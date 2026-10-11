@@ -54,6 +54,8 @@ export const INTERNAL_FRAME_TAGS: ReadonlyArray<string> = [
   // 内部控制信号（原 stream-chat-helpers 私有清单，统一收编）
   "话题切换",
   "话题已切换",
+  // 上游 provider harness 的轨迹切分控制帧（2026-10-11 事故：整条回复都是它）
+  "trajectory-slicing",
 ];
 
 /**
@@ -81,6 +83,8 @@ export const INTERNAL_FRAME_STEMS: ReadonlyArray<string> = [
   "话题已切",
   "Topic",
   "STOP",
+  // 上游 harness 轨迹切分帧（`[trajectory-slicing]`）
+  "trajectory",
 ];
 
 /**
@@ -122,12 +126,147 @@ function stripOneUnclosedSystemReminder(text: string): string {
 }
 
 /**
- * 剥离 XML 形态的 <system-reminder> 注入块，保留真实正文。
- * 闭合块整块删；未闭合块吞英文提醒行、留 CJK 正文行。循环处理多个块。
+ * XML 形态的上游 harness **控制帧** `<system>…</system>`（2026-10-11 事故根源）。
+ *
+ * 真实事故：旅行规划轮的 assistant 正文**整条**只有 61 字，全部是它——
+ *   <system>
+ *   [trajectory-slicing]
+ *   接下来的回复被分到两条轨迹，#1 紧接本段，#2 紧接 #1。
+ * 这是上游 provider harness（agent 式调度器）塞进模型上下文的轨迹切分控制帧
+ * （本工程从不产生该形态），模型把它当成「该输出的话」原样复读，顺着流式通道
+ * 直穿气泡 → 用户看到「不相关的内容」，且本该有的行程叙述被整条挤掉。
+ *
+ * 与 `<system-reminder>` 的差别：本形态**不闭合**（实测无 `</system>`），且帧体
+ * 的说明行带中文（「接下来的回复被分到两条轨迹…」），因此不能照搬「吞无 CJK 行」
+ * 的策略（会把手写说明留下）。判据改为：**opener 后首个非空行是方括号控制标签**
+ * （`[trajectory-slicing]` 这类纯拉丁标签，正常正文不会这样起头）→ 认定整个块
+ * 都是 harness 帧体，吞到块尾（空行或 EOF）。
+ */
+const SYSTEM_FRAME_BLOCK_RE = /<system>[\s\S]*?<\/system>/gi;
+const SYSTEM_FRAME_OPEN_RE = /<system>/i;
+/** 快速守卫：文本里是否疑似有 `<system>` 控制帧（大小写/空白不敏感）。 */
+export const SYSTEM_FRAME_ANY_RE = /<\s*system\s*>/i;
+/** harness 控制标签行：`[trajectory-slicing]` / `[policy]` 这类纯拉丁方括号标签。 */
+const HARNESS_TAG_LINE_RE = /^[ \t]*\[[A-Za-z][A-Za-z0-9._:\-/ ]*\][ \t]*$/;
+
+function stripOneUnclosedSystemFrame(text: string): string {
+  const m = SYSTEM_FRAME_OPEN_RE.exec(text);
+  if (!m) return text;
+  const start = m.index;
+  const lines = text.slice(start + m[0].length).split("\n");
+  let firstBody = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if ((lines[i] ?? "").trim() !== "") {
+      firstBody = i;
+      break;
+    }
+  }
+  if (firstBody >= 0 && HARNESS_TAG_LINE_RE.test(lines[firstBody] ?? "")) {
+    // harness 帧体：吞到空行为止（无空行则吞到 EOF），块后若有正文原样保留
+    let end = lines.length;
+    for (let i = firstBody + 1; i < lines.length; i++) {
+      if ((lines[i] ?? "").trim() === "") {
+        end = i;
+        break;
+      }
+    }
+    return text.slice(0, start) + (end < lines.length ? lines.slice(end).join("\n") : "");
+  }
+  // 无控制标签行 → 保守：只吞 opener 之后的无 CJK 行（保留中文正文）
+  let consumed = 0;
+  for (; consumed < lines.length; consumed++) {
+    if (CJK_CHAR_RE.test(lines[consumed] ?? "")) break;
+  }
+  if (consumed >= lines.length) return text.slice(0, start);
+  return text.slice(0, start) + lines.slice(consumed).join("\n");
+}
+
+/**
+ * 剥离 XML 形态的 `<system>` harness 控制帧。
+ * 闭合块整块删；未闭合块按「控制标签行 → 吞到块尾」处理（见上）。
+ * 另删孤立的 `<system>` / `</system>` 半截标签。
+ */
+export function stripSystemFrames(text: string): string {
+  if (!text || !SYSTEM_FRAME_ANY_RE.test(text)) return text;
+  let out = text.replace(SYSTEM_FRAME_BLOCK_RE, "");
+  for (let i = 0; i < 8; i++) {
+    const next = stripOneUnclosedSystemFrame(out);
+    if (next === out) break;
+    out = next;
+  }
+  out = out.replace(/<\/?system>/gi, "");
+  // 接缝收敛：帧在开头时剥完会留下起首空行（气泡首行空白）。
+  return out.replace(/^[ \t]*\n+/, "").replace(/\n{3,}/g, "\n\n");
+}
+
+/** 整条文本是否「只是一个/多个 `<system>` 控制帧」（剥完为空 → 不该下发气泡）。 */
+export function isSystemFrameText(text: string): boolean {
+  if (!text || !SYSTEM_FRAME_ANY_RE.test(text)) return false;
+  return stripSystemFrames(text).trim() === "";
+}
+
+/**
+ * 流式半截探测：缓冲内容是否为 `<system>` / `<system-reminder>` opener 的**真前缀**
+ * （还没出现 `>`）。命中即应扣住待判。
+ *
+ * 为什么不能只靠 [systemReminderPartialTailLen] / [systemFramePartialTailLen]：
+ * 那两个函数有「≥2 / ≥3 字符」的下限，首 chunk 常常只有 `<` 或 `<sy`——
+ * 长度不足阈值时判不出来，净化器就直接切直通，整帧从此逐字穿到气泡
+ * （2026-10-11 实测：`<system>` 帧逐字符/小块喂入 100% 泄漏）。
+ */
+export function isPartialSystemOpener(text: string): boolean {
+  const t = text.replace(/^\s+/, "").toLowerCase();
+  if (!t || t.includes(">")) return false;
+  return "<system-reminder>".startsWith(t) || "<system>".startsWith(t);
+}
+
+/**
+ * 流式状态判定：缓冲内容里 `<system>` 控制帧的进展。
+ *   - `"none"`    ：没有控制帧（或帧已终结：见到 `</system>`、或帧体后出现空行分界，
+ *                  或 opener 后首个非空行根本不是控制标签 → 是正文）
+ *   - `"pending"` ：见到 opener，帧体还没能识别（还没换行 / 控制标签行只到一半）→ 继续扣住
+ *   - `"body"`    ：确认是 harness 帧体（方括号控制标签行）且未终结 → 整段吞到帧体结束
+ *
+ * 关键：`"pending"` / `"body"` 两个状态都必须让调用方**保留缓冲**——一旦把已剥空的
+ * 缓冲清掉，后续帧体碎片里没有 opener，净化器再也认不出来（实测泄漏路径）。
+ */
+export function systemFrameStreamState(text: string): "none" | "pending" | "body" {
+  const m = SYSTEM_FRAME_OPEN_RE.exec(text);
+  if (!m) return "none";
+  if (/<\/system>/i.test(text)) return "none";
+  const lines = text.slice(m.index + m[0].length).split("\n");
+  let firstBody = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if ((lines[i] ?? "").trim() !== "") {
+      firstBody = i;
+      break;
+    }
+  }
+  if (firstBody < 0) return "pending"; // 帧体还没到
+  const body = (lines[firstBody] ?? "").trim();
+  if (!HARNESS_TAG_LINE_RE.test(body)) {
+    // 控制标签可能还没收完（`[traj` / `[trajectory-slic`）→ 继续等
+    if (body.startsWith("[") && body.length < 40 && !CJK_CHAR_RE.test(body)) return "pending";
+    return "none";
+  }
+  for (let i = firstBody + 1; i < lines.length; i++) {
+    // 末位空元素只是「流还在继续」（split 尾部残留），不是空行分界
+    if ((lines[i] ?? "").trim() === "" && i !== lines.length - 1) return "none";
+  }
+  return "body";
+}
+
+/**
+ * 剥离 XML 形态的 harness 注入块（`<system-reminder>` 与 `<system>` 两种），保留真实正文。
+ * `<system>` 控制帧整块剥（含未闭合形态，见上）；`<system-reminder>` 闭合块整块删、
+ * 未闭合块吞英文提醒行留 CJK 正文行。循环处理多个块。
+ * 名称保留（两处历史调用点仍以它作为「线程内容净化」入口），实现已覆盖两种形态。
  */
 export function stripSystemReminderBlocks(text: string): string {
-  if (!text || !SYSTEM_REMINDER_ANY_RE.test(text)) return text;
-  let out = text.replace(SYSTEM_REMINDER_BLOCK_RE, "");
+  if (!text || (!SYSTEM_REMINDER_ANY_RE.test(text) && !SYSTEM_FRAME_ANY_RE.test(text))) {
+    return text;
+  }
+  let out = stripSystemFrames(text).replace(SYSTEM_REMINDER_BLOCK_RE, "");
   for (let i = 0; i < 8; i++) {
     const next = stripOneUnclosedSystemReminder(out);
     if (next === out) break;
@@ -146,6 +285,21 @@ export function systemReminderPartialTailLen(text: string): number {
   const target = "<system-reminder>";
   const max = Math.min(text.length, target.length - 1);
   for (let len = max; len >= 2; len--) {
+    if (text.slice(-len).toLowerCase() === target.slice(0, len)) return len;
+  }
+  return 0;
+}
+
+/**
+ * 流式半截探测：文本末尾是否为 `<system>` 控制帧 opener 的真前缀（≥3 字符）。
+ * 与 [systemReminderPartialTailLen] 同理——半截 opener 先吐给用户就撤不回。
+ * 只认 `<sy…` 起头（≥3 字符），避免把正文里的裸 `<` 误判成长缓冲。
+ */
+export function systemFramePartialTailLen(text: string): number {
+  if (!text) return 0;
+  const target = "<system>";
+  const max = Math.min(text.length, target.length - 1);
+  for (let len = max; len >= 3; len--) {
     if (text.slice(-len).toLowerCase() === target.slice(0, len)) return len;
   }
   return 0;
@@ -217,8 +371,9 @@ export function hasInternalFrameTag(text: string): boolean {
  * 剥离文本中的内部帧，返回**可以给用户看**的文本。
  *
  * 四层，顺序不能换：
- *   0. XML 形态 <system-reminder> 上游 harness 注入块（2026-10-08 事故根源，
- *      闭合整块删 / 未闭合吞英文提醒行留 CJK 正文）
+ *   0. XML 形态的 harness 注入块——`<system-reminder>`（2026-10-08 事故根源，
+ *      闭合整块删 / 未闭合吞英文提醒行留 CJK 正文）与 `<system>` 控制帧
+ *      （2026-10-11 事故根源，含未闭合形态，整块删）
  *   1. 闭口的 `[不可信内容围栏]…[/不可信内容围栏]` 整块删（块内是工具原始数据）
  *   2. 孤立围栏标签行删（防半截复读）
  *   3. 以内部帧标签开头的整行删（多行；覆盖 [后台任务记录] 目标：… 这类单行帧）

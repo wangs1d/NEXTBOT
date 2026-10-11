@@ -13,8 +13,11 @@ import assert from "node:assert/strict";
 import {
   hasInternalFrameTag,
   isInternalFrameText,
+  isSystemFrameText,
   stripInternalFrames,
+  stripSystemFrames,
 } from "../src/external-model/internal-frames.js";
+import { createStreamControlTagSanitizer } from "../src/external-model/stream-chat-helpers.js";
 
 test("逐字复读的中断占位帧（含围栏原文）整条判为内部帧并剥净", () => {
   const leaked =
@@ -162,4 +165,102 @@ test("端到端：thread 折叠出的中断占位帧不再夹带围栏原文", a
   assert.ok(text.includes("兴义 26℃ 晴"));
   // 且携带禁复述约束
   assert.ok(text.includes("禁止"));
+});
+
+
+// ═══════════════════════════════════════════════════════════════════
+// XML 形态 <system> harness 控制帧（2026-10-11 旅行规划轮事故）
+//
+// 事故原文（chat-threads.json 落库，finalTextChars=61 全是它）：
+//   <system>\n[trajectory-slicing]\n接下来的回复被分到两条轨迹，#1 紧接本段，#2 紧接 #1。
+// ═══════════════════════════════════════════════════════════════════
+
+const LEAKED_SYSTEM_FRAME =
+  "<system>\n[trajectory-slicing]\n接下来的回复被分到两条轨迹，#1 紧接本段，#2 紧接 #1。";
+
+test("整条就是 <system> 控制帧 → 剥净且判为内部帧", () => {
+  assert.equal(isSystemFrameText(LEAKED_SYSTEM_FRAME), true);
+  assert.equal(stripInternalFrames(LEAKED_SYSTEM_FRAME), "");
+  assert.equal(stripSystemFrames(LEAKED_SYSTEM_FRAME), "");
+});
+
+test("<system> 闭合帧剥掉后保留正文", () => {
+  const closed =
+    "<system>\n[trajectory-slicing]\n回执说明\n</system>\n王哥，马尔代夫七天我给你排好了。";
+  assert.equal(stripInternalFrames(closed), "王哥，马尔代夫七天我给你排好了。");
+});
+
+test("<system> 未闭合帧按空行分界，块后正文保留", () => {
+  const unclosed =
+    "<system>\n[trajectory-slicing]\n接下来的回复被分到两条轨迹。\n\n王哥，马尔代夫七天我给你排好了。";
+  assert.equal(stripInternalFrames(unclosed), "王哥，马尔代夫七天我给你排好了。");
+  // 无空行分界 → 整块吞到 EOF
+  assert.equal(stripInternalFrames(`${LEAKED_SYSTEM_FRAME}\n还有半句话`), "");
+});
+
+test("<system> 无控制标签行时保守：只吞 opener 与无 CJK 行", () => {
+  const plain = "<system>\nsome english line\n真正的正文在这里。";
+  assert.equal(stripInternalFrames(plain), "真正的正文在这里。");
+});
+
+test("<system> 帧体里的控制标签行也算内部帧标签", () => {
+  assert.equal(hasInternalFrameTag("[trajectory-slicing]"), true);
+  assert.equal(stripInternalFrames("正文在这\n[trajectory-slicing]\n尾部"), "正文在这\n尾部");
+});
+
+test("正常正文不受 <system> 规则影响", () => {
+  const normal = "王哥，马尔代夫七天我给你排好了，先看卡片。";
+  assert.equal(stripInternalFrames(normal), normal);
+  assert.equal(isSystemFrameText(normal), false);
+});
+
+// ═══════════════════════════════════════════════════════════════════
+// 流式净化：<system> 控制帧必须逐 chunk 也不吐（2026-10-11 泄漏真凶）
+//
+// 实测背景：帧体是多行文本，前半段（opener + 控制标签行）可识别，后半段说明行
+// **没有 opener**——净化器一旦放通一次，整帧就逐字穿到气泡。修复前逐字符 / 3 字 /
+// 10 字喂入 100% 泄漏（首 chunk 只有 `<`，长度不足旧的半截阈值）。
+// ═══════════════════════════════════════════════════════════════════
+
+function feedChunks(chunks: string[]): string {
+  const feed = createStreamControlTagSanitizer();
+  let out = "";
+  for (const c of chunks) out += feed(c);
+  return out;
+}
+
+test("流式：<system> 控制帧逐字符喂入也不吐（首 chunk = `<`）", () => {
+  assert.equal(feedChunks([...LEAKED_SYSTEM_FRAME]), "");
+});
+
+test("流式：<system> 控制帧按 3 字 / 10 字切片喂入也不吐", () => {
+  assert.equal(feedChunks(LEAKED_SYSTEM_FRAME.match(/.{1,3}/gs) ?? []), "");
+  assert.equal(feedChunks(LEAKED_SYSTEM_FRAME.match(/.{1,10}/gs) ?? []), "");
+});
+
+test("流式：opener 被切断（`<sys` | `tem>` …）也不吐", () => {
+  assert.equal(
+    feedChunks(["<sys", "tem>\n[traj", "ectory-slicing]\n接下来的回复被分到", "两条轨迹。"]),
+    "",
+  );
+});
+
+test("流式：帧体后有正文（空行分界）只吐正文", () => {
+  assert.equal(
+    feedChunks(["<system>\n[trajectory-slicing]\n说明行\n\n王哥，马尔代夫七天我给你排好了。"]),
+    "王哥，马尔代夫七天我给你排好了。",
+  );
+});
+
+test("流式：正常回复逐段喂入原样吐出", () => {
+  assert.equal(
+    feedChunks(["王哥，", "马尔代夫七天", "我给你排好了，先看卡片。"]),
+    "王哥，马尔代夫七天我给你排好了，先看卡片。",
+  );
+});
+
+test("流式：正文里出现裸 <system> 前缀（不是帧）时不误吞", () => {
+  // 首个非空行不是方括号控制标签 → 判为正文，剥掉孤标签后照常下发
+  const out = feedChunks(["<system>", "\n王哥，这趟行程我按你的节奏排好了。"]);
+  assert.ok(out.includes("王哥"));
 });

@@ -18,6 +18,7 @@ import type { InfoSearchItem } from "./info-hub-service.js";
 import {
   hasInternalFrameTag,
   isInternalFrameText,
+  isSystemFrameText,
   stripInternalFrames,
 } from "../external-model/internal-frames.js";
 
@@ -504,6 +505,32 @@ function buildTravelDaySummaryItems(plan: Record<string, unknown>): string[] {
   return out;
 }
 
+/**
+ * 行程卡前的确定性短介绍（2026-10-11 用户要求「前面一段简短介绍 + 后面跟旅游卡片」）。
+ *
+ * 背景：真实轮次里模型可能一个字都没留下——上游 harness 控制帧把叙述挤掉了
+ * （事故：finalText 61 字全是 `<system>[trajectory-slicing]…`，剥完为空），
+ * 回复只剩一张卡，用户看到「只有卡片、没有介绍」。这里按行程数据兜一段简短
+ * 介绍，**只在正文为空时补**，绝不覆盖模型自己写的口语回复。
+ */
+function buildTravelIntro(plan: Record<string, unknown>): string {
+  const destination = strField(plan.destination);
+  const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
+  const dayCount = days.length;
+  const stopCount = days.reduce(
+    (n, d) => n + (Array.isArray(d?.items) ? (d.items as unknown[]).length : 0),
+    0,
+  );
+  const head = destination
+    ? `${destination}${dayCount > 0 ? `${dayCount}天` : ""}的行程`
+    : "行程";
+  const scale = dayCount > 0 && stopCount > 0 ? `（共 ${dayCount} 天 · ${stopCount} 项安排）` : "";
+  return (
+    `${head}我给你排好了${scale}：逐日的节奏、路线和每站停留都在下面这张卡里，` +
+    "点「打开行程规划」能看完整明细；想调哪一天、或者加点什么，直接跟我说。"
+  );
+}
+
 /** 行程卡 footer：天数/项数汇总 +（有价格汇总时）预计总花费。 */
 function buildTravelItineraryFooter(plan: Record<string, unknown>): string {
   const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
@@ -601,7 +628,9 @@ function snapshotFromRawPlan(
  *   1. travelItineraryStore 快照（skill 执行时写入，含图片/评论/坐标全量字段）；
  *   2. 回显 JSON 本身（summarizeItinerary 瘦身版，仅缺媒体字段）。
  * 逐天摘要行（Day N · 日期：亮点 → 亮点）供前端行程卡预览胶囊展示；
- * leadText（LLM 在 JSON 前写的引导句）保留在卡片之前。
+ * leadText（LLM 在 JSON 前写的引导句）保留在卡片之前；leadText 为空（模型没留下
+ * 可见正文，例如整段被上游 harness 控制帧占掉）时由 [buildTravelIntro] 兜一段
+ * 确定性短介绍——回复形态恒为「前面一段简短介绍 + 后面跟行程卡片」。
  */
 function buildTravelItineraryCardFromPlan(
   plan: Record<string, unknown>,
@@ -639,8 +668,10 @@ function buildTravelItineraryCardFromPlan(
     travelPlan,
   };
   const card = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
-  if (!leadText) return card;
-  return `${leadText}\n\n${card}`;
+  // 卡前导：优先模型的口语回复；正文为空（被内部帧清空 / 模型没叙述）时补一段
+  // 确定性短介绍 → 回复形态恒为「前面一段简短介绍 + 后面跟行程卡片」。
+  const lead = leadText || buildTravelIntro(travelPlan as unknown as Record<string, unknown>);
+  return `${lead}\n\n${card}`;
 }
 
 /**
@@ -795,7 +826,8 @@ function buildTravelPlainTextSummary(
   const title = strField(plan.title) || `${strField(plan.destination)}行程规划`;
   const lines = buildTravelDaySummaryItems(plan);
   const footer = buildTravelItineraryFooter(plan);
-  return [leadText, title, ...lines, footer].filter(Boolean).join("\n");
+  const lead = leadText || buildTravelIntro(plan);
+  return [lead, title, ...lines, footer].filter(Boolean).join("\n");
 }
 
 export interface ToolResultProcessorOptions {
@@ -841,6 +873,13 @@ export class ToolResultProcessor {
     // 现在按内部帧契约判定：整条是内部帧 → 直接不下发；混有内部帧 → 剥帧留正文。
     if (isInternalFrameText(text)) {
       console.log("[ToolResultProcessor] system_frame: hidden from user");
+      return "";
+    }
+    // 2026-10-11 升级：XML 形态的 `<system>` control frame（上游 harness 轨迹切分帧）
+    // 整条就是它时同样不下发。实测事故：旅行规划轮 finalText 61 字全是
+    // `<system>[trajectory-slicing]…`，此前只有 `[…]` 形态判定，整条漏网直穿气泡。
+    if (isSystemFrameText(text)) {
+      console.log("[ToolResultProcessor] system_frame(system): hidden from user");
       return "";
     }
     if (hasInternalFrameTag(text)) {
@@ -1002,7 +1041,11 @@ export class ToolResultProcessor {
     }
 
     // 优先级 3：summary_card 长内容折叠
-    if (hint.type === "summary_card") {
+    // 媒体搜索轮禁入（不变量，与模型无关）：照片/视频卡是本轮唯一主形态，
+    // 摘要折叠卡若附进正文，媒体轮清洗（stripMediaEchoText 不认识该标记）
+    // 剥不掉，会以裸 JSON 透出到前端（2026-10-10 搜图轮 CONTENT_SUMMARY 泄漏）。
+    // 换模型只会改变「文本多长才触发折叠」的概率，不该改变路由契约。
+    if (hint.type === "summary_card" && !isMediaSearchTool(opts?.toolName)) {
       console.log(
         `[ToolResultProcessor] Processing text, length: ${workingText.length}, threshold: ${this.options.threshold}, plainTextMode: ${!!opts?.plainTextMode}`,
       );
@@ -1164,6 +1207,20 @@ function buildProxyMediaUrl(rawUrl: string, referer?: string): string {
   const base = `/agent/media/proxy?url=${encodeURIComponent(rawUrl)}`;
   if (referer) return `${base}&referer=${encodeURIComponent(referer)}`;
   return base;
+}
+
+/**
+ * 搜索类媒体工具判定（不变量）：search_images / search_images_batch /
+ * search_videos 的产出照片/视频由 mediaCards 结构化卡片承载，本轮主形态是
+ * 媒体——摘要折叠卡（CONTENT_SUMMARY）等文本形态整卡禁入。
+ * 集中成函数而不是散落各处：新增媒体工具时只改这一处。
+ */
+export function isMediaSearchTool(toolName: string | undefined | null): boolean {
+  return (
+    toolName === "search_images" ||
+    toolName === "search_images_batch" ||
+    toolName === "search_videos"
+  );
 }
 
 /**

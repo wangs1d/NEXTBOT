@@ -1,0 +1,999 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>行迹 · 桌面端 — 会自己调速的旅行 Agent</title>
+<!-- 字体走设计稿同源 CDN（离线时自动回落到系统字体栈，不阻塞渲染）。
+     本页唯一外链：不再引入任何图片/脚本 CDN。 -->
+<link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Sora:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap">
+<style>
+:root{
+  --win:#14151A; --side:#101115; --card:#1C1F27; --card2:#23262F;
+  --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.14);
+  --txt:#F3F1EC; --t2:#9BA0AA; --t3:#626873;
+  --amber:#F5A552; --amber2:#D88434; --amberSoft:rgba(245,165,82,.13); --amberLine:rgba(245,165,82,.4);
+  --jade:#63AAA1; --ok:#63C98C;
+  --num:'Sora','Noto Sans SC',-apple-system,sans-serif;
+  --cn:'Noto Sans SC','Sora',-apple-system,'PingFang SC',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{background:#07080A;color:var(--txt);font-family:var(--cn);-webkit-font-smoothing:antialiased;
+  overflow:hidden;
+  background-image:radial-gradient(900px 600px at 20% 10%,rgba(245,165,82,.06),transparent 60%),radial-gradient(700px 500px at 85% 90%,rgba(99,170,161,.05),transparent 60%);}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+img{display:block;width:100%;height:100%;object-fit:cover}
+::-webkit-scrollbar{width:6px}::-webkit-scrollbar-thumb{background:rgba(255,255,255,.12);border-radius:6px}
+
+/* ===== 应用窗口（宿主为无边框系统窗口，面板自身铺满窗口） =====
+   设计稿里的圆角/投影是「浮在桌面上的拟真窗口」展示壳；真实宿主窗口由系统
+   提供边界（client/flutter_app 的行程独立窗口用 setAsFrameless），所以这里只
+   保留窗内结构（标题栏 + 主体），去掉外壳圆角与投影。 */
+.mac{width:100vw;height:100vh;background:var(--win);border-radius:0;
+  display:flex;flex-direction:column;overflow:hidden}
+.titlebar{height:42px;flex:0 0 auto;display:flex;align-items:center;padding:0 16px;
+  background:rgba(28,30,37,.7);backdrop-filter:blur(20px);border-bottom:1px solid var(--line);position:relative;z-index:5;
+  -webkit-app-region:drag;cursor:default;user-select:none}
+.traffic{display:flex;gap:8px;width:64px}
+.traffic i{width:12px;height:12px;border-radius:50%;display:block;cursor:pointer}
+.traffic i:nth-child(1){background:#FF5F57}.traffic i:nth-child(2){background:#FEBC2E}.traffic i:nth-child(3){background:#28C840}
+.win-right{-webkit-app-region:no-drag}
+.win-title{position:absolute;left:50%;transform:translateX(-50%);font-size:12.5px;color:var(--t2);font-weight:500;letter-spacing:.3px;
+  display:flex;align-items:center;gap:8px}
+.win-title .d{width:6px;height:6px;border-radius:50%;background:var(--amber);position:relative}
+.win-title .d::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--amberLine);animation:ping 2.2s infinite}
+@keyframes ping{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.6);opacity:0}}
+.win-right{margin-left:auto;display:flex;gap:6px;align-items:center}
+.win-right .wc{width:28px;height:22px;border-radius:5px;display:grid;place-items:center;color:var(--t3)}
+.win-right .wc:hover{background:rgba(255,255,255,.06);color:var(--t2)}
+.win-right .wc svg{width:13px;height:13px}
+
+.body{flex:1;display:flex;min-height:0}
+
+/* ===== 左栏 ===== */
+.sidebar{width:64px;flex:0 0 auto;background:var(--side);border-right:1px solid var(--line);
+  display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:6px}
+.side-ic{width:40px;height:40px;border-radius:10px;display:grid;place-items:center;color:var(--t3);position:relative;transition:.18s}
+.side-ic svg{width:19px;height:19px}
+.side-ic:hover{color:var(--t2);background:rgba(255,255,255,.05)}
+.side-ic.on{color:var(--amber);background:var(--amberSoft)}
+.side-ic.on::before{content:"";position:absolute;left:-16px;top:50%;transform:translateY(-50%);width:3px;height:20px;border-radius:0 3px 3px 0;background:var(--amber)}
+.side-spacer{flex:1}
+.avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#F5A552,#D88434);display:grid;place-items:center;font-size:13px;font-weight:700;color:#201407}
+
+/* ===== 主区 ===== */
+.main{flex:1;display:flex;flex-direction:column;min-width:0}
+.topbar{height:58px;flex:0 0 auto;display:flex;align-items:center;gap:18px;padding:0 20px;border-bottom:1px solid var(--line);min-width:0;overflow:hidden}
+.tb-left{display:flex;align-items:center;gap:12px;flex:0 1 auto;min-width:0}
+.tb-city{font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tb-sub{font-family:var(--num);font-size:10.5px;color:var(--t3);letter-spacing:1.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.day-pill{display:flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px;
+  /* 多天行程（7 天常见）不能把旅程带挤没：胶囊条自身横向滚动，宽度封顶且不参与收缩 */
+  flex:0 0 auto;max-width:min(330px,44vw);overflow-x:auto;scrollbar-width:none}
+.day-pill::-webkit-scrollbar{display:none}
+.day-pill button{padding:4px 12px;border-radius:999px;font-size:11.5px;color:var(--t2);min-height:26px;white-space:nowrap;flex:0 0 auto}
+/* 多天行程（>4 天）胶囊收窄字号与内距，让 7 天能整排显示（设计稿 2 天口径不变） */
+.day-pill.compact button{padding:4px 9px;font-size:11px}
+.day-pill button.on{background:var(--txt);color:#15161A;font-weight:600}
+.tb-band{flex:1 1 auto;min-width:140px}
+.band-meta{display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px;white-space:nowrap;overflow:hidden}
+.band-meta .mood{color:var(--t2);overflow:hidden;text-overflow:ellipsis}.band-meta .mood b{color:var(--amber);font-weight:600}
+.band-meta .end{font-family:var(--num);color:var(--t3);flex:0 0 auto;margin-left:10px}
+.band{display:flex;gap:2px;height:6px;border-radius:99px}
+.band i{height:100%;border-radius:99px;background:rgba(255,255,255,.1);cursor:pointer;transition:flex-grow .5s cubic-bezier(.3,.8,.3,1),background .25s;min-width:4px}
+.band i.done{background:rgba(255,255,255,.2)}.band i.now{background:var(--amber);box-shadow:0 0 8px rgba(245,165,82,.6)}
+.band i.alt{background:transparent;border:1px dashed rgba(255,255,255,.2);height:5px;align-self:center}
+.tb-right{display:flex;align-items:center;gap:10px;flex:0 0 auto}
+.agent-chip{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);background:var(--card);border:1px solid var(--line);padding:6px 12px;border-radius:999px}
+.agent-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--amber);box-shadow:0 0 6px var(--amber)}
+.weather{font-family:var(--num);font-size:12px;color:var(--t2);display:flex;align-items:center;gap:5px}
+.weather svg{width:14px;height:14px;color:var(--amber)}
+
+/* ===== 内容区 ===== */
+.content{flex:1;position:relative;min-height:0;display:flex}
+.view{position:absolute;inset:0;display:flex;padding:20px;gap:18px;min-height:0}
+.view-map{display:none;background:var(--win)}
+.view-map.open{display:flex}
+
+/* 当前站大卡 */
+.now-photo{flex:0 0 44%;border-radius:16px;overflow:hidden;position:relative;min-height:0}
+.now-photo::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,12,14,0) 50%,rgba(11,12,14,.7))}
+/* 无实拍图时的兜底：不闪占位框，走同族深青渐变（真实行程缺图常见） */
+.now-photo.noimg{background:linear-gradient(150deg,#14323C,#0A151B 70%)}
+.now-photo.noimg img{opacity:0}
+.now-tag{position:absolute;top:14px;left:14px;z-index:2;font-size:10.5px;letter-spacing:1px;background:rgba(11,12,14,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);padding:5px 11px;border-radius:999px}
+.now-book{position:absolute;top:14px;right:14px;z-index:2;display:flex;align-items:center;gap:6px;font-size:10.5px;background:rgba(11,12,14,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);padding:5px 11px;border-radius:999px}
+.now-book .d{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.now-big{position:absolute;left:20px;right:20px;bottom:18px;z-index:2}
+.now-time{font-family:var(--num);font-size:12px;color:var(--amber);letter-spacing:1px;font-weight:600}
+.now-name{font-size:27px;font-weight:700;margin-top:3px;line-height:1.25}
+
+.now-info{flex:1;display:flex;flex-direction:column;min-width:0}
+.now-note{font-size:13.5px;color:var(--t2);line-height:1.7;margin-top:4px}
+.stay-row{display:flex;align-items:center;gap:10px;margin-top:18px;font-size:12px;color:var(--t2);font-family:var(--num)}
+.stay-row svg{width:15px;height:15px;color:var(--amber)}
+.stay-bar{flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
+.stay-bar i{display:block;height:100%;background:linear-gradient(90deg,var(--amber2),var(--amber));border-radius:4px;transition:width .5s}
+.feedback{display:flex;gap:10px;margin-top:auto;padding-top:18px}
+.fb{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--t2);border:1px solid var(--line2);padding:9px 16px;border-radius:999px;transition:.18s}
+.fb svg{width:14px;height:14px}
+.fb:hover{border-color:var(--amberLine);color:var(--amber)}
+
+/* 底部下一站条 */
+.bottombar{height:74px;flex:0 0 auto;border-top:1px solid var(--line);display:flex;align-items:center;gap:16px;padding:0 20px;background:rgba(16,17,21,.5)}
+.next-info{display:flex;align-items:center;gap:13px;flex:1;min-width:0}
+.next-ic{width:40px;height:40px;border-radius:11px;background:var(--amberSoft);display:grid;place-items:center;flex:0 0 auto}
+.next-ic svg{width:20px;height:20px;color:var(--amber)}
+.next-txt{min-width:0}
+.next-txt .a{font-size:10.5px;color:var(--t3);letter-spacing:.5px}
+.next-txt .b{font-size:14.5px;font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.next-txt .b span{font-family:var(--num);color:var(--amber);font-weight:500;font-size:12.5px;margin-left:9px}
+.go-btn{height:44px;padding:0 26px;border-radius:12px;background:var(--amber);color:#201407;font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px;letter-spacing:.3px;box-shadow:0 12px 28px -10px rgba(245,165,82,.55);transition:transform .12s;flex:0 0 auto}
+.go-btn:active{transform:scale(.98)}.go-btn svg{width:17px;height:17px}
+
+/* Agent 气泡 */
+.bubble{position:absolute;top:14px;left:50%;transform:translateX(-50%) translateY(-8px);z-index:20;
+  max-width:560px;background:linear-gradient(120deg,rgba(245,165,82,.13),rgba(245,165,82,.03));
+  border:1px solid rgba(245,165,82,.24);border-radius:14px;padding:12px 16px;display:none;gap:11px;
+  box-shadow:0 20px 50px -18px rgba(0,0,0,.7);animation:rise .35s ease}
+.bubble.show{display:flex}
+@keyframes rise{from{opacity:0;transform:translateX(-50%) translateY(-14px)}to{opacity:1;transform:translateX(-50%) translateY(0)}}
+.bubble .bic{width:26px;height:26px;border-radius:8px;background:var(--amberSoft);display:grid;place-items:center;flex:0 0 auto}
+.bubble .bic svg{width:15px;height:15px;color:var(--amber)}
+.bubble p{font-size:12.5px;line-height:1.65;color:var(--t2);flex:1}
+.bubble p b{color:var(--txt);font-weight:600}
+.bubble .undo{flex:0 0 auto;align-self:center;color:var(--amber);font-size:11.5px;border:1px solid var(--amberLine);padding:5px 12px;border-radius:999px;white-space:nowrap}
+
+/* 地图视图 */
+.map-wrap{flex:1;border-radius:14px;overflow:hidden;position:relative;background:#0D0F13}
+#mapSvg{width:100%;height:100%}
+.map-back{position:absolute;top:14px;left:14px;z-index:5;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txt);background:rgba(16,17,21,.75);backdrop-filter:blur(10px);border:1px solid var(--line2);padding:8px 14px;border-radius:999px}
+.map-back svg{width:14px;height:14px}
+.map-bg{stroke:rgba(255,255,255,.035)}
+.map-water{fill:rgba(99,170,161,.08);stroke:rgba(99,170,161,.3);stroke-width:1.2}
+.map-wl{fill:none;stroke:rgba(99,170,161,.16);stroke-width:1}
+.map-road{fill:none;stroke:rgba(255,255,255,.1);stroke-width:3;stroke-linecap:round}
+.map-road.t{stroke-width:1.5;stroke:rgba(255,255,255,.06)}
+.alab{fill:#565B65;font-size:13px;letter-spacing:4px}
+.r-done{fill:none;stroke:var(--amber);stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 6px rgba(245,165,82,.5))}
+.r-todo{fill:none;stroke:rgba(245,165,82,.32);stroke-width:2.4;stroke-dasharray:2 7;stroke-linecap:round}
+.r-flow{fill:none;stroke:rgba(255,238,212,.9);stroke-width:2.8;stroke-dasharray:1 14;stroke-linecap:round;animation:flow 1.1s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-15}}
+.mp{cursor:pointer}
+.mp circle.c{fill:var(--card2);stroke:var(--amberLine);stroke-width:1.6;transition:.2s}
+.mp.now circle.c{fill:var(--amber);stroke:var(--amber)}
+.mp.done circle.c{fill:#2A2D35;stroke:rgba(255,255,255,.18)}
+.mp text.n{fill:var(--t2);font-family:var(--num);font-size:11px;font-weight:600;text-anchor:middle;dominant-baseline:central}
+.mp.now text.n{fill:#201407}.mp.done text.n{fill:var(--t3)}
+.mp text.l{fill:var(--t2);font-size:11.5px;paint-order:stroke;stroke:#0D0F13;stroke-width:3.4px}
+.mp.now text.l{fill:var(--amber);font-weight:700}
+.mp.rest circle.c{stroke-dasharray:3 3;stroke:var(--jade)}
+.here{fill:var(--amber)}.here-p{fill:none;stroke:var(--amber);stroke-width:1.5;animation:ping 1.8s infinite}
+
+/* ===== 右栏 ===== */
+.rightbar{width:264px;flex:0 0 auto;background:var(--side);border-left:1px solid var(--line);display:flex;flex-direction:column;transition:width .3s,opacity .3s;overflow:hidden}
+.rightbar.collapsed{width:0;border:none;opacity:0}
+.rb-head{padding:16px 16px 10px;display:flex;align-items:center;justify-content:space-between}
+.rb-head h3{font-size:13px;font-weight:600}
+.rb-head .cnt{font-family:var(--num);font-size:10.5px;color:var(--t3)}
+.rb-list{flex:1;overflow-y:auto;padding:0 10px 10px}
+.rb-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer;transition:.15s}
+.rb-row:hover{background:rgba(255,255,255,.04)}
+.rb-row.now{background:var(--amberSoft);border:1px solid var(--amberLine)}
+.rb-row.done{opacity:.45}
+.rb-time{font-family:var(--num);font-size:11px;color:var(--t3);width:42px;text-align:right;flex:0 0 auto}
+.rb-row.now .rb-time{color:var(--amber)}
+.rb-dot{width:8px;height:8px;border-radius:50%;background:var(--amberLine);flex:0 0 auto;position:relative}
+.rb-row.now .rb-dot{background:var(--amber);box-shadow:0 0 0 4px var(--amberSoft)}
+.rb-row.done .rb-dot{background:rgba(255,255,255,.2)}
+.rb-main{flex:1;min-width:0}
+.rb-name{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.rb-sub{font-size:10px;color:var(--t3);font-family:var(--num);margin-top:1px}
+.rb-tag{font-size:9.5px;color:var(--t3);border:1px solid var(--line);padding:2px 6px;border-radius:5px;flex:0 0 auto}
+.rb-alt{margin:6px 10px 10px;border:1px dashed var(--line2);border-radius:11px;padding:11px 12px}
+.rb-alt .ah{font-size:10px;color:var(--t3);letter-spacing:1px;margin-bottom:8px}
+.rb-alt-item{display:flex;align-items:center;justify-content:space-between;padding:6px 0}
+.rb-alt-item .nm{font-size:12px;color:var(--t2)}
+.rb-alt-item button{font-size:10.5px;color:var(--amber);border:1px solid var(--amberLine);padding:4px 10px;border-radius:999px}
+.rb-signal{padding:12px 14px 16px;border-top:1px solid var(--line)}
+.rb-signal .sh{font-size:10px;color:var(--t3);letter-spacing:1px;margin-bottom:9px}
+.sig-row{display:flex;flex-wrap:wrap;gap:6px}
+.sig{font-size:11px;color:var(--t3);border:1px dashed rgba(255,255,255,.16);padding:5px 10px;border-radius:999px;min-height:28px}
+.sig:active,.sig.on{color:var(--amber);border-color:var(--amberLine)}
+
+#toast{position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-10px);z-index:100;
+  background:#23262E;border:1px solid var(--line2);font-size:12.5px;padding:10px 20px;border-radius:999px;
+  opacity:0;pointer-events:none;transition:.28s;white-space:nowrap;box-shadow:0 20px 50px -15px rgba(0,0,0,.7)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.05s!important}}
+</style>
+</head>
+<body>
+<div class="mac">
+  <!-- 标题栏（无边框窗口的自绘标题栏：左三色按钮 = 关闭/最小化/最大化，
+       空白处按住可拖动窗口；右侧三枚为同义图标入口） -->
+  <div class="titlebar" id="titlebar">
+    <div class="traffic" id="trafficLights">
+      <i id="tlClose" title="关闭"></i><i id="tlMin" title="最小化"></i><i id="tlMax" title="最大化 / 还原"></i>
+    </div>
+    <div class="win-title"><span class="d"></span><span id="winTitleText">行迹 · 行程规划</span></div>
+    <div class="win-right">
+      <button class="wc" id="wcMin" title="最小化"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M5 12h14"/></svg></button>
+      <button class="wc" id="wcMax" title="最大化 / 还原"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="5" width="14" height="14" rx="2"/></svg></button>
+      <button class="wc" id="wcClose" title="关闭"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+  </div>
+
+  <div class="body">
+    <!-- 左栏 -->
+    <nav class="sidebar">
+      <button class="side-ic on" data-view="now" title="今日"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg></button>
+      <button class="side-ic" data-view="list" title="全程"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></button>
+      <button class="side-ic" data-view="map" title="路线地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg></button>
+      <button class="side-ic" data-view="pref" title="偏好"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
+      <div class="side-spacer"></div>
+      <div class="avatar">我</div>
+    </nav>
+
+    <!-- 主区 -->
+    <main class="main">
+      <div class="topbar">
+        <div class="tb-left">
+          <div>
+            <div class="tb-city" id="tbCity">西湖环湖线</div>
+            <div class="tb-sub" id="tbSub">HANGZHOU · DAY 1 · 09/12</div>
+          </div>
+          <div class="day-pill" id="dayPill"></div>
+        </div>
+        <div class="tb-band">
+          <div class="band-meta"><span class="mood">今日节奏 · <b id="moodText">刚刚好</b></span><span class="end" id="endText"></span></div>
+          <div class="band" id="band"></div>
+        </div>
+        <div class="tb-right">
+          <div class="weather" id="weather"></div>
+          <div class="agent-chip"><span class="dot"></span>Agent 跟随中</div>
+        </div>
+      </div>
+
+      <div class="content" id="content">
+        <!-- 当前站视图 -->
+        <div class="view" id="viewNow">
+          <div class="now-photo" id="nowPhoto">
+            <img id="nowImg" src="" alt="">
+            <div class="now-tag" id="nowTag"></div>
+            <div class="now-book" id="nowBook" style="display:none"><span class="d"></span><span id="nowBookText"></span></div>
+            <div class="now-big">
+              <div class="now-time" id="nowTime"></div>
+              <div class="now-name" id="nowName"></div>
+            </div>
+          </div>
+          <div class="now-info">
+            <div class="now-note" id="nowNote"></div>
+            <div class="stay-row">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+              <span id="stayText">建议停留</span>
+              <span class="stay-bar"><i id="stayFill"></i></span>
+            </div>
+            <div class="feedback">
+              <button class="fb" id="slowBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M6 12l6 7 6-7"/></svg>慢一点</button>
+              <button class="fb" id="fasterBtn">还能逛<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 19V5M6 12l6-7 6 7"/></svg></button>
+            </div>
+          </div>
+        </div>
+
+        <!-- 地图视图 -->
+        <div class="view view-map" id="viewMap">
+          <div class="map-wrap">
+            <button class="map-back" id="mapBack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>返回今日</button>
+            <svg id="mapSvg" viewBox="0 0 560 720" preserveAspectRatio="xMidYMid slice"></svg>
+          </div>
+        </div>
+
+        <!-- Agent 气泡 -->
+        <div class="bubble" id="bubble">
+          <div class="bic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3l2.2 4.8L19 9l-4.8 1.2L12 15l-2.2-4.8L5 9l4.8-1.2z"/></svg></div>
+          <p id="bubbleText"></p>
+          <button class="undo" id="undoBtn">撤销</button>
+        </div>
+      </div>
+
+      <!-- 底部下一站 -->
+      <div class="bottombar">
+        <div class="next-info">
+          <div class="next-ic" id="nextIcon"></div>
+          <div class="next-txt">
+            <div class="a">下一站</div>
+            <div class="b" id="nextText"></div>
+          </div>
+        </div>
+        <button class="go-btn" id="goBtn"></button>
+      </div>
+    </main>
+
+    <!-- 右栏 -->
+    <aside class="rightbar" id="rightbar">
+      <div class="rb-head"><h3>今日安排</h3><span class="cnt" id="rbCnt"></span></div>
+      <div class="rb-list" id="rbList"></div>
+      <div class="rb-signal">
+        <div class="sh">实时信号（原型演示）</div>
+        <div class="sig-row">
+          <button class="sig" data-ev="behind">比计划慢了</button>
+          <button class="sig" data-ev="rain">下起雨了</button>
+          <button class="sig" data-ev="tired">有点累</button>
+          <button class="sig" data-ev="reset">还原</button>
+        </div>
+      </div>
+    </aside>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+/* ================= 数据 =================
+   本页是「行迹 · 桌面端」行程界面的唯一实现，两种数据来源：
+     ① 宿主桥注入（产品形态）：窗口宿主经 window.__travelPanel.loadPlan(payload)
+        下发真实行程（载荷结构与 panel.html / mobile.html 同源：days[].entries[]）；
+     ② 内置演示数据（无宿主时兜底）：设计稿原数据（杭州 2 日），
+        直接在浏览器打开本页即可看到完整界面。
+   真实载荷缺失的字段（anchor 时间锚点 / duration 停留 / leg 交通）前端不臆造：
+   时长按相邻时刻差与保守默认推，时间锚点留空（只有 Agent 侧能定语义）。 */
+var IMG={duanqiao:'https://aka.doubaocdn.com/s/YjhlfkeVgm',gushan:'https://aka.doubaocdn.com/s/BpOEpT1gzn',
+louwailou:'https://aka.doubaocdn.com/s/7H2JQ4NnlU',boat:'https://aka.doubaocdn.com/s/VKjn9EK4cO',
+leifeng:'https://aka.doubaocdn.com/s/dPC3phFfBe',sudi:'https://aka.doubaocdn.com/s/zSryk7GuxV',
+hefang:'https://aka.doubaocdn.com/s/7x85cINjkE',lingyin:'https://aka.doubaocdn.com/s/SSmz729jv4',
+veggie:'https://aka.doubaocdn.com/s/rfsDswJgC9',teamuseum:'https://aka.doubaocdn.com/s/uNj54LZFyW',
+longjing:'https://aka.doubaocdn.com/s/idxVoEE0sQ',jiuxi:'https://aka.doubaocdn.com/s/vvASueQOVa',
+museum:'https://aka.doubaocdn.com/s/910L4gLppV',cafe:'https://aka.doubaocdn.com/s/uNj54LZFyW',
+hotel:'https://aka.doubaocdn.com/s/xiu7PH2DoS'};
+var DEMO={
+S:{
+hotel:{n:'湖滨精品酒店',k:'stay',tag:'出发',img:IMG.hotel,base:10,xy:[300,118],note:'退房寄存行李，沿北山街步行出发，今天单向环湖、不走回头路。'},
+duanqiao:{n:'断桥残雪',k:'sight',tag:'景点',img:IMG.duanqiao,base:45,xy:[150,168],note:'清晨湖面最静，先占白堤这一段光，人少好拍。'},
+gushan:{n:'孤山 · 西泠印社',k:'sight',tag:'景点',img:IMG.gushan,base:70,xy:[108,252],note:'沿白堤走到孤山，林间石阶与金石篆刻，慢慢走。'},
+louwailou:{n:'楼外楼',k:'food',tag:'午餐 · 已订 12:15',img:IMG.louwailou,base:80,anchor:735,book:'已预订临湖位',xy:[132,352],note:'时间锚点不动：西湖醋鱼、东坡肉，临湖位已为你留好。'},
+boat:{n:'游船渡湖 · 花港观鱼',k:'ride',tag:'游船',img:IMG.boat,base:65,xy:[252,432],note:'孤山码头上船，在水上看雷峰塔，最省力的一段。'},
+museum:{n:'浙江省博物馆',k:'indoor',tag:'室内 · 备选',img:IMG.museum,base:70,optional:true,xy:[168,306],note:'青瓷与良渚玉器，走得动或下雨时再进来。'},
+cafe:{n:'湖畔咖啡',k:'rest',tag:'歇脚',img:IMG.cafe,rest:true,base:30,xy:[372,336],note:'临窗湖景，喝杯手冲，节奏由你，想坐多久坐多久。'},
+leifeng:{n:'雷峰塔',k:'sight',tag:'景点',img:IMG.leifeng,base:70,xy:[338,478],note:'傍晚光线最好，登塔看夕照，是今天的高光。'},
+sudi:{n:'苏堤追日落',k:'sight',tag:'日落 · 约18:05',img:IMG.sudi,base:60,anchor:1055,xy:[212,398],note:'时间锚点：18:05 落日，沿长堤往西走，光最好的十分钟。'},
+hefang:{n:'河坊街',k:'food',tag:'晚餐夜游',img:IMG.hefang,base:100,xy:[452,250],note:'灯笼老街，定胜糕、葱包桧，晚餐与夜游都在这。'},
+d2start:{n:'酒店出发进山',k:'stay',tag:'出发 · 已约车',img:IMG.hotel,base:10,xy:[468,92],note:'盘山路约 28 分钟，9:20 的车已叫好。'},
+lingyin:{n:'灵隐寺 · 飞来峰',k:'sight',tag:'景点 · 已预约',img:IMG.lingyin,base:120,book:'已实名预约',xy:[150,300],note:'趁上午人少先看飞来峰石窟，再进五大殿。'},
+veggie:{n:'灵隐素斋',k:'food',tag:'午餐',img:IMG.veggie,base:65,xy:[206,372],note:'素鹅、罗汉斋，寺旁小院，清幽。'},
+teamuseum:{n:'中国茶叶博物馆',k:'indoor',tag:'室内 · 备选',img:IMG.teamuseum,base:70,optional:true,xy:[256,472],note:'看龙井制茶史、坐下品茶，走得动或下雨时进来。'},
+longjing:{n:'龙井村 · 茶园',k:'sight',tag:'景点',img:IMG.longjing,base:90,xy:[312,548],note:'茶垄层层，到茶农家喝一杯明前龙井。'},
+jiuxi:{n:'九溪烟树',k:'sight',tag:'徒步',img:IMG.jiuxi,base:110,xy:[312,668],note:'踩汀步沿溪下行，最出片但也最耗体力。'},
+d2back:{n:'返程回酒店',k:'stay',tag:'返程',img:IMG.hotel,base:20,xy:[468,92],note:'龙井村口上车，顺路送回湖滨。'}
+}};
+DEMO.ORDER={1:['hotel','duanqiao','gushan','louwailou','boat','museum','cafe','leifeng','sudi','hefang'],
+            2:['d2start','lingyin','veggie','teamuseum','longjing','jiuxi','d2back']};
+DEMO.EDGE={
+'hotel->duanqiao':['walk',14,'1.1km'],'duanqiao->gushan':['walk',12,'900m'],'gushan->louwailou':['walk',6,'450m'],
+'gushan->museum':['walk',4,'300m'],'museum->louwailou':['walk',5,'400m'],'louwailou->boat':['boat',20,'渡湖含等船'],
+'louwailou->museum':['walk',7,'550m'],'museum->cafe':['taxi',8,'2.2km'],'boat->cafe':['taxi',8,'2.3km'],
+'boat->leifeng':['walk',9,'700m'],'cafe->leifeng':['walk',8,'600m'],'leifeng->sudi':['walk',8,'600m'],
+'sudi->hefang':['taxi',12,'3.4km'],'leifeng->hefang':['taxi',12,'3.6km'],'louwailou->leifeng':['taxi',10,'2.8km'],
+'cafe->hefang':['taxi',11,'3km'],'gushan->cafe':['taxi',9,'2.4km'],
+'d2start->lingyin':['taxi',28,'8.6km'],'lingyin->veggie':['walk',5,'350m'],'veggie->teamuseum':['taxi',12,'3.8km'],
+'veggie->longjing':['taxi',16,'5.2km'],'teamuseum->longjing':['walk',8,'600m'],'longjing->jiuxi':['hike',22,'1.6km'],
+'jiuxi->d2back':['taxi',28,'9.2km'],'longjing->d2back':['taxi',25,'7.8km'],'lingyin->longjing':['taxi',18,'6km']};
+DEMO.DAYNAME={1:'西湖环湖线',2:'灵隐龙井山野线'};
+DEMO.META={city:'杭州',cityEn:'HANGZHOU',days:2,dates:['09/12','09/13'],title:'行迹 · 杭州 2 日'};
+
+/* ================= 当前生效数据（演示 → 真实载荷覆盖） ================= */
+var S=DEMO.S,ORDER=DEMO.ORDER,EDGE=DEMO.EDGE,DAYNAME=DEMO.DAYNAME,META=DEMO.META;
+var DAY_START={};                 // day → 当天时间轴起点（分钟），取首个明确时刻
+function dayStart(){return DAY_START[state.day]||540;}
+var TICON={walk:'M10.5 9l-2.5 3.2 3 1.3 1.6 3.2M10.5 9l1.4 4 3.1 2.2M11.9 13l-3 6.5M13.6 15.2l3.4 4.3',
+bike:'M6 16.5 10.5 8h4M10.5 8 8.5 11.5h5L11.5 8M14.5 8l1.2-2.4H18',
+boat:'M12 3v11M12 4l6 5H6zM3 15s1.6 1.6 4 1.6S11 15 12 15s2.6 1.6 5 1.6S21 15 21 15l-1.6 3.4H4.6z',
+taxi:'M5 13l1.4-4.2A2 2 0 0 1 8.3 7.4h7.4a2 2 0 0 1 1.9 1.4L19 13M3.5 12.6h17v5h-17z',
+hike:'M3 18l5-7 3.5 4.5L15 11l6 7z'};
+function icon(t,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.7)+'" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="4.6" r="1.9"/><path d="'+(TICON[t]||TICON.walk)+'"/></svg>';}
+var TNAME={walk:'步行',bike:'骑行',boat:'游船',taxi:'打车',hike:'徒步'};
+function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
+function t2s(m){m=Math.round(m);return (Math.floor(m/60)+'').padStart(2,'0')+':'+(m%60+'').padStart(2,'0');}
+
+/* ================= 状态 + Agent 实时重排 ================= */
+var state={day:1,pace:0,event:null,cur:2,prev:null,forceShow:{},view:'now'};
+/* 演示数据模式下沿用设计稿的显式收起口径（boat/sudi/jiuxi）；
+   真实载荷模式按站的通用属性判（ride 水上交通 / 天气敏感词 / 高耗体力），不认死 id。
+   两档都保证「至少留一站」：全收起等于当天没行程，宁可留一站让人自己决定。 */
+var DEMO_MODE=true;
+var WEATHER_SENSITIVE_RE=/游船|出海|浮潜|潜水|海钓|观鲸|巡航|登岛|日落|日出|徒步|溯溪|漂流|沙滩|海滩/;
+function rainHides(id,sp){
+  if(DEMO_MODE)return id==='boat'||id==='sudi'||id==='jiuxi';
+  return !!sp.ride||WEATHER_SENSITIVE_RE.test(sp.text||'');
+}
+function tiredHides(id,sp){
+  if(DEMO_MODE)return id==='sudi'||id==='jiuxi';
+  return !!sp.heavy||(sp.outdoor&&sp.base>=90);
+}
+function effPace(){return state.pace+(state.event==='tired'?-1:0)+(state.event==='behind'?1:0);}
+function replan(){
+  var ep=effPace(),ev=state.event,order=ORDER[state.day]||[];
+  var visible=[],alts=[];
+  order.forEach(function(id){
+    var sp=S[id],show=true;
+    if(sp.optional){show=(ev==='rain')||state.forceShow[id]||(ep>=1);}
+    if(ev==='rain'&&rainHides(id,sp))show=false;
+    if(ev==='tired'&&tiredHides(id,sp))show=false;
+    if(show)visible.push(id);else alts.push(id);
+  });
+  // 兜底：不能把一天全收进备选（雨天岛屿行程尤其容易全命中天气词）
+  if(!visible.length&&order.length){
+    visible.push(order[0]);
+    alts=alts.filter(function(x){return x!==order[0];});
+  }
+  var items=[],cur=dayStart();
+  for(var i=0;i<visible.length;i++){
+    var id=visible[i],sp=S[id],dur;
+    if(sp.k==='stay')dur=sp.base;
+    else if(sp.rest)dur=clamp(Math.round(sp.base-ep*12),15,70);
+    else if(sp.anchor)dur=sp.base;
+    else{dur=sp.base-ep*8;if(ev==='behind')dur*=0.85;dur=clamp(Math.round(dur),sp.base*0.5,sp.base*1.5);}
+    var next=visible[i+1],edge=null;
+    if(next){var key=id+'->'+next;edge=EDGE[key]?EDGE[key].slice():['walk',8,'600m'];}
+    items.push({id:id,sp:sp,start:cur,end:cur+dur,dur:dur,edge:edge,
+      picked:sp.optional&&(ep>=1||ev==='rain'||state.forceShow[id]),rest:!!sp.rest});
+    cur+=dur+(edge?edge[1]:0);
+  }
+  finalize(items,dayStart());
+  return {items:items,alts:alts};
+}
+function minDur(it){if(it.sp.k==='stay'||it.sp.anchor)return it.sp.base;if(it.sp.rest)return 15;return Math.round(it.sp.base*0.5);}
+function compressible(it){return !it.sp.anchor&&it.sp.k!=='stay'&&!it.sp.rest;}
+function finalize(items,dayStartMin){
+  var base=dayStartMin==null?540:dayStartMin;
+  var lastEnd=base,segStart=0;
+  for(var i=0;i<items.length;i++){var it=items[i];
+    if(it.sp.anchor){
+      var prev=items[segStart-1],lead=(prev&&prev.edge)?prev.edge[1]:0;
+      var avail=it.sp.anchor-lastEnd-lead,seg=items.slice(segStart,i),need=0;
+      seg.forEach(function(x){need+=x.dur+(x.edge?x.edge[1]:0);});
+      if(need>avail){
+        var over=need-avail,flex=seg.filter(compressible),flexTotal=0;
+        flex.forEach(function(x){flexTotal+=x.dur-minDur(x);});
+        flex.forEach(function(x){var can=x.dur-minDur(x),cut=flexTotal>0?over*can/flexTotal:0;x.dur=Math.max(minDur(x),Math.round(x.dur-cut));});
+      }
+      lastEnd=it.sp.anchor+it.dur;segStart=i+1;
+    }
+  }
+  var cur=base;
+  items.forEach(function(it){it.start=it.sp.anchor?it.sp.anchor:cur;it.end=it.start+it.dur;cur=it.end+(it.edge?it.edge[1]:0);});
+}
+/** 收起/加回的实际站点名（气泡文案用真实数据，不写死杭州地名）。 */
+function namesOf(plan,ids){return (ids||[]).map(function(id){var sp=S[id];return sp?sp.n:'';}).filter(Boolean);}
+function joinNames(names,cap){
+  if(!names.length)return '';
+  var list=names.slice(0,cap||2);
+  var extra=names.length-list.length;
+  return '「'+list.join('、')+(extra>0?'等 '+names.length+' 处':'')+'」';
+}
+function agentMsg(before,plan){
+  var ev=state.event,alts=plan?plan.alts:[];
+  var hidden=joinNames(namesOf(plan,alts));
+  if(ev==='behind')return '你比计划慢了约 25 分钟。<b>时间锚点不能等</b>，我把'+ (hidden||'可选的两站') +'收进备选、压缩了两段缓冲，晚餐顺延 15 分钟，你不用操作。';
+  if(ev==='rain')return '午后有雨。已把<b>'+(hidden||'户外几站')+'收起</b>，改走室内，时间锚点与已订的餐都不动。';
+  if(ev==='tired')return '先照顾体力：把<b>'+(hidden||'最耗脚力的那几站')+'收起</b>，中间留足歇脚时间，今天少走约 5 千步。';
+  if(before&&before.pace<state.pace)return '看你状态不错、走得挺顺，我把<b>之前收起的备选加了回来</b>，午后多逛一段，整体仍然从容，不会赶。';
+  if(before&&before.pace>state.pace)return '帮你松一松：<b>部分安排先收进备选</b>，留出余量，跟着走就行。';
+  return '已按你现在的节奏重新排好，<b>时间锚点保持不动</b>，其余都能跟着你的状态伸缩。';
+}
+
+/* ================= 渲染 ================= */
+var $=function(id){return document.getElementById(id);};
+function moodText(){var ep=effPace(),e=state.event;
+  if(e==='rain')return'雨天室内';if(e==='tired')return'省力模式';if(e==='behind')return'追赶中';
+  if(ep<=-1)return'很从容';if(ep>=1)return'比较充实';return'刚刚好';}
+/** 天气胶囊：演示数据沿用设计稿文案；真实载荷没有天气字段时整枚隐藏
+    （不编造天气读数——与项目「数据诚实化」一致；Agent 侧要展示时随载荷带
+    `weather` 字段下发即可）。 */
+var WEATHER_TEXT='';
+function weatherHtml(){
+  if(state.event==='rain')return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 13a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 6 3.8 3.8 0 0 1 18 13"></path><path d="M8 16l-1 2.5M12.5 16l-1 2.5M17 16l-1 2.5"></path></svg> 13:00 中雨';
+  if(!DEMO_MODE)return WEATHER_TEXT?('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 15a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 8 3.8 3.8 0 0 1 18 15z"></path></svg> '+WEATHER_TEXT):'';
+  if(state.day===1)return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7"></path></svg> 26° 晴';
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 15a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 8 3.8 3.8 0 0 1 18 15z"></path></svg> 24° 多云';
+}
+/** 天数胶囊条：按当前行程天数生成（设计稿 Day 1/Day 2 版式的通用化）。 */
+function renderDayPills(){
+  var n=Math.max(1,dayCount());
+  var pill=$('dayPill');
+  if(pill.dataset.n!==String(n)){
+    var h='';
+    for(var i=1;i<=n;i++)h+='<button data-day="'+i+'">Day '+i+'</button>';
+    pill.innerHTML=h;
+    pill.dataset.n=String(n);
+    pill.classList.toggle('compact',n>4);
+    Array.prototype.forEach.call(pill.querySelectorAll('button'),function(b){
+      b.addEventListener('click',function(){state.day=+b.dataset.day;state.cur=0;state.forceShow={};render();});
+    });
+  }
+  Array.prototype.forEach.call(pill.querySelectorAll('button'),function(b){b.classList.toggle('on',+b.dataset.day===state.day);});
+}
+/** 顶栏/标题栏文案：全部来自当前生效数据（城市 · 第几天 · 当天线路名）。 */
+function refreshChrome(){
+  var day=META.dates&&META.dates[state.day-1]?META.dates[state.day-1]:'';
+  $('tbCity').textContent=DAYNAME[state.day]||DAYNAME[1]||META.city;
+  $('tbSub').textContent=[META.cityEn,'DAY '+state.day,day].filter(Boolean).join(' · ');
+  $('winTitleText').textContent='行迹 · '+META.city+' '+dayCount()+' 日 · Agent 跟随中';
+}
+function render(){
+  var plan=replan(),items=plan.items,alts=plan.alts;
+  // 宿主形态（WebView 里被独立窗口加载）且载荷还没到：不拿演示数据冒充真实行程，
+  // 只显示装载态——预热阶段页面已在后台跑，正式显窗前载荷必已注入。
+  if(!items.length||!DATA_READY){
+    $('tbCity').textContent=DATA_READY?(META.city||'行程'):'行程装载中…';
+    $('tbSub').textContent=DATA_READY?(META.cityEn||''):'等待行程数据';
+    $('moodText').textContent=DATA_READY?'待生成':'';
+    $('endText').textContent='';
+    $('band').innerHTML='';
+    $('rbList').innerHTML='<div class="rb-alt"><div class="ah">'+(DATA_READY?'这一天还没有安排':'行程装载中…')+'</div></div>';
+    $('rbCnt').textContent=DATA_READY?'0 站':'';
+    $('nextText').innerHTML=DATA_READY?'这一天还没有安排':'正在读取行程';
+    $('goBtn').innerHTML=DATA_READY?'等待行程数据':'装载中…';
+    return;
+  }
+  state.cur=clamp(state.cur,0,items.length-1);
+  var cur=items[state.cur],next=items[state.cur+1];
+
+  renderDayPills();
+  refreshChrome();
+  $('moodText').textContent=moodText();
+  $('endText').textContent='预计 '+t2s(items[items.length-1].end)+' 结束';
+  $('weather').innerHTML=weatherHtml();
+
+  /* 旅程带 */
+  var total=items.reduce(function(a,it){return a+it.dur+(it.edge?it.edge[1]:0);},0);
+  var band='';
+  items.forEach(function(it,i){var w=it.dur+(it.edge?it.edge[1]:0);
+    var cls=i<state.cur?'done':(i===state.cur?'now':'');
+    band+='<i class="'+cls+'" data-i="'+i+'" style="flex-grow:'+w.toFixed(1)+'" title="'+it.sp.n+'"></i>';});
+  alts.forEach(function(id){band+='<i class="alt" data-alt="'+id+'" title="收起的备选：'+S[id].n+'"></i>';});
+  $('band').innerHTML=band;
+  Array.prototype.forEach.call($('band').querySelectorAll('i[data-i]'),function(el){
+    el.addEventListener('click',function(){setCur(+el.dataset.i);});});
+  Array.prototype.forEach.call($('band').querySelectorAll('i[data-alt]'),function(el){
+    el.addEventListener('click',function(){state.forceShow[el.dataset.alt]=true;commit();toast('已把「'+S[el.dataset.alt].n+'」加回');});});
+
+  /* Now 卡 */
+  setImg($('nowImg'),$('nowPhoto'),cur.sp.img,cur.sp.n);
+  enrichLive(cur.sp);
+  $('nowTag').textContent=cur.sp.tag;
+  if(cur.sp.book){$('nowBook').style.display='flex';$('nowBookText').textContent=cur.sp.book;}else{$('nowBook').style.display='none';}
+  $('nowTime').textContent=t2s(cur.start)+' — '+t2s(cur.end)+(cur.sp.anchor?' · 时间锚点':'');
+  $('nowName').textContent=cur.sp.n;
+  $('nowNote').textContent=cur.sp.note;
+  $('stayText').textContent='建议停留 '+cur.dur+' 分钟';
+  $('stayFill').style.width=clamp(cur.dur/120*100,8,100)+'%';
+
+  /* 底部 */
+  if(next){
+    $('nextIcon').innerHTML=icon(next.edge[0]);
+    $('nextText').innerHTML=next.sp.n+'<span>'+TNAME[next.edge[0]]+' '+next.edge[1]+' 分钟 · '+next.edge[2]+'</span>';
+    $('goBtn').innerHTML=icon(next.edge[0],2)+'前往 '+next.sp.n+' · '+TNAME[next.edge[0]]+' '+next.edge[1]+' 分钟';
+  }else{
+    $('nextIcon').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.6-7-10a7 7 0 0 1 14 0c0 5.4-7 10-7 10z"/><circle cx="12" cy="11" r="2.6"/></svg>';
+    $('nextText').innerHTML='今日到此结束 · 回酒店休整';
+    $('goBtn').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>结束今日 · 回酒店';
+  }
+
+  renderRight(items,alts);
+  if(state.view==='map')renderMap(items);
+  Array.prototype.forEach.call(document.querySelectorAll('.sig'),function(b){
+    b.classList.toggle('on',b.dataset.ev!=='reset'&&b.dataset.ev===state.event);});
+}
+function renderRight(items,alts){
+  $('rbCnt').textContent=items.length+' 站';
+  var h='';
+  items.forEach(function(it,i){
+    h+='<div class="rb-row '+(i===state.cur?'now ':(i<state.cur?'done':''))+'" data-i="'+i+'">'+
+      '<div class="rb-time">'+t2s(it.start)+'</div><div class="rb-dot"></div>'+
+      '<div class="rb-main"><div class="rb-name">'+it.sp.n+'</div>'+
+      '<div class="rb-sub">停留 '+it.dur+' 分'+(it.edge?' · '+TNAME[it.edge[0]]+' '+it.edge[1]+' 分':'')+(it.picked?' · 刚加回':'')+'</div></div>'+
+      '<div class="rb-tag">'+it.sp.tag.split(' ')[0]+'</div></div>';
+  });
+  if(alts.length){
+    h+='<div class="rb-alt"><div class="ah">AGENT 暂时收起 · 节奏松下来会自动加回</div>';
+    alts.forEach(function(id){h+='<div class="rb-alt-item"><span class="nm">'+S[id].n+'</span><button data-add="'+id+'">现在就去</button></div>';});
+    h+='</div>';
+  }
+  $('rbList').innerHTML=h;
+  Array.prototype.forEach.call($('rbList').querySelectorAll('.rb-row'),function(r){
+    r.addEventListener('click',function(){setCur(+r.dataset.i);});});
+  Array.prototype.forEach.call($('rbList').querySelectorAll('[data-add]'),function(b){
+    b.addEventListener('click',function(){state.forceShow[b.dataset.add]=true;commit();toast('已加回「'+S[b.dataset.add].n+'」');});});
+}
+
+/* 地图（设计稿的示意底图：矢量网格 + 抽象水系/山线 + 真实坐标投影后的路线）。
+   坐标投影：真实载荷的经纬度按当天范围等比投到 560×720 viewBox；
+   无坐标的站在可见区域内均分（不臆造地理关系，只给一个可读的排布）。 */
+function mapBase(day){
+  var s='';
+  var label=DEMO_MODE?(day===1?'西 子 湖 面':'西 山 林 麓'):(META.city||'路线示意');
+  for(var x=40;x<560;x+=48)s+='<line class="map-bg" x1="'+x+'" y1="0" x2="'+x+'" y2="720"/>';
+  for(var y=40;y<720;y+=48)s+='<line class="map-bg" x1="0" y1="'+y+'" x2="560" y2="'+y+'"/>';
+  if(day===1){
+    s+='<path class="map-water" d="M70 150 C40 240 60 360 150 450 C240 540 380 540 430 440 C480 340 455 210 360 150 C270 95 110 95 70 150 Z"/>';
+    [0,1,2].forEach(function(i){s+='<path class="map-wl" d="M'+(92+i*16)+' '+(180+i*70)+' C80 260 110 340 180 410 C250 470 360 470 405 400"/>';});
+    s+='<path class="map-road" d="M300 118 C180 120 96 190 96 286 C96 400 196 498 320 498 C424 498 470 400 452 300 C438 210 380 120 300 118 Z"/>';
+    s+='<path class="map-road t" d="M150 168 C120 220 110 300 132 352 C180 420 250 440 338 478"/>';
+    s+='<text class="alab" x="236" y="300">'+label+'</text>';
+  }else{
+    [260,360,470,580].forEach(function(y,i){s+='<path class="map-water" style="fill:none;stroke:rgba(245,165,82,.08);stroke-width:1.2" d="M40 '+y+' C160 '+(y-60)+' 340 '+(y-50)+' 520 '+(y-10)+'"/>';});
+    s+='<path class="map-wl" style="stroke:rgba(99,170,161,.3);stroke-width:2" d="M150 300 C220 420 260 540 312 668"/>';
+    s+='<path class="map-road" d="M468 92 C340 150 220 220 150 300 C190 360 250 420 312 548 C312 600 312 640 312 668"/>';
+    s+='<text class="alab" x="60" y="232">'+label+'</text>';
+  }
+  return s;}
+function smooth(p){if(p.length<2)return'';var d='M'+p[0][0]+' '+p[0][1];
+  for(var i=0;i<p.length-1;i++){var p0=p[i-1]||p[i],p1=p[i],p2=p[i+1],p3=p[i+2]||p[i+1];
+    d+=' C'+(p1[0]+(p2[0]-p0[0])/6).toFixed(1)+' '+(p1[1]+(p2[1]-p0[1])/6).toFixed(1)+' '+(p2[0]-(p3[0]-p1[0])/6).toFixed(1)+' '+(p2[1]-(p3[1]-p1[1])/6).toFixed(1)+' '+p2[0]+' '+p2[1];}
+  return d;}
+function renderMap(items){
+  projectDay(state.day);                       // 可视窗口内重排（窗口比例变化也成立）
+  var pts=items.map(function(i){return i.sp.xy||[280,360]}),ai=state.cur;
+  var s='<g>'+mapBase(state.day)+'</g>';
+  var done=pts.slice(0,ai+1),todo=pts.slice(ai);
+  if(todo.length>1)s+='<path class="r-todo" d="'+smooth(todo)+'"/>';
+  if(done.length>1){s+='<path class="r-done" d="'+smooth(done)+'"/><path class="r-flow" d="'+smooth(done)+'"/>';}
+  var num=0;
+  items.forEach(function(it,i){var xy=it.sp.xy,x=xy[0],y=xy[1];if(it.sp.k!=='stay')num++;
+    var cls='mp '+(i===ai?'now ':(i<ai?'done ':''))+(it.rest?'rest':'');
+    s+='<g class="'+cls+'" data-i="'+i+'" transform="translate('+x+','+y+')"><circle class="c" r="11"/>';
+    s+='<text class="n" y="0.4">'+(it.rest||it.sp.k==='stay'?'•':num)+'</text>';
+    var anchor=x>420?'end':'start',lx=x>420?-14:14;
+    s+='<text class="l" x="'+lx+'" y="-13" text-anchor="'+anchor+'">'+it.sp.n.split(' · ')[0]+'</text></g>';});
+  var h=items[ai].sp.xy;
+  s+='<circle class="here-p" cx="'+h[0]+'" cy="'+h[1]+'" r="6"/><circle class="here" cx="'+h[0]+'" cy="'+h[1]+'" r="3.4"/>';
+  $('mapSvg').innerHTML=s;
+  Array.prototype.forEach.call($('mapSvg').querySelectorAll('.mp'),function(g){
+    g.addEventListener('click',function(){setCur(+g.dataset.i);});});
+}
+
+/* ================= 交互 ================= */
+function setCur(i){state.cur=i;render();if(state.view==='map')renderMap(replan().items);}
+function commit(msg){
+  var plan=replan();
+  if(state.cur>=plan.items.length)state.cur=plan.items.length-1;
+  render();showBubble(msg||agentMsg(state.prev,plan));
+}
+function change(patch,msg){state.prev=JSON.parse(JSON.stringify({pace:state.pace,event:state.event,cur:state.cur,forceShow:state.forceShow}));
+  Object.assign(state,patch);commit(msg);}
+function showBubble(txt){$('bubbleText').innerHTML=txt;$('bubble').classList.add('show');}
+$('undoBtn').addEventListener('click',function(){if(!state.prev)return;
+  Object.assign(state,state.prev);state.prev=null;render();$('bubble').classList.remove('show');toast('已撤销');});
+$('slowBtn').addEventListener('click',function(){change({pace:clamp(state.pace-1,-2,2),event:null});});
+$('fasterBtn').addEventListener('click',function(){change({pace:clamp(state.pace+1,-2,2),event:null});});
+Array.prototype.forEach.call(document.querySelectorAll('.sig'),function(b){
+  b.addEventListener('click',function(){var v=b.dataset.ev;
+    if(v==='reset'){change({event:null,pace:0,forceShow:{}},'已回到跟随你实时节奏的顺畅安排。');}
+    else change({event:v});});});
+$('goBtn').addEventListener('click',function(){var plan=replan();
+  if(state.cur<plan.items.length-1){state.cur++;render();}else toast('今日行程结束，已为你叫车回酒店');});
+/* 天数胶囊条由 renderDayPills() 动态生成并自行绑定事件 */
+
+/* 左栏视图切换 */
+Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
+  b.addEventListener('click',function(){
+    var v=b.dataset.view;
+    if(v==='now'){state.view='now';$('viewMap').classList.remove('open');}
+    else if(v==='map'){state.view='map';$('viewMap').classList.add('open');renderMap(replan().items);}
+    else if(v==='list'){$('rightbar').classList.toggle('collapsed');}
+    else{toast('偏好 / 设置（原型占位）');return;}
+    Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x===b);});
+  });
+});
+$('mapBack').addEventListener('click',function(){state.view='now';$('viewMap').classList.remove('open');
+  Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x.dataset.view==='now');});});
+
+function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},1900);}
+
+/* ═══════════════════════════════════════════════════════════════════
+   宿主桥：真实载荷适配 + 窗口控制
+   ═══════════════════════════════════════════════════════════════════
+   宿主（client/flutter_app 的行程独立窗口）经 WebView2 postMessage 下发：
+     window.__travelPanel.loadPlan(payload)  真实行程（与 panel/mobile 同载荷结构）
+     window.__travelPanel.applySignal(ev,msg) Agent 侧感知结论（天气/步速/对话）
+   页面向上报（window.chrome.webview.postMessage）：
+     ready / close / minimize / maximize / windowDrag / openUrl
+   ═══════════════════════════════════════════════════════════════════ */
+function notifyHost(payload){
+  try{
+    if(window.__travelPanelHost&&window.__travelPanelHost.postMessage){window.__travelPanelHost.postMessage(payload);return;}
+    if(window.chrome&&window.chrome.webview&&window.chrome.webview.postMessage){window.chrome.webview.postMessage(payload);return;}
+  }catch(e){/* 浏览器形态：无宿主，忽略 */}
+}
+function apiBase(){
+  if(TILE_BASE)return TILE_BASE.replace(/\/$/,'');
+  var s=location.protocol+'//'+location.host;
+  return (location.protocol==='file:')?'':s;
+}
+var TILE_BASE='';
+/** 无实拍图 → 兜底渐变 + 按需向服务端取真实实拍（与 mobile.html 同源接口）。 */
+function setImg(img,box,url,name){
+  // 加载失败也要干净：去掉破图图标（Windows WebView 里同样会露出默认占位）
+  img.onerror=function(){box.classList.add('noimg');img.style.visibility='hidden';};
+  img.onload=function(){box.classList.remove('noimg');img.style.visibility='';};
+  if(url){img.src=url;box.classList.remove('noimg');return;}
+  img.removeAttribute('src');
+  img.style.visibility='hidden';
+  box.classList.add('noimg');
+  if(name)box.dataset.pending=name;
+}
+var liveCache={};
+function enrichLive(sp){
+  if(!sp||!sp.n||sp.img)return;
+  if(sp.id in liveCache)return;
+  liveCache[sp.id]=1;
+  var base=apiBase();
+  if(!base)return;
+  var qs='name='+encodeURIComponent(sp.n);
+  if(sp.loc)qs+='&lat='+sp.loc.lat+'&lng='+sp.loc.lng;
+  fetch(base+'/travel-poi/details?'+qs,{headers:{Accept:'application/json'}})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(j){
+      if(!j)return;
+      var ph=j.photos&&j.photos.length?(j.photos[0].thumb||j.photos[0].full):null;
+      var wiki=j.wiki&&j.wiki.extract?String(j.wiki.extract):null;
+      if(!ph&&!wiki)return;
+      if(!sp.img&&ph)sp.img=ph;
+      if(!sp.note&&wiki)sp.note=wiki;
+      var plan=replan(),isCur=plan.items[state.cur]&&plan.items[state.cur].id===sp.id;
+      if(!isCur)return;
+      if(ph)setImg($('nowImg'),$('nowPhoto'),sp.img,sp.n);
+      if(sp.note)$('nowNote').textContent=sp.note;
+    })
+    .catch(function(){/* 取不到：保持占位态 */});
+}
+
+/* ── 载荷适配：真实行程（days[].entries[]）→ 本页数据模型（S/ORDER/EDGE/DAYNAME） ── */
+/** 兼容两种载荷形态：宿主桥注入的 entries 形态，与行程仓库的 items 形态
+    （仓库字段 startTime/visitDuration/items → 统一成 entries 形态，与 mobile.html 同规则）。 */
+function normalizePlan(raw){
+  raw=raw||{};
+  var days=raw.days||[];
+  if(!days.length||!days[0]||!days[0].items)return raw;
+  return{
+    destination:str(raw.destination),title:str(raw.title),center:raw.center||null,
+    days:days.map(function(d,i){
+      return{
+        label:str(d.date)||('Day '+(i+1)),
+        subtitle:str(d.subtitle)||str(d.name),
+        entries:(d.items||[]).map(function(it){
+          return{
+            name:str(it.name),type:str(it.type),time:str(it.startTime),
+            duration:Number(it.visitDuration)||0,
+            description:str(it.description),priceInfo:str(it.priceInfo),
+            tips:Array.isArray(it.tips)?it.tips:[],
+            address:str(it.address),images:Array.isArray(it.images)?it.images:[],
+            latitude:it.latitude,longitude:it.longitude,
+            optional:it.type==='optional'
+          };
+        })
+      };
+    })
+  };
+}
+var KIND_BY_TYPE={attraction:'sight',restaurant:'food',hotel:'stay',transport:'ride',shopping:'sight',other:'sight',indoor:'indoor'};
+var TAG_BY_TYPE={attraction:'景点',restaurant:'餐饮',hotel:'住宿',transport:'交通',shopping:'逛街',indoor:'室内',other:'安排'};
+var PERIOD_MIN={'凌晨':60,'清晨':360,'早上':420,'上午':540,'中午':720,'下午':840,'傍晚':1020,'晚上':1140,'夜里':1260};
+var LEG_SPEED={walk:75,bike:220,taxi:400};
+var OUTDOOR_RE=/湖|山|海|滩|岛|公园|景区|古镇|街|堤|塔|桥|徒步|骑行|日落|日出|游船|缆车|村|谷|湾|礁|岛礁/;
+var HEAVY_RE=/徒步|登山|骑行|长堤|环湖|溯溪|漂流|攀/;
+
+function str(v){return v==null?'':String(v);}
+function pad2(n){return (10>n?'0':'')+n;}
+function parseTime(t){
+  var s=str(t).trim();
+  if(!s)return null;
+  var m=/(\d{1,2})\s*[:：]\s*(\d{2})\s*[-~—－至]\s*(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if(m)return{start:(+m[1])*60+(+m[2]),end:(+m[3])*60+(+m[4])};
+  m=/T\s*(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if(m)return{start:(+m[1])*60+(+m[2]),end:null};
+  m=/^(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if(m)return{start:(+m[1])*60+(+m[2]),end:null};
+  m=/^(\d{1,2})\s*点\s*(半|[0-5]?\d)?/.exec(s);
+  if(m)return{start:(+m[1])*60+(m[2]==='半'?30:(m[2]?+m[2]:0)),end:null};
+  for(var k in PERIOD_MIN){if(s.indexOf(k)>=0)return{start:PERIOD_MIN[k],end:null};}
+  return null;
+}
+function haversineKm(a,b){
+  if(!a||!b||a.lng==null||b.lng==null||a.lat==null||b.lat==null)return null;
+  var R=6371,dLat=(b.lat-a.lat)*Math.PI/180,dLng=(b.lng-a.lng)*Math.PI/180;
+  var la1=a.lat*Math.PI/180,la2=b.lat*Math.PI/180;
+  var h=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)*Math.sin(dLng/2);
+  return 2*R*Math.asin(Math.min(1,Math.sqrt(h)));
+}
+function estimateEdge(from,to){
+  if(!from||!to||!from.loc||!to.loc)return['walk',8,'600m'];
+  var km=haversineKm(from.loc,to.loc);
+  if(km==null)return['walk',8,'600m'];
+  var mode=km<1.2?'walk':(km<4?'bike':'taxi');
+  var road=km*1.32;
+  // 上限 180 分钟：跨岛/跨城这类长距离用「直线 × 系数 ÷ 市区车速」会算出十几小时，
+  // 那是臆造的地理路径。缺口留给 Agent 侧回填 leg 字段，这里只给保守上限。
+  var minutes=clamp(Math.round(road*1000/LEG_SPEED[mode]),3,180);
+  return[mode,minutes,road<1?Math.round(road*1000)+'m':road.toFixed(1)+'km'];
+}
+/** 原始 entry → 本页站点模型（S[id]）。anchor/duration 缺失一律不臆造。 */
+function adaptStop(entry,dayKey,idx){
+  var type=str(entry.type)||'attraction';
+  var k=KIND_BY_TYPE[type]||'sight';
+  var loc=(entry.latitude!=null&&entry.longitude!=null&&isFinite(Number(entry.latitude))&&isFinite(Number(entry.longitude)))
+    ?{lat:Number(entry.latitude),lng:Number(entry.longitude)}:null;
+  var imgs=(entry.images||[]).filter(function(u){return u&&str(u).trim();});
+  var range=parseTime(entry.time);
+  var dur=Number(entry.duration)>0?Number(entry.duration):(range&&range.end!=null?Math.max(15,range.end-range.start):0);
+  var isRest=/咖啡|茶|歇脚|休息/.test(str(entry.name)+str(entry.type));
+  var text=str(entry.name)+' '+str(entry.description)+' '+str(entry.tips);
+  return{id:'d'+dayKey+'e'+idx,n:str(entry.name)||'行程安排',k:k,tag:TAG_BY_TYPE[type]||'安排',
+    img:imgs.length?str(imgs[0]):'',base:dur,xy:null,loc:loc,note:str(entry.description)||str(entry.priceInfo)||str(entry.tips),
+    anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
+    startHint:range?range.start:null,text:text,ride:k==='ride',
+    outdoor:OUTDOOR_RE.test(text)&&k!=='indoor',heavy:HEAVY_RE.test(text)};
+}
+/** 停留时长补齐：有明确起止→用差值；否则用与下一站的时刻差；再否则 45 分兜底。 */
+function fillDurations(stops){
+  for(var i=0;i<stops.length;i++){
+    var s=stops[i],next=stops[i+1];
+    if(s.base>0)continue;
+    if(next&&s.startHint!=null&&next.startHint!=null&&next.startHint>s.startHint){s.base=clamp(Math.round(next.startHint-s.startHint),15,240);continue;}
+    s.base=45;
+  }
+}
+/** 真实坐标 → 可视区投影。
+    地图 SVG 是固定 viewBox 560×720 + preserveAspectRatio slice：容器宽高比一变，
+    可见的 viewBox 窗口就变（宽容器会切掉上下）。因此按「当前实际可见窗口」做投影，
+    窗口尺寸变化时重投影——保证任何窗口比例下全部站点都在屏内。 */
+function visibleViewBox(){
+  var el=$('mapSvg');
+  var rect=el?el.getBoundingClientRect():null;
+  var vw=560,vh=720;
+  if(!rect||!rect.width||!rect.height)return{x:0,y:0,w:vw,h:vh};
+  var scale=Math.max(rect.width/vw,rect.height/vh);   // slice：取覆盖比例
+  var w=rect.width/scale,h=rect.height/scale;
+  return{x:(vw-w)/2,y:(vh-h)/2,w:w,h:h};
+}
+/** 当天的站在可视窗口内排布：
+    ① 有真实经纬度 → 地理等比投影；
+    ② 只有设计稿的示意坐标（演示数据）→ 原排布整体等比映射进可视窗口（保持相对关系）；
+    ③ 啥都没有 → 沿对角线均分，保证地图可读。 */
+function projectDay(day){
+  var ids=ORDER[day]||[];
+  var stops=ids.map(function(id){return S[id];}).filter(Boolean);
+  if(!stops.length)return;
+  var vb=visibleViewBox(),padX=Math.min(90,vb.w*0.14),padY=Math.min(110,vb.h*0.16);
+  var x0=vb.x+padX,x1=vb.x+vb.w-padX,y0=vb.y+padY,y1=vb.y+vb.h-padY;
+  var withLoc=stops.filter(function(s){return !!s.loc;});
+  if(withLoc.length>=2){
+    var lats=withLoc.map(function(s){return s.loc.lat;}),lngs=withLoc.map(function(s){return s.loc.lng;});
+    var minLat=Math.min.apply(null,lats),maxLat=Math.max.apply(null,lats);
+    var minLng=Math.min.apply(null,lngs),maxLng=Math.max.apply(null,lngs);
+    var spanLat=Math.max(maxLat-minLat,1e-5),spanLng=Math.max(maxLng-minLng,1e-5);
+    var sc=Math.min((x1-x0)/spanLng,(y1-y0)/spanLat);
+    var offX=x0+((x1-x0)-spanLng*sc)/2,offY=y0+((y1-y0)-spanLat*sc)/2;
+    stops.forEach(function(s){
+      if(!s.loc){s.xy=null;return;}
+      s.xy=[Math.round(offX+(s.loc.lng-minLng)*sc),Math.round(offY+(maxLat-s.loc.lat)*sc)];
+    });
+  }else if(withLoc.length===1){
+    withLoc[0].xy=[Math.round((x0+x1)/2),Math.round((y0+y1)/2)];
+  }
+  // 无地理坐标的站（演示数据的示意坐标）→ 原排布整体等比映射进可视窗口
+  var based=stops.filter(function(s){return !s.loc&&s.baseXy;});
+  if(based.length>=2){
+    var bx=based.map(function(s){return s.baseXy[0];}),by=based.map(function(s){return s.baseXy[1];});
+    var bMinX=Math.min.apply(null,bx),bMaxX=Math.max.apply(null,bx);
+    var bMinY=Math.min.apply(null,by),bMaxY=Math.max.apply(null,by);
+    var bSpanX=Math.max(bMaxX-bMinX,1),bSpanY=Math.max(bMaxY-bMinY,1);
+    var bs=Math.min((x1-x0)/bSpanX,(y1-y0)/bSpanY);
+    var bOffX=x0+((x1-x0)-bSpanX*bs)/2,bOffY=y0+((y1-y0)-bSpanY*bs)/2;
+    based.forEach(function(s){
+      s.xy=[Math.round(bOffX+(s.baseXy[0]-bMinX)*bs),Math.round(bOffY+(s.baseXy[1]-bMinY)*bs)];
+    });
+  }
+  // 仍无落点的站：沿对角线均分，保证地图可读
+  var rest=stops.filter(function(s){return !s.xy;});
+  rest.forEach(function(s,i){
+    var t=rest.length===1?0.5:i/(rest.length-1);
+    s.xy=[Math.round(x0+t*(x1-x0)),Math.round(y0+t*(y1-y0))];
+  });
+}
+/** 完整载荷 → 本页数据模型。返回 false 表示载荷不可用（保留演示数据）。 */
+function adaptPlan(raw){
+  raw=normalizePlan(raw);
+  var days=raw.days||[];
+  if(!days.length)return false;
+  var S2={},ORDER2={},EDGE2={},DAYNAME2={},START2={},DATES=[];
+  days.forEach(function(day,di){
+    var key=di+1;
+    var entries=day.entries||[];
+    var stops=[],prev=null,ids=[],minStart=null;
+    entries.forEach(function(e,ei){
+      var s=adaptStop(e,key,ei);
+      if(s.startHint!=null)minStart=minStart==null?s.startHint:Math.min(minStart,s.startHint);
+      stops.push(s);ids.push(s.id);
+      S2[s.id]=s;
+      prev=s;
+    });
+    fillDurations(stops);
+    for(var i=1;i<stops.length;i++){
+      EDGE2[stops[i-1].id+'->'+stops[i].id]=estimateEdge(stops[i-1],stops[i]);
+    }
+    ORDER2[key]=ids;
+    DAYNAME2[key]=str(day.subtitle)||str(day.name)||('第 '+key+' 天');
+    // 只认形如 09/12 · 2026-09-12 · 9.12 的日期文本（label 常是「Day 1」这类，不能当日期）
+    var dateText=str(day.subtitle)||str(day.label);
+    if(/^\d{1,4}[\/\-.]\d{1,2}([\/\-.]\d{1,2})?$/.test(dateText.trim()))DATES.push(dateText.trim());
+    START2[key]=minStart!=null?minStart:540;
+  });
+  S=S2;ORDER=ORDER2;EDGE=EDGE2;DAYNAME=DAYNAME2;DAY_START=START2;
+  var dest=str(raw.destination)||str(raw.title)||'行程';
+  // 拉丁文目的地才拿来做「城市英文名」（中文名转大写只是复读，不如不显示）
+  var en=/^[\x20-\x7E]+$/.test(dest)?dest.toUpperCase():'';
+  META={city:dest,cityEn:en,days:days.length,dates:DATES,title:'行迹 · '+dest+' '+days.length+' 日'};
+  WEATHER_TEXT=str(raw.weather);
+  liveCache={};
+  return true;
+}
+
+/* ── 桥 API（与 panel.html / mobile.html 同名，客户端桥逻辑复用） ── */
+var HOST_MODE=!!(window.chrome&&window.chrome.webview)||/[?&]host=1/.test(location.search);
+/** 宿主形态下载荷到达前不展示演示数据（避免被当成真实行程）。 */
+var DATA_READY=!HOST_MODE;
+window.__travelPanel={
+  loadPlan:function(payload){
+    DEMO_MODE=!adaptPlan(payload);
+    DATA_READY=true;
+    state.day=1;state.cur=0;state.event=null;state.forceShow={};
+    render();
+    if(state.view==='map')renderMap(replan().items);
+  },
+  /** Agent 侧感知结论（天气/步速/对话）：页面据此重排，并展示 Agent 的解释文案。 */
+  applySignal:function(ev,note){
+    state.prev=null;state.event=ev||null;state.pace=0;state.forceShow={};
+    render();
+    if(note)showBubble(note);
+  },
+  setTheme:function(){/* 行迹为固定深色设计令牌，保留 API 兼容 */},
+  setTileProxy:function(base){TILE_BASE=String(base==null?'':base);},
+  setDefaultCenter:function(){/* 地图为示意底图，中心随载荷投影 */},
+  showDay:function(i){var n=dayCount();state.day=clamp(Number(i)||1,1,n);state.cur=0;state.forceShow={};render();},
+  openStop:function(id){
+    var order=ORDER[state.day]||[],i=order.indexOf(id);
+    if(i<0){state.forceShow[id]=true;commit();i=(replan().items.map(function(x){return x.id;}).indexOf(id));}
+    if(i>=0){state.cur=i;render();}
+  }
+};
+function dayCount(){return META&&META.days?META.days:1;}
+
+/* ── 窗口控制（无边框窗口的自绘标题栏） ── */
+function winAction(act){notifyHost({event:act});}
+$('tlClose').addEventListener('click',function(){winAction('close');});
+$('tlMin').addEventListener('click',function(){winAction('minimize');});
+$('tlMax').addEventListener('click',function(){winAction('maximize');});
+$('wcClose').addEventListener('click',function(){winAction('close');});
+$('wcMin').addEventListener('click',function(){winAction('minimize');});
+$('wcMax').addEventListener('click',function(){winAction('maximize');});
+$('titlebar').addEventListener('mousedown',function(e){
+  if(e.button!==0)return;
+  if(e.target.closest('.traffic')||e.target.closest('.win-right'))return;
+  notifyHost({event:'windowDrag'});
+});
+$('titlebar').addEventListener('dblclick',function(e){
+  if(e.target.closest('.traffic')||e.target.closest('.win-right'))return;
+  notifyHost({event:'maximize'});
+});
+
+/* ══════════════════ 启动 ══════════════════ */
+// 演示数据的示意坐标留一份快照：地图投影按可视窗口重排时用它保相对关系
+(function(){for(var id in S){if(S[id]&&S[id].xy&&!S[id].baseXy)S[id].baseXy=S[id].xy.slice();}})();
+render();
+window.addEventListener('resize',function(){if(state.view==='map')renderMap(replan().items);});
+notifyHost({event:'ready'});
+</script>
+</body>
+</html>

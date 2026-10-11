@@ -5,15 +5,21 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
 
 /**
- * 行程规划浏览器页面路由（「行程卡 → 系统浏览器打开」链路）。
+ * 行程规划浏览器页面路由（「行程卡 → 进入界面」链路）。
  *
- * 页面本体是自包含 HTML（server/web/travel-map/panel.html，MapLibre 内联），
+ * 页面本体是自包含 HTML（server/web/travel-map/）：
+ * - desktop.html → 桌面版「行迹」（左栏 tab + 旅程带 + Now 卡 + 示意地图 + 今日安排；
+ *   行程独立窗口的页面，见 client/flutter_app 的 travel_plan_window.dart）
+ * - mobile.html  → 手机竖屏版（一屏一站 + 按需呼出地图 + 站点详情）
  * 行程数据经 POST /travel-plans 存入进程内存，页面以 ?id=xxx 同源取回后
- * 调 window.__travelPanel.loadPlan 渲染。数据不落盘、随进程生命周期存亡。
+ * 调 window.__travelPanel.loadPlan 渲染（两版桥 API 同名）。数据不落盘、
+ * 随进程生命周期存亡。
  *
- * 桌面应用侧：TravelPlanBrowserLauncher（client/flutter_app）先 POST 载荷
- * 再用系统浏览器打开 /travel-map?id=xxx；server 不可达时桌面侧自行降级到
- * 独立子进程窗口。
+ * 进入方式：GET /travel-map 按 User-Agent 分流（手机 UA → mobile.html），
+ * 两版共用同一份载荷与同一套 BroadcastChannel 标签页复用约定。
+ * 应用侧：TravelPlanBrowserLauncher（client/flutter_app）先 POST 载荷再打开
+ * /travel-map?id=xxx（Android/iOS 走应用内浏览器、桌面走系统浏览器）；
+ * server 不可达时桌面侧自行降级到独立子进程窗口。
  */
 
 const webRoot = join(import.meta.dirname ?? ".", "../../../web/travel-map");
@@ -55,8 +61,20 @@ const MAPLIBRE_CSS_TAG =
 const MAPLIBRE_JS_TAG =
   '<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>';
 
-function buildTravelMapHtml(): string {
-  let html = readFileSync(join(webRoot, "panel.html"), "utf8");
+/** 手机 UA 判定：决定 /travel-map 走竖屏版还是桌面版 */
+const MOBILE_UA_RE =
+  /Android|webOS|iPhone|iPod|iPad|BlackBerry|IEMobile|Opera Mini|Mobile Safari|HarmonyOS|Windows Phone/i;
+
+/** 分流判定：?mobile=1 / ?desktop=1 显式覆盖（调试与宿主指定），否则看 UA */
+function wantsMobileView(req: FastifyRequest): boolean {
+  const q = req.query as { mobile?: string; desktop?: string };
+  if (q.mobile === "1") return true;
+  if (q.desktop === "1") return false;
+  return MOBILE_UA_RE.test(String(req.headers["user-agent"] ?? ""));
+}
+
+function buildPageHtml(fileName: string): string {
+  let html = readFileSync(join(webRoot, fileName), "utf8");
   const cssPath = join(webRoot, "vendor", "maplibre-gl.css");
   const jsPath = join(webRoot, "vendor", "maplibre-gl.js");
   if (existsSync(cssPath) && existsSync(jsPath) && html.includes(MAPLIBRE_JS_TAG)) {
@@ -94,20 +112,52 @@ function warmTilesForPayload(payload: unknown): void {
 }
 
 export function registerTravelMapRoutes(app: FastifyInstance): void {
-  /** GET /travel-map — 行程规划页面（自包含 HTML；内容静态，长缓存加速二次打开） */
-  app.get("/travel-map", async (_req, reply) => {
+  /** GET /travel-map — 行程规划页面（自包含 HTML；按 UA 分流手机竖屏版/桌面双栏版） */
+  app.get("/travel-map", async (req, reply) => {
     // HTML 为纯静态自包含资源（行程数据走 /travel-plans/:id 异步取），
-    // 长缓存后二次打开零 HTML 等待；版本更新靠内容变更 + 浏览器常规刷新兜底
-    reply.header("Cache-Control", "public, max-age=86400");
+    // 长缓存后二次打开零 HTML 等待；版本更新靠内容变更 + 常规刷新兜底。
+    // 同一 URL 按 UA 返回不同页面 → 必须 Vary: User-Agent 且不进共享缓存。
+    reply.header("Vary", "User-Agent");
+    reply.header("Cache-Control", "private, max-age=86400");
     reply.type("text/html; charset=utf-8");
-    return buildTravelMapHtml();
+    return buildPageHtml(wantsMobileView(req) ? "mobile.html" : "desktop.html");
+  });
+
+  /** GET /travel-map/mobile — 强制手机竖屏版（调试 / 宿主显式指定用） */
+  app.get("/travel-map/mobile", async (_req, reply) => {
+    reply.header("Cache-Control", "private, max-age=86400");
+    reply.type("text/html; charset=utf-8");
+    return buildPageHtml("mobile.html");
+  });
+
+  /**
+   * GET /travel-map/desktop — 桌面「行迹」行程面板（行程独立窗口的页面）。
+   *
+   * 由 client/flutter_app 的行程独立窗口宿主加载（`?host=1`，数据经 Dart 桥
+   * `window.__travelPanel.loadPlan` 注入）；页面自身也带设计稿演示数据，
+   * 浏览器直接打开即可看到完整界面。
+   *
+   * 注：旧的桌面双栏页 panel.html 已于 2026-10-11 删除（行程统一走本页，
+   * 其 MapLibre 实时路线规划能力当前无调用方，需要时再从 git 历史取回）。
+   */
+  app.get("/travel-map/desktop", async (_req, reply) => {
+    reply.header("Cache-Control", "private, max-age=86400");
+    reply.type("text/html; charset=utf-8");
+    return buildPageHtml("desktop.html");
   });
 
   /** GET /travel-map/switch — 标签页复用引导页：广播新行程 id 给已开页面换载 */
   app.get("/travel-map/switch", async (req, reply) => {
-    const q = req.query as { id?: string };
-    const id = (q.id ?? "").replace(/[^A-Za-z0-9]/g, "");
+    const q = req.query as { id?: string; planId?: string };
+    // 真实仓库 planId 形如 plan-1790585256591（保留下划线/连字符）；内存载荷 id 为纯十六进制
+    const realId = (q.planId ?? "").replace(/[^A-Za-z0-9_-]/g, "");
+    const memId = (q.id ?? "").replace(/[^A-Za-z0-9]/g, "");
+    const id = realId || memId;
     if (!id) return reply.code(400).type("text/plain").send("missing id");
+    // 无已开页面时的落点：真实仓库带 planId=，内存载荷带 id=
+    const fallback = realId
+      ? `/travel-map?planId=${encodeURIComponent(id)}`
+      : `/travel-map?id=${id}`;
     reply.header("Cache-Control", "no-store");
     reply.type("text/html; charset=utf-8");
     // 已开的行程页监听同一 BroadcastChannel：认领后本引导页自动关闭，
@@ -126,7 +176,7 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
   }catch(e){}
   setTimeout(function(){
     if(claimed){document.title='✓ 已切换';try{window.close()}catch(e){}}
-    else{location.replace('/travel-map?id='+id);}
+    else{location.replace(${JSON.stringify(fallback)});}
   },450);
 })();
 </script></body>`;

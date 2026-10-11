@@ -1,0 +1,1389 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0B0C0E">
+<title>行程 · 会自己调速的旅行 Agent</title>
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+/* ============================================================================
+   移动端行程页（一屏一站）。与 panel.html（桌面双栏）同路由域，按 UA 分流。
+   设计语法见 docs/design/mobile-travel-agent/。
+   - 页面不内置任何行程数据。两种取数：
+     · ?planId=plan-xxx —— 读服务端真实行程仓库 GET /travel/plans/:planId（Agent 生成后落盘）
+     · ?id=xxx          —— 读本机内存载荷 GET /travel-plans/:id（客户端从卡片即时下发）
+     · ?host=1          —— 由宿主桥 window.__travelPanel.loadPlan 注入
+   - 站点无自带图时按需向 /travel-poi/details 取真实实拍与维基简介补全（取不到保持占位）
+   - 实时信号由 Agent 侧感知后经桥 window.__travelPanel.applySignal 推入，页面无手动上报
+   - 地图：MapLibre（本地 vendor 内联）+ /travel-basemap/style/dark 本地瓦片代理，
+     无坐标时回落 SVG 弹性动线（弱网/离线也秒开）
+   - 前端只呈现：时间锚点/取舍排序由 Agent 侧决定，页面不自行改动已锚定时间
+   ========================================================================== */
+:root{
+  --bg:#000; --screen:#0B0C0E; --card:#17191F; --card2:#1F222A;
+  --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.16);
+  --txt:#F5F3EE; --t2:#9A9FA9; --t3:#626873;
+  --amber:#F5A552; --amber2:#D88434; --amberSoft:rgba(245,165,82,.14); --amberLine:rgba(245,165,82,.4);
+  --jade:#63AAA1; --ok:#63C98C;
+  --r:22px;
+  --num:-apple-system,'SF Pro Display','Segoe UI Variable Display','Segoe UI',system-ui,sans-serif;
+  --cn:'Noto Sans SC',-apple-system,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{background:var(--bg);color:var(--txt);font-family:var(--cn);-webkit-font-smoothing:antialiased;overflow:hidden}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+img{display:block;width:100%;height:100%;object-fit:cover}
+.tnum{font-family:var(--num);font-variant-numeric:tabular-nums}
+::-webkit-scrollbar{width:0}
+.app{position:fixed;inset:0;margin:0 auto;max-width:520px;background:var(--screen);overflow:hidden}
+@media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.05s!important}}
+
+/* ===== 视图容器 ===== */
+.view{position:absolute;inset:0;display:flex;flex-direction:column;background:var(--screen);
+  transition:transform .38s cubic-bezier(.3,.8,.3,1),opacity .3s}
+#home{z-index:1}
+#detailView{transform:translateX(100%);opacity:.4;z-index:20}
+#detailView.open{transform:none;opacity:1}
+#mapView{transform:translateX(100%);opacity:.4;z-index:40}
+#mapView.open{transform:none;opacity:1}
+
+/* ===== 顶栏 ===== */
+.top{padding:calc(12px + env(safe-area-inset-top)) 24px 0;flex:0 0 auto}
+.top-row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.eyebrow{font-family:var(--num);font-size:11px;letter-spacing:2.4px;color:var(--t3);font-variant-numeric:tabular-nums}
+.place{font-size:21px;font-weight:600;letter-spacing:.5px;margin-top:2px;display:flex;align-items:center;gap:8px}
+.agent-live{display:flex;align-items:center;gap:8px;font-size:11px;color:var(--t2);
+  border:1px solid var(--line);background:var(--card);padding:7px 12px;border-radius:999px;flex:0 0 auto}
+.agent-live .ad{width:7px;height:7px;border-radius:50%;background:var(--amber);position:relative}
+.agent-live .ad::after{content:"";position:absolute;inset:-4px;border-radius:50%;border:1px solid var(--amberLine);animation:ping 2.2s infinite}
+@keyframes ping{0%{transform:scale(.6);opacity:.9}100%{transform:scale(1.5);opacity:0}}
+
+/* ===== 弹性旅程带 ===== */
+.band-wrap{padding:18px 24px 0;flex:0 0 auto}
+.band-meta{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:9px;gap:10px}
+.band-meta .mood{font-size:12.5px;color:var(--t2);white-space:nowrap}
+.band-meta .mood b{color:var(--amber);font-weight:600}
+.band-meta .end{font-family:var(--num);font-size:11px;color:var(--t3);white-space:nowrap;font-variant-numeric:tabular-nums}
+.band{display:flex;gap:3px;height:7px;border-radius:99px}
+.band i{height:100%;border-radius:99px;background:rgba(255,255,255,.1);transition:flex-grow .55s cubic-bezier(.3,.8,.3,1),background .3s,opacity .3s;cursor:pointer;min-width:5px}
+.band i.done{background:rgba(255,255,255,.22)}
+.band i.now{background:var(--amber);box-shadow:0 0 10px rgba(245,165,82,.6)}
+.band i.alt{background:transparent;border:1px dashed rgba(255,255,255,.22);height:6px;align-self:center;cursor:pointer}
+.band-times{display:flex;justify-content:space-between;margin-top:7px;font-family:var(--num);font-size:10px;color:var(--t3);font-variant-numeric:tabular-nums}
+
+/* ===== Now 主卡 ===== */
+.now-scroll{flex:1 1 auto;overflow-y:auto;padding:18px 24px 8px;-webkit-overflow-scrolling:touch}
+.now-card{border-radius:var(--r);overflow:hidden;background:var(--card);border:1px solid var(--line);cursor:pointer;
+  transition:transform .12s}
+.now-card:active{transform:scale(.995)}
+.now-photo{position:relative;height:236px;background:linear-gradient(135deg,#232830,#151A22 55%,#2A2018)}
+.now-photo.noimg::before{content:"";position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 22% 18%,rgba(245,165,82,.28),transparent 60%),
+             radial-gradient(90% 80% at 82% 88%,rgba(99,170,161,.22),transparent 62%)}
+.now-photo::after{content:"";position:absolute;inset:0;z-index:1;background:linear-gradient(180deg,rgba(11,12,14,0) 38%,rgba(11,12,14,.88))}
+.now-tag{position:absolute;top:14px;left:14px;z-index:2;font-size:10.5px;letter-spacing:1px;
+  background:rgba(11,12,14,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);
+  padding:5px 11px;border-radius:999px}
+.now-book{position:absolute;top:14px;right:14px;z-index:2;display:flex;align-items:center;gap:6px;font-size:10.5px;
+  background:rgba(11,12,14,.55);backdrop-filter:blur(8px);padding:5px 11px;border-radius:999px;border:1px solid rgba(255,255,255,.14)}
+.now-book .d{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.now-photo .big{position:absolute;left:18px;right:18px;bottom:14px;z-index:2}
+.now-time{font-family:var(--num);font-size:12px;color:var(--amber);letter-spacing:1px;font-weight:600;font-variant-numeric:tabular-nums}
+.now-name{font-size:25px;font-weight:700;letter-spacing:.5px;margin-top:3px;line-height:1.25}
+.now-body{padding:16px 18px 18px}
+.now-note{font-size:13px;color:var(--t2);line-height:1.6}
+.now-stay{display:flex;align-items:center;gap:8px;margin-top:12px;font-size:12px;color:var(--t2);font-family:var(--num);font-variant-numeric:tabular-nums}
+.now-stay svg{width:15px;height:15px;color:var(--amber);flex:0 0 auto}
+.stay-bar{flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
+.stay-bar i{display:block;height:100%;background:linear-gradient(90deg,var(--amber2),var(--amber));border-radius:4px;transition:width .5s}
+.next-row{margin-top:13px;display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:16px;
+  background:var(--card2);border:1px solid var(--line)}
+.next-row .ni{width:38px;height:38px;border-radius:12px;background:var(--amberSoft);display:grid;place-items:center;flex:0 0 auto}
+.next-row .ni svg{width:20px;height:20px;color:var(--amber)}
+.next-row .nt{flex:1;min-width:0}
+.next-row .nt .a{font-size:11px;color:var(--t3)}
+.next-row .nt .b{font-size:14px;font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.next-row .nt .b span{font-family:var(--num);color:var(--amber);font-weight:500;font-size:12px;margin-left:7px;font-variant-numeric:tabular-nums}
+.next-row .narr{color:var(--t3);flex:0 0 auto}
+.next-row .narr svg{width:18px;height:18px}
+.switch-stops{display:flex;justify-content:center;gap:8px;margin:14px 0 4px}
+.mini-dot{width:7px;height:7px;border-radius:50%;background:rgba(255,255,255,.16)}
+.mini-dot.on{background:var(--amber);width:20px;border-radius:99px}
+
+/* ===== Agent 气泡 ===== */
+.agent-bubble{margin:14px 24px 0;flex:0 0 auto;border-radius:16px;background:linear-gradient(120deg,rgba(245,165,82,.12),rgba(245,165,82,.03));
+  border:1px solid rgba(245,165,82,.22);padding:13px 15px;display:none;animation:rise .4s ease}
+.agent-bubble.show{display:flex;gap:11px}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+.agent-bubble .ab-ic{width:26px;height:26px;flex:0 0 auto;border-radius:9px;background:var(--amberSoft);display:grid;place-items:center}
+.agent-bubble .ab-ic svg{width:15px;height:15px;color:var(--amber)}
+.agent-bubble p{font-size:12.3px;line-height:1.62;color:var(--t2);flex:1}
+.agent-bubble p b{color:var(--txt);font-weight:600}
+.agent-bubble .undo{flex:0 0 auto;align-self:flex-start;color:var(--amber);font-size:11.5px;border:1px solid var(--amberLine);padding:4px 10px;border-radius:999px;white-space:nowrap}
+
+/* ===== 底部拇指区 ===== */
+.thumb{flex:0 0 auto;padding:10px 24px calc(16px + env(safe-area-inset-bottom))}
+.go-btn{width:100%;height:54px;border-radius:18px;background:var(--amber);color:#201407;font-size:15.5px;font-weight:700;
+  display:flex;align-items:center;justify-content:center;gap:9px;letter-spacing:.5px;padding:0 14px;
+  box-shadow:0 14px 30px -12px rgba(245,165,82,.55);transition:transform .12s}
+.go-btn:active{transform:scale(.98)}
+.go-btn svg{width:18px;height:18px;flex:0 0 auto}
+.go-btn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ghost-row{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px}
+.ghost{display:flex;align-items:center;gap:6px;font-size:12.5px;color:var(--t2);padding:9px 14px;border-radius:999px;
+  border:1px solid var(--line);min-height:40px;white-space:nowrap}
+.ghost svg{width:14px;height:14px}
+.ghost:active{border-color:var(--amberLine);color:var(--amber)}
+/* 实时信号不再由用户手动上报：改由 Agent 侧感知（天气/路况/步速/对话）后推入。
+   页面只留一行被动说明，无交互控件。 */
+.signal-hint{display:flex;align-items:center;justify-content:center;gap:6px;margin:12px 24px 0;flex:0 0 auto;
+  text-align:center;font-size:10.5px;letter-spacing:.6px;color:var(--t3)}
+.signal-hint .sh-dot{width:5px;height:5px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 3px var(--amberSoft);
+  animation:pulse 2.4s ease-in-out infinite;flex:0 0 auto}
+@keyframes pulse{0%,100%{opacity:.45}50%{opacity:1}}
+
+/* ===== 全屏地图 ===== */
+.map-top{flex:0 0 auto;display:flex;align-items:center;justify-content:space-between;gap:12px;
+  padding:calc(16px + env(safe-area-inset-top)) 22px 12px}
+.map-title{font-size:16px;font-weight:600}
+.map-close{width:40px;height:40px;border-radius:50%;background:var(--card);border:1px solid var(--line);display:grid;place-items:center;flex:0 0 auto}
+.map-close svg{width:18px;height:18px}
+.map-svg-wrap{flex:1 1 auto;position:relative;margin:0 18px;min-height:0}
+#mapSvg{width:100%;height:100%}
+.map-bottom{flex:0 0 auto;padding:8px 22px calc(18px + env(safe-area-inset-bottom))}
+.map-now{display:flex;align-items:center;gap:13px;background:var(--card);border:1px solid var(--line);border-radius:18px;padding:13px 16px}
+.map-now .mn-dot{width:11px;height:11px;border-radius:50%;background:var(--amber);box-shadow:0 0 0 5px var(--amberSoft);flex:0 0 auto}
+.map-now .mn{flex:1;min-width:0}
+.map-now .mn .a{font-size:10.5px;color:var(--t3)}
+.map-now .mn .b{font-size:14px;font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.map-now button{font-size:12.5px;color:var(--amber);border:1px solid var(--amberLine);padding:8px 14px;border-radius:999px;flex:0 0 auto}
+.map-bg{stroke:rgba(255,255,255,.035)}
+.ml-wrap{position:absolute;inset:0;display:none}
+.ml-wrap.on{display:block}
+#mlDiv{width:100%;height:100%;background:var(--screen)}
+.map-attrib{position:absolute;right:6px;bottom:4px;z-index:3;font-family:var(--num);font-size:9px;color:rgba(255,255,255,.32)}
+.poi-m{display:flex;align-items:center;gap:7px;white-space:nowrap;cursor:pointer}
+.poi-m .p-dot{width:26px;height:26px;border-radius:50%;background:var(--card2);border:2px solid var(--amberLine);color:var(--t2);font-family:var(--num);font-size:12px;font-weight:600;display:grid;place-items:center;flex:0 0 auto}
+.poi-m.now .p-dot{background:var(--amber);border-color:var(--amber);color:#201407;box-shadow:0 0 0 6px var(--amberSoft)}
+.poi-m.done .p-dot{background:#2A2D35;border-color:rgba(255,255,255,.18);color:var(--t3)}
+.poi-m .p-l{font-size:11px;color:var(--txt);text-shadow:0 1px 4px rgba(0,0,0,.9);font-weight:500}
+.poi-m.now .p-l{color:var(--amber);font-weight:700}
+.r-done{fill:none;stroke:var(--amber);stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 6px rgba(245,165,82,.5))}
+.r-todo{fill:none;stroke:rgba(245,165,82,.32);stroke-width:2.4;stroke-dasharray:2 7;stroke-linecap:round}
+.r-flow{fill:none;stroke:rgba(255,238,212,.9);stroke-width:2.8;stroke-dasharray:1 14;stroke-linecap:round;animation:flow 1.1s linear infinite}
+@keyframes flow{to{stroke-dashoffset:-15}}
+.mp{cursor:pointer}
+.mp circle.c{fill:var(--card2);stroke:var(--amberLine);stroke-width:1.6;transition:.2s}
+.mp.now circle.c{fill:var(--amber);stroke:var(--amber)}
+.mp.done circle.c{fill:#2A2D35;stroke:rgba(255,255,255,.18)}
+.mp text.n{fill:var(--t2);font-family:var(--num);font-size:11px;font-weight:600;text-anchor:middle;dominant-baseline:central}
+.mp.now text.n{fill:#201407}
+.mp.done text.n{fill:var(--t3)}
+.mp text.l{fill:var(--t2);font-size:11px;paint-order:stroke;stroke:#0B0C0E;stroke-width:3.4px}
+.mp.now text.l{fill:var(--amber);font-weight:700}
+.mp.rest circle.c{stroke-dasharray:3 3;stroke:var(--jade)}
+.here{fill:var(--amber)}
+.here-p{fill:none;stroke:var(--amber);stroke-width:1.5;animation:ping 1.8s infinite}
+
+/* ===== 全程抽屉 ===== */
+#sheet{position:absolute;left:0;right:0;bottom:0;z-index:45;height:78%;background:#14161B;
+  border-top-left-radius:26px;border-top-right-radius:26px;border:1px solid var(--line2);border-bottom:none;
+  transform:translateY(102%);transition:transform .4s cubic-bezier(.3,.8,.3,1);display:flex;flex-direction:column}
+#sheet.open{transform:none}
+.sheet-grip{width:40px;height:4px;border-radius:4px;background:rgba(255,255,255,.18);margin:10px auto 4px;flex:0 0 auto}
+.sheet-head{display:flex;align-items:center;justify-content:space-between;padding:8px 24px 12px;flex:0 0 auto;gap:10px}
+.sheet-head h3{font-size:16px}
+.day-seg{display:flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:3px;overflow-x:auto;max-width:62vw}
+.day-seg button{padding:6px 15px;border-radius:999px;font-size:12.5px;color:var(--t2);min-height:32px;white-space:nowrap}
+.day-seg button.on{background:var(--txt);color:#15161A;font-weight:600}
+.sheet-list{flex:1;overflow-y:auto;padding:0 24px 30px;-webkit-overflow-scrolling:touch}
+.s-row{display:flex;gap:14px;align-items:center;padding:13px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.s-row .sr-t{font-family:var(--num);font-size:12px;color:var(--t3);width:46px;flex:0 0 auto;text-align:right;font-variant-numeric:tabular-nums}
+.s-row .sr-dot{width:10px;height:10px;border-radius:50%;background:var(--amberLine);flex:0 0 auto;position:relative}
+.s-row.now .sr-dot{background:var(--amber);box-shadow:0 0 0 4px var(--amberSoft)}
+.s-row.done .sr-dot{background:rgba(255,255,255,.2)}
+.s-row .sr-main{flex:1;min-width:0}
+.s-row .sr-name{font-size:14px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.s-row.done .sr-name{color:var(--t3)}
+.s-row .sr-sub{font-size:11px;color:var(--t3);margin-top:2px;font-family:var(--num);font-variant-numeric:tabular-nums}
+.s-row .sr-tag{font-size:10px;color:var(--t3);border:1px solid var(--line);padding:3px 8px;border-radius:999px;flex:0 0 auto}
+.alt-block{margin-top:16px;border:1px dashed var(--line2);border-radius:16px;padding:13px 16px}
+.alt-block .ab-h{font-size:11.5px;color:var(--t3);letter-spacing:1px;margin-bottom:9px}
+.alt-item{display:flex;align-items:center;justify-content:space-between;padding:8px 0;gap:10px}
+.alt-item .nm{font-size:13px;color:var(--t2);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.alt-item button{font-size:11.5px;color:var(--amber);border:1px solid var(--amberLine);padding:5px 12px;border-radius:999px;flex:0 0 auto}
+.sheet-close{flex:0 0 auto;margin:0 24px calc(14px + env(safe-area-inset-bottom));height:46px;border-radius:14px;border:1px solid var(--line);color:var(--t2);font-size:13.5px}
+
+/* ===== 站点详情 ===== */
+.hero{position:relative;height:296px;flex:0 0 auto;background:linear-gradient(135deg,#232830,#151A22 55%,#2A2018);overflow:hidden}
+.hero.noimg::before{content:"";position:absolute;inset:0;
+  background:radial-gradient(120% 90% at 22% 18%,rgba(245,165,82,.28),transparent 60%),
+             radial-gradient(90% 80% at 82% 88%,rgba(99,170,161,.22),transparent 62%)}
+.hero::after{content:"";position:absolute;inset:0;z-index:1;
+  background:linear-gradient(180deg,rgba(11,12,14,.5) 0%,rgba(11,12,14,0) 30%,rgba(11,12,14,0) 45%,rgba(11,12,14,.9))}
+.hero-bar{position:absolute;top:calc(12px + env(safe-area-inset-top));left:16px;right:16px;z-index:3;display:flex;align-items:center;justify-content:space-between;gap:10px}
+.circle-btn{width:40px;height:40px;border-radius:50%;background:rgba(11,12,14,.55);backdrop-filter:blur(8px);
+  border:1px solid rgba(255,255,255,.14);display:grid;place-items:center;flex:0 0 auto}
+.circle-btn svg{width:18px;height:18px}
+.hero-info{position:absolute;left:18px;right:18px;bottom:16px;z-index:2}
+/* 头图内的类型胶囊回到文档流（home 里 .now-tag 是绝对定位在卡角） */
+.hero-info .now-tag{position:static;display:inline-block}
+.d-time{font-family:var(--num);font-size:12px;color:var(--amber);letter-spacing:1px;font-weight:600;margin-top:11px;font-variant-numeric:tabular-nums}
+.d-name{font-size:25px;font-weight:700;letter-spacing:.5px;margin-top:3px;line-height:1.25}
+.d-scroll{flex:1 1 auto;overflow-y:auto;padding:18px 24px 10px;-webkit-overflow-scrolling:touch}
+.chips{display:flex;flex-wrap:wrap;gap:8px}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:11.5px;color:var(--t2);
+  border:1px solid var(--line);background:var(--card);padding:7px 12px;border-radius:999px}
+.chip svg{width:13px;height:13px;color:var(--amber);flex:0 0 auto}
+.chip .cdot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.chip.hot{color:var(--amber);border-color:var(--amberLine);background:var(--amberSoft)}
+.chip.act:active{border-color:var(--amberLine);color:var(--amber)}
+.sec{margin-top:24px}
+.sec-h{font-size:11px;letter-spacing:2.4px;color:var(--t3);margin-bottom:12px;
+  display:flex;justify-content:space-between;align-items:center;gap:10px;font-weight:500}
+.desc{font-size:13.5px;color:var(--t2);line-height:1.8}
+.hl{list-style:none}
+.hl li{display:flex;gap:10px;font-size:13px;color:var(--txt);line-height:1.65;margin-bottom:10px}
+.hl li .dot{margin-top:7px}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--amber);flex:0 0 auto}
+.dot3{background:rgba(255,255,255,.22)}
+.tip{display:flex;gap:10px;font-size:12.5px;color:var(--t2);line-height:1.7;margin-bottom:9px}
+.tip .dot{margin-top:8px}
+.info-card{background:var(--card);border:1px solid var(--line);border-radius:18px;padding:3px 16px}
+.irow{display:flex;justify-content:space-between;align-items:baseline;gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.irow:last-child{border-bottom:none}
+.irow .k{font-size:11px;color:var(--t3);flex:0 0 auto;letter-spacing:1px}
+.irow .v{font-size:12.8px;color:var(--txt);text-align:right;line-height:1.6}
+.flow-row{width:100%;display:flex;align-items:center;gap:13px;padding:13px 15px;border-radius:16px;
+  background:var(--card2);border:1px solid var(--line);text-align:left}
+.flow-row+.flow-row{margin-top:10px}
+.flow-row.next{border-color:rgba(245,165,82,.25)}
+.flow-row:active{border-color:var(--amberLine)}
+.flow-row .ni{width:38px;height:38px;border-radius:12px;background:var(--amberSoft);display:grid;place-items:center;flex:0 0 auto}
+.flow-row .ni svg{width:20px;height:20px;color:var(--amber)}
+.flow-row .nt{flex:1;min-width:0}
+.flow-row .nt .a{font-size:11px;color:var(--t3)}
+.flow-row .nt .b{font-size:14px;font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.flow-row .nt .b span{font-family:var(--num);color:var(--amber);font-weight:500;font-size:12px;margin-left:7px;font-variant-numeric:tabular-nums}
+.flow-row .narr{color:var(--t3);flex:0 0 auto}
+.flow-row .narr svg{width:18px;height:18px}
+.stop-chips{display:flex;flex-wrap:wrap;gap:8px;padding-bottom:6px}
+.schip{display:inline-flex;align-items:center;gap:7px;font-family:var(--num);font-size:11px;color:var(--t3);
+  border:1px solid var(--line);background:var(--card);padding:7px 12px;border-radius:999px;font-variant-numeric:tabular-nums}
+.schip b{font-family:var(--cn);font-weight:500;font-size:12px;color:var(--t2)}
+.schip.on{background:var(--amberSoft);border-color:var(--amberLine);color:var(--amber)}
+.schip.on b{color:var(--amber)}
+.schip.done{opacity:.5}
+
+/* ===== 空态 / 提示 ===== */
+.empty{position:absolute;inset:0;z-index:30;display:none;flex-direction:column;align-items:center;justify-content:center;gap:10px;
+  background:var(--screen);text-align:center;padding:0 44px}
+.empty.on{display:flex}
+.empty .e-ic{width:56px;height:56px;border-radius:18px;background:var(--amberSoft);display:grid;place-items:center;color:var(--amber);margin-bottom:6px}
+.empty .e-ic svg{width:27px;height:27px}
+.empty .e-t{font-size:16px;font-weight:600;letter-spacing:.5px}
+.empty .e-d{font-size:11.5px;color:var(--t3);line-height:2}
+.empty .e-d i{font-style:normal;font-family:var(--num);font-size:10.5px;color:var(--amber);background:var(--amberSoft);border:1px solid var(--amberLine);padding:1px 7px;border-radius:99px;margin:0 2px}
+.empty .retry{margin-top:14px;font-size:12.5px;color:var(--amber);border:1px solid var(--amberLine);padding:9px 20px;border-radius:999px}
+#toast{position:fixed;top:calc(58px + env(safe-area-inset-top));left:50%;transform:translateX(-50%) translateY(-10px);z-index:80;
+  background:#23262E;border:1px solid var(--line2);font-size:12.5px;padding:10px 18px;border-radius:999px;
+  opacity:0;pointer-events:none;transition:.28s;white-space:nowrap;max-width:88vw;overflow:hidden;text-overflow:ellipsis}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+</style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ==================== 主视图：一屏一站 ==================== -->
+  <section class="view" id="home">
+    <div class="top">
+      <div class="top-row">
+        <div style="min-width:0">
+          <div class="eyebrow" id="dayEyebrow">DAY <span id="dayNum">1</span><span id="cityName"></span></div>
+          <div class="place"><span id="dayName">行程</span></div>
+        </div>
+        <div class="agent-live"><span class="ad"></span>Agent 跟随中</div>
+      </div>
+    </div>
+
+    <div class="band-wrap">
+      <div class="band-meta">
+        <div class="mood">今日节奏 · <b id="moodText">刚刚好</b></div>
+        <div class="end" id="endText"></div>
+      </div>
+      <div class="band" id="band"></div>
+      <div class="band-times"><span id="bandStart">—</span><span id="bandEnd">—</span></div>
+    </div>
+
+    <div class="now-scroll">
+      <div class="now-card" id="nowCard">
+        <div class="now-photo" id="nowPhoto">
+          <img id="nowImg" src="" alt="">
+          <div class="now-tag" id="nowTag"></div>
+          <div class="now-book" id="nowBook" style="display:none"><span class="d"></span><span id="nowBookText"></span></div>
+          <div class="big">
+            <div class="now-time" id="nowTime"></div>
+            <div class="now-name" id="nowName"></div>
+          </div>
+        </div>
+        <div class="now-body">
+          <div class="now-note" id="nowNote"></div>
+          <div class="now-stay">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+            <span id="stayText">建议停留</span>
+            <span class="stay-bar"><i id="stayFill"></i></span>
+          </div>
+          <div class="next-row" id="nextRow">
+            <div class="ni" id="nextIcon"></div>
+            <div class="nt"><div class="a">下一站</div><div class="b" id="nextText"></div></div>
+            <div class="narr"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></div>
+          </div>
+        </div>
+      </div>
+      <div class="switch-stops" id="stopDots"></div>
+    </div>
+
+    <div class="agent-bubble" id="bubble">
+      <div class="ab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3l2.2 4.8L19 9l-4.8 1.2L12 15l-2.2-4.8L5 9l4.8-1.2z"/></svg></div>
+      <p id="bubbleText"></p>
+      <button class="undo" id="undoBtn">撤销</button>
+    </div>
+
+    <!-- 实时信号由 Agent 主动感知（天气 / 路况 / 步速 / 对话），经宿主桥推入后本页自动重排 -->
+    <div class="signal-hint" id="signalHint"><span class="sh-dot"></span><span id="signalHintText">Agent 主动感知中 · 随时重排，时间锚点不动</span></div>
+
+    <div class="thumb">
+      <button class="go-btn" id="goBtn"></button>
+      <div class="ghost-row">
+        <button class="ghost" id="mapBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg>路线地图</button>
+        <button class="ghost" id="sheetBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>全程安排</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 站点详情 ==================== -->
+  <section class="view" id="detailView">
+    <div class="hero" id="dHero">
+      <img id="dImg" src="" alt="">
+      <div class="hero-bar">
+        <button class="circle-btn" id="dBack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
+        <div class="now-book" id="dBook" style="display:none"><span class="d"></span><span id="dBookText"></span></div>
+      </div>
+      <div class="hero-info">
+        <span class="now-tag" id="dTag"></span>
+        <div class="d-time" id="dTime"></div>
+        <div class="d-name" id="dName"></div>
+      </div>
+    </div>
+
+    <div class="d-scroll" id="dScroll">
+      <div class="chips" id="dChips"></div>
+
+      <div class="agent-bubble show" id="dBubble" style="margin-top:16px">
+        <div class="ab-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 3l2.2 4.8L19 9l-4.8 1.2L12 15l-2.2-4.8L5 9l4.8-1.2z"/></svg></div>
+        <p id="dAgentText"></p>
+      </div>
+
+      <div class="sec" id="secDesc"><div class="sec-h">介绍</div><p class="desc" id="dDesc"></p></div>
+      <div class="sec" id="secHl"><div class="sec-h">亮点</div><ul class="hl" id="dHl"></ul></div>
+      <div class="sec" id="secTips"><div class="sec-h">贴士</div><div id="dTips"></div></div>
+      <div class="sec" id="secInfo"><div class="sec-h">实用信息</div><div class="info-card" id="dInfo"></div></div>
+      <div class="sec" id="secFlow"><div class="sec-h">到达 · 下一站</div><div id="dFlow"></div></div>
+
+      <div class="sec">
+        <div class="sec-h">本日站点
+          <div class="day-seg" id="dDaySeg"></div>
+        </div>
+        <div class="stop-chips" id="dStopChips"></div>
+      </div>
+    </div>
+
+    <div class="thumb">
+      <button class="go-btn" id="dGo"></button>
+      <div class="ghost-row">
+        <button class="ghost" id="dMapBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg>在地图中查看</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 全屏地图（按需呼出） ==================== -->
+  <section class="view" id="mapView">
+    <div class="map-top">
+      <div style="min-width:0">
+        <div class="eyebrow">TODAY ROUTE</div>
+        <div class="map-title" id="mapTitle">弹性动线</div>
+      </div>
+      <button class="map-close" id="mapClose"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    </div>
+    <div class="map-svg-wrap">
+      <div class="ml-wrap" id="mlWrap"><div id="mlDiv"></div></div>
+      <svg id="mapSvg" viewBox="0 0 560 720" preserveAspectRatio="xMidYMid slice"></svg>
+      <div class="map-attrib" id="mapAttrib"></div>
+    </div>
+    <div class="map-bottom">
+      <div class="map-now">
+        <span class="mn-dot"></span>
+        <div class="mn"><div class="a">当前</div><div class="b" id="mapNowName"></div></div>
+        <button id="mapSheetBtn">看全程</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================== 全程抽屉 ==================== -->
+  <div id="sheet">
+    <div class="sheet-grip" id="sheetGrip"></div>
+    <div class="sheet-head">
+      <h3>全程安排</h3>
+      <div class="day-seg" id="daySeg"></div>
+    </div>
+    <div class="sheet-list" id="sheetList"></div>
+    <button class="sheet-close" id="sheetClose">收起</button>
+  </div>
+
+  <div id="toast"></div>
+
+  <!-- ==================== 空态 ==================== -->
+  <div class="empty" id="emptyState">
+    <div class="e-ic"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M15.5 8.5 13.6 13.6 8.5 15.5 10.4 10.4z"/></svg></div>
+    <div class="e-t" id="emptyTitle">等待 Agent 规划</div>
+    <div class="e-d" id="emptyDesc">页面不内置行程数据<br>回应用里点旅游卡片「打开行程规划」<br>行程载荷经 <i>POST /travel-plans</i> 注入后自动渲染</div>
+    <button class="retry" id="retryBtn" style="display:none">重试</button>
+  </div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+"use strict";
+/* ══════════════════════════════════════════════════════════════════════════════
+   行程载荷 → 视图模型适配
+   页面契约（与桌面 panel.html 同一份载荷）：
+     { title?, destination?, dataQuality?, theme?, center?{latitude,longitude},
+       days:[{ label, subtitle, entries:[
+         { name, type, time, priceInfo, description, tips[], address, images[],
+           splatUrl, latitude, longitude, anchor?, book?, duration?, highlights[] }] }] }
+   - 视图模型：{ city, day, days:[{ name, stops:[{...}], alts:[] }] }
+   - Agent 未提供的字段（建议停留 / 站间交通 / 时间锚点）由本层按坐标与相邻站
+     保守估算，仅用于呈现；真实数值以 Agent 侧回填为准（回填即优先采用）。
+   ══════════════════════════════════════════════════════════════════════════════ */
+var KIND_BY_TYPE = { attraction: 'sight', restaurant: 'food', hotel: 'stay', transport: 'ride' };
+var TAG_BY_TYPE  = { attraction: '景点', restaurant: '餐饮', hotel: '住宿', transport: '交通' };
+var PERIOD_MIN = { '凌晨': 60, '清晨': 360, '早上': 420, '上午': 540, '中午': 720, '下午': 840, '傍晚': 1020, '晚上': 1140, '夜里': 1260 };
+var LEG_SPEED = { walk: 75, bike: 220, taxi: 400 };   // m/min
+
+function pad2(n) { return (10 > n ? '0' : '') + n; }
+function min2text(m) { m = Math.round(m); return pad2(Math.floor(m / 60) % 24) + ':' + pad2(((m % 60) + 60) % 60); }
+function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+function str(v) { return v == null ? '' : String(v); }
+
+/** 时间文本 → { start, end|null }（绝对分钟）。支持 ISO / HH:mm / HH:mm-HH:mm / 时段词 */
+function parseTime(timeText) {
+  var s = str(timeText).trim();
+  if (!s) return null;
+  var m = /(\d{1,2})\s*[:：]\s*(\d{2})\s*[-~—－至]\s*(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if (m) return { start: (+m[1]) * 60 + (+m[2]), end: (+m[3]) * 60 + (+m[4]) };
+  m = /T\s*(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if (m) return { start: (+m[1]) * 60 + (+m[2]), end: null };
+  m = /^(\d{1,2})\s*[:：]\s*(\d{2})/.exec(s);
+  if (m) return { start: (+m[1]) * 60 + (+m[2]), end: null };
+  m = /^(\d{1,2})\s*点\s*(半|[0-5]?\d)?/.exec(s);
+  if (m) return { start: (+m[1]) * 60 + (m[2] === '半' ? 30 : (m[2] ? +m[2] : 0)), end: null };
+  for (var k in PERIOD_MIN) { if (s.indexOf(k) >= 0) return { start: PERIOD_MIN[k], end: null }; }
+  return null;
+}
+
+/** 两点直线距离（km）——路网缺失时的保守估算基准 */
+function haversineKm(a, b) {
+  if (!a || !b || a.lng == null || b.lng == null || a.lat == null || b.lat == null) return null;
+  var R = 6371, dLat = (b.lat - a.lat) * Math.PI / 180, dLng = (b.lng - a.lng) * Math.PI / 180;
+  var la1 = a.lat * Math.PI / 180, la2 = b.lat * Math.PI / 180;
+  var h = Math.sin(dLat / 2) * Math.sin(dLat / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * R * Math.asin(Math.min(1, Math.sqrt(h)));
+}
+
+/** 站间交通估算：距离 → 方式 + 分钟（Agent 回填 leg 时不走这里） */
+function estimateLeg(from, to) {
+  if (!from || !to) return null;
+  var km = haversineKm(from.loc, to.loc);
+  if (km == null) return null;
+  var mode = km < 1.2 ? 'walk' : (km < 4 ? 'bike' : 'taxi');
+  var road = km * 1.32;                                     // 直线 → 路网系数
+  var minutes = Math.max(3, Math.round(road * 1000 / LEG_SPEED[mode]));
+  return { mode: mode, minutes: minutes, dist: road < 1 ? Math.round(road * 1000) + 'm' : road.toFixed(1) + 'km' };
+}
+
+/** 原始 entry → 站点（视图模型的原子单位） */
+function adaptStop(entry, dayIndex, stopIndex, prev) {
+  var type = str(entry.type) || 'attraction';
+  var kind = KIND_BY_TYPE[type] || 'sight';
+  var loc = (entry.latitude != null && entry.longitude != null &&
+             isFinite(Number(entry.latitude)) && isFinite(Number(entry.longitude)))
+    ? { lng: Number(entry.longitude), lat: Number(entry.latitude) } : null;
+  var images = (entry.images || []).filter(function (u) { return u && str(u).trim(); });
+  var range = parseTime(entry.time);
+  var stop = {
+    id: 'd' + dayIndex + 'e' + stopIndex,
+    name: str(entry.name) || '行程安排',
+    kind: kind,
+    tag: TAG_BY_TYPE[type] || '安排',
+    img: images.length ? str(images[0]) : '',
+    images: images,
+    note: str(entry.description) || str(entry.priceInfo),
+    loc: loc,
+    xy: null,
+    start: range ? range.start : null,
+    duration: Number(entry.duration) > 0 ? Number(entry.duration) : (range && range.end != null ? Math.max(15, range.end - range.start) : null),
+    anchor: entry.anchor != null ? Number(entry.anchor) : null,
+    book: entry.book ? str(entry.book) : null,
+    rest: kind === 'stay' ? false : false,
+    optional: !!entry.optional,
+    splatUrl: str(entry.splatUrl),
+    leg: null,
+    detail: {
+      desc: str(entry.description),
+      hl: Array.isArray(entry.highlights) ? entry.highlights.map(str).filter(Boolean) : [],
+      tips: Array.isArray(entry.tips) ? entry.tips.map(str).filter(Boolean) : [],
+      ticket: str(entry.priceInfo),
+      hours: str(entry.hours),
+      addr: str(entry.address),
+      reviews: entry.reviews || [],
+      videos: entry.videos || []
+    }
+  };
+  if (entry.leg && entry.leg.mode) stop.leg = { mode: str(entry.leg.mode), minutes: Number(entry.leg.minutes) || 0, dist: str(entry.leg.dist) };
+  else if (prev) stop.leg = estimateLeg(prev, stop);
+  return stop;
+}
+
+/** 站点时间补齐：无 start 的按上一站推；duration 缺失按下一站间隔推（兜底 45 分） */
+function fillTimings(stops) {
+  var DEFAULT_START = 9 * 60, i;
+  for (i = 0; i < stops.length; i++) {
+    var s = stops[i], prev = i > 0 ? stops[i - 1] : null;
+    if (s.start == null) {
+      s.start = prev ? prev.start + (prev.duration || 45) + (s.leg ? s.leg.minutes : 0) : DEFAULT_START;
+    }
+  }
+  for (i = 0; i < stops.length; i++) {
+    var cur = stops[i], next = stops[i + 1];
+    if (cur.duration == null) {
+      if (next) {
+        var gap = next.start - cur.start - (next.leg ? next.leg.minutes : 0);
+        cur.duration = clamp(Math.round(gap), 15, 240);
+      } else {
+        cur.duration = 45;
+      }
+    }
+    if (!(cur.duration > 0)) cur.duration = 45;
+  }
+}
+
+/** 交通方式归一：真实仓库里是中文（步行 / 包车·网约车 / 城际交通 / 打车·Grab），
+ *  统一映射到页面图标字典与估算口径。 */
+var MODE_ALIAS = [
+  [/步行|walk/i, 'walk'], [/骑行|单车|bike|cycle/i, 'bike'], [/游船|渡船|坐船|船|boat|ferry/i, 'boat'],
+  [/徒步|hike|trek/i, 'hike'], [/车|drive|taxi|grab|car|bus|城际|包车|网约/i, 'taxi']
+];
+function normalizeMode(m) {
+  var s = str(m);
+  for (var i = 0; i < MODE_ALIAS.length; i++) if (MODE_ALIAS[i][0].test(s)) return MODE_ALIAS[i][1];
+  return '';
+}
+
+/** 真实行程仓库形态 → 页面规范载荷。
+ *  仓库（StoredTravelPlan，GET /travel/plans/:planId）用 days[].items[]，
+ *  内存载荷（客户端下发 /travel-plans/:id）用 days[].entries[]；
+ *  此处只做一层等价转换，不做任何语义臆造（缺字段就留空，由页面兜底）。 */
+function normalizePlan(raw) {
+  raw = raw || {};
+  var days = raw.days || [];
+  if (!days.length || !days[0] || !days[0].items) return raw;   // 已是 entries 形态或空：原样返回
+  return {
+    destination: str(raw.destination),
+    title: str(raw.title),
+    dataQuality: str(raw.dataQuality),
+    center: raw.center || null,
+    coverImage: str(raw.coverImage),
+    theme: str(raw.theme),
+    days: days.map(function (d, i) {
+      return {
+        label: str(d.date) || ('Day ' + (i + 1)),
+        subtitle: str(d.subtitle) || str(d.name),
+        entries: (d.items || []).map(function (it) {
+          var tp = it.transportFromPrev;
+          var km = tp && tp.distanceKm != null ? Number(tp.distanceKm) : null;
+          return {
+            name: str(it.name),
+            type: str(it.type),
+            time: str(it.startTime),
+            duration: Number(it.visitDuration) || 0,
+            latitude: it.latitude,
+            longitude: it.longitude,
+            address: str(it.address),
+            priceInfo: str(it.priceInfo),
+            description: str(it.description),
+            tips: it.tips || [],
+            highlights: it.highlights || [],
+            images: it.images || [],
+            splatUrl: str(it.splatUrl),
+            reviews: it.reviews || [],
+            videos: it.videos || [],
+            leg: tp
+              ? {
+                  mode: normalizeMode(tp.mode) || 'taxi',
+                  minutes: Number(tp.durationMin) || 0,
+                  dist: km == null ? '' : (km < 1 ? Math.round(km * 1000) + 'm' : km.toFixed(1) + 'km')
+                }
+              : null
+          };
+        })
+      };
+    })
+  };
+}
+
+/** 完整载荷 → 视图模型 */
+function adaptPayload(raw) {
+  raw = normalizePlan(raw);
+  raw = raw || {};
+  var rawDays = raw.days || [];
+  var days = rawDays.map(function (day, di) {
+    var entries = day.entries || [];
+    var stops = [], alts = [], prev = null;
+    entries.forEach(function (e, ei) {
+      var stop = adaptStop(e, di, ei, prev);
+      if (stop.optional) { alts.push(stop); return; }
+      stops.push(stop); prev = stop;
+    });
+    // 备选站的 leg 也要能算（挂到上一个正常站）
+    (day.alts || []).forEach(function (e, ai) {
+      alts.push(adaptStop(e, di, 'a' + ai, stops.length ? stops[stops.length - 1] : null));
+    });
+    fillTimings(stops);
+    return {
+      name: str(day.subtitle) || (stops.length ? stops[0].name : (str(day.label) || ('Day ' + (di + 1)))),
+      label: str(day.label) || ('Day ' + (di + 1)),
+      stops: stops,
+      alts: alts
+    };
+  });
+  return {
+    city: str(raw.destination) || str(raw.title) || '行程',
+    title: str(raw.title) || (str(raw.destination) ? str(raw.destination) + ' 行程' : '行程规划'),
+    theme: str(raw.theme),
+    center: raw.center || null,
+    centerLat: raw.center && isFinite(Number(raw.center.latitude)) ? Number(raw.center.latitude) : null,
+    centerLng: raw.center && isFinite(Number(raw.center.longitude)) ? Number(raw.center.longitude) : null,
+    day: clamp(Number(raw.day) || 0, 0, Math.max(0, days.length - 1)),
+    mood: str(raw.mood) || '刚刚好',
+    days: days
+  };
+}
+
+/* ══════════════════ 运行时状态 ══════════════════ */
+var PLAN = null;                                  // 视图模型
+var state = { day: 0, cur: 0, event: null, view: 'home' };
+var TILE_BASE = '';                               // 宿主注入的绝对基址（WebView 无 origin 时用）
+var planId = null;                                // 当前取数 id（标签页复用换载用）
+
+/* ══════════════════ 小工具 ══════════════════ */
+var $ = function (id) { return document.getElementById(id); };
+var TICON = {
+  walk: 'M10.5 9l-2.5 3.2 3 1.3 1.6 3.2M10.5 9l1.4 4 3.1 2.2M11.9 13l-3 6.5M13.6 15.2l3.4 4.3',
+  bike: 'M6 16.5 10.5 8h4M10.5 8 8.5 11.5h5L11.5 8M14.5 8l1.2-2.4H18',
+  boat: 'M12 3v11M12 4l6 5H6zM3 15s1.6 1.6 4 1.6S11 15 12 15s2.6 1.6 5 1.6S21 15 21 15l-1.6 3.4H4.6z',
+  taxi: 'M5 13l1.4-4.2A2 2 0 0 1 8.3 7.4h7.4a2 2 0 0 1 1.9 1.4L19 13M3.5 12.6h17v5h-17z',
+  hike: 'M3 18l5-7 3.5 4.5L15 11l6 7z'
+};
+var TNAME = { walk: '步行', bike: '骑行', boat: '游船', taxi: '打车', hike: '徒步' };
+function icon(t, sw) {
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="' + (sw || 1.7) +
+    '" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="4.6" r="1.9"/><path d="' + (TICON[t] || TICON.walk) + '"/></svg>';
+}
+var IC_CLOCK = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>';
+var IC_ARROW = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>';
+var IC_PIN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.6-7-10a7 7 0 0 1 14 0c0 5.4-7 10-7 10z"/><circle cx="12" cy="11" r="2.6"/></svg>';
+function toast(m) {
+  var t = $('toast'); t.textContent = m; t.classList.add('show');
+  clearTimeout(t._h); t._h = setTimeout(function () { t.classList.remove('show'); }, 1900);
+}
+/** 服务端绝对基址：宿主注入优先，否则同源 */
+function apiBase() {
+  if (TILE_BASE) return String(TILE_BASE).replace(/\/+$/, '');
+  try { if (/^https?:/i.test(location.origin)) return location.origin; } catch (e) { /* about:blank */ }
+  return '';
+}
+/** 当前天 / 站点取用 */
+function curDay() { return PLAN.days[state.day]; }
+function curStops() { return curDay().stops; }
+function curAlts() { return curDay().alts || []; }
+function moodText() {
+  if (!PLAN) return '等待规划';
+  if (state.event === 'rain') return '雨天室内';
+  if (state.event === 'tired') return '省力模式';
+  if (state.event === 'behind') return '追赶中';
+  return PLAN.mood || '刚刚好';
+}
+
+/* ══════════════════ 渲染：主视图 ══════════════════ */
+function render() {
+  $('emptyState').classList.toggle('on', !PLAN);
+  if (!PLAN) return;
+  var items = curStops(), alts = curAlts();
+  if (!items.length) { $('emptyState').classList.add('on'); return; }
+  state.cur = clamp(state.cur, 0, items.length - 1);
+  var cur = items[state.cur], next = items[state.cur + 1];
+
+  $('dayNum').textContent = String(state.day + 1);
+  $('cityName').textContent = PLAN.city ? ' · ' + PLAN.city : '';
+  $('dayName').textContent = curDay().name;
+
+  var last = items[items.length - 1];
+  $('endText').textContent = '预计 ' + min2text(last.start + last.duration) + ' 结束';
+  $('bandStart').textContent = min2text(items[0].start);
+  $('bandEnd').textContent = min2text(last.start + last.duration);
+  $('moodText').textContent = moodText();
+
+  /* 弹性旅程带：段宽 = 停留 + 站间交通 */
+  var band = '';
+  items.forEach(function (it, i) {
+    var w = (it.duration || 45) + (it.leg ? it.leg.minutes : 0);
+    var cls = i < state.cur ? 'done' : (i === state.cur ? 'now' : '');
+    band += '<i class="' + cls + '" data-i="' + i + '" style="flex-grow:' + w.toFixed(1) + '" title="' + esc(it.name) + '"></i>';
+  });
+  alts.forEach(function (a) {
+    band += '<i class="alt" data-alt="' + a.id + '" title="收起的备选：' + esc(a.name) + '"></i>';
+  });
+  $('band').innerHTML = band;
+  bindAll($('band').querySelectorAll('i[data-i]'), function (el) {
+    el.addEventListener('click', function () { state.cur = +el.dataset.i; render(); });
+  });
+  bindAll($('band').querySelectorAll('i[data-alt]'), function (el) {
+    el.addEventListener('click', function () { requestAlt(el.dataset.alt); });
+  });
+
+  /* Now 主卡 */
+  setImage($('nowImg'), $('nowPhoto'), cur.img);
+  enrichLive(cur);
+  $('nowTag').textContent = cur.tag;
+  if (cur.book) { $('nowBook').style.display = 'flex'; $('nowBookText').textContent = cur.book; }
+  else { $('nowBook').style.display = 'none'; }
+  $('nowTime').textContent = min2text(cur.start) + ' — ' + min2text(cur.start + cur.duration) +
+    (cur.anchor != null ? ' · 时间锚点' : '');
+  $('nowName').textContent = cur.name;
+  $('nowNote').textContent = cur.note || '';
+  $('stayText').textContent = '建议停留 ' + cur.duration + ' 分钟';
+  $('stayFill').style.width = clamp(cur.duration / 120 * 100, 8, 100) + '%';
+
+  if (next) {
+    $('nextIcon').innerHTML = icon(next.leg ? next.leg.mode : 'walk');
+    $('nextText').innerHTML = esc(next.name) + (next.leg
+      ? '<span>' + TNAME[next.leg.mode] + ' ' + next.leg.minutes + ' 分钟 · ' + esc(next.leg.dist) + '</span>' : '');
+    $('goBtn').innerHTML = next.leg
+      ? icon(next.leg.mode, 2) + '<span>前往 ' + esc(next.name) + ' · ' + TNAME[next.leg.mode] + ' ' + next.leg.minutes + ' 分钟</span>'
+      : '<span>前往 ' + esc(next.name) + '</span>';
+  } else {
+    $('nextIcon').innerHTML = IC_PIN;
+    $('nextText').innerHTML = '今日到此结束 · 回酒店休整';
+    $('goBtn').innerHTML = '<span>结束今日 · 回酒店</span>';
+  }
+
+  var dots = '';
+  items.forEach(function (it, i) { dots += '<span class="mini-dot ' + (i === state.cur ? 'on' : '') + '"></span>'; });
+  $('stopDots').innerHTML = dots;
+
+  // 信号说明行：反映出 Agent 当前感知到的状态（无手动上报控件）
+  var hintMap = {
+    rain: 'Agent 感知到下雨 · 已切雨天室内',
+    tired: 'Agent 感知到体力下降 · 已切省力模式',
+    behind: 'Agent 感知到进度落后 · 正在追赶'
+  };
+  $('signalHintText').textContent = hintMap[state.event] || 'Agent 主动感知中 · 随时重排，时间锚点不动';
+
+  renderMap();
+  renderSheet();
+  if (state.view === 'detail') renderDetail();
+}
+
+function esc(s) {
+  return str(s).replace(/[&<>"]/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c];
+  });
+}
+/* ── 真实实拍补全：站点自身无图时，按需向服务端 POI 实况接口取真实照片
+   （/travel-poi/details 走必应/去哪儿等公开图源 + 维基简介，本机同源、服务端缓存 24h）。
+   取不到就保持占位态，不塞假图。 ── */
+var liveCache = {};                                    // stopId -> { img, desc } | null(失败/无)
+function stopKey(it) { return it.id + '|' + it.name; }
+
+function enrichLive(it) {
+  if (!it || !str(it.name)) return;
+  if (it.img) return;                                  // 行程自带图，优先用
+  var k = stopKey(it);
+  if (k in liveCache) return;                          // 已请求过（含失败占位）
+  liveCache[k] = null;
+  var base = apiBase();
+  if (base === '') return;
+  var qs = 'name=' + encodeURIComponent(it.name);
+  if (it.loc) qs += '&lat=' + it.loc.lat + '&lng=' + it.loc.lng;
+  fetch(base + '/travel-poi/details?' + qs, { headers: { Accept: 'application/json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (j) {
+      if (!j) return;
+      var ph = j.photos && j.photos.length ? (j.photos[0].thumb || j.photos[0].full) : null;
+      var wiki = j.wiki && j.wiki.extract ? String(j.wiki.extract) : null;
+      if (!ph && !wiki) return;
+      liveCache[k] = { img: ph, desc: wiki };
+      if (!it.img && ph) it.img = ph;                  // 写回视图模型，切天/切站不再重复取
+      if (!str(it.detail.desc) && wiki) it.detail.desc = wiki;
+      var isCur = curStops()[state.cur] === it || curAlts().indexOf(it) >= 0;
+      if (!PLAN || !isCur) return;
+      if (state.view === 'detail') renderDetail();
+      else setImage($('nowImg'), $('nowPhoto'), it.img);
+    })
+    .catch(function () { /* 取不到：保持占位 */ });
+}
+
+function bindAll(list, fn) { Array.prototype.forEach.call(list, function (el) { fn(el); }); }
+
+function setImage(img, holder, url) {
+  if (url) {
+    img.style.display = '';
+    holder.classList.remove('noimg');
+    // 实拍多来自携程/去哪儿等第三方图源，带 referrer 会被防盗链拦掉（403/空图）
+    img.referrerPolicy = 'no-referrer';
+    img.onerror = function () { img.onerror = null; img.style.display = 'none'; holder.classList.add('noimg'); };
+    img.src = url;
+  } else {
+    img.removeAttribute('src');
+    img.style.display = 'none';
+    holder.classList.add('noimg');
+  }
+}
+
+/* ══════════════════ 渲染：全屏地图 ══════════════════ */
+var MMAP = null, MMAP_STATE = 'idle', MMAP_SEQ = 0, MKRS = [];
+var ROUTE_SRC = 'plan-route';
+
+function renderMap() {
+  var items = curStops();
+  if (!items.length) return;
+  if (tryMapRender(items)) { $('mapSvg').style.display = 'none'; $('mlWrap').classList.add('on'); return; }
+  $('mlWrap').classList.remove('on');
+  $('mapSvg').style.display = '';
+  renderSvgMap(items);
+}
+
+/** 真实地图：MapLibre + 本地瓦片代理。未就绪时返回 false 让 SVG 先顶上 */
+function tryMapRender(items) {
+  if (!window.maplibregl) return false;
+  var base = apiBase();
+  if (base === '') return false;
+  var hasCoord = items.some(function (it) { return it.loc; });
+  if (!hasCoord) return false;
+  if (MMAP_STATE === 'failed') return false;
+  if (MMAP_STATE === 'ready') { drawMapItems(items); return true; }
+  if (MMAP_STATE === 'loading') return false;
+  MMAP_STATE = 'loading';
+  try {
+    MMAP = new maplibregl.Map({
+      container: 'mlDiv',
+      style: base + '/travel-basemap/style/dark',
+      center: [PLAN.centerLng != null ? PLAN.centerLng : items[0].loc.lng, PLAN.centerLat != null ? PLAN.centerLat : items[0].loc.lat],
+      zoom: 13,
+      attributionControl: false
+    });
+    MMAP.on('load', function () {
+      MMAP_STATE = 'ready';
+      $('mapAttrib').textContent = '© OpenStreetMap · CARTO';
+      if (PLAN) { renderMap(); if (state.view === 'detail') renderDetail(); }
+    });
+    MMAP.on('error', function () { /* 底图源抖动：静默，SVG 兜底已可见 */ });
+    // 超时兜底：3.2s 未起来就固定回落 SVG，不再无限等待
+    setTimeout(function () { if (MMAP_STATE === 'loading') MMAP_STATE = 'failed'; }, 3200);
+  } catch (e) { MMAP_STATE = 'failed'; return false; }
+  return false;
+}
+
+/** 清掉站点标记（路线图层常驻，只 setData 更新） */
+function clearMapItems() {
+  MKRS.forEach(function (m) { try { m.remove(); } catch (e) { /* noop */ } });
+  MKRS = [];
+}
+
+/** 路线图层：单一 GeoJSON source + 两条 layer（已走实线 / 未走虚线，按 done 过滤）。
+ *  只建一次、之后 setData 更新。注意 line-cap/line-join 属 layout（放 paint 里会
+ *  被 MapLibre 样式校验静默丢弃——不抛错、图层无声失效）。 */
+function ensureRouteLayers() {
+  if (!MMAP || MMAP.getSource(ROUTE_SRC)) return;
+  var specs = [
+    {
+      id: 'plan-route-todo', filter: ['==', ['get', 'done'], false],
+      layout: { 'line-cap': 'butt', 'line-join': 'round' },
+      paint: { 'line-color': '#F5A552', 'line-width': 3.4, 'line-opacity': 0.5, 'line-dasharray': [0.8, 2.2] }
+    },
+    {
+      id: 'plan-route-done', filter: ['==', ['get', 'done'], true],
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#F5A552', 'line-width': 4.4, 'line-opacity': 0.95 }
+    }
+  ];
+  try {
+    MMAP.addSource(ROUTE_SRC, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+  } catch (e) { /* source 已存在：继续补 layer */ }
+  var attempt = 0;
+  var addAll = function () {
+    if (!MMAP) return;
+    specs.forEach(function (s) {
+      if (MMAP.getLayer(s.id)) return;
+      try {
+        MMAP.addLayer({ id: s.id, type: 'line', source: ROUTE_SRC, filter: s.filter, layout: s.layout, paint: s.paint });
+      } catch (e) { console.warn('[travel-mobile] 路线图层 addLayer 异常', s.id, e); }
+    });
+    if (!MMAP.getLayer('plan-route-todo')) {
+      // style 变更队列竞态 → 下一帧补建；补 3 次仍无 → 多半是样式属性归属写错
+      // （如 line-cap/line-join 写进 paint），MapLibre 会校验静默丢图层
+      if (attempt++ < 3) setTimeout(addAll, 160);
+      else console.warn('[travel-mobile] 路线图层未挂载：检查 addLayer 的 layout/paint 属性归属');
+    }
+  };
+  addAll();
+}
+
+function updateRouteData(items) {
+  var src;
+  try { src = MMAP.getSource(ROUTE_SRC); } catch (e) { src = null; }
+  if (!src) return;
+  var feats = [];
+  for (var k = 0; k < items.length - 1; k++) {
+    var a = items[k], b = items[k + 1];
+    if (!a.loc || !b.loc) continue;
+    feats.push({
+      type: 'Feature', properties: { done: k < state.cur },
+      geometry: { type: 'LineString', coordinates: [[a.loc.lng, a.loc.lat], [b.loc.lng, b.loc.lat]] }
+    });
+  }
+  try { src.setData({ type: 'FeatureCollection', features: feats }); } catch (e) { /* noop */ }
+}
+
+function drawMapItems(items) {
+  if (!MMAP || MMAP_STATE !== 'ready') return;
+  var seq = ++MMAP_SEQ;
+  clearMapItems();
+  ensureRouteLayers();
+  updateRouteData(items);
+  var bounds = new maplibregl.LngLatBounds(), num = 0;
+  items.forEach(function (it, i) {
+    if (!it.loc) return;
+    if (it.kind !== 'stay') num++;
+    var el = document.createElement('div');
+    el.className = 'poi-m ' + (i === state.cur ? 'now' : (i < state.cur ? 'done' : ''));
+    el.innerHTML = '<span class="p-dot">' + ((it.rest || it.kind === 'stay') ? '•' : num) + '</span>' +
+      '<span class="p-l">' + esc(it.name.split(' · ')[0]) + '</span>';
+    el.addEventListener('click', function () { state.cur = i; render(); });
+    MKRS.push(new maplibregl.Marker({ element: el, anchor: 'bottom' }).setLngLat([it.loc.lng, it.loc.lat]).addTo(MMAP));
+    bounds.extend([it.loc.lng, it.loc.lat]);
+  });
+  setTimeout(function () {
+    if (seq !== MMAP_SEQ) return;
+    try { if (!bounds.isEmpty()) MMAP.fitBounds(bounds, { padding: { top: 70, bottom: 110, left: 70, right: 70 }, duration: 0 }); } catch (e) { /* noop */ }
+  }, 120);
+}
+
+/** SVG 弹性动线兜底（无坐标 / 底图不可用） */
+function renderSvgMap(items) {
+  var pts = items.map(function (it, i) { return it.xy || autoXY(items.length, i); }), ai = state.cur;
+  var s = '<g>' + mapBaseLines() + '</g>';
+  var done = pts.slice(0, ai + 1), todo = pts.slice(ai);
+  if (todo.length > 1) s += '<path class="r-todo" d="' + smooth(todo) + '"/>';
+  if (done.length > 1) { s += '<path class="r-done" d="' + smooth(done) + '"/><path class="r-flow" d="' + smooth(done) + '"/>'; }
+  var num = 0;
+  items.forEach(function (it, i) {
+    var xy = pts[i], x = xy[0], y = xy[1];
+    if (it.kind !== 'stay') num++;
+    var cls = 'mp ' + (i === ai ? 'now ' : (i < ai ? 'done ' : '')) + (it.rest ? 'rest' : '');
+    s += '<g class="' + cls + '" data-i="' + i + '" transform="translate(' + x + ',' + y + ')"><circle class="c" r="11"/>';
+    s += '<text class="n" y="0.4">' + ((it.rest || it.kind === 'stay') ? '•' : num) + '</text>';
+    var anchor = x > 420 ? 'end' : 'start', lx = x > 420 ? -14 : 14, ly = y < 60 ? 16 : -13;
+    s += '<text class="l" x="' + lx + '" y="' + ly + '" text-anchor="' + anchor + '">' + esc(it.name.split(' · ')[0]) + '</text></g>';
+  });
+  var h = pts[ai];
+  s += '<circle class="here-p" cx="' + h[0] + '" cy="' + h[1] + '" r="6"/><circle class="here" cx="' + h[0] + '" cy="' + h[1] + '" r="3.4"/>';
+  $('mapSvg').innerHTML = s;
+  $('mapNowName').textContent = items[ai].name + ' · ' + min2text(items[ai].start);
+  $('mapTitle').textContent = curDay().name;
+  $('mapAttrib').textContent = '';
+  bindAll($('mapSvg').querySelectorAll('.mp'), function (g) {
+    g.addEventListener('click', function () { state.cur = +g.dataset.i; render(); });
+  });
+}
+function mapBaseLines() {
+  var s = '';
+  for (var x = 40; x < 560; x += 48) s += '<line class="map-bg" x1="' + x + '" y1="0" x2="' + x + '" y2="720"/>';
+  for (var y = 40; y < 720; y += 48) s += '<line class="map-bg" x1="0" y1="' + y + '" x2="560" y2="' + y + '"/>';
+  return s;
+}
+function smooth(p) {
+  if (p.length < 2) return '';
+  var d = 'M' + p[0][0] + ' ' + p[0][1];
+  for (var i = 0; i < p.length - 1; i++) {
+    var p0 = p[i - 1] || p[i], p1 = p[i], p2 = p[i + 1], p3 = p[i + 2] || p[i + 1];
+    d += ' C' + (p1[0] + (p2[0] - p0[0]) / 6).toFixed(1) + ' ' + (p1[1] + (p2[1] - p0[1]) / 6).toFixed(1) + ' ' +
+      (p2[0] - (p3[0] - p1[0]) / 6).toFixed(1) + ' ' + (p2[1] - (p3[1] - p1[1]) / 6).toFixed(1) + ' ' + p2[0] + ' ' + p2[1];
+  }
+  return d;
+}
+function autoXY(n, i) {
+  var a = Math.PI * 2 * i / Math.max(n, 1) - Math.PI / 2;
+  return [Math.round(280 + 200 * Math.cos(a)), Math.round(330 + 270 * Math.sin(a))];
+}
+
+/* ══════════════════ 渲染：全程抽屉 ══════════════════ */
+function renderSheet() {
+  if (!PLAN) return;
+  var items = curStops(), alts = curAlts();
+  var seg = '';
+  PLAN.days.forEach(function (d, n) {
+    seg += '<button data-day="' + n + '" class="' + (n === state.day ? 'on' : '') + '">Day ' + (n + 1) + '</button>';
+  });
+  $('daySeg').innerHTML = seg;
+  bindAll($('daySeg').querySelectorAll('button'), function (b) {
+    b.addEventListener('click', function () {
+      var n = +b.dataset.day;
+      if (n === state.day) return;
+      state.day = n; state.cur = 0; state.event = null; render();
+    });
+  });
+
+  var h = '';
+  items.forEach(function (it, i) {
+    h += '<div class="s-row ' + (i === state.cur ? 'now ' : (i < state.cur ? 'done' : '')) + '" data-i="' + i + '">' +
+      '<div class="sr-t">' + min2text(it.start) + '</div><div class="sr-dot"></div>' +
+      '<div class="sr-main"><div class="sr-name">' + esc(it.name) + '</div>' +
+      '<div class="sr-sub">停留 ' + it.duration + ' 分' + (it.leg ? ' · ' + TNAME[it.leg.mode] + ' ' + it.leg.minutes + ' 分' : '') + '</div></div>' +
+      '<div class="sr-tag">' + esc(str(it.tag).split(' ')[0]) + '</div></div>';
+  });
+  if (alts.length) {
+    h += '<div class="alt-block"><div class="ab-h">AGENT 暂时收起 · 可请求加回</div>';
+    alts.forEach(function (a) {
+      h += '<div class="alt-item"><span class="nm">' + esc(a.name) + '</span><button data-add="' + a.id + '">现在就去</button></div>';
+    });
+    h += '</div>';
+  }
+  $('sheetList').innerHTML = h;
+  bindAll($('sheetList').querySelectorAll('.s-row'), function (r) {
+    r.addEventListener('click', function () { state.cur = +r.dataset.i; render(); closeSheet(); });
+  });
+  bindAll($('sheetList').querySelectorAll('[data-add]'), function (b) {
+    b.addEventListener('click', function () { requestAlt(b.dataset.add); });
+  });
+}
+
+/* ══════════════════ 渲染：站点详情 ══════════════════ */
+function renderDetail() {
+  if (!PLAN) return;
+  var stops = curStops(), alts = curAlts(), all = stops.concat(alts);
+  state.cur = clamp(state.cur, 0, Math.max(0, all.length - 1));
+  var i = state.cur, it = all[i], d = it.detail || {};
+  var prev = i > 0 ? all[i - 1] : null, next = i < all.length - 1 ? all[i + 1] : null;
+
+  setImage($('dImg'), $('dHero'), it.img);
+  enrichLive(it);
+  $('dTag').textContent = it.tag;
+  if (it.book) { $('dBook').style.display = 'flex'; $('dBookText').textContent = it.book; }
+  else { $('dBook').style.display = 'none'; }
+  $('dTime').textContent = min2text(it.start) + ' — ' + min2text(it.start + it.duration) + (it.anchor != null ? ' · 时间锚点' : '');
+  $('dName').textContent = it.name;
+  $('dAgentText').textContent = it.note || d.desc || '按你的节奏来，这一站不用赶。';
+  $('dDesc').textContent = d.desc || it.note || '';
+  $('secDesc').style.display = (d.desc || it.note) ? '' : 'none';
+
+  var chips = '<span class="chip">' + IC_CLOCK + '建议停留 ' + it.duration + ' 分钟</span>';
+  if (it.anchor != null) chips += '<span class="chip hot">时间锚点 · 不可错过</span>';
+  if (it.book) chips += '<span class="chip"><span class="cdot"></span>' + esc(it.book) + '</span>';
+  if (it.splatUrl) chips += '<button class="chip act" id="splatBtn">沉浸式 3D 实景</button>';
+  $('dChips').innerHTML = chips;
+  var sb = $('splatBtn');
+  if (sb) sb.addEventListener('click', function () { openUrl(it.splatUrl); });
+
+  var hl = d.hl || [];
+  $('secHl').style.display = hl.length ? '' : 'none';
+  $('dHl').innerHTML = hl.map(function (x) { return '<li><span class="dot"></span>' + esc(x) + '</li>'; }).join('');
+
+  var tips = d.tips || [];
+  $('secTips').style.display = tips.length ? '' : 'none';
+  $('dTips').innerHTML = tips.map(function (x) { return '<div class="tip"><span class="dot dot3"></span><div>' + esc(x) + '</div></div>'; }).join('');
+
+  var rows = '';
+  if (d.hours) rows += '<div class="irow"><span class="k">开放时间</span><span class="v">' + esc(d.hours) + '</span></div>';
+  if (d.ticket) rows += '<div class="irow"><span class="k">费用</span><span class="v">' + esc(d.ticket) + '</span></div>';
+  if (d.addr) rows += '<div class="irow"><span class="k">位置</span><span class="v">' + esc(d.addr) + '</span></div>';
+  if (it.loc) {
+    rows += '<div class="irow"><span class="k">坐标</span><span class="v tnum">' +
+      it.loc.lat.toFixed(4) + ', ' + it.loc.lng.toFixed(4) + '</span></div>';
+  }
+  $('secInfo').style.display = rows ? '' : 'none';
+  $('dInfo').innerHTML = rows;
+
+  var flow = '';
+  if (prev && it.leg) {
+    flow += '<div class="flow-row"><div class="ni">' + icon(it.leg.mode) + '</div>' +
+      '<div class="nt"><div class="a">到达方式</div><div class="b">从 ' + esc(prev.name.split(' · ')[0]) +
+      '<span>' + TNAME[it.leg.mode] + ' ' + it.leg.minutes + ' 分钟 · ' + esc(it.leg.dist) + '</span></div></div></div>';
+  } else {
+    flow += '<div class="flow-row"><div class="ni">' + icon('walk') + '</div>' +
+      '<div class="nt"><div class="a">出发</div><div class="b">行程从这里出发</div></div></div>';
+  }
+  if (next && next.leg) {
+    flow += '<button class="flow-row next" id="nextJump"><div class="ni">' + icon(next.leg.mode) + '</div>' +
+      '<div class="nt"><div class="a">下一站</div><div class="b">' + esc(next.name) +
+      '<span>' + TNAME[next.leg.mode] + ' ' + next.leg.minutes + ' 分钟 · ' + esc(next.leg.dist) + '</span></div></div>' +
+      '<div class="narr">' + IC_ARROW + '</div></button>';
+  } else {
+    flow += '<div class="flow-row"><div class="ni">' + IC_PIN + '</div>' +
+      '<div class="nt"><div class="a">收尾</div><div class="b">今日到此结束 · 回酒店休整</div></div></div>';
+  }
+  $('dFlow').innerHTML = flow;
+  var nj = $('nextJump');
+  if (nj) nj.addEventListener('click', function () { state.cur = i + 1; render(); toast('已切换到「' + all[i + 1].name + '」'); });
+
+  var sc = '';
+  all.forEach(function (x, j) {
+    sc += '<button class="schip ' + (j === i ? 'on' : (j < i ? 'done' : '')) + '" data-j="' + j + '"><span>' +
+      min2text(x.start) + '</span><b>' + esc(x.name.split(' · ')[0]) + '</b></button>';
+  });
+  $('dStopChips').innerHTML = sc;
+  bindAll($('dStopChips').querySelectorAll('.schip'), function (el) {
+    el.addEventListener('click', function () { state.cur = +el.dataset.j; render(); });
+  });
+
+  var dseg = '';
+  PLAN.days.forEach(function (dd, n) {
+    dseg += '<button data-day="' + n + '" class="' + (n === state.day ? 'on' : '') + '">Day ' + (n + 1) + '</button>';
+  });
+  $('dDaySeg').innerHTML = dseg;
+  bindAll($('dDaySeg').querySelectorAll('button'), function (b) {
+    b.addEventListener('click', function () {
+      var n = +b.dataset.day;
+      if (n === state.day) return;
+      var cid = all[state.cur].id;
+      state.day = n;
+      var list = curStops().concat(curAlts()), j = -1;
+      for (var k = 0; k < list.length; k++) { if (list[k].id === cid) { j = k; break; } }
+      state.cur = j >= 0 ? j : 0;
+      render();
+    });
+  });
+
+  $('dGo').innerHTML = next
+    ? (next.leg
+      ? icon(next.leg.mode, 2) + '<span>前往 ' + esc(next.name) + ' · ' + TNAME[next.leg.mode] + ' ' + next.leg.minutes + ' 分钟</span>'
+      : '<span>前往 ' + esc(next.name) + '</span>')
+    : '<span>结束今日 · 回酒店</span>';
+  $('dScroll').scrollTop = 0;
+}
+
+/* ══════════════════ 视图切换 / 抽屉 ══════════════════ */
+function setView(v) {
+  state.view = v;
+  $('mapView').classList.toggle('open', v === 'map');
+  $('detailView').classList.toggle('open', v === 'detail');
+  if (v === 'map') renderMap();
+  if (v === 'detail') renderDetail();
+}
+function openSheet() { renderSheet(); $('sheet').classList.add('open'); }
+function closeSheet() { $('sheet').classList.remove('open'); }
+function openUrl(url) {
+  var u = str(url);
+  if (!u) return;
+  try {
+    if (window.__travelPanelHost && window.__travelPanelHost.postMessage) {
+      window.__travelPanelHost.postMessage({ event: 'openUrl', url: u });
+      return;
+    }
+    if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage) {
+      window.chrome.webview.postMessage({ event: 'openUrl', url: u });
+      return;
+    }
+  } catch (e) { /* 无宿主 → 直接打开 */ }
+  try { window.open(u, '_blank'); } catch (e) { location.href = u; }
+}
+function requestAlt(id) {
+  var a = curAlts().filter(function (x) { return x.id === id; })[0];
+  toast('已请求加回「' + (a ? a.name : id) + '」· 等待下轮规划');
+  notifyHost({ event: 'requestAlt', stopId: id, day: state.day });
+}
+/** Agent 侧感知到信号后由宿主推入（不再有用户手动上报控件）。
+ *  ev: 'rain' | 'tired' | 'behind' | null(还原)；msg: Agent 的解释文案（可选，进气泡）。 */
+function applySignal(ev, msg) {
+  state.event = ev || null;
+  render();
+  if (msg) { $('bubbleText').innerHTML = msg; $('bubble').classList.add('show'); }
+}
+/** 向上报宿主（WebView 形态）：宿主据此把交互交给 Agent */
+function notifyHost(payload) {
+  try {
+    if (window.chrome && window.chrome.webview && window.chrome.webview.postMessage) {
+      window.chrome.webview.postMessage(payload);
+      return;
+    }
+  } catch (e) { /* 浏览器形态：无宿主，纯本地 */ }
+}
+
+/* ══════════════════ 装订事件 ══════════════════ */
+$('nowCard').addEventListener('click', function () {
+  if (!PLAN) return;
+  setView('detail');
+});
+$('goBtn').addEventListener('click', function () {
+  if (!PLAN) return;
+  var items = curStops();
+  if (state.cur < items.length - 1) { state.cur++; render(); }
+  else toast('今日行程结束，已为你叫车回酒店');
+});
+$('undoBtn').addEventListener('click', function () { $('bubble').classList.remove('show'); });
+$('mapBtn').addEventListener('click', function () { setView('map'); });
+$('mapClose').addEventListener('click', function () { setView('home'); });
+$('mapSheetBtn').addEventListener('click', function () { openSheet(); });
+$('sheetBtn').addEventListener('click', function () { openSheet(); });
+$('sheetClose').addEventListener('click', closeSheet);
+$('sheetGrip').addEventListener('click', closeSheet);
+$('dBack').addEventListener('click', function () { setView('home'); });
+$('dMapBtn').addEventListener('click', function () { setView('map'); });
+$('dGo').addEventListener('click', function () {
+  if (!PLAN) return;
+  var all = curStops().concat(curAlts());
+  if (state.cur < all.length - 1) { state.cur++; render(); toast('已切换到「' + all[state.cur].name + '」'); }
+  else toast('今日行程结束，已为你叫车回酒店');
+});
+$('retryBtn').addEventListener('click', function () { if (planId) loadPlanById(planId, 0); });
+window.addEventListener('resize', function () { if (PLAN) renderMap(); });
+document.addEventListener('keydown', function (e) {
+  if (e.key === 'Escape') { setView('home'); closeSheet(); }
+});
+
+/* ══════════════════ 载荷注入 ══════════════════ */
+function applyPlan(raw, msg) {
+  PLAN = adaptPayload(raw);
+  state.day = clamp(PLAN.day, 0, Math.max(0, PLAN.days.length - 1));
+  state.cur = 0;
+  state.event = null;
+  if (PLAN.theme === 'light') document.documentElement.style.colorScheme = 'light';
+  // 深链：hash 里带 stop 时直接进详情（应用内返回键仍走 setView）
+  var m = /stop=([A-Za-z0-9_-]+)/.exec(location.hash || '');
+  if (m) {
+    var list = curStops().concat(curAlts());
+    for (var i = 0; i < list.length; i++) if (list[i].id === m[1]) { state.cur = i; state.view = 'detail'; break; }
+  }
+  render();
+  if (state.view === 'detail') { $('detailView').classList.add('open'); renderDetail(); }
+  if (msg) {
+    $('bubbleText').innerHTML = msg;
+    $('bubble').classList.add('show');
+  }
+  // 载荷自带 signal：Agent 重排后随行程一起下发的「感知结论」
+  if (raw && raw.signal) applySignal(raw.signal, str(raw.signalNote) || null);
+}
+
+/* ══════════════════ 宿主桥（与 panel.html 同名 API，便于客户端复用） ══════════════════ */
+window.__travelPanel = {
+  loadPlan: function (payload) { applyPlan(payload, null); },
+  /** Agent 侧感知到实时信号（天气/路况/步速/对话）后由宿主推入，页面据此重排节奏。
+   *  ev: 'rain' | 'tired' | 'behind' | null；note: 展示给用户的解释文案（可选）。 */
+  applySignal: function (ev, note) { applySignal(ev, note); },
+  setTileProxy: function (base) {
+    TILE_BASE = String(base == null ? '' : base);
+    if (PLAN) renderMap();
+  },
+  setTheme: function () { /* 移动页固定深色令牌；保留 API 兼容 */ },
+  setDefaultCenter: function () { /* 中心随载荷 center 走 */ },
+  flyTo: function (lat, lng, zoom) {
+    try { if (MMAP && MMAP_STATE === 'ready') MMAP.flyTo({ center: [Number(lng), Number(lat)], zoom: zoom == null ? 16 : Number(zoom) }); } catch (e) { /* noop */ }
+  },
+  showDay: function (i) { state.day = clamp(Number(i) || 0, 0, PLAN ? PLAN.days.length - 1 : 0); state.cur = 0; render(); },
+  openStop: function (id) { var l = curStops().concat(curAlts()); for (var i = 0; i < l.length; i++) if (l[i].id === id) { state.cur = i; setView('detail'); return; } }
+};
+
+/* ══════════════════ 取数引导 ══════════════════ */
+function showEmpty(title, desc, retriable) {
+  $('emptyTitle').textContent = title;
+  $('emptyDesc').innerHTML = desc;
+  $('retryBtn').style.display = retriable ? '' : 'none';
+  $('emptyState').classList.add('on');
+}
+
+/** 读服务端真实行程仓库（Agent 生成后落盘的 StoredTravelPlan） */
+function loadRealPlan(pid, attempt) {
+  fetch(apiBase() + '/travel/plans/' + encodeURIComponent(pid), { headers: { Accept: 'application/json' } })
+    .then(function (r) {
+      if (r.status === 404) throw new Error('missing');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (j) { applyPlan(j && j.plan ? j.plan : j, null); })
+    .catch(function (err) {
+      var missing = err && err.message === 'missing';
+      showEmpty(missing ? '未找到这份行程' : '行程数据加载失败',
+        missing ? '请回应用里重新打开这张行程卡' : '请检查本机服务是否在运行', !missing && attempt < 2);
+      if (!missing && attempt < 2) setTimeout(function () { loadRealPlan(pid, attempt + 1); }, 2500);
+    });
+}
+
+/** 统一入口：真实仓库 id（plan-xxx）走仓库，内存载荷 id 走 /travel-plans */
+function loadAnyPlan(id, attempt) {
+  if (/^plan[-_]/i.test(str(id))) return loadRealPlan(id, attempt || 0);
+  return loadPlanById(id, attempt || 0);
+}
+
+function loadPlanById(id, attempt) {
+  fetch(apiBase() + '/travel-plans/' + id, { headers: { Accept: 'application/json' } })
+    .then(function (r) {
+      if (r.status === 404) throw new Error('expired');
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    })
+    .then(function (payload) { applyPlan(payload, null); })
+    .catch(function (err) {
+      var expired = err && err.message === 'expired';
+      showEmpty(expired ? '行程数据已过期' : '行程数据加载失败',
+        expired ? '请回应用里重新打开这张行程卡' : '请检查本机服务是否在运行', !expired && attempt < 2);
+      if (!expired && attempt < 2) setTimeout(function () { loadPlanById(id, attempt + 1); }, 2500);
+    });
+}
+
+(function boot() {
+  var pm = /[?&]planId=([A-Za-z0-9_-]+)/.exec(location.search);
+  var m = /[?&]id=([A-Za-z0-9]+)/.exec(location.search);
+  var hostMode = /[?&]host=1/.test(location.search);
+  if (pm) {
+    // 真实行程仓库：Agent 生成后落盘的 planId
+    planId = pm[1];
+    loadRealPlan(pm[1], 0);
+  } else if (m) {
+    planId = m[1];
+    loadPlanById(m[1], 0);
+  } else if (!hostMode) {
+    // 浏览器直接访问：先给可读空态，宿主随后注入也不影响（applyPlan 会覆盖）
+    setTimeout(function () {
+      if (!PLAN) showEmpty('未携带行程参数',
+        '请从应用内的旅游卡片进入<br>或带 <i>?planId=&lt;行程id&gt;</i> / <i>?id=&lt;载荷id&gt;</i> 打开', false);
+    }, 500);
+  }
+  // 标签页复用：主应用再次打开行程时热换载（与 panel.html 同一 BroadcastChannel 约定）
+  try {
+    var bc = new BroadcastChannel('pai-travel-plan');
+    bc.onmessage = function (e) {
+      var d = e.data || {};
+      if (d.type !== 'switch' || !d.id) return;
+      bc.postMessage({ type: 'claimed', id: d.id });
+      if (d.id === planId) return;
+      planId = d.id;
+      loadAnyPlan(d.id, 0);
+    };
+  } catch (e) { /* 无 BroadcastChannel：忽略 */ }
+})();
+</script>
+</body>
+</html>

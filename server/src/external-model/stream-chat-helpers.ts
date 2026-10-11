@@ -1496,8 +1496,34 @@ export function stripInternalControlTags(text: string): string {
 export function createStreamControlTagSanitizer(maxPendingChars = 512) {
   let pending = "";
   let passthrough = false;
+  /**
+   * 已确认进入「未终结的 `<system>` 控制帧体」：后续增量整段吞到帧体结束。
+   *
+   * 为什么需要这个独立状态：帧体是多行文本，前半段（opener + 控制标签行）在缓冲里
+   * 能识别，但后半段的说明行**没有 opener**，逐 chunk 净化认不出来——一旦放通一次，
+   * 整帧就直穿气泡（2026-10-11 实测：`<system>` 帧逐字符/3 字/10 字喂入全泄漏）。
+   * 结束判据：出现 `</system>` 或帧体后出现空行分界（之后跟随的是正文）。
+   */
+  let swallowSystemFrame = false;
+  /** 吞帧体时的缓冲上限（超过则只留尾部判界，避免内存无界）。 */
+  const swallowCap = Math.max(4096, maxPendingChars * 8);
 
   return function feed(delta: string): string {
+    if (swallowSystemFrame) {
+      pending += delta;
+      const terminated = /<\/system>/i.test(pending) || /\n[ \t]*\n/.test(pending);
+      if (!terminated) {
+        if (pending.length > swallowCap) pending = pending.slice(-64);
+        return "";
+      }
+      const rest = stripInternalFrames(pending);
+      pending = "";
+      swallowSystemFrame = false;
+      if (!rest) return "";
+      passthrough = true;
+      return rest;
+    }
+
     if (passthrough) return delta;
 
     pending += delta;
@@ -1509,6 +1535,17 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
       pending = "";
       return out;
     }
+
+    // `<system>` 控制帧（2026-10-11 事故根源）：未终结就先扣住整条流。
+    // 顺序在一切剥离之前——半截 opener（首 chunk 往往只有 `<`）也要扣住，
+    // 否则净化器直接切直通，整帧逐字穿到气泡。
+    const sysState = systemFrameStreamState(pending);
+    if (sysState === "body") {
+      swallowSystemFrame = true;
+      return "";
+    }
+    if (sysState === "pending") return "";
+    if (isPartialSystemOpener(pending)) return "";
 
     // 先做整串剥离（循环剥掉完整标签，可能连着多个）。
     const stripped = stripInternalControlTags(pending);
@@ -1528,6 +1565,13 @@ export function createStreamControlTagSanitizer(maxPendingChars = 512) {
       // 前缀（如 `<system-`）时扣住待判——整标签到齐后下一轮 feed 的整串
       // 剥离会连块删掉，半截先吐就撤不回了。
       if (systemReminderPartialTailLen(stripped) > 0) {
+        pending = stripped;
+        return "";
+      }
+      // XML 形态 <system> 控制帧（2026-10-11 事故根源）：同理扣住半截 opener
+      // （`<sy…`）。整帧到齐后 stripInternalFrames 会整块剥掉；未闭合形态
+      // （实测无 </system>）剥到块尾/EOF，全程不吐给用户。
+      if (systemFramePartialTailLen(stripped) > 0) {
         pending = stripped;
         return "";
       }
@@ -1829,7 +1873,10 @@ import type {
 } from "openai/resources/chat/completions";
 import {
   INTERNAL_FRAME_PREFIX_RE,
+  isPartialSystemOpener,
   stripInternalFrames,
+  systemFramePartialTailLen,
+  systemFrameStreamState,
   systemReminderPartialTailLen,
 } from "./internal-frames.js";
 
