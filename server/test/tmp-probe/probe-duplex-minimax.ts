@@ -15,6 +15,7 @@ import WebSocket from "ws";
 
 import "../../src/config/load-server-env.js";
 import { MiniMaxTTSAdapter } from "../../src/services/voice-dialogue/adapters/minimax-tts-adapter.js";
+import { pcmToWav } from "../../src/services/voice-duplex/endpoint-detector.js";
 
 const PORT = process.env.PORT?.trim() || "3000";
 // 每次探针用独立 sessionId：上轮残留通话不会触发忙线门禁
@@ -39,7 +40,9 @@ async function main(): Promise<void> {
   const messages: Array<Record<string, unknown>> = [];
   ws.on("message", (data) => {
     try {
-      messages.push(JSON.parse(data.toString()) as Record<string, unknown>);
+      const m = JSON.parse(data.toString()) as Record<string, unknown>;
+      m.__at = Date.now() - t0; // 到达时间戳（相对探针起点），用于量首块延迟
+      messages.push(m);
     } catch {
       // ignore
     }
@@ -55,10 +58,10 @@ async function main(): Promise<void> {
   // 腿 1：text.turn
   send({ type: "session.start" });
   await until(() => last("session.ready") != null, 10000, "session.ready");
-  const ready = last("session.ready") as { engine?: string };
-  log(`engine=${ready.engine ?? "(pipeline)"}`);
-  if (ready.engine !== "minimax-realtime") {
-    console.error("探针判定：FAIL（引擎不是 minimax-realtime，检查 MINIMAX_API_KEY 是否已配置进常驻实例）");
+  const ready = last("session.ready") as { engine?: string; engineKind?: string };
+  log(`engine=${ready.engine ?? "(pipeline)"} kind=${ready.engineKind ?? "-"}`);
+  if (ready.engineKind !== "realtime") {
+    console.error("探针判定：FAIL（本次会话未走端到端实时引擎，检查引擎是否已配置或被 DISABLED 开关关闭）");
     process.exit(1);
   }
 
@@ -67,11 +70,21 @@ async function main(): Promise<void> {
   send({ type: "text.turn", text: "用一两句话介绍一下你能帮我做什么" });
   await until(() => messages.slice(base).some((m) => m.type === "turn.completed"), 60000, "text.turn 完成");
   const textTurn = last("turn.completed") as { userText: string; assistantText: string };
-  const chunk1 = messages.slice(base).find((m) => m.type === "tts.chunk") as { audio: string; format: string };
-  const wav1 = Buffer.from(chunk1.audio, "base64");
-  writeFileSync(join(outDir, "duplex-text-turn.wav"), wav1);
+  const chunks1 = messages.slice(base).filter((m) => m.type === "tts.chunk") as Array<{
+    audio: string;
+    sampleRate?: number;
+    __at?: number;
+  }>;
+  const sr1 = chunks1[0]?.sampleRate ?? 24000;
+  const audio1 = Buffer.concat(chunks1.map((c) => Buffer.from(c.audio, "base64")));
+  if (audio1.length > 0) writeFileSync(join(outDir, "duplex-text-turn.wav"), pcmToWav(audio1, sr1));
+  const done1 = messages.slice(base).find((m) => m.type === "turn.completed") as { __at?: number } | undefined;
   log(`腿1 text.turn：回复="${textTurn.assistantText}"`);
-  log(`腿1 首包语音=${(last("tts.chunk") ? Date.now() - textSendAt : -1)}ms 音频=${wav1.length}bytes → duplex-text-turn.wav`);
+  log(`腿1 流式 ${chunks1.length} 块 / ${audio1.length}bytes（${(audio1.length / sr1 / 2).toFixed(2)}s）→ duplex-text-turn.wav`);
+  log(
+    `腿1 首块 tts.chunk @ ${chunks1[0]?.__at ?? -1}ms ←→ turn.completed @ ${done1?.__at ?? -1}ms` +
+      `（差值 = 流式省掉的整轮等待）`,
+  );
 
   // 腿 2：audio.chunk（合成提问 → 端点检测自动成轮）
   const question = "我现在提醒你，明天早上八点叫我起床。";
@@ -90,11 +103,19 @@ async function main(): Promise<void> {
   }
   await until(() => messages.slice(base).some((m) => m.type === "turn.completed"), 90000, "audio 轮完成");
   const audioTurn = last("turn.completed") as { userText: string; assistantText: string };
-  const chunk2 = messages.slice(base).find((m) => m.type === "tts.chunk") as { audio: string };
-  const wav2 = Buffer.from(chunk2.audio, "base64");
-  writeFileSync(join(outDir, "duplex-audio-turn.wav"), wav2);
+  const chunks2 = messages.slice(base).filter((m) => m.type === "tts.chunk") as Array<{
+    audio: string;
+    sampleRate?: number;
+    __at?: number;
+  }>;
+  const sr2 = chunks2[0]?.sampleRate ?? 24000;
+  const audio2 = Buffer.concat(chunks2.map((c) => Buffer.from(c.audio, "base64")));
+  if (audio2.length > 0) writeFileSync(join(outDir, "duplex-audio-turn.wav"), pcmToWav(audio2, sr2));
   log(`腿2 audio：ASR听到的="${audioTurn.userText}" 回复="${audioTurn.assistantText}"`);
-  log(`腿2 喂入耗时=${Date.now() - audioSendAt}ms（含 realtime 回合）音频=${wav2.length}bytes → duplex-audio-turn.wav`);
+  log(
+    `腿2 流式 ${chunks2.length} 块 / ${audio2.length}bytes（${(audio2.length / sr2 / 2).toFixed(2)}s）` +
+      ` 首块 @ ${chunks2[0]?.__at ?? -1}ms（音频喂入起点 @ ${audioSendAt - t0}ms）→ duplex-audio-turn.wav`,
+  );
 
   send({ type: "session.stop" });
   await until(() => last("session.ended") != null, 5000, "session.ended");
@@ -153,8 +174,8 @@ async function main(): Promise<void> {
   const pass =
     textTurn.assistantText.length > 0 &&
     audioTurn.assistantText.length > 0 &&
-    wav1.length > 1000 &&
-    wav2.length > 1000 &&
+    audio1.length > 1000 &&
+    audio2.length > 1000 &&
     contextOk;
   console.log(`\n探针判定：${pass ? "PASS" : "FAIL（contextOk=" + contextOk + "）"}`);
   process.exit(pass ? 0 : 1);

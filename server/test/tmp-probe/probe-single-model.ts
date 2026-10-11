@@ -1,10 +1,10 @@
 /**
- * 单模型配置实测探针（2026-10-07）：不搞双模型，各自只配一把密钥。
+ * 单模型配置实测探针：不搞双模型，各自只配一把密钥，路由跟随主模型。
  *
  *   场景 A｜纯 DeepSeek：只留 OPENAI_API_KEY（指向 DeepSeek）→
- *     主模型=deepseek-flash，路由 auto 链也落 deepseek（快档案 192/3s）。
+ *     主模型=deepseek-flash，路由同模型（快档案 192/3s）。
  *   场景 B｜纯 MiniMax：只留 MINIMAX_API_KEY →
- *     主模型=MiniMax-M3，路由 auto 链落 minimax（思考档案 1024/5s）。
+ *     主模型=MiniMax-M3，路由同模型（思考档案 1024/5s）。
  *
  * 每场景测两件事：① 路由判定（闲聊/实时/个人数据）；② 主模型直答（活人感）。
  * 用法（server 目录下）：node --import tsx test/tmp-probe/probe-single-model.ts
@@ -12,7 +12,6 @@
  */
 import "../../src/config/load-server-env.js";
 import { createExternalChatProviderFromEnv } from "../../src/external-model/resolve-provider.js";
-import { resolveRouteChatProvider } from "../../src/external-model/route-chat-provider.js";
 import { routeTurnByLlm } from "../../src/agent/llm-task-router.js";
 import type { ExternalChatProvider } from "../../src/external-model/types.js";
 
@@ -86,11 +85,8 @@ async function main(): Promise<void> {
   console.log("═══ 场景 A｜纯 DeepSeek（只配 OPENAI_API_KEY）═══");
   await withSingleKey("openai", "MINIMAX_API_KEY", async (mainProvider) => {
     if (!mainProvider?.isEnabled()) throw new Error("DeepSeek 主模型未启用");
-    const route = resolveRouteChatProvider(mainProvider);
-    console.log(
-      `主模型=${mainProvider.id} 路由=${(route as { id?: string } | null)?.id ?? "null"}\n`,
-    );
-    await runRoutes("A·路由", route, "\u200B");
+    console.log(`主模型=路由=${mainProvider.id}（单模型）\n`);
+    await runRoutes("A·路由", mainProvider, "\u200B");
     console.log("");
     await runChat("A·直答", mainProvider, "\u200B");
   });
@@ -98,11 +94,8 @@ async function main(): Promise<void> {
   console.log("\n═══ 场景 B｜纯 MiniMax（只配 MINIMAX_API_KEY）═══");
   await withSingleKey("minimax", "OPENAI_API_KEY", async (mainProvider) => {
     if (!mainProvider?.isEnabled()) throw new Error("MiniMax 主模型未启用");
-    const route = resolveRouteChatProvider(mainProvider);
-    console.log(
-      `主模型=${mainProvider.id} 路由=${(route as { id?: string } | null)?.id ?? "null"}\n`,
-    );
-    await runRoutes("B·路由", route, "\u200B\u200B");
+    console.log(`主模型=路由=${mainProvider.id}（单模型）\n`);
+    await runRoutes("B·路由", mainProvider, "\u200B\u200B");
     console.log("");
     await runChat("B·直答", mainProvider, "\u200B\u200B");
   });

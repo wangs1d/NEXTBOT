@@ -1,6 +1,6 @@
 # 工程铁律（2026-09-24 定稿）
 
-本文是硬约束清单：合入前自查，评审对照。三条铁律 + 两条默认策略，全部来自真实事故或一线对标结论。
+本文是硬约束清单：合入前自查，评审对照。四条铁律 + 两条默认策略，全部来自真实事故或一线对标结论。
 
 ## 铁律一：出口收口 —— 任何绕过聊天管线的 LLM 出口必须自带收口
 
@@ -29,6 +29,16 @@
 2. 所有拼接进工具返回值的错误消息，过一遍 `redactCredentials`（`server/src/security/redact.ts`）；结构性返回值用 `redactDeep`。
 3. 联盟 API 凭据（淘宝客/京东联盟/多多进宝）只在本模块内读取 env + 签名，错误统一脱敏后上抛（official-price-source.ts 为参照）。
 4. 授权边界在用户侧的动作（加购/下单/账号操作），不找服务器代劳的捷径；平台官方 agent 授权通道（如淘宝桌面 MCP）是唯一正门。
+
+## 铁律四：用户事实单一权威源 —— 定字段只允许一个写入者，其余是投影
+
+**背景**：2026-10-09 事故——用户说「以后叫我王哥」，agent 口头应下（读的是画像/KV，已是王哥），但桌面端问候仍显示旧称呼。根因不是「改不了」，而是同一份档案字段（称呼/职业/居住地/技术栈/生日/公司/学历）同时落在 **7 个地方**（结构化事实库 / USER_PROFILE.md / KV `user_profile` / KV `memory_facts` / KV `memory_preferences` / KV `user_profile_facts` / `data/user-facts/*.json`），每条链路各自独立写入、各自覆盖，任一处漏更就自相矛盾；写入闸门还漏判（L1 判了 `personal_fact`，但 `personalFact` 只接了召回、没接写入）。
+
+**规则**：
+1. **定字段的权威源唯一**：`structured_facts`（`server/src/agentic-memory/structured-fact-store.ts`）是称呼/职业/居住地等确定性字段的唯一权威，也是唯一写入者。新增档案字段在 `PROFILE_FIELD_ALIASES` 登记。
+2. **其余位置只能是投影**：USER_PROFILE.md 的「基本信息」字段行由 `profile-fact-authority.ts` 重渲染（同字段只留一行、清别名行与行内历史注解）；KV 槽位不再保留档案字段副本；画像全文的 KV 副本必须与磁盘画像逐字一致。
+3. **发现「某字段在别处又写了一份」时，不是加同步，而是接到权威源上**——加同步只会多一条会漂移的链路。
+4. **存量漂移用一次性收敛清**：`npm run` 之外用 `cd server && node --import tsx scripts/reconcile-profile-facts.ts [actorId]`（幂等，可反复跑）；运行期由写钩子（字段变更去抖收敛）+ 夜间任务 + 启动收敛维持。
 
 ## 默认策略 A：降价监控/比价数据源 —— 官方 API 优先、浏览器兜底、注明来源时效
 

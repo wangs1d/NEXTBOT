@@ -5,6 +5,10 @@
  * 词面 top-5 域多数票（≥2 票强信号）→ 预载该域全族瘦身 schema（≤12）。
  * 旅游轮（大理行程）由 travel 域信号命中覆盖（原硬编码场景回归）；无强信号
  * 轮不预载（纯桥可见）。确定性：同语料同文本恒同域。
+ *
+ * 2026-10-10 P0-1 教训：语料改走真实装配链（SkillManager 注册真实技能 →
+ * skillManifestToChatTool），不再手写 travel 六件套 schema——手搓语料让测试
+ * 构造了生产不存在的描述，回归测不到真实装配 bug。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 process.env.DESKTOP_VISUAL_ENABLED = "1";
@@ -18,6 +22,14 @@ const { getBuiltinAgentChatTools } = await import(
 const { dominantDomainForQuery } = await import("../src/tools/tool-search/index.js");
 const { toolsInDomain, domainsForTool } = await import("../src/tools/tool-search/tool-category.js");
 const { slimToolSchema } = await import("../src/external-model/lane-tool-sets.js");
+const { SkillManager } = await import("../src/skills/skill-manager.js");
+const { skillManifestToChatTool } = await import("../src/skills/skill-openai-bridge.js");
+const { registerTravelPlanningBuiltinSkills } = await import(
+  "../src/skills/travel-planning/travel-planning-skills.js"
+);
+const { PlanningService } = await import(
+  "../src/skills/travel-planning/travel-planning-service.js"
+);
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 function fn(name: string, description = name): ChatCompletionTool {
@@ -34,14 +46,17 @@ function fn(name: string, description = name): ChatCompletionTool {
   };
 }
 
-/** 生产语料 + travel 技能族（bootstrap 注册链同源构造） */
-const corpus: ChatCompletionTool[] = [...getBuiltinAgentChatTools()];
-for (const n of [
-  "travel.plan-itinerary", "travel.search-poi", "travel.destination-info",
-  "travel.compute-route", "travel.get-itinerary", "travel.edit-itinerary",
-]) {
-  corpus.push(fn(n, `${n}：行程规划`));
-}
+/** 生产语料（builtin 静态注册表）∪ 技能族（真实注册链 + 生产同款 manifest→tool 桥） */
+const corpus: ChatCompletionTool[] = (() => {
+  const skillManager = new (SkillManager as new () => InstanceType<typeof SkillManager>)();
+  const travelPlanningService = new (PlanningService as new () => InstanceType<typeof PlanningService>)();
+  registerTravelPlanningBuiltinSkills(
+    (skill) => skillManager.register(skill),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 测试最小 Deps（规划服务本体，无 IO）
+    { travelPlanningService } as any,
+  );
+  return [...getBuiltinAgentChatTools(), ...skillManager.list(true).map(skillManifestToChatTool)];
+})();
 
 test("旅游轮域信号命中：大理行程 → travel 域（原硬编码场景的泛化覆盖）", () => {
   const domain = dominantDomainForQuery("帮我规划一个大理两日游行程", corpus);
@@ -53,10 +68,15 @@ test("域预载族完整：travel 域含规划六件套且瘦身", () => {
   for (const n of ["travel.plan-itinerary", "travel.search-poi", "travel.compute-route"]) {
     assert.ok(family.includes(n), `缺 ${n}`);
   }
+  // 真实技能 manifest 参数：瘦身卸任后任何字段级 description 都不该幸存
   const slim = slimToolSchema(toolsInDomain(corpus, "travel")[0]!);
-  const params = (slim as { function: { parameters: { properties: Record<string, unknown> } } })
-    .function.parameters.properties;
-  assert.equal("description" in params.q, false);
+  const props = (slim as { function: { parameters: { properties: Record<string, unknown> } } })
+    .function.parameters.properties ?? {};
+  const keys = Object.keys(props);
+  assert.ok(keys.length > 0, "真实技能参数应至少存在一个字段");
+  for (const k of keys) {
+    assert.equal("description" in (props[k] as object), false, `${k} 的字段级描述应被剥掉`);
+  }
 });
 
 test("无强信号不预载：闲聊文本域信号为空", () => {

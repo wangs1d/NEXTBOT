@@ -34,6 +34,11 @@ import {
 import { SilenceLog, type SilenceLogEntry, type SilenceSearchOptions } from "./silence-log.js";
 import { FrequencyGovernor } from "./frequency-governor.js";
 import {
+  TemporalAdmissionGate,
+  formatAdmissionEvidence,
+  isTemporalAdmissionEnabled,
+} from "./temporal-admission.js";
+import {
   TurnAsideQueue,
   formatTurnAsidePrompt,
   isTurnAsideEnabled,
@@ -135,6 +140,11 @@ export interface ProactivityHubDeps {
     executed: boolean,
   ) => void;
   /**
+   * 时效准入闸（2026-10-09）：话题级准入（年龄 + 相关性 + 静默 + 复活配额），
+   * 插在负反馈抑制之后、FrequencyGovernor 之前。未注入时 hub 内建默认实例。
+   */
+  temporalAdmissionGate?: TemporalAdmissionGate;
+  /**
    * 顺嘴搭车队列（2026-10-01 P1）：注入后 low 级 speak 不即时推送，挂起等
    * 用户下一轮对话织入回复末尾（agent-core 经 takeTurnAsideForTurn 取走）。
    * 队列拒绝（同 kind 挂起中/间隔不足）时回退原即时路径。
@@ -216,6 +226,8 @@ export function parseFirstTrack(
 
 export class ProactivityHub {
   private readonly governor: FrequencyGovernor;
+  /** 时效准入闸（话题年龄/相关性/静默/复活配额；见 temporal-admission.ts） */
+  private readonly admissionGate: TemporalAdmissionGate;
   /** 沉默日志（act 三分支 silence 留痕；与管道共享实例由装配层注入） */
   private readonly silenceLog: SilenceLog;
   /** 挂起确认存储（ask_first；与管道共享实例由装配层注入，可落盘恢复） */
@@ -231,6 +243,12 @@ export class ProactivityHub {
   private readonly knownActors = new Set<string>();
   /** 最近一次对话交互时刻（observeConversationTurn 维护） */
   private readonly lastInteractionAt = new Map<string, number>();
+  /**
+   * 近期用户原话环形窗口（话题相关度判定用；最多保留最近 5 轮）。
+   * 只用于"这件事跟用户现在聊的搭不搭"，不喂任何 LLM，也不替代 WorldBoard 会话层。
+   */
+  private readonly recentUserTexts = new Map<string, string[]>();
+  private readonly RECENT_USER_TEXTS_LIMIT = 5;
   /** 最近已发起的主动行为（防重复同类主动） */
   private readonly recentInitiatives = new Map<string, string[]>();
   /** 防重记忆落盘路径（deps.dataPath 注入时启用） */
@@ -248,6 +266,7 @@ export class ProactivityHub {
 
   constructor(private readonly deps: ProactivityHubDeps) {
     this.governor = deps.frequencyGovernor ?? new FrequencyGovernor();
+    this.admissionGate = deps.temporalAdmissionGate ?? new TemporalAdmissionGate();
     this.silenceLog = deps.silenceLog ?? new SilenceLog();
     this.confirmations = deps.pendingConfirmations ?? new PendingConfirmationStore();
     // 防重记忆持久化（可选 dataPath）：重启后 noteInitiative 的记录不丢，
@@ -340,6 +359,11 @@ export class ProactivityHub {
   observeConversationTurn(actorId: string, text: string): void {
     this.knownActors.add(actorId);
     this.lastInteractionAt.set(actorId, Date.now());
+    // 话题窗口（相关度判定用）：最近 5 轮用户原话
+    const ring = this.recentUserTexts.get(actorId) ?? [];
+    ring.push(text);
+    if (ring.length > this.RECENT_USER_TEXTS_LIMIT) ring.splice(0, ring.length - this.RECENT_USER_TEXTS_LIMIT);
+    this.recentUserTexts.set(actorId, ring);
     // 会话层入板：程序截断整理，供映射规则/诊断读取（不喂任何 LLM）
     try {
       this.deps.onConversationTurn?.(actorId, text.slice(0, 120));
@@ -475,7 +499,43 @@ export class ProactivityHub {
     if (intent) await this.route(intent);
   }
 
-  /** 快路径核心：意图 → 抑制 → 频控 → 按行为模式分发 */
+  /**
+   * 时效准入判定（话题级）：插在负反馈抑制之后、频控之前。
+   * 只在意图带了 `originAt` 且年龄越过在途窗口时从严；未打 originAt 的意图
+   * （天气/邮件/账单/日程等即时事件）一律放行，既有行为不变。
+   * 拦截时写沉默日志 scope=admission，支撑「你当时为什么没提这件事」的反问。
+   */
+  private admitIntent(intent: ProactiveIntent): { admitted: boolean; evidence?: string } {
+    if (!isTemporalAdmissionEnabled()) return { admitted: true };
+    const texts = this.recentUserTexts.get(intent.actorId) ?? [];
+    const verdict = this.admissionGate.evaluate(intent, {
+      currentUserText: texts.length > 0 ? texts[texts.length - 1] : undefined,
+      recentUserTexts: texts,
+      lastInteractionAt: this.lastInteractionAtOf(intent.actorId),
+    });
+    if (verdict.admitted) {
+      // 复活旧话题（越窗）才留审计串；在途/新鲜事件不额外加噪
+      return { admitted: true, evidence: verdict.revived ? formatAdmissionEvidence(verdict) : undefined };
+    }
+    console.log(
+      `[ProactivityHub] 时效准入拦截 kind=${intent.kind} actor=${intent.actorId} reason=${verdict.reason}`,
+    );
+    this.silenceLog.record({
+      at: Date.now(),
+      actorId: intent.actorId,
+      kind: intent.kind,
+      title: `${intent.title}`.slice(0, 60),
+      source: intent.source,
+      scope: "admission",
+      netUtility: 0,
+      riskScore: 0,
+      valueScore: 0,
+      reason: verdict.reason,
+    });
+    return { admitted: false };
+  }
+
+  /** 快路径核心：意图 → 抑制 → 时效准入 → 频控 → 按行为模式分发 */
   private async route(intent: ProactiveIntent): Promise<void> {
     // 负反馈抑制检查（用户意愿优先于时间冷却）：kind 级或关键词级命中即放弃
     const suppression = this.deps.suppressionStore?.isSuppressed(
@@ -489,6 +549,9 @@ export class ProactivityHub {
       );
       return;
     }
+    // 时效准入（话题是否还该被主动提起）：年龄/相关性/静默/复活配额
+    const admission = this.admitIntent(intent);
+    if (!admission.admitted) return;
     const verdict = this.governor.canTrigger(intent.actorId, intent.kind, intent.importance);
     if (!verdict.allowed) {
       console.log(`[ProactivityHub] 频控拦截 kind=${intent.kind} actor=${intent.actorId} reason=${verdict.reason}`);
@@ -508,9 +571,9 @@ export class ProactivityHub {
         // 队列拒绝（同 kind 挂起中/间隔不足）或通道关闭时走原即时投递。
         if (this.tryDeferToTurnAside(intent)) break;
         if (this.isDirectLaneEnabled()) {
-          this.submitDirectSpeak(intent);
+          this.submitDirectSpeak(intent, admission.evidence);
         } else {
-          this.emitSpeakSignal(intent);
+          this.emitSpeakSignal(intent, admission.evidence);
         }
         break;
       case "act":
@@ -532,10 +595,10 @@ export class ProactivityHub {
    * 直达车道提交：intent → 零 LLM 模板渲染 directText → 统一管道提案。
    * 频控在管道仲裁层再查一次（socialCanTrigger），计数在真正 delivered 时发生。
    */
-  private submitDirectSpeak(intent: ProactiveIntent): void {
+  private submitDirectSpeak(intent: ProactiveIntent, admissionEvidence?: string): void {
     if (!this.directLane) {
       // 车道未接线（管道未创建/测试环境）：回退旧路径
-      this.emitSpeakSignal(intent);
+      this.emitSpeakSignal(intent, admissionEvidence);
       return;
     }
     const text = renderProactiveText(intent.kind, {
@@ -554,7 +617,11 @@ export class ProactivityHub {
       title: intent.title,
       summary: intent.summary,
       directText: text,
-      evidence: [`source=${intent.source}`, "direct_lane"],
+      evidence: [
+        `source=${intent.source}`,
+        "direct_lane",
+        ...(admissionEvidence ? [admissionEvidence] : []),
+      ],
       createdAt: Date.now(),
       source: `hub:${intent.source}`,
     };
@@ -636,7 +703,7 @@ export class ProactivityHub {
   /**
    * speak 模式：发布 LifeSignal → 现有 ProactionCortex 闭环接管
    */
-  private emitSpeakSignal(intent: ProactiveIntent & { direct?: boolean }): void {
+  private emitSpeakSignal(intent: ProactiveIntent & { direct?: boolean }, admissionEvidence?: string): void {
     // 死信闸（2026-10-01 P0）：全设备离线时信号必然无人接收——跳过，
     // 省一次下游话术 LLM 调用，也不再产生「已发送」假台账。
     // （low 级已被搭车队列在 route() 拦截，到这里的多为 medium+，挂起重试
@@ -655,7 +722,11 @@ export class ProactivityHub {
         summary: intent.summary,
         importance: intent.importance,
         tags: [intent.kind, "proactivity"],
-        evidence: [`source=${intent.source}`, intent.summary.slice(0, 96)],
+        evidence: [
+          `source=${intent.source}`,
+          intent.summary.slice(0, 96),
+          ...(admissionEvidence ? [admissionEvidence] : []),
+        ],
         metadata: {
           source: intent.source,
           proactivityKind: intent.kind,

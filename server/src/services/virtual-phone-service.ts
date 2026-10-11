@@ -159,7 +159,7 @@ export class VirtualPhoneService {
 
   /**
    * 按通话上下文构建 realtime 会话人设（经 VoiceDuplexService 注入
-   * MinimaxDuplexSession 的 instructions）。非活跃通话返回 null（用默认人设）。
+   * RealtimeDuplexSession 的 instructions）。非活跃通话返回 null（用默认人设）。
    */
   getCallVoiceContext(callId: string): string | null {
     const session = this.callSessions.get(callId.trim());

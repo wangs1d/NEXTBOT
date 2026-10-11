@@ -24,8 +24,10 @@ export type ToolCallTraceEntry = {
    *   deferred   = 经桥按名/检索/请求卡调回的延迟工具
    *   hallucination_promoted = 模型未检索就直呼的不可见名，registry 放行执行
    *                            （调用即发现转正，等价 discover+call 合一波）
+   *   deterministic = 服务端确定性预执行（2026-10-10：媒体意图轮开场真搜，
+   *                   不经模型决策，根治搜图轮「时有时无」）
    */
-  acquisition?: "visible" | "bridge" | "deferred" | "hallucination_promoted";
+  acquisition?: "visible" | "bridge" | "deferred" | "hallucination_promoted" | "deterministic";
   /**
    * 失败是否为参数级错误（2026-10-10 L3 盲区观测）：arguments 非法 JSON
    * （TOOL_ARGS_MALFORMED）或 schema 校验不过（VALIDATION_ERROR）。L3 错误即

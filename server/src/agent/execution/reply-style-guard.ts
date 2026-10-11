@@ -29,6 +29,7 @@ export type ReplyStyleViolation =
   | "hedge_pileup" // 找补/自证堆积（"我不编""怕你糟心""实话讲"连环）
   | "offer_pileup" // 连环让步式收尾（"截图丢给我""或者你想让我""我帮你存"）
   | "self_explain" // 能力自诉句（"我的问题在于：我看不到…"——结论已给，这就是废话）
+  | "meta_narration" // 元叙述段（（用户已通过 profile_update…本轮主任务…）——把注入的任务上下文复述给用户）
   | "overlong"; // chat 面纯文本超长（无结构却超过句数/字数上限）
 
 /**
@@ -94,6 +95,18 @@ const SELF_EXPLAIN_STRONG_RE =
 /** 能力自诉·弱标记：单看是正常说明，仅在找补/超长已定罪时一并删 */
 const SELF_EXPLAIN_WEAK_RE = /(我只能|我搜不了|我无法|我这边看不到)/;
 
+/**
+ * 元叙述·强标记（2026-10-10 P0-2）：模型把注入的任务上下文（turnIntent/任务态/
+ * 路由结果）复述进正文——真机实证（马尔代夫规划轮）：整段（用户已通过
+ * profile_update 记录固定称呼"王哥"；…前置任务：…本轮主任务：…）原样流给用户。
+ * 词表与 agentic-memory/ltm-write-gate.ts 的 TASK_STATE_RE 同源（记忆写入侧早有
+ * 同款闸，回复出口此前没有——「只建了一半」的闸家族）。
+ */
+const META_NARRATION_TERM_RE =
+  /本轮主任务|前置任务[：:]|本轮目标|本轮用户(?:从|已)|活跃目标|profile_update|EvolutionLoop|优先级\s*[=＝]|路由[：:]|turnIntent|routeConfidence|截至(?:本|该)轮|该轮次|任务态/;
+/** 元叙述段最小长度：短括注（"（预算档位）"）即使碰巧含词也不动刀 */
+const META_NARRATION_MIN_CHARS = 10;
+
 // ── 句级手术 ──
 
 /** 分句（含句末标点；；与换行同作边界，让"；或者…"式连环让步能被切开） */
@@ -132,6 +145,63 @@ function factCarriedElsewhere(sentences: string[], exclude: string): boolean {
   return sentences.some((s) => s !== exclude && FACT_MARKER_RE.test(s));
 }
 
+// ── 元叙述段剥离（2026-10-10 P0-2）──
+
+/** 摘出顶层括号段（支持一层嵌套；全角/半角括号混算），返回内容与原文区间 */
+function extractParenSegments(
+  text: string,
+): { content: string; start: number; end: number }[] {
+  const out: { content: string; start: number; end: number }[] = [];
+  let i = 0;
+  while (i < text.length) {
+    const ch = text[i];
+    if (ch === "（" || ch === "(") {
+      let depth = 1;
+      let j = i + 1;
+      while (j < text.length && depth > 0) {
+        const c = text[j];
+        if (c === "（" || c === "(") depth++;
+        else if (c === "）" || c === ")") depth--;
+        j++;
+      }
+      if (depth === 0) {
+        out.push({ content: text.slice(i + 1, j - 1), start: i, end: j });
+        i = j;
+        continue;
+      }
+    }
+    i++;
+  }
+  return out;
+}
+
+/**
+ * 元叙述段判定：括号包裹 + 含强标记元词 + 达到最小长度。
+ * 只删段不改写——正文其余部分一个字节不动。
+ */
+function isMetaNarrationSegment(content: string): boolean {
+  return content.length >= META_NARRATION_MIN_CHARS && META_NARRATION_TERM_RE.test(content);
+}
+
+/**
+ * 确定性剥离正文中的元叙述括号段（含同段重复出现——真机那轮同一段自述落了两遍）。
+ * 剥离后空白塌缩（段间残留空行收敛到双换行）。
+ */
+export function stripMetaNarration(body: string): { body: string; removed: string[] } {
+  const segments = extractParenSegments(body).filter((s) => isMetaNarrationSegment(s.content));
+  if (segments.length === 0) return { body, removed: [] };
+  const removed = segments.map((s) => s.content);
+  let out = "";
+  let cursor = 0;
+  for (const s of segments) {
+    out += body.slice(cursor, s.start);
+    cursor = s.end;
+  }
+  out += body.slice(cursor);
+  out = out.replace(/\n{3,}/g, "\n\n").trim();
+  return { body: out, removed };
+}
+
 /**
  * 能力自诉句删除判定：强标记句（"我的问题在于：我看不到…"）在已有别句承载
  * 事实时是纯废话；弱标记句（"我只能…"）仅在找补/超长已定罪时随案删除。
@@ -164,6 +234,8 @@ const CHAT_KEEP_PLAIN_CHARS = 120;
 /**
  * 执法入口：检测 + 越形才整形。
  * 检测在协议块摘出后的裸正文上做；整形只做句级删除，绝不改写、不重排。
+ * meta_narration（2026-10-10 P0-2）在句级手术**之前**做整段确定性剥离：
+ * 元叙述段是括号包裹的多句长段，句级手术切不开它，必须整段摘除。
  */
 export function enforceReplyStyle(
   rawText: string,
@@ -172,17 +244,43 @@ export function enforceReplyStyle(
 ): ReplyStyleGateResult {
   if (!rawText || isGateDisabled()) return { text: rawText, changed: false, violations: [] };
 
-  const { body, blocks } = extractProtocolBlocks(rawText);
-  if (!body) return { text: rawText, changed: false, violations: [] };
+  const { body: protocolBody, blocks } = extractProtocolBlocks(rawText);
+  if (!protocolBody) return { text: rawText, changed: false, violations: [] };
+  const suffix = blocks.length > 0 ? `\n\n${blocks.join("")}` : "";
 
-  const violations = detectViolations(body, lane, opts?.confirmationRound ?? false);
+  // ── meta_narration 剥离（先于句级手术）──
+  const meta = stripMetaNarration(protocolBody);
+  if (meta.removed.length > 0) {
+    if (!meta.body) {
+      // 永不变差：整段都是元叙述、剥完为空 → 回退原文（宁漏勿残）
+      return { text: rawText, changed: false, violations: ["meta_narration"] };
+    }
+    const violations = detectViolations(meta.body, lane, opts?.confirmationRound ?? false);
+    if (violations.length === 0) {
+      return { text: `${meta.body}${suffix}`, changed: true, violations: ["meta_narration"] };
+    }
+    const trimmedBody = trimBody(meta.body, violations, lane, opts);
+    if (!trimmedBody || trimmedBody === meta.body) {
+      return {
+        text: `${meta.body}${suffix}`,
+        changed: true,
+        violations: ["meta_narration", ...violations],
+      };
+    }
+    return {
+      text: `${trimmedBody}${suffix}`,
+      changed: true,
+      violations: ["meta_narration", ...violations],
+    };
+  }
+
+  const violations = detectViolations(protocolBody, lane, opts?.confirmationRound ?? false);
   if (violations.length === 0) return { text: rawText, changed: false, violations: [] };
 
-  const trimmedBody = trimBody(body, violations, lane, opts);
-  if (!trimmedBody || trimmedBody === body) {
-    return { text: rawText, changed: trimmedBody !== body, violations };
+  const trimmedBody = trimBody(protocolBody, violations, lane, opts);
+  if (!trimmedBody || trimmedBody === protocolBody) {
+    return { text: rawText, changed: trimmedBody !== protocolBody, violations };
   }
-  const suffix = blocks.length > 0 ? `\n\n${blocks.join("")}` : "";
   return { text: `${trimmedBody}${suffix}`, changed: true, violations };
 }
 
@@ -231,7 +329,12 @@ export function detectReplyStyleViolations(
 ): ReplyStyleViolation[] {
   const { body } = extractProtocolBlocks(text);
   if (!body) return [];
-  return detectViolations(body, lane, opts?.confirmationRound ?? false);
+  const out = detectViolations(body, lane, opts?.confirmationRound ?? false);
+  // 元叙述段与句级特征正交（多句括号长段，句级检测覆盖不到），单独补检
+  if (extractParenSegments(body).some((s) => isMetaNarrationSegment(s.content))) {
+    return ["meta_narration", ...out];
+  }
+  return out;
 }
 
 function trimBody(

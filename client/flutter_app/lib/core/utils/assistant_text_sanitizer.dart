@@ -98,6 +98,8 @@ const List<String> kInternalFrameTags = <String>[
   "本轮用户明确要求不联网",
   "话题切换",
   "话题已切换",
+  // 上游 provider harness 的轨迹切分控制帧（2026-10-11 事故：整条回复都是它）
+  "trajectory-slicing",
 ];
 
 final String _internalFrameAlt =
@@ -127,6 +129,126 @@ final RegExp _systemReminderAnyTagRe = RegExp(
 );
 final RegExp _cjkCharRe = RegExp(r"[\u3400-\u4dbf\u4e00-\u9fff]");
 
+// ── XML 形态的 <system> harness 控制帧（2026-10-11 事故根源，与服务端
+//    `internal-frames.ts` 的 stripSystemFrames 同构）─────────────────────
+//
+// 真实事故：旅行规划轮的 assistant 正文**整条**只有 61 字，全部是上游 harness
+// 塞进模型上下文的轨迹切分控制帧（本工程从不产生该形态），模型原样复读：
+//   <system>
+//   [trajectory-slicing]
+//   接下来的回复被分到两条轨迹，#1 紧接本段，#2 紧接 #1。
+// 与 `<system-reminder>` 的差别：本形态**不闭合**，且帧体说明行带中文，不能照搬
+// 「吞无 CJK 行」。判据：opener 后首个非空行是方括号纯拉丁控制标签 → 整个块都是
+// 帧体，吞到块尾（空行）或 EOF。
+final RegExp _systemFrameOpenRe = RegExp(r"<\s*system\s*>", caseSensitive: false);
+final RegExp _systemFrameBlockRe = RegExp(
+  r"<system>[\s\S]*?</system>",
+  caseSensitive: false,
+);
+final RegExp _systemFrameAnyRe = RegExp(r"<\s*system\s*>", caseSensitive: false);
+final RegExp _harnessTagLineRe =
+    RegExp(r"^[ \t]*\[[A-Za-z][A-Za-z0-9._:\-/ ]*\][ \t]*$");
+
+String _stripOneUnclosedSystemFrame(String text) {
+  final Match? m = _systemFrameOpenRe.firstMatch(text);
+  if (m == null) return text;
+  final int start = m.start;
+  final List<String> lines = text.substring(m.end).split("\n");
+  int firstBody = -1;
+  for (int i = 0; i < lines.length; i++) {
+    if (lines[i].trim().isNotEmpty) {
+      firstBody = i;
+      break;
+    }
+  }
+  if (firstBody >= 0 && _harnessTagLineRe.hasMatch(lines[firstBody])) {
+    int end = lines.length;
+    for (int i = firstBody + 1; i < lines.length; i++) {
+      if (lines[i].trim().isEmpty) {
+        end = i;
+        break;
+      }
+    }
+    return end < lines.length
+        ? text.substring(0, start) + lines.sublist(end).join("\n")
+        : text.substring(0, start);
+  }
+  int consumed = 0;
+  for (; consumed < lines.length; consumed++) {
+    if (_cjkCharRe.hasMatch(lines[consumed])) break;
+  }
+  if (consumed >= lines.length) return text.substring(0, start);
+  return text.substring(0, start) + lines.sublist(consumed).join("\n");
+}
+
+/// 剥离 XML 形态的 `<system>` harness 控制帧（闭合整块删 / 未闭合吞到块尾）。
+String stripSystemFrames(String text) {
+  if (text.isEmpty || !_systemFrameAnyRe.hasMatch(text)) return text;
+  String out = text.replaceAll(_systemFrameBlockRe, "");
+  for (var i = 0; i < 8; i++) {
+    final String next = _stripOneUnclosedSystemFrame(out);
+    if (next == out) break;
+    out = next;
+  }
+  out = out.replaceAll(RegExp(r"</?system>", caseSensitive: false), "");
+  // 接缝收敛：帧在开头时剥完会留下起首空行（气泡首行空白）。
+  return out
+      .replaceFirst(RegExp(r"^[ \t]*\n+"), "")
+      .replaceAll(RegExp(r"\n{3,}"), "\n\n");
+}
+
+/// 整条文本是否「只是一个/多个 `<system>` 控制帧」（剥完为空 → 不该显示）。
+bool isSystemFrameText(String text) {
+  if (text.isEmpty || !_systemFrameAnyRe.hasMatch(text)) return false;
+  return stripSystemFrames(text).trim().isEmpty;
+}
+
+/// 流式探测：缓冲内容是否为 `<system>` / `<system-reminder>` opener 的**半截前缀**
+/// （还没出现 `>`）。命中说明标签可能尚未到齐，调用方应扣住待判——半截标签先吐
+/// 给用户就撤不回。
+bool _isPartialSystemOpener(String text) {
+  final String t = text.trimLeft().toLowerCase();
+  if (t.isEmpty || t.contains(">")) return false;
+  for (final String target in const <String>["<system-reminder>", "<system>"]) {
+    if (target.startsWith(t)) return true;
+  }
+  return false;
+}
+
+/// 缓冲内容里是否有一个「尚未终结」的 `<system>` 控制帧：无 `</system>` 闭合，
+/// opener 后首个非空行是方括号控制标签（harness 帧体），且帧体之后还没出现空行
+/// 分界。命中即继续扣住整条流（见 AssistantTextSanitizer.ingest）。
+bool _hasUnterminatedSystemFrame(String text) {
+  final Match? m = _systemFrameOpenRe.firstMatch(text);
+  if (m == null) return false;
+  if (_systemFrameBlockRe.hasMatch(text)) return false; // 已闭合 → 已终结
+  final List<String> lines = text.substring(m.end).split("\n");
+  int firstBody = -1;
+  for (int i = 0; i < lines.length; i++) {
+    if (lines[i].trim().isNotEmpty) {
+      firstBody = i;
+      break;
+    }
+  }
+  if (firstBody < 0) return true; // 帧体还没到，继续等
+  final String body = lines[firstBody].trim();
+  if (!_harnessTagLineRe.hasMatch(body)) {
+    // 控制标签可能还没收完（`[traj` / `[trajectory-slic`）：继续等，别急着放行
+    // ——一旦放行，后续帧体说明行就会从直通分支漏出去（本次事故的泄漏路径）。
+    if (body.startsWith("[") && body.length < 40 && !_cjkCharRe.hasMatch(body)) {
+      return true;
+    }
+    return false; // 非控制标签 → 不是 harness 帧体，走常规
+  }
+  for (int i = firstBody + 1; i < lines.length; i++) {
+    // 末位空元素只是「流还在继续」（split 尾部残留），不是空行分界
+    if (lines[i].trim().isEmpty && i != lines.length - 1) {
+      return false; // 空行分界 → 帧体结束，后面是正文
+    }
+  }
+  return true;
+}
+
 String _stripOneUnclosedSystemReminder(String text) {
   final Match? m = _systemReminderOpenRe.firstMatch(text);
   if (m == null) return text;
@@ -142,10 +264,11 @@ String _stripOneUnclosedSystemReminder(String text) {
 
 String stripSystemReminderBlocks(String text) {
   if (text.isEmpty ||
-      !text.toLowerCase().contains("system-reminder")) {
+      !(text.toLowerCase().contains("system-reminder") ||
+          _systemFrameAnyRe.hasMatch(text))) {
     return text;
   }
-  String out = text.replaceAll(_systemReminderBlockRe, "");
+  String out = stripSystemFrames(text).replaceAll(_systemReminderBlockRe, "");
   for (var i = 0; i < 8; i++) {
     final String next = _stripOneUnclosedSystemReminder(out);
     if (next == out) break;
@@ -234,6 +357,21 @@ class AssistantTextSanitizer {
     final String trimmed = buffered.trimLeft();
 
     if (trimmed.isEmpty) return "";
+
+    // XML 形态 harness 帧（`<system>` / `<system-reminder>`）：
+    // 1) 半截 opener（`<sy…`）先扣住——先吐就撤不回；
+    // 2) `<system>` 控制帧尚未终结（无 `</system>`，帧体后也没出现空行分界）时
+    //    继续扣住整条流——帧体后半段的说明行里没有 opener，逐 chunk 净化认不出来，
+    //    会从直通分支漏给用户（真实事故就是这样把「接下来的回复被分到两条轨迹…」
+    //    送上了气泡）。流结束时由 drainPending 做最终剥离（整条即帧 → 返回空串）。
+    if (trimmed.startsWith("<")) {
+      if (_isPartialSystemOpener(buffered) && buffered.length < maxPendingLength) {
+        return "";
+      }
+      if (_hasUnterminatedSystemFrame(buffered)) {
+        if (buffered.length < maxPendingLength) return "";
+      }
+    }
 
     // 容忍残缺帧：`[ts` 后可能断行/丢冒号（如 "[ts\n2026-09-03 ...]"），
     // 因此只要开头是 "[ts" 就先按住缓冲，等帧闭合（出现 "]"）再一次性剥。

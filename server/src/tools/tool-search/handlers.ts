@@ -8,7 +8,7 @@ import {
   type AdaptiveDeferredToolSearchMatch,
 } from "./adaptive-catalog.js";
 import { slimJsonSchema, firstSentence } from "./schema-slim.js";
-import { DOMAIN_REGISTRY, domainDefByName, domainsForTool } from "./tool-category.js";
+import { domainsForTool, resolveDomainDef } from "./tool-category.js";
 import { getAdaptiveSearchRouting } from "./adaptive-catalog.js";
 import { getToolSearchConfig } from "./env.js";
 import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from "./tool-embedding.js";
@@ -261,10 +261,16 @@ function executeToolDiscoverByDomain(
   catalog: DeferredToolCatalog,
   domain: string,
 ): Promise<ToolSearchBridgeResult> {
-  const def = domainDefByName(domain);
-  if (!def) {
-    const available = DOMAIN_REGISTRY.filter((d) => d.name !== "misc")
-      .map((d) => d.name)
+  // 2026-10-10 根修：域可用性由「目录里是否有该域成员」裁定，而非「是否登记在
+  // DOMAIN_REGISTRY」。派生域（技能族 habit/booking/picture/finance/virtual-phone/
+  // agentworld 等自动成域）因此与显式域同等可达；不存在的域名仍走自纠错分支。
+  const members = catalog.entries
+    .map((e) => e.registryName)
+    .filter((n) => domainsForTool(n).includes(domain));
+  if (members.length === 0) {
+    const available = [...new Set(catalog.entries.flatMap((e) => domainsForTool(e.registryName)))]
+      .filter((d) => d !== "misc")
+      .sort()
       .join("、");
     return Promise.resolve({
       kind: "discover",
@@ -272,9 +278,7 @@ function executeToolDiscoverByDomain(
       result: { error: `未知能力域: ${domain}`, available_domains: available },
     });
   }
-  const members = catalog.entries
-    .map((e) => e.registryName)
-    .filter((n) => domainsForTool(n).includes(domain));
+  const def = resolveDomainDef(domain);
   const wire = members.slice(0, DOMAIN_PULL_LIMIT).map((memberName, rank) => {
     const entry = catalog.byName.get(memberName);
     const fn = entry && entry.tool.type === "function" ? entry.tool.function : undefined;
@@ -299,7 +303,15 @@ function executeToolDiscoverByDomain(
       count: members.length,
       matches: wire,
       ...(members.length > DOMAIN_PULL_LIMIT
-        ? { more: members.length - DOMAIN_PULL_LIMIT, hint_more: "用 name 模式拉取未列出的工具 schema" }
+        ? {
+            // 2026-10-10 根修：截断仅限「详细视图」，被截工具的【名字】必须随行下发——
+            // 否则域卡标了 (+N) 告诉模型「还有更多」，模型按域来拉却既看不到名、也无法
+            // name 模式补拉（提示不可执行）→ 大域尾部工具对模型事实不可枚举。仅补名字，
+            // 不附描述/schema，提示词零膨胀。
+            more: members.length - DOMAIN_PULL_LIMIT,
+            more_names: members.slice(DOMAIN_PULL_LIMIT),
+            hint_more: "未展开的工具名见 more_names，需要时用 name 模式拉取其参数 schema",
+          }
         : {}),
       hint: "matches 内工具可直接 tool_call 按名调用；前 3 名已附参数 schema，其余需要时用 name 模式补拉。",
     },

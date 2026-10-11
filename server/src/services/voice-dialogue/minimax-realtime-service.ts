@@ -1,5 +1,24 @@
 import WebSocket from "ws";
 
+import type {
+  RealtimeTurnInput,
+  RealtimeTurnResult,
+  RealtimeTurnStreamHandlers,
+} from "../voice-duplex/realtime-engine-port.js";
+
+/**
+ * 回合相关契约（输入 / 结果 / 流式回调）的权威定义在端口
+ * `voice-duplex/realtime-engine-port.ts`：上层（会话层 / 装配层）依赖端口，
+ * 不依赖厂商模块。此处再导出仅为兼容既有 import 路径，新代码请直接引端口。
+ */
+export type {
+  RealtimeTurnInput,
+  RealtimeTurnResult,
+  RealtimeTurnStreamHandlers,
+  /** @deprecated 用 RealtimeTurnStreamHandlers */
+  RealtimeTurnStreamHandlers as TurnStreamHandlers,
+} from "../voice-duplex/realtime-engine-port.js";
+
 /**
  * MiniMax Realtime API（实时交互，端到端语音对话）客户端。
  *
@@ -51,16 +70,6 @@ export interface RealtimeSessionConfig {
   temperature?: number;
   /** 服务端字段类型为 string，传数字会被整体拒绝 */
   maxResponseOutputTokens?: string;
-}
-
-export interface RealtimeTurnResult {
-  /** 助手回复语音，PCM16 单声道 24kHz 裸流 */
-  audio: Buffer;
-  transcript: string;
-  /** 服务端对我们输入音频的 ASR 结果（若下发） */
-  asrText: string | null;
-  firstAudioMs: number | null;
-  totalMs: number;
 }
 
 function defaultSocketFactory(apiKey: string): () => RealtimeSocketLike {
@@ -381,12 +390,6 @@ export class MiniMaxRealtimeService {
   }
 }
 
-/** 一轮对话的输入：文本（conversation.item.create）或整段 16kHz PCM（append+commit）二选一。 */
-export interface RealtimeTurnInput {
-  text?: string;
-  pcm16k?: Buffer;
-}
-
 interface ActiveTurn {
   audioChunks: Buffer[];
   transcript: string;
@@ -396,6 +399,11 @@ interface ActiveTurn {
   timer: NodeJS.Timeout;
   resolve: (r: RealtimeTurnResult) => void;
   reject: (e: Error) => void;
+  /** 流式增量回调（可选） */
+  onAudioChunk?: (chunk: Buffer, seq: number) => void;
+  onTranscriptDelta?: (text: string) => void;
+  /** 已下发的音频块计数 */
+  audioSeq: number;
 }
 
 /**
@@ -422,8 +430,15 @@ export class PersistentRealtimeClient {
     return this.session != null;
   }
 
-  /** 跑一轮回合。timeout 到点判失败并丢弃连接（状态可疑不复用）。 */
-  async turn(input: RealtimeTurnInput, timeoutMs = 45000): Promise<RealtimeTurnResult> {
+  /**
+   * 跑一轮回合。timeout 到点判失败并丢弃连接（状态可疑不复用）。
+   * 传 handlers.onAudioChunk 即进入流式模式：音频边到边交回调，返回值不再聚合。
+   */
+  async turn(
+    input: RealtimeTurnInput,
+    timeoutMs = 45000,
+    handlers?: RealtimeTurnStreamHandlers,
+  ): Promise<RealtimeTurnResult> {
     if (this.current) {
       throw new Error("上一回合仍在进行中");
     }
@@ -443,6 +458,9 @@ export class PersistentRealtimeClient {
         }, timeoutMs),
         resolve,
         reject,
+        onAudioChunk: handlers?.onAudioChunk,
+        onTranscriptDelta: handlers?.onTranscriptDelta,
+        audioSeq: 0,
       };
       this.current = active;
       void this.dispatch(session, input).catch((err: unknown) => {
@@ -492,12 +510,18 @@ export class PersistentRealtimeClient {
       const t = this.current;
       if (!t) return;
       t.firstAudioMs ??= Date.now() - t.startedAt;
-      t.audioChunks.push(chunk);
+      // 流式模式：即时上交调用方下发，不再聚合整轮副本；否则照旧累积待 settle 返回
+      if (t.onAudioChunk) {
+        t.onAudioChunk(chunk, ++t.audioSeq);
+      } else {
+        t.audioChunks.push(chunk);
+      }
     });
     session.onTranscriptDelta((text) => {
       const t = this.current;
       if (!t) return;
       t.transcript += text;
+      t.onTranscriptDelta?.(text);
     });
     session.onTranscriptDone((text) => {
       const t = this.current;

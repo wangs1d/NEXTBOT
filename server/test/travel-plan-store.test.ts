@@ -16,10 +16,9 @@ process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
-const {
-  buildTravelStatePrompt,
-  shouldInjectTravelState,
-} = await import("../src/services/travel-prompt-snapshot.js");
+const { buildTravelStatePrompt } = await import(
+  "../src/services/travel-prompt-snapshot.js"
+);
 const { createTravelPlanningBuiltinSkills } = await import(
   "../src/skills/travel-planning/travel-planning-skills.js"
 );
@@ -104,10 +103,9 @@ test("plan store: findByDestination matches latest case-insensitively", () => {
   assert.equal(travelPlanStore.findByDestination("不存在的岛"), null);
 });
 
-test("travel state prompt: gated by keywords, lists compact receipts when trips exist", () => {
-  assert.equal(shouldInjectTravelState("帮我看看第二天的行程怎么调整"), true);
-  assert.equal(shouldInjectTravelState("今天天气怎么样"), false);
-
+test("travel state prompt: snapshot lists compact receipts when trips exist (注入门控归 understanding)", () => {
+  // 词表判定退役：shouldInjectTravelState 已删，注入门槛由调用方按
+  // L1 路由 understanding.travel_query 裁决（本文件只测快照产出本身）。
   const snap = buildTravelStatePrompt();
   assert.ok(snap, "有已存行程时应产出快照");
   assert.match(snap!, /^TRIP\|count=1$/m);

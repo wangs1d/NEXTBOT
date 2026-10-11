@@ -27,14 +27,25 @@ function commitmentPartyLabel(record: CommitmentRecord): string {
 
 export function createCommitmentScheduleOutlet(deps: {
   tasks: ScheduleTaskService;
+  /**
+   * 时间源注入：承诺板把自身时钟传进来，保证「时间闸」与板扫描、日程未来闸
+   * 同一时基（否则注入冻结时钟的测试会在真实时间越过 fixture 日期后静默不物化）。
+   * 缺省读真实时钟，生产行为不变。
+   */
+  now?: () => Date;
 }): CommitmentScheduleOutlet {
   const { tasks } = deps;
+  let clock = deps.now ?? (() => new Date());
   return {
+    setNow(next) {
+      clock = next ?? (() => new Date());
+    },
+
     async upsertFromCommitment(record) {
       if (record.status !== "active" || !record.deadline) return null;
       const deadlineMs = Date.parse(record.deadline);
       if (!Number.isFinite(deadlineMs)) return null;
-      if (deadlineMs <= Date.now() + MATERIALIZE_MIN_LEAD_MS) return null; // 时间闸：只物化未来
+      if (deadlineMs <= clock().getTime() + MATERIALIZE_MIN_LEAD_MS) return null; // 时间闸：只物化未来
 
       const existing = tasks.findTaskBySourceRefId(record.id);
       if (existing) {

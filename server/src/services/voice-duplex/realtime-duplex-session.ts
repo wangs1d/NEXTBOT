@@ -1,35 +1,40 @@
-import {
-  MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE,
-  REALTIME_INPUT_CHUNK_BYTES,
-  REALTIME_INPUT_CHUNK_DELAY_MS,
-  type MiniMaxRealtimeService,
-  type PersistentRealtimeClient,
-  type RealtimeTurnResult,
-} from "../voice-dialogue/minimax-realtime-service.js";
-import { EndpointDetector, pcmToWav } from "./endpoint-detector.js";
+import { EndpointDetector } from "./endpoint-detector.js";
 import type { DuplexClientMessage, DuplexServerMessage, DuplexSessionConfig, DuplexSessionState } from "./protocol.js";
+import type {
+  RealtimeEngineSession,
+  RealtimeEngineDescriptor,
+  RealtimeTurnResult,
+  RealtimeVoiceEngine,
+} from "./realtime-engine-port.js";
 
 /**
- * MiniMax Realtime 引擎的全双工语音会话。
+ * 端到端实时语音引擎的全双工语音会话（引擎无关）。
  *
  * 与 DuplexVoiceSession（pipeline 引擎）同一客户端协议，差异只在引擎：
- *   - ASR + LLM + 语音合成全部发生在 MiniMax realtime 单连接里，
- *     会话期上下文延续（追问"刚才说了什么"能答上），服务端不存历史；
+ *   - ASR + LLM + 语音合成全部发生在实时引擎的单条会话里，会话期上下文延续
+ *     （追问"刚才说了什么"能答上），服务端不存历史；
  *   - text.turn：客户端把本地识别好的文本直接喂进来（纯语音模式主路径，
  *     麦克风仍归本地唤醒/声纹/识别所有，无双消费者冲突）；
- *   - audio.chunk：整段 16kHz PCM 也支持——本地能量 VAD 断句后整句
- *     append+commit 喂给 realtime（MiniMax 无 server_vad，必须手动 commit）；
- *   - 回合输出按整轮下发：单条 tts.chunk（24kHz wav，客户端 TtsPlayer 可直接播）。
+ *   - audio.chunk：整段 16kHz PCM 也支持——本地能量 VAD 断句后整句喂给引擎
+ *     （部分引擎无 server_vad，必须手动 commit，由引擎实现自行处理）；
+ *   - 回合输出，若引擎 descriptor.streamingTts 为真则**流式分块下发**：引擎的
+ *     音频增量逐段到达即逐段下发 tts.chunk（裸 PCM + sampleRate），客户端边收
+ *     边播；否则退化为整轮聚合后单块下发。
  *
- * 半双工约定：thinking/speaking 期间上行音频直接丢弃（客户端播放时
- * 不采集，扬声器不会回流进 realtime 上下文）；此期间收到 text.turn 回错。
+ * 本类**不绑定任何厂商**：所有引擎差异（名字、采样率、上行分片、是否流式）
+ * 均来自 `deps.engine.descriptor`，开会话经 `deps.engine.openSession`。
+ * 换本地引擎或其它云端 = 换一个 RealtimeVoiceEngine 实现，本文件不动。
+ *
+ * 半双工约定：thinking/speaking 期间上行音频直接丢弃（客户端播放时不采集，
+ * 扬声器不会回流进引擎上下文）；此期间收到 text.turn 回错。
  * 打断语义沿用代次（generation）：interrupt 后完成的旧回合输出整体丢弃
- * （realtime 无 response.cancel，服务端侧会跑完但结果不下发）。
+ * （实时引擎多无 response.cancel，服务端侧会跑完但结果不下发）。
  */
 
-export interface MinimaxDuplexSessionDeps {
-  realtime: MiniMaxRealtimeService;
-  /** realtime 会话人设（口语化短回复） */
+export interface RealtimeDuplexSessionDeps {
+  /** 端到端实时语音引擎（端口实现：MiniMax 云端 / 本地 / 其它云端） */
+  engine: RealtimeVoiceEngine;
+  /** 会话人设（口语化短回复） */
   systemPrompt?: string;
   /** 端点检测静音时长（毫秒） */
   endpointSilenceMs?: number;
@@ -49,13 +54,15 @@ const DEFAULT_ENDPOINT_SILENCE_MS = (() => {
   return Number.isFinite(n) && n >= 200 && n <= 2000 ? n : 550;
 })();
 
-export class MinimaxDuplexSession {
+export class RealtimeDuplexSession {
   readonly id: string;
-  readonly engine = "minimax-realtime" as const;
+  /** 引擎实现名（来自 descriptor，仅作展示/日志用） */
+  readonly engine: string;
 
+  private readonly desc: RealtimeEngineDescriptor;
   private state: DuplexSessionState = "idle";
   private config: DuplexSessionConfig = { sampleRate: 16000, language: "zh" };
-  private client: PersistentRealtimeClient | null = null;
+  private engineSession: RealtimeEngineSession | null = null;
   private generation = 0;
   private ttsSeq = 0;
   /** 通话场景人设（session.start 带 callId 时注入），空为默认助手 */
@@ -71,15 +78,17 @@ export class MinimaxDuplexSession {
   private uplinkWindowStart = Date.now();
   /** 非 listening 状态的持续起点（看门狗用，防状态机卡死导致上行永久丢弃） */
   private busySince: number | null = null;
-  /** 本轮音频推送的预计耗时（毫秒，见 REALTIME_INPUT_CHUNK_DELAY_MS） */
+  /** 本轮音频推送的预计耗时（毫秒，由 descriptor 分片参数估算） */
   private audioDispatchMs = 0;
 
   constructor(
     id: string,
     private readonly sink: (msg: DuplexServerMessage) => void,
-    private readonly deps: MinimaxDuplexSessionDeps,
+    private readonly deps: RealtimeDuplexSessionDeps,
   ) {
     this.id = id;
+    this.desc = deps.engine.descriptor;
+    this.engine = this.desc.name;
     this.detector = new EndpointDetector({
       silenceMs: deps.endpointSilenceMs ?? DEFAULT_ENDPOINT_SILENCE_MS,
     });
@@ -113,8 +122,7 @@ export class MinimaxDuplexSession {
         this.voiceContext = msg.sessionId?.trim()
           ? this.deps.callVoiceContext?.(msg.sessionId.trim()) ?? null
           : null;
-        this.client?.close();
-        this.client = null;
+        this.dropEngineSession();
         this.resetListeningBuffers();
         this.setState("listening");
         this.sink({
@@ -122,6 +130,8 @@ export class MinimaxDuplexSession {
           config: this.config,
           streamingAsr: false,
           engine: this.engine,
+          engineKind: "realtime",
+          streamingTts: this.desc.streamingTts,
         });
         return;
       }
@@ -162,7 +172,7 @@ export class MinimaxDuplexSession {
         // 看门狗：回合理论上几十秒内必完成，超时说明客户端断连/回合挂起，
         // 强制回到 listening，否则本次通话的上行会被永久丢弃
         console.warn(
-          `[minimax-duplex:${this.id}] 状态 ${this.state} 已持续 ${stuckMs}ms，` +
+          `[duplex:${this.engine}:${this.id}] 状态 ${this.state} 已持续 ${stuckMs}ms，` +
             `强制回到 listening（防上行被永久丢弃）`,
         );
         this.setState("listening");
@@ -193,7 +203,7 @@ export class MinimaxDuplexSession {
               )}×3），说话不会被识别`
             : `峰值 ${peak} ≥ 生效阈值 ${threshold}，可触发 VAD`;
       console.info(
-        `[minimax-duplex:${this.id}] vad probe bytes=${this.uplinkBytesWindow} ` +
+        `[duplex:${this.engine}:${this.id}] vad probe bytes=${this.uplinkBytesWindow} ` +
           `sampleRate=${this.config.sampleRate} noise=${Math.round(this.detector.noise)} ` +
           `inSpeech=${this.detector.hasSpeech} → ${verdict}`,
       );
@@ -222,14 +232,14 @@ export class MinimaxDuplexSession {
 
   async stop(): Promise<void> {
     this.generation += 1;
-    this.dropClient();
+    this.dropEngineSession();
     this.setState("idle");
     this.sink({ type: "session.ended" });
   }
 
   dispose(): void {
     this.generation += 1;
-    this.dropClient();
+    this.dropEngineSession();
   }
 
   // ------------------------------------------------------------------ //
@@ -257,20 +267,42 @@ export class MinimaxDuplexSession {
     if (pcm.length < this.config.sampleRate * 2 * 0.3) return;
     const gen = ++this.generation;
     this.setState("thinking");
-    this.audioDispatchMs = Math.ceil(pcm.length / REALTIME_INPUT_CHUNK_BYTES) * REALTIME_INPUT_CHUNK_DELAY_MS;
+    const blocks = Math.ceil(pcm.length / this.desc.inputChunkBytes);
+    this.audioDispatchMs = blocks * this.desc.inputChunkDelayMs;
     console.info(
-      `[minimax-duplex:${this.id}] VAD 断句 ${(pcm.length / this.config.sampleRate / 2).toFixed(2)}s 音频，` +
-        `将分 ${Math.ceil(pcm.length / REALTIME_INPUT_CHUNK_BYTES)} 块推送（推送耗时约 ${this.audioDispatchMs}ms）`,
+      `[duplex:${this.engine}:${this.id}] VAD 断句 ${(pcm.length / this.config.sampleRate / 2).toFixed(2)}s 音频，` +
+        `将分 ${blocks} 块推送（推送耗时约 ${this.audioDispatchMs}ms）`,
     );
     await this.runTurn("", { pcm16k: pcm }, gen);
   }
 
   private async runTurn(userText: string, input: { text?: string; pcm16k?: Buffer }, gen: number): Promise<void> {
     try {
-      const client = this.ensureClient();
-      const turn = await client.turn(input);
+      const engineSession = this.ensureEngineSession();
+      // 流式：首段音频到达即开播，后续块边到边下发。
+      // 首字延迟因此只等引擎首包，不再叠加"整轮生成完"那段纯等待。
+      let ttsStarted = false;
+      let audioBytes = 0;
+      const result = await engineSession.turn(input, undefined, {
+        onAudioChunk: (chunk) => {
+          if (gen !== this.generation) return; // 已被打断：整轮输出丢弃
+          if (!ttsStarted) {
+            ttsStarted = true;
+            this.setState("speaking");
+            this.sink({ type: "tts.start" });
+          }
+          audioBytes += chunk.length;
+          this.sink({
+            type: "tts.chunk",
+            seq: ++this.ttsSeq,
+            audio: chunk.toString("base64"),
+            format: "pcm",
+            sampleRate: this.desc.outputSampleRate,
+          });
+        },
+      });
       if (gen !== this.generation) return; // 已被打断：输出整体丢弃
-      this.emitTurnOutput(userText, turn);
+      this.finishTurnOutput(userText, result, ttsStarted, audioBytes);
     } catch (err) {
       if (gen !== this.generation) return;
       this.sink({
@@ -278,41 +310,32 @@ export class MinimaxDuplexSession {
         message: `实时语音回合失败：${err instanceof Error ? err.message : String(err)}`,
         recoverable: true,
       });
-      this.dropClient(); // 连接状态可疑，下一回合懒重连
+      this.dropEngineSession(); // 连接状态可疑，下一回合懒重连
       this.setState("listening");
     }
   }
 
-  private emitTurnOutput(userText: string, turn: RealtimeTurnResult): void {
-    const asrText = (turn.asrText ?? "").trim() || userText;
+  private finishTurnOutput(userText: string, result: RealtimeTurnResult, ttsStarted: boolean, audioBytes: number): void {
+    const asrText = (result.asrText ?? "").trim() || userText;
     this.sink({ type: "asr.final", text: asrText });
 
-    const audioSec = turn.audio.length / MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE / 2;
+    const audioSec = audioBytes / this.desc.outputSampleRate / 2;
     console.info(
-      `[minimax-duplex:${this.id}] 回合完成：推送 ${this.audioDispatchMs}ms → 首包语音 ${turn.firstAudioMs}ms ` +
-        `→ 整轮 ${turn.totalMs}ms（回复 ${audioSec.toFixed(2)}s 音频）` +
-        (turn.firstAudioMs != null && turn.totalMs - turn.firstAudioMs > 800
-          ? ` ⚠ 首包后又等了 ${turn.totalMs - turn.firstAudioMs}ms 才下发，这段是纯等待`
-          : ""),
+      `[duplex:${this.engine}:${this.id}] 回合完成：推送 ${this.audioDispatchMs}ms → 首包语音 ${result.firstAudioMs}ms ` +
+        `→ 整轮 ${result.totalMs}ms（流式下发 ${audioSec.toFixed(2)}s 音频，首包即播不再等整轮）`,
     );
 
-    if (!turn.transcript.trim() && turn.audio.length === 0) {
+    if (!result.transcript.trim() && !ttsStarted) {
       this.sink({ type: "error", message: "本轮没有产生回复", recoverable: true });
       this.setState("listening");
       return;
     }
 
-    this.setState("speaking");
-    this.sink({ type: "tts.start" });
-    this.sink({
-      type: "tts.chunk",
-      seq: ++this.ttsSeq,
-      audio: pcmToWav(turn.audio, MINIMAX_REALTIME_OUTPUT_SAMPLE_RATE).toString("base64"),
-      format: "wav",
-    });
-    this.sink({ type: "tts.end" });
-    this.sink({ type: "assistant.completed", text: turn.transcript });
-    this.sink({ type: "turn.completed", userText: asrText, assistantText: turn.transcript });
+    if (ttsStarted) {
+      this.sink({ type: "tts.end" });
+    }
+    this.sink({ type: "assistant.completed", text: result.transcript });
+    this.sink({ type: "turn.completed", userText: asrText, assistantText: result.transcript });
     this.setState("listening");
   }
 
@@ -320,23 +343,23 @@ export class MinimaxDuplexSession {
   // 内部
   // ------------------------------------------------------------------ //
 
-  private ensureClient(): PersistentRealtimeClient {
-    this.client ??= this.deps.realtime.openPersistentClient({
+  private ensureEngineSession(): RealtimeEngineSession {
+    this.engineSession ??= this.deps.engine.openSession({
       voiceId: this.config.voiceId,
       instructions: [this.deps.systemPrompt, this.voiceContext].filter((s) => !!s && s.trim()).join("\n\n") || undefined,
     });
-    return this.client;
+    return this.engineSession;
   }
 
-  private dropClient(): void {
-    if (this.client) {
+  private dropEngineSession(): void {
+    if (this.engineSession) {
       try {
-        this.client.close();
+        this.engineSession.close();
       } catch {
         // ignore
       }
     }
-    this.client = null;
+    this.engineSession = null;
   }
 
   private resetListeningBuffers(): void {

@@ -56,6 +56,18 @@ export class AgentMemorySyncService {
     }
   }
 
+  /**
+   * 等待所有挂起的写入落盘（脚本 / 测试 / 关停用）。
+   * setEntry / appendXxx 系列是 fire-and-forget 入队，外部脚本读盘前须先 flush。
+   */
+  async flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      await Promise.all([...this.writeQueues.values()]);
+      await this.persistChain;
+      if (this.writeQueues.size === 0) return;
+    }
+  }
+
   private schedulePersist(): void {
     this.persistChain = this.persistChain.then(() => this.flushToDisk());
   }

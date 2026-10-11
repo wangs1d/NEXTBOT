@@ -5,7 +5,8 @@ import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
-import { detectMemorySignals, shouldSkipNarrativeRecall } from "./memory-signal.js";
+import { detectMemorySignals } from "./memory-signal.js";
+import type { TurnUnderstanding } from "./task-router.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getTurnWalService } from "../services/turn-wal-service.js";
@@ -33,6 +34,8 @@ export type FinalizeTurnInput = {
   pePlan?: TaskExecutionPlan | null;
   peExhausted?: boolean;
   messageId?: string;
+  /** 本轮语义理解标记（L1 路由产出）：memory_instruction 驱动写入候选的「用户要求记住」信号。 */
+  understanding?: TurnUnderstanding;
 };
 
 export type FinalizeTurnResult = {
@@ -66,7 +69,9 @@ export class TurnLifecycle {
   ) {}
 
   async prepareNarrativeRecall(actorId: string, text: string): Promise<string | undefined> {
-    if (!this.deps.narrativeMemory || shouldSkipNarrativeRecall(text)) return undefined;
+    // 召回触发判定已由调用方（agent-core narrowMemoryCue，模型标记驱动）单点
+    // 承担——本方法不再内部二次词表门控（此前三处独立评估正则白名单，改一处漏两处）。
+    if (!this.deps.narrativeMemory) return undefined;
     const timeoutMs = getAgentRuntimeConfig().memoryPrompt.narrativeRecallTimeoutMs;
     try {
       const nr = await Promise.race([
@@ -81,12 +86,19 @@ export class TurnLifecycle {
     }
   }
 
-  ingestTurnArchive(actorId: string, userText: string, assistantText: string, context: "main" | "notes" = "main"): void {
+  ingestTurnArchive(
+    actorId: string,
+    userText: string,
+    assistantText: string,
+    context: "main" | "notes" = "main",
+    memoryInstruction = false,
+    personalFact = false,
+  ): void {
     // #3 写入精度：不再把整段 "Turn archive | user…| assistant…" 原文灌进长期记忆图
     // （那是噪声/串台源）。只抽取高价值原子片段（用户要求记住 / Agent 承诺/结论）；
     // 无高价值信号时只落一行极短的"用户意图主干"，再交整合链路裁决是否值得保留。
     // 完整轮次仍由 turn-wal / daily-digest / chat-threads 独立留存，不回落到长期图谱。
-    const signal = detectMemorySignals(userText, assistantText);
+    const signal = detectMemorySignals(userText, assistantText, memoryInstruction, personalFact);
     const body = buildTurnArchiveSnapshot(userText, assistantText, signal);
     if (!body) return;
 
@@ -177,7 +189,9 @@ export class TurnLifecycle {
       return this.applyQuota(input);
     }
 
-    const signal = detectMemorySignals(input.userText, full);
+    const memoryInstruction = input.understanding?.memoryInstruction === true;
+    const personalFact = input.understanding?.personalFact === true;
+    const signal = detectMemorySignals(input.userText, full, memoryInstruction, personalFact);
     const ts = new Date().toISOString();
     const memContext: "main" | "notes" = isNotesChatSessionId(input.sessionId) ? "notes" : "main";
 
@@ -238,7 +252,14 @@ export class TurnLifecycle {
       this.stmConfig.mode === "enhanced" &&
       (this.stmConfig.deferTurnArchive || signal.isHighSignal);
     if (!deferArchive) {
-      this.ingestTurnArchive(input.actorId, input.userText, full, memContext);
+      this.ingestTurnArchive(
+        input.actorId,
+        input.userText,
+        full,
+        memContext,
+        memoryInstruction,
+        personalFact,
+      );
     }
 
     this.deps.evolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);

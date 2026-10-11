@@ -83,8 +83,10 @@ class UpdateResultCard {
     BuildContext context, {
     bool forceRefresh = false,
   }) async {
+    updateCheckTrace("ui manual-check begin${forceRefresh ? " (forced)" : ""}");
     final ClientUpdateCheckResult? result =
         await checkClientUpdate(forceRefresh: forceRefresh);
+    updateCheckTrace("ui check returned, card routing");
     if (!context.mounted) return;
     if (result == null) {
       showFailure(
@@ -111,6 +113,7 @@ class UpdateResultCard {
       );
       return;
     }
+    updateCheckTrace("ui glass-card show (upToDate)");
     GlassNotify.show(
       title: "已是最新版本",
       message: "当前版本 v${result.localVersion}",

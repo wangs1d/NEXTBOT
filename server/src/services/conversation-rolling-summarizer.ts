@@ -388,6 +388,240 @@ export function readRecapAbsoluteTag(line: string): Date | null {
   return Number.isNaN(ts) ? null : new Date(ts);
 }
 
+// ── 注入层时间锚（2026-10-09）：把「距今多久」显式送到模型面前 ──────────────
+//
+// 病灶：recap 行自带绝对时间标签（`[2026/10/08 周四 22:07]`），但模型不会主动拿它
+// 去减 now，于是把一天前说的「好饿」当「刚才」承接（时间感知缺失家族）。已有
+// layerRecapLinesByBudget 只把标签用在 recap 内部排序，没有把年龄送进 prompt。
+//
+// 方案（对齐主流 temporal decay / explicit timestamps，且不动存储）：
+// - 视图层（buildTimestampFreeLlmView）对 recap 行追加 `（约N天前）` 年龄标注；
+// - **日粒度**：同一天内标注字节恒定 → 不打断 prefix cache，仅跨天刷新一次；
+// - 仅作用于发往 LLM 的克隆视图，存储与解析（extractSessionRecapLines）完全不受影响；
+// - 无绝对时间标签的行（标题/标记行）原样保留。
+
+/**
+ * 日粒度相对年龄标签：今天 / 约1天前 / 约N天前 / 约N周前 / 约N个月前 / 约N年前。
+ * 刻意不做「N小时前」细粒度——标注随小时变化会让 recap 消息每轮变字节、打断前缀缓存；
+ * 日粒度足以根治「跨天当现事」，同日内的小时差由行内绝对时刻标签承担。
+ */
+export function formatRecapAgeLabel(at: Date, now: Date = new Date()): string {
+  const days = dayDiffDays(at, now);
+  if (!Number.isFinite(days) || days <= 0) return "今天";
+  if (days === 1) return "约1天前";
+  if (days <= 6) return `约${days}天前`;
+  if (days <= 29) return `约${Math.round(days / 7)}周前`;
+  if (days <= 364) return `约${Math.round(days / 30)}个月前`;
+  return `约${Math.round(days / 365)}年前`;
+}
+
+/**
+ * 给 recap 块的每一行（带绝对时间标签的摘要行/待归纳行）追加日粒度年龄标注：
+ *   `- [2026/10/08 周四 22:07] 用户表示好饿…`
+ *   → `- [2026/10/08 周四 22:07]（约1天前）用户表示好饿…`
+ * 无变化时返回原串。已带标注的行（视图二次处理）跳过，保证幂等。
+ */
+export function annotateRecapLinesWithAge(content: string, now: Date = new Date()): string {
+  if (!content || !content.includes("[")) return content;
+  let changed = false;
+  const out = content.split("\n").map((line) => {
+    const bullet = line.match(/^(\s*-\s*)/);
+    const prefix = bullet?.[1] ?? "";
+    const body = prefix ? line.slice(prefix.length) : line;
+    const m = body.match(RECAP_ABSOLUTE_TAG_RE);
+    if (!m) return line;
+    const at = readRecapAbsoluteTag(body);
+    if (!at) return line;
+    const rest = body.slice(m[0].length);
+    if (rest.startsWith("（")) return line; // 已有标注，幂等跳过
+    const tag = m[0].trimEnd();
+    const annotated = `${prefix}${tag}（${formatRecapAgeLabel(at, now)}）${rest}`;
+    if (annotated === line) return line;
+    changed = true;
+    return annotated;
+  });
+  return changed ? out.join("\n") : content;
+}
+
+// ── recap 未闭环旧 open loop 的时效衰减（2026-10-09）────────────────────────
+//
+// 病灶：摘要器按"照抄原文表述"规则保留未兑现承诺/待办（正确），但这些未闭环项
+// 一旦跨天仍留在注入上下文里，模型会把它当成"此刻仍待处理"主动承接
+// （「刚才你说好饿」事故：好饿是 10-08 22:07 说的，10-09 21:38 被当现事说）。
+//
+// 方案（与年龄段标注同源：**日粒度 + 仅视图层 + 幂等**）：
+// - 识别「未闭环线索」（尚未/还没/未决定/待定/未完成 …）；
+// - 跨天（≥1 天）仍未闭环的，在该行尾部追加一句**降级指令**：仅当用户本轮
+//   主动提起时才可承接，不得主动追问/翻旧账；
+// - 日粒度 → 同一天内字节恒定，不打断 prefix cache（只在跨天时刷新一次）；
+// - 仅作用于发往 LLM 的视图克隆，存储与解析完全不受影响。
+//
+// 可选更强档：RECAP_STALE_LOOP_DROP_DAYS=<天数>（默认 0=关闭）——超过该天数的
+// 未闭环行直接从**视图**中剔除（存储/全文归档仍在，用户主动提起时按需回溯）。
+
+/**
+ * 未闭环线索识别（复用标注/衰减判定；纯启发式，不做语义理解）。
+ * 只收「明确的未完成信号」——宁少勿多：误判会把已闭环的事实标成"待办"。
+ */
+const UNCLOSED_OPEN_LOOP_RE =
+  /尚未|尚待|还没|还没有|没有决定|未决定|没定|待定|未完成|未完成|未解决|未兑现|待办|还没吃|没想好|要不要|正在考虑|纠结/;
+
+/** 跨天未闭环项的注入期降级指令（静态串 → 字节稳定） */
+const RECAP_STALE_LOOP_SUFFIX =
+  "（该事项已跨天仍未闭环：仅当用户本轮主动提起时才可承接，不要主动追问或翻旧账。）";
+
+/** 是否属于「未闭环线索」（尚无闭合结果/决定/兑现）。 */
+export function isUnclosedOpenLoop(line: string): boolean {
+  if (!line) return false;
+  return UNCLOSED_OPEN_LOOP_RE.test(line);
+}
+
+/** 从 recap 行解析其绝对时间标签（支持 "- [tag] 内容" 渲染态）；无标签返回 null。 */
+function readLineAbsoluteTag(line: string): Date | null {
+  const bullet = line.match(/^(\s*-\s*)/);
+  const body = bullet ? line.slice(bullet[1]!.length) : line;
+  return readRecapAbsoluteTag(body);
+}
+
+/** 视图丢弃阈值天数（env RECAP_STALE_LOOP_DROP_DAYS；0/未设 = 只降级不丢弃） */
+function staleLoopDropDays(): number {
+  const n = Number.parseInt(process.env.RECAP_STALE_LOOP_DROP_DAYS ?? "", 10);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * 对 recap 块做「未闭环旧项」时效衰减：
+ * - 跨天（≥1 天）未闭环 → 行尾追加降级指令（幂等：已带该指令的行跳过）；
+ * - 超过 RECAP_STALE_LOOP_DROP_DAYS 的未闭环行 → 从视图中剔除（可选档）；
+ * - 无绝对时间标签 / 已闭环 / 当天事项 → 原样保留。
+ * 返回原串表示无变化。
+ */
+export function decayStaleOpenLoops(content: string, now: Date = new Date()): string {
+  if (!content || !content.includes("[")) return content;
+  const dropDays = staleLoopDropDays();
+  const out: string[] = [];
+  let changed = false;
+  for (const line of content.split("\n")) {
+    if (!isUnclosedOpenLoop(line)) {
+      out.push(line);
+      continue;
+    }
+    const at = readLineAbsoluteTag(line);
+    if (!at) {
+      out.push(line);
+      continue;
+    }
+    const days = dayDiffDays(at, now);
+    if (days < 1) {
+      out.push(line);
+      continue;
+    }
+    if (dropDays > 0 && days >= dropDays) {
+      changed = true; // 从视图剔除（存储不动）
+      continue;
+    }
+    if (line.includes(RECAP_STALE_LOOP_SUFFIX)) {
+      out.push(line);
+      continue;
+    }
+    changed = true;
+    out.push(`${line}${RECAP_STALE_LOOP_SUFFIX}`);
+  }
+  return changed ? out.join("\n") : content;
+}
+
+// ── recap 分类索引视图（2026-10-09 深夜）：瞬时 TTL 剔除 + 冷索引 + 策略位 ───
+//
+// 主流方案落地：recap 的「法律地位」从可引用叙述降级为目录/索引。污染三成分
+// （原话可引用 / 相对词漂移 / 年龄不可见）在视图加工时逐项剥除，而不是注入后
+// 靠模型自觉：
+// - **瞬时状态**（好饿/困/累/想吃…这类当下状态）：只在在途窗口内保留，跨天直接
+//   从视图剔除——模型根本没有原话素材可随口引用（根治「刚才你说好饿」）。
+//   存储/全文归档不动，用户主动提起时仍可按需回溯。
+// - **持久事项**（承诺/计划/决定类）：跨天未闭环的转冷索引行 + 策略位
+//   「勿主动提」——上下文层管「知不知道」，能否主动提由 temporal-admission 闸管。
+// - 日粒度 → 同日内字节恒定，不打断 prefix cache；幂等；仅视图层，存储不动。
+//
+// env：RECAP_TRANSIENT_TTL_DAYS（默认 1，0=关闭瞬时剔除）；
+//      RECAP_STALE_LOOP_DROP_DAYS（沿用：未闭环超 N 天直接剔除，默认 0=只降级）。
+//
+// 注：decayStaleOpenLoops（上一轮的纯降级方案）保留导出供兼容/测试，
+// 注入管线已由本函数取代（策略位语义覆盖降级指令，且多承担瞬时剔除）。
+
+/** 瞬时状态识别：身体/饮食/休息的「当下状态」，而非持续事项。
+ * 宁少勿多——误杀持久事项（如「在忙装修」）比漏杀代价低（漏杀只是少剔除）。 */
+const RECAP_TRANSIENT_TOPIC_RE =
+  /好饿|饿了|饿死|好渴|好困|好累|太累|疲惫|疲倦|犯困|想吃|想喝|想睡|想休息|想躺|馋|夜宵|点外卖|吃什么|心情不好|心情差|心情低落/;
+
+/** 瞬时条目在注入视图中的在途窗口（天，日粒度；env RECAP_TRANSIENT_TTL_DAYS）。 */
+function transientTtlDays(): number {
+  const n = Number.parseInt(process.env.RECAP_TRANSIENT_TTL_DAYS ?? "", 10);
+  return Number.isFinite(n) && n >= 0 ? n : 1;
+}
+
+/** 是否属于「瞬时状态类」recap 条目。 */
+export function isTransientRecapTopic(line: string): boolean {
+  if (!line) return false;
+  return RECAP_TRANSIENT_TOPIC_RE.test(line);
+}
+
+/** 跨天未闭环持久项的策略位（静态串 → 字节稳定；幂等判据）。 */
+const RECAP_STALE_POLICY_SUFFIX =
+  "（跨天未闭环 · 策略:勿主动提：仅当用户本轮主动提起才可承接，不要主动追问。）";
+
+/** 有瞬时条目被剔除时插入的聚合说明（静态串；只在真有剔除时出现，字节稳定）。 */
+const RECAP_TRANSIENT_COLLAPSED_NOTE =
+  "- [时效索引] 更早的瞬时状态类条目（饮食/休息/心情）已按 TTL 收起，不在本上下文中；用户主动提起时可按需检索历史原文。";
+
+/**
+ * 把 recap 块加工成「分类索引视图」：
+ * 1) 瞬时状态条目：超过在途窗口（默认跨天）→ 从视图剔除（原话素材不再常驻）；
+ * 2) 持久事项且跨天未闭环 → 行尾追加策略位「勿主动提」（冷索引语义）；
+ * 3) 超过 RECAP_STALE_LOOP_DROP_DAYS 的未闭环项直接剔除（可选硬档）；
+ * 4) 其余（已闭环 / 当日 / 无标签行）原样保留；有剔除时补一行聚合说明。
+ * 幂等；返回原串表示无变化。
+ */
+export function indexifyRecapForLlm(content: string, now: Date = new Date()): string {
+  if (!content || !content.includes("[")) return content;
+  const ttl = transientTtlDays();
+  const dropDays = staleLoopDropDays();
+  const out: string[] = [];
+  let changed = false;
+  let dropped = 0;
+  for (const line of content.split("\n")) {
+    const at = readLineAbsoluteTag(line);
+    if (!at) {
+      out.push(line);
+      continue;
+    }
+    const days = dayDiffDays(at, now);
+    // 1) 瞬时状态：超过在途窗口 → 从视图剔除（存储不动）
+    if (ttl > 0 && days >= ttl && isTransientRecapTopic(line)) {
+      changed = true;
+      dropped++;
+      continue;
+    }
+    // 2/3) 持久未闭环：硬档剔除 或 追加策略位
+    if (days >= 1 && isUnclosedOpenLoop(line)) {
+      if (dropDays > 0 && days >= dropDays) {
+        changed = true;
+        continue;
+      }
+      if (!line.includes(RECAP_STALE_POLICY_SUFFIX)) {
+        changed = true;
+        out.push(`${line}${RECAP_STALE_POLICY_SUFFIX}`);
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  if (dropped > 0 && !content.includes(RECAP_TRANSIENT_COLLAPSED_NOTE)) {
+    out.push(RECAP_TRANSIENT_COLLAPSED_NOTE);
+    changed = true;
+  }
+  return changed ? out.join("\n") : content;
+}
+
 /** 解析 recap 行首的时间标签（相对词原样返回）；无标签返回 null。 */
 export function readRecapTimeTag(line: string): string | null {
   const trimmed = line.trim();
@@ -396,7 +630,6 @@ export function readRecapTimeTag(line: string): string | null {
   const m = trimmed.match(RECAP_TIME_TAG_RE);
   return m ? m[0].trim() : null;
 }
-
 /**
  * 把旧数据 recap 行的相对时间标签确定性换算为绝对标签（不依赖 LLM）。
  *

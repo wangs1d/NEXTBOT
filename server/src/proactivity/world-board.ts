@@ -130,10 +130,30 @@ export class WorldBoard {
         break;
       }
       case "schedule": {
-        const runAt = typeof payload.nextRunAt === "number" ? payload.nextRunAt : null;
-        const title = String(payload.nextTitle ?? "");
-        if (runAt !== null && title) {
-          this.ingest(actorId, "obligations", "nextEvent", { title, runAt, updatedAt: at });
+        // 两种形状：
+        //  a) 任务集合快照（schedule-sensor）：nextRunAt + nextTitle
+        //  b) 日历订阅事件（ics-sensor，2026-10-11 收编）：startMs + summary
+        // 原来只认 a)，ICS 信号在此被**静默丢弃**——订阅日历永远驱动不了 meeting_soon。
+        const legacyRunAt = typeof payload.nextRunAt === "number" ? payload.nextRunAt : null;
+        const legacyTitle = String(payload.nextTitle ?? "");
+        if (legacyRunAt !== null && legacyTitle) {
+          this.ingest(actorId, "obligations", "nextEvent", {
+            title: legacyTitle,
+            runAt: legacyRunAt,
+            updatedAt: at,
+          });
+          break;
+        }
+        const startMs = typeof payload.startMs === "number" ? payload.startMs : null;
+        const summary = String(payload.summary ?? "");
+        // 注意：ICS 适配器的 signal.at 就是**事件开始时刻**，不是观测时刻，
+        // 因此"是否未来事件"必须对比板钟，不能对比 at（否则恒等、永远不入板）
+        if (startMs !== null && summary && startMs > this.nowFn()) {
+          // 订阅一次可能送来多个事件：只在"更近的未来事件"时覆盖，避免远事件挤掉近事件
+          const prev = this.read<{ runAt: number }>(actorId, "obligations", "nextEvent");
+          if (!prev || startMs < prev.runAt) {
+            this.ingest(actorId, "obligations", "nextEvent", { title: summary, runAt: startMs, updatedAt: at });
+          }
         }
         break;
       }
@@ -141,6 +161,37 @@ export class WorldBoard {
         if (payload.sender) {
           this.append(actorId, "current", "unreadRecent", { at, sender: String(payload.sender) });
         }
+        break;
+      case "mail": {
+        // 2026-10-11：邮件收编进板（原来落 background 尾迹 → unread_burst 永不触发）。
+        // 营销邮件在 MailWatchService 侧已过滤，能到这里的都是真人来信。
+        const sender = String(payload.from ?? payload.sender ?? "未知发件人");
+        this.append(actorId, "current", "unreadRecent", {
+          at,
+          sender,
+          source: "mail",
+          ...(payload.subject ? { subject: String(payload.subject) } : {}),
+          ...(payload.importance ? { importance: String(payload.importance) } : {}),
+        });
+        break;
+      }
+      case "finance":
+        // 2026-10-11：账本条目入板（原来落 background 尾迹 → 无任何消费方）。
+        // 驱动 spend_alert（大额支出）等财务类规则；金额/商户是可 JSON 化纯数据。
+        this.append(
+          actorId,
+          "current",
+          "recentTx",
+          {
+            at,
+            id: String(payload.id ?? ""),
+            amount: Number(payload.amount ?? 0),
+            type: String(payload.type ?? "expense"),
+            ...(payload.merchant ? { merchant: String(payload.merchant) } : {}),
+            ...(payload.category ? { category: String(payload.category) } : {}),
+          },
+          20,
+        );
         break;
       case "goal":
         this.append(

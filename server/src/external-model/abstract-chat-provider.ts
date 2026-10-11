@@ -21,6 +21,7 @@ import {
   StreamIdleTimeoutError,
   ToolIntentWithoutToolsError,
   stripInternalControlTags,
+  stripMetaSentences,
   type NormalToolCall,
   type NormalUsage,
 } from "./stream-chat-helpers.js";
@@ -440,6 +441,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 证据注入豁免 + 路由置信度（2026-09-23 扩面配套，见工具循环出口检查处）
             turnEvidenceInjected: effectiveStreamOpts.turnEvidenceInjected,
             turnRouteConfidence: effectiveStreamOpts.turnRouteConfidence,
+            // 确定性媒体预执行（2026-10-10）：白名单透传，漏掉 = 预执行静默失效
+            deterministicToolCalls: effectiveStreamOpts.deterministicToolCalls,
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
@@ -578,7 +581,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       );
       streamUsage = result.usage;
       toolIntentCalls = result.toolCalls;
-      visible = stripInternalControlTags(pickVisibleText(result.content, result.reasoning));
+      // 2026-10-11：整串路径补一道 stripMetaSentences（含「元决策自述句」判据，
+      // 与流式 metaFilter 同一套词面），防止净化后文本仍把「根据规范必须调用…」
+      // 这类自述带进最终回复。
+      visible = stripMetaSentences(
+        stripInternalControlTags(pickVisibleText(result.content, result.reasoning)),
+      );
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
       if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {

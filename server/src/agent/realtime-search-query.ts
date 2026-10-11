@@ -188,3 +188,204 @@ export function composeRealtimeSearchQuery(
   // 无任何实体 → 查询词兜底（仍是可执行的搜索词）
   return normalizeQuery(text);
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// media 轮查询词的确定性构造器（2026-10-10，搜图轮「时有时无」根治的查询半边）
+//
+// 契约与 realtime 同构：路由器判 media_retrieval 后，查询词必须由**纯代码**构造
+// 出来，不依赖模型自觉。图片/视频搜索词和网页搜索词的构造策略不同：命令动词
+// （搜索/找/来几张）和媒体载体名词（照片/图片）对图库检索没有区分度，剥离后
+// 剩余主体就是更好的查询词（「搜索几张马尔代夫的照片」→「马尔代夫」）。
+// 剥完不剩主体（「来点图」）→ 退回 composeRealtimeSearchQuery 实体消解兜底。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 媒体命令词/载体词：对图库检索无区分度，构造查询词时剥离。长词优先匹配。 */
+const MEDIA_COMMAND_WORDS: string[] = [
+  // 命令动词与口语变体
+  "搜索", "搜一下", "搜搜", "搜个", "搜", "找找", "找一下", "找一找", "找些", "找",
+  "查一下", "查查", "看看", "看下", "给我看", "给我", "帮我", "帮忙", "麻烦", "请问", "请",
+  // 数量词与结构助词（「几个/那张/XX的照片」剥离后实体不粘连）
+  "来几张", "来几", "来张", "来点", "几张", "几", "一些", "多来", "个", "张", "些", "的",
+  // 媒体载体名词（壁纸/头像/表情包等**图片类型词不剥**——它们是有效检索词）
+  "照片", "图片", "美图", "相片", "配图", "图",
+  // 视频载体词（配合 mediaToolNameForText 选 search_videos）
+  "视频", "影片", "录像", "短片", "片段",
+  // 语气收尾
+  "吧", "呀", "啊", "呢", "呗", "一下",
+];
+
+const MEDIA_COMMAND_RE = new RegExp(
+  [...MEDIA_COMMAND_WORDS].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|"),
+  "g",
+);
+
+/** 中文媒体轮常用的视频诉求判定：命中 → 确定性预执行 search_videos 而非 search_images。 */
+const VIDEO_ASK_RE = /视频|影片|录像|短片|片段|视频了/;
+
+export function mediaToolNameForText(text: string): "search_images" | "search_videos" {
+  return VIDEO_ASK_RE.test(text ?? "") ? "search_videos" : "search_images";
+}
+
+/**
+ * 构造 media 轮的图片/视频搜索词（确定性，无 LLM 参与）。
+ * contextLines：最近对话 + 记忆档案行（仅在全被命令词剥光时的实体兜底用）。
+ */
+export function composeMediaSearchQuery(
+  userText: string,
+  contextLines: string[] = [],
+): string {
+  const text = (userText ?? "").trim();
+  if (!text) return "";
+  // 1) 剥媒体命令词/载体词，剩余主体即查询词（保留原语序中的限定词）
+  const stripped = text.replace(MEDIA_COMMAND_RE, " ").replace(/\s+/g, " ").trim();
+  if (stripped.replace(/[，。！？、,.!?~～]/g, "").length >= 2) {
+    return normalizeQuery(stripped);
+  }
+  // 2) 命令词吃光主体（「来点图」「找照片」）→ 实体消解兜底
+  return composeRealtimeSearchQuery(text, contextLines);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// travel 轮行程请求的确定性构造器（2026-10-10 P1，与 media/realtime 同构）
+//
+// 契约：路由判 travel_planning 后，travel.plan-itinerary 的调用参数必须由
+// **纯代码**构造——「要不要规划」在意图判定处已定，「用什么参数调」不依赖模型。
+// 构造质量只影响参数显式度，不影响调用正确性：travel.plan-itinerary 的 input
+// 收自然语言原文（技能内部引擎自行抽取目的地/天数），destination/days 是代码
+// 能确定性抽出的结构化增量。目的地抽不出（纯指代轮）→ 返回 destination 空，
+// agent-core 不预执行（避免必然失败的空参调用），回退模型自决 + 域预载可见。
+// ─────────────────────────────────────────────────────────────────────────────
+
+export type TravelPlanRequest = {
+  /** 自然语言需求原文（技能必填参数，恒为用户原话） */
+  input: string;
+  /** 代码抽取的目的地（抽不出则缺省） */
+  destination?: string;
+  /** 代码抽取的天数（抽不出则缺省） */
+  days?: number;
+};
+
+/** 规划命令词/载体词：对目的地抽取无区分度，剥离后剩余主体即候选目的地。 */
+const TRAVEL_COMMAND_WORDS: string[] = [
+  // 敬语/命令框架
+  "麻烦你", "麻烦", "帮帮我", "帮我", "帮忙", "给我", "我想", "想要", "我要",
+  "请", "来一份", "来一个", "做一份", "做一个", "出一份", "出一个",
+  // 规划动词
+  "规划一下", "规划", "安排一下", "安排", "制定", "计划一下", "计划", "整理", "做",
+  // 疑问功能词（「怎么安排」「如何规划」——不是目的地成分）
+  "怎么", "怎样", "如何", "哪些", "什么", "推荐",
+  // 行程载体词（含组合：「旅游攻略」「行程规划」长词优先）
+  "行程规划", "旅游攻略", "旅游指南", "旅行攻略", "行程安排", "行程", "攻略", "路线",
+  "旅游", "旅行", "自由行", "出游", "游玩", "指南",
+  // 方位/动作连接词
+  "去", "到", "在", "玩", "逛", "游", "出发",
+  // 量词与结构助词
+  "一份", "一个", "一下", "个", "的",
+  // 时间限定（出发时间不是目的地：下周去三亚 → 三亚）
+  "下周", "这周", "本周", "上周", "下个月", "下月", "这个月", "本月",
+  "周末", "周一", "周二", "周三", "周四", "周五", "周六", "周日",
+  "星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期天",
+  "今天", "明天", "后天", "国庆", "春节", "五一", "十一",
+  // 模糊限定
+  "大概", "大约", "差不多", "左右", "最多", "最好", "尽量",
+  // 语气收尾
+  "吧", "呀", "啊", "呢", "呗", "哦", "谢谢", "麻烦了",
+];
+
+const TRAVEL_COMMAND_RE = new RegExp(
+  [...TRAVEL_COMMAND_WORDS].sort((a, b) => b.length - a.length).map(escapeRegExp).join("|"),
+  "g",
+);
+
+/** 中文数字 → 数值（天数抽取用） */
+const CN_NUM: Record<string, number> = {
+  一: 1, 两: 2, 二: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10,
+};
+
+/**
+ * 抽取天数（确定性）。支持：「5天」「三天两夜」「一周」「两周」「一个星期」「周末」
+ * 「两日游」。日期（「10月3日」）不当天数——「日」只在「X日游」形态才算。
+ */
+function sniffTravelDays(text: string): number | undefined {
+  const t = text ?? "";
+  const cnDay = t.match(/([一二两三四五六七八九十\d]+)\s*个?\s*天(?:\s*[一二两三四五六七八九十\d]+\s*夜)?/);
+  if (cnDay) {
+    const raw = cnDay[1] ?? "";
+    const n = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : CN_NUM[raw];
+    if (n != null && n >= 1 && n <= 30) return n;
+  }
+  const week = t.match(/([一二两三四五六七八九十\d]+)\s*个?\s*(?:个?星期|周)/);
+  if (week) {
+    const raw = week[1] ?? "";
+    const n = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : CN_NUM[raw];
+    if (n != null && n >= 1 && n <= 8) return n * 7;
+  }
+  const dayTour = t.match(/([一二两三四五六七八九十\d]+)\s*日\s*游/);
+  if (dayTour) {
+    const raw = dayTour[1] ?? "";
+    const n = /^\d+$/.test(raw) ? Number.parseInt(raw, 10) : CN_NUM[raw];
+    if (n != null && n >= 1 && n <= 30) return n;
+  }
+  if (/半\s*天/.test(t)) return 1;
+  if (/周末/.test(t)) return 2;
+  return undefined;
+}
+
+/** 从剥净命令词/天数后的文本抽目的地：首个 2-6 字 CJK 串，退拉丁词。 */
+function sniffTravelDestination(text: string): string | undefined {
+  const cleaned = (text ?? "")
+    .replace(/([一二两三四五六七八九十\d]+)\s*个?\s*(?:天|日|夜|个?星期|周)[两一二三四五六七八九十\d]*夜?/g, " ")
+    .replace(/晚|夜/g, " ")
+    .replace(TRAVEL_COMMAND_RE, " ");
+  const cjk = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,6}/g)].map((m) => m[0]);
+  if (cjk.length > 0) return cjk[0];
+  const latin = [...cleaned.matchAll(/\b[A-Za-z][A-Za-z0-9-]{1,}\b/g)].map((m) => m[0]);
+  return latin.length > 0 ? latin[0] : undefined;
+}
+
+/**
+ * 构造 travel_planning 轮的 travel.plan-itinerary 调用参数（确定性，无 LLM）。
+ * contextLines：最近对话 + 记忆档案行（纯指代轮「规划个三天的行程」的目的地兜底）。
+ * destination 抽不出时缺省——调用方（agent-core）按「无目的地不预执行」处理。
+ */
+export function composeTravelPlanRequest(
+  userText: string,
+  contextLines: string[] = [],
+): TravelPlanRequest {
+  const text = (userText ?? "").trim();
+  if (!text) return { input: "" };
+  const days = sniffTravelDays(text);
+  const strippedForDest = text
+    .replace(/([一二两三四五六七八九十\d]+)\s*个?\s*(?:天|日|夜|个?星期|周)/g, " ");
+  let destination = sniffTravelDestination(strippedForDest);
+  if (!destination) {
+    // 纯指代轮：上下文实体消解兜底（「上周聊的三亚」→「三亚」）
+    destination = pickEntityFromContext(contextLines) ?? undefined;
+  }
+  return {
+    input: normalizeQuery(text),
+    ...(destination ? { destination } : {}),
+    ...(days != null ? { days } : {}),
+  };
+}
+
+/**
+ * 直接问「现在几点/今天几号/星期几」类当前时间问题（2026-10-11）。
+ *
+ * realtime 路由会把「现在几点」消解成搜索词「当前北京时间」走**网页搜索**，
+ * 搜回来的是网页快照里爬取时刻的旧时间（真机实证：模型照抄快照答了
+ * 「2026-05-08 周五 17:22」，与真实日期差了 5 个月）。时间这类确定性事实的
+ * 证据源是**本地时钟**，不是网页——本判定用于在前置检索门禁里把时间问题
+ * 重定向到 clock 证据（见 agent-core 的 runClockEvidence），绝不入搜索引擎。
+ *
+ * 口径收紧：只认「现在/当前/今天」限定的时间问句（「明天几点开会」是日程
+ * 意图，不在此列）。
+ */
+export function isDirectCurrentTimeQuestion(text: string | undefined): boolean {
+  const t = (text ?? "").trim();
+  if (!t) return false;
+  return (
+    /(现在|当前|此刻|今天|今日|今晚)[^。！？\n]{0,6}(几点|时间|日期|几号|多少号|星期|周[一二三四五六日天]|礼拜)/i.test(t) ||
+    /几点了|现在几点|what time|current time|what('|’)?s the date/i.test(t)
+  );
+}

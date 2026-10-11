@@ -5,92 +5,168 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { shouldRecallLongTerm } from "../src/agent/recall-gate.js";
-import {
-  shouldInjectMemorySummary,
-  isWindowDeixisShortCircuit,
-} from "../src/agent/memory-signal.js";
+import { parseUnderstanding } from "../src/agent/route-llm-call.js";
+import type { TurnUnderstanding } from "../src/agent/task-router.js";
 import { DailyJournalService } from "../src/services/daily-journal-service.js";
 import { ShortTermMemoryGatewayService } from "../src/services/short-term-memory-gateway.js";
 import { isNoiseLogLine } from "../src/services/nightly-memory-task-service.js";
 
-// ===== recall-gate：长期记忆白名单门控 =====
+// ===== recall-gate：触发条件由 L1 路由 understanding 驱动（词表判定退役）=====
 
-test("explicit memory cues trigger recall", () => {
-  assert.equal(shouldRecallLongTerm({ text: "还记得我上次说的那个项目吗" }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "上次聊天我们聊到哪了" }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "记住我不吃香菜" }).trigger, true);
-});
+/** 构造合法 TurnUnderstanding（缺省全 false = 无特殊处理） */
+function u(partial: Partial<TurnUnderstanding> = {}): TurnUnderstanding {
+  return {
+    isFollowUp: false,
+    reference: "none",
+    recallIntent: false,
+    memoryInstruction: false,
+    personalFact: false,
+    scheduleQuery: false,
+    travelQuery: false,
+    ...partial,
+  };
+}
 
-test("personal fact statements trigger recall", () => {
-  assert.equal(shouldRecallLongTerm({ text: "我叫李雷，在杭州工作" }).trigger, true);
-});
-
-test("new session opening does NOT trigger recall (2026-10-06 治啰嗦 P1)", () => {
-  // 新会话开场不再无条件触发跨会话召回——情节块（recap/召回）只在显式记忆
-  // 线索/个人事实/指代升级时注入；跨会话衔接交给恒驻速览（结构化事实）与
-  // brain.recall 按需检索（对齐 ChatGPT/Claude/Letta 的按需召回设计）。
+test("understanding 缺省（路由失败/降级）→ 一律不触发（最小注入）", () => {
+  // 词表判定退役：用户原文不再被正则扫描（旧版这里 "还记得/我叫/上次" 会命中
+  // 各张词表）。文本是猜不准的——「你叫我什么？」因标点分支缺 ^ 锚被判成追问轮
+  // 的教训；语义判定归模型，缺省方向 = 不触发（误注入=串台 > 漏注入=少点上下文）。
+  assert.equal(shouldRecallLongTerm({ text: "还记得我上次说的那个项目吗" }).trigger, false);
+  assert.equal(shouldRecallLongTerm({ text: "我叫李雷，在杭州工作" }).trigger, false);
+  assert.equal(shouldRecallLongTerm({ text: "你叫我什么？" }).trigger, false);
   assert.equal(shouldRecallLongTerm({ text: "在吗", threadMessageCount: 0 }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "以后叫我王哥", threadMessageCount: 0 }).trigger, false);
 });
 
-test("second turn in session does NOT trigger new_session recall (串台根治)", () => {
-  // 首轮问答完成后 thread 已有 2 条消息；任务追问（如"你确定？"）不得再命中
-  // new_session 把跨会话记忆/关系记忆灌进任务轮。
-  assert.equal(shouldRecallLongTerm({ text: "你确定？", threadMessageCount: 2, ambiguousFollowUp: true }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "再帮我看看", threadMessageCount: 3 }).trigger, false);
+test("memory_instruction / recall_intent / earlier_session 锚定 → memory_cue", () => {
+  const memoryCue = shouldRecallLongTerm({
+    text: "记住我不吃香菜",
+    understanding: u({ memoryInstruction: true }),
+  });
+  assert.equal(memoryCue.trigger, true);
+  assert.equal(memoryCue.reason, "memory_cue");
+
+  const recallIntent = shouldRecallLongTerm({
+    text: "上次聊天我们聊到哪了",
+    threadMessageCount: 2,
+    understanding: u({ recallIntent: true }),
+  });
+  assert.equal(recallIntent.trigger, true);
+  assert.equal(recallIntent.reason, "memory_cue");
+
+  const earlierSession = shouldRecallLongTerm({
+    text: "我们之前聊过的那家餐厅",
+    threadMessageCount: 2,
+    understanding: u({ reference: "earlier_session" }),
+  });
+  assert.equal(earlierSession.trigger, true);
+  assert.equal(earlierSession.reason, "memory_cue");
 });
 
-test("ordinary mid-session turns do NOT trigger recall (白天只写不捞)", () => {
-  assert.equal(shouldRecallLongTerm({ text: "今天天气怎么样", threadMessageCount: 10 }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "帮我看看这段代码有什么问题", threadMessageCount: 6 }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "哈哈这个有意思", threadMessageCount: 4 }).trigger, false);
+test("personal_fact → personal_fact", () => {
+  const gate = shouldRecallLongTerm({
+    text: "我叫李雷，在杭州工作",
+    understanding: u({ personalFact: true }),
+  });
+  assert.equal(gate.trigger, true);
+  assert.equal(gate.reason, "personal_fact");
 });
 
-test("empty text never triggers", () => {
-  assert.equal(shouldRecallLongTerm({ text: "   " }).trigger, false);
-});
-
-test("anaphora escalation: ambiguous follow-up in long session triggers, short session does not", () => {
-  // 短会话：LLM 从最近轮次即可消解，不需要长期检索
+test("anaphora escalation: 追问轮仅在长会话（超出注入窗口）时升级", () => {
+  // 短会话：LLM 从最近轮次即可消解指代，不需要长期检索
   assert.equal(
-    shouldRecallLongTerm({ text: "那个方案后来怎么样了", threadMessageCount: 8, ambiguousFollowUp: true }).trigger,
+    shouldRecallLongTerm({
+      text: "那个方案后来怎么样了",
+      threadMessageCount: 8,
+      understanding: u({ isFollowUp: true }),
+    }).trigger,
     false,
   );
   // 长会话（早期轮次已截出窗口）：指代可能指向窗口外，升级检索
-  const escalated = shouldRecallLongTerm({ text: "那个方案后来怎么样了", threadMessageCount: 30, ambiguousFollowUp: true });
+  const escalated = shouldRecallLongTerm({
+    text: "那个方案后来怎么样了",
+    threadMessageCount: 30,
+    understanding: u({ isFollowUp: true }),
+  });
   assert.equal(escalated.trigger, true);
   assert.equal(escalated.reason, "anaphora_escalation");
-  // 非指代轮次即使会话再长也不触发
+  // 非追问轮次即使会话再长也不触发
   assert.equal(
-    shouldRecallLongTerm({ text: "今天天气怎么样", threadMessageCount: 30, ambiguousFollowUp: false }).trigger,
+    shouldRecallLongTerm({
+      text: "今天天气怎么样",
+      threadMessageCount: 30,
+      understanding: u({ isFollowUp: false }),
+    }).trigger,
     false,
   );
 });
 
-// ===== 窗口内指代短路：根治"之前/刚才"双关词误触长期检索导致的串台 =====
-
-test("window-deixis short-circuit: pure in-window references do NOT trigger recall", () => {
-  // 窗口内指代（thread/STM 可消解）→ 不触发长期检索
-  assert.equal(shouldRecallLongTerm({ text: "我刚才说的那个文件呢", threadMessageCount: 12 }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "之前那个方案后来怎么样了", threadMessageCount: 12 }).trigger, false);
-  assert.equal(shouldRecallLongTerm({ text: "前面说的那家店叫什么", threadMessageCount: 12 }).trigger, false);
-  // 记忆摘要注入同样被抑制（"之前"双关词不再把旧会话摘要带进来）
-  assert.equal(shouldInjectMemorySummary("我之前说的那个文件呢"), false);
-  assert.equal(isWindowDeixisShortCircuit("我刚才说的那个文件呢"), true);
+test("empty text never triggers", () => {
+  assert.equal(shouldRecallLongTerm({ text: "   ", understanding: u({ personalFact: true }) }).trigger, false);
 });
 
-test("cross-session escalation: historical verbs/dates bypass short-circuit", () => {
-  // 带"说过/聊过/上次/昨天"等跨会话线索 → 放行长期检索
-  assert.equal(shouldRecallLongTerm({ text: "我之前跟你说过的那个方案", threadMessageCount: 12 }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "我们之前聊过的那家餐厅", threadMessageCount: 12 }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "昨天我们聊到了哪", threadMessageCount: 12 }).trigger, true);
-  assert.equal(shouldRecallLongTerm({ text: "记得我刚才说的那个文件吗", threadMessageCount: 12 }).trigger, true);
-  assert.equal(isWindowDeixisShortCircuit("我们之前聊过的那家餐厅"), false);
+// ===== parseUnderstanding 契约（L1 路由 LLM 产出 → 消费链入口）=====
+
+test("parseUnderstanding: 「你叫我什么？」期望产出（全 false）→ undefined（零注入）", () => {
+  // 回归锚：这句话曾被词表误判成追问轮 → 追问锚点注入带偏模型 → 手写行程
+  // 检测误触发强制规划。新契约下 L1 路由判 chat 且全标记 false → 解析层省略
+  // understanding → recall-gate off / 追问锚点无 / scheduleSnapshot 无 / travelState 无。
+  const raw = JSON.stringify({
+    intent: "chat",
+    confidence: 0.95,
+    understanding: {
+      is_follow_up: false,
+      reference: "none",
+      recall_intent: false,
+      memory_instruction: false,
+      personal_fact: false,
+      schedule_query: false,
+      travel_query: false,
+    },
+  });
+  assert.equal(parseUnderstanding(raw), undefined);
 });
 
-test("explicit memory command is never short-circuited", () => {
-  assert.equal(shouldRecallLongTerm({ text: "记住我刚才说的，周末去见客户", threadMessageCount: 12 }).trigger, true);
-  assert.equal(isWindowDeixisShortCircuit("记住我刚才说的约会安排"), false);
+test("parseUnderstanding: snake_case 信号解析 + reference 封闭集校验", () => {
+  const parsed = parseUnderstanding(
+    JSON.stringify({
+      intent: "task",
+      understanding: {
+        is_follow_up: true,
+        reference: "earlier_session",
+        recall_intent: "true",
+        memory_instruction: false,
+        personal_fact: true,
+        schedule_query: false,
+        travel_query: false,
+      },
+    }),
+  );
+  assert.notEqual(parsed, undefined);
+  assert.equal(parsed!.isFollowUp, true);
+  assert.equal(parsed!.reference, "earlier_session");
+  assert.equal(parsed!.recallIntent, true);
+  assert.equal(parsed!.memoryInstruction, false);
+  assert.equal(parsed!.personalFact, true);
+  assert.equal(parsed!.scheduleQuery, false);
+  assert.equal(parsed!.travelQuery, false);
+});
+
+test("parseUnderstanding: 非法 reference 回落 none；坏 JSON/缺字段容错", () => {
+  // reference 非法值 → "none"，其余有效信号保留
+  const badRef = parseUnderstanding(
+    JSON.stringify({ understanding: { reference: "last_week", recall_intent: true } }),
+  );
+  assert.equal(badRef!.reference, "none");
+  assert.equal(badRef!.recallIntent, true);
+
+  // 坏 JSON / 空 / 无大括号 → undefined
+  assert.equal(parseUnderstanding("not json at all"), undefined);
+  assert.equal(parseUnderstanding(""), undefined);
+  assert.equal(parseUnderstanding(undefined), undefined);
+  assert.equal(parseUnderstanding('{"understanding": broken'), undefined);
+
+  // 未产出 understanding 字段（旧模型/降级响应）→ undefined
+  assert.equal(parseUnderstanding(JSON.stringify({ intent: "chat", confidence: 0.9 })), undefined);
 });
 
 // ===== 固化噪音过滤：闲聊语气行不进入长期记忆 =====

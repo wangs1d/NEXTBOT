@@ -8,15 +8,14 @@
  *   改后·出口救援：同一降级决策作为 input.route，复刻 agent-core
  *     rescueMisroutedChat 的调用参数（主模型=minimax 直答：零工具 + 纯闲聊隔离
  *     + ephemeral），词表寒暄裸 goal、非词表带处境说明（防编造）。
- *   解耦后·生产常态：正常超时，auto 链路由（deepseek-flash）——同一批句子
- *     直接判 chat 面，事故源头已堵，根本不进任务面。
+ *   生产常态：正常超时，路由跟随主模型——同一批句子直接判 chat 面，
+ *     事故源头已堵，根本不进任务面。
  *
  * 用法（server 目录下）：
  *   node --import tsx test/tmp-probe/probe-p4-rescue.ts
  */
 import "../../src/config/load-server-env.js";
 import { createExternalChatProviderFromEnv } from "../../src/external-model/resolve-provider.js";
-import { resolveRouteChatProvider } from "../../src/external-model/route-chat-provider.js";
 import { routeTurnByLlm } from "../../src/agent/llm-task-router.js";
 import { buildTaskFailureNotice } from "../../src/external-model/fallback-texts.js";
 import { isHighPrecisionChatText } from "../../src/agent/task-router.js";
@@ -92,14 +91,12 @@ async function main(): Promise<void> {
     );
   }
 
-  console.log("\n═══ 组 3｜解耦后·生产常态（auto 链路由，正常超时）═══");
+  console.log("\n═══ 组 3｜生产常态（路由跟随主模型，正常超时）═══");
   delete process.env.LLM_ROUTE_TIMEOUT_MS;
-  const routeProvider = resolveRouteChatProvider(mainProvider);
-  console.log(`路由 provider: ${(routeProvider as { id?: string } | null)?.id ?? "null"}`);
   for (const c of ALL_CASES) {
     const text = c + CACHE_BUST[2];
     const t0 = Date.now();
-    const d = await routeTurnByLlm(routeProvider, "probe-p4", text);
+    const d = await routeTurnByLlm(mainProvider, "probe-p4", text);
     console.log(
       `[常态] "${c}" → plane=${d.plane} intent=${d.intent ?? "-"} conf=${d.confidence?.toFixed(2) ?? "-"}（${Date.now() - t0}ms）`,
     );

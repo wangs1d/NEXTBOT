@@ -50,6 +50,13 @@ export type RuleServices = {
   readyGoals?: () => Array<{ title: string; body: string }>;
   interestLines?: () => string[];
   recallMemory?: (query: string, limit: number) => Promise<string[]> | string[];
+  /**
+   * 感知 → 目标桥（2026-10-10）：某 actor 的"一句话目标上下文"（如
+   * 「你还在推进「学英语」，下一步是「背 20 个词」」）。规则文案据此从
+   * "碎片化场景"升级为"带目标上下文"（对齐 Muse 的目标驱动）。
+   * 未注入 = 规则文案不带目标上下文（行为回退）。
+   */
+  activeGoalLine?: (actorId: string) => string | null;
 };
 
 /** 规则执行上下文：只看状态板 + 自己的私有状态（查询型服务经 buildBoardRules

@@ -2,7 +2,6 @@ import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
-import { isAmbiguousFollowUpMessage } from "../agent/memory-signal.js";
 
 export type TaskStackEntry = {
   taskId: string;
@@ -492,7 +491,11 @@ export class ShortTermMemoryGatewayService {
     };
   }
 
-  buildPromptContext(sessionId: string, currentInput?: string): string | undefined {
+  buildPromptContext(
+    sessionId: string,
+    currentInput?: string,
+    understanding?: import("../agent/task-router.js").TurnUnderstanding,
+  ): string | undefined {
     const state = this.getTaskState(sessionId);
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
     const paused = state.tasks.filter((task) => task.status === "paused").slice(0, 3);
@@ -562,7 +565,7 @@ export class ShortTermMemoryGatewayService {
     // 滚动上下文对中早期对话做了硬截断，但保真台账里留有原文。
     // 这里把命中的完整轮次灌回 prompt，让 LLM 能"看到"之前聊过的细节，
     // 从而回答"好想他→(刘浩存)"这类指代反查。命中即收费，未命中零开销。
-    const episodicLines = this.buildEpisodicContextForInput(sessionId, currentInput, focus, isTopicFollowUp, memory);
+    const episodicLines = this.buildEpisodicContextForInput(sessionId, currentInput, focus, isTopicFollowUp, memory, understanding);
     if (episodicLines.length) {
       lines.push(...episodicLines);
     }
@@ -915,17 +918,21 @@ export class ShortTermMemoryGatewayService {
     focus: TurnFocusResolution,
     isTopicFollowUp: boolean,
     memory?: SessionConversationMemory,
+    understanding?: import("../agent/task-router.js").TurnUnderstanding,
   ): string[] {
     const input = normalizeInput(currentInput ?? "");
     if (!input) return [];
 
-    // 指代/回忆判定：纯指代短句（"好想他""那家公司"）即使被 resolveTurnFocus 视为
+    // 指代/回忆判定（2026-10-10 词表判定退役）：优先读模型判定（追问轮/锚定
+    // 上文/想回忆更早内容）；understanding 缺省（路由失败）退化为本地延续/回忆
+    // 启发。纯指代短句（"好想他""那家公司"）即使被 resolveTurnFocus 视为
     // topic_switch（无任务锚点），仍是此前内容的延续，必须允许反查。
-    // 模糊追问（"你确定吗/然后呢/再具体讲讲"）同属延续轮：命中检索才有上文可接。
     const isReferent =
-      isContinuityTurn(input) ||
-      this.isRecallOrFollowUp(input) ||
-      isAmbiguousFollowUpMessage(input) ||
+      (understanding
+        ? understanding.isFollowUp ||
+          understanding.reference !== "none" ||
+          understanding.recallIntent
+        : isContinuityTurn(input) || this.isRecallOrFollowUp(input)) ||
       /(他|她|他们|她们|它|这个|那个|这儿|那儿)/.test(input);
     // 真正干净的无关话题切换（无指代/回忆信号）才抑制注入，避免串台 + 省 token
     const isCleanSwitch = focus.kind === "topic_switch" && !focus.preserveRecentContext && !isTopicFollowUp;

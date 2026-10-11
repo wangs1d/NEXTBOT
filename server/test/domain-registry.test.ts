@@ -108,3 +108,67 @@ test("full 束与空束不投影；桥工具无归属", () => {
   assert.deepEqual(toolsMatchingCapabilityBeam(corpus, []), []);
   assert.equal(toolInCapabilityDomains("tool_discover", ["search"]), false);
 });
+
+/**
+ * 技能族域归属完整性（2026-10-10 根修回归闸）。
+ *
+ * 断言的语料**必须含技能注册链的工具**——上方各测试用 builtin 语料（束投影口径
+ * 需要），而根修对象（技能族域归属）根本不在 builtin 里。这正是历史坑：
+ * 「misc ≤ 8」只在 builtin 下成立，技能工具一进来 misc 就 35（picture 全族被域卡
+ * 14 上限截掉、按域 tool_discover 返回「未知能力域」、L1 预载整族漏召）。
+ * 本测试用真实装配链语料守住「每个技能族都有专属域、misc 不堆积」。
+ */
+test("技能族域归属完整性（真实装配链语料）：无族落 misc、misc 规模受控", async () => {
+  const { SkillManager } = await import("../src/skills/skill-manager.js");
+  const { skillManifestToChatTool } = await import("../src/skills/skill-openai-bridge.js");
+  const sm = new (SkillManager as new () => InstanceType<typeof SkillManager>)();
+  const modulePaths = [
+    "../src/skills/travel-planning/travel-planning-skills.js",
+    "../src/skills/builtin/booking-travel-skills.js",
+    "../src/skills/builtin/merchant-order-skills.js",
+    "../src/skills/builtin/alipay-payment-skills.js",
+    "../src/skills/builtin/picture-skills.js",
+    "../src/skills/builtin/habit-loop-skills.js",
+    "../src/skills/builtin/arrival-concierge-skills.js",
+    "../src/skills/builtin/finance-ingest-skills.js",
+    "../src/skills/builtin/virtual-phone-skills.js",
+    "../src/skills/builtin/agent-world-identity-skills.js",
+  ] as const;
+  for (const path of modulePaths) {
+    const mod: Record<string, unknown> = await import(path);
+    const key = Object.keys(mod).find(
+      (k) => /^register.*BuiltinSkills$/.test(k) && typeof mod[k] === "function",
+    );
+    if (!key) continue;
+    (mod[key] as (r: (s: unknown) => void, d: unknown) => void)(
+      (s: unknown) => sm.register(s as never),
+      new Proxy({}, { get: () => new Proxy(() => {}, { get: () => () => {} }) }),
+    );
+  }
+  const skillTools = sm.list(true).map(skillManifestToChatTool);
+  assert.ok(skillTools.length > 0, "技能注册链未产出任何工具（测试语料失真）");
+
+  const families = new Set<string>();
+  for (const tool of skillTools) {
+    const name = nameOf(tool);
+    if (!name) continue;
+    families.add(name.split(".")[0]);
+    const domains = domainsForTool(name);
+    assert.ok(
+      !(domains.length === 1 && domains[0] === "misc"),
+      `技能工具无专属域（落 misc，能力面对模型不可见）: ${name}`,
+    );
+  }
+
+  // misc 规模在真实语料下同样受控（历史坑：misc 35 个 → picture 全族被域卡截断）
+  const full = [...corpus, ...skillTools];
+  const misc: string[] = [];
+  for (const tool of full) {
+    const name = nameOf(tool);
+    if (!name) continue;
+    const domains = domainsForTool(name);
+    if (domains.length === 1 && domains[0] === "misc") misc.push(name);
+  }
+  assert.ok(misc.length <= 8, `真实语料下 misc 兜底堆积(${misc.length}): ${misc.join(",")}`);
+  assert.ok(families.size >= 6, `技能族过少(${families.size})，覆盖断言失真`);
+});

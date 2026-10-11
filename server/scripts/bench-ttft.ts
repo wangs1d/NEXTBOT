@@ -13,7 +13,6 @@ import {
   runPlanExecuteLoop,
   shouldUsePlanExecuteLoop,
 } from "../src/agent/plan-execute-loop.js";
-import { shouldSkipNarrativeRecall } from "../src/agent/simple-task.js";
 import { createExternalChatProviderFromEnv } from "../src/external-model/index.js";
 import { AgentCore } from "../src/services/agent-core.js";
 import type { NarrativeMemoryPort } from "../src/services/narrative-memory-port.js";
@@ -115,6 +114,15 @@ async function simulateLegacyPipeline(args: {
   return performance.now() - t0;
 }
 
+/**
+ * understanding 缺省时的长度启发近似（与 task-context.ts 对齐）：
+ * 真实管道的召回触发由 L1 路由 understanding 标记驱动，本基准无路由 LLM，
+ * 用「短句不召回」近似模拟该路径的延迟形态。
+ */
+function skipNarrativeRecallByLength(message: string): boolean {
+  return message.trim().length <= 16;
+}
+
 /** 优化后：启发式跳过 / 记忆超时 / 默认关闭 world caps */
 async function simulateOptimizedPipeline(args: {
   message: string;
@@ -123,7 +131,7 @@ async function simulateOptimizedPipeline(args: {
   recallTimeoutMs: number;
 }): Promise<number> {
   const t0 = performance.now();
-  if (!shouldSkipNarrativeRecall(args.message)) {
+  if (!skipNarrativeRecallByLength(args.message)) {
     await sleep(Math.min(args.narrativeDelayMs, args.recallTimeoutMs));
   }
   await sleep(args.llmFirstTokenMs);
@@ -328,7 +336,7 @@ async function main(): Promise<void> {
   console.log("");
   console.log("【当前默认开关】");
   console.log(`  world caps prompt: ${isAgentCapsPromptEnabled() ? "开启" : "关闭（默认）"}`);
-  console.log(`  短句跳过记忆检索: ${shouldSkipNarrativeRecall(shortMessage) ? "是" : "否"}`);
+  console.log(`  短句跳过记忆检索: ${skipNarrativeRecallByLength(shortMessage) ? "是" : "否"}`);
 
   if (process.argv.includes("--live")) {
     console.log("");

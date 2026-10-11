@@ -1,7 +1,3 @@
-import { shouldSkipNarrativeRecall } from "./memory-signal.js";
-
-export { shouldSkipNarrativeRecall };
-
 const DIRECT_CLOCK_RE =
   /现在.*几点|几点了|当前.*时间|今天.*几号|今天.*星期|我.*在哪|当前位置|current time|what time|where am i/i;
 

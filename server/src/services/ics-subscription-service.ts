@@ -505,6 +505,16 @@ export class IcsSubscriptionService {
   private timer: NodeJS.Timeout | null = null;
   private polling = false;
   private feedStatus = new Map<string, { lastSyncAt: string | null; lastError: string | null; eventCount: number }>();
+  /** 最近解析出的窗口内事件（外部信源收编读取口用） */
+  private readonly recentEvents: Array<{
+    feed: string;
+    key: string;
+    summary: string;
+    location?: string;
+    startMs: number;
+    allDay: boolean;
+    durationMinutes?: number;
+  }> = [];
 
   constructor(deps: {
     config: IcsWatchConfig;
@@ -568,6 +578,43 @@ export class IcsSubscriptionService {
     const fresh: IcsFeedState = { materialized: {} };
     this.state.feeds[name] = fresh;
     return fresh;
+  }
+
+  /**
+   * 只读取数口（2026-10-10 外部信源收编）：返回本服务最近解析出的窗口内事件，
+   * 供 IcsSensor 转成 Signal 进统一采集层。不发起新的网络请求。
+   */
+  fetchEventsSince(since: number): Array<{
+    feed: string;
+    key: string;
+    summary: string;
+    location?: string;
+    startMs: number;
+    allDay: boolean;
+    durationMinutes?: number;
+  }> {
+    return this.recentEvents.filter((e) => e.startMs > since).sort((a, b) => a.startMs - b.startMs);
+  }
+
+  /** 记录最近解析事件（容量封顶防膨胀） */
+  private rememberRecent(
+    feed: string,
+    occurrences: Array<{ key: string; summary: string; location?: string | null; startMs: number; allDay: boolean; durationMinutes?: number | null }>,
+    windowStartMs: number,
+  ): void {
+    for (const occ of occurrences) {
+      if (occ.startMs < windowStartMs) continue;
+      this.recentEvents.push({
+        feed,
+        key: occ.key,
+        summary: occ.summary,
+        ...(occ.location ? { location: occ.location } : {}),
+        startMs: occ.startMs,
+        allDay: occ.allDay,
+        ...(occ.durationMinutes ? { durationMinutes: occ.durationMinutes } : {}),
+      });
+    }
+    while (this.recentEvents.length > 500) this.recentEvents.shift();
   }
 
   private scheduleNext(): void {
@@ -698,6 +745,10 @@ export class IcsSubscriptionService {
     st.lastSyncAt = this.now().toISOString();
     st.lastError = null;
     st.eventCount = occurrences.length;
+
+    // 收编读取口（2026-10-10）：把本轮解析出的窗口内事件留在环形缓冲，
+    // 供 SensorKernel 的 IcsSensor 拉取（跨源汇聚用），不重复拉网络。
+    this.rememberRecent(feed.name, occurrences, windowStartMs);
 
     const changed = created + updated + cancelled;
     if (changed > 0 && this.notify) {

@@ -27,6 +27,8 @@ export type TaskOutboxEntry = {
   finalText: string;
   /** 任务面媒体卡片：照片/视频结果与 finalText 同生命周期，重放必须原样携带。 */
   mediaCards?: Array<Record<string, unknown>>;
+  /** 结构化摘要卡（CONTENT_SUMMARY 通道迁移）：与 finalText 同生命周期。 */
+  summaryCard?: Record<string, unknown>;
   /** 「接下来你可以」接续建议：与 finalText 同生命周期，重放原样携带（可点胶囊）。 */
   followups?: string[];
   enqueuedAt: number;
@@ -77,6 +79,7 @@ export class TaskOutbox {
       messageId: string;
       finalText: string;
       mediaCards?: Array<Record<string, unknown>>;
+      summaryCard?: Record<string, unknown>;
       followups?: string[];
     },
   ): void {
@@ -92,6 +95,7 @@ export class TaskOutbox {
       messageId: entry.messageId,
       finalText: entry.finalText,
       ...(entry.mediaCards && entry.mediaCards.length > 0 ? { mediaCards: entry.mediaCards } : {}),
+      ...(entry.summaryCard ? { summaryCard: entry.summaryCard } : {}),
       ...(entry.followups && entry.followups.length > 0 ? { followups: entry.followups } : {}),
       enqueuedAt: Date.now(),
     });
@@ -136,6 +140,7 @@ export class TaskOutbox {
               ...(entry.mediaCards && entry.mediaCards.length > 0
                 ? { mediaCards: entry.mediaCards }
                 : {}),
+              ...(entry.summaryCard ? { summaryCard: entry.summaryCard } : {}),
               ...(entry.followups && entry.followups.length > 0
                 ? { followups: entry.followups }
                 : {}),
@@ -148,6 +153,7 @@ export class TaskOutbox {
           messageId: entry.messageId,
           finalText: entry.finalText,
           mediaCards: entry.mediaCards,
+          summaryCard: entry.summaryCard,
           followups: entry.followups,
         });
       }

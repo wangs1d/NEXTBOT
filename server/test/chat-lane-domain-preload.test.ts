@@ -7,8 +7,12 @@
  * 命中域全族瘦身 schema）——「帮我规划…行程」这类轮次 travel.plan-itinerary
  * 确定性对模型可见，不再依赖模型自觉 discover。
  *
- * 注意：travel 技能族不在静态 builtin 注册表，生产由 bootstrap 注册链注入；
- * 测试环境按注册链同源构造（同 lane-tool-travel-promotion.test.ts）。
+ * 注意：travel 技能族不在静态 builtin 注册表，生产由 bootstrap 注册链注入
+ * sessionSkillTools（PromptContextBuilder.getChatSkillTools）。2026-10-10 P0-1
+ * 教训：本文件曾手写 travel 六件套 schema push 进 corpus——测试构造了生产不存在
+ * 的语料（生产 chat 车道当时根本没装配技能族），测试绿、线上失效。现改为
+ * **真实装配链**取语料：SkillManager 注册真实 travel 技能定义 →
+ * skillManifestToChatTool（生产同款桥），不再手写 schema。
  */
 process.env.AGENT_TOOL_SEARCH_ENABLED = "on";
 process.env.DESKTOP_VISUAL_ENABLED = "1";
@@ -24,6 +28,14 @@ const {
   buildLaneCoreTools,
   CHAT_LANE_CORE_NAMES,
 } = await import("../src/external-model/lane-tool-sets.js");
+const { SkillManager } = await import("../src/skills/skill-manager.js");
+const { skillManifestToChatTool } = await import("../src/skills/skill-openai-bridge.js");
+const { registerTravelPlanningBuiltinSkills } = await import(
+  "../src/skills/travel-planning/travel-planning-skills.js"
+);
+const { PlanningService } = await import(
+  "../src/skills/travel-planning/travel-planning-service.js"
+);
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 function fn(name: string, description = name): ChatCompletionTool {
@@ -40,14 +52,17 @@ function fn(name: string, description = name): ChatCompletionTool {
   };
 }
 
-/** 生产语料 + travel 技能族（bootstrap 注册链同源构造） */
-const corpus: ChatCompletionTool[] = [...getBuiltinAgentChatTools()];
-for (const n of [
-  "travel.plan-itinerary", "travel.search-poi", "travel.destination-info",
-  "travel.compute-route", "travel.get-itinerary", "travel.edit-itinerary",
-]) {
-  corpus.push(fn(n, `${n}：行程规划`));
-}
+/** 生产语料（builtin 静态注册表）∪ 技能族（真实注册链 + 生产同款 manifest→tool 桥） */
+const corpus: ChatCompletionTool[] = (() => {
+  const skillManager = new (SkillManager as new () => InstanceType<typeof SkillManager>)();
+  const travelPlanningService = new (PlanningService as new () => InstanceType<typeof PlanningService>)();
+  registerTravelPlanningBuiltinSkills(
+    (skill) => skillManager.register(skill),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 测试最小 Deps（规划服务本体，无 IO）
+    { travelPlanningService } as any,
+  );
+  return [...getBuiltinAgentChatTools(), ...skillManager.list(true).map(skillManifestToChatTool)];
+})();
 
 function toolName(t: ChatCompletionTool): string {
   return t.type === "function" ? t.function?.name ?? "" : "";
@@ -72,16 +87,25 @@ test("chat 车道装配口径：Core ∪ 预载无重名（与 buildChatLaneExpl
   assert.ok(preload.map(toolName).includes("travel.plan-itinerary"));
 });
 
-test("预载 schema 瘦身：字段级描述被剥掉（控 token）", () => {
+test("预载 schema 瘦身：字段级描述被剥掉（控 token，真实 manifest 参数）", () => {
   const preload = buildDomainPreloadTools("帮我规划一个周末去兴义玩的行程", corpus, new Set());
   assert.ok(preload.length > 0);
-  const first = preload[0]!;
-  const params = (first.function?.parameters ?? {}) as {
-    properties?: Record<string, unknown>;
-  };
-  const prop = params.properties?.q as { description?: string } | undefined;
-  assert.ok(prop, "测试构造的字段 q 应保留");
-  assert.equal("description" in prop, false, "字段级描述应被瘦身剥掉");
+  // 真实技能 manifest 的参数 schema：瘦身卸任后任何字段级 description 都不该幸存
+  let propCount = 0;
+  for (const tool of preload) {
+    const params = (tool.function?.parameters ?? {}) as {
+      properties?: Record<string, unknown>;
+    };
+    for (const [propName, prop] of Object.entries(params.properties ?? {})) {
+      propCount += 1;
+      assert.equal(
+        "description" in (prop as object),
+        false,
+        `${toolName(tool)}.${propName} 的字段级描述应被瘦身剥掉`,
+      );
+    }
+  }
+  assert.ok(propCount > 0, "真实技能参数应至少存在一个字段");
 });
 
 test("闲聊轮不注入：无强信号 → 空预载（零工具隔离语义不受影响）", () => {
@@ -118,4 +142,23 @@ test("确定性：同文本同语料恒同预载（前缀缓存前提）", () =>
   const a = buildDomainPreloadTools("帮我规划一个周末去兴义玩的行程", corpus, coreNames);
   const b = buildDomainPreloadTools("帮我规划一个周末去兴义玩的行程", corpus, coreNames);
   assert.deepEqual(a, b);
+});
+
+test("装配通道不变量（2026-10-10 P0-1 回归）：技能族只走 sessionSkillTools，builtin 注册表不含", () => {
+  // 防回归契约：travel.*（技能工具）不在 getBuiltinAgentChatTools() 静态注册表，
+  // 只经 PromptContextBuilder.getChatSkillTools(actorId)（= sessionSkillTools）
+  // 进入语料。若有人把技能族塞进静态注册表或改了通道，此测试立刻暴露。
+  const builtinNames = new Set(getBuiltinAgentChatTools().map(toolName));
+  assert.equal(
+    builtinNames.has("travel.plan-itinerary"),
+    false,
+    "travel.plan-itinerary 不应出现在静态 builtin 注册表（技能族只走 sessionSkillTools 通道）",
+  );
+  const skillNames = new Set(corpus.map(toolName));
+  for (const n of [
+    "travel.plan-itinerary", "travel.search-poi", "travel.destination-info",
+    "travel.compute-route", "travel.get-itinerary", "travel.edit-itinerary",
+  ]) {
+    assert.ok(skillNames.has(n), `真实注册链语料缺 ${n}`);
+  }
 });

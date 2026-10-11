@@ -9,6 +9,8 @@ import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show RenderRepaintBoundary;
 import "package:flutter/scheduler.dart" show SchedulerBinding;
 
+import "../services/client_update_checker.dart";
+
 /// ═══════════════════════════════════════════════════════════════════
 /// 玻璃态通知卡（移植自用户定稿的 Meoo 演示页，黑白单色毛玻璃）：
 /// - 真实毛玻璃：backdrop blur(28) + saturate(150%)
@@ -466,6 +468,7 @@ class _GlassToastCardState extends State<_GlassToastCard>
   @override
   void initState() {
     super.initState();
+    updateCheckTrace("glass card initState id=${widget.entry.id} title=${widget.entry.title}");
     if (widget.entry.duration > Duration.zero) {
       _progress = AnimationController(
         vsync: this,

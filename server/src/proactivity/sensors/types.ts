@@ -21,7 +21,12 @@ export type SignalStream =
   | "device"
   | "goal"
   | "file"
-  | "clipboard";
+  | "clipboard"
+  // ─── 外部信源收编（2026-10-10）：邮件/购物/位置 三条此前各自轮询、
+  // 未进统一内核的流。补齐后 SensorStream 覆盖 Muse 的「跨源汇聚」全集。
+  | "mail"
+  | "shopping"
+  | "location";
 
 export type SignalSalience = "high" | "medium" | "low";
 

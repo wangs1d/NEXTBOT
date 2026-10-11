@@ -55,6 +55,26 @@ PC → server 可单向推送 `desktop.event`。action 字段白名单见
 `desktop_visual/bridge_actions.py` 的 `ACTION_FIELD_ALLOWLIST`——未知 action
 直接拒绝,**不会**静默降级成 run_task(2026-08-31 修复的历史 bug)。
 
+### 手机远控电脑:无 UI 入口,走 Agent 工具(2026-10-09 定案)
+
+手机端**不设**「电脑」页面入口——用户直接对 Agent 说「帮我在电脑上打开 XX /
+截个屏 / 把这段字发到电脑剪贴板」,Agent 调 `desktop.*` 工具族,经
+`desktop.bridge.invoke` 下发到那台已配对的 PC 执行(工具全局注册,手机端会话同样可见)。
+
+- **身份口径**:桥接执行器按 `userId` 绑定(ws 层 `actorId = userId || sessionId`,
+  且桌面桥接通道强制要求 userId),所以**手机与电脑必须登录同一账号**才能命中同一台机器。
+- **提示词配套(关键)**:`prompt-context-builder.ts` 的 mobile 分支原先写
+  「涉及电脑端才能做的事就直说稍后在电脑上办」——这句会直接压制远控(模型有工具也不调)。
+  已改为明确告知模型:可直接调 `desktop.*` 代用户在已配对电脑上执行,只有确需本人
+  站到电脑前(插拔设备等)才让用户过去,电脑离线就直说没连上。
+- **电脑侧 Flutter 桥接**:`desktop_bridge_service.dart` 放行 `window` / `clipboard` /
+  `run_automation` 三个此前只在 Python worker 里支持的动作,否则手机让 Agent
+  切窗口 / 传剪贴板会拿到 `action_not_supported`。
+- **注意**:若电脑离线**且**服务端本机开着 `DESKTOP_VISUAL_ENABLED=1`,
+  `desktop.visual.screenshot` 会回退到在**服务器本机**截屏(既有行为,用于自托管场景);
+  结果文案会区分「已通过电脑桥接截取屏幕」与「已截取屏幕」。手机远控场景建议不要
+  在服务端开 `DESKTOP_VISUAL_ENABLED`,避免截错机器。
+
 `run_task` 的每步动作经 stderr `##STEP {json}` 行由桥接转发为
 `desktop.task.step` 事件(server 端 `DesktopBridgeCoordinator.subscribeEvents`
 可订阅,ws 层无 event_type 白名单),客户端可据此实时展示操作步骤。

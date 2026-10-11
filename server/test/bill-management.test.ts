@@ -35,7 +35,9 @@ const now = () => new Date(NOW);
 
 async function makeFixture() {
   const dir = await mkdtemp(join(tmpdir(), "bill-mgmt-test-"));
-  const finance = new FinanceDeepService(dir);
+  // 时基贯通：账本与账单管理共用同一冻结时钟，否则预算周期按真实月份归属，
+  // 缴费入账后 getBudgetStatus 仍算出 spent=0（时间炸弹）。
+  const finance = new FinanceDeepService(dir, now);
   await finance.load();
   const bills = new BillManagementService({ financeDeepService: finance, now });
   return { dir, finance, bills };

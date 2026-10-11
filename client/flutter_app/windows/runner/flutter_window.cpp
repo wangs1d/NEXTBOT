@@ -191,6 +191,17 @@ bool FlutterWindow::OnCreate() {
         HandleAppLifecycleMethodCall(call, std::move(result));
       });
 
+  // pai/pcm_player —— 全双工流式语音的原生 PCM 边收边播（waveOut）
+  pcm_player_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/pcm_player",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  pcm_player_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandlePcmPlayerMethodCall(call, std::move(result));
+      });
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -333,6 +344,9 @@ void FlutterWindow::OnDestroy() {
   overlay_window_.reset();
   overlay_channel_.reset();
   desktop_bridge_channel_.reset();
+  // 先关播放器（waveOutClose 会阻断后续音频线程回调），再释放 channel
+  pcm_player_.reset();
+  pcm_player_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -359,6 +373,12 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     case WM_FONTCHANGE:
       flutter_controller_->engine()->ReloadSystemFonts();
       break;
+    case kPcmPlayerDoneMsg:
+      // PCM 流播放自然结束（音频线程 PostMessage 弹回）→ 通知 Dart 解除半双工门控
+      if (pcm_player_channel_) {
+        pcm_player_channel_->InvokeMethod("onComplete", nullptr);
+      }
+      return 0;
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
@@ -1439,6 +1459,58 @@ void FlutterWindow::HandleAppLifecycleMethodCall(
     const bool enabled =
         res == ERROR_SUCCESS && type == REG_SZ && size > sizeof(wchar_t);
     result->Success(flutter::EncodableValue(enabled));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::HandlePcmPlayerMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "start") {
+    int sample_rate = 24000;
+    int channels = 1;
+    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
+      sample_rate = GetEncodableInt(args, "sampleRate", sample_rate);
+      channels = GetEncodableInt(args, "channels", channels);
+    }
+    if (!pcm_player_) {
+      pcm_player_ = std::make_unique<PcmStreamPlayer>();
+      pcm_player_->SetNotifyTarget(GetHandle(), kPcmPlayerDoneMsg);
+    }
+    result->Success(
+        flutter::EncodableValue(pcm_player_->Start(sample_rate, channels)));
+    return;
+  }
+
+  if (method == "write") {
+    // 直接收 Uint8List：省掉 base64 编解码，逐块直写 waveOut
+    const auto* bytes = std::get_if<std::vector<uint8_t>>(call.arguments());
+    if (bytes && !bytes->empty() && pcm_player_) {
+      pcm_player_->Write(bytes->data(), bytes->size());
+    }
+    result->Success();
+    return;
+  }
+
+  if (method == "finish") {
+    if (pcm_player_) pcm_player_->Finish();
+    result->Success();
+    return;
+  }
+
+  if (method == "stop") {
+    if (pcm_player_) pcm_player_->Stop();
+    result->Success();
+    return;
+  }
+
+  if (method == "isPlaying") {
+    result->Success(flutter::EncodableValue(pcm_player_ != nullptr &&
+                                            pcm_player_->IsPlaying()));
     return;
   }
 

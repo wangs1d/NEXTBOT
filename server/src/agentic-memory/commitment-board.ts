@@ -138,6 +138,11 @@ export type CommitmentScheduleOutlet = {
   upsertFromCommitment(record: CommitmentRecord): Promise<string | null>;
   /** 承诺进入终态或撤掉期限时，撤下已物化的日程。 */
   withdrawFromCommitment(record: CommitmentRecord): Promise<void>;
+  /**
+   * 时基下发（可选）：承诺板注入时把自身时钟传给出口，
+   * 保证出口的「未来时间闸」与板扫描同一时基。
+   */
+  setNow?(now: () => Date): void;
 };
 
 export interface CommitmentCreateInput {
@@ -362,6 +367,14 @@ export class CommitmentBoard {
   /** 注入日程物化出口（装配层接 ScheduleTaskService；未注入时承诺不落日程，行为不变） */
   setScheduleOutlet(outlet: CommitmentScheduleOutlet | null): void {
     this.scheduleOutlet = outlet;
+    // 时基对齐：出口的「未来时间闸」必须跟着板的时钟走。
+    // 否则装配层给板注入了冻结时钟、出口却偷读真实时钟时，
+    // 真实时间越过 fixture 日期后所有承诺静默不物化（且只有一行 error 日志）。
+    try {
+      outlet?.setNow?.(this.now);
+    } catch (err) {
+      console.error("[commitment-board] 出口时基下发失败（忽略）:", err);
+    }
   }
 
   private emit(

@@ -1078,7 +1078,7 @@ export const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "clock.get_current_time",
       description:
-        "获取当前时间（注册名 clock.get_current_time）。通过 IP 查询时区与城市，返回本地时间（精确到秒）、星期。\n【强制调用规则】用户询问时间或所在城市/当前位置时必须调用本工具或 clock.get_user_location；禁止使用 IP 或训练数据臆测位置。",
+        "获取当前时间（注册名 clock.get_current_time）。通过 IP 查询时区与城市，返回本地时间（精确到秒）、星期。\n【调用规则】上下文里的【当前时间】块是权威时间，问「现在几点/今天几号/星期几」直接用它推算即可，通常不需要调用本工具——不要为了确认时间而先调用它。仅当本轮缺少【当前时间】块，或确实需要精确到秒/时区名字时再调用。用户询问所在城市/当前位置时改用 clock.get_user_location；禁止使用 IP 或训练数据臆测位置。",
       parameters: {
         type: "object",
         properties: {},

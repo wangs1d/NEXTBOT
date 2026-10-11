@@ -282,6 +282,38 @@ test("attach: non-travel tool or empty days → unchanged", () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
+// 卡前确定性短介绍（2026-10-11 用户要求：前面一段简短介绍 + 后面跟旅游卡片）
+//
+// 事故背景：真实轮次 finalText 61 字全是上游 harness 控制帧
+//   <system>\n[trajectory-slicing]\n接下来的回复被分到两条轨迹…
+// 被出口守卫剥净后正文为空 → 回复只剩一张卡（「只有卡片、没有介绍」）。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const LEAKED_HARNESS_FRAME =
+  "<system>\n[trajectory-slicing]\n接下来的回复被分到两条轨迹，#1 紧接本段，#2 紧接 #1。";
+
+test("attach: 正文为空（内部帧被剥净）→ 卡前补确定性短介绍", () => {
+  const cleaned = processor.processAssistantText(LEAKED_HARNESS_FRAME);
+  assert.equal(cleaned, "", "整条 harness 控制帧应被出口守卫剥净");
+  const out = attachTravelItineraryCard(cleaned, "travel.plan-itinerary", buildRawToolResult());
+  const card = parseCard(out);
+  assert.equal(card.cardType, "travel_itinerary");
+  const lead = out.slice(0, out.indexOf("[AGENT_RESULT_CARD_START]")).trim();
+  assert.ok(lead.length > 0, "卡前应有介绍，不能只有卡片");
+  assert.ok(lead.includes("马尔代夫"), "介绍点到目的地");
+  assert.ok(lead.includes("共 1 天") || lead.includes("1天"), "介绍带上天数口径");
+  assert.ok(lead.includes("打开行程规划"), "介绍给出下一步入口");
+  assert.ok(out.trimEnd().endsWith("[AGENT_RESULT_CARD_END]"), "卡片仍在末尾");
+});
+
+test("attach: 模型有口语回复时不注入介绍（原样保留）", () => {
+  const reply = "帮你排好啦，马尔代夫 2 天，第一天住水上屋～";
+  const out = attachTravelItineraryCard(reply, "travel.plan-itinerary", buildRawToolResult());
+  assert.ok(out.startsWith(reply));
+  assert.ok(!out.includes("我给你排好了"), "有正文时不再补介绍");
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
 // stripMediaCardMarker：媒体卡轮次剥除残留卡片块，但 travel_itinerary 必须保留
 // ─────────────────────────────────────────────────────────────────────────────
 

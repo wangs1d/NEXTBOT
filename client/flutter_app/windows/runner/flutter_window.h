@@ -19,6 +19,7 @@
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
 #include "dynamic_island_window.h"
+#include "pcm_stream_player.h"
 
 // A window that does nothing but host a Flutter view.
 class FlutterWindow : public Win32Window {
@@ -157,6 +158,19 @@ class FlutterWindow : public Win32Window {
   void HandleAppLifecycleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // pai/pcm_player MethodChannel —— 全双工流式语音的原生 PCM 边收边播
+  // （服务端逐块下发 24kHz PCM，这里 waveOut 直写，不必等整轮音频生成完）
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      pcm_player_channel_;
+  std::unique_ptr<PcmStreamPlayer> pcm_player_;
+
+  void HandlePcmPlayerMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
+
+  // PCM 播放自然结束：音频线程 PostMessage 弹回平台线程后再通知 Dart
+  static constexpr UINT kPcmPlayerDoneMsg = WM_APP + 0x7A;
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

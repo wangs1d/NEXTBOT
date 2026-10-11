@@ -45,6 +45,16 @@ export type ProactiveIntent = {
   /** 上下文：用户原话 / 任务目标 / 画像兴趣等（LifeSignal.summary） */
   summary: string;
   mode: ProactiveBehaviorMode;
+  /**
+   * 本次意图所指向的**事件真实发生时刻**（ms）；缺省 = 意图创建时刻（视为新鲜事件）。
+   *
+   * 时效准入闸（temporal-admission）据此判定"这件事现在还该不该主动提"：
+   *   age ≤ 在途窗口  → 直接放行（既有触发源行为完全不变）
+   *   age 越过窗口    → 进入相关/静默/配额从严判定（防「翻旧账」）
+   * 因此**只有会复活旧事的生产者需要显式打这个字段**（如顺嘴过期升级取队列
+   * 条目的 createdAt）；天气/邮件/账单/日程等即时事件不必填。
+   */
+  originAt?: number;
   /** act 模式：直接后台执行的工具调用（白名单内，按序执行） */
   actArgs?: ProactiveActStep[];
   /**
@@ -69,7 +79,8 @@ export type ProactiveIntent = {
     | "health"        // 健康关怀（节律提醒等）
     | "location"      // 位置场景（围栏事件 / 到达常去地点）
     | "confirmation_expiry" // ask_first 确认超时未回复的作废告知
-    | "turn_aside_expiry"; // 顺嘴搭车 6h 未上车，过期升级重投正常通道（防再搭车回环）
+    | "turn_aside_expiry" // 顺嘴搭车 6h 未上车，过期升级重投正常通道（防再搭车回环）
+    | "goal"; // 目标后台自主循环（GoalRunner：计划完成/等确认/阶段性进展）
 };
 
 // ─── 通用主动性层（感知 → LLM 自主决策 → 通用执行） ───

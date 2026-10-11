@@ -1,0 +1,137 @@
+<html style="margin:0;padding:0;">
+<title>语音通道 × Agent大脑 解耦选型脑图（2026.10）</title>
+<div class="wrap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #000; color: #e8e8ea;
+      font-family: -apple-system, "SF Pro Text", "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .wrap { padding: 30px 34px; overflow-x: auto; }
+    .h-title { font-size: 19px; font-weight: 700; letter-spacing: .3px; margin: 0 0 2px; }
+    .h-sub { font-size: 12.5px; color: #86868b; margin: 0 0 22px; }
+    .tree ul { display: flex; flex-direction: column; justify-content: center;
+      padding: 0 0 0 36px; margin: 0; position: relative; }
+    .tree li { list-style: none; position: relative; padding: 8px 12px 8px 0;
+      margin: 0; display: flex; align-items: center; }
+    .tree li::before { content: ''; position: absolute; left: 0; top: 50%;
+      width: 36px; height: 1px; background: #3a3a3c; }
+    .tree li::after { content: ''; position: absolute; left: 0; top: 0;
+      width: 1px; height: 100%; background: #3a3a3c; }
+    .tree li:first-child::after { top: 50%; height: 50%; }
+    .tree li:last-child::after { height: 50%; }
+    .tree li:only-child::after { display: none; }
+    .tree > li::before, .tree > li::after { display: none; }
+    .tree > li { padding-left: 0; }
+    .node { line-height: 1.45; }
+    .root { background: #1d1d1f; border: 1.5px solid #545458; border-radius: 14px;
+      padding: 16px 20px; min-width: 230px; }
+    .root .t { font-size: 16px; font-weight: 700; }
+    .root .s { font-size: 12px; color: #98989f; margin-top: 5px; }
+    .branch { background: #141416; border: 1px solid #333336; border-radius: 11px;
+      padding: 11px 15px; min-width: 218px; border-left: 3px solid #666; }
+    .branch .t { font-size: 14px; font-weight: 700; white-space: nowrap; }
+    .branch .s { font-size: 11.5px; color: #86868b; margin-top: 4px; white-space: nowrap; }
+    .b1 { border-left-color: #30d158; }
+    .b2 { border-left-color: #0a84ff; }
+    .b3 { border-left-color: #64d2ff; }
+    .b4 { border-left-color: #ff9f0a; }
+    .b5 { border-left-color: #98989f; }
+    .leaf { background: #0e0e10; border: 1px solid #2b2b2e; border-radius: 8px;
+      padding: 7px 11px; width: 232px; font-size: 12.5px; color: #d6d6d8; }
+    .leaf b { font-weight: 600; }
+    .g { color: #30d158; } .bl { color: #64a8ff; } .cy { color: #64d2ff; }
+    .o { color: #ffb340; } .gy { color: #a1a1a6; }
+    .verdict { margin-top: 26px; background: #141416; border: 1px solid #333336;
+      border-radius: 12px; padding: 14px 18px; font-size: 13px; color: #c7c7cc; max-width: 1180px; }
+    .verdict b { color: #f0f0f2; }
+  </style>
+
+  <p class="h-title">语音通道 × Agent 大脑：解耦选型脑图</p>
+  <p class="h-sub">核心问题：端到端语音模型把 ASR/LLM/TTS 焊死，Agent 的记忆、工具、人格被绕过 ｜ 评估时间 2026-10</p>
+
+  <ul class="tree">
+    <li>
+      <div class="node root">
+        <div class="t">语音 × Agent 解耦</div>
+        <div class="s">外看端到端 · 内看全可拆</div>
+      </div>
+      <ul>
+        <li>
+          <div class="node branch b1">
+            <div class="t">★ 最优落地：双层解耦</div>
+            <div class="s">针对 NextBot（记忆 / Tool Routing / MCP / Windows）</div>
+          </div>
+          <ul>
+            <li><div class="node leaf">入口网关：<b class="g">Qwen-Audio-Agent</b>，Windows 悬浮 Orb 现成</div></li>
+            <li><div class="node leaf">本地语音引擎：<b class="g">HF speech-to-speech</b>，全链路本地</div></li>
+            <li><div class="node leaf">LLM 段 → <b class="g">NextBot 的 OpenAI 兼容端点</b>（人格 / 记忆 100% 自有）</div></li>
+            <li><div class="node leaf">长任务后端 → <b class="g">NextBot ACP stdio</b>（复用 MCP / Skills / 认证）</div></li>
+            <li><div class="node leaf">中文组件：Paraformer STT ＋ Qwen3-TTS / VoxCPM ＋ Silero VAD</div></li>
+            <li><div class="node leaf">底层模型可云端，但<b class="g">必经 NextBot</b>，不再被语音模型内置 LLM 截胡</div></li>
+          </ul>
+        </li>
+        <li>
+          <div class="node branch b2">
+            <div class="t">范式 B · Harness 编排层</div>
+            <div class="s">语音是前端，干活的是你自己的 Agent</div>
+          </div>
+          <ul>
+            <li><div class="node leaf"><b class="bl">Qwen-Audio-Agent</b> ｜ Apache-2.0 ｜ TypeScript/Node</div></li>
+            <li><div class="node leaf">语音前端可换：Qwen / GPT-Live / Gemini / 豆包 Seeduplex / Step / 本地</div></li>
+            <li><div class="node leaf">后端经 <b class="bl">ACP / A2A</b> 接任意 Agent（通用 ACP_COMMAND 接入）</div></li>
+            <li><div class="node leaf">前台对话 ‖ 后台任务并行，结果自然回流，可追问 / 取消</div></li>
+            <li><div class="node leaf">自带跨会话记忆、知识库、前端工具、桌面端（Win/macOS/Linux）</div></li>
+            <li><div class="node leaf">分工：<b class="bl">ACP 管 Agent 会话/权限，MCP 管工具/资源</b></div></li>
+          </ul>
+        </li>
+        <li>
+          <div class="node branch b3">
+            <div class="t">范式 A · 协议标准化引擎</div>
+            <div class="s">用 OpenAI Realtime 协议把语音 IO 服务器化</div>
+          </div>
+          <ul>
+            <li><div class="node leaf"><b class="cy">HuggingFace speech-to-speech</b> ｜ Apache-2.0 ｜ Python 3.10+</div></li>
+            <li><div class="node leaf">VAD → STT → LLM → TTS，<b class="cy">四段逐可换</b>，CLI flag 切换</div></li>
+            <li><div class="node leaf">对外仅一个 <b class="cy">OpenAI Realtime 兼容 WebSocket</b>（/v1/realtime）</div></li>
+            <li><div class="node leaf">默认全本地：llama.cpp / vLLM / mlx-lm，客户端零改动</div></li>
+            <li><div class="node leaf">工具事件透传——<b class="cy">工具能力由 LLM 端（NextBot）决定</b></div></li>
+            <li><div class="node leaf">代价：级联而非神经 E2E，延迟与运维自己扛（已量产于 Reachy Mini）</div></li>
+          </ul>
+        </li>
+        <li>
+          <div class="node branch b4">
+            <div class="t">范式 C · 端到端可拆模型</div>
+            <div class="s">组件独立训练，但换大脑仍需训练</div>
+          </div>
+          <ul>
+            <li><div class="node leaf"><b class="o">NemotronLabs VoiceChat</b>（NVIDIA, 2026-09）｜ CC BY 4.0</div></li>
+            <li><div class="node leaf">FastConformer ＋ Nemotron-Nano-9B ＋ 独立流式 TTS，全双工</div></li>
+            <li><div class="node leaf">并行专用 function channel，工具选择 F1 82.5%（超 Gemini Live）</div></li>
+            <li><div class="node leaf">换 LLM 需 <b class="o">CPT/SFT（64×GPU 级）</b>，非“随意适配”</div></li>
+            <li><div class="node leaf">限制：2 分钟记忆窗口 ｜ ≤5 工具 ｜ 工具执行中不可打断</div></li>
+            <li><div class="node leaf">端到端族（换脑均需训练）：Moshi / Smallthinker、Step-Audio 2、VITA-Audio / QinYu、MiniCPM-o 4.5</div></li>
+          </ul>
+        </li>
+        <li>
+          <div class="node branch b5">
+            <div class="t">备选编排框架</div>
+            <div class="s">按技术栈 / 部署形态取舍</div>
+          </div>
+          <ul>
+            <li><div class="node leaf"><b class="gy">Pipecat</b> ｜ BSD-2 ｜ Python：帧 Pipeline，插入粒度最细，全 Python 首选</div></li>
+            <li><div class="node leaf"><b class="gy">LiveKit Agents</b> ｜ Apache-2.0 ｜ Py/Node：WebRTC/SFU、高并发、SIP 电话</div></li>
+            <li><div class="node leaf"><b class="gy">TEN Framework</b>（声网）：C++ 扩展图、边缘低延迟，Smart Turn 全开源含训练数据</div></li>
+          </ul>
+        </li>
+      </ul>
+    </li>
+  </ul>
+
+  <div class="verdict">
+    <b>核心判断：</b>“神经端到端 ＋ 中间 LLM 零成本热替换”在工程上不成立——音频 token 空间与 LLM 联合训练，换脑必有适配训练。
+    2026 年开源界的实际答案是把解耦上移两层：<b>引擎层</b>用 OpenAI Realtime 协议把语音 IO 服务器化、四段可换（speech-to-speech）；
+    <b>Harness 层</b>把实时语音前端与执行型 Agent 用 ACP/A2A 分开，并解决 Agent 干活时对话“在场”的问题（Qwen-Audio-Agent）。
+    对 NextBot：<b>Qwen-Audio-Agent ＋ 本地 speech-to-speech（LLM 段指向 NextBot）＋ NextBot 作 ACP 后端</b>为当前最优组合；
+    想先跑通 MVP 可只用 speech-to-speech，想全 Python 深度内嵌则用 Pipecat。
+  </div>
+</div>
+</html>

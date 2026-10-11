@@ -725,7 +725,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     };
     // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
     ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
-    // 「行程规划」独立界面：行程卡点击 / autoOpen → 全屏路由打开
+    // 「行程规划」：行程卡点击 / autoOpen → 桌面走独立窗口（行迹桌面页
+    // 1:1），手机走应用内浏览器；入口见 _openTravelPlanWindow。
     // 版本闸：开源版剔除旅游家族，入口不注册
     if (!ApiConfig.isOssEdition) {
       TravelPlanLauncher.setHandler(_openTravelPlanPanel);
@@ -1794,6 +1795,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       .whereType<Map<String, dynamic>>()
                       .toList()
                   : null;
+          // 结构化摘要卡（CONTENT_SUMMARY 通道迁移）：随 done 下发的折叠卡载荷，
+          // 文本通道已不携带 JSON；历史消息回退正文标记解析。
+          final Map<String, dynamic>? summaryCardFromPayload =
+              payload["summaryCard"] is Map<String, dynamic>
+                  ? payload["summaryCard"] as Map<String, dynamic>
+                  : null;
           final List<Map<String, dynamic>>? renderBlocksFromPayload =
               payload["renderBlocks"] is List
                   ? (payload["renderBlocks"] as List)
@@ -1842,6 +1849,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               finalText: resolvedText,
               playUrl: playUrl,
               mediaCards: mediaCardsFromPayload,
+              summaryCard: summaryCardFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
               followUps: followUpsFromPayload,
@@ -1857,6 +1865,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               replyBlocks: replyBlocksFromPayload,
               followUps: followUpsFromPayload,
               playUrl: playUrl,
+              summaryCard: summaryCardFromPayload,
             );
           } else {
           final int? idx = _messageIndexById(messageId);
@@ -1895,6 +1904,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 durationMs: previous.durationMs,
                 waveform: previous.waveform,
                 mediaCards: resolvedMediaCards,
+                summaryCard: summaryCardFromPayload ?? previous.summaryCard,
                 renderBlocks: renderBlocksFromPayload,
                 replyBlocks: replyBlocksFromPayload,
                 followUpPrompts: followUpsFromPayload,
@@ -1911,6 +1921,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               timestamp: DateTime.now(),
               playUrl: playUrl,
               mediaCards: mediaCardsFromPayload,
+              summaryCard: summaryCardFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
               followUpPrompts: followUpsFromPayload,
@@ -2839,6 +2850,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _reconcileBubblesOnDone({
     required List<Map<String, dynamic>> bubbles,
     required List<Map<String, dynamic>>? mediaCards,
+    required Map<String, dynamic>? summaryCard,
     required List<Map<String, dynamic>>? renderBlocks,
     required List<Map<String, dynamic>>? replyBlocks,
     required List<String>? followUps,
@@ -2887,6 +2899,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             mediaCards: isLast
                 ? (mediaCards ?? previous.mediaCards)
                 : previous.mediaCards,
+            summaryCard: isLast
+                ? (summaryCard ?? previous.summaryCard)
+                : previous.summaryCard,
             renderBlocks: isLast ? lastRenderBlocks : previous.renderBlocks,
             replyBlocks: isLast ? lastReplyBlocks : previous.replyBlocks,
             followUpPrompts: isLast ? followUps : previous.followUpPrompts,
@@ -2904,6 +2919,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           timestamp: DateTime.now(),
           playUrl: isLast ? playUrl : null,
           mediaCards: isLast ? mediaCards : null,
+          summaryCard: isLast ? summaryCard : null,
           renderBlocks: isLast ? lastRenderBlocks : null,
           replyBlocks: isLast ? lastReplyBlocks : null,
           followUpPrompts: isLast ? followUps : null,
@@ -2929,6 +2945,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     required String finalText,
     required String? playUrl,
     required List<Map<String, dynamic>>? mediaCards,
+    required Map<String, dynamic>? summaryCard,
     required List<Map<String, dynamic>>? renderBlocks,
     required List<Map<String, dynamic>>? replyBlocks,
     required List<String>? followUps,
@@ -2974,6 +2991,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         durationMs: previous.durationMs,
         waveform: previous.waveform,
         mediaCards: mediaCards ?? previous.mediaCards,
+        summaryCard: summaryCard ?? previous.summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
         followUpPrompts: followUps,
@@ -2990,6 +3008,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         timestamp: DateTime.now(),
         playUrl: playUrl,
         mediaCards: mediaCards,
+        summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
         followUpPrompts: followUps,
@@ -3892,20 +3911,29 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 在独立系统
-  /// 窗口中打开行程规划（spawn 子进程，与主窗口并排，互不遮挡）。
+  /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 打开行程规划。
+  ///
+  /// 打开方式按平台分流（2026-10-11 收敛为单一形态，去掉「两种打开方式」）：
+  ///   - Windows 桌面：**只走独立系统窗口**（spawn 子进程，页面 = 服务端
+  ///     /travel-map/desktop 的「行迹」桌面版，与设计稿 1:1）。此前桌面首选
+  ///     「本机 server 页面 + 系统浏览器」，于是同一张卡会先弹独立窗口、
+  ///     又开一个浏览器标签页——两条路并存是用户报的「两种打开方式」。
+  ///   - Android / iOS：网页仍是唯一可行路径（webview_windows 在移动端不可用，
+  ///     应用内没有可用的行程界面），保留应用内浏览器（不离开 App）。
   void _openTravelPlanPanel(AgentResultData data) {
     unawaited(_openTravelPlanWindow(data));
   }
 
   Future<void> _openTravelPlanWindow(AgentResultData data) async {
-    // 首选：本机 server 页面 + 系统浏览器（零独立进程/WebView2 幽灵窗）。
-    // server 不可达时退回独立子进程窗口，再退应用内全屏页。
-    if (await TravelPlanBrowserLauncher.open(data)) {
-      if (!mounted) return;
-      setState(() => _tabIndex = 0); // 主窗口聚焦时，行程卡就在聊天页眼前
-      return;
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      // 手机端：应用内浏览器（失败退系统浏览器）
+      if (await TravelPlanBrowserLauncher.open(data)) {
+        if (!mounted) return;
+        setState(() => _tabIndex = 0); // 主窗口聚焦时，行程卡就在聊天页眼前
+        return;
+      }
     }
+    // 桌面（以及手机端浏览器不可用）：独立子进程窗口
     final bool opened = await TravelPlanWindowLauncher.open(data);
     if (opened) {
       if (!mounted) return;
@@ -3966,24 +3994,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 常用工具「手机」入口：跳转到"真实手机"功能页
-  /// 与"虚拟电话"区分——这里对接的是用户自己的手机（拨号/通讯录/短信等）。
-  void _openPhoneDevicesDialog() {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    // TODO(phone-devices): 等 lib/features/phone_devices/phone_devices_page.dart
-    // 的 PhoneDevicesPage 类完成后，把下面三行解注释：
-    // Navigator.of(navCtx).push<void>(
-    //   MaterialPageRoute<void>(
-    //     builder: (BuildContext context) => const PhoneDevicesPage(),
-    //     fullscreenDialog: true,
-    //   ),
-    // );
-    ScaffoldMessenger.maybeOf(navCtx)?.showSnackBar(
-      const SnackBar(content: Text("「手机」功能页正在准备中")),
-    );
-  }
-
   // ═══════════════════════════════════════════════════════════
   // 任务面回执（chat.task_update / chat.task_cancel）
   // ═══════════════════════════════════════════════════════════
@@ -4041,6 +4051,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 .whereType<Map<String, dynamic>>()
                 .toList()
             : null;
+    // 结构化摘要卡（CONTENT_SUMMARY 通道迁移）：任务面 done 与前台轮次同构。
+    final Map<String, dynamic>? summaryCardFromPayload =
+        payload["summaryCard"] is Map<String, dynamic>
+            ? payload["summaryCard"] as Map<String, dynamic>
+            : null;
     // 回复信封块：任务面 done 与前台轮次同构，服务端已把卡片标记确定性拆成
     // text/card 序列（行程卡收尾独立成块）——优先按 blocks 渲染，
     // 消除文本解析漂移导致的漏卡。
@@ -4050,7 +4065,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 .whereType<Map<String, dynamic>>()
                 .toList()
             : null;
-    if (finalText.trim().isEmpty && (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty)) {
+    if (finalText.trim().isEmpty &&
+        (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty) &&
+        summaryCardFromPayload == null) {
       return;
     }
     final int? idx = _messageIndexById(messageId);
@@ -4063,6 +4080,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           ? _messages[idx].timestamp
           : DateTime.now(),
       mediaCards: mediaCardsFromPayload,
+      summaryCard: summaryCardFromPayload,
       replyBlocks: replyBlocksFromPayload,
     );
     void apply() {
@@ -4253,70 +4271,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _messages.removeRange(fromIdx, _messages.length);
       _rebuildAssistantIndex();
     });
-  }
-
-  /// 删除全部聊天记录：确认弹窗 → 调服务端清空接口(聊天线程+Agent 记忆) → 清空本地。
-  /// 无论服务端成功与否,本地历史一律清空(本地历史属于设备侧)。
-  Future<void> _confirmClearAllChat() async {
-    final BuildContext? ctx = _rootNavigatorKey.currentContext;
-    if (ctx == null || !mounted) return;
-
-    final bool? confirmed = await showDialog<bool>(
-      context: ctx,
-      builder: (BuildContext dialogCtx) => AlertDialog(
-        title: const Text("清空所有聊天记录？"),
-        content: const Text("将删除全部聊天内容，并同时清空 AI 助手的记忆。此操作不可恢复。"),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.pop(dialogCtx, false),
-            child: const Text("取消"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogCtx, true),
-            child: const Text("删除"),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true) return;
-
-    String tip = "已清空本地聊天记录(服务端未连接)";
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/clear-all");
-      final http.Response res = await http
-          .post(
-            uri,
-            headers: const <String, String>{"Content-Type": "application/json"},
-            body: jsonEncode(<String, dynamic>{
-              "sessionId": ApiConfig.effectiveActorId,
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200) {
-        tip = "已清空全部聊天记录与 AI 记忆";
-      } else {
-        tip = "已清空本地记录(服务端清理失败 ${res.statusCode})";
-      }
-    } catch (_) {
-      // 网络不可达兜底
-    }
-
-    // 通知服务端同步清除 ChatThreadStore 内存上下文 + 本地历史
-    _ws.sendEvent("chat.clear_history", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-    });
-    await _store.clearAllMessages();
-    if (mounted) {
-      setState(() {
-        _messages.clear();
-        _relayInbound.clear();
-        _taskReceiptMessageIdByTaskId.clear();
-        _taskPlaneState.clear();
-        IslandRealFeeds.setTaskActivity(activeCount: 0);
-        _rebuildAssistantIndex();
-      });
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tip)));
-    }
   }
 
   /// 重建 assistant 消息索引（删除后索引失效需重建）
@@ -5396,44 +5350,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   elevation: 0,
                                   scrolledUnderElevation: 0,
                                   title: _buildAppBarTitle(),
-                                  actions: _tabIndex == 0
-                                      ? <Widget>[
-                                          PopupMenuButton<String>(
-                                            tooltip: "更多操作",
-                                            icon: Icon(
-                                              Icons.more_vert_rounded,
-                                              size: 22,
-                                              color: AppPalette
-                                                  .resolveAppBarForeground(
-                                                      variant),
-                                            ),
-                                            itemBuilder:
-                                                (BuildContext ctx) =>
-                                                    <PopupMenuEntry<String>>[
-                                              const PopupMenuItem<String>(
-                                                value: "clear_all_chat",
-                                                height: 40,
-                                                child: Row(
-                                                  children: <Widget>[
-                                                    Icon(
-                                                      Icons
-                                                          .delete_sweep_outlined,
-                                                      size: 18,
-                                                    ),
-                                                    SizedBox(width: 10),
-                                                    Text("删除全部聊天记录"),
-                                                  ],
-                                                ),
-                                              ),
-                                            ],
-                                            onSelected: (String value) {
-                                              if (value == "clear_all_chat") {
-                                                _confirmClearAllChat();
-                                              }
-                                            },
-                                          ),
-                                        ]
-                                      : const <Widget>[],
                                   ),
                                 ),
                                 Expanded(
@@ -6113,7 +6029,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         scheduleFuture: _cachedScheduleFuture,
         onAgentLink: _openAgentLinkTab,
         onSchedule: _openSchedulePanel,
-        onPhone: _openPhoneDevicesDialog,
         onMessages: _openMessagesPanel,
         onGallery: _openGalleryPanel,
         onBrowser: _openBrowserPanel,

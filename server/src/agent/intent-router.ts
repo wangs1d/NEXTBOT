@@ -14,6 +14,7 @@ export type IntentLabel =
   | "realtime_lookup" // 需外部实时信息：新闻/某人近况/最新消息/价格/热搜/比分
   | "personal_data_query" // 查用户自己的数据：日程/订单/快递/钱包/消息/相册——走本地只读工具，绝不联网搜索
   | "media_retrieval" // 找图/照片/视频/壁纸
+  | "travel_planning" // 旅行行程规划：去某地玩几天的行程/攻略/路线（确定性预执行 travel.plan-itinerary）
   | "action_write" // 写数据/有副作用：日程/提醒/发消息/下单
   | "multi_step_task" // 多步操作/软件设备操控/其他办事
   | "meta_capability"; // 问能力/系统状态
@@ -24,6 +25,7 @@ export const INTENT_LABELS: readonly IntentLabel[] = [
   "realtime_lookup",
   "personal_data_query",
   "media_retrieval",
+  "travel_planning",
   "action_write",
   "multi_step_task",
   "meta_capability",
@@ -74,6 +76,10 @@ export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
   // 订单到哪了」→ 整句进了 AnySearch）。
   personal_data_query: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
   media_retrieval: { plane: "task", capabilities: ["media", "search"], budget: 3, tier: "flash" },
+  // travel_planning（2026-10-10 P1）：行程规划确定性预执行——「判出规划 → 代码
+  // 直接调 travel.plan-itinerary → 行程草案进上下文」，模型只叙述+追问参数。
+  // capabilities full（不裁束；travel 族可见性由域预载 + 意图强制注入保证）。
+  travel_planning: { plane: "task", capabilities: ["full"], budget: 3, tier: "flash" },
   action_write: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
   multi_step_task: { plane: "task", capabilities: ["full"], budget: 4, tier: "pro" },
   meta_capability: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
@@ -118,6 +124,11 @@ const INTENT_ALIASES: Record<string, IntentLabel> = {
   media_retrieval: "media_retrieval",
   image: "media_retrieval",
   photo: "media_retrieval",
+  travel: "travel_planning",
+  travel_planning: "travel_planning",
+  travel_plan: "travel_planning",
+  trip: "travel_planning",
+  itinerary: "travel_planning",
   write: "action_write",
   action: "action_write",
   action_write: "action_write",

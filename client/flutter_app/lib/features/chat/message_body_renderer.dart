@@ -229,6 +229,30 @@ Widget _buildAssistantBodyInner(
   // （renderBlocks 已并入上方统一路径：卡片标记与照片在同一序列渲染，
   // 不再作为独立分支彼此抢占。）
 
+  // 结构化摘要卡通道（2026-10-10 CONTENT_SUMMARY 迁移）：卡片随 done 的
+  // summaryCard 字段下发，正文已不携带 JSON——这是权威路由，优先于一切
+  // 文本解析分支。历史消息（迁移前落库）回退到下方正文标记解析路径。
+  if (!isUser && message.summaryCard != null) {
+    try {
+      final ContentSummaryDataV2 structuredSummary =
+          ContentSummaryDataV2.fromJson(message.summaryCard!);
+      return ContentSummaryMessageBody(
+        summary: structuredSummary,
+        briefText: "",
+        extraText: ContentSummaryParser.stripSummaryBlocks(
+          typewriterRawText ?? message.text,
+        ),
+        onCardTap: () {
+          if (!ContentSummaryLauncher.open(structuredSummary)) {
+            ContentSummaryDetailModal.show(context, structuredSummary);
+          }
+        },
+      );
+    } catch (_) {
+      // 载荷损坏：回退正文渲染（服务端保证损坏载荷整块剥离，正文是干净的）
+    }
+  }
+
   // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本渲染。
   //
   // 来自服务端 `chat.assistant_done` 的 `mediaCards` 字段，与 LLM 的文本回复
@@ -271,9 +295,12 @@ Widget _buildAssistantBodyInner(
       footer: "",
     );
     // 旧数据正文里可能残留图片链接行，展示前剥掉，避免与图廊重复。
+    // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：mediaCards
+    // 分支在本方法提前 return，走不到 contentSummary 折叠卡路由，因此展示文本
+    // 必须先剥掉摘要块——照片是主形态时，块没有消费者，只剩裸 JSON 泄漏一途。
     final String displayText = recoveredImageUrls.isNotEmpty
         ? _stripLegacyImageLines(message.text)
-        : message.text;
+        : ContentSummaryParser.stripSummaryBlocks(message.text);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,

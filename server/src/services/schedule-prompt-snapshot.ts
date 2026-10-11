@@ -7,29 +7,17 @@ const RECURRENCE_LABEL: Record<string, string> = {
   yearly: "每年",
 };
 
-const SCHEDULE_RECALL_RE =
-  /日程|提醒|安排|待办|计划|行程|会议|约会|闹钟|calendar|schedule|remind|todo|task/i;
-
-const SCHEDULE_FAR_RANGE_RE =
-  /明天|后天|下周|下个月|本月|本周|未来|之后|以后|全部|所有|最近几天|最近一周|长期|tomorrow|next week|next month|future|all/i;
-
-export function shouldInjectScheduleSnapshot(userText: string | undefined): boolean {
-  const text = userText?.trim() ?? "";
-  return Boolean(text) && SCHEDULE_RECALL_RE.test(text);
-}
-
-export function shouldUseExtendedScheduleWindow(userText: string | undefined): boolean {
-  const text = userText?.trim() ?? "";
-  return Boolean(text) && SCHEDULE_FAR_RANGE_RE.test(text);
-}
-
+/**
+ * 构建日程快照（注入门槛由调用方裁决：L1 路由 understanding.schedule_query /
+ * 追问轮）。原 SCHEDULE_RECALL_RE / SCHEDULE_FAR_RANGE_RE 词表判定已退役——
+ * 「用户这轮在不在问日程、要看多远」归模型判定，本模块只负责执行。
+ */
 export function buildSchedulePromptSnapshot(
   scheduleTaskService: ScheduleTaskService,
   sessionId: string,
-  userText?: string,
+  extended: boolean,
 ): string {
   const now = Date.now();
-  const extended = shouldUseExtendedScheduleWindow(userText);
   const horizonDays = extended ? 7 : 1;
   const maxItems = extended ? 5 : 3;
   const from = new Date(now).toISOString();

@@ -84,7 +84,7 @@ function nowIso(): string {
 function normalizeSubject(text: string): string {
   return text
     .trim()
-    .replace(/[\s，。；！？、,.;:!?'""''（）()\[\]【】~～]/g, "")
+    .replace(/[\s，。；！？、,.;:!?'""''「」『』（）()\[\]【】~～]/g, "")
     .slice(0, 12);
 }
 

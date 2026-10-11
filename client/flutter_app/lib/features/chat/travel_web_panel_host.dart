@@ -14,8 +14,9 @@ import "travel_web_panel_controller.dart";
 /// 打开/关闭面板、进出全屏都不再重新加载地图（页面常驻），
 /// 仅在 loadPlan 时切换数据。
 ///
-/// 页面单一来源：加载本机 server 的 /travel-map?host=1（不再打包第二份
-/// HTML 资产）。宿主模式下数据由 Dart 桥 loadPlan 注入，不走 ?id= 取数；
+/// 页面单一来源：加载本机 server 的 /travel-map/desktop?host=1（行迹桌面页，
+/// 与行程卡点击进入的独立窗口同一份页面；不再打包第二份 HTML 资产）。
+/// 宿主模式下数据由 Dart 桥 loadPlan 注入，不走 ?id= 取数；
 /// 实拍图/瓦片代理与页面同源直连，无需任何地址注入。
 ///
 /// 预加载：[preload] 后台初始化（隐藏渲染），首次打开面板零等待。
@@ -47,7 +48,7 @@ class TravelWebPanelHost {
   /// 初始化错误（宿主渲染占位提示用）。
   String? get error => _error;
 
-  /// 幂等启动：App 启动/首次使用时调用，后台加载 panel.html + 地图。
+  /// 幂等启动：App 启动/首次使用时调用，后台加载行程桌面页 + 地图。
   Future<void> ensureStarted() {
     final Future<void>? starting = _starting;
     if (starting != null) return starting;
@@ -81,11 +82,12 @@ class TravelWebPanelHost {
 
       // 加载本机 server 页面（单一来源）。host 模式：数据由 Dart 桥 loadPlan
       // 注入，页面不显示"未携带行程参数"空态。_cb 时间戳穿透长缓存：
-      // panel.html 服务端声明 max-age=86400，不带穿透参数时页面更新
-      // （路线/标点逻辑修订）会被 WebView2 磁盘缓存压住最长一天。
+      // 页面声明 max-age=86400，不带穿透参数时页面更新（路线/标点逻辑修订）
+      // 会被 WebView2 磁盘缓存压住最长一天。
+      // 桌面页 = /travel-map/desktop（「行迹」桌面版，行程独立窗口的 1:1 呈现）。
       final Uri base = Uri.parse(ApiConfig.httpBase);
       final Uri pageUri = base.replace(
-        path: "${base.path}/travel-map".replaceAll("//", "/"),
+        path: "${base.path}/travel-map/desktop".replaceAll("//", "/"),
         queryParameters: <String, String>{
           "host": "1",
           "_cb": DateTime.now().millisecondsSinceEpoch.toString(),

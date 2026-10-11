@@ -136,6 +136,28 @@ class ContentSummaryParser {
     r'<details_card\s+ref="([^"]+)"\s*/>',
   );
 
+  /// 渲染层兜底：把文本中的整个 CONTENT_SUMMARY_V2 块（标记对 + JSON 载荷 +
+  /// 孤儿 details_card 占位）剥掉。任何把文本直接交给 markdown 渲染的路径
+  /// （mediaCards 分支 / 结构化正文 / image_result 回退）都应先过这里，
+  /// 保证块无论从哪条链路到达都绝不以裸 JSON 透出（2026-10-10 搜图轮泄漏）。
+  /// 服务端出口也有同语义剥离（stripContentSummaryBlock），两侧任一生效即可。
+  static final RegExp _summaryBlockRe = RegExp(
+    r"\[CONTENT_SUMMARY_V2_START\][\s\S]*?\[CONTENT_SUMMARY_V2_END\][ \t]*",
+  );
+  static final RegExp _orphanDetailsCardRe = RegExp(
+    r'^[ \t]*<details_card\s+ref="[^"]*"\s*/>[ \t]*$',
+    multiLine: true,
+  );
+
+  static String stripSummaryBlocks(String text) {
+    final String noBlock = text.replaceAll(_summaryBlockRe, "");
+    // 孤儿 details_card 占位行无条件清（与服务端 stripContentSummaryBlock 同语义）
+    final String cleaned = noBlock.replaceAll(_orphanDetailsCardRe, "");
+    return cleaned
+        .replaceAll(RegExp(r"\n{3,}"), "\n\n")
+        .trim();
+  }
+
   /// 匹配「{ ... "items": [ ... ] ... }」形式的 JSON 块。
   /// 允许内层包含嵌套花括号（外层用平衡式扫描，不依赖正则）。
   static final RegExp _itemsJsonHint = RegExp(

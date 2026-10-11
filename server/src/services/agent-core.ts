@@ -158,11 +158,11 @@ import {
   FALLBACK_TEXT_BACKGROUND_FAILED,
   buildTaskFailureNotice,
 } from "../external-model/fallback-texts.js";
-import { resolveRouteChatProvider } from "../external-model/route-chat-provider.js";
 import {
   buildDomainPreloadTools,
   buildLaneCoreTools,
   buildTaskLaneRouterFirstLightTools,
+  dedupeToolsByName,
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
   isToolRecallEnabled,
@@ -170,6 +170,7 @@ import {
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
 import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
+import { toolsInDomain } from "../tools/tool-search/tool-category.js";
 import {
   getBuiltinAgentChatTools,
   selectForegroundCapabilityToolAdditions,
@@ -209,6 +210,7 @@ import {
   TASK_STATUS_TOOL_DEFINITION,
 } from "../tools/task-plane-tools.js";
 import { PERCEPTION_OVERVIEW_TOOL_DEFINITION } from "../tools/perception-tools.js";
+import { extractContentSummaryCard } from "./content-summary-service.js";
 import {
   allImageCardsHaveCaption,
   attachTravelItineraryCard,
@@ -227,7 +229,8 @@ import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } 
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { routeTurnByLlm } from "../agent/llm-task-router.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
-import { claimsWebSearch, composeRealtimeSearchQuery } from "../agent/realtime-search-query.js";
+import { claimsWebSearch, composeRealtimeSearchQuery, isDirectCurrentTimeQuestion, mediaToolNameForText, type TravelPlanRequest } from "../agent/realtime-search-query.js";
+import { buildCurrentTimePrompt } from "../agent/prompt-builder.js";
 import {
   isExplicitNoWebRequest,
   filterWebSearchTools,
@@ -240,12 +243,6 @@ import {
   stripDispatchTags,
 } from "../agent/dispatch-tag.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import {
-  MEMORY_EXPLICIT_RE,
-  MEMORY_RECALL_HINT_RE,
-  isAmbiguousFollowUpMessage,
-} from "../agent/memory-signal.js";
-import { DATE_DEIXIS_RE } from "../agent/recall-gate.js";
 import { TaskTier, buildModelOverrideOpts } from "../config/model-routing.js";
 import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
@@ -275,20 +272,10 @@ import {
 
 export type { AgentReply } from "../agent/types.js";
 
-const META_CONVERSATION_RECALL_RE =
-  /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
-
-// P0 时间窗口查询感知：用户问"昨天/上周做了什么"或询问事件经过时，把时间词锚进召回 query，
-// 提高对应时间窗口内 episodic 记忆的召回概率（配合注入侧的相对时间标注闭环）。
-const TIME_WINDOW_WORD_RE = /昨天|前天|大前天|上周|上礼拜|上个月|前几天|这周|本周|今天早上|今天下午|今天晚上/;
-const EVENT_INQUIRY_RE = /做了|干了|说了|聊了|发生了|安排了|干了啥|做了什么|怎么样了/;
-
-function buildTimeWindowRecallHint(text: string): string {
-  const t = text.trim();
-  return TIME_WINDOW_WORD_RE.test(t) || EVENT_INQUIRY_RE.test(t)
-    ? "时间线 事件 经过 昨天 今天 前几天 上周 做了什么 发生了什么 episodic 事件记忆"
-    : "";
-}
+// P0 时间窗口查询感知的词表加料（TIME_WINDOW_WORD_RE / EVENT_INQUIRY_RE /
+// META_CONVERSATION_RECALL_RE / enrichMemoryRecallQuery）已随词表判定退役
+// （2026-10-10）：召回触发由 understanding 闸单点承担，检索 query 回归用户
+// 原文——recall-gate 原则「禁止加料，加料是召回串台的根因」。
 
 export type HandleUserMessageOptions = {
   onAssistantDelta?: StreamDeltaHandler;
@@ -371,13 +358,6 @@ export class AgentCore {
   private brainCenter: BrainCenter | null = null;
   /** 主动性模块（ProactivityHub）：对话轮观察等主动触发的统一入口 */
   private proactivityHub: import("../proactivity/proactivity-hub.js").ProactivityHub | null = null;
-  /**
-   * 路由专用模型（2026-10-07 解耦）：意图路由不跟随主模型切换——主模型换成
-   * MiniMax M 系等思考型 provider 时，路由调用被思考链拖慢/饿死/判偏，
-   * 闲聊整轮被保守降级吸进任务面（实测：「你知道我的老婆是谁吧」→ 任务失败回执）。
-   */
-  private readonly routeChat: ExternalChatProvider | null;
-
   constructor(
     private readonly toolRegistry: ToolRegistry,
     private readonly externalChat: ExternalChatProvider | null = null,
@@ -395,7 +375,6 @@ export class AgentCore {
     moodInferenceService: MoodInferenceService | null = null,
     lifeSignalHubService: LifeSignalHubService | null = null,
   ) {
-    this.routeChat = resolveRouteChatProvider(externalChat);
     this.moodInferenceService = moodInferenceService;
     this.lifeSignalHubService = lifeSignalHubService;
     this.promptContextBuilder = new PromptContextBuilder({
@@ -646,7 +625,7 @@ export class AgentCore {
     entityContextLines: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
     return routeTurnByLlm(
-      this.routeChat,
+      this.externalChat,
       sessionId,
       text,
       recentUserTurns,
@@ -684,20 +663,6 @@ export class AgentCore {
     fn: ((actorId: string) => string | null) | null,
   ): void {
     this.promptContextBuilder.setInterestListProvider(fn);
-  }
-
-  private enrichMemoryRecallQuery(baseQuery: string, text: string): string {
-    const normalized = text.trim();
-    const timeHint = buildTimeWindowRecallHint(normalized);
-    if (!META_CONVERSATION_RECALL_RE.test(normalized) && !timeHint) return baseQuery;
-    return [
-      baseQuery,
-      timeHint,
-      "最近一次对话 上次聊天 最后聊天 最后说了什么 之前聊了什么 对话摘要",
-      "assistantDone user reply EvolutionLoop Daily digest session recap",
-    ]
-      .filter(Boolean)
-      .join("\n");
   }
 
   /**
@@ -842,19 +807,22 @@ export class AgentCore {
       const routePromise = opts?.routeDecision
         ? Promise.resolve(opts.routeDecision)
         : routeTurnByLlm(
-            this.routeChat,
+            this.externalChat,
             sessionId,
             text,
             recentUserTurns ?? [],
             getTaskHub().activeSummary(actorId),
           );
-      const ambiguousFollowUp = isAmbiguousFollowUpMessage(text);
       const cognizePromise = this.brainCenter
         .cognize({
           actorId,
           text,
           sessionId,
-          ambiguousFollowUp,
+          // 语义理解标记随路由决策异步送达（2026-10-10 词表判定退役）：
+          // cognize 与路由并行启动，recall-gate 消费前才 await，零串行开销。
+          understandingPromise: routePromise
+            .then((r) => r.understanding)
+            .catch(() => undefined),
         })
         .catch((err): import("../brain/types.js").CognitiveResult | null => {
           console.log(
@@ -993,7 +961,7 @@ export class AgentCore {
       }
       // 前置路由门：降级路径同样必跑语义分类（plane=task → 任务执行器）
       route = await routeTurnByLlm(
-        this.routeChat,
+        this.externalChat,
         sessionId,
         text,
         this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
@@ -1014,6 +982,7 @@ export class AgentCore {
         userText: text,
         assistantText: fallback,
         sessionId,
+        understanding: route.understanding,
       });
       return { text: fallback };
     }
@@ -1040,6 +1009,7 @@ export class AgentCore {
         userText: text,
         assistantText: humanized,
         sessionId,
+        understanding: route.understanding,
       });
       // 流式分片：cognize response 一次性返回，不分片
       opts?.onAssistantDelta?.(humanized);
@@ -1088,11 +1058,18 @@ export class AgentCore {
     // 2026-10-06 治啰嗦 P1：「新会话开场必触发」一并删除——新会话首轮不再自动注入
     // session_recap/narrativeRecall 等跨会话情节块（主流 agent 均无此机制；
     // 跨会话衔接交给恒驻速览与 brain.recall 按需检索）。
+    // 窄线索兜底（2026-10-10 词表判定退役）：触发条件改由 L1 路由 LLM 产出的
+    // understanding 承担（memory_instruction / recall_intent / 锚定更早会话）——
+    // 原四张正则词表已删。understanding 缺省（路由失败）→ 不触发（最小注入：
+    // 误注入=串台，漏注入=少点可选上下文，代价不对称）。
+    // route 在 brainCenter/降级两条分支均已携带 understanding（fastRoute 展开传播 /
+    // routeTurnByLlm 直返），公共路径统一读 route，避免引用分支内局部变量。
+    const turnUnderstanding = route.understanding;
     const narrowMemoryCue =
-      MEMORY_EXPLICIT_RE.test(text) ||
-      MEMORY_RECALL_HINT_RE.test(text) ||
-      META_CONVERSATION_RECALL_RE.test(text) ||
-      DATE_DEIXIS_RE.test(text);
+      turnUnderstanding != null &&
+      (turnUnderstanding.memoryInstruction ||
+        turnUnderstanding.recallIntent ||
+        turnUnderstanding.reference === "earlier_session");
     const recallGate = {
       trigger: narrowMemoryCue,
       reason: ("memory_cue" as const),
@@ -1122,7 +1099,7 @@ export class AgentCore {
             ? Promise.resolve(undefined)
             : (cognitiveRecallItems && cognitiveRecallItems.length > 0
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text)))),
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, text))),
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
@@ -1148,7 +1125,7 @@ export class AgentCore {
             ? Promise.resolve(undefined)
             : (cognitiveRecallItems && cognitiveRecallItems.length > 0
                 ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, this.enrichMemoryRecallQuery(text, text))),
+                : this.turnLifecycle.prepareNarrativeRecall(actorId, text)),
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
           // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
           // 话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
@@ -1266,6 +1243,7 @@ if (route.plane === "task") {
               userText: text,
               assistantText: "",
               sessionId,
+              understanding: route.understanding,
             });
             return { text: "", streamedChunks: false, taskDispatched: true };
           }
@@ -1294,6 +1272,7 @@ if (route.plane === "task") {
           routeIntent: route.intent,
           routeConfidence: route.confidence,
           routeSearchQuery: route.searchQuery,
+          routeTravelPlanRequest: route.travelPlanRequest,
           specEvidence: speculativeSearch ?? undefined,
           webSearchForbidden,
         });
@@ -1326,6 +1305,7 @@ if (route.plane === "task") {
         routeIntent: route.intent,
         routeConfidence: route.confidence,
         routeSearchQuery: route.searchQuery,
+        routeTravelPlanRequest: route.travelPlanRequest,
         specEvidence: speculativeSearch ?? undefined,
         webSearchForbidden,
       });
@@ -1963,6 +1943,8 @@ if (route.plane === "task") {
        * （可推脱不搜、凭 thread 旧回复复读）。
        */
       routeSearchQuery?: string;
+      /** travel_planning 轮由路由器代码构造的行程请求参数（确定性预执行用）。 */
+      routeTravelPlanRequest?: TravelPlanRequest;
       /** 投机并行搜索结果（路由无查询词的保守降级轮复用），见 handleUserMessage。 */
       specEvidence?: Promise<string | null>;
       /** 显式禁网轮（2026-09-23）：跳过证据注入、剥离联网工具、注入禁网说明。 */
@@ -2013,6 +1995,7 @@ if (route.plane === "task") {
             turnPlan: ctx.turnPlan,
             routeIntent: ctx.routeIntent,
             routeSearchQuery: ctx.routeSearchQuery,
+            routeTravelPlanRequest: ctx.routeTravelPlanRequest,
             specEvidence: ctx.specEvidence,
             taskHubTaskId: taskId,
           });
@@ -2096,6 +2079,8 @@ if (route.plane === "task") {
       routeConfidence?: number;
       /** realtime_lookup 轮由路由器生成的搜索词（前置检索用，见 runFreshEvidenceSearch）。 */
       routeSearchQuery?: string;
+      /** travel_planning 轮由路由器代码构造的行程请求参数（确定性预执行用）。 */
+      routeTravelPlanRequest?: TravelPlanRequest;
       /**
        * 投机并行搜索（2026-09-13）：路由判定期间已用用户原话发起的搜索 Promise。
        * 路由产出查询词时弃用（用更准的 route_query 重搜）；路由保守降级/超时
@@ -2235,7 +2220,21 @@ if (route.plane === "task") {
     };
     const buildChatLaneExplicitOpts = () => {
       const webForbidden = ctx.webSearchForbidden === true;
-      const coreTools = buildLaneCoreTools("chat", getBuiltinAgentChatTools(), [
+      // 2026-10-10 P0-1 修复（技能族在对话面集体失踪）：本函数返回的
+      // chatToolsExtra 在对象展开顺序里位于 promptContextBuilder.build() 之后，
+      // 直接覆盖了后者产出的 chatToolsExtra = sessionSkillTools(actorId)。
+      // 技能工具（travel.* / alipay.* / merchant.* / picture.* 等全部技能族，
+      // kind:"builtin"）不在 getBuiltinAgentChatTools() 静态注册表，只走
+      // sessionSkillTools 通道——被覆盖后对话面既看不见、也进不了延迟目录
+      // （tool_discover 语料同源），模型只剩 search_web（马尔代夫行程轮实证）。
+      // 任务面语料 [...chatToolsBuiltin, ...chatToolsExtra] 不受影响，故只有
+      // 对话面复现。修复：语料并集 = builtin ∪ sessionSkillTools，按名去重。
+      const chatSkillTools = this.promptContextBuilder.getChatSkillTools(actorId);
+      const corpusMerged = dedupeToolsByName([
+        ...getBuiltinAgentChatTools(),
+        ...chatSkillTools,
+      ]);
+      const coreTools = buildLaneCoreTools("chat", corpusMerged, [
         TASK_DISPATCH_TOOL_DEFINITION,
         TASK_STATUS_TOOL_DEFINITION,
         TASK_CANCEL_TOOL_DEFINITION,
@@ -2243,8 +2242,8 @@ if (route.plane === "task") {
       ]);
       const coreFiltered = webForbidden ? filterWebSearchTools(coreTools) : coreTools;
       const corpusSafe = webForbidden
-        ? filterWebSearchTools(getBuiltinAgentChatTools())
-        : getBuiltinAgentChatTools();
+        ? filterWebSearchTools(corpusMerged)
+        : corpusMerged;
       const coreNames = new Set(
         coreFiltered
           .map((d) => (d.type === "function" ? d.function?.name : ""))
@@ -2357,11 +2356,19 @@ if (route.plane === "task") {
     //      投机证据会教模型「搜索是系统的事」（误路由轮零工具直答的根源之一），
     //      且拿原话当查询词的搜索质量差，常把垃圾条目灌进闲聊 prompt。
     //      对话面只认 route_query（消解过的精确查询词）。
-    if (!ctx.webSearchForbidden && (ctx.routeSearchQuery?.trim() || ctx.specEvidence)) {
+    // 2026-10-11 时间问题重定向（实盘探针实证）：路由把「现在几点」消解成
+    // 搜索词「当前北京时间」走网页搜索，搜回来的是网页快照里爬取时刻的旧时间，
+    // 模型照抄快照答了「2026-05-08 周五 17:22」（真实日期 2026-10-11，差 5 个月）。
+    // 时间是确定性事实，证据源是**本地时钟**，绝不入搜索引擎。
+    const directClockQuestion = isDirectCurrentTimeQuestion(text);
+    if (!ctx.webSearchForbidden && (directClockQuestion || ctx.routeSearchQuery?.trim() || ctx.specEvidence)) {
       let evidence: string | null = null;
       let evidenceSource = "none";
       const isChatLane = this.isChatLane(mode);
-      if (ctx.routeSearchQuery?.trim()) {
+      if (directClockQuestion) {
+        evidence = this.buildClockEvidence(baseStreamOpts.promptContext?.memory?.currentTime);
+        evidenceSource = "clock_local";
+      } else if (ctx.routeSearchQuery?.trim()) {
         evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
         evidenceSource = "route_query";
       } else if (ctx.specEvidence && !isChatLane) {
@@ -2522,6 +2529,48 @@ if (route.plane === "task") {
       // 2026-09-23 扩面配套：证据注入豁免（realtime 轮已有证据块时零工具直答
       // 是正确行为）+ 路由置信度（观测）。
       turnIntent: ctx.routeIntent,
+      // 确定性媒体预执行（2026-10-10 根治搜图轮「时有时无」）：media_retrieval 轮
+      // 不再把「要不要搜图」交给模型现场决定——路由层已代码构造查询词（compose-
+      // MediaSearchQuery），这里把它变成循环开场的确定性 search_images/search_videos
+      // 真搜，照片结果进上下文后模型只负责叙述。与 realtime 轮「判 realtime → 必
+      // 先真搜」完全对称；查询词缺失（路由降级轮）/禁网轮不强制（出口闸仍兜底）。
+      ...(ctx.routeIntent === "media_retrieval" &&
+      ctx.routeSearchQuery?.trim() &&
+      !ctx.webSearchForbidden
+        ? {
+            deterministicToolCalls: [
+              {
+                name: mediaToolNameForText(text),
+                args: { query: ctx.routeSearchQuery.trim(), limit: 6 },
+              },
+            ],
+          }
+        : {}),
+      // 确定性行程预执行（2026-10-10 P1）：travel_planning 轮不再把「要不要调
+      // travel.plan-itinerary」交给模型——路由层已代码构造调用参数
+      //（routeTravelPlanRequest），这里把它变成循环开场的确定性真执行，行程草案
+      // 进上下文后模型只负责叙述+追问参数。与 media/realtime 完全对称。守卫：
+      // 目的地抽不出（纯指代轮，避免必然失败的空参调用）或禁网轮不强制；执行
+      // 失败由预执行器的失败提示引导模型重试/追问（工具仍经域预载可见）。
+      ...(ctx.routeIntent === "travel_planning" &&
+      ctx.routeTravelPlanRequest?.input?.trim() &&
+      ctx.routeTravelPlanRequest.destination?.trim() &&
+      !ctx.webSearchForbidden
+        ? {
+            deterministicToolCalls: [
+              {
+                name: "travel.plan-itinerary",
+                args: {
+                  input: ctx.routeTravelPlanRequest.input.trim(),
+                  destination: ctx.routeTravelPlanRequest.destination.trim(),
+                  ...(ctx.routeTravelPlanRequest.days != null
+                    ? { days: ctx.routeTravelPlanRequest.days }
+                    : {}),
+                },
+              },
+            ],
+          }
+        : {}),
       // 语感治理 A（2026-10-06）：chat 车道主生成显式置位采样放开（temp 0.85 +
       // frequency_penalty 0.4，env 可调）；任务面不置位保持默认采样。ephemeral
       // 内部调用（识情/路由/收尾汇总）不带本字段，provider 侧再兜一层。
@@ -2619,13 +2668,21 @@ if (route.plane === "task") {
           // 目录按需召回（能力面经域卡+域拉取可达）。回滚：AGENT_TASK_LANE=core
           // （下方静态 Core 路径）。
           const domainPreload = buildDomainPreloadTools(text, corpusSafe);
+          // travel 意图强制可见（2026-10-10 P1）：确定性预执行要求工具在本轮
+          // 可见集内（预执行器守卫），而域预载是词面多数票——「下周去三亚」这类
+          // 弱词面轮可能 miss。判出 travel_planning 后 travel 全族确定性并入，
+          // 与「路由判需要 → 工具必然可见」的束投影同一条结构保证。
+          const travelForcePreload =
+            ctx.routeIntent === "travel_planning"
+              ? toolsInDomain(corpusSafe, "travel").map(slimToolSchema)
+              : [];
           // 轻量常驻（2026-10-10 ②）：router-first 不再是纯预载——「提醒/回复/
           // 记一下」类短口语动作的 BM25 词面召回天然弱（通词被 IDF 闸杀、强票位
           // 被长描述族占走，benchmark 三条实证 miss），轻动作/感知工具确定性
           // 常驻；与预载/晋升重名由下方去重收敛。
           const lightTools = buildTaskLaneRouterFirstLightTools(corpusSafe);
           const preloadNames = new Set(
-            [...domainPreload, ...lightTools]
+            [...domainPreload, ...travelForcePreload, ...lightTools]
               .map((d) => (d.type === "function" ? d.function?.name : "") ?? "")
               .filter(Boolean),
           );
@@ -2633,11 +2690,12 @@ if (route.plane === "task") {
           execStreamOpts = {
             ...streamOpts,
             toolExposureProfile: "explicit",
-            chatToolsBuiltin: [
+            chatToolsBuiltin: dedupeToolsByName([
               ...domainPreload,
+              ...travelForcePreload,
               ...lightTools,
               ...buildPromotedChatTools(corpusSafe, preloadNames),
-            ],
+            ]),
             chatToolsExtra: corpusSafe,
           };
         }
@@ -2914,6 +2972,21 @@ if (route.plane === "task") {
    *     「搜过、查不到」，而不是谎称「搜过了，全是旧闻」（虚构搜索见闻）；
    *   - null：检索本身失败/超时（非确定性结论），跳过注入，回退模型自决。
    */
+  /**
+   * 时间问题的确定性证据块（2026-10-11，零网络）：与 system 的【当前时间】块
+   * 同一来源（本轮已装配的 currentTime 优先，缺失时现场构造），绝不做网页搜索
+   * ——网页快照里的时间是爬取时刻的旧值（实盘实证：差 5 个月）。证据块非空
+   * 还保证 realtime 出口闸的「已有证据块零工具直答」豁免照常成立。
+   */
+  private buildClockEvidence(currentTimeBlock?: string): string {
+    const line = currentTimeBlock?.trim() || buildCurrentTimePrompt(new Date());
+    return [
+      "【实时证据｜本地时钟（刚刚生成，权威）】",
+      /^当前时间/.test(line) ? line : `当前时间：${line}`,
+      "当前时间/今天日期/星期几一律以上面为准（与 system 的【当前时间】块一致）；禁止引用任何网页快照或搜索结果里的时间。",
+    ].join("\n");
+  }
+
   private async runFreshEvidenceSearch(query: string): Promise<string | null> {
     if (!this.toolRegistry) return null;
     try {
@@ -3137,6 +3210,16 @@ if (route.plane === "task") {
         // 编入 blocks，卡片与照片同一条序列下发。原先 blocks 只装 text/card，
         // 客户端优先 blocks 即丢任务结果照片；renderBlocks 一并下发，旧客户端
         // 与历史回放（blocks 不落盘）走原字段回退。
+        // 结构化通道迁移（2026-10-10）：正文中的 CONTENT_SUMMARY 块摘出为
+        // summaryCard 字段，文本通道不携带 JSON（与 WS 对话路径同构）。
+        let summaryCard: Record<string, unknown> | undefined;
+        {
+          const extracted = extractContentSummaryCard(finalText);
+          if (extracted.card && mediaCards.length === 0) {
+            summaryCard = extracted.card;
+          }
+          finalText = extracted.text;
+        }
         const renderBlocks =
           mediaCards.length > 0
             ? allImageCardsHaveCaption(mediaCards)
@@ -3155,6 +3238,7 @@ if (route.plane === "task") {
               toolCalls: [],
               source: "task_plane",
               ...(mediaCards.length > 0 ? { mediaCards } : {}),
+              ...(summaryCard ? { summaryCard } : {}),
               ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
               ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
               // 「接下来你可以」接续建议：任务轮与对话面同权随 done 下发成
@@ -3168,6 +3252,7 @@ if (route.plane === "task") {
             messageId,
             finalText,
             mediaCards,
+            ...(summaryCard ? { summaryCard } : {}),
             ...(followups.length > 0 ? { followups } : {}),
           });
         }

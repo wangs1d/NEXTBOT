@@ -778,6 +778,12 @@ export class MailWatchService {
   private retryDelaySec: number | null = null;
   private newMessagesHandled = 0;
   private promotionalFiltered = 0;
+  /**
+   * 最近处理过的邮件环形缓冲（2026-10-10，供 SensorKernel 收编读取）：
+   * `fetchNewSince(since)` 从这里取，不重连 IMAP。内核轮询内核水位，
+   * 服务自身轮询照旧——两者共享同一份处理结果，零重复网络开销。
+   */
+  private readonly recentMails: Array<{ uid: number; at: number; mail: IncomingMail; importance: string }> = [];
 
   constructor(deps: MailWatchDeps = {}) {
     this.deps = deps;
@@ -1042,7 +1048,33 @@ export class MailWatchService {
         this.log("warn", `邮件 ingest 进消息中心失败（忽略）：${errorMessage(e)}`);
       }
     }
+    // 收编读取口：把处理结果留在环形缓冲，供 SensorKernel 的 MailSensor 拉取
+    this.rememberRecent(mail, classification.importance);
     return classification;
+  }
+
+  /**
+   * 只读取数口（2026-10-10 外部信源收编）：返回 `since` 以来**已处理**的邮件。
+   * 不发起新的 IMAP 连接——直接从处理环形缓冲取；内核仅做形状转换。
+   * 供 `MailSensor.collect()` 调用；未启用邮箱时返回空数组（不抛错）。
+   */
+  fetchNewSince(since: number): Array<{ uid: number; mail: IncomingMail; importance: string }> {
+    return this.recentMails
+      .filter((r) => r.at > since)
+      .sort((a, b) => a.at - b.at)
+      .map((r) => ({ uid: r.uid, mail: r.mail, importance: r.importance }));
+  }
+
+  /** 写入处理环形缓冲（容量封顶，防长期运行膨胀） */
+  private rememberRecent(mail: IncomingMail, importance: string): void {
+    const at = mail.date ? Date.parse(mail.date) : NaN;
+    this.recentMails.push({
+      uid: mail.uid ?? -1,
+      at: Number.isFinite(at) ? at : Date.now(),
+      mail,
+      importance,
+    });
+    while (this.recentMails.length > 200) this.recentMails.shift();
   }
 
   /** 邮件 → message-hub：platform="email"，每个发件人地址一个会话（与 IM 联系人粒度一致）。 */

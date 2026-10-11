@@ -18,7 +18,12 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { bm25HitsForQuery, domainVotesForQuery, priorDirectMatchesForQuery, PRIOR_DIRECT_LIMIT, topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { firstSentence } from "../tools/tool-search/schema-slim.js";
-import { toolInCapabilityDomains, toolsInDomain } from "../tools/tool-search/tool-category.js";
+import {
+  domainsForTool,
+  isExplicitDomain,
+  toolInCapabilityDomains,
+  toolsInDomain,
+} from "../tools/tool-search/tool-category.js";
 import {
   isPreloadDeweighted,
   recordPreloadInjection,
@@ -249,6 +254,42 @@ export const DOMAIN_PRELOAD_CAP = 12;
 /** 弱信号兜底的 top-K 工具数（无强域时 BM25 直取，宁少勿滥）。 */
 export const DOMAIN_PRELOAD_TOPK = 4;
 
+/** 派生域族信号的扫描深度（BM25 top-N）。 */
+const DERIVED_DOMAIN_SIGNAL_TOPN = 8;
+/** 派生域族信号的最小工具数（top-N 内同族 ≥2 个不同工具才算信号）。 */
+const DERIVED_DOMAIN_SIGNAL_MIN = 2;
+
+/**
+ * 派生域族信号（2026-10-10 根修，L1 对技能族的覆盖）：BM25 top-N 内同一**派生域**
+ * （技能族 habit/booking/picture/finance/virtual-phone/agentworld 等，前缀自动成域）
+ * 出现 ≥2 个不同工具 → 该域按强域处理，族全族瘦身 schema 进本轮可见集。
+ *
+ * 为什么需要独立通道：显式域用「top-5 域多数票 ≥3/5」判强信号，但技能族工具的
+ * 词面分天生低（英文点号名 + 简短描述，中文口语 query 重叠少）——实测「记一下我
+ * 每天早上要喝水的习惯」里 habit.list-rules 已排 BM25 **第 1**，top-5 仍只投出
+ * habit:1 票，凑不到 3 票；top-K 兜底又被 0.075 绝对闸拦下。结果整族漏召，模型
+ * 手上没有工具 → 要么多走一趟 discover，要么直接凭常识答。
+ * 阈值取 2 而非 3：派生域语义边界由前缀唯一确定，同族 ≥2 个不同工具命中已是
+ * 足够强的族信号；实测 10 个闲聊/无关 query（嗯嗯好的/今天天气怎么样/在吗…）
+ * 零误命中。确定性：同语料同 query 恒同输出（复用跨轮 catalog 缓存）。
+ */
+function derivedDomainSignals(seg: string, corpus: ChatCompletionTool[]): string[] {
+  const hits = bm25HitsForQuery(seg, corpus, DERIVED_DOMAIN_SIGNAL_TOPN);
+  const byDomain = new Map<string, Set<string>>();
+  for (const hit of hits) {
+    for (const domain of domainsForTool(hit.name)) {
+      if (isExplicitDomain(domain)) continue; // 显式域走既有票选通道，避免双重放大
+      const set = byDomain.get(domain) ?? new Set<string>();
+      set.add(hit.name);
+      byDomain.set(domain, set);
+    }
+  }
+  return [...byDomain.entries()]
+    .filter(([, tools]) => tools.size >= DERIVED_DOMAIN_SIGNAL_MIN)
+    .sort((a, b) => b[1].size - a[1].size || a[0].localeCompare(b[0]))
+    .map(([domain]) => domain);
+}
+
 /**
  * 工具召回链总开关（2026-10-09 五层根修）：AGENT_TOOL_RECALL=off 一键关闭
  * L1（域预载/top-K 兜底）与 L4（晋升常驻）——A/B 基线与故障回退共用。
@@ -332,11 +373,24 @@ export function buildDomainPreloadTools(
   const strongDomains: string[] = [];
   for (const seg of segments) {
     const votes = domainVotesForQuery(seg, corpus);
-    if (votes.length === 0 || votes[0].votes < 3) continue;
-    for (const v of votes) {
-      if (v.votes < 2) break;
-      if (!strongDomains.includes(v.domain)) strongDomains.push(v.domain);
-      if (strongDomains.length >= 2) break;
+    if (votes.length > 0 && votes[0].votes >= 3) {
+      // 显式域票选（top-5 多数票 ≥3）：语义浓度足够，取强域 + 次强域。
+      for (const v of votes) {
+        if (v.votes < 2) break;
+        if (!strongDomains.includes(v.domain)) strongDomains.push(v.domain);
+        if (strongDomains.length >= 2) break;
+      }
+    }
+    // 派生域通道（2026-10-10 根修，补充式）：显式域不足 2 个时，用技能族/长尾
+    // 派生域的族信号补足名额。放在显式票选**之后**且只在未满员时生效——既不
+    // 挤占既有强域（travel/media 等显式强域轮零行为变化），又能救回被通用词
+    // 噪声（voice 3 票等）抢走名额的技能族轮（实测「帮我把健身房打卡设为每天
+    // 的习惯」显式只得 voice 1 个，补入 habit 后整族可见）。
+    if (strongDomains.length < 2) {
+      for (const domain of derivedDomainSignals(seg, corpus)) {
+        if (!strongDomains.includes(domain)) strongDomains.push(domain);
+        if (strongDomains.length >= 2) break;
+      }
     }
     if (strongDomains.length >= 2) break;
   }

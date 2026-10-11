@@ -132,7 +132,9 @@ async function withIcsService(fn: (h: IcsHarness) => Promise<void>): Promise<voi
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   let icsText = SAMPLE_ICS;
   const fetchImpl = (async () => new Response(icsText, { status: 200 })) as unknown as typeof fetch;
-  const tasks = new ScheduleTaskService();
+  // 时基贯通：日程服务用同一个冻结时钟，否则 createTask 的「runAt 必须在未来」
+  // 按真实时钟判定，真实日期越过 fixture 后建日程全部失败（时间炸弹）。
+  const tasks = new ScheduleTaskService({ now: () => new Date(NOW) });
   const intents: ProactiveIntent[] = [];
   const service = new IcsSubscriptionService({
     config: {

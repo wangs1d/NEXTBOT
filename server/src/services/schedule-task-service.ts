@@ -268,10 +268,26 @@ function normalizeScheduleContent(value: string | undefined): string {
  */
 const DEPART_ESCALATE_SLACK_MIN = 5;
 
+/**
+ * 日程服务装配选项。
+ *
+ * `now` 是**统一时间源**：调度链路里所有「当前时间」（未来时间闸、补发判定、
+ * 退避基准、周期推进基准）都必须走它，禁止直接 `Date.now()`。
+ * 教训：注入了冻结时钟的测试，一旦服务内部偷读真实时钟，真实时间越过 fixture
+ * 日期后就会集体失效（时间炸弹）——表现为「不物化 / 预算 spent=0」这类
+ * 看似功能缺失、实为时基不一致的失败。
+ */
+export type ScheduleTaskServiceOptions = {
+  /** 时间源注入（测试/回放用）；缺省读真实时钟。 */
+  now?: () => Date;
+};
+
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
   private readonly runsByTaskId = new Map<string, ScheduleTaskRun[]>();
   private readonly runningTaskIds = new Set<string>();
+  /** 统一时间源（见 ScheduleTaskServiceOptions）。 */
+  private readonly clock: () => Date;
   private tickHandle: NodeJS.Timeout | undefined;
   private weatherBriefHandler?: WeatherBriefHandler;
   private reminderHandler?: ScheduleReminderHandler;
@@ -295,6 +311,15 @@ export class ScheduleTaskService {
     sessionId: string;
     location: string;
   }) => Promise<RouteEstimate | null>;
+
+  constructor(options: ScheduleTaskServiceOptions = {}) {
+    this.clock = options.now ?? (() => new Date());
+  }
+
+  /** 当前时间（统一时间源，禁止在本类里直接使用 Date.now()）。 */
+  private now(): Date {
+    return this.clock();
+  }
 
   setRouteEstimator(
     estimator:
@@ -405,7 +430,7 @@ export class ScheduleTaskService {
     sessionId: string,
     range?: { from?: string; to?: string },
   ): ScheduleTaskRecord[] {
-    const now = Date.now();
+    const now = this.now().getTime();
     const from = range?.from ? new Date(range.from).getTime() : now;
     const hasExplicitTo = !!range?.to;
     // 非周期任务沿用原行为：未给 to → +∞（列出所有未来单次任务）
@@ -520,7 +545,7 @@ export class ScheduleTaskService {
   async createTask(input: CreateScheduleTaskInput): Promise<ScheduleTaskRecord> {
     const tz = input.timezone?.trim() || "Asia/Shanghai";
     const schedule = this.resolveSchedule(input.runAt, input.recurrence, tz, input.cronExpression);
-    const now = new Date().toISOString();
+    const now = this.now().toISOString();
     this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
     // 幂等创建：命中重复时直接返回已有任务，不插入、不持久化、不广播 tasks_changed
     //（客户端本地镜像按 taskId 幂等，旧广播已存在，无需再发）。
@@ -642,7 +667,7 @@ export class ScheduleTaskService {
           : task.remindBeforeMinutes,
       location:
         input.location !== undefined ? input.location?.trim() || undefined : task.location,
-      updatedAt: new Date().toISOString(),
+      updatedAt: this.now().toISOString(),
     };
     if (
       input.runAt !== undefined ||
@@ -679,7 +704,7 @@ export class ScheduleTaskService {
     const task = this.byTaskId.get(taskId);
     if (!task) throw new Error("task not found");
     if (task.status !== "active") throw new Error("current task is not active");
-    await this.executeTask(task, new Date().toISOString());
+    await this.executeTask(task, this.now().toISOString());
   }
 
   async triggerByWebhookToken(webhookToken: string): Promise<ScheduleTaskRecord> {
@@ -688,12 +713,12 @@ export class ScheduleTaskService {
     const task = Array.from(this.byTaskId.values()).find((entry) => entry.webhookToken === token);
     if (!task) throw new Error("webhook task not found");
     if (task.status !== "active") throw new Error("current task is not active");
-    await this.executeTask(task, new Date().toISOString());
+    await this.executeTask(task, this.now().toISOString());
     return this.byTaskId.get(task.taskId) ?? task;
   }
 
   private async tick(): Promise<void> {
-    const now = Date.now();
+    const now = this.now().getTime();
     await this.firePreReminders(now);
     const dueTasks = Array.from(this.byTaskId.values()).filter((task) => {
       if (task.status !== "active" || !task.nextRunAt) return false;
@@ -702,7 +727,7 @@ export class ScheduleTaskService {
     for (const task of dueTasks) {
       if (this.runningTaskIds.has(task.taskId)) continue;
       this.runningTaskIds.add(task.taskId);
-      const plannedAt = task.nextRunAt ?? new Date().toISOString();
+      const plannedAt = task.nextRunAt ?? this.now().toISOString();
       void this.executeTask(task, plannedAt).finally(() => {
         this.runningTaskIds.delete(task.taskId);
       });
@@ -837,13 +862,13 @@ export class ScheduleTaskService {
   private async executeTask(task: ScheduleTaskRecord, plannedAt: string): Promise<void> {
     // 补发判定：实际执行比计划晚太多 = runtime 离线跨过了触发点（重启补跑）。
     // 超窗 → 不执行、记 missed、通知一次；窗内 → 照常执行但带补发语境。
-    const lagMs = Date.now() - new Date(plannedAt).getTime();
+    const lagMs = this.now().getTime() - new Date(plannedAt).getTime();
     if (Number.isFinite(lagMs) && lagMs > CATCHUP_MAX_LAG_MS) {
       await this.recordMissedRun(task, plannedAt);
       return;
     }
     const catchUp = Number.isFinite(lagMs) && lagMs > CATCHUP_MIN_LAG_MS;
-    const startedAt = new Date().toISOString();
+    const startedAt = this.now().toISOString();
     const runId = randomUUID();
     const run: ScheduleTaskRun = {
       runId,
@@ -883,7 +908,7 @@ export class ScheduleTaskService {
       run.status = "failed";
       run.error = e instanceof Error ? e.message : String(e);
     } finally {
-      run.endedAt = new Date().toISOString();
+      run.endedAt = this.now().toISOString();
       const nextTaskState = this.computeNextTaskState(task, run.status === "success", run.error);
       this.byTaskId.set(task.taskId, nextTaskState);
       const list = this.runsByTaskId.get(task.taskId) ?? [];
@@ -915,7 +940,7 @@ export class ScheduleTaskService {
    * 循环推进避免停机多天后每个陈旧槽位连环触发 missed）。
    */
   private async recordMissedRun(task: ScheduleTaskRecord, plannedAt: string): Promise<void> {
-    const nowIso = new Date().toISOString();
+    const nowIso = this.now().toISOString();
     const run: ScheduleTaskRun = {
       runId: randomUUID(),
       taskId: task.taskId,
@@ -929,7 +954,7 @@ export class ScheduleTaskService {
     let guard = 0;
     while (
       next.nextRunAt &&
-      new Date(next.nextRunAt).getTime() <= Date.now() &&
+      new Date(next.nextRunAt).getTime() <= this.now().getTime() &&
       guard < 400
     ) {
       next = this.computeNextTaskState(next, true);
@@ -950,7 +975,7 @@ export class ScheduleTaskService {
 
   /** agent_task 补发语境：显式给出原定时间与当前时间，防相对时间（"今早/今天"）被按现在理解。 */
   private buildCatchUpAgentPrompt(prompt: string, plannedAt: string): string {
-    const nowIso = new Date().toISOString();
+    const nowIso = this.now().toISOString();
     return (
       `【补发任务】此任务原定 ${plannedAt} 触发，因 runtime 未运行错过，现在补跑（当前实际时间 ${nowIso}）。` +
       `任务里"今早/今天/昨晚"等相对时间按原定时间点理解；产出开头用一句话说明这是原定 ${plannedAt} 的补发。` +
@@ -965,8 +990,8 @@ export class ScheduleTaskService {
   ): ScheduleTaskRecord {
     const updated: ScheduleTaskRecord = {
       ...task,
-      lastRunAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
+      lastRunAt: this.now().toISOString(),
+      updatedAt: this.now().toISOString(),
       // 主触发后重置提前提醒记录，下一周期可再次推送
       firedPreReminderOffsets: undefined,
     };
@@ -983,7 +1008,7 @@ export class ScheduleTaskService {
         return updated;
       }
       const backoffMs = Math.min(RETRY_BACKOFF_BASE_MS * 2 ** (fails - 1), RETRY_BACKOFF_MAX_MS);
-      updated.nextRunAt = new Date(Date.now() + backoffMs).toISOString();
+      updated.nextRunAt = new Date(this.now().getTime() + backoffMs).toISOString();
       return updated;
     }
     // 成功清零失败计数
@@ -1083,7 +1108,7 @@ export class ScheduleTaskService {
       hasExplicitTimezone
         ? this.parseAbsoluteRunAt(normalizedRaw)
         : this.parseLocalRunAt(normalizedRaw, timezone);
-    if (utc.getTime() < Date.now() - 5000) {
+    if (utc.getTime() < this.now().getTime() - 5000) {
       throw new Error("runAt must be in the future");
     }
     return utc;
@@ -1140,7 +1165,7 @@ export class ScheduleTaskService {
     const daysOfMonth = this.parseCronField(fields[2]!, 1, 31);
     const months = this.parseCronField(fields[3]!, 1, 12);
     const daysOfWeek = this.parseCronField(fields[4]!, 0, 7, true);
-    const base = fromIso ? new Date(fromIso) : new Date();
+    const base = fromIso ? new Date(fromIso) : this.now();
     const candidate = this.toLocalInTimezone(new Date(base.getTime() + 60_000), timezone);
     candidate.setSeconds(0, 0);
     for (let i = 0; i < 366 * 24 * 60; i += 1) {

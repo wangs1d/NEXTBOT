@@ -11,11 +11,11 @@
  */
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { DOMAIN_REGISTRY, domainsForTool } from "./tool-category.js";
+import { DOMAIN_REGISTRY, domainsForTool, resolveDomainDef, type DomainDef } from "./tool-category.js";
 import { firstSentence } from "./schema-slim.js";
 
 /** 卡片工具清单每域上限（超出的长尾域截断并标注；misc 域本就受控） */
-const CARD_TOOLS_PER_DOMAIN = 14;
+export const CARD_TOOLS_PER_DOMAIN = 14;
 
 function nameOf(tool: ChatCompletionTool): string {
   return tool.type === "function" ? tool.function?.name ?? "" : "";
@@ -39,14 +39,31 @@ export function buildDomainCards(corpus: ChatCompletionTool[]): string {
   }
 
   const lines: string[] = [];
-  for (const def of DOMAIN_REGISTRY) {
-    const names = byDomain.get(def.name);
-    if (!names || names.length === 0) continue; // 语料无此域（edition/模块裁剪）→ 卡片不出现
+  const line = (def: DomainDef, names: string[]): string => {
     const shown = names.slice(0, CARD_TOOLS_PER_DOMAIN);
     const more = names.length - shown.length;
-    lines.push(
-      `- ${def.name}｜${def.summary}：${shown.join("·")}` + (more > 0 ? `（+${more}）` : ""),
-    );
+    return `- ${def.name}｜${def.summary}：${shown.join("·")}` + (more > 0 ? `（+${more}）` : "");
+  };
+
+  // ① 显式域（DOMAIN_REGISTRY 顺序；misc 兜底行留到最末）。
+  const emitted = new Set<string>();
+  for (const def of DOMAIN_REGISTRY) {
+    if (def.name === "misc") continue;
+    const names = byDomain.get(def.name);
+    if (!names || names.length === 0) continue; // 语料无此域（edition/模块裁剪）→ 卡片不出现
+    emitted.add(def.name);
+    lines.push(line(def, names));
+  }
+  // ② 派生域（2026-10-10 根修）：未登记进注册表、由注册名前缀派生的域
+  //（技能族 habit/booking/picture/finance/virtual-phone/agentworld 等）。
+  // 按域名排序保证确定性；同样受 CARD_TOOLS_PER_DOMAIN 截断。
+  for (const domain of [...byDomain.keys()].filter((d) => !emitted.has(d) && d !== "misc").sort()) {
+    lines.push(line(resolveDomainDef(domain), byDomain.get(domain) ?? []));
+  }
+  // ③ misc 兜底行（无点号的无名工具），永远排在最后。
+  const misc = byDomain.get("misc");
+  if (misc && misc.length > 0) {
+    lines.push(line(resolveDomainDef("misc"), misc));
   }
   if (lines.length === 0) return "";
 

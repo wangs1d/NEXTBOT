@@ -21,13 +21,66 @@ const { getBuiltinAgentChatTools } = await import(
 const { executeToolSearchBridge, prepareToolsWithToolSearch } = await import(
   "../src/tools/tool-search/index.js"
 );
-const { buildDomainCards } = await import("../src/tools/tool-search/domain-cards.js");
+const { buildDomainCards, CARD_TOOLS_PER_DOMAIN } = await import(
+  "../src/tools/tool-search/domain-cards.js"
+);
 const { domainsForTool } = await import("../src/tools/tool-search/tool-category.js");
+const { SkillManager } = await import("../src/skills/skill-manager.js");
+const { skillManifestToChatTool } = await import("../src/skills/skill-openai-bridge.js");
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-const corpus: ChatCompletionTool[] = [...getBuiltinAgentChatTools()];
+/**
+ * 真实装配链语料 = builtin 静态注册表 ∪ 技能族（SkillManager 注册真实技能定义 →
+ * 生产同款 manifest→tool 桥）。
+ *
+ * 2026-10-10 教训（同 chat-lane-domain-preload）：语料只取 builtin 会漏掉全部
+ * 技能族（travel/habit/booking/picture/finance/virtual-phone/agentworld 等 51 个
+ * 工具），域卡/域拉取的断言因此看不到本次根修的真实对象（技能族域归属）。
+ */
+async function realCorpus(): Promise<ChatCompletionTool[]> {
+  const sm = new (SkillManager as new () => InstanceType<typeof SkillManager>)();
+  const modulePaths = [
+    "../src/skills/travel-planning/travel-planning-skills.js",
+    "../src/skills/builtin/booking-travel-skills.js",
+    "../src/skills/builtin/merchant-order-skills.js",
+    "../src/skills/builtin/alipay-payment-skills.js",
+    "../src/skills/builtin/picture-skills.js",
+    "../src/skills/builtin/habit-loop-skills.js",
+    "../src/skills/builtin/arrival-concierge-skills.js",
+    "../src/skills/builtin/finance-ingest-skills.js",
+    "../src/skills/builtin/virtual-phone-skills.js",
+    "../src/skills/builtin/agent-world-identity-skills.js",
+  ] as const;
+  for (const path of modulePaths) {
+    try {
+      const mod: Record<string, unknown> = await import(path);
+      const key = Object.keys(mod).find(
+        (k) => /^register.*BuiltinSkills$/.test(k) && typeof mod[k] === "function",
+      );
+      if (!key) continue;
+      (mod[key] as (r: (s: unknown) => void, d: unknown) => void)(
+        (s: unknown) => sm.register(s as never),
+        // 各技能族 Deps 不同：占位 Proxy 只为让 manifest 进注册表拿 schema，不触发 IO
+        new Proxy({}, { get: () => new Proxy(() => {}, { get: () => () => {} }) }),
+      );
+    } catch {
+      /* 单族注册失败不阻塞其余族 */
+    }
+  }
+  return [...getBuiltinAgentChatTools(), ...sm.list(true).map(skillManifestToChatTool)];
+}
+
+const corpus: ChatCompletionTool[] = await realCorpus();
 const prepared = prepareToolsWithToolSearch([], corpus);
 const catalog = prepared.deferredCatalog;
+
+/** 域内工具总数（判断某域是否被 CARD_TOOLS_PER_DOMAIN 截断）。 */
+const domainSize = new Map<string, number>();
+for (const tool of corpus) {
+  const name = tool.type === "function" ? tool.function?.name ?? "" : "";
+  if (!name) continue;
+  for (const d of domainsForTool(name)) domainSize.set(d, (domainSize.get(d) ?? 0) + 1);
+}
 
 test("域卡：覆盖全部非 misc 工具名、含使用指引、同语料恒同字节", () => {
   const cards = buildDomainCards(corpus);
@@ -38,9 +91,38 @@ test("域卡：覆盖全部非 misc 工具名、含使用指引、同语料恒�
     if (!name || name.startsWith("tool_")) continue;
     const domains = domainsForTool(name);
     if (domains.length === 1 && domains[0] === "misc") continue; // misc 域工具在卡上由 misc 兜底行覆盖
+    // 域内工具数超上限的域会被截断（卡片标注 +N），成员不逐一列出——跳过
+    if (domains.some((d) => (domainSize.get(d) ?? 0) > CARD_TOOLS_PER_DOMAIN)) continue;
     assert.ok(cards.includes(name), `卡片缺失工具名: ${name}`);
   }
   assert.equal(cards, buildDomainCards(corpus));
+});
+
+test("技能族域可见性（2026-10-10 根修回归）：habit 等派生域在域卡可见 + 按域可拉取", async () => {
+  const cards = buildDomainCards(corpus);
+  for (const family of [
+    "habit",
+    "booking",
+    "picture",
+    "finance",
+    "virtual-phone",
+    "agentworld",
+  ]) {
+    const members = catalog.entries
+      .map((e) => e.registryName)
+      .filter((n) => n.startsWith(`${family}.`));
+    if (members.length === 0) continue; // 该族未注册进语料（环境裁剪）→ 不误判
+    assert.ok(cards.includes(`${family}.`), `域卡缺失技能族 ${family}（能力面对模型不可见）`);
+    const r = await executeToolSearchBridge("tool_discover", { domain: family }, catalog);
+    assert.equal(r.ok, true, `按域拉取 ${family} 失败：${JSON.stringify(r.result)}`);
+    const result = r.result as { mode: string; domain: string; matches: Array<{ name: string }> };
+    assert.equal(result.mode, "domain");
+    assert.equal(result.domain, family);
+    assert.ok(result.matches.length > 0, `${family} 域拉取为空`);
+    for (const m of result.matches) {
+      assert.ok(m.name.startsWith(`${family}.`), `${family} 域拉取混入异族成员: ${m.name}`);
+    }
+  }
 });
 
 test("域卡：空语料安全降级为空串", () => {

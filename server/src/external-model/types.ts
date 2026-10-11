@@ -310,6 +310,13 @@ export type AgentStreamOptions = {
    */
   turnIntent?: string;
   /**
+   * 确定性媒体预执行调用（2026-10-10）：media_retrieval 轮由代码在工具循环
+   * 开场先真搜一次（查询词来自路由层 composeMediaSearchQuery），模型只叙述。
+   * provider 必须把本字段透传进 streamCompletionWithTools——白名单漏掉它
+   * 会导致预执行静默失效、退回「出口闸拉回补搜」的事后补丁路径。
+   */
+  deterministicToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
+  /**
    * chat 车道主生成采样放开（2026-10-06 语感治理 A）：true 时 provider 对该轮
    * 主生成下发 temperature/frequency_penalty（CHAT_TEMPERATURE / CHAT_FREQUENCY_PENALTY
    * 可覆盖）。仅 agent-core 的 chat 车道主链路置位；任务面、ephemeral 内部调用

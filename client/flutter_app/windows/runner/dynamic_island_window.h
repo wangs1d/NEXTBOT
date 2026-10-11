@@ -21,7 +21,9 @@
 ///     滚轮切换「今日/任务」，滚到「展开」进展开卡）
 ///   - 展开态：胶囊本体向下生长成日程卡（圆角连续变形），头部行保留
 ///   - 形变保护：morphing 期间吞掉点击/滚轮，避免按出半截状态
-///   - 前台全屏（D3D 全屏 / 放映模式）时自动隐藏，退出后恢复
+///   - 前台全屏（D3D 全屏 / 放映模式 / 忙碌）或前台窗口最大化盖岛时自动
+///     隐藏（2026-10-09 拍板：应用最大化同样让位，自家主窗口一视同仁），
+///     退出/还原后恢复；抑制期间鼠标贴屏幕顶边可临时唤出（peek）
 ///
 /// 尺寸即声明（islandTransition 思路）：壳层只在「声明尺寸档」之间插值，
 /// 不按文案实时测量——每种内容态一个标准宽度档，杜绝文案长短引起的抖动。
@@ -130,6 +132,8 @@ class DynamicIslandWindow {
   // busy 隐藏岛时会停动画心跳省 CPU，恢复检查不能跟它同生死——
   // 否则退出全屏后没有任何代码再把岛唤回（曾死锁：岛一去不回）。
   static constexpr UINT kSuppressTimerId = 3;
+  // 顶边唤出探针：抑制期间鼠标贴屏幕顶边临时唤回岛（200ms 轮询光标）。
+  static constexpr UINT kPeekTimerId = 4;
   // attention 提醒动画：各阶段时长（秒）。2026-10-05 用户拍板：提醒不再放大，
   // 小胶囊形态（kAttentionCapsuleW）+ 脉冲细环承担注意力信号，尺寸恒为 1。
   static constexpr double kAttentionScale = 1.0;
@@ -153,6 +157,13 @@ class DynamicIslandWindow {
   void StartAnimTimer();
   void StopAnimTimer();
   void UpdateFullscreenSuppression();
+  /// 前台窗口是否「最大化且盖住岛」：并入抑制判定（与 D3D 全屏同权）。
+  /// 只认 IsZoomed + 覆盖岛窗口中心点，排除工具窗与岛自身；
+  /// 自家主窗口不豁免（2026-10-09 拍板：一视同仁）。
+  bool IsForegroundCoveringIsland() const;
+  /// 抑制期间的顶边唤出探针（kPeekTimerId 驱动）：鼠标贴主屏顶边临时
+  /// 浮现，离开顶边且不在岛上（0.5s 宽限）即收回；不改抑制标志。
+  void UpdateTopEdgePeek();
   int HoverDotAt(int client_x, int client_y) const;
   void FireEvent(EventType type, const std::string& payload);
   double AttentionScale() const;  // 当前 attention 缩放（1 = 无）
@@ -178,6 +189,8 @@ class DynamicIslandWindow {
   HWND window_handle_ = nullptr;
   bool visible_ = false;
   bool suppressed_by_fullscreen_ = false;
+  bool peek_active_ = false;        // 抑制中的顶边唤出临时显示
+  ULONGLONG peek_last_in_zone_ms_ = 0;  // 鼠标最近一次位于顶边区/岛上的时刻
   double dpi_scale_ = 1.0;
 
   Entry entry_;

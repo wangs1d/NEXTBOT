@@ -106,6 +106,26 @@ export const BOOKKEEPING_TOOL_NAMES = new Set<string>([
 ]);
 
 /**
+ * 本轮是否只有记账型工具（无任何真实检索/外部信息）。
+ *
+ * 这是「过程话是否值得说」的唯一判定入口（2026-10-09 发言模型）：
+ * 记账轮回执是「已写入/已清除」类状态，过程话（"好的，记下了"）与结论
+ * （"已经记上啦"）必然同义 —— 过程话在这一轮没有任何信息价值，应当裁掉。
+ * 判定放这里（策略层）而不是散在工具循环/各工具 handler 里，避免按工具名打补丁。
+ */
+export function isBookkeepingOnlyToolSet(toolNames: readonly string[]): boolean {
+  if (toolNames.length === 0) return false;
+  return toolNames.every((name) => BOOKKEEPING_TOOL_NAMES.has(name));
+}
+
+/**
+ * 过程话（工具执行前的过渡话）许可：
+ * - allow：检索/生成类轮次，过程话承载「我在查了」的等待价值（TTFT 体感），必须保留；
+ * - suppress：记账类轮次，过程话必然与结论同义，抑制。
+ */
+export type PreamblePolicy = "allow" | "suppress";
+
+/**
  * 是否是「纯图轮」：本轮至少一次 search_images 成功，且没有任何成功的
  * 文字检索/抓取结果（图文混合时仍走常规合成策略）。search_images_batch
  * 是对比出图流，前端按「一段介绍 + 一组对比图」交错渲染，不在此列。
@@ -138,6 +158,11 @@ export interface StrategyDirective {
   instruction: string;
   /** 数据质量评估（用于日志/调试） */
   quality: DataQualityAssessment;
+  /**
+   * 过程话许可（2026-10-09 发言模型）：由策略层统一声明，装配层/工具循环只读不算。
+   * 记账轮 suppress —— 过程话与结论必然同义，说了就是重复。
+   */
+  preamblePolicy: PreamblePolicy;
 }
 
 /** 搜索类工具名关键词 */
@@ -374,7 +399,7 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
       break;
   }
 
-  return { strategy, instruction, quality };
+  return { strategy, instruction, quality, preamblePolicy: "allow" };
 }
 
 /** 从 ToolExecutedInfo 数组构造 CollectedToolData */
@@ -417,6 +442,8 @@ export function evaluateAndSelectStrategy(
         level: "empty",
         reason: "纯记账轮：仅档案/记忆写入类回执，不施加展开策略",
       },
+      // 记账轮：过程话与结论必然同义（"好的，记下了" vs "已经记上啦"）→ 抑制
+      preamblePolicy: "suppress",
     };
   }
   // 纯图轮短路（2026-10-06）：搜照片轮的交付是图本身，不走数据质量分档——
@@ -437,6 +464,7 @@ export function evaluateAndSelectStrategy(
         level: "high",
         reason: "纯图轮：search_images 成功且无文字检索结果，交图为主",
       },
+      preamblePolicy: "allow",
     };
   }
   // 天气卡轮短路（2026-10-08）：天气数值已由系统专用卡片展示，不走数据质量分档——
@@ -457,6 +485,7 @@ export function evaluateAndSelectStrategy(
         level: "high",
         reason: "天气卡轮：weather.* 成功且无文字检索结果，数值走卡片、正文只写建议",
       },
+      preamblePolicy: "allow",
     };
   }
   const toolData = collectToolDataFromResults(substantiveResults);

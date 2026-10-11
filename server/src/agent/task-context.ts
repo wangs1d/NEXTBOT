@@ -1,4 +1,5 @@
-import { requiresTaskDecomposition, shouldSkipNarrativeRecall } from "./simple-task.js";
+import { requiresTaskDecomposition } from "./simple-task.js";
+import type { TurnUnderstanding } from "./task-router.js";
 
 export type TaskContextProfile = {
   complexity: "direct" | "multi_step";
@@ -18,11 +19,21 @@ const PERSISTENT_ACTION_RE =
 const CODE_OR_PROJECT_RE =
   /code|repo|project|file|bug|test|build|lint|typescript|javascript|flutter|server|client|代码|项目|文件|报错|测试|构建|类型|前端|后端|优化|修复|实现/i;
 
-export function buildTaskContextProfile(message: string): TaskContextProfile {
+export function buildTaskContextProfile(
+  message: string,
+  understanding?: TurnUnderstanding,
+): TaskContextProfile {
   const t = message.trim();
   return {
     complexity: requiresTaskDecomposition(t) ? "multi_step" : "direct",
-    needsNarrativeRecall: !shouldSkipNarrativeRecall(t),
+    // 召回需求（2026-10-10 词表判定退役）：优先读模型判定（recallIntent/
+    // memoryInstruction/锚定上文）；understanding 缺省（路由失败）退化为
+    // 长度启发（短句不召回——原 shouldSkipNarrativeRecall 的非追问主干的近似）。
+    needsNarrativeRecall: understanding
+      ? understanding.recallIntent ||
+        understanding.memoryInstruction ||
+        understanding.reference !== "none"
+      : t.length > 16,
     likelyNeedsFreshFacts: FRESH_FACT_RE.test(t),
     likelyPersistsState: PERSISTENT_ACTION_RE.test(t),
     likelyCodeOrProjectWork: CODE_OR_PROJECT_RE.test(t),
@@ -39,8 +50,12 @@ function compactTaskFlags(profile: TaskContextProfile): string {
   return flags.join(", ");
 }
 
-export function buildTaskContextPrompt(message: string, now: Date = new Date()): string | undefined {
-  const profile = buildTaskContextProfile(message);
+export function buildTaskContextPrompt(
+  message: string,
+  understanding?: TurnUnderstanding,
+  now: Date = new Date(),
+): string | undefined {
+  const profile = buildTaskContextProfile(message, understanding);
   const flags = compactTaskFlags(profile);
 
   const needsDetailedPolicy =

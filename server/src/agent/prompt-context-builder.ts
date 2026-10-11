@@ -22,11 +22,9 @@ import {
 } from "../services/agent-identity.js";
 import {
   buildSchedulePromptSnapshot,
-  shouldInjectScheduleSnapshot,
 } from "../services/schedule-prompt-snapshot.js";
 import {
   buildTravelStatePrompt,
-  shouldInjectTravelState,
 } from "../services/travel-prompt-snapshot.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
@@ -34,11 +32,8 @@ import { getConversationTimelineService } from "../services/conversation-timelin
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
-import {
-  buildFollowUpAnchorPrompt,
-  isAmbiguousFollowUpMessage,
-} from "./memory-signal.js";
 import { shouldRecallLongTerm } from "./recall-gate.js";
+import type { TurnUnderstanding } from "./task-router.js";
 import type { PersonalityCore } from "../brain/types.js";
 import type {
   AgentPromptMemoryContext,
@@ -53,6 +48,29 @@ import type { FeatureCatalog } from "../catalog/index.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
 const WORLD_CACHE_TTL_MS = 5_000;
+
+/**
+ * 追问锚点块（2026-10-10 语义化重写）：由模型判定的 reference 驱动。
+ * 只说清「承接对象」帮指代对齐，不携带推进旧任务的压力——原「FU|anchor=...」
+ * 密文 + 词表判定（把「你叫我什么？」误判成追问轮锚到上一条旅游回复）已退役。
+ */
+function buildFollowUpAnchorFromUnderstanding(
+  understanding?: TurnUnderstanding,
+): string | undefined {
+  if (!understanding || understanding.reference === "none") return undefined;
+  const target =
+    understanding.reference === "prev_assistant"
+      ? "你（Agent）上一条回复"
+      : understanding.reference === "prev_user_request"
+        ? "用户自己上一条请求"
+        : "更早的对话/长期记忆";
+  return [
+    `【追问锚点】模型判定：用户这句话在承接${target}。`,
+    "- 回应本句前先对齐承接对象（它指什么、哪个方案、哪个对象），别答成新话题；",
+    "- 若用户本句实际开启了新话题，直接回应新话题，绝不把旧话题硬扯进来；",
+    "- 锚点只影响指代消解，不构成继续旧任务的承诺。",
+  ].join("\n");
+}
 
 /**
  * STM 会话情景记忆 与 journal 当日日志检索 双轨去重（P0-3）。
@@ -97,7 +115,10 @@ function extractUserTimezoneFromLocation(userLocation?: string): string | undefi
 
 /**
  * 【运行环境】块（2026-10-07）：用户此刻从哪类设备发消息（WS 连接自报 platform）。
- * 手机端=小屏移动场景：回复短、别发大段排版/表格，别引导用户做桌面端操作；
+ * 手机端=小屏移动场景：回复短、别发大段排版/表格；但**不**因为人在手机旁就放弃
+ * 电脑远控——手机上同样能调 desktop.* 工具代用户操作他那台已配对的电脑
+ * （2026-10-09 改：原句「涉及电脑端才能做的事就直说稍后在电脑上办」会压制远控，
+ * 用户人在外面正是最需要手机遥控电脑的时候）。
  * 电脑端=桌面场景：可正常交付卡片/多段内容。缺省（未登记/旧客户端/程序化调用）
  * 不注入——模型按对话语境自行判断，避免错误标注。
  */
@@ -105,7 +126,16 @@ export function buildDeviceEnvironmentBlock(
   deviceClass?: "desktop" | "mobile",
 ): string | undefined {
   if (deviceClass === "mobile") {
-    return "【运行环境】用户此刻在手机 App 上和你对话（小屏、可能在外出）。回复保持口语短句，不写长文/表格/多级列表；不要引导用户去电脑上做操作，涉及电脑端才能做的事就直说稍后在电脑上办。";
+    return (
+      "【运行环境】用户此刻在手机 App 上和你对话（小屏、可能不在电脑前）。" +
+      "回复保持口语短句，不写长文/表格/多级列表。" +
+      "涉及电脑才能做的事，别让用户自己去电脑上点——你具备电脑远控能力，可直接调用 " +
+      "desktop.* 工具（如 desktop.visual.screenshot 截图、desktop.open 打开程序/网页/文件、" +
+      "desktop.uia_query 看界面元素、desktop.run_input 键鼠操作、desktop.run_automation 控件操作、" +
+      "desktop.window 切窗口、desktop.clipboard 剪贴板）在用户那台已配对的电脑上代他执行。" +
+      "只有确实需要用户本人站到电脑前动手（插拔设备、物理接触等）时才让他过去；" +
+      "那台电脑未在线或未配对时直说没连上，不要假装已经办了。"
+    );
   }
   if (deviceClass === "desktop") {
     return "【运行环境】用户此刻在电脑桌面端和你对话，可以正常交付结构化内容与卡片。";
@@ -397,9 +427,16 @@ export type BuildPromptContextInput = {
   /**
    * recall-gate 白名单判定结果（门控单点化）：cognize 已用完整输入评估过，
    * agent-core 透传至此。提供时不再本地重评 shouldRecallLongTerm（消除
-   * 多处独立评估正则的漂移空间）；缺省时保持本地评估（向后兼容其他调用方）。
+   * 多处独立评估的漂移空间）；缺省时保持本地评估（向后兼容其他调用方）。
    */
   recallGateTriggered?: boolean;
+  /**
+   * 本轮语义理解标记（2026-10-10 词表判定退役）：L1 路由 LLM 产出的追问锚定/
+   * 记忆召回/日程/旅行等语境标记。追问锚点、scheduleSnapshot、travelState、
+   * dailyDigest 抑制与各上下文块压缩档全部改读此处——缺省（路由失败）时一律
+   * 按「无特殊处理」（最小注入）执行。
+   */
+  understanding?: TurnUnderstanding;
   /**
    * 当前工作记忆摘要（来自 WorkingMemoryCortex.toSummary）。
    * 作为独立块注入 system prompt，不再拼入 narrativeRecall，
@@ -610,7 +647,11 @@ export class PromptContextBuilder {
   private assembleMemory(input: BuildPromptContextInput): AgentPromptMemoryContext {
     const config = getAgentRuntimeConfig();
     const userText = input.userText?.trim() ?? "";
-    const ambiguousFollowUp = isAmbiguousFollowUpMessage(userText);
+    // 本轮语义理解标记（L1 路由产出）：追问/锚定/日程/旅行判定全部读此处，
+    // 缺省（路由失败）按「无特殊处理」执行——误注入=串台，漏注入=少点可选上下文。
+    // 命名区分：本变量是本轮路由语义；下方 `understanding` 是用户理解档案块（另一概念）。
+    const turnUnderstanding = input.understanding;
+    const followUpTurn = turnUnderstanding?.isFollowUp === true;
     const digestService = getDailyDigestService();
     const memoryManager = getMemoryManagerService();
 
@@ -628,7 +669,7 @@ export class PromptContextBuilder {
         shouldRecallLongTerm({
           text: userText,
           threadMessageCount: input.threadMessageCount,
-          ambiguousFollowUp,
+          understanding: turnUnderstanding,
         }).trigger) ||
       input.semanticRecallHit === true;
 
@@ -711,7 +752,7 @@ export class PromptContextBuilder {
     // 短期上下文（STM/recentHistory/followUpAnchor）的差异化长度，服务指代消解。
     // dailyDigest 仍只在非追问场景注入（digest 与追问语义无关，省 token）
     const dailyDigest =
-      ambiguousFollowUp || !userText
+      followUpTurn || !userText
         ? undefined
         : digestService.getRelevantPromptDigest(input.actorId, userText);
     const userProfileFromManager =
@@ -742,30 +783,38 @@ export class PromptContextBuilder {
       longTermEnabled
         ? memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined
         : undefined;
-    const followUpAnchor = buildFollowUpAnchorPrompt(userText);
-    // scheduleSnapshot 注入门控（2026-09-08 扩展）：除日程语义命中外，追问轮
-    // （ambiguousFollowUp）也注入——追问轮正是 agent 回头确认「正事」的场景，
-    // 权威日程快照（含提醒触发时间）能纠正 recap/挂起栈的记忆偏差，防止对
-    // 已创建的提醒反复追问「要提前多久」。
+    // 追问锚点（2026-10-10 语义化重写）：原「FU|anchor=...」密文 + 词表判定退役。
+    // 仅当模型判定本轮话头锚定上文（reference ≠ none）时注入，锚文本改用自然
+    // 语言说清「承接对象」——只解决指代对齐，不催促推进旧任务（「你叫我什么？」
+    // 被硬编码判成追问轮、锚到上一条旅游回复导致答非所问的教训）。
+    const followUpAnchor = buildFollowUpAnchorFromUnderstanding(turnUnderstanding);
+    // scheduleSnapshot 注入：模型判定的日程语义（schedule_query）或追问轮注入
+    // ——追问轮 agent 回头确认「正事」，权威日程快照能纠正 recap/挂起栈的记忆偏差。
     const scheduleSnapshot =
       this.deps.scheduleTaskService != null &&
-      (shouldInjectScheduleSnapshot(userText) || ambiguousFollowUp)
-        ? buildSchedulePromptSnapshot(this.deps.scheduleTaskService, input.actorId, userText)
+      (turnUnderstanding?.scheduleQuery === true || followUpTurn)
+        ? buildSchedulePromptSnapshot(
+            this.deps.scheduleTaskService,
+            input.actorId,
+            turnUnderstanding?.scheduleQuery === true,
+          )
         : undefined;
-    // 行程状态热层：仅行程语义命中时注入一行回执列表（目的地/日期/planId），
+    // 行程状态热层：仅模型判定本轮在问行程/旅行时注入一行回执列表（目的地/日期/planId），
     // 完整明细不进上下文，由 travel.get-itinerary 按需回查（见 travel-prompt-snapshot.ts）
-    const travelState = shouldInjectTravelState(userText)
-      ? buildTravelStatePrompt(userText)
-      : undefined;
+    const travelState =
+      turnUnderstanding?.travelQuery === true ? buildTravelStatePrompt(userText) : undefined;
     const taskContext =
       config.memoryPrompt.taskContextInPrompt && userText
-        ? compactPromptBlock(buildTaskContextPrompt(userText), 320)
+        ? compactPromptBlock(buildTaskContextPrompt(userText, turnUnderstanding), 320)
         : undefined;
     // 追问场景扩容：900 → 1500 字，保留更多任务脉络
-    const shortTermTaskContextLimit = ambiguousFollowUp ? 1500 : 900;
+    const shortTermTaskContextLimit = followUpTurn ? 1500 : 900;
     const shortTermTaskContext =
       input.sessionId && this.deps.shortTermMemoryGateway
-        ? compactPromptBlock(this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText), shortTermTaskContextLimit)
+        ? compactPromptBlock(
+            this.deps.shortTermMemoryGateway.buildPromptContext(input.sessionId, userText, turnUnderstanding),
+            shortTermTaskContextLimit,
+          )
         : undefined;
     // 当日日志检索块：独立注入（不拼 narrativeRecall，防 formatNarrativeRecallPrompt 拍平）。
     // 与 STM 会话情景记忆双轨去重：同一批今天早些时候的对话，STM（延续/指代轮注入原文、
@@ -786,16 +835,16 @@ export class PromptContextBuilder {
     // 修复"上下文跳转"：原实现把它们拼到 narrativeRecall 末尾，被 formatNarrativeRecallPrompt
     // 的 slice(0,4) 当作召回条目丢弃，或块结构被拍平、hint 被正则误杀。
     // 追问场景适度压缩（仍注入，保留指代消解线索），非追问保持原长度。
-    const workingMemorySummaryLimit = ambiguousFollowUp ? 300 : 600;
+    const workingMemorySummaryLimit = followUpTurn ? 300 : 600;
     const workingMemorySummary = compactPromptBlock(input.workingMemorySummary, workingMemorySummaryLimit);
-    const recentConversationHistoryLimit = ambiguousFollowUp ? 500 : 900;
+    const recentConversationHistoryLimit = followUpTurn ? 500 : 900;
     const recentConversationHistory = compactPromptBlock(
       input.recentConversationHistory,
       recentConversationHistoryLimit,
     );
     const compactDailyDigest = compactPromptBlock(dailyDigest, 420);
     // followUpAnchor 追问场景扩容：180 → 400 字，增加指代消解线索
-    const followUpAnchorLimit = ambiguousFollowUp ? 400 : 180;
+    const followUpAnchorLimit = followUpTurn ? 400 : 180;
     const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
     const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
     const compactTravelState = compactPromptBlock(travelState, 300);
@@ -920,7 +969,7 @@ export class PromptContextBuilder {
     const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
 
     // 人格内核（personality 域）：每轮从 MemoryCortex 拉取，格式化后注入 system prompt 稳定前缀防漂移。
-    // 注意：不受 ambiguousFollowUp 影响——人格内核是稳定身份层，非本轮上下文。
+    // 注意：不受追问轮影响——人格内核是稳定身份层，非本轮上下文。
     const rawPersonalityCore = this.personalityProvider?.(input.actorId) ?? null;
     const personalityCore = rawPersonalityCore
       ? compactPromptBlock(formatPersonalityCorePrompt(rawPersonalityCore), 400)
@@ -991,7 +1040,7 @@ export class PromptContextBuilder {
       ...(lifeThemeMemoryCompact ? { lifeThemeMemory: lifeThemeMemoryCompact } : {}),
       ...(dreamMemoryCompact ? { dreamMemory: dreamMemoryCompact } : {}),
       // 优化 2：跨天事件回顾，压缩到 200 字（非追问场景）
-      ...(yesterdayHighlight && !ambiguousFollowUp
+      ...(yesterdayHighlight && !followUpTurn
         ? { yesterdayHighlight: compactPromptBlock(yesterdayHighlight, 200) }
         : {}),
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
@@ -1226,6 +1275,17 @@ export class PromptContextBuilder {
       Boolean(memory.recentConversationHistory) ||
       Boolean(memory.semanticIntent)
     );
+  }
+
+  /**
+   * 会话技能工具公开入口（2026-10-10 P0-1）：chat 车道语料装配
+   * （agent-core.buildChatLaneExplicitOpts）需要把技能工具并进语料，
+   * 否则技能族（travel.* / alipay.* / merchant.* … 全部技能）在对话面
+   * 既不可见、也进不了延迟目录（tool_discover 召回不到）。
+   * 与 build() 产出的 chatToolsExtra 同一数据源，调用方负责按名去重。
+   */
+  getChatSkillTools(actorId: string): ChatCompletionTool[] {
+    return this.sessionSkillTools(actorId) ?? [];
   }
 
   private sessionSkillTools(actorId: string): ChatCompletionTool[] | undefined {

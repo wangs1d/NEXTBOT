@@ -64,6 +64,23 @@ const MAX_SLOTS = 7;
 /** 遗忘曲线阈值 */
 const DECAY_PASSIVE_MS = 30 * 60_000; // 30 分钟未触碰 → 降级
 const DECAY_FORGET_MS = 60 * 60_000; // 1 小时未触碰 → 遗忘
+/** 工作记忆整体陈旧阈值（2026-10-09）：全部条目都超过此时长时，摘要里加"可能过时"提示 */
+const WM_STALE_MS = 6 * 60 * 60_000;
+
+/**
+ * 相对年龄标签（分钟/小时/天粒度）。工作记忆摘要在易变层、每轮本就重算，
+ * 细粒度不影响 prefix cache；此处用相对年龄把「多久前」显式交给模型。
+ */
+function wmAgeLabel(iso: string, nowMs: number): string {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "未知";
+  const min = Math.floor((nowMs - t) / 60_000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min}分钟前`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours}小时前`;
+  return `${Math.floor(hours / 24)}天前`;
+}
 
 /**
  * 工作记忆皮层。
@@ -324,10 +341,15 @@ export class WorkingMemoryCortex {
    *
    * 性能优化：纯内存操作，<0.1ms。
    * 深度链接：BrainCenter.cognize 返回值携带 → agent-core.ts 注入 prompt。
+   *
+   * 时间锚（2026-10-09）：槽位/目标附带「更新于 X」相对年龄，并在整体陈旧时给出
+   * 「可能已过时」提示——此前槽位只有 key/value 无时间，模型会把旧槽位当现事复述
+   * （「刚才你说好饿」家族的另一处入口）。纯展示层标注，不改淘汰逻辑。
    */
   toSummary(actorId: string): string {
     const wm = this.load(actorId);
     const parts: string[] = [];
+    const nowMs = Date.now();
 
     // 活跃目标（最多 3 个，按优先级和时间排序）
     const activeGoals = wm.goals
@@ -339,7 +361,9 @@ export class WorkingMemoryCortex {
       .slice(0, 3);
     if (activeGoals.length > 0) {
       parts.push(
-        `当前目标：${activeGoals.map((g) => `${g.description}（${g.priority}）`).join("；")}`,
+        `当前目标：${activeGoals
+          .map((g) => `${g.description}（${g.priority}·${wmAgeLabel(g.lastTouchedAt, nowMs)}）`)
+          .join("；")}`,
       );
     }
 
@@ -355,7 +379,9 @@ export class WorkingMemoryCortex {
       .slice(0, MAX_SLOTS);
     if (recentSlots.length > 0) {
       parts.push(
-        `已知信息：${recentSlots.map((s) => `${s.key}=${s.value}`).join("；")}`,
+        `已知信息：${recentSlots
+          .map((s) => `${s.key}=${s.value}（更新于${wmAgeLabel(s.lastTouchedAt, nowMs)}）`)
+          .join("；")}`,
       );
     }
 
@@ -365,6 +391,16 @@ export class WorkingMemoryCortex {
       parts.push(
         `待办：${pendingTodos.map((t) => `${t.content}${t.dueAt ? `（截止 ${t.dueAt}）` : ""}`).join("；")}`,
       );
+    }
+
+    // 时效提示：全部条目均较旧（>6h）时显式标注，避免模型把陈旧工作记忆当"此刻"
+    const newestTouched = Math.max(
+      0,
+      ...recentSlots.map((s) => new Date(s.lastTouchedAt).getTime()),
+      ...activeGoals.map((g) => new Date(g.lastTouchedAt).getTime()),
+    );
+    if (parts.length > 0 && newestTouched > 0 && nowMs - newestTouched > WM_STALE_MS) {
+      parts.unshift("（以下工作记忆已有一段时间未更新，可能过时；仅在话题相关时参考，不要当作「刚刚/此刻」的事实）");
     }
 
     return parts.join("\n");

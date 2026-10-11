@@ -190,7 +190,17 @@ export class FinanceDeepService {
   /** 防抖定时器 */
   private persistTimer: NodeJS.Timeout | null = null;
 
-  constructor(private readonly dataRoot: string) {}
+  /**
+   * @param dataRoot 账本数据根目录
+   * @param options.now 时间源注入（测试/回放用）；缺省读真实时钟。
+   *   账本里所有「当前时间」（记账默认日期、预算周期归属、报表时间戳）都必须过这里：
+   *   上层服务（如账单管理）注入了冻结时钟、本服务却偷读真实时钟时，
+   *   会算出不同的归属周期，表现为「缴费已入账但预算 spent=0」这类时基不一致的失败。
+   */
+  constructor(
+    private readonly dataRoot: string,
+    private readonly now: () => Date = () => new Date(),
+  ) {}
 
   // ─── 持久化 ──────────────────────────────────────────────────
 
@@ -301,7 +311,7 @@ export class FinanceDeepService {
       if (typeof item.amount !== "number" || !Number.isFinite(item.amount)) continue;
       const tx: FinanceTransaction = {
         id: typeof item.id === "string" && item.id ? item.id : this.genId(),
-        date: typeof item.date === "string" && item.date ? item.date : new Date().toISOString(),
+        date: typeof item.date === "string" && item.date ? item.date : this.now().toISOString(),
         amount: Math.abs(item.amount),
         type: item.type === "income" ? "income" : "expense",
         category: this.normalizeCategory(item.category, item.description ?? item.merchant),
@@ -374,7 +384,7 @@ export class FinanceDeepService {
     to?: string,
     groupBy?: "category" | "month",
   ): SpendingAnalysis {
-    const now = Date.now();
+    const now = this.now().getTime();
     const fromMs = from ? Date.parse(from) : now - 30 * 86_400_000;
     const toMs = to ? Date.parse(to) : now;
     const fromIso = new Date(fromMs).toISOString();
@@ -514,7 +524,7 @@ export class FinanceDeepService {
     const existingIdx = store.budgets.findIndex(
       (b) => b.category === category && b.period === period,
     );
-    const nowIso = new Date().toISOString();
+    const nowIso = this.now().toISOString();
     const budget: FinanceBudget = {
       id: existingIdx >= 0 ? store.budgets[existingIdx].id : this.genId(),
       category,
@@ -541,7 +551,7 @@ export class FinanceDeepService {
   getBudgetStatus(actorId: string, month?: string): BudgetStatus[] {
     const store = this.stores.get(actorId);
     if (!store || store.budgets.length === 0) return [];
-    const periodLabel = month ?? new Date().toISOString().slice(0, 7);
+    const periodLabel = month ?? this.now().toISOString().slice(0, 7);
     const year = periodLabel.slice(0, 4);
     const fromMs = Date.parse(`${periodLabel}-01T00:00:00`);
     // 当月最后一天
@@ -747,7 +757,7 @@ export class FinanceDeepService {
     const reportDir = join(this.dataRoot, safeActorId, "reports");
     await mkdir(reportDir, { recursive: true });
 
-    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const stamp = this.now().toISOString().replace(/[:.]/g, "-");
     const ext = format === "markdown" ? "md" : format;
     const fileName = `report-${stamp}.${ext}`;
     const fullPath = join(reportDir, fileName);
@@ -921,7 +931,7 @@ export class FinanceDeepService {
         const category = this.normalizeCategory(r.category, description ?? merchant);
         return {
           id: typeof r.id === "string" && r.id ? r.id : this.genId(),
-          date: typeof r.date === "string" && r.date ? r.date : new Date().toISOString(),
+          date: typeof r.date === "string" && r.date ? r.date : this.now().toISOString(),
           amount: Math.abs(Number(r.amount) || 0),
           type: r.type === "income" ? ("income" as const) : ("expense" as const),
           category,
@@ -948,12 +958,12 @@ export class FinanceDeepService {
           startDate:
             typeof r.startDate === "string" && r.startDate
               ? r.startDate
-              : new Date().toISOString().slice(0, 10),
+              : this.now().toISOString().slice(0, 10),
           ...(typeof r.endDate === "string" && r.endDate ? { endDate: r.endDate } : {}),
           createdAt:
             typeof r.createdAt === "string" && r.createdAt
               ? r.createdAt
-              : new Date().toISOString(),
+              : this.now().toISOString(),
         };
       });
   }

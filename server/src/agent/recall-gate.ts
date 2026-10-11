@@ -1,71 +1,47 @@
 /**
  * 长期记忆召回门控（Recall Gate）—— 记忆架构重构检索层
  *
- * 原则：白天「只写不捞」，长期记忆检索从「每轮默认」改为「白名单触发」。
+ * 原则：白天「只写不捞」，长期记忆检索从「每轮默认」改为「触发式」。
  * 未触发时跳过长期记忆检索（省 token + 根治召回串台/幻觉污染）。
  *
- * 触发白名单（满足任一）：
- *  1. 显式记忆线索：用户明确提到记忆/上次/之前说过等（MEMORY_EXPLICIT_RE /
- *     MEMORY_RECALL_HINT_RE / META_CONVERSATION_RECALL_RE）；
- *  2. 个人事实陈述：用户主动陈述自我信息（我叫/我在…工作），走个人化写入路径。
+ * 2026-10-10 词表判定退役：触发条件不再用正则词表猜语义（原 MEMORY_EXPLICIT_RE /
+ * META_CONVERSATION_RECALL_RE / DATE_DEIXIS_RE / PERSONAL_FACT_RE / 窗口内指代
+ * 短路——「你叫我什么？」因标点分支缺 ^ 锚被判成追问轮的教训），全部改由 L1
+ * 路由 LLM 与意图同体产出的 TurnUnderstanding 承担。「这轮在问什么、指什么」
+ * 归模型，本文件只做触发路由表（纯代码、无 IO、无词面判定）。
  *
- *  2026-10-06 治啰嗦 P1：「新会话开场必触发」已删除——主流 agent（ChatGPT/Claude/
- *  Letta）均无「新会话自动倒一段上次对话」机制；跨会话衔接交给恒驻的用户速览
- *  （结构化事实块）与按需检索（brain.recall 工具）。新会话首轮不再自动注入
- *  session_recap/narrativeRecall 等情节块，模型不再被旧话题素材顶着想什么都提。
+ * understanding 缺省（路由失败/降级）→ 一律不触发（最小注入）：误注入=串台，
+ * 漏注入=少点可选上下文，代价不对称，保守方向明确。
+ *
+ * 触发表（满足任一）：
+ *  1. memory_instruction / recall_intent / reference=earlier_session → memory_cue
+ *  2. personal_fact → personal_fact
+ *  3. is_follow_up + 会话长于注入窗口 → anaphora_escalation
+ *     （短会话内 LLM 从最近轮次即可消解；只有历史被截断后，"那个"才可能指向窗口外）
  *
  * 触发时检索 query 只用用户原文（禁止拼接任务/偏好/openLoops 等加料，
  * 那是召回串台的根因——检索结果永远偏向旧任务簇）。
- *
- * 白名单外的补充通道（P0-4 向量预筛）：正则白名单天然存在漏召（用户换个说法
- * 提到旧话题时 agent"忘了你"）。agent-core 在白名单未命中时会对用户原文做一次
- * 廉价向量检索（MemoryCortex.semanticRecallPreScreen，无 LLM），top1 分数 ≥
- * 阈值即放行长期记忆注入。本文件保持纯正则、无 IO——预筛在调用方叠加。
- *
  * 当天的问题不走长期检索，只扫当日 journal（DailyJournalService.searchToday）。
  */
 
-import {
-  MEMORY_EXPLICIT_RE,
-  MEMORY_RECALL_HINT_RE,
-  isWindowDeixisShortCircuit,
-} from "./memory-signal.js";
-
-/** 元对话记忆线索（"上次聊天/最后一次说/还记得吗"类） */
-export const META_CONVERSATION_RECALL_RE =
-  /上次聊天|上回聊天|上次聊|上回聊|最后(?:一次)?(?:说|聊|谈)|最近(?:一次)?(?:说|聊|谈)|之前(?:说|聊|谈)了?什么|什么时候(?:聊|说|谈)|还记得.*(?:上次|上回|之前|最后)/i;
-
-/**
- * 跨天/日期指代：没有显式"上次/之前"时，用户也可能在问"昨天/前天"发生的事。
- * 命中即触发长期/日志检索；同时供上层决定 journal 检索窗口（近 48h~72h，见 agent-core）。
- */
-export const DATE_DEIXIS_RE =
-  /昨天|昨天(?:白天|晚上|上午|下午|中午|凌晨|夜里|睡前)?|前天|大前天|昨儿|上周|上上周|上个星期|前几天|前两天|几天前|前两三天|今早|今天早上|今天上午|今天白天|昨晚|昨天晚上|夜里|凌晨/i;
-
-/**
- * 个人事实陈述（触发个人化写入路径的召回）。
- * 身份域称谓（老婆/丈夫/女儿…）在此列出：用户陈述或询问家人事实时必须放行
- * 长期检索——否则事实注册表以外的旧值残留无法被召回对质。
- */
-const PERSONAL_FACT_RE =
-  /我叫|我是|我在做|我最近在|我的项目|我正在|我计划|我住在|我在.*工作|我的生日|我老婆|我妻子|我媳妇|我老公|我丈夫|我爱人|我对象|我爸|我妈|我女儿|我儿子|我孩子|我家[娃宠]|我的家人|我的[名字职业公司学校老家家乡]/i;
+import type { TurnUnderstanding } from "./task-router.js";
 
 export type RecallGateInput = {
-  /** 用户本轮原文（唯一合法的检索 query 来源） */
+  /** 用户本轮原文（仅空值保护；不再做词面判定） */
   text: string;
-  /** 当前 thread 非 system 消息数；< 0 表示未知（关闭新会话判定） */
+  /** 当前 thread 非 system 消息数；< 0 表示未知（关闭指代升级判定） */
   threadMessageCount?: number;
-  /** 本轮是否为模糊指代/短追问（"那个方案呢""它后来怎么样"类），由调用方用 isAmbiguousFollowUpMessage 判定 */
-  ambiguousFollowUp?: boolean;
+  /** L1 路由产出的本轮语义理解标记（缺省 = 不触发，最小注入） */
+  understanding?: TurnUnderstanding;
 };
 
 export type RecallGateResult = {
   /** 是否触发长期记忆检索 */
   trigger: boolean;
   reason:
-    | "memory_cue" // 显式记忆线索
+    | "memory_cue" // 记忆指令 / 想衔接更早对话
     | "personal_fact" // 个人事实陈述
-    | "anaphora_escalation" // 指代消解失败升级：会话长于窗口，指代可能落在窗口外
+    | "anaphora_escalation" // 指代升级：追问轮 + 会话长于窗口，指代可能落在窗口外
     | "off"; // 未触发（默认）
 };
 
@@ -83,35 +59,20 @@ function envPositiveInt(name: string, fallback: number): number {
 const ANAPHORA_ESCALATION_THREAD_MIN = envPositiveInt("AGENT_MEMORY_RECALL_ANAPHORA_MIN_MSGS", 24);
 
 export function shouldRecallLongTerm(input: RecallGateInput): RecallGateResult {
-  const text = input.text.trim();
-  if (!text) return { trigger: false, reason: "off" };
+  if (!input.text.trim()) return { trigger: false, reason: "off" };
+  const u = input.understanding;
+  if (!u) return { trigger: false, reason: "off" };
 
-  // 0. 窗口内纯指代短路："刚才/刚刚/前面/之前"且无跨会话升级词时，
-  //    由 thread/STM 消解即可；触发检索会把更早会话旧记忆注入当前问题（串台根治）。
-  if (isWindowDeixisShortCircuit(text)) {
-    return { trigger: false, reason: "off" };
-  }
-
-  // 1. 显式记忆线索 / 跨天日期指代
-  //    （"刚才/刚刚/前面"是窗口内指代，不进这里——由 thread/STM 消解，见 IN_WINDOW_DEIXIS_RE）
-  if (
-    MEMORY_EXPLICIT_RE.test(text) ||
-    MEMORY_RECALL_HINT_RE.test(text) ||
-    META_CONVERSATION_RECALL_RE.test(text) ||
-    DATE_DEIXIS_RE.test(text)
-  ) {
+  if (u.memoryInstruction || u.recallIntent || u.reference === "earlier_session") {
     return { trigger: true, reason: "memory_cue" };
   }
 
-  // 2. 个人事实陈述
-  if (PERSONAL_FACT_RE.test(text)) {
+  if (u.personalFact) {
     return { trigger: true, reason: "personal_fact" };
   }
 
-  // 3. 指代消解失败升级：模糊指代/短追问 + 会话已长于注入窗口
-  // （短会话内 LLM 从最近轮次即可消解；只有历史被截断后，"那个"才可能指向窗口外）
   const count = input.threadMessageCount ?? -1;
-  if (input.ambiguousFollowUp && count >= ANAPHORA_ESCALATION_THREAD_MIN) {
+  if (u.isFollowUp && count >= ANAPHORA_ESCALATION_THREAD_MIN) {
     return { trigger: true, reason: "anaphora_escalation" };
   }
 

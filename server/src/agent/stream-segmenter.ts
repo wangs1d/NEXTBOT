@@ -276,6 +276,19 @@ export class StreamSegmenter {
     }
   }
 
+  /**
+   * 等待"当前已喂入内容"分发完毕（不断流、不丢弃缓冲，可继续 feed）。
+   *
+   * 用途：工具边界处的确定性屏障。分段器分发是**异步串行**的（feed 只入链，
+   * 真正的 emit 在 chain 上跑，还含块间停顿），若在工具开始执行时直接打
+   * "过程话阶段结束"的标记，仍在链上的过程话会在标记之后才 emit ——
+   * 发言模型就会把过程话误判成结论，塌缩裁决随之失效。
+   * 加这道屏障后，边界标记严格晚于已喂入文本的出站，过程话/结论划分确定。
+   */
+  async awaitPending(): Promise<void> {
+    await this.chain;
+  }
+
   /** 丢弃缓冲并停止后续推送（例如 turn 过期）。 */
   discard(): void {
     this.disposed = true;

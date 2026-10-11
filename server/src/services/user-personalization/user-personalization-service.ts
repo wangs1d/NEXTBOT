@@ -23,6 +23,7 @@ import {
   truncateProfileForPrompt,
 } from "./profile-heuristics.js";
 import { UserProfileStore, hasRealProfileContent } from "./user-profile-store.js";
+import { projectProfileMarkdown } from "./profile-fact-authority.js";
 import {
   decayFactStore,
   defaultFactStore,
@@ -956,6 +957,8 @@ export class UserPersonalizationService {
     }
     let state = this.loadEmotionState(actorId);
     nextMd = syncPreferredToneInProfile(nextMd, TONE_ZH[state.preferredTone]);
+    // 单一权威源：档案字段行以结构化事实库为准（投影后再落盘/KV，避免两处两个值）
+    nextMd = await this.projectProfileFieldAuthority(actorId, nextMd);
     // 内容无变化则跳过文件写，缩小与聚合器（LLM 抽取）read-modify-write 的竞态窗口；
     // KV 副本仍同步，保证 prompt 后备基底与最新画像一致。
     if (nextMd !== md) await this.store.write(actorId, nextMd);
@@ -1370,7 +1373,25 @@ export class UserPersonalizationService {
     );
     const trimmed = out.trim();
     if (!trimmed.startsWith("#")) return;
-    await this.store.write(actorId, trimmed);
-    this.syncProfileKv(actorId, trimmed);
+    // 单一权威源：整文重写同样受权威投影约束
+    const projected = await this.projectProfileFieldAuthority(actorId, trimmed);
+    await this.store.write(actorId, projected);
+    this.syncProfileKv(actorId, projected);
+  }
+
+  /**
+   * 画像档案字段权威投影（单一权威源，2026-10-09）：
+   * 「基本信息」里的档案字段（称呼/职业/居住地…）以结构化事实库当前值为准，
+   * 去别名重复行、清行内历史注解。记忆系统未装配/无权威值 → 原样返回。
+   */
+  private async projectProfileFieldAuthority(actorId: string, md: string): Promise<string> {
+    try {
+      const { getMemoryComponents } = await import("../../agentic-memory/index.js");
+      const facts = getMemoryComponents().factStore?.getActiveFacts?.(actorId) ?? [];
+      if (facts.length === 0) return md;
+      return projectProfileMarkdown(md, facts);
+    } catch {
+      return md;
+    }
   }
 }

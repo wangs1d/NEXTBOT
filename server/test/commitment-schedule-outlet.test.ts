@@ -34,9 +34,12 @@ async function withBoardAndTasks(fn: (ctx: OutletCtx) => Promise<void>): Promise
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   const db = openAgenticSqlite(join(dir, "board.db"));
   let nowMs = Date.parse(BASE);
-  const board = new CommitmentBoard(db, () => new Date(nowMs));
-  const tasks = new ScheduleTaskService();
-  board.setScheduleOutlet(createCommitmentScheduleOutlet({ tasks }));
+  const now = () => new Date(nowMs);
+  const board = new CommitmentBoard(db, now);
+  // 时基贯通：日程服务也要用同一冻结时钟，否则「runAt 必须在未来」按真实时钟判定，
+  // 真实日期越过 fixture 后所有物化静默失败（时间炸弹）。
+  const tasks = new ScheduleTaskService({ now });
+  board.setScheduleOutlet(createCommitmentScheduleOutlet({ tasks, now }));
   const tick = async () => {
     for (let i = 0; i < 8; i++) await new Promise((r) => setImmediate(r));
   };

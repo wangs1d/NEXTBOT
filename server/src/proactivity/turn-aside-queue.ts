@@ -7,12 +7,16 @@
 // 该不该说、怎么说由两端的既有闸门与主模型负责。
 //
 // 治理参数：
-//   - TTL：挂起 6 小时无人接话——low 作废（低价值消息不值得隔夜补刀），
+//   - TTL：挂起 2 小时无人接话——low 作废（低价值消息不值得隔夜补刀），
 //     medium 升级回正常通道（超时升级，2026-10-01 扩面）：等不到搭车就自己弹，
 //     不能因为用户没聊天就永远不说
 //   - 同 kind 最小间隔 4 小时（同一类关怀一天最多顺嘴一次）
 //   - 每 actor 队列上限 3 条（防堆积后一轮连塞多条）
 //   - 每轮最多取 1 条（回复尾巴只挂一个旁注）
+//
+// TTL 收窄（2026-10-09）：6h → 2h。6 小时的挂起窗口让「昨晚的小事今天顺嘴提起」
+// 成为常态——旁注不带时间锚时，模型会把旧事当此刻说（「刚才你说好饿」家族）。
+// 缩短窗口 + 织入时带发生时间（见 formatTurnAsidePrompt），双管齐下。
 //
 // 仅内存态：低优先级挂起消息重启丢失可接受（少提一句无感知，
 // 与 pending 确认/提醒等必达语义不同，不落盘）。
@@ -20,9 +24,16 @@
 // 回滚开关：PROACTIVITY_TURN_ASIDE=0 全局关闭，两条挂起点（hub.speakFeedback /
 // proactive-outreach-executor）回退为即时推送的旧行为；
 // PROACTIVITY_TURN_ASIDE_MEDIUM=0 收窄回 low-only（扩面回滚开关）。
+// PROACTIVITY_TURN_ASIDE_TTL_MIN=<分钟> 覆盖挂起 TTL。
 
-/** 挂起条目 TTL（毫秒） */
-const ASIDE_TTL_MS = 6 * 60 * 60_000;
+/** 挂起条目 TTL 默认 2 小时（毫秒；可用 PROACTIVITY_TURN_ASIDE_TTL_MIN 覆盖） */
+function resolveAsideTtlMs(): number {
+  const raw = process.env.PROACTIVITY_TURN_ASIDE_TTL_MIN?.trim();
+  const min = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(min) && min > 0) return min * 60_000;
+  return 2 * 60 * 60_000;
+}
+const ASIDE_TTL_MS = resolveAsideTtlMs();
 /** 同 kind 两次顺嘴投递的最小间隔（毫秒） */
 const ASIDE_KIND_GAP_MS = 4 * 60 * 60_000;
 /** 每 actor 挂起上限 */
@@ -56,12 +67,23 @@ export function isTurnAsideMediumEnabled(): boolean {
 }
 
 /** 旁注形态定稿（P2）：块正文给主模型的织入指令与事实 */
-export function formatTurnAsidePrompt(item: TurnAsideItem): string {
+export function formatTurnAsidePrompt(item: TurnAsideItem, now: number = Date.now()): string {
+  const age = timerAgeLabel(item.createdAt, now);
   return [
     `【顺嘴机会】`,
-    `（后台攒下的一件小事。值得提就在回复末尾顺嘴一句，形态=括号旁注，如「（顺嘴一句：…）」，一句话即可；与本轮话题不搭就别提，绝不硬塞）`,
+    `（后台攒下的一件小事，发生于${age}。值得提就在回复末尾顺嘴一句，形态=括号旁注，如「（顺嘴一句：…）」，一句话即可；与本轮话题不搭就别提，绝不硬塞；若已时隔较久，须按当时的语境说、不要用「刚才/刚刚」。）`,
     item.hint || item.title,
   ].join("\n");
+}
+
+/** 相对年龄标签（分钟/小时，供旁注说明"发生于多久前"） */
+function timerAgeLabel(at: number, now: number): string {
+  const min = Math.floor((now - at) / 60_000);
+  if (min < 1) return "刚刚";
+  if (min < 60) return `${min} 分钟前`;
+  const hours = Math.floor(min / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.floor(hours / 24)} 天前`;
 }
 
 let seq = 0;

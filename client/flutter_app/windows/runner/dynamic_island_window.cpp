@@ -300,6 +300,8 @@ bool DynamicIslandWindow::Create() {
   // 全屏抑制检查走独立常开心跳（kSuppressTimerId）：busy 分支会停动画心跳，
   // 恢复检查必须独立存活，否则退出全屏后岛再也不出现。
   SetTimer(window_handle_, kSuppressTimerId, 2000, nullptr);
+  // 顶边唤出探针（kPeekTimerId）：抑制期间鼠标贴屏幕顶边临时唤回岛。
+  SetTimer(window_handle_, kPeekTimerId, 200, nullptr);
   return true;
 }
 
@@ -599,8 +601,11 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
   if (FAILED(SHQueryUserNotificationState(&state))) return;
   const bool recording = IsScreenRecordingActive();
   const bool attention_active = attention_start_s_ >= 0;
+  // 最大化前台窗口与全屏同权：盖住岛就让位（2026-10-09 拍板，
+  // 自家主窗口一视同仁）——否则待机光球悬浮遮挡应用顶部内容。
+  const bool covered = IsForegroundCoveringIsland();
   const bool busy = !recording && !attention_active &&
-                    (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+                    (covered || state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                      state == QUNS_PRESENTATION_MODE ||
                      state == QUNS_BUSY);
   // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
@@ -609,8 +614,8 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
   if (heartbeat) {
     wchar_t hb[160];
     _snwprintf_s(hb, _countof(hb), _TRUNCATE,
-                 L"suppress-tick busy=%d rec=%d suppressed=%d visible=%d",
-                 busy ? 1 : 0, recording ? 1 : 0,
+                 L"suppress-tick busy=%d rec=%d cov=%d suppressed=%d visible=%d",
+                 busy ? 1 : 0, recording ? 1 : 0, covered ? 1 : 0,
                  suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0);
     IslandLifecycleLog(window_handle_, hb);
   }
@@ -620,12 +625,74 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
   suppressed_by_fullscreen_ = busy;
   if (window_handle_ == nullptr) return;
   if (busy) {
+    peek_active_ = false;  // 抑制开始：顶边唤出态一并收回
     ShowWindow(window_handle_, SW_HIDE);
     StopAnimTimer();
   } else if (visible_) {
+    peek_active_ = false;  // 抑制解除：回到常驻显示，探针退位
     PositionAtTopCenter();
     ShowWindow(window_handle_, SW_SHOWNOACTIVATE);
     StartAnimTimer();
+  }
+}
+
+// 前台窗口「最大化且盖住岛」判定：只认 IsZoomed + 覆盖岛窗口中心点，
+// 排除工具窗（含岛自身，虽然 NOACTIVATE 一般当不上前台）。多显示器下
+// 副屏的最大化窗口只要不盖住岛矩形就不触发。判定失败一律返回 false
+// （宁可多显示，不可误隐藏）。
+bool DynamicIslandWindow::IsForegroundCoveringIsland() const {
+  if (window_handle_ == nullptr) return false;
+  const HWND fg = GetForegroundWindow();
+  if (fg == nullptr || fg == window_handle_) return false;
+  if (!IsWindowVisible(fg)) return false;
+  if (!IsZoomed(fg)) return false;
+  const LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
+  if (ex & WS_EX_TOOLWINDOW) return false;
+  RECT fr = {};
+  if (!GetWindowRect(fg, &fr)) return false;
+  RECT ir = {};
+  if (!GetWindowRect(window_handle_, &ir)) return false;
+  const POINT center = {(ir.left + ir.right) / 2, (ir.top + ir.bottom) / 2};
+  return PtInRect(&fr, center) != FALSE;
+}
+
+// 顶边唤出探针（kPeekTimerId 200ms，窗口存活期间常开）：
+// 抑制期间鼠标贴主屏顶边（工作区顶部 ≤3px）→ 临时浮现。不改
+// suppressed_by_fullscreen_ 标志——peek 只是视觉临时放行，收回零成本；
+// attention 不走 peek：它有自己的豁免与唤回链路（StartAttention）。
+// 收回条件：离开顶边且不在岛上（0.5s 宽限，容忍顶边→岛的移动间隙）。
+void DynamicIslandWindow::UpdateTopEdgePeek() {
+  if (window_handle_ == nullptr) return;
+  if (!suppressed_by_fullscreen_) {
+    peek_active_ = false;
+    return;
+  }
+  if (attention_start_s_ >= 0) return;
+  RECT wa = {};
+  if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return;
+  POINT p = {};
+  if (!GetCursorPos(&p)) return;
+  const bool in_zone = p.y >= wa.top && p.y <= wa.top + 3 &&
+                       p.x >= wa.left && p.x < wa.right;
+  const ULONGLONG now = GetTickCount64();
+  if (in_zone || hovering_) peek_last_in_zone_ms_ = now;
+  if (!peek_active_) {
+    if (!in_zone) return;
+    peek_active_ = true;
+    PositionAtTopCenter();
+    ShowWindow(window_handle_, SW_SHOWNOACTIVATE);
+    StartAnimTimer();
+    IslandLifecycleLog(window_handle_, L"peek-on");
+    return;
+  }
+  if (!in_zone && !hovering_ && now - peek_last_in_zone_ms_ > 500) {
+    peek_active_ = false;
+    if (stage_target_ != Stage::kCompact) SetStage(Stage::kCompact);
+    ShowWindow(window_handle_, SW_HIDE);
+    StopAnimTimer();
+    hovering_ = false;
+    UpdateWheelHook();
+    IslandLifecycleLog(window_handle_, L"peek-off");
   }
 }
 
@@ -1296,6 +1363,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         UpdateAnimations();
       } else if (wparam == kSuppressTimerId) {
         UpdateFullscreenSuppression();
+      } else if (wparam == kPeekTimerId) {
+        UpdateTopEdgePeek();
       } else if (wparam == 2) {
         KillTimer(hwnd, 2);
         if (!hovering_ && attention_start_s_ < 0) {

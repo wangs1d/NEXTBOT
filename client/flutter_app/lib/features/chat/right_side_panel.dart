@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/models/schedule_models.dart";
-import "../../core/services/device_api_client.dart";
 import "../../core/services/right_panel_tool_preference.dart";
 import "../../core/services/schedule_preference.dart";
 
@@ -92,7 +91,6 @@ class RightSidePanel extends StatefulWidget {
     this.scheduleFuture,
     this.onAgentLink,
     this.onSchedule,
-    this.onPhone,
     this.onMessages,
     this.onGallery,
     this.onBrowser,
@@ -102,7 +100,6 @@ class RightSidePanel extends StatefulWidget {
   final Future<List<ScheduleEvent>>? scheduleFuture;
   final VoidCallback? onAgentLink;
   final VoidCallback? onSchedule;
-  final VoidCallback? onPhone;
   final VoidCallback? onMessages;
 
   /// 「图库」工具入口（照片浏览/上传/删除）。
@@ -124,13 +121,9 @@ class _RightSidePanelState extends State<RightSidePanel> {
   /// 周期刷新：让 now 游标、「接下来 · X分钟后」倒计时随时间前进。
   Timer? _scheduleTicker;
 
-  // 工具区：布局偏好 / 编辑模式 / 手机在线状态
+  // 工具区：布局偏好 / 编辑模式
   bool _editingTools = false;
   RightPanelToolLayout _toolLayout = const RightPanelToolLayout();
-  int? _phoneOnline;
-  int? _phoneTotal;
-  Timer? _devicePollTimer;
-  final DeviceApiClient _deviceApi = DeviceApiClient();
 
   // 「日程」工具副标签用的已解析日程数据（与上方 FutureBuilder 消费同一 Future）
   List<ScheduleEvent>? _resolvedScheduleEvents;
@@ -143,11 +136,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
     });
     // 主题切换时同步悬浮窗配色（窗口未创建时为 no-op）
     unawaited(_loadToolLayout());
-    _refreshDeviceStatus();
-    _devicePollTimer = Timer.periodic(
-      const Duration(minutes: 1),
-      (_) => _refreshDeviceStatus(),
-    );
     _resolveScheduleFuture();
     _loadSchedulePreference();
   }
@@ -177,36 +165,12 @@ class _RightSidePanelState extends State<RightSidePanel> {
   @override
   void dispose() {
     _scheduleTicker?.cancel();
-    _devicePollTimer?.cancel();
     super.dispose();
   }
 
   Future<void> _loadToolLayout() async {
     final RightPanelToolLayout layout = await RightPanelToolPreference.load();
     if (mounted) setState(() => _toolLayout = layout);
-  }
-
-  Future<void> _refreshDeviceStatus() async {
-    if (ApiConfig.isOssEdition) return; // 开源版无手机设备能力，跳过轮询
-    try {
-      final DeviceApiResult<List<DeviceInfo>> result =
-          await _deviceApi.listDevices();
-      if (!mounted) return;
-      if (result.ok && result.value != null) {
-        final List<DeviceInfo> devices = result.value!;
-        setState(() {
-          _phoneTotal = devices.length;
-          _phoneOnline = devices.where((DeviceInfo d) => d.online).length;
-        });
-      } else {
-        setState(() {
-          _phoneOnline = null;
-          _phoneTotal = null;
-        });
-      }
-    } catch (_) {
-      // 静默失败：手机工具不显示副标签即可
-    }
   }
 
   Future<void> _loadSchedulePreference() async {
@@ -962,20 +926,16 @@ class _RightSidePanelState extends State<RightSidePanel> {
   // ═══════════════════════════════════════════════════════════
   List<_ToolSpec> _allToolSpecs() {
     return <_ToolSpec>[
-      // 版本闸（开源版剔除内测独占能力）：好友/手机设备入口不出现
+      // 版本闸（开源版剔除内测独占能力）：好友入口不出现
       if (!ApiConfig.isOssEdition) ...[
         _ToolSpec(
             id: "friends",
             icon: Icons.people_outline,
             label: "好友",
             onTap: widget.onAgentLink),
-        _ToolSpec(
-            id: "phone",
-            icon: Icons.phone_iphone,
-            label: "手机",
-            onTap: widget.onPhone,
-            subLabelBuilder: () => _phoneSubLabel),
       ],
+      // 「手机」工具已删除（2026-10-11）：手机桥接属内测能力，不对外暴露，
+      // 入口连同其状态轮询一并移除（落地页 features/phone_devices 保留在仓库里）。
       _ToolSpec(
           id: "messages",
           icon: Icons.message_outlined,
@@ -1000,15 +960,6 @@ class _RightSidePanelState extends State<RightSidePanel> {
           label: "浏览器",
           onTap: widget.onBrowser),
     ];
-  }
-
-  /// 「手机」副标签：在线设备数（未配对 / 拉取失败时不显示）
-  String? get _phoneSubLabel {
-    final int? total = _phoneTotal;
-    final int? online = _phoneOnline;
-    if (total == null || online == null) return null;
-    if (total == 0) return "未配对";
-    return "$online/$total 在线";
   }
 
   /// 「日程」副标签：下一条未开始事项的时间；没有则显示空闲

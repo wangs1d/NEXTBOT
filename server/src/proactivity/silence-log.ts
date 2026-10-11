@@ -13,7 +13,7 @@
  */
 import { readJson, writeJson } from "./persist-file.js";
 
-export type SilenceLogScope = "proposal" | "action" | "turn_aside";
+export type SilenceLogScope = "proposal" | "action" | "turn_aside" | "admission";
 
 export type SilenceLogEntry = {
   at: number;
@@ -22,7 +22,13 @@ export type SilenceLogEntry = {
   title: string;
   dedupKey?: string;
   source?: string;
-  /** 评估对象层级：proposal=管道提案，action=hub 行动计划，turn_aside=顺嘴挂起（等下轮织入） */
+  /**
+   * 评估对象层级：
+   *   proposal   = 管道提案
+   *   action     = hub 行动计划
+   *   turn_aside = 顺嘴挂起（等下轮织入）
+   *   admission  = 时效准入闸拦截（话题年龄/相关性/静默/复活配额）
+   */
   scope: SilenceLogScope;
   netUtility: number;
   riskScore: number;

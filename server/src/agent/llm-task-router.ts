@@ -28,7 +28,7 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { isHighPrecisionChatText, type RouteDecision } from "./task-router.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "./intent-router.js";
-import { composeRealtimeSearchQuery } from "./realtime-search-query.js";
+import { composeMediaSearchQuery, composeRealtimeSearchQuery, composeTravelPlanRequest } from "./realtime-search-query.js";
 import { classifyIntentByLlm } from "./route-llm-call.js";
 import {
   isIntentLabel,
@@ -209,6 +209,7 @@ export async function routeTurnByLlm(
 
   const parsed = call.intent;
   const auxAnalysis = call.auxAnalysis;
+  const understanding = call.understanding;
   const result = call.raw;
   if (!isIntentLabel(parsed.intent)) {
     const decision = conservativeFallback(trimmed, "llm_route_fallback:invalid_intent");
@@ -255,6 +256,38 @@ export async function routeTurnByLlm(
       `[LlmTaskRouter] realtime search_query (${querySource}): "${searchQuery}"`,
     );
   }
+  // media 轮查询词的结构性保证（2026-10-10，与 realtime 同构的根治半边）：
+  // 此前 media_retrieval 只贴标签不产查询词，「要不要搜图/怎么拼查询词」全交给
+  // flash 档模型现场决定 → 同一句话时而出图时而零工具直答（真实事故：马尔代夫
+  // 搜图轮 03:05 出图 / 03:07 凭想象列文字清单）。现在代码剥命令词构造查询词，
+  // agent-core 拿它确定性预执行媒体搜索——「判 media → 查询词必非空 → 必真搜」
+  // 全程代码保证，与 realtime 的「必先搜」完全对称。
+  if (parsed.intent === "media_retrieval") {
+    const base = searchQuery ?? trimmed;
+    searchQuery = composeMediaSearchQuery(base, [
+      ...recentUserTurns,
+      ...entityContextLines,
+    ]);
+    reasons.push("media_query:composed_by_code");
+    console.info(`[LlmTaskRouter] media search_query: "${searchQuery}"`);
+  }
+  // travel 轮调用参数的结构性保证（2026-10-10 P1，与 media 同构）：判出
+  // travel_planning 后，「用什么参数调 travel.plan-itinerary」由代码构造
+  // （目的地/天数确定性抽取，input 恒为用户原话），agent-core 据此在工具循环
+  // 开场确定性预执行——「判规划 → 必先出草案」不经过模型自觉。目的地抽不出
+  // （纯指代轮）时 travelPlanRequest.destination 缺省 → agent-core 不预执行，
+  // 回退模型自决 + 域预载可见（出口闸仍兜底）。
+  let travelPlanRequest: RouteDecision["travelPlanRequest"];
+  if (parsed.intent === "travel_planning") {
+    travelPlanRequest = composeTravelPlanRequest(searchQuery || trimmed, [
+      ...recentUserTurns,
+      ...entityContextLines,
+    ]);
+    reasons.push("travel_plan_input:composed_by_code");
+    console.info(
+      `[LlmTaskRouter] travel plan request: dest="${travelPlanRequest.destination ?? "(none)"}" days=${travelPlanRequest.days ?? "?"}`,
+    );
+  }
 
   const decision: RouteDecision = {
     reasons,
@@ -266,6 +299,8 @@ export async function routeTurnByLlm(
     capabilities,
     budget,
     tier,
+    ...(travelPlanRequest ? { travelPlanRequest } : {}),
+    ...(understanding ? { understanding } : {}),
     ...(auxAnalysis ? { auxAnalysis } : {}),
   };
   cacheSet(key, decision);

@@ -66,6 +66,18 @@ export class MessageBatchProcessor {
   /** 消息队列：处理中到达的新消息排队，依次回复 */
   private messageQueue = new Map<string, BatchedMessage[]>();
 
+  /**
+   * turn 级幂等（2026-10-09 发言模型 I5）：已受理的客户端消息 id 及受理时刻。
+   *
+   * 为什么必须在入口拦：本处理器对"处理中到达的新消息"是**排队各跑一轮**的
+   * （见 tryStartOrRestart），一条消息被投递两次就会实打实跑出两轮独立回复——
+   * 用户看到的就是"同一句话得到两条回复"，与发言模型 I1（一 turn 一发言）冲突。
+   * 重复投递的真实来源是 ack 丢失重传 / 断线重连重投，服务端此前无任何防护。
+   */
+  private acceptedTurnIds = new Map<string, number>();
+  /** 幂等窗口：同一条消息在该窗口内重复投递视为重传 */
+  private static readonly TURN_DEDUP_TTL_MS = 10 * 60 * 1000;
+
   constructor(config?: Partial<MessageBatchProcessorConfig>) {
     this.config = { ...DEFAULT_CONFIG, ...config };
   }
@@ -79,6 +91,15 @@ export class MessageBatchProcessor {
     onReady: (merged: BatchedMessage, turn: BatchTurnContext) => Promise<void>,
   ): void {
     this.onReadyHandlers.set(sessionId, onReady);
+
+    // turn 级幂等：同一条用户消息（客户端生成的 messageId）只受理一次。
+    if (!this.acceptTurnId(sessionId, message.originalMessageId, Date.now())) {
+      // 重复投递：原轮的回复仍在/已完成，静默丢弃，不再跑第二轮。
+      console.log(
+        `[message-batch-processor] session=${sessionId} 重复投递被拒 messageId=${message.originalMessageId}`,
+      );
+      return;
+    }
 
     if (!this.config.enabled) {
       const turn = this.bumpGeneration(sessionId);
@@ -119,6 +140,27 @@ export class MessageBatchProcessor {
   /** 当前轮次是否已被更新的用户消息取代（应停止向客户端推送） */
   isStaleTurn(sessionId: string, generation: number): boolean {
     return (this.processingGeneration.get(sessionId) ?? 0) !== generation;
+  }
+
+  /**
+   * 受理一条 turn 的客户端消息 id：首次受理返回 true，幂等窗口内的重复投递返回 false。
+   * 未携带 id（老客户端）不做幂等限制，保持行为不变。
+   */
+  private acceptTurnId(sessionId: string, messageId: string | undefined, now: number): boolean {
+    const id = (messageId ?? "").trim();
+    if (!id) return true;
+    const key = `${sessionId}::${id}`;
+    const seenAt = this.acceptedTurnIds.get(key);
+    if (seenAt !== undefined && now - seenAt < MessageBatchProcessor.TURN_DEDUP_TTL_MS) {
+      return false;
+    }
+    this.acceptedTurnIds.set(key, now);
+    if (this.acceptedTurnIds.size > 500) {
+      for (const [k, t] of this.acceptedTurnIds) {
+        if (now - t >= MessageBatchProcessor.TURN_DEDUP_TTL_MS) this.acceptedTurnIds.delete(k);
+      }
+    }
+    return true;
   }
 
   /** @deprecated 仅服务端兜底；正常由客户端 processing_ui active=false 触发 */

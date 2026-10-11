@@ -85,44 +85,6 @@ class MobileChatController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 删除全部聊天记录：调服务端清空接口(聊天线程+Agent 记忆)，并通知服务端、
-  /// 清空本地内存。返回是否成功(接口可达且返回 200)。
-  Future<bool> clearAllChat() async {
-    bool ok = false;
-    try {
-      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/clear-all");
-      final http.Response res = await http
-          .post(
-            uri,
-            headers: const <String, String>{"Content-Type": "application/json"},
-            body: jsonEncode(<String, dynamic>{
-              "sessionId": ApiConfig.effectiveActorId,
-            }),
-          )
-          .timeout(const Duration(seconds: 15));
-      ok = res.statusCode == 200;
-    } catch (_) {
-      ok = false;
-    }
-    // 本地落盘的历史一并清掉（与服务端「聊天线程+记忆」清空语义对齐）
-    try {
-      await _store.deleteMessagesForSession(ApiConfig.effectiveActorId);
-    } catch (_) {
-      // 本地清理失败不阻塞服务端清理结果
-    }
-    // 通知服务端同步清除 ChatThreadStore 内存上下文
-    _service.sendEvent("chat.clear_history", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-    });
-    messages.clear();
-    _streamingMessageId = null;
-    currentToolName = null;
-    isProcessing = false;
-    errorMessage = ok ? null : "服务端清理失败,已清空本地";
-    notifyListeners();
-    return ok;
-  }
-
   // ===== 聊天历史持久化（2026-10-08）：本地落盘 + 服务端线程漫游回填 =====
 
   /// 启动加载：本地 store 恢复历史 → 再拉服务端线程回填跨端消息。
@@ -724,6 +686,11 @@ class MobileChatController extends ChangeNotifier {
     // 卡片与图文交错，不再把 `[AGENT_RESULT_CARD_START]` 等标记当纯文本展示。
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
+    // 结构化摘要卡（CONTENT_SUMMARY 通道迁移）：随 done 下发的折叠卡载荷。
+    final Map<String, dynamic>? summaryCard =
+        payload["summaryCard"] is Map<String, dynamic>
+            ? payload["summaryCard"] as Map<String, dynamic>
+            : null;
     final List<Map<String, dynamic>>? renderBlocks =
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
@@ -732,6 +699,7 @@ class MobileChatController extends ChangeNotifier {
       // 没有流式占位:直接落一条最终消息（整轮只剩内部帧 → 不落空白泡）
       if (finalText.trim().isEmpty &&
           mediaCards == null &&
+          summaryCard == null &&
           renderBlocks == null &&
           replyBlocks == null) {
         _streamingMessageId = null;
@@ -747,6 +715,7 @@ class MobileChatController extends ChangeNotifier {
         text: finalText,
         timestamp: DateTime.now(),
         mediaCards: mediaCards,
+        summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
       ));
@@ -758,6 +727,7 @@ class MobileChatController extends ChangeNotifier {
       final bool nothingToShow = finalText.trim().isEmpty &&
           prev.text.trim().isEmpty &&
           mediaCards == null &&
+          summaryCard == null &&
           renderBlocks == null &&
           replyBlocks == null;
       if (nothingToShow) {
@@ -776,6 +746,7 @@ class MobileChatController extends ChangeNotifier {
         timestamp: prev.timestamp,
         streaming: false,
         mediaCards: mediaCards ?? prev.mediaCards,
+        summaryCard: summaryCard ?? prev.summaryCard,
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
       );
@@ -801,6 +772,10 @@ class MobileChatController extends ChangeNotifier {
         : "assistant-final";
     final List<Map<String, dynamic>>? mediaCards =
         _parseStructuredList(payload, "mediaCards");
+    final Map<String, dynamic>? summaryCard =
+        payload["summaryCard"] is Map<String, dynamic>
+            ? payload["summaryCard"] as Map<String, dynamic>
+            : null;
     final List<Map<String, dynamic>>? renderBlocks =
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
@@ -816,6 +791,7 @@ class MobileChatController extends ChangeNotifier {
       });
       if (finalText.trim().isEmpty &&
           mediaCards == null &&
+          summaryCard == null &&
           renderBlocks == null &&
           replyBlocks == null) {
         // 整轮只剩系统内部帧 → 塌缩后也不留空白泡
@@ -832,6 +808,7 @@ class MobileChatController extends ChangeNotifier {
         text: finalText,
         timestamp: DateTime.now(),
         mediaCards: mediaCards,
+        summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
       ));
@@ -880,6 +857,7 @@ class MobileChatController extends ChangeNotifier {
           text: text,
           timestamp: DateTime.now(),
           mediaCards: isLast ? mediaCards : null,
+          summaryCard: isLast ? summaryCard : null,
           renderBlocks: isLast ? renderBlocksForLast : null,
           replyBlocks: isLast ? replyBlocksForLast : null,
         ));
@@ -898,6 +876,7 @@ class MobileChatController extends ChangeNotifier {
           text: text.isNotEmpty ? text : prev.text,
           timestamp: prev.timestamp,
           mediaCards: isLast ? (mediaCards ?? prev.mediaCards) : prev.mediaCards,
+          summaryCard: isLast ? (summaryCard ?? prev.summaryCard) : prev.summaryCard,
           renderBlocks:
               isLast ? (renderBlocksForLast ?? prev.renderBlocks) : prev.renderBlocks,
           replyBlocks:

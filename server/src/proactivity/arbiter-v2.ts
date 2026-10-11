@@ -44,8 +44,28 @@ export type ArbiterV2Deps = {
   primaryActorId?: () => string | null;
   /** alert 档中等成本阈值（CostCalibrator 动态提供；缺省 4.5 恒定） */
   alertMidThreshold?: () => number;
+  /**
+   * 挂起项过期回调（2026-10-10）：不再静默丢弃，把"等了但一直没等到时机"的
+   * 事件交回调用方做降级投递（落站内信/直接告知）——"最坏也要说出来"优于
+   * "宁可不说"。未注入时维持原静默丢弃语义（向后兼容）。
+   * 参数 entry 为过期条目；调用方自行决定降级方式（通常走管道离线兜底）。
+   */
+  onParkExpire?: (entry: {
+    actorId: string;
+    urgency: AttentionUrgency;
+    label: string;
+    deliver: () => void;
+    parkedAt: number;
+  }) => void;
   /** 测试注入时钟 */
   nowFn?: () => number;
+  /**
+   * 稳定态放行成本上限（2026-10-10）：缺省 4.5。用户长期处于"稳定中高成本"
+   * 状态（写代码/用终端，成本常 >4.5）时，pause 跃迁检测与稳态兜底都不触达，
+   * 挂起项会饿死到 TTL。放宽阈值可让"一直停着"的用户也收到积压的轻消息。
+   * env PROACTIVITY_PARK_COST_CEIL 可配；注意放宽会增加打扰，建议 ≤6。
+   */
+  parkCostCeil?: () => number;
 };
 
 /** 打断成本各项权重（先验拍定；上线两周后可用 outcome 数据回归校准） */
@@ -281,9 +301,25 @@ export class ArbiterV2 {
    */
   private tick(): void {
     const now = this.deps.nowFn?.() ?? Date.now();
-    // 过期清理（全队列扫描；过期即作废，沉默由调用方台账承担）
+    // 过期处理（2026-10-10）：不再静默丢弃——把"等了但始终没等到合适时机"的
+    // 挂起项交回调用方做降级投递（onParkExpire 未注入时保持原丢弃语义）。
+    // 这是对症 26 条 wait_for_pause 静默消失的关键修复："最坏也要说出来"。
     for (let i = this.parked.length - 1; i >= 0; i--) {
-      if (this.parked[i].expireAt <= now) this.parked.splice(i, 1);
+      if (this.parked[i].expireAt <= now) {
+        const expired = this.parked[i];
+        this.parked.splice(i, 1);
+        try {
+          this.deps.onParkExpire?.({
+            actorId: expired.actorId,
+            urgency: expired.urgency,
+            label: expired.label,
+            deliver: expired.deliver,
+            parkedAt: expired.parkedAt,
+          });
+        } catch (err) {
+          console.log(`[ArbiterV2] 挂起过期回调失败（忽略）label=${expired.label}: ${err}`);
+        }
+      }
     }
     // 多 actor pause 检测：按挂起队列中出现的 distinct actor 逐个快照判定
     // （家庭/多设备场景下不同用户的上下文互不干扰）；单用户时等价原行为。
@@ -315,6 +351,10 @@ export class ArbiterV2 {
     const cost = interruptCost(s);
     const prevCost = interruptCost(prev);
     const oldestParkedAt = oldest?.parkedAt ?? now;
+    // 稳定态放行成本上限（2026-10-10 可配，缺省 4.5）。原硬编码 4.5 导致
+    // "稳定 coding（成本恒 >4.5）"永不触达兜底分支 → 挂起项饿死到 TTL。
+    // 放宽后仍保留 !inConversation 保护，且下方放行循环每轮最多 2 条防连发。
+    const costCeil = this.deps.parkCostCeil?.() ?? 4.5;
 
     const paused =
       (prev.inConversation && !s.inConversation) ||
@@ -323,17 +363,17 @@ export class ArbiterV2 {
       // 用户离开后回归（idle/offline → active）：回来本身就是开口时机
       ((prev.presence === "idle" || prev.presence === "offline") && s.presence === "active") ||
       // 成本从高跌破 alert 中档：用户退出了高打扰活动（会议散场/视频关掉/专注降档）
-      (prevCost > 4.5 && cost <= 4.5) ||
-      // 稳态低打扰放行：挂起超过 45min 且当前始终是低打扰状态（写代码/听歌）——
+      (prevCost > costCeil && cost <= costCeil) ||
+      // 稳态低打扰放行：挂起超过 45min 且当前不是高打扰状态（写代码/听歌）——
       // 成本模型的转换检测对"长时间平稳的低打扰状态"存在盲区（无跃迁即无 pause），
       // 挂起项会饿到 8h 保质期作废；此时用户显然"一直停着"，开口是安全的
-      (now - oldestParkedAt >= 45 * 60_000 && cost <= 4.5 && !s.inConversation);
+      (now - oldestParkedAt >= 45 * 60_000 && cost <= costCeil && !s.inConversation);
 
     this.actorBaselines.set(actorId, s);
     // 兼容旧诊断字段（lastCostValue）
     this.lastCost = cost;
 
-    if (paused && cost <= 4.5) {
+    if (paused && cost <= costCeil) {
       // 每个 pause 至多放行 2 条（紧迫度优先，同紧迫度 FIFO）：一次停顿把
       // 积压的两件事说完是自然节奏；更多的留给下一次 pause（防连发）
       const rank = { interrupt: 3, alert: 2, normal: 1, log: 0 } as const;

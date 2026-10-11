@@ -68,8 +68,15 @@ export type ProactiveOutcome =
   | "ignored"
   | "replied";
 
-/** 触达通道：两端在线 WS fan-out 直推；两端离线时必达/critical 升级手机系统推送 */
-export type DeliveryChannel = "in_app" | "mobile_push";
+/**
+ * 触达通道：
+ *  - in_app：两端在线 WS fan-out 直推
+ *  - mobile_push：两端离线时必达/critical 升级手机系统推送
+ *  - offline_inbox：两端离线且无推送通道时的社交层兜底（落站内信，用户下次打开
+ *    即可看到；2026-10-10 补——此前 social 层离线既不落信箱也不推手机，只能挂到
+ *    TTL 静默作废，是「主动性几乎不说话」的主因之一）
+ */
+export type DeliveryChannel = "in_app" | "mobile_push" | "offline_inbox";
 
 /** 仲裁结果（决策链可解释：verdict + 每步原因） */
 export type ArbitrationDecision = {

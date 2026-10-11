@@ -28,18 +28,34 @@ test("解释性提问不触发电话强制路由", () => {
   assert.equal(choice, "auto");
 });
 
-test("直接时间问题强制 clock.get_current_time（注册名带点号）", () => {
+test("问时间不再强制 clock.get_current_time（2026-10-11 口径：以【当前时间】块为准）", () => {
   const choice = resolveForcedToolChoice(
     "现在几点了",
-    [fnTool("clock.get_current_time")],
+    [fnTool("clock.get_current_time"), fnTool("clock.get_user_location")],
   );
-  assert.deepEqual(choice, { type: "function", function: { name: "clock.get_current_time" } });
+  assert.equal(choice, "auto");
 });
 
-test("Fast 模式跳过时间强制（system prompt 已注入 currentTime）", () => {
+test("问时间不再强制（含日期/星期式提问）", () => {
   const choice = resolveForcedToolChoice(
-    "现在几点了",
+    "今天几号，星期几",
     [fnTool("clock.get_current_time")],
+  );
+  assert.equal(choice, "auto");
+});
+
+test("问当前位置强制 clock.get_user_location（注册名带点号）", () => {
+  const choice = resolveForcedToolChoice(
+    "我现在在哪",
+    [fnTool("clock.get_current_time"), fnTool("clock.get_user_location")],
+  );
+  assert.deepEqual(choice, { type: "function", function: { name: "clock.get_user_location" } });
+});
+
+test("Fast 模式跳过位置强制（system prompt 已注入定位上下文）", () => {
+  const choice = resolveForcedToolChoice(
+    "我现在在哪",
+    [fnTool("clock.get_user_location")],
     true,
   );
   assert.equal(choice, "auto");

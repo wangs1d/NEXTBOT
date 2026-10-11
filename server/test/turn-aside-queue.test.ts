@@ -54,11 +54,11 @@ test("织入间隔：同 kind 4 小时内新挂起被拒", () => {
   assert.equal(q.tryEnqueue({ actorId: "u1", kind: "care", title: "c" }), true, "过间隔放行");
 });
 
-test("TTL：挂起超 6 小时无人接话即作废", () => {
+test("TTL：挂起超 2 小时无人接话即作废", () => {
   let now = T0;
   const q = new TurnAsideQueue({ nowFn: () => now });
   q.tryEnqueue({ actorId: "u1", kind: "care", title: "过期件" });
-  now = T0 + 6 * HOUR + 60_000;
+  now = T0 + 2 * HOUR + 60_000;
   assert.equal(q.takeForTurn("u1"), null);
   assert.equal(q.pending("u1").length, 0, "过期条目就地作废");
 });
@@ -114,14 +114,14 @@ test("medium 扩面开关：默认开，PROACTIVITY_TURN_ASIDE_MEDIUM=0 收窄",
   }
 });
 
-test("medium 过期升级：6h 没搭上车走 onExpire 回调，low 仍静默作废", () => {
+test("medium 过期升级：2h 没搭上车走 onExpire 回调，low 仍静默作废", () => {
   let now = T0;
   const q = new TurnAsideQueue({ nowFn: () => now });
   const expired: string[] = [];
   q.setOnExpire((item) => expired.push(`${item.importance}:${item.kind}`));
   q.tryEnqueue({ actorId: "u1", kind: "interest_alert", title: "中优", importance: "medium" });
   q.tryEnqueue({ actorId: "u1", kind: "care", title: "低优", importance: "low" });
-  now = T0 + 6 * HOUR + 60_000;
+  now = T0 + 2 * HOUR + 60_000;
   // take 触发的过期：medium 升级、low 丢弃
   const got = q.takeForTurn("u1");
   assert.ok(got === null || got.kind !== "interest_alert");

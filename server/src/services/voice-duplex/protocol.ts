@@ -13,7 +13,9 @@
  *     │  asr.partial* ◀────────────────│
  *   audio.end 或静音端点检测 ─────────▶ asr.final → thinking
  *     │  assistant.delta* ◀────────────│ （LLM 流式）
- *     │  tts.start / tts.chunk* ◀──────│ （分句 TTS）
+ *     │  tts.start / tts.chunk* ◀──────│ （流式 TTS：realtime 引擎（本地/云端）
+ *     │                                 │   逐段下发 pcm，收到首段即开播；
+ *     │                                 │   pipeline 引擎为整轮单块 wav）
  *   （speaking 期间 audio.chunk/interrupt）▶ 打断：丢弃后续合成 → listening
  *     │  tts.end / turn.completed ◀────│
  *   session.stop ─────────────────────▶ session.ended
@@ -59,8 +61,23 @@ export type DuplexServerMessage =
       type: "session.ready";
       config: DuplexSessionConfig;
       streamingAsr: boolean;
-      /** 会话引擎：pipeline=ASR+LLM+TTS 三段式；minimax-realtime=端到端实时语音 */
-      engine?: "pipeline" | "minimax-realtime";
+      /**
+       * 引擎实现名（如 "minimax-realtime"、未来本地/其它云端引擎名）。
+       * 仅作展示与诊断用——客户端若要分支，请用 engineKind，勿匹配具体厂商名。
+       */
+      engine?: string;
+      /**
+       * 引擎类别：pipeline=本地三段式（ASR+LLM+TTS）；realtime=端到端实时引擎
+       * （MiniMax 云端 / 本地实时模型 / 其它云端均属此类）。客户端据此判定本连接
+       * 是否走实时语音主路径，从而与具体厂商解耦——换引擎无需改客户端。
+       */
+      engineKind?: "pipeline" | "realtime";
+      /**
+       * 是否以流式 PCM 分块下发语音：true 时 tts.chunk 为 format="pcm" 的裸 PCM
+       * 片段（采样率见 sampleRate），客户端应边收边播（原生 PCM 流式）。false/缺省
+       * 时维持旧行为（整轮单块 wav）。
+       */
+      streamingTts?: boolean;
     }
   | { type: "state"; state: DuplexSessionState }
   | { type: "asr.partial"; text: string }
@@ -68,7 +85,14 @@ export type DuplexServerMessage =
   | { type: "assistant.delta"; text: string }
   | { type: "assistant.completed"; text: string }
   | { type: "tts.start" }
-  | { type: "tts.chunk"; seq: number; audio: string; format: "mp3" | "wav" }
+  | {
+      type: "tts.chunk";
+      seq: number;
+      audio: string;
+      format: "mp3" | "wav" | "pcm";
+      /** format="pcm" 时的裸流采样率（Hz）；wav/mp3 自带采样率，缺省 */
+      sampleRate?: number;
+    }
   | { type: "tts.end" }
   | { type: "turn.completed"; userText: string; assistantText: string }
   | { type: "error"; message: string; recoverable: boolean }

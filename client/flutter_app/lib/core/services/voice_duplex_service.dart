@@ -8,6 +8,7 @@ import "package:record/record.dart";
 import "package:web_socket_channel/web_socket_channel.dart";
 
 import "../config/api_config.dart";
+import "pcm_stream_player.dart";
 import "tts_player.dart";
 
 /// 全双工语音 WS 客户端（/ws/voice-duplex）。
@@ -15,15 +16,17 @@ import "tts_player.dart";
 /// 两种上行：
 ///   - `text.turn`：纯语音模式用——本地识别文本进，整轮语音回流；
 ///   - `audio.chunk`：电话通话用——麦克风 16kHz PCM16 流式上行，
-///     服务端能量 VAD 断句后交给 MiniMax realtime 端到端应答。
-/// 下行统一是 `tts.chunk`（24kHz wav base64），经 [TtsPlayer] 直接播。
+///     服务端能量 VAD 断句后端到端应答。
+/// 下行统一是 `tts.chunk`：realtime 引擎为 `format="pcm"` 裸流（边收边播，
+/// 见 [PcmStreamPlayer]），pipeline 引擎为整块 wav/mp3（经 [TtsPlayer]）。
 ///
 /// 半双工门控（回声防护）：任何 TTS 播报期间（含通话接通问候语）麦克风
 /// 上行自动暂停，播完自动恢复；服务端在 thinking/speaking 态还会二次丢弃
 /// 上行音频，双层防扬声器回流污染对话上下文。
 ///
-/// 服务端无 minimax 时 session.ready 会回 pipeline 引擎，本客户端
-/// 不认 pipeline（start 返回 false，调用方回落）。
+/// 引擎是否可用由服务端 `session.ready` 的 `engineKind="realtime"` 判定——
+/// 本客户端只认「是不是端到端实时引擎」，不认具体厂商（MiniMax / 本地 /
+/// 其它云端都一样）。服务端回 pipeline 引擎时 start 返回 false，调用方回落。
 class VoiceDuplexService {
   VoiceDuplexService._();
 
@@ -35,18 +38,43 @@ class VoiceDuplexService {
   Completer<void>? _playbackCompleter;
   bool _turnInFlight = false;
 
+  /// 流式 PCM 段：active=正在收/播；gen=代次（打断/新段递增，旧回调作废）；
+  /// pending=原生 start 就绪前先到的块（start 是异步的，首块常在就绪前到达）。
+  bool _pcmActive = false;
+  int _pcmGen = 0;
+  final List<Uint8List> _pcmPending = <Uint8List>[];
+
+  /// 起播就绪前就收到了 tts.end（本轮音频很短时的竞态），就绪后立即收尾
+  bool _pcmEndPending = false;
+
+  /// 原生播放器不可用时的降级态（C++ 侧未编译进当前 exe / 非 Windows）：
+  /// 攒齐本轮 PCM，tts.end 时整段包 WAV 交给 TtsPlayer 播。
+  /// 绝不能静默丢块——服务端已流式化，丢了就是「有对话、没声音」。
+  bool _pcmFallback = false;
+  int _pcmFallbackSr = 24000;
+  final List<Uint8List> _pcmFallbackBuf = <Uint8List>[];
+
   final AudioRecorder _recorder = AudioRecorder();
   StreamSubscription<Uint8List>? _micSub;
   bool _micGated = false;
   VoidCallback? _gatingCompletionListener;
+
   /// 门控起始时刻（毫秒）；与 [_micGateStuckMs] 配合做失准自愈
   int? _gatedSinceMs;
 
   /// 门控卡死阈值：播报超过这么久仍未恢复即判定为状态失准，强制放行上行。
   static const int _micGateStuckMs = 15000;
 
+  /// 播放中的门控上限：确实有音频在播时放宽（流式长回复可能远超 15s），
+  /// 超过这个上限仍未播完才判定为异常并强放行。
+  static const int _micGateMaxMs = 60000;
+
   String? engine;
   String? lastState;
+
+  /// 服务端本次会话是否走端到端实时引擎（engineKind=="realtime"）。
+  /// 本地/云端任一实时引擎实现都置真——不依赖具体厂商名。
+  bool _realtimeEngine = false;
 
   /// 服务端 VAD 能量阈值下限（与 endpoint-detector 的 DEFAULT_SPEECH_THRESHOLD
   /// 同口径，都是 16bit RMS 原值）。服务端实际生效值是
@@ -73,7 +101,7 @@ class VoiceDuplexService {
   bool get isReady =>
       _channel != null &&
       (_readyCompleter?.isCompleted ?? false) &&
-      engine == "minimax-realtime";
+      _realtimeEngine;
 
   bool get micActive => _micSub != null;
 
@@ -92,8 +120,8 @@ class VoiceDuplexService {
   /// 建立会话并等待握手。
   ///
   /// [sessionId] 传通话 callId 时，服务端把该通电话的场景上下文并进
-  /// realtime 人设（来电汇报内容/来电留言）。返回是否为可用的
-  /// minimax-realtime 引擎。
+  /// realtime 人设（来电汇报内容/来电留言）。返回本次会话是否走端到端实时
+  /// 引擎（engineKind=="realtime"，与具体厂商无关）。
   Future<bool> start({
     String? sessionId,
     String? actorId,
@@ -239,7 +267,8 @@ class VoiceDuplexService {
   }
 
   /// 等本轮回复音频播放完（tts.chunk 已播完；无音频轮立即返回）。
-  Future<void> waitPlayback({Duration timeout = const Duration(seconds: 90)}) async {
+  Future<void> waitPlayback(
+      {Duration timeout = const Duration(seconds: 90)}) async {
     final Completer<void>? c = _playbackCompleter;
     if (c == null) return;
     await c.future.timeout(timeout, onTimeout: () {});
@@ -249,12 +278,14 @@ class VoiceDuplexService {
   Future<void> stop() async {
     final WebSocketChannel? channel = _channel;
     _channel = null;
+    _abortPcmStream();
     await stopMic();
     await _sub?.cancel();
     _sub = null;
     _readyCompleter = null;
     _playbackCompleter = null;
     _turnInFlight = false;
+    _realtimeEngine = false;
     if (channel != null) {
       try {
         channel.sink.add(jsonEncode(<String, dynamic>{"type": "session.stop"}));
@@ -266,6 +297,185 @@ class VoiceDuplexService {
   }
 
   // ── 内部 ──
+
+  /// 流式 PCM 块入口：首块触发原生起播（异步就绪），就绪前到达的块先暂存。
+  void _handlePcmChunk(String base64Audio, int sampleRate) {
+    final Uint8List bytes;
+    try {
+      bytes = base64Decode(base64Audio);
+    } catch (_) {
+      return;
+    }
+    if (_pcmActive) {
+      PcmStreamPlayer.instance.write(bytes);
+      return;
+    }
+    if (_pcmFallback) {
+      _pcmFallbackBuf.add(bytes);
+      return;
+    }
+    _pcmPending.add(bytes);
+    if (_pcmPending.length == 1) {
+      unawaited(_startPcmStream(sampleRate));
+    }
+  }
+
+  Future<void> _startPcmStream(int sampleRate) async {
+    final int gen = ++_pcmGen;
+    final bool ok =
+        await PcmStreamPlayer.instance.start(sampleRate: sampleRate);
+    if (gen != _pcmGen) {
+      _pcmPending.clear(); // 期间被打断或已开新段，本次起播作废
+      return;
+    }
+    if (!ok) {
+      // 降级：原生播放器不可用（通道未注册 = 原生侧还没编译进去 / 非 Windows）。
+      // 转入整段播放路径，保住「能听到」这条底线，只牺牲流式首字延迟。
+      debugPrint(
+        "[VoiceDuplex] 原生 PCM 播放器不可用，降级为整段 WAV 播放"
+        "（非 Windows，或 pai/pcm_player 通道未注册）",
+      );
+      _pcmFallback = true;
+      _pcmFallbackSr = sampleRate;
+      _pcmFallbackBuf.addAll(_pcmPending);
+      _pcmPending.clear();
+      _setMicGated(true);
+      _playbackCompleter = Completer<void>();
+      if (_pcmEndPending) {
+        _pcmEndPending = false;
+        unawaited(_playPcmFallback());
+      }
+      return;
+    }
+    _pcmActive = true;
+    _setMicGated(true);
+    _playbackCompleter = Completer<void>();
+    for (final Uint8List b in _pcmPending) {
+      PcmStreamPlayer.instance.write(b);
+    }
+    _pcmPending.clear();
+    if (_pcmEndPending) {
+      // 起播就绪前 tts.end 已到：立即收尾，别让播放器悬着不结束
+      _pcmEndPending = false;
+      unawaited(_finishPcmStream());
+    }
+  }
+
+  /// 输入结束：等原生播完已入队音频 → 解除门控并结算本轮播放。
+  Future<void> _finishPcmStream() async {
+    if (_pcmFallback) {
+      await _playPcmFallback();
+      return;
+    }
+    if (!_pcmActive) {
+      // 起播还在途（首块仍在暂存）：记下结束请求，待就绪后立即收尾
+      if (_pcmPending.isNotEmpty) _pcmEndPending = true;
+      return;
+    }
+    final int gen = _pcmGen;
+    _pcmActive = false;
+    await PcmStreamPlayer.instance.finish();
+    if (gen != _pcmGen) return; // 已被打断/新段取代
+    _setMicGated(false);
+    if (!(_playbackCompleter?.isCompleted ?? true)) {
+      _playbackCompleter?.complete();
+    }
+  }
+
+  /// 降级播放：把攒下的裸 PCM 整段包成 WAV 交给 TtsPlayer（非流式）。
+  Future<void> _playPcmFallback() async {
+    final int gen = _pcmGen;
+    final Uint8List pcm = _concatBytes(_pcmFallbackBuf);
+    _pcmFallbackBuf.clear();
+    _pcmFallback = false;
+    if (pcm.isEmpty) {
+      _setMicGated(false);
+      if (!(_playbackCompleter?.isCompleted ?? true)) {
+        _playbackCompleter?.complete();
+      }
+      return;
+    }
+    void onDone() {
+      if (gen != _pcmGen) return; // 已被打断/新段取代
+      TtsPlayer.instance.removeOnCompleted(onDone);
+      _setMicGated(false);
+      if (!(_playbackCompleter?.isCompleted ?? true)) {
+        _playbackCompleter?.complete();
+      }
+    }
+
+    TtsPlayer.instance.addOnCompleted(onDone);
+    final bool played = await TtsPlayer.instance
+        .playFromBytes(_pcmToWav(pcm, _pcmFallbackSr), format: "wav");
+    if (!played) {
+      // 播放失败也要解除门控，否则麦克风被永久关死
+      onDone();
+    }
+  }
+
+  /// 立即中断当前流式播放（打断/挂断）。
+  void _abortPcmStream() {
+    if (!_pcmActive && _pcmPending.isEmpty && _pcmFallbackBuf.isEmpty) return;
+    _pcmGen++; // 让在途 start/finish 回调作废
+    _pcmActive = false;
+    _pcmEndPending = false;
+    _pcmFallback = false;
+    _pcmPending.clear();
+    _pcmFallbackBuf.clear();
+    unawaited(PcmStreamPlayer.instance.stop());
+    _setMicGated(false);
+    if (!(_playbackCompleter?.isCompleted ?? true)) {
+      _playbackCompleter?.complete();
+    }
+  }
+
+  /// 拼接字节块。
+  Uint8List _concatBytes(List<Uint8List> chunks) {
+    if (chunks.isEmpty) return Uint8List(0);
+    if (chunks.length == 1) return chunks.first;
+    int total = 0;
+    for (final Uint8List c in chunks) {
+      total += c.length;
+    }
+    final Uint8List out = Uint8List(total);
+    int offset = 0;
+    for (final Uint8List c in chunks) {
+      out.setRange(offset, offset + c.length, c);
+      offset += c.length;
+    }
+    return out;
+  }
+
+  /// 裸 PCM16 单声道包最小 WAV 容器（与服务端 pcmToWav 同构）。
+  Uint8List _pcmToWav(Uint8List pcm, int sampleRate, {int channels = 1}) {
+    const int bitsPerSample = 16;
+    final int byteRate = sampleRate * channels * (bitsPerSample >> 3);
+    final int blockAlign = channels * (bitsPerSample >> 3);
+    final ByteData h = ByteData(44);
+    void str(int offset, String s) {
+      for (int i = 0; i < s.length; i++) {
+        h.setUint8(offset + i, s.codeUnitAt(i));
+      }
+    }
+
+    str(0, "RIFF");
+    h.setUint32(4, 36 + pcm.length, Endian.little);
+    str(8, "WAVE");
+    str(12, "fmt ");
+    h.setUint32(16, 16, Endian.little);
+    h.setUint16(20, 1, Endian.little); // PCM
+    h.setUint16(22, channels, Endian.little);
+    h.setUint32(24, sampleRate, Endian.little);
+    h.setUint32(28, byteRate, Endian.little);
+    h.setUint16(32, blockAlign, Endian.little);
+    h.setUint16(34, bitsPerSample, Endian.little);
+    str(36, "data");
+    h.setUint32(40, pcm.length, Endian.little);
+    final Uint8List out = Uint8List(44 + pcm.length);
+    out.setRange(0, 44, h.buffer.asUint8List());
+    out.setRange(44, out.length, pcm);
+    return out;
+  }
 
   /// 累计一块上行音频的 RMS（每 8 个样本抽 1 个，够诊断用）。
   void _updateMicLevel(Uint8List chunk) {
@@ -330,17 +540,21 @@ class VoiceDuplexService {
 
   /// 门控是否真的生效（含失准超时判定）。
   bool _isMicGatedEffective() {
-    final bool busy = _micGated || TtsPlayer.instance.isPlaying;
+    final bool playing =
+        TtsPlayer.instance.isPlaying || PcmStreamPlayer.instance.isPlaying;
+    final bool busy = _micGated || playing;
     if (!busy) {
       _gatedSinceMs = null;
       return false;
     }
     final int now = DateTime.now().millisecondsSinceEpoch;
     _gatedSinceMs ??= now;
-    if (now - _gatedSinceMs! <= _micGateStuckMs) return true;
+    // 有音频在播：按更宽的上限判定（流式长回复可达数十秒，不算卡死）
+    final int limit = playing ? _micGateMaxMs : _micGateStuckMs;
+    if (now - _gatedSinceMs! <= limit) return true;
     debugPrint(
-      "[VoiceDuplex] mic gate stuck >${_micGateStuckMs}ms (gated=$_micGated "
-      "playing=${TtsPlayer.instance.isPlaying}) → force release，防止上行被永久关闭",
+      "[VoiceDuplex] mic gate stuck >${limit}ms (gated=$_micGated "
+      "playing=$playing) → force release，防止上行被永久关闭",
     );
     _micGated = false;
     _gatedSinceMs = null;
@@ -380,9 +594,13 @@ class VoiceDuplexService {
     switch (evt["type"]?.toString()) {
       case "session.ready":
         engine = evt["engine"]?.toString();
-        final bool ok = engine == "minimax-realtime";
+        // 能力判定：只认「端到端实时引擎」这一类，不匹配具体厂商名。
+        // 旧服务端不带 engineKind 时按 engine 名兜底，保证前后端可分别升级。
+        final String kind = evt["engineKind"]?.toString() ??
+            (engine == "minimax-realtime" ? "realtime" : "");
+        _realtimeEngine = kind == "realtime";
         if (_readyCompleter?.isCompleted != true) {
-          _readyCompleter?.complete(ok);
+          _readyCompleter?.complete(_realtimeEngine);
         }
       case "state":
         lastState = evt["state"]?.toString();
@@ -391,6 +609,13 @@ class VoiceDuplexService {
         final String audio = evt["audio"]?.toString() ?? "";
         if (audio.isEmpty) break;
         final String format = evt["format"]?.toString() ?? "wav";
+        if (format == "pcm") {
+          // 流式分块下发：边收边喂原生 PCM 播放器，首块即起播（不等整轮）
+          final Object? sr = evt["sampleRate"];
+          _handlePcmChunk(audio, sr is int && sr > 0 ? sr : 24000);
+          break;
+        }
+        // 整段块（pipeline 引擎）：沿用 TtsPlayer
         // 半双工：播报即门控麦克风，播完恢复
         _setMicGated(true);
         final Completer<void> completer = Completer<void>();
@@ -412,6 +637,9 @@ class VoiceDuplexService {
             }
           }),
         );
+      case "tts.end":
+        // 流式段输入结束：等原生把已入队音频播完后解除半双工门控
+        unawaited(_finishPcmStream());
       case "turn.completed":
         _turnInFlight = false;
         final String user = evt["userText"]?.toString() ?? "";
@@ -433,6 +661,7 @@ class VoiceDuplexService {
   void _onDisconnected() {
     if (_channel == null) return; // 已主动 stop，忽略
     _channel = null;
+    _abortPcmStream();
     _readyCompleter?.complete(false);
     _readyCompleter = null;
     if (!(_playbackCompleter?.isCompleted ?? true)) {
@@ -440,6 +669,7 @@ class VoiceDuplexService {
     }
     _playbackCompleter = null;
     _turnInFlight = false;
+    _realtimeEngine = false;
     onConnectionLost?.call();
   }
 }

@@ -95,6 +95,7 @@ import {
   stripInternalControlTags,
   createStreamControlTagSanitizer,
   createStreamMetaSentenceFilter,
+  stripMetaSentences,
   type NormalChatChunk,
   type NormalToolCall,
   type NormalUsage,
@@ -1684,6 +1685,17 @@ export async function streamCompletionWithTools(
     turnEvidenceInjected?: boolean;
     /** 路由置信度（观测用，进 turn-trace 便于量化路由误判率） */
     turnRouteConfidence?: number;
+    /**
+     * 确定性预执行工具调用（2026-10-10，根治「搜图轮时有时无」）。
+     *
+     * media_retrieval 轮此前把「要不要调 search_images」交给模型现场决定，
+     * 决策非确定 → 同一句话时而出图时而零工具直答凭想象描述。与 realtime 的
+     * 确定性前置检索同构：路由层判媒体意图 + 代码构造查询词后，循环开场先
+     * 真搜一次，结果作为 assistant(tool_calls)+tool 消息对进上下文——模型从
+     * 「决策者」降级为「叙述者」，仍可追加细化调用（轮级去重挡同参重复）。
+     * 工具不在本轮可见集/查询词为空时跳过（出口闸仍兜底）。
+     */
+    deterministicToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
     promptCache?: PrefixCacheRequest;
     requestSystemMessages?: ChatCompletionMessageParam[];
     /** volatile 动态上下文（记忆/时间等），沉底注入到最新 user 消息尾部，保护前缀缓存 */
@@ -1906,6 +1918,139 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   // 用闭包函数而非常量：for 条件与波次终止决策读取同一份动态预算（失败发生后生效）。
   const effectiveMaxWaves = (): number =>
     fastProfile ? Math.min(maxWaves + (allToolExecResults.some((r) => !r.ok) ? 1 : 0), 4) : maxWaves;
+
+  // ── 确定性媒体预执行（2026-10-10 根治「搜图轮时有时无」）──
+  // 执行器：单次超时竞速（与主路径同源的超时预算与 abort 语义），轮级去重
+  // 共享。去重键与主路径同款格式（${toolName}::${argsKey}）——模型 wave 0 发
+  // 同参 search_images 时直接复用预执行结果，不重复执行；失败结果落定即摘除
+  // 去重键，后续波次仍可重试（与主路径语义一致）。
+  const executeDeterministicToolCall = async (
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<ToolExecOutcome> => {
+    const dedupeKey = `${toolName}::${stableArgsKey(args)}`;
+    const inflight = turnDedupeCache.get(dedupeKey);
+    if (inflight) return inflight;
+    const TOOL_TIMEOUT_MS = resolveToolExecutionTimeoutMs(toolName);
+    const run = (async (): Promise<ToolExecOutcome> => {
+      await awaitOverrunGuardIfAny(toolName);
+      const callAbort = new AbortController();
+      const toolPromise = ctx.executeTool(toolName, args, { signal: callAbort.signal });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      try {
+        return await Promise.race([
+          toolPromise,
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(() => {
+              callAbort.abort(new ToolExecutionTimeoutError(toolName, TOOL_TIMEOUT_MS));
+              registerOverrunGuard(toolName, toolPromise);
+              reject(new ToolExecutionTimeoutError(toolName, TOOL_TIMEOUT_MS));
+            }, TOOL_TIMEOUT_MS);
+          }),
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    })();
+    turnDedupeCache.set(dedupeKey, run);
+    void run.then(
+      (r) => {
+        if (!r.ok) turnDedupeCache.delete(dedupeKey);
+      },
+      () => turnDedupeCache.delete(dedupeKey),
+    );
+    return run;
+  };
+
+  if (options?.deterministicToolCalls?.length && stableApiTools.length > 0) {
+    for (let di = 0; di < options.deterministicToolCalls.length; di++) {
+      const det = options.deterministicToolCalls[di];
+      const detName = String(det?.name ?? "").trim();
+      const detArgs = (det?.args ?? {}) as Record<string, unknown>;
+      const detQuery = String(detArgs.query ?? "").trim();
+      // 2026-10-10 P1 扩面：不再限定 query 形工具——travel.plan-itinerary 收
+      // {input,destination,days}，任意非空参数即视为可执行（media/realtime 的
+      // query 守卫语义由各自的 args 构造方保证，不受影响）。
+      const detHasArgs = Object.values(detArgs).some(
+        (v) => v != null && String(v).trim() !== "",
+      );
+      const apiName = registryNameToApiToolName(detName);
+      const registryName = resolveRegistryToolName(apiName);
+      // 工具必须在本轮可见集内（能力束裁剪后不可见 = 架构上不允许这轮动它）
+      const visible = stableApiTools.some((t) => apiToolNameOf(t) === apiName);
+      if (!detName || !visible || (!detQuery && !detHasArgs)) {
+        console.info(
+          `[openai-tool-loop] 确定性预执行跳过：${detName || "(空)"} visible=${visible} query="${detQuery.slice(0, 40)}" args=${detHasArgs}`,
+        );
+        continue;
+      }
+      const detStart = Date.now();
+      ctx.onToolExecuteStart?.({ toolName: registryName, input: detArgs });
+      let exec: ToolExecOutcome;
+      try {
+        exec = await executeDeterministicToolCall(registryName, detArgs);
+      } catch (e) {
+        exec = { ok: false, result: { error: (e as Error)?.message ?? String(e) } };
+      }
+      const compacted = await compactToolOutputForLlm({
+        toolName: registryName,
+        ok: exec.ok,
+        result: exec.ok ? exec.result : { error: exec.result.error ?? exec.result },
+        preferredMaxChars: budgetForTool(registryName),
+        stripKeys: getToolResultStripKeys(registryName),
+      });
+      const detCallId = `det_${traceStartTs}_${di}`;
+      // 与模型 tool_calls 相同的消息协议形态：assistant(tool_calls) + tool(result)
+      messages.push({
+        role: "assistant",
+        content: null,
+        tool_calls: [
+          {
+            id: detCallId,
+            type: "function" as const,
+            function: { name: apiName, arguments: JSON.stringify(detArgs) },
+          },
+        ],
+      });
+      const fenced = shouldFenceToolContent(registryName)
+        ? fenceUntrustedToolContent(registryName, compacted.content)
+        : compacted.content;
+      const detPhotoHint =
+        exec.ok && registryName === "search_images" ? PHOTO_REPLY_HINT : "";
+      const detFailureReminder = !exec.ok
+        ? buildToolFailureReminder(registryName, compacted.content)
+        : "";
+      const detHints = [detPhotoHint, detFailureReminder].filter(Boolean).join("\n");
+      messages.push({
+        role: "tool",
+        tool_call_id: detCallId,
+        content: detHints ? `${fenced}\n${detHints}` : fenced,
+      });
+      ctx.onToolExecuted?.({
+        toolName: registryName,
+        input: detArgs,
+        ok: exec.ok,
+        result: exec.result,
+      });
+      allToolExecResults.push({
+        toolName: registryName,
+        ok: exec.ok,
+        input: detArgs,
+        result: exec.result,
+      });
+      traceToolCalls.push({
+        name: registryName,
+        ok: exec.ok,
+        ms: Date.now() - detStart,
+        acquisition: "deterministic",
+      });
+      console.info(
+        `[openai-tool-loop] 确定性媒体预执行：${registryName} ok=${exec.ok} ` +
+          `ms=${Date.now() - detStart} query="${detQuery.slice(0, 40)}"`,
+      );
+    }
+  }
+
 
   for (let wave = 0; wave < effectiveMaxWaves(); wave++) {
     traceWavesUsed = wave + 1;
@@ -2157,8 +2302,13 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       /* 审计失败静默 */
     }
 
-    // 仅累积正式回复内容；以 tool_calls 结束的轮次中 fullText 仅为思考前导话，
-    // 不进入最终回复，也不推送给前端。
+    // 仅把"正式回复"计入 lastAssistantText；以 tool_calls 结束的轮次中 fullText
+    // 仅为思考前导话，**不进最终回复文本**（但请注意：它已经通过上面的
+    // onContentDelta 直推 / 工具波次前导话透出**推给了前端**——那是 2026-09-28
+    // 起刻意为之的放流行为，历史注释"也不推送给前端"与代码不符，已修正）。
+    // 「前导话已出站、但不进最终文本」这对事实的收敛责任在展示侧：WS 层用
+    // UtteranceAssembler（agent/utterance-assembler.ts）把前导话与结论装配成
+    // 同一条发言，并在两者语义重复时裁掉前导话，避免"同一句话变成两条消息"。
     // 注意：下方收尾闸门（出口检查/出口自检/空正文兜底）命中 continue 重试前
     // 会清空本累积——重试轮「替换」上一轮文本而非拼接，否则上一轮的自语会
     // 和重试后的新答案拼成一条两句同义的回复（2026-09-09 实测事故）。
@@ -2315,20 +2465,34 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         } else if (
           finalText.trim() &&
           allToolExecResults.length === 0 &&
-          (options?.turnIntent === "realtime_lookup" || options?.turnIntent === "media_retrieval") &&
-          options?.turnEvidenceInjected !== true
+          ((options?.turnIntent === "realtime_lookup" && options?.turnEvidenceInjected !== true) ||
+            options?.turnIntent === "media_retrieval" ||
+            options?.turnIntent === "travel_planning")
         ) {
           // 2026-09-23 扩面：realtime/media 意图轮此前零工具直答无任何拦截
           //（真实日志：任务面 18 轮里 4 轮零工具）。证据块已注入的轮豁免——
           // 答的就是刚检索到的事实，不需要再调工具；未注入（前置检索失败/
           // 路由降级轮）时零工具直答 = 用训练记忆硬答当前事实，必须补搜。
+          // 2026-10-10 收窄豁免（马尔代夫搜图轮实证）：豁免只留给 realtime_lookup。
+          // media 轮注入的证据永远来自投机/路由的**文字**搜索（search_web），
+          // 拿到两条文字摘要 ≠ 照片已检索——豁免放行后模型零工具直答，
+          // 用想象把「水屋/海底/航拍」描述一遍，用户一张图都收不到。
+          // travel_planning（2026-10-10 P1）：确定性预执行要求目的地可抽，纯指代
+          // 轮不预执行 → 零工具直答 = 手写行程（行程卡缺席的原始事故形态），
+          // 同样不设豁免，强制补调 travel.plan-itinerary 或追问目的地。
           gateReason = options?.turnIntent === "media_retrieval"
             ? "media_intent_never_attempted"
+            : options?.turnIntent === "travel_planning"
+            ? "travel_intent_never_attempted"
             : "realtime_intent_never_attempted";
           gateInstruction = options?.turnIntent === "media_retrieval"
             ? "用户在找图片/照片/视频，路由系统已把这条消息判定为媒体检索意图，但你还没有调用任何工具就直接回复了。" +
               "请立即调用 search_images / search_videos（必要时配合 search_web）真实检索，基于真实结果回答；" +
               "若确实无法检索，请如实向用户说明，不要凭想象描述或编造图片。"
+            : options?.turnIntent === "travel_planning"
+            ? "用户这条消息是在规划旅行行程，路由系统已把它判定为行程规划意图，但你还没有调用任何工具就直接回复了。" +
+              "请立即调用 travel.plan-itinerary 生成结构化行程（系统会自动附上行程卡），基于工具返回的行程草案回复；" +
+              "若确实缺少目的地等必要信息，先向用户追问一句，不要手写逐日行程清单。"
             : "这条消息需要现实世界的当前信息，路由系统已把它判定为实时查询意图，但本轮既没有注入检索证据块、" +
               "你也没有调用任何搜索工具就直接回答了。请先调用 search_web 真实检索，拿到结果后再回答用户；" +
               "若确实查不到，如实说明，不要凭记忆硬答或编造。";
@@ -2445,11 +2609,14 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       // 2026-08-29 扩展：再走一次元术语整句过滤，兜底 LLM 把系统元描述（"上一轮转入
       // 规划任务，执行脑已接手处理中"）写成完整句子的场景——这类整句与正常内容混编
       // 时整段丢弃，避免污染前端气泡。
-      const metaFilter = createStreamMetaSentenceFilter();
-      // 兜底：consumeNormalizedStream 已在咽喉处剥过内联 <think> 块，这里再剥一次
-      // （防未来有路径绕过统一 consumer），思考原文绝不进入正式回复。
+      //
+      // 2026-10-11：这里改用**整串版** `stripMetaSentences`（而非 createStreamMetaSentenceFilter
+      // 的整串调用）。后者按 chunk 语义设计，未遇句末标点的尾部会留在缓冲里累积——对已
+      // 完整的整串来说等于把末尾那句吞掉。同时该函数已加入「元决策自述句」判据
+      // （「根据规范必须调用…」「系统已注入…但强制规则要求必须调用工具」），覆盖
+      // 「问时间」4 泡事故那一族；流式路径（waveMetaFilter）走同一套判据。
       const sanitizedFinalText = stripRequestCardTags(
-        stripInternalControlTags(metaFilter(stripInlineThinkBlocks(effectiveFinalText))),
+        stripInternalControlTags(stripMetaSentences(stripInlineThinkBlocks(effectiveFinalText))),
       );
       // 本波已直推过（波内直推）→ 不再整段重推；与 sanitizedFinalText 的差异
       // 由 WS 层 streamedText vs reply.text 的残差补推对齐（见 chat-user-message）。
@@ -2511,9 +2678,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
     // 元话语整句过滤后推送（与最终回复共用同一净化管线，元描述/内部信号不泄漏）；
     // 最终回复仍在收尾时统一推送，不重复计入 lastAssistantText。
     if (finishReason === "tool_calls" && normalizedToolCalls.length > 0 && fullText.trim()) {
-      const preambleFilter = createStreamMetaSentenceFilter();
       const preamble = stripInternalControlTags(
-        preambleFilter(stripInlineThinkBlocks(fullText)),
+        stripMetaSentences(stripInlineThinkBlocks(fullText)),
       ).trim();
       // 波内已直推过前导话 → 不重复推（同最终收尾的跳过语义）。
       if (preamble && !waveStreamedText.trim()) {

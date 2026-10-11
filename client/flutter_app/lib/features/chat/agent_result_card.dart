@@ -1362,11 +1362,6 @@ class _TravelItineraryCard extends StatelessWidget {
                         ),
                       ],
                       const Spacer(),
-                      // 数据可信度角标：非实时数据时明示来源（数据诚实化）
-                      if (plan.dataQuality == "knowledge")
-                        _buildQualityBadge("📖 知识库数据"),
-                      if (plan.dataQuality == "synthetic")
-                        _buildQualityBadge("⚠ 离线估算"),
                       if (dateRange.isNotEmpty)
                         Text(
                           dateRange,
@@ -1425,26 +1420,6 @@ class _TravelItineraryCard extends StatelessWidget {
   );
 
   /// 目的地徽章（玻璃态：半透明黑底 + 白描边，压在海报上深浅图都可读）。
-  /// 数据可信度角标（琥珀色调，与深色海报区兼容）
-  Widget _buildQualityBadge(String label) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: const Color(0x66420C06),
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: const Color(0x73FFB042)),
-      ),
-      child: Text(
-        label,
-        style: const TextStyle(
-          fontSize: 11,
-          fontWeight: FontWeight.w600,
-          color: Color(0xFFFFD8A8),
-        ),
-      ),
-    );
-  }
-
   Widget _buildDestinationBadge(String destination) {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),

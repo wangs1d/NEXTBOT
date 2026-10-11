@@ -23,6 +23,14 @@ type ScreenFocus = { kind: string; since: number; lastSeenAt: number };
 type Presence = { state: string; since: number };
 /** 日程板值 */
 type NextEvent = { title: string; runAt: number; updatedAt: number };
+/** 账本板值（finance 流收编后由世界板写入 current.recentTx） */
+type LedgerTx = { at: number; id: string; amount: number; type: string; merchant?: string; category?: string };
+
+/** 单笔支出提醒阈值（元）：低于此值静默入账，不打扰。env 可调。 */
+const SPEND_ALERT_AMOUNT = (() => {
+  const raw = Number(process.env.PROACTIVITY_SPEND_ALERT_AMOUNT);
+  return Number.isFinite(raw) && raw > 0 ? raw : 1000;
+})();
 
 /**
  * 构建全部映射规则。services 全部可选——缺哪个数据源就自动跳过对应段，
@@ -165,6 +173,15 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
         const lastAlertAt = (st.get("lastAlertAt") as number) ?? 0;
         if (workMin >= 180 && ctx.nowMs - lastAlertAt >= 4 * 3600_000) {
           st.set("lastAlertAt", ctx.nowMs);
+          // 感知 → 目标桥（2026-10-10）：若用户有活跃目标，过劳关怀附带一句目标上下文
+          // （"你还在推进「学英语」，下一步是「背 20 个词」"）——从"碎片化场景提醒"
+          // 升级为"带目标上下文"，对齐 Muse 的目标驱动。无活跃目标时行为不变。
+          const goalLine = services.activeGoalLine?.(ctx.actorId) ?? null;
+          const body = renderProactiveText("work_marathon", {
+            dedupKey: `marathon:${new Date(ctx.nowMs).toISOString().slice(0, 10)}`,
+            now: ctx.now,
+            hours: Math.round(workMin / 60),
+          });
           out.push({
             kind: "work_marathon",
             urgency: "alert",
@@ -172,11 +189,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "medium",
             title: `连续工作 ${Math.round(workMin / 60)} 小时`,
-            body: renderProactiveText("work_marathon", {
-              dedupKey: `marathon:${new Date(ctx.nowMs).toISOString().slice(0, 10)}`,
-              now: ctx.now,
-              hours: Math.round(workMin / 60),
-            }),
+            body: goalLine ? `${body}\n（顺便：${goalLine}）` : body,
             dedupKey: `work_marathon:${new Date(ctx.nowMs).toISOString().slice(0, 10)}`,
             salience: "medium",
           });
@@ -214,6 +227,43 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
       },
     },
 
+    // 4b. spend_alert：外部账本大额支出 —— 跨源进场后的主动财务提醒
+    //     （2026-10-11 新增：finance 流此前只进统一库、**无任何消费方**，
+    //      账本永远不产生主动；补齐后「账单/比价」类主动才有触发源）
+    {
+      id: "spend_alert",
+      layers: ["current"],
+      tickEveryMs: 5 * 60_000,
+      eval(ctx) {
+        const st = ctx.state;
+        const out: ReturnType<BoardRule["eval"]> = [];
+        const txs = readField<LedgerTx[]>(ctx.board, "current", "recentTx") ?? [];
+        const seen = (st.get("seen") as Map<string, number>) ?? new Map<string, number>();
+        st.set("seen", seen);
+        // 去重键保留 7 天：同一笔只提醒一次，重启不重发
+        for (const [k, v] of seen) if (ctx.nowMs - v > 7 * 86400_000) seen.delete(k);
+        for (const t of txs) {
+          if (t.type !== "expense" || !(t.amount >= SPEND_ALERT_AMOUNT)) continue;
+          const key = t.id || `${t.at}:${t.amount}`;
+          if (seen.has(key)) continue;
+          seen.set(key, ctx.nowMs);
+          out.push({
+            kind: "spend_alert",
+            urgency: "normal",
+            // 独立频控维度：不与 life_reminder（预算/天气/回顾）共享冷却
+            proposalKind: "spend_alert",
+            tier: "social",
+            importance: "medium",
+            title: `一笔 ${Math.round(t.amount)} 元的支出`,
+            body: `刚记了一笔支出${t.merchant ? `：${t.merchant}` : ""} ¥${t.amount.toFixed(2)}。要我帮你看看同类有没有更划算的，或者记进本月预算吗？`,
+            dedupKey: `spend_alert:${key}`,
+            salience: "medium",
+          });
+        }
+        return out;
+      },
+    },
+
     // 5. digest_beat：每天 10/16/21 点的心跳回顾 —— 后台常驻检测的确定性节拍
     {
       id: "digest_beat",
@@ -243,7 +293,11 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
           {
             kind: "digest_beat",
             urgency: "normal",
-            proposalKind: "life_reminder",
+            // P1-1（2026-10-10）：独立 kind，不再与 budget 超支/天气等共享
+            // life_reminder 的 4h 冷却——此前多个无关场景串在同一冷却上，
+            // 一个先到就吃掉另一个的资格（通过率相乘）。规则内 beatKey 已按
+            // (日,时) 槽位去重，频控层只需兜底防连发（未知 kind 默认 2h）。
+            proposalKind: "digest_beat",
             tier: "social",
             importance: "low",
             title: "心跳回顾",

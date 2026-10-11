@@ -44,6 +44,10 @@ import {
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
 import { BubbleTracker } from "../../agent/bubble-tracker.js";
+import {
+  UtteranceAssembler,
+  type UtteranceSettlement,
+} from "../../agent/utterance-assembler.js";
 import { isVoiceMode } from "../../proactivity/voice-mode-state.js";
 import { CALENDAR_CONFIRM_TOOLS } from "../../services/agent-core.js";
 import {
@@ -52,7 +56,8 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
 import {
   buildToolCard,
   lookupToolCardBuilder,
@@ -599,6 +604,13 @@ async function processBatchedMessage(
   // 分配/记账逻辑见 BubbleTracker（bubble-tracker.ts，含独立单测）。
   const bubbleTracker = new BubbleTracker(false, assistantMessageId);
 
+  // 发言模型（2026-10-09 重复回复根源修复）：一轮 = 一条发言（utteranceId =
+  // 本轮 traceId，客户端据此把多泡归组成同一条消息）。气泡是发言的**视图分段**，
+  // 分段数量不改变身份。过程话（首个工具开始执行之前的文本）在结算时若与结论
+  // 语义等价或纯属无实质内容（记账轮），由装配器裁掉 → 展示侧塌缩为单条发言。
+  // 设计说明见 agent/utterance-assembler.ts；不变量 I1-I5 有单测。
+  const utterance = new UtteranceAssembler({ utteranceId: batched.originalMessageId });
+
   // 会出卡片的轮次不流式（2026-10-08 用户定调）：手机端「先流式打纯文本 →
   // done 整条替换成卡片渲染」的跳变根治。本轮一旦确认会携带结构化卡片
   // （工具确定性附卡源 / 识图照片卡 / LLM 自产结构化标记），正文一律扣发；
@@ -694,6 +706,8 @@ async function processBatchedMessage(
     // 气泡拆分：new 开新泡（独立 messageId），无 meta 的直推段（确定性收口
     // supplement / 零正文兜底）追加到当前末泡；尚无泡时兜底开第一泡。
     const outbound = bubbleTracker.assign(cleanedChunk, meta);
+    // 发言记账：只登记真正出站的文本（角色由工具起点自动划分，见装配器）。
+    utterance.noteEmitted(cleanedChunk);
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantChunk,
@@ -1038,6 +1052,11 @@ async function processBatchedMessage(
   let executedTravelPlanAttempted = false;
   // 「边说边出图」已推送过的媒体地址集合：跨工具批去重，避免同一张图被推两次
   const sentEarlyMediaKeys = new Set<string>();
+  // 「边说边出图」按组预算（2026-10-10）：与 done 阶段 trimMediaCardsByTopic 的
+  // maxPerGroup=4 同规则、同分组键（groupTitle）跨批累计——保证最终 mediaCards
+  // 恒为已早推内容的前缀（只增不换），根治「流式中一组照片、落定换成另一组」。
+  const EARLY_MEDIA_MAX_PER_GROUP = 4;
+  const earlyMediaGroupCounts = new Map<string, number>();
   // 方案1：不再把流式 delta 逐段喂入分段器（多段流/工具边界会打断 heldFirst 导致
   // 多个垫词、顺序错乱、语义重复）。仅累积原始流式文本作兜底，最终只把"最终文本"一次性
   // 喂入分段器，保证：垫词恰好一个、信息块按最终文本顺序、层层递进不重复。
@@ -1095,6 +1114,13 @@ async function processBatchedMessage(
       },
       onExternalToolExecuteStart: (info) => {
         if (isStale()) return;
+        // 发言模型：首个工具开始执行 = 过程话阶段截止，此后产出均为结论。
+        // 先等分段器把已喂入的过程话发完（分发是异步串行的，不设屏障会与仍在
+        // 链上的过程话乱序 → 过程话被误判为结论、塌缩裁决失效）。
+        void streamSegmenter
+          .awaitPending()
+          .then(() => utterance.noteToolStart(info.toolName))
+          .catch(() => utterance.noteToolStart(info.toolName));
         // 方案1：不再需要 markToolBoundary——分段器只在最终文本一次性喂入时才裁决，
         // 工具边界不会再产生垫词碎片。
         wireToolExecuteStart(
@@ -1112,6 +1138,8 @@ async function processBatchedMessage(
       },
       onExternalToolExecuted: (info) => {
         if (isStale()) return;
+        // 发言模型：登记工具名（直跑路径可能只有完成回调、没有 start 回调）
+        utterance.noteToolExecuted(info.toolName);
         wireToolExecuted(
           {
             sessionId: msgActor,
@@ -1222,6 +1250,12 @@ async function processBatchedMessage(
             ).filter((c) => {
               const key = (c.thumbnailUrl || c.mediaUrl || "").trim();
               if (!key || sentEarlyMediaKeys.has(key)) return false;
+              // 按组预算：与 done 阶段裁剪同规则，同组超预算的不再早推
+              //（也不占用 sentEarlyMediaKeys，留给 done 阶段聚合裁决）
+              const group = (c.groupTitle ?? "").trim();
+              const used = earlyMediaGroupCounts.get(group) ?? 0;
+              if (used >= EARLY_MEDIA_MAX_PER_GROUP) return false;
+              earlyMediaGroupCounts.set(group, used + 1);
               sentEarlyMediaKeys.add(key);
               return true;
             });
@@ -1434,6 +1468,24 @@ async function processBatchedMessage(
     if (guardResidual) streamSegmenter.feed(guardResidual);
     await streamSegmenter.flushFinal();
 
+    // 发言结算（2026-10-09 重复回复根源修复）：本轮唯一发言在此定稿。
+    // - 过程话与结论语义等价、或过程话在记账轮无实质内容 → 裁掉过程话，复用既有
+    //   「整轮塌缩」通道（finalTextReplacesStream + bubbles 清单）让客户端删除
+    //   过程话气泡、只落一条发言 —— 事故形态「好的王爷，记下了。」+「已经记上啦」
+    //   从此只剩后者。
+    // - 检索轮两段都保留：它们仍是同一条发言的两个分段，客户端按 utteranceId
+    //   归组渲染（头像/名字只出现一次），"先应一句、停顿、再细说"的节奏不受损。
+    const utteranceSettlement: UtteranceSettlement = utterance.settle(finalFeed);
+    let utteranceCollapse = false;
+    if (utteranceSettlement.collapse) {
+      utteranceCollapse = true;
+      finalTextReplacesStream = true;
+      console.log(
+        `[utterance] 过程话被结论吸收（reason=${utteranceSettlement.collapseReason}，` +
+          `trace=${batched.originalMessageId}，drop=[${utteranceSettlement.droppedSegmentIndexes.join(",")}]）`,
+      );
+    }
+
     if (isStale()) return;
 
     let toolResult: { ok: boolean; result?: Record<string, unknown> } | undefined;
@@ -1549,9 +1601,17 @@ async function processBatchedMessage(
     // 命中且本轮没尝试过规划工具时，代码强制补跑一次规划，回执走下方
     // attachDeterministicCards 原链路附卡；规划阶段进度经 travel-progress-bus
     // 照常下发，用户端可见「正在规划行程」。
+    // intent 闸（2026-10-10 词表判定退役）：结构检测器会被「回复里引用旧方案」
+    // 的轮次误命中（「你叫我什么？」答句回扣方案A/B/C 被强制补跑规划）——
+    // 模型判定本轮非旅行话题（travel_query=false）时不再补跑。understanding
+    // 缺省（路由失败）保持旧行为：双闸检测自身误报率低，不因路由抖动丢卡。
+    const routeUnderstanding = await decisionPromise
+      .then((d) => d.understanding)
+      .catch(() => undefined);
     if (
       !executedTravelPlanAttempted &&
       !travelReceiptResolution.toolName &&
+      routeUnderstanding?.travelQuery !== false &&
       looksLikeHandwrittenItinerary(finalText)
     ) {
       const forcedInput = batched.text.trim() || "规划行程";
@@ -1710,6 +1770,14 @@ async function processBatchedMessage(
       // 工具项（`[路径]说明` 行）就会变成底部脏文本。按行剔除含图片地址的 echo，
       // 只保留纯文字叙述（若整段都是 echo 则剩余为空），保证下方只剩干净照片。
       finalText = stripMediaEchoText(finalText);
+      // 出口不变量（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：照片是
+      // 本轮唯一主形态时，摘要折叠块绝不允许随正文透出——不管它是哪条路由
+      // （summary_card / 模型自发标记 / 未来新增生产者）塞进来的，这里一律剥掉。
+      // 客户端渲染层另有同语义兜底，两侧任一生效即可防泄漏。
+      if (stripContentSummaryBlock(finalText) !== finalText) {
+        console.log("[chat] media round: stripped CONTENT_SUMMARY block from finalText");
+        finalText = stripContentSummaryBlock(finalText);
+      }
     }
     // 提升最终回复文本中图片地址为可见缩略图（mediaCards 为空时的最后兜底）
     if (mediaCards.length === 0) {
@@ -1729,6 +1797,17 @@ async function processBatchedMessage(
           locationHint: batched.clientLocation?.label?.trim() || undefined,
         });
         finalText = attachImageResultPhotos(finalText, photoItems);
+        // 路由配对不变量（与 CONTENT_SUMMARY 泄漏同源）：块存在 ⇒ 路由必在。
+        // [IMAGE_RESULT_START] 块只有 [RENDER_AS:image_result] 路由的消费者；
+        // LLM 叙事文本若被路由到其它形态（plain/brief/structured），客户端
+        // 不会解析该块 → 裸 JSON 顶在正文最前面。附块而缺路由时强制补声明。
+        if (
+          finalText.includes("[IMAGE_RESULT_START]") &&
+          !finalText.includes("[RENDER_AS:image_result]")
+        ) {
+          console.log("[chat] vision photos: force-pairing RENDER_AS:image_result");
+          finalText = `[RENDER_AS:image_result]\n${finalText}`;
+        }
       } catch (err) {
         console.info(
           `[chat] 识图照片卡构建失败（忽略，照片不入卡）: ${
@@ -1736,6 +1815,24 @@ async function processBatchedMessage(
           }`,
         );
       }
+    }
+
+    // 结构化通道迁移（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏根治）：
+    // 摘要卡是「路由资产」，永远不该以 JSON 内嵌在正文里透出。这里把正文中的
+    // CONTENT_SUMMARY 块确定性摘出为 summaryCard 结构化字段随 done 下发，
+    // 文本通道从此不携带 JSON——与 mediaCards 同构的 side-channel 模式。
+    // 模型自发复读、任何路由注入、任何新模型行为都到不了用户眼前：
+    // 块要么变成结构化卡，要么消失。媒体轮（照片是唯一主形态）整卡让位。
+    let summaryCard: Record<string, unknown> | undefined;
+    {
+      const extracted = extractContentSummaryCard(finalText);
+      if (extracted.card && mediaCards.length === 0) {
+        summaryCard = extracted.card;
+        console.log(
+          `[chat] summary card -> structured field: ${String((extracted.card as { id?: string }).id ?? "")}`,
+        );
+      }
+      finalText = extracted.text;
     }
 
     // [调试] 图片搜索链路诊断：记录工具名 / items / 卡片是否注入，用于排查前端照片不显示
@@ -1827,7 +1924,21 @@ async function processBatchedMessage(
           // 真·分绿泡（2026-09-28）：各气泡定稿对账数组（id+定稿文本）。
           // 客户端据此逐泡定稿/补建漏收的泡；finalTextReplacesStream=true 时
           // 该数组同时是"待塌缩删除"的泡清单。普通轮不下发该字段。
-          ...(bubbleTracker.hasBubbles ? { bubbles: bubbleTracker.snapshot } : {}),
+          // 发言塌缩轮即使无泡也要下发（空数组语义 = 只按单条发言收口）。
+          ...(bubbleTracker.hasBubbles || utteranceCollapse
+            ? { bubbles: bubbleTracker.snapshot }
+            : {}),
+          // 发言模型观测字段（2026-10-09）：本轮唯一发言的 id 与结算结果。
+          // 客户端已可用 traceId 归组（utteranceId === traceId），此字段供
+          // 端到端断言与线上取证（重复回复回归时看 collapse/reason 即可定位）。
+          utterance: {
+            id: utteranceSettlement.utteranceId,
+            segments: utteranceSettlement.segments.length,
+            keptSegments: utteranceSettlement.kept.length,
+            collapse: utteranceSettlement.collapse,
+            collapseReason: utteranceSettlement.collapseReason,
+            bookkeepingOnly: utteranceSettlement.bookkeepingOnly,
+          },
           // 放流配套（2026-09-28）：最终文本与已流文本分叉（重写/重跑/确定性
           // 收口）时置 true，客户端收到后用 finalText 整段替换流式气泡。
           // 卡片轮撤回（2026-10-08）：stream_reset 已撤回正文，done 必须
@@ -1842,6 +1953,9 @@ async function processBatchedMessage(
           ...(reply.taskDispatched ? { source: "task_plane" } : {}),
           // 结构化媒体卡片（Coze 式架构）：独立于 LLM 文本，前端直接渲染缩略图
           ...(mediaCards.length > 0 ? { mediaCards } : {}),
+          // 结构化摘要卡（2026-10-10 通道迁移）：正文中的 CONTENT_SUMMARY 块
+          // 已确定性摘出，卡片随本字段下发；文本通道不再携带 JSON。
+          ...(summaryCard ? { summaryCard } : {}),
           // 交错渲染块：按正文顺序切好的「文字段+媒体组」，前端按序渲染
           // → 「一段文字介绍后放一组照片，再一段文字，再一组照片」。
           ...(renderBlocks.length > 0 ? { renderBlocks } : {}),

@@ -28,6 +28,7 @@ class TravelPlanPanel extends StatefulWidget {
     required this.data,
     this.fullscreen = false,
     this.onClose,
+    this.onWindowAction,
   });
 
   final AgentResultData data;
@@ -37,6 +38,12 @@ class TravelPlanPanel extends StatefulWidget {
 
   /// 关闭回调（宿主容器需要内部关闭按钮时传入；全屏页自身有返回键）。
   final VoidCallback? onClose;
+
+  /// 页面自绘标题栏的窗口动作回调（'windowDrag' | 'minimize' | 'maximize'）。
+  ///
+  /// 只有行程独立窗口（无边框窗口）会传：页面标题栏就是窗口标题栏，
+  /// 拖动/最小化/最大化都经桥回宿主执行。应用内兜底面板不传 → 静默忽略。
+  final void Function(String action)? onWindowAction;
 
   @override
   State<TravelPlanPanel> createState() => _TravelPlanPanelState();
@@ -49,6 +56,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
       data: widget.data,
       fullscreen: widget.fullscreen,
       onClose: widget.onClose,
+      onWindowAction: widget.onWindowAction,
     );
   }
 }
@@ -62,11 +70,13 @@ class _WebTravelPanel extends StatefulWidget {
     required this.data,
     this.fullscreen = false,
     this.onClose,
+    this.onWindowAction,
   });
 
   final AgentResultData data;
   final bool fullscreen;
   final VoidCallback? onClose;
+  final void Function(String action)? onWindowAction;
 
   @override
   State<_WebTravelPanel> createState() => _WebTravelPanelState();
@@ -127,6 +137,7 @@ class _WebTravelPanelState extends State<_WebTravelPanel> {
     c.onOpenUrl = _launchExternal;
     c.onClose = () => widget.onClose?.call();
     c.onFullscreen = _openFullscreen;
+    c.onWindowAction = widget.onWindowAction;
   }
 
   /// 仅解绑属于自己的回调（不同 State 实例的方法 tearoff 不相等，互不误伤）。
@@ -139,6 +150,7 @@ class _WebTravelPanelState extends State<_WebTravelPanel> {
     if (c.onHideRouteCard == _clearRoute) c.onHideRouteCard = null;
     if (c.onOpenUrl == _launchExternal) c.onOpenUrl = null;
     if (c.onFullscreen == _openFullscreen) c.onFullscreen = null;
+    // onWindowAction 来自宿主（tearoff 由下一个挂载点覆盖），此处不动
   }
 
   /// 下发当前行程载荷（共享 WebView 未就绪时由控制器排队，就绪后自动送达）。

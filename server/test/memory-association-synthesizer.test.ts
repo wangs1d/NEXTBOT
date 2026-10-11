@@ -80,13 +80,22 @@ test("parseAssociationsFromLlmOutput: 过短结论被过滤", () => {
 // ── 工厂降级 ─────────────────────────────────────────────
 
 test("createMemoryAssociationSynthesizer: 无 API key 返回 null（静默降级）", () => {
-  const prev = process.env.OPENAI_API_KEY;
+  // 工厂回退链：入参 key → resolvePrimaryLlmClientConfig（跟随主对话 provider）→ OPENAI_API_KEY。
+  // 本机 .env 若配了 MINIMAX/MOONSHOT key，空白入参会被回退救活——测试显式置
+  // EXTERNAL_MODEL_PROVIDER=none 禁用主 LLM binding，只测「完全无 key」分支。
+  const prev = {
+    openai: process.env.OPENAI_API_KEY,
+    provider: process.env.EXTERNAL_MODEL_PROVIDER,
+  };
   delete process.env.OPENAI_API_KEY;
+  process.env.EXTERNAL_MODEL_PROVIDER = "none";
   try {
     assert.equal(createMemoryAssociationSynthesizer(), null);
     assert.equal(createMemoryAssociationSynthesizer("   "), null);
   } finally {
-    if (prev !== undefined) process.env.OPENAI_API_KEY = prev;
+    if (prev.openai !== undefined) process.env.OPENAI_API_KEY = prev.openai;
+    if (prev.provider !== undefined) process.env.EXTERNAL_MODEL_PROVIDER = prev.provider;
+    else delete process.env.EXTERNAL_MODEL_PROVIDER;
   }
 });
 

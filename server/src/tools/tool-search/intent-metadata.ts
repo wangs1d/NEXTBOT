@@ -425,6 +425,66 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeAliases: ["打开软件", "启动应用"],
     },
   },
+  // ── 技能族入口的意图先验（2026-10-10 根修）──
+  // 技能族工具的 BM25 词面分天生低（英文点号名 + 简短描述 vs 中文口语 query），
+  // 域派生只解决「可见性/按域拉取」，L1 预载仍需一条确切意图通道。这里按
+  // travel.plan-itinerary 的既有范式给各族入口登记别名/例句——priorDirectMatchesForQuery
+  // 命中即免 discover 直取（≤2 个/查询），把「要不要找这个族的工具」收回代码裁决。
+  {
+    exact: "habit.create-rule",
+    metadata: {
+      aliases: ["养成习惯", "建立习惯", "打卡", "以后每天", "每天都要", "帮我记着每天"],
+      examples: [
+        "记一下我每天早上要喝水的习惯",
+        "帮我养成每天跑步的习惯",
+        "以后每天八点提醒我做拉伸",
+      ],
+      negativeAliases: ["打开软件", "启动应用", "查一下天气"],
+    },
+  },
+  {
+    exact: "booking.travel-pay",
+    metadata: {
+      aliases: ["订机票", "买机票", "订酒店", "订火车票", "订门票", "帮我订一下"],
+      examples: ["帮我订一下去三亚的机票", "订一间明晚的酒店", "买一张明天去上海的高铁票"],
+      negativeAliases: ["规划行程", "行程怎么安排"],
+    },
+  },
+  {
+    exact: "picture.process",
+    metadata: {
+      aliases: ["修图", "修一下照片", "美化照片", "照片美化", "调色", "去水印"],
+      examples: ["把我这张照片修一下", "帮我美化一下这张图", "把照片调个色"],
+      negativeAliases: ["找照片", "搜照片", "生成图片"],
+    },
+  },
+  {
+    exact: "finance.ingest-text",
+    metadata: {
+      aliases: ["记账", "导入账单", "导入消费", "记一笔", "账单导入", "记到账上"],
+      examples: [
+        "帮我把这个月的账单导入记账",
+        "把这段消费记录记到账上",
+        "帮我记一笔吃饭花了一百块",
+      ],
+      negativeAliases: ["查余额", "看账单", "转账"],
+    },
+  },
+  {
+    exact: "virtual-phone.ensure-my-number",
+    metadata: {
+      aliases: ["虚拟手机号", "虚拟号", "申请手机号", "小号"],
+      examples: ["给我申请一个虚拟手机号", "我需要一个虚拟号码"],
+      negativeAliases: ["我的手机号是多少", "查看手机号"],
+    },
+  },
+  {
+    exact: "agentworld.registration-status",
+    metadata: {
+      aliases: ["Agent World 注册", "注册数字身份", "我的 agent world 状态"],
+      examples: ["我的 Agent World 注册到哪一步了", "帮我看看数字身份注册状态"],
+    },
+  },
 ];
 
 const DEFAULT_METADATA_PATH = resolve(process.cwd(), "data", "tool-intent-metadata.json");

@@ -1,0 +1,131 @@
+<html style="margin:0;padding:0;">
+<title>NextBot 人类级语音通话架构（双系统 · 记忆分层 · 上下文治理）</title>
+<div class="wrap">
+  <style>
+    * { box-sizing: border-box; }
+    body { margin: 0; background: #000; color: #e8e8ea;
+      font-family: -apple-system, "SF Pro Text", "Segoe UI", "Microsoft YaHei", sans-serif; }
+    .wrap { padding: 30px 34px 36px; }
+    .h-title { font-size: 19px; font-weight: 700; margin: 0 0 2px; }
+    .h-sub { font-size: 12.5px; color: #86868b; margin: 0 0 24px; }
+    .layer { display: flex; align-items: stretch; border: 1px solid #303034;
+      border-radius: 13px; background: #121214; overflow: hidden; }
+    .tag { width: 172px; flex: 0 0 172px; padding: 14px 16px;
+      border-right: 1px solid #2c2c2f; display: flex; flex-direction: column; justify-content: center; }
+    .tag .n { font-size: 14.5px; font-weight: 700; line-height: 1.35; }
+    .tag .r { font-size: 11.5px; color: #86868b; margin-top: 6px; line-height: 1.4; }
+    .mods { display: flex; flex-wrap: wrap; gap: 9px; padding: 13px 15px; flex: 1; align-items: center; }
+    .m { background: #0b0b0d; border: 1px solid #2b2b30; border-radius: 9px;
+      padding: 9px 12px; font-size: 12.5px; color: #d4d4d7; line-height: 1.4; min-width: 150px; flex: 1; }
+    .m b { display: block; font-size: 12.5px; margin-bottom: 3px; }
+    .m span { font-size: 11px; color: #8e8e93; }
+    .l1 .tag { border-left: 3px solid #98989f; }
+    .l2 .tag { border-left: 3px solid #30d158; }
+    .l3 .tag { border-left: 3px solid #0a84ff; }
+    .l4 .tag { border-left: 3px solid #bf5af2; }
+    .l5 .tag { border-left: 3px solid #ff9f0a; }
+    .l1 b { color: #c7c7cc; } .l2 b { color: #7de08c; } .l3 b { color: #7db4ff; }
+    .l4 b { color: #d79af7; } .l5 b { color: #ffc05c; }
+    .arrow { text-align: center; color: #5a5a5e; font-size: 17px; line-height: 1; margin: 3px 0; }
+    .bars { display: flex; gap: 14px; margin-top: 22px; flex-wrap: wrap; }
+    .bar-card { flex: 1; min-width: 420px; background: #121214; border: 1px solid #303034;
+      border-radius: 12px; padding: 14px 16px; }
+    .bar-card .t { font-size: 13.5px; font-weight: 700; margin-bottom: 11px; }
+    .seg { display: flex; align-items: center; gap: 9px; margin-bottom: 8px; font-size: 11.5px; }
+    .seg .lab { width: 150px; flex: 0 0 150px; color: #b8b8be; }
+    .track { flex: 1; height: 17px; background: #1d1d20; border-radius: 5px; overflow: hidden; display: flex; }
+    .seg .v { width: 92px; flex: 0 0 92px; text-align: right; color: #86868b; font-size: 11px; }
+    .p1 { background: #5a5a5e; } .p2 { background: #30a356; } .p3 { background: #0a74e6; }
+    .p4 { background: #a248d0; } .p5 { background: #e08a10; }
+    .legend { font-size: 11px; color: #86868b; margin-top: 9px; line-height: 1.6; }
+    .note { margin-top: 18px; background: #141416; border: 1px solid #333336; border-radius: 12px;
+      padding: 14px 18px; font-size: 12.5px; color: #c7c7cc; line-height: 1.65; }
+    .note b { color: #f0f0f2; }
+  </style>
+
+  <p class="h-title">NextBot 人类级语音通话架构</p>
+  <p class="h-sub">双系统（前台反射 ‖ 后台 Agent）＋ 记忆分层（窗口只是 L1）＋ 注入回路 ｜ 2026-10</p>
+
+  <div class="layer l1">
+    <div class="tag"><div class="n">① 媒体层</div><div class="r">全双工音频 IO<br>播放中持续收音</div></div>
+    <div class="mods">
+      <div class="m"><b>AEC 回声消除 ＋ NS/AGC</b><span>Windows 无系统级 AEC，走 WebRTC 3A 客户端栈（关键坑）</span></div>
+      <div class="m"><b>自适应 VAD ＋ 语义端点预测</b><span>不只判静音，判“这句话说完没”</span></div>
+      <div class="m"><b>流式 STT</b><span>Paraformer / Qwen3ASR，边说边出字</span></div>
+      <div class="m"><b>流式对话 TTS</b><span>Qwen3-TTS / VoxCPM，短语级首包、固定音色</span></div>
+    </div>
+  </div>
+  <div class="arrow">▼ 帧流（80ms 级）</div>
+
+  <div class="layer l2">
+    <div class="tag"><div class="n">② 反射层 · 快系统</div><div class="r">前台 / 小模型<br>目标 &lt;200ms，保真实感</div></div>
+    <div class="mods">
+      <div class="m"><b>Backchannel 附和</b><span>“嗯 / 对 / 然后呢”，时机对齐人类分布</span></div>
+      <div class="m"><b>Lead ＋ Filler 先发声</b><span>不依赖工具的开头先说，拖出等待时间</span></div>
+      <div class="m"><b>Barge-in 让权</b><span>用户开口即停 TTS、弃半句话、转向</span></div>
+      <div class="m"><b>工作记忆（短窗）</b><span>近 10–20 轮原文，全保真、仅此在窗内</span></div>
+    </div>
+  </div>
+  <div class="arrow">▼ 需要工具 / 深度内容时委派　　　▲ 结果注入后继续说</div>
+
+  <div class="layer l3">
+    <div class="tag"><div class="n">③ Agent 核心 · 慢系统</div><div class="r">NextBot 本体<br>人格 / 记忆 / 工具全在此</div></div>
+    <div class="mods">
+      <div class="m"><b>人格 Prompt</b><span>核心人格常驻精简，场景化部分按需注入</span></div>
+      <div class="m"><b>上下文组装器</b><span>每轮按 Token 预算从零组装，而非无限拼接</span></div>
+      <div class="m"><b>Tool Routing → MCP</b><span>活跃工具 ≤5 个进上下文，其余二级路由</span></div>
+      <div class="m"><b>规划 / 多步执行</b><span>多跳关联、任务状态机、权限确认</span></div>
+    </div>
+  </div>
+  <div class="arrow">▼ 读写 / 固化　　　　　　　　　　　　　　　　　　　　　　　　　　▲ 即时检索</div>
+
+  <div class="layer l4">
+    <div class="tag"><div class="n">④ 外置记忆层</div><div class="r">不占上下文窗口<br>类人分层、可检索</div></div>
+    <div class="mods">
+      <div class="m"><b>VoicePage 交互页</b><span>每次对话存 音频 / 转写 / 摘要 三种保真度</span></div>
+      <div class="m"><b>VoiceThread 话题线</b><span>相关页多对多串联 ＋ 线程摘要，跨话题可回流</span></div>
+      <div class="m"><b>语义事实 / 用户画像</b><span>异步抽取决策、承诺、待办、偏好入结构化 state</span></div>
+      <div class="m"><b>检索底座</b><span>BM25 ＋ Embedding ＋ 多跳（你已有）</span></div>
+      <div class="m"><b>程序记忆</b><span>Skills / 工具用法 / 行为模式</span></div>
+    </div>
+  </div>
+  <div class="arrow">▼ 滑出窗口的内容　　　　　　　　　　　　　　　　　　　　　　　　▲ 命中即取</div>
+
+  <div class="layer l5">
+    <div class="tag"><div class="n">⑤ 固化与注入回路</div><div class="r">全异步、不阻塞对话<br>训练-free 可落地</div></div>
+    <div class="mods">
+      <div class="m"><b>异步固化（睡眠式巩固）</b><span>口语净化去口水词 → 两级滚动摘要 → 事实抽取 → 入线程</span></div>
+      <div class="m"><b>多保真投影</b><span>按预算降级：音频→转写→摘要→省略，相关性低的先降（调度 ~1ms）</span></div>
+      <div class="m"><b>Chunked Prefill 注入</b><span>工具/检索结果单次前向注入帧流，600 帧仅 86ms，信息零损失、精确数字不丢</span></div>
+      <div class="m"><b>环境状态护栏</b><span>丢包/噪声显式建模，防误触发把垃圾转写灌进上下文</span></div>
+    </div>
+  </div>
+
+  <div class="bars">
+    <div class="bar-card">
+      <div class="t">延迟预算（用户停说到首音响起，P95）</div>
+      <div class="seg"><div class="lab">人类通话间隙</div><div class="track"><div class="p1" style="width:14%"></div></div><div class="v">≈200ms</div></div>
+      <div class="seg"><div class="lab">端点/语义判句</div><div class="track"><div class="p2" style="width:24%"></div></div><div class="v">200–400ms</div></div>
+      <div class="seg"><div class="lab">LLM 首 token</div><div class="track"><div class="p3" style="width:16%"></div></div><div class="v">150–250ms</div></div>
+      <div class="seg"><div class="lab">TTS 首包</div><div class="track"><div class="p4" style="width:16%"></div></div><div class="v">150–250ms</div></div>
+      <div class="seg"><div class="lab">目标总预算</div><div class="track"><div class="p5" style="width:48%"></div></div><div class="v">300–700ms ｜ &gt;1s 崩坏</div></div>
+      <div class="legend">打断响应 &lt;200ms、TTS 停止 &lt;300ms、误打断率 &lt;5%；用 Lead/Filler 盖住等待，工具再慢也不冷场。</div>
+    </div>
+    <div class="bar-card">
+      <div class="t">每轮上下文预算（总量封顶 ~8–12k，与通话时长脱钩）</div>
+      <div class="seg"><div class="lab">核心人格 ＋ 语气指引</div><div class="track"><div class="p1" style="width:12%"></div></div><div class="v">~1k</div></div>
+      <div class="seg"><div class="lab">结构化 state（事实/待办）</div><div class="track"><div class="p2" style="width:14%"></div></div><div class="v">~1–2k</div></div>
+      <div class="seg"><div class="lab">工作记忆（近 10–20 轮）</div><div class="track"><div class="p3" style="width:38%"></div></div><div class="v">~3–5k</div></div>
+      <div class="seg"><div class="lab">检索片段（相关 vpage/线程）</div><div class="track"><div class="p4" style="width:24%"></div></div><div class="v">~2–3k</div></div>
+      <div class="seg"><div class="lab">工具子集 ＋ 输出安全余量</div><div class="track"><div class="p5" style="width:12%"></div></div><div class="v">~1k</div></div>
+      <div class="legend">1 小时口语约 1.5–2.5 万 token，全量必爆；经投影+固化后每轮恒定，实测成本不随长度增长（长会话便宜约 25 倍、质量保留 98.7%）。</div>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>两个关键认知：</b>① 上下文窗口不是记忆，是 L1 cache——长通话靠“外置分层记忆 ＋ 每轮按需组装 ＋ 多保真投影”，而不是扩窗口或硬截断；
+    ② 人类感不靠单点提速，靠“反射层抢时间（附和/Lead/让权）＋ 全双工 AEC ＋ 结果零等待注入”——Agent 干活时语音始终在场。
+    <b>工程取舍：</b>反射层可用小模型/端侧模型，人格与事实输出权始终在 NextBot；媒体采集在 Windows 上直接复用 WebRTC 客户端栈拿 AEC，是最省的一条路。
+  </div>
+</div>
+</html>

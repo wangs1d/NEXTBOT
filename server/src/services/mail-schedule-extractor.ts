@@ -314,19 +314,101 @@ export function suppressMailInterrupt(
   return report != null;
 }
 
+// ---------------------------------------------------------------------- //
+// 漏检埋点（2026-10-11）
+// ---------------------------------------------------------------------- //
+//
+// 「规则命中」是宁漏不误的保守策略：粗筛判定"像票务"、规则却解不出结构化字段时，
+// 邮件被静默跳过（不建日程）。此时系统**不知道自己漏了什么**——注释里那句
+// "LLM 兜底层留待规则层跑出漏检率数据后再接" 的前提就是先有度量。
+// 本埋点只回答一个问题：**预筛命中却零产出的邮件有多少、长什么样**，
+// 供评估要不要为这一小撮开一次有边界的 LLM 兜底。埋点纯观测，不改变任何行为。
+
+/** 漏检原因：① 预筛命中但规则/ICS 均未产出草稿；② 仅靠 ICS 探针进来的邮件没解出事件。 */
+export type MailTicketMissReason = "prefilter_hit_no_draft" | "ics_probe_no_draft";
+
+/** 单条漏检样本（有界保留，供人工抽查模板漂移）。 */
+export type MailTicketMiss = {
+  at: string;
+  actorId: string;
+  reason: MailTicketMissReason;
+  from: string;
+  subject: string;
+  /** 正文纯文本长度：为 0 常见于纯图片/HTML 卡片邮件——规则天生读不到，是最该关注的形态 */
+  bodyChars: number;
+};
+
+export type MailTicketMissStats = {
+  total: number;
+  byReason: Record<MailTicketMissReason, number>;
+  lastAt: string | null;
+  /** 最近若干条样本（上限 {@link MISS_SAMPLE_CAP}） */
+  samples: MailTicketMiss[];
+};
+
+/** 漏检样本有界保留上限（只留最近 N 条，防内存无界增长）。 */
+const MISS_SAMPLE_CAP = 50;
+
 export class MailScheduleBridge {
   private readonly tasks: ScheduleTaskService;
   private readonly notify: ((intent: ProactiveIntent) => void) | null;
   private readonly now: () => Date;
+  private readonly onMiss: ((miss: MailTicketMiss) => void) | null;
+  private missTotal = 0;
+  private readonly missByReason: Record<MailTicketMissReason, number> = {
+    prefilter_hit_no_draft: 0,
+    ics_probe_no_draft: 0,
+  };
+  private missLastAt: string | null = null;
+  private readonly missSamples: MailTicketMiss[] = [];
 
   constructor(deps: {
     tasks: ScheduleTaskService;
     notify?: ((intent: ProactiveIntent) => void) | null;
     now?: () => Date;
+    /** 漏检回调（装配层接日志；缺省仅进程内计数）。回调异常被吞，绝不影响主链路。 */
+    onMiss?: ((miss: MailTicketMiss) => void) | null;
   }) {
     this.tasks = deps.tasks;
     this.notify = deps.notify ?? null;
     this.now = deps.now ?? (() => new Date());
+    this.onMiss = deps.onMiss ?? null;
+  }
+
+  /** 记录一次漏检：仅计数 + 有界样本 + 可选回调，零业务副作用。 */
+  private recordMiss(
+    mail: Pick<IncomingMail, "actorId" | "from" | "subject">,
+    reason: MailTicketMissReason,
+    bodyChars: number,
+  ): void {
+    const miss: MailTicketMiss = {
+      at: this.now().toISOString(),
+      actorId: mail.actorId,
+      reason,
+      from: mail.from,
+      subject: mail.subject,
+      bodyChars,
+    };
+    this.missTotal += 1;
+    this.missByReason[reason] += 1;
+    this.missLastAt = miss.at;
+    this.missSamples.push(miss);
+    if (this.missSamples.length > MISS_SAMPLE_CAP) this.missSamples.shift();
+    try {
+      this.onMiss?.(miss);
+    } catch {
+      /* 埋点回调异常绝不影响邮件主链路 */
+    }
+  }
+
+  /** 漏检统计快照：评估"要不要上 LLM 兜底"的数据面（total / 分因 / 最近样本）。 */
+  missStats(): MailTicketMissStats {
+    return {
+      total: this.missTotal,
+      byReason: { ...this.missByReason },
+      lastAt: this.missLastAt,
+      samples: this.missSamples.slice(),
+    };
   }
 
   /**
@@ -337,13 +419,15 @@ export class MailScheduleBridge {
   async onMail(
     mail: Pick<IncomingMail, "actorId" | "from" | "subject" | "source">,
   ): Promise<MailScheduleSyncReport | null> {
-    if (!mail.source || mail.source.length === 0) return null;
+    // 预筛判定与最终产出之间的落差即「疑似票务却没识别出」——埋点记录，不改变返回。
+    const prefilterHit = isTicketLikeMail(mail.from, mail.subject);
+    if (!mail.source || mail.source.length === 0) {
+      if (prefilterHit) this.recordMiss(mail, "prefilter_hit_no_draft", 0);
+      return null;
+    }
     const rawProbe = mail.source.toString("latin1");
-    const looksLikeTicket =
-      isTicketLikeMail(mail.from, mail.subject) ||
-      rawProbe.includes("text/calendar") ||
-      /\.ics\b/i.test(rawProbe.slice(0, 8192));
-    if (!looksLikeTicket) return null;
+    const icsProbe = rawProbe.includes("text/calendar") || /\.ics\b/i.test(rawProbe.slice(0, 8192));
+    if (!prefilterHit && !icsProbe) return null;
     const parts = extractMailCalendarParts(mail.source);
     const drafts = extractMailScheduleDrafts({
       from: mail.from,
@@ -351,7 +435,14 @@ export class MailScheduleBridge {
       bodyText: parts.fullText,
       icsTexts: parts.icsTexts,
     });
-    if (drafts.length === 0) return null;
+    if (drafts.length === 0) {
+      this.recordMiss(
+        mail,
+        prefilterHit ? "prefilter_hit_no_draft" : "ics_probe_no_draft",
+        parts.fullText.length,
+      );
+      return null;
+    }
     return this.syncDrafts(mail.actorId, drafts);
   }
 

@@ -31,6 +31,14 @@ import OpenAI from "openai";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { getModelForTask, TaskTier } from "../config/model-routing.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
+import {
+  parseFieldLine,
+  profileFieldOfLabel,
+  projectProfileMarkdown,
+  reconcileProfileFactsFromStores,
+  type ProfileAuthorityDeps,
+  type ProfileAuthorityReport,
+} from "../services/user-personalization/profile-fact-authority.js";
 import { touchProfileLines, rebuildProfileMeta, listStaleLines } from "./profile-lines-meta.js";
 
 /** 规则画像的最小接口（OnlineLearningCortex 子集，避免硬依赖） */
@@ -532,6 +540,80 @@ export class UserProfileAggregator {
   }
 
   /**
+   * 档案字段权威投影（2026-10-09 单一权威源）：
+   * 把「基本信息」里的档案字段行（称呼/职业/居住地…）重渲染为结构化事实库
+   * 的当前值——同一字段只保留一行、清掉别名行（如「用户称呼」）与行内历史注解。
+   * 记忆系统未装配/无权威值时原样返回（零注入）。
+   */
+  private async projectProfileFields(actorId: string, md: string): Promise<string> {
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      const facts = getMemoryComponents().factStore?.getActiveFacts?.(actorId) ?? [];
+      if (facts.length === 0) return md;
+      return projectProfileMarkdown(md, facts);
+    } catch {
+      return md;
+    }
+  }
+
+  /**
+   * 把 LLM 抽取到的档案字段值回灌权威库（structured_facts）——本聚合器是
+   * 权威库的**馈入方**而非并列写入方，避免画像与事实库各记一个值。
+   * 只回收 basic section 里「字段：值」形态的短断言（问句/长句不回收）。
+   */
+  private async feedBasicFieldsToCanonicalStore(
+    actorId: string,
+    ops: readonly ProfileOp[],
+  ): Promise<void> {
+    const candidates: Array<{ field: string; value: string }> = [];
+    for (const op of ops) {
+      if (op.section !== "basic" || op.op === "DELETE") continue;
+      const parsed = op.line ? parseFieldLine(op.line) : null;
+      if (!parsed) continue;
+      const field = profileFieldOfLabel(parsed.label);
+      if (!field) continue;
+      // 去掉行内注解（「王哥；也曾使用"王king"」→「王哥」）
+      const value = parsed.value.split(/[；;]/)[0]!.trim();
+      if (!value || value.length > 40 || /[？?]$/.test(value) || /待了解|未知/.test(value)) continue;
+      candidates.push({ field, value });
+    }
+    if (candidates.length === 0) return;
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      const store = getMemoryComponents().factStore;
+      if (!store) return;
+      for (const c of candidates) {
+        store.applyFact({
+          actorId,
+          field: c.field,
+          value: c.value,
+          sourceRef: "profile-aggregator",
+        });
+      }
+    } catch {
+      /* 记忆系统未装配 → 忽略（画像照常写） */
+    }
+  }
+
+  /**
+   * 一次性收敛（启动 / 写钩子 / 手动脚本用）：把该 actor 画像的档案字段行重渲染
+   * 为权威投影，并（可选）清掉 KV 槽位里的档案字段副本。幂等——无变化不写盘。
+   */
+  async reconcileProfileFieldAuthority(
+    actorId: string,
+    memorySync?: ProfileAuthorityDeps["memorySync"],
+  ): Promise<ProfileAuthorityReport> {
+    return this.runSerialized(actorId, async () => {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      return reconcileProfileFactsFromStores(actorId, {
+        profileStore: this.store,
+        factStore: getMemoryComponents().factStore,
+        memorySync: memorySync ?? null,
+      });
+    });
+  }
+
+  /**
    * 持久化队列条数达标即触发深度合成（2026-09-29 换锚：原内存计数器随 tsx watch
    * 重启清零，阈值永远凑不齐；队列文件本就每轮落盘，判据读它重启不丢）。
    * 间隔/在途去重由 synthesizeDeepProfile 内部闸承担；未放行时队列继续累积
@@ -641,11 +723,20 @@ export class UserProfileAggregator {
 
       const { profile: next, applied } = applyProfileOps(currentProfile, ops);
       if (applied.length === 0) return true;
-      await this.store.write(actorId, next);
+      // 单一权威源闭环：LLM 抽到的档案字段先回灌结构化事实库（唯一写入者），
+      // 再把画像的档案字段行投影为权威值（去别名重复行 / 清行内历史注解）。
+      await this.feedBasicFieldsToCanonicalStore(actorId, applied.map((a) => a.op));
+      const projected = await this.projectProfileFields(actorId, next);
+      await this.store.write(actorId, projected);
 
-      // 写后校验：重读文件，确认每条操作真实生效且落在正确 section
+      // 写后校验：重读文件，确认每条操作真实生效且落在正确 section。
+      // 基本信息里的档案字段行由权威投影接管（会被重渲染），不计为失败。
       const written = await this.store.read(actorId);
-      const failures = verifyProfileOps(written, applied);
+      const failures = verifyProfileOps(written, applied).filter((a) => {
+        if (a.op.section !== "basic" || a.expectLine === undefined) return true;
+        const parsed = parseFieldLine(a.expectLine);
+        return !(parsed && profileFieldOfLabel(parsed.label));
+      });
       if (failures.length > 0) {
         console.warn(
           `[ProfileAggregator] 画像写入校验未通过: ${actorId} (${failures.length}/${applied.length} 条未落位)`,
@@ -732,12 +823,14 @@ export class UserProfileAggregator {
           console.warn("[ProfileAggregator] LLM 输出不符合画像格式，保持旧画像");
           return false;
         }
+        // 单一权威源：整文重写同样受权威投影约束，档案字段行以事实库为准
+        const projected = await this.projectProfileFields(actorId, cleaned);
 
-        await this.store.write(actorId, cleaned);
+        await this.store.write(actorId, projected);
         this.lastSynthesisAt.set(actorId, Date.now());
         // 新鲜度 sidecar 随整文重写重建（保留原有行的历史，新行从现在起算）
         try {
-          await rebuildProfileMeta(actorId, cleaned);
+          await rebuildProfileMeta(actorId, projected);
         } catch (metaErr) {
           console.warn(`[ProfileAggregator] 行元数据重建失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
         }

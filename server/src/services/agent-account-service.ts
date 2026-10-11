@@ -99,7 +99,28 @@ export class AgentAccountService {
     }
   }
 
+  /**
+   * 落盘串行队列。
+   *
+   * persist 的语义是「全量快照 + 整文件覆盖」，并发调用时若各写各的，
+   * Windows 上同一路径的并发 open 会间歇性 EPERM（文件正被上一次写入
+   * 或杀毒扫描占用）——批量/并发注册 200 路时必现。
+   * 这里把写入排成一条链：快照推迟到真正落盘那一刻才取，
+   * 因此后写者必然带上前写者的改动，既串行又不重复写。
+   */
+  private persistQueue: Promise<void> = Promise.resolve();
+
   async persist(): Promise<void> {
+    const next = this.persistQueue.then(() => this.writePersistedSnapshot());
+    // 单次落盘失败不污染队列，后续写入照常排队
+    this.persistQueue = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
+  }
+
+  private async writePersistedSnapshot(): Promise<void> {
     const dir = dirname(this.persistPath);
     await mkdir(dir, { recursive: true });
     const accounts = Array.from(this.byActorId.values()).map((a) => ({

@@ -34,6 +34,13 @@ class TravelWebPanelController {
   /// 用户点击网页顶栏「全屏」。
   void Function()? onFullscreen;
 
+  /// 页面自绘标题栏的窗口动作（'windowDrag' | 'minimize' | 'maximize'）。
+  ///
+  /// 行程独立窗口宿主把页面设为无边框窗口（setAsFrameless），窗口的拖动/最小化/
+  /// 最大化就交给页面标题栏（1:1 设计稿的自绘标题栏），经这里回调到宿主执行。
+  /// 应用内兜底面板不注册 → 这些动作静默忽略（主窗口不该被行程页最小化）。
+  void Function(String action)? onWindowAction;
+
   Future<void> Function(String script)? _executeScript;
   bool _ready = false;
   final List<String> _pendingScripts = <String>[];
@@ -60,6 +67,7 @@ class TravelWebPanelController {
     onOpenUrl = null;
     onClose = null;
     onFullscreen = null;
+    onWindowAction = null;
   }
 
   /// JS → Dart 事件入口：由视图把 webMessage 原样转发进来。
@@ -108,6 +116,11 @@ class TravelWebPanelController {
       case "fullscreen":
         onFullscreen?.call();
         break;
+      case "windowDrag":
+      case "minimize":
+      case "maximize":
+        onWindowAction?.call("${data["event"]}");
+        break;
       default:
         break;
     }
@@ -115,7 +128,7 @@ class TravelWebPanelController {
 
   // ── 出站：Dart → JS（未 attach / 未就绪时入队或 no-op）──────────────
 
-  /// 注入本机 server 瓦片代理基址：WebView(about:blank) 无 origin，panel.html
+  /// 注入本机 server 瓦片代理基址：WebView(about:blank) 无 origin，行程页
   /// 的相对路径代理不可用，必须给绝对地址。底图资源随后走 server 本地缓存
   /// （首次拉取落盘、规划完成预热），弱网/离线也秒开。空串=不可用走 CDN。
   void setTileProxy(String base) {
@@ -186,7 +199,7 @@ class TravelWebPanelController {
   }
 }
 
-/// 整页 WebView 面板的载荷构建：把 [TravelPlanData] 转成 panel.html
+/// 整页 WebView 面板的载荷构建：把 [TravelPlanData] 转成行程桌面页
 /// `loadPlan` 需要的 JSON（媒体地址已解析为服务端绝对地址）。
 abstract final class TravelWebPanelPayload {
   static Map<String, dynamic> build(
@@ -249,7 +262,7 @@ abstract final class TravelWebPanelPayload {
     };
   }
 
-  /// 路线结果卡载荷（panel.html `showRouteCard` 渲染数据）。
+  /// 路线结果卡载荷（行程页 `showRouteCard` 渲染数据；行迹桌面页暂不消费，留作兼容）。
   static Map<String, dynamic> routeCard({
     required String totalDistanceText,
     required String totalDurationText,

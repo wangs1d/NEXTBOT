@@ -9,6 +9,8 @@ import type { ChatUserTurn } from "./types.js";
 import type { RecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { mergeKeyPins, normalizeRecapSummaryResult } from "../services/conversation-rolling-summarizer.js";
 import {
+  annotateRecapLinesWithAge,
+  indexifyRecapForLlm,
   formatRecapStamp,
   layerRecapLinesByBudget,
   migrateRecapContentLabels,
@@ -150,6 +152,15 @@ const CHAT_COMPRESS_PRESERVE_RECENT_TURNS = 2;
 
 const SESSION_RECAP_PREFIX = "[session-recap]";
 const SESSION_RECAP_TITLE = "Earlier conversation recap:";
+/**
+ * 注入层时间锚提示行（2026-10-09）：只加进发往 LLM 的视图，不落盘。
+ * 内容静态 → 字节稳定，不打断 prefix cache；配合逐行的 `（约N天前）` 标注，
+ * 把「距今多久」显式交给模型，根治「把旧事当现事说」（「刚才你说好饿」事故家族）。
+ */
+const RECAP_TIME_ANCHOR_HINT =
+  "（本块为历史摘要：行首是该事件发生的绝对时刻，紧随的括号是它距现在的时长；" +
+  "叙述时必须按括号判断「多久前」——距今超过 1 小时不得说「刚才/刚刚/现在」，" +
+  "跨天（昨天及更早）必须按日期叙述，拿不准就只陈述内容、不报时间。）";
 /** 待归纳区标记：其下为「已滑出窗口、尚未被 LLM 增量摘要吸收」的原文占位行（绝对时间标签）。 */
 const SESSION_UNSUMMARIZED_MARKER = "[unsummarized]";
 
@@ -421,13 +432,40 @@ export type TimestampFreeLlmViewOptions = {
    * （防 `[ts:]` 复述的根修不回退），只是不再附时间轴块。
    */
   includeTimeline?: boolean;
+  /**
+   * 注入层时间锚基准时刻（2026-10-09）：给 recap 行算「距今多久」用。
+   * 默认取当前时间；测试可注入固定时刻。仅影响视图克隆，存储不动。
+   */
+  now?: Date;
 };
+
+/**
+ * 构造 recap 消息的 LLM 视图内容（2026-10-09 分类索引视图）：
+ * - 逐行追加日粒度年龄标注（`（约1天前）`）——把「距今多久」显式交给模型；
+ * - 分类索引加工：瞬时状态条目跨天从视图剔除（原话素材不再常驻，治「刚才你说
+ *   好饿」），持久事项跨天未闭环的加策略位「勿主动提」（冷索引语义）；
+ * - 标题行后补一行静态时间锚提示（字节稳定，不伤 prefix cache）；
+ * - 仅视图克隆，原消息/存储/解析完全不变。
+ */
+function buildRecapLlmViewContent(content: string, now: Date): string {
+  const withAges = annotateRecapLinesWithAge(content, now);
+  const indexed = indexifyRecapForLlm(withAges, now);
+  const lines = indexed.split("\n");
+  const titleIdx = lines.findIndex((l) => l.trim() === SESSION_RECAP_TITLE);
+  const next = titleIdx >= 0 ? (lines[titleIdx + 1] ?? "") : "";
+  if (titleIdx >= 0 && !next.includes("距现在的时长")) {
+    lines.splice(titleIdx + 1, 0, RECAP_TIME_ANCHOR_HINT);
+  }
+  const joined = lines.join("\n");
+  return joined === content ? content : joined;
+}
 
 export function buildTimestampFreeLlmView(
   msgs: ChatCompletionMessageParam[],
   options: TimestampFreeLlmViewOptions = {},
 ): TimestampFreeLlmView {
   const includeTimeline = options.includeTimeline !== false;
+  const now = options.now ?? new Date();
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((raw) => {
     // 内部元数据先剥掉：它既不参与时间轴，也不该出现在发往 LLM 的正文里。
@@ -445,7 +483,14 @@ export function buildTimestampFreeLlmView(
       const original = part.text ?? "";
       const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
       const stripped = stripLeadingTimestampFrames(original);
-      if (date && !stripped.startsWith("[session-recap]")) {
+      if (stripped.startsWith(SESSION_RECAP_PREFIX)) {
+        const recapView = buildRecapLlmViewContent(stripped, now);
+        if (recapView === original) return msg;
+        const clonedParts = parts.slice();
+        clonedParts[textIdx] = { ...part, text: recapView };
+        return cloneMessageWithClientId(msg, clonedParts);
+      }
+      if (date) {
         timeline.push({ date, roleLabel });
       }
       if (stripped === original) return msg;
@@ -458,7 +503,11 @@ export function buildTimestampFreeLlmView(
     const original = msg.content;
     const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
     const stripped = stripLeadingTimestampFrames(original);
-    if (date && !stripped.startsWith("[session-recap]")) {
+    if (stripped.startsWith(SESSION_RECAP_PREFIX)) {
+      const recapView = buildRecapLlmViewContent(stripped, now);
+      return recapView === original ? msg : cloneMessageWithClientId(msg, recapView);
+    }
+    if (date) {
       timeline.push({ date, roleLabel });
     }
     if (stripped === original) return msg;
@@ -1532,6 +1581,11 @@ export class ChatThreadStore {
     const trimmed = stripProtocolMarkersForThread(assistantText.trim());
     if (!trimmed) return;
     const msgs = this.thread(sessionId, defaultSystemPrompt);
+    // turn 级幂等（2026-10-09 发言模型 I5）：同一 clientMessageId 的轮次已经落库
+    // （user 消息带该 id，且其后已有 assistant 回复）→ 不再重复追加。
+    // 落库层是最后一道闸：即使入口幂等漏网（老客户端无 id、进程重启丢内存态），
+    // 上下文里也不会出现同一句话的两轮，杜绝"重复回复"污染后续对话与记忆。
+    if (this.isTurnAlreadyPersisted(msgs, clientMessageId)) return;
     const userAt = new Date(now.getTime());
     const assistantAt = new Date(now.getTime() + 1); // 1ms 偏移，避免同毫秒时排序并列
     const incomingUserText = userTurn.text;
@@ -1557,6 +1611,30 @@ export class ChatThreadStore {
     msgs.push({ role: "assistant", content: annotateTimeframe(trimmed, assistantAt, now) });
     this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
+  }
+
+  /**
+   * turn 级幂等判定（2026-10-09 发言模型 I5）：该 clientMessageId 的轮次是否已落库。
+   *
+   * 判定口径 = 线程里存在一条带该 clientMessageId 的 user 消息，**且其后已经跟过
+   * assistant 回复**（只有 user 没回复 = 上一轮中途失败，允许重试续写，不算重复）。
+   */
+  private isTurnAlreadyPersisted(
+    msgs: ChatCompletionMessageParam[],
+    clientMessageId?: string,
+  ): boolean {
+    const id = clientMessageId?.trim();
+    if (!id) return false;
+    for (let i = msgs.length - 1; i >= 0; i--) {
+      const msg = msgs[i];
+      if (!msg || msg.role !== "user") continue;
+      if (readUserMessageClientId(msg) !== id) continue;
+      for (let j = i + 1; j < msgs.length; j++) {
+        if (msgs[j]?.role === "assistant") return true;
+      }
+      return false;
+    }
+    return false;
   }
 
   /**

@@ -1291,15 +1291,17 @@ export class BrainCenter {
     }
 
     // === 阶段 0.93：长期记忆召回门控（记忆架构重构，单点评估）===
-    // 白名单触发（显式记忆线索 / 新会话开场 / 个人事实陈述 / 长会话指代升级）才执行
-    // 长期检索；未触发时跳过 recall 通道（省 token + 根治召回串台）。
-    // 当天的问题由 DailyJournalService.searchToday（当日日志词法检索）覆盖。
+    // 触发条件由 L1 路由 LLM 产出的 understanding 承担（2026-10-10 词表判定退役）；
+    // understandingPromise 与路由并行启动，此处消费前才 await，不增加串行延迟。
+    // understanding 缺省（路由失败/降级）→ 不触发（最小注入）。
     // 判定结果随 CognitiveResult.recallGate 透出，agent-core / prompt 装配层
-    // 直接复用，不再各自重评（此前三处独立评估正则白名单，改一处漏两处）。
+    // 直接复用，不再各自重评。
+    const turnUnderstanding = await (input.understandingPromise?.catch(() => undefined) ??
+      Promise.resolve(undefined));
     const recallGate = shouldRecallLongTerm({
       text: query,
       threadMessageCount: cognizeThreadMessageCount,
-      ambiguousFollowUp: input.ambiguousFollowUp,
+      understanding: turnUnderstanding,
     });
     if (recallGate.trigger) {
       console.log(`[BrainCenter] recall gate triggered (${recallGate.reason})`);

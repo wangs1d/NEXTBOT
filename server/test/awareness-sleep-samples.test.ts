@@ -117,7 +117,9 @@ test("重启接续：恢复的挂起会话在重启后首次非睡眠提交时�
     any2.trackSleepWindow("u@x.com", undefined, "idle");
     const samples = c2.getRecentSleepWindowSamples("u@x.com");
     assert.equal(samples.length, 1, "重启前的夜应落成样本");
-    const spanHours = samples[0]!.endHour - samples[0]!.startHour;
+    // 样本按 dayKey 记「当日小时」：入睡 17:xx / 醒来 00:0x 跨午夜时
+    // endHour < startHour，必须补 24h 进位，否则手算出 -17（午夜敏感假失败）
+    const spanHours = (samples[0]!.endHour - samples[0]!.startHour + 24) % 24;
     assert.ok(
       Math.abs(spanHours - 7) < 0.2,
       `样本时长应≈7h（起点不漂移到重启点），实际 ${spanHours}`,

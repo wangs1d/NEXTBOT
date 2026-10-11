@@ -42,7 +42,10 @@ const String kTravelPlanWindowHiddenEnv = "PAI_TRAVEL_PLAN_HIDDEN";
 const String kTravelPlanParentPidEnv = "PAI_TRAVEL_PLAN_PARENT_PID";
 
 /// 行程规划独立窗口默认尺寸。
-const Size kTravelPlanWindowSize = Size(1120, 760);
+///
+/// 与页面设计稿（`server/web/travel-map/desktop.html`）的版面尺寸一致：
+/// 1:1 呈现的前提是窗口就是设计稿那扇窗（1140×740），最大化留给用户自己按。
+const Size kTravelPlanWindowSize = Size(1140, 740);
 
 /// 行程窗口载荷：卡片数据 + 打开时刻的主题变体。
 ///
@@ -199,7 +202,12 @@ class TravelPlanWindowLauncher {
 // 子进程窗口分支（main() 检测到环境变量后进入）
 // ═══════════════════════════════════════════════════════════════════
 
-/// 独立行程窗口的子进程入口：预热 WebView → 信箱轮询 → 配置窗口 → runApp。
+/// 行程规划独立窗口的子进程入口：预热 WebView → 信箱轮询 → 配置窗口 → runApp。
+///
+/// 窗口形态（2026-10-11 收敛）：**无边框**。页面是「行迹 · 桌面端」设计稿的
+/// 1:1 呈现，自带标题栏（三色按钮 + 拖动区），系统标题栏会与之重复；因此窗口
+/// 去边框，窗口控制经页面 → 桥 → [_handleWindowAction]。打开尺寸即设计稿尺寸
+/// [kTravelPlanWindowSize]（不再默认最大化）。
 ///
 /// 由 main() 在启动最早期调用（不 bootstrap 完整应用）。
 Future<void> runTravelPlanWindow(String mailboxDirPath) async {
@@ -216,6 +224,11 @@ Future<void> runTravelPlanWindow(String mailboxDirPath) async {
   _startParentWatchdog();
 
   await windowManager.ensureInitialized();
+  // 无边框窗口（2026-10-11）：页面（行迹桌面页）自带设计稿的自绘标题栏
+  // （三色按钮 + 标题 + 拖拽区），系统标题栏再叠一条 = 双标题栏。
+  // 因此窗口去掉系统边框，拖动/最小化/最大化/关闭全部经页面标题栏 → 桥 →
+  // _handleWindowAction 落到 windowManager。
+  await windowManager.setAsFrameless();
   // 系统标题栏 X 不结束进程：拦截为隐藏，进程与 WebView 保活实现重开零等待
   await windowManager.setPreventClose(true);
   windowManager.addListener(_TravelPlanWindowListener());
@@ -224,21 +237,38 @@ Future<void> runTravelPlanWindow(String mailboxDirPath) async {
     center: true,
     title: "行程规划",
     backgroundColor: Colors.transparent,
-    // 保留系统标题栏：拖动 / 最小化 / 最大化 / 关闭(X) 全部交给系统默认行为
+    titleBarStyle: TitleBarStyle.hidden,
   );
   await windowManager.waitUntilReadyToShow(options, () async {
     // 预热拉起：窗口保持隐藏（进程与共享 WebView 照常就绪），等首个
     // reveal 载荷经 _revealIfNeeded 显窗——用户点卡片按钮时零等待前置。
     if (Platform.environment[kTravelPlanWindowHiddenEnv] == "1") return;
     await windowManager.show();
-    // 默认最大化（全屏）打开：规划完成自动弹出时即大屏沉浸浏览；
-    // 用户可随时经标题栏还原为小窗（与主窗口并排）
-    try {
-      await windowManager.maximize();
-    } catch (_) {/* 最大化失败（WM 限制等）退回默认尺寸 */}
     await windowManager.focus();
   });
   runApp(TravelPlanWindowApp(coordinator: coordinator));
+}
+
+/// 页面自绘标题栏的窗口动作（无边框窗口）：拖拽 / 最小化 / 最大化还原。
+Future<void> _handleWindowAction(String action) async {
+  try {
+    switch (action) {
+      case "windowDrag":
+        await windowManager.startDragging();
+      case "minimize":
+        await windowManager.minimize();
+      case "maximize":
+        if (await windowManager.isMaximized()) {
+          await windowManager.unmaximize();
+        } else {
+          await windowManager.maximize();
+        }
+      default:
+        break;
+    }
+  } catch (_) {
+    // 窗口尚未就绪等：静默忽略，不传染页面
+  }
 }
 
 /// 行程信箱协调器（子进程内）：轮询 latest.json 指针，装载新载荷并通知 UI。
@@ -327,19 +357,9 @@ class TravelPlanWindowCoordinator extends ChangeNotifier {
       if (!await windowManager.isVisible()) {
         await windowManager.show();
         await windowManager.focus();
-        // 预热拉起的窗口从未走过初始最大化：首次 reveal 补齐同等体验
-        if (!_everShown) {
-          _everShown = true;
-          try {
-            await windowManager.maximize();
-          } catch (_) {/* 最大化失败退回默认尺寸 */}
-        }
       }
     } catch (_) {/* 窗口尚未初始化时忽略：初始 show 流程负责 */}
   }
-
-  /// 首次 reveal 前是否已显过窗（预热拉起的首个 reveal 补最大化）。
-  bool _everShown = false;
 
   /// 「关闭」= 隐藏窗口保活进程（重开零等待）。
   Future<void> hide() async {
@@ -455,6 +475,8 @@ class _TravelPlanWindowState extends State<TravelPlanWindowApp> {
         data: p.card,
         fullscreen: true,
         onClose: () => unawaited(widget.coordinator.hide()),
+        // 无边框窗口：页面自绘标题栏的拖动/最小化/最大化回宿主执行
+        onWindowAction: (String action) => unawaited(_handleWindowAction(action)),
       ),
     );
   }

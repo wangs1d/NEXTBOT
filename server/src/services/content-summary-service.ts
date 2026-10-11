@@ -389,7 +389,7 @@ function parseSections(content: string): ParsedSection[] {
         rawText: "",
       };
     } else if (currentSection) {
-      if (trimmed.length > 5) {
+      if (trimmed.length > 5 && !isMediaOnlyLine(trimmed)) {
         currentSection.items.push(trimmed);
         currentSection.rawText += (currentSection.rawText ? "\n" : "") + trimmed;
       }
@@ -407,6 +407,21 @@ function truncateBrief(text: string, maxLen: number): string {
   const clean = text.trim();
   if (clean.length <= maxLen) return clean;
   return `${clean.slice(0, maxLen - 3)}...`;
+}
+
+/**
+ * 媒体行判定：markdown 图片/链接行（`![alt](url)` / `[alt](url)` / 裸 URL 行）。
+ * 要点提取只吃文字内容——图片行混进 briefPoints 会变成「!alt(url)」式垃圾要点
+ * （2026-10-10 搜图轮实测），链接行则把 URL 混进摘要文案。
+ */
+function isMediaOnlyLine(line: string): boolean {
+  const t = line.trim();
+  if (!t) return false;
+  if (/^!\[[^\]]*\]\([^)]*\)$/.test(t)) return true; // 纯 markdown 图片
+  if (/^\[[^\]]*\]\([^)]*\)$/.test(t)) return true; // 纯 markdown 链接
+  if (/^!?\S+\((?:https?:\/\/|\/)[^)]*\)$/.test(t) && !/\s/.test(t)) return true; // 被剥过括号的 !alt(url) 残形
+  if (/^https?:\/\/\S+$/.test(t)) return true; // 裸 URL 行
+  return false;
 }
 
 function isGenericSummaryTitle(title: string, category: ContentCategory): boolean {
@@ -544,7 +559,7 @@ function extractOverviewHighlights(
         .replace(/^[""「『【]/, "")
         .replace(/[""」』】]$/, "")
         .trim();
-      if (clean.length >= 6) push(clean);
+      if (clean.length >= 6 && !isMediaOnlyLine(clean)) push(clean);
     }
   } else {
     // 纯段落：取开头几句完整句子
@@ -684,6 +699,67 @@ ${summaryData}
 [CONTENT_SUMMARY_V2_END]
 
 <details_card ref="${summary.id}" />`;
+}
+
+/**
+ * 从文本中摘出 CONTENT_SUMMARY_V2 块为结构化卡（结构化通道迁移，2026-10-10）。
+ *
+ * 返回：
+ *   - card：块内 JSON 载荷（损坏时为 null，但整块仍会从 text 剥离——载荷坏了
+ *     也不能让它以裸 JSON 透出）；
+ *   - text：剥离整块与孤儿 details_card 后的正文。文本通道从此不再携带摘要块，
+ *     卡片随 chat.assistant_done 的 summaryCard 字段下发。
+ */
+export function extractContentSummaryCard(
+  text: string,
+): { card: Record<string, unknown> | null; text: string } {
+  if (!text || !text.includes(CONTENT_SUMMARY_MARKER)) {
+    return { card: null, text };
+  }
+  const match = text.match(
+    /\[CONTENT_SUMMARY_V2_START\]([\s\S]*?)\[CONTENT_SUMMARY_V2_END\]/,
+  );
+  let card: Record<string, unknown> | null = null;
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (
+        parsed &&
+        typeof parsed === "object" &&
+        (parsed as Record<string, unknown>).type === "content_summary_v2"
+      ) {
+        card = parsed as Record<string, unknown>;
+      }
+    } catch {
+      // 载荷损坏：按无卡处理，整块仍剥离（宁缺毋滥）
+    }
+  }
+  return { card, text: stripContentSummaryBlock(text) };
+}
+
+/**
+ * 从文本中剥离整个 CONTENT_SUMMARY_V2 块（标记对 + JSON 载荷 + 尾随 details_card）。
+ *
+ * 定位（不变量，2026-10-10 搜图轮裸 JSON 泄漏）：摘要块是一种「路由资产」——
+ * 它只允许被消费（客户端折叠卡渲染），绝不允许以裸文本透出。任何把媒体卡设为
+ * 本轮主形态的出口（mediaCards 非空）都必须调用本函数确定性剥离；客户端渲染层
+ * 另有同语义兜底。与模型无关：换任何模型，块要么被路由消费、要么在这里消失。
+ */
+export function stripContentSummaryBlock(text: string): string {
+  if (!text) return text;
+  let out = text;
+  if (out.includes(CONTENT_SUMMARY_MARKER)) {
+    out = out.replace(
+      /\[CONTENT_SUMMARY_V2_START\][\s\S]*?\[CONTENT_SUMMARY_V2_END\][ \t]*/g,
+      "",
+    );
+  }
+  // 孤儿 details_card 占位行无条件清（历史数据可能单独残留——占位符本身
+  // 没有独立消费者，留着的唯一归宿就是裸文本泄漏）
+  out = out.replace(/^[ \t]*<details_card\s+ref="[^"]*"\s*\/>[ \t]*$/gm, "");
+  return out
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 /**

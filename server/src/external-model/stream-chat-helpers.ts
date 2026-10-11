@@ -1411,6 +1411,114 @@ const META_TERM_KEYWORDS = [
 const MIN_META_HITS = 2;
 const SENTENCE_END_RE = /[。！？!?\n]/;
 
+/* ------------------------------------------------------------------ *
+ * 元决策自述整句净化（2026-10-11，「问时间」4 泡事故）                   *
+ * ------------------------------------------------------------------ *
+ * 现象：用户问「现在几点」，模型把**该不该调工具**的内心权衡写进了 content
+ * （不是 reasoning 通道——那条只累积不推流，客户端也没有渲染入口），随工具波
+ * 前导话直穿气泡，被分泡器切成 4 条：
+ *   ①（用户问现在几点，根据规范必须调用 clock.getcurrenttime，禁止臆测。）
+ *   ② 系统已注入当前时间提示"…凌晨"，但强制规则要求必须调用工具以拿到…
+ *   ③ 直接调用。王哥，现在是 … 贵州兴义这边的时间。
+ *   ④ 这么晚还没睡?
+ * 触发源已按「prompt 口径统一」根修（system 说"不要调工具查时间"、工具描述说
+ * "必须调用"——同一上下文互斥，模型只能先自述再执行）。本过滤器是第二道保险：
+ * 口径万一再漂，自述也出不了气泡。
+ *
+ * 与 isMetaOnlySentence（元术语需 ≥2 命中）的分工：这一族的判据是**单命中即删**，
+ * 因为下列短语几乎不可能出现在对用户说话的正常正文里——它们是模型在跟自己讲规则。
+ * 误删防护（宁漏勿残）：句内出现代码/URL/技术名词（豁免清单）或整句超长 → 放行。
+ */
+const META_DECISION_HARD_RE =
+  /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|已注入[^。！？\n]{0,10}(?:提示|时间|上下文)|调用\s*clock)/;
+/** 软判据：整句就是一句光秃秃的动作宣告（「直接调用。」「先调用工具。」），
+ *  只在整句≤8 字且没有别的内容时删——避免误伤「直接调用这个接口就行」这类正文。 */
+const META_DECISION_SOFT_RE =
+  /^(?:好[的]?[，,]?\s*)?(?:那么|那就|我)?(?:直接)?(?:去|先)?(?:调用|调一下)(?:工具|本工具|clock(?:\.\w+)?|get_current_time)?\s*$/u;
+/** 决策自述整句的长度上限：真自述都是短句；长句多半是有内容的正文。 */
+const META_DECISION_MAX_CHARS = 90;
+/** 代码/技术语境豁免：命中即放行（豁免无害，误删有害）。 */
+const CODE_CONTEXT_RE =
+  /(`|```|https?:\/\/|\b(?:API|JSON|HTTP|SDK)\b|函数|接口|方法|参数|变量|报错|编译|脚本)/;
+
+function isMetaDecisionSentence(sentence: string): boolean {
+  const raw = sentence.trim();
+  if (!raw) return false;
+  if (raw.length > META_DECISION_MAX_CHARS) return false;
+  if (CODE_CONTEXT_RE.test(raw)) return false;
+  // 比较前剥掉句末标点与括号（「直接调用。」→「直接调用」）
+  const bare = raw.replace(/^[\s（(【\[]+|[\s。！？!?：:，,、）)】\]\n]+$/gu, "");
+  if (!bare) return false;
+  return META_DECISION_HARD_RE.test(raw) || META_DECISION_SOFT_RE.test(bare);
+}
+
+/** 括号净开合数：>0 表示该句有未闭合的开括号（其闭合括号会作为残渣留在后面）。 */
+function bracketBalance(s: string): number {
+  let bal = 0;
+  for (const ch of s) {
+    if (ch === "（" || ch === "(") bal++;
+    else if (ch === "）" || ch === ")") bal--;
+  }
+  return bal;
+}
+
+/** 吞掉因整句删除而残留的孤立闭括号（「（…」被删后剩下的「）」）。返回吞掉的数量。 */
+function stripLeadingOrphanClosers(text: string, max: number): { text: string; used: number } {
+  let out = text;
+  let used = 0;
+  while (used < max) {
+    const m = /^\s*[）)]/.exec(out);
+    if (!m) break;
+    out = out.slice(m[0].length);
+    used++;
+  }
+  return { text: out, used };
+}
+
+const SENTENCE_SPLIT_RE = /(?<=[。！？!?\n])/;
+
+/** 孤立闭括号的跨批状态（流式分块喂入时，「」的闭合括号可能落在下一批）。 */
+type OrphanCloserState = { orphan: number };
+
+/**
+ * 按句末标点切片并逐句过滤（元术语句 / 元决策自述句），顺带吞掉孤立闭括号。
+ * @param state 流式路径需跨批传入同一 state；整串路径省略（内部新建）。
+ */
+function filterMetaSentences(text: string, state?: OrphanCloserState): string {
+  if (!text) return text;
+  const st = state ?? { orphan: 0 };
+  const kept: string[] = [];
+  for (const piece of text.split(SENTENCE_SPLIT_RE)) {
+    if (!piece) continue;
+    if (isMetaOnlySentence(piece) || isMetaDecisionSentence(piece)) {
+      const bal = bracketBalance(piece.replace(/[\s。！？!?\n]+$/u, ""));
+      if (bal > 0) st.orphan += bal;
+      continue;
+    }
+    let s = piece;
+    if (st.orphan > 0) {
+      const r = stripLeadingOrphanClosers(s, st.orphan);
+      s = r.text;
+      st.orphan -= r.used;
+    }
+    if (s) kept.push(s);
+  }
+  return kept.join("");
+}
+
+/**
+ * 整串版的元句净化（用于**一次性**文本：tool-loop 的最终回复与前导话）。
+ *
+ * 与 `createStreamMetaSentenceFilter` 的区别：后者按 chunk 喂入、未遇句末标点的
+ * 尾部留在缓冲里继续累积（对逐 delta 推流是对的）；对已经完整的整串来说那个行为
+ * 会把**末尾无句末标点的残句直接吞掉**，所以整串路径必须用这个纯函数版本
+ * （split→过滤→join，无残句，未命中的正文一个字节不动）。
+ */
+export function stripMetaSentences(text: string): string {
+  return filterMetaSentences(text);
+}
+
+
 function isMetaOnlySentence(sentence: string): boolean {
   if (!sentence) return false;
   let hits = 0;
@@ -1434,6 +1542,7 @@ function isMetaOnlySentence(sentence: string): boolean {
  */
 export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
   let pending = "";
+  const state: OrphanCloserState = { orphan: 0 };
 
   return function feed(delta: string): string {
     pending += delta;
@@ -1453,16 +1562,10 @@ export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
       pending.lastIndexOf("\n"),
     );
     if (lastEnd < 0) return "";
-    // 切出已完成的句子，逐句过滤
+    // 切出已完成的句子，逐句过滤（元术语句 + 元决策自述句，孤立闭括号跨批吞掉）
     const complete = pending.slice(0, lastEnd + 1);
     pending = pending.slice(lastEnd + 1);
-    const kept: string[] = [];
-    for (const sentence of complete.split(/(?<=[。！？!?\n])/)) {
-      if (!sentence) continue;
-      if (isMetaOnlySentence(sentence)) continue; // 元描述整句丢弃
-      kept.push(sentence);
-    }
-    return kept.join("");
+    return filterMetaSentences(complete, state);
   };
 }
 

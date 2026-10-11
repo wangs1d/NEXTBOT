@@ -109,12 +109,16 @@ export function normalizeFactField(field: string): string {
 /**
  * 字段别名归一：同一语义的不同说法收敛到标准字段，避免「姓名/名字/称呼」
  * 各存一行导致精确寻址漏命中。归一在 normalizeFactField 之后做精确匹配。
+ *
+ * 2026-10-09 单一权威源：本表同时是「档案字段」的权威定义——凡是能归一到
+ * 下列标准字段之一者，其值只允许存在于本库；USER_PROFILE.md / KV 槽位只能是
+ * 本库的投影（见 profile-fact-authority.ts）。新增档案字段在此登记即可。
  */
-const FIELD_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
+export const PROFILE_FIELD_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
   ["称呼", /^(姓名|名字|全名|叫我|昵称|英名|花名|称呼)$/],
   ["职业", /^(工作|职务|职位|岗位|行业|职业)$/],
   ["居住地", /^(住址|住处|所在地|城市|定居地|家在|坐标|居住地)$/],
-  ["技术栈", /^(技术|技术方向|stack|编程语言|常用语言|技术栈)$/i],
+  ["技术栈", /^(技术|技术方向|stack|编程语言|技术栈)$/i],
   ["生日", /^(出生日期|生日|诞辰|生日日期)$/],
   ["公司", /^(任职|雇主|单位|公司|所在公司)$/],
   ["学历", /^(教育|毕业院校|学校|学历)$/],
@@ -123,10 +127,24 @@ const FIELD_ALIASES: ReadonlyArray<readonly [string, RegExp]> = [
 export function canonicalFactField(field: string): string {
   const f = normalizeFactField(field);
   if (!f) return "";
-  for (const [canonical, re] of FIELD_ALIASES) {
+  for (const [canonical, re] of PROFILE_FIELD_ALIASES) {
     if (re.test(f)) return canonical;
   }
   return f;
+}
+
+/** 全部标准档案字段（调用方用于投影/清理的遍历） */
+export const PROFILE_FIELDS: readonly string[] = PROFILE_FIELD_ALIASES.map(
+  ([canonical]) => canonical,
+);
+
+/**
+ * 是否为「档案字段」（确定性、字段固定的用户信息：称呼/职业/居住地…）。
+ * 只有本库对这类字段有写入权；其余存储只能是投影。
+ */
+export function isProfileField(field: string): boolean {
+  const canonical = canonicalFactField(field);
+  return canonical !== "" && PROFILE_FIELDS.includes(canonical);
 }
 
 let uidSeq = 0;
@@ -288,6 +306,23 @@ export class StructuredFactStore {
       )
       .get(actorId, entity, f) as FactRow | undefined;
     return row ? toFact(row) : null;
+  }
+
+  /**
+   * 某字段的全部已知值（当前 + superseded 历史，去重）——供投影侧识别「陈旧副本」：
+   * 别的存储里若还写着该字段的旧值（"我是王king"），可据此判定并清除。
+   */
+  getAllValuesForField(actorId: string, field: string, entity = "user"): string[] {
+    const f = canonicalFactField(field);
+    const ent = normalizeFactField(entity) || "user";
+    if (!actorId || !f) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT value FROM structured_facts
+         WHERE actor_id = ? AND entity = ? AND field = ?`,
+      )
+      .all(actorId, ent, f) as Array<{ value: string }>;
+    return [...new Set(rows.map((r) => r.value))];
   }
 
   /**

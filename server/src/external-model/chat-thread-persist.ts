@@ -334,6 +334,34 @@ export class ChatThreadPersistence {
     return sanitized;
   }
 
+  /**
+   * 只读枚举某 actor 名下的全部持久化线程（2026-10-10 跨会话检索用）。
+   *
+   * 匹配规则：session key 为裸 actorId（主会话）、`master:{actor}`、
+   * `notes:{actor}`、`proactive:{actor}:{ts}` 等形态——凡「前缀边界后紧跟
+   * actorId」的 key 都算该 actor 名下（`:` 边界防子串误配）。
+   * 同时覆盖主文件与 notes 独立文件两份存储。
+   */
+  getActorThreads(actorId: string): Array<{
+    sessionId: string;
+    updatedAt: string;
+    messages: ChatCompletionMessageParam[];
+  }> {
+    const id = actorId?.trim();
+    if (!id) return [];
+    const owned = (key: string): boolean =>
+      key === id || key.includes(`:${id}`) || key.includes(`${id}:`);
+    const out: Array<{ sessionId: string; updatedAt: string; messages: ChatCompletionMessageParam[] }> = [];
+    for (const store of [this.data, this.notesData]) {
+      for (const [sessionId, row] of Object.entries(store.sessions)) {
+        if (!owned(sessionId)) continue;
+        if (!row?.messages?.length) continue;
+        out.push({ sessionId, updatedAt: row.updatedAt, messages: row.messages });
+      }
+    }
+    return out;
+  }
+
   scheduleSave(sessionId: string, threadMessages: ChatCompletionMessageParam[]): void {
     if (!shouldPersistChatThread(sessionId)) return;
     const nonSystem = threadMessages.filter((m) => m.role !== "system");

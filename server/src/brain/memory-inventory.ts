@@ -153,10 +153,21 @@ export class MemoryInventory {
       .slice(0, 6)
       .map(([topic, count]) => ({ topic, count }));
 
-    // 覆盖缺口：核心画像类条目为空时提示
+    // 覆盖缺口：核心画像类条目为空时提示。
+    // 档案字段（称呼/职业/居住地…）现由结构化事实库权威持有，KV memory_facts 里
+    // 不再保留副本（2026-10-09 单一权威源）——判定「基本事实」覆盖必须把事实库
+    // 算进来，否则会把有档案的用户误报成缺口。
+    let hasStructuredFacts = false;
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      hasStructuredFacts =
+        (getMemoryComponents().factStore?.getActiveFacts?.(actorId)?.length ?? 0) > 0;
+    } catch {
+      /* 记忆系统未装配 */
+    }
     const gaps: string[] = [];
     if (!entries["memory_preferences"]) gaps.push("偏好");
-    if (!entries["memory_facts"]) gaps.push("基本事实");
+    if (!entries["memory_facts"] && !hasStructuredFacts) gaps.push("基本事实");
     if (!entries["memory_commitments"] && !entries["memory_open_loops"]) gaps.push("待办与承诺");
 
     const stats: MemoryInventoryStats = { totalLines, byKey, timeDistribution, topTopics, gaps };

@@ -148,6 +148,7 @@ import type { PictureKit } from "@private-ai-agent/picture";
 import { buildGoalPlanningModule } from "./goal-planning/index.js";
 import { buildMemoryGovernanceModule } from "./memory-governance/index.js";
 import type { GoalPlanner } from "../../proactivity/goal-planner.js";
+import type { GoalRunner } from "../../proactivity/goal-runner.js";
 import type { AuditTrailService } from "../../proactivity/audit-timeline.js";
 import type { InterestWatcher } from "../../proactivity/interest-watcher.js";
 import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
@@ -226,6 +227,11 @@ export interface CapabilityModuleDeps {
    * GoalBoard/AgentCore 之前构造，字段在服务建成后再赋值（handler 调用时读取）。
    */
   goalPlanner?: GoalPlanner | null;
+  /**
+   * 目标后台自主循环（GoalRunner，2026-10-10）：晚绑定；goal.runner.status
+   * 诊断工具读取其运行状态（是否启用/扫描间隔/跟踪目标数）。
+   */
+  goalRunner?: GoalRunner | null;
   /** 行为审计时间线（activity.timeline）：同上晚绑定 */
   auditTrailService?: AuditTrailService | null;
   /** 兴趣池（memory.forget 联动清除）：晚绑定 */

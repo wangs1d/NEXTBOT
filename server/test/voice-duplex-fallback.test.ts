@@ -17,7 +17,7 @@ const { VoiceDuplexService } = await import(
   "../src/services/voice-duplex/voice-duplex-service.js"
 );
 const { DuplexVoiceSession } = await import("../src/services/voice-duplex/duplex-session.js");
-const { MinimaxDuplexSession } = await import("../src/services/voice-duplex/minimax-duplex-session.js");
+const { RealtimeDuplexSession } = await import("../src/services/voice-duplex/realtime-duplex-session.js");
 
 /** fake realtime：isEnabled 可控，其余任意方法调用记录到 calls（Proxy 兜底）。 */
 function fakeRealtime(enabled: boolean, calls: string[]) {
@@ -80,7 +80,7 @@ test("未禁用：已配置 realtime 用端到端引擎", () => {
   delete process.env.MINIMAX_REALTIME_DUPLEX_DISABLED;
   try {
     const { service } = buildService(true);
-    assert.equal(pickEngine(service), MinimaxDuplexSession.name);
+    assert.equal(pickEngine(service), RealtimeDuplexSession.name);
   } finally {
     if (prev !== undefined) process.env.MINIMAX_REALTIME_DUPLEX_DISABLED = prev;
   }
@@ -89,4 +89,39 @@ test("未禁用：已配置 realtime 用端到端引擎", () => {
 test("未配置 realtime：直接走 pipeline 引擎", () => {
   const { service } = buildService(null);
   assert.equal(pickEngine(service), DuplexVoiceSession.name);
+});
+
+/**
+ * 端口抽象的核心保证：任何实现 RealtimeVoiceEngine 的引擎（本地/其它云端）都能
+ * 塞进 realtimeEngines 被选中，且其 descriptor.name 原样透传到会话与客户端回执，
+ * 上层（本服务/协议/客户端）无需知道它是谁。
+ */
+test("端口注册：自定义引擎（realtimeEngines）被选中且名称透传", () => {
+  const custom = {
+    descriptor: {
+      name: "local-realtime",
+      inputSampleRate: 16000,
+      outputSampleRate: 24000,
+      inputChunkBytes: 3200,
+      inputChunkDelayMs: 0,
+      streamingTts: true,
+    },
+    isEnabled: () => true,
+    openSession: () => ({
+      alive: false,
+      turn: async () => ({ audio: Buffer.alloc(0), transcript: "", asrText: null, firstAudioMs: null, totalMs: 0 }),
+      close: () => {},
+    }),
+  };
+  const service = new VoiceDuplexService({
+    voiceDialogueService: { getProvider: () => ({ asr: {}, tts: {}, llm: { chat: async () => "hi" } }) },
+    realtimeEngines: [custom],
+  } as unknown as ConstructorParameters<typeof VoiceDuplexService>[0]);
+
+  const session = (service as unknown as {
+    createSession: (sink: () => void) => RealtimeDuplexSession;
+  }).createSession(() => {});
+  assert.equal(session.constructor.name, RealtimeDuplexSession.name);
+  assert.equal(session.engine, "local-realtime");
+  session.dispose();
 });

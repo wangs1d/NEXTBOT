@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/material.dart";
 
 import "../../core/theme/app_typography.dart";
+import "../../core/utils/content_summary_parser.dart";
 import "accent_panel.dart";
 import "content_summary_detail_formatter.dart";
 
@@ -25,7 +26,14 @@ class StructuredAssistantMessageBody extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String normalized = text.replaceAll("\r\n", "\n").trimRight();
+    // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：本组件是
+    // 多条路由共用的正文渲染器，收到的文本若混入摘要块（mediaCards 分支 /
+    // RENDER_AS:structured / 历史落库消息），块没有折叠卡消费者，会整段以裸
+    // JSON 渲染。这里统一剥掉——块要么被专属路由消费，要么在此消失，绝不透出。
+    final String normalized =
+        ContentSummaryParser.stripSummaryBlocks(text)
+            .replaceAll("\r\n", "\n")
+            .trimRight();
     if (normalized.isEmpty) {
       return showCursor
           ? _BlinkingCursor(

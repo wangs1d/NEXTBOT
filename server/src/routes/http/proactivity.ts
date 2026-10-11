@@ -49,6 +49,17 @@ const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
 export type ProactivityFabricDeps = {
   /** 传感器健康快照（L1） */
   sensorHealth: () => unknown;
+  /** 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模 */
+  sourceStats?: () => unknown;
+  /** 跨源实体检索（"提到三亚的所有来源"）——Muse「汇聚」价值的查询面 */
+  sourceFind?: (entity: string, opts?: { since?: number; streams?: string[]; limit?: number }) => unknown;
+  /**
+   * 票务邮件规则漏检埋点（2026-10-11）：预筛判定"像票务"但规则零产出 → 计数 + 最近样本。
+   * 回答"规则漏了多少、漏的邮件长什么样"，是评估"要不要上 LLM 兜底"的数据面。
+   */
+  mailTicketMissStats?: () => unknown;
+  /** 目标自驱循环状态（GoalRunner）：是否启用/扫描间隔/跟踪目标数 */
+  goalRunnerStatus?: () => unknown;
   /** 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察） */
   rhythmHealth?: () => unknown;
   /** 当前仲裁快照 + 预览裁决（L3） */
@@ -236,8 +247,34 @@ export function registerProactivityPipelineRoutes(
       ok: true,
       sensors: deps.fabric.sensorHealth(),
       goals: deps.fabric.goalStats(),
+      // 目标自驱循环（GoalRunner）：无人对话时 goal 是否在后台推进
+      goalRunner: deps.fabric.goalRunnerStatus?.() ?? null,
+      // 跨源统一采集库（"自己的数据库"）：外线信源收编后与内线同池
+      sources: deps.fabric.sourceStats?.() ?? null,
+      // 票务邮件规则漏检埋点：预筛命中却零产出的计数与样本（0 表示规则没漏）
+      mailTicketMiss: deps.fabric.mailTicketMissStats?.() ?? null,
       // 节律采样链健康（rhythm 未启用时为 null）：per-sensor 计数 + stalled 红点
       rhythm: deps.fabric.rhythmHealth?.() ?? null,
+    };
+  });
+
+  // GET /api/proactivity/sources/find?entity=三亚 —— 跨源实体检索：
+  // 一次返回**所有来源**里提到该实体的条目（邮件航班+日历行程+账单酒店可拼图）。
+  // 这是 Muse「跨源汇聚」价值的直接查询面，替代过去"逐个服务去问"。
+  app.get("/api/proactivity/sources/find", async (request) => {
+    if (!deps.fabric?.sourceFind) return { ok: false, error: "sourceFind not wired" };
+    const q = request.query as { entity?: string; since?: string; streams?: string; limit?: string };
+    const entity = q.entity?.trim();
+    if (!entity) return { ok: false, error: "entity required" };
+    const streamsArg = q.streams?.split(",").map((s) => s.trim()).filter(Boolean);
+    return {
+      ok: true,
+      entity,
+      hits: deps.fabric.sourceFind(entity, {
+        ...(q.since ? { since: Number(q.since) } : {}),
+        ...(streamsArg && streamsArg.length ? { streams: streamsArg } : {}),
+        ...(q.limit ? { limit: Number(q.limit) } : {}),
+      }),
     };
   });
 

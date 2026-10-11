@@ -1,5 +1,11 @@
 # Fast rebuild for the Flutter Windows *debug* client, for Dart-only changes (lib/**).
 #
+# Prefer scripts/desktop-hot-reload.mjs (npm run dev:desktop) when only Dart changed:
+# it pushes the new kernel straight into the running app through the VM Service
+# (true hot reload: no rebuild of the bundle, no process restart). This script
+# remains the restart-based fallback (e.g. after a rejected hot reload, or when
+# you want a clean process).
+#
 # Why this exists:
 #   On this machine the `flutter` tool cannot run at all: the Dart VM inside it fails to
 #   create child processes ("CreateFile failed 231", ERROR_PIPE_BUSY, system named-pipe

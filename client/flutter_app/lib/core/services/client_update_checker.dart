@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io" show Directory, File, FileMode;
 
 import "package:flutter/foundation.dart" show debugPrint, kDebugMode;
 import "package:http/http.dart" as http;
@@ -66,11 +67,38 @@ ClientUpdateCheckResult? _sessionCache;
 DateTime? _sessionCacheAt;
 const Duration _sessionCacheTtl = Duration(minutes: 5);
 
+/// 「检查更新」全链路毫秒级 trace：手动检查慢（卡片几秒后才出）时用来定位
+/// 卡在哪一环——点击 / 缓存命中 / HTTP 往返 / 读本地版本 / 卡片渲染各自打点。
+/// 落盘到 %TEMP%\pai_update_check_trace.log（stderr 被独占重定向、stdout 随
+/// 直接启动丢失，控制台类日志在线上形态拿不到）。开销：每次检查 2~5 行
+/// 追加写，可忽略；发布构建默认关闭（[traceEnabled]）。
+const bool _updateTraceEnabled =
+    bool.fromEnvironment("PAI_UPDATE_TRACE", defaultValue: false) || kDebugMode;
+
+void updateCheckTrace(String event) {
+  if (!_updateTraceEnabled) return;
+  try {
+    final DateTime now = DateTime.now();
+    final String ts =
+        "${now.hour.toString().padLeft(2, "0")}:${now.minute.toString().padLeft(2, "0")}:${now.second.toString().padLeft(2, "0")}.${now.millisecond.toString().padLeft(3, "0")}";
+    final File f = File(
+        "${Directory.systemTemp.path}\\pai_update_check_trace.log");
+    f.writeAsStringSync(
+      "$ts $event\n",
+      mode: FileMode.append,
+      flush: false,
+    );
+  } catch (_) {
+    // trace 永不影响主流程
+  }
+}
+
 /// [forceRefresh] = 跳过缓存强查一次（失败卡上的「重试」走这条）。
 Future<ClientUpdateCheckResult?> checkClientUpdate({bool forceRefresh = false}) async {
   if (!forceRefresh && _sessionCache != null) {
     final Duration age = DateTime.now().difference(_sessionCacheAt!);
     if (age < _sessionCacheTtl) {
+      updateCheckTrace("cache-hit age=${age.inMilliseconds}ms");
       if (kDebugMode) {
         debugPrint("[update-check] session cache hit (age=${age.inMilliseconds}ms)");
       }
@@ -78,6 +106,8 @@ Future<ClientUpdateCheckResult?> checkClientUpdate({bool forceRefresh = false}) 
     }
     _sessionCache = null; // 过期作废，走下面的真查
   }
+  updateCheckTrace(
+      "fresh-check begin${forceRefresh ? " (forced)" : ""}${_sessionCache != null ? " (cache-expired)" : " (no-cache)"}");
   final Stopwatch sw = Stopwatch()..start();
   final ClientUpdateCheckResult? result = await _checkClientUpdateUncached();
   if (kDebugMode) {
@@ -85,6 +115,7 @@ Future<ClientUpdateCheckResult?> checkClientUpdate({bool forceRefresh = false}) 
         "[update-check] fresh check took ${sw.elapsedMilliseconds}ms"
         "${forceRefresh ? " (forced)" : ""}");
   }
+  updateCheckTrace("fresh-check done status=${result?.status.name ?? "null"} in ${sw.elapsedMilliseconds}ms");
   if (result != null) {
     _sessionCache = result;
     _sessionCacheAt = DateTime.now();
@@ -98,7 +129,9 @@ Future<ClientUpdateCheckResult?> _checkClientUpdateUncached() async {
   // 发给用户的安装包（Release flavor）不受影响，照常比对。
   if (kDebugMode) {
     try {
+      final Stopwatch piSw = Stopwatch()..start();
       final PackageInfo info = await PackageInfo.fromPlatform();
+      updateCheckTrace("debug-branch packageInfo=${piSw.elapsedMilliseconds}ms v${info.version}");
       return ClientUpdateCheckResult(
         status: ClientUpdateStatus.upToDate,
         manifest: const ClientManifest(
@@ -116,18 +149,22 @@ Future<ClientUpdateCheckResult?> _checkClientUpdateUncached() async {
     }
   }
   try {
+    final Stopwatch httpSw = Stopwatch()..start();
     final http.Response res = await _updateHttpClient
         // 发行版双清单：服务端按 ?edition= 读 client-manifest.<edition>.json（缺失回落主文件）
         .get(Uri.parse(
             "${ApiConfig.updateManifestUrl}/api/client/manifest?edition=${ApiConfig.edition}"))
         .timeout(const Duration(seconds: 3));
+    updateCheckTrace("http done code=${res.statusCode} in ${httpSw.elapsedMilliseconds}ms url=${Uri.parse("${ApiConfig.updateManifestUrl}/api/client/manifest").host}");
     if (res.statusCode != 200) return null;
     final dynamic body = jsonDecode(utf8.decode(res.bodyBytes));
     if (body is! Map<String, dynamic>) return null;
     final ClientManifest manifest = ClientManifest.fromJson(body);
     if (manifest.latest.isEmpty || manifest.minVersion.isEmpty) return null;
 
+    final Stopwatch piSw = Stopwatch()..start();
     final PackageInfo info = await PackageInfo.fromPlatform();
+    updateCheckTrace("release-branch packageInfo=${piSw.elapsedMilliseconds}ms v${info.version}");
     final String local = info.version;
 
     ClientUpdateStatus status = ClientUpdateStatus.upToDate;

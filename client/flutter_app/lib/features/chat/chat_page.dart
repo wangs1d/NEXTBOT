@@ -23,7 +23,9 @@ import "agent_result_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
+import "utterance_grouping.dart";
 import "../../core/services/profile_manage_api.dart";
+import "../../core/services/account_profile_api.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
 
 /// 输入框内图标按钮的视觉强度
@@ -343,7 +345,9 @@ class _ChatPageState extends State<ChatPage>
       if (data == null) return "";
       for (final ProfileFactItem f in data.facts) {
         if (f.field == "称呼" && f.value.trim().isNotEmpty) {
-          return f.value.trim();
+          // 与简报卡同源同一硬规则（问候绝不直呼大名）：「王铭川」→「王先生」；
+          // 已是称呼（王哥/老王/Tony…）原样返回。
+          return politeDisplayName(f.value.trim());
         }
       }
     } catch (_) {
@@ -1187,6 +1191,7 @@ class _ChatPageState extends State<ChatPage>
     required ChatMessage mainMessage,
     required bool isUser,
     ContentSummaryParseResult? contentSummary,
+    bool isUtteranceContinuation = false,
   }) {
     // 选择模式下，只有当前选中范围内的消息参与（触发用户消息 + 其agent回复）
     final bool inSelectableRange = _deleteSelectionMode &&
@@ -1221,6 +1226,7 @@ class _ChatPageState extends State<ChatPage>
       selectedCount: _selectedMessageIds.length,
       inSelectableRange: inSelectableRange,
       isTrigger: isTrigger,
+      isUtteranceContinuation: isUtteranceContinuation,
       onEnterDeleteMode: _enterDeleteMode,
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
@@ -1382,6 +1388,20 @@ class _ChatPageState extends State<ChatPage>
                                     : ContentSummaryParser.parse(
                                         mainMessage.text);
 
+                            // 发言归组（2026-10-09 重复回复根源修复）：reverse 列表
+                            // 里 index+1 = 视觉上的上一条（更早）。同一条发言的后续
+                            // 分段渲染为「续泡」（不重复头像/名字/时间头），避免把
+                            // 「一条发言的两段」读成两条独立回复。
+                            final ChatMessage? aboveMessage = index + 1 < itemCount
+                                ? renderItems[index + 1]['main'] as ChatMessage
+                                : null;
+                            final bool isUtteranceContinuation = !isUser &&
+                                aboveMessage != null &&
+                                UtteranceGrouping.isContinuationOf(
+                                  aboveMessage.messageId,
+                                  mainMessage.messageId,
+                                );
+
                             // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
                             // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
                             // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
@@ -1393,6 +1413,8 @@ class _ChatPageState extends State<ChatPage>
                                 mainMessage: mainMessage,
                                 isUser: isUser,
                                 contentSummary: contentSummary,
+                                isUtteranceContinuation:
+                                    isUtteranceContinuation,
                               ),
                             );
                           },
@@ -1903,11 +1925,19 @@ class _HoverableMessageWidget extends StatelessWidget {
 
     /// 取消后台任务回调（任务回执 hover 取消按钮）
     this.onCancelBackgroundTask,
+
+    /// 是否为同一条发言（utterance）的后续分段（续泡）：不重复头像/名字/时间头
+    this.isUtteranceContinuation = false,
   });
 
   final ColorScheme cs;
   final ChatMessage mainMessage;
   final bool isUser;
+
+  /// 是否为同一条发言（utterance）的后续分段（续泡）：
+  /// 续泡不带头像、名字与时间头 —— 同一发言继续说下一句，不是新的一条回复。
+  /// 判据见 lib/features/chat/utterance_grouping.dart。
+  final bool isUtteranceContinuation;
 
   /// 该用户消息是否仍在排队（等待 Agent 依次处理），控制「排队中」徽标
   final bool isQueued;
@@ -1995,6 +2025,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onUserAction: onUserAction,
       onFollowupTap: onFollowupTap,
       onCancelBackgroundTask: onCancelBackgroundTask,
+      isUtteranceContinuation: isUtteranceContinuation,
     );
   }
 }
@@ -2029,6 +2060,7 @@ class _HoverableMessageContent extends StatefulWidget {
     this.onUserAction,
     this.onFollowupTap,
     this.onCancelBackgroundTask,
+    this.isUtteranceContinuation = false,
   });
 
   final ColorScheme cs;
@@ -2073,6 +2105,10 @@ class _HoverableMessageContent extends StatefulWidget {
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
+
+  /// 是否为同一条发言（utterance）的后续分段（续泡）：
+  /// 续泡不带头像、名字与时间头 —— 同一条消息继续说下一句，不是新的一条回复。
+  final bool isUtteranceContinuation;
 
   @override
   State<_HoverableMessageContent> createState() =>
@@ -2301,7 +2337,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          if (!widget.isUser) _buildAvatar(context, isUser: false),
+          if (!widget.isUser && !widget.isUtteranceContinuation)
+            _buildAvatar(context, isUser: false),
           Flexible(child: _buildMessageColumn(bubble)),
           if (widget.isUser) _buildAvatar(context, isUser: true),
         ],
@@ -2464,6 +2501,12 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         padding: const EdgeInsets.only(bottom: 2, right: 4),
         child: Text(timeStr, style: timeStyle),
       );
+    }
+
+    // 续泡（同一条发言的后续分段）：不重复名字与时间头 —— 视觉上读作
+    // 「同一条消息继续说下一句」，而不是新的一条回复（重复回复事故的观感根源）。
+    if (widget.isUtteranceContinuation) {
+      return const SizedBox(height: 2);
     }
 
     return Padding(

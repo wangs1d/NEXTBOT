@@ -107,6 +107,7 @@ class ChatMessage {
     this.waveform,
     this.streaming = false,
     this.mediaCards,
+    this.summaryCard,
     this.renderBlocks,
     this.replyBlocks,
     this.pendingMediaCards,
@@ -161,6 +162,14 @@ class ChatMessage {
   ///   - pageUrl: 来源页
   ///   - source: 来源名称
   final List<Map<String, dynamic>>? mediaCards;
+
+  /// 结构化摘要卡（CONTENT_SUMMARY 通道迁移，2026-10-10）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `summaryCard` 字段：服务端已把正文中
+  /// 的 `[CONTENT_SUMMARY_V2_*]` 块确定性摘出，文本通道不再携带 JSON。
+  /// 前端优先按本字段渲染折叠卡；历史消息（迁移前落库）仍走正文标记解析
+  /// 兼容路径，两者渲染等价。
+  final Map<String, dynamic>? summaryCard;
 
   /// 交错渲染块（renderBlocks）。
   ///

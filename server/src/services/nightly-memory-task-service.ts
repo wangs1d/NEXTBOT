@@ -685,15 +685,60 @@ export class NightlyMemoryTaskService {
     // 与事实冲突的旧行被替换，当天 per-turn 捕获的未提升行保留）
     if (canonical > 0) {
       const sync = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync!);
+      // 单一权威源（2026-10-09）：派生同步可能把行式事实写回 KV，随后清掉其中的
+      // 档案字段副本（称呼/职业/居住地…）——这些字段的权威块由 prompt 单独注入，
+      // KV 再留一份只会双写漂移。
+      const strippedCopies = await this.stripProfileFieldCopiesFromKv(actorId);
       console.log(
         `[NightlyMemory] 事实提炼: actor=${actorId} 主库 ${canonical} 条` +
           `（偏好 ${sync.preferences} / 事实 ${sync.facts}），承诺 ${kvWritten} 条走 KV，` +
-          `槽位保留近期行 ${sync.keptRecent}`,
+          `槽位保留近期行 ${sync.keptRecent}` +
+          (strippedCopies > 0 ? `，清档案字段副本 ${strippedCopies} 行` : ""),
       );
     } else if (kvWritten > 0) {
       console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
     }
     return { canonical, kvWritten };
+  }
+
+  /**
+   * 清理 KV 槽位里的档案字段副本（权威库已有该字段值时）。返回清掉的行数。
+   * 与 profile-fact-authority 共用同一判定，保证与画像投影口径一致。
+   */
+  private async stripProfileFieldCopiesFromKv(actorId: string): Promise<number> {
+    if (!this.memorySync) return 0;
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      const factStore = getMemoryComponents().factStore;
+      if (!factStore) return 0;
+      const facts = factStore.getActiveFacts(actorId);
+      if (facts.length === 0) return 0;
+      const { canonicalFieldMap, cleanProfileFieldCopiesFromSlot } = await import(
+        "./user-personalization/profile-fact-authority.js"
+      );
+      const fields = new Set(canonicalFieldMap(facts).keys());
+      if (fields.size === 0) return 0;
+      const knownValues = new Map<string, readonly string[]>(
+        [...fields].map((f) => [
+          f,
+          factStore.getAllValuesForField?.(actorId, f) ?? [],
+        ]),
+      );
+      let removed = 0;
+      for (const key of ["memory_facts", "memory_preferences"]) {
+        const { entries } = this.memorySync.getSnapshot(actorId, [key]);
+        const raw = typeof entries[key] === "string" ? (entries[key] as string) : "";
+        if (!raw) continue;
+        const r = cleanProfileFieldCopiesFromSlot(raw, fields, knownValues);
+        if (r.changed) {
+          this.memorySync.setEntry(actorId, key, r.value);
+          removed += r.removed;
+        }
+      }
+      return removed;
+    } catch {
+      return 0;
+    }
   }
 
   /** 单次 LLM 调用：从日志中抽取持久事实（失败返回空数组，不抛错） */

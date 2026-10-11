@@ -60,7 +60,12 @@ import {
 } from "../agentic-memory/user-understanding-store.js";
 import {
   createStructuredFactStoreIfEnabled,
+  isProfileField,
 } from "../agentic-memory/structured-fact-store.js";
+import {
+  reconcileProfileFactsForActors,
+  reconcileProfileFactsRuntime,
+} from "../services/user-personalization/profile-fact-authority-runtime.js";
 import { createMemoryFtsStoreIfEnabled } from "../agentic-memory/fts-store.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
@@ -129,7 +134,7 @@ import {
   configureChatSuggestionProfileSource,
   configureChatSuggestionUsageSource,
 } from "../services/chat-suggestions-service.js";
-import { VoiceDuplexService } from "../services/voice-duplex/index.js";
+import { MiniMaxRealtimeEngine, VoiceDuplexService } from "../services/voice-duplex/index.js";
 import { registerVoiceDuplexWsRoute } from "../ws/voice-duplex-route.js";
 import type { TravelTicketProvider } from "../services/booking/providers/travel-ticket-provider.js";
 import { LifeSignalHubService } from "../services/life-signal-hub-service.js";
@@ -291,7 +296,7 @@ import { registerLifeSignalTools } from "../tools/life-signal-tools.js";
 import { registerMarketSignalTools } from "../tools/market-signal-tools.js";
 import { ToolRegistry } from "../tools/tool-registry.js";
 import type { ToolContext } from "../tools/tool-registry.js";
-import { resolveActorId } from "../agent/actor-id.js";
+import { resolveActorId, isEphemeralActorId } from "../agent/actor-id.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
 import { ShoppingBrowserExecutor } from "../services/shopping-platforms/browser-executor.js";
@@ -501,6 +506,11 @@ import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
 import { ClipboardSensor, isClipboardSensorEnabled } from "../proactivity/sensors/clipboard-sensor.js";
 import { registerPerceptionOverviewTool } from "../tools/perception-tools.js";
 import { ScheduleSensor } from "../proactivity/sensors/schedule-sensor.js";
+// 外部信源收编（2026-10-10）：邮件/日历/财务 → ProactiveSensor 适配器
+import { MailSensor } from "../proactivity/sensors/mail-sensor.js";
+import { IcsSensor } from "../proactivity/sensors/ics-sensor.js";
+import { FinanceSensor } from "../proactivity/sensors/finance-sensor.js";
+import { SourceStore } from "../proactivity/source-store.js";
 import { ArbiterV2 } from "../proactivity/arbiter-v2.js";
 import {
   appendEventAudit,
@@ -534,6 +544,8 @@ function readNdjsonTail(path: string, maxLines: number): unknown[] {
 }
 import { GoalBoard } from "../proactivity/goal-board.js";
 import { GoalPlanner } from "../proactivity/goal-planner.js";
+import { GoalRunner } from "../proactivity/goal-runner.js";
+import { GoalSignalBridge } from "../proactivity/goal-signal-bridge.js";
 import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
@@ -563,7 +575,6 @@ import {
 } from "../services/consumption-ledger-listener.js";
 import { fetchHotRankings } from "../services/hot-rankings.js";
 import { RhythmCore } from "../body/rhythm-core.js";
-import { buildSchedulePromptSnapshot } from "../services/schedule-prompt-snapshot.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
 
 export async function createAppServices(): Promise<AppServices> {
@@ -1330,6 +1341,37 @@ export async function createAppServices(): Promise<AppServices> {
     fts: memoryFtsStore,
   });
 
+  // 档案字段单一权威源（2026-10-09）：结构化事实库是「称呼/职业/居住地…」的
+  // 唯一权威。字段值变更后，去抖收敛 USER_PROFILE.md 与 KV 槽位里的副本到权威值，
+  // 保证客户端 / 画像 / prompt 三处读到的永远同一份（此前各自独立写导致漂移）。
+  const profileFactReconcileTimers = new Map<string, NodeJS.Timeout>();
+  const scheduleProfileFactReconcile = (actorId: string): void => {
+    if (!actorId || profileFactReconcileTimers.has(actorId)) return;
+    const timer = setTimeout(() => {
+      profileFactReconcileTimers.delete(actorId);
+      void (async () => {
+        try {
+          const agg = brainCenter?.getUserProfileAggregator?.() ?? null;
+          const report = agg
+            ? await agg.reconcileProfileFieldAuthority(actorId, agentMemorySyncService)
+            : await reconcileProfileFactsRuntime(actorId, agentMemorySyncService);
+          if (report.profileChanged || report.profileKvSynced || report.kvRemoved > 0) {
+            console.info(
+              `[profile-fact-authority] 收敛 ${actorId}: ` +
+                `画像${report.profileChanged ? "已投影" : "不变"}` +
+                `${report.profileKvSynced ? "，KV画像副本已同步" : ""}` +
+                `${report.kvRemoved > 0 ? `，清 KV 副本 ${report.kvRemoved} 行` : ""}`,
+            );
+          }
+        } catch {
+          /* 收敛失败不阻断记忆写入主链路 */
+        }
+      })();
+    }, 900);
+    timer.unref?.();
+    profileFactReconcileTimers.set(actorId, timer);
+  };
+
   // Mem0 落库钩子（方案 B/C/D 的统一取数口）：账本落 claim → 溯源登记 →
   // 承诺自动提取（旁路 LLM，不阻塞写入主链路）。
   // P0-2：承诺捕获与记忆路由解耦——低信号/被拒存的文本也会带 commitments
@@ -1486,6 +1528,8 @@ export async function createAppServices(): Promise<AppServices> {
               `actor=${event.actorId} ${fact.field}=${fact.value}` +
               (result.previous.length > 0 ? `（原值：${result.previous[0]!.value}）` : ""),
           );
+          // 档案字段变更 → 收敛其它存储里的副本（单一权威源）
+          if (isProfileField(fact.field)) scheduleProfileFactReconcile(event.actorId);
         }
       } catch (err) {
         console.warn("[structured-facts] 事实入档失败（忽略）:", err);
@@ -1532,6 +1576,35 @@ export async function createAppServices(): Promise<AppServices> {
     factStore: structuredFactStore,
     fts: memoryFtsStore,
   });
+
+  // ─── 档案字段单一权威源：启动期一次性收敛（2026-10-09）───
+  // 存量用户此前的漂移（画像/KV 里的称呼副本、别名重复行、行内历史注解）在启动后
+  // 做一次幂等收敛；此后由写钩子 + 夜间任务维持。延后 25s 让装配完成
+  // （聚合器在 brain 块内创建，收敛走它的串行链）。
+  if (process.env.AGENT_PROFILE_FACT_AUTHORITY_RECONCILE?.trim() !== "0") {
+    const authorityTimer = setTimeout(() => {
+      void (async () => {
+        try {
+          const actors = new Set<string>(agentMemorySyncService.listSessionIds());
+          for (const id of getDailyJournalService()?.listActorIds?.() ?? []) actors.add(id);
+          const target = [...actors].filter((id) => id && !isEphemeralActorId(id));
+          if (target.length === 0) return;
+          const { scanned, changed } = await reconcileProfileFactsForActors(
+            target,
+            agentMemorySyncService,
+          );
+          if (changed > 0) {
+            console.info(
+              `[profile-fact-authority] 启动收敛完成：${changed}/${scanned} 个 actor 有变更`,
+            );
+          }
+        } catch (err) {
+          console.warn("[profile-fact-authority] 启动收敛失败（忽略）:", err);
+        }
+      })();
+    }, 25_000);
+    authorityTimer.unref();
+  }
 
   // 承诺板提醒/升级出口：proactivity 管道装配后接线（见下方 proactivePipeline
   // 构造之后的 commitmentBoard.setNotifier），未接上前由 board 内置日志降级。
@@ -1592,8 +1665,11 @@ export async function createAppServices(): Promise<AppServices> {
       : null,
   );
 
-  // ─── 记忆回查工具：把会话情景台账暴露为 memory.recall_episodic（压缩+按需展开）───
-  registerMemoryRecallTools(toolRegistry, { shortTermMemoryGateway });
+  // ─── 记忆回查工具：episodic（当前会话逐轮）+ history（跨会话历史原文，2026-10-10）───
+  registerMemoryRecallTools(toolRegistry, {
+    shortTermMemoryGateway,
+    chatThreadPersistence: getChatThreadPersistence(),
+  });
   setMemoryChatTools([...MEMORY_RECALL_CHAT_TOOLS, ...MEMORY_INVALIDATION_CHAT_TOOLS]);
 
   // DailyDigest 仅承载当日 RAM 摘要（prompt 注入），长期归档已收敛到 journal 夜间固化
@@ -2955,18 +3031,17 @@ export async function createAppServices(): Promise<AppServices> {
   }
 
   // ── 全双工实时语音（WS /ws/voice-duplex）──
-  // 引擎自动选择：配置了 MINIMAX_API_KEY 且未设 MINIMAX_REALTIME_DUPLEX_DISABLED=1
-  // 时走 MiniMax 端到端实时语音（text.turn/audio.chunk 进 → 整轮 wav 语音出）；
-  // 否则回退 pipeline 引擎（FunASR/Whisper + LLM + TTS）。
+  // 引擎装配：云端 MiniMax 只是「实时语音引擎端口」的一个实现。接入本地引擎或
+  // 换其它云端时，只需往 realtimeEngines 里加一个 RealtimeVoiceEngine 实现；
+  // 会话层、协议层、客户端均不动。无可用引擎时自动回退 pipeline（ASR+LLM+TTS）。
   const minimaxRealtimeService = new MiniMaxRealtimeService();
+  const minimaxEngine = new MiniMaxRealtimeEngine(minimaxRealtimeService);
   // 电话通话同步切 realtime：开启后通话对话由 duplex 引擎按 callId 上下文接管，
   // phone.call_reply 打字回复与接通首问 LLM 链路停用。
-  virtualPhoneService.setRealtimeVoiceEnabled(
-    minimaxRealtimeService.isEnabled() && process.env.MINIMAX_REALTIME_DUPLEX_DISABLED?.trim() !== "1",
-  );
+  virtualPhoneService.setRealtimeVoiceEnabled(minimaxEngine.isEnabled());
   const voiceDuplexService = new VoiceDuplexService({
     voiceDialogueService,
-    minimaxRealtime: minimaxRealtimeService,
+    realtimeEngines: [minimaxEngine],
     // 通话上下文注入：session.start 带 sessionId=callId 时，把通话场景并进 realtime 人设
     callVoiceContext: (callId) => virtualPhoneService.getCallVoiceContext(callId),
     systemPrompt: process.env.VOICE_DUPLEX_SYSTEM_PROMPT?.trim() || undefined,
@@ -2975,8 +3050,8 @@ export async function createAppServices(): Promise<AppServices> {
   registerVoiceDuplexWsRoute(app, voiceDuplexService);
   app.log.info(
     `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，引擎=${
-      process.env.MINIMAX_API_KEY?.trim() && process.env.MINIMAX_REALTIME_DUPLEX_DISABLED?.trim() !== "1"
-        ? "minimax-realtime"
+      minimaxEngine.isEnabled()
+        ? minimaxEngine.descriptor.name
         : `pipeline（ASR=${process.env.FUNASR_BASE_URL ? "FunASR流式" : "回退整句"}）`
     }）`,
   );
@@ -4352,6 +4427,9 @@ export async function createAppServices(): Promise<AppServices> {
       summary: item.hint || item.title,
       mode: "speak",
       source: "turn_aside_expiry",
+      // 时效准入闸：带上事件真实发生时刻（挂起时刻）——过期升级属"延迟投递"，
+      // 相关闸豁免，但超保质期（followup 24h）仍会被拦，防"隔夜补刀"翻旧账
+      originAt: item.createdAt,
     });
   });
   // 接线 1：agent-core（对话内触发 + advise 注入 + 编排器任务完成恭喜随内部传递）
@@ -4795,9 +4873,27 @@ export async function createAppServices(): Promise<AppServices> {
     },
     primaryActorId: primaryActor,
     alertMidThreshold: () => costCalibrator.alertMidThreshold(),
+    // 稳定态放行成本上限（2026-10-10）：缺省 4.5；env 可放宽到 ≤6 让"一直在
+    // 写代码/用终端"的用户也能收到积压的轻消息（原先恒 >4.5 会饿死到 TTL）
+    parkCostCeil: () => {
+      const raw = Number.parseFloat(process.env.PROACTIVITY_PARK_COST_CEIL ?? "");
+      return Number.isFinite(raw) && raw > 0 ? Math.min(10, raw) : 4.5;
+    },
+    // 挂起项过期降级投递（2026-10-10）：不再静默丢弃——把"等了但没等到时机"
+    // 的事件经管道离线兜底（落站内信）说出。管道晚绑定（下方 ref 已声明）。
+    onParkExpire: (entry) => {
+      try {
+        entry.deliver();
+        console.log(`[ArbiterV2] 挂起过期降级投递 label=${entry.label}`);
+      } catch (err) {
+        console.log(`[ArbiterV2] 挂起过期降级投递失败（忽略）label=${entry.label}: ${err}`);
+      }
+    },
   });
 
   // 评估器链（L2）：信号 delta → AttentionEvent（正文模板直出，零 LLM）
+  // 感知 → 目标桥晚绑定容器（goalPlanner 在下方创建后填充；见 activeGoalLine）
+  const goalSignalBridgeRef: { current: import("../proactivity/goal-signal-bridge.js").GoalSignalBridge | null } = { current: null };
   const builtinServices = {
       listTodayTasks: () => {
         const now = Date.now();
@@ -4851,6 +4947,9 @@ export async function createAppServices(): Promise<AppServices> {
       const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
       return (result?.items ?? []).map((item) => item.content);
     },
+    // 感知 → 目标桥（2026-10-10）：goalSignalBridge 晚绑定（goalPlanner 在下方创建）。
+    // 规则文案据此从"碎片化场景"升级为"带目标上下文"；未装配时返回 null，行为不变。
+    activeGoalLine: (actorId: string) => goalSignalBridgeRef.current?.goalLineFor(actorId) ?? null,
   };
   // 世界状态板：传感信号分层整理成"专属给规则看的现在"（程序采集+整理，零判断零 LLM）
   const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
@@ -4948,6 +5047,15 @@ export async function createAppServices(): Promise<AppServices> {
   const mailScheduleBridge = new MailScheduleBridge({
     tasks: scheduleTaskService,
     notify: (intent) => proactivityHub.submitIntent(intent),
+    // 漏检埋点（2026-10-11）：预筛判定"像票务"但规则解不出结构化字段 → 记一条。
+    // 只观测不改变行为；计数快照经 proactivityFabric.mailTicketMissStats 查询，
+    // 用于评估"要不要为这一小撮开一次有边界的 LLM 兜底"。日志按 actor 归属便于排障。
+    onMiss: (miss) => {
+      app.log.warn(
+        `[mail-ticket] 疑似票务邮件未识别（漏检埋点）：reason=${miss.reason} ` +
+          `from=${miss.from} subject=${miss.subject} bodyChars=${miss.bodyChars}`,
+      );
+    },
   });
   const mailWatchService = new MailWatchService({
     env: process.env,
@@ -5114,6 +5222,55 @@ export async function createAppServices(): Promise<AppServices> {
         : "未启用（FINANCE_BILL_AUTO_FETCH_ENABLED=1 开启；需导入支付宝 Cookie；实时场景建议叠加账单邮件通道）"
     }`,
   );
+
+  // ─── 外部信源收编 × 跨源统一采集库（2026-10-10 扫描架构 P0）───
+  // 此前外部信源（邮件/日历/财务）各扫各的、各存各的目录，产出不进 SensorKernel，
+  // 导致：① 无"自己的数据库"无法跨源查询；② 无法跨源关联（邮件航班+日历行程+账单
+  // 酒店）；③ 邮件链路挂了主系统不感知。这里把三者适配成 ProactiveSensor 收编进
+  // 统一内核（调度/退避/水位/健康白送），并把内核信号汇聚进 SourceStore。
+  // 单源回退：SENSOR_FABRIC_MAIL=0 / SENSOR_FABRIC_ICS=0 / SENSOR_FABRIC_FINANCE=0；
+  // 整库回退：SENSOR_SOURCE_STORE=0。适配器只做形状转换，业务逻辑仍留在原服务。
+  const sourceStore = new SourceStore({ dataPath: proactivityFabricPath });
+  const sensorFabricDisabled = (name: string) => process.env[`SENSOR_FABRIC_${name}`] === "0";
+  if (!sensorFabricDisabled("MAIL")) {
+    sensorKernel.register(new MailSensor({ fetchNewSince: (since) => mailWatchService.fetchNewSince(since) }));
+  }
+  if (!sensorFabricDisabled("ICS")) {
+    sensorKernel.register(new IcsSensor({ fetchEventsSince: (since) => icsSubscriptionService.fetchEventsSince(since) }));
+  }
+  if (!sensorFabricDisabled("FINANCE")) {
+    sensorKernel.register(
+      new FinanceSensor(
+        { getTransactions: (...args) => financeDeepService.getTransactions(...args) },
+        () => primaryActor(),
+      ),
+    );
+  }
+  // 内核 → SourceStore：所有信号（内线 + 外线）统一汇聚进"自己的数据库"
+  sensorKernel.onSignal((signal) => sourceStore.feed(signal));
+  console.log(
+    `[Bootstrap] 跨源统一采集库 ${sourceStore.enabled() ? "已启用" : "已关闭（SENSOR_SOURCE_STORE=0）"}；` +
+      `外部信源收编 mail=${!sensorFabricDisabled("MAIL")} ics=${!sensorFabricDisabled("ICS")} finance=${!sensorFabricDisabled("FINANCE")}`,
+  );
+  // 启动分段加载：把最近 N 天日分区重建进内存窗口 + 实体索引（对齐 Muse「扫进自己的库、
+  // 随时可查」——重启后历史仍可跨源检索，不再"重启即失忆"）。延迟到启动完成后执行，
+  // 避免同步读盘阻塞引导；只读不写。SENSOR_SOURCE_LOAD_DAYS=0 关闭。
+  if (sourceStore.enabled() && sourceStore.loadDays() > 0) {
+    const loadTimer = setTimeout(() => {
+      try {
+        const loaded = sourceStore.loadRecent();
+        if (loaded > 0) {
+          console.log(
+            `[Bootstrap] 跨源库启动加载 ${loaded} 条历史信号（最近 ${sourceStore.loadDays()} 天）；` +
+              `保留 ${sourceStore.retentionDays()} 天`,
+          );
+        }
+      } catch (e) {
+        console.warn(`[Bootstrap] 跨源库启动加载失败（忽略）：${e instanceof Error ? e.message : String(e)}`);
+      }
+    }, 1500);
+    if (typeof loadTimer.unref === "function") loadTimer.unref();
+  }
 
   // ─── Task 16 消费管家闭环装配（场景B）───
   // 工具执行成功 → hookBus tool.executed → 自动入账（finance-deep）
@@ -5342,6 +5499,37 @@ export async function createAppServices(): Promise<AppServices> {
   goalPlanner.reconcile(getTaskHub());
   capabilityModuleDeps.goalPlanner = goalPlanner;
 
+  // ─── 感知 ↔ 目标双向桥（2026-10-10，阶段二）───
+  // 让规则文案带目标上下文（"你还在推进「学英语」…"），并为 GoalRunner 提供
+  // "某步骤是否需要检索"的判定。方向 A 经 builtinServices.activeGoalLine 注入规则；
+  // 方向 B 经 GoalRunner.planRetrieval 触发按需检索。
+  const goalSignalBridge = new GoalSignalBridge({ goalPlanner });
+  goalSignalBridgeRef.current = goalSignalBridge;
+
+  // ─── GoalRunner：目标后台自主循环（2026-10-10，对标 Muse「Goal 为主引擎」）───
+  // plan 型目标此前只能靠模型在对话里被动调 goal.plan.advance——没有对话就完全静止。
+  // GoalRunner 补上"谁在后台定期推它"：常驻 tick 扫描活跃计划，复用 GoalPlanner.advance
+  // （不绕预算闸，所有派发仍走上面的 launchTask 三道护栏）。只在"值得开口"时产提案
+  // （外部步骤等确认 / 计划完成 / 阶段进展），静默推进不打扰。GOAL_RUNNER_ENABLED=0 关。
+  const goalRunner = new GoalRunner({
+    goalPlanner,
+    listActors: () => proactivityHub.exportActors().map((a) => a.actorId),
+    emitProposal: (p) =>
+      proactivityHub.submitIntent({
+        actorId: p.actorId,
+        kind: "life_reminder",
+        importance: p.importance,
+        title: p.title,
+        summary: p.summary,
+        mode: "speak",
+        source: "goal",
+      }),
+    // 方向 B（目标 → 感知）：派发前判定下一步是否需要检索（如"查机票"）。
+    planRetrieval: (goal, step) => goalSignalBridge.retrievalRequestFor(goal, step),
+  });
+  goalRunner.start();
+  capabilityModuleDeps.goalRunner = goalRunner;
+
   // 行为审计时间线（对标 Muse「全量审计轨迹」）：聚合 台账/目标板/任务面/挂起确认，
   // 出口 = GET /agent/audit-timeline + activity.timeline 工具（memory-governance 模块）
   const auditTrailService = new AuditTrailService({
@@ -5561,6 +5749,20 @@ export async function createAppServices(): Promise<AppServices> {
     // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
     // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
     mobilePush: proactivePushService,
+    // 站内信兜底（2026-10-10）：social 层 + medium 及以上的离线提案落站内信，
+    // 而非挂到 TTL 静默作废（对症 97 条 offline_wait_reconnect）。客户端下次打开即见。
+    // env PROACTIVITY_OFFLINE_INBOX=0 可关闭。
+    inbox: {
+      send: (input) =>
+        inboxService.send({
+          actorId: input.actorId,
+          title: input.title,
+          body: input.body,
+          ...(input.kind ? { kind: input.kind } : {}),
+          ...(input.importance ? { importance: input.importance as "low" | "normal" | "high" | "critical" } : {}),
+          ...(input.messageId ? { messageId: input.messageId } : {}),
+        }),
+    },
     // critical 提案升级链接线（Phase 3 待办落地）：送达 ≠ 被看到——critical 直投成功后
     // 挂起 intelligent-reminder 的 popup→tts_alarm→phone_call 三级升级链（未确认按默认
     // 规则 10/12 分钟逐级升级），用户确认（reminder.acknowledge）即停链。
@@ -5975,6 +6177,16 @@ export async function createAppServices(): Promise<AppServices> {
     proactivePushService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),
+      // 目标自驱循环状态（GoalRunner）：无人对话时 goal 是否在后台推进
+      goalRunnerStatus: () => goalRunner.status(),
+      // 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模
+      sourceStats: () => sourceStore.stats(),
+      // 票务邮件规则漏检埋点（2026-10-11）：预筛命中却零产出 → 计数 + 最近样本。
+      // 这是"要不要换 LLM 兜底"的决策数据面（当前 total 恒为 0 表示规则没漏）。
+      mailTicketMissStats: () => mailScheduleBridge.missStats(),
+      // 跨源实体检索（"提到三亚的所有来源"）——汇聚价值的查询面
+      sourceFind: (entity, opts) =>
+        sourceStore.findByEntity(entity, opts as Parameters<typeof sourceStore.findByEntity>[1]),
       // 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察）
       rhythmHealth: () => rhythmEngine?.health() ?? null,
       // 邮件反应链测试注入（2026-10-01）：模拟邮件走真实 handleIncoming 链，

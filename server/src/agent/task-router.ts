@@ -22,6 +22,35 @@ export type TurnPlane = import("./intent-router.js").TurnPlane;
 export type TurnCapability = import("./intent-router.js").TurnCapability;
 export type TurnTier = import("./intent-router.js").TurnTier;
 
+/** 本轮话头锚定目标（语义理解，模型判定）。 */
+export type TurnReference =
+  | "none" // 独立新话题/新请求
+  | "prev_assistant" // 承接 agent 上一条回复
+  | "prev_user_request" // 回应用户自己上一条请求
+  | "earlier_session"; // 明确指向更早的会话/记忆
+
+/**
+ * 每轮语义理解标记——原 isAmbiguousFollowUpMessage / SCHEDULE_RECALL_RE /
+ * travel 词表等硬编码判定的语义层替代（2026-10-09）。
+ * 由 L1 路由 LLM 与意图同体产出；字段缺省一律按 false 处理。
+ */
+export type TurnUnderstanding = {
+  /** 本轮是否为承接上文的短追问/应答（「然后呢」「那个方案呢」「你确定吗」）。 */
+  isFollowUp: boolean;
+  /** 本轮话头锚定什么。 */
+  reference: TurnReference;
+  /** 用户显式想衔接/回忆更早的对话或记忆（「上次说的」「之前聊的」）。 */
+  recallIntent: boolean;
+  /** 用户要求记住或忘掉某信息。 */
+  memoryInstruction: boolean;
+  /** 用户在陈述关于自己的事实（名字/身份/家人/住所/计划）。 */
+  personalFact: boolean;
+  /** 本轮在问自己的日程/提醒/安排。 */
+  scheduleQuery: boolean;
+  /** 本轮在问行程/旅行规划相关。 */
+  travelQuery: boolean;
+};
+
 export type RouteDecision = {
   reasons: string[];
   /** 是否需要对回复做短句分段（对话面分段，任务面信息性内容不分段）。 */
@@ -38,6 +67,14 @@ export type RouteDecision = {
   /** 模型档位。 */
   tier: TurnTier;
   /**
+   * 每轮语义理解标记（2026-10-09 词表判定退役）：追问锚定/记忆召回/日程/旅行
+   * 等语境判定由 L1 路由 LLM 与意图同体产出——「这轮在问什么、指什么」归模型，
+   * 代码只按标记执行注入路由表。路由失败/未产出时缺省，消费方一律按
+   * 「无特殊处理」（最小注入）执行：误注入=串台，漏注入=少点可选上下文，
+   * 代价不对称，保守方向明确。
+   */
+  understanding?: TurnUnderstanding;
+  /**
    * 语义路由顺带产出的轻量情绪/话题分析（与每轮路由 LLM 调用合并，
    * 省掉 MoodInferenceService 的独立每轮调用）。路由超时/降级/未产出时缺省，
    * 消费方（agent-core → mood-inference-service.ingestRouteAux）缺省时回退独立分析。
@@ -53,6 +90,13 @@ export type RouteDecision = {
    * search-before-LLM）确定性执行；其他 intent / 路由降级时缺省。
    */
   searchQuery?: string;
+  /**
+   * travel_planning 时由路由器代码构造的行程请求参数（2026-10-10 P1，与
+   * searchQuery/媒体查询词同构的确定性半边）：input 恒为用户原话，
+   * destination/days 为代码可抽取的结构化增量。agent-core 据此确定性预执行
+   * travel.plan-itinerary；destination 抽不出时不预执行（避免空参必然失败）。
+   */
+  travelPlanRequest?: import("./realtime-search-query.js").TravelPlanRequest;
 };
 
 /** 由车道派生词法级执行计划（降级路径用）。 */

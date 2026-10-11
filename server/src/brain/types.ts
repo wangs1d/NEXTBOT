@@ -670,11 +670,14 @@ export interface CognitiveInput {
   signal?: BrainSignalInput;  // 主动信号（被动认知时为空）
   sessionId?: string;
   /**
-   * 本轮是否为模糊指代/短追问（"那个方案呢""它后来怎么样"类）。
-   * 供 recall-gate 的 anaphora_escalation 判定使用——门控单点化后 cognize 是
-   * 白名单唯一评估点，必须拿到完整输入（agent-core 用 isAmbiguousFollowUpMessage 预计算）。
+   * 本轮语义理解标记的异步载体（2026-10-10 词表判定退役）：agent-core 传入
+   * L1 路由决策的 understanding Promise——cognize 与路由并行启动，不阻塞；
+   * recall-gate 的触发判定在记忆阶段消费前才 await。路由失败时 Promise 返回
+   * undefined → 门控按「不触发」（最小注入）执行。
    */
-  ambiguousFollowUp?: boolean;
+  understandingPromise?: Promise<
+    import("../agent/task-router.js").TurnUnderstanding | undefined
+  >;
 }
 
 // 端到端认知上下文：各脑区并行收集的感知/记忆/情绪/活动/能力，一次性交给 CognitiveEngine

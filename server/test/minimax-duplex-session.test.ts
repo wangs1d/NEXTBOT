@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MiniMaxRealtimeService, type RealtimeSocketLike } from "../src/services/voice-dialogue/minimax-realtime-service.js";
-import { MinimaxDuplexSession } from "../src/services/voice-duplex/minimax-duplex-session.js";
+import { MiniMaxRealtimeEngine } from "../src/services/voice-duplex/engines/minimax-realtime-engine.js";
+import { RealtimeDuplexSession } from "../src/services/voice-duplex/realtime-duplex-session.js";
 import type { DuplexServerMessage } from "../src/services/voice-duplex/protocol.js";
 
 /** 可脚本驱动的假 realtime socket（记录出站帧、手动注入服务端事件）。 */
@@ -68,7 +69,7 @@ function makeChunk(rms: number, ms = 100): Buffer {
 interface Harness {
   sockets: FakeRealtimeSocket[];
   messages: DuplexServerMessage[];
-  session: MinimaxDuplexSession;
+  session: RealtimeDuplexSession;
   /** 设置出站帧脚本：作用于当前及之后创建的每一条 fake socket。 */
   setScript: (fn: (socket: FakeRealtimeSocket, msg: Record<string, unknown>) => void) => void;
 }
@@ -105,8 +106,8 @@ function makeSession(): Harness {
     return s;
   }, ENV);
   const messages: DuplexServerMessage[] = [];
-  const session = new MinimaxDuplexSession("test_1", (m) => messages.push(m), {
-    realtime: service,
+  const session = new RealtimeDuplexSession("test_1", (m) => messages.push(m), {
+    engine: new MiniMaxRealtimeEngine(service),
     systemPrompt: "口语化短回复。",
   });
   return { sockets, messages, session, setScript: (fn) => { script = fn; } };
@@ -126,11 +127,12 @@ test("duplex-minimax：session.start 回执 engine=minimax-realtime 并进入 li
   const ready = h.messages.find((m) => m.type === "session.ready") as Extract<DuplexServerMessage, { type: "session.ready" }>;
   assert.equal(ready.engine, "minimax-realtime");
   assert.equal(ready.streamingAsr, false);
+  assert.equal(ready.streamingTts, true);
   assert.equal(h.session.getState(), "listening");
   h.session.dispose();
 });
 
-test("duplex-minimax：text.turn 全链（thinking → speaking → tts.chunk wav → turn.completed）", async () => {
+test("duplex-minimax：text.turn 全链（thinking → speaking → 流式 tts.chunk pcm → turn.completed）", async () => {
   const h = makeSession();
   await h.session.handle({ type: "session.start" } as never);
   h.setScript(okScript({ transcript: "好的，已记下明天三点的会。" }));
@@ -140,10 +142,21 @@ test("duplex-minimax：text.turn 全链（thinking → speaking → tts.chunk wa
 
   const types = h.messages.map((m) => m.type);
   assert.ok(types.includes("state")); // thinking + speaking
-  const chunk = h.messages.find((m) => m.type === "tts.chunk") as Extract<DuplexServerMessage, { type: "tts.chunk" }>;
-  const wav = Buffer.from(chunk.audio, "base64");
-  assert.equal(chunk.format, "wav");
-  assert.equal(wav.slice(0, 4).toString(), "RIFF");
+  // 流式分块：okScript 推 2 段 audio.delta → 2 块 pcm（而非整轮单块 wav）
+  const chunks = h.messages.filter((m) => m.type === "tts.chunk") as Array<
+    Extract<DuplexServerMessage, { type: "tts.chunk" }>
+  >;
+  assert.equal(chunks.length, 2);
+  assert.equal(chunks[0].format, "pcm");
+  assert.equal(chunks[0].sampleRate, 24000);
+  assert.equal(chunks[0].seq, 1);
+  assert.equal(chunks[1].seq, 2);
+  assert.equal(Buffer.from(chunks[0].audio, "base64").toString("hex"), "01020304");
+  assert.equal(Buffer.from(chunks[1].audio, "base64").toString("hex"), "0506");
+  // tts.start 必须在首个音频块之前
+  const startIdx = h.messages.findIndex((m) => m.type === "tts.start");
+  const firstChunkIdx = h.messages.findIndex((m) => m.type === "tts.chunk");
+  assert.ok(startIdx >= 0 && startIdx < firstChunkIdx, "tts.start 应先于首个 tts.chunk");
   const done = h.messages.find((m) => m.type === "turn.completed") as Extract<DuplexServerMessage, { type: "turn.completed" }>;
   assert.equal(done.userText, "帮我记一下明天三点开会");
   assert.equal(done.assistantText, "好的，已记下明天三点的会。");
@@ -153,6 +166,30 @@ test("duplex-minimax：text.turn 全链（thinking → speaking → tts.chunk wa
   const item = itemCreate.item as Record<string, unknown>;
   assert.equal(item.status, "completed");
   assert.equal(h.sockets[0].closed, false); // 连接保持给下一轮
+  h.session.dispose();
+});
+
+test("duplex-minimax：流式——首块 tts.chunk 在 response.done 之前即下发（不等整轮）", async () => {
+  const h = makeSession();
+  await h.session.handle({ type: "session.start" } as never);
+  h.setScript((socket, msg) => {
+    if (msg.type !== "response.create") return;
+    // 首段音频立刻到；整轮 done 延迟 80ms —— 验证下发不被 done 阻塞
+    queueMicrotask(() => {
+      socket.emitServer({ type: "response.audio.delta", delta: Buffer.from([9, 9]).toString("base64") });
+    });
+    setTimeout(() => {
+      socket.emitServer({ type: "response.audio_transcript.done", transcript: "在的。" });
+      socket.emitServer({ type: "response.done", response: { status: "completed" } });
+    }, 80);
+  });
+  h.session.handle({ type: "text.turn", text: "在吗" } as never);
+
+  await until(() => h.messages.some((m) => m.type === "tts.chunk"));
+  assert.equal(h.messages.some((m) => m.type === "turn.completed"), false, "done 未到，回合不应结束");
+  assert.equal(h.session.getState(), "speaking", "首块到达即进入 speaking");
+
+  await until(() => h.messages.some((m) => m.type === "turn.completed"));
   h.session.dispose();
 });
 
@@ -241,8 +278,8 @@ test("duplex-minimax：sessionId=callId 注入通话上下文进 realtime instru
     return s;
   }, ENV);
   const messages: DuplexServerMessage[] = [];
-  const session = new MinimaxDuplexSession("test_1", (m) => messages.push(m), {
-    realtime: service,
+  const session = new RealtimeDuplexSession("test_1", (m) => messages.push(m), {
+    engine: new MiniMaxRealtimeEngine(service),
     systemPrompt: "口语化短回复。",
     callVoiceContext: (callId) =>
       callId === "call-9" ? "你正与用户实时通话（提醒电话）。汇报内容：「明早八点的会改到九点」。" : null,

@@ -236,11 +236,50 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
 /** 兼容旧引用 */
 export const TOOL_CATEGORIES: ToolCategoryDef[] = DOMAIN_REGISTRY;
 
+/**
+ * 派生域摘要表（2026-10-10 根修配套）：技能族/长尾域不手工登记进 DOMAIN_REGISTRY，
+ * 而是由注册名前缀自动成域（见 derivedDomainForTool），此表只负责给这些域一句
+ * 可读摘要。缺省时用通用文案，不影响域可用性。
+ *
+ * 为什么需要它：历史上每个新技能族都要手工往 DOMAIN_REGISTRY 加域/加 secondaryTools
+ * ——travel 加了、alipay 加了、habit/booking/picture/finance/virtual-phone/agentworld
+ * 忘了加，六族全落 misc（实测 misc 35 个 > 域卡 14 上限 → 21 个工具从能力面消失、
+ * 按域 tool_discover 返回「未知能力域」、L1 域预载整族漏召）。逐族补白名单="打地鼠"，
+ * 正解是「前缀即域」的确定性派生 + 本表补可读性。
+ */
+export const DERIVED_DOMAIN_SUMMARIES: Record<string, string> = {
+  habit: "习惯养成（打卡/规律提醒/习惯清单）",
+  booking: "预订下单（机票/酒店/门票的支付与出票）",
+  picture: "照片/图库（生成/美化/整理/回忆）",
+  finance: "记账与账单导入（邮箱/文本账单接入）",
+  "virtual-phone": "虚拟手机号（申请/状态查询）",
+  agentworld: "Agent World 身份（注册/改名/验证）",
+};
+
 /** 桥接元工具：不参与任何域归属（可见性由 prepareTools 控制） */
 const BRIDGE_TOOL_NAMES = new Set(["tool_search", "tool_discover", "tool_describe", "tool_call"]);
 
 /**
- * 工具的域归属（≥1 个；无命中落 misc 兜底）。桥工具返回空。
+ * 前缀派生域（2026-10-10 根修）：注册表显式前缀都没命中时，取注册名的首段
+ * （`.` 之前）作为该工具的域——技能族工具（habit.create-rule → habit）与长尾
+ * 工具（video.find → video）因此自动成域，不必手工登记。无点号名返回 null。
+ *
+ * 确定性：纯字符串切分，同注册名恒同结果。
+ */
+export function derivedDomainForTool(registryName: string): string | null {
+  const idx = registryName.indexOf(".");
+  if (idx <= 0) return null;
+  return registryName.slice(0, idx);
+}
+
+/**
+ * 工具的域归属（≥1 个）。桥工具返回空。
+ *
+ * 解析顺序（2026-10-10 起）：
+ *   1. DOMAIN_REGISTRY 显式前缀 / secondaryTools 命中 → 用显式域（语义最准）；
+ *   2. 未命中但注册名含 `.` → 首段作派生域（技能族/长尾域自动可见，根治手工白名单漂移）；
+ *   3. 其余（无点号无名）→ misc 兜底。
+ *
  * 确定性：同注册名恒同结果（域卡/域拉取/束投影共用）。
  */
 export function domainsForTool(registryName: string): string[] {
@@ -251,11 +290,38 @@ export function domainsForTool(registryName: string): string[] {
       result.push(def.name);
     }
   }
-  return result.length > 0 ? result : ["misc"];
+  if (result.length > 0) return result;
+  const derived = derivedDomainForTool(registryName);
+  return derived ? [derived] : ["misc"];
 }
 
+/** 显式域定义查找（DOMAIN_REGISTRY 内）。 */
 export function domainDefByName(name: string): DomainDef | undefined {
   return DOMAIN_REGISTRY.find((d) => d.name === name);
+}
+
+/** 是否 DOMAIN_REGISTRY 显式登记的域（false = 前缀派生的技能族/长尾域；misc 属显式）。 */
+export function isExplicitDomain(name: string): boolean {
+  return DOMAIN_REGISTRY.some((d) => d.name === name);
+}
+
+/**
+ * 域定义解析（含派生域）：显式域优先返回注册表定义；否则合成一个派生域定义
+ * （summary 取自 DERIVED_DOMAIN_SUMMARIES 或通用文案，前缀 = `<域>.`）。
+ *
+ * 消费方：tool_discover 按域拉取（域拉取/域卡用同一份定义，防口径漂移）。
+ * 注意：域是否**可用**由「目录里是否有该域成员」裁定（见 handlers），
+ * 本函数只负责「有没有这个域的形状」，不保证域非空。
+ */
+export function resolveDomainDef(name: string): DomainDef {
+  const explicit = domainDefByName(name);
+  if (explicit) return explicit;
+  return {
+    name,
+    summary: DERIVED_DOMAIN_SUMMARIES[name] ?? `扩展能力（${name}）`,
+    prefixes: [`${name}.`],
+    secondaryTools: [],
+  };
 }
 
 /**

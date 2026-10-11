@@ -194,8 +194,14 @@ class DesktopBridgeService {
       result = await _runShell(payload);
     } else if (action == "uia_query" ||
         action == "run_input" ||
+        action == "run_automation" ||
         action == "open" ||
-        action == "show_message") {
+        action == "show_message" ||
+        action == "window" ||
+        action == "clipboard") {
+      // window / clipboard / run_automation 是手机端「我的电脑」页要用的原子动作
+      // （换窗口、剪贴板互传、按控件直调），Python stdio_worker 早已实现，
+      // 此前只是 Flutter 执行端未放行，故一并归入通用转发分支。
       result = await _runWorkerAction(payload);
     } else {
       result = <String, dynamic>{

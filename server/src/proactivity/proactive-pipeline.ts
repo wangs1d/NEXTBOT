@@ -47,6 +47,23 @@ export type ProactivePipelineDeps = {
    */
   mobilePush?: import("./mobile-push-service.js").MobilePushChannel;
   /**
+   * 站内信兜底通道（离线社交层落信箱，2026-10-10）：
+   * social 层 + medium 及以上的提案在两端离线且无手机推送通道时，落站内信
+   * （客户端下次打开即见），而非挂到 TTL 静默作废。未注入 = 走旧挂起语义。
+   * env PROACTIVITY_OFFLINE_INBOX=0 可整体关闭。
+   */
+  inbox?: {
+    send(input: {
+      actorId: string;
+      title: string;
+      body: string;
+      kind?: string;
+      importance?: string;
+      /** 幂等键：重复投递同一 id 不产生第二条 */
+      messageId?: string;
+    }): Promise<{ deliveredLive: boolean }>;
+  };
+  /**
    * 沉默日志（方案 B）：verdict=silenced 的效用评估留痕，支持
    * 「你上周为什么没提醒我 XX」反问检索。未注入时管道内建一份
    * （与 hub 共享同一实例由装配层注入，这里只兜底）。
@@ -236,39 +253,101 @@ export class ProactivePipeline {
   }
 
   /**
-   * 离线推送升级：两端都不在线（或 WS 投递竞态失败）时，必达层/critical 提案改走手机
-   * 系统推送——App 被杀也能收到系统通知。fire-and-forget；先退避 5min 防失败连打，
-   * 推送成功即出队并记 mobile_push outcome（不会在重连后重复投递）。
+   * 离线兜底（2026-10-10 重构，对症 97 条 offline_wait_reconnect 静默作废）：
+   * 两端都不在线（或 WS 投递竞态失败）时按优先级分层兜底：
+   *   ① must/critical 且手机推送可用 → 手机系统推送（现状，最高优先级）
+   *   ② social + medium 及以上 → 落站内信（客户端下次打开即见，不丢）
+   *   ③ 其余（low social）→ 维持原挂起语义（低频轻消息不值得沉淀到收件箱）
+   * 兜底成功即出队并记 outcome（不会在重连后重复投递）。
+   * 站内信兜底可用 env PROACTIVITY_OFFLINE_INBOX=0 关闭（回退旧挂起语义）。
    */
   private attemptOfflinePush(p: ProactiveProposal): void {
-    const push = this.deps.mobilePush;
-    if (!push || (p.tier !== "must" && p.importance !== "critical") || !push.hasChannel(p.actorId)) return;
     const clock = () => this.deps.nowFn?.() ?? Date.now();
-    this.store.reschedule(p.dedupKey, clock() + OFFLINE_PUSH_RETRY_MS);
-    const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
-    void push
-      .push({ actorId: p.actorId, title: p.title, body: p.directText ?? p.summary, importance: p.importance, kind: p.kind, deliveryId })
+    const push = this.deps.mobilePush;
+
+    // ① 必达层/critical：手机系统推送优先（通道可用时）
+    if (push && (p.tier === "must" || p.importance === "critical") && push.hasChannel(p.actorId)) {
+      this.store.reschedule(p.dedupKey, clock() + OFFLINE_PUSH_RETRY_MS);
+      const deliveryId = `dp_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`;
+      void push
+        .push({ actorId: p.actorId, title: p.title, body: p.directText ?? p.summary, importance: p.importance, kind: p.kind, deliveryId })
+        .then((result) => {
+          if (!result.ok) {
+            console.log(`[ProactivePipeline] 离线推送失败（保留待发区重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
+            return;
+          }
+          if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
+          this.store.markDelivered(p.dedupKey, clock());
+          this.deps.outcomes.record({
+            deliveryId,
+            actorId: p.actorId,
+            kind: p.kind,
+            channel: "mobile_push",
+            outcome: "delivered",
+            at: Date.now(),
+            ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
+          });
+          console.log(`[ProactivePipeline] 离线推送已送达 kind=${p.kind} provider=${result.provider} actor=${p.actorId}`);
+        })
+        .catch((err) => {
+          console.log(`[ProactivePipeline] 离线推送异常（忽略）kind=${p.kind}: ${err}`);
+        });
+      return;
+    }
+
+    // ② 其余（social 层；或 must/critical 但推送通道不可用）：落站内信兜底。
+    //    attemptOfflineInbox 内部按重要度过滤（only medium+ 才沉淀），
+    //    轻消息（low）仍维持原挂起语义，避免收件箱被灌爆。
+    this.attemptOfflineInbox(p);
+  }
+
+  /**
+   * 落站内信兜底（社交层离线主兜底）：medium 及以上才沉淀，low 保持挂起语义
+   * （轻消息进收件箱会污染「助手动态」心智）。落信箱即视为已投递（用户下次
+   * 打开必见），记 outcome channel=offline_inbox，避免重连重复直推。
+   */
+  private attemptOfflineInbox(p: ProactiveProposal): void {
+    if (!this.deps.inbox || this.offlineInboxDisabled()) return;
+    // 只兜中等价值以上的消息；low social 仍走原挂起（避免收件箱被灌爆）
+    const rank: Record<string, number> = { critical: 3, high: 2, medium: 1, low: 0 };
+    if ((rank[p.importance] ?? 0) < 1) return;
+    const clock = () => this.deps.nowFn?.() ?? Date.now();
+    const messageId = `proactive:${p.dedupKey}`;
+    void this.deps.inbox
+      .send({
+        actorId: p.actorId,
+        title: p.title,
+        body: p.directText ?? p.summary,
+        kind: `proactive:${p.kind}`,
+        importance: p.importance,
+        messageId,
+      })
       .then((result) => {
-        if (!result.ok) {
-          console.log(`[ProactivePipeline] 离线推送失败（保留待发区重试）kind=${p.kind} provider=${result.provider} reason=${result.reason}`);
-          return;
-        }
+        // 落盘成功即视为送达（deliveredLive=false 表示用户当前离线，打开即见）
         if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
         this.store.markDelivered(p.dedupKey, clock());
         this.deps.outcomes.record({
-          deliveryId,
+          deliveryId: `di_${clock().toString(36)}_${(this.pushSeq++).toString(36)}`,
           actorId: p.actorId,
           kind: p.kind,
-          channel: "mobile_push",
+          channel: "offline_inbox",
           outcome: "delivered",
           at: Date.now(),
           ...(topicKeyOfProposal(p) ? { topic: topicKeyOfProposal(p) } : {}),
         });
-        console.log(`[ProactivePipeline] 离线推送已送达 kind=${p.kind} provider=${result.provider} actor=${p.actorId}`);
+        console.log(
+          `[ProactivePipeline] 离线落站内信 kind=${p.kind} actor=${p.actorId} live=${result?.deliveredLive === true}`,
+        );
       })
       .catch((err) => {
-        console.log(`[ProactivePipeline] 离线推送异常（忽略）kind=${p.kind}: ${err}`);
+        // 落信箱失败：保留待发区（重连即达），不丢
+        console.log(`[ProactivePipeline] 离线落站内信失败（保留待发区）kind=${p.kind}: ${err}`);
       });
+  }
+
+  /** 站内信兜底总开关（env PROACTIVITY_OFFLINE_INBOX=0 关；缺省开） */
+  private offlineInboxDisabled(): boolean {
+    return process.env.PROACTIVITY_OFFLINE_INBOX === "0";
   }
 
   /**

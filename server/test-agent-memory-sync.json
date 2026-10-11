@@ -1,12 +1,13 @@
 {
   "sessions": {
-    "actor-3": {
-      "revision": 2,
+    "actor-2": {
+      "revision": 4,
       "entries": {
-        "memory_summary": "[2026-10-09T05:52:42.630Z] [topic:general] user prefers concise answers\n[2026-10-09T05:52:42.632Z] [topic:general] user dislikes concise answers",
+        "memory_summary": "[2026-10-10T19:46:24.592Z] [topic:general] I will continue following up on the context fix\n[2026-10-10T19:46:24.593Z] [topic:general] todo: verify continuity after 100 messages\n[2026-10-10T19:46:24.593Z] [topic:general] todo: prepare regression notes for memory rollout",
         "memory_summary_forgotten": "",
-        "memory_preferences": "[2026-10-09T05:52:42.632Z] [topic:general] user dislikes concise answers",
-        "session_recap": "[2026-10-09T05:52:42.631Z] [topic:general] user prefers concise answers\n[2026-10-09T05:52:42.632Z] [topic:general] user dislikes concise answers"
+        "memory_commitments": "",
+        "session_recap": "[2026-10-10T19:46:24.593Z] [topic:general] todo: prepare regression notes for memory rollout",
+        "memory_open_loops": "[2026-10-10T19:46:24.593Z] [topic:general] todo: prepare regression notes for memory rollout"
       }
     }
   }

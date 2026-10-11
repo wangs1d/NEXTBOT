@@ -237,6 +237,76 @@ test("映射规则: 传感信号入板（桥接映射）——meeting/unread/goa
 
 // ─── L3 仲裁 ───
 
+test("仲裁: 挂起项 TTL 过期 → onParkExpire 降级投递（不再静默消失）", () => {
+  const clock = new MockClock();
+  const expired: Array<{ label: string; urgency: string }> = [];
+  const arbiter = new ArbiterV2({
+    presence: { getPresence: () => "active", listOnline: () => ["user-1"], lastActivityAt: () => clock.t } as never,
+    lastConversationAt: () => clock.t - 10_000, // 一直"对话中"→ 永不 pause
+    screenFocus: () => "meeting",
+    nextEventMin: () => 5,
+    receptivity: () => 0.5,
+    primaryActorId: () => "user-1",
+    nowFn: () => clock.t,
+    onParkExpire: (e) => expired.push({ label: e.label, urgency: e.urgency }),
+  });
+  const r = arbiter.admit({ actorId: "user-1", urgency: "alert", label: "t-exp", deliver: () => {} });
+  assert.equal(r.action, "wait_for_pause");
+  assert.equal(arbiter.parkedEntries().length, 1, "先挂起");
+  // 推进到 TTL 过期之后（环境始终无 pause 跃迁）
+  clock.advance(9 * 60 * 60_000);
+  arbiter.forceTick();
+  assert.equal(arbiter.parkedEntries().length, 0, "过期出队");
+  assert.equal(expired.length, 1, "过期回调触发降级投递");
+  assert.equal(expired[0].label, "t-exp");
+  assert.equal(expired[0].urgency, "alert");
+});
+
+test("仲裁: 未注入 onParkExpire 时保持原静默丢弃语义（回退兼容）", () => {
+  const clock = new MockClock();
+  const arbiter = new ArbiterV2({
+    presence: { getPresence: () => "active", listOnline: () => ["user-1"], lastActivityAt: () => clock.t } as never,
+    lastConversationAt: () => clock.t - 10_000,
+    screenFocus: () => "meeting",
+    nextEventMin: () => 5,
+    receptivity: () => 0.5,
+    primaryActorId: () => "user-1",
+    nowFn: () => clock.t,
+  });
+  arbiter.admit({ actorId: "user-1", urgency: "alert", label: "t-noop", deliver: () => {} });
+  clock.advance(9 * 60 * 60_000);
+  arbiter.forceTick();
+  assert.equal(arbiter.parkedEntries().length, 0, "过期出队（无回调，行为不变）");
+});
+
+test("仲裁: parkCostCeil 可放宽稳定高成本死区（默认 4.5 饿死 → 放宽后放行）", () => {
+  // 稳定态成本 5（terminal 3 + 低接受度 2）：>4.5 饿死、≤6 放行，
+  // 复现「用户一直在写代码/用终端 → 挂起项饿到 8h TTL」的死区
+  const makeArb = (ceil: number) => {
+    const clock = new MockClock();
+    const delivered: string[] = [];
+    let focus = "meeting"; // 挂起时 snapshot 的 prev 基线
+    const a = new ArbiterV2({
+      presence: { getPresence: () => "active", listOnline: () => ["user-1"], lastActivityAt: () => null } as never,
+      lastConversationAt: () => null,
+      screenFocus: () => focus,
+      nextEventMin: () => null,
+      receptivity: () => 0, // 低接受度 → +2，把稳定态成本抬到 5
+      primaryActorId: () => "user-1",
+      nowFn: () => clock.t,
+      parkCostCeil: () => ceil,
+    });
+    a.admit({ actorId: "user-1", urgency: "normal", label: "t-ceil", deliver: () => delivered.push("x") });
+    assert.equal(a.parkedEntries().length, 1, `ceil=${ceil} 先挂起`);
+    focus = "terminal"; // 稳定高成本：无 meeting 散场跃迁、不在对话中
+    clock.advance(50 * 60_000); // 超过 45min 稳态兜底窗口
+    a.forceTick();
+    return delivered;
+  };
+  assert.equal(makeArb(4.5).length, 0, "默认阈值下稳定高成本饿死（复现 26 条 wait_for_pause 静默作废）");
+  assert.equal(makeArb(6).length, 1, "放宽阈值后兜底放行积压消息");
+});
+
 function baseSnapshot(over: Partial<Parameters<typeof interruptCost>[0]> = {}) {
   return {
     now: new Date(MockClock.localAt(15, 0)),

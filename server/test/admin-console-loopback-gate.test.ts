@@ -41,7 +41,13 @@ const deps = {
   paymentService: new PaymentService(),
 } as unknown as HttpRouteDeps;
 
-function buildApp() {
+/**
+ * 注意：门禁在**请求时**读 ADMIN_CONSOLE_ALLOW_REMOTE，而 load-server-env 会在
+ * import 期把本机 .env 覆盖回进程环境变量——所以这里必须在建 app 时显式归位，
+ * 否则本地 .env 里的一条 ALLOW_REMOTE=1 就能让「默认仅回环」的断言永远为假。
+ */
+function buildApp(allowRemote = false) {
+  process.env.ADMIN_CONSOLE_ALLOW_REMOTE = allowRemote ? "1" : "0";
   const app = Fastify({ logger: false });
   // 门禁必须在 admin 路由注册之前安装（与 index.ts 的顺序约定一致）
   installAdminConsoleLoopbackGate(app);
@@ -103,9 +109,8 @@ test("回环访问不受影响：页面 200、status 正常、token 鉴权照常
 
 test("ADMIN_CONSOLE_ALLOW_REMOTE=1 显式放行公网", async () => {
   process.env.ADMIN_UPLOAD_TOKEN = TEST_TOKEN;
-  process.env.ADMIN_CONSOLE_ALLOW_REMOTE = "1";
   try {
-    const app = buildApp();
+    const app = buildApp(true);
     const res = await app.inject({
       method: "GET",
       url: "/api/admin/overview",

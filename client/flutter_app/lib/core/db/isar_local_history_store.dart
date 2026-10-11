@@ -174,6 +174,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
             playUrl: map["playUrl"] as String?,
             mediaCards: _decryptMediaCards(map["mediaCards"]),
+            summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
           );
         }).toList();
@@ -657,6 +658,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       attachmentImageCount: message.attachmentImageCount,
       playUrl: message.playUrl,
       mediaCards: message.mediaCards,
+      summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
@@ -722,6 +724,24 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
+  /// 把结构化摘要卡加密为存储字符串（null → null）。
+  String? _encryptSummaryCard(Map<String, dynamic>? card) {
+    if (card == null || card.isEmpty) return null;
+    return _encryptFor(jsonEncode(card), _userPin);
+  }
+
+  /// 解密存储字符串为摘要卡；损坏时不抛异常，返回 null（历史兼容）。
+  Map<String, dynamic>? _decryptSummaryCard(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! Map) return null;
+      return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
   String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
     if (blocks == null || blocks.isEmpty) return null;
@@ -775,6 +795,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   if (m.playUrl != null) "playUrl": m.playUrl,
                   if (m.mediaCards != null)
                     "mediaCards": _encryptMediaCards(m.mediaCards),
+                  if (m.summaryCard != null)
+                    "summaryCard": _encryptSummaryCard(m.summaryCard),
                   if (m.renderBlocks != null)
                     "renderBlocks": _encryptRenderBlocks(m.renderBlocks),
                 },

@@ -13,7 +13,7 @@ import "mobile_theme.dart";
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
-/// - 顶栏：居中标题 + 在线状态点 + 删除全部聊天记录按钮
+/// - 顶栏：居中标题 + 在线状态点
 /// - 消息区：用户黑底白字右对齐、助手浅灰底黑字左对齐
 /// - 底部输入栏：圆角输入框(右侧「+」选照片) + 纯黑发送按钮
 ///
@@ -85,14 +85,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
       backgroundColor: p.background,
       appBar: AppBar(
         title: _buildTitle(context, p),
-        actions: [
-          IconButton(
-            tooltip: "删除全部聊天记录",
-            icon: const Icon(Icons.delete_sweep_outlined, size: 22),
-            color: p.textPrimary,
-            onPressed: _confirmClearAllChat,
-          ),
-        ],
       ),
       body: Column(
         children: [
@@ -174,41 +166,6 @@ class _MobileChatPageState extends State<MobileChatPage> {
       });
     }
     _maybeScrollToBottom();
-  }
-
-  /// 删除全部聊天记录：确认弹窗 → 调服务端清空接口 → 清空本地。
-  Future<void> _confirmClearAllChat() async {
-    final MobilePalette p = MobileTheme.of(context);
-    final bool? confirmed = await showDialog<bool>(
-      context: context,
-      builder: (BuildContext dialogCtx) => AlertDialog(
-        title: const Text("清空所有聊天记录？"),
-        content: const Text("将删除全部聊天内容，并同时清空 AI 助手的记忆。此操作不可恢复。"),
-        actions: <Widget>[
-          TextButton(
-            onPressed: () => Navigator.pop(dialogCtx, false),
-            child: const Text("取消"),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogCtx, true),
-            child: const Text("删除"),
-          ),
-        ],
-      ),
-    );
-    if (confirmed != true || !mounted) return;
-    final bool ok = await _controller.clearAllChat();
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: p.surface,
-        content: Text(
-          ok ? "已清空全部聊天记录与 AI 记忆" : "已清空本地记录(服务端未连接)",
-          style: TextStyle(color: p.textPrimary),
-        ),
-      ),
-    );
   }
 
   Widget _buildTitle(BuildContext context, MobilePalette p) {
