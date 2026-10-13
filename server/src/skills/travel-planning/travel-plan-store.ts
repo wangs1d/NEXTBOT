@@ -37,6 +37,12 @@ export interface StoredDayItem {
   transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
   /** 建议游览/用餐时长（分钟；编辑局部重排用它保持原排时口径） */
   visitDuration?: number;
+  /**
+   * 时间锚点：该条目时刻被用户/预订明确钉住（如显式指定 startTime 的新增条目）。
+   * 局部重排（retimeDayAfterEdit）保留其 startTime 只重算交通腿，之后按此时钟
+   * 顺推；客户端在行程页渲染「· 时间锚点」徽章。
+   */
+  anchor?: boolean;
   reviews?: unknown[];
   videos?: Array<Record<string, unknown>>;
 }
@@ -64,6 +70,8 @@ export interface StoredTravelPlan {
   intro?: string;
   /** 出行随身物品叮嘱（行程卡「记得带」胶囊） */
   packing?: string[];
+  /** 出发日天气一句话摘要（Open-Meteo 实时预报；行程桌面页顶栏天气胶囊展示） */
+  weather?: string;
   /** 目的地代表性封面（行程卡海报区背景；冷层回读建卡时随 travelPlan 下发） */
   coverImage?: string;
   /** 候选 POI 池（含未排入日程的备选，前端地图常驻展示） */
@@ -78,6 +86,11 @@ export interface StoredTravelPlan {
   }>;
   /** 总实付（pricingSummary.totalFinal，冗余一份避免读全文） */
   totalCost?: number;
+  /**
+   * 用户行程进度（跨端共享的「已走/当前站」；设备状态，编辑乐观锁不因此自增）。
+   * day/stop 为 0 基索引，stop 指该天 items 的当前站。
+   */
+  progress?: { day: number; stop: number; updatedAt: number };
   days: Array<{
     date: string;
     items: StoredDayItem[];
@@ -93,6 +106,8 @@ interface PlanSummaryEntry {
   endDate: string;
   dayCount: number;
   totalCost?: number;
+  /** 目的地封面（行程归档列表卡片背景；无则省略，客户端渐变兜底） */
+  coverImage?: string;
   createdAt: number;
 }
 
@@ -154,6 +169,26 @@ class TravelPlanStore {
     return null;
   }
 
+  /**
+   * 更新行程进度（设备状态，跨端共享「已走/当前站」）。
+   * 直接改内存 + 刷盘，不走 save() —— 进度更新不应自增编辑乐观锁版本，
+   * 否则手机端走一半行程会让桌面端并发的编辑请求全部 409。
+   */
+  updateProgress(planId: string, day: number, stop: number): boolean {
+    const plan = this.get(planId);
+    if (!plan) return false;
+    const prev = plan.progress;
+    if (prev && prev.day === day && prev.stop === stop) return true;
+    plan.progress = { day, stop, updatedAt: Date.now() };
+    this.mem.set(planId, plan);
+    try {
+      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+    } catch (err) {
+      console.error("[TravelPlanStore] updateProgress failed:", err);
+    }
+    return true;
+  }
+
   /** 按目的地名找最近一份行程（大小写/首尾空格不敏感，摘要索引上匹配后按 planId 取全量） */
   findByDestination(destination: string): StoredTravelPlan | null {
     const key = destination.trim().toLowerCase();
@@ -181,6 +216,7 @@ class TravelPlanStore {
     endDate: string;
     dayCount: number;
     totalCost?: number;
+    coverImage?: string;
     createdAt: number;
   }> {
     return [...this.ensureSummaryIndex().values()]
@@ -194,6 +230,7 @@ class TravelPlanStore {
         endDate: s.endDate,
         dayCount: s.dayCount,
         ...(s.totalCost != null ? { totalCost: s.totalCost } : {}),
+        ...(s.coverImage ? { coverImage: s.coverImage } : {}),
         createdAt: s.createdAt,
       }));
   }
@@ -207,6 +244,7 @@ class TravelPlanStore {
       endDate: plan.endDate ?? "",
       dayCount: plan.days?.length ?? 0,
       ...(plan.totalCost != null ? { totalCost: plan.totalCost } : {}),
+      ...(plan.coverImage ? { coverImage: plan.coverImage } : {}),
       createdAt: plan.createdAt ?? 0,
     };
   }

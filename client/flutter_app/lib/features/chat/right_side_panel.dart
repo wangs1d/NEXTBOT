@@ -94,6 +94,7 @@ class RightSidePanel extends StatefulWidget {
     this.onMessages,
     this.onGallery,
     this.onBrowser,
+    this.onTravel,
     this.messagesUnread = 0,
   });
 
@@ -107,6 +108,9 @@ class RightSidePanel extends StatefulWidget {
 
   /// 「浏览器」工具入口（用户与 Agent 共用的内嵌浏览器）。
   final VoidCallback? onBrowser;
+
+  /// 「行程」工具入口（应用内行程归档页：对话中创建过的行程都在这里）。
+  final VoidCallback? onTravel;
 
   /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
   final int messagesUnread;
@@ -948,6 +952,14 @@ class _RightSidePanelState extends State<RightSidePanel> {
           label: "日程",
           onTap: widget.onSchedule,
           subLabelBuilder: () => _scheduleSubLabel),
+      // 「行程」：应用内行程归档页（对话中创建过的行程沉淀于此，
+      // 随时回看）。与旅游家族同闸：开源版服务端不产行程卡，入口不注册。
+      if (!ApiConfig.isOssEdition)
+        _ToolSpec(
+            id: "travel",
+            icon: Icons.luggage_outlined,
+            label: "行程",
+            onTap: widget.onTravel),
       // 图库入口暂时隐藏（功能暂不接入）
       // _ToolSpec(
       //     id: "gallery",

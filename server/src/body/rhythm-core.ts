@@ -39,12 +39,14 @@ function readEnvOverworkHours(): number | null {
   return Number.isFinite(n) && n > 0 ? n : null;
 }
 
-/** 深夜活跃触发阈值（次，env RHYTHM_LATE_NIGHT_COUNT 可调，默认 2） */
+/** 深夜活跃触发阈值（次，env RHYTHM_LATE_NIGHT_COUNT 可调，默认 3）。
+ *  2026-10-12 修订：默认 2 过敏——深夜聊两句就触发全套干预（放音乐+排日程+开口），
+ *  实盘三次触发两次是「活跃 2 次」误报。提到 3 次并配合 30 分钟去抖降噪。 */
 function readLateNightThreshold(): number {
   const raw = process.env.RHYTHM_LATE_NIGHT_COUNT;
-  if (!raw) return 2;
+  if (!raw) return 3;
   const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : 2;
+  return Number.isFinite(n) && n > 0 ? n : 3;
 }
 
 /** 触发后冷却（ms，env RHYTHM_TRIGGER_COOLDOWN_MS 可调，默认 8h） */
@@ -61,8 +63,11 @@ const DEFAULT_LATE_NIGHT_START = 23;
 /** 自适应约束区间（小时）：工作阈值 / 深夜窗口起点 */
 const WORK_THRESHOLD_RANGE_H: [number, number] = [2.5, 6];
 const LATE_NIGHT_START_RANGE_H: [number, number] = [22, 26]; // 26 = 凌晨 2 点
-/** 学习样本最低数量（不足则用默认值） */
+/** 学习样本最低数量（不足则用默认值；仅检测类阈值用） */
 const MIN_SAMPLES = 5;
+/** 就寝基线学习门槛（个有效夜晚）：作息驱动休息提醒宁早勿等——
+ *  2 个有效夜晚即跟随用户作息，不再等 5 天、更不落 20:00 硬默认。 */
+const BEDTIME_LEARN_MIN_SAMPLES = 2;
 /** 学习样本滚动窗口 */
 const SAMPLE_WINDOW = 14;
 const LATE_NIGHT_END = 5; // 深夜终点（05:00）
@@ -70,8 +75,12 @@ const LATE_NIGHT_END = 5; // 深夜终点（05:00）
 const WORK_GAP_RESET_MS = 30 * 60 * 1000;
 /** 记入学习样本的最短工作段（30 分钟；更短的没有节律意义） */
 const MIN_SESSION_SAMPLE_MS = 30 * 60 * 1000;
-/** 深夜计数去抖：同窗口内多次活跃算 1 次（10 分钟） */
-const LATE_NIGHT_DEBOUNCE_MS = 10 * 60 * 1000;
+/** 深夜计数去抖：同窗口内多次活跃算 1 次（30 分钟）。
+ *  2026-10-12 修订：10 分钟窗口把一轮对话拆成多次「深夜活跃」，放大误触发。 */
+const LATE_NIGHT_DEBOUNCE_MS = 30 * 60 * 1000;
+/** 就寝样本收录门槛：当日最后活跃须落在晚间/深夜（19:00-次日 05:00）。
+ *  下午关 App（13 点/16 点最后活跃）不是就寝，混入会把深夜窗口起点拖早 → 误判深夜。 */
+const BEDTIME_SAMPLE_MIN_HOUR = 19;
 
 function localDateKey(now: Date): string {
   const y = now.getFullYear();
@@ -151,7 +160,14 @@ export class RhythmCore implements BodyModuleLike {
       };
       for (const [actorId, entry] of Object.entries(raw.actors ?? {})) {
         if (entry.state) this.actors.set(actorId, entry.state);
-        if (entry.learned) this.learned.set(actorId, entry.learned);
+        if (entry.learned) {
+          // 2026-10-12 防污染：旧版本落盘的就寝样本混有下午关 App 的时刻
+          // （13 点/16 点），恢复时按有效就寝区间 [19:00, 次日 04:00] 清洗
+          entry.learned.bedtimes = (entry.learned.bedtimes ?? []).filter(
+            (h) => h >= BEDTIME_SAMPLE_MIN_HOUR && h <= 28,
+          );
+          this.learned.set(actorId, entry.learned);
+        }
       }
       const n = this.actors.size;
       if (n > 0) console.log(`[RhythmCore] 状态已恢复：${n} 用户（连续工作计时跨重启）`);
@@ -221,6 +237,15 @@ export class RhythmCore implements BodyModuleLike {
     if (samples.length < MIN_SAMPLES) return DEFAULT_LATE_NIGHT_START;
     const bedtime = medianOf(samples);
     return clamp(bedtime + 1, LATE_NIGHT_START_RANGE_H[0], LATE_NIGHT_START_RANGE_H[1]);
+  }
+
+  /** 学习到的习惯就寝时刻（小时小数，可 >24；还没学会时返回 null——
+   *  下游据此跳过定时提醒，绝不猜一个硬编码时间）。
+   *  门槛 2 个有效夜晚（BEDTIME_LEARN_MIN_SAMPLES），滚动 14 天窗口持续跟随作息变化。 */
+  learnedBedtimeHour(actorId: string): number | null {
+    const samples = this.learnedOf(actorId).bedtimes;
+    if (samples.length < BEDTIME_LEARN_MIN_SAMPLES) return null;
+    return Math.round(medianOf(samples) * 10) / 10;
   }
 
   /** 按该用户学习到的窗口判定深夜（起点可跨午夜折算） */
@@ -340,6 +365,7 @@ export class RhythmCore implements BodyModuleLike {
         lateNightActiveCount,
         thresholdHours: Math.round(thresholdHours * 10) / 10,
         reason: overwork ? "continuous_work" : "late_night_active",
+        learnedBedtimeHour: this.learnedBedtimeHour(actorId),
         detectedAt: now.toISOString(),
       },
       module: "rhythm",
@@ -360,8 +386,11 @@ export class RhythmCore implements BodyModuleLike {
       if (state && state.lastActiveAt !== null) {
         const last = new Date(state.lastActiveAt);
         let h = last.getHours() + last.getMinutes() / 60;
-        if (h < LATE_NIGHT_END) h += 24;
-        this.pushSample(actorId, "bedtimes", Math.min(h, 28));
+        // 下午/傍晚就关 App 的日子不算就寝样本（污染基线 → 深夜窗口漂移）
+        if (h >= BEDTIME_SAMPLE_MIN_HOUR || h < LATE_NIGHT_END) {
+          if (h < LATE_NIGHT_END) h += 24;
+          this.pushSample(actorId, "bedtimes", Math.min(h, 28));
+        }
         // 跨天仍在工作段：按午夜截断长度记为自然结束样本
         if (state.workStartAt !== null) {
           const len = state.lastActiveAt - state.workStartAt;

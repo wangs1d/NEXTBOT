@@ -1145,7 +1145,10 @@ class MarkdownTableWidget extends StatelessWidget {
               children: cells)));
     }
 
-    // 宽度撑满可用空间；仅当列数多到超过容器宽度时才出现横向滚动。
+    // 一律压回容器宽内平铺（2026-10-12）：此前 maxWidth=列数*140，天气等
+    // 3-4 列数据表在手机端必然超宽 → 横向滑动才能看全。单元格文本自动
+    // 换行后表格恒与容器等宽，所有数据一屏展示；横向滚动仅保留为极端
+    // 场景（不可断行的长 token 溢出）的安全阀，正常内容不会触发。
     return LayoutBuilder(
       builder: (BuildContext context, BoxConstraints box) {
         final double availableWidth =
@@ -1162,8 +1165,8 @@ class MarkdownTableWidget extends StatelessWidget {
               scrollDirection: Axis.horizontal,
               child: ConstrainedBox(
                 constraints: BoxConstraints(
-                  minWidth: math.max(280.0, availableWidth),
-                  maxWidth: math.max(availableWidth, columnCount * 140.0),
+                  minWidth: math.min(280.0, availableWidth),
+                  maxWidth: availableWidth,
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,

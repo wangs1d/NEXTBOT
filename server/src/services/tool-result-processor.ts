@@ -37,8 +37,10 @@ function wrapRenderAs(name: string, text: string): string {
   return `[RENDER_AS:${name}]\n${text}`;
 }
 
-/** 模型复述在正文里的展示形态声明（RENDER_AS / RENDER_HINT，任意位置） */
-const RENDER_DECLARATION_TOKEN_RE = /\[RENDER_(?:HINT|AS):[A-Za-z_]+\]/g;
+/** 模型复述在正文里的展示形态声明（RENDER_AS / RENDER_HINT，任意位置）。
+ *  2026-10-11 扩容：模型会把格式写歪成 `[RENDER_HINT]:brief`（括号在冒号前闭合，
+ *  实机探针实证透进气泡）——容错匹配规范形与变体形。 */
+const RENDER_DECLARATION_TOKEN_RE = /\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?/g;
 
 /**
  * 剥掉正文任何位置残留的 [RENDER_AS:xxx] / [RENDER_HINT:xxx] 声明。

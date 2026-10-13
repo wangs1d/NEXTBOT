@@ -1,8 +1,15 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 
+import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/services/schedule_api_client.dart";
 import "../core/services/world_api_client.dart";
+import "../core/utils/agent_result_parser.dart";
+import "../features/chat/travel_plan_launcher.dart";
+import "../features/chat/travel_plan_mobile_page.dart";
+import "../features/chat/travel_plan_models.dart";
 import "mobile_chat_controller.dart";
 import "mobile_chat_page.dart";
 import "mobile_profile_page.dart";
@@ -43,7 +50,8 @@ class MobileHomePage extends StatefulWidget {
   State<MobileHomePage> createState() => MobileHomePageState();
 }
 
-class MobileHomePageState extends State<MobileHomePage> {
+class MobileHomePageState extends State<MobileHomePage>
+    with WidgetsBindingObserver {
   late final MobileChatController _chatController;
   late final WorldApiClient _worldApi;
   late final ScheduleApiClient _scheduleApi;
@@ -61,16 +69,105 @@ class MobileHomePageState extends State<MobileHomePage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _tabIndex = widget.initialTabIndex.clamp(0, 2);
     _chatController = widget.chatController ?? MobileChatController();
     _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
     _scheduleApi = ScheduleApiClient(baseUrl: ApiConfig.httpBase);
+    _wireAmbientFeeds();
+    // 行程规划入口接线（2026-10-12 与桌面端对齐）：行程卡「打开行程规划」
+    // 按钮经 TravelPlanLauncher 静态回调打开原生行程页。此前手机端从未注册
+    // handler（桌面 main.dart 独有），点击恒为 no-op。
+    TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+  }
+
+  /// 打开原生行程规划页（TravelPlanMobilePage 全屏路由）。
+  void _openTravelPlanPanel(AgentResultData data) {
+    if (ApiConfig.isOssEdition) return;
+    if (!mounted) return;
+    unawaited(
+      TravelPlanMobilePage.show(context, plan: TravelPlanData.from(data)),
+    );
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    // 单例端口随主壳销毁清空，防悬挂闭包引用已 dispose 的 context
+    final AmbientFeedsController c = AmbientFeedsController.instance;
+    c.isAppBackgrounded = null;
+    c.syncSchedule = null;
+    c.showForegroundReminder = null;
     _chatController.dispose();
     super.dispose();
+  }
+
+  // ===== 提醒触达装配（2026-10-12 接通）=====
+
+  /// 是否处于手机后台（类微信常在线分流：后台走系统通知，前台走应用内横幅）。
+  bool _appBackgrounded = false;
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // resumed 才算前台；hidden/paused/detached 均按后台处理
+    _appBackgrounded = state != AppLifecycleState.resumed;
+  }
+
+  /// 装配环境信息流编排层端口（与桌面端 main.dart 同构）：
+  /// 前后台判定、日程页刷新、前台提醒横幅。后台系统通知由
+  /// LocalNotificationService 承接（main_mobile.dart 启动时 init）。
+  void _wireAmbientFeeds() {
+    final AmbientFeedsController c = AmbientFeedsController.instance;
+    c.isAppBackgrounded = () => _appBackgrounded;
+    c.syncSchedule = () async {
+      _scheduleKey.currentState?.refresh();
+    };
+    c.showForegroundReminder = (String title, String message) async {
+      _showReminderBanner(title, message);
+    };
+  }
+
+  /// 到点提醒前台横幅：浮层 SnackBar 6s 自动收，点击跳日程页。
+  void _showReminderBanner(String title, String message) {
+    if (!mounted) return;
+    final MobilePalette p = MobileTheme.of(context);
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 6),
+        backgroundColor: p.surface,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(14),
+          side: BorderSide(color: p.divider),
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    color: p.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600)),
+            if (message.isNotEmpty && message != title)
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
+                child: Text(message,
+                    maxLines: 3,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: p.textSecondary, fontSize: 13)),
+              ),
+          ],
+        ),
+        action: SnackBarAction(
+          label: "日程",
+          textColor: p.textPrimary,
+          onPressed: () => goToTab(1),
+        ),
+      ),
+    );
   }
 
   /// 切到指定 tab(0=对话 1=日程 2=我的;供行程表空态跳回对话页等跨页联动)。

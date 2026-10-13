@@ -8,6 +8,7 @@ import "package:video_player/video_player.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/video_preview_launcher.dart";
+import "media_disk_cache.dart";
 
 /// 视频媒体数据模型（对应后端 [VIDEO_MEDIA_START] 标记中的 JSON）。
 class VideoMediaData {
@@ -301,8 +302,8 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
             ClipRRect(
               borderRadius: BorderRadius.circular(10),
               child: thumb != null
-                  ? Image.network(
-                      thumb,
+                  ? CachedMediaImage(
+                      url: thumb,
                       width: widget.maxWidth,
                       height: 178,
                       fit: BoxFit.cover,
@@ -311,15 +312,13 @@ class _AgentInlineVideoPlayerState extends State<AgentInlineVideoPlayer> {
                         color: cs.surfaceContainerHighest,
                         foreground: cs.onSurfaceVariant,
                       ),
-                      loadingBuilder: (_, Widget child, ImageChunkEvent? p) {
-                        if (p == null) return child;
-                        return _VideoThumbPlaceholder(
-                          icon: Icons.videocam_outlined,
-                          color: cs.surfaceContainerHighest,
-                          foreground: cs.onSurfaceVariant,
-                          showSpinner: true,
-                        );
-                      },
+                      loadingBuilder: (BuildContext context) =>
+                          _VideoThumbPlaceholder(
+                        icon: Icons.videocam_outlined,
+                        color: cs.surfaceContainerHighest,
+                        foreground: cs.onSurfaceVariant,
+                        showSpinner: true,
+                      ),
                     )
                   : _VideoThumbPlaceholder(
                       icon: Icons.videocam_outlined,

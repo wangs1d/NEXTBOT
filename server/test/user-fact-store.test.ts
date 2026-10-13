@@ -63,7 +63,7 @@ test("upsertFact: 同 subject 新值替换旧值并累积 seenCount/sources", as
     });
     assert.ok(second);
     assert.equal(second.id, first.id, "同 subject 应命中同一条事实");
-    assert.equal(second.value, "我是前端工程师", "新值应替换旧值");
+    assert.equal(second.value, "我是前端工程师", "新值应替换旧值（值原样入库，规范格式由抽取侧保证）");
     assert.equal(second.seenCount, 2);
     assert.equal(second.confidence, 0.9);
     assert.deepEqual(second.sources, ["nightly-extract", "kv-slot"]);

@@ -69,7 +69,12 @@ export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
   // 任务面波预算（2026-09-23 router-first 后 +1）：可见集只剩桥工具，标准流程
   // = discover 召回 → tool_call 执行 → 收尾作答，最低 3 波（原 2 波会卡在
   // 「结果已拿到但没波次作答」）。意图预召回命中时可省掉 discover 轮。
-  realtime_lookup: { plane: "task", capabilities: ["search"], budget: 3, tier: "flash" },
+  // capabilities 含 media（2026-10-12 架构收敛：标签错误去杀伤化）：外部查证
+  // 是一个族——网页/图片/视频是**模态**不是意图，模态选择归还执行模型（看见
+  // 完整上下文 + 全部检索工具后自选）。此前 realtime 束只有 search 域，L1 把
+  // 「再来点」误标 realtime 时执行模型想调 search_images 都不可见，代码拿着
+  // 媒体形状的查询词烧网页搜索（真机探针实证）——标签错误不该阉割正确工具。
+  realtime_lookup: { plane: "task", capabilities: ["search", "media"], budget: 3, tier: "flash" },
   // personal_data_query（2026-09-23）：查自己的数据落对话面前台直办（chat Core
   // 恒挂 wallet/messages/calendar 等只读工具）。此前无此标签，这类轮被吸进
   // realtime_lookup 拿原话当搜索词烧 web 搜索（真实事故：「看看我最近的购物

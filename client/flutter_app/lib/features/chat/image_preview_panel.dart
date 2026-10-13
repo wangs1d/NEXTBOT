@@ -3,6 +3,7 @@ import "package:flutter/material.dart";
 import "../../core/config/api_config.dart";
 // import "../../core/services/image_preview_launcher.dart";
 // （图库入口暂时隐藏：恢复「在照片墙中查看」按钮时需一并恢复本 import）
+import "media_disk_cache.dart";
 
 /// 图片预览面板左侧预留的空白侧栏宽度（仅占位留白，为后续侧边栏内容预留位置）。
 const double kImagePreviewSidebarWidth = 56.0;
@@ -158,23 +159,20 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
                         minScale: 0.6,
                         maxScale: 6,
                         child: Center(
-                          child: Image.network(
-                            _resolvedUrl,
+                          child: CachedMediaImage(
+                            url: _resolvedUrl,
                             fit: BoxFit.contain,
                             errorBuilder: (BuildContext context, Object error,
                                 StackTrace? stackTrace) {
                               return _fallback(cs);
                             },
-                            loadingBuilder: (BuildContext context, Widget child,
-                                ImageChunkEvent? progress) {
-                              if (progress == null) return child;
-                              return const SizedBox(
-                                width: 36,
-                                height: 36,
-                                child:
-                                    CircularProgressIndicator(strokeWidth: 2.5),
-                              );
-                            },
+                            loadingBuilder: (BuildContext context) =>
+                                const SizedBox(
+                              width: 36,
+                              height: 36,
+                              child:
+                                  CircularProgressIndicator(strokeWidth: 2.5),
+                            ),
                           ),
                         ),
                       ),

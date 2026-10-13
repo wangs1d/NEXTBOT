@@ -213,9 +213,20 @@ export class UtteranceAssembler {
    */
   settle(finalText?: string): UtteranceSettlement {
     const preamble = this.preambleText;
-    // 结论未经分段器出站（收口链一次性写入）时补登记一个结论段，保证"结论一定在"。
-    // 幂等：结论已在册则不重复补（重复 settle 安全）。
-    if (!this.conclusionText && finalText?.trim()) {
+    // 无工具轮没有"过程话/结论"之分——角色划分是时间性的，依赖工具边界；
+    // 没有工具，整条流就是发言本体。若仍把 finalText 兜底成结论段，它与
+    // 已流分段内容天然等价 → preamble_equals_conclusion → 每个纯聊天轮都被
+    // 整轮塌缩成单泡（finalTextReplacesStream → 客户端删光已分的绿泡、用
+    // finalText 落一条），真·分绿泡在无工具轮全部失效（2026-10-11 实盘回归，
+    // 症状：回复内容看得出分段、实际只有一个泡）。
+    // 因此结论兜底补登只对「有工具轮」或「全程无分段」（缓冲模式/扣流轮，
+    // 分段列表为空）生效；后者的结论段是唯一分段，不受塌缩影响。
+    const hasTools = this.toolNames.length > 0;
+    if (
+      !this.conclusionText &&
+      finalText?.trim() &&
+      (hasTools || this.segments.length === 0)
+    ) {
       this.segments.push({
         index: this.nextIndex++,
         role: "conclusion",

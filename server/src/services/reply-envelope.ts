@@ -86,10 +86,11 @@ const UNSUPPORTED_MARKERS = [
  * 服务器权威注入，此处不动。
  */
 export function stripRenderHintDeclarations(text: string): string {
-  if (!text.includes("[RENDER_HINT:")) return text ?? "";
+  if (!text.includes("[RENDER_")) return text ?? "";
+  // 2026-10-11 扩容：兼容模型写歪的变体 `[RENDER_HINT]:brief`（括号在冒号前闭合）
   const kept: string[] = [];
   for (const line of (text ?? "").split("\n")) {
-    const stripped = line.replace(/\[RENDER_HINT:[A-Za-z_]+\]/g, "");
+    const stripped = line.replace(/\[RENDER_HINT\]?\s*[:：]\s*[A-Za-z_]+\]?/g, "");
     // 声明独占一行 → 整行删除；行内嵌声明 → 就地剥离保留其余文本
     if (!stripped.trim() && line.trim()) continue;
     kept.push(stripped);

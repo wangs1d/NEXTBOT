@@ -31,20 +31,6 @@ import { travelFavoritesStore } from './travel-favorites-store.js';
 import { emitTravelProgress } from './travel-progress-bus.js';
 import { gcj02ToWgs84 } from './coord-transform.js';
 
-/** 行程条目可挂载的本地媒体（来自 POI 媒体库） */
-interface PoiMediaMeta {
-  reviewCount: number;
-  reviews: Array<{ author: string; rating: number; text: string; createdAt: string }>;
-  videos: Array<{
-    platform: string;
-    title: string;
-    author: string;
-    durationSeconds?: number;
-    thumbnailUrl?: string;
-    playPageUrl: string;
-  }>;
-}
-
 /** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
 type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
 
@@ -192,18 +178,7 @@ export interface ItineraryItem {
   phone: string;
   openingHours: string;
   tags: string[];
-  reviewCount: number;
   images: string[];
-  /** 相关视频（媒体库登记的元数据+播放页，不自托管文件） */
-  videos: Array<{
-    platform: string;
-    title: string;
-    author: string;
-    durationSeconds?: number;
-    thumbnailUrl?: string;
-    playPageUrl: string;
-  }>;
-  reviews: unknown[];
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL */
   splatUrl?: string;
   // 酒店特有
@@ -247,6 +222,8 @@ export interface PlanningResult {
     warnings: string[];
   };
   fromCache: boolean;
+  /** 出发日天气一句话摘要（Open-Meteo 实时预报；天气获取失败缺省，前端隐藏天气胶囊） */
+  weather?: string;
   /**
    * 目的地代表性封面（行程卡海报区背景）：目的地本身的形象照，非任何单个
    * POI 的照片。解析链见 resolveDestinationCover（维基百科条目主图优先）。
@@ -308,19 +285,57 @@ const WIKI_MIN_WIDTH = 640;
 const WIKI_MIN_HEIGHT = 480;
 const WIKI_GPS_MAX_RADIUS_KM = 50; // EXIF GPS 校验半径
 
+// ===== 必应图片搜索（2026-10-12 起为 POI 配图的主源）=====
+// 为什么是必应而不是 Wikimedia：本机网络下 commons.wikimedia.org 与
+// zh.wikipedia.org 实测 http=000（10~12s 超时），配图链路因此只有 3.4% 覆盖率；
+// cn.bing.com/images/async 实测 200 / 0.55s。Wikimedia 保留为兜底（网络恢复时可用）。
+const BING_IMAGES_BASE = 'https://cn.bing.com/images/async';
+const BING_IMAGES_TIMEOUT_MS = 6000;
+/** 必应图片要浏览器 UA（默认 UA 会被拒）；候选尺寸无法从列表页拿，
+    宽高校验留到下载落地时做（见 P2 照片本地化）。 */
+const BING_IMAGES_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36';
+/** 一次抓取的候选上限（多图轮播够用；过多会拖慢后台回填） */
+const BING_MAX_IMAGES = 4;
+/** Wikimedia 可达性探测：单次上限 3s、结果缓存 10 分钟（与熔断窗口同宽） */
+const WIKI_IMAGES_PROBE_TIMEOUT_MS = 3000;
+const WIKI_IMAGES_PROBE_TTL_MS = 10 * 60 * 1000;
+
+/** 图片搜索端口：宿主可注入既有搜索服务；未注入时服务内部走必应直抓 */
+export interface TravelImageSearchPort {
+  /** 按查询词取真实图片 URL（返回空数组表示无结果，不抛错） */
+  searchImages(query: string, limit?: number): Promise<string[]>;
+}
+
+/**
+ * 视频/评论能力已于 2026-10-12 下线（评论的数据来源是视频评论区，无视频即无评论）。
+ * 媒体库现只承载照片一类。对应的存储端口、过滤函数与装配注入一并移除。
+ */
+
 /** 备用地理编码（Photon，OSM 数据的免费检索服务），Nominatim 失败时切换而非直接抛错 */
 const PHOTON_GEOCODE_BASE = 'https://photon.komoot.io/api';
 /** 地理编码超时：冷启动主要延迟来源，从 20s 压到 8s（Overpass 6s / OSRM 5s 同量级） */
 const GEOCODE_REQUEST_TIMEOUT_MS = 8000;
 const PHOTON_REQUEST_TIMEOUT_MS = 6000;
 // 多个 Overpass 镜像并行尝试，使用首个成功响应（应对大陆网络对 overpass-api.de 的封锁/超时）
+// 超时 20s：景点大查询（多子句 × 25km 半径）实测各镜像需 15~30s——2026-10-11 前的
+// 6s 超时会让景点/餐厅查询全军覆没而酒店小查询侥幸成功，产出「只有酒店」的残缺行程。
+//
+// 2026-10-12 移除 maps.mail.ru：它从本网**连得上但不回包**（实测同一 Overpass
+// 查询 http=000 / 22.0s 挂死到超时；对照 kumi.systems 2.2s / osm.ch 2.0s 均 200）。
+// 因为镜像是并行跑、而 Promise.any 必须等**全部**成员 settle 才 reject（见下方
+// fetchOverpass 的 controller 语义），列表里只要有一个挂死镜像，「全挂」的那次调用
+// 就必然等满 20s——加了它之后每次死镜像轮的成本从 ≤6s 变成 20s。一轮规划要跑 3 轮
+// Overpass（初始 + 空类别重试 + 60km 二次搜索），就是这 35s 把规划耗时推到 49s，
+// 撞穿了当时 30s 的工具预算（该预算 2026-10-12 已按技能声明改为 120s）。
+// 新增镜像前必须先量它的「最坏耗时」：只会挂死的镜像对并行竞速是纯拖累。
 const OSM_OVERPASS_BASES = [
   'https://overpass-api.de/api/interpreter',
   'https://overpass.kumi.systems/api/interpreter',
   'https://overpass.openstreetmap.fr/api/interpreter',
   'https://overpass.osm.ch/api/interpreter',
 ];
-const OVERPASS_REQUEST_TIMEOUT_MS = 6000;
+const OVERPASS_REQUEST_TIMEOUT_MS = 20000;
 const USER_AGENT = 'TravelPlanner3D/1.0 (Educational Project)';
 
 /**
@@ -475,9 +490,25 @@ export class PlanningService {
   private inFlightSearches = new Map<string, Promise<CacheEntry>>();
 
   /**
-   * @param weatherService 可选天气服务（未注入则跳过天气感知，按中性天气排程）
+   * Wikimedia 可达性探测缓存。
+   *
+   * 本机网络下 commons/zh.wikipedia 实测 http=000（每次 10~12s 超时）。链路里
+   * 每个 POI 都要先跑一遍 Wikimedia 才会返回空 —— 后台回填是 3 并发 × 2 次重试，
+   * 等于每个 POI 白烧 ~24s。用一次轻量探测把它变成「窗口内直接跳过」。
    */
-  constructor(private readonly weatherService?: WeatherService) {}
+  private wikiImagesProbedAt = 0;
+  private wikiImagesReachableCache = false;
+
+  /**
+   * @param weatherService 可选天气服务（未注入则跳过天气感知，按中性天气排程）
+   * @param imageSearch 可选图片搜索端口（未注入时走内置必应图片抓取）
+   *
+   * 2026-10-12：原第三/四个构造参数（videoSearch / reviewSearch）随视频能力下线移除。
+   */
+  constructor(
+    private readonly weatherService?: WeatherService,
+    private readonly imageSearch?: TravelImageSearchPort,
+  ) {}
 
   /**
    * 编排阶段的交通腿查询：OSRM 真实路网优先（带 24h 缓存），失败降级 haversine 估算。
@@ -696,7 +727,7 @@ export class PlanningService {
     // === 阶段2：媒体装配（纯本地读：媒体库/POI 缓存直图，网络抓取已移出请求路径）===
     this.reportProgress(request.sessionId, "media", "正在装配图片与点评…");
     const tMedia0 = Date.now();
-    const { imageMap, mediaMeta, missing } = this.collectMediaForDays(daysRaw, cacheEntry);
+    const { imageMap, missing } = this.collectMediaForDays(daysRaw, cacheEntry);
 
     // 海报封面：阶段1期间并行解析，此时仍未完成才需要等待并汇报进度
     // （缓存命中时已就绪，秒回）。解析失败保持 undefined，海报由前端退回
@@ -706,7 +737,7 @@ export class PlanningService {
     }
     const coverImage = await coverPromise;
 
-    const days = this.enrichDaysWithMedia(daysRaw, imageMap, mediaMeta);
+    const days = this.enrichDaysWithMedia(daysRaw, imageMap);
     const tMedia = Date.now() - tMedia0;
 
     // 缺图 POI 交给后台回填（TRAVEL_MEDIA_BACKFILL=off 时关闭自动抓取，
@@ -733,6 +764,7 @@ export class PlanningService {
       pricingSummary,
       fromCache,
       coverImage,
+      weather: weatherCtx?.summary || undefined,
       dataQuality: this.deriveDataQuality(cacheEntry.data),
     };
 
@@ -838,6 +870,7 @@ export class PlanningService {
       latitude: number;
       longitude: number;
       visitDuration?: number;
+      anchor?: boolean;
       transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
     },
   >(
@@ -900,6 +933,15 @@ export class PlanningService {
       const leg = prevPoint
         ? await this.transportLeg(prevPoint.lat, prevPoint.lon, it.latitude, it.longitude)
         : undefined;
+
+      // 时间锚点条目（it.anchor）：时刻被用户/预订钉住不可动 —— 只重算交通腿，
+      // 时钟对齐到锚点时刻后顺推（设计稿「随时重排，时间锚点不动」的服务端语义）
+      if (it.anchor) {
+        setLeg(it, leg);
+        clock = Math.max(clock, parseMin(it.startTime)) + visitOf(it);
+        prevPoint = { lat: it.latitude, lon: it.longitude };
+        continue;
+      }
 
       // 显式锚点：保留该条目原 startTime，只重算其交通腿，之后按此时钟顺推
       if (opts?.keepFirstStartTime && i === fromItemIndex) {
@@ -1402,8 +1444,14 @@ export class PlanningService {
     // Step 4: 写入缓存（内存+文件持久化，全局共享）。
     // 知识库兜底与空结果都不落缓存：一次网络故障降级的数据不应在 TTL 内
     // 阻止后续重试拿到实时数据。
-    if (knowledgeFallback || (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0)) {
-      console.warn(`[PlanningService] 跳过 POI 缓存写入（${knowledgeFallback ? "知识库兜底" : "空结果"} 不缓存）`);
+    // 「景点+餐厅双空、只有酒店」的残缺结果同样不缓存：这正是 2026-10-11
+    // 「新疆行程只有酒店」事故的污染源——注释声称防部分污染，实际条件漏了
+    // 「KB 未命中时部分空照样落盘」，7 天 TTL 内该目的地的行程一直是残缺版。
+    const coreCategoriesEmpty = attractions.length === 0 && restaurants.length === 0;
+    if (knowledgeFallback || coreCategoriesEmpty || (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0)) {
+      console.warn(
+        `[PlanningService] 跳过 POI 缓存写入（${knowledgeFallback ? "知识库兜底" : coreCategoriesEmpty ? "核心类别（景点+餐厅）全空，防残缺结果污染" : "空结果"} 不缓存）`,
+      );
       return {
         destination: destName,
         queryKey: normalizedKey,
@@ -1430,11 +1478,29 @@ export class PlanningService {
     hotels: RawPOI[];
     restaurants: RawPOI[];
   }> {
-    const [attractions, hotels, restaurants] = await Promise.all([
+    let [attractions, hotels, restaurants] = await Promise.all([
       this.searchAttractions(center, destName),
       this.searchHotels(center, destName),
       this.searchRestaurants(center, destName),
     ]);
+
+    // 空类别重试：Overpass 镜像存在瞬时 429/超时（尤其重查询），单轮全挂时
+    // 其余类别往往成功——部分缺失的行程比全空更糟（Step 2.5 只兜全空场景）。
+    // 仅对空类别补一轮串行重试，非空类别不重复消耗镜像配额。
+    if (attractions.length === 0 || hotels.length === 0 || restaurants.length === 0) {
+      console.warn(
+        `[PlanningService] OSM 部分类别为空(景点${attractions.length}/酒店${hotels.length}/餐厅${restaurants.length})，空类别重试一轮...`,
+      );
+      const [a2, h2, r2] = await Promise.all([
+        attractions.length === 0 ? this.searchAttractions(center, destName) : Promise.resolve<RawPOI[]>([]),
+        hotels.length === 0 ? this.searchHotels(center, destName) : Promise.resolve<RawPOI[]>([]),
+        restaurants.length === 0 ? this.searchRestaurants(center, destName) : Promise.resolve<RawPOI[]>([]),
+      ]);
+      if (attractions.length === 0) attractions = a2;
+      if (hotels.length === 0) hotels = h2;
+      if (restaurants.length === 0) restaurants = r2;
+    }
+
     return { attractions, hotels, restaurants };
   }
 
@@ -1576,6 +1642,9 @@ export class PlanningService {
    * 不加约束会把旅馆、观景信息牌都当成景点排进行程。
    */
   private async searchAttractions(center: Coordinates, cityHint: string, radius = 25000): Promise<RawPOI[]> {
+    // 只取元素本体+中心点即可（way 自带 center）。历史版本还带「(._; >;) out skel qt」
+    // 递归子节点：响应体积放大几十倍，2026-10-11 实测让三个镜像全部 500/406/超时——
+    // 而解析端只读 center/tags，递归结果完全没人消费。去掉后同一查询稳定返回。
     const query = `
       [out:json][timeout:15];
       (
@@ -1587,8 +1656,6 @@ export class PlanningService {
         way["leisure"~"park|garden"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >;);
-      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1620,8 +1687,6 @@ export class PlanningService {
         way["tourism"~"^(hotel|guest_house|hostel|motel|resort)$"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >;);
-      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1644,8 +1709,6 @@ export class PlanningService {
         way["amenity"~"^(restaurant|cafe|fast_food|food_court)$"](around:${radius},${center.latitude},${center.longitude});
       );
       out body center;
-      (._; >;);
-      out skel qt;
     `;
 
     const results = await this.overpassQuery(query);
@@ -1677,23 +1740,46 @@ export class PlanningService {
     // 并行请求所有镜像，首个成功（HTTP 200 + JSON + 有 elements）即胜出并 abort
     // 其余在途请求——避免落败镜像继续跑满整个超时窗口占用连接与重试预算。
     const controller = new AbortController();
+    // 逐镜像埋点（2026-10-12）：镜像是否「快失败」还是「挂死到超时」直接决定这一轮
+    // 的固定罚金——并行竞速下 Promise.any 要等全部成员 settle 才 reject，所以列表里
+    // 一个挂死镜像 = 每次「全挂」都等满超时上限（6s 档曾 ≤6s，20s 档变 20s；一轮
+    // 规划要跑 3 轮 → 就是这个把规划推过预算）。新增镜像前先看这里的耗时分布。
+    const overpassStartedAt = Date.now();
     const timer = setTimeout(() => controller.abort(), OVERPASS_REQUEST_TIMEOUT_MS);
     try {
       const attempts = OSM_OVERPASS_BASES.map(async (base) => {
-        const res = await fetch(base, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': USER_AGENT },
-          body: `data=${encodeURIComponent(overpassQL)}`,
-          signal: controller.signal,
-        });
-        if (!res.ok) {
-          throw new Error(`${new URL(base).host} HTTP ${res.status}`);
+        const host = new URL(base).host;
+        const mirrorStartedAt = Date.now();
+        try {
+          const res = await fetch(base, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': USER_AGENT },
+            body: `data=${encodeURIComponent(overpassQL)}`,
+            signal: controller.signal,
+          });
+          if (!res.ok) {
+            throw new Error(`HTTP ${res.status}`);
+          }
+          const elements = await tryParseElements(res);
+          if (!elements || elements.length === 0) {
+            throw new Error('空结果');
+          }
+          const ms = Date.now() - mirrorStartedAt;
+          console.info(`[Overpass] 镜像胜出 ${host} ${ms}ms elements=${elements.length}`);
+          return { base, elements };
+        } catch (e: unknown) {
+          const ms = Date.now() - mirrorStartedAt;
+          const reason = (e as Error)?.message ?? String(e);
+          // 贴满超时上限 = 挂死型镜像（连得上/连不上都不回包）。它不是「不可用」而是
+          // 「拖慢」——单独高亮，让新加进来的挂死镜像在第一次规划时就暴露。
+          const hanging = ms >= OVERPASS_REQUEST_TIMEOUT_MS * 0.8;
+          const line =
+            `[Overpass] 镜像失败 ${host} ${ms}ms ${reason}` +
+            (hanging ? ' ← 挂死型（贴满超时），对并行竞速是纯拖累，应移除或单独给短超时' : '');
+          if (hanging) console.warn(line);
+          else console.info(line);
+          throw e;
         }
-        const elements = await tryParseElements(res);
-        if (!elements || elements.length === 0) {
-          throw new Error(`${new URL(base).host} 空结果`);
-        }
-        return { base, elements };
       });
 
       let winner: { base: string; elements: Array<Record<string, unknown>> };
@@ -1701,7 +1787,9 @@ export class PlanningService {
         winner = await Promise.any(attempts);
       } catch {
         // AggregateError：所有镜像均失败（含被 abort 的在途请求）
-        console.warn('[Overpass] 所有镜像均不可用，触发合成数据降级');
+        console.warn(
+          `[Overpass] 所有镜像均不可用，触发合成数据降级（本轮调用耗时 ${Date.now() - overpassStartedAt}ms / 上限 ${OVERPASS_REQUEST_TIMEOUT_MS}ms；逐镜像耗时见上一行起）`,
+        );
         return [];
       }
       // 首个成功者已产生：取消其余镜像的在途请求
@@ -2080,6 +2168,23 @@ export class PlanningService {
     }
   }
 
+  /**
+   * 行程实时信号 · 目的地天气（供 /travel/plans/:planId/signal 查询）。
+   * 返回一句话摘要 + 当日是否雨天；未注入天气服务/失败 → null，绝不阻塞。
+   */
+  async signalWeather(
+    center: Coordinates,
+  ): Promise<{ summaryLine: string; rainy: boolean } | null> {
+    if (!this.weatherService) return null;
+    try {
+      const brief = await this.weatherService.getBrief(center.latitude, center.longitude, 'auto');
+      const ctx = this.buildWeatherContext(brief);
+      return { summaryLine: brief.summaryLine, rainy: ctx.isRainyDay };
+    } catch {
+      return null;
+    }
+  }
+
   /** 将 Open-Meteo 逐小时预报折叠为 上午/下午/晚间 三时段天气语境 */
   private buildWeatherContext(brief: WeatherBrief): TripWeatherCtx {
     const slotCtx = (hours: number[]): SlotWeatherCtx => {
@@ -2234,7 +2339,7 @@ export class PlanningService {
 
   /**
    * 阶段1：快速构建行程数据（不获取图片，纯数据操作，<100ms完成）
-   * 图片/评论/视频在阶段2通过 collectMediaForDays 本地装配
+   * 图片在阶段2通过 collectMediaForDays 本地装配（评论/视频能力已下线）
    */
   private async buildDaysFast(
     dayCount: number,
@@ -2701,7 +2806,6 @@ export class PlanningService {
     entry: CacheEntry | null,
   ): {
     imageMap: Map<string, string[]>;
-    mediaMeta: Map<string, PoiMediaMeta>;
     missing: Array<{ poiId?: string; type: ItineraryItem['type']; name: string; latitude: number; longitude: number }>;
   } {
     // 收集所有唯一 POI（含坐标，去重）
@@ -2728,7 +2832,6 @@ export class PlanningService {
     }
 
     const imageMap = new Map<string, string[]>();
-    const mediaMeta = new Map<string, PoiMediaMeta>();
     const missing: Array<{ poiId?: string; type: ItineraryItem['type']; name: string; latitude: number; longitude: number }> = [];
 
     for (const [key, info] of poiSet) {
@@ -2740,31 +2843,9 @@ export class PlanningService {
         images = this.findCachedPOIImages(entry, info.type, info.poiId);
       }
 
-      // 评论/视频元数据（有才挂）
-      const agg = travelMediaStore.aggregate(info.type, info.name);
-      if (agg && (agg.reviewCount > 0 || agg.videoCount > 0)) {
-        const mediaEntry = travelMediaStore.get(info.type, info.name);
-        mediaMeta.set(key, {
-          reviewCount: agg.reviewCount,
-          reviews: (mediaEntry?.reviews ?? [])
-            .slice()
-            .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-            .slice(0, 3)
-            .map((r) => ({ author: r.author, rating: r.rating, text: r.text, createdAt: r.createdAt })),
-          videos: (mediaEntry?.videos ?? []).slice(0, 5).map((v) => ({
-            platform: v.platform,
-            title: v.title,
-            author: v.author,
-            durationSeconds: v.durationSeconds,
-            thumbnailUrl: v.thumbnailUrl,
-            playPageUrl: v.playPageUrl,
-          })),
-        });
-      }
-
-      if (images.length > 0) {
-        imageMap.set(key, images);
-      } else {
+      // 只有**完全没图**的 POI 才进回填队列（视频/评论已下线，不再是回填判据）
+      if (images.length > 0) imageMap.set(key, images);
+      else {
         missing.push({
           poiId: info.poiId,
           type: info.type,
@@ -2775,8 +2856,8 @@ export class PlanningService {
       }
     }
 
-    console.log(`[PlanningService] 媒体装配(本地直读): ${imageMap.size}/${poiSet.size} 个POI有图, ${mediaMeta.size} 个POI带评论/视频`);
-    return { imageMap, mediaMeta, missing };
+    console.log(`[PlanningService] 媒体装配(本地直读): ${imageMap.size}/${poiSet.size} 个POI有图`);
+    return { imageMap, missing };
   }
 
   /** 自动回填开关：TRAVEL_MEDIA_BACKFILL=off 时只走管理员手动触发/本地上传 */
@@ -2784,22 +2865,33 @@ export class PlanningService {
     (process.env.TRAVEL_MEDIA_BACKFILL ?? 'on').toLowerCase() !== 'off';
 
   /**
-   * 管理端手动回填：对单个 POI 抓一次 Wikimedia 图片并写入媒体库。
-   * 供 /travel/media/backfill 接口调用（自动回填关闭时的替代路径）。
+   * POI 媒体补全：补齐**照片**（缺图才补，已有就跳过）。
+   * 供 /travel/media/backfill 与旅行数据维护服务调用。
+   *
+   * 返回本次实际新增的数量——调用方（数据维护服务）据此汇报「补了什么、补了几条」。
+   *
+   * 2026-10-12：视频与评论随视频能力下线移除，媒体库只剩照片一类；
+   * 但返回结构保留 videos/reviews 恒为 0，避免调用方（维护服务 + 其前端快照接口）
+   * 为了一个永远是 0 的字段去改类型。
    */
   async backfillMediaForPoi(
     name: string,
     type: ItineraryItem['type'],
     latitude?: number,
     longitude?: number,
-  ): Promise<string[]> {
-    const images = await this.fetchSingleWithRetry(name, type, latitude, longitude);
-    if (images.length > 0 && latitude !== undefined && longitude !== undefined) {
-      travelMediaStore.attachBackfilledImages(type, name, images, { latitude, longitude });
-    } else if (images.length > 0) {
-      travelMediaStore.attachBackfilledImages(type, name, images);
+  ): Promise<{ images: number; videos: number; reviews: number }> {
+    const coords =
+      latitude !== undefined && longitude !== undefined ? { latitude, longitude } : undefined;
+    const before = travelMediaStore.aggregate(type, name);
+
+    if (!before || before.imageCount === 0) {
+      const fetched = await this.fetchSingleWithRetry(name, type, latitude, longitude);
+      if (fetched.length > 0) {
+        const localized = await travelMediaStore.localizeAndAttach(type, name, fetched, coords);
+        return { images: localized.length, videos: 0, reviews: 0 };
+      }
     }
-    return images;
+    return { images: 0, videos: 0, reviews: 0 };
   }
 
   /**
@@ -2828,18 +2920,25 @@ export class PlanningService {
           const idx = cursor++;
           if (idx >= missing.length) return;
           const info = missing[idx]!;
+          const coords = { latitude: info.latitude, longitude: info.longitude };
           try {
-            const images = await this.fetchSingleWithRetry(info.name, info.type, info.latitude, info.longitude);
-            if (images.length > 0) {
-              travelMediaStore.attachBackfilledImages(info.type, info.name, images, {
-                latitude: info.latitude,
-                longitude: info.longitude,
-              });
-              // 同步写回 POI 缓存（请求路径内的旧数据兜底层）
-              if (entry && info.poiId) {
-                poiCache.updatePOIImages(entry.destination, info.type, info.poiId, images);
+            // 三类媒体各自判断「缺不缺」、互不阻塞：缺图补图、缺视频抓视频、
+            // 缺评论抓口碑。任一失败只影响自己那一项，不牵连其余。
+            const agg = travelMediaStore.aggregate(info.type, info.name);
+
+            if (!agg || agg.imageCount === 0) {
+              const fetched = await this.fetchSingleWithRetry(info.name, info.type, info.latitude, info.longitude);
+              if (fetched.length > 0) {
+                // 先落地本机（内容寻址去重）再回写 POI 缓存：这样载荷里带的就是本地
+                // 资产路径，前端不再依赖第三方图床，弱网/离线也能出图。
+                const localized = await travelMediaStore.localizeAndAttach(info.type, info.name, fetched, coords);
+                // 同步写回 POI 缓存（请求路径内的旧数据兜底层）
+                if (entry && info.poiId) {
+                  poiCache.updatePOIImages(entry.destination, info.type, info.poiId, localized);
+                }
               }
             }
+
           } catch { /* 单点失败不影响整体 */ }
         }
       };
@@ -2891,27 +2990,19 @@ export class PlanningService {
   }
 
   /**
-   * 将本地媒体装配回行程数据：图片 + 评论（最新3条）+ 视频 + 评论数
+   * 将本地媒体装配回行程数据：只挂图片。
+   * 2026-10-12：评论/视频能力下线后，这里不再有第二类媒体可装配。
    */
   private enrichDaysWithMedia(
     daysRaw: PlannedDay[],
     imageMap: Map<string, string[]>,
-    mediaMeta: Map<string, PoiMediaMeta>,
   ): PlannedDay[] {
     return daysRaw.map(day => ({
       ...day,
       items: day.items.map(item => {
-        const key = `${item.type}-${item.itemId}`;
-        const images = imageMap.get(key);
-        const meta = mediaMeta.get(key);
-        if ((!images || images.length === 0) && !meta) return item;
-        return {
-          ...item,
-          images: images && images.length > 0 ? images : item.images,
-          reviewCount: meta ? meta.reviewCount : item.reviewCount,
-          reviews: meta && meta.reviews.length > 0 ? meta.reviews : item.reviews,
-          videos: meta && meta.videos.length > 0 ? meta.videos : item.videos,
-        };
+        const images = imageMap.get(`${item.type}-${item.itemId}`);
+        if (!images || images.length === 0) return item;
+        return { ...item, images };
       }),
     }));
   }
@@ -2968,10 +3059,7 @@ export class PlanningService {
                type === 'attraction' ? '开放时间请以现场公示为准' : '开放时间请以现场公示为准';
       })(),
       tags: this.generateTags(type, poi.rating || 0, preferences),
-      reviewCount: 0,
       images,
-      videos: [],
-      reviews: [],
       splatUrl: poi.splatUrl,
       priceQuote,
     };
@@ -3283,6 +3371,92 @@ export class PlanningService {
   }
 
   /**
+   * 可达源配图：宿主注入的搜索端口优先，否则内置必应图片抓取。
+   *
+   * 顺序与"权威性"无关，只跟实测连通性有关：Wikimedia 在本机网络下要白等
+   * 10~12s 超时才返回空，必应 0.55s。返回空数组表示两个可达源都没拿到图，
+   * 由调用方决定是否再试 Wikimedia（兜底）。
+   */
+  private async fetchReachableImages(poiName: string): Promise<string[]> {
+    const query = poiName.replace(/[()（）·•・]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!query) return [];
+    if (this.imageSearch) {
+      try {
+        const viaPort = await this.imageSearch.searchImages(query, BING_MAX_IMAGES);
+        const clean = (viaPort ?? []).filter((u) => typeof u === 'string' && /^https?:/i.test(u));
+        if (clean.length > 0) {
+          console.log(`[ImageSearch] ${query}: 搜索端口命中 ${clean.length} 张`);
+          return clean.slice(0, BING_MAX_IMAGES);
+        }
+      } catch { /* 端口失败：降级到内置抓取 */ }
+    }
+    const bing = await this.fetchBingImages(query);
+    if (bing.length > 0) {
+      console.log(`[ImageSearch] ${query}: 必应命中 ${bing.length} 张`);
+    }
+    return bing;
+  }
+
+  /**
+   * 必应图片抓取（POI 配图主源）。
+   *
+   * 只做「取候选 URL」这一件事：列表页拿不到尺寸元数据，宽高校验与落地留存
+   * 交给下载阶段（照片本地化）——不在这一步臆造过滤条件。
+   */
+  private async fetchBingImages(query: string, limit = BING_MAX_IMAGES): Promise<string[]> {
+    try {
+      const url =
+        `${BING_IMAGES_BASE}?q=${encodeURIComponent(query)}` +
+        `&first=0&count=${Math.max(8, limit * 2)}&mmasync=1`;
+      const res = await fetch(url, {
+        headers: { 'User-Agent': BING_IMAGES_UA, Accept: 'text/html' },
+        signal: AbortSignal.timeout(BING_IMAGES_TIMEOUT_MS),
+      });
+      if (!res.ok) return [];
+      const html = (await res.text()).replace(/&quot;/g, '"');
+      const urls: string[] = [];
+      for (const m of html.matchAll(/"murl":"(https?:\/\/[^"]+)"/g)) {
+        const u = m[1];
+        if (!u || urls.includes(u)) continue;
+        // 与 Wikimedia 同口径的脏图过滤（图标/地图/logo/水印占位等）
+        const tail = u.split('/').pop() ?? '';
+        if (WIKI_BLOCKED_PATTERNS.some((p) => p.test(tail))) continue;
+        urls.push(u);
+        if (urls.length >= limit) break;
+      }
+      return urls;
+    } catch {
+      return []; // 抓取失败不抛：调用方还有 Wikimedia 兜底与前端渐变兜底
+    }
+  }
+
+  /**
+   * Wikimedia 是否可达（带 10 分钟窗口缓存）。
+   *
+   * 探测本身用极轻量的 siteinfo 查询，且复用已有的双通道 `wikimediaJson`
+   * （直连 + v6 代理并行取首个非空），所以"不可达"也能在 3s 内判定，
+   * 而不是等完整搜索链跑完的 10~12s。
+   */
+  private async wikiImagesReachable(): Promise<boolean> {
+    const now = Date.now();
+    if (now - this.wikiImagesProbedAt < WIKI_IMAGES_PROBE_TTL_MS) {
+      return this.wikiImagesReachableCache;
+    }
+    this.wikiImagesProbedAt = now;
+    const probe = await this.wikimediaJson(
+      'https://commons.wikimedia.org/w/api.php?action=query&format=json&meta=siteinfo',
+      WIKI_IMAGES_PROBE_TIMEOUT_MS,
+    );
+    this.wikiImagesReachableCache = probe != null;
+    console.log(
+      this.wikiImagesReachableCache
+        ? '[ImageSearch] Wikimedia 可达，兜底源已启用（10 分钟内复用该结论）'
+        : '[ImageSearch] Wikimedia 不可达，配图仅走可达源（10 分钟内不再探测）',
+    );
+    return this.wikiImagesReachableCache;
+  }
+
+  /**
    * 获取 POI 的真实图片（多重地理+名称校验，确保图片对应真实地点）
    *
    * 三阶段策略（从最准确到兜底）：
@@ -3375,6 +3549,18 @@ export class PlanningService {
     };
 
     try {
+      // ===== 阶段0：可达源优先（实测连通性决定顺序，不是"哪个源更权威"）=====
+      // Wikimedia 在本机网络下每次都要白等 10~12s 超时，放前面等于让每个 POI
+      // 先付一轮罚金；必应图片实测 0.55s。宿主注入的搜索端口优先于内置抓取。
+      const reachable = await this.fetchReachableImages(poiName);
+      if (reachable.length > 0) return reachable;
+
+      // Wikimedia 是兜底源：不可达时直接跳过，别让每个 POI 都先付一轮超时罚金
+      if (!(await this.wikiImagesReachable())) {
+        console.log(`[ImageSearch] ${poiName}: 跳过 Wikimedia（本机网络不可达）`);
+        return [];
+      }
+
       // ===== 阶段1：Wikimedia geosearch（按坐标）=====
       // geosearch 返回的是百科「条目」标题，需先取条目配图清单得到 File: 标题，
       // 再查 Commons imageinfo（旧实现把条目标题直接当 Commons File 查，必然落空）

@@ -83,8 +83,11 @@ import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
 import "features/chat/content_summary_detail_view.dart";
 import "features/chat/travel_plan_launcher.dart";
+import "features/chat/travel_ask_launcher.dart";
 import "features/chat/travel_plan_window.dart";
-import "features/chat/travel_plan_browser_launcher.dart";
+import "features/chat/travel_plan_archive.dart";
+import "features/chat/travel_plan_mobile_page.dart";
+import "features/chat/travel_plan_models.dart";
 import "features/chat/travel_plan_panel.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
@@ -726,10 +729,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 右侧双栏「内容详情」面板：详情卡（长内容折叠卡）点击 → 右栏继续展示
     ContentSummaryLauncher.setHandler(_openContentSummaryPanel);
     // 「行程规划」：行程卡点击 / autoOpen → 桌面走独立窗口（行迹桌面页
-    // 1:1），手机走应用内浏览器；入口见 _openTravelPlanWindow。
+    // 1:1），手机走原生行程页（2026-10-12 起不再用应用内浏览器）；
+    // 常用工具「行程」入口 → 应用内行程归档页（_openTravelArchive）。
     // 版本闸：开源版剔除旅游家族，入口不注册
     if (!ApiConfig.isOssEdition) {
       TravelPlanLauncher.setHandler(_openTravelPlanPanel);
+    }
+    // 「问 Agent」：行程页/归档页 → 回到聊天并预填问题（预填不自动发送，
+    // 用户可补充修改）。版本闸随旅游家族一起。
+    if (!ApiConfig.isOssEdition) {
+      TravelAskLauncher.setHandler((String message) {
+        final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+        if (navCtx != null && navCtx.mounted) {
+          Navigator.of(navCtx).popUntil((Route<dynamic> r) => r.isFirst);
+        }
+        if (!mounted) return;
+        setState(() => _tabIndex = 0);
+        _inputController.text = message;
+        _inputFocusNode.requestFocus();
+      });
     }
     // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
     // 预加载会让 WebView2 在启动时就创建内部顶层窗口，该窗口曾滞留屏幕上
@@ -3913,25 +3931,32 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 行程规划入口：行程卡(travel_itinerary)点击 / autoOpen → 打开行程规划。
   ///
-  /// 打开方式按平台分流（2026-10-11 收敛为单一形态，去掉「两种打开方式」）：
+  /// 打开方式按平台分流（2026-10-12 收敛）：
+  ///   - Android / iOS：**原生行程页**（TravelPlanMobilePage，纯 Flutter
+  ///     实现）。应用内浏览器路径已退役——行程界面直接做在 App 里。
   ///   - Windows 桌面：**只走独立系统窗口**（spawn 子进程，页面 = 服务端
   ///     /travel-map/desktop 的「行迹」桌面版，与设计稿 1:1）。此前桌面首选
   ///     「本机 server 页面 + 系统浏览器」，于是同一张卡会先弹独立窗口、
   ///     又开一个浏览器标签页——两条路并存是用户报的「两种打开方式」。
-  ///   - Android / iOS：网页仍是唯一可行路径（webview_windows 在移动端不可用，
-  ///     应用内没有可用的行程界面），保留应用内浏览器（不离开 App）。
+  ///     常用工具「行程」入口则打开**应用内**行程归档页（见 _openTravelArchive），
+  ///     独立窗口链路保持不变。
   void _openTravelPlanPanel(AgentResultData data) {
     unawaited(_openTravelPlanWindow(data));
   }
 
   Future<void> _openTravelPlanWindow(AgentResultData data) async {
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-      // 手机端：应用内浏览器（失败退系统浏览器）
-      if (await TravelPlanBrowserLauncher.open(data)) {
-        if (!mounted) return;
-        setState(() => _tabIndex = 0); // 主窗口聚焦时，行程卡就在聊天页眼前
+      // 手机端：原生行程页（2026-10-12 起替代应用内浏览器）
+      final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+      if (navCtx != null && navCtx.mounted) {
+        await TravelPlanMobilePage.show(
+          navCtx,
+          plan: TravelPlanData.from(data),
+        );
         return;
       }
+      // navCtx 不可用（极罕见）：落回桌面分支——Windows 窗口启动在
+      // 移动端会失败，最终退到下方应用内全屏页兜底。
     }
     // 桌面（以及手机端浏览器不可用）：独立子进程窗口
     final bool opened = await TravelPlanWindowLauncher.open(data);
@@ -3957,6 +3982,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
     unawaited(GalleryWorkbenchPage.show(navCtx));
+  }
+
+  /// 常用工具「行程」入口：全屏路由打开应用内行程归档页。
+  /// 对话中创建过的行程（服务端 data/travel-plans 落盘）都在这里沉淀，
+  /// 点条目回看详情：桌面 = 应用内 WebView 面板，手机 = 原生行程页。
+  void _openTravelArchive() {
+    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
+    if (navCtx == null || !navCtx.mounted) return;
+    unawaited(TravelPlanArchivePage.show(navCtx));
   }
 
   /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
@@ -4425,6 +4459,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// App 生命周期（手机后台时主动消息走系统通知，类微信常在线提醒）
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  // ⚠️ 铁律（用户 2026-10-13 明令）：_isMobile 必须永远只按平台判定
+  // （Android/iOS）。桌面 exe（Windows/macOS/Linux）绝不允许为了调试手机 UI
+  // 而伪造这个值（加调试开关、环境变量、写死 true 等一律禁止）。
+  // 调试手机端 UI 用独立入口 main_mobile.dart，不要动桌面路由。
   bool get _appBackgrounded => _lifecycleState != AppLifecycleState.resumed;
 
   // ====== 统一主动性管道：outcome 反馈回传 ======
@@ -5242,6 +5280,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 手机端全链走手机 UI：登录门禁 → 手机主壳（对话/日程/我的）。
     // 桌面端的注册门禁/首启向导/N 光扫/主界面均不参与；根组件的重量级
     // 初始化照常后台跑——主动通知、简报、通话等根能力与主壳解耦。
+    //
+    // ⚠️ 铁律（用户 2026-10-13 明令）：这个分支只在真手机平台生效。
+    // 桌面 exe 必须永远落到下方桌面链路（注册门禁 → 首启向导 → 桌面主壳
+    // AppSidebar），任何调试/排查都不许让桌面 exe 路由进手机壳
+    // （MobileLoginPage / MobileHomePage）。调手机 UI 走 main_mobile.dart。
     if (_isMobile) {
       if (_accountEmail == null) {
         return _buildMobileLoginGate();
@@ -6032,6 +6075,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onMessages: _openMessagesPanel,
         onGallery: _openGalleryPanel,
         onBrowser: _openBrowserPanel,
+        onTravel: _openTravelArchive,
         messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
       ),
     );

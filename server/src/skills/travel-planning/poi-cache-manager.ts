@@ -8,8 +8,7 @@
  * - 所有用户共享同一份缓存（全局受益）
  */
 
-import fs from 'fs';
-import path from 'path';
+import { travelPoiDb, type DbPoiRow } from './travel-poi-db.js';
 
 /** POI 缓存 TTL：过期条目仍可用（stale-while-revalidate），由服务层触发后台刷新。
  *  可用环境变量 POI_CACHE_TTL_MS 覆盖（默认 7 天）。 */
@@ -57,16 +56,29 @@ export interface RawPOI {
   raw?: Record<string, unknown>;
 }
 
+/** 落库用的 POI 行（与 travelPoiDb.replacePois 的入参形状一致） */
+interface PoiRowInput {
+  poiId: string;
+  type: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  address: string;
+  rating?: number;
+  tags?: string[];
+  payload: Record<string, unknown>;
+}
+
 export class POICacheManager {
-  private cacheDir: string;
   private memoryCache: Map<string, CacheEntry> = new Map();
   private maxMemoryEntries: number = 100; // 内存最多缓存100个目的地
 
   constructor() {
-    this.cacheDir = path.join(process.cwd(), 'data', 'poi-cache');
-    this.ensureCacheDir();
-    // 启动时从文件恢复到内存
-    this.restoreFromFilesystem();
+    // 持久化层已从「每城市一个 JSON 文件」切到 SQLite（travel-poi.db）：
+    // 权威源、可查询、可审计（每次写入带 created_at/updated_at，刷新服务据此
+    // 决定刷谁）。旧 JSON 由 travelPoiDb 构造时一次性导入、目录改名 *.migrated
+    // 保留（可回滚），因此这里不再扫文件。
+    this.restoreFromStore();
   }
 
   // ======================== 公共接口 ========================
@@ -84,8 +96,8 @@ export class POICacheManager {
       return entry;
     }
 
-    // 内存没有，尝试从文件读取
-    return this.loadFromFile(key);
+    // 内存没有 → 从 SQLite 读（顺带把 lastAccessedAt/accessCount 落库）
+    return this.loadFromStore(key);
   }
 
   /**
@@ -113,8 +125,8 @@ export class POICacheManager {
     this.evictIfNeeded();
     this.memoryCache.set(key, entry);
 
-    // 写入文件（持久化，供其他用户/重启后使用）
-    this.saveToFile(key, entry);
+    // 落库（SQLite 权威源，供重启/其他调用方/刷新服务使用）
+    this.persist(key, entry);
 
     console.log(`[POICache] 已缓存: ${destination} (景点${data.attractions.length} 酒店${data.hotels.length} 餐厅${data.restaurants.length})`);
     return entry;
@@ -126,7 +138,11 @@ export class POICacheManager {
   has(destination: string): boolean {
     const key = this.normalizeKey(destination);
     if (this.memoryCache.has(key)) return true;
-    return fs.existsSync(this.getFilePath(key));
+    try {
+      return travelPoiDb.getCity(key) != null;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -149,15 +165,31 @@ export class POICacheManager {
     poiCount: number;
   }> {
     const result: Array<{ destination: string; accessCount: number; createdAt: string; poiCount: number }> = [];
-    for (const [, entry] of this.memoryCache) {
-      result.push({
-        destination: entry.destination,
-        accessCount: entry.accessCount,
-        createdAt: entry.createdAt,
-        poiCount: entry.data.attractions.length + entry.data.hotels.length + entry.data.restaurants.length,
-      });
+    try {
+      // 以库为准：内存只装最近 100 个，库里有全量
+      for (const city of travelPoiDb.listCities()) {
+        const mem = this.memoryCache.get(city.slug);
+        result.push({
+          destination: city.destination,
+          accessCount: city.access_count,
+          createdAt: city.created_at,
+          poiCount: mem
+            ? mem.data.attractions.length + mem.data.hotels.length + mem.data.restaurants.length
+            : travelPoiDb.listPois(city.slug).length,
+        });
+      }
+    } catch {
+      // 库不可用（极端情况）：退回内存视图，不抛错
+      for (const [, entry] of this.memoryCache) {
+        result.push({
+          destination: entry.destination,
+          accessCount: entry.accessCount,
+          createdAt: entry.createdAt,
+          poiCount: entry.data.attractions.length + entry.data.hotels.length + entry.data.restaurants.length,
+        });
+      }
     }
-    // 按访问次数排序
+    // 按访问次数排序（热点目的地优先，刷新服务也按这个顺序刷）
     return result.sort((a, b) => b.accessCount - a.accessCount);
   }
 
@@ -166,15 +198,13 @@ export class POICacheManager {
    */
   invalidate(destination: string): boolean {
     const key = this.normalizeKey(destination);
-    this.memoryCache.delete(key);
+    const inMemory = this.memoryCache.delete(key);
+    let inDb = false;
     try {
-      const filePath = this.getFilePath(key);
-      if (fs.existsSync(filePath)) {
-        fs.unlinkSync(filePath);
-        return true;
-      }
-    } catch { /* ignore */ }
-    return false;
+      inDb = travelPoiDb.getCity(key) != null;
+      travelPoiDb.deleteCity(key);
+    } catch { /* 库不可用：至少内存已清 */ }
+    return inMemory || inDb;
   }
 
   /**
@@ -191,13 +221,13 @@ export class POICacheManager {
   ): void {
     if (!images.length) return;
     const key = this.normalizeKey(destination);
-    const entry = this.memoryCache.get(key) ?? this.loadFromFile(key);
+    const entry = this.memoryCache.get(key) ?? this.loadFromStore(key);
     if (!entry) return;
     const listKey = `${type}s` as keyof CacheEntry['data'];
     const poi = entry.data[listKey].find((p) => p.id === poiId);
     if (!poi) return;
     poi.images = images;
-    this.saveToFile(key, entry);
+    this.persist(key, entry);
   }
 
   /**
@@ -209,20 +239,14 @@ export class POICacheManager {
     totalSizeBytes: number;
     topDestinations: Array<{ destination: string; accessCount: number }>;
   } {
-    let fileEntries = 0;
-    let totalSize = 0;
-
+    // 字段名沿用 fileEntries/totalSizeBytes（healthCheck 在消费），语义已切到
+    // SQLite：分别表示「库里持久化的目的地数」与「库文件字节数」。
+    let persistedEntries = 0;
+    let dbBytes = 0;
     try {
-      if (fs.existsSync(this.cacheDir)) {
-        const files = fs.readdirSync(this.cacheDir).filter(f => f.endsWith('.json'));
-        fileEntries = files.length;
-        for (const f of files) {
-          try {
-            totalSize += fs.statSync(path.join(this.cacheDir, f)).size;
-          } catch { /* ignore */ }
-        }
-      }
-    } catch { /* ignore */ }
+      persistedEntries = travelPoiDb.listCities().length;
+      dbBytes = travelPoiDb.dbSizeBytes();
+    } catch { /* 库不可用：返回内存视图 */ }
 
     const topDestinations = this.listCachedDestinations()
       .slice(0, 10)
@@ -230,8 +254,8 @@ export class POICacheManager {
 
     return {
       memoryEntries: this.memoryCache.size,
-      fileEntries,
-      totalSizeBytes: totalSize,
+      fileEntries: persistedEntries,
+      totalSizeBytes: dbBytes,
       topDestinations,
     };
   }
@@ -244,78 +268,138 @@ export class POICacheManager {
     return Buffer.from(normalized, 'utf-8').toString('hex').slice(0, 64);
   }
 
-  private getFilePath(key: string): string {
-    return path.join(this.cacheDir, `${key}.json`);
-  }
+  // ── 持久化层（SQLite / travel-poi.db）────────────────────────────
+  // 设计要点：POI 的完整原始对象存进 pois.payload_json（图片/评分/标签都在里面），
+  // 结构化列只用于查询与排序。所以「补图」不需要单独的迁移脚本——payload 一变
+  // 整行就跟着更新。
 
-  private ensureCacheDir(): void {
-    if (!fs.existsSync(this.cacheDir)) {
-      fs.mkdirSync(this.cacheDir, { recursive: true });
-      console.log(`[POICache] 创建缓存目录: ${this.cacheDir}`);
-    }
-  }
-
-  /** 服务启动时从文件系统恢复到内存 */
-  private restoreFromFilesystem(): void {
-    let count = 0;
+  private persist(key: string, entry: CacheEntry): void {
     try {
-      if (!fs.existsSync(this.cacheDir)) return;
-
-      const files = fs.readdirSync(this.cacheDir).filter(f => f.endsWith('.json'));
-
-      for (const file of files) {
-        try {
-          const filePath = path.join(this.cacheDir, file);
-          const content = fs.readFileSync(filePath, 'utf-8');
-          const entry: CacheEntry = JSON.parse(content);
-          const key = this.normalizeKey(entry.destination);
-
-          // 只加载到内存缓存上限
-          if (this.memoryCache.size < this.maxMemoryEntries) {
-            this.memoryCache.set(key, entry);
-            count++;
-          }
-        } catch (err) {
-          console.warn(`[POICache] 恢复缓存失败: ${file}`, err);
-        }
-      }
-
-      if (count > 0) {
-        console.log(`[POICache] 从文件恢复了 ${count} 个目的地的缓存`);
-      }
+      travelPoiDb.upsertCity({
+        slug: key,
+        destination: entry.destination,
+        centerLat: entry.center?.latitude ?? 0,
+        centerLng: entry.center?.longitude ?? 0,
+        createdAt: entry.createdAt,
+        lastAccessedAt: entry.lastAccessedAt,
+        accessCount: entry.accessCount,
+      });
+      travelPoiDb.replacePois(key, this.toPoiRows(entry));
     } catch (err) {
-      console.error('[POICache] 恢复缓存失败:', err);
+      // 写库失败不影响本次请求：内存里仍有数据，只是重启后会丢
+      console.warn(`[POICache] 写库失败（内存仍可用）: ${key}`, err instanceof Error ? err.message : err);
     }
   }
 
-  private loadFromFile(key: string): CacheEntry | null {
+  private toPoiRows(entry: CacheEntry): PoiRowInput[] {
+    const rows: PoiRowInput[] = [];
+    for (const listKey of ['attractions', 'hotels', 'restaurants'] as const) {
+      for (const p of entry.data[listKey] ?? []) {
+        if (!p?.id || !p?.name) continue;
+        rows.push({
+          poiId: p.id,
+          type: listKey.slice(0, -1), // attractions → attraction
+          name: p.name,
+          latitude: Number(p.latitude) || 0,
+          longitude: Number(p.longitude) || 0,
+          address: p.address ?? '',
+          rating: typeof p.rating === 'number' ? p.rating : undefined,
+          tags: Array.isArray(p.tags) ? p.tags : undefined,
+          payload: p as unknown as Record<string, unknown>,
+        });
+      }
+    }
+    return rows;
+  }
+
+  private poiFromRow(row: DbPoiRow): RawPOI {
+    let tags: string[] | undefined;
+    if (row.tags_json) {
+      try { tags = JSON.parse(row.tags_json) as string[]; } catch { /* 脏数据忽略 */ }
+    }
+    return {
+      id: row.poi_id,
+      name: row.name,
+      latitude: row.latitude ?? 0,
+      longitude: row.longitude ?? 0,
+      address: row.address ?? '',
+      type: row.type,
+      rating: row.rating ?? undefined,
+      tags,
+    };
+  }
+
+  /**
+   * 从库读回一个目的地。
+   * @param bump 是否累计访问计数（恢复启动快照时不累计，否则每次重启都虚增）
+   */
+  private readCity(key: string, opts: { cache: boolean; bump: boolean }): CacheEntry | null {
     try {
-      const filePath = this.getFilePath(key);
-      if (!fs.existsSync(filePath)) return null;
+      const city = travelPoiDb.getCity(key);
+      if (!city) return null;
+      const rows = travelPoiDb.listPois(key);
+      if (rows.length === 0) return null;
 
-      const content = fs.readFileSync(filePath, 'utf-8');
-      const entry: CacheEntry = JSON.parse(content);
+      const data: CacheEntry['data'] = { attractions: [], hotels: [], restaurants: [] };
+      for (const row of rows) {
+        let poi: RawPOI;
+        if (row.payload_json) {
+          try {
+            poi = JSON.parse(row.payload_json) as RawPOI;
+          } catch {
+            poi = this.poiFromRow(row);
+          }
+        } else {
+          poi = this.poiFromRow(row);
+        }
+        const listKey = `${row.type}s` as keyof CacheEntry['data'];
+        if (Array.isArray(data[listKey])) (data[listKey] as RawPOI[]).push(poi);
+      }
 
-      // 加载到内存
-      this.evictIfNeeded();
-      this.memoryCache.set(key, entry);
+      const entry: CacheEntry = {
+        destination: city.destination,
+        queryKey: key,
+        data,
+        center: { latitude: city.center_lat ?? 0, longitude: city.center_lng ?? 0 },
+        createdAt: city.created_at,
+        lastAccessedAt: opts.bump ? new Date().toISOString() : city.last_accessed_at,
+        accessCount: opts.bump ? city.access_count + 1 : city.access_count,
+      };
 
-      entry.lastAccessedAt = new Date().toISOString();
-      entry.accessCount++;
-
+      if (opts.cache) {
+        this.evictIfNeeded();
+        this.memoryCache.set(key, entry);
+      }
+      if (opts.bump) travelPoiDb.touchCity(key);
       return entry;
     } catch (err) {
-      console.warn(`[POICache] 读取文件缓存失败: ${key}`, err);
+      console.warn(`[POICache] 读库失败: ${key}`, err instanceof Error ? err.message : err);
       return null;
     }
   }
 
-  private saveToFile(key: string, entry: CacheEntry): void {
+  /** 内存未命中时从库补齐（并累计一次访问） */
+  private loadFromStore(key: string): CacheEntry | null {
+    return this.readCity(key, { cache: true, bump: true });
+  }
+
+  /** 服务启动时从库恢复到内存（只装满内存上限，库里保留全量） */
+  private restoreFromStore(): void {
+    let count = 0;
     try {
-      const filePath = this.getFilePath(key);
-      fs.writeFileSync(filePath, JSON.stringify(entry, null, 2), 'utf-8');
+      for (const city of travelPoiDb.listCities()) {
+        if (this.memoryCache.size >= this.maxMemoryEntries) break;
+        const entry = this.readCity(city.slug, { cache: false, bump: false });
+        if (entry) {
+          this.memoryCache.set(city.slug, entry);
+          count++;
+        }
+      }
+      if (count > 0) {
+        console.log(`[POICache] 从 SQLite 恢复 ${count} 个目的地（${travelPoiDb.dbPath}）`);
+      }
     } catch (err) {
-      console.warn(`[POICache] 写入文件缓存失败: ${key}`, err);
+      console.warn('[POICache] 从 SQLite 恢复失败:', err instanceof Error ? err.message : err);
     }
   }
 

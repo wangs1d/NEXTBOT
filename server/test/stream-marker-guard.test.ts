@@ -141,3 +141,30 @@ test("sawStructuredBlock：RENDER_HINT/NEXT_UP 不算结构化产出（不触发
   g.feed("[RENDER_HINT:structured]\n建议如下[NEXT_UP_START]查天气[NEXT_UP_END]完。");
   assert.equal(g.sawStructuredBlock, false);
 });
+
+// ── 2026-10-11 变体声明（模型把格式写歪：括号在冒号前闭合）──────────────
+
+test("变体声明 [RENDER_HINT]:brief 行内嵌时被剥离，正文照发", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("马上帮你搜～[RENDER_HINT]:brief\n");
+  assert.equal(out, "马上帮你搜～\n");
+});
+
+test("变体声明 [RENDER_AS]:brief 独占一行被整行扣下", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("前文。\n[RENDER_AS]:brief\n后文。");
+  assert.equal(out, "前文。\n后文。");
+});
+
+test("变体声明跨 chunk（残段扣留后补全）同样剥离", () => {
+  const g = createStreamMarkerGuard();
+  const a = g.feed("开头。[RENDER_AS");
+  const b = g.feed("]:brief\n正文继续。");
+  assert.equal(`${a}${b}`.replace(/\n+/g, "\n"), "开头。\n正文继续。");
+});
+
+test("普通方括号文本（非标记变体）不受影响", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("参见 [附录A] 与 [注1]:内容\n");
+  assert.equal(out, "参见 [附录A] 与 [注1]:内容\n");
+});

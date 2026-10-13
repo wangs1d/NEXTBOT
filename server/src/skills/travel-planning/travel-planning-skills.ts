@@ -65,8 +65,6 @@ function mapDaysToStored(days: PlannedDay[] | undefined) {
       splatUrl: item.splatUrl,
       transportFromPrev: item.transportFromPrev,
       visitDuration: item.visitDuration,
-      reviews: item.reviews,
-      videos: item.videos,
     })),
   }));
 }
@@ -295,6 +293,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           // 行程卡海报区文案：目的地一句话简介 + 出行随身物品叮嘱
           intro: result.travelInfo?.intro,
           packing: result.travelInfo?.packing,
+          // 出发日天气摘要：行程桌面页顶栏天气胶囊（无天气数据时缺省，前端隐藏）
+          weather: result.weather,
           // 行程卡海报区背景：目的地代表性封面（维基百科主图优先，见规划服务）
           coverImage: result.coverImage,
           days: mapDaysToStored(result.days),
@@ -319,6 +319,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           // 卡片海报区文案与候选 POI 池：冷层补齐后，planId 直读建卡（A4）不缺数据
           intro: result.travelInfo?.intro,
           packing: result.travelInfo?.packing,
+          weather: result.weather,
           coverImage: result.coverImage,
           pois: mapPoisToStored(result.pois),
           totalCost: (result as { pricingSummary?: { totalFinal?: number } }).pricingSummary

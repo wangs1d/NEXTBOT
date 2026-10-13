@@ -139,8 +139,21 @@ Copy-Item (Join-Path $Repo 'server\models\speaker-campplus-zh') (Join-Path $Stag
 # 3.8 旅行知识种子数据（68KB）：travel 技能的离线底座（poi/坐标/目的地/国内关键词）。
 # 知识库读 cwd\data\travel-knowledge，捆绑 runtime 的 cwd 就是 runtime 目录，路径正好对上；
 # 拷在冒烟之前，让门禁实跑时顺带验证真实加载。开源版剔除 travel 家族，种子一并跳过。
+#
+# **只拷 travel-knowledge，绝不整目录拷 data/**：travel-media/assets 是运行期回填出来的
+# 图片资产（2026-10-12 存量一度 766MB / 1964 张），它属于用户数据不是随包资产——整目录
+# 拷进 staging 就是几百 MB 的安装包。回填能力在代码里，用户首次规划时按需生成。
 if ($Edition -ne 'oss') {
   Copy-Item (Join-Path $Repo 'server\data\travel-knowledge') (Join-Path $StageRuntime 'data\travel-knowledge') -Recurse -Force
+}
+
+# 3.8.1 staging 体积防线：media 资产绝不能进包。这里不是"清理"而是"断言"——
+# 上面若有朝一日改成整目录拷 data/，这里会当场炸掉，而不是等到用户下载完才发现。
+$leakedMedia = @('travel-media', 'tile-cache') | Where-Object {
+  Test-Path (Join-Path $StageRuntime "data\$_")
+}
+if ($leakedMedia) {
+  throw "staging 混入了运行期媒体资产（$($leakedMedia -join ', ')）——它们不该随安装包分发，请只拷 travel-knowledge"
 }
 
 # 3.9 开源版差异注入：runtime\.env 声明 NEXTBOT_EDITION=oss（服务端版本闸的唯一

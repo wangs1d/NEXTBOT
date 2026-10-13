@@ -58,6 +58,8 @@ Future<void> runIslandReminderE2EBootstrap() async {
     title: "设计评审 · 14:00",
     message: "10 分钟后开始，请提前准备",
     holdSeconds: 8,
+    // E2E 验证的就是破屏唤回链路（到点档语义）：显式带 urgent 白名单。
+    urgent: true,
   );
   File("${stageDir.path}${Platform.pathSeparator}reminder_fired.flag")
       .writeAsStringSync(DateTime.now().toIso8601String());

@@ -21,6 +21,8 @@ export type TemplateCtx = {
   hours?: number;
   minutes?: number;
   count?: number;
+  /** 关怀类模板的触发原因（continuous_work / late_night_active），决定文案族 */
+  reason?: string;
   firstTask?: string;
   weather?: string;
   topic?: string;
@@ -62,7 +64,26 @@ export function renderProactiveText(kind: string, ctx: TemplateCtx): string {
         c,
       );
     // ── 关怀 ──
+    // 2026-10-12 修订：overwork_care 按 reason 分文案——深夜活跃触发不再
+    // 硬说「连续 N 小时」（实盘凌晨触发却报「连续3小时」，检测叙事失实）；
+    // work_marathon（连续工作评估器）hours 恒有值，保持原话术。
     case "overwork_care":
+      if (c.reason === "late_night_active") {
+        return pick(
+          [
+            (x) => `都${x.now?.getHours() ?? 23}点了还醒着。轻音乐我放上了，听完这段就去休息。`,
+            (x) => `${x.now?.getHours() ?? 23} 点了，屏幕还亮着。我放了首轻的，你也别硬撑。`,
+          ],
+          c,
+        );
+      }
+      return pick(
+        [
+          (x) => (x.hours ? `连续${x.hours}小时了，屏幕都替你累。歇十分钟？我放点轻的。` : "忙了这么久，屏幕都替你累。歇十分钟？我放点轻的。"),
+          (x) => (x.hours ? `都${x.hours}个小时没挪窝了。起来走走，水我提醒你接。` : "忙了这么久没挪窝。起来走走，水我提醒你接。"),
+        ],
+        c,
+      );
     case "work_marathon":
       return pick(
         [

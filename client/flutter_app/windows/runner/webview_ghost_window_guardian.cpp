@@ -1,6 +1,7 @@
 #include "webview_ghost_window_guardian.h"
 
 #include <windows.h>
+#include <io.h>
 #include <tlhelp32.h>
 
 #include <atomic>
@@ -157,8 +158,13 @@ BOOL CALLBACK SweepWindow(HWND hwnd, LPARAM lparam) {
                static_cast<long>(rect.bottom));
   OutputDebugStringW(log);
   // main.cpp 已把 stderr 重定向到 pai_app_stderr.log，方便事后排查。
-  fwprintf(stderr, L"%ls\n", log);
-  fflush(stderr);
+  // 防御：stderr 流必须有效才写——freopen 失败/流被关闭（fd=-1）时任何
+  // fwprintf 都会触发 debug CRT 断言 write.cpp:50 并 abort（2026-10-11
+  // 行程窗口崩溃实锤：本线程的 dump 栈止于 ucrtbased abort）。
+  if (stderr != nullptr && _fileno(stderr) >= 0) {
+    fwprintf(stderr, L"%ls\n", log);
+    fflush(stderr);
+  }
   return TRUE;
 }
 

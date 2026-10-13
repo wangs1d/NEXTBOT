@@ -4,6 +4,7 @@ import "dart:convert";
 import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
 
+import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/db/isar_local_history_store.dart";
 import "../core/db/local_history_store.dart";
@@ -11,8 +12,12 @@ import "../core/models/chat_models.dart";
 import "../core/services/access_auth_api.dart";
 import "../core/services/client_location_service.dart";
 import "../core/services/ws_chat_service.dart";
+import "../core/utils/agent_result_parser.dart";
 import "../core/utils/assistant_text_sanitizer.dart";
+import "../core/utils/link_utils.dart";
 import "../core/vision/vision_wire_frame.dart";
+import "../features/chat/media_disk_cache.dart";
+import "../features/chat/travel_plan_launcher.dart";
 
 // ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
 final RegExp _bubbleIdPattern = RegExp(r"^assistant-(.+)-b(\d+)$");
@@ -76,6 +81,9 @@ class MobileChatController extends ChangeNotifier {
   /// 输入框左上角据此展示「球形图标 + 正在调用:xxx」。
   String? currentToolName;
 
+  /// 离线补发进行中闸（防 ws_connected 风暴期间并发 flush 乱序重复发送）。
+  bool _flushingPending = false;
+
   /// 打开一个新会话：仅清空本地内存，仍连接同一后端。
   void reset() {
     messages.clear();
@@ -103,9 +111,19 @@ class MobileChatController extends ChangeNotifier {
       }
       final List<ChatMessage> loaded =
           await _store.listMessages(ApiConfig.effectiveActorId);
-      if (loaded.isNotEmpty) {
-        _mergeLoadedMessages(loaded);
+      // recap 回显过滤（2026-10-12）：本地库已落盘的「摘要整块复述」气泡在加载层
+      // 剔除（非破坏性——store 数据不动，仅不再显示）。与服务端 isRecapEchoText 同判据。
+      final List<ChatMessage> visible = loaded
+          .where((m) => m.role != "assistant" ||
+              stripRecapEchoBlocks(m.text).trim().isNotEmpty)
+          .toList();
+      if (visible.isNotEmpty) {
+        _mergeLoadedMessages(visible);
         notifyListeners();
+        // 冷启动媒体预热（2026-10-12 预缓存）：历史照片提前并发落盘到磁盘
+        // 缓存，滚到对应消息直接命中秒出——这是「重开后照片要重新缓存一段
+        // 时间」问题的根治半边（渲染端已统一走 CachedMediaImage）。
+        _warmHistoryMedia(visible);
       }
     } catch (e) {
       debugPrint("[MobileChatController] 本地历史加载失败(降级内存态): $e");
@@ -127,6 +145,32 @@ class MobileChatController extends ChangeNotifier {
     messages.insertAll(0, older);
   }
 
+  /// 冷启动媒体预热：收集历史消息里全部媒体卡地址（mediaCards / renderBlocks
+  /// 媒体块 / 瞬态 pendingMediaCards），归一为绝对 URL 后交给磁盘缓存有界
+  /// 并发预热。全程静默，不阻塞聊天恢复。
+  void _warmHistoryMedia(List<ChatMessage> msgs) {
+    void collectCard(Map<String, dynamic> card) {
+      final Object? thumb = card["thumbnailUrl"] ?? card["mediaUrl"];
+      final String url = thumb?.toString() ?? "";
+      if (url.isEmpty) return;
+      MediaDiskCache.instance.warm(<String>[LinkUtils.resolveMediaUrl(url)]);
+    }
+
+    for (final ChatMessage m in msgs) {
+      m.mediaCards?.forEach(collectCard);
+      m.pendingMediaCards?.forEach(collectCard);
+      final List<Map<String, dynamic>>? blocks = m.renderBlocks;
+      if (blocks == null) continue;
+      for (final Map<String, dynamic> block in blocks) {
+        if ((block["type"]?.toString() ?? "") != "media") continue;
+        final List<dynamic>? cards = block["cards"] as List<dynamic>?;
+        cards
+            ?.whereType<Map<String, dynamic>>()
+            .forEach(collectCard);
+      }
+    }
+  }
+
   /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
   void _persist(ChatMessage message) {
     unawaited(
@@ -136,8 +180,9 @@ class MobileChatController extends ChangeNotifier {
     );
   }
 
-  /// 服务端线程历史拉取（GET /api/chat-data/history）：读最近一段共享线程，
-  /// 把本机缺失的对话轮回填进本地（桌面端聊过、手机重启后也能看到）。
+  /// 服务端全量转史拉取（GET /api/chat-data/history?full=1）：从服务端 turn WAL
+  /// 反解完整聊天转史（2026-10-12 P1）——线程口径只有滑动窗口十几条，清数据/
+  /// 换机后旧对话回不来；WAL 是聊天记录的权威源。按 user 锚去重后落本地。
   Future<void> _pullServerHistory() async {
     if (_serverHistoryPulled) return;
     _serverHistoryPulled = true;
@@ -145,7 +190,8 @@ class MobileChatController extends ChangeNotifier {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
           .replace(queryParameters: <String, String>{
         "userId": ApiConfig.effectiveActorId,
-        "limit": "80",
+        "limit": "200",
+        "full": "1",
       });
       final http.Response res = await http
           .get(uri, headers: AccessCredentialStore.instance.authHeaders)
@@ -282,16 +328,16 @@ class MobileChatController extends ChangeNotifier {
   /// 发送一条用户消息(空文本+无图忽略)。携带 [visionFrames] 时与桌面端
   /// 同协议走 `chat.user_message.visionFrames`(base64,服务端视觉管线)。
   /// 返回落库的用户消息 id(未发送返回 null),供调用方挂气泡缩略图。
+  ///
+  /// 离线可发（2026-10-12）：断网时消息照常落气泡并持久化，同时把完整
+  /// `chat.user_message` 载荷存进本地待发队列；联网后由
+  /// [_flushPendingUserMessages] 按序补发。服务端按 messageId 幂等去重，
+  /// 补发重复无害。
   Future<String?> send(String raw, {List<VisionWireFrame>? visionFrames}) async {
     final String text = raw.trim();
     final bool hasFrames = visionFrames != null && visionFrames.isNotEmpty;
     if (text.isEmpty && !hasFrames) return null;
-    if (!_service.isConnected) {
-      _service.retryConnect();
-      errorMessage = "正在连接服务器,请稍后再发";
-      notifyListeners();
-      return null;
-    }
+    final bool offline = !_service.isConnected;
     final ChatMessage userMsg = ChatMessage(
       messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
@@ -300,13 +346,8 @@ class MobileChatController extends ChangeNotifier {
       text: text.isEmpty && hasFrames ? "（见图）" : text,
       timestamp: DateTime.now(),
       attachmentImageCount: hasFrames ? visionFrames.length : 0,
+      pendingDelivery: offline,
     );
-    messages.add(userMsg);
-    _persist(userMsg);
-    isProcessing = true;
-    errorMessage = null;
-    notifyListeners();
-
     final Map<String, dynamic> payload = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
       "messageId": userMsg.messageId,
@@ -321,8 +362,64 @@ class MobileChatController extends ChangeNotifier {
       payload["visionFrames"] =
           visionFrames.map((VisionWireFrame f) => f.toJson()).toList();
     }
+    messages.add(userMsg);
+    _persist(userMsg);
+    notifyListeners();
+
+    if (offline) {
+      // 离线：入队（fire-and-forget，存储失败只丢补发不丢气泡）+ 触发重连
+      unawaited(
+        _store.enqueuePendingUserMessage(payload).catchError((Object e) {
+          debugPrint("[MobileChatController] 离线消息入队失败: $e");
+        }),
+      );
+      _service.retryConnect();
+      errorMessage = "当前离线,消息已存入待发队列,联网后自动发送";
+      notifyListeners();
+      return userMsg.messageId;
+    }
+    isProcessing = true;
+    errorMessage = null;
+    notifyListeners();
     _service.sendEvent("chat.user_message", payload);
     return userMsg.messageId;
+  }
+
+  /// 联网补发离线待发消息（`ws_connected` 后触发；此时 `session.init` 已由
+  /// onConnected 同步先行发出，载荷落在已绑定的账号车道上）。
+  ///
+  /// 按队列顺序逐条补发；发送成功才出队并翻转气泡「离线待发送」状态。
+  /// 中途断线/发送失败立即停手，剩余留队等下次 ws_connected。
+  Future<void> _flushPendingUserMessages() async {
+    if (_flushingPending) return;
+    _flushingPending = true;
+    try {
+      final List<Map<String, dynamic>> pending =
+          await _store.listPendingUserMessages();
+      if (pending.isEmpty) return;
+      for (final Map<String, dynamic> payload in pending) {
+        if (!_service.isConnected) return;
+        final String messageId = payload["messageId"]?.toString() ?? "";
+        if (messageId.isEmpty) continue;
+        if (!_send("chat.user_message", payload)) return;
+        await _store.dequeuePendingUserMessage(messageId);
+        final int idx =
+            messages.indexWhere((m) => m.messageId == messageId);
+        if (idx >= 0 && messages[idx].pendingDelivery) {
+          final ChatMessage settled =
+              messages[idx].copyWith(pendingDelivery: false);
+          messages[idx] = settled;
+          _persist(settled);
+        }
+        notifyListeners();
+      }
+      errorMessage = null;
+    } catch (e) {
+      debugPrint("[MobileChatController] 离线消息补发失败(留队重试): $e");
+    } finally {
+      _flushingPending = false;
+      notifyListeners();
+    }
   }
 
   /// 测试入口：直接驱动 WS 事件（生产路径走 [_subscription] → 本方法）。
@@ -411,8 +508,17 @@ class MobileChatController extends ChangeNotifier {
         // 连接就绪即静默上报一次定位（无 jobId）：填充服务端位置缓存，
         // 首条消息的 prompt 注入才有位置背景。与桌面端启动上报同语义。
         unawaited(_reportStartupLocation());
+        // 离线待发消息补发（session.init 已由 onConnected 同步先行发出）
+        unawaited(_flushPendingUserMessages());
       case "agent.location_request":
         unawaited(_handleLocationRequest(payload));
+      case "schedule.reminder_fired":
+        // 到点提醒（2026-10-12 接通）：编排层按前后台分流——后台系统通知，
+        // 前台应用内横幅。此前手机端不监听本事件，到点无任何触达。
+        unawaited(AmbientFeedsController.instance.onScheduleReminderFired(payload));
+      case "schedule.tasks_changed":
+        // 日程变更同步（创建/更新/删除）→ 编排层刷新日程页本地镜像。
+        unawaited(AmbientFeedsController.instance.onScheduleTasksChanged(payload));
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
@@ -439,6 +545,7 @@ class MobileChatController extends ChangeNotifier {
         notifyListeners();
       case "chat.assistant_done":
         _finalizeReply(payload);
+        _maybeAutoOpenTravelCard(payload);
       case "chat.error":
         isProcessing = false;
         errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
@@ -891,6 +998,22 @@ class MobileChatController extends ChangeNotifier {
     currentToolName = null;
     isProcessing = false;
     notifyListeners();
+  }
+
+  /// 行程卡 autoOpen 自动展开（2026-10-12 与桌面端对齐，桌面见 main.dart
+  /// done 收口的同名逻辑）：本轮产出带 autoOpen 的 travel_itinerary 卡时，
+  /// 经 TravelPlanLauncher 直接打开行程规划页（handler 由 MobileHomePage
+  /// 注册）。非 autoOpen 卡只展示卡面，用户点「打开行程规划」再进。
+  void _maybeAutoOpenTravelCard(Map<String, dynamic> payload) {
+    if (ApiConfig.isOssEdition) return;
+    final String finalText =
+        stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
+    final AgentResultData? card = AgentResultParser.parse(finalText).data;
+    if (card != null &&
+        card.cardType == "travel_itinerary" &&
+        card.autoOpen) {
+      TravelPlanLauncher.open(card);
+    }
   }
 
   @override

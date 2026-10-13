@@ -8,6 +8,9 @@ import {
   readMessageTimestampPrefix,
 } from "../../external-model/chat-thread-store.js";
 import { readUserMessageClientId } from "../../external-model/chat-thread-client-id.js";
+import { readMessageTimestampMeta } from "../../external-model/chat-thread-ts-meta.js";
+import { isRecapEchoText } from "../../external-model/chat-thread-store.js";
+import { readActorTranscript } from "../../services/wal-transcript.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import { getAgentRuntimeConfig } from "../../agent/agent-runtime-config.js";
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
@@ -94,8 +97,12 @@ export function registerChatDataRoutes(
    * - 只读：peekThread 不创建空线程；线程消息剥掉 [ts:] 帧还原纯正文 + 真实时间戳。
    * - user 消息附带 clientMessageId（客户端 messageId），供客户端按 id 精确去重。
    * - [session-recap] 摘要块与 tool/system 消息不下发（均为模型内部素材，不是气泡）。
+   * - `full=1`（2026-10-12 P1）：改从 turn WAL（全量轮次原文日志）反解完整聊天
+   *   转史下发——线程是滑动窗口 + 摘要，只适合喂模型；聊天记录的权威源是 WAL，
+   *   换设备/清数据后也能回全量。客户端按 clientMessageId + 用户原文锚去重，
+   *   与线程口径的回填走同一套合并逻辑。
    */
-  app.get<{ Querystring: { userId?: string; sessionId?: string; limit?: string } }>(
+  app.get<{ Querystring: { userId?: string; sessionId?: string; limit?: string; full?: string } }>(
     "/api/chat-data/history",
     async (request, reply) => {
       const query = request.query ?? {};
@@ -108,6 +115,42 @@ export function registerChatDataRoutes(
       }
       const limitRaw = Number.parseInt(query.limit ?? "", 10);
       const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
+
+      if (query.full === "1") {
+        const turns = await readActorTranscript(actorId);
+        const messages: Array<{
+          role: "user" | "assistant";
+          text: string;
+          ts: number | null;
+          clientMessageId?: string;
+        }> = [];
+        for (const turn of turns) {
+          if (turn.userText) {
+            const item: {
+              role: "user" | "assistant";
+              text: string;
+              ts: number | null;
+              clientMessageId?: string;
+            } = { role: "user", text: turn.userText.slice(0, 8000), ts: turn.ts };
+            if (turn.clientMessageId) item.clientMessageId = turn.clientMessageId;
+            messages.push(item);
+          }
+          if (turn.assistantText) {
+            messages.push({
+              role: "assistant",
+              text: turn.assistantText.slice(0, 8000),
+              ts: turn.ts,
+            });
+          }
+        }
+        return {
+          ok: true,
+          actorId,
+          sessionId: actorId,
+          source: "wal",
+          messages: messages.slice(-limit),
+        };
+      }
 
       const masterOn = getAgentRuntimeConfig().masterDelegation.enabled;
       const threadKey = resolvePrimaryChatSessionId(actorId, masterOn);
@@ -139,7 +182,12 @@ export function registerChatDataRoutes(
         const parsed = readMessageTimestampPrefix(content);
         const text = (parsed?.rest ?? content).trim();
         if (!text || text.startsWith("[session-recap]")) continue;
-        const ts = parseMessageTimestamp(content);
+        // recap 回显（无标签的摘要复述残体）不是对话气泡，不下发（2026-10-12）。
+        if (isRecapEchoText(text)) continue;
+        // P1 通道分离配套（2026-10-12 回归修复）：新消息的时刻在 metadata `__ts`，
+        // 正文已无 [ts:] 帧——只解析正文会让 2026-10-11 之后的所有消息 ts=null，
+        // 客户端漫游回填全部按「现在」落位，时间排序/去重全乱。
+        const ts = readMessageTimestampMeta(msg) ?? parseMessageTimestamp(content);
         const item: {
           role: "user" | "assistant";
           text: string;

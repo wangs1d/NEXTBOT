@@ -85,6 +85,13 @@ class TravelWebPanelHost {
       // 页面声明 max-age=86400，不带穿透参数时页面更新（路线/标点逻辑修订）
       // 会被 WebView2 磁盘缓存压住最长一天。
       // 桌面页 = /travel-map/desktop（「行迹」桌面版，行程独立窗口的 1:1 呈现）。
+      // ⚠️ 铁律（用户 2026-10-13 明确要求）：桌面端入口恒为 /travel-map/desktop，
+      // 任何调试/排查都不许改成 /travel-map/mobile 或 UA 分流的 /travel-map；
+      // 调试手机版直接访问 /travel-map/mobile，入口本身一律禁止改动。
+      // 新页面即将导航：上一份页面的就绪态/排队脚本作废（必须在 loadUrl 之前，
+      // 否则旧 ready 会被当成新页面的就绪信号）。
+      controller.resetPageState();
+
       final Uri base = Uri.parse(ApiConfig.httpBase);
       final Uri pageUri = base.replace(
         path: "${base.path}/travel-map/desktop".replaceAll("//", "/"),

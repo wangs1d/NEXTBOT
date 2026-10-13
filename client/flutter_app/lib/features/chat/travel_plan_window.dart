@@ -9,6 +9,7 @@ import "../../core/services/access_auth_api.dart";
 import "../../core/services/windows_webview_bootstrap.dart";
 import "../../core/theme/app_theme.dart";
 import "../../core/utils/agent_result_parser.dart";
+import "travel_plan_models.dart";
 import "travel_plan_panel.dart";
 import "travel_web_panel_host.dart";
 
@@ -472,7 +473,7 @@ class _TravelPlanWindowState extends State<TravelPlanWindowApp> {
     return Scaffold(
       body: TravelPlanPanel(
         key: ValueKey<TravelPlanWindowPayload>(p),
-        data: p.card,
+        plan: TravelPlanData.from(p.card),
         fullscreen: true,
         onClose: () => unawaited(widget.coordinator.hide()),
         // 无边框窗口：页面自绘标题栏的拖动/最小化/最大化回宿主执行

@@ -22,16 +22,20 @@ import "travel_web_panel_host.dart";
 
 
 /// 行程规划面板入口。
+///
+/// [plan] 为渲染数据（`TravelPlanData`）；聊天卡片等持有 AgentResultData
+/// 的调用方经 [TravelPlanFullscreenPage]（内部转换）进入，
+/// 行程归档等已有 TravelPlanData 的调用方直接传 [plan]。
 class TravelPlanPanel extends StatefulWidget {
   const TravelPlanPanel({
     super.key,
-    required this.data,
+    required this.plan,
     this.fullscreen = false,
     this.onClose,
     this.onWindowAction,
   });
 
-  final AgentResultData data;
+  final TravelPlanData plan;
 
   /// 是否为全屏模式（全屏页时隐藏内部全屏入口）。
   final bool fullscreen;
@@ -53,7 +57,7 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
   @override
   Widget build(BuildContext context) {
     return _WebTravelPanel(
-      data: widget.data,
+      plan: widget.plan,
       fullscreen: widget.fullscreen,
       onClose: widget.onClose,
       onWindowAction: widget.onWindowAction,
@@ -67,13 +71,13 @@ class _TravelPlanPanelState extends State<TravelPlanPanel> {
 
 class _WebTravelPanel extends StatefulWidget {
   const _WebTravelPanel({
-    required this.data,
+    required this.plan,
     this.fullscreen = false,
     this.onClose,
     this.onWindowAction,
   });
 
-  final AgentResultData data;
+  final TravelPlanData plan;
   final bool fullscreen;
   final VoidCallback? onClose;
   final void Function(String action)? onWindowAction;
@@ -83,7 +87,7 @@ class _WebTravelPanel extends StatefulWidget {
 }
 
 class _WebTravelPanelState extends State<_WebTravelPanel> {
-  late final TravelPlanData _plan = TravelPlanData.from(widget.data);
+  late final TravelPlanData _plan = widget.plan;
 
   /// 面板与全屏页共用进程级 WebView 宿主（单例，App 启动即预加载）：
   /// 打开面板 / 进出全屏复用同一纹理，地图不再重新加载。
@@ -173,8 +177,8 @@ class _WebTravelPanelState extends State<_WebTravelPanel> {
     setState(() => _fullscreenOpen = true);
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
-        builder: (BuildContext context) => TravelPlanFullscreenPage(
-          data: widget.data,
+        builder: (BuildContext context) => TravelPlanFullscreenPage.fromPlan(
+          plan: widget.plan,
         ),
       ),
     );
@@ -389,9 +393,15 @@ class _WebPanelView extends StatelessWidget {
 /// 不套 AppBar——网页版自带的玻璃拟态顶栏（目的地标题 + 关闭按钮）即页面顶栏，
 /// 关闭按钮经 [TravelPlanPanel.onClose] 弹出路由；原生兜底版同样渲染关闭按钮。
 class TravelPlanFullscreenPage extends StatelessWidget {
-  const TravelPlanFullscreenPage({super.key, required this.data});
+  const TravelPlanFullscreenPage({super.key, required this.data})
+      : plan = null;
 
-  final AgentResultData data;
+  /// 行程归档等已有渲染数据的入口：直接吃 TravelPlanData（零解析开销）。
+  const TravelPlanFullscreenPage.fromPlan({super.key, required this.plan})
+      : data = null;
+
+  final AgentResultData? data;
+  final TravelPlanData? plan;
 
   @override
   Widget build(BuildContext context) {
@@ -399,7 +409,7 @@ class TravelPlanFullscreenPage extends StatelessWidget {
     return Scaffold(
       backgroundColor: cs.surface,
       body: TravelPlanPanel(
-        data: data,
+        plan: plan ?? TravelPlanData.from(data!),
         fullscreen: true,
         onClose: () => Navigator.of(context).pop(),
       ),

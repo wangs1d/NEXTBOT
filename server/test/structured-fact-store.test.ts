@@ -126,6 +126,89 @@ test("canonicalFactField: 规范化与别名映射", () => {
 });
 
 // ============================================================
+// 1.5 主流对齐（2026-10-11）：字段级遗忘 + 低置信标注
+// ============================================================
+
+test("clearFact: 字段级遗忘（用户明确要求忘掉）supersede 下线，历史可追溯", async () => {
+  await withStore(async (store) => {
+    store.applyFact({ actorId: "user-1", field: "居住地", value: "杭州" });
+    store.applyFact({ actorId: "user-1", field: "居住地", value: "上海" });
+    store.applyFact({ actorId: "user-1", field: "职业", value: "全栈开发" });
+
+    const cleared = store.clearFact("user-1", "住址"); // 别名归一 → 居住地
+    assert.equal(cleared, 1);
+    assert.equal(store.getFact("user-1", "居住地"), null);
+    // 其它字段不受牵连
+    assert.equal(store.getFact("user-1", "职业")?.value, "全栈开发");
+    // 历史行仍可追溯（非物理删除）
+    const actives = store.getActiveFacts("user-1");
+    assert.equal(actives.length, 1);
+    assert.equal(store.stats("user-1").superseded, 2);
+    // 再清一次：无可下线条目返回 0；非法字段返回 null
+    assert.equal(store.clearFact("user-1", "居住地"), 0);
+    assert.equal(store.clearFact("user-1", ""), null);
+    assert.equal(store.clearFact("", "居住地"), null);
+  });
+});
+
+test("renderForPrompt: 低置信条目带「不要把话说满」标注，高置信不带", async () => {
+  await withStore(async (store) => {
+    store.applyFact({ actorId: "user-1", field: "居住地", value: "兴义", confidence: 0.9 });
+    store.applyFact({ actorId: "user-1", field: "生日", value: "3 月 15 日", confidence: 0.4 });
+
+    const block = store.renderForPrompt("user-1");
+    assert.ok(block);
+    assert.ok(block!.includes("- 居住地：兴义"));
+    // 高置信条目不带标注
+    const locationLine = block!
+      .split("\n")
+      .find((l) => l.startsWith("- 居住地："));
+    assert.ok(locationLine);
+    assert.ok(!locationLine!.includes("置信度低"));
+    // 低置信条目有标注（断言标注紧跟在生日行）
+    const birthdayLine = block!
+      .split("\n")
+      .find((l) => l.startsWith("- 生日："));
+    assert.ok(birthdayLine);
+    assert.ok(birthdayLine!.includes("置信度低"));
+    assert.ok(birthdayLine!.includes("不要把话说满"));
+  });
+});
+
+test("normalize: 解析 forget（用户明确要求忘掉的字段），reject 决策下清空", () => {
+  const raw = parseJsonObject(
+    JSON.stringify({
+      decision: "remember",
+      memories: ["用户要求忘掉居住地"],
+      commitments: [],
+      corrections: [],
+      understandings: [],
+      facts: [],
+      forget: ["居住地", "生日", "  ", "一个超过十六个字符长度限制的字段名会被截断"],
+    }),
+  );
+  assert.ok(raw);
+  const result = normalize(raw);
+  assert.ok(result);
+  assert.equal(result.forget.length, 3);
+  assert.deepEqual(result.forget, ["居住地", "生日", "一个超过十六个字符长度限制的字段"]);
+
+  const rejected = normalize({
+    decision: "reject",
+    memories: [],
+    commitments: [],
+    corrections: [],
+    understandings: [],
+    facts: [],
+    forget: ["居住地"],
+  });
+  assert.ok(rejected);
+  // forget 是动作指令不随 reject 丢弃：「别记我家在哪了」常被判 reject，
+  // 但遗忘恰恰要在这轮执行（与 commitments/corrections 同等地位）
+  assert.deepEqual(rejected.forget, ["居住地"]);
+});
+
+// ============================================================
 // 2. 精确寻址 + 事实块渲染
 // ============================================================
 
@@ -310,6 +393,37 @@ test("persistUnifiedExtraction: reject 决策记忆不落库，facts 仍进钩�
   assert.equal(results.length, 0);
   assert.ok(hookFacts);
   assert.equal(hookFacts![0]!.field, "技术栈");
+});
+
+test("persistUnifiedExtraction: forget 字段遗忘经钩子携带（钩子走字段级 supersede）", async () => {
+  const fakeMemory = {
+    async add() {
+      throw new Error("forget 路径不应落库 Mem0");
+    },
+  } as unknown as Memory;
+  const ingest = new AgenticMemoryIngestService(fakeMemory);
+  let hookForget: string[] | undefined;
+  ingest.addWriteHook((event) => {
+    hookForget = event.forget;
+  });
+
+  await ingest.persistUnifiedExtraction(
+    "user-1",
+    "chat:turn-4",
+    {
+      decision: "remember",
+      memories: ["用户要求忘掉居住地"],
+      commitments: [],
+      corrections: [],
+      understandings: [],
+      facts: [],
+      forget: ["居住地"],
+    },
+    "main",
+    true,
+  );
+  assert.ok(hookForget);
+  assert.deepEqual(hookForget, ["居住地"]);
 });
 
 test("ingestText 低信号 orphan 路径：extractUnified 的 facts 进钩子", { timeout: 30_000 }, async () => {

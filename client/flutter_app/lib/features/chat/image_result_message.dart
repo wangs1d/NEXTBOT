@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "content_summary_detail_formatter.dart";
+import "media_disk_cache.dart";
 import "media_thumbnail.dart";
 
 /// 识图结果外壳（[RENDER_AS:image_result] 的专属渲染）。
@@ -373,8 +374,8 @@ class _PhotoCaptionCard extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxHeight: 320),
-              child: Image.network(
-                url,
+              child: CachedMediaImage(
+                url: url,
                 width: double.infinity,
                 fit: BoxFit.cover,
                 alignment: Alignment.topCenter,
@@ -388,23 +389,19 @@ class _PhotoCaptionCard extends StatelessWidget {
                     color: cs.onSurfaceVariant.withValues(alpha: 0.5),
                   ),
                 ),
-                loadingBuilder: (BuildContext context, Widget child,
-                    ImageChunkEvent? progress) {
-                  if (progress == null) return child;
-                  return Container(
-                    height: 160,
-                    color: cs.surfaceContainerHighest.withValues(alpha: 0.3),
-                    alignment: Alignment.center,
-                    child: SizedBox(
-                      width: 18,
-                      height: 18,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: cs.primary.withValues(alpha: 0.6),
-                      ),
+                loadingBuilder: (BuildContext context) => Container(
+                  height: 160,
+                  color: cs.surfaceContainerHighest.withValues(alpha: 0.3),
+                  alignment: Alignment.center,
+                  child: SizedBox(
+                    width: 18,
+                    height: 18,
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: cs.primary.withValues(alpha: 0.6),
                     ),
-                  );
-                },
+                  ),
+                ),
               ),
             ),
           ),

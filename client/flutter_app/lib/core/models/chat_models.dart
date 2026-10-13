@@ -106,6 +106,7 @@ class ChatMessage {
     this.durationMs,
     this.waveform,
     this.streaming = false,
+    this.pendingDelivery = false,
     this.mediaCards,
     this.summaryCard,
     this.renderBlocks,
@@ -133,6 +134,12 @@ class ChatMessage {
   /// 仅内存态标志：渲染层据此对整条消息做打字机逐字展示；
   /// 持久化/历史加载均为 false（存储层重建消息时不带此字段）。
   final bool streaming;
+
+  /// 是否为「离线待发送」的用户消息。
+  ///
+  /// 断网时发送的消息照常落气泡，但先入本地待发队列（随消息一起持久化）；
+  /// 联网后由控制器补发，发送成功才翻转此标志。重启后仍显示「离线待发送」。
+  final bool pendingDelivery;
 
   /// 消息附件列表（语音 / 图片 / 视频）。
   /// agent 发的语音消息、用户上传的语音消息都会落到这里。
@@ -234,6 +241,62 @@ class ChatMessage {
 
   /// 任务提交时间 epoch ms（算“已运行 X 分钟”用）。
   final int? taskStartedAt;
+
+  /// 字段级拷贝（不可变模型的标准出口）：仅覆盖显式传入的字段。
+  /// 离线补发翻转 [pendingDelivery]、状态带原地更新等场景用。
+  ChatMessage copyWith({
+    String? messageId,
+    String? sessionId,
+    String? role,
+    String? text,
+    DateTime? timestamp,
+    int? attachmentImageCount,
+    String? playUrl,
+    bool? streaming,
+    bool? pendingDelivery,
+    List<MessageAttachment>? attachments,
+    String? contentType,
+    int? durationMs,
+    List<double>? waveform,
+    List<Map<String, dynamic>>? mediaCards,
+    Map<String, dynamic>? summaryCard,
+    List<Map<String, dynamic>>? renderBlocks,
+    List<Map<String, dynamic>>? replyBlocks,
+    List<Map<String, dynamic>>? pendingMediaCards,
+    List<String>? followUpPrompts,
+    String? taskId,
+    String? taskState,
+    String? taskGoal,
+    String? taskProgress,
+    int? taskStartedAt,
+  }) {
+    return ChatMessage(
+      messageId: messageId ?? this.messageId,
+      sessionId: sessionId ?? this.sessionId,
+      role: role ?? this.role,
+      text: text ?? this.text,
+      timestamp: timestamp ?? this.timestamp,
+      attachmentImageCount: attachmentImageCount ?? this.attachmentImageCount,
+      playUrl: playUrl ?? this.playUrl,
+      streaming: streaming ?? this.streaming,
+      pendingDelivery: pendingDelivery ?? this.pendingDelivery,
+      attachments: attachments ?? this.attachments,
+      contentType: contentType ?? this.contentType,
+      durationMs: durationMs ?? this.durationMs,
+      waveform: waveform ?? this.waveform,
+      mediaCards: mediaCards ?? this.mediaCards,
+      summaryCard: summaryCard ?? this.summaryCard,
+      renderBlocks: renderBlocks ?? this.renderBlocks,
+      replyBlocks: replyBlocks ?? this.replyBlocks,
+      pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
+      followUpPrompts: followUpPrompts ?? this.followUpPrompts,
+      taskId: taskId ?? this.taskId,
+      taskState: taskState ?? this.taskState,
+      taskGoal: taskGoal ?? this.taskGoal,
+      taskProgress: taskProgress ?? this.taskProgress,
+      taskStartedAt: taskStartedAt ?? this.taskStartedAt,
+    );
+  }
 
   /// 是否终态（回执上不再显示取消入口）。
   bool get isTaskTerminal {

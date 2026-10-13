@@ -36,6 +36,10 @@ class AmbientFeedsController {
   /// 是否处于手机后台（类微信常在线分流：后台走系统通知）。
   bool Function()? isAppBackgrounded;
 
+  /// 手机端前台提醒呈现端口（应用内横幅）。桌面端不注入走灵动岛；
+  /// 手机端灵动岛未装配，不注入此端口时到点提醒在前台会静默丢失（2026-10-12 修复）。
+  Future<void> Function(String title, String message)? showForegroundReminder;
+
   /// 站内信未读角标 +1 并喂岛（State 持 _inboxUnread 镜像供侧栏 widget）。
   void Function()? bumpInboxUnread;
 
@@ -99,15 +103,23 @@ class AmbientFeedsController {
 
       if (isMobile && _backgrounded) {
         unawaited(LocalNotificationService.show(title: title, body: message));
+      } else if (showForegroundReminder != null) {
+        // 应用内横幅（端口注入即生效）：手机端前台主路；Windows 桌面调试
+        // 手机 UI（main_mobile.dart -d windows）同样注入，横幅可见可验。
+        // 桌面端主壳不注入此端口，走下方灵动岛原路。
+        unawaited(showForegroundReminder!(title, message));
       } else {
         // 岛上标题+说明全展示（2026-10-07 修订，覆盖 2026-10-05「只显示
         // 事情本身」）：预告/到点文案完整上岛，胶囊宽度原生端自适应伸缩。
+        // 全屏打断白名单（2026-10-13 定调）：仅到点档破屏（「现在该做了」
+        // = 需要立马知道）；预告档不 urgent，全屏/忙碌时原生端整体跳过。
         IslandReminderScheduler.instance.fireNow(
           title: title,
           message: message,
           // 到点档加长驻留（原生保持段 26s + 入出场 ≈ 30s）；
           // 提前量预告用默认短档。
           holdSeconds: isPreReminder ? 0 : 26,
+          urgent: !isPreReminder,
         );
         // 到点档桌面弹窗兜底必达（2026-10-07 修订）；预告档仍只走岛，
         // 弹窗留给真正到点的时刻，避免每次预告都打断。
@@ -164,7 +176,10 @@ class AmbientFeedsController {
         }
         return;
       }
-      IslandReminderScheduler.instance.fireNow(title: display);
+      // 全屏打断白名单（2026-10-13 定调）：仅高优消息（外卖/快递等到货类
+      // 服务通知）破屏展报；普通消息不 urgent，全屏/忙碌时原生端整体跳过，
+      // 非全屏时行为不变（即时上岛 6s 档）。
+      IslandReminderScheduler.instance.fireNow(title: display, urgent: high);
     } catch (e, st) {
       debugPrint("[hub] hub.message_arrived failed: $e\n$st");
     }

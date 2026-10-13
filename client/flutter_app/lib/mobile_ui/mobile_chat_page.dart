@@ -4,8 +4,10 @@ import "package:flutter/material.dart";
 
 import "../core/models/chat_models.dart";
 import "../core/theme/app_typography.dart";
+import "../core/utils/agent_result_parser.dart";
 import "../core/vision/pick_gallery_vision.dart";
 import "../core/vision/vision_wire_frame.dart";
+import "../features/chat/agent_result_card.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/typewriter_reveal.dart";
 import "mobile_chat_controller.dart";
@@ -104,6 +106,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 
   /// 仅在消息数量变化或新内容到达时滚到底,避免每次键盘输入都触发滚动。
+  ///
+  /// 列表 reverse:true（2026-10-13 重进定位根治）：offset 0 恒为最新消息
+  /// 底部锚点。历史回填（本地恢复/服务端 _mergeServerTurns）把旧消息插在
+  /// 列表远端（视觉顶部），只增长 maxScrollExtent、不扰动锚点，重进会话
+  /// 天然定位在聊天最低部——不再依赖「postFrame 取 maxScrollExtent 再滚」
+  /// 与惰性布局赛跑的竞态逻辑（正向列表下该估计值追不上回填,落点半山腰）。
   void _maybeScrollToBottom() {
     final int count = _controller.messages.length;
     final bool needScroll =
@@ -113,13 +121,14 @@ class _MobileChatPageState extends State<MobileChatPage> {
     _lastMessageCount = count;
     if (!needScroll) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scroll.hasClients) {
-        _scroll.animateTo(
-          _scroll.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 220),
-          curve: Curves.easeOut,
-        );
-      }
+      if (!_scroll.hasClients) return;
+      // 已锚在底部（offset 0）：reverse 列表下新消息自动入画,免动画。
+      if (_scroll.offset <= 0) return;
+      _scroll.animateTo(
+        0,
+        duration: const Duration(milliseconds: 220),
+        curve: Curves.easeOut,
+      );
     });
   }
 
@@ -207,16 +216,43 @@ class _MobileChatPageState extends State<MobileChatPage> {
       return _buildEmpty(p);
     }
     // 长按/拖拽选中消息文字复制（与桌面端 SelectionArea 行为对齐）
+    // reverse:true 底部锚定（2026-10-13）：index 0 = 最新消息（列表底部）,
+    // 旧消息向视觉顶部延伸;offset 0 恒锚最新,重进不再需要滚位计算。
     return SelectionArea(
       child: ListView.builder(
         controller: _scroll,
+        reverse: true,
         padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
         itemCount: _controller.messages.length,
         itemBuilder: (context, index) {
-          final ChatMessage m = _controller.messages[index];
+          final ChatMessage m =
+              _controller.messages[_controller.messages.length - 1 - index];
           final bool isUser = m.role == "user";
           if (m.streaming && m.text.isEmpty) {
             return _buildThinking(p);
+          }
+          if (!isUser) {
+            // 行程卡独立第二条消息形态（2026-10-12 与桌面端对齐）：气泡只装
+            // 文字，travel_itinerary 大卡不框进气泡外壳，作为独立消息元素
+            // 跟在下方（卡自带完整外观与 460 限宽）。桌面端同款做法见
+            // chat_page._buildMessageColumn。
+            final AgentResultData? travelCard = _travelItineraryCardOf(m);
+            if (travelCard != null) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  _buildBubble(context, m, isUser, p),
+                  Padding(
+                    padding: const EdgeInsets.only(top: AppTypography.space2),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: AgentResultCard(data: travelCard),
+                    ),
+                  ),
+                ],
+              );
+            }
           }
           return _buildBubble(context, m, isUser, p);
         },
@@ -346,6 +382,25 @@ class _MobileChatPageState extends State<MobileChatPage> {
                       height: AppTypography.bodyLineHeight,
                     ).copyWith(color: text),
                   ),
+                  // 离线待发送角标：断网时发出的消息入队等联网补发
+                  if (m.pendingDelivery)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.schedule, size: 12, color: p.textMuted),
+                          const SizedBox(width: 3),
+                          Text(
+                            "离线待发送",
+                            style: TextStyle(
+                              color: p.textMuted,
+                              fontSize: 11,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                 ],
               )
             // 助手消息：复用桌面端同一共享渲染器，保证卡片 / 图文交错 /
@@ -497,6 +552,27 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 }
 
+/// 提取助手消息携带的 travel_itinerary 行程卡（无则 null）。
+///
+/// 与桌面端 chat_page._agentResult 同口径：优先从消息文本解析卡片标记
+/// （行程卡的权威通道——服务端确定性附卡写在 finalText 里）；blocks 信封
+/// 里的 card 块作兜底（text 通道被剥卡的历史消息仍能取到）。
+AgentResultData? _travelItineraryCardOf(ChatMessage m) {
+  if (m.role == "user") return null;
+  final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
+  if (parsed != null && parsed.cardType == "travel_itinerary") return parsed;
+  final List<Map<String, dynamic>>? blocks = m.replyBlocks;
+  if (blocks == null) return null;
+  for (final Map<String, dynamic> b in blocks) {
+    if ((b["type"]?.toString() ?? "") != "card") continue;
+    final Object? cardJson = b["card"];
+    if (cardJson is! Map<String, dynamic>) continue;
+    final AgentResultData data = AgentResultData.fromJson(cardJson);
+    if (data.cardType == "travel_itinerary") return data;
+  }
+  return null;
+}
+
 /// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器与
 /// [TypewriterReveal] 打字机控制器,保证两端结构与流式节奏一致。
 class _TypewriterAssistantBody extends StatefulWidget {
@@ -555,6 +631,9 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
           typewriterRawText: _typewriter.isPartial ? _typewriter.revealed : null,
           typewriterCursor: _typewriter.isRevealing,
+          // 行程卡由消息行在气泡外独立渲染（与桌面端同款第二条消息形态）,
+          // body 内不再重复,避免双份。
+          excludeTravelCard: true,
         ),
         // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
         // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后

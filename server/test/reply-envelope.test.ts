@@ -399,3 +399,15 @@ test("nextup: 正文中间含建议字样的普通句子不受影响", () => {
   assert.deepEqual(followups, ["明早八点叫我起床"]);
   assert.ok(out.includes("明早八点叫我起床这件事我记下了。"));
 });
+
+// ── 2026-10-11 变体声明剥离 ────────────────────────────────────────────
+test("stripRenderHintDeclarations：剥变体 [RENDER_HINT]:brief", () => {
+  assert.equal(
+    stripRenderHintDeclarations("马上帮你搜～[RENDER_HINT]:brief"),
+    "马上帮你搜～",
+  );
+  assert.equal(
+    stripRenderHintDeclarations("[RENDER_HINT]:brief\n正文"),
+    "正文",
+  );
+});

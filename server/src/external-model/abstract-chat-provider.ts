@@ -2,11 +2,11 @@ import OpenAI from "openai";
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
 import {
-  annotateUserContentForLlm,
   buildTimestampFreeLlmView,
   getChatThreadStore,
   tagUserMessageClientId,
 } from "./chat-thread-store.js";
+import { tagMessageTimestampMeta } from "./chat-thread-ts-meta.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { isUnknownModelError } from "./chat-thread-sanitize.js";
@@ -29,12 +29,14 @@ import {
   applyPromptCacheMessages,
   preparePromptCachePlan,
 } from "./prefix-cache.js";
+import { fingerprintRequestHead, reportPrefixWatchOutcome } from "./prefix-watchdog.js";
 import { resolveChatToolPlanForStream } from "./resolve-chat-tools.js";
 // 从 agent-gateway 具体模块导入而非 gateway/index 大桶——基类模块经桶文件
 // 会回连 resolve-provider → providers/*，形成 module-init 循环
 // （2026-09-25 冷启动 "Cannot access AbstractChatProvider before initialization"）。
 import { prepareTools } from "../gateway/agent-gateway.js";
 import { streamCompletionWithTools } from "./openai-compatible-tool-loop.js";
+import { normalizeTraditionalToSimplified } from "../utils/simplified-chinese.js";
 import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 import type {
   AgentPromptMemoryContext,
@@ -76,7 +78,7 @@ export interface SystemAndPlanResult {
  * 所有具体 chat provider 的抽象基类（模板方法模式）。
  *
  * 设计动机：防串台逻辑（foldCompletedToolChains，在 afterTurnCompleted 中根源折叠）、
- * 时间戳注入（annotateUserContentForLlm）、clientMessageId 标记（tagUserMessageClientId）、
+ * 时间戳 metadata（tagMessageTimestampMeta，P1 通道分离）、clientMessageId 标记（tagUserMessageClientId）、
  * thread 维护（trimThread/afterTurnCompleted）原本散落在各 provider 的 streamCompletion 里
  * 靠复制粘贴维持，任一新 provider 漏调即导致"话题切换串台"问题。本基类把这些逻辑固化为
  * 模板方法中不可跳过的步骤，子类只覆写 provider 特定钩子，从结构上杜绝漏调。
@@ -362,8 +364,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     // 视觉模型注入 image_url，非视觉模型降级为"存在照片"的文本说明（PaddleOCR 已移除）。
     const userMsg = {
       role: "user",
-      content: annotateUserContentForLlm(openAiUserContentFromTurn(userTurn, { model })),
+      content: openAiUserContentFromTurn(userTurn, { model }),
     } as ChatCompletionMessageParam;
+    // P1（2026-10-11 通道分离）：时间戳不再写进正文（帧会被复读），改存消息 metadata；
+    // LLM 的时间锚由 buildTimestampFreeLlmView 的时间轴块承担。
+    tagMessageTimestampMeta(userMsg, new Date());
     tagUserMessageClientId(userMsg, userTurn.clientMessageId);
     msgs.push(userMsg);
 
@@ -443,6 +448,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             turnRouteConfidence: effectiveStreamOpts.turnRouteConfidence,
             // 确定性媒体预执行（2026-10-10）：白名单透传，漏掉 = 预执行静默失效
             deterministicToolCalls: effectiveStreamOpts.deterministicToolCalls,
+            // 答案留存（2026-10-13 根修）：白名单透传，漏掉 = 工具轮照旧流式，
+            // 「先流式输出正文 → done 弹卡」的通道级根修失效
+            holdAnswer: effectiveStreamOpts.holdAnswer,
             extraBody,
             promptCache: promptPlan.promptCache,
             requestSystemMessages: promptPlan.requestSystemMessages,
@@ -501,6 +509,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
 
     // ── 非工具分支 ──
     let stream;
+    // 前缀看门狗指纹（在下方 try 内赋值，流结束后上报归因）
+    let plainHeadFps: ReturnType<typeof fingerprintRequestHead> | null = null;
     try {
       const finalMessages = applyPromptCacheMessages(
         llmView,
@@ -520,6 +530,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       };
       // Token 用量审计：记录发往 LLM 的实际输入规模（估算）
       requestAuditInput = JSON.stringify(finalMessages).length + (toolPlan ? JSON.stringify(toolPlan.visibleTools).length : 0);
+      // 前缀看门狗（2026-10-12）：非工具分支同样取分段指纹，usage 到达后归因。
+      plainHeadFps = fingerprintRequestHead({ tools: [], messages: finalMessages });
       stream = await client.chat.completions.create(
         request as Parameters<typeof client.chat.completions.create>[0],
         effectiveStreamOpts.signal ? { signal: effectiveStreamOpts.signal } : undefined,
@@ -563,9 +575,13 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 兜底 LLM 在流式中把系统元描述整段写进回复。
             const clean = metaFilter(sanitizer(d));
             if (clean) {
-              streamedVisible += clean;
+              // 繁→简出口正规化（2026-10-11）：流式与累计（streamedVisible）用同一
+              // 归一文本，1:1 等长替换不破坏流式分段。
+              const t2s = normalizeTraditionalToSimplified(clean);
+              const normalized = t2s.text;
+              streamedVisible += normalized;
               if (timingFirstDelta === null) timingFirstDelta = Date.now();
-              onDelta(clean);
+              onDelta(normalized);
             }
           },
           providerId: this.id,
@@ -584,9 +600,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       // 2026-10-11：整串路径补一道 stripMetaSentences（含「元决策自述句」判据，
       // 与流式 metaFilter 同一套词面），防止净化后文本仍把「根据规范必须调用…」
       // 这类自述带进最终回复。
-      visible = stripMetaSentences(
-        stripInternalControlTags(pickVisibleText(result.content, result.reasoning)),
-      );
+      visible = normalizeTraditionalToSimplified(
+        stripMetaSentences(
+          stripInternalControlTags(pickVisibleText(result.content, result.reasoning)),
+        ),
+      ).text;
     } catch (e) {
       // 流式空闲超时：如果有 partial content，用它作为兜底回复而非直接失败。
       if (e instanceof StreamIdleTimeoutError && e.partialContent.trim()) {
@@ -651,6 +669,16 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       });
     } catch {
       /* 审计失败静默 */
+    }
+    // 前缀看门狗归因上报（非工具分支）：直答轮无 tools 段，主要盯 system 漂移
+    if (plainHeadFps) {
+      reportPrefixWatchOutcome({
+        sessionId,
+        stage: (streamOpts?.auditStage as string | undefined) ?? "main_chat",
+        fingerprint: plainHeadFps,
+        hitTokens: streamUsage?.promptCacheHitTokens,
+        missTokens: streamUsage?.promptCacheMissTokens,
+      });
     }
     return visible;
   }

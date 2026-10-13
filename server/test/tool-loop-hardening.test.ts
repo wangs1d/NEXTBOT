@@ -277,6 +277,51 @@ describe("tool-loop 加固（假 client 端到端）", () => {
       else process.env.TOOL_EXECUTION_TIMEOUT_MS = prevTimeout;
     }
   });
+
+  test("阶段2-4：预算击杀不再静默——[tool-budget] 击杀 + 落定日志成对出现", async () => {
+    // 事故教训（2026-10-12 行程卡缺席）：击杀此前只静默吞掉，导致 `ok=false + ms≈预算`
+    // 与「工具真的跑了 30s 才失败」在日志里无法区分，bug 藏了半个月。这两条日志把
+    // 「预算不够 vs 能力不行」变成可判定证据——本测试锁死它们不能又被删掉。
+    const prevTimeout = process.env.TOOL_EXECUTION_TIMEOUT_MS;
+    process.env.TOOL_EXECUTION_TIMEOUT_MS = "150";
+    const warns: string[] = [];
+    const origWarn = console.warn;
+    console.warn = (...args: unknown[]) => {
+      warns.push(args.map(String).join(" "));
+    };
+    try {
+      const { client } = makeFakeClient(twoWaveScript(JSON.stringify({ query: "天气" })));
+      const ctx = makeCtx(
+        async () => {
+          await new Promise((r) => setTimeout(r, 600));
+          return { ok: true, result: { weather: "晴" } };
+        },
+        { toolResults: [] },
+      );
+      await streamCompletionWithTools(
+        client as never,
+        "test-model",
+        [...baseMessages()],
+        () => {},
+        ctx,
+        { maxRounds: 2, tools: [WEATHER_TOOL_SCHEMA] },
+      );
+      assert.ok(
+        warns.some((w) => /\[tool-budget\] 击杀 tool=.*预算=150ms/.test(w)),
+        `应有击杀日志，实际: ${JSON.stringify(warns)}`,
+      );
+      // 等后台残留落定 → 落定日志给出「真实耗时 vs 预算」的判定锚点
+      await new Promise((r) => setTimeout(r, 800));
+      assert.ok(
+        warns.some((w) => /\[tool-budget\] 击杀后真实完成 .*实际=\d+ms 预算=150ms/.test(w)),
+        `应有落定日志（预算不足 vs 能力不行的判定锚点），实际: ${JSON.stringify(warns)}`,
+      );
+    } finally {
+      console.warn = origWarn;
+      if (prevTimeout === undefined) delete process.env.TOOL_EXECUTION_TIMEOUT_MS;
+      else process.env.TOOL_EXECUTION_TIMEOUT_MS = prevTimeout;
+    }
+  });
 });
 
 // ---------- 单元：截断 JSON 修复 ----------

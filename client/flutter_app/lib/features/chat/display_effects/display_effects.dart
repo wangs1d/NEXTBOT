@@ -29,6 +29,7 @@ import "effect_media_utils.dart";
 import "fold_list_effect_card.dart";
 import "metric_effect_card.dart";
 import "steps_effect_card.dart";
+import "weather_effect_card.dart";
 
 /// 按 [AgentResultData.cardType] 分发展示效果组件。
 ///
@@ -48,6 +49,11 @@ Widget? displayEffectsCard({
       return StepsEffectCard(data: data, cs: cs);
     case "metric":
       return MetricEffectCard(data: data, cs: cs);
+    case "weather":
+      // 天气平铺卡（2026-10-12）：两列大字网格 + 百分比进度条 + 着装整行，
+      // 一屏展示全部内容；返回 null 会回退通用列表卡并伴随正文 markdown
+      // 表格（横向滑动），不再走那条路。
+      return WeatherEffectCard(data: data, cs: cs);
     case "carousel":
       return CarouselEffectCard(data: data, cs: cs);
     case "chips":

@@ -1,6 +1,7 @@
 #include "dynamic_island_window.h"
 
 #include <windowsx.h>
+#include <io.h>
 
 #include <gdiplus.h>
 #include <mmsystem.h>
@@ -28,12 +29,17 @@
 namespace {
 
 // ── 岛窗口生死日志 ──
-// stderr 已被 main.cpp 重定向到 pai_app_stderr.log（追加写）。
+// stderr 已被 main.cpp 重定向到 pai_app_stderr.log（追加写，失败时兜底到
+// exe 目录 / %TEMP% / nul，保证流永远有效）。
 // 取证「谁在销毁岛窗口」：外部 WM_CLOSE 与直接 DestroyWindow 的路径不同。
+// 防御：流无效（fd=-1）时绝不写——debug CRT 的 fwprintf 会断言 write.cpp:50
+// 并 abort（2026-10-11 行程窗口崩溃同款机制）。
 void IslandLifecycleLog(HWND hwnd, const wchar_t* event) {
-  fwprintf(stderr, L"[DynamicIsland] %ls hwnd=0x%p tick=%llu\n", event, hwnd,
-           static_cast<unsigned long long>(GetTickCount64()));
-  fflush(stderr);
+  if (stderr != nullptr && _fileno(stderr) >= 0) {
+    fwprintf(stderr, L"[DynamicIsland] %ls hwnd=0x%p tick=%llu\n", event, hwnd,
+             static_cast<unsigned long long>(GetTickCount64()));
+    fflush(stderr);
+  }
 }
 
 // ── 录屏豁免全屏抑制 ──
@@ -433,7 +439,16 @@ void DynamicIslandWindow::SetExpanded(bool expanded) {
 
 void DynamicIslandWindow::StartAttention(const std::string& title,
                                          const std::string& trailing,
-                                         double hold_s) {
+                                         double hold_s, bool urgent) {
+  // 全屏打断白名单（2026-10-13 定调）：只有「需要立马知道」的事（外卖等
+  // 高优消息、日程到点）可在全屏/忙碌时破屏展报；非紧急档（预告/普通
+  // 消息）在抑制中整体跳过——不响铃、不上屏、不注入条目。
+  attention_urgent_ = urgent;
+  if (!urgent) {
+    // 2s 心跳可能滞后：跳过判定前直推一次抑制检查（幂等）。
+    UpdateFullscreenSuppression();
+    if (suppressed_by_fullscreen_) return;
+  }
   PlayAttentionChime();
   attention_title_ = Utf8ToWide(title);
   attention_trailing_ = Utf8ToWide(trailing);
@@ -594,13 +609,17 @@ void DynamicIslandWindow::CheckSuppression() {
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
 // 录屏进程在跑时豁免三种忙碌态（IsScreenRecordingActive，见文件头说明），
 // 忙碌判定本身不变：录制一停，全屏/忙碌仍照常抑制。
-// 提醒豁免（2026-10-05 拍板）：提醒 attention 进行中即使全屏也上屏——
-// 「现在不看会错过」的唯一强打断态；attention 播完/点击收口后由各结束点
-// 回推一次本函数立即让位，心跳 2s 兜底。
+// 提醒豁免（2026-10-05 拍板，2026-10-13 收紧）：仅 urgent attention 进行中
+// 即使全屏也上屏——「现在不看会错过」的唯一强打断态（外卖等高优消息、
+// 日程到点）；非紧急档在抑制中由 StartAttention 整体跳过。urgent attention
+// 播完/点击收口后由各结束点回推一次本函数立即让位，心跳 2s 兜底。
 void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATION_STATE state;
   if (FAILED(SHQueryUserNotificationState(&state))) return;
   const bool recording = IsScreenRecordingActive();
-  const bool attention_active = attention_start_s_ >= 0;
+  // 提醒豁免收紧（2026-10-13 定调）：只有 urgent attention（外卖等高优
+  // 消息、日程到点）可豁免全屏抑制；非紧急档由 StartAttention 在抑制中
+  // 整体跳过，不破屏。
+  const bool attention_active = attention_start_s_ >= 0 && attention_urgent_;
   // 最大化前台窗口与全屏同权：盖住岛就让位（2026-10-09 拍板，
   // 自家主窗口一视同仁）——否则待机光球悬浮遮挡应用顶部内容。
   const bool covered = IsForegroundCoveringIsland();

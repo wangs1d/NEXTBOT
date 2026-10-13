@@ -46,6 +46,8 @@ export interface Mem0WriteEvent {
   understandings?: UnifiedUnderstanding[];
   /** 统一抽取路径携带：结构化事实（钩子走事实库字段级 latest-wins upsert） */
   facts?: import("./unified-extractor.js").UnifiedFact[];
+  /** 统一抽取路径携带：用户明确要求忘掉的档案字段（钩子走字段级 supersede） */
+  forget?: string[];
   /** 统一抽取路径携带：角色→人名指代映射（钩子走事实库 指代·role 字段落库） */
   referents?: import("./unified-extractor.js").UnifiedReferent[];
 }
@@ -161,7 +163,8 @@ export class AgenticMemoryIngestService {
             orphan.commitments.length === 0 &&
             orphan.corrections.length === 0 &&
             orphan.understandings.length === 0 &&
-            orphan.facts.length === 0
+            orphan.facts.length === 0 &&
+            orphan.forget.length === 0
           ) {
             return;
           }
@@ -176,6 +179,7 @@ export class AgenticMemoryIngestService {
             understandings:
               orphan.understandings.length > 0 ? orphan.understandings : undefined,
             facts: orphan.facts.length > 0 ? orphan.facts : undefined,
+            forget: orphan.forget.length > 0 ? orphan.forget : undefined,
             referents: orphan.referents.length > 0 ? orphan.referents : undefined,
           });
         })
@@ -263,11 +267,13 @@ export class AgenticMemoryIngestService {
     const corrections =
       extraction.corrections.length > 0 ? extraction.corrections : undefined;
     const facts = extraction.facts.length > 0 ? extraction.facts : undefined;
+    // forget 防御性取值：测试/旧调用方手工构造的 extraction 可能缺该字段
+    const forget = (extraction.forget?.length ?? 0) > 0 ? extraction.forget : undefined;
     const referents = extraction.referents && extraction.referents.length > 0 ? extraction.referents : undefined;
 
     if (extraction.decision === "reject") {
       // 被拒存：results 为空（账本不落 claim），但承诺/纠正/理解/事实仍要落地
-      if (understandings || commitments || corrections || facts || referents) {
+      if (understandings || commitments || corrections || facts || forget || referents) {
         this.fireWriteHooks({
           actorId,
           sourceId,
@@ -278,6 +284,7 @@ export class AgenticMemoryIngestService {
           corrections,
           understandings,
           facts,
+          forget,
           referents,
         });
       }
@@ -329,7 +336,7 @@ export class AgenticMemoryIngestService {
       }
     }
     // Mem0 全部写入失败但承诺/纠正/理解/事实存在时也要触发钩子（不随存储失败丢失）
-    if (results.length > 0 || understandings || commitments || corrections || facts || referents) {
+    if (results.length > 0 || understandings || commitments || corrections || facts || forget || referents) {
       this.fireWriteHooks({
         actorId,
         sourceId,
@@ -340,6 +347,7 @@ export class AgenticMemoryIngestService {
         corrections,
         understandings,
         facts,
+        forget,
         referents,
       });
     }

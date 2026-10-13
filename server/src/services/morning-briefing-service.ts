@@ -22,6 +22,7 @@ import { fetchHotRankings } from "./hot-rankings.js";
 import { normalizeFp } from "../proactivity/interest-watcher.js";
 import { resolvePoliteAppellation } from "./user-personalization/appellation.js";
 import { fetchIPLocation } from "./ip-geolocation.js";
+import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 
@@ -98,12 +99,30 @@ export interface MorningBriefingOutfitTip {
   reason: string;
 }
 
+/** 晨报行程段：今天落在行程区间内 → 第一站提醒（确定性读行程仓库，无 LLM） */
+export interface MorningBriefingTravel {
+  planId: string;
+  title: string;
+  destination: string;
+  /** 当天第一站（无排程天为 null） */
+  firstStop: { name: string; startTime: string } | null;
+  /** 出发日天气一句话摘要（规划时取，可能为空） */
+  weather: string | null;
+  /** 随身叮嘱（packing 前 3 条） */
+  packing: string[];
+}
+
 export interface MorningBriefing {
   date: string;
   weather: MorningBriefingWeather | null;
   outfitTip: MorningBriefingOutfitTip | null;
   todaySchedule: MorningBriefingScheduleItem[];
   pendingNotes: MorningBriefingPendingNote[];
+  /**
+   * 行程段（可选块，第六源）：今天落在某份行程区间内（startDate ≤ 今天 ≤ endDate）
+   * → 当天第一站 + 目的地/天气 + 随身叮嘱；无进行中行程时省略该字段。
+   */
+  travel?: MorningBriefingTravel;
   /** 兴趣热搜命中（可选块）：无命中时省略该字段，三源结构不受影响 */
   interestHits?: MorningBriefingInterestHit[];
   /** 待办跟进（可选块）：之前交代的未完成事项 + 今日已办结数；全空时省略 */
@@ -438,6 +457,15 @@ export function buildNarrationFacts(briefing: MorningBriefing): string {
   if (hits.length > 0) {
     lines.push(`关注话题上热搜：${hits.map((h) => h.title).join("、")}`);
   }
+  const travel = briefing.travel;
+  if (travel) {
+    const first = travel.firstStop;
+    lines.push(
+      `今天在${travel.destination}的行程「${travel.title}」里` +
+        (first ? `，第一站 ${first.startTime} ${first.name}` : "") +
+        (travel.packing.length > 0 ? `；记得带${travel.packing.join("、")}` : ""),
+    );
+  }
   const days = briefing.upcomingImportantDays ?? [];
   if (days.length > 0) {
     lines.push(
@@ -548,6 +576,10 @@ export class MorningBriefingService {
     // 待办跟进（确定性读取，无 LLM）：之前交代未完成 + 今日已办结
     const todoFollowups = this.fetchTodoFollowups(sessionId);
 
+    // 第六源：行程段（确定性读行程仓库，无 LLM）——今天落在某份行程区间内
+    // → 当天第一站 + 天气叮嘱（行前主动提醒）
+    const travel = await this.fetchTravelToday().catch(() => null);
+
     return {
       date: todayIsoDate(),
       weather: sections.weather ? weather : null,
@@ -560,10 +592,43 @@ export class MorningBriefingService {
       ...(todoFollowups ? { todoFollowups } : {}),
       // 无近期日子时省略该字段（可选块）
       ...(upcomingImportantDays.length > 0 ? { upcomingImportantDays } : {}),
+      // 行程段（可选块）：无进行中行程时省略
+      ...(travel ? { travel } : {}),
       // 用户称呼（可选）：无称呼时省略该字段
       ...(appellation ? { appellation } : {}),
       agentGreeting: MORNING_GREETING,
     };
+  }
+
+  /** 行程段取数：今天 ∈ [startDate, endDate] 的最近一份行程 → 当天第一站 */
+  private async fetchTravelToday(): Promise<MorningBriefingTravel | null> {
+    const two = (v: number): string => v.toString().padStart(2, "0");
+    const now = new Date();
+    const today =
+      `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+    const summaries = travelPlanStore.listSummaries(20);
+    for (const s of summaries) {
+      if (s.startDate > today || s.endDate < today) continue;
+      const plan = travelPlanStore.get(s.planId);
+      if (!plan) continue;
+      const day =
+        plan.days.find((d) => d.date === today) ?? plan.days[0] ?? null;
+      const first = day?.items[0] ?? null;
+      // startTime 可能是 "HH:mm" 或 "YYYY-MM-DDTHH:mm:00"，统一抽出 HH:mm
+      const raw = first?.startTime ?? "";
+      const m = /(\d{1,2}:\d{2})/.exec(raw);
+      return {
+        planId: plan.planId,
+        title: plan.title,
+        destination: plan.destination,
+        firstStop: first
+          ? { name: first.name, startTime: m ? m[1]! : raw }
+          : null,
+        weather: plan.weather ?? null,
+        packing: (plan.packing ?? []).slice(0, 3),
+      };
+    }
+    return null;
   }
 
   async narrateBriefing(sessionId: string): Promise<MorningBriefingNarration> {
@@ -989,6 +1054,17 @@ export class MorningBriefingService {
     const upcomingDays = briefing.upcomingImportantDays ?? [];
     if (upcomingDays.length > 0) {
       parts.push(formatImportantDaysBit(upcomingDays));
+    }
+
+    // 第六源：行程段（可选块）——今天在行程中 → 第一站提醒
+    const travel = briefing.travel;
+    if (travel) {
+      const first = travel.firstStop;
+      parts.push(
+        `今天在${travel.destination}的行程继续` +
+          (first ? `，第一站 ${first.startTime} 是${first.name}` : "") +
+          (travel.packing.length > 0 ? `，记得带${travel.packing.join("、")}` : ""),
+      );
     }
 
     // 全空（个人数据源都没配置/没命中）→ 明确说明，不输出空荡荡的纯问候

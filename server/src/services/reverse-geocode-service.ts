@@ -16,6 +16,29 @@ export type ReverseGeocodeHit = {
 
 const FETCH_TIMEOUT_MS = 8_000;
 
+/**
+ * 逆地理结果进程内缓存（2026-10-12 延迟优化）。
+ *
+ * 坐标取整到 3 位小数（≈110m）作键；地址/时区在分钟级不会变，同一位置在多轮
+ * 对话里被反复反查纯属浪费——此前前端 `/geo/reverse`（每条消息一次）与每轮
+ * prompt 装配各打一次外网，且两条路径都无缓存。TTL 30min、LRU 512 条封顶；
+ * 只缓存成功结果（失败多为瞬态，不固化），并发同键用 in-flight 去重。
+ */
+const GEO_CACHE_TTL_MS = 30 * 60 * 1000;
+const GEO_CACHE_MAX = 512;
+const geoCache = new Map<string, { at: number; hit: ReverseGeocodeHit }>();
+const geoInflight = new Map<string, Promise<ReverseGeocodeHit | null>>();
+
+function geoCacheKey(latitude: number, longitude: number): string {
+  return `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+}
+
+/** 测试钩子：清空缓存与 in-flight 表。 */
+export function resetReverseGeocodeCacheForTest(): void {
+  geoCache.clear();
+  geoInflight.clear();
+}
+
 async function fetchJson(url: string, init?: RequestInit): Promise<unknown | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
@@ -153,15 +176,39 @@ async function reverseFromAmap(latitude: number, longitude: number): Promise<Rev
   };
 }
 
-/** 根据 GPS 经纬度反查地址（国内准确；不依赖 IP）。 */
+/** 根据 GPS 经纬度反查地址（国内准确；不依赖 IP）。命中进程内缓存时零网络。 */
 export async function reverseGeocodeCoordinates(
   latitude: number,
   longitude: number,
 ): Promise<ReverseGeocodeHit | null> {
   if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
 
-  const amap = await reverseFromAmap(latitude, longitude);
-  if (amap) return amap;
+  const key = geoCacheKey(latitude, longitude);
+  const cached = geoCache.get(key);
+  if (cached && Date.now() - cached.at <= GEO_CACHE_TTL_MS) return cached.hit;
 
-  return reverseFromBigDataCloud(latitude, longitude);
+  const inflight = geoInflight.get(key);
+  if (inflight) return inflight;
+
+  const task = (async (): Promise<ReverseGeocodeHit | null> => {
+    const amap = await reverseFromAmap(latitude, longitude);
+    if (amap) return amap;
+    return reverseFromBigDataCloud(latitude, longitude);
+  })()
+    .then((hit) => {
+      if (hit) {
+        if (geoCache.size >= GEO_CACHE_MAX) {
+          const oldest = geoCache.keys().next().value;
+          if (oldest !== undefined) geoCache.delete(oldest);
+        }
+        geoCache.set(key, { at: Date.now(), hit });
+      }
+      return hit;
+    })
+    .finally(() => {
+      geoInflight.delete(key);
+    });
+
+  geoInflight.set(key, task);
+  return task;
 }

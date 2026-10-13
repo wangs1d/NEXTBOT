@@ -4,8 +4,14 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>行迹 · 桌面端 — 会自己调速的旅行 Agent</title>
+<!-- 真实地图底图引擎：MapLibre GL（矢量底图走本机 /travel-basemap 代理与磁盘缓存）。
+     服务端 buildPageHtml 命中下面这两行时会把它们替换成 server/web/travel-map/vendor/
+     的本地内联副本；vendor 缺失时保留 CDN 引用（弱网/离线由瓦片代理兜底）。 -->
+<link href="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<script src="https://cdn.jsdelivr.net/npm/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
 <!-- 字体走设计稿同源 CDN（离线时自动回落到系统字体栈，不阻塞渲染）。
-     本页唯一外链：不再引入任何图片/脚本 CDN。 -->
+     另有 MapLibre 底图引擎外链（见下），服务端会把两者之外的资源都留在本机：
+     底图瓦片/精灵/字形全部经 /travel-basemap 代理 + 磁盘缓存。 -->
 <link rel="stylesheet" href="https://miaoda.feishu.cn/fonts/css2?family=Sora:wght@400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap">
 <style>
 :root{
@@ -49,7 +55,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .win-right .wc:hover{background:rgba(255,255,255,.06);color:var(--t2)}
 .win-right .wc svg{width:13px;height:13px}
 
-.body{flex:1;display:flex;min-height:0}
+.body{flex:1;display:flex;min-height:0;position:relative}
 
 /* ===== 左栏 ===== */
 .sidebar{width:64px;flex:0 0 auto;background:var(--side);border-right:1px solid var(--line);
@@ -65,7 +71,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* ===== 主区 ===== */
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
 .topbar{height:58px;flex:0 0 auto;display:flex;align-items:center;gap:18px;padding:0 20px;border-bottom:1px solid var(--line);min-width:0;overflow:hidden}
-.tb-left{display:flex;align-items:center;gap:12px;flex:0 1 auto;min-width:0}
+/* 顶栏不重叠的三条约束：tb-left 整体不收缩（内部胶囊不可压，压了就叠到邻区）、
+   时距条自己缩（band-meta 已带 ellipsis）、天气胶囊限宽（长句走 title 悬停） */
+.tb-left{display:flex;align-items:center;gap:12px;flex:0 0 auto;min-width:0}
 .tb-city{font-size:17px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tb-sub{font-family:var(--num);font-size:10.5px;color:var(--t3);letter-spacing:1.5px;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .day-pill{display:flex;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px;
@@ -76,7 +84,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* 多天行程（>4 天）胶囊收窄字号与内距，让 7 天能整排显示（设计稿 2 天口径不变） */
 .day-pill.compact button{padding:4px 9px;font-size:11px}
 .day-pill button.on{background:var(--txt);color:#15161A;font-weight:600}
-.tb-band{flex:1 1 auto;min-width:140px}
+.tb-band{flex:1 1 0;min-width:90px;overflow:hidden}
 .band-meta{display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px;white-space:nowrap;overflow:hidden}
 .band-meta .mood{color:var(--t2);overflow:hidden;text-overflow:ellipsis}.band-meta .mood b{color:var(--amber);font-weight:600}
 .band-meta .end{font-family:var(--num);color:var(--t3);flex:0 0 auto;margin-left:10px}
@@ -87,14 +95,18 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .tb-right{display:flex;align-items:center;gap:10px;flex:0 0 auto}
 .agent-chip{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);background:var(--card);border:1px solid var(--line);padding:6px 12px;border-radius:999px}
 .agent-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--amber);box-shadow:0 0 6px var(--amber)}
-.weather{font-family:var(--num);font-size:12px;color:var(--t2);display:flex;align-items:center;gap:5px}
+.weather{font-family:var(--num);font-size:12px;color:var(--t2);display:flex;align-items:center;gap:5px;flex:0 0 auto;max-width:210px;white-space:nowrap;overflow:hidden}
+.dq-chip{font-size:11px;color:var(--amber);background:var(--amberSoft);border:1px solid var(--amberLine);padding:5px 10px;border-radius:999px;white-space:nowrap}
 .weather svg{width:14px;height:14px;color:var(--amber)}
 
 /* ===== 内容区 ===== */
 .content{flex:1;position:relative;min-height:0;display:flex}
 .view{position:absolute;inset:0;display:flex;padding:20px;gap:18px;min-height:0}
 .view-map{display:none;background:var(--win)}
-.view-map.open{display:flex}
+/* z-index 必须高于「今日」视图内的浮层（.now-big/.now-tag 为 z-index:2，
+   而两个 .view 都是 z-index:auto 的 absolute —— 不给地图层抬层级时，
+   Now 卡的大标题会穿透到地图上面）。 */
+.view-map.open{display:flex;z-index:4}
 
 /* 当前站大卡 */
 .now-photo{flex:0 0 44%;border-radius:16px;overflow:hidden;position:relative;min-height:0}
@@ -115,22 +127,8 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .stay-row svg{width:15px;height:15px;color:var(--amber)}
 .stay-bar{flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
 .stay-bar i{display:block;height:100%;background:linear-gradient(90deg,var(--amber2),var(--amber));border-radius:4px;transition:width .5s}
-.feedback{display:flex;gap:10px;margin-top:auto;padding-top:18px}
-.fb{display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--t2);border:1px solid var(--line2);padding:9px 16px;border-radius:999px;transition:.18s}
-.fb svg{width:14px;height:14px}
-.fb:hover{border-color:var(--amberLine);color:var(--amber)}
-
-/* 底部下一站条 */
-.bottombar{height:74px;flex:0 0 auto;border-top:1px solid var(--line);display:flex;align-items:center;gap:16px;padding:0 20px;background:rgba(16,17,21,.5)}
-.next-info{display:flex;align-items:center;gap:13px;flex:1;min-width:0}
-.next-ic{width:40px;height:40px;border-radius:11px;background:var(--amberSoft);display:grid;place-items:center;flex:0 0 auto}
-.next-ic svg{width:20px;height:20px;color:var(--amber)}
-.next-txt{min-width:0}
-.next-txt .a{font-size:10.5px;color:var(--t3);letter-spacing:.5px}
-.next-txt .b{font-size:14.5px;font-weight:600;margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.next-txt .b span{font-family:var(--num);color:var(--amber);font-weight:500;font-size:12.5px;margin-left:9px}
-.go-btn{height:44px;padding:0 26px;border-radius:12px;background:var(--amber);color:#201407;font-size:14px;font-weight:700;display:flex;align-items:center;gap:9px;letter-spacing:.3px;box-shadow:0 12px 28px -10px rgba(245,165,82,.55);transition:transform .12s;flex:0 0 auto}
-.go-btn:active{transform:scale(.98)}.go-btn svg{width:17px;height:17px}
+/* 节奏反馈按钮（慢一点/还能逛）与底部「下一站/前往」条已整体移交手机端：
+   桌面端定位 = 规划 + 全程展示，不做旅行过程引导（2026-10-12）。 */
 
 /* Agent 气泡 */
 .bubble{position:absolute;top:14px;left:50%;transform:translateX(-50%) translateY(-8px);z-index:20;
@@ -145,38 +143,74 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .bubble p b{color:var(--txt);font-weight:600}
 .bubble .undo{flex:0 0 auto;align-self:center;color:var(--amber);font-size:11.5px;border:1px solid var(--amberLine);padding:5px 12px;border-radius:999px;white-space:nowrap}
 
-/* 地图视图 */
+/* 地图视图（真实底图 MapLibre；底图瓦片走本机 /travel-basemap 代理 + 磁盘缓存） */
 .map-wrap{flex:1;border-radius:14px;overflow:hidden;position:relative;background:#0D0F13}
-#mapSvg{width:100%;height:100%}
+#map{position:absolute;inset:0}
+.maplibregl-ctrl-attrib{display:none!important}
+.maplibregl-canvas:focus{outline:none}
 .map-back{position:absolute;top:14px;left:14px;z-index:5;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txt);background:rgba(16,17,21,.75);backdrop-filter:blur(10px);border:1px solid var(--line2);padding:8px 14px;border-radius:999px}
 .map-back svg{width:14px;height:14px}
-.map-bg{stroke:rgba(255,255,255,.035)}
-.map-water{fill:rgba(99,170,161,.08);stroke:rgba(99,170,161,.3);stroke-width:1.2}
-.map-wl{fill:none;stroke:rgba(99,170,161,.16);stroke-width:1}
-.map-road{fill:none;stroke:rgba(255,255,255,.1);stroke-width:3;stroke-linecap:round}
-.map-road.t{stroke-width:1.5;stroke:rgba(255,255,255,.06)}
-.alab{fill:#565B65;font-size:13px;letter-spacing:4px}
-.r-done{fill:none;stroke:var(--amber);stroke-width:2.8;stroke-linecap:round;stroke-linejoin:round;filter:drop-shadow(0 0 6px rgba(245,165,82,.5))}
-.r-todo{fill:none;stroke:rgba(245,165,82,.32);stroke-width:2.4;stroke-dasharray:2 7;stroke-linecap:round}
-.r-flow{fill:none;stroke:rgba(255,238,212,.9);stroke-width:2.8;stroke-dasharray:1 14;stroke-linecap:round;animation:flow 1.1s linear infinite}
-@keyframes flow{to{stroke-dashoffset:-15}}
-.mp{cursor:pointer}
-.mp circle.c{fill:var(--card2);stroke:var(--amberLine);stroke-width:1.6;transition:.2s}
-.mp.now circle.c{fill:var(--amber);stroke:var(--amber)}
-.mp.done circle.c{fill:#2A2D35;stroke:rgba(255,255,255,.18)}
-.mp text.n{fill:var(--t2);font-family:var(--num);font-size:11px;font-weight:600;text-anchor:middle;dominant-baseline:central}
-.mp.now text.n{fill:#201407}.mp.done text.n{fill:var(--t3)}
-.mp text.l{fill:var(--t2);font-size:11.5px;paint-order:stroke;stroke:#0D0F13;stroke-width:3.4px}
-.mp.now text.l{fill:var(--amber);font-weight:700}
-.mp.rest circle.c{stroke-dasharray:3 3;stroke:var(--jade)}
-.here{fill:var(--amber)}.here-p{fill:none;stroke:var(--amber);stroke-width:1.5;animation:ping 1.8s infinite}
+/* 目的地水印：复刻设计稿的 alab（原示意底图上的「西 子 湖 面」）。
+   真实底图上线后它更重要——一屏深色地图上看不出「这是哪」，水印直接给答案。 */
+.map-mark{position:absolute;left:22px;bottom:18px;z-index:4;pointer-events:none;
+  font-size:25px;font-weight:700;letter-spacing:6px;color:rgba(255,255,255,.10);
+  text-shadow:0 2px 16px rgba(0,0,0,.65);white-space:nowrap}
+.map-mark span{font-size:13px;letter-spacing:3px;color:rgba(245,165,82,.32);margin-left:8px}
+/* 冷启动（首拉矢量样式/瓦片）占位：避免几秒纯黑，也避免被误读成"界面挂了" */
+.map-loading{position:absolute;inset:0;z-index:3;display:grid;place-items:center;background:#0D0F13;
+  color:var(--t3);font-size:12.5px;letter-spacing:.4px;transition:opacity .45s}
+.map-loading.off{opacity:0;pointer-events:none}
+/* 路线概览（真实距离/时长/数据来源；算不出来时整枚隐藏，不编造） */
+.map-legend{position:absolute;top:14px;right:14px;z-index:5;display:none;align-items:center;gap:9px;
+  font-family:var(--num);font-size:11.5px;color:var(--t2);background:rgba(16,17,21,.78);backdrop-filter:blur(10px);
+  border:1px solid var(--line2);padding:8px 13px;border-radius:999px}
+.map-legend.on{display:flex}
+.map-legend b{color:var(--txt);font-weight:600}
+.map-legend .sep{width:1px;height:11px;background:var(--line2)}
+.map-legend .warn{color:var(--amber)}
+/* 地图上的站点标记（MapLibre Marker 的 DOM）。
+   注意：marker 元素由 MapLibre 用 transform 定位，**不要**给它设 position——
+   覆盖成 relative 会让它脱离 marker 定位流、把内部绝对定位的标签甩飞。
+   所以锚点盒保持 0×0，全部内容放进内层 .wrap，靠 translate(-11,-11) 让
+   22px 圆点（半径 11）的圆心正好落在坐标点上。 */
+.poi{width:0;height:0}
+.poi .wrap{position:absolute;left:0;top:0;display:flex;align-items:center;
+  transform:translate(-11px,-11px);cursor:pointer}
+.poi .pin{width:22px;height:22px;border-radius:50%;background:var(--card2);border:1.6px solid var(--amberLine);
+  color:var(--t2);font-family:var(--num);font-size:11px;font-weight:600;display:grid;place-items:center;
+  transition:.2s;flex:0 0 auto}
+.poi .lb{margin-left:7px;font-size:11.5px;color:var(--t2);white-space:nowrap;
+  text-shadow:0 1px 3px rgba(0,0,0,.95),0 0 9px rgba(0,0,0,.85);pointer-events:none}
+.poi.now{z-index:3}
+.poi.now .pin{background:var(--amber);border-color:var(--amber);color:#201407;box-shadow:0 0 0 5px rgba(245,165,82,.18)}
+.poi.now .lb{color:var(--amber);font-weight:700}
+.poi.done{opacity:.5}
+.poi.done .pin{border-color:rgba(255,255,255,.18)}
+.poi.rest .pin{border-style:dashed;border-color:var(--jade)}
+.poi.stay .pin{border-radius:7px}
+.poi .pulse{position:absolute;left:0;top:0;width:22px;height:22px;border-radius:50%;border:1px solid var(--amber);display:none}
+.poi.now .pulse{display:block;animation:ping 1.8s infinite}
 
-/* ===== 右栏 ===== */
-.rightbar{width:264px;flex:0 0 auto;background:var(--side);border-left:1px solid var(--line);display:flex;flex-direction:column;transition:width .3s,opacity .3s;overflow:hidden}
-.rightbar.collapsed{width:0;border:none;opacity:0}
-.rb-head{padding:16px 16px 10px;display:flex;align-items:center;justify-content:space-between}
+/* ===== 右栏：与主区并排的双面板（今日安排） =====
+   占布局列、不悬浮覆盖内容；收缩按钮在面板头部，收起后宽度归零，
+   右上角留一枚浮标（rb-fab）唤回。 */
+.rightbar{width:264px;flex:0 0 auto;background:var(--side);border-left:1px solid var(--line);
+  display:flex;flex-direction:column;overflow:hidden;
+  transition:width .3s,opacity .28s}
+.rightbar.collapsed{width:0;border:none;opacity:0;pointer-events:none}
+.rb-head{padding:14px 12px 10px 16px;display:flex;align-items:center}
 .rb-head h3{font-size:13px;font-weight:600}
-.rb-head .cnt{font-family:var(--num);font-size:10.5px;color:var(--t3)}
+.rb-head .cnt{font-family:var(--num);font-size:10.5px;color:var(--t3);margin-left:auto;margin-right:8px}
+.rb-collapse{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:var(--t3);flex:0 0 auto}
+.rb-collapse:hover{color:var(--t2);background:rgba(255,255,255,.06)}
+.rb-collapse svg{width:14px;height:14px}
+.rb-fab{position:absolute;top:10px;right:10px;z-index:6;display:none;align-items:center;gap:7px;
+  font-size:12px;color:var(--txt);background:rgba(16,17,21,.85);backdrop-filter:blur(10px);
+  border:1px solid var(--line2);padding:8px 14px;border-radius:999px;cursor:pointer}
+.rb-fab.on{display:flex}
+.rb-fab:hover{border-color:var(--amberLine)}
+.rb-fab svg{width:14px;height:14px;color:var(--amber)}
+.rb-fab .cnt{font-family:var(--num);font-size:10.5px;color:var(--t3)}
 .rb-list{flex:1;overflow-y:auto;padding:0 10px 10px}
 .rb-row{display:flex;align-items:center;gap:10px;padding:9px 8px;border-radius:9px;cursor:pointer;transition:.15s}
 .rb-row:hover{background:rgba(255,255,255,.04)}
@@ -196,11 +230,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .rb-alt-item{display:flex;align-items:center;justify-content:space-between;padding:6px 0}
 .rb-alt-item .nm{font-size:12px;color:var(--t2)}
 .rb-alt-item button{font-size:10.5px;color:var(--amber);border:1px solid var(--amberLine);padding:4px 10px;border-radius:999px}
-.rb-signal{padding:12px 14px 16px;border-top:1px solid var(--line)}
-.rb-signal .sh{font-size:10px;color:var(--t3);letter-spacing:1px;margin-bottom:9px}
-.sig-row{display:flex;flex-wrap:wrap;gap:6px}
-.sig{font-size:11px;color:var(--t3);border:1px dashed rgba(255,255,255,.16);padding:5px 10px;border-radius:999px;min-height:28px}
-.sig:active,.sig.on{color:var(--amber);border-color:var(--amberLine)}
+/* 实时信号演示按钮（比计划慢了/下起雨了…）随过程功能一并移交手机端 */
 
 #toast{position:fixed;top:24px;left:50%;transform:translateX(-50%) translateY(-10px);z-index:100;
   background:#23262E;border:1px solid var(--line2);font-size:12.5px;padding:10px 20px;border-radius:999px;
@@ -229,9 +259,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
     <!-- 左栏 -->
     <nav class="sidebar">
       <button class="side-ic on" data-view="now" title="今日"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg></button>
-      <button class="side-ic" data-view="list" title="全程"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg></button>
       <button class="side-ic" data-view="map" title="路线地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg></button>
-      <button class="side-ic" data-view="pref" title="偏好"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg></button>
       <div class="side-spacer"></div>
       <div class="avatar">我</div>
     </nav>
@@ -251,6 +279,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
           <div class="band" id="band"></div>
         </div>
         <div class="tb-right">
+          <div class="dq-chip" id="dqChip" style="display:none"></div>
           <div class="weather" id="weather"></div>
           <div class="agent-chip"><span class="dot"></span>Agent 跟随中</div>
         </div>
@@ -270,23 +299,22 @@ img{display:block;width:100%;height:100%;object-fit:cover}
           </div>
           <div class="now-info">
             <div class="now-note" id="nowNote"></div>
-            <div class="stay-row">
+                        <div class="stay-row">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
               <span id="stayText">建议停留</span>
               <span class="stay-bar"><i id="stayFill"></i></span>
             </div>
-            <div class="feedback">
-              <button class="fb" id="slowBtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M6 12l6 7 6-7"/></svg>慢一点</button>
-              <button class="fb" id="fasterBtn">还能逛<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 19V5M6 12l6-7 6 7"/></svg></button>
-            </div>
           </div>
         </div>
 
-        <!-- 地图视图 -->
+        <!-- 地图视图（真实底图 + 当天 POI + 真实路网路线） -->
         <div class="view view-map" id="viewMap">
           <div class="map-wrap">
             <button class="map-back" id="mapBack"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>返回今日</button>
-            <svg id="mapSvg" viewBox="0 0 560 720" preserveAspectRatio="xMidYMid slice"></svg>
+            <div class="map-legend" id="mapLegend"></div>
+            <div id="map"></div>
+            <div class="map-mark" id="mapMark"></div>
+            <div class="map-loading" id="mapLoading">底图加载中…</div>
           </div>
         </div>
 
@@ -297,33 +325,14 @@ img{display:block;width:100%;height:100%;object-fit:cover}
           <button class="undo" id="undoBtn">撤销</button>
         </div>
       </div>
-
-      <!-- 底部下一站 -->
-      <div class="bottombar">
-        <div class="next-info">
-          <div class="next-ic" id="nextIcon"></div>
-          <div class="next-txt">
-            <div class="a">下一站</div>
-            <div class="b" id="nextText"></div>
-          </div>
-        </div>
-        <button class="go-btn" id="goBtn"></button>
-      </div>
     </main>
 
-    <!-- 右栏 -->
+    <!-- 今日安排收起后的浮标（唤回弹窗） -->
+    <button class="rb-fab" id="rbFab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>今日安排<span class="cnt" id="rbFabCnt"></span></button>
+    <!-- 右栏：双面板「今日安排」（头部按钮收起，浮标唤回） -->
     <aside class="rightbar" id="rightbar">
-      <div class="rb-head"><h3>今日安排</h3><span class="cnt" id="rbCnt"></span></div>
+      <div class="rb-head"><h3>今日安排</h3><span class="cnt" id="rbCnt"></span><button class="rb-collapse" id="rbCollapse" title="收起今日安排"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button></div>
       <div class="rb-list" id="rbList"></div>
-      <div class="rb-signal">
-        <div class="sh">实时信号（原型演示）</div>
-        <div class="sig-row">
-          <button class="sig" data-ev="behind">比计划慢了</button>
-          <button class="sig" data-ev="rain">下起雨了</button>
-          <button class="sig" data-ev="tired">有点累</button>
-          <button class="sig" data-ev="reset">还原</button>
-        </div>
-      </div>
     </aside>
   </div>
 </div>
@@ -385,12 +394,7 @@ DEMO.META={city:'杭州',cityEn:'HANGZHOU',days:2,dates:['09/12','09/13'],title:
 var S=DEMO.S,ORDER=DEMO.ORDER,EDGE=DEMO.EDGE,DAYNAME=DEMO.DAYNAME,META=DEMO.META;
 var DAY_START={};                 // day → 当天时间轴起点（分钟），取首个明确时刻
 function dayStart(){return DAY_START[state.day]||540;}
-var TICON={walk:'M10.5 9l-2.5 3.2 3 1.3 1.6 3.2M10.5 9l1.4 4 3.1 2.2M11.9 13l-3 6.5M13.6 15.2l3.4 4.3',
-bike:'M6 16.5 10.5 8h4M10.5 8 8.5 11.5h5L11.5 8M14.5 8l1.2-2.4H18',
-boat:'M12 3v11M12 4l6 5H6zM3 15s1.6 1.6 4 1.6S11 15 12 15s2.6 1.6 5 1.6S21 15 21 15l-1.6 3.4H4.6z',
-taxi:'M5 13l1.4-4.2A2 2 0 0 1 8.3 7.4h7.4a2 2 0 0 1 1.9 1.4L19 13M3.5 12.6h17v5h-17z',
-hike:'M3 18l5-7 3.5 4.5L15 11l6 7z'};
-function icon(t,sw){return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="'+(sw||1.7)+'" stroke-linecap="round" stroke-linejoin="round"><circle cx="13" cy="4.6" r="1.9"/><path d="'+(TICON[t]||TICON.walk)+'"/></svg>';}
+/* 交通方式图标（icon/TICON）随「前往下一站」一并下线：桌面端不再做过程引导 */
 var TNAME={walk:'步行',bike:'骑行',boat:'游船',taxi:'打车',hike:'徒步'};
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 function t2s(m){m=Math.round(m);return (Math.floor(m/60)+'').padStart(2,'0')+':'+(m%60+'').padStart(2,'0');}
@@ -491,9 +495,21 @@ function moodText(){var ep=effPace(),e=state.event;
     （不编造天气读数——与项目「数据诚实化」一致；Agent 侧要展示时随载荷带
     `weather` 字段下发即可）。 */
 var WEATHER_TEXT='';
+/** 长天气句 → 顶栏短胶囊（如「26° 中雨」）：顶栏只有 58px 高，载荷里七八十字的
+    天气描述直接塞进来会把右侧挤爆（2026-10-12 实盘）。全文放 title 悬停可读。 */
+function compactWeather(t){
+  var tm=/(-?\d+(?:\.\d+)?)\s*°?\s*C/i.exec(t);
+  var m=/晴|多云|阴|阵雨|雷雨|暴雨|大雨|中雨|小雨|毛毛雨|雨夹雪|小雪|中雪|大雪|冻雨|雾|霾|沙尘/.exec(t);
+  if(!tm&&!m)return '';
+  return [tm?Math.round(parseFloat(tm[1]))+'°':'',m?m[0]:''].filter(Boolean).join(' ');
+}
 function weatherHtml(){
   if(state.event==='rain')return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 13a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 6 3.8 3.8 0 0 1 18 13"></path><path d="M8 16l-1 2.5M12.5 16l-1 2.5M17 16l-1 2.5"></path></svg> 13:00 中雨';
-  if(!DEMO_MODE)return WEATHER_TEXT?('<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 15a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 8 3.8 3.8 0 0 1 18 15z"></path></svg> '+WEATHER_TEXT):'';
+  if(!DEMO_MODE){
+    if(!WEATHER_TEXT)return '';
+    var cw=compactWeather(WEATHER_TEXT);
+    return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 15a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 8 3.8 3.8 0 0 1 18 15z"></path></svg> '+escHtml(cw||WEATHER_TEXT);
+  }
   if(state.day===1)return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.5v2.4M12 19.1v2.4M2.5 12h2.4M19.1 12h2.4M5.2 5.2l1.7 1.7M17.1 17.1l1.7 1.7M18.8 5.2l-1.7 1.7M6.9 17.1l-1.7 1.7"></path></svg> 26° 晴';
   return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M7 15a4.5 4.5 0 1 1 .9-8.9A5.5 5.5 0 0 1 18.5 8 3.8 3.8 0 0 1 18 15z"></path></svg> 24° 多云';
 }
@@ -516,8 +532,10 @@ function renderDayPills(){
 /** 顶栏/标题栏文案：全部来自当前生效数据（城市 · 第几天 · 当天线路名）。 */
 function refreshChrome(){
   var day=META.dates&&META.dates[state.day-1]?META.dates[state.day-1]:'';
-  $('tbCity').textContent=DAYNAME[state.day]||DAYNAME[1]||META.city;
-  $('tbSub').textContent=[META.cityEn,'DAY '+state.day,day].filter(Boolean).join(' · ');
+  // 大标题：当天线路名（Agent 给了才有）→ 目的地；不显示「第 N 天」这类空名
+  // 副标题只放「城市英文名 · 日期」：第几天由胶囊条表达（此前 DAY 1 与 Day 1 同屏复读）
+  $('tbCity').textContent=DAYNAME[state.day]||META.city||'行程';
+  $('tbSub').textContent=[META.cityEn,day].filter(Boolean).join(' · ');
   $('winTitleText').textContent='行迹 · '+META.city+' '+dayCount()+' 日 · Agent 跟随中';
 }
 function render(){
@@ -532,18 +550,27 @@ function render(){
     $('band').innerHTML='';
     $('rbList').innerHTML='<div class="rb-alt"><div class="ah">'+(DATA_READY?'这一天还没有安排':'行程装载中…')+'</div></div>';
     $('rbCnt').textContent=DATA_READY?'0 站':'';
-    $('nextText').innerHTML=DATA_READY?'这一天还没有安排':'正在读取行程';
-    $('goBtn').innerHTML=DATA_READY?'等待行程数据':'装载中…';
+    $('rbFabCnt').textContent=$('rbCnt').textContent;
     return;
   }
   state.cur=clamp(state.cur,0,items.length-1);
-  var cur=items[state.cur],next=items[state.cur+1];
+  var cur=items[state.cur];
+  preloadDayAssets(state.day);   // 当前天照片预热（幂等，重复 render 不重复加载）
 
   renderDayPills();
   refreshChrome();
   $('moodText').textContent=moodText();
   $('endText').textContent='预计 '+t2s(items[items.length-1].end)+' 结束';
   $('weather').innerHTML=weatherHtml();
+  $('weather').title=(DEMO_MODE||!WEATHER_TEXT)?'':WEATHER_TEXT;
+  /* 数据来源角标：非实时数据必须明示（knowledge=内置真实地点库；synthetic 不应出现） */
+  (function(){
+    var dq=META.dq||'';
+    var el=$('dqChip');
+    if(dq==='knowledge'){el.style.display='';el.textContent='真实地点库 · 非实时';}
+    else if(dq==='synthetic'){el.style.display='';el.textContent='数据受限';}
+    else el.style.display='none';
+  })();
 
   /* 旅程带 */
   var total=items.reduce(function(a,it){return a+it.dur+(it.edge?it.edge[1]:0);},0);
@@ -569,24 +596,12 @@ function render(){
   $('stayText').textContent='建议停留 '+cur.dur+' 分钟';
   $('stayFill').style.width=clamp(cur.dur/120*100,8,100)+'%';
 
-  /* 底部 */
-  if(next){
-    $('nextIcon').innerHTML=icon(next.edge[0]);
-    $('nextText').innerHTML=next.sp.n+'<span>'+TNAME[next.edge[0]]+' '+next.edge[1]+' 分钟 · '+next.edge[2]+'</span>';
-    $('goBtn').innerHTML=icon(next.edge[0],2)+'前往 '+next.sp.n+' · '+TNAME[next.edge[0]]+' '+next.edge[1]+' 分钟';
-  }else{
-    $('nextIcon').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-7-4.6-7-10a7 7 0 0 1 14 0c0 5.4-7 10-7 10z"/><circle cx="12" cy="11" r="2.6"/></svg>';
-    $('nextText').innerHTML='今日到此结束 · 回酒店休整';
-    $('goBtn').innerHTML='<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12l9-9 9 9M5 10v10h14V10"/></svg>结束今日 · 回酒店';
-  }
-
   renderRight(items,alts);
   if(state.view==='map')renderMap(items);
-  Array.prototype.forEach.call(document.querySelectorAll('.sig'),function(b){
-    b.classList.toggle('on',b.dataset.ev!=='reset'&&b.dataset.ev===state.event);});
 }
 function renderRight(items,alts){
   $('rbCnt').textContent=items.length+' 站';
+  $('rbFabCnt').textContent=$('rbCnt').textContent;
   var h='';
   items.forEach(function(it,i){
     h+='<div class="rb-row '+(i===state.cur?'now ':(i<state.cur?'done':''))+'" data-i="'+i+'">'+
@@ -607,87 +622,403 @@ function renderRight(items,alts){
     b.addEventListener('click',function(){state.forceShow[b.dataset.add]=true;commit();toast('已加回「'+S[b.dataset.add].n+'」');});});
 }
 
-/* 地图（设计稿的示意底图：矢量网格 + 抽象水系/山线 + 真实坐标投影后的路线）。
-   坐标投影：真实载荷的经纬度按当天范围等比投到 560×720 viewBox；
-   无坐标的站在可见区域内均分（不臆造地理关系，只给一个可读的排布）。 */
-function mapBase(day){
-  var s='';
-  var label=DEMO_MODE?(day===1?'西 子 湖 面':'西 山 林 麓'):(META.city||'路线示意');
-  for(var x=40;x<560;x+=48)s+='<line class="map-bg" x1="'+x+'" y1="0" x2="'+x+'" y2="720"/>';
-  for(var y=40;y<720;y+=48)s+='<line class="map-bg" x1="0" y1="'+y+'" x2="560" y2="'+y+'"/>';
-  if(day===1){
-    s+='<path class="map-water" d="M70 150 C40 240 60 360 150 450 C240 540 380 540 430 440 C480 340 455 210 360 150 C270 95 110 95 70 150 Z"/>';
-    [0,1,2].forEach(function(i){s+='<path class="map-wl" d="M'+(92+i*16)+' '+(180+i*70)+' C80 260 110 340 180 410 C250 470 360 470 405 400"/>';});
-    s+='<path class="map-road" d="M300 118 C180 120 96 190 96 286 C96 400 196 498 320 498 C424 498 470 400 452 300 C438 210 380 120 300 118 Z"/>';
-    s+='<path class="map-road t" d="M150 168 C120 220 110 300 132 352 C180 420 250 440 338 478"/>';
-    s+='<text class="alab" x="236" y="300">'+label+'</text>';
-  }else{
-    [260,360,470,580].forEach(function(y,i){s+='<path class="map-water" style="fill:none;stroke:rgba(245,165,82,.08);stroke-width:1.2" d="M40 '+y+' C160 '+(y-60)+' 340 '+(y-50)+' 520 '+(y-10)+'"/>';});
-    s+='<path class="map-wl" style="stroke:rgba(99,170,161,.3);stroke-width:2" d="M150 300 C220 420 260 540 312 668"/>';
-    s+='<path class="map-road" d="M468 92 C340 150 220 220 150 300 C190 360 250 420 312 548 C312 600 312 640 312 668"/>';
-    s+='<text class="alab" x="60" y="232">'+label+'</text>';
-  }
-  return s;}
-function smooth(p){if(p.length<2)return'';var d='M'+p[0][0]+' '+p[0][1];
-  for(var i=0;i<p.length-1;i++){var p0=p[i-1]||p[i],p1=p[i],p2=p[i+1],p3=p[i+2]||p[i+1];
-    d+=' C'+(p1[0]+(p2[0]-p0[0])/6).toFixed(1)+' '+(p1[1]+(p2[1]-p0[1])/6).toFixed(1)+' '+(p2[0]-(p3[0]-p1[0])/6).toFixed(1)+' '+(p2[1]-(p3[1]-p1[1])/6).toFixed(1)+' '+p2[0]+' '+p2[1];}
-  return d;}
-function renderMap(items){
-  projectDay(state.day);                       // 可视窗口内重排（窗口比例变化也成立）
-  var pts=items.map(function(i){return i.sp.xy||[280,360]}),ai=state.cur;
-  var s='<g>'+mapBase(state.day)+'</g>';
-  var done=pts.slice(0,ai+1),todo=pts.slice(ai);
-  if(todo.length>1)s+='<path class="r-todo" d="'+smooth(todo)+'"/>';
-  if(done.length>1){s+='<path class="r-done" d="'+smooth(done)+'"/><path class="r-flow" d="'+smooth(done)+'"/>';}
+/* ═══════════════════════════════════════════════════════════════════
+   真实地图（MapLibre GL）
+   ═══════════════════════════════════════════════════════════════════
+   底图：Carto 暗色矢量，走本机 /travel-basemap 代理（磁盘缓存 + 规划完成即预热）。
+   站点：当天行程 POI 按真实经纬度落点（编号 + 名称，点击切站）。
+   路线：GET /travel-route（OSRM 开放路网，按段选步行/骑行/驾车）取真实几何；
+        首次打开该天时白线「依次连接」——逐段生长，连完转流光。
+   降级：无坐标的站不上图；某段取不到路网几何 → 该段用直线连并在图例里明示
+        「N 段未接路网」，不静默丢段、不假装是真路。 */
+var MAP_STYLE_PATH='/travel-basemap/style/dark';
+var MAP_STYLE_FALLBACK='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+var ROUTE_SRC='travel-route';
+var LEG_SRC='travel-leg';
+var DASH_SEQ=[[0,4,3],[.5,4,2.5],[1,4,2],[1.5,4,1.5],[2,4,1],[2.5,4,.5],[3,4,0],
+  [0,.5,3,3.5],[0,1,3,3],[0,1.5,3,2.5],[0,2,3,2],[0,2.5,3,1.5],[0,3,3,1],[0,3.5,3,.5]];
+var mapState={map:null,loading:false,ready:false,markers:[],poisKey:'',routeKey:'',
+  played:{},raf:0,tick:0,flowTick:0,center:null};
+var MODE_OF_PROFILE={walk:'walk',bike:'bike',drive:'taxi'};
+
+function emptyFC(){return{type:'FeatureCollection',features:[]};}
+function escHtml(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
+  return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function mapStyleUrl(){
+  var base=apiBase();
+  return base?base+MAP_STYLE_PATH:MAP_STYLE_FALLBACK;
+}
+/** 底图调色（只改 paint/layout，不动几何与数据）。
+ *
+ * Carto dark-matter 的水域是 #2C353C、陆地是 #0e0e0e —— 两个深色贴在一起，
+ * 西湖这种大水面在屏幕上就是"一片黑"，看不出是在湖边；湖名在 z13 只有 9px
+ * 灰字，读数接近于无。行程地图的第一职责是让人一眼认出"这是哪"，所以：
+ * 水域提成偏青的湖色（与页面 jade 令牌同族）、湖名放大提亮、社区名压暗退后。 */
+function tuneBasemap(map){
+  var setP=function(id,prop,val){try{if(map.getLayer(id))map.setPaintProperty(id,prop,val);}catch(e){/* 样式版本差异：忽略 */}};
+  var setL=function(id,prop,val){try{if(map.getLayer(id))map.setLayoutProperty(id,prop,val);}catch(e){/* ignore */}};
+  // 水：深灰蓝 → 湖青；水岸留一圈更深的影，边界更清楚
+  setP('water','fill-color','#17414F');
+  setP('water_shadow','fill-color','#07161C');
+  // 湖名/水域名：z13 从 9px 提到 15px，颜色提到可读、描边压深保证压在任何底上都能读
+  setL('watername_lake','text-size',['interpolate',['linear'],['zoom'],8,10,12,13,13,15,16,17]);
+  setP('watername_lake','text-color','rgba(168,206,216,1)');
+  setP('watername_lake','text-halo-color','#05202A');
+  setP('watername_lake','text-halo-width',1.6);
+  setL('watername_lake_line','text-size',['interpolate',['linear'],['zoom'],8,10,12,12,13,14,16,16]);
+  setP('watername_lake_line','text-color','rgba(132,170,182,1)');
+  setP('watername_lake_line','text-halo-color','#05202A');
+  setP('watername_lake_line','text-halo-width',1.4);
+  // 社区/郊区名：略压暗，把注意力让给站点标签与湖名
+  setP('place_suburbs','text-color','rgba(118,124,134,1)');
+  // 中文行程配中文地名：Carto 默认按 zoom 切字段（z<13 用 {name_en}），于是
+  // 低 zoom 下整张图是 XINGYI / Pingdong / Zerong 这类拉丁文，跟行程里的地点名
+  // 对不上。这里把「地名/水域名/路名」三类图层的字段统一成本地名优先
+  // （name → name_zh → name_en），其余图层（housenumber/poi 等）不动，避免错取字段。
+  var CN_NAME_FIELD=['coalesce',['get','name'],['get','name_zh'],['get','name_en']];
+  var layers=(map.getStyle()||{}).layers||[];
+  layers.forEach(function(l){
+    if(l.type!=='symbol')return;
+    if(!/^(place_|watername_|roadname_)/.test(l.id))return;
+    try{map.setLayoutProperty(l.id,'text-field',CN_NAME_FIELD);}catch(e){/* ignore */}
+  });
+}
+/** 地图容器可见后再初始化：.view-map 未展开时容器尺寸为 0，MapLibre 会把视口算错。 */
+function ensureMap(cb){
+  if(mapState.map){cb&&cb();return;}
+  if(mapState.loading)return;
+  if(!window.maplibregl){console.warn('[map] MapLibre 未加载');return;}
+  mapState.loading=true;
+  var c=mapState.center?[mapState.center.lng,mapState.center.lat]:[100.1595,25.6904];
+  var map=new maplibregl.Map({
+    container:$('map'),style:mapStyleUrl(),
+    center:c,zoom:mapState.center?12:11,
+    attributionControl:false,dragRotate:false,pitchWithRotate:false
+  });
+  mapState.map=map;
+  map.on('load',function(){
+    mapState.ready=true;mapState.loading=false;
+    tuneBasemap(map);
+    addRouteLayers();
+    if(state.view==='map')renderMap(replan().items);
+    cb&&cb();
+    // 占位要在「首屏瓦片真的画出来」之后撤：`load` 只代表样式就绪，
+    // 此时底图仍是黑的。idle 在所有可见瓦片到位后触发，离线时用超时兜底。
+    var off=function(){var ld=$('mapLoading');if(ld)ld.classList.add('off');};
+    map.once('idle',off);
+    setTimeout(off,9000);
+  });
+  map.on('error',function(e){console.warn('[map]',e&&e.error&&e.error.message);});
+}
+/** 路线图层组：轨道（未连接）/ 已连接白线 + 外发光 / 直线降级 / 生长中的当前段 / 流光 */
+function addRouteLayers(){
+  var map=mapState.map;
+  if(!map||map.getSource(ROUTE_SRC))return;
+  map.addSource(ROUTE_SRC,{type:'geojson',data:emptyFC()});
+  map.addSource(LEG_SRC,{type:'geojson',data:emptyFC()});
+  var cap={ 'line-cap':'round','line-join':'round' };
+  map.addLayer({id:'route-track',type:'line',source:ROUTE_SRC,
+    filter:['==',['get','state'],'todo'],layout:cap,
+    paint:{'line-color':'#ffffff','line-width':1.6,'line-opacity':.15,'line-dasharray':[1.2,2.2]}});
+  map.addLayer({id:'route-glow',type:'line',source:ROUTE_SRC,
+    filter:['==',['get','state'],'linked'],layout:cap,
+    paint:{'line-color':'#ffffff','line-width':14,'line-opacity':.10,'line-blur':7}});
+  map.addLayer({id:'route-line',type:'line',source:ROUTE_SRC,
+    filter:['==',['get','state'],'linked'],layout:cap,
+    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':.97}});
+  // 直线降级段：细虚线，与真实路网一眼可分
+  map.addLayer({id:'route-straight',type:'line',source:ROUTE_SRC,
+    filter:['all',['==',['get','state'],'linked'],['==',['get','real'],false]],layout:cap,
+    paint:{'line-color':'#ffffff','line-width':2,'line-opacity':.62,'line-dasharray':[1,2.4]}});
+  map.addLayer({id:'route-leg',type:'line',source:LEG_SRC,layout:cap,
+    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':1}});
+  // 连完后的流光：白虚线循环推进（复刻旧行程页的流光语言）
+  map.addLayer({id:'route-flow',type:'line',source:ROUTE_SRC,
+    filter:['==',['get','state'],'linked'],layout:cap,
+    paint:{'line-color':'#ffffff','line-width':2.2,'line-opacity':0,'line-dasharray':DASH_SEQ[0]}});
+}
+function updateFlow(on){
+  var map=mapState.map;
+  if(mapState.flowTick){clearInterval(mapState.flowTick);mapState.flowTick=0;}
+  if(!map)return;
+  try{map.setPaintProperty('route-flow','line-opacity',on?.85:0);}catch(e){/* 图层未就绪 */}
+  if(!on)return;
+  var idx=0;
+  mapState.flowTick=setInterval(function(){
+    var m=mapState.map;
+    if(!m||!m.getLayer('route-flow'))return;
+    idx=(idx+1)%DASH_SEQ.length;
+    try{m.setPaintProperty('route-flow','line-dasharray',DASH_SEQ[idx]);}catch(e){/* ignore */}
+  },90);
+}
+function clearAnim(){
+  if(mapState.raf){cancelAnimationFrame(mapState.raf);mapState.raf=0;}
+  if(mapState.tick){clearTimeout(mapState.tick);mapState.tick=0;}
+  var src=mapState.map&&mapState.map.getSource(LEG_SRC);
+  if(src)src.setData(emptyFC());
+}
+/* ── 站点标记 ── */
+function poiEl(it,i,num){
+  var d=document.createElement('div');
+  var cls=[];
+  if(i===state.cur)cls.push('now');else if(i<state.cur)cls.push('done');
+  if(it.rest)cls.push('rest');
+  if(it.sp.k==='stay')cls.push('stay');
+  d.className='poi'+(cls.length?' '+cls.join(' '):'');
+  d.dataset.i=String(i);
+  d.title=it.sp.n;
+  d.innerHTML='<span class="wrap"><span class="pulse"></span><span class="pin">'+(num||'•')+'</span>'+
+    '<span class="lb">'+escHtml(it.sp.n.split(' · ')[0])+'</span></span>';
+  d.addEventListener('mousedown',function(e){e.stopPropagation();});
+  d.addEventListener('click',function(e){e.stopPropagation();setCur(i);});
+  return d;
+}
+function renderMapPois(items){
+  var map=mapState.map;
+  mapState.markers.forEach(function(m){try{m.remove();}catch(e){/* ignore */}});
+  mapState.markers=[];
   var num=0;
-  items.forEach(function(it,i){var xy=it.sp.xy,x=xy[0],y=xy[1];if(it.sp.k!=='stay')num++;
-    var cls='mp '+(i===ai?'now ':(i<ai?'done ':''))+(it.rest?'rest':'');
-    s+='<g class="'+cls+'" data-i="'+i+'" transform="translate('+x+','+y+')"><circle class="c" r="11"/>';
-    s+='<text class="n" y="0.4">'+(it.rest||it.sp.k==='stay'?'•':num)+'</text>';
-    var anchor=x>420?'end':'start',lx=x>420?-14:14;
-    s+='<text class="l" x="'+lx+'" y="-13" text-anchor="'+anchor+'">'+it.sp.n.split(' · ')[0]+'</text></g>';});
-  var h=items[ai].sp.xy;
-  s+='<circle class="here-p" cx="'+h[0]+'" cy="'+h[1]+'" r="6"/><circle class="here" cx="'+h[0]+'" cy="'+h[1]+'" r="3.4"/>';
-  $('mapSvg').innerHTML=s;
-  Array.prototype.forEach.call($('mapSvg').querySelectorAll('.mp'),function(g){
-    g.addEventListener('click',function(){setCur(+g.dataset.i);});});
+  items.forEach(function(it,i){
+    var loc=it.sp.loc;
+    if(it.sp.k!=='stay')num++;
+    if(!loc)return;
+    var m=new maplibregl.Marker({element:poiEl(it,i,num),anchor:'center'})
+      .setLngLat([loc.lng,loc.lat]).addTo(map);
+    mapState.markers.push(m);
+  });
+}
+function updatePoiActive(){
+  mapState.markers.forEach(function(m){
+    var el=m.getElement(),i=+el.dataset.i;
+    el.classList.toggle('now',i===state.cur);
+    el.classList.toggle('done',i<state.cur);
+  });
+}
+/* ── 路线：几何构建 + 依次连接动画 ── */
+function seqOf(items){
+  var out=[];
+  items.forEach(function(it,i){if(it.sp.loc)out.push({lat:it.sp.loc.lat,lng:it.sp.loc.lng,itemIndex:i});});
+  return out;
+}
+function planar(a,b){
+  var dx=(b[0]-a[0])*Math.cos((a[1]+b[1])*Math.PI/360),dy=b[1]-a[1];
+  return Math.sqrt(dx*dx+dy*dy);
+}
+/** 按累计长度比例截断（生长动画的一帧）；少于两点时补一个点保证可绘 */
+function sliceAt(coords,ratio){
+  if(ratio<=0)return[];
+  if(ratio>=1)return coords.slice();
+  var segs=[],total=0,i,d;
+  for(i=0;i+1<coords.length;i++){d=planar(coords[i],coords[i+1]);segs.push(d);total+=d;}
+  if(!total)return coords.slice(0,Math.max(2,Math.ceil(coords.length*ratio)));
+  var need=total*ratio,out=[coords[0]];
+  for(i=0;i<segs.length;i++){
+    if(need<=0)break;
+    if(need<segs[i]){
+      var t=need/segs[i];
+      out.push([coords[i][0]+(coords[i+1][0]-coords[i][0])*t,coords[i][1]+(coords[i+1][1]-coords[i][1])*t]);
+      need=0;break;
+    }
+    need-=segs[i];out.push(coords[i+1]);
+  }
+  return out.length>=2?out:[coords[0],coords[1]];
+}
+function legsByIndex(list){
+  var by={};(list||[]).forEach(function(l){by[l.index]=l;});return by;
+}
+/** 提交「前 linkedCount 段已连接」的路网形态（其余为暗轨道） */
+function commitRoute(seq,by,linkedCount){
+  var map=mapState.map;
+  if(!map||!map.getSource(ROUTE_SRC))return;
+  var features=[];
+  for(var i=0;i+1<seq.length;i++){
+    var leg=by[i],real=!!leg;
+    var geom=real?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
+    features.push({type:'Feature',
+      properties:{state:i<linkedCount?'linked':'todo',real:real,mode:real?leg.mode:'straight'},
+      geometry:{type:'LineString',coordinates:geom}});
+  }
+  map.getSource(ROUTE_SRC).setData({type:'FeatureCollection',features:features});
+}
+/** 单段生长：按 ~16ms 一帧逐帧截断几何（MapLibre GL 没有 line-dashoffset，
+    逐帧 setData 是兼容性最好的生长实现，段短、帧数少，开销可忽略）。 */
+function growLeg(coords,done){
+  var src=mapState.map&&mapState.map.getSource(LEG_SRC);
+  if(!src){done();return;}
+  var dur=clamp(coords.length*13,240,860);
+  var steps=Math.max(6,Math.round(dur/16)),n=0;
+  (function frame(){
+    n++;
+    var r=Math.min(1,n/steps);
+    src.setData({type:'FeatureCollection',features:[
+      {type:'Feature',properties:{},geometry:{type:'LineString',coordinates:sliceAt(coords,r)}}]});
+    if(r<1){mapState.raf=requestAnimationFrame(frame);}
+    else{mapState.raf=0;done();}
+  })();
+}
+function fitToSeq(seq,animate){
+  var map=mapState.map;
+  if(!map)return;
+  var opts={duration:animate===false?0:650};
+  // 没有任何可用站点坐标：退回载荷给的行程中心（目的地），别停在一个不相干的地方
+  if(!seq||!seq.length){
+    if(mapState.center)map.easeTo({center:[mapState.center.lng,mapState.center.lat],zoom:12,duration:opts.duration});
+    return;
+  }
+  if(seq.length===1){
+    map.easeTo({center:[seq[0].lng,seq[0].lat],zoom:14.5,duration:opts.duration});
+    return;
+  }
+  var b=new maplibregl.LngLatBounds();
+  seq.forEach(function(p){b.extend([p.lng,p.lat]);});
+  map.fitBounds(b,{padding:{top:70,bottom:70,left:120,right:170},
+    duration:opts.duration,maxZoom:15.5});
+}
+/** 真实腿回填：底部「下一站」与右栏的交通耗时换成路网实测，而不是 haversine 估算 */
+function applyRealLegs(items,by,seq){
+  for(var i=0;i+1<seq.length;i++){
+    var a=seq[i],b=seq[i+1];
+    if(b.itemIndex!==a.itemIndex+1)continue;        // 中间夹着无坐标的站：不硬接
+    var leg=by[i];if(!leg)continue;
+    var idA=items[a.itemIndex].id,idB=items[b.itemIndex].id;
+    var mode=MODE_OF_PROFILE[leg.mode]||'walk';
+    var dist=leg.distanceKm<1?Math.round(leg.distanceKm*1000)+'m':leg.distanceKm.toFixed(1)+'km';
+    EDGE[idA+'->'+idB]=[mode,leg.durationMin,dist+' · 路网'];
+  }
+}
+function updateLegend(list,total){
+  var el=$('mapLegend');
+  if(!el)return;
+  if(!list||!list.length){el.className='map-legend';el.innerHTML='';return;}
+  var km=0,min=0;
+  list.forEach(function(l){km+=Number(l.distanceKm)||0;min+=Number(l.durationMin)||0;});
+  var missing=(total||0)-list.length;
+  el.innerHTML='<span>当天路线</span><span class="sep"></span><b>'+km.toFixed(1)+' km</b>'+
+    '<span class="sep"></span><b>'+t2s(min)+'</b><span class="sep"></span>'+
+    (missing>0?'<span class="warn">'+missing+' 段未接路网 · 按直线</span>':'<span>真实路网 · OSM</span>');
+  el.className='map-legend on';
+}
+/** 取当天真实路网（带同日去重：切天/切站不重复打外网） */
+function loadDayRoute(items,seq){
+  if(!seq||seq.length<2){commitRoute(seq||[],{},0);updateLegend([],0);return;}
+  var key=state.day+'|'+seq.map(function(l){return l.lat.toFixed(4)+','+l.lng.toFixed(4);}).join(';');
+  if(mapState.routeKey===key)return;
+  mapState.routeKey=key;
+  var base=apiBase();
+  if(!base){playRoute(items,seq,[],key);return;}
+  var qs='stops='+seq.map(function(l){return l.lat+','+l.lng;}).join(';');
+  fetch(base+'/travel-route?'+qs,{headers:{Accept:'application/json'}})
+    .then(function(r){return r.ok?r.json():null;})
+    .then(function(j){
+      if(mapState.routeKey!==key)return;   // 用户已切天：丢弃迟到结果
+      playRoute(items,seq,(j&&j.legs)||[],key);
+    })
+    .catch(function(){if(mapState.routeKey===key)playRoute(items,seq,[],key);});
+}
+/** 首次打开该天：白线依次连接（逐段生长）；再看已播过则直接落线 + 流光。 */
+function playRoute(items,seq,list,key){
+  var by=legsByIndex(list);
+  clearAnim();
+  updateFlow(false);
+  commitRoute(seq,by,0);
+  updateLegend(list,seq.length-1);
+  applyRealLegs(items,by,seq);
+  // 真实腿回填后刷新「下一站/右栏」的交通文案（此前是 haversine 估算，
+  // 与地图上的真实路网对不上）。render 内部会再看一次地图，但 routeKey
+  // 未变 → loadDayRoute 直接返回，不会重复打外网。
+  if(seq.length>1)render();
+  if(mapState.played[key]){
+    commitRoute(seq,by,seq.length-1);
+    updateFlow(true);
+    return;
+  }
+  mapState.played[key]=true;
+  // 起手留一拍：等视野定位的 ease 动画走完（~650ms）再开始连接，
+  // 否则「地图在缩放的同时线在长」，两头都看不清。
+  var i=0;
+  function nextLeg(){
+    if(i>=seq.length-1){commitRoute(seq,by,seq.length-1);updateFlow(true);return;}
+    var leg=by[i];
+    var coords=leg?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
+    growLeg(coords,function(){
+      i++;
+      commitRoute(seq,by,i);
+      mapState.tick=setTimeout(nextLeg,140);
+    });
+  }
+  mapState.tick=setTimeout(nextLeg,700);
+}
+/** 目的地水印：一屏深色地图上让人立刻知道「这是哪」（复刻设计稿的 alab）。 */
+function updateMapMark(){
+  var el=$('mapMark');
+  if(!el)return;
+  var city=META&&META.city?META.city:'';
+  var line=DAYNAME[state.day]||'';
+  if(!city&&!line){el.innerHTML='';return;}
+  el.innerHTML=escHtml(city)+(line?'<span>'+escHtml(line)+'</span>':'');
+}
+/** 地图视图渲染入口（懒初始化 + 标记增量化：切站不重建 marker，避免闪烁） */
+function renderMap(items){
+  if(!items||!items.length)return;
+  if(!mapState.map){ensureMap(function(){renderMap(items);});return;}
+  if(!mapState.ready)return;
+  updateMapMark();
+  var poisKey=state.day+'|'+items.map(function(it){
+    return it.sp.id+':'+(it.sp.loc?it.sp.loc.lat.toFixed(5)+','+it.sp.loc.lng.toFixed(5):'-');}).join('|');
+  if(mapState.poisKey!==poisKey){
+    mapState.poisKey=poisKey;
+    renderMapPois(items);
+    // 站点落位后先定视野（与路线请求并行跑，别等路线回来才决定看哪）
+    fitToSeq(seqOf(items),true);
+    mapState.routeKey='';          // 站点集合变了：路线必须重取
+  }else{
+    updatePoiActive();
+  }
+  loadDayRoute(items,seqOf(items));
 }
 
 /* ================= 交互 ================= */
-function setCur(i){state.cur=i;render();if(state.view==='map')renderMap(replan().items);}
+function setCur(i){state.cur=i;render();}
 function commit(msg){
   var plan=replan();
   if(state.cur>=plan.items.length)state.cur=plan.items.length-1;
   render();showBubble(msg||agentMsg(state.prev,plan));
 }
-function change(patch,msg){state.prev=JSON.parse(JSON.stringify({pace:state.pace,event:state.event,cur:state.cur,forceShow:state.forceShow}));
-  Object.assign(state,patch);commit(msg);}
 function showBubble(txt){$('bubbleText').innerHTML=txt;$('bubble').classList.add('show');}
 $('undoBtn').addEventListener('click',function(){if(!state.prev)return;
   Object.assign(state,state.prev);state.prev=null;render();$('bubble').classList.remove('show');toast('已撤销');});
-$('slowBtn').addEventListener('click',function(){change({pace:clamp(state.pace-1,-2,2),event:null});});
-$('fasterBtn').addEventListener('click',function(){change({pace:clamp(state.pace+1,-2,2),event:null});});
-Array.prototype.forEach.call(document.querySelectorAll('.sig'),function(b){
-  b.addEventListener('click',function(){var v=b.dataset.ev;
-    if(v==='reset'){change({event:null,pace:0,forceShow:{}},'已回到跟随你实时节奏的顺畅安排。');}
-    else change({event:v});});});
-$('goBtn').addEventListener('click',function(){var plan=replan();
-  if(state.cur<plan.items.length-1){state.cur++;render();}else toast('今日行程结束，已为你叫车回酒店');});
+/* 节奏反馈（慢一点/还能逛）与底部「前往下一站」属旅行过程功能，已整体移交手机端；
+   桌面端只保留规划与全程展示。state.pace/event 逻辑保留：Agent 侧 applySignal 仍可用。 */
 /* 天数胶囊条由 renderDayPills() 动态生成并自行绑定事件 */
 
-/* 左栏视图切换 */
+/* 左栏视图切换（偏好已下线：偏好由用户画像 Agent 潜移默化注入，不做手动设置面板） */
 Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
   b.addEventListener('click',function(){
     var v=b.dataset.view;
     if(v==='now'){state.view='now';$('viewMap').classList.remove('open');}
-    else if(v==='map'){state.view='map';$('viewMap').classList.add('open');renderMap(replan().items);}
-    else if(v==='list'){$('rightbar').classList.toggle('collapsed');}
-    else{toast('偏好 / 设置（原型占位）');return;}
+    else if(v==='map'){
+      state.view='map';$('viewMap').classList.add('open');
+      // 容器刚从 display:none 恢复：等一帧拿到真实尺寸，再让 MapLibre 重算视口
+      requestAnimationFrame(function(){
+        if(mapState.map)mapState.map.resize();
+        renderMap(replan().items);
+      });
+    }
+    else{return;} /* 未知视图：不响应也不改选中态 */
     Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x===b);});
   });
 });
 $('mapBack').addEventListener('click',function(){state.view='now';$('viewMap').classList.remove('open');
   Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x.dataset.view==='now');});});
+/* 今日安排弹窗：头部按钮收起 → 右上角浮标唤回（收起不销毁，列表状态保留） */
+$('rbCollapse').addEventListener('click',function(){
+  $('rightbar').classList.add('collapsed');
+  $('rbFab').classList.add('on');
+});
+$('rbFab').addEventListener('click',function(){
+  $('rightbar').classList.remove('collapsed');
+  $('rbFab').classList.remove('on');
+});
 
 function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},1900);}
 
@@ -698,7 +1029,7 @@ function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clear
      window.__travelPanel.loadPlan(payload)  真实行程（与 panel/mobile 同载荷结构）
      window.__travelPanel.applySignal(ev,msg) Agent 侧感知结论（天气/步速/对话）
    页面向上报（window.chrome.webview.postMessage）：
-     ready / close / minimize / maximize / windowDrag / openUrl
+     ready / close / minimize / maximize / windowDrag
    ═══════════════════════════════════════════════════════════════════ */
 function notifyHost(payload){
   try{
@@ -739,7 +1070,7 @@ function enrichLive(sp){
       var ph=j.photos&&j.photos.length?(j.photos[0].thumb||j.photos[0].full):null;
       var wiki=j.wiki&&j.wiki.extract?String(j.wiki.extract):null;
       if(!ph&&!wiki)return;
-      if(!sp.img&&ph)sp.img=ph;
+      if(!sp.img&&ph){sp.img=ph;enqueuePreload([ph]);}
       if(!sp.note&&wiki)sp.note=wiki;
       var plan=replan(),isCur=plan.items[state.cur]&&plan.items[state.cur].id===sp.id;
       if(!isCur)return;
@@ -747,6 +1078,37 @@ function enrichLive(sp){
       if(sp.note)$('nowNote').textContent=sp.note;
     })
     .catch(function(){/* 取不到：保持占位态 */});
+}
+
+/* ── 照片预加载：进窗口就 warm 当前天全部站点的图，切站零等待 ──
+   此前的口径是「切到哪站才加载哪站」：有图的站等一次冷 HTTP，没图的站还要
+   先请求 /travel-poi/details 补图再加载 —— 用户进窗口先看白底渐变。
+   现在 loadPlan/render 即把当前天全部站点图推进预加载队列（当前站最优先，
+   其余天在切天时再预热）；并发上限 4，不挤占底图瓦片与接口带宽。 */
+var preloaded={},preloadQueue=[],preloadActive=0;
+function pumpPreload(){
+  while(preloadActive<4&&preloadQueue.length){
+    var u=preloadQueue.shift();
+    if(!u||preloaded[u])continue;
+    preloaded[u]=1;preloadActive++;
+    var im=new Image();
+    im.onload=im.onerror=function(){preloadActive--;pumpPreload();};
+    im.src=u;
+  }
+}
+function enqueuePreload(urls){
+  for(var i=0;i<(urls||[]).length;i++)preloadQueue.push(urls[i]);
+  pumpPreload();
+}
+function preloadDayAssets(dayKey){
+  if(!DATA_READY)return;
+  var ids=ORDER[dayKey]||[],here=[],later=[];
+  ids.forEach(function(id){
+    var sp=S[id];if(!sp)return;
+    if(sp.img)(dayKey===state.day?here:later).push(sp.img);
+    else enrichLive(sp);   // 缺图站：先补图（补到后经 enqueuePreload 自动入队）
+  });
+  enqueuePreload(here.concat(later));
 }
 
 /* ── 载荷适配：真实行程（days[].entries[]）→ 本页数据模型（S/ORDER/EDGE/DAYNAME） ── */
@@ -818,19 +1180,32 @@ function estimateEdge(from,to){
   var minutes=clamp(Math.round(road*1000/LEG_SPEED[mode]),3,180);
   return[mode,minutes,road<1?Math.round(road*1000)+'m':road.toFixed(1)+'km'];
 }
+/** 有效经纬度判定：(0,0) 是服务端「未知中心」的哨兵值（`center: knownCenter ?? {0,0}`），
+    当成真实坐标会把地图甩到几内亚湾；越界值同样丢弃。 */
+function validLatLng(lat,lng){
+  var a=Number(lat),b=Number(lng);
+  if(!isFinite(a)||!isFinite(b))return null;
+  if(a===0&&b===0)return null;
+  if(Math.abs(a)>90||Math.abs(b)>180)return null;
+  return{lat:a,lng:b};
+}
 /** 原始 entry → 本页站点模型（S[id]）。anchor/duration 缺失一律不臆造。 */
 function adaptStop(entry,dayKey,idx){
   var type=str(entry.type)||'attraction';
   var k=KIND_BY_TYPE[type]||'sight';
-  var loc=(entry.latitude!=null&&entry.longitude!=null&&isFinite(Number(entry.latitude))&&isFinite(Number(entry.longitude)))
-    ?{lat:Number(entry.latitude),lng:Number(entry.longitude)}:null;
+  var loc=validLatLng(entry.latitude,entry.longitude);
   var imgs=(entry.images||[]).filter(function(u){return u&&str(u).trim();});
   var range=parseTime(entry.time);
   var dur=Number(entry.duration)>0?Number(entry.duration):(range&&range.end!=null?Math.max(15,range.end-range.start):0);
   var isRest=/咖啡|茶|歇脚|休息/.test(str(entry.name)+str(entry.type));
   var text=str(entry.name)+' '+str(entry.description)+' '+str(entry.tips);
+  // 备注：描述 → 价格 → 贴士（顿号串）→ 地址，全空才真正留白
+  var note=str(entry.description);
+  if(!note)note=str(entry.priceInfo);
+  if(!note&&entry.tips&&entry.tips.length)note=entry.tips.filter(Boolean).join('；');
+  if(!note)note=str(entry.address);
   return{id:'d'+dayKey+'e'+idx,n:str(entry.name)||'行程安排',k:k,tag:TAG_BY_TYPE[type]||'安排',
-    img:imgs.length?str(imgs[0]):'',base:dur,xy:null,loc:loc,note:str(entry.description)||str(entry.priceInfo)||str(entry.tips),
+    img:imgs.length?str(imgs[0]):'',base:dur,xy:null,loc:loc,note:note,
     anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
     startHint:range?range.start:null,text:text,ride:k==='ride',
     outdoor:OUTDOOR_RE.test(text)&&k!=='indoor',heavy:HEAVY_RE.test(text)};
@@ -843,64 +1218,6 @@ function fillDurations(stops){
     if(next&&s.startHint!=null&&next.startHint!=null&&next.startHint>s.startHint){s.base=clamp(Math.round(next.startHint-s.startHint),15,240);continue;}
     s.base=45;
   }
-}
-/** 真实坐标 → 可视区投影。
-    地图 SVG 是固定 viewBox 560×720 + preserveAspectRatio slice：容器宽高比一变，
-    可见的 viewBox 窗口就变（宽容器会切掉上下）。因此按「当前实际可见窗口」做投影，
-    窗口尺寸变化时重投影——保证任何窗口比例下全部站点都在屏内。 */
-function visibleViewBox(){
-  var el=$('mapSvg');
-  var rect=el?el.getBoundingClientRect():null;
-  var vw=560,vh=720;
-  if(!rect||!rect.width||!rect.height)return{x:0,y:0,w:vw,h:vh};
-  var scale=Math.max(rect.width/vw,rect.height/vh);   // slice：取覆盖比例
-  var w=rect.width/scale,h=rect.height/scale;
-  return{x:(vw-w)/2,y:(vh-h)/2,w:w,h:h};
-}
-/** 当天的站在可视窗口内排布：
-    ① 有真实经纬度 → 地理等比投影；
-    ② 只有设计稿的示意坐标（演示数据）→ 原排布整体等比映射进可视窗口（保持相对关系）；
-    ③ 啥都没有 → 沿对角线均分，保证地图可读。 */
-function projectDay(day){
-  var ids=ORDER[day]||[];
-  var stops=ids.map(function(id){return S[id];}).filter(Boolean);
-  if(!stops.length)return;
-  var vb=visibleViewBox(),padX=Math.min(90,vb.w*0.14),padY=Math.min(110,vb.h*0.16);
-  var x0=vb.x+padX,x1=vb.x+vb.w-padX,y0=vb.y+padY,y1=vb.y+vb.h-padY;
-  var withLoc=stops.filter(function(s){return !!s.loc;});
-  if(withLoc.length>=2){
-    var lats=withLoc.map(function(s){return s.loc.lat;}),lngs=withLoc.map(function(s){return s.loc.lng;});
-    var minLat=Math.min.apply(null,lats),maxLat=Math.max.apply(null,lats);
-    var minLng=Math.min.apply(null,lngs),maxLng=Math.max.apply(null,lngs);
-    var spanLat=Math.max(maxLat-minLat,1e-5),spanLng=Math.max(maxLng-minLng,1e-5);
-    var sc=Math.min((x1-x0)/spanLng,(y1-y0)/spanLat);
-    var offX=x0+((x1-x0)-spanLng*sc)/2,offY=y0+((y1-y0)-spanLat*sc)/2;
-    stops.forEach(function(s){
-      if(!s.loc){s.xy=null;return;}
-      s.xy=[Math.round(offX+(s.loc.lng-minLng)*sc),Math.round(offY+(maxLat-s.loc.lat)*sc)];
-    });
-  }else if(withLoc.length===1){
-    withLoc[0].xy=[Math.round((x0+x1)/2),Math.round((y0+y1)/2)];
-  }
-  // 无地理坐标的站（演示数据的示意坐标）→ 原排布整体等比映射进可视窗口
-  var based=stops.filter(function(s){return !s.loc&&s.baseXy;});
-  if(based.length>=2){
-    var bx=based.map(function(s){return s.baseXy[0];}),by=based.map(function(s){return s.baseXy[1];});
-    var bMinX=Math.min.apply(null,bx),bMaxX=Math.max.apply(null,bx);
-    var bMinY=Math.min.apply(null,by),bMaxY=Math.max.apply(null,by);
-    var bSpanX=Math.max(bMaxX-bMinX,1),bSpanY=Math.max(bMaxY-bMinY,1);
-    var bs=Math.min((x1-x0)/bSpanX,(y1-y0)/bSpanY);
-    var bOffX=x0+((x1-x0)-bSpanX*bs)/2,bOffY=y0+((y1-y0)-bSpanY*bs)/2;
-    based.forEach(function(s){
-      s.xy=[Math.round(bOffX+(s.baseXy[0]-bMinX)*bs),Math.round(bOffY+(s.baseXy[1]-bMinY)*bs)];
-    });
-  }
-  // 仍无落点的站：沿对角线均分，保证地图可读
-  var rest=stops.filter(function(s){return !s.xy;});
-  rest.forEach(function(s,i){
-    var t=rest.length===1?0.5:i/(rest.length-1);
-    s.xy=[Math.round(x0+t*(x1-x0)),Math.round(y0+t*(y1-y0))];
-  });
 }
 /** 完整载荷 → 本页数据模型。返回 false 表示载荷不可用（保留演示数据）。 */
 function adaptPlan(raw){
@@ -924,17 +1241,25 @@ function adaptPlan(raw){
       EDGE2[stops[i-1].id+'->'+stops[i].id]=estimateEdge(stops[i-1],stops[i]);
     }
     ORDER2[key]=ids;
-    DAYNAME2[key]=str(day.subtitle)||str(day.name)||('第 '+key+' 天');
-    // 只认形如 09/12 · 2026-09-12 · 9.12 的日期文本（label 常是「Day 1」这类，不能当日期）
-    var dateText=str(day.subtitle)||str(day.label);
-    if(/^\d{1,4}[\/\-.]\d{1,2}([\/\-.]\d{1,2})?$/.test(dateText.trim()))DATES.push(dateText.trim());
+    // 天名：去掉「第 N 天」这类通用副标题（拿它当大标题等于复读天数），留空走
+    // 顶栏回退链（目的地/行程名）；只有 Agent 侧给了真实线路名（如「西湖环湖线」）才显示
+    var dayName=str(day.subtitle)||str(day.name);
+    if(/^第\s*\d+\s*天$/.test(dayName.trim()))dayName='';
+    DAYNAME2[key]=dayName;
+    // 只认形如 09/12 · 2026-09-12 · 9.12 的日期文本。subtitle 与 label 都试
+    // （Dart 载荷 label=日期、subtitle=「第 N 天」，只看 subtitle 会丢日期）
+    var dateCands=[str(day.subtitle),str(day.label)];
+    for(var di2=0;di2<dateCands.length;di2++){
+      var dateText=dateCands[di2].trim();
+      if(/^\d{1,4}[\/\-.]\d{1,2}([\/\-.]\d{1,2})?$/.test(dateText)){DATES.push(dateText);break;}
+    }
     START2[key]=minStart!=null?minStart:540;
   });
   S=S2;ORDER=ORDER2;EDGE=EDGE2;DAYNAME=DAYNAME2;DAY_START=START2;
   var dest=str(raw.destination)||str(raw.title)||'行程';
   // 拉丁文目的地才拿来做「城市英文名」（中文名转大写只是复读，不如不显示）
   var en=/^[\x20-\x7E]+$/.test(dest)?dest.toUpperCase():'';
-  META={city:dest,cityEn:en,days:days.length,dates:DATES,title:'行迹 · '+dest+' '+days.length+' 日'};
+  META={city:dest,cityEn:en,days:days.length,dates:DATES,title:'行迹 · '+dest+' '+days.length+' 日',dq:str(raw.dataQuality)};
   WEATHER_TEXT=str(raw.weather);
   liveCache={};
   return true;
@@ -944,13 +1269,50 @@ function adaptPlan(raw){
 var HOST_MODE=!!(window.chrome&&window.chrome.webview)||/[?&]host=1/.test(location.search);
 /** 宿主形态下载荷到达前不展示演示数据（避免被当成真实行程）。 */
 var DATA_READY=!HOST_MODE;
+/** 换载时把地图侧状态清干净：旧站的 marker / 路线 / 图例 / 播放记录都不能残留。 */
+function resetMapState(){
+  mapState.poisKey='';mapState.routeKey='';mapState.played={};
+  clearAnim();updateFlow(false);
+  mapState.markers.forEach(function(m){try{m.remove();}catch(e){/* ignore */}});
+  mapState.markers=[];
+  var src=mapState.map&&mapState.map.getSource(ROUTE_SRC);
+  if(src)src.setData(emptyFC());
+  var el=$('mapLegend');if(el){el.className='map-legend';el.innerHTML='';}
+}
+/** 提前让服务端把目的地底图落到磁盘缓存：用户还在「今日」视图的这几秒里，
+    后台已把矢量样式/精灵/首屏瓦片备好，点开「路线」几乎瞬开（不再几秒黑屏）。
+    只发坐标，不发整份载荷（体量小、语义清楚）。 */
+function warmBasemap(raw){
+  var base=apiBase();
+  if(!base||!raw)return;
+  var pois=[];
+  (raw.days||[]).forEach(function(d){
+    (d.entries||d.items||[]).forEach(function(e){
+      var p=validLatLng(e.latitude,e.longitude);
+      if(p)pois.push({latitude:p.lat,longitude:p.lng});
+    });
+  });
+  var center=raw.center?validLatLng(raw.center.latitude,raw.center.longitude):null;
+  if(!pois.length&&!center)return;
+  try{
+    fetch(base+'/travel-basemap/warm',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({center:center,days:[{entries:pois}]})
+    }).catch(function(){/* 预热失败不影响主流程 */});
+  }catch(e){/* fetch 不可用：忽略 */}
+}
 window.__travelPanel={
   loadPlan:function(payload){
     DEMO_MODE=!adaptPlan(payload);
     DATA_READY=true;
     state.day=1;state.cur=0;state.event=null;state.forceShow={};
+    // 行程中心（目的地）：站点坐标缺失时靠它把底图定位到「对应的地点」，
+    // 而不是停在一个不相干的默认点
+    mapState.center=payload&&payload.center
+      ?validLatLng(payload.center.latitude,payload.center.longitude):null;
+    resetMapState();
+    warmBasemap(payload);
     render();
-    if(state.view==='map')renderMap(replan().items);
   },
   /** Agent 侧感知结论（天气/步速/对话）：页面据此重排，并展示 Agent 的解释文案。 */
   applySignal:function(ev,note){
@@ -960,7 +1322,7 @@ window.__travelPanel={
   },
   setTheme:function(){/* 行迹为固定深色设计令牌，保留 API 兼容 */},
   setTileProxy:function(base){TILE_BASE=String(base==null?'':base);},
-  setDefaultCenter:function(){/* 地图为示意底图，中心随载荷投影 */},
+  setDefaultCenter:function(){/* 地图中心随当天站点边界自适应，无需外部指定 */},
   showDay:function(i){var n=dayCount();state.day=clamp(Number(i)||1,1,n);state.cur=0;state.forceShow={};render();},
   openStop:function(id){
     var order=ORDER[state.day]||[],i=order.indexOf(id);
@@ -989,10 +1351,11 @@ $('titlebar').addEventListener('dblclick',function(e){
 });
 
 /* ══════════════════ 启动 ══════════════════ */
-// 演示数据的示意坐标留一份快照：地图投影按可视窗口重排时用它保相对关系
-(function(){for(var id in S){if(S[id]&&S[id].xy&&!S[id].baseXy)S[id].baseXy=S[id].xy.slice();}})();
 render();
-window.addEventListener('resize',function(){if(state.view==='map')renderMap(replan().items);});
+// 窗口尺寸变化：MapLibre 需要显式 resize 才会重算画布与视口（不会自动跟随容器）
+window.addEventListener('resize',function(){
+  if(state.view==='map'&&mapState.map)mapState.map.resize();
+});
 notifyHost({event:'ready'});
 </script>
 </body>

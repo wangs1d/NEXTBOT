@@ -4,6 +4,7 @@ import "package:url_launcher/url_launcher.dart";
 import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/services/video_preview_launcher.dart";
+import "media_disk_cache.dart";
 import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
@@ -1593,8 +1594,8 @@ class _PosterBackdropState extends State<_PosterBackdrop> {
       fit: StackFit.expand,
       children: <Widget>[
         _TravelItineraryCard.posterFallback,
-        Image.network(
-          url,
+        CachedMediaImage(
+          url: url,
           fit: BoxFit.cover,
           alignment: Alignment.center,
           errorBuilder: (_, Object __, StackTrace? ___) {
@@ -1604,14 +1605,8 @@ class _PosterBackdropState extends State<_PosterBackdrop> {
             });
             return const SizedBox.shrink();
           },
-          loadingBuilder: (
-            BuildContext context,
-            Widget child,
-            ImageChunkEvent? progress,
-          ) =>
-              progress == null
-                  ? child
-                  : _TravelItineraryCard.posterFallback,
+          loadingBuilder: (BuildContext context) =>
+              _TravelItineraryCard.posterFallback,
         ),
       ],
     );
@@ -2177,21 +2172,17 @@ class _ProductCompareCard extends StatelessWidget {
                 children: <Widget>[
                   AspectRatio(
                     aspectRatio: 0.74,
-                    child: Image.network(
-                      LinkUtils.resolveMediaUrl(side.image!),
+                    child: CachedMediaImage(
+                      url: LinkUtils.resolveMediaUrl(side.image!),
                       fit: BoxFit.cover,
                       filterQuality: FilterQuality.low,
                       errorBuilder: (_, __, ___) => _imageFallback(),
-                      loadingBuilder: (BuildContext context, Widget child,
-                          ImageChunkEvent? progress) {
-                        if (progress == null) return child;
-                        return Container(
-                          color: cs.surfaceContainerHighest,
-                          alignment: Alignment.center,
-                          child: const CircularProgressIndicator(
-                              strokeWidth: 1.6),
-                        );
-                      },
+                      loadingBuilder: (BuildContext context) => Container(
+                        color: cs.surfaceContainerHighest,
+                        alignment: Alignment.center,
+                        child: const CircularProgressIndicator(
+                            strokeWidth: 1.6),
+                      ),
                     ),
                   ),
                   Positioned(

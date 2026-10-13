@@ -173,8 +173,10 @@ import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
 import { toolsInDomain } from "../tools/tool-search/tool-category.js";
 import {
   getBuiltinAgentChatTools,
+  isSubstantiveToolExecution,
   selectForegroundCapabilityToolAdditions,
 } from "../external-model/openai-compatible-tool-loop.js";
+import { isVoiceMode } from "../proactivity/voice-mode-state.js";
 import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
 
 /** 记忆 domain → 注入 prompt 时的中文类型标签（分类显性化，P4）。 */
@@ -623,6 +625,7 @@ export class AgentCore {
     text: string,
     recentUserTurns: string[] = [],
     entityContextLines: string[] = [],
+    dialogStateLines: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
     return routeTurnByLlm(
       this.externalChat,
@@ -631,6 +634,7 @@ export class AgentCore {
       recentUserTurns,
       getTaskHub().activeSummary(sessionId),
       entityContextLines,
+      dialogStateLines,
     );
   }
 
@@ -2121,6 +2125,16 @@ if (route.plane === "task") {
     let taskProgressSteps = 0;
     /** 本轮是否注入过前置检索证据（搜索宣称一致性闸的「已搜」一侧证据）。 */
     let evidenceInjected = false;
+    /** 本轮是否注入过「网页检索」证据（区别于本地时钟证据：前者配搜索卡、答案留存）。 */
+    let webEvidenceInjected = false;
+    /**
+     * 答案留存记账（2026-10-13 根修：工具轮的答案不进流式通道）：
+     * holdAnswer 置位后，工具循环对「执行过实质工具的轮次」不再直推正文，
+     * 答案随返回值交 done。本标记把「循环确实留存了」如实带给 WS 层——
+     * done 裁据此区分「留存答案（整段替换呈现）」与「出口重写分歧（说话算话
+     * 丢弃）」，不再靠残差比例猜。语音轮不置位 holdAnswer，本标记恒 false。
+     */
+    let answerStreamHeld = false;
     /**
      * 本轮是否有日历/提醒创建工具成功返回（办妥确认轮标记，2026-09-24）：
      * 传给 TurnFinalizer → 回复风格闸对确认轮不吃结构豁免。
@@ -2178,6 +2192,12 @@ if (route.plane === "task") {
         onToolExecuted: (info: ToolExecutedInfo) => {
           if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
             calendarCreateSucceededThisTurn = true;
+          }
+          // 答案留存记账（2026-10-13 根修）：holdAnswer="after_tool_use" 时，
+          // 实质工具执行 = 工具循环已对本轮答案关闸（与循环内 answerHeld()
+          // 同一判定函数 isSubstantiveToolExecution，口径恒一致）。
+          if (holdAnswer === "after_tool_use" && isSubstantiveToolExecution(info.toolName)) {
+            answerStreamHeld = true;
           }
           ctx.orchestrateToolCtx?.onToolExecuted?.(info);
           ctx.backgroundOnToolExecuted?.(info);
@@ -2371,10 +2391,12 @@ if (route.plane === "task") {
       } else if (ctx.routeSearchQuery?.trim()) {
         evidence = await this.runFreshEvidenceSearch(ctx.routeSearchQuery.trim());
         evidenceSource = "route_query";
+        if (evidence) webEvidenceInjected = true;
       } else if (ctx.specEvidence && !isChatLane) {
         // 路由未产出查询词（保守降级/超时轮）：复用路由期间已并行完成的投机搜索
         evidence = await ctx.specEvidence;
         evidenceSource = "speculative";
+        if (evidence) webEvidenceInjected = true;
       }
       if (evidence) {
         const memory = (baseStreamOpts.promptContext ??= {}).memory;
@@ -2492,6 +2514,21 @@ if (route.plane === "task") {
     // 取代旧"mode=complex 一律 reasoner"的粗粒度路由（省 token）。
     const resolvedTier: TaskTier =
       mode === "chat" || ctx.turnPlan?.tier === "flash" ? TaskTier.FLASH : TaskTier.PRO;
+    // ── 答案留存（2026-10-13 根修：工具轮的答案不进流式通道）──
+    // 决策点在 agent-core（知道「检索发生在循环外」这一事实）+ 工具循环
+    // （知道「本轮是否执行过工具」），两层合成完整契约：
+    //   - 网页证据轮（前置检索已完成）→ "always"：答案从第一波就留存；
+    //   - 其余对话面轮 → "after_tool_use"：循环内执行过实质工具即留存；
+    //   - 语音轮豁免（TTS 消费流式分句）；任务面/子 Agent 不置位（流式消费方不变）。
+    // 纯闲聊轮上游已零工具隔离（chatLanePureChat），本闸对它天然无感——
+    // 「打字机只在闲聊」由此成为结构性质，不再依赖意图标签或回执时机。
+    const holdAnswer: "after_tool_use" | "always" | undefined =
+      this.isChatLane(mode) && !isVoiceMode(actorId)
+        ? webEvidenceInjected
+          ? "always"
+          : "after_tool_use"
+        : undefined;
+    if (holdAnswer === "always") answerStreamHeld = true;
     const streamOpts: AgentStreamOptions = {
       ...baseStreamOpts,
       ...(effectiveMemory ? { promptContext: { memory: effectiveMemory } } : { promptContext: undefined }),
@@ -2529,6 +2566,9 @@ if (route.plane === "task") {
       // 2026-09-23 扩面配套：证据注入豁免（realtime 轮已有证据块时零工具直答
       // 是正确行为）+ 路由置信度（观测）。
       turnIntent: ctx.routeIntent,
+      // 答案留存（2026-10-13 根修）：透传进工具循环，provider 白名单转发，
+      // 漏传 = 留存静默失效（见 AgentStreamOptions.holdAnswer 注释）。
+      ...(holdAnswer ? { holdAnswer } : {}),
       // 确定性媒体预执行（2026-10-10 根治搜图轮「时有时无」）：media_retrieval 轮
       // 不再把「要不要搜图」交给模型现场决定——路由层已代码构造查询词（compose-
       // MediaSearchQuery），这里把它变成循环开场的确定性 search_images/search_videos
@@ -2954,6 +2994,11 @@ if (route.plane === "task") {
     }, opts?.onAssistantDelta);
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
+    }
+    // 答案留存（2026-10-13 根修）：如实告知 WS 层「答案没走流式通道」，
+    // done 裁据此走整段替换（卡片+正文同帧）而非说话算话丢弃裁决。
+    if (answerStreamHeld) {
+      reply.answerStreamHeld = true;
     }
     return reply;
   }

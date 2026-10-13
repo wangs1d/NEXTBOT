@@ -114,6 +114,8 @@ export interface UnifiedExtraction {
   understandings: UnifiedUnderstanding[];
   /** 结构化事实（事实库字段级 latest-wins upsert，实时生效） */
   facts: UnifiedFact[];
+  /** 用户明确要求忘掉的档案字段（事实库字段级 supersede，历史保留可追溯） */
+  forget: string[];
   /** 角色→人名指代映射（结构化事实库 指代·role 字段，realtime 消解直查） */
   referents: UnifiedReferent[];
 }
@@ -154,7 +156,13 @@ const SYSTEM_PROMPT = [
   "  // 例：agent 叫用户「老王」后用户正常回应 → facts 输出 称呼:老王（confidence≈0.6）；",
   "  // 用户表示不喜欢这个称呼则不输出（按更正处理，字段级覆盖由系统完成）。",
   "  // 拿不准是不是字面为真就不输出。用户更正旧信息时 facts 输出新值（字段级覆盖由系统完成）。",
-  "  // field 用短字段名（称呼|职业|居住地|技术栈|生日|公司|学历 或其他 ≤6 字字段）；value 是确定短值（≤20 字）",
+  "  // field 用短字段名（称呼|职业|居住地|技术栈|生日|公司|学历 或其他 ≤6 字字段）；value 是确定短值（≤20 字）。",
+  "  // value 必须语义改写成无主语短值（Mem0/ChatGPT 式口径）：抽取时归一，不照抄原句——",
+  "  // 「我在兴义」→ 居住地:兴义；「我是做后端的」→ 职业:后端开发；「我叫王铭川」→ 称呼:王铭川；",
+  "  // 禁止以「我/我的/我在」开头（第一人称原话进 prompt 会让模型分不清「我」指谁，主语翻转）",
+  "  // 用户明确要求忘掉/清除某字段时输出 forget（如「别记我住哪了」→ forget:[\"居住地\"]），",
+  "  // 不确定的遗忘请求不输出（拿不准就不删）；forget 与 facts 同轮冲突时以 forget 为准",
+  '"forget":["字段名"]  // 仅当用户明确要求忘掉/清除档案字段时输出，无则省略或空数组',
   '"referents":[{"role":"称谓","name":"人名","confidence":0到1}],',
   "  // 用户用角色/亲属称谓指代具体人物时输出映射：「我老婆是刘浩存」→ role:老婆 name:刘浩存；",
   "  // 粉丝式称呼同样输出（如「我老婆最近在哪」指代某明星）——本字段只记录「用户这么指代」，",
@@ -185,6 +193,7 @@ interface RawUnified {
   corrections?: unknown;
   understandings?: unknown;
   facts?: unknown;
+  forget?: unknown;
   referents?: unknown;
 }
 
@@ -316,6 +325,18 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
         .slice(0, 5)
     : [];
 
+  // 字段级遗忘（Mem0 DELETE 语义）：只收用户明确要求的「忘掉X」，字段名限长。
+  // 不走 asStringArray（其 ≥4 字过滤会误杀「称呼/生日」等 2-3 字段名）。
+  // forget 不随 reject 丢弃——「别记我家在哪了」是动作指令不是记忆，常被判
+  // reject（无价值琐事），但遗忘恰恰要在这轮执行
+  const forget = !Array.isArray(raw.forget)
+    ? []
+    : (raw.forget as unknown[])
+        .filter((f): f is string => typeof f === "string")
+        .map((f) => f.trim().slice(0, 16))
+        .filter(Boolean)
+        .slice(0, 6);
+
   const scores = parseScores(raw.scores);
   return applyPromotionGate({
     decision,
@@ -327,6 +348,7 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     corrections,
     understandings,
     facts,
+    forget,
     referents,
   });
 }

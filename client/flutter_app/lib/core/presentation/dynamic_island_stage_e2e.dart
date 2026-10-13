@@ -116,8 +116,12 @@ Future<void> runIslandStageE2EBootstrap() async {
   File("${_stageDir.path}${Platform.pathSeparator}attention_ready.flag")
       .writeAsStringSync(DateTime.now().toIso8601String());
   await hold(2000); // 待机原态帧
-  IslandReminderScheduler.instance
-      .fireNow(title: "14:00 高铁 G1234 出发", holdSeconds: 6);
+  IslandReminderScheduler.instance.fireNow(
+    title: "14:00 高铁 G1234 出发",
+    holdSeconds: 6,
+    // E2E 帧序断言必须上屏：显式带全屏打断白名单。
+    urgent: true,
+  );
   await hold(9000); // 入场 + 保持 + 缩回全程
   File("${_stageDir.path}${Platform.pathSeparator}attention_done.flag")
       .writeAsStringSync(DateTime.now().toIso8601String());

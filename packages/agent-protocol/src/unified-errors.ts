@@ -42,6 +42,13 @@ export function classifyToolFailure(result: Record<string, unknown> | undefined)
   }
   if (result?.timeout === true) return UnifiedErrorCode.ToolTimeout;
   const text = typeof result?.error === "string" ? result.error : "";
+  // 超时文本兜底：工具执行超时经 `ToolExecutionTimeoutError` 只带 message
+  // （「工具 "x" 执行超时 (30000ms)」），不带 errorCode 也不带 timeout 标志，
+  // 此前一律被判成通用的 TOOL_EXECUTION_FAILED —— 超时在指标里与真实失败混在一起，
+  // 掩盖了「预算不够而非能力不行」这类问题（2026-10-12 行程规划漏卡即由此隐藏）。
+  if (text.includes("执行超时") || text.includes("timed out")) {
+    return UnifiedErrorCode.ToolTimeout;
+  }
   if (text.includes("未知工具")) return UnifiedErrorCode.ToolUnknown;
   if (text.includes("未拥有") || text.includes("不允许") || text.includes("沙箱")) {
     return UnifiedErrorCode.ToolDenied;

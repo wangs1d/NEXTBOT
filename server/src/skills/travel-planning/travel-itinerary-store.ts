@@ -33,6 +33,8 @@ export interface TravelItinerarySnapshot {
   intro?: string;
   /** 出行随身物品叮嘱（行程卡「记得带」胶囊） */
   packing?: string[];
+  /** 出发日天气一句话摘要（Open-Meteo 实时预报；行程桌面页顶栏天气胶囊展示） */
+  weather?: string;
   /**
    * 目的地代表性封面（行程卡海报区背景）：目的地本身的形象照（维基百科条目
    * 主图优先），前端海报优先于任何条目实拍图使用。解析失败缺省。

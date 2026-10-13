@@ -1,5 +1,7 @@
 import "package:flutter/material.dart";
 
+import "media_disk_cache.dart";
+
 /// 统一媒体缩略图：网络图 + 统一加载动画 + 统一错误占位 + 圆角裁剪。
 ///
 /// 供图片网格（[agent_result_card.dart] 的 _GalleryImageTile / _SinglePhotoTile）
@@ -53,14 +55,14 @@ class MediaThumbnail extends StatelessWidget {
       child: SizedBox(
         width: width,
         height: height,
-        child: Image.network(
-          url,
+        // 磁盘缓存版（2026-10-12）：历史消息照片重启后直接命中本地落盘
+        // 秒出，不再逐张重新下载（Image.network 只有进程内内存缓存）。
+        child: CachedMediaImage(
+          url: url,
           fit: fit,
-          loadingBuilder: (BuildContext context, Widget child,
-              ImageChunkEvent? progress) {
-            if (progress == null) return child;
-            return loadingBox;
-          },
+          width: width,
+          height: height,
+          loadingBuilder: (BuildContext context) => loadingBox,
           errorBuilder:
               (BuildContext context, Object error, StackTrace? stackTrace) {
             return errorBox;

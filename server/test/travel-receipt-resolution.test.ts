@@ -23,7 +23,7 @@ process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
-const { resolveTravelReceipt, attachDeterministicCards, looksLikeHandwrittenItinerary, sniffItineraryDays } = await import(
+const { resolveTravelReceipt, attachDeterministicCards, looksLikeHandwrittenItinerary, sniffItineraryDays, classifyTravelCardMissing } = await import(
   "../src/services/deterministic-card-chain.js"
 );
 const { normalizeReplyCardLayout, buildReplyBlocks } = await import(
@@ -238,4 +238,103 @@ test("天数嗅探：两日/三天/一日 → 对应天数，说不清 → 缺�
   assert.equal(sniffItineraryDays(["成都三日游怎么玩"]), 3);
   assert.equal(sniffItineraryDays(["周末一日游"]), 1);
   assert.equal(sniffItineraryDays(["出去玩"]), undefined);
+});
+
+// ───────────────────────────────────────────────────────────────────────────
+// 行程卡缺席自检判据（2026-10-12 贵阳轮事故埋点）：classifyTravelCardMissing
+//   硬档 = 跑过规划/拿到回执却无卡（确定性事实）；软档 = 路由判行程轮 + 手写行程。
+// ───────────────────────────────────────────────────────────────────────────
+
+/** 造一段「正文 + 真行程卡」文本（复用真实 attach 链，不手搓卡 JSON）。 */
+function textWithTravelCard(destination: string): string {
+  savePlan(`plan-gap-${destination}`, destination, 0);
+  const resolved = resolveTravelReceipt({
+    executedReceipt: { ...SLIM_RECEIPT, id: `plan-gap-${destination}`, title: `${destination}3日游` },
+    goal: `去${destination}玩3天`,
+    finalText: `${destination}的行程帮你排好了。`,
+    nowMs: NOW,
+  });
+  const text = attachDeterministicCards({
+    text: `${destination}的行程帮你排好了。`,
+    travelToolName: resolved.toolName,
+    travelResult: resolved.result,
+  });
+  return text;
+}
+
+test("缺席自检：有卡 → null（硬/软都不报）", () => {
+  const text = textWithTravelCard("厦门");
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: text,
+      travelPlanningAttempted: true,
+      travelReceiptPresent: true,
+      travelQuery: true,
+    }),
+    null,
+  );
+});
+
+test("缺席自检·硬档：跑过规划却无卡 → hard（事故核心形态）", () => {
+  // 事故原形：工具被预算击杀 ok=false → 无卡，正文是模型手写的逐日行程
+  const handwritten =
+    "贵阳两天这样玩：\n第一天 09:00 甲秀楼，11:30 黔灵山，14:00 青岩古镇；\n第二天 09:00 花溪公园，12:00 天河潭，16:00 返程。景点门票都帮你留了弹性。";
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: handwritten,
+      travelPlanningAttempted: true, // executedTravelPlanAttempted
+      travelReceiptPresent: false, // ok=false → 回执为空
+      travelQuery: true,
+    }),
+    "hard",
+  );
+});
+
+test("缺席自检·硬档：拿到回执却无卡 → hard（与 travelQuery 无关）", () => {
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: "行程已经在路上了，稍等。",
+      travelPlanningAttempted: false,
+      travelReceiptPresent: true,
+      travelQuery: undefined, // LLM 字段缺省也要报——不能单点靠它
+    }),
+    "hard",
+  );
+});
+
+test("缺席自检·软档：路由判行程轮 + 手写行程 → soft（未尝试规划时的高置信兜底）", () => {
+  const handwritten =
+    "行程这样安排：\n第一天抵达大理古城逛逛，第二天环洱海骑行，景点门票都帮你留了弹性。";
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: handwritten,
+      travelPlanningAttempted: false,
+      travelReceiptPresent: false,
+      travelQuery: true,
+    }),
+    "soft",
+  );
+});
+
+test("缺席自检：非行程轮闲聊/引用旧方案 → null（不刷告警）", () => {
+  // 只是聊到旅游，无行程结构
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: "兴义秋天挺适合旅游的，万峰林和马岭河都值得去。",
+      travelPlanningAttempted: false,
+      travelReceiptPresent: false,
+      travelQuery: true,
+    }),
+    null,
+  );
+  // 路由判非行程轮（引用旧方案），即便有手写结构也不报
+  assert.equal(
+    classifyTravelCardMissing({
+      finalText: "方案A/B/C 都在上面了，你挑一个？",
+      travelPlanningAttempted: false,
+      travelReceiptPresent: false,
+      travelQuery: false,
+    }),
+    null,
+  );
 });

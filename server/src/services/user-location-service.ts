@@ -27,6 +27,26 @@ function buildLabel(info: {
 }
 
 async function geoFromClientLocation(loc: ClientLocationWire): Promise<UserGeoInfo | null> {
+  // 客户端已带回服务端解析好的省市区（前端 /geo/reverse 的产物）→ 直接复用，
+  // 免掉每轮一次冗余逆地理外网往返（2026-10-12 延迟优化）。仅当「无任何结构化
+  // 字段」时才回退服务端反查——那条路是纯坐标上报（逆地理失败兜底）的场景。
+  const hasResolvedParts = Boolean(
+    loc.city?.trim() || loc.district?.trim() || loc.region?.trim() || loc.country?.trim(),
+  );
+  if (hasResolvedParts) {
+    return {
+      timezone: loc.timezone?.trim() || "Asia/Shanghai",
+      country: loc.country?.trim() ?? "",
+      region: loc.region?.trim() ?? "",
+      district: loc.district?.trim() ?? "",
+      city: loc.city?.trim() ?? "",
+      ip: "",
+      source: "client-gps",
+      latitude: loc.latitude,
+      longitude: loc.longitude,
+    };
+  }
+
   const rev = await reverseGeocodeCoordinates(loc.latitude, loc.longitude);
   if (!rev) {
     const fallbackLabel = loc.label?.trim() || buildLabel(loc);

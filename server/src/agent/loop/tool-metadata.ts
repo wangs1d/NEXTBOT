@@ -211,6 +211,12 @@ const HONEST_FAILURE_TOOLS = new Set<string>([
   "shopping.order.place",
   "wallet.transfer",
   "wallet.purchase",
+  // 提醒/日程创建（2026-10-12）：matched=false（时间解析不出/周期需确认）时
+  // 严禁转述成「已设置」——用户据此以为到点会提醒，实际什么都没创建
+  //（真实事故：提醒轮无落库、日程页无数据、到点无通知）。
+  "reminder.plan",
+  "calendar.create_from_text",
+  "calendar.create_task",
   // 统一预订层（方案 A）：下单工具禁止假成功（模拟模式必须如实标注 simulated）
   "ride_hailing.book",
   "home_service.book",
@@ -256,13 +262,21 @@ export function getToolMetadata(toolName: string): ToolMetadata {
 }
 
 function inferSideEffect(toolName: string): ToolMetadata["sideEffect"] {
-  if (/transfer|purchase|place|cancel|create|send|call|control|run_|open|automation|input/.test(toolName)) {
+  if (/transfer|purchase|place|cancel|create|send|call|control|run_|open|automation|input|book|reminder|update|delete|write|profile|forget/.test(toolName)) {
     return "external";
   }
   if (/search|fetch|inspect|get|list|screenshot|query|extract|weather|clock/.test(toolName)) {
     return "read";
   }
   return "read";
+}
+
+/**
+ * 工具是否有外部副作用（2026-10-12 出口宣称-一致性闸消费）。
+ * 闸的通用判据：回复宣称完成写操作 ∧ 本轮零个副作用工具执行 = 结构性违约。
+ */
+export function hasExternalSideEffect(toolName: string): boolean {
+  return inferSideEffect(toolName) === "external";
 }
 
 function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {

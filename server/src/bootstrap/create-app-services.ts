@@ -26,6 +26,7 @@ import { pickBestProductImage } from "../services/product-image-scorer.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { createLlmRollingRecapSummarizer } from "../services/conversation-rolling-summarizer.js";
 import { registerHttpRoutes } from "../routes/http/index.js";
+
 import { AgentAccountService } from "../services/agent-account-service.js";
 import { BetaWhitelistService } from "../services/beta-whitelist-service.js";
 import { BetaInviteService, BetaWaitlistService } from "../services/beta-invite-service.js";
@@ -238,6 +239,7 @@ import { registerPictureBuiltinSkills } from "../skills/builtin/picture-skills.j
 import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
 import { registerTravelCommuteBuiltinSkills } from "../skills/travel-planning/travel-commute-skills.js";
 import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
+import { travelDataRefresh } from "../skills/travel-planning/travel-data-refresh.js";
 import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
@@ -264,7 +266,7 @@ import {
   classifyFeatureByName,
 } from "../catalog/index.js";
 import { setFeatureCatalog } from "../agent/agent-capabilities.js";
-import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools } from "../external-model/openai-compatible-tool-loop.js";
+import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
 import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
@@ -670,6 +672,12 @@ export async function createAppServices(): Promise<AppServices> {
   };
   bootLoads.push(loadPersistedCommunitySkills(skillManager));
   toolRegistry.setSkillManager(skillManager);
+  // 工具超时预算 ← 技能声明（2026-10-12）：把 `SkillMetadata.timeoutMs` 接进工具循环的
+  // 超时解析，作为**下界**（工具的通用兜底档/30s 默认值不得把它吃掉）。
+  // 事故背景：声明此前只被 skill-sandbox 消费，实盘量出 10 个技能声明 30~120s 全被
+  // 30s 钳住（travel.plan-itinerary 声明 120s / 实测 57s → 被击杀 → 行程卡整轮缺席）。
+  // 接上之后，新增慢工具只需在技能里声明 timeoutMs，不必再改工具循环。
+  setDeclaredSkillTimeoutResolver(declaredSkillTimeoutFromManager(skillManager));
   // 技能管理工具（skill.list / skill.view / skill.manage）：让 LLM 自主查询/沉淀/修补 procedural 技能
   registerSkillManageTools(toolRegistry, skillManager);
 
@@ -1241,7 +1249,30 @@ export async function createAppServices(): Promise<AppServices> {
 
   // 注册旅游规划内置Skills（承接 3D-Travel 项目能力：规则引擎行程生成 + POI 缓存 + 目的地知识库）
   // 版本闸：开源版剔除 travel.* 技能族（服务本体保留构造——行程路由 deps / shutdown 仍引用）
-  const travelPlanningService = new TravelPlanningService(weatherService);
+  //
+  // 配图主源接 upstreamSearchService（API 优先、cn.bing.com 兜底、结果转存本地 PNG）：
+  // 原来只走 Wikimedia，而 commons/zh.wikipedia 在本机网络下实测 http=000，
+  // 导致 POI 照片覆盖率只有 3.4%、且每个 POI 都要先白等一轮超时。这里失败也不会
+  // 让配图断掉——PlanningService 内部另有一层必应直抓兜底。
+  const travelPlanningService = new TravelPlanningService(weatherService, {
+    searchImages: async (query, limit) => {
+      const res = await upstreamSearchService.searchImages(query, limit ?? 4, "shared-travel-img");
+      return res.items
+        .map((it) => it.mediaUrl)
+        .filter((u): u is string => Boolean(u));
+    },
+  });
+  // 2026-10-12 用户决定下线 POI 视频能力，评论的数据来源是视频评论区（无视频即无评论），
+  // 两者一并下线：searchVideos / searchReviews 端口、media 表的 video/review 行、
+  // 桌面与手机端的渲染区块全部移除。媒体库只剩照片一类。
+  // 若日后重启评论能力，来源得换（结构化评论源要登录态），不能直接复用这段。
+
+  // 旅行数据维护：把媒体补全能力（照片+视频+评论）接进维护服务，
+  // 并在启动后延迟跑一次存量图片本地化（把历史遗留的第三方外链抓成本机资产）。
+  travelDataRefresh.setMediaFetcher((name, type, lat, lon) =>
+    travelPlanningService.backfillMediaForPoi(name, type, lat, lon),
+  );
+  travelDataRefresh.scheduleStartupLocalize();
   if (!isOssEdition()) {
     registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
       travelPlanningService,
@@ -1533,6 +1564,23 @@ export async function createAppServices(): Promise<AppServices> {
         }
       } catch (err) {
         console.warn("[structured-facts] 事实入档失败（忽略）:", err);
+      }
+    }
+    // 字段级遗忘（Mem0 DELETE 语义）：用户明确要求忘掉的字段 supersede 下线，
+    // 历史行保留可追溯；档案字段清档后同样收敛其它存储副本
+    for (const field of event.forget ?? []) {
+      try {
+        const cleared = structuredFactStore?.clearFact(event.actorId, field);
+        if (cleared !== null && cleared !== undefined) {
+          console.info(
+            `[structured-facts] 字段遗忘 actor=${event.actorId} ${field}（下线 ${cleared} 条）`,
+          );
+          if (cleared > 0 && isProfileField(field)) {
+            scheduleProfileFactReconcile(event.actorId);
+          }
+        }
+      } catch (err) {
+        console.warn("[structured-facts] 字段遗忘失败（忽略）:", err);
       }
     }
   });

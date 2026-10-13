@@ -17,6 +17,11 @@ import {
 } from "../services/conversation-rolling-summarizer.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import {
+  readMessageTimestampMeta,
+  stripPersistedTsField,
+  tagMessageTimestampMeta,
+} from "./chat-thread-ts-meta.js";
+import {
   absorbPersistedClientIds,
   copyUserMessageClientId,
   PERSISTED_CLIENT_ID_FIELD,
@@ -52,10 +57,10 @@ export { PERSISTED_CLIENT_ID_FIELD, tagUserMessageClientId };
  */
 const THREAD_NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\][\s\S]*?(?:\[NEXT_UP_END\]|$)/g;
 const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT_UP_(?:START|END)\]/g;
-const THREAD_RENDER_DECL_RE = /^\s*\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]\s*$/gm;
-const THREAD_RENDER_DECL_INLINE_RE = /\[(?:RENDER_HINT|RENDER_AS):[A-Za-z_]+\]/g;
+const THREAD_RENDER_DECL_RE = /^\s*\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?\s*$/gm;
+const THREAD_RENDER_DECL_INLINE_RE = /\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?/g;
 const THREAD_PROTOCOL_ANY_RE =
-  /\[NEXT_UP_(?:START|END)\]|\[(?:RENDER_HINT|RENDER_AS):|<\s*\/?\s*system-reminder/i;
+  /\[NEXT_UP_(?:START|END)\]|\[RENDER_(?:HINT|AS)\]?\s*[:：]|<\s*\/?\s*system-reminder/i;
 
 function stripProtocolMarkersForThread(text: string): string {
   // <system-reminder>（2026-10-08 事故根源）：上游 harness 注入块被模型复读后
@@ -163,6 +168,54 @@ const RECAP_TIME_ANCHOR_HINT =
   "跨天（昨天及更早）必须按日期叙述，拿不准就只陈述内容、不报时间。）";
 /** 待归纳区标记：其下为「已滑出窗口、尚未被 LLM 增量摘要吸收」的原文占位行（绝对时间标签）。 */
 const SESSION_UNSUMMARIZED_MARKER = "[unsummarized]";
+
+/**
+ * recap 回显检测（2026-10-12 摘要直出事故根治）：
+ *
+ * 事故链路：模型把线程里的 recap 块（assistant 角色）当成「自己说过的话」整块复述出来
+ * → 出口净化只剥掉了 `[session-recap]` 标签行、正文照发 → 复读正文**落库成普通
+ * assistant 消息** → 下一轮模型看到「自己复述过」再复读 + /history 把它当聊天记录
+ * 下发手机端 → 自我维持循环（实测 2026-10-12 23:05 起，气泡连续三轮回显摘要块）。
+ *
+ * 判据（对真实 recap 消息零误伤）：
+ * - `（本块为历史摘要` 是 RECAP_TIME_ANCHOR_HINT 的开头，**只存在于发往 LLM 的视图**
+ *   （buildRecapLlmViewContent 注入），存储层 recap 永远不含它 → 正文含它必是回显；
+ * - `Earlier conversation recap:` 标题行虽然是真实 recap 的一部分，但真实 recap
+ *   恒以 `[session-recap]` 标签开头；无标签却以标题开头的 assistant 正文必是
+ *   「标签被出口剥掉后的回显残体」。
+ */
+const RECAP_ECHO_VIEW_HINT_SIGNATURE = "（本块为历史摘要";
+
+export function isRecapEchoText(text: string): boolean {
+  if (!text) return false;
+  if (text.includes(RECAP_ECHO_VIEW_HINT_SIGNATURE)) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  return (
+    trimmed.startsWith(SESSION_RECAP_TITLE) && !trimmed.startsWith(SESSION_RECAP_PREFIX)
+  );
+}
+
+/** assistant 消息形态的 recap 回显（落库/恢复路径用）。真实 recap 消息不命中。 */
+function isRecapEchoMessage(msg: ChatCompletionMessageParam): boolean {
+  if (!msg || msg.role !== "assistant" || typeof msg.content !== "string") return false;
+  return isRecapEchoText(msg.content);
+}
+
+/** 从线程数组里原地剔除 recap 回显消息（afterTurnCompleted / 恢复路径共用）。 */
+function dropRecapEchoMessages(msgs: ChatCompletionMessageParam[]): boolean {
+  let changed = false;
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (isRecapEchoMessage(msgs[i])) {
+      console.log(
+        `[chat-thread-store] dropped recap echo assistant message (idx=${i}, len=${(msgs[i].content as string).length})`,
+      );
+      msgs.splice(i, 1);
+      changed = true;
+    }
+  }
+  return changed;
+}
 
 // ── 增量摘要预算（env 可调）：滑动窗口 + 增量摘要，不做「挤进固定 14 行」的折叠 ──
 /** LLM 滚动摘要区行数/字符预算（摘要器提示词使用同一预算，保证输出可完整落进线程）。 */
@@ -333,6 +386,9 @@ export function parseMessageTimestamp(line: string): Date | null {
 /** 从消息对象中尝试读取已注入的时间戳；用于恢复历史时保持原时间，避免重新打标后顺序乱跳。 */
 function extractMessageTimestamp(msg: ChatCompletionMessageParam): Date | null {
   if (msg.role !== "user" && msg.role !== "assistant") return null;
+  // P1（2026-10-11 通道分离）：新写入走 metadata；旧线程的内联帧走正文解析（读取兼容）。
+  const fromMeta = readMessageTimestampMeta(msg);
+  if (fromMeta) return fromMeta;
   if (typeof msg.content === "string") return parseMessageTimestamp(msg.content);
   if (Array.isArray(msg.content)) {
     for (const part of msg.content) {
@@ -346,16 +402,8 @@ function extractMessageTimestamp(msg: ChatCompletionMessageParam): Date | null {
   return null;
 }
 
-/**
- * 供 Provider 在调 LLM 前给本轮 user 消息打时间戳前缀（避免「同 1 句用户话，下轮才看到时间」）。
- * 已有时间戳则不重复打，保持唯一。
- */
-export function annotateUserContentForLlm(
-  content: string | ChatCompletionMessageParam["content"],
-  now: Date = new Date(),
-): string | ChatCompletionContentPart[] {
-  return annotateUserContentIfString(content, now, now);
-}
+// （2026-10-11 P1 通道分离）旧 annotateUserContentForLlm 已删除：Provider 不再给
+// user 消息正文打时间帧，改为在构造消息对象时调 annotateMessageTimeMeta 写 metadata。
 
 /** 容错解析时间帧文本里的本地时间（兼容残缺/变体帧，如模型复述出的 `[ts:...]周四[now]`）。 */
 function parseFrameDateLoose(text: string): Date | null {
@@ -469,7 +517,16 @@ export function buildTimestampFreeLlmView(
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((raw) => {
     // 内部元数据先剥掉：它既不参与时间轴，也不该出现在发往 LLM 的正文里。
-    const msg = stripPersistedClientIdField(raw);
+    // P1：时间戳 metadata（__ts）同样只属于线程内部——但时间轴要用它，先取再剥。
+    const metaDate = readMessageTimestampMeta(raw);
+    const msg = stripPersistedTsField(stripPersistedClientIdField(raw));
+    // P0-B：system 形态的 recap 同样走视图加工（年龄标注 + 时间锚提示）——
+    // 它不参与时间轴、不参与时间戳剥离，但绝不能因为换了角色就丢掉视图加工。
+    if (msg.role === "system" && typeof msg.content === "string") {
+      if (!msg.content.startsWith(SESSION_RECAP_PREFIX)) return msg;
+      const recapView = buildRecapLlmViewContent(msg.content, now);
+      return recapView === msg.content ? msg : cloneMessageWithClientId(msg, recapView);
+    }
     if (msg.role !== "user" && msg.role !== "assistant") return msg;
     const roleLabel = msg.role === "user" ? "用户" : "助手";
 
@@ -481,7 +538,7 @@ export function buildTimestampFreeLlmView(
       if (textIdx < 0) return msg;
       const part = parts[textIdx] as { type: "text"; text: string };
       const original = part.text ?? "";
-      const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
+      const date = metaDate ?? extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
       const stripped = stripLeadingTimestampFrames(original);
       if (stripped.startsWith(SESSION_RECAP_PREFIX)) {
         const recapView = buildRecapLlmViewContent(stripped, now);
@@ -501,7 +558,7 @@ export function buildTimestampFreeLlmView(
 
     if (typeof msg.content !== "string") return msg;
     const original = msg.content;
-    const date = extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
+    const date = metaDate ?? extractMessageTimestamp(msg) ?? parseFrameDateLoose(original);
     const stripped = stripLeadingTimestampFrames(original);
     if (stripped.startsWith(SESSION_RECAP_PREFIX)) {
       const recapView = buildRecapLlmViewContent(stripped, now);
@@ -559,15 +616,32 @@ function userMessageTextMatches(msg: ChatCompletionMessageParam, incoming: strin
 }
 
 /**
- * 在每条 user / assistant 消息首行注入精确时间戳（年/月/日/时/分/秒 + 星期 + 相对当前时间）。
- * 重复调用同一消息时自动用新时间刷新；兼容历史 `[timeframe:...]` 前缀。
+ * 时间戳标注（P1 通道分离版，2026-10-11）：正文不写任何帧文本，时刻存消息 metadata
+ * （`__ts`，随线程落盘）。语义与旧 annotateTimeframe 对齐：
+ * - 已有 metadata → 冻结不刷新（P0-1 字节级稳定语义）；
+ * - 旧线程的内联 `[ts:]/[timeframe:]` 帧 → 顺手迁移出正文（metadata 接管原时刻）；
+ * - 都没有 → 打上 `at`。
+ * LLM 的【对话时间轴】由 buildTimestampFreeLlmView 从 metadata 构造，正文即「人说的话」。
  */
-function annotateTimeframe(content: string, at: Date, now: Date = new Date()): string {
-  const trimmed = content.trimStart();
-  const existing = readMessageTimestampPrefix(trimmed);
-  const rest = existing ? existing.rest : trimmed;
-  const prefix = buildMessageTimestampPrefix(at, now);
-  return `${prefix}\n${rest}`;
+function annotateMessageTimeMeta(
+  msg: ChatCompletionMessageParam,
+  at: Date,
+): ChatCompletionMessageParam {
+  if (msg.role !== "user" && msg.role !== "assistant") return msg;
+  if (readMessageTimestampMeta(msg)) return msg; // 已有 → 冻结
+  if (typeof msg.content === "string") {
+    const parsed = readMessageTimestampPrefix(msg.content);
+    if (parsed) {
+      // 旧线程内联帧迁移：正文剥帧、metadata 接管原时刻（随下一轮落盘固化）
+      tagMessageTimestampMeta(msg, parseMessageTimestamp(msg.content) ?? at);
+      const cleaned = parsed.rest.trim();
+      return cleaned === msg.content.trim() && cleaned === msg.content
+        ? msg
+        : { ...msg, content: cleaned };
+    }
+  }
+  tagMessageTimestampMeta(msg, at);
+  return msg;
 }
 
 function stripTimestampText(content: string): string {
@@ -576,7 +650,12 @@ function stripTimestampText(content: string): string {
 }
 
 function isSessionRecapMessage(msg: ChatCompletionMessageParam | undefined): boolean {
-  if (!msg || msg.role !== "assistant" || typeof msg.content !== "string") return false;
+  if (!msg || typeof msg.content !== "string") return false;
+  // P0-B（2026-10-12）：recap 角色从 assistant 根修为 system——assistant 消息在模型
+  // 眼里是「自己说过的话」，是复读诱导的根源（ChatGPT/Coze 的压缩历史同样走 system/
+  // 上下文注入，从不伪装成模型发言）。存量线程里的 assistant 形态 recap 继续识别，
+  // 由 trim 重建/增强回写时自然迁移为 system。
+  if (msg.role !== "assistant" && msg.role !== "system") return false;
   return stripTimestampText(msg.content).startsWith(SESSION_RECAP_PREFIX);
 }
 
@@ -589,6 +668,9 @@ function extractSessionRecapLines(content: string | undefined): string[] {
   for (const raw of text.split("\n").slice(1)) {
     const line = raw.replace(/^-+\s*/, "").trim();
     if (line === SESSION_UNSUMMARIZED_MARKER || line.startsWith(SESSION_KEY_PINS_MARKER)) break;
+    // 视图层提示行（RECAP_TIME_ANCHOR_HINT）只属于 LLM 视图，绝不吸收进存储 recap——
+    // 带标签的回显若被 separateRecapMessages 当 recap 解析，这行会被当内容行永久固化。
+    if (line.startsWith(RECAP_ECHO_VIEW_HINT_SIGNATURE)) continue;
     if (line && line !== SESSION_RECAP_TITLE) lines.push(line);
   }
   return lines;
@@ -846,9 +928,11 @@ function buildSessionRecapMessage(
   if (summaryCharCapped.length === 0 && cappedPending.length === 0 && mergedPins.length === 0) return null;
 
   return {
-    role: "assistant",
+    // P0-B（2026-10-12）：system 角色——摘要是「给模型看的上下文」不是「模型说过的话」，
+    // assistant 角色是复读诱导的结构根源（见 isSessionRecapMessage 注释）。
+    role: "system",
     content: buildSessionRecapContent(summaryCharCapped, mergedPins, cappedPending, now),
-  };
+  } as ChatCompletionMessageParam;
 }
 
 function separateRecapMessages(messages: ChatCompletionMessageParam[]): {
@@ -889,12 +973,14 @@ function annotateMessageIfNeeded(
     if (typeof msg.content !== "string") return msg;
     const anchor = extractMessageTimestamp(msg);
     const migrated = migrateRecapContentLabels(msg.content, anchor);
+    // P0-B 角色迁移（2026-10-12）：存量 assistant 形态 recap 在恢复/收口标注时一次性
+    // 迁为 system——不等下一次折叠重建，旧线程立即脱离「assistant 复读诱导」结构。
+    if (msg.role === "assistant") {
+      return { ...msg, role: "system", content: migrated };
+    }
     return migrated === msg.content ? msg : { ...msg, content: migrated };
   }
-  if ((msg.role === "user" || msg.role === "assistant") && typeof msg.content === "string") {
-    return { ...msg, content: annotateTimeframe(msg.content, at, now) };
-  }
-  return msg;
+  return annotateMessageTimeMeta(msg, at);
 }
 
 /**
@@ -911,7 +997,11 @@ function annotateMessageWithOwnTimeOrKeep(
   now: Date = new Date(),
 ): ChatCompletionMessageParam {
   const at = extractMessageTimestamp(msg);
-  if (!at) return msg;
+  // P0-B：无帧 recap 也走标注路径（角色迁移 assistant→system 在其中发生）。
+  if (!at) {
+    if (isSessionRecapMessage(msg)) return annotateMessageIfNeeded(msg, now, now);
+    return msg;
+  }
   return annotateMessageIfNeeded(msg, at, now);
 }
 
@@ -972,10 +1062,20 @@ function buildInterruptedToolChainNotice(
         // 这就是「[上一轮回复中断…[不可信内容围栏…]」黏在同一条气泡里的成因。
         // 摘录前先剥掉围栏标签外壳（保留块内真实数据——那是「已办了什么」的事实），
         // 只留真正的工具数据。
-        const cleaned = stripInternalFrameMarkup(raw).replace(/\s+/g, " ").trim();
+        // 2026-10-11：摘录必须「无围栏标签、无括号、单行」——① 行内出现的围栏标签
+        // （stripInternalFrameMarkup 只剥独立标签行）要按 token 剥；② 帧里的原始 JSON
+        // 含 `]`，会让 stripInternalFrames 的整行删除正则（`\[[^\]]*\]`）在 JSON 数组
+        // 括号处提前截断，模型复读该帧时只有首行被剥、JSON 续行原样漏进气泡（实盘探针
+        // 实证）。摘录只承担「办了什么」的事实语义，括号/花括号一律展平。
+        const cleaned = stripInternalFrameMarkup(raw)
+          .replace(/\[\/?(?:不可信内容围栏|session-recap)[^\]]*\]/g, "")
+          .replace(/\s+/g, " ")
+          .trim();
         const firstLine = cleaned.split("\n")[0]?.trim() ?? "";
-        if (firstLine && !isInternalFrameText(firstLine)) {
-          resultSnippets.push(firstLine.slice(0, 80));
+        if (!firstLine || isInternalFrameText(firstLine)) continue;
+        const flat = firstLine.replace(/[\[\]{}]/g, " ").replace(/\s+/g, " ").trim().slice(0, 80);
+        if (flat) {
+          resultSnippets.push(flat);
         }
       }
     }
@@ -1012,8 +1112,14 @@ function removeTransientSystemMessages(msgs: ChatCompletionMessageParam[]): void
   if (msgs.length <= 1) return;
   let write = 1;
   for (let read = 1; read < msgs.length; read++) {
-    if (msgs[read].role === "system") continue;
-    msgs[write++] = msgs[read];
+    const msg = msgs[read];
+    if (msg.role === "system") {
+      // P0-B：recap 摘要消息现在也是 system 角色（index>0）——它是持久上下文不是
+      // transient 指令，必须豁免，否则每轮收口都会被这里清掉（静默失忆）。
+      if (isSessionRecapMessage(msg)) msgs[write++] = msg;
+      continue;
+    }
+    msgs[write++] = msg;
   }
   msgs.length = write;
 }
@@ -1056,14 +1162,11 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
         if (content) {
           result.push(finalAssistant);
         } else {
-          result.push({
+          const placeholder: ChatCompletionMessageParam = {
             role: "assistant",
-            content: annotateTimeframe(
-              "[上一轮工具调用已完成但未生成可见回复]",
-              new Date(),
-              new Date(),
-            ),
-          });
+            content: "[上一轮工具调用已完成但未生成可见回复]",
+          };
+          result.push(annotateMessageTimeMeta(placeholder, new Date()));
         }
         changed = true;
         i = j;
@@ -1074,14 +1177,11 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
       // 2026-09-08：占位符必须携带已执行的工具事实——空话式「未生成完整回复」会
       // 被 recap 记成「用户重复请求…未完成」，诱导 agent 反复重问已办成的事
       // （实测：两条提醒已创建成功，agent 却在后续轮次反复追问「要提前多久叫你」）。
-      result.push({
+      const placeholder: ChatCompletionMessageParam = {
         role: "assistant",
-        content: annotateTimeframe(
-          buildInterruptedToolChainNotice(msgs, i, j),
-          new Date(),
-          new Date(),
-        ),
-      });
+        content: buildInterruptedToolChainNotice(msgs, i, j),
+      };
+      result.push(annotateMessageTimeMeta(placeholder, new Date()));
       changed = true;
       i = j;
       continue;
@@ -1098,24 +1198,12 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
   return changed;
 }
 
-function annotateUserContentIfString(
+/** P1（2026-10-11 通道分离）：旧 annotateUserContentIfString 已废——正文不再打时间帧，
+ *  时刻统一走 annotateMessageTimeMeta 写消息 metadata。本函数仅保留多模态内容透传。 */
+function passthroughUserContent(
   content: ChatCompletionMessageParam["content"],
-  at: Date,
-  now: Date = new Date(),
-): string | ChatCompletionContentPart[] {
-  if (typeof content === "string") return annotateTimeframe(content, at, now);
-  if (Array.isArray(content) && content.length > 0) {
-    // 多模态：仅在第一个 text part 注入时间戳，保留 image_url 等
-    const parts: ChatCompletionContentPart[] = content.map((part, idx) => {
-      if (idx === 0 && part && typeof part === "object" && (part as { type?: string }).type === "text") {
-        const text = (part as { text?: string }).text ?? "";
-        return { ...(part as object), type: "text", text: annotateTimeframe(text, at, now) } as ChatCompletionContentPart;
-      }
-      return part as ChatCompletionContentPart;
-    });
-    return parts;
-  }
-  return "";
+): ChatCompletionMessageParam["content"] {
+  return content;
 }
 
 export class ChatThreadStore {
@@ -1201,7 +1289,7 @@ export class ChatThreadStore {
     // 合并成功：摘要区替换为精炼结果（关键钉原样并入），待归纳区清空（其内容已被本次合并吸收）。
     // seq 守卫保证 apply 时线程内待归纳区与捕获时刻一致（期间有新 fold 会 bump seq 走丢弃分支）。
     const recapMsg: ChatCompletionMessageParam = {
-      role: "assistant",
+      role: "system",
       content: buildSessionRecapContent(lines, pins, []),
     };
     const index = msgs.findIndex(isSessionRecapMessage);
@@ -1318,6 +1406,9 @@ export class ChatThreadStore {
         ),
       ),
     ];
+    // 存量自愈（2026-10-12）：落库时已被回显污染的线程（无 [session-recap] 标签的
+    // 摘要复述正文）在恢复路径一次性剔除，重启即净，不再需要手工清库。
+    dropRecapEchoMessages(t);
     // 顺序不能反：先把落盘字段重新灌回反向索引，再剥掉字段。两者都必须在**最终**线程
     // 对象上做（索引按对象身份索引，灌到克隆前的中间产物等于没灌）。
     absorbPersistedClientIds(t);
@@ -1579,6 +1670,13 @@ export class ChatThreadStore {
     model?: string,
   ): void {
     const trimmed = stripProtocolMarkersForThread(assistantText.trim());
+    // recap 回显不落库（2026-10-12）：appendTurn 是非工具分支的落库口，复读正文
+    // 在这里整轮丢弃（真实链路里 user 消息已由 provider 在流式开始时写入线程，
+    // 这里只负责不让回显正文成为 assistant 消息）。
+    if (isRecapEchoText(trimmed)) {
+      console.log("[chat-thread-store] appendTurn: dropped recap echo assistant text");
+      return;
+    }
     if (!trimmed) return;
     const msgs = this.thread(sessionId, defaultSystemPrompt);
     // turn 级幂等（2026-10-09 发言模型 I5）：同一 clientMessageId 的轮次已经落库
@@ -1596,19 +1694,22 @@ export class ChatThreadStore {
     if (last && last.role === "user" && userMessageTextMatches(last, incomingUserText)) {
       const next = {
         ...last,
-        content: annotateUserContentIfString(last.content, userAt, now),
+        content: passthroughUserContent(last.content),
       } as ChatCompletionMessageParam;
+      annotateMessageTimeMeta(next, userAt);
       tagUserMessageClientId(next, clientMessageId ?? readUserMessageClientId(last));
       msgs[msgs.length - 1] = next;
     } else {
       const userMsg = {
         role: "user",
-        content: annotateUserContentIfString(openAiUserContentFromTurn(userTurn, { model }), userAt, now),
+        content: passthroughUserContent(openAiUserContentFromTurn(userTurn, { model })),
       } as ChatCompletionMessageParam;
+      annotateMessageTimeMeta(userMsg, userAt);
       tagUserMessageClientId(userMsg, clientMessageId);
       msgs.push(userMsg);
     }
-    msgs.push({ role: "assistant", content: annotateTimeframe(trimmed, assistantAt, now) });
+    const assistantMsg: ChatCompletionMessageParam = { role: "assistant", content: trimmed };
+    msgs.push(annotateMessageTimeMeta(assistantMsg, assistantAt));
     this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
@@ -1654,7 +1755,8 @@ export class ChatThreadStore {
     const now = new Date();
     const goalLine = goal.replace(/\s+/g, " ").trim().slice(0, 200);
     const content = `[后台任务记录] 目标：${goalLine || "未命名任务"}\n结果：${trimmedResult || "（无结果）"}`;
-    msgs.push({ role: "assistant", content: annotateTimeframe(content, now, now) });
+    const recordMsg: ChatCompletionMessageParam = { role: "assistant", content };
+    msgs.push(annotateMessageTimeMeta(recordMsg, now));
     this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
   }
@@ -1701,9 +1803,12 @@ export class ChatThreadStore {
     if (!msg || msg.role !== "assistant" || typeof msg.content !== "string") return null;
 
     const parsed = readMessageTimestampPrefix(msg.content);
+    const originalTs = parsed ? parseMessageTimestamp(msg.content) : readMessageTimestampMeta(msg);
     const body = (parsed?.rest ?? msg.content).trim();
     const mergedBody = body ? `${body}\n\n${trimmed}` : trimmed;
-    msg.content = parsed ? `${parsed.prefix}\n${mergedBody}` : annotateTimeframe(mergedBody, new Date());
+    // P1：正文净文本化——旧内联帧不回写正文，时刻进 metadata（保留原消息时刻）
+    msg.content = mergedBody;
+    tagMessageTimestampMeta(msg, originalTs ?? new Date());
     this.trimThread(msgs, maxThreadMessages);
     this.persistence?.scheduleSave(sessionId, msgs);
     return mergedBody;
@@ -1736,8 +1841,9 @@ export class ChatThreadStore {
 
     const assistantMsg = {
       role: "assistant",
-      content: annotateTimeframe(trimmed, new Date()),
+      content: trimmed,
     } as ChatCompletionMessageParam;
+    annotateMessageTimeMeta(assistantMsg, new Date());
     msgs.splice(Math.max(0, insertAfter + 1), 0, assistantMsg);
     this.trimThread(msgs, maxThreadMessages);
     this.persistence?.scheduleSave(sessionId, msgs);
@@ -1752,12 +1858,14 @@ export class ChatThreadStore {
     // 补一次原始时间戳，且补完后不再刷新。相对时间的语义在写入锚点时刻已固定，
     // 会话临近轮次的绝对时间足够 LLM 判断时序。
     const annotated = msgs.map((msg) => {
-      if (
-        (msg.role === "user" || msg.role === "assistant") &&
-        typeof msg.content === "string"
-      ) {
-        if (readMessageTimestampPrefix(msg.content)) return msg; // 已有时间戳 → 冻结
-        return annotateMessageWithOwnTimeOrKeep(msg, now);
+      if (msg.role === "user" || msg.role === "assistant") {
+        const known = readMessageTimestampMeta(msg) ?? extractMessageTimestamp(msg);
+        // P0-B：recap 恒无单点时刻（无帧无 meta），若按「无时刻即原样返回」会让
+        // 角色迁移（assistant→system）永远不触发——recap 无条件走标注路径。
+        if (!known && isSessionRecapMessage(msg)) {
+          return annotateMessageIfNeeded(msg, now, now);
+        }
+        return known ? annotateMessageTimeMeta(msg, known) : msg;
       }
       return msg;
     });
@@ -1777,6 +1885,10 @@ export class ChatThreadStore {
     }
     msgs.length = 0;
     msgs.push(...annotated);
+    // recap 回显剔除（2026-10-12）：工具循环回写/非工具分支 push 进线程的 assistant
+    // 正文若整块是摘要复述（见 isRecapEchoText 注释的事故链路），在轮次收口处拦下，
+    // 不让它成为「模型下一轮看到的自己说过的话」——这是回显自我维持循环的根源断点。
+    dropRecapEchoMessages(msgs);
     // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。
     // 下一轮 LLM 只看到干净的 assistant(content)，不会把上轮 tool 结果当成当前轮语境。
     foldCompletedToolChains(msgs);
@@ -1902,8 +2014,9 @@ export class ChatThreadStore {
     const { index, msg } = found;
     const replaced = {
       ...msg,
-      content: annotateUserContentIfString(text, now, now),
+      content: passthroughUserContent(text),
     } as ChatCompletionMessageParam;
+    annotateMessageTimeMeta(replaced, now);
     tagUserMessageClientId(replaced, clientMessageId);
     msgs[index] = replaced;
     if (index < msgs.length - 1) {

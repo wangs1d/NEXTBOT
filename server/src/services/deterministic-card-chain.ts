@@ -24,6 +24,7 @@ import {
 import {
   attachTravelItineraryCard,
   attachVideoMediaMarker,
+  containsTravelItineraryCard,
 } from "./tool-result-processor.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 
@@ -139,6 +140,40 @@ export function sniffItineraryDays(texts: ReadonlyArray<string>): number | undef
   if (/三日|三天|3天/.test(joined)) return 3;
   if (/一日|一天|1天/.test(joined)) return 1;
   return undefined;
+}
+
+/**
+ * 行程卡缺席自检判据（2026-10-12 贵阳轮「行程卡整轮缺席」埋点，纯函数便于回归）。
+ *
+ * 症状：行程规划轮结束时正文里**没有** travel_itinerary 卡——用户诉求未兑现，
+ * 且下游出口闸会把该轮判成「工具全败」，模型于是手写逐日行程直穿气泡（无卡、
+ * 裸 markdown）。事故形态：回执被 30s 预算击杀（ok=false）→ resolveTravelReceipt
+ * 返回 {} → 无卡。
+ *
+ * 判据分两档，**硬档锚在确定性事实上**——不能只靠 LLM 的 travel_query（该字段
+ * 来自路由模型，可能缺省/抖动；且事故里路由是成功的，与回执被杀无因果，单点
+ * 兜底会漏报）：
+ *   - "hard"：本轮真跑过规划工具 或 拿到过行程回执，却无卡 → 必然是 bug。
+ *   - "soft"：路由判为行程轮 且 正文是一段手写行程 → 高置信嫌疑（事故原形态）。
+ *   - null：有卡，或既没规划迹象也没手写行程（正常闲聊/引用旧方案）。
+ *
+ * @returns 命中档位；未命中返回 null。
+ */
+export function classifyTravelCardMissing(input: {
+  finalText: string;
+  /** 本轮真执行过 travel.plan-itinerary（含确定性预执行，无论成败）。 */
+  travelPlanningAttempted: boolean;
+  /** 本轮拿到过行程回执（travelReceiptResolution.toolName 非空）。 */
+  travelReceiptPresent: boolean;
+  /** 路由理解：是否行程轮（LLM 字段，可能 undefined）。 */
+  travelQuery?: boolean;
+}): "hard" | "soft" | null {
+  if (containsTravelItineraryCard(input.finalText)) return null;
+  if (input.travelPlanningAttempted || input.travelReceiptPresent) return "hard";
+  if (input.travelQuery === true && looksLikeHandwrittenItinerary(input.finalText)) {
+    return "soft";
+  }
+  return null;
 }
 
 export interface DeterministicCardChainInput {

@@ -49,6 +49,13 @@ export type TurnUnderstanding = {
   scheduleQuery: boolean;
   /** 本轮在问行程/旅行规划相关。 */
   travelQuery: boolean;
+  /**
+   * 用户在明确拒绝/取消某类写操作（2026-10-12 真机探针实证：「以后别提醒我
+   * 开会的事」被 L1 以 0.92 置信判成 action_write——而出口闸会强迫调工具
+   * "完成动作"，有创建垃圾提醒的实际风险）。L2 一致性校验消费：
+   * action_write + actionNegation = 自相矛盾 → 降级 chat。
+   */
+  actionNegation: boolean;
 };
 
 export type RouteDecision = {

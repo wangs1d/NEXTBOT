@@ -9,6 +9,7 @@ import { getDailyJournalService } from "../../services/daily-journal-service.js"
 import type { TrajectorySkillPromotionService } from "../../services/trajectory-skill-promotion-service.js";
 import { enforceReplyStyle, extractProtocolBlocks, detectReplyStyleViolations } from "./reply-style-guard.js";
 import type { ReplyStyleLane } from "./reply-style-guard.js";
+import { normalizeTraditionalToSimplified } from "../../utils/simplified-chinese.js";
 
 export type FinishTurnMeta = {
   streamedChunks: boolean;
@@ -58,6 +59,17 @@ export class TurnFinalizer {
       userText,
     });
     let sanitizedOutput = outputSafety?.sanitized ?? assistantText;
+
+    // 繁→简出口正规化（2026-10-11）：模型偶发把地名/常用词泄成繁体（「興義」），
+    // 确定性 1:1 字符映射整串归一。先于风格闸执行，保证后续人格检查、轨迹、
+    // 记忆落盘、done 载荷看到的都是简体权威文本。
+    const t2s = normalizeTraditionalToSimplified(sanitizedOutput);
+    if (t2s.changed) {
+      console.warn(
+        `[ReplyStyleGate] 繁体收敛：整串替换为简体（${sanitizedOutput.length} 字符）`,
+      );
+      sanitizedOutput = t2s.text;
+    }
 
     // 回复风格闸（2026-09-22）：人格/长度越形在此程序层强制整形，
     // 不依赖 prompt（长上下文下模型不守）。正常回复零接触；

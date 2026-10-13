@@ -16,6 +16,8 @@
          显示笼统的「网络错误」。生产请直接用 https 域名（如
          https://login.nextbot.top），无需维护此表。 -->
     <domain-config cleartextTrafficPermitted="true">
+        <!-- 云服务器部署机（腾讯云，生产后端） -->
+        <domain includeSubdomains="false">159.75.52.2</domain>
         <!-- 真实后端：当前电脑的局域网 IP（构建时 dart-define 传 HTTP_BASE=http://192.168.10.2:3000） -->
         <domain includeSubdomains="false">192.168.10.2</domain>
         <!-- 旧部署机 IP 兼容 -->

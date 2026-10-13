@@ -84,6 +84,7 @@ import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
+import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -122,6 +123,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
     registerTravelMapRoutes(app);
     registerPoiDetailsRoute(app);
+    // 旅行数据维护（快照 + 主动刷新：存量图片本地化 / 按目的地补图）
+    registerTravelDataRoutes(app);
     registerPhoneRoutes(app, deps);
   }
   registerCompanionRoutes(app, deps);

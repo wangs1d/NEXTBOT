@@ -152,6 +152,7 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
         ),
         _buildTodoSection(b, p),
         _buildImportantDaysSection(b, p),
+        _buildTravelSection(b, p),
         _buildOutfitSection(b, p),
         const SizedBox(height: 24),
       ],
@@ -291,6 +292,42 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
                   const SizedBox(width: 10),
                   Expanded(child: Text(s.toString(), style: TextStyle(color: p.textPrimary, fontSize: 15))),
                 ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 行程段：今天落在行程区间内 → 目的地 + 第一站 + 随身叮嘱（第六源）
+  Widget _buildTravelSection(Map<String, dynamic> b, MobilePalette p) {
+    final Map<String, dynamic>? travel = b["travel"] as Map<String, dynamic>?;
+    if (travel == null) return const SizedBox.shrink();
+    final Map<String, dynamic>? firstStop =
+        travel["firstStop"] as Map<String, dynamic>?;
+    final List<dynamic> packing =
+        (travel["packing"] as List<dynamic>?) ?? const <dynamic>[];
+    final String destination = travel["destination"]?.toString() ?? "";
+    final String title = travel["title"]?.toString() ?? "";
+    return _Section(
+      p: p,
+      icon: Icons.luggage_outlined,
+      title: "今日行程",
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            firstStop != null
+                ? "$destination · 「$title」\n第一站 ${firstStop["startTime"] ?? ""} ${firstStop["name"] ?? ""}"
+                : "$destination · 「$title」",
+            style: TextStyle(color: p.textPrimary, fontSize: 15, height: 1.5),
+          ),
+          if (packing.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                "记得带：${packing.join("、")}",
+                style: TextStyle(color: p.textSecondary, fontSize: 13.5),
               ),
             ),
         ],

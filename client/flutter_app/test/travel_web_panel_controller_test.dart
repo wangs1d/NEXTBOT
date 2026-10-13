@@ -81,6 +81,47 @@ void main() {
       controller.handleWebMessage(null);
       controller.handleWebMessage(42);
     });
+
+    // ── 回归：2026-10-12 实盘「行程页永远停在『行程装载中…』」的根因 ──
+    // 宿主真实时序是「loadUrl → 页面发 ready → 探测到页面就绪后才 attach」。
+    // 曾把 _ready=false 写在 attach 里，而页面只发一次 ready → 就绪态被抹掉，
+    // loadPlan 永久滞留在队列里。
+    testWidgets("ready 先于 attach 到达时，loadPlan 仍能送达", (WidgetTester tester) async {
+      controller.handleWebMessage(jsonEncode(<String, dynamic>{"event": "ready"}));
+      expect(controller.isReady, isTrue);
+
+      await controller.attach(execute); // 探测成功后才注入执行器
+      expect(controller.isReady, isTrue, reason: "attach 不得重置已到达的就绪态");
+
+      controller.loadPlan(<String, dynamic>{"destination": "杭州"});
+      expect(scripts.length, 1);
+      expect(scripts.first, contains("window.__travelPanel.loadPlan"));
+      expect(scripts.first, contains("杭州"));
+    });
+
+    testWidgets("attach 之前到达的出站调用入队，attach 后补发", (WidgetTester tester) async {
+      controller.loadPlan(<String, dynamic>{"destination": "兴义"});
+      expect(scripts, isEmpty); // 尚无执行器：必须入队而非丢弃
+
+      await controller.attach(execute);
+      expect(scripts.length, 1);
+      expect(scripts.first, contains("兴义"));
+    });
+
+    testWidgets("resetPageState 后新页面需重新 ready 才放行", (WidgetTester tester) async {
+      await controller.attach(execute);
+      controller.handleWebMessage(jsonEncode(<String, dynamic>{"event": "ready"}));
+      expect(controller.isReady, isTrue);
+
+      controller.resetPageState(); // 新页面开始导航
+      expect(controller.isReady, isFalse);
+      controller.loadPlan(<String, dynamic>{"destination": "大理"});
+      expect(scripts, isEmpty); // 等新页面 ready
+
+      controller.handleWebMessage(jsonEncode(<String, dynamic>{"event": "ready"}));
+      expect(scripts.length, 1);
+      expect(scripts.first, contains("大理"));
+    });
   });
 
   group("TravelWebPanelPayload 载荷构建", () {

@@ -68,7 +68,8 @@ export async function runUnifiedNightlyConsolidation(input: {
   const system =
     "你是夜间记忆巩固器，一次完成两项工作。\n" +
     "工作一（facts）：从对话日志中提取「值得跨会话长期记住」的用户信息，忽略闲聊、临时上下文和一次性任务细节。" +
-    "preference=稳定偏好/习惯；fact=稳定身份/背景事实；commitment=需要后续跟进的承诺或待办；text 用第一人称中文短句，最多 12 条。\n" +
+    "preference=稳定偏好/习惯；fact=稳定身份/背景事实；commitment=需要后续跟进的承诺或待办；" +
+    "text 用第三人称中文短句（以「用户」开头或无主语短语，禁止以「我/我的」开头——第一人称条目注入 prompt 后会让模型混淆人称视角），最多 12 条。\n" +
     "工作二（scores）：对传入的 lines 逐条打留存分（0-1），衡量该行内容值得长期保留的程度：" +
     "稳定偏好/事实/承诺/风险/行动相关≈0.7-1.0，一般事件≈0.3-0.6，寒暄/临时上下文≈0.0-0.2。\n" +
     '只输出 JSON：{"facts":[{"kind":"preference|fact|commitment","text":"..."}],"scores":[{"id":"L0","score":0.8}]}，' +

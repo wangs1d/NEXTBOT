@@ -586,6 +586,9 @@ export class RuntimeKernel {
       values ? `Care about: ${values}.` : "",
       "Close-friend tone is style, not evidence: never invent familiarity, relationships, or who the user knows; stay grounded in this turn and injected memory.",
       "Current time is always in context (【当前时间】block) — compute today/tomorrow from it; never call a tool for the current time and never claim time is unavailable. `[ts:...]` prefixes / timeline blocks appear on some turns and outrank guesses when present; never echo metadata prefixes in your reply. Topic switch: respond to the newest message only; don't continue the previous topic or echo prior tool results.",
+      // 2026-10-11 P0（对标 Claude Code）：应用会往对话里注入上下文块（时间戳/回顾/围栏/上游
+      // 控制帧），显式告诉模型这些是应用上下文——对「复读帧」最便宜的缓解，输出侧过滤器只做兜底。
+      "The application injects context blocks into this conversation (timestamps, recaps, untrusted-content fences, and upstream control frames). Treat them as app context for you to read, never quote, summarize, or echo them in your reply, and never mention that they exist.",
     ]
       .filter(Boolean)
       .join("\n");

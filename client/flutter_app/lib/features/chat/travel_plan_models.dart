@@ -32,7 +32,27 @@ String resolveTravelMediaUrl(String url) {
     }
     return u;
   }
-  return "${ApiConfig.httpBase}$u";
+  return "${ApiConfig.httpBase}${_encodeNonAsciiPath(u)}";
+}
+
+/// 路径段含非 ASCII（如中文目录 `destcover贵阳-<sha>`）时逐段百分号编码。
+/// 服务端对裸 UTF-8 路径返回 400（实测），只认编码形态；Dart HttpClient
+/// 发请求时会自动编码，但 WebView `<img>` 等非 Dart 消费方不会——统一在
+/// URL 构造处编码，所有消费方拿到的都是可直接请求的合法 URL。
+String _encodeNonAsciiPath(String path) {
+  final int q = path.indexOf("?");
+  final String p = q >= 0 ? path.substring(0, q) : path;
+  final String query = q >= 0 ? path.substring(q) : "";
+  final bool hasNonAscii = p.contains(RegExp(r"[^\x00-\x7F]"));
+  if (!hasNonAscii) return path;
+  final String encoded = p
+      .split("/")
+      .map((String seg) =>
+          seg.isEmpty || !seg.contains(RegExp(r"[^\x00-\x7F]"))
+              ? seg
+              : Uri.encodeComponent(seg))
+      .join("/");
+  return "$encoded$query";
 }
 
 /// 行程条目类型（决定右栏时间线图标 / 地图标记配色）。
@@ -42,51 +62,6 @@ enum TravelEntryKind {
   hotel,
   transport,
   other,
-}
-
-/// 条目评论（来自服务端 POI 媒体库，仅结构化 travelPlan 携带）。
-class TravelEntryReview {
-  const TravelEntryReview({
-    required this.author,
-    required this.rating,
-    required this.text,
-  });
-
-  factory TravelEntryReview.fromJson(Map<String, dynamic> json) {
-    return TravelEntryReview(
-      author: json["author"]?.toString() ?? "",
-      rating: (num.tryParse(json["rating"]?.toString() ?? "") ?? 0).toDouble(),
-      text: json["text"]?.toString() ?? "",
-    );
-  }
-
-  final String author;
-  final double rating;
-  final String text;
-}
-
-/// 条目相关视频（只存元数据 + 播放页链接，点击跳外部平台）。
-class TravelEntryVideo {
-  const TravelEntryVideo({
-    required this.platform,
-    required this.title,
-    required this.playPageUrl,
-    this.author = "",
-  });
-
-  factory TravelEntryVideo.fromJson(Map<String, dynamic> json) {
-    return TravelEntryVideo(
-      platform: json["platform"]?.toString() ?? "",
-      title: json["title"]?.toString() ?? "",
-      playPageUrl: json["playPageUrl"]?.toString() ?? "",
-      author: json["author"]?.toString() ?? "",
-    );
-  }
-
-  final String platform;
-  final String title;
-  final String playPageUrl;
-  final String author;
 }
 
 /// 单条行程条目（右栏时间线的一行 / 地图标记 / 预订与详情面板的数据源）。
@@ -105,8 +80,7 @@ class TravelDayEntry {
     this.tips = const <String>[],
     this.splatUrl = "",
     this.images = const <String>[],
-    this.reviews = const <TravelEntryReview>[],
-    this.videos = const <TravelEntryVideo>[],
+    this.anchor = false,
   });
 
   /// 条目唯一键（服务端 itemId，缺省用名称兜底；预订清单聚合用）。
@@ -132,11 +106,8 @@ class TravelDayEntry {
   /// 实拍图（已 resolve 为绝对地址，最多取 6 张）。
   final List<String> images;
 
-  /// 本地评论（最多取 2 条内联展示）。
-  final List<TravelEntryReview> reviews;
-
-  /// 相关视频（最多取 3 条）。
-  final List<TravelEntryVideo> videos;
+  /// 时间锚点：时刻被用户/预订钉住，重排不动（服务端 retimeDayAfterEdit 保护）。
+  final bool anchor;
 
   /// 兼容旧面板的拼接备注（价格 · 描述 · 贴士 · 地址）。
   String get note => <String>[
@@ -166,14 +137,6 @@ class TravelDayEntry {
         if (img?.toString().trim().isNotEmpty ?? false)
           resolveTravelMediaUrl(img!.toString().trim()),
     ].take(6).toList(growable: false);
-    final List<TravelEntryReview> reviews = <TravelEntryReview>[
-      for (final dynamic r in (raw["reviews"] as List<dynamic>? ?? const <dynamic>[]))
-        if (r is Map<String, dynamic>) TravelEntryReview.fromJson(r),
-    ].take(2).toList(growable: false);
-    final List<TravelEntryVideo> videos = <TravelEntryVideo>[
-      for (final dynamic v in (raw["videos"] as List<dynamic>? ?? const <dynamic>[]))
-        if (v is Map<String, dynamic>) TravelEntryVideo.fromJson(v),
-    ].take(3).toList(growable: false);
 
     return TravelDayEntry(
       itemId: raw["itemId"]?.toString() ?? "",
@@ -192,8 +155,7 @@ class TravelDayEntry {
           if (t != null) t.toString(),
       ],
       images: images,
-      reviews: reviews,
-      videos: videos,
+      anchor: raw["anchor"] == true,
     );
   }
 
@@ -230,6 +192,33 @@ class TravelPlanDay {
   final List<TravelDayEntry> entries;
 }
 
+/// 候选 POI（服务端 pois 池，含未排入日程的备选；行程页「Agent 暂时收起」源）。
+class TravelPoi {
+  const TravelPoi({
+    required this.name,
+    required this.type,
+    this.latitude,
+    this.longitude,
+    this.address = "",
+  });
+
+  factory TravelPoi.fromJson(Map<String, dynamic> json) {
+    return TravelPoi(
+      name: json["name"]?.toString() ?? "",
+      type: json["type"]?.toString() ?? "",
+      latitude: (json["latitude"] as num?)?.toDouble(),
+      longitude: (json["longitude"] as num?)?.toDouble(),
+      address: json["address"]?.toString() ?? "",
+    );
+  }
+
+  final String name;
+  final String type; // attraction | restaurant | hotel
+  final double? latitude;
+  final double? longitude;
+  final String address;
+}
+
 /// 行程规划界面数据（优先来自服务端结构化 travelPlan，兜底从卡 items 文本启发式解析）。
 class TravelPlanData {
   const TravelPlanData({
@@ -244,12 +233,14 @@ class TravelPlanData {
     this.intro = "",
     this.packing = const <String>[],
     this.coverImage = "",
+    this.weather = "",
     this.preferences = const <String>[],
     this.footer = "",
     this.rawItems = const <String>[],
     this.isStructured = false,
     this.dataQuality = "real",
     this.version,
+    this.travelPois = const <TravelPoi>[],
   });
 
   final String title;
@@ -275,6 +266,10 @@ class TravelPlanData {
   /// 照片；空串表示服务端未解析到，海报退回条目实拍/渐变兜底。
   final String coverImage;
 
+  /// 出发日天气一句话摘要（服务端 Open-Meteo 实时预报；空串=无数据，
+  /// 行程桌面页据此隐藏顶栏天气胶囊，不编造天气读数）。
+  final String weather;
+
   final List<String> preferences;
   final List<TravelPlanDay> days;
   final String footer;
@@ -287,6 +282,9 @@ class TravelPlanData {
   /// 数据可信度：real = 实时搜索数据；knowledge = 内置知识库真实 POI；
   /// synthetic = 离线合成占位。非 real 时 UI 需向用户明示数据来源。
   final String dataQuality;
+
+  /// 候选 POI 池（服务端 pois，含未排入日程的备选；文本兜底时为空）。
+  final List<TravelPoi> travelPois;
 
   /// 服务端乐观锁版本（A6）：编辑请求经 If-Match 回传，冲突时 409。
   final int? version;
@@ -347,9 +345,14 @@ class TravelPlanData {
       centerLongitude: (tp["center"]?["longitude"] as num?)?.toDouble(),
       intro: tp["intro"]?.toString() ?? "",
       coverImage: resolveTravelMediaUrl(tp["coverImage"]?.toString() ?? ""),
+      weather: tp["weather"]?.toString() ?? "",
       isStructured: true,
       dataQuality: tp["dataQuality"]?.toString() ?? "real",
       version: (tp["version"] as num?)?.toInt(),
+      travelPois: <TravelPoi>[
+        for (final dynamic p in (tp["pois"] as List<dynamic>? ?? const <dynamic>[]))
+          if (p is Map<String, dynamic>) TravelPoi.fromJson(p),
+      ],
       packing: <String>[
         for (final dynamic p in (tp["packing"] as List<dynamic>? ?? const <dynamic>[]))
           if (p != null && p.toString().trim().isNotEmpty) p.toString().trim(),

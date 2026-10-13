@@ -432,3 +432,31 @@ test("deleteTurn: 原文兜底不覆盖按 id 命中的精确语义", () => {
   assert.doesNotMatch(serialized, /assistant turn 2/, "被 id 指向的轮次应被删除");
   assert.match(serialized, /user turn 1/, "原文指向的轮次不得被误删");
 });
+
+// ── 2026-10-11：中断占位帧的摘录脱敏（无括号/单行，保证可被整行剥离）─────
+test("foldCompletedToolChains：占位帧摘录展平 JSON 括号，帧保持单行", async () => {
+  const { foldCompletedToolChains } = await import("../src/external-model/chat-thread-store.js");
+  const msgs = [
+    { role: "user", content: "帮我查一下" },
+    {
+      role: "assistant",
+      content: null,
+      tool_calls: [{ id: "t1", type: "function", function: { name: "search_web", arguments: "{}" } }],
+    },
+    {
+      role: "tool",
+      tool_call_id: "t1",
+      content: '[不可信内容围栏 source=tool:search_web]{"ok":true,"results":[{"title":"a","url":"https://x.com/[a]"}]}\n第二行噪音',
+    },
+  ] as unknown as Parameters<typeof foldCompletedToolChains>[0];
+  const changed = foldCompletedToolChains(msgs);
+  assert.equal(changed, true);
+  const last = msgs[msgs.length - 1];
+  const content = String(last?.content ?? "");
+  assert.ok(content.startsWith("[上一轮回复中断"), "应折叠为占位帧");
+  assert.ok(!content.includes("\n"), "占位帧必须单行（多行会让帧剥离器只删首行）");
+  assert.ok(!content.includes("{"), "摘录不得携带原始 JSON 花括号");
+  assert.ok(!content.slice(1).includes("["), "除帧头外不得再出现方括号（JSON 数组括号会让帧剥离器提前截断）");
+  assert.ok(!content.includes("不可信内容围栏"), "围栏标签不得进入摘录");
+  assert.ok(content.includes("search_web"), "工具名事实保留");
+});

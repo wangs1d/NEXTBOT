@@ -979,8 +979,11 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
     const std::string title = GetEncodableString(args, "title", "");
     const std::string trailing = GetEncodableString(args, "trailing", "");
     const double hold_s = GetEncodableDouble(args, "holdS", 0.0);
+    // 全屏打断白名单（2026-10-13 定调）：urgent=false 的提醒在全屏/忙碌时
+    // 由原生端整体跳过；默认 true 兼容未带该参数的旧调用方（E2E 等）。
+    const bool urgent = GetEncodableBool(args, "urgent", true);
     if (dynamic_island_window_) {
-      dynamic_island_window_->StartAttention(title, trailing, hold_s);
+      dynamic_island_window_->StartAttention(title, trailing, hold_s, urgent);
     }
     result->Success(flutter::EncodableValue(true));
     return;

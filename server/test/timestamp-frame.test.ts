@@ -177,3 +177,54 @@ describe("buildTimestampFreeLlmView", () => {
     );
   });
 });
+
+// ── 2026-10-11 P1 通道分离：正文净文本化，时刻走 __ts metadata ──────────
+import { tagMessageTimestampMeta } from "../src/external-model/chat-thread-ts-meta.js";
+
+test("P1：新写入消息正文无时间帧，时刻在 __ts metadata，且不外发到 LLM 视图", () => {
+  const store = getChatThreadStore();
+  const sessionId = `test-ts-meta-${Date.now()}`;
+  store.thread(sessionId, "sys");
+  store.appendAssistantFollowup(sessionId, undefined, "净文本回复");
+  const msgs = store.thread(sessionId, "sys");
+  const last = msgs[msgs.length - 1] as ChatCompletionMessageParam & { __ts?: string };
+  assert.equal(last.role, "assistant");
+  assert.equal(last.content, "净文本回复", "正文不得再带 [ts:] 帧");
+  assert.ok(typeof last.__ts === "string" && last.__ts.length > 0, "应携带 __ts metadata");
+
+  const view = buildTimestampFreeLlmView(msgs, NOW).messages;
+  const viewLast = view[view.length - 1] as ChatCompletionMessageParam & { __ts?: string };
+  assert.equal(viewLast.__ts, undefined, "metadata 不外发");
+  assert.equal(viewLast.content, "净文本回复");
+  store.clearSession(sessionId);
+});
+
+test("P1：时间轴从 __ts metadata 构造（视图正文保持净文本）", () => {
+  const m1 = { role: "user", content: "早上好" } as ChatCompletionMessageParam;
+  tagMessageTimestampMeta(m1, new Date(2026, 8, 3, 9, 0, 0));
+  const m2 = { role: "assistant", content: "晚上好" } as ChatCompletionMessageParam;
+  tagMessageTimestampMeta(m2, new Date(2026, 8, 3, 21, 0, 0));
+  const view = buildTimestampFreeLlmView([m1, m2], { now: NOW }).messages;
+  const userView = view.find((m) => m.role === "user");
+  assert.equal(userView?.content, "早上好");
+  assert.equal((userView as { __ts?: string } | undefined)?.__ts, undefined);
+  const joined = view.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(joined.includes("2026-09-03 09:00:00"), "时间轴应包含 metadata 时刻");
+  assert.ok(!joined.includes("[ts:"), "正文不应再出现内联帧");
+});
+
+test("P1：旧线程内联帧仍兼容（视图剥帧 + 时间轴照常）", () => {
+  const p1 = `${buildMessageTimestampPrefix(new Date(2026, 8, 3, 9, 0, 0), NOW)}\n早`;
+  const p2 = `${buildMessageTimestampPrefix(new Date(2026, 8, 3, 21, 0, 0), NOW)}\n晚`;
+  const view = buildTimestampFreeLlmView(
+    [
+      { role: "user", content: p1 } as ChatCompletionMessageParam,
+      { role: "assistant", content: p2 } as ChatCompletionMessageParam,
+    ],
+    NOW,
+  ).messages;
+  const userView = view.find((m) => m.role === "user");
+  assert.equal(userView?.content, "早");
+  const joined = view.map((m) => (typeof m.content === "string" ? m.content : "")).join("\n");
+  assert.ok(joined.includes("2026-09-03 09:00:00"));
+});

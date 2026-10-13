@@ -94,6 +94,8 @@ test("快路径：过劳信号 → act 三步静默执行（可逆+隐式授权+
   hub.onRhythmSignal(ACTOR, "body.rhythm.overwork_detected", {
     continuousWorkHours: 3.5,
     lateNightActiveCount: 0,
+    // 作息基线已学会 → 才排休息提醒（纯作息驱动，无基线时 hub 不发 calendar 步骤）
+    learnedBedtimeHour: 23,
   });
   await flush();
 
@@ -109,9 +111,9 @@ test("快路径：过劳信号 → act 三步静默执行（可逆+隐式授权+
   assert.equal(play.trackId, "t-01");
   assert.equal(play.trackName, "月光");
   assert.equal(play.artist, "某人");
-  // 休息日程排到明晚
+  // 休息日程按作息排（就寝 23:00 前 1h → 下一个未过的 22:00）
   assert.equal(toolCalls[2].args.kind, "reminder");
-  assert.ok(String(toolCalls[2].args.runAt).length > 10);
+  assert.ok(String(toolCalls[2].args.runAt).includes("T22:00:00"));
   assert.ok(hub.getActAudit(ACTOR).length >= 3, "静默执行仍有 act 审计");
 });
 

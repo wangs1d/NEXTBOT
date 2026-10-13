@@ -179,7 +179,9 @@ test("renderForPrompt: 渲染理解块，命中主题带寻址标记，修订附
 
     const block = store.renderForPrompt("user-1", new Set(["老婆"]));
     assert.ok(block);
-    assert.ok(block!.includes("【我对用户的理解】"));
+    assert.ok(block!.includes("【Agent 对用户的理解】"));
+    // 人称视角铁律：块头不得以「我」开头（与用户第一人称记忆条目混淆）
+    assert.ok(!block!.includes("【我对用户的理解】"));
     assert.ok(block!.includes("不要当作真实事实转述"));
     assert.ok(block!.includes("用户改口说'老婆'是刘浩存"));
     assert.ok(block!.includes("← 本轮提问相关，基于此理解回答"));

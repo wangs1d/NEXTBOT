@@ -43,7 +43,7 @@ export interface RuntimeFacade {
    * 语义 LLM 路由（fast/complex 判定），供展示层在分阶段交互决策前取得
    * 与 runtime 一致的判定；同轮内缓存保证不重复计费。
    */
-  routeTurnForWs(sessionId: string, text: string, recentUserTurns?: string[], entityContextLines?: string[]): Promise<RouteDecision>;
+  routeTurnForWs(sessionId: string, text: string, recentUserTurns?: string[], entityContextLines?: string[], dialogStateLines?: string[]): Promise<RouteDecision>;
 
   /**
    * 服务重启后恢复未完成的自主任务（状态机任务断点续跑），返回恢复数量。
@@ -99,8 +99,9 @@ export class DirectRuntimeAdapter implements RuntimeFacade {
     text: string,
     recentUserTurns?: string[],
     entityContextLines?: string[],
+    dialogStateLines?: string[],
   ): Promise<RouteDecision> {
-    return this.core.routeTurnForWs(sessionId, text, recentUserTurns, entityContextLines);
+    return this.core.routeTurnForWs(sessionId, text, recentUserTurns, entityContextLines, dialogStateLines);
   }
 
   async resumeAutonomousTasks(): Promise<number> {

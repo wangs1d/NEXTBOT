@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 
 #include "embedded_font.h"
 #include "flutter_window.h"
@@ -37,19 +38,54 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // Dart 的 onError 直接崩溃）只会走 stderr，Dart 侧日志抓不到。若这里丢弃
   // 到 NUL，这类崩溃就完全无迹可查（表现为 flutter run 打印 "Lost connection
   // to device" 但没有对应异常）。因此持久化到 CRT 崩溃日志，便于事后排查。
-  FILE* stderr_sink;
-  char env_buf[1024];
-  char* crash_log_path = nullptr;
-  size_t env_len = 0;
-  errno_t env_err = _dupenv_s(&crash_log_path, &env_len, "PAI_STDERR_LOG");
-  if (env_err != 0 || !crash_log_path || !*crash_log_path) {
-    free(crash_log_path);
-    crash_log_path = env_buf;
-    strcpy_s(env_buf, sizeof(env_buf), "pai_app_stderr.log");
+  //
+  // ⚠️ freopen_s 失败会把 stderr 置为「已关闭」流（fd=-1）——之后任何
+  // fwprintf(stderr)（DynamicIsland/GhostGuard 的日志写点）都会触发 debug
+  // CRT 断言 write.cpp:50 并 abort。2026-10-11 行程窗口「旅游界面进不去」
+  // 弹 Debug Assertion 崩溃的实锤根因（dump 栈 = GhostGuard 线程 →
+  // ucrtbased abort，参数校验失败于 _write 的无效句柄检查）。
+  // 因此这里逐级兜底（env 指定路径 → exe 目录 → %TEMP% → nul 设备），
+  // 保证 stderr 流永远有效；前三级失败一般只发生在目标盘不可写/被锁。
+  FILE* stderr_sink = nullptr;
+  errno_t fr_err = -1;
+  {
+    char* env_val = nullptr;
+    size_t env_len = 0;
+    const errno_t env_err = _dupenv_s(&env_val, &env_len, "PAI_STDERR_LOG");
+    if (env_err == 0 && env_val != nullptr && *env_val != '\0') {
+      const int wlen = ::MultiByteToWideChar(CP_UTF8, 0, env_val, -1, nullptr, 0);
+      if (wlen > 0) {
+        std::wstring wpath(static_cast<size_t>(wlen), L'\0');
+        ::MultiByteToWideChar(CP_UTF8, 0, env_val, -1, wpath.data(), wlen);
+        // 去掉 MultiByteToWideChar 的结尾 NUL
+        while (!wpath.empty() && wpath.back() == L'\0') wpath.pop_back();
+        fr_err = _wfreopen_s(&stderr_sink, wpath.c_str(), L"a", stderr);
+      }
+    }
+    free(env_val);
   }
-  freopen_s(&stderr_sink, crash_log_path, "a", stderr); // 追加写，不覆盖历史
-  if (env_err == 0 && crash_log_path && crash_log_path != env_buf) {
-    free(crash_log_path);
+  if (fr_err != 0 || stderr_sink == nullptr) {
+    // 兜底 1：exe 同目录（写入时机早于任何 chdir，绝对路径最稳）
+    wchar_t exe_path[MAX_PATH] = {};
+    ::GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    std::wstring fallback(exe_path);
+    const size_t slash = fallback.find_last_of(L"\\/");
+    fallback = (slash == std::wstring::npos) ? std::wstring()
+                                             : fallback.substr(0, slash + 1);
+    fallback += L"pai_app_stderr.log";
+    fr_err = _wfreopen_s(&stderr_sink, fallback.c_str(), L"a", stderr);
+  }
+  if (fr_err != 0 || stderr_sink == nullptr) {
+    // 兜底 2：%TEMP%
+    wchar_t tmp_dir[MAX_PATH] = {};
+    if (::GetTempPathW(MAX_PATH, tmp_dir) > 0) {
+      std::wstring fallback = std::wstring(tmp_dir) + L"pai_app_stderr.log";
+      fr_err = _wfreopen_s(&stderr_sink, fallback.c_str(), L"a", stderr);
+    }
+  }
+  if (fr_err != 0 || stderr_sink == nullptr) {
+    // 兜底 3：nul 设备，永远成功。宁可丢日志也不能留无效 stderr 流。
+    _wfreopen_s(&stderr_sink, L"nul", L"a", stderr);
   }
 
   // Initialize COM, so that it is available for use in the library and/or

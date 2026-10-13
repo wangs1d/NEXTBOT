@@ -3,14 +3,21 @@ import "dart:async";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 
+import "app/ambient_feeds_controller.dart";
 import "core/config/api_config.dart";
 import "core/services/account_session_store.dart";
 import "core/services/access_auth_api.dart";
+import "core/services/local_notification_service.dart";
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_theme.dart";
 
 /// 手机端应用入口(Android / iOS)。
+///
+/// ⚠️ 铁律（用户 2026-10-13 明令）：这是**唯一**的桌面调试手机 UI 通道。
+/// 调试手机端一律用本入口（-t lib/main_mobile.dart），绝不允许改桌面主入口
+/// main.dart 的路由（_buildApp 的 _isMobile 分流 / home 指向）让桌面 exe
+/// 落到手机壳——桌面 exe 必须路由到真的桌面代码。
 ///
 /// 运行：
 /// - Linux/macOS/Windows 桌面调试手机 UI：
@@ -53,6 +60,11 @@ class _MobileAppState extends State<MobileApp> {
   @override
   void initState() {
     super.initState();
+    // 系统通知服务初始化（Android 13+ 运行时权限申请 + 渠道注册）：
+    // 不 init 则 show() 静默返回，手机后台到点提醒永远无系统通知（2026-10-12 修复）。
+    unawaited(LocalNotificationService.init());
+    LocalNotificationService.onOutcome =
+        AmbientFeedsController.instance.sendProactiveOutcome;
     _restoreSession();
   }
 

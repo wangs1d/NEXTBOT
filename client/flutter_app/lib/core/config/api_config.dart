@@ -1,3 +1,7 @@
+import "dart:io" show Platform;
+
+import "package:flutter/foundation.dart" show kIsWeb;
+
 /// 与 WebSocket 网关同机时使用；Android 模拟器可 `--dart-define=HTTP_BASE=http://10.0.2.2:3000`。
 /// 双实例联调时可 `--dart-define=SESSION_ID=session-b`；WebSocket 地址可 `--dart-define=WS_URL=ws://10.0.2.2:3000/ws`。
 /// 与后端 UAP/世界/记忆对齐的稳定用户 id：`--dart-define=USER_ID=your-login-id`（可选；未设置时 [effectiveActorId] 与 [sessionId] 相同）。
@@ -7,9 +11,21 @@ class ApiConfig {
   static const String _httpBaseFromEnv = String.fromEnvironment("HTTP_BASE");
 
   /// 主服务 HTTP 根地址。
+  ///
+  /// P0 防线（2026-10-12，裸 `flutter build apk --release` 复发「网络错误」）：
+  /// Android 上 127.0.0.1 指手机自己，烤入失败时绝不能静默回落——那只会把
+  /// 构建期配置错误拖到运行期，变成登录页一句笼统的「网络错误」。直接
+  /// fail-fast，错误信息指明正确打包路径（build_apk.ps1）。
   static String get httpBase {
     if (_httpBaseFromEnv.isNotEmpty) {
       return _httpBaseFromEnv;
+    }
+    if (!kIsWeb && Platform.isAndroid) {
+      throw StateError(
+        "APK 未烤入 HTTP_BASE（127.0.0.1 回落已禁用）。"
+        "请用 client/flutter_app/build_apk.ps1 打包，"
+        "或显式传 --dart-define=HTTP_BASE=http://<后端地址>:3000。",
+      );
     }
     return "http://127.0.0.1:3000";
   }

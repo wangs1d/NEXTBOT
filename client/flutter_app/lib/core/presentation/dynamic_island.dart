@@ -342,10 +342,14 @@ class DynamicIslandLauncher {
   /// 提醒时刻的 attention 动画：高亮脉冲 + 胶囊宽度按文本自适应伸缩。
   /// [holdSeconds] = 保持段时长（秒），0 用原生默认档（预告）；
   /// 到点提醒传长驻留（如 26），点击胶囊可提前收口并回「打开日程」action。
+  /// [urgent] = 全屏打断白名单（2026-10-13 定调）：仅「需要立马知道」的事
+  /// （外卖等高优消息、日程到点档）可破屏；非紧急档在全屏/忙碌时由原生端
+  /// 整体跳过（不响铃不上屏），退出全屏后不补播。
   Future<void> attention({
     required String title,
     String trailing = '',
     double holdSeconds = 0,
+    bool urgent = false,
   }) async {
     if (!_nativeReady) return;
     try {
@@ -353,6 +357,7 @@ class DynamicIslandLauncher {
         'title': title,
         'trailing': trailing,
         'holdS': holdSeconds,
+        'urgent': urgent,
       });
     } on PlatformException catch (_) {}
   }
@@ -479,14 +484,19 @@ class IslandReminderScheduler {
   /// 全展示，以「 · 」连接；胶囊宽度原生端按文本自适应伸缩）。
   /// [holdSeconds] 保持段时长（秒）：预告档不传（默认 6s 收回）；
   /// 到点档传长驻留（如 26 → 约 30s），点击胶囊提前收口并跳日程页。
+  /// [urgent] = 全屏打断白名单（2026-10-13 定调）：默认 false（不打断），
+  /// 仅到点档/高优消息传 true；全屏时非紧急档由原生端整体跳过。
   void fireNow({
     required String title,
     String? message,
     double holdSeconds = 0,
+    bool urgent = false,
   }) {
     final DynamicIslandLauncher launcher = DynamicIslandLauncher.instance;
     launcher.attention(
-        title: displayText(title, message), holdSeconds: holdSeconds);
+        title: displayText(title, message),
+        holdSeconds: holdSeconds,
+        urgent: urgent);
     // 提醒动画结束后胶囊回落：默认 6 秒；长驻留档 = 保持段 + 入出场余量。
     final int dismissMs =
         holdSeconds > 0 ? ((holdSeconds + 1.0) * 1000).round() : 6000;

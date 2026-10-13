@@ -43,20 +43,44 @@ class TravelWebPanelController {
 
   Future<void> Function(String script)? _executeScript;
   bool _ready = false;
+  bool _detached = false;
   final List<String> _pendingScripts = <String>[];
+
+  /// 排队上限：正常时序下队列最多 1~2 条；上限只用于异常时序兜底。
+  static const int _maxPendingScripts = 24;
 
   /// WebView 是否已就绪（收到 JS 的 ready 事件）。
   bool get isReady => _ready;
 
-  /// 由视图在 WebView 加载完成后调用：注入脚本执行器。
-  Future<void> attach(Future<void> Function(String script) executeScript) async {
-    _executeScript = executeScript;
+  /// 页面导航开始时调用：把上一份页面的就绪态与排队脚本作废。
+  ///
+  /// 宿主在 `loadUrl` 之前调它。**不能**把这个语义塞进 [attach]——`attach` 发生在
+  /// 页面脚本跑完之后（宿主先探测 `window.__travelPanel` 成功才注入执行器），
+  /// 那时 JS 的 `ready` 事件已经到达并把 `_ready` 置真；若在 `attach` 里重置，
+  /// 页面不会再发第二次 `ready`，`loadPlan` 就永久滞留在队列里 → 界面卡在
+  /// 「行程装载中…」（2026-10-12 实盘根因）。
+  void resetPageState() {
     _ready = false;
+    _executeScript = null;
     _pendingScripts.clear();
+    _detached = false;
+  }
+
+  /// 由视图在 WebView 加载完成后调用：注入脚本执行器。
+  ///
+  /// 若页面在本调用之前就已上报 `ready`（宿主先探测后注入的正常时序），
+  /// 这里必须立刻把排队脚本放行。
+  Future<void> attach(Future<void> Function(String script) executeScript) async {
+    _detached = false;
+    _executeScript = executeScript;
+    if (_ready) {
+      _flushPending(); // 页面在本调用之前就已上报 ready：立刻放行
+    }
   }
 
   /// 视图 dispose 时调用：释放引用，方法回归静默 no-op。
   void detach() {
+    _detached = true;
     _executeScript = null;
     _ready = false;
     _pendingScripts.clear();
@@ -95,6 +119,8 @@ class TravelWebPanelController {
     switch (data["event"]) {
       case "ready":
         _ready = true;
+        // 先按序放行排队脚本（通常就是挂载点早到的 loadPlan），再通知挂载点，
+        // 避免「旧 loadPlan 滞后于新 loadPlan 执行」的覆盖乱序。
         _flushPending();
         onReady?.call();
         break;
@@ -172,14 +198,23 @@ class TravelWebPanelController {
   }
 
   void _sendRaw(String script) {
-    if (_executeScript == null) return; // 未 attach / 已 detach，静默 no-op
-    if (!_ready) {
+    if (_detached) return; // 已释放：静默 no-op
+    // 未 attach（宿主还在初始化）或页面尚未上报 ready：一律入队，等 [attach]
+    // 或 ready 事件放行。此前「未 attach 直接 return」会丢掉首次 loadPlan。
+    if (_executeScript == null || !_ready) {
       _pendingScripts.add(script);
+      // 队列上限：异常时序下不让它无限增长（丢最旧的，保留最近意图）
+      if (_pendingScripts.length > _maxPendingScripts) {
+        _pendingScripts.removeRange(0, _pendingScripts.length - _maxPendingScripts);
+      }
       return;
     }
     _runNow(script);
   }
 
+  /// 放行排队脚本。**同步按序发起**（executeScript 的调用顺序 = 队列顺序，
+  /// 每条各自异步完成）——不要在循环里 await：那会把后续脚本推到 microtask，
+  /// 使「flush 完再通知挂载点」的先后关系不再成立。
   void _flushPending() {
     final List<String> scripts = List<String>.of(_pendingScripts);
     _pendingScripts.clear();
@@ -213,6 +248,7 @@ abstract final class TravelWebPanelPayload {
       "destination": plan.destination,
       "dataQuality": plan.dataQuality,
       "title": plan.title.isNotEmpty ? plan.title : "${plan.destination} 行程",
+      if (plan.weather.isNotEmpty) "weather": plan.weather,
       if (plan.centerLatitude != null && plan.centerLongitude != null)
         "center": <String, double>{
           "latitude": plan.centerLatitude!,
@@ -235,22 +271,6 @@ abstract final class TravelWebPanelPayload {
                   "address": e.address,
                   "images": e.images,
                   "splatUrl": resolveTravelMediaUrl(e.splatUrl),
-                  "reviews": <Map<String, dynamic>>[
-                    for (final TravelEntryReview r in e.reviews)
-                      <String, dynamic>{
-                        "author": r.author,
-                        "rating": r.rating,
-                        "text": r.text,
-                      },
-                  ],
-                  "videos": <Map<String, dynamic>>[
-                    for (final TravelEntryVideo v in e.videos)
-                      <String, dynamic>{
-                        "platform": v.platform,
-                        "title": v.title,
-                        "playPageUrl": v.playPageUrl,
-                      },
-                  ],
                   if (e.latitude != null && e.longitude != null)
                     "latitude": e.latitude,
                   if (e.latitude != null && e.longitude != null)

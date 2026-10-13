@@ -17,19 +17,20 @@ export function buildRoutePrompt(
   text: string,
   recentUserTurns: string[],
   activeTasksSummary?: string,
+  dialogStateLines: string[] = [],
 ): string {
   const lines: string[] = [
     "你是双面架构的意图路由器。对话面对话直答（零工具）；任务面在后台真正调用工具把事办完。你的任务只有一个：判断这条用户消息的意图标签。",
     "",
-    '只输出一个 JSON 对象，格式：{"intent":"标签","confidence":0.0到1.0,"sentiment":<-1到1的小数，用户情绪>,"tags":[<最多3个情绪标签>],"topics":[<1-3个话题关键词>],"search_query":"<搜索词>","understanding":{"is_follow_up":布尔,"reference":"锚定","recall_intent":布尔,"memory_instruction":布尔,"personal_fact":布尔,"schedule_query":布尔,"travel_query":布尔}}。不要输出任何其他字符。',
+    '只输出一个 JSON 对象，格式：{"intent":"标签","confidence":0.0到1.0,"evidence":["片段"],"sentiment":<-1到1的小数，用户情绪>,"tags":[<最多3个情绪标签>],"topics":[<1-3个话题关键词>],"search_query":"<搜索词>","understanding":{"is_follow_up":布尔,"reference":"锚定","recall_intent":布尔,"memory_instruction":布尔,"personal_fact":布尔,"schedule_query":布尔,"travel_query":布尔,"action_negation":布尔}}。不要输出任何其他字符。',
     "intent 必须且只能取以下封闭集之一：",
-    "- chat：纯对话。寒暄、情绪、观点交流、评价、闲聊追问，凭常识或已有上下文就能答的内容。问你的近况/想法/感受也是 chat。",
+    "- chat：纯对话。寒暄、情绪、观点交流、评价、闲聊追问，凭常识或已有上下文就能答的内容。问你的近况/想法/感受也是 chat。陈述关于自己的事实（真名/称呼/偏好）也是 chat。",
     "- knowledge_qa：常识/知识问答（不依赖实时信息，如原理、历史、解释）。",
     "- realtime_lookup：需要外部**公开网络**实时信息——新闻、某人（公众人物/他人）近况、最新消息、价格行情、热搜、比分、排片、天气等，答准了必须现查的。",
     "- personal_data_query：查**用户自己的**数据——我的/我自己的日程、提醒、订单、快递、钱包余额、账单、消息、通话、相册照片、设备状态等。这类走系统内工具直查，绝不联网搜索。",
     "- media_retrieval：找图片/照片/视频/壁纸/表情包。",
     "- travel_planning：规划旅行行程——去某地玩几天的行程安排/旅游攻略/路线规划（含对规划中的行程补充目的地、天数、偏好）。",
-    "- action_write：写数据/有副作用的操作——创建或修改日程提醒、发消息、下单、支付等。",
+    "- action_write：写数据/有副作用的操作——创建或修改日程提醒、发消息、下单、支付等。「X点提醒我Y」「定个闹钟」「帮我设置…」都是 action_write，绝不能判成 chat。但用户**明确拒绝或取消**某类写操作（「别再提醒我开会」「不用给我下单了」）不是 action_write——那是 chat（口头应一声）或在要求管理已有提醒。",
     "- multi_step_task：多步操作、操作软件/电脑/设备、或以上都没贴切的办事请求。",
     "- meta_capability：询问你能做什么/系统状态。",
     "",
@@ -42,7 +43,9 @@ export function buildRoutePrompt(
     "- intent=realtime_lookup 时 search_query 必填：结合最近对话解决指代（如「我老婆」指代哪个具体人名、「那家店」是哪家），生成一句完整、具体、可直接搜索的中文查询词；其他 intent 一律给空字符串。",
     "- 「帮我规划去X玩N天」「X旅游攻略」「周末去X怎么玩」「去X自由行」是 travel_planning；只问「X有什么好玩的/适合几月去」这类知识问答是 knowledge_qa；过问已派发的行程任务进度是 chat。",
     "- intent=travel_planning 时 search_query 恒为空字符串（调用参数由系统代码从用户原话构造，不需要模型生成搜索词）。",
-    "- 短追问（如「娱乐圈的」「新鲜的」）按它继承的话题判——语境见最近对话与后台任务。",
+    "- evidence 字段（2026-10-12 证据锚定契约）：intent 为 media_retrieval / realtime_lookup / action_write 时必填——从**当前用户消息原文**中逐字摘出 1-3 个支撑该标签的片段（media 摘表示找图/找视频诉求的词，realtime 摘需要现查的内容，action_write 摘明确的动作诉求词）。当前消息里摘不出支撑片段 = 标签不成立，请改判；系统会代码校验片段确实出自当前消息，造假片段会被作废。其他 intent 一律省略 evidence。",
+    "- 话题继承收口：短承接语（「娱乐圈的」「再来点」）仅当 understanding.is_follow_up=true 且上一轮对话状态显示话题尚未完结（如照片还没找够）时才按继承话题判；用户在陈述个人事实、确认偏好、提出新请求时，永远按当前消息本身判——上一轮搜过图、交付过照片，不代表本轮还要图。",
+    "- 承接上一轮媒体交付的短承接语（「再来点」「多来几张」「还有吗」）判 media_retrieval，绝不判 realtime_lookup——媒体追加诉求走图片/视频搜索，不是网页搜索（「上一轮对话状态」里已列出的 search_images/照片交付就是媒体话题的标志）。",
     "- sentiment/tags/topics 是顺带分析（情绪与话题），省略不报错，但尽量都给。",
     "- understanding 是顺带的语境理解标记（省略不报错，但尽量都给），按用户消息本身判定：",
     "  - is_follow_up：本条是否承接上一轮的短追问/应答（「然后呢」「那个方案呢」「你确定吗」）。独立的新话题、新请求、新问题一律 false。",
@@ -52,6 +55,7 @@ export function buildRoutePrompt(
     "  - personal_fact：用户在陈述关于自己的事实（名字/称呼/身份/家人/住所/计划）。",
     "  - schedule_query：本轮在问用户自己的日程/提醒/安排。",
     "  - travel_query：本轮在问行程/旅行规划相关的事。",
+    "  - action_negation：用户在明确拒绝/取消某类写操作（「别再提醒我」「不用下单了」），而不是在提出写请求。",
     "",
   ];
   if (activeTasksSummary?.trim()) {
@@ -61,7 +65,13 @@ export function buildRoutePrompt(
     lines.push("任务结果会由系统自动回到对话里，本轮口头应一声即可，绝不再派新任务。");
     lines.push("");
   }
-  if (recentUserTurns.length > 0) {
+  if (dialogStateLines.length > 0) {
+    // 结构化对话状态（2026-10-12 架构收敛）：上一轮的意图 + 真实执行过的工具
+    // ——分类器终于看得到执行者做过的事，不再从 user 原文里猜「刚才发生了什么」。
+    lines.push("上一轮对话状态（短承接/继承话题判定的唯一依据；列出的工具结果已交付给用户）：");
+    for (const line of dialogStateLines) lines.push(line);
+    lines.push("");
+  } else if (recentUserTurns.length > 0) {
     lines.push("最近对话（最旧在前，仅供理解话题）：");
     for (const turn of recentUserTurns.slice(-4)) {
       lines.push(`- ${turn}`);
@@ -133,6 +143,7 @@ export function parseUnderstanding(
       personalFact: bool(u.personal_fact ?? u.personalFact),
       scheduleQuery: bool(u.schedule_query ?? u.scheduleQuery),
       travelQuery: bool(u.travel_query ?? u.travelQuery),
+      actionNegation: bool(u.action_negation ?? u.actionNegation),
     };
     const hasSignal =
       understanding.isFollowUp ||
@@ -141,11 +152,40 @@ export function parseUnderstanding(
       understanding.memoryInstruction ||
       understanding.personalFact ||
       understanding.scheduleQuery ||
-      understanding.travelQuery;
+      understanding.travelQuery ||
+      understanding.actionNegation;
     // 全 false 时省字段：缺省即「无特殊处理」，语义等价
     return hasSignal ? understanding : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * 解析路由输出里的证据锚定片段（2026-10-12 证据锚定契约）。
+ * media_retrieval / realtime_lookup / action_write 要求模型从当前用户消息
+ * 逐字摘出支撑片段；L2 代码校验「片段确实出自当前消息」，造假/摘不出即标签
+ * 作废。返回空数组 = 模型未给（宽容：历史输出兼容，不因 schema 缺字段降级）。
+ */
+export function parseEvidenceJson(raw: string | undefined | null): string[] {
+  if (!raw) return [];
+  const start = raw.indexOf("{");
+  const end = raw.lastIndexOf("}");
+  if (start < 0 || end <= start) return [];
+  try {
+    const obj = JSON.parse(raw.slice(start, end + 1)) as Record<string, unknown>;
+    const rawEvidence = obj.evidence;
+    const items = Array.isArray(rawEvidence)
+      ? rawEvidence
+      : typeof rawEvidence === "string" && rawEvidence.trim()
+        ? [rawEvidence]
+        : [];
+    return items
+      .map((e) => String(e).trim())
+      .filter(Boolean)
+      .slice(0, 3);
+  } catch {
+    return [];
   }
 }
 
@@ -178,8 +218,9 @@ export async function classifyIntentByLlm(
   text: string,
   recentUserTurns: string[] = [],
   activeTasksSummary?: string,
+  dialogStateLines: string[] = [],
 ): Promise<IntentRouteCall> {
-  const prompt = buildRoutePrompt(text, recentUserTurns, activeTasksSummary);
+  const prompt = buildRoutePrompt(text, recentUserTurns, activeTasksSummary, dialogStateLines);
   const { maxOutputTokens, timeoutMs, jsonMode } = resolveRouteCallParams(provider);
   const result = await structuredCall<{ intent: IntentLabel; confidence: number }>(
     provider,

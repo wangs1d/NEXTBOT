@@ -88,7 +88,13 @@ export class MiniMaxProvider extends AbstractChatProvider {
       providerId: this.id,
       model: ctx.model,
       baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
-      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
+      // 2026-10-11 修复（「现在几点」实盘探针定位）：minimal 模式走 overrideSys，
+      // 此前这里把 memory 整个丢掉 → 【当前时间】块/前置检索证据/用户档案从未进
+      // 请求，模型只看到 kernel 里"当前时间永远在上下文"一句话，只能编时间
+      // （真机：答「2026-05-12 周二 22:41」，真实日期 2026-10-11）。minimal 的
+      // 本意是省 system 后缀，不是丢动态事实层——与 openai-official 对齐，
+      // memory 恒透传（assembler 只对有内容的块追加，空 memory 行为不变）。
+      memory: ctx.promptMemory,
       finalizeOptions: {
         tools: Boolean(ctx.tools && !ctx.overrideSys),
         masterSubAgentDelegate: ctx.streamOpts?.masterSubAgentDelegate,

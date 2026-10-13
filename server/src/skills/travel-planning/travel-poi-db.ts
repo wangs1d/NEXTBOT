@@ -282,12 +282,20 @@ class TravelPoiDb {
       .all(nameNorm, limit) as unknown as DbPoiRow[];
   }
 
+  /**
+   * 库占用字节数。
+   *
+   * WAL 模式下新写入先进 `-wal`，主库文件可能长期只有 4KB（checkpoint 前），
+   * 只统计主文件会把几 MB 的库报成 4KB。三个文件一起算才是真实占用。
+   */
   dbSizeBytes(): number {
-    try {
-      return fs.statSync(this.dbPath).size;
-    } catch {
-      return 0;
+    let total = 0;
+    for (const suffix of ['', '-wal', '-shm']) {
+      try {
+        total += fs.statSync(`${this.dbPath}${suffix}`).size;
+      } catch { /* 文件不存在：跳过 */ }
     }
+    return total;
   }
 
   // ======================== media（POI 级 图/评/视频） ========================
@@ -296,6 +304,14 @@ class TravelPoiDb {
   countMediaPois(): number {
     const row = this.db.prepare('SELECT COUNT(*) AS n FROM media_pois').get() as { n: number } | undefined;
     return row?.n ?? 0;
+  }
+
+  /** 全部媒体 POI 的键（存量本地化/刷新任务遍历用） */
+  listMediaPoiKeys(): string[] {
+    const rows = this.db
+      .prepare('SELECT poi_key FROM media_pois ORDER BY updated_at DESC')
+      .all() as Array<{ poi_key: string }>;
+    return rows.map((r) => r.poi_key);
   }
 
   getMediaPoi(poiKey: string): DbMediaPoiRow | null {

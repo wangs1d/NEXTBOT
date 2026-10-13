@@ -226,6 +226,9 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     endpoints: [
       "GET    /travel/plans                                行程摘要列表（≤20）",
       "GET    /travel/plans/:planId                        完整行程（404 若不存在）",
+      "PATCH  /travel/plans/:planId/progress              {day,stop} 上报行程进度（设备状态，不动版本）",
+      "GET    /travel/plans/:planId/progress              行程进度（无记录为 null）",
+      "GET    /travel/plans/:planId/signal                实时信号（rain/behind，Agent 侧确定性判定）",
       "PATCH  /travel/plans/:planId/days/:dayIndex/items/:itemIndex   {type?,name?,startTime?,latitude?,longitude?,address?,priceInfo?,description?,tips?,images?}",
       "DELETE /travel/plans/:planId/days/:dayIndex/items/:itemIndex   删除条目",
       "POST   /travel/plans/:planId/days/:dayIndex/items              {type,name,startTime?} 新增条目（searchPois 定位 + 局部重排）",
@@ -369,6 +372,8 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
         name: poi.name,
         // 占位时刻：局部重排会按新坐标与当天时钟重算（显式指定 startTime 时作为锚点保留）
         startTime: explicitStart || "19:00",
+        // 显式指定时刻 = 用户钉住该时间 → 标记时间锚点（重排保护 + 客户端徽章）
+        ...(explicitStart ? { anchor: true } : {}),
         latitude: poi.latitude,
         longitude: poi.longitude,
         address: poi.address || "",
@@ -450,6 +455,130 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       );
       travelPlanStore.save(plan);
       return plan;
+    },
+  );
+
+  // ======================== 行程进度（跨端共享「已走/当前站」） ========================
+
+  const progressSchema = z.object({
+    day: z.coerce.number().int().min(0).max(60),
+    stop: z.coerce.number().int().min(0).max(200),
+  });
+
+  /**
+   * 上报行程进度（设备状态）：手机端切站时防抖上报，桌面端/下次打开恢复。
+   * 不做版本校验、不自增乐观锁 —— 进度不是内容编辑，避免手机端走行程
+   * 把桌面端并发的编辑请求打成 409。
+   */
+  app.patch<{ Params: { planId: string } }>(
+    "/travel/plans/:planId/progress",
+    async (request, reply) => {
+      if (!requireService(reply)) return;
+      const parsed = planIdParamsSchema.safeParse(request.params);
+      if (!parsed.success) {
+        return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+      }
+      const body = progressSchema.safeParse(request.body);
+      if (!body.success) {
+        return reply.code(400).send({ ok: false, error: body.error.flatten() });
+      }
+      const ok = travelPlanStore.updateProgress(
+        parsed.data.planId,
+        body.data.day,
+        body.data.stop,
+      );
+      if (!ok) {
+        return reply.code(404).send({ ok: false, error: "plan not found" });
+      }
+      const plan = travelPlanStore.get(parsed.data.planId);
+      return { ok: true, progress: plan?.progress ?? null };
+    },
+  );
+
+  /** 读取行程进度（无进度记录时 progress 为 null） */
+  app.get<{ Params: { planId: string } }>(
+    "/travel/plans/:planId/progress",
+    async (request, reply) => {
+      if (!requireService(reply)) return;
+      const parsed = planIdParamsSchema.safeParse(request.params);
+      if (!parsed.success) {
+        return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+      }
+      const plan = travelPlanStore.get(parsed.data.planId);
+      if (!plan) {
+        return reply.code(404).send({ ok: false, error: "plan not found" });
+      }
+      return { ok: true, progress: plan.progress ?? null };
+    },
+  );
+
+  // ======================== 行程实时信号（Agent 侧感知，页面只被动呈现） ========================
+
+  /** 从条目 startTime（"HH:mm" / "YYYY-MM-DDTHH:mm:00"）取当日分钟 */
+  const startMinOf = (startTime: string): number => {
+    const m = /(\d{1,2}):(\d{2})/.exec(startTime ?? "");
+    if (!m) return 9 * 60;
+    return Number(m[1]) * 60 + Number(m[2]);
+  };
+
+  /**
+   * 行程实时信号：Agent 侧感知（设计稿 PA_TRAVEL_SIGNAL 的确定性判定薄版）。
+   * - rain：目的地实时天气（PlanningService.signalWeather，Open-Meteo）判当日雨天；
+   * - behind：当天行程 + 用户进度站点的建议时段已过 20 分钟仍停在原地。
+   * tired（体力感知）暂无感知源，不返回。客户端在行程页呈现气泡与节奏文案，
+   * 页面不做任何主动改判 —— 与「前端只呈现，重排在 Agent 侧」契约一致。
+   */
+  app.get<{ Params: { planId: string } }>(
+    "/travel/plans/:planId/signal",
+    async (request, reply) => {
+      if (!requireService(reply)) return;
+      const parsed = planIdParamsSchema.safeParse(request.params);
+      if (!parsed.success) {
+        return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+      }
+      const plan = requirePlan(reply, parsed.data.planId);
+      if (!plan) return;
+
+      const now = new Date();
+      const two = (v: number): string => v.toString().padStart(2, "0");
+      const today = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
+      const nowMin = now.getHours() * 60 + now.getMinutes();
+
+      let event: "rain" | "behind" | null = null;
+      let mood: string | null = null;
+      let note: string | null = null;
+
+      // ① 目的地实时天气 → rain（老桩/未注入 signalWeather 时跳过）
+      if (plan.center) {
+        const svc = deps.travelPlanningService!;
+        const wx =
+          typeof svc.signalWeather === "function"
+            ? await svc.signalWeather(plan.center).catch(() => null)
+            : null;
+        if (wx?.rainy) {
+          event = "rain";
+          mood = "雨天室内";
+          note = `Agent 感知到目的地天气变化（${wx.summaryLine}）· 室内安排已优先`;
+        }
+      }
+
+      // ② 当天行程 + 进度站点时段已过 → behind
+      if (!event && plan.progress) {
+        const day = plan.days[plan.progress.day];
+        if (day && day.date === today) {
+          const cur = day.items[plan.progress.stop];
+          if (cur) {
+            const endMin = startMinOf(cur.startTime) + (cur.visitDuration ?? 60);
+            if (nowMin > endMin + 20) {
+              event = "behind";
+              mood = "追赶中";
+              note = `Agent 感知到进度落后 · 「${cur.name}」的建议时段已过，正在为你压缩后续停留`;
+            }
+          }
+        }
+      }
+
+      return { ok: true, event, mood, note, checkedAt: now.getTime() };
     },
   );
 

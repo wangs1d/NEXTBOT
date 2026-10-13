@@ -46,23 +46,33 @@ test("连续工作 ≥3h：发布 overwork 信号（continuous_work）", () => {
   assert.ok(payload.continuousWorkHours >= 3);
 });
 
-test("深夜活跃 ≥2 次（去抖 10 分钟）：发布 overwork 信号（late_night_active）", () => {
+test("深夜活跃 ≥3 次（去抖 30 分钟）：发布 overwork 信号（late_night_active）", () => {
   const { core, signals } = makeRhythm();
-  // 同一晚 23:30 / 23:45（间隔 15min > 去抖窗口，计 2 次）
-  core.noteActivity(ACTOR, "conversation", atHour(23, 30));
+  // 凌晨同一 dateKey 内：00:10 / 00:45 / 01:20（间隔 35min > 去抖窗口，计 3 次）
+  core.noteActivity(ACTOR, "conversation", atHour(0, 10));
   assert.equal(signals.length, 0);
-  core.noteActivity(ACTOR, "conversation", atHour(23, 45));
+  core.noteActivity(ACTOR, "conversation", atHour(0, 45));
+  assert.equal(signals.length, 0); // 2 次不再触发（2026-10-12 降噪：2 次=误报重灾区）
+  core.noteActivity(ACTOR, "conversation", atHour(1, 20));
   assert.equal(signals.length, 1);
   const payload = signals[0].payload as { reason: string; lateNightActiveCount: number };
   assert.equal(payload.reason, "late_night_active");
-  assert.ok(payload.lateNightActiveCount >= 2);
+  assert.ok(payload.lateNightActiveCount >= 3);
 });
 
-test("深夜去抖：10 分钟窗口内多次活跃只计 1 次", () => {
+test("深夜聊两句（同去抖窗口内）不触发全套干预", () => {
+  const { core, signals } = makeRhythm();
+  // 23:30 / 23:55（25min < 30min 去抖）只计 1 次；午夜前最多 2 次 → 不触发
+  core.noteActivity(ACTOR, "conversation", atHour(23, 30));
+  core.noteActivity(ACTOR, "conversation", atHour(23, 55));
+  assert.equal(signals.length, 0);
+});
+
+test("深夜去抖：30 分钟窗口内多次活跃只计 1 次", () => {
   const { core, signals } = makeRhythm();
   core.noteActivity(ACTOR, "conversation", atHour(23, 30));
   core.noteActivity(ACTOR, "conversation", atHour(23, 35)); // 5 分钟后：去抖不计数
-  core.noteActivity(ACTOR, "conversation", atHour(23, 39)); // 仍 <10min：不计数
+  core.noteActivity(ACTOR, "conversation", atHour(23, 55)); // 仍 <30min：不计数
   assert.equal(signals.length, 0);
 });
 
@@ -210,6 +220,28 @@ test("自适应深夜窗口：样本不足用默认 23 点（23:30 活跃计入�
   const sense = await core.sense({ actorId: ACTOR } as never);
   const data = sense.data as { lateNightCount?: number };
   assert.ok((data.lateNightCount ?? 0) >= 1);
+});
+
+test("就寝样本防污染：下午关 App 的日子不计入就寝基线", () => {
+  const { core } = makeRhythm();
+  // 5 个「下午 14 点最后活跃」的昼夜：不是就寝，不应进样本
+  for (let d = 0; d < 5; d++) {
+    core.noteActivity(ACTOR, "conversation", atHour(14, 0, d));
+    core.noteActivity(ACTOR, "conversation", atHour(9, 0, d + 1)); // 跨天采样点
+  }
+  assert.equal(core.learnedBedtimeHour(ACTOR), null); // 样本被拒收 → 无学习值
+  assert.equal(core.lateNightStartHour(ACTOR), 23); // 深夜窗口不漂移
+});
+
+test("作息基线：2 个有效夜晚即学习（不等 5 天，不落硬默认）", () => {
+  const { core } = makeRhythm();
+  // 两个「23:30 最后活跃」的夜晚 → 就寝样本 23.5×2
+  for (let d = 0; d < 2; d++) {
+    core.noteActivity(ACTOR, "conversation", atHour(23, 30, d));
+    core.noteActivity(ACTOR, "conversation", atHour(9, 0, d + 1)); // 跨天记样本
+  }
+  assert.equal(core.learnedBedtimeHour(ACTOR), 23.5); // 提醒将排在 22:30（就寝前 1h）
+  assert.equal(core.lateNightStartHour(ACTOR), 23); // 检测窗口仍走 5 样本门槛 → 默认
 });
 
 test("sense：adaptive 视图暴露学习阈值与样本数", async () => {

@@ -543,3 +543,21 @@ test("allImageCardsHaveCaption: true only when every image card has non-empty ca
   ];
   assert.equal(allImageCardsHaveCaption(partial), false);
 });
+
+// ── 2026-10-11 变体声明剥离（[RENDER_AS]:xxx，括号在冒号前闭合）─────────
+import { stripResidualRenderDeclarations as _stripResidual } from "../src/services/tool-result-processor.js";
+
+test("stripResidualRenderDeclarations：剥变体 [RENDER_AS]:structured（行内嵌与独占行）", () => {
+  assert.equal(
+    _stripResidual("行程攻略结尾[RENDER_AS]:structured"),
+    "行程攻略结尾",
+  );
+  assert.equal(
+    _stripResidual("第一段\n[RENDER_HINT]:brief\n第二段"),
+    "第一段\n第二段",
+  );
+  assert.equal(
+    _stripResidual("规范形 [RENDER_AS:structured] 与变体 [RENDER_AS]:structured 都剥"),
+    "规范形  与变体  都剥",
+  );
+});

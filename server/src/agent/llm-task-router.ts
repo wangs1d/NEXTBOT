@@ -28,8 +28,12 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { isHighPrecisionChatText, type RouteDecision } from "./task-router.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "./intent-router.js";
-import { composeMediaSearchQuery, composeRealtimeSearchQuery, composeTravelPlanRequest } from "./realtime-search-query.js";
-import { classifyIntentByLlm } from "./route-llm-call.js";
+import {
+  composeMediaSearchQuery,
+  composeRealtimeSearchQuery,
+  composeTravelPlanRequest,
+} from "./realtime-search-query.js";
+import { classifyIntentByLlm, parseEvidenceJson } from "./route-llm-call.js";
 import {
   isIntentLabel,
   routePlanForIntent,
@@ -39,6 +43,31 @@ import {
 const CACHE_TTL_MS = 5 * 60_000;
 const CACHE_MAX = 300;
 const ROUTE_SESSION_PREFIX = "llm-route::";
+
+/** 证据锚定审计覆盖的意图（有确定性放大行为的标签必须可被当前消息证实）。 */
+const EVIDENCE_ANCHOR_INTENTS: ReadonlySet<IntentLabel> = new Set([
+  "media_retrieval",
+  "realtime_lookup",
+]);
+
+/** 证据锚定审计结论。 */
+type EvidenceAnchor = "ok" | "invalid" | "missing";
+
+/**
+ * 证据锚定审计（纯代码）：L1 声称的支撑片段必须逐字出自当前用户消息。
+ * - 片段全部命中 → ok（标签可信，允许确定性放大）；
+ * - 有片段与消息对不上（造假/幻觉/摘自上一轮）→ invalid（标签作废）；
+ * - 模型没给 evidence（缺字段/空）→ missing（宽容：schema 兼容优先，
+ *   不因输出格式问题误伤正常轮；放大行为由 understanding 一致性兜底）。
+ * 片段匹配忽略空白差异（中英混排/换行容忍），不忽略大小写以外的改写——
+ * 逐字锚定的意义就在于「片段必须是消息原文的一部分」。
+ */
+function auditEvidenceAnchor(messageText: string, evidence: string[]): EvidenceAnchor {
+  if (evidence.length === 0) return "missing";
+  const normalize = (s: string): string => s.replace(/\s+/g, "").toLowerCase();
+  const haystack = normalize(messageText);
+  return evidence.every((e) => haystack.includes(normalize(e))) ? "ok" : "invalid";
+}
 
 const routeCache = new Map<string, { decision: RouteDecision; at: number }>();
 
@@ -150,6 +179,10 @@ function parseAuxAnalysis(
  *        行 + 全角色最近线程消息。只供 realtime 轮 search_query 的实体频次
  *        统计（composeRealtimeSearchQuery）使用，不进任何 prompt；因此取数
  *        窗口可以比 recentUserTurns 宽得多。参与路由缓存键（消解结果随语料变化）。
+ * @param dialogStateLines 结构化对话状态行（2026-10-12，dialog-state 提供）：
+ *        最近 N 轮的「用户消息 → 意图 + 已执行工具」。进路由 prompt——分类器
+ *        从此看得到执行者上一轮做过什么，不再从 user 原文反推（话题带偏根治）。
+ *        参与路由缓存键。
  */
 export async function routeTurnByLlm(
   externalChat: ExternalChatProvider | null,
@@ -158,6 +191,7 @@ export async function routeTurnByLlm(
   recentUserTurns: string[] = [],
   activeTasksSummary?: string,
   entityContextLines: string[] = [],
+  dialogStateLines: string[] = [],
 ): Promise<RouteDecision> {
   const trimmed = text.trim();
   if (!trimmed) {
@@ -172,7 +206,7 @@ export async function routeTurnByLlm(
       tier: "flash",
     };
   }
-  const key = JSON.stringify([trimmed, recentUserTurns, entityContextLines]);
+  const key = JSON.stringify([trimmed, recentUserTurns, entityContextLines, dialogStateLines]);
   const hit = cacheGet(key);
   if (hit) return hit;
 
@@ -193,6 +227,7 @@ export async function routeTurnByLlm(
     trimmed,
     recentUserTurns,
     activeTasksSummary,
+    dialogStateLines,
   );
   if (!call.ok) {
     // 失败结果不缓存：provider 恢复后下一轮立即回到语义路由。
@@ -218,11 +253,63 @@ export async function routeTurnByLlm(
   }
 
   // ── L2 路由决策层（纯代码裁决）──
-  const plan = routePlanForIntent(parsed.intent);
+  // 标签审计双契约（2026-10-12 架构收敛，取代已删除的两个词面词表补丁——
+  // media 词面复核闸与 reminder 词法安全网。教训：按意图长词表是打地鼠，
+  // 通用机制才是根治）：
+  //
+  // ① 证据锚定审计（evidence anchor）：intent ∈ {media_retrieval,
+  //    realtime_lookup} 时 L1 必须从**当前用户消息**逐字摘出支撑片段，
+  //    代码校验片段确实出自当前消息。摘出的片段与消息对不上（造假/幻觉）
+  //    → 标签作废降级 chat——**概率性标签不允许被确定性放大，除非它能被
+  //    当前消息文本证实**。模型未给 evidence（缺字段）宽容放行：不因
+  //    schema 兼容性问题误伤正常轮。action_write 的 evidence 仅记账观测
+  //    （写侧没有「放大」行为需要守卫，漏调由出口宣称-一致性闸兜底）。
+  //
+  // ② understanding 一致性校验：L1 同体输出语境标记。intent=media/realtime
+  //    且 personal_fact/memory_instruction=true 是自相矛盾输出（「陈述关于
+  //    自己的事实」与「找图/查公开网络」互斥）——信任理解标记，降级 chat。
+  //    真实事故：「真名叫王铭川 以后喊我川哥王哥都行」被上一轮搜图话题带偏
+  //    贴 media 标签（该句 personal_fact 必然为 true）——一致性校验即拦。
+  //    刻意**不含** action_write 的 personal_fact（「我叫王铭川，明天9点提醒
+  //    我开会」两句话轮合法共存），但 action_write + actionNegation（用户在
+  //    拒绝/取消写操作）是自相矛盾——真机探针实证「以后别提醒我开会的事」
+  //    被判 action_write@0.92，出口闸会强迫调工具"完成动作"，有创建垃圾
+  //    提醒的实际风险，必须降级。
+  const evidence = parseEvidenceJson(result);
+  const anchor =
+    parsed.intent === "media_retrieval" || parsed.intent === "realtime_lookup"
+      ? auditEvidenceAnchor(trimmed, evidence)
+      : ("not_required" as const);
+  const understandingConflict =
+    (parsed.intent === "media_retrieval" || parsed.intent === "realtime_lookup") &&
+    (understanding?.personalFact === true || understanding?.memoryInstruction === true);
+  const writeNegationConflict =
+    (parsed.intent === "action_write" || parsed.intent === "multi_step_task") &&
+    understanding?.actionNegation === true;
+
+  let effectiveIntent: IntentLabel = parsed.intent;
+  if (anchor === "invalid" || understandingConflict || writeNegationConflict) {
+    effectiveIntent = "chat";
+  }
+
+  const plan = routePlanForIntent(effectiveIntent);
   const reasons: string[] = [
     `llm_intent:${parsed.intent}@${parsed.confidence.toFixed(2)}`,
     `route_table:${plan.plane}/${plan.capabilities.join("+") || "none"}/b${plan.budget}/${plan.tier}`,
   ];
+  if (anchor !== "not_required") reasons.push(`evidence_anchor:${anchor}`);
+  if (understandingConflict) reasons.push("understanding_conflict:personal_fact_vs_action_intent");
+  if (writeNegationConflict) reasons.push("understanding_conflict:write_negation_vs_write_intent");
+  if (effectiveIntent !== parsed.intent) {
+    reasons.push(
+      anchor === "invalid"
+        ? "route_downgrade:evidence_not_anchored_in_message"
+        : "route_downgrade:understanding_conflict",
+    );
+    console.info(
+      `[LlmTaskRouter] 标签审计改判: ${parsed.intent} → ${effectiveIntent} (anchor=${anchor}, conflict=${understandingConflict}, negation=${writeNegationConflict}) "${trimmed.slice(0, 40)}"`,
+    );
+  }
 
   const plane = plan.plane;
   const capabilities = [...plan.capabilities];
@@ -240,36 +327,59 @@ export async function routeTurnByLlm(
   let querySource: "model" | "model+entity_merge" | "fallback_composed" = searchQuery
     ? "model"
     : "fallback_composed";
-  if (parsed.intent === "realtime_lookup") {
-    const base = searchQuery ?? trimmed;
-    const composed = composeRealtimeSearchQuery(base, [
-      ...recentUserTurns,
-      ...entityContextLines,
-    ]);
-    if (composed && composed !== base) {
-      reasons.push("search_query:entity_resolved_by_code");
-      if (searchQuery) querySource = "model+entity_merge";
+  if (effectiveIntent === "realtime_lookup") {
+    // 确定性网页预执行只认「证据锚定 ok」（2026-10-12 架构收敛：预执行是
+    // 加速路径不是正确性来源）。anchor=missing（模型没给 evidence）时不再
+    // 无条件预执行——真机探针实证：「再来点」被误标 realtime 时代码拿着
+    // 媒体形状查询词烧网页搜索。现在锚定缺失 → 不预执行，执行模型在
+    // search+media 全模态可见束里自选工具（realtime 出口闸仍兜底「零工具
+    // 直答凭记忆」的原始事故形态）。正确性不再依赖 L1 的 schema 服从度。
+    if (anchor === "ok") {
+      const base = searchQuery ?? trimmed;
+      const composed = composeRealtimeSearchQuery(base, [
+        ...recentUserTurns,
+        ...entityContextLines,
+      ]);
+      if (composed && composed !== base) {
+        reasons.push("search_query:entity_resolved_by_code");
+        if (searchQuery) querySource = "model+entity_merge";
+      }
+      searchQuery = composed || undefined;
+      // 可观测性（2026-09-13）：查询词来源可见，兜底失手才能被监控与回归
+      console.info(
+        `[LlmTaskRouter] realtime search_query (${querySource}): "${searchQuery}"`,
+      );
+    } else {
+      reasons.push("search_query:withheld_unanchored");
+      searchQuery = undefined;
+      console.info(
+        `[LlmTaskRouter] realtime 预执行跳过（anchor=${anchor}），执行模型自决工具与模态`,
+      );
     }
-    searchQuery = composed || undefined;
-    // 可观测性（2026-09-13）：查询词来源可见，兜底失手才能被监控与回归
-    console.info(
-      `[LlmTaskRouter] realtime search_query (${querySource}): "${searchQuery}"`,
-    );
   }
   // media 轮查询词的结构性保证（2026-10-10，与 realtime 同构的根治半边）：
   // 此前 media_retrieval 只贴标签不产查询词，「要不要搜图/怎么拼查询词」全交给
   // flash 档模型现场决定 → 同一句话时而出图时而零工具直答（真实事故：马尔代夫
   // 搜图轮 03:05 出图 / 03:07 凭想象列文字清单）。现在代码剥命令词构造查询词，
-  // agent-core 拿它确定性预执行媒体搜索——「判 media → 查询词必非空 → 必真搜」
-  // 全程代码保证，与 realtime 的「必先搜」完全对称。
-  if (parsed.intent === "media_retrieval") {
-    const base = searchQuery ?? trimmed;
-    searchQuery = composeMediaSearchQuery(base, [
-      ...recentUserTurns,
-      ...entityContextLines,
-    ]);
-    reasons.push("media_query:composed_by_code");
-    console.info(`[LlmTaskRouter] media search_query: "${searchQuery}"`);
+  // agent-core 拿它确定性预执行媒体搜索——与 realtime 同一闸门（2026-10-12）：
+  // **预执行只认证据锚定 ok**；anchor=missing 时不预执行，执行模型在 media+search
+  // 全模态束里自决（media 出口闸仍兜底零工具直答）。
+  if (effectiveIntent === "media_retrieval") {
+    if (anchor === "ok") {
+      const base = searchQuery ?? trimmed;
+      searchQuery = composeMediaSearchQuery(base, [
+        ...recentUserTurns,
+        ...entityContextLines,
+      ]);
+      reasons.push("media_query:composed_by_code");
+      console.info(`[LlmTaskRouter] media search_query: "${searchQuery}"`);
+    } else {
+      reasons.push("media_query:withheld_unanchored");
+      searchQuery = undefined;
+      console.info(
+        `[LlmTaskRouter] media 预执行跳过（anchor=${anchor}），执行模型自决工具与模态`,
+      );
+    }
   }
   // travel 轮调用参数的结构性保证（2026-10-10 P1，与 media 同构）：判出
   // travel_planning 后，「用什么参数调 travel.plan-itinerary」由代码构造
@@ -292,7 +402,7 @@ export async function routeTurnByLlm(
   const decision: RouteDecision = {
     reasons,
     segmentable: plane === "chat",
-    intent: parsed.intent,
+    intent: effectiveIntent,
     searchQuery,
     confidence: parsed.confidence,
     plane,

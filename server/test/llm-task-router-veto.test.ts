@@ -78,15 +78,17 @@ test("L1 不吞掉带诉求的句子：比特币价格句进语义分类并落�
   const decision = await routeTurnByLlm(provider, "sess-l0-2", "现在比特币多少钱一个");
   assert.equal(calls.count, 1, "应进入 L1 语义分类");
   assert.equal(decision.plane, "task");
-  assert.deepEqual(decision.capabilities, ["search"]);
+  assert.deepEqual(decision.capabilities, ["search", "media"]);
 });
 
-test("L1+L2：realtime_lookup 按路由表映射任务面（轻预算 Flash 档）", async () => {
+test("L1+L2：realtime_lookup 按路由表映射任务面（轻预算 Flash 档，search+media 全模态束）", async () => {
   const { provider } = fakeProvider("realtime_lookup");
   const decision = await routeTurnByLlm(provider, "sess-l1-1", "帮我扒扒景甜");
   assert.equal(decision.plane, "task");
   assert.equal(decision.plane, "task");
-  assert.deepEqual(decision.capabilities, ["search"]);
+  // 2026-10-12 架构收敛：外部查证是一个族，模态（网页/图片/视频）选择归还
+  // 执行模型——realtime 束必须含 media，否则标签误标时正确工具不可见。
+  assert.deepEqual(decision.capabilities, ["search", "media"]);
   assert.equal(decision.budget, TASK_PLANE_FALLBACK_BUDGET, "router-first 下最低 3 波");
   assert.equal(decision.tier, "flash");
   assert.ok(decision.reasons.some((r) => r.includes("route_table:task/search")));

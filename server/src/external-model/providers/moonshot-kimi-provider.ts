@@ -68,7 +68,10 @@ export class MoonshotKimiProvider extends AbstractChatProvider {
       providerId: this.id,
       model: ctx.model,
       baseSystemPrompt: ctx.overrideSys || SYSTEM_PROMPT,
-      memory: ctx.overrideSys ? undefined : ctx.promptMemory,
+      // 2026-10-11 修复：与 minimax-provider 同款问题——minimal（overrideSys）路径
+      // 把 memory 丢掉，【当前时间】块/证据/档案从未进请求。与 openai-official 对齐，
+      // memory 恒透传（assembler 只对有内容的块追加，空 memory 行为不变）。
+      memory: ctx.promptMemory,
       finalizeOptions: {
         tools: Boolean(ctx.tools && !ctx.overrideSys),
         agentAccessMode: ctx.streamOpts?.agentAccessMode,

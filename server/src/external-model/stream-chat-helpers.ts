@@ -69,6 +69,12 @@ export type StreamConsumeOptions = {
   onContentDelta?: (delta: string) => void;
   /** 工具调用累积完成时触发（按 index 升序逐个调用） */
   onToolCallsComplete?: (calls: NormalToolCall[]) => void;
+  /**
+   * 流中**首个携带 tool_call 增量的 chunk** 到达时触发（仅一次，早于流结束）。
+   * 「先一句话后结果」闸门配套（2026-10-11）：上层据此知道本波要调工具，
+   * 可停止直推后续 content delta（关闸前已流出的文本 = 模型的自然确认语）。
+   */
+  onToolCallDeltaSeen?: () => void;
   /** 是否打印「content 为空、reasoning 兜底」等诊断日志。默认 true；`STREAM_CHAT_HELPERS_DEBUG=0` 关闭 */
   debug?: boolean;
   /** 标识 provider（"moonshot-kimi" / "openai" / "failover" / "anthropic" …） */
@@ -560,6 +566,8 @@ export async function consumeNormalizedStream(
   let reasoning = "";
   let finishReason: string | null = null;
   let usage: NormalUsage | undefined;
+  // 流中是否已出现过 tool_call 增量（onToolCallDeltaSeen 只发一次）
+  let toolCallDeltaSeen = false;
   const toolAccByIndex = new Map<number, NormalToolCall>();
   // content 内联思考块净化：部分思考型模型把 `<think>…</think>` 直接写进 content
   // （而非独立 reasoning 字段），在咽喉处统一剥除，保证所有 consumer 拿到的
@@ -633,6 +641,12 @@ export async function consumeNormalizedStream(
         finishReason = chunk.finishReason;
       }
       if (chunk.toolCalls && chunk.toolCalls.length > 0) {
+        // 首个 tool_call 增量即通知（流中时点，非流末）：闸门类 consumer 依赖
+        // 这个时点区分「确认语文本」与「工具调用之后的伴随文本」。
+        if (!toolCallDeltaSeen) {
+          toolCallDeltaSeen = true;
+          options.onToolCallDeltaSeen?.();
+        }
         for (const tc of chunk.toolCalls) {
           const idx = typeof tc.index === "number" ? tc.index : 0;
           let acc = toolAccByIndex.get(idx);
@@ -1430,7 +1444,7 @@ const SENTENCE_END_RE = /[。！？!?\n]/;
  * 误删防护（宁漏勿残）：句内出现代码/URL/技术名词（豁免清单）或整句超长 → 放行。
  */
 const META_DECISION_HARD_RE =
-  /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|已注入[^。！？\n]{0,10}(?:提示|时间|上下文)|调用\s*clock)/;
+  /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|已注入[^。！？\n]{0,10}(?:提示|时间|上下文)|\[系统注入\]|\[system[-_ ]?context\]|（system注入）|已为你联网检索|已为你查到|已联网检索到|调用\s*clock)/;
 /** 软判据：整句就是一句光秃秃的动作宣告（「直接调用。」「先调用工具。」），
  *  只在整句≤8 字且没有别的内容时删——避免误伤「直接调用这个接口就行」这类正文。 */
 const META_DECISION_SOFT_RE =

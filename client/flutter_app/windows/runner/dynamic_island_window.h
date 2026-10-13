@@ -97,8 +97,10 @@ class DynamicIslandWindow {
   void SetVoiceTalkMode(bool enabled);
   /// 提醒 attention 动画。hold_s = 保持高亮段时长（秒），<=0 用默认档；
   /// 到点提醒传长驻留（如 26s），点击胶囊可提前收口（并回 kAction「打开日程」）。
+  /// urgent = 全屏打断白名单（2026-10-13 定调）：仅「需要立马知道」的事
+  /// （外卖等高优消息、日程到点）可破屏；非紧急档在抑制中整体跳过。
   void StartAttention(const std::string& title, const std::string& trailing,
-                      double hold_s = 0.0);
+                      double hold_s = 0.0, bool urgent = true);
   /// attention 胶囊宽度自适应（2026-10-07）：按提醒文本实测宽度取档，
   /// 钳位 [kAttentionCapsuleW, kAttentionMaxCapsuleW]（逻辑 px）。
   int MeasureAttentionCapsuleW(const std::wstring& title,
@@ -220,6 +222,9 @@ class DynamicIslandWindow {
   std::wstring attention_title_;    // 高亮时显示的标题（可选，空=沿用当前 entry）
   std::wstring attention_trailing_;
   int attention_capsule_w_ = 0;  // 本次 attention 实测宽（逻辑 px；0=未测量）
+  // 全屏打断白名单（2026-10-13 定调）：仅 urgent attention 豁免全屏抑制，
+  // 非紧急档（预告/普通消息）在抑制中由 StartAttention 直接跳过。
+  bool attention_urgent_ = true;
 
   // 鼠标交互
   bool hovering_ = false;

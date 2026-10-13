@@ -23,6 +23,10 @@
 const MARKER_TOKEN_RE =
   /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|CHAT_MEDIA_START|CHAT_MEDIA_END|IMAGE_RESULT_START|IMAGE_RESULT_END|NEXT_UP_START|NEXT_UP_END)\]/g;
 
+/** 模型写歪的声明变体：`[RENDER_HINT]:brief` / `[RENDER_AS]: brief`（括号在冒号前
+ *  闭合，2026-10-11 实机探针实证透进气泡）。规范形由 MARKER_TOKEN_RE 覆盖。 */
+const RENDER_DECL_VARIANT_RE = /\[RENDER_(?:HINT|AS)\]\s*[:：]\s*[A-Za-z_]+\]?/g;
+
 /** 独占一行的全大写方括号标记（防御未来新增的服务端标记类型） */
 const MARKER_LINE_RE = /^[ \t]*\[[A-Z_]+(?::[A-Za-z_]+)?\][ \t]*$/;
 
@@ -103,22 +107,22 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
       inNextUpBlock = false;
       const after = line
         .slice(endIdx + NEXT_UP_END_LINE.length)
-        .replace(MARKER_TOKEN_RE, "");
+        .replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
       return after.trim() ? after : null;
     }
     if (startIdx !== -1) {
-      const before = line.slice(0, startIdx).replace(MARKER_TOKEN_RE, "");
+      const before = line.slice(0, startIdx).replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
       if (endIdx > startIdx) {
         const after = line
           .slice(endIdx + NEXT_UP_END_LINE.length)
-          .replace(MARKER_TOKEN_RE, "");
+          .replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
         const merged = `${before}${after}`;
         return merged.trim() ? merged : null;
       }
       inNextUpBlock = true;
       return before.trim() ? before : null;
     }
-    const stripped = line.replace(MARKER_TOKEN_RE, "");
+    const stripped = line.replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
     if (stripped !== line) {
       if (STRUCTURAL_MARKER_TOKEN_RE.test(line)) sawStructured = true;
       // 行内嵌标记被剥离：剩余纯空白则整行丢弃，否则发剩余文本

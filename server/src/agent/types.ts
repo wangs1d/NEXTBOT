@@ -22,4 +22,12 @@ export type AgentReply = {
    * 结清前台处理状态且不落正文气泡（任务回执/结果由任务面事件独立承载）。
    */
   taskDispatched?: boolean;
+  /**
+   * 答案留存（2026-10-13 根修：工具轮的答案不进流式通道）：工具循环对执行过
+   * 实质工具的轮次未直推正文（或前置检索证据轮从第一波留存），text 是随 done
+   * 一次性下发的答案本体。WS 层据此把 done 定为整段替换呈现（finalText
+   * ReplacesStream），跳过「说话算话」残差裁决——残差不是出口重写分歧，
+   * 而是从未流出过的答案。
+   */
+  answerStreamHeld?: boolean;
 };

@@ -296,6 +296,38 @@ final RegExp _internalFrameLineRe = RegExp(
   caseSensitive: false,
 );
 
+// ── recap 回显块（2026-10-12 摘要直出事故，与服务端 isRecapEchoText 同构）──────
+// 模型把线程里的 [session-recap] 摘要块整块复述出来时，出口只剥掉标签行，正文
+// （"Earlier conversation recap:" 标题 + 「（本块为历史摘要…」视图提示行 + 条目）
+// 会照发。判据与服务端一致：提示行「（本块为历史摘要」只存在于 LLM 视图、存储层
+// 永远没有 → 正文含它必是回显；无 [session-recap] 标签却以标题行开头同理。
+final RegExp _recapEchoTitleLineRe = RegExp(
+  "^[ \\t]*Earlier conversation recap:[ \\t]*(?:\\n|\$)",
+  multiLine: true,
+  caseSensitive: false,
+);
+final RegExp _recapEchoHintRe = RegExp(
+  "（本块为历史摘要[\\s\\S]*?(?:）|\$)",
+);
+
+/// 剥离 recap 回显正文；整条就是回显时返回空串（调用方据此不落气泡）。
+String stripRecapEchoBlocks(String text) {
+  if (text.isEmpty) return text;
+  final String trimmed = text.trimLeft();
+  final bool tagged = trimmed.startsWith("[session-recap]");
+  if (!tagged && trimmed.startsWith("Earlier conversation recap:")) {
+    return "";
+  }
+  if (!text.contains("Earlier conversation recap:") &&
+      !text.contains("（本块为历史摘要")) {
+    return text;
+  }
+  return text
+      .replaceAll(_recapEchoHintRe, "")
+      .replaceAll(_recapEchoTitleLineRe, "")
+      .replaceAll(RegExp(r"\n{3,}"), "\n\n");
+}
+
 /// 文本开头的连续内部帧（可能连着多个），剥帧留正文。
 final RegExp _internalFrameLeadingRe = RegExp(
   "^[ \\t]*(?:\\[(?:${_internalFrameAlt})[^\\]]*\\][ \\t:：—–-]*)+",
@@ -329,11 +361,13 @@ bool isInternalFrameText(String text) {
 }
 
 String stripAssistantProtocolFrames(String text) {
-  // 先剥线程内部帧（整块围栏 / 帧整行 / 开头连续帧），再剥行首时间戳帧、
-  // 删整行时间戳帧，最后剥 DSML 工具调用标记。
+  // 先剥 recap 回显块，再剥线程内部帧（整块围栏 / 帧整行 / 开头连续帧），
+  // 再剥行首时间戳帧、删整行时间戳帧，最后剥 DSML 工具调用标记。
   return stripDsmlToolCallMarkup(
     stripAllTimestampFrameLines(
-      stripAssistantTimestampFrames(stripInternalFrames(text)),
+      stripAssistantTimestampFrames(
+        stripInternalFrames(stripRecapEchoBlocks(text)),
+      ),
     ),
   );
 }

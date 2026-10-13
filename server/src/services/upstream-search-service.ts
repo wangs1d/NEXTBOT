@@ -823,6 +823,59 @@ export class UpstreamSearchService {
     return result;
   }
 
+  /**
+   * B站视频评论（真实观众留言）。
+   *
+   * 为什么拿它当 POI 口碑源：中文 UGC 里结构化评论几乎都要登录态
+   * （小红书 / 大众点评 / 携程），而 B站公开视频的评论区带首页 cookie + 站内
+   * Referer 即可读——且「某地点相关视频下的评论」本来就是去过的人说的话，
+   * 与 POI 的相关性天然成立。评论区关掉或视频太冷门时返回空数组。
+   *
+   * @param videoUrl 视频播放页（av 号；BV 号会先经 view 接口换算）
+   */
+  async searchBilibiliReplies(
+    videoUrl: string,
+    limit = 6,
+  ): Promise<Array<{ author: string; text: string; like: number; pageUrl: string }>> {
+    const aid = await resolveBilibiliAid(videoUrl);
+    if (!aid) return [];
+    const bounded = Math.max(1, Math.min(20, limit));
+    try {
+      const cookie = await resolveBilibiliCookie();
+      const res = await fetch(
+        `https://api.bilibili.com/x/v2/reply?type=1&oid=${aid}&sort=2&ps=${bounded}&pn=1`,
+        {
+          headers: {
+            "user-agent": process.env.WEB_FETCH_USER_AGENT ?? BILIBILI_UA,
+            referer: `https://www.bilibili.com/video/av${aid}`,
+            ...(cookie ? { cookie } : {}),
+          },
+          signal: AbortSignal.timeout(8_000),
+        },
+      );
+      const json = (await res.json()) as {
+        code?: number;
+        data?: { replies?: Array<{ member?: { uname?: string }; content?: { message?: string }; like?: number }> };
+      };
+      if (json.code !== 0) return [];
+      return (json.data?.replies ?? [])
+        .map((r) => ({
+          author: r.member?.uname?.trim() || "B站用户",
+          // B站表情是 [妙啊] / [呲牙] 这类方括号标签，直接摘出来读起来像乱码；
+          // 视频本身的弹幕式短评也偏噪声，所以正文门槛放到 6 字。
+          text: String(r.content?.message ?? "")
+            .replace(/\[[^[\]]{1,12}\]/g, "")
+            .replace(/\s+/g, " ")
+            .trim(),
+          like: r.like ?? 0,
+          pageUrl: `https://www.bilibili.com/video/av${aid}`,
+        }))
+        .filter((r) => r.text.length >= 6);
+    } catch {
+      return [];
+    }
+  }
+
   async searchWechat(query: string, limit = 10): Promise<{
     provider: string;
     raw: string;
@@ -1502,6 +1555,28 @@ function queryEntityTokens(query: string): string[] {
 // cookie 再调接口即可放行（真实测试实证）。cookie 进程级缓存 30 分钟。
 let biliCookieCache: { cookie: string; at: number } | null = null;
 
+const BILIBILI_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+
+/** 视频播放页 → av 号；BV 号先经 view 接口换算（B站评论接口只吃 oid=aid） */
+async function resolveBilibiliAid(videoUrl: string): Promise<string | null> {
+  const url = String(videoUrl ?? "");
+  const av = /\/video\/av(\d+)/i.exec(url) ?? /[?&]aid=(\d+)/.exec(url);
+  if (av) return av[1]!;
+  const bv = /\/video\/(BV[0-9A-Za-z]{10})/.exec(url);
+  if (!bv) return null;
+  try {
+    const res = await fetch(`https://api.bilibili.com/x/web-interface/view?bvid=${bv[1]}`, {
+      headers: { "user-agent": BILIBILI_UA },
+      signal: AbortSignal.timeout(6_000),
+    });
+    const json = (await res.json()) as { code?: number; data?: { aid?: number } };
+    return json.code === 0 && json.data?.aid ? String(json.data.aid) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveBilibiliCookie(): Promise<string> {
   if (biliCookieCache && Date.now() - biliCookieCache.at < 30 * 60 * 1000) {
     return biliCookieCache.cookie;
@@ -1509,9 +1584,7 @@ async function resolveBilibiliCookie(): Promise<string> {
   try {
     const res = await fetch("https://www.bilibili.com/", {
       headers: {
-        "user-agent":
-          process.env.WEB_FETCH_USER_AGENT ??
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+        "user-agent": process.env.WEB_FETCH_USER_AGENT ?? BILIBILI_UA,
       },
       redirect: "follow",
       signal: AbortSignal.timeout(5_000),

@@ -20,24 +20,6 @@ const addImageSchema = poiBodySchema.extend({
   takenAt: z.string().max(40).optional(),
 });
 
-const addReviewSchema = poiBodySchema.extend({
-  author: z.string().max(60).optional(),
-  rating: z.coerce.number().min(1).max(5),
-  text: z.string().min(1).max(2000),
-  images: z.array(z.string().max(500)).max(9).optional(),
-  visitedDate: z.string().max(20).optional(),
-  source: z.enum(["user", "imported"]).optional(),
-});
-
-const addVideoSchema = poiBodySchema.extend({
-  platform: z.string().max(30),
-  title: z.string().max(200),
-  author: z.string().max(80),
-  durationSeconds: z.coerce.number().int().min(0).optional(),
-  thumbnailUrl: z.string().max(1000).optional(),
-  playPageUrl: z.string().url().max(1000),
-});
-
 const updateImageSchema = poiBodySchema.extend({
   url: z.string().min(1).max(1000),
   source: z.enum(["user", "curated", "wikimedia"]).optional(),
@@ -47,21 +29,6 @@ const updateImageSchema = poiBodySchema.extend({
 
 const deleteByUrlSchema = poiBodySchema.extend({
   url: z.string().min(1).max(1000),
-});
-
-const updateReviewSchema = poiBodySchema.extend({
-  reviewId: z.string().min(1).max(80),
-  rating: z.coerce.number().min(1).max(5).optional(),
-  text: z.string().min(1).max(2000).optional(),
-  author: z.string().max(60).optional(),
-});
-
-const deleteReviewSchema = poiBodySchema.extend({
-  reviewId: z.string().min(1).max(80),
-});
-
-const deleteVideoSchema = poiBodySchema.extend({
-  playPageUrl: z.string().min(1).max(1000),
 });
 
 const backfillSchema = poiBodySchema;
@@ -116,8 +83,6 @@ export function registerTravelMediaRoutes(
       latitude: entry.latitude ?? latitude,
       longitude: entry.longitude ?? longitude,
       images: entry.images,
-      reviews: entry.reviews,
-      videos: entry.videos,
       aggregate: travelMediaStore.aggregate(type, name),
     };
   });
@@ -137,40 +102,6 @@ export function registerTravelMediaRoutes(
     );
     if (!result.ok) return reply.code(400).send(result);
     return { ok: true, image: result.image, aggregate: travelMediaStore.aggregate(type, name) };
-  });
-
-  /** 写入评论（1-5 分 + 文本，可附图） */
-  app.post("/travel/media/reviews", async (request, reply) => {
-    const parsed = addReviewSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
-    }
-    const { name, type, latitude, longitude, ...review } = parsed.data;
-    const result = travelMediaStore.addReview(
-      type,
-      name,
-      review,
-      latitude !== undefined && longitude !== undefined ? { latitude, longitude } : undefined,
-    );
-    if (!result.ok) return reply.code(400).send(result);
-    return { ok: true, review: result.review, aggregate: travelMediaStore.aggregate(type, name) };
-  });
-
-  /** 登记视频：只存元数据 + 封面 + 播放页链接（抖音/小红书/B站等，不自托管文件） */
-  app.post("/travel/media/videos", async (request, reply) => {
-    const parsed = addVideoSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
-    }
-    const { name, type, latitude, longitude, ...video } = parsed.data;
-    const result = travelMediaStore.addVideo(
-      type,
-      name,
-      video,
-      latitude !== undefined && longitude !== undefined ? { latitude, longitude } : undefined,
-    );
-    if (!result.ok) return reply.code(400).send(result);
-    return { ok: true, aggregate: travelMediaStore.aggregate(type, name) };
   });
 
   // ======================== 管理端：更新 / 删除 / 回填 ========================
@@ -199,43 +130,7 @@ export function registerTravelMediaRoutes(
     return { ok: true, aggregate: travelMediaStore.aggregate(type, name) };
   });
 
-  /** 更新评论（评分/文本/作者） */
-  app.put("/travel/media/reviews", async (request, reply) => {
-    const parsed = updateReviewSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
-    }
-    const { name, type, ...patch } = parsed.data;
-    const updated = travelMediaStore.updateReview(type, name, patch.reviewId, patch);
-    if (!updated) return reply.code(404).send({ ok: false, error: "评论不存在或参数非法" });
-    return { ok: true, review: updated, aggregate: travelMediaStore.aggregate(type, name) };
-  });
-
-  /** 删除评论 */
-  app.delete("/travel/media/reviews", async (request, reply) => {
-    const parsed = deleteReviewSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
-    }
-    const { name, type, reviewId } = parsed.data;
-    const removed = travelMediaStore.removeReview(type, name, reviewId);
-    if (!removed) return reply.code(404).send({ ok: false, error: "评论不存在" });
-    return { ok: true, aggregate: travelMediaStore.aggregate(type, name) };
-  });
-
-  /** 删除视频登记 */
-  app.delete("/travel/media/videos", async (request, reply) => {
-    const parsed = deleteVideoSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
-    }
-    const { name, type, playPageUrl } = parsed.data;
-    const removed = travelMediaStore.removeVideo(type, name, playPageUrl);
-    if (!removed) return reply.code(404).send({ ok: false, error: "视频不存在" });
-    return { ok: true, aggregate: travelMediaStore.aggregate(type, name) };
-  });
-
-  /** 手动回填单个 POI 的 Wikimedia 图片（自动回填关闭时的替代路径） */
+  /** 手动补全单个 POI 的照片（自动回填关闭时的替代路径；视频/评论能力已下线） */
   app.post("/travel/media/backfill", async (request, reply) => {
     if (!deps.travelPlanningService) {
       return reply.code(503).send({ ok: false, error: "规划服务未装配，无法回填" });
@@ -246,7 +141,7 @@ export function registerTravelMediaRoutes(
     }
     const { name, type, latitude, longitude } = parsed.data;
     try {
-      const images = await deps.travelPlanningService.backfillMediaForPoi(
+      const added = await deps.travelPlanningService.backfillMediaForPoi(
         name,
         type,
         latitude,
@@ -254,8 +149,8 @@ export function registerTravelMediaRoutes(
       );
       return {
         ok: true,
-        filled: images.length,
-        images,
+        filled: added.images,
+        added,
         aggregate: travelMediaStore.aggregate(type, name),
       };
     } catch (err) {
@@ -332,15 +227,10 @@ export function registerTravelMediaRoutes(
     endpoints: [
       "GET  /travel/media?name=&type=&latitude=&longitude=",
       "POST /travel/media/images   {name,type,dataUrl|url,source?,uploader?}",
-      "POST /travel/media/reviews  {name,type,rating,text,author?}",
-      "POST /travel/media/videos   {name,type,platform,title,author,playPageUrl}",
       "GET  /travel/media/assets/:dir/:fileName",
       "GET  /travel/media/remote?u=<wikimedia 图床 URL>",
       "PUT    /travel/media/images   {name,type,url,source?,takenAt?,uploader?}",
       "DELETE /travel/media/images   {name,type,url}",
-      "PUT    /travel/media/reviews  {name,type,reviewId,rating?,text?,author?}",
-      "DELETE /travel/media/reviews  {name,type,reviewId}",
-      "DELETE /travel/media/videos   {name,type,playPageUrl}",
       "POST   /travel/media/backfill {name,type,latitude?,longitude?}",
     ],
     note: "poiKey 归一化规则见 travel-media-store.ts poiKeyOf()，上传与查询需使用同一 name/type",

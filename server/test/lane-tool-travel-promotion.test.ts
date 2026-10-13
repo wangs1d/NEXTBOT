@@ -95,3 +95,56 @@ test("族规模受控：预载上限 12 内（DOMAIN_PRELOAD_CAP 对齐域拉取
   );
   for (const [, size] of biggest) assert.ok(size <= 20, `域族异常膨胀: ${size}`);
 });
+
+/* ────────────────────────────────────────────────────────────
+ * 行程规划超时预算（2026-10-12 贵阳轮「行程卡整轮缺席」根因回归）
+ *
+ * 事故链：travel.plan-itinerary 冷启动（缓存未命中）实测 20~57s，技能自身
+ * 声明 timeoutMs=120s，但该声明此前只被 skill-sandbox 消费；工具循环只认
+ * 自己的硬编码超时表 → travel 落 30s 默认值被击杀（ok=false）→ 行程回执
+ * 缺失 → 行程卡整轮缺席 + 出口闸判「工具全败」→ 模型手写逐日行程直穿气泡。
+ *
+ * 断言把「技能声明」与「工具循环实取超时」锁在一起：任一侧漂移即红。
+ * ──────────────────────────────────────────────────────────── */
+
+test("行程规划：工具循环实取超时 ≥ 技能声明（不得被 30s 默认值截断）", async () => {
+  const { resolveToolExecutionTimeoutMs } = await import(
+    "../src/external-model/openai-compatible-tool-loop.js"
+  );
+  const skillManager = new (SkillManager as new () => InstanceType<typeof SkillManager>)();
+  const travelPlanningService = new (PlanningService as new () => InstanceType<typeof PlanningService>)();
+  registerTravelPlanningBuiltinSkills(
+    (skill) => skillManager.register(skill),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- 测试最小 Deps（无 IO）
+    { travelPlanningService } as any,
+  );
+  const manifest = skillManager
+    .list(true)
+    .find((m) => m.name === "travel.plan-itinerary");
+  assert.ok(manifest, "travel.plan-itinerary 应已通过真实注册链注册");
+  const declared = manifest!.timeoutMs;
+  assert.equal(declared, 120_000, "技能声明超时应为 120s（冷启动实测 20~57s）");
+
+  delete process.env.TOOL_TIMEOUT_TRAVEL_PLAN_MS;
+  const effective = resolveToolExecutionTimeoutMs("travel.plan-itinerary");
+  assert.ok(
+    effective >= declared!,
+    `工具循环实取超时 ${effective}ms 小于技能声明 ${declared}ms —— 会被 30s 默认值击杀`,
+  );
+});
+
+test("行程规划超时可经 env 覆盖，且不破坏快工具的 30s 钳制语义", async () => {
+  const { resolveToolExecutionTimeoutMs } = await import(
+    "../src/external-model/openai-compatible-tool-loop.js"
+  );
+  process.env.TOOL_TIMEOUT_TRAVEL_PLAN_MS = "45000";
+  try {
+    assert.equal(resolveToolExecutionTimeoutMs("travel.plan-itinerary"), 45_000);
+  } finally {
+    delete process.env.TOOL_TIMEOUT_TRAVEL_PLAN_MS;
+  }
+  // 对照：快工具仍走各自分级档（classTimeouts 的 Math.min(classMs, defaultMs) 未被绕过）
+  assert.equal(resolveToolExecutionTimeoutMs("search_web"), 6_500);
+  assert.equal(resolveToolExecutionTimeoutMs("some_unknown_tool"), 30_000);
+});
+

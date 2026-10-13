@@ -39,7 +39,9 @@ test("路由表：对话面三标签零工具；实时/媒体轻预算任务面�
 
   const realtime = routePlanForIntent("realtime_lookup");
   assert.equal(realtime.plane, "task");
-  assert.deepEqual(realtime.capabilities, ["search"]);
+  // 2026-10-12 架构收敛：外部查证是一个族，模态（网页/图片/视频）选择归还
+  // 执行模型——realtime 束必须含 media，否则标签误标时正确工具不可见。
+  assert.deepEqual(realtime.capabilities, ["search", "media"]);
   assert.equal(realtime.budget, 3, "router-first 下最低 3 波：discover→call→作答");
   assert.equal(realtime.tier, "flash", "单点查询用 Flash 档，省 token");
 

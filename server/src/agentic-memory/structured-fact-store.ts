@@ -195,6 +195,9 @@ export class StructuredFactStore {
     const actorId = input.actorId?.trim();
     const entity = normalizeFactField(input.entity ?? "user") || "user";
     const field = canonicalFactField(input.field ?? "");
+    // 值规范（对齐主流口径）：无主语短值由抽取侧语义改写保证（unified-extractor
+    // 协议约束「存兴义不存我在兴义」），本层不做正则剥字——正则剥「我是做后端的」
+    // 会剥坏语义，LLM 抽取时改写成「职业:后端开发」才是正确姿势
     const value = input.value?.trim().replace(/\s+/g, " ");
     if (!actorId || !field || !value || value.length > 80) return null;
     if (isEphemeralActorId(actorId)) return null;
@@ -375,7 +378,13 @@ export class StructuredFactStore {
         history.length > 0
           ? `（此前：${history[0]!.value}，${history[0]!.updatedAt.slice(5, 10).replace("-", "/")}）`
           : "";
-      return `- ${f.field}：${f.value}（${updatedAt} 更新）${historyLine}${grounded}`;
+      // 低置信标注（ChatGPT 式 Confidence，2026-10-11）：只标低置信条目，
+      // 提示模型转述时不要把话说满——治「画像精确度/用词准确性」
+      const lowConfidence =
+        f.confidence !== null && f.confidence < 0.6
+          ? "〔置信度低：据你随口提及，转述时不要把话说满〕"
+          : "";
+      return `- ${f.field}：${f.value}（${updatedAt} 更新）${historyLine}${grounded}${lowConfidence}`;
     });
     return [
       "【用户档案·结构化事实】",
@@ -389,6 +398,41 @@ export class StructuredFactStore {
       "不要在回复里连名带姓直呼用户）",
       ...lines,
     ].join("\n");
+  }
+
+  /**
+   * 字段级遗忘（Mem0 DELETE 语义，2026-10-11）：用户明确要求忘掉某字段
+   * （「别记我住哪了」「把那个忘了」）时，该字段全部 active 值 supersede
+   * 下线（superseded_by='forget'），历史行保留可追溯（与隐私 purge 不同，
+   * 这不是数据销毁而是档案修正）。返回下线条数；字段无效返回 null。
+   */
+  clearFact(
+    actorId: string,
+    field: string,
+    opts?: { entity?: string },
+  ): number | null {
+    const actor = actorId?.trim();
+    const canonical = canonicalFactField(field ?? "");
+    const entity = normalizeFactField(opts?.entity ?? "user") || "user";
+    if (!actor || !canonical) return null;
+    const now = new Date().toISOString();
+    const run = this.db.transaction((): number => {
+      const actives = this.db
+        .prepare(
+          `SELECT id FROM structured_facts
+           WHERE actor_id = ? AND entity = ? AND field = ? AND status = 'active'`,
+        )
+        .all(actor, entity, canonical) as Array<{ id: string }>;
+      if (actives.length === 0) return 0;
+      const clear = this.db.prepare(
+        `UPDATE structured_facts
+         SET status = 'superseded', superseded_at = ?, superseded_by = 'forget'
+         WHERE id = ? AND status = 'active'`,
+      );
+      for (const row of actives) clear.run(now, row.id);
+      return actives.length;
+    });
+    return run();
   }
 
   /** actor 级清理（memory-clear-service 级联调用，隐私闭环） */

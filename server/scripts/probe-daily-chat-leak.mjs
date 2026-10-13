@@ -33,30 +33,29 @@ const BASE_PROMPTS = [
   "晚安",
 ];
 const ONLY = process.env.LEAK_ONLY?.trim();
-const PROMPTS = ONLY ? [ONLY] : BASE_PROMPTS;
+const PROMPTS = ONLY
+  ? [ONLY]
+  : process.env.LEAK_PROMPTS?.trim()
+    ? process.env.LEAK_PROMPTS.split("|").map((s) => s.trim()).filter(Boolean)
+    : BASE_PROMPTS;
 
-/** 泄漏规则：name + 正则。命中会打印上下文供人工复核。 */
+/** 泄漏规则：name + 正则 + scope。scope="stream" 只判流式气泡视图——
+ *  协议块（AGENT_RESULT_CARD / RENDER_HINT）出现在 assistant_done.finalText
+ *  是**合法渲染载荷**（客户端解析渲染），只有透进流式气泡才算泄漏。 */
 const LEAK_RULES = [
-  { name: "元决策自述", re: /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|直接调用。|调用\s*clock)/ },
-  { name: "元术语独白", re: /(对话脑|执行脑|规划任务|已接手|后台处理|正在处理|上一轮转入|turnIntent|routeConfidence)/ },
-  { name: "内部控制帧", re: /(<\s*\/?\s*system(?:-reminder)?\s*>|\[STOP\s|\[话题已?切换|\[trajectory-slicing\])/i },
-  { name: "思考标签", re: /<\s*\/?\s*(?:think(?:ing)?|reasoning)\s*>/i },
-  { name: "协议标记或工具原始物", re: /(\[[A-Z_]+_(?:START|END)\]|\{\s*"(?:query|location|latitude|arguments)"\s*:|traceId[=:])/ },
-  { name: "prompt 元词汇复读", re: /(【当前时间】|【消息时间戳】|【对话时间轴】|session-recap|\[ts:\d{4}-)/ },
+  { name: "元决策自述", scope: "both", re: /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|\[系统注入\]|\[system[-_ ]?context\]|（system注入）|已为你联网检索|直接调用。|调用\s*clock)/ },
+  { name: "元术语独白", scope: "both", re: /(对话脑|执行脑|规划任务|已接手|后台处理|正在处理|上一轮转入|turnIntent|routeConfidence)/ },
+  { name: "内部控制帧", scope: "both", re: /(<\s*\/?\s*system(?:-reminder)?\s*>|\[STOP\s|\[话题已?切换|\[trajectory-slicing\])/i },
+  { name: "思考标签", scope: "both", re: /<\s*\/?\s*(?:think(?:ing)?|reasoning)\s*>/i },
+  { name: "渲染协议标记透出", scope: "stream", re: /(RENDER_HINT|RENDER_AS|\[[A-Z_]+_(?:START|END)\])/ },
+  { name: "prompt 元词汇复读", scope: "both", re: /(【当前时间】|【消息时间戳】|【对话时间轴】|session-recap|\[ts:\d{4}-)/ },
 ];
 
-const results = [];
-let ws;
-let current = null;
-
-function send(obj) {
-  ws.send(JSON.stringify(obj));
-}
-
-function checkLeaks(text) {
+function checkLeaks(text, scope) {
   const hits = [];
   if (!text) return hits;
   for (const rule of LEAK_RULES) {
+    if (rule.scope !== "both" && rule.scope !== scope) continue;
     const m = rule.re.exec(text);
     if (m) {
       const idx = m.index;
@@ -68,6 +67,65 @@ function checkLeaks(text) {
     }
   }
   return hits;
+}
+
+/** 时间正确性：时间问句的回答必须包含今天的日期（2026-10-11 的常见写法）。 */
+const TODAY = new Date();
+const TODAY_DATE_CN = `${TODAY.getFullYear()}年${TODAY.getMonth() + 1}月${TODAY.getDate()}日`;
+const TODAY_DATE_ISO = `${TODAY.getFullYear()}-${String(TODAY.getMonth() + 1).padStart(2, "0")}-${String(TODAY.getDate()).padStart(2, "0")}`;
+const TODAY_DATE_SLASH = `${TODAY.getFullYear()}/${String(TODAY.getMonth() + 1).padStart(2, "0")}/${String(TODAY.getDate()).padStart(2, "0")}`;
+const TIME_QUESTION_RE = /(现在.*几点|几点了|现在时间|当前时间|今天.*(几号|多少号|日期|星期|周[一二三四五六日天])|星期几|周几|礼拜几)/i;
+const sp = "\\s*"; // 模型会在数字与单位之间加空格/加粗（「2026 年 10 月 11 日」）
+const TODAY_RE = new RegExp(
+  [
+    `${TODAY.getFullYear()}${sp}年${sp}${TODAY.getMonth() + 1}${sp}月${sp}${TODAY.getDate()}${sp}日`,
+    TODAY_DATE_ISO,
+    TODAY_DATE_SLASH,
+    `${TODAY.getMonth() + 1}${sp}月${sp}${TODAY.getDate()}`,
+    `${TODAY.getMonth() + 1}-${String(TODAY.getDate()).padStart(2, "0")}`,
+  ].join("|"),
+);
+
+const CN_NUM = { 零: 0, 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
+function cnToInt(s) {
+  if (!s) return null;
+  if (/^\d+$/.test(s)) return Number(s);
+  if (s.startsWith("十")) return 10 + (s.length > 1 ? CN_NUM[s[1]] ?? 0 : 0);
+  if (s.includes("十")) {
+    const [a, b] = s.split("十");
+    return (CN_NUM[a] ?? 0) * 10 + (b ? CN_NUM[b] ?? 0 : 0);
+  }
+  return CN_NUM[s] ?? null;
+}
+
+function checkTimeAnswer(prompt, text) {
+  if (!TIME_QUESTION_RE.test(prompt) || !text) return [];
+  // 对 = ① 含今天日期；② 含接近当前时刻（±40min）的 HH:MM；
+  // ③ 含中文数字报时且小时与当前小时吻合（12 小时制，「下午一点四十」= 13:40 合格）。
+  if (TODAY_RE.test(text)) return [];
+  const nowMin = TODAY.getHours() * 60 + TODAY.getMinutes();
+  for (const m of text.matchAll(/(\d{1,2})[:：](\d{2})/g)) {
+    const hh = Number(m[1]);
+    const mm = Number(m[2]);
+    if (hh > 23 || mm > 59) continue;
+    const t = hh * 60 + mm;
+    const diff = Math.abs(t - nowMin) > 720 ? 1440 - Math.abs(t - nowMin) : Math.abs(t - nowMin);
+    if (diff <= 40) return [];
+  }
+  for (const m of text.matchAll(/([零一二两三四五六七八九十]{1,3}|\d{1,2})\s*点\s*(?:([零一二两三四五六七八九十]{1,3}|\d{1,2})\s*分?|半)?/g)) {
+    const h = cnToInt(m[1]);
+    if (h == null || h > 24) continue;
+    if ((h % 12) === (TODAY.getHours() % 12)) return [];
+  }
+  return [{ rule: "时间答案不含今天日期", matched: TODAY_DATE_CN, context: text.slice(0, 80).replace(/\s+/g, " ") }];
+}
+
+const results = [];
+let ws;
+let current = null;
+
+function send(obj) {
+  ws.send(JSON.stringify(obj));
 }
 
 function startTurn(text) {
@@ -159,9 +217,12 @@ for (let r = 0; r < REPEATS; r++) {
     const finalText = turn.finalText;
     const userVisible = turn.replaces ? finalText : streamed;
 
-    const leakStreamed = checkLeaks(streamed);
-    const leakFinal = checkLeaks(finalText);
-    const leakVisible = turn.replaces ? leakFinal : [...leakStreamed, ...leakFinal.filter((l) => !leakStreamed.some((s) => s.rule === l.rule && s.matched === l.matched))];
+    const leakStreamed = checkLeaks(streamed, "stream");
+    const leakFinal = checkLeaks(finalText, "final");
+    const timeHits = checkTimeAnswer(prompt, userVisible);
+    const leakVisible = turn.replaces
+      ? [...leakFinal, ...timeHits]
+      : [...leakStreamed, ...timeHits];
 
     results.push({ turn, streamed, finalText, leakStreamed, leakFinal, leakVisible });
 

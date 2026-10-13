@@ -19,15 +19,23 @@ import crypto from 'crypto';
 import http from 'http';
 import https from 'https';
 
+import { travelPoiDb } from './travel-poi-db.js';
+
 const IMAGE_UA = 'TravelPlanner3D/1.0 (Educational Project)';
 
 export type PoiMediaType = 'attraction' | 'hotel' | 'restaurant';
 
 export interface MediaImage {
+  /** 原始外链：本地化后保留 —— 溯源、外链失效时回溯、代理兜底都要它。
+   *  判重必须同时看 url 与 originUrl：本地化后 url 变成本机路径，
+   *  而调用方下次拿到的仍是外链，只判 url 会把同一张图反复下载 + 重复登记。*/
+  originUrl?: string;
+  /** 内容指纹（sha256 前 16 位）；本地文件按它命名，同图不同链只存一份 */
+  sha256?: string;
   /** 展示 URL（本地资源走 /travel/media/assets/...，外部为完整 URL） */
   url: string;
   /** user=用户本地上传实拍 / curated=精选图库 / wikimedia=离线回填 */
-  source: 'user' | 'curated' | 'wikimedia';
+  source: 'user' | 'curated' | 'wikimedia' | 'web';
   uploader?: string;
   takenAt?: string;
   createdAt: string;
@@ -61,8 +69,6 @@ export interface PoiMediaEntry {
   latitude?: number;
   longitude?: number;
   images: MediaImage[];
-  reviews: MediaReview[];
-  videos: MediaVideo[];
   updatedAt: string;
 }
 
@@ -76,10 +82,63 @@ export interface PoiMediaAggregate {
 }
 
 /** 图片来源展示优先级：越大越优先 */
-const SOURCE_PRIORITY: Record<MediaImage['source'], number> = { user: 3, curated: 2, wikimedia: 1 };
+const SOURCE_PRIORITY: Record<MediaImage['source'], number> = { user: 3, curated: 2, web: 1, wikimedia: 1 };
+
+/**
+ * 下载出口的图片归一化（2026-10-12，为「安装包/磁盘体积」而加）。
+ *
+ * 问题：本地化原本**原样保存上游字节**，上游给的是原图 —— 实测 assets 存量
+ * 1970 张 / 762MB，最大单张 9.3MB。这份 data/ 一旦被整目录拷进 staging
+ * 就会直接变成安装包体积。
+ *
+ * 做法：所有落盘路径共用这一道出口，统一转码——
+ *   · rotate() 先按 EXIF 摆正（不摆正 resize 会按错误方向缩放）
+ *   · 限宽 1280px 不放大（行程卡与详情页最大显示宽度远小于此）
+ *   · 一律重编码 JPEG q76 mozjpeg；GIF/SVG 不动（转码会毁掉动图与矢量）
+ *
+ * 实测收益：最大 60 份样本 137MB → 9.2MB（14.9x）。
+ * sharp 取不到时原样返回——体积优化不是正确性依赖，宁可大也不丢图。
+ */
+const MAX_IMAGE_EDGE_PX = 1280;
+const REENCODE_JPEG_QUALITY = 76;
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+// sharp 的默认导出在 ESM interop 下是构造器，而 `typeof import('sharp')` 是模块
+// 命名空间（两者类型不兼容），这里刻意用 any：只是内部可选依赖的调用，
+// 真取不到时下面有 catch 兜底，类型精度换不来东西。
+let sharpMod: any = undefined;
+
+async function loadSharp(): Promise<any> {
+  if (sharpMod !== undefined) return sharpMod;
+  try {
+    sharpMod = (await import('sharp')).default;
+  } catch {
+    sharpMod = null;
+  }
+  return sharpMod;
+}
+
+async function normalizeDownloadedImage(
+  img: { buf: Buffer; mime: string },
+): Promise<{ buf: Buffer; mime: string }> {
+  if (/image\/gif|image\/svg/i.test(img.mime)) return img;
+  // 已经足够小的图不再折腾：重编码未必更小，纯亏画质
+  if (img.buf.length <= 120 * 1024) return img;
+  const sharp = await loadSharp();
+  if (!sharp) return img;
+  try {
+    const out = await sharp(img.buf)
+      .rotate()
+      .resize({ width: MAX_IMAGE_EDGE_PX, withoutEnlargement: true })
+      .jpeg({ quality: REENCODE_JPEG_QUALITY, mozjpeg: true })
+      .toBuffer();
+    // 只有确实变小才采用重编码结果
+    return out.length < img.buf.length ? { buf: out, mime: 'image/jpeg' } : img;
+  } catch {
+    return img; // 字节损坏/格式不认得：保留原图让上层按原逻辑处理
+  }
+}
 const MAX_IMAGES_PER_POI = 12;
-const MAX_REVIEWS_PER_POI = 100;
-const MAX_VIDEOS_PER_POI = 20;
 
 /** 名称归一化：去空白 + 常见标点，转小写 */
 function normalizeName(name: string): string {
@@ -122,26 +181,36 @@ class TravelMediaStore {
     const key = poiKeyOf(type, name);
     const hit = this.mem.get(key);
     if (hit) return hit;
-    const loaded = this.loadFromFile(key);
+    const loaded = this.loadFromStore(key);
     if (loaded) this.mem.set(key, loaded);
     return loaded;
+  }
+
+  /**
+   * 只取展示 URL 列表（规划装配的热点路径；video/review 已下线，媒体只剩照片）。
+   * 与 get() 的区别：get() 会把整个 entry（含元数据）读进内存缓存，
+   * 装配时只需要 url 字符串。
+   */
+  imageUrls(type: PoiMediaType, name: string, source?: MediaImage['source']): string[] {
+    const images = this.get(type, name)?.images ?? [];
+    return (source ? images.filter((i) => i.source === source) : images).map((i) => i.url);
   }
 
   /** 聚合统计（供排序/前端徽标，无媒体时返回 null） */
   aggregate(type: PoiMediaType, name: string): PoiMediaAggregate | null {
     const entry = this.get(type, name);
     if (!entry) return null;
-    const rated = entry.reviews.filter((r) => typeof r.rating === 'number' && r.rating > 0);
+    const rated: Array<MediaReview & { rating: number }> = [];
     const ratingAvg = rated.length
       ? rated.reduce((s, r) => s + r.rating, 0) / rated.length
       : 0;
     return {
       ratingAvg,
       ratingCount: rated.length,
-      reviewCount: entry.reviews.length,
+      reviewCount: 0,
       imageCount: entry.images.length,
       userImageCount: entry.images.filter((i) => i.source === 'user').length,
-      videoCount: entry.videos.length,
+      videoCount: 0,
     };
   }
 
@@ -197,165 +266,13 @@ class TravelMediaStore {
     this.persist(entry);
   }
 
-  addReview(
-    type: PoiMediaType,
-    name: string,
-    review: { author?: string; rating: number; text: string; images?: string[]; visitedDate?: string; source?: 'user' | 'imported' },
-    coords?: { latitude: number; longitude: number },
-  ): { ok: boolean; review?: MediaReview; error?: string } {
-    if (!review.text?.trim()) return { ok: false, error: '评论内容不能为空' };
-    const rating = Number(review.rating);
-    if (!Number.isFinite(rating) || rating < 1 || rating > 5) return { ok: false, error: '评分需在 1-5 之间' };
-
-    const entry = this.getOrCreate(type, name, coords);
-    const record: MediaReview = {
-      id: `rev-${Date.now()}-${crypto.randomBytes(3).toString('hex')}`,
-      author: review.author?.trim() || '旅友',
-      rating,
-      text: review.text.trim().slice(0, 2000),
-      images: review.images,
-      visitedDate: review.visitedDate,
-      createdAt: new Date().toISOString(),
-      source: review.source ?? 'user',
-    };
-    entry.reviews.push(record);
-    if (entry.reviews.length > MAX_REVIEWS_PER_POI) {
-      entry.reviews = entry.reviews.slice(-MAX_REVIEWS_PER_POI);
-    }
-    this.persist(entry);
-    return { ok: true, review: record };
-  }
-
-  addVideo(
-    type: PoiMediaType,
-    name: string,
-    video: { platform: string; title: string; author: string; durationSeconds?: number; thumbnailUrl?: string; playPageUrl: string },
-    coords?: { latitude: number; longitude: number },
-  ): { ok: boolean; error?: string } {
-    if (!video.playPageUrl?.trim()) return { ok: false, error: '缺少 playPageUrl' };
-    const entry = this.getOrCreate(type, name, coords);
-    if (entry.videos.some((v) => v.playPageUrl === video.playPageUrl)) return { ok: true };
-    entry.videos.push({ ...video, createdAt: new Date().toISOString() });
-    if (entry.videos.length > MAX_VIDEOS_PER_POI) {
-      entry.videos = entry.videos.slice(-MAX_VIDEOS_PER_POI);
-    }
-    this.persist(entry);
-    return { ok: true };
-  }
-
-  /**
-   * 供行程装配：按来源优先级返回图片 URL 列表（本地上传在前）。
-   * minSource 之下的不返回（如只要 user/curated 时传 'curated'）。
-   */
-  imageUrls(type: PoiMediaType, name: string, minSource: MediaImage['source'] = 'wikimedia'): string[] {
-    const entry = this.get(type, name);
-    if (!entry) return [];
-    const floor = SOURCE_PRIORITY[minSource];
-    return entry.images.filter((i) => SOURCE_PRIORITY[i.source] >= floor).map((i) => i.url);
-  }
-
-  /** 解析 assets 相对路径 → 绝对路径（严格防穿越），不存在返回 null */
-  resolveAssetPath(safeDir: string, fileName: string): string | null {
-    if (!/^[a-z0-9\u4e00-\u9fa5-]+$/i.test(safeDir) || !/^[a-zA-Z0-9._-]+$/.test(fileName)) return null;
-    const full = path.join(this.assetsRoot, safeDir, fileName);
-    if (!full.startsWith(this.assetsRoot)) return null;
-    return fs.existsSync(full) ? full : null;
-  }
-
-  // ======================== 管理端：更新 / 删除 ========================
-
-  /** 更新图片元数据（来源/拍摄时间/上传者）。返回是否找到并更新。 */
-  updateImage(
-    type: PoiMediaType,
-    name: string,
-    url: string,
-    patch: { source?: MediaImage['source']; takenAt?: string; uploader?: string },
-  ): boolean {
-    const entry = this.get(type, name);
-    const image = entry?.images.find((i) => i.url === url);
-    if (!entry || !image) return false;
-    if (patch.source !== undefined) image.source = patch.source;
-    if (patch.takenAt !== undefined) image.takenAt = patch.takenAt;
-    if (patch.uploader !== undefined) image.uploader = patch.uploader;
-    this.sortImages(entry);
-    this.persist(entry);
-    return true;
-  }
-
-  /** 删除图片记录；本地 assets 文件一并移除（外链只删记录）。 */
-  removeImage(type: PoiMediaType, name: string, url: string): boolean {
-    const entry = this.get(type, name);
-    if (!entry) return false;
-    const before = entry.images.length;
-    entry.images = entry.images.filter((i) => i.url !== url);
-    if (entry.images.length === before) return false;
-    // 本地上传的文件同步删除，避免孤儿资源
-    const m = /^\/travel\/media\/assets\/([^/]+)\/([^/]+)$/.exec(url);
-    if (m) {
-      const full = this.resolveAssetPath(m[1]!, m[2]!);
-      if (full) {
-        try {
-          fs.rmSync(full);
-        } catch { /* 删除失败不阻塞记录清理 */ }
-      }
-    }
-    this.persist(entry);
-    return true;
-  }
-
-  /** 更新评论（评分/文本/作者）。返回更新后的评论，未找到返回 null。 */
-  updateReview(
-    type: PoiMediaType,
-    name: string,
-    reviewId: string,
-    patch: { rating?: number; text?: string; author?: string },
-  ): MediaReview | null {
-    const entry = this.get(type, name);
-    const review = entry?.reviews.find((r) => r.id === reviewId);
-    if (!entry || !review) return null;
-    if (patch.rating !== undefined) {
-      if (!Number.isFinite(patch.rating) || patch.rating < 1 || patch.rating > 5) return null;
-      review.rating = patch.rating;
-    }
-    if (patch.text !== undefined) {
-      const text = patch.text.trim();
-      if (!text) return null;
-      review.text = text.slice(0, 2000);
-    }
-    if (patch.author !== undefined && patch.author.trim()) review.author = patch.author.trim().slice(0, 60);
-    this.persist(entry);
-    return review;
-  }
-
-  /** 删除评论。 */
-  removeReview(type: PoiMediaType, name: string, reviewId: string): boolean {
-    const entry = this.get(type, name);
-    if (!entry) return false;
-    const before = entry.reviews.length;
-    entry.reviews = entry.reviews.filter((r) => r.id !== reviewId);
-    if (entry.reviews.length === before) return false;
-    this.persist(entry);
-    return true;
-  }
-
-  /** 删除视频登记。 */
-  removeVideo(type: PoiMediaType, name: string, playPageUrl: string): boolean {
-    const entry = this.get(type, name);
-    if (!entry) return false;
-    const before = entry.videos.length;
-    entry.videos = entry.videos.filter((v) => v.playPageUrl !== playPageUrl);
-    if (entry.videos.length === before) return false;
-    this.persist(entry);
-    return true;
-  }
-
   // ======================== 内部 ========================
 
   private getOrCreate(type: PoiMediaType, name: string, coords?: { latitude: number; longitude: number }): PoiMediaEntry {
     const key = poiKeyOf(type, name);
     let entry: PoiMediaEntry | null | undefined = this.mem.get(key);
     if (!entry) {
-      entry = this.loadFromFile(key);
+      entry = this.loadFromStore(key);
     }
     if (!entry) {
       entry = {
@@ -365,8 +282,6 @@ class TravelMediaStore {
         latitude: coords?.latitude,
         longitude: coords?.longitude,
         images: [],
-        reviews: [],
-        videos: [],
         updatedAt: new Date().toISOString(),
       };
     }
@@ -376,6 +291,60 @@ class TravelMediaStore {
     }
     this.mem.set(key, entry);
     return entry;
+  }
+
+  /** 更新图片元数据（来源/拍摄时间/上传者）。改 source 会影响展示优先级。 */
+  updateImage(
+    type: PoiMediaType,
+    name: string,
+    url: string,
+    patch: { source?: MediaImage['source']; takenAt?: string; uploader?: string },
+  ): MediaImage | null {
+    const entry = this.get(type, name);
+    const img = entry?.images.find((i) => i.url === url);
+    if (!entry || !img) return null;
+    if (patch.source !== undefined) img.source = patch.source;
+    if (patch.takenAt !== undefined) img.takenAt = patch.takenAt;
+    if (patch.uploader !== undefined && patch.uploader.trim()) img.uploader = patch.uploader.trim().slice(0, 60);
+    this.sortImages(entry);
+    this.persist(entry);
+    return img;
+  }
+
+  /** 删除图片（本机资产文件一并清理）。返回是否命中。 */
+  removeImage(type: PoiMediaType, name: string, url: string): boolean {
+    const entry = this.get(type, name);
+    if (!entry) return false;
+    const before = entry.images.length;
+    entry.images = entry.images.filter((i) => i.url !== url);
+    if (entry.images.length === before) return false;
+    // 本机资产才删文件：外链条目没有对应本地文件
+    if (url.startsWith('/travel/media/assets/')) {
+      try {
+        const rel = url.replace('/travel/media/assets/', '');
+        const abs = path.join(this.assetsRoot, rel);
+        // 目录穿越防护：解析后必须仍在 assets 根内
+        if (abs.startsWith(this.assetsRoot) && fs.existsSync(abs)) fs.unlinkSync(abs);
+      } catch { /* 删除失败不阻塞记录清理 */ }
+    }
+    this.persist(entry);
+    return true;
+  }
+
+  /**
+   * 把 `/travel/media/assets/<dir>/<file>` 解析为绝对路径，并做目录穿越防护。
+   * 静态路由直接用它：拒绝任何 `..` 或解析后跳出 assets 根的请求。
+   */
+  resolveAssetPath(dir: string, fileName: string): string | null {
+    if (!dir || !fileName) return null;
+    if (dir.includes('..') || fileName.includes('..')) return null;
+    if (dir.includes('/') || dir.includes('\\') || fileName.includes('/') || fileName.includes('\\')) {
+      return null;
+    }
+    const full = path.join(this.assetsRoot, dir, fileName);
+    const resolved = path.resolve(full);
+    // startsWith 有前缀陷阱（/assets-evil 也会命中 /assets），补分隔符判断
+    return resolved.startsWith(this.assetsRoot + path.sep) ? resolved : null;
   }
 
   /** 图片按来源优先级稳定排序（本地上传在前，同级按时间倒序） */
@@ -406,6 +375,128 @@ class TravelMediaStore {
     const fileName = `${Date.now()}-${crypto.randomBytes(4).toString('hex')}.${ext}`;
     fs.writeFileSync(path.join(dir, fileName), buf);
     return { ok: true, url: `/travel/media/assets/${dirName}/${fileName}` };
+  }
+
+  /** 内容寻址的本地化目录名（poiKey 的 sha1 前 12 位，确定性可重算） */
+  private localDirFor(poiKey: string): string {
+    return `poi-${crypto.createHash('sha1').update(poiKey).digest('hex').slice(0, 12)}`;
+  }
+
+  /**
+   * 把一张远程图抓成本机资产并返回落盘后的展示 URL（内容寻址，sha256 去重）。
+   * 已是本机路径时原样返回；下载失败返回 null（调用方保留外链）。
+   */
+  private async localizeOne(
+    url: string,
+    poiKey: string,
+    timeoutMs: number,
+  ): Promise<{ url: string; sha: string } | null> {
+    if (!/^https?:/i.test(url)) return null;
+    const dir = this.localDirFor(poiKey);
+    const dirAbs = path.join(this.assetsRoot, dir);
+    const downloaded = await this.downloadImage(url, timeoutMs);
+    if (!downloaded) return null;
+    // 内容寻址：文件名 = sha256(字节)[:16]。注意判重不能只看展示 url ——
+    // 本地化后 url 是本机路径、调用方下次拿到的仍是外链，只判 url 会反复下载。
+    const sha = crypto.createHash('sha256').update(downloaded.buf).digest('hex').slice(0, 16);
+    const file = `${sha}.${mimeToExt(downloaded.mime)}`;
+    try {
+      this.ensureDir(dirAbs);
+      const full = path.join(dirAbs, file);
+      if (!fs.existsSync(full)) fs.writeFileSync(full, downloaded.buf);
+    } catch {
+      return null;
+    }
+    return { url: `/travel/media/assets/${dir}/${file}`, sha };
+  }
+
+  /**
+   * 新增图片时**同时本地化**：抓回本机再登记，返回实际登记的展示 URL 列表。
+   * 与 materializeEntryImages 的区别：那个是补历史数据（url 已是外链的存量条目）。
+   *
+   * 判重键必须同时含 url 与 originUrl —— 本地化后展示 url 变了，但外链还在，
+   * 下次回填拿到的是外链，只判展示 url 会把同一张图重复登记。
+   */
+  async localizeAndAttach(
+    type: PoiMediaType,
+    name: string,
+    urls: string[],
+    coords?: { latitude: number; longitude: number },
+    timeoutMs = 12_000,
+  ): Promise<string[]> {
+    if (!urls.length) return [];
+    const entry = this.getOrCreate(type, name, coords);
+    const known = new Set<string>();
+    for (const i of entry.images) {
+      known.add(i.url);
+      if (i.originUrl) known.add(i.originUrl);
+    }
+    const out: string[] = [];
+    for (const raw of urls) {
+      if (known.has(raw)) continue;
+      const local = await this.localizeOne(raw, entry.poiKey, timeoutMs);
+      if (local) {
+        if (known.has(local.url)) continue;
+        entry.images.push({
+          url: local.url,
+          originUrl: raw,
+          sha256: local.sha,
+          source: 'web',
+          createdAt: new Date().toISOString(),
+        });
+        known.add(local.url);
+        known.add(raw);
+        out.push(local.url);
+      } else {
+        // 下载失败（防盗链/死链）时保留外链：宁可加载失败也别把图整个丢掉
+        entry.images.push({ url: raw, source: 'web', createdAt: new Date().toISOString() });
+        known.add(raw);
+        out.push(raw);
+      }
+    }
+    if (out.length > 0) {
+      this.sortImages(entry);
+      entry.images = entry.images.slice(0, MAX_IMAGES_PER_POI);
+      this.persist(entry);
+    }
+    return out;
+  }
+
+  /**
+   * 把历史条目里仍是第三方外链的图片抓成本机资产，**原地替换** url。
+   * 原地而非新增：否则同一张图会在库里留下「外链条目 + 本地条目」两份。
+   * 幂等：已是本机资产的条目直接跳过，可以放心重复跑（启动时自动跑一次）。
+   */
+  async materializeEntryImages(
+    type: PoiMediaType,
+    name: string,
+    timeoutMs = 12_000,
+  ): Promise<{ checked: number; localized: number; failed: number }> {
+    const entry = this.get(type, name);
+    let checked = 0;
+    let localized = 0;
+    let failed = 0;
+    if (!entry || entry.images.length === 0) return { checked, localized, failed };
+
+    for (const img of entry.images) {
+      if (!/^https?:/i.test(img.url)) continue; // 已是本机资产
+      checked++;
+      const local = await this.localizeOne(img.originUrl ?? img.url, entry.poiKey, timeoutMs);
+      if (!local) {
+        failed++;
+        continue;
+      }
+      img.originUrl = img.originUrl ?? img.url;
+      img.url = local.url;
+      img.sha256 = local.sha;
+      localized++;
+    }
+
+    if (localized > 0) {
+      this.sortImages(entry);
+      this.persist(entry);
+    }
+    return { checked, localized, failed };
   }
 
   /**
@@ -487,7 +578,9 @@ class TravelMediaStore {
       this.downloadViaDefault(url, timeoutMs),
       this.downloadViaV6(url, timeoutMs),
     ]);
-    return winner ?? null;
+    if (!winner) return null;
+    // 出口统一收口：所有落盘路径（本地化 / 存量物化 / 视频封面）共用这一道
+    return normalizeDownloadedImage(winner);
   }
 
   /** 默认网络栈的 fetch：网络层失败或 HTTP ≥400 或非图片 MIME 返回 null */
@@ -560,23 +653,56 @@ class TravelMediaStore {
     });
   }
 
-  private loadFromFile(poiKey: string): PoiMediaEntry | null {
-    const file = path.join(this.root, `${fileNameFor(poiKey)}.json`);
-    if (!fs.existsSync(file)) return null;
-    try {
-      const raw = JSON.parse(fs.readFileSync(file, 'utf-8')) as PoiMediaEntry;
-      if (raw.poiKey !== poiKey) return null; // hash 碰撞防护
-      return raw;
-    } catch {
-      return null;
+  /**
+   * 从 SQLite 读出 POI 媒体条目（权威源，2026-10-12 起；旧 JSON 由
+   * travel-poi-db.migrateLegacyJson 一次性导入并改名 *.migrated）。
+   * 结构化列只用于查询排序，图片的完整记录存在 media.payload_json 里。
+   */
+  private loadFromStore(poiKey: string): PoiMediaEntry | null {
+    const head = travelPoiDb.getMediaPoi(poiKey);
+    if (!head) return null;
+    const entry: PoiMediaEntry = {
+      poiKey,
+      type: head.type as PoiMediaType,
+      name: head.name,
+      latitude: head.latitude ?? undefined,
+      longitude: head.longitude ?? undefined,
+      images: [],
+      updatedAt: head.updated_at,
+    };
+    for (const row of travelPoiDb.listMedia(poiKey, 'image')) {
+      try {
+        entry.images.push(JSON.parse(row.payload_json) as MediaImage);
+      } catch {
+        /* 脏数据跳过：单条坏行不该让整个 POI 的图全丢 */
+      }
     }
+    return entry.images.length > 0 || head.updated_at ? entry : null;
   }
 
   private persist(entry: PoiMediaEntry): void {
     entry.updatedAt = new Date().toISOString();
-    const file = path.join(this.root, `${fileNameFor(entry.poiKey)}.json`);
     try {
-      fs.writeFileSync(file, JSON.stringify(entry, null, 2), 'utf-8');
+      travelPoiDb.upsertMediaPoi({
+        poiKey: entry.poiKey,
+        type: entry.type,
+        name: entry.name,
+        latitude: entry.latitude,
+        longitude: entry.longitude,
+      });
+      // 整表替换：media 行按 (poi_key, kind, item_id) 唯一，item_id 用 url
+      for (const row of travelPoiDb.listMedia(entry.poiKey, 'image')) {
+        travelPoiDb.deleteMedia(entry.poiKey, 'image', row.item_id);
+      }
+      for (const img of entry.images) {
+        travelPoiDb.insertMedia({
+          poiKey: entry.poiKey,
+          kind: 'image',
+          itemId: img.url,
+          payload: img as unknown as Record<string, unknown>,
+          createdAt: img.createdAt,
+        });
+      }
     } catch (err) {
       console.warn('[TravelMediaStore] 持久化失败:', err instanceof Error ? err.message : err);
     }

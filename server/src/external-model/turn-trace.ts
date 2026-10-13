@@ -35,7 +35,27 @@ export type ToolCallTraceEntry = {
    * 该指标定位重灾区工具，针对性修 schema 描述。
    */
   paramError?: boolean;
+  /**
+   * 本次调用实际套用的执行超时预算（2026-10-12 预算类故障自证）。
+   *
+   * 读法：`ok=false && ms ≈ budgetMs` 即「被预算击杀」——配合下方 `timedOut` 直接
+   * 定位，不必再拿 ms 去猜是「工具慢」还是「预算小」。此前 trace 只有 ms，30s
+   * 击杀与「工具真的跑了 30s」在日志里长得一模一样（2026-10-12 行程卡缺席事故
+   * 就是靠人肉比对才认出 ms=30032）。
+   */
+  budgetMs?: number;
+  /** 是否被执行超时击杀（= !ok 且耗时贴满预算）。 */
+  timedOut?: boolean;
 };
+
+/**
+ * 由「耗时 + 预算」推导是否被击杀。贴满预算（含调度抖动余量）且失败即判定击杀——
+ * 独立的 timedOut 字段需要穿透工具执行层，而预算与耗时在 trace 点都在手边。
+ */
+export function inferToolCallTimedOut(ok: boolean, ms: number, budgetMs?: number): boolean {
+  if (ok || typeof budgetMs !== "number" || budgetMs <= 0) return false;
+  return ms >= budgetMs * 0.98;
+}
 
 export type TurnTraceRecord = {
   ts: number;
@@ -102,6 +122,10 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
   paramErrorCalls: number;
   /** 参数级失败占全部调用的比例（重灾区定位看分析脚本的按工具聚合） */
   paramErrorRate: number;
+  /** 被预算击杀的调用数（ms 贴满 budgetMs 且失败；>0 即预算配置有问题的硬信号） */
+  budgetKilledCalls: number;
+  /** 被预算击杀的工具名（去重，直接指出该上调谁的超时声明） */
+  budgetKilledTools: string[];
 } {
   const totalCalls = records.reduce((n, r) => n + r.toolCalls.length, 0);
   const okCalls = records.reduce((n, r) => n + r.toolCalls.filter((c) => c.ok).length, 0);
@@ -118,6 +142,12 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
     const executed = new Set(r.toolCalls.map((c) => c.name));
     return n + r.recallInjectedNames!.filter((name) => executed.has(name)).length;
   }, 0);
+  // 预算击杀（2026-10-12）：优先读显式标记，缺标记的旧调用按「贴满预算且失败」兜底
+  const budgetKilled = records.flatMap((r) =>
+    r.toolCalls.filter(
+      (c) => c.timedOut === true || inferToolCallTimedOut(c.ok, c.ms, c.budgetMs),
+    ),
+  );
   return {
     turns: records.length,
     totalCalls,
@@ -141,5 +171,7 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
         ? records.reduce((n, r) => n + r.toolCalls.filter((c) => c.paramError === true).length, 0) /
           totalCalls
         : 0,
+    budgetKilledCalls: budgetKilled.length,
+    budgetKilledTools: [...new Set(budgetKilled.map((c) => c.name))],
   };
 }

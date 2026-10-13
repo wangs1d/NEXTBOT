@@ -33,6 +33,14 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
   final List<Map<String, dynamic>> _scheduleEvents =
       <Map<String, dynamic>>[];
 
+  /// 写盘串行链。_flush 是「全量重写整个 JSON」，而 saveMessage 是
+  /// fire-and-forget：分泡定稿一帧内多条 _persist 并发时，两次
+  /// writeAsString 会在同一文件上交错截断 → 半截 JSON → 下次启动命中
+  /// 「JSON parse error」→ 整库被判损坏重建为空（外在表现就是
+  /// 「手机端对话历史没保存」）。这里把写盘排成链，且 JSON 快照在链内
+  /// 依次取（先取快照再排队会丢最后一次状态的时序保证）。
+  Future<void>? _flushQueue;
+
   /// 解析一个可写的存储文件位置。
   ///
   /// 优先 Documents；若该目录被 OneDrive 重定向 / 权限保护而不可写，
@@ -173,6 +181,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             timestamp: DateTime.parse(map["timestamp"] as String),
             attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
             playUrl: map["playUrl"] as String?,
+            pendingDelivery: map["pendingDelivery"] == true,
             mediaCards: _decryptMediaCards(map["mediaCards"]),
             summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
@@ -405,6 +414,57 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     await _flush();
   }
 
+  // ===== 离线待发用户消息队列（2026-10-12）=====
+  //
+  // 断网时 MobileChatController 把 `chat.user_message` 的完整 WS 载荷（含
+  // visionFrames）挂进 _preferences 持久化；联网补发成功才出队。上限保护：
+  // 超出丢最旧（对应气泡仍保留，只是不再补发，避免存储文件无限膨胀）。
+
+  static const int _maxPendingUserMessages = 50;
+
+  List<Map<String, dynamic>> _pendingUserMessageList() {
+    final Object? raw = _preferences["pendingUserMessages"];
+    if (raw is! List) return <Map<String, dynamic>>[];
+    return raw
+        .whereType<Map>()
+        .map((Map e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> listPendingUserMessages() async {
+    await init();
+    return _pendingUserMessageList();
+  }
+
+  @override
+  Future<void> enqueuePendingUserMessage(Map<String, dynamic> payload) async {
+    final String messageId = payload["messageId"]?.toString() ?? "";
+    if (messageId.isEmpty) return;
+    await init();
+    final List<Map<String, dynamic>> list = _pendingUserMessageList()
+      ..removeWhere((Map<String, dynamic> m) => m["messageId"] == messageId)
+      ..add(payload);
+    while (list.length > _maxPendingUserMessages) {
+      list.removeAt(0);
+    }
+    _preferences["pendingUserMessages"] = list;
+    await _flush();
+  }
+
+  @override
+  Future<void> dequeuePendingUserMessage(String messageId) async {
+    final String id = messageId.trim();
+    if (id.isEmpty) return;
+    await init();
+    final List<Map<String, dynamic>> list = _pendingUserMessageList();
+    final int before = list.length;
+    list.removeWhere((Map<String, dynamic> m) => m["messageId"] == id);
+    if (list.length == before) return;
+    _preferences["pendingUserMessages"] = list;
+    await _flush();
+  }
+
   ScheduleEvent _scheduleEventFromMap(Map<String, dynamic> m) {
     return ScheduleEvent(
       id: m["id"] as String,
@@ -581,21 +641,32 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
     final List<ChatMessage> deduped = unique.values.toList()
       ..sort((ChatMessage a, ChatMessage b) => a.timestamp.compareTo(b.timestamp));
-    return deduped
-        .map(
-          (ChatMessage message) => ChatMessage(
-            messageId: message.messageId,
-            sessionId: message.sessionId,
-            role: message.role,
-            text: _decryptFor(message.text, _userPin),
-            timestamp: message.timestamp,
-            attachmentImageCount: message.attachmentImageCount,
-            playUrl: message.playUrl,
-            mediaCards: message.mediaCards,
-            renderBlocks: message.renderBlocks,
-          ),
-        )
-        .toList();
+    // 逐条容错解密：单条消息损坏（截断/base64 坏/异源 PIN）只跳过那一条，
+    // 绝不让整段历史因一条脏数据静默清零（此前 listMessages 一抛，
+    // _bootstrapHistory 整个 catch 掉 → 用户看到的就是「历史没保存」）。
+    final List<ChatMessage> out = <ChatMessage>[];
+    for (final ChatMessage message in deduped) {
+      try {
+        out.add(ChatMessage(
+          messageId: message.messageId,
+          sessionId: message.sessionId,
+          role: message.role,
+          text: _decryptFor(message.text, _userPin),
+          timestamp: message.timestamp,
+          attachmentImageCount: message.attachmentImageCount,
+          playUrl: message.playUrl,
+          pendingDelivery: message.pendingDelivery,
+          mediaCards: message.mediaCards,
+          summaryCard: message.summaryCard,
+          renderBlocks: message.renderBlocks,
+        ));
+      } catch (e) {
+        debugPrint(
+          '[IsarLocalHistoryStore] 跳过损坏消息 ${message.messageId}: $e',
+        );
+      }
+    }
+    return out;
   }
 
   @override
@@ -657,6 +728,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       timestamp: message.timestamp,
       attachmentImageCount: message.attachmentImageCount,
       playUrl: message.playUrl,
+      pendingDelivery: message.pendingDelivery,
       mediaCards: message.mediaCards,
       summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
@@ -762,7 +834,20 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
-  Future<void> _flush() async {
+  /// 排队一次写盘。快照（jsonEncode）在链内取，保证每次快照看到的都是
+  /// 前一次写盘完成后的最新状态；链条本身不带错误中断（_doFlush 内部吞），
+  /// 再加一层 catchError 兜底防链条被毒化（一旦链上 future 带错，后续
+  /// then 回调不再执行 = 后续所有消息永远不落盘）。
+  Future<void> _flush() {
+    final Future<void> prev = _flushQueue ?? Future<void>.value();
+    final Future<void> task = prev.then((_) => _doFlush());
+    _flushQueue = task.catchError((Object e) {
+      debugPrint('[IsarLocalHistoryStore] 写盘链异常（已续链）: $e');
+    });
+    return task;
+  }
+
+  Future<void> _doFlush() async {
     // Web 平台不支持文件系统，跳过写入
     if (kIsWeb || _storageFile == null) {
       debugPrint('[IsarLocalHistoryStore] Web 平台，跳过文件写入');
@@ -793,6 +878,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   "timestamp": m.timestamp.toIso8601String(),
                   "attachmentImageCount": m.attachmentImageCount,
                   if (m.playUrl != null) "playUrl": m.playUrl,
+                  if (m.pendingDelivery) "pendingDelivery": true,
                   if (m.mediaCards != null)
                     "mediaCards": _encryptMediaCards(m.mediaCards),
                   if (m.summaryCard != null)
@@ -809,7 +895,22 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       "scheduleEvents": _scheduleEvents,
     };
     try {
-      await file.writeAsString(jsonEncode(encoded));
+      // 原子落盘：先写临时文件再改名。直写 writeAsString 中途进程被杀
+      // （手机上滑清后台很常见）会留下半截 JSON，下次启动整库判损坏被
+      // 重建为空——这是「对话历史没保存」的主凶。rename 在 POSIX
+      // （Android/iOS）上是原子替换；rename 覆盖失败的个别场景退回直写。
+      final File tmp = File("${file.path}.tmp");
+      await tmp.writeAsString(jsonEncode(encoded), flush: true);
+      try {
+        await tmp.rename(file.path);
+      } catch (_) {
+        await file.writeAsString(jsonEncode(encoded), flush: true);
+        try {
+          if (await tmp.exists()) await tmp.delete();
+        } catch (_) {
+          // 残留 .tmp 无害，下次写盘会覆盖
+        }
+      }
     } catch (e) {
       // 写入失败不抛异常，避免影响调用链（如定位缓存上报）；仅记日志。
       debugPrint('[IsarLocalHistoryStore] 存储写入失败（已忽略）: $e');

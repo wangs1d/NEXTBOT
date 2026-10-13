@@ -560,6 +560,7 @@ export class NightlyMemoryTaskService {
               corrections: [],
               understandings: [],
               facts: [],
+              forget: [],
               referents: [],
               importance: highSignal ? 0.7 : 0.3,
             };
@@ -761,9 +762,10 @@ export class NightlyMemoryTaskService {
               "你是记忆巩固器。从对话日志中提取「值得跨会话长期记住」的用户信息，忽略闲聊、临时上下文和一次性任务细节。" +
               "只输出 JSON：{\"facts\":[{\"kind\":\"preference|fact|commitment\",\"text\":\"...\"}]}，最多 12 条。" +
               "规则：preference=稳定偏好/习惯（text 需含「喜欢/偏好/讨厌/习惯」等词）；" +
-              "fact=稳定身份/背景事实（text 以「我是/我在/我住在/我的」开头）；" +
+              "fact=稳定身份/背景事实（text 以「用户」开头或用无主语短语，如「用户住在兴义」「职业：后端开发」）；" +
               "commitment=需要后续跟进的承诺或待办（text 需含「我会/我将/计划/待办」等词）。" +
-              "text 用第一人称中文短句。没有可提取内容时返回 {\"facts\":[]}。",
+              "text 用第三人称中文短句（以「用户」开头或无主语短语），禁止以「我/我的」开头——" +
+              "这些条目会注入对话 prompt，第一人称会让模型分不清「我」指谁（人称视角铁律）。没有可提取内容时返回 {\"facts\":[]}。",
           },
           { role: "user", content: transcript.slice(0, 12_000) },
         ],

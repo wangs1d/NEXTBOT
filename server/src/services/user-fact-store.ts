@@ -39,7 +39,7 @@ export interface UserFact {
   kind: UserFactKind;
   /** 归一化主语/槽位（如 "居住地"、"项目"、"简洁回答"） */
   subject: string;
-  /** 事实陈述（第一人称短句） */
+  /** 事实陈述（第三人称/无主语短句，由抽取/巩固侧语义改写保证，本层不做正则剥字） */
   value: string;
   /** 0-1，多次观察取最大值 */
   confidence: number;
@@ -292,13 +292,16 @@ export class UserFactStore {
       {
         key: "memory_preferences",
         factLines: prefFacts.map(renderFactLine),
-        factSubjects: new Set(prefFacts.map((f) => f.subject)),
+        factSubjects: new Set(prefFacts.map((f) => f.subject || extractFactSubject(f.kind, f.value))),
       },
       {
         key: "memory_facts",
         factLines: otherFacts.map(renderFactLine),
+        // 用落库时固化的 f.subject（源自剥前缀前的原始值）做冲突比对；
+        // 值已剥成无主语短句（「杭州」），从值重算 subject 会对不上
+        // 槽位旧行的第一人称 subject（「居住地」），导致旧行漏替换
         factSubjects: new Set(
-          otherFacts.map((f) => extractFactSubject(f.kind, f.value)),
+          otherFacts.map((f) => f.subject || extractFactSubject(f.kind, f.value)),
         ),
       },
     ];

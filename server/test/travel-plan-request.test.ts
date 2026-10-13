@@ -43,6 +43,28 @@ test("「下周去三亚玩五天」→ 出发时间不污染目的地", () => {
   assert.equal(r.days, 5);
 });
 
+/**
+ * 2026-10-12 贵阳轮回归：载体词表缺「旅程/之旅/出行/度假」。
+ *
+ * 事故形态：「规划两天的贵阳旅程」抽出的目的地是 **「贵阳旅程」**——4 字 CJK 连续段
+ * 被 sniffTravelDestination 的 /[\u4e00-\u9fff]{2,6}/ 整段吞下当地名。脏目的地让实时
+ * POI 搜索空转（餐厅恒 0），多跑一轮空类别重试；而当时每轮死镜像要烧满 20s，规划耗时
+ * 49s 撞穿 30s 工具预算 → 回执 ok=false → 行程卡整轮缺席 + 模型手写裸 markdown。
+ * 同族载体词（旅游/旅行/游玩/出游/行程）本就在表内，属漏词而非设计。
+ */
+test("载体词漏词回归：旅程/之旅/出行/度假 不进目的地", () => {
+  const cases: Array<[string, string]> = [
+    ["规划两天的贵阳旅程", "贵阳"],
+    ["贵阳之旅两天", "贵阳"],
+    ["规划两天贵阳出行", "贵阳"],
+    ["去三亚度假五天", "三亚"],
+  ];
+  for (const [text, expected] of cases) {
+    const r = composeTravelPlanRequest(text);
+    assert.equal(r.destination, expected, `「${text}」目的地应为 ${expected}，实际 ${r.destination}`);
+  }
+});
+
 test("纯指代轮：无目的地 → destination 缺省（不预执行信号），input 保留", () => {
   const r = composeTravelPlanRequest("帮我规划个行程");
   assert.equal(r.input, "帮我规划个行程");

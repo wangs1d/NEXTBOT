@@ -4,6 +4,7 @@ import "../../../core/services/image_preview_launcher.dart";
 import "../../../core/utils/agent_result_parser.dart";
 import "effect_card_shell.dart";
 import "effect_media_utils.dart";
+import "../media_disk_cache.dart";
 
 /// 轮播横滑卡（cardType = "carousel"）。
 ///
@@ -100,8 +101,8 @@ class _CarouselEffectCardState extends State<CarouselEffectCard> {
                         mainAxisSize: MainAxisSize.min,
                         children: <Widget>[
                           Expanded(
-                            child: Image.network(
-                              p.url,
+                            child: CachedMediaImage(
+                              url: p.url,
                               fit: BoxFit.cover,
                               errorBuilder: (
                                 BuildContext context,
