@@ -48,6 +48,7 @@ const ROUTE_SESSION_PREFIX = "llm-route::";
 const EVIDENCE_ANCHOR_INTENTS: ReadonlySet<IntentLabel> = new Set([
   "media_retrieval",
   "realtime_lookup",
+  "weather_query",
 ]);
 
 /** 证据锚定审计结论。 */
@@ -276,12 +277,15 @@ export async function routeTurnByLlm(
   //    被判 action_write@0.92，出口闸会强迫调工具"完成动作"，有创建垃圾
   //    提醒的实际风险，必须降级。
   const evidence = parseEvidenceJson(result);
-  const anchor =
-    parsed.intent === "media_retrieval" || parsed.intent === "realtime_lookup"
-      ? auditEvidenceAnchor(trimmed, evidence)
-      : ("not_required" as const);
+  const isExternalLookupIntent =
+    parsed.intent === "media_retrieval" ||
+    parsed.intent === "realtime_lookup" ||
+    parsed.intent === "weather_query";
+  const anchor = isExternalLookupIntent
+    ? auditEvidenceAnchor(trimmed, evidence)
+    : ("not_required" as const);
   const understandingConflict =
-    (parsed.intent === "media_retrieval" || parsed.intent === "realtime_lookup") &&
+    isExternalLookupIntent &&
     (understanding?.personalFact === true || understanding?.memoryInstruction === true);
   const writeNegationConflict =
     (parsed.intent === "action_write" || parsed.intent === "multi_step_task") &&
@@ -356,6 +360,13 @@ export async function routeTurnByLlm(
         `[LlmTaskRouter] realtime 预执行跳过（anchor=${anchor}），执行模型自决工具与模态`,
       );
     }
+  }
+  // weather_query 轮查询词结构性保证（2026-10-13）：天气由专属工具
+  // weather.get_local 按自动定位直查，不需要网页搜索——模型若照 realtime
+  // 习惯输出了 search_query，代码层确定性剥离，防止任何路径拿天气原话烧搜索。
+  if (effectiveIntent === "weather_query" && searchQuery) {
+    searchQuery = undefined;
+    reasons.push("search_query:weather_dedicated_tool_no_web_search");
   }
   // media 轮查询词的结构性保证（2026-10-10，与 realtime 同构的根治半边）：
   // 此前 media_retrieval 只贴标签不产查询词，「要不要搜图/怎么拼查询词」全交给

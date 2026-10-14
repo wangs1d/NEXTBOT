@@ -12,7 +12,6 @@ import "package:window_manager/window_manager.dart";
 
 import "app/ambient_feeds_controller.dart";
 import "app/chat_turn_controller.dart";
-import "app/notification_flow_controller.dart";
 import "app/phone_call_controller.dart";
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
@@ -21,7 +20,6 @@ import "core/presentation/client_update_dialog.dart";
 import "core/presentation/dynamic_island.dart";
 import "core/presentation/dynamic_island_stage_e2e.dart";
 import "core/presentation/dynamic_island_reminder_e2e.dart";
-import "core/presentation/reminder_popup_e2e.dart";
 import "core/presentation/glass_notify.dart";
 import "core/presentation/update_result_card.dart";
 import "core/presentation/voice_call_ui_labels.dart";
@@ -98,7 +96,6 @@ import "features/chat/voiceprint_registration_page.dart";
 import "core/services/agent_sphere_voice_controller.dart";
 import "core/services/connected_call_launcher.dart";
 import "core/services/briefing_delivery_api.dart";
-import "core/services/desktop_notification_launcher.dart";
 import "features/briefing/daily_briefing_window.dart";
 import "core/services/incoming_call_launcher.dart";
 import "core/services/phone_call_session.dart";
@@ -594,7 +591,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   DateTime? _lastDesktopBriefingAt;
   StreamSubscription<String>? _mobileBriefingTapSub;
   bool _notificationPermissionChecked = false;
-  Map<String, dynamic>? _pendingDesktopBriefingPayload;
 
   @override
   void initState() {
@@ -612,12 +608,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ) async {
         final String title = parameters["title"] ?? "玻璃通知验收";
         final String message = parameters["message"] ?? "主动性消息玻璃卡 E2E";
-        // 不等待卡片关闭（关闭在倒计时后），立即返回便于脚本连续触发
-        unawaited(_showProactiveNativeNotification(
+        // 不等待卡片关闭（卡片落对话流即返回），立即返回便于脚本连续触发
+        _showProactivePopup(
           title,
           message,
           "debug-${DateTime.now().microsecondsSinceEpoch}",
-        ));
+        );
         return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
           "ok": true,
         }));
@@ -702,14 +698,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         onSpeakerToggle: _handleSpeakerToggle,
       );
     }
-    DesktopNotificationLauncher.bindHandlers(
-      onConfirm: _handleDesktopNotificationConfirm,
-      onDismiss: _handleDesktopNotificationDismiss,
-      onTimeout: _handleDesktopNotificationTimeout,
-    );
     MobileBriefingLauncher.bind();
     // 移动端推送通道：上报 push token（原生侧未接入厂商推送时静默跳过）
     unawaited(MobilePushRegistrar.registerIfNeeded());
+    // 注册自愈定时器（2026-10-14）：HMS token 就绪后 60s 内自动完成上报，
+    // 无需用户保持前台——就绪事件另有 PushTokenService.onNewToken 系统回调兜底；
+    // 已注册时空转（一次字符串比较），成本可忽略。
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      Timer.periodic(const Duration(seconds: 60), (_) {
+        unawaited(MobilePushRegistrar.registerIfNeeded());
+      });
+    }
     _mobileBriefingTapSub =
         MobileBriefingLauncher.payloads.listen((String payload) {
       unawaited(_openBriefingFromPayload(payload));
@@ -771,6 +770,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 记录生命周期切换：若随后进程退出，可据此区分「用户关了窗口/系统杀进程」与「崩溃」。
     // 只写单行状态、不带堆栈——生命周期事件高频触发，带堆栈曾把日志刷到 189MB。
     _writeCrashLog("[LIFECYCLE]", "state=$state");
+    // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
+    // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
+    // （内部按 actorId 去重，已注册则空转）。
+    if (state == AppLifecycleState.resumed &&
+        !kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.android ||
+            defaultTargetPlatform == TargetPlatform.iOS)) {
+      unawaited(MobilePushRegistrar.registerIfNeeded());
+    }
     if (state == AppLifecycleState.detached) {
       _writeCrashLog("[EXIT]", "app detached (window closed)");
     }
@@ -785,7 +793,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     unawaited(_mobileBriefingTapSub?.cancel());
     IncomingCallLauncher.unbind();
     ConnectedCallLauncher.unbind();
-    DesktopNotificationLauncher.unbind();
     unawaited(MobileBriefingLauncher.unbind());
     OutgoingCallLauncher.unbind();
     _inputFocusNode.dispose();
@@ -1073,12 +1080,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (const bool.fromEnvironment('PAI_ISLAND_REMINDER_E2E')) {
       unawaited(runIslandReminderE2EBootstrap());
     }
-    // E2E 专用（--dart-define=PAI_REMINDER_POPUP_E2E=true）：日程提醒
-    // 预告档/到点档桌面分流（预告只上岛，到点岛+原生弹窗）的数据注入引导，
-    // 见 reminder_popup_e2e.dart。
-    if (const bool.fromEnvironment('PAI_REMINDER_POPUP_E2E')) {
-      unawaited(runReminderPopupE2EBootstrap());
-    }
     // 日程倒计时每 30s 刷新一次（「25 分钟后」随时间推进），并立即初同步。
     unawaited(_syncIslandSchedule());
     _islandScheduleTicker = Timer.periodic(
@@ -1097,6 +1098,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
         unawaited(_tryShowDesktopLaunchBriefing());
+      }
+      // 闹钟服务端对账（2026-10-13）：每次 WS 连上（含断线重连）都拉一次服务端
+      // 活跃闹钟补挂本地——建钟那一刻不在线的闹钟由此收敛进本地库。
+      if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android ||
+          defaultTargetPlatform == TargetPlatform.iOS)) {
+        unawaited(AlarmEngine.instance.syncFromServer());
+        // 推送 token 重注册：登录后 effectiveActorId 才是真实身份，连接成功
+        // 时补一次（内部按 actorId 去重，同身份不重复上报）。
+        unawaited(MobilePushRegistrar.registerIfNeeded());
       }
     };
     ClientLocationService.bindPreferences(
@@ -2034,8 +2044,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "agent.proactive_message") {
           final String title = payload["title"]?.toString() ?? "Agent 主动联系";
           final String text = payload["text"]?.toString() ?? "";
-          // 统一主动性管道：高重要度主动消息恒走桌面原生弹窗触达，
-          // 确认/关闭/超时按卡片 id 回传 outcome 反馈
+          // 统一主动性管道：高重要度主动消息走应用内玻璃卡触达，
+          // 确认/关闭/超时按卡片回调回传 outcome 反馈
           final String importance = payload["importance"]?.toString() ?? "";
           final String deliveryId = payload["deliveryId"]?.toString() ?? "";
           final bool important = importance == "high" || importance == "critical";
@@ -2045,9 +2055,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               title: title, body: text, deliveryId: deliveryId,
             ));
           } else if (mounted && important && deliveryId.isNotEmpty) {
-            // 决策类触达恒走桌面原生弹窗（右下角，单卡接管式），
-            // 原生不可用（非 Windows/移动端）自动降级应用内玻璃卡
-            unawaited(_showProactiveNativeNotification(title, text, deliveryId));
+            // 决策卡落对话流（确认/忽略在卡上完成并回传 outcome）
+            _showProactivePopup(title, text, deliveryId);
           } else if (mounted) {
             // 应用内展示即 impression：上报 viewed（服务端记为"已展示"，不算忽略，
             // 也不进接受率分母——此前应用内阅读与忽略无法区分，学习信号有偏）
@@ -2305,9 +2314,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String title = payload["title"]?.toString() ?? "提醒";
           final String message = payload["message"]?.toString() ?? "";
           final String priority = payload["priority"]?.toString() ?? "normal";
-          final bool showConfirm = payload["showConfirmButton"] == true;
-          final String confirmText =
-              payload["confirmText"]?.toString() ?? "我知道了";
           final String attentionId =
               payload["attentionId"]?.toString() ?? "";
 
@@ -2320,18 +2326,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             ));
           }
 
-          // 分级触达 ack 归一：用户点掉弹窗 = 已知晓，服务端升级链即停。
-          // 决策类触达恒走桌面弹窗（右下角原生窗），不依赖主窗可见性
-          unawaited(() async {
-            try {
-              await _showAttentionPopup(title, message, priority, showConfirm, confirmText);
-              if (attentionId.isNotEmpty) {
-                await AttentionApi().ack(attentionId, via: "popup");
-              }
-            } catch (_) {
-              // ack 失败不影响本地弹窗（升级链会随截止时间自然收敛）
-            }
-          }());
+          // 决策卡落对话流：确认/忽略都在卡上完成，ack 由按钮回调回传
+          // （升级链随之收敛），不再飘弹窗。
+          _showAttentionPopup(title, message, priority, attentionId);
         }
 
         // ====== TTS 闹钟升级链事件（tts_alarm_start / tts_alarm_play）======
@@ -2350,7 +2347,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               body: text,
             ));
           } else if (mounted) {
-            // 应用内提醒卡：玻璃态通知（窗口可见时）
+            // 应用内提醒卡：玻璃态通知
             GlassNotify.show(
               title: important ? "【$priority】$title" : title,
               message: text,
@@ -2359,16 +2356,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   : GlassNotifyVariant.info,
               duration: const Duration(milliseconds: 8000),
             );
-            if (important && !kIsWeb && !_isMobile) {
-              unawaited(DesktopNotificationLauncher.show(
-                title: "【$priority】$title",
-                message: text,
-                priority: priority,
-                showConfirmButton: true,
-                confirmText: "我知道了",
-                autoCloseMs: 30000,
-              ));
-            }
           }
         }
         if (type == "tts_alarm_play") {
@@ -2718,6 +2705,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           "minutesAhead": minutesAhead,
           "trailing": IslandReminderPolicy.trailingFor(
               minutesAhead, 0, 1),
+          // 预告窗口提前量（服务端任务计划推导，null=不预告）：
+          // 胶囊倒计时只在窗口内出场，2026-10-13 定调见 previewLeadMinutesFromTask。
+          "previewLeadMinutes": focus.previewLeadMinutes,
         };
       }
       IslandRealFeeds.setSchedule(agenda: agenda, next: nextMap);
@@ -4453,9 +4443,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             );
   }
 
-  // 桌面弹窗生命周期状态机（pending 主动消息 outcome、闭合完成器网）
-  // 已收口至 NotificationFlowController，其字段自带默认值，无需装配。
-
   /// App 生命周期（手机后台时主动消息走系统通知，类微信常在线提醒）
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
   bool get _isMobile => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
@@ -4465,61 +4452,104 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 调试手机端 UI 用独立入口 main_mobile.dart，不要动桌面路由。
   bool get _appBackgrounded => _lifecycleState != AppLifecycleState.resumed;
 
-  // ====== 统一主动性管道：outcome 反馈回传 ======
+  // ====== 统一主动性管道：决策卡 + outcome 反馈回传（2026-10-14 定稿）======
 
-  /// 高重要度主动消息 → 桌面原生弹窗（右下角 DesktopNotificationWindow，
-  /// 决策类统一承载面，不依赖主窗可见性）；原生不可用（非 Windows/移动端）
-  /// 降级应用内玻璃卡。outcome 三态由全局回调映射：
-  /// 确认 accepted / 点 × dismissed / 倒计时 ignored
-  Future<void> _showProactiveNativeNotification(String title, String text, String deliveryId) async {
-    NotificationFlowController.instance.needsFeedback = false;
-    NotificationFlowController.instance.feedbackChannel = "websocket";
+  /// 高重要度主动消息 → 对话流决策卡（不飘弹窗/玻璃卡）。
+  /// 用户在卡上点「我知道了」→ outcome accepted；「忽略」→ dismissed。
+  void _showProactivePopup(String title, String text, String deliveryId) {
+    _appendDecisionCard(<String, dynamic>{
+      "kind": "proactive",
+      "title": title,
+      "message": text,
+      "priority": "high",
+      "state": "pending",
+      "deliveryId": deliveryId,
+    });
+  }
 
-    if (!kIsWeb && !_isMobile) {
-      // outcome 走全局回调（按 _pendingProactiveDeliveryId 配对）；窗口为
-      // 接管式单卡，被后到决策弹窗顶掉时未决 outcome 按既有语义放弃
-      NotificationFlowController.instance.armProactiveOutcome(deliveryId);
-      final bool ok = await DesktopNotificationLauncher.show(
-        title: title,
-        message: text,
-        priority: "high",
-        showConfirmButton: true,
-        confirmText: "我知道了",
-        autoCloseMs: 45000,
-      );
-      if (ok) return;
-      NotificationFlowController.instance.clearProactiveOutcome();
+  /// 提醒升级链 popup 级（reminder_popup）→ 对话流决策卡。
+  /// 确认与忽略都算已知晓：点击即 AttentionApi ack（via=chat_card），
+  /// 服务端升级链随之收敛。
+  void _showAttentionPopup(
+    String title,
+    String message,
+    String priority,
+    String attentionId,
+  ) {
+    _appendDecisionCard(<String, dynamic>{
+      "kind": "attention",
+      "title": title,
+      "message": message,
+      "priority": priority,
+      "state": "pending",
+      "attentionId": attentionId,
+    });
+  }
+
+  /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
+  /// 同 task_receipt）。追加即展示：chat_page 的消息列表监听自动滚底。
+  void _appendDecisionCard(Map<String, dynamic> card) {
+    final String title = card["title"]?.toString() ?? "";
+    final String body = card["message"]?.toString() ?? "";
+    final ChatMessage message = ChatMessage(
+      messageId: "decision-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: body.isNotEmpty ? body : title,
+      timestamp: DateTime.now(),
+      contentType: "decision_card",
+      decisionCard: card,
+    );
+    void apply() {
+      _messages.add(message);
+      _assistantMessageIndexById[message.messageId] = _messages.length - 1;
     }
 
-    if (!mounted) return;
-    final Completer<void> closed = Completer<void>();
-    bool confirmed = false;
-    GlassNotify.show(
-      title: title,
-      message: text,
-      variant: GlassNotifyVariant.info,
-      duration: const Duration(milliseconds: 10000),
-      actions: <GlassNotifyAction>[
-        GlassNotifyAction(
-          label: "我知道了",
-          emphasized: true,
-          onPressed: () {
-            confirmed = true;
-            AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, "accepted");
-          },
-        ),
-      ],
-      onClose: (GlassNotifyCloseReason reason) {
-        if (!confirmed) {
-          AmbientFeedsController.instance.sendProactiveOutcome(
-            deliveryId,
-            reason == GlassNotifyCloseReason.dismissed ? "dismissed" : "ignored",
-          );
+    if (mounted) {
+      setState(apply);
+    } else {
+      apply();
+    }
+  }
+
+  /// 决策卡按钮回调：回传 ack/outcome + 原地翻转卡片为终态。
+  /// attention：确认/忽略都 ack（via=chat_card，升级链收敛）；
+  /// proactive：确认 accepted / 忽略 dismissed。
+  void _handleDecisionCardAction(String messageId, bool confirmed) {
+    final int? idx = _messageIndexById(messageId);
+    if (idx == null || idx >= _messages.length) return;
+    final ChatMessage msg = _messages[idx];
+    final Map<String, dynamic>? card = msg.decisionCard;
+    if (card == null || card["state"]?.toString() == "confirmed") return;
+
+    final String kind = card["kind"]?.toString() ?? "";
+    final String attentionId = card["attentionId"]?.toString() ?? "";
+    final String deliveryId = card["deliveryId"]?.toString() ?? "";
+    if (kind == "attention" && attentionId.isNotEmpty) {
+      unawaited(() async {
+        try {
+          await AttentionApi().ack(attentionId, via: "chat_card");
+        } catch (e) {
+          // ack 失败不影响本地卡片（升级链会随截止时间自然收敛）
+          debugPrint("[decision-card] attention ack failed: $e");
         }
-        if (!closed.isCompleted) closed.complete();
-      },
-    );
-    await closed.future;
+      }());
+    } else if (kind == "proactive" && deliveryId.isNotEmpty) {
+      AmbientFeedsController.instance.sendProactiveOutcome(
+          deliveryId, confirmed ? "accepted" : "dismissed");
+    }
+
+    final Map<String, dynamic> updated =
+        Map<String, dynamic>.of(card)..["state"] = "confirmed";
+    void apply() {
+      _messages[idx] = msg.copyWith(decisionCard: updated);
+    }
+
+    if (mounted) {
+      setState(apply);
+    } else {
+      apply();
+    }
   }
 
   // ====== 桌面端独立来电悬浮窗回调 ======
@@ -4697,54 +4727,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _ws.sendEvent("phone.speaker", {"on": newOn});
   }
 
-  void _handleDesktopNotificationConfirm() {
-    NotificationFlowController.instance.completeDesktopAck("confirm");
-    final Map<String, dynamic>? pendingBriefing =
-        _pendingDesktopBriefingPayload;
-    _pendingDesktopBriefingPayload = null;
-    if (pendingBriefing != null) {
-      unawaited(
-          _handleMorningBriefingEvent(pendingBriefing, forceDialog: true));
-      return;
-    }
-    if (NotificationFlowController.instance.hasPendingProactiveOutcome) {
-      AmbientFeedsController.instance.sendProactiveOutcome(
-          NotificationFlowController.instance.takePendingProactiveDeliveryId()!,
-          "accepted");
-    }
-    if (NotificationFlowController.instance.needsFeedback) {
-      AmbientFeedsController.instance.sendContactFeedback(
-        channel: NotificationFlowController.instance.feedbackChannel,
-        responded: true,
-        feedback: "positive",
-        quietHours: AmbientFeedsController.instance.isQuietHoursNow(),
-      );
-    }
-    NotificationFlowController.instance.needsFeedback = false;
-  }
-
-  void _handleDesktopNotificationDismiss() {
-    NotificationFlowController.instance.completeDesktopAck("dismiss");
-    if (NotificationFlowController.instance.hasPendingProactiveOutcome) {
-      AmbientFeedsController.instance.sendProactiveOutcome(
-          NotificationFlowController.instance.takePendingProactiveDeliveryId()!,
-          "dismissed");
-    }
-    NotificationFlowController.instance.needsFeedback = false;
-    _pendingDesktopBriefingPayload = null;
-  }
-
-  void _handleDesktopNotificationTimeout() {
-    NotificationFlowController.instance.completeDesktopAck("timeout");
-    if (NotificationFlowController.instance.hasPendingProactiveOutcome) {
-      AmbientFeedsController.instance.sendProactiveOutcome(
-          NotificationFlowController.instance.takePendingProactiveDeliveryId()!,
-          "ignored");
-    }
-    NotificationFlowController.instance.needsFeedback = false;
-    _pendingDesktopBriefingPayload = null;
-  }
-
   void _handleOutgoingCallHangup() {
     // 修复：此前发的是 phone.hang_up（服务端无此事件，挂断从未生效）；
     // 正确事件为 phone.call_hangup，并携带当前通话 callId
@@ -4758,91 +4740,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _phoneCallToActorId = null;
       _activeCallId = null;
     });
-  }
-
-  /// 主动性决策弹窗（reminder_popup）：恒走桌面原生弹窗（右下角
-  /// DesktopNotificationWindow，决策类统一承载面，不依赖主窗可见性）；
-  /// 原生不可用（非 Windows/移动端）降级应用内玻璃卡。
-  /// Future 在 confirm/dismiss/超时后完成（调用方据此回 attentionId ack）。
-  Future<void> _showAttentionPopup(
-    String title,
-    String message,
-    String priority,
-    bool showConfirm,
-    String confirmText,
-  ) async {
-    NotificationFlowController.instance.needsFeedback = false;
-    NotificationFlowController.instance.feedbackChannel = "websocket";
-
-    if (!kIsWeb && !_isMobile) {
-      final String cardId = "att_${DateTime.now().microsecondsSinceEpoch}";
-      final bool ok = await DesktopNotificationLauncher.show(
-        title: title,
-        message: message,
-        priority: priority,
-        showConfirmButton: showConfirm,
-        confirmText: showConfirm ? confirmText : "",
-        // 必须 >0：原生侧 0 = 永不超时，ack Future 会挂死
-        autoCloseMs: 30000,
-      );
-      if (ok) {
-        // 共享窗只有全局闭合回调，把等待 id 交给回调补发闭合事件
-        NotificationFlowController.instance.pendingDesktopAckCardId = cardId;
-        await NotificationFlowController.instance.waitForPopupClose(cardId);
-        return;
-      }
-    }
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-    _showInAppReminderCard(title, message, priority, showConfirm, confirmText);
-  }
-
-  /// 应用内玻璃卡兜底（桌面原生弹窗不可用时）：黑白毛玻璃，右上角层叠。
-  /// Future 在卡片完全关闭后完成。
-  Future<void> _showInAppReminderCard(
-    String title,
-    String message,
-    String priority,
-    bool showConfirm,
-    String confirmText,
-  ) async {
-    final BuildContext? navCtx = _rootNavigatorKey.currentContext;
-    if (navCtx == null || !navCtx.mounted) return;
-
-    final Completer<void> closed = Completer<void>();
-    final bool important = priority == "urgent" || priority == "high";
-
-    GlassNotify.show(
-      title: title,
-      message: message,
-      variant: switch (priority) {
-        "urgent" => GlassNotifyVariant.error,
-        "high" => GlassNotifyVariant.warning,
-        _ => GlassNotifyVariant.info,
-      },
-      // 重要提醒停留更久，普通提醒按演示页节奏短驻
-      duration: Duration(milliseconds: important ? 8000 : 4500),
-      actions: showConfirm
-          ? <GlassNotifyAction>[
-              GlassNotifyAction(
-                label: confirmText,
-                emphasized: true,
-                onPressed: () {
-                  AmbientFeedsController.instance.sendContactFeedback(
-                    channel: "websocket",
-                    responded: true,
-                    feedback: "positive",
-                    quietHours: AmbientFeedsController.instance.isQuietHoursNow(),
-                  );
-                },
-              ),
-            ]
-          : const <GlassNotifyAction>[],
-      onClose: (GlassNotifyCloseReason reason) {
-        if (!closed.isCompleted) closed.complete();
-      },
-    );
-    await closed.future;
   }
 
   void _presentPeerAgentIncoming(Map<String, dynamic> payload) {
@@ -5700,35 +5597,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
     }
 
-    if (mode == UserPreferencesApi.modeWindow &&
-        !forceDialog &&
-        !kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.windows) {
-      final bool alreadyDelivered =
-          await _isBriefingDeliveredElsewhere(preferredChannel: "desktop");
-      if (alreadyDelivered) return;
-      _pendingDesktopBriefingPayload = <String, dynamic>{
-        "mode": mode,
-        "narrationText": narrationText,
-        "briefing": briefing,
-      };
-      final String message = buildDesktopBriefingSummary(briefing);
-      NotificationFlowController.instance.needsFeedback = false;
-      NotificationFlowController.instance.feedbackChannel = "websocket";
-      final bool shown = await DesktopNotificationLauncher.show(
-        title: "每日简报",
-        message: message,
-        priority: "normal",
-        showConfirmButton: true,
-        confirmText: "打开查看",
-        autoCloseMs: 0,
-      );
-      if (shown) {
-        await _markBriefingDelivered("desktop");
-        return;
-      }
-      _pendingDesktopBriefingPayload = null;
-    }
+    // 右下角原生弹窗兜底已随 2026-10-14 删除；悬浮窗打开失败时落到
+    // 下方 Android 通知 / 对话框既有路径。
 
     if (!kIsWeb &&
         defaultTargetPlatform == TargetPlatform.android &&
@@ -6310,6 +6180,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
       backgroundTaskCount: _taskPlaneState.activeCount,
       onCancelBackgroundTask: _cancelBackgroundTask,
+      onConfirmDecisionCard: _handleDecisionCardAction,
       // 豆包式列队发送：排队中的用户消息气泡显示「排队中」徽标
       queuedMessageIds: _queuedUserMessageIds,
       // 「为你推荐」：父级聚合空闲态 + 本地存储（出现时机治理持久化）

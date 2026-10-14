@@ -1214,10 +1214,15 @@ class _TravelItineraryCard extends StatelessWidget {
       for (final String img in gallery)
         if (img != posterUrl) img,
     ];
-    // 图片预热：卡片上屏即并发预取海报候选+全部实拍（全局去重），
-    // 海报先人一步点亮，点开画廊/规划面板时全部命中内存缓存秒开
+    // 图片预热（2026-10-13 根修）：此前只 warm 进程内存缓存（重启即空，
+    // 且卡片上屏才触发 → 与首帧渲染赛跑），表现为「每次重开仍要等图」。
+    // 现在双轨：MediaDiskCache 落盘预热（跨进程持久，重开卡片秒开）+
+    // TravelImageWarmer 内存解码预热（同会话内滚动/重进零等待）。
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (context.mounted) TravelImageWarmer.warm(posterCandidates);
+      if (context.mounted) {
+        MediaDiskCache.instance.warm(posterCandidates);
+        TravelImageWarmer.warm(posterCandidates);
+      }
     });
     // 卡体强调色随 App 主题对齐（海报区压在照片上，保留恒定霓虹青）
     final TravelPalette palette = TravelPalette.of(context);

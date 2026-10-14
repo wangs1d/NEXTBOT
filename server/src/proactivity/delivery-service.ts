@@ -11,6 +11,8 @@ export type DeliveryResult =
 
 export type DeliveryDeps = {
   trySend: (actorId: string, json: string) => boolean;
+  /** 定向投递（targetDeviceClass 提案用）：仅向指定设备类别的在线端投递（2026-10-13） */
+  trySendToDeviceClasses?: (actorId: string, json: string, deviceClasses: string[]) => boolean;
   /** 助手动态台账（右侧面板「助手动态」卡数据源）：kind 以 "action." 开头的代办提案
    * 投递成功后落一条记录（投递失败不记——提案会挂起重投，送达才算"办完了"）。 */
   ledger?: { record: (p: ProactiveProposal) => void };
@@ -37,7 +39,12 @@ export class ProactiveDeliveryService {
         ...(popup ? { display: "popup" } : {}),
       },
     };
-    if (!this.deps.trySend(p.actorId, JSON.stringify(payload))) {
+    if (p.targetDeviceClass && this.deps.trySendToDeviceClasses) {
+      // 定向投递：只面向声明设备类别的在线端；不在线返回失败由管道挂起重投/推送兜底
+      if (!this.deps.trySendToDeviceClasses(p.actorId, JSON.stringify(payload), [p.targetDeviceClass])) {
+        return { ok: false, reason: `no_online_${p.targetDeviceClass}` };
+      }
+    } else if (!this.deps.trySend(p.actorId, JSON.stringify(payload))) {
       return { ok: false, reason: "no_online_device" };
     }
     if (p.kind.startsWith("action.")) {

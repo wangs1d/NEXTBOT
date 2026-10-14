@@ -12,6 +12,7 @@ export type IntentLabel =
   | "chat" // 寒暄/情绪/观点/闲聊，凭上下文即可答
   | "knowledge_qa" // 常识/知识问答，不依赖实时信息
   | "realtime_lookup" // 需外部实时信息：新闻/某人近况/最新消息/价格/热搜/比分
+  | "weather_query" // 查天气：实况/预报/穿衣——专属工具（weather.get_local）对话面前台直办
   | "personal_data_query" // 查用户自己的数据：日程/订单/快递/钱包/消息/相册——走本地只读工具，绝不联网搜索
   | "media_retrieval" // 找图/照片/视频/壁纸
   | "travel_planning" // 旅行行程规划：去某地玩几天的行程/攻略/路线（确定性预执行 travel.plan-itinerary）
@@ -23,6 +24,7 @@ export const INTENT_LABELS: readonly IntentLabel[] = [
   "chat",
   "knowledge_qa",
   "realtime_lookup",
+  "weather_query",
   "personal_data_query",
   "media_retrieval",
   "travel_planning",
@@ -75,6 +77,12 @@ export const INTENT_ROUTING_TABLE: Record<IntentLabel, IntentRoutePlan> = {
   // 「再来点」误标 realtime 时执行模型想调 search_images 都不可见，代码拿着
   // 媒体形状的查询词烧网页搜索（真机探针实证）——标签错误不该阉割正确工具。
   realtime_lookup: { plane: "task", capabilities: ["search", "media"], budget: 3, tier: "flash" },
+  // weather_query（2026-10-13）：天气落对话面前台直办——weather.get_local 在
+  // chat Core 常驻 + 域预载兜底，单工具秒级动作与 action_write 同构。此前天气
+  // 被吸进 realtime_lookup 甩到任务面（真链探针实证：多付一轮任务面开销，
+  // 正文还从任务面汇总通道流式打字机漏出——答案留存闸的洞正是它撑开的）。
+  // 天气卡由 chat 车道确定性附卡链（weather.get_local 回执）交付。
+  weather_query: { plane: "chat", capabilities: [], budget: 0, tier: "flash" },
   // personal_data_query（2026-09-23）：查自己的数据落对话面前台直办（chat Core
   // 恒挂 wallet/messages/calendar 等只读工具）。此前无此标签，这类轮被吸进
   // realtime_lookup 拿原话当搜索词烧 web 搜索（真实事故：「看看我最近的购物
@@ -119,6 +127,9 @@ const INTENT_ALIASES: Record<string, IntentLabel> = {
   realtime_lookup: "realtime_lookup",
   search: "realtime_lookup",
   news: "realtime_lookup",
+  weather: "weather_query",
+  weather_query: "weather_query",
+  weather_report: "weather_query",
   personal: "personal_data_query",
   personal_data: "personal_data_query",
   personal_data_query: "personal_data_query",

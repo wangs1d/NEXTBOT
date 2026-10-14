@@ -17,6 +17,7 @@ import "../../core/theme/app_typography.dart";
 import "../../core/theme/app_theme.dart";
 import "agent_home_page.dart";
 import "agent_profile_page.dart" show AgentProfileData;
+import "media_disk_cache.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "agent_result_card.dart";
@@ -90,6 +91,10 @@ class ChatPage extends StatefulWidget {
 
     /// 取消后台任务回调（回执 hover 取消按钮；null 时仅展示无取消入口）
     this.onCancelBackgroundTask,
+
+    /// 对话流决策卡「确认/忽略」回调（传入 messageId；main.dart 据卡内
+    /// kind 回传 attention ack / proactive outcome 并原地翻转卡片状态）
+    this.onConfirmDecisionCard,
 
     /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合。
     /// 命中的用户气泡在时间行显示「排队中」徽标，服务端开始处理该条
@@ -194,6 +199,9 @@ class ChatPage extends StatefulWidget {
 
   /// 取消后台任务回调（回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
+
+  /// 对话流决策卡「确认/忽略」回调（传入 messageId）
+  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合（父组件维护）
   final Set<String> queuedMessageIds;
@@ -1233,6 +1241,7 @@ class _ChatPageState extends State<ChatPage>
       onUserAction: widget.onUserAction,
       onFollowupTap: _sendSuggestion,
       onCancelBackgroundTask: widget.onCancelBackgroundTask,
+      onConfirmDecisionCard: widget.onConfirmDecisionCard,
     );
   }
 
@@ -1926,6 +1935,9 @@ class _HoverableMessageWidget extends StatelessWidget {
     /// 取消后台任务回调（任务回执 hover 取消按钮）
     this.onCancelBackgroundTask,
 
+    /// 对话流决策卡「确认/忽略」回调（透传至条目渲染）
+    this.onConfirmDecisionCard,
+
     /// 是否为同一条发言（utterance）的后续分段（续泡）：不重复头像/名字/时间头
     this.isUtteranceContinuation = false,
   });
@@ -1963,6 +1975,9 @@ class _HoverableMessageWidget extends StatelessWidget {
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
+
+  /// 对话流决策卡「确认/忽略」回调（传入 messageId；区分确认与忽略）
+  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 全局删除选择模式是否激活
   final bool deleteSelectionMode;
@@ -2025,6 +2040,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onUserAction: onUserAction,
       onFollowupTap: onFollowupTap,
       onCancelBackgroundTask: onCancelBackgroundTask,
+      onConfirmDecisionCard: onConfirmDecisionCard,
       isUtteranceContinuation: isUtteranceContinuation,
     );
   }
@@ -2060,6 +2076,7 @@ class _HoverableMessageContent extends StatefulWidget {
     this.onUserAction,
     this.onFollowupTap,
     this.onCancelBackgroundTask,
+    this.onConfirmDecisionCard,
     this.isUtteranceContinuation = false,
   });
 
@@ -2105,6 +2122,9 @@ class _HoverableMessageContent extends StatefulWidget {
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
+
+  /// 对话流决策卡「确认/忽略」回调（传入 messageId）
+  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 是否为同一条发言（utterance）的后续分段（续泡）：
   /// 续泡不带头像、名字与时间头 —— 同一条消息继续说下一句，不是新的一条回复。
@@ -2262,6 +2282,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
     final bool isTaskReceipt =
         widget.mainMessage.contentType == "task_receipt";
+    final bool isDecisionCard =
+        widget.mainMessage.contentType == "decision_card";
     final bool isVoiceMessage = widget.mainMessage.contentType == "audio" &&
         widget.mainMessage.attachments.any(
             (MessageAttachment a) => a.type == MessageAttachmentType.audio);
@@ -2272,6 +2294,13 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       bubble = _TaskReceiptBubble(
         message: widget.mainMessage,
         onCancel: widget.onCancelBackgroundTask,
+      );
+    } else if (isDecisionCard) {
+      // 决策卡（2026-10-14 定稿）：决策类通知不再飘弹窗/玻璃卡，
+      // 直接落对话流一张卡，确认/忽略在卡上完成并回传 ack/outcome。
+      bubble = _DecisionCardBubble(
+        message: widget.mainMessage,
+        onAction: widget.onConfirmDecisionCard,
       );
     } else if (isVoiceMessage) {
       final MessageAttachment audio = widget.mainMessage.attachments.firstWhere(
@@ -2580,8 +2609,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         child: avatarUrl == null || avatarUrl.isEmpty
             ? fallbackIcon
             : ClipOval(
-                child: Image.network(
-                  avatarUrl,
+                child: CachedMediaImage(
+                  url: avatarUrl,
                   width: 34,
                   height: 34,
                   fit: BoxFit.cover,
@@ -3142,6 +3171,180 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
                   ),
                 ),
               ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 对话流决策卡（contentType="decision_card"，2026-10-14 定稿）。
+///
+/// 决策类通知（提醒升级链 popup 级 / 高重要度主动性消息）的统一承载面：
+/// 不再飘独立弹窗或玻璃卡，直接落进对话流一张卡，与对话阅读流同源——
+/// 上下文不丢（弹窗顶掉弹窗的问题不复存在），确认动作留在卡片本体上。
+///
+/// 视觉（黑白极简，与 task_receipt 同族但更醒目）：低对比深底 + 细描边 +
+/// 优先级强调条（urgent 红 / high 琥珀 / normal 灰），标题加粗、正文常规；
+/// pending 态给「确认」主按钮 +「忽略」次入口，操作后原地翻转为
+/// 「已确认 / 已忽略」终态（透明度降低，作为对话记录保留）。
+///
+/// 回传由 main.dart 的 onConfirmDecisionCard 处理：attention → AttentionApi
+/// ack（确认与忽略都算已知晓，升级链收敛）；proactive → outcome
+/// accepted / dismissed。
+class _DecisionCardBubble extends StatelessWidget {
+  const _DecisionCardBubble({required this.message, this.onAction});
+
+  final ChatMessage message;
+
+  /// 确认/忽略回调（confirmed 区分两颗按钮；null 时按钮仅展示锁定态）
+  final void Function(String messageId, bool confirmed)? onAction;
+
+  Color _accent(ColorScheme cs) {
+    final String priority =
+        message.decisionCard?["priority"]?.toString() ?? "normal";
+    return switch (priority) {
+      "urgent" => cs.error,
+      "high" => const Color(0xFFFFB020), // 琥珀（原右下角弹窗 high 档色）
+      _ => cs.outline,
+    };
+  }
+
+  String _priorityLabel() {
+    final String priority =
+        message.decisionCard?["priority"]?.toString() ?? "normal";
+    return switch (priority) {
+      "urgent" => "紧急",
+      "high" => "重要",
+      _ => "提醒",
+    };
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final Map<String, dynamic> card =
+        message.decisionCard ?? const <String, dynamic>{};
+    final String title = card["title"]?.toString() ?? message.text;
+    final String body = card["message"]?.toString() ?? "";
+    final bool confirmed = card["state"]?.toString() == "confirmed";
+    final Color accent = _accent(cs);
+
+    return Opacity(
+      opacity: confirmed ? 0.6 : 1.0,
+      child: Container(
+        constraints: const BoxConstraints(maxWidth: 380),
+        decoration: BoxDecoration(
+          color: cs.onSurface.withValues(alpha: 0.05),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
+        ),
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(13),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              // 优先级强调条
+              Container(height: 3, color: accent),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    // 头行：图标 + 「紧急/重要/提醒 · 需要你确认」
+                    Row(
+                      children: <Widget>[
+                        Icon(
+                          confirmed
+                              ? Icons.check_circle_outline
+                              : Icons.notifications_active_outlined,
+                          size: 15,
+                          color: confirmed ? cs.primary : accent,
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          confirmed
+                              ? "${_priorityLabel()} · 已确认"
+                              : "${_priorityLabel()} · 需要你确认",
+                          style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(
+                                    color: cs.onSurfaceVariant,
+                                    fontWeight: FontWeight.w600,
+                                    letterSpacing: 0.3,
+                                  ),
+                        ),
+                      ],
+                    ),
+                    if (title.isNotEmpty) ...<Widget>[
+                      const SizedBox(height: 8),
+                      Text(
+                        title,
+                        style: Theme.of(context)
+                                .textTheme
+                                .titleSmall
+                                ?.copyWith(
+                                  color: cs.onSurface.withValues(alpha: 0.92),
+                                  fontWeight: FontWeight.w600,
+                                  height: 1.3,
+                                ),
+                      ),
+                    ],
+                    if (body.isNotEmpty && body != title) ...<Widget>[
+                      const SizedBox(height: 4),
+                      Text(
+                        body,
+                        style: Theme.of(context)
+                                .textTheme
+                                .bodySmall
+                                ?.copyWith(
+                                  color: cs.onSurface.withValues(alpha: 0.72),
+                                  height: 1.4,
+                                ),
+                      ),
+                    ],
+                    // 动作区：pending 态给确认主按钮 + 忽略次入口；
+                    // 确认/忽略都算已知晓（升级链 / outcome 语义均收敛）
+                    if (!confirmed) ...<Widget>[
+                      const SizedBox(height: 10),
+                      Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: <Widget>[
+                          FilledButton(
+                            style: FilledButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              backgroundColor:
+                                  cs.onSurface.withValues(alpha: 0.9),
+                              foregroundColor: cs.surface,
+                              padding:
+                                  const EdgeInsets.symmetric(horizontal: 16),
+                            ),
+                            onPressed: onAction == null
+                                ? null
+                                : () => onAction!(message.messageId, true),
+                            child: const Text("我知道了"),
+                          ),
+                          const SizedBox(width: 8),
+                          TextButton(
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              foregroundColor: cs.onSurfaceVariant,
+                            ),
+                            onPressed: onAction == null
+                                ? null
+                                : () => onAction!(message.messageId, false),
+                            child: const Text("忽略"),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
             ],
           ),
         ),

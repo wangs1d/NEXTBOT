@@ -51,7 +51,7 @@ private object AlarmRestFallback {
             val prefs = context.getSharedPreferences("alarm_clock_prefs", Context.MODE_PRIVATE)
             val base = prefs.getString("http_base", null) ?: return
             val path = if (action == "snooze") "/api/alarms/$alarmId/snooze" else "/api/alarms/$alarmId/dismiss"
-            val body = if (action == "snooze") """{"minutes":5}""" else "{}"
+            val body = if (action == "snooze") """{"minutes":10}""" else "{}"
             val conn = (java.net.URL(base + path).openConnection() as java.net.HttpURLConnection).apply {
                 requestMethod = "POST"
                 setRequestProperty("Content-Type", "application/json")

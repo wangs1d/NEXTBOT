@@ -150,10 +150,11 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
   }
 
   /**
-   * 后台任务的单条事实记录（2026-09-08）：assistant 角色、带「[后台任务记录]」前缀，
-   * 取代旧的「伪造 user 轮 [后台任务] <原文> + assistant 回复对」。user 轮会让
-   * 后续对话把任务原文当作用户说过的话接茬（把「刘浩存才是真主 未来的老婆」
-   * 接成说媒拒绝的事故根因之一）。
+   * 后台任务的单条事实记录（2026-09-08 建立，2026-10-13 根修迁 system 角色）：
+   * 带「[后台任务记录]」前缀，取代旧的「伪造 user 轮 [后台任务] <原文> + assistant
+   * 回复对」。user 轮会让后续对话把任务原文当作用户说过的话接茬（把「刘浩存才是
+   * 真主 未来的老婆」接成说媒拒绝的事故根因之一）；assistant 角色则会让模型把它
+   * 当自己的输出复读给用户（2026-10-13 手机端气泡事故同根源），故迁 system。
    */
   appendTaskRecord(sessionId: string, goal: string, resultText: string): void {
     this.threads.appendTaskRecord(sessionId, this.systemPrompt, goal, resultText);

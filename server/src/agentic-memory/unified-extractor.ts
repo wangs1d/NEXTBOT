@@ -172,6 +172,8 @@ const SYSTEM_PROMPT = [
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
+  "归属铁律：Assistant 话中的「我」指 Agent 自己——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；"
+  + "时效性计划与临时安排（下周去上海/周末的安排）不进 facts（属 decay/计划域，不是档案）；",
   "裁决基准：持久性与影响范围双低的日常琐事（天气、吃了什么、喝了咖啡、",
   "寒暄问候、今天的心情）必须 reject，绝不允许 remember；今天的安排/临时",
   "事项 decay；只有长期有效且影响未来回答的信息才 remember；",

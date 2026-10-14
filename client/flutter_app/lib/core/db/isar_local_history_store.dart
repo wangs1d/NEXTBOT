@@ -473,6 +473,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       shortTitle: m["shortTitle"] as String?,
       notes: m["notes"] as String?,
       isTrivia: m["isTrivia"] == true,
+      previewLeadMinutes: (m["previewLeadMinutes"] as num?)?.toInt(),
     );
   }
 
@@ -484,6 +485,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       "shortTitle": e.shortTitle,
       "notes": e.notes,
       "isTrivia": e.isTrivia,
+      "previewLeadMinutes": e.previewLeadMinutes,
     };
   }
 

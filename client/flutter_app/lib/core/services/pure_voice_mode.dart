@@ -4,9 +4,9 @@ import "package:flutter/foundation.dart";
 import "package:window_manager/window_manager.dart";
 
 import "../presentation/dynamic_island.dart";
+import "../presentation/glass_notify.dart";
 import "agent_sphere_voice_controller.dart";
 import "briefing_tts_api.dart";
-import "desktop_notification_launcher.dart";
 import "tts_player.dart";
 import "voice_duplex_service.dart";
 import "../config/api_config.dart";
@@ -351,20 +351,17 @@ class PureVoiceModeController {
     await TtsPlayer.instance.playFromBase64(base64Audio);
   }
 
-  /// 简洁回复弹窗（复用原生玻璃卡）：长文截断预览，12 秒自动关闭；
+  /// 简洁回复弹窗（应用内玻璃卡）：长文截断预览，12 秒自动关闭；
   /// 完整内容已落聊天流，主窗口打开后可见。
   Future<void> _showReplyPopup(String text) async {
     final String compact =
         text.length > 260 ? "${text.substring(0, 260)}…" : text;
-    final bool ok = await DesktopNotificationLauncher.show(
+    GlassNotify.show(
       title: "Agent 回复",
       message: compact,
-      priority: "normal",
-      autoCloseMs: 12000,
+      variant: GlassNotifyVariant.info,
+      duration: const Duration(milliseconds: 12000),
     );
-    if (!ok) {
-      debugPrint("[PureVoiceMode] reply popup unavailable（原生窗未就绪）");
-    }
   }
 
   /// TTS 喂给朗读端的口语化清洗：剥代码块/表格/常见 markdown 标记。

@@ -10,7 +10,9 @@ import "../core/db/isar_local_history_store.dart";
 import "../core/db/local_history_store.dart";
 import "../core/models/chat_models.dart";
 import "../core/services/access_auth_api.dart";
+import "../core/services/attention_api.dart";
 import "../core/services/client_location_service.dart";
+import "../core/services/local_notification_service.dart";
 import "../core/services/ws_chat_service.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../core/utils/assistant_text_sanitizer.dart";
@@ -519,6 +521,13 @@ class MobileChatController extends ChangeNotifier {
       case "schedule.tasks_changed":
         // 日程变更同步（创建/更新/删除）→ 编排层刷新日程页本地镜像。
         unawaited(AmbientFeedsController.instance.onScheduleTasksChanged(payload));
+      case "reminder_popup":
+        // 提醒升级链 popup 级（2026-10-14 与桌面端对齐）：决策卡落对话流。
+        // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
+        _handleReminderPopupEvent(payload);
+      case "agent.proactive_message":
+        // 主动性消息（2026-10-14 与桌面端对齐）：决策类落卡，告知类落文字气泡。
+        _handleProactiveMessageEvent(payload);
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
@@ -551,6 +560,123 @@ class MobileChatController extends ChangeNotifier {
         errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
         notifyListeners();
     }
+  }
+
+  // ===== 对话流决策卡（2026-10-14 与桌面端对齐）=====
+
+  /// 是否处于后台（MobileHomePage 装配进 AmbientFeedsController 端口）。
+  bool get _appBackgrounded =>
+      AmbientFeedsController.instance.isAppBackgrounded?.call() ?? false;
+
+  /// 提醒升级链 popup 级（reminder_popup）→ 对话流决策卡。
+  /// 后台时补系统通知触达（前台卡在流里直接可见，无需通知）。
+  void _handleReminderPopupEvent(Map<String, dynamic> payload) {
+    final String title = payload["title"]?.toString() ?? "提醒";
+    final String message = payload["message"]?.toString() ?? "";
+    final String priority = payload["priority"]?.toString() ?? "normal";
+    final String attentionId = payload["attentionId"]?.toString() ?? "";
+    if (_appBackgrounded) {
+      unawaited(LocalNotificationService.show(
+        title: priority == "urgent" ? "[紧急] $title" : title,
+        body: message,
+      ));
+    }
+    _appendDecisionCard(<String, dynamic>{
+      "kind": "attention",
+      "title": title,
+      "message": message,
+      "priority": priority,
+      "state": "pending",
+      "attentionId": attentionId,
+    });
+  }
+
+  /// 主动性消息（agent.proactive_message）→ 决策类落对话流决策卡，
+  /// 告知类落普通文字气泡（同样进对话流，不弹 SnackBar）。
+  void _handleProactiveMessageEvent(Map<String, dynamic> payload) {
+    final String title = payload["title"]?.toString() ?? "Agent 主动联系";
+    final String text = payload["text"]?.toString() ?? "";
+    final String importance = payload["importance"]?.toString() ?? "";
+    final String deliveryId = payload["deliveryId"]?.toString() ?? "";
+    final bool important = importance == "high" || importance == "critical";
+    if (!important || deliveryId.isEmpty) {
+      // 告知类：落对话流即 impression（viewed，不进接受率分母）
+      if (deliveryId.isNotEmpty) {
+        AmbientFeedsController.instance.sendProactiveOutcome(
+            deliveryId, "viewed");
+      }
+      if (text.trim().isEmpty) return;
+      messages.add(ChatMessage(
+        messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: title.isNotEmpty && text.isNotEmpty ? "$title\n$text" : (text.isNotEmpty ? text : title),
+        timestamp: DateTime.now(),
+      ));
+      notifyListeners();
+      return;
+    }
+    if (_appBackgrounded) {
+      // 手机后台（类微信常在线）：系统通知触达，点开回前台，卡在流里承接确认
+      unawaited(LocalNotificationService.show(title: title, body: text, deliveryId: deliveryId));
+    }
+    _appendDecisionCard(<String, dynamic>{
+      "kind": "proactive",
+      "title": title,
+      "message": text,
+      "priority": "high",
+      "state": "pending",
+      "deliveryId": deliveryId,
+    });
+  }
+
+  /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
+  /// 与桌面端同语义：重启后消失，服务端升级链自行收敛）。
+  void _appendDecisionCard(Map<String, dynamic> card) {
+    final String title = card["title"]?.toString() ?? "";
+    final String body = card["message"]?.toString() ?? "";
+    messages.add(ChatMessage(
+      messageId: "decision-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: body.isNotEmpty ? body : title,
+      timestamp: DateTime.now(),
+      contentType: "decision_card",
+      decisionCard: card,
+    ));
+    notifyListeners();
+  }
+
+  /// 决策卡按钮回调（MobileChatPage 调用）：回传 ack/outcome + 原地翻转终态。
+  /// attention：确认/忽略都 ack（via=chat_card，升级链收敛）；
+  /// proactive：确认 accepted / 忽略 dismissed。
+  void confirmDecisionCard(String messageId, bool confirmed) {
+    final int idx = messages.indexWhere((m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final Map<String, dynamic>? card = messages[idx].decisionCard;
+    if (card == null || card["state"]?.toString() == "confirmed") return;
+
+    final String kind = card["kind"]?.toString() ?? "";
+    final String attentionId = card["attentionId"]?.toString() ?? "";
+    final String deliveryId = card["deliveryId"]?.toString() ?? "";
+    if (kind == "attention" && attentionId.isNotEmpty) {
+      unawaited(() async {
+        try {
+          await AttentionApi().ack(attentionId, via: "chat_card");
+        } catch (e) {
+          // ack 失败不影响本地卡片（升级链会随截止时间自然收敛）
+          debugPrint("[mobile decision-card] attention ack failed: $e");
+        }
+      }());
+    } else if (kind == "proactive" && deliveryId.isNotEmpty) {
+      AmbientFeedsController.instance
+          .sendProactiveOutcome(deliveryId, confirmed ? "accepted" : "dismissed");
+    }
+
+    messages[idx] = messages[idx].copyWith(
+      decisionCard: Map<String, dynamic>.of(card)..["state"] = "confirmed",
+    );
+    notifyListeners();
   }
 
   /// 思考态或流式开始时,确保有一条等待中的助手消息。

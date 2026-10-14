@@ -5,6 +5,9 @@ allprojects {
         maven("https://maven.aliyun.com/repository/central")
         google()
         mavenCentral()
+        // 华为 HMS 仓库：厂商通道 plugin:huawei 的 HMS push 依赖在此
+        // （com.huawei.hms:* 不在 Maven Central）
+        maven("https://developer.huawei.com/repo/")
     }
 }
 

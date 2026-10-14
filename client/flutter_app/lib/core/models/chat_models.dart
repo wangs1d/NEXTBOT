@@ -113,6 +113,7 @@ class ChatMessage {
     this.replyBlocks,
     this.pendingMediaCards,
     this.followUpPrompts,
+    this.decisionCard,
     this.taskId,
     this.taskState,
     this.taskGoal,
@@ -221,6 +222,21 @@ class ChatMessage {
   /// done 实时下发，历史消息不带（对话推进后旧建议即失效）。
   final List<String>? followUpPrompts;
 
+  /// 对话流内决策卡（contentType="decision_card"，2026-10-14 定稿）。
+  ///
+  /// 决策类通知（reminder_popup / 高重要度主动性消息）不再飘独立弹窗或
+  /// 玻璃卡，直接落进对话流一张卡：用户点「确认/忽略」后由 main.dart
+  /// 原地翻转 state 并回传 attention ack / proactive outcome。
+  /// 内存态不持久化（同 task_receipt：重启后消失，服务端升级链自行收敛）。
+  ///
+  /// 载荷：
+  ///   - kind: "attention" | "proactive"
+  ///   - title / message / priority
+  ///   - state: "pending" | "confirmed"
+  ///   - attentionId: reminder_popup 的 ack 目标（kind=attention）
+  ///   - deliveryId: 主动性消息的 outcome 目标（kind=proactive）
+  final Map<String, dynamic>? decisionCard;
+
   // ===== 后台任务回执（contentType="task_receipt" 专用，2026-09-08）=====
   //
   // 前后台分工：task.dispatch 派发后台任务后，服务端以 chat.task_update 推送
@@ -264,6 +280,7 @@ class ChatMessage {
     List<Map<String, dynamic>>? replyBlocks,
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
+    Map<String, dynamic>? decisionCard,
     String? taskId,
     String? taskState,
     String? taskGoal,
@@ -290,6 +307,7 @@ class ChatMessage {
       replyBlocks: replyBlocks ?? this.replyBlocks,
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
+      decisionCard: decisionCard ?? this.decisionCard,
       taskId: taskId ?? this.taskId,
       taskState: taskState ?? this.taskState,
       taskGoal: taskGoal ?? this.taskGoal,

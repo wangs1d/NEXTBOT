@@ -46,6 +46,12 @@ export type ProactiveProposal = {
   utility?: ProposalUtilityMeta;
   /** 提案级确认（ask_first）：确认文案投递后登记待确认，批准回调 onProposalApproved */
   confirmAction?: { label: string };
+  /**
+   * 定向投递（2026-10-13）：缺省 = 全部在线设备 fan-out（旧行为）；声明为
+   * "mobile" 时投递只面向手机端——桌面在线不构成对手机的送达，也不让桌面
+   * 收到重复通知（到点提醒的手机离线补达用：挂起待手机重连 / 升级手机推送）。
+   */
+  targetDeviceClass?: "mobile" | "desktop";
 };
 
 export type ProposalVerdict =
@@ -72,11 +78,10 @@ export type ProactiveOutcome =
  * 触达通道：
  *  - in_app：两端在线 WS fan-out 直推
  *  - mobile_push：两端离线时必达/critical 升级手机系统推送
- *  - offline_inbox：两端离线且无推送通道时的社交层兜底（落站内信，用户下次打开
- *    即可看到；2026-10-10 补——此前 social 层离线既不落信箱也不推手机，只能挂到
- *    TTL 静默作废，是「主动性几乎不说话」的主因之一）
+ *  （offline_inbox 站内信兜底已删除 2026-10-14：站内信职责是后台→用户的
+ *    平台消息/更新通知，不承载聊天式提醒；离线无推送通道一律挂起待重连）
  */
-export type DeliveryChannel = "in_app" | "mobile_push" | "offline_inbox";
+export type DeliveryChannel = "in_app" | "mobile_push";
 
 /** 仲裁结果（决策链可解释：verdict + 每步原因） */
 export type ArbitrationDecision = {

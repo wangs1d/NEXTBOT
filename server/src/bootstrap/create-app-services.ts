@@ -245,6 +245,17 @@ import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
 import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
+import {
+  AGENT_NAME_KV_KEY,
+  parseAgentIdentityKv,
+} from "../services/agent-identity.js";
+import {
+  buildPersonaStaticBlock,
+  resolveRelationshipTier,
+  type RelationshipTier,
+  type UserAdaptationProfile,
+} from "../agent/persona-core.js";
+import { getSoulOverlay } from "../agent/soul-store.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
@@ -1016,7 +1027,14 @@ export async function createAppServices(): Promise<AppServices> {
   // 管道在下方装配段创建后注入；在线时 ScheduleReminderFired 原生弹窗即唯一触达
   // （不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
   let onReminderOfflineToPipeline:
-    | ((taskId: string, sessionId: string, title: string, message: string, runAt: string) => void)
+    | ((
+        taskId: string,
+        sessionId: string,
+        title: string,
+        message: string,
+        runAt: string,
+        preReminder: boolean,
+      ) => void)
     | undefined;
   scheduleTaskService.setReminderHandler(async (task, message, options) => {
     const displayMessage = formatReminderDisplayMessage(message);
@@ -1048,14 +1066,30 @@ export async function createAppServices(): Promise<AppServices> {
         displayMessage,
         "schedule.reminder_fired",
       );
-    } else {
-      // 人不在电脑前：WS 推送静默丢失 → 管道提案（directText 零 LLM）→ MessageHub 离线落库必达
+    }
+    // 手机端不在场（2026-10-13 根修「桌面在线 → 手机错过到点提醒」）：
+    // WS 全端 fan-out 任一端在线即算送达的旧语义，会让桌面在线时手机端
+    // （后台断连/被杀）永远收不到。手机不在线就补挂一条只面向手机端的
+    // 管道提案（定向投递）：手机重连即直推，或升级手机系统推送——桌面
+    // 已收到的 reminder_fired 不抵扣手机，也不会吃重复通知。
+    if (!wsConnectionRegistry.hasDeviceClass(task.sessionId, "mobile")) {
       onReminderOfflineToPipeline?.(
         task.taskId,
         task.sessionId,
         task.title ?? "",
         displayMessage,
         task.nextRunAt ?? task.runAt,
+        preReminder,
+      );
+    } else if (!wsDelivered) {
+      // 手机在线但 fan-out 竞态失败：维持原离线管道兜底
+      onReminderOfflineToPipeline?.(
+        task.taskId,
+        task.sessionId,
+        task.title ?? "",
+        displayMessage,
+        task.nextRunAt ?? task.runAt,
+        preReminder,
       );
     }
     // 不再根据"起床/叫醒"等关键词自动拨打电话
@@ -1974,15 +2008,76 @@ export async function createAppServices(): Promise<AppServices> {
   app.log.info("[MorningBriefing] 调度器已启动");
 
   // ─── Task 15 生活节律：晚间 digest「今日回顾 + 明日预告」（场景A）───
-  // 数据源全确定性（journal 当日要点 / 当日账本新增 / 明日日程 / 次日天气预警），
-  // 零 LLM；送达链路参考晨报（WS 推送 EveningDigest 事件），调度模式参考
-  // MorningBriefingScheduler（每分钟 tick，全局 EVENING_DIGEST_HOUR 默认 21 点）。
+  // 数据源全确定性（journal 当日要点 / 当日账本新增 / 明日日程 / 次日天气预警）；
+  // 文案交给 agent（2026-10-13 定调）：需要提前提醒的信息 → LLM 动态产出，
+  // system 注入 agent 自身 soul（buildPersonaStaticBlock 与主对话同源，文案
+  // 受 agent 人格影响），失败/未启用回退确定性模板；送达链路参考晨报
+  // （WS 推送 EveningDigest 事件），调度模式参考 MorningBriefingScheduler。
+  const eveningDigestSoulProvider = (sessionId: string): string | null => {
+    try {
+      // agent 名（与聊天面同源：记忆同步 KV 的 agent.name）
+      let agentName: string | undefined;
+      try {
+        const identityRaw = agentMemorySyncService
+          .getSnapshot(sessionId, [AGENT_NAME_KV_KEY])
+          .entries[AGENT_NAME_KV_KEY];
+        agentName = parseAgentIdentityKv(identityRaw)?.displayName ?? undefined;
+      } catch {
+        /* 名字缺失不阻塞 soul */
+      }
+      // 用户称呼（agent 叫用户的称呼；与晨报同源，不回退 displayName）
+      let userAlias: string | undefined;
+      try {
+        userAlias =
+          structuredFactStore?.getFact(sessionId, "称呼")?.value?.trim() ||
+          undefined;
+      } catch {
+        /* 称呼缺失不阻塞 soul */
+      }
+      // 关系档 + 学到的适配（与人格模块同口径换算；preferredTone 在异步
+      // getPromptSlice 里，睡前 soul 保持同步取用 → 只带同步可得信号）
+      let tier: RelationshipTier = 1;
+      let adaptation: UserAdaptationProfile | undefined;
+      try {
+        const rel = userPersonalizationService.getRelationshipState(sessionId);
+        tier = resolveRelationshipTier(rel?.rapport);
+        adaptation = { humorTolerance: rel?.humorTolerance };
+      } catch {
+        /* 关系态缺失走默认档 */
+      }
+      return buildPersonaStaticBlock({ userAlias, agentName, tier, adaptation, soulOverlay: getSoulOverlay() ?? undefined });
+    } catch {
+      return null;
+    }
+  };
   const eveningDigestService = new EveningDigestService({
     journalService: getDailyJournalService(),
     financeDeepService,
     scheduleTaskService,
     weatherService,
     weatherPrefsService,
+    soulProvider: eveningDigestSoulProvider,
+    llmComplete: externalChat?.isEnabled()
+      ? async (prompt, opts) => {
+          let full = "";
+          await externalChat!.streamCompletion(
+            `evening-digest-${Date.now()}`,
+            { text: prompt },
+            (delta: string) => {
+              full += delta;
+            },
+            undefined,
+            {
+              // soul 走 system（agent 人格），睡前 prompt 走 user（ephemeral 不进历史）
+              systemPromptOverride: opts?.systemPrompt,
+              ephemeralTurn: true,
+              disableThinking: true,
+              maxThreadMessages: 0,
+            },
+          );
+          return full;
+        }
+      : undefined,
   });
   const eveningDigestScheduler = new EveningDigestScheduler({
     digestService: eveningDigestService,
@@ -2007,7 +2102,7 @@ export async function createAppServices(): Promise<AppServices> {
           tier: "must",
           importance: "medium",
           dedupKey: `evening_digest:${sessionId}:${new Date().toISOString().slice(0, 10)}`,
-          title: "今日回顾与明日预告",
+          title: "睡前备忘",
           summary: digest.narrationText.slice(0, 200),
           evidence: ["evening_digest_scheduled", "ws_push_failed"],
           directText: digest.narrationText,
@@ -2189,7 +2284,10 @@ export async function createAppServices(): Promise<AppServices> {
         : null,
     },
   });
-  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService);
+  // 闹钟服务在装配序列后段（alarm-clock 段）才构造；calendar 工具经此 getter 懒取用，
+  // 创建「闹钟类提醒」时同步补建真闹钟（alarm.sync → 手机端本地精确响铃）
+  let alarmClockServiceRef: AlarmClockService | null = null;
+  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService, () => alarmClockServiceRef);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
   // 启动智能家居设备状态轮询（若 HA 已配置），将状态变化发布为 smart_home 信号
@@ -5767,6 +5865,14 @@ export async function createAppServices(): Promise<AppServices> {
     },
     delivery: new ProactiveDeliveryService({
       trySend: (actorId, json) => wsConnectionRegistry.trySend(actorId, json),
+      // 定向投递（targetDeviceClass 提案用）：按设备类别投递（手机离线补达场景，
+      // 桌面在线不构成对手机的送达也不吃重复通知）
+      trySendToDeviceClasses: (actorId, json, deviceClasses) =>
+        wsConnectionRegistry.trySendToDeviceClasses(
+          actorId,
+          json,
+          deviceClasses.filter((c): c is "desktop" | "mobile" => c === "desktop" || c === "mobile"),
+        ),
       ledger: {
         record: (p) =>
           agentActivityStore.record({
@@ -5797,20 +5903,6 @@ export async function createAppServices(): Promise<AppServices> {
     // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
     // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
     mobilePush: proactivePushService,
-    // 站内信兜底（2026-10-10）：social 层 + medium 及以上的离线提案落站内信，
-    // 而非挂到 TTL 静默作废（对症 97 条 offline_wait_reconnect）。客户端下次打开即见。
-    // env PROACTIVITY_OFFLINE_INBOX=0 可关闭。
-    inbox: {
-      send: (input) =>
-        inboxService.send({
-          actorId: input.actorId,
-          title: input.title,
-          body: input.body,
-          ...(input.kind ? { kind: input.kind } : {}),
-          ...(input.importance ? { importance: input.importance as "low" | "normal" | "high" | "critical" } : {}),
-          ...(input.messageId ? { messageId: input.messageId } : {}),
-        }),
-    },
     // critical 提案升级链接线（Phase 3 待办落地）：送达 ≠ 被看到——critical 直投成功后
     // 挂起 intelligent-reminder 的 popup→tts_alarm→phone_call 三级升级链（未确认按默认
     // 规则 10/12 分钟逐级升级），用户确认（reminder.acknowledge）即停链。
@@ -6069,22 +6161,31 @@ export async function createAppServices(): Promise<AppServices> {
     // 微信支付服务通知 → 零 LLM 解析 → 静默自动入账（只落库不推送，查询走 finance.* 工具）
     void financeIngestService.handleInboundMessage(input).catch(() => {});
   };
-  // 到点提醒 WS 推送失败（两端都不在线）→ 管道提案 directText 零 LLM → 挂起待重连直推，
-  // 或升级手机系统推送（proactivePushService 已配置时）
-  onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt) => {
+  // 到点提醒手机端不在场 → 定向手机端的管道提案（directText 零 LLM）：手机重连
+  // 即直推（targetDeviceClass 定向，桌面不吃重复），或升级手机系统推送（proactivePushService 已配置时）
+  onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt, preReminder) => {
     proactivePipeline.submitProposal({
       proposalId: `p_${Date.now().toString(36)}_rm${taskId.slice(-6)}`,
       actorId: sessionId,
       kind: "schedule_reminder",
       tier: "must",
       importance: "high",
-      dedupKey: `schedule_reminder:${taskId}:${runAt}`,
+      // 预告段与到点触发各自一条（同 taskId 同 runAt，必须用后缀区分，否则预告提案
+      // 会把到点提案 dedup 吞掉）
+      dedupKey: `schedule_reminder:${taskId}:${runAt}${preReminder ? ":pre" : ""}`,
       title,
       summary: message,
-      evidence: [`taskId=${taskId}`, `runAt=${runAt}`, "ws_push_failed"],
+      evidence: [
+        `taskId=${taskId}`,
+        `runAt=${runAt}`,
+        preReminder ? "pre_reminder" : "due_reminder",
+        "mobile_not_reachable",
+      ],
       directText: message,
       createdAt: Date.now(),
       source: "schedule",
+      // 定向手机端（2026-10-13）：桌面在线不构成对手机的送达；投递/挂起/推送兜底均只面向手机
+      targetDeviceClass: "mobile",
     });
   };
   console.log(
@@ -6201,6 +6302,7 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
   alarmClockService.start();
+  alarmClockServiceRef = alarmClockService;
   registerAlarmRoutes(app, { alarmClockService });
   app.addHook("onClose", async () => alarmClockService.stop());
 

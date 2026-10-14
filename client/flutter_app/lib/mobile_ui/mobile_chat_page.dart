@@ -231,6 +231,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
           if (m.streaming && m.text.isEmpty) {
             return _buildThinking(p);
           }
+          if (m.contentType == "decision_card") {
+            // 决策卡（2026-10-14 与桌面端对齐）：决策类通知直接落对话流，
+            // 确认/忽略在卡上完成并回传 ack/outcome。
+            return _buildDecisionCard(context, m, p);
+          }
           if (!isUser) {
             // 行程卡独立第二条消息形态（2026-10-12 与桌面端对齐）：气泡只装
             // 文字，travel_itinerary 大卡不框进气泡外壳，作为独立消息元素
@@ -260,8 +265,139 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildEmpty(MobilePalette p) {
-    return Center(
+  /// 对话流决策卡（2026-10-14 与桌面端同构）：低对比底 + 优先级强调条
+  /// （urgent 红 / high 琥珀 / normal 灰），pending 给「我知道了/忽略」，
+  /// 点击后经控制器回传 ack/outcome 并原地翻转为「已确认」终态。
+  Widget _buildDecisionCard(BuildContext context, ChatMessage m, MobilePalette p) {
+    final Map<String, dynamic> card = m.decisionCard ?? const <String, dynamic>{};
+    final String title = card["title"]?.toString() ?? m.text;
+    final String body = card["message"]?.toString() ?? "";
+    final String priority = card["priority"]?.toString() ?? "normal";
+    final bool confirmed = card["state"]?.toString() == "confirmed";
+    final Color accent = switch (priority) {
+      "urgent" => const Color(0xFFFF5C5C),
+      "high" => const Color(0xFFFFB020),
+      _ => p.divider,
+    };
+    final String priorityLabel = switch (priority) {
+      "urgent" => "紧急",
+      "high" => "重要",
+      _ => "提醒",
+    };
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Opacity(
+        opacity: confirmed ? 0.6 : 1.0,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          constraints: const BoxConstraints(maxWidth: 300),
+          decoration: BoxDecoration(
+            color: p.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: p.divider),
+          ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(13),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                Container(height: 3, color: accent),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Row(
+                        children: <Widget>[
+                          Icon(
+                            confirmed
+                                ? Icons.check_circle_outline
+                                : Icons.notifications_active_outlined,
+                            size: 15,
+                            color: confirmed ? p.online : accent,
+                          ),
+                          const SizedBox(width: 6),
+                          Text(
+                            confirmed
+                                ? "$priorityLabel · 已确认"
+                                : "$priorityLabel · 需要你确认",
+                            style: TextStyle(
+                              color: p.textSecondary,
+                              fontSize: 11,
+                              fontWeight: FontWeight.w600,
+                              letterSpacing: 0.3,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (title.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 8),
+                        Text(
+                          title,
+                          style: TextStyle(
+                            color: p.textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            height: 1.3,
+                          ),
+                        ),
+                      ],
+                      if (body.isNotEmpty && body != title) ...<Widget>[
+                        const SizedBox(height: 4),
+                        Text(
+                          body,
+                          style: TextStyle(
+                            color: p.textSecondary,
+                            fontSize: 13,
+                            height: 1.4,
+                          ),
+                        ),
+                      ],
+                      if (!confirmed) ...<Widget>[
+                        const SizedBox(height: 10),
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            FilledButton(
+                              style: FilledButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                backgroundColor: p.textPrimary,
+                                foregroundColor: p.background,
+                                padding:
+                                    const EdgeInsets.symmetric(horizontal: 16),
+                              ),
+                              onPressed: () => _controller
+                                  .confirmDecisionCard(m.messageId, true),
+                              child: const Text("我知道了"),
+                            ),
+                            const SizedBox(width: 8),
+                            TextButton(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                                foregroundColor: p.textSecondary,
+                              ),
+                              onPressed: () => _controller
+                                  .confirmDecisionCard(m.messageId, false),
+                              child: const Text("忽略"),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildEmpty(MobilePalette p) {    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [

@@ -18,6 +18,7 @@ import {
   type NightlyMode,
 } from "./nightly-unified-consolidator.js";
 import { semanticFingerprint } from "./memory-record-utils.js";
+import { maybeRunSoulReflection } from "../agent/soul-store.js";
 
 export type NightlySleepAgentReport = {
   runAt: string;
@@ -413,10 +414,12 @@ export class NightlyMemoryTaskService {
     const journal = getDailyJournalService();
     if (!journal || !this.memoryManager) return;
 
+    let lastTranscript: string | null = null;
     for (const actorId of this.getAllActorIds()) {
       try {
         const transcript = await this.buildNightlyTranscript(journal, actorId);
         if (!transcript) continue;
+        lastTranscript = transcript;
 
         // 评分行必须与 consolidateNow 的评分输入同源同格式（consumeTodayJournalLines
         // 的行格式），指纹才能在缓存中精确命中；此处只读不消费游标。
@@ -448,6 +451,20 @@ export class NightlyMemoryTaskService {
         }
       } catch (err) {
         console.error(`[NightlyMemory] unified pre-pass failed for ${actorId}:`, err);
+      }
+    }
+
+    // 灵魂周级反思（2026-10-13）：复用本通道拼好的 transcript，产出受 drift guard
+    // 约束的 disposition patch。周级门禁在 soul-store 内部（changelog 最近一条
+    // ≥7 天才调 LLM），LLM 缺失/失败静默跳过，绝不影响后续固化阶段。
+    if (lastTranscript) {
+      try {
+        const soul = await maybeRunSoulReflection({ transcript: lastTranscript });
+        if (soul.applied) {
+          console.log(`[NightlyMemory] Soul reflection applied (${soul.reason})`);
+        }
+      } catch (err) {
+        console.error("[NightlyMemory] Soul reflection failed:", err);
       }
     }
   }

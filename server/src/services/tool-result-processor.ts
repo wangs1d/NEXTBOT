@@ -4,7 +4,6 @@ import {
   formatContentSummaryForPlainText,
   shouldSummarizeContent,
 } from "../services/content-summary-service.js";
-import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { routeRender } from "../gateway/index.js";
 import { extractDataBriefPayload } from "./render-hint-service.js";
 import {
@@ -858,11 +857,14 @@ export class ToolResultProcessor {
     },
   ): string {
     if (!this.options.enabled) {
-      return humanizeAssistantText(text, { userText: opts?.userText });
+      return text;
     }
 
-    // 人性化助手：下方所有分支统一走它，避免重复写 `{ userText }` 参数
-    const humanize = (t: string) => humanizeAssistantText(t, { userText: opts?.userText });
+    // 人化改稿闸已删除（2026-10-13 根修）：本管线处理的是**已流式送达用户**的
+    // 最终文本，prose 层再改写（humanizeAssistantText 的客服腔清洗/口头禅清理）
+    // 就是「先流式输出一段、done 落库另一段」的根源之一。模型文本即权威，
+    // 这里只做结构化（卡片/标记/渲染路由）。人化约束归 prompt 层；
+    // 认知快路径（agent-core）在流式**前**的人化保持不变（流=落库一致）。
 
     // === -1. 系统内部帧守卫：线程存档里的非用户可见文本既不做形态判定，也不下发 ===
     // 真实数据回放发现：[session-recap] 记忆回顾、[后台任务记录]、[上一轮回复中断]
@@ -904,13 +906,13 @@ export class ToolResultProcessor {
       console.log(`[ToolResultProcessor] LLM declared render_hint: ${llmHint}`);
       switch (llmHint) {
         case "structured":
-          return wrapRenderAs("structured", humanize(workingText));
+          return wrapRenderAs("structured", workingText);
         case "brief":
-          return wrapRenderAs("brief", humanize(workingText));
+          return wrapRenderAs("brief", workingText);
         case "card":
-          return formatAgentResultForChat(workingText, opts?.toolName) ?? humanize(workingText);
+          return formatAgentResultForChat(workingText, opts?.toolName) ?? workingText;
         case "plain":
-          return humanize(workingText);
+          return workingText;
       }
       // 未知 hint → fall through 走规则判断
     }
@@ -988,7 +990,7 @@ export class ToolResultProcessor {
     // 优先级 0：image_text 图片识别/OCR → 注入 [RENDER_AS:image_result]
     if (hint.type === "image_text") {
       console.log(`[ToolResultProcessor] image_text: ${hint.reason}`);
-      return wrapRenderAs("image_result", humanize(workingText));
+      return wrapRenderAs("image_result", workingText);
     }
 
     // 优先级 1：search_result 搜索工具结果 → 专用搜索结果卡片（含 URL 提取）
@@ -1003,10 +1005,10 @@ export class ToolResultProcessor {
     }
 
     // 优先级 1.5：data_brief 数据快报 → 注入 [RENDER_AS:data_brief] + [DATA_BRIEF_START] payload。
-    // 用原始文本提取（不经过 humanize，避免数值被口语化改写），前端解析失败时回退纯文本。
+    // 用原始文本提取（正文零改写，数值不被口语化），前端解析失败时回退纯文本。
     if (hint.type === "data_brief") {
       console.log(`[ToolResultProcessor] data_brief: ${hint.reason}`);
-      if (opts?.plainTextMode) return humanize(workingText);
+      if (opts?.plainTextMode) return workingText;
       const payload = extractDataBriefPayload(workingText);
       return wrapRenderAs(
         "data_brief",
@@ -1039,7 +1041,7 @@ export class ToolResultProcessor {
     // 优先级 3+：brief 简报形态（L2 模型声明 only；打分退役后不再从散文猜简报）
     if (hint.type === "brief") {
       console.log(`[ToolResultProcessor] brief: ${hint.reason}`);
-      return wrapRenderAs("brief", humanize(workingText));
+      return wrapRenderAs("brief", workingText);
     }
 
     // 优先级 3：summary_card 长内容折叠
@@ -1068,7 +1070,7 @@ export class ToolResultProcessor {
           console.log(
             `[ToolResultProcessor] Formatted output length: ${formatted.length}`,
           );
-          return humanize(formatted);
+          return formatted;
         }
       }
     }
@@ -1077,13 +1079,13 @@ export class ToolResultProcessor {
     if (hint.type === "long_text") {
       console.log(`[ToolResultProcessor] long_text: ${hint.reason}`);
       if (hint.intent) {
-        return wrapRenderAs("structured", humanize(workingText));
+        return wrapRenderAs("structured", workingText);
       }
-      return humanize(workingText);
+      return workingText;
     }
 
     // 优先级 5：plain 普通正文（无硬信号 → 纯文本，不硬塞形态）
-    return humanize(workingText);
+    return workingText;
   }
 }
 

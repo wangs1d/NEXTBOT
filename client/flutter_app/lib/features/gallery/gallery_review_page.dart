@@ -6,6 +6,7 @@ import "package:flutter/services.dart" show KeyEvent, LogicalKeyboardKey;
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "../chat/media_disk_cache.dart";
 
 /// 回顾视图：盲盒清理（Linger 式随机断舍离）+ 记忆放映（Yope 式 moments）。
 ///
@@ -418,8 +419,8 @@ class _GalleryReviewPageState extends State<GalleryReviewPage> {
                   child: Stack(
                     fit: StackFit.expand,
                     children: <Widget>[
-                      Image.network(
-                        "${ApiConfig.httpBase}${photo.imageUrl}",
+                      CachedMediaImage(
+                        url: "${ApiConfig.httpBase}${photo.imageUrl}",
                         fit: BoxFit.contain,
                         errorBuilder: (_, Object e, StackTrace? s) => Center(
                           child: Text("图片加载失败", style: TextStyle(color: cs.onSurfaceVariant)),
@@ -579,8 +580,8 @@ class _GalleryReviewPageState extends State<GalleryReviewPage> {
                           children: <Widget>[
                             ClipRRect(
                               borderRadius: BorderRadius.circular(6),
-                              child: Image.network(
-                                "${ApiConfig.httpBase}${p.previewUrl}",
+                              child: CachedMediaImage(
+                                url: "${ApiConfig.httpBase}${p.previewUrl}",
                                 fit: BoxFit.cover,
                                 errorBuilder: (_, Object e, StackTrace? s) =>
                                     ColoredBox(color: cs.surfaceContainerHigh),
@@ -877,8 +878,8 @@ class _MemoryPlaybackDialogState extends State<_MemoryPlaybackDialog>
           transform: Matrix4.identity()..scaleByDouble(scale, scale, 1.0, 1.0),
           child: Align(
             alignment: align,
-            child: Image.network(
-              "${ApiConfig.httpBase}${slide.url}",
+            child: CachedMediaImage(
+              url: "${ApiConfig.httpBase}${slide.url}",
               fit: BoxFit.cover,
               alignment: align,
               errorBuilder: (_, Object e, StackTrace? s) =>

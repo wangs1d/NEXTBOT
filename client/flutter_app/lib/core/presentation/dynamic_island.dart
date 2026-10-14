@@ -44,7 +44,7 @@ class IslandEntry {
 /// 由 [DynamicIslandLauncher] 监听本控制器并同步过去。
 ///
 /// 与通知分流定调一致：岛上只走「不需要决策的被动信息」，
-/// 需要决策的通知仍走右下角原生弹窗，不进岛。
+/// 需要决策的通知落对话流决策卡（contentType=decision_card），不进岛。
 class DynamicIslandController extends ChangeNotifier {
   /// 运行态统一用 [instance] 单例；测试需要干净实例时直接新建。
   DynamicIslandController();
@@ -417,9 +417,11 @@ void handleIslandAction(String label) => _islandActionHandler(label);
 
 // ───────────────────────── 行程预告调度器 ─────────────────────────
 
-/// 行程预告的提前量策略表：按事项标题关键词分类（命中多个取最靠前）。
-/// 提醒时刻本身已统一收归服务端；本表只剩两个消费面：
-/// 胶囊预告窗口闸（[withinPreviewWindow]）与预告尾注文案（[trailingFor]）。
+/// 行程预告的提前量策略表（⚠️ 2026-10-13 起退役为兼容兜底）：按事项标题
+/// 关键词分类（命中多个取最靠前）。预告提前量的权威源 = 服务端分级提醒
+/// 策略的任务计划（客户端 previewLeadMinutesFromTask 落库到事项），
+/// 「不是什么事都预告、提前量因事而异」。本表只剩旧注入方（E2E 台账等
+/// 未带计划字段的 next）走 [withinPreviewWindow] 兜底与尾注文案（[trailingFor]）。
 class IslandReminderPolicy {
   IslandReminderPolicy._();
 
@@ -450,14 +452,24 @@ class IslandReminderPolicy {
     return tierCount > 1 ? '$base · 第${tierIndex + 1}次提醒' : '$base 后';
   }
 
-  /// 「下一事项」胶囊的预告窗口 = 该事项的首档提醒提前量。
-  /// 岛上预告与提醒同节奏：进入提醒节奏才上岛倒计时，还有很久不占胶囊
-  /// （2026-10-05 定调：「根据情况按一定时间提前预示」）。
+  /// 「下一事项」胶囊的预告窗口 = 该事项的预告提前量。
+  /// 2026-10-13 定调：预告提前量因事而异（来源 = 服务端分级提醒策略的任务
+  /// 计划，经 previewLeadMinutesFromTask 落到事项上），且不是什么事都预告——
+  /// 无计划事项（next 带 previewLeadMinutes=null）不进胶囊倒计时，只走到点
+  /// 提醒与预告段的主动 attention。关键词硬编码表（[leadMinutesFor]）退役为
+  /// 未带该字段的旧注入方（E2E 台账等）兼容兜底。
   static int previewLeadMinutesFor(String title) => leadMinutesFor(title).first;
 
-  /// 预告窗口闸（纯函数可测）：未带 minutesAhead 的注入方（E2E 台账）视为已在窗口内。
+  /// 预告窗口闸（纯函数可测）：
+  ///   - next 带 previewLeadMinutes（int）→ 计划口径：minutesAhead ≤ 提前量；
+  ///   - next 显式带 null → 该事项无预告计划，不预告；
+  ///   - 未带该字段 → 旧注入方，回退关键词表（兼容兜底）。
   static bool withinPreviewWindow(Map<String, Object?> next) {
     final int minutesAhead = (next['minutesAhead'] as num?)?.toInt() ?? 0;
+    if (next.containsKey('previewLeadMinutes')) {
+      final int? lead = (next['previewLeadMinutes'] as num?)?.toInt();
+      return lead != null && minutesAhead <= lead;
+    }
     return minutesAhead <=
         previewLeadMinutesFor((next['title'] ?? '').toString());
   }
@@ -474,6 +486,10 @@ class IslandReminderPolicy {
 /// （schedule.reminder_fired 事件，含 preReminder 分段与到点档，2026-10-05
 /// 合并定调——客户端关键词 Timer 重复触发已删）。本类只剩 [fireNow]：
 /// 收到服务端事件后驱动岛的 attention 动画。
+///
+/// ⚠️ [IslandReminderPolicy] 的关键词提前量表已退役（2026-10-13 定调：
+/// 预告提前量因事而异，来源 = 服务端任务计划经 previewLeadMinutesFromTask
+/// 落到事项；关键词表只剩 E2E 等未带计划字段的旧注入方兼容兜底）。
 class IslandReminderScheduler {
   IslandReminderScheduler._();
 

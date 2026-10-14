@@ -129,7 +129,7 @@ test("流式半截探测：识别 <system-reminder> 的真前缀，放过普通�
   assert.ok(systemReminderPartialTailLen("今天天气不错") === 0);
 });
 
-test("端到端：thread 折叠出的中断占位帧不再夹带围栏原文", async () => {
+test("端到端：thread 折叠出的中断链不再夹带围栏原文（system 动作台账，assistant 通道清零）", async () => {
   const { foldCompletedToolChains } = await import(
     "../src/external-model/chat-thread-store.js"
   );
@@ -151,20 +151,23 @@ test("端到端：thread 折叠出的中断占位帧不再夹带围栏原文", a
   ] as never[];
   const changed = foldCompletedToolChains(msgs);
   assert.equal(changed, true);
-  // 折叠后只剩一条 assistant 占位帧（system + 占位）
-  const assistant = (msgs as Array<{ role: string; content?: unknown }>).filter(
+  // 2026-10-13 根修：折叠后 assistant 通道清零，事实记录以 system 动作台账承载
+  const assistants = (msgs as Array<{ role: string; content?: unknown }>).filter(
     (m) => m.role === "assistant",
   );
-  assert.equal(assistant.length, 1);
-  const text = String(assistant[0]?.content ?? "");
-  assert.ok(text.includes("上一轮回复中断"));
-  // 契约核心：围栏原文（含 source=tool:）不得出现在占位帧里
+  assert.equal(assistants.length, 0, "assistant 通道不得再出现占位帧");
+  const ledger = (msgs as Array<{ role: string; content?: unknown }>).find(
+    (m) => m.role === "system" && String(m.content ?? "").startsWith("[动作台账"),
+  );
+  assert.ok(ledger, "中断链必须折叠出 system 动作台账");
+  const text = String(ledger?.content ?? "");
+  // 契约核心：围栏原文（含 source=tool:）不得进入台账
   assert.equal(text.includes("不可信内容围栏"), false);
   assert.equal(text.includes("source=tool:"), false);
   // 工具事实仍在（天气数据本身，不是围栏头）
   assert.ok(text.includes("兴义 26℃ 晴"));
-  // 且携带禁复述约束
-  assert.ok(text.includes("禁止"));
+  // 单行契约：整行可被出口剥离器拦
+  assert.equal(text.includes("\n"), false);
 });
 
 

@@ -8,6 +8,8 @@
 // GET  /api/proactivity/push/status —— 已配置 provider 与各 actor 注册的 token 概览。
 // POST /api/proactivity/push/test —— 给指定 actor 发一条测试推送（验证通道连通）。
 import type { FastifyInstance } from "fastify";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { ProactivePipeline } from "../../proactivity/proactive-pipeline.js";
@@ -25,7 +27,7 @@ const ALLOWED_OUTCOMES = new Set<ProactiveOutcome>([
   "replied",
 ]);
 
-const ALLOWED_PUSH_PROVIDERS = new Set(["jpush", "bark", "webhook"]);
+const ALLOWED_PUSH_PROVIDERS = new Set(["huawei", "jpush", "bark", "webhook"]);
 
 /** 用户语义化反馈动作（一键"太多了/别推这个"直通频控与静音表） */
 const ALLOWED_FEEDBACK_ACTIONS = new Set(["too_many", "mute_topic", "resume_topic", "like"]);
@@ -397,9 +399,23 @@ export function registerProactivityPipelineRoutes(
 
   app.post("/api/proactivity/push/register", async (request, reply) => {
     if (!pushService) return reply.code(503).send({ ok: false, error: "push service not wired" });
-    const body = (request.body ?? {}) as { actorId?: string; provider?: string; token?: string; deviceId?: string };
+    const body = (request.body ?? {}) as { actorId?: string; provider?: string; token?: string; deviceId?: string; err?: string };
     const actorId = String(body.actorId ?? "").trim();
     const provider = String(body.provider ?? "").trim();
+    // 设备侧诊断（2026-10-14）：token 拿不到时客户端把 HMS 报错带上来落日志，
+    // 便于远程定位（无 token 不进注册表；放在 actorId 校验之前——未登录时
+    // actorId 可能为空，同样要留痕）
+    if (!body.token?.trim()) {
+      const errLine = `${new Date().toISOString()} actor=${actorId || "(empty)"} provider=${provider || "?"} err=${String(body.err ?? "token missing").slice(0, 300)}\n`;
+      try {
+        const diagDir = join(process.cwd(), "data", "debug");
+        mkdirSync(diagDir, { recursive: true });
+        appendFileSync(join(diagDir, "push-register-errors.log"), errLine);
+      } catch {
+        /* 落盘失败不影响响应 */
+      }
+      return { ok: false, logged: true, error: "token missing (diag logged)" };
+    }
     if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
     if (!ALLOWED_PUSH_PROVIDERS.has(provider)) {
       return reply.code(400).send({

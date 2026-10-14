@@ -81,7 +81,16 @@ export class JPushProvider implements PushProvider {
           audience: { registration_id: [target.token] },
           notification: {
             alert: `${input.title}：${input.body}`,
-            android: { alert: `${input.title}：${input.body}`, title: input.title },
+            android: {
+              alert: `${input.title}：${input.body}`,
+              title: input.title,
+              // 顶部横幅弹窗（heads-up）：channel_id 指向客户端 init 时创建的
+              // HIGH 重要性渠道（LocalNotificationService），priority=2 为
+              // Android 8.0 以下的遗留横幅优先级
+              channel_id: "proactive",
+              priority: 2,
+              category: "reminder",
+            },
             ios: { alert: `${input.title}：${input.body}`, sound: "default", badge: 1 },
           },
           options: { apns_production: this.apnsProduction, time_to_live: 86400 },
@@ -150,6 +159,103 @@ export class WebhookPushProvider implements PushProvider {
   }
 }
 
+/** 华为 Push Kit 直连（2026-10-13 用户定调：移除极光，高可控直连）：
+ *  OAuth client_credentials 换 access token（内存缓存）→ push-api messages:send。
+ *  凭据来源 AGC「OAuth 2.0 客户端 ID」：HUAWEI_PUSH_APP_ID + HUAWEI_PUSH_CLIENT_SECRET。 */
+export class HuaweiPushProvider implements PushProvider {
+  readonly name = "huawei";
+  private accessToken: string | null = null;
+  private tokenExpiresAt = 0;
+
+  constructor(private readonly appId: string, private readonly clientSecret: string) {}
+
+  static fromEnv(env: NodeJS.ProcessEnv = process.env): HuaweiPushProvider | null {
+    const appId = env.HUAWEI_PUSH_APP_ID?.trim() ?? "";
+    const secret = env.HUAWEI_PUSH_CLIENT_SECRET?.trim() ?? "";
+    return appId && secret ? new HuaweiPushProvider(appId, secret) : null;
+  }
+
+  isConfigured(): boolean {
+    return true;
+  }
+
+  private async getAccessToken(): Promise<string> {
+    if (this.accessToken && Date.now() < this.tokenExpiresAt - 60_000) return this.accessToken;
+    const body = new URLSearchParams({
+      grant_type: "client_credentials",
+      client_id: this.appId,
+      client_secret: this.clientSecret,
+    });
+    const resp = await fetch("https://oauth-login.cloud.huawei.com/oauth2/v3/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    const data = (await resp.json().catch(() => ({}))) as { access_token?: string; expires_in?: number };
+    if (!resp.ok || !data.access_token) {
+      throw new Error(`huawei OAuth HTTP ${resp.status}`);
+    }
+    this.accessToken = data.access_token;
+    this.tokenExpiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
+    return data.access_token;
+  }
+
+  async push(target: PushTarget, input: PushInput): Promise<{ ok: boolean; reason?: string }> {
+    if (!target.token) return { ok: false, reason: "huawei 需要 HMS push token" };
+    try {
+      const accessToken = await this.getAccessToken();
+      const payload = {
+        validate_only: false,
+        message: {
+          android: {
+            collapse_key: -1,
+            urgency: "HIGH",
+            notification: {
+              title: input.title,
+              body: input.body,
+              // 顶部横幅弹窗（heads-up）：channel_id 指向客户端 init 时创建的
+              // HIGH 重要性渠道（LocalNotificationService："proactive"）
+              channel_id: "proactive",
+              click_action: { type: 3 },
+              notify_id: Math.abs(
+                [...`${input.title}${input.body}`].reduce((a, c) => (a * 31 + c.charCodeAt(0)) | 0, 0),
+              ) % 2_000_000_000,
+            },
+          },
+          token: [target.token],
+        },
+      };
+      // 华为 messages:send 的业务错误（如 80300002 token 无效/指纹不匹配）也走
+      // HTTP 200 + body.code —— 只看 HTTP 状态会把被拒的推送误记成「已送达」。
+      // 必须解析 body：code 缺失或 80000000 才算成功（实测 2026-10-14）。
+      const response = await fetch(
+        `https://push-api.cloud.huawei.com/v1/${this.appId}/messages:send`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+          body: JSON.stringify(payload),
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+        },
+      );
+      const text = (await response.text().catch(() => "")).slice(0, 500);
+      let bodyCode = "";
+      try {
+        bodyCode = (JSON.parse(text) as { code?: string }).code ?? "";
+      } catch {
+        /* 非 JSON 响应按 HTTP 状态判定 */
+      }
+      if (!response.ok) return { ok: false, reason: `huawei HTTP ${response.status}: ${text}` };
+      if (bodyCode && bodyCode !== "80000000") {
+        return { ok: false, reason: `huawei code=${bodyCode}: ${text}` };
+      }
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, reason: `huawei 请求失败: ${err}` };
+    }
+  }
+}
+
 type PersistedTokens = Record<string, PushTokenEntry[]>;
 
 export type MobilePushDeps = { registryPath: string; env?: NodeJS.ProcessEnv; providers?: PushProvider[] };
@@ -160,7 +266,9 @@ export class MobilePushService {
   private dirty = false;
 
   constructor(private readonly deps: MobilePushDeps) {
-    const envProviders = [JPushProvider.fromEnv(deps.env), BarkProvider.fromEnv(deps.env), WebhookPushProvider.fromEnv(deps.env)].filter(
+    // 极光已按用户要求移除（2026-10-13）：激活路径只剩 huawei 直连 / bark / webhook。
+    // JPushProvider 类保留仅供参考，不再进激活列表。
+    const envProviders = [HuaweiPushProvider.fromEnv(deps.env), BarkProvider.fromEnv(deps.env), WebhookPushProvider.fromEnv(deps.env)].filter(
       (p) => p !== null,
     );
     this.providers = deps.providers ?? envProviders;

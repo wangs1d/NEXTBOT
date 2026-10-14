@@ -13,7 +13,6 @@ project(runner LANGUAGES CXX)
 add_executable(${BINARY_NAME} WIN32
   "agent_profile_overlay_window.cpp"
   "connected_call_window.cpp"
-  "desktop_notification_window.cpp"
   "desktop_screen_capture.cpp"
   "flutter_window.cpp"
   "glass_notify_window.cpp"

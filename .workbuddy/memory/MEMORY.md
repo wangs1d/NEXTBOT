@@ -3,6 +3,7 @@
 > 逐日明细见同目录 `YYYY-MM-DD.md`；本文件只留跨天仍有约束力的铁律（≤3000 字，勿再膨胀）。
 
 ## 服务端铁律
+0. **已流式即定稿（2026-10-13 根修定稿，最高优先）**：出口层（TurnFinalizer/tool-result-processor/chat-turn-runner）禁止对已流式正文做任何 prose 改稿——ReplyStyleGate 确定性删句、隔离重写臂（rewriteReplyBriefly）、AGENT_HUMAN_REWRITE 真人腔改写器（assistant-rewriter.ts）、processAssistantText 里的 humanize 已全部删除，勿复活。人化/人格约束归 prompt 层；认知快路径 agent-core.ts:1011 的流前 humanize 保留（流=落库一致）。保留下来的非文风出口：净化器（控制帧/meta句/时间戳帧/DSML）、说话算话裁决、utterance 塌缩、事实类闸（出口自检 TurnOutcomeGate、搜索宣称一致性重跑——会整轮换稿但属事实纠错，删=虚构搜索回归）、空回复重生。删句手术/词面违规检测（apology/hedge/offer 词表判人设）这类「措辞猜人格」的闸不许再加。
 1. **确定性执行契约**：realtime/media 查询词纯代码构造（`agent/realtime-search-query.ts`），「要不要搜」永不交给模型现场决定；「时好时坏」先查意图缺确定性半边，别加出口闸。media 剥命令/载体/量词，壁纸/头像/表情包不剥；剥光退回实体消解。
 2. **统一时间源**：服务内禁 `Date.now()`/无参 `new Date()`，用 `now: () => Date` 注入透传（`CommitmentBoard.setScheduleOutlet()` 下发板钟）。时间问句证据源=本地时钟（`isDirectCurrentTimeQuestion`→`buildClockEvidence`）。provider 陷阱：overrideSys ≠ 丢 memory，恒透传 promptMemory。诊断 `AGENT_PROMPT_TRACE=1` 或 `data/prompt-trace.flag`。
 3. **用户事实权威源** = `structured_facts`（structured-fact-store.ts，`PROFILE_FIELD_ALIASES`）；新字段先登记别名表；`normalizeSubject` 剥「」。
@@ -44,3 +45,12 @@
 - stderr 崩溃：freopen 失败置流关闭 → fwprintf 触发断言 abort(0xC0000409)；写点须 `_fileno(stderr)>=0` 防御；main.cpp 兜底链 env→exe→%TEMP%→nul；dumps 在 logs/crashdumps/。
 - 前缀缓存：MiniMax 缓存好，命中率低=tools 数组逐轮分叉；`stabilizeToolOrderForSession` 会话级单调并集，必须在注册表名层做；新加「逐轮筛工具」前先想这条。Anthropic 端点 api.minimaxi.com/anthropic 可用，被动缓存已够不必切端点。
 - 右侧面板入口下线：从 `_allToolSpecs()` 摘掉即可，历史偏好无需清理；隐藏≠删除，入口专属轮询字段同删。
+
+## APK 烤入/部署拓扑约定（2026-10-14 用户定调）
+- 手机 APK 后端地址两档：`159.75.52.2:3000`＝腾讯云生产后端（SSH 用桌面 King.pem，/opt/pai，systemd pai-server 跑 dist）；`192.168.10.2:3000`＝本机局域网自用版。build_apk.ps1 -HttpBase 二选一；`login.nextbot.top`（阿里云 47.98.122.29）只是控制面/登录页，不是后端。
+- 云机华为 Push 凭据 = AGC「OAuth 2.0 客户端 ID」面板值（119333351 + 6750e54b…），**不是** agconnect-services.json 里的 client_secret（那个实测 1101 invalid）。
+
+## 媒体兜底抓取（2026-10-14 用户提出，工具 `scripts/scrape-article-media.mjs`）
+- 「搜索引擎只返回文章链接」时：拉文章页 → 抠 `<img>` 真图 → `curl -e <referer>` 下载；信息也一并抽成 md。三模式：`--urls` 抓文章 / `--images` 直链下载 / `--prune` 清残留。
+- 铁律：**抽取端放宽，content-type + 真实分辨率才是闸门**（网易/腾讯图链无 `.jpg` 后缀）；**先切正文容器再抽图**（否则推荐流混入，163 实测 29→13）；**新浪是 GBK 必须解码**；JS 壳站点（头条）用 agent-browser 只取 `article img`。
+- **信息侧同思路**（2026-10-14）：正文清洗（模板噪声词表 + 附件清单行过滤 + 句级去重）→ `info/*.json` 结构化 → `--digest --topic` 聚合出时间线/要点/多源同事件。三个坑：标题必须防模板污染（论坛 og:title 是门户口号，要降级 `<h1>`）；**中文改写稿字面相似度极低（≤0.06），同事件归组要用共享实体（《书名号》）而非 n-gram**；要点必须过**主题相关性闸门**，否则多人红毯稿会把无关明星带进来。

@@ -6,9 +6,9 @@ import {
   resolvePersonaMood,
   resolveRelationshipTier,
 } from "../agent/persona-core.js";
+import { getSoulOverlay } from "../agent/soul-store.js";
 import { buildVoiceBaselineBlock } from "../agent/chat-voice-baseline.js";
 import { TurnBudget } from "../agent/turn-budget.js";
-import { humanizeAssistantText } from "./assistant-humanizer.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
@@ -1005,19 +1005,21 @@ export class AgentCore {
       !isApologyStyleFallback(cognitiveResponse) &&
       (route.plane === "chat")
     ) {
-      // 人化处理：去除客服腔、清理 LEADING_CLEANUPS、调整语气——与 streamCompletion 路径保持一致。
-      // 不补这一步会让大量快回复（不带工具调用）跳过人化，导致"活人感"约束大面积失效。
-      const humanized = humanizeAssistantText(cognitiveResponse, { userText: text });
+      // 2026-10-13 根修：prose 改写全部退役——模型文本即权威，人格风格由
+      // system 的【人格·静态】+【人格·状态】+【语感基准】承担（与本路径
+      // 消费的 thread 同源），出口不再做任何润色。此分支当前为死代码
+      // （cognitiveNeedsToolLoop 恒 true，默认引擎 response 恒空），保留
+      // 结构供未来产出 response 的认知引擎使用。
       this.turnLifecycle.finalizeTurn({
         actorId,
         userText: text,
-        assistantText: humanized,
+        assistantText: cognitiveResponse,
         sessionId,
         understanding: route.understanding,
       });
       // 流式分片：cognize response 一次性返回，不分片
-      opts?.onAssistantDelta?.(humanized);
-      return { text: humanized, streamedChunks: false };
+      opts?.onAssistantDelta?.(cognitiveResponse);
+      return { text: cognitiveResponse, streamedChunks: false };
     }
     // cognize 返回 apology 或空内容 → 记日志，让流程继续走 streamCompletion 重建回复
     if (cognitiveResponse && isApologyStyleFallback(cognitiveResponse)) {
@@ -2136,11 +2138,6 @@ if (route.plane === "task") {
      */
     let answerStreamHeld = false;
     /**
-     * 本轮是否有日历/提醒创建工具成功返回（办妥确认轮标记，2026-09-24）：
-     * 传给 TurnFinalizer → 回复风格闸对确认轮不吃结构豁免。
-     */
-    let calendarCreateSucceededThisTurn = false;
-    /**
      * 本轮实际发起过的工具调用摘要（A2 升级段轨迹延续）：onToolExecuteStart 在
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
      */
@@ -2190,9 +2187,6 @@ if (route.plane === "task") {
         // 自我学习/外部回执），而 backgroundOnToolExecuted 是派发方收集
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
-          if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
-            calendarCreateSucceededThisTurn = true;
-          }
           // 答案留存记账（2026-10-13 根修）：holdAnswer="after_tool_use" 时，
           // 实质工具执行 = 工具循环已对本轮答案关闸（与循环内 answerHeld()
           // 同一判定函数 isSubstantiveToolExecution，口径恒一致）。
@@ -2468,6 +2462,7 @@ if (route.plane === "task") {
         tier: personaTier,
         userAlias: aliasMatch?.[1],
         adaptation,
+        soulOverlay: getSoulOverlay() ?? undefined,
       });
       // 【语感基准】few-shot（2026-10-06 活人感治理）：seed=sessionId 会话内字节稳定。
       // 仅 chat 车道注入——任务面交付（结论先行/充分展开）与闲聊 few-shot 相克。
@@ -2518,12 +2513,14 @@ if (route.plane === "task") {
     // 决策点在 agent-core（知道「检索发生在循环外」这一事实）+ 工具循环
     // （知道「本轮是否执行过工具」），两层合成完整契约：
     //   - 网页证据轮（前置检索已完成）→ "always"：答案从第一波就留存；
-    //   - 其余对话面轮 → "after_tool_use"：循环内执行过实质工具即留存；
-    //   - 语音轮豁免（TTS 消费流式分句）；任务面/子 Agent 不置位（流式消费方不变）。
-    // 纯闲聊轮上游已零工具隔离（chatLanePureChat），本闸对它天然无感——
-    // 「打字机只在闲聊」由此成为结构性质，不再依赖意图标签或回执时机。
+    //   - 其余轮 → "after_tool_use"：循环内执行过实质工具即留存；
+    //   - 语音轮豁免（TTS 消费流式分句）。
+    // 双车道统一（2026-10-13 真链实证）：天气问句被路由层判 realtime_lookup
+    // → plane=task，答案同样在任务面工具循环产出并流式到对话面——只留 chat
+    // 车道=漏掉用户实际命中的天气路径（真链探针 242 字全量流式反例）。任务面
+    // 的过程反馈走 chat.agent_status/execution_event 结构化事件，不靠打字机。
     const holdAnswer: "after_tool_use" | "always" | undefined =
-      this.isChatLane(mode) && !isVoiceMode(actorId)
+      !isVoiceMode(actorId)
         ? webEvidenceInjected
           ? "always"
           : "after_tool_use"
@@ -2989,8 +2986,6 @@ if (route.plane === "task") {
       trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
-      lane: this.isChatLane(mode) ? "chat" : "task",
-      confirmationRound: this.isChatLane(mode) && calendarCreateSucceededThisTurn,
     }, opts?.onAssistantDelta);
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
@@ -3721,7 +3716,6 @@ if (route.plane === "task") {
         pePlan: null,
         peExhausted: false,
         trajCap: undefined,
-        lane: "task",
         ...(meta?.messageId ? { messageId: meta.messageId } : {}),
         ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
       })

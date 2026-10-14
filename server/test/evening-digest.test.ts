@@ -164,12 +164,12 @@ test("晚间 digest：今日回顾 + 明日预告确定性聚合与播报", asyn
     assert.equal(digest.tomorrowWeather?.text, "雷暴");
     assert.deepEqual(digest.tomorrowWeather?.alerts, ["雷暴"]);
 
-    // 播报：回顾 + 账本 + 明日预告 + 预警 + 晚安
-    assert.match(digest.narrationText, /回顾一下今天/);
-    assert.match(digest.narrationText, /新增3笔/);
-    assert.match(digest.narrationText, /明天有1件事要办/);
-    assert.match(digest.narrationText, /雷暴预警/);
-    assert.match(digest.narrationText, /晚安/);
+    // 播报（2026-10-13 活人感定调）：只说明天，回顾/账本/晚安套话不进文案
+    assert.match(digest.narrationText, /明天就一件事/);
+    assert.match(digest.narrationText, /项目周会/);
+    assert.match(digest.narrationText, /到点我叫你/);
+    assert.match(digest.narrationText, /雷暴/);
+    assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔/);
   } finally {
     await rm(journalDir, { recursive: true, force: true });
     await rm(financeDir, { recursive: true, force: true });
@@ -183,9 +183,83 @@ test("晚间 digest：依赖缺失/无数据时各块自然省略", async () => 
   assert.equal(digest.todayLedger, null);
   assert.deepEqual(digest.tomorrowSchedule, []);
   assert.equal(digest.tomorrowWeather, null);
-  // 无数据也有基本播报骨架
-  assert.match(digest.narrationText, /晚上好/);
-  assert.match(digest.narrationText, /晚安/);
+  // 无数据：明天没安排的不打扰文案（无天气源 → 无预警无雨分支）
+  assert.match(digest.narrationText, /明天没安排/);
+  assert.doesNotMatch(digest.narrationText, /晚上好|晚安/);
+});
+
+test("晚间 digest：文案交给 agent —— soul 进 system + 预告段进数据 + 失败回退", async () => {
+  // 明日日程 mock：带预告段（起床闹钟 130min 前 = 7:20；night_before 不进）
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowIso = new Date(
+    tomorrow.getFullYear(), tomorrow.getMonth(), tomorrow.getDate(), 9, 30,
+  ).toISOString();
+  const scheduleMock = {
+    listTasksBySession: () => [
+      {
+        taskId: "task-1",
+        title: "项目周会",
+        nextRunAt: tomorrowIso,
+        runAt: tomorrowIso,
+        reminderMessage: "",
+        preReminders: [
+          { offsetMinutes: 700, stage: "night_before", label: "睡前备忘", message: "" },
+          { offsetMinutes: 130, stage: "wake_alarm", label: "叫你起床", message: "" },
+          { offsetMinutes: 40, stage: "depart", label: "该出门了", message: "" },
+        ],
+      },
+    ],
+  };
+
+  let capturedSystem: string | undefined;
+  const agentSvc = new EveningDigestService({
+    scheduleTaskService: scheduleMock as never,
+    soulProvider: () => "【人格·静态】\n你是用户的私人管家兼搭档，叫测试员。",
+    llmComplete: async (prompt, opts) => {
+      capturedSystem = opts?.systemPrompt;
+      // 数据段口径：需要提前提醒的信息（含预告段时刻）；要求段 = 用户定稿
+      assert.match(prompt, /需要提前提醒的信息/);
+      assert.match(prompt, /项目周会/);
+      assert.match(prompt, /叫你起床/);
+      assert.match(prompt, /该出门了/);
+      assert.doesNotMatch(prompt, /睡前备忘/); // night_before 不进明日数据
+      assert.match(prompt, /最熟的那个朋友/);
+      assert.match(prompt, /只挑最早或最要紧/);
+      assert.match(prompt, /九点半有个周会/);
+      return `明天九点半有个周会，八点五十我喊你出门。早点睡。`;
+    },
+  });
+  const agentDigest = await agentSvc.generateDigest(SESSION);
+  assert.equal(
+    agentDigest.narrationText,
+    "明天九点半有个周会，八点五十我喊你出门。早点睡。",
+  );
+  // soul 走 system（agent 人格影响文案）
+  assert.match(capturedSystem ?? "", /人格·静态/);
+  assert.match(capturedSystem ?? "", /测试员/);
+  // 明日条目数据面：advanceNotes 预渲染（9:30 - 130min = 7:20）
+  assert.deepEqual(agentDigest.tomorrowSchedule[0]!.advanceNotes, [
+    "07:20叫你起床",
+    "08:50该出门了",
+  ]);
+
+  // 包裹引号/围栏被净化剥掉
+  const messySvc = new EveningDigestService({
+    llmComplete: async () => "```「明天没安排，早点睡。」```",
+  });
+  const messyDigest = await messySvc.generateDigest(SESSION);
+  assert.equal(messyDigest.narrationText, "明天没安排，早点睡。");
+
+  // 失败回退：LLM 抛错 → 确定性模板顶上（无数据 → 「明天没安排」分支）
+  const failSvc = new EveningDigestService({
+    llmComplete: async () => {
+      throw new Error("llm down");
+    },
+  });
+  const failDigest = await failSvc.generateDigest(SESSION);
+  assert.match(failDigest.narrationText, /明天没安排/);
+  assert.doesNotMatch(failDigest.narrationText, /晚上好|晚安/);
 });
 
 // ── 3. 晨报恶劣天气预警联动 ──────────────────────────

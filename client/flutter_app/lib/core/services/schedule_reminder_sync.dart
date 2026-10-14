@@ -25,6 +25,42 @@ bool _isTriviaTask(Map<String, dynamic> task) {
   return description.startsWith(kRhythmTaskMark);
 }
 
+/// 预告窗口提前量推导（2026-10-13 定调：预告与到点提醒分开，预告提前量
+/// 因事而异，来源 = 服务端分级提醒策略的任务计划，不再客户端关键词硬编码）：
+///   - preReminders 计划在（策略层产物：睡前备忘/起床闹钟/出发预留分段）：
+///     取「唤醒/出发」类段的最大提前量（≤180min）——睡前备忘（night_before）
+///     是前晚的主动提醒，不该驱动胶囊倒计时挂一整天；
+///   - 无计划但有显式 remindBeforeMinutes：取 ≤180min 的最大档（用户显式
+///     说了提前量就尊重，但胶囊是环境视觉，超 3 小时的档不进胶囊）；
+///   - 都没有（周期/琐事/承诺物化等无计划任务）：null = 不预告，只走到点提醒。
+/// 服务端的预告段（preReminder）触发时照常走 schedule.reminder_fired →
+/// 岛 attention 主动提醒，与胶囊被动倒计时互补。
+int? previewLeadMinutesFromTask(Map<String, dynamic> task) {
+  int? best;
+  final Object? pre = task["preReminders"];
+  if (pre is List) {
+    for (final Object? stage in pre) {
+      if (stage is! Map) continue;
+      if ((stage["stage"]?.toString() ?? "") == "night_before") continue;
+      final num? offset = stage["offsetMinutes"] as num?;
+      if (offset == null || offset <= 0) continue;
+      final int m = offset.round();
+      if (m <= 180 && (best == null || m > best)) best = m;
+    }
+  }
+  if (best != null) return best;
+  final Object? remindBefore = task["remindBeforeMinutes"];
+  if (remindBefore is List) {
+    for (final Object? v in remindBefore) {
+      final num? n = v is num ? v : num.tryParse(v?.toString() ?? "");
+      if (n == null || n <= 0) continue;
+      final int m = n.round();
+      if (m <= 180 && (best == null || m > best)) best = m;
+    }
+  }
+  return best;
+}
+
 bool isScheduleReminderToolName(String toolName) {
   final String n = toolName.trim();
   if (_scheduleReminderTools.contains(n)) return true;
@@ -71,6 +107,7 @@ Future<bool> upsertLocalScheduleFromToolResult(
       shortTitle: _pickShortTitle(result),
       notes: _buildNotes(result),
       isTrivia: _isTriviaTask(result),
+      previewLeadMinutes: previewLeadMinutesFromTask(result),
     );
   } catch (_) {
     return false;
@@ -148,6 +185,7 @@ Future<int> syncServerRemindersToLocal(
           shortTitle: _pickShortTitle(t),
           notes: _buildNotes(t),
           isTrivia: _isTriviaTask(t),
+          previewLeadMinutes: previewLeadMinutesFromTask(t),
         )
             ? 1
             : 0;
@@ -177,6 +215,7 @@ Future<bool> _persistExpandedTask(
   required String? shortTitle,
   required String? notes,
   bool isTrivia = false,
+  int? previewLeadMinutes,
 }) async {
   final List<DateTime> occurrences = expandScheduleOccurrences(
     anchorLocal: anchorLocal,
@@ -196,6 +235,7 @@ Future<bool> _persistExpandedTask(
         shortTitle: shortTitle,
         notes: notes,
         isTrivia: isTrivia,
+        previewLeadMinutes: previewLeadMinutes,
       ),
     );
   }

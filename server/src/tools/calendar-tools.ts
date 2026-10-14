@@ -3,6 +3,8 @@
  * 与 Web 聊天里用自然语言建日程、`/chat/schedule-draft` 同源解析（`calendar.create_from_text`）。
  */
 import { resolveActorId } from "../agent/actor-id.js";
+import { isAlarmLikeReminderText, repeatRuleFromRecurrence, type ScheduleRecurrence } from "../services/alarm-clock/alarm-intent.js";
+import type { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import type { ScheduleConflictService } from "../services/schedule-conflict-service.js";
 import { buildConflictToolResult, precheckCreateConflict } from "../services/schedule-conflict-service.js";
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
@@ -110,11 +112,52 @@ export function buildScheduleCreateInput(
   };
 }
 
+/**
+ * 闹钟类提醒（「明早7点叫我起床」）在日程任务之外补建真闹钟（kind=alarm）。
+ *
+ * 日程任务照常创建（今日安排/编辑/删除生态不动）；真闹钟经 alarm-clock 链路
+ * alarm.sync 下发到手机端本地精确调度（AlarmManager，杀进程也响）。
+ * 幂等由 AlarmStore.findDuplicate（同 label 同 fireAt ±60s）兜底，口头重复不炸双响。
+ *
+ * 返回建好的闹钟摘要；不满足条件（非闹钟类 / 服务未装配 / 时间已过 / yearly 重复）
+ * 返回 null，调用方按纯日程提醒转述。
+ */
+export function createLinkedAlarmIfAlarmLike(
+  getAlarmClockService: (() => AlarmClockService | null) | undefined,
+  input: { text: string; label: string; runAt: string; recurrence: string; actorId: string },
+): { alarmId: string; nextFireAt: string | null; repeatRule: string | null; label: string } | null {
+  const alarmClockService = getAlarmClockService?.();
+  if (!alarmClockService) return null;
+  // 时间语义必须成立：过去时刻/非法时间不建闹钟（日程层自会给出自己的报错路径）
+  const fireMs = new Date(input.runAt).getTime();
+  if (!Number.isFinite(fireMs) || fireMs <= Date.now()) return null;
+  if (!isAlarmLikeReminderText(input.text)) return null;
+  const { rule, ok } = repeatRuleFromRecurrence(input.recurrence as ScheduleRecurrence);
+  if (!ok) return null;
+  const label = input.label.trim().slice(0, 24) || "闹钟";
+  try {
+    const { alarm } = alarmClockService.createAlarm({
+      actorId: input.actorId,
+      label,
+      kind: "alarm",
+      fireAt: input.runAt,
+      repeatRule: rule,
+      source: "agent",
+    });
+    return { alarmId: alarm.id, nextFireAt: alarm.nextFireAt ?? null, repeatRule: rule, label };
+  } catch {
+    // 闹钟链路任何异常都不阻断日程创建：退化为纯提醒（与旧行为一致）
+    return null;
+  }
+}
+
 export function registerCalendarTools(
   registry: ToolRegistry,
   scheduleTaskService: ScheduleTaskService,
   scheduleIntentService: ScheduleIntentService,
   conflictService?: ScheduleConflictService,
+  /** 闹钟服务懒取用器：闹钟服务在装配序列后段构造，用 getter 解耦创建顺序 */
+  getAlarmClockService?: () => AlarmClockService | null,
 ): void {
   registry.register("calendar.create_from_text", async (input, context) => {
     const text = String(input.text ?? "").trim();
@@ -151,11 +194,20 @@ export function registerCalendarTools(
       }
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
+      // 闹钟类提醒补建真闹钟（本地精确响铃主路）；日程任务照常，双链并存
+      const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
+        text: `${text} ${draft.description}`,
+        label: draft.shortTitle?.trim() || draft.title?.trim() || draft.reminderMessage?.trim() || draft.description,
+        runAt: draft.runAt,
+        recurrence: draft.recurrence,
+        actorId: sessionId,
+      });
       const response = {
         ok: true,
         matched: true,
-        summary: "日程已写入",
+        summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : "日程已写入",
         taskId: task.taskId,
+        ...(linkedAlarm ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt } : {}),
         title: task.reminderMessage || task.title,
         shortTitle: task.shortTitle,
         kind: task.kind,
@@ -239,11 +291,20 @@ export function registerCalendarTools(
           location,
           remindBeforeMinutes,
         });
+        // 闹钟类提醒补建真闹钟（本地精确响铃主路）；日程任务照常，双链并存
+        const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
+          text: `${title} ${description} ${reminderMessage}`,
+          label: shortTitle || task.shortTitle || task.reminderMessage || task.title || description,
+          runAt: task.nextRunAt ?? runAt,
+          recurrence,
+          actorId: sessionId,
+        });
         const response = {
           ok: true,
           matched: true,
-          summary: "提醒已写入日程",
+          summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : "提醒已写入日程",
           taskId: task.taskId,
+          ...(linkedAlarm ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt } : {}),
           title: task.reminderMessage || task.title,
           shortTitle: task.shortTitle,
           kind: task.kind,

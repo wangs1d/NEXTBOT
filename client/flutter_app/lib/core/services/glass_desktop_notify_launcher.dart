@@ -2,8 +2,8 @@ import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 
 /// 桌面右上角玻璃通知栈（Windows 原生 ULW 窗口，多条层叠景深、倒计时进度、
-/// 确认/关闭/超时事件）。2026-09-22 定调：决策类弹窗统一走右下角
-/// DesktopNotificationWindow，本通道已无调用方，保留待定去留；
+/// 确认/关闭/超时事件）。决策类弹窗已改走应用内 GlassNotify 玻璃卡；
+/// 本通道当前无调用方，保留待定去留。
 /// 非 Windows（MissingPluginException）返回 false，由调用方降级应用内玻璃卡。
 class GlassDesktopNotifyLauncher {
   GlassDesktopNotifyLauncher._();

@@ -434,7 +434,9 @@ test("deleteTurn: 原文兜底不覆盖按 id 命中的精确语义", () => {
 });
 
 // ── 2026-10-11：中断占位帧的摘录脱敏（无括号/单行，保证可被整行剥离）─────
-test("foldCompletedToolChains：占位帧摘录展平 JSON 括号，帧保持单行", async () => {
+// 2026-10-13 根修更新：占位帧整体改道 system 角色动作台账（assistant 通道清零），
+// 事实抽取与单行契约保持不变。
+test("foldCompletedToolChains：中断链折叠为 system 动作台账，摘录展平 JSON 括号且单行", async () => {
   const { foldCompletedToolChains } = await import("../src/external-model/chat-thread-store.js");
   const msgs = [
     { role: "user", content: "帮我查一下" },
@@ -452,11 +454,13 @@ test("foldCompletedToolChains：占位帧摘录展平 JSON 括号，帧保持单
   const changed = foldCompletedToolChains(msgs);
   assert.equal(changed, true);
   const last = msgs[msgs.length - 1];
+  assert.equal(last?.role, "system", "折叠记录必须是 system 角色（assistant 通道清零）");
   const content = String(last?.content ?? "");
-  assert.ok(content.startsWith("[上一轮回复中断"), "应折叠为占位帧");
-  assert.ok(!content.includes("\n"), "占位帧必须单行（多行会让帧剥离器只删首行）");
+  assert.ok(content.startsWith("[动作台账"), "应折叠为动作台账");
+  assert.ok(!content.includes("\n"), "台账必须单行（多行会让帧剥离器只删首行）");
   assert.ok(!content.includes("{"), "摘录不得携带原始 JSON 花括号");
   assert.ok(!content.slice(1).includes("["), "除帧头外不得再出现方括号（JSON 数组括号会让帧剥离器提前截断）");
   assert.ok(!content.includes("不可信内容围栏"), "围栏标签不得进入摘录");
   assert.ok(content.includes("search_web"), "工具名事实保留");
+  assert.ok(!content.includes("禁止原样或改写后复述"), "system 通道不再需要禁复述恳求（那是 assistant 通道的补丁）");
 });

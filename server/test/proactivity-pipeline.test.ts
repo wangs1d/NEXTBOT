@@ -275,31 +275,17 @@ type Harness = {
   governor: FrequencyGovernor;
   delivered: Array<{ actorId: string; json: string }>;
   spoken: ProactiveProposal[];
-  /** 离线落信箱记录（2026-10-10：social 层离线兜底可观测） */
-  inbox: Array<{ actorId: string; title: string; body: string; kind?: string; importance?: string; messageId?: string }>;
-  flags: { failSend: boolean; failInbox: boolean };
+  flags: { failSend: boolean };
   dir: string;
 };
 
-function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: boolean; failInbox?: boolean; inboxEnabled?: boolean; confirmations?: PendingConfirmationStore; onProposalApproved?: (p: ProactiveProposal) => void } = {}): Harness {
+function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: boolean; confirmations?: PendingConfirmationStore; onProposalApproved?: (p: ProactiveProposal) => void } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), "proactive-pipe-"));
   const presence = new PresenceService();
   const governor = new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: opts.dailyBudget ?? 6 });
   const delivered: Array<{ actorId: string; json: string }> = [];
   const spoken: ProactiveProposal[] = [];
-  const inbox: Harness["inbox"] = [];
-  const flags = { failSend: opts.failSend ?? false, failInbox: opts.failInbox ?? false };
-  // 缺省注入站内信通道（验证离线兜底）；inboxEnabled=false 时模拟「未接通道」旧挂起语义
-  const inboxDep =
-    opts.inboxEnabled === false
-      ? undefined
-      : {
-          send: async (input: Harness["inbox"][number]) => {
-            if (flags.failInbox) throw new Error("inbox down");
-            inbox.push(input);
-            return { deliveredLive: false };
-          },
-        };
+  const flags = { failSend: opts.failSend ?? false };
   const pipeline = new ProactivePipeline({
     dataPath: dir,
     governor,
@@ -315,11 +301,10 @@ function makeHarness(opts: { now?: number; dailyBudget?: number; failSend?: bool
     outcomes: new OutcomeStore(join(dir, "outcomes.json")),
     speak: (p) => spoken.push(p),
     nowFn: () => opts.now ?? NOON,
-    inbox: inboxDep,
     confirmations: opts.confirmations,
     onProposalApproved: opts.onProposalApproved,
   });
-  return { pipeline, presence, governor, delivered, spoken, inbox, flags, dir };
+  return { pipeline, presence, governor, delivered, spoken, flags, dir };
 }
 
 test("pipeline: 在线 directText 零 LLM 直投 + outcome 记录", async () => {
@@ -392,9 +377,9 @@ test("pipeline: 两端离线提案挂起 → 任一设备重连后直推（弹�
   }
 });
 
-// ─── 离线兜底：落站内信（2026-10-10 对症 97 条 offline_wait_reconnect 静默作废） ───
+// ─── 离线语义（2026-10-14 收敛）：站内信兜底已删除，离线一律挂起待重连 ───
 
-test("pipeline: 两端离线且 social+medium → 落站内信（不再挂到 TTL 静默过期）", async () => {
+test("pipeline: 两端离线 social+medium → 挂起待重连（不再落站内信，2026-10-14 用户定调删除该链路）", async () => {
   const h = makeHarness();
   try {
     // 离线：无设备连接
@@ -402,109 +387,33 @@ test("pipeline: 两端离线且 social+medium → 落站内信（不再挂到 TT
     assert.equal(d.verdict, "deferred");
     assert.equal(h.delivered.length, 0, "离线不直推");
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 1, "medium social 落站内信");
-    assert.equal(h.inbox[0].actorId, "user-a");
-    assert.equal(h.inbox[0].messageId, "proactive:k-inbox", "幂等键按 dedupKey 派生");
-    assert.equal(h.inbox[0].kind, "proactive:schedule_upcoming");
-    // 落信箱 = 已送达语义：出队，避免重连重复直推
-    assert.equal(h.pipeline.diagnostics().pending.length, 0, "落信箱后出队");
-    const outcome = h.pipeline.diagnostics().recentOutcomes.at(-1);
-    assert.equal(outcome?.channel, "offline_inbox");
-    assert.equal(outcome?.outcome, "delivered");
+    // 保留待发区：重连后直推，消息不丢也不污染站内信
+    assert.equal(h.pipeline.diagnostics().pending.length, 1, "离线挂起语义");
+    assert.equal(h.pipeline.diagnostics().recentOutcomes.length, 0, "未投递不记 outcome");
+    // 重连 → 直推
+    h.presence.markConnected("user-a", NOON - 11 * 60_000);
+    h.pipeline.flushDue(NOON);
+    assert.equal(h.delivered.length, 1, "重连后立即直推");
+    assert.equal(h.pipeline.diagnostics().pending.length, 0);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: 离线 low social 不落信箱（避免收件箱灌爆，维持挂起语义）", async () => {
+test("pipeline: 离线 low social 维持挂起语义", async () => {
   const h = makeHarness();
   try {
     const d = h.pipeline.submitProposal(proposal({ tier: "social", importance: "low", dedupKey: "k-low" }));
     assert.equal(d.verdict, "deferred");
     await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 0, "low 不落站内信");
     assert.equal(h.pipeline.diagnostics().pending.length, 1, "仍保留待发区等重连");
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }
 });
 
-test("pipeline: 未接站内信通道时维持旧挂起语义（回退兼容）", async () => {
-  const h = makeHarness({ inboxEnabled: false });
-  try {
-    h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", dedupKey: "k-noch" }));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 0);
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "无通道 = 旧挂起语义");
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("pipeline: 落信箱失败保留待发区（重连即达，不丢）", async () => {
-  const h = makeHarness({ failInbox: true });
-  try {
-    h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", dedupKey: "k-failin" }));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 0);
-    assert.equal(h.pipeline.diagnostics().pending.length, 1, "落信箱异常不吞提案");
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("pipeline: PROACTIVITY_OFFLINE_INBOX=0 一键回退旧挂起语义", async () => {
-  const prev = process.env.PROACTIVITY_OFFLINE_INBOX;
-  process.env.PROACTIVITY_OFFLINE_INBOX = "0";
-  const h = makeHarness();
-  try {
-    h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", dedupKey: "k-envoff" }));
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 0, "开关关闭 = 不落信箱");
-    assert.equal(h.pipeline.diagnostics().pending.length, 1);
-  } finally {
-    if (prev === undefined) delete process.env.PROACTIVITY_OFFLINE_INBOX;
-    else process.env.PROACTIVITY_OFFLINE_INBOX = prev;
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("pipeline: 重连抢跑优先——站内信落盘前重连直推（store.take 单点守卫，不重复记账）", async () => {
-  const h = makeHarness();
-  try {
-    h.pipeline.submitProposal(proposal({ tier: "social", importance: "medium", dedupKey: "k-race" }));
-    // 站内信 send 是异步的：在 microtask 落盘前重连并 flush → WS 直推抢先
-    h.presence.markConnected("user-a", NOON - 11 * 60_000);
-    h.pipeline.flushDue(NOON);
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.delivered.length, 1, "WS 直推发生");
-    // store.take 单点守卫：直推已出队，站内信侧 take 落空 → 不重复记 outcome
-    const outcomes = h.pipeline.diagnostics().recentOutcomes;
-    assert.equal(outcomes.length, 1, "同一提案只记一次 outcome（不双发）");
-    assert.equal(outcomes[0].channel, "in_app", "以先到者为准");
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("pipeline: 投递竞态（WS 发送失败）→ 落站内信兜底（不再静默丢失）", async () => {
+test("pipeline: WS 发送失败 → 保留待发区重试不丢失", async () => {
   const h = makeHarness({ failSend: true });
-  try {
-    h.presence.markConnected("user-a", NOON - 5 * 60_000);
-    const d = h.pipeline.submitProposal(proposal());
-    assert.equal(d.verdict, "delivered");
-    assert.equal(h.delivered.length, 0, "WS 发送失败不产出直推");
-    await new Promise((r) => setImmediate(r));
-    assert.equal(h.inbox.length, 1, "WS 竞态失败 → 落站内信兜底");
-    assert.equal(h.pipeline.diagnostics().pending.length, 0, "兜底成功即出队");
-    assert.equal(h.pipeline.diagnostics().recentOutcomes.at(-1)?.channel, "offline_inbox");
-  } finally {
-    rmSync(h.dir, { recursive: true, force: true });
-  }
-});
-
-test("pipeline: WS 发送失败且无站内信通道 → 30s 后重试不丢失（旧语义）", async () => {
-  const h = makeHarness({ failSend: true, inboxEnabled: false });
   try {
     h.presence.markConnected("user-a", NOON - 5 * 60_000);
     const d = h.pipeline.submitProposal(proposal());

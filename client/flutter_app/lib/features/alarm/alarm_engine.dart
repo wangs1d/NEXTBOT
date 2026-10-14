@@ -58,13 +58,44 @@ class AlarmEngine {
     // 原生通知动作（贪睡/关闭）→ 引擎动作（业务推进收口在这里：本地库 + REST 同步）
     AlarmPlatform.onNativeAction = (action, alarmId) {
       unawaited(
-        action == "snooze" ? snooze(alarmId, minutes: 5) : dismiss(alarmId),
+        action == "snooze" ? snooze(alarmId, minutes: 10) : dismiss(alarmId),
       );
     };
     AlarmPlatform.attachActionHandler();
     // 看门狗：每 30s 兜底扫一次到点闹钟（方法桥失灵/精确闹钟被系统吞掉时的应用内兜底）
     _watchdog?.cancel();
     _watchdog = Timer.periodic(const Duration(seconds: 30), (_) => unawaited(_watchdogTick()));
+    // 服务端对账（2026-10-13 根修）：alarm.sync 只在创建瞬间 WS fan-out，
+    // 建钟那一刻本机不在线 = 闹钟永远不进本地库（到点退别的端又被
+    // localAlreadyHandled 只回 ack 不响 → 全端丢失）。启动即拉一次服务端补齐。
+    unawaited(syncFromServer());
+  }
+
+  /// 服务端对账：拉取服务端活跃闹钟逐条 upsert 进本地库并重排本地调度。
+  /// 启动 / WS 重连时调用；幂等（同 id 覆盖），离线失败静默（下次连接再收敛）。
+  Future<void> syncFromServer() async {
+    if (_httpBase.isEmpty) return;
+    final String actorId = _actorId();
+    if (actorId.isEmpty) return;
+    try {
+      final resp = await (_client ?? http.Client())
+          .get(Uri.parse(
+              "$_httpBase/api/alarms?actorId=${Uri.encodeComponent(actorId)}&status=active"))
+          .timeout(const Duration(seconds: 5));
+      if (resp.statusCode != 200) return;
+      final body = jsonDecode(resp.body) as Map<String, dynamic>;
+      final list = body["alarms"];
+      if (list is! List) return;
+      for (final raw in list) {
+        if (raw is! Map) continue;
+        await _onAlarmSync(<String, dynamic>{
+          "op": "upsert",
+          "alarm": Map<String, dynamic>.from(raw),
+        });
+      }
+    } on Exception {
+      // 对账失败不致命：WS 重连 / 下次启动再收敛
+    }
   }
 
   void dispose() {
@@ -185,8 +216,8 @@ class AlarmEngine {
     await _scheduleAlarmLocalIfActive(alarmId);
   }
 
-  /// 贪睡：本地先顺延（离线可用），再同步服务端
-  Future<void> snooze(String alarmId, {int minutes = 5}) async {
+  /// 贪睡：本地先顺延（离线可用），再同步服务端（2026-10-13 定调：贪睡档 10 分钟）
+  Future<void> snooze(String alarmId, {int minutes = 10}) async {
     await AlarmPlatform.stopRing();
     await _store.applySnooze(alarmId, minutes);
     final resp = await _post("/api/alarms/$alarmId/snooze", {"minutes": minutes});

@@ -8,6 +8,7 @@ import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "media_disk_cache.dart";
 import "travel_ask_launcher.dart";
 import "travel_plan_models.dart";
 
@@ -314,6 +315,11 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
   @override
   void initState() {
     super.initState();
+    // 落盘预热（2026-10-13 根修）：此前本页用裸 Image.network + 无任何预热，
+    // 进页即从零下载（进程内存缓存重启即空）→「每次进入都要等图」。
+    // 现在 initState 即把全部实拍/封面推进磁盘缓存（有界并发落盘），
+    // 渲染端统一走 CachedMediaImage：首次进入边下边看，再次进入秒开。
+    _warmPlanImages(_plan);
     if (_hasPlanId) {
       // 进度恢复（跨端共享「已走/当前站」）
       unawaited(_restoreProgress());
@@ -325,6 +331,15 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
         unawaited(_fetchSignal());
       });
     }
+  }
+
+  /// 行程图片磁盘预热：封面 + 全部天全部站点实拍（有界并发，静默容错）。
+  void _warmPlanImages(TravelPlanData plan) {
+    MediaDiskCache.instance.warm(<String>[
+      if (plan.coverImage.isNotEmpty) plan.coverImage,
+      for (final TravelPlanDay day in plan.days)
+        for (final TravelDayEntry e in day.entries) ...e.images,
+    ]);
   }
 
   @override
@@ -443,6 +458,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
           _days.isEmpty ? const <_Stop>[] : _days[_day].stops;
       if (_cur >= stops.length) _cur = 0;
     });
+    _warmPlanImages(updated);
   }
 
   Future<void> _refreshFromStore() async {
@@ -1012,8 +1028,8 @@ class _NowCard extends StatelessWidget {
                 fit: StackFit.expand,
                 children: <Widget>[
                   if (stop.images.isNotEmpty)
-                    Image.network(
-                      stop.images.first,
+                    CachedMediaImage(
+                      url: stop.images.first,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => const _NoImageFallback(),
                     )
@@ -2214,8 +2230,8 @@ class _StopDetailPage extends StatelessWidget {
                 fit: StackFit.expand,
                 children: <Widget>[
                   if (stop.images.isNotEmpty)
-                    Image.network(
-                      stop.images.first,
+                    CachedMediaImage(
+                      url: stop.images.first,
                       fit: BoxFit.cover,
                       errorBuilder: (_, __, ___) => const _NoImageFallback(),
                     )

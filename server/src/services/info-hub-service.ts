@@ -8,6 +8,7 @@ import {
   type DomesticFetchOptions,
 } from "./domestic-web-providers.js";
 import { fetchWebPageEnhanced, extractWithReadability, decodeWithEncoding } from "./web-fetch-enhancer.js";
+import { composeArticleRead } from "./article-fallback-service.js";
 import {
   SearchCache,
   RssHealthMonitor,
@@ -72,11 +73,8 @@ export class InfoHubService {
   private readonly rssHealth = new RssHealthMonitor();
   // 同会话跨查询复用
   private readonly sessionCache = new SessionSearchCache();
-  // 网页内容缓存（LRU + TTL 10 分钟）
-  private readonly pageContentCache = new SearchCache<string>({
-    maxSize: 100,
-    ttlMs: 10 * 60 * 1000,
-  });
+  // 网页内容缓存（LRU + TTL 10 分钟）——只保留「html + text」这一份：
+  // 结构化抽取需要 HTML，仅有纯文本的缓存已无消费方（readWebpage 已改走此路径）。
   private readonly pageContentCacheFull = new SearchCache<{ html: string; text: string }>({
     maxSize: 50,
     ttlMs: 10 * 60 * 1000,
@@ -232,12 +230,35 @@ export class InfoHubService {
     return fetchDomesticNews(query, limit, { userAgent: this.userAgent, rssHealth: this.rssHealth });
   }
 
-  async readWebpage(url: string): Promise<{ title: string; content: string; summary: string }> {
+  /**
+   * 读取网页正文。
+   *
+   * 2026-10-14 起接入文章页结构化抽取：标题改为优先用抽取结果（论坛/门户的
+   * og:title 常是站点口号，抽取层会降级到 <h1>），并补齐 publishedAt / author /
+   * paragraphs。**content 仍以通用正文文本兜底**——只有抽取确实拿到成规模正文时才
+   * 采用清洗后的版本（见 composeArticleRead 的安全阀），避免非 <p> 排版的页面被掏空。
+   */
+  async readWebpage(url: string): Promise<{
+    title: string;
+    content: string;
+    summary: string;
+    publishedAt?: string;
+    author?: string;
+    paragraphs?: string[];
+  }> {
     const normalizedUrl = this.normalizeUrl(url);
-    const content = await this.readPageAsText(normalizedUrl);
-    const title = inferTitleFromText(content) || "Untitled";
-    const summary = summarizePlainText(content);
-    return { title, content, summary };
+    const { html, text } = await this.readPageContent(normalizedUrl);
+    const read = composeArticleRead(html, normalizedUrl, text);
+    const title = read.title || inferTitleFromText(read.content) || "Untitled";
+    const summary = summarizePlainText(read.content);
+    return {
+      title,
+      content: read.content,
+      summary,
+      ...(read.publishedAt ? { publishedAt: read.publishedAt } : {}),
+      ...(read.author ? { author: read.author } : {}),
+      ...(read.paragraphs ? { paragraphs: read.paragraphs } : {}),
+    };
   }
 
   async inspectWebpage(url: string): Promise<{
@@ -395,24 +416,6 @@ export class InfoHubService {
     } finally {
       clearTimeout(timer);
     }
-  }
-
-  private async readPageAsText(url: string): Promise<string> {
-    // 缓存命中：直接返回（TTL 10 分钟）
-    const cached = this.pageContentCache.get(url);
-    if (cached) return cached;
-
-    // 抓取 + 指数退避重试（网络波动时自动重试 2 次）
-    const result = await withRetry(() =>
-      fetchWebPageEnhanced(
-        url,
-        { userAgent: this.userAgent, timeoutMs: 10_000 },
-        (html) => htmlToText(html),
-      ),
-    );
-    const text = result.text.slice(0, 10000);
-    this.pageContentCache.set(url, text);
-    return text;
   }
 
   private async readPageContent(url: string): Promise<{ html: string; text: string }> {

@@ -6,9 +6,7 @@ import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
 import { stripMarkersToPlainText } from "./reply-envelope.js";
-import { AssistantRewriterService } from "./assistant-rewriter.js";
 import { dedupeAdjacentLines, normalizeDashTypos } from "../utils/text.js";
-import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import { isApologyStyleFallback } from "../external-model/fallback-texts.js";
 
 export type ChatTurnInput = {
@@ -96,8 +94,6 @@ export async function runChatTurnForActor(
   const agentAccessMode = parseAgentAccessMode(input.agentAccessMode);
 
   try {
-    const rewriteProvider = createExternalChatProviderFromEnv();
-    const rewriter = new AssistantRewriterService(rewriteProvider);
     const reply = await runtime.handleUserMessage(actorId, text, {
       chatUserMessageId: messageId,
       userId,
@@ -171,7 +167,6 @@ export async function runChatTurnForActor(
     });
     if (capability === "plain") {
       finalText = stripMarkersToPlainText(finalText);
-      finalText = await rewriter.rewriteIfNeeded(text, finalText);
       finalText = normalizeDashTypos(finalText);
       finalText = dedupeAdjacentLines(finalText);
       finalText = getToolResultProcessor().processAssistantText(finalText, {

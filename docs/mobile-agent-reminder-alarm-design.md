@@ -386,3 +386,33 @@ M1 全量落地 + M2 骨架，代码位置：
 - **日志**：`fired ... route=<reminder_active_device|reminder_fanout_location_unknown|alarm_mobile_first|offline>`。
 
 验证：单测新增"智能路由"用例（提醒活跃端命中不 fan-out / 闹钟 mobile 优先），7/7 通过；tsc 干净。
+
+
+### 12.2 P0 接线：闹钟类提醒补建真闹钟（2026-10-13）
+
+**问题**：M1 引擎建成后一直缺「创建入口」——聊天里「明早7点叫我起床」走的是日程提醒链
+（schedule-task → schedule.reminder_fired 应用内通知，依赖 App 在线），POST /api/alarms
+无任何调用方，真闹钟（杀进程也响）实际触发不了。
+
+**方案**：意图分流双链并存——闹钟类提醒照常建日程任务（今日安排/编辑/删除生态不动），
+同时补建 kind=alarm 的真闹钟（alarmClockService.createAlarm → alarm.sync →
+手机端写入本地闹钟库并预约 AlarmManager 精确闹钟）。
+
+**实现**（判定必须纯代码，与 L543 起床类判定同源）：
+- `server/src/services/alarm-clock/alarm-intent.ts` —— `isAlarmLikeReminderText`
+  （/叫我起床|起床|闹钟|叫醒|定时叫|叫早/，不含裸「叫我」防「叫我开会」误伤）+
+  `repeatRuleFromRecurrence`（daily/weekly → RRULE；yearly 不在 alarm-rrule 子集 → 跳过闹钟）；
+- `server/src/tools/calendar-tools.ts` —— `createLinkedAlarmIfAlarmLike`：
+  calendar.create_from_text / create_task（kind=reminder）创建任务后补建真闹钟，
+  幂等由 AlarmStore.findDuplicate（同 label 同 fireAt ±60s）兜底；闹钟链路异常不阻断日程创建；
+  响应增加 `alarmId` / `alarmNextFireAt`，summary 变为「闹钟已设置（手机端到点响铃）」；
+- `server/src/bootstrap/create-app-services.ts` —— alarmClockServiceRef 懒取用器
+  （闹钟服务在装配序列后段构造，getter 解耦创建顺序）；
+- 测试 `server/test/alarm-intent.test.ts` 5/5（判定/映射/补建/幂等/四类跳过）；回归
+  alarm-clock 7/7、schedule-reminder-policy 23/23；tsc 干净。
+
+**已知边界（P1 待办）**：
+- calendar.update_task / delete_task 不同步闹钟（改期/删除日程后旧闹钟仍在）——需在
+  update/delete 时按 alarmId 级联 updateAlarm/cancelAlarm；
+- iOS 本地通知触发路仍未接（见 §12 已知边界）；
+- 闹钟响铃页与语音叫醒（M2 完整形态）未接 voice-duplex。

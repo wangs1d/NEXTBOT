@@ -8,6 +8,7 @@ import {
   SearchCache,
 } from "./search-enhancements.js";
 import { searchImagesViaSearchApi, type ImageApiItem } from "./search-api-provider.js";
+import { ArticleFallbackService, isArticleImageFallbackEnabled } from "./article-fallback-service.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -67,7 +68,17 @@ export class UpstreamSearchService {
 
   private imageStorageService?: ImageGenerationService;
 
-  constructor(private readonly infoHubService: InfoHubService) {}
+  private readonly now: () => Date;
+  private readonly articleFallback: ArticleFallbackService;
+
+  constructor(
+    private readonly infoHubService: InfoHubService,
+    opts: { now?: () => Date } = {},
+  ) {
+    // 统一时间源：按项目约定用注入的 now，服务内不直接读系统时钟。
+    this.now = opts.now ?? (() => new Date());
+    this.articleFallback = new ArticleFallbackService({ now: this.now });
+  }
 
   setImageStorageService(service: ImageGenerationService): void {
     this.imageStorageService = service;
@@ -298,12 +309,62 @@ export class UpstreamSearchService {
       };
     }
 
+    // 兜底（默认开，ARTICLE_IMAGE_FALLBACK=0 可关）：搜索引擎对人物/主题类查询往往
+    // 只返回**文章链接**而不给图片直链。此时改从文章页里抠真实图链，
+    // 再走同一套 materializeImageResults 转存——不另起下载链路。
+    if (isArticleImageFallbackEnabled()) {
+      const harvested = await this.harvestImagesFromArticles(keyword, boundedLimit);
+      const fallbackItems = harvested.length
+        ? await this.materializeImageResults(harvested, actorId, boundedLimit)
+        : [];
+      if (fallbackItems.length > 0) {
+        return {
+          provider: "article-fallback-images",
+          mediaType: "image",
+          items: fallbackItems,
+          notes: ["搜索 API 与图片页均未命中；已改从文章页抠取真实图链（带 Referer 回源）"],
+        };
+      }
+    }
+
     return {
       provider: "bing-images",
       mediaType: "image",
       items: [],
       notes: ["未能把图片结果转存为 PNG，已避免返回普通网页链接"],
     };
+  }
+
+  /**
+   * 文章页兜底：用同一关键词跑一次正文搜索拿到文章 URL，再从文章页抠图链。
+   *
+   * 只在「search-api 图片源」与「bing 图片页」都未命中时进入，预算独立且短
+   * （ARTICLE_FALLBACK_TIMEOUT_MS），并且到点即停——不能拖垮整次 search_images。
+   */
+  private async harvestImagesFromArticles(keyword: string, limit: number): Promise<MediaSearchItem[]> {
+    const deadlineAt = this.now().getTime() + ARTICLE_FALLBACK_TIMEOUT_MS;
+    try {
+      const web = await this.searchWeb(keyword, ARTICLE_FALLBACK_MAX_ARTICLES * 2);
+      const urls = [...new Set((web.items ?? []).map((it) => it.url).filter((u) => /^https?:\/\//.test(u)))]
+        .slice(0, ARTICLE_FALLBACK_MAX_ARTICLES);
+      if (urls.length === 0) return [];
+      const candidates = await this.articleFallback.harvestImageCandidates(urls, {
+        deadlineAt,
+        maxConcurrency: 2,
+        maxImages: clamp(limit * 4, 8, 32),
+      });
+      if (this.now().getTime() >= deadlineAt) return [];
+      return candidates.slice(0, limit * 3).map((c) => ({
+        type: "image" as const,
+        title: keyword,
+        pageUrl: c.articleUrl,
+        mediaUrl: c.url,
+        thumbnailUrl: c.url,
+        source: "article-fallback",
+      }));
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -1175,6 +1236,11 @@ const IMAGE_MATERIALIZE_CONCURRENCY = 3;
 const IMAGE_MATERIALIZE_BUDGET_MS = 6_500;
 // 图片结果页抓取超时：配合转存预算，保证"抓取 + 转存"总耗时 < 12s 工具预算。
 const IMAGE_FETCH_TIMEOUT_MS = 5_000;
+// 文章页兜底（搜索引擎只返回文章链接时）的硬预算：只在上述两条路径都失败后追加，
+// 且到点即停，避免把问题从"搜不到图"变成"整次 search_images 超时"。
+const ARTICLE_FALLBACK_TIMEOUT_MS = 5_000;
+// 兜底最多读几篇文章（并发 2）；文章页往往能一次给出多张图。
+const ARTICLE_FALLBACK_MAX_ARTICLES = 4;
 
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;

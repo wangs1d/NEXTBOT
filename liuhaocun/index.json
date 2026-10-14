@@ -1,0 +1,125 @@
+{
+  "generatedAt": "2026-10-14T06:00:42.542Z",
+  "query": "刘浩存",
+  "totals": {
+    "images": 60,
+    "imageBytes": null,
+    "articles": 10,
+    "infoFiles": 10
+  },
+  "dirs": {
+    "d6star.tw-850206c324": 5,
+    "icbw.com.cn-a579ea50a1": 6,
+    "news.qq.com-8f991c086e": 3,
+    "news.qq.com-d0713e8a93": 10,
+    "slide.ent.sina.com.cn-c1c1c67f15": 9,
+    "toutiao": 14,
+    "www.163.com-9481c0ea0a": 13
+  },
+  "info": {},
+  "sources": [
+    {
+      "url": "https://d6star.tw/archives/12329",
+      "title": "劉浩存解鎖《紅秀 GRAZIA》雙封面 一柔一颯展現時尚可塑性",
+      "article": "articles/850206c324.md",
+      "published": null,
+      "dir": "images/d6star.tw-850206c324",
+      "count": 5,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://icbw.com.cn/thread-238342-1-1.html",
+      "title": "传播网-传播网门户网站www.icbw.com.cn）-文化传播网，法制传播网，教育传播网，企业传播网，线上传播网，媒体传播网! - 传播网!",
+      "article": "articles/a579ea50a1.md",
+      "published": null,
+      "dir": "images/icbw.com.cn-a579ea50a1",
+      "count": 6,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://slide.ent.sina.com.cn/slide_4_86512_365797.html",
+      "title": "组图：刘浩存摩登街头风大片释出 全黑look搭配低马尾酷飒感十足",
+      "article": "articles/c1c1c67f15.md",
+      "published": null,
+      "dir": "images/slide.ent.sina.com.cn-c1c1c67f15",
+      "count": 9,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://www.163.com/dy/article/KQNBCP0J0552D1FK.html",
+      "title": "北影节红毯：高圆圆美的惊心动魄，被周冬雨吓了一跳，高叶太敢穿",
+      "article": "articles/9481c0ea0a.md",
+      "published": null,
+      "dir": "images/www.163.com-9481c0ea0a",
+      "count": 13,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://news.qq.com/rain/a/20260928A05AV300",
+      "title": "刘浩存吊带背心皮衣照曝光，长发飞扬又美又飒，《主角》“忆秦娥”获赞_腾讯新闻",
+      "article": "articles/d0713e8a93.md",
+      "published": null,
+      "dir": "images/news.qq.com-d0713e8a93",
+      "count": 10,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://news.qq.com/rain/a/20260928A0BZG700",
+      "title": "刘浩存首登时尚芭莎银十封面，恰逢创刊四十年，深棕皮衣站进旷野风沙_腾讯新闻",
+      "article": "articles/8f991c086e.md",
+      "published": null,
+      "dir": "images/news.qq.com-8f991c086e",
+      "count": 3,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://www.litaoxinxi.cn/archives/82626",
+      "title": "刘浩存《时尚芭莎》24小时销售额破212万，00花杂志销量断层领跑！",
+      "article": "articles/d6bf157641.md",
+      "published": null,
+      "dir": null,
+      "count": 0,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://m.toutiao.com/a7602256094487937588/",
+      "title": null,
+      "article": "articles/237ac87dd9.md",
+      "published": null,
+      "dir": null,
+      "count": 0,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://www.toutiao.com/a7690489329546494518",
+      "title": null,
+      "article": "articles/30172bf909.md",
+      "published": null,
+      "dir": null,
+      "count": 0,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "https://m.toutiao.com/article/7691392737710555658",
+      "title": null,
+      "article": "articles/8792c07d9a.md",
+      "published": null,
+      "dir": null,
+      "count": 0,
+      "how": "curl + Referer"
+    },
+    {
+      "url": "(toutiao ×3)",
+      "title": "头条：新春写真 / 芭莎银十 / 微头条",
+      "dir": "images/toutiao",
+      "count": 14,
+      "how": "agent-browser 渲染 → article img 直链 → curl + Referer"
+    }
+  ],
+  "digest": {
+    "file": "digest.md",
+    "points": 31,
+    "timeline": 7,
+    "sameEventGroups": 1
+  }
+}

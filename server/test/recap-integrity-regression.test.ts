@@ -78,7 +78,7 @@ function toolCallMsg(names: string[]): ChatCompletionMessageParam {
   } as unknown as ChatCompletionMessageParam;
 }
 
-test("B 折叠占位符：携带已调用工具名与结果摘要，并禁止当悬空事项重提", () => {
+test("B 折叠动作台账：携带已调用工具名与结果摘要，并禁止当悬空事项重提（2026-10-13 迁 system）", () => {
   const msgs: ChatCompletionMessageParam[] = [
     { role: "system", content: "sys" },
     { role: "user", content: "今天中午12点有个会议要开 记得提前提醒我" },
@@ -87,11 +87,14 @@ test("B 折叠占位符：携带已调用工具名与结果摘要，并禁止当
     // 链被中断：没有最终 assistant 正文
   ];
   foldCompletedToolChains(msgs);
-  const assistant = msgs.filter((m) => m.role === "assistant");
-  assert.equal(assistant.length, 1, "工具链应折叠为单条 assistant 消息");
-  const text = String(assistant[0]!.content);
-  assert.match(text, /calendar\.create_from_text/, "占位符应点名已调用的工具");
-  assert.match(text, /提醒已写入日程/, "占位符应携带工具结果摘要");
+  // 2026-10-13 根修：assistant 通道清零——事实记录以 system 动作台账承载
+  const assistants = msgs.filter((m) => m.role === "assistant");
+  assert.equal(assistants.length, 0, "assistant 通道不得再出现占位帧");
+  const ledger = msgs.find((m) => m.role === "system" && String(m.content).startsWith("[动作台账"));
+  assert.ok(ledger, "中断链应折叠出 system 动作台账");
+  const text = String(ledger!.content);
+  assert.match(text, /calendar\.create_from_text/, "台账应点名已调用的工具");
+  assert.match(text, /提醒已写入日程/, "台账应携带工具结果摘要");
   assert.match(text, /不要把它当作用户重复请求或未处理的悬空事项重新提起/);
   assert.doesNotMatch(text, /尚未完成即被新消息打断/, "不得再出现空话式旧占位符");
 });
@@ -124,7 +127,7 @@ test("B 折叠：完成的工具链保留最终回复正文（回归不破坏原
 
 /* ── C. 后台任务记录：单条 assistant 角色事实记录 ────────────────── */
 
-test("C appendTaskRecord：单条 assistant 记录，不伪造 user 轮", () => {
+test("C appendTaskRecord：单条 system 记录，不伪造 user 轮（2026-10-13 迁 system）", () => {
   const store = new ChatThreadStore(null);
   const sessionId = "session-task-record-test";
   store.appendTaskRecord(
@@ -136,7 +139,7 @@ test("C appendTaskRecord：单条 assistant 记录，不伪造 user 轮", () => 
   const msgs = store.thread(sessionId, "system");
   const taskRecords = msgs.filter((m) => String(m.content).includes("[后台任务记录]"));
   assert.equal(taskRecords.length, 1, "应恰好一条任务记录");
-  assert.equal(taskRecords[0]!.role, "assistant", "任务记录必须是 assistant 角色");
+  assert.equal(taskRecords[0]!.role, "system", "任务记录必须是 system 角色（assistant 通道清零）");
   assert.match(String(taskRecords[0]!.content), /目标：刘浩存才是真主/);
   assert.match(String(taskRecords[0]!.content), /结果：/);
   const userTurns = msgs.filter(

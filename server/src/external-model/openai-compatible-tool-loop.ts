@@ -2808,7 +2808,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           allToolExecResults.length === 0 &&
           ((options?.turnIntent === "realtime_lookup" && options?.turnEvidenceInjected !== true) ||
             options?.turnIntent === "media_retrieval" ||
-            options?.turnIntent === "travel_planning")
+            options?.turnIntent === "travel_planning" ||
+            options?.turnIntent === "weather_query")
         ) {
           // 2026-09-23 扩面：realtime/media 意图轮此前零工具直答无任何拦截
           //（真实日志：任务面 18 轮里 4 轮零工具）。证据块已注入的轮豁免——

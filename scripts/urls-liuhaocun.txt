@@ -1,0 +1,13 @@
+# 刘浩存 —— 文章页兜底抓取源（搜索引擎返回的文章链接）
+https://d6star.tw/archives/12329
+https://icbw.com.cn/thread-238342-1-1.html
+https://slide.ent.sina.com.cn/slide_4_86512_365797.html
+https://www.163.com/dy/article/KQNBCP0J0552D1FK.html
+https://news.qq.com/rain/a/20260928A05AV300
+https://news.qq.com/rain/a/20260928A0BZG700
+https://www.litaoxinxi.cn/archives/82626
+# https://info.vanpeople.com/1859859.html   # 连接被拒(000)
+# 头条(toutiao)/新浪图集为 JS 渲染，curl 拿不到 —— 用 agent-browser 渲染后取 article img 直链，再走 --images 模式
+https://m.toutiao.com/a7602256094487937588/
+https://www.toutiao.com/a7690489329546494518
+https://m.toutiao.com/article/7691392737710555658

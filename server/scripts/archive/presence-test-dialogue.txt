@@ -1,4 +1,8 @@
 # presence 对话记录  query=帮我看一下马尔代夫的消费情况
 # user: 帮我看一下马尔代夫的消费情况
-[+8ms] WS-ERR: connect ECONNREFUSED 127.0.0.1:3000
-# 结束原因: ws error
+[+368ms] USER: 帮我看一下马尔代夫的消费情况
+[+820ms] ack: 服务端已接收
+[+5493ms] status: 开始处理任务…
+[+14422ms] done: finalText(0字)
+[assistant_done finalText]: 
+# 结束原因: assistant_done

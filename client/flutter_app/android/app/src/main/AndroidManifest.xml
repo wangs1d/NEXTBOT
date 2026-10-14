@@ -3,6 +3,11 @@
     <!-- 网络与桥接 -->
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
+
+    <!-- 厂商推送（华为 HMS 直连）：HMS SDK manifest 自带权限合并；指纹与
+         agconnect-services.json 见 docs/mobile-push-jpush-setup.md -->
+    <uses-permission android:name="android.permission.RECEIVE_USER_PRESENT"/>
 
     <!-- 电量 -->
     <uses-permission android:name="android.permission.BATTERY_STATS"/>
@@ -169,6 +174,16 @@
             android:name=".AlarmRingService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback"/>
+
+        <!-- HMS Push token 事件回调：token 就绪/刷新时系统主动送达（App 后台也生效），
+             写入 SharedPreferences 供 MobilePushPlugin 随取随用 -->
+        <service
+            android:name=".PushTokenService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.huawei.push.action.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
 
         <meta-data
             android:name="flutterEmbedding"

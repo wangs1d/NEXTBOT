@@ -1,11 +1,9 @@
 import "package:private_ai_agent/app/ambient_feeds_controller.dart";
 import "package:private_ai_agent/app/chat_turn_controller.dart";
-import "package:private_ai_agent/app/notification_flow_controller.dart";
 import "package:private_ai_agent/app/phone_call_controller.dart";
 import "package:private_ai_agent/core/models/agent_relay_models.dart";
 import "package:private_ai_agent/core/services/account_profile_api.dart";
 import "package:private_ai_agent/core/presentation/dynamic_island.dart";
-import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 
 void main() {
@@ -82,40 +80,8 @@ void main() {
       expect(syncCalls, 2);
     });
 
-    test("reminder_fired: 桌面到点档补发原生弹窗，预告档不上弹窗", () async {
-      const MethodChannel channel = MethodChannel("pai/desktop_notification");
-      final List<Map<String, dynamic>> shows = <Map<String, dynamic>>[];
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == "show") {
-          shows.add(Map<String, dynamic>.from(call.arguments as Map));
-          return true;
-        }
-        return null;
-      });
-      addTearDown(() => TestDefaultBinaryMessengerBinding
-          .instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, null));
-
-      // 到点档：岛 + 原生弹窗双通道（弹窗带确认钮）
-      await c.onScheduleReminderFired(<String, dynamic>{
-        "title": "评审会",
-        "message": "现在开始",
-      });
-      expect(shows, hasLength(1));
-      expect(shows.single["title"], "评审会");
-      expect(shows.single["message"], "现在开始");
-      expect(shows.single["showConfirmButton"], true);
-
-      // 预告档：只走灵动岛，不上弹窗（弹窗留给到点时刻）
-      await c.onScheduleReminderFired(<String, dynamic>{
-        "title": "该出门了",
-        "preReminder": true,
-      });
-      expect(shows, hasLength(1));
-    });
-
-    test("reminder_fired: 岛 attention 标题+说明全展示（2026-10-07 定调）", () async {
+    test("reminder_fired: 说明文案回退链（空 message → 到点了）经前台横幅端口可断言",
+        () async {
       // 展示文本组装为纯函数直测（岛通道单测态 nativeReady=false 不出口）
       expect(
         IslandReminderScheduler.displayText(
@@ -125,22 +91,17 @@ void main() {
       expect(IslandReminderScheduler.displayText("吃药", null), "吃药");
       expect(IslandReminderScheduler.displayText("吃药", "  "), "吃药");
 
-      // 说明文案回退链（空 message → 到点了）经桌面弹窗通道可断言
-      const MethodChannel channel = MethodChannel("pai/desktop_notification");
-      final List<Map<String, dynamic>> shows = <Map<String, dynamic>>[];
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, (MethodCall call) async {
-        if (call.method == "show") {
-          shows.add(Map<String, dynamic>.from(call.arguments as Map));
-          return true;
-        }
-        return null;
-      });
-      addTearDown(() => TestDefaultBinaryMessengerBinding
-          .instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(channel, null));
+      // 说明文案回退链（空 message → 到点了）经前台横幅端口可断言
+      String? bannerTitle;
+      String? bannerMessage;
+      c.showForegroundReminder = (String title, String message) async {
+        bannerTitle = title;
+        bannerMessage = message;
+      };
+      addTearDown(() => c.showForegroundReminder = null);
       await c.onScheduleReminderFired(<String, dynamic>{"title": "吃药"});
-      expect(shows.single["message"], "到点了");
+      expect(bannerTitle, "吃药");
+      expect(bannerMessage, "到点了");
     });
 
     test("inbox.message: 桌面前台走应用内呈现并 bump 角标", () async {
@@ -187,43 +148,6 @@ void main() {
     test("isQuietHoursNow: 23 点后与 8 点前为静音时段", () {
       // 纯区间逻辑：hour >= 23 || hour < 8（不注入时钟，只验证函数存在且为 bool）
       expect(c.isQuietHoursNow(), isA<bool>());
-    });
-  });
-
-  group("NotificationFlowController", () {
-    late NotificationFlowController n;
-    setUp(() {
-      n = NotificationFlowController.instance;
-      n.pendingDesktopAckCardId = null;
-      n.clearProactiveOutcome();
-      n.needsFeedback = false;
-      n.feedbackChannel = "websocket";
-    });
-
-    test("主动消息 outcome：登记 → 待回传 → 取走即清空", () {
-      expect(n.hasPendingProactiveOutcome, isFalse);
-      n.armProactiveOutcome("d-1");
-      expect(n.hasPendingProactiveOutcome, isTrue);
-      expect(n.takePendingProactiveDeliveryId(), "d-1");
-      expect(n.hasPendingProactiveOutcome, isFalse);
-      expect(n.takePendingProactiveDeliveryId(), isNull);
-    });
-
-    test("弹窗闭合配对：等待者拿到全局回调补发的事件", () async {
-      final Future<String> closed = n.waitForPopupClose("card-1");
-      n.pendingDesktopAckCardId = "card-1";
-      n.completeDesktopAck("confirm");
-      expect(await closed, "confirm");
-    });
-
-    test("弹窗闭合配对：无等待者时补发不抛错；事件先到不补发旧 id", () {
-      n.completeDesktopAck("dismiss"); // cardId == null：安全空操作
-
-      n.pendingDesktopAckCardId = "card-2";
-      n.completeDesktopAck("timeout");
-      expect(n.pendingDesktopAckCardId, isNull);
-      // 同 id 重复补发：完成器已取走，不崩
-      n.completeDesktopAck("timeout");
     });
   });
 

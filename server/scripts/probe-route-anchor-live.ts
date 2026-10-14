@@ -18,7 +18,7 @@ type Case = {
   name: string;
   text: string;
   dialogStateLines?: string[];
-  expect: (d: { intent?: string; searchQuery?: string; reasons: string[] }) => string | null;
+  expect: (d: { intent?: string; plane?: string; searchQuery?: string; reasons: string[] }) => string | null;
 };
 
 // 模拟「上一轮搜过刘亦菲照片且已交付」的对话状态（事故现场还原，
@@ -86,6 +86,27 @@ const CASES: Case[] = [
     text: "以后别提醒我开会的事",
     expect: (d) => (d.intent !== "action_write" ? null : `不应判 action_write，实际 ${d.intent}`),
   },
+  {
+    name: "天气实况：现在天气怎么样（应 weather_query → 对话面直办，无网页搜索词）",
+    text: "现在天气怎么样？",
+    expect: (d) =>
+      d.intent === "weather_query" && d.plane === "chat" && !d.searchQuery
+        ? null
+        : `期望 weather_query/chat 面且无搜索词，实际 intent=${d.intent} plane=${d.plane} q="${d.searchQuery ?? ""}" reasons=[${d.reasons.join(",")}]`,
+  },
+  {
+    name: "天气降水：兴义今天会下雨吗（应 weather_query）",
+    text: "兴义今天会下雨吗",
+    expect: (d) =>
+      d.intent === "weather_query" && !d.searchQuery
+        ? null
+        : `期望 weather_query 且无搜索词，实际 intent=${d.intent} q="${d.searchQuery ?? ""}" reasons=[${d.reasons.join(",")}]`,
+  },
+  {
+    name: "感叹天气：今天天气真好啊（应 chat，非查询）",
+    text: "今天天气真好啊",
+    expect: (d) => (d.intent === "chat" ? null : `应判 chat，实际 ${d.intent}`),
+  },
 ];
 
 async function main(): Promise<void> {
@@ -119,6 +140,7 @@ async function main(): Promise<void> {
         .join(",")}]`;
       verdict = c.expect({
         intent: d.intent,
+        plane: d.plane,
         searchQuery: d.searchQuery,
         reasons: d.reasons,
       });

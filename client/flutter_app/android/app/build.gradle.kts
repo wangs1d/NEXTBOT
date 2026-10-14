@@ -32,7 +32,10 @@ android {
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
-        applicationId = "com.example.private_ai_app"
+        // 应用身份 = NextBot 品牌包名（2026-10-13 用户定调）。华为 AGC 注册的包名必须与此
+        // 完全一致。注意 namespace（Kotlin 源码包）仍为 com.example.private_ai_app，
+        // AGP 8 允许二者不同，勿混淆。
+        applicationId = "com.nextbot.app"
         // You can update the following values to match your application needs.
         // For more information, see: https://flutter.dev/to/review-gradle-config.
         minSdk = flutter.minSdkVersion
@@ -41,11 +44,30 @@ android {
         versionName = flutter.versionName
     }
 
+    // NextBot 正式签名（2026-10-13）：nextbot-release.jks 与华为 AGC 登记的
+    // SHA-256 指纹绑定（HMS 注册强校验），debug/release 统一用它——任何构建
+    // 的签名指纹都与 AGC 登记一致。keystore 备份在桌面 nextbot-signing/。
+    signingConfigs {
+        create("nextbot") {
+            storeFile = file("nextbot-release.jks")
+            storePassword = "Nextbot@2026"
+            keyAlias = "nextbot"
+            keyPassword = "Nextbot@2026"
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("nextbot")
+            // R8：HMS 可选类 dontwarn 规则（proguard-rules.pro）
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+        debug {
+            // 调试构建也带正式身份：HMS/指纹校验对 debug 运行同样生效
+            signingConfig = signingConfigs.getByName("nextbot")
         }
     }
 
@@ -63,6 +85,11 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.5")
+
+    // 厂商推送：华为 HMS Push 直连（2026-10-13 用户定调：移除极光，高可控直连）。
+    // 客户端 HmsInstanceId 取 token 上报服务端；服务端经华为 OAuth + Push Kit API 直推。
+    // 前置条件（均已就位）：app/agconnect-services.json + AGC 指纹登记。
+    implementation("com.huawei.hms:push:6.12.0.300")
 
     // 远程拍照（camera_capture）：CameraX 后台拍照（前台服务 + camera 类型）
     implementation("androidx.camera:camera-core:1.3.4")

@@ -1006,6 +1006,25 @@ function annotateMessageWithOwnTimeOrKeep(
 }
 
 /**
+ * 存量迁移（2026-10-13 根修，assistant 通道清零）：旧版线程里以 assistant 角色
+ * 落库的内部帧（[上一轮回复中断…] / [上一轮工具调用…] / [后台任务记录]）一次性
+ * 迁为 system——恢复路径 + 轮次收口双入口触发，旧线程立即脱离「assistant 复读
+ * 诱导」结构，与 recap 的 P0-B 迁移（2026-10-12）同款。只迁角色不动内容，
+ * 事实语义（工具名/结果摘要）原样保留。
+ */
+function migrateLegacyAssistantInternalFrame(
+  msg: ChatCompletionMessageParam,
+): ChatCompletionMessageParam {
+  if (msg.role !== "assistant") return msg;
+  // recap 有自己的 P0-B 迁移路径（annotateMessageIfNeeded 内含相对标签换算），
+  // 在这里短路会让标签迁移失效——recap 原样放行，交给既有路径。
+  if (isSessionRecapMessage(msg)) return msg;
+  const content = typeof msg.content === "string" ? msg.content : "";
+  if (!content || !isInternalFrameText(content)) return msg;
+  return { ...msg, role: "system", content };
+}
+
+/**
  * 从根源折叠「已完成的 tool_call 链」，防止串台。
  *
  * 根源问题：OpenAI 协议里 tool 消息没有「轮次边界」。一轮工具调用完成后，thread 里留下
@@ -1025,8 +1044,10 @@ function annotateMessageWithOwnTimeOrKeep(
  *   压缩为：
  *   assistant(content)
  *
- * 未完成的 tool_call 链（无后续 assistant(content)，如被新消息打断）：折叠为单条 assistant
- * 占位消息，明确标注「上一轮工具调用未完成」，避免 LLM 把孤立的 tool_calls 当成当前轮语境。
+ * 未完成的 tool_call 链（无后续 assistant(content)，如被新消息打断）：折叠为单条
+ * system 角色动作台账（2026-10-13 根修，原为 assistant 占位帧——assistant 角色
+ * 是复读诱导的结构根源，见 buildActionLedgerContent 注释），明确标注已调用的
+ * 工具与结果，避免 LLM 把孤立的 tool_calls 当成当前轮语境。
  *
  * 幂等：已是普通 assistant（无 tool_calls）的消息不会被重复处理。
  */
@@ -1036,13 +1057,23 @@ function hasToolCalls(msg: ChatCompletionMessageParam): boolean {
 }
 
 /**
- * 未完成工具链的事实化占位文本（2026-09-08）：列出该链已调用的工具与结果摘要，
- * 并显式约束后续模型不得把本轮当作用户重复请求或悬空未办事项。
+ * 中断/空回复工具链的事实化记录（2026-10-13 根修：assistant 通道清零）。
+ *
+ * 事实抽取逻辑与旧 buildInterruptedToolChainNotice 完全一致（工具名 + 展平结果摘录），
+ * 唯一变化是**出口换通道**：旧版把这段文本以 assistant 角色写进线程——assistant 在
+ * 模型视角里是「我上一轮说过的话」，对它复读/续写是 LLM 原生行为，出口净化叠几层
+ * 都是在对抗生成倾向（2026-10-13 手机端气泡复读事故的结构根源）。新版作为 system
+ * 角色「动作台账」下发——system 是「给模型看的上下文」，与 session-recap 的 P0-B
+ * 迁移（2026-10-12）同哲学。
+ *
+ * 单行契约不变：模型若复读台账文本，出口剥离器（stripInternalFrames 整行删除）
+ * 需要整行命中 `[动作台账…]` 才拦得住，多行会让帧剥离器只删首行（2026-10-11 实测）。
  */
-function buildInterruptedToolChainNotice(
+function buildActionLedgerContent(
   msgs: ChatCompletionMessageParam[],
   start: number,
   end: number,
+  completed: boolean,
 ): string {
   const toolNames: string[] = [];
   const resultSnippets: string[] = [];
@@ -1080,7 +1111,7 @@ function buildInterruptedToolChainNotice(
       }
     }
   }
-  const parts: string[] = ["[上一轮回复中断：最终回复未生成完整。"];
+  const parts: string[] = ["[动作台账]"];
   if (toolNames.length > 0) {
     parts.push(`期间已调用工具 ${toolNames.join("、")}（共 ${toolNames.length} 次）`);
     if (resultSnippets.length > 0) {
@@ -1088,18 +1119,21 @@ function buildInterruptedToolChainNotice(
     } else {
       parts.push("（结果未回传）。");
     }
-    parts.push("这些动作可能已实际生效——引用本事项前先查证实际状态，");
+    if (completed) {
+      parts.push("工具已执行完成但未生成可见回复——引用本事项前先查证实际状态。");
+    } else {
+      parts.push(
+        "这些动作可能已实际生效——引用本事项前先查证实际状态，",
+        "不要把它当作用户重复请求或未处理的悬空事项重新提起。本轮未生成可见回复。",
+      );
+    }
   } else {
-    parts.push("未产生任何工具动作。");
+    parts.push(
+      completed
+        ? "工具已执行完成但未生成可见回复。"
+        : "未产生任何工具动作，本轮未生成可见回复。",
+    );
   }
-  // 2026-10-08：显式禁复述。占位帧以 assistant 角色待在线程里，模型会把它当成
-  // 「自己上一轮说过的话」原样复读给用户（手机端气泡事故的直接成因）。出口净化
-  // （stream-chat-helpers / ToolResultProcessor）只能挡逐字复读，挡不住改写转述，
-  // 因此这里在帧文本内部再钉一条硬约束。
-  parts.push(
-    "不要把它当作用户重复请求或未处理的悬空事项重新提起。",
-    "这是系统内部记录：禁止原样或改写后复述给用户，也不要提及它的存在。]",
-  );
   return parts.join("");
 }
 
@@ -1116,7 +1150,11 @@ function removeTransientSystemMessages(msgs: ChatCompletionMessageParam[]): void
     if (msg.role === "system") {
       // P0-B：recap 摘要消息现在也是 system 角色（index>0）——它是持久上下文不是
       // transient 指令，必须豁免，否则每轮收口都会被这里清掉（静默失忆）。
-      if (isSessionRecapMessage(msg)) msgs[write++] = msg;
+      // 2026-10-13 根修扩面：动作台账（[动作台账]…）等以内部帧标签起头的 system
+      // 上下文同样豁免——这正是 2026-09-08 占位帧被迫选 assistant 角色的原因
+      // （当时 system 中间消息会被这里清掉），assistant 通道清零后此闸必须放开。
+      const content = typeof msg.content === "string" ? msg.content : "";
+      if (isSessionRecapMessage(msg) || isInternalFrameText(content)) msgs[write++] = msg;
       continue;
     }
     msgs[write++] = msg;
@@ -1124,7 +1162,10 @@ function removeTransientSystemMessages(msgs: ChatCompletionMessageParam[]): void
   msgs.length = write;
 }
 
-export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boolean {
+export function foldCompletedToolChains(
+  msgs: ChatCompletionMessageParam[],
+  now: Date = new Date(),
+): boolean {
   if (msgs.length < 2) return false;
   const result: ChatCompletionMessageParam[] = [];
   let i = 0;
@@ -1162,11 +1203,15 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
         if (content) {
           result.push(finalAssistant);
         } else {
-          const placeholder: ChatCompletionMessageParam = {
-            role: "assistant",
-            content: "[上一轮工具调用已完成但未生成可见回复]",
+          // 2026-10-13 根修（assistant 通道清零）：空回复占位帧
+          // `[上一轮工具调用已完成但未生成可见回复]` 不再以 assistant 角色落线程
+          // （assistant 角色是复读诱导的结构根源，见 P0-B 注释），改为 system
+          // 角色动作台账，事实语义不丢。
+          const ledger: ChatCompletionMessageParam = {
+            role: "system",
+            content: buildActionLedgerContent(msgs, i, j, true),
           };
-          result.push(annotateMessageTimeMeta(placeholder, new Date()));
+          result.push(annotateMessageTimeMeta(ledger, now));
         }
         changed = true;
         i = j;
@@ -1174,14 +1219,16 @@ export function foldCompletedToolChains(msgs: ChatCompletionMessageParam[]): boo
       }
 
       // 未完成的 tool_call 链：assistant(tool_calls) → tool*（无后续 assistant content）
-      // 2026-09-08：占位符必须携带已执行的工具事实——空话式「未生成完整回复」会
-      // 被 recap 记成「用户重复请求…未完成」，诱导 agent 反复重问已办成的事
+      // 2026-09-08：记录必须携带已执行的工具事实——空话式「未生成完整回复」会被
+      // recap 记成「用户重复请求…未完成」，诱导 agent 反复重问已办成的事
       // （实测：两条提醒已创建成功，agent 却在后续轮次反复追问「要提前多久叫你」）。
-      const placeholder: ChatCompletionMessageParam = {
-        role: "assistant",
-        content: buildInterruptedToolChainNotice(msgs, i, j),
+      // 2026-10-13 根修：事实记录从 assistant 占位帧改道 system 角色动作台账——
+      // assistant 通道只允许出现模型真实输出的用户可见回复。
+      const ledger: ChatCompletionMessageParam = {
+        role: "system",
+        content: buildActionLedgerContent(msgs, i, j, false),
       };
-      result.push(annotateMessageTimeMeta(placeholder, new Date()));
+      result.push(annotateMessageTimeMeta(ledger, now));
       changed = true;
       i = j;
       continue;
@@ -1402,7 +1449,9 @@ export class ChatThreadStore {
       { role: "system", content: systemPrompt },
       ...repairKimiAssistantToolCallReasoning(
         compactValidChatMessages(
-          restored.map((msg) => annotateMessageWithOwnTimeOrKeep(msg, now)),
+          restored.map((msg) =>
+            annotateMessageWithOwnTimeOrKeep(migrateLegacyAssistantInternalFrame(msg), now),
+          ),
         ),
       ),
     ];
@@ -1739,7 +1788,9 @@ export class ChatThreadStore {
   }
 
   /**
-   * 后台任务的单条事实记录（2026-09-08）：assistant 角色、带时间戳帧。
+   * 后台任务的单条事实记录（2026-09-08 建立；2026-10-13 根修迁 system 角色）：
+   * 任务结果与「已完成动作事实」是给模型看的上下文，不是模型说过的话——assistant
+   * 角色会诱导模型把它当自己的输出复读给用户（与 session-recap P0-B、动作台账同根源）。
    * 单条消息而非 user/assistant 对——见 AbstractChatProvider.appendTaskRecord 注释。
    */
   appendTaskRecord(
@@ -1755,7 +1806,7 @@ export class ChatThreadStore {
     const now = new Date();
     const goalLine = goal.replace(/\s+/g, " ").trim().slice(0, 200);
     const content = `[后台任务记录] 目标：${goalLine || "未命名任务"}\n结果：${trimmedResult || "（无结果）"}`;
-    const recordMsg: ChatCompletionMessageParam = { role: "assistant", content };
+    const recordMsg: ChatCompletionMessageParam = { role: "system", content };
     msgs.push(annotateMessageTimeMeta(recordMsg, now));
     this.trimThread(msgs, maxThreadMessages, sessionId);
     this.persistence?.scheduleSave(sessionId, msgs);
@@ -1858,6 +1909,10 @@ export class ChatThreadStore {
     // 补一次原始时间戳，且补完后不再刷新。相对时间的语义在写入锚点时刻已固定，
     // 会话临近轮次的绝对时间足够 LLM 判断时序。
     const annotated = msgs.map((msg) => {
+      // 存量迁移（2026-10-13 assistant 通道清零）：旧版 assistant 角色内部帧迁
+      // system——与恢复路径同款，内存常驻线程不必等重启即脱离复读诱导结构。
+      const migrated = migrateLegacyAssistantInternalFrame(msg);
+      if (migrated !== msg) return migrated;
       if (msg.role === "user" || msg.role === "assistant") {
         const known = readMessageTimestampMeta(msg) ?? extractMessageTimestamp(msg);
         // P0-B：recap 恒无单点时刻（无帧无 meta），若按「无时刻即原样返回」会让
@@ -1891,7 +1946,7 @@ export class ChatThreadStore {
     dropRecapEchoMessages(msgs);
     // 根源防串台：轮次完成的瞬间折叠已完成的 tool_call 链，移除 raw tool 结果。
     // 下一轮 LLM 只看到干净的 assistant(content)，不会把上轮 tool 结果当成当前轮语境。
-    foldCompletedToolChains(msgs);
+    foldCompletedToolChains(msgs, now);
     // 清理 tool loop 残留在会话中间的 transient system 消息（如「工具调用原则」），
     // 只保留 msgs[0] 的主 system prompt，避免污染后续轮次的对话历史。
     removeTransientSystemMessages(msgs);

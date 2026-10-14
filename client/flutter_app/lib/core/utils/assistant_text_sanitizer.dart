@@ -82,6 +82,9 @@ String stripDsmlToolCallMarkup(String text) {
 const List<String> kInternalFrameTags = <String>[
   "上一轮回复中断",
   "上一轮工具调用已完成但未生成可见回复",
+  // 动作台账（2026-10-13 根修）：system 角色动作台账被复读时按标签整行拦
+  // （与服务端 internal-frames.ts 对齐，两边各写一份名单正是此前漏网的根源）
+  "动作台账",
   "session-recap",
   "unsummarized",
   "关键钉",

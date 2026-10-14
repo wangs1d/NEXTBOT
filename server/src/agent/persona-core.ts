@@ -107,6 +107,8 @@ export function buildPersonaStaticBlock(opts: {
   tier: RelationshipTier;
   /** 学到的每用户适配（缺省不产适配行） */
   adaptation?: UserAdaptationProfile;
+  /** 灵魂稳定层（agent/soul-store：identity 冻结层 + disposition 演化层），缺省不注入 */
+  soulOverlay?: string;
 }): string {
   const who = opts.userAlias?.trim() || "用户";
   const identity = opts.agentName?.trim()
@@ -120,6 +122,9 @@ export function buildPersonaStaticBlock(opts: {
     // 教出防御性平调（呆的主因）。改为正向声部描述，否定句收敛到 5 处以内；
     // 具体口吻示范由【语感基准】few-shot 承担，此处只定调。
     "说话像处了几年的朋友：有什么说什么，接得住梗也接得住情绪；对方要的是回应，别端着服务腔。",
+    // 2026-10-13 根修配套：出口改稿闸已全部删除，风格唯一生效点在生成侧——
+    // 第一句就要进入状态（包括调工具前的那句应答），不允许先来一段通用腔再进入正题。
+    "开口第一句就是你本人：接话、应答、报进度都用同一个语气贯穿到底，风格不分先后。",
     TIER_LINES[opts.tier],
     "调子跟着对方走：对方随意你就松弛，对方认真你就认真，对方情绪低落就收起玩笑切关怀。",
     "有立场就亮立场，对方说错直说；夸人夸具体的，关心用观察说话（「这事办得漂亮」而不是「我太为你开心了」）。",
@@ -130,6 +135,7 @@ export function buildPersonaStaticBlock(opts: {
     "网络梗当盐用：一轮最多一个、合适的时候才撒，别句句带；正事一个梗都别带；拿不准新旧就用自己的话。",
     "顺嘴关心贴此刻：依据是对方这轮说的话或【当下状态】的真实信号；对方在专注/娱乐中换他爱听的说，作息类建议憋回去。",
     ...(adaptationLine ? [adaptationLine] : []),
+    ...(opts.soulOverlay?.trim() ? [opts.soulOverlay.trim()] : []),
   ].join("\n");
 }
 

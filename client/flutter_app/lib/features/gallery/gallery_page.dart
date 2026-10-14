@@ -7,6 +7,7 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "../chat/media_disk_cache.dart";
 
 /// 图库页：常用工具「图库」入口的落地页。
 ///
@@ -450,8 +451,8 @@ class _GalleryPageState extends State<GalleryPage> {
                   child: InteractiveViewer(
                     maxScale: 4,
                     child: Center(
-                      child: Image.network(
-                        "${ApiConfig.httpBase}${photo.imageUrl}",
+                      child: CachedMediaImage(
+                        url: "${ApiConfig.httpBase}${photo.imageUrl}",
                         fit: BoxFit.contain,
                         errorBuilder: (_, Object error, StackTrace? stack) =>
                             const Text("图片加载失败"),
@@ -706,8 +707,8 @@ class _PhotoTile extends StatelessWidget {
       child: Stack(
         fit: StackFit.expand,
         children: <Widget>[
-          Image.network(
-            "$httpBase${photo.thumbnailUrl}",
+          CachedMediaImage(
+            url: "$httpBase${photo.thumbnailUrl}",
             fit: BoxFit.cover,
             errorBuilder: (_, Object error, StackTrace? stack) => const ColoredBox(
               color: Color(0x22800000),

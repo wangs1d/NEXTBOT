@@ -55,9 +55,9 @@ export class ScheduleIntentService {
   async parseForCreate(
     sessionId: string,
     userText: string,
-    options?: { userTimezone?: string },
+    options?: { userTimezone?: string; now?: Date },
   ): Promise<ScheduleIntentParseResult> {
-    const draft = await this.resolveDraft(sessionId, userText, options?.userTimezone);
+    const draft = await this.resolveDraft(sessionId, userText, options?.userTimezone, options?.now);
     if (!draft) {
       return {
         matched: false,
@@ -66,6 +66,13 @@ export class ScheduleIntentService {
     }
     if (draft.kind === "reminder" && needsRecurrenceConfirmation(userText)) {
       const suggestion = analyzeTaskRecurrencePattern(userText, draft);
+      // 高置信一次性直接创建（2026-10-13 根修「没进日程」）：「取快递/开会/挂号」
+      // 等一次性事项此前被重复确认闸门拦下（matched=false），而模型在确认问答
+      // 之间口头宣称「已设置」——任务从未落库，日程页自然看不到。对齐 Siri/
+      // ChatGPT「先建后说」语义：一次性先建（用户可再改/再删），没建才是事故。
+      if (suggestion.suggestedType === "once" && suggestion.confidence === "high") {
+        return { matched: true, draft };
+      }
       return {
         matched: false,
         needsRecurrenceConfirm: true,
@@ -81,17 +88,18 @@ export class ScheduleIntentService {
   async parse(
     sessionId: string,
     userText: string,
-    options?: { userTimezone?: string },
+    options?: { userTimezone?: string; now?: Date },
   ): Promise<ScheduleDraft | null> {
-    return this.resolveDraft(sessionId, userText, options?.userTimezone);
+    return this.resolveDraft(sessionId, userText, options?.userTimezone, options?.now);
   }
 
   private async resolveDraft(
     sessionId: string,
     userText: string,
     userTimezone?: string,
+    now?: Date,
   ): Promise<ScheduleDraft | null> {
-    const ruleDraft = this.parseByRule(userText, userTimezone);
+    const ruleDraft = this.parseByRule(userText, userTimezone, now);
     if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
@@ -162,9 +170,9 @@ export class ScheduleIntentService {
     }
   }
 
-  private parseByRule(userText: string, userTimezone?: string): ScheduleDraft | null {
+  private parseByRule(userText: string, userTimezone?: string, now?: Date): ScheduleDraft | null {
     const normalized = userText.trim();
-    const runAt = parseDateTimeFromPrompt(normalized, userTimezone);
+    const runAt = parseDateTimeFromPrompt(normalized, userTimezone, now);
     if (!runAt) return null;
     const recurrence = inferRecurrenceFromUserText(normalized);
     const durationMinutes = parseDurationFromUserText(normalized);
@@ -704,9 +712,9 @@ function parseChineseHourToken(token: string): number | null {
   return single != null ? single : null;
 }
 
-/** 根据 早上/下午/晚上 等修饰词将 1–11 点映射到 24 小时制 */
+/** 根据 早上/下午/晚上 等修饰词将 1–11 点映射到 24 小时制（今晚/明晚 也按晚上算） */
 function applyDayPeriodHint(hours: number, text: string): number {
-  if (/晚上|夜间|半夜|傍晚/.test(text) && hours >= 1 && hours <= 11) return hours + 12;
+  if (/今晚|明晚|晚上|夜间|半夜|傍晚/.test(text) && hours >= 1 && hours <= 11) return hours + 12;
   if (/下午/.test(text) && hours >= 1 && hours <= 11) return hours + 12;
   return hours;
 }
@@ -732,7 +740,9 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
 
   const half = text.match(/(\d{1,2})\s*点半/);
   if (half) {
-    const hours = Number(half[1]);
+    // 时段词映射对数字形态同样生效（2026-10-13 修复）：「晚上7点半」此前因
+    // 阿拉伯数字分支未过 applyDayPeriodHint 被解析成 07:30
+    const hours = applyDayPeriodHint(Number(half[1]), text);
     if (validClock(hours, 30)) return { hours, minutes: 30 };
   }
 
@@ -749,7 +759,7 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
 
   const pointSub = text.match(/(\d{1,2})\s*点\s*(\d{1,2})\s*分?/);
   if (pointSub && !text.includes("点半")) {
-    const hours = Number(pointSub[1]);
+    const hours = applyDayPeriodHint(Number(pointSub[1]), text);
     const minutes = Number(pointSub[2]);
     if (validClock(hours, minutes)) return { hours, minutes };
   }
@@ -766,23 +776,22 @@ function parseHourMinuteFromPrompt(text: string): { hours: number; minutes: numb
 
   const pointOnly = text.match(/(\d{1,2})\s*点(?!半|[要摘分])/);
   if (pointOnly) {
-    const hours = Number(pointOnly[1]);
+    const hours = applyDayPeriodHint(Number(pointOnly[1]), text);
     if (validClock(hours, 0)) return { hours, minutes: 0 };
   }
   return null;
 }
 
 /** 供测试与即时提醒快路径：解析用户句中的可执行时间点（相对或绝对）。 */
-export function parseScheduleTimeFromPrompt(text: string, timezone?: string): Date | null {
-  return parseDateTimeFromPrompt(text, timezone);
+export function parseScheduleTimeFromPrompt(text: string, timezone?: string, now?: Date): Date | null {
+  return parseDateTimeFromPrompt(text, timezone, now);
 }
 
 const RELATIVE_TIME_STRIP_RE =
   /(?:半(?:个)?(?:小时|钟头)|\d+\s*秒(?:钟)?|[一二两三四五六七八九十]{1,3}|\d+)\s*(?:个)?(?:分钟|小时|钟头)(?:后|之后|以内)?|半(?:个)?(?:小时|钟头)(?:后|之后)?/g;
 
-function parseRelativeDateTimeFromPrompt(text: string): Date | null {
+function parseRelativeDateTimeFromPrompt(text: string, now: Date = new Date()): Date | null {
   const normalized = text.trim();
-  const now = new Date();
 
   if (/半(?:个)?(?:小时|钟头)(?:后|之后)?/.test(normalized)) {
     return new Date(now.getTime() + 30 * 60 * 1000);
@@ -823,20 +832,19 @@ function parseRelativeDateTimeFromPrompt(text: string): Date | null {
   return null;
 }
 
-function parseDateTimeFromPrompt(text: string, timezone?: string): Date | null {
+function parseDateTimeFromPrompt(text: string, timezone?: string, now: Date = new Date()): Date | null {
   // 「提前X分钟/小时」是提醒偏移不是事件锚点：先剥掉再做时间解析，
   // 否则「提前30分钟提醒我」会被相对时间正则误读成「30分钟后」（事件变成半小时后）。
   const anchorText = text.replace(
     /提前\s*[零一二两三四五六七八九十\d]{1,3}\s*(?:个)?\s*(?:半)?\s*(?:分钟|小时|钟头)/g,
     " ",
   );
-  const relative = parseRelativeDateTimeFromPrompt(anchorText);
+  const relative = parseRelativeDateTimeFromPrompt(anchorText, now);
   if (relative) return relative;
 
   const hm = parseHourMinuteFromPrompt(anchorText);
   if (!hm) return null;
   const { hours, minutes } = hm;
-  const now = new Date();
   const tz = timezone?.trim();
   const base = tz ? getLocalDateInTimezone(now, tz) : now;
   const target = new Date(
@@ -849,9 +857,23 @@ function parseDateTimeFromPrompt(text: string, timezone?: string): Date | null {
     0,
   );
   if (/后天/.test(anchorText)) target.setDate(target.getDate() + 2);
-  else if (/明天/.test(anchorText)) target.setDate(target.getDate() + 1);
+  else if (/明天|明晚/.test(anchorText)) target.setDate(target.getDate() + 1);
   const utc = tz ? toUtcFromLocalTime(target, tz) : target;
   if (utc.getTime() <= now.getTime()) {
+    // 就近未来回退（2026-10-13 根修「18:00 说 7点半 → 次日 07:30」）：
+    // 裸「X点半/X点」（1–11 点、无 早上/上午/凌晨/半夜/中午 时段词、无 明天/后天
+    // 日期偏移）解析结果早于当前时，先尝试 +12h 的下午/晚上解释——18:00 说
+    // 「7点半」最自然的理解是当天 19:30 而非次日 07:30，对齐 chrono-node
+    // forwardDate 的就近未来语义。带显式时段词的保持字面语义（「早上8点」在
+    // 18:00 说就是明早 8 点）。
+    const hasExplicitAmWord = /早上|上午|凌晨|半夜|中午/.test(anchorText);
+    const hasExplicitDayShift = /明天|后天/.test(anchorText);
+    if (!hasExplicitAmWord && !hasExplicitDayShift && hours >= 1 && hours <= 11) {
+      const pmTarget = new Date(target.getTime());
+      pmTarget.setHours(hours + 12);
+      const pmUtc = tz ? toUtcFromLocalTime(pmTarget, tz) : pmTarget;
+      if (pmUtc.getTime() > now.getTime()) return pmUtc;
+    }
     target.setDate(target.getDate() + 1);
     return tz ? toUtcFromLocalTime(target, tz) : target;
   }

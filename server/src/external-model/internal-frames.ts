@@ -34,6 +34,10 @@ export const INTERNAL_FRAME_TAGS: ReadonlyArray<string> = [
   // thread 折叠占位（防串台）
   "上一轮回复中断",
   "上一轮工具调用已完成但未生成可见回复",
+  // 动作台账（2026-10-13 根修）：中断/空回复工具链折叠的 system 角色事实记录。
+  // assistant 通道清零配套——占位帧迁 system 后仍要登记标签：模型若复读台账文本，
+  // 出口剥离器按标签整行拦；removeTransientSystemMessages 按 isInternalFrameText 豁免。
+  "动作台账",
   // 滚动摘要区
   "session-recap",
   "unsummarized",
@@ -65,6 +69,7 @@ export const INTERNAL_FRAME_TAGS: ReadonlyArray<string> = [
 export const INTERNAL_FRAME_STEMS: ReadonlyArray<string> = [
   "上一轮回复",
   "上一轮工具",
+  "动作台账",
   "session-recap",
   "unsummarized",
   "关键钉",

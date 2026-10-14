@@ -1,38 +1,108 @@
 package com.example.private_ai_app
 
+import android.content.Context
+import android.os.Handler
+import android.os.Looper
+import com.huawei.hms.aaid.HmsInstanceId
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONObject
+import java.util.concurrent.Executors
 
 /**
- * 移动端推送通道（pai/mobile_push）。
+ * 移动端推送通道（pai/mobile_push）—— 华为 HMS Push 直连。
  *
- * Dart 侧 MobilePushRegistrar 启动时调 getPushToken，把厂商推送 token 上报服务端
- * （POST /api/proactivity/push/register），用于两端都离线（App 被杀）后的离线必达：
- * 服务端 JPush / Bark / webhook 三 provider 把 critical 提醒推成系统通知。
+ * Dart 侧 MobilePushRegistrar 启动/WS 重连时调 getPushToken，把 HMS push token 上报
+ * 服务端（POST /api/proactivity/push/register，provider=huawei），用于手机端离线
+ * （WS 断开/App 被杀）后的离线必达：服务端 HuaweiPushProvider 经华为 OAuth +
+ * Push Kit API 直推系统通知，不经任何第三方聚合。
  *
- * 当前实现：尚未接入厂商推送 SDK（极光 JPush 可聚合华为/小米/OPPO/vivo 厂商通道），
- * getPushToken 如实返回 null，Dart 侧静默降级——WS 在线直推链路完全不受影响。
- * 后续接入 JPush 的步骤：
- *   1) android/app/build.gradle 加 cn.jiguang.sdk 依赖，manifest 配 JPUSH_APPKEY；
- *   2) 本类初始化时 JInterface 接入，回调里把 registration_id 缓存 SharedPreferences；
- *   3) getPushToken 返回 {"provider":"jpush","token":<registration_id>}。
- * 零 SDK 替代路径（当下即可用）：服务端配 MOBILE_PUSH_WEBHOOK_URL 接 ntfy
- * （手机装 ntfy App 订阅对应 topic），无需本插件参与即可离线必达。
+ * 前置条件（缺一则 getPushToken 返回 configured=false，Dart 静默降级）：
+ *   1) assets/agconnect-services.json（源 = android/app/src/main/assets/ 同名文件，
+ *      直接打进 APK assets；android/app/ 根的另一份无插件消费，仅为存档，
+ *      两处必须手工同步，勿只改其一——2026-10-14 旧 app_id 残留即此坑）
+ *   2) AGC 后台登记的签名指纹与实际签名一致（HMS 注册强校验）
+ *
+ * 契约（getPushToken 返回值）：
+ *   {"provider":"huawei","configured":false}                       —— 无 AGC 配置（Dart 放弃）
+ *   {"provider":"huawei","configured":true,"token":""}             —— token 未就绪（Dart 退避重试）
+ *   {"provider":"huawei","configured":true,"token":"<rid>"}        —— 就绪（Dart 上报服务端）
  */
 class MobilePushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
     private var channel: MethodChannel? = null
+    private var appContext: Context? = null
+    private var appId: String? = null
+    private val executor = Executors.newSingleThreadExecutor()
+    private val mainHandler = Handler(Looper.getMainLooper())
 
     override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        appContext = binding.applicationContext
         channel = MethodChannel(binding.binaryMessenger, CHANNEL_NAME).also {
             it.setMethodCallHandler(this)
         }
+        appId = readAgConnectAppId(binding.applicationContext)
+    }
+
+    /** 从 assets 读取 AGC 配置的应用 ID（getToken 需要）；缺文件 = 未配置推送 */
+    private fun readAgConnectAppId(context: Context): String? = try {
+        val raw = context.assets.open("agconnect-services.json").bufferedReader().use { it.readText() }
+        JSONObject(raw).getJSONObject("client").optString("app_id").takeIf { it.isNotEmpty() }
+    } catch (_: Exception) {
+        null
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
-            // 未接厂商 SDK：如实告知无 token（Dart 侧静默降级，不假装注册成功）
-            "getPushToken" -> result.success(null)
+            "getPushToken" -> {
+                val context = appContext
+                val id = appId
+                if (context == null || id == null) {
+                    result.success(mapOf("provider" to PROVIDER, "configured" to false))
+                    return
+                }
+                // 快路径：PushTokenService.onNewToken 已缓存 token（系统事件回调，
+                // 后台也会送达）→ 立即返回，无需等 getToken 网络握手
+                val cached = try {
+                    context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                        .getString(KEY_TOKEN, null)
+                } catch (_: Exception) {
+                    null
+                }
+                if (!cached.isNullOrEmpty()) {
+                    result.success(mapOf("provider" to PROVIDER, "configured" to true, "token" to cached))
+                    return
+                }
+                // 慢路径：getToken 是阻塞调用（SDK 内部走网络），必须离开主线程；
+                // 成功后写缓存，供后续快路径命中；失败把 HMS 报错带出（远程诊断用）
+                executor.execute {
+                    var token = ""
+                    var err = ""
+                    try {
+                        token = HmsInstanceId.getInstance(context).getToken(id, "HCM") ?: ""
+                        if (token.isEmpty()) err = "getToken returned empty"
+                    } catch (t: Throwable) {
+                        err = "${t.javaClass.simpleName}: ${t.message ?: "unknown"}"
+                    }
+                    if (token.isNotEmpty()) {
+                        try {
+                            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+                                .edit().putString(KEY_TOKEN, token).apply()
+                        } catch (_: Exception) {
+                        }
+                    }
+                    mainHandler.post {
+                        result.success(
+                            mapOf(
+                                "provider" to PROVIDER,
+                                "configured" to true,
+                                "token" to token,
+                                "err" to err,
+                            )
+                        )
+                    }
+                }
+            }
             else -> result.notImplemented()
         }
     }
@@ -44,5 +114,8 @@ class MobilePushPlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
     companion object {
         private const val CHANNEL_NAME = "pai/mobile_push"
+        private const val PROVIDER = "huawei"
+        const val PREFS = "pai_push"
+        const val KEY_TOKEN = "hms_token"
     }
 }

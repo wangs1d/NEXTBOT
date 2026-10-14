@@ -6,6 +6,7 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "media_disk_cache.dart";
 import "travel_ask_launcher.dart";
 import "travel_plan_mobile_page.dart";
 import "travel_plan_models.dart";
@@ -128,12 +129,19 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
     final Object? decoded = jsonDecode(resp.body);
     final List<dynamic>? raw =
         decoded is Map ? decoded["plans"] as List<dynamic>? : null;
-    return <_PlanSummary>[
+    final List<_PlanSummary> summaries = <_PlanSummary>[
       for (final dynamic item in raw ?? const <dynamic>[])
         if (item is Map<String, dynamic> &&
             (item["planId"]?.toString() ?? "").isNotEmpty)
           _PlanSummary.fromJson(item),
     ];
+    // 封面落盘预热：列表一返回就把各封面推进磁盘缓存，
+    // 卡片渲染走 CachedMediaImage，二次进入列表封面秒解不闪占位。
+    MediaDiskCache.instance.warm(<String>[
+      for (final _PlanSummary s in summaries)
+        if (s.coverImage.isNotEmpty) resolveTravelMediaUrl(s.coverImage),
+    ]);
+    return summaries;
   }
 
   /// 拉取完整行程并按平台打开详情。
@@ -273,8 +281,8 @@ class _PlanCard extends StatelessWidget {
                   height: 68,
                   child: cover.isEmpty
                       ? _CoverFallback(cs: cs, label: summary.destination)
-                      : Image.network(
-                          cover,
+                      : CachedMediaImage(
+                          url: cover,
                           width: 68,
                           height: 68,
                           fit: BoxFit.cover,

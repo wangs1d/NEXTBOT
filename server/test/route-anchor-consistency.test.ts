@@ -235,3 +235,59 @@ test("dialogStateStore：record → promptLines 渲染意图与工具；容量�
   assert.equal(dialogStateStore.lastIntent("sess-ds"), "media_retrieval");
   assert.equal(dialogStateStore.promptLines("sess-其他", 3).length, 0);
 });
+
+// ── weather_query 一等意图（2026-10-13）：天气归对话面前台直办 ──
+
+test("黄金回放：天气问句 → weather_query，路由到对话面（不进任务面），search_query 剥离", async () => {
+  const decision = await routeTurnByLlm(
+    fakeProvider({
+      intent: "weather_query",
+      confidence: 0.97,
+      evidence: ["天气怎么样"],
+      search_query: "兴义 今天 天气", // 模型照 realtime 习惯给了搜索词 → 代码剥离
+    }),
+    "sess-weather-1",
+    "现在天气怎么样？",
+  );
+  assert.equal(decision.intent, "weather_query");
+  assert.equal(decision.plane, "chat", "天气必须落在对话面前台直办（专属工具，不进任务面）");
+  assert.equal(decision.searchQuery, undefined, "天气由专属工具直查，search_query 必须被剥离");
+  assert.ok(decision.reasons.includes("search_query:weather_dedicated_tool_no_web_search"));
+  assert.ok(decision.reasons.includes("evidence_anchor:ok"));
+});
+
+test("黄金回放：weather_query + 造假证据（摘自别处）→ 标签作废降级 chat", async () => {
+  const decision = await routeTurnByLlm(
+    fakeProvider({
+      intent: "weather_query",
+      confidence: 0.9,
+      evidence: ["刘浩存最近"],
+    }),
+    "sess-weather-2",
+    "我叫王铭川，平时朋友都喊我老王",
+  );
+  assert.equal(decision.intent, "chat");
+  assert.ok(decision.reasons.includes("evidence_anchor:invalid"));
+});
+
+test("黄金回放：weather_query + personal_fact 自相矛盾 → 降级 chat", async () => {
+  const decision = await routeTurnByLlm(
+    fakeProvider({
+      intent: "weather_query",
+      confidence: 0.9,
+      evidence: ["天气"],
+      understanding: { personal_fact: true },
+    }),
+    "sess-weather-3",
+    "我昨天淋雨了，今天天气怎么样都无所谓吧",
+  );
+  assert.equal(decision.intent, "chat");
+  assert.ok(decision.reasons.includes("route_downgrade:understanding_conflict"));
+});
+
+test("buildRoutePrompt：weather_query 标签定义与专属工具契约在 prompt 中", () => {
+  const prompt = buildRoutePrompt("现在天气怎么样？", [], undefined, []);
+  assert.ok(prompt.includes("weather_query"), "封闭标签集应包含 weather_query");
+  assert.ok(prompt.includes("专属天气工具"), "应声明天气走专属工具直办");
+  assert.ok(prompt.includes("search_query 恒为空字符串（天气由系统专属工具按自动定位直查"));
+});

@@ -655,24 +655,41 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
   }
 }
 
-// 前台窗口「最大化且盖住岛」判定：只认 IsZoomed + 覆盖岛窗口中心点，
-// 排除工具窗（含岛自身，虽然 NOACTIVATE 一般当不上前台）。多显示器下
-// 副屏的最大化窗口只要不盖住岛矩形就不触发。判定失败一律返回 false
-// （宁可多显示，不可误隐藏）。
+// 前台窗口「盖住岛」判定（2026-10-14 根修），两条独立路径：
+//   1) 最大化（IsZoomed）且覆盖岛窗口中心点——常规最大化应用（原路保留）；
+//   2) 无边框全屏：前台窗口铺满岛所在整台显示器（含任务栏区，±8px 容差）
+//      ——浏览器 F11 / 无边框全屏游戏既不是 IsZoomed，shell 的 QUNS_BUSY
+//      启发式对这类窗口也时灵时不灵（此前「网页/游戏全屏岛照显」的根因）。
+// 均排除工具窗（含岛自身，虽然 NOACTIVATE 一般当不上前台）。路径 2 按岛
+// 所在显示器取界，多显示器下副屏的全屏窗口不盖岛屏就不触发。
+// 判定失败一律返回 false（宁可多显示，不可误隐藏）。
 bool DynamicIslandWindow::IsForegroundCoveringIsland() const {
   if (window_handle_ == nullptr) return false;
   const HWND fg = GetForegroundWindow();
   if (fg == nullptr || fg == window_handle_) return false;
   if (!IsWindowVisible(fg)) return false;
-  if (!IsZoomed(fg)) return false;
   const LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
   if (ex & WS_EX_TOOLWINDOW) return false;
   RECT fr = {};
   if (!GetWindowRect(fg, &fr)) return false;
-  RECT ir = {};
-  if (!GetWindowRect(window_handle_, &ir)) return false;
-  const POINT center = {(ir.left + ir.right) / 2, (ir.top + ir.bottom) / 2};
-  return PtInRect(&fr, center) != FALSE;
+  // 路径 1：最大化且盖住岛中心点。
+  if (IsZoomed(fg)) {
+    RECT ir = {};
+    if (!GetWindowRect(window_handle_, &ir)) return false;
+    const POINT center = {(ir.left + ir.right) / 2, (ir.top + ir.bottom) / 2};
+    if (PtInRect(&fr, center) != FALSE) return true;
+  }
+  // 路径 2：无边框全屏——铺满岛所在显示器（含任务栏区域）。
+  const HMONITOR mon =
+      MonitorFromWindow(window_handle_, MONITOR_DEFAULTTONEAREST);
+  MONITORINFO mi = {};
+  mi.cbSize = sizeof(mi);
+  if (!GetMonitorInfoW(mon, &mi)) return false;
+  constexpr int kSlack = 8;  // DWM 隐形边框 / 取整容差
+  return fr.left <= mi.rcMonitor.left + kSlack &&
+         fr.top <= mi.rcMonitor.top + kSlack &&
+         fr.right >= mi.rcMonitor.right - kSlack &&
+         fr.bottom >= mi.rcMonitor.bottom - kSlack;
 }
 
 // 顶边唤出探针（kPeekTimerId 200ms，窗口存活期间常开）：

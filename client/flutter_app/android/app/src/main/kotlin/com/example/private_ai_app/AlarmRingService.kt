@@ -20,8 +20,8 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * 闹钟响铃前台服务（foregroundServiceType=mediaPlayback）—— 触发主路的执行体：
- *  - 循环播放系统默认闹铃 + 振动，最长 5 分钟自动停止（防耗电/扰人）；
- *  - 满屏通知（full-screen intent）锁屏直达响铃页；通知带「贪睡 5 分钟」「关闭」动作；
+ *  - 循环播放系统默认闹铃 + 振动，最长 1 分钟自动停止（防耗电/扰人，2026-10-13 用户定调）；
+ *  - 满屏通知（full-screen intent）锁屏直达响铃页；通知带「贪睡 10 分钟」「关闭」动作；
  *  - 服务端 alarm.trigger 下发的 TTS base64（二阶段语音叫醒）优先于系统铃声播放。
  *
  * 用户动作经 AlarmRingActionsReceiver 转回 Dart 侧 AlarmEngine.snooze/dismiss
@@ -33,7 +33,7 @@ class AlarmRingService : Service() {
         private const val CHANNEL_RING = "alarm_ring"
         private const val CHANNEL_FALLBACK = "alarm_fallback"
         private const val NOTIFICATION_ID_BASE = 47_000
-        private const val MAX_RING_MS = 5 * 60_000L
+        private const val MAX_RING_MS = 60_000L // 最长响 1 分钟自动停（2026-10-13 用户定调）
         private val ringing = ConcurrentHashMap<String, AlarmRingService>()
 
         fun start(context: Context, alarmId: String, label: String, ttsBase64: String?) {
@@ -113,7 +113,7 @@ class AlarmRingService : Service() {
                 .setCategory(Notification.CATEGORY_ALARM)
                 .setOngoing(true)
                 .setAutoCancel(false)
-                .addAction(android.R.drawable.ic_menu_recent_history, "贪睡 5 分钟", snoozePi)
+                .addAction(android.R.drawable.ic_menu_recent_history, "贪睡 10 分钟", snoozePi)
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "关闭", stopPi)
                 .apply {
                     if (fullScreen && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {

@@ -94,16 +94,6 @@ bool FlutterWindow::OnCreate() {
         HandleIncomingCallMethodCall(call, std::move(result));
       });
 
-  desktop_notification_channel_ = std::make_unique<
-      flutter::MethodChannel<flutter::EncodableValue>>(
-      flutter_controller_->engine()->messenger(), "pai/desktop_notification",
-      &flutter::StandardMethodCodec::GetInstance());
-
-  desktop_notification_channel_->SetMethodCallHandler(
-      [this](const auto& call, auto result) {
-        HandleDesktopNotificationMethodCall(call, std::move(result));
-      });
-
   // pai/glass_notify —— 桌面右上角玻璃通知栈（主动性消息专属）
   glass_notify_channel_ = std::make_unique<
       flutter::MethodChannel<flutter::EncodableValue>>(
@@ -332,8 +322,6 @@ double GetEncodableDouble(const flutter::EncodableMap* args,
 void FlutterWindow::OnDestroy() {
   incoming_call_window_.reset();
   incoming_call_channel_.reset();
-  desktop_notification_window_.reset();
-  desktop_notification_channel_.reset();
   glass_notify_window_.reset();
   glass_notify_channel_.reset();
   connected_call_window_.reset();
@@ -712,67 +700,6 @@ void FlutterWindow::ReportIncomingCallEvent(const std::string& event,
   incoming_call_channel_->InvokeMethod(
       "onNativeEvent",
       std::make_unique<flutter::EncodableValue>(payload));
-}
-
-void FlutterWindow::HandleDesktopNotificationMethodCall(
-    const flutter::MethodCall<flutter::EncodableValue>& call,
-    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
-  const std::string& method = call.method_name();
-
-  if (method == "show") {
-    std::string title;
-    std::string message;
-    std::string priority = "normal";
-    std::string confirm_text = "我知道了";
-    int auto_close_ms = 0;
-
-    // 注：Dart 端可能仍下发 showConfirmButton（稍后按钮已移除），直接忽略
-    if (auto* args = std::get_if<flutter::EncodableMap>(call.arguments())) {
-      title = GetEncodableString(args, "title");
-      message = GetEncodableString(args, "message");
-      priority = GetEncodableString(args, "priority", priority);
-      confirm_text = GetEncodableString(args, "confirmText", confirm_text);
-      auto_close_ms = GetEncodableInt(args, "autoCloseMs", auto_close_ms);
-    }
-
-    if (!desktop_notification_window_) {
-      desktop_notification_window_ = std::make_unique<DesktopNotificationWindow>();
-      desktop_notification_window_->SetCallbacks(
-          [this]() { ReportDesktopNotificationEvent("confirm"); },
-          [this]() { ReportDesktopNotificationEvent("dismiss"); },
-          [this]() { ReportDesktopNotificationEvent("timeout"); });
-    }
-
-    desktop_notification_window_->Show(title, message, priority, confirm_text,
-                                       auto_close_ms);
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "hide") {
-    if (desktop_notification_window_) desktop_notification_window_->Hide();
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "isVisible") {
-    const bool visible = desktop_notification_window_ &&
-                         desktop_notification_window_->IsVisible();
-    result->Success(flutter::EncodableValue(visible));
-    return;
-  }
-
-  result->NotImplemented();
-}
-
-void FlutterWindow::ReportDesktopNotificationEvent(const std::string& event) {
-  if (!desktop_notification_channel_) return;
-  flutter::EncodableMap payload;
-  payload[flutter::EncodableValue("event")] = flutter::EncodableValue(event);
-  payload[flutter::EncodableValue("timestampMs")] = flutter::EncodableValue(
-      static_cast<int64_t>(GetTickCount64()));
-  desktop_notification_channel_->InvokeMethod(
-      "onNativeEvent", std::make_unique<flutter::EncodableValue>(payload));
 }
 
 void FlutterWindow::HandleGlassNotifyMethodCall(

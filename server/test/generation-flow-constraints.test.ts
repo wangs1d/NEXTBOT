@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { isDirectFactQuery } from "../src/agent/direct-fact-query.js";
-import { AssistantRewriterService } from "../src/services/assistant-rewriter.js";
 import { UserPersonalizationService } from "../src/services/user-personalization/user-personalization-service.js";
 
 test("direct fact query detection stays narrow to factual lookups", () => {
@@ -80,21 +79,5 @@ test("personalization projects user register as observation data, not coaching",
   assert.equal(slice.toneGuidance?.includes("long-term behavior tendency"), false);
 });
 
-test("rewriter skips direct fact query turns instead of adding extra flavor", async () => {
-  let called = 0;
-  const provider = {
-    isEnabled() {
-      return true;
-    },
-    async streamCompletion() {
-      called += 1;
-    },
-  };
-
-  const service = new AssistantRewriterService(provider as any);
-  const base = "还没有确切消息。昨晚她还在活动现场，所以目前更像还在那边。";
-  const output = await service.rewriteIfNeeded("她现在在哪？有没有确切消息", base);
-
-  assert.equal(output, base);
-  assert.equal(called, 0);
-});
+// 2026-10-13 根修：AssistantRewriterService（真人腔 LLM 改写器）已整体删除——
+// 「已流式送出的文本即最终稿」，出口不再做任何二次改稿（含直答事实轮豁免逻辑）。
