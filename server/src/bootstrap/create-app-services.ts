@@ -146,6 +146,7 @@ import { HookBus, setHookBus } from "../services/hooks/index.js";
 import { WebhookService } from "../services/webhook/index.js";
 import { AgentPairingService } from "../services/agent-pairing-service.js";
 import { AgentRelayService } from "../services/agent-relay-service.js";
+import { FriendMessageService } from "../services/friend-message-service.js";
 import { AuditService } from "../services/audit-service.js";
 import { EmailRegistrationService } from "../services/email-registration-service.js";
 import { InfoHubService } from "../services/info-hub-service.js";
@@ -1106,6 +1107,15 @@ export async function createAppServices(): Promise<AppServices> {
   const betaWaitlistService = new BetaWaitlistService();
   const betaInviteService = new BetaInviteService();
   const friendService = new FriendService();
+  // 站内好友消息统一投递内核（2026-10-15 闭环）：agent.send_to_peer / messages.reply
+  // (friend) / HTTP /friends/messages 三出口共用；hub 持久落库解决离线必达。
+  const friendMessageService = new FriendMessageService({
+    hub: messageHubService,
+    relay: agentRelayService,
+    wsRegistry: wsConnectionRegistry,
+    accounts: agentAccountService,
+    friends: friendService,
+  });
   // 财务入站记账服务（构造提前到 skill 注册之前；LLM/推送回调由装配层后置注入）。
   const financeIngestService = new FinanceIngestService({
     financeDeepService,
@@ -1134,8 +1144,7 @@ export async function createAppServices(): Promise<AppServices> {
     registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
     registerAgentRelayTools(
       toolRegistry,
-      agentRelayService,
-      wsConnectionRegistry,
+      friendMessageService,
       agentPairingService,
       agentAccountService,
     );
@@ -4394,7 +4403,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   messageBridgeService = new MessageBridgeService(runtime, messageHubService);
 
-  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime });
+  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime, friendMessages: friendMessageService });
 
   registerEmbodimentTools(toolRegistry, {
     wsRegistry: wsConnectionRegistry,
@@ -6126,37 +6135,25 @@ export async function createAppServices(): Promise<AppServices> {
         ? "critical"
         : undefined,
   });
-  messageHubService.onInbound = (input, message) => {
-    // 生活消息入站 → 灵动岛即时告知（2026-10-05 定调：消息类统一上岛，
-    // 岛=告知、弹窗=决策）。显示行取消息首行（邮件=主题行、服务通知=正文首行，
-    // 都是「事情本身」）；仅判重后的新消息走到这里（ingestInbound 去重不触发）。
-    const hubIslandLine = (message.text
-      .split("\n")
-      .map((l) => l.trim())
-      .find(Boolean) ?? "").slice(0, 40);
-    wsConnectionRegistry.trySend(
-      input.actorId,
-      JSON.stringify({
-        type: ServerEventType.HubMessageArrived,
-        payload: {
-          platform: input.platform,
-          title: input.title ?? "",
-          sender: input.senderName ?? input.participantName ?? "",
-          summary: hubIslandLine,
-          importance:
-            (message.meta as { importance?: string } | undefined)?.importance ?? "normal",
-        },
-      }),
-    );
+  messageHubService.onInbound = (input) => {
+    // 消息前端陈列已撤（2026-10-14 定调）：不再每条入站直推 hub.message_arrived
+    // 上岛展示——多数为垃圾消息，打扰体验。消息统一在后台扫描消化：
+    // messageWatchTrigger 识别高价值信号（日程变动等）→ 主动提案链路按价值
+    // 推送；messageFeeder 供传感内核 unread_burst 评估；finance 静默入账。
     messageWatchTrigger.handleInbound(input);
-    // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）
+    // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）。
+    // payload.text 带正文（截 500 字）：SourceStore 按 payload.text 建实体索引，
+    // 消息正文从此参与跨源检索（「提到三亚的所有来源」能命中消息）。
     messageFeeder({
       actorId: input.actorId,
       at: Date.now(),
       fingerprint: `msg:${input.actorId}:${input.platform}:${input.channelId}:${Date.now()}:${input.text.slice(0, 24)}`,
       salience: "low",
       delta: `来自 ${input.participantName || input.senderName || input.title || input.platform} 的新消息`,
-      payload: { sender: input.participantName || input.senderName || input.title || String(input.platform) },
+      payload: {
+        sender: input.participantName || input.senderName || input.title || String(input.platform),
+        text: input.text.slice(0, 500),
+      },
     });
     // 微信支付服务通知 → 零 LLM 解析 → 静默自动入账（只落库不推送，查询走 finance.* 工具）
     void financeIngestService.handleInboundMessage(input).catch(() => {});
@@ -6487,6 +6484,7 @@ export async function createAppServices(): Promise<AppServices> {
     messageBridgeService,
     browserSessionService,
     friendService,
+    friendMessageService,
     companionService,
     runtime,
     wsConnectionRegistry,
@@ -6531,6 +6529,7 @@ export async function createAppServices(): Promise<AppServices> {
     phoneBridgeCoordinator,
     sharedBrowserCoordinator,
     messageHubService,
+    friendMessageService,
     locationCoordinator,
     locationIngest,
     virtualPhoneService,

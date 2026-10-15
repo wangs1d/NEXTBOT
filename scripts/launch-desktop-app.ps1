@@ -20,7 +20,11 @@ function Test-BackendPort {
 }
 
 function Start-App {
-    if (Get-Process -Name "private_ai_agent" -ErrorAction SilentlyContinue) { return }
+    # Zombie guard: a crashed-but-unreaped process object (0 threads, 0 handles)
+    # still matches by name and must not block a fresh launch.
+    $live = Get-Process -Name "private_ai_agent" -ErrorAction SilentlyContinue |
+        Where-Object { $_.Threads.Count -gt 0 }
+    if ($live) { return }
     Start-Process -FilePath $AppExe -WorkingDirectory (Split-Path $AppExe)
 }
 

@@ -1189,6 +1189,15 @@ export class UpstreamSearchService {
     actorId: string,
     limit: number,
   ): Promise<MediaSearchItem[]> {
+    // 来源闸（2026-10-15 同兴山庄实证）：图搜「住宅区/山庄/小区名」高频返回
+    // 百度地图位置截图与图库水印图，转存后顶着 POI 名义展示给用户。三条搜索
+    // 路径（search-api / bing 图片页 / 文章页抠图）统一在此单点拦截。
+    const usable = items.filter((it) => !isBlockedImageSource(it));
+    if (usable.length < items.length) {
+      console.log(`[UpstreamSearch] 图片来源闸拦截 ${items.length - usable.length} 张（地图截图/水印图库）`);
+    }
+    items = usable;
+
     const storage = this.imageStorageService;
     if (!storage) return items.slice(0, limit);
     const out: MediaSearchItem[] = [];
@@ -1245,6 +1254,72 @@ const ARTICLE_FALLBACK_MAX_ARTICLES = 4;
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
   return Math.max(min, Math.min(max, Math.floor(input)));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 图片来源闸（2026-10-15 同兴山庄实证）
+// 图搜「住宅小区/山庄/单位名」高频返回两类垃圾图：地图位置截图（软件生成，
+// 无实拍价值）与图库水印预览图（站标水印+编号）。与旅游封面链的
+// STOCK_WATERMARK_HOST_SUFFIXES（travel-planning-service.ts）同族语义，此处
+// 作用于通用图搜转存链，host 级 + 标题词双闸。
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 地图/位置示意图站：图搜 POI 名高频命中其位置截图页 */
+const MAP_SCREENSHOT_HOST_SUFFIXES = [
+  'map.baidu.com',   // 百度地图（同兴山庄位置截图实证）
+  'map.qq.com',      // 腾讯地图
+  'ditu.amap.com',   // 高德地图
+  'map.amap.com',
+  'autonavi.com',    // 高德图床
+  'bdimg.com',       // 百度地图静态图床
+  'mapbar.com',
+] as const;
+
+/** 图库水印站（与封面链 STOCK_WATERMARK_HOST_SUFFIXES 同族，独立维护防跨模块耦合） */
+const WATERMARK_STOCK_HOST_SUFFIXES = [
+  '699pic.com',      // 摄图网（贵阳封面实证）
+  'nipic.com',       // 昵图网（同兴山庄水印图实证，水印写 www.nipic.cn）
+  'nipic.cn',
+  'vcg.com',         // 视觉中国
+  'gettyimages.com',
+  'ibaotu.com',
+  '51yuansu.com',
+  'gaoding.com',
+  '818ps.com',
+  'photophoto.cn',
+  'quanjing.com',
+  'dfic.cn',         // 东方 IC
+] as const;
+
+/** 标题特征词（软件图/示意图；裸「地图」不收防误杀「地图鱼」等实拍主题） */
+const IMAGE_TITLE_BLOCKED_WORDS = [
+  '百度地图', '高德地图', '腾讯地图', '搜狗地图', '北斗地图',
+  '位置示意图', '卫星地图', '卫星图', '街景地图', '电子地图', '导航地图', '交通地图',
+] as const;
+
+/**
+ * 判定图搜候选是否为垃圾来源（地图截图/水印图库）。
+ * pageUrl / mediaUrl / thumbnailUrl 任一命中黑名单 host 即拒——地图截图常以
+ * 来源页（pageUrl）而非图片直链暴露地图域。
+ */
+function isBlockedImageSource(item: {
+  title?: string;
+  pageUrl?: string;
+  mediaUrl?: string;
+  thumbnailUrl?: string;
+}): boolean {
+  const urls = [item.pageUrl, item.mediaUrl, item.thumbnailUrl]
+    .filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u));
+  for (const u of urls) {
+    try {
+      const host = new URL(u).hostname.toLowerCase();
+      const blocked = [...MAP_SCREENSHOT_HOST_SUFFIXES, ...WATERMARK_STOCK_HOST_SUFFIXES]
+        .some((s) => host === s || host.endsWith(`.${s}`));
+      if (blocked) return true;
+    } catch { /* 非法 URL 不因它拒，交给下载层 */ }
+  }
+  const title = String(item.title ?? '');
+  return IMAGE_TITLE_BLOCKED_WORDS.some((w) => title.includes(w));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

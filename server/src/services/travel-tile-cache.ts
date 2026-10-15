@@ -14,8 +14,9 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-/** 上游域名白名单（后缀匹配） */
-const ALLOWED_HOST_SUFFIXES = ["cartocdn.com", "arcgisonline.com"];
+/** 上游域名白名单（后缀匹配）。is.autonavi.com = 高德栅格瓦片（webrd0X 系），
+ *  2026-10-15 行程底图切高德（位置/POI/中文路名信息更全，暗色化在页面侧做） */
+const ALLOWED_HOST_SUFFIXES = ["cartocdn.com", "arcgisonline.com", "is.autonavi.com"];
 
 /** 改写规则版本（改写 URL 形态变化时 +1，让浏览器旧缓存自然失效） */
 const REWRITE_VERSION = 2;

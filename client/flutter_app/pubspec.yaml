@@ -49,6 +49,11 @@ dev_dependencies:
 dependency_overrides:
   audioplayers_windows:
     path: third_party/audioplayers_windows-4.4.1
+  # webview_windows 0.4.0 原生 SendScroll 把滚轮事件坐标硬编码 (0,0)（页面
+  # 左上角），滚轮永远打在标题栏上而非光标处 → MapLibre 等页面滚轮缩放/内层
+  # 滚动全失效。fork 一行修复：WHEEL 事件改用 last_cursor_pos_（光标实时位置）。
+  webview_windows:
+    path: third_party/webview_windows-0.4.0
 
 flutter:
   uses-material-design: true

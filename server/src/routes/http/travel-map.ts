@@ -1,8 +1,10 @@
-import { randomUUID } from "node:crypto";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve, dirname } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
+import { fetchText, fetchBingPhotoUrls } from "../../skills/travel-planning/bing-photos.js";
+import { travelMediaStore, type PoiMediaType } from "../../skills/travel-planning/travel-media-store.js";
 
 /**
  * 行程规划浏览器页面路由（「行程卡 → 进入界面」链路）。
@@ -191,9 +193,56 @@ const ROUTE_LEG_CACHE = new Map<
   { at: number; leg: Omit<RouteLegResult, "index"> }
 >();
 const ROUTE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const ROUTE_CIRCUIT_MS = 10 * 60 * 1000;
-/** 熔断到期时刻（0 = 通路） */
+
+// ── 路线腿磁盘缓存（2026-10-15）──
+// 痛点：腿几何只存内存（24h），进程重启全丢；OSRM 公共节点偶发超时会触发
+// 10min 熔断，期间用户看到的全是直线降级。路线几何基本不变，取到一次就该
+// 永久用——落盘后重启/断网/熔断都不再退化直线。
+const ROUTE_DISK_DIR = resolve(
+  process.env.TRAVEL_ROUTE_CACHE_DIR || join(process.cwd(), "data", "route-cache"),
+);
+/** 磁盘新鲜期：路网月级变化，30 天足够；过期先回旧数据再后台刷新（SWR） */
+const ROUTE_DISK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** 单段上游超时（OSRM 健康时 <1s，10s 已是 10 倍冗余） */
+const ROUTE_UPSTREAM_TIMEOUT_MS = 10_000;
+/** 网络类失败重试次数（单次抖动直接被重试吸收，不再一棍子熔断） */
+const ROUTE_RETRY_ATTEMPTS = 2;
+/** 熔断：连续 ≥2 次重试后仍网络失败才开，窗口 90s（原「一次失败锁 10min」太狠） */
+const ROUTE_CIRCUIT_MS = 90 * 1000;
+const ROUTE_CIRCUIT_AFTER = 2;
+/** 熔断到期时刻（0 = 通路）与连续失败计数 */
 let routeCircuitOpenUntil = 0;
+let routeConsecutiveFailures = 0;
+
+function routeDiskPathOf(key: string): string {
+  const sha = createHash("sha1").update(key).digest("hex");
+  return join(ROUTE_DISK_DIR, sha.slice(0, 2), `${sha.slice(2)}.json`);
+}
+
+function readRouteDisk(key: string): { leg: Omit<RouteLegResult, "index">; at: number } | null {
+  try {
+    const file = routeDiskPathOf(key);
+    if (!existsSync(file)) return null;
+    const parsed = JSON.parse(readFileSync(file, "utf-8")) as {
+      leg?: Omit<RouteLegResult, "index">;
+      createdAt?: number;
+    };
+    if (!parsed.leg || !parsed.createdAt) return null;
+    return { leg: parsed.leg, at: parsed.createdAt };
+  } catch {
+    return null;
+  }
+}
+
+function writeRouteDisk(key: string, leg: Omit<RouteLegResult, "index">): void {
+  try {
+    const file = routeDiskPathOf(key);
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, JSON.stringify({ leg, createdAt: Date.now() }), "utf-8");
+  } catch {
+    // 落盘失败不影响响应（内存仍有）
+  }
+}
 
 function routeUpstreamOf(profile: RouteProfile): string {
   if (profile === "drive") {
@@ -247,63 +296,94 @@ async function fetchRouteLeg(
   const hit = ROUTE_LEG_CACHE.get(key);
   if (hit && now - hit.at < ROUTE_CACHE_TTL_MS) return hit.leg;
 
-  if (now < routeCircuitOpenUntil) return null;
-
-  const base = routeUpstreamOf(profile);
-  const url =
-    `${base}/route/v1/${ROUTE_PROFILE_PATH[profile]}/${from.lng},${from.lat};${to.lng},${to.lat}` +
-    `?overview=simplified&geometries=geojson&steps=false&alternatives=false`;
-
-  let leg: Omit<RouteLegResult, "index"> | null = null;
-  try {
-    const res = await fetch(url, {
-      headers: { Accept: "application/json" },
-      signal: AbortSignal.timeout(8000),
-    });
-    if (res.ok) {
-      const json = (await res.json()) as {
-        routes?: Array<{
-          distance?: number;
-          duration?: number;
-          geometry?: { coordinates?: unknown };
-        }>;
-      };
-      const r = json.routes?.[0];
-      const raw = r?.geometry?.coordinates;
-      if (r && Array.isArray(raw)) {
-        const coords = raw.filter(
-          (c): c is [number, number] =>
-            Array.isArray(c) &&
-            c.length >= 2 &&
-            Number.isFinite(c[0] as number) &&
-            Number.isFinite(c[1] as number),
-        );
-        if (coords.length >= 2) {
-          leg = {
-            mode: profile,
-            distanceKm: Math.round(((r.distance ?? 0) / 1000) * 10) / 10,
-            durationMin: Math.max(1, Math.round((r.duration ?? 0) / 60)),
-            coordinates: coords,
-          };
-        }
-      }
-    } else if (res.status >= 500 || res.status === 429) {
-      // 上游过载/限流：短暂熔断，别把这一批剩下的段全打上去
-      routeCircuitOpenUntil = now + ROUTE_CIRCUIT_MS;
-    }
-  } catch {
-    // 网络不可达/超时：熔断（离线环境下列表页仍可用直线降级）
-    routeCircuitOpenUntil = now + ROUTE_CIRCUIT_MS;
+  // 磁盘新鲜命中 → 直接回（重开行程/重启进程不再打外网）
+  const disk = readRouteDisk(key);
+  if (disk && now - disk.at < ROUTE_DISK_TTL_MS) {
+    ROUTE_LEG_CACHE.set(key, { at: now, leg: disk.leg });
+    return disk.leg;
   }
 
+  if (now < routeCircuitOpenUntil) return null;
+
+  const leg = await fetchRouteLegUpstream(from, to, profile);
   if (leg) {
+    routeConsecutiveFailures = 0;
     ROUTE_LEG_CACHE.set(key, { at: now, leg });
     if (ROUTE_LEG_CACHE.size > 512) {
       const oldest = ROUTE_LEG_CACHE.keys().next().value;
       if (oldest != null) ROUTE_LEG_CACHE.delete(oldest);
     }
+    writeRouteDisk(key, leg);
+    return leg;
   }
-  return leg;
+
+  // 上游失败但有过期磁盘数据 → SWR 先回旧路网（几何月级不变，旧数据可用）
+  if (disk) return disk.leg;
+  return null;
+}
+
+/** 打上游（带重试与熔断计数），成功/失败都不碰缓存层 */
+async function fetchRouteLegUpstream(
+  from: RouteLatLng,
+  to: RouteLatLng,
+  profile: RouteProfile,
+): Promise<Omit<RouteLegResult, "index"> | null> {
+  const base = routeUpstreamOf(profile);
+  const url =
+    `${base}/route/v1/${ROUTE_PROFILE_PATH[profile]}/${from.lng},${from.lat};${to.lng},${to.lat}` +
+    `?overview=simplified&geometries=geojson&steps=false&alternatives=false`;
+
+  for (let attempt = 0; attempt < ROUTE_RETRY_ATTEMPTS; attempt++) {
+    try {
+      const res = await fetch(url, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(ROUTE_UPSTREAM_TIMEOUT_MS),
+      });
+      if (res.ok) {
+        const json = (await res.json()) as {
+          routes?: Array<{
+            distance?: number;
+            duration?: number;
+            geometry?: { coordinates?: unknown };
+          }>;
+        };
+        const r = json.routes?.[0];
+        const raw = r?.geometry?.coordinates;
+        if (r && Array.isArray(raw)) {
+          const coords = raw.filter(
+            (c): c is [number, number] =>
+              Array.isArray(c) &&
+              c.length >= 2 &&
+              Number.isFinite(c[0] as number) &&
+              Number.isFinite(c[1] as number),
+          );
+          if (coords.length >= 2) {
+            return {
+              mode: profile,
+              distanceKm: Math.round(((r.distance ?? 0) / 1000) * 10) / 10,
+              durationMin: Math.max(1, Math.round((r.duration ?? 0) / 60)),
+              coordinates: coords,
+            };
+          }
+        }
+        return null; // 上游 2xx 但无可路由几何（如点在水里）：不重试、不计熔断
+      }
+      if (res.status >= 500 || res.status === 429) {
+        // 上游过载/限流：短暂熔断，别把这一批剩下的段全打上去
+        routeCircuitOpenUntil = Date.now() + ROUTE_CIRCUIT_MS;
+        return null;
+      }
+      return null; // 4xx 等：请求本身有问题，重试无意义
+    } catch {
+      // 网络不可达/超时：重试一次；连续多次失败才熔断（离线时仍走直线降级）
+      routeConsecutiveFailures++;
+      if (routeConsecutiveFailures >= ROUTE_CIRCUIT_AFTER) {
+        routeCircuitOpenUntil = Date.now() + ROUTE_CIRCUIT_MS;
+        return null;
+      }
+    }
+  }
+  return null;
 }
 
 /** 有界并发（OSRM 公共节点对突发并发不友好，3 路足够把 12 段压进数秒） */
@@ -414,6 +494,39 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     reply.header("Cache-Control", "no-cache");
     reply.type("application/json");
     return style.body;
+  });
+
+  /**
+   * GET /travel-basemap/style/amap-dark — 高德栅格底图样式（GCJ-02 网格）。
+   *
+   * 高德瓦片的位置/POI/中文路名信息远全于 Carto 矢量，但官方无暗色栅格样式；
+   * 暗色观感由 desktop.html 对地图 canvas 做 CSS 反色（invert + hue-rotate）
+   * 得到，路线图层颜色因此在页面里做「反色预补偿」（画黑 → 显白）。
+   * 数据侧仍统一 WGS-84：站点/路线几何由页面在显示边界做 wgs84→gcj02 转换
+   * （OSRM 查询参数保持 WGS-84，/travel-route 不感知坐标系）。
+   * 瓦片经 /travel-basemap/fetch 白名单代理（is.autonavi.com 已放行）+ 磁盘缓存。
+   */
+  app.get("/travel-basemap/style/amap-dark", async (req, reply) => {
+    const origin = originOf(req);
+    const tiles = ["01", "02", "03", "04"].map(
+      (s) =>
+        `${origin}/travel-basemap/fetch?u=${encodeURIComponent(
+          `https://webrd${s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}`,
+        )}`,
+    );
+    reply.header("Cache-Control", "no-cache");
+    reply.type("application/json");
+    return {
+      version: 8,
+      name: "amap-dark",
+      sources: {
+        amap: { type: "raster", tiles, tileSize: 256, maxzoom: 18 },
+      },
+      layers: [
+        { id: "bg", type: "background", paint: { "background-color": "#0B1220" } },
+        { id: "amap", type: "raster", source: "amap", paint: { "raster-fade-duration": 180 } },
+      ],
+    };
   });
 
   /** GET /travel-basemap/fetch?u= — 白名单上游资源代理（磁盘缓存 + SWR）。
@@ -600,31 +713,45 @@ interface PoiLiveDetails {
 }
 
 const poiCache = new Map<string, { at: number; data: PoiLiveDetails }>();
-const POI_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+/** 缓存 7 天（照片/电话/官网低频变化）+ 磁盘持久化：进程重启不再全量重抓 */
+const POI_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const POI_DISK_FILE = resolve(
+  process.env.TRAVEL_POI_CACHE_FILE || join(process.cwd(), "data", "travel-cache", "poi-live-cache.json"),
+);
 
-const BROWSER_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
-
-async function fetchText(url: string, init: RequestInit = {}, timeoutMs = 9000): Promise<string> {
-  const res = await fetch(url, {
-    ...init,
-    headers: { "User-Agent": BROWSER_UA, ...(init.headers as Record<string, string>) },
-    signal: AbortSignal.timeout(timeoutMs),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.text();
+function loadPoiCacheDisk(): void {
+  try {
+    if (!existsSync(POI_DISK_FILE)) return;
+    const parsed = JSON.parse(readFileSync(POI_DISK_FILE, "utf-8")) as Record<
+      string,
+      { at: number; data: PoiLiveDetails }
+    >;
+    const now = Date.now();
+    for (const [k, v] of Object.entries(parsed)) {
+      if (v && typeof v.at === "number" && v.data && now - v.at < POI_CACHE_TTL_MS) {
+        poiCache.set(k, v);
+      }
+    }
+  } catch {
+    /* 损坏缓存当不存在 */
+  }
 }
 
-/** 必应图片：抓取该地点名称的真实照片直链（murl 字段） */
-async function fetchBingPhotos(name: string): Promise<PoiLiveDetails["photos"]> {
-  const html = await fetchText(
-    `https://cn.bing.com/images/async?q=${encodeURIComponent(name)}&first=0&count=8&mmasync=1`,
-  );
-  const decoded = html.replace(/&quot;/g, '"');
-  const urls = [...decoded.matchAll(/"murl":"(https?:\/\/[^"]+)"/g)].map((m) => m[1]);
-  const unique = [...new Set(urls)].slice(0, 6);
-  if (!unique.length) return undefined;
-  return unique.map((full) => ({ thumb: full, full }));
+let poiDiskSaveTimer: ReturnType<typeof setTimeout> | null = null;
+function savePoiCacheDisk(): void {
+  // 防抖 2s：页面 enrichLive 一次会连发多个 POI 请求
+  if (poiDiskSaveTimer) return;
+  poiDiskSaveTimer = setTimeout(() => {
+    poiDiskSaveTimer = null;
+    try {
+      mkdirSync(dirname(POI_DISK_FILE), { recursive: true });
+      const out: Record<string, { at: number; data: PoiLiveDetails }> = {};
+      for (const [k, v] of poiCache) out[k] = v;
+      writeFileSync(POI_DISK_FILE, JSON.stringify(out), "utf-8");
+    } catch {
+      /* 写失败不影响主流程（内存仍有） */
+    }
+  }, 2000);
 }
 
 interface OverpassElement {
@@ -652,7 +779,7 @@ async function fetchOverpass(query: string): Promise<OverpassElement[]> {
   let lastErr: unknown = null;
   for (const mirror of mirrors) {
     try {
-      const text = await fetchText(`${mirror}?data=${encodeURIComponent(query)}`, {}, 25000);
+      const text = await fetchText(`${mirror}?data=${encodeURIComponent(query)}`, 25000);
       const data = JSON.parse(text) as { elements?: OverpassElement[] };
       return data.elements ?? [];
     } catch (e: unknown) {
@@ -703,15 +830,32 @@ async function fetchOsmContact(
   return Object.keys(contact).length ? contact : undefined;
 }
 
-export function registerPoiDetailsRoute(app: FastifyInstance): void {
+/**
+ * 2026-10-15：高德实拍图整批退役（商家门脸/位置示意图观感差），原
+ * fetchAmapPoiPhotos 已删除，POI 配图统一走 web 图搜（search image 端口
+ * → 必应直抓），与规划链 fetchRealImages 同底座。
+ */
+
+export function registerPoiDetailsRoute(
+  app: FastifyInstance,
+  deps?: { searchImages?: (query: string, limit?: number) => Promise<string[]> },
+): void {
+  loadPoiCacheDisk();
   app.get("/travel-poi/details", async (req, reply) => {
-    const q = req.query as { name?: string; lat?: string; lng?: string };
+    const q = req.query as { name?: string; lat?: string; lng?: string; type?: string; photos?: string };
     const name = (q.name ?? "").trim();
     const lat = Number(q.lat);
     const lng = Number(q.lng);
     if (!name) return reply.code(400).send({ error: "name is required" });
+    // 可选 type（attraction|hotel|restaurant）：带上才能把补到的照片种进媒体库
+    // （按 type+name 归档），下次行程装配/读取装配直接命中本地资产。
+    const mediaType = (["attraction", "hotel", "restaurant"] as const).find((t) => t === q.type);
+    const coords =
+      Number.isFinite(lat) && Number.isFinite(lng) ? { latitude: lat, longitude: lng } : undefined;
 
-    const cacheKey = `${name}@${Number.isFinite(lat) ? lat.toFixed(4) : ""},${Number.isFinite(lng) ? lng.toFixed(4) : ""}`;
+    // v2（2026-10-15）：高德实拍图退役、配图改走 web 图搜——旧 v1 磁盘缓存里
+    // 烤着高德图 URL，升版本号让旧条目自然过期，不做迁移。
+    const cacheKey = `v2:${name}@${Number.isFinite(lat) ? lat.toFixed(4) : ""},${Number.isFinite(lng) ? lng.toFixed(4) : ""}`;
     const hit = poiCache.get(cacheKey);
     const now = Date.now();
     if (hit && now - hit.at < POI_CACHE_TTL_MS) {
@@ -720,15 +864,59 @@ export function registerPoiDetailsRoute(app: FastifyInstance): void {
 
     const result: PoiLiveDetails = {};
     const errors: string[] = [];
+    // photos=1 快速通道（桌面页专用）：只要照片，不等 Overpass 电话/官网——
+    // 那路 25s 超时×3 镜像的顺序回退会把照片展示一起拖住，而桌面页根本
+    // 不消费 contact。桌面页 enrichLive 已带 photos=1。
+    const photosOnly = q.photos === "1";
+    // 配图限定词：通用名 POI 不补类型词时图搜会返回不相关实拍（用户实测：
+    // 「同兴山庄」配出停车场）。名称已含该词时不重复拼。
+    const typeLabel =
+      mediaType === "hotel" ? "酒店" : mediaType === "restaurant" ? "美食" : "景点";
+    const photoQuery = name.includes(typeLabel) ? name : `${name} ${typeLabel}`;
+    // 照片主源（2026-10-15 定调：高德实拍图退役，配图统一走 web 图搜）：
+    // 1) agent 的 search image 端口（search-api 优先、cn.bing.com 兜底，带来源闸，
+    //    与规划配图 fetchRealImages 同底座）。查询词带类型限定词（「景点/酒店/
+    //    美食」），通用名 POI 裸名图搜会配出不相关实拍。
+    // 2) 端口未注入/失败时必应直抓。
+    const resolvePhotoUrls = async (): Promise<string[]> => {
+      if (deps?.searchImages) {
+        try {
+          const viaPort = await deps.searchImages(photoQuery, 4);
+          if (viaPort.length) return viaPort;
+        } catch {
+          /* 端口失败 → 必应兜底 */
+        }
+      }
+      return fetchBingPhotoUrls(photoQuery);
+    };
     const tasks = [
-      fetchBingPhotos(name)
-        .then((photos) => {
-          result.photos = photos;
+      resolvePhotoUrls()
+        .then(async (urls) => {
+          if (!urls.length) return;
+          let first = urls[0]!;
+          if (mediaType) {
+            // 补图前移：首图落地本机资产（内容寻址、immutable 盘存）再返回——
+            // 页面补图拿到的是 /travel/media/assets 本地路径而非任意外站图床直链，
+            // 弱网也能秒出；顺手种进媒体库，后续行程装配/读取零抓取。
+            // 下载失败时 localizeAndAttach 保留外链兜底，行为与从前一致。
+            try {
+              const localized = await travelMediaStore.localizeAndAttach(
+                mediaType,
+                name,
+                urls.slice(0, 1),
+                coords,
+              );
+              first = localized[0] ?? travelMediaStore.imageUrls(mediaType, name)[0] ?? first;
+            } catch {
+              /* 本地化失败 → 保持外链，与从前一致 */
+            }
+          }
+          result.photos = [first, ...urls.slice(1)].map((full) => ({ thumb: full, full }));
         })
         .catch((e: unknown) => {
           errors.push(`photos: ${e instanceof Error ? e.message : e}`);
         }),
-      Number.isFinite(lat) && Number.isFinite(lng)
+      !photosOnly && Number.isFinite(lat) && Number.isFinite(lng)
         ? fetchOsmContact(name, lat, lng)
             .then((contact) => {
               result.contact = contact;
@@ -746,6 +934,7 @@ export function registerPoiDetailsRoute(app: FastifyInstance): void {
       const oldest = poiCache.keys().next().value;
       if (oldest != null) poiCache.delete(oldest);
     }
+    savePoiCacheDisk();
     return reply.send(result);
   });
 }

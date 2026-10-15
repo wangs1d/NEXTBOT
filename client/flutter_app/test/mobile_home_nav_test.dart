@@ -83,16 +83,21 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
-      const MaterialApp(home: MobileHomePage(initialTabIndex: 2)),
+      // onLogout 必传：null 时「我的」页隐藏退出登录项（登录门禁在根组件）
+      MaterialApp(home: MobileHomePage(initialTabIndex: 2, onLogout: () {})),
     );
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
-    expect(find.text("每日简报"), findsOneWidget);
-    expect(find.text("邮箱"), findsOneWidget);
-    expect(find.text("消息中心"), findsOneWidget);
-    expect(find.text("设备"), findsOneWidget);
-    expect(find.text("审批"), findsOneWidget);
-    expect(find.text("模型服务"), findsOneWidget);
+    // 已裁撤项不再出现（每日简报/设备/审批为内测裁撤，模型服务更名模型目录）
+    expect(find.text("每日简报"), findsNothing);
+    // 邮箱/消息中心入口已删除（2026-10-14）：消息统一后台扫描按价值主动推送
+    expect(find.text("邮箱"), findsNothing);
+    expect(find.text("消息中心"), findsNothing);
+    expect(find.text("设备"), findsNothing);
+    expect(find.text("审批"), findsNothing);
+    expect(find.text("模型服务"), findsNothing);
+    expect(find.text("服务接入"), findsOneWidget);
+    expect(find.text("模型目录"), findsOneWidget);
     expect(find.text("帮助与反馈"), findsOneWidget);
     expect(find.text("退出登录"), findsOneWidget);
     // 连接状态行(测试环境 WS 连不上 → 未连接)

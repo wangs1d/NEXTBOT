@@ -7,10 +7,7 @@ import "package:image_picker/image_picker.dart";
 import "../core/config/api_config.dart";
 import "../core/presentation/user_avatar.dart";
 import "../core/services/user_avatar_api.dart";
-import "../core/services/world_api_client.dart";
 import "../features/help/feedback_dialog.dart";
-import "../features/mailbox/mailbox_page.dart";
-import "../features/mailbox/message_hub_page.dart";
 import "mobile_chat_controller.dart";
 import "mobile_model_catalog_page.dart";
 import "mobile_service_access_page.dart";
@@ -19,15 +16,16 @@ import "mobile_theme.dart";
 /// 手机端「我的」页:全功能二级菜单聚合。
 ///
 /// - 顶部账号卡片：头像(点击可设置) + 名称(与桌面端同源：邮箱前缀) + 实时连接状态
-/// - 功能：邮箱 / 消息中心 / 模型目录(只读) / 服务接入(内测 byok:模型+TTS 密钥)
+/// - 功能：模型目录(只读) / 服务接入(内测 byok:模型+TTS 密钥)
 /// - 设置：主题(亮 / 暗 / 跟随系统)、帮助与反馈
 /// - 账号：退出登录
+/// （邮箱/消息中心入口已删除（2026-10-14）：消息统一后台扫描，agent 判定
+///   有价值后才主动推送，不再提供前端陈列入口）
 /// （每日简报/设备/审批/购物目录已按内测范围裁撤，功能面保留在桌面端）
 class MobileProfilePage extends StatefulWidget {
   const MobileProfilePage({
     super.key,
     required this.chatController,
-    required this.worldApi,
     this.themeMode,
     this.onThemeModeChanged,
     this.onLogout,
@@ -35,9 +33,6 @@ class MobileProfilePage extends StatefulWidget {
 
   /// 共享对话控制器(连接状态展示 + WS 服务复用)。
   final MobileChatController chatController;
-
-  /// 世界 API(邮箱/消息中心与桌面端同源)。
-  final WorldApiClient worldApi;
 
   /// 当前主题模式(null 时隐藏主题设置行,如嵌入测试)。
   final ThemeMode? themeMode;
@@ -172,21 +167,6 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _GroupLabel(label: "功能"),
           _SectionCard(
             children: [
-              _ListRow(
-                leading: Icon(Icons.mail_outline, color: p.textSecondary, size: 22),
-                title: "邮箱",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(
-                    MailboxPage(api: widget.worldApi, ws: widget.chatController.service), "邮箱"),
-              ),
-              _divider(context),
-              _ListRow(
-                leading: Icon(Icons.forum_outlined, color: p.textSecondary, size: 22),
-                title: "消息中心",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(MessageHubPage(api: widget.worldApi), "消息中心"),
-              ),
-              _divider(context),
               _ListRow(
                 leading: Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
                 title: "服务接入",

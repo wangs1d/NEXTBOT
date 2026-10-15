@@ -32,8 +32,9 @@ import "mobile_ui/mobile_theme.dart";
 /// 全链按该 userId 落库，与桌面端登录同一账号即共享全部数据。已登录会话
 /// 读盘恢复（account_session.json），退出登录回到登录页。
 ///
-/// 底部导航：「对话」 / 「日程」 / 「我的」(邮箱、消息中心、服务接入、
-/// 模型目录、帮助反馈、主题、退出登录)。功能与桌面端同源同数据,详见 mobile_home.dart。
+/// 底部导航：「对话」 / 「日程」 / 「我的」(服务接入、模型目录、帮助反馈、
+/// 主题、退出登录；邮箱/消息中心入口已删除——消息统一后台扫描按价值主动推送)。
+/// 功能与桌面端同源同数据,详见 mobile_home.dart。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
   runApp(const MobileApp());

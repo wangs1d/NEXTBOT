@@ -37,6 +37,9 @@
  *   npm run dev:desktop -- --restore-kernel  把产物 kernel 还原成出厂版本
  *   常驻交互：回车 = 立即热重载，r = 重启应用（保留已有改动），q = 退出
  *
+ * 关键保证：脚本启动（非依附）与重启进程前都会先增量编译当前源码再落盘，
+ *   所以「脚本没在跑时改的代码」在下次启动/重启时也会生效（重启 = 最新代码）。
+ *
  * 产物/状态都在 build/hot-reload/（随 build/ 一起被 git 忽略）。
  */
 import { spawn } from 'node:child_process';
@@ -439,16 +442,24 @@ async function launchAndWait({ failFast = false } = {}) {
   throw new Error(`${BOOT_TIMEOUT_MS / 1000}s 内没等到 VM Service，可能启动失败`);
 }
 
-/** 重启进程：先把最新 kernel 同步进产物，保证改动不丢。 */
-async function restartApp({ ship = true } = {}) {
-  if (ship) shipChainToBundle();
+/**
+ * 重启进程：先增量编译当前源码、再把最新 kernel 同步进产物，保证「重启 = 最新代码」。
+ * compile=false 仅用于热重载刚编译完的场合（DILL 已是最新，跳过重复编译）。
+ */
+async function restartApp({ compile = true } = {}) {
+  if (compile) {
+    const r = await compileChain('重启前编译');
+    if (r !== 'ok') warn('重启前增量编译失败：按上一版 kernel 重启（本次源码改动可能缺失）');
+  }
+  // 必须先杀再落盘：运行中的 exe 把 kernel_blob.bin 内存映射住，先拷会 UNKNOWN/EPERM。
   await killApp();
+  shipChainToBundle();
   await sleep(400);
   if (!(await backendListening())) {
     warn('本地 runtime（127.0.0.1:3000）没在监听：应用启动后会自己拉起，首次可能要等十几秒');
   }
   let launched = await launchAndWait({ failFast: true });
-  if (!launched && ship && fs.existsSync(KERNEL_BACKUP)) {
+  if (!launched && fs.existsSync(KERNEL_BACKUP)) {
     warn('新 kernel 启动失败，回滚出厂 kernel 再试一次');
     for (const p of BUNDLE_KERNELS) if (fs.existsSync(path.dirname(p))) copyQuiet(KERNEL_BACKUP, p);
     await killApp();
@@ -463,14 +474,23 @@ async function restartApp({ ship = true } = {}) {
 // ---------------------------------------------------------------- 一轮热重载
 
 /**
- * 增量编译 + 推送 VM Service。
- * @returns {'ok'|'compile-error'|'rejected'}
+ * 选增量基线：优先上一条增量链产物，否则出厂 kernel（首次）。
  */
-async function hotReloadOnce(url, reason) {
+function pickBase() {
   const state = loadState();
-  // 基线 = 应用当前在跑的 kernel：优先上一条增量链产物，否则出厂 kernel（首次）。
   const base = state.chainDill && fs.existsSync(state.chainDill) ? state.chainDill : BUNDLE_KERNELS[0];
   if (!fs.existsSync(base)) throw new Error(`找不到增量基线 kernel：${base}`);
+  return base;
+}
+
+/**
+ * 把当前源码增量编译成新链头 DILL（不推送）。
+ * 编译产物即时转正并记入状态：即使后续推送/重启失败，
+ * 下一次重启 ship 到产物里的也是这份最新 kernel。
+ * @returns {'ok'|'compile-error'}
+ */
+async function compileChain(reason) {
+  const base = pickBase();
   if (base === BUNDLE_KERNELS[0]) say(`增量基线 = 应用启动 kernel（${mb(fs.statSync(base).size)}）`);
 
   const t0 = Date.now();
@@ -478,13 +498,24 @@ async function hotReloadOnce(url, reason) {
   const res = await compileTo(DILL_NEXT, base);
   if (!res.ok) {
     unlinkQuiet(DILL_NEXT);
-    fail(`增量编译失败（exit=${res.code}），应用保持旧代码、不重启`);
+    fail(`增量编译失败（exit=${res.code}），保留上一版 kernel`);
     if (res.output) console.error(res.output.split(/\r?\n/).slice(0, 40).join('\n'));
     return 'compile-error';
   }
   if (fs.existsSync(DILL)) copyQuiet(DILL, DILL_PREV);
   fs.renameSync(DILL_NEXT, DILL);
+  saveState({ chainDill: DILL });
   say(`增量编译完成 ${mb(res.size)}，用时 ${((Date.now() - t0) / 1000).toFixed(1)}s（触发：${reason}）`);
+  return 'ok';
+}
+
+/**
+ * 增量编译 + 推送 VM Service。
+ * @returns {'ok'|'compile-error'|'rejected'}
+ */
+async function hotReloadOnce(url, reason) {
+  const compiled = await compileChain(reason);
+  if (compiled !== 'ok') return compiled;
 
   const client = new VmClient(wsOf(url));
   try {
@@ -511,7 +542,7 @@ async function hotReloadOnce(url, reason) {
     } catch (e) {
       warn(`reassemble 调用失败（界面可能没立刻刷新）：${e.message}`);
     }
-    saveState({ chainDill: DILL, lastReloadAt: new Date().toISOString() });
+    saveState({ lastReloadAt: new Date().toISOString() });
     return 'ok';
   } finally {
     client.close();
@@ -531,6 +562,7 @@ function printHelp() {
   常驻交互：回车=立即热重载  r=重启应用（保留改动）  q=退出
 
 产物与状态：build/hot-reload/（随 build/ 忽略）
+启动/重启前会先增量编译当前源码：脚本没跑时改过的代码也会生效。
 注意：native / pubspec 改动仍需全量 flutter build windows --debug。`);
 }
 
@@ -558,7 +590,7 @@ async function main() {
   }
   if (!url) {
     if (pids.length > 0) say('检测到应用在跑但不是本脚本接管的（拿不到 VM Service 地址），先停掉重开');
-    const launched = await restartApp({ ship: fs.existsSync(DILL) });
+    const launched = await restartApp();
     url = launched.url;
   }
 
@@ -584,7 +616,7 @@ async function main() {
       const r = await hotReloadOnce(url, reason);
       if (r === 'rejected') {
         warn('热重载被拒 -> 把最新 kernel 同步进产物并重启进程（改动不会丢）');
-        const launched = await restartApp({ ship: true });
+        const launched = await restartApp({ compile: false });
         url = launched.url;
       }
     } catch (e) {
@@ -656,7 +688,7 @@ async function main() {
       }
       running = true;
       try {
-        const launched = await restartApp({ ship: true });
+        const launched = await restartApp();
         url = launched.url;
       } catch (e) {
         fail(`重启失败：${e.message}`);

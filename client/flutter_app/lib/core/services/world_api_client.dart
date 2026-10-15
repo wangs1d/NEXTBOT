@@ -382,6 +382,48 @@ class WorldApiClient {
     return _decode(r);
   }
 
+  /// 好友消息历史（双向，时间正序；hub platform=friend 会话）
+  Future<Map<String, dynamic>> getFriendMessages(String targetActorId, {int? limit}) async {
+    final Map<String, String> query = Map<String, String>.from(ApiConfig.accountAuthQuery);
+    query["targetActorId"] = targetActorId;
+    if (limit != null) query["limit"] = limit.toString();
+    final http.Response r = await http.get(_uri("/friends/messages", query));
+    return _decode(r);
+  }
+
+  /// 好友消息直连发送（好友聊天面板；与 agent.send_to_peer 同一投递内核）
+  Future<Map<String, dynamic>> sendFriendMessage(String toActorId, String text) async {
+    final Map<String, dynamic> body = <String, dynamic>{
+      "toActorId": toActorId,
+      "text": text,
+    };
+    for (final MapEntry<String, String> e in ApiConfig.accountAuthQuery.entries) {
+      body[e.key] = e.value;
+    }
+    final http.Response r = await http.post(
+      _uri("/friends/messages"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
+  /// 好友会话标读（清 hub 未读，重连补投随之停止）
+  Future<Map<String, dynamic>> markFriendMessagesRead(String targetActorId) async {
+    final Map<String, dynamic> body = <String, dynamic>{
+      "targetActorId": targetActorId,
+    };
+    for (final MapEntry<String, String> e in ApiConfig.accountAuthQuery.entries) {
+      body[e.key] = e.value;
+    }
+    final http.Response r = await http.post(
+      _uri("/friends/messages/read"),
+      headers: <String, String>{"Content-Type": "application/json"},
+      body: jsonEncode(body),
+    );
+    return _decode(r);
+  }
+
   Future<Map<String, dynamic>> getMessageConversations({
     String? platform,
     int? limit,

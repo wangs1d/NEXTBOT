@@ -3,6 +3,8 @@ plugins {
     id("kotlin-android")
     // The Flutter Gradle Plugin must be applied after the Android and Kotlin Gradle plugins.
     id("dev.flutter.flutter-gradle-plugin")
+    // HMS AGC 插件：构建期把 app/agconnect-services.json 处理进资源（须在 AGP 之后应用）
+    id("com.huawei.agconnect")
 }
 
 android {
@@ -90,6 +92,8 @@ dependencies {
     // 客户端 HmsInstanceId 取 token 上报服务端；服务端经华为 OAuth + Push Kit API 直推。
     // 前置条件（均已就位）：app/agconnect-services.json + AGC 指纹登记。
     implementation("com.huawei.hms:push:6.12.0.300")
+    // AGC SDK 基础包（AGC 控制台「添加SDK」引导项；agcp 插件构建期消费上面的 json）
+    implementation("com.huawei.agconnect:agconnect-core:1.9.1.304")
 
     // 远程拍照（camera_capture）：CameraX 后台拍照（前台服务 + camera 类型）
     implementation("androidx.camera:camera-core:1.3.4")

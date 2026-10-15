@@ -63,6 +63,7 @@ import { registerAdminAuthRoutes } from "./admin-session-auth.js";
 import { installAdminConsoleLoopbackGate } from "./admin-console-gate.js";
 import { registerAdminConsoleRoutes } from "./admin-console.js";
 import { registerAdminInboxRoutes } from "./admin-inbox.js";
+import { registerSearchProxyRoutes } from "./search-proxy.js";
 import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerGatewayAdminRoutes } from "./gateway-admin.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
@@ -122,7 +123,14 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     registerTravelPlanRoutes(app, deps);
     // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
     registerTravelMapRoutes(app);
-    registerPoiDetailsRoute(app);
+    // POI 补图主源接 search image 端口（upstreamSearchService，与规划配图同底座）；
+    // 未装配时端点内自动回落必应直抓。
+    registerPoiDetailsRoute(app, {
+      searchImages: async (query, limit) => {
+        const res = await deps.upstreamSearchService.searchImages(query, limit ?? 4, "shared-travel-img");
+        return res.items.map((it) => it.mediaUrl).filter((u): u is string => Boolean(u));
+      },
+    });
     // 旅行数据维护（快照 + 主动刷新：存量图片本地化 / 按目的地补图）
     registerTravelDataRoutes(app);
     registerPhoneRoutes(app, deps);
@@ -306,6 +314,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 管理后台账号密码登录 + 可吊销会话（status/setup/login/logout；requireAdmin 已升级双通道）
   registerAdminAuthRoutes(app);
   registerAdminConsoleRoutes(app, deps);
+  // 云端搜索代理（ECS 专用：env 闸控，未启用不挂载；安装包用户搜索走这里）
+  registerSearchProxyRoutes(app);
   // 管理后台「消息发送」：收件人解析（全体/指定/分组）+ 发送台账（requireAdmin）
   registerAdminInboxRoutes(app, deps);
   if (deps.devicePairingService && deps.deviceRegistry) {

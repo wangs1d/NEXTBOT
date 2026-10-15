@@ -206,8 +206,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     assert.equal(days.length, 3);
     for (let i = 0; i < 3; i++) {
@@ -238,8 +238,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     const counts = days.map(attrCount);
     const total = counts.reduce((a, b) => a + b, 0);
@@ -262,8 +262,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     assert.equal(days.length, 5);
     for (let i = 0; i < 5; i++) {
@@ -292,8 +292,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     for (let i = 0; i < 3; i++) {
       const day = days[i];
@@ -319,8 +319,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     for (let i = 0; i < days.length; i++) {
       const times = days[i]!.items.map((it: { startTime: string }) => it.startTime);
@@ -348,8 +348,8 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       PREFERENCES,
       TRAVEL_INFO,
       PRICING_CTX,
-      null,
-      undefined,
+      [], // perDayWeather：空数组 = 无逐日天气（不触发天气分槽/暴雨降档）
+      [], // cafes：空数组 = 无茶歇候选池
     );
     assert.equal(days.length, 2);
     for (let i = 0; i < 2; i++) {
@@ -357,6 +357,221 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
       assert.ok(meals.lunch && meals.dinner, `Day${i + 1} 午晚餐应齐全`);
       assert.ok(days[i]!.items.some((it: { type: string }) => it.type === "hotel"));
     }
+  });
+});
+
+// ==================== 逐日天气 × 吃玩休息节奏 ====================
+
+/** 构造逐日天气包（TripDayWeather 结构对齐 travel-planning-service 内部定义，不经网络） */
+function mkDayWx(opts: {
+  morningRainy?: boolean;
+  afternoonRainy?: boolean;
+  afternoonHot?: boolean;
+  summary?: string;
+}) {
+  const slot = (rainy: boolean, hot: boolean) => ({ rainy, hot, cold: false, precipPct: rainy ? 85 : 10 });
+  return {
+    ctx: {
+      morning: slot(opts.morningRainy ?? false, false),
+      afternoon: slot(opts.afternoonRainy ?? false, opts.afternoonHot ?? false),
+      evening: slot(false, false),
+      isRainyDay: !!(opts.morningRainy || opts.afternoonRainy),
+      isHotDay: !!opts.afternoonHot,
+      isColdDay: false,
+      summary: opts.summary ?? "",
+    },
+    summary: opts.summary,
+  } as any;
+}
+
+describe("逐日天气分槽与茶歇 (吃玩休息)", () => {
+  it("foldHourlyToCtx：下午下雨行折叠出 afternoon.rainy，上午不受影响", () => {
+    const rows = [
+      { hour: "09:00", temperatureC: 20, weatherCode: 0 },
+      { hour: "10:00", temperatureC: 21, weatherCode: 0 },
+      { hour: "13:00", temperatureC: 19, weatherCode: 63 },
+      { hour: "14:00", temperatureC: 18, weatherCode: 63, precipitationProbabilityPct: 80 },
+      { hour: "20:00", temperatureC: 17, weatherCode: 0 },
+    ];
+    const ctx = (service as any).foldHourlyToCtx(rows);
+    assert.equal(ctx.morning.rainy, false, "上午无雨");
+    assert.equal(ctx.afternoon.rainy, true, "下午中雨码 63 → rainy");
+    assert.equal(ctx.isRainyDay, true);
+  });
+
+  it("foldHourlyToCtx：下午 ≥32°C 折叠出 afternoon.hot（触发茶歇避暑）", () => {
+    const rows = [
+      { hour: "09:00", temperatureC: 28, weatherCode: 0 },
+      { hour: "13:00", temperatureC: 35, weatherCode: 0 },
+      { hour: "15:00", temperatureC: 36, weatherCode: 0 },
+    ];
+    const ctx = (service as any).foldHourlyToCtx(rows);
+    assert.equal(ctx.afternoon.hot, true);
+    assert.equal(ctx.isHotDay, true);
+    assert.equal(ctx.afternoon.rainy, false);
+  });
+
+  it("雨天下午 + 咖啡池：当天必排茶歇，tips 带避雨说明", async () => {
+    const cafes = [mkPoi("咖啡馆A", CENTER.latitude + 0.01, CENTER.longitude, "restaurant")];
+    const { days } = await buildDays(
+      service,
+      2,
+      "2026-09-15",
+      attractionGrid(8),
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(6),
+      CENTER,
+      PREFERENCES,
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [mkDayWx({ afternoonRainy: true, summary: "小雨，18–24°C" }), mkDayWx({ afternoonRainy: true, summary: "小雨" })],
+      cafes,
+    );
+    for (let i = 0; i < days.length; i++) {
+      const day = days[i];
+      const tea = day.items.find(
+        (it: { tips?: string[] }) => it.tips?.some((t) => t.includes("茶歇")),
+      );
+      assert.ok(tea, `Day${i + 1} 雨天下午应排茶歇`);
+      assert.ok(
+        tea.tips.some((t: string) => t.includes("避雨")),
+        "茶歇 tips 应说明避雨原因",
+      );
+      assert.equal(day.dayWeather, i === 0 ? "小雨，18–24°C" : "小雨", "dayWeather 应携带逐日摘要");
+    }
+  });
+
+  it("晴天 intensive 节奏：不排茶歇（茶歇仅 hot/rainy 必排或 relaxed 可排）", async () => {
+    const cafes = [mkPoi("咖啡馆B", CENTER.latitude + 0.01, CENTER.longitude, "restaurant")];
+    const { days } = await buildDays(
+      service,
+      1,
+      "2026-09-15",
+      attractionGrid(6),
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(6),
+      CENTER,
+      { ...PREFERENCES, pace: "intensive" },
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [mkDayWx({})],
+      cafes,
+    );
+    const tea = days[0]!.items.find((it: { tips?: string[] }) =>
+      it.tips?.some((t) => t.includes("茶歇")),
+    );
+    assert.ok(!tea, "晴天 intensive 不应排茶歇");
+  });
+
+  it("雨天空景点池：茶歇锚定主酒店照排（每天不空白）", async () => {
+    const cafes = [mkPoi("咖啡馆C", CENTER.latitude + 0.005, CENTER.longitude + 0.005, "restaurant")];
+    const { days } = await buildDays(
+      service,
+      1,
+      "2026-09-15",
+      [],
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(4),
+      CENTER,
+      PREFERENCES,
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [mkDayWx({ afternoonRainy: true })],
+      cafes,
+    );
+    const tea = days[0]!.items.find((it: { tips?: string[] }) =>
+      it.tips?.some((t) => t.includes("茶歇")),
+    );
+    assert.ok(tea, "无景点时雨天茶歇仍应排（锚定酒店）");
+  });
+});
+
+// ==================== 住宿锚定优选 ====================
+
+describe("pickPrimaryHotel (住宿锚定)", () => {
+  it("优选离景点质心近的酒店，而非搜索结果第一个", () => {
+    const attractions = attractionGrid(6, 0.01); // 集中在 CENTER 附近
+    const nearHotel = mkPoi("近酒店", CENTER.latitude + 0.005, CENTER.longitude, "hotel");
+    const farHotel = mkPoi("远酒店", CENTER.latitude + 0.5, CENTER.longitude + 0.5, "hotel"); // ~70km 外
+    const picked = (service as any).pickPrimaryHotel([farHotel, nearHotel], attractions, PREFERENCES);
+    assert.equal(picked?.name, "近酒店", "应选离景点质心近的酒店");
+  });
+
+  it("无酒店池返回 undefined（起点退回目的地中心）", () => {
+    const picked = (service as any).pickPrimaryHotel([], attractionGrid(3), PREFERENCES);
+    assert.equal(picked, undefined);
+  });
+});
+
+// ==================== 雨天室内餐厅优先 ====================
+
+describe("pickRestaurantOnRoute indoorHint (雨天室内)", () => {
+  const prefs = PREFERENCES;
+  const usedIds = new Set<string>();
+
+  it("传 'indoor' 时，稍远但带 indoor 标签的餐厅胜过更近的室外餐厅", () => {
+    const nearOutdoor = mkPoi("路边摊", CENTER.latitude + 0.01, CENTER.longitude, "restaurant");
+    const farIndoor = mkPoi("商场餐厅", CENTER.latitude + 0.05, CENTER.longitude, "restaurant");
+    farIndoor.tags = ["indoor"];
+    const picked = (service as any).pickRestaurantOnRoute(
+      [nearOutdoor, farIndoor], CENTER.latitude, CENTER.longitude, usedIds, prefs, undefined, "indoor",
+    );
+    assert.equal(picked?.name, "商场餐厅", "雨天应优先室内餐厅");
+  });
+
+  it("不传 indoorHint（晴天）时，距离近的餐厅照常胜出", () => {
+    const nearOutdoor = mkPoi("路边摊2", CENTER.latitude + 0.01, CENTER.longitude, "restaurant");
+    const farIndoor = mkPoi("商场餐厅2", CENTER.latitude + 0.05, CENTER.longitude, "restaurant");
+    farIndoor.tags = ["indoor"];
+    const picked = (service as any).pickRestaurantOnRoute(
+      [nearOutdoor, farIndoor], CENTER.latitude, CENTER.longitude, new Set(), prefs, undefined,
+    );
+    assert.equal(picked?.name, "路边摊2", "晴天距离优先");
+  });
+
+  it("传 'indoor' 但候选全无 indoor 标签：自然回落距离优先", () => {
+    const near = mkPoi("近餐厅", CENTER.latitude + 0.01, CENTER.longitude, "restaurant");
+    const far = mkPoi("远餐厅", CENTER.latitude + 0.05, CENTER.longitude, "restaurant");
+    const picked = (service as any).pickRestaurantOnRoute(
+      [near, far], CENTER.latitude, CENTER.longitude, new Set(), prefs, undefined, "indoor",
+    );
+    assert.equal(picked?.name, "近餐厅");
+  });
+});
+
+// ==================== 茶歇图片直通 ====================
+
+describe("collectMediaForDays cafe 图源直通", () => {
+  it("cafe 不在缓存三桶：extraImagesByPoiId 透传后进 imageMap，不再进 missing", () => {
+    const cafeItem = {
+      itemId: "restaurant-cafe-1-1",
+      poiId: "cafe-1",
+      type: "restaurant" as const,
+      name: "咖啡馆D",
+      latitude: CENTER.latitude,
+      longitude: CENTER.longitude,
+    };
+    const days = [{ date: "2026-09-15", items: [cafeItem] }] as any;
+    const extra = new Map([["cafe-1", ["https://img.example/amap-cafe.jpg"]]]);
+    const { imageMap, missing } = (service as any).collectMediaForDays(days, null, extra);
+    // imageMap 键格式为 `${type}-${itemId}`
+    assert.deepEqual(imageMap.get(`restaurant-${cafeItem.itemId}`), ["https://img.example/amap-cafe.jpg"]);
+    assert.equal(missing.length, 0, "有直通图不应进回填队列");
+  });
+
+  it("无直通图且缓存未命中：照旧进 missing（后台回填）", () => {
+    const cafeItem = {
+      itemId: "restaurant-cafe-2-1",
+      poiId: "cafe-2",
+      type: "restaurant" as const,
+      name: "咖啡馆E",
+      latitude: CENTER.latitude,
+      longitude: CENTER.longitude,
+    };
+    const days = [{ date: "2026-09-15", items: [cafeItem] }] as any;
+    const { imageMap, missing } = (service as any).collectMediaForDays(days, null, new Map());
+    assert.ok(!imageMap.has("restaurant-cafe-2-1"));
+    assert.equal(missing.length, 1);
   });
 });
 

@@ -60,6 +60,8 @@ constexpr const wchar_t* kRecorderProcessNames[] = {
     L"sharex.exe",
     L"jianyingpro.exe",  // 剪映专业版
     L"apowerrec.exe",    // 傲软录屏
+    L"cap.exe",          // Cap（cap.so 开源录屏，2026-10-14 实证其选区
+                         // 全屏遮罩会盖住岛触发让位，入列豁免）
 };
 
 bool IsScreenRecordingActive() {
@@ -604,6 +606,25 @@ void DynamicIslandWindow::CheckSuppression() {
   UpdateFullscreenSuppression();
 }
 
+// suppress-on 取证：记录触发让位时刻的前台窗口进程 exe 名（仅抑制转向瞬间
+// 打一条，零稳态开销）。录屏豁免名单再遇漏网工具时，日志直接给出增补依据。
+void LogSuppressOnForeground() {
+  wchar_t exe[MAX_PATH] = L"?";
+  const HWND fg = GetForegroundWindow();
+  DWORD pid = 0;
+  if (fg != nullptr && GetWindowThreadProcessId(fg, &pid) && pid != 0) {
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (h != nullptr) {
+      DWORD size = MAX_PATH;
+      if (!QueryFullProcessImageNameW(h, 0, exe, &size)) exe[0] = L'?';
+      CloseHandle(h);
+    }
+  }
+  wchar_t line[MAX_PATH + 48];
+  _snwprintf_s(line, _countof(line), _TRUNCATE, L"suppress-on fg=%ls", exe);
+  IslandLifecycleLog(nullptr, line);
+}
+
 // 由 kSuppressTimerId 常开心跳驱动（与动画心跳无关，窗口存活期间一直跑）。
 // 注意：窗口定时器随窗口同死——窗口被销毁后本心跳也随之消失，
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
@@ -639,8 +660,11 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
     IslandLifecycleLog(window_handle_, hb);
   }
   if (busy == suppressed_by_fullscreen_) return;
-  IslandLifecycleLog(window_handle_,
-                     busy ? L"suppress-on" : L"suppress-off");
+  if (busy) {
+    LogSuppressOnForeground();
+  } else {
+    IslandLifecycleLog(window_handle_, L"suppress-off");
+  }
   suppressed_by_fullscreen_ = busy;
   if (window_handle_ == nullptr) return;
   if (busy) {

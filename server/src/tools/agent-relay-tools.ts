@@ -1,15 +1,13 @@
-import { ServerEventType as S } from "../protocol.js";
+import { resolveActorId } from "../agent/actor-id.js";
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import { relayRequiresPairEnv } from "../services/agent-pairing-service.js";
-import type { AgentRelayService } from "../services/agent-relay-service.js";
+import type { FriendMessageService } from "../services/friend-message-service.js";
 import type { AgentAccountService } from "../services/agent-account-service.js";
-import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 export function registerAgentRelayTools(
   registry: ToolRegistry,
-  relay: AgentRelayService,
-  wsRegistry: ClientPushPort,
+  friendMessages: FriendMessageService,
   pairing: AgentPairingService,
   agentAccountService?: AgentAccountService,
 ): void {
@@ -38,50 +36,39 @@ export function registerAgentRelayTools(
         if (byNumber) targetSessionId = byNumber.userId;
       }
     }
-    if (targetSessionId === context.sessionId) {
+    const actorId = resolveActorId(context);
+    if (targetSessionId === actorId) {
       throw new Error("不能向自己的 session 发中继消息");
     }
 
-    if (relayRequiresPairEnv() && !pairing.arePaired(context.sessionId, targetSessionId)) {
+    if (relayRequiresPairEnv() && !pairing.arePaired(actorId, targetSessionId)) {
       throw new Error(
         "中继已要求配对：请双方先使用相同配对码调用 POST /agent/pair，或设置环境变量 AGENT_RELAY_REQUIRE_PAIR=0（仅开发环境）。",
       );
     }
 
-    const record = relay.postMessage({
-      fromSessionId: context.sessionId,
-      toSessionId: targetSessionId,
+    // 投递统一走 FriendMessageService：内存中继 + 接收方 hub 持久入站 +
+    // 发送方 hub 留档 + WS 直推（含 fromName）+ lastMessageAt 双向刷新。
+    const result = await friendMessages.send({
+      fromActorId: actorId,
+      toActorId: targetSessionId,
       text: body,
       subject: subject || undefined,
-      traceId:
-        typeof input.traceId === "string" ? input.traceId : undefined,
+      traceId: typeof input.traceId === "string" ? input.traceId : undefined,
       chatUserMessageId: context.chatUserMessageId,
     });
-
-    const envelope = {
-      type: S.AgentPeerMessage,
-      payload: {
-        messageId: record.messageId,
-        fromSessionId: record.fromSessionId,
-        toSessionId: record.toSessionId,
-        text: record.text,
-        subject: record.subject,
-        receivedAt: record.createdAt,
-        ...(record.chatUserMessageId ? { chatUserMessageId: record.chatUserMessageId } : {}),
-        ...(record.aip ? { aip: record.aip } : {}),
-      },
-    };
-    const pushed = wsRegistry.trySend(
-      targetSessionId,
-      JSON.stringify(envelope),
-    );
+    if (!result.ok) {
+      throw new Error(result.error);
+    }
 
     return {
       ok: true,
-      messageId: record.messageId,
+      messageId: result.messageId,
       toSessionId: targetSessionId,
-      pushedToPeer: pushed,
-      summary: pushed ? "已投递并推送给对方在线连接" : "已写入对方收件箱（对方离线或未连接）",
+      pushedToPeer: result.pushedToPeer,
+      summary: result.pushedToPeer
+        ? "已投递并推送给对方在线连接"
+        : "已持久写入对方收件箱与消息中心（对方当前离线，上线后会补投提醒）",
     };
   });
 }

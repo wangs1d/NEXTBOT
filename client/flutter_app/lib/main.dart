@@ -71,9 +71,9 @@ import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
 import "features/gallery/gallery_workbench_page.dart";
 import "features/gallery/gallery_wall_host.dart";
-import "features/onboarding/onboarding_flow.dart";
 import "features/mailbox/mailbox_page.dart";
 import "features/mailbox/message_hub_page.dart";
+import "features/onboarding/onboarding_flow.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
@@ -87,6 +87,7 @@ import "features/chat/travel_plan_archive.dart";
 import "features/chat/travel_plan_mobile_page.dart";
 import "features/chat/travel_plan_models.dart";
 import "features/chat/travel_plan_panel.dart";
+import "features/chat/travel_web_panel_host.dart";
 import "features/chat/right_side_panel.dart";
 import "core/services/split_ratio_preference.dart";
 import "features/chat/sidebar_user_menu.dart";
@@ -380,7 +381,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 当前右侧面板要展示的内容
   /// - null: 未打开
   /// - RightPanelKind.friends:     好友（MailboxPage）
-  /// - RightPanelKind.messages:   消息聚合（MessageHubPage）
+  /// - RightPanelKind.messages:   消息聚合（MessageHubPage）——入口已撤
+  ///   （2026-10-14，消息统一后台扫描按价值主动推送），枚举分支保留，
+  ///   无 UI 触发点。
   RightPanelKind? _rightPanel;
 
   /// 图片预览面板当前要展示的图片快照（来自媒体卡点击）。
@@ -411,11 +414,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 面板内容(220+8=228)，split 模式即 chat_layout 报告的 rightWidth。
   double _rightPanelWidth = kRightSidePanelWidth + _kSidePanelDividerWidth;
 
-  Map<String, int> _unreadByPlatform = <String, int>{};
+  /// 站内信未读轮询定时器（MessageHub 前端陈列撤除后仅服务站内信角标）。
   Timer? _messagePollTimer;
 
   /// 站内信（平台→用户收件箱）未读数：随消息轮询刷新 + WS 推送即时 +1，
-  /// 与消息聚合未读合并进侧栏「站内信」红点角标。
+  /// 进侧栏「站内信」红点角标。
   int _inboxUnread = 0;
 
   /// 关闭右侧面板
@@ -492,8 +495,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
   /// 首启配置向导：登录后未完成 onboarding 时顶在主界面之前（进度条开机
-  /// 动画 + 称呼/agent 名/声纹/模型四步）。完成标记按账号存偏好
-  /// （`onboarding.completedV1.<email>`），未完成时冷启动自动重入。
+  /// 动画 + 称呼/agent 名同屏 + 模型两步；声纹已删，保留 just-in-time 入口）。
+  /// 完成标记按账号存偏好（`onboarding.completedV1.<email>`），
+  /// 未完成时冷启动自动重入。
   bool _needsOnboarding = false;
   bool _onboardingDone = false;
   // 向导专用（与注册门禁同款隔离理由：禁止与主应用共享 GlobalKey）
@@ -748,14 +752,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         _inputFocusNode.requestFocus();
       });
     }
-    // 注意：主进程不再预加载共享行程 WebView（TravelWebPanelHost.preload）。
-    // 预加载会让 WebView2 在启动时就创建内部顶层窗口，该窗口曾滞留屏幕上
-    // 成为透明"幽灵窗"，拦截其他应用的点击；现改为真实使用时懒加载——
-    // 行程卡默认走独立子进程窗口（自带预加载），应用内回退页由
-    // TravelPlanPanel.initState 的 ensureStarted() 兜底初始化。
-    // 兜底防护：runner 已常驻 WebViewGhostGuard 看门狗
-    // （windows/runner/webview_ghost_window_guardian.cpp），任何滞留的
-    // WebView2 内部顶层窗口都会被自动打上点击穿透样式，不再拦截其他应用。
+    // 行程面板共享 WebView 进程级预加载（2026-10-15 恢复）：WebView2 冷启动
+    // （初始化 + 页面加载 + 就绪轮询）是旅游面板首开慢的最大头，提前到启动时
+    // 后台跑完，打开卡片/面板零等待。曾因幽灵窗问题禁用——WebView2 内部顶层
+    // 窗口滞留会透明拦截其他应用点击；现 runner 常驻 WebViewGhostGuard 看门狗
+    // （windows/runner/webview_ghost_window_guardian.cpp，main.cpp Start()）
+    // 会自动给任何滞留窗口打点击穿透样式，预加载恢复安全。
+    TravelWebPanelHost.preload();
     // 今日安排面板数据刷新：设置（创建/删除）提醒日程后，通过信号刷新右侧面板
     _scheduleReloadSignal.addListener(_onScheduleReloadSignal);
     _configureAmbientFeeds();
@@ -1517,10 +1520,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             AlarmEngine.instance.handleServerEvent(type, payload),
           );
         }
-        if (type == "hub.message_arrived") {
-          await AmbientFeedsController.instance
-              .onHubMessageArrived(payload);
-        }
+        // hub.message_arrived 即时上岛已撤（2026-10-14）：消息类内容统一由
+        // agent 后台扫描、判定有价值后走主动提案链路推送，不再每条直展。
         if (type == "surface.show") {
           // Surface-on-Demand：服务端 surface.show 工具召唤桌面悬浮卡。
           // 语音模式下主窗口已隐藏，悬浮窗由本进程独立 HWND 承载，不受影响。
@@ -3794,7 +3795,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     setState(() => _tabIndex = index);
   }
 
-  /// 好友入口：不再切整页 tab，而是从右侧滑出好友面板
+  /// 好友入口：不再切整页 tab，而是从右侧滑出好友面板（2026-10-15 恢复）
   void _openAgentLinkTab() {
     setState(() {
       _tabIndex = 0;
@@ -3807,43 +3808,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 消息入口：从右侧滑出消息聚合面板
-  void _openMessagesPanel() {
-    setState(() {
-      _tabIndex = 0;
-      _rightPanel = RightPanelKind.messages;
-      // 保存当前 splitRatio，关闭时恢复
-      _previousSplitRatio = _splitRatio;
-      // 保存 side 模式下的原右面板宽度，关闭时恢复
-      _previousRightPanelWidth = _rightPanelWidth;
-      _splitRatio = RightPanelKind.messages.defaultSplitRatio;
-    });
-  }
+  /// 消息面板入口已删除（2026-10-14）：消息类内容统一后台扫描，agent
+  /// 判定有价值后才主动推送，不再提供前端陈列入口。RightPanelKind.messages
+  /// 面板分支保留（代码路径仍可达性由服务端事件决定），仅撤 UI 触发点。
 
+  /// 站内信未读轮询（15s）：站内信角标数据源。MessageHub 聚合未读轮询已随
+  /// 「消息」工具撤除（2026-10-14），仅保留 InboxService 记账的未读数。
   Future<void> _pollUnreadMessages() async {
-    try {
-      final result = await _worldApi.getMessageConversations(limit: 200);
-      if (!mounted) return;
-      if (result["ok"] == true) {
-        final List<dynamic> conversations = result["conversations"] ?? [];
-        final Map<String, int> byPlatform = <String, int>{};
-        for (final dynamic c in conversations) {
-          final Map<String, dynamic> conv = c as Map<String, dynamic>;
-          final int unread = (conv["unreadCount"] as num?)?.toInt() ?? 0;
-          if (unread <= 0) continue;
-          final String platform = conv["platform"] as String? ?? "generic";
-          byPlatform[platform] = (byPlatform[platform] ?? 0) + unread;
-        }
-        if (mounted) {
-          setState(() => _unreadByPlatform = byPlatform);
-          debugPrint('[msg-poll] actor=${ApiConfig.effectiveActorId} '
-              'convs=${conversations.length} '
-              'platforms=${byPlatform.keys.toList()} '
-              'total=${byPlatform.values.fold(0, (int a, int b) => a + b)}');
-        }
-      }
-    } catch (_) {}
-    // 站内信未读数（服务端 InboxService 记账，离线消息补齐也走这里）
     final inboxResult = await _inboxApi.unreadCount();
     if (inboxResult.ok && mounted) {
       setState(() => _inboxUnread = inboxResult.value ?? 0);
@@ -4429,6 +4400,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       });
       await _store.upsertRelayMessage(ApiConfig.effectiveActorId, inbound);
     };
+    // 补投/重放去重：服务端重连补投按 messageId 重推，本端已落库的不再重复提示
+    c.isRelayMessageKnown = (String messageId) => _relayInbound
+        .any((AgentRelayMessage x) => x.messageId == messageId);
     c.showRelayToast = (String fromSessionId) {
       if (!mounted) return;
       ScaffoldMessenger.maybeOf(context)?.showSnackBar(
@@ -5118,7 +5092,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       ),
       home: OnboardingFlow(
         onComplete: _completeOnboarding,
-        writePreference: _store.savePreference,
       ),
     );
   }
@@ -5191,8 +5164,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (_accountEmail == null) {
       return _buildRegisterGate();
     }
-    // 首启向导：动画+四步配置顶在主界面之前；重量级初始化照常后台跑，
-    // 向导动画本身就是 init 等待屏（完成即 _isInitialized，无闪屏）。
+    // 首启向导：进度条动画+称呼/名字同屏+模型两步顶在主界面之前；重量级
+    // 初始化照常后台跑，向导动画本身就是 init 等待屏（完成即 _isInitialized，无闪屏）。
     if (_needsOnboarding && !_onboardingDone) {
       return _buildOnboardingGate();
     }
@@ -5384,7 +5357,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     setState(() {
       _accountEmail = AccountSessionStore.instance.email;
       _sessionLoaded = true;
-      // 向导未完成：首启序列（进度条动画+四步）顶替 N 开场动画
+      // 向导未完成：首启序列（进度条动画+两步配置）顶替 N 开场动画
       _needsOnboarding = _accountEmail != null && pending;
       _playBootAnimation = _accountEmail != null && !pending;
     });
@@ -5942,11 +5915,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         scheduleFuture: _cachedScheduleFuture,
         onAgentLink: _openAgentLinkTab,
         onSchedule: _openSchedulePanel,
-        onMessages: _openMessagesPanel,
         onGallery: _openGalleryPanel,
         onBrowser: _openBrowserPanel,
         onTravel: _openTravelArchive,
-        messagesUnread: _unreadByPlatform.values.fold(0, (int a, int b) => a + b),
       ),
     );
   }

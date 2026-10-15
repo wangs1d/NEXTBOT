@@ -1,8 +1,8 @@
 /// 旅游行程海报卡的视觉快照生成器。
 ///
 /// 运行 `flutter test --update-goldens test/travel_itinerary_card_golden.dart`
-/// 生成/更新 goldens 目录下的 PNG，用于确认 2026-09 卡片重设计
-/// （景点海报背景 + 目的地简介 + 「记得带」叮嘱 + 加大版面）的视觉效果。
+/// 生成/更新 goldens 目录下的 PNG，用于确认 2026-10 卡片重设计
+/// （目的地风景海报背景 + 目的地简介 + 加大版面）的视觉效果。
 ///
 /// 海报背景图走 `debugNetworkImageHttpClientProvider` 测试钩子注入本地
 /// fixtures/maldives_poster.jpg 的字节，模拟服务端媒体库实拍图加载成功。
@@ -26,6 +26,7 @@ import "package:flutter_test/flutter_test.dart";
 import "package:private_ai_agent/core/theme/app_theme.dart";
 import "package:private_ai_agent/core/utils/agent_result_parser.dart";
 import "package:private_ai_agent/features/chat/agent_result_card.dart";
+import "package:private_ai_agent/features/chat/travel_plan_models.dart";
 
 /// 加载 MiSans 正文与 MaterialIcons 图标字体（测试环境默认不加载，
 /// 否则图标渲染为豆腐块）。
@@ -141,13 +142,6 @@ AgentResultData _structuredPlanData() {
       "startDate": "2026-09-05",
       "endDate": "2026-09-09",
       "intro": "印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名",
-      "packing": <String>[
-        "护照（有效期6个月+）与酒店订单",
-        "防晒霜 SPF50+",
-        "泳装与浮潜装备",
-        "英标转换插头",
-        "美元小额现金（小费）",
-      ],
       "days": <dynamic>[
         <String, dynamic>{
           "date": "2026-09-05",
@@ -211,6 +205,9 @@ Widget _harness(AppThemeVariant variant, AgentResultData data) {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  // 封面活取关断：金丝雀快照只渲染卡内数据，不发真实网络请求
+  TravelLiveCover.enabled = false;
+
   setUpAll(_loadFonts);
 
   Future<void> pumpAndCapture(
@@ -247,7 +244,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  testWidgets("行程海报卡 深色主题（结构化数据：海报图+简介+叮嘱）", (WidgetTester tester) async {
+  testWidgets("行程海报卡 深色主题（结构化数据：海报图+简介）", (WidgetTester tester) async {
     await pumpAndCapture(
         tester, AppThemeVariant.dark, _structuredPlanData(), "travel_card_dark.png");
   });
@@ -257,7 +254,7 @@ void main() {
         tester, AppThemeVariant.warm, _structuredPlanData(), "travel_card_warm.png");
   });
 
-  testWidgets("行程海报卡 历史消息兜底（无 travelPlan：渐变底，无简介/叮嘱）", (WidgetTester tester) async {
+  testWidgets("行程海报卡 历史消息兜底（无 travelPlan：渐变底，无简介）", (WidgetTester tester) async {
     await pumpAndCapture(
         tester, AppThemeVariant.dark, _textFallbackData(), "travel_card_fallback.png");
   });

@@ -9,14 +9,14 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * 两级获取约定（写进 description 引导模型省 token）：
  *   1. messages.overview 先看各平台未读统计 + 最新预览（纯计数，便宜）；
  *   2. 需要某个会话的完整消息再用 messages.read_conversation 拉全文。
- * 平台覆盖：wechat / qq / feishu / sms / email（手机通知捕捉 + 通用消息桥 webhook
- * 汇聚 + 邮件盯件 IMAP 自动收件；email/alipay 会话只读）。
+ * 平台覆盖：friend（站内好友，双向可回信）/ wechat / qq / feishu / sms（手机通知捕捉 +
+ * 通用消息桥 webhook 汇聚 + 邮件盯件 IMAP 自动收件；email/alipay 会话只读）。
  */
 const toolDefinitions: { name: string; description: string; parameters: Record<string, unknown> }[] = [
   {
     name: "messages.overview",
     description:
-      "查看用户消息聚合中心的总体概况：微信/QQ/飞书/短信/邮箱等各平台未读条数、会话数与最新一条消息预览。" +
+      "查看用户消息聚合中心的总体概况：微信/QQ/飞书/短信/邮箱/站内好友等各平台未读条数、会话数与最新一条消息预览。" +
       "新邮件由邮件盯件自动收进这里（平台名 email），所以「有没有新邮件/邮件上说啥」也先调这个。" +
       "用户问「有没有人找我」「看下消息」「有什么未读」时先调这个。返回 platforms[].latest[].conversationId " +
       "可传给 messages.read_conversation 查看完整消息。",
@@ -37,7 +37,7 @@ const toolDefinitions: { name: string; description: string; parameters: Record<s
       properties: {
         platform: {
           type: "string",
-          enum: ["wechat", "qq", "feishu", "sms", "email", "alipay", "generic"],
+          enum: ["friend", "wechat", "qq", "feishu", "sms", "email", "alipay", "generic"],
           description: "限定平台；缺省返回全部平台",
         },
         limit: { type: "integer", description: "最多返回会话数，默认 50" },
@@ -63,9 +63,8 @@ const toolDefinitions: { name: string; description: string; parameters: Record<s
   {
     name: "messages.reply",
     description:
-      "代表用户回复某条消息。目前仅支持短信（sms）真实代发：调用后用户手机会弹出确认窗，" +
-      "用户确认后才发出；微信/QQ/飞书/邮件暂不支持直接代发（只读）——要发邮件用 email.send。" +
-      "调用前必须先向用户复述接收方与回复内容并取得同意。",
+      "代表用户回复某条消息。好友（friend）与短信（sms）支持真实代发：好友消息直达对方收件箱，短信发前手机弹窗确认；" +
+      "微信/QQ/飞书/邮件暂不支持代发（只读）——要发邮件用 email.send。调用前先复述接收方与内容并取得同意。",
     parameters: {
       type: "object",
       properties: {

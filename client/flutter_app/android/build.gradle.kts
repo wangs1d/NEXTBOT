@@ -1,3 +1,22 @@
+// HMS AGC 插件（2026-10-14）：构建期把 agconnect-services.json 处理进资源。
+// agcp 1.9.1.304 兼容 AGP 8；它启动时检查 buildscript classpath 里必须有
+// com.android.tools.build:gradle，所以这里同时显式挂 AGP 8.11.1。
+// 注意：root .kts 一旦声明 buildscript，脚本就按 buildscript 类路径编译，
+// AGP 类型（LibraryExtension 等）必须在这条 classpath 上，缺了会 Unresolved reference。
+buildscript {
+    repositories {
+        maven("https://developer.huawei.com/repo/")
+        maven("https://maven.aliyun.com/repository/google")
+        maven("https://maven.aliyun.com/repository/central")
+        google()
+        mavenCentral()
+    }
+    dependencies {
+        classpath("com.android.tools.build:gradle:8.11.1")
+        classpath("com.huawei.agconnect:agcp:1.9.1.304")
+    }
+}
+
 allprojects {
     repositories {
         // CN 镜像优先，失败回落官方源（与 settings.gradle.kts 的 pluginManagement 对应）

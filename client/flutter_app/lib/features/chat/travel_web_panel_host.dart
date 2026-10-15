@@ -21,12 +21,12 @@ import "travel_web_panel_controller.dart";
 ///
 /// 预加载：[preload] 后台初始化（隐藏渲染），首次打开面板零等待。
 ///
-/// ⚠️ 只允许在「确定要用 WebView 的时机」调用（行程独立子进程启动时）。
-/// 主应用禁止在启动/首页 initState 里预加载：WebView2 一旦创建就会产生
-/// 内部顶层窗口，若滞留屏幕会变成透明"幽灵窗"拦截其他应用的点击
-/// （曾实测盖住左半屏）；主进程路径由 TravelPlanPanel 挂载时懒加载兜底。
-/// 兜底之兜底：runner 常驻 WebViewGhostGuard 看门狗会自动中和滞留窗口，
-/// 即使幽灵窗再出现也不会拦截其他应用的点击。
+/// 主应用在启动 initState 调用 [preload]（2026-10-15 恢复）；行程独立子进程
+/// 启动时也调用。曾因幽灵窗问题在主进程禁用——WebView2 创建时产生的内部
+/// 顶层窗口若滞留屏幕，会变成透明"幽灵窗"拦截其他应用的点击（曾实测盖住
+/// 左半屏）；现 runner 常驻 WebViewGhostGuard 看门狗自动中和滞留窗口，
+/// 预加载恢复安全。TravelPlanPanel.initState 的 ensureStarted() 仍作兜底
+/// （幂等，预加载已完成时立即返回）。
 class TravelWebPanelHost {
   TravelWebPanelHost._();
 

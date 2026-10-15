@@ -66,7 +66,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .side-ic.on{color:var(--amber);background:var(--amberSoft)}
 .side-ic.on::before{content:"";position:absolute;left:-16px;top:50%;transform:translateY(-50%);width:3px;height:20px;border-radius:0 3px 3px 0;background:var(--amber)}
 .side-spacer{flex:1}
-.avatar{width:34px;height:34px;border-radius:50%;background:linear-gradient(135deg,#F5A552,#D88434);display:grid;place-items:center;font-size:13px;font-weight:700;color:#201407}
 
 /* ===== 主区 ===== */
 .main{flex:1;display:flex;flex-direction:column;min-width:0}
@@ -93,8 +92,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .band i.done{background:rgba(255,255,255,.2)}.band i.now{background:var(--amber);box-shadow:0 0 8px rgba(245,165,82,.6)}
 .band i.alt{background:transparent;border:1px dashed rgba(255,255,255,.2);height:5px;align-self:center}
 .tb-right{display:flex;align-items:center;gap:10px;flex:0 0 auto}
-.agent-chip{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t2);background:var(--card);border:1px solid var(--line);padding:6px 12px;border-radius:999px}
-.agent-chip .dot{width:6px;height:6px;border-radius:50%;background:var(--amber);box-shadow:0 0 6px var(--amber)}
 .weather{font-family:var(--num);font-size:12px;color:var(--t2);display:flex;align-items:center;gap:5px;flex:0 0 auto;max-width:210px;white-space:nowrap;overflow:hidden}
 .dq-chip{font-size:11px;color:var(--amber);background:var(--amberSoft);border:1px solid var(--amberLine);padding:5px 10px;border-radius:999px;white-space:nowrap}
 .weather svg{width:14px;height:14px;color:var(--amber)}
@@ -103,6 +100,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .content{flex:1;position:relative;min-height:0;display:flex}
 .view{position:absolute;inset:0;display:flex;padding:20px;gap:18px;min-height:0}
 .view-map{display:none;background:var(--win)}
+/* 离屏预建图：loadPlan 到手就给容器一个屏外真实尺寸把 MapLibre 建起来
+   （样式/精灵/首屏瓦片/WebGL 上下文全部就位），切到地图视图只剩 resize+贴标记。 */
+.view-map.boot{display:flex;position:fixed;left:-12000px;top:0;width:1100px;height:700px}
 /* z-index 必须高于「今日」视图内的浮层（.now-big/.now-tag 为 z-index:2，
    而两个 .view 都是 z-index:auto 的 absolute —— 不给地图层抬层级时，
    Now 卡的大标题会穿透到地图上面）。 */
@@ -114,6 +114,16 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* 无实拍图时的兜底：不闪占位框，走同族深青渐变（真实行程缺图常见） */
 .now-photo.noimg{background:linear-gradient(150deg,#14323C,#0A151B 70%)}
 .now-photo.noimg img{opacity:0}
+/* 右下角站点跳转（上一站/下一站）：端点置灰，中间站序；
+   与右栏列表/旅程带/地图 marker 同一 state.cur，点击即三方联动 */
+.stop-nav{position:absolute;right:20px;bottom:20px;z-index:3;display:flex;align-items:center;gap:6px;
+  background:rgba(20,21,26,.85);backdrop-filter:blur(14px);border:1px solid var(--line2);border-radius:999px;padding:5px}
+.stop-nav button{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--txt);
+  padding:7px 13px;border-radius:999px;transition:.15s;white-space:nowrap}
+.stop-nav button:hover:not(:disabled){background:var(--amberSoft);color:var(--amber)}
+.stop-nav button:disabled{color:var(--t3);cursor:default;opacity:.55}
+.stop-nav button svg{width:13px;height:13px;flex:0 0 auto}
+.stop-nav .sn-pos{font-family:var(--num);font-size:11.5px;color:var(--t2);min-width:46px;text-align:center;letter-spacing:.5px}
 .now-tag{position:absolute;top:14px;left:14px;z-index:2;font-size:10.5px;letter-spacing:1px;background:rgba(11,12,14,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);padding:5px 11px;border-radius:999px}
 .now-book{position:absolute;top:14px;right:14px;z-index:2;display:flex;align-items:center;gap:6px;font-size:10.5px;background:rgba(11,12,14,.55);backdrop-filter:blur(8px);border:1px solid rgba(255,255,255,.14);padding:5px 11px;border-radius:999px}
 .now-book .d{width:6px;height:6px;border-radius:50%;background:var(--ok)}
@@ -146,6 +156,10 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* 地图视图（真实底图 MapLibre；底图瓦片走本机 /travel-basemap 代理 + 磁盘缓存） */
 .map-wrap{flex:1;border-radius:14px;overflow:hidden;position:relative;background:#0D0F13}
 #map{position:absolute;inset:0}
+/* 高德栅格只有浅色样式 → canvas 整体反色得暗色观感（invert 翻转明暗，
+ * hue-rotate(180deg) 把被反转的色相转回来；浅底深字 → 暗底亮字，路线画黑显白）。
+ * marker/图例等 DOM 元素在 canvas 之外，不受影响。 */
+#map .maplibregl-canvas{filter:invert(1) hue-rotate(180deg) saturate(.72) brightness(1.04) contrast(.94)}
 .maplibregl-ctrl-attrib{display:none!important}
 .maplibregl-canvas:focus{outline:none}
 .map-back{position:absolute;top:14px;left:14px;z-index:5;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txt);background:rgba(16,17,21,.75);backdrop-filter:blur(10px);border:1px solid var(--line2);padding:8px 14px;border-radius:999px}
@@ -204,7 +218,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .rb-collapse{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:var(--t3);flex:0 0 auto}
 .rb-collapse:hover{color:var(--t2);background:rgba(255,255,255,.06)}
 .rb-collapse svg{width:14px;height:14px}
-.rb-fab{position:absolute;top:10px;right:10px;z-index:6;display:none;align-items:center;gap:7px;
+.rb-fab{display:none;align-items:center;gap:7px;flex:0 0 auto;
   font-size:12px;color:var(--txt);background:rgba(16,17,21,.85);backdrop-filter:blur(10px);
   border:1px solid var(--line2);padding:8px 14px;border-radius:999px;cursor:pointer}
 .rb-fab.on{display:flex}
@@ -261,7 +275,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
       <button class="side-ic on" data-view="now" title="今日"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg></button>
       <button class="side-ic" data-view="map" title="路线地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg></button>
       <div class="side-spacer"></div>
-      <div class="avatar">我</div>
     </nav>
 
     <!-- 主区 -->
@@ -281,7 +294,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
         <div class="tb-right">
           <div class="dq-chip" id="dqChip" style="display:none"></div>
           <div class="weather" id="weather"></div>
-          <div class="agent-chip"><span class="dot"></span>Agent 跟随中</div>
+          <!-- 今日安排收起后的浮标（唤回弹窗）：放在顶栏流内（天气旁），
+               曾是 body 右上角绝对定位浮层——收起时正好压住天气与「预计 X 结束」 -->
+          <button class="rb-fab" id="rbFab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>今日安排<span class="cnt" id="rbFabCnt"></span></button>
         </div>
       </div>
 
@@ -305,6 +320,12 @@ img{display:block;width:100%;height:100%;object-fit:cover}
               <span class="stay-bar"><i id="stayFill"></i></span>
             </div>
           </div>
+          <!-- 右下角站点跳转：上一个地方 / 下一个地方（端点置灰） -->
+          <div class="stop-nav" id="stopNav">
+            <button id="stopPrev"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 18l-6-6 6-6"/></svg>上一个地方</button>
+            <div class="sn-pos" id="stopPos"></div>
+            <button id="stopNext">下一个地方<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+          </div>
         </div>
 
         <!-- 地图视图（真实底图 + 当天 POI + 真实路网路线） -->
@@ -327,9 +348,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
       </div>
     </main>
 
-    <!-- 今日安排收起后的浮标（唤回弹窗） -->
-    <button class="rb-fab" id="rbFab"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M8 6h13M8 12h13M8 18h13M3.5 6h.01M3.5 12h.01M3.5 18h.01"/></svg>今日安排<span class="cnt" id="rbFabCnt"></span></button>
-    <!-- 右栏：双面板「今日安排」（头部按钮收起，浮标唤回） -->
+    <!-- 右栏：双面板「今日安排」（头部按钮收起，顶栏浮标唤回） -->
     <aside class="rightbar" id="rightbar">
       <div class="rb-head"><h3>今日安排</h3><span class="cnt" id="rbCnt"></span><button class="rb-collapse" id="rbCollapse" title="收起今日安排"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button></div>
       <div class="rb-list" id="rbList"></div>
@@ -536,7 +555,7 @@ function refreshChrome(){
   // 副标题只放「城市英文名 · 日期」：第几天由胶囊条表达（此前 DAY 1 与 Day 1 同屏复读）
   $('tbCity').textContent=DAYNAME[state.day]||META.city||'行程';
   $('tbSub').textContent=[META.cityEn,day].filter(Boolean).join(' · ');
-  $('winTitleText').textContent='行迹 · '+META.city+' '+dayCount()+' 日 · Agent 跟随中';
+  $('winTitleText').textContent='行迹 · '+META.city+' '+dayCount()+' 日';
 }
 function render(){
   var plan=replan(),items=plan.items,alts=plan.alts;
@@ -551,6 +570,7 @@ function render(){
     $('rbList').innerHTML='<div class="rb-alt"><div class="ah">'+(DATA_READY?'这一天还没有安排':'行程装载中…')+'</div></div>';
     $('rbCnt').textContent=DATA_READY?'0 站':'';
     $('rbFabCnt').textContent=$('rbCnt').textContent;
+    $('stopNav').style.display='none';
     return;
   }
   state.cur=clamp(state.cur,0,items.length-1);
@@ -597,6 +617,7 @@ function render(){
   $('stayFill').style.width=clamp(cur.dur/120*100,8,100)+'%';
 
   renderRight(items,alts);
+  renderStopNav(items);
   if(state.view==='map')renderMap(items);
 }
 function renderRight(items,alts){
@@ -621,17 +642,31 @@ function renderRight(items,alts){
   Array.prototype.forEach.call($('rbList').querySelectorAll('[data-add]'),function(b){
     b.addEventListener('click',function(){state.forceShow[b.dataset.add]=true;commit();toast('已加回「'+S[b.dataset.add].n+'」');});});
 }
+/** 右下角站点跳转状态：站序文本 + 端点置灰（当天可见站为口径，与 replan 一致）。 */
+function renderStopNav(items){
+  var nav=$('stopNav'),n=items.length,i=state.cur;
+  if(n<1){nav.style.display='none';return;}
+  nav.style.display='flex';
+  $('stopPos').textContent=(i+1)+' / '+n;
+  $('stopPrev').disabled=i<=0;
+  $('stopNext').disabled=i>=n-1;
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    真实地图（MapLibre GL）
    ═══════════════════════════════════════════════════════════════════
-   底图：Carto 暗色矢量，走本机 /travel-basemap 代理（磁盘缓存 + 规划完成即预热）。
+   底图：高德栅格暗色化（详见下方 2026-10-15 注），走本机 /travel-basemap 代理（磁盘缓存 + SWR）。
    站点：当天行程 POI 按真实经纬度落点（编号 + 名称，点击切站）。
    路线：GET /travel-route（OSRM 开放路网，按段选步行/骑行/驾车）取真实几何；
         首次打开该天时白线「依次连接」——逐段生长，连完转流光。
    降级：无坐标的站不上图；某段取不到路网几何 → 该段用直线连并在图例里明示
-        「N 段未接路网」，不静默丢段、不假装是真路。 */
-var MAP_STYLE_PATH='/travel-basemap/style/dark';
+        「N 段未接路网」，不静默丢段、不假装是真路。
+   底图（2026-10-15）：高德栅格（/travel-basemap/style/amap-dark，位置/POI/中文
+        路名更全），暗色观感靠 canvas CSS 反色；高德网格是 GCJ-02，而行程数据
+        （POI/路线）统一 WGS-84 → 页面在「显示边界」统一 wgs2gcj（下方助手），
+        OSRM 查询参数保持 WGS-84。Carto dark 仅作样式兜底（WGS 网格，GCJ 偏移
+        ~500m，仅 server 样式路由异常时可见）。 */
+var MAP_STYLE_PATH='/travel-basemap/style/amap-dark';
 var MAP_STYLE_FALLBACK='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 var ROUTE_SRC='travel-route';
 var LEG_SRC='travel-leg';
@@ -644,6 +679,33 @@ var MODE_OF_PROFILE={walk:'walk',bike:'bike',drive:'taxi'};
 function emptyFC(){return{type:'FeatureCollection',features:[]};}
 function escHtml(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
   return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+/* 底图坐标系（2026-10-15）：高德栅格网格是 GCJ-02，行程数据统一 WGS-84。
+ * 这里只做「显示边界」转换（marker / 路线几何 / 相机视野）；/travel-route 的
+ * stops 查询参数必须保持 WGS-84（OSRM 是 WGS 路网），绝不能转换。
+ * 标准偏移算法，与 server/src/skills/travel-planning/coord-transform.ts 逐行同构
+ * （wgs84ToGcj02，正向一次即用；页面只画图不需要逆向）。 */
+function transformLat(x,y){var r=-100+2*x+3*y+0.2*y*y+0.1*x*y+0.2*Math.sqrt(Math.abs(x));
+  r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;
+  r+=(20*Math.sin(y*Math.PI)+40*Math.sin(y/3*Math.PI))*2/3;
+  r+=(160*Math.sin(y/12*Math.PI)+320*Math.sin(y*Math.PI/30))*2/3;return r;}
+function transformLon(x,y){var r=300+x+2*y+0.1*x*x+0.1*x*y+0.1*Math.sqrt(Math.abs(x));
+  r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;
+  r+=(20*Math.sin(x*Math.PI)+40*Math.sin(x/3*Math.PI))*2/3;
+  r+=(150*Math.sin(x/12*Math.PI)+300*Math.sin(x/30*Math.PI))*2/3;return r;}
+function wgs2gcjLngLat(p){                     // p=[lng,lat] → [lng,lat]
+  var lon=p[0],lat=p[1];
+  if(lon<72.004||lon>137.8347||lat<0.8293||lat>55.8271)return p;   // 境外：无偏移
+  var EE=0.00669342162296594323,A=6378245;
+  var dLat=transformLat(lon-105,lat-35),dLon=transformLon(lon-105,lat-35);
+  var rad=lat/180*Math.PI,m=Math.sin(rad);
+  m=1-EE*m*m;var sq=Math.sqrt(m);
+  dLat=(dLat*180)/((A*(1-EE))/(m*sq)*Math.PI);
+  dLon=(dLon*180)/(A/sq*Math.cos(rad)*Math.PI);
+  return [lon+dLon,lat+dLat];
+}
+function wgs2gcjPath(coords){                  // [[lng,lat],...] 整条线
+  var out=[];for(var i=0;i<coords.length;i++)out.push(wgs2gcjLngLat(coords[i]));return out;
+}
 function mapStyleUrl(){
   var base=apiBase();
   return base?base+MAP_STYLE_PATH:MAP_STYLE_FALLBACK;
@@ -689,15 +751,21 @@ function ensureMap(cb){
   if(mapState.loading)return;
   if(!window.maplibregl){console.warn('[map] MapLibre 未加载');return;}
   mapState.loading=true;
-  var c=mapState.center?[mapState.center.lng,mapState.center.lat]:[100.1595,25.6904];
+  var c=wgs2gcjLngLat(mapState.center?[mapState.center.lng,mapState.center.lat]:[100.1595,25.6904]);
   var map=new maplibregl.Map({
     container:$('map'),style:mapStyleUrl(),
     center:c,zoom:mapState.center?12:11,
     attributionControl:false,dragRotate:false,pitchWithRotate:false
   });
+  // 缩放交互（2026-10-15 二次定调）：滚轮缩放根因在 webview_windows 插件原生
+  // SendScroll 把 WHEEL 事件坐标硬编码 (0,0)——已 fork 修复改用光标实时位置，
+  // 页面内 +/- 按钮不再需要（用户要求删除），按 MapLibre 默认滚轮/拖拽交互。
   mapState.map=map;
   map.on('load',function(){
     mapState.ready=true;mapState.loading=false;
+    // 离屏 boot 容器功成身退（视图仍隐藏时收回 display:none；已展开则保留 .open 布局）
+    var vm=$('viewMap');
+    if(vm&&!vm.classList.contains('open'))vm.classList.remove('boot');
     tuneBasemap(map);
     addRouteLayers();
     if(state.view==='map')renderMap(replan().items);
@@ -710,7 +778,28 @@ function ensureMap(cb){
   });
   map.on('error',function(e){console.warn('[map]',e&&e.error&&e.error.message);});
 }
-/** 路线图层组：轨道（未连接）/ 已连接白线 + 外发光 / 直线降级 / 生长中的当前段 / 流光 */
+/** 载荷到手就离屏建图（用户还在「今日」视图的这几秒里把 MapLibre 全链路建完）：
+    样式请求、精灵、首屏瓦片、WebGL 上下文都不占用户等待时间，切「路线」视图
+    从「建图+拉样式+等瓦片」变成一次 resize+贴标记。 */
+function bootMapEarly(){
+  if(mapState.map||mapState.loading)return;
+  var vm=$('viewMap');
+  if(!vm||!window.maplibregl)return;
+  // 没有任何可用坐标时建图无意义（会停在默认中心）
+  var hasCoord=!!mapState.center;
+  if(!hasCoord){
+    (ORDER[1]||[]).forEach(function(id){if(S[id]&&S[id].loc)hasCoord=true;});
+  }
+  if(!hasCoord)return;
+  vm.classList.add('boot');
+  ensureMap();
+}
+/** 路线图层组：轨道（未连接）/ 已连接白线 + 外发光 / 直线降级 / 生长中的当前段 / 流光
+ *
+ * 颜色「反色预补偿」（2026-10-15 底图切高德暗色化）：底图暗色 = canvas CSS
+ * invert(1)+hue-rotate(180deg)，canvas 上一切颜色都被反转——路线要**显示为白**
+ * 就必须**画成黑**（#000 → invert → 白）；半透明度不参与反色，glow/流光透明度
+ * 保持原值。站点 marker 是 DOM 元素（不在 canvas 里），不受滤镜影响。 */
 function addRouteLayers(){
   var map=mapState.map;
   if(!map||map.getSource(ROUTE_SRC))return;
@@ -719,23 +808,23 @@ function addRouteLayers(){
   var cap={ 'line-cap':'round','line-join':'round' };
   map.addLayer({id:'route-track',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'todo'],layout:cap,
-    paint:{'line-color':'#ffffff','line-width':1.6,'line-opacity':.15,'line-dasharray':[1.2,2.2]}});
+    paint:{'line-color':'#000000','line-width':1.6,'line-opacity':.15,'line-dasharray':[1.2,2.2]}});
   map.addLayer({id:'route-glow',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#ffffff','line-width':14,'line-opacity':.10,'line-blur':7}});
+    paint:{'line-color':'#000000','line-width':14,'line-opacity':.10,'line-blur':7}});
   map.addLayer({id:'route-line',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':.97}});
+    paint:{'line-color':'#000000','line-width':3.4,'line-opacity':.97}});
   // 直线降级段：细虚线，与真实路网一眼可分
   map.addLayer({id:'route-straight',type:'line',source:ROUTE_SRC,
     filter:['all',['==',['get','state'],'linked'],['==',['get','real'],false]],layout:cap,
-    paint:{'line-color':'#ffffff','line-width':2,'line-opacity':.62,'line-dasharray':[1,2.4]}});
+    paint:{'line-color':'#000000','line-width':2,'line-opacity':.62,'line-dasharray':[1,2.4]}});
   map.addLayer({id:'route-leg',type:'line',source:LEG_SRC,layout:cap,
-    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':1}});
+    paint:{'line-color':'#000000','line-width':3.4,'line-opacity':1}});
   // 连完后的流光：白虚线循环推进（复刻旧行程页的流光语言）
   map.addLayer({id:'route-flow',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#ffffff','line-width':2.2,'line-opacity':0,'line-dasharray':DASH_SEQ[0]}});
+    paint:{'line-color':'#000000','line-width':2.2,'line-opacity':0,'line-dasharray':DASH_SEQ[0]}});
 }
 function updateFlow(on){
   var map=mapState.map;
@@ -783,7 +872,7 @@ function renderMapPois(items){
     if(it.sp.k!=='stay')num++;
     if(!loc)return;
     var m=new maplibregl.Marker({element:poiEl(it,i,num),anchor:'center'})
-      .setLngLat([loc.lng,loc.lat]).addTo(map);
+      .setLngLat(wgs2gcjLngLat([loc.lng,loc.lat])).addTo(map);
     mapState.markers.push(m);
   });
 }
@@ -833,7 +922,7 @@ function commitRoute(seq,by,linkedCount){
   var features=[];
   for(var i=0;i+1<seq.length;i++){
     var leg=by[i],real=!!leg;
-    var geom=real?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
+    var geom=wgs2gcjPath(real?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]]);
     features.push({type:'Feature',
       properties:{state:i<linkedCount?'linked':'todo',real:real,mode:real?leg.mode:'straight'},
       geometry:{type:'LineString',coordinates:geom}});
@@ -862,15 +951,15 @@ function fitToSeq(seq,animate){
   var opts={duration:animate===false?0:650};
   // 没有任何可用站点坐标：退回载荷给的行程中心（目的地），别停在一个不相干的地方
   if(!seq||!seq.length){
-    if(mapState.center)map.easeTo({center:[mapState.center.lng,mapState.center.lat],zoom:12,duration:opts.duration});
+    if(mapState.center)map.easeTo({center:wgs2gcjLngLat([mapState.center.lng,mapState.center.lat]),zoom:12,duration:opts.duration});
     return;
   }
   if(seq.length===1){
-    map.easeTo({center:[seq[0].lng,seq[0].lat],zoom:14.5,duration:opts.duration});
+    map.easeTo({center:wgs2gcjLngLat([seq[0].lng,seq[0].lat]),zoom:14.5,duration:opts.duration});
     return;
   }
   var b=new maplibregl.LngLatBounds();
-  seq.forEach(function(p){b.extend([p.lng,p.lat]);});
+  seq.forEach(function(p){b.extend(wgs2gcjLngLat([p.lng,p.lat]));});
   map.fitBounds(b,{padding:{top:70,bottom:70,left:120,right:170},
     duration:opts.duration,maxZoom:15.5});
 }
@@ -939,7 +1028,7 @@ function playRoute(items,seq,list,key){
   function nextLeg(){
     if(i>=seq.length-1){commitRoute(seq,by,seq.length-1);updateFlow(true);return;}
     var leg=by[i];
-    var coords=leg?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
+    var coords=wgs2gcjPath(leg?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]]);
     growLeg(coords,function(){
       i++;
       commitRoute(seq,by,i);
@@ -997,7 +1086,9 @@ Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
     var v=b.dataset.view;
     if(v==='now'){state.view='now';$('viewMap').classList.remove('open');}
     else if(v==='map'){
-      state.view='map';$('viewMap').classList.add('open');
+      state.view='map';
+      $('viewMap').classList.remove('boot');   /* 离屏预建期就点开：摘掉屏外定位 */
+      $('viewMap').classList.add('open');
       // 容器刚从 display:none 恢复：等一帧拿到真实尺寸，再让 MapLibre 重算视口
       requestAnimationFrame(function(){
         if(mapState.map)mapState.map.resize();
@@ -1018,6 +1109,13 @@ $('rbCollapse').addEventListener('click',function(){
 $('rbFab').addEventListener('click',function(){
   $('rightbar').classList.remove('collapsed');
   $('rbFab').classList.remove('on');
+});
+/* 右下角站点跳转：点击走 setCur（与右栏列表/旅程带/地图同一 state.cur 联动），
+   端点置灰由 renderStopNav 在每次 render 后刷新 */
+$('stopPrev').addEventListener('click',function(){if(state.cur>0)setCur(state.cur-1);});
+$('stopNext').addEventListener('click',function(){
+  var n=replan().items.length;
+  if(state.cur<n-1)setCur(state.cur+1);
 });
 
 function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},1900);}
@@ -1061,7 +1159,8 @@ function enrichLive(sp){
   liveCache[sp.id]=1;
   var base=apiBase();
   if(!base)return;
-  var qs='name='+encodeURIComponent(sp.n);
+  var qs='name='+encodeURIComponent(sp.n)+'&photos=1';
+  if(sp.t)qs+='&type='+encodeURIComponent(sp.t);
   if(sp.loc)qs+='&lat='+sp.loc.lat+'&lng='+sp.loc.lng;
   fetch(base+'/travel-poi/details?'+qs,{headers:{Accept:'application/json'}})
     .then(function(r){return r.ok?r.json():null;})
@@ -1206,7 +1305,7 @@ function adaptStop(entry,dayKey,idx){
   if(!note)note=str(entry.address);
   return{id:'d'+dayKey+'e'+idx,n:str(entry.name)||'行程安排',k:k,tag:TAG_BY_TYPE[type]||'安排',
     img:imgs.length?str(imgs[0]):'',base:dur,xy:null,loc:loc,note:note,
-    anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
+    t:type,anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
     startHint:range?range.start:null,text:text,ride:k==='ride',
     outdoor:OUTDOOR_RE.test(text)&&k!=='indoor',heavy:HEAVY_RE.test(text)};
 }
@@ -1312,7 +1411,12 @@ window.__travelPanel={
       ?validLatLng(payload.center.latitude,payload.center.longitude):null;
     resetMapState();
     warmBasemap(payload);
+    bootMapEarly();
     render();
+    // 全量照片预热：render 已预热当前天（当前站经 setImg 最先在载），
+    // 这里把其余天跟进（有图站直接入队、缺图站经 enrichLive 补图后自动入队）。
+    // 预热发生在窗口隐藏期——用户显窗时各天照片通常已就绪，进窗/切天/切站零等待。
+    for(var d=1;d<=dayCount();d++)if(d!==state.day)preloadDayAssets(d);
   },
   /** Agent 侧感知结论（天气/步速/对话）：页面据此重排，并展示 Agent 的解释文案。 */
   applySignal:function(ev,note){
@@ -1352,6 +1456,23 @@ $('titlebar').addEventListener('dblclick',function(e){
 
 /* ══════════════════ 启动 ══════════════════ */
 render();
+/* ?id / ?planId 自取载荷（浏览器标签页路径，与 mobile.html 同款）：
+   宿主形态走桥注入不受影响；真实仓库 planId 走 /travel/plans/:id（读取装饰会
+   顺带把媒体库补图带出），内存载荷 id 走 /travel-plans/:id。 */
+(function bootById(){
+  var pm=/[?&]planId=([A-Za-z0-9_-]+)/.exec(location.search);
+  var m=/[?&]id=([A-Za-z0-9]+)/.exec(location.search);
+  if(!pm&&!m)return;
+  var base=apiBase();
+  if(!base)return;
+  fetch(pm?base+'/travel/plans/'+pm[1]:base+'/travel-plans/'+m[1],{headers:{Accept:'application/json'}})
+    .then(function(r){if(!r.ok)throw new Error('HTTP '+r.status);return r.json();})
+    .then(function(j){
+      var payload=pm?(j&&j.plan):j;
+      if(payload)window.__travelPanel.loadPlan(payload);
+    })
+    .catch(function(){/* 取不到：保持当前展示，不打断演示态 */});
+})();
 // 窗口尺寸变化：MapLibre 需要显式 resize 才会重算画布与视口（不会自动跟随容器）
 window.addEventListener('resize',function(){
   if(state.view==='map'&&mapState.map)mapState.map.resize();

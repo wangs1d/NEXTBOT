@@ -5,7 +5,6 @@ import "package:flutter/material.dart";
 import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/services/schedule_api_client.dart";
-import "../core/services/world_api_client.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../features/chat/travel_plan_launcher.dart";
 import "../features/chat/travel_plan_mobile_page.dart";
@@ -53,7 +52,6 @@ class MobileHomePage extends StatefulWidget {
 class MobileHomePageState extends State<MobileHomePage>
     with WidgetsBindingObserver {
   late final MobileChatController _chatController;
-  late final WorldApiClient _worldApi;
   late final ScheduleApiClient _scheduleApi;
 
   int _tabIndex = 0;
@@ -72,7 +70,6 @@ class MobileHomePageState extends State<MobileHomePage>
     WidgetsBinding.instance.addObserver(this);
     _tabIndex = widget.initialTabIndex.clamp(0, 2);
     _chatController = widget.chatController ?? MobileChatController();
-    _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
     _scheduleApi = ScheduleApiClient(baseUrl: ApiConfig.httpBase);
     _wireAmbientFeeds();
     // 行程规划入口接线（2026-10-12 与桌面端对齐）：行程卡「打开行程规划」
@@ -216,7 +213,6 @@ class MobileHomePageState extends State<MobileHomePage>
       case 2:
         return MobileProfilePage(
           chatController: _chatController,
-          worldApi: _worldApi,
           themeMode: widget.themeMode,
           onThemeModeChanged: widget.onThemeModeChanged,
           onLogout: widget.onLogout,

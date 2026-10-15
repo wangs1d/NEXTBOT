@@ -1,13 +1,14 @@
 import { resolveActorId } from "../agent/actor-id.js";
 import type { MessagePlatformGateway } from "../services/message-platform-gateway.js";
 import type { MessageHubService } from "../services/message-hub-service.js";
+import type { FriendMessageService } from "../services/friend-message-service.js";
 import { runChatTurnForActor } from "../services/chat-turn-runner.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { ToolContext, ToolRegistry } from "./tool-registry.js";
 
 export function registerMessageHubTools(
   registry: ToolRegistry,
-  deps: { hub: MessageHubService; gateway: MessagePlatformGateway; runtime: RuntimeFacade },
+  deps: { hub: MessageHubService; gateway: MessagePlatformGateway; runtime: RuntimeFacade; friendMessages?: FriendMessageService },
 ): void {
   registry.register("messages.overview", async (_params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);
@@ -72,6 +73,34 @@ export function registerMessageHubTools(
           ok: false,
           error: "手机不在线，无法代发短信",
           errorCode: "TOOL_UNAVAILABLE",
+        };
+      }
+      // friend（站内好友消息）：经 FriendMessageService 统一投递（对方 hub 持久
+      // 入站 + WS 直推 + 本方留档），不走 MessagePlatformGateway 的外部桥。
+      if (conversation.platform === "friend") {
+        if (!deps.friendMessages) {
+          return { ok: false, error: "站内好友消息通道未装配", errorCode: "TOOL_UNAVAILABLE" };
+        }
+        const toActorId = conversation.participantId?.trim() || conversation.channelId.trim();
+        const sent = await deps.friendMessages.send({
+          fromActorId: actorId,
+          toActorId,
+          text,
+          ...(typeof params.replyToMessageId === "string" && params.replyToMessageId.trim()
+            ? { replyToMessageId: params.replyToMessageId.trim() }
+            : {}),
+        });
+        if (!sent.ok) {
+          return { ok: false, error: sent.error, errorCode: "TOOL_UNAVAILABLE" };
+        }
+        const updated = deps.hub.getConversation(actorId, conversationId);
+        return {
+          ok: true,
+          delivered: true,
+          conversation: updated ?? conversation,
+          summary: sent.pushedToPeer
+            ? "站内消息已送达对方（在线直推）。"
+            : "站内消息已持久送达对方收件箱（对方离线，上线会补投提醒）。",
         };
       }
       const sendResult = await deps.gateway.send({

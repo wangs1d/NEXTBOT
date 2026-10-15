@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。
@@ -12,6 +12,12 @@ param(
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。
   # 不烤入的话捆绑用户的反馈只会落在本机数据库，管理后台收不到。
   [string]$ControlPlaneUrl = "http://login.nextbot.top",
+  # 安装包默认搜索端点：运营方云端搜索代理（nginx :80 -> 主服务 /v1/search 路由，
+  # key 只存云端，客户端零 key）。内测/公测发行搜索统一由运营方提供。
+  [string]$SearchApiUrl = "http://47.98.122.29/v1/search",
+  # 搜索代理访问令牌：烤入 SEARCH_API_KEY 由客户端自动携带（authorization: Bearer），
+  # 云端 ANYSEARCH_PROXY_ACCESS_TOKEN 校验——扫描器拿到端点无令牌 403。与云端同值
+  [string]$SearchApiToken = "nbsrch_9f4c2e7a81d63b504ae7c2f19d83b546",
   # staging 根目录：刻意用短路径，避开 node_modules 深路径 260 字符上限
   [string]$StageRootPath = "E:\PAStage",
   # 发行版本：internal=内测版（默认，能力全量，AppId/文件名同历史）；oss=开源版
@@ -156,11 +162,16 @@ if ($leakedMedia) {
   throw "staging 混入了运行期媒体资产（$($leakedMedia -join ', ')）——它们不该随安装包分发，请只拷 travel-knowledge"
 }
 
-# 3.9 开源版差异注入：runtime\.env 声明 NEXTBOT_EDITION=oss（服务端版本闸的唯一
-# 开关，loadServerEnv 从 runtime 根读 .env）+ 独立发行清单 client-manifest.oss.json
-# （客户端以 ?edition=oss 拉取；url 留空 = 开源版自分发，不弹指向 ECS 的升级提示）。
+# 3.9 runtime\.env：搜索 API 默认走运营方云端搜索代理（key 只存云端，客户端零 key
+# 零配置），内测/开源两版一致——搜索由运营方统一提供。开源版追加 NEXTBOT_EDITION=oss
+# （服务端版本闸的唯一开关，loadServerEnv 从 runtime 根读 .env）。
+$searchEnvLines = @("SEARCH_API_PROVIDER=anysearch", "ANYSEARCH_ENDPOINT=$SearchApiUrl", "SEARCH_API_KEY=$SearchApiToken")
 if ($Edition -eq 'oss') {
-  Set-Content -Path (Join-Path $StageRuntime '.env') -Value "NEXTBOT_EDITION=oss" -Encoding ascii
+  $searchEnvLines = @("NEXTBOT_EDITION=oss") + $searchEnvLines
+}
+# 注意 PowerShell 5.1 的 utf8 带 BOM，Node JSON.parse 会炸，故用 ascii（内容全 ASCII）
+Set-Content -Path (Join-Path $StageRuntime '.env') -Value $searchEnvLines -Encoding ascii
+if ($Edition -eq 'oss') {
   $ossManifest = [ordered]@{
     latest     = $Version
     minVersion = $Version

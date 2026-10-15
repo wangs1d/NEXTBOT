@@ -72,6 +72,24 @@ describe("destinationCoverStore v2 (升级映射)", () => {
       null,
     );
   });
+
+  it("evict：移除并返回旧记录（无视 TTL），get 立即落空；升级映射保留可继续改发新封面", () => {
+    destinationCoverStore.set("测试地丁", { url: "/travel/media/assets/destcoverd-444/old.jpg", source: "vlm-pick" });
+    destinationCoverStore.registerCoverDir("测试地丁", "/travel/media/assets/destcoverd-444/old.jpg");
+    const removed = destinationCoverStore.evict("测试地丁");
+    assert.ok(removed);
+    assert.equal(removed.url, "/travel/media/assets/destcoverd-444/old.jpg");
+    // 驱逐后读取落空（refresh 链路据此强制重解析）
+    assert.equal(destinationCoverStore.get("测试地丁"), null);
+    assert.equal(destinationCoverStore.evict("测试地丁"), null);
+    assert.equal(destinationCoverStore.evict("从未规划过的地方"), null);
+
+    // 刷新换新图后：目录级升级映射仍在，旧资产请求改发当前封面
+    destinationCoverStore.set("测试地丁", { url: "/travel/media/assets/destcoverd-444/new.jpg", source: "vlm-pick" });
+    const hit = destinationCoverStore.resolveSuperseded("/travel/media/assets/destcoverd-444/old.jpg");
+    assert.ok(hit);
+    assert.equal(hit.url, "/travel/media/assets/destcoverd-444/new.jpg");
+  });
 });
 
 describe("scoreCoverCandidate (封面关键词预排序)", () => {

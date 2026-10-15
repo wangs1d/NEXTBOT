@@ -3,11 +3,11 @@ import "dart:convert";
 import "dart:io" show HttpClient, HttpClientRequest, HttpClientResponse, HttpHeaders;
 
 import "package:flutter/material.dart";
-import "package:flutter/painting.dart" show debugNetworkImageHttpClientProvider;
 import "package:flutter_test/flutter_test.dart";
 
 import "package:private_ai_agent/core/utils/agent_result_parser.dart";
 import "package:private_ai_agent/features/chat/agent_result_card.dart";
+import "package:private_ai_agent/features/chat/travel_plan_models.dart";
 
 /// 1x1 透明 PNG（候选链回退测试的「真实可解码图」）
 const String _kPng1x1Base64 =
@@ -159,6 +159,13 @@ AgentResultData _degradedStructuredData() {
 }
 
 void main() {
+  setUp(() {
+    // 封面活取默认关断：卡片测试只验证卡内数据的确定性渲染；
+    // 活取行为由专门的桩注入测试覆盖（见「活取封面到达后换上新图」）。
+    TravelLiveCover.resetForTesting();
+    TravelLiveCover.enabled = false;
+  });
+
   Future<void> pumpCard(WidgetTester tester, AgentResultData data) async {
     await tester.pumpWidget(
       MaterialApp(
@@ -173,20 +180,21 @@ void main() {
     await tester.pump(const Duration(milliseconds: 50));
   }
 
-  testWidgets("海报卡：徽章/天数/日期区间/简介/记得带/按钮渲染", (WidgetTester tester) async {
+  testWidgets("海报卡：徽章/天数/日期区间/简介/按钮渲染（记得带已撤下）", (WidgetTester tester) async {
     await pumpCard(tester, _structuredPlanData());
 
     expect(find.text("马尔代夫"), findsOneWidget);
     expect(find.textContaining("天行程"), findsOneWidget);
     expect(find.text("09-05 ~ 09-09"), findsOneWidget);
     expect(find.text("印度洋上的珊瑚岛国，一岛一酒店，以水上屋、浮潜与纯净泻湖闻名"), findsOneWidget);
-    expect(find.text("记得带"), findsOneWidget);
-    expect(find.text("防晒霜 SPF50+"), findsOneWidget);
+    // 2026-10-15 用户定稿：「记得带」叮嘱行撤下，打包建议只在行程规划面板里看
+    expect(find.text("记得带"), findsNothing);
+    expect(find.text("防晒霜 SPF50+"), findsNothing);
     expect(find.text("打开行程规划"), findsOneWidget);
     expect(find.text("共 5 天 · 1 项安排"), findsOneWidget);
 
     // 2026-09-25 用户定稿「卡面极简」：逐日地标串不再上卡面（旧断言要求 Day
-    // 摘要在卡面，与定稿相反），卡面只保留 海报 + 叮嘱 + 主入口 + 脚注
+    // 摘要在卡面，与定稿相反），卡面只保留 海报 + 主入口 + 脚注
     expect(find.textContaining("Day 1"), findsNothing);
   });
 
@@ -199,6 +207,26 @@ void main() {
     final NetworkImage poster = images.first.image as NetworkImage;
     expect(poster.url, contains("destination-cover.jpg"));
     expect(poster.url, isNot(contains("/poster.jpg")));
+  });
+
+  testWidgets("活取封面到达后海报换上新图（历史卡片不改存量数据自动换新）", (WidgetTester tester) async {
+    TravelLiveCover.enabled = true;
+    TravelLiveCover.fetcher = (String destination) async =>
+        destination == "马尔代夫" ? "/agent/images/live-cover.jpg" : null;
+    await pumpCard(tester, _coverPlanData());
+
+    // 活取异步返回：走帧等 setState 落地，海报第一候选应为活取封面
+    bool switchedToLive = false;
+    for (int i = 0; i < 8; i++) {
+      await tester.pump(const Duration(milliseconds: 50));
+      final Iterable<Image> images = tester.widgetList<Image>(find.byType(Image));
+      if (images.isNotEmpty &&
+          (images.first.image as NetworkImage).url.contains("live-cover.jpg")) {
+        switchedToLive = true;
+        break;
+      }
+    }
+    expect(switchedToLive, isTrue, reason: "服务端封面库的新封面应自动上卡");
   });
 
   testWidgets("无封面时退回首个有图景点实拍（兼容旧数据）", (WidgetTester tester) async {

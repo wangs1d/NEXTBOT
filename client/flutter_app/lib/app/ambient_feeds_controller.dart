@@ -49,6 +49,9 @@ class AmbientFeedsController {
   /// 中继消息落本地库 + 入列表（State 做 setState 持久化）。
   Future<void> Function(AgentRelayMessage message)? persistRelayMessage;
 
+  /// 中继消息是否已在本端落库（按 messageId 去重；重连补投/重启后不重复打扰）。
+  bool Function(String messageId)? isRelayMessageKnown;
+
   /// 中继消息应用内提示。
   void Function(String fromSessionId)? showRelayToast;
 
@@ -142,36 +145,6 @@ class AmbientFeedsController {
     return "提醒";
   }
 
-  /// 生活消息入站（邮件 / 微信服务通知 / 通用消息桥等 MessageHub 汇入源）→
-  /// 灵动岛即时告知（2026-10-05 定调：消息类统一上岛；岛=告知，弹窗=决策）。
-  /// 显示行 = 服务端摘好的 summary（消息首行=事情本身），空则回落来源标题。
-  /// 手机后台不打扰（重要消息走系统通知，非重要静默等用户回来看聚合）。
-  Future<void> onHubMessageArrived(Map<String, dynamic> payload) async {
-    try {
-      final String summary = payload["summary"]?.toString().trim() ?? "";
-      final String sourceTitle = payload["title"]?.toString().trim() ?? "";
-      final String display = summary.isNotEmpty
-          ? summary
-          : (sourceTitle.isNotEmpty ? sourceTitle : "新消息");
-      final bool high = payload["importance"]?.toString() == "high";
-
-      if (isMobile && _backgrounded) {
-        if (high) {
-          unawaited(LocalNotificationService.show(
-            title: display, body: sourceTitle,
-          ));
-        }
-        return;
-      }
-      // 全屏打断白名单（2026-10-13 定调）：仅高优消息（外卖/快递等到货类
-      // 服务通知）破屏展报；普通消息不 urgent，全屏/忙碌时原生端整体跳过，
-      // 非全屏时行为不变（即时上岛 6s 档）。
-      IslandReminderScheduler.instance.fireNow(title: display, urgent: high);
-    } catch (e, st) {
-      debugPrint("[hub] hub.message_arrived failed: $e\n$st");
-    }
-  }
-
   /// 站内信：平台/运营侧推送（服务端已落盘必达，此处只做即时提醒）。
   Future<void> onInboxMessage(Map<String, dynamic> payload) async {
     final String inboxTitle = payload["title"]?.toString() ?? "新消息";
@@ -192,30 +165,45 @@ class AmbientFeedsController {
     }
   }
 
-  /// 中继消息（多会话 peer 互发）：构造入站模型 → 落库/入列表 → 提示。
+  /// 中继消息（好友站内信 peer 互发）：构造入站模型 → 落库/入列表 → 触达分流。
+  /// 2026-10-15 闭环：服务端 hub 持久落库 + 重连补投（replayed 标记）；
+  /// 本端按 messageId 去重——已落库的只更新不重复提示；手机后台走系统通知
+  /// （与站内信 onInboxMessage 同分流），前台 SnackBar 提示。
   Future<void> onPeerMessage(Map<String, dynamic> payload) async {
     final String messageId =
         payload["messageId"]?.toString() ?? "relay-unknown";
     final String fromSessionId = payload["fromSessionId"]?.toString() ?? "";
-    final String toSessionId = payload["toSessionId"]?.toString() ?? "";
     final String body = payload["text"]?.toString() ?? "";
     final String? subject = payload["subject"]?.toString();
+    final String fromName =
+        payload["fromName"]?.toString().trim().isNotEmpty == true
+            ? payload["fromName"].toString()
+            : fromSessionId;
     final String receivedRaw =
         payload["receivedAt"]?.toString() ?? DateTime.now().toIso8601String();
     DateTime receivedAt = DateTime.now();
     try {
       receivedAt = DateTime.parse(receivedRaw);
     } catch (_) {}
+    final bool known = isRelayMessageKnown?.call(messageId) ?? false;
     final AgentRelayMessage inbound = AgentRelayMessage(
       messageId: messageId,
       fromSessionId: fromSessionId,
-      toSessionId: toSessionId,
+      toSessionId: payload["toSessionId"]?.toString() ?? "",
       text: body,
       subject: (subject == null || subject.isEmpty) ? null : subject,
       receivedAt: receivedAt,
     );
     await persistRelayMessage?.call(inbound);
-    showRelayToast?.call(fromSessionId);
+    if (known) return; // 补投/重放：只更新落库，不重复打扰
+    if (isMobile && _backgrounded) {
+      unawaited(LocalNotificationService.show(
+        title: "来自 $fromName 的消息",
+        body: body,
+      ));
+    } else {
+      showRelayToast?.call(fromName);
+    }
   }
 
   // ── 主动性反馈回传（原 State 内联 HTTP 收口，纯 API 无 UI 依赖） ──

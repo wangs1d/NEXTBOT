@@ -96,6 +96,21 @@ class TravelDestinationCoverStore {
     return hit?.url ? { url: hit.url, source: hit.source } : null;
   }
 
+  /**
+   * 驱逐目的地封面（强制刷新用）：移除并返回旧记录（无视 TTL）；无记录返回
+   * null。superseded/coverDirs 升级映射刻意保留——刷新换新图后，历史卡片烤死
+   * 的旧资产目录/旧远程 URL 仍能改发当前封面。
+   */
+  evict(destination: string): DestinationCover | null {
+    this.ensureLoaded();
+    const key = normalizeDest(destination);
+    const hit = this.mem.get(key);
+    if (!hit) return null;
+    this.mem.delete(key);
+    this.persist();
+    return { url: hit.url, source: hit.source };
+  }
+
   set(destination: string, cover: DestinationCover): void {
     const url = cover.url?.trim();
     if (!url) return;

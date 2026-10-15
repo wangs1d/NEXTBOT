@@ -1,12 +1,15 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 
 import "../../core/services/world_api_client.dart";
 
 /// 好友聊天面板（内嵌右侧面板，不再全屏路由）。
 ///
-/// 消息下发真实链路 = 用户在聊天轮里让 agent 调 agent.send_to_peer；本面板
-/// 当前仅本地回显输入（发送直连通道 TODO，见 _sendMessage），收到
-/// agent.peer_message 推送时的展示由 MailboxPage 的选中联动负责。
+/// 2026-10-15 闭环：历史加载与直连发送走 hub platform=friend 会话的 HTTP 面
+/// （GET/POST /friends/messages），与 agent.send_to_peer 同一投递内核；
+/// 打开面板即标读（POST /friends/messages/read），重连补投随之停止。
+/// 收到 agent.peer_message 推送时的展示由 MailboxPage 的选中联动负责。
 class FriendChatPage extends StatefulWidget {
   const FriendChatPage({
     super.key,
@@ -33,16 +36,13 @@ class _FriendChatPageState extends State<FriendChatPage> {
 
   final List<Map<String, dynamic>> _messages = [];
   bool _loading = false;
+  bool _sending = false;
+  String? _error;
 
   @override
   void initState() {
     super.initState();
-    // TODO: 加载历史消息（需要后端支持）
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
-      }
-    });
+    _loadHistory();
   }
 
   @override
@@ -52,38 +52,72 @@ class _FriendChatPageState extends State<FriendChatPage> {
     super.dispose();
   }
 
+  Future<void> _loadHistory() async {
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      final result = await widget.api.getFriendMessages(widget.friendActorId, limit: 100);
+      final List<dynamic> raw = (result["messages"] as List<dynamic>? ?? <dynamic>[]);
+      final List<Map<String, dynamic>> loaded = raw
+          .whereType<Map<String, dynamic>>()
+          .map((m) => <String, dynamic>{
+                "text": (m["text"] ?? "").toString(),
+                "isMe": m["direction"] == "outbound",
+                "timestamp": (m["createdAt"] ?? "").toString(),
+              })
+          .toList();
+      if (!mounted) return;
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(loaded);
+      });
+      _scrollToBottom();
+      // 打开面板即读：清服务端未读，重连补投不再重推
+      unawaited(widget.api.markFriendMessagesRead(widget.friendActorId));
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = "历史加载失败：$e");
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scrollController.hasClients) return;
+      _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+    });
+  }
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || _sending) return;
 
-    setState(() => _loading = true);
-
+    setState(() => _sending = true);
     try {
-      // TODO: 直连发送通道（对端 agent.send_to_peer 的 HTTP 出口）尚未建；
-      // 当前仅本地回显，真实发送走对 agent 说「给好友发消息」。
+      final result = await widget.api.sendFriendMessage(widget.friendActorId, text);
+      if (result["ok"] != true) {
+        throw Exception((result["message"] ?? result["error"] ?? "发送失败").toString());
+      }
+      if (!mounted) return;
       setState(() {
         _messages.add({
           "text": text,
           "isMe": true,
-          "timestamp": DateTime.now().toIso8601String(),
+          "timestamp": DateTime.now().toUtc().toIso8601String(),
         });
+        _error = null;
       });
-
       _controller.clear();
-
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (_scrollController.hasClients) {
-          _scrollController.animateTo(
-            _scrollController.position.maxScrollExtent,
-            duration: const Duration(milliseconds: 300),
-            curve: Curves.easeOut,
-          );
-        }
-      });
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _error = "发送失败：$e");
     } finally {
-      if (mounted) {
-        setState(() => _loading = false);
-      }
+      if (mounted) setState(() => _sending = false);
     }
   }
 
@@ -112,12 +146,34 @@ class _FriendChatPageState extends State<FriendChatPage> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              IconButton(
+                icon: _loading
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.refresh, size: 18),
+                tooltip: "刷新",
+                visualDensity: VisualDensity.compact,
+                onPressed: _loading ? null : _loadHistory,
+              ),
             ],
           ),
         ),
+        if (_error != null)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            child: Text(
+              _error!,
+              style: theme.textTheme.bodySmall?.copyWith(
+                color: theme.colorScheme.error,
+              ),
+            ),
+          ),
         // 消息列表
         Expanded(
-          child: _messages.isEmpty
+          child: _messages.isEmpty && !_loading
               ? Center(
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
@@ -138,7 +194,7 @@ class _FriendChatPageState extends State<FriendChatPage> {
                       Padding(
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                         child: Text(
-                          "直接对 agent 说「给 TA 发消息」即可送达",
+                          "直接输入发送，或对 agent 说「给 TA 发消息」",
                           textAlign: TextAlign.center,
                           style: theme.textTheme.bodySmall?.copyWith(
                             color: theme.colorScheme.onSurfaceVariant,
@@ -190,14 +246,14 @@ class _FriendChatPageState extends State<FriendChatPage> {
               ),
               const SizedBox(width: 4),
               IconButton(
-                icon: _loading
+                icon: _sending
                     ? const SizedBox(
                         width: 18,
                         height: 18,
                         child: CircularProgressIndicator(strokeWidth: 2),
                       )
                     : const Icon(Icons.send, size: 20),
-                onPressed: _loading ? null : _sendMessage,
+                onPressed: _sending ? null : _sendMessage,
                 color: theme.colorScheme.primary,
                 visualDensity: VisualDensity.compact,
               ),
@@ -259,13 +315,11 @@ class _FriendChatPageState extends State<FriendChatPage> {
                             : theme.colorScheme.onSurface,
                       ),
                     ),
-                  if (timestamp != null)
+                  if (timestamp != null && timestamp.isNotEmpty)
                     Padding(
                       padding: const EdgeInsets.only(top: 2),
                       child: Text(
-                        DateTime.parse(timestamp)
-                            .toString()
-                            .substring(11, 16),
+                        _formatTime(timestamp),
                         style: theme.textTheme.bodySmall?.copyWith(
                           color: theme.colorScheme.onSurfaceVariant,
                           fontSize: 9,
@@ -281,4 +335,15 @@ class _FriendChatPageState extends State<FriendChatPage> {
       ),
     );
   }
+
+  /// ISO 时间转本地 HH:mm；解析失败回退原串切片。
+  String _formatTime(String iso) {
+    try {
+      final dt = DateTime.parse(iso).toLocal();
+      return "${dt.hour.toString().padLeft(2, "0")}:${dt.minute.toString().padLeft(2, "0")}";
+    } catch (_) {
+      return iso.length >= 16 ? iso.substring(11, 16) : iso;
+    }
+  }
 }
+

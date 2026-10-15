@@ -285,6 +285,11 @@ export class MessageHubSqliteStore {
     `);
   }
 
+  /** 关闭底层 SQLite 连接（测试 teardown / 进程优雅退出用）。 */
+  close(): void {
+    this.db.close();
+  }
+
   upsertConversation(input: ConversationUpsertInput): MessageHubConversation {
     this.upsertConversationStmt.run({
       conversation_id: input.conversationId,

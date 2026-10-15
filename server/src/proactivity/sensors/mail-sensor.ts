@@ -42,6 +42,9 @@ export class MailSensor implements ProactiveSensor {
           from: mail.from,
           subject: mail.subject,
           importance,
+          // 正文摘要（截 500 字）参与 SourceStore 实体索引（2026-10-14）：
+          // 正文实体（地点/人名/订单号词）从此可被跨源检索命中
+          text: mail.textSnippet?.slice(0, 500),
           // 跨源实体候选：发件人（"张总"）+ 主题（"三亚"）
           entities: entityHints(mail.from, mail.subject),
         },

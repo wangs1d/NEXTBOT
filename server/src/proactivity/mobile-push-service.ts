@@ -266,8 +266,8 @@ export class MobilePushService {
   private dirty = false;
 
   constructor(private readonly deps: MobilePushDeps) {
-    // 极光已按用户要求移除（2026-10-13）：激活路径只剩 huawei 直连 / bark / webhook。
-    // JPushProvider 类保留仅供参考，不再进激活列表。
+    // 极光 2026-10-15 短暂重接后再次移除（用户定调）：小米厂商通道需应用上架 +
+    // 企业开发者账号，当前不具备。JPushProvider 类保留仅供参考，不再进激活列表。
     const envProviders = [HuaweiPushProvider.fromEnv(deps.env), BarkProvider.fromEnv(deps.env), WebhookPushProvider.fromEnv(deps.env)].filter(
       (p) => p !== null,
     );

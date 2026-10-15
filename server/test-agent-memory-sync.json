@@ -1,14 +1,9 @@
 {
   "sessions": {
-    "actor-1": {
-      "revision": 3,
+    "actor-5": {
+      "revision": 2,
       "entries": {
-        "memory_summary": "[2026-10-13T12:38:43.595Z] [topic:general] user prefers concise answers\n[2026-10-13T12:38:43.634Z] [topic:general] I will continue following up on this fix\n[2026-10-13T12:38:43.635Z] [topic:general] my project is a Flutter chat context repair",
-        "memory_summary_forgotten": "",
-        "memory_preferences": "[2026-10-13T12:38:43.631Z] [topic:general] user prefers concise answers",
-        "session_recap": "[2026-10-13T12:38:43.631Z] [topic:general] user prefers concise answers\n[2026-10-13T12:38:43.634Z] [topic:general] I will continue following up on this fix\n[2026-10-13T12:38:43.636Z] [topic:general] my project is a Flutter chat context repair",
-        "memory_commitments": "[2026-10-13T12:38:43.634Z] [topic:general] I will continue following up on this fix",
-        "memory_facts": "[2026-10-13T12:38:43.636Z] [topic:general] my project is a Flutter chat context repair"
+        "memory_current_mission": ""
       }
     }
   }

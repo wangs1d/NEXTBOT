@@ -387,6 +387,45 @@ class MobileChatController extends ChangeNotifier {
     return userMsg.messageId;
   }
 
+  /// 卡片动作（选择型卡按钮 / chips 效果卡点击）：与桌面端 main.dart
+  /// `_handleCardAction` 同协议——经 `chat.user_action` 发出，后端转写为
+  /// 等价 chat.user_message（携带 cardAction 元数据供审计/路由）走原聊天
+  /// 流程，Agent 据此衔接回复（如支付确认卡的「我已完成支付，帮我确认」、
+  /// chips 标签追问）。断线时提示并触发重连（与桌面端同样不发送）。
+  bool sendCardAction(
+    AgentResultAction action, {
+    required AgentResultData cardData,
+  }) {
+    final String label = action.label.trim();
+    if (label.isEmpty) return false;
+    if (!_service.isConnected) {
+      _service.retryConnect();
+      errorMessage = "正在连接服务器，请稍后再试";
+      notifyListeners();
+      return false;
+    }
+    final bool sent = _service.sendCardAction(
+      sessionId: ApiConfig.sessionId,
+      messageId: "action-${DateTime.now().microsecondsSinceEpoch}",
+      actionId: action.id,
+      label: label,
+      cardId: cardData.cardId,
+      variant: action.variant,
+      actionPayload: action.payload,
+      cardTitle: cardData.title,
+      cardItems: cardData.items
+          .map((AgentResultItem it) => it.text)
+          .toList(growable: false),
+      userId: ApiConfig.effectiveActorId,
+    );
+    if (sent) {
+      isProcessing = true;
+      errorMessage = null;
+      notifyListeners();
+    }
+    return sent;
+  }
+
   /// 联网补发离线待发消息（`ws_connected` 后触发；此时 `session.init` 已由
   /// onConnected 同步先行发出，载荷落在已绑定的账号车道上）。
   ///

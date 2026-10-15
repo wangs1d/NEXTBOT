@@ -1,3 +1,7 @@
+import "dart:convert";
+
+import "package:http/http.dart" as http;
+
 import "../../core/config/api_config.dart";
 import "../../core/utils/agent_result_parser.dart";
 
@@ -53,6 +57,58 @@ String _encodeNonAsciiPath(String path) {
               : Uri.encodeComponent(seg))
       .join("/");
   return "$encoded$query";
+}
+
+/// 目的地当前封面活取（会话级缓存）：行程卡海报背景用——服务端重选封面后，
+/// 历史卡片烤死的旧 URL 无法靠 302 升级映射自愈（客户端磁盘缓存按 URL 钉死
+/// 字节），卡片按目的地名活取封面库当前值，新图自动上卡。
+class TravelLiveCover {
+  TravelLiveCover._();
+
+  /// 测试开关：关闭后 [fetch] 恒返回 null（不发请求、不碰缓存）。
+  static bool enabled = true;
+
+  /// 可注入实现（测试桩替换）；默认走 GET /travel/media/destination-cover。
+  static Future<String?> Function(String destination) fetcher = _fetchViaHttp;
+
+  static final Map<String, Future<String?>> _cache =
+      <String, Future<String?>>{};
+
+  /// 取目的地当前封面；空目的地/未启用返回 null，任何失败静默为 null。
+  static Future<String?> fetch(String destination) {
+    final String d = destination.trim();
+    if (d.isEmpty || !enabled) return Future<String?>.value(null);
+    return _cache.putIfAbsent(d, () => _guard(() => fetcher(d)));
+  }
+
+  /// 清空会话缓存并还原实现（测试隔离用）。
+  static void resetForTesting() {
+    _cache.clear();
+    enabled = true;
+    fetcher = _fetchViaHttp;
+  }
+
+  static Future<String?> _guard(Future<String?> Function() run) async {
+    try {
+      return await run();
+    } catch (_) {
+      return null;
+    }
+  }
+
+  static Future<String?> _fetchViaHttp(String destination) async {
+    final Uri uri = Uri.parse(
+      "${ApiConfig.httpBase}/travel/media/destination-cover"
+      "?destination=${Uri.encodeComponent(destination)}",
+    );
+    final http.Response resp =
+        await http.get(uri).timeout(const Duration(seconds: 6));
+    if (resp.statusCode != 200) return null;
+    final dynamic body = jsonDecode(resp.body);
+    final String url = (body is Map ? body["url"] : null)?.toString() ?? "";
+    if (url.isEmpty) return null;
+    return resolveTravelMediaUrl(url);
+  }
 }
 
 /// 行程条目类型（决定右栏时间线图标 / 地图标记配色）。

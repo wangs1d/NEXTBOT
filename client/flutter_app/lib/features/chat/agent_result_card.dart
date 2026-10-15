@@ -1173,42 +1173,85 @@ class _MediaCard extends StatelessWidget {
   }
 }
 
-/// 旅游行程海报卡：景点实拍背景 + 目的地简介 + 出行叮嘱 + 「打开行程规划」入口。
+/// 旅游行程海报卡：目的地风景背景 + 目的地简介 + 「打开行程规划」入口。
 ///
 /// 与媒体卡同样采用静态回调桥接（[TravelPlanLauncher.open]）：点击入口后
 /// 以独立界面（全屏路由 TravelPlanFullscreenPage）打开行程规划。
 ///
-/// 设计（2026-09 用户反馈）：
-///   - 不再罗列 Day 1/2/3 摘要（与规划界面重复），换成目的地一句话简介
-///     + 「记得带」随身物品叮嘱，卡片自身先回答「去哪玩 / 要带什么」；
-///   - 卡片加大（maxWidth 460，气泡宽度在 chat_page 对行程卡放宽），
-///     背景优先取目的地代表性封面（服务端维基百科条目主图——目的地本身的
-///     形象照，最具代表性），无封面退回第一个有实拍图的景点（attraction
-///     优先），压深色渐变保证白字可读；无图/加载失败退回深青渐变，不闪占位框；
-///   - 无结构化 travelPlan 的历史消息优雅降级：简介/叮嘱行整体隐藏，
+/// 设计（2026-10-15 用户反馈）：
+///   - 卡面极简：海报 + 主入口按钮 + 脚注，不罗列 Day 摘要，也不放随身
+///     物品叮嘱（「记得带」已撤下，打包建议留在行程规划面板里看）；
+///   - 背景优先活取目的地当前封面（GET /travel/media/destination-cover，
+///     服务端重选封面后历史卡片不改存量数据即自动换新图），未到达/无封面
+///     退回卡片数据里烤死的封面与景点实拍，压深色渐变保证白字可读；
+///     无图/加载失败退回深青渐变，不闪占位框；
+///   - 无结构化 travelPlan 的历史消息优雅降级：简介行整体隐藏，
 ///     海报走渐变兜底，布局不破损。
-class _TravelItineraryCard extends StatelessWidget {
+class _TravelItineraryCard extends StatefulWidget {
   const _TravelItineraryCard({required this.data, required this.cs});
 
   final AgentResultData data;
   final ColorScheme cs;
 
-  /// 海报区强调色（压在照片深色遮罩上，深浅主题恒可读，不随主题切换）。
-  static const Color _accent = Color(0xFF18D6F3);
-
   /// 海报兜底渐变（无图/图加载中/加载失败时露出）：深海军蓝 → 深青，
-  /// 与 _accent 同族且不随主题切换 —— 海报文字恒为白字，深浅主题都成立。
+  /// 与强调色同族且不随主题切换 —— 海报文字恒为白字，深浅主题都成立。
   static const List<Color> _posterFallback = <Color>[
     Color(0xFF123243),
     Color(0xFF071A24),
   ];
 
+  /// 海报背景：兜底渐变常驻底层，图片加载中/失败时自然露出，不闪占位框。
+  /// （候选图逐张回退的有 State 版本见 [_PosterBackdrop]。）
+  static const DecoratedBox posterFallback = DecoratedBox(
+    decoration: BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: _posterFallback,
+      ),
+    ),
+  );
+
+  @override
+  State<_TravelItineraryCard> createState() => _TravelItineraryCardState();
+}
+
+class _TravelItineraryCardState extends State<_TravelItineraryCard> {
+  /// 目的地当前封面（活取）：服务端封面库的最新 URL；null=未到达/无封面。
+  String? _liveCoverUrl;
+
+  @override
+  void initState() {
+    super.initState();
+    final String destination =
+        TravelPlanData.from(widget.data).destination.trim();
+    if (destination.isEmpty) return;
+    TravelLiveCover.fetch(destination).then((String? url) {
+      if (!mounted || url == null || url.isEmpty) return;
+      setState(() => _liveCoverUrl = url);
+      // 新封面与本地缓存链路对齐：落盘 + 内存解码预热，重开卡片秒开
+      MediaDiskCache.instance.warm(<String>[url]);
+      TravelImageWarmer.warm(<String>[url]);
+    });
+  }
+
+  /// 海报区强调色（压在照片深色遮罩上，深浅主题恒可读，不随主题切换）。
+  static const Color _accent = Color(0xFF18D6F3);
+
   @override
   Widget build(BuildContext context) {
-    final TravelPlanData plan = TravelPlanData.from(data);
+    final TravelPlanData plan = TravelPlanData.from(widget.data);
     final List<String> gallery = _collectImages(plan);
-    final String? posterUrl = _pickPosterImage(plan);
-    // 海报候选链：封面优先，条目实拍跟随（封面加载失败自动落到下一张）
+    final String? bakedPosterUrl = _pickPosterImage(plan);
+    // 活取封面优先：服务端重选封面后，历史卡片自动换新图
+    final String? posterUrl =
+        (_liveCoverUrl != null && _liveCoverUrl!.isNotEmpty)
+            ? _liveCoverUrl
+            : bakedPosterUrl;
+    if (posterUrl != null && !gallery.contains(posterUrl)) {
+      gallery.insert(0, posterUrl);
+    }
+    // 海报候选链：当前封面优先，条目实拍跟随（封面加载失败自动落到下一张）
     final List<String> posterCandidates = <String>[
       if (posterUrl != null) posterUrl,
       for (final String img in gallery)
@@ -1238,9 +1281,10 @@ class _TravelItineraryCard extends StatelessWidget {
     return Container(
       constraints: const BoxConstraints(maxWidth: 460),
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
+        color: widget.cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+        border:
+            Border.all(color: widget.cs.outline.withValues(alpha: 0.22)),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
@@ -1255,20 +1299,14 @@ class _TravelItineraryCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 mainAxisSize: MainAxisSize.min,
                 children: <Widget>[
-                  // ── 卡面极简（2026-09-25 用户定稿）：逐日地标串不再上卡面，
-                  // 卡面只保留 海报 + 打包叮嘱 + 主入口按钮 + 脚注；
-                  // 逐日明细走「打开行程规划」双面板（travelPlan 全量数据）。──
-                  // ── 出行叮嘱（记得带）──
-                  if (plan.packing.isNotEmpty) ...<Widget>[
-                    _buildPackingRow(plan.packing, palette),
-                    const SizedBox(height: 10),
-                  ],
+                  // ── 卡面极简（2026-10-15 修订）：海报 + 主入口按钮 + 脚注；
+                  // 逐日明细与打包建议都走「打开行程规划」面板（全量数据）。──
                   // ── 主入口按钮（实底强调色，压住卡底）──
                   if (hasPlan)
                     SizedBox(
                       width: double.infinity,
                       child: FilledButton.icon(
-                        onPressed: () => TravelPlanLauncher.open(data),
+                        onPressed: () => TravelPlanLauncher.open(widget.data),
                         style: FilledButton.styleFrom(
                           backgroundColor: palette.accentBg,
                           foregroundColor: palette.onAccentBg,
@@ -1284,16 +1322,16 @@ class _TravelItineraryCard extends StatelessWidget {
                         ),
                       ),
                     ),
-                  if (data.footer.trim().isNotEmpty) ...<Widget>[
+                  if (widget.data.footer.trim().isNotEmpty) ...<Widget>[
                     const SizedBox(height: 8),
                     Text(
-                      data.footer.trim(),
+                      widget.data.footer.trim(),
                       maxLines: 2,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 11,
                         height: 1.45,
-                        color: cs.onSurfaceVariant,
+                        color: widget.cs.onSurfaceVariant,
                       ),
                     ),
                   ],
@@ -1413,18 +1451,6 @@ class _TravelItineraryCard extends StatelessWidget {
     );
   }
 
-  /// 海报背景：兜底渐变常驻底层，图片加载中/失败时自然露出，不闪占位框。
-  /// （候选图逐张回退的有 State 版本见 [_PosterBackdrop]。）
-  static const DecoratedBox posterFallback = DecoratedBox(
-    decoration: BoxDecoration(
-      gradient: LinearGradient(
-        begin: Alignment.topCenter,
-        end: Alignment.bottomCenter,
-        colors: _posterFallback,
-      ),
-    ),
-  );
-
   /// 目的地徽章（玻璃态：半透明黑底 + 白描边，压在海报上深浅图都可读）。
   Widget _buildDestinationBadge(String destination) {
     return Container(
@@ -1449,63 +1475,6 @@ class _TravelItineraryCard extends StatelessWidget {
           ),
         ],
       ),
-    );
-  }
-
-  /// 「记得带」叮嘱行：标签 + 随身物品胶囊（最多 6 个，Wrap 自动换行）。
-  Widget _buildPackingRow(List<String> packing, TravelPalette palette) {
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.only(top: 5),
-          child: Icon(
-            Icons.luggage_outlined,
-            size: 14,
-            color: palette.accent.withValues(alpha: 0.9),
-          ),
-        ),
-        const SizedBox(width: 6),
-        Padding(
-          padding: const EdgeInsets.only(top: 5),
-          child: Text(
-            "记得带",
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: cs.onSurfaceVariant,
-            ),
-          ),
-        ),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 5,
-            children: <Widget>[
-              for (final String item in packing.take(6))
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: palette.accent.withValues(alpha: 0.10),
-                    borderRadius: BorderRadius.circular(999),
-                    border: Border.all(
-                        color: palette.accent.withValues(alpha: 0.28)),
-                  ),
-                  child: Text(
-                    item,
-                    style: TextStyle(
-                      fontSize: 11.5,
-                      height: 1.3,
-                      color: cs.onSurface.withValues(alpha: 0.9),
-                    ),
-                  ),
-                ),
-            ],
-          ),
-        ),
-      ],
     );
   }
 

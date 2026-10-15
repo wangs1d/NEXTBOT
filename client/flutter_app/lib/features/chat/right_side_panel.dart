@@ -91,17 +91,16 @@ class RightSidePanel extends StatefulWidget {
     this.scheduleFuture,
     this.onAgentLink,
     this.onSchedule,
-    this.onMessages,
     this.onGallery,
     this.onBrowser,
     this.onTravel,
-    this.messagesUnread = 0,
   });
 
   final Future<List<ScheduleEvent>>? scheduleFuture;
+
+  /// 「好友」工具入口（好友面板从右侧滑出，2026-10-15 恢复）。
   final VoidCallback? onAgentLink;
   final VoidCallback? onSchedule;
-  final VoidCallback? onMessages;
 
   /// 「图库」工具入口（照片浏览/上传/删除）。
   final VoidCallback? onGallery;
@@ -111,9 +110,6 @@ class RightSidePanel extends StatefulWidget {
 
   /// 「行程」工具入口（应用内行程归档页：对话中创建过的行程都在这里）。
   final VoidCallback? onTravel;
-
-  /// 站内信未读总数（供「消息」工具渲染角标；0 不显示）。
-  final int messagesUnread;
 
   @override
   State<RightSidePanel> createState() => _RightSidePanelState();
@@ -930,35 +926,31 @@ class _RightSidePanelState extends State<RightSidePanel> {
   // ═══════════════════════════════════════════════════════════
   List<_ToolSpec> _allToolSpecs() {
     return <_ToolSpec>[
+      // 「好友」入口（2026-10-15 恢复；消息入口仍撤）。
       // 版本闸（开源版剔除内测独占能力）：好友入口不出现
-      if (!ApiConfig.isOssEdition) ...[
+      if (!ApiConfig.isOssEdition)
         _ToolSpec(
             id: "friends",
             icon: Icons.people_outline,
             label: "好友",
             onTap: widget.onAgentLink),
-      ],
+      // 「消息」入口已删除（2026-10-14）：消息类内容统一后台扫描，
+      // agent 判定有价值后才主动推送，不再提供前端陈列入口（垃圾消息免打扰）。
       // 「手机」工具已删除（2026-10-11）：手机桥接属内测能力，不对外暴露，
       // 入口连同其状态轮询一并移除（落地页 features/phone_devices 保留在仓库里）。
-      _ToolSpec(
-          id: "messages",
-          icon: Icons.message_outlined,
-          label: "消息",
-          onTap: widget.onMessages,
-          badgeCount: widget.messagesUnread),
       _ToolSpec(
           id: "schedule",
           icon: Icons.calendar_today_outlined,
           label: "日程",
           onTap: widget.onSchedule,
           subLabelBuilder: () => _scheduleSubLabel),
-      // 「行程」：应用内行程归档页（对话中创建过的行程沉淀于此，
+      // 「旅游」：应用内行程归档页（对话中创建过的行程沉淀于此，
       // 随时回看）。与旅游家族同闸：开源版服务端不产行程卡，入口不注册。
       if (!ApiConfig.isOssEdition)
         _ToolSpec(
             id: "travel",
             icon: Icons.luggage_outlined,
-            label: "行程",
+            label: "旅游",
             onTap: widget.onTravel),
       // 图库入口暂时隐藏（功能暂不接入）
       // _ToolSpec(
@@ -1255,7 +1247,6 @@ class _ToolSpec {
     required this.icon,
     required this.label,
     this.onTap,
-    this.badgeCount,
     String? Function()? subLabelBuilder,
   }) : _subLabelBuilder = subLabelBuilder;
 
@@ -1263,9 +1254,6 @@ class _ToolSpec {
   final IconData icon;
   final String label;
   final VoidCallback? onTap;
-
-  /// 未读等数字角标（null/0 不显示）
-  final int? badgeCount;
   final String? Function()? _subLabelBuilder;
 
   /// 副标签（如「14:30」「2/1 在线」），null 不显示
@@ -1494,40 +1482,7 @@ class _ToolButtonState extends State<_ToolButton> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
-                    // 图标 + 数字角标
-                    Stack(
-                      clipBehavior: Clip.none,
-                      children: <Widget>[
-                        Icon(spec.icon, size: 18, color: fg),
-                        if (spec.badgeCount != null && spec.badgeCount! > 0)
-                          Positioned(
-                            top: -5,
-                            right: -9,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(
-                                  horizontal: 3.5, vertical: 1),
-                              constraints:
-                                  const BoxConstraints(minWidth: 13),
-                              decoration: BoxDecoration(
-                                color: cs.error,
-                                borderRadius: BorderRadius.circular(999),
-                              ),
-                              alignment: Alignment.center,
-                              child: Text(
-                                spec.badgeCount! > 99
-                                    ? "99+"
-                                    : "${spec.badgeCount}",
-                                style: const TextStyle(
-                                  fontSize: 8,
-                                  height: 1.2,
-                                  fontWeight: FontWeight.w700,
-                                  color: Colors.white,
-                                ),
-                              ),
-                            ),
-                          ),
-                      ],
-                    ),
+                    Icon(spec.icon, size: 18, color: fg),
                     const SizedBox(height: 4),
                     Text(
                       spec.label,

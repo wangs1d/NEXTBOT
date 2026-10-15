@@ -545,6 +545,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
             : _TypewriterAssistantBody(
                 message: m,
                 cs: Theme.of(context).colorScheme,
+                // 卡片动作：支付确认卡按钮 / chips 追问等经控制器走
+                // chat.user_action（与桌面端 _handleCardAction 同协议）。
+                onUserAction: _controller.sendCardAction,
               ),
       ),
     );
@@ -712,10 +715,19 @@ AgentResultData? _travelItineraryCardOf(ChatMessage m) {
 /// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器与
 /// [TypewriterReveal] 打字机控制器,保证两端结构与流式节奏一致。
 class _TypewriterAssistantBody extends StatefulWidget {
-  const _TypewriterAssistantBody({required this.message, required this.cs});
+  const _TypewriterAssistantBody({
+    required this.message,
+    required this.cs,
+    this.onUserAction,
+  });
 
   final ChatMessage message;
   final ColorScheme cs;
+
+  /// 卡片动作回调（与桌面端 chat_page 同链路）：选择型卡按钮 / chips
+  /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
+  final void Function(AgentResultAction action, {required AgentResultData cardData})?
+      onUserAction;
 
   @override
   State<_TypewriterAssistantBody> createState() =>
@@ -764,6 +776,8 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           widget.cs,
           m,
           isUser: false,
+          // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
+          onUserAction: widget.onUserAction,
           // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
           typewriterRawText: _typewriter.isPartial ? _typewriter.revealed : null,
           typewriterCursor: _typewriter.isRevealing,

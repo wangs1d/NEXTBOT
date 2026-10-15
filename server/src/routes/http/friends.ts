@@ -3,6 +3,7 @@ import { z } from "zod";
 import type { FriendService } from "../../services/friend-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
 import { AGENT_NUMBER_PATTERN } from "../../services/agent-account-service.js";
+import type { FriendMessageService } from "../../services/friend-message-service.js";
 
 function accountActorRefine(data: { userId?: string; sessionId?: string }, ctx: z.RefinementCtx): void {
   const u = data.userId?.trim() ?? "";
@@ -72,6 +73,29 @@ const discoverQuerySchema = friendQuerySchema.and(
   })
 );
 
+/** 好友消息直连发送（聊天面板） */
+const sendFriendMessageSchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    toActorId: z.string().min(1).max(254),
+    text: z.string().min(1).max(4000),
+  })
+  .superRefine(accountActorRefine);
+
+/** 好友消息历史/标读查询参数 */
+const friendMessageTargetSchema = friendQuerySchema.and(
+  z.object({
+    targetActorId: z.string().min(1).max(254),
+  })
+);
+
+const friendMessageQuerySchema = friendMessageTargetSchema.and(
+  z.object({
+    limit: z.coerce.number().int().min(1).max(200).optional(),
+  })
+);
+
 function accountActorFromBody(data: { userId?: string; sessionId?: string }): string {
   const u = data.userId?.trim() ?? "";
   const s = data.sessionId?.trim() ?? "";
@@ -105,9 +129,10 @@ export function registerFriendRoutes(
   deps: {
     friendService: FriendService;
     agentAccountService: AgentAccountService;
+    friendMessageService?: FriendMessageService;
   }
 ): void {
-  const { friendService, agentAccountService } = deps;
+  const { friendService, agentAccountService, friendMessageService } = deps;
 
   /**
    * 发送好友请求
@@ -358,5 +383,80 @@ export function registerFriendRoutes(
     }));
 
     return { ok: true, results };
+  });
+
+  /**
+   * 好友消息历史（双向，时间正序；hub platform=friend 会话的 HTTP 面）。
+   * GET /friends/messages?userId|sessionId&targetActorId&limit
+   */
+  app.get("/friends/messages", async (request, reply) => {
+    const parsed = friendMessageQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    if (!friendMessageService) {
+      return reply.code(503).send({ ok: false, message: "站内好友消息通道未装配" });
+    }
+    const actorId = accountActorFromBody(parsed.data);
+    const messages = friendMessageService.listTranscript(
+      actorId,
+      parsed.data.targetActorId.trim(),
+      parsed.data.limit ?? 100,
+    );
+    const unreadCount = friendMessageService.unreadCount(actorId, parsed.data.targetActorId.trim());
+    return { ok: true, messages, unreadCount };
+  });
+
+  /**
+   * 好友消息直连发送（好友聊天面板；与 agent.send_to_peer 同一投递内核）。
+   * POST /friends/messages
+   */
+  app.post("/friends/messages", async (request, reply) => {
+    const parsed = sendFriendMessageSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    if (!friendMessageService) {
+      return reply.code(503).send({ ok: false, message: "站内好友消息通道未装配" });
+    }
+    const fromActorId = accountActorFromBody(parsed.data);
+    const toActorId = resolveTargetActorId(
+      agentAccountService,
+      parsed.data.toActorId,
+      undefined,
+    );
+    if (!toActorId || !agentAccountService.getByActorId(toActorId)) {
+      return reply.code(404).send({ ok: false, message: "目标用户不存在" });
+    }
+    const result = await friendMessageService.send({
+      fromActorId,
+      toActorId,
+      text: parsed.data.text,
+    });
+    if (!result.ok) {
+      return reply.code(400).send({ ok: false, message: result.error });
+    }
+    return {
+      ok: true,
+      messageId: result.messageId,
+      pushedToPeer: result.pushedToPeer,
+    };
+  });
+
+  /**
+   * 好友会话标读（打开聊天面板后调用；清 hub 未读，重连补投随之停止）。
+   * POST /friends/messages/read
+   */
+  app.post("/friends/messages/read", async (request, reply) => {
+    const parsed = friendMessageTargetSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    if (!friendMessageService) {
+      return reply.code(503).send({ ok: false, message: "站内好友消息通道未装配" });
+    }
+    const actorId = accountActorFromBody(parsed.data);
+    const ok = await friendMessageService.markRead(actorId, parsed.data.targetActorId.trim());
+    return { ok };
   });
 }

@@ -262,7 +262,108 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
     brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
     return brief;
   }
+
+  /**
+   * 逐日预报（多日行程「每天按当天天气排程」用，2026-10-15）。
+   * Open-Meteo 一次请求 forecast_days=N（免费无 Key，上限 7），返回逐日
+   * daily 概要 + 当日逐小时行（供折叠为上午/下午/晚间三段语境）。
+   */
+  async getMultiDayForecast(
+    latitude: number,
+    longitude: number,
+    days: number,
+    timezone = "auto",
+  ): Promise<MultiDayForecast> {
+    const n = Math.max(1, Math.min(days, 7));
+    const params = new URLSearchParams({
+      latitude: String(latitude),
+      longitude: String(longitude),
+      timezone,
+      hourly: ["temperature_2m", "precipitation_probability", "weather_code"].join(","),
+      daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max"].join(","),
+      forecast_days: String(n),
+    });
+    const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
+    const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+    if (!res.ok) {
+      throw new Error(`天气接口错误: ${res.status}`);
+    }
+    const raw = (await res.json()) as {
+      hourly?: {
+        time?: (string | null)[];
+        temperature_2m?: (number | null)[];
+        precipitation_probability?: (number | null)[];
+        weather_code?: (number | null)[];
+      };
+      daily?: {
+        time?: (string | null)[];
+        weather_code?: (number | null)[];
+        temperature_2m_max?: (number | null)[];
+        temperature_2m_min?: (number | null)[];
+        precipitation_probability_max?: (number | null)[];
+      };
+    };
+
+    // 逐小时行按日历日分组（time 形如 "2026-10-15T09:00"）
+    const byDate = new Map<string, WeatherHourlyForecast[]>();
+    const times = raw.hourly?.time ?? [];
+    for (let i = 0; i < times.length; i++) {
+      const t = times[i];
+      if (!t) continue;
+      const date = t.slice(0, 10);
+      const hour = t.slice(11, 16) || "";
+      const temp = raw.hourly?.temperature_2m?.[i];
+      if (temp == null) continue;
+      const code = Number(raw.hourly?.weather_code?.[i] ?? 0);
+      const prob = raw.hourly?.precipitation_probability?.[i];
+      let rows = byDate.get(date);
+      if (!rows) {
+        rows = [];
+        byDate.set(date, rows);
+      }
+      rows.push({
+        time: t,
+        hour,
+        temperatureC: Number(temp),
+        precipitationProbabilityPct: typeof prob === "number" ? prob : 0,
+        weatherCode: code,
+        weatherText: wmoText(code),
+      });
+    }
+
+    const dailyDates = raw.daily?.time ?? [];
+    const out: DayForecast[] = [];
+    for (let d = 0; d < dailyDates.length; d++) {
+      const date = dailyDates[d];
+      if (!date) continue;
+      const code = Number(raw.daily?.weather_code?.[d] ?? 0);
+      out.push({
+        date,
+        weatherCode: code,
+        weatherText: wmoText(code),
+        minC: Number(raw.daily?.temperature_2m_min?.[d] ?? 0),
+        maxC: Number(raw.daily?.temperature_2m_max?.[d] ?? 0),
+        rainPct: Number(raw.daily?.precipitation_probability_max?.[d] ?? 0),
+        hourly: byDate.get(date) ?? [],
+      });
+    }
+    return { days: out };
+  }
 }
+
+/** 单日预报概要 + 当日逐小时行（供折叠为时段语境） */
+export type DayForecast = {
+  date: string;
+  weatherCode: number;
+  weatherText: string;
+  minC: number;
+  maxC: number;
+  /** 当日最大降水概率（0-100） */
+  rainPct: number;
+  hourly: WeatherHourlyForecast[];
+};
+
+export type MultiDayForecast = { days: DayForecast[] };
 
 /**
  * 恶劣天气预警检测（Task 15 生活节律：确定性规则，零 LLM）。

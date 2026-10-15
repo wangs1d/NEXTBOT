@@ -35,6 +35,15 @@ const backfillSchema = poiBodySchema;
 
 const remoteQuerySchema = z.object({ u: z.string().min(8).max(2000) });
 
+const coverQuerySchema = z.object({ destination: z.string().min(1).max(80) });
+
+const coverRefreshSchema = z.object({
+  destination: z.string().min(1).max(80),
+  latitude: z.coerce.number().finite().optional(),
+  longitude: z.coerce.number().finite().optional(),
+  attractionNames: z.array(z.string().min(1).max(80)).max(6).optional(),
+});
+
 /**
  * 远程图代理白名单：仅 Wikimedia 家族（thumb/upload/commons 图床、wikipedia、
  * wikidata）。行程链路的所有远程图 URL 都出自这三个域，收窄到零 SSRF 面。
@@ -162,6 +171,53 @@ export function registerTravelMediaRoutes(
   });
 
   /**
+   * 目的地当前封面（2026-10-15）：行程卡海报活取用。客户端磁盘缓存按 URL
+   * 钉死字节，服务端重选封面后历史卡片烤死的旧 URL 无法靠 302 自愈——卡片
+   * 改为按目的地名活取封面库当前值，新图自动上卡。
+   */
+  app.get("/travel/media/destination-cover", async (request, reply) => {
+    const parsed = coverQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const cover = destinationCoverStore.get(parsed.data.destination);
+    return { ok: true, url: cover?.url ?? null, source: cover?.source ?? null };
+  });
+
+  /**
+   * 强制刷新目的地封面（管理端）：驱逐缓存 → 完整解析链重选（候选池含网搜
+   * 风景源 + VLM 终审）→ 新旧不同登记升级映射，历史卡片自动换新图。
+   * 坐标/景点名可选——提供后地理锚定与招牌景点搜索更准，不提供也能解析。
+   */
+  app.post("/travel/media/destination-cover/refresh", async (request, reply) => {
+    if (!deps.travelPlanningService) {
+      return reply.code(503).send({ ok: false, error: "规划服务未装配，无法刷新" });
+    }
+    const parsed = coverRefreshSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const { destination, latitude, longitude, attractionNames } = parsed.data;
+    const center =
+      latitude !== undefined && longitude !== undefined
+        ? { latitude, longitude }
+        : undefined;
+    try {
+      const result = await deps.travelPlanningService.refreshDestinationCover(
+        destination,
+        center,
+        attractionNames ?? [],
+      );
+      return { ok: true, ...result };
+    } catch (err) {
+      return reply.code(502).send({
+        ok: false,
+        error: `刷新失败：${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  });
+
+  /**
    * 远程图代理（2026-09-28，存量数据兼容通道）：历史行程/聊天快照里烤死的
    * wikimedia 远程 URL，客户端网络直连不可达（不走系统代理，IPv4 被墙）。
    * 客户端把这类 URL 重写到本路由，服务端以 URL 哈希为键落盘缓存（双路抓取，
@@ -232,7 +288,9 @@ export function registerTravelMediaRoutes(
       "PUT    /travel/media/images   {name,type,url,source?,takenAt?,uploader?}",
       "DELETE /travel/media/images   {name,type,url}",
       "POST   /travel/media/backfill {name,type,latitude?,longitude?}",
+      "GET    /travel/media/destination-cover?destination=",
+      "POST   /travel/media/destination-cover/refresh {destination,latitude?,longitude?,attractionNames?}",
     ],
-    note: "poiKey 归一化规则见 travel-media-store.ts poiKeyOf()，上传与查询需使用同一 name/type",
+    note: "poiKey 归一化规则见 travel-media-store.ts poiKeyOf()，上传与查询需使用同一 name/type。cover-chain v3(网搜入池+SF侧车终审)",
   }));
 }

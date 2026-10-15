@@ -12,40 +12,38 @@ import "../../core/config/api_config.dart";
 import "../../core/presentation/boot_animation.dart";
 import "../../core/services/local_runtime_config.dart";
 import "../../core/services/local_runtime_manager.dart";
-import "../../core/services/mic_clip_recorder.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/theme/app_theme.dart";
 import "../model_config/model_provider_card.dart";
 import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
-/// 首启序列：进度条开机动画 + 四步配置向导（称呼 → agent 名字 → 声纹注册 →
+/// 首启序列：进度条开机动画 + 两步配置向导（称呼+agent 名字同屏 →
 /// 模型接入），黑白极简，完成后经 [onComplete] 切入主界面。
 ///
-/// 动画期间做真实准备工作（runtime 探活 / 能力面板 / 声纹状态 / agent 名读取），
+/// （2026-10-15：声纹注册步骤已删除——不再卡首启必经路径，声纹保留
+/// just-in-time 入口（语音触发 / 设置页直达）；称呼与 agent 名字合并为
+/// 同屏双字段。）
+///
+/// 动画期间做真实准备工作（runtime 探活 / 能力面板 / agent 名读取），
 /// 进度条反映实际就绪度；向导步骤落点：
 ///   称呼   → POST /api/profile/manage/fact（结构化事实，prompt 现成通道）
 ///   名字   → POST /api/agent-identity/rename（账号+记忆KV+prefs 统一管道）
-///   声纹   → /api/voice/voiceprint/*（本地 ONNX 说话人引擎）
 ///   模型   → %APPDATA%\PrivateAgent\config.env + runtime 重启 + 直连测试
 class OnboardingFlow extends StatefulWidget {
   const OnboardingFlow({
     super.key,
     required this.onComplete,
-    this.writePreference,
   });
 
   /// 全部完成（或 debug 跳过）后回调；持久化 onboarding 完成标记由宿主负责。
   final VoidCallback onComplete;
 
-  /// 偏好落盘通道（声纹已注册标记等）；测试/预览可注入 mock。
-  final Future<void> Function(String key, dynamic value)? writePreference;
-
   @override
   State<OnboardingFlow> createState() => _OnboardingFlowState();
 }
 
-enum _Phase { boot, appellation, agentName, voiceprint, model, done }
+enum _Phase { boot, profile, model, done }
 
 class _OnboardingFlowState extends State<OnboardingFlow> {
   // ── 配色（与注册门禁同套深色独占语言）──
@@ -63,34 +61,15 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   final ValueNotifier<double> _bootProgress = ValueNotifier<double>(0);
   String _bootStatus = "正在唤醒…";
   bool _prepDone = false;
-  bool _voiceprintEngineReady = false;
   String? _currentAgentName;
 
   // ── 步骤 1：称呼 ──
   final TextEditingController _appellationCtrl = TextEditingController();
 
-  // ── 步骤 2：agent 名字 ──
+  // ── 步骤 1：agent 名字（与称呼同屏）──
   final TextEditingController _agentNameCtrl = TextEditingController();
 
-  // ── 步骤 3：声纹 ──
-  final MicClipRecorder _recorder = MicClipRecorder();
-  final List<Uint8List> _clips = <Uint8List>[];
-  int _clipIndex = 0; // 0..2 待录，3=录完待提交
-  bool _recording = false;
-  double _recordElapsed = 0;
-  Timer? _recordTimer;
-  String? _voiceprintError;
-  Map<String, dynamic>? _voiceprintResult; // {usedSamples, verifyScore}
-
-  static const List<String> _clipPrompts = <String>[
-    "随便说一句你日常会说的话",
-    "例如：明天早上八点叫我起床",
-    "最后一句，像平时聊天一样自然",
-  ];
-  static const Duration _clipDuration = Duration(seconds: 4);
-  bool _voiceprintSkipped = false;
-
-  // ── 步骤 4：模型（目录式选择，UI 与数据全部在 ModelProviderCard）──
+  // ── 步骤 2：模型（目录式选择，UI 与数据全部在 ModelProviderCard）──
   final GlobalKey<ModelProviderCardState> _modelCardKey = GlobalKey<ModelProviderCardState>();
   ModelApiTestResult? _lastTestResult;
   // 预填：已配置过 key 的重进用户（例如向导中断后重跑）
@@ -116,8 +95,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
 
   @override
   void dispose() {
-    _recordTimer?.cancel();
-    _recorder.dispose();
     _appellationCtrl.dispose();
     _agentNameCtrl.dispose();
     _bootProgress.dispose();
@@ -162,14 +139,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         } catch (_) {/* best-effort */}
       }()),
       (() async {
-        try {
-          final Map<String, dynamic> status = await VoiceprintApi.status();
-          _voiceprintEngineReady = status["engineReady"] == true;
-        } catch (_) {
-          _voiceprintEngineReady = false;
-        }
-      }()),
-      (() async {
         // 现有 agent 名（重进向导时回显）
         try {
           final http.Response res = await http
@@ -206,7 +175,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     _initialApiKey = cfg["OPENAI_API_KEY"] ?? "";
     _initialBase = cfg["OPENAI_BASE_URL"];
     _initialModel = cfg["OPENAI_MODEL"];
-    _go(_Phase.appellation);
+    _go(_Phase.profile);
   }
 
   void _go(_Phase next) {
@@ -259,92 +228,24 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   }
 
   // ============================================================
-  // 步骤 3：声纹注册
+  // 步骤 1：称呼 + agent 名字（同屏双字段）
   // ============================================================
 
-  Future<void> _startClip() async {
-    if (_recording) return;
-    final bool ok = await _recorder.start();
-    if (!ok) {
-      setState(() => _voiceprintError = "无法访问麦克风：请检查系统麦克风权限");
-      return;
-    }
-    setState(() {
-      _recording = true;
-      _recordElapsed = 0;
-      _voiceprintError = null;
-    });
-    _recordTimer?.cancel();
-    const Duration tickDur = Duration(milliseconds: 100);
-    _recordTimer = Timer.periodic(tickDur, (Timer t) {
-      _recordElapsed += tickDur.inMilliseconds / 1000;
-      if (_recordElapsed >= _clipDuration.inMilliseconds / 1000) {
-        unawaited(_finishClip());
-      } else if (mounted) {
-        setState(() {});
-      }
-    });
-  }
-
-  Future<void> _finishClip() async {
-    _recordTimer?.cancel();
-    _recordTimer = null;
-    final Uint8List clip = await _recorder.stop();
-    if (!mounted) return;
-    if (clip.length < 16000) {
-      // <0.5s，视为无效
-      setState(() {
-        _recording = false;
-        _voiceprintError = "录音太短，请长按说完一句话";
-      });
-      return;
-    }
-    setState(() {
-      _recording = false;
-      _clips.add(clip);
-      _clipIndex = _clips.length;
-    });
-    if (_clips.length >= 3) {
-      unawaited(_submitVoiceprint());
-    }
-  }
-
-  Future<void> _submitVoiceprint() async {
-    setState(() => _voiceprintError = null);
-    try {
-      final Map<String, dynamic> reg = await VoiceprintApi.register(_clips);
-      if (reg["ok"] != true) {
-        setState(() => _voiceprintError = reg["error"]?.toString() ?? "注册失败，请重试");
-        return;
-      }
-      // 用第二段做一次自验证，给用户一个可信的「就绪」信号
-      double? score;
-      try {
-        final Map<String, dynamic> verify = await VoiceprintApi.verify(_clips[1]);
-        if (verify["ok"] == true) score = (verify["score"] as num?)?.toDouble();
-      } catch (_) {/* 自验证 best-effort */}
-      await widget.writePreference?.call("voiceprint.registeredV1", true);
-      if (!mounted) return;
-      setState(() => _voiceprintResult = <String, dynamic>{
-            "usedSamples": reg["usedSamples"],
-            "verifyScore": score,
-          });
-    } catch (e) {
-      setState(() => _voiceprintError = "声纹服务不可达：$e");
-    }
-  }
-
-  void _resetVoiceprint() {
-    setState(() {
-      _clips.clear();
-      _clipIndex = 0;
-      _voiceprintResult = null;
-      _voiceprintError = null;
-    });
+  /// 两项校验通过后一起落盘；单边失败不阻塞（后续对话里还能纠正）。
+  Future<void> _confirmProfile() async {
+    final String appellation = _appellationCtrl.text.trim();
+    final String agentName = _agentNameCtrl.text.trim();
+    if (appellation.isEmpty || appellation.length > 12) return;
+    if (agentName.isEmpty || agentName.length > 12) return;
+    _savedAppellation = appellation;
+    _savedAgentName = agentName;
+    unawaited(_saveAppellation(appellation));
+    unawaited(_saveAgentName(agentName));
+    _go(_Phase.model);
   }
 
   // ============================================================
-  // 步骤 4：模型接入（UI/收集/测试在 ModelProviderCard，这里只落盘）
+  // 步骤 2：模型接入（UI/收集/测试在 ModelProviderCard，这里只落盘）
   // ============================================================
 
   Future<void> _saveModelConfig(ModelConfigDraft draft) async {
@@ -358,26 +259,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       await LocalRuntimeManager.restart().timeout(const Duration(seconds: 30));
     }
     _finalModelResult = _lastTestResult;
-  }
-
-  // ============================================================
-  // 步骤推进
-  // ============================================================
-
-  Future<void> _confirmAppellation() async {
-    final String value = _appellationCtrl.text.trim();
-    if (value.isEmpty || value.length > 12) return;
-    _savedAppellation = value;
-    unawaited(_saveAppellation(value)); // 失败不阻塞（后续对话里还能纠正）
-    _go(_Phase.agentName);
-  }
-
-  Future<void> _confirmAgentName() async {
-    final String value = _agentNameCtrl.text.trim();
-    if (value.isEmpty || value.length > 12) return;
-    _savedAgentName = value;
-    unawaited(_saveAgentName(value));
-    _go(_Phase.voiceprint);
   }
 
   // ============================================================
@@ -396,7 +277,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       final String? baseUrl = params["baseUrl"];
       final String? model = params["model"];
       final String? providerId = params["providerId"];
-      final bool skipVoiceprint = params["skipVoiceprint"] != "0";
       final bool submit = params["submit"] == "1";
       if (appellation != null) _appellationCtrl.text = appellation;
       if (agentName != null) _agentNameCtrl.text = agentName;
@@ -415,7 +295,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         _savedAgentName = _agentNameCtrl.text.trim().isNotEmpty ? _agentNameCtrl.text.trim() : "(未填)";
         unawaited(_saveAppellation(_appellationCtrl.text.trim()));
         unawaited(_saveAgentName(_agentNameCtrl.text.trim()));
-        if (skipVoiceprint) _voiceprintSkipped = true;
         final ModelConfigDraft? draft = _modelCardKey.currentState?.buildDraft()
             ?? ((apiKey != null && apiKey.trim().isNotEmpty)
                 ? ModelConfigDraft(
@@ -483,12 +362,8 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     switch (_phase) {
       case _Phase.boot:
         return _BootPane(progress: _bootProgress, status: _bootStatus, done: _prepDone);
-      case _Phase.appellation:
-        return _buildAppellationStep();
-      case _Phase.agentName:
-        return _buildAgentNameStep();
-      case _Phase.voiceprint:
-        return _buildVoiceprintStep();
+      case _Phase.profile:
+        return _buildProfileStep();
       case _Phase.model:
         return _buildModelStep();
       case _Phase.done:
@@ -514,7 +389,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
-              _StepIndicator(current: step, total: 4),
+              _StepIndicator(current: step, total: 2),
               const SizedBox(height: 28),
               Text(title, style: const TextStyle(color: textPrimary, fontSize: 26, fontWeight: FontWeight.w600, letterSpacing: 0.5)),
               const SizedBox(height: 8),
@@ -555,168 +430,48 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
     );
   }
 
-  // ── 步骤 1 ──
+  // ── 步骤 1：称呼 + agent 名字（同屏）──
 
-  Widget _buildAppellationStep() {
-    final String text = _appellationCtrl.text.trim();
-    final bool canNext = text.isNotEmpty && text.length <= 12;
+  Widget _buildProfileStep() {
+    final String appellation = _appellationCtrl.text.trim();
+    final String agentName = _agentNameCtrl.text.trim();
+    final bool canNext = appellation.isNotEmpty && appellation.length <= 12 &&
+        agentName.isNotEmpty && agentName.length <= 12;
     return _stepFrame(
       step: 1,
       title: "怎么称呼你？",
-      subtitle: "我会记住这个称呼。之后对话里，它就是我对你的名字。",
+      subtitle: "我会记住这个称呼。之后对话里，它就是我对你的名字。也给它取个名字，你想叫它什么都行。",
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
+          _fieldLabel("称呼你"),
           _darkField(
             controller: _appellationCtrl,
             hint: "1-12 个字",
             autofocus: true,
             onChanged: (_) => setState(() {}),
           ),
-          const SizedBox(height: 28),
-          _primaryButton("下一步", _confirmAppellation, enabled: canNext),
-        ],
-      ),
-    );
-  }
-
-  // ── 步骤 2 ──
-
-  Widget _buildAgentNameStep() {
-    final String text = _agentNameCtrl.text.trim();
-    final bool canNext = text.isNotEmpty && text.length <= 12;
-    return _stepFrame(
-      step: 2,
-      title: "给我取个名字吧",
-      subtitle: _currentAgentName == null
-          ? "你想叫它什么都行，它以后就一直叫这个。"
-          : "它现在叫「$_currentAgentName」，你可以保留，或换一个新的。",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
+          const SizedBox(height: 24),
+          _fieldLabel(_currentAgentName == null
+              ? "给它取个名字"
+              : "给它取个名字（现在叫「$_currentAgentName」，可保留）"),
           _darkField(
             controller: _agentNameCtrl,
-            hint: "给它起个名字（1-12 字）",
+            hint: _currentAgentName ?? "你想叫它什么都行（1-12 字）",
             onChanged: (_) => setState(() {}),
           ),
           const SizedBox(height: 28),
-          _primaryButton("下一步", _confirmAgentName, enabled: canNext),
+          _primaryButton("下一步", _confirmProfile, enabled: canNext),
         ],
       ),
     );
   }
 
-  // ── 步骤 3：声纹 ──
-
-  Widget _buildVoiceprintStep() {
-    final Widget body;
-    if (!_voiceprintEngineReady) {
-      body = Column(
-        children: <Widget>[
-          _infoCard(
-            "声纹引擎未随包就绪（models/speaker-cnceleb-resnet34 缺失）。\n"
-            "语音对话与控制将在引擎可用后自动恢复声纹校验。",
-          ),
-          const SizedBox(height: 24),
-          _primaryButton("继续", () => _go(_Phase.model)),
-        ],
-      );
-    } else if (_voiceprintResult != null) {
-      final double? score = (_voiceprintResult!["verifyScore"] as num?)?.toDouble();
-      body = Column(
-        children: <Widget>[
-          const Icon(Icons.check_circle_outline, color: Colors.white, size: 44),
-          const SizedBox(height: 14),
-          Text(
-            score != null ? "声纹已录入 · 自验相似度 ${score.toStringAsFixed(2)}" : "声纹已录入",
-            style: const TextStyle(color: textPrimary, fontSize: 16, fontWeight: FontWeight.w600),
-          ),
-          const SizedBox(height: 6),
-          const Text("此后语音对话与语音控制只响应你的声音。", style: TextStyle(color: textSecondary, fontSize: 13)),
-          const SizedBox(height: 26),
-          _primaryButton("下一步", () => _go(_Phase.model)),
-          const SizedBox(height: 12),
-          _textLink("重新录入", _resetVoiceprint),
-        ],
-      );
-    } else {
-      body = Column(
-        children: <Widget>[
-          _infoCard(
-            "录三句话，让我记住你的声音。\n"
-            "语音对话与语音控制只响应录入声纹的人——包括你在内，别人说话我不会应答。",
-          ),
-          const SizedBox(height: 24),
-          _RecordDots(count: _clips.length, total: 3),
-          const SizedBox(height: 24),
-          _recordButton(),
-          const SizedBox(height: 16),
-          if (_clipIndex < 3 && !_recording)
-            Text(_clipIndex == 0 ? _clipPrompts[0] : _clipPrompts[_clipIndex], style: const TextStyle(color: textSecondary, fontSize: 13.5))
-          else if (_recording)
-            ValueListenableBuilder<double>(
-              valueListenable: _recorder.level,
-              builder: (BuildContext context, double level, _) => Text(
-                "正在聆听… ${(_clipDuration.inMilliseconds / 1000 - _recordElapsed).ceil()}s",
-                style: const TextStyle(color: textPrimary, fontSize: 13.5),
-              ),
-            ),
-          if (_voiceprintError != null) ...<Widget>[
-            const SizedBox(height: 12),
-            Text(_voiceprintError!, style: const TextStyle(color: errorRed, fontSize: 12.5)),
-          ],
-          const SizedBox(height: 24),
-          _primaryButton(
-            _clipIndex >= 3 ? "提交声纹" : "下一步",
-            _clipIndex >= 3 ? _submitVoiceprint : () => _go(_Phase.model),
-            enabled: _clipIndex >= 3,
-          ),
-          const SizedBox(height: 12),
-          _textLink("跳过，稍后在设置中录入", () {
-            _voiceprintSkipped = true;
-            _go(_Phase.model);
-          }),
-        ],
-      );
-    }
-    return _stepFrame(step: 3, title: "声纹注册", subtitle: "你的声音，就是唤醒我的钥匙。", child: body);
-  }
-
-  Widget _recordButton() {
-    return ValueListenableBuilder<double>(
-      valueListenable: _recorder.level,
-      builder: (BuildContext context, double level, _) {
-        final double pulse = _recording ? 1.0 + level * 0.18 : 1.0;
-        return GestureDetector(
-          onTap: _recording ? _finishClip : _startClip,
-          child: AnimatedScale(
-            scale: pulse,
-            duration: const Duration(milliseconds: 120),
-            child: Container(
-              width: 92,
-              height: 92,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _recording ? Colors.white : cardBg,
-                border: Border.all(color: _recording ? Colors.white : cardBorder, width: 1.2),
-              ),
-              child: Icon(
-                _recording ? Icons.stop_rounded : Icons.mic_none_rounded,
-                size: 34,
-                color: _recording ? Colors.black : textPrimary,
-              ),
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  // ── 步骤 4：模型接入 ──
+  // ── 步骤 2：模型接入 ──
 
   Widget _buildModelStep() {
     return _stepFrame(
-      step: 4,
+      step: 2,
       title: "接入你的模型",
       subtitle: "选一个模型服务商，按引导拿到 API Key 填进来，我才有大脑。数据只存在这台电脑上。",
       child: ModelProviderCard(
@@ -746,9 +501,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   // ── 完成页 ──
 
   Widget _buildDonePane() {
-    final String voiceLine = _voiceprintResult != null
-        ? "已录入 · 仅你声纹可唤醒语音"
-        : (_voiceprintSkipped ? "已跳过（可稍后在设置中录入）" : "未录入");
     final String modelLine = _finalModelResult?.ok == true
         ? _finalModelResult!.summary
         : "已保存（未测试连通）";
@@ -769,7 +521,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
               const SizedBox(height: 30),
               _doneRow("称呼", _savedAppellation ?? "（未设置）"),
               _doneRow("名字", _savedAgentName ?? "（未设置）"),
-              _doneRow("声纹", voiceLine),
               _doneRow("模型", modelLine),
               const SizedBox(height: 36),
               _primaryButton("开始使用", widget.onComplete),
@@ -793,6 +544,13 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
   }
 
   // ── 通用小件 ──
+
+  Widget _fieldLabel(String text) {
+    return Padding(
+      padding: const EdgeInsets.only(left: 2, bottom: 8),
+      child: Text(text, style: const TextStyle(color: textMuted, fontSize: 12.5)),
+    );
+  }
 
   Widget _darkField({
     required TextEditingController controller,
@@ -818,32 +576,6 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: Colors.white.withValues(alpha: 0.5))),
       ),
       onChanged: onChanged,
-    );
-  }
-
-  Widget _infoCard(String text) {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: cardBg,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cardBorder),
-      ),
-      child: Text(text, style: const TextStyle(color: textSecondary, fontSize: 13, height: 1.8)),
-    );
-  }
-
-  Widget _textLink(String label, VoidCallback onTap) {
-    return Align(
-      alignment: Alignment.center,
-      child: TextButton(
-        style: TextButtonTheme.of(context).style?.copyWith(
-              foregroundColor: const WidgetStatePropertyAll<Color>(textMuted),
-              textStyle: const WidgetStatePropertyAll<TextStyle>(TextStyle(fontSize: 12.5)),
-            ),
-        onPressed: onTap,
-        child: Text(label),
-      ),
     );
   }
 }
@@ -962,33 +694,6 @@ class _StepIndicator extends StatelessWidget {
               height: 2,
               margin: EdgeInsets.only(right: i == total ? 0 : 6),
               color: i <= current ? Colors.white : const Color(0xFF232323),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
-class _RecordDots extends StatelessWidget {
-  const _RecordDots({required this.count, required this.total});
-
-  final int count;
-  final int total;
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: <Widget>[
-        for (int i = 0; i < total; i++)
-          Container(
-            width: 8,
-            height: 8,
-            margin: const EdgeInsets.symmetric(horizontal: 7),
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: i < count ? Colors.white : const Color(0xFF232323),
-              border: Border.all(color: i < count ? Colors.white : const Color(0xFF333333)),
             ),
           ),
       ],

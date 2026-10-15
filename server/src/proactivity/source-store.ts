@@ -396,7 +396,8 @@ export function dateKey(at: number): string {
 /**
  * 实体抽取（零 LLM）：把信号里"值得跨源关联"的词提出来。
  *  - 显式实体：payload.entities（传感器可直接给，最准）
- *  - 文本实体：delta 里的中文 2-4 字词 / 英文/数字 ≥3 字符词
+ *  - 正文实体：payload.text（消息正文 / 邮件 textSnippet 摘要）里的词
+ *  - 描述实体：delta 里的中文 2-4 字词 / 英文/数字 ≥3 字符词
  * 刻意保持保守（宁少勿滥），避免索引被噪声词撑爆。
  */
 export function extractEntities(signal: Signal): string[] {
@@ -406,6 +407,13 @@ export function extractEntities(signal: Signal): string[] {
     for (const e of explicit) {
       if (typeof e === "string" && e.trim()) out.add(e.trim().toLowerCase());
     }
+  }
+  // 正文类字段（2026-10-14）：message 流的 payload.text（消息正文）、mail 流的
+  // textSnippet 摘要——正文是实体主来源，tokenize 优先于 delta 模板词，避免长正文
+  // 把「来自 X 的新消息」这类模板词元顶掉正文实体（20 上限内正文先占坑）。
+  const body = signal.payload?.text;
+  if (typeof body === "string" && body.trim()) {
+    for (const t of tokenize(body)) out.add(t);
   }
   if (signal.delta) {
     for (const t of tokenize(signal.delta)) out.add(t);

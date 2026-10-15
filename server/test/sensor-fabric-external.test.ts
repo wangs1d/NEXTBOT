@@ -192,6 +192,32 @@ test("SourceStore: 跨源实体检索——「三亚」一次命中邮件+日历
   }
 });
 
+test("SourceStore: 正文 payload.text 参与实体索引（消息正文可被跨源检索）", () => {
+  const dir = tmpDir();
+  try {
+    const store = new SourceStore({ dataPath: dir, disablePersist: true });
+    // message 流信号只带正文，无 entities、delta 只是模板句——正文实体必须被索引
+    store.feed({
+      stream: "message",
+      at: 1700,
+      fingerprint: "msg1",
+      salience: "low",
+      delta: "来自 张总 的新消息",
+      payload: { sender: "张总", text: "下周去三亚出差，记得订携程机票" },
+    });
+    const hits = store.findByEntity("三亚");
+    assert.equal(hits.length, 1, "正文实体「三亚」命中 message 流");
+    assert.equal(store.findByEntity("携程").length, 1, "正文实体「携程」命中");
+    // 正文实体优先于 delta 模板词占坑（20 上限内 text 先于 delta）
+    assert.ok(store.findByEntity("张总").length >= 1, "delta 里的人名实体仍可命中");
+    // 无正文不炸（text 缺省/非字符串）
+    store.feed({ stream: "message", at: 1701, fingerprint: "msg2", salience: "low", delta: "来自 李雷 的新消息" });
+    assert.equal(store.findByEntity("李雷").length, 1, "无 text 时 delta tokenize 兜底不变");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("SourceStore: 显式实体优先 + 文本 tokenize（中文 2-4 字 / 英文 3+）", () => {
   const sig: Signal = {
     stream: "message",

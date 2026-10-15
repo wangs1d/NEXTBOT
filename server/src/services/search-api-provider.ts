@@ -1,17 +1,32 @@
 import type { InfoSearchItem } from "./info-hub-service.js";
+import { createAnySearchProvider, resetAnySearchImageProbeForTests } from "./search-providers/anysearch.js";
+import {
+  createBingProvider,
+  createJinaProvider,
+  createSerperProvider,
+  createTavilyProvider,
+} from "./search-providers/thirdparty.js";
 
 /**
- * 搜索 API 提供方抽象。
+ * 搜索 API 抽象层：提供方无关的统一搜索入口。
  *
- * 目标：把「稳定、不封 IP」的搜索 API 作为主力搜索源，替代纯爬网页（必应/百度/搜狗/DDG）。
- * 通过环境变量配置，支持 Tavily / Serper / Bing Web Search / Jina 四种提供方：
- *   - SEARCH_API_PROVIDER=tavily|serper|bing|jina（不设 = 关闭，走爬网页兜底）
- *   - SEARCH_API_KEY=可复用的 API Key（Tavily / Serper / Bing 通用；Jina 用 JINA_API_KEY）
+ * 分层结构（上层调用方只依赖本文件的门面与归一化结果类型）：
+ *
+ *   上层（domestic-web-providers / upstream-search-service / 各工具链）
+ *     └─ searchViaSearchApi / searchImagesViaSearchApi（本文件门面）
+ *          └─ SearchProvider 契约（注册表解析出的具体实现）
+ *               ├─ search-providers/anysearch.ts   主后端：运营方自运营的 AnySearch
+ *               └─ search-providers/thirdparty.ts  备选：tavily / serper / bing / jina
+ *
+ * 搜索后端由本项目运营方统一提供（当前为 AnySearch）：外接 API 与本地部署
+ * 只是同一实现的不同端点（ANYSEARCH_ENDPOINT），上层与契约均不感知；更换
+ * 后端形态/换实现只动 search-providers/ 与环境变量，上层零改动。新后端接
+ * 入 = 实现一份 SearchProvider 契约 + registerSearchProvider 注册一行。
  *
  * 行为约定：
- *   - 未配置任何提供方 → 返回 null（调用方应跳过 API，继续走爬网页链）
- *   - 已配置但请求失败 → 返回 []（调用方优雅降级到多引擎爬网页）
- *   - 成功 → 返回去重后的 InfoSearchItem[]（不超过 limit）
+ *   - 未配置（SEARCH_API_PROVIDER=none / 缺 key）→ null（网页）/ []（图片），调用方走多引擎爬网页兜底
+ *   - 已配置但请求失败 → []（优雅降级）
+ *   - 成功 → 去重归一化后的 InfoSearchItem[] / ImageApiItem[]（不超过 limit）
  */
 
 export type SearchApiProviderType = "tavily" | "serper" | "bing" | "jina" | "anysearch" | "none";
@@ -28,7 +43,34 @@ export type SearchApiConfig = {
   anysearchZone: string;
   /** AnySearch 偏好语言（如 zh-CN） */
   anysearchLang: string;
+  /** 单次请求超时（ms） */
+  timeoutMs: number;
 };
+
+/** 图片搜索条目（归一化结果，与提供方无关）。 */
+export type ImageApiItem = {
+  title: string;
+  mediaUrl: string;
+  thumbnailUrl?: string;
+  pageUrl?: string;
+  source?: string;
+};
+
+/**
+ * 搜索提供方契约：上层只见契约不见实现。
+ *   - name：结果 source 标注与日志用
+ *   - requiresApiKey：false = 无 key 可用（如 Jina 免费额度）
+ *   - searchWeb：必选能力，失败/空 → []
+ *   - searchImages：可选能力，未实现时门面回退爬图片网页兜底
+ */
+export type SearchProvider = {
+  readonly name: string;
+  readonly requiresApiKey: boolean;
+  searchWeb(keyword: string, limit: number): Promise<InfoSearchItem[]>;
+  searchImages?(keyword: string, limit: number): Promise<ImageApiItem[]>;
+};
+
+export type SearchProviderFactory = (cfg: SearchApiConfig) => SearchProvider;
 
 // 搜索 API 超时：必须小于 search_web 的工具执行预算（TOOL_TIMEOUT_SEARCH_MS，默认
 // 6500ms）。曾默认 8000ms > 6500ms——AnySearch 慢响应时整个 search_web 在 6.5s 被外层
@@ -36,11 +78,18 @@ export type SearchApiConfig = {
 // 默认 5000ms 给 API，剩余预算留给爬虫兜底；SEARCH_API_TIMEOUT_MS 可调。
 const SEARCH_API_TIMEOUT_MS =
   Number.parseInt(process.env.SEARCH_API_TIMEOUT_MS ?? "5000", 10) || 5000;
-const ANYSEARCH_ENDPOINT =
-  (process.env.ANYSEARCH_ENDPOINT ?? "").trim() || "https://api.anysearch.com/v1/search";
-// 能力拓扑查询端点：与搜索端点同源（/v1/search → /v1/sub-domains）
-const ANYSEARCH_SUB_DOMAINS_ENDPOINT = ANYSEARCH_ENDPOINT.replace(/\/v1\/search$/, "/v1/sub-domains");
 const DEFAULT_BING_ENDPOINT = "https://api.cognitive.microsoft.com/bing/v7.0/search";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 提供方注册表：内置实现注册于文件尾部；新后端（如本地部署的搜索服务）在此注册。
+// ─────────────────────────────────────────────────────────────────────────────
+
+const providerFactories = new Map<SearchApiProviderType, SearchProviderFactory>();
+
+/** 注册搜索后端实现。重复注册按覆盖处理（便于测试与本地替换）。 */
+export function registerSearchProvider(type: SearchApiProviderType, factory: SearchProviderFactory): void {
+  providerFactories.set(type, factory);
+}
 
 function normalizeProvider(raw: string | undefined): SearchApiProviderType {
   const v = (raw ?? "").trim().toLowerCase();
@@ -56,8 +105,21 @@ export function getSearchApiConfig(env: NodeJS.ProcessEnv = process.env): Search
     bingEndpoint: (env.BING_SEARCH_API_ENDPOINT ?? DEFAULT_BING_ENDPOINT).trim() || DEFAULT_BING_ENDPOINT,
     anysearchZone: (env.ANYSEARCH_ZONE ?? "cn").trim() || "cn",
     anysearchLang: (env.ANYSEARCH_LANG ?? "zh-CN").trim() || "zh-CN",
+    timeoutMs: SEARCH_API_TIMEOUT_MS,
   };
 }
+
+/** 按配置从注册表实例化提供方；none/未注册 → null。key 校验由门面按场景完成。 */
+export function resolveSearchProvider(cfg: SearchApiConfig): SearchProvider | null {
+  if (cfg.provider === "none") return null;
+  const factory = providerFactories.get(cfg.provider);
+  if (!factory) return null;
+  return factory(cfg);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 门面：上层唯一入口（签名与降级语义自抽象前保持不变）
+// ─────────────────────────────────────────────────────────────────────────────
 
 /** 通过搜索 API 搜索。未配置 → null；配置但失败 → []；成功 → 结果数组。 */
 export async function searchViaSearchApi(
@@ -74,13 +136,15 @@ export async function searchViaSearchApi(
     console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，联网搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
     return null;
   }
-  if (cfg.provider !== "jina" && !cfg.apiKey) {
+  const provider = resolveSearchProvider(cfg);
+  if (!provider) return null;
+  if (provider.requiresApiKey && !cfg.apiKey) {
     console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
     return null;
   }
 
   console.log(`[SearchApi] 请求 ${cfg.provider}  查询="${keyword.slice(0, 40)}"  limit=${boundedLimit}`);
-  const result = await dispatchSearchApi(cfg, keyword, boundedLimit);
+  const result = await provider.searchWeb(keyword, boundedLimit);
   // 可观测性：已配置的 API 返回 0 条（请求失败/业务失败/空结果）时显式告警。
   // 此前静默回退爬虫链，日志里完全看不出「配了 anysearch 却没走 anysearch」。
   if (result.length === 0) {
@@ -90,37 +154,6 @@ export async function searchViaSearchApi(
   }
   return result;
 }
-
-async function dispatchSearchApi(
-  cfg: SearchApiConfig,
-  keyword: string,
-  boundedLimit: number,
-): Promise<InfoSearchItem[]> {
-  switch (cfg.provider) {
-    case "tavily":
-      return searchTavily(keyword, boundedLimit, cfg.apiKey);
-    case "serper":
-      return searchSerper(keyword, boundedLimit, cfg.apiKey);
-    case "bing":
-      return searchBingApi(keyword, boundedLimit, cfg.apiKey, cfg.bingEndpoint);
-    case "jina":
-      return searchJina(keyword, boundedLimit, cfg.jinaKey);
-    case "anysearch":
-      return searchAnySearch(keyword, boundedLimit, cfg.apiKey, cfg.anysearchZone, cfg.anysearchLang);
-    // normalizeProvider 已把非法值归一为 "none"（上方提前返回 null），此分支不可达
-    default:
-      return [];
-  }
-}
-
-/** 图片搜索失败器：未配置/缺 key/请求失败 → 空数组（调用方优雅降级到爬网页）。 */
-export type ImageApiItem = {
-  title: string;
-  mediaUrl: string;
-  thumbnailUrl?: string;
-  pageUrl?: string;
-  source?: string;
-};
 
 /**
  * 通过已接入的搜索 API 搜图。未配置 → []；配置但失败 → []；成功 → 图片项数组。
@@ -140,506 +173,26 @@ export async function searchImagesViaSearchApi(
     console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，图片搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
     return [];
   }
-  if (cfg.provider !== "jina" && !cfg.apiKey) {
+  const provider = resolveSearchProvider(cfg);
+  if (!provider) return [];
+  if (provider.requiresApiKey && !cfg.apiKey) {
     console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，图片搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
+    return [];
+  }
+  if (!provider.searchImages) {
+    // 提供方无图片能力（如 Jina）→ 回退到爬图片网页兜底。
     return [];
   }
 
   console.log(`[SearchApi] 图片搜索 ${cfg.provider}  查询="${keyword.slice(0, 40)}"  limit=${boundedLimit}`);
-  switch (cfg.provider) {
-    case "tavily":
-      return searchTavilyImages(keyword, boundedLimit, cfg.apiKey);
-    case "serper":
-      return searchSerperImages(keyword, boundedLimit, cfg.apiKey);
-    case "bing":
-      return searchBingImages(keyword, boundedLimit, cfg.apiKey, cfg.bingEndpoint);
-    // Jina 无图片搜索端点 → 返回空数组，回退到爬图片网页兜底。
-    case "jina":
-      return [];
-    // AnySearch：/v1/search 按 tag={domain}.{sub_domain} 路由垂直搜索。图片能力
-    // 服务端灰度开放中（2026-09-17 实测能力拓扑仅 code/finance/travel），这里做
-    // 能力自发现：开放后自动切走必应爬页兜底，无需改代码；详见 searchAnySearchImages。
-    case "anysearch":
-      return searchAnySearchImages(keyword, boundedLimit, cfg);
-    default:
-      return [];
-  }
+  return provider.searchImages(keyword, boundedLimit);
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// AnySearch 图片垂直搜索（能力自发现）
-//
-// AnySearch 的图片搜索不是独立端点，而是 /v1/search + tag={domain}.{sub_domain}
-// 的垂直路由。tag 取值由 GET /v1/sub-domains?domain=image 下发——能力未对当前
-// key 开放时该请求返回 code:-1「Capabilities temporarily unavailable」。
-// 因此这里按 10 分钟窗口探测一次（结果正负都缓存）：
-//   - 探测到 image 域有 sub_domain → 用 ${domain}.${sub_domain} 作为 tag 搜图；
-//   - 未开放 → 返回 []，调用方回退必应爬页兜底（现状不变）；
-//   - ANYSEARCH_IMAGE_TAG 环境变量可显式指定 tag 强制启用，=off 关闭探测。
-// 结果字段按未来垂直扩展容错解析（image_url/media_url/thumbnail… 均兼容）。
-// ─────────────────────────────────────────────────────────────────────────────
+// 内置提供方注册。AnySearch 为主后端（运营方统一提供），其余为备选。
+registerSearchProvider("anysearch", createAnySearchProvider);
+registerSearchProvider("tavily", createTavilyProvider);
+registerSearchProvider("serper", createSerperProvider);
+registerSearchProvider("bing", createBingProvider);
+registerSearchProvider("jina", createJinaProvider);
 
-const ANYSEARCH_IMAGE_PROBE_TTL_MS = 10 * 60 * 1000;
-const ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS = 2_500;
-const ANYSEARCH_IMAGE_PROBE_DOMAINS = ["image", "images", "photo"] as const;
-let anysearchImageProbe: { at: number; tag: string | null } | null = null;
-
-/** 仅供测试：清空 AnySearch 图片能力探测缓存，隔离用例间的模块级状态。 */
-export function resetAnySearchImageProbeForTests(): void {
-  anysearchImageProbe = null;
-}
-
-async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | null> {
-  const forced = (process.env.ANYSEARCH_IMAGE_TAG ?? "").trim();
-  if (forced) return forced.toLowerCase() === "off" ? null : forced;
-
-  if (anysearchImageProbe && Date.now() - anysearchImageProbe.at < ANYSEARCH_IMAGE_PROBE_TTL_MS) {
-    return anysearchImageProbe.tag;
-  }
-  let tag: string | null = null;
-  for (const domain of ANYSEARCH_IMAGE_PROBE_DOMAINS) {
-    const json = await requestJson(
-      `${ANYSEARCH_SUB_DOMAINS_ENDPOINT}?domain=${domain}`,
-      { method: "GET", headers: { authorization: `Bearer ${cfg.apiKey}` } },
-      ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS,
-    );
-    if (!isObj(json)) break; // 端点不可达同样视为不可用：连续探测最多 3×2.5s 会拖垮本次调用预算
-    if (json.code !== 0) break; // 能力拓扑服务端明确拒绝（未开放），无需再试其他域名
-    const data = json.data;
-    if (!isObj(data) || !Array.isArray(data.domains)) continue;
-    const entry = data.domains.filter(isObj).find((d) => str(d.domain) === domain);
-    const subs = entry && Array.isArray(entry.sub_domains) ? entry.sub_domains.filter(isObj) : [];
-    const first = subs.map((s) => str(s.sub_domain)).find(Boolean);
-    if (first) {
-      tag = `${domain}.${first}`;
-      break;
-    }
-  }
-  anysearchImageProbe = { at: Date.now(), tag };
-  if (!tag) {
-    console.warn(
-      `[SearchApi] AnySearch 图片垂直能力未开放（探测 ${ANYSEARCH_IMAGE_PROBE_DOMAINS.join("/")} 域均不可用），` +
-        `search_images 暂走必应爬页兜底；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
-        `或设 ANYSEARCH_IMAGE_TAG=<tag> 强制启用`,
-    );
-  }
-  return tag;
-}
-
-async function searchAnySearchImages(
-  query: string,
-  limit: number,
-  cfg: SearchApiConfig,
-): Promise<ImageApiItem[]> {
-  const tag = await resolveAnySearchImageTag(cfg);
-  if (!tag) return [];
-  const json = await requestJson(ANYSEARCH_ENDPOINT, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${cfg.apiKey}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      query,
-      // 官方约束 max_results 1–10
-      max_results: Math.max(1, Math.min(10, limit)),
-      tag,
-      zone: cfg.anysearchZone === "intl" ? "intl" : "cn",
-      language: cfg.anysearchLang,
-    }),
-  });
-  if (!isObj(json)) return [];
-  if (json.code !== 0) {
-    console.warn(
-      `[SearchApi] AnySearch 图片垂直失败 code=${String(json.code)} msg=${String(json.message ?? "")} tag=${tag} query="${query.slice(0, 40)}"`,
-    );
-    return [];
-  }
-  const data = json.data;
-  if (!isObj(data) || !Array.isArray(data.results)) return [];
-  const out: ImageApiItem[] = [];
-  const seen = new Set<string>();
-  for (const item of data.results) {
-    if (!isObj(item)) continue;
-    const rec = item as Record<string, unknown>;
-    const mediaUrl =
-      str(rec.image_url) || str(rec.imageUrl) || str(rec.media_url) || str(rec.mediaUrl) ||
-      str(rec.thumbnail) || str(rec.thumbnail_url) || str(rec.url);
-    const low = mediaUrl.toLowerCase();
-    if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl) || seen.has(low)) continue;
-    seen.add(low);
-    out.push({
-      title: str(rec.title) || query,
-      mediaUrl,
-      thumbnailUrl:
-        str(rec.thumbnail_url) || str(rec.thumbnailUrl) || str(rec.thumbnail) || mediaUrl,
-      pageUrl: str(rec.page_url) || str(rec.pageUrl) || str(rec.source_url) || str(rec.link),
-    });
-    if (out.length >= limit) break;
-  }
-  return out.length > 0 ? withSource(out, "AnySearch") : [];
-}
-
-async function searchTavilyImages(query: string, limit: number, apiKey: string): Promise<ImageApiItem[]> {
-  const json = await requestJson("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      api_key: apiKey,
-      query,
-      max_results: Math.max(limit, 5),
-      include_answer: false,
-      include_raw_content: false,
-      include_images: true,
-    }),
-  });
-  if (!isObj(json)) return [];
-  const images = Array.isArray((json as Record<string, unknown>).images)
-    ? ((json as Record<string, unknown>).images as unknown[])
-    : [];
-  const out: ImageApiItem[] = [];
-  const seen = new Set<string>();
-  for (const img of images) {
-    const url = str(img);
-    const low = url.toLowerCase();
-    if (!url || !/^https?:\/\//i.test(url) || seen.has(low)) continue;
-    seen.add(low);
-    out.push({ title: query, mediaUrl: url, thumbnailUrl: url });
-    if (out.length >= limit) break;
-  }
-  return out.length > 0 ? withSource(out, "Tavily") : [];
-}
-
-async function searchSerperImages(query: string, limit: number, apiKey: string): Promise<ImageApiItem[]> {
-  const json = await requestJson("https://google.serper.dev/images", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": apiKey },
-    body: JSON.stringify({ q: query, num: Math.max(limit, 10), gl: "cn", hl: "zh-cn" }),
-  });
-  if (!isObj(json)) return [];
-  const images = Array.isArray((json as Record<string, unknown>).images)
-    ? ((json as Record<string, unknown>).images as unknown[])
-    : [];
-  const out: ImageApiItem[] = [];
-  const seen = new Set<string>();
-  for (const item of images) {
-    if (!isObj(item)) continue;
-    const mediaUrl = str((item as Record<string, unknown>).imageUrl);
-    const low = mediaUrl.toLowerCase();
-    if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl) || seen.has(low)) continue;
-    seen.add(low);
-    out.push({
-      title: str((item as Record<string, unknown>).title) || query,
-      mediaUrl,
-      thumbnailUrl: str((item as Record<string, unknown>).thumbnailUrl) || mediaUrl,
-      pageUrl: str((item as Record<string, unknown>).link),
-    });
-    if (out.length >= limit) break;
-  }
-  return out.length > 0 ? withSource(out, "Serper") : [];
-}
-
-async function searchBingImages(
-  query: string,
-  limit: number,
-  apiKey: string,
-  endpoint: string,
-): Promise<ImageApiItem[]> {
-  // 由已配置的 Bing 搜索端点推导图片端：`.../search` → `.../images/search`
-  const imageEndpoint = endpoint.replace(/\/search$/, "/images/search");
-  const url = `${imageEndpoint}?q=${encodeURIComponent(query)}&count=${Math.max(limit, 10)}&mkt=zh-CN`;
-  const json = await requestJson(url, {
-    method: "GET",
-    headers: { "ocp-apim-subscription-key": apiKey },
-  });
-  if (!isObj(json)) return [];
-  const value = Array.isArray((json as Record<string, unknown>).value)
-    ? ((json as Record<string, unknown>).value as unknown[])
-    : [];
-  const out: ImageApiItem[] = [];
-  const seen = new Set<string>();
-  for (const item of value) {
-    if (!isObj(item)) continue;
-    const rec = item as Record<string, unknown>;
-    const mediaUrl = str(rec.contentUrl);
-    const low = mediaUrl.toLowerCase();
-    if (!mediaUrl || !/^https?:\/\//i.test(mediaUrl) || seen.has(low)) continue;
-    seen.add(low);
-    out.push({
-      title: str(rec.name) || query,
-      mediaUrl,
-      thumbnailUrl: str(rec.thumbnailUrl) || mediaUrl,
-      pageUrl: str(rec.hostPageUrl),
-    });
-    if (out.length >= limit) break;
-  }
-  return out.length > 0 ? withSource(out, "Bing API") : [];
-}
-
-function withSource(items: ImageApiItem[], source: string): ImageApiItem[] {
-  return items.map((it) => ({ ...it, source: it.source || source }));
-}
-
-async function requestJson(url: string, init: RequestInit, timeoutMs = SEARCH_API_TIMEOUT_MS): Promise<unknown | null> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  const label = `${init.method ?? "GET"} ${url}`;
-  try {
-    const response = await fetch(url, { ...init, signal: controller.signal });
-    if (!response.ok) {
-      console.warn(`[SearchApi] 请求失败 HTTP ${response.status} ${response.statusText} -> ${label}`);
-      return null;
-    }
-    const text = await response.text();
-    if (!text) {
-      console.warn(`[SearchApi] 响应为空 -> ${label}`);
-      return null;
-    }
-    try {
-      return JSON.parse(text) as unknown;
-    } catch {
-      console.warn(`[SearchApi] 响应非合法 JSON -> ${label}  body=${text.slice(0, 120)}`);
-      return null;
-    }
-  } catch (e) {
-    console.warn(`[SearchApi] 请求异常/超时(${timeoutMs}ms) -> ${label}  err=${(e as Error)?.message ?? e}`);
-    return null;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function toItems(
-  items: Array<{ title?: string; url?: string; snippet?: string; date?: string }>,
-  source: string,
-  limit: number,
-): InfoSearchItem[] {
-  const out: InfoSearchItem[] = [];
-  const seen = new Set<string>();
-  for (const item of items) {
-    const title = (item.title ?? "").trim();
-    const url = (item.url ?? "").trim();
-    if (!title || !url || !/^https?:\/\//i.test(url)) continue;
-    const key = url.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      title: title.slice(0, 180),
-      url,
-      // 2026-09-03：220→400 字符。原上限只够一两句话，LLM 拿不到细节只能潦草收尾。
-      snippet: (item.snippet ?? "").slice(0, 400),
-      source,
-      publishedAt: item.date,
-    });
-    if (out.length >= limit) break;
-  }
-  return out;
-}
-
-async function searchTavily(query: string, limit: number, apiKey: string): Promise<InfoSearchItem[]> {
-  const body = {
-    api_key: apiKey,
-    query,
-    search_depth: "advanced" as const,
-    max_results: Math.max(limit, 5),
-    include_answer: false,
-    include_raw_content: false,
-  };
-  const json = await requestJson("https://api.tavily.com/search", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!isObj(json)) return [];
-  const results = Array.isArray((json as Record<string, unknown>).results)
-    ? ((json as Record<string, unknown>).results as unknown[])
-    : [];
-  const mapped = results
-    .filter(isObj)
-    .map((r) => ({
-      title: str(r.title),
-      url: str(r.url),
-      snippet: str(r.content),
-      date: str((r as Record<string, unknown>).published_date),
-    }));
-  return toItems(mapped, "Tavily", limit);
-}
-
-async function searchSerper(query: string, limit: number, apiKey: string): Promise<InfoSearchItem[]> {
-  const json = await requestJson("https://google.serper.dev/search", {
-    method: "POST",
-    headers: { "content-type": "application/json", "x-api-key": apiKey },
-    body: JSON.stringify({ q: query, num: Math.max(limit, 10), gl: "cn", hl: "zh-cn" }),
-  });
-  if (!isObj(json)) return [];
-  const organic = Array.isArray((json as Record<string, unknown>).organic)
-    ? ((json as Record<string, unknown>).organic as unknown[])
-    : [];
-  const mapped = organic.filter(isObj).map((r) => ({
-    title: str(r.title),
-    url: str(r.link),
-    snippet: str(r.snippet),
-    date: str((r as Record<string, unknown>).date),
-  }));
-  return toItems(mapped, "Serper", limit);
-}
-
-async function searchBingApi(
-  query: string,
-  limit: number,
-  apiKey: string,
-  endpoint: string,
-): Promise<InfoSearchItem[]> {
-  const url = `${endpoint}?q=${encodeURIComponent(query)}&count=${Math.max(limit, 10)}&mkt=zh-CN`;
-  const json = await requestJson(url, {
-    method: "GET",
-    headers: { "ocp-apim-subscription-key": apiKey },
-  });
-  if (!isObj(json)) return [];
-  const webPages = (json as Record<string, unknown>).webPages;
-  if (!isObj(webPages)) return [];
-  const value = Array.isArray((webPages as Record<string, unknown>).value)
-    ? ((webPages as Record<string, unknown>).value as unknown[])
-    : [];
-  const mapped = value.filter(isObj).map((r) => ({
-    title: str(r.name),
-    url: str(r.url),
-    snippet: str(r.snippet),
-    date: str((r as Record<string, unknown>).datePublished),
-  }));
-  return toItems(mapped, "Bing API", limit);
-}
-
-async function searchJina(query: string, limit: number, jinaKey: string): Promise<InfoSearchItem[]> {
-  // Jina 免费搜索端点（无需 key 也有基础额度；提供 key 可提额）。
-  const url = `https://s.jina.ai/${encodeURIComponent(query)}`;
-  const headers: Record<string, string> = {
-    accept: "application/json",
-    "x-respond-with": "no-content",
-    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-  };
-  if (jinaKey) headers.authorization = `Bearer ${jinaKey}`;
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SEARCH_API_TIMEOUT_MS);
-  try {
-    const response = await fetch(url, { headers, signal: controller.signal });
-    if (!response.ok) return [];
-    const text = await response.text();
-    if (!text) return [];
-    // s.jina.ai 返回 JSON Lines：每行一个 JSON 对象，含 url / title / description
-    const items: Array<{ title?: string; url?: string; snippet?: string; date?: string }> = [];
-    for (const line of text.split("\n")) {
-      const t = line.trim();
-      if (!t) continue;
-      try {
-        const obj = JSON.parse(t) as Record<string, unknown>;
-        if (!obj || typeof obj !== "object") continue;
-        items.push({ title: str(obj.title), url: str(obj.url), snippet: str(obj.description), date: str(obj.date) });
-      } catch {
-        // 跳过不可解析行
-      }
-    }
-    return toItems(items, "Jina", limit);
-  } catch (e) {
-    console.warn(
-      `[SearchApi] Jina 请求异常/超时(${SEARCH_API_TIMEOUT_MS}ms) -> query  err=${(e as Error)?.message ?? e}`,
-    );
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function searchAnySearch(
-  query: string,
-  limit: number,
-  apiKey: string,
-  zone: string,
-  lang: string,
-): Promise<InfoSearchItem[]> {
-  // 对 Agent 的下一代统一搜索基础设施：POST /v1/search，Bearer 认证。
-  // 返回 data.results[{ title, url, snippet, content }]，含清洗后的正文，对中文与垂直领域友好。
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SEARCH_API_TIMEOUT_MS);
-  try {
-    const response = await fetch(ANYSEARCH_ENDPOINT, {
-      method: "POST",
-      headers: {
-        authorization: `Bearer ${apiKey}`,
-        "content-type": "application/json",
-      },
-      body: JSON.stringify({
-        query,
-        max_results: Math.max(limit, 5),
-        zone: zone === "intl" ? "intl" : "cn",
-        language: lang,
-      }),
-      signal: controller.signal,
-    });
-    if (!response.ok) {
-      console.warn(
-        `[SearchApi] AnySearch HTTP ${response.status} ${response.statusText} -> query="${query.slice(0, 40)}"`,
-      );
-      return [];
-    }
-    const text = await response.text();
-    if (!text) {
-      console.warn(`[SearchApi] AnySearch 响应为空 -> query="${query.slice(0, 40)}"`);
-      return [];
-    }
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(text) as unknown;
-    } catch {
-      console.warn(`[SearchApi] AnySearch 响应非 JSON -> query="${query.slice(0, 40)}" body=${text.slice(0, 120)}`);
-      return [];
-    }
-    if (!isObj(parsed)) return [];
-    // 成功响应：code===0 且 data.results 为数组；非 0 视为业务失败
-    const rec = parsed as Record<string, unknown>;
-    if (rec.code !== 0) {
-      console.warn(
-        `[SearchApi] AnySearch 业务失败 code=${String(rec.code)} msg=${String(rec.message ?? "")} -> query="${query.slice(0, 40)}"`,
-      );
-      return [];
-    }
-    const data = rec.data;
-    if (!isObj(data)) {
-      console.warn(`[SearchApi] AnySearch 响应缺 data 字段 -> query="${query.slice(0, 40)}"`);
-      return [];
-    }
-    const results = Array.isArray((data as Record<string, unknown>).results)
-      ? ((data as Record<string, unknown>).results as unknown[])
-      : [];
-    const mapped = results.filter(isObj).map((r) => {
-      const snippet = str(r.snippet);
-      const content = str(r.content);
-      return {
-        title: str(r.title),
-        url: str(r.url),
-        snippet: snippet || content,
-        // 尽力取发布时间：时效排序与证据块日期标注都依赖它；缺省保持空串
-        date: str(r.publish_time) || str(r.publishedAt) || str(r.date) || str(r.publishTime) || str(r.time),
-      };
-    });
-    return toItems(mapped, "AnySearch", limit);
-  } catch (e) {
-    // 静默吞异常曾让「API 实际不可达/超时」无任何日志，表现为 Agent 静默
-    // 退到爬虫兜底、用户以为是没配 API（2026-09-12）。失败必须留痕。
-    console.warn(
-      `[SearchApi] AnySearch 请求异常/超时(${SEARCH_API_TIMEOUT_MS}ms) -> query="${query.slice(0, 40)}"  err=${(e as Error)?.message ?? e}`,
-    );
-    return [];
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function isObj(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === "object";
-}
-
-function str(value: unknown): string {
-  return typeof value === "string" ? value : "";
-}
+export { resetAnySearchImageProbeForTests };

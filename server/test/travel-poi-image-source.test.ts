@@ -34,7 +34,7 @@ test("配图走注入的搜索端口（不再依赖 Wikimedia）", async () => {
   const imgs = await asProbe(svc).fetchRealImages("楼外楼", "restaurant", 30.2553, 120.1388);
   assert.equal(imgs.length, 2);
   assert.match(imgs[0]!, /cdn\.example\.com/);
-  assert.deepEqual(queries, ["楼外楼"], "查询词应是地名本身，不带类型后缀");
+  assert.deepEqual(queries, ["楼外楼 美食"], "查询词=地名+类型限定词（2026-10-15：裸名图搜会配出不相关实拍）");
 });
 
 test("端口返回空时降级到内置必应抓取", async () => {
@@ -90,4 +90,32 @@ test("Wikimedia 跳过判定带窗口缓存：同一窗口内只探测一次", a
   assert.equal(first, false);
   assert.equal(second, false);
   assert.equal(probes, 1, "10 分钟窗口内不应重复探测（否则等于没熔断）");
+});
+
+test("POI 缓存旧数据里烤死的高德图 URL 读取时被过滤（2026-10-15 高德图退役）", async () => {
+  const svc = new PlanningService();
+  const probe = asProbe(svc) as unknown as {
+    findCachedPOIImages(entry: unknown, type: string, poiId?: string): string[];
+  };
+  const entry = {
+    destination: "贵阳",
+    data: {
+      attractions: [
+        {
+          id: "amap-B001",
+          images: [
+            "https://aos-comment.amap.com/2021img/user-photo.jpg",
+            "https://store.is.autonavi.com/showpic/door-photo.png",
+            "https://cdn.example.com/web-search-hit.jpg",
+          ],
+        },
+      ],
+    },
+  };
+  const imgs = probe.findCachedPOIImages(entry, "attraction", "amap-B001");
+  assert.deepEqual(
+    imgs,
+    ["https://cdn.example.com/web-search-hit.jpg"],
+    "amap/autonavi host 的旧实拍图必须丢弃，只放行 web 图搜回填的图",
+  );
 });

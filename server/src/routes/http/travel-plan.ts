@@ -15,10 +15,45 @@ import {
   type PricingContext,
 } from "../../skills/travel-planning/pricing-service.js";
 import type { PlanningService } from "../../skills/travel-planning/travel-planning-service.js";
+import {
+  travelMediaStore,
+  type PoiMediaType,
+} from "../../skills/travel-planning/travel-media-store.js";
 
 /** 行程条目类型（与 PlanningService 的 POI 三分类一致） */
 const POI_TYPES = ["attraction", "hotel", "restaurant"] as const;
 type PoiType = (typeof POI_TYPES)[number];
+
+/**
+ * 存量行程读取时从媒体库带图（本地直读，不写库、不动版本）。
+ *
+ * 生成期载荷缺图（媒体库当时没有、阶段 2.5 后台回填晚到）的条目，只要媒体库
+ * 后来补上了（Wikimedia/必应回填、/travel-poi/details 补图播种），读取路径就把
+ * 图带出去——归档/手机端/编辑刷新全部受益，无需重新生成行程。
+ * imageUrls 可注入（单测用假库）；默认走媒体库。仅对完全没图的条目补图。
+ */
+export function decoratePlanWithMedia<
+  P extends {
+    days: Array<{ items: Array<{ type: string; name: string; images?: string[] }> }>;
+  },
+>(
+  plan: P,
+  imageUrls: (type: string, name: string) => string[] = (t, n) =>
+    travelMediaStore.imageUrls(t as PoiMediaType, n),
+): P {
+  let touched = false;
+  const days = plan.days.map((day) => ({
+    ...day,
+    items: day.items.map((item) => {
+      if (item.images?.length) return item;
+      const urls = imageUrls(item.type, item.name);
+      if (!urls.length) return item;
+      touched = true;
+      return { ...item, images: urls };
+    }),
+  }));
+  return touched ? { ...plan, days } : plan;
+}
 
 /** 会员等级（pricing-service.MemberTier 的运行时枚举，用于请求校验） */
 const MEMBER_TIERS = ["normal", "silver", "gold", "diamond", "platinum"] as const;
@@ -253,7 +288,7 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     }
     const plan = requirePlan(reply, parsed.data.planId);
     if (!plan) return;
-    return { ok: true, plan };
+    return { ok: true, plan: decoratePlanWithMedia(plan) };
   });
 
   // ======================== 行程编辑 ========================
