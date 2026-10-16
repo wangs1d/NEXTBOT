@@ -567,6 +567,10 @@ class MobileChatController extends ChangeNotifier {
       case "agent.proactive_message":
         // 主动性消息（2026-10-14 与桌面端对齐）：决策类落卡，告知类落文字气泡。
         _handleProactiveMessageEvent(payload);
+      case "evening.digest":
+        // 睡前提醒（2026-10-16 接线）：narrationText 是唯一文案源，落文字气泡。
+        // 后台不发系统通知（离线兜底已由服务端 proactivePipeline 承担）。
+        _handleEveningDigestEvent(payload);
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
@@ -628,6 +632,25 @@ class MobileChatController extends ChangeNotifier {
       "state": "pending",
       "attentionId": attentionId,
     });
+  }
+
+  /// 睡前提醒（evening.digest）→ 落对话流文字气泡。
+  /// narrationText 是唯一文案源（2026-10-13 服务端定调），不渲染结构化块。
+  void _handleEveningDigestEvent(Map<String, dynamic> payload) {
+    String text = payload["narrationText"]?.toString() ?? "";
+    if (text.trim().isEmpty) {
+      final Object? digest = payload["digest"];
+      if (digest is Map) text = digest["narrationText"]?.toString() ?? "";
+    }
+    if (text.trim().isEmpty) return;
+    messages.add(ChatMessage(
+      messageId: "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: text.trim(),
+      timestamp: DateTime.now(),
+    ));
+    notifyListeners();
   }
 
   /// 主动性消息（agent.proactive_message）→ 决策类落对话流决策卡，

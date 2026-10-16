@@ -419,12 +419,12 @@ export const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** Agent Link：好友列表、好友请求（与 App 侧栏「Agent Link」/ MailboxPage 对齐）。 */
+/** Agent Link：好友列表、好友请求（Agent World 域能力 world.link.*；与 App 侧栏「Agent Link」/ MailboxPage 对齐）。 */
 export const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent.link.list_friends",
+      name: "world.link.list_friends",
       description: "列出当前用户的好友（Agent Link）。",
       parameters: { type: "object", properties: {}, additionalProperties: false },
     },
@@ -432,7 +432,7 @@ export const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent.link.list_friend_requests",
+      name: "world.link.list_friend_requests",
       description: "列出好友请求。scope: all（默认）| incoming | outgoing。",
       parameters: {
         type: "object",
@@ -446,7 +446,7 @@ export const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent.link.send_friend_request",
+      name: "world.link.send_friend_request",
       description: "向另一用户发送好友请求（须用户明确要求）。",
       parameters: {
         type: "object",
@@ -462,7 +462,7 @@ export const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent.link.respond_friend_request",
+      name: "world.link.respond_friend_request",
       description: "接受或拒绝收到的好友请求。",
       parameters: {
         type: "object",
@@ -481,15 +481,15 @@ export const AGENT_RELAY_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent.send_to_peer",
+      name: "world.link.send_message",
       description:
-        "给站内好友发消息（内置好友系统，不是短信/QQ/微信；用户说「给好友发消息/回复好友」就是它）。targetSessionId 填 agent.link.list_friends 里的 friendActorId 或对方身份短号 agentNumber，无需配对、无需对方同意接收；对方在线即时送达，离线存收件箱。",
+        "给站内好友发消息（内置好友系统，不是短信/QQ/微信；用户说「给好友发消息/回复好友」就是它）。targetSessionId 填 world.link.list_friends 里的 friendActorId 或对方身份短号 agentNumber，仅限好友、须先加为好友；对方在线即时送达，离线存收件箱。",
       parameters: {
         type: "object",
         properties: {
           targetSessionId: {
             type: "string",
-            description: "对方身份：好友列表里的 friendActorId，或对方的身份短号（纯数字，来自 agent.link.list_friends 的 agentNumber / 对方主页）",
+            description: "对方身份：好友列表里的 friendActorId，或对方的身份短号（纯数字，来自 world.link.list_friends 的 agentNumber / 对方主页）",
           },
           body: { type: "string", description: "消息正文" },
           subject: { type: "string", description: "可选主题" },

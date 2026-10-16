@@ -35,16 +35,6 @@ class MorningBriefingCard extends StatelessWidget {
     final ThemeData theme = Theme.of(context);
     final ColorScheme cs = theme.colorScheme;
 
-    final Object? weather = briefing["weather"];
-    final Object? outfit = briefing["outfitTip"];
-    final num? temp = weather is Map ? (weather["temperature"] as num?) : null;
-    final String condition =
-        weather is Map ? (weather["condition"]?.toString() ?? "") : "";
-    final String description =
-        weather is Map ? (weather["description"]?.toString() ?? "") : "";
-    final String outfitSuggestion =
-        outfit is Map ? (outfit["suggestion"]?.toString() ?? "") : "";
-
     final String greeting = _readString("greeting", "agentGreeting") ?? "";
     final List<Map<String, dynamic>> schedule = <Map<String, dynamic>>[
       for (final Object? x
@@ -91,37 +81,6 @@ class MorningBriefingCard extends StatelessWidget {
                 ],
               ],
             ),
-            if (temp != null || condition.isNotEmpty || description.isNotEmpty)
-              ...<Widget>[
-                const SizedBox(height: 16),
-                _SectionHeader(
-                  icon: Icons.cloud_outlined,
-                  text: "天气",
-                  theme: theme,
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  [
-                    if (condition.isNotEmpty) condition,
-                    if (temp != null) "${temp.round()}°C",
-                    if (description.isNotEmpty) description,
-                  ].join(" · "),
-                  style: theme.textTheme.bodyLarge,
-                ),
-              ],
-            if (outfitSuggestion.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 16),
-              _SectionHeader(
-                icon: Icons.checkroom_outlined,
-                text: "穿衣提醒",
-                theme: theme,
-              ),
-              const SizedBox(height: 6),
-              Text(
-                outfitSuggestion,
-                style: theme.textTheme.bodyMedium,
-              ),
-            ],
             const SizedBox(height: 16),
             _SectionHeader(
               icon: Icons.event_note_outlined,

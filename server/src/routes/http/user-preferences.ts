@@ -11,8 +11,6 @@ import {
 
 type BriefingMode = "voice" | "window" | "card";
 type BriefingSections = {
-  weather: boolean;
-  outfit: boolean;
   schedule: boolean;
   notes: boolean;
 };
@@ -127,8 +125,6 @@ const DEFAULT_PREFS: UserPreferences = {
     mode: "voice",
     showOnDesktopLaunch: true,
     sections: {
-      weather: true,
-      outfit: true,
       schedule: true,
       notes: true,
     },
@@ -307,12 +303,6 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
       }
       if (mb.sections && typeof mb.sections === "object") {
         const nextSections = mb.sections as Partial<BriefingSections>;
-        if (typeof nextSections.weather === "boolean") {
-          prefs.morningBriefing.sections.weather = nextSections.weather;
-        }
-        if (typeof nextSections.outfit === "boolean") {
-          prefs.morningBriefing.sections.outfit = nextSections.outfit;
-        }
         if (typeof nextSections.schedule === "boolean") {
           prefs.morningBriefing.sections.schedule = nextSections.schedule;
         }

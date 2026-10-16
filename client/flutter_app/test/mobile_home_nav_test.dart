@@ -25,15 +25,6 @@ class _MockHttpClient extends http.BaseClient {
           "date": "2026-10-07 周三",
           "appellation": "王哥",
           "agentGreeting": "早上好",
-          "weather": <String, dynamic>{
-            "temperature": 18,
-            "condition": "多云",
-            "description": "适宜出行",
-          },
-          "outfitTip": <String, dynamic>{
-            "suggestion": "加一件薄外套",
-            "reason": "早晚温差大",
-          },
           "todaySchedule": <Map<String, dynamic>>[
             <String, dynamic>{"id": "s1", "title": "写周报", "time": "10:00"},
           ],
@@ -114,12 +105,13 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text("2026-10-07 周三"), findsOneWidget);
     expect(find.text("王哥，早上好"), findsOneWidget);
-    expect(find.text("多云 18°C"), findsOneWidget);
     expect(find.text("今日日程"), findsOneWidget);
     expect(find.text("写周报"), findsOneWidget);
     expect(find.text("没看过的笔记"), findsOneWidget);
     expect(find.text("采购清单"), findsOneWidget);
     expect(find.text("之前交代的事"), findsOneWidget);
-    expect(find.text("穿衣建议"), findsOneWidget);
+    // 2026-10-16 天气/穿衣迁出简报（搬往睡前提醒），页面不再渲染这两块
+    expect(find.text("多云 18°C"), findsNothing);
+    expect(find.text("穿衣建议"), findsNothing);
   });
 }

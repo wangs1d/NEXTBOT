@@ -12,7 +12,6 @@ import { test } from "node:test";
 import { detectSevereWeatherAlerts } from "../src/services/weather-service.js";
 import { EveningDigestService } from "../src/services/evening-digest-service.js";
 import { DailyJournalService } from "../src/services/daily-journal-service.js";
-import { FinanceDeepService } from "../src/services/finance-deep-service.js";
 import { MorningBriefingService } from "../src/services/morning-briefing-service.js";
 
 const SESSION = "actor-evening-digest-test";
@@ -62,7 +61,6 @@ function todayKeyShanghai(): string {
 
 test("晚间 digest：今日回顾 + 明日预告确定性聚合与播报", async () => {
   const journalDir = await makeJournalDir();
-  const financeDir = await mkdtemp(join(tmpdir(), "evening-digest-finance-"));
   try {
     // journal 当日记录（与 appendTurn 写入格式一致）
     const journal = new DailyJournalService(journalDir);
@@ -79,16 +77,7 @@ test("晚间 digest：今日回顾 + 明日预告确定性聚合与播报", asyn
       "utf8",
     );
 
-    // 当日账本新增（两笔支出一笔收入）
-    const finance = new FinanceDeepService(financeDir);
-    await finance.load();
-    await finance.importTransactions(SESSION, [
-      { id: "t1", date: new Date().toISOString(), amount: 35, type: "expense", category: "餐饮", description: "午饭" },
-      { id: "t2", date: new Date().toISOString(), amount: 120, type: "expense", category: "购物", description: "日用品" },
-      { id: "t3", date: new Date().toISOString(), amount: 5000, type: "income", category: "工资", description: "工资" },
-    ]);
-
-    // 明日日程 + 次日天气（mock）
+    // 明日行程 + 次日天气（mock）
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
     const tomorrowIso = new Date(
@@ -143,7 +132,6 @@ test("晚间 digest：今日回顾 + 明日预告确定性聚合与播报", asyn
 
     const svc = new EveningDigestService({
       journalService: journal,
-      financeDeepService: finance,
       scheduleTaskService: scheduleTaskService as never,
       weatherService: weatherService as never,
       weatherPrefsService: weatherPrefsService as never,
@@ -151,28 +139,28 @@ test("晚间 digest：今日回顾 + 明日预告确定性聚合与播报", asyn
 
     const digest = await svc.generateDigest(SESSION);
 
-    // 今日回顾：journal 要点（user/fact 优先）+ 当日账本新增
+    // 今日回顾：journal 要点（user/fact 优先；账本块 2026-10-16 移除）
     assert.ok(digest.todayHighlights.length >= 3);
     assert.ok(digest.todayHighlights.some((h) => h.text.includes("爬山计划")));
-    assert.equal(digest.todayLedger?.count, 3);
-    assert.equal(digest.todayLedger?.expense, 155);
-    assert.equal(digest.todayLedger?.income, 5000);
+    assert.equal("todayLedger" in digest, false);
 
-    // 明日预告：只含明日的日程 + 次日天气与预警
+    // 明日预告：只含明日的行程 + 次日天气与预警 + 穿衣建议（buildClothingAdvice 同源）
     assert.equal(digest.tomorrowSchedule.length, 1);
     assert.equal(digest.tomorrowSchedule[0]!.title, "项目周会");
     assert.equal(digest.tomorrowWeather?.text, "雷暴");
     assert.deepEqual(digest.tomorrowWeather?.alerts, ["雷暴"]);
+    // 明日 17~23° 有雷暴雨 → 薄外套层 + 雨具（digest 数据块，全串口径）
+    assert.equal(digest.outfitTip, "薄外套或长袖叠穿；携带雨具（伞或雨衣）");
 
-    // 播报（2026-10-13 活人感定调）：只说明天，回顾/账本/晚安套话不进文案
+    // 播报（2026-10-13 活人感定调）：只说明天，回顾/晚安套话不进文案；
+    // 2026-10-16 天气/穿衣迁入且简短口径：一个层级 + 一个行动项，不念全串
     assert.match(digest.narrationText, /明天就一件事/);
     assert.match(digest.narrationText, /项目周会/);
     assert.match(digest.narrationText, /到点我叫你/);
-    assert.match(digest.narrationText, /雷暴/);
-    assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔/);
+    assert.match(digest.narrationText, /明天雷暴17~23度，长袖，记得带伞。/);
+    assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔|薄外套或长袖叠穿/);
   } finally {
     await rm(journalDir, { recursive: true, force: true });
-    await rm(financeDir, { recursive: true, force: true });
   }
 });
 
@@ -180,9 +168,9 @@ test("晚间 digest：依赖缺失/无数据时各块自然省略", async () => 
   const svc = new EveningDigestService({});
   const digest = await svc.generateDigest(SESSION);
   assert.deepEqual(digest.todayHighlights, []);
-  assert.equal(digest.todayLedger, null);
   assert.deepEqual(digest.tomorrowSchedule, []);
   assert.equal(digest.tomorrowWeather, null);
+  assert.equal(digest.outfitTip, null);
   // 无数据：明天没安排的不打扰文案（无天气源 → 无预警无雨分支）
   assert.match(digest.narrationText, /明天没安排/);
   assert.doesNotMatch(digest.narrationText, /晚上好|晚安/);
@@ -223,7 +211,9 @@ test("晚间 digest：文案交给 agent —— soul 进 system + 预告段进�
       assert.match(prompt, /项目周会/);
       assert.match(prompt, /叫你起床/);
       assert.match(prompt, /该出门了/);
-      assert.doesNotMatch(prompt, /睡前备忘/); // night_before 不进明日数据
+      // night_before 不进明日数据（只查数据段；写法段指令提及「睡前备忘」无妨）
+      const dataSection = prompt.split("写法：")[0] ?? "";
+      assert.doesNotMatch(dataSection, /睡前备忘/);
       assert.match(prompt, /最熟的那个朋友/);
       assert.match(prompt, /只挑最早或最要紧/);
       assert.match(prompt, /九点半有个周会/);

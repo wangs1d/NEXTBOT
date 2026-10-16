@@ -810,12 +810,25 @@ class _ChatPageState extends State<ChatPage>
   /// 按时间倒序生成所有消息的渲染项列表（最新在 reverse ListView 的 index 0）。
   /// `assistant_progress`（处理中占位消息）不再进入消息流——处理状态统一由
   /// 输入框上方的状态条呈现（见 [_buildAgentStatusStrip]）。
+  /// 相同时间戳用原始下标做 tie-break（倒序）：Dart 的 List.sort 不稳定，
+  /// 同毫秒的问答对（如跨端回填轮次）会被随机翻序，出现「回复冒到提问上面」。
   List<Map<String, dynamic>> _getRenderItems() {
-    final List<ChatMessage> sorted = List<ChatMessage>.from(widget.messages)
-      ..removeWhere((ChatMessage m) => m.role == "assistant_progress")
-      ..sort(
-          (ChatMessage a, ChatMessage b) => b.timestamp.compareTo(a.timestamp));
-    return sorted.map(_messageToGroup).toList();
+    final List<ChatMessage> source = List<ChatMessage>.from(widget.messages)
+      ..removeWhere((ChatMessage m) => m.role == "assistant_progress");
+    final List<Map<String, Object>> indexed = <Map<String, Object>>[
+      for (int i = 0; i < source.length; i++)
+        <String, Object>{"m": source[i], "i": i},
+    ];
+    indexed.sort((Map<String, Object> a, Map<String, Object> b) {
+      final int c = (b["m"]! as ChatMessage)
+          .timestamp
+          .compareTo((a["m"]! as ChatMessage).timestamp);
+      if (c != 0) return c;
+      return (b["i"]! as int).compareTo(a["i"]! as int);
+    });
+    return indexed
+        .map((Map<String, Object> e) => _messageToGroup(e["m"]! as ChatMessage))
+        .toList();
   }
 
   /// 处理中气泡文案：`agent_status` > 即时确认应答（interim ack）> 历史流程提示 > 默认

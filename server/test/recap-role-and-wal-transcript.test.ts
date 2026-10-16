@@ -8,7 +8,10 @@ import {
   ChatThreadStore,
   buildTimestampFreeLlmView,
 } from "../src/external-model/chat-thread-store.js";
-import { readActorTranscriptFromWal } from "../src/services/wal-transcript.js";
+import {
+  readActorTranscriptFromWal,
+  setActorTranscriptClearedAt,
+} from "../src/services/wal-transcript.js";
 
 /**
  * P0-B 根修契约（2026-10-12）：recap 摘要角色 assistant → system。
@@ -114,4 +117,49 @@ test("P1: WAL 反解转史——按 actor 过滤、升序、messageId 去重、n
 test("P1: WAL 目录不存在/空 → 返回空数组不抛错", async () => {
   const missing = await readActorTranscriptFromWal(join(tmpdir(), "wal-not-exist-xyz"), "a@x");
   assert.deepEqual(missing, []);
+});
+
+test("清空可见性（2026-10-16）：cleared-at 之前的轮次不下发，之后的照常回填", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wal-cleared-"));
+  try {
+    await mkdir(dir, { recursive: true });
+    const day = join(dir, "2026-10-16.jsonl");
+    await writeFile(
+      day,
+      [
+        JSON.stringify({ ts: "2026-10-16T09:00:00+08:00", actorId: "c@x", userText: "清空前的话", assistantText: "清空前的回复", messageId: "m1" }),
+        JSON.stringify({ ts: "2026-10-16T11:00:00+08:00", actorId: "c@x", userText: "清空后的话", assistantText: "清空后的回复", messageId: "m2" }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+
+    // 清空点取两轮之间：第一轮被过滤，第二轮保留
+    const clearAtMs = Date.parse("2026-10-16T10:00:00+08:00");
+    await setActorTranscriptClearedAt(dir, "c@x", clearAtMs);
+    const turns = await readActorTranscriptFromWal(dir, "c@x");
+    assert.equal(turns.length, 1, "只回填清空点之后的轮次");
+    assert.equal(turns[0].clientMessageId, "m2");
+
+    // 重复清空（更早的时刻）幂等：不回退清空点
+    await setActorTranscriptClearedAt(dir, "c@x", clearAtMs - 60_000);
+    assert.equal((await readActorTranscriptFromWal(dir, "c@x")).length, 1);
+
+    // 其他 actor 不受影响
+    await writeFile(
+      day,
+      [
+        JSON.stringify({ ts: "2026-10-16T09:00:00+08:00", actorId: "c@x", userText: "清空前的话", assistantText: "清空前的回复", messageId: "m1" }),
+        JSON.stringify({ ts: "2026-10-16T11:00:00+08:00", actorId: "c@x", userText: "清空后的话", assistantText: "清空后的回复", messageId: "m2" }),
+        JSON.stringify({ ts: "2026-10-16T09:30:00+08:00", actorId: "d@x", userText: "别人的话", assistantText: "别人的回复", messageId: "m3" }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const dTurns = await readActorTranscriptFromWal(dir, "d@x");
+    assert.equal(dTurns.length, 1, "其他 actor 的历史不受 c@x 清空影响");
+    assert.equal(dTurns[0].clientMessageId, "m3");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -26,7 +26,7 @@ class DailyBriefingCardContent {
   /// 问候语，如「早上好」。
   final String greeting;
 
-  /// 元信息行，如「9月10日 周四 · 阵雨 21~26°C」。
+  /// 元信息行，如「9月10日 周四」。
   final String meta;
 
   /// 口播稿正文（TTS 与卡片共用同一份文本）。
@@ -64,36 +64,10 @@ String dailyBriefingDateLabel(DateTime now) {
   return "${now.month}月${now.day}日 ${_kWeekdayLabels[now.weekday - 1]}";
 }
 
-/// 天气段：「阵雨 21~26°C」/「26°C」/ 空串。
-String dailyBriefingWeatherLabel(Map<String, dynamic>? weather) {
-  if (weather == null) return "";
-  final Object? rawCondition = weather["condition"];
-  final String condition =
-      rawCondition is String ? rawCondition.trim() : "";
-  final Object? rawMax = weather["maxC"];
-  final Object? rawMin = weather["minC"];
-  final Object? rawTemp = weather["temperature"];
-  final double? maxC = rawMax is num ? rawMax.toDouble() : null;
-  final double? minC = rawMin is num ? rawMin.toDouble() : null;
-  final double? tempC = rawTemp is num ? rawTemp.toDouble() : null;
-
-  final String tempPart;
-  if (maxC != null && minC != null) {
-    tempPart = "${minC.round()}~${maxC.round()}°C";
-  } else if (tempC != null) {
-    tempPart = "${tempC.round()}°C";
-  } else {
-    tempPart = "";
-  }
-  if (condition.isNotEmpty && tempPart.isNotEmpty) {
-    return "$condition $tempPart";
-  }
-  return condition.isNotEmpty ? condition : tempPart;
-}
-
 /// 从服务端 briefing JSON 组装悬浮窗卡片内容。
 ///
 /// [narrationText] 为口播稿；缺失时退化为 meta 行本身（保证卡片仍有内容）。
+/// 2026-10-16 天气/穿衣迁出简报（搬往睡前提醒 evening.digest），meta 收敛为纯日期。
 DailyBriefingCardContent buildDailyBriefingCard({
   required Map<String, dynamic> briefing,
   String? narrationText,
@@ -102,13 +76,7 @@ DailyBriefingCardContent buildDailyBriefingCard({
 }) {
   final DateTime time = now ?? DateTime.now();
   final String dateLabel = dailyBriefingDateLabel(time);
-  final Object? rawWeather = briefing["weather"];
-  final Map<String, dynamic>? weather =
-      rawWeather is Map ? rawWeather.cast<String, dynamic>() : null;
-  final String weatherLabel = dailyBriefingWeatherLabel(weather);
-  final String meta = weatherLabel.isEmpty
-      ? dateLabel
-      : "$dateLabel · $weatherLabel";
+  final String meta = dateLabel;
 
   int listLen(String key) {
     final Object? raw = briefing[key];

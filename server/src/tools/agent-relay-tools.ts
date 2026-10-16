@@ -11,7 +11,7 @@ export function registerAgentRelayTools(
   pairing: AgentPairingService,
   agentAccountService?: AgentAccountService,
 ): void {
-  registry.register("agent.send_to_peer", async (input, context) => {
+  registry.register("world.link.send_message", async (input, context) => {
     let targetSessionId = String(input.targetSessionId ?? "").trim();
     const body = String(input.body ?? "").trim();
     const subject =
@@ -25,7 +25,7 @@ export function registerAgentRelayTools(
       throw new Error("缺少 body");
     }
     // QQ 式身份短号直发：纯数字目标先按登录主体查，未命中且形如短号则按号反查
-    // （与 /friends/* 与 agent.link 的解析同口径；actorId 优先保证数字形态的
+    // （与 /friends/* 与 world.link 的解析同口径；actorId 优先保证数字形态的
     // 旧 sessionId 不被误吸走）。
     if (agentAccountService) {
       const direct = agentAccountService.getByActorId(targetSessionId);
@@ -58,7 +58,13 @@ export function registerAgentRelayTools(
       chatUserMessageId: context.chatUserMessageId,
     });
     if (!result.ok) {
-      throw new Error(result.error);
+      // 结构化失败（含门禁 reason），与 world.link.send_friend_request 同口径，
+      // 让 LLM 能按 reason 引导用户（注册账号 / 先加好友）
+      return {
+        ok: false as const,
+        ...(result.reason ? { reason: result.reason } : {}),
+        message: result.error,
+      };
     }
 
     return {

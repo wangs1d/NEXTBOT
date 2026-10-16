@@ -4,9 +4,9 @@
  * 与晨报（MorningBriefingService）互补：晨报面向"今天怎么安排"，晚间 digest
  * 面向"今天过了什么 + 明天要准备什么"。全部确定性聚合，零 LLM：
  *   - 今日回顾：journal 当日记录要点（DailyJournalService.readTodayLines）
- *              + 当日账本新增（FinanceDeepService 当日交易笔数/金额）
- *   - 明日预告：明日日程（ScheduleTaskService 次日任务）
+ *   - 明日预告：明日行程（ScheduleTaskService 次日任务）
  *              + 次日天气与预警（WeatherService.getBrief().tomorrow + 预警检测）
+ *              + 明日穿衣（buildClothingAdvice 同源）
  *
  * 送达链路参考晨报：调度器（EveningDigestScheduler）到点触发 → 装配层
  * onDigestTriggered → WS 推送（ServerEventType.EveningDigest）。
@@ -16,23 +16,13 @@
  */
 
 import type { DailyJournalService, JournalHit } from "./daily-journal-service.js";
-import type { FinanceDeepService } from "./finance-deep-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
+import { buildClothingAdvice, detectSevereWeatherAlerts } from "./weather-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
-import { detectSevereWeatherAlerts } from "./weather-service.js";
 
 /** 今日回顾：journal 当日要点（最多呈现条数） */
 const TODAY_HIGHLIGHT_MAX = 6;
-
-export interface EveningDigestLedger {
-  /** 当日新增交易笔数 */
-  count: number;
-  /** 当日支出合计 */
-  expense: number;
-  /** 当日收入合计 */
-  income: number;
-}
 
 export interface EveningDigestScheduleItem {
   id: string;
@@ -59,19 +49,22 @@ export interface EveningDigest {
   date: string;
   /** 今日回顾：journal 当日记录要点（时间 + 角色 + 首句） */
   todayHighlights: JournalHit[];
-  /** 今日回顾：当日账本新增（无记录时 null） */
-  todayLedger: EveningDigestLedger | null;
-  /** 明日预告：日程条目 */
+  /** 明日预告：行程条目（2026-10-16 口径：日程统一叫「行程」） */
   tomorrowSchedule: EveningDigestScheduleItem[];
   /** 明日预告：次日天气（未配置天气位置时 null） */
   tomorrowWeather: EveningDigestTomorrowWeather | null;
+  /**
+   * 明日穿衣建议（2026-10-16：早间简报的天气/穿衣迁来睡前提醒）。
+   * 复用 weather-service 的 buildClothingAdvice（与 weather_brief 定时任务同源），
+   * 以明天最高温定层级、明天降水/天气码定雨具等提示；无明日天气时 null。
+   */
+  outfitTip: string | null;
   /** 口语化播报文本（供 TTS / 消息气泡） */
   narrationText: string;
 }
 
 export type EveningDigestDeps = {
   journalService?: DailyJournalService | null;
-  financeDeepService?: FinanceDeepService | null;
   scheduleTaskService?: ScheduleTaskService;
   weatherService?: WeatherService;
   weatherPrefsService?: WeatherPrefsService;
@@ -132,19 +125,21 @@ export class EveningDigestService {
   /** 生成晚间 digest（确定性聚合，零 LLM；任一源缺失/失败 → 该块省略） */
   async generateDigest(sessionId: string): Promise<EveningDigest> {
     const now = new Date();
-    const [todayHighlights, todayLedger, tomorrowSchedule, tomorrowWeather] = await Promise.all([
+    const [todayHighlights, tomorrowSchedule, tomorrowBundle] = await Promise.all([
       this.fetchTodayHighlights(sessionId).catch(() => [] as JournalHit[]),
-      this.fetchTodayLedger(sessionId, now).catch(() => null),
       this.fetchTomorrowSchedule(sessionId, now).catch(() => [] as EveningDigestScheduleItem[]),
-      this.fetchTomorrowWeather(sessionId).catch(() => null),
+      this.fetchTomorrowBundle(sessionId).catch(() => ({
+        weather: null,
+        outfitTip: null,
+      })),
     ]);
 
     const digest: EveningDigest = {
       date: localDateKey(now),
       todayHighlights,
-      todayLedger,
       tomorrowSchedule,
-      tomorrowWeather,
+      tomorrowWeather: tomorrowBundle.weather,
+      outfitTip: tomorrowBundle.outfitTip,
       narrationText: "",
     };
     digest.narrationText = await this.composeNarrationText(sessionId, digest);
@@ -207,14 +202,15 @@ export class EveningDigestService {
       : null;
 
     const dataLines = [
-      `- 明天（${dateLabel}）的安排：${scheduleLines}`,
+      `- 明天（${dateLabel}）的行程：${scheduleLines}`,
     ];
     if (weatherLine) dataLines.push(`- 明天天气：${weatherLine}`);
+    if (d.outfitTip) dataLines.push(`- 明天穿衣：${d.outfitTip}`);
 
     return [
       "你是用户最熟的那个朋友，晚上临睡前顺口提一嘴明天的事。" +
         "语气松弛、靠谱，像发微信，不是秘书做汇报，也不用寒暄。",
-      "你会拿到：需要提前提醒的信息（明天的日程/预告时刻和天气）。",
+      "你会拿到：需要提前提醒的信息（明天的日程/预告时刻、天气和穿衣）。",
       "",
       "需要提前提醒的信息：",
       ...dataLines,
@@ -222,7 +218,8 @@ export class EveningDigestService {
       "写法：",
       "- 一到两句，短句。只挑最早或最要紧的那件事说，别把日程从头到尾念一遍。" +
         "时间要口语化，比如「九点半有个周会」，不要写成「9:30 项目周会」这种条目。",
-      "- 天气只有在需要行动时才提：下雨带伞、降温加衣、高温防晒；普通晴阴和温度一律不提。",
+      "- 明天天气和穿衣要说（这是睡前备忘的正经内容，不是可省项）：预警优先；" +
+        "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。",
       "- 明天没安排就轻松带过一句，不许编事，也不许硬凑。",
       "- 可以有自然的语气词或一句收尾（「记得定闹钟」「早点睡」），但别每次都一个套路。",
       "- 不要：敬语、「亲爱的」「您好」、「温馨提示」、汇报腔、排比、书面语、emoji、标题、引号、换行、任何解释。",
@@ -242,27 +239,7 @@ export class EveningDigestService {
     return ranked.slice(0, TODAY_HIGHLIGHT_MAX);
   }
 
-  /** 今日回顾 2/2：当日账本新增（笔数/支出/收入，确定性聚合） */
-  private async fetchTodayLedger(sessionId: string, now: Date): Promise<EveningDigestLedger | null> {
-    if (!this.deps.financeDeepService) return null;
-    const dayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const dayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
-    const txs = this.deps.financeDeepService.getTransactions(
-      sessionId,
-      dayStart.toISOString(),
-      dayEnd.toISOString(),
-      undefined,
-      1000,
-    );
-    if (txs.length === 0) return null;
-    return {
-      count: txs.length,
-      expense: txs.filter((t) => t.type === "expense").reduce((acc, t) => acc + t.amount, 0),
-      income: txs.filter((t) => t.type === "income").reduce((acc, t) => acc + t.amount, 0),
-    };
-  }
-
-  /** 明日预告 1/2：次日日程（schedule 服务） */
+  /** 明日预告 1/2：次日行程（schedule 服务） */
   private async fetchTomorrowSchedule(
     sessionId: string,
     now: Date,
@@ -311,46 +288,60 @@ export class EveningDigestService {
     }
   }
 
-  /** 明日预告 2/2：次日天气 + 预警检测（weather-service 每日数据） */
-  private async fetchTomorrowWeather(sessionId: string): Promise<EveningDigestTomorrowWeather | null> {
+  /**
+   * 明日预告 2/2：次日天气 + 预警检测 + 明日穿衣建议（weather-service 每日数据）。
+   * 穿衣复用 buildClothingAdvice（weather_brief 定时任务同源）：以明天最高温定
+   * 衣物层级、明天降水概率/天气码定雨具防滑提示；与天气块同取自一次 getBrief。
+   */
+  private async fetchTomorrowBundle(
+    sessionId: string,
+  ): Promise<{ weather: EveningDigestTomorrowWeather | null; outfitTip: string | null }> {
     const { weatherService, weatherPrefsService } = this.deps;
-    if (!weatherService || !weatherPrefsService) return null;
+    if (!weatherService || !weatherPrefsService) {
+      return { weather: null, outfitTip: null };
+    }
     const prefs = weatherPrefsService.get(sessionId);
-    if (!prefs) return null;
+    if (!prefs) return { weather: null, outfitTip: null };
     const brief = await weatherService.getBrief(
       prefs.latitude,
       prefs.longitude,
       prefs.timezone || "Asia/Shanghai",
       prefs.label,
     );
-    if (!brief.tomorrow) return null;
-    return {
-      text: brief.tomorrow.weatherText,
-      minC: brief.tomorrow.minC,
-      maxC: brief.tomorrow.maxC,
-      rainPct: brief.tomorrow.rainPct,
-      alerts: detectSevereWeatherAlerts(brief.tomorrow),
+    if (!brief.tomorrow) return { weather: null, outfitTip: null };
+    const t = brief.tomorrow;
+    const weather: EveningDigestTomorrowWeather = {
+      text: t.weatherText,
+      minC: t.minC,
+      maxC: t.maxC,
+      rainPct: t.rainPct,
+      alerts: detectSevereWeatherAlerts(t),
     };
+    const outfitTip = buildClothingAdvice({
+      currentTempC: t.maxC,
+      todayMinC: t.minC,
+      todayMaxC: t.maxC,
+      peakRainPct: t.rainPct,
+      weatherCode: t.weatherCode,
+      windKmh: 0,
+    });
+    return { weather, outfitTip };
   }
 
   /**
    * 确定性兜底文案（LLM 未注入/失败/空输出时降级用，不再是文案主源）。
-   * 2026-10-13 定调：睡前文案只说「明天的事」+ 可行动天气，活人感短句、
-   * 用「你」；简报腔（机器人开场白/晚安套话/记账播报）不出现。
+   * 2026-10-16 口径更新（天气/穿衣自早间简报迁来）：睡前文案说「明天的事」+
+   * 明日天气与穿衣建议，活人感短句、用「你」；简报腔不出现。
    */
   private composeNarration(d: EveningDigest): string {
-    const w = d.tomorrowWeather;
-    const alerts = w?.alerts ?? [];
     const items = d.tomorrowSchedule;
     const n = items.length;
+    const bit = weatherOutfitBit(d);
 
-    // 明天没安排：预警 > 有雨 > 干脆的不打扰
+    // 明天没安排：天气穿衣照说，没数据才干脆的不打扰（bit 去掉「明天」主语避免重复）
     if (n === 0) {
-      if (alerts.length > 0) {
-        return `明天没安排。不过有${alerts.join("和")}预警，要出门记得带伞。`;
-      }
-      if (w && w.rainPct >= 40) {
-        return `明天没安排，可能有雨，出门带把伞。`;
+      if (bit) {
+        return `明天没安排，${bit.replace(/^明天/, "")}`;
       }
       return `明天没安排，想睡就多睡会儿。`;
     }
@@ -369,12 +360,34 @@ export class EveningDigestService {
       line = `明天 ${n} 件事，最早${when}${first.title}，剩下的到时候我会说。`;
     }
 
-    // 天气只在可行动时缀一句（预警/可能下雨），晴阴温度不进睡前文案
-    if (alerts.length > 0) {
-      line += ` 对了，明天有${alerts.join("和")}，安排留点余量。`;
-    } else if (w && w.rainPct >= 40) {
-      line += ` 明天可能有雨，伞放门口。`;
+    // 明日天气 + 穿衣（雨具等行动提示由 outfitTip 内含，预警一并提及）
+    if (bit) {
+      line += ` ${bit}`;
     }
     return line;
   }
+}
+
+/**
+ * 明日天气+穿衣一句（兜底模板用；无明日天气 → 空串整句省略）。
+ * 2026-10-16 简短口径（用户拍板）：穿衣只报一个层级 + 一个行动项，
+ * 不念 buildClothingAdvice 全串（分号长串是给 LLM 的信息源，不是播报文案）。
+ */
+function weatherOutfitBit(d: EveningDigest): string {
+  const w = d.tomorrowWeather;
+  if (!w) return "";
+  const layer =
+    w.maxC >= 28 ? "短袖"
+    : w.maxC >= 20 ? "长袖"
+    : w.maxC >= 12 ? "外套"
+    : w.maxC >= 5 ? "厚外套"
+    : "羽绒服";
+  const rainy = w.rainPct >= 40 || w.text.includes("雨");
+  const snowy = w.text.includes("雪");
+  const action = snowy ? "注意防滑" : rainy ? "记得带伞" : "";
+  // 预警标签与天气文本重复（如「雷暴」既是 text 又是 alert）时不二次播报
+  const alerts = w.alerts.filter((a) => !w.text.includes(a));
+  const alertPart = alerts.length > 0 ? `，${alerts.join("、")}预警` : "";
+  const actionPart = action ? `，${action}` : "";
+  return `明天${w.text}${w.minC.toFixed(0)}~${w.maxC.toFixed(0)}度${alertPart}，${layer}${actionPart}。`;
 }

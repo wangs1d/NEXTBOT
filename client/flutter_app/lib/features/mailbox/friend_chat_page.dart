@@ -7,7 +7,7 @@ import "../../core/services/world_api_client.dart";
 /// 好友聊天面板（内嵌右侧面板，不再全屏路由）。
 ///
 /// 2026-10-15 闭环：历史加载与直连发送走 hub platform=friend 会话的 HTTP 面
-/// （GET/POST /friends/messages），与 agent.send_to_peer 同一投递内核；
+/// （GET/POST /friends/messages），与 world.link.send_message 同一投递内核；
 /// 打开面板即标读（POST /friends/messages/read），重连补投随之停止。
 /// 收到 agent.peer_message 推送时的展示由 MailboxPage 的选中联动负责。
 class FriendChatPage extends StatefulWidget {

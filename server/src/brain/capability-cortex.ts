@@ -143,8 +143,8 @@ const EXPANDABLE_DOMAINS = new Set<string>([
  * 能力域 → 工具名匹配规则。
  *
  * - 字符串以 `.` 结尾：前缀匹配（如 `phone.` 命中 phone.call_user / phone_bridge.ring）
- * - 字符串不含 `.`：精确匹配（如 `agent.register_account`）
- * - 字符串含 `.` 但不以 `.` 结尾：精确匹配（如 `agent.send_to_peer`）
+ * - 字符串不含 `.`：精确匹配（如 `search_web`）
+ * - 字符串含 `.` 但不以 `.` 结尾：精确匹配（如 `world.link.send_message`）
  *
  * 用途：bootstrap 阶段调用 {@link CapabilityCortex.attachToolNames}，
  * 把 ToolRegistry 中已注册的真实工具名按 domain 归类填到 descriptor.tools，
@@ -156,7 +156,7 @@ const EXPANDABLE_DOMAINS = new Set<string>([
  */
 const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   wallet: ["wallet.", "payment.", "alipay."],
-  agent_link: ["agent.link.", "agent.send_to_peer"],
+  agent_link: ["world.link."],
   calendar: ["calendar.", "reminder."],
   weather: ["weather."],
   sub_agent: ["master."],
@@ -170,7 +170,6 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   // entertainment 暂无对应工具
   social_feed: ["world.social."],
   self_programming: ["self."],
-  agent_account: ["agent.register_account"],
   world: ["world."],
   embodiment: ["embodiment."],
   smart_home: ["smart_home."],

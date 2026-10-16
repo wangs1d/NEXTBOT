@@ -105,6 +105,10 @@ interface PlanSummaryEntry {
   startDate: string;
   endDate: string;
   dayCount: number;
+  /** 站点总数（全部天的条目数之和；归档页预览 meta 免二次请求） */
+  stopCount: number;
+  /** 行程进度摘要（归档页「进行中 Day x/y」徽章免二次请求；无记录省略） */
+  progress?: { day: number; stop: number };
   totalCost?: number;
   /** 目的地封面（行程归档列表卡片背景；无则省略，客户端渐变兜底） */
   coverImage?: string;
@@ -181,6 +185,7 @@ class TravelPlanStore {
     if (prev && prev.day === day && prev.stop === stop) return true;
     plan.progress = { day, stop, updatedAt: Date.now() };
     this.mem.set(planId, plan);
+    this.summaryIndex?.set(planId, this.buildSummary(plan));
     try {
       fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
     } catch (err) {
@@ -205,6 +210,23 @@ class TravelPlanStore {
   }
 
   /**
+   * 删除行程：内存 + 摘要索引 + 磁盘文件一并移除。
+   * 归档页「删除行程」用；不存在返回 false。
+   */
+  remove(planId: string): boolean {
+    const existed = this.get(planId) != null;
+    this.mem.delete(planId);
+    this.summaryIndex?.delete(planId);
+    if (!existed) return false;
+    try {
+      fs.unlinkSync(this.planPath(planId));
+    } catch {
+      // 文件已在（prune 竞态等）→ 视为已删除
+    }
+    return true;
+  }
+
+  /**
    * 全部行程摘要（新→旧），供状态快照与列表查询。
    * 只读内存摘要索引：save/prune 增量维护，启动后首次调用才扫一次磁盘建索引。
    */
@@ -215,6 +237,8 @@ class TravelPlanStore {
     startDate: string;
     endDate: string;
     dayCount: number;
+    stopCount: number;
+    progress?: { day: number; stop: number };
     totalCost?: number;
     coverImage?: string;
     createdAt: number;
@@ -229,6 +253,8 @@ class TravelPlanStore {
         startDate: s.startDate,
         endDate: s.endDate,
         dayCount: s.dayCount,
+        stopCount: s.stopCount,
+        ...(s.progress ? { progress: { ...s.progress } } : {}),
         ...(s.totalCost != null ? { totalCost: s.totalCost } : {}),
         ...(s.coverImage ? { coverImage: s.coverImage } : {}),
         createdAt: s.createdAt,
@@ -243,6 +269,11 @@ class TravelPlanStore {
       startDate: plan.startDate ?? "",
       endDate: plan.endDate ?? "",
       dayCount: plan.days?.length ?? 0,
+      stopCount:
+        plan.days?.reduce((sum, day) => sum + (day.items?.length ?? 0), 0) ?? 0,
+      ...(plan.progress
+        ? { progress: { day: plan.progress.day, stop: plan.progress.stop } }
+        : {}),
       ...(plan.totalCost != null ? { totalCost: plan.totalCost } : {}),
       ...(plan.coverImage ? { coverImage: plan.coverImage } : {}),
       createdAt: plan.createdAt ?? 0,

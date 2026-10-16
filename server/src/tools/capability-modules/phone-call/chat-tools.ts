@@ -8,7 +8,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * 通话本身由用户手机拨出、用户亲自进行；P1 起在同一状态机上叠加实时语音。
  *
  * ── 路由边界（写进每个工具 description，防 LLM 误选，详见 docs/phone-call-architecture.md §〇）──
- *   - 对端是用户本人（站内 App 内来电）→ 虚拟电话 `phone.call_user`（Agent 之间不打电话，走 agent.send_to_peer 文本）
+ *   - 对端是用户本人（站内 App 内来电）→ 虚拟电话 `phone.call_user`（Agent 之间不打电话，走 world.link.send_message 文本）
  *   - 只需打开拨号盘、用户自己讲、无需确认卡与回填 → `phone.dial`
  *   - 对端是外部真实号码、需要拨前确认门 + 拨后结果回填闭环 → `phone_call.*`（本族）
  *

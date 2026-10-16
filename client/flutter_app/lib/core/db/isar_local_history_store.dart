@@ -641,8 +641,25 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     for (final ChatMessage m in encrypted) {
       unique[m.messageId] = m;
     }
-    final List<ChatMessage> deduped = unique.values.toList()
-      ..sort((ChatMessage a, ChatMessage b) => a.timestamp.compareTo(b.timestamp));
+    // 升序（最旧在前）；相同时间戳按去重后的原始次序 tie-break——Dart 的
+    // List.sort 不稳定，同毫秒的问答对（跨端回填轮次共享同一 ts）会被随机翻序。
+    // unique 是 LinkedHashMap（保留首次写入次序，Isar 读出即写入序）。
+    final List<Map<String, Object>> indexed = <Map<String, Object>>[
+      for (final ChatMessage m in unique.values) <String, Object>{"m": m},
+    ];
+    // 原始下标随 map 一起构造，避免二次遍历
+    for (int i = 0; i < indexed.length; i++) {
+      indexed[i]["i"] = i;
+    }
+    indexed.sort((Map<String, Object> a, Map<String, Object> b) {
+      final int c = (a["m"]! as ChatMessage)
+          .timestamp
+          .compareTo((b["m"]! as ChatMessage).timestamp);
+      if (c != 0) return c;
+      return (a["i"]! as int).compareTo(b["i"]! as int);
+    });
+    final List<ChatMessage> deduped =
+        indexed.map((Map<String, Object> e) => e["m"]! as ChatMessage).toList();
     // 逐条容错解密：单条消息损坏（截断/base64 坏/异源 PIN）只跳过那一条，
     // 绝不让整段历史因一条脏数据静默清零（此前 listMessages 一抛，
     // _bootstrapHistory 整个 catch 掉 → 用户看到的就是「历史没保存」）。

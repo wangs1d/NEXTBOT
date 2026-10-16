@@ -67,8 +67,9 @@ Future<void> runRegisterPreviewWindow() async {
 /// 网页登录流程里这一步由 /accounts/web 页面自己完成；本函数保留给
 /// 预览窗口与调试直调通道直接驱动真实注册用。
 Future<void> registerAccountToControlPlane(
-  String email,
-) async {
+  String email, {
+  bool freshCreated = false,
+}) async {
   // 邮箱即账号主键，统一小写（与 /accounts/web 页面、服务端同规则）
   final String mail = email.trim().toLowerCase();
   final http.Client client = http.Client();
@@ -114,8 +115,10 @@ class _RegisterPreviewApp extends StatelessWidget {
   }
 }
 
-/// 登录回调载荷：网页回连成功后携带邮箱。
-typedef OnWebAuth = Future<void> Function(String email);
+/// 登录回调载荷：网页回连成功后携带邮箱；[freshCreated] 仅当本次回连
+/// 真正新建了账号时为 true（服务端注册幂等，已存在走「已存在」400），
+/// 宿主据此决定是否跑首启向导——已注册邮箱在任意机器登录直达主界面。
+typedef OnWebAuth = Future<void> Function(String email, {bool freshCreated});
 
 /// debug 直调扩展只注册一次（门禁会反复挂载注册页）。
 bool _debugFillExtensionRegistered = false;
@@ -156,7 +159,7 @@ class _RegisterPageState extends State<RegisterPage> {
   String? _authError;
   HttpServer? _loopbackServer;
   Uri? _webAuthUrl;
-  Completer<String>? _callbackCompleter;
+  Completer<({String email, bool freshCreated})>? _callbackCompleter;
 
   @override
   void initState() {
@@ -217,9 +220,9 @@ class _RegisterPageState extends State<RegisterPage> {
         _webAuthUrl!,
         mode: LaunchMode.externalApplication,
       ));
-      final String email = await _waitLoopbackCallback(server, state);
+      final (:email, freshCreated: bool fresh) = await _waitLoopbackCallback(server, state);
       if (!mounted) return;
-      await _completeAuth(email);
+      await _completeAuth(email, freshCreated: fresh);
     } catch (e) {
       if (mounted && e is! _WebAuthCancelled) {
         setState(() => _authError = _friendlyAuthError(e));
@@ -231,10 +234,15 @@ class _RegisterPageState extends State<RegisterPage> {
     }
   }
 
-  /// 等待网页回连：只认 path=/callback 且 state 匹配的请求，取邮箱交给完成态。
+  /// 等待网页回连：只认 path=/callback 且 state 匹配的请求，取邮箱与
+  /// 新建标记（fresh=1，仅本次真正新建账号时由网页附加）交给完成态。
   /// 5 分钟未回连视为超时；取消由 [_cancelWebAuth] 注入 [_WebAuthCancelled]。
-  Future<String> _waitLoopbackCallback(HttpServer server, String state) {
-    final Completer<String> completer = Completer<String>();
+  Future<({String email, bool freshCreated})> _waitLoopbackCallback(
+    HttpServer server,
+    String state,
+  ) {
+    final Completer<({String email, bool freshCreated})> completer =
+        Completer<({String email, bool freshCreated})>();
     _callbackCompleter = completer;
     server.listen((HttpRequest req) async {
       if (req.uri.path != "/callback") {
@@ -249,6 +257,7 @@ class _RegisterPageState extends State<RegisterPage> {
         return;
       }
       final String email = (req.uri.queryParameters["email"] ?? "").trim();
+      final bool freshCreated = req.uri.queryParameters["fresh"] == "1";
       // 浏览器停留在回连页：给一句终态提示，窗口可自行关闭
       req.response.headers.contentType = ContentType.html;
       req.response.write(_loopbackAckHtml());
@@ -257,15 +266,15 @@ class _RegisterPageState extends State<RegisterPage> {
         completer.completeError(Exception("回连参数缺少有效邮箱"));
         return;
       }
-      completer.complete(email);
+      completer.complete((email: email, freshCreated: freshCreated));
     });
     return completer.future.timeout(const Duration(minutes: 5));
   }
 
   /// 登录成功（真实回连或 debug 直调）后的收尾：交调用方落会话并切主界面。
-  Future<void> _completeAuth(String email) async {
+  Future<void> _completeAuth(String email, {bool freshCreated = false}) async {
     if (widget.onAuthenticated != null) {
-      await widget.onAuthenticated!(email);
+      await widget.onAuthenticated!(email, freshCreated: freshCreated);
     } else {
       // 预览/验收：模拟一次真实回连的往返延迟
       await Future<void>.delayed(const Duration(milliseconds: 1200));
@@ -291,7 +300,8 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 
   void _cancelWebAuth() {
-    final Completer<String>? completer = _callbackCompleter;
+    final Completer<({String email, bool freshCreated})>? completer =
+        _callbackCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(const _WebAuthCancelled());
     }

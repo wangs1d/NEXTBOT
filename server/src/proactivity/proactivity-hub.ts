@@ -54,10 +54,6 @@ import {
 import { classifyToolRisk } from "../services/tool-risk.js";
 import { semanticDedupKey } from "./dedup-key.js";
 import type { InterestHit } from "./interest-watcher.js";
-import {
-  buildOverworkIntent,
-  type OverworkRhythmPayload,
-} from "./triggers/overwork-trigger.js";
 
 /** 最小依赖接口（便于测试 mock 与模块解耦） */
 export interface ProactivityHubDeps {
@@ -408,17 +404,6 @@ export class ProactivityHub {
     // 快路径：待办闭环必恭喜（确定性场景，零 LLM）
     void this.route(buildLoopCompletedIntent(actorId, loopText)).catch((err) => {
       console.log(`[ProactivityHub] 待办闭环恭喜失败（忽略）: ${err}`);
-    });
-  }
-
-  /** body 节律信号（body.rhythm.* 订阅接线） */
-  onRhythmSignal(actorId: string, kind: string, payload?: unknown): void {
-    this.knownActors.add(actorId);
-    if (kind !== "body.rhythm.overwork_detected") return;
-    const p = payload as OverworkRhythmPayload | undefined;
-    // 快路径：过劳必干预（确定性场景，零 LLM，act+speak 复合）
-    void this.route(buildOverworkIntent(actorId, p)).catch((err) => {
-      console.log(`[ProactivityHub] 过劳干预失败（忽略）: ${err}`);
     });
   }
 

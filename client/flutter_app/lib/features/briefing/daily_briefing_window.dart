@@ -34,9 +34,11 @@ import "../../core/services/windows_webview_bootstrap.dart";
 // Dart → JS：executeScript 调 window.__setPlaying(posMs, durMs) /
 //   window.__setIdle(label) 驱动播报行形态。
 //
-// 2026-09-24 结构化行卡改版：卡面全部直出结构化字段（天气大字/穿衣一行/
-// 日程·待办·笔记·热搜·重要日子全量行），不再印口播稿（口播稿只进耳朵，
-// 点击卡片即 TTS）；无「展开详情」第二跳——私人管家简报一眼看全。
+// 2026-09-24 结构化行卡改版：卡面全部直出结构化字段（日程·待办·笔记·
+// 热搜·重要日子全量行），不再印口播稿（口播稿只进耳朵，点击卡片即 TTS）；
+// 无「展开详情」第二跳——私人管家简报一眼看全。
+// 2026-10-16 天气/穿衣迁出简报卡面（搬往睡前提醒 evening.digest），
+// 温度大字/天气副行/穿衣行与对应高度常量一并删除。
 // ═══════════════════════════════════════════════════════════════════
 
 /// 子进程窗口模式的环境变量名（值为载荷 JSON 文件路径）。
@@ -226,8 +228,6 @@ Future<void> _positionRightCenter() async {
 double briefingWindowHeight(DailyBriefingWindowPayload? payload) {
   const double padTop = 20, padBottom = 18;
   const double greetH = 24, metaGap = 5, metaH = 17;
-  const double weatherGap = 16, weatherH = 40;
-  const double outfitGap = 12, outfitH = 20;
   const double secGap = 14, secLabelH = 15, rowH = 30;
   const double doneGap = 4, doneH = 18;
   const double statusGap = 14, statusPadTop = 12, statusH = 22;
@@ -237,21 +237,7 @@ double briefingWindowHeight(DailyBriefingWindowPayload? payload) {
   final _BriefingLayout layout = _BriefingLayout.of(briefing);
 
   double h = padTop + greetH + metaGap + metaH;
-  // markdown 文档流（与 .md CSS 一一对应）：# 温度大字 → 天气副行 → 穿衣 → 板块
-  bool hasBlock = false;
-  final int sideLines = _weatherSideLineCount(layout);
-  if (layout.weatherBig.isNotEmpty) {
-    h += weatherGap + weatherH; // h1 温度大字
-    hasBlock = true;
-  }
-  if (sideLines > 0) {
-    h += (hasBlock ? 0 : weatherGap) + sideLines * 19;
-    hasBlock = true;
-  }
-  if (layout.outfit.isNotEmpty) {
-    h += (hasBlock ? outfitGap : weatherGap) + outfitH;
-    hasBlock = true;
-  }
+  // markdown 文档流（与 .md CSS 一一对应）：板块标题 + 行列表
   int rowsOf(String key) {
     final Object? raw = briefing?[key];
     return raw is List ? raw.length : 0;
@@ -269,11 +255,8 @@ double briefingWindowHeight(DailyBriefingWindowPayload? payload) {
       : 0;
   // 全空兜底：口播稿印上卡面（正常版式下口播稿只进耳朵不进眼睛）
   final String narration = payload?.narrationText.trim() ?? "";
-  final bool scriptFallback = briefing != null &&
-      !layout.hasWeather &&
-      layout.outfit.isEmpty &&
-      !layout.hasAnySection &&
-      narration.isNotEmpty;
+  final bool scriptFallback =
+      briefing != null && !layout.hasAnySection && narration.isNotEmpty;
   if (scriptFallback) {
     final int lines = max(1, (narration.length / 25).ceil());
     h += scriptGap + lines * scriptLineH;
@@ -282,66 +265,19 @@ double briefingWindowHeight(DailyBriefingWindowPayload? payload) {
   return h;
 }
 
-/// 天气副行行数（条件/区间一行 + 温差或风况第二行）。
-int _weatherSideLineCount(_BriefingLayout layout) {
-  final bool hasSide = layout.weatherCondition.isNotEmpty ||
-      layout.weatherRange.isNotEmpty ||
-      layout.weatherSideBottom.isNotEmpty;
-  if (!hasSide) return 0;
-  return layout.weatherSideBottom.isEmpty ? 1 : 2;
-}
-
 /// 版式要素抽取（HTML 生成与高度计算共用同一份判定，防两端不一致）。
 class _BriefingLayout {
   const _BriefingLayout({
-    required this.hasWeather,
-    required this.weatherBig,
-    required this.weatherCondition,
-    required this.weatherRange,
-    required this.weatherSideBottom,
-    required this.outfit,
     required this.todoPending,
     required this.doneTodayCount,
     required this.hasAnySection,
   });
 
-  final bool hasWeather;
-  final String weatherBig;
-  final String weatherCondition;
-  final String weatherRange;
-  final String weatherSideBottom;
-  final String outfit;
   final List<String> todoPending;
   final int doneTodayCount;
   final bool hasAnySection;
 
   static _BriefingLayout of(Map<String, dynamic>? briefing) {
-    final Object? rawWeather = briefing?["weather"];
-    final Map<String, dynamic>? weather =
-        rawWeather is Map ? rawWeather.cast<String, dynamic>() : null;
-    final num? temp = weather?["temperature"] as num?;
-    final String condition =
-        weather?["condition"]?.toString().trim() ?? "";
-    final bool hasWeather = weather != null && (temp != null || condition.isNotEmpty);
-    final String big = temp == null ? "" : "${temp.round()}°";
-    final num? maxC = weather?["maxC"] as num?;
-    final num? minC = weather?["minC"] as num?;
-    final String range = <String>[
-      if (maxC != null) "最高 ${maxC.round()}°",
-      if (minC != null) "最低 ${minC.round()}°",
-    ].join(" · ");
-    // 温差 ≥8° 提示一句（第二行）；无极值时退化为风况，再无则留空
-    final num? wind = weather?["windKmh"] as num?;
-    final String sideBottom = maxC != null && minC != null
-        ? ((maxC - minC).round() >= 8 ? "早晚温差大" : "")
-        : (wind != null ? "风速 ${wind.round()} km/h" : "");
-
-    final String outfitSuggestion =
-        briefing?["outfitTip"] is Map
-            ? ((briefing!["outfitTip"] as Map)["suggestion"]?.toString() ?? "")
-                .trim()
-            : "";
-
     final List<String> pending = <String>[];
     int doneCount = 0;
     final Object? rawTodo = briefing?["todoFollowups"];
@@ -370,12 +306,6 @@ class _BriefingLayout {
     }
 
     return _BriefingLayout(
-      hasWeather: hasWeather,
-      weatherBig: big,
-      weatherCondition: condition,
-      weatherRange: range,
-      weatherSideBottom: sideBottom,
-      outfit: outfitSuggestion,
       todoPending: pending,
       doneTodayCount: doneCount,
       hasAnySection: hasAnySection(),
@@ -631,19 +561,6 @@ String _highlightScript(String plainEscaped) {
   );
 }
 
-/// 天气状况 → emoji（按关键词匹配，未命中给中性图标）。
-String _conditionEmoji(String condition) {
-  if (condition.contains("雷")) return "⛈️";
-  if (condition.contains("雪")) return "❄️";
-  if (condition.contains("雨")) return "🌧️";
-  if (condition.contains("雾") || condition.contains("霾")) return "🌫️";
-  if (condition.contains("阴")) return "☁️";
-  if (condition.contains("云")) return "⛅";
-  if (condition.contains("晴")) return "☀️";
-  if (condition.contains("风")) return "🌬️";
-  return "🌤️";
-}
-
 /// 兴趣热搜行文案：「标题 · 平台」。
 String _interestHitText(Map<String, dynamic> item) {
   final String title = item["title"]?.toString() ?? "";
@@ -665,22 +582,11 @@ String _importantDayText(Map<String, dynamic> item) {
 }
 
 /// 把结构化简报组装成 markdown 文档（2026-09-25：卡面内容层 = markdown，
-/// 调内容只动这里，不碰 HTML/CSS）。固定顺序：# 温度大字 → 天气副行 →
-/// 穿衣 → 五板块（## 标题 + - 列表 + 完成数纯文本行）。
+/// 调内容只动这里，不碰 HTML/CSS）。固定顺序：五板块（## 标题 + - 列表 +
+/// 完成数纯文本行）；2026-10-16 天气/穿衣迁往睡前提醒，不再上卡面。
 String _composeBriefingMarkdown(
     Map<String, dynamic>? briefing, _BriefingLayout layout) {
   final StringBuffer buf = StringBuffer();
-  if (layout.hasWeather && layout.weatherBig.isNotEmpty) {
-    buf.writeln("# ${layout.weatherBig}");
-  }
-  final List<String> side = <String>[
-    if (layout.weatherCondition.isNotEmpty)
-      "${_conditionEmoji(layout.weatherCondition)} ${layout.weatherCondition}",
-    if (layout.weatherRange.isNotEmpty) layout.weatherRange,
-    if (layout.weatherSideBottom.isNotEmpty) layout.weatherSideBottom,
-  ];
-  if (side.isNotEmpty) buf.writeln(side.join(" · "));
-  if (layout.outfit.isNotEmpty) buf.writeln("**穿衣** ${layout.outfit}");
   if (briefing == null) return buf.toString();
 
   List<Map<String, dynamic>> listOf(String key) {
@@ -740,7 +646,7 @@ String _composeBriefingMarkdown(
 }
 
 /// 极小 markdown 渲染器（卡面内容子集，零依赖）：
-/// `# / ##` 标题、`- ` 列表、`**加粗**`、空行分隔；其余行为纯文本段落。
+/// `##` 标题、`- ` 列表、`**加粗**`、空行分隔；其余行为纯文本段落。
 /// 先整体 HTML 转义再施加行内标记，杜绝内容注入。
 String _markdownToHtml(String md) {
   final StringBuffer html = StringBuffer();
@@ -775,9 +681,6 @@ String _markdownToHtml(String md) {
     } else if (line.startsWith("## ")) {
       flushList();
       html.write("<h2>${_inlineMarkdown(_esc(line.substring(3).trim()))}</h2>");
-    } else if (line.startsWith("# ")) {
-      flushList();
-      html.write("<h1>${_inlineMarkdown(_esc(line.substring(2).trim()))}</h1>");
     } else if (line.startsWith("- ")) {
       listItems.add(_inlineMarkdown(_esc(line.substring(2).trim())));
     } else {
@@ -814,15 +717,12 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   final Map<String, dynamic>? briefing = payload?.briefing;
   final _BriefingLayout layout = _BriefingLayout.of(briefing);
 
-  // meta 只放日期：天气升格为大字行，不再挤在 meta 里
+  // meta 只放日期
   final String metaLine = dailyBriefingDateLabel(DateTime.now());
 
   final String narration = payload?.narrationText.trim() ?? "";
-  final bool scriptFallback = payload != null &&
-      !layout.hasWeather &&
-      layout.outfit.isEmpty &&
-      !layout.hasAnySection &&
-      narration.isNotEmpty;
+  final bool scriptFallback =
+      payload != null && !layout.hasAnySection && narration.isNotEmpty;
   final String scriptHtml = scriptFallback
       ? "<div class=\"script\">${_highlightScript(_esc(narration))}</div>"
       : "";
@@ -871,10 +771,7 @@ String buildBriefingHtml(DailyBriefingWindowPayload? payload) {
   .greet .meta { margin-top: 5px; font-size: 12px; line-height: 17px; color: #8f97a3; letter-spacing: .2px; }
 
   /* ── markdown 内容层样式 ── */
-  .md h1 { margin: 16px 0 0; height: 40px; line-height: 40px; font-size: 40px; font-weight: 600; letter-spacing: -1px; font-variant-numeric: tabular-nums; }
-  .md h1 + p { margin: 0; height: auto; font-size: 12px; line-height: 19px; color: #8f97a3; }
   .md p { margin: 12px 0 0; height: 20px; line-height: 20px; font-size: 12.5px; color: #8f97a3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .md > p:first-child { margin-top: 16px; }
   .md p strong { color: #ccd2db; font-weight: 600; margin-right: 6px; }
   .md h2 { margin: 14px 0 0; height: 15px; line-height: 15px; display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: #8f97a3; letter-spacing: 2px; font-weight: 600; }
   .md h2::after { content: ""; flex: 1; height: 1px; background: rgba(255,255,255,.06); }

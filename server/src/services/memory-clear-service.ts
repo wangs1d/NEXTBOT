@@ -10,6 +10,7 @@ import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { getConversationTimelineService } from "./conversation-timeline.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
+import { clearActorTranscript } from "./wal-transcript.js";
 
 export type ClearAllMemoryResult = {
   chat: boolean;
@@ -40,6 +41,18 @@ export async function clearAllMemoryForActor(
       deps.externalChat.clearSession(`notes:${variant}`);
     }
     chatCleared = true;
+  }
+
+  // 1b. 聊天记录可见性：turn WAL 是聊天记录的权威源（append-only），清空通过
+  // 记 per-actor cleared-at 读取过滤实现——任何设备拉转史（?full=1）都不会
+  // 复活已清轮次（2026-10-16，桌面端跨端回填接入的前置）。
+  try {
+    await clearActorTranscript(actorId);
+  } catch (e) {
+    console.warn(
+      "[memory-clear] clear transcript failed:",
+      e instanceof Error ? e.message : e,
+    );
   }
 
   // 2. 记忆图谱（HumanLikeMemoryService）

@@ -38,7 +38,8 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
       const acc = agentAccountService.getByActorId(actorId);
       return {
         actorId,
-        agentWorldRegistered: state.agentWorldRegistered,
+        // 有效注册状态：世界挑战注册 或 宿主已注册账号（另一处登录不重走注册）
+        agentWorldRegistered: worldService.isAgentWorldRegistered(actorId),
         agentWorldCredits: state.agentWorldCredits,
         sceneId: state.sceneId,
         revision: state.revision,
@@ -198,7 +199,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
       version: "1.0.0",
       displayName: "更新 Agent 账号显示名",
       description:
-        "在已存在 Agent 账号时修改 displayName。若尚未注册账号，请先使用工具 agent.register_account 或 HTTP POST /accounts/register。",
+        "在已存在 Agent 账号时修改 displayName。若尚未注册账号，请先完成 HTTP POST /accounts/register。",
       kind: "builtin",
       tags: ["agent-world", "profile", "account"],
       parameters: [

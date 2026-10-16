@@ -1,13 +1,15 @@
 /**
- * 早间简报聚合服务：将天气、日程、笔记、兴趣热搜命中合并为一份「早间简报」（四源）。
+ * 早间简报聚合服务：将日程、笔记、兴趣热搜命中等合并为一份「早间简报」。
  *
  * 依赖为可选 —— 当宿主未注入对应服务时返回占位数据，
  * 保证该服务可独立实例化与调用。
  *
+ * 2026-10-16：天气与穿衣建议移出早间简报（迁往睡前提醒 EveningDigest）；
+ * 本服务仅保留内部天气抓取供恶劣天气预警检测（onSevereWeatherAlert 联动）。
+ *
  * 第四源「兴趣热搜命中」（2026-08-29）：读 data/interest-watch.json 中该 actor 的
  * 兴趣列表（字段结构见 proactivity/interest-watcher.ts），结合 hot-rankings.ts 的
- * 实时热搜聚合做简单 includes 匹配，最多取 3 条；无命中则整体省略该块，
- * 不影响现有三源（天气/日程/笔记）的逻辑与结构。
+ * 实时热搜聚合做简单 includes 匹配，最多取 3 条；无命中则整体省略该块。
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,7 +28,11 @@ import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js"
 import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 
-export interface MorningBriefingWeather {
+/**
+ * 内部天气快照：仅供生成期恶劣天气预警检测（onSevereWeatherAlert 联动），
+ * 不再作为简报内容块下发（2026-10-16 天气/穿衣迁往睡前提醒）。
+ */
+interface MorningBriefingWeather {
   temperature?: number;
   condition?: string;
   description?: string;
@@ -94,11 +100,6 @@ export interface MorningBriefingImportantDay {
   daysUntil: number;
 }
 
-export interface MorningBriefingOutfitTip {
-  suggestion: string;
-  reason: string;
-}
-
 /** 晨报行程段：今天落在行程区间内 → 第一站提醒（确定性读行程仓库，无 LLM） */
 export interface MorningBriefingTravel {
   planId: string;
@@ -114,8 +115,6 @@ export interface MorningBriefingTravel {
 
 export interface MorningBriefing {
   date: string;
-  weather: MorningBriefingWeather | null;
-  outfitTip: MorningBriefingOutfitTip | null;
   todaySchedule: MorningBriefingScheduleItem[];
   pendingNotes: MorningBriefingPendingNote[];
   /**
@@ -248,58 +247,6 @@ function formatHhmm(iso: string | null | undefined): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
-function formatWeatherBit(
-  condition: string | undefined,
-  temperature: number | undefined,
-  _description: string | undefined,
-): string {
-  const segs: string[] = [];
-  if (condition) segs.push(condition);
-  if (typeof temperature === "number" && Number.isFinite(temperature)) {
-    segs.push(`${Math.round(temperature)}度`);
-  }
-  // 用户要求：不要天气状况的文字描述（description 冗长且与卡片 meta 重复），
-  // 只播「天气晴，24度」式短句
-  if (segs.length === 0) return "";
-  return `天气${segs.join("，")}。`;
-}
-
-function buildOutfitTip(weather: MorningBriefingWeather | null): MorningBriefingOutfitTip | null {
-  const temp = weather?.temperature;
-  if (typeof temp !== "number" || !Number.isFinite(temp)) {
-    return null;
-  }
-  // 一句话说完（2026-09-24 用户定调：穿衣建议不需要那么多，简洁即可）
-  if (temp >= 30) {
-    return {
-      suggestion: "轻薄夏装，注意防晒。",
-      reason: "今天体感偏热。",
-    };
-  }
-  if (temp >= 22) {
-    return {
-      suggestion: "短袖就行，早晚备件薄外套。",
-      reason: "温度比较舒适。",
-    };
-  }
-  if (temp >= 15) {
-    return {
-      suggestion: "长袖加件薄外套。",
-      reason: "今天稍微有点凉。",
-    };
-  }
-  if (temp >= 8) {
-    return {
-      suggestion: "穿上外套，早晚保暖。",
-      reason: "气温偏凉。",
-    };
-  }
-  return {
-    suggestion: "厚外套穿上，注意保暖。",
-    reason: "今天明显偏冷。",
-  };
-}
-
 function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
   const top = items.slice(0, 3);
   const rest = items.length - top.length;
@@ -414,22 +361,6 @@ function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
  */
 export function buildNarrationFacts(briefing: MorningBriefing): string {
   const lines: string[] = [];
-  if (briefing.weather) {
-    const segs: string[] = [];
-    if (briefing.weather.condition) segs.push(briefing.weather.condition);
-    if (typeof briefing.weather.temperature === "number") {
-      segs.push(`${Math.round(briefing.weather.temperature)}度`);
-    }
-    if (
-      typeof briefing.weather.maxC === "number" &&
-      typeof briefing.weather.minC === "number"
-    ) {
-      segs.push(`最高${Math.round(briefing.weather.maxC)}度`);
-      segs.push(`最低${Math.round(briefing.weather.minC)}度`);
-    }
-    if (segs.length > 0) lines.push(`天气：${segs.join("，")}`);
-  }
-  if (briefing.outfitTip) lines.push(`穿衣：${briefing.outfitTip.suggestion}`);
   if (briefing.todaySchedule.length > 0) {
     lines.push(
       `今日日程：${briefing.todaySchedule
@@ -528,22 +459,18 @@ export class MorningBriefingService {
   async generateBriefing(sessionId: string): Promise<MorningBriefing> {
     const prefs = this.deps.getSessionPrefs?.(sessionId);
     const sections = prefs?.morningBriefing.sections ?? {
-      weather: true,
-      outfit: true,
       schedule: true,
       notes: true,
     };
 
+    // 天气抓取仅供恶劣天气预警检测（结果不再进简报内容，2026-10-16 迁往睡前提醒）
     const [weather, todaySchedule, pendingNotes, interestHits] = await Promise.all([
-      sections.weather || sections.outfit
-        ? this.fetchWeather(sessionId).catch(() => null)
-        : Promise.resolve(null),
+      this.fetchWeather(sessionId).catch(() => null),
       sections.schedule ? this.fetchTodaySchedule(sessionId) : Promise.resolve([]),
       sections.notes ? this.fetchPendingNotes(sessionId) : Promise.resolve([]),
       // 第四源：兴趣热搜命中（可选块；失败/无命中 → 空数组 → 省略该块）
       this.fetchInterestHits(sessionId).catch(() => [] as MorningBriefingInterestHit[]),
     ]);
-    const outfitTip = sections.outfit ? buildOutfitTip(weather) : null;
 
     // 恶劣天气预警联动（Task 15 生活节律）：晨报生成时检测当日预警
     // （确定性规则：暴雨/雷暴/冻雨/大雪/高温/寒潮/大风）→ 预警命中且
@@ -582,11 +509,9 @@ export class MorningBriefingService {
 
     return {
       date: todayIsoDate(),
-      weather: sections.weather ? weather : null,
-      outfitTip,
       todaySchedule,
       pendingNotes,
-      // 无命中时省略该字段，保持现有三源结构与接口签名不变
+      // 无命中时省略该字段（可选块）
       ...(interestHits.length > 0 ? { interestHits } : {}),
       // 待办跟进（可选块）：全空时省略
       ...(todoFollowups ? { todoFollowups } : {}),
@@ -1016,17 +941,7 @@ export class MorningBriefingService {
     const parts: string[] = [];
     // 播报稿对齐设计稿（design/daily-briefing-floating.html）：问候与日期由
     // 卡片头（greeting/meta 行）展示，正文直接从内容开始，不再重复
-    // 「下午好，今天9月10日周四」。
-
-    if (briefing.weather) {
-      const { condition, temperature, description } = briefing.weather;
-      const weatherBit = formatWeatherBit(condition, temperature, description);
-      if (weatherBit) parts.push(weatherBit);
-    }
-
-    if (briefing.outfitTip) {
-      parts.push(`穿衣建议：${briefing.outfitTip.suggestion}`);
-    }
+    // 「下午好，今天9月10日周四」。天气/穿衣已迁往睡前提醒，不再进播报稿。
 
     if (briefing.todaySchedule.length > 0) {
       parts.push(formatScheduleBit(briefing.todaySchedule));

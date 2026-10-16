@@ -358,3 +358,46 @@ test("缺 service 时数据端点 503，_meta 仍可用", async () => {
   assert.equal(metaBody.domain, "travel-plan");
   assert.ok(metaBody.endpoints.length >= 9);
 });
+
+// ────────────────────────────────────────────────────────────
+// 归档页摘要扩展（stopCount / progress）与整体删除
+// ────────────────────────────────────────────────────────────
+
+test("列表摘要携带 stopCount 与 progress（归档页免二次请求）", async () => {
+  travelPlanStore.updateProgress("plan-routes-test-1", 1, 1);
+  const res = await app.inject({ method: "GET", url: "/travel/plans" });
+  assert.equal(res.statusCode, 200);
+  const body = res.json() as {
+    ok: boolean;
+    plans: Array<{ planId: string; dayCount: number; stopCount: number; progress?: { day: number; stop: number } }>;
+  };
+  const plan = body.plans.find((p) => p.planId === "plan-routes-test-1");
+  assert.ok(plan);
+  // 前文用例已从 Day1 删除一条条目：Day1 剩两项 + Day2 两项 = 4
+  assert.equal(plan!.stopCount, 4);
+  assert.equal(plan!.dayCount, 2);
+  assert.deepEqual(plan!.progress, { day: 1, stop: 1 });
+});
+
+test("DELETE 整份行程：落盘/内存/分享码映射清理，二次删除 404", async () => {
+  // 先生成分享码，验证删除时被一并清理
+  const share = await app.inject({ method: "POST", url: "/travel/plans/plan-routes-test-1/share" });
+  const { shareCode } = share.json() as { shareCode: string };
+  assert.ok(shareCode);
+
+  const res = await app.inject({ method: "DELETE", url: "/travel/plans/plan-routes-test-1" });
+  assert.equal(res.statusCode, 200);
+  assert.equal((res.json() as { ok: boolean }).ok, true);
+
+  // 完整行程 404、列表不含、store 无痕、分享码失效
+  assert.equal((await app.inject({ method: "GET", url: "/travel/plans/plan-routes-test-1" })).statusCode, 404);
+  const list = await app.inject({ method: "GET", url: "/travel/plans" });
+  const plans = (list.json() as { plans: Array<{ planId: string }> }).plans;
+  assert.ok(!plans.some((p) => p.planId === "plan-routes-test-1"));
+  assert.equal(travelPlanStore.get("plan-routes-test-1"), null);
+  assert.equal(travelShareStore.resolve(shareCode), null);
+
+  // 二次删除 404
+  const again = await app.inject({ method: "DELETE", url: "/travel/plans/plan-routes-test-1" });
+  assert.equal(again.statusCode, 404);
+});

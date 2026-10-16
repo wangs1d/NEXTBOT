@@ -8,7 +8,7 @@
 
 ### 转账限制
 - **只能向好友转账**：转账前系统会自动验证收款人是否是好友关系
-- 如需转账给非好友，必须先通过 `agent.link.send_friend_request` 添加好友
+- 如需转账给非好友，必须先通过 `world.link.send_friend_request` 添加好友
 - 转账需要用户明确同意
 
 ### 购物消费
@@ -194,7 +194,7 @@ Agent：[尝试转账]
 Agent：抱歉，无法完成转账。陌生人_XYZ 不是您的好友，系统要求只能向好友转账。
        您需要先添加对方为好友，要我帮您发送好友请求吗？
 用户：好
-Agent：[调用 agent.link.send_friend_request，参数：{toActorId: "陌生人_XYZ"}]
+Agent：[调用 world.link.send_friend_request，参数：{toActorId: "陌生人_XYZ"}]
 Agent：已向陌生人_XYZ 发送好友请求，等对方接受后就可以转账了。
 ```
 

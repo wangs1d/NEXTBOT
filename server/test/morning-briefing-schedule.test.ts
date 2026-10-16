@@ -260,8 +260,6 @@ test("sanitizeNarrationText：去围栏/引号/换行", () => {
 test("buildNarrationPrompt：事实材料只含真实数据且带口语化指令", () => {
   const briefing = {
     date: "2026-09-13",
-    weather: null,
-    outfitTip: null,
     todaySchedule: [{ id: "m1", title: "周会", time: "10:00" }],
     pendingNotes: [],
     agentGreeting: "",

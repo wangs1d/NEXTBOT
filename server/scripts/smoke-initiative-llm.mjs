@@ -57,12 +57,11 @@ const scenarios = [
     },
   },
   {
-    name: "场景2：过劳+截止压力（应主动关怀，speak/advise）",
+    name: "场景2：熬夜赶工+截止压力（应主动关怀，speak/advise）",
     input: {
       actorId: "user-test",
       observations: [
         { type: "conversation_turn", content: "用户说：这个方案周五必须交，我已经连着三天搞到凌晨两点了", salience: "medium", observedAt: Date.now() },
-        { type: "rhythm_overwork", content: "过劳信号：连续工作 6.5h，深夜活跃 3 次", salience: "high", observedAt: Date.now() },
       ],
       recentContext: [
         { type: "conversation_turn", content: "用户说：需求又改了", salience: "low", observedAt: Date.now() - 3600e3 },

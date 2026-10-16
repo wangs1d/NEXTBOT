@@ -114,22 +114,9 @@ String rightPanelTitle(RightPanelKind kind) {
   }
 }
 
-/// 移动端简报摘要文本。
+/// 移动端简报摘要文本（2026-10-16 天气/穿衣迁出简报，摘要只留日程）。
 String buildMobileBriefingSummary(Map<String, dynamic> briefing) {
   final List<String> parts = <String>[];
-  final Object? weather = briefing["weather"];
-  if (weather is Map) {
-    final String condition = weather["condition"]?.toString() ?? "";
-    final Object? temp = weather["temperature"];
-    if (condition.isNotEmpty || temp != null) {
-      parts.add(
-        [
-          if (condition.isNotEmpty) condition,
-          if (temp != null) "${temp.toString()}°C",
-        ].join(" "),
-      );
-    }
-  }
   final Object? schedule = briefing["todaySchedule"];
   if (schedule is List && schedule.isNotEmpty) {
     final Object? first = schedule.first;
@@ -152,27 +139,6 @@ String buildDesktopBriefingSummary(Map<String, dynamic> briefing) {
       "";
   if (greeting.isNotEmpty) {
     lines.add(greeting);
-  }
-  final Object? weather = briefing["weather"];
-  if (weather is Map) {
-    final String condition = weather["condition"]?.toString() ?? "";
-    final String temperature = weather["temperature"]?.toString() ?? "";
-    final String description = weather["description"]?.toString() ?? "";
-    final String weatherLine = [
-      condition,
-      temperature.isEmpty ? "" : "$temperature°C",
-      description
-    ].where((String item) => item.trim().isNotEmpty).join(" · ");
-    if (weatherLine.isNotEmpty) {
-      lines.add("天气：$weatherLine");
-    }
-  }
-  final Object? outfit = briefing["outfitTip"];
-  if (outfit is Map) {
-    final String suggestion = outfit["suggestion"]?.toString() ?? "";
-    if (suggestion.isNotEmpty) {
-      lines.add("穿衣：$suggestion");
-    }
   }
   final Object? schedule = briefing["todaySchedule"];
   if (schedule is List && schedule.isNotEmpty) {

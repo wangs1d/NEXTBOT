@@ -262,13 +262,17 @@ function renderAccountWebPage(otpEnabled: boolean): string {
             err.statusCode = res.status;
             throw err;
           }
-          return;
+          // ok=true 仅当本次调用真正新建了账号（已存在走 400「已存在」）；
+          // 回连据此带 fresh=1，桌面端仅对新建账号跑首启向导，已注册邮箱
+          // 在任意机器登录直达主界面（2026-10-16）。
+          return ok;
         });
-      }).then(function () {
+      }).then(function (fresh) {
         setMsg("成功，正在回连桌面端…", "ok");
         var sep = cb.indexOf("?") >= 0 ? "&" : "?";
         window.location.href = cb + sep + "state=" + encodeURIComponent(state)
-          + "&email=" + encodeURIComponent(email);
+          + "&email=" + encodeURIComponent(email)
+          + (fresh ? "&fresh=1" : "");
       }).catch(function (e) {
         setMsg(e && e.message ? e.message : "登录失败，请稍后重试", "err");
         btn.disabled = false;

@@ -213,6 +213,18 @@ export class WorldService {
   private evolutionHooks: Partial<WorldServiceEvolutionHooks> = {};
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private persistChain: Promise<void> = Promise.resolve();
+  /**
+   * 外部注册判定（宿主装配层注入）：本世界状态未注册时咨询宿主「该主体是否
+   * 已有注册账号」。已注册邮箱账号在另一处登录时不得再走一遍世界注册流程
+   * （2026-10-16），故宿主账号存在即视为已注册，并在首次判定时物化到世界
+   * 状态（与挑战注册同路径发放初始点数）。
+   */
+  private externalRegistrationResolver: ((sessionId: string) => boolean) | null = null;
+
+  /** 注入外部注册判定（如宿主 AgentAccountService 的账号存在性查询）。 */
+  setExternalRegistrationResolver(resolver: ((sessionId: string) => boolean) | null): void {
+    this.externalRegistrationResolver = resolver;
+  }
 
   /** 入账 / 购技能等事件回调（可选）。 */
   setEvolutionHooks(hooks: Partial<WorldServiceEvolutionHooks>): void {
@@ -483,7 +495,14 @@ export class WorldService {
 
   /** 是否已完成开放式 Agent 注册（旧持久化数据缺字段视为已注册）。 */
   isAgentWorldRegistered(sessionId: string): boolean {
-    return this.getOrCreate(sessionId).agentWorldRegistered === true;
+    if (this.getOrCreate(sessionId).agentWorldRegistered === true) return true;
+    // 宿主已注册账号（邮箱主体）即视为已注册：另一处登录不重走注册流程。
+    // 首次判定时物化（发放初始点数），此后走上面常规路径。
+    if (this.externalRegistrationResolver?.(sessionId)) {
+      this.grantAgentWorldRegistrationIfNeeded(sessionId);
+      return true;
+    }
+    return false;
   }
 
   /** 颁发注册挑战（任意域名上的 Agent 可用 HTTP 或工具完成）。 */

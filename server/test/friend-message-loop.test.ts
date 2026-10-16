@@ -2,7 +2,7 @@
  * 站内好友消息闭环（2026-10-15）端到端单测。
  *
  * 覆盖「agent 给好友发消息」全环：
- *   1. agent.send_to_peer 工具 → 接收方 hub 持久入站（platform=friend）+
+ *   1. world.link.send_message 工具 → 接收方 hub 持久入站（platform=friend）+
  *      发送方 hub 留档（outbound）+ WS 直推（含 fromName）+ lastMessageAt 双向
  *   2. 对方离线（trySend=false）→ 消息仍持久落库；hub 重建（模拟重启）后不丢
  *   3. 重连补投 replayUnread：未读会话重推最新一条；标读后不再推
@@ -25,6 +25,7 @@ import { FriendMessageService } from "../src/services/friend-message-service.js"
 import { FriendService } from "../src/services/friend-service.js";
 import { MessageHubService } from "../src/services/message-hub-service.js";
 import { gateInboundMessage } from "../src/services/message-gate.js";
+import { registerAgentLinkTools } from "../src/tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../src/tools/agent-relay-tools.js";
 import { registerMessageHubTools } from "../src/tools/message-hub-tools.js";
 import { ToolRegistry, type ToolContext } from "../src/tools/tool-registry.js";
@@ -56,6 +57,8 @@ interface Harness {
   dbPath: string;
   hubDbPath: string;
   savedAccountsFile?: string;
+  /** fake 世界身份注册表：好友请求门禁用（world.open_registry 语义） */
+  worldRegistered: Set<string>;
 }
 
 async function buildHarness(): Promise<Harness> {
@@ -92,10 +95,14 @@ async function buildHarness(): Promise<Harness> {
     friends,
   });
 
+  const worldRegistered = new Set(["alice@test.local", "bob@test.local"]);
+  const worldService = { isAgentWorldRegistered: (id: string) => worldRegistered.has(id) };
+
   const registry = new ToolRegistry();
   registerAgentRelayTools(registry, friendMessages, {
     arePaired: () => true,
   } as never, accounts);
+  registerAgentLinkTools(registry, friends, accounts, worldService as never);
   registerMessageHubTools(registry, {
     hub,
     gateway: { send: async () => ({ ok: false, delivered: false, message: "unused" }) } as never,
@@ -105,7 +112,7 @@ async function buildHarness(): Promise<Harness> {
 
   return {
     dir, accounts, friends, relay, hub, friendMessages, ws, registry,
-    dbPath: dir, hubDbPath, savedAccountsFile,
+    dbPath: dir, hubDbPath, savedAccountsFile, worldRegistered,
   };
 }
 
@@ -130,12 +137,12 @@ async function makeFriends(h: Harness): Promise<void> {
   assert.ok(responded.ok);
 }
 
-test("agent.send_to_peer 全环：接收方 hub 入站 + 发送方留档 + WS 直推 + lastMessageAt", async () => {
+test("world.link.send_message 全环：接收方 hub 入站 + 发送方留档 + WS 直推 + lastMessageAt", async () => {
   const h = await buildHarness();
   try {
     await makeFriends(h);
     const result = await h.registry.execute(
-      "agent.send_to_peer",
+      "world.link.send_message",
       { targetSessionId: "bob@test.local", body: "今晚一起吃饭吗？" },
       ALICE_CTX,
     );
@@ -189,7 +196,7 @@ test("对方离线也必达：hub 持久落库，模拟重启后消息仍在且�
     await makeFriends(h);
     h.ws.online = false; // 对方离线
     const result = await h.registry.execute(
-      "agent.send_to_peer",
+      "world.link.send_message",
       { targetSessionId: "bob@test.local", body: "离线也要送达" },
       ALICE_CTX,
     );
@@ -249,7 +256,7 @@ test("messages.reply 在 friend 会话上真实回信", async () => {
     await makeFriends(h);
     // 鲍勃的爱丽丝会话（由 alice 先发一条建立）
     await h.registry.execute(
-      "agent.send_to_peer",
+      "world.link.send_message",
       { targetSessionId: "bob@test.local", body: "在吗" },
       ALICE_CTX,
     );
@@ -303,4 +310,113 @@ test("入口闸豁免 friend 平台：强模板词的好友消息不被吞", () 
     text: "我中奖了哈哈，请你吃饭",
   });
   assert.equal(smsVerdict.gated, true);
+});
+
+test("门禁：无世界身份发起方调 world.link.send_friend_request → WORLD_REGISTRATION_REQUIRED 引导注册", async () => {
+  const h = await buildHarness();
+  try {
+    // dave 无 Agent World 身份（harness 默认只有 alice/bob 有）
+    const ctx: ToolContext = { sessionId: "dave@test.local" };
+    const result = await h.registry.execute(
+      "world.link.send_friend_request",
+      { toActorId: "bob@test.local", message: "交个朋友" },
+      ctx,
+    );
+    assert.ok(result.ok, `工具本身应执行成功（结构化返回而非 throw）：${JSON.stringify(result.result)}`);
+    const payload = result.result as { ok: boolean; reason?: string; message?: string; fix?: { tool?: string } };
+    assert.equal(payload.ok, false);
+    assert.equal(payload.reason, "WORLD_REGISTRATION_REQUIRED");
+    assert.match(payload.message ?? "", /world\.open_registry/);
+    assert.equal(payload.fix?.tool, "world.open_registry.agent_quick");
+
+    // 目标无世界身份：发起方有身份但对方没有 → 目标校验拦截
+    h.worldRegistered.add("dave@test.local");
+    const eveResult = await h.registry.execute(
+      "world.link.send_friend_request",
+      { toActorId: "eve@test.local", message: "交个朋友" },
+      ctx,
+    );
+    assert.equal(eveResult.ok, false, "目标未完成世界注册应失败");
+    assert.match(JSON.stringify(eveResult), /Agent World 注册/);
+
+    // 站内信无注册前提：无身份的 dave 发消息只按好友关系判定（非好友 → NOT_FRIENDS）
+    const sendResult = await h.registry.execute(
+      "world.link.send_message",
+      { targetSessionId: "bob@test.local", body: "在吗" },
+      ctx,
+    );
+    assert.ok(sendResult.ok, "execute 层应成功（结构化失败放在 result 内）");
+    const sendFailure = sendResult.result as { ok?: boolean; message?: string; reason?: string };
+    assert.equal(sendFailure.ok, false, "非好友发送应失败");
+    assert.equal(sendFailure.reason, "NOT_FRIENDS", "失败原因是好友关系而非身份（站内信无注册前提）");
+    // 无落库、无推送、无收件
+    assert.equal(h.ws.pushed.length, 0);
+    assert.equal(h.relay.listInbox("bob@test.local").length, 0);
+  } finally {
+    await teardown(h);
+  }
+});
+
+test("门禁：非好友（未注册）调 world.link.send_message → NOT_FRIENDS 且五处落点全无", async () => {
+  const h = await buildHarness();
+  try {
+    // carol 未注册任何身份（站内信不设注册前提，仅好友关系门禁）
+    const result = await h.registry.execute(
+      "world.link.send_message",
+      { targetSessionId: "carol@test.local", body: "我还没加你好友" },
+      ALICE_CTX,
+    );
+    assert.ok(result.ok, "execute 层应成功（结构化失败放在 result 内）");
+    const failure = result.result as { ok?: boolean; message?: string; reason?: string };
+    assert.equal(failure.ok, false, "非好友发送应失败");
+    assert.match(failure.message ?? "", /world\.link\.send_friend_request/);
+    assert.equal(failure.reason, "NOT_FRIENDS");
+
+    // 五处落点全无：hub 对方无入站、发送方无留档、WS 无推送、relay 无收件、无 lastMessageAt
+    const carolConv = h.hub
+      .listConversations("carol@test.local", { platform: "friend" })
+      .find((c) => c.channelId === "alice@test.local");
+    assert.equal(carolConv, undefined, "接收方不应有 friend 会话");
+    assert.equal(h.ws.pushed.length, 0);
+    assert.equal(h.relay.listInbox("carol@test.local").length, 0);
+  } finally {
+    await teardown(h);
+  }
+});
+
+test("门禁：messages.reply 对非好友 friend 会话返回 NOT_FRIENDS 结构", async () => {
+  const h = await buildHarness();
+  try {
+    // 模拟「曾是好友后被删」的残留会话：carol 给 bob 灌一条 friend 入站建立会话
+    await h.hub.ingestInbound({
+      actorId: "bob@test.local",
+      platform: "friend",
+      channelId: "carol@test.local",
+      text: "还加我好友吗",
+      participantId: "carol@test.local",
+      participantName: "卡罗尔",
+      senderId: "carol@test.local",
+      senderName: "卡罗尔",
+    });
+    const bobConv = h.hub
+      .listConversations("bob@test.local", { platform: "friend" })
+      .find((c) => c.channelId === "carol@test.local");
+    assert.ok(bobConv, "前置：残留 friend 会话已建立");
+
+    const result = await h.registry.execute(
+      "messages.reply",
+      { conversationId: bobConv.conversationId, text: "不加" },
+      BOB_CTX,
+    );
+    assert.ok(result.ok, "execute 层应成功（结构化失败放在 result 内）");
+    const failure = result.result as { ok?: boolean; error?: string; reason?: string };
+    assert.equal(failure.ok, false, "非好友回信应失败");
+    assert.equal(failure.reason, "NOT_FRIENDS");
+    assert.match(failure.error ?? "", /world\.link\.send_friend_request/);
+    // 对方未收到任何东西
+    assert.equal(h.ws.pushed.length, 0);
+    assert.equal(h.relay.listInbox("carol@test.local").length, 0);
+  } finally {
+    await teardown(h);
+  }
 });

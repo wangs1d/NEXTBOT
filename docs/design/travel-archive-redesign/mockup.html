@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>行程归档页重设计 · 设计稿</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0f1216;
+    color: #e8eaed;
+    padding: 40px 32px;
+    min-height: 100vh;
+  }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .page-sub { font-size: 13px; color: #9aa0a6; margin-bottom: 32px; }
+
+  .layout { display: flex; gap: 40px; flex-wrap: wrap; align-items: flex-start; }
+  .screens { display: flex; gap: 36px; flex-wrap: wrap; }
+
+  /* ── 手机框 ── */
+  .phone {
+    width: 375px; height: 812px;
+    background: #f7f8fa;
+    border-radius: 44px;
+    border: 10px solid #1c2026;
+    overflow: hidden;
+    position: relative;
+    box-shadow: 0 24px 60px rgba(0,0,0,.55);
+    flex-shrink: 0;
+  }
+  .phone .statusbar {
+    height: 44px; display: flex; align-items: center; justify-content: space-between;
+    padding: 0 24px; font-size: 12.5px; font-weight: 600; color: #1a1c1e;
+    background: #f7f8fa; position: relative; z-index: 5;
+  }
+  .statusbar .icons { display: flex; gap: 5px; align-items: center; font-size: 11px; }
+  .screen-label {
+    position: absolute; top: -30px; left: 4px;
+    font-size: 12px; color: #9aa0a6; font-weight: 600; letter-spacing: 1px;
+  }
+  .phone-wrap { position: relative; margin-top: 40px; }
+
+  /* ── 顶栏 ── */
+  .appbar {
+    padding: 10px 20px 4px; display: flex; align-items: flex-end; justify-content: space-between;
+  }
+  .appbar h1 { font-size: 26px; font-weight: 800; color: #1a1c1e; letter-spacing: .5px; }
+  .appbar .stat { font-size: 11.5px; color: #7a7f87; margin-top: 3px; }
+  .appbar .actions { display: flex; gap: 8px; padding-bottom: 6px; }
+  .icon-btn {
+    width: 34px; height: 34px; border-radius: 12px; background: #fff;
+    display: flex; align-items: center; justify-content: center;
+    color: #3c4043; font-size: 15px; box-shadow: 0 1px 4px rgba(0,0,0,.06);
+  }
+
+  /* ── 英雄卡：进行中 ── */
+  .hero { margin: 12px 20px 0; position: relative; border-radius: 22px; overflow: hidden;
+    height: 178px; box-shadow: 0 10px 28px rgba(23,105,90,.28); }
+  .hero img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .hero .shade { position: absolute; inset: 0;
+    background: linear-gradient(180deg, rgba(0,0,0,.10) 0%, rgba(0,0,0,.02) 38%, rgba(0,0,0,.66) 100%); }
+  .hero .live-badge {
+    position: absolute; top: 12px; left: 12px;
+    background: rgba(255,255,255,.92); color: #0e6b5c;
+    font-size: 11px; font-weight: 700; padding: 5px 10px; border-radius: 20px;
+    display: flex; align-items: center; gap: 5px;
+  }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: #12a486;
+    box-shadow: 0 0 0 3px rgba(18,164,134,.22); }
+  .hero .info { position: absolute; left: 14px; right: 14px; bottom: 12px; color: #fff; }
+  .hero .info .t { font-size: 17.5px; font-weight: 800; text-shadow: 0 1px 6px rgba(0,0,0,.4); }
+  .hero .info .s { font-size: 11.5px; opacity: .92; margin-top: 3px; }
+  .hero .go {
+    position: absolute; right: 12px; bottom: 12px;
+    background: #12a486; color: #fff; font-size: 12px; font-weight: 700;
+    padding: 8px 14px; border-radius: 20px; box-shadow: 0 4px 12px rgba(0,0,0,.3);
+  }
+
+  /* ── 筛选 chips ── */
+  .chips { display: flex; gap: 8px; padding: 16px 20px 6px; }
+  .chip {
+    font-size: 12px; font-weight: 600; padding: 7px 13px; border-radius: 20px;
+    background: #eceef1; color: #5f6368;
+  }
+  .chip.on { background: #0e6b5c; color: #fff; }
+  .chip .n { opacity: .65; font-weight: 500; margin-left: 2px; }
+
+  /* ── 分区头 ── */
+  .sec { display: flex; align-items: baseline; justify-content: space-between;
+    padding: 14px 20px 8px; }
+  .sec .l { font-size: 14px; font-weight: 800; color: #1a1c1e; display: flex; align-items: center; gap: 6px; }
+  .sec .l::before { content: ""; width: 3.5px; height: 13px; border-radius: 2px; background: #12a486; }
+  .sec .r { font-size: 11px; color: #9aa0a6; }
+
+  /* ── 即将出发卡 ── */
+  .up-card {
+    margin: 0 20px; background: #fff; border-radius: 18px; padding: 10px;
+    display: flex; gap: 12px; box-shadow: 0 2px 10px rgba(0,0,0,.05);
+  }
+  .up-card img { width: 92px; height: 92px; border-radius: 13px; object-fit: cover; flex-shrink: 0; }
+  .up-card .body { flex: 1; padding: 3px 4px 3px 0; display: flex; flex-direction: column; }
+  .up-card .t { font-size: 15px; font-weight: 700; color: #1a1c1e; }
+  .up-card .place { font-size: 12px; color: #7a7f87; margin-top: 4px; display: flex; align-items: center; gap: 4px; }
+  .up-card .meta { margin-top: auto; display: flex; gap: 6px; }
+  .tag { font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 12px;
+    background: #f0f2f4; color: #5f6368; }
+  .tag.count { background: #e2f5f0; color: #0e6b5c; }
+
+  /* ── 往期紧凑行 ── */
+  .past { margin: 0 20px; background: #fff; border-radius: 16px; overflow: hidden;
+    box-shadow: 0 2px 10px rgba(0,0,0,.05); }
+  .past-row { display: flex; align-items: center; gap: 12px; padding: 10px 14px; }
+  .past-row + .past-row { border-top: 1px solid #f1f3f5; }
+  .past-row img { width: 56px; height: 56px; border-radius: 12px; object-fit: cover; flex-shrink: 0; }
+  .past-row .body { flex: 1; min-width: 0; }
+  .past-row .t { font-size: 13.5px; font-weight: 650; color: #24282c; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .past-row .s { font-size: 11.5px; color: #8a9098; margin-top: 3px; }
+  .past-row .when { font-size: 11px; color: #9aa0a6; text-align: right; flex-shrink: 0; }
+  .past-row .when .done { display: inline-block; font-size: 10px; color: #9aa0a6;
+    background: #f0f2f4; padding: 2px 7px; border-radius: 10px; margin-top: 4px; }
+
+  /* ── 屏 2：搜索态 ── */
+  .searchbar { margin: 12px 20px 0; background: #fff; border-radius: 14px;
+    display: flex; align-items: center; gap: 8px; padding: 11px 14px;
+    box-shadow: 0 0 0 2px #12a486, 0 4px 14px rgba(18,164,134,.18); }
+  .searchbar .ph { flex: 1; font-size: 13.5px; color: #1a1c1e; }
+  .searchbar .caret { width: 1.5px; height: 16px; background: #12a486; }
+  .searchbar .cancel { font-size: 12.5px; color: #0e6b5c; font-weight: 600; }
+  .hit-mark { background: #dff2ec; color: #0e6b5c; border-radius: 3px; padding: 0 1px; }
+  .hint-card { margin: 14px 20px 0; background: #eef6f4; border-radius: 14px; padding: 12px 14px;
+    font-size: 11.5px; color: #4b6b64; line-height: 1.7; }
+  .hint-card b { color: #0e6b5c; }
+
+  /* ── 长按菜单示意 ── */
+  .sheet-mask { position: absolute; inset: 0; background: rgba(10,12,14,.42); z-index: 8; }
+  .sheet { position: absolute; left: 10px; right: 10px; bottom: 14px; z-index: 9;
+    background: #fff; border-radius: 20px; overflow: hidden; }
+  .sheet .head { padding: 14px 18px 6px; font-size: 12px; color: #8a9098; }
+  .sheet .item { padding: 13px 18px; font-size: 14px; color: #24282c; display: flex; gap: 10px; align-items: center; }
+  .sheet .item + .item { border-top: 1px solid #f1f3f5; }
+  .sheet .item.danger { color: #d33a2f; }
+  .sheet .cancel { padding: 14px; text-align: center; font-size: 14px; font-weight: 700; color: #0e6b5c;
+    border-top: 6px solid #f2f4f6; }
+
+  /* ── 右侧说明 ── */
+  .notes { max-width: 430px; min-width: 330px; flex: 1; }
+  .notes h2 { font-size: 15px; font-weight: 800; margin: 26px 0 10px; color: #fff;
+    display: flex; align-items: center; gap: 8px; }
+  .notes h2:first-child { margin-top: 0; }
+  .notes h2 .idx { width: 20px; height: 20px; border-radius: 6px; background: #12a486; color: #04241e;
+    font-size: 11.5px; display: inline-flex; align-items: center; justify-content: center; font-weight: 800; }
+  .notes ul { list-style: none; }
+  .notes li { font-size: 12.8px; color: #b9bec5; line-height: 1.75; padding-left: 14px; position: relative; margin-bottom: 6px; }
+  .notes li::before { content: ""; position: absolute; left: 0; top: 9px; width: 5px; height: 5px;
+    border-radius: 50%; background: #3c8f80; }
+  .notes li b { color: #e8eaed; }
+  .dep { background: #171c22; border: 1px solid #262d36; border-radius: 14px; padding: 14px 16px; }
+  .dep li::before { background: #b0853c; }
+  .dep-title { font-size: 11px; color: #b0853c; font-weight: 700; letter-spacing: 1px; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+
+<div class="page-title">常用工具 → 行程 · 归档页重设计</div>
+<div class="page-sub">「时间漏斗」三层结构：进行中置顶直达 · 即将出发倒计时 · 往期回顾收纳 ｜ 2026-10-16 设计稿 v1</div>
+
+<div class="layout">
+  <div class="screens">
+
+    <!-- ═══ 屏 1：主列表 ═══ -->
+    <div class="phone-wrap">
+      <div class="screen-label">屏 1 · 主列表态</div>
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><span class="icons">▪▪▪ ⌁ ▮</span></div>
+
+        <div class="appbar">
+          <div>
+            <h1>行程</h1>
+            <div class="stat">6 次旅行 · 4 个目的地</div>
+          </div>
+          <div class="actions">
+            <div class="icon-btn">⌕</div>
+            <div class="icon-btn">↻</div>
+          </div>
+        </div>
+
+        <!-- 进行中英雄卡 -->
+        <div class="hero">
+          <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Kyoto%20Fushimi%20Inari%20shrine%20vermillion%20torii%20gates%20path%20autumn%20soft%20morning%20light%20travel%20photography%20cinematic&image_size=landscape_16_9" alt="">
+          <div class="shade"></div>
+          <div class="live-badge"><span class="live-dot"></span>进行中 · Day 2 / 5</div>
+          <div class="info">
+            <div class="t">京都樱花五日行</div>
+            <div class="s">京都 · 10-15 ~ 10-19 · 第 3 站 伏见稻荷</div>
+          </div>
+          <div class="go">继续行程 →</div>
+        </div>
+
+        <!-- 筛选 chips -->
+        <div class="chips">
+          <div class="chip on">全部<span class="n">6</span></div>
+          <div class="chip">即将出发<span class="n">1</span></div>
+          <div class="chip">往期回顾<span class="n">4</span></div>
+        </div>
+
+        <!-- 即将出发 -->
+        <div class="sec"><span class="l">即将出发</span><span class="r">按出发时间</span></div>
+        <div class="up-card">
+          <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Osaka%20Dotonbori%20canal%20neon%20signs%20at%20dusk%20vibrant%20street%20travel%20photography&image_size=landscape_16_9" alt="">
+          <div class="body">
+            <div class="t">大阪美食三日</div>
+            <div class="place">📍 大阪 · 11-02 ~ 11-04</div>
+            <div class="meta">
+              <span class="tag count">还有 17 天</span>
+              <span class="tag">3 天</span>
+              <span class="tag">¥4,200</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- 往期回顾 -->
+        <div class="sec"><span class="l">往期回顾</span><span class="r">4 次</span></div>
+        <div class="past">
+          <div class="past-row">
+            <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Sanya%20Hainan%20tropical%20beach%20turquoise%20water%20palm%20trees%20aerial%20travel%20photography&image_size=square" alt="">
+            <div class="body">
+              <div class="t">三亚亲子六日</div>
+              <div class="s">三亚 · 6 天 · ¥12,800</div>
+            </div>
+            <div class="when">08 月<br><span class="done">已完成</span></div>
+          </div>
+          <div class="past-row">
+            <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Tokyo%20Shibuya%20crossing%20night%20neon%20cityscape%20travel%20photography&image_size=square" alt="">
+            <div class="body">
+              <div class="t">东京五日深度游</div>
+              <div class="s">东京 · 5 天 · ¥9,600</div>
+            </div>
+            <div class="when">05 月<br><span class="done">已完成</span></div>
+          </div>
+          <div class="past-row">
+            <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Chiang%20Mai%20Thailand%20golden%20temple%20pagoda%20daylight%20travel%20photography&image_size=square" alt="">
+            <div class="body">
+              <div class="t">清迈慢生活周记</div>
+              <div class="s">清迈 · 7 天 · ¥6,900</div>
+            </div>
+            <div class="when">2025<br><span class="done">已完成</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ 屏 2：搜索 + 长按管理 ═══ -->
+    <div class="phone-wrap">
+      <div class="screen-label">屏 2 · 搜索态 + 长按管理</div>
+      <div class="phone">
+        <div class="statusbar"><span>9:41</span><span class="icons">▪▪▪ ⌁ ▮</span></div>
+
+        <div class="appbar">
+          <div><h1>行程</h1><div class="stat">6 次旅行 · 4 个目的地</div></div>
+          <div class="actions"><div class="icon-btn">↻</div></div>
+        </div>
+
+        <!-- 搜索框（展开态） -->
+        <div class="searchbar">
+          <span style="color:#8a9098">⌕</span>
+          <span class="ph">大<span class="caret"></span></span>
+          <span class="cancel">取消</span>
+        </div>
+
+        <div class="sec"><span class="l">找到 1 个行程</span></div>
+        <div class="up-card">
+          <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Osaka%20Dotonbori%20canal%20neon%20signs%20at%20dusk%20vibrant%20street%20travel%20photography&image_size=landscape_16_9" alt="">
+          <div class="body">
+            <div class="t"><span class="hit-mark">大</span>阪美食三日</div>
+            <div class="place">📍 <span class="hit-mark">大</span>阪 · 11-02 ~ 11-04</div>
+            <div class="meta"><span class="tag count">还有 17 天</span><span class="tag">3 天</span></div>
+          </div>
+        </div>
+
+        <div class="hint-card">
+          <b>交互说明</b><br>
+          · 搜索匹配 标题 + 目的地，本地过滤零延迟<br>
+          · 空结果引导「让 Agent 帮我规划」<br>
+          · 长按任意行程卡呼出下方管理菜单
+        </div>
+
+        <!-- 长按菜单示意 -->
+        <div class="sheet-mask"></div>
+        <div class="sheet">
+          <div class="head">大阪美食三日</div>
+          <div class="item">📌&nbsp; 置顶（本地偏好）</div>
+          <div class="item">🔗&nbsp; 复制分享码</div>
+          <div class="item danger">🗑&nbsp; 删除行程</div>
+          <div class="cancel">取消</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ 设计说明 ═══ -->
+  <div class="notes">
+    <h2><span class="idx">1</span>解决的痛点</h2>
+    <ul>
+      <li><b>平铺无层次</b>：进行中 / 未开始 / 已结束行程视觉权重完全相同，一眼抓不到重点</li>
+      <li><b>辨识度差</b>：68px 小封面 + 三行小字，卡片同质化，靠读文字找行程</li>
+      <li><b>不可管理</b>：无搜索、无筛选、无删除，行程变多后只能无限滚动肉眼扫</li>
+    </ul>
+
+    <h2><span class="idx">2</span>「时间漏斗」信息架构</h2>
+    <ul>
+      <li><b>进行中 → 英雄卡置顶</b>：大封面 + 「Day x/y」进度徽章 + 「继续行程」直达按钮（服务端 progress API 已有，直接可用）</li>
+      <li><b>即将出发 → 中卡 + 倒计时</b>：「还有 N 天」本地日期计算，强化期待感</li>
+      <li><b>往期回顾 → 紧凑行收纳</b>：小图行式布局，弱化为档案视角，按时间倒序</li>
+      <li>顶部 chips（全部/即将出发/往期回顾）+ 搜索 = 两级快速定位，≤20 条本地过滤零延迟</li>
+    </ul>
+
+    <h2><span class="idx">3</span>交互与视觉规则</h2>
+    <ul>
+      <li>状态语义色：进行中=品牌绿（呼吸光点）、即将出发=浅绿底倒计时、已完成=灰</li>
+      <li>点击行为不变：条目 → 拉完整行程 → 手机原生页 / 桌面 WebView 面板</li>
+      <li>下拉刷新保留；空态 / 错误态沿用现有文案微调</li>
+      <li>长按呼出管理菜单：置顶（本地）、分享码（服务端已有）、删除</li>
+    </ul>
+
+    <h2><span class="idx">4</span>服务端依赖（新增，量很小）</h2>
+    <div class="dep">
+      <div class="dep-title">REQUIRES BACKEND</div>
+      <ul>
+        <li><b>DELETE /travel/plans/:planId</b>：删除落盘行程（当前只有条目级删除，无整体删除）</li>
+        <li>列表接口 GET /travel/plans 追加返回 <b>progress 摘要</b>（day/stop），英雄卡免二次请求</li>
+        <li>置顶仅存客户端本地偏好，不动服务端</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+</body>
+</html>

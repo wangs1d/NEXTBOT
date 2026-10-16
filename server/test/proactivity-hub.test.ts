@@ -1,5 +1,5 @@
 // ProactivityHub（主动性编排器）集成单测：
-// 快路径（任务恭喜/待办闭环/过劳干预/待办跟进）、频控（分 kind 冷却/每日预算）、
+// 快路径（任务恭喜/待办闭环/待办跟进）、频控（分 kind 冷却/每日预算）、
 // 对话轮入板回调。LLM 通用路径已整体拆除（2026-09-24 架构定稿：决策=状态板映射规则），
 // 映射规则场景见 mapping-executor.test.ts。
 import assert from "node:assert/strict";
@@ -73,56 +73,6 @@ test("快路径：用户待办闭环 → speak 恭喜信号", async () => {
   assert.equal(signals.length, 1);
   assert.equal(signals[0].kind, "task_celebration");
   assert.ok(signals[0].summary.includes("简历"));
-});
-
-test("快路径：过劳信号 → act 三步静默执行（可逆+隐式授权+高价值，不通知）", async () => {
-  const { deps, signals, toolCalls } = makeDeps({
-    executeTool: async (tool, args) => {
-      toolCalls.push({ tool, args });
-      if (tool === "media.search") {
-        return {
-          ok: true,
-          result: {
-            tracks: [{ id: "t-01", name: "月光", artist: "某人", durationSec: 180 }],
-          },
-        };
-      }
-      return { ok: true, result: {} };
-    },
-  });
-  const hub = new ProactivityHub(deps);
-  hub.onRhythmSignal(ACTOR, "body.rhythm.overwork_detected", {
-    continuousWorkHours: 3.5,
-    lateNightActiveCount: 0,
-    // 作息基线已学会 → 才排休息提醒（纯作息驱动，无基线时 hub 不发 calendar 步骤）
-    learnedBedtimeHour: 23,
-  });
-  await flush();
-
-  // 三分支语义（方案 C）：过劳干预全部为可逆+已授权（rhythm 隐式）+高净效用
-  // → execute_silently 直接执行；做完轻提一句（告知放了歌/排了提醒）
-  assert.equal(signals.length, 1);
-  assert.equal(signals[0].kind, "overwork_care");
-
-  const tools = toolCalls.map((c) => c.tool);
-  assert.deepEqual(tools, ["media.search", "media.play", "calendar.create_task"]);
-  // fromStep 链式填参：media.play 拿到 search 结果第一条曲目
-  const play = toolCalls[1].args;
-  assert.equal(play.trackId, "t-01");
-  assert.equal(play.trackName, "月光");
-  assert.equal(play.artist, "某人");
-  // 休息日程按作息排（就寝 23:00 前 1h → 下一个未过的 22:00）
-  assert.equal(toolCalls[2].args.kind, "reminder");
-  assert.ok(String(toolCalls[2].args.runAt).includes("T22:00:00"));
-  assert.ok(hub.getActAudit(ACTOR).length >= 3, "静默执行仍有 act 审计");
-});
-
-test("快路径：非 overwork 的节律信号被忽略", async () => {
-  const { deps, signals } = makeDeps();
-  const hub = new ProactivityHub(deps);
-  hub.onRhythmSignal(ACTOR, "body.rhythm.heartbeat", {});
-  await flush();
-  assert.equal(signals.length, 0);
 });
 
 test("对话轮：followup 强线索 → 规则判主动承接", async () => {

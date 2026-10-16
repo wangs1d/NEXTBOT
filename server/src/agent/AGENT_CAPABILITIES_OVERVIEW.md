@@ -103,7 +103,7 @@ import {
 
 4️⃣ 【Agent间通信能力】
 可用工具：
-- agent.send_to_peer: 向已配对的Agent发送消息
+- world.link.send_message: 向好友Agent发送站内消息（仅限好友关系）
 提示：需要双方完成配对才能通信
 
 5️⃣ 【AIP协议能力】
@@ -148,11 +148,6 @@ import {
 - protocol.unified.human_directive: 接收人类指令
 - protocol.unified.governance_probe: 治理探测
 提示：用于系统级管理和配置
-
-1️⃣1️⃣ 【Agent账号管理能力】
-可用工具：
-- agent.register_account: 注册新的Agent账号
-提示：用于创建和管理Agent身份
 
 【虚拟电话能力】
 ✅ 您的虚拟联络号：123456（登记在 Agent 名下，与您共用）

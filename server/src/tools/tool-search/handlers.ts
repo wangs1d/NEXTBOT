@@ -28,7 +28,7 @@ const historyStore: HistoryScoreStore = sharedHistoryStore;
  * 两种写法都能命中（模型有时混用点号/下划线）。
  */
 export type ResidentToolInfo = {
-  /** 注册表名（点号形态，如 agent.send_to_peer） */
+  /** 注册表名（点号形态，如 world.link.send_message） */
   name: string;
   /** LLM 可见名（下划线形态），无别名时与 name 相同 */
   alias: string;

@@ -85,8 +85,8 @@ test("core 常驻名单：oss 剔除电话/好友家族，shopping.suggest 与�
   withEdition("oss", () => {
     assert.equal(isCoreToolRegistryName("phone.ensure_my_number"), false);
     assert.equal(isCoreToolRegistryName("phone.anything"), false);
-    assert.equal(isCoreToolRegistryName("agent.send_to_peer"), false);
-    assert.equal(isCoreToolRegistryName("agent.link.list_friends"), false);
+    assert.equal(isCoreToolRegistryName("world.link.send_message"), false);
+    assert.equal(isCoreToolRegistryName("world.link.list_friends"), false);
     assert.equal(isCoreToolRegistryName("shopping.suggest"), true, "开源拍板保留");
     assert.equal(isCoreToolRegistryName("calendar.create_task"), true);
     assert.equal(isCoreToolRegistryName("voice.speak"), true, "语音 TTS 非电话家族，保留");

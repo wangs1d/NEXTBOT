@@ -493,7 +493,7 @@ export const USER_FACING_AGENT_WORLD_CHAT_TOOLS = AGENT_WORLD_CHAT_TOOLS;
 export const WORLD_FREE_MARKET_USER_CHAT_TOOLS = WORLD_FREE_MARKET_SKILL_CHAT_TOOLS;
 
 const USER_AGENT_LINK_SUFFIX =
-  "\n\n【Agent Link · 好友联络】对应 App 侧栏「Agent Link」（与 Agent World 独立）。工具：agent.link.*；发消息 agent.send_to_peer / aip.dispatch。加好友前须用户同意。";
+  "\n\n【Agent Link · 好友联络】Agent World 域能力（对应 App 侧栏「Agent Link」）。工具：world.link.*（好友列表/请求/回信/发消息）；跨 Agent 结构化协议另有 aip.dispatch。发消息仅限好友（后台能力，不需注册）；加好友须双方已有 Agent World 身份（无身份先 world.open_registry.agent_quick 注册），且加好友前须用户同意。";
 
 /** Agent World 说明·核心段（open_registry 域，任何开关组合下工具都真实存在）。 */
 const USER_AGENT_AGENT_WORLD_SUFFIX_CORE =

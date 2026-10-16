@@ -139,7 +139,10 @@ export function registerChatDataRoutes(
             messages.push({
               role: "assistant",
               text: turn.assistantText.slice(0, 8000),
-              ts: turn.ts,
+              // 同轮 user/assistant 共享同一 ts（同一毫秒）会让客户端渲染层
+              // 的不稳定排序随机翻序（回复冒到提问上面）——assistant 恒 +1ms
+              // 保证「问在上、答在下」的次序在一切排序下确定（2026-10-16）。
+              ts: turn.ts == null ? null : turn.ts + 1,
             });
           }
         }

@@ -137,7 +137,6 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
             ],
           ),
         ),
-        _buildWeatherCard(b, p),
         _Section(
           p: p,
           icon: Icons.event_outlined,
@@ -153,50 +152,8 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
         _buildTodoSection(b, p),
         _buildImportantDaysSection(b, p),
         _buildTravelSection(b, p),
-        _buildOutfitSection(b, p),
         const SizedBox(height: 24),
       ],
-    );
-  }
-
-  Widget _buildWeatherCard(Map<String, dynamic> b, MobilePalette p) {
-    final Map<String, dynamic>? w = b["weather"] as Map<String, dynamic>?;
-    if (w == null) return const SizedBox.shrink();
-    final String condition = w["condition"]?.toString() ?? "";
-    final String desc = w["description"]?.toString() ?? "";
-    final Object? temp = w["temperature"];
-    return Container(
-      margin: const EdgeInsets.fromLTRB(16, 8, 16, 4),
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: p.surface,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.wb_cloudy_outlined, size: 32, color: p.textSecondary),
-          const SizedBox(width: 14),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  temp == null ? condition : "$condition $temp°C",
-                  style: TextStyle(
-                    color: p.textPrimary,
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-                if (desc.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 2),
-                  Text(desc, style: TextStyle(color: p.textSecondary, fontSize: 13)),
-                ],
-              ],
-            ),
-          ),
-        ],
-      ),
     );
   }
 
@@ -366,29 +323,6 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
                 ],
               ),
             ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildOutfitSection(Map<String, dynamic> b, MobilePalette p) {
-    final Map<String, dynamic>? outfit = b["outfitTip"] as Map<String, dynamic>?;
-    if (outfit == null) return const SizedBox.shrink();
-    final String suggestion = outfit["suggestion"]?.toString() ?? "";
-    final String reason = outfit["reason"]?.toString() ?? "";
-    if (suggestion.isEmpty) return const SizedBox.shrink();
-    return _Section(
-      p: p,
-      icon: Icons.checkroom_outlined,
-      title: "穿衣建议",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(suggestion, style: TextStyle(color: p.textPrimary, fontSize: 15)),
-          if (reason.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 4),
-            Text(reason, style: TextStyle(color: p.textSecondary, fontSize: 13)),
-          ],
         ],
       ),
     );

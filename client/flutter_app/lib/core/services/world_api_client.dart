@@ -391,7 +391,7 @@ class WorldApiClient {
     return _decode(r);
   }
 
-  /// 好友消息直连发送（好友聊天面板；与 agent.send_to_peer 同一投递内核）
+  /// 好友消息直连发送（好友聊天面板；与 world.link.send_message 同一投递内核）
   Future<Map<String, dynamic>> sendFriendMessage(String toActorId, String text) async {
     final Map<String, dynamic> body = <String, dynamic>{
       "toActorId": toActorId,

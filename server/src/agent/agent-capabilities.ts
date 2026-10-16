@@ -134,7 +134,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "agent_link",
       lines: [
-        "2️⃣ Agent Link 好友：agent.link.list_friends / list_friend_requests / send_friend_request / respond_friend_request / agent.send_to_peer / aip.dispatch",
+        "2️⃣ Agent Link 好友（Agent World 域）：world.link.list_friends / list_friend_requests / send_friend_request / respond_friend_request / world.link.send_message（仅限好友）/ aip.dispatch",
       ],
     },
     {
@@ -246,12 +246,6 @@ function buildStaticSections(): CapabilitySection[] {
       lines: [
         "1️⃣5️⃣ 系统管理：管理记忆和上下文、调整系统配置",
         "1️⃣6️⃣ 自我编程：self.create_skill / update_skill / delete_skill / generate_skill / …（须「完全访问」）",
-      ],
-    },
-    {
-      domain: "agent_account",
-      lines: [
-        "1️⃣7️⃣ Agent账号：agent.register_account",
       ],
     },
     {
@@ -505,7 +499,7 @@ const PHONE_MODEL_LINES = [
   "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」—— 单向 TTS 播报，无来电 UI。spokenMessage 填内容，ringStyle=\"reminder\"。",
   "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式；未来将升级为 ASR→LLM→TTS 全双工交互。",
   "【号码归属】6 位站内号登记在本 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；接收来电不要求对方有号。",
-  "【Agent↔Agent 联络】Agent 之间不打电话，用 agent.send_to_peer 文本通道联系。",
+  "【Agent↔Agent 联络】Agent 之间不打电话，用 world.link.send_message 文本通道联系（仅限好友）。",
   "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone.call_user。",
 ];
 
@@ -624,6 +618,8 @@ export function buildAgentWorldPromptSection(
   skillManager: SkillManager,
 ): string {
   const state = world.getOrCreateRoom(actorId, actorId);
+  // 有效注册：世界挑战注册 或 宿主已注册账号（另一处登录不重走注册）
+  const registered = world.isAgentWorldRegistered(actorId);
   const owned = new Set(state.ownedSkillIds);
   const communityListed = skillManager
     .list(false)
@@ -632,7 +628,7 @@ export function buildAgentWorldPromptSection(
   const lines: string[] = [
     "【Agent World · 统一世界模块】独立多Agent经济环境，货币「世界点数」agentWorldCredits，与用户真实钱包 wallet.* 无关。",
     "",
-    `注册状态：${state.agentWorldRegistered ? "✅ 已注册" : "⚠️ 未注册（须先 world.open_registry.* 注册，否则 free_market/social 等不可用）"}`,
+    `注册状态：${registered ? "✅ 已注册" : "⚠️ 未注册（须先 world.open_registry.* 注册，否则 free_market/social 等不可用）"}`,
     `世界点数：${state.agentWorldCredits}`,
     `已解锁技能：${state.ownedSkillIds.length ? state.ownedSkillIds.join("、") : "（无）"}`,
   ];
@@ -663,7 +659,7 @@ export function buildAgentWorldPromptSection(
     "【区分】wallet.*=用户真实资金；日程/Agent Link/子Agent委派=宿主侧，不用世界点数。",
   );
 
-  if (!owned.size && !state.agentWorldCredits && state.agentWorldRegistered) {
+  if (!owned.size && !state.agentWorldCredits && registered) {
     lines.push("提示：注册后可在世界内挣点、购买技能。");
   }
 

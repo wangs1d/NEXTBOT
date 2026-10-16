@@ -98,6 +98,7 @@ import { EveningDigestService } from "../services/evening-digest-service.js";
 import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import { LifeRhythmEngine } from "../rhythm/engine.js";
 import { RhythmProfileStore } from "../rhythm/profile-store.js";
+import { UserTimingService } from "../proactivity/user-timing-service.js";
 import { NightlyRhythmAnalyzer } from "../rhythm/nightly-rhythm-analyzer.js";
 import { SleepWindowSensor } from "../rhythm/sensors/sleep-window-sensor.js";
 import { DesktopActivitySensor } from "../rhythm/sensors/desktop-activity-sensor.js";
@@ -244,7 +245,6 @@ import { travelDataRefresh } from "../skills/travel-planning/travel-data-refresh
 import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
 import type { SkillMetadata } from "../skills/types.js";
-import { registerAgentAccountTools } from "../tools/agent-account-tools.js";
 import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
 import {
   AGENT_NAME_KV_KEY,
@@ -1107,7 +1107,7 @@ export async function createAppServices(): Promise<AppServices> {
   const betaWaitlistService = new BetaWaitlistService();
   const betaInviteService = new BetaInviteService();
   const friendService = new FriendService();
-  // 站内好友消息统一投递内核（2026-10-15 闭环）：agent.send_to_peer / messages.reply
+  // 站内好友消息统一投递内核（2026-10-15 闭环）：world.link.send_message / messages.reply
   // (friend) / HTTP /friends/messages 三出口共用；hub 持久落库解决离线必达。
   const friendMessageService = new FriendMessageService({
     hub: messageHubService,
@@ -1135,13 +1135,12 @@ export async function createAppServices(): Promise<AppServices> {
     app.log.error({ err }, "Failed to load persisted data");
   });
   
-  registerAgentAccountTools(toolRegistry, agentAccountService);
   registerWalletTools(toolRegistry, friendService);
   registerPaymentTools(toolRegistry, paymentService, new QrAssistService({ imageStore: imageGenerationService }));
   registerMeituanTools(toolRegistry, meituanService);
-  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：好友/中继/虚拟电话工具族
+  // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：中继/虚拟电话工具族
+  // （好友联络工具族 registerAgentLinkTools 在 worldService 创建后注册——加好友门禁用世界身份）
   if (!isOssEdition()) {
-    registerAgentLinkTools(toolRegistry, friendService, agentAccountService);
     registerAgentRelayTools(
       toolRegistry,
       friendMessageService,
@@ -1262,6 +1261,11 @@ export async function createAppServices(): Promise<AppServices> {
   });
 
   const worldService = new WorldService();
+  // 已注册宿主账号（邮箱主体）即视为 Agent World 已注册：另一处设备登录时
+  // 不得再走一遍世界注册流程（好友请求等门禁直接放行，2026-10-16）。
+  worldService.setExternalRegistrationResolver(
+    (actorId) => Boolean(agentAccountService.getByActorId(actorId)),
+  );
   registerAgentWorldIdentityBuiltinSkills((skill) => skillManager.register(skill), {
     worldService,
     agentAccountService,
@@ -1360,6 +1364,11 @@ export async function createAppServices(): Promise<AppServices> {
     console.log("[skip] AgentWorld social domain disabled by ENV");
   }
   toolRegistry.setWorldService(worldService);
+  // 好友联络工具族（Agent World 域 world.link.*）：门禁依赖世界身份，
+  // 须在 worldService 创建（L~1264）之后注册；oss 版剔除
+  if (!isOssEdition()) {
+    registerAgentLinkTools(toolRegistry, friendService, agentAccountService, worldService);
+  }
   // Feature Catalog：能力分类统一层（分类视图，不注册能力）。
   // build() 在全部注册完成后调用（hookBus 段首次 + onReady 二次刷新，
   // MCP 工具异步加载，onReady 时已就绪）。
@@ -1770,6 +1779,34 @@ export async function createAppServices(): Promise<AppServices> {
   initMemoryManagerService(narrativeMemory, agentMemorySyncService);
   const stmConfig = getShortTermMemoryConfig();
 
+  // ─── 用户时刻统一取用口（2026-10-16 接口统一，用户拍板）───
+  // 「按对用户的了解动态设置时刻」的能力此前散落多处（晚报调度器直连
+  // RhythmCore、夜间固化直连 AwarenessCortex、过劳提醒经 body 信号 payload
+  // 捎带 learnedBedtimeHour……），现统一注册到 UserTimingService：新的
+  // 定时场景一律从这里取学到的就寝/起床时刻/睡眠窗口，不再各自直连数据源。
+  // 注册序 = 数据质量优先级：在线活跃学习 > 在场足迹推导 > 会话睡眠窗口。
+  // rhythmCore/awarenessCortex 声明在后，闭包运行期已初始化，可选链安全。
+  const userTiming = new UserTimingService();
+  userTiming.registerSource({
+    name: "rhythm-core",
+    bedtimeHour: (actorId) => rhythmCore?.learnedBedtimeHour(actorId) ?? null,
+  });
+  userTiming.registerSource({
+    name: "presence-footprint",
+    bedtimeHour: (actorId) =>
+      getPresenceFootprintStore()?.deriveSleepWindow(actorId).sleepStartHour ?? null,
+    wakeHour: (actorId) =>
+      getPresenceFootprintStore()?.deriveSleepWindow(actorId).wakeHour ?? null,
+  });
+  userTiming.registerSource({
+    name: "awareness-sleep-window",
+    bedtimeHour: (actorId) =>
+      awarenessCortex?.getLearnedSleepWindow(actorId)?.startHour ?? null,
+    wakeHour: (actorId) =>
+      awarenessCortex?.getLearnedSleepWindow(actorId)?.endHour ?? null,
+    sleepWindow: (actorId) => awarenessCortex?.getLearnedSleepWindow(actorId) ?? null,
+  });
+
   const nightlyMemoryService = initNightlyMemoryTaskService({
     timezone: stmConfig.digestTimezone,
   });
@@ -2061,7 +2098,6 @@ export async function createAppServices(): Promise<AppServices> {
   };
   const eveningDigestService = new EveningDigestService({
     journalService: getDailyJournalService(),
-    financeDeepService,
     scheduleTaskService,
     weatherService,
     weatherPrefsService,
@@ -2090,6 +2126,9 @@ export async function createAppServices(): Promise<AppServices> {
   });
   const eveningDigestScheduler = new EveningDigestScheduler({
     digestService: eveningDigestService,
+    // 推送时刻动态学习（2026-10-16）：经 UserTimingService 多源取就寝时刻
+    // → 就寝前 30 分钟（钳位 [20:00, 23:30]）；未学出回退默认 21:00。
+    bedtimeHourOf: (sessionId) => userTiming.bedtimeHour(sessionId),
     onDigestTriggered: (sessionId, digest) => {
       const sent = wsConnectionRegistry.trySend(
         sessionId,
@@ -3654,8 +3693,9 @@ export async function createAppServices(): Promise<AppServices> {
     bodyCenter.setVestibularApparatus(vestibularApparatus);
     bodyCenter.setHomeostasis(homeostasisCore);
     bodyCenter.setReflex(reflexModuleAdapter);
-    // 6.0 节律感知核心（第 10 个 BodyModule）：连续工作 / 深夜活跃检测，
-    //     越过阈值发布 body.rhythm.overwork_detected（ProactivityHub 订阅后干预）。
+    // 6.0 节律感知核心（第 10 个 BodyModule）：用户作息学习（最后活跃→就寝
+    //     基线），经 UserTimingService 统一取用口供各定时场景消费
+    //     （过劳检测/干预链路 2026-10-16 已删除）。
     rhythmCore = new RhythmCore({ bodyBus }, join(process.cwd(), "data", "body"));
     bodyCenter.registerModule(rhythmCore);
 
@@ -3763,8 +3803,11 @@ export async function createAppServices(): Promise<AppServices> {
     // 缺口 3 修复：注入 AwarenessCortex 到 nightly 服务，启用"夜间 + sleeping"双条件触发 dreaming
     // 注意：awarenessCortex 在 brainNeuroEnabled 块内创建（行 1093），
     // 此处注入若 awarenessCortex 未创建则传 null（降级为仅时间窗触发）
-    if (nightlyMemoryService && awarenessCortex) {
-      nightlyMemoryService.setAwarenessCortex(awarenessCortex);
+    if (nightlyMemoryService) {
+      if (awarenessCortex) nightlyMemoryService.setAwarenessCortex(awarenessCortex);
+      // 动态夜间窗口改走统一取用口（2026-10-16 接口统一）；
+      // userTiming 不依赖 awarenessCortex，无它也要注入（多源兜底）
+      nightlyMemoryService.setUserTiming(userTiming);
     }
 
     // 突触总线注册到 BrainCenter（各皮层已通过 registerSynapseBus 建立订阅）
@@ -4705,14 +4748,6 @@ export async function createAppServices(): Promise<AppServices> {
   memoryCortex?.setEpitomeLoopClosedListener((actorId, loopText) => {
     proactivityHub.onUserLoopCompleted(actorId, loopText);
   });
-  // 接线 3：body 节律信号（RhythmCore 过劳检测 → act+speak 复合干预）
-  bodyCenter
-    ?.getBus()
-    .subscribe("body.rhythm.overwork_detected", (signal) => {
-      if (signal.actorId) {
-        proactivityHub.onRhythmSignal(signal.actorId, signal.kind, signal.payload);
-      }
-    });
   // ─── InterestWatcher 兴趣话题追踪装配（对标扣子主动推送体验）───
   // 用户长期关注的话题从对话中被 LLM 挖出（interest.manage 工具入库），
   // 后台每 tick 拉一次实时热搜（微博/百度/知乎/B站聚合），命中用户兴趣 →

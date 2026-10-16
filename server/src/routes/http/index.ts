@@ -152,7 +152,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 网页登录页按 OTP 闸状态渲染验证码步骤（SMTP 凭据齐备即自动收紧）
   registerAccountWebRoutes(app, { otpEnabled: isEmailOtpEnforced(deps) });
   registerFinanceIngestRoutes(app, deps);
-  // 好友社交（agent.link.* 的 HTTP 面；开源版剔除）
+  // 好友社交（world.link.* 工具族的 HTTP 面；开源版剔除）
   if (!isOssEdition()) {
     registerFriendRoutes(app, deps);
   }

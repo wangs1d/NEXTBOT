@@ -326,6 +326,9 @@ async function pickIsolate(client) {
 // ---------------------------------------------------------------- 增量编译
 
 async function compileTo(outPath, basePath) {
+  // frontend_server 不会自建目录：build/ 被清理后首跑会因写不出 outPath 直接
+  // PathNotFoundException（exit=255），然后带着旧 kernel 启动。这里先补目录。
+  fs.mkdirSync(path.dirname(outPath), { recursive: true });
   const dartExe = path.join(CACHE, 'dart-sdk', 'bin', 'dartaotruntime.exe');
   const feServer = path.join(CACHE, 'dart-sdk', 'bin', 'snapshots', 'frontend_server_aot.dart.snapshot');
   const sdkRoot = `${fwd(path.join(CACHE, 'artifacts', 'engine', 'common', 'flutter_patched_sdk'))}/`;

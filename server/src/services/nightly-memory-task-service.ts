@@ -98,12 +98,16 @@ export class NightlyMemoryTaskService {
    * 注入后，dreaming 触发条件从"仅时间窗"升级为"时间窗 + sleeping 状态"双条件，
    * 避免用户深夜还在密集对话时强行触发 dreaming 造成竞态。
    *
-   * 动态窗口扩展：若 getLearnedSleepWindow 可用且样本足够，
-   * 用学习到的个性化窗口替换硬编码的 nightStartHour/nightEndHour。
+   * 动态窗口扩展（2026-10-16 接口统一）：夜间窗口从 UserTimingService
+   * 统一取用口取（多源：节律活跃学习 > 在场足迹 > 会话睡眠窗口），
+   * 不再直连 AwarenessCortex.getLearnedSleepWindow。
    */
+  private userTiming: {
+    sleepWindow(actorId: string): { startHour: number; endHour: number; sampleCount: number } | null;
+  } | null = null;
+  /** AwarenessCortex（dreaming 触发用：observe 轮询活动状态；窗口取数已移交 UserTimingService） */
   private awarenessCortex: {
     observe(actorId: string): { activity: string } | null;
-    getLearnedSleepWindow?(actorId: string): { startHour: number; endHour: number; sampleCount: number } | null;
   } | null = null;
   /**
    * 记录已触发 dreaming 的 actor，避免同一夜间重复触发。
@@ -131,24 +135,32 @@ export class NightlyMemoryTaskService {
   }
 
   /**
-   * 注入 AwarenessCortex（缺口 3 修复 + 动态窗口扩展）。
+   * 注入 AwarenessCortex（缺口 3 修复）。
    *
    * 注入后：
    * - tick() 在夜间会检测每个 actor 的 sleeping 状态
    * - 只对处于 sleeping 状态的 actor 触发 dreaming
-   * - 动态窗口：若 getLearnedSleepWindow 可用且样本足够，用学习到的窗口替换硬编码
    * - 保留"昼夜切换兜底"：若用户整夜不睡，夜→昼切换时补跑
+   * （动态夜间窗口 2026-10-16 起改走 setUserTiming 注入的统一取用口）
    */
   setAwarenessCortex(
     svc: {
       observe(actorId: string): { activity: string } | null;
-      getLearnedSleepWindow?(actorId: string): { startHour: number; endHour: number; sampleCount: number } | null;
     } | null,
   ): void {
     this.awarenessCortex = svc;
     console.log(
-      `[NightlyMemory] ${svc ? "已注入 AwarenessCortex（dreaming 双条件触发 + 动态窗口学习已启用）" : "AwarenessCortex 已清除"}`,
+      `[NightlyMemory] ${svc ? "已注入 AwarenessCortex（dreaming 双条件触发已启用）" : "AwarenessCortex 已清除"}`,
     );
+  }
+
+  /** 注入用户时刻统一取用口（夜间模式动态窗口的数据来源，2026-10-16 接口统一） */
+  setUserTiming(
+    svc: {
+      sleepWindow(actorId: string): { startHour: number; endHour: number; sampleCount: number } | null;
+    } | null,
+  ): void {
+    this.userTiming = svc;
   }
 
   startScheduler(): void {
@@ -301,8 +313,9 @@ export class NightlyMemoryTaskService {
   /**
    * 判定当前是否处于夜间模式。
    *
-   * 动态窗口优先级：
-   * 1. 若 awarenessCortex.getLearnedSleepWindow 可用且样本足够 → 用学习到的个性化窗口
+   * 动态窗口优先级（2026-10-16 接口统一）：
+   * 1. UserTimingService.sleepWindow 学到的个性化窗口（多源合并：节律活跃
+   *    学习 > 在场足迹 > 会话睡眠窗口，样本门槛由各源自行把关）
    * 2. 否则回退到 config.nightStartHour/nightEndHour（默认 23-6 或 env 配置）
    *
    * 多 actor 场景：只要有任一 actor 学习到个性化窗口，就采用该窗口。
@@ -320,13 +333,13 @@ export class NightlyMemoryTaskService {
     const [h, m] = hourStr.split(":").map(Number);
     const hourDecimal = h + m / 60;
 
-    // 尝试获取动态学习到的窗口
+    // 尝试获取动态学习到的窗口（统一取用口）
     let startHour = this.config.nightStartHour;
     let endHour = this.config.nightEndHour;
     let usingDynamic = false;
-    if (this.awarenessCortex?.getLearnedSleepWindow) {
+    if (this.userTiming) {
       for (const actorId of this.getAllActorIds()) {
-        const learned = this.awarenessCortex.getLearnedSleepWindow(actorId);
+        const learned = this.userTiming.sleepWindow(actorId);
         if (learned) {
           startHour = learned.startHour;
           endHour = learned.endHour;

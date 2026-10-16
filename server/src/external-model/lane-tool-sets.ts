@@ -67,7 +67,7 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   "phone.ensure_my_number",
   "messages.overview",
   "messages.reply",
-  "agent.send_to_peer",
+  "world.link.send_message",
   // 记忆（感知）
   "brain.recall",
   // 用户画像自编辑（2026-09-29）：「越来越了解用户」是对话基本动作；
@@ -117,7 +117,7 @@ export const TASK_LANE_CORE_NAMES: readonly string[] = [
   // 通讯
   "messages.overview",
   "messages.reply",
-  "agent.send_to_peer",
+  "world.link.send_message",
   // 桌面（桥/本机视觉离线时由调用方过滤）
   "desktop.visual.screenshot",
   // 代码沙箱（self-programming 注册，缺失自动跳过）

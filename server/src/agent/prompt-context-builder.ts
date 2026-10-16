@@ -193,7 +193,8 @@ function getCachedWorldState(worldService: WorldService, actorId: string): World
   }
   const state = worldService.getOrCreateRoom(actorId, actorId);
   const data = {
-    registered: state.agentWorldRegistered,
+    // 有效注册：世界挑战注册 或 宿主已注册账号（另一处登录不重走注册）
+    registered: worldService.isAgentWorldRegistered(actorId),
     credits: state.agentWorldCredits,
     ownedSkillIds: state.ownedSkillIds,
   };

@@ -261,6 +261,7 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     endpoints: [
       "GET    /travel/plans                                行程摘要列表（≤20）",
       "GET    /travel/plans/:planId                        完整行程（404 若不存在）",
+      "DELETE /travel/plans/:planId                        删除整份行程（含分享码映射）",
       "PATCH  /travel/plans/:planId/progress              {day,stop} 上报行程进度（设备状态，不动版本）",
       "GET    /travel/plans/:planId/progress              行程进度（无记录为 null）",
       "GET    /travel/plans/:planId/signal                实时信号（rain/behind，Agent 侧确定性判定）",
@@ -289,6 +290,21 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     const plan = requirePlan(reply, parsed.data.planId);
     if (!plan) return;
     return { ok: true, plan: decoratePlanWithMedia(plan) };
+  });
+
+  /** 删除整份行程（归档页管理动作）：落盘文件 + 内存 + 分享码映射一并清理 */
+  app.delete<{ Params: { planId: string } }>("/travel/plans/:planId", async (request, reply) => {
+    if (!requireService(reply)) return;
+    const parsed = planIdParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const removed = travelPlanStore.remove(parsed.data.planId);
+    if (!removed) {
+      return reply.code(404).send({ ok: false, error: `行程不存在：${parsed.data.planId}` });
+    }
+    travelShareStore.removeForPlan(parsed.data.planId);
+    return { ok: true };
   });
 
   // ======================== 行程编辑 ========================

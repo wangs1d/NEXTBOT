@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { WorldService } from "@private-ai-agent/agent-world";
 import type { FriendService } from "../../services/friend-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
 import { AGENT_NUMBER_PATTERN } from "../../services/agent-account-service.js";
@@ -130,9 +131,10 @@ export function registerFriendRoutes(
     friendService: FriendService;
     agentAccountService: AgentAccountService;
     friendMessageService?: FriendMessageService;
+    worldService: WorldService;
   }
 ): void {
-  const { friendService, agentAccountService, friendMessageService } = deps;
+  const { friendService, agentAccountService, friendMessageService, worldService } = deps;
 
   /**
    * 发送好友请求
@@ -145,6 +147,15 @@ export function registerFriendRoutes(
     }
 
     const fromActorId = accountActorFromBody(parsed.data);
+    // 发起方必须已有 Agent World 身份（与 world.link.send_friend_request 工具面同口径）
+    if (fromActorId && !worldService.isAgentWorldRegistered(fromActorId)) {
+      return reply.code(403).send({
+        ok: false,
+        code: "WORLD_REGISTRATION_REQUIRED",
+        message:
+          "当前登录主体还没有 Agent World 身份，无法发起好友请求；请先完成世界注册（world.open_registry.agent_quick 或 POST /world/register/agent_quick）",
+      });
+    }
     const toActorId = resolveTargetActorId(
       agentAccountService,
       parsed.data.toActorId,
@@ -154,10 +165,9 @@ export function registerFriendRoutes(
       return reply.code(400).send({ ok: false, message: "缺少目标：请填 toActorId 或 toAgentNumber（对方身份号码）" });
     }
 
-    // 检查目标用户是否存在
-    const targetAccount = agentAccountService.getByActorId(toActorId);
-    if (!targetAccount) {
-      return reply.code(404).send({ ok: false, message: "目标用户不存在" });
+    // 检查目标是否已有 Agent World 身份
+    if (!worldService.isAgentWorldRegistered(toActorId)) {
+      return reply.code(404).send({ ok: false, message: "目标尚未完成 Agent World 注册，无法添加好友" });
     }
 
     const result = await friendService.sendFriendRequest(
@@ -408,7 +418,7 @@ export function registerFriendRoutes(
   });
 
   /**
-   * 好友消息直连发送（好友聊天面板；与 agent.send_to_peer 同一投递内核）。
+   * 好友消息直连发送（好友聊天面板；与 world.link.send_message 同一投递内核）。
    * POST /friends/messages
    */
   app.post("/friends/messages", async (request, reply) => {

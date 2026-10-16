@@ -80,9 +80,10 @@ const GOLDEN: GoldenCase[] = [
   { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "reminder.plan"], topK: 3 },
   { query: "看一下门口摄像头", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
   { query: "我答应过你什么", expect: ["commitment.list"], topK: 3 },
-  // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 agent.send_to_peer
-  { query: "给好友发消息", expect: ["agent.send_to_peer"] },
-  { query: "回复好友消息", expect: ["agent.send_to_peer", "messages.reply"], topK: 2 },
+  // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 world.link.send_message
+  // （2026-10-16 工具归域改名：agent.send_to_peer / agent.link.* → world.link.*）
+  { query: "给好友发消息", expect: ["world.link.send_message"] },
+  { query: "回复好友消息", expect: ["world.link.send_message", "messages.reply"], topK: 2 },
 ];
 
 type DiscoverMatch = { name: string; routing?: { confidence?: number } };

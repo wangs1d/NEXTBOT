@@ -91,7 +91,12 @@ export function registerMessageHubTools(
             : {}),
         });
         if (!sent.ok) {
-          return { ok: false, error: sent.error, errorCode: "TOOL_UNAVAILABLE" };
+          return {
+            ok: false,
+            error: sent.error,
+            ...(sent.reason ? { reason: sent.reason } : {}),
+            errorCode: "TOOL_UNAVAILABLE",
+          };
         }
         const updated = deps.hub.getConversation(actorId, conversationId);
         return {

@@ -179,7 +179,7 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   },
   {
     name: "agent",
-    summary: "智能体社交（好友/中继消息/跨agent协作）",
+    summary: "智能体自我与跨agent协作（注册/能力查询）",
     prefixes: ["agent."],
     secondaryTools: [],
   },
@@ -203,7 +203,7 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   },
   {
     name: "world",
-    summary: "Agent World 注册/房间",
+    summary: "Agent World 注册/房间/好友联络（world.link.*）",
     prefixes: ["world."],
     secondaryTools: [],
   },

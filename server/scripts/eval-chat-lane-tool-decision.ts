@@ -114,7 +114,7 @@ function buildToolContext() {
   }));
   // 其余 Core 工具（钱包/消息/日程/派发等）本台架不接执行器：明确报错而非静默假成功
   const stub = async (name: string) => ({ ok: false, result: { error: `eval-harness: ${name} 未接执行器` } });
-  for (const name of ["wallet.get_balance", "wallet.get_transactions", "messages.overview", "calendar.list_tasks", "brain.recall", "perception.overview", "agent.query_capabilities", "self.list_custom_skills", "surface.show", "task.dispatch", "task.status", "task.cancel", "reminder.plan", "calendar.create_from_text", "phone.ensure_my_number", "phone.virtual_call", "messages.reply", "agent.send_to_peer", "fetch_web", "deep_search", "search_videos"]) {
+  for (const name of ["wallet.get_balance", "wallet.get_transactions", "messages.overview", "calendar.list_tasks", "brain.recall", "perception.overview", "agent.query_capabilities", "self.list_custom_skills", "surface.show", "task.dispatch", "task.status", "task.cancel", "reminder.plan", "calendar.create_from_text", "phone.ensure_my_number", "phone.virtual_call", "messages.reply", "world.link.send_message", "fetch_web", "deep_search", "search_videos"]) {
     registry.register(name, stub.bind(null, name));
   }
   const calls: Array<{ name: string; ok: boolean }> = [];

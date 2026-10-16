@@ -8,7 +8,7 @@ import type { AgentRelayService } from "./agent-relay-service.js";
 /**
  * 站内好友消息统一发送内核（2026-10-15 闭环根修）。
  *
- * 此前 agent.send_to_peer 只做「内存中继 + 在线 WS 直推」：离线收件箱纯内存
+ * 此前 world.link.send_message（原 agent.send_to_peer）只做「内存中继 + 在线 WS 直推」：离线收件箱纯内存
  * 重启即丢、发件不留档、好友回信 agent 读不到——发送半环不闭环。
  *
  * 本服务收口全部投递面，一条消息五处落点：
@@ -18,7 +18,7 @@ import type { AgentRelayService } from "./agent-relay-service.js";
  *   3. 发送方 hub createOutbound——代发留档；
  *   4. WS AgentPeerMessage 直推（含 fromName，客户端 toast/通知直接可读）；
  *   5. friendService lastMessageAt 双向刷新。
- * agent.send_to_peer、messages.reply（friend 平台）、HTTP /friends/messages
+ * world.link.send_message、messages.reply（friend 平台）、HTTP /friends/messages
  * 三个出口全部走这里，保证语义一致。
  */
 
@@ -42,6 +42,8 @@ export type FriendMessageSendResult = {
 export type FriendMessageSendFailure = {
   ok: false;
   error: string;
+  /** 门禁原因：非好友关系（站内信后台专用，不设注册前提） */
+  reason?: "NOT_FRIENDS";
 };
 
 export type FriendPeerMessageEnvelopePayload = {
@@ -88,6 +90,17 @@ export class FriendMessageService {
     if (!from || !to) return { ok: false, error: "缺少发送方或接收方身份" };
     if (!text) return { ok: false, error: "消息正文不能为空" };
     if (from === to) return { ok: false, error: "不能给自己发好友消息" };
+
+    // 门禁：仅好友关系可互发消息（站内信后台专用，不设注册前提；
+    // 非好友 → 引导先加好友，加好友须双方完成 Agent World 注册）
+    if (!this.deps.friends.areFriends(from, to)) {
+      return {
+        ok: false,
+        reason: "NOT_FRIENDS",
+        error:
+          "你与对方还不是好友，无法发送站内消息。请先调用 world.link.send_friend_request 发送好友请求（须用户同意），对方接受后再发消息。",
+      };
+    }
 
     const fromName = this.displayNameOf(from);
 

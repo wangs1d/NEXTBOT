@@ -112,7 +112,7 @@ function buildToolContext() {
   for (const name of [
     "hot_rankings", "internet.research", "info.inspect_webpage", "info.navigate_site",
     "weather.get_local", "reminder.plan", "calendar.create_from_text", "calendar.list_tasks",
-    "messages.overview", "messages.reply", "agent.send_to_peer", "clock.get_current_time",
+    "messages.overview", "messages.reply", "world.link.send_message", "clock.get_current_time",
     "clock.get_user_location", "browser.session.list", "code.run", "code.write_file",
     "code.read_file", "brain.recall", "agent.query_capabilities", "self.list_custom_skills",
     "perception.overview", "wallet.get_balance", "wallet.get_transactions", "surface.show",

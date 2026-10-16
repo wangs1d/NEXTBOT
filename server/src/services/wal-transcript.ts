@@ -1,4 +1,4 @@
-import { readFile, readdir } from "node:fs/promises";
+import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
 import { getShortTermMemoryConfig } from "./short-term-memory-config.js";
@@ -38,6 +38,48 @@ function isWalDayFile(name: string): boolean {
   return /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(name);
 }
 
+/**
+ * 「清空对话」可见性标记（2026-10-16）：WAL 是 append-only 审计日志，清空
+ * 不删行，改记 per-actor 的 cleared-at（ms），转史读取时过滤清空点之前的轮次。
+ * 否则换设备拉取 ?full=1 会复活用户已明确清掉的对话（手机端既有缺口，
+ * 桌面端接入跨端回填前必须先堵上）。文件存在 WAL 目录内，日期文件过滤
+ * 不会把它误读成 WAL 数据。
+ */
+const CLEARED_AT_FILE = "cleared-at.json";
+
+type ClearedAtMap = Record<string, number>;
+
+async function readClearedAtMap(dir: string): Promise<ClearedAtMap> {
+  try {
+    const parsed = JSON.parse(await readFile(join(dir, CLEARED_AT_FILE), "utf8")) as ClearedAtMap;
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/** 记录某 actor 的清空时刻（幂等：只前进不回退；重复清空取更大值）。 */
+export async function setActorTranscriptClearedAt(
+  dir: string,
+  actorId: string,
+  atMs = Date.now(),
+): Promise<void> {
+  const map = await readClearedAtMap(dir);
+  if (atMs <= (map[actorId] ?? 0)) return;
+  map[actorId] = atMs;
+  try {
+    await writeFile(join(dir, CLEARED_AT_FILE), JSON.stringify(map), "utf8");
+  } catch {
+    // 落盘失败 = 清空不生效（下次拉取仍见旧历史），静默不影响主流程
+  }
+}
+
+/** 生产路径：清空某 actor 的聊天记录可见性（clear-all 接线用）。 */
+export function clearActorTranscript(actorId: string, atMs = Date.now()): Promise<void> {
+  const dir = join(process.cwd(), getShortTermMemoryConfig().walDir);
+  return setActorTranscriptClearedAt(dir, actorId, atMs);
+}
+
 function entryTsMs(entry: WalRawEntry): number | null {
   const raw = entry.ts;
   if (!raw) return null;
@@ -64,6 +106,7 @@ export async function readActorTranscriptFromWal(
     return []; // 目录不存在 = 没有任何历史，静默空转
   }
   if (names.length > maxDays) names = names.slice(-maxDays);
+  const clearedAt = (await readClearedAtMap(dir))[actorId] ?? 0;
 
   const byKey = new Map<string, WalTranscriptTurn>();
   for (const name of names) {
@@ -96,7 +139,10 @@ export async function readActorTranscriptFromWal(
     }
   }
 
-  return [...byKey.values()].sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || 0);
+  return [...byKey.values()]
+    // 清空点之前的轮次不下发（ts 缺省的兜底行保留，避免误删仅存的记录）
+    .filter((t) => t.ts == null || t.ts > clearedAt)
+    .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || 0);
 }
 
 /** 生产路径：默认 WAL 目录下读某 actor 的转史。 */

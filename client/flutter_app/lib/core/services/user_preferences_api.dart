@@ -25,8 +25,6 @@ class UserPreferencesApi {
   static const Duration _timeout = Duration(seconds: 10);
 
   static const Map<String, bool> defaultBriefingSections = <String, bool>{
-    "weather": true,
-    "outfit": true,
     "schedule": true,
   };
 

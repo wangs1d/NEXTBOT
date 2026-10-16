@@ -402,7 +402,7 @@ const rng = () => {
 const origLedgerPush = deliveriesLedger.push.bind(deliveriesLedger);
 deliveriesLedger.push = (payload) => {
   origLedgerPush(payload);
-  const isMust = /meeting|commitment|schedule|overwork|weather/.test(String(payload.kind));
+  const isMust = /meeting|commitment|schedule|weather/.test(String(payload.kind));
   const accepted = isMust ? true : rng() < sim.acceptRate;
   setTimeout(() => {
     pipeline.recordOutcome(payload.deliveryId, accepted ? "accepted" : "ignored");
@@ -486,7 +486,7 @@ dayScripts.push([
   setWindow(1, 19, 0, "explorer.exe", "桌面"),
   disconnect(1, 23, 59),
 ]);
-// Day2 周三：早间天气预警 + 午后托付（LLM followup 路径）+ 深夜 23:30 过劳节律信号 + 23:35 深夜视频（sleep_boundary）
+// Day2 周三：早间天气预警 + 午后托付（LLM followup 路径）+ 23:35 深夜视频（sleep_boundary）
 dayScripts.push([
   connect(2, 7, 50), activity(2, 7, 50), setWindow(2, 7, 51, "msedge.exe", "新闻 - Microsoft Edge"),
   { t: at(2, 8, 0), fn: () => hub.submitIntent({ actorId: ACTOR, kind: "weather_alert", importance: "high", title: "今天有暴雨", summary: "小雨转暴雨，出门带伞", mode: "speak", source: "weather", templateData: { weather: "小雨转暴雨" } }) },
@@ -495,11 +495,10 @@ dayScripts.push([
   conv(2, 13, 15, "下午帮我盯着小李那个交付,别忘了"),
   setWindow(2, 18, 0, "msedge.exe", "资讯 - Microsoft Edge"), activity(2, 18, 0),
   conv(2, 18, 5, "帮我把周杰伦的晴天找出来放一下"),
-  { t: at(2, 23, 30), fn: () => hub.onRhythmSignal(ACTOR, "body.rhythm.overwork_detected", { continuousWorkHours: 6.5, lateNightActiveCount: 3 }) },
   setWindow(2, 23, 35, "bilibili.exe", "哔哩哔哩"), activity(2, 23, 35),
 ]);
 // 跨零点事件在 day3 脚本创建后统一登记（见下方 dayScripts[3] 注册处）
-// Day3 周四：晨间应送达过劳关怀（夜里 defer 到早晨）+ 15:00 评审会 + 17:00 兴趣推送 → 17:30 离线 → 20:00 回归（离线挂起重连必达）+ 16:00 任务完成恭喜
+// Day3 周四：15:00 评审会 + 17:00 兴趣推送 → 17:30 离线 → 20:00 回归（离线挂起重连必达）+ 16:00 任务完成恭喜
 dayScripts.push(workday(3, {
   meetingAt: [15, 0], meetingTitle: "季度评审会",
   eveningConv: "回来了",
@@ -669,9 +668,6 @@ const trueAway = dayDeliveries(1).filter((d) => d.kind === "away_return");
 expect("E6a 白天真实外出久别问候 d1 17:30 后", trueAway.length === 1 && trueAway[0].at >= at(1, 17, 30), trueAway.map((d) => `${hhmm(d.at)}`).join(",") || "未触发");
 const sleepCare = sortedDeliveries.filter((d) => d.kind === "sleep_care" && d.at >= at(2, 23, 0) && d.at <= at(3, 1, 0));
 expect("E7 深夜关怀当晚送达（勿拖到早晨）", sleepCare.length === 1, sleepCare.map((d) => `${hhmm(d.at)}`).join(",") || "未在当晚送达");
-const overworkMorning = dayDeliveries(3).filter((d) => d.kind === "overwork_care" && byHour(d.at) >= 7 && byHour(d.at) < 12);
-const overworkNight = sortedDeliveries.filter((d) => d.kind === "overwork_care" && d.at >= at(2, 23, 0) && d.at < at(3, 7, 0));
-expect("E8 过劳干预择时晨间 d3", overworkNight.length === 0 && overworkMorning.length >= 1, `夜间 ${overworkNight.length} / 晨间 ${overworkMorning.length}`);
 const weatherD2 = dayDeliveries(2).filter((d) => d.kind === "weather_alert");
 expect("E9 天气预警 d2 上午必达", weatherD2.length === 1 && weatherD2[0].at < at(2, 12, 0), weatherD2.map((d) => hhmm(d.at)).join(",") || "未触发");
 const burst0 = dayDeliveries(0).filter((d) => /新消息|看一眼/.test(d.text));

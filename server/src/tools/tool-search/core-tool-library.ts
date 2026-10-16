@@ -52,8 +52,7 @@ export const CORE_TOOL_LIBRARY = {
       "profile.update",
       "phone.ensure_my_number",
       "phone.call_user",
-      "agent.send_to_peer",
-      "agent.register_account",
+      "world.link.send_message",
       "budget.calculate",
       "shopping.suggest",
       "self.list_custom_skills",
@@ -63,7 +62,7 @@ export const CORE_TOOL_LIBRARY = {
       "calendar.",
       "phone.",
       "voice.",
-      "agent.link.",
+      "world.link.",
       "care.",
       "wallet.get_",
       "protocol.unified.",
@@ -90,16 +89,16 @@ export const CORE_TOOL_LIBRARY = {
 
 /**
  * 开源版（NEXTBOT_EDITION=oss）从核心常驻名单剔除的条目：
- * 虚拟电话（phone.*）+ 好友/中继（agent.link.*、agent.send_to_peer）。
+ * 虚拟电话（phone.*）+ 好友/联络（world.link.*）。
  * 这些工具在开源版不注册执行器，留在 core 名单会变成 LLM 可见但不可调的死条目。
  */
 const OSS_EXCLUDED_CORE_EXACT = new Set<string>([
   "phone.ensure_my_number",
   "phone.call_user",
-  "agent.send_to_peer",
+  "world.link.send_message",
 ]);
 
-const OSS_EXCLUDED_CORE_PREFIXES: readonly string[] = ["phone.", "agent.link."];
+const OSS_EXCLUDED_CORE_PREFIXES: readonly string[] = ["phone.", "world.link."];
 
 const CORE_EXACT_NAMES = new Set<string>([
   ...CORE_TOOL_LIBRARY.essential.names,

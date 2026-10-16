@@ -1173,7 +1173,7 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   {
     category: 'social',
     keywords: ['好友', 'friend', '联系人', 'contact', '消息', 'message', '发送', 'send', '接收', 'receive', '请求', 'request', 'agent', 'peer', '中继', 'relay', '配对', 'pair', '未读', '微信', 'wechat', 'qq', '飞书', 'feishu', '短信', 'sms', '有人找', '回消息', '看消息', '查收'],
-    toolNames: ['agent.link.list_friends', 'agent.link.list_friend_requests', 'agent.link.send_friend_request', 'agent.link.respond_friend_request', 'agent.send_to_peer', 'messages.overview', 'messages.list_conversations', 'messages.read_conversation', 'messages.reply', 'messages.mark_read', 'messages.suggest_reply', 'wechat.login_qr', 'wechat.login_check']
+    toolNames: ['world.link.list_friends', 'world.link.list_friend_requests', 'world.link.send_friend_request', 'world.link.respond_friend_request', 'world.link.send_message', 'messages.overview', 'messages.list_conversations', 'messages.read_conversation', 'messages.reply', 'messages.mark_read', 'messages.suggest_reply', 'wechat.login_qr', 'wechat.login_check']
   },
   {
     category: 'phone',

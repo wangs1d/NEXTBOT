@@ -11,7 +11,7 @@ function makePrefs(overrides: Partial<UserPreferences["morningBriefing"]> = {}):
       time: "08:00",
       mode: "card",
       showOnDesktopLaunch: true,
-      sections: { weather: true, outfit: true, schedule: true, notes: true },
+      sections: { schedule: true, notes: true },
       lastSentAt: null,
       deliveredAt: null,
       deliveredChannel: null,
@@ -39,8 +39,6 @@ function makeScheduler() {
         narrationText: "简报",
         briefing: {
           date: "2026-09-13",
-          weather: null,
-          outfitTip: null,
           todaySchedule: [],
           pendingNotes: [],
           agentGreeting: "早上好",

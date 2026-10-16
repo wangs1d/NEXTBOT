@@ -59,7 +59,7 @@ export type ProactiveIntent = {
   actArgs?: ProactiveActStep[];
   /**
    * 直达车道模板数据（零 LLM 话术）：speak/advise 经 voice-templates 渲染时
-   * 传入的 kind 专属字段（interest_alert 的 name/excerpt、overwork 的 hours……）。
+   * 传入的 kind 专属字段（interest_alert 的 name/excerpt……）。
    */
   templateData?: Record<string, unknown>;
   source:
@@ -87,12 +87,12 @@ export type ProactiveIntent = {
 
 /**
  * 通用感知观察 —— 任何源产出的统一格式。
- * 感知是可插拔的通用流：对话轮、日程变化、节律（连续工作/深夜）、任务事件、
+ * 感知是可插拔的通用流：对话轮、日程变化、节律、任务事件、
  * 桌面 presence、情绪信号……全部汇成 Observation，供 InitiativeEngine 消费。
  */
 export type Observation = {
   actorId: string;
-  /** 观察类型（如 conversation_turn / schedule_upcoming / rhythm_overwork / task_completed / loop_closed / desktop_presence） */
+  /** 观察类型（如 conversation_turn / schedule_upcoming / task_completed / loop_closed / desktop_presence） */
   type: string;
   /** 自然语言描述（LLM 直接可读） */
   content: string;

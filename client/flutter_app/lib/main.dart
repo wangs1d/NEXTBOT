@@ -494,10 +494,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   bool _playBootAnimation = false;
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
-  /// 首启配置向导：登录后未完成 onboarding 时顶在主界面之前（进度条开机
-  /// 动画 + 称呼/agent 名同屏 + 模型两步；声纹已删，保留 just-in-time 入口）。
-  /// 完成标记按账号存偏好（`onboarding.completedV1.<email>`），
-  /// 未完成时冷启动自动重入。
+  /// 首启配置向导：仅当本次登录真正新建了账号（网页回连 fresh=1）时顶在
+  /// 主界面之前（进度条开机动画 + 称呼/agent 名同屏 + 模型两步；声纹已删，
+  /// 保留 just-in-time 入口）。已注册邮箱在任意机器登录都直达主界面
+  /// （2026-10-16），不走本向导。
   bool _needsOnboarding = false;
   bool _onboardingDone = false;
   // 向导专用（与注册门禁同款隔离理由：禁止与主应用共享 GlobalKey）
@@ -1059,6 +1059,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       unawaited(_cleanupDuplicateMessages(
           dedupedMessages, messageIndexById, duplicateMessageIds));
     }
+
+    // 跨端历史回填（2026-10-16）：同一账号在别的设备聊过的轮次，登录后从
+    // 服务端 turn WAL 拉回合并（与手机端同一套锚定去重），换机不再丢聊天记录。
+    // 不阻塞首帧：本地缓存先上屏，服务端增量随后补插。
+    unawaited(_pullServerHistoryIntoStream());
 
     // 桌面顶部灵动岛：原生窗口 + 控制器绑定（数据全部来自真实事件源）。
     setDynamicIslandActionHandler((String label) {
@@ -2453,6 +2458,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         }
         if (type == "morning.briefing") {
           await _handleMorningBriefingEvent(payload);
+        }
+        if (type == "evening.digest") {
+          await _handleEveningDigestEvent(payload);
         }
         if (!ApiConfig.isOssEdition && type == "agent.phone.call_status") {
           final String status = payload["status"]?.toString() ?? "unknown";
@@ -4268,6 +4276,145 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
+  /// 跨端历史回填：GET /api/chat-data/history?full=1 从服务端 turn WAL
+  /// （聊天记录权威源）反解完整转史，按轮合并进当前聊天流并逐条落本地
+  /// Isar（下次启动直接命中）。与手机端 mobile_chat_controller 的
+  /// _pullServerHistory/_mergeServerTurns 同一套锚定去重语义：
+  /// - 锚 = 用户消息：clientMessageId 命中 / 用户原文精确命中 / 纯图占位
+  ///   （服务端「（用户发送了…」↔ 本地「（见图）」）→ 整轮跳过，
+  ///   分泡/塌缩形态差异不再制造双份；
+  /// - 无锚孤儿助手消息按正文包含关系去重后按时间戳落位插入。
+  Future<void> _pullServerHistoryIntoStream() async {
+    final String actorId = ApiConfig.effectiveActorId;
+    if (actorId.isEmpty) return;
+    try {
+      final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
+          .replace(queryParameters: <String, String>{
+        "userId": actorId,
+        "limit": "200",
+        "full": "1",
+      });
+      final http.Response res = await http
+          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return;
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final List<dynamic> raw = body["messages"] as List<dynamic>? ?? const [];
+      if (raw.isEmpty) return;
+
+      final List<ChatMessage> incoming = <ChatMessage>[];
+      int fallbackSeq = 0;
+      for (final dynamic item in raw) {
+        if (item is! Map<String, dynamic>) continue;
+        final String role = item["role"]?.toString() ?? "";
+        final String text =
+            stripAssistantProtocolFrames(item["text"]?.toString() ?? "").trim();
+        if ((role != "user" && role != "assistant") || text.isEmpty) continue;
+        final int? tsMs = item["ts"] is int ? item["ts"] as int : null;
+        final DateTime ts = tsMs != null
+            ? DateTime.fromMillisecondsSinceEpoch(tsMs)
+            : DateTime.now();
+        final String? clientMessageId = item["clientMessageId"]?.toString();
+        final String messageId =
+            role == "user" && (clientMessageId?.isNotEmpty ?? false)
+                ? clientMessageId!
+                : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+        incoming.add(ChatMessage(
+          messageId: messageId,
+          sessionId: actorId,
+          role: role,
+          text: text,
+          timestamp: ts,
+        ));
+      }
+
+      // 按 user 锚切轮（开头没有锚的孤儿助手消息自成一轮）
+      final List<List<ChatMessage>> turns = <List<ChatMessage>>[];
+      for (final ChatMessage m in incoming) {
+        if (m.role == "user" || turns.isEmpty) {
+          turns.add(<ChatMessage>[m]);
+        } else {
+          turns.last.add(m);
+        }
+      }
+
+      final List<ChatMessage> merged = List<ChatMessage>.from(_messages);
+      final Set<String> localUserIds = <String>{};
+      final Set<String> localUserTexts = <String>{};
+      final List<ChatMessage> localAssistants = <ChatMessage>[];
+      for (final ChatMessage m in merged) {
+        if (m.role == "user") {
+          localUserIds.add(m.messageId);
+          localUserTexts.add(m.text.trim());
+        } else if (m.text.trim().isNotEmpty) {
+          localAssistants.add(m);
+        }
+      }
+      final Set<String> backfilledAssistantTexts = <String>{};
+
+      bool turnExistsLocally(List<ChatMessage> turn) {
+        final ChatMessage anchor = turn.first;
+        if (anchor.role != "user") return false;
+        final String anchorText = anchor.text.trim();
+        if (localUserIds.contains(anchor.messageId)) return true;
+        if (localUserTexts.contains(anchorText)) return true;
+        // 纯图轮：本地气泡文案与服务端视觉占位文案不同，视为同一轮
+        if (anchorText == "（见图）" && localUserTexts.contains("（见图）")) {
+          return true;
+        }
+        return false;
+      }
+
+      bool assistantKnown(ChatMessage m) {
+        final String text = m.text.trim();
+        if (backfilledAssistantTexts.contains(text)) return true;
+        for (final ChatMessage local in localAssistants) {
+          final String lt = local.text.trim();
+          // 包含关系去重：服务端合并正文 ↔ 本地分泡互为片段时视为同一条回复
+          if (lt.length >= 8 && text.contains(lt)) return true;
+          if (text.length >= 8 && lt.contains(text)) return true;
+        }
+        return false;
+      }
+
+      bool mutated = false;
+      for (final List<ChatMessage> turn in turns) {
+        if (turnExistsLocally(turn)) continue;
+        for (final ChatMessage m in turn) {
+          if (m.role == "assistant" && assistantKnown(m)) continue;
+          if (m.role == "assistant") backfilledAssistantTexts.add(m.text.trim());
+          int idx = merged
+              .indexWhere((local) => local.timestamp.isAfter(m.timestamp));
+          if (idx < 0) idx = merged.length;
+          merged.insert(idx, m);
+          if (m.role == "user") {
+            localUserIds.add(m.messageId);
+            localUserTexts.add(m.text.trim());
+          } else {
+            localAssistants.add(m);
+          }
+          try {
+            await _store.saveMessage(m);
+          } catch (e) {
+            debugPrint("[chat] server-history persist failed: $e");
+          }
+          mutated = true;
+        }
+      }
+      if (!mutated || !mounted) return;
+      setState(() {
+        _messages
+          ..clear()
+          ..addAll(merged);
+        // 插入改变了下标，assistant 消息索引必须重建（chunk 去重依赖它）
+        _rebuildAssistantIndex();
+      });
+    } catch (e) {
+      debugPrint("[chat] 服务端历史拉取失败(跳过跨端回填): $e");
+    }
+  }
+
   /// 重建 assistant 消息索引（删除后索引失效需重建）
   void _rebuildAssistantIndex() {
     _assistantMessageIndexById.clear();
@@ -4458,6 +4605,49 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       "state": "pending",
       "attentionId": attentionId,
     });
+  }
+
+  /// 往对话流追加一条 assistant 纯文字气泡（内存态，同决策卡模式构造）。
+  void _appendAssistantText(String messageIdPrefix, String text) {
+    final ChatMessage message = ChatMessage(
+      messageId: "$messageIdPrefix-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: text,
+      timestamp: DateTime.now(),
+    );
+    void apply() {
+      _messages.add(message);
+      _assistantMessageIndexById[message.messageId] = _messages.length - 1;
+    }
+
+    if (mounted) {
+      setState(apply);
+    } else {
+      apply();
+    }
+  }
+
+  /// 睡前提醒（evening.digest，2026-10-16 接线）：对话流文字气泡 +
+  /// 玻璃卡轻提醒。narrationText 是唯一文案源（2026-10-13 服务端定调），
+  /// 不渲染结构化块；后台不另发系统通知（离线兜底由 proactivePipeline 承担）。
+  Future<void> _handleEveningDigestEvent(Map<String, dynamic> payload) async {
+    String text = payload["narrationText"]?.toString() ?? "";
+    if (text.trim().isEmpty) {
+      final Object? digest = payload["digest"];
+      if (digest is Map) text = digest["narrationText"]?.toString() ?? "";
+    }
+    text = text.trim();
+    if (text.isEmpty) return;
+    _appendAssistantText("assistant-evening-digest", text);
+    if (mounted) {
+      GlassNotify.show(
+        title: "睡前备忘",
+        message: text,
+        variant: GlassNotifyVariant.info,
+        duration: const Duration(milliseconds: 8000),
+      );
+    }
   }
 
   /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
@@ -5164,8 +5354,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (_accountEmail == null) {
       return _buildRegisterGate();
     }
-    // 首启向导：进度条动画+称呼/名字同屏+模型两步顶在主界面之前；重量级
-    // 初始化照常后台跑，向导动画本身就是 init 等待屏（完成即 _isInitialized，无闪屏）。
+    // 首启向导：仅本次真正新建账号（网页回连 fresh=1）才进入——进度条动画
+    // +称呼/名字同屏+模型两步顶在主界面之前；已注册邮箱换机登录直达主界面。
+    // 重量级初始化照常后台跑，向导动画本身就是 init 等待屏（完成即 _isInitialized，无闪屏）。
     if (_needsOnboarding && !_onboardingDone) {
       return _buildOnboardingGate();
     }
@@ -5346,20 +5537,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 读本机账号会话：已注册（冷启动）武装 N 开场动画后进主界面；
   /// 未注册直接亮注册页，不播开场动画。
+  /// 冷启动一律直达主界面——首启向导只在「本次回连真正新建账号」那一刻
+  /// 由 [_completeWebAuth] 触发，已注册邮箱换机重登不再重跑向导（2026-10-16）。
   /// 登录邮箱同步写进 [ApiConfig.runtimeUserId]——WS/HTTP/本地存储的
   /// 身份全链以邮箱为准，不同账号数据互不串台。
   Future<void> _loadAccountSession() async {
     await AccountSessionStore.instance.load();
     ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
     if (!mounted) return;
-    final bool pending = await _isOnboardingPending();
-    if (!mounted) return;
     setState(() {
       _accountEmail = AccountSessionStore.instance.email;
       _sessionLoaded = true;
-      // 向导未完成：首启序列（进度条动画+两步配置）顶替 N 开场动画
-      _needsOnboarding = _accountEmail != null && pending;
-      _playBootAnimation = _accountEmail != null && !pending;
+      _playBootAnimation = _accountEmail != null;
     });
     if (_accountEmail != null) {
       unawaited(_loadUserAvatar());
@@ -5406,17 +5595,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
-  /// 向导完成标记（按账号分键；读盘前 store 可能未 init，等待其就绪）
-  Future<bool> _isOnboardingPending() async {
-    final String? email = _accountEmail ?? AccountSessionStore.instance.email;
-    if (email == null) return false;
-    try {
-      await _store.init();
-    } catch (_) {/* 未就绪按未完成处理 */}
-    final dynamic done = await _store.getPreference("onboarding.completedV1.$email");
-    return done != true;
-  }
-
   /// 网页登录回连：落盘会话 → 切入主界面。
   /// 注册/登录本身已在 /accounts/web 网页端对控制面完成（幂等），
   /// 这里只负责本机登录态；落盘成功前门禁不放行，抛错由注册页捕获展示。
@@ -5424,35 +5602,28 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 后所有请求立刻带上本账号身份。另外向控制面补一次账号自注册（幂等）：
   /// 防网页注册落在别处/失败时后台用户列表缺行。首次切入主界面武装一次
   /// N 开场动画（重登录时重置播完标记）。
-  Future<void> _completeWebAuth(String email) async {
+  ///
+  /// 首启向导仅在 [freshCreated]（本次回连真正新建了账号）时触发：
+  /// 已注册邮箱在任意机器登录都直达主界面（2026-10-16），称呼/名字等
+  /// 账号级配置随账号走，模型接入可事后在设置页补配。
+  Future<void> _completeWebAuth(String email, {bool freshCreated = false}) async {
     final String mail = email.trim();
     await AccountSessionStore.instance.save(mail);
     ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
     unawaited(ControlPlaneAccount.ensureRegistered());
-    final bool pending = await _isOnboardingPending();
     if (!mounted) return;
     setState(() {
       _accountEmail = mail;
-      _needsOnboarding = pending;
-      // 首次登录走向导自己的进度条开机动画；老账号照常 N 光扫
-      _playBootAnimation = !pending;
+      _needsOnboarding = freshCreated;
+      // 新建账号走向导自己的进度条开机动画；已注册登录照常 N 光扫
+      _playBootAnimation = !freshCreated;
       _bootAnimDone = false;
     });
     unawaited(_loadUserAvatar());
   }
 
-  /// 向导完成：按账号落完成标记，切入主界面（N 光扫不再补播，
-  /// 向导的进度条动画就是本次开场）。
+  /// 向导完成：切入主界面（N 光扫不再补播，向导的进度条动画就是本次开场）。
   Future<void> _completeOnboarding() async {
-    final String? email = _accountEmail;
-    if (email != null) {
-      try {
-        await _store.savePreference("onboarding.completedV1.$email", true);
-        await _store.savePreference("onboarding.completedV1", true);
-      } catch (e) {
-        debugPrint("[Onboarding] 完成标记落盘失败（下次启动将重入向导）: $e");
-      }
-    }
     if (!mounted) return;
     setState(() {
       _onboardingDone = true;

@@ -15,7 +15,7 @@ import { gateInboundMessage } from "./message-gate.js";
 // "mailwatch:<账号>:<uid>" 形态，与网关 webhook 的 messageId 天然不冲突）。
 // alipay（2026-09-18）：手机通知监听捕捉的支付宝推送——财务实时入账（钱迹模式）的专用平台，
 // 普通消息聚合不经过此平台（通知监听白名单里只有支付宝包名映射到它）
-// friend（2026-10-15）：站内好友消息（Agent Link）。agent.send_to_peer 出站/好友回信入站
+// friend（2026-10-15）：站内好友消息（Agent Link）。world.link.send_message 出站/好友回信入站
 // 都落 hub（platform=friend，channelId=对方 actorId），持久化 + agent 可经
 // messages.overview / read_conversation 读取——闭合「agent 给好友发消息」收发环。
 export type MessageHubPlatform = "wechat" | "qq" | "feishu" | "sms" | "email" | "alipay" | "friend" | "generic";

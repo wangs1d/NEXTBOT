@@ -51,6 +51,18 @@ class TravelShareStore {
     return this.map.get(key) ?? null;
   }
 
+  /** 行程删除时清理其分享码映射（无映射则静默） */
+  removeForPlan(planId: string): void {
+    let touched = false;
+    for (const [code, pid] of this.map) {
+      if (pid === planId) {
+        this.map.delete(code);
+        touched = true;
+      }
+    }
+    if (touched) this.persist();
+  }
+
   /** 生成 8 位分享码（crypto 随机源） */
   private generate(): string {
     const bytes = crypto.randomBytes(CODE_LENGTH);
