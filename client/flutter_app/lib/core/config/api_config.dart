@@ -1,6 +1,8 @@
 import "dart:io" show Platform;
 
-import "package:flutter/foundation.dart" show kIsWeb;
+import "package:flutter/foundation.dart" show kIsWeb, kReleaseMode;
+
+import "../services/local_runtime_manager.dart";
 
 /// 与 WebSocket 网关同机时使用；Android 模拟器可 `--dart-define=HTTP_BASE=http://10.0.2.2:3000`。
 /// 双实例联调时可 `--dart-define=SESSION_ID=session-b`；WebSocket 地址可 `--dart-define=WS_URL=ws://10.0.2.2:3000/ws`。
@@ -16,6 +18,14 @@ class ApiConfig {
   /// Android 上 127.0.0.1 指手机自己，烤入失败时绝不能静默回落——那只会把
   /// 构建期配置错误拖到运行期，变成登录页一句笼统的「网络错误」。直接
   /// fail-fast，错误信息指明正确打包路径（build_apk.ps1）。
+  ///
+  /// P0 防线（2026-10-16，桌面发行包复发「行程列表加载失败/拒绝连接」）：
+  /// Windows Release 且 exe 旁无捆绑 runtime（非 byok 形态）时，127.0.0.1
+  /// 回落是同一种构建期配置错误——用户机器上没人监听 3000，错到运行期才爆。
+  /// 与 Android 同规则 fail-fast。Debug 开发联调（手工起服务）与 byok
+  /// 捆绑形态（本地 runtime 监听 127.0.0.1:3000）不受影响。
+  static bool? _windowsReleaseFallbackBlocked;
+
   static String get httpBase {
     if (_httpBaseFromEnv.isNotEmpty) {
       return _httpBaseFromEnv;
@@ -26,6 +36,17 @@ class ApiConfig {
         "请用 client/flutter_app/build_apk.ps1 打包，"
         "或显式传 --dart-define=HTTP_BASE=http://<后端地址>:3000。",
       );
+    }
+    if (!kIsWeb && Platform.isWindows && kReleaseMode) {
+      // isBundled 做两次文件存在性探测，memo 一次即可（exe 目录运行期不变）。
+      _windowsReleaseFallbackBlocked ??= !LocalRuntimeManager.isBundled;
+      if (_windowsReleaseFallbackBlocked!) {
+        throw StateError(
+          "Windows 发行包未烤入 HTTP_BASE（127.0.0.1 回落已禁用）。"
+          "请用 client/flutter_app/build_windows.ps1 -HttpBase http://<后端地址>:3000 打包，"
+          "或显式传 --dart-define=HTTP_BASE=...。",
+        );
+      }
     }
     return "http://127.0.0.1:3000";
   }

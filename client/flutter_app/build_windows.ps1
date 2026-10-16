@@ -156,6 +156,14 @@ function Invoke-BuildAndDeploy {
       Write-Host '  更新检查与用户反馈将回落 httpBase（本地 127.0.0.1:3000），云端后台收不到。' -ForegroundColor Yellow
       Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl http://login.nextbot.top -ControlPlaneUrl http://login.nextbot.top' -ForegroundColor Yellow
     }
+    if (-not $HttpBase) {
+      # 2026-10-16 复发：无 HttpBase 的 Release 包静默回落 127.0.0.1:3000，
+      # 用户机器上没人监听 → 「行程列表加载失败/拒绝连接」。byok 捆绑构建
+      # （exe 旁会有 runtime\）合法回落，不受影响；非捆绑包运行期直接 fail-fast。
+      Write-Host 'WARNING: 本次 Release 构建未烤入 HttpBase，客户端将回落 http://127.0.0.1:3000。' -ForegroundColor Yellow
+      Write-Host '  发给用户（连云端后端）请加：-HttpBase http://<后端地址>:3000' -ForegroundColor Yellow
+      Write-Host '  仅 byok 捆绑形态（安装器会放置 runtime\）允许不带 HttpBase。' -ForegroundColor Yellow
+    }
     Write-Host "flutter build windows --release $($dartDefines -join ' ')"
     & $flutterExe build windows --release @dartDefines
   }

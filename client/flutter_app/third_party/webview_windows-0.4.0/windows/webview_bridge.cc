@@ -209,9 +209,46 @@ WebviewBridge::WebviewBridge(flutter::BinaryMessenger* messenger,
   event_channel_->SetStreamHandler(std::move(handler));
 }
 
+namespace {
+
+// PAI fork (2026-10-15): teardown-race guard.
+//
+// Crash forensics (dump 28340, identical to 31312/26120/26144): at shutdown the
+// engine's FlutterWindowsEngine::Stop() nulls messenger->engine BEFORE the
+// plugin registrar destroys plugins, so ~WebviewWindowsPlugin -> instances_
+// cleanup -> ~WebviewBridge -> SetMethodCallHandler(nullptr) re-enters
+// flutter_windows.dll with engine==0 -> AV at +0x14f37 -> 0xc000041d. Every
+// close with a live webview crashed. There is no engine-liveness API, so catch
+// the AV: when the engine is gone the handler map and texture registrar die
+// with it, skipping the unregister is correct, not a leak.
+//
+// C2712: the __try frame must hold no C++ locals — the real body lives in
+// TeardownBridge (raw pointers only), called from the guarded wrapper.
+void TeardownBridge(flutter::MethodChannel<flutter::EncodableValue>* channel,
+                    flutter::TextureRegistrar* registrar,
+                    int64_t texture_id) {
+  channel->SetMethodCallHandler(nullptr);
+  registrar->UnregisterTexture(texture_id);
+}
+
+bool TeardownBridgeGuarded(
+    flutter::MethodChannel<flutter::EncodableValue>* channel,
+    flutter::TextureRegistrar* registrar, int64_t texture_id) {
+  __try {
+    TeardownBridge(channel, registrar, texture_id);
+    return true;
+  } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
+    return false;
+  }
+}
+
+}  // namespace
+
 WebviewBridge::~WebviewBridge() {
-  method_channel_->SetMethodCallHandler(nullptr);
-  texture_registrar_->UnregisterTexture(texture_id_);
+  TeardownBridgeGuarded(method_channel_.get(), texture_registrar_,
+                        texture_id_);
 }
 
 void WebviewBridge::RegisterEventHandlers() {

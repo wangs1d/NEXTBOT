@@ -156,10 +156,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* 地图视图（真实底图 MapLibre；底图瓦片走本机 /travel-basemap 代理 + 磁盘缓存） */
 .map-wrap{flex:1;border-radius:14px;overflow:hidden;position:relative;background:#0D0F13}
 #map{position:absolute;inset:0}
-/* 高德栅格只有浅色样式 → canvas 整体反色得暗色观感（invert 翻转明暗，
- * hue-rotate(180deg) 把被反转的色相转回来；浅底深字 → 暗底亮字，路线画黑显白）。
- * marker/图例等 DOM 元素在 canvas 之外，不受影响。 */
-#map .maplibregl-canvas{filter:invert(1) hue-rotate(180deg) saturate(.72) brightness(1.04) contrast(.94)}
 .maplibregl-ctrl-attrib{display:none!important}
 .maplibregl-canvas:focus{outline:none}
 .map-back{position:absolute;top:14px;left:14px;z-index:5;display:flex;align-items:center;gap:7px;font-size:12px;color:var(--txt);background:rgba(16,17,21,.75);backdrop-filter:blur(10px);border:1px solid var(--line2);padding:8px 14px;border-radius:999px}
@@ -655,18 +651,13 @@ function renderStopNav(items){
 /* ═══════════════════════════════════════════════════════════════════
    真实地图（MapLibre GL）
    ═══════════════════════════════════════════════════════════════════
-   底图：高德栅格暗色化（详见下方 2026-10-15 注），走本机 /travel-basemap 代理（磁盘缓存 + SWR）。
+   底图：Carto 暗色矢量，走本机 /travel-basemap 代理（磁盘缓存 + 规划完成即预热）。
    站点：当天行程 POI 按真实经纬度落点（编号 + 名称，点击切站）。
    路线：GET /travel-route（OSRM 开放路网，按段选步行/骑行/驾车）取真实几何；
         首次打开该天时白线「依次连接」——逐段生长，连完转流光。
    降级：无坐标的站不上图；某段取不到路网几何 → 该段用直线连并在图例里明示
-        「N 段未接路网」，不静默丢段、不假装是真路。
-   底图（2026-10-15）：高德栅格（/travel-basemap/style/amap-dark，位置/POI/中文
-        路名更全），暗色观感靠 canvas CSS 反色；高德网格是 GCJ-02，而行程数据
-        （POI/路线）统一 WGS-84 → 页面在「显示边界」统一 wgs2gcj（下方助手），
-        OSRM 查询参数保持 WGS-84。Carto dark 仅作样式兜底（WGS 网格，GCJ 偏移
-        ~500m，仅 server 样式路由异常时可见）。 */
-var MAP_STYLE_PATH='/travel-basemap/style/amap-dark';
+        「N 段未接路网」，不静默丢段、不假装是真路。 */
+var MAP_STYLE_PATH='/travel-basemap/style/dark';
 var MAP_STYLE_FALLBACK='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
 var ROUTE_SRC='travel-route';
 var LEG_SRC='travel-leg';
@@ -679,33 +670,6 @@ var MODE_OF_PROFILE={walk:'walk',bike:'bike',drive:'taxi'};
 function emptyFC(){return{type:'FeatureCollection',features:[]};}
 function escHtml(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){
   return{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
-/* 底图坐标系（2026-10-15）：高德栅格网格是 GCJ-02，行程数据统一 WGS-84。
- * 这里只做「显示边界」转换（marker / 路线几何 / 相机视野）；/travel-route 的
- * stops 查询参数必须保持 WGS-84（OSRM 是 WGS 路网），绝不能转换。
- * 标准偏移算法，与 server/src/skills/travel-planning/coord-transform.ts 逐行同构
- * （wgs84ToGcj02，正向一次即用；页面只画图不需要逆向）。 */
-function transformLat(x,y){var r=-100+2*x+3*y+0.2*y*y+0.1*x*y+0.2*Math.sqrt(Math.abs(x));
-  r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;
-  r+=(20*Math.sin(y*Math.PI)+40*Math.sin(y/3*Math.PI))*2/3;
-  r+=(160*Math.sin(y/12*Math.PI)+320*Math.sin(y*Math.PI/30))*2/3;return r;}
-function transformLon(x,y){var r=300+x+2*y+0.1*x*x+0.1*x*y+0.1*Math.sqrt(Math.abs(x));
-  r+=(20*Math.sin(6*x*Math.PI)+20*Math.sin(2*x*Math.PI))*2/3;
-  r+=(20*Math.sin(x*Math.PI)+40*Math.sin(x/3*Math.PI))*2/3;
-  r+=(150*Math.sin(x/12*Math.PI)+300*Math.sin(x/30*Math.PI))*2/3;return r;}
-function wgs2gcjLngLat(p){                     // p=[lng,lat] → [lng,lat]
-  var lon=p[0],lat=p[1];
-  if(lon<72.004||lon>137.8347||lat<0.8293||lat>55.8271)return p;   // 境外：无偏移
-  var EE=0.00669342162296594323,A=6378245;
-  var dLat=transformLat(lon-105,lat-35),dLon=transformLon(lon-105,lat-35);
-  var rad=lat/180*Math.PI,m=Math.sin(rad);
-  m=1-EE*m*m;var sq=Math.sqrt(m);
-  dLat=(dLat*180)/((A*(1-EE))/(m*sq)*Math.PI);
-  dLon=(dLon*180)/(A/sq*Math.cos(rad)*Math.PI);
-  return [lon+dLon,lat+dLat];
-}
-function wgs2gcjPath(coords){                  // [[lng,lat],...] 整条线
-  var out=[];for(var i=0;i<coords.length;i++)out.push(wgs2gcjLngLat(coords[i]));return out;
-}
 function mapStyleUrl(){
   var base=apiBase();
   return base?base+MAP_STYLE_PATH:MAP_STYLE_FALLBACK;
@@ -751,7 +715,7 @@ function ensureMap(cb){
   if(mapState.loading)return;
   if(!window.maplibregl){console.warn('[map] MapLibre 未加载');return;}
   mapState.loading=true;
-  var c=wgs2gcjLngLat(mapState.center?[mapState.center.lng,mapState.center.lat]:[100.1595,25.6904]);
+  var c=mapState.center?[mapState.center.lng,mapState.center.lat]:[100.1595,25.6904];
   var map=new maplibregl.Map({
     container:$('map'),style:mapStyleUrl(),
     center:c,zoom:mapState.center?12:11,
@@ -794,12 +758,7 @@ function bootMapEarly(){
   vm.classList.add('boot');
   ensureMap();
 }
-/** 路线图层组：轨道（未连接）/ 已连接白线 + 外发光 / 直线降级 / 生长中的当前段 / 流光
- *
- * 颜色「反色预补偿」（2026-10-15 底图切高德暗色化）：底图暗色 = canvas CSS
- * invert(1)+hue-rotate(180deg)，canvas 上一切颜色都被反转——路线要**显示为白**
- * 就必须**画成黑**（#000 → invert → 白）；半透明度不参与反色，glow/流光透明度
- * 保持原值。站点 marker 是 DOM 元素（不在 canvas 里），不受滤镜影响。 */
+/** 路线图层组：轨道（未连接）/ 已连接白线 + 外发光 / 直线降级 / 生长中的当前段 / 流光 */
 function addRouteLayers(){
   var map=mapState.map;
   if(!map||map.getSource(ROUTE_SRC))return;
@@ -808,23 +767,23 @@ function addRouteLayers(){
   var cap={ 'line-cap':'round','line-join':'round' };
   map.addLayer({id:'route-track',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'todo'],layout:cap,
-    paint:{'line-color':'#000000','line-width':1.6,'line-opacity':.15,'line-dasharray':[1.2,2.2]}});
+    paint:{'line-color':'#ffffff','line-width':1.6,'line-opacity':.15,'line-dasharray':[1.2,2.2]}});
   map.addLayer({id:'route-glow',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#000000','line-width':14,'line-opacity':.10,'line-blur':7}});
+    paint:{'line-color':'#ffffff','line-width':14,'line-opacity':.10,'line-blur':7}});
   map.addLayer({id:'route-line',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#000000','line-width':3.4,'line-opacity':.97}});
+    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':.97}});
   // 直线降级段：细虚线，与真实路网一眼可分
   map.addLayer({id:'route-straight',type:'line',source:ROUTE_SRC,
     filter:['all',['==',['get','state'],'linked'],['==',['get','real'],false]],layout:cap,
-    paint:{'line-color':'#000000','line-width':2,'line-opacity':.62,'line-dasharray':[1,2.4]}});
+    paint:{'line-color':'#ffffff','line-width':2,'line-opacity':.62,'line-dasharray':[1,2.4]}});
   map.addLayer({id:'route-leg',type:'line',source:LEG_SRC,layout:cap,
-    paint:{'line-color':'#000000','line-width':3.4,'line-opacity':1}});
+    paint:{'line-color':'#ffffff','line-width':3.4,'line-opacity':1}});
   // 连完后的流光：白虚线循环推进（复刻旧行程页的流光语言）
   map.addLayer({id:'route-flow',type:'line',source:ROUTE_SRC,
     filter:['==',['get','state'],'linked'],layout:cap,
-    paint:{'line-color':'#000000','line-width':2.2,'line-opacity':0,'line-dasharray':DASH_SEQ[0]}});
+    paint:{'line-color':'#ffffff','line-width':2.2,'line-opacity':0,'line-dasharray':DASH_SEQ[0]}});
 }
 function updateFlow(on){
   var map=mapState.map;
@@ -872,7 +831,7 @@ function renderMapPois(items){
     if(it.sp.k!=='stay')num++;
     if(!loc)return;
     var m=new maplibregl.Marker({element:poiEl(it,i,num),anchor:'center'})
-      .setLngLat(wgs2gcjLngLat([loc.lng,loc.lat])).addTo(map);
+      .setLngLat([loc.lng,loc.lat]).addTo(map);
     mapState.markers.push(m);
   });
 }
@@ -922,7 +881,7 @@ function commitRoute(seq,by,linkedCount){
   var features=[];
   for(var i=0;i+1<seq.length;i++){
     var leg=by[i],real=!!leg;
-    var geom=wgs2gcjPath(real?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]]);
+    var geom=real?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
     features.push({type:'Feature',
       properties:{state:i<linkedCount?'linked':'todo',real:real,mode:real?leg.mode:'straight'},
       geometry:{type:'LineString',coordinates:geom}});
@@ -951,15 +910,15 @@ function fitToSeq(seq,animate){
   var opts={duration:animate===false?0:650};
   // 没有任何可用站点坐标：退回载荷给的行程中心（目的地），别停在一个不相干的地方
   if(!seq||!seq.length){
-    if(mapState.center)map.easeTo({center:wgs2gcjLngLat([mapState.center.lng,mapState.center.lat]),zoom:12,duration:opts.duration});
+    if(mapState.center)map.easeTo({center:[mapState.center.lng,mapState.center.lat],zoom:12,duration:opts.duration});
     return;
   }
   if(seq.length===1){
-    map.easeTo({center:wgs2gcjLngLat([seq[0].lng,seq[0].lat]),zoom:14.5,duration:opts.duration});
+    map.easeTo({center:[seq[0].lng,seq[0].lat],zoom:14.5,duration:opts.duration});
     return;
   }
   var b=new maplibregl.LngLatBounds();
-  seq.forEach(function(p){b.extend(wgs2gcjLngLat([p.lng,p.lat]));});
+  seq.forEach(function(p){b.extend([p.lng,p.lat]);});
   map.fitBounds(b,{padding:{top:70,bottom:70,left:120,right:170},
     duration:opts.duration,maxZoom:15.5});
 }
@@ -1028,7 +987,7 @@ function playRoute(items,seq,list,key){
   function nextLeg(){
     if(i>=seq.length-1){commitRoute(seq,by,seq.length-1);updateFlow(true);return;}
     var leg=by[i];
-    var coords=wgs2gcjPath(leg?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]]);
+    var coords=leg?leg.coordinates:[[seq[i].lng,seq[i].lat],[seq[i+1].lng,seq[i+1].lat]];
     growLeg(coords,function(){
       i++;
       commitRoute(seq,by,i);

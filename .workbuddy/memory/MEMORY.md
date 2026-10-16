@@ -47,7 +47,8 @@
 - 右侧面板入口下线：从 `_allToolSpecs()` 摘掉即可，历史偏好无需清理；隐藏≠删除，入口专属轮询字段同删。
 
 ## APK 烤入/部署拓扑约定（2026-10-14 用户定调）
-- 手机 APK 后端地址两档：`159.75.52.2:3000`＝腾讯云生产后端（SSH 用桌面 King.pem，/opt/pai，systemd pai-server 跑 dist）；`192.168.10.2:3000`＝本机局域网自用版。build_apk.ps1 -HttpBase 二选一；`login.nextbot.top`（阿里云 47.98.122.29）只是控制面/登录页，不是后端。
+- 手机 APK 后端地址两档：`159.75.52.2:3000`＝腾讯云生产后端（SSH 用桌面 King.pem，root@，/opt/pai，systemd pai-server 跑 dist）；`192.168.10.2:3000`＝本机局域网自用版。build_apk.ps1 -HttpBase 二选一；`login.nextbot.top`（阿里云 47.98.122.29）只是控制面/登录页，不是后端。桌面 exe 同规则：build_windows.ps1 -HttpBase，2026-10-16 起 Windows+Release+非捆绑（exe 旁无 runtime\node.exe）漏烤 HTTP_BASE 在 api_config.dart 直接 fail-fast（Debug/byok 捆绑仍回落 127.0.0.1）。
+- **HTTPS（2026-10-16 已上线）**：`login.nextbot.top`（阿里云控制面）HTTPS 全通——LE 证书（certbot webroot 自动续期，dry-run 已验证），443=HSTS+反代 3000，80=ACME+301；服务器 conf 与仓库 `scripts/release/nginx-nextbot.conf` 一致。159.75.52.2 自用后端保持明文 3000 不签证书（80 挂了 nginx 反代备用，conf=`scripts/release/nginx-api.nextbot.conf`）。SSH：阿里云 root 用本机 id_ed25519，腾讯云 root 用桌面 King.pem。客户端控制面 URL 必须烤 `https://login.nextbot.top`（80 已 301，POST 跨协议重定向不可靠）。
 - 云机华为 Push 凭据 = AGC「OAuth 2.0 客户端 ID」面板值（119333351 + 6750e54b…），**不是** agconnect-services.json 里的 client_secret（那个实测 1101 invalid）。
 
 ## 媒体兜底抓取（2026-10-14 用户提出，工具 `scripts/scrape-article-media.mjs`）

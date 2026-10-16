@@ -54,6 +54,16 @@ class WebviewWindowsPlugin : public flutter::Plugin {
 
   virtual ~WebviewWindowsPlugin();
 
+  // PAI fork (2026-10-15): real body of the async creation completion. Public
+  // because the file-local SEH wrapper (FinishCreationGuarded) calls it.
+  // Ownership: on every non-exception path *webview/*error are consumed and
+  // nulled; after a caught AV only still-unconsumed pointers are deleted by
+  // the caller (never double-freed — see FinishCreationGuarded).
+  static void FinishCreation(WebviewWindowsPlugin* plugin,
+                             flutter::MethodResult<flutter::EncodableValue>* result,
+                             Webview** webview,
+                             WebviewCreationError** error);
+
  private:
   std::unique_ptr<WebviewPlatform> platform_;
   std::unique_ptr<WebviewHost> webview_host_;
@@ -67,11 +77,39 @@ class WebviewWindowsPlugin : public flutter::Plugin {
 
   void CreateWebviewInstance(
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>);
+
   // Called when a method is called on this plugin's channel from Dart.
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& method_call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 };
+
+// PAI fork (2026-10-15): shutdown-race guard.
+//
+// Crash forensics (dumps 31312@23:30 26920@21:23 18136@10-13, identical
+// signature): closing the app runs FlutterWindowsEngine::Stop() which nulls
+// messenger->engine; a WebView2 creation completion still in flight then fires
+// on the platform thread, WebviewBridge's ctor calls SetMethodCallHandler ->
+// FlutterDesktopMessengerSetCallback -> GetEngine()==0 -> AV at
+// flutter_windows.dll+0x14f37 -> 0xc000041d fatal user callback. The plugin
+// cannot query engine liveness, so catch the AV instead of dying: a late
+// completion during teardown is skipped, process exits cleanly.
+//
+// C2712: the __try frame must hold no C++ locals — all objects stay in
+// FinishCreation (callee) and in the calling lambda (caller).
+bool FinishCreationGuarded(WebviewWindowsPlugin* plugin,
+                           flutter::MethodResult<flutter::EncodableValue>* result,
+                           Webview** webview,
+                           WebviewCreationError** error) {
+  __try {
+    WebviewWindowsPlugin::FinishCreation(plugin, result, webview, error);
+    return true;
+  } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION
+                  ? EXCEPTION_EXECUTE_HANDLER
+                  : EXCEPTION_CONTINUE_SEARCH) {
+    return false;
+  }
+}
 
 // static
 void WebviewWindowsPlugin::RegisterWithRegistrar(
@@ -202,31 +240,54 @@ void WebviewWindowsPlugin::CreateWebviewInstance(
       hwnd, true, true,
       [shared_result, this](std::unique_ptr<Webview> webview,
                             std::unique_ptr<WebviewCreationError> error) {
-        if (!webview) {
-          if (error) {
-            return shared_result->Error(
-                kErrorCodeWebviewCreationFailed,
-                std::format(
-                    "Creating the webview failed: {} (HRESULT: {:#010x})",
-                    error->message, error->hr));
-          }
-          return shared_result->Error(kErrorCodeWebviewCreationFailed,
-                                      "Creating the webview failed.");
+        // PAI fork (2026-10-15): release into raw pointers so the SEH wrapper
+        // frame stays free of C++ unwinding state (see FinishCreationGuarded).
+        // On a caught AV only still-unconsumed pointers are disposed here;
+        // anything the bridge already took over was nulled and is skipped.
+        Webview* raw_webview = webview.release();
+        WebviewCreationError* raw_error = error.release();
+        if (!FinishCreationGuarded(this, shared_result.get(), &raw_webview,
+                                   &raw_error)) {
+          delete raw_webview;
+          delete raw_error;
         }
-
-        auto bridge = std::make_unique<WebviewBridge>(
-            messenger_, textures_, platform_->graphics_context(),
-            std::move(webview));
-        auto texture_id = bridge->texture_id();
-        instances_[texture_id] = std::move(bridge);
-
-        auto response = flutter::EncodableValue(flutter::EncodableMap{
-            {flutter::EncodableValue("textureId"),
-             flutter::EncodableValue(texture_id)},
-        });
-
-        shared_result->Success(response);
       });
+}
+
+void WebviewWindowsPlugin::FinishCreation(
+    WebviewWindowsPlugin* plugin,
+    flutter::MethodResult<flutter::EncodableValue>* result, Webview** webview,
+    WebviewCreationError** error) {
+  if (!*webview) {
+    if (*error) {
+      result->Error(kErrorCodeWebviewCreationFailed,
+                    std::format("Creating the webview failed: {} (HRESULT: {:#010x})",
+                                (*error)->message, (*error)->hr));
+      delete *error;
+      *error = nullptr;
+    } else {
+      result->Error(kErrorCodeWebviewCreationFailed,
+                    "Creating the webview failed.");
+    }
+    return;
+  }
+
+  auto bridge = std::make_unique<WebviewBridge>(
+      plugin->messenger_, plugin->textures_,
+      plugin->platform_->graphics_context(),
+      std::unique_ptr<Webview>(*webview));
+  // Ownership moved into the bridge — null out so a later AV in
+  // result->Success cannot make the caller double-free.
+  *webview = nullptr;
+  auto texture_id = bridge->texture_id();
+  plugin->instances_[texture_id] = std::move(bridge);
+
+  auto response = flutter::EncodableValue(flutter::EncodableMap{
+      {flutter::EncodableValue("textureId"),
+       flutter::EncodableValue(texture_id)},
+  });
+
+  result->Success(response);
 }
 
 bool WebviewWindowsPlugin::InitPlatform() {

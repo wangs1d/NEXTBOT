@@ -496,39 +496,6 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     return style.body;
   });
 
-  /**
-   * GET /travel-basemap/style/amap-dark — 高德栅格底图样式（GCJ-02 网格）。
-   *
-   * 高德瓦片的位置/POI/中文路名信息远全于 Carto 矢量，但官方无暗色栅格样式；
-   * 暗色观感由 desktop.html 对地图 canvas 做 CSS 反色（invert + hue-rotate）
-   * 得到，路线图层颜色因此在页面里做「反色预补偿」（画黑 → 显白）。
-   * 数据侧仍统一 WGS-84：站点/路线几何由页面在显示边界做 wgs84→gcj02 转换
-   * （OSRM 查询参数保持 WGS-84，/travel-route 不感知坐标系）。
-   * 瓦片经 /travel-basemap/fetch 白名单代理（is.autonavi.com 已放行）+ 磁盘缓存。
-   */
-  app.get("/travel-basemap/style/amap-dark", async (req, reply) => {
-    const origin = originOf(req);
-    const tiles = ["01", "02", "03", "04"].map(
-      (s) =>
-        `${origin}/travel-basemap/fetch?u=${encodeURIComponent(
-          `https://webrd${s}.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}`,
-        )}`,
-    );
-    reply.header("Cache-Control", "no-cache");
-    reply.type("application/json");
-    return {
-      version: 8,
-      name: "amap-dark",
-      sources: {
-        amap: { type: "raster", tiles, tileSize: 256, maxzoom: 18 },
-      },
-      layers: [
-        { id: "bg", type: "background", paint: { "background-color": "#0B1220" } },
-        { id: "amap", type: "raster", source: "amap", paint: { "raster-fade-duration": 180 } },
-      ],
-    };
-  });
-
   /** GET /travel-basemap/fetch?u= — 白名单上游资源代理（磁盘缓存 + SWR）。
    *  变体路由 fetch.json / fetch.png：MapLibre 会把 sprite 的扩展名插到 query
    *  之前（/fetch.json?u=...），这里把后缀补回上游 URL。
