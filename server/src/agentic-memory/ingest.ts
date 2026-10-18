@@ -16,6 +16,7 @@ import {
   type UnifiedUnderstanding,
   type UnifiedLlmClient,
 } from "./unified-extractor.js";
+import { topicTagsFor } from "./travel-tagger.js";
 
 /** Mem0 add(infer:true) 抽取出的单条记忆 */
 export interface Mem0WrittenItem {
@@ -322,6 +323,8 @@ export class AgenticMemoryIngestService {
               ? { memorySemanticClass: extraction.semanticClass }
               : {}),
             extractSource: "unified",
+            // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
+            ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
             ...extraMetadata,
           },
           // 统一抽取已完成记忆改写，Mem0 侧直存，不再进 infer 的 LLM
@@ -408,6 +411,8 @@ export class AgenticMemoryIngestService {
         // 连续重要性分缺省（infer 路径无统一抽取分数）：高信号 0.7 / 低信号 0.3，
         // 调用方可经 extraMetadata 覆盖（如 ingestHighSignal 回退路径带真实决策分）
         importance: highSignal ? 0.7 : 0.3,
+        // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
+        ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
         ...extraMetadata,
       },
       infer: true,

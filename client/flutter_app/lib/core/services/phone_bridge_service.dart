@@ -211,10 +211,14 @@ class PhoneBridgeService {
     );
 
     unawaited(
-      channel.ready.then((_) {
+      channel.ready.then((_) async {
         if (!identical(_channel, channel)) return;
         _reconnectAttempts = 0;
         status.value = PhoneBridgeStatus.offline; // 绑定成功后才算 online
+        // 注册前查一次通知使用权授权状态，随 deviceInfo 上报——服务端
+        // messages.capture_status 读它决定是否引导 agent 发 permission_request 卡
+        _reportedListenerEnabled =
+            await PhoneCaptureService.instance.isListenerEnabled();
         _send("session.init", _sessionInitPayload());
         _send("phone.bridge.register", _registerPayload());
         _startKeepalive(channel);
@@ -225,12 +229,17 @@ class PhoneBridgeService {
     );
   }
 
+  /// 最近一次注册前查到的通知使用权授权状态（null = 尚未查过，不随注册上报）
+  bool? _reportedListenerEnabled;
+
   Map<String, dynamic> _deviceInfoPayload() {
     return <String, dynamic>{
       "model": "flutter-app",
       "manufacturer": Platform.operatingSystem,
       "brand": Platform.operatingSystem,
       "systemVersion": Platform.operatingSystemVersion,
+      if (_reportedListenerEnabled != null)
+        "notificationListenerEnabled": _reportedListenerEnabled,
     };
   }
 

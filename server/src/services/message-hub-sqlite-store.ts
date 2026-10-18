@@ -117,6 +117,7 @@ type MessageRow = {
   reply_to_message_id: string | null;
   external_message_id: string | null;
   meta: string | null;
+  seq: number | null;
 };
 
 function rowToConversation(row: ConversationRow): MessageHubConversation {
@@ -151,6 +152,8 @@ function rowToMessage(row: MessageRow): MessageHubMessage {
     replyToMessageId: row.reply_to_message_id ?? undefined,
     externalMessageId: row.external_message_id ?? undefined,
     meta: fromJsonColumn<Record<string, unknown> | undefined>(row.meta, undefined),
+    // 会话内单调序号（2026-10-17）：客户端排序/去重/增量拉取（sinceSeq 游标）的稳定依据
+    seq: row.seq ?? undefined,
   };
 }
 
@@ -204,6 +207,7 @@ export class MessageHubSqliteStore {
   private readonly db: SqliteDatabase;
   private readonly insertMessageStmt: Statement;
   private readonly upsertConversationStmt: Statement;
+  private readonly nextSeqStmt: Statement;
 
   constructor(db?: SqliteDatabase | string) {
     // 支持传路径字符串（message-hub-service 持有 dbPath 配置）：按需打开，父目录不存在则创建
@@ -213,6 +217,9 @@ export class MessageHubSqliteStore {
     } else {
       this.db = db ?? openMessageHubSqlite();
     }
+    // 顺序约束：建表 → 补列迁移 → 建索引。idx_mh_msg_conv_seq 依赖 seq 列，
+    // 必须在 migrateAddSeqColumn 之后创建，否则旧库（无 seq 列）启动即崩
+    // "no such column: seq"（2026-10-17 修复）。
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS mh_conversations (
         conversation_id TEXT NOT NULL,
@@ -229,8 +236,6 @@ export class MessageHubSqliteStore {
         updated_at TEXT NOT NULL,
         PRIMARY KEY (actor_id, conversation_id)
       );
-      CREATE INDEX IF NOT EXISTS idx_mh_conv_actor_platform
-        ON mh_conversations(actor_id, platform, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS mh_messages (
         message_id TEXT PRIMARY KEY,
@@ -245,10 +250,18 @@ export class MessageHubSqliteStore {
         created_at TEXT NOT NULL,
         reply_to_message_id TEXT,
         external_message_id TEXT,
-        meta TEXT
+        meta TEXT,
+        seq INTEGER
       );
+    `);
+    this.migrateAddSeqColumn();
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_mh_conv_actor_platform
+        ON mh_conversations(actor_id, platform, updated_at DESC);
       CREATE INDEX IF NOT EXISTS idx_mh_msg_conv_time
         ON mh_messages(actor_id, conversation_id, created_at);
+      CREATE INDEX IF NOT EXISTS idx_mh_msg_conv_seq
+        ON mh_messages(actor_id, conversation_id, seq);
       CREATE UNIQUE INDEX IF NOT EXISTS idx_mh_msg_external
         ON mh_messages(actor_id, platform, external_message_id)
         WHERE external_message_id IS NOT NULL;
@@ -276,12 +289,40 @@ export class MessageHubSqliteStore {
       INSERT OR IGNORE INTO mh_messages (
         message_id, actor_id, conversation_id, platform, channel_id,
         direction, sender_id, sender_name, text, created_at,
-        reply_to_message_id, external_message_id, meta
+        reply_to_message_id, external_message_id, meta, seq
       ) VALUES (
         @message_id, @actor_id, @conversation_id, @platform, @channel_id,
         @direction, @sender_id, @sender_name, @text, @created_at,
-        @reply_to_message_id, @external_message_id, @meta
+        @reply_to_message_id, @external_message_id, @meta, @seq
       )
+    `);
+    this.nextSeqStmt = this.db.prepare(`
+      SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
+      FROM mh_messages
+      WHERE actor_id = ? AND conversation_id = ?
+    `);
+  }
+
+  /**
+   * 旧库迁移：补 seq 列（会话内单调序号，2026-10-17）。
+   * 存量数据按 (actor_id, conversation_id) 分区、以 created_at/rowid 排序回填，
+   * 之后所有插入都由 insertMessage 分配。幂等：已迁移的库直接跳过。
+   */
+  private migrateAddSeqColumn(): void {
+    const cols = this.db.prepare(`PRAGMA table_info(mh_messages)`).all() as Array<{ name: string }>;
+    if (cols.some((c) => c.name === "seq")) return;
+    this.db.exec(`ALTER TABLE mh_messages ADD COLUMN seq INTEGER`);
+    this.db.exec(`
+      WITH ordered AS (
+        SELECT message_id,
+               ROW_NUMBER() OVER (
+                 PARTITION BY actor_id, conversation_id
+                 ORDER BY created_at, rowid
+               ) AS rn
+        FROM mh_messages
+      )
+      UPDATE mh_messages
+      SET seq = (SELECT rn FROM ordered WHERE ordered.message_id = mh_messages.message_id)
     `);
   }
 
@@ -309,6 +350,9 @@ export class MessageHubSqliteStore {
 
   /** @returns true=新插入；false=externalMessageId 命中唯一索引判重跳过 */
   insertMessage(input: MessageInsertInput): boolean {
+    // 会话内单调 seq：MAX(seq)+1（better-sqlite3 同步单连接，SELECT→INSERT 之间无并发交错）；
+    // 判重跳过时该 seq 未被消费，下次重算无空洞
+    const seq = (this.nextSeqStmt.get(input.actorId, input.conversationId) as { next_seq: number }).next_seq;
     const result = this.insertMessageStmt.run({
       message_id: input.messageId,
       actor_id: input.actorId,
@@ -323,6 +367,7 @@ export class MessageHubSqliteStore {
       reply_to_message_id: input.replyToMessageId ?? null,
       external_message_id: input.externalMessageId ?? null,
       meta: toJsonColumn(input.meta),
+      seq,
     });
     return result.changes > 0;
   }
@@ -357,18 +402,29 @@ export class MessageHubSqliteStore {
   listMessages(
     actorId: string,
     conversationId: string,
-    opts?: { limit?: number },
+    opts?: { limit?: number; sinceSeq?: number },
   ): MessageHubMessage[] {
     const limit = Math.max(1, Math.min(500, Math.trunc(opts?.limit ?? 50)));
-    const rows = this.db
-      .prepare(`
-        SELECT * FROM (
-          SELECT * FROM mh_messages
-          WHERE actor_id = ? AND conversation_id = ?
-          ORDER BY created_at DESC LIMIT ?
-        ) ORDER BY created_at ASC
-      `)
-      .all(actorId, conversationId, limit) as MessageRow[];
+    // sinceSeq 游标（2026-10-17）：只取 seq > sinceSeq 的增量，客户端断线补拉用
+    const rows = (opts?.sinceSeq != null
+      ? this.db
+          .prepare(`
+            SELECT * FROM (
+              SELECT * FROM mh_messages
+              WHERE actor_id = ? AND conversation_id = ? AND seq > ?
+              ORDER BY seq DESC LIMIT ?
+            ) ORDER BY seq ASC
+          `)
+          .all(actorId, conversationId, Math.trunc(opts.sinceSeq), limit)
+      : this.db
+          .prepare(`
+            SELECT * FROM (
+              SELECT * FROM mh_messages
+              WHERE actor_id = ? AND conversation_id = ?
+              ORDER BY seq DESC LIMIT ?
+            ) ORDER BY seq ASC
+          `)
+          .all(actorId, conversationId, limit)) as MessageRow[];
     return rows.map(rowToMessage);
   }
 
@@ -392,6 +448,72 @@ export class MessageHubSqliteStore {
       `)
       .get(actorId, platform, externalMessageId) as MessageRow | undefined;
     return row ? rowToMessage(row) : null;
+  }
+
+  /** LIKE 通配符转义（用户输入的关键词按字面匹配）。 */
+  private static escapeLike(raw: string): string {
+    return raw.replace(/[\\%_]/g, (ch) => `\\${ch}`);
+  }
+
+  /**
+   * 关键词检索消息（messages.search 工具用）：LIKE 字面匹配 + 可选平台/起始时间过滤，
+   * 时间倒序。direction 不限（查"收到的话"和"让他人办的事"都有用）。
+   */
+  searchMessages(
+    actorId: string,
+    opts?: { query?: string; platform?: string; since?: string; limit?: number },
+  ): MessageHubMessage[] {
+    const limit = Math.max(1, Math.min(50, Math.trunc(opts?.limit ?? 20)));
+    const conds = ["actor_id = ?"];
+    const args: Array<string | number> = [actorId];
+    const query = opts?.query?.trim();
+    if (query) {
+      conds.push(`text LIKE ? ESCAPE '\\'`);
+      args.push(`%${MessageHubSqliteStore.escapeLike(query)}%`);
+    }
+    if (opts?.platform) {
+      conds.push("platform = ?");
+      args.push(opts.platform);
+    }
+    if (opts?.since) {
+      conds.push("created_at >= ?");
+      args.push(opts.since);
+    }
+    args.push(limit);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM mh_messages WHERE ${conds.join(" AND ")} ORDER BY created_at DESC LIMIT ?`,
+      )
+      .all(...args) as MessageRow[];
+    return rows.map(rowToMessage);
+  }
+
+  /**
+   * 通知捕捉统计（messages.capture_status 工具用）：按 platform 聚合
+   * phone_capture 来源的入站消息最近捕获时间与 24h 条数。断流判断的数据源。
+   */
+  captureStats(
+    actorId: string,
+  ): Array<{ platform: string; lastInboundAt: string; count24h: number }> {
+    const rows = this.db
+      .prepare(`
+        SELECT platform,
+               MAX(created_at) AS last_at,
+               COALESCE(SUM(CASE WHEN created_at >= datetime('now', 'localtime', '-1 day') THEN 1 ELSE 0 END), 0) AS c24
+        FROM mh_messages
+        WHERE actor_id = ?
+          AND direction = 'inbound'
+          AND meta IS NOT NULL
+          AND json_valid(meta)
+          AND json_extract(meta, '$.source') = 'phone_capture'
+        GROUP BY platform
+      `)
+      .all(actorId) as Array<{ platform: string; last_at: string; c24: number }>;
+    return rows.map((r) => ({
+      platform: r.platform,
+      lastInboundAt: r.last_at,
+      count24h: r.c24,
+    }));
   }
 
   markConversationRead(actorId: string, conversationId: string): boolean {

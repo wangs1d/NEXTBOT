@@ -162,6 +162,9 @@ function parsePhoneDeviceInfo(payload: Record<string, unknown>): Record<string, 
     "isHarmonyOS",
     "systemVersion",
     "batteryLevel",
+    // 通知使用权授权状态（注册时客户端上报）：capture_status 工具读它决定
+    // 是否引导 LLM 发 permission_request 授权卡
+    "notificationListenerEnabled",
   ];
   for (const key of keys) {
     if (payload[key] !== undefined) {
@@ -1107,7 +1110,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const batchId = String(reportPayload.batchId ?? "").trim();
           const items = Array.isArray(reportPayload.messages) ? reportPayload.messages : [];
           // alipay：支付宝 App 支付/收款推送（通知监听白名单专属映射；财务实时入账通道）
-          const reportablePlatforms = new Set<string>(["wechat", "qq", "feishu", "sms", "alipay", "generic"]);
+          // email（2026-10-18）：QQ邮箱/网易邮箱等国内邮箱 App 的通知捕捉入站
+          const reportablePlatforms = new Set<string>(["wechat", "qq", "feishu", "sms", "alipay", "email", "generic"]);
           let accepted = 0;
           let duplicates = 0;
           let invalid = 0;
@@ -1140,7 +1144,10 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                   capturedAt: item.capturedAt != null ? String(item.capturedAt) : undefined,
                 },
               });
-              if (result.deduped) duplicates += 1;
+              // gated（入口闸拦截）≠ accepted：库都没进，计成 accepted 会让
+              // 客户端误以为已入库而丢消息，归入 invalid 让客户端可见地丢弃
+              if ((result as { gated?: boolean }).gated) invalid += 1;
+              else if (result.deduped) duplicates += 1;
               else accepted += 1;
             } catch {
               invalid += 1;

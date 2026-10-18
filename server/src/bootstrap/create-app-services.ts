@@ -241,6 +241,12 @@ import { registerPictureBuiltinSkills } from "../skills/builtin/picture-skills.j
 import { registerTravelPlanningBuiltinSkills } from "../skills/travel-planning/travel-planning-skills.js";
 import { registerTravelCommuteBuiltinSkills } from "../skills/travel-planning/travel-commute-skills.js";
 import { PlanningService as TravelPlanningService } from "../skills/travel-planning/travel-planning-service.js";
+import { TravelHeatEnricher } from "../skills/travel-planning/travel-heat-enricher.js";
+import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
+import { TravelBudgetGuardService } from "../services/travel-budget-guard-service.js";
+import { travelMemoir } from "../services/travel-memoir-service.js";
+import { TravelPoiVideoService } from "../services/travel-poi-video-service.js";
+import { TransferWatchService } from "../services/transfer-watch-service.js";
 import { travelDataRefresh } from "../skills/travel-planning/travel-data-refresh.js";
 import { MerchantOrderService } from "../services/merchant-order-service.js";
 import { SkillValidator } from "../skills/skill-validator.js";
@@ -899,8 +905,19 @@ export async function createAppServices(): Promise<AppServices> {
   const quoteAggregator = buildQuoteAggregator({
     browserRunner: agentBrowserService,
   });
-  const bookingProviders = buildDefaultBookingProviders(bookingConfig, { quoteAggregator });
+  const bookingProviders = buildDefaultBookingProviders(bookingConfig, {
+    quoteAggregator,
+    // 滴滴官方 MCP 桥接（travel-upgrade-plan P2）：接驳下单真实走滴滴
+    mcpClient: mcpClientService,
+  });
   const bookingOrderStore = new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json"));
+  // 行后旅行回忆录（travel 双端⑦）：订单库/账本服务在这里注入真实实例
+  // （travel-map 路由经 travelMemoir 单例取用，避免同文件双实例读写不一致）
+  travelMemoir.configure({
+    travelPlanStore,
+    bookingOrderStore,
+    financeDeepService,
+  });
   const bookingService = new BookingService({
     providers: bookingProviders,
     store: bookingOrderStore,
@@ -1301,6 +1318,25 @@ export async function createAppServices(): Promise<AppServices> {
   // 原来只走 Wikimedia，而 commons/zh.wikipedia 在本机网络下实测 http=000，
   // 导致 POI 照片覆盖率只有 3.4%、且每个 POI 都要先白等一轮超时。这里失败也不会
   // 让配图断掉——PlanningService 内部另有一层必应直抓兜底。
+  // 社交热度回填器（travel-upgrade-plan）：小红书/抖音聚合 + LLM 名单内归类。
+  // llmComplete 闭包引用 externalChat（声明在下方，运行时调用时已初始化）。
+  const travelHeatEnricher = new TravelHeatEnricher({
+    searchXiaohongshu: (q, limit) => upstreamSearchService.searchXiaohongshu(q, limit ?? 8),
+    searchDouyin: (q, limit) => upstreamSearchService.searchDouyin(q, limit ?? 8),
+    llmComplete: async (prompt) => {
+      if (!externalChat?.isEnabled()) return "";
+      let full = "";
+      await externalChat.streamCompletion(
+        `travel-heat-${Date.now()}`,
+        { text: prompt },
+        (delta: string) => { full += delta; },
+        undefined,
+        // 一次性归类任务：ephemeral 不进 provider 历史、关 thinking 降延迟
+        { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 0 },
+      );
+      return full;
+    },
+  });
   const travelPlanningService = new TravelPlanningService(weatherService, {
     searchImages: async (query, limit) => {
       const res = await upstreamSearchService.searchImages(query, limit ?? 4, "shared-travel-img");
@@ -1308,7 +1344,7 @@ export async function createAppServices(): Promise<AppServices> {
         .map((it) => it.mediaUrl)
         .filter((u): u is string => Boolean(u));
     },
-  });
+  }, travelHeatEnricher);
   // 2026-10-12 用户决定下线 POI 视频能力，评论的数据来源是视频评论区（无视频即无评论），
   // 两者一并下线：searchVideos / searchReviews 端口、media 表的 video/review 行、
   // 桌面与手机端的渲染区块全部移除。媒体库只剩照片一类。
@@ -1320,9 +1356,21 @@ export async function createAppServices(): Promise<AppServices> {
     travelPlanningService.backfillMediaForPoi(name, type, lat, lon),
   );
   travelDataRefresh.scheduleStartupLocalize();
+  // POI 打卡视频回填（travel 视频下放）：搜索走 searchVideos 三源（B站 API/Bing/社交中转），
+  // 从严过滤后每景点只落 1 条播放页 URL（不下载视频文件）；PA_TRAVEL_POI_VIDEO=0 关闭
+  const travelPoiVideoBackfill = new TravelPoiVideoService(
+    { searchVideos: (q, limit) => upstreamSearchService.searchVideos(q, limit) },
+    travelPlanStore,
+  );
   if (!isOssEdition()) {
     registerTravelPlanningBuiltinSkills((skill) => skillManager.register(skill), {
       travelPlanningService,
+      // 旅行画像读取口（travel-upgrade-plan 画像引擎）：闭包延迟取 userPersonalizationService
+      //（声明在本调用之后，运行时才执行，TDZ 安全）；personalization 以 sessionId 为 actorId 索引
+      getUserTravelProfile: (sessionId) =>
+        sessionId ? userPersonalizationService.getTravelProfile(sessionId) : undefined,
+      // POI 打卡视频回填（travel 视频下放）：行程落盘后后台逐景点补 1 条真实相关播放页
+      poiVideoBackfill: (plan) => travelPoiVideoBackfill.backfillForPlan(plan),
     });
 
     // 注册出行通勤内置Skills（实时路况出发建议 + 票夹 + 打包清单；复用同一 WeatherService）
@@ -2096,12 +2144,19 @@ export async function createAppServices(): Promise<AppServices> {
       return null;
     }
   };
+  // 行程预算守门（travel 双端⑥）：行程冷层（今日进行中 + 预算档）+ 订单库（当日旅行消费）
+  const travelBudgetGuard = new TravelBudgetGuardService({
+    travelPlanStore,
+    bookingOrderStore,
+  });
   const eveningDigestService = new EveningDigestService({
     journalService: getDailyJournalService(),
     scheduleTaskService,
     weatherService,
     weatherPrefsService,
     soulProvider: eveningDigestSoulProvider,
+    // 行程预算守门（travel 双端⑥）：今日在行程中且当日消费超预算档日上限 → 晚报带超支提醒
+    travelBudgetProvider: (sessionId) => travelBudgetGuard.checkBudget(sessionId),
     llmComplete: externalChat?.isEnabled()
       ? async (prompt, opts) => {
           let full = "";
@@ -2162,6 +2217,59 @@ export async function createAppServices(): Promise<AppServices> {
   });
   eveningDigestScheduler.start();
   app.log.info("[EveningDigest] 晚间 digest 调度器已启动");
+
+  // ─── 旅游接驳提醒（travel-upgrade-plan P2）：行程交通大段（高铁/航班）到点 ───
+  // 询问是否预约滴滴（确认后 Agent 走 ride_hailing.quote/book 真实下单）。调度
+  // 模式仿晚间 digest：每分钟 tick；WS 在线直推手机端确认卡，不在线走 proactive
+  // 管道 must 层兜底（directText 零 LLM，重连即直推——覆盖航班落地恢复网络场景）。
+  const transferWatchService = new TransferWatchService({
+    listPlans: () => travelPlanStore.listPlansWithTransfers(),
+    setPickupState: (planId, segmentNo, state) =>
+      travelPlanStore.setTransferPickupState(planId, segmentNo, state),
+    // 返程出发提醒经 UserTimingService 动态反算最晚出发时刻（提醒不早于起床后 30 分钟）
+    getWakeHour: (actorId) => userTiming.wakeHour(actorId),
+    onReminder: (payload) => {
+      if (!payload.sessionId) {
+        app.log.warn({ planId: payload.planId, no: payload.segment.no },
+          "[TransferWatch] 行程无 sessionId，跳过接驳提醒推送");
+        return;
+      }
+      const sent = wsConnectionRegistry.trySend(
+        payload.sessionId,
+        JSON.stringify({
+          type: ServerEventType.AgentTransferReminder,
+          payload: {
+            sessionId: payload.sessionId,
+            planId: payload.planId,
+            destination: payload.destination,
+            segment: payload.segment,
+            minutesUntil: payload.minutesUntil,
+            message: payload.message,
+            phase: payload.phase,
+          },
+        }),
+      );
+      if (!sent) {
+        // 全端离线：must 层兜底（用户重连后 directText 直推原文）
+        proactivePipeline.submitProposal({
+          proposalId: `p_${Date.now().toString(36)}_transfer`,
+          actorId: payload.sessionId,
+          kind: "transfer_reminder",
+          tier: "must",
+          importance: "high",
+          dedupKey: `transfer:${payload.planId}:${payload.segment.no}:${payload.phase}`,
+          title: "接驳提醒",
+          summary: payload.message.slice(0, 200),
+          evidence: ["transfer_watch_scheduled", "ws_push_failed"],
+          directText: payload.message,
+          createdAt: Date.now(),
+          source: "time",
+        });
+      }
+    },
+  });
+  transferWatchService.start();
+  app.log.info("[TransferWatch] 接驳提醒调度器已启动");
 
   // ─── Task 20 生活节律引擎：观察 → 建模 → 调整 闭环 ───
   // 中枢只拥有节律画像（data/rhythm_profiles/*.json，atomic 落盘）；数据从
@@ -4446,7 +4554,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   messageBridgeService = new MessageBridgeService(runtime, messageHubService);
 
-  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime, friendMessages: friendMessageService });
+  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime, friendMessages: friendMessageService, phoneBridgeCoordinator });
 
   registerEmbodimentTools(toolRegistry, {
     wsRegistry: wsConnectionRegistry,
@@ -6594,6 +6702,7 @@ export async function createAppServices(): Promise<AppServices> {
     subscriptionAuditService.stop();
     billManagementService.stop();
     eveningDigestScheduler.stop();
+    transferWatchService.stop();
     // 推送 token 注册表兜底落盘（register/unregister 已写穿，此处防未来新写路径漏刷）
     proactivePushService.flush();
     // 任务面台账强制落盘（1s 防抖窗口内的变更不丢）
@@ -6696,6 +6805,7 @@ export async function createAppServices(): Promise<AppServices> {
     externalChat,
     moodInferenceService,
     morningBriefingScheduler,
+    transferWatchService,
     deviceRegistry,
     devicePairingService,
     accessAuthService,

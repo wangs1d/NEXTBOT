@@ -127,7 +127,10 @@ async function main(): Promise<void> {
     // 匿名探针 Cookie 的预期结局：三平台登录墙拦截（taobao 请登录页 / jd 硬跳
     // passport.jd.com / pdd 重定向门户），服务如实报 retryable 而非编造数据。
     // 真实数据路径 = 用户真实登录 Cookie（Chrome 扩展导出 → import + consent）。
-    const honestFail = s2.ok === true && r2.ok === false && String(r2.error ?? "").includes("登录态");
+    // 断言按「登录类」错误族匹配（未导入/扫码/登录态/Cookie），不钉死单一文案——
+    // 各平台拦截形态不同且文案会演进，钉死文本会让断言误报。
+    const errText = String(r2.error ?? "");
+    const honestFail = s2.ok === true && r2.ok === false && /登录|扫码|未导入|Cookie/.test(errText);
     record(
       "S2 匿名态被登录墙拦截且如实上报（不编造数据）",
       honestFail,

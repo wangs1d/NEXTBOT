@@ -164,6 +164,8 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "messages.reply": "social",
   "messages.mark_read": "social",
   "messages.suggest_reply": "social",
+  "messages.search": "social",
+  "messages.capture_status": "social",
 };
 
 // ────────────────────────────────────────────────────────────

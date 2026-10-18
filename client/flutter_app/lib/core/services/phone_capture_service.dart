@@ -153,4 +153,68 @@ class PhoneCaptureService {
       return false;
     }
   }
+
+  /// 下发动态捕捉配置：[extraRules] 自定义「包名 → 平台」规则（银行等长尾 App）；
+  /// [captureAll] 开启后未识别的 App 通知也按 generic 兜底捕捉（默认关闭防噪音）。
+  Future<bool> setCaptureConfig({
+    List<CapturePackageRule> extraRules = const [],
+    bool captureAll = false,
+  }) async {
+    ensureInitialized();
+    try {
+      return await _channel.invokeMethod<bool>("setCaptureConfig", <String, dynamic>{
+        "extraRules": extraRules.map((r) => r.toMap()).toList(),
+        "captureAll": captureAll,
+      }) ?? false;
+    } catch (e) {
+      debugPrint("[PhoneCapture] setCaptureConfig failed: $e");
+      return false;
+    }
+  }
+
+  /// 读取当前动态捕捉配置（设置页回显）。
+  Future<CaptureConfig?> getCaptureConfig() async {
+    ensureInitialized();
+    try {
+      final Map<dynamic, dynamic>? raw =
+          await _channel.invokeMethod<Map<dynamic, dynamic>>("getCaptureConfig");
+      return CaptureConfig.fromMap(raw);
+    } catch (e) {
+      debugPrint("[PhoneCapture] getCaptureConfig failed: $e");
+      return null;
+    }
+  }
+}
+
+/// 一条动态捕捉规则（用户自定义包名 → 聚合平台归类）。
+class CapturePackageRule {
+  CapturePackageRule({required this.pkg, this.platform = "generic"});
+
+  final String pkg;
+  final String platform;
+
+  Map<String, dynamic> toMap() => <String, dynamic>{"pkg": pkg, "platform": platform};
+}
+
+/// 动态捕捉配置（原生 SharedPreferences 持久化，监听服务每次分类时消费）。
+class CaptureConfig {
+  CaptureConfig({this.extraRules = const [], this.captureAll = false});
+
+  final List<CapturePackageRule> extraRules;
+  final bool captureAll;
+
+  factory CaptureConfig.fromMap(Map<dynamic, dynamic>? map) {
+    final rules = (map?["extraRules"] as List<dynamic>? ?? const <dynamic>[])
+        .whereType<Map>()
+        .map((r) => CapturePackageRule(
+              pkg: r["pkg"]?.toString() ?? "",
+              platform: r["platform"]?.toString() ?? "generic",
+            ))
+        .where((r) => r.pkg.isNotEmpty)
+        .toList();
+    return CaptureConfig(
+      extraRules: rules,
+      captureAll: map?["captureAll"] == true,
+    );
+  }
 }

@@ -19,6 +19,8 @@ import io.flutter.plugin.common.MethodChannel
  *   - isListenerEnabled 通知使用权是否已授予
  *   - openListenerSettings 跳转系统「通知使用权」设置页
  *   - startBridgeService 拉起常驻前台服务（保活 WS 桥接与上报）
+ *   - setCaptureConfig  下发动态捕捉配置：自定义包名规则 + 未识别包全量捕捉开关
+ *   - getCaptureConfig  读取当前动态捕捉配置（设置页回显）
  */
 class MessageCapturePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
 
@@ -89,6 +91,33 @@ class MessageCapturePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                     Log.w(TAG, "startForegroundService failed", e)
                     result.success(false)
                 }
+            }
+            "setCaptureConfig" -> {
+                val ctx = appContext
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                try {
+                    val args = call.arguments as? Map<*, *>
+                    val rules = (args?.get("extraRules") as? List<*>)?.mapNotNull { raw ->
+                        (raw as? Map<*, *>)?.let { m ->
+                            val pkg = (m["pkg"] as? String)?.trim().orEmpty()
+                            val platform = (m["platform"] as? String)?.trim().orEmpty().ifEmpty { "generic" }
+                            if (pkg.isEmpty()) null else pkg to platform
+                        }
+                    }.orEmpty()
+                    val captureAll = args?.get("captureAll") == true
+                    MessageCaptureListenerService.applyConfig(ctx, rules, captureAll)
+                    result.success(true)
+                } catch (e: Exception) {
+                    Log.w(TAG, "setCaptureConfig failed", e)
+                    result.success(false)
+                }
+            }
+            "getCaptureConfig" -> {
+                val ctx = appContext ?: return result.success(null)
+                result.success(MessageCaptureListenerService.readConfig(ctx))
             }
             else -> result.notImplemented()
         }

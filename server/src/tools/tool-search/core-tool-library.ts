@@ -55,6 +55,13 @@ export const CORE_TOOL_LIBRARY = {
       "world.link.send_message",
       "budget.calculate",
       "shopping.suggest",
+      // 接驳下单两件套（travel-upgrade-plan P2，2026-10-18 live e2e 实证）：core 层级
+      // 归属（不进 BM25 延迟目录）。注意：每轮可见性由 resolve-chat-tools 的
+      // ALWAYS_INCLUDED_TOOLS 决定（已同步加入），两处须同时在场——
+      // quote/book 是时点性刚需，接驳确认后 1-2 轮内必须走通（错过窗口就没意义）。
+      // status/cancel 低频，留在延迟目录按需召回。
+      "ride_hailing.quote",
+      "ride_hailing.book",
       "self.list_custom_skills",
       "surface.show",
     ],

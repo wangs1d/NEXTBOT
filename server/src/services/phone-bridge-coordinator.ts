@@ -29,6 +29,8 @@ export type PhoneDeviceInfo = {
   isHarmonyOS?: boolean;
   systemVersion?: string;
   batteryLevel?: number;
+  /** 系统通知使用权是否已授予（客户端注册时上报；undefined=旧客户端未上报） */
+  notificationListenerEnabled?: boolean;
   [key: string]: unknown;
 };
 

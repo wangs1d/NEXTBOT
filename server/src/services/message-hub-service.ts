@@ -51,6 +51,8 @@ export type MessageHubMessage = {
   replyToMessageId?: string;
   externalMessageId?: string;
   meta?: Record<string, unknown>;
+  /** 会话内单调序号（2026-10-17）：排序/去重/增量拉取游标的稳定依据 */
+  seq?: number;
 };
 
 export type MessageHubInboundInput = {
@@ -374,9 +376,14 @@ export class MessageHubService {
     return this.requireStore().getConversation(actorId, conversationId);
   }
 
-  listMessages(actorId: string, conversationId: string, opts?: { limit?: number }): MessageHubMessage[] {
+  listMessages(
+    actorId: string,
+    conversationId: string,
+    opts?: { limit?: number; sinceSeq?: number },
+  ): MessageHubMessage[] {
     return this.requireStore().listMessages(actorId, conversationId, {
       limit: clampLimit(opts?.limit, 50, 500),
+      sinceSeq: opts?.sinceSeq,
     });
   }
 
@@ -386,6 +393,29 @@ export class MessageHubService {
 
   getMessage(actorId: string, messageId: string): MessageHubMessage | null {
     return this.requireStore().getMessage(actorId, messageId);
+  }
+
+  /** 按 externalMessageId 查本 actor 空间内的消息副本（已读回执跨会话映射用）。 */
+  getMessageByExternalId(actorId: string, platform: string, externalMessageId: string): MessageHubMessage | null {
+    return this.requireStore().getMessageByExternalId(actorId, platform, externalMessageId);
+  }
+
+  /** 关键词检索消息（messages.search 工具用）。 */
+  searchMessages(
+    actorId: string,
+    opts?: { query?: string; platform?: string; since?: string; limit?: number },
+  ): MessageHubMessage[] {
+    return this.requireStore().searchMessages(actorId, {
+      query: opts?.query,
+      platform: opts?.platform,
+      since: opts?.since,
+      limit: clampLimit(opts?.limit, 20, 50),
+    });
+  }
+
+  /** 通知捕捉统计（messages.capture_status 工具用，断流判断数据源）。 */
+  captureStats(actorId: string): Array<{ platform: string; lastInboundAt: string; count24h: number }> {
+    return this.requireStore().captureStats(actorId);
   }
 
   /** 各平台未读/会话统计（messages.overview 工具用，纯计数不总结）。 */

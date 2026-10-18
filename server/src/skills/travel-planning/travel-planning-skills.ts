@@ -27,6 +27,23 @@ import {
 
 type Deps = {
   travelPlanningService: PlanningService;
+  /** 旅行画像读取口（travel-upgrade-plan 画像引擎）：出片向/体验向等长期偏好，
+   * 规划时静默并入偏好推断，用户无需每次重说。按 sessionId（=actorId）查询。 */
+  getUserTravelProfile?: (sessionId?: string) => {
+    photoDriven?: boolean;
+    experienceDriven?: boolean;
+    /** travel 双端②：攻略页「不感兴趣」累积的负向偏好（同类标签 + 具体 POI 名） */
+    dislikeTags?: string[];
+    dislikeNames?: string[];
+    /** travel 双端③：旅行人格分型（徽章 + 每日密度微调） */
+    persona?: { id: "shutter" | "explorer" | "curator" | "wanderer"; label: string; desc: string };
+  } | undefined;
+  /**
+   * POI 打卡视频回填口（travel 视频下放）：行程落盘后后台补视频（fire-and-forget
+   * 不阻塞规划），每景点最多 1 条真实相关播放页，命中写回 plan 冷层。
+   * 未注入 = 不回填（视频块缺省，前端隐藏）。
+   */
+  poiVideoBackfill?: (plan: StoredTravelPlan) => void;
 };
 
 /** 按条目类型选计价入口（edit-itinerary 的 replace 路径复用 HTTP comment 端点的口径） */
@@ -65,6 +82,8 @@ function mapDaysToStored(days: PlannedDay[] | undefined) {
       splatUrl: item.splatUrl,
       transportFromPrev: item.transportFromPrev,
       visitDuration: item.visitDuration,
+      // travel 双端②：「为什么推荐给你」随冷层/快照透传到攻略页
+      recommendReason: item.recommendReason,
     })),
   }));
 }
@@ -102,6 +121,8 @@ function refreshItinerarySnapshot(plan: StoredTravelPlan): void {
     ...(plan.intro ? { intro: plan.intro } : {}),
     ...(plan.packing ? { packing: plan.packing } : {}),
     ...(plan.coverImage ? { coverImage: plan.coverImage } : {}),
+    // 旅行人格分型随编辑后快照保留（travel 双端③）
+    ...(plan.persona ? { persona: plan.persona } : {}),
     days: plan.days.map((day) => ({
       date: day.date,
       items: day.items.map((item) => ({ ...item })),
@@ -198,7 +219,7 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
 }
 
 export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[] {
-  const { travelPlanningService } = deps;
+  const { travelPlanningService, getUserTravelProfile, poiVideoBackfill } = deps;
 
   /** 1. 生成完整行程（主入口） */
   const plan_itinerary: SkillDefinition = {
@@ -256,6 +277,10 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       const memoryPrefs = recallSameDestinationPreferenceLabels(explicitDest ?? rawInput, userPrefs ?? []);
       const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
       try {
+        // 画像静默注入（travel-upgrade-plan 画像引擎）：UserFact 里的长期旅行
+        // 偏好（出片向/体验向/负向偏好/人格分型）并入本次偏好推断；
+        // 原文表达优先级更高（不覆盖）。任一字段存在即传（travel 双端②③）
+        const profileHints = getUserTravelProfile?.(execContext?.sessionId);
         const result = await travelPlanningService.generateItinerary({
           input: rawInput,
           // 进度流式：规划引擎各阶段经 travel-progress-bus 汇报，聊天侧按 sessionId 订阅下发
@@ -263,6 +288,14 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           destination: explicitDest,
           days: typeof input.days === "number" && input.days > 0 ? input.days : undefined,
           preferences: mergedPrefs.length > 0 ? mergedPrefs : undefined,
+          ...(profileHints &&
+          (profileHints.photoDriven ||
+            profileHints.experienceDriven ||
+            (profileHints.dislikeTags?.length ?? 0) > 0 ||
+            (profileHints.dislikeNames?.length ?? 0) > 0 ||
+            profileHints.persona)
+            ? { profileHints }
+            : {}),
         });
         const quality = typeof result.dataQuality === "string" ? result.dataQuality : "real";
         // 规划完成即预热底图瓦片（fire-and-forget）：用户点开行程地图时瓦片已在
@@ -297,13 +330,15 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           weather: result.weather,
           // 行程卡海报区背景：目的地代表性封面（维基百科主图优先，见规划服务）
           coverImage: result.coverImage,
+          // 旅行人格分型徽章（travel 双端③）：有分型才透传，前端无值隐藏
+          ...(result.preferences?.persona ? { persona: result.preferences.persona } : {}),
           days: mapDaysToStored(result.days),
           // 候选 POI 池：全量酒店/餐厅/景点摘要（含未排入日程的备选），前端地图一并展示
           pois: mapPoisToStored(result.pois),
         });
         // 冷层落盘：完整明细按 planId 持久化，供跨轮/跨重启的 travel.get-itinerary
         // 按需回查；LLM 上下文只留 summarizeItinerary 的极简回执
-        travelPlanStore.save({
+        const storedPlan: StoredTravelPlan = {
           planId: String(result.id ?? ""),
           dataQuality: quality,
           destination: result.destination,
@@ -321,11 +356,23 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           packing: result.travelInfo?.packing,
           weather: result.weather,
           coverImage: result.coverImage,
+          // 旅行人格分型（travel 双端③）：冷层也存，bootById 直读建卡不缺徽章数据
+          ...(result.preferences?.persona ? { persona: result.preferences.persona } : {}),
           pois: mapPoisToStored(result.pois),
           totalCost: (result as { pricingSummary?: { totalFinal?: number } }).pricingSummary
             ?.totalFinal,
+          // 预算档位（travel 双端⑥）：预算守门的判定依据（超支进晚间摘要）
+          ...(result.preferences?.budget ? { budgetTier: result.preferences.budget } : {}),
           days: mapDaysToStored(result.days),
-        });
+          // 交通大段（高铁/航班）：接驳提醒调度器的扫描数据源（travel-upgrade-plan P2）
+          transferSegments: result.transferSegments,
+          // 规划会话：接驳提醒推送给该会话（多端 fan-out 由 WS 注册表承担）
+          sessionId: execContext?.sessionId,
+        };
+        travelPlanStore.save(storedPlan);
+        // POI 打卡视频回填（travel 视频下放）：落盘后后台逐景点补 1 条真实相关
+        // 播放页（fire-and-forget，不阻塞规划回执；无命中站点不带视频）
+        poiVideoBackfill?.(storedPlan);
         // 乐观锁基准：规划回执带 version，模型后续编辑（edit-itinerary）凭它做冲突校验
         const savedVersion = travelPlanStore.get(String(result.id ?? ""))?.version;
         return {
@@ -588,6 +635,51 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
+  /** 5.5 接驳应答落盘（travel-upgrade-plan P2）：用户对接驳提醒说「要/不要」后，
+   *  模型先调本工具把状态写回行程段（防调度器重复打扰），再说/走 ride_hailing。 */
+  const pickup_answer: SkillDefinition = {
+    metadata: {
+      name: "travel.pickup-answer",
+      version: "1.0.0",
+      displayName: "记录接驳应答",
+      description:
+        "用户对接驳提醒（高铁/航班到站前询问是否预约滴滴）作出答复后，把答复落盘。" +
+        "用户明确说需要接驳/要叫车 → accepted=true；明确拒绝/自己安排 → accepted=false。" +
+        "落盘后若 accepted=true，继续调用 ride_hailing.quote → ride_hailing.book 真实下单" +
+        "（scheduleAt 用票面到达时刻；起点=到达车站/机场，终点=行程酒店）。",
+      kind: "builtin",
+      tags: ["travel", "接驳", "滴滴", "pickup", "transfer"],
+      icon: "🚕",
+      parameters: [
+        { name: "planId", type: "string", required: true, description: "行程 ID（接驳提醒事件里的 planId）" },
+        { name: "segmentNo", type: "string", required: true, description: "车次/航班号（提醒事件 segment.no）" },
+        { name: "accepted", type: "boolean", required: true, description: "用户是否需要接驳" },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        hint: "后续动作提示",
+      },
+      permissions: [],
+      timeoutMs: 5_000,
+    },
+    handler: async (input) => {
+      const planId = typeof input.planId === "string" ? input.planId.trim() : "";
+      const segmentNo = typeof input.segmentNo === "string" ? input.segmentNo.trim() : "";
+      const accepted = input.accepted === true;
+      if (!planId || !segmentNo) {
+        return { ok: false, error: "缺少 planId 或 segmentNo" };
+      }
+      const ok = travelPlanStore.setTransferPickupState(planId, segmentNo, accepted ? "confirmed" : "dismissed");
+      if (!ok) return { ok: false, error: `行程 ${planId} 中没有车次/航班 ${segmentNo}` };
+      return {
+        ok: true,
+        hint: accepted
+          ? "已记录需要接驳。现在继续 ride_hailing.quote（起点=到达车站/机场，终点=行程酒店，scheduleAt=票面到达时刻），用户确认选项后 ride_hailing.book 下单"
+          : "已记录不需要接驳，后续该段行程不再提醒",
+      };
+    },
+  };
+
   /** 6. 编辑行程（聊天式修改：添加/删除/替换/微调单条目） */
   const edit_itinerary: SkillDefinition = {
     metadata: {
@@ -807,7 +899,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary, edit_itinerary];
+  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary, pickup_answer, edit_itinerary];
 }
 
 /**

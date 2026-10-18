@@ -3,8 +3,16 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
+import {
+  navigationSessions,
+  NavigationSessionError,
+  type NavSessionView,
+} from "../../services/navigation/navigation-session-service.js";
 import { fetchText, fetchBingPhotoUrls } from "../../skills/travel-planning/bing-photos.js";
 import { travelMediaStore, type PoiMediaType } from "../../skills/travel-planning/travel-media-store.js";
+import { poiCache as poiCacheStore } from "../../skills/travel-planning/poi-cache-manager.js";
+import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
+import { travelMemoir } from "../../services/travel-memoir-service.js";
 
 /**
  * 行程规划浏览器页面路由（「行程卡 → 进入界面」链路）。
@@ -659,6 +667,214 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     reply.header("Cache-Control", "no-store");
     return reply.send(item.payload);
   });
+
+  // ══════════════════ 导航会话（手机端通用导航能力，旅游规划首个使用方） ══════════════════
+  // 状态机与存储见 services/navigation/navigation-session-service.ts。
+  // 页内导航：前端用 /travel-route 真实路网把当前段路线画在自家地图上（不跳外部地图）；
+  // 会话状态在服务端，页面重载后按 planId 无损恢复 Dock 与当前段路线。
+  // legUrl 为导航源 URI（NavigationProvider 抽象契约字段，如「唤起高德 App」等场景预留），
+  // 页内导航不消费它。
+
+  /** POST /travel-map/nav/session — 创建连续导航会话（站点串来自页面当前日的站点，同 planId 重建即替换） */
+  app.post("/travel-map/nav/session", async (req, reply) => {
+    const body = (req.body ?? {}) as {
+      planId?: string;
+      stops?: unknown;
+      startIndex?: number;
+      providerId?: string;
+      mode?: string;
+    };
+    try {
+      const view = navigationSessions.create(String(body.planId ?? ""), {
+        stops: body.stops,
+        startIndex: body.startIndex,
+        providerId: body.providerId,
+        mode: body.mode,
+      });
+      reply.header("Cache-Control", "no-store");
+      return reply.send(view);
+    } catch (e) {
+      if (e instanceof NavigationSessionError) {
+        return reply.code(e.status).send({ error: e.message });
+      }
+      throw e;
+    }
+  });
+
+  /** GET /travel-map/nav/session?planId= — 恢复活跃会话（无活跃会话返回 null） */
+  app.get("/travel-map/nav/session", async (req, reply) => {
+    const q = req.query as { planId?: string };
+    reply.header("Cache-Control", "no-store");
+    return reply.send({ session: navigationSessions.getActive(String(q.planId ?? "")) });
+  });
+
+  /**
+   * GET /travel-map/nav/transfer-link?name= — 接驳出发提醒的「导航去车站」链接。
+   * 返回高德 Web URI（真实导航；callnative=0 固定网页导航不唤起高德 App，与
+   * mobile.html 页内导航同口径）。优先用 AMAP_WEB_KEY 把车站名解析成坐标
+   * （to=lng,lat,名称 三元组，定位更准）；无 Key / 解析失败 → 纯名称模式
+   * （to=名称，由高德自行地名匹配，链接仍真实可用）。坐标只进 URI 参数
+   * （工具入参），不透出到用户可见文案（经纬度禁令）。
+   */
+  app.get("/travel-map/nav/transfer-link", async (req, reply) => {
+    const q = req.query as { name?: string; mode?: string };
+    const name = String(q.name ?? "").trim().slice(0, 60);
+    if (!name) return reply.code(400).send({ error: "name is required" });
+    const mode = ["car", "walk", "bus", "ride"].includes(String(q.mode)) ? String(q.mode) : "car";
+    const coord = await geocodeStationName(name);
+    const to = coord
+      ? `${coord.lng.toFixed(6)},${coord.lat.toFixed(6)},${encodeURIComponent(name)}`
+      : encodeURIComponent(name);
+    reply.header("Cache-Control", "no-store");
+    return reply.send({
+      url: `https://uri.amap.com/navigation?to=${to}&mode=${mode}&policy=&src=PrivateAgent&coordinate=gaode&callnative=0`,
+      resolved: Boolean(coord),
+    });
+  });
+
+  /**
+   * POST /travel-map/nav/:action — 会话阶段流转（用户手动按钮驱动，暂不做自动判定）。
+   * action: arrive（已到达，going→stay）| depart（出发去下一站）| skip（跳过当前目标）| end（结束导航）。
+   */
+  app.post("/travel-map/nav/:action", async (req, reply) => {
+    const { action } = req.params as { action: string };
+    const body = (req.body ?? {}) as { planId?: string };
+    const planId = String(body.planId ?? "");
+    const actions: Record<string, () => NavSessionView> = {
+      arrive: () => {
+        const view = navigationSessions.arrive(planId);
+        // 出片时刻提示（travel 双端⑤）：到达即查 POI 库当前站的机位/最佳时段，
+        // 有真实字段才随响应带出（页内展示），无则不带——宁缺毋滥
+        const tip = poiPhotoTipOf(planId, view.stops[view.curIdx]?.name ?? "");
+        // 到访足迹（travel 双端⑦）：把「已到达」落进行程冷层（按站名回找
+        // day/stop 索引；找不到就跳过——不硬记）。失败静默，不影响导航主链路。
+        recordVisitFootprint(planId, view.stops[view.curIdx]?.name ?? "");
+        return tip ? { ...view, photoTip: tip } : view;
+      },
+      depart: () => navigationSessions.depart(planId),
+      skip: () => navigationSessions.skip(planId),
+      end: () => navigationSessions.end(planId),
+    };
+    const fn = actions[action];
+    if (!fn) return reply.code(404).send({ error: "unknown nav action" });
+    try {
+      reply.header("Cache-Control", "no-store");
+      return reply.send(fn());
+    } catch (e) {
+      if (e instanceof NavigationSessionError) {
+        return reply.code(e.status).send({ error: e.message });
+      }
+      throw e;
+    }
+  });
+
+  /** GET /travel-map/memoir — 行后旅行回忆录长页（travel 双端⑦；?planId= 定位行程） */
+  app.get("/travel-map/memoir", async (_req, reply) => {
+    reply.header("Cache-Control", "private, max-age=86400");
+    reply.type("text/html; charset=utf-8");
+    return buildPageHtml("memoir.html");
+  });
+
+  /** GET /travel-map/memoir/data?planId= — 回忆录聚合数据（足迹+订单+账本+照片） */
+  app.get("/travel-map/memoir/data", async (req, reply) => {
+    const q = req.query as { planId?: string };
+    const planId = String(q.planId ?? "").trim();
+    if (!planId) return reply.code(400).send({ error: "planId is required" });
+    const memoir = await travelMemoir.build(planId);
+    if (!memoir) return reply.code(404).send({ error: "plan not found" });
+    reply.header("Cache-Control", "no-store");
+    return reply.send(memoir);
+  });
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 到访足迹（travel 双端⑦）：导航 arrive → 按站名在行程冷层回找 day/stop
+// 索引后落盘（travel-plan-store.recordVisit）。站名在行程里找不到（如用户
+// 手动加的临时点）就不记——足迹只认真实到访，宁缺毋滥。
+// ═══════════════════════════════════════════════════════════════════
+
+function recordVisitFootprint(planId: string, stopName: string): void {
+  try {
+    if (!stopName) return;
+    const plan = travelPlanStore.get(planId);
+    if (!plan) return;
+    for (let d = 0; d < (plan.days ?? []).length; d++) {
+      const items = plan.days[d]?.items ?? [];
+      const s = items.findIndex((it) => (it.name ?? "").trim() === stopName);
+      if (s >= 0) {
+        travelPlanStore.recordVisit(planId, { day: d, stop: s, name: stopName, arrivedAt: Date.now() });
+        return;
+      }
+    }
+  } catch {
+    // 足迹记录失败不影响导航主链路
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 出片时刻提示（travel 双端⑤）：导航 arrive 后按站名回查 POI 库的 photo
+// 属性（机位/最佳时段，参考 LLM 归纳的真实热度回填）。查不到一律不带。
+// ═══════════════════════════════════════════════════════════════════
+
+function poiPhotoTipOf(planId: string, stopName: string): { spot?: string; bestTime?: string } | null {
+  if (!stopName) return null;
+  try {
+    const dest = travelPlanStore.get(planId)?.destination;
+    if (!dest) return null;
+    const entry = poiCacheStore.get(dest);
+    if (!entry) return null;
+    const poi = entry.data.attractions.find((p) => p.name === stopName);
+    const spot = poi?.photo?.spot?.trim();
+    const bestTime = poi?.photo?.bestTime?.trim();
+    if (!spot && !bestTime) return null;
+    return {
+      ...(spot ? { spot } : {}),
+      ...(bestTime ? { bestTime } : {}),
+    };
+  } catch {
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 接驳「导航去车站」的车站名 → 高德坐标解析（GCJ-02）。
+// AMAP_WEB_KEY 未配置或网络失败 → 返回 null，调用方降级为纯名称导航 URI
+// （链接仍真实可用），绝不返回编造坐标。
+// ═══════════════════════════════════════════════════════════════════
+
+const AMAP_WEB_KEY = process.env.AMAP_WEB_KEY || "";
+
+interface StationCoord {
+  lat: number;
+  lng: number;
+}
+
+/** 车站名坐标解析内存缓存（车站坐标基本不变，进程级缓存即可） */
+const stationCoordCache = new Map<string, StationCoord | null>();
+
+async function geocodeStationName(name: string): Promise<StationCoord | null> {
+  if (!AMAP_WEB_KEY) return null;
+  if (stationCoordCache.has(name)) return stationCoordCache.get(name) ?? null;
+  try {
+    const url = `https://restapi.amap.com/v3/place/text?key=${AMAP_WEB_KEY}&keywords=${encodeURIComponent(name)}&types=150500|150100|150700&citylimit=false&offset=1`;
+    const res = await fetch(url, { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) throw new Error(`amap place http ${res.status}`);
+    const data = (await res.json()) as {
+      status?: string;
+      pois?: Array<{ location?: string }>;
+    };
+    const loc = data.status === "1" ? data.pois?.[0]?.location : undefined;
+    const [lng, lat] = (loc ?? "").split(",").map(Number);
+    const coord =
+      Number.isFinite(lng) && Number.isFinite(lat) && lng !== 0 && lat !== 0
+        ? { lng, lat }
+        : null;
+    stationCoordCache.set(name, coord);
+    return coord;
+  } catch {
+    stationCoordCache.set(name, null);
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -814,6 +1030,8 @@ export function registerPoiDetailsRoute(
     const lat = Number(q.lat);
     const lng = Number(q.lng);
     if (!name) return reply.code(400).send({ error: "name is required" });
+    // 动态媒体回填接口（照片本地化后 URL 会变）：禁中间层缓存，浏览器每次验证
+    reply.header("Cache-Control", "no-cache");
     // 可选 type（attraction|hotel|restaurant）：带上才能把补到的照片种进媒体库
     // （按 type+name 归档），下次行程装配/读取装配直接命中本地资产。
     const mediaType = (["attraction", "hotel", "restaurant"] as const).find((t) => t === q.type);

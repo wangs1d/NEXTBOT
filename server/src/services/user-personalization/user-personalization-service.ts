@@ -30,7 +30,20 @@ import {
   extractFactCandidates,
   mergeFactCandidates,
   toFactStore,
+  travelFactOf,
+  type FactCandidate,
+  type UserFactStore,
 } from "./user-profile-facts.js";
+
+/**
+ * 旅行人格分型（travel 双端③）：由 UserFact travel 类聚合出的轻量画像标签。
+ * 随规划载荷下发攻略页展示，并参与每日景点密度微调。
+ */
+export interface TravelPersona {
+  id: "shutter" | "explorer" | "curator" | "wanderer";
+  label: string;
+  desc: string;
+}
 import {
   defaultContactPreferenceState,
   ProactiveContactPolicyService,
@@ -1279,15 +1292,88 @@ export class UserPersonalizationService {
     return next;
   }
 
-  private updateFactStore(actorId: string, userText: string): void {
-    if (!this.memory || !userText.trim()) return;
-    void this.updateFactStoreAsync(actorId, userText);
+  /**
+   * 旅行画像读取口（travel-upgrade-plan 画像引擎 + travel 双端②③）：规划工具
+   * 生成行程前取用——出片向/体验向 style 兜底 + POI 负向偏好（同类衰减依据）+
+   * 旅行人格分型（攻略页徽章 + 每日密度）。信号查不到返回空对象，不阻塞规划。
+   */
+  getTravelProfile(actorId: string): {
+    photoDriven?: boolean;
+    experienceDriven?: boolean;
+    dislikeTags?: string[];
+    dislikeNames?: string[];
+    persona?: TravelPersona;
+  } {
+    try {
+      const store = this.loadFactStore(actorId);
+      const style = travelFactOf(store, "travel_style");
+      const dislikeTags = store.facts
+        .filter((f) => f.category === "travel" && f.key === "poi_dislike" && f.value)
+        .map((f) => f.value);
+      const dislikeNames = store.facts
+        .filter((f) => f.category === "travel" && f.key === "poi_dislike_name" && f.value)
+        .map((f) => f.value);
+      const persona = this.deriveTravelPersona(store, style);
+      if (!style && !dislikeTags.length && !dislikeNames.length && !persona) return {};
+      return {
+        ...(style === "photo_driven" ? { photoDriven: true } : {}),
+        ...(style === "experience_driven" ? { experienceDriven: true } : {}),
+        ...(dislikeTags.length ? { dislikeTags: dislikeTags.slice(0, 12) } : {}),
+        ...(dislikeNames.length ? { dislikeNames: dislikeNames.slice(0, 24) } : {}),
+        ...(persona ? { persona } : {}),
+      };
+    } catch {
+      return {};
+    }
   }
 
-  private async updateFactStoreAsync(actorId: string, userText: string): Promise<void> {
+  /**
+   * 旅行人格分型（travel 双端③）：UserFact travel 类聚合 → 规则分型。
+   * 优先级：style 显式分型 > 负反馈证据≥3（挑剔）> 有旅行事实（随性）。
+   * 无任何旅行事实返回 null——攻略页不展示人格徽章，宁缺毋滥不硬凑。
+   */
+  private deriveTravelPersona(store: UserFactStore, style?: string): TravelPersona | null {
+    const travelFacts = store.facts.filter((f) => f.category === "travel");
+    if (!travelFacts.length) return null;
+    if (style === "photo_driven") {
+      return { id: "shutter", label: "出片收集家", desc: "走到哪拍到哪，机位与光线优先" };
+    }
+    if (style === "experience_driven") {
+      return { id: "explorer", label: "体验沉浸派", desc: "玩法与在地感优先，不赶路不打卡" };
+    }
+    const dislikeEvidence = travelFacts
+      .filter((f) => f.key === "poi_dislike" || f.key === "poi_dislike_name")
+      .reduce((sum, f) => sum + Math.max(1, f.evidenceCount), 0);
+    if (dislikeEvidence >= 3) {
+      return { id: "curator", label: "挑剔策展人", desc: "不合口味的一票否决，留下的都是精华" };
+    }
+    return { id: "wanderer", label: "随性漫游者", desc: "不设限的旅程，走到哪算哪" };
+  }
+
+  /**
+   * POI 负向偏好写入口（travel 双端①，2026-10-18）：攻略页「不感兴趣」反馈
+   * 回写 UserFact——按 POI 标签写 travel.poi_dislike（同类衰减的依据，证据
+   * 越多 confidence 越高、下次规划同类降权越狠），POI 名单独写
+   * travel.poi_dislike_name（下轮规划直接点名排除）。零阻塞：写失败只记日志。
+   */
+  recordPoiDislike(actorId: string, poiName: string, tags: string[], fallbackKind?: string): void {
     if (!this.memory) return;
-    const candidates = extractFactCandidates(userText);
-    if (!candidates.length) return;
+    const candidates: FactCandidate[] = [];
+    for (const tag of tags) {
+      const v = tag.trim().slice(0, 24);
+      if (v) candidates.push({ category: "travel", key: "poi_dislike", value: v });
+    }
+    if (!candidates.length && fallbackKind) {
+      candidates.push({ category: "travel", key: "poi_dislike", value: fallbackKind });
+    }
+    const name = poiName.trim().slice(0, 40);
+    if (name) candidates.push({ category: "travel", key: "poi_dislike_name", value: name });
+    void this.mergeFactsLocked(actorId, candidates).catch(() => {});
+  }
+
+  /** UserFact 乐观锁合并（CAS 重试 ≤8 次；对话抽取与显式反馈共用） */
+  private async mergeFactsLocked(actorId: string, candidates: FactCandidate[]): Promise<void> {
+    if (!this.memory || !candidates.length) return;
     for (let i = 0; i < 8; i++) {
       const { revision, entries } = this.memory.getSnapshot(actorId, [USER_PROFILE_FACTS_KEY]);
       const current = toFactStore(entries[USER_PROFILE_FACTS_KEY]);
@@ -1295,6 +1381,16 @@ export class UserPersonalizationService {
       const r = await this.memory.applyPatch(actorId, revision, [{ key: USER_PROFILE_FACTS_KEY, op: "put", value: merged }]);
       if (r.ok) return;
     }
+  }
+
+  private updateFactStore(actorId: string, userText: string): void {
+    if (!this.memory || !userText.trim()) return;
+    void this.updateFactStoreAsync(actorId, userText);
+  }
+
+  private async updateFactStoreAsync(actorId: string, userText: string): Promise<void> {
+    const candidates = extractFactCandidates(userText);
+    await this.mergeFactsLocked(actorId, candidates);
   }
 
   private loadBehaviorSignals(actorId: string): BehaviorSignals {

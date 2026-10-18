@@ -41,6 +41,10 @@ const GATE_EXEMPT_PLATFORMS = new Set<string>(["alipay", "friend"]);
 export function gateInboundMessage(input: MessageHubInboundInput): MessageGateVerdict {
   if (process.env.MESSAGE_HUB_GATE === "off") return { gated: false };
   if (GATE_EXEMPT_PLATFORMS.has(input.platform)) return { gated: false };
+  // 通知捕捉（2026-10-18）：端侧通知监听白名单已筛过来源（同 alipay 豁免逻辑），
+  // 且取件码/验证码/物流进度正是用户向 agent 检索的高价值信息——
+  // 捕捉走「全量镜像、消费时过滤」分层，入口闸不再二次裁决内容价值。
+  if (input.meta?.source === "phone_capture") return { gated: false };
   const text = input.text ?? "";
   if (text.trim().length === 0) return { gated: false };
   if (HUMAN_URGENT_RE.test(text)) return { gated: false };

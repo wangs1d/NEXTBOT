@@ -34,6 +34,7 @@ import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
 import "core/utils/content_summary_parser.dart";
 import "core/services/app_auto_start.dart";
+import "core/services/app_tray_service.dart";
 import "core/services/client_update_checker.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
@@ -210,6 +211,8 @@ void main() async {
         await windowManager.show();
         await windowManager.focus();
         windowManager.addListener(WindowBoundsSaver.instance);
+        // 点 X 后台驻留 + 系统托盘（隐藏时经托盘恢复/退出）。
+        await AppTrayService.instance.init();
       });
       _writeCrashLog("[BOOT]", "stage 6: after waitUntilReadyToShow, before runApp", StackTrace.current);
     }

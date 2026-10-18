@@ -15,6 +15,7 @@
  */
 
 import type { Coordinates, AgentTrace } from './types.js';
+import type { TravelPersona } from '../../services/user-personalization/user-personalization-service.js';
 import https from 'node:https';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { searchFoursquarePois, isFoursquareConfigured } from './foursquare-service.js';
@@ -36,6 +37,37 @@ import { gcj02ToWgs84 } from './coord-transform.js';
 
 /** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
 type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
+
+/**
+ * 交通段正则抽取（travel-upgrade-plan P2，导出供测试与调度器复用）。
+ * 车次：G/D/C/K/T/Z + 1-4 位数字；航班：两位航司码 + 3-4 位数字。
+ * 诚实边界：只抽数量与类型，用户没给的时刻绝不构造（depTime/arrTime 留空，
+ * 调度器对无时刻段降级为行程当日早间提醒）。
+ */
+export function extractTransferSegments(input: string, destination: string): TransferSegment[] {
+  if (!input) return [];
+  const out: TransferSegment[] = [];
+  const seen = new Set<string>();
+  // 车次（去程语义：出现在规划输入里 = 用户将乘坐前往目的地）
+  const trainRe = /(?<![A-Za-z0-9])([GDC_KTZ])\s?(\d{1,4})(?![0-9])/g;
+  for (const m of input.toUpperCase().matchAll(trainRe)) {
+    const no = `${m[1]}${m[2]}`;
+    if (seen.has(no)) continue;
+    seen.add(no);
+    out.push({ type: 'train', role: 'arrival', no, from: '出发地', to: destination || '目的地' });
+  }
+  // 航班号：IATA 航司两位码 + 3-4 位数字（CA1832 / MU5137）
+  const flightRe = /(?<![A-Za-z0-9])([A-Z0-9]{2})(\d{3,4})(?![0-9])/g;
+  for (const m of input.toUpperCase().matchAll(flightRe)) {
+    const no = `${m[1]}${m[2]}`;
+    if (seen.has(no)) continue;
+    // 车次字母（G/D/C/K/T/Z）开头的两位已被 trainRe 吃掉，这里只收真航班形态
+    if (/^[GDC_KTZ]\d+$/.test(no)) continue;
+    seen.add(no);
+    out.push({ type: 'flight', role: 'arrival', no, from: '出发地', to: destination || '目的地' });
+  }
+  return out.slice(0, 4);
+}
 
 /** 单个时段的天气语境（供天气×时段智能排程） */
 interface SlotWeatherCtx {
@@ -103,6 +135,19 @@ export interface PlanningRequest {
   boundPlatforms?: BoundPlatform[];
   /** 会话 ID（可选）：传入时通过 travel-progress-bus 向聊天侧流式汇报规划进度 */
   sessionId?: string;
+  /** 用户画像提示（UserFact travel 类别；原文未说的 style 用它兜底；含 POI 负向偏好与人格分型，travel 双端②③） */
+  profileHints?: {
+    photoDriven?: boolean;
+    experienceDriven?: boolean;
+    /** 攻略页「不感兴趣」累积的同类标签：命中候选降权（同类衰减） */
+    dislikeTags?: string[];
+    /** 点过不感兴趣的 POI 名：命中候选重罚（下轮排除向） */
+    dislikeNames?: string[];
+    /** 旅行人格分型：攻略页徽章 + 每日景点密度微调 */
+    persona?: TravelPersona;
+  };
+  /** 交通大段（对话中收集到的车次/航班；未提供时从 input 正则兜底抽取） */
+  transfers?: TransferSegment[];
 }
 
 /**
@@ -132,8 +177,14 @@ export interface TripPreferences {
   cuisine?: string;
   /** 住宿档次（提取自"豪华/精品/经济"等） */
   hotelTier?: 'budget' | 'mid' | 'luxury';
-  /** 偏好来源标签：user=用户原文说 / destination=目的地常识 / default=系统默认 */
-  sources: Record<keyof Omit<TripPreferences, 'raw' | 'sources'>, 'user' | 'destination' | 'default'>;
+  /** 出片向：漂亮饭/网红打卡/机位优先（原文或用户画像 travel_style=photo_driven） */
+  photoDriven: boolean;
+  /** 体验向：项目/玩法优先（原文或用户画像 travel_style=experience_driven） */
+  experienceDriven: boolean;
+  /** 旅行人格分型（travel 双端③）：UserFact 聚合，控制每日景点密度并随载荷下发 */
+  persona?: TravelPersona;
+  /** 偏好来源标签：user=用户原文说 / destination=目的地常识 / default=系统默认 / profile=用户画像 */
+  sources: Record<keyof Omit<TripPreferences, 'raw' | 'sources' | 'persona'>, 'user' | 'destination' | 'default' | 'profile'>;
 }
 
 /**
@@ -162,6 +213,41 @@ export interface PlannedDay {
   items: ItineraryItem[];
   /** 当天天气一句话摘要（逐日预报；天气获取失败缺省，前端隐藏式消费） */
   dayWeather?: string;
+  /** 当天主题线（剧本式攻略：如「出片打卡日」「海滨躺平日」；模板生成，可缺省） */
+  theme?: string;
+}
+
+/**
+ * 交通大段（高铁/航班，travel-upgrade-plan P2 接驳提醒的数据源）。
+ * 由规划对话中用户提供（车次/航班号 + 票面时间），或 Agent 经 transfers 入参传入；
+ * RE 兜底从规划输入里抽取（有车次没时刻时 depTime/arrTime 留空，调度器降级处理）。
+ */
+export interface TransferSegment {
+  type: 'flight' | 'train';
+  /** arrival=到达目的地 / departure=返程离开 */
+  role: 'arrival' | 'departure';
+  /** 车次号（G123）或航班号（CA1832） */
+  no: string;
+  /** 出发时间（ISO；票面未提供时留空） */
+  depTime?: string;
+  /** 到达时间（ISO；接驳提醒按它倒推触发时刻） */
+  arrTime?: string;
+  from: string;
+  to: string;
+  /** 用户已确认需要接驳（确认后调度器不再问） */
+  pickupConfirmed?: boolean;
+  /** 用户已拒绝，本段行程内不再打扰 */
+  pickupDismissed?: boolean;
+}
+
+/** 剧本式攻略的横向聚合视图（电脑端四 Tab 展示；全部来自真实数据，宁缺毋滥） */
+export interface TripGuide {
+  /** 出片清单：有 photo 属性或社媒热度 hot 的景点 */
+  photoSpots: Array<{ name: string; photoTip?: string; bestTime?: string; image?: string; tags?: string[] }>;
+  /** 漂亮饭清单：有 prettyFood 属性或社媒热度 hot 的餐厅 */
+  prettyFood: Array<{ name: string; vibe?: string; signature?: string; avgPrice?: number; image?: string; tags?: string[] }>;
+  /** 避雷清单：tips 中含避坑语义的条目 */
+  pitfalls: Array<{ name: string; tip: string }>;
 }
 
 export interface ItineraryItem {
@@ -179,6 +265,14 @@ export interface ItineraryItem {
   visitDuration?: number;
   /** 当地小贴士（用户没问也补） */
   tips?: string[];
+  /** 一句话种草：为什么去（30 字内，模板化生成自真实数据，不虚构） */
+  why?: string;
+  /** 出片建议：机位/时段（来自 POI.photo 属性，无数据省略） */
+  photoTip?: string;
+  /** 避坑提示（来自 tips 中含避坑语义的条目，无则省略） */
+  pitfall?: string;
+  /** 画像推荐理由（travel 双端②：「为什么推荐给你」，与排序同源的信号命中才有） */
+  recommendReason?: string;
   /** 预订提示（酒店/付费景点） */
   bookingNote?: string;
   latitude: number;
@@ -219,6 +313,10 @@ export interface PlanningResult {
   days: PlannedDay[];
   pois: POISummary[];
   preferences: TripPreferences;
+  /** 剧本式攻略聚合视图（出片/漂亮饭/避雷，电脑端四 Tab；无数据为空数组） */
+  guide?: TripGuide;
+  /** 交通大段（高铁/航班，接驳提醒数据源；用户没提供车次/航班时空缺省） */
+  transferSegments?: TransferSegment[];
   /** 行程附加实用信息（用户没问也补） */
   travelInfo: TravelInfo;
   /** 整体价格汇总（货币/总原价/总优惠/总实付/价格模式） */
@@ -530,6 +628,21 @@ const AMAP_POI_TYPES: Record<string, string> = {
 // ======================== 排序/评分权重配置 ========================
 
 /**
+ * 每日景点数上限（travel 双端③密度口径收口为纯函数，buildDaysFast 与单测共用）：
+ * 节奏档位打底，想多玩 +1，带老人 -1，人格分型微调——体验沉浸/挑剔策展/随性漫游
+ * 留出慢下来的空间，出片收集家（shutter）保持默认密度（打卡点多拍才尽兴）。
+ * 下限 2 不破底线。
+ */
+export function paceCapFor(preferences: Pick<TripPreferences, 'pace' | 'activities' | 'elderly' | 'persona'>): number {
+  const paceCap: Record<TripPreferences['pace'], number> = { relaxed: 2, balanced: 3, intensive: 4 };
+  let cap = paceCap[preferences.pace];
+  if (preferences.activities) cap += 1;
+  if (preferences.elderly) cap = Math.max(2, cap - 1);
+  if (preferences.persona && preferences.persona.id !== 'shutter') cap = Math.max(2, cap - 1);
+  return cap;
+}
+
+/**
  * 评分与排序权重集中配置（替代散落在排序函数里的魔法数字）。
  * 调整排序手感只改这里；语义见各字段名与使用处注释。
  */
@@ -545,7 +658,13 @@ const SCORING = {
     activities: 2, seaside: 3, kids: 2,
     indoorRainy: 5, indoorHot: 3, outdoorRainy: -5, outdoorHot: -2,
     nightView: 1.5, eveningOnly: 1,
+    // travel 双端②：画像信号（负向衰减 + 出片/体验向加分）。负罚只影响排序不删除
+    //（保留兜底池），名称重罚下轮排除向、标签轻罚同类衰减
+    dislikeName: -8, dislikeTag: -1.5, photoBoost: 1.5, experienceBoost: 1.5,
   },
+  /** 体验向词根（travel 双端②）：与 user-profile-facts 的 experience_driven 信号同源，
+   *  用于排序加分与「为什么推荐给你」理由标注，两处共用同一判据（同源才同话术） */
+  experienceTagRe: /(户外|徒步|露营|潜水|滑雪|漂流|蹦极|越野|垂钓|温泉|乐园|游乐|探险|刺激|互动|outdoor|hiking|camping|diving|ski|rafting)/i,
   /** 顺路餐厅选择：距离(distWeight) + 评分(ratingWeight) + 偏好加分 - 复用惩罚 */
   routePick: {
     distanceWeight: 0.6,
@@ -590,12 +709,14 @@ export class PlanningService {
   /**
    * @param weatherService 可选天气服务（未注入则跳过天气感知，按中性天气排程）
    * @param imageSearch 可选图片搜索端口（未注入时走内置必应图片抓取）
+   * @param heatEnricher 可选社交热度回填器（未注入则跳过网红/出片属性回填）
    *
    * 2026-10-12：原第三/四个构造参数（videoSearch / reviewSearch）随视频能力下线移除。
    */
   constructor(
     private readonly weatherService?: WeatherService,
     private readonly imageSearch?: TravelImageSearchPort,
+    private readonly heatEnricher?: import('./travel-heat-enricher.js').TravelHeatEnricher,
   ) {}
 
   /**
@@ -687,7 +808,10 @@ export class PlanningService {
     // 1. 解析用户输入
     const destName = extractDestination(request.input, request.destination);
     const dayCount = request.days || extractDays(request.input) || 3;
-    const preferences = extractPreferences(request.input, request.preferences, destName);
+    const preferences = extractPreferences(request.input, request.preferences, destName, request.profileHints);
+    // 旅行人格分型（travel 双端③）不进 extractPreferences（原文/画像优先级在那里已定），
+    // 直接随 preferences 下发：排程密度 + 载荷透传共用这一份
+    preferences.persona = request.profileHints?.persona;
     const normalizedDest = destName.toLowerCase().trim();
 
     this.reportProgress(request.sessionId, "resolve", `正在规划「${destName}」${dayCount}天行程，解析偏好中…`);
@@ -781,6 +905,12 @@ export class PlanningService {
     const prefSig = JSON.stringify([
       preferences.seaside, preferences.pool, preferences.activities, preferences.kids, preferences.elderly,
       preferences.pace, preferences.activityMix, preferences.budget ?? '', preferences.cuisine ?? '', preferences.hotelTier ?? '',
+      // travel 双端②③：出片/体验向 + 人格分型 + 负向偏好都影响排序结果，必须进签名，
+      // 否则行程级缓存会吃掉新画像的效果（点完「不感兴趣」再规划还是老顺序）
+      preferences.photoDriven, preferences.experienceDriven,
+      preferences.persona?.id ?? '',
+      (request.profileHints?.dislikeTags ?? []).join(','),
+      (request.profileHints?.dislikeNames ?? []).join(','),
     ]);
     const itinKey =
       `itin|${normalizedDest}|${dayCount}|${prefSig}|${weatherSig}`;
@@ -801,7 +931,8 @@ export class PlanningService {
       cacheEntry.data.hotels,
       cacheEntry.data.restaurants,
       preferences,
-      rankedWeatherCtx
+      rankedWeatherCtx,
+      { dislikeTags: request.profileHints?.dislikeTags, dislikeNames: request.profileHints?.dislikeNames }
     );
     const tParsed = Date.now() - t0;
 
@@ -872,6 +1003,20 @@ export class PlanningService {
     // 8. 汇总价格
     const pricingSummary = this._summarizePricing(days, pricingCtx);
 
+    // 8.5 剧本式攻略（travel-upgrade-plan）：逐站 why/photoTip/pitfall 标注 + 每日
+    //     主题线 + 横向聚合清单（出片/漂亮饭/避雷）。全模板化生成，数据只来自
+    //     POI 真实属性（photo/socialHeat/prettyFood/tips），拿不到就空——不造假。
+    this.annotateItineraryStory(days, cacheEntry.data);
+    // 画像推荐理由（travel 双端②）：与排序同源的信号命中才写，无信号不写——宁缺毋滥
+    this.annotateProfileReasons(days, cacheEntry.data, preferences, {
+      dislikeTags: request.profileHints?.dislikeTags,
+      dislikeNames: request.profileHints?.dislikeNames,
+    });
+    const guide = this.buildGuide(days, cacheEntry.data);
+
+    // 8.6 交通大段（接驳提醒数据源）：调用方传入优先，正则从规划输入兜底抽取
+    const transferSegments = this.resolveTransferSegments(request);
+
     const result: PlanningResult = {
       id: `plan-${Date.now()}`,
       title: this.buildTitle(destName, dayCount, preferences),
@@ -883,6 +1028,8 @@ export class PlanningService {
       days,
       pois,
       preferences,
+      guide,
+      transferSegments: transferSegments.length ? transferSegments : undefined,
       travelInfo,
       pricingSummary,
       fromCache,
@@ -890,6 +1037,10 @@ export class PlanningService {
       weather: weatherCtx?.summary || undefined,
       dataQuality: this.deriveDataQuality(cacheEntry.data),
     };
+
+    // 8.7 社交热度后台回填（fire-and-forget：小红书/抖音聚合 + LLM 名单内归类，
+    //     7 天去重；失败静默不影响本次行程返回）
+    this.heatEnricher?.maybeEnrich(destName, cacheEntry);
 
     // 9. 写入行程级二级缓存（POI 数据刷新时由 createdAt 差异自然失效）。
     //    缓存内存深拷贝：调用方持有的是原始对象，mutate 不影响缓存。
@@ -1011,11 +1162,12 @@ export class PlanningService {
       `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(Math.round(min % 60)).padStart(2, '0')}`;
     const defaultPrefs: TripPreferences = {
       raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false,
-      pace: 'balanced', activityMix: 'mixed',
+      pace: 'balanced', activityMix: 'mixed', photoDriven: false, experienceDriven: false,
       sources: {
         seaside: 'default', pool: 'default', activities: 'default', kids: 'default',
         elderly: 'default', pace: 'default', activityMix: 'default',
         budget: 'default', cuisine: 'default', hotelTier: 'default',
+        photoDriven: 'default', experienceDriven: 'default',
       },
     };
     const visitOf = (it: T): number =>
@@ -2100,14 +2252,19 @@ export class PlanningService {
    *
    * 天气感知（B3）：雨天/高温时把室内景点前置、室外景点后置；
    * 夜景/夜间专属景点小幅前置，具体晚间分槽在 buildDaysFast 中进一步处理。
+   * 画像信号（travel 双端②）：dislikeNames/dislikeTags 负向衰减、出片/体验向加分
+   * （photoDriven/experienceDriven 已并入 prefs，出片加分要求有真实机位或热度数据）。
    */
   private rankPOIsByPreferences(
     attractions: RawPOI[],
     hotels: RawPOI[],
     restaurants: RawPOI[],
     prefs: TripPreferences,
-    weather?: TripWeatherCtx | null
+    weather?: TripWeatherCtx | null,
+    hints?: { dislikeTags?: string[]; dislikeNames?: string[] }
   ): { attractions: RawPOI[]; hotels: RawPOI[]; restaurants: RawPOI[] } {
+    const dislikeNames = new Set(hints?.dislikeNames ?? []);
+    const dislikeTags = hints?.dislikeTags ?? [];
     const score = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number => {
       const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
       let s = this.effectiveRating(poi, type); // 本地评论聚合分混合（媒体库优先）
@@ -2130,6 +2287,13 @@ export class PlanningService {
         if (prefs.activities) s += SCORING.attraction.activities; // 想看"有什么好玩的" → 把景点都前置
         if (prefs.seaside && /(海|滩|湾|岛|beach|coast|reef|dive|潜水|冲浪)/i.test(hay)) s += SCORING.attraction.seaside;
         if (prefs.kids && /(乐园|动物园|主题|family|amusement|zoo)/i.test(hay)) s += SCORING.attraction.kids;
+        // travel 双端②：负向偏好衰减——点过「不感兴趣」的 POI 重罚，同类标签轻降权
+        if (dislikeNames.has(poi.name)) s += SCORING.attraction.dislikeName;
+        if (dislikeTags.some((t) => t && hay.includes(t.toLowerCase()))) s += SCORING.attraction.dislikeTag;
+        // 出片向：有实测机位数据或社交热度 hot 才加分（无数据不加分，宁缺毋滥）
+        if (prefs.photoDriven && (poi.photo?.spot || poi.socialHeat?.level === 'hot')) s += SCORING.attraction.photoBoost;
+        // 体验向：玩法/户外类标签命中加分
+        if (prefs.experienceDriven && SCORING.experienceTagRe.test(hay)) s += SCORING.attraction.experienceBoost;
         if (weather) {
           const t = poi.tags || [];
           if (t.includes('indoor')) {
@@ -2405,6 +2569,136 @@ export class PlanningService {
     return tags.length ? `${base}·${tags.join('/')}` : base;
   }
 
+  // ======================== 剧本式攻略 + 交通大段（travel-upgrade-plan） ========================
+
+  /**
+   * 逐站攻略标注（模板化，数据全部来自 POI 真实属性，缺省静默）：
+   * - why：评分/热度/品类组成的一句话种草（30 字内），无任何依据就不写
+   * - photoTip：POI.photo（机位/最佳时段）→「机位：… · 最佳时段：…」
+   * - pitfall：tips 中含避坑语义（排队/收费/小心/避雷/注意）的第一条
+   * 同时按当天组成生成主题线（photoDriven 时优先出片措辞）。
+   */
+  private annotateItineraryStory(days: PlannedDay[], data: CacheEntry['data']): void {
+    for (const day of days) {
+      const themes: string[] = [];
+      for (const it of day.items) {
+        // why：评分是唯一可靠依据；热度标签只是措辞修饰
+        const whyParts: string[] = [];
+        if (it.rating >= 4.5) whyParts.push(`评分 ${it.rating.toFixed(1)} 的高分之选`);
+        else if (it.rating >= 4.0) whyParts.push(`评分 ${it.rating.toFixed(1)} 口碑不错`);
+        if (it.type === 'restaurant' && it.tags?.some((t) => /特色|本地|老字号|招牌/.test(t))) {
+          whyParts.push('本地特色味道');
+        }
+        if (whyParts.length) it.why = whyParts.slice(0, 2).join('，');
+        // photoTip：来自回填的 photo 属性
+        const meta = this.findCachedSocialMeta(data, it);
+        if (meta?.photo?.spot || meta?.photo?.bestTime) {
+          it.photoTip = [meta.photo.spot ? `机位：${meta.photo.spot}` : '', meta.photo.bestTime ? `最佳时段：${meta.photo.bestTime}` : '']
+            .filter(Boolean)
+            .join(' · ');
+        }
+        // pitfall：tips 中的避坑语义
+        it.pitfall = it.tips?.find((t) => /排队|收费|小心|避雷|注意|陷阱|强制|套票/.test(t));
+        // 主题线素材
+        if (it.type === 'restaurant') themes.push('食');
+        else if (it.photoTip || (it.tags?.some((t) => /夜景|日落|日出|湖|海|花/.test(t)))) themes.push('景');
+        else themes.push('游');
+      }
+      const eat = themes.filter((t) => t === '食').length;
+      const view = themes.filter((t) => t === '景').length;
+      const parts: string[] = [];
+      if (view >= 2) parts.push('出片漫游');
+      else if (view === 1) parts.push('轻漫游');
+      if (eat >= 2) parts.push('吃好喝好');
+      else if (eat === 1) parts.push('风味一餐');
+      if (day.items.some((i) => i.tags?.some((t) => /夜景|夜市|夜间/.test(t)))) parts.push('夜色收尾');
+      day.theme = parts.length ? parts.join(' · ') : undefined;
+    }
+  }
+
+  /** 从 POI 缓存数据桶找回填的社交属性（ItineraryItem 不冗余存，按 poiId 回查） */
+  private findCachedSocialMeta(
+    data: CacheEntry['data'],
+    it: ItineraryItem,
+  ): { socialHeat?: { level: 'hot' | 'mid' }; photo?: { spot?: string; bestTime?: string }; prettyFood?: { vibe?: string; signature?: string } } | null {
+    if (!it.poiId) return null;
+    const bucket = it.type === 'restaurant' ? data.restaurants : data.attractions;
+    const poi = bucket.find((p) => p.id === it.poiId);
+    return poi ? { socialHeat: poi.socialHeat, photo: poi.photo, prettyFood: poi.prettyFood } : null;
+  }
+
+  /**
+   * 画像推荐理由（travel 双端②「为什么推荐给你」）：只给 attraction 条目写，
+   * 判据与 rankPOIsByPreferences 完全同源（出片=有实测机位/热度 hot，体验=词根命中），
+   * 排序因为什么加分，理由就说同一件事；负向衰减不写理由（不解释「为什么没去」）。
+   * 无信号命中 → 不写字段，前端隐藏（宁缺毋滥）。
+   */
+  private annotateProfileReasons(
+    days: PlannedDay[],
+    data: CacheEntry['data'],
+    prefs: TripPreferences,
+    hints?: { dislikeTags?: string[]; dislikeNames?: string[] },
+  ): void {
+    if (!prefs.photoDriven && !prefs.experienceDriven) return;
+    for (const day of days) {
+      for (const it of day.items) {
+        if (it.type !== 'attraction' || it.recommendReason) continue;
+        const meta = this.findCachedSocialMeta(data, it);
+        if (prefs.photoDriven && (meta?.photo?.spot || meta?.socialHeat?.level === 'hot')) {
+          it.recommendReason = meta?.photo?.spot ? '按你的出片偏好挑的，有实测机位' : '按你的出片偏好挑的热门打卡地';
+          continue;
+        }
+        if (prefs.experienceDriven && SCORING.experienceTagRe.test(`${it.name} ${(it.tags || []).join(' ')}`)) {
+          it.recommendReason = '按你的口味挑的体验型玩法';
+        }
+      }
+    }
+  }
+
+  /** 横向聚合清单：出片 / 漂亮饭 / 避雷（全部来自真实数据，无则空数组） */
+  private buildGuide(days: PlannedDay[], data: CacheEntry['data']): TripGuide {
+    const photoSpots: TripGuide['photoSpots'] = [];
+    const prettyFood: TripGuide['prettyFood'] = [];
+    const pitfalls: TripGuide['pitfalls'] = [];
+    const seen = new Set<string>();
+    for (const day of days) {
+      for (const it of day.items) {
+        if (seen.has(it.name)) continue;
+        seen.add(it.name);
+        const meta = this.findCachedSocialMeta(data, it);
+        const isHot = meta?.socialHeat?.level === 'hot';
+        if (it.type === 'attraction' && (it.photoTip || isHot)) {
+          photoSpots.push({
+            name: it.name,
+            ...(it.photoTip ? { photoTip: it.photoTip } : {}),
+            ...(meta?.photo?.bestTime ? { bestTime: meta.photo.bestTime } : {}),
+            ...(it.images?.[0] ? { image: it.images[0] } : {}),
+            // 标签随载荷下发（travel 双端①）：攻略页「不感兴趣」反馈按标签写回同类负向偏好
+            ...(it.tags?.length ? { tags: it.tags.slice(0, 4) } : {}),
+          });
+        }
+        if (it.type === 'restaurant' && (meta?.prettyFood || isHot)) {
+          prettyFood.push({
+            name: it.name,
+            ...(meta?.prettyFood?.vibe ? { vibe: meta.prettyFood.vibe } : {}),
+            ...(meta?.prettyFood?.signature ? { signature: meta.prettyFood.signature } : {}),
+            ...(it.avgPrice ? { avgPrice: it.avgPrice } : {}),
+            ...(it.images?.[0] ? { image: it.images[0] } : {}),
+            ...(it.tags?.length ? { tags: it.tags.slice(0, 4) } : {}),
+          });
+        }
+        if (it.pitfall) pitfalls.push({ name: it.name, tip: it.pitfall });
+      }
+    }
+    return { photoSpots, prettyFood, pitfalls };
+  }
+
+  /** 交通大段：调用方传入优先；否则从规划输入正则兜底（车次/航班号） */
+  private resolveTransferSegments(request: PlanningRequest): TransferSegment[] {
+    if (request.transfers?.length) return request.transfers;
+    return extractTransferSegments(request.input, request.destination || '');
+  }
+
   /**
    * 将原始POI数据构建为每天的行程项目
    *
@@ -2462,9 +2756,7 @@ export class PlanningService {
     cafes.forEach(c => { const s = toSummary(c, 'restaurant'); if (s) allPois.push(s); });
 
     const paceCap: Record<TripPreferences['pace'], number> = { relaxed: 2, balanced: 3, intensive: 4 };
-    let maxAttractionsPerDay = paceCap[preferences.pace];
-    if (preferences.activities) maxAttractionsPerDay += 1;
-    if (preferences.elderly) maxAttractionsPerDay = Math.max(2, maxAttractionsPerDay - 1);
+    const maxAttractionsPerDay = paceCapFor(preferences);
 
     if (preferences.activityMix !== 'mixed') {
       const want = preferences.activityMix;
@@ -4582,7 +4874,7 @@ export class PlanningService {
     return imageUrls;
   }
 
-  private generateDescription(poi: Pick<RawPOI, 'name'> & Partial<Pick<RawPOI, 'tags' | 'rating' | 'address'>>, type: string, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default' } }): string {
+  private generateDescription(poi: Pick<RawPOI, 'name'> & Partial<Pick<RawPOI, 'tags' | 'rating' | 'address'>>, type: string, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', photoDriven: false, experienceDriven: false, sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default', photoDriven: 'default', experienceDriven: 'default' } }): string {
     const tags = poi.tags || [];
     const tagStr = tags.slice(0, 3).join('、');
 
@@ -4615,7 +4907,7 @@ export class PlanningService {
     }
   }
 
-  private generateTags(type: string, rating: number, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default' } }): string[] {
+  private generateTags(type: string, rating: number, prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', photoDriven: false, experienceDriven: false, sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default', photoDriven: 'default', experienceDriven: 'default' } }): string[] {
     const tags: string[] = [];
     if (type === 'attraction') {
       tags.push('热门景点', '必打卡');
@@ -4660,7 +4952,7 @@ export class PlanningService {
     return m && m[1] ? parseInt(m[1]) : null;
   }
 
-  private inferCategory(tags: string[], prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default' } }): string {
+  private inferCategory(tags: string[], prefs: TripPreferences = { raw: [], seaside: false, pool: false, activities: false, kids: false, elderly: false, pace: 'balanced', activityMix: 'mixed', photoDriven: false, experienceDriven: false, sources: { seaside: 'default', pool: 'default', activities: 'default', kids: 'default', elderly: 'default', pace: 'default', activityMix: 'default', budget: 'default', cuisine: 'default', hotelTier: 'default', photoDriven: 'default', experienceDriven: 'default' } }): string {
     if (tags.some(t => /park|garden|nature|beach|water|mountain|volcano/.test(t))) {
       return prefs.seaside ? '海岛自然风光' : '自然风光';
     }

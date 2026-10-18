@@ -1,0 +1,561 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅游界面重设计 v3 · Agent 驱动规划 + 左栏行程</title>
+<style>
+  /* ═══ 主题变量（严格取自 app_theme.dart / travel_theme.dart）═══ */
+  :root[data-theme="dark"] {
+    --bg: #0F0F0F;            /* AppPalette.mainPanel */
+    --side: #131313;          /* AppPalette.sidebar */
+    --side-sep: #2A2A2A;      /* AppPalette.sidebarSeparator */
+    --card: #1F1F1F;          /* AppPalette.locationDialogCard（深色抬升面） */
+    --card2: #171717;
+    --border: #353535;
+    --border-soft: #27272A;
+    --text: #E8E8E8;
+    --text2: #BBBBBB;
+    --muted: #989898;
+    --accent: #18D6F3;        /* TravelPalette 深色 accent */
+    --on-accent: #06222C;
+    --accent-soft: rgba(24, 214, 243, .12);
+    --accent-border: rgba(24, 214, 243, .45);
+    --green: #1ED7A6;
+    --orange: #D7B85A;
+    --shadow: rgba(0, 0, 0, .45);
+  }
+  :root[data-theme="warm"] {
+    --bg: #F8FAFD;            /* AppPalette.warmMainPanel */
+    --side: #F0F1F3;          /* AppPalette.warmSidebarPanel */
+    --side-sep: #E5EAF1;      /* AppPalette.warmSidebarSeparator */
+    --card: #FFFFFF;          /* AppPalette.cardBackgroundWarm */
+    --card2: #F6F8FC;
+    --border: #DCE3EC;        /* AppPalette.warmOutline */
+    --border-soft: #E8EDF4;
+    --text: #232833;          /* AppPalette.warmOnSurface */
+    --text2: #667085;
+    --muted: #98A2B3;
+    --accent: #0055B8;        /* TravelPalette 暖色 accent */
+    --on-accent: #FFFFFF;
+    --accent-soft: #EAF3FF;
+    --accent-border: #9DC3E8;
+    --green: #0E9F6E;
+    --orange: #B45309;
+    --shadow: rgba(35, 40, 51, .10);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "MiSans", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+    background: #0b0d10;
+    color: #e8eaed;
+    padding: 36px 32px 56px;
+    min-height: 100vh;
+  }
+  .page-title { font-size: 22px; font-weight: 700; margin-bottom: 6px; }
+  .page-sub { font-size: 13px; color: #9aa0a6; margin-bottom: 28px; line-height: 1.7; }
+  .page-sub b { color: #18d6f3; font-weight: 600; }
+
+  /* ═══ 应用窗口框 ═══ */
+  .window {
+    width: 1180px; max-width: 100%;
+    background: var(--bg);
+    border-radius: 14px;
+    border: 1px solid #262c35;
+    overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0,0,0,.6);
+  }
+  .titlebar {
+    height: 40px; background: var(--side); border-bottom: 1px solid var(--side-sep);
+    display: flex; align-items: center; padding: 0 14px; gap: 8px;
+  }
+  .titlebar .dot { width: 11px; height: 11px; border-radius: 50%; }
+  .titlebar .t { margin-left: 12px; font-size: 12px; color: var(--muted); }
+
+  .app { display: flex; height: 720px; }
+
+  /* ═══ 左栏：行程收纳 ═══ */
+  .rail {
+    width: 300px; flex-shrink: 0; background: var(--side);
+    border-right: 1px solid var(--side-sep);
+    display: flex; flex-direction: column;
+  }
+  .rail-head { padding: 20px 18px 0; font-size: 17px; font-weight: 800; color: var(--text); }
+  .rail-head .stat { font-size: 11px; color: var(--muted); font-weight: 500; margin-left: 8px; }
+  .segs { display: flex; gap: 2px; margin: 14px 14px 0; background: var(--card2); border-radius: 12px; padding: 3px; border: 1px solid var(--border-soft); }
+  .seg {
+    flex: 1; text-align: center; font-size: 11px; font-weight: 650; color: var(--muted);
+    padding: 6px 0; border-radius: 9px; cursor: pointer; user-select: none;
+    display: flex; align-items: center; justify-content: center; gap: 5px; font-family: inherit;
+  }
+  .seg:hover { color: var(--text2); }
+  .seg .n { font-size: 9.5px; opacity: .65; }
+  .seg.on { background: var(--card); color: var(--text); box-shadow: 0 2px 8px var(--shadow); }
+  .seg .sdot { width: 5px; height: 5px; border-radius: 50%; flex-shrink: 0; }
+  .sdot-c { background: var(--accent); }
+  .sdot-o { background: var(--orange); }
+  .sdot-g { background: var(--muted); }
+  .seg.on .sdot-c { box-shadow: 0 0 0 3px var(--accent-soft); }
+  .seg.on .sdot-o { box-shadow: 0 0 0 3px rgba(215,184,90,.15); }
+  :root[data-theme="warm"] .seg.on .sdot-o { box-shadow: 0 0 0 3px rgba(180,83,9,.12); }
+
+  .rail-list { flex: 1; overflow-y: auto; padding: 13px 12px 8px; }
+  .tabpane { display: none; }
+  .tabpane.show { display: block; }
+
+  .trip-card {
+    position: relative; overflow: hidden;
+    background: var(--card); border: 1px solid var(--border-soft); border-radius: 13px;
+    padding: 9px 9px 9px 14px; display: flex; gap: 10px; cursor: pointer; margin-bottom: 9px;
+  }
+  .trip-card::before {
+    content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 3px;
+    border-radius: 0 3px 3px 0; background: var(--muted); opacity: .35;
+  }
+  .trip-card.st-ongoing::before { background: var(--accent); opacity: 1; }
+  .trip-card.st-upcoming::before { background: var(--orange); opacity: .9; }
+  .trip-card.st-past .cover { filter: grayscale(.75); opacity: .82; }
+  .trip-card:hover { border-color: var(--border); }
+  .trip-card .cover {
+    width: 64px; height: 64px; border-radius: 10px; object-fit: cover;
+    flex-shrink: 0; background: var(--card2); display: block;
+  }
+  .trip-card .body { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .trip-card .t { font-size: 12.5px; font-weight: 750; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .trip-card .s { font-size: 10.5px; color: var(--muted); margin-top: 2px; }
+  .trip-card .meta { margin-top: auto; display: flex; gap: 4px; flex-wrap: wrap; }
+  .tag {
+    font-size: 9px; font-weight: 650; padding: 2px 7px; border-radius: 9px;
+    background: var(--card2); color: var(--muted);
+  }
+  .tag.cyan { background: var(--accent-soft); color: var(--accent); }
+  .tag.orange { background: rgba(215,184,90,.14); color: var(--orange); }
+  :root[data-theme="warm"] .tag.orange { background: rgba(180,83,9,.10); }
+  .tag.green { background: rgba(30,215,166,.12); color: var(--green); }
+  :root[data-theme="warm"] .tag.green { background: rgba(14,159,110,.10); }
+  .prog { height: 3px; border-radius: 2px; background: var(--border-soft); margin-top: 7px; overflow: hidden; }
+  .prog i { display: block; height: 100%; background: var(--accent); border-radius: 2px; }
+
+  /* ═══ 主区：Agent 驱动规划 ═══ */
+  .stage { flex: 1; display: flex; flex-direction: column; min-width: 0; background: var(--bg); }
+  .stage-top {
+    height: 46px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 20px; border-bottom: 1px solid var(--border-soft);
+  }
+  .stage-top .tt { font-size: 12.5px; font-weight: 700; color: var(--text2); }
+  .theme-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--card2); color: var(--text2); border: 1px solid var(--border-soft);
+    font-size: 11px; font-weight: 600; padding: 5px 11px; border-radius: 13px;
+    cursor: pointer; font-family: inherit;
+  }
+  .theme-btn:hover { color: var(--text); border-color: var(--border); }
+
+  .stage-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+  .stage-inner { width: 620px; max-width: 88%; margin: 0 auto; padding: 8px 0 16px; }
+
+  /* 居中引导图标（无文案） */
+  .lead-ico {
+    width: 46px; height: 46px; margin: 0 auto 18px; border-radius: 15px;
+    background: var(--accent-soft); color: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .lead-ico svg { width: 24px; height: 24px; }
+
+  /* 输入区：idle 时垂直居中，发起后落底部 */
+  .composer { flex-shrink: 0; padding: 12px 0 18px; }
+  .stage.idle .stage-body { display: none; }
+  .stage.idle .composer { flex: 1; display: flex; flex-direction: column; justify-content: center; padding-bottom: 48px; }
+  .stage.idle .quick { justify-content: center; }
+  .composer-inner { width: 620px; max-width: 88%; margin: 0 auto; }
+  .quick { display: flex; gap: 8px; margin-bottom: 10px; flex-wrap: wrap; }
+  .quick .chip {
+    font-size: 11.5px; font-weight: 600; padding: 6px 13px; border-radius: 16px;
+    background: var(--card); color: var(--text2); border: 1px solid var(--border-soft);
+    cursor: pointer; user-select: none; font-family: inherit;
+  }
+  .quick .chip:hover { color: var(--accent); border-color: var(--accent-border); }
+  .input-row {
+    display: flex; gap: 10px; align-items: center;
+    background: var(--card); border: 1px solid var(--border); border-radius: 16px;
+    padding: 6px 6px 6px 18px;
+    box-shadow: 0 6px 24px var(--shadow);
+  }
+  .input-row:focus-within { border-color: var(--accent); }
+  .input-row input {
+    flex: 1; background: transparent; border: none; outline: none;
+    color: var(--text); font-size: 14px; font-family: inherit;
+  }
+  .input-row input::placeholder { color: var(--muted); }
+  .send {
+    width: 40px; height: 40px; border-radius: 12px; border: none; cursor: pointer;
+    background: var(--accent); color: var(--on-accent);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+  }
+  .send:hover { filter: brightness(1.08); }
+  .send svg { width: 17px; height: 17px; }
+
+  /* 对话流 */
+  .flow { display: flex; flex-direction: column; }
+  .bubble-user {
+    align-self: flex-end; max-width: 78%;
+    background: var(--accent-soft); color: var(--text);
+    border: 1px solid var(--border-soft);
+    font-size: 13.5px; line-height: 1.6; padding: 10px 15px; border-radius: 15px 15px 4px 15px;
+    margin-bottom: 16px;
+    animation: rise .3s ease both;
+  }
+  .agent-block { margin-bottom: 16px; animation: rise .32s ease both; }
+  .agent-who {
+    font-size: 10.5px; font-weight: 700; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; margin: 0 0 7px 2px;
+  }
+  .agent-who::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--accent); }
+  .agent-say { font-size: 13.5px; color: var(--text2); line-height: 1.65; margin: 0 0 8px 2px; }
+
+  .acard {
+    background: var(--card); border: 1px solid var(--border-soft); border-radius: 15px;
+    padding: 15px 17px;
+    box-shadow: 0 4px 18px var(--shadow);
+  }
+  .acard .c-t { font-size: 13px; font-weight: 750; color: var(--text); display: flex; align-items: center; gap: 8px; }
+  .acard .c-t .sub { font-size: 10.5px; color: var(--muted); font-weight: 500; margin-left: auto; }
+  .acard .c-note { font-size: 11.5px; color: var(--muted); margin-top: 6px; line-height: 1.6; }
+
+  .chips { display: flex; gap: 7px; flex-wrap: wrap; margin-top: 11px; }
+  .chip {
+    font-size: 11.5px; font-weight: 600; padding: 6px 12px; border-radius: 15px;
+    background: var(--card2); color: var(--text2); border: 1px solid transparent;
+    cursor: pointer; user-select: none; font-family: inherit;
+  }
+  .chip:hover { color: var(--text); }
+  .chip.on { background: var(--accent-soft); color: var(--accent); border-color: var(--accent-border); }
+  .mini-input {
+    background: var(--card2); border: 1px solid var(--border-soft); border-radius: 12px;
+    color: var(--text); font-size: 11.5px; padding: 7px 11px; font-family: inherit; outline: none;
+    width: 180px;
+  }
+  .mini-input:focus { border-color: var(--accent); }
+  .mini-input::placeholder { color: var(--muted); }
+
+  /* 天气面板（出现在规划流中） */
+  .w-days { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 11px; }
+  .w-day {
+    background: var(--card2); border: 1px solid var(--border-soft); border-radius: 11px;
+    padding: 9px 11px 8px; display: flex; align-items: center; gap: 9px;
+  }
+  .w-day svg { width: 22px; height: 22px; flex-shrink: 0; }
+  .w-day .d { font-size: 10px; color: var(--muted); }
+  .w-day .v { font-size: 12.5px; font-weight: 700; color: var(--text); margin-top: 1px; font-variant-numeric: tabular-nums; }
+  .w-day .v small { font-size: 9.5px; color: var(--muted); font-weight: 500; }
+  .w-tip { font-size: 11.5px; color: var(--text2); margin-top: 10px; display: flex; gap: 6px; align-items: center; line-height: 1.5; }
+  .w-tip::before { content: ""; width: 3px; height: 11px; border-radius: 2px; background: var(--orange); flex-shrink: 0; }
+
+  /* 生成中 */
+  .typing { display: inline-flex; gap: 4px; padding: 10px 2px; }
+  .typing i {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--muted);
+    animation: blink 1.2s infinite;
+  }
+  .typing i:nth-child(2) { animation-delay: .18s; }
+  .typing i:nth-child(3) { animation-delay: .36s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+  /* 草案卡 */
+  .day-line { display: flex; gap: 10px; margin-top: 10px; font-size: 12px; color: var(--text2); align-items: baseline; }
+  .day-line .dl { font-weight: 750; color: var(--accent); flex-shrink: 0; width: 46px; font-size: 11.5px; }
+  .day-line .stops { flex: 1; min-width: 0; }
+  .draft-btns { display: flex; gap: 9px; margin-top: 15px; }
+  .btn-primary {
+    flex: 1; background: var(--accent); color: var(--on-accent); border: none;
+    font-size: 13px; font-weight: 800; padding: 11px 0; border-radius: 12px;
+    cursor: pointer; font-family: inherit;
+  }
+  .btn-primary:hover { filter: brightness(1.08); }
+  .btn-ghost {
+    background: transparent; color: var(--text2); border: 1px solid var(--border);
+    font-size: 12px; font-weight: 600; padding: 11px 18px; border-radius: 12px;
+    cursor: pointer; font-family: inherit;
+  }
+  .btn-ghost:hover { color: var(--text); border-color: var(--muted); }
+
+  @keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  /* ═══ toast ═══ */
+  .toast {
+    position: fixed; left: 50%; bottom: 34px; transform: translateX(-50%) translateY(16px);
+    background: #1c242e; color: #dfe4e9; border: 1px solid #323c48;
+    font-size: 12.5px; padding: 10px 18px; border-radius: 12px;
+    opacity: 0; pointer-events: none; transition: all .25s; z-index: 99;
+    box-shadow: 0 10px 30px rgba(0,0,0,.5);
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+  /* ═══ 设计要点 ═══ */
+  .notes { width: 1180px; max-width: 100%; margin-top: 26px; }
+  .notes .nt { font-size: 14px; font-weight: 700; margin-bottom: 10px; color: #cdd3d9; }
+  .notes ul { list-style: none; }
+  .notes li { font-size: 12.5px; color: #8a929c; line-height: 1.9; padding-left: 16px; position: relative; }
+  .notes li::before { content: ""; position: absolute; left: 2px; top: 9px; width: 5px; height: 5px; border-radius: 50%; background: #18d6f3; }
+  .notes li b { color: #c3cad1; font-weight: 650; }
+</style>
+</head>
+<body>
+
+<div class="page-title">旅游界面重设计 v3 · Agent 驱动规划 + 左栏行程</div>
+<div class="page-sub">
+  <b>输入框默认正中央</b>（无引导文案），发起后落到底部继续对话 · 缺的信息由 Agent 在规划过程中吐<b>卡片/面板</b>让你点选（天气面板也在规划流中出现）·
+  <b>左栏</b>行程用分段式状态切换（进行中 | 即将出发 | 往期：状态色点 + 卡片左缘色条 + 往期封面置灰）·
+  右上角 ↻ 可重播演示 · 颜色跟随项目主题（深 #18D6F3 / 米白 #0055B8 双变体，实现时随应用主题热切换，窗口内无切换按钮）·
+  可交互：点快捷 chip 或输入框回车、点卡片选项、↻ 重播
+</div>
+
+<div class="window">
+  <div class="titlebar">
+    <span class="dot" style="background:#ff5f57"></span>
+    <span class="dot" style="background:#febc2e"></span>
+    <span class="dot" style="background:#28c840"></span>
+    <span class="t">行程规划 · Private Agent</span>
+  </div>
+
+  <div class="app">
+
+    <!-- ═══ 左栏：行程 ═══ -->
+    <aside class="rail">
+      <div class="rail-head">行程 <span class="stat">3 次旅行 · 3 个目的地</span></div>
+      <div class="segs">
+        <span class="seg on" onclick="showTab(this,'ongoing')"><i class="sdot sdot-c"></i>进行中<span class="n">1</span></span>
+        <span class="seg" onclick="showTab(this,'upcoming')"><i class="sdot sdot-o"></i>即将出发<span class="n">1</span></span>
+        <span class="seg" onclick="showTab(this,'past')"><i class="sdot sdot-g"></i>往期<span class="n">1</span></span>
+      </div>
+      <div class="rail-list">
+        <div class="tabpane show" id="pane-ongoing">
+          <div class="trip-card st-ongoing" onclick="toast('→ 打开完整行程界面：成都慢游三日（详情由旅游规划界面承载）')">
+            <img class="cover" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Giant%20panda%20sitting%20among%20lush%20green%20bamboo%20forest%2C%20soft%20natural%20light%2C%20realistic%20wildlife%20photography%2C%20high%20detail&image_size=square" alt="">
+            <div class="body">
+              <div class="t">成都慢游三日</div>
+              <div class="s">成都 · 10-15 ~ 10-17</div>
+              <div class="meta"><span class="tag cyan">Day 2/3</span><span class="tag">5 站点</span><span class="tag">¥3600</span></div>
+              <div class="prog"><i style="width:55%"></i></div>
+            </div>
+          </div>
+        </div>
+        <div class="tabpane" id="pane-upcoming">
+          <div class="trip-card st-upcoming" onclick="toast('→ 打开完整行程界面：西安古都三日（详情由旅游规划界面承载）')">
+            <img class="cover" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Ancient%20Xi%27an%20city%20wall%20with%20red%20lanterns%20at%20dusk%2C%20warm%20lights%2C%20historic%20Chinese%20architecture%2C%20realistic%20travel%20photography&image_size=square" alt="">
+            <div class="body">
+              <div class="t">西安古都三日</div>
+              <div class="s">西安 · 11-02 ~ 11-04</div>
+              <div class="meta"><span class="tag orange">还剩 16 天</span><span class="tag">3 天</span><span class="tag">¥4200</span></div>
+            </div>
+          </div>
+        </div>
+        <div class="tabpane" id="pane-past">
+          <div class="trip-card st-past" onclick="toast('→ 打开完整行程界面：三亚海岛四日（详情由旅游规划界面承载）')">
+            <img class="cover" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Tropical%20beach%20in%20Sanya%20Hainan%2C%20turquoise%20water%2C%20white%20sand%2C%20palm%20trees%2C%20sunny%20day%2C%20realistic%20travel%20photography&image_size=square" alt="">
+            <div class="body">
+              <div class="t">三亚海岛四日</div>
+              <div class="s">三亚 · 10-06 结束</div>
+              <div class="meta"><span class="tag">3 天</span><span class="tag">¥12800</span><span class="tag green">已归档</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- ═══ 主区：Agent 驱动规划 ═══ -->
+    <main class="stage idle">
+      <div class="stage-top">
+        <span class="tt">行程规划</span>
+        <button class="theme-btn" onclick="replay()" title="重播演示">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 8A9 9 0 1 0 21 12"/><path d="M21 3v5h-5"/></svg>
+        </button>
+      </div>
+
+      <div class="stage-body" id="stageBody">
+        <div class="stage-inner">
+          <div class="flow" id="flow"></div>
+        </div>
+      </div>
+
+      <div class="composer">
+        <div class="composer-inner">
+          <div class="lead-ico" id="leadIco">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9.5"/><path d="M15.5 8.5l-2.2 5-5 2.2 2.2-5z"/></svg>
+          </div>
+          <div class="quick" id="quick">
+            <span class="chip" onclick="quickStart('我想去成都玩三天')">试试：我想去成都玩三天</span>
+            <span class="chip" onclick="quickStart('带爸妈出行，节奏别太赶')">带爸妈出行，节奏别太赶</span>
+          </div>
+          <div class="input-row">
+            <input id="mainInput" placeholder="想去哪儿玩？比如：成都吃三天" onkeydown="if(event.key==='Enter')send()">
+            <button class="send" onclick="send()" title="发送">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12h15M13 6l6 6-6 6"/></svg>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+  </div>
+</div>
+
+<div class="notes">
+  <div class="nt">设计要点</div>
+  <ul>
+    <li><b>整个流程交给 Agent</b>：主界面只有正中央一个输入框（无引导文案），一句话发起后输入框落到底部继续对话；不在入口铺一堆选项让用户自己填。</li>
+    <li><b>缺的信息规划中补</b>：Agent 按需吐卡片 —— 出行方式、住房、吃的逐张出现，点选即答；<b>天气作为规划流中的面板</b>出现，辅助定日期和排点（"16 日有小雨，那天排室内更稳"）。</li>
+    <li><b>左栏放行程</b>：分段式状态切换（进行中 | 即将出发 | 往期）+ 卡片左缘状态色条（青=进行中、橙=即将出发、灰=往期），往期封面置灰且默认不出现；卡片只做收纳与状态，点开直达完整行程界面。</li>
+    <li><b>颜色跟项目主题</b>：深色（#0F0F0F/#131313 + 青 #18D6F3）/ 米白（#F8FAFD/#F0F1F3 + 蓝 #0055B8）严格取自 AppPalette 与 TravelPalette，随主题变体热切换。</li>
+    <li><b>记忆</b>：对话中聊出的旅游内容由后台做摘要、打「旅游」标签写入统一记忆（与工作、娱乐同人脑式分类），界面无独立记忆块；Agent 提问时已带着用户的历史偏好，不会重复问已知的事。</li>
+  </ul>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+
+  /* ═══ 左栏页签 ═══ */
+  function showTab(btn, name) {
+    document.querySelectorAll('.rail .seg').forEach(t => t.classList.remove('on'));
+    btn.classList.add('on');
+    ['ongoing', 'upcoming', 'past'].forEach(k =>
+      document.getElementById('pane-' + k).classList.toggle('show', k === name));
+  }
+
+  /* ═══ 发起规划流 ═══ */
+  const flowEl = document.getElementById('flow');
+  const stageEl = document.querySelector('.stage');
+  const inputEl = document.getElementById('mainInput');
+  const timers = [];
+  const PH_FLOW = '随时补充或调整，比如：第二天想去都江堰';
+  const PH_IDLE = '想去哪儿玩？比如：成都吃三天';
+
+  function send() {
+    const v = inputEl.value.trim();
+    if (!v) { toast('先在输入框写一句想去哪儿玩'); return; }
+    startFlow(v);
+  }
+  function quickStart(text) { startFlow(text); }
+
+  function replay() {
+    timers.forEach(clearTimeout); timers.length = 0;
+    stageEl.classList.add('idle');
+    document.getElementById('leadIco').style.display = '';
+    document.getElementById('quick').style.display = '';
+    flowEl.innerHTML = '';
+    inputEl.value = ''; inputEl.placeholder = PH_IDLE;
+    showTab(document.querySelector('.rail .seg'), 'ongoing');
+  }
+
+  function startFlow(text) {
+    timers.forEach(clearTimeout); timers.length = 0;
+    stageEl.classList.remove('idle');
+    document.getElementById('leadIco').style.display = 'none';
+    document.getElementById('quick').style.display = 'none';
+    flowEl.innerHTML = '';
+    inputEl.value = ''; inputEl.placeholder = PH_FLOW;
+
+    push(bubbleUser(text));
+    at(600,  () => push(agentSay('收到！成都三日我来排。先看下这几天的天气，再跟你对齐三件小事。')));
+    at(1300, () => push(agentCard('目的地天气 · 成都', '10-15 ~ 10-17', weatherInner(), true)));
+    at(2100, () => push(agentCard('出行方式怎么解决？', '', choiceInner(
+      ['租车自驾', '预定打车', '公共交通', '到地再说'], false))));
+    at(2900, () => push(agentCard('住房偏向哪种？', '', choiceInner(
+      ['舒适型酒店', '特色民宿', '度假酒店', '经济连锁'], false))));
+    at(3700, () => push(agentCard('吃的上有什么讲究？', '', choiceInner(
+      ['本地特色', '能吃辣', '清淡', '海鲜', '小吃街探索'], true,
+      '<input class="mini-input" placeholder="忌口 / 过敏，如：不吃香菜">'))));
+    at(4500, () => push(typing()));
+    at(5400, () => { removeTyping(); push(draftCard()); });
+    scrollBottom();
+  }
+
+  function at(ms, fn) { timers.push(setTimeout(() => { fn(); scrollBottom(); }, ms)); }
+  function push(html) { flowEl.insertAdjacentHTML('beforeend', html); }
+  function scrollBottom() {
+    const b = document.getElementById('stageBody');
+    b.scrollTop = b.scrollHeight;
+  }
+
+  function bubbleUser(text) { return '<div class="bubble-user">' + esc(text) + '</div>'; }
+  function agentSay(text) {
+    return '<div class="agent-block"><div class="agent-who">Agent</div><div class="agent-say">' + text + '</div></div>';
+  }
+  function agentCard(title, sub, inner, withTip) {
+    return '<div class="agent-block"><div class="agent-who">Agent</div><div class="acard">' +
+      '<div class="c-t">' + title + (sub ? '<span class="sub">' + sub + '</span>' : '') + '</div>' +
+      inner + '</div></div>';
+  }
+  function choiceInner(options, multi, extra) {
+    return '<div class="chips"' + (multi ? ' data-multi' : '') + '>' +
+      options.map(o => '<span class="chip">' + o + '</span>').join('') +
+      (extra || '') + '</div>';
+  }
+  function typing() {
+    return '<div class="agent-block" id="typingBlock"><div class="agent-who">Agent</div>' +
+      '<div class="typing"><i></i><i></i><i></i></div></div>';
+  }
+  function removeTyping() {
+    const t = document.getElementById('typingBlock');
+    if (t) t.remove();
+  }
+  function draftCard() {
+    return '<div class="agent-block"><div class="agent-who">Agent</div><div class="acard">' +
+      '<div class="c-t">成都慢游三日 · 草案<span class="sub">按你的偏好生成</span></div>' +
+      '<div class="day-line"><span class="dl">Day 1</span><span class="stops">宽窄巷子 → 武侯祠 → 锦里古街</span></div>' +
+      '<div class="day-line"><span class="dl">Day 2</span><span class="stops">大熊猫繁育研究基地 → 文殊院</span></div>' +
+      '<div class="day-line"><span class="dl">Day 3</span><span class="stops">杜甫草堂 → 返程</span></div>' +
+      '<div class="draft-btns">' +
+      '<button class="btn-primary" onclick="toast(\'→ 生成完整行程，进入旅游规划界面（mockup 演示）\')">生成完整行程</button>' +
+      '<button class="btn-ghost" onclick="toast(\'在下方输入框告诉 Agent 改哪里，比如：第二天想去都江堰\')">再调整</button>' +
+      '</div></div></div>';
+  }
+
+  /* ═══ 天气数据（mock） ═══ */
+  const ICONS = {
+    sun: '<svg viewBox="0 0 24 24" fill="none" stroke="#d7b85a" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="4.2"/><path d="M12 2.5v2.2M12 19.3v2.2M2.5 12h2.2M19.3 12h2.2M4.8 4.8l1.6 1.6M17.6 17.6l1.6 1.6M19.2 4.8l-1.6 1.6M6.4 17.6l-1.6 1.6"/></svg>',
+    cloud: '<svg viewBox="0 0 24 24" fill="none" stroke="#9fb4c4" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 18a4 4 0 1 1 .6-7.96A5.5 5.5 0 0 1 17.7 11 3.5 3.5 0 0 1 17 18z"/></svg>',
+    rain: '<svg viewBox="0 0 24 24" fill="none" stroke="#7fb8d8" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6.5 14a4 4 0 1 1 .6-7.96A5.5 5.5 0 0 1 17.7 7 3.5 3.5 0 0 1 17 14z"/><path d="M8 17.5v2M12 17.5v2.8M16 17.5v2"/></svg>'
+  };
+  function weatherInner() {
+    const days = [
+      { icon: 'cloud', d: '10-15 周四', hi: 21, lo: 15, t: '阴转多云' },
+      { icon: 'rain',  d: '10-16 周五', hi: 19, lo: 14, t: '小雨' },
+      { icon: 'cloud', d: '10-17 周六', hi: 20, lo: 13, t: '多云' }
+    ];
+    return '<div class="w-days">' + days.map(d =>
+      '<div class="w-day">' + ICONS[d.icon] +
+      '<div><div class="d">' + d.d + ' · ' + d.t + '</div>' +
+      '<div class="v">' + d.hi + '° <small>/ ' + d.lo + '°</small></div></div></div>'
+    ).join('') + '</div>' +
+    '<div class="w-tip">16 日有小雨 —— 那天排室内点位更稳；早晚微凉，带件薄外套</div>';
+  }
+
+  /* ═══ 卡片内点选 ═══ */
+  flowEl.addEventListener('click', e => {
+    const c = e.target.closest('.chip'); if (!c) return;
+    const g = c.closest('.chips'); if (!g) return;
+    if (g.hasAttribute('data-multi')) { c.classList.toggle('on'); }
+    else {
+      g.querySelectorAll('.chip').forEach(x => x.classList.remove('on'));
+      c.classList.add('on');
+    }
+  });
+
+  function esc(s) {
+    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  }
+
+  /* ═══ toast ═══ */
+  let toastTimer;
+  function toast(msg) {
+    const t = document.getElementById('toast');
+    t.textContent = msg; t.classList.add('show');
+    clearTimeout(toastTimer);
+    toastTimer = setTimeout(() => t.classList.remove('show'), 2400);
+  }
+</script>
+</body>
+</html>

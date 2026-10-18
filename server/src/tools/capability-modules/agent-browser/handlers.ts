@@ -44,15 +44,22 @@ export function createAgentBrowserOpenHandler(
   };
 }
 
+/** 解析元素定位入参：优先 ref（extract_text 返回的 ariaSnapshot 引用），否则 selector。 */
+function resolveSelector(input: Record<string, unknown>): string {
+  const ref = typeof input.ref === "string" ? input.ref.trim() : "";
+  if (ref) return `aria-ref=${ref}`;
+  return typeof input.selector === "string" ? input.selector : "";
+}
+
 /** agent_browser.click —— 点击元素。 */
 export function createAgentBrowserClickHandler(
   service: AgentBrowserService,
 ): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
-    const selector = typeof input.selector === "string" ? input.selector : "";
+    const selector = resolveSelector(input);
     if (!sessionId) return { ok: false, error: "缺少 sessionId" };
-    if (!selector) return { ok: false, error: "缺少 selector" };
+    if (!selector) return { ok: false, error: "缺少 ref 或 selector" };
 
     const opts: { timeout?: number; button?: "left" | "right"; doubleClick?: boolean } = {};
     if (typeof input.timeout === "number") opts.timeout = input.timeout;
@@ -69,10 +76,10 @@ export function createAgentBrowserTypeHandler(
 ): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
-    const selector = typeof input.selector === "string" ? input.selector : "";
+    const selector = resolveSelector(input);
     const text = typeof input.text === "string" ? input.text : "";
     if (!sessionId) return { ok: false, error: "缺少 sessionId" };
-    if (!selector) return { ok: false, error: "缺少 selector" };
+    if (!selector) return { ok: false, error: "缺少 ref 或 selector" };
     if (!text) return { ok: false, error: "缺少 text" };
 
     const opts: { append?: boolean; delay?: number; clear?: boolean } = {};
@@ -143,9 +150,9 @@ export function createAgentBrowserWaitForHandler(
 ): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
-    const selector = typeof input.selector === "string" ? input.selector : "";
+    const selector = resolveSelector(input);
     if (!sessionId) return { ok: false, error: "缺少 sessionId" };
-    if (!selector) return { ok: false, error: "缺少 selector" };
+    if (!selector) return { ok: false, error: "缺少 ref 或 selector" };
 
     const timeout = typeof input.timeout === "number" ? input.timeout : undefined;
 

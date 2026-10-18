@@ -30,6 +30,8 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   // ── 位置场景（方案 D）──
   location_arrival: 6 * 60 * 60 * 1000, // 到达常去地点问候：同地点 6h 一次（别每次到家都唠叨）
   geofence_event: 30 * 60 * 1000,       // 地理围栏动作的 speak 告知：30min 兜底（围栏层自有防抖）
+  // ── 旅游接驳（travel-upgrade-plan P2）──
+  transfer_reminder: 60 * 60 * 1000,    // 接驳提醒：同段行程只问一次（调度器自有 sent 表，此处是兜底冷却）
 };
 
 /**

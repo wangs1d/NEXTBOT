@@ -169,7 +169,16 @@ const bookingSchema = z.object({
  *
  * travelPlanningService 未装配时所有端点返回 503（仿 not enabled 模式）。
  */
-export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPlanningService?: PlanningService }): void {
+export function registerTravelPlanRoutes(
+  app: FastifyInstance,
+  deps: {
+    travelPlanningService?: PlanningService;
+    /** POI 负向偏好写入口（攻略页「不感兴趣」反馈 → UserFact，travel 双端①） */
+    userPersonalizationService?: {
+      recordPoiDislike(actorId: string, poiName: string, tags: string[], fallbackKind?: string): void;
+    };
+  },
+): void {
   /** 统一 503：规划服务未装配。返回 false 表示已发送错误响应 */
   const requireService = (reply: FastifyReply): boolean => {
     if (!deps.travelPlanningService) {
@@ -252,6 +261,8 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
   /** 行程摘要列表（新→旧，最多 20 份），供面板「我的行程」选择 */
   app.get("/travel/plans", async (_request, reply) => {
     if (!requireService(reply)) return;
+    // 动态数据（规划/编辑/视频回填后即时变化）：禁中间层缓存，浏览器每次验证
+    reply.header("Cache-Control", "no-cache");
     return { ok: true, plans: travelPlanStore.listSummaries(20) };
   });
 
@@ -289,6 +300,8 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
     }
     const plan = requirePlan(reply, parsed.data.planId);
     if (!plan) return;
+    // 冷层权威数据源（视频回填/编辑后即时变化）：禁中间层缓存，浏览器每次验证
+    reply.header("Cache-Control", "no-cache");
     return { ok: true, plan: decoratePlanWithMedia(plan) };
   });
 
@@ -630,6 +643,47 @@ export function registerTravelPlanRoutes(app: FastifyInstance, deps: { travelPla
       }
 
       return { ok: true, event, mood, note, checkedAt: now.getTime() };
+    },
+  );
+
+  // ======================== POI 偏好反馈（攻略页「不感兴趣」→ UserFact） ========================
+
+  const poiFeedbackSchema = z.object({
+    kind: z.enum(["photo", "food", "attraction", "restaurant"]).default("attraction"),
+    name: z.string().min(1).max(60),
+    tags: z.array(z.string().min(1).max(24)).max(8).optional(),
+  });
+
+  /**
+   * POST /travel/plans/:planId/poi-feedback — POI 负向反馈（travel 双端①）。
+   * 攻略页出片/漂亮饭卡「不感兴趣」→ 按行程归属（plan.sessionId）写 UserFact
+   * 负向偏好：标签进 travel.poi_dislike（同类衰减）、POI 名进
+   * travel.poi_dislike_name（下轮点名排除）。行程无归属会话时如实返回不写。
+   */
+  app.post<{ Params: { planId: string } }>(
+    "/travel/plans/:planId/poi-feedback",
+    async (request, reply) => {
+      const parsedParams = planIdParamsSchema.safeParse(request.params);
+      if (!parsedParams.success) {
+        return reply.code(400).send({ ok: false, error: parsedParams.error.flatten() });
+      }
+      const parsedBody = poiFeedbackSchema.safeParse(request.body ?? {});
+      if (!parsedBody.success) {
+        return reply.code(400).send({ ok: false, error: parsedBody.error.flatten() });
+      }
+      const plan = requirePlan(reply, parsedParams.data.planId);
+      if (!plan) return;
+      const actorId = (plan as { sessionId?: string }).sessionId ?? "";
+      if (!actorId) {
+        return reply.code(409).send({ ok: false, error: "行程无归属会话，无法沉淀偏好" });
+      }
+      if (!deps.userPersonalizationService) {
+        return reply.code(503).send({ ok: false, error: "画像服务未装配，偏好反馈暂不可用" });
+      }
+      const { kind, name, tags } = parsedBody.data;
+      const fallbackKind = kind === "food" ? "restaurant" : kind === "photo" ? "attraction" : kind;
+      deps.userPersonalizationService.recordPoiDislike(actorId, name, tags ?? [], fallbackKind);
+      return { ok: true, recorded: name };
     },
   );
 

@@ -108,6 +108,37 @@ const toolDefinitions: { name: string; description: string; parameters: Record<s
       additionalProperties: false,
     },
   },
+  {
+    name: "messages.search",
+    description: "按关键词检索聚合中心的历史消息（含手机通知捕捉的微信/QQ/短信/邮箱/电商物流等）。" +
+      "适合「刚才谁提到过X」「之前那条快递消息说啥」这类跨会话回忆。",
+    parameters: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "关键词（按字面匹配）" },
+        platform: {
+          type: "string",
+          enum: ["friend", "wechat", "qq", "feishu", "sms", "email", "alipay", "generic"],
+          description: "限定平台（可选）",
+        },
+        since: { type: "string", description: "起始时间 ISO 格式（可选）" },
+        limit: { type: "integer", description: "最多返回条数，默认 20" },
+      },
+      required: ["query"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "messages.capture_status",
+    description: "查看手机通知捕捉的覆盖与状态：各平台最近捕获时间、24h 条数、是否断流（超6小时无捕捉）。" +
+      "用户问「能看得到我哪些App的消息」「为什么没收到消息」时调用。",
+    parameters: {
+      type: "object",
+      properties: {},
+      additionalProperties: false,
+      required: [],
+    },
+  },
 ];
 
 export const MESSAGE_HUB_CHAT_TOOL_DEFINITIONS: ChatCompletionTool[] = toolDefinitions.map((def) => ({

@@ -84,6 +84,7 @@ import { registerTravelMediaRoutes } from "./travel-media.js";
 import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
+import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
@@ -121,6 +122,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     registerTravelMediaRoutes(app, deps);
     // 行程路由域（编辑/搜索/预订/分享；travelPlanningService 未装配时端点返回 503）
     registerTravelPlanRoutes(app, deps);
+    // 规划会话路由域（v3 旅游界面 Agent 驱动规划流：卡片事件 + 真实生成）
+    registerTravelPlanSessionRoutes(app, deps);
     // 行程规划浏览器页面（行程卡 → 系统浏览器打开；见 travel-map.ts）
     registerTravelMapRoutes(app);
     // POI 补图主源接 search image 端口（upstreamSearchService，与规划配图同底座）；

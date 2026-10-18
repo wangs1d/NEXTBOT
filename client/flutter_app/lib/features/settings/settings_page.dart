@@ -36,7 +36,8 @@ class SettingsPage extends StatefulWidget {
   State<SettingsPage> createState() => _SettingsPageState();
 }
 
-class _SettingsPageState extends State<SettingsPage> {
+class _SettingsPageState extends State<SettingsPage>
+    with WidgetsBindingObserver {
   /// 当前选中的分区（Android 默认「手机桥接」，其余平台「通用」）。
   _SettingsSection _section = _SettingsSection.general;
 
@@ -50,6 +51,8 @@ class _SettingsPageState extends State<SettingsPage> {
   bool _listenerEnabled = false;
   int _captureQueueSize = 0;
   bool _captureLoading = true;
+  bool _captureAll = false; // 未识别包全量捕捉兜底（默认关）
+  List<CapturePackageRule> _captureRules = const []; // 自定义包名规则（回显用）
 
   // —— 模型与声纹分区 ——
   // 模型接入 UI/收集/测试全部在 ModelProviderCard（与首启向导共用），这里只存
@@ -70,6 +73,7 @@ class _SettingsPageState extends State<SettingsPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
       _section = _SettingsSection.phoneBridge;
     }
@@ -78,6 +82,21 @@ class _SettingsPageState extends State<SettingsPage> {
     _loadModelConfig();
     _refreshVoiceprintStatus();
     _refreshMailStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  /// 从系统「通知使用权」设置页授权回来时自动回检刷新状态
+  /// （替代固定延时轮询：用户在系统设置里操作时长不可预估）。
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    if (kIsWeb || defaultTargetPlatform != TargetPlatform.android) return;
+    unawaited(_refreshCaptureState());
   }
 
   /// 加载 Windows 本机设置：开机自启（注册表）。
@@ -764,8 +783,8 @@ class _SettingsPageState extends State<SettingsPage> {
       captureSubtitle = "正在检查通知使用权…";
     } else if (_listenerEnabled) {
       captureSubtitle = _captureQueueSize > 0
-          ? "微信/QQ/飞书/短信通知将汇总给 Agent（待补报 $_captureQueueSize 条）"
-          : "微信/QQ/飞书/短信通知将汇总给 Agent，Agent 仅在你询问或重要事项时查看";
+          ? "微信/QQ/飞书/短信/邮箱/电商物流等通知将汇总给 Agent（待补报 $_captureQueueSize 条）"
+          : "微信/QQ/飞书/短信/邮箱/电商物流等通知将汇总给 Agent，Agent 仅在你询问或重要事项时查看";
     } else {
       captureSubtitle = "需要授予系统「通知使用权」后才能捕捉消息";
     }
@@ -788,12 +807,29 @@ class _SettingsPageState extends State<SettingsPage> {
             child: TextButton(
               onPressed: () async {
                 await PhoneCaptureService.instance.openListenerSettings();
-                // 给用户留出操作时间，稍后自动刷新状态
-                await Future<void>.delayed(const Duration(seconds: 3));
-                if (mounted) unawaited(_refreshCaptureState());
+                // 授权结果回来后由 didChangeAppLifecycleState(resumed) 自动回检
               },
               child: const Text("去系统设置授权"),
             ),
+          ),
+        if (_listenerEnabled)
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            title: const Text("扩展捕捉全部应用"),
+            subtitle: const Text(
+              "白名单外（如银行 App）的通知也捕捉给 Agent，按「其他应用」归类；默认关闭，避免营销通知噪音。",
+            ),
+            value: _captureAll,
+            onChanged: (bool v) {
+              setState(() => _captureAll = v);
+              unawaited(
+                PhoneCaptureService.instance
+                    .setCaptureConfig(extraRules: _captureRules, captureAll: v)
+                    .then((ok) {
+                  if (!ok && mounted) setState(() => _captureAll = !v);
+                }),
+              );
+            },
           ),
         SwitchListTile(
           contentPadding: EdgeInsets.zero,
@@ -813,10 +849,13 @@ class _SettingsPageState extends State<SettingsPage> {
     try {
       final bool enabled = await PhoneCaptureService.instance.isListenerEnabled();
       final int queueSize = await PhoneCaptureService.instance.queueSize();
+      final config = enabled ? await PhoneCaptureService.instance.getCaptureConfig() : null;
       if (!mounted) return;
       setState(() {
         _listenerEnabled = enabled;
         _captureQueueSize = queueSize;
+        _captureAll = config?.captureAll ?? false;
+        _captureRules = config?.extraRules ?? const [];
         _captureLoading = false;
       });
     } catch (_) {

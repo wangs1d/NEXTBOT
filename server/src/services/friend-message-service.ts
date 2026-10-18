@@ -37,6 +37,8 @@ export type FriendMessageSendResult = {
   ok: true;
   messageId: string;
   pushedToPeer: boolean;
+  /** 发送方 hub outbound 副本的会话内序号（聊天面板直发后本地气泡排序/去重用） */
+  outboundSeq?: number;
 };
 
 export type FriendMessageSendFailure = {
@@ -61,9 +63,16 @@ export type FriendPeerMessageEnvelopePayload = {
 
 export type FriendPeerMessageType = (typeof ServerEventType)[keyof typeof ServerEventType];
 
-export function buildFriendPeerEnvelope(
+/** 已读回执载荷（agent.peer_read_receipt）：lastReadSeq 已翻译到接收方会话空间 */
+export type FriendReadReceiptPayload = {
+  readerActorId: string;
+  lastReadSeq: number;
+  readAt: string;
+};
+
+export function buildFriendPeerEnvelope<T extends object>(
   type: FriendPeerMessageType,
-  payload: FriendPeerMessageEnvelopePayload,
+  payload: T,
 ): string {
   return JSON.stringify({ type, payload });
 }
@@ -134,8 +143,9 @@ export class FriendMessageService {
     }
 
     // 3. 发送方 hub 留档（代发留痕，outbound 会话由 hub 幂等 upsert）
+    let outboundSeq: number | undefined;
     try {
-      await this.deps.hub.createOutbound({
+      const outbound = await this.deps.hub.createOutbound({
         actorId: from,
         platform: "friend",
         channelId: to,
@@ -147,6 +157,7 @@ export class FriendMessageService {
         ...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
         meta: { via: "friend_message_service" },
       });
+      outboundSeq = outbound.message.seq;
     } catch {
       // 留档失败不阻断投递
     }
@@ -178,13 +189,14 @@ export class FriendMessageService {
       ok: true,
       messageId: record.messageId,
       pushedToPeer: pushed,
+      ...(outboundSeq != null ? { outboundSeq } : {}),
     };
   }
 
-  /** 好友会话双向记录（客户端聊天面板历史用；时间正序）。 */
-  listTranscript(actorId: string, friendActorId: string, limit = 100) {
+  /** 好友会话双向记录（客户端聊天面板历史用；时间正序）。sinceSeq 游标只取增量。 */
+  listTranscript(actorId: string, friendActorId: string, limit = 100, sinceSeq?: number) {
     const conversationId = `${actorId}::friend::${friendActorId}`;
-    return this.deps.hub.listMessages(actorId, conversationId, { limit });
+    return this.deps.hub.listMessages(actorId, conversationId, { limit, sinceSeq });
   }
 
   /** 好友会话未读数（重连补投/角标用）。 */
@@ -196,12 +208,35 @@ export class FriendMessageService {
     return conversation?.unreadCount ?? 0;
   }
 
-  /** 标读好友会话（等价 messages.mark_read，HTTP 面用）。 */
+  /**
+   * 标读好友会话（等价 messages.mark_read，HTTP 面用）。
+   * 成功后推已读回执（agent.peer_read_receipt）给对端：读取进度经
+   * externalMessageId 翻译到对端会话空间（对端副本的 seq），对端客户端把
+   * seq ≤ lastReadSeq 的气泡标为已读。尽力而为：翻译失败/对端离线都静默。
+   */
   async markRead(actorId: string, friendActorId: string): Promise<boolean> {
-    return this.deps.hub.markConversationRead(
-      actorId,
-      `${actorId}::friend::${friendActorId}`,
-    );
+    const conversationId = `${actorId}::friend::${friendActorId}`;
+    const ok = await this.deps.hub.markConversationRead(actorId, conversationId);
+    if (!ok) return ok;
+    try {
+      // 读取方会话的最新一条 → 对端空间内的同一消息副本 → 对端 seq
+      const latest = this.deps.hub.listMessages(actorId, conversationId, { limit: 1 })[0];
+      const externalId = latest?.externalMessageId;
+      if (!externalId) return ok;
+      const peerCopy = this.deps.hub.getMessageByExternalId(friendActorId, "friend", externalId);
+      if (peerCopy?.seq == null) return ok;
+      this.deps.wsRegistry.trySend(
+        friendActorId,
+        buildFriendPeerEnvelope(ServerEventType.AgentPeerReadReceipt, {
+          readerActorId: actorId,
+          lastReadSeq: peerCopy.seq,
+          readAt: new Date().toISOString(),
+        }),
+      );
+    } catch {
+      // 回执失败不影响标读
+    }
+    return ok;
   }
 
   /**

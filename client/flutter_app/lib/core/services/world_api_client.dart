@@ -383,10 +383,12 @@ class WorldApiClient {
   }
 
   /// 好友消息历史（双向，时间正序；hub platform=friend 会话）
-  Future<Map<String, dynamic>> getFriendMessages(String targetActorId, {int? limit}) async {
+  /// [sinceSeq] 增量游标：传上次收到的最大 seq 只拉新增部分（断线补拉用）
+  Future<Map<String, dynamic>> getFriendMessages(String targetActorId, {int? limit, int? sinceSeq}) async {
     final Map<String, String> query = Map<String, String>.from(ApiConfig.accountAuthQuery);
     query["targetActorId"] = targetActorId;
     if (limit != null) query["limit"] = limit.toString();
+    if (sinceSeq != null) query["sinceSeq"] = sinceSeq.toString();
     final http.Response r = await http.get(_uri("/friends/messages", query));
     return _decode(r);
   }

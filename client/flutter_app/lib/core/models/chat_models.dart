@@ -114,6 +114,7 @@ class ChatMessage {
     this.pendingMediaCards,
     this.followUpPrompts,
     this.decisionCard,
+    this.transferReminder,
     this.taskId,
     this.taskState,
     this.taskGoal,
@@ -237,6 +238,20 @@ class ChatMessage {
   ///   - deliveryId: 主动性消息的 outcome 目标（kind=proactive）
   final Map<String, dynamic>? decisionCard;
 
+  /// 接驳确认卡（contentType="transfer_reminder"）。
+  ///
+  /// 行程段临近到达（如高铁快到站）时服务端经 `agent.transfer_reminder`
+  /// 下发，落对话流一张「接驳确认卡」：用户点「帮我叫车/不用了」后由
+  /// 控制器以用户身份走原 chat 发送链路回复固定文本，并原地翻转终态。
+  /// 内存态不持久化（同 decisionCard：重启后消失，时刻窗已过的确认卡无意义）。
+  ///
+  /// 载荷：
+  ///   - message: 提醒文案
+  ///   - segment: { type: "train" | "flight", no, arrTime, from, to, ... }
+  ///   - minutesUntilArrival / planId
+  ///   - state: "pending" | "accepted" | "declined"
+  final Map<String, dynamic>? transferReminder;
+
   // ===== 后台任务回执（contentType="task_receipt" 专用，2026-09-08）=====
   //
   // 前后台分工：task.dispatch 派发后台任务后，服务端以 chat.task_update 推送
@@ -281,6 +296,7 @@ class ChatMessage {
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
     Map<String, dynamic>? decisionCard,
+    Map<String, dynamic>? transferReminder,
     String? taskId,
     String? taskState,
     String? taskGoal,
@@ -308,6 +324,7 @@ class ChatMessage {
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
       decisionCard: decisionCard ?? this.decisionCard,
+      transferReminder: transferReminder ?? this.transferReminder,
       taskId: taskId ?? this.taskId,
       taskState: taskState ?? this.taskState,
       taskGoal: taskGoal ?? this.taskGoal,

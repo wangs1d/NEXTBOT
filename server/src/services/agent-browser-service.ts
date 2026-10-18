@@ -61,8 +61,8 @@ const DEFAULT_VIEWPORT = { width: 1280, height: 720 } as const;
 /** extract_text 返回的文本截断上限（字符）。 */
 const TEXT_BUDGET = 4000;
 
-/** extract_text 附带的可交互元素数量上限。 */
-const INTERACTIVE_BUDGET = 30;
+/** extract_text 附带的 ariaSnapshot 紧凑元素行数上限（每行 ~10 token）。 */
+const INTERACTIVE_BUDGET = 300;
 
 /** screenshot base64 截断上限（字符），避免 tool loop token 膨胀。 */
 const SCREENSHOT_BASE64_BUDGET = 2000;
@@ -286,6 +286,14 @@ export class AgentBrowserService {
 
       this.sessions.set(sessionId, session);
 
+      // 新标签页跟随：购物/商品链接普遍 target=_blank 开新 tab，
+      // 下单等多步任务必须让会话操作跟随进入新 tab（session.page 切到最新活动页）。
+      context.on("page", (popup) => {
+        popup.setDefaultTimeout(getActionTimeoutMs());
+        session.page = popup;
+        session.currentUrl = popup.url();
+      });
+
       const title = await page.title().catch(() => "");
 
       // 通用「需要扫码自动推」：白名单站点撞登录页时，登录二维码自动推到聊天
@@ -505,6 +513,53 @@ export class AgentBrowserService {
     }
   }
 
+  /**
+   * ariaSnapshot(mode=ai) YAML → 紧凑可交互元素行（Node 侧解析，无 evaluate 闭包陷阱）。
+   *
+   * 输入（Playwright mode:"ai"）：
+   *   - navigation [ref=e2]:
+   *     - link "链接一" [ref=e3] [cursor=pointer]:
+   *       - /url: /1
+   *   - button "领券购买" [ref=e5]
+   *
+   * 输出（每行 ~10 token，供 LLM 直接阅读并把 ref 传给 click/type）：
+   *   e2 navigation
+   *   e3 link "链接一"
+   *   e5 button "领券购买"
+   *
+   * 仅保留可交互角色 + heading（页面语义文本已由正文 text 覆盖）；
+   * 丢弃 /url 子行与 cursor 标记；行数上限 INTERACTIVE_BUDGET。
+   */
+  private compactAriaSnapshot(snapshot: string): string {
+    const KEEP_ROLES = new Set([
+      "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
+      "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "option", "slider",
+      "switch", "img", "heading", "listbox", "treeitem", "spinbutton",
+    ]);
+    const DROP_MARKS = new Set(["cursor=pointer", "cursor=grab", "cursor=grabbing"]);
+    const lines: string[] = [];
+    for (const raw of snapshot.split("\n")) {
+      // 行格式：- role "可选名称" [标记1] [标记2]:（尾冒号表示有子节点）
+      const m = raw.match(/^\s*-\s+([A-Za-z][\w]*)\s*(?:"((?:[^"\\]|\\.)*)")?\s*((?:\[[^\]]+\]\s*)*):?\s*$/);
+      if (!m) continue;
+      const role = m[1];
+      if (!KEEP_ROLES.has(role)) continue;
+      const marks = (m[3] ?? "").match(/\[([^\]]+)\]/g) ?? [];
+      let ref = "";
+      const stateMarks: string[] = [];
+      for (const mark of marks) {
+        const inner = mark.slice(1, -1).trim();
+        if (inner.startsWith("ref=")) ref = inner.slice(4);
+        else if (!DROP_MARKS.has(inner)) stateMarks.push(inner);
+      }
+      const name = m[2] ? ` "${m[2]}"` : "";
+      const state = stateMarks.length ? ` [${stateMarks.join("] [")}]` : "";
+      lines.push(ref ? `${ref} ${role}${name}${state}` : `${role}${name}${state}`);
+      if (lines.length >= INTERACTIVE_BUDGET) break;
+    }
+    return lines.join("\n");
+  }
+
   /** 提取页面文本，可附带可交互元素列表。 */
   async extractText(
     ctx: ToolContext,
@@ -523,47 +578,23 @@ export class AgentBrowserService {
 
       const trimmed = text.replace(/\s+/g, " ").trim().slice(0, TEXT_BUDGET);
 
-      let interactive: Array<{ tag: string; text: string; selector: string }> | undefined;
+      let interactive: string | undefined;
       if (includeInteractive) {
-        interactive = await session.page
-          .evaluate(() => {
-            const results: Array<{ tag: string; text: string; selector: string }> = [];
-            const nodes = document.querySelectorAll<HTMLElement>(
-              "a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [role='button'], [role='link'], [onclick]",
-            );
-            for (const node of nodes) {
-              const tag = node.tagName.toLowerCase();
-              const text = (node.innerText || node.getAttribute("aria-label") || node.getAttribute("placeholder") || node.getAttribute("title") || "").trim().slice(0, 60);
-              if (!text && tag === "input") continue;
-              // 构造简易 selector
-              let sel = "";
-              if (node.id) {
-                sel = `#${node.id}`;
-              } else if (node.getAttribute("data-testid")) {
-                sel = `[data-testid="${node.getAttribute("data-testid")}"]`;
-              } else if (node.className && typeof node.className === "string") {
-                const cls = node.className.trim().split(/\s+/).slice(0, 2).join(".");
-                sel = cls ? `${tag}.${cls}` : tag;
-              } else {
-                sel = tag;
-              }
-              results.push({ tag, text: text || "(no text)", selector: sel });
-              if (results.length >= 30) break;
-            }
-            return results;
-          })
-          .catch(() => [] as Array<{ tag: string; text: string; selector: string }>);
-
-        if (interactive && interactive.length > INTERACTIVE_BUDGET) {
-          interactive = interactive.slice(0, INTERACTIVE_BUDGET);
+        try {
+          const snapshot = await session.page.locator("body").ariaSnapshot({ mode: "ai" });
+          interactive = this.compactAriaSnapshot(snapshot);
+        } catch (e) {
+          console.error("[agent_browser] ariaSnapshot 失败:", e instanceof Error ? e.message.slice(0, 200) : e);
+          interactive = undefined;
         }
       }
 
       this.touch(session);
+      const interactiveCount = interactive ? interactive.split("\n").length : 0;
       await this.audit(ctx, "extract_text", sessionId, {
         hasSelector: Boolean(selector),
         textLength: trimmed.length,
-        interactiveCount: interactive?.length ?? 0,
+        interactiveCount,
       });
 
       return {
@@ -573,6 +604,7 @@ export class AgentBrowserService {
         text: trimmed,
         truncated: text.length > TEXT_BUDGET,
         interactive,
+        interactiveCount,
       };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };

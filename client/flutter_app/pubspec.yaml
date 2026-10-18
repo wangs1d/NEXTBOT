@@ -24,6 +24,8 @@ dependencies:
   video_player: ^2.8.5
   # 桌面端窗口控制（隐藏/显示/置顶）
   window_manager: ^0.4.3
+  # 系统托盘：点 X 后台驻留，托盘恢复/退出
+  tray_manager: ^0.4.0
   # 查询显示器布局：还原主窗口位置时校验是否仍在屏幕内（window_manager 的传递依赖，显式声明以便直接 import）
   screen_retriever: ^0.2.2
   flutter_timezone: ^5.1.0
@@ -60,6 +62,8 @@ flutter:
   assets:
     - assets/agent_avatars/
     - assets/fonts/
+    # 系统托盘图标（点 X 后台驻留，见 core/services/app_tray_service.dart）
+    - assets/tray_icon.ico
     # 灵动岛专用字体（GDI 直读文件，见 windows/runner/embedded_font.h）
     - assets/fonts/noto/NotoSansSC-Regular.otf
     - assets/fonts/noto/NotoSansSC-Medium.otf

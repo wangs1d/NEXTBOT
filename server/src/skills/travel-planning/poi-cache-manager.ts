@@ -53,6 +53,16 @@ export interface RawPOI {
   images?: string[];
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat） */
   splatUrl?: string;
+  /**
+   * 社交热度（travel-upgrade-plan 数据层）：来自小红书/抖音/微博搜索聚合的
+   * 定性判断。level=hot 才会被攻略的出片/漂亮饭清单采纳；拿不到就不写，
+   * 宁缺毋滥不造假。
+   */
+  socialHeat?: { level: 'hot' | 'mid'; source?: string };
+  /** 出片属性（机位/最佳时段），供参考的 LLM 归纳，前端需标注来源 */
+  photo?: { score: number; spot?: string; bestTime?: string };
+  /** 漂亮饭属性（餐厅专用：环境/摆盘出片 + 招牌菜） */
+  prettyFood?: { vibe?: string; signature?: string };
   raw?: Record<string, unknown>;
 }
 
@@ -228,6 +238,30 @@ export class POICacheManager {
     if (!poi) return;
     poi.images = images;
     this.persist(key, entry);
+  }
+
+  /**
+   * 回写单个 POI 的社交属性（socialHeat/photo/prettyFood，travel-upgrade-plan
+   * 热度回填任务用）。payload 整对象落库，零迁移；同名 POI 按 poiId 精确命中，
+   * 找不到（缓存被刷新换 id）就丢弃本次结果，宁缺毋滥。
+   */
+  updatePOISocial(
+    destination: string,
+    type: 'attraction' | 'hotel' | 'restaurant',
+    poiId: string,
+    patch: Pick<RawPOI, 'socialHeat' | 'photo' | 'prettyFood'>,
+  ): boolean {
+    const key = this.normalizeKey(destination);
+    const entry = this.memoryCache.get(key) ?? this.loadFromStore(key);
+    if (!entry) return false;
+    const listKey = `${type}s` as keyof CacheEntry['data'];
+    const poi = entry.data[listKey].find((p) => p.id === poiId);
+    if (!poi) return false;
+    if (patch.socialHeat) poi.socialHeat = patch.socialHeat;
+    if (patch.photo) poi.photo = patch.photo;
+    if (patch.prettyFood) poi.prettyFood = patch.prettyFood;
+    this.persist(key, entry);
+    return true;
   }
 
   /**

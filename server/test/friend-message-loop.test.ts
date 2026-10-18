@@ -8,6 +8,9 @@
  *   3. 重连补投 replayUnread：未读会话重推最新一条；标读后不再推
  *   4. messages.reply 在 friend 平台会话上真实回信（经同一投递内核）
  *   5. 入口闸豁免：friend 平台带强模板词（验证码/中奖）的好友消息不被吞
+ *   6. seq 单调递增 + sinceSeq 增量拉取（2026-10-17 断线补拉游标）
+ *   7. 已读回执：标读后对端收到 agent.peer_read_receipt，lastReadSeq
+ *      经 externalMessageId 翻译到对端会话空间（2026-10-17）
  *
  * 测试封闭：临时目录 SQLite/JSON，无外部依赖；AGENT_TOOL_PROMOTION_STATE_PATH
  * 无关本测试（未触 preload 链路）。
@@ -416,6 +419,93 @@ test("门禁：messages.reply 对非好友 friend 会话返回 NOT_FRIENDS 结�
     // 对方未收到任何东西
     assert.equal(h.ws.pushed.length, 0);
     assert.equal(h.relay.listInbox("carol@test.local").length, 0);
+  } finally {
+    await teardown(h);
+  }
+});
+
+test("seq 会话内单调递增；sinceSeq 游标只回增量（hub + listTranscript 同口径）", async () => {
+  const h = await buildHarness();
+  try {
+    await makeFriends(h);
+    for (const text of ["第1条", "第2条", "第3条"]) {
+      const r = await h.registry.execute(
+        "world.link.send_message",
+        { targetSessionId: "bob@test.local", body: text },
+        ALICE_CTX,
+      );
+      assert.ok(r.ok);
+    }
+
+    const bobConv = h.hub
+      .listConversations("bob@test.local", { platform: "friend" })
+      .find((c) => c.channelId === "alice@test.local");
+    assert.ok(bobConv);
+    const all = h.hub.listMessages("bob@test.local", bobConv.conversationId);
+    assert.deepEqual(
+      all.map((m) => m.seq),
+      [1, 2, 3],
+      "会话内 seq 应从 1 单调递增",
+    );
+    // 发送方 outbound 副本同规则独立编号
+    const aliceConv = h.hub
+      .listConversations("alice@test.local", { platform: "friend" })
+      .find((c) => c.channelId === "bob@test.local");
+    assert.ok(aliceConv);
+    assert.deepEqual(
+      h.hub.listMessages("alice@test.local", aliceConv.conversationId).map((m) => m.seq),
+      [1, 2, 3],
+    );
+
+    // sinceSeq=1 → 只回 2、3；sinceSeq=2 → 只回 3
+    const delta1 = h.hub.listMessages("bob@test.local", bobConv.conversationId, { sinceSeq: 1 });
+    assert.deepEqual(delta1.map((m) => m.seq), [2, 3]);
+    assert.deepEqual(delta1.map((m) => m.text), ["第2条", "第3条"]);
+    const delta2 = h.friendMessages.listTranscript("bob@test.local", "alice@test.local", 100, 2);
+    assert.deepEqual(delta2.map((m) => m.seq), [3]);
+  } finally {
+    await teardown(h);
+  }
+});
+
+test("已读回执：标读后对端收到 agent.peer_read_receipt，lastReadSeq 翻译到对端会话空间", async () => {
+  const h = await buildHarness();
+  try {
+    await makeFriends(h);
+    // alice → bob 两条：alice 会话 outbound seq=1,2；bob 会话 inbound seq=1,2（同 externalMessageId 配对）
+    await h.registry.execute(
+      "world.link.send_message",
+      { targetSessionId: "bob@test.local", body: "你好" },
+      ALICE_CTX,
+    );
+    await h.registry.execute(
+      "world.link.send_message",
+      { targetSessionId: "bob@test.local", body: "在吗" },
+      ALICE_CTX,
+    );
+    const pushesBefore = h.ws.pushed.length;
+
+    const ok = await h.friendMessages.markRead("bob@test.local", "alice@test.local");
+    assert.equal(ok, true);
+
+    const receipt = h.ws.pushed
+      .slice(pushesBefore)
+      .find((p) => p.targetId === "alice@test.local" && p.envelope.type === "agent.peer_read_receipt");
+    assert.ok(receipt, "alice 应收到 bob 的已读回执");
+    const payload = receipt.envelope.payload as Record<string, unknown>;
+    assert.equal(payload.readerActorId, "bob@test.local");
+    // bob 会话最新 seq=2（R2）；R2 在 alice 会话空间的 outbound 副本 seq 同为 2
+    assert.equal(payload.lastReadSeq, 2);
+    assert.ok(typeof payload.readAt === "string");
+
+    // 标读幂等重放：再标读一次仍可产生回执（尽力而为语义），但 lastReadSeq 不回退
+    await h.friendMessages.markRead("bob@test.local", "alice@test.local");
+    const receipts = h.ws.pushed
+      .slice(pushesBefore)
+      .filter((p) => p.envelope.type === "agent.peer_read_receipt");
+    for (const r of receipts) {
+      assert.equal((r.envelope.payload as Record<string, unknown>).lastReadSeq, 2);
+    }
   } finally {
     await teardown(h);
   }

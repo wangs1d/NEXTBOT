@@ -79,16 +79,19 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "agent_browser.click",
       description:
         "在指定会话的浏览器页面中点击元素。\n" +
-        "selector 支持 Playwright 选择器语法：CSS（#id / .class / tag）、文本（text=登录）、XPath（xpath=//button）。\n" +
-        "若元素需要滚动到可视区域，Playwright 会自动滚动。\n" +
-        "适用场景：点击按钮、链接、复选框等。",
+        "定位二选一：优先传 ref（extract_text 返回的元素引用，如 \"e5\"）；否则传 selector（CSS / text=登录 / xpath=）。\n" +
+        "适用场景：点击按钮、链接、复选框等。元素不在视口内会自动滚动。",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
+          ref: {
+            type: "string",
+            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
+          },
           selector: {
             type: "string",
-            description: "Playwright 选择器。例如 '#submit-btn' / '.login-link' / 'text=登录' / 'xpath=//button[@type=\"submit\"]'。",
+            description: "Playwright 选择器（未传 ref 时必填）。例如 '#submit-btn' / 'text=登录'。",
           },
           button: {
             type: "string",
@@ -104,7 +107,7 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "操作超时（毫秒），默认 15000。",
           },
         },
-        required: ["sessionId", "selector"],
+        required: ["sessionId"],
         additionalProperties: false,
       },
     },
@@ -115,16 +118,20 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "agent_browser.type",
       description:
         "在指定会话的浏览器页面输入框中输入文本。\n" +
-        "默认替换模式（append=false）：清空输入框后填入新文本。\n" +
-        "追加模式（append=true）：在当前光标位置逐字符输入，可设 delay 模拟真人打字。\n" +
+        "定位二选一：优先传 ref（extract_text 返回的元素引用）；否则传 selector。\n" +
+        "默认替换模式（append=false）：清空后填入。追加模式（append=true）可设 delay 模拟真人打字。\n" +
         "适用场景：填写表单、搜索框输入、登录凭证输入等。",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
+          ref: {
+            type: "string",
+            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
+          },
           selector: {
             type: "string",
-            description: "目标输入框的 Playwright 选择器。例如 '#search-input' / 'input[name=\"q\"]' / 'textarea'。",
+            description: "目标输入框的 Playwright 选择器（未传 ref 时必填）。例如 '#search-input' / 'input[name=\"q\"]'。",
           },
           text: { type: "string", description: "要输入的文本内容。" },
           append: {
@@ -140,7 +147,7 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
             description: "追加模式下是否先清空输入框。默认 false。",
           },
         },
-        required: ["sessionId", "selector", "text"],
+        required: ["sessionId", "text"],
         additionalProperties: false,
       },
     },
@@ -218,10 +225,11 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "agent_browser.extract_text",
       description:
-        "提取指定会话当前页面的文本内容，并附带可交互元素列表（按钮/链接/输入框的 selector）。\n" +
+        "提取指定会话当前页面的文本内容，并附带可交互元素列表。\n" +
         "这是 Agent 浏览网页的**主要信息获取工具**，比 screenshot 更省 token 且信息更结构化。\n" +
-        "返回内容：页面 URL、标题、正文文本（截断 4000 字）、可交互元素列表（tag/text/selector，最多 30 个）。\n" +
-        "可用 selector 精确提取某元素文本（如 '.article-content'）。",
+        "返回：页面 URL、标题、正文文本（截断 4000 字）、可交互元素列表（每行 `ref role \"名称\" [状态]`，如 `e5 button \"领券购买\"`）。\n" +
+        "拿到 ref 后传给 click/type/wait_for 的 ref 参数即可精确定位操作；列表最多 300 行。\n" +
+        "可用 selector 只提取某元素的文本（如 '.article-content'）。",
       parameters: {
         type: "object",
         properties: {
@@ -232,7 +240,7 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           includeInteractive: {
             type: "boolean",
-            description: "是否附带可交互元素列表（a/button/input/select/textarea 等），默认 true。设 false 可减少返回体积。",
+            description: "是否附带可交互元素列表，默认 true。设 false 可减少返回体积。",
           },
         },
         required: ["sessionId"],
@@ -246,22 +254,26 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "agent_browser.wait_for",
       description:
         "等待指定会话页面中某元素出现并可见。\n" +
-        "适用场景：点击后等待弹窗、提交后等待结果加载、翻页后等待新内容渲染。\n" +
-        "超时后返回错误（retryable=true），可重试或改用其他 selector。",
+        "定位二选一：优先传 ref（extract_text 返回的元素引用）；否则传 selector。\n" +
+        "适用场景：点击后等待弹窗、提交后等待结果加载。超时返回错误（retryable=true）。",
       parameters: {
         type: "object",
         properties: {
           sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
+          ref: {
+            type: "string",
+            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
+          },
           selector: {
             type: "string",
-            description: "等待出现的元素选择器（Playwright 选择器）。",
+            description: "等待出现的元素选择器（未传 ref 时必填）。",
           },
           timeout: {
             type: "integer",
             description: "等待超时（毫秒），默认 15000，上限 60000。",
           },
         },
-        required: ["sessionId", "selector"],
+        required: ["sessionId"],
         additionalProperties: false,
       },
     },

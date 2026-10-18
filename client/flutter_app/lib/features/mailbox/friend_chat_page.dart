@@ -3,23 +3,32 @@ import "dart:async";
 import "package:flutter/material.dart";
 
 import "../../core/services/world_api_client.dart";
+import "../../core/services/ws_chat_service.dart";
 
 /// 好友聊天面板（内嵌右侧面板，不再全屏路由）。
 ///
 /// 2026-10-15 闭环：历史加载与直连发送走 hub platform=friend 会话的 HTTP 面
 /// （GET/POST /friends/messages），与 world.link.send_message 同一投递内核；
 /// 打开面板即标读（POST /friends/messages/read），重连补投随之停止。
-/// 收到 agent.peer_message 推送时的展示由 MailboxPage 的选中联动负责。
+///
+/// 2026-10-17 增量同步 + 已读回执：
+/// - 服务端为会话内消息分配单调 seq，面板持有 _maxSeq 游标；收到
+///   agent.peer_message 推送（含重连补投 replayed）时按 sinceSeq 增量追平，
+///   离线攒多条不再只展示最后一条；
+/// - 对端标读后服务端推 agent.peer_read_receipt（读取进度已翻译到本端
+///   会话空间），面板把自己的 seq ≤ lastReadSeq 的气泡标「已读」。
 class FriendChatPage extends StatefulWidget {
   const FriendChatPage({
     super.key,
     required this.api,
+    required this.ws,
     required this.friendActorId,
     required this.friendName,
     this.onBack,
   });
 
   final WorldApiClient api;
+  final WsChatService ws;
   final String friendActorId;
   final String friendName;
 
@@ -39,17 +48,44 @@ class _FriendChatPageState extends State<FriendChatPage> {
   bool _sending = false;
   String? _error;
 
+  /// 增量拉取游标：本地已加载的最大会话内 seq（null=旧服务端无 seq，退化为整列重载）
+  int? _maxSeq;
+  /// 已加载消息的去重键（seq 优先，缺 seq 退化为 messageId），防重推/补拉重复上屏
+  final Set<String> _knownKeys = {};
+  /// 对端已读到的序号（agent.peer_read_receipt；null=尚无回执）
+  int? _peerLastReadSeq;
+  StreamSubscription<Map<String, dynamic>>? _wsSub;
+
   @override
   void initState() {
     super.initState();
     _loadHistory();
+    _wsSub = widget.ws.events.listen(_onWsEvent);
   }
 
   @override
   void dispose() {
+    _wsSub?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  /// hub 消息 → 本地气泡；seq 用于增量游标与已读判定
+  Map<String, dynamic> _bubbleFrom(Map<String, dynamic> m) {
+    final seq = (m["seq"] as num?)?.toInt();
+    return <String, dynamic>{
+      "text": (m["text"] ?? "").toString(),
+      "isMe": m["direction"] == "outbound",
+      "timestamp": (m["createdAt"] ?? "").toString(),
+      if (seq != null) "seq": seq,
+    };
+  }
+
+  String _keyOf(Map<String, dynamic> m) {
+    final seq = (m["seq"] as num?)?.toInt();
+    if (seq != null) return "s:$seq";
+    return "id:${(m["externalMessageId"] ?? m["messageId"] ?? "").toString()}";
   }
 
   Future<void> _loadHistory() async {
@@ -60,28 +96,84 @@ class _FriendChatPageState extends State<FriendChatPage> {
     try {
       final result = await widget.api.getFriendMessages(widget.friendActorId, limit: 100);
       final List<dynamic> raw = (result["messages"] as List<dynamic>? ?? <dynamic>[]);
-      final List<Map<String, dynamic>> loaded = raw
-          .whereType<Map<String, dynamic>>()
-          .map((m) => <String, dynamic>{
-                "text": (m["text"] ?? "").toString(),
-                "isMe": m["direction"] == "outbound",
-                "timestamp": (m["createdAt"] ?? "").toString(),
-              })
-          .toList();
       if (!mounted) return;
       setState(() {
         _messages
           ..clear()
-          ..addAll(loaded);
+          ..addAll(raw.whereType<Map<String, dynamic>>().map(_bubbleFrom));
+        _knownKeys
+          ..clear()
+          ..addAll(raw.whereType<Map<String, dynamic>>().map(_keyOf));
+        _maxSeq = _latestSeq(raw.whereType<Map<String, dynamic>>());
       });
       _scrollToBottom();
-      // 打开面板即读：清服务端未读，重连补投不再重推
+      // 打开面板即读：清服务端未读，重连补投不再重推；服务端随之向对端推已读回执
       unawaited(widget.api.markFriendMessagesRead(widget.friendActorId));
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = "历史加载失败：$e");
     } finally {
       if (mounted) setState(() => _loading = false);
+    }
+  }
+
+  /// 增量追平：按 sinceSeq 游标只拉新增，替代旧「收到推送就整列重载」。
+  /// 重连补投（replayed=true）也走这里——离线攒的多条未读被一并补回。
+  Future<void> _syncNewMessages() async {
+    if (_maxSeq == null) {
+      // 无游标（服务端无 seq 或游标未建立）：退化为整列重载
+      await _loadHistory();
+      return;
+    }
+    try {
+      final result = await widget.api.getFriendMessages(
+        widget.friendActorId,
+        limit: 100,
+        sinceSeq: _maxSeq,
+      );
+      if (!mounted) return;
+      final List<dynamic> raw = (result["messages"] as List<dynamic>? ?? <dynamic>[]);
+      final fresh = <Map<String, dynamic>>[];
+      for (final m in raw.whereType<Map<String, dynamic>>()) {
+        final key = _keyOf(m);
+        if (_knownKeys.contains(key)) continue;
+        _knownKeys.add(key);
+        fresh.add(_bubbleFrom(m));
+        final seq = (m["seq"] as num?)?.toInt();
+        if (seq != null && (_maxSeq == null || seq > _maxSeq!)) _maxSeq = seq;
+      }
+      if (fresh.isEmpty) return;
+      setState(() => _messages.addAll(fresh));
+      _scrollToBottom();
+      // 面板打开即视读：清未读 + 触发对端已读回执
+      unawaited(widget.api.markFriendMessagesRead(widget.friendActorId));
+    } catch (_) {
+      // 增量同步失败静默：下次推送/手动刷新再试
+    }
+  }
+
+  int? _latestSeq(Iterable<Map<String, dynamic>> raw) {
+    int? max;
+    for (final m in raw) {
+      final seq = (m["seq"] as num?)?.toInt();
+      if (seq != null && (max == null || seq > max)) max = seq;
+    }
+    return max ?? _maxSeq;
+  }
+
+  void _onWsEvent(Map<String, dynamic> event) {
+    final String type = event["type"] as String? ?? "";
+    final Map<String, dynamic> payload =
+        event["payload"] as Map<String, dynamic>? ?? const {};
+    if (type == "agent.peer_message") {
+      // 只关心当前会话对象的推送（含重连补投 replayed）
+      if ((payload["fromSessionId"] as String? ?? "") != widget.friendActorId) return;
+      unawaited(_syncNewMessages());
+    } else if (type == "agent.peer_read_receipt") {
+      if ((payload["readerActorId"] as String? ?? "") != widget.friendActorId) return;
+      final seq = (payload["lastReadSeq"] as num?)?.toInt();
+      if (seq == null || !mounted) return;
+      setState(() => _peerLastReadSeq = seq);
     }
   }
 
@@ -102,17 +194,24 @@ class _FriendChatPageState extends State<FriendChatPage> {
       if (result["ok"] != true) {
         throw Exception((result["message"] ?? result["error"] ?? "发送失败").toString());
       }
+      // 服务端返回本会话内真 seq：本地气泡直接对齐服务端序号，
+      // 后续增量拉取按 seq 去重不重复上屏
+      final seq = (result["seq"] as num?)?.toInt();
       if (!mounted) return;
       setState(() {
         _messages.add({
           "text": text,
           "isMe": true,
           "timestamp": DateTime.now().toUtc().toIso8601String(),
+          if (seq != null) "seq": seq,
         });
+        if (seq != null) _knownKeys.add("s:$seq");
         _error = null;
       });
       _controller.clear();
       _scrollToBottom();
+      // 游标不动，随后增量同步兜底补拉发送间隙可能漏掉的对方消息
+      unawaited(_syncNewMessages());
     } catch (e) {
       if (!mounted) return;
       setState(() => _error = "发送失败：$e");
@@ -271,6 +370,13 @@ class _FriendChatPageState extends State<FriendChatPage> {
   ) {
     final text = message["text"] as String? ?? "";
     final timestamp = message["timestamp"] as String?;
+    // 已读判定：对端回执的 lastReadSeq 已翻译到本端会话空间，
+    // 自己的气泡 seq ≤ lastReadSeq 即对端已读
+    final seq = (message["seq"] as num?)?.toInt();
+    final isRead = isMe &&
+        seq != null &&
+        _peerLastReadSeq != null &&
+        seq <= _peerLastReadSeq!;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
@@ -315,17 +421,33 @@ class _FriendChatPageState extends State<FriendChatPage> {
                             : theme.colorScheme.onSurface,
                       ),
                     ),
-                  if (timestamp != null && timestamp.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 2),
-                      child: Text(
-                        _formatTime(timestamp),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: theme.colorScheme.onSurfaceVariant,
-                          fontSize: 9,
-                        ),
-                      ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (timestamp != null && timestamp.isNotEmpty)
+                          Text(
+                            _formatTime(timestamp),
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.onSurfaceVariant,
+                              fontSize: 9,
+                            ),
+                          ),
+                        if (isRead) ...[
+                          const SizedBox(width: 4),
+                          Text(
+                            "已读",
+                            style: theme.textTheme.bodySmall?.copyWith(
+                              color: theme.colorScheme.primary,
+                              fontSize: 9,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
+                  ),
                 ],
               ),
             ),

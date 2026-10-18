@@ -236,6 +236,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
             // 确认/忽略在卡上完成并回传 ack/outcome。
             return _buildDecisionCard(context, m, p);
           }
+          if (m.contentType == "transfer_reminder") {
+            // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
+            // 服务端推送，「帮我叫车/不用了」一键回复。
+            return _buildTransferReminderCard(context, m, p);
+          }
           if (!isUser) {
             // 行程卡独立第二条消息形态（2026-10-12 与桌面端对齐）：气泡只装
             // 文字，travel_itinerary 大卡不框进气泡外壳，作为独立消息元素
@@ -391,6 +396,195 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 ),
               ],
             ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 接驳确认卡（agent.transfer_reminder，2026-10-18）：行程段临近到达时
+  /// 服务端推送。卡面 = 提醒文案 + 出发地→目的地 + 到达时刻 + 车次/航班号，
+  /// pending 给「帮我叫车/不用了」两个一键回复；点击经控制器走现有发消息
+  /// 链路以用户身份发出固定文本，卡原地收起（隐藏按钮并翻转终态）。
+  /// 卡片外壳（surface 底 + 14 圆角 + divider 描边）与决策卡同风格。
+  Widget _buildTransferReminderCard(
+      BuildContext context, ChatMessage m, MobilePalette p) {
+    final Map<String, dynamic> card =
+        m.transferReminder ?? const <String, dynamic>{};
+    final Map<String, dynamic> segment =
+        card["segment"] is Map<String, dynamic>
+            ? card["segment"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final String message = (card["message"]?.toString() ?? m.text).trim();
+    final String from = segment["from"]?.toString() ?? "";
+    final String to = segment["to"]?.toString() ?? "";
+    final bool isFlight = segment["type"]?.toString() == "flight";
+    final String no = segment["no"]?.toString() ?? "";
+    final String state = card["state"]?.toString() ?? "pending";
+    final bool settled = state != "pending";
+
+    // 到达时刻 HH:mm（arrTime 为 ISO8601 含时区，解析失败则不展示该段）
+    String arrivalHm = "";
+    final Object? rawArr = segment["arrTime"];
+    if (rawArr != null) {
+      try {
+        final DateTime arr = DateTime.parse(rawArr.toString());
+        arrivalHm =
+            "${arr.hour.toString().padLeft(2, "0")}:${arr.minute.toString().padLeft(2, "0")}";
+      } catch (_) {
+        arrivalHm = "";
+      }
+    }
+    final Object? rawMinutes = card["minutesUntilArrival"];
+    final int? minutes = rawMinutes is int ? rawMinutes : null;
+
+    // 信息行：15:30 到达 · 车次 G123 · 约 30 分钟后到达
+    final List<String> infoParts = <String>[
+      if (arrivalHm.isNotEmpty) "$arrivalHm 到达",
+      if (no.isNotEmpty) "${isFlight ? "航班" : "车次"} $no",
+      if (minutes != null) "约 $minutes 分钟后到达",
+    ];
+
+    final String stateLabel = switch (state) {
+      "accepted" => "已帮你叫车",
+      "declined" => "已取消",
+      _ => "需要你确认",
+    };
+
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Opacity(
+        opacity: settled ? 0.6 : 1.0,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          constraints: const BoxConstraints(maxWidth: 300),
+          decoration: BoxDecoration(
+            color: p.surface,
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: p.divider),
+          ),
+          padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Icon(
+                    settled ? Icons.check_circle_outline : Icons.local_taxi_outlined,
+                    size: 15,
+                    color: state == "accepted" ? p.online : p.textSecondary,
+                  ),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      "接驳提醒 · $stateLabel",
+                      style: TextStyle(
+                        color: p.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.3,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              if (message.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 8),
+                Text(
+                  message,
+                  style: TextStyle(
+                    color: p.textPrimary,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                    height: 1.3,
+                  ),
+                ),
+              ],
+              if (from.isNotEmpty || to.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 8),
+                Row(
+                  children: <Widget>[
+                    Flexible(
+                      child: Text(
+                        from,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(color: p.textSecondary, fontSize: 13),
+                      ),
+                    ),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Icon(Icons.arrow_forward_rounded,
+                          size: 13, color: p.textMuted),
+                    ),
+                    Flexible(
+                      child: Text(
+                        to,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          color: p.textPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (infoParts.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 4),
+                Text(
+                  infoParts.join(" · "),
+                  style: TextStyle(color: p.textSecondary, fontSize: 12),
+                ),
+              ],
+              if (!settled) ...<Widget>[
+                const SizedBox(height: 10),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    FilledButton(
+                      style: FilledButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        backgroundColor: p.textPrimary,
+                        foregroundColor: p.background,
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                      ),
+                      onPressed: () =>
+                          _controller.respondTransferReminder(m.messageId, true),
+                      child: const Text("帮我叫车"),
+                    ),
+                    const SizedBox(width: 8),
+                    // 出发相位（返程去车站）额外给「导航去车站」：不叫车也能
+                    // 一键开导航（服务端拼高德 Web 导航 URI，系统浏览器打开）
+                    if ((card["phase"]?.toString() ?? "") == "pre_departure")
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: TextButton(
+                          style: TextButton.styleFrom(
+                            visualDensity: VisualDensity.compact,
+                            foregroundColor: p.textPrimary,
+                          ),
+                          onPressed: () =>
+                              _controller.openTransferNav(m.messageId),
+                          child: const Text("导航去车站"),
+                        ),
+                      ),
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        foregroundColor: p.textSecondary,
+                      ),
+                      onPressed: () =>
+                          _controller.respondTransferReminder(m.messageId, false),
+                      child: const Text("不用了"),
+                    ),
+                  ],
+                ),
+              ],
+            ],
           ),
         ),
       ),

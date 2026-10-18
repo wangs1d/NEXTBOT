@@ -291,6 +291,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         color: theme.colorScheme.surface,
         child: FriendChatPage(
           api: widget.api,
+          ws: widget.ws,
           friendActorId: selected["friendActorId"] as String,
           friendName: displayName,
           onBack: () => setState(() => _selectedFriend = null),

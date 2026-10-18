@@ -1,8 +1,11 @@
+import "dart:async";
+
 import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
+import "../../core/services/phone_capture_service.dart";
 import "../../core/services/video_preview_launcher.dart";
 import "media_disk_cache.dart";
 import "../../core/utils/agent_result_parser.dart";
@@ -96,6 +99,8 @@ class AgentResultCard extends StatelessWidget {
           // 立场化推荐卡（开源保留，同 product_compare 策略不闸）：
           // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。
           return ProductPickCard(data: data, cs: cs);
+        case "permission_request":
+          return _PermissionRequestCard(data: data, cs: cs);
         case "morning_briefing":
           // 简报卡（岛上条目退役后简报的聊天流落点）：extra 携带原始简报
           // 载荷，渲染复用 MorningBriefingCard（与兜底 Dialog 同一组件）。
@@ -601,6 +606,125 @@ class _ProgressRow extends StatelessWidget {
               valueColor: AlwaysStoppedAnimation<Color>(barColor),
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 权限引导卡（cardType=permission_request）：手机权限/系统设置引导。
+///
+/// 按钮动作是**固定本机映射**（open_notification_listener_settings → 系统
+/// 「通知使用权」设置页），不透传任意 intent/路由——LLM 只能选择是否出卡，
+/// 无法引导到别的页面。actions 缺失或 id 不匹配时退化为纯展示卡（不出按钮）。
+class _PermissionRequestCard extends StatelessWidget {
+  const _PermissionRequestCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  static const String _allowedActionId = "open_notification_listener_settings";
+
+  @override
+  Widget build(BuildContext context) {
+    AgentResultAction? action;
+    for (final AgentResultAction a in data.actions) {
+      if (a.id == _allowedActionId) {
+        action = a;
+        break;
+      }
+    }
+    final String buttonLabel =
+        (action?.label.isNotEmpty ?? false) ? action!.label : "去系统设置授权";
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 390),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.primary.withValues(alpha: 0.06),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              SoftIconChip(
+                icon: Icons.notifications_active_outlined,
+                color: cs.primary,
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  data.title,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                    height: 1.45,
+                  ),
+                  softWrap: true,
+                ),
+              ),
+            ],
+          ),
+          if (data.items.isNotEmpty)
+            ...data.items.map((AgentResultItem it) {
+              return Padding(
+                padding: const EdgeInsets.symmetric(vertical: 3),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    _ItemMark(type: it.type, colorScheme: cs),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: _InlineMarkdownBody(
+                        it.text,
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: cs.onSurface.withValues(alpha: 0.82),
+                          height: 1.55,
+                        ),
+                        colorScheme: cs,
+                      ),
+                    ),
+                  ],
+                ),
+              );
+            }),
+          if (action != null) ...<Widget>[
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: FilledButton.icon(
+                onPressed: () {
+                  unawaited(
+                    PhoneCaptureService.instance.openListenerSettings(),
+                  );
+                },
+                icon: const Icon(Icons.settings_outlined, size: 16),
+                label: Text(buttonLabel),
+                style: FilledButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  backgroundColor: cs.primary,
+                  foregroundColor: cs.onPrimary,
+                ),
+              ),
+            ),
+          ],
+          if (data.footer.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            Text(
+              data.footer,
+              style: TextStyle(
+                fontSize: 12.5,
+                color: cs.onSurfaceVariant,
+                height: 1.45,
+              ),
+            ),
+          ],
         ],
       ),
     );

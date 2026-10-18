@@ -3,6 +3,7 @@ import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
+import "package:url_launcher/url_launcher.dart";
 
 import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
@@ -571,6 +572,9 @@ class MobileChatController extends ChangeNotifier {
         // 睡前提醒（2026-10-16 接线）：narrationText 是唯一文案源，落文字气泡。
         // 后台不发系统通知（离线兜底已由服务端 proactivePipeline 承担）。
         _handleEveningDigestEvent(payload);
+      case "agent.transfer_reminder":
+        // 接驳提醒（行程段临近到达）：落对话流确认卡，一键回复帮我叫车。
+        _handleTransferReminderEvent(payload);
       case "ws_disconnected":
       case "connection_error":
         isConnected = false;
@@ -739,6 +743,108 @@ class MobileChatController extends ChangeNotifier {
       decisionCard: Map<String, dynamic>.of(card)..["state"] = "confirmed",
     );
     notifyListeners();
+  }
+
+  // ===== 接驳确认卡（agent.transfer_reminder，2026-10-18）=====
+
+  /// 接驳提醒落卡：行程段临近到达（如高铁快到站）时服务端推送，往对话流
+  /// 追加一张「接驳确认卡」（contentType="transfer_reminder"）。用户在其他
+  /// tab 时控制器照常收事件落卡（MobileHomePage IndexedStack 保活），重进
+  /// 会话看到同一张卡不重复弹；后台时补一条系统通知触达（同 reminder_popup
+  /// 分流）。卡内存态不持久化：重启后消失，时刻窗已过的确认卡无意义。
+  void _handleTransferReminderEvent(Map<String, dynamic> payload) {
+    final Map<String, dynamic> segment =
+        payload["segment"] is Map<String, dynamic>
+            ? payload["segment"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final String message = payload["message"]?.toString() ?? "";
+    final String from = segment["from"]?.toString() ?? "";
+    final String to = segment["to"]?.toString() ?? "";
+    if (message.trim().isEmpty && from.isEmpty && to.isEmpty) return;
+    if (_appBackgrounded) {
+      unawaited(LocalNotificationService.show(
+        title: "接驳提醒",
+        body: message,
+      ));
+    }
+    messages.add(ChatMessage(
+      messageId: "transfer-reminder-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: message,
+      timestamp: DateTime.now(),
+      contentType: "transfer_reminder",
+      transferReminder: <String, dynamic>{
+        "message": message,
+        "segment": Map<String, dynamic>.of(segment),
+        if (payload["minutesUntilArrival"] is int)
+          "minutesUntilArrival": payload["minutesUntilArrival"] as int,
+        "planId": payload["planId"]?.toString() ?? "",
+        // 相位（2026-10-18）：pre_arrival 到达提醒 / pre_departure 返程出发提醒
+        //（卡面带「导航去车站」）/ missing_time 求补充时刻
+        "phase": payload["phase"]?.toString() ?? "",
+        "state": "pending",
+      },
+    ));
+    notifyListeners();
+  }
+
+  /// 接驳确认卡按钮回调（MobileChatPage 调用）：以用户身份经现有 [send]
+  /// 链路发出固定文本（接站/接机由行程段类型决定，后端 Agent 走
+  /// ride_hailing 工具真实下单；不用了则回绝并收起卡片），并原地翻转终态。
+  /// 已定稿的卡幂等不重复回复。
+  void respondTransferReminder(String messageId, bool accept) {
+    final int idx = messages.indexWhere((m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final Map<String, dynamic>? card = messages[idx].transferReminder;
+    if (card == null || card["state"]?.toString() != "pending") return;
+    final Map<String, dynamic> segment =
+        card["segment"] is Map<String, dynamic>
+            ? card["segment"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final String from = segment["from"]?.toString() ?? "";
+    final String to = segment["to"]?.toString() ?? "";
+    final bool isFlight = segment["type"]?.toString() == "flight";
+    final String text = accept
+        ? "帮我预约从$from到$to的${isFlight ? "接机" : "接站"}车"
+        : "不用了,我自己安排";
+    messages[idx] = messages[idx].copyWith(
+      transferReminder: Map<String, dynamic>.of(card)
+        ..["state"] = accept ? "accepted" : "declined",
+    );
+    notifyListeners();
+    unawaited(send(text));
+  }
+
+  /// 「导航去车站」（接驳出发卡 pre_departure，2026-10-18）：服务端把车站名
+  /// 解析成高德 Web 导航 URI（/travel-map/nav/transfer-link，优先坐标、降级
+  /// 纯名称），系统浏览器打开即开始导航。不翻转卡片状态——导航与叫车互斥
+  /// 但都不代表确认完成；解析/打开失败静默提示，不打断对话。
+  Future<void> openTransferNav(String messageId) async {
+    final int idx = messages.indexWhere((m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final Map<String, dynamic>? card = messages[idx].transferReminder;
+    if (card == null) return;
+    final Map<String, dynamic> segment =
+        card["segment"] is Map<String, dynamic>
+            ? card["segment"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final String station = segment["from"]?.toString() ?? "";
+    if (station.trim().isEmpty) return;
+    try {
+      final Uri req = Uri.parse("${ApiConfig.httpBase}/travel-map/nav/transfer-link")
+          .replace(queryParameters: <String, String>{"name": station.trim()});
+      final http.Response res =
+          await http.get(req).timeout(const Duration(seconds: 8));
+      final dynamic url =
+          jsonDecode(utf8.decode(res.bodyBytes))["url"];
+      if (res.statusCode == 200 && url is String && url.startsWith("https://")) {
+        await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
+        return;
+      }
+    } catch (_) {/* 落到底部提示 */}
+    // 服务端不可达：退回「发消息让 Agent 引导」的既有链路
+    unawaited(send("帮我导航去$station"));
   }
 
   /// 思考态或流式开始时,确保有一条等待中的助手消息。

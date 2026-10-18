@@ -160,6 +160,32 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .map-now .mn .a{font-size:10.5px;color:var(--t3)}
 .map-now .mn .b{font-size:14px;font-weight:600;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .map-now button{font-size:12.5px;color:var(--amber);border:1px solid var(--amberLine);padding:8px 14px;border-radius:999px;flex:0 0 auto}
+
+/* ===== 导航 Dock（地图规划界面 · 手机端通用导航能力，旅游规划首个使用方） ===== */
+#navDock{display:none;margin-bottom:8px}
+#navDock.on{display:block}
+.map-bottom.nav-active .map-now{display:none}
+.nav-puck{width:15px;height:15px;border-radius:50%;background:#4EA1FF;border:2.5px solid #fff;box-shadow:0 0 0 4px rgba(78,161,255,.28);box-sizing:border-box}
+.nd-card{background:var(--card);border:1px solid var(--amberLine);border-radius:18px;padding:12px 14px}
+.nd-card.stay{border-color:rgba(99,201,140,.4)}
+.nd-head{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.nd-chip{font-family:var(--num);font-size:10px;letter-spacing:1.6px;color:var(--amber);background:var(--amberSoft);border:1px solid var(--amberLine);padding:3px 9px;border-radius:999px;flex:0 0 auto}
+.nd-card.stay .nd-chip{color:var(--ok);background:var(--okSoft);border-color:rgba(99,201,140,.4)}
+.nd-prog{font-family:var(--num);font-size:10.5px;color:var(--t3);font-variant-numeric:tabular-nums}
+.nd-target{font-size:15.5px;font-weight:600;margin-top:7px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 出片时刻提示（travel 双端⑤）：到达后展示 POI 库真实机位/最佳时段（琥珀色小标） */
+.nd-photo{display:flex;gap:6px;align-items:flex-start;font-size:11.5px;color:var(--t1);margin-top:6px;line-height:1.5}
+.nd-photo .p{flex:0 0 auto;color:var(--amber);border:1px solid var(--amberLine);background:var(--amberSoft);border-radius:999px;font-size:9.5px;padding:1px 7px;font-weight:600}
+.nd-agent{display:flex;gap:7px;align-items:flex-start;font-size:11.5px;color:var(--t2);margin-top:5px;line-height:1.5}
+.nd-agent .sv{color:var(--amber);flex:0 0 auto}
+.nd-btns{display:flex;gap:9px;margin-top:11px}
+.nd-main{flex:1;font-size:13.5px;font-weight:700;background:linear-gradient(135deg,var(--amber2),var(--amber));color:#10120F;padding:10px;border-radius:999px}
+.nd-card.stay .nd-main{background:linear-gradient(135deg,#2E7D64,var(--ok));color:#0B1310}
+.nd-mini{display:flex;justify-content:space-between;align-items:center;margin-top:9px;min-height:24px}
+.nd-mini button{font-size:11.5px;color:var(--t3);padding:4px 8px}
+.nd-done{display:flex;align-items:center;gap:11px;background:var(--card);border:1px solid rgba(99,201,140,.4);border-radius:18px;padding:13px 15px}
+.nd-done .t{flex:1;font-size:13.5px;font-weight:600;color:var(--ok)}
+.nd-done button{font-size:12px;color:var(--t2);border:1px solid var(--line2);padding:7px 14px;border-radius:999px;flex:0 0 auto}
 .map-bg{stroke:rgba(255,255,255,.035)}
 .ml-wrap{position:absolute;inset:0;display:none}
 .ml-wrap.on{display:block}
@@ -210,6 +236,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .s-row.done .sr-name{color:var(--t3)}
 .s-row .sr-sub{font-size:11px;color:var(--t3);margin-top:2px;font-family:var(--num);font-variant-numeric:tabular-nums}
 .s-row .sr-tag{font-size:10px;color:var(--t3);border:1px solid var(--line);padding:3px 8px;border-radius:999px;flex:0 0 auto}
+.s-row .sr-nav{width:30px;height:30px;border-radius:50%;background:var(--amberSoft);border:1px solid var(--amberLine);color:var(--amber);display:grid;place-items:center;flex:0 0 auto}
+.s-row .sr-nav svg{width:13px;height:13px}
+.s-row .sr-nav:active{transform:scale(.9)}
 .alt-block{margin-top:16px;border:1px dashed var(--line2);border-radius:16px;padding:13px 16px}
 .alt-block .ab-h{font-size:11.5px;color:var(--t3);letter-spacing:1px;margin-bottom:9px}
 .alt-item{display:flex;align-items:center;justify-content:space-between;padding:8px 0;gap:10px}
@@ -424,9 +453,11 @@ img{display:block;width:100%;height:100%;object-fit:cover}
       <div class="map-attrib" id="mapAttrib"></div>
     </div>
     <div class="map-bottom">
+      <div id="navDock"></div>
       <div class="map-now">
         <span class="mn-dot"></span>
         <div class="mn"><div class="a">当前</div><div class="b" id="mapNowName"></div></div>
+        <button id="mapNavBtn">导航</button>
         <button id="mapSheetBtn">看全程</button>
       </div>
     </div>
@@ -899,6 +930,7 @@ function tryMapRender(items) {
       MMAP_STATE = 'ready';
       $('mapAttrib').textContent = '© OpenStreetMap · CARTO';
       if (PLAN) { renderMap(); if (state.view === 'detail') renderDetail(); }
+      if (navSession) syncNavLeg();   // 页面重载恢复会话时，refreshNav 先于地图就绪 → 此处补画当前段
     });
     MMAP.on('error', function () { /* 底图源抖动：静默，SVG 兜底已可见 */ });
     // 超时兜底：3.2s 未起来就固定回落 SVG，不再无限等待
@@ -952,17 +984,41 @@ function ensureRouteLayers() {
   addAll();
 }
 
+/** 行程路线段几何缓存（真实路网优先，缺段直线），配合 planRouteKey 去重 */
+var planRouteKey = '', planGeoms = null;
+
 function updateRouteData(items) {
-  var src;
+  var pts = [];
+  for (var k = 0; k < items.length; k++) if (items[k].loc) pts.push(items[k].loc);
+  if (pts.length < 2) return;
+  var key = pts.map(function (p) { return p.lat.toFixed(4) + ',' + p.lng.toFixed(4); }).join(';');
+  if (key === planRouteKey) { drawPlanLines(pts, planGeoms); return; }   // 站点没变：只刷 done 染色
+  planRouteKey = key; planGeoms = null;
+  drawPlanLines(pts, null);   // 真实路网回来前先落直线
+  var base = apiBase();
+  if (!base) return;
+  fetch(base + '/travel-route?stops=' + pts.map(function (p) { return p.lat + ',' + p.lng; }).join(';'), { headers: { Accept: 'application/json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (j) {
+      if (key !== planRouteKey || MMAP_STATE !== 'ready') return;   // 已切天/换载：丢弃迟到结果
+      var byIdx = {};
+      ((j && j.legs) || []).forEach(function (l) { if (l && l.index != null && l.coordinates) byIdx[l.index] = l.coordinates; });
+      planGeoms = [];
+      for (var k = 0; k < pts.length - 1; k++) planGeoms.push(byIdx[k] || null);   // 缺段 null → 直线兜底
+      drawPlanLines(pts, planGeoms);
+    })
+    .catch(function () { /* 直线兜底已在屏 */ });
+}
+
+function drawPlanLines(pts, geoms) {
+  var src = null;
   try { src = MMAP.getSource(ROUTE_SRC); } catch (e) { src = null; }
   if (!src) return;
   var feats = [];
-  for (var k = 0; k < items.length - 1; k++) {
-    var a = items[k], b = items[k + 1];
-    if (!a.loc || !b.loc) continue;
+  for (var k = 0; k < pts.length - 1; k++) {
     feats.push({
       type: 'Feature', properties: { done: k < state.cur },
-      geometry: { type: 'LineString', coordinates: [[a.loc.lng, a.loc.lat], [b.loc.lng, b.loc.lat]] }
+      geometry: { type: 'LineString', coordinates: (geoms && geoms[k]) || [[pts[k].lng, pts[k].lat], [pts[k + 1].lng, pts[k + 1].lat]] }
     });
   }
   try { src.setData({ type: 'FeatureCollection', features: feats }); } catch (e) { /* noop */ }
@@ -1059,11 +1115,14 @@ function renderSheet() {
 
   var h = '';
   items.forEach(function (it, i) {
+    var navable = it.loc && it.loc.lat != null && it.loc.lng != null && it.kind !== 'ride';
     h += '<div class="s-row ' + (i === state.cur ? 'now ' : (i < state.cur ? 'done' : '')) + '" data-i="' + i + '">' +
       '<div class="sr-t">' + min2text(it.start) + '</div><div class="sr-dot"></div>' +
       '<div class="sr-main"><div class="sr-name">' + esc(it.name) + '</div>' +
       '<div class="sr-sub">停留 ' + it.duration + ' 分' + (it.leg ? ' · ' + TNAME[it.leg.mode] + ' ' + it.leg.minutes + ' 分' : '') + '</div></div>' +
-      '<div class="sr-tag">' + esc(str(it.tag).split(' ')[0]) + '</div></div>';
+      '<div class="sr-tag">' + esc(str(it.tag).split(' ')[0]) + '</div>' +
+      (navable ? '<button class="sr-nav" data-nav="' + i + '" aria-label="从这里开始导航"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2 L19 21 L12 17 L5 21 Z"/></svg></button>' : '') +
+      '</div>';
   });
   if (alts.length) {
     h += '<div class="alt-block"><div class="ab-h">AGENT 暂时收起 · 可请求加回</div>';
@@ -1078,6 +1137,17 @@ function renderSheet() {
   });
   bindAll($('sheetList').querySelectorAll('[data-add]'), function (b) {
     b.addEventListener('click', function () { requestAlt(b.dataset.add); });
+  });
+  bindAll($('sheetList').querySelectorAll('[data-nav]'), function (b) {
+    b.addEventListener('click', function (ev) {
+      ev.stopPropagation();
+      if (navSession) { closeSheet(); setView('map'); renderNav(); toast('导航进行中'); return; }
+      var rowIdx = +b.dataset.nav;
+      var it = curStops()[rowIdx];
+      var filtered = navStops(), fi = 0;
+      for (var k = 0; k < filtered.length; k++) { if (it && filtered[k].id === it.id) { fi = k; break; } }
+      startNavAt(fi);
+    });
   });
 }
 
@@ -1104,9 +1174,16 @@ function renderDetail() {
   if (it.anchor != null) chips += '<span class="chip hot">时间锚点 · 不可错过</span>';
   if (it.book) chips += '<span class="chip"><span class="cdot"></span>' + esc(it.book) + '</span>';
   if (it.splatUrl) chips += '<button class="chip act" id="splatBtn">沉浸式 3D 实景</button>';
+  // 打卡视频（travel 视频下放）：后台回填命中的站点带 1 条真实播放页，点开即看
+  var vids = d.videos || [];
+  if (vids.length && vids[0] && vids[0].url) {
+    chips += '<button class="chip act" id="poiVidBtn">▶ ' + esc(vids[0].title || '打卡视频') + '</button>';
+  }
   $('dChips').innerHTML = chips;
   var sb = $('splatBtn');
   if (sb) sb.addEventListener('click', function () { openUrl(it.splatUrl); });
+  var vb = $('poiVidBtn');
+  if (vb) vb.addEventListener('click', function () { openUrl(vids[0].url); });
 
   var hl = d.hl || [];
   $('secHl').style.display = hl.length ? '' : 'none';
@@ -1120,10 +1197,7 @@ function renderDetail() {
   if (d.hours) rows += '<div class="irow"><span class="k">开放时间</span><span class="v">' + esc(d.hours) + '</span></div>';
   if (d.ticket) rows += '<div class="irow"><span class="k">费用</span><span class="v">' + esc(d.ticket) + '</span></div>';
   if (d.addr) rows += '<div class="irow"><span class="k">位置</span><span class="v">' + esc(d.addr) + '</span></div>';
-  if (it.loc) {
-    rows += '<div class="irow"><span class="k">坐标</span><span class="v tnum">' +
-      it.loc.lat.toFixed(4) + ', ' + it.loc.lng.toFixed(4) + '</span></div>';
-  }
+  // 经纬度禁令（2026-10-08 硬性要求）：坐标只进工具入参（地图/导航），不进任何用户可见内容
   $('secInfo').style.display = rows ? '' : 'none';
   $('dInfo').innerHTML = rows;
 
@@ -1232,6 +1306,240 @@ function notifyHost(payload) {
   } catch (e) { /* 浏览器形态：无宿主，纯本地 */ }
 }
 
+/* ══════════════════ 导航（页内 · 手机端通用导航能力，旅游规划首个使用方） ══════════════════
+   - 不跳外部地图：当前段路线（/travel-route 真实路网，服务端抽象可换源）直接画在自家地图上
+   - GPS 打点跟随（watchPosition 更新位置点），阶段流转全靠手动按钮（已到达/出发/跳过/结束）
+   - 会话状态在服务端：页面重载后按 planId 无损恢复 Dock 与当前段路线
+   - 坐标仅用于取路线/拼请求参数，不上屏 */
+var navSession = null;      // 服务端活跃会话快照（NavSessionView）
+var navDoneFlash = false;   // 完成提示（服务端 done 即无活跃会话，仅本地展示一次）
+var navWatchId = null;      // GPS watch 句柄
+var navUserPos = null;      // 最新定位 {lat,lng}（首段路线起点）
+var navPuck = null;         // 地图上的位置点 marker
+var navLegSeq = 0;          // 段切换序号：丢弃迟到的路线响应
+var NAV_SRC = 'nav-route';
+
+/** 当日可导航站点（有坐标、非交通行段） */
+function navStops() {
+  return curStops().filter(function (s) {
+    return s.loc && s.loc.lat != null && s.loc.lng != null && s.kind !== 'ride';
+  });
+}
+function navApi(path, body) {
+  return fetch(apiBase() + path, {
+    method: body ? 'POST' : 'GET',
+    headers: body ? { Accept: 'application/json', 'Content-Type': 'application/json' } : { Accept: 'application/json' },
+    body: body ? JSON.stringify(body) : undefined,
+  }).then(function (r) { return r.json().catch(function () { return null; }); });
+}
+/** 阶段变化上报宿主（Agent 侧感知导航进行时，尽力而为） */
+function navNoteHost() {
+  if (!navSession) return;
+  var cur = navSession.stops[navSession.curIdx];
+  notifyHost({
+    event: 'navState',
+    phase: navSession.phase,
+    legIndex: navSession.legIndex,
+    total: navSession.total,
+    stop: cur ? cur.name : '',
+  });
+}
+/** 会话出行方式 → 路网 profile（/travel-route 支持 walk|bike|drive） */
+function navProfile() {
+  var m = navSession && navSession.mode;
+  return m === 'walking' ? 'walk' : (m === 'cycling' ? 'bike' : 'drive');
+}
+/** 导航路线图层：当前段精确路线（盖在行程琥珀线上）。只建一次，之后 setData 更新 */
+function ensureNavLayers() {
+  if (!MMAP || MMAP.getSource(NAV_SRC)) return;
+  try {
+    MMAP.addSource(NAV_SRC, { type: 'geojson', data: { type: 'FeatureCollection', features: [] } });
+    MMAP.addLayer({
+      id: 'nav-route-line', type: 'line', source: NAV_SRC,
+      layout: { 'line-cap': 'round', 'line-join': 'round' },
+      paint: { 'line-color': '#4EA1FF', 'line-width': 5.2, 'line-opacity': 0.95 }
+    });
+  } catch (e) { console.warn('[travel-mobile] 导航路线图层建立失败', e); }
+}
+function setNavLine(coords) {
+  if (!MMAP || MMAP_STATE !== 'ready') return;
+  ensureNavLayers();
+  var src = null;
+  try { src = MMAP.getSource(NAV_SRC); } catch (e) { src = null; }
+  if (!src) return;
+  var feats = coords && coords.length > 1
+    ? [{ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: coords } }]
+    : [];
+  try { src.setData({ type: 'FeatureCollection', features: feats }); } catch (e) { /* noop */ }
+}
+/** 两点球面距离（km）——定位合理性校验用 */
+function haversineKm(a, b) {
+  var R = 6371, dLa = (b.lat - a.lat) * Math.PI / 180, dLo = (b.lng - a.lng) * Math.PI / 180;
+  var la1 = a.lat * Math.PI / 180, la2 = b.lat * Math.PI / 180;
+  var h = Math.sin(dLa / 2) * Math.sin(dLa / 2) + Math.cos(la1) * Math.cos(la2) * Math.sin(dLo / 2) * Math.sin(dLo / 2);
+  return 2 * R * Math.asin(Math.sqrt(h));
+}
+/** 当前段精确路线：from=上一站（首段用 GPS 定位）→ 当前站；路网缺失降级直线（不丢段） */
+function syncNavLeg() {
+  if (!navSession || MMAP_STATE !== 'ready') return;
+  var stops = navSession.stops, cur = stops[navSession.curIdx];
+  if (!cur || cur.lat == null) { setNavLine(null); return; }
+  var prev = navSession.curIdx > 0 ? stops[navSession.curIdx - 1] : null;
+  // 首段起点用 GPS，但距目标 >300km 视为无效定位（IP 定位漂移/出境），
+  // 不画跨洋直线，降级为聚焦目的地
+  var from = (prev && prev.lat != null) ? prev
+    : (navUserPos && haversineKm(navUserPos, cur) <= 300 ? navUserPos : null);
+  var seq = ++navLegSeq;
+  if (!from) {
+    setNavLine(null);
+    try { MMAP.flyTo({ center: [cur.lng, cur.lat], zoom: 16, duration: 600 }); } catch (e) { /* noop */ }
+    return;
+  }
+  var base = apiBase();
+  if (!base) { setNavLine([[from.lng, from.lat], [cur.lng, cur.lat]]); return; }
+  fetch(base + '/travel-route?stops=' + from.lat + ',' + from.lng + ';' + cur.lat + ',' + cur.lng +
+    '&profile=' + navProfile(), { headers: { Accept: 'application/json' } })
+    .then(function (r) { return r.ok ? r.json() : null; })
+    .then(function (j) {
+      if (seq !== navLegSeq) return;   // 已切下一段：丢弃迟到响应
+      var leg = j && j.legs && j.legs[0];
+      var coords = (leg && leg.coordinates && leg.coordinates.length > 1)
+        ? leg.coordinates
+        : [[from.lng, from.lat], [cur.lng, cur.lat]];
+      setNavLine(coords);
+      try {
+        var b = new maplibregl.LngLatBounds();
+        coords.forEach(function (c) { b.extend(c); });
+        MMAP.fitBounds(b, { padding: { top: 150, bottom: 210, left: 70, right: 70 }, duration: 700, maxZoom: 16.5 });
+      } catch (e) { /* noop */ }
+    })
+    .catch(function () {
+      if (seq !== navLegSeq) return;
+      setNavLine([[from.lng, from.lat], [cur.lng, cur.lat]]);
+    });
+}
+/** GPS 打点跟随：导航进行中持续更新位置点（只呈现，不自动流转阶段） */
+function startNavWatch() {
+  if (navWatchId != null || !navigator.geolocation) return;
+  navWatchId = navigator.geolocation.watchPosition(function (p) {
+    var first = !navUserPos;
+    navUserPos = { lat: p.coords.latitude, lng: p.coords.longitude };
+    if (!MMAP || MMAP_STATE !== 'ready' || !navUserPos) return;
+    if (!navPuck) {
+      var el = document.createElement('div');
+      el.className = 'nav-puck';
+      navPuck = new maplibregl.Marker({ element: el }).setLngLat([navUserPos.lng, navUserPos.lat]).addTo(MMAP);
+    } else {
+      try { navPuck.setLngLat([navUserPos.lng, navUserPos.lat]); } catch (e) { /* noop */ }
+    }
+    // 首回调补画：syncNavLeg 先于 GPS 就位执行时首段起点缺失，定位到手后补一次
+    if (first && navSession && navSession.phase === 'going') syncNavLeg();
+  }, function () { /* 定位不可用静默：首段起点降级目的地聚焦 */ },
+  { enableHighAccuracy: true, maximumAge: 4000, timeout: 12000 });
+}
+function stopNavWatch() {
+  if (navWatchId != null && navigator.geolocation) navigator.geolocation.clearWatch(navWatchId);
+  navWatchId = null;
+  if (navPuck) { try { navPuck.remove(); } catch (e) { /* noop */ } navPuck = null; }
+}
+/** 会话结束清理：停 GPS、清路线层（Dock 收尾由 renderNav 处理） */
+function cleanupNav() {
+  stopNavWatch();
+  navUserPos = null;
+  setNavLine(null);
+}
+/** 恢复/刷新会话（页面加载、行程换载时调用）；有活跃会话则同步当前段路线 */
+function refreshNav() {
+  if (!planId) return Promise.resolve();
+  return navApi('/travel-map/nav/session?planId=' + encodeURIComponent(planId)).then(function (j) {
+    navSession = (j && j.session) || null;
+    renderNav();
+    if (navSession) { startNavWatch(); syncNavLeg(); }
+    else cleanupNav();
+  }).catch(function () { /* 服务不可达：Dock 静默隐藏 */ });
+}
+/** 从指定站开始导航（创建会话后页内进入：画当前段真实路网路线） */
+function startNavAt(filteredIdx) {
+  if (!planId) { toast('未关联行程，无法开始导航'); return; }
+  var stops = navStops();
+  if (!stops.length) { toast('这一天没有可导航的地点'); return; }
+  navApi('/travel-map/nav/session', {
+    planId: planId,
+    stops: stops.map(function (s) { return { name: s.name, lat: s.loc.lat, lng: s.loc.lng }; }),
+    startIndex: clamp(filteredIdx, 0, stops.length - 1),
+  }).then(function (j) {
+    if (!j || j.error) { toast('导航会话创建失败'); return; }
+    navSession = j; navDoneFlash = false;
+    renderNav(); navNoteHost();
+    startNavWatch(); syncNavLeg();
+  });
+}
+/** 阶段流转（arrive / depart / skip / end）；depart/skip 成功后页内切到下一段路线 */
+function navAction(action) {
+  if (!navSession || !planId) return;
+  navApi('/travel-map/nav/' + action, { planId: planId }).then(function (j) {
+    if (!j || j.error) {
+      // 服务端会话已不存在（如服务重启清内存）：重同步，Dock 与服务端真实状态对齐
+      refreshNav();
+      toast(j && j.error ? j.error : '操作失败，请重试');
+      return;
+    }
+    if (j.phase === 'done') { navSession = null; navDoneFlash = true; cleanupNav(); }
+    else { navSession = j; }   /* arrive 响应可能带 photoTip（出片提示），随会话对象保留 */
+    renderNav(); navNoteHost();
+    if (navSession && action !== 'arrive') syncNavLeg();
+  });
+}
+/** 渲染地图底部导航 Dock（going / stay / done 三态） */
+function renderNav() {
+  var dock = $('navDock');
+  var bottom = dock ? dock.parentNode : null;
+  if (!dock || !bottom) return;
+  var show = !!navSession || navDoneFlash;
+  dock.classList.toggle('on', show);
+  bottom.classList.toggle('nav-active', !!navSession);
+  if (!show) { dock.innerHTML = ''; return; }
+  if (!navSession) {   // done 收尾
+    dock.innerHTML = '<div class="nd-done"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--ok)" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12.5 L9.5 18 L20 6.5"/></svg><div class="t">导航完成</div><button id="ndDoneOk">收起</button></div>';
+    var okBtn = $('ndDoneOk');
+    if (okBtn) okBtn.addEventListener('click', function () { navDoneFlash = false; renderNav(); });
+    return;
+  }
+  var going = navSession.phase === 'going';
+  var cur = navSession.stops[navSession.curIdx] || { name: '' };
+  var nxt = navSession.stops[navSession.curIdx + 1] || null;
+  var agentLine = going
+    ? '跟着地图上的蓝色路线走；到了按「已到达」，我就停掉这段。'
+    : (nxt ? '慢慢逛～出发时按下面按钮，路线直接画到「' + esc(nxt.name) + '」。'
+           : '最后一站逛完按「完成行程」，我给你收尾。');
+  // 出片时刻提示（travel 双端⑤）：arrive 后服务端按站名回查 POI 库真实机位/
+  // 最佳时段字段，stay 态在 Agent 行上方追加一行；没有该字段就不出现
+  var tip = (!going && navSession.photoTip && typeof navSession.photoTip === 'object') ? navSession.photoTip : null;
+  var tipHtml = '';
+  if (tip && (str(tip.spot).trim() || str(tip.bestTime).trim())) {
+    var parts = [];
+    if (str(tip.spot).trim()) parts.push('机位：' + str(tip.spot).trim());
+    if (str(tip.bestTime).trim()) parts.push('最佳时段：' + str(tip.bestTime).trim());
+    tipHtml = '<div class="nd-photo"><span class="p">出片</span>' + esc(parts.join(' · ')) + '</div>';
+  }
+  var mainLabel = going ? '已到达' : (nxt ? '出发去下一站' : '完成行程');
+  dock.innerHTML = '<div class="nd-card' + (going ? '' : ' stay') + '">' +
+    '<div class="nd-head"><span class="nd-chip">' + (going ? '前往中' : '已到达 · 停留中') + '</span>' +
+    '<span class="nd-prog">第 ' + navSession.legIndex + ' / ' + navSession.total + ' 站</span></div>' +
+    '<div class="nd-target">' + esc(cur.name) + '</div>' +
+    tipHtml +
+    '<div class="nd-agent"><span class="sv">✦</span><span>' + agentLine + '</span></div>' +
+    '<div class="nd-btns">' +
+    '<button class="nd-main" id="ndMain">' + mainLabel + '</button></div>' +
+    '<div class="nd-mini">' + (going ? '<button id="ndSkip">跳过此站</button>' : '<span></span>') +
+    '<button id="ndEnd">结束导航</button></div>' +
+    '</div>';
+  $('ndMain').addEventListener('click', function () { navAction(going ? 'arrive' : 'depart'); });
+  var skipBtn = $('ndSkip');
+  if (skipBtn) skipBtn.addEventListener('click', function () { navAction('skip'); });
+  $('ndEnd').addEventListener('click', function () { navAction('end'); });
+}
+
 /* ══════════════════ 装订事件 ══════════════════ */
 $('nowCard').addEventListener('click', function () {
   if (!PLAN) return;
@@ -1247,6 +1555,17 @@ $('undoBtn').addEventListener('click', function () { $('bubble').classList.remov
 $('mapBtn').addEventListener('click', function () { setView('map'); });
 $('mapClose').addEventListener('click', function () { setView('home'); });
 $('mapSheetBtn').addEventListener('click', function () { openSheet(); });
+$('mapNavBtn').addEventListener('click', function () {
+  if (!PLAN) return;
+  if (navSession) { renderNav(); toast('导航进行中'); return; }
+  var items = curStops();
+  var curId = items[state.cur] ? items[state.cur].id : null;
+  var filtered = navStops();
+  if (!filtered.length) { toast('这一天没有可导航的地点'); return; }
+  var fi = 0;   // 从当前站开始；当前站无坐标则顺延到下一个可导航站
+  for (var k = 0; k < filtered.length; k++) { if (curId && filtered[k].id === curId) { fi = k; break; } }
+  startNavAt(fi);
+});
 $('sheetBtn').addEventListener('click', function () { openSheet(); });
 $('sheetClose').addEventListener('click', closeSheet);
 $('sheetGrip').addEventListener('click', closeSheet);
@@ -1285,6 +1604,8 @@ function applyPlan(raw, msg) {
   }
   // 载荷自带 signal：Agent 重排后随行程一起下发的「感知结论」
   if (raw && raw.signal) applySignal(raw.signal, str(raw.signalNote) || null);
+  // 行程换载/恢复后同步导航会话（导航进行中则恢复地图 Dock）
+  refreshNav();
 }
 
 /* ══════════════════ 宿主桥（与 panel.html 同名 API，便于客户端复用） ══════════════════ */

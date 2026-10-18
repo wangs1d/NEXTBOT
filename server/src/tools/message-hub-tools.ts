@@ -6,9 +6,43 @@ import { runChatTurnForActor } from "../services/chat-turn-runner.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { ToolContext, ToolRegistry } from "./tool-registry.js";
 
+/**
+ * 国内生态通知捕捉覆盖清单（与 Android 端 MessageCaptureListenerService.PACKAGE_PLATFORM
+ * 对齐；国外源 Gmail/Outlook 等暂不接入）。仅作为 capture_status 的覆盖面说明供 agent
+ * 如实告知用户，不是运行时拦截。
+ */
+const DOMESTIC_CAPTURE_APPS = [
+  "微信",
+  "QQ",
+  "飞书",
+  "钉钉",
+  "短信",
+  "支付宝",
+  "QQ邮箱",
+  "网易邮箱",
+  "淘宝",
+  "京东",
+  "拼多多",
+  "美团",
+  "饿了么",
+  "菜鸟裹裹",
+  "顺丰速运",
+  "抖音",
+  "哔哩哔哩",
+  "小红书",
+  "微博",
+] as const;
+
 export function registerMessageHubTools(
   registry: ToolRegistry,
-  deps: { hub: MessageHubService; gateway: MessagePlatformGateway; runtime: RuntimeFacade; friendMessages?: FriendMessageService },
+  deps: {
+    hub: MessageHubService;
+    gateway: MessagePlatformGateway;
+    runtime: RuntimeFacade;
+    friendMessages?: FriendMessageService;
+    /** 手机桥接协调器：capture_status 读注册时上报的通知使用权授权状态 */
+    phoneBridgeCoordinator?: { getDeviceInfo(actorId: string): Record<string, unknown> | undefined };
+  },
 ): void {
   registry.register("messages.overview", async (_params, ctx: ToolContext) => {
     const actorId = resolveActorId(ctx);
@@ -148,6 +182,78 @@ export function registerMessageHubTools(
     if (!conversationId) return { ok: false, error: "missing conversationId" };
     const ok = await deps.hub.markConversationRead(actorId, conversationId);
     return ok ? { ok: true } : { ok: false, error: "conversation not found" };
+  });
+
+  registry.register("messages.search", async (params, ctx: ToolContext) => {
+    const actorId = resolveActorId(ctx);
+    const query = String(params.query ?? "").trim();
+    if (!query) return { ok: false, error: "missing query" };
+    const messages = deps.hub.searchMessages(actorId, {
+      query,
+      platform: typeof params.platform === "string" ? params.platform.trim() || undefined : undefined,
+      since: typeof params.since === "string" ? params.since.trim() || undefined : undefined,
+      limit: typeof params.limit === "number" ? params.limit : undefined,
+    });
+    return {
+      ok: true,
+      count: messages.length,
+      messages: messages.map((m) => ({
+        platform: m.platform,
+        conversationId: m.conversationId,
+        direction: m.direction,
+        senderName: m.senderName,
+        text: m.text.slice(0, 200),
+        createdAt: m.createdAt,
+      })),
+      summary:
+        messages.length > 0
+          ? `找到 ${messages.length} 条含「${query}」的消息（按时间倒序）。要看某个会话完整内容用 messages.read_conversation。`
+          : `没有找到含「${query}」的消息。注意：只搜得到被捕捉/汇聚进聚合中心的消息，App 未发通知或未开通知使用权时收不到。`,
+    };
+  });
+
+  registry.register("messages.capture_status", async (_params, ctx: ToolContext) => {
+    const actorId = resolveActorId(ctx);
+    const stats = deps.hub.captureStats(actorId);
+    const now = Date.now();
+    const platforms = stats.map((s) => {
+      const hoursAgo = Math.max(0, Math.round((now - Date.parse(s.lastInboundAt)) / 3_600_000));
+      return {
+        platform: s.platform,
+        lastCaptureAt: s.lastInboundAt,
+        hoursSinceLastCapture: hoursAgo,
+        countLast24h: s.count24h,
+        stale: hoursAgo >= 6,
+      };
+    });
+    const staleOnes = platforms.filter((p) => p.stale);
+    // 通知使用权授权状态：手机注册时上报（parsePhoneDeviceInfo 透传）。
+    // undefined = 旧客户端未上报，不引导（保守避免误判）；显式 false 才发卡引导。
+    const bridgeOnline = ctx.phoneBridgeOnline === true;
+    const listenerEnabled =
+      deps.phoneBridgeCoordinator?.getDeviceInfo(actorId)?.notificationListenerEnabled === true;
+    const listenerDenied = bridgeOnline && listenerEnabled === false;
+    const coverageText =
+      platforms.length === 0
+        ? "还没有任何手机通知捕捉记录（手机桥接可能没发过通知）。"
+        : `通知捕捉覆盖 ${platforms.length} 个平台：${platforms
+            .map((p) => `${p.platform} 最近 ${p.hoursSinceLastCapture} 小时前（24h 内 ${p.countLast24h} 条）`)
+            .join("；")}。${
+            staleOnes.length > 0
+              ? `${staleOnes.map((p) => p.platform).join("、")} 已超过 6 小时无捕捉——可能是对应 App 没发通知、通知使用权被系统收回或手机桥接离线，如实告知用户即可，不要臆断消息不存在。`
+              : "各平台捕获流正常。"
+          }`;
+    return {
+      ok: true,
+      platforms,
+      bridgeOnline,
+      listenerEnabled,
+      coveredApps: DOMESTIC_CAPTURE_APPS,
+      // 未授权引导独立于记录数：哪怕有历史捕捉记录（授权被收回/重装后未重授）也要引导
+      summary: listenerDenied
+        ? `${coverageText}另外，手机桥接在线但未授予系统「通知使用权」——发一张 permission_request 卡片引导用户授权（actions 带 {"id":"open_notification_listener_settings","label":"去系统设置授权"}），并说明授权后微信/QQ/短信/邮箱/物流等通知会汇总给你。`
+        : coverageText,
+    };
   });
 
   registry.register("messages.suggest_reply", async (params, ctx: ToolContext) => {

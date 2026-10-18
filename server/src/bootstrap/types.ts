@@ -45,6 +45,7 @@ import type { CodeSandboxService } from "../services/code-sandbox-service.js";
 import type { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import type { HabitLoopService } from "../services/habit-loop/index.js";
 import type { ArrivalMonitorService } from "../services/arrival-concierge/index.js";
+import type { TransferWatchService } from "../services/transfer-watch-service.js";
 import type { VoiceDuplexService } from "../services/voice-duplex/index.js";
 import type { BookingOrderStore } from "../services/booking/index.js";
 import type { FeatureCatalog } from "../catalog/index.js";
@@ -133,6 +134,8 @@ export type AppServices = {
   habitLoopService: HabitLoopService;
   /** 到站管家（航班/高铁到站监控 + 接站通知 + 到站约车提案） */
   arrivalMonitorService: ArrivalMonitorService;
+  /** 接驳提醒（行程交通段到站/起飞前动态窗口主动询问是否预约滴滴） */
+  transferWatchService: TransferWatchService;
   /** 全双工实时语音（WS /ws/voice-duplex 会话管理） */
   voiceDuplexService: VoiceDuplexService;
   /** 统一预订层本地订单存储（travel 域结算技能共用） */

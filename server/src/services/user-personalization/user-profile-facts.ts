@@ -4,7 +4,8 @@ export type UserFactCategory =
   | "personality"
   | "communication_style"
   | "decision_style"
-  | "privacy_preference";
+  | "privacy_preference"
+  | "travel";
 
 export type UserFact = {
   id: string;
@@ -103,6 +104,41 @@ export function extractFactCandidates(userText: string): FactCandidate[] {
     push({ category: "privacy_preference", key: "storage", value: "minimize_storage" });
   }
 
+  // ── 旅行画像（travel-upgrade-plan 画像引擎）：偏好信号驱动，非性别标签 ──
+  // 出片向：漂亮饭/网红打卡/拍照出片/氛围感是强信号
+  if (/(出片|拍照好看|好出片|漂亮饭|网红打卡|打卡点|氛围感|机位|适合拍照|照片好看)/.test(t)) {
+    push({ category: "travel", key: "travel_style", value: "photo_driven" });
+  }
+  // 体验向：项目/玩法/硬核体验优先于拍照
+  if (/(体验感|好玩的项目|刺激|户外|徒步|露营|潜水|滑雪|钓鱼|垂钓|自驾穿越|越野|漂流|蹦极)/.test(t)) {
+    push({ category: "travel", key: "travel_style", value: "experience_driven" });
+  }
+  // 躺平向：度假酒店/发呆/慢节奏
+  if (/(躺平|泡酒店|度假村|发呆|慢节奏|不想赶|轻松点)/.test(t)) {
+    push({ category: "travel", key: "travel_style", value: "relax_driven" });
+  }
+  // 打卡向：多去几个地方/特种兵
+  if (/(特种兵|多去几个|把景点都逛|尽量多逛|紧凑一点)/.test(t)) {
+    push({ category: "travel", key: "travel_style", value: "checkin_driven" });
+  }
+  // 饮食限制（影响漂亮饭/餐厅推荐）
+  if (/(不吃辣|不能吃辣|忌口|吃素|素食|清真|过敏)/.test(t)) {
+    const m = /(不吃辣|不能吃辣|吃素|素食|清真|[^，。！？\s]{1,6}过敏)/.exec(t);
+    if (m?.[1]) push({ category: "travel", key: "diet", value: m[1].trim() });
+  }
+  // 交通方式：无自有交通工具（高铁/飞机出行）→ 需要接驳提醒
+  if (/(自驾|自己开车|开车去)/.test(t)) {
+    push({ category: "travel", key: "drives_own_car", value: "self_drive" });
+  }
+  if (/(没车|不会开车|不自驾|坐高铁|坐飞机|高铁去|飞机去|坐火车|火车去)/.test(t)) {
+    push({ category: "travel", key: "drives_own_car", value: "no_car" });
+  }
+  // 同行人结构（影响节奏与项目类型）
+  if (/(和男朋友|和女朋友|情侣|带娃|带孩子|带小孩|带爸妈|和爸妈|陪父母|闺蜜|一个人去|独自去|亲子|家庭出游)/.test(t)) {
+    const m = /(和男朋友|和女朋友|情侣|带娃|带孩子|带小孩|带爸妈|和爸妈|陪父母|闺蜜|一个人去|独自去|亲子|家庭出游)/.exec(t);
+    if (m?.[1]) push({ category: "travel", key: "travel_companion", value: m[1].trim() });
+  }
+
   return out.slice(0, 8);
 }
 
@@ -166,6 +202,13 @@ export function decayFactStore(store: UserFactStore, now = new Date()): UserFact
     .filter((f) => f.confidence >= MIN_CONFIDENCE)
     .sort((a, b) => b.confidence - a.confidence);
   return { facts: next, updatedAt: nowIso() };
+}
+
+/** 取某 key 的最高置信 travel 画像值（无则 undefined）。规划层取数口。 */
+export function travelFactOf(store: UserFactStore, key: string): string | undefined {
+  return store.facts
+    .filter((f) => f.category === "travel" && f.key === key)
+    .sort((a, b) => b.confidence - a.confidence)[0]?.value;
 }
 
 export function buildFactPromptSummary(store: UserFactStore, limit = 10): string | undefined {

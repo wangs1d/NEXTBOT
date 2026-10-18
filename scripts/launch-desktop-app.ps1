@@ -3,8 +3,8 @@
 # Backend start reuses the existing autostart chain (scheduled task PrivateAgentServer
 # -> scripts/autostart/autostart-server.mjs) so the resident instance is never duplicated.
 # Keep this file pure ASCII: PowerShell 5.1 decodes BOM-less .ps1 as ANSI/GBK.
-$Root     = "E:\ws-project\Private-Agent"
-$AppExe   = Join-Path $Root "windows_dist\Debug\private_ai_agent.exe"
+$Root     = "D:\ws-project\Private-Agent"
+$AppExe   = Join-Path $Root "windows_dist\Release\private_ai_agent.exe"
 $TaskName = "PrivateAgentServer"
 $Port     = 3000
 $WaitMs   = 30000

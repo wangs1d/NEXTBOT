@@ -40,6 +40,8 @@ export interface TravelItinerarySnapshot {
    * 主图优先），前端海报优先于任何条目实拍图使用。解析失败缺省。
    */
   coverImage?: string;
+  /** 旅行人格分型（travel 双端③）：攻略页头部徽章展示，随快照透传（结构同 StoredTravelPlan.persona） */
+  persona?: { id: string; label: string; desc: string };
   days: Array<{
     date: string;
     /** 与 StoredTravelPlan 共用同一份条目结构（StoredDayItem） */

@@ -186,6 +186,14 @@ export const ServerEventType = {
   ToolResult: "tool.result",
   WalletSimulateResult: "wallet.simulate.result",
   AgentPeerMessage: "agent.peer_message",
+  /**
+   * 站内好友消息已读回执（2026-10-17）：A 标读好友会话后，服务端把读取进度
+   * 翻译到对端 B 的会话空间（经 externalMessageId 映射两侧副本）推给 B。
+   * payload: { readerActorId, lastReadSeq, readAt }——lastReadSeq 为 B 会话
+   * 空间内的已读序号，B 客户端把自己的 seq ≤ lastReadSeq 的气泡标为已读。
+   * 尽力而为语义：离线不补投，标读动作不重复补偿。
+   */
+  AgentPeerReadReceipt: "agent.peer_read_receipt",
   /** 每日天气简报（日程 weather_brief 触发，需已建立 WS session） */
   WeatherBrief: "weather.brief",
   /** Agent 自动化任务到点执行完成（需已建立 WS session 才能实时收到） */
@@ -240,6 +248,14 @@ export const ServerEventType = {
   MorningBriefing: "morning.briefing",
   /** 晚间 digest（今日回顾+明日预告）：调度器到点触发后推送（Task 15 生活节律） */
   EveningDigest: "evening.digest",
+  /**
+   * 接驳提醒（travel-upgrade-plan P2）：行程交通大段（高铁/航班）到站/出发前
+   * 动态触发，询问是否预约滴滴（确认后 Agent 走 ride_hailing 真实下单）。
+   * payload: { sessionId, planId, destination, segment, minutesUntil, message, phase }
+   * phase: pre_arrival（到达提醒）| pre_departure（返程出发提醒，卡面带「导航去车站」）
+   *        | missing_time（无票面时刻，求补充）
+   */
+  AgentTransferReminder: "agent.transfer_reminder",
   /**
    * 生活节律画像更新（Task 20 生活节律引擎）：夜间分析完成后推送。
    * 客户端可用于展示"管家眼中的你"（睡眠窗口/高效时段/节律洞察），

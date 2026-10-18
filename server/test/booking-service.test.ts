@@ -112,21 +112,44 @@ test("booking-service - 网约车全链路（quote → 两阶段 book → status
     assert.equal(s1.simulated, true);
     assert.match(s1.summary, /网约车/);
 
-    // 阶段一可直接执行：confirm=true 但缺 token → 拒绝
+    // 阶段二缺 token：服务端兜底自动消费同 actor+domain 的最新待确认记录（2026-10-18
+    // live e2e 实证：工具历史折叠后 token 字符串从模型上下文消失，回抄必然断链）
     const noToken = await service.book(ctx, "ride", {
       optionId: q.options[0].id,
       params: { pickup: "国贸", dropoff: "首都机场T3" },
       confirm: true,
     });
-    assert.equal(noToken.ok, false);
-    if (!noToken.ok) assert.match(noToken.error, /confirmationToken/);
+    assert.equal(noToken.ok, true);
+    assert.match((noToken as { orderId: string }).orderId, /^bkg_/);
+
+    // 兜底路径 fail-closed：没有任何待确认记录时 confirm=true 拒绝并引导重走阶段一
+    const noPending = await service.book(ctx, "ride", {
+      optionId: q.options[0].id,
+      params: { pickup: "国贸", dropoff: "首都机场T3" },
+      confirm: true,
+    });
+    assert.equal(noPending.ok, false);
+    if (!noPending.ok) assert.match(noPending.error, /confirm=false/);
+
+    // 重新走阶段一 → 带 token 消费（原有精确路径不回归）
+    const stage1b = await service.book(ctx, "ride", {
+      optionId: q.options[0].id,
+      params: { pickup: "国贸", dropoff: "首都机场T3" },
+      confirm: false,
+    });
+    assert.equal(stage1b.ok, true);
+    const s1b = stage1b as { needsConfirmation: boolean; confirmationToken: string; simulated: boolean; summary: string };
+    assert.equal(s1b.needsConfirmation, true);
+    assert.ok(s1b.confirmationToken);
+    assert.equal(s1b.simulated, true);
+    assert.match(s1b.summary, /网约车/);
 
     // 下单阶段二：本地订单 + 承诺板写入
     const stage2 = await service.book(ctx, "ride", {
       optionId: q.options[0].id,
       params: { pickup: "国贸", dropoff: "首都机场T3" },
       confirm: true,
-      confirmationToken: s1.confirmationToken,
+      confirmationToken: s1b.confirmationToken,
     });
     assert.equal(stage2.ok, true);
     const s2 = stage2 as {

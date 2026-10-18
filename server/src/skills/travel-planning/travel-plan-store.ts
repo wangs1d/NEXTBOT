@@ -31,12 +31,19 @@ export interface StoredDayItem {
   description: string;
   tips?: string[];
   images?: string[];
+  /**
+   * 打卡视频（travel 视频下放）：真实相关的播放页，每站最多 1 条
+   * （TravelPoiVideoService 从严过滤后落盘；无命中 = 无字段，宁缺毋滥）。
+   */
+  videos?: TravelPlanStopVideo[];
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat，无则省略） */
   splatUrl?: string;
   /** 从上一个条目出发的交通腿（首项无；编辑局部重排时按新坐标重算） */
   transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
   /** 建议游览/用餐时长（分钟；编辑局部重排用它保持原排时口径） */
   visitDuration?: number;
+  /** 画像推荐理由（travel 双端②：「为什么推荐给你」，有画像信号才有） */
+  recommendReason?: string;
   /**
    * 时间锚点：该条目时刻被用户/预订明确钉住（如显式指定 startTime 的新增条目）。
    * 局部重排（retimeDayAfterEdit）保留其 startTime 只重算交通腿，之后按此时钟
@@ -44,7 +51,6 @@ export interface StoredDayItem {
    */
   anchor?: boolean;
   reviews?: unknown[];
-  videos?: Array<Record<string, unknown>>;
 }
 
 export interface StoredTravelPlan {
@@ -87,14 +93,66 @@ export interface StoredTravelPlan {
   /** 总实付（pricingSummary.totalFinal，冗余一份避免读全文） */
   totalCost?: number;
   /**
+   * 预算档位（travel 双端⑥）：规划时从 TripPreferences.budget 存档，
+   * 预算守门（当日消费 vs 档位日上限 → 超支进晚间摘要）的判定依据；
+   * 未传 = 不守门（宁缺毋滥，不硬算）。
+   */
+  budgetTier?: 'low' | 'mid' | 'high';
+  /**
    * 用户行程进度（跨端共享的「已走/当前站」；设备状态，编辑乐观锁不因此自增）。
    * day/stop 为 0 基索引，stop 指该天 items 的当前站。
    */
   progress?: { day: number; stop: number; updatedAt: number };
+  /** 规划会话 ID：接驳提醒的推送目标（提醒跟随规划时的用户会话） */
+  sessionId?: string;
   days: Array<{
     date: string;
     items: StoredDayItem[];
   }>;
+  /** 交通大段（高铁/航班，travel-upgrade-plan P2）：接驳提醒调度器的扫描数据源 */
+  transferSegments?: TravelTransferSegment[];
+  /** 旅行人格分型（travel 双端③）：攻略页头部徽章展示（结构随 personalization 下发） */
+  persona?: { id: string; label: string; desc: string };
+  /**
+   * 到访足迹（travel 双端⑦）：导航「已到达」时记录的站点点位（day/stop 为
+   * 0 基索引，与 progress 同口径）。回忆录的数据源之一；无导航记录 = 无足迹
+   * 条目（宁缺毋滥，不用计划站点冒充到访）。
+   */
+  visits?: TravelPlanVisit[];
+}
+
+/** 单条到访足迹（回忆录⑦）：同站重复到达只记首次 */
+export interface TravelPlanVisit {
+  day: number;
+  stop: number;
+  name: string;
+  /** 到达时刻（毫秒时间戳） */
+  arrivedAt: number;
+}
+
+/** 单条打卡视频（travel 视频下放）：真实播放页，每站最多 1 条 */
+export interface TravelPlanStopVideo {
+  /** 播放页直链（白名单域：B站/抖音/小红书/YouTube） */
+  url: string;
+  /** 视频标题（来自搜索结果原题，未做 LLM 改写） */
+  title: string;
+  /** 来源站标识（bilibili/douyin/xiaohongshu/youtube） */
+  source: string;
+  /** 时长文本（搜索源给出才有） */
+  duration?: string;
+}
+
+/** 与 travel-planning-service 的 TransferSegment 同构（冷层独立定义，避免循环依赖） */
+export interface TravelTransferSegment {
+  type: 'flight' | 'train';
+  role: 'arrival' | 'departure';
+  no: string;
+  depTime?: string;
+  arrTime?: string;
+  from: string;
+  to: string;
+  pickupConfirmed?: boolean;
+  pickupDismissed?: boolean;
 }
 
 /** 行程摘要（内存索引条目，列表查询不再触达磁盘与全量 JSON.parse） */
@@ -112,6 +170,8 @@ interface PlanSummaryEntry {
   totalCost?: number;
   /** 目的地封面（行程归档列表卡片背景；无则省略，客户端渐变兜底） */
   coverImage?: string;
+  /** 规划会话（预算守门按 sessionId 找今日进行中行程用） */
+  sessionId?: string;
   createdAt: number;
 }
 
@@ -210,6 +270,81 @@ class TravelPlanStore {
   }
 
   /**
+   * 接驳提醒调度器（transfer-watch-service）的数据口：
+   * 扫描含交通大段的全部行程（全量 get，行程总量 ≤50 可承受）。
+   */
+  listPlansWithTransfers(): StoredTravelPlan[] {
+    const out: StoredTravelPlan[] = [];
+    for (const s of this.ensureSummaryIndex().values()) {
+      const plan = this.get(s.planId);
+      if (plan?.transferSegments?.length) out.push(plan);
+    }
+    return out;
+  }
+
+  /**
+   * 更新某交通段的接驳状态（用户确认/拒绝后调用，落盘防重复打扰）。
+   * 仿 updateProgress：直改内存+刷盘，不走 save() 不自增编辑乐观锁。
+   */
+  setTransferPickupState(planId: string, segmentNo: string, state: 'confirmed' | 'dismissed'): boolean {
+    const plan = this.get(planId);
+    if (!plan) return false;
+    const seg = plan.transferSegments?.find((s) => s.no === segmentNo);
+    if (!seg) return false;
+    if (state === 'confirmed') {
+      seg.pickupConfirmed = true;
+      seg.pickupDismissed = false;
+    } else {
+      seg.pickupDismissed = true;
+      seg.pickupConfirmed = false;
+    }
+    this.mem.set(planId, plan);
+    try {
+      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+    } catch (err) {
+      console.error("[TravelPlanStore] setTransferPickupState failed:", err);
+    }
+    return true;
+  }
+
+  /**
+   * 记录到访足迹（回忆录⑦）：导航 arrive 时调用，按 day+stop 去重（重复到达
+   * 只保留首次）。仿 updateProgress：直改内存+刷盘，不走 save() 不自增编辑乐观锁。
+   */
+  recordVisit(planId: string, visit: TravelPlanVisit): boolean {
+    const plan = this.get(planId);
+    if (!plan) return false;
+    if (!plan.visits) plan.visits = [];
+    const dup = plan.visits.some((v) => v.day === visit.day && v.stop === visit.stop);
+    if (!dup) plan.visits.push(visit);
+    this.mem.set(planId, plan);
+    try {
+      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+    } catch (err) {
+      console.error("[TravelPlanStore] recordVisit failed:", err);
+    }
+    return true;
+  }
+
+  /**
+   * 落盘某站的打卡视频（travel 视频下放）：后台视频回填命中后调用。
+   * 仿 recordVisit：直改内存+刷盘，不走 save() 不自增编辑乐观锁。
+   */
+  setStopVideos(planId: string, day: number, stop: number, videos: TravelPlanStopVideo[]): boolean {
+    const plan = this.get(planId);
+    const item = plan?.days?.[day]?.items?.[stop];
+    if (!plan || !item) return false;
+    if (videos.length > 0) item.videos = videos.slice(0, 1); // 每站只留 1 条
+    this.mem.set(planId, plan);
+    try {
+      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+    } catch (err) {
+      console.error("[TravelPlanStore] setStopVideos failed:", err);
+    }
+    return true;
+  }
+
+  /**
    * 删除行程：内存 + 摘要索引 + 磁盘文件一并移除。
    * 归档页「删除行程」用；不存在返回 false。
    */
@@ -241,6 +376,7 @@ class TravelPlanStore {
     progress?: { day: number; stop: number };
     totalCost?: number;
     coverImage?: string;
+    sessionId?: string;
     createdAt: number;
   }> {
     return [...this.ensureSummaryIndex().values()]
@@ -257,6 +393,7 @@ class TravelPlanStore {
         ...(s.progress ? { progress: { ...s.progress } } : {}),
         ...(s.totalCost != null ? { totalCost: s.totalCost } : {}),
         ...(s.coverImage ? { coverImage: s.coverImage } : {}),
+        ...(s.sessionId ? { sessionId: s.sessionId } : {}),
         createdAt: s.createdAt,
       }));
   }
@@ -276,6 +413,7 @@ class TravelPlanStore {
         : {}),
       ...(plan.totalCost != null ? { totalCost: plan.totalCost } : {}),
       ...(plan.coverImage ? { coverImage: plan.coverImage } : {}),
+      ...(plan.sessionId ? { sessionId: plan.sessionId } : {}),
       createdAt: plan.createdAt ?? 0,
     };
   }

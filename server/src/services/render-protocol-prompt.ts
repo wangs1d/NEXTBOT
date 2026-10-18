@@ -47,6 +47,9 @@ cardType 选型（每条 items 都是 {"type":"num","text":"..."}，text 规范�
 - chips：候选标签，每条 ≤10 字（用户可点选继续追问）
 - search_result：资料/搜索结果列表，每条 text「标题: 一句话摘要」并带 url
 - quote：一句话结论/金句（items 只放一条）
+- permission_request：手机权限/设置引导卡（仅当工具结果明确提示需要引导授权时使用；
+  actions 必须恰好一条 {"id":"open_notification_listener_settings","label":"去系统设置授权"}，
+  items 用一两句说明授权后能带来什么）
 
 使用规则：
 - 一条回复最多 1-2 张卡；条目 2-12 条；卡片承载"内容本身"，正文围绕卡片展开说明（可在卡后写一句引入、在文末写一句收尾），不要把条目复述第二遍；

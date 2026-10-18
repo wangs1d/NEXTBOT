@@ -65,11 +65,14 @@ export interface DbMediaRow {
 class TravelPoiDb {
   private db: DatabaseSync;
   readonly dbPath: string;
+  /** 库所在数据目录（默认 cwd/data；测试可用 TRAVEL_POI_DB_DIR 覆盖） */
+  private readonly dataDir: string;
 
   constructor() {
-    const dataDir = path.join(process.cwd(), 'data');
-    this.dbPath = path.join(dataDir, 'travel-poi.db');
-    fs.mkdirSync(dataDir, { recursive: true });
+    // 测试可用 TRAVEL_POI_DB_DIR 覆盖库目录（默认 data/），避免夹具写穿真实 POI 库
+    this.dataDir = process.env.TRAVEL_POI_DB_DIR || path.join(process.cwd(), 'data');
+    this.dbPath = path.join(this.dataDir, 'travel-poi.db');
+    fs.mkdirSync(this.dataDir, { recursive: true });
     this.db = new DatabaseSync(this.dbPath);
     this.db.exec('PRAGMA journal_mode = WAL;');
     this.db.exec('PRAGMA synchronous = NORMAL;');
@@ -394,8 +397,8 @@ class TravelPoiDb {
     let importedPois = 0;
     let importedMedia = 0;
 
-    // 1) poi-cache/*.json → cities + pois
-    const poiCacheDir = path.join(process.cwd(), 'data', 'poi-cache');
+    // 1) poi-cache/*.json → cities + pois（跟随 dataDir：默认 cwd/data，测试隔离时同目录）
+    const poiCacheDir = path.join(this.dataDir, 'poi-cache');
     if (fs.existsSync(poiCacheDir)) {
       for (const file of fs.readdirSync(poiCacheDir).filter((f) => f.endsWith('.json'))) {
         try {
@@ -452,7 +455,7 @@ class TravelPoiDb {
 
     // 2) travel-media/*.json → media_pois + media
     //    注意：assets/ 上传资源目录保留原地（URL 指向不变），只迁走元数据 JSON
-    const mediaDir = path.join(process.cwd(), 'data', 'travel-media');
+    const mediaDir = path.join(this.dataDir, 'travel-media');
     if (fs.existsSync(mediaDir)) {
       for (const file of fs.readdirSync(mediaDir).filter((f) => f.endsWith('.json'))) {
         try {

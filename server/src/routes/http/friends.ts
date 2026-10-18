@@ -94,6 +94,8 @@ const friendMessageTargetSchema = friendQuerySchema.and(
 const friendMessageQuerySchema = friendMessageTargetSchema.and(
   z.object({
     limit: z.coerce.number().int().min(1).max(200).optional(),
+    /** 增量拉取游标：只返回会话内 seq > sinceSeq 的消息（断线补拉/实时追平用） */
+    sinceSeq: z.coerce.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
   })
 );
 
@@ -397,7 +399,8 @@ export function registerFriendRoutes(
 
   /**
    * 好友消息历史（双向，时间正序；hub platform=friend 会话的 HTTP 面）。
-   * GET /friends/messages?userId|sessionId&targetActorId&limit
+   * GET /friends/messages?userId|sessionId&targetActorId&limit&sinceSeq
+   * sinceSeq 传上次收到的最大 seq 即只拉增量（seq 缺省时全量拉最近 limit 条）。
    */
   app.get("/friends/messages", async (request, reply) => {
     const parsed = friendMessageQuerySchema.safeParse(request.query);
@@ -412,6 +415,7 @@ export function registerFriendRoutes(
       actorId,
       parsed.data.targetActorId.trim(),
       parsed.data.limit ?? 100,
+      parsed.data.sinceSeq,
     );
     const unreadCount = friendMessageService.unreadCount(actorId, parsed.data.targetActorId.trim());
     return { ok: true, messages, unreadCount };
@@ -450,6 +454,8 @@ export function registerFriendRoutes(
       ok: true,
       messageId: result.messageId,
       pushedToPeer: result.pushedToPeer,
+      // 发送方会话内序号：客户端本地气泡带真 seq，后续增量拉取按它去重
+      ...(result.outboundSeq != null ? { seq: result.outboundSeq } : {}),
     };
   });
 

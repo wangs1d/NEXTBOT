@@ -291,26 +291,25 @@ function convertSafetyResult(
       };
     }
     if (action === "require_approval") {
-      // 内置两阶段确认（ask_first）工具在聊天通道的特例：
+      // 内置两阶段确认（ask_first）工具在聊天通道的特例：一律放行到 BookingService。
       //   阶段一 confirm=false 只是「问」——生成摘要+一次性 token，不执行不可逆动作；
-      //   阶段二 confirm=true+token —— token 即用户在会话内明确同意的凭证。
-      // 两者放行（否则两阶段确认在聊天通道永远无法走通）；自主任务通道
-      // 直接消费 AgentTaskSafety 的 require_approval 挂起审批，不经过本转换。
+      //   阶段二 confirm=true —— token 校验/TTL/限额全部由 BookingService 内生强制，
+      //   缺 token/过期 token 返回可自愈的 actionable 错误（模型补上 token 重试即通）。
+      // 闸不在这里复刻 token 校验：此前对「阶段二缺 token」的硬拦只生产出
+      // 「资金支付类动作需要用户确认」这句误导性死胡同——用户明明已确认，模型
+      // 却无法自救（2026-10-18 live e2e 实证：三轮递进确认全部卡死在这句文案上）。
+      // 安全语义无损：这四个工具唯一的不可逆路径在 BookingService 内部，token
+      // 缺失时它必然拒绝执行。自主任务通道不经过本转换，require_approval 照常
+      // 挂起审批（agent-task-orchestrator 直接消费 AgentTaskSafety 结果）。
       if (TWO_PHASE_CONFIRM_TOOLS.has(tool)) {
-        const isStage2 = args.confirm === true;
-        const hasToken = typeof args.confirmationToken === "string" && args.confirmationToken.length > 0;
-        if (!isStage2 || hasToken) {
-          return {
-            allowed: true,
-            severity: "allowed",
-            reason: isStage2
-              ? "两阶段确认阶段二：confirmationToken 即用户确认凭证"
-              : "两阶段确认阶段一：仅生成确认摘要（ask_first），不执行动作",
-            tool,
-            args,
-            checkedAt,
-          };
-        }
+        return {
+          allowed: true,
+          severity: "allowed",
+          reason: "两阶段确认工具（ask_first）：确认凭证由 BookingService 内生校验",
+          tool,
+          args,
+          checkedAt,
+        };
       }
       return {
         allowed: false,

@@ -134,8 +134,15 @@ export function extractDays(input: string): number | null {
 /**
  * 从自然语言 + 自由文本标签 + 目的地常识中抽取结构化偏好
  * 优先级：用户原文 > 目的地常识 > 系统默认
+ * profileHints：用户画像（UserFact travel 类别）兜底——原文没说的 style 用画像补，
+ * 来源标 profile，不覆盖用户本轮原话。
  */
-export function extractPreferences(input: string, rawPrefs?: string[], destName?: string): TripPreferences {
+export function extractPreferences(
+  input: string,
+  rawPrefs?: string[],
+  destName?: string,
+  profileHints?: { photoDriven?: boolean; experienceDriven?: boolean },
+): TripPreferences {
   const text = `${input || ''} ${(rawPrefs || []).join(' ')}`.toLowerCase();
   const has = (kw: string | RegExp) => (kw instanceof RegExp ? kw.test(text) : text.includes(kw));
 
@@ -148,6 +155,8 @@ export function extractPreferences(input: string, rawPrefs?: string[], destName?
     elderly: false,
     pace: 'balanced',
     activityMix: 'mixed',
+    photoDriven: false,
+    experienceDriven: false,
     sources: {
       seaside: 'default',
       pool: 'default',
@@ -159,6 +168,8 @@ export function extractPreferences(input: string, rawPrefs?: string[], destName?
       budget: 'default',
       cuisine: 'default',
       hotelTier: 'default',
+      photoDriven: 'default',
+      experienceDriven: 'default',
     },
   };
 
@@ -187,6 +198,23 @@ export function extractPreferences(input: string, rawPrefs?: string[], destName?
   }
   if (has(/带[老人父母长辈]/) || has(/父母/) || has(/老人/)) {
     prefs.elderly = true; prefs.sources.elderly = 'user';
+  }
+
+  // 出片向：漂亮饭/网红打卡/机位优先（travel-upgrade-plan 偏好信号）
+  if (
+    has(/出片/) || has(/漂亮饭/) || has(/网红打卡/) || has(/网红店/) || has(/打卡点/) ||
+    has(/机位/) || has(/氛围感/) || has(/拍照好看/) || has(/好拍/) || has(/适合拍照/)
+  ) {
+    prefs.photoDriven = true; prefs.sources.photoDriven = 'user';
+  }
+
+  // 体验向：项目/玩法优先
+  if (
+    has(/体验感/) || has(/好玩的项目/) || has(/刺激/) || has(/户外/) || has(/徒步/) ||
+    has(/露营/) || has(/潜水/) || has(/滑雪/) || has(/钓鱼/) || has(/垂钓/) ||
+    has(/越野/) || has(/漂流/) || has(/蹦极/) || has(/自驾穿越/)
+  ) {
+    prefs.experienceDriven = true; prefs.sources.experienceDriven = 'user';
   }
 
   // 节奏
@@ -245,6 +273,14 @@ export function extractPreferences(input: string, rawPrefs?: string[], destName?
 
   // —— 目的地常识层（用户没说就补） ——
   if (destName) applyDestinationDefaults(destName, prefs);
+
+  // —— 用户画像层（UserFact travel_style 兜底；不覆盖原文/目的地层） ——
+  if (profileHints?.photoDriven && prefs.sources.photoDriven === 'default') {
+    prefs.photoDriven = true; prefs.sources.photoDriven = 'profile';
+  }
+  if (profileHints?.experienceDriven && prefs.sources.experienceDriven === 'default') {
+    prefs.experienceDriven = true; prefs.sources.experienceDriven = 'profile';
+  }
 
   // —— 系统默认层 ——
   if (!prefs.hotelTier) {

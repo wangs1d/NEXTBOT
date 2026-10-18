@@ -102,6 +102,45 @@ export class BookingConfirmationStore {
     return { ok: true, pending };
   }
 
+  /**
+   * 阶段二缺 token 时的服务端兜底：消费同 actor + action + domain 下未过期的
+   * 最新一条待确认记录（optionId 可匹配时优先）。
+   *
+   * 为什么存在（2026-10-18 live e2e 实证）：工具循环会把已完成工具结果折叠成
+   * 摘要行（replan/digest 历史），阶段一 mint 的 token 字符串会从模型工作上下文
+   * 消失——要求 LLM 回抄不透明 token 让两阶段确认在多轮会话里必然断链。聊天
+   * 通道里用户明确说「确认下单」+ 模型 confirm=true 即确认语义，凭证由本层
+   * 确定性校验（actor/domain/action 一致 + TTL + 一次性消费）承担，token 回抄
+   * 降级为可选路径。安全语义不变：找不到任何待确认记录仍 fail-closed 拒绝。
+   */
+  consumeLatest(
+    expect: { actorId: string; action: "book" | "cancel" | "refund"; domain: BookingDomain },
+    preferredOptionId?: string,
+  ): ConsumeResult {
+    const nowMs = this.now();
+    let best: BookingPendingConfirmation | null = null; // 最近 mint 的合格 pending
+    let exact: BookingPendingConfirmation | null = null; // 最近 mint 且 optionId 精确匹配
+    for (const pending of this.pendings.values()) {
+      if (nowMs > pending.expiresAt) continue; // 过期条目留给定时清理，不在此删（避免迭代中变更）
+      if (pending.actorId !== expect.actorId) continue;
+      if (pending.action !== expect.action || pending.domain !== expect.domain) continue;
+      best = pending; // Map 迭代序 = mint 序，后写入者覆盖 → 最新
+      if (preferredOptionId && pending.draft?.optionId === preferredOptionId) {
+        exact = pending;
+      }
+    }
+    const chosen = exact ?? best;
+    if (!chosen) {
+      return {
+        ok: false,
+        error: "当前没有待确认的订单（确认摘要已过期或从未生成）。请先带 confirm=false 重新生成确认摘要，用户同意后再 confirm=true 下单。",
+        retryable: true,
+      };
+    }
+    this.pendings.delete(chosen.token);
+    return { ok: true, pending: chosen };
+  }
+
   /** 失败归还：把未执行成功的待确认记录放回（保留原 TTL；已过期则丢弃）。 */
   restore(pending: BookingPendingConfirmation): void {
     if (this.now() > pending.expiresAt) return;

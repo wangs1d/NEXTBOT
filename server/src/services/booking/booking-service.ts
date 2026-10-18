@@ -218,11 +218,17 @@ export class BookingService {
   ): Promise<BookingServiceResult> {
     const actorId = resolveActorId(ctx);
     if (input.confirm) {
-      const consumed = this.confirmations.consume(input.confirmationToken ?? "", {
-        actorId,
-        action: "book",
-        domain,
-      });
+      // 阶段二确认凭证两条路（2026-10-18）：
+      //   a) 模型回抄 confirmationToken（原有路径，token 仍在上下文时最精确）；
+      //   b) 缺 token → 服务端消费同 actor+action+domain 的最新待确认记录
+      //      （optionId 可匹配时优先）。工具循环会把已完成工具结果折叠成摘要，
+      //      阶段一 mint 的 token 字符串多轮后会从模型上下文消失，回抄必然断链；
+      //      用户在会话内明确同意 + confirm=true 即确认语义，凭证校验由
+      //      BookingConfirmationStore 确定性承担（actor/domain/action + TTL + 一次性）。
+      const token = input.confirmationToken?.trim() ?? "";
+      const consumed = token
+        ? this.confirmations.consume(token, { actorId, action: "book", domain })
+        : this.confirmations.consumeLatest({ actorId, action: "book", domain }, input.optionId);
       if (!consumed.ok) return consumed;
       return this.executeBookStage2(ctx, consumed.pending);
     }
@@ -379,7 +385,7 @@ export class BookingService {
               "该预订时间与用户已有日程冲突：请先向用户逐条转述 scheduleConflict.conflicts 并询问是否仍要预订；用户明确坚持后再走阶段二确认。",
           }
         : {
-            hint: "请向用户复述上述摘要（模拟模式必须说明是模拟），得到明确同意后，带 confirm=true + confirmationToken 再调用完成预订",
+            hint: "请向用户复述上述摘要（模拟模式必须说明是模拟），得到明确同意后，再调用一次本工具并把 confirm 传 true 完成预订（confirmationToken 可省略，系统会自动匹配本次待确认记录）",
           }),
     };
   }

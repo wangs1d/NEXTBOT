@@ -20,6 +20,7 @@ import type { ScheduleTaskService } from "./schedule-task-service.js";
 import { buildClothingAdvice, detectSevereWeatherAlerts } from "./weather-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
+import type { TravelBudgetAlert } from "./travel-budget-guard-service.js";
 
 /** 今日回顾：journal 当日要点（最多呈现条数） */
 const TODAY_HIGHLIGHT_MAX = 6;
@@ -59,6 +60,11 @@ export interface EveningDigest {
    * 以明天最高温定层级、明天降水/天气码定雨具等提示；无明日天气时 null。
    */
   outfitTip: string | null;
+  /**
+   * 行程超支提醒（travel 双端⑥）：今日在行程中且当日消费超过预算档日上限时
+   * 由 TravelBudgetGuardService 给出；无行程/无档位/未超支 → null（整块省略）。
+   */
+  budgetAlert: TravelBudgetAlert | null;
   /** 口语化播报文本（供 TTS / 消息气泡） */
   narrationText: string;
 }
@@ -86,6 +92,12 @@ export type EveningDigestDeps = {
    * 文案只受睡前 prompt 自身约束。
    */
   soulProvider?: (sessionId: string) => string | null;
+  /**
+   * 行程预算守门取数口（travel 双端⑥）：装配层组装 TravelBudgetGuardService
+   * 闭包（行程冷层 + 订单库）；今日在行程中且当日消费超档 → 返回 alert，
+   * 否则 null。未注入 = 不做预算块。
+   */
+  travelBudgetProvider?: (sessionId: string) => Promise<TravelBudgetAlert | null>;
 };
 
 function localDateKey(d: Date): string {
@@ -125,13 +137,14 @@ export class EveningDigestService {
   /** 生成晚间 digest（确定性聚合，零 LLM；任一源缺失/失败 → 该块省略） */
   async generateDigest(sessionId: string): Promise<EveningDigest> {
     const now = new Date();
-    const [todayHighlights, tomorrowSchedule, tomorrowBundle] = await Promise.all([
+    const [todayHighlights, tomorrowSchedule, tomorrowBundle, budgetAlert] = await Promise.all([
       this.fetchTodayHighlights(sessionId).catch(() => [] as JournalHit[]),
       this.fetchTomorrowSchedule(sessionId, now).catch(() => [] as EveningDigestScheduleItem[]),
       this.fetchTomorrowBundle(sessionId).catch(() => ({
         weather: null,
         outfitTip: null,
       })),
+      this.fetchBudgetAlert(sessionId).catch(() => null),
     ]);
 
     const digest: EveningDigest = {
@@ -140,10 +153,17 @@ export class EveningDigestService {
       tomorrowSchedule,
       tomorrowWeather: tomorrowBundle.weather,
       outfitTip: tomorrowBundle.outfitTip,
+      budgetAlert,
       narrationText: "",
     };
     digest.narrationText = await this.composeNarrationText(sessionId, digest);
     return digest;
+  }
+
+  /** 行程超支提醒取数（travel 双端⑥）：未注入 provider 或判定不超支 → null */
+  private async fetchBudgetAlert(sessionId: string): Promise<TravelBudgetAlert | null> {
+    if (!this.deps.travelBudgetProvider) return null;
+    return await this.deps.travelBudgetProvider(sessionId);
   }
 
   /**
@@ -206,6 +226,7 @@ export class EveningDigestService {
     ];
     if (weatherLine) dataLines.push(`- 明天天气：${weatherLine}`);
     if (d.outfitTip) dataLines.push(`- 明天穿衣：${d.outfitTip}`);
+    if (d.budgetAlert) dataLines.push(`- 行程消费提醒：${budgetAlertFact(d.budgetAlert)}`);
 
     return [
       "你是用户最熟的那个朋友，晚上临睡前顺口提一嘴明天的事。" +
@@ -220,9 +241,11 @@ export class EveningDigestService {
         "时间要口语化，比如「九点半有个周会」，不要写成「9:30 项目周会」这种条目。",
       "- 明天天气和穿衣要说（这是睡前备忘的正经内容，不是可省项）：预警优先；" +
         "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。",
+      "- 有行程消费提醒的话必须带上一句（今天花超了这种事睡前得说）：口语化说超了多少，" +
+        "像「今天在成都花了九百多，超预算不少」这样，别念数字报表，也别责备人。",
       "- 明天没安排就轻松带过一句，不许编事，也不许硬凑。",
       "- 可以有自然的语气词或一句收尾（「记得定闹钟」「早点睡」），但别每次都一个套路。",
-      "- 不要：敬语、「亲爱的」「您好」、「温馨提示」、汇报腔、排比、书面语、emoji、标题、引号、换行、任何解释。",
+      "- 不要：敬语、「亲爱的」、「您好」、「温馨提示」、汇报腔、排比、书面语、emoji、标题、引号、换行、任何解释。",
       "只输出消息正文本身。",
     ].join("\n");
   }
@@ -340,10 +363,11 @@ export class EveningDigestService {
 
     // 明天没安排：天气穿衣照说，没数据才干脆的不打扰（bit 去掉「明天」主语避免重复）
     if (n === 0) {
+      const tail = d.budgetAlert ? ` ${budgetAlertBit(d.budgetAlert)}` : "";
       if (bit) {
-        return `明天没安排，${bit.replace(/^明天/, "")}`;
+        return `明天没安排，${bit.replace(/^明天/, "")}${tail}`;
       }
-      return `明天没安排，想睡就多睡会儿。`;
+      return `明天没安排，想睡就多睡会儿。${tail}`;
     }
 
     const first = items[0]!;
@@ -364,8 +388,23 @@ export class EveningDigestService {
     if (bit) {
       line += ` ${bit}`;
     }
+    // 行程超支（travel 双端⑥）：要紧事，兜底文案直接说
+    if (d.budgetAlert) {
+      line += ` ${budgetAlertBit(d.budgetAlert)}`;
+    }
     return line;
   }
+}
+
+/** 超支事实行（LLM 提示词数据段用）：目的地/第几天/花费/档位上限，供 agent 转述 */
+function budgetAlertFact(a: TravelBudgetAlert): string {
+  return `用户在${a.destination}的行程今天是第 ${a.dayIndex}/${a.totalDays} 天，` +
+    `当日消费 ${a.spentToday.toFixed(0)} 元，已超过该行程预算档的每日上限 ${a.dailyCap.toFixed(0)} 元`;
+}
+
+/** 超支一句（确定性兜底文案用）：口语短句，不念报表 */
+function budgetAlertBit(a: TravelBudgetAlert): string {
+  return `对了，今天在${a.destination}花了 ${a.spentToday.toFixed(0)} 块，比预算高出不少，明天省着点。`;
 }
 
 /**

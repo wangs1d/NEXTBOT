@@ -11,17 +11,27 @@
 import type { BookingProvider } from "../booking-provider.js";
 import type { BookingConfig } from "../booking-config.js";
 import type { QuoteAggregator } from "../quote/index.js";
+import type { McpClientService } from "../../mcp-client-service.js";
 import { SimulatedRideProvider } from "./simulated-ride-provider.js";
 import { SimulatedHomeServiceProvider, SimulatedRestaurantProvider } from "./simulated-local-providers.js";
 import { AmapRideProvider } from "./amap-ride-provider.js";
+import { DidiMcpRideProvider } from "./didi-mcp-ride-provider.js";
 import { TravelTicketProvider } from "./travel-ticket-provider.js";
 
 export function buildDefaultBookingProviders(
   config: BookingConfig,
-  deps: { quoteAggregator?: QuoteAggregator | null } = {},
+  deps: { quoteAggregator?: QuoteAggregator | null; mcpClient?: McpClientService | null } = {},
 ): BookingProvider[] {
+  // 滴滴（官方 MCP）排在 ride 域首位：availability 优先（resolveProvider 无显式
+  // provider 时取第一个可用的），用户已接入滴滴，接驳下单真实走滴滴而非模拟
+  const ridePreferred: BookingProvider[] = [];
+  if (deps.mcpClient) {
+    const didi = new DidiMcpRideProvider(deps.mcpClient);
+    if (didi.availability().ok) ridePreferred.push(didi);
+  }
   if (config.mode === "mock") {
     return [
+      ...ridePreferred,
       new SimulatedRideProvider(),
       new SimulatedHomeServiceProvider(),
       new SimulatedRestaurantProvider(),
@@ -31,6 +41,7 @@ export function buildDefaultBookingProviders(
     ];
   }
   const providers: BookingProvider[] = [
+    ...ridePreferred,
     new TravelTicketProvider({ quoteAggregator: deps.quoteAggregator ?? null }),
   ];
   if (config.rideAmapWebKey) {

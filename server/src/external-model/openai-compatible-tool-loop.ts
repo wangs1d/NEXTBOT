@@ -1352,6 +1352,13 @@ const ALWAYS_INCLUDED_TOOLS = [
   // ObservationPack 读回工具：压缩/折叠损失的原文按句柄分页读回（SoL-Pi 借鉴）。
   // 常驻保证会话内 schema 集稳定（不随是否出现归档而抖动，保护前缀缓存）。
   'obs_recall',
+  // 接驳下单两件套（travel-upgrade-plan P2，2026-10-18 live e2e 实证）：接驳提醒
+  // 确认后的后续轮（「好，就订经济型那单」「确认下单」）文本里没有打车/滴滴关键词，
+  // contextual 分类召回不命中 → quote/book 从可见 schema 被裁掉，模型只能幻觉提升
+  // 调用或走 tool_call 桥（桥上 ms=0 fail），两阶段确认永远走不通。时点性刚需
+  // （错过到站窗口就没意义）必须 1-2 轮内走通，与 weather.get_local 常驻核心同理。
+  'ride_hailing.quote',
+  'ride_hailing.book',
   // 2026-09-05：escalate 哨兵工具已随车道内升级机制一起删除。
   // search_images 不再常驻：
   //   收敛误触发（2026-08-20，宁缺勿滥）——常驻会让模型在"对话前面搜过图、本轮并
