@@ -579,8 +579,7 @@ function adaptStop(entry, dayIndex, stopIndex, prev) {
       ticket: str(entry.priceInfo),
       hours: str(entry.hours),
       addr: str(entry.address),
-      reviews: entry.reviews || [],
-      videos: entry.videos || []
+      reviews: entry.reviews || []
     }
   };
   if (entry.leg && entry.leg.mode) stop.leg = { mode: str(entry.leg.mode), minutes: Number(entry.leg.minutes) || 0, dist: str(entry.leg.dist) };
@@ -660,7 +659,6 @@ function normalizePlan(raw) {
             images: it.images || [],
             splatUrl: str(it.splatUrl),
             reviews: it.reviews || [],
-            videos: it.videos || [],
             leg: tp
               ? {
                   mode: normalizeMode(tp.mode) || 'taxi',
@@ -1174,16 +1172,10 @@ function renderDetail() {
   if (it.anchor != null) chips += '<span class="chip hot">时间锚点 · 不可错过</span>';
   if (it.book) chips += '<span class="chip"><span class="cdot"></span>' + esc(it.book) + '</span>';
   if (it.splatUrl) chips += '<button class="chip act" id="splatBtn">沉浸式 3D 实景</button>';
-  // 打卡视频（travel 视频下放）：后台回填命中的站点带 1 条真实播放页，点开即看
-  var vids = d.videos || [];
-  if (vids.length && vids[0] && vids[0].url) {
-    chips += '<button class="chip act" id="poiVidBtn">▶ ' + esc(vids[0].title || '打卡视频') + '</button>';
-  }
+  // 打卡视频只在电脑端 Now 卡展示（2026-10-19 定调：手机端不展示，数据字段不再透传）
   $('dChips').innerHTML = chips;
   var sb = $('splatBtn');
   if (sb) sb.addEventListener('click', function () { openUrl(it.splatUrl); });
-  var vb = $('poiVidBtn');
-  if (vb) vb.addEventListener('click', function () { openUrl(vids[0].url); });
 
   var hl = d.hl || [];
   $('secHl').style.display = hl.length ? '' : 'none';

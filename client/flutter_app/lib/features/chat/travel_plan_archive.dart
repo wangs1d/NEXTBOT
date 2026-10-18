@@ -1,4 +1,4 @@
-﻿﻿import "dart:async" show unawaited;
+import "dart:async" show unawaited;
 import "dart:convert";
 import "dart:io" show Platform;
 
@@ -853,30 +853,19 @@ class _TripCard extends StatelessWidget {
                     borderRadius: BorderRadius.circular(3),
                   ),
                 ),
-                // 封面（往期置灰）
+                // 封面（正常色彩；往期状态由左缘色条区分）
                 ClipRRect(
                   borderRadius: BorderRadius.circular(10),
                   child: SizedBox(
                     width: 60,
                     height: 60,
                     child: summary.coverImage.isNotEmpty
-                        ? (past
-                            ? ColorFiltered(
-                                colorFilter: const ColorFilter.mode(
-                                    Colors.grey, BlendMode.saturation),
-                                child: CachedMediaImage(
-                                  url: resolveTravelMediaUrl(summary.coverImage),
-                                  fit: BoxFit.cover,
-                                  errorBuilder: (_, __, ___) =>
-                                      _CoverFallback(colors: colors, label: summary.destination),
-                                ),
-                              )
-                            : CachedMediaImage(
-                                url: resolveTravelMediaUrl(summary.coverImage),
-                                fit: BoxFit.cover,
-                                errorBuilder: (_, __, ___) =>
-                                    _CoverFallback(colors: colors, label: summary.destination),
-                              ))
+                        ? CachedMediaImage(
+                            url: resolveTravelMediaUrl(summary.coverImage),
+                            fit: BoxFit.cover,
+                            errorBuilder: (_, __, ___) =>
+                                _CoverFallback(colors: colors, label: summary.destination),
+                          )
                         : _CoverFallback(colors: colors, label: summary.destination),
                   ),
                 ),
