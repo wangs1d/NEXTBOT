@@ -7,6 +7,7 @@ import { test } from "node:test";
 
 import { arbitrate, DELIVERY_RETRY_MS, nextQuietEnd, type ArbiterContext } from "../src/proactivity/arbiter.js";
 import { ProactiveDeliveryService } from "../src/proactivity/delivery-service.js";
+import type { OpenedBody } from "../src/proactivity/discovery-layer.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import type { ProactiveProposal } from "../src/proactivity/pipeline-types.js";
 import { ProactivePipeline } from "../src/proactivity/proactive-pipeline.js";
@@ -524,14 +525,18 @@ test("governor: 自适应冷却上下界（负反馈×1.5 上限 48h，正反馈
 
 // ─── 助手动态台账（action.* 提案投递成功落库）───
 
+// 投递正文在类型上是"已过开口闸"的 OpenedBody（生产代码只能经 DiscoveryLayer.openMouth 拿到）；
+// 这里直连 delivery 做台账单测，铸一个等价物。
+const asOpened = (t: string): OpenedBody => t as OpenedBody;
+
 test("ledger: action.* 提案投递成功落库，非 action.* 不落", () => {
   const recorded: ProactiveProposal[] = [];
   const delivery = new ProactiveDeliveryService({
     trySend: () => true,
     ledger: { record: (p) => recorded.push(p) },
   });
-  const r1 = delivery.deliver(proposal({ kind: "action.purchase", dedupKey: "buy-milk" }), "牛奶订好啦", "已为你订购牛奶");
-  const r2 = delivery.deliver(proposal({ kind: "schedule_upcoming", dedupKey: "k2" }), "评审提醒", "评审");
+  const r1 = delivery.deliver(proposal({ kind: "action.purchase", dedupKey: "buy-milk" }), asOpened("牛奶订好啦"), "已为你订购牛奶");
+  const r2 = delivery.deliver(proposal({ kind: "schedule_upcoming", dedupKey: "k2" }), asOpened("评审提醒"), "评审");
   assert.ok(r1.ok && r2.ok);
   assert.equal(recorded.length, 1, "只有 action.* 提案进台账");
   assert.equal(recorded[0]!.kind, "action.purchase");
@@ -543,7 +548,7 @@ test("ledger: 投递失败（两端离线）不落台账", () => {
     trySend: () => false,
     ledger: { record: (p) => recorded.push(p) },
   });
-  const r = delivery.deliver(proposal({ kind: "action.payment" }), "水电费已缴", "已缴纳水电费");
+  const r = delivery.deliver(proposal({ kind: "action.payment" }), asOpened("水电费已缴"), "已缴纳水电费");
   assert.equal(r.ok, false);
   assert.equal(recorded.length, 0, "挂起重投的提案在送达前不进台账");
 });

@@ -47,6 +47,10 @@ export function buildLocationArrivalIntent(actorId: string, place: FrequentPlace
       `没有就只问好，别编造任务。`,
     mode: "speak",
     source: "location",
+    // 共同键显式给地点名（2026-10-19 二期）：这是这次开口真正"属于哪个主题"。
+    // 不给的话推断会在长句里挑出「地点」这种无区分度的词，把不相干的到达绑到一起；
+    // 地点名（"家"/"公司"）才是能与位置源其他发现汇聚的真实键。
+    subject: where,
   };
 }
 

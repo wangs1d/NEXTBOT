@@ -68,6 +68,10 @@ export class MessageWatchTrigger {
       this.lastProposalAt.set(cooldownKey, now);
 
       const sender = input.senderName?.trim() || input.participantName?.trim() || input.channelId;
+      // 共同键（2026-10-19 二期）：从命中的「日程语境词」里取（会议/航班/面试…），
+      // 而不是留给推断从长句里挑出「日程变动」这种无区分度的词。取不到语境词
+      //（只有时间表达）时不硬给——退回推断兜底，宁可不给键也不给假键。
+      const ctxWord = input.text.trim().match(SCHEDULE_CONTEXT)?.[1]?.trim();
       let excerpt = input.text.trim().replace(/\s+/g, " ").slice(0, 120);
       // 消息正文自带「发件人：」前缀时摘要去重，避免 summary 出现「李雷：李雷：…」
       if (sender && excerpt.startsWith(`${sender}：`)) {
@@ -101,6 +105,8 @@ export class MessageWatchTrigger {
         // 不设 expiresAt：静默时段被顺延到早7点的提案仍然有效
         // （「昨晚说会议改期」早上告知依旧有用），由 dedupKey 防重
         source: "message_watch",
+        // 共同键：日程语境词（会议/航班/面试…）；取不到则缺省，由管道推断兜底
+        ...(ctxWord ? { subject: ctxWord } : {}),
         detail: {
           来源: platformLabel(input.platform),
           发件人: sender ?? "未知",

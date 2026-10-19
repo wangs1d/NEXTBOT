@@ -9,12 +9,17 @@
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const { SourceStore } = await import("../src/proactivity/source-store.js");
 const { DiscoveryLayer, primarySubjectOf } = await import("../src/proactivity/discovery-layer.js");
+const { ProactivePipeline } = await import("../src/proactivity/proactive-pipeline.js");
+const { FrequencyGovernor } = await import("../src/proactivity/frequency-governor.js");
+const { ProactiveDeliveryService } = await import("../src/proactivity/delivery-service.js");
+const { OutcomeStore } = await import("../src/proactivity/outcome-store.js");
+const { PresenceService } = await import("../src/proactivity/presence-service.js");
 
 /** 造一个不落盘的共享总线（disablePersist）+ 发现层；时钟可控 */
 function makeLayer(nowFn: () => number) {
@@ -123,4 +128,147 @@ test("主体词推断（零 LLM）：给不出共同键时不硬绑", () => {
   assert.equal(primarySubjectOf("邮件提到三亚合同 review"), "三亚", "剥前缀噪声 + 优先双字实体");
   assert.equal(primarySubjectOf("要不要"), null, "全是停用词 → 无共同键（宁缺勿滥）");
   assert.equal(primarySubjectOf("房东邮件提到搬家要提前一周预约电梯"), null, "剥不干净的长句式碎片 → 弃用，退回实体联系");
+});
+
+// ─── 旁路生产者走共享层（2026-10-19 通用化回归）───
+// 以前 messageWatch / commitmentTrigger / 到点提醒 / 早报 等直接调 submitProposal，
+// 绕过共享层；现在"发现登记 + 开口前读合成 + 按 verdict 消费"下沉到管道这一个入口
+// （所有触发源的共同底）。这条用例锁住：旁路提案的发现被登记，且能与其他源的发现
+// 交叉合并成同一条开口——不再需要给每个生产者各自打补丁。
+
+test("旁路生产者（直接 submitProposal）也走共享层：跨源发现被合并进同一条开口", () => {
+  const now = () => 1_700_000_100_000;
+  const dir = mkdtempSync(join(tmpdir(), "pa-discovery-pipe-"));
+  try {
+    const store = new SourceStore({ dataPath: dir, disablePersist: true, nowFn: now, env: {} });
+    const discovery = new DiscoveryLayer({ store, nowFn: now });
+    const presence = new PresenceService();
+    presence.markConnected("u1", now() - 5 * 60_000); // 在线（active 但非对话中 → social 提案可直投）
+    const delivered: Array<{ actorId: string; json: string }> = [];
+    const pipeline = new ProactivePipeline({
+      dataPath: dir,
+      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
+      presence,
+      delivery: new ProactiveDeliveryService({
+        trySend: (actorId, json) => {
+          delivered.push({ actorId, json });
+          return true;
+        },
+      }),
+      outcomes: new OutcomeStore(join(dir, "outcomes.json")),
+      nowFn: now,
+      discovery,
+    });
+
+    // 源 1（对应 GoalRunner，经 hub → 直达车道）先登记一条未消费发现，尚未开口
+    discovery.write({
+      subject: "g_搬家",
+      actorId: "u1",
+      source: "hub:goal",
+      content: "计划「搬家」卡在第 3 步「预约搬家公司」，等你点确认",
+    });
+
+    // 源 2（旁路：直接 submitProposal，如承诺板/消息监控）就同一目标开口
+    const decision = pipeline.submitProposal({
+      proposalId: "p_bypass",
+      actorId: "u1",
+      kind: "life_reminder",
+      tier: "social",
+      importance: "medium",
+      dedupKey: "bypass:commitment:1",
+      title: "搬家进度",
+      summary: "搬家这事有新动静",
+      directText: "搬家这事有新动静",
+      evidence: ["commitment-board"],
+      createdAt: now(),
+      source: "commitment-board",
+      subject: "g_搬家",
+    });
+
+    assert.equal(decision.verdict, "delivered");
+    const payload = JSON.parse(delivered[0].json);
+    assert.match(
+      payload.payload.text,
+      /计划「搬家」卡在第 3 步/,
+      "旁路提案把源 1 的发现合并进了同一条开口（共享层收口生效）",
+    );
+    assert.equal(store.stats().findings.pending, 0, "说出口后未消费发现被消费");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── 消费解耦：预留 ≠ 消费（2026-10-19 二期）───
+// 旧版把 "deferred" 也算消费，于是挂起的提案若后续被静默清理/僵尸丢弃，
+// 它读走的他人发现已被吞掉 = 信息蒸发（正是修 merged 想堵的洞，在 deferred 上又裂一道）。
+// 现在开口瞬间只**预留**（第二个出口读不到，杜绝各说一遍），结算拆三态：
+// delivered=消费 / deferred=维持预留 / 丢弃=释放回总线。
+
+test("消费解耦：开口即预留；deferred 不消费；丢弃释放、投递才消费", () => {
+  const now = () => 1_700_000_200_000;
+  const { store, discovery } = makeLayer(now);
+  const subject = "g_搬家";
+  discovery.write({ subject, source: "goal_runner", content: "计划「搬家」卡在第 3 步" });
+
+  const composed = discovery.composeBeforeOpen({ subject, ownSource: "hub:goal", body: "搬家提醒", importance: "medium" });
+  assert.equal(composed.pendingFingerprints.length, 1);
+  assert.equal(discovery.findingsFor(subject).length, 0, "开口瞬间即预留：第二个出口读不到（杜绝各说一遍）");
+
+  // deferred：入队等时刻——既不消费也不释放（预留维持，等那次真的投出去）
+  discovery.noteSpoken(composed.pendingFingerprints, "deferred");
+  assert.equal(store.findingStats().consumed, 0, "deferred 不算说出，不消费");
+  assert.equal(discovery.findingsFor(subject).length, 0, "deferred 期间仍预留（第二个出口仍读不到）");
+
+  // 队列丢弃 → 释放回总线（旧版会在此吞掉发现=蒸发）
+  discovery.settle(composed.pendingFingerprints, "dropped");
+  assert.equal(discovery.findingsFor(subject).length, 1, "被丢弃的开口把发现释放回总线，信息不蒸发");
+
+  // 真投递 → 消费
+  assert.equal(discovery.settle(composed.pendingFingerprints, "delivered"), 1, "投递结算成消费");
+  assert.equal(discovery.findingsFor(subject).length, 0);
+});
+
+test("管道结算：deferred 提案维持预留（不消费发现），等真投递才消费", () => {
+  const now = () => 1_700_000_300_000;
+  const dir = mkdtempSync(join(tmpdir(), "pa-discovery-defer-"));
+  try {
+    const store = new SourceStore({ dataPath: dir, disablePersist: true, nowFn: now, env: {} });
+    const discovery = new DiscoveryLayer({ store, nowFn: now });
+    const presence = new PresenceService(); // 未 markConnected → offline → 仲裁挂起
+    const pipeline = new ProactivePipeline({
+      dataPath: dir,
+      governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true }),
+      suppression: { isSuppressed: () => ({ suppressed: false, reason: "" }) },
+      presence,
+      delivery: new ProactiveDeliveryService({ trySend: () => true }),
+      outcomes: new OutcomeStore(join(dir, "outcomes.json")),
+      nowFn: now,
+      discovery,
+    });
+
+    discovery.write({ subject: "g_x", actorId: "u1", source: "goal_runner", content: "别处也提到 X" });
+    const decision = pipeline.submitProposal({
+      proposalId: "p_defer",
+      actorId: "u1",
+      kind: "life_reminder",
+      tier: "social",
+      importance: "medium",
+      dedupKey: "defer:1",
+      title: "X 进度",
+      summary: "X 有动静",
+      directText: "X 有动静",
+      evidence: ["e"],
+      createdAt: now(),
+      source: "commitment-board",
+      subject: "g_x",
+    });
+
+    assert.equal(decision.verdict, "deferred", "离线 → 挂起待重连");
+    assert.equal(store.findingStats().consumed, 0, "deferred 不消费发现");
+    assert.equal(store.findingStats().pending, 0, "被这次开口预留中（对别的出口不可见）");
+    assert.ok(pipeline.diagnostics().pending.length >= 1, "提案仍在待发区（fingerprints 已随提案留存，等真投递结算）");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

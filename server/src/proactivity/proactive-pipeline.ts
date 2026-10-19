@@ -15,6 +15,7 @@ import { ProposalStore } from "./proposal-store.js";
 import { SilenceLog } from "./silence-log.js";
 import { CONFIRMATION_TTL_MS, type PendingConfirmation, PendingConfirmationStore } from "./pending-confirmation-store.js";
 import { topicKeyOfProposal, TopicDismissTracker } from "./topic-dismiss-tracker.js";
+import { primarySubjectOf, type DiscoveryLayer, type OpenedBody } from "./discovery-layer.js";
 
 export type ProactivePipelineDeps = {
   /** 数据目录（默认 data/proactivity）：proposals.json / frequency.json / known-actors.json */
@@ -73,6 +74,13 @@ export type ProactivePipelineDeps = {
    * 未注入 = 无话题维度学习。
    */
   topicDismiss?: TopicDismissTracker;
+  /**
+   * 共享发现层（2026-10-19）：本管道是**所有**触发源的共同底（文档自述"任何触发源只调这
+   * 一个方法"），所以"发现怎么汇总、开口前读什么"的唯一收口放在这里——write 登记本次发现
+   * → composeBeforeOpen 读合成（同 subject 未消费的他人发现 + 实体命中上下文）→ noteSpoken
+   * 按 verdict 决定是否消费。未注入 = 退化为原行为（既有单测不受影响）。
+   */
+  discovery?: DiscoveryLayer;
 };
 
 /** 正反馈 outcome 集合（自适应冷却的方向判定） */
@@ -137,16 +145,59 @@ export class ProactivePipeline {
   /** 统一入口：任何触发源只调这一个方法（fire-and-forget，绝不阻塞调用方） */
   submitProposal(p: ProactiveProposal): ArbitrationDecision {
     const now = this.deps.nowFn?.() ?? Date.now();
-    if (this.store.wasDeliveredRecently(p.dedupKey, now) || !this.store.enqueue(p)) {
+    // ─── 共享发现层收口（2026-10-19）───
+    // 所有触发源（邮件/日历/目标/承诺/提醒/早报/承诺代催…）都汇到这一个方法，所以"发现
+    // 怎么汇总、开口前读什么"只在这里发生一次：先把本次发现登记进总线，再读合成（同
+    // subject 可读的他人发现 + 实体命中上下文），零 LLM 拼进正文；重复开口的等级降一档。
+    // 读走的发现在开口瞬间就被**预留**（第二个出口读不到，杜绝各说一遍），但预留≠消费：
+    // decide 依提案最终去向结算——delivered 才转消费，deferred 维持预留（等真投递），
+    // 被去重/抑制/丢弃则释放回总线。这是"之后的信息都走共享层"的结构性保证，而不是让
+    // N 个生产者各自打补丁。
+    let proposal = p;
+    if (this.deps.discovery) {
+      const subject = (p.subject ?? primarySubjectOf(`${p.title} ${p.summary}`) ?? "").trim();
+      if (p.directText !== undefined) {
+        // 唯一开口入口：登记本次发现 + 读合成（读走即预留），返回 branded 正文与结算句柄。
+        // handle.body 是 OpenedBody，投递出口只认它——管道是唯一被授权把正文说出去的地方。
+        const handle = this.deps.discovery.openMouth({
+          subject,
+          actorId: p.actorId,
+          source: p.source,
+          content: p.summary,
+          body: p.directText,
+          importance: p.importance,
+          needsUser: p.needsUser === true,
+        });
+        proposal = {
+          ...p,
+          directText: handle.body,
+          importance: handle.importance,
+          // 读走的 finding 随提案带上：decide 依最终去向结算（消费/维持预留/释放）
+          ...(handle.fingerprints.length ? { findingFingerprints: [...handle.fingerprints] } : {}),
+        };
+      } else {
+        // 无 directText 的提案走 hub 的 speak 闭环（LLM 话术），本次不在管道读合成——
+        // 发现留在总线上，由那句真正带正文的开口合并带走；这里只按重复状态调等级。
+        this.deps.discovery.write({ subject, actorId: p.actorId, source: p.source, content: p.summary });
+        const preview = this.deps.discovery.previewOpen(subject, p.importance, p.needsUser === true);
+        proposal = { ...p, importance: preview.importance };
+      }
+    }
+    if (this.store.wasDeliveredRecently(proposal.dedupKey, now) || !this.store.enqueue(proposal)) {
+      // 被去重丢弃 / 入队失败：用户没看到这条，读走的发现释放回总线（信息不蒸发）
+      if (this.deps.discovery && proposal.findingFingerprints?.length) {
+        this.deps.discovery.settle(proposal.findingFingerprints, "dropped");
+      }
       const merged: ArbitrationDecision = {
-        proposal: p,
+        proposal,
         verdict: "merged",
-        reasonChain: [`dedup:${p.dedupKey}`],
+        reasonChain: [`dedup:${proposal.dedupKey}`],
       };
       this.store.logDecision(merged);
       return merged;
     }
-    return this.decide(p);
+    // decide 内部按提案最终去向结算预留（delivered=消费 / pending=维持预留 / dropped=释放）
+    return this.decide(proposal);
   }
 
   /** 推进到期延迟提案（deferred/offline 挂起的在在场变化后重仲裁；at 可注入推进时钟） */
@@ -259,6 +310,10 @@ export class ProactivePipeline {
           }
           if (!this.store.take(p.dedupKey)) return; // 已被 WS 重连直投抢先
           this.store.markDelivered(p.dedupKey, clock());
+          // 手机推送真的送达 → 读走的发现此刻结算成消费（否则会随预留到期释放、被再合并一遍）
+          if (this.deps.discovery && p.findingFingerprints?.length) {
+            this.deps.discovery.settle(p.findingFingerprints, "delivered");
+          }
           this.deps.outcomes.record({
             deliveryId,
             actorId: p.actorId,
@@ -346,28 +401,35 @@ export class ProactivePipeline {
     const decision = arbitrate(p, this.buildContext(p, at));
     this.store.logDecision(decision);
     if (decision.verdict !== "deferred") this.redecides.delete(p.dedupKey);
+    // 提案最终去向 → 共享发现层预留结算：delivered=消费 / pending=维持预留（等真投递）/ dropped=释放
+    let disposition: "delivered" | "pending" | "dropped" = "dropped";
     switch (decision.verdict) {
       case "delivered": {
         if (this.dispatch(p)) {
           this.store.take(p.dedupKey);
           this.store.markDelivered(p.dedupKey, this.deps.nowFn?.() ?? Date.now());
           this.registerProposalConfirmationIfNeeded(p, decision);
+          disposition = "delivered";
         } else {
           // 竞态：仲裁时设备在线、发送时已全部掉线 → 保留待发区稍后重试（重连即达）
           this.store.reschedule(p.dedupKey, (this.deps.nowFn?.() ?? Date.now()) + DELIVERY_RETRY_MS);
           this.attemptOfflinePush(p);
+          disposition = "pending";
         }
         break;
       }
       case "deferred": {
         const now = this.deps.nowFn?.() ?? Date.now();
+        disposition = "pending";
         if (decision.reasonChain.includes("offline_wait_reconnect")) {
           const n = (this.redecides.get(p.dedupKey) ?? 0) + 1;
           this.redecides.set(p.dedupKey, n);
           if (n > MAX_REDECISIONS) {
             // 挂起超限：设备长期离线且提案无保质期——放弃（信息已过时，留痕即可）
+            // 读走的发现释放回总线（这次开口等于没说，不能吞掉别人的发现）
             this.store.take(p.dedupKey);
             this.redecides.delete(p.dedupKey);
+            disposition = "dropped";
             console.log(`[ProactivePipeline] 挂起重裁决超限（${MAX_REDECISIONS} 次）放弃 kind=${p.kind} dedupKey=${p.dedupKey}`);
             break;
           }
@@ -403,6 +465,9 @@ export class ProactivePipeline {
         this.store.take(p.dedupKey); // expired / suppressed / throttled：出队（原因已留痕）
         break;
     }
+    if (this.deps.discovery && p.findingFingerprints?.length) {
+      this.deps.discovery.settle(p.findingFingerprints, disposition);
+    }
     return decision;
   }
 
@@ -413,7 +478,10 @@ export class ProactivePipeline {
    */
   private dispatch(p: ProactiveProposal): boolean {
     if (p.directText) {
-      const result = this.deps.delivery.deliver(p, p.directText, p.title);
+      // 正文在 submitProposal 里已经过 openMouth 闸；本方法是**唯一**被授权把正文投出去的
+      // 地方（无发现层回退时由本类作为唯一编排者铸造）。外部模块想投递，只能拿到 openMouth
+      // 产出的 OpenedBody——绕过开口闸会在 delivery.deliver 这里编译不过，而非靠约定。
+      const result = this.deps.delivery.deliver(p, p.directText as OpenedBody, p.title);
       if (!result.ok) return false;
       this.deps.outcomes.record({
         deliveryId: result.deliveryId,

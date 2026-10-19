@@ -12,9 +12,11 @@
 //  2. **共同键 = subject**（目标用 goalId；其余用主体词），三源天然汇聚。
 //  3. **"联系"由 findByEntity 自然产生**：findByEntity("搬家") 同时命中邮件里提到搬家和
 //     GoalRunner 说卡在第 3 步——不需要任何两两耦合。
-//  4. **单开口闸 = composeBeforeOpen**：任何出口在开口前读同 subject 的未消费 finding +
-//     实体命中上下文，零 LLM 模板拼接进正文，并把读过的发现标记为已消费。于是同一发现
-//     不会被两个出口各说一遍，"重复降档"从"另加一条规则"变成"发现已被读走"的副作用。
+//  4. **单开口闸 = composeBeforeOpen**：任何出口在开口前读同 subject 的可读 finding +
+//     实体命中上下文，零 LLM 模板拼接进正文，并把读过的发现**预留**走。于是同一发现
+//     在开口瞬间就不会被两个出口各说一遍；但"预留 ≠ 消费"——真说出口（delivered）才
+//     结算成消费，被抑制/静默/丢弃则释放回总线（信息不蒸发）。"重复降档"从"另加一条
+//     规则"变成"发现已被读走"的副作用。
 //
 // 边界：零 LLM；不新建存储；不动执行边界（launchTask / TaskHub 终态回调），执行仍由
 // 既有链路负责，本层只管"发现怎么汇总、开口前读什么"。
@@ -94,15 +96,54 @@ export type ComposeOpenResult<T extends ProactiveImportance> = {
   /** 被合并进来的跨源实体联系（诊断/对比用） */
   linked: string[];
   /**
-   * 本次读到的 finding 指纹。**没有立即消费**——消费发生在"真的说出口"之后
-   * （noteSpoken）。语义差异很重要：被频控/静默挡下的开口等于没说，
-   * 它登记过的发现应当留在总线上，让下一个出口顺带说出来，而不是人间蒸发。
+   * 本次读到的 finding 指纹（已在开口瞬间**预留**）。**没有消费**——消费/释放由
+   * settle 决定：真说出口（delivered）→ commit；被抑制/丢弃/过期 → release 回总线；
+   * deferred（入队等时刻）→ 维持预留，等那次真的投出去再 commit。
+   * 语义差异很重要：被频控/静默挡下、或 deferred 后被丢弃的开口等于没说，
+   * 它读走的发现应当回到总线上让下一个出口顺带说出来，而不是人间蒸发。
    */
   pendingFingerprints: string[];
 };
 
-/** 已真正说出去的仲裁结论（这些 verdict 之后才消费发现；被抑制的不消费） */
-const SPOKEN_VERDICTS = new Set(["delivered", "deferred", "merged"]);
+// ─── 唯一开口入口（2026-10-19 三期）：把"登记 + 读合成 + 预留"收成一个动作 ───
+
+declare const OPENED_BODY: unique symbol;
+/**
+ * 已过开口闸的正文（branded）。**唯一**值产出口是 openMouth()；投递出口
+ * `ProactiveDeliveryService.deliver` 只接受它——于是"拿一句裸 string 直接发出去"
+ * 在这一步**编译不过**：想主动开口，就只有先过 openMouth 这一条路。
+ */
+export type OpenedBody = string & { readonly [OPENED_BODY]: true };
+
+/** 唯一开口入口入参：一次把"本次发现"写进总线 + 读合成（读走即预留） */
+export type OpenMouthInput<T extends ProactiveImportance> = {
+  subject?: string;
+  actorId?: string;
+  /** 本次开口的产出者标识（= composeBeforeOpen 的 ownSource） */
+  source: string;
+  /** 写进总线的本次发现正文（缺省 = body） */
+  content?: string;
+  /** 本次开口正文 */
+  body: string;
+  importance: T;
+  needsUser?: boolean;
+};
+
+/** 开口句柄：branded 正文 + 读走的指纹 + 唯一结算通道（说不出 / 丢弃都必须经它） */
+export type OpenMouth<T extends ProactiveImportance> = {
+  readonly body: OpenedBody;
+  readonly importance: T;
+  readonly subject: string;
+  readonly fingerprints: readonly string[];
+  settle(disposition: "delivered" | "pending" | "dropped"): number;
+};
+
+/** 真的说出口的裁决结论（只有这个把预留转成"消费"）。
+ *  与旧版的差别：**deferred 不再算消费**——它只是"入队等时刻"，队列里后续可能被静默
+ *  清理/僵尸丢弃/去重顶掉；那些情况下发现必须回到总线，而不是被过早吞掉=蒸发。 */
+const COMMIT_VERDICTS = new Set(["delivered"]);
+/** 维持预留的裁决结论："还没说出去，但也不是失败"（入队等时机），预留继续挂着等真投递 */
+const HOLD_VERDICTS = new Set(["deferred"]);
 
 /** 开口时刻记账（目标侧接 GoalBoard.lastOpenedAt 以保跨重启语义；其余留在内存） */
 export type OpenMarkStore = {
@@ -181,7 +222,8 @@ export class DiscoveryLayer {
     }
     for (const entity of entities.slice(0, 4)) {
       for (const f of this.deps.store.findingsByEntity(entity, { limit: 3 })) {
-        if (this.deps.store.isFindingConsumed(f.fingerprint)) continue;
+        // 可读 = 既没被消费、也没被别的开口预留（"读走等裁决"期间对第二个口不可见）
+        if (!this.deps.store.isFindingAvailable(f.fingerprint)) continue;
         if (f.at + f.ttlMs <= now) continue;
         if (!gathered.has(f.fingerprint)) gathered.set(f.fingerprint, f);
       }
@@ -218,25 +260,91 @@ export class DiscoveryLayer {
     const body = extras.length ? `${base}\n（另：${extras.join("；")}）` : base;
 
     // 重复开口判定：该 subject 刚被说过 + 这次不是请用户拍板 → 降一档
-    const lastOpenedAt = this.lastOpenedAt(subject);
-    const repeat = subject ? isCrossSourceRepeat(lastOpenedAt, now) : false;
+    // （previewOpen 只读「是否重复」，必须在 markOpened 之前调用）
+    const { importance, repeat } = this.previewOpen(subject, input.importance, input.needsUser === true);
     if (subject) this.markOpened(subject, now);
-    // 收窄断言安全：降档只沿阶梯向下走一格（critical→high→medium→low），绝不升档
-    const importance = (repeat && !input.needsUser
-      ? downgradeImportanceForRepeat(input.importance, { needsUser: false })
-      : input.importance) as T;
 
-    // 消费推迟到"真的说出口"（noteSpoken）：被抑制的开口不该把发现一起吞掉
-    return { body, importance, subject, repeat, merged, linked, pendingFingerprints: findings.map((f) => f.fingerprint) };
+    // 读走即**预留**（不等裁决）：读到的他人发现在本次开口裁决期间对别的出口不可见，
+    // 于是"同一发现被两个出口各说一遍"在开口瞬间就挡住了；但预留≠消费——真说出口才
+    // 由 settle（commit）转消费，被抑制/丢弃/过期则 release 回总线（信息不蒸发）。
+    const fingerprints = findings.map((f) => f.fingerprint);
+    if (fingerprints.length) this.deps.store.reserveFindings(fingerprints);
+    return { body, importance, subject, repeat, merged, linked, pendingFingerprints: fingerprints };
   }
 
   /**
-   * 开口真的说出口之后调用：把这次读到的发现标记为已消费（下一个出口不再重复说）。
-   * 仲裁结论是被抑制/静默/过期/丢弃时不调用——那些开口等于没说，发现留在总线上。
+   * 无副作用的等级预览（开口闸**之前**派生 urgency 用）：只读"该 subject 是否刚说过"，
+   * 不登记开口、不读发现。真实合成与记账只在 composeBeforeOpen（单一入口）发生一次。
+   */
+  previewOpen<T extends ProactiveImportance>(
+    subject: string,
+    importance: T,
+    needsUser = false,
+  ): { importance: T; repeat: boolean } {
+    const key = String(subject ?? "").trim();
+    const repeat = key ? isCrossSourceRepeat(this.lastOpenedAt(key), this.nowFn()) : false;
+    // 收窄断言安全：降档只沿阶梯向下走一格（critical→high→medium→low），绝不升档
+    const graded = (repeat && !needsUser
+      ? downgradeImportanceForRepeat(importance, { needsUser: false })
+      : importance) as T;
+    return { importance: graded, repeat };
+  }
+
+  /**
+   * 按"开口最终去向"结算预留（管道 decide 在提案落定后调用）：
+   *   delivered → 转消费（下次不再说）；pending → 维持预留（等真投递）；dropped → 释放回总线。
+   * 这是"读走 ≠ 说出"的解耦落点。
+   */
+  settle(fingerprints: string[], disposition: "delivered" | "pending" | "dropped"): number {
+    if (!fingerprints.length) return 0;
+    if (disposition === "delivered") return this.deps.store.commitFindings(fingerprints);
+    if (disposition === "pending") return 0;
+    return this.deps.store.releaseFindings(fingerprints);
+  }
+
+  /**
+   * 唯一开口入口（2026-10-19 三期）：登记本次发现 → 读合成（读走即预留）→ 返回句柄。
+   * 管道出口与顺嘴搭车出口**都只调它**；返回的 body 是 branded 的 OpenedBody，投递出口
+   * 只接受它。于是"绕开这道闸把主动内容说给用户"在编译层就不成立——不是靠约定，
+   * 是类型上根本拿不到可以投递的正文。结算同样只能经句柄（说不出/丢弃都要归位）。
+   */
+  openMouth<T extends ProactiveImportance>(input: OpenMouthInput<T>): OpenMouth<T> {
+    const subject = (input.subject ?? primarySubjectOf(input.body) ?? "").trim();
+    this.write({
+      subject,
+      actorId: input.actorId,
+      source: input.source,
+      content: input.content ?? input.body,
+    });
+    const composed = this.composeBeforeOpen({
+      subject,
+      ownSource: input.source,
+      actorId: input.actorId,
+      body: input.body,
+      importance: input.importance,
+      needsUser: input.needsUser === true,
+    });
+    const fingerprints = composed.pendingFingerprints;
+    return {
+      // 收窄断言：brand 是名义类型，值不变量由"只有本方法产出"保证
+      body: composed.body as OpenedBody,
+      importance: composed.importance,
+      subject: composed.subject,
+      fingerprints,
+      settle: (disposition) => this.settle(fingerprints, disposition),
+    };
+  }
+
+  /**
+   * 按仲裁结论结算（verdict 版 API；管道之外的调用点/测试用）。映射：
+   *   delivered → 消费；deferred → 维持预留；其余（suppressed/silenced/throttled/
+   *   expired/merged/…）→ 释放回总线。被抑制/静默/被去重丢弃的开口等于没说。
    */
   noteSpoken(fingerprints: string[], verdict: string, at = this.nowFn()): number {
-    if (!SPOKEN_VERDICTS.has(verdict)) return 0;
-    return this.deps.store.consumeFindings(fingerprints, at);
+    if (!fingerprints.length) return 0;
+    if (COMMIT_VERDICTS.has(verdict)) return this.deps.store.commitFindings(fingerprints, at);
+    if (HOLD_VERDICTS.has(verdict)) return 0;
+    return this.deps.store.releaseFindings(fingerprints);
   }
 
   /** 某 subject 上次开口时刻（外部记账优先，保证 goalId 跨重启语义） */

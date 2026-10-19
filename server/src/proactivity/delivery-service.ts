@@ -4,6 +4,9 @@
 // 高重要度消息 payload 带 display:"popup"，客户端保证以弹窗形式展示（桌面原生弹窗 /
 // 移动端应用内弹窗卡片）。每条投递带 deliveryId，客户端回传 outcome 反馈。
 import type { ProactiveProposal } from "./pipeline-types.js";
+// 类型约束：投递正文必须是"已过开口闸"的 OpenedBody（见 DiscoveryLayer.openMouth）。
+// 拿一句裸 string 调 deliver 会编译不过——主动内容无法绕开共享发现层说给用户。
+import type { OpenedBody } from "./discovery-layer.js";
 
 export type DeliveryResult =
   | { ok: true; deliveryId: string }
@@ -23,7 +26,11 @@ export class ProactiveDeliveryService {
 
   constructor(private readonly deps: DeliveryDeps) {}
 
-  deliver(p: ProactiveProposal, text: string, title: string): DeliveryResult {
+  /**
+   * 唯一投递出口。`text` 是 branded 的 OpenedBody——只能由 DiscoveryLayer.openMouth
+   * 产出，因此"绕过开口闸直接投递"在这里是编译错误，而不是靠人记约定。
+   */
+  deliver(p: ProactiveProposal, text: OpenedBody, title: string): DeliveryResult {
     const deliveryId = `d_${Date.now().toString(36)}_${(this.seq++).toString(36)}`;
     const popup = p.importance === "high" || p.importance === "critical";
     const payload = {

@@ -46,6 +46,12 @@ export type ProactiveProposal = {
   subject?: string;
   /** 是否在请用户拍板（是则不参与跨源重复降档） */
   needsUser?: boolean;
+  /**
+   * 本次开口从共享发现层读走的 finding 指纹（composeBeforeOpen 预留所得）。
+   * 随提案持久化：deferred 挂起后真的投递出去（flushDue 重裁决 delivered）才能结算
+   * 成消费，被丢弃则释放回总线。管道 decide 依提案最终去向结算，调用方无需关心。
+   */
+  findingFingerprints?: string[];
   /** 代办结果详情（仅 action.* 提案）：键值对形式（商品/金额/渠道...），
    * 投递成功后随提案落入助手动态台账，客户端详情浮层直接展示 */
   detail?: Record<string, string>;

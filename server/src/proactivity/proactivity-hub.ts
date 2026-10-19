@@ -54,6 +54,7 @@ import {
 import { classifyToolRisk } from "../services/tool-risk.js";
 import { semanticDedupKey } from "./dedup-key.js";
 import type { InterestHit } from "./interest-watcher.js";
+import { primarySubjectOf, type DiscoveryLayer } from "./discovery-layer.js";
 
 /** 最小依赖接口（便于测试 mock 与模块解耦） */
 export interface ProactivityHubDeps {
@@ -146,6 +147,12 @@ export interface ProactivityHubDeps {
    * 队列拒绝（同 kind 挂起中/间隔不足）时回退原即时路径。
    */
   turnAsideQueue?: TurnAsideQueue;
+  /**
+   * 共享发现层（2026-10-19 二期）：顺嘴搭车是**第二条开口出口**（不经管道投递，而是
+   * 织进下一轮对话）。注入后取货点也走同一道 composeBeforeOpen——把别的层就同一主题的
+   * 发现合并进旁注，并"取走即说出"地结算预留（消费）。未注入 = 退化为原文（既有测试不变）。
+   */
+  discovery?: DiscoveryLayer;
   /**
    * 在场查询（2026-10-01 P0 死信闸）：缺省视为在线（保持既有测试行为）。
    * 注入后 emitSpeakSignal 在用户全设备离线时跳过——信号发了也无人接收，
@@ -257,6 +264,8 @@ export class ProactivityHub {
    */
   private directLane: ((p: ProactiveProposal) => ArbitrationDecision | void) | null = null;
   private readonly directLaneEnabled = readDirectLaneEnabled();
+  /** 共享发现层（晚绑定：装配层在 discovery 创建后经 setDiscovery 注入） */
+  private discovery: DiscoveryLayer | null = null;
   private hubSeq = 0;
   private started = false;
 
@@ -297,6 +306,14 @@ export class ProactivityHub {
    */
   setDirectLane(fn: (p: ProactiveProposal) => ArbitrationDecision | void): void {
     this.directLane = fn;
+  }
+
+  /**
+   * 接线共享发现层（装配层在 discovery 创建后调用）：顺嘴搭车取货点据此把同主题的
+   * 他人发现合并进旁注，并"取走即说出"地结算预留。未接线 = 顺嘴出口退回原文（旧行为）。
+   */
+  setDiscovery(d: DiscoveryLayer): void {
+    this.discovery = d;
   }
 
   /** 直达车道是否启用（诊断展示） */
@@ -685,7 +702,27 @@ export class ProactivityHub {
     console.log(
       `[ProactivityHub] 顺嘴织入本轮 kind=${item.kind} actor=${actorId}`,
     );
-    return formatTurnAsidePrompt(item);
+    // 第二条开口出口接入共享发现层（2026-10-19 二期）：取货即"开口"——
+    // 走**同一个** openMouth 闸：① 自己的发现登记进总线；② 把同主题的他人发现
+    // 合并进旁注；③ 取走即说出（进对话 prompt）→ 结算预留为消费，读走的发现不再被重说。
+    const discovery = this.discovery ?? this.deps.discovery;
+    if (!discovery) return formatTurnAsidePrompt(item);
+    const subject = (item.subject ?? primarySubjectOf(`${item.title} ${item.hint}`) ?? "").trim();
+    const body = item.hint || item.title;
+    const handle = discovery.openMouth({
+      subject,
+      actorId,
+      source: "hub:aside",
+      content: body,
+      body,
+      importance: item.importance,
+    });
+    try {
+      handle.settle("delivered");
+    } catch (err) {
+      console.log(`[ProactivityHub] 顺嘴结算失败（忽略）kind=${item.kind}: ${err}`);
+    }
+    return formatTurnAsidePrompt({ ...item, hint: handle.body });
   }
 
   /**

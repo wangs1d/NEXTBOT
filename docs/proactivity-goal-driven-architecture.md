@@ -260,17 +260,81 @@ ScreenSensor 连续 coding 3h + 存在活跃 plan "学英语"
    - **重复降档从"另加一条规则"变成"发现已被读走"的副作用**——等级由目标状态 +
      重复状态推导，**不再有任何硬编码等级**。
 
-**关键补充：消费推迟到"真的说出口"。**
-`composeBeforeOpen` 只返回 `pendingFingerprints`，**不消费**；真正消费由
-`noteSpoken(fingerprints, verdict)` 在仲裁结论为 `delivered/deferred/merged` 时执行。
-被判 `suppressed/silenced/throttled/expired/dropped` 的开口**等于没说**，
-发现留在总线上等下一个出口——**信息不蒸发**。
+**关键补充：读走 ≠ 说出——消费拆三态（2026-10-19 二期）。**
+`composeBeforeOpen` 读走发现时只**预留**（`reserve`，带 TTL）：第二个出口在同一窗口内读不到
+它，于是"同一发现被两个出口各说一遍"在开口瞬间就挡住了；但**预留 ≠ 消费**。真正结算由
+`settle(fingerprints, disposition)` 按提案最终去向执行：
 
-### 6.3 收口点：一条收口，不给 N 个生产者打补丁
+| 最终去向 | 结算 | 含义 |
+|---|---|---|
+| `delivered`（真说出口） | `commit` | 转消费，下次不再说 |
+| `pending`（deferred，入队等时刻） | 维持预留 | 等那次真的投出去再 commit |
+| `dropped`（去重丢弃 / 抑制 / 静默 / 过期） | `release` | 释放回总线，等下一个出口带出 |
 
-所有经 `proactivityHub.submitIntent` 的生产者（邮件/日历/天气/财务/GoalRunner/夜间内省）
-统一在 `setDirectLane` 的闭包里登记 finding + 读合成；评估器事件出口
-`mappingExecutor.onEvent` 复用同一个 `DiscoveryLayer`。**一处收口，N 个生产者零改动。**
+旧版把 `deferred` 也算消费——挂起的提案若后续被静默清理 / 48h 僵尸丢弃，它读走的他人发现
+已被吞掉 = **信息蒸发**（正是修 `merged` 想堵的洞，在 deferred 上又裂一道）。三态把这道裂缝
+补上：只有 `delivered` 才消费，其余一律回到总线。台账 `findingStats()` 相应区分
+`pending / reserved / consumed` 三项。
+
+### 6.3 收口点：唯一收口 = `ProactivePipeline.submitProposal`
+
+`submitProposal` 的文档自述就是"统一入口：任何触发源只调这一个方法"——它是**所有**主动
+提案的共同底：直达车道（hub 的 speak/advise）、评估器事件（`mappingExecutor.onEvent`）、
+消息监控、承诺板扫描、到点提醒、早报/晚间 digest、承诺代催、wellness（周期关怀/SOS）……
+无一例外。所以把发现层收口放在这一个方法里：
+
+- **write**（登记本次发现）→ **composeBeforeOpen**（读合成：同 subject 未消费的他人发现 +
+  实体命中上下文，读走即预留）→ **settle**（按提案最终去向结算：delivered=消费 /
+  pending=维持预留 / dropped=释放）——三件事只在这一处发生一次；
+- 上游出口只负责各自本职（直达车道派生 urgency、评估器做目标归属），**不再各自 compose**；
+  于是"之后的信息都走共享层"是**结构性保证**，而不是靠约定给 N 个生产者逐个打补丁。
+- 关键不变量：**发现指纹随提案持久化**（`ProactiveProposal.findingFingerprints`）——deferred
+  挂起后真的投递出去（`flushDue` 重裁决 / 离线推送成功回调）才结算成消费；提案被丢弃则释放。
+
+两个边界：
+1. **无 `directText` 的提案**（走 hub 的 speak LLM 话术闭环）本次只登记发现 + 按重复状态
+   调档，不读合成——发现留给那句真正带正文的开口合并带走。该跳转必须**转交
+   `subject`/`needsUser`**（装配层 `speak` 桥），否则共同键在这里丢掉、三源汇聚失效。
+2. **被去重丢弃的开口**（`verdict=merged`，用户没看到）**释放**发现（旧版靠 `SPOKEN_VERDICTS`
+   只认 `delivered`，现在由 `settle(..., "dropped")` 直接释放）——否则被合并进这条丢掉的开口里的
+   他人发现会人间蒸发。
+
+### 6.3.1 两个开口出口合流同一道闸（2026-10-19 二期）
+
+共享层的"开口"不止管道投递这一个出口。**顺嘴搭车（turn-aside）是第二条出口**：
+hub 把 low/medium 意图挂起、经 `takeTurnAsideForTurn` 织进下一轮对话的 prompt，
+它**不经管道投递**、天然绕开 `submitProposal`。二期把它也纳入同一道闸：
+
+- hub 晚绑定 `setDiscovery()`（镜像既有 `setDirectLane`，因 hub 早于 discovery 构造）；
+- `takeTurnAsideForTurn` 取货即开口：`write`(自己那句) → `composeBeforeOpen`（合并同主题
+  他人发现进旁注）→ `settle(..., "delivered")`（进对话 prompt 即视为说出，读走的发现转消费）；
+- `TurnAsideItem.subject` 透传（`submitIntent` 的 `intent.subject` 一路带下来）。
+
+于是"全系统一道开口闸"从"今天恰好只有一个入口"升级为**被测试守住的不变量**：
+管道出口与旁注出口都走 `composeBeforeOpen` + `settle`，同一发现在任一时点只被一个出口带走。
+
+### 6.3.2 唯一入口 + 类型约束（2026-10-19 收口加固）
+
+二期把"两个出口合流"做成**被测试守住的**不变量——但测试只能事后报警，挡不住新代码绕过。
+加固把它抬到**类型层**：把"开口"收成一个动作，让"绕过开口闸"根本编译不过。
+
+- **唯一入口**：`DiscoveryLayer.openMouth(input)` 一次完成 登记本次发现 → 读合成
+  （读走即预留）→ 返回句柄。管道出口（`submitProposal`）与旁注出口
+  （`takeTurnAsideForTurn`）都只调它，不再各自拼 `write + composeBeforeOpen`。
+- **branded 正文**：`openMouth` 返回的 `body` 是 `OpenedBody = string & { readonly [OPENED_BODY]: true }`
+  （`OPENED_BODY` 为模块私有 `unique symbol`）。**投递出口** `ProactiveDeliveryService.deliver`
+  的 `text` 参数**只接受** `OpenedBody`。
+- **效果**：任何代码想把主动内容发给用户，只能先拿到 `openMouth` 产出的 `OpenedBody`；
+  拿一句裸 `string` 去 `deliver` 会得到
+  `TS2345: Argument of type 'string' is not assignable to parameter of type 'OpenedBody'`。
+  第三个出口若想绕过开口闸，**在编译期就被挡下**，不再依赖"今天恰好只有两个出口"。
+- **结算耦合**：句柄同时是唯一的结算通道（`handle.settle(delivered|pending|dropped)`），
+  说不出 / 丢弃都要经它归位——"读走却不归位"同样无处可写。
+
+边界（诚实标注）：`OpenedBody` 的名义类型只能由 `openMouth` 产出，但 `as` 断言无法被
+TS 完全封死——管道 `dispatch` 作为**唯一被授权**的投递点，保留一处显式
+`p.directText as OpenedBody`（无发现层 / 单测回退用），是当前方案的已知边界：
+它把"绕过"从"随手可写"抬高到"必须写一处刺眼的断言"。
 
 ### 6.4 三期落地
 
@@ -278,7 +342,9 @@ ScreenSensor 连续 coding 3h + 存在活跃 plan "学英语"
 |---|---|---|
 | A | 目标三源汇聚到 `subject=goalId` | GoalRunner / GoalNightly / 规则桥 emitProposal |
 | B | 扫描源迁入同一条总线 | sensor_bridge → `discovery.write` |
-| C | 收口：删降档 → 通用 `composeBeforeOpen`；其余读点（活跃目标行 / 在办事项视图）统一走共享层 | `create-app-services.ts` 装配层 |
+| C | 收口：删降档 → 通用 `composeBeforeOpen`；其余读点（活跃目标行 / 在办事项视图）统一走共享层 | 收口下沉到 `ProactivePipeline.submitProposal`（所有触发源的共同底）+ `create-app-services.ts` 装配层 |
+| 二期 | ① 消费拆三态（reserve/commit/release，deferred 不再算消费）；② 第二条出口（顺嘴搭车）并入同一道闸；③ `subject` 显式化（生产者可选提供，推断只兜底） | `source-store.ts`（预留台账）· `discovery-layer.ts`（compose 预留 + `settle`）· `pipeline-types.ts`（`findingFingerprints`）· `proactive-pipeline.ts`（按去向结算）· `proactivity-hub.ts`（`setDiscovery` + `takeTurnAsideForTurn`）· `turn-aside-queue.ts`（`subject` 透传） |
+| 收口加固 | 唯一开口入口 `openMouth()` + branded `OpenedBody`：投递出口只接受已过闸的正文，"绕过开口闸"在编译期被挡下 | `discovery-layer.ts`（`openMouth` / `OpenedBody`）· `delivery-service.ts`（`deliver(text: OpenedBody)`）· `proactive-pipeline.ts`（走 `openMouth`；`dispatch` 为唯一授权断言点）· `proactivity-hub.ts`（旁注出口走 `openMouth`） |
 
 C 期删除的 `gateGoalOpening` 是**旧补丁**，其"开口时间戳 + 重复降档"语义已被
 `composeBeforeOpen`（未消费发现 + 目标状态推导）完全吸收，行为等价且**读得到内容**。
@@ -315,16 +381,33 @@ C 期删除的 `gateGoalOpening` 是**旧补丁**，其"开口时间戳 + 重复
 
 | 文件 | 类型 | 说明 |
 |---|---|---|
-| `server/src/proactivity/discovery-layer.ts` | **新增** | 共享发现层核心：`write`/`composeBeforeOpen`/`noteSpoken` + 主体词推断 |
+| `server/src/proactivity/discovery-layer.ts` | **新增** | 共享发现层核心：`write`/`composeBeforeOpen`/`noteSpoken`/`previewOpen` + 主体词推断 |
 | `server/src/proactivity/source-store.ts` | 改 | `SignalStream` 加 `"finding"`；finding 台账 API（noteFinding/findingsFor/findingsByEntity/consumeFindings/…） |
+| `server/src/proactivity/proactive-pipeline.ts` | 改 | **唯一收口**：`submitProposal` 内做 write/composeBeforeOpen/noteSpoken；`discovery` 可注入（未注入=原行为） |
 | `server/src/proactivity/pipeline-types.ts`·`proactivity-types.ts`·`proactivity-hub.ts` | 改 | `subject`/`needsUser` 下传至 proposal |
 | `server/src/proactivity/goal-unified-view.ts` | 改 | 在办事项视图接共享层读点 `pendingFindingsOf` |
-| `server/src/bootstrap/create-app-services.ts` | 改 | 单开口闸收口（directLane + onEvent）；删 `gateGoalOpening` 旧补丁 |
-| `server/test/shared-discovery.test.ts` | **新增** | 6 组回归：幂等/共同键/重复降档/实体联系/时效/主体词推断 |
+| `server/src/bootstrap/create-app-services.ts` | 改 | 管道注入 `discovery`；directLane/onEvent 只留本职（urgency/归属），删重复 compose + `gateGoalOpening` 旧补丁 |
+| `server/test/shared-discovery.test.ts` | **新增** | 9 组回归：幂等/共同键/重复降档/实体联系/时效/主体词推断/旁路生产者走共享层 + 消费三态/管道按去向结算 |
 | `server/scripts/compare-shared-discovery.ts` | **新增** | 前后对比脚本（旧路径忠实复刻 → 报告） |
+
+**共享发现层二期追加清单（2026-10-19）**：
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `server/src/proactivity/source-store.ts` | 改 | 预留台账：`reservedFindings` 映射 + `reserveFindings`/`commitFindings`/`releaseFindings`/`isFindingReserved`/`isFindingAvailable`；`findingStats()` 增 `reserved` |
+| `server/src/proactivity/discovery-layer.ts` | 改 | `composeBeforeOpen` 读走即**预留**；新增 `settle(fps, disposition)`（delivered=commit / pending=维持 / dropped=release）；旧 `noteSpoken` 语义改为"预留→结算" |
+| `server/src/proactivity/pipeline-types.ts` | 改 | `ProactiveProposal.findingFingerprints?`（读走的 finding 随提案持久化，供按去向结算） |
+| `server/src/proactivity/proactive-pipeline.ts` | 改 | `submitProposal` 带 fingerprints；`decide` 依最终去向 `settle`；merged 快路径释放；离线推送成功回调 commit |
+| `server/src/proactivity/proactivity-hub.ts` | 改 | `discovery?` 依赖 + `setDiscovery`（晚绑定）；`takeTurnAsideForTurn` 重写为"取货即开口"（write→compose→settle） |
+| `server/src/proactivity/turn-aside-queue.ts` | 改 | `TurnAsideItem.subject?` 透传（共同键一路带下来） |
+| `server/src/proactivity/triggers/location-trigger.ts` | 改 | 到达意图显式给 `subject=地点名`（修正推断在长句里挑出的无区分度词） |
+| `server/src/bootstrap/create-app-services.ts` | 改 | `proactivityHub.setDiscovery(discovery)`；`speak` 桥转交 `subject`/`needsUser` |
+| `server/test/proactivity-hub.test.ts` | 改 | 新增"顺嘴搭车取货也走同一开口闸"回归（第二条出口合并他人发现并结算消费） |
 
 **验收指标**：
 - 阶段一：无对话状态下，24h 内至少一个活跃 plan 被推进 ≥1 步
 - 阶段二：出现"感知信号 + 目标上下文"复合文案的主动消息
 - 阶段三：新增一类主动场景 = 加一条模板，**零代码改动**
 - 共享层：多源发现同一件事时**合并成一条**开口；被静音的开口信息**不蒸发**（由下一个出口带出）
+- 共享层二期：挂起（deferred）的开口**不消费**发现，丢弃则**释放回总线**；管道与旁注**两个出口**
+  同一发现在任一时点只被一个出口带走（由 `shared-discovery` / `proactivity-hub` 回归守住）

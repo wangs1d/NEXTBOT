@@ -86,6 +86,10 @@ export class CommitmentTrigger {
       directText: draft.directText,
       createdAt: now,
       source: "commitment-board",
+      // 共同键（2026-10-19 二期）：同一条承诺的多次事件（临近提醒 / 超时升级 / 依赖满足）
+      // 共享同一 subject（承诺 id）——于是它们不再各弹一条，而由共享发现层合并进同一条开口，
+      // 同一承诺不会碎片化。相当于目标侧用 goalId 做共同键的同构做法。
+      subject: c.id,
       utility: utilityForEvent(event, draft.needsAuthorization, draft.importance),
       // 代催类：确认文案投递后登记提案级待确认，用户批准才真正落地
       ...(draft.needsAuthorization ? { confirmAction: { label: "代发催促" } } : {}),

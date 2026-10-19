@@ -4,10 +4,15 @@
 // 映射规则场景见 mapping-executor.test.ts。
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import { TurnAsideQueue } from "../src/proactivity/turn-aside-queue.js";
+import { SourceStore } from "../src/proactivity/source-store.js";
+import { DiscoveryLayer } from "../src/proactivity/discovery-layer.js";
 
 const ACTOR = "actor-1";
 
@@ -222,4 +227,54 @@ test("顺嘴搭车：未注入队列时 low 照旧即时推送（回退兼容）
   });
   await flush();
   assert.equal(signals.length, 1, "无队列回退原路径");
+});
+
+// ── 顺嘴搭车 × 共享发现层（2026-10-19 二期：全系统一道开口闸）────────
+// 顺嘴搭车是**第二条开口出口**（不经管道投递，而是织进下一轮对话）。
+// 这里锁住：取货点也走同一道 composeBeforeOpen——把别的层就同一主题的发现
+// 合并进旁注，并"取走即说出"地结算（预留转消费），于是同一发现不会被
+// 两个出口（管道 / 旁注）各说一遍。
+
+test("顺嘴搭车取货也走同一开口闸：合并他人同主题发现并结算消费", async () => {
+  const now = () => 1_700_000_400_000;
+  const dir = mkdtempSync(join(tmpdir(), "pa-hub-aside-"));
+  try {
+    const store = new SourceStore({ dataPath: dir, disablePersist: true, nowFn: now, env: {} });
+    const discovery = new DiscoveryLayer({ store, nowFn: now });
+    const { deps } = makeDeps();
+    const hub = new ProactivityHub({ ...deps, turnAsideQueue: new TurnAsideQueue({ nowFn: now }) });
+    hub.setDiscovery(discovery);
+
+    // 源 1（如邮件）：就同一主题登记发现，尚未开口
+    discovery.write({
+      subject: "g_搬家",
+      actorId: ACTOR,
+      source: "hub:mail",
+      content: "房东邮件：搬家要提前一周预约电梯",
+    });
+
+    // 源 2（顺嘴搭车）：low 级意图挂起，等下一轮对话取货即开口
+    hub.submitIntent({
+      actorId: ACTOR,
+      kind: "life_reminder",
+      importance: "low",
+      title: "搬家进度",
+      summary: "搬家还有一步没走完",
+      mode: "speak",
+      source: "finance",
+      subject: "g_搬家",
+    });
+    await flush();
+
+    const aside = hub.takeTurnAsideForTurn(ACTOR);
+    assert.ok(aside, "下一轮对话取到顺嘴块");
+    assert.match(aside, /房东邮件：搬家要提前一周预约电梯/, "第二条出口也把他人同主题发现合并进旁注");
+    assert.equal(
+      discovery.findingsFor("g_搬家").length,
+      0,
+      "取走即说出 → 结算为消费，读走的发现不再被别的出口重说",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

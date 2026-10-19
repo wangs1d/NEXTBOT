@@ -93,6 +93,8 @@ export type DiscoveryFindingInput = {
 export const DEFAULT_FINDING_TTL_MS = 6 * 3600_000;
 /** 已消费标记表上限（防长进程无界增长；超出按插入序淘汰最旧） */
 const CONSUMED_MAP_MAX = 5000;
+/** 预留标记表上限（同上） */
+const RESERVE_MAP_MAX = 5000;
 
 /** 跨源实体索引里的一条命中 */
 export type SourceHit = {
@@ -136,8 +138,12 @@ export class SourceStore {
   private prunedFiles = 0;
   /** 最近一次启动加载命中的信号条数 */
   private loadedCount = 0;
-  /** finding 已消费标记：fingerprint → 消费时刻（"这条发现已经被某次开口读走了"） */
+  /** finding 已消费标记：fingerprint → 消费时刻（"这条发现已经被某次开口真的说走了"） */
   private readonly consumedFindings = new Map<string, number>();
+  /** finding 预留标记：fingerprint → 预留到期时刻（"这条发现被某次开口读走、等裁决"）。
+   *  预留 ≠ 消费：被抑制/丢弃/过期时释放（信息回到总线上），真 delivered 才转消费。
+   *  于是"跨源的他人发现被某次开口读走"与"那次开口真的说出去了"不再混为一谈。 */
+  private readonly reservedFindings = new Map<string, number>();
   /** 各 subject 最近一次开口时刻（跨源重复开口判定；进程内记账，不落盘） */
   private readonly openedAt = new Map<string, number>();
 
@@ -315,8 +321,8 @@ export class SourceStore {
     loadDays: number;
     /** @deprecated 保留旧字段名（语义=evicted），兼容既有消费方 */
     dropped: number;
-    /** 共享发现层台账（subjects=有发现的共同键数 / pending=待开口 / consumed=已读走） */
-    findings: { subjects: number; pending: number; consumed: number };
+    /** 共享发现层台账（subjects=有发现的共同键数 / pending=待开口 / consumed=已说出 / reserved=被读走等裁决） */
+    findings: { subjects: number; pending: number; consumed: number; reserved: number };
   } {
     const streams: Record<string, number> = {};
     for (const s of this.window) streams[s.stream] = (streams[s.stream] ?? 0) + 1;
@@ -400,7 +406,8 @@ export class SourceStore {
       if (!f || f.subject !== key) continue;
       if (opts.actorId !== undefined && s.actorId !== opts.actorId) continue;
       if (f.at + f.ttlMs <= now && !opts.includeExpired) continue;
-      if (!opts.includeConsumed && this.consumedFindings.has(f.fingerprint)) continue;
+      // 消费（已说出）与预留（某次开口读走、等裁决）都让这条发现对其它出口不可见
+      if (!opts.includeConsumed && (this.consumedFindings.has(f.fingerprint) || this.isFindingReserved(f.fingerprint))) continue;
       out.push(f);
     }
     return out;
@@ -434,16 +441,45 @@ export class SourceStore {
     return out;
   }
 
-  /** 某指纹是否已被消费（跨点判定用；findingsByEntity 的读点在调用方自查） */
+  /** 某指纹是否已被消费（真的说出口了） */
   isFindingConsumed(fingerprint: string): boolean {
     return this.consumedFindings.has(fingerprint);
   }
 
-  /** 标记若干 finding 已被读走（同一发现不会被两个出口各说一遍）。返回实际新增标记数 */
-  consumeFindings(fingerprints: string[], at = this.nowFn()): number {
+  /** 某指纹是否正被某次开口预留（未到期）——跨点判定用 */
+  isFindingReserved(fingerprint: string): boolean {
+    const until = this.reservedFindings.get(fingerprint);
+    return until !== undefined && until > this.nowFn();
+  }
+
+  /** 某指纹是否可被读（既没被消费，也没被别人预留）——compose 读点用 */
+  isFindingAvailable(fingerprint: string): boolean {
+    return !this.consumedFindings.has(fingerprint) && !this.isFindingReserved(fingerprint);
+  }
+
+  /**
+   * 预留：某次开口读走这些发现，为该开口保留（其它出口在此期间读不到）。
+   * **预留不等于消费**——真说出口才 commit，被丢弃/抑制则 release，
+   * 于是"读走"与"说出"解耦（病根：deferred 被丢弃时发现却已被消费=蒸发）。
+   */
+  reserveFindings(fingerprints: string[], until = this.nowFn() + DEFAULT_FINDING_TTL_MS): number {
     let marked = 0;
     for (const fp of fingerprints) {
       if (!fp || this.consumedFindings.has(fp)) continue;
+      this.reservedFindings.set(fp, until);
+      marked += 1;
+    }
+    this.pruneReservations();
+    return marked;
+  }
+
+  /** 确认消费（真的说出口）：解除预留 + 转入已消费表。返回实际新增消费数 */
+  commitFindings(fingerprints: string[], at = this.nowFn()): number {
+    let marked = 0;
+    for (const fp of fingerprints) {
+      if (!fp) continue;
+      this.reservedFindings.delete(fp);
+      if (this.consumedFindings.has(fp)) continue;
       this.consumedFindings.set(fp, at);
       marked += 1;
     }
@@ -453,6 +489,33 @@ export class SourceStore {
       this.consumedFindings.delete(oldest);
     }
     return marked;
+  }
+
+  /** 释放预留（那次开口没真的说出去）：发现重新可被别的出口读到，信息不蒸发 */
+  releaseFindings(fingerprints: string[]): number {
+    let released = 0;
+    for (const fp of fingerprints) {
+      if (fp && this.reservedFindings.delete(fp)) released += 1;
+    }
+    return released;
+  }
+
+  /** 标记若干 finding 已被消费（commitFindings 的别名，保留旧调用点语义） */
+  consumeFindings(fingerprints: string[], at = this.nowFn()): number {
+    return this.commitFindings(fingerprints, at);
+  }
+
+  /** 清理过期预留（懒执行：读点/写点顺手调用，无需定时器） */
+  private pruneReservations(): void {
+    const now = this.nowFn();
+    for (const [fp, until] of this.reservedFindings) {
+      if (until <= now) this.reservedFindings.delete(fp);
+    }
+    while (this.reservedFindings.size > RESERVE_MAP_MAX) {
+      const oldest = this.reservedFindings.keys().next().value;
+      if (oldest === undefined) break;
+      this.reservedFindings.delete(oldest);
+    }
   }
 
   /** 某 subject 上次开口时刻（跨源重复开口判定用） */
@@ -466,8 +529,8 @@ export class SourceStore {
     if (key) this.openedAt.set(key, at);
   }
 
-  /** finding 台账快照（诊断面板） */
-  findingStats(): { subjects: number; pending: number; consumed: number } {
+  /** finding 台账快照（诊断面板；pending=待开口且无人预留，reserved=被某次开口读走等裁决） */
+  findingStats(): { subjects: number; pending: number; consumed: number; reserved: number } {
     const now = this.nowFn();
     const subjects = new Set<string>();
     let pending = 0;
@@ -475,9 +538,11 @@ export class SourceStore {
       const f = findingOf(s);
       if (!f) continue;
       subjects.add(f.subject);
-      if (f.at + f.ttlMs > now && !this.consumedFindings.has(f.fingerprint)) pending += 1;
+      if (f.at + f.ttlMs > now && !this.consumedFindings.has(f.fingerprint) && !this.isFindingReserved(f.fingerprint)) {
+        pending += 1;
+      }
     }
-    return { subjects: subjects.size, pending, consumed: this.consumedFindings.size };
+    return { subjects: subjects.size, pending, consumed: this.consumedFindings.size, reserved: this.reservedFindings.size };
   }
 
   // ─── 内部 ───

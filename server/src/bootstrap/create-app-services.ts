@@ -5645,6 +5645,9 @@ export async function createAppServices(): Promise<AppServices> {
     },
   });
   discoveryRef.current = discovery;
+  // 顺嘴搭车出口接入共享发现层（2026-10-19 二期）：取货织入时也走同一道 composeBeforeOpen
+  // （把同主题他人发现合并进旁注）+ 取走即说出地结算预留。晚绑定：hub 早于 discovery 构造。
+  proactivityHub.setDiscovery(discovery);
   const sensorFabricDisabled = (name: string) => process.env[`SENSOR_FABRIC_${name}`] === "0";
   if (!sensorFabricDisabled("MAIL")) {
     sensorKernel.register(new MailSensor({ fetchNewSince: (since) => mailWatchService.fetchNewSince(since) }));
@@ -6183,6 +6186,10 @@ export async function createAppServices(): Promise<AppServices> {
     // 话题级 dismiss 追踪（2026-10-01）：同话题连续划掉 3 条 → 投「要不要少提这类」建议；
     // 真正的静音仍只走用户明说（proactivity.feedback mute_topic / 抑制表）
     topicDismiss: new TopicDismissTracker({ dataPath: join(process.cwd(), "data", "proactivity") }),
+    // 共享发现层（2026-10-19）：所有触发源的唯一收口——write/composeBeforeOpen/noteSpoken
+    // 都在管道这一个入口发生（messageWatch / commitmentTrigger / 到点提醒 / 早报 / 承诺
+    // 代催 / wellness 等直接调 submitProposal 的旁路，从此结构性走共享层，不必各自打补丁）。
+    discovery,
     // 对话进行中判定走对话时刻（hub 记录的最近交互）：桌面同步会持续刷新设备活跃，
     // 若用活跃时刻判定，用户在电脑前的每一分钟都像"对话中"，社交提案将被无限顺延
     lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId),
@@ -6312,6 +6319,10 @@ export async function createAppServices(): Promise<AppServices> {
         summary: p.summary,
         mode: "speak",
         source: "task",
+        // 共享发现层共同键随提案转交（2026-10-19 二期）：producer 给的 subject / needsUser
+        // 不能在 speak 兜底这一跳丢掉，否则下游开口只能退回启发式推断（于是三源汇聚失效）。
+        ...(p.subject ? { subject: p.subject } : {}),
+        ...(p.needsUser ? { needsUser: p.needsUser } : {}),
       }),
     exportActors: () => proactivityHub.exportActors(),
     restoreActors: (entries) => proactivityHub.restoreActors(entries),
@@ -6356,49 +6367,25 @@ export async function createAppServices(): Promise<AppServices> {
   // 直达车道：hub 的 speak/advise（模板直出）→ ArbiterV2 仲裁（连发统计口径
   // 与评估器事件归一）→ 统一管道（deliveryId/outcome/离线挂起继承）
   proactivityHub.setDirectLane((p) => {
-    // ─── 单开口闸（共享发现层，2026-10-19）───
-    // 一条生产链一次开口，但**这一句要说的话不止这一条链知道**：先把本次发现登记进
-    // 总线，再读合成（同 subject 未消费的他人发现 + 实体命中的跨源上下文），
-    // 零 LLM 模板拼接进正文；读走的发现被标记，下一个出口不会再重复说一遍。
-    // 这里同时是邮件/日历/天气/财务（B 期）与 GoalRunner/夜间内省（A 期）的唯一收口——
-    // 它们全部经 proactivityHub.submitIntent 到这条车道，不必各自打补丁。
+    // ─── 开口时机（共享发现层收口已下沉到管道）───
+    // "发现登记 + 开口前读合成 + 按 verdict 消费"现在统一在 proactivePipeline.submitProposal
+    // 这一所有触发源的共同底发生一次（2026-10-19）；这里只负责开口时机：按（可能因重复开口
+    // 降档的）等级派生 urgency，交给 ArbiterV2 决定"现在打扰还是等 pause"。
+    // previewOpen 无副作用（不登记开口/不读发现），真实合成仍只在下方的 submitProposal 里跑。
     const subject = (p.subject ?? primarySubjectOf(`${p.title} ${p.summary}`) ?? "").trim();
-    discovery.write({
-      subject,
-      actorId: p.actorId,
-      source: p.source,
-      content: p.summary,
-    });
-    const composed = discovery.composeBeforeOpen({
-      subject,
-      ownSource: p.source,
-      actorId: p.actorId,
-      body: p.directText ?? p.summary,
-      importance: p.importance,
-      needsUser: p.needsUser === true,
-    });
-    if (composed.merged.length || composed.linked.length) {
-      console.log(
-        `[Discovery] 汇总开口 subject=${composed.subject || "(无)"} 合并${composed.merged.length}条/联系${composed.linked.length}条 → ${composed.importance}${composed.repeat ? "（重复降档）" : ""}`,
-      );
-    }
-    const proposal = { ...p, directText: composed.body, importance: composed.importance };
+    const graded = discovery.previewOpen(subject, p.importance, p.needsUser === true).importance;
     const urgency =
-      composed.importance === "high" || composed.importance === "critical"
-        ? ("alert" as const)
-        : ("normal" as const);
+      graded === "high" || graded === "critical" ? ("alert" as const) : ("normal" as const);
     arbiterV2.admit({
-      actorId: proposal.actorId,
+      actorId: p.actorId,
       urgency,
-      tier: proposal.tier,
-      label: proposal.title,
+      tier: p.tier,
+      label: p.title,
       deliver: () => {
-        const decision = proactivePipeline.submitProposal(proposal);
-        // 真的说出口才消费发现：被抑制的开口等于没说，读到的发现留在总线上等下一个出口
-        discovery.noteSpoken(composed.pendingFingerprints, decision.verdict);
-        proactivityHub.noteInitiative(proposal.actorId, proposal.kind, proposal.title);
+        const decision = proactivePipeline.submitProposal(p);
+        proactivityHub.noteInitiative(p.actorId, p.kind, p.title);
         console.log(
-          `[ArbiterV2] 直达车道投递 kind=${proposal.kind} verdict=${decision.verdict} urgency=${urgency}`,
+          `[ArbiterV2] 直达车道投递 kind=${p.kind} verdict=${decision.verdict} urgency=${urgency}`,
         );
       },
     });
@@ -6413,40 +6400,19 @@ export async function createAppServices(): Promise<AppServices> {
     // 目标该抢注意力），未命中时下面逐字不变（零风险回退）。生产者的等级从此不是
     // 唯一依据，"规则写死 medium" 这件事被去掉了。
     const relation = goalSignalBridge.relatedGoalFor(actorId, `${event.title} ${event.body}`);
-    let goalRepeat = false;
-    /** 本次开口读到的发现（投递结论出来后按 verdict 决定消费或不消费） */
-    let composedPending: string[] = [];
-    {
-      const graded = adjustImportanceByGoalRelation(event.importance, relation);
-      // 与直达车道同一个单开口闸（共享发现层）：
-      //  - 命中在办目标 → subject=goalId，把"场景信号发现了什么"登记进总线，并把
-      //    别的层（GoalRunner/夜间内省）就同一目标还没说过的发现合并进这一句；
-      //  - 同一 subject 刚被说过且不是请用户拍板 → 重复降档（needsUser 不降）；
-      //  - 未命中目标 → subject 由正文推主体词，仍做跨源实体联系（"聊到搬家时把
-      //    邮件里那条一并带上"），推不出则不硬绑。
-      const composed = discovery.composeBeforeOpen({
-        subject: relation?.goalId,
-        ownSource: "sensor_bridge",
-        actorId,
-        body: relation ? appendGoalHint(event.body, relation) : event.body,
+    // 共享发现层收口已下沉到 proactivePipeline.submitProposal（所有触发源的共同底）：
+    // 归属判定只在这里按目标状态调一次等级并随提案下传（subject=goalId / needsUser）；
+    // 发现登记、开口前读合成、按 verdict 消费都由管道统一负责——本出口不再重复一份。
+    const graded = adjustImportanceByGoalRelation(event.importance, relation);
+    const goalRepeat = relation
+      ? discovery.previewOpen(relation.goalId, event.importance, relation.needsUser === true).repeat
+      : false;
+    if (relation) {
+      event = {
+        ...event,
         importance: graded,
-        needsUser: relation?.needsUser === true,
-      });
-      discovery.write({
-        subject: composed.subject,
-        actorId,
-        source: "sensor_bridge",
-        content: event.title,
-      });
-      goalRepeat = relation ? composed.repeat : false;
-      composedPending = composed.pendingFingerprints;
-      if (relation || composed.merged.length || composed.linked.length) {
-        event = {
-          ...event,
-          importance: composed.importance,
-          body: composed.body,
-        };
-      }
+        body: appendGoalHint(event.body, relation),
+      };
     }
     // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
     const audit: EventAuditRecord = {
@@ -6492,12 +6458,13 @@ export async function createAppServices(): Promise<AppServices> {
           evidence: [`evaluator:${event.kind}`],
           createdAt: Date.now(),
           source: `evaluator:${event.kind}`,
+          // 共同键 + 是否请用户拍板随提案下传：管道的单开口闸据此合并同目标/同实体的
+          // 他人发现（不再由本出口自己 compose）
+          ...(relation ? { subject: relation.goalId, needsUser: relation.needsUser } : {}),
           ...(event.expiresAt !== undefined ? { expiresAt: event.expiresAt } : {}),
           ...(event.confirmLabel ? { confirmAction: { label: event.confirmLabel } } : {}),
         });
         audit.verdict = decision.verdict;
-        // 真的说出口才消费发现（被抑制/静默的开口等于没说，发现留给下一个出口）
-        discovery.noteSpoken(composedPending, decision.verdict);
         // 投递成功记入防重复记忆：同一事件不再被 LLM 通用路径重复表达
         if (decision.verdict === "delivered") proactivityHub.noteInitiative(actorId, event.kind, event.title);
         console.log(

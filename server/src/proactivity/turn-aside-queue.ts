@@ -50,6 +50,8 @@ export type TurnAsideItem = {
   hint: string;
   /** 挂起前的重要度（medium 过期升级回正常通道；low 过期直接作废） */
   importance: "low" | "medium";
+  /** 共享发现层共同键（2026-10-19 二期）：取货织入时据此合并同主题发现 */
+  subject?: string;
   createdAt: number;
   expiresAt: number;
 };
@@ -117,6 +119,8 @@ export class TurnAsideQueue {
     summary?: string;
     /** 调用方可能传完整重要度联合（ProactiveIntent 直接透传）；仅 low/medium 落队列 */
     importance?: "low" | "medium" | "high" | "critical";
+    /** 共享发现层共同键（ProactiveIntent 直接透传；取货织入时合并同主题发现） */
+    subject?: string;
   }): boolean {
     const now = this.nowFn();
     const list = this.queue.get(intent.actorId) ?? [];
@@ -130,6 +134,7 @@ export class TurnAsideQueue {
       title: intent.title,
       hint: (intent.summary ?? "").slice(0, 160),
       importance: intent.importance === "medium" ? "medium" : "low",
+      ...(intent.subject ? { subject: intent.subject } : {}),
       createdAt: now,
       expiresAt: now + ASIDE_TTL_MS,
     });
