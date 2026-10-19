@@ -27,6 +27,13 @@ export type GoalRunnerProposal = {
   /** 幂等键：同一目标同一事件只提一次 */
   dedupKey: string;
   source: string;
+  /**
+   * 归属目标（跨源去重键，2026-10-19）：装配层据此判定"这个目标刚才是不是
+   * 已经（被另一个源）说过了"，窗口内重复则降一档。
+   */
+  goalId: string;
+  /** 这条开口是否在请用户拍板（是则不参与重复降档——用户是阻塞点） */
+  needsUser: boolean;
 };
 
 export type GoalRunnerDeps = {
@@ -203,6 +210,8 @@ export class GoalRunner {
           summary: `下一步「${outcome.step.title}」涉及外部操作，你点头我就继续。`,
           dedupKey: `goal_runner:confirm:${goal.goalId}:${outcome.step.id}`,
           source: "goal_runner",
+          goalId: goal.goalId,
+          needsUser: true, // 外部步骤卡口：必须用户点头
         });
         return { advanced: false, proposed: true };
       case "finished":
@@ -215,6 +224,8 @@ export class GoalRunner {
           summary: outcome.summary,
           dedupKey: `goal_runner:finished:${goal.goalId}`,
           source: "goal_runner",
+          goalId: goal.goalId,
+          needsUser: false, // 完成汇报：知会，不用拍板
         });
         return { advanced: true, proposed: true };
       case "blocked": {
@@ -235,6 +246,8 @@ export class GoalRunner {
           summary: `「${outcome.step.title}」推不动：${outcome.reason}。你看怎么处理？`,
           dedupKey: `goal_runner:blocked:${goal.goalId}:${outcome.step.id}`,
           source: "goal_runner",
+          goalId: goal.goalId,
+          needsUser: true, // 执行类阻塞：等用户定夺怎么处理
         });
         return { advanced: false, proposed: true };
       }
@@ -295,6 +308,8 @@ export class GoalRunner {
       summary: `已完成 ${done}/${steps.length} 步，我继续盯着。`,
       dedupKey: `goal_runner:progress:${goalId}:${milestone}`,
       source: "goal_runner",
+      goalId,
+      needsUser: false, // 阶段进展：知会
     });
     return true;
   }

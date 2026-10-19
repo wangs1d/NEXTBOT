@@ -26,7 +26,19 @@ export type SignalStream =
   // 未进统一内核的流。补齐后 SensorStream 覆盖 Muse 的「跨源汇聚」全集。
   | "mail"
   | "shopping"
-  | "location";
+  | "location"
+  /**
+   * 共享发现流（2026-10-19）：跨层「发现」的统一落点。
+   *
+   * 病根是每条会开口的链路各存各的（传感原料 / 目标板 / 会话拆步），彼此无共同
+   * 键 —— 邮件说"提到搬家"、GoalRunner 说"搬家卡在第 3 步等确认"，两句话谁都读
+   * 不到对方，于是同一个目标被两层各说一遍。
+   *
+   * 修法不是新加一个存储，而是**复用已有的 SourceStore**：发现也作为信号进同一条
+   * 总线，靠 `payload.subject`（共同键：目标=goalId，其余=actorId+主体词）把它绑到
+   * 一起，白拿指纹去重、按天分区、实体倒排与保留期。
+   */
+  | "finding";
 
 export type SignalSalience = "high" | "medium" | "low";
 

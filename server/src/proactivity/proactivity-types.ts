@@ -62,6 +62,14 @@ export type ProactiveIntent = {
    * 传入的 kind 专属字段（interest_alert 的 name/excerpt……）。
    */
   templateData?: Record<string, unknown>;
+  /**
+   * 共享发现层的共同键（2026-10-19）：这件事"属于哪个主题"。
+   * 目标相关开口传 goalId；其余缺省由正文推主体词。带上它，开口前的
+   * composeBeforeOpen 才能把别的层就同一主题的发现合并进这一句（而不是各说各的）。
+   */
+  subject?: string;
+  /** 是否在请用户拍板（是则不参与跨源重复降档） */
+  needsUser?: boolean;
   source:
     | "conversation"
     | "task"

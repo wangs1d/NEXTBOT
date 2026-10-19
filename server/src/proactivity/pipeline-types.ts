@@ -39,6 +39,13 @@ export type ProactiveProposal = {
   /** 是否允许打断进行中的对话（critical 默认允许） */
   interruptible?: boolean;
   source: string;
+  /**
+   * 共享发现层共同键（2026-10-19）：本提案"属于哪个主题"（目标=goalId，
+   * 其余=主体词）。直达车道据此在开口前合并其它层的同主题发现。
+   */
+  subject?: string;
+  /** 是否在请用户拍板（是则不参与跨源重复降档） */
+  needsUser?: boolean;
   /** 代办结果详情（仅 action.* 提案）：键值对形式（商品/金额/渠道...），
    * 投递成功后随提案落入助手动态台账，客户端详情浮层直接展示 */
   detail?: Record<string, string>;

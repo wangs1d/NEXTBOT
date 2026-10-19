@@ -609,6 +609,9 @@ export class ProactivityHub {
       ],
       createdAt: Date.now(),
       source: `hub:${intent.source}`,
+      // 共享发现层共同键随提案下传（2026-10-19）：直达车道据此合并同主题发现
+      ...(intent.subject ? { subject: intent.subject } : {}),
+      ...(intent.needsUser !== undefined ? { needsUser: intent.needsUser } : {}),
     };
     try {
       this.directLane(proposal);

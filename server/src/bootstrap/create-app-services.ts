@@ -579,6 +579,7 @@ import { GoalNightlyJob, createGoalSemanticVerifier } from "../proactivity/goal-
 import { buildGoalCostReport } from "../proactivity/goal-cost.js";
 import { buildUnifiedGoalView } from "../proactivity/goal-unified-view.js";
 import { GoalSignalBridge, adjustImportanceByGoalRelation, appendGoalHint } from "../proactivity/goal-signal-bridge.js";
+import { DiscoveryLayer, primarySubjectOf } from "../proactivity/discovery-layer.js";
 import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
@@ -593,7 +594,7 @@ import { SilenceLog } from "../proactivity/silence-log.js";
 import { PendingConfirmationStore } from "../proactivity/pending-confirmation-store.js";
 import { CommitmentTrigger, sendCommitmentNudge } from "../proactivity/triggers/commitment-trigger.js";
 import { PreferenceChangeTrigger } from "../proactivity/triggers/preference-change-trigger.js";
-import type { ProactiveProposal } from "../proactivity/pipeline-types.js";
+import type { ProactiveImportance, ProactiveProposal } from "../proactivity/pipeline-types.js";
 import { registerInterestWatchTools } from "../tools/interest-watch-tools.js";
 import {
   registerProactivityConfirmTools,
@@ -5281,6 +5282,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 评估器链（L2）：信号 delta → AttentionEvent（正文模板直出，零 LLM）
   // 感知 → 目标桥晚绑定容器（goalPlanner 在下方创建后填充；见 activeGoalLine）
   const goalSignalBridgeRef: { current: import("../proactivity/goal-signal-bridge.js").GoalSignalBridge | null } = { current: null };
+  // 共享发现层晚绑定容器（sourceStore/goalBoard 在下方创建后填充；见 activeGoalLine）
+  const discoveryRef: { current: DiscoveryLayer | null } = { current: null };
   const builtinServices = {
       listTodayTasks: () => {
         const now = Date.now();
@@ -5334,9 +5337,18 @@ export async function createAppServices(): Promise<AppServices> {
       const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
       return (result?.items ?? []).map((item) => item.content);
     },
-    // 感知 → 目标桥（2026-10-10）：goalSignalBridge 晚绑定（goalPlanner 在下方创建）。
-    // 规则文案据此从"碎片化场景"升级为"带目标上下文"；未装配时返回 null，行为不变。
-    activeGoalLine: (actorId: string) => goalSignalBridgeRef.current?.goalLineFor(actorId) ?? null,
+    // 感知 → 目标桥（2026-10-10）+ 共享发现层读点（2026-10-19）：两者都晚绑定
+    // （goalPlanner / sourceStore 在下方创建）。规则文案据此从"碎片化场景"升级为
+    // "带目标上下文"，并带上**该目标尚未开口的发现条数**——对话注入与开口闸读的是
+    // 同一份发现台账，不再是各读各的。未装配时返回 null，行为不变。
+    activeGoalLine: (actorId: string) => {
+      const bridge = goalSignalBridgeRef.current;
+      const line = bridge?.goalLineFor(actorId) ?? null;
+      if (!line) return null;
+      const goal = bridge?.activeGoalContext(actorId, 1)[0];
+      const pending = goal && discoveryRef.current ? discoveryRef.current.findingsFor(goal.goalId).length : 0;
+      return pending > 0 ? `${line}（另有 ${pending} 条相关发现待汇总）` : line;
+    },
   };
   // 世界状态板：传感信号分层整理成"专属给规则看的现在"（程序采集+整理，零判断零 LLM）
   const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
@@ -5618,6 +5630,21 @@ export async function createAppServices(): Promise<AppServices> {
   // 单源回退：SENSOR_FABRIC_MAIL=0 / SENSOR_FABRIC_ICS=0 / SENSOR_FABRIC_FINANCE=0；
   // 整库回退：SENSOR_SOURCE_STORE=0。适配器只做形状转换，业务逻辑仍留在原服务。
   const sourceStore = new SourceStore({ dataPath: proactivityFabricPath });
+
+  // ─── 共享发现层（2026-10-19，架构收口）───
+  // 一条总线（SourceStore 的 finding 条目）+ 一个共同键（subject）+ 一个单开口闸
+  // （composeBeforeOpen）。此前 GoalRunner / 夜间内省 / 感知规则桥 / 邮件 / 日历 /
+  // 天气 / 财务 各写各的、各说各的，源数一涨就 N²；现在它们先把"发现"写进同一条
+  // 总线，开口前统一读合成——"信息汇总、各自联系"由总线与实体倒排自然产生。
+  // 目标侧的开口记账接 GoalBoard（goalId 上次开口跨重启仍有效），其余留内存。
+  const discovery = new DiscoveryLayer({
+    store: sourceStore,
+    goalOpens: {
+      lastOpenedAt: (subject) => goalBoard.get(subject)?.lastOpenedAt,
+      markOpened: (subject, at) => goalBoard.noteOpened(subject, at),
+    },
+  });
+  discoveryRef.current = discovery;
   const sensorFabricDisabled = (name: string) => process.env[`SENSOR_FABRIC_${name}`] === "0";
   if (!sensorFabricDisabled("MAIL")) {
     sensorKernel.register(new MailSensor({ fetchNewSince: (since) => mailWatchService.fetchNewSince(since) }));
@@ -5993,6 +6020,9 @@ export async function createAppServices(): Promise<AppServices> {
     // 2026-10-19：退避闸（failStreak≥2 冻结）、目标级预算、track/preexec 过期收尾
     goalBoard,
     listActors: () => proactivityHub.exportActors().map((a) => a.actorId),
+    // 开口只到 hub 为止：subject=goalId 让共享发现层把它和夜间内省/规则桥的发现
+    // 汇到同一个共同键上，等级判定与"重复降档"交给 composeBeforeOpen 统一做
+    // （2026-10-19 起不再由生产者自己写死等级）。
     emitProposal: (p) =>
       proactivityHub.submitIntent({
         actorId: p.actorId,
@@ -6002,6 +6032,8 @@ export async function createAppServices(): Promise<AppServices> {
         summary: p.summary,
         mode: "speak",
         source: "goal",
+        subject: p.goalId,
+        needsUser: p.needsUser,
       }),
     // 方向 B（目标 → 感知）：派发前判定下一步是否需要检索（如"查机票"）。
     planRetrieval: (goal, step) => goalSignalBridge.retrievalRequestFor(goal, step),
@@ -6053,6 +6085,8 @@ export async function createAppServices(): Promise<AppServices> {
         summary: p.summary,
         mode: "speak",
         source: p.source,
+        subject: p.goalId,
+        needsUser: p.needsUser,
       }),
   });
   goalNightly.start();
@@ -6322,20 +6356,49 @@ export async function createAppServices(): Promise<AppServices> {
   // 直达车道：hub 的 speak/advise（模板直出）→ ArbiterV2 仲裁（连发统计口径
   // 与评估器事件归一）→ 统一管道（deliveryId/outcome/离线挂起继承）
   proactivityHub.setDirectLane((p) => {
+    // ─── 单开口闸（共享发现层，2026-10-19）───
+    // 一条生产链一次开口，但**这一句要说的话不止这一条链知道**：先把本次发现登记进
+    // 总线，再读合成（同 subject 未消费的他人发现 + 实体命中的跨源上下文），
+    // 零 LLM 模板拼接进正文；读走的发现被标记，下一个出口不会再重复说一遍。
+    // 这里同时是邮件/日历/天气/财务（B 期）与 GoalRunner/夜间内省（A 期）的唯一收口——
+    // 它们全部经 proactivityHub.submitIntent 到这条车道，不必各自打补丁。
+    const subject = (p.subject ?? primarySubjectOf(`${p.title} ${p.summary}`) ?? "").trim();
+    discovery.write({
+      subject,
+      actorId: p.actorId,
+      source: p.source,
+      content: p.summary,
+    });
+    const composed = discovery.composeBeforeOpen({
+      subject,
+      ownSource: p.source,
+      actorId: p.actorId,
+      body: p.directText ?? p.summary,
+      importance: p.importance,
+      needsUser: p.needsUser === true,
+    });
+    if (composed.merged.length || composed.linked.length) {
+      console.log(
+        `[Discovery] 汇总开口 subject=${composed.subject || "(无)"} 合并${composed.merged.length}条/联系${composed.linked.length}条 → ${composed.importance}${composed.repeat ? "（重复降档）" : ""}`,
+      );
+    }
+    const proposal = { ...p, directText: composed.body, importance: composed.importance };
     const urgency =
-      p.importance === "high" || p.importance === "critical"
+      composed.importance === "high" || composed.importance === "critical"
         ? ("alert" as const)
         : ("normal" as const);
     arbiterV2.admit({
-      actorId: p.actorId,
+      actorId: proposal.actorId,
       urgency,
-      tier: p.tier,
-      label: p.title,
+      tier: proposal.tier,
+      label: proposal.title,
       deliver: () => {
-        const decision = proactivePipeline.submitProposal(p);
-        proactivityHub.noteInitiative(p.actorId, p.kind, p.title);
+        const decision = proactivePipeline.submitProposal(proposal);
+        // 真的说出口才消费发现：被抑制的开口等于没说，读到的发现留在总线上等下一个出口
+        discovery.noteSpoken(composed.pendingFingerprints, decision.verdict);
+        proactivityHub.noteInitiative(proposal.actorId, proposal.kind, proposal.title);
         console.log(
-          `[ArbiterV2] 直达车道投递 kind=${p.kind} verdict=${decision.verdict} urgency=${urgency}`,
+          `[ArbiterV2] 直达车道投递 kind=${proposal.kind} verdict=${decision.verdict} urgency=${urgency}`,
         );
       },
     });
@@ -6350,12 +6413,40 @@ export async function createAppServices(): Promise<AppServices> {
     // 目标该抢注意力），未命中时下面逐字不变（零风险回退）。生产者的等级从此不是
     // 唯一依据，"规则写死 medium" 这件事被去掉了。
     const relation = goalSignalBridge.relatedGoalFor(actorId, `${event.title} ${event.body}`);
-    if (relation) {
-      event = {
-        ...event,
-        importance: adjustImportanceByGoalRelation(event.importance, relation),
-        body: appendGoalHint(event.body, relation),
-      };
+    let goalRepeat = false;
+    /** 本次开口读到的发现（投递结论出来后按 verdict 决定消费或不消费） */
+    let composedPending: string[] = [];
+    {
+      const graded = adjustImportanceByGoalRelation(event.importance, relation);
+      // 与直达车道同一个单开口闸（共享发现层）：
+      //  - 命中在办目标 → subject=goalId，把"场景信号发现了什么"登记进总线，并把
+      //    别的层（GoalRunner/夜间内省）就同一目标还没说过的发现合并进这一句；
+      //  - 同一 subject 刚被说过且不是请用户拍板 → 重复降档（needsUser 不降）；
+      //  - 未命中目标 → subject 由正文推主体词，仍做跨源实体联系（"聊到搬家时把
+      //    邮件里那条一并带上"），推不出则不硬绑。
+      const composed = discovery.composeBeforeOpen({
+        subject: relation?.goalId,
+        ownSource: "sensor_bridge",
+        actorId,
+        body: relation ? appendGoalHint(event.body, relation) : event.body,
+        importance: graded,
+        needsUser: relation?.needsUser === true,
+      });
+      discovery.write({
+        subject: composed.subject,
+        actorId,
+        source: "sensor_bridge",
+        content: event.title,
+      });
+      goalRepeat = relation ? composed.repeat : false;
+      composedPending = composed.pendingFingerprints;
+      if (relation || composed.merged.length || composed.linked.length) {
+        event = {
+          ...event,
+          importance: composed.importance,
+          body: composed.body,
+        };
+      }
     }
     // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
     const audit: EventAuditRecord = {
@@ -6366,7 +6457,7 @@ export async function createAppServices(): Promise<AppServices> {
       actorId,
       action: "pending",
       title: event.title,
-      ...(relation ? { goalId: relation.goalId, goalMatchedOn: relation.matchedOn } : {}),
+      ...(relation ? { goalId: relation.goalId, goalMatchedOn: relation.matchedOn, goalRepeat } : {}),
     };
     const action = arbiterV2.admit({
       actorId,
@@ -6405,6 +6496,8 @@ export async function createAppServices(): Promise<AppServices> {
           ...(event.confirmLabel ? { confirmAction: { label: event.confirmLabel } } : {}),
         });
         audit.verdict = decision.verdict;
+        // 真的说出口才消费发现（被抑制/静默的开口等于没说，发现留给下一个出口）
+        discovery.noteSpoken(composedPending, decision.verdict);
         // 投递成功记入防重复记忆：同一事件不再被 LLM 通用路径重复表达
         if (decision.verdict === "delivered") proactivityHub.noteInitiative(actorId, event.kind, event.title);
         console.log(
@@ -6793,6 +6886,8 @@ export async function createAppServices(): Promise<AppServices> {
           commitmentBoard,
           actorId,
           progressOf: (g) => goalPlanner.progressLine(g),
+          // 共享发现层读点：该目标尚未开口的发现条数（与开口闸读同一份台账）
+          pendingFindingsOf: (goalId: string) => discovery.findingsFor(goalId).length,
         }),
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => mappingExecutor.probes(),

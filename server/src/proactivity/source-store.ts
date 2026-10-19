@@ -55,6 +55,45 @@ const MAX_FILE_BYTES_ON_LOAD = 32 * 1024 * 1024;
 /** 一天毫秒数 */
 const DAY_MS = 86_400_000;
 
+/**
+ * 共享发现层的一条 finding（2026-10-19）。
+ *
+ * 与"传感原料"不同：finding 是**已经被某一层消化过、可读、待开口**的结论
+ * （"邮件里提到搬家"、"GoalRunner 说卡在第 3 步等确认"）。落进同一条总线后，
+ * 共同键 `subject` 让不同层能互相读到，实体倒排让 findByEntity 自然产生"联系"。
+ */
+export type DiscoveryFinding = {
+  /** 共同键：目标用 goalId；其余用"主体词"（三亚 / 搬家 / 年度体检） */
+  subject: string;
+  /** 产出者标识（"goal_runner" / "goal_nightly" / "hub:email" / "sensor_bridge"…） */
+  source: string;
+  /** 人话正文（零 LLM 模板拼接产物） */
+  content: string;
+  at: number;
+  /** 保质期：过期未开口即作废（发现是"当下值得一提"，不是账本） */
+  ttlMs: number;
+  fingerprint: string;
+  actorId?: string;
+};
+
+/** noteFinding 入参 */
+export type DiscoveryFindingInput = {
+  subject: string;
+  source: string;
+  content: string;
+  at?: number;
+  ttlMs?: number;
+  actorId?: string;
+  salience?: Signal["salience"];
+  /** 显式实体词（跨源联系用；缺省只靠正文分词） */
+  entities?: string[];
+};
+
+/** finding 缺省保质期：6h（跨源去重窗口 2h 的 3 倍，够一次"合并开口"消化完） */
+export const DEFAULT_FINDING_TTL_MS = 6 * 3600_000;
+/** 已消费标记表上限（防长进程无界增长；超出按插入序淘汰最旧） */
+const CONSUMED_MAP_MAX = 5000;
+
 /** 跨源实体索引里的一条命中 */
 export type SourceHit = {
   stream: SignalStream;
@@ -97,6 +136,10 @@ export class SourceStore {
   private prunedFiles = 0;
   /** 最近一次启动加载命中的信号条数 */
   private loadedCount = 0;
+  /** finding 已消费标记：fingerprint → 消费时刻（"这条发现已经被某次开口读走了"） */
+  private readonly consumedFindings = new Map<string, number>();
+  /** 各 subject 最近一次开口时刻（跨源重复开口判定；进程内记账，不落盘） */
+  private readonly openedAt = new Map<string, number>();
 
   constructor(opts: SourceStoreOptions) {
     this.rootDir = join(opts.dataPath, "sensor-fabric");
@@ -272,6 +315,8 @@ export class SourceStore {
     loadDays: number;
     /** @deprecated 保留旧字段名（语义=evicted），兼容既有消费方 */
     dropped: number;
+    /** 共享发现层台账（subjects=有发现的共同键数 / pending=待开口 / consumed=已读走） */
+    findings: { subjects: number; pending: number; consumed: number };
   } {
     const streams: Record<string, number> = {};
     for (const s of this.window) streams[s.stream] = (streams[s.stream] ?? 0) + 1;
@@ -286,7 +331,153 @@ export class SourceStore {
       retentionDays: this.retentionDays(),
       loadDays: this.loadDays(),
       dropped: this.evicted,
+      findings: this.findingStats(),
     };
+  }
+
+  // ─── 共享发现层（finding 条目；2026-10-19）───
+  //
+  // 设计要点：**不新建存储**。finding 走同一条总线（stream="finding"），于是白拿
+  // 指纹去重、按天分区、实体倒排 findByEntity、保留期与 LRU。共同键是 subject：
+  // 目标用 goalId（三源天然汇聚），其余用主体词（"三亚"/"搬家"，跨源天然汇聚）。
+
+  /**
+   * 登记一条发现。同 subject 下已存在**未消费**的同一指纹 → 忽略（幂等）。
+   * 返回落账的 finding（被去重/未启用/内容为空时返回 null）。
+   */
+  noteFinding(input: DiscoveryFindingInput): DiscoveryFinding | null {
+    if (!this.enabled()) return null;
+    const subject = String(input.subject ?? "").trim();
+    const content = String(input.content ?? "").trim();
+    if (!subject || !content) return null;
+    const at = input.at ?? this.nowFn();
+    const ttlMs = input.ttlMs && input.ttlMs > 0 ? input.ttlMs : DEFAULT_FINDING_TTL_MS;
+    const fingerprint = `finding:${subject}:${hashText(content)}`;
+    if (this.findingsFor(subject).some((f) => f.fingerprint === fingerprint)) return null;
+    const signal: Signal = {
+      stream: "finding",
+      ...(input.actorId ? { actorId: input.actorId } : {}),
+      at,
+      fingerprint,
+      salience: input.salience ?? "medium",
+      delta: content,
+      payload: {
+        subject,
+        source: input.source,
+        ttlMs,
+        // 显式实体：让 findByEntity("搬家") 同时命中邮件与目标两边的 finding
+        entities: input.entities?.length ? input.entities : extractEntities({ stream: "finding", at, fingerprint, salience: "medium", delta: content }),
+      },
+    };
+    this.ingest(signal, !this.disablePersist);
+    if (!this.disablePersist) this.maybePrune();
+    return {
+      subject,
+      source: input.source,
+      content,
+      at,
+      ttlMs,
+      fingerprint,
+      ...(input.actorId ? { actorId: input.actorId } : {}),
+    };
+  }
+
+  /**
+   * 读某 subject 下的 finding（默认只给未消费、未过期的）。
+   * 这是"三源互读"的唯一入口：GoalRunner / 夜间内省 / 感知规则桥都读它。
+   */
+  findingsFor(
+    subject: string,
+    opts: { actorId?: string; includeConsumed?: boolean; includeExpired?: boolean } = {},
+  ): DiscoveryFinding[] {
+    const key = String(subject ?? "").trim();
+    if (!key) return [];
+    const now = this.nowFn();
+    const out: DiscoveryFinding[] = [];
+    for (const s of this.window) {
+      if (s.stream !== "finding") continue;
+      const f = findingOf(s);
+      if (!f || f.subject !== key) continue;
+      if (opts.actorId !== undefined && s.actorId !== opts.actorId) continue;
+      if (f.at + f.ttlMs <= now && !opts.includeExpired) continue;
+      if (!opts.includeConsumed && this.consumedFindings.has(f.fingerprint)) continue;
+      out.push(f);
+    }
+    return out;
+  }
+
+  /** 未消费的 finding（findingsFor 的语义别名，读点更易读） */
+  unconsumedFindings(subject: string, opts: { actorId?: string } = {}): DiscoveryFinding[] {
+    return this.findingsFor(subject, opts);
+  }
+
+  /**
+   * 按**实体词**找发现（跨共同键的联系：邮件那边的 subject 是「房东」、目标那边的
+   * subject 是 goalId，光靠 subject 永远碰不到面；倒排让它们因「搬家」而相遇）。
+   * 走 findByEntity 的常驻索引，重启后仍可查。
+   */
+  findingsByEntity(entity: string, opts: { since?: number; limit?: number } = {}): DiscoveryFinding[] {
+    const out: DiscoveryFinding[] = [];
+    for (const hit of this.findByEntity(entity, opts)) {
+      if (hit.stream !== "finding") continue;
+      const f = findingOf({
+        stream: "finding",
+        at: hit.at,
+        fingerprint: hit.fingerprint,
+        salience: "medium",
+        delta: hit.delta,
+        payload: hit.payload,
+        ...(hit.actorId ? { actorId: hit.actorId } : {}),
+      });
+      if (f) out.push(f);
+    }
+    return out;
+  }
+
+  /** 某指纹是否已被消费（跨点判定用；findingsByEntity 的读点在调用方自查） */
+  isFindingConsumed(fingerprint: string): boolean {
+    return this.consumedFindings.has(fingerprint);
+  }
+
+  /** 标记若干 finding 已被读走（同一发现不会被两个出口各说一遍）。返回实际新增标记数 */
+  consumeFindings(fingerprints: string[], at = this.nowFn()): number {
+    let marked = 0;
+    for (const fp of fingerprints) {
+      if (!fp || this.consumedFindings.has(fp)) continue;
+      this.consumedFindings.set(fp, at);
+      marked += 1;
+    }
+    while (this.consumedFindings.size > CONSUMED_MAP_MAX) {
+      const oldest = this.consumedFindings.keys().next().value;
+      if (oldest === undefined) break;
+      this.consumedFindings.delete(oldest);
+    }
+    return marked;
+  }
+
+  /** 某 subject 上次开口时刻（跨源重复开口判定用） */
+  lastOpenedAt(subject: string): number | undefined {
+    return this.openedAt.get(String(subject ?? "").trim());
+  }
+
+  /** 记一次"为某 subject 开口" */
+  markOpened(subject: string, at = this.nowFn()): void {
+    const key = String(subject ?? "").trim();
+    if (key) this.openedAt.set(key, at);
+  }
+
+  /** finding 台账快照（诊断面板） */
+  findingStats(): { subjects: number; pending: number; consumed: number } {
+    const now = this.nowFn();
+    const subjects = new Set<string>();
+    let pending = 0;
+    for (const s of this.window) {
+      const f = findingOf(s);
+      if (!f) continue;
+      subjects.add(f.subject);
+      if (f.at + f.ttlMs > now && !this.consumedFindings.has(f.fingerprint)) pending += 1;
+    }
+    return { subjects: subjects.size, pending, consumed: this.consumedFindings.size };
   }
 
   // ─── 内部 ───
@@ -461,6 +652,32 @@ const STOPWORDS = new Set([
   "this",
   "that",
 ]);
+
+/** 从 finding 流信号还原一条发现（字段缺失/非 finding 流 → null） */
+export function findingOf(signal: Signal): DiscoveryFinding | null {
+  if (signal.stream !== "finding") return null;
+  const p = signal.payload as Record<string, unknown> | undefined;
+  const subject = typeof p?.subject === "string" ? p.subject : "";
+  const content = typeof signal.delta === "string" ? signal.delta : "";
+  if (!subject || !content) return null;
+  return {
+    subject,
+    source: typeof p?.source === "string" ? p.source : "unknown",
+    content,
+    at: signal.at,
+    ttlMs: typeof p?.ttlMs === "number" && p.ttlMs > 0 ? p.ttlMs : DEFAULT_FINDING_TTL_MS,
+    fingerprint: signal.fingerprint,
+    ...(signal.actorId ? { actorId: signal.actorId } : {}),
+  };
+}
+
+/** 轻量内容指纹（djb2 → base36）：finding 幂等去重用，不做加密 */
+export function hashText(text: string): string {
+  let h = 5381;
+  const s = String(text ?? "");
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(36);
+}
 
 /** 日期分片排序：先按日期，再按序号（无序号=0） */
 function comparePartitionFiles(a: string, b: string): number {

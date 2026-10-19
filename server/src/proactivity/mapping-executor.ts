@@ -124,6 +124,8 @@ export type EventAuditRecord = {
    */
   goalId?: string;
   goalMatchedOn?: string;
+  /** 该开口在窗口内与另一源的开口重复（已按跨源去重降档，2026-10-19） */
+  goalRepeat?: boolean;
 };
 
 const EVENT_LOG_MAX_BYTES = 5 * 1024 * 1024;

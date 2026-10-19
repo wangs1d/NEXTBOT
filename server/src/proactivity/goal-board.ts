@@ -67,6 +67,13 @@ export type GoalRecord = {
   salience?: number;
   /** 最近一次夜间内省处理的时刻（同类建议冷却内不再重复开口） */
   introspectedAt?: number;
+  /**
+   * 最近一次为这个目标**开口**的时刻（跨源去重，2026-10-19）。
+   * 目标相关的开口有多个源（GoalRunner 后台推进 / 夜间内省 / 感知规则桥），
+   * 同一个目标被两层各说一遍就是重复噪音——记录上一次开口时刻，窗口内的
+   * 第二个源据此降一档。
+   */
+  lastOpenedAt?: number;
 };
 
 /** 目标级日预算默认值（plan 型；track/preexec 不派任务，不消耗） */
@@ -292,6 +299,17 @@ export class GoalBoard {
     const goal = this.goals.get(goalId);
     if (!goal) return;
     goal.introspectedAt = at;
+    this.persist();
+  }
+
+  /**
+   * 记录一次"为这个目标开口"（跨源去重，2026-10-19）：任何源（后台推进/夜间内省/
+   * 感知规则桥）产出目标相关开口时调一次，下一个源据此判重复并降档。
+   */
+  noteOpened(goalId: string, at = this.nowFn()): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    goal.lastOpenedAt = at;
     this.persist();
   }
 

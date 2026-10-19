@@ -27,6 +27,11 @@ export type UnifiedItem = {
   progress?: string;
   /** 等用户拍板（外部动作待确认 / 承诺待确认 / 已逾期待升级） */
   needsUser: boolean;
+  /**
+   * goal 才有：共享发现层里该目标**尚未开口**的发现条数（2026-10-19）。
+   * 面板与开口闸读的是同一份台账——"几层就同一件事攒了几条还没说"一眼可见。
+   */
+  pendingFindings?: number;
 };
 
 export type UnifiedGoalView = {
@@ -44,6 +49,8 @@ export type BuildUnifiedGoalViewDeps = {
   actorId: string;
   /** 计划进度格式化（注入避免本模块依赖 GoalPlanner） */
   progressOf?: (goal: GoalRecord) => string | undefined;
+  /** 共享发现层读点：该目标未开口的发现条数（注入避免本模块依赖 DiscoveryLayer） */
+  pendingFindingsOf?: (goalId: string) => number;
   now?: () => number;
 };
 
@@ -68,6 +75,7 @@ export function buildUnifiedGoalView(deps: BuildUnifiedGoalViewDeps): UnifiedGoa
       kind: goal.kind,
       ...(deps.progressOf ? { progress: deps.progressOf(goal) } : {}),
       needsUser,
+      ...(deps.pendingFindingsOf ? { pendingFindings: deps.pendingFindingsOf(goal.goalId) } : {}),
     });
   }
 

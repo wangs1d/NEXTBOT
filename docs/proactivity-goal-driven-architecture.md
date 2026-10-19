@@ -207,6 +207,97 @@ ScreenSensor 连续 coding 3h + 存在活跃 plan "学英语"
 
 ---
 
+## 六、共享发现层（Shared Discovery Layer / Blackboard，2026-10-19）
+
+> 这一节回答上一节没答的问题：把 Goal 提为主引擎之后，**多条感知线 + 多个出口**之间
+> 「谁读到谁」的连线数怎么控制。答案是**一条总线 + 一个共同键 + 一个开口闸**。
+
+### 6.1 病根：四套存储、三个出口、没有共同键
+
+把开口方摊开看，其实是四套各自为政的存储喂三个出口：
+
+| 存储 | 存的是 | 谁写 | 出口 |
+|---|---|---|---|
+| SourceStore | 传感原料（邮件/日历/位置…） | 各路 sensor | arbiterV2.admit |
+| WorldBoard | 整理后的「现在」（9 条规则产出） | MappingExecutor | proactivePipeline.submitProposal |
+| GoalBoard | 长期目标（track/preexec/plan） | GoalPlanner / GoalRunner | proactivityHub.submitIntent |
+| 会话拆步 | 计划步骤的临时状态 | 会话工具 | （同上，经 hub） |
+
+四者**没有共同键**。于是源数从 3 涨到 N 时，"谁读到谁"的连线数按 **≈ N²** 涨：
+邮件说「提到搬家」、GoalRunner 说「搬家卡在第 1 步等确认」、夜间内省说「搬家三天没动静」，
+**三句话谁也读不到对方**——同一件事被三层各说一遍，用户收到三条碎片。
+
+**这不是"去重没做好"，是"没有共享面"。** 给下游 dedup 打补丁只是把症状压住：
+补丁只能按"刚不刚说过"降档，**读不到内容**，也**说不清它们说的是不是同一件事**。
+
+### 6.2 架构：一条总线、一个共同键、一个开口闸
+
+```
+                    ┌──────────── 共享发现层（复用 SourceStore）────────────┐
+  邮件 / 日历 / 天气 ─┤  finding 条目：{ subject, source, content, at, ttlMs } │
+  GoalRunner        ─┤  共同键 = subject（目标用 goalId，其余用主体词）        ├─→ composeBeforeOpen ─→ 单开口
+  夜间内省 L3       ─┤  联系 = findByEntity 自然相遇（不需要两两耦合）         │      ▲
+  财务 / 位置 / …   ─┘  白拿：指纹去重 / 按天分区 / 实体倒排 / 保留期 / LRU     │      │ noteSpoken(verdict)
+                                                                              └──────┘  「真的说出口」才算消费
+```
+
+**四条设计决策**（全部零 LLM、不新建存储）：
+
+1. **一条总线 = 复用 SourceStore，不新建存储。**
+   `SignalStream` 增加 `"finding"` 条目类型，发现作为普通信号落进同一条流，
+   白拿指纹去重、按天分区、实体倒排 `findByEntity`、保留期与 LRU——**架构上不欠债**。
+
+2. **共同键 = `subject`。** 目标类开口传 `goalId`；其余开口由
+   `primarySubjectOf(title + summary)` 推断主体词（如"三亚"/"搬家"）。
+   三源天然汇聚到同一个键，不需要任何两两耦合。
+
+3. **「联系」由 `findByEntity` 自然产生。** 邮件里提到"房东"、目标是"搬家"，
+   靠共同实体"搬家"在倒排索引里相遇——**联系是索引的副作用，不是写死的规则**。
+
+4. **单开口闸 = `composeBeforeOpen`。** 任何出口在开口前：读同 subject 的未消费 finding +
+   实体命中上下文，**零 LLM 模板拼接**进正文。于是：
+   - 同一件事被第二层发现时，**合并进正文**（`（另：…）`）而不是各发一条；
+   - **重复降档从"另加一条规则"变成"发现已被读走"的副作用**——等级由目标状态 +
+     重复状态推导，**不再有任何硬编码等级**。
+
+**关键补充：消费推迟到"真的说出口"。**
+`composeBeforeOpen` 只返回 `pendingFingerprints`，**不消费**；真正消费由
+`noteSpoken(fingerprints, verdict)` 在仲裁结论为 `delivered/deferred/merged` 时执行。
+被判 `suppressed/silenced/throttled/expired/dropped` 的开口**等于没说**，
+发现留在总线上等下一个出口——**信息不蒸发**。
+
+### 6.3 收口点：一条收口，不给 N 个生产者打补丁
+
+所有经 `proactivityHub.submitIntent` 的生产者（邮件/日历/天气/财务/GoalRunner/夜间内省）
+统一在 `setDirectLane` 的闭包里登记 finding + 读合成；评估器事件出口
+`mappingExecutor.onEvent` 复用同一个 `DiscoveryLayer`。**一处收口，N 个生产者零改动。**
+
+### 6.4 三期落地
+
+| 期 | 内容 | 落点 |
+|---|---|---|
+| A | 目标三源汇聚到 `subject=goalId` | GoalRunner / GoalNightly / 规则桥 emitProposal |
+| B | 扫描源迁入同一条总线 | sensor_bridge → `discovery.write` |
+| C | 收口：删降档 → 通用 `composeBeforeOpen`；其余读点（活跃目标行 / 在办事项视图）统一走共享层 | `create-app-services.ts` 装配层 |
+
+C 期删除的 `gateGoalOpening` 是**旧补丁**，其"开口时间戳 + 重复降档"语义已被
+`composeBeforeOpen`（未消费发现 + 目标状态推导）完全吸收，行为等价且**读得到内容**。
+
+### 6.5 前后对比（可复现）
+
+`server/scripts/compare-shared-discovery.ts` 用同一份输入跑**旧实现（忠实复刻各层不共享发现源）**
+与**新实现（共享层）**，两条场景：
+
+| 场景 | 旧 | 新 |
+|---|---|---|
+| A「三源撞车」（同一件事被三层同时发现，均 delivered） | **3 条**消息（三层各说各的） | **1 条**（一条说完全部，附「另：…」） |
+| B「抑制后」（两条被频控挡下，一条送达） | 信息覆盖 **1/3**（被挡下的两条无人转述） | 信息覆盖 **3/3**（被挡下的两条被下一个出口说出） |
+
+两场景信息覆盖度**均不下降**（A 3/3→3/3、B 1/3→3/3），而消息条数从 3 降到 1（A）、
+覆盖从 1/3 升到 3/3（B）。对比报告：`shared-discovery-before-after.html`。
+
+---
+
 ## 附：新增/改动文件清单
 
 | 文件 | 类型 | 说明 |
@@ -220,7 +311,20 @@ ScreenSensor 连续 coding 3h + 存在活跃 plan "学英语"
 | `server/src/tools/capability-modules/goal-planning/` | 改（可选） | 增加 `goal.runner.status` 诊断工具 |
 | `test/goal-runner.test.ts` | **新增** | 后台推进 / 预算闸 / 外部步骤转确认 三组回归 |
 
+**共享发现层（§六）追加清单**：
+
+| 文件 | 类型 | 说明 |
+|---|---|---|
+| `server/src/proactivity/discovery-layer.ts` | **新增** | 共享发现层核心：`write`/`composeBeforeOpen`/`noteSpoken` + 主体词推断 |
+| `server/src/proactivity/source-store.ts` | 改 | `SignalStream` 加 `"finding"`；finding 台账 API（noteFinding/findingsFor/findingsByEntity/consumeFindings/…） |
+| `server/src/proactivity/pipeline-types.ts`·`proactivity-types.ts`·`proactivity-hub.ts` | 改 | `subject`/`needsUser` 下传至 proposal |
+| `server/src/proactivity/goal-unified-view.ts` | 改 | 在办事项视图接共享层读点 `pendingFindingsOf` |
+| `server/src/bootstrap/create-app-services.ts` | 改 | 单开口闸收口（directLane + onEvent）；删 `gateGoalOpening` 旧补丁 |
+| `server/test/shared-discovery.test.ts` | **新增** | 6 组回归：幂等/共同键/重复降档/实体联系/时效/主体词推断 |
+| `server/scripts/compare-shared-discovery.ts` | **新增** | 前后对比脚本（旧路径忠实复刻 → 报告） |
+
 **验收指标**：
 - 阶段一：无对话状态下，24h 内至少一个活跃 plan 被推进 ≥1 步
 - 阶段二：出现"感知信号 + 目标上下文"复合文案的主动消息
 - 阶段三：新增一类主动场景 = 加一条模板，**零代码改动**
+- 共享层：多源发现同一件事时**合并成一条**开口；被静音的开口信息**不蒸发**（由下一个出口带出）

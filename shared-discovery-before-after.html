@@ -1,0 +1,41 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8">
+<title>共享发现层 · 前后对比</title>
+<style>
+ body{font:14px/1.7 -apple-system,"Segoe UI","PingFang SC",sans-serif;background:#0f1115;color:#e6e8ee;margin:0;padding:32px}
+ h1{font-size:22px;margin:0 0 4px} .sub{color:#8b93a7;margin-bottom:24px}
+ h2{font-size:17px;margin:32px 0 12px;border-left:3px solid #4f8cff;padding-left:10px}
+ .grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+ .col{background:#161a22;border:1px solid #232936;border-radius:10px;padding:14px}
+ .col h3{margin:0 0 10px;font-size:14px;color:#9fb0d0}
+ ul{list-style:none;padding:0;margin:0} li{padding:10px 0;border-top:1px dashed #232936}
+ li:first-child{border-top:0}
+ .msg{white-space:normal;color:#cdd4e3;margin-top:6px;background:#10141b;border-radius:6px;padding:8px 10px}
+ .badge{font-size:11px;padding:2px 7px;border-radius:99px;background:#26304a;color:#a9c0ff}
+ .badge.suppressed{background:#4a2530;color:#ff9aa8}
+ .badge.delivered{background:#1e3a2b;color:#7ee0a8}
+ .merged{font-size:12px;color:#7ee0a8;margin-top:6px}
+ .empty{color:#5a6373}
+ .stats{background:#161a22;border:1px solid #232936;border-radius:10px;padding:14px;margin-top:16px}
+ table{border-collapse:collapse;width:100%} td,th{padding:8px 10px;border-bottom:1px solid #232936;text-align:left;font-size:13px}
+ th{color:#8b93a7;font-weight:500}
+</style>
+<h1>共享发现层 · 前后优化对比</h1>
+<div class="sub">同一场景、同一份输入；旧路径 = 三条链各说各的（发现源不共享），新路径 = 一条总线（SourceStore.finding）+ 一个共同键（subject）+ 一个单开口闸（composeBeforeOpen）。</div>
+
+<h2>场景 A：三源撞车（邮件 / GoalRunner / 夜间内省 同时发现了同一件在办的事）</h2>
+<div class="grid"><div class="col"><h3>旧路径：三层各说各的</h3><ul><li><b>email</b> <span class="badge delivered">medium</span><div class="msg">房东邮件：搬家要提前一周预约电梯，物业周末不上班。</div></li><li><b>goal</b> <span class="badge delivered">high</span><div class="msg">计划「搬家」卡在第 1 步「预约搬家公司」，等你点确认。</div></li><li><b>goal_introspect</b> <span class="badge delivered">high</span><div class="msg">「搬家」三天没动静，这个目标还作数吗？</div></li></ul></div><div class="col"><h3>新路径：一条说完全部</h3><ul><li><b>goal_introspect</b> <span class="badge delivered">medium</span><div class="msg">「搬家」三天没动静，这个目标还作数吗？<br>（另：目标：计划「搬家」卡在第 1 步「预约搬家公司」，等你点确认。；email：房东邮件：搬家要提前一周预约电梯，物业周末不上班。）</div><div class="merged">合并了 2 条他人发现</div></li></ul></div></div>
+
+<h2>场景 B：抑制之后（前两条被主动管道频控挡下，等于没说）</h2>
+<div class="grid"><div class="col"><h3>旧路径：被挡下的信息无人转述</h3><ul><li><b>email</b> <span class="badge suppressed">被挡下（等于没说）</span><div class="msg">房东邮件：搬家要提前一周预约电梯，物业周末不上班。</div></li><li><b>goal</b> <span class="badge suppressed">被挡下（等于没说）</span><div class="msg">计划「搬家」卡在第 1 步「预约搬家公司」，等你点确认。</div></li><li><b>goal_introspect</b> <span class="badge delivered">high</span><div class="msg">「搬家」三天没动静，这个目标还作数吗？</div></li></ul></div><div class="col"><h3>新路径：发现留在总线上，被下一个出口说出</h3><ul><li><b>email</b> <span class="badge suppressed">被挡下（等于没说）</span><div class="msg">房东邮件：搬家要提前一周预约电梯，物业周末不上班。</div></li><li><b>goal</b> <span class="badge suppressed">被挡下（等于没说）</span><div class="msg">计划「搬家」卡在第 1 步「预约搬家公司」，等你点确认。<br>（另：email：房东邮件：搬家要提前一周预约电梯，物业周末不上班。）</div><div class="merged">合并了 1 条他人发现</div></li><li><b>goal_introspect</b> <span class="badge delivered">medium</span><div class="msg">「搬家」三天没动静，这个目标还作数吗？<br>（另：目标：计划「搬家」卡在第 1 步「预约搬家公司」，等你点确认。；email：房东邮件：搬家要提前一周预约电梯，物业周末不上班。）</div><div class="merged">合并了 2 条他人发现</div></li></ul></div></div>
+
+<div class="stats">
+<table>
+<tr><th>指标</th><th>旧路径</th><th>新路径</th></tr>
+<tr><td>场景 A：用户收到消息数</td><td>3 条</td><td>1 条</td></tr>
+<tr><td>场景 A：三层信息覆盖</td><td>3 / 3</td><td>3 / 3</td></tr>
+<tr><td>场景 B：三层信息覆盖（两条被频控挡下）</td><td>1 / 3</td><td>3 / 3</td></tr>
+<tr><td>跨层读取（A 层能否读到 B 层的发现）</td><td>不能（无共同键）</td><td>能（subject + 实体倒排）</td></tr>
+<tr><td>重复说同一件事</td><td>同目标被两层各说一遍</td><td>未消费发现被合并/读走后不再重复</td></tr>
+</table>
+</div>
+</html>

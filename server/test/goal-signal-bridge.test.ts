@@ -9,10 +9,13 @@ import { test } from "node:test";
 import { GoalBoard } from "../src/proactivity/goal-board.js";
 import { GoalPlanner } from "../src/proactivity/goal-planner.js";
 import {
+  CROSS_SOURCE_REPEAT_WINDOW_MS,
   GoalSignalBridge,
   adjustImportanceByGoalRelation,
   appendGoalHint,
   composeRetrievalQuery,
+  downgradeImportanceForRepeat,
+  isCrossSourceRepeat,
 } from "../src/proactivity/goal-signal-bridge.js";
 
 const NOW = new Date(2026, 9, 10, 10, 0, 0).getTime();
@@ -185,4 +188,51 @@ test("正文拼接: 已带目标口径则不重复追加", () => {
   assert.equal(appendGoalHint("外面下雨了", rel), "外面下雨了（顺便：你还在推进「搬家」）");
   assert.equal(appendGoalHint("你还在推进「搬家」的事", rel), "你还在推进「搬家」的事", "已有目标口径不重复");
   assert.equal(appendGoalHint("外面下雨了", null), "外面下雨了");
+});
+
+// ─── 跨源去重（2026-10-19）：同一个目标被两层各说一遍 = 重复噪音 ───
+
+test("重复判定: 无上次记录不算重复；窗口内算、越窗不算", () => {
+  assert.equal(isCrossSourceRepeat(undefined, NOW), false, "从未开口过不算重复");
+  assert.equal(isCrossSourceRepeat(null, NOW), false);
+  assert.equal(isCrossSourceRepeat(NOW - 60_000, NOW), true, "刚说过 = 重复");
+  assert.equal(
+    isCrossSourceRepeat(NOW - CROSS_SOURCE_REPEAT_WINDOW_MS - 1, NOW),
+    false,
+    "超出窗口不算重复",
+  );
+});
+
+test("重复降档: 沿阶梯向下走一格，见底即止；需要用户拍板的不降", () => {
+  assert.equal(downgradeImportanceForRepeat("critical", null), "high");
+  assert.equal(downgradeImportanceForRepeat("high", null), "medium");
+  assert.equal(downgradeImportanceForRepeat("medium", null), "low");
+  assert.equal(downgradeImportanceForRepeat("low", null), "low", "low 见底不再降");
+  // 用户是阻塞点的开口（等确认/卡住/问还作不作数）：重复也保持原档
+  assert.equal(downgradeImportanceForRepeat("medium", { needsUser: true }), "medium");
+  assert.equal(downgradeImportanceForRepeat("high", { needsUser: true }), "high");
+});
+
+test("跨源去重(端到端): 目标板记账 + 闸门——首次照发，窗口内第二个源降一档", () => {
+  const dir = mkdtempSync(join(tmpdir(), "goal-open-"));
+  try {
+    const board = new GoalBoard({ dataPath: dir, emitGoal: () => {}, nowFn: () => NOW });
+    const goal = board.create({ actorId: "u1", kind: "plan", type: "plan", title: "搬家" });
+    // 与装配层 gateGoalOpening 同构：读上次开口 → 记本次开口
+    const open = (importance: "low" | "medium" | "high", needsUser: boolean) => {
+      const repeat = isCrossSourceRepeat(board.get(goal.goalId)?.lastOpenedAt, NOW);
+      board.noteOpened(goal.goalId, NOW);
+      return repeat ? downgradeImportanceForRepeat(importance, { needsUser }) : importance;
+    };
+    assert.equal(open("medium", false), "medium", "首次开口照原档");
+    assert.equal(board.get(goal.goalId)?.lastOpenedAt, NOW, "开口已记账");
+    assert.equal(open("medium", false), "low", "窗口内第二个源降一档");
+    assert.equal(open("medium", true), "medium", "请用户拍板的开口不降档");
+    // 另一个目标不受牵连（去重键是目标，不是全局）
+    const other = board.create({ actorId: "u1", kind: "plan", type: "plan", title: "学英语" });
+    const repeatOther = isCrossSourceRepeat(board.get(other.goalId)?.lastOpenedAt, NOW);
+    assert.equal(repeatOther, false, "各自独立记账");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });

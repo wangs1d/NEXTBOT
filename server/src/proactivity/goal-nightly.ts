@@ -30,6 +30,10 @@ export type GoalNightlyProposal = {
   title: string;
   summary: string;
   source: NonNullable<ProactiveIntent["source"]>;
+  /** 归属目标（跨源去重键，2026-10-19） */
+  goalId: string;
+  /** 是否在请用户拍板（是则不参与重复降档） */
+  needsUser: boolean;
 };
 
 export type GoalNightlyDeps = {
@@ -60,6 +64,14 @@ const ACTION_IMPORTANCE: Record<string, "low" | "medium" | "high"> = {
   suggest_replan: "medium",
   expire: "low",
   verified_met: "medium",
+};
+
+/** 各动作是否在请用户拍板（问作不作数 / 建议换走法 = 是；归档类 = 否） */
+const ACTION_NEEDS_USER: Record<string, boolean> = {
+  ask_stale: true,
+  suggest_replan: true,
+  expire: false,
+  verified_met: false,
 };
 
 /** 每晚执行时刻读取：GOAL_NIGHTLY_HOUR（0-23，本地时）覆盖默认 */
@@ -134,6 +146,8 @@ export class GoalNightlyJob {
             title: ACTION_TITLE[f.action] ?? "在办目标回顾",
             summary: f.message,
             source: "goal_introspect",
+            goalId: f.goalId,
+            needsUser: ACTION_NEEDS_USER[f.action] ?? false,
           });
           delivered += 1;
         }

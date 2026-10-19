@@ -127,6 +127,51 @@ export function appendGoalHint(body: string, relation: GoalSignalRelation | null
   return `${text}（顺便：${relation.hint}）`;
 }
 
+// ─── 跨源去重（2026-10-19）：同一个目标被两层各说一遍 = 重复噪音 ───
+
+/**
+ * 重复开口判定窗口。目标相关的开口有三个源（GoalRunner 后台推进 / 夜间内省 /
+ * 感知规则桥带目标口径的场景事件），它们在分钟级内就同一目标先后开口几乎必定
+ * 是同义重复；拉到小时级就会误伤"推进有新进展"的正常汇报。
+ */
+export const CROSS_SOURCE_REPEAT_WINDOW_MS = 2 * 3600_000;
+
+/** 距上次开口不足窗口 = 重复开口（无上次记录则不算） */
+export function isCrossSourceRepeat(
+  lastOpenedAt: number | undefined | null,
+  now: number,
+  windowMs = CROSS_SOURCE_REPEAT_WINDOW_MS,
+): boolean {
+  return typeof lastOpenedAt === "number" && now - lastOpenedAt < windowMs;
+}
+
+/**
+ * 跨源重复开口降一档（low 已是地板）。
+ *
+ * 为什么降而不是丢：重复的是**信息型**内容（另一层已经说过的同一件事），
+ * 丢掉可能丢真信息，降一档让它排在后面的同时仍然送达。
+ *
+ * 为什么 needsUser 不降：需要用户拍板的开口（外部步骤等确认 / 执行失败卡住 /
+ * 问用户目标还作不作数）本身就是"用户是阻塞点"，它的价值不由"刚不刚说过"
+ * 决定——刚说过一句进展不该把请你拍板的那句也一起压下去。
+ */
+export function downgradeImportanceForRepeat(
+  base: ProactiveImportance,
+  relation: Pick<GoalSignalRelation, "needsUser"> | null,
+): ProactiveImportance {
+  if (relation?.needsUser) return base;
+  switch (base) {
+    case "critical":
+      return "high";
+    case "high":
+      return "medium";
+    case "medium":
+      return "low";
+    default:
+      return base; // low 见底
+  }
+}
+
 export class GoalSignalBridge {
   constructor(private readonly deps: { goalPlanner: GoalPlanner }) {}
 
