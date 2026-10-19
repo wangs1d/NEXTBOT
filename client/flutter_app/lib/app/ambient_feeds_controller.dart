@@ -95,29 +95,36 @@ class AmbientFeedsController {
   ///   - 移动端后台一律走系统通知（前台仍回落灵动岛）。
   Future<void> onScheduleReminderFired(Map<String, dynamic> payload) async {
     try {
-      final String title = _reminderTitle(payload);
-      final String message =
-          payload["message"]?.toString().trim().isNotEmpty == true
-              ? payload["message"]!.toString().trim()
-              : (payload["reminderMessage"]?.toString().trim() ?? "到点了");
+      // 2026-10-19 定调：提醒只说事本身，全通道不再带「标题 · 说明」前缀
+      // （岛胶囊此前出「吃饭 · 该吃饭啦」，用户只要后半句）。文案链：
+      // message → reminderMessage → title/shortTitle（泛化「提醒」跳过）→「到点了」。
+      String text = payload["message"]?.toString().trim() ?? "";
+      if (text.isEmpty) {
+        text = payload["reminderMessage"]?.toString().trim() ?? "";
+      }
+      if (text.isEmpty) {
+        text = _reminderTitle(payload);
+        if (text == "提醒") text = "到点了";
+      }
       final bool isPreReminder = payload["preReminder"] == true;
 
       if (isMobile && _backgrounded) {
-        unawaited(LocalNotificationService.show(title: title, body: message));
+        // 单文案制：标题即全部内容，body 留空避免系统通知里自我重复。
+        unawaited(LocalNotificationService.show(title: text, body: ""));
       } else if (showForegroundReminder != null) {
         // 应用内横幅（端口注入即生效）：手机端前台主路；Windows 桌面调试
         // 手机 UI（main_mobile.dart -d windows）同样注入，横幅可见可验。
-        // 桌面端主壳不注入此端口，走下方灵动岛原路。
-        unawaited(showForegroundReminder!(title, message));
+        // 桌面端主壳不注入此端口，走下方灵动岛原路。message 留空 =
+        // 横幅只出加粗主行（mobile_home._showReminderBanner 空串即收起副行）。
+        unawaited(showForegroundReminder!(text, ""));
       } else {
-        // 岛上标题+说明全展示（2026-10-07 修订，覆盖 2026-10-05「只显示
-        // 事情本身」）：预告/到点文案完整上岛，胶囊宽度原生端自适应伸缩。
+        // 岛上只出提醒文案本身（2026-10-19 修订，取代 2026-10-07「标题+说明
+        // 全展示」）：胶囊单句，宽度原生端自适应伸缩。
         // 全屏打断白名单（2026-10-14 定调，取代 10-13「仅到点破屏」）：
         // 允许越级显示的只有日程两档——预告 + 到点，均 urgent 破屏；
         // 普通消息等非日程档不 urgent，全屏/忙碌时原生端整体跳过。
         IslandReminderScheduler.instance.fireNow(
-          title: title,
-          message: message,
+          title: text,
           // 到点档加长驻留（原生保持段 26s + 入出场 ≈ 30s）；
           // 提前量预告用默认短档。
           holdSeconds: isPreReminder ? 0 : 26,

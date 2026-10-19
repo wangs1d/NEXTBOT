@@ -8,7 +8,12 @@ import { test } from "node:test";
 
 import { GoalBoard } from "../src/proactivity/goal-board.js";
 import { GoalPlanner } from "../src/proactivity/goal-planner.js";
-import { GoalSignalBridge, composeRetrievalQuery } from "../src/proactivity/goal-signal-bridge.js";
+import {
+  GoalSignalBridge,
+  adjustImportanceByGoalRelation,
+  appendGoalHint,
+  composeRetrievalQuery,
+} from "../src/proactivity/goal-signal-bridge.js";
 
 const NOW = new Date(2026, 9, 10, 10, 0, 0).getTime();
 
@@ -112,4 +117,72 @@ test("composeRetrievalQuery: 剥动词/语气词，恒非空兜底", () => {
   assert.equal(composeRetrievalQuery("了解一下降噪耳机"), "降噪耳机");
   assert.equal(composeRetrievalQuery("看看明天的天气吧"), "明天的天气");
   assert.equal(composeRetrievalQuery("查"), "查", "剥光后退回原文（恒非空）");
+});
+
+// ─── 归属判定（2026-10-19）：仲裁依据来自目标状态，而不是规则写死的等级 ───
+
+test("归属: 信号实词命中目标标题 → 判定相关，且带目标上下文", () => {
+  const h = makeBridge();
+  try {
+    h.planner.createPlan({ actorId: "u1", title: "三亚旅行准备", steps: ["比价往返机票"] });
+    const rel = h.bridge.relatedGoalFor("u1", "连续工作 3 小时 三亚");
+    assert.ok(rel, "标题实词命中算相关");
+    assert.equal(rel!.matchedOn, "三亚", "命中词留痕");
+    assert.equal(rel!.needsUser, false, "没有等确认/partial → 不是阻塞点");
+    assert.match(rel!.hint, /三亚旅行准备/);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("归属: 通用词不算相关（防过度归属把无关信息吸到目标上）", () => {
+  const h = makeBridge();
+  try {
+    h.planner.createPlan({ actorId: "u1", title: "今天计划安排", steps: ["处理一下"] });
+    assert.equal(h.bridge.relatedGoalFor("u1", "今天有个会议安排要不要提醒"), null);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("归属: 步骤等确认 / 验收 partial → needsUser（用户是阻塞点）", () => {
+  const h = makeBridge();
+  try {
+    const r = h.planner.createPlan({ actorId: "u1", title: "搬家", steps: ["联系中介约看房"] });
+    assert.ok(r.ok);
+    const step = h.planner.stepsOf(r.goal)[0];
+    step.status = "awaiting_confirm";
+    const rel = h.bridge.relatedGoalFor("u1", "中介 来消息了");
+    assert.ok(rel);
+    assert.equal(rel!.needsUser, true, "有步骤等确认即视为阻塞点");
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("归属: 无相关目标 → null（规则走原仲裁，行为不变）", () => {
+  const h = makeBridge();
+  try {
+    h.planner.createPlan({ actorId: "u1", title: "备考雅思", steps: ["刷真题"] });
+    assert.equal(h.bridge.relatedGoalFor("u1", "外面下暴雨了"), null);
+    assert.equal(h.bridge.relatedGoalFor("u1", ""), null);
+  } finally {
+    rmSync(h.dir, { recursive: true, force: true });
+  }
+});
+
+test("等级调整: 阻塞点 +1 档，其余不变档；永不升到 critical", () => {
+  assert.equal(adjustImportanceByGoalRelation("low", { needsUser: true }), "medium");
+  assert.equal(adjustImportanceByGoalRelation("medium", { needsUser: true }), "high");
+  assert.equal(adjustImportanceByGoalRelation("high", { needsUser: true }), "high", "不越级到 critical");
+  assert.equal(adjustImportanceByGoalRelation("critical", { needsUser: true }), "critical");
+  assert.equal(adjustImportanceByGoalRelation("medium", { needsUser: false }), "medium", "只是相关不改档");
+  assert.equal(adjustImportanceByGoalRelation("medium", null), "medium", "无关系逐字不变");
+});
+
+test("正文拼接: 已带目标口径则不重复追加", () => {
+  const rel = { goalId: "g1", title: "搬家", needsUser: false, matchedOn: "搬家", hint: "你还在推进「搬家」" };
+  assert.equal(appendGoalHint("外面下雨了", rel), "外面下雨了（顺便：你还在推进「搬家」）");
+  assert.equal(appendGoalHint("你还在推进「搬家」的事", rel), "你还在推进「搬家」的事", "已有目标口径不重复");
+  assert.equal(appendGoalHint("外面下雨了", null), "外面下雨了");
 });

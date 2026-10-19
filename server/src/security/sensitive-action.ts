@@ -32,6 +32,7 @@ const EXTERNAL_TOOL_PREFIXES: string[] = [
 /** 只读工具前缀（声明性，供审计展示；未命中任何表的工具按调用方语义处理） */
 const READ_TOOL_PREFIXES: string[] = [
   "shopping.compare.",
+  "order.status", // 订单状态查询（只读跨源采集库；probe 判定用）
   "search.",
   "web.",
   "weather.",

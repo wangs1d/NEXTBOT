@@ -62,8 +62,10 @@ class ApiConfig {
 
   /// 版本清单（更新检查）地址。byok 捆绑形态下 [httpBase] 指向本地 runtime
   /// （127.0.0.1），而版本控制面在云端 ECS——发版构建必须烤入：
-  /// `--dart-define=UPDATE_MANIFEST_URL=http://login.nextbot.top`（走域名，
-  /// 勿烤裸 IP：控制面页面会直接进用户浏览器地址栏）。
+  /// `--dart-define=UPDATE_MANIFEST_URL=https://login.nextbot.top`（走域名 +
+  /// https：80 已 301 到 https，烤 http 每次检查多付一次重定向 + 二次 TLS，
+  /// 弱网下「已是最新版本」弹卡延迟数秒；勿烤裸 IP：控制面页面会直接进用户
+  /// 浏览器地址栏）。
   /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源）。
   static String get updateManifestUrl {
     if (_updateManifestUrlFromEnv.isNotEmpty) return _updateManifestUrlFromEnv;
@@ -77,8 +79,8 @@ class ApiConfig {
   /// 控制面（管理后台所在服务器）：反馈、站内信、网页登录页（/accounts/web）
   /// 等走这里。捆绑形态下若仍指向本地 runtime，用户反馈只会落进本机数据库，
   /// 管理后台永远看不到——发版构建必须烤入：
-  /// `--dart-define=CONTROL_PLANE_URL=http://login.nextbot.top`（登录页 URL
-  /// 用户可见，必须用域名而非裸 IP）。
+  /// `--dart-define=CONTROL_PLANE_URL=https://login.nextbot.top`（登录页 URL
+  /// 用户可见，必须用域名而非裸 IP；必须 https，80 已 301 跨协议重定向不可靠）。
   /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源，行为不变）。
   static String get controlPlaneBase {
     final String c = _controlPlaneFromEnv.trim();

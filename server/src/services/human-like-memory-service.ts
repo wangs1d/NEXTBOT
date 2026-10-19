@@ -1882,7 +1882,10 @@ export class HumanLikeMemoryService {
   ): string {
     const header = `记忆重构结果 | 域=${domainId} | 模式=${mode} | 置信度=${confidence}`;
     const facts = nodes.map((node, index) => {
-      const base = `${index + 1}. [${node.domainId}/${node.kind}] ${node.summary}`;
+      // 时间标签（2026-10-19 时间认知）：此前只输出 summary，模型完全不知道
+      // 这些事发生在什么时候，注入后会把多年前的旧事当近况。这里用节点的
+      // 记录时刻做绝对日期标注（不写"3 天前"——相对值每轮都变，且模型能自己算）。
+      const base = `${index + 1}. [${node.domainId}/${node.kind}] ${node.summary}（记于 ${this.recallRecordDate(node)}）`;
       if (detailLevel === "summary") return base;
       if (detailLevel === "detail") {
         return `${base} | 重要性=${node.importance.toFixed(2)} | 置信度=${node.confidence.toFixed(2)} | 访问=${node.accessCount}`;
@@ -1895,6 +1898,15 @@ export class HumanLikeMemoryService {
       "以下内容为按当前任务裁剪后的柔性回忆，不是原始对话回放。",
       ...facts,
     ].join("\n");
+  }
+
+  /** 召回条目的记录日期（YYYY-MM-DD）；时间戳损坏时如实标注，不猜。 */
+  private recallRecordDate(node: MemoryNodeRecord): string {
+    const ts = Date.parse(node.timestamp);
+    if (!Number.isFinite(ts)) return "时间未知";
+    const d = new Date(ts);
+    const pad = (n: number): string => (n < 10 ? `0${n}` : String(n));
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
   }
 
   /**

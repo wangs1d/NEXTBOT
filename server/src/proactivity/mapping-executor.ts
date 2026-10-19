@@ -118,6 +118,12 @@ export type EventAuditRecord = {
   /** 管道 verdict（deliver_now 时有值） */
   verdict?: string;
   title: string;
+  /**
+   * 归属判定留痕（2026-10-19）：这条场景信号被判定为"某个在办目标的事"时记下
+   * 目标与命中词——回答"这条为什么被提了等级/为什么带上了目标文案"。
+   */
+  goalId?: string;
+  goalMatchedOn?: string;
 };
 
 const EVENT_LOG_MAX_BYTES = 5 * 1024 * 1024;

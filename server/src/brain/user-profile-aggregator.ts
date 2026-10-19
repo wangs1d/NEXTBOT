@@ -583,11 +583,29 @@ export class UserProfileAggregator {
       const store = getMemoryComponents().factStore;
       if (!store) return;
       for (const c of candidates) {
+        // 回灌防线（2026-10-19）：画像是权威库的**投影**，不是新证据。若画像里
+        // 这个值已经是该字段的历史值（旧居住地/旧称呼，权威库有据可查），回灌
+        // 等于把旧值写回去——"搬走后又变回原籍"的环流事故。已知历史值一律不写。
+        const active = store.getFact?.(actorId, c.field);
+        if (active && active.value === c.value) continue; // 已一致，省一次写
+        const known = store.getAllValuesForField?.(actorId, c.field) ?? [];
+        if (known.includes(c.value)) {
+          console.info(
+            `[structured-facts] 画像回灌跳过（历史值不回写）actor=${actorId} ` +
+              `${c.field}=${c.value}` +
+              (active ? `（现状：${active.value}）` : ""),
+          );
+          continue;
+        }
         store.applyFact({
           actorId,
           field: c.field,
           value: c.value,
           sourceRef: "profile-aggregator",
+          // 夜间批量提炼的确定性中等：低于对话内直述，但仍足以登记；
+          // 低于 0.8 也让置信度闸能挡住它去覆盖用户刚刚确认过的值。
+          confidence: 0.7,
+          temporal: "current",
         });
       }
     } catch {

@@ -51,6 +51,15 @@ const CLOCK_ANCHOR_RE = new RegExp(
 const TIMED_ACTION_RE = /(提醒我|闹钟|叫(?:我)?醒|叫我起床|倒计时|定时|截到|截止)/i;
 const TIME_EN_RE = /\b(what time|what day|what'?s the date|how long)\b/i;
 
+/**
+ * 回忆 / 时间指涉（2026-10-19 时间认知补齐）：
+ * 用户谈过去经历、旧事、变化（"我以前住浙江""上次说的那个""后来搬家了"）时，
+ * 必须知道「这些话分别发生在什么时候」，否则会把旧时刻当成现状、把多年前的事
+ * 当这两天的。这类轮次放行【对话时间轴】——按需闸的默认态仍是关，只扩触发面。
+ */
+const PAST_RECALL_RE =
+  /(以前|之前|原来|曾经|从前|过去|那天|那次|上次|当年|小时候|上学时|读书时|大学时|刚工作|前段时间|前几天|上个月|去年|前年|搬家|迁居|换工作|跳槽|后来|used to|previously|last time)/i;
+
 /** 本轮用户消息是否显式需要时间上下文。 */
 export function turnRequestsTimeContext(userText: string | undefined): boolean {
   const t = userText?.trim() ?? "";
@@ -60,7 +69,8 @@ export function turnRequestsTimeContext(userText: string | undefined): boolean {
     TIME_SPAN_RE.test(t) ||
     CLOCK_ANCHOR_RE.test(t) ||
     TIMED_ACTION_RE.test(t) ||
-    TIME_EN_RE.test(t)
+    TIME_EN_RE.test(t) ||
+    PAST_RECALL_RE.test(t)
   );
 }
 

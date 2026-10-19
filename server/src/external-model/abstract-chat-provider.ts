@@ -463,6 +463,8 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             signal: effectiveStreamOpts.signal,
             audit: {
               sessionId,
+              // 计划主键由 agent-core 下发（工具层写入用的同一个会话键）；缺省回落 sessionId
+              planKey: effectiveStreamOpts.planSessionKey ?? sessionId,
               // B1 stage 打标：任务面透传 task_plane_*；缺省 = 前台工具循环 main_chat_tools
               // （该 stage 此前已声明但从未被写入，工具循环的用量一直混在 main_chat 里）。
               stage: (streamOpts?.auditStage as Parameters<typeof recordLlmUsageByChars>[0]["stage"] | undefined) ?? "main_chat_tools",

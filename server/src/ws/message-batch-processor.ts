@@ -14,6 +14,17 @@ export type BatchedMessage = {
   sessionId?: string;
   /** 消息内容类型，用于区分 voice/text_chat 等 channel（如 "audio" → voice） */
   contentType?: string;
+  /**
+   * 计划交接回执（2026-10-19 handoff）：用户点了「我已完成，继续下一步」。
+   * 置位意味着等待步**已在点击原点是 done**，本轮是计划续跑——下游走确定性
+   * 任务面路由（multi_step_task），不拿按钮文案去猜意图。
+   */
+  planContinuation?: {
+    stepId: string;
+    stepTitle: string;
+    nextStepId?: string;
+    nextStepTitle?: string;
+  };
 };
 
 export type MessageBatchProcessorConfig = {

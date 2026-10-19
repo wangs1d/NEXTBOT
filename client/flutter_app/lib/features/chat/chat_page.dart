@@ -21,6 +21,7 @@ import "media_disk_cache.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "agent_result_card.dart";
+import "plan_steps_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
@@ -66,6 +67,10 @@ class ChatPage extends StatefulWidget {
 
     /// 「分阶段异步对话交互 v2」结构化状态：null 时退回 v1 思考气泡。
     this.turnState,
+
+    /// 跨轮常驻的任务步骤（plan.* 的可见面）：与 turnState 的差别是不随轮次
+    /// 销毁——「等用户操作」通常发生在一轮结束之后。
+    this.planSteps = const <TurnPlanStep>[],
     this.onOpenPhoneDialer,
     this.inputFocusNode,
     this.isActive = true,
@@ -178,6 +183,9 @@ class ChatPage extends StatefulWidget {
 
   /// 「分阶段异步对话交互 v2」结构化状态机；null 表示 v1 链路
   final TurnState? turnState;
+
+  /// 跨轮常驻的任务步骤（plan.* 写入的会话级计划）
+  final List<TurnPlanStep> planSteps;
 
   /// 呼叫 Agent（App 内无需另输 6 位联络号）
   final VoidCallback? onOpenPhoneDialer;
@@ -1554,6 +1562,17 @@ class _ChatPageState extends State<ChatPage>
                         onSuggestionTap: _sendSuggestion,
                         onSuggestionInsert: _insertSuggestion,
                         localStore: widget.localStore,
+                      ),
+                    // 任务步骤条（2026-10-19 handoff）：有未完成计划时常驻在输入框
+                    // 上方显示步骤与进度；等待步摊开 handoff 说明并给「我已完成」按钮
+                    // （点击＝发一句话，服务端据此收回执行权并继续）。
+                    if ((widget.planSteps.isNotEmpty ||
+                            (widget.turnState?.plan.isNotEmpty ?? false)))
+                      PlanStepsCard(
+                        steps: widget.planSteps.isNotEmpty
+                            ? widget.planSteps
+                            : widget.turnState!.plan,
+                        onConfirm: () => _sendSuggestion("我已完成，继续下一步"),
                       ),
                     // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
                     // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动

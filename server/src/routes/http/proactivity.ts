@@ -62,6 +62,12 @@ export type ProactivityFabricDeps = {
   mailTicketMissStats?: () => unknown;
   /** 目标自驱循环状态（GoalRunner）：是否启用/扫描间隔/跟踪目标数 */
   goalRunnerStatus?: () => unknown;
+  /** Goal 成本-产出报告（2026-10-19）：按 kind 的目标数/步骤数/达成率 + goal stage token 占比 */
+  goalCost?: (actorId?: string) => unknown;
+  /** Goal 夜间内省（确定性）：闲置/显著度/partial 验收 → 需要开口的 finding */
+  goalIntrospect?: (actorId: string) => unknown;
+  /** 在办事项统一视图（goal + 承诺只读合并）：前端「在办目标」面板的数据面 */
+  goalView?: (actorId: string) => unknown;
   /** 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察） */
   rhythmHealth?: () => unknown;
   /** 当前仲裁快照 + 预览裁决（L3） */
@@ -125,6 +131,34 @@ export function registerProactivityPipelineRoutes(
   },
 ): void {
   const pipeline = deps.pipeline;
+
+  // ─── Goal 成本-产出 / 夜间内省（2026-10-19）───
+  // 放在 pipeline 守卫之前：成本面与内省是否可用，不该取决于主动性管道装没装。
+  app.get("/api/proactivity/goals/cost", async (request) => {
+    if (!deps.fabric?.goalCost) return { ok: false, error: "goal 成本面未装配" };
+    const q = request.query as { actorId?: string };
+    const actorId = q.actorId?.trim() || undefined;
+    return { ok: true, report: deps.fabric.goalCost(actorId) };
+  });
+
+  app.get("/api/proactivity/goals/introspect", async (request, reply) => {
+    const q = request.query as { actorId?: string };
+    const actorId = q.actorId?.trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    if (!deps.fabric?.goalIntrospect) return { ok: false, error: "goal 内省未装配" };
+    return { ok: true, actorId, findings: deps.fabric.goalIntrospect(actorId) };
+  });
+
+  // 在办事项统一视图（2026-10-19）：goal（goals.json）+ 承诺（SQLite）只读合并，
+  // 前端「在办目标」面板与干预入口共用一个口子。
+  app.get("/api/proactivity/goals/view", async (request, reply) => {
+    const q = request.query as { actorId?: string };
+    const actorId = q.actorId?.trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    if (!deps.fabric?.goalView) return { ok: false, error: "在办视图未装配" };
+    return { ok: true, actorId, view: deps.fabric.goalView(actorId) };
+  });
+
   if (!pipeline) return;
 
   // 诊断快照。可选查询参数（沉默决策反问）：

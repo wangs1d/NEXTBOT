@@ -542,6 +542,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 用于在用户点发送的同一帧立即显示「正在思考…」（不等服务端）。
   TurnState? _pendingLocalTurn;
 
+  /// 跨轮常驻的任务步骤（2026-10-19 handoff）：TurnState 在 done 时被清空，但
+  /// 「等用户操作」往往发生在一轮结束之后，所以步骤条独立持有、不随轮次销毁。
+  /// 全部完成后由卡片自己隐藏；这里只在收到 plan_step 时合并。
+  final List<TurnPlanStep> _planSteps = <TurnPlanStep>[];
+
   /// 与 Agent 同步委派进行中：屏蔽内部工具对进度条的覆盖
   bool _subAgentDelegationActive = false;
 
@@ -2342,9 +2347,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
         // ====== TTS 闹钟升级链事件（tts_alarm_start / tts_alarm_play）======
         // 此前服务端推了音频但客户端无 handler——升级链第 2 级"有声无息"。
-        // start：桌面端原生通知（urgent/high）+ 应用内卡片；手机后台走系统通知。
-        // play：播 base64 mp3，带时间去抖——服务端渐强会在 10s 内连推约 20 个
-        // 音量步，全部起播会重叠轰炸；两次真实起播至少间隔 [._ttsAlarmMinGap]。
+        // start：使用场景只在手机端，手机后台走系统通知触达（桌面端不接线，
+        // 声音本身即提醒）；play：播 base64 mp3，带时间去抖——服务端渐强会在
+        // 10s 内连推约 20 个音量步，全部起播会重叠轰炸；两次真实起播至少
+        // 间隔 [._ttsAlarmMinGap]。
         if (type == "tts_alarm_start") {
           final String title = payload["title"]?.toString() ?? "语音提醒";
           final String text = payload["message"]?.toString() ?? "";
@@ -2355,16 +2361,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               title: important ? "[紧急语音] $title" : "[语音提醒] $title",
               body: text,
             ));
-          } else if (mounted) {
-            // 应用内提醒卡：玻璃态通知
-            GlassNotify.show(
-              title: important ? "【$priority】$title" : title,
-              message: text,
-              variant: important
-                  ? GlassNotifyVariant.warning
-                  : GlassNotifyVariant.info,
-              duration: const Duration(milliseconds: 8000),
-            );
           }
         }
         if (type == "tts_alarm_play") {
@@ -3326,6 +3322,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         thought: payload["thought"]?.toString(),
         log: payload["log"]?.toString(),
       );
+      // 跨轮步骤条（2026-10-19 handoff）：同一份合并语义再喂给常驻列表——
+      // TurnState 本轮的 plan 会随 done 一起消失，步骤条不能跟着消失。
+      if (kind == "plan_step" && payload["planStep"] is Map<String, dynamic>) {
+        applyPlanStepWire(
+          _planSteps,
+          payload["planStep"] as Map<String, dynamic>,
+        );
+      }
     });
   }
 
@@ -4631,9 +4635,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  /// 睡前提醒（evening.digest，2026-10-16 接线）：对话流文字气泡 +
-  /// 玻璃卡轻提醒。narrationText 是唯一文案源（2026-10-13 服务端定调），
-  /// 不渲染结构化块；后台不另发系统通知（离线兜底由 proactivePipeline 承担）。
+  /// 睡前提醒（evening.digest，2026-10-16 接线）：以消息形式落对话聊天流，
+  /// 不走应用内玻璃胶囊弹窗（2026-10-19 用户定调）。narrationText 是唯一
+  /// 文案源（2026-10-13 服务端定调），不渲染结构化块；后台不另发系统通知
+  /// （离线兜底由 proactivePipeline 承担）。
   Future<void> _handleEveningDigestEvent(Map<String, dynamic> payload) async {
     String text = payload["narrationText"]?.toString() ?? "";
     if (text.trim().isEmpty) {
@@ -4643,14 +4648,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     text = text.trim();
     if (text.isEmpty) return;
     _appendAssistantText("assistant-evening-digest", text);
-    if (mounted) {
-      GlassNotify.show(
-        title: "睡前备忘",
-        message: text,
-        variant: GlassNotifyVariant.info,
-        duration: const Duration(milliseconds: 8000),
-      );
-    }
   }
 
   /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
@@ -6312,6 +6309,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       interimAckText: _interimAckText,
       // v2：把结构化状态机注入到 ChatPage；v1 链路下传 null 不影响
       turnState: _turnState ?? _pendingLocalTurn,
+      // 跨轮常驻任务步骤（plan.* 的可见面；等用户操作的一步会在这里给按钮）
+      planSteps: _planSteps,
       isActive: _tabIndex == 0,
       onOpenPhoneDialer: () {
         _callMyAgentViaPhone(null);

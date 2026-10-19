@@ -59,8 +59,8 @@
 
   <section>
     <h2>当前档案</h2>
-    <table><thead><tr><th>字段</th><th>值</th><th>记录 / 事发</th><th></th></tr></thead>
-      <tbody id="current"><tr><td colspan="4" class="empty">尚未读取</td></tr></tbody></table>
+    <table><thead><tr><th>字段</th><th>值</th><th>记录 / 事发</th><th>来源</th><th></th></tr></thead>
+      <tbody id="current"><tr><td colspan="5" class="empty">尚未读取</td></tr></tbody></table>
   </section>
 
   <section>
@@ -91,6 +91,14 @@ function esc(s) {
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
   })[c]);
 }
+function srcBadge(ref) {
+  if (!ref) return '<span class="meta">—</span>';
+  const label = ref.startsWith("location:") ? "位置"
+    : ref.startsWith("user:") ? "本人说"
+    : ref === "profile-aggregator" ? "夜间画像"
+    : "对话";
+  return '<span class="tag">' + label + '</span> <span class="meta">' + esc(ref.slice(0, 30)) + "</span>";
+}
 function day(iso) {
   if (!iso) return "—";
   return String(iso).slice(0, 10);
@@ -108,7 +116,18 @@ async function api(path, opts) {
 }
 
 async function forget(field) {
-  if (!confirm("忘掉「" + field + "」？历史会保留可追溯，但不再作为现状使用。")) return;
+  let detail = "历史会保留可追溯，但不再作为现状使用。";
+  try {
+    const preview = await api("/api/memory/facts/forget/preview", {
+      method: "POST",
+      body: JSON.stringify({ actorId, field }),
+    });
+    const planned = preview.plannedCount || 0;
+    detail = "将下线：" + (preview.active ? "1 条现状" : "无现状") +
+      (planned ? "、" + planned + " 条未执行计划" : "") +
+      "；保留 " + (preview.historicalCount || 0) + " 条历史。";
+  } catch { /* 预览失败不阻塞，用兜底文案 */ }
+  if (!confirm("忘掉「" + field + "」？" + detail)) return;
   await api("/api/memory/facts/forget", { method: "POST", body: JSON.stringify({ actorId, field }) });
   await load();
   say("已忘掉 " + field);
@@ -153,6 +172,7 @@ function renderCurrent(rows, suppressedSet) {
       <td class="field">${esc(f.field)}${muted ? '<span class="tag muted">勿主动提</span>' : ""}</td>
       <td class="val">${esc(f.value)}</td>
       <td class="meta">记于 ${day(f.observedAt)}${f.eventTime ? " · 事发 " + esc(f.eventTime) : ""}${f.validFrom ? " · 自 " + esc(f.validFrom) : ""}</td>
+      <td>${srcBadge(f.sourceRef)}</td>
       <td><div class="ops">
         ${muted ? `<button class="ghost" onclick="unmute('field','${esc(f.field)}')">恢复提及</button>`
                 : `<button class="ghost" onclick="mute('field','${esc(f.field)}')">别再提</button>`}

@@ -2,6 +2,8 @@ import type OpenAI from "openai";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { recordLlmUsageByChars, recordToolCompactionByChars, type LlmAuditStage } from "../services/llm-token-audit.js";
+import { currentBlockingStep, getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
+import { classifyToolSensitivity } from "../security/sensitive-action.js";
 import type {
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
@@ -1718,6 +1720,45 @@ function stableArgsKey(args: Record<string, unknown>): string {
   return keys.map((k) => `${k}=${JSON.stringify(args[k] ?? null)}`).join("&");
 }
 
+// ─── 执行压力软提示（2026-10-19 P0-B）───────────────────────────────────────
+// 拆解不靠路由闸门（闸门是在信息最少的时刻猜复杂度），而靠执行中出现的
+// 真实信号：连着做了几步、还在继续。命中时只在工具结果之后追加一条提醒，
+// 让模型自己决定要不要把步骤写下来——判断权交给最了解上下文的那一方。
+//
+// 成本：闲聊轮永远凑不到 3 次工具调用 → 零触发、零 token；复杂轮多出的
+// 只是一条几十字的 user 消息，且只发一次。
+export const PLAN_NUDGE_THRESHOLD = 3;
+const PLAN_NUDGE_TEXT =
+  "[系统提示] 这件事已经连着执行了好几步。若还要继续多步，先用 plan.write 把接下来的步骤记下来" +
+  "（用户能看见进度、后续也能接着做），再继续；如果马上就办完了，不用写。" +
+  "其中需要用户自己动手的步骤（点外卖/购物付款/登录授权/到店取货），用 plan.set_status 置 " +
+  "awaiting_confirm 并写清 handoff.instruction——停下来等他做，别替他操作。";
+
+function planNudgeEnabled(): boolean {
+  return process.env.PLAN_NUDGE_ENABLED !== "0";
+}
+
+/**
+ * 尝试追加一条软提示。返回是否真的追加。
+ * 已存在 TaskPlan 时不提示（已经在记了，再催就是噪音）。
+ */
+function tryPushPlanNudge(
+  messages: ChatCompletionMessageParam[],
+  planKey: string | undefined,
+): boolean {
+  if (!planNudgeEnabled()) return false;
+  if (!planKey) return false;
+  try {
+    const store = getTaskPlanStore();
+    if (!store) return false;
+    if (store.get(planKey)) return false;
+    messages.push({ role: "user", content: PLAN_NUDGE_TEXT });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** 判断一条 assistant 消息是否携带 tool_calls。 */
 function isAssistantWithToolCalls(m: ChatCompletionMessageParam): boolean {
   if (m.role !== "assistant") return false;
@@ -1934,7 +1975,7 @@ export async function streamCompletionWithTools(
      */
     signal?: AbortSignal;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
-    audit?: { sessionId?: string; stage?: LlmAuditStage };
+    audit?: { sessionId?: string; stage?: LlmAuditStage; planKey?: string };
   },
 ): Promise<string> {
   const userText = extractUserTextFromMessages(messages) || "";
@@ -1956,8 +1997,27 @@ export async function streamCompletionWithTools(
     options?.maxRounds ?? (fastProfile ? 1 : PLAN_EXECUTE_MAX_WAVES_DEFAULT),
   );
   
-  const mergedRegistryTools = options?.tools ?? getBuiltinAgentChatTools();
-  const toolSearchPrepared = await prepareTools(mergedRegistryTools, options?.toolSearchSourceTools);
+  // ── handoff 工具面收缩（2026-10-19 根修，docs §10 的落地）──
+  // 计划里有一步在等用户自己操作（点外卖/付款/授权）时，**外部动作类工具整族
+  // 从工具面消失**——不是 prompt 劝模型"别下单"，而是让它看不见、也调不动。
+  // 分级权威源是 security/sensitive-action.ts（act_external），不另造清单。
+  //
+  // 这不是"每轮都裁"：没有等待步时 handoffBlocking 为 null，工具面原样。
+  // 能力损失的出口是显式的：把该步置 skipped/failed 即恢复（prompt 块里已经写了）。
+  const planSessionKey = taskPlanKey({
+    sessionId: options?.audit?.planKey ?? options?.audit?.sessionId,
+  });
+  const handoffBlocking = currentBlockingStep(planSessionKey);
+  const isHandoffBlockedTool = (name: string): boolean =>
+    Boolean(handoffBlocking) && classifyToolSensitivity(name) === "act_external";
+  const keepHandoffVisible = (tools: ChatCompletionTool[]): ChatCompletionTool[] =>
+    handoffBlocking ? tools.filter((t) => !isHandoffBlockedTool(apiToolNameOf(t))) : tools;
+
+  const mergedRegistryTools = keepHandoffVisible(options?.tools ?? getBuiltinAgentChatTools());
+  const handoffFilteredSourceTools = options?.toolSearchSourceTools
+    ? keepHandoffVisible(options.toolSearchSourceTools)
+    : undefined;
+  const toolSearchPrepared = await prepareTools(mergedRegistryTools, handoffFilteredSourceTools);
   const registryTools = toolSearchPrepared.visibleTools;
   const deferredToolCatalog = toolSearchPrepared.deferredCatalog;
 
@@ -1998,7 +2058,7 @@ export async function streamCompletionWithTools(
   // （hallucination_promoted，registry 层本就放行执行，这里补观测语义）。
   const bridgeSurfacedNames = new Set<string>();
   // L3 错误即检索的语料：用稳定 searchable 源（跨轮签名稳定 → BM25 catalog 缓存友好）
-  const recallCorpus = options?.toolSearchSourceTools ?? mergedRegistryTools;
+  const recallCorpus = handoffFilteredSourceTools ?? mergedRegistryTools;
   // L5 观测（2026-10-09 五层根修）：本轮召回链注入可见集的工具名（可见集 −
   // 静态 Core − 桥）——离线对账「预载转化率 / 晋升转化率」的基准集合。
   // 2026-10-10 ③：task 车道口径补上 router-first 轻量常驻（TASK_LANE_ROUTER_
@@ -2307,8 +2367,22 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
   }
 
 
+  // 执行压力软提示计数（2026-10-19 P0-B）：本 loop 已执行过的工具调用数 + 有调用的波数
+  let loopToolCallCount = 0;
+  let wavesWithToolCalls = 0;
+  let planNudgeSent = false;
+
   for (let wave = 0; wave < effectiveMaxWaves(); wave++) {
     traceWavesUsed = wave + 1;
+    // 只在真有执行压力时出现：闲聊轮凑不到阈值 = 零触发、零 token。
+    // 追加的是普通 user 消息（不改正文、不换稿），下一波自然带上。
+    //
+    // 判据必须是「串行依赖」而不是「调用个数」（2026-10-19 根修）：多步任务的本
+    // 质是后一波依赖前一波结果；一轮里并行 4 个搜索是**一次查询的扇出**，不是四步。
+    // 旧判据只看个数，会把「对比三个城市天气」这种单轮查询也催着去写计划。
+    if (!planNudgeSent && wavesWithToolCalls >= 2 && loopToolCallCount >= PLAN_NUDGE_THRESHOLD) {
+      if (tryPushPlanNudge(messages, planSessionKey)) planNudgeSent = true;
+    }
     let retriedToolCallIdError = false;
     let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
@@ -3109,6 +3183,9 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         ...(argsMalformed ? { argsMalformed: true as const, rawArguments } : {}),
       });
     }
+    // 执行压力计数（P0-B）：本波真正要执行的工具调用数，供下一波判断是否软提示
+    loopToolCallCount += workItems.length;
+    if (workItems.length > 0) wavesWithToolCalls += 1;
 
     const settledResults = await Promise.allSettled(
       workItems.map(async (item) => {
@@ -3289,6 +3366,22 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         // 完整执行流程（超时兜底 + 非超时失败确定性重试 1 次），作为共享 Promise 的载荷：
         // 同一波内并发的相同工具调用复用同一次执行，不再各自真实执行。
         const runExecWithRetry = async (): Promise<ToolExecOutcome> => {
+          // 执行守卫（2026-10-19 handoff）：可见集已裁掉外部动作族，这里兜住
+          // 「模型凭记忆直呼工具名」与 tool_call 桥按名转正两条侧门——
+          // 等待用户操作期间，外部动作**一次真执行都不允许发生**（防重复下单）。
+          if (isHandoffBlockedTool(targetToolName)) {
+            return {
+              ok: false,
+              result: {
+                error:
+                  `【已收起】当前有一步在等用户自己操作（${handoffBlocking?.handoff?.instruction ?? ""}），` +
+                  "外部动作类工具本轮不允许执行——不要替用户下单/支付/发送。用户回执后系统会继续；" +
+                  "用户不做了就把该步置 skipped。",
+                errorCode: UnifiedErrorCode.ToolDenied,
+                toolName: targetToolName,
+              },
+            };
+          }
           let exec: ToolExecOutcome;
           try {
             exec = await attemptExec();

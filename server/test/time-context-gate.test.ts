@@ -108,3 +108,39 @@ test("includeTimeline 缺省=true：旧行为不变（时间轴照注入）", ()
     "缺省应注入时间轴",
   );
 });
+
+// ============================================================
+// 2026-10-19 时间认知：回忆类轮次也要放行时间轴
+// ============================================================
+
+test("回忆/过去时态放行：谈旧事时需要知道各句话发生在什么时候", () => {
+  const open = [
+    "我以前住在浙江",
+    "之前那个项目怎么样了",
+    "原来我在杭州待了三年",
+    "去年搬家的时候你还帮我找过房子",
+    "上次说的那个餐厅叫什么",
+    "小时候我特别怕黑",
+    "后来换工作了就很少联系了",
+  ];
+  for (const t of open) {
+    assert.equal(turnRequestsTimeContext(t), true, `应放行：${t}`);
+  }
+});
+
+test("时间轴带会话跨度：截断后仍知道这段对话从什么时候开始", () => {
+  const msgs = [
+    user("早上好"),
+    assistant("早"),
+    user("帮我找图"),
+  ];
+  const view = buildTimestampFreeLlmView(msgs).messages;
+  const timeline = view.find(
+    (m) => m.role === "system" && typeof m.content === "string" && m.content.includes("对话时间轴"),
+  );
+  assert.ok(timeline);
+  assert.ok(
+    String(timeline!.content).includes("本段对话跨度"),
+    "跨天/跨周会话需要一条跨度锚，防把旧对话当今天",
+  );
+});

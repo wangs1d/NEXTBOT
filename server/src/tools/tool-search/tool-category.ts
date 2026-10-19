@@ -131,9 +131,9 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   },
   {
     name: "shopping",
-    summary: "购物推荐/比价",
+    summary: "购物推荐/比价/订单状态",
     prefixes: ["shopping."],
-    secondaryTools: [],
+    secondaryTools: ["order.status"],
   },
   {
     name: "wechat",

@@ -1,17 +1,18 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。
 .EXAMPLE
-  .\build-installer.ps1 -Version 0.1.0 -UpdateManifestUrl http://login.nextbot.top
+  .\build-installer.ps1 -Version 0.1.0 -UpdateManifestUrl https://login.nextbot.top
 #>
 param(
   [string]$Version = "0.1.0",
-  # 版本控制面（ECS manifest），byok 形态 chat 仍走本地 runtime
-  [string]$UpdateManifestUrl = "http://login.nextbot.top",
+  # 版本控制面（ECS manifest），byok 形态 chat 仍走本地 runtime。
+  # 必须 https://（80 已 301，烤 http 每次更新检查多付一次重定向 + 二次 TLS，弱网弹卡慢数秒）
+  [string]$UpdateManifestUrl = "https://login.nextbot.top",
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。
-  # 不烤入的话捆绑用户的反馈只会落在本机数据库，管理后台收不到。
-  [string]$ControlPlaneUrl = "http://login.nextbot.top",
+  # 不烤入的话捆绑用户的反馈只会落在本机数据库，管理后台收不到。（同上必须 https）
+  [string]$ControlPlaneUrl = "https://login.nextbot.top",
   # 安装包默认搜索端点：运营方云端搜索代理（nginx :80 -> 主服务 /v1/search 路由，
   # key 只存云端，客户端零 key）。内测/公测发行搜索统一由运营方提供。
   [string]$SearchApiUrl = "http://47.98.122.29/v1/search",
@@ -70,13 +71,34 @@ foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   Copy-Item (Join-Path $env:windir "System32\$dll") $StageApp -Force
 }
 
-# 3.2 捆绑 node.exe（与开发机同大版本，绿色单文件）
-$nodeExe = @(
+# 3.2 捆绑 node.exe：必须与仓库里已编译的原生模块 ABI 对齐。
+# 不能盲取 PATH 第一个 node——开发机常并存多个大版本（22=ABI127 / 24=ABI137），
+# 取错就是装机后启动即崩：better_sqlite3.node was compiled against a different
+# Node.js version（NODE_MODULE_VERSION 137 vs 127）。这里改为「谁能真的 require
+# 起来就用谁」，对将来换版本也自洽。
+$nodeCandidates = @(
   (Get-Command node -ErrorAction SilentlyContinue).Source,
-  "$env:ProgramFiles\nodejs\node.exe",
-  'D:\nodejs\node.exe'
-) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if (-not $nodeExe) { throw '未找到 node.exe，请确认 PATH 或手改候选路径' }
+  'D:\nodejs\node.exe',
+  "$env:ProgramFiles\nodejs\node.exe"
+) | Where-Object { $_ -and (Test-Path $_) } | Select-Object -Unique
+$nodeExe = $null
+$prevEap = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'   # 原生命令 stderr 在 EAP=Stop 下会变成终止错误
+try {
+  Push-Location $Repo
+  foreach ($cand in $nodeCandidates) {
+    # 必须真的 open 一个内存库：better-sqlite3 的 .node 在 new Database() 时才加载，
+    # 只 require 包永远成功（踩过这个坑，自检会假通过）。
+    & $cand -e "const D=require('better-sqlite3');const db=new D(':memory:');db.close()" *> $null
+    if ($LASTEXITCODE -eq 0) { $nodeExe = $cand; break }
+  }
+  Pop-Location
+} finally {
+  $ErrorActionPreference = $prevEap
+}
+if (-not $nodeExe) { throw "未找到能加载 better-sqlite3 的 node.exe（候选：$($nodeCandidates -join ', ')）；请确认 node_modules 已按该版本编译或改用对应大版本" }
+$nodeAbi = & $nodeExe -p "process.version + '/abi' + process.versions.modules"
+Write-Host "bundled node: $nodeExe ($nodeAbi)" -ForegroundColor Green
 Copy-Item $nodeExe (Join-Path $StageRuntime 'node.exe') -Force
 
 # 3.3 node_modules：解引用复制（排除 @private-ai-agent 软链，workspace 包单独按需拷）
@@ -226,10 +248,24 @@ $env:FUNASR_AUTO_START = '0'
 # 让 agentic-memory 运行时能在冒烟环境完整装配。
 Remove-Item Env:OPENAI_API_KEY, Env:OPENAI_BASE_URL, Env:AGENT_EMBEDDING_API_KEY, Env:AGENT_EMBEDDING_BASE_URL, Env:OPENAI_EMBEDDINGS_URL -ErrorAction SilentlyContinue
 $env:OPENAI_API_KEY = 'sk-smoke-0000000000000000000'
-$smokeProc = Start-Process -FilePath (Join-Path $StageRuntime 'node.exe') `
-  -ArgumentList 'dist\index.js' -WorkingDirectory $StageRuntime `
-  -WindowStyle Hidden -PassThru `
-  -RedirectStandardOutput $smokeLog -RedirectStandardError "$smokeLog.err"
+# 起冒烟进程不用 Start-Process：PS 5.1 会先把环境变量塞进一个**大小写敏感**的
+# 字典再传给子进程，而 Windows 环境块允许同时存在 HTTPS_PROXY 与 https_proxy
+# （Clash / v2ray 一类代理软件常见写法），此时直接抛
+# 「已添加项。字典中的关键字:"HTTPS_PROXY"所添加的关键字:"https_proxy"」——
+# 冒烟还没开始就假失败（0.3.x 发版翻过车）。改用 .NET ProcessStartInfo：
+# 它的 EnvironmentVariables 是大小写不敏感的 StringDictionary，等价变量只留一个。
+# 输出用异步读干，避免子进程写满 4K 管道后阻塞在 write 上。
+$smokePsi = New-Object System.Diagnostics.ProcessStartInfo
+$smokePsi.FileName = Join-Path $StageRuntime 'node.exe'
+$smokePsi.Arguments = 'dist\index.js'
+$smokePsi.WorkingDirectory = $StageRuntime
+$smokePsi.UseShellExecute = $false
+$smokePsi.CreateNoWindow = $true
+$smokePsi.RedirectStandardOutput = $true
+$smokePsi.RedirectStandardError = $true
+$smokeProc = [System.Diagnostics.Process]::Start($smokePsi)
+$smokeOutTask = $smokeProc.StandardOutput.ReadToEndAsync()
+$smokeErrTask = $smokeProc.StandardError.ReadToEndAsync()
 Remove-Item Env:PORT, Env:FUNASR_AUTO_START -ErrorAction SilentlyContinue
 $ready = $false
 $smokeManifestUri = "http://127.0.0.1:$smokePort/api/client/manifest"
@@ -242,7 +278,15 @@ foreach ($i in 1..50) {
     if ($res.StatusCode -eq 200) { $ready = $true; break }
   } catch {}
 }
-& taskkill /T /F /PID $smokeProc.Id 2>&1 | Out-Null
+& cmd /c "taskkill /T /F /PID $($smokeProc.Id) >nul 2>&1"
+$null = $smokeProc.WaitForExit(8000)
+# 落盘供失败时排查（.NET 路径没有 -RedirectStandardOutput，这里手工写回）。
+# 必须在任何 throw 之前完成——否则「服务启动即退出」这种最该看日志的失败
+# 恰恰拿不到日志（taskkill 找不到 PID 会被 EAP=Stop 当成终止错误）。
+try {
+  [System.IO.File]::WriteAllText($smokeLog, [string]$smokeOutTask.Result)
+  [System.IO.File]::WriteAllText("$smokeLog.err", [string]$smokeErrTask.Result)
+} catch {}
 if (-not $ready) {
   Write-Host '--- 冒烟 stdout（尾部）---'
   Get-Content $smokeLog -Tail 40 -ErrorAction SilentlyContinue

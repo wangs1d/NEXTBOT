@@ -634,6 +634,49 @@ export class NightlyMemoryTaskService {
     return this.factStore;
   }
 
+  /**
+   * 计划到期扫描（独立入口，2026-10-19 P0 修复）。
+   *
+   * 之前挂在 extractFactsFromJournals 的 actor 循环里，被该方法开头两道早退
+   * （!journal / !llm）挡住——没有 LLM 配置的环境计划**永远不会 lapsed**，
+   * 防线形同虚设。本方法无任何早退：所有登记 actor 无条件扫一遍。
+   *
+   * 调用时机：夜间任务 + 服务启动补扫（进程白天重启也不漏一天）。
+   * @returns 本轮降级为 lapsed 的计划条数
+   */
+  async runPlanSweepForAllActors(now: Date = new Date()): Promise<number> {
+    let total = 0;
+    try {
+      const structured = await this.getStructuredFactStore();
+      if (!structured) return 0;
+      for (const actorId of this.getAllActorIds()) {
+        try {
+          total += structured.sweepUpcomingPlans(actorId, now);
+        } catch (err) {
+          console.warn(`[NightlyMemory] 计划到期扫描失败（跳过该 actor） ${actorId}:`, err);
+        }
+      }
+    } catch (err) {
+      console.warn("[NightlyMemory] 计划到期扫描整体失败（忽略）:", err);
+    }
+    return total;
+  }
+
+  /**
+   * 结构化事实库（计划到期扫描用）。动态导入避免 nightly ⇄ agentic-memory 的
+   * 静态循环；未装配时返回 null（夜间任务照常跑，不做计划扫描）。
+   */
+  private async getStructuredFactStore(): Promise<
+    { sweepUpcomingPlans: (actorId: string, at: Date | string) => number } | null
+  > {
+    try {
+      const { getMemoryComponents } = await import("../agentic-memory/index.js");
+      return getMemoryComponents().factStore ?? null;
+    } catch {
+      return null;
+    }
+  }
+
   setFactStore(store: UserFactStore): void {
     this.factStore = store;
   }

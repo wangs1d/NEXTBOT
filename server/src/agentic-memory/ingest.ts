@@ -7,6 +7,7 @@ import {
   getCommitmentExtractScope,
 } from "./env.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
+import { factValueInText } from "../services/memory-record-utils.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
 import { gateLtmWrite } from "./ltm-write-gate.js";
 import {
@@ -308,6 +309,21 @@ export class AgenticMemoryIngestService {
         continue;
       }
       const trimmed = verdict.cleaned.length > 12_000 ? `${verdict.cleaned.slice(0, 12_000)}...` : verdict.cleaned;
+      // 事实字段标签（2026-10-19）：这条记忆承载了哪些档案字段的值。事实变更时
+      // fact-supersede 按标签精确退役旧条目——没有标签只能退回文本启发式，
+      // 精确度和召回都差一截。只标「值确实出现在本条正文里」的字段，不猜。
+      // 同时把事实的结构化区间写进 metadata（P0-2）：检索判断"用户问的是哪个
+      // 时间段"时用它，而不是记录时间——2020 年的事 2026 年才说，createdAt 会骗人。
+      let factFields: string[] = [];
+      let factValidFrom: string | undefined;
+      let factValidTo: string | undefined;
+      for (const f of facts ?? []) {
+        if (!f.value || !factValueInText(f.value, trimmed)) continue;
+        factFields.push(f.field);
+        if (!factValidFrom && f.validFrom) factValidFrom = f.validFrom;
+        if (!factValidTo && f.validTo) factValidTo = f.validTo;
+        if (factFields.length >= 4) break;
+      }
       try {
         const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
           userId: actorId,
@@ -325,6 +341,13 @@ export class AgenticMemoryIngestService {
             extractSource: "unified",
             // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
             ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
+            ...(factFields.length > 0
+              ? {
+                  factFields: factFields.join(","),
+                  ...(factValidFrom ? { factValidFrom } : {}),
+                  ...(factValidTo ? { factValidTo } : {}),
+                }
+              : {}),
             ...extraMetadata,
           },
           // 统一抽取已完成记忆改写，Mem0 侧直存，不再进 infer 的 LLM

@@ -98,6 +98,7 @@ import { AccessAuthService } from "../services/access-auth-service.js";
 import type { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import type { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import { getUserPreferences } from "../routes/http/user-preferences.js";
+import { getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
 
 type SocketWithHeartbeat = {
   send(data: string): void;
@@ -1246,6 +1247,36 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             payload: actionPayload,
           });
 
+          // 计划交接回执（2026-10-19 handoff）：用户在「我已完成，继续下一步」按钮上
+          // 点了一下 = 收回执行权的唯一证据。在点击原点就把等待步置 done（不信模型、
+          // 也不必等下一轮），并标记本轮是计划续跑——下游据此走确定性任务面路由。
+          const planStepId =
+            typeof actionPayload.planStepId === "string" ? actionPayload.planStepId.trim() : "";
+          let planContinuation:
+            | { stepId: string; stepTitle: string; nextStepId?: string; nextStepTitle?: string }
+            | undefined;
+          if (planStepId) {
+            const store = getTaskPlanStore();
+            const planKey = taskPlanKey({
+              sessionId: typeof actPl.sessionId === "string" ? actPl.sessionId : boundActorId,
+              actorId: boundActorId,
+            });
+            const resumed = store?.resume(planKey, planStepId, { by: "user", note: label });
+            if (resumed?.ok) {
+              planContinuation = {
+                stepId: resumed.step.id,
+                stepTitle: resumed.step.title,
+                ...(resumed.nextStep ? { nextStepId: resumed.nextStep.id, nextStepTitle: resumed.nextStep.title } : {}),
+              };
+            } else {
+              // 幂等：重复点击 / 该步已不在等待态 → 不阻断（仍按普通消息走），只记日志
+              app.log.debug(
+                { actorId: boundActorId, stepId: planStepId, error: resumed?.ok === false ? resumed.error : "计划未装配" },
+                "plan handoff confirm ignored",
+              );
+            }
+          }
+
           // 构造等价的 user message payload。
           // text 使用按钮 label(等价于用户打字输入了这段话);
           // messageId 由客户端提供,保证前端 UI 与后端审计可对齐。
@@ -1272,6 +1303,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             variant,
             payload: actionPayload,
           };
+          // 计划续跑标记（内部字段）：让下游把这一轮确定性路由到任务面，
+          // 而不是拿「我已完成，继续下一步」去猜意图。
+          if (planContinuation) userMessagePayload.planContinuation = planContinuation;
 
           await handleChatUserMessageEvent(
             {

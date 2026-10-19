@@ -66,27 +66,39 @@ class TurnPlanStep {
     required this.id,
     required this.title,
     required this.status,
+    this.instruction,
   });
 
   final String id;
   final String title;
   TurnStepStatus status;
 
+  /// 交接说明（handoff.instruction）：这一步需要用户自己动手时，服务端下发
+  /// 「要他在哪儿做什么」。非等待态为空。
+  String? instruction;
+
   factory TurnPlanStep.fromWire(Map<String, dynamic> json) {
+    final String? ins =
+        (json['instruction']?.toString().trim().isNotEmpty ?? false)
+            ? json['instruction'].toString().trim()
+            : null;
     return TurnPlanStep(
       id: json['id']?.toString() ?? '',
       title: json['title']?.toString() ?? '',
       status: _stepStatusFromWire(json['status']?.toString()),
+      instruction: ins,
     );
   }
 }
 
-enum TurnStepStatus { pending, running, ok, err }
+enum TurnStepStatus { pending, running, ok, err, waiting }
 
 TurnStepStatus _stepStatusFromWire(String? raw) {
   switch (raw) {
     case 'running':
       return TurnStepStatus.running;
+    case 'waiting':
+      return TurnStepStatus.waiting;
     case 'ok':
       return TurnStepStatus.ok;
     case 'err':
@@ -95,6 +107,36 @@ TurnStepStatus _stepStatusFromWire(String? raw) {
     default:
       return TurnStepStatus.pending;
   }
+}
+
+/// 把一条 plan_step 事件合并进步骤列表（已存在则更新，否则追加）。
+///
+/// 抽成顶层函数是为了让「本轮 TurnState」与「跨轮常驻的步骤条」共用同一套
+/// 合并语义——turnState 在 done 时会被清空，而步骤条要跨轮常驻（等待用户操作
+/// 往往发生在一轮结束之后）。
+void applyPlanStepWire(List<TurnPlanStep> plan, Map<String, dynamic> wire) {
+  final String stepId = wire['id']?.toString() ?? '';
+  if (stepId.isEmpty) return;
+  final String stepTitle = wire['title']?.toString() ?? '';
+  final TurnStepStatus status = _stepStatusFromWire(wire['status']?.toString());
+  final String? instruction =
+      (wire['instruction']?.toString().trim().isNotEmpty ?? false)
+          ? wire['instruction'].toString().trim()
+          : null;
+  for (final TurnPlanStep s in plan) {
+    if (s.id == stepId) {
+      s.status = status;
+      // 离开等待态时清掉交接说明（旧说明会一直挂在步骤上误导用户）
+      s.instruction = status == TurnStepStatus.waiting ? instruction : null;
+      return;
+    }
+  }
+  plan.add(TurnPlanStep(
+    id: stepId,
+    title: stepTitle,
+    status: status,
+    instruction: status == TurnStepStatus.waiting ? instruction : null,
+  ));
 }
 
 /// master_delegate 派出的子 Agent。
@@ -301,18 +343,7 @@ class TurnState {
         break;
       case 'plan_step':
         if (planStep == null) return;
-        final String stepId = planStep['id']?.toString() ?? '';
-        final String stepTitle = planStep['title']?.toString() ?? '';
-        final TurnStepStatus stepStatus = _stepStatusFromWire(planStep['status']?.toString());
-        if (stepId.isEmpty) return;
-        // 已存在 → 更新状态；不存在 → 补一条
-        for (final TurnPlanStep s in plan) {
-          if (s.id == stepId) {
-            s.status = stepStatus;
-            return;
-          }
-        }
-        plan.add(TurnPlanStep(id: stepId, title: stepTitle, status: stepStatus));
+        applyPlanStepWire(plan, planStep);
         break;
     }
     // 进入执行阶段

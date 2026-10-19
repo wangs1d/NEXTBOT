@@ -23,6 +23,7 @@ import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { AuditService } from "./audit-service.js";
 import { getAgentTaskSafety } from "./agent-task-safety.js";
 import { getAgentTaskStore } from "./agent-task-store.js";
+import { getTaskPlanStore } from "../agent/task-plan-store.js";
 import type {
   AgentTask,
   AgentTaskStatus,
@@ -667,8 +668,28 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
       return;
     }
 
-    // 默认:如果当前阶段是 planning 且有子任务了,迁移到 executing
-    const updatedTask = store.get(taskId)!;
+    // 子任务的唯一来源（2026-10-19）：planning 阶段若本会话已有 TaskPlan，
+    // 直接映射成 subtasks。`plannedSubtasks`（agent-task-types:226）全仓零写入
+    // 零消费，与其去修那条解析链，不如让 TaskPlan 成为唯一来源——否则
+    // `planning && subtasks>0 → executing` 这个条件永远不成立。
+    let updatedTask = store.get(taskId)!;
+    if (updatedTask.status === "planning" && updatedTask.subtasks.length === 0) {
+      const plan = getTaskPlanStore()?.get(updatedTask.sessionId);
+      if (plan && plan.steps.length > 0) {
+        store.update(taskId, (t) => {
+          const now = new Date().toISOString();
+          t.subtasks = plan.steps.map((s) => ({
+            id: s.id,
+            description: s.title,
+            status: s.status === "done" ? "done" : s.status === "running" ? "in_progress" : "pending",
+            attempts: 0,
+            maxAttempts: 3,
+            createdAt: now,
+          }));
+        });
+        updatedTask = store.get(taskId)!;
+      }
+    }
     if (updatedTask.status === "planning" && updatedTask.subtasks.length > 0) {
       this.transitionTo(taskId, "executing", "规划完成,开始执行", options);
     }

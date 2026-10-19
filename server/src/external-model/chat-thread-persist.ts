@@ -264,7 +264,7 @@ export class ChatThreadPersistence {
       }
     }
     if (changed) {
-      void this.flushToDisk();
+      this.trackRepairFlush();
     }
   }
 
@@ -292,7 +292,7 @@ export class ChatThreadPersistence {
       changed = true;
     }
     if (changed) {
-      void this.flushToDisk();
+      this.trackRepairFlush();
     }
   }
 
@@ -427,6 +427,28 @@ export class ChatThreadPersistence {
       messages,
     };
     await this.flushToDisk();
+  }
+
+  /**
+   * load 内部的修复写盘是"尽力而为"：失败只告警不致命（数据仍在内存）。
+   * 挂在实例上而非裸 void——测试删目录后写盘的 ENOENT 拒绝不会再变成
+   * unhandledRejection 把整份测试文件标失败（2026-10-19）。
+   */
+  private pendingRepairFlush: Promise<void> | null = null;
+
+  private trackRepairFlush(): void {
+    this.pendingRepairFlush = this.flushToDisk().catch((err) => {
+      console.warn(
+        "[chat-thread-persist] 修复写盘失败（忽略，数据仍在内存）:",
+        err instanceof Error ? err.message : err,
+      );
+    });
+  }
+
+  /** 仅测试/有序关停用：等待挂起的修复写盘完成。 */
+  async flushPendingForTests(): Promise<void> {
+    const pending = this.pendingRepairFlush;
+    if (pending) await pending;
   }
 
   private async flushToDisk(): Promise<void> {

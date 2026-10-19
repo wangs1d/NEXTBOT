@@ -48,17 +48,28 @@ const String kTravelPlanParentPidEnv = "PAI_TRAVEL_PLAN_PARENT_PID";
 /// 1:1 呈现的前提是窗口就是设计稿那扇窗（1140×740），最大化留给用户自己按。
 const Size kTravelPlanWindowSize = Size(1140, 740);
 
-/// 行程窗口载荷：卡片数据 + 打开时刻的主题变体。
+/// 行程窗口载荷：卡片数据（或服务端行程 JSON）+ 打开时刻的主题变体。
 ///
 /// [reveal]=false 的载荷是预热注入（窗口保持隐藏）；true 才驱动显窗。
+/// [card] 与 [planJson] 二选一：聊天卡片走 [card]（AgentResultData），
+/// 行程归档等已有服务端行程 JSON 的调用方走 [planJson]（GET /travel/plans/:id
+/// 的 plan 字段原样透传，避免 AgentResultData 往返转换丢字段）。
 class TravelPlanWindowPayload {
   const TravelPlanWindowPayload({
-    required this.card,
+    this.card,
+    this.planJson,
     required this.theme,
     this.reveal = true,
-  });
+  }) : assert(
+          (card == null) != (planJson == null),
+          "card 与 planJson 必须二选一",
+        );
 
-  final AgentResultData card;
+  final AgentResultData? card;
+
+  /// 服务端行程 JSON（TravelPlanData.fromPlanJson 直接吃）。
+  final Map<String, dynamic>? planJson;
+
   final AppThemeVariant theme;
 
   /// 是否随载荷显窗（预热载荷为 false）。
@@ -68,7 +79,8 @@ class TravelPlanWindowPayload {
         "version": 1,
         "theme": theme.name,
         "reveal": reveal,
-        "card": card.toJson(),
+        if (card != null) "card": card!.toJson(),
+        if (planJson != null) "plan": planJson,
       });
 
   /// 解码失败（文件损坏/版本不符）时返回 null，宿主展示错误页。
@@ -77,7 +89,11 @@ class TravelPlanWindowPayload {
       final Object? decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return null;
       final Object? rawCard = decoded["card"];
-      if (rawCard is! Map<String, dynamic>) return null;
+      final Object? rawPlan = decoded["plan"];
+      if ((rawCard is! Map<String, dynamic>) &&
+          (rawPlan is! Map<String, dynamic>)) {
+        return null;
+      }
       final Object? rawTheme = decoded["theme"];
       final AppThemeVariant theme = AppThemeVariant.values.firstWhere(
         (AppThemeVariant v) => v.name == rawTheme,
@@ -85,7 +101,10 @@ class TravelPlanWindowPayload {
       );
       final Object? rawReveal = decoded["reveal"];
       return TravelPlanWindowPayload(
-        card: AgentResultData.fromJson(rawCard),
+        card: rawCard is Map<String, dynamic>
+            ? AgentResultData.fromJson(rawCard)
+            : null,
+        planJson: rawPlan is Map<String, dynamic> ? rawPlan : null,
         theme: theme,
         reveal: rawReveal is bool ? rawReveal : true,
       );
@@ -114,14 +133,34 @@ class TravelPlanWindowLauncher {
 
   /// 尝试在独立系统窗口中打开行程规划；成功返回 true。
   /// 失败（非 Windows / spawn 失败）时由调用方退回窗口内展示。
-  static Future<bool> open(AgentResultData data) => _deliver(data, reveal: true);
+  static Future<bool> open(AgentResultData data) => _deliver(
+        TravelPlanWindowPayload(
+          card: data,
+          theme: AppThemeController.instance.value,
+        ),
+      );
+
+  /// 行程归档入口：直接透传服务端行程 JSON（GET /travel/plans/:id 的 plan），
+  /// 子进程侧 TravelPlanData.fromPlanJson 直读，不经 AgentResultData 往返。
+  static Future<bool> openPlanJson(Map<String, dynamic> planJson) => _deliver(
+        TravelPlanWindowPayload(
+          planJson: planJson,
+          theme: AppThemeController.instance.value,
+        ),
+      );
 
   /// 预热（2026-09-25）：把行程载荷提前注入规划窗口，但不下发显示指令——
   /// 常驻进程存活时只换载数据；未拉起时以隐藏态 spawn（WebView/页面/地图
   /// 照常就绪）。用户随后点「打开行程规划」时零等待直接前置。
-  static Future<bool> warm(AgentResultData data) => _deliver(data, reveal: false);
+  static Future<bool> warm(AgentResultData data) => _deliver(
+        TravelPlanWindowPayload(
+          card: data,
+          theme: AppThemeController.instance.value,
+          reveal: false,
+        ),
+      );
 
-  static Future<bool> _deliver(AgentResultData data, {required bool reveal}) async {
+  static Future<bool> _deliver(TravelPlanWindowPayload payload) async {
     if (!Platform.isWindows) return false;
     try {
       final Directory dir = mailboxDir();
@@ -131,14 +170,7 @@ class TravelPlanWindowLauncher {
       final int ts = DateTime.now().microsecondsSinceEpoch;
       final File payloadFile =
           File("${dir.path}${Platform.pathSeparator}plan-$ts.json");
-      await payloadFile.writeAsString(
-        TravelPlanWindowPayload(
-          card: data,
-          theme: AppThemeController.instance.value,
-          reveal: reveal,
-        ).encode(),
-        flush: true,
-      );
+      await payloadFile.writeAsString(payload.encode(), flush: true);
 
       // 2. 原子更新指针（写临时文件后 rename 覆盖，子进程不会读到半截 JSON）
       final File pointer = File("${dir.path}${Platform.pathSeparator}latest.json");
@@ -170,7 +202,7 @@ class TravelPlanWindowLauncher {
           ...Platform.environment,
           kTravelPlanWindowEnv: dir.path,
           kTravelPlanParentPidEnv: pid.toString(),
-          if (!reveal) kTravelPlanWindowHiddenEnv: "1",
+          if (!payload.reveal) kTravelPlanWindowHiddenEnv: "1",
         },
       );
       // 排空子进程 stdout/stderr：debug 构建日志量大，管道塞满会卡死子进程
@@ -233,9 +265,13 @@ Future<void> runTravelPlanWindow(String mailboxDirPath) async {
   // 系统标题栏 X 不结束进程：拦截为隐藏，进程与 WebView 保活实现重开零等待
   await windowManager.setPreventClose(true);
   windowManager.addListener(_TravelPlanWindowListener());
+  // 尺寸/位置由原生层在窗口创建那一刻一次定死（main.cpp 的
+  // PAI_TRAVEL_PLAN_MAILBOX 分支按主屏工作区居中），Dart 侧不再 setAlignment
+  // 居中——否则窗口创建后会被二次挪动，而二次挪动正是「幽灵窗」的成因
+  // （且 window_manager 的居中按鼠标所在显示器算，与原生侧主屏不一定是同一块）。
+  // 此处 size 保留为幂等校准：frameless 切换后触发重排，让 Flutter 视图与客户区同步。
   final WindowOptions options = WindowOptions(
     size: kTravelPlanWindowSize,
-    center: true,
     title: "行程规划",
     backgroundColor: Colors.transparent,
     titleBarStyle: TitleBarStyle.hidden,
@@ -473,7 +509,9 @@ class _TravelPlanWindowState extends State<TravelPlanWindowApp> {
     return Scaffold(
       body: TravelPlanPanel(
         key: ValueKey<TravelPlanWindowPayload>(p),
-        plan: TravelPlanData.from(p.card),
+        plan: p.planJson != null
+            ? TravelPlanData.fromPlanJson(p.planJson!)
+            : TravelPlanData.from(p.card!),
         fullscreen: true,
         onClose: () => unawaited(widget.coordinator.hide()),
         // 无边框窗口：页面自绘标题栏的拖动/最小化/最大化回宿主执行

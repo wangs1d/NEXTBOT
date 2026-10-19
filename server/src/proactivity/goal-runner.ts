@@ -15,7 +15,7 @@
 //  - **只在"值得开口"时打扰**：外部步骤转 awaiting_confirm、计划完成、阶段性进展
 //    三类才产出提案；静默继续（dispatched）不打扰用户——对齐 Muse「决策点才打扰」。
 import type { GoalPlanner, PlanStep } from "./goal-planner.js";
-import type { GoalRecord } from "./goal-board.js";
+import type { GoalBoard, GoalRecord } from "./goal-board.js";
 
 /** GoalRunner 提交主动提案的最小形状（装配层适配成 ProactiveProposal / submitIntent） */
 export type GoalRunnerProposal = {
@@ -31,6 +31,11 @@ export type GoalRunnerProposal = {
 
 export type GoalRunnerDeps = {
   goalPlanner: GoalPlanner;
+  /**
+   * 目标板（2026-10-19）：退避闸 / 目标级预算 / track·preexec 过期收尾都要读它。
+   * 缺省时退化为旧行为（只按间隔闸推 plan 型），不影响既有调用方。
+   */
+  goalBoard?: GoalBoard;
   /** 活跃 actor 枚举（复用 proactivityHub.exportActors 的活跃过滤结果） */
   listActors: () => string[];
   /** 提案出口（装配层接到管道/ProactivityHub） */
@@ -90,7 +95,10 @@ export class GoalRunner {
 
   private tickIntervalMs(): number {
     const raw = Number.parseInt(this.env.GOAL_RUNNER_TICK_MS ?? "", 10);
-    return Number.isFinite(raw) && raw >= 30_000 ? raw : 5 * 60_000;
+    // 2026-10-19：默认从 5min 降到 30min。事件回调（TaskHub 终态）已是主路径，
+    // tick 只是兜底；每分钟扫活跃计划纯属白烧 CPU（每步都有退避闸，扫了也不推）。
+    // 显式配置仍允许 ≥30s（测试/特殊部署要密一点不该被钳制）。
+    return Number.isFinite(raw) && raw >= 30_000 ? raw : 30 * 60_000;
   }
 
   start(): void {
@@ -116,7 +124,7 @@ export class GoalRunner {
   }
 
   /**
-   * 单轮扫描：对每个活跃 actor 的活跃计划，尝试推进。
+   * 单轮扫描：plan 型推步骤；track / preexec 只做过期收尾（零 LLM、零派发）。
    * 返回本轮动作统计（诊断/测试断言用）。
    */
   tick(): { scanned: number; advanced: number; proposals: number } {
@@ -127,9 +135,11 @@ export class GoalRunner {
     let scanned = 0;
 
     for (const actorId of this.deps.listActors()) {
-      const plans = this.deps.goalPlanner
-        .listPlans(actorId)
-        .filter((g) => g.status !== "done" && g.status !== "expired" && g.status !== "ready");
+      const goals = this.deps.goalBoard?.list(actorId);
+      const active = (g: GoalRecord) => g.status !== "done" && g.status !== "expired";
+
+      // ① plan 型：推进步骤（唯一会花 token 的路径，闸门最密）
+      const plans = (goals ?? this.deps.goalPlanner.listPlans(actorId)).filter(active);
       for (const goal of plans) {
         if (advanced >= this.maxPerTick) return { scanned, advanced, proposals };
         scanned += 1;
@@ -137,12 +147,28 @@ export class GoalRunner {
         if (r.advanced) advanced += 1;
         if (r.proposed) proposals += 1;
       }
+
+      // ② track / preexec：不派任务，只做过期收尾。ready 超过保质期 = 材料过时，
+      //    静默作废（成本类，说了是噪音）。
+      for (const goal of goals ?? []) {
+        if (goal.kind === "plan" || !active(goal)) continue;
+        scanned += 1;
+        if (goal.status === "ready" && goal.expiresAt && goal.expiresAt <= now) {
+          this.deps.goalBoard?.markDone(goal.goalId);
+          this.log(`「${goal.title}」已过保质期，作废`);
+        }
+      }
     }
     return { scanned, advanced, proposals };
   }
 
-  /** 推进单个计划：间隔闸 → 按需检索 → advance() → 按结果决定要不要开口 */
+  /** 推进单个计划：退避闸 → 间隔闸 → 按需检索 → advance() → 记账 → 决定要不要开口 */
   private advanceOne(goal: GoalRecord, actorId: string, now: number): { advanced: boolean; proposed: boolean } {
+    // 退避闸（2026-10-19）：连续失败 ≥2 或未到 nextEligibleAt 一律不推。
+    // 冻结后由「卡住了」那条提案负责开口（见 blocked 分支），不是静默放弃。
+    if (this.deps.goalBoard && !this.deps.goalBoard.isEligible(goal.goalId)) {
+      return { advanced: false, proposed: false };
+    }
     const last = this.lastAdvanceAt.get(goal.goalId) ?? 0;
     if (now - last < this.minIntervalMs) return { advanced: false, proposed: false };
     this.lastAdvanceAt.set(goal.goalId, now);
@@ -153,6 +179,14 @@ export class GoalRunner {
 
     const outcome = this.deps.goalPlanner.advance(goal.goalId, actorId);
     if (!outcome.ok) return { advanced: false, proposed: false };
+
+    // 尝试记账：成功清零 failStreak；执行类阻塞累加并退避（成本类不记失败，
+    // 否则「额度不够」会被当成「这事办不成」然后冻结）。
+    if (outcome.action === "dispatched" || outcome.action === "finished") {
+      this.deps.goalBoard?.noteAttempt(goal.goalId, { ok: true });
+    } else if (outcome.action === "blocked" && !isCostBlocked(outcome.reason)) {
+      this.deps.goalBoard?.noteAttempt(goal.goalId, { ok: false, reason: outcome.reason });
+    }
 
     switch (outcome.action) {
       case "dispatched":
@@ -183,10 +217,27 @@ export class GoalRunner {
           source: "goal_runner",
         });
         return { advanced: true, proposed: true };
-      case "blocked":
-        // 派发通道不可用/预算超限：如实记日志，不打扰（避免把成本问题变成噪音）
-        this.log(`「${goal.title}」步骤「${outcome.step.title}」暂无法推进：${outcome.reason}`);
-        return { advanced: false, proposed: false };
+      case "blocked": {
+        // 阻塞分两类（2026-10-19 D6，对齐 Muse「悄悄失败」教训）：
+        //  - 成本类（预算超限 / 通道未就绪）：静默，额度恢复后自愈
+        //  - 执行类（步骤失败 / 依赖断 / 凭证失效）：**必须开口**，带原因
+        // 判据：用户能不能自己修。能 → 说；不能（只是等额度）→ 不说。
+        // 识别不了一律按执行类处理（默认开口），宁可多一句也不悄悄卡死。
+        if (isCostBlocked(outcome.reason)) {
+          this.log(`「${goal.title}」步骤「${outcome.step.title}」暂无法推进：${outcome.reason}`);
+          return { advanced: false, proposed: false };
+        }
+        this.deps.emitProposal({
+          actorId,
+          kind: "goal_blocked",
+          importance: "medium",
+          title: `计划「${goal.title}」卡住了`,
+          summary: `「${outcome.step.title}」推不动：${outcome.reason}。你看怎么处理？`,
+          dedupKey: `goal_runner:blocked:${goal.goalId}:${outcome.step.id}`,
+          source: "goal_runner",
+        });
+        return { advanced: false, proposed: true };
+      }
       case "already_doing":
         return { advanced: false, proposed: false };
       default:
@@ -206,9 +257,17 @@ export class GoalRunner {
     if (!next) return;
     const req = planRetrieval(goal, next);
     if (!req) return;
-    void Promise.resolve(retrieveForStep({ goalId: goal.goalId, stepId: next.id, query: req.query, channel: req.channel }))
+    const { goalId } = goal;
+    void Promise.resolve(retrieveForStep({ goalId, stepId: next.id, query: req.query, channel: req.channel }))
       .then((res) => {
-        if (res?.summary) this.log(`已为「${goal.title}」第「${next.title}」步检索：${res.summary.slice(0, 80)}`);
+        const summary = res?.summary?.trim();
+        if (!summary) return;
+        // 结果写回该步 note（2026-10-19）：派发出去的那一步任务据此带着
+        // 「已查到什么」继续，而不是重新搜一遍。步骤已被推进则静默跳过。
+        const written = this.deps.goalPlanner.annotateStep(goalId, next.id, `按需检索（${req.channel}）：${summary}`);
+        this.log(
+          `已为「${goal.title}」第「${next.title}」步检索：${summary.slice(0, 80)}${written ? "（已回写步骤）" : ""}`,
+        );
       })
       .catch((err) => this.log(`步骤检索失败（忽略）：${err}`));
     void actorId;
@@ -257,6 +316,15 @@ export class GoalRunner {
         .slice(0, 20),
     };
   }
+}
+
+/**
+ * 成本类阻塞判定：用户自己修不了的（预算超限 / 后台通道未就绪），
+ * 说了也只是噪音。**识别不了一律按执行类处理**——默认开口，
+ * 宁可多一句也不让目标悄悄卡死（Muse 的「悄悄失败」教训）。
+ */
+function isCostBlocked(reason: string): boolean {
+  return /预算|额度|通道未就绪|通道不可用|未装配|budget|quota|not ready|not available/i.test(reason);
 }
 
 /** skill 工具 goal.runner.status 的文本渲染（诊断面） */

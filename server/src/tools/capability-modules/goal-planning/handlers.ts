@@ -33,13 +33,19 @@ export function createPlanCreateHandler(deps: GoalPlanningModuleDeps): ToolHandl
       ...(context.sessionId ? { sessionId: context.sessionId } : {}),
       title,
       steps,
+      ...(typeof input.successCriteria === "string" && input.successCriteria.trim()
+        ? { successCriteria: input.successCriteria.trim() }
+        : {}),
       ...(typeof input.note === "string" && input.note.trim() ? { note: input.note.trim() } : {}),
     });
     if (!result.ok) return result;
+    const preferences = (result.goal.payload as { preferences?: string } | undefined)?.preferences;
     return {
       ok: true,
       goalId: result.goal.goalId,
       title: result.goal.title,
+      successCriteria: result.goal.successCriteria,
+      ...(preferences ? { preferences } : {}),
       steps: planner.stepsOf(result.goal).map((s) => ({ id: s.id, title: s.title, sensitivity: s.sensitivity })),
       hint: "已建档并开始推进。向用户复述拆步结果（一两句），外部操作步骤会先征求意见",
     };
@@ -56,6 +62,8 @@ export function createPlanListHandler(deps: GoalPlanningModuleDeps): ToolHandler
       title: g.title,
       progress: planner.progressLine(g),
       steps: planner.stepsOf(g).map((s) => ({ id: s.id, title: s.title, status: s.status })),
+      // 模板带来的结果形态偏好：产出时按这个口径给（同类目标第二次不再走 LLM 拆步）
+      preferences: (g.payload as { preferences?: string } | undefined)?.preferences,
       lastReplanReason: (g.payload as { lastReplanReason?: string } | undefined)?.lastReplanReason,
     }));
     return { ok: true, count: plans.length, plans };

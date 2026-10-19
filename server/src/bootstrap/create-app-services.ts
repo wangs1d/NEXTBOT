@@ -35,6 +35,10 @@ import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
 import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-facade.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
+import { buildActiveGoalsPromptBlock } from "../agent/active-goals-prompt.js";
+import { getTaskPlanStore, initTaskPlanStore } from "../agent/task-plan-store.js";
+import { TaskPlanProbeRunner } from "../agent/task-plan-probe-runner.js";
+import { getToolResultProcessor } from "../services/tool-result-processor.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import {
   formatAgentRuntimeConfigSummary,
@@ -68,6 +72,9 @@ import {
   reconcileProfileFactsRuntime,
 } from "../services/user-personalization/profile-fact-authority-runtime.js";
 import { createMemoryFtsStoreIfEnabled } from "../agentic-memory/fts-store.js";
+import { retireMemoriesForFactChange } from "../agentic-memory/fact-supersede.js";
+import { getMemoryReinforcementStore } from "../agentic-memory/memory-reinforcement.js";
+import { initMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { getMemoryHealthSnapshot } from "../agentic-memory/health.js";
 import { registerCommitmentTools, MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { registerTaskDispatchTool } from "../tools/task-dispatch-tool.js";
@@ -539,6 +546,8 @@ import {
 } from "../proactivity/mapping-executor.js";
 import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
+import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
+import { registerOrderStatusTools } from "../tools/shopping-tools.js";
 import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
 import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
@@ -565,7 +574,11 @@ function readNdjsonTail(path: string, maxLines: number): unknown[] {
 import { GoalBoard } from "../proactivity/goal-board.js";
 import { GoalPlanner } from "../proactivity/goal-planner.js";
 import { GoalRunner } from "../proactivity/goal-runner.js";
-import { GoalSignalBridge } from "../proactivity/goal-signal-bridge.js";
+import { GoalIntrospector } from "../proactivity/goal-introspector.js";
+import { GoalNightlyJob, createGoalSemanticVerifier } from "../proactivity/goal-nightly.js";
+import { buildGoalCostReport } from "../proactivity/goal-cost.js";
+import { buildUnifiedGoalView } from "../proactivity/goal-unified-view.js";
+import { GoalSignalBridge, adjustImportanceByGoalRelation, appendGoalHint } from "../proactivity/goal-signal-bridge.js";
 import { AuditTrailService } from "../proactivity/audit-timeline.js";
 import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-caller.js";
 import { fabricSelftest } from "../proactivity/selftest.js";
@@ -667,6 +680,23 @@ export async function createAppServices(): Promise<AppServices> {
   const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
   const messageHubService = new MessageHubService(join(process.cwd(), "data", "message-hub.json"));
   bootLoads.push(messageHubService.load());
+  // 订单信号派生（2026-10-19 handoff 数据源半边）：手机通知捕捉里命中订单词的
+  // （美团/饿了么/骑手/已送达…），派生成 shopping 流信号喂进 SensorKernel →
+  // 跨源采集库。emit 闭包晚绑定（sensorKernel 在下方才创建）；查询面是
+  // order.status 工具（tools/shopping-tools.ts）。
+  let emitShoppingOrder:
+    | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
+    | null = null;
+  messageHubService.onInbound = (input, message) => {
+    if (!emitShoppingOrder) return;
+    const signal = deriveOrderSignal({
+      actorId: input.actorId,
+      platform: String(input.platform ?? ""),
+      title: input.title ?? "",
+      text: message.text ?? input.text ?? "",
+    });
+    if (signal) emitShoppingOrder(signal);
+  };
   const messagePlatformGateway = new MessagePlatformGateway();
 
   const skillManager = new SkillManager();
@@ -1652,15 +1682,55 @@ export async function createAppServices(): Promise<AppServices> {
           value: fact.value,
           sourceRef: event.sourceId,
           confidence: fact.confidence ?? null,
+          // 时态与事发时间（2026-10-19 时间锚定）：past 只登记历史、不改现状；
+          // upcoming 只登记计划、也不改现状（到期无证据只降级为"未确认"）；
+          // eventTime/validFrom/validTo 是"事情何时发生"，与 observed_at 分开存。
+          temporal:
+            fact.temporal === "past"
+              ? "past"
+              : fact.temporal === "upcoming"
+                ? "upcoming"
+                : "current",
+          eventTime: fact.eventTime ?? null,
+          validFrom: fact.validFrom ?? null,
+          validTo: fact.validTo ?? null,
         });
         if (result?.changed) {
           console.info(
             `[structured-facts] 字段${result.previous.length > 0 ? "变更" : "新增"} ` +
               `actor=${event.actorId} ${fact.field}=${fact.value}` +
+              (fact.eventTime ? `（事发 ${fact.eventTime}）` : "") +
               (result.previous.length > 0 ? `（原值：${result.previous[0]!.value}）` : ""),
           );
           // 档案字段变更 → 收敛其它存储里的副本（单一权威源）
-          if (isProfileField(fact.field)) scheduleProfileFactReconcile(event.actorId);
+          if (isProfileField(fact.field)) {
+            scheduleProfileFactReconcile(event.actorId);
+            // 向量层即时退役（2026-10-19 收尾）：结构化事实是字段级 latest-wins，
+            // 但 Mem0 里"住在杭州"那条旧记忆不会自动消失，不处理就有最长约一天
+            // 的新旧并存窗口。按 factFields 标签/短句线索归档同字段旧条目
+            // （archiveIds：可恢复，非物理删除）；失败静默，交回 lifecycle。
+            void retireMemoriesForFactChange({
+              memory: agenticMemoryRuntime?.memory ?? null,
+              reinforcement: getMemoryReinforcementStore(),
+              actorId: event.actorId,
+              field: fact.field,
+              newValue: fact.value,
+              previousValues: result.previous.map((p) => p.value),
+            }).catch(() => {});
+          }
+        } else if (result?.ignored) {
+          // 时间锚定的各个拦截口都留痕：past=用户说的是过去，不改现状；
+          // upcoming=计划，不改现状；low_confidence=新值明显比现状弱
+          const reasonLabel =
+            result.ignored === "past"
+              ? "（登记为历史陈述）"
+              : result.ignored === "upcoming"
+                ? "（登记为计划，未发生）"
+                : `（现状：${result.fact.value}，置信 ${result.fact.confidence ?? "?"}）`;
+          console.info(
+            `[structured-facts] 未覆盖（${result.ignored}）` +
+              `actor=${event.actorId} ${fact.field}=${fact.value}${reasonLabel}`,
+          );
         }
       } catch (err) {
         console.warn("[structured-facts] 事实入档失败（忽略）:", err);
@@ -1715,6 +1785,14 @@ export async function createAppServices(): Promise<AppServices> {
   }
 
   // 组件注册表：clear-service / prompt-context / health 快照从这里取实例
+  // 软抑制存储（"别再提这个"，2026-10-19）：启动期建一次，prompt/召回热路径
+  // 只走 peek（不建库），避免在未装配环境里顺手写出库文件。
+  try {
+    initMemorySuppressionStore();
+  } catch (err) {
+    console.warn("[memory-suppression] 初始化失败（软抑制不可用，忽略）:", err);
+  }
+
   registerMemoryComponents({
     ledger: agenticLedger,
     commitmentBoard,
@@ -1869,6 +1947,17 @@ export async function createAppServices(): Promise<AppServices> {
     app.log.info(
       `[NightlyMemory] Night mode: ${nightlyMemoryService.isInNightMode() ? "🌙 ON" : "☀️ OFF"} (${stmConfig.digestTimezone})`,
     );
+    // 计划到期补扫（2026-10-19 P0）：夜间任务一天只跑一次且可能被早退跳过；
+    // 进程启动 30s 后补一次，白天重启也不会让到期计划悬着。
+    const planSweepTimer = setTimeout(() => {
+      void getNightlyMemoryTaskService()
+        ?.runPlanSweepForAllActors()
+        .then((n) => {
+          if (n > 0) app.log.info(`[NightlyMemory] 启动补扫：${n} 条计划到期未确认`);
+        })
+        .catch(() => {});
+    }, 30_000);
+    planSweepTimer.unref();
   }
   
   const chatSyncService = initDailyChatSyncService();
@@ -5546,6 +5635,12 @@ export async function createAppServices(): Promise<AppServices> {
   }
   // 内核 → SourceStore：所有信号（内线 + 外线）统一汇聚进"自己的数据库"
   sensorKernel.onSignal((signal) => sourceStore.feed(signal));
+  // 订单流 feeder（2026-10-19）：MessageHubService.onInbound 里派生的 shopping
+  // 信号从这里进内核。此刻起 onInbound 的派生开始生效（晚绑定闭环）。
+  emitShoppingOrder = registerFeeder(sensorKernel, "shopping_orders", "shopping");
+  // order.status：只读跨源库的订单状态查询（probe 判定 / 模型按需查）。
+  // 只读工具，handoff 等待期不被 act_external 收缩拦下。
+  registerOrderStatusTools(toolRegistry, { sourceStore });
   console.log(
     `[Bootstrap] 跨源统一采集库 ${sourceStore.enabled() ? "已启用" : "已关闭（SENSOR_SOURCE_STORE=0）"}；` +
       `外部信源收编 mail=${!sensorFabricDisabled("MAIL")} ics=${!sensorFabricDisabled("ICS")} finance=${!sensorFabricDisabled("FINANCE")}`,
@@ -5797,6 +5892,90 @@ export async function createAppServices(): Promise<AppServices> {
   goalPlanner.reconcile(getTaskHub());
   capabilityModuleDeps.goalPlanner = goalPlanner;
 
+  // ─── 在办目标进对话面（2026-10-19 三层尺度架构 · P0-A）───
+  // 此前 goal 只在 proactivity 侧存在，prompt 层 grep 零命中：用户在对话里说
+  // "下周去三亚"，当轮答完就蒸发；用户问"那事怎么样了"只能靠记忆模糊召回。
+  // 这里把活跃目标摘要（前 3 条）接进动态层，每轮 ≈100 tokens。
+  agentCore.setActiveGoalsProvider((actorId) =>
+    buildActiveGoalsPromptBlock({ goalBoard, goalPlanner, actorId }),
+  );
+
+  // ─── 会话级任务计划（2026-10-19 三层尺度架构 · P0-B）───
+  // TaskPlan 是三层尺度里的中间层：单次多步任务、会话内可续跑、完成即归档。
+  // 存储独立（data/session-plans/），绝不进 goals.json——短任务会冲爆长期台账，
+  // 而那里是每轮注入的数据源。进程级单例，工具层 getTaskPlanStore() 直取。
+  initTaskPlanStore({ dataPath: join(process.cwd(), "data") });
+
+  // ─── 等待步的客观探测（2026-10-19 handoff · checkMode=probe）───
+  // 把执行权交给用户后，「他做完了」有两种收回方式：他自己点（已接），或客观
+  // 事实已经到了（订单/日程/文件）。后者只能由代码定期查——零 LLM 决策，查到即
+  // resume，然后起一轮受控续跑（只做下一步，不重播全表）。
+  // 关：PLAN_PROBE_RUNNER_ENABLED=0。
+  {
+    const planStore = getTaskPlanStore();
+    if (planStore) {
+      const planProbeRunner = new TaskPlanProbeRunner({
+        store: planStore,
+        executeProbe: async ({ actorId, sessionId, tool, args }) => {
+          const res = await toolRegistry.execute(tool, args ?? {}, {
+            sessionId,
+            userId: actorId,
+          } as ToolContext);
+          return { ok: res.ok, result: res.result };
+        },
+        onResumed: ({ actorId, sessionId, step, nextStep }) => {
+          const prompt = nextStep
+            ? `（计划续跑：第「${step.title}」步已确认完成，继续下一步「${nextStep.title}」。直接做，不要重新问已完成的信息。）`
+            : `（计划续跑：第「${step.title}」步已确认完成，计划全部完成，向用户简单收尾说结果。）`;
+          const messageId = `plan-probe-${Date.now()}`;
+          const assistantMsgId = `${messageId}-a`;
+          void runtime
+            .handleUserMessage(actorId, prompt, {
+              chatUserMessageId: messageId,
+              sessionId,
+              onAssistantDelta: (delta) => {
+                wsConnectionRegistry.trySend(
+                  actorId,
+                  JSON.stringify({
+                    type: ServerEventType.ChatAssistantChunk,
+                    payload: { sessionId: actorId, messageId: assistantMsgId, chunk: delta },
+                  }),
+                );
+              },
+            })
+            .then((reply) => {
+              const text = (reply.text ?? "").trim();
+              if (!reply.streamedChunks && text) {
+                wsConnectionRegistry.trySend(
+                  actorId,
+                  JSON.stringify({
+                    type: ServerEventType.ChatAssistantChunk,
+                    payload: { sessionId: actorId, messageId: assistantMsgId, chunk: text },
+                  }),
+                );
+              }
+              wsConnectionRegistry.trySend(
+                actorId,
+                JSON.stringify({
+                  type: ServerEventType.ChatAssistantDone,
+                  payload: {
+                    sessionId: actorId,
+                    messageId: assistantMsgId,
+                    finalText: getToolResultProcessor().processAssistantText(text, { userText: prompt }),
+                    toolCalls: reply.toolName ? [reply.toolName] : [],
+                  },
+                }),
+              );
+            })
+            .catch((err) => {
+              app.log.warn({ err, actorId }, "plan probe 续跑失败");
+            });
+        },
+      });
+      planProbeRunner.start();
+    }
+  }
+
   // ─── 感知 ↔ 目标双向桥（2026-10-10，阶段二）───
   // 让规则文案带目标上下文（"你还在推进「学英语」…"），并为 GoalRunner 提供
   // "某步骤是否需要检索"的判定。方向 A 经 builtinServices.activeGoalLine 注入规则；
@@ -5811,6 +5990,8 @@ export async function createAppServices(): Promise<AppServices> {
   // （外部步骤等确认 / 计划完成 / 阶段进展），静默推进不打扰。GOAL_RUNNER_ENABLED=0 关。
   const goalRunner = new GoalRunner({
     goalPlanner,
+    // 2026-10-19：退避闸（failStreak≥2 冻结）、目标级预算、track/preexec 过期收尾
+    goalBoard,
     listActors: () => proactivityHub.exportActors().map((a) => a.actorId),
     emitProposal: (p) =>
       proactivityHub.submitIntent({
@@ -5824,9 +6005,57 @@ export async function createAppServices(): Promise<AppServices> {
       }),
     // 方向 B（目标 → 感知）：派发前判定下一步是否需要检索（如"查机票"）。
     planRetrieval: (goal, step) => goalSignalBridge.retrievalRequestFor(goal, step),
+    // 方向 B 落地（2026-10-19）：检索结果写回该步 note（此前只打日志，是条假通路）。
+    // - source 通道：跨源采集库按实体检索（"提到三亚的所有来源"），进程内零成本可查。
+    // - realtime 通道：进程内没有直接的联网检索入口（检索能力在任务面工具里），
+    //   不假装已查到——只把"要查什么"落到步骤上，由派发出去的那一步带工具查证。
+    retrieveForStep: ({ query, channel }) => {
+      try {
+        if (channel === "source") {
+          const hits = sourceStore.findByEntity(query, { limit: 3 });
+          if (hits.length === 0) return null;
+          return {
+            summary: hits.map((h) => `${h.stream}：${(h.delta ?? h.entity).slice(0, 60)}`).join("；"),
+          };
+        }
+        return { summary: `该步需要最新信息，派发后先联网核实：${query}` };
+      } catch {
+        return null; // 检索失败不阻断推进
+      }
+    },
   });
   goalRunner.start();
   capabilityModuleDeps.goalRunner = goalRunner;
+
+  // ─── 目标夜间内省（2026-10-19，L3 日批档）───
+  // L2 只回答「下一步做什么」，「这个目标还需不需要存在」要判断力但一天一次就够：
+  // 确定性扫描闲置/显著度/partial 验收，产出 finding 供夜间任务开口或作废。
+  // 语义终审（可选，每晚 ≤5 次 flash）：确定性判不了"办得对不对"，它能把
+  // 「步骤做完但没留结果说明」的 partial 计划复核翻案；未配置模型则全程零 LLM。
+  const goalIntrospector = new GoalIntrospector({
+    goalBoard,
+    ...(externalChat?.isEnabled() ? { semanticVerifier: createGoalSemanticVerifier(externalChat) } : {}),
+  });
+
+  // L3 排期与开口（2026-10-19）：内省引擎此前只在 HTTP 查询时被动读，闲置衰减/
+  // 过期/复核的副作用在生产从不发生。这里补上"谁在夜里调它、结果怎么开口"：
+  // 每晚 3 点跑一遍，finding → proactivityHub.submitIntent（频控/静默时段/负反馈
+  // 抑制由那条管道统一处理，不新增闸门）。GOAL_NIGHTLY=0 关。
+  const goalNightly = new GoalNightlyJob({
+    introspector: goalIntrospector,
+    listActors: () => proactivityHub.exportActors().map((a) => a.actorId),
+    emit: (p) =>
+      proactivityHub.submitIntent({
+        actorId: p.actorId,
+        kind: p.kind,
+        importance: p.importance,
+        title: p.title,
+        summary: p.summary,
+        mode: "speak",
+        source: p.source,
+      }),
+  });
+  goalNightly.start();
 
   // 行为审计时间线（对标 Muse「全量审计轨迹」）：聚合 台账/目标板/任务面/挂起确认，
   // 出口 = GET /agent/audit-timeline + activity.timeline 工具（memory-governance 模块）
@@ -6116,6 +6345,18 @@ export async function createAppServices(): Promise<AppServices> {
   // 映射规则事件 → 仲裁裁决 → 管道投递（决策零 LLM；状态板不再喂任何 LLM 观察流）
   mappingExecutor.onEvent((event) => {
     const actorId = event.actorId ?? "local_user";
+    // 归属判定（2026-10-19）：这条场景信号是不是在说某个在办目标的事？
+    // 命中时**就地替换局部副本**——等级与正文都改由目标状态决定（卡在用户身上的
+    // 目标该抢注意力），未命中时下面逐字不变（零风险回退）。生产者的等级从此不是
+    // 唯一依据，"规则写死 medium" 这件事被去掉了。
+    const relation = goalSignalBridge.relatedGoalFor(actorId, `${event.title} ${event.body}`);
+    if (relation) {
+      event = {
+        ...event,
+        importance: adjustImportanceByGoalRelation(event.importance, relation),
+        body: appendGoalHint(event.body, relation),
+      };
+    }
     // 事件审计：每一次主动事件的仲裁动作与管道 verdict 全链留痕（events.ndjson）
     const audit: EventAuditRecord = {
       at: Date.now(),
@@ -6125,6 +6366,7 @@ export async function createAppServices(): Promise<AppServices> {
       actorId,
       action: "pending",
       title: event.title,
+      ...(relation ? { goalId: relation.goalId, goalMatchedOn: relation.matchedOn } : {}),
     };
     const action = arbiterV2.admit({
       actorId,
@@ -6540,6 +6782,18 @@ export async function createAppServices(): Promise<AppServices> {
         };
       },
       goalStats: () => goalBoard.stats(),
+      // 成本-产出面（2026-10-19）：哪类目标花得多、达成率高 → 反哺模板优先级
+      goalCost: (actorId?: string) => buildGoalCostReport({ goalBoard, goalPlanner, actorId: actorId ?? null }),
+      // 夜间内省（确定性）：闲置/显著度/partial 验收 → 需要开口的 finding
+      goalIntrospect: (actorId: string) => goalIntrospector.actionable(actorId),
+      // 在办事项统一视图（2026-10-19）：goal + 承诺只读合并，供前端「在办目标」面板
+      goalView: (actorId: string) =>
+        buildUnifiedGoalView({
+          goalBoard,
+          commitmentBoard,
+          actorId,
+          progressOf: (g) => goalPlanner.progressLine(g),
+        }),
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => mappingExecutor.probes(),
       observeOutcome: (outcome) => costCalibrator.observe(outcome),

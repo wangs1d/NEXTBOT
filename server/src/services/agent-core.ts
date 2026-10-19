@@ -26,6 +26,12 @@ import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isActorDisabled } from "./user-disable-gate.js";
 
 /**
+ * 位置证据门去重表（2026-10-19）：同一 actor 在同一位置文本上只尝试一次计划确认，
+ * 避免每轮都查一次计划表。位置变了（真的移动了）才会重新判定。
+ */
+const planLocationLastAttempt = new Map<string, string>();
+
+/**
  * 本模式职责人格（chat/task 双面差异化 persona）。
  *
  * 设计动机：对话面与任务面是同一套基座人格的两个"脑"，但职责不同——由 agent-core
@@ -670,6 +676,19 @@ export class AgentCore {
   }
 
   /**
+   * 注入在办目标拉取器（GoalBoard 接线，bootstrap 装配）。
+   *
+   * 每轮对话面注入【在办目标】块（仅活跃前 3 条，一行一个）：让 agent 知道
+   * 「我正在替用户办这件事」——用户问「那事怎么样了」时直接读台账，不必靠
+   * 记忆模糊召回。无活跃目标时零注入。
+   */
+  setActiveGoalsProvider(
+    fn: ((actorId: string) => string | null) | null,
+  ): void {
+    this.promptContextBuilder.setActiveGoalsProvider(fn);
+  }
+
+  /**
    * 当日 journal 命中块：只产出带时间标签的命中行（2026-08-28 注入路径统一后，
    * 块标题与免责声明由 prompt-assembler 的【短期上下文】家族统一添加，
    * 服务层不再手拼【】标题头）。
@@ -1144,6 +1163,11 @@ export class AgentCore {
           Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
         ]);
     
+    // 位置证据门（2026-10-19）：本轮有定位、且定位落到某个"计划搬去 X"的目标地，
+    // 才把计划转成现状。**没有位置就不动**——位置是唯一能确定性证明"他真的到了"
+    // 的证据；计划到期本身不构成证据（用户可能根本没去，也没说）。
+    void this.maybeConfirmPlansByLocation(actorId, userLocation);
+
     // 当日日志命中块：作为独立字段透传（当天问题优先命中今天日志，而非长期图）。
     // 不并入 narrativeRecall——formatNarrativeRecallPrompt 会对 narrativeRecall 做
     // 6 条截断 + 「【」免责头过滤 + 字符压缩，拼进去会被拍平丢框架（workingMemorySummary 同款旧 bug）。
@@ -1705,6 +1729,40 @@ if (route.plane === "task") {
     if (ageMin < 5) return prompt;
     const ageText = ageMin < 60 ? `${ageMin} 分钟前` : `${Math.floor(ageMin / 60)} 小时前`;
     return `${prompt}（定位时间：${ageText}，非实时）`;
+  }
+
+  /**
+   * 位置证据门（2026-10-19）：只有定位真的落到计划目标地，才把「计划搬去 X」
+   * 转成现状。计划到期本身**不是**证据（用户可能没去、也没说），所以这条通道
+   * 与 sweep 严格分离：sweep 只降级为"未确认"，这里才是唯一的自动转正入口。
+   *
+   * 同一位置文本只尝试一次（进程内缓存），避免每轮查库；确认失败静默。
+   */
+  private maybeConfirmPlansByLocation(actorId: string, userLocation: string | undefined): void {
+    const loc = userLocation?.trim();
+    if (!loc) return;
+    // 陈旧定位不构成证据：resolveUserLocationForPrompt 对超过 5 分钟的定位会附
+    // "（定位时间：X 小时前，非实时）"。拿三天前的缓存位置确认"他搬到了成都"，
+    // 等于用旧证据改档案——直接跳过。
+    if (loc.includes("非实时")) return;
+    if (planLocationLastAttempt.get(actorId) === loc) return;
+    planLocationLastAttempt.set(actorId, loc);
+    void (async () => {
+      try {
+        const { getMemoryComponents } = await import("../agentic-memory/index.js");
+        const store = getMemoryComponents().factStore;
+        if (!store) return;
+        const confirmed = store.confirmPlansByLocation(actorId, loc);
+        if (confirmed.length > 0) {
+          console.info(
+            `[structured-facts] 位置证据确认计划 actor=${actorId} ` +
+              confirmed.map((c) => `${c.field}=${c.value}`).join(", "),
+          );
+        }
+      } catch {
+        /* 记忆组件未装配 / 查询失败 → 忽略（不影响本轮回复） */
+      }
+    })();
   }
 
   /**
@@ -2563,6 +2621,10 @@ if (route.plane === "task") {
       // 2026-09-23 扩面配套：证据注入豁免（realtime 轮已有证据块时零工具直答
       // 是正确行为）+ 路由置信度（观测）。
       turnIntent: ctx.routeIntent,
+      // 会话级任务计划主键（2026-10-19 handoff）：plan.* 用 ToolContext.sessionId 写入，
+      // 工具循环内拿不到那个值——这里显式下发，保证「写 / 注入 / 软提示 / 工具面收缩 /
+      // 执行守卫」五处同一把钥匙（此前各拼各的，导致计划写了不显示、软提示一直催）。
+      ...(ctx.sessionId ? { planSessionKey: ctx.sessionId } : {}),
       // 答案留存（2026-10-13 根修）：透传进工具循环，provider 白名单转发，
       // 漏传 = 留存静默失效（见 AgentStreamOptions.holdAnswer 注释）。
       ...(holdAnswer ? { holdAnswer } : {}),

@@ -2,6 +2,8 @@ import type { WorldService } from "@private-ai-agent/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { getMemoryComponents } from "../agentic-memory/index.js";
+import { peekMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
+import { buildTemporalFactAddressing } from "./memory-temporal-intent.js";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
@@ -29,6 +31,7 @@ import {
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
+import { getTaskPlanStore, taskPlanKey } from "./task-plan-store.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
@@ -607,6 +610,20 @@ export class PromptContextBuilder {
   }
 
   /**
+   * 在办目标拉取器（GoalBoard 接线，agent-core 转发注入）。
+   *
+   * 每轮注入【在办目标】块（仅 active 前 3 条）：让对话面知道「我正在替用户办
+   * 这件事」，用户问「那事怎么样了」时可直接读台账，不必靠记忆模糊召回。
+   * 无活跃目标返回 null（零注入）。块只进动态层——目标进度随步骤变，
+   * 放稳定层会打断整个前缀缓存。
+   */
+  private activeGoalsProvider: ((actorId: string) => string | null) | null = null;
+
+  setActiveGoalsProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.activeGoalsProvider = fn;
+  }
+
+  /**
    * 注入人格内核拉取器（通常来自 BrainCenter.getPersonalityCore → MemoryCortex.getPersonalityCore）。
    * assembleMemory 会调用它获取结构化人格内核，格式化后填入 memory.personalityCore，
    * 由 buildLayeredSystemPrompt 注入 system prompt 稳定前缀的【人格内核】块，防止单次对话导致人格漂移。
@@ -929,6 +946,29 @@ export class PromptContextBuilder {
       }
     }
 
+    // 在办目标（2026-10-19 三层尺度架构）：GoalBoard 活跃目标摘要，只取前 3 条
+    // （裁剪在 provider 内做）。让对话面知道「我正在替用户办这件事」——
+    // 这是「同一性」问题，不是主动性问题。无活跃目标时零注入。
+    let activeGoalsBlock: string | undefined;
+    if (this.activeGoalsProvider) {
+      try {
+        activeGoalsBlock = this.activeGoalsProvider(input.actorId) ?? undefined;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 在办目标注入失败（忽略）: ${err}`);
+      }
+    }
+
+    // 会话级任务步骤（TaskPlanStore 进程级单例）：本轮有 plan 才注入完整步骤表。
+    // 与【在办目标】互补——goal 是跨会话意图，plan 是本会话执行路径（通常几轮内归档）。
+    let taskPlanBlock: string | undefined;
+    try {
+      const planStore = getTaskPlanStore();
+      const planKey = taskPlanKey({ actorId: input.actorId, sessionId: input.sessionId });
+      if (planStore && planKey) taskPlanBlock = planStore.buildPromptBlock(planKey);
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 任务步骤注入失败（忽略）: ${err}`);
+    }
+
     const seenMemory = new Set<string>();
     const dedupedMemorySummary = dedupePromptBlock(fromKv.memorySummary, seenMemory);
     const dedupedNarrativeRecall = dedupePromptBlock(narrativeRecall, seenMemory);
@@ -1019,6 +1059,8 @@ export class PromptContextBuilder {
         : {}),
       ...(userUnderstandingBlock ? { userUnderstanding: userUnderstandingBlock } : {}),
       ...(userFactsBlock ? { userFacts: userFactsBlock } : {}),
+      // 时间问句定位（动态层：每轮随问句变，不能进稳定前缀）
+      ...(facts.temporalBlock ? { temporalAddressing: facts.temporalBlock } : {}),
       ...(turnAddressingBlock ? { turnAddressing: turnAddressingBlock } : {}),
       ...(input.personalization?.relationshipGuidance
         ? { relationshipGuidance: input.personalization.relationshipGuidance }
@@ -1047,6 +1089,10 @@ export class PromptContextBuilder {
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
+      // 在办目标 / 会话步骤（2026-10-19）：只进动态层。goal 进度随步骤变、
+      // plan 随执行变，放稳定层会逐轮打断前缀缓存（实测代价 3-4K/轮）。
+      ...(activeGoalsBlock ? { activeGoals: activeGoalsBlock } : {}),
+      ...(taskPlanBlock ? { taskPlan: taskPlanBlock } : {}),
       ...(compactTravelState ? { travelState: compactTravelState } : {}),
       // 规则画像块（OnlineLearningCortex）单独走动态层【用户档案】画像槽；
       // 文件画像已升稳定层（userProfileSummary），不再在此合并避免双注入
@@ -1136,7 +1182,7 @@ export class PromptContextBuilder {
   private buildUserFactsBlock(
     actorId: string,
     userText: string,
-  ): { stableBlock: string | undefined; matchedFields: string[] } {
+  ): { stableBlock: string | undefined; matchedFields: string[]; temporalBlock?: string } {
     try {
       const store = getMemoryComponents().factStore;
       if (!store) return { stableBlock: undefined, matchedFields: [] };
@@ -1144,7 +1190,25 @@ export class PromptContextBuilder {
         .matchFieldsInText(actorId, userText)
         .map((f) => f.field.trim())
         .filter(Boolean);
-      return { stableBlock: store.renderForPrompt(actorId) ?? undefined, matchedFields };
+      // 软抑制（"别再提这个"）：只影响"主不主动提"，不移除内容
+      let suppressedFields: Set<string> | undefined;
+      try {
+        suppressedFields = peekMemorySuppressionStore()?.suppressedFields(actorId);
+      } catch {
+        suppressedFields = undefined;
+      }
+      // 时间问句定位（"2024年6月我住哪"）：走区间查询给确定答案，不靠召回猜
+      let temporalBlock: string | undefined;
+      try {
+        temporalBlock = buildTemporalFactAddressing(store, actorId, userText, new Date());
+      } catch {
+        temporalBlock = undefined;
+      }
+      return {
+        stableBlock: store.renderForPrompt(actorId, undefined, "user", { suppressedFields }) ?? undefined,
+        matchedFields,
+        ...(temporalBlock ? { temporalBlock } : {}),
+      };
     } catch (err) {
       console.log(`[PromptContextBuilder] 结构化事实块构建失败（忽略）: ${err}`);
       return { stableBlock: undefined, matchedFields: [] };

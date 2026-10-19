@@ -25,11 +25,18 @@ export const GOAL_PLANNING_CHAT_TOOLS: ChatCompletionTool[] = [
           steps: {
             type: "array",
             items: { type: "string" },
-            description: "有序步骤列表，每步一句完整可执行的话（如「查东站周边两居室房源并整理 5 个候选」）",
+            description:
+              "有序步骤列表，每步一句完整可执行的话。**不传则按同类目标模板自动生成**" +
+              "（出行/搬家/备考/装修/求职已有模板，省一次拆解）；目标形态明显不同时才自己拆",
+          },
+          successCriteria: {
+            type: "string",
+            description:
+              "达成判据一句话（如「日期、交通、住宿都定下来且在预算内」）。有它验收才严格；不传则用模板自带的",
           },
           note: { type: "string", description: "可选补充背景（预算/偏好/期限等）" },
         },
-        required: ["title", "steps"],
+        required: ["title"],
         additionalProperties: false,
       },
     },

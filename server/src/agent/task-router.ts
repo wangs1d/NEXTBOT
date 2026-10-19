@@ -13,7 +13,7 @@
  *     对话面误判转任务（agent-core），路由不需要一次判对。
  */
 
-import { TASK_PLANE_FALLBACK_BUDGET } from "./intent-router.js";
+import { TASK_PLANE_FALLBACK_BUDGET, routePlanForIntent } from "./intent-router.js";
 
 /** 执行车道：chat=对话面（直答/前台工具直办）；task=任务面（后台执行）。 */
 export type LlmExecutionMode = "chat" | "task";
@@ -106,9 +106,29 @@ export type RouteDecision = {
   travelPlanRequest?: import("./realtime-search-query.js").TravelPlanRequest;
 };
 
+/**
+ * 计划续跑轮的路由决策（2026-10-19 handoff）。
+ *
+ * 用户点「我已完成，继续下一步」时，这轮**不需要猜意图**：手里有一条没走完的
+ * 计划，且刚刚确认完一步，语义上就是「继续执行 multi_step_task」。走确定性
+ * 路由比拿按钮文案去问分类器更稳——文案是 UI 文案，以后改一个字就会换平面。
+ *
+ * 注意：这里只是「平面/预算」的确定性，不决定模型做什么；具体下一步由注入的
+ * 【当前任务步骤】块 + 用户回执共同决定。
+ */
+export function buildPlanContinuationDecision(): RouteDecision {
+  return {
+    reasons: ["plan_continuation"],
+    // 任务面不做聊天气泡分段（与其它任务面轮一致）
+    segmentable: false,
+    intent: "multi_step_task",
+    confidence: 1,
+    ...routePlanForIntent("multi_step_task"),
+  };
+}
+
 /** 由车道派生词法级执行计划（降级路径用）。 */
-export function planFieldsForLane(lane: LlmExecutionMode): {
-  plane: TurnPlane;
+export function planFieldsForLane(lane: LlmExecutionMode): {  plane: TurnPlane;
   capabilities: TurnCapability[];
   budget: number;
   tier: TurnTier;

@@ -80,7 +80,7 @@ void main() {
       expect(syncCalls, 2);
     });
 
-    test("reminder_fired: 说明文案回退链（空 message → 到点了）经前台横幅端口可断言",
+    test("reminder_fired: 单文案制（2026-10-19 定调：不带「标题 · 说明」前缀）经前台横幅端口可断言",
         () async {
       // 展示文本组装为纯函数直测（岛通道单测态 nativeReady=false 不出口）
       expect(
@@ -91,7 +91,8 @@ void main() {
       expect(IslandReminderScheduler.displayText("吃药", null), "吃药");
       expect(IslandReminderScheduler.displayText("吃药", "  "), "吃药");
 
-      // 说明文案回退链（空 message → 到点了）经前台横幅端口可断言
+      // 单文案链（message → reminderMessage → title/shortTitle → 到点了）：
+      // 横幅只出主行文案，message 传空（副行收起），标题前缀不再拼接。
       String? bannerTitle;
       String? bannerMessage;
       c.showForegroundReminder = (String title, String message) async {
@@ -101,7 +102,13 @@ void main() {
       addTearDown(() => c.showForegroundReminder = null);
       await c.onScheduleReminderFired(<String, dynamic>{"title": "吃药"});
       expect(bannerTitle, "吃药");
-      expect(bannerMessage, "到点了");
+      expect(bannerMessage, isEmpty);
+
+      // reminderMessage 优先：只出这一句，不带任务标题前缀
+      await c.onScheduleReminderFired(
+          <String, dynamic>{"title": "吃饭", "reminderMessage": "该吃饭啦"});
+      expect(bannerTitle, "该吃饭啦");
+      expect(bannerMessage, isEmpty);
     });
 
     test("inbox.message: 桌面前台走应用内呈现并 bump 角标", () async {

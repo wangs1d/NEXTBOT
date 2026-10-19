@@ -12,6 +12,7 @@ import "media_disk_cache.dart";
 import "travel_plan_mobile_page.dart";
 import "travel_plan_models.dart";
 import "travel_plan_panel.dart";
+import "travel_plan_window.dart";
 import "travel_theme.dart";
 
 // ═══════════════════════════════════════════════════════════════════
@@ -204,6 +205,10 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   /// 完整行程缓存（打开详情共用，避免重复拉取）。
   final Map<String, TravelPlanData> _planCache = <String, TravelPlanData>{};
 
+  /// 服务端原始行程 JSON 缓存（独立窗口透传用，不经 Dart 模型往返）。
+  final Map<String, Map<String, dynamic>> _rawPlanCache =
+      <String, Map<String, dynamic>>{};
+
   /// 详情加载态（按 planId 记录）。
   final Set<String> _loadingPlans = <String>{};
 
@@ -253,6 +258,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
         throw Exception("行程数据缺失");
       }
       final TravelPlanData plan = TravelPlanData.fromPlanJson(rawPlan);
+      _rawPlanCache[planId] = rawPlan;
       _planCache[planId] = plan;
       return plan;
     } catch (e) {
@@ -280,6 +286,14 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       if (Platform.isAndroid || Platform.isIOS) {
         unawaited(TravelPlanMobilePage.show(context, plan: plan));
       } else {
+        // 桌面端优先独立系统窗口（与聊天卡片同一条链路）；原始 JSON 缓存
+        // 命中时透传服务端行程，spawn 失败再回落应用内全屏路由。
+        final Map<String, dynamic>? raw = _rawPlanCache[plan.planId];
+        if (raw != null && raw.isNotEmpty) {
+          final bool opened = await TravelPlanWindowLauncher.openPlanJson(raw);
+          if (opened) return;
+        }
+        if (!mounted) return;
         unawaited(Navigator.of(context).push<void>(
           MaterialPageRoute<void>(
             builder: (BuildContext context) =>
@@ -615,12 +629,6 @@ class _LeftRail extends StatelessWidget {
                             fontSize: 17,
                             fontWeight: FontWeight.w800,
                             color: c.text)),
-                    const SizedBox(width: 8),
-                    Text(
-                      "${plans.length} 次旅行 · "
-                      "${plans.map((_PlanSummary s) => s.destination).where((String d) => d.isNotEmpty).toSet().length} 个目的地",
-                      style: TextStyle(fontSize: 11, color: c.muted),
-                    ),
                   ],
                 ),
               ),

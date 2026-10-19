@@ -214,64 +214,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .poi .pulse{position:absolute;left:0;top:0;width:22px;height:22px;border-radius:50%;border:1px solid var(--amber);display:none}
 .poi.now .pulse{display:block;animation:ping 1.8s infinite}
 
-/* ===== 攻略视图（与今日/地图并列切换） =====
-   时间轴/出片/漂亮饭/实用信息四 Tab。guide.* 与 travelInfo 均为可选载荷字段：
-   缺失或为空一律空态文案降级，不放占位数据。配色全部沿用全局令牌。 */
-.view-guide{display:none;background:var(--win)}
-.view-guide.open{display:flex;z-index:4}
-.guide-wrap{flex:1;display:flex;flex-direction:column;min-width:0;min-height:0}
-/* Tab 条：与顶栏 .day-pill 同一视觉语言（胶囊容器 + 选中反白） */
-.guide-tabs{display:flex;gap:2px;background:var(--card);border:1px solid var(--line);border-radius:999px;padding:2px;
-  flex:0 0 auto;width:max-content;max-width:100%;overflow-x:auto;scrollbar-width:none}
-.guide-tabs::-webkit-scrollbar{display:none}
-.guide-tabs button{padding:5px 14px;border-radius:999px;font-size:11.5px;color:var(--t2);white-space:nowrap;flex:0 0 auto}
-.guide-tabs button.on{background:var(--txt);color:#15161A;font-weight:600}
-.guide-body{flex:1;overflow-y:auto;min-height:0;margin-top:14px;padding:0 6px 12px 0}
-/* 行程时间轴 */
-.g-day{margin-bottom:16px}
-.g-day-h{display:flex;align-items:baseline;gap:10px;margin:2px 2px 8px}
-.g-day-h b{font-size:14px;font-weight:600}
-.g-day-h span{font-family:var(--num);font-size:10.5px;color:var(--t3);letter-spacing:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.g-row{display:flex;align-items:flex-start;gap:12px;padding:8px 10px;border-radius:10px}
-.g-row:hover{background:rgba(255,255,255,.04)}
-.g-time{font-family:var(--num);font-size:11.5px;color:var(--amber);width:44px;flex:0 0 auto;padding-top:2px}
-.g-time span{display:block;font-size:9.5px;color:var(--t3);margin-top:1px}
-.g-dot{width:8px;height:8px;border-radius:50%;background:var(--amberLine);flex:0 0 auto;margin-top:5px}
-.g-dot.stay{border-radius:2px;background:var(--jade)}
-.g-main{flex:1;min-width:0}
-.g-name{font-size:13px;font-weight:500;line-height:1.4}
-.g-tag{font-size:9.5px;color:var(--t3);border:1px solid var(--line);padding:2px 6px;border-radius:5px;margin-left:8px;font-weight:400;vertical-align:1px;white-space:nowrap}
-.g-tips{margin-top:3px}
-.g-tip{font-size:11.5px;color:var(--t2);line-height:1.65;padding-left:12px;position:relative;margin-top:2px}
-.g-tip::before{content:"";position:absolute;left:1px;top:8px;width:4px;height:4px;border-radius:50%;background:var(--amber2)}
-/* 出片 / 漂亮饭卡片 */
-.g-cards{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:12px}
-.g-card{background:var(--card);border:1px solid var(--line);border-radius:12px;overflow:hidden;position:relative}
-.g-card.dim{opacity:.35;transition:opacity .4s}
-/* 「不感兴趣」负反馈按钮：hover 卡片浮现（travel 双端① 偏好闭环入口） */
-.g-card-x{position:absolute;top:8px;right:8px;background:rgba(10,15,20,.72);color:var(--t2);border:1px solid var(--line);border-radius:999px;font-size:10.5px;padding:3px 10px;cursor:pointer;opacity:0;transition:opacity .15s;line-height:1.4}
-.g-card:hover .g-card-x{opacity:1}
-.g-card-x:hover{color:#fff;border-color:var(--t3)}
-.g-img{height:118px}
-/* 无实拍图兜底：与 .now-photo.noimg 同族深青渐变（不放占位图） */
-.g-img.noimg{background:linear-gradient(150deg,#14323C,#0A151B 70%)}
-.g-card-b{padding:10px 12px 12px}
-.g-card-n{font-size:13px;font-weight:600;line-height:1.4}
-.g-card-d{font-size:11.5px;color:var(--t2);line-height:1.65;margin-top:4px}
-.g-card-d .g-k{color:var(--t3);margin-right:6px}
-.g-chip{display:inline-block;font-size:10px;color:var(--amber);background:var(--amberSoft);border:1px solid var(--amberLine);border-radius:999px;padding:2px 9px;margin:7px 6px 0 0}
-/* 实用信息 */
-.g-sec{margin-bottom:18px}
-.g-sec-h{font-size:10px;color:var(--t3);letter-spacing:1.5px;margin-bottom:7px}
-.g-sec-b{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:8px 14px}
-.g-kv{display:flex;gap:12px;font-size:12.5px;line-height:1.6;padding:4px 0}
-.g-kv .k{color:var(--t3);width:62px;flex:0 0 auto}
-.g-kv .v{min-width:0}
-.g-li{font-size:12px;color:var(--t2);line-height:1.7;padding-left:13px;position:relative}
-.g-li::before{content:"";position:absolute;left:2px;top:9px;width:4px;height:4px;border-radius:50%;background:var(--amber2)}
-/* 空态（guide/travelInfo 缺失或为空时的诚实降级） */
-.g-empty{border:1px dashed var(--line2);border-radius:12px;padding:34px 16px;text-align:center;color:var(--t3);font-size:12.5px}
-
 /* ===== 右栏：与主区并排的双面板（今日安排） =====
    占布局列、不悬浮覆盖内容；收缩按钮在面板头部，收起后宽度归零，
    右上角留一枚浮标（rb-fab）唤回。 */
@@ -341,7 +283,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
     <nav class="sidebar">
       <button class="side-ic on" data-view="now" title="今日"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></svg></button>
       <button class="side-ic" data-view="map" title="路线地图"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2zM9 4v14M15 6v14"/></svg></button>
-      <button class="side-ic" data-view="guide" title="攻略"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></button>
       <div class="side-spacer"></div>
     </nav>
 
@@ -410,20 +351,6 @@ img{display:block;width:100%;height:100%;object-fit:cover}
             <div id="map"></div>
             <div class="map-mark" id="mapMark"></div>
             <div class="map-loading" id="mapLoading">底图加载中…</div>
-          </div>
-        </div>
-
-        <!-- 攻略视图：行程时间轴 / 出片清单 / 漂亮饭清单 / 实用信息。
-             guide / travelInfo 为可选载荷字段，缺失时对应 Tab 显示空态文案（不臆造）。 -->
-        <div class="view view-guide" id="viewGuide">
-          <div class="guide-wrap">
-            <div class="guide-tabs" id="guideTabs">
-              <button data-tab="timeline" class="on">行程时间轴</button>
-              <button data-tab="photo">出片清单</button>
-              <button data-tab="food">漂亮饭清单</button>
-              <button data-tab="info">实用信息</button>
-            </div>
-            <div class="guide-body" id="guideBody"></div>
           </div>
         </div>
 
@@ -501,16 +428,13 @@ DEMO.META={city:'杭州',cityEn:'HANGZHOU',days:2,dates:['09/12','09/13'],title:
 var S=DEMO.S,ORDER=DEMO.ORDER,EDGE=DEMO.EDGE,DAYNAME=DEMO.DAYNAME,META=DEMO.META;
 var DAY_START={};                 // day → 当天时间轴起点（分钟），取首个明确时刻
 function dayStart(){return DAY_START[state.day]||540;}
-/* 攻略视图可选载荷：guide（出片/漂亮饭）与 travelInfo（实用信息）。
-   宿主未下发时保持 null —— 对应 Tab 一律空态文案降级，绝不报错。 */
-var GUIDE=null,TRAVEL_INFO=null;
 /* 交通方式图标（icon/TICON）随「前往下一站」一并下线：桌面端不再做过程引导 */
 var TNAME={walk:'步行',bike:'骑行',boat:'游船',taxi:'打车',hike:'徒步'};
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
 function t2s(m){m=Math.round(m);return (Math.floor(m/60)+'').padStart(2,'0')+':'+(m%60+'').padStart(2,'0');}
 
 /* ================= 状态 + Agent 实时重排 ================= */
-var state={day:1,pace:0,event:null,cur:2,prev:null,forceShow:{},view:'now',gtab:'timeline'};
+var state={day:1,pace:0,event:null,cur:2,prev:null,forceShow:{},view:'now'};
 /* 演示数据模式下沿用设计稿的显式收起口径（boat/sudi/jiuxi）；
    真实载荷模式按站的通用属性判（ride 水上交通 / 天气敏感词 / 高耗体力），不认死 id。
    两档都保证「至少留一站」：全收起等于当天没行程，宁可留一站让人自己决定。 */
@@ -759,151 +683,6 @@ function renderStopNav(items){
   $('stopPos').textContent=(i+1)+' / '+n;
   $('stopPrev').disabled=i<=0;
   $('stopNext').disabled=i>=n-1;
-}
-
-/* ═══════════════════════════════════════════════════════════════════
-   攻略视图（与今日/地图并列）：行程时间轴 / 出片清单 / 漂亮饭清单 / 实用信息
-   ═══════════════════════════════════════════════════════════════════
-   时间轴复用 S/ORDER/EDGE（与右栏/旅程带同一份数据模型），时间按 startHint
-   锚点 + 站序累加推算，不臆造；guide / travelInfo 为可选载荷字段，缺失或为空
-   一律空态文案降级（与页面「数据诚实化」口径一致），绝不报错、不放占位数据。 */
-function gTipsHtml(tips){
-  var h='';
-  (Array.isArray(tips)?tips:[]).forEach(function(t){
-    t=str(t).trim();if(t)h+='<div class="g-tip">'+escHtml(t)+'</div>';
-  });
-  return h?'<div class="g-tips">'+h+'</div>':'';
-}
-/** 卡片配图：无图直接渐变兜底（.g-img.noimg）；有图交给 setImg 挂 onerror/onload
-    —— 加载失败同样落到渐变，不出破图、不用占位图。 */
-function gImgHtml(url,name){
-  url=str(url).trim();
-  return '<div class="g-img'+(url?'':' noimg')+'"'+(url?' data-src="'+escHtml(url)+'"':'')+
-    ' data-name="'+escHtml(name)+'"><img alt=""></div>';
-}
-function bindGuideImgs(scope){
-  Array.prototype.forEach.call(scope.querySelectorAll('.g-img'),function(box){
-    var im=box.querySelector('img');if(!im)return;
-    setImg(im,box,box.dataset.src||'',box.dataset.name||'');
-  });
-}
-function guideTimelineHtml(){
-  if(!DATA_READY)return '<div class="g-empty">行程装载中…</div>';
-  var h='';
-  for(var d=1;d<=dayCount();d++){
-    var ids=ORDER[d]||[];if(!ids.length)continue;
-    var head=[DAYNAME[d]||'',META.dates&&META.dates[d-1]?META.dates[d-1]:''].filter(Boolean).join(' · ');
-    var rows='',cur=DAY_START[d]||540;
-    for(var i=0;i<ids.length;i++){
-      var sp=S[ids[i]];if(!sp)continue;
-      var start=sp.startHint!=null?sp.startHint:(sp.anchor!=null?sp.anchor:cur);
-      var dur=sp.base>0?sp.base:45;
-      cur=start+dur;
-      var nextId=ids[i+1],edge=nextId?EDGE[ids[i]+'->'+nextId]:null;
-      if(edge)cur+=edge[1];
-      rows+='<div class="g-row"><div class="g-time">'+t2s(start)+'<span>'+t2s(start+dur)+'</span></div>'+
-        '<div class="g-dot'+(sp.k==='stay'?' stay':'')+'"></div>'+
-        '<div class="g-main"><div class="g-name">'+escHtml(sp.n)+'<span class="g-tag">'+escHtml(sp.tag)+'</span></div>'+
-        gTipsHtml(sp.tips)+'</div></div>';
-    }
-    if(rows)h+='<div class="g-day"><div class="g-day-h"><b>Day '+d+'</b>'+(head?'<span>'+escHtml(head)+'</span>':'')+'</div>'+rows+'</div>';
-  }
-  return h||'<div class="g-empty">暂无行程</div>';
-}
-function guidePhotoHtml(){
-  var list=GUIDE&&Array.isArray(GUIDE.photoSpots)?GUIDE.photoSpots:[];
-  if(!list.length)return '<div class="g-empty">暂无出片数据</div>';
-  var h='<div class="g-cards">';
-  list.forEach(function(p){
-    p=(p&&typeof p==='object')?p:{};
-    var imgs=Array.isArray(p.images)?p.images:[];
-    var name=str(p.name).trim()||'未命名机位';
-    h+='<div class="g-card" data-name="'+escHtml(name)+'" data-kind="photo" data-tags="'+escHtml((Array.isArray(p.tags)?p.tags:[]).join(','))+'">'+gImgHtml(imgs[0],name)+
-      '<button class="g-card-x" title="下次规划同类少推">不感兴趣</button>'+
-      '<div class="g-card-b"><div class="g-card-n">'+escHtml(name)+'</div>'+
-      (str(p.photoTip).trim()?'<div class="g-card-d">'+escHtml(str(p.photoTip).trim())+'</div>':'')+
-      (str(p.bestTime).trim()?'<span class="g-chip">'+escHtml(str(p.bestTime).trim())+'</span>':'')+
-      '</div></div>';
-  });
-  return h+'</div>';
-}
-function guideFoodHtml(){
-  var list=GUIDE&&Array.isArray(GUIDE.prettyFood)?GUIDE.prettyFood:[];
-  if(!list.length)return '<div class="g-empty">暂无</div>';
-  var h='<div class="g-cards">';
-  list.forEach(function(p){
-    p=(p&&typeof p==='object')?p:{};
-    var imgs=Array.isArray(p.images)?p.images:[];
-    var name=str(p.name).trim()||'未命名小店';
-    var ap=str(p.avgPrice).trim();
-    var vibe=str(p.vibe).trim(),sig=str(p.signature).trim();
-    h+='<div class="g-card" data-name="'+escHtml(name)+'" data-kind="food" data-tags="'+escHtml((Array.isArray(p.tags)?p.tags:[]).join(','))+'">'+gImgHtml(imgs[0],name)+
-      '<button class="g-card-x" title="下次规划同类少推">不感兴趣</button>'+
-      '<div class="g-card-b"><div class="g-card-n">'+escHtml(name)+'</div>'+
-      (vibe?'<div class="g-card-d">'+escHtml(vibe)+'</div>':'')+
-      (sig?'<div class="g-card-d"><span class="g-k">招牌</span>'+escHtml(sig)+'</div>':'')+
-      (ap?'<span class="g-chip">人均 '+escHtml(/^\d+(\.\d+)?$/.test(ap)?'¥'+ap:ap)+'</span>':'')+
-      '</div></div>';
-  });
-  return h+'</div>';
-}
-/** 实用信息：只渲染载荷里真实存在的字段（TravelInfo，字段级降级，缺哪行省哪行）。 */
-function guideInfoHtml(){
-  var ti=TRAVEL_INFO;
-  if(!ti||typeof ti!=='object')return '<div class="g-empty">暂无实用信息</div>';
-  var secs='';
-  function sec(title,body){if(body)secs+='<div class="g-sec"><div class="g-sec-h">'+escHtml(title)+
-    '</div><div class="g-sec-b">'+body+'</div></div>';}
-  function kv(k,v){v=str(v).trim();return v?'<div class="g-kv"><span class="k">'+escHtml(k)+
-    '</span><span class="v">'+escHtml(v)+'</span></div>':'';}
-  function lis(arr){var h='';(Array.isArray(arr)?arr:[]).forEach(function(t){
-    t=str(t).trim();if(t)h+='<div class="g-li">'+escHtml(t)+'</div>';});return h;}
-  var basics='';
-  var visa=(ti.visa&&typeof ti.visa==='object')?ti.visa:null;
-  if(visa){
-    var vt=str(visa.type).trim();
-    if(vt)basics+=kv('签证',vt+(visa.required===false?' · 无需另行办理':''));
-    var vn=str(visa.notes).trim();
-    if(vt&&vn)basics+=kv('签证备注',vn);
-  }
-  var c=(ti.currency&&typeof ti.currency==='object')?ti.currency:null;
-  if(c){
-    var cv=[str(c.name).trim(),str(c.code).trim(),str(c.symbol).trim()].filter(Boolean).join(' ');
-    var r=Number(c.rateToCNY);
-    if(isFinite(r)&&r>0)cv=(cv?cv+' · ':'')+'1'+(str(c.code).trim()||'单位')+'≈'+r+' 元';
-    if(cv)basics+=kv('货币',cv);
-  }
-  var tz=(ti.timezone&&typeof ti.timezone==='object')?ti.timezone:null;
-  if(tz){
-    var tv=[str(tz.name).trim(),str(tz.offset).trim()].filter(Boolean).join(' · ');
-    if(tv)basics+=kv('时区',tv);
-  }
-  basics+=kv('电压',ti.voltage)+kv('插座',ti.socket);
-  var langs=Array.isArray(ti.language)?ti.language:[];
-  if(langs.length)basics+=kv('语言',langs.map(str).filter(Boolean).join('、'));
-  var bs=(ti.bestSeason&&typeof ti.bestSeason==='object')?ti.bestSeason:null;
-  if(bs){
-    var months=Array.isArray(bs.months)?bs.months:[];
-    var bv=[months.map(str).filter(Boolean).join(' / '),str(bs.description).trim()].filter(Boolean).join(' · ');
-    if(bv)basics+=kv('最佳季节',bv);
-  }
-  sec('基本信息',basics);
-  var em=(ti.emergency&&typeof ti.emergency==='object')?ti.emergency:null;
-  if(em)sec('紧急电话',kv('警察',em.police)+kv('救护车',em.ambulance)+
-    kv('旅游热线',em.touristHotline)+kv('中国大使馆',em.chinaEmbassy));
-  sec('风俗与禁忌',lis(ti.customs));
-  sec('实用贴士',lis(ti.tips));
-  sec('记得带',lis(ti.packing));
-  return secs||'<div class="g-empty">暂无实用信息</div>';
-}
-function renderGuide(){
-  var body=$('guideBody');if(!body)return;
-  var tab=state.gtab||'timeline';
-  if(tab==='photo')body.innerHTML=guidePhotoHtml();
-  else if(tab==='food')body.innerHTML=guideFoodHtml();
-  else if(tab==='info')body.innerHTML=guideInfoHtml();
-  else body.innerHTML=guideTimelineHtml();
-  bindGuideImgs(body);
 }
 
 /* ═══════════════════════════════════════════════════════════════════
@@ -1302,7 +1081,6 @@ Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
   b.addEventListener('click',function(){
     var v=b.dataset.view;
     if(v==='now'){state.view='now';$('viewMap').classList.remove('open');}
-    else if(v==='guide'){state.view='guide';$('viewMap').classList.remove('open');renderGuide();}
     else if(v==='map'){
       state.view='map';
       $('viewMap').classList.remove('boot');   /* 离屏预建期就点开：摘掉屏外定位 */
@@ -1315,14 +1093,6 @@ Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
     }
     else{return;} /* 未知视图：不响应也不改选中态 */
     Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x===b);});
-  });
-});
-/* 攻略视图 Tab：四枚常驻（数据缺失走空态文案，不隐藏 Tab），内容惰性重建 */
-Array.prototype.forEach.call($('guideTabs').querySelectorAll('button'),function(b){
-  b.addEventListener('click',function(){
-    state.gtab=b.dataset.tab||'timeline';
-    Array.prototype.forEach.call($('guideTabs').querySelectorAll('button'),function(x){x.classList.toggle('on',x===b);});
-    renderGuide();
   });
 });
 $('mapBack').addEventListener('click',function(){state.view='now';$('viewMap').classList.remove('open');
@@ -1445,7 +1215,6 @@ function normalizePlan(raw){
   if(!days.length||!days[0]||!days[0].items)return raw;
   return{
     destination:str(raw.destination),title:str(raw.title),center:raw.center||null,
-    guide:raw.guide||null,travelInfo:raw.travelInfo||null,
     // 顶层可选字段透传：items→entries 形态转换不再丢数据角标/天气/人格徽章/起止日期
     dataQuality:raw.dataQuality,weather:raw.weather,persona:raw.persona||null,
     startDate:raw.startDate,endDate:raw.endDate,
@@ -1597,8 +1366,6 @@ function adaptPlan(raw){
     start:str(raw.startDate),end:str(raw.endDate),
     persona:(raw.persona&&raw.persona.id&&raw.persona.label)?{id:str(raw.persona.id),label:str(raw.persona.label),desc:str(raw.persona.desc)}:null};
   WEATHER_TEXT=str(raw.weather);
-  GUIDE=(raw.guide&&typeof raw.guide==='object')?raw.guide:null;
-  TRAVEL_INFO=(raw.travelInfo&&typeof raw.travelInfo==='object')?raw.travelInfo:null;
   liveCache={};
   return true;
 }
@@ -1641,9 +1408,6 @@ function warmBasemap(raw){
 }
 window.__travelPanel={
   loadPlan:function(payload){
-    GUIDE=null;TRAVEL_INFO=null;   /* 换载先清空攻略可选字段：adaptPlan 失败也不残留旧数据 */
-    // 行程 id（travel 双端①）：偏好反馈 POST 用；载荷/URL 两路都取不到则反馈按钮静默失效
-    PAGE_PLAN_ID=payload&&str(payload.planId).trim()?str(payload.planId).trim():PAGE_PLAN_ID;
     DEMO_MODE=!adaptPlan(payload);
     DATA_READY=true;
     state.day=1;state.cur=0;state.event=null;state.forceShow={};
@@ -1655,7 +1419,6 @@ window.__travelPanel={
     warmBasemap(payload);
     bootMapEarly();
     render();
-    if(state.view==='guide')renderGuide();   /* 攻略视图开着：载荷到手即刷新 */
     // 全量照片预热：render 已预热当前天（当前站经 setImg 最先在载），
     // 这里把其余天跟进（有图站直接入队、缺图站经 enrichLive 补图后自动入队）。
     // 预热发生在窗口隐藏期——用户显窗时各天照片通常已就绪，进窗/切天/切站零等待。
@@ -1699,8 +1462,6 @@ $('titlebar').addEventListener('dblclick',function(e){
 
 /* ══════════════════ 启动 ══════════════════ */
 render();
-/* 行程 id（travel 双端①）：偏好反馈 POST 用；bootById 与 loadPlan 双路赋值 */
-var PAGE_PLAN_ID=null;
 /* ?id / ?planId 自取载荷（浏览器标签页路径，与 mobile.html 同款）：
    宿主形态走桥注入不受影响；真实仓库 planId 走 /travel/plans/:id（读取装饰会
    顺带把媒体库补图带出），内存载荷 id 走 /travel-plans/:id。 */
@@ -1708,7 +1469,6 @@ var PAGE_PLAN_ID=null;
   var pm=/[?&]planId=([A-Za-z0-9_-]+)/.exec(location.search);
   var m=/[?&]id=([A-Za-z0-9]+)/.exec(location.search);
   if(!pm&&!m)return;
-  PAGE_PLAN_ID=pm?pm[1]:m[1];
   var base=apiBase();
   if(!base)return;
   fetch(pm?base+'/travel/plans/'+pm[1]:base+'/travel-plans/'+m[1],{headers:{Accept:'application/json'}})
@@ -1720,37 +1480,6 @@ var PAGE_PLAN_ID=null;
     .catch(function(){/* 取不到：保持当前展示，不打断演示态 */});
 })();
 
-/* 攻略页 POI 负反馈（travel 双端①）：出片/漂亮饭卡「不感兴趣」→ 按行程归属
-   写回用户画像（同类标签衰减 + 点名排除），下次规划同类少推。卡片淡出原地
-   收场；无行程 id / 请求失败如实提示，不假装成功。 */
-document.addEventListener('click',function(e){
-  var btn=e.target.closest('.g-card-x');
-  if(!btn)return;
-  e.stopPropagation();   /* 不触发卡片下层点击（选站等） */
-  var card=btn.closest('.g-card');
-  if(!card||btn.disabled)return;
-  if(!PAGE_PLAN_ID){toast('行程未关联，暂不能记偏好');return;}
-  var body={
-    kind:card.dataset.kind||'attraction',
-    name:card.dataset.name||'',
-    tags:(card.dataset.tags||'').split(',').filter(Boolean)
-  };
-  if(!body.name){toast('这条没有名称，跳过');return;}
-  btn.disabled=true;
-  fetch(apiBase()+'/travel/plans/'+encodeURIComponent(PAGE_PLAN_ID)+'/poi-feedback',{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)
-  }).then(function(r){
-    if(!r.ok)throw new Error('HTTP '+r.status);
-    card.classList.add('dim');
-    btn.textContent='下次少推';
-    toast('记下了，下次同类少推');
-  }).catch(function(){
-    btn.disabled=false;
-    toast('没记上，稍后再试');
-  });
-});
 // 窗口尺寸变化：MapLibre 需要显式 resize 才会重算画布与视口（不会自动跟随容器）
 window.addEventListener('resize',function(){
   if(state.view==='map'&&mapState.map)mapState.map.resize();

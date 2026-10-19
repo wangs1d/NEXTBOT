@@ -6,6 +6,8 @@ import type { AuditService } from "../../services/audit-service.js";
 import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import { resolveActorId } from "../../agent/actor-id.js";
+import { getTaskPlanStore, isHandoffDoneReply, taskPlanKey } from "../../agent/task-plan-store.js";
+import { buildPlanContinuationDecision } from "../../agent/task-router.js";
 import { dialogStateStore } from "../../agent/dialog-state.js";
 import { ClientEventType, ServerEventType } from "../../protocol.js";
 import type { VisionFrame } from "../../external-model/types.js";
@@ -349,6 +351,39 @@ export type ChatUserMessageContext = {
 };
 
 /**
+ * 计划交接的文字回执（2026-10-19 handoff）。
+ *
+ * 触发条件三者齐：①本会话存在等待步 ②文本是「已完成」类短句 ③收回成功。
+ * 任何一条不满足都返回 undefined，本轮按普通消息走——不猜、不劫持。
+ */
+function resumePlanHandoffFromText(
+  sessionId: string,
+  text: string,
+):
+  | { stepId: string; stepTitle: string; nextStepId?: string; nextStepTitle?: string }
+  | undefined {
+  try {
+    const store = getTaskPlanStore();
+    if (!store) return undefined;
+    const key = taskPlanKey({ sessionId });
+    const blocking = store.blockingStep(key);
+    if (!blocking) return undefined;
+    if (!isHandoffDoneReply(text)) return undefined;
+    const resumed = store.resume(key, blocking.id, { by: "user", note: text.trim().slice(0, 60) });
+    if (!resumed.ok) return undefined;
+    return {
+      stepId: resumed.step.id,
+      stepTitle: resumed.step.title,
+      ...(resumed.nextStep
+        ? { nextStepId: resumed.nextStep.id, nextStepTitle: resumed.nextStep.title }
+        : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * 处理 `chat.user_message` WebSocket 事件。
  * @returns 是否已消费该事件
  */
@@ -500,6 +535,17 @@ export async function handleChatUserMessageEvent(
   // （与确认卡点击同效；正则严格短语匹配，避免误伤无关场景的「确认」）。fire-and-forget。
   deps.phoneCallCoordinator?.observeUserText(msgActor, effectiveText);
 
+  // 本轮使用的会话键（与 chat.user_message 提交时一致；隐身会话是唯一例外）
+  const turnSessionId =
+    typeof data.sessionId === "string" && isIncognitoChatSessionId(data.sessionId)
+      ? data.sessionId
+      : ctx.sessionId;
+  // 计划交接的文字回执（2026-10-19 handoff）：用户在等一步外部操作，直接打字说
+  // 「点好了 / 付了 / 已完成」。**只有存在唯一等待步时才消费**——歧义就不猜，
+  // 让用户去点胶囊/卡片。这一步在路由之前完成，跟点击回执走同一条续跑通道。
+  const planContinuation =
+    resumePlanHandoffFromText(turnSessionId, effectiveText);
+
   void deps.auditService
     .record({
       type: ClientEventType.ChatUserMessage,
@@ -541,6 +587,8 @@ export async function handleChatUserMessageEvent(
         ? data.sessionId
         : ctx.sessionId,
     contentType: typeof data.contentType === "string" ? data.contentType : undefined,
+    // 计划交接回执（2026-10-19 handoff）：等待步已置 done，本轮是续跑。
+    ...(planContinuation ? { planContinuation } : {}),
   }, (batched, turn) => processBatchedMessage(ctx, batched, deps, turn));
 
   return true;
@@ -749,6 +797,80 @@ async function processBatchedMessage(
     enabled: getAgentRuntimeConfig().turnPanelV2.enabled,
   });
 
+  // 会话级任务计划 → 前端步骤条（2026-10-19 P0-B）
+  // plan.* 工具写入/改状态即广播，这里转成 plan_step 复用 plan-execute 的同一条
+  // 管道（不需要新增 UI 协议）。按 session 覆盖式订阅：异常路径没退订也不会累积。
+  // 键必须与工具层写入时一致（ToolContext.sessionId）——旧代码用 msgActor（userId），
+  // 与 socket 会话键不等时会「计划写了但前端不显示」。
+  try {
+    getTaskPlanStore()?.subscribeSession(taskPlanKey({ sessionId: batched.sessionId, actorId: msgActor }), (ev) => {
+      if (isStale() || ev.type === "clear") return;
+      // 客户端只认 pending|running|ok|err|waiting（turn_state.dart:_stepStatusFromWire）
+      const wireStatus = (s: string): "ok" | "pending" | "running" | "err" | "waiting" =>
+        s === "done" || s === "skipped"
+          ? "ok"
+          : s === "failed"
+            ? "err"
+            : s === "running"
+              ? "running"
+              : s === "awaiting_confirm"
+                ? "waiting"
+                : "pending";
+      const emitStep = (
+        id: string,
+        title: string,
+        status: string,
+        handoff?: { instruction?: string; actions?: Array<{ id: string; label: string; url?: string }> },
+      ) => {
+        turnEmitter.emitExecutionEvent(
+          buildExecutionEventPayload({
+            sessionId: msgActor,
+            traceId: batched.originalMessageId,
+            eventId: `plan-${id}-${Date.now()}`,
+            kind: "plan_step",
+            planStep: {
+              id,
+              title,
+              status: wireStatus(status),
+              // 交接说明随步骤下发（2026-10-19 handoff）：前端据此在步骤条上
+              // 直接渲染「需要你操作」+ 按钮，不必等正文卡片。
+              ...(handoff?.instruction ? { instruction: handoff.instruction } : {}),
+              ...(handoff?.actions?.length ? { actions: handoff.actions } : {}),
+            },
+          }),
+        );
+      };
+      // 建表/重排：整表下发（否则前端只看到第一条，用户以为就一步）
+      if (ev.type === "write" || ev.type === "replan") {
+        for (const s of ev.plan.steps) emitStep(s.id, s.title, s.status, s.handoff);
+        return;
+      }
+      const step = ev.step ?? ev.plan.steps.find((s) => s.status === "running") ?? ev.plan.steps[0];
+      if (step) emitStep(step.id, step.title, step.status, step.handoff);
+    });
+  } catch {
+    /* 计划事件是增强，失败不影响主管道 */
+  }
+
+  // 交接回执的状态补发（2026-10-19 handoff）：resume 发生在点击/文字输入的
+  // **上一跳**（连接层或本函数更早处），那一刻本轮还没订阅事件，done 事件发不
+  // 出去——前端步骤条会一直停在「等你操作」。这里补一条 ok，把本地状态对齐。
+  if (batched.planContinuation) {
+    turnEmitter.emitExecutionEvent(
+      buildExecutionEventPayload({
+        sessionId: msgActor,
+        traceId: batched.originalMessageId,
+        eventId: `plan-continuation-${batched.planContinuation.stepId}-${Date.now()}`,
+        kind: "plan_step",
+        planStep: {
+          id: batched.planContinuation.stepId,
+          title: batched.planContinuation.stepTitle,
+          status: "ok",
+        },
+      }),
+    );
+  }
+
   // 路由决策 & 分阶段异步开关
   // 2026-08-29：语义 LLM 路由为唯一权威（词法硬规则退出判定链，仅作其失败降级）。
   // 拉最近几条用户消息供 LLM 理解短追问（"娱乐圈的""新鲜的"）继承的话题意图；
@@ -808,7 +930,9 @@ async function processBatchedMessage(
   // await 最多 3s），agent-core 侧与记忆认知（cognize）并行消费。
   // 面板事件 / 实时流式开关等路由衍生配置在 .then 里就绪——首个主回复 delta
   // 必然晚于路由决策（agent-core 的主 LLM 调用依赖平面/工具束），无竞态。
-  const decisionPromise = deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns, entityContextLines, dialogStateLines);
+  const decisionPromise = batched.planContinuation
+    ? Promise.resolve(buildPlanContinuationDecision())
+    : deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns, entityContextLines, dialogStateLines);
   // turn 面板 v2 阶段 0/1（路由结果就绪后补发，不阻塞主链路）
   void decisionPromise
     .then((decision) => {

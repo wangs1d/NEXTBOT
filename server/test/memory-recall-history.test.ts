@@ -10,7 +10,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -31,8 +31,20 @@ async function makePersistence(sessionsMain: object, sessionsNotes: object = {})
   await writeFile(notes, JSON.stringify({ sessions: sessionsNotes }));
   const p = new ChatThreadPersistence(main, notes);
   await p.load();
-  // Windows 上紧随文件写入的递归删除偶发 ENOTEMPTY（句柄延迟释放），重试兜底
+  // load() 内部的修复写盘（sanitize/migrate）是 fire-and-forget 的 flushToDisk：
+  // 先等 *.tmp 落盘完成再删目录，否则写盘的 ENOENT 拒绝会在测试结束后变成
+  // unhandledRejection，把整份文件标记为失败（用例本身全绿也救不回来）。
   const cleanup = async () => {
+    await p.flushPendingForTests();
+    for (let i = 0; i < 50; i++) {
+      try {
+        const entries = await readdir(dir);
+        if (!entries.some((e) => e.includes(".tmp"))) break;
+      } catch {
+        break; // 目录已不存在
+      }
+      await new Promise((r) => setTimeout(r, 20));
+    }
     for (let i = 0; i < 5; i++) {
       try {
         await rm(dir, { recursive: true, force: true });

@@ -68,6 +68,12 @@ export type AgentPromptMemoryContext = {
    */
   userFacts?: string;
   /**
+   * 时间问句定位块（2026-10-19）：用户问「2024 年 6 月我住哪」这类带时间词的
+   * 问题且命中档案字段时，程序化给出那个时间点有效的值（来自 valid_from/valid_to
+   * 区间查询）。确定性答案，不靠语义召回猜。
+   */
+  temporalAddressing?: string;
+  /**
    * 本轮寻址块（2026-09-29 P0-1 缓存优化）：用户最新消息命中的理解话题/事实
    * 字段清单。理解档案/事实块本体进稳定层时不再带逐条寻址标记（那会让稳定层
    * 逐轮变字节，打断 DeepSeek 前缀缓存——实测改一行命中 98%→27%），命中信息
@@ -130,6 +136,19 @@ export type AgentPromptMemoryContext = {
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
   scheduleSnapshot?: string;
+  /**
+   * 在办目标摘要（2026-10-19 三层尺度架构）：GoalBoard 活跃目标的前 3 条，
+   * 一行一个（标题 · 进度 · 下一步是否等确认）。让对话面知道「我正在替用户
+   * 办这件事」——用户问「那事怎么样了」时不必靠记忆模糊召回。
+   * 一天只变几次（进度随步骤推进），只进动态层，绝不进稳定层。
+   */
+  activeGoals?: string;
+  /**
+   * 会话级任务步骤（TaskPlanStore）：本轮有 plan 才有，携带完整步骤表。
+   * 与 activeGoals 互补——goal 是跨会话意图，plan 是本会话的执行路径；
+   * 完成即归档，通常只在几轮内存在。
+   */
+  taskPlan?: string;
   /**
    * 行程状态热层快照（travel-prompt-snapshot）：已生成行程的一行回执列表
    * （目的地/日期/planId），仅用户消息命中行程语义时注入。完整明细不进上下文，
@@ -276,6 +295,15 @@ export type AgentStreamOptions = {
    * task_plane_complex；缺省时 provider 按分支落 main_chat（非工具）/ main_chat_tools（工具循环）。
    */
   auditStage?: string;
+  /**
+   * 会话级任务计划的主键（2026-10-19）。
+   *
+   * 工具层用 `ToolContext.sessionId` 写计划，而工具循环内只能拿到 provider 的
+   * sessionId（对话面 = actorId）——两者不一定相等。plan.* 的软提示判重、等待步
+   * 工具面收缩、执行守卫都靠这个键查计划，所以由 agent-core 显式下发，不在
+   * 工具循环里猜。
+   */
+  planSessionKey?: string;
   /** 替换默认 system（跳过 UAP 记忆拼装，用于低延迟场景） */
   systemPromptOverride?: string;
   /** 覆盖默认 chat 模型（如专用快模型） */

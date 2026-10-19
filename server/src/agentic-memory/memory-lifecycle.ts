@@ -107,6 +107,8 @@ function parseTimestamp(ts: string | undefined): number {
 const LLM_REVIEW_SYSTEM_PROMPT = [
   "你是个人记忆库的审查员。给定同一用户的一组记忆条目，找出其中明确的：",
   "① 过时（信息已被更新取代，如旧地址、旧偏好）；② 矛盾（与其他条目冲突）；③ 冗余（与另一条几乎同义）。",
+  "条目若带 currentProfile 字段，那是用户档案的**当前权威值**（来自结构化事实库）：",
+  "与该值冲突的条目一律按「过时」判定，尤其是居住地/职业/称呼/公司这类会变的字段。",
   "只标记有把握的条目；拿不准一律保留（宁保留不误删）。",
   '只输出 JSON：{"forget":[{"n":序号,"reason":"一句话理由"}]}；未列出的条目视为保留。',
 ].join("\n");
@@ -396,6 +398,32 @@ export class AgenticMemoryLifecycleService {
   }
 
   /**
+   * 读取候选条目所属 actor 的档案当前值（字段 → 值），供 LLM 审查判「过时」。
+   * 动态导入避免 index ⇄ lifecycle 静态循环；任何失败返回空表（回退旧行为）。
+   */
+  private async loadCurrentProfileFacts(
+    items: Mem0MemoryItem[],
+  ): Promise<Map<string, Record<string, string>>> {
+    const out = new Map<string, Record<string, string>>();
+    try {
+      const { getMemoryComponents } = await import("./index.js");
+      const store = getMemoryComponents().factStore;
+      if (!store) return out;
+      for (const item of items) {
+        const actorId = actorIdOf(item);
+        if (!actorId || out.has(actorId)) continue;
+        const facts = store.getActiveFacts(actorId) ?? [];
+        const map: Record<string, string> = {};
+        for (const f of facts) map[f.field] = f.value;
+        out.set(actorId, map);
+      }
+    } catch {
+      /* 记忆组件未装配 → 不注入档案，审查按纯文本判定 */
+    }
+    return out;
+  }
+
+  /**
    * Mem0 库 LLM 定期审查（设计「LLM 主动遗忘」）：规则 TTL/去重判不了的
    * 「过时/矛盾/冗余」（如同义改写之外的语义重复、已被新事实取代的旧值）
    * 由 LLM 抽批复审，命中者归档（不直接删）。审查窗口按
@@ -437,17 +465,25 @@ export class AgenticMemoryLifecycleService {
     let forgetIdx: number[] = [];
     try {
       const openai = new OpenAI({ apiKey, baseURL: llmConfig.baseURL, maxRetries: 1 });
+      // 权威档案注入（2026-10-19 时间锚定）：把结构化事实库的**当前值**交给审查员，
+      // 「旧居住地/旧职业」这类过时条目才判得准——纯看条目文本时，一条 2023 年
+      // 的"住在杭州"看不出已被"住在兴义"取代。读不到档案时静默回退旧行为。
+      const profileByActor = await this.loadCurrentProfileFacts(candidates);
       const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
         { role: "system", content: LLM_REVIEW_SYSTEM_PROMPT },
         {
           role: "user",
           content: JSON.stringify({
-            memories: candidates.map((mem, i) => ({
-              n: i,
-              text: mem.memory.slice(0, 160),
-              importance: importanceOf(mem),
-              class: semanticClassOf(mem) || "unknown",
-            })),
+            memories: candidates.map((mem, i) => {
+              const profile = profileByActor.get(actorIdOf(mem));
+              return {
+                n: i,
+                text: mem.memory.slice(0, 160),
+                importance: importanceOf(mem),
+                class: semanticClassOf(mem) || "unknown",
+                ...(profile && Object.keys(profile).length > 0 ? { currentProfile: profile } : {}),
+              };
+            }),
           }),
         },
       ];

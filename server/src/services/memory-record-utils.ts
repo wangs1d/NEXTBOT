@@ -59,6 +59,22 @@ export function semanticFingerprint(line: string): string {
   return tokens.length === 0 ? "" : [...tokens].sort().join(" ");
 }
 
+/**
+ * 事实值是否出现在文本里（归一匹配，2026-10-19 P1）。
+ *
+ * 直接 `text.includes(value)` 对「杭州」vs「杭州市」这类颗粒度差异会漏标——
+ * LLM 抽取时会把原话改写成不同行政粒度。归一规则：去空白、剥行政区划后缀
+ * （省/市/区/县/州/盟），再做 contains。只在"打标签/判定副本"这类
+ * 写侧判定用，不做同义词展开（那需要词表，宁漏不猜）。
+ */
+export function factValueInText(value: string, text: string): boolean {
+  const norm = (s: string): string =>
+    s.replace(/\s+/g, "").replace(/[省市区县州盟]$/g, "");
+  const v = norm(value ?? "");
+  const t = norm(text ?? "");
+  return v.length >= 2 && t.includes(v);
+}
+
 /** 词袋 token 集合（实体一致性/话题重叠计算的原料，中文 bigram 粒度）。 */
 export function contentTokenSet(line: string): Set<string> {
   return new Set(tokenize(line));

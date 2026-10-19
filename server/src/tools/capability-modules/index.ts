@@ -146,6 +146,7 @@ import {
 } from "./picture/index.js";
 import type { PictureKit } from "@private-ai-agent/picture";
 import { buildGoalPlanningModule } from "./goal-planning/index.js";
+import { buildTaskPlanModule } from "./task-plan/index.js";
 import { buildMemoryGovernanceModule } from "./memory-governance/index.js";
 import type { GoalPlanner } from "../../proactivity/goal-planner.js";
 import type { GoalRunner } from "../../proactivity/goal-runner.js";
@@ -498,6 +499,9 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
     // 计划推进（2026-09-24，对标 Muse 大目标模式）：goalPlanner 晚绑定，
     // 未装配时 handler 如实返回未装配错误
     buildGoalPlanningModule(deps),
+    // 会话级任务计划（2026-10-19）：plan.* 四工具（scope=session/goal 统一入口），
+    // store 走进程级单例；goalPlanner 晚绑定，未装配时 scope=goal 如实报错
+    buildTaskPlanModule({ goalPlanner: deps.goalPlanner ?? null }),
     // 记忆治理（定向遗忘 + 行为审计）：依赖全部可选，handler 逐项降级
     buildMemoryGovernanceModule(deps),
   ];

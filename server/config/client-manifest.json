@@ -1,7 +1,7 @@
 {
-  "latest": "0.1.0",
+  "latest": "0.1.1",
   "minVersion": "0.1.0",
-  "url": "http://login.nextbot.top/downloads/Nextbot-Setup-0.1.0.exe",
-  "notes": "首个公开发布版本",
+  "url": "https://login.nextbot.top/downloads/Nextbot-Setup-0.1.1.exe",
+  "notes": "更新检查直连 HTTPS，弹卡更快；玻璃胶囊弹窗接线收缩",
   "channel": "byok"
 }

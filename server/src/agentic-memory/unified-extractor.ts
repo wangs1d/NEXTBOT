@@ -60,6 +60,26 @@ export interface UnifiedFact {
   /** 确定性短值（"张三"/"全栈开发"/"杭州"） */
   value: string;
   confidence?: number;
+  /**
+   * 时态（2026-10-19 时间锚定 + 证据门）：
+   *   - current：现状陈述（"我现在住兴义"）——参与字段级 latest-wins；
+   *   - past：历史陈述（"我以前住浙江"）——只登记历史，**永不覆盖现状**；
+   *   - upcoming：未来才生效的**长期状态变更**（"我下个月搬去成都"）——
+   *     只登记计划，**不改现状、不算已发生**。到期没有证据也只是降级为
+   *     "未确认"，绝不会自动改写成"已经搬了"。
+   * 缺省按 current 处理（兼容旧输出）。
+   */
+  temporal?: "current" | "past" | "upcoming";
+  /**
+   * 事情发生/生效的时间线索，照抄用户给的时间表达（"2023"、"2021年夏天"、
+   * "大学毕业前"）。**不是**说话时间——它是模型区分「何时发生」与「何时得知」
+   * 的唯一依据。用户没给时间则省略。
+   */
+  eventTime?: string;
+  /** 结构化有效区间起点（ISO：YYYY-MM-DD 或 YYYY-MM），用于 as-of 查询 */
+  validFrom?: string;
+  /** 结构化有效区间终点；"至今/现在"则省略 */
+  validTo?: string;
 }
 
 /**
@@ -148,9 +168,24 @@ const SYSTEM_PROMPT = [
   "  // note 必须写明「粉丝式称呼，并非真实关系」——除非用户明确表示是真实关系；",
   "  // 玩笑/调侃 kind=joke；比喻夸张 kind=figurative；改口/更正 kind=correction（note 写明从什么改成什么）；",
   "  // 字面陈述（我叫X/我住在X）kind=literal",
-  '"facts":[{"field":"档案字段名","value":"确定值","confidence":0到1}]',
+  '"facts":[{"field":"档案字段名","value":"确定值","temporal":"current|past|upcoming","eventTime":"时间线索或省略","validFrom":"YYYY-MM-DD 或 YYYY-MM","validTo":"同上或省略","confidence":0到1}]',
   "  // 用户关于自身的字面为真的确定性字段，只收字面陈述（我叫X→称呼:X；我住在X→居住地:X；",
   "  // 我是做后端的→职业:后端开发；我用 TS 和 Python→技术栈:TS/Python）。",
+  "  // 【时态铁律】temporal 必填，三态区分：",
+  "  //   现状（住/是/在做）→ temporal:current；",
+  "  //   过去时态（以前/之前/原来/曾经/过去/那时候/待过/搬走了/小时候）→ temporal:past，",
+  "  //   例：「我以前住浙江」→ 居住地:浙江 temporal:past eventTime:以前；",
+  "  //   同一句里既有过去又有现在（「我以前在杭州，现在搬来兴义了」）→ 输出两条：",
+  "  //   居住地:杭州(past) + 居住地:兴义(current)；",
+  "  //   未来才生效的**长期状态变更**（「我下个月搬去成都」「明年换工作去字节」「毕业后去深圳」）",
+  "  //   → temporal:upcoming，validFrom 写计划生效日；**它不会覆盖现状，也不算已经发生**。",
+  "  //   ⚠️ 临时行程不算状态变更（「周末去上海玩」「下周出差」）→ 不进 facts（属 plan/decay 域）；",
+  "  //   只有「居住/工作/身份这类会持续存在的状态要变」才用 upcoming。",
+  "  // 【证据铁律】不得把计划写成已发生：用户说「我要搬去成都」只能记 upcoming，",
+  "  //   除非他明确说「我已经搬过来了/我到了」才记 current/past。",
+  "  // validFrom/validTo 用 ISO（YYYY-MM-DD 或 YYYY-MM），只写用户明确给出的时间，",
+  "  // 把「去年」「上个月」按给定的当前时间换算成绝对时间；「至今/现在」→ validTo 省略。",
+  "  // 无法确定就省略字段，**不要编日期**。",
   "  // 疑问、玩笑、粉丝式称呼、比喻、假设一律不进 facts（那些只进 understandings）；",
   "  // 例外：agent 给用户起的昵称/小名，用户接受了（没纠正、自然继续对话）也算称呼事实，",
   "  // 例：agent 叫用户「老王」后用户正常回应 → facts 输出 称呼:老王（confidence≈0.6）；",
@@ -173,7 +208,8 @@ const SYSTEM_PROMPT = [
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
   "归属铁律：Assistant 话中的「我」指 Agent 自己——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；"
-  + "时效性计划与临时安排（下周去上海/周末的安排）不进 facts（属 decay/计划域，不是档案）；",
+  + "临时行程与安排（下周去上海玩/周末的安排）不进 facts（属 decay/计划域，不是档案）；"
+  + "但会改变长期状态的计划（搬家/换工作/换城市）要用 temporal:upcoming 记下来；",
   "裁决基准：持久性与影响范围双低的日常琐事（天气、吃了什么、喝了咖啡、",
   "寒暄问候、今天的心情）必须 reject，绝不允许 remember；今天的安排/临时",
   "事项 decay；只有长期有效且影响未来回答的信息才 remember；",
@@ -299,9 +335,36 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
           const value = typeof f.value === "string" ? f.value.trim() : "";
           if (!field || !value) return null;
           const conf = Number(f.confidence);
+          // 时态：只认 past/upcoming/current 三个字面值；其余（含缺失）按现状
+          // 处理——兼容旧模型输出，同时不因偶发脏值把现状误判成历史/计划。
+          const rawTemporal = typeof f.temporal === "string" ? f.temporal.trim().toLowerCase() : "";
+          const temporal =
+            rawTemporal === "past"
+              ? ("past" as const)
+              : rawTemporal === "upcoming"
+                ? ("upcoming" as const)
+                : ("current" as const);
+          const rawEvent = typeof f.eventTime === "string" ? f.eventTime.trim() : "";
+          const eventTime =
+            rawEvent && !/^(null|undefined|none|未知)$/i.test(rawEvent)
+              ? rawEvent.slice(0, 40)
+              : "";
+          // 结构化区间：只接受能解析成 ISO 前缀的字符串（YYYY / YYYY-MM / YYYY-MM-DD）；
+          // 解析不了的丢弃——不把"大学毕业前"塞进一个日期字段里。
+          const isoPoint = (v: unknown): string => {
+            if (typeof v !== "string") return "";
+            const t = v.trim();
+            return /^\d{4}(?:[-/.]\d{1,2}){0,2}$/.test(t) ? t.slice(0, 10) : "";
+          };
+          const validFrom = isoPoint(f.validFrom);
+          const validTo = isoPoint(f.validTo);
           return {
             field,
             value,
+            temporal,
+            ...(eventTime ? { eventTime } : {}),
+            ...(validFrom ? { validFrom } : {}),
+            ...(validTo ? { validTo } : {}),
             ...(Number.isFinite(conf) ? { confidence: Math.max(0, Math.min(1, conf)) } : {}),
           } as UnifiedFact;
         })

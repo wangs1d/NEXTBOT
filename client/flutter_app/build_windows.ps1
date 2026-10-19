@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   Build Flutter Windows (Release and/or Debug) and copy the runner folder to E:.
@@ -10,8 +10,10 @@
   additionally mirrors the full Release or Debug folder (entire folder, not only .exe),
   including stopping processes that lock the deploy folder.
 
-  Default dist root: E:\W-Project\Private AI Agent\windows_dist\Release | Debug
-  Override: set env PRIVATE_AI_AGENT_WINDOWS_DIST to a folder on E: (or any drive).
+  Default dist root: <repo>\windows_dist\Release | Debug —— 与 cmake_install 的
+  镜像目标（windows/cmake/private_ai_agent_deploy_windows_dist.cmake）保持同一处，
+  不再指向机器相关的绝对路径（旧默认 E:\W-Project\... 早已不是本仓）。
+  Override: set env PRIVATE_AI_AGENT_WINDOWS_DIST to any folder.
 
   Requires: Flutter on PATH or FLUTTER_ROOT, Visual Studio desktop C++, Windows Developer Mode for symlinks.
 #>
@@ -26,12 +28,15 @@ param(
   # 在云端，必须单独烤入。默认烤入云端域名（nginx login 子域反代 Node，勿烤裸 IP：
   # 登录页等页面会直接进用户浏览器地址栏）——控制面常量是编译期烤死的，漏传时客户端
   # 静默回落 127.0.0.1:3000，更新检查/反馈失联（0.2.1 与本地 Debug 均翻过车）。
+  # 必须烤 https://（2026-10-19 定调）：80 已 301 到 https，烤 http 会让每次
+  # 「检查更新」都多付一次 301 重定向 + 二次 TLS 握手，弱网下弹卡延迟数秒。
   # 确要回落本地联调请显式传空：-UpdateManifestUrl ''
-  [string] $UpdateManifestUrl = 'http://login.nextbot.top',
+  [string] $UpdateManifestUrl = 'https://login.nextbot.top',
   # 控制面（管理后台所在服务器）：反馈/站内信/网页登录页（/accounts/web）走这里。
-  # 网页登录 URL 用户可见，必须烤域名（login.nextbot.top）而非裸 IP。
+  # 网页登录 URL 用户可见，必须烤域名（login.nextbot.top）而非裸 IP；
+  # 同样必须烤 https://（同上，80 已 301，跨协议重定向不可靠）。
   # 默认烤入云端域名，本地构建也能在后台看到反馈；确要回落本地请显式传空：-ControlPlaneUrl ''
-  [string] $ControlPlaneUrl = 'http://login.nextbot.top',
+  [string] $ControlPlaneUrl = 'https://login.nextbot.top',
   # 发行版本：internal=内测版（默认，能力全量）；oss=开源版（GitHub 发行，
   # 内测独占能力整族隐藏）。与服务端 NEXTBOT_EDITION 同名值，开源安装包传 -Edition oss。
   [ValidateSet('internal', 'oss')]
@@ -78,12 +83,24 @@ if (-not $flutterExe) {
   Write-Error 'Flutter not found. Add flutter to PATH or set FLUTTER_ROOT. See https://docs.flutter.dev/get-started/install/windows'
 }
 
-$DistRoot = 'E:\W-Project\Private AI Agent\windows_dist'
+# 部署目录默认落在本仓 <repo>\windows_dist，与 cmake_install 的镜像目标一致。
+# 旧默认写死 'E:\W-Project\Private AI Agent\windows_dist'（早已不是本仓路径），
+# 在别的机器/别的盘符上会凭空造目录、与真正在跑的包不是同一份——「改了代码但
+# 界面上没变」的经典来源之一。
+# 仓根 = 本脚本所在目录（client\flutter_app）往上两级；与 CMakeLists.txt 里
+# ${CMAKE_SOURCE_DIR}/../../.. 的口径一致（CMAKE_SOURCE_DIR 是 windows\）。
+$RepoRoot = Split-Path (Split-Path $Root -Parent) -Parent
+$DistRoot = Join-Path $RepoRoot 'windows_dist'
 if ($env:PRIVATE_AI_AGENT_WINDOWS_DIST) {
-  $DistRoot = $env:PRIVATE_AI_AGENT_WINDOWS_DIST.Trim()
-}
-if (-not $DistRoot) {
-  Write-Error 'PRIVATE_AI_AGENT_WINDOWS_DIST is set but empty.'
+  $override = $env:PRIVATE_AI_AGENT_WINDOWS_DIST.Trim()
+  if (-not $override) {
+    Write-Error 'PRIVATE_AI_AGENT_WINDOWS_DIST is set but empty.'
+  }
+  $DistRoot = if ([System.IO.Path]::IsPathRooted($override)) {
+    $override
+  } else {
+    Join-Path $RepoRoot $override
+  }
 }
 
 $cmakeLists = Join-Path $Root 'windows\CMakeLists.txt'
@@ -154,7 +171,7 @@ function Invoke-BuildAndDeploy {
       # 静默回落是隐形坑：0.2.1 安装包因此把用户反馈全落在了本机库
       Write-Host 'WARNING: 本次 Release 构建未烤入 UpdateManifestUrl / ControlPlaneUrl，' -ForegroundColor Yellow
       Write-Host '  更新检查与用户反馈将回落 httpBase（本地 127.0.0.1:3000），云端后台收不到。' -ForegroundColor Yellow
-      Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl http://login.nextbot.top -ControlPlaneUrl http://login.nextbot.top' -ForegroundColor Yellow
+      Write-Host '  需联调后台或发用户请加：-UpdateManifestUrl https://login.nextbot.top -ControlPlaneUrl https://login.nextbot.top' -ForegroundColor Yellow
     }
     if (-not $HttpBase) {
       # 2026-10-16 复发：无 HttpBase 的 Release 包静默回落 127.0.0.1:3000，

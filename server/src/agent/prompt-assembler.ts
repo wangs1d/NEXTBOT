@@ -59,6 +59,10 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "memoryContinuity",
   "yesterdayHighlight",
   "semanticIntent",
+  // 在办目标 / 会话步骤（2026-10-19）：必须进白名单，否则「只有目标、没别的记忆」
+  // 的轮次会被 hasAnyPromptMemory 判空、整块不渲染（只填字段不渲染的老坑）。
+  "activeGoals",
+  "taskPlan",
   "scheduleSnapshot",
   "taskContext",
   "followUpAnchor",
@@ -228,6 +232,14 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 理解档案/事实块本体在稳定层渲染为字节稳定版（不带逐条寻址标记），命中
   // 信息由此块沉底承载——标记位置从稳定层挪到动态层，前缀缓存不再逐轮断裂。
   if (m.turnAddressing) dynamicContext.push(m.turnAddressing);
+  // 时间问句定位：用户问"2024年6月我住哪"时给区间查询的确定答案
+  if (m.temporalAddressing) dynamicContext.push(m.temporalAddressing);
+  // 在办目标（2026-10-19 三层尺度架构）：跨会话的意图主键，置于日程之前——
+  // 目标决定要不要看日程。必须留在动态层：进度随步骤推进而变，放稳定层
+  // 会逐轮打断前缀缓存（代价 3-4K/轮）。
+  if (m.activeGoals) dynamicContext.push(m.activeGoals);
+  // 会话级任务步骤（TaskPlanStore）：本会话的执行路径，完成即归档。
+  if (m.taskPlan) dynamicContext.push(m.taskPlan);
   if (m.scheduleSnapshot) dynamicContext.push(m.scheduleSnapshot);
   if (m.travelState) dynamicContext.push(m.travelState);
   // 前置检索证据：realtime_lookup 轮的程序化搜索结果，块内自带以证据为准的强约束
@@ -248,7 +260,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 不主动翻旧账、不以承接话开头——与【消息时间戳】的【话题切换】禁令同源。
   if (m.narrativeRecall) {
     dynamicContext.push(
-      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
+      `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；其中提到的事发生时间不等于现在，别把旧事当刚发生，不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
     );
   }
   // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要

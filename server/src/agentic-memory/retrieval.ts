@@ -5,10 +5,22 @@ import {
   getAgenticMemorySearchTopK,
   getHighSignalBoost,
   getMemoryImportanceBoost,
+  getTimeDecayHalfLifeHours,
   isMemoryReinforcementEnabled,
 } from "./env.js";
 import { getMemoryReinforcementStore } from "./memory-reinforcement.js";
 import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
+import {
+  extractTemporalIntent,
+  temporalIntentFactorForItem,
+} from "../agent/memory-temporal-intent.js";
+import {
+  getRerankMode,
+  recordRerankDecision,
+  rerankCandidates,
+  shouldRerankAdaptive,
+  type RerankDeps,
+} from "./rerank-cross-encoder.js";
 
 interface Mem0SearchItem {
   id: string;
@@ -73,6 +85,33 @@ function freshnessLabel(ageHours: number): string {
 }
 
 /**
+ * 召回时效因子（2026-10-19 时间认知补齐）：
+ * 文本注入路径（buildRecallWithContext）此前只把「多久以前」写进标签给人看，
+ * 排序完全不吃时间——同一主题的新旧两条等分时，旧的那条可能先注入，模型
+ * 就拿旧值作答。这里给一个与仲裁器同口径的**软**调制（下限 0.75），
+ * 半衰期内几乎不扣分、久远的缓慢下沉，不伤重要旧事实的召回。
+ *
+ * 半衰期取 AGENT_MEMORY_TIME_DECAY_HALF_LIFE_H（默认 72h）；≤0 视为关闭。
+ * 注意：searchStructured 路径**不**在此加衰减——那条路交给 MemoryArbitrator
+ * 的 recencyFactor 单层处理，避免重复压制（见 AgenticMemoryCandidate 注释）。
+ */
+const RECENCY_FLOOR = 0.75;
+
+/** kill switch：AGENT_MEMORY_RECENCY_DECAY_ENABLED=0 时检索完全不看时间（旧行为） */
+function isRecencyDecayEnabled(): boolean {
+  const raw = process.env.AGENT_MEMORY_RECENCY_DECAY_ENABLED?.trim();
+  if (raw === undefined || raw === "") return true;
+  return raw !== "0" && raw.toLowerCase() !== "false";
+}
+
+export function recencyFactor(ageHours: number, halfLifeHours: number): number {
+  if (!Number.isFinite(ageHours) || ageHours <= 0) return 1;
+  if (!Number.isFinite(halfLifeHours) || halfLifeHours <= 0) return 1;
+  const decay = Math.pow(0.5, ageHours / halfLifeHours);
+  return RECENCY_FLOOR + (1 - RECENCY_FLOOR) * decay;
+}
+
+/**
  * 重要性连续分（0-1）的检索加权因子：1 + (importance - 0.5) × boost。
  * importance=0.5（含缺失/旧数据）不增不减；高分上浮、低分下压。boost=0 关闭。
  */
@@ -83,8 +122,127 @@ function importanceFactor(item: Mem0SearchItem, boost: number): number {
   return 1 + (importance - 0.5) * boost;
 }
 
-function buildSearchFilters(
-  actorId: string,
+/**
+ * 档案实体信号 + 状态标签（2026-10-19 P1）。
+ *
+ * entity 信号：Mem0 OSS 检索本身没有实体通道，但结构化档案里就有最可靠的实体
+ * （称呼/公司/居住地/技术栈的值）。query 命中某个档案实体、且记忆条目也含该
+ * 实体时，给一个确定性加分——这正是"问人名/项目名召回不稳"的原因。
+ *
+ * 状态标签：条目带 factFields 标签且**不含当前值、只含历史值**时，它描述的是
+ * 已失效的旧状态。A-TMA 的 "ghost memory" 结论是：存储里有状态，但答案仍可能
+ * 用错，状态标签必须一路带进模型看到的证据包。所以这里直接标在行首。
+ */
+interface FactContext {
+  /** 档案实体值（长度 ≥2，用于 entity 命中加分） */
+  entityValues: string[];
+  /** 单个条目的状态标签："" | "[当前]" | "[已失效]" */
+  tagOf: (item: Mem0SearchItem) => string;
+  /** 被软抑制的文案片段（命中则标「勿主动提」，不删条目） */
+  mutedKeys: string[];
+}
+
+async function loadFactContext(actorId: string): Promise<FactContext> {
+  let mutedKeys: string[] = [];
+  try {
+    const { peekMemorySuppressionStore } = await import("./memory-suppression.js");
+    mutedKeys = peekMemorySuppressionStore()?.textKeys(actorId) ?? [];
+  } catch {
+    mutedKeys = [];
+  }
+  try {
+    const { getMemoryComponents } = await import("./index.js");
+    const comps = getMemoryComponents();
+    const store = comps.factStore;
+    if (!store) return { entityValues: [], tagOf: () => "", mutedKeys };
+    const actives = store.getActiveFacts(actorId);
+    // 实体池（P1-4 扩容）：档案字段值之外，把理解档案的 topic 也算实体——
+    // 那是用户对话里的核心称谓/主题词（"老婆""K3 模型"），专名覆盖比档案广。
+    let entityValues = [...new Set(actives.map((f) => f.value.trim()))].filter(
+      (v) => v.length >= 2,
+    );
+    try {
+      const topics = comps.understandingStore?.getActiveUnderstandings(actorId) ?? [];
+      for (const note of topics) {
+        const t = note.topic?.trim();
+        if (t && t.length >= 2) entityValues.push(t);
+      }
+    } catch {
+      /* 理解档案未装配 → 只用档案值 */
+    }
+    entityValues = [...new Set(entityValues)];
+    const currentByField = new Map(actives.map((f) => [f.field, f.value]));
+    const historyCache = new Map<string, readonly string[]>();
+
+    return {
+      entityValues,
+      mutedKeys,
+      tagOf: (item) => {
+        const raw = item.metadata?.factFields;
+        if (typeof raw !== "string" || !raw.trim()) return "";
+        const fields = raw
+          .split(/[,，]/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (fields.length === 0) return "";
+        const text = item.memory ?? "";
+        for (const field of fields) {
+          const current = currentByField.get(field);
+          if (current && text.includes(current)) return "[当前]";
+        }
+        for (const field of fields) {
+          let known = historyCache.get(field);
+          if (!known) {
+            known = store.getAllValuesForField(actorId, field);
+            historyCache.set(field, known);
+          }
+          if (known.some((v) => v.length >= 2 && text.includes(v))) return "[已失效]";
+        }
+        return "";
+      },
+    };
+  } catch {
+    return { entityValues: [], tagOf: () => "", mutedKeys };
+  }
+}
+
+/** query 命中档案实体、条目也含该实体 → 确定性加分（最多 +2 个实体，+15%/个） */
+function entityOverlapFactor(query: string, item: Mem0SearchItem, entities: string[]): number {
+  if (entities.length === 0) return 1;
+  const text = item.memory ?? "";
+  let hit = 0;
+  for (const e of entities) {
+    if (hit >= 2) break;
+    if (query.includes(e) && text.includes(e)) hit += 1;
+  }
+  return 1 + hit * 0.15;
+}
+
+/**
+ * 精排依赖的懒加载（避免 retrieval ⇄ resolve-provider 的模块初始化循环）。
+ * 无 key / 无配置 → null，调用方跳过精排。
+ */
+async function resolveRerankDeps(): Promise<RerankDeps | null> {
+  try {
+    const [{ default: OpenAI }, provider, env] = await Promise.all([
+      import("openai"),
+      import("../external-model/resolve-provider.js"),
+      import("./env.js"),
+    ]);
+    const cfg = provider.resolvePrimaryLlmClientConfig();
+    const apiKey = env.resolveOpenAiApiKey();
+    if (!cfg || !apiKey) return null;
+    const client = new OpenAI({ apiKey, baseURL: cfg.baseURL, maxRetries: 0 });
+    return {
+      client: client as unknown as RerankDeps["client"],
+      model: env.getAgenticMemoryLlmModel(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function buildSearchFilters(  actorId: string,
   context: "main" | "notes" | "any",
 ): Record<string, unknown> {
   const filters: Record<string, unknown> = { user_id: actorId };
@@ -161,20 +319,31 @@ export class AgenticMemoryRetrievalService {
     if (!items.length) return "";
 
     const now = Date.now();
+    const nowDate = new Date(now);
     const highSignalBoost = getHighSignalBoost();
     const importanceBoost = getMemoryImportanceBoost();
+    const halfLifeHours = isRecencyDecayEnabled() ? getTimeDecayHalfLifeHours() : 0;
+    // 时间意图 + 档案实体：都是确定性信号，解析不出来就不介入（factor=1）
+    const intent = extractTemporalIntent(query, nowDate);
+    const factCtx = await loadFactContext(actorId);
 
     const scored: ScoredItem[] = items
       .filter((item) => contextMatches(item.metadata?.context, opts.context))
-      .map((item) => ({
-        item,
-        rawScore:
-          (item.score ?? 0) *
-          (item.metadata?.highSignal === true ? highSignalBoost : 1) *
-          importanceFactor(item, importanceBoost),
-        ageHours: ageHoursOf(item, now),
-        highSignal: item.metadata?.highSignal === true,
-      }));
+      .map((item) => {
+        const ageHours = ageHoursOf(item, now);
+        return {
+          item,
+          rawScore:
+            (item.score ?? 0) *
+            (item.metadata?.highSignal === true ? highSignalBoost : 1) *
+            importanceFactor(item, importanceBoost) *
+            recencyFactor(ageHours, halfLifeHours) *
+            temporalIntentFactorForItem(intent, item, nowDate) *
+            entityOverlapFactor(query, item, factCtx.entityValues),
+          ageHours,
+          highSignal: item.metadata?.highSignal === true,
+        };
+      });
 
     if (!scored.length) return "";
 
@@ -182,7 +351,43 @@ export class AgenticMemoryRetrievalService {
 
     const finalTopK = getAgenticMemoryTopK();
     const deduped = this.dedupeScoredItems(scored);
-    const topItems = deduped.slice(0, finalTopK);
+    let topItems = deduped.slice(0, finalTopK);
+
+    // Cross-encoder 精排（2026-10-19）：快慢结合的关键是**门控**而不是全开全关。
+    //   off      不动（零额外延迟）
+    //   always   每轮都排
+    //   adaptive 只在排序模糊/整体虚弱时才排（见 shouldRerankAdaptive）
+    // 只调整顺序不丢弃；任何失败原样返回。
+    const rerankMode = getRerankMode();
+    const rerankPool = deduped.slice(0, finalTopK * 2);
+    const needsRerank =
+      rerankMode === "always" ||
+      (rerankMode === "adaptive" && shouldRerankAdaptive(rerankPool.map((s) => s.rawScore)));
+    if (rerankMode !== "off") {
+      // 观测埋点（P0-3）：off 时不记——统计的是"开了之后值不值"
+      recordRerankDecision({ triggered: false });
+    }
+    if (needsRerank && rerankPool.length > 1) {
+      const rerankStart = Date.now();
+      const beforeTop1 = rerankPool[0]?.item.memory;
+      const deps = await resolveRerankDeps();
+      if (deps) {
+        const candidates = rerankPool.map((s, i) => ({ id: String(i), text: s.item.memory }));
+        const reordered = await rerankCandidates(query, candidates, deps);
+        const byId = new Map(rerankPool.map((s, i) => [String(i), s]));
+        topItems = reordered
+          .map((c) => byId.get(c.id))
+          .filter((s): s is ScoredItem => Boolean(s))
+          .slice(0, finalTopK);
+        recordRerankDecision({
+          triggered: true,
+          beforeTop1,
+          afterTop1: topItems[0]?.item.memory,
+          latencyMs: Date.now() - rerankStart,
+        });
+      }
+    }
+
     this.touchRecalled(
       actorId,
       topItems.map((s) => s.item),
@@ -198,8 +403,13 @@ export class AgenticMemoryRetrievalService {
           ? ` [${item.metadata.context}]`
           : "";
       const signalTag = highSignal ? " ⭐高信号" : "";
+      // 状态标签紧贴正文：证据包里必须能看出这条描述的是现状还是已失效的旧值
+      const stateTag = factCtx.tagOf(item);
+      // 软抑制命中：标「勿主动提」，条目照常给模型（用户问起时还要能答）
+      const mutedTag = factCtx.mutedKeys.some((k) => item.memory?.includes(k)) ? "[勿主动提] " : "";
       parts.push(
-        `${i + 1}. 相关度 ${scorePercent}% · ${freshnessLabel(ageHours)}${signalTag}${ctxTag}${src ? ` ${src}` : ""}\n${item.memory}`,
+        `${i + 1}. 相关度 ${scorePercent}% · ${freshnessLabel(ageHours)}${signalTag}${ctxTag}${src ? ` ${src}` : ""}` +
+          `\n${mutedTag}${stateTag ? `${stateTag} ` : ""}${item.memory}`,
       );
     }
 
@@ -236,15 +446,22 @@ export class AgenticMemoryRetrievalService {
     if (!items.length) return [];
 
     const now = Date.now();
+    const nowDate = new Date(now);
     const highSignalBoost = getHighSignalBoost();
     const importanceBoost = getMemoryImportanceBoost();
+    // 时间意图 + 档案实体同样作用于结构化召回通道（时间衰减不在此加，
+    // 仍由 MemoryArbitrator 单层处理——这里只补"用户问哪个时间段/哪个实体"）
+    const intent = extractTemporalIntent(query, nowDate);
+    const factCtx = await loadFactContext(actorId);
 
     const scored: ScoredItem[] = items.map((item) => ({
       item,
       rawScore:
         (item.score ?? 0) *
         (item.metadata?.highSignal === true ? highSignalBoost : 1) *
-        importanceFactor(item, importanceBoost),
+        importanceFactor(item, importanceBoost) *
+        temporalIntentFactorForItem(intent, item, nowDate) *
+        entityOverlapFactor(query, item, factCtx.entityValues),
       ageHours: ageHoursOf(item, now),
       highSignal: item.metadata?.highSignal === true,
     }));

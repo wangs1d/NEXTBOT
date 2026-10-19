@@ -535,7 +535,15 @@ export type ChatIntentMode =
 export type ChatPlanStep = {
   id: string;
   title: string;
-  status: "pending" | "running" | "ok" | "err";
+  /**
+   * waiting（2026-10-19 handoff）：这一步需要用户自己动手（点外卖/付款/授权），
+   * 客户端据此在步骤条上摊开说明并给「我已完成」入口。
+   */
+  status: "pending" | "running" | "ok" | "err" | "waiting";
+  /** 交接说明：要用户在哪儿做什么（仅 waiting 时有值） */
+  instruction?: string;
+  /** 交接动作（打开 App / 我已完成），渲染方式由客户端决定 */
+  actions?: Array<{ id: string; label: string; url?: string }>;
 };
 
 /** master_delegate 要派出的子 Agent 规划。 */
@@ -608,11 +616,8 @@ export type ChatExecutionEventPayload = {
     elapsedMs: number;
   };
   /** plan_execute 步骤状态更新（kind=plan_step 时携带） */
-  planStep?: {
-    id: string;
-    title: string;
-    status: "pending" | "running" | "ok" | "err";
-  };
+  /** 步骤状态更新（kind=plan_step）：与 intent_detected 的 plan 同构，含 handoff 说明 */
+  planStep?: ChatPlanStep;
   /** 状态机任务进度（kind=task_progress 时携带，由 AgentTaskOrchestrator 推送） */
   taskProgress?: {
     taskId: string;

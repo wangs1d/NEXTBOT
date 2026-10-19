@@ -108,6 +108,32 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
+
+  // 行程规划独立窗口（PAI_TRAVEL_PLAN_MAILBOX）：窗口「创建即最终几何」。
+  //
+  // 「幽灵窗」的根源是「创建几何（占位 10,10/1280×720）≠ 最终几何」：
+  // Flutter 模板「首帧即 Show」会在 Dart 侧算出最终几何之前先把窗口显示出来，
+  // 随后窗口才被挪到居中位置——于是"先在别处映现一下、再回到正常位置"。
+  // 这里把几何在 CreateWindow 之前就定死为最终值，从源头消除了「占位几何」
+  // 这个可被提前显示的错误状态：模板 Show 与 Dart 侧的尺寸设置都退化为幂等
+  // 操作，无需在任何地方压制显示时机。口径与页面设计稿 1:1：1140×740 逻辑像素、
+  // 主屏工作区居中。
+  if (GetEnvironmentVariableW(L"PAI_TRAVEL_PLAN_MAILBOX", nullptr, 0) > 0) {
+    RECT work{};
+    if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0)) {
+      const double dpr = static_cast<double>(GetDpiForSystem()) / 96.0;
+      const double w = 1140.0 * dpr;  // 物理宽
+      const double h = 740.0 * dpr;   // 物理高
+      const double x = work.left + ((work.right - work.left) - w) / 2.0;
+      const double y = work.top + ((work.bottom - work.top) - h) / 2.0;
+      // Win32Window::Create 内部会按目标监视器 DPI 再放大一次，故此处回传
+      // 「逻辑」坐标（物理 / dpr），最终落在物理 (x, y, w, h)。
+      origin = Win32Window::Point(static_cast<unsigned int>(x / dpr + 0.5),
+                                  static_cast<unsigned int>(y / dpr + 0.5));
+      size = Win32Window::Size(1140, 740);
+    }
+  }
+
   if (!window.Create(L"", origin, size)) {
     return EXIT_FAILURE;
   }

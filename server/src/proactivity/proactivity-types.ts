@@ -80,7 +80,8 @@ export type ProactiveIntent = {
     | "location"      // 位置场景（围栏事件 / 到达常去地点）
     | "confirmation_expiry" // ask_first 确认超时未回复的作废告知
     | "turn_aside_expiry" // 顺嘴搭车 6h 未上车，过期升级重投正常通道（防再搭车回环）
-    | "goal"; // 目标后台自主循环（GoalRunner：计划完成/等确认/阶段性进展）
+    | "goal" // 目标后台自主循环（GoalRunner：计划完成/等确认/阶段性进展）
+    | "goal_introspect"; // 目标夜间内省（L3 日批：闲置还作数吗 / partial 建议重排 / 过期作废 / 语义复核翻案）
 };
 
 // ─── 通用主动性层（感知 → LLM 自主决策 → 通用执行） ───

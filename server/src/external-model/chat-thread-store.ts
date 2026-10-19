@@ -586,6 +586,17 @@ export function buildTimestampFreeLlmView(
       // prefix cache 永远失配、按全价计费；绝对时间 + 当前时间足以推算相对时间。
       return `- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}`;
     });
+    // 会话跨度（2026-10-19 时间认知）：时间轴会被 TIMELINE_MAX_ENTRIES 截断，
+    // 截断后模型只看得到最近若干条，容易把"这段对话就是今天开始的"当成事实。
+    // 首行给出完整跨度，跨天/跨周会话的时间位置才立得住。
+    const first = timeline[0];
+    const last = timeline[timeline.length - 1];
+    if (first && last && timeline.length > 1) {
+      rows.unshift(
+        `- 本段对话跨度：${formatLocalDateTime(first.date)} → ${formatLocalDateTime(last.date)}` +
+          `（共 ${timeline.length} 条有时间的消息）`,
+      );
+    }
     const timelineMsg: ChatCompletionMessageParam = {
       role: "system",
       content: `${TIMELINE_HEADER}\n${rows.join("\n")}`,

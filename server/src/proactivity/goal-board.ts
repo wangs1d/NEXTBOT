@@ -37,7 +37,55 @@ export type GoalRecord = {
   expiresAt?: number;
   /** 进度心跳序号（plan 步骤级进展用；feeder fingerprint 带上它防被去重吞掉） */
   rev?: number;
+
+  // ── 验收 / 预算 / 退避（2026-10-19，docs/goal-hybrid-architecture.md §3）──
+
+  /**
+   * 达成判据（一句话，用户能听懂、verifier 能判）。
+   * 有它才会走语义终审；没有则用「步骤都有结果」的确定性近似。
+   */
+  successCriteria?: string;
+  /** 验收结论；null/缺省 = 未验收 */
+  verdict?: "met" | "partial" | "failed" | null;
+  verdictNote?: string;
+  verifiedAt?: number;
+
+  /** 尝试与退避：连续失败 ≥2 冻结自动推进（转"卡住了"开口） */
+  attempts?: {
+    count: number;
+    lastAt: number;
+    failStreak: number;
+    lastFailReason?: string;
+  };
+
+  /** 目标级预算：防单个 goal 吃掉全局日额度 */
+  budget?: { dailySteps: number; spentToday: number; dayKey: string };
+
+  /** 下次可推进时刻（退避算出的确定性闸门） */
+  nextEligibleAt?: number;
+  /** 显著度 0-1：夜间内省按它排序，决定要不要提、要不要继续推 */
+  salience?: number;
+  /** 最近一次夜间内省处理的时刻（同类建议冷却内不再重复开口） */
+  introspectedAt?: number;
 };
+
+/** 目标级日预算默认值（plan 型；track/preexec 不派任务，不消耗） */
+export const DEFAULT_GOAL_DAILY_STEPS = 6;
+/** 退避档位：0 次失败 10min、1 次 2h、≥2 冻结（返回 Infinity） */
+export function backoffMsForFailStreak(failStreak: number, now: number): number {
+  if (failStreak <= 0) return now + 10 * 60_000;
+  if (failStreak === 1) return now + 2 * 3600_000;
+  return Number.POSITIVE_INFINITY;
+}
+
+/** 本地日键（YYYY-MM-DD），预算跨天重置用 */
+export function dayKeyOf(at: number): string {
+  const d = new Date(at);
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
 
 export type GoalBoardDeps = {
   dataPath: string;
@@ -119,6 +167,137 @@ export class GoalBoard {
     goal.rev = (goal.rev ?? 0) + 1;
     this.persist();
     this.deps.emitGoal(goal);
+  }
+
+  // ─────────────── 尝试 / 退避 / 预算 / 验收（2026-10-19）───────────────
+
+  /**
+   * 记录一次推进尝试：成功清零 failStreak，失败累加并按档位退避。
+   * `failStreak ≥ 2` 时 nextEligibleAt = Infinity（冻结自动推进，转人工开口）。
+   */
+  noteAttempt(goalId: string, outcome: { ok: boolean; reason?: string }): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    const now = this.nowFn();
+    const prev = goal.attempts ?? { count: 0, lastAt: now, failStreak: 0 };
+    const failStreak = outcome.ok ? 0 : prev.failStreak + 1;
+    goal.attempts = {
+      count: prev.count + 1,
+      lastAt: now,
+      failStreak,
+      ...(outcome.ok ? {} : { lastFailReason: (outcome.reason ?? "未知原因").slice(0, 200) }),
+    };
+    // 成功即清除退避（退避只针对失败）；失败按档位算下次可推进时刻
+    if (outcome.ok) {
+      delete goal.nextEligibleAt;
+    } else {
+      const next = backoffMsForFailStreak(failStreak, now);
+      if (Number.isFinite(next)) goal.nextEligibleAt = next;
+      else delete goal.nextEligibleAt; // 冻结：Infinity 不落盘（JSON 会变 null）
+    }
+    this.persist();
+  }
+
+  /** 是否到了可推进时刻（无记录=可推进） */
+  isEligible(goalId: string): boolean {
+    const goal = this.goals.get(goalId);
+    if (!goal) return false;
+    if ((goal.attempts?.failStreak ?? 0) >= 2) return false;
+    return !goal.nextEligibleAt || goal.nextEligibleAt <= this.nowFn();
+  }
+
+  /**
+   * 目标级日预算：还剩额度则扣一次并返回 true。
+   * 跨天自动重置（dayKey 变化），防单个 goal 吃掉全局日额度。
+   */
+  trySpendStep(goalId: string, dailySteps = DEFAULT_GOAL_DAILY_STEPS): boolean {
+    const goal = this.goals.get(goalId);
+    if (!goal) return false;
+    const now = this.nowFn();
+    const dayKey = dayKeyOf(now);
+    const budget = goal.budget && goal.budget.dayKey === dayKey
+      ? goal.budget
+      : { dailySteps, spentToday: 0, dayKey };
+    if (budget.spentToday >= budget.dailySteps) {
+      goal.budget = budget;
+      this.persist();
+      return false;
+    }
+    budget.spentToday += 1;
+    goal.budget = budget;
+    this.persist();
+    return true;
+  }
+
+  /**
+   * 写验收结论。met → 走 markReady 进 ReadyTray（挑时机投递）；
+   * partial/failed → 停在 watching，由调用方决定是否开口/重排。
+   */
+  setVerdict(
+    goalId: string,
+    verdict: "met" | "partial" | "failed",
+    note?: string,
+    payload?: Record<string, unknown>,
+  ): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    goal.verdict = verdict;
+    if (note) goal.verdictNote = note.slice(0, 300);
+    goal.verifiedAt = this.nowFn();
+    if (verdict === "met") {
+      goal.status = "ready";
+      goal.readyAt = goal.verifiedAt;
+      goal.expiresAt = goal.readyAt + 2 * 3600_000;
+      if (payload) goal.payload = { ...goal.payload, ...payload };
+    } else if (verdict === "failed") {
+      const prev = goal.attempts ?? { count: 0, lastAt: goal.verifiedAt, failStreak: 0 };
+      goal.attempts = {
+        count: prev.count + 1,
+        lastAt: goal.verifiedAt,
+        failStreak: prev.failStreak + 1,
+        lastFailReason: (note ?? "验收未通过").slice(0, 200),
+      };
+    }
+    this.persist();
+    this.deps.emitGoal(goal);
+  }
+
+  /**
+   * 显著度衰减（夜间内省）：长期没有动作的目标逐步降权，降到阈值以下
+   * 交给内省器问一句「这个还作数吗」，而不是继续闷头推。
+   * 返回衰减后的 salience（0-1）。
+   */
+  decaySalience(goalId: string, opts: { idleDays: number; halfLifeDays?: number }): number {
+    const goal = this.goals.get(goalId);
+    if (!goal) return 0;
+    const halfLife = opts.halfLifeDays ?? 14;
+    const base = goal.salience ?? 1;
+    const factor = Math.pow(0.5, Math.max(0, opts.idleDays) / halfLife);
+    const next = Math.max(0, Math.min(1, base * factor));
+    goal.salience = Number(next.toFixed(3));
+    this.persist();
+    return goal.salience;
+  }
+
+  /** 直接设显著度（用户明确关心/完成后回写用） */
+  setSalience(goalId: string, value: number): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    goal.salience = Math.max(0, Math.min(1, value));
+    this.persist();
+  }
+
+  /** 记录一次夜间内省处理（同类建议冷却用：防同一目标被夜夜追问） */
+  markIntrospected(goalId: string, at = this.nowFn()): void {
+    const goal = this.goals.get(goalId);
+    if (!goal) return;
+    goal.introspectedAt = at;
+    this.persist();
+  }
+
+  /** 按 actor 取全部目标（内省/成本聚合用，含各类 kind） */
+  listAll(actorId: string): GoalRecord[] {
+    return this.list(actorId);
   }
 
   /** 移除目标（memory.forget 定向遗忘用；actorId 给出时校验归属） */

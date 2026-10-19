@@ -16,6 +16,8 @@
  * （出差/生病/改主意）后模型在对话中调 goal.plan.replan 重排。
  */
 import type { GoalBoard, GoalRecord } from "./goal-board.js";
+import { verifyDeterministic } from "./goal-verifier.js";
+import { buildStepsFromTemplate, formatTemplatePreferences, matchGoalTemplate } from "./goal-templates.js";
 import { classifyTextSensitivity, type ActionSensitivity } from "../security/sensitive-action.js";
 import type { TaskHub } from "../task-plane/task-hub.js";
 
@@ -33,6 +35,12 @@ export interface PlanStep {
   taskId?: string;
   /** 结果/原因备注（完成摘要、失败原因、重排原因都落这里） */
   note?: string;
+  /**
+   * 依赖的步骤 id（2026-10-19 占位）。
+   * **线性调度不读它**——生活事务的依赖复杂度撑不起 DAG 调度器/环检测/局部重算。
+   * 留字段是为了将来真有并行分支时不必改数据形态。
+   */
+  dependsOn?: string[];
   updatedAt: number;
 }
 
@@ -42,6 +50,13 @@ interface PlanPayload {
   lastReplanReason?: string;
   /** plan 建立时的会话（结果投递归属） */
   sessionId?: string;
+  /** 命中的模板 id（成本报告按模板归因：哪类目标达成率高） */
+  templateId?: string;
+  /**
+   * 模板带来的操作偏好（结果形态，如"先给结论、细节折叠"）。落载荷并随
+   * goal.plan.list/create 输出给模型，让同类目标第二次的产出直接对上口径。
+   */
+  preferences?: string;
 }
 
 export interface GoalPlannerDeps {
@@ -106,14 +121,35 @@ export class GoalPlanner {
     actorId: string;
     sessionId?: string;
     title: string;
-    /** 有序步骤描述（一句话一步） */
-    steps: string[];
+    /** 有序步骤描述（一句话一步）；**留空则按模板库自动套步骤**（省一次 LLM 拆步） */
+    steps?: string[];
     note?: string;
+    /** 达成判据；缺省时用模板自带的 */
+    successCriteria?: string;
+    /** 模板 id（命中时记录，供成本报告归因） */
+    templateId?: string;
   }): { ok: true; goal: GoalRecord } | { ok: false; error: string } {
     const title = String(input.title ?? "").trim();
-    const rawSteps = (input.steps ?? []).map((s) => String(s ?? "").trim()).filter(Boolean);
+    let rawSteps = (input.steps ?? []).map((s) => String(s ?? "").trim()).filter(Boolean);
     if (!title) return { ok: false, error: "缺少 title（目标一句话）" };
-    if (rawSteps.length === 0) return { ok: false, error: "至少拆出 1 个步骤" };
+
+    // 模板优先（2026-10-19）：没给步骤时按同类目标套用「成功流程 + 失败规避」，
+    // 这是「能力随使用变强、token 不涨」的具体落点——同类目标第二次不再调 LLM 拆步。
+    let templateId = input.templateId?.trim() || undefined;
+    let criteria = input.successCriteria?.trim() || undefined;
+    let preferences: string | undefined;
+    if (rawSteps.length === 0) {
+      const tpl = matchGoalTemplate(title);
+      if (tpl) {
+        rawSteps = buildStepsFromTemplate(tpl, input.note);
+        templateId = templateId ?? tpl.id;
+        criteria = criteria ?? tpl.successCriteria;
+        preferences = formatTemplatePreferences(tpl);
+      }
+    }
+    if (rawSteps.length === 0) {
+      return { ok: false, error: "至少拆出 1 个步骤（也可命中模板自动生成：出行/搬家/备考/装修/求职）" };
+    }
     if (rawSteps.length > MAX_STEPS) return { ok: false, error: `步骤太多（上限 ${MAX_STEPS} 步），先拆主干` };
 
     const now = Date.now();
@@ -126,7 +162,12 @@ export class GoalPlanner {
       updatedAt: now,
     }));
 
-    const payload: PlanPayload = { steps, ...(input.sessionId ? { sessionId: input.sessionId } : {}) };
+    const payload: PlanPayload = {
+      steps,
+      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+      ...(templateId ? { templateId } : {}),
+      ...(preferences ? { preferences } : {}),
+    };
     const goal = this.deps.goalBoard.create({
       actorId: input.actorId,
       kind: "plan",
@@ -134,7 +175,15 @@ export class GoalPlanner {
       title: title.slice(0, 120),
       payload: payload as unknown as Record<string, unknown>,
     });
-    return { ok: true, goal };
+    // 达成判据落主表：有它才会在终审时要求「每一步留结果」的确定性确证
+    if (criteria) {
+      const rec = this.deps.goalBoard.get(goal.goalId);
+      if (rec) {
+        rec.successCriteria = criteria.slice(0, 200);
+        rec.salience = rec.salience ?? 1;
+      }
+    }
+    return { ok: true, goal: this.deps.goalBoard.get(goal.goalId) ?? goal };
   }
 
   /** 某 actor 的全部计划（活跃在前，最近更新优先） */
@@ -256,6 +305,23 @@ export class GoalPlanner {
     this.persistSteps(goal, steps);
     if (status === "done" || status === "skipped") return this.advance(goalId, actorId);
     return { ok: true, action: "blocked", step, reason: "步骤已标记失败，计划暂停推进" };
+  }
+
+  /**
+   * 写一条步骤备注而不改状态（2026-10-19）：供 GoalRunner 的按需检索把
+   * 查到的结果落回该步，让随后派发的任务带着「已经查到什么」继续，不重复搜。
+   * 只对仍是 todo 的步骤生效（已被推进/完成则静默跳过）。
+   */
+  annotateStep(goalId: string, stepId: string, note: string): boolean {
+    const goal = this.deps.goalBoard.get(goalId);
+    if (!goal || goal.kind !== "plan") return false;
+    const steps = this.stepsOf(goal);
+    const step = steps.find((s) => s.id === stepId);
+    if (!step || step.status !== "todo") return false;
+    step.note = note.slice(0, 300);
+    step.updatedAt = Date.now();
+    this.persistSteps(goal, steps);
+    return true;
   }
 
   /**
@@ -392,6 +458,16 @@ export class GoalPlanner {
         reason: "后台任务通道未就绪（LLM 未启用），步骤保持待办",
       };
     }
+    // 目标级预算（2026-10-19）：防单个 goal 吃掉全局日额度。这是**成本类**阻塞，
+    // GoalRunner 侧静默等次日重置，不打扰用户。
+    if (!this.deps.goalBoard.trySpendStep(goal.goalId)) {
+      return {
+        ok: true,
+        action: "blocked",
+        step,
+        reason: "该目标今日步数已达上限（目标级预算），明天再继续",
+      };
+    }
     const payload = goal.payload as PlanPayload;
     const taskId = launch({
       actorId: goal.actorId,
@@ -448,8 +524,18 @@ export class GoalPlanner {
     }
   }
 
-  /** 全部步骤终结 → markReady 进 ReadyTray（goal_ready 评估器挑时机投递摘要） */
-  private finishPlan(goal: GoalRecord): { ok: true; action: "finished"; summary: string } {
+  /**
+   * 全部步骤终结 → 验收（2026-10-19，D3）。
+   *
+   * 旧判据是「所有 step.status === done」，等于把「执行成功」当「目标达成」。
+   * 现在先过确定性验收（零 token）：
+   *  - met     → markReady 进 ReadyTray（挑时机投递摘要）
+   *  - partial → 不宣布完成，停住并说明差在哪（交人工/夜间重排）
+   *  - failed  → 不宣布完成，记失败（GoalRunner 会开口告知，不静默）
+   */
+  private finishPlan(
+    goal: GoalRecord,
+  ): { ok: true; action: "finished"; summary: string } | { ok: true; action: "blocked"; step: PlanStep; reason: string } {
     const steps = this.stepsOf(goal);
     const lines = steps.map((s, i) => {
       const mark = s.status === "failed" ? "✗" : s.status === "skipped" ? "—" : "✓";
@@ -457,7 +543,28 @@ export class GoalPlanner {
     });
     const summary = `「${goal.title}」计划完成：${steps.filter((s) => s.status === "done").length} 步办成` +
       (steps.some((s) => s.status === "failed") ? `，${steps.filter((s) => s.status === "failed").length} 步没办成` : "");
-    this.deps.goalBoard.markReady(goal.goalId, {
+
+    const verified = verifyDeterministic({
+      title: goal.title,
+      ...(goal.successCriteria ? { successCriteria: goal.successCriteria } : {}),
+      steps: steps.map((s) => ({ title: s.title, status: s.status, ...(s.note ? { note: s.note } : {}) })),
+    });
+
+    if (verified && verified.verdict !== "met") {
+      this.deps.goalBoard.setVerdict(goal.goalId, verified.verdict, verified.note);
+      this.deps.recordActivity?.({
+        actorId: goal.actorId,
+        title: `计划「${goal.title}」没验收通过`,
+        summary: verified.note,
+        status: verified.verdict === "failed" ? "failed" : "pending",
+      });
+      const last = steps[steps.length - 1];
+      return last
+        ? { ok: true, action: "blocked", step: last, reason: `验收没通过：${verified.note}` }
+        : { ok: true, action: "blocked", step: { id: "s0", title: goal.title, status: "failed", sensitivity: "act_internal", updatedAt: Date.now() }, reason: `验收没通过：${verified.note}` };
+    }
+
+    this.deps.goalBoard.setVerdict(goal.goalId, "met", verified?.note, {
       body: `${summary}\n${lines.join("\n")}`,
       bodyKind: "plan_done",
       dedupFields: { title: `计划完成：${goal.title}` },

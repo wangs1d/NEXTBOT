@@ -4,7 +4,6 @@ import "package:flutter/foundation.dart";
 import "package:window_manager/window_manager.dart";
 
 import "../presentation/dynamic_island.dart";
-import "../presentation/glass_notify.dart";
 import "agent_sphere_voice_controller.dart";
 import "briefing_tts_api.dart";
 import "tts_player.dart";
@@ -154,7 +153,8 @@ class PureVoiceModeController {
   }
 
   /// 回复收尾钩子（main.dart chat.assistant_done 落聊天流后调用）。
-  /// 简洁弹窗 + TTS 播报，播完开 10 秒追问窗口。
+  /// TTS 播报，播完开 10 秒追问窗口；不弹文字卡（2026-10-19 用户定调：
+  /// 纯语音模式只留语音回复，不单独展示文字）。
   Future<void> notifyReply(String replyText) async {
     if (!isActive.value) return;
     _submitSafetyTimer?.cancel();
@@ -162,7 +162,6 @@ class PureVoiceModeController {
         replyText.trim().isEmpty ? "（本轮无文字回复）" : replyText.trim();
     _phase = PureVoicePhase.speaking;
     IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "回复已落聊天流");
-    unawaited(_showReplyPopup(snippet));
     await _speak(_speakableText(snippet));
     _startFollowUpWindow();
   }
@@ -192,16 +191,14 @@ class PureVoiceModeController {
       };
   }
 
-  /// realtime 回合完成：弹窗呈现回复文字（语音已由 tts.chunk 回流直接播），
-  /// 播完再开追问窗口——否则扬声器声音会被本地识别当成人声。
+  /// realtime 回合完成：语音已由 tts.chunk 回流直接播，播完再开追问窗口
+  /// ——否则扬声器声音会被本地识别当成人声。不弹文字卡（2026-10-19 用户
+  /// 定调：纯语音模式只留语音回复，不单独展示文字）。
   void _onDuplexTurnCompleted(String userText, String assistantText) {
     if (!isActive.value || !_duplexActive) return;
     _submitSafetyTimer?.cancel();
     _phase = PureVoicePhase.speaking;
     IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "实时语音");
-    unawaited(_showReplyPopup(
-      assistantText.trim().isEmpty ? "（本轮无文字回复）" : assistantText.trim(),
-    ));
     unawaited(() async {
       await VoiceDuplexService.instance.waitPlayback();
       _startFollowUpWindow();
@@ -349,19 +346,6 @@ class PureVoiceModeController {
     );
     if (base64Audio == null) return;
     await TtsPlayer.instance.playFromBase64(base64Audio);
-  }
-
-  /// 简洁回复弹窗（应用内玻璃卡）：长文截断预览，12 秒自动关闭；
-  /// 完整内容已落聊天流，主窗口打开后可见。
-  Future<void> _showReplyPopup(String text) async {
-    final String compact =
-        text.length > 260 ? "${text.substring(0, 260)}…" : text;
-    GlassNotify.show(
-      title: "Agent 回复",
-      message: compact,
-      variant: GlassNotifyVariant.info,
-      duration: const Duration(milliseconds: 12000),
-    );
   }
 
   /// TTS 喂给朗读端的口语化清洗：剥代码块/表格/常见 markdown 标记。
