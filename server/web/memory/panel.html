@@ -1,0 +1,230 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>记忆面板</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 28px 24px 60px;
+    background: #0b0b0c; color: #e9e9ea;
+    font: 14px/1.6 system-ui, -apple-system, "Segoe UI", "PingFang SC", sans-serif;
+  }
+  .wrap { max-width: 980px; margin: 0 auto; }
+  h1 { font-size: 16px; font-weight: 500; margin: 0 0 4px; letter-spacing: .02em; }
+  .sub { color: #8b8b90; font-size: 12px; margin-bottom: 22px; }
+  .bar { display: flex; gap: 8px; margin-bottom: 24px; }
+  input {
+    flex: 1; padding: 9px 12px; border-radius: 8px;
+    border: 1px solid #2a2a2e; background: #141416; color: #e9e9ea; font-size: 13px;
+  }
+  input:focus { outline: none; border-color: #4a4a52; }
+  button {
+    padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px;
+    border: 1px solid #2a2a2e; background: #1a1a1d; color: #e9e9ea;
+  }
+  button:hover { border-color: #4a4a52; }
+  button.ghost { background: transparent; color: #8b8b90; }
+  button.danger:hover { border-color: #7a3030; color: #f0a0a0; }
+  section { margin-bottom: 26px; }
+  h2 { font-size: 13px; font-weight: 500; color: #a9a9b0; margin: 0 0 10px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid #1e1e22; vertical-align: top; }
+  th { color: #7b7b82; font-weight: 400; font-size: 12px; }
+  td.field { color: #c9c9cf; white-space: nowrap; }
+  td.val { color: #f2f2f4; }
+  .meta { color: #78787f; font-size: 12px; }
+  .tag { display: inline-block; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid #33333a; color: #9a9aa2; margin-left: 6px; }
+  .tag.plan { border-color: #4a3a1e; color: #d6a95a; }
+  .tag.lapsed { border-color: #5a2a2a; color: #d97c7c; }
+  .tag.muted { border-color: #2e3f52; color: #7fa8cd; }
+  .empty { color: #6a6a71; font-size: 13px; padding: 10px 0; }
+  .ops { display: flex; gap: 6px; justify-content: flex-end; }
+  .ops button { padding: 4px 9px; font-size: 12px; }
+  #status { color: #8b8b90; font-size: 12px; min-height: 18px; margin-top: -8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>记忆面板</h1>
+  <div class="sub">你记了什么、什么时候记的、什么时候的事；可以忘掉一条，也可以只是让它别再主动提。</div>
+
+  <div class="bar">
+    <input id="actor" placeholder="actorId（例如你的邮箱）" />
+    <button id="load">读取</button>
+  </div>
+  <div id="status"></div>
+
+  <section>
+    <h2>当前档案</h2>
+    <table><thead><tr><th>字段</th><th>值</th><th>记录 / 事发</th><th></th></tr></thead>
+      <tbody id="current"><tr><td colspan="4" class="empty">尚未读取</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>计划中的变更</h2>
+    <table><thead><tr><th>字段</th><th>值</th><th>计划生效</th><th>状态</th><th></th></tr></thead>
+      <tbody id="plans"><tr><td colspan="5" class="empty">无</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>历史档案</h2>
+    <table><thead><tr><th>字段</th><th>值</th><th>有效时间</th><th></th></tr></thead>
+      <tbody id="past"><tr><td colspan="4" class="empty">无</td></tr></tbody></table>
+  </section>
+
+  <section>
+    <h2>别再主动提</h2>
+    <table><thead><tr><th>类型</th><th>内容</th><th>添加时间</th><th></th></tr></thead>
+      <tbody id="suppressed"><tr><td colspan="4" class="empty">无</td></tr></tbody></table>
+  </section>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let actorId = "";
+
+function esc(s) {
+  return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;",
+  })[c]);
+}
+function day(iso) {
+  if (!iso) return "—";
+  return String(iso).slice(0, 10);
+}
+function say(msg) { $("status").textContent = msg || ""; }
+
+async function api(path, opts) {
+  const res = await fetch(path, {
+    headers: { "Content-Type": "application/json" },
+    ...(opts || {}),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || data.ok === false) throw new Error(data.error || res.statusText);
+  return data;
+}
+
+async function forget(field) {
+  if (!confirm("忘掉「" + field + "」？历史会保留可追溯，但不再作为现状使用。")) return;
+  await api("/api/memory/facts/forget", { method: "POST", body: JSON.stringify({ actorId, field }) });
+  await load();
+  say("已忘掉 " + field);
+}
+
+async function mute(kind, key) {
+  const reason = prompt("为什么不想被主动提起？（可留空）") || "";
+  await api("/api/memory/suppressions", {
+    method: "POST",
+    body: JSON.stringify({ actorId, kind, key, reason }),
+  });
+  await load();
+  say("已设为不再主动提：" + key);
+}
+
+async function unmute(kind, key) {
+  await api("/api/memory/suppressions/remove", {
+    method: "POST",
+    body: JSON.stringify({ actorId, kind, key }),
+  });
+  await load();
+  say("已恢复：" + key);
+}
+
+async function confirmPlan(field) {
+  const evidenceRef = prompt("确认依据（例如：用户说自己搬过去了 / location:成都）");
+  if (!evidenceRef) return;
+  await api("/api/memory/facts/plan/confirm", {
+    method: "POST",
+    body: JSON.stringify({ actorId, field, evidenceRef, became: "current" }),
+  });
+  await load();
+  say("计划已确认：" + field);
+}
+
+function renderCurrent(rows, suppressedSet) {
+  const body = $("current");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="4" class="empty">还没有记录</td></tr>'; return; }
+  body.innerHTML = rows.map((f) => {
+    const muted = suppressedSet.has(f.field);
+    return `<tr>
+      <td class="field">${esc(f.field)}${muted ? '<span class="tag muted">勿主动提</span>' : ""}</td>
+      <td class="val">${esc(f.value)}</td>
+      <td class="meta">记于 ${day(f.observedAt)}${f.eventTime ? " · 事发 " + esc(f.eventTime) : ""}${f.validFrom ? " · 自 " + esc(f.validFrom) : ""}</td>
+      <td><div class="ops">
+        ${muted ? `<button class="ghost" onclick="unmute('field','${esc(f.field)}')">恢复提及</button>`
+                : `<button class="ghost" onclick="mute('field','${esc(f.field)}')">别再提</button>`}
+        <button class="danger" onclick="forget('${esc(f.field)}')">忘掉</button>
+      </div></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderPlans(rows) {
+  const body = $("plans");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="5" class="empty">没有待确认的计划</td></tr>'; return; }
+  body.innerHTML = rows.map((p) => {
+    const tag = p.planState === "lapsed"
+      ? '<span class="tag lapsed">未确认是否发生</span>'
+      : '<span class="tag plan">尚未发生</span>';
+    return `<tr>
+      <td class="field">${esc(p.field)}</td>
+      <td class="val">${esc(p.value)}</td>
+      <td class="meta">${esc(p.validFrom || "时点未定")}</td>
+      <td>${tag}</td>
+      <td><div class="ops"><button onclick="confirmPlan('${esc(p.field)}')">有证据，确认</button></div></td>
+    </tr>`;
+  }).join("");
+}
+
+function renderPast(rows) {
+  const body = $("past");
+  if (!rows.length) { body.innerHTML = '<tr><td colspan="4" class="empty">无</td></tr>'; return; }
+  body.innerHTML = rows.map((f) => `<tr>
+      <td class="field">${esc(f.field)}</td>
+      <td class="val">${esc(f.value)}</td>
+      <td class="meta">${esc(f.validFrom || day(f.observedAt))} → ${esc(f.validTo || "至今/未知")}</td>
+      <td></td>
+    </tr>`).join("");
+}
+
+function renderSuppressed(items) {
+  const body = $("suppressed");
+  if (!items.length) { body.innerHTML = '<tr><td colspan="4" class="empty">无</td></tr>'; return; }
+  body.innerHTML = items.map((s) => `<tr>
+      <td class="field">${s.kind === "field" ? "字段" : "文案"}</td>
+      <td class="val">${esc(s.key)}</td>
+      <td class="meta">${day(s.createdAt)}</td>
+      <td><div class="ops"><button class="ghost" onclick="unmute('${esc(s.kind)}','${esc(s.key)}')">恢复</button></div></td>
+    </tr>`).join("");
+}
+
+async function load() {
+  actorId = $("actor").value.trim();
+  if (!actorId) { say("请先填 actorId"); return; }
+  localStorage.setItem("memoryPanelActor", actorId);
+  say("读取中…");
+  try {
+    const [facts, sup] = await Promise.all([
+      api("/api/memory/facts?actorId=" + encodeURIComponent(actorId)),
+      api("/api/memory/suppressions?actorId=" + encodeURIComponent(actorId)),
+    ]);
+    renderCurrent(facts.current || [], new Set(facts.suppressed || []));
+    renderPlans(facts.plans || []);
+    renderPast(facts.past || []);
+    renderSuppressed(sup.items || []);
+    say("已读取 " + actorId);
+  } catch (err) {
+    say("读取失败：" + (err.message || err));
+  }
+}
+
+$("load").addEventListener("click", load);
+$("actor").addEventListener("keydown", (e) => { if (e.key === "Enter") load(); });
+const saved = localStorage.getItem("memoryPanelActor");
+if (saved) { $("actor").value = saved; load(); }
+</script>
+</body>
+</html>
