@@ -84,6 +84,25 @@ export class WsConnectionRegistry {
     return !!set && set.size > 0;
   }
 
+  /**
+   * 全量广播（客户端版本更新推送等运营事件）：遍历全部 session 的全部连接，
+   * open 状态才发；单连接发送失败吞掉（不影响其余连接，也不影响遍历）。
+   */
+  broadcastAll(data: string): void {
+    for (const set of this.connections.values()) {
+      for (const entry of set) {
+        const open =
+          entry.socket.readyState === undefined || entry.socket.readyState === 1;
+        if (!open) continue;
+        try {
+          entry.socket.send(data);
+        } catch {
+          /* 半开连接 send 可能抛错：吞掉，其余连接照常 */
+        }
+      }
+    }
+  }
+
   /** 该 actor 是否有指定类别的在线设备（升级链设备分级路由用） */
   hasDeviceClass(sessionId: string, deviceClass: DeviceClass): boolean {
     const set = this.connections.get(sessionId);

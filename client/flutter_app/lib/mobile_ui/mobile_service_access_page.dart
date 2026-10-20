@@ -7,6 +7,7 @@ import "package:url_launcher/url_launcher.dart";
 
 import "../core/config/api_config.dart";
 import "../core/services/access_auth_api.dart";
+import "../core/services/model_api_tester.dart";
 import "mobile_theme.dart";
 
 /// 手机端「服务接入」页（内测 byok）。
@@ -20,6 +21,7 @@ import "mobile_theme.dart";
 ///   或选「自定义」手填 OpenAI 兼容网关地址 + 模型名 + API Key
 /// - 语音合成（TTS）：MiniMax（独立 Key）或 OpenAI（复用模型服务 Key），
 ///   保存后可点「试听测试」真实合成一小段语音验证连通性
+/// - 邮箱盯梢：登录邮箱已自动接入，只需填一次 IMAP 授权码即可开始盯邮件
 class MobileServiceAccessPage extends StatefulWidget {
   const MobileServiceAccessPage({super.key});
 
@@ -33,6 +35,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   final TextEditingController _model = TextEditingController();
   final TextEditingController _apiKey = TextEditingController();
   final TextEditingController _ttsApiKey = TextEditingController();
+  final TextEditingController _mailPass = TextEditingController();
 
   bool _loading = true;
   String? _error;
@@ -51,14 +54,25 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   String? _modelKeyTail;
   String? _ttsKeyTail;
   bool _ttsConfigured = false;
+  String? _mailKeyTail;
+  bool _mailConfigured = false;
 
   bool _savingModel = false;
   bool _savingTts = false;
   bool _testingTts = false;
+  bool _savingMail = false;
   String? _modelMessage;
   bool _modelMessageError = false;
   String? _ttsMessage;
   bool _ttsMessageError = false;
+  String? _mailMessage;
+  bool _mailMessageError = false;
+
+  /// 邮箱盯梢状态（GET /api/mail-watch/status：登录邮箱自动接入的账号 + 轮询态）。
+  bool _mailRunning = false;
+  String _mailUser = "";
+  String _mailReason = "";
+  bool _obscureMailPass = true;
 
   @override
   void initState() {
@@ -72,6 +86,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     _model.dispose();
     _apiKey.dispose();
     _ttsApiKey.dispose();
+    _mailPass.dispose();
     super.dispose();
   }
 
@@ -96,6 +111,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
             .get(Uri.parse("${ApiConfig.httpBase}/api/model-providers"),
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
+        client
+            .get(Uri.parse("${ApiConfig.httpBase}/api/mail-watch/status"),
+                headers: AccessCredentialStore.instance.authHeaders)
+            .timeout(const Duration(seconds: 15)),
       ]);
       client.close();
 
@@ -108,6 +127,15 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           (cfg["model"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
       final Map<String, dynamic> ttsBlock =
           (cfg["tts"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      final Map<String, dynamic> mailBlock =
+          (cfg["mail"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      Map<String, dynamic> mailStatus = const <String, dynamic>{};
+      if (responses[2].statusCode == 200) {
+        final Map<String, dynamic> parsed =
+            jsonDecode(responses[2].body) as Map<String, dynamic>;
+        mailStatus = (parsed["status"] as Map<String, dynamic>?) ??
+            const <String, dynamic>{};
+      }
 
       List<Map<String, dynamic>> providers = const <Map<String, dynamic>>[];
       if (responses[1].statusCode == 200) {
@@ -125,6 +153,11 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _modelKeyTail = modelBlock["keyTail"]?.toString();
         _ttsConfigured = ttsBlock["configured"] == true;
         _ttsKeyTail = ttsBlock["keyTail"]?.toString();
+        _mailConfigured = mailBlock["configured"] == true;
+        _mailKeyTail = mailBlock["keyTail"]?.toString();
+        _mailRunning = mailStatus["running"] == true;
+        _mailUser = mailStatus["user"]?.toString() ?? "";
+        _mailReason = mailStatus["reason"]?.toString() ?? "";
         // 预填：服务端已配置 → 带出网关/模型；否则带目录首项（DeepSeek 兜底）
         if ((modelBlock["baseUrl"]?.toString() ?? "").isNotEmpty) {
           _baseUrl.text = modelBlock["baseUrl"].toString();
@@ -236,6 +269,66 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _ttsMessage = err;
         _ttsMessageError = true;
       }
+    });
+  }
+
+  /// 保存邮箱授权码：PUT /api/service-config（mail 块）→ 服务端落盘 + 即刻启动
+  /// IMAP 轮询（host/user 由登录邮箱域自动接入，无需手填服务器）。
+  Future<void> _saveMail() async {
+    final String pass = _mailPass.text.trim();
+    if (pass.isEmpty && !_mailConfigured) {
+      _setMailMessage("请填写 IMAP 授权码（邮箱网页版设置里生成，不是登录密码）",
+          error: true);
+      return;
+    }
+    setState(() {
+      _savingMail = true;
+      _mailMessage = null;
+    });
+    final String? err = await _putServiceConfig(<String, dynamic>{
+      "mail": <String, dynamic>{"pass": pass},
+    });
+    if (!mounted) return;
+    if (err != null) {
+      setState(() {
+        _savingMail = false;
+        _mailMessage = err;
+        _mailMessageError = true;
+      });
+      return;
+    }
+    _mailConfigured = true;
+    _mailPass.clear();
+    await _refreshMailStatus();
+    if (!mounted) return;
+    setState(() {
+      _savingMail = false;
+      _mailMessage = _mailRunning
+          ? "已接通，Agent 开始盯你的邮箱"
+          : "已保存，但未启动：${_mailReason.isEmpty ? "未知原因" : _mailReason}";
+      _mailMessageError = false;
+    });
+  }
+
+  /// 邮箱盯梢运行态刷新（GET /api/mail-watch/status；保存后回转真实结果）。
+  Future<void> _refreshMailStatus() async {
+    final Map<String, dynamic> res = await MailWatchApi.status();
+    if (!mounted) return;
+    final Map<String, dynamic> st = res["status"] is Map
+        ? res["status"] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    setState(() {
+      _mailRunning = st["running"] == true;
+      _mailReason = st["reason"]?.toString() ?? "";
+      final String user = st["user"]?.toString() ?? "";
+      if (user.isNotEmpty) _mailUser = user;
+    });
+  }
+
+  void _setMailMessage(String text, {required bool error}) {
+    setState(() {
+      _mailMessage = text;
+      _mailMessageError = error;
     });
   }
 
@@ -352,7 +445,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),
           child: Text(
-            "内测期服务端不代充额度：模型与语音的 API Key 需自行填写。"
+            "内测期服务端不代充额度：模型、语音与邮箱都需要你自己接入一次。"
             "密钥只保存在服务器本机并按尾号回显，保存后即刻生效，无需重启。",
             style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
           ),
@@ -360,6 +453,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _buildModelCard(p),
         const SizedBox(height: 16),
         _buildTtsCard(p),
+        const SizedBox(height: 16),
+        _buildMailCard(p),
         const SizedBox(height: 24),
       ],
     );
@@ -544,6 +639,173 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
             _ttsMessage!,
             style: TextStyle(
               color: _ttsMessageError
+                  ? Theme.of(context).colorScheme.error
+                  : p.textSecondary,
+              fontSize: 13,
+              height: 1.5,
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  // ═══════════════════════════════════════════════
+  // 邮箱盯梢卡
+  // ═══════════════════════════════════════════════
+
+  Widget _buildMailCard(MobilePalette p) {
+    final String? guideUrl = mailGuideUrl(_mailUser);
+    return _card(
+      p,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.mark_email_unread_outlined,
+                color: p.textSecondary, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text("邮箱盯梢",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Container(
+                  width: 7,
+                  height: 7,
+                  decoration: BoxDecoration(
+                    color: _mailRunning
+                        ? const Color(0xFF34C759)
+                        : p.textMuted,
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                const SizedBox(width: 6),
+                Text(_mailRunning ? "盯梢中" : "未接通",
+                    style: TextStyle(color: p.textSecondary, fontSize: 12)),
+              ],
+            ),
+          ],
+        ),
+        const SizedBox(height: 10),
+        Text(
+          "登录用的邮箱已自动接入。只需填一次 IMAP 授权码（邮箱网页版设置里生成，"
+          "不是登录密码），Agent 就会帮你盯重要邮件、自动把车票/酒店行程记进日程。",
+          style: TextStyle(color: p.textSecondary, fontSize: 13, height: 1.5),
+        ),
+        if (_mailUser.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          Text("已接入邮箱：$_mailUser",
+              style: TextStyle(color: p.textPrimary, fontSize: 13)),
+        ],
+        if (!_mailRunning && _mailReason.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 4),
+          Text(_mailReason,
+              style: TextStyle(color: p.textMuted, fontSize: 12, height: 1.4)),
+        ],
+        const SizedBox(height: 12),
+        // 授权码获取引导（按邮箱域给分步说明 + 官方入口直达）
+        Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: p.background,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: p.divider),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text("如何获取授权码？",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(height: 6),
+              Text(mailGuideSteps(_mailUser),
+                  style: TextStyle(
+                      color: p.textSecondary, fontSize: 12.5, height: 1.6)),
+              if (guideUrl != null) ...<Widget>[
+                const SizedBox(height: 8),
+                InkWell(
+                  onTap: () => launchUrl(Uri.parse(guideUrl),
+                      mode: LaunchMode.externalApplication),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      Icon(Icons.open_in_new, size: 14, color: p.accent),
+                      const SizedBox(width: 4),
+                      Text("打开邮箱设置页",
+                          style: TextStyle(
+                            color: p.accent,
+                            fontSize: 12.5,
+                            decoration: TextDecoration.underline,
+                            decorationColor: p.accent,
+                          )),
+                    ],
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+        const SizedBox(height: 12),
+        _fieldLabel(
+            p, "IMAP 授权码${_mailConfigured ? "（已存 ${_mailKeyTail ?? ""}，留空沿用）" : ""}"),
+        TextField(
+          controller: _mailPass,
+          obscureText: _obscureMailPass,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: TextStyle(color: p.textPrimary, fontSize: 14),
+          decoration: InputDecoration(
+            hintText: "邮箱设置里生成的授权码",
+            hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
+            filled: true,
+            fillColor: p.background,
+            contentPadding:
+                const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            suffixIcon: IconButton(
+              icon: Icon(
+                _obscureMailPass
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 18,
+                color: p.textMuted,
+              ),
+              onPressed: () =>
+                  setState(() => _obscureMailPass = !_obscureMailPass),
+            ),
+            border: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: p.divider),
+            ),
+            enabledBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: p.divider),
+            ),
+            focusedBorder: OutlineInputBorder(
+              borderRadius: BorderRadius.circular(10),
+              borderSide: BorderSide(color: p.textSecondary),
+            ),
+          ),
+        ),
+        const SizedBox(height: 14),
+        _actionButton(
+          p,
+          label: "保存并接通",
+          busy: _savingMail,
+          onPressed: _saveMail,
+        ),
+        if (_mailMessage != null) ...<Widget>[
+          const SizedBox(height: 10),
+          Text(
+            _mailMessage!,
+            style: TextStyle(
+              color: _mailMessageError
                   ? Theme.of(context).colorScheme.error
                   : p.textSecondary,
               fontSize: 13,

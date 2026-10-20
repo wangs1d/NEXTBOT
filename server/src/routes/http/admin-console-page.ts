@@ -1,7 +1,7 @@
 /**
  * 管理控制台页面（管理员）：自包含 HTML，无外部依赖。
  *
- * 左侧导航 + 七个标签：概览 / 用户 / 站内信（发送+记录+聚合统计）/ 支付 / 反馈管理 / 下载分发 / 系统。
+ * 左侧导航 + 六个标签：概览 / 用户 / 内测 / 站内信（发送+记录+聚合统计）/ 支付 / 反馈管理 / 下载分发。
  * 数据接口：反馈提交与「我的反馈」走开放接口；全量反馈、状态流转与所有
  * /api/admin/* 鉴权：账号密码会话（HttpOnly Cookie，主通道）+ x-admin-token 遗留口令（脚本通道）。
  * 页内脚本用字符串拼接渲染，内容全部经 esc() 转义；事件用委托，不用内联 onclick。
@@ -298,7 +298,6 @@ export function renderAdminConsolePage(): string {
     <a href="#payments" data-tab="payments">支付</a>
     <a href="#feedback" data-tab="feedback">反馈管理<span class="nav-badge" id="navBadgeFeedback"></span></a>
     <a href="#downloads" data-tab="downloads">下载分发</a>
-    <a href="#system" data-tab="system">系统</a>
   </nav>
   <div class="tokenbox" id="accountBox" style="display:none">
     <label>管理员</label>
@@ -411,7 +410,7 @@ export function renderAdminConsolePage(): string {
       <div class="sub" style="margin:0 0 8px">发版设置（客户端启动检查的版本清单，保存即生效，无需重启）</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <label>latest <input id="mfLatest" size="9" placeholder="0.2.0"></label>
-        <label>url <input id="mfUrl" size="58" placeholder="http://47.98.122.29:3000/downloads/Nextbot-Setup-x.y.z.exe"></label>
+        <label>url <input id="mfUrl" size="58" placeholder="https://nextbot.top/downloads/Nextbot-Setup-x.y.z.exe"></label>
         <button class="btn primary" id="mfSaveBtn">保存清单</button>
         <span class="meta" id="mfHint"></span>
       </div>
@@ -427,11 +426,6 @@ export function renderAdminConsolePage(): string {
     <div id="dlList"><div class="empty">加载中…</div></div>
   </section>
 
-  <section class="tab" id="tab-system">
-    <h1>系统</h1>
-    <div class="sub">运行状态 · 存储占用 · 依赖探活 · 服务配置 · 管理操作审计</div>
-    <div id="systemBody"><div class="empty">加载中…</div></div>
-  </section>
 </main>
 <script>
 var STATUS_LABELS = ${statusLabelsJson};
@@ -511,12 +505,6 @@ function showErr(msg) { $("err").innerHTML = '<div class="err">' + esc(msg) + "<
 function clearErr() { $("err").innerHTML = ""; }
 function okNote(msg) { return '<div class="ok-note">' + esc(msg) + "</div>"; }
 
-function kvTable(pairs) {
-  return '<table class="kv">' + pairs.map(function (p) {
-    return "<tr><td>" + esc(p[0]) + '</td><td class="kv-val">' + p[1] + "</td></tr>";
-  }).join("") + "</table>";
-}
-
 function chip(cls, text) { return '<span class="chip ' + cls + '">' + esc(text) + "</span>"; }
 
 // ---------- 标签路由 ----------
@@ -539,7 +527,6 @@ function showTab(name) {
   else if (name === "messages") { loadCompose(); loadMessages(); }
   else if (name === "feedback") loadFeedback();
   else if (name === "downloads") { loadDownloads(); loadManifest(); }
-  else if (name === "system") loadSystem();
 }
 
 /** 带 hash 的跳转（跨标签按钮统一走这里，保持地址栏可分享/可回退）。 */
@@ -645,7 +632,7 @@ function loadOverview() {
         "</div></div>";
       html += '<div class="meta">服务器：运行 ' + fmtUptime(d.server.uptimeMs) + " · 内存 " +
         fmtBytes(d.server.rssBytes) + " · " + esc(d.server.nodeVersion) + " · " + esc(d.server.platform) +
-        ' · <a href="#system">详细状态 →</a></div>';
+        "</div>";
       body.innerHTML = html;
     })
     .catch(function (e) {
@@ -1210,7 +1197,7 @@ function checkedApplyEmails() {
 
 function approveWaitlist(emails) {
   if (!emails.length) { showErr("先勾选要通过的申请"); return; }
-  if (!confirm("通过 " + emails.length + " 个申请？通过后邮箱加入白名单，对方会收到站内信通知。")) return;
+  if (!confirm("通过 " + emails.length + " 个申请？通过后邮箱加入白名单，并自动向对方邮箱发送通过通知（需已配置 SMTP）。")) return;
   api("/api/admin/beta-waitlist/approve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -1580,8 +1567,7 @@ function renderPaymentsTable() {
   }
   if (!payOrders.length) {
     wrap.innerHTML = '<div class="card"><div class="empty">还没有真实支付订单。</div>' +
-      '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式），' +
-      '渠道配置状态见「系统」标签；模拟测试订单不再展示、不再落库。</div></div>';
+      '<div class="meta" style="text-align:center;padding:0 0 18px">真实通道需在服务端配置微信/支付宝商户凭证（live 模式）；模拟测试订单不再展示、不再落库。</div></div>';
     return;
   }
   var rows = orders.map(function (o) {
@@ -1835,125 +1821,6 @@ function deleteDownload(name) {
     .catch(function (e) { showErr("删除失败：" + e.message); });
 }
 
-// ---------- 系统 ----------
-function depChip(d) {
-  if (!d.configured) return chip("offline", "未配置");
-  return d.ok ? chip("online", "正常") : chip("bad", "异常");
-}
-
-function loadSystem() {
-  clearErr();
-  var body = $("systemBody");
-  body.innerHTML = '<div class="empty">加载中…</div>';
-  Promise.all([
-    api("/api/admin/system").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); }),
-    api("/api/admin/config").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); }),
-    api("/api/admin/audit?limit=50").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
-  ]).then(function (results) {
-    var sys = results[0], cfg = results[1], audit = results[2];
-    if (sys.code === 401 || cfg.code === 401) throw new Error("管理员会话已失效，请重新登录");
-    if (sys.j.ok !== true) throw new Error("系统状态接口异常");
-    var d = sys.j;
-
-    // 页面层级：常用信息（状态/依赖/存储/审计）直接展示；
-    // 主机详情、定时任务、支付渠道等服务配置折进「更多诊断」，低频不看。
-    var html = '<div class="stats">' +
-      kpiCard(fmtUptime(d.server.uptimeMs), "运行时长", "PID " + d.server.pid) +
-      kpiCard(fmtBytes(d.server.rssBytes), "内存 RSS", "堆 " + fmtBytes(d.server.heapUsedBytes)) +
-      kpiCard(fmtBytes(d.storage.dataDir.totalBytes), "data 目录", d.storage.dataDir.entries.length + " 个条目") +
-      kpiCard(fmtBytes(d.storage.downloadsDir.bytes), "下载目录", d.storage.downloadsDir.files + " 个文件") +
-      "</div>";
-
-    html += '<div class="meta" style="margin:-4px 0 14px">' +
-      esc(d.os.hostname) + " · " + esc(d.server.platform) + " / " + esc(d.server.arch) +
-      " · Node " + esc(d.server.nodeVersion) +
-      " · 定时任务 " + d.jobs.total + "（待执行 " + d.jobs.pending + "）" +
-      " · 账号 " + d.accounts.total + "（禁用 " + d.accounts.disabled + "）" +
-      " · 反馈待处理 " + d.feedback.open + "</div>";
-
-    html += '<div class="card" style="margin-bottom:12px"><div class="card-title">依赖探活</div>' +
-      "<table><tr><th>组件</th><th>配置</th><th>状态</th><th>详情</th></tr>" +
-      "<tr><td>外部模型</td><td>" + (d.deps.model.configured ? "已配置" : "未配置") + "</td><td>" + depChip(d.deps.model) +
-      '</td><td class="wrap">' + esc(d.deps.model.detail) + "</td></tr>" +
-      "<tr><td>Redis</td><td>" + (d.deps.redis.configured ? "已配置" : "未配置") + "</td><td>" + depChip(d.deps.redis) +
-      '</td><td class="wrap">' + esc(d.deps.redis.detail) + "</td></tr>" +
-      "<tr><td>Qdrant（向量库）</td><td>" + (d.deps.qdrant.configured ? "已配置" : "未配置") + "</td><td>" + depChip(d.deps.qdrant) +
-      '</td><td class="wrap">' + esc(d.deps.qdrant.detail) + "</td></tr>" +
-      "</table></div>";
-
-    html += '<div class="card" style="margin-bottom:12px"><div class="card-title">存储占用（data 目录明细）</div>';
-    var entries = (d.storage.dataDir.entries || []).slice(0, 12);
-    html += entries.length
-      ? "<table><tr><th>条目</th><th>体积</th><th>文件数</th></tr>" + entries.map(function (e) {
-          return "<tr><td>" + esc(e.name) + (e.isDir ? "" : " 📄") + "</td><td>" + fmtBytes(e.bytes) + "</td><td>" +
-            (e.isDir ? e.files : "-") + "</td></tr>";
-        }).join("") + "</table>"
-      : '<div class="meta">data 目录为空</div>';
-    html += '<div class="meta" style="margin-top:6px">路径：' + esc(d.storage.dataDir.path) +
-      " · 下载目录：" + esc(d.storage.downloadsDir.path) + "</div>";
-    html += "</div>";
-
-    var entriesAudit = (audit.j && audit.j.ok === true ? audit.j.entries : []) || [];
-    html += '<div class="card"><div class="head"><div class="card-title">管理操作审计（最近 ' + entriesAudit.length + " 条）</div>" +
-      '<button class="btn small" data-act="sys-reload">刷新</button></div>';
-    html += entriesAudit.length
-      ? '<table style="margin-top:6px"><tr><th>时间</th><th>操作</th><th>详情</th><th>来源 IP</th></tr>' +
-        entriesAudit.map(function (a) {
-          return "<tr>" +
-            "<td>" + fmtTime(a.time) + "</td>" +
-            "<td>" + esc(a.action) + "</td>" +
-            '<td class="wrap">' + esc(JSON.stringify(a.detail || {})) + "</td>" +
-            "<td>" + esc(a.ip || "-") + "</td>" +
-            "</tr>";
-        }).join("") + "</table>"
-      : '<div class="empty">暂无审计记录（管理写操作会记录在这里）</div>';
-    html += "</div>";
-
-    // —— 低频诊断信息：默认折叠 ——
-    html += '<details class="diag" style="margin-top:14px"><summary>更多诊断：主机详情 / 服务配置（部署期信息，默认折叠）</summary>';
-    html += '<div class="grid2" style="margin-top:10px">';
-    html += '<div class="card"><div class="card-title">主机与进程</div>' + kvTable([
-      ["工作目录", esc(d.server.cwd)],
-      ["物理内存", fmtBytes(d.os.totalMemBytes) + "（可用 " + fmtBytes(d.os.freeMemBytes) + "）"],
-      ["负载", esc(d.os.loadavg.join(" / "))],
-      ["堆内存 / 外部内存", fmtBytes(d.server.heapUsedBytes) + " / " + fmtBytes(d.server.externalMemoryBytes)],
-      ["下次定时执行", d.jobs.nextRunAt ? fmtTime(d.jobs.nextRunAt) : "-"],
-      ["已完成 / 已取消任务", d.jobs.completed + " / " + d.jobs.cancelled]
-    ]) + "</div>";
-    if (cfg.j.ok === true) {
-      var c = cfg.j;
-      html += '<div class="card"><div class="card-title">服务配置</div>' +
-        "<table><tr><th>服务</th><th>配置</th></tr>";
-      html += "<tr><td>微信支付</td><td>模式 " + esc(c.payment.wechat.mode) +
-        " · AppID " + esc(c.payment.wechat.appId || "未配置") +
-        " · 商户号 " + esc(c.payment.wechat.mchId || "未配置") +
-        " · APIv3 密钥 " + (c.payment.wechat.apiKeySet ? "已设置" : "未设置") +
-        " · 商户私钥 " + (c.payment.wechat.privateKeySet ? "已设置" : "未设置") + "</td></tr>";
-      html += "<tr><td>支付宝</td><td>模式 " + esc(c.payment.alipay.mode) +
-        " · AppID " + esc(c.payment.alipay.appId || "未配置") +
-        " · 应用私钥 " + (c.payment.alipay.privateKeySet ? "已设置" : "未设置") +
-        " · 支付宝公钥 " + (c.payment.alipay.publicKeySet ? "已设置" : "未设置") + "</td></tr>";
-      html += "<tr><td>支付回调</td><td>" + esc(c.payment.notifyBaseUrl || "未配置 PAYMENT_NOTIFY_BASE_URL（live 模式建议配置）") + "</td></tr>";
-      html += "<tr><td>外部模型</td><td>" + (c.model.configured
-        ? esc(c.model.providerId + " · " + (c.model.model || "默认模型") + " · " + c.model.baseUrl)
-        : "未配置") + "</td></tr>";
-      html += "<tr><td>Agent 邮箱域</td><td>" + esc(c.mail.agentMailDomain) +
-        " · 入站密钥 " + (c.mail.inboundSecretSet ? "已设置" : "未设置") +
-        " · 出站 SMTP " + (c.mail.outboundSmtpConfigured
-          ? "已配置（" + esc(c.mail.outboundSmtpHost || "") + "）"
-          : "未配置") + "</td></tr>";
-      html += "<tr><td>下载目录</td><td>" + esc(c.paths.downloadsDir) + "</td></tr>";
-      html += "</table></div>";
-    }
-    html += "</div></details>";
-
-    body.innerHTML = html;
-  }).catch(function (e) {
-    body.innerHTML = '<div class="empty">加载失败：' + esc(e.message) + "</div>";
-    showErr(e.message);
-  });
-}
-
 // ---------- 事件委托与初始化 ----------
 document.addEventListener("click", function (ev) {
   var el = ev.target.closest ? ev.target.closest("[data-act]") : null;
@@ -1980,7 +1847,6 @@ document.addEventListener("click", function (ev) {
   else if (act === "user-goto-feedback") gotoFeedbackSearch(el.getAttribute("data-user") || "");
   else if (act === "user-goto-inbox") gotoUserInbox(el.getAttribute("data-user") || "");
   else if (act === "dl-delete") deleteDownload(el.getAttribute("data-file"));
-  else if (act === "sys-reload") loadSystem();
   else if (act === "bc-user") bcToggleUser(el.getAttribute("data-user"), el.checked);
   else if (act === "bc-clear-sel") { bcSelected = {}; renderBcUserList(); updateBcHint(); }
   else if (act === "bc-reload") loadCompose();

@@ -1,5 +1,5 @@
 /**
- * 运行时服务接入配置（内测 byok 形态）：模型 / TTS 等外部服务的用户自配密钥。
+ * 运行时服务接入配置（内测 byok 形态）：模型 / TTS / 邮箱等外部服务的用户自配密钥。
  *
  * 背景：内测期服务端不代充模型/语音额度，用户在客户端「服务接入」页自行填
  * API Key。配置经 PUT /api/service-config 写入本文件（data/service-config.json）
@@ -35,16 +35,25 @@ export type TtsServiceConfig = {
   updatedAt: string;
 };
 
+/** 邮箱接入（邮箱盯梢）：只存 IMAP 授权码，host/user 沿用登录邮箱域自动接入（auto-mail-account）。 */
+export type MailServiceConfig = {
+  /** IMAP 授权码 / 应用专用密码（非邮箱登录密码） */
+  pass: string;
+  updatedAt: string;
+};
+
 export type ServiceConfigFile = {
   version: 1;
   updatedAt: string;
   model?: ModelServiceConfig;
   tts?: TtsServiceConfig;
+  mail?: MailServiceConfig;
 };
 
 export type ServiceConfigPatch = {
   model?: Omit<ModelServiceConfig, "updatedAt">;
   tts?: Omit<TtsServiceConfig, "updatedAt">;
+  mail?: Omit<MailServiceConfig, "updatedAt">;
 };
 
 /** 密钥脱敏：只留尾 4 位，供状态回显（绝不下发完整 key） */
@@ -94,6 +103,12 @@ export function applyServiceConfigToEnv(
     env.MINIMAX_API_KEY = tts.apiKey.trim();
   }
   // tts.provider === "openai"：复用模型服务的 OPENAI_API_KEY，无需单独 env
+  const mail = cfg.mail;
+  if (mail && mail.pass.trim()) {
+    // 邮箱盯梢按 env 键启动（MailWatchService 构造期读 env）；enabled 随之点亮
+    env.MAIL_WATCH_PASS = mail.pass.trim();
+    env.MAIL_WATCH_ENABLED = "1";
+  }
 }
 
 /** 启动时重放持久化配置（create-app-services 在解析 externalChat 之前调用）。返回应用了的配置。 */
@@ -123,6 +138,7 @@ export async function saveServiceConfigPatch(
     updatedAt: now,
     ...(patch.model ? { model: { ...patch.model, updatedAt: now } } : {}),
     ...(patch.tts ? { tts: { ...patch.tts, updatedAt: now } } : {}),
+    ...(patch.mail ? { mail: { ...patch.mail, updatedAt: now } } : {}),
   };
   await writeJsonAtomic(serviceConfigFilePath(dir), next);
   applyServiceConfigToEnv(next, env);

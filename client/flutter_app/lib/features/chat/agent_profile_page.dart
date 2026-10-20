@@ -51,9 +51,9 @@ class AgentProfileData {
   }
 
   Map<String, Object?> toPayload() {
+    // 不含 displayName/handle：名字是 agent.update_identity 改名管道的专属领地，
+    // 主页文案写入（PUT /api/user-preferences）不得直改身份字段。
     return <String, Object?>{
-      "displayName": displayName,
-      "handle": handle,
       "signature": signature,
       "avatarUrl": avatarUrl,
       "moodStyle": moodStyle,
@@ -73,25 +73,19 @@ class AgentProfileData {
     if (updatedAtRaw.isNotEmpty) {
       updatedAt = DateTime.tryParse(updatedAtRaw);
     }
+    // 出厂不预设名字：用户/Agent 没设定前一律空值，界面显示「未命名」，
+    // 绝不在这里塞自拟名字/handle/签名（那会让 agent 带着没人给它的名字）。
     return AgentProfileData(
-      displayName: profile["displayName"]?.toString().trim().isNotEmpty == true
-          ? profile["displayName"].toString().trim()
-          : "小夜灯",
-      handle: profile["handle"]?.toString().trim().isNotEmpty == true
-          ? profile["handle"].toString().trim()
-          : "soft_reply_box",
-      signature: profile["signature"]?.toString().trim().isNotEmpty == true
-          ? profile["signature"].toString().trim()
-          : "主页亮着，你什么时候来找我都可以。",
+      displayName: profile["displayName"]?.toString().trim() ?? "",
+      handle: profile["handle"]?.toString().trim() ?? "",
+      signature: profile["signature"]?.toString().trim() ?? "",
       avatarUrl: profile["avatarUrl"]?.toString().trim().isNotEmpty == true
           ? profile["avatarUrl"].toString().trim()
           : null,
       moodStyle: profile["moodStyle"]?.toString().trim().isNotEmpty == true
           ? profile["moodStyle"].toString().trim()
           : UserPreferencesApi.moodGentle,
-      statusText: profile["statusText"]?.toString().trim().isNotEmpty == true
-          ? profile["statusText"].toString().trim()
-          : "在线，温柔模式。",
+      statusText: profile["statusText"]?.toString().trim() ?? "",
       avatarPreset:
           profile["avatarPreset"]?.toString().trim().isNotEmpty == true
               ? profile["avatarPreset"].toString().trim()

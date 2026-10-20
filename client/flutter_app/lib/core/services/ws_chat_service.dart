@@ -36,6 +36,26 @@ class WsChatService {
   DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
   DateTime _connectedAt = DateTime.fromMillisecondsSinceEpoch(0);
 
+  /// 已写入 socket、尚未拿到服务端 ack 的 `chat.user_message`（messageId → 事件）。
+  ///
+  /// 半开连接上 `sink.add` 既不抛错也不阻塞，消息只是沉进内核发送缓冲区，客户端却
+  /// 认定「已发出」——直到 3 分钟看门狗报「抱歉，等待回复超时」。链路随后被判死时
+  /// 这些消息回补进 [_pendingOutbound]，重连后原样重发。重发是安全的：服务端
+  /// MessageBatchProcessor 按 `(sessionId, messageId)` 做 10 分钟 turn 级幂等，
+  /// 重复投递只记日志「重复投递被拒」并静默丢弃，不会重复跑轮次/重复触发工具。
+  final Map<String, _PendingWsEvent> _chatInFlight = <String, _PendingWsEvent>{};
+
+  /// messageId → 已重投次数；防止死循环重投（超过上限回 [chat_delivery_failed]）。
+  final Map<String, int> _chatRedeliveryCount = <String, int>{};
+  static const int _maxChatRedeliveries = 3;
+
+  /// 服务端 ack 事件名：三者的 payload 都带客户端 messageId（done 走 traceId）。
+  static const Set<String> _chatAckEventTypes = <String>{
+    "chat.message_received",
+    "chat.turn_started",
+    "chat.assistant_done",
+  };
+
   /// 连接就绪（含重连后）时回调；应在此时发送 `session.init`。
   void Function()? onConnected;
 
@@ -61,6 +81,7 @@ class WsChatService {
     _subscription = null;
     _isConnecting = false;
     _isConnected = false;
+    _requeueChatInFlight();
     try {
       _channel?.sink.close(1000); // 使用正常的关闭代码
     } catch (e) {
@@ -97,6 +118,7 @@ class WsChatService {
           _lastInboundAt = DateTime.now();
           final Map<String, dynamic> event =
               jsonDecode(data.toString()) as Map<String, dynamic>;
+          _confirmChatDelivery(event);
           _eventsController.add(event);
         },
         onError: (Object error) {
@@ -117,7 +139,6 @@ class WsChatService {
           _lastInboundAt = DateTime.now();
           _connectedAt = _lastInboundAt;
           _startHeartbeat(channel);
-          _flushPendingOutbound();
           _eventsController.add(<String, dynamic>{
             "type": "ws_connected",
             "payload": <String, dynamic>{
@@ -125,7 +146,10 @@ class WsChatService {
               "connectedAt": _connectedAt.toIso8601String(),
             },
           });
+          // session.init 必须先于补发队列：重连补发的 chat.user_message 若抢在
+          // session.init 之前到达，服务端会归错车道。旧实现先 flush 后 init。
           onConnected?.call();
+          _flushPendingOutbound();
         }).catchError((Object _) {
           if (!identical(_channel, channel)) return;
           _handleDisconnect(channel);
@@ -162,9 +186,55 @@ class WsChatService {
     unawaited(_subscription?.cancel());
     _subscription = null;
     _channel = null;
+    _requeueChatInFlight();
     _notifyDisconnected();
     if (_manualClose) return;
     _handleConnectionError();
+  }
+
+  /// 服务端已受理该条消息（[chat.message_received] / [chat.turn_started] /
+  /// [chat.assistant_done] 都会带客户端 messageId），从在途表摘除。
+  void _confirmChatDelivery(Map<String, dynamic> event) {
+    final Object? type = event["type"];
+    if (type is! String || !_chatAckEventTypes.contains(type)) return;
+    final Object? payload = event["payload"];
+    if (payload is! Map) return;
+    // assistant_done 的关联字段是 traceId（= 客户端 messageId），其余是 messageId。
+    final Object? id = payload["messageId"] ?? payload["traceId"];
+    if (id is! String || id.isEmpty) return;
+    if (_chatInFlight.remove(id) != null) {
+      _chatRedeliveryCount.remove(id);
+    }
+  }
+
+  /// 链路被判死时，把在途 chat 消息回补进待发队列（重连后由
+  /// [_flushPendingOutbound] 重发）。服务端按 `(sessionId, messageId)` 幂等，
+  /// 重复投递会被静默丢弃，因此重发不会造成重复轮次/重复工具副作用。
+  void _requeueChatInFlight() {
+    if (_chatInFlight.isEmpty) return;
+    final List<_PendingWsEvent> requeued = <_PendingWsEvent>[];
+    for (final MapEntry<String, _PendingWsEvent> entry
+        in _chatInFlight.entries) {
+      final int attempts = (_chatRedeliveryCount[entry.key] ?? 0) + 1;
+      if (attempts > _maxChatRedeliveries) {
+        // 放弃重投：交给既有的 3 分钟回合看门狗报「等待回复超时」，不再造新事件。
+        _chatRedeliveryCount.remove(entry.key);
+        continue;
+      }
+      _chatRedeliveryCount[entry.key] = attempts;
+      requeued.add(entry.value);
+    }
+    _chatInFlight.clear();
+    if (requeued.isNotEmpty) {
+      _pendingOutbound.insertAll(0, requeued);
+    }
+  }
+
+  /// 入站静默是否已超过心跳阈值（服务端每 20~30s 会推 embodiment / autonomy
+  /// 事件，长时间零入站即链路已死或半开）。
+  bool _isInboundStale() {
+    if (_lastInboundAt == DateTime.fromMillisecondsSinceEpoch(0)) return true;
+    return DateTime.now().difference(_lastInboundAt) > _heartbeatTimeout;
   }
 
   void _startHeartbeat(WebSocketChannel channel) {
@@ -261,6 +331,16 @@ class WsChatService {
 
   bool sendEvent(String type, Map<String, dynamic> payload) {
     if (_isConnected && _channel != null && _channel!.closeCode == null) {
+      // 半开连接自检：链路已被中间设备静默掐断时 `sink.add` 不抛错，消息只会沉在
+      // 内核发送缓冲区里，客户端却当成「已发出」——用户随后必然等到看门狗报
+      // 「抱歉，等待回复超时」。服务端有稳定的周期性推送，入站静默超过心跳阈值
+      // 即判死链：主动拆链入队、重连后再发，语义上仍算「已受理」。
+      if (type == "chat.user_message" && _isInboundStale()) {
+        _pendingOutbound.add(_PendingWsEvent(type: type, payload: payload));
+        final WebSocketChannel? dead = _channel;
+        if (dead != null) _handleDisconnect(dead);
+        return true;
+      }
       final result = _sendNow(type, payload);
       return result;
     }
@@ -345,6 +425,14 @@ class WsChatService {
         "payload": payload,
       });
       _channel!.sink.add(message);
+      // 记账「在途」：拿到服务端 ack 前若链路死掉，重连后按原 messageId 重发。
+      if (type == "chat.user_message") {
+        final Object? id = payload["messageId"];
+        if (id is String && id.isNotEmpty) {
+          _chatInFlight[id] =
+              _PendingWsEvent(type: type, payload: payload);
+        }
+      }
       return true;
     } catch (e) {
       _markDisconnected();
@@ -364,6 +452,8 @@ class WsChatService {
     _isConnecting = false;
     _isConnected = false;
     _pendingOutbound.clear();
+    _chatInFlight.clear();
+    _chatRedeliveryCount.clear();
     // 1001(goingAway) 被 web_socket 包 checkCloseCode 拒绝（只收 1000/3000-4999），
     // 会抛 ArgumentError 成未捕获异步异常；统一用 1000 正常关闭。
     await _channel?.sink.close(1000);

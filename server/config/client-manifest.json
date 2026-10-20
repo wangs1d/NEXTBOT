@@ -1,7 +1,7 @@
 {
-  "latest": "0.1.1",
+  "latest": "0.1.2",
   "minVersion": "0.1.0",
-  "url": "https://login.nextbot.top/downloads/Nextbot-Setup-0.1.1.exe",
-  "notes": "更新检查直连 HTTPS，弹卡更快；玻璃胶囊弹窗接线收缩",
+  "url": "https://login.nextbot.top/downloads/Nextbot-Setup-0.1.2.exe",
+  "notes": "修复弱网/长连接半开时消息投递丢失导致的「等待回复超时」：断链自动重连并补发未确认消息；补齐 travel 封面图资产",
   "channel": "byok"
 }

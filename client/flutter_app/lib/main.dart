@@ -36,6 +36,7 @@ import "core/utils/content_summary_parser.dart";
 import "core/services/app_auto_start.dart";
 import "core/services/app_tray_service.dart";
 import "core/services/client_update_checker.dart";
+import "package:package_info_plus/package_info_plus.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
 import "core/presentation/api_key_setup_dialog.dart";
@@ -115,6 +116,7 @@ import "features/devices/devices_page.dart";
 import "features/settings/settings_page.dart";
 import "features/approvals/approvals_panel.dart";
 import "core/services/access_auth_api.dart";
+import "core/services/cloud_model_binding_store.dart";
 import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
@@ -163,6 +165,9 @@ void main() async {
     // 预加载本机访问凭据（token），确保首次 session.init 就能带上
     _writeCrashLog("[BOOT]", "stage 1: before AccessCredentialStore.load", StackTrace.current);
     await AccessCredentialStore.instance.load();
+    // 预加载云端连接版「用户自有模型」配置，确保首次 session.init 就能带上
+    // （仅云端连接版消费；byok 本地版不读此文件）。
+    await CloudModelBindingStore.instance.load();
     _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
     // WebView2 环境进程内只初始化一次：若用户开启了共用浏览器 CDP 调试端口
     // （SharedBrowserHost.remoteDebugPort），必须在这里一并传入，晚于首次
@@ -358,15 +363,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 用户给agent起的名字
   String? _agentName;
+  // 出厂不预设名字：加载到真实档案前保持空态，界面显示「未命名」，
+  // 不得塞自拟名字/handle/签名。
   AgentProfileData _agentProfile = const AgentProfileData(
-    displayName: "AI助手",
-    handle: "ai_agent",
-    signature: "今天也在认真发光。",
+    displayName: "",
+    handle: "",
+    signature: "",
     avatarUrl: null,
     moodStyle: UserPreferencesApi.moodGentle,
-    statusText: "刚把今天的对话别在衣领上，准备继续陪你往下走。",
+    statusText: "",
     avatarPreset: "dawn",
-    lastProfileEvent: "这是 Agent 当前默认的主页状态。",
+    lastProfileEvent: "",
     updatedAt: null,
   );
 
@@ -1065,8 +1072,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         ..clear()
         ..addAll(cachedRelay);
       _visionCameraConsent = visionConsent;
-      // 设置agent名字占位符
-      _agentName = "AI助手";
+      // agent 名字占位：未设定前留空，界面统一显示「未命名」（不预设名字）
+      _agentName = "";
       _isInitialized = true;
     });
 
@@ -1219,6 +1226,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 版本检查先于定位询问：强制升级锁（minVersion 之下的旧客户端）必须
       // 先于一切启动弹窗生效，锁死时后续询问不再执行。
       await _checkClientUpdateAtStartup();
+      // 运行中的更新感知不再轮询：服务端清单变化时沿 wss 推 update.available
+      // （见 _handleUpdateAvailablePush），发布即达、离线上线补推。
       // byok 首启：config.env 无模型 key 时引导填写（不可跳过），保存后重启
       // runtime 使 key 生效。
       if (!kIsWeb && Platform.isWindows && LocalRuntimeManager.isBundled) {
@@ -1273,6 +1282,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // 即使下发，用户未同意定位时定时器会自行停止。
         if (type == "agent.location_tracking_config") {
           _configureContinuousLocationTracking(payload);
+        }
+        // 版本更新推送（2026-10-21 替代 4h 轮询）：发布方改清单文件即推送，
+        // 在线用户秒级收到；离线用户由服务端在 session.init 时补推。
+        if (type == "update.available") {
+          final Map<String, dynamic> mf =
+              (payload["manifest"] as Map?)?.cast<String, dynamic>() ??
+                  <String, dynamic>{};
+          unawaited(_handleUpdateAvailablePush(mf));
         }
         if (type == "connection_error") {
           SphereEmbodimentMotionBridge.instance.setMainAgentLinked(false);
@@ -3585,6 +3602,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 无条件携带 userId——服务端 resolveActorId 以 userId 为准，
     // 这是按账号隔离记忆/世界/配额的第一闸。
     sessionInit["userId"] = ApiConfig.effectiveActorId;
+    // 云端连接版 BYOK（2026-10-20）：用户自有模型三元组随 session.init 上送。
+    // 门控三重：非捆绑形态（云端连接版）+ 已配置 + wss 连接——明文 ws 绝不送
+    // key。服务端按 actor 绑定、纯内存驻留 24h，重连重传自愈；byok 本地版
+    // （isBundled）不走此路径，模型 key 仍只进本地 runtime 的 config.env。
+    if (!kIsWeb && !LocalRuntimeManager.isBundled && ApiConfig.wsUrl.startsWith("wss://")) {
+      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
+      if (binding.isConfigured) {
+        sessionInit["modelProvider"] = <String, dynamic>{
+          "baseUrl": binding.baseUrl,
+          "apiKey": binding.apiKey,
+          "model": binding.model,
+        };
+      }
+    }
     _ws.sendEvent("session.init", sessionInit);
   }
 
@@ -5004,6 +5035,49 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     );
   }
 
+  /// 运行中更新感知（2026-10-21 起改为服务端推送，不再轮询）：服务端清单变化或
+  /// 用户上线补推时沿 wss 下发 update.available，这里按启动检查同款语义分流——
+  /// 可选升级只上灵动岛简短提示（不抢焦点不打断对话，同版本进程内只提示一次）；
+  /// 强制升级（minVersion 之下）走启动同款弹窗；已最新则撤下岛上的可升级提示
+  /// （用户在别处完成升级后，下次任何推送都会把过期提示撤掉）。
+  final Set<String> _islandNotifiedVersions = <String>{};
+
+  Future<void> _handleUpdateAvailablePush(Map<String, dynamic> manifestJson) async {
+    if (kIsWeb || !Platform.isWindows || kDebugMode) return;
+    if (manifestJson.isEmpty) return;
+    final manifest = ClientManifest.fromJson(manifestJson);
+    String local;
+    try {
+      local = (await PackageInfo.fromPlatform()).version;
+    } catch (_) {
+      return; // 读不到本地版本无法比对，静默放弃（启动检查兜底）
+    }
+    final ClientUpdateStatus status = classifyUpdate(local, manifest);
+    if (status == ClientUpdateStatus.upToDate) {
+      DynamicIslandController.instance.dismiss('update.available');
+      return;
+    }
+    if (status == ClientUpdateStatus.optionalUpdate) {
+      if (!_islandNotifiedVersions.add(manifest.latest)) return;
+      DynamicIslandController.instance.present(IslandEntry(
+        id: 'update.available',
+        title: '新版本 ${manifest.latest} 可升级',
+        kind: IslandKind.update,
+        trailing: '侧栏可更新',
+        priority: 2,
+      ));
+      return;
+    }
+    final BuildContext? ctx = _rootNavigatorKey.currentContext;
+    if (ctx == null || !ctx.mounted) return;
+    await showClientUpdateDialog(
+      context: ctx,
+      manifest: manifest,
+      localVersion: local,
+      forced: true,
+    );
+  }
+
   /// 侧栏「检查更新」按钮：见 UpdateResultCard.runManualUpdateCheck
   /// 的结果分流说明（已是最新→右上角玻璃卡；其余→按钮上方浮卡；强锁→居中弹窗）。
   Future<void> _checkForUpdateManually() async {
@@ -5789,13 +5863,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   children: <Widget>[
                     MorningBriefingCard(
                       briefing: briefing,
-                      narrationText: narrationText,
                       modeLabel: modeLabel,
-                      onSpeak: (String text) {
-                        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                          SnackBar(content: Text(text)),
-                        );
-                      },
                     ),
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),

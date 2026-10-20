@@ -37,23 +37,28 @@ export class AgentMemorySyncService {
   private data: PersistedShape = { sessions: {} };
   private persistChain: Promise<void> = Promise.resolve();
   private readonly writeQueues = new Map<string, Promise<unknown>>();
+  /** 磁盘快照只加载一次：重复 load 会覆盖内存态，导致已入队未落盘的写入被旧快照冲掉 */
+  private loadPromise: Promise<void> | null = null;
 
   constructor(filePath?: string) {
     this.filePath =
       filePath ?? process.env.AGENT_MEMORY_SYNC_FILE ?? join(process.cwd(), "data", "agent-memory-sync.json");
   }
 
-  async load(): Promise<void> {
-    try {
-      const raw = await readFile(this.filePath, "utf8");
-      const parsed = JSON.parse(raw) as PersistedShape;
-      if (parsed?.sessions && typeof parsed.sessions === "object") {
-        this.data = parsed;
+  load(): Promise<void> {
+    this.loadPromise ??= (async () => {
+      try {
+        const raw = await readFile(this.filePath, "utf8");
+        const parsed = JSON.parse(raw) as PersistedShape;
+        if (parsed?.sessions && typeof parsed.sessions === "object") {
+          this.data = parsed;
+        }
+      } catch (e: unknown) {
+        const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
+        if (code !== "ENOENT") throw e;
       }
-    } catch (e: unknown) {
-      const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
-      if (code !== "ENOENT") throw e;
-    }
+    })();
+    return this.loadPromise;
   }
 
   /**
@@ -176,6 +181,25 @@ export class AgentMemorySyncService {
       }
       return false;
     });
+  }
+
+  /**
+   * 写入单个 KV 条目并等待落盘队列完成（返回是否写入成功）。
+   * 与 setEntry 同款乐观并发重试，但返回 Promise——改名这类「要么全写、
+   * 要么全失败」的原子操作必须用它：setEntry 是 fire-and-forget，进程退出
+   * 前可能还没落盘，会留下「账号/界面有名字、prompt 里却没名字」的半截态。
+   */
+  async setEntryAndWait(actorId: string, key: string, value: unknown): Promise<boolean> {
+    const ok = await this.enqueueActorWrite(actorId, () => {
+      for (let i = 0; i < 12; i++) {
+        const { revision } = this.getSnapshot(actorId, [key]);
+        const result = this.applyPatchUnsafe(actorId, revision, [{ key, op: "put", value }]);
+        if (result.ok) return true;
+      }
+      return false;
+    });
+    if (ok) await this.persistChain;
+    return ok;
   }
 
   /**

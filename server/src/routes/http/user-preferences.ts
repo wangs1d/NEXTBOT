@@ -4,10 +4,7 @@ import type { FastifyInstance } from "fastify";
 
 import { writeJsonAtomic } from "../../storage/atomic-json.js";
 import { isWithinBriefingWindow } from "../../services/morning-briefing-service.js";
-import {
-  AGENT_NAME_SUGGESTIONS,
-  DEFAULT_AGENT_NAME,
-} from "../../services/agent-identity.js";
+import { AGENT_NAME_SUGGESTIONS } from "../../services/agent-identity.js";
 
 type BriefingMode = "voice" | "window" | "card";
 type BriefingSections = {
@@ -131,9 +128,11 @@ const DEFAULT_PREFS: UserPreferences = {
     deliveredChannel: null,
   },
   agentProfile: {
-    displayName: DEFAULT_AGENT_NAME.displayName,
-    handle: DEFAULT_AGENT_NAME.handle,
-    signature: "昼与夜的边界，替你值守。",
+    // 出厂不预设名字（2026-10-20 定调）：用户设定前各处置为「未命名」，
+    // agent 不得自己给自己取名；签名同理不自拟，留空由用户或 Agent 后续打理。
+    displayName: "",
+    handle: "",
+    signature: "",
     avatarUrl: null,
     moodStyle: "gentle",
     statusText: "有点忙，但不是不在。",
@@ -157,6 +156,13 @@ function getOrCreatePrefs(sessionId: string): UserPreferences {
   if (prefs.agentProfile && "intro" in prefs.agentProfile) {
     delete (prefs.agentProfile as Record<string, unknown>).intro;
   }
+  // 存量清理（2026-10-20）：出厂默认名已下线——旧数据里 nameOrigin==="default"
+  // 的名字档案是没人设定过的占位身份（自定义名字必走改名管道、origin 会是
+  // user/self），读取时清成「未命名」态，否则 agent 会带着一个没人给过它的名字。
+  if (prefs.agentProfile?.nameOrigin === "default") {
+    prefs.agentProfile.displayName = "";
+    prefs.agentProfile.handle = "";
+  }
   prefsStore.set(sessionId, prefs);
   return prefs;
 }
@@ -164,14 +170,19 @@ function getOrCreatePrefs(sessionId: string): UserPreferences {
 function applyAgentProfilePatch(
   target: AgentProfile,
   patch: Partial<AgentProfile>,
+  opts?: { allowIdentity?: boolean },
 ): AgentProfile {
-  if (typeof patch.displayName === "string") {
+  // 身份三字段（displayName/handle/nameOrigin）是改名管道的专属领地：
+  // 只有 applyAgentIdentityRename 显式传 allowIdentity 才写入，其余任何直写
+  // 入口（PUT /api/user-preferences 等）一律拦掉，杜绝「名字只写了一半」。
+  const allowIdentity = opts?.allowIdentity === true;
+  if (allowIdentity && typeof patch.displayName === "string") {
     const trimmed = patch.displayName.trim();
     if (trimmed) target.displayName = trimmed.slice(0, 24);
   }
-  if (typeof patch.handle === "string") {
-    const normalized = patch.handle.trim().replace(/\s+/g, "_");
-    if (normalized) target.handle = normalized.slice(0, 32);
+  if (allowIdentity && typeof patch.handle === "string") {
+    // 允许显式置空（用于清理遗留错配 handle）；非空才按规则裁剪
+    target.handle = patch.handle.trim().replace(/\s+/g, "_").slice(0, 32);
   }
   if (typeof patch.signature === "string") {
     target.signature = patch.signature.trim().slice(0, 120);
@@ -196,7 +207,7 @@ function applyAgentProfilePatch(
   if (typeof patch.lastProfileEvent === "string") {
     target.lastProfileEvent = patch.lastProfileEvent.trim().slice(0, 160);
   }
-  if (patch.nameOrigin === "self" || patch.nameOrigin === "user" || patch.nameOrigin === "default") {
+  if (allowIdentity && (patch.nameOrigin === "self" || patch.nameOrigin === "user" || patch.nameOrigin === "default")) {
     target.nameOrigin = patch.nameOrigin;
   }
   if (patch.pinnedPostId === null || typeof patch.pinnedPostId === "string") {
@@ -226,14 +237,35 @@ export function getUserPreferences(sessionId: string): UserPreferences {
   return getOrCreatePrefs(sessionId);
 }
 
+/**
+ * 主页档案写入（主页文案/头像/心情等）。
+ * 身份三字段（displayName/handle/nameOrigin）默认被拦掉——要改名请走
+ * applyAgentIdentityRename（工具与 HTTP 端点共用的唯一入口），并显式传
+ * opts.allowIdentity 才放行，避免「名字只写了一半」。
+ */
 export function patchAgentProfile(
   sessionId: string,
   patch: Partial<AgentProfile>,
+  opts?: { allowIdentity?: boolean },
 ): AgentProfile {
+  if (opts?.allowIdentity !== true) {
+    const blocked = ["displayName", "handle", "nameOrigin"].filter((k) => k in patch);
+    if (blocked.length) {
+      console.warn(
+        `[user-preferences] 拦截 agentProfile 身份字段直写(${blocked.join(",")})，改名请走 applyAgentIdentityRename`,
+      );
+    }
+  }
   const prefs = getOrCreatePrefs(sessionId);
-  const next = applyAgentProfilePatch(prefs.agentProfile, patch);
+  const next = applyAgentProfilePatch(prefs.agentProfile, patch, opts);
   mirrorPersist(sessionId, prefs);
   return next;
+}
+
+/** 已知的持久化 prefs actorId 列表（存量回填遍历用，等待磁盘快照加载完成） */
+export async function listPrefsActorIds(): Promise<string[]> {
+  await ensurePrefsLoaded();
+  return Object.keys(persistedPrefs);
 }
 
 export function markMorningBriefingDelivered(
@@ -311,10 +343,14 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
       }
     }
     if (body.preferences?.agentProfile) {
-      applyAgentProfilePatch(
-        prefs.agentProfile,
-        body.preferences.agentProfile as Partial<AgentProfile>,
-      );
+      const incoming = body.preferences.agentProfile as Partial<AgentProfile>;
+      const blocked = ["displayName", "handle", "nameOrigin"].filter((k) => k in incoming);
+      if (blocked.length) {
+        console.warn(
+          `[user-preferences] 拦截 agentProfile 身份字段直写(${blocked.join(",")})，改名请走 applyAgentIdentityRename`,
+        );
+      }
+      applyAgentProfilePatch(prefs.agentProfile, incoming);
     }
     mirrorPersist(body.sessionId, prefs);
     return { ok: true, preferences: prefs };

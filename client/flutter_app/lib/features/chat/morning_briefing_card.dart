@@ -4,15 +4,11 @@ class MorningBriefingCard extends StatelessWidget {
   const MorningBriefingCard({
     super.key,
     required this.briefing,
-    this.narrationText,
     this.modeLabel,
-    this.onSpeak,
   });
 
   final Map<String, dynamic> briefing;
-  final String? narrationText;
   final String? modeLabel;
-  final void Function(String text)? onSpeak;
 
   String? _readString(String key1, String key2) {
     final Object? a = briefing[key1];
@@ -42,9 +38,6 @@ class MorningBriefingCard extends StatelessWidget {
         if (x is Map) x.cast<String, dynamic>(),
     ];
 
-    final bool canSpeak =
-        onSpeak != null && narrationText != null && narrationText!.isNotEmpty;
-
     return Card(
       clipBehavior: Clip.antiAlias,
       child: Padding(
@@ -66,18 +59,6 @@ class MorningBriefingCard extends StatelessWidget {
                 if (modeLabel != null && modeLabel!.isNotEmpty) ...<Widget>[
                   const SizedBox(width: 8),
                   _ModeChip(label: modeLabel!),
-                ],
-                if (canSpeak) ...<Widget>[
-                  const SizedBox(width: 4),
-                  IconButton(
-                    icon: const Icon(Icons.volume_up_outlined),
-                    onPressed: () => onSpeak!(narrationText!),
-                    tooltip: "语音播报",
-                    visualDensity: VisualDensity.compact,
-                    padding: EdgeInsets.zero,
-                    constraints:
-                        const BoxConstraints(minWidth: 32, minHeight: 32),
-                  ),
                 ],
               ],
             ),

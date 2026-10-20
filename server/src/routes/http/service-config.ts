@@ -27,6 +27,8 @@ export type ServiceConfigRouteDeps = {
   ttsService: TtsService;
   /** 热替换主对话 provider（create-app-services 注入 MutableExternalChatProvider.swap） */
   externalChatSwapper?: (next: ExternalChatProvider | null) => void;
+  /** 邮箱接入热生效（授权码保存后当场启动 IMAP 轮询；未注入时仅落盘+写 env） */
+  mailWatchApplyPass?: (pass: string) => unknown;
 };
 
 function isValidHttpUrl(raw: string): boolean {
@@ -59,6 +61,13 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
         configured: Boolean(persisted?.tts?.apiKey) || Boolean(process.env.MINIMAX_API_KEY?.trim()),
         keyTail: maskServiceKey(persisted?.tts?.apiKey ?? process.env.MINIMAX_API_KEY),
         updatedAt: persisted?.tts?.updatedAt ?? null,
+      },
+      mail: {
+        // 邮箱接入：host/user 由登录邮箱域自动接入（auto-mail-account），这里只管授权码有没有
+        configured:
+          Boolean(persisted?.mail?.pass) || Boolean(process.env.MAIL_WATCH_PASS?.trim()),
+        keyTail: maskServiceKey(persisted?.mail?.pass ?? process.env.MAIL_WATCH_PASS),
+        updatedAt: persisted?.mail?.updatedAt ?? null,
       },
     };
   });
@@ -103,14 +112,28 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
       patch.tts = { provider, apiKey };
     }
 
-    if (!patch.model && !patch.tts) {
-      return reply.code(400).send({ ok: false, error: "请求体为空：至少提供 model 或 tts 之一" });
+    if (body.mail != null) {
+      // pass 留空 = 沿用已存授权码（改完别的服务不必重填邮箱授权码）
+      const persisted = await readServiceConfigFile();
+      const pass = (body.mail.pass ?? "").trim() || persisted?.mail?.pass || "";
+      if (!pass) {
+        return reply.code(400).send({ ok: false, error: "mail.pass 不能为空" });
+      }
+      patch.mail = { pass };
+    }
+
+    if (!patch.model && !patch.tts && !patch.mail) {
+      return reply.code(400).send({ ok: false, error: "请求体为空：至少提供 model / tts / mail 之一" });
     }
 
     const saved = await saveServiceConfigPatch(patch);
     // env 已由 saveServiceConfigPatch 应用；重新解析 provider 并热替换进主链路
     if (deps.externalChatSwapper) {
       deps.externalChatSwapper(createExternalChatProviderFromEnv());
+    }
+    // 邮箱授权码热生效：当场启动 IMAP 轮询（未注入时仅落盘+写 env，重启后重放同样生效）
+    if (patch.mail && deps.mailWatchApplyPass) {
+      deps.mailWatchApplyPass(patch.mail.pass);
     }
     const binding = resolvePrimaryExternalModelBinding();
     return {
@@ -126,6 +149,9 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
           : undefined,
         tts: patch.tts
           ? { provider: saved.tts?.provider, keyTail: maskServiceKey(saved.tts?.apiKey) }
+          : undefined,
+        mail: patch.mail
+          ? { keyTail: maskServiceKey(saved.mail?.pass) }
           : undefined,
         runtimeBinding: binding
           ? { providerId: binding.providerId, model: binding.model, baseUrl: binding.baseUrl }

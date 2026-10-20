@@ -13,9 +13,10 @@ param(
   # 控制面（管理后台所在服务器）：反馈/站内信等运营数据走这里。
   # 不烤入的话捆绑用户的反馈只会落在本机数据库，管理后台收不到。（同上必须 https）
   [string]$ControlPlaneUrl = "https://login.nextbot.top",
-  # 安装包默认搜索端点：运营方云端搜索代理（nginx :80 -> 主服务 /v1/search 路由，
+  # 安装包默认搜索端点：运营方云端搜索代理（nginx :443 -> 主服务 /v1/search 路由，
   # key 只存云端，客户端零 key）。内测/公测发行搜索统一由运营方提供。
-  [string]$SearchApiUrl = "http://47.98.122.29/v1/search",
+  # 必须 https://（80 已 301，明文要多付一次重定向 + 二次 TLS，弱网下更易被中间设备改写）
+  [string]$SearchApiUrl = "https://nextbot.top/v1/search",
   # 搜索代理访问令牌：烤入 SEARCH_API_KEY 由客户端自动携带（authorization: Bearer），
   # 云端 ANYSEARCH_PROXY_ACCESS_TOKEN 校验——扫描器拿到端点无令牌 403。与云端同值
   [string]$SearchApiToken = "nbsrch_9f4c2e7a81d63b504ae7c2f19d83b546",
@@ -126,6 +127,14 @@ Copy-Item (Join-Path $Repo 'server\dist') (Join-Path $StageRuntime 'dist') -Recu
 Copy-Item (Join-Path $Repo 'server\package.json') (Join-Path $StageRuntime 'package.json') -Force
 Copy-Item (Join-Path $Repo 'server\config') (Join-Path $StageRuntime 'config') -Recurse -Force
 
+# 3.5.1 服务端静态页资产：dist 只装编译后的 js，页面本体在 server\web——聊天网页、
+# 照片墙、行程地图 desktop/mobile.html。路由按 `dist/routes/http` 上三级解析
+# （即 **runtime 根** 的 web\），所以必须整树落到 runtime\web；漏拷在装机环境里
+# 表现为页面 404（打开行程页/照片墙直接空白）。顺带摇树：*.js.map 只服务调试
+# （~4MB），装机包不带 sourcemap。
+Copy-Item (Join-Path $Repo 'server\web') (Join-Path $StageRuntime 'web') -Recurse -Force
+Get-ChildItem (Join-Path $StageRuntime 'web') -Recurse -File -Include '*.map' -ErrorAction SilentlyContinue | Remove-Item -Force
+
 # 3.6 server 私有依赖：npm 工作区不会把全部依赖提升到根 node_modules
 # （如 mem0ai、groq-sdk、@anthropic-ai/sdk 等只落在 server\node_modules），
 # 漏拷会让 dist/index.js 启动即 ERR_MODULE_NOT_FOUND。拷到 dist\node_modules
@@ -151,6 +160,28 @@ foreach ($ortBin in (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin'
       }
     }
   }
+}
+
+# 3.6.6 摇树：剔掉只服务开发/构建期的工具链包。dist 是编译好的 JS，运行时永不
+# import 它们（已全仓 grep 确认无 typescript/esbuild/vite/vitest 的运行时引用），
+# 留着只是把 dev 工具链随安装包分发（tsc+esbuild+vite-node ≈ 47MB 原始体积）。
+# tsx 一并剔：它是 esbuild 的前端封装，esbuild 走后包内那份 tsx 已是死包；而
+# 代码修复皮层跑的是用户 PATH 里的 npx/tsc/tsx（shell:true），不读包内 tsx。
+# 同批清掉 node_modules 里的 *.map：只服务调试，装机包不带 sourcemap。
+foreach ($nmRoot in @($StageRuntime, (Join-Path $StageRuntime 'dist'))) {
+  $nm = Join-Path $nmRoot 'node_modules'
+  if (-not (Test-Path $nm)) { continue }
+  foreach ($pkg in 'typescript', 'vitest', 'vite', 'vite-node', 'esbuild', 'tinypool', 'tsx', '@esbuild', '@vitest') {
+    $target = Join-Path $nm $pkg
+    if (Test-Path $target) {
+      Remove-Item -Recurse -Force -ErrorAction SilentlyContinue -LiteralPath ('\\?\' + (Resolve-Path $target).Path)
+    }
+  }
+  # .bin 里指向被删包的 shim 一并清掉，避免留下指向空目录的入口
+  foreach ($shim in 'typescript', 'tsc', 'vitest', 'vite', 'vite-node', 'esbuild', 'tsx') {
+    Get-ChildItem (Join-Path $nm '.bin') -Filter "$shim.*" -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
+  }
+  Get-ChildItem $nm -Recurse -File -Include '*.map' -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 }
 
 # 3.7 本地内置向量引擎模型资产（零配置记忆底座）：bge-small-zh-v1.5 int8 ONNX
@@ -187,7 +218,12 @@ if ($leakedMedia) {
 # 3.9 runtime\.env：搜索 API 默认走运营方云端搜索代理（key 只存云端，客户端零 key
 # 零配置），内测/开源两版一致——搜索由运营方统一提供。开源版追加 NEXTBOT_EDITION=oss
 # （服务端版本闸的唯一开关，loadServerEnv 从 runtime 根读 .env）。
+# UPDATE_MANIFEST_SOURCE_URL（2026-10-21）：本地 runtime 从更新控制面拉客户端版本清单，
+# 变化沿本地 wss 推 update.available（客户端 0.1.4+ 处理；edition 不设 = byok 主清单）。
 $searchEnvLines = @("SEARCH_API_PROVIDER=anysearch", "ANYSEARCH_ENDPOINT=$SearchApiUrl", "SEARCH_API_KEY=$SearchApiToken")
+if ($UpdateManifestUrl) {
+  $searchEnvLines += "UPDATE_MANIFEST_SOURCE_URL=$UpdateManifestUrl"
+}
 if ($Edition -eq 'oss') {
   $searchEnvLines = @("NEXTBOT_EDITION=oss") + $searchEnvLines
 }

@@ -161,7 +161,9 @@ function defaultFailoverChainLegacy(): string {
  * 模型思考特性声明收敛到一张表，换模型只改档案，所有旁路调用点自适应）：
  * - MiniMax M 系默认强制思考，且思考计入 max_tokens 预算：旁路调用多为小 max_tokens
  *   的结构化输出，不关思考会导致 `<think>` 混入 content 或正文被思考饿死。M3 支持
- *   `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0）；M2.x 会 accept 但仍思考。
+ *   `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0）；M2.x 会 accept 但仍思考；
+ *   M3.1 系（M3.1-Flash）硬拒 disabled（400/2013），改发 `reasoning: {effort:"minimal"}`
+ *   （判定统一在 provider-profiles.minimaxThinkingExtras，provider 路径同源）。
  * - openai 槽位托管 DeepSeek deepseek-flash 时默认带思考链（实测简单任务多
  *   200+ reasoning_tokens），必须显式关闭，否则记忆精排等 800ms 级超时热路径全部拖爆。
  * - moonshot-kimi k2.5+ 默认开思考——与 MoonshotKimiProvider 对每次调用的默认

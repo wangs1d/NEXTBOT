@@ -107,10 +107,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerClientManifestRoutes(app);
   // 模型接入目录（自包含，无 deps）：向导/设置页目录式选模型，base URL 服务端统一下发
   registerModelProviderRoutes(app);
-  // 服务接入（内测 byok）：用户自配模型/TTS 密钥（GET/PUT /api/service-config + tts-test）
+  // 服务接入（内测 byok）：用户自配模型/TTS/邮箱授权码（GET/PUT /api/service-config + tts-test）
   registerServiceConfigRoutes(app, {
     ttsService: deps.ttsService,
     externalChatSwapper: deps.externalChatSwapper,
+    mailWatchApplyPass: deps.proactivityFabric?.mailWatchApplyPass,
   });
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);

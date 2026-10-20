@@ -213,6 +213,12 @@ export type IntentRouteCall =
 /**
  * L1 结构化意图分类：预算/超时/json mode 按路由 provider 能力档案自适应，
  * 超时/坏输出/异常网关式重试（细节见 structured-call）。永不抛错。
+ *
+ * 唯一偏离默认契约处：**超时不重试**。路由是主回复前的同步前置门，超时意味着
+ * 请求仍卡在服务端——原参立刻重试几乎必然再超时，实测把一次 5000ms 超时翻倍成
+ * 10000ms 空等后仍然失败（L1 分类失败→保守降级任务面）。而本层自带确定性兜底
+ * （conservativeFallback），不用为「再试一次」付第二个 timeout。坏输出与调用
+ * 异常的重试保留（那才是瞬态抖动语义）。
  */
 export async function classifyIntentByLlm(
   provider: ExternalChatProvider,
@@ -233,6 +239,7 @@ export async function classifyIntentByLlm(
       maxOutputTokens,
       timeoutMs,
       jsonMode,
+      retryOnTimeout: false,
       parse: (raw) => parseIntentJson(raw),
     },
   );

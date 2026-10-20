@@ -23,6 +23,11 @@ export {
 } from "./tool-protocol-adapter.js";
 export { AbstractChatProvider } from "./abstract-chat-provider.js";
 export { MutableExternalChatProvider } from "./mutable-chat-provider.js";
+export {
+  ActorModelBindingStore,
+  validateByokBaseUrl,
+  type ActorModelBinding,
+} from "./actor-model-bindings.js";
 export type { SystemAndPlanContext, SystemAndPlanResult } from "./abstract-chat-provider.js";
 export { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 export { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";

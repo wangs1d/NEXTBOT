@@ -15,6 +15,7 @@ import type { RealFundsWalletService } from "../services/real-funds-wallet-servi
 import type { AgentPairingService } from "../services/agent-pairing-service.js";
 import type { FriendMessageService } from "../services/friend-message-service.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import { notifySessionInit } from "../services/client-update-pusher.js";
 import { normalizeDeviceClass } from "../services/ws-connection-registry.js";
 import { declareClientCapabilities } from "../services/client-capability-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
@@ -22,6 +23,7 @@ import type { UserPersonalizationService } from "../services/user-personalizatio
 import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../services/voice-message-service.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
+import type { ActorModelBindingStore } from "../external-model/actor-model-bindings.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { setVoiceMode } from "../proactivity/voice-mode-state.js";
@@ -222,6 +224,11 @@ export type WsRouteDeps = {
   phoneCallCoordinator?: PhoneCallCoordinator;
   /** 账号服务（可选）：session.init 记录最近活跃（管理后台「最近活跃」指标） */
   agentAccountService?: { touchLastActive(actorId: string): void } | null;
+  /**
+   * 按 actor 的用户自有模型绑定仓（云端连接版 BYOK，可选）：session.init 解析
+   * payload.modelProvider 三元组并按 actorId 绑定；未装配时该字段被忽略。
+   */
+  actorModelBindings?: ActorModelBindingStore | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -257,6 +264,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     accessAuthService,
     phoneCallCoordinator,
     agentAccountService,
+    actorModelBindings,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -661,10 +669,59 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
+          // ─── 云端连接版 BYOK（2026-10-20）：session.init 携带用户自有模型三元组 ───
+          // 存在且字段齐全 → 按 actor 绑定（此后该 actor 的对话轮走用户 key，见
+          // agent-core.chatProviderFor）；存在但字段不全 → 撤绑（用户在 UI 清空）；
+          // 缺失 → 不动（旧客户端/桥接通道零影响）。key 纯内存驻留（TTL 24h），
+          // 客户端每次连接重传自愈。安全门：仅聊天主通道接收；上送通道必须 TLS
+          // （wss，经 x-forwarded-proto / socket.encrypted 判定）；baseUrl 由
+          // 绑定仓做 https 公网校验（SSRF 门）。
+          if (actorModelBindings && !isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+            const mpRaw = payload.modelProvider as Record<string, unknown> | undefined;
+            if (mpRaw && typeof mpRaw === "object") {
+              const mpBaseUrl = typeof mpRaw.baseUrl === "string" ? mpRaw.baseUrl.trim() : "";
+              const mpApiKey = typeof mpRaw.apiKey === "string" ? mpRaw.apiKey.trim() : "";
+              const mpModel = typeof mpRaw.model === "string" ? mpRaw.model.trim() : "";
+              if (mpBaseUrl && mpApiKey && mpModel) {
+                const xfProto = String(request.headers?.["x-forwarded-proto"] ?? "").toLowerCase();
+                const isTls =
+                  xfProto.includes("https") ||
+                  (request.socket as unknown as { encrypted?: boolean } | undefined)?.encrypted === true;
+                if (!isTls) {
+                  socket.send(
+                    JSON.stringify({
+                      type: ServerEventType.ErrorEvent,
+                      payload: {
+                        code: "MODEL_PROVIDER_INSECURE",
+                        message: "模型 API Key 仅允许在 wss(HTTPS) 连接下上送，请改用 https 接入地址",
+                      },
+                    }),
+                  );
+                } else if (
+                  !actorModelBindings.set(actorId, { baseUrl: mpBaseUrl, apiKey: mpApiKey, model: mpModel })
+                ) {
+                  socket.send(
+                    JSON.stringify({
+                      type: ServerEventType.ErrorEvent,
+                      payload: {
+                        code: "MODEL_PROVIDER_REJECTED",
+                        message: "modelProvider 配置被拒绝：baseUrl 须为 https 公网地址",
+                      },
+                    }),
+                  );
+                }
+              } else {
+                actorModelBindings.clear(actorId);
+              }
+            }
+          }
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             declareClientCapabilities(actorId, {
               mediaPlayback: declaredCapabilities?.mediaPlayback === true,
             });
+            // 更新推送（2026-10-21）：上线即补推当前版本清单（发布期间离线的用户
+            // 连上就知道；发布时的在线用户由清单变化广播覆盖，见 client-update-pusher）
+            notifySessionInit(socket);
           }
           if (isDesktopBridgeChannel) {
             if (!userIdRaw) {

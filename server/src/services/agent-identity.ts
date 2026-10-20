@@ -2,9 +2,10 @@
  * Agent 身份（名字）共享模块：agent.update_identity 工具、prompt 自我认知注入、
  * 主页 API 三方共用的常量与解析。
  *
- * 名字审美（2026-09-19 定调）：不要"小夜灯"式家用小家电名——名字应该像一种
- * 现象或一个频率，而不是一只萌宠。三个候选方向：信号与物理 / 值夜者视角 /
- * 机器自指。默认名「晨昏线」：行星上昼与夜的分界线，永远移动、永不落地。
+ * 出厂不预设名字（2026-10-20 定调）：名字只由用户来定——用户设定前，agent 在
+ * 界面与对话里统一是「未命名」，不得自己给自己取名。
+ * 名字审美：不要"小夜灯"式家用小家电名——名字应该像一种现象或一个频率，
+ * 而不是一只萌宠。
  */
 
 /** agent-memory-sync KV 键：名字档案（JSON 串） */
@@ -30,11 +31,6 @@ export type AgentNameSuggestion = {
 
 /** 建议名池：命名仪式 / 主页改名入口共用；客户端经 GET /api/agent-name-suggestions 拉取 */
 export const AGENT_NAME_SUGGESTIONS: AgentNameSuggestion[] = [
-  {
-    displayName: "晨昏线",
-    handle: "terminator_line",
-    reason: "行星上昼与夜的分界线，永远移动、从不落地——你不在时我也在转。",
-  },
   {
     displayName: "残响",
     handle: "residual_echo",
@@ -62,9 +58,7 @@ export const AGENT_NAME_SUGGESTIONS: AgentNameSuggestion[] = [
   },
 ];
 
-export const DEFAULT_AGENT_NAME: AgentNameSuggestion = AGENT_NAME_SUGGESTIONS[0]!;
-
-/** 宽松解析 KV 里的名字档案（旧数据/半截数据不抛错，返回 null 走默认） */
+/** 宽松解析 KV 里的名字档案（旧数据/半截数据不抛错，返回 null 走未命名） */
 export function parseAgentIdentityKv(raw: unknown): AgentIdentityKv | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
   try {

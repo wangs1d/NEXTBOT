@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<title>今日简报卡片 · 四个版式版本对比</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #060709;
+    font-family: "Segoe UI", "Microsoft YaHei", "PingFang SC", sans-serif;
+    color: #eceff4;
+    padding: 40px 44px 80px;
+  }
+  h1 { font-size: 15px; font-weight: 600; color: #ccd2db; letter-spacing: .5px; }
+  .legend { font-size: 12px; line-height: 20px; color: #5c6370; margin: 8px 0 38px; max-width: 1080px; }
+  .legend b { color: #8f97a3; }
+  .ver { margin-bottom: 46px; }
+  .ver h2 { font-size: 13px; font-weight: 600; color: #eceff4; letter-spacing: .5px; }
+  .ver h2 .k { color: #88bbff; margin-right: 7px; }
+  .ver .desc { font-size: 12px; line-height: 19px; color: #5c6370; margin: 5px 0 16px; max-width: 1080px; }
+  .ver .desc b { color: #8f97a3; }
+  .row { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }
+  .col-cap { font-size: 11.5px; color: #8f97a3; letter-spacing: 1px; margin-bottom: 10px; }
+
+  /* ═══ 卡片外壳（与 daily_briefing_window.dart 同款：400 宽 · 深玻璃 · 圆角 16）═══ */
+  .card {
+    position: relative; width: 400px;
+    background: rgba(10, 11, 14, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 16px;
+    box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5), inset 1px 0 0 rgba(255, 255, 255, 0.05);
+    padding: 20px 22px 18px;
+    color: #eceff4; font-size: 13px;
+  }
+  .close { position: absolute; top: 8px; right: 8px; width: 34px; height: 34px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center; color: rgba(255,255,255,0.4); }
+  .close svg { width: 16px; height: 16px; }
+
+  /* 头部：问候 + 日期；右侧统计胶囊 */
+  .head { display: flex; align-items: flex-start; gap: 12px; }
+  .head .name { font-size: 17px; font-weight: 600; line-height: 24px; letter-spacing: .3px; }
+  .head .meta { margin-top: 4px; font-size: 12px; line-height: 17px; color: #8f97a3; }
+  .chips { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; max-width: 152px; padding-top: 3px; }
+  .chip { font-size: 10.5px; color: #8f97a3; letter-spacing: .5px; background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.06); border-radius: 999px; padding: 2px 8px; white-space: nowrap; }
+  .chip b { color: #eceff4; font-weight: 600; margin-right: 3px; font-variant-numeric: tabular-nums; }
+
+  /* 通用行 */
+  .it { display: flex; gap: 10px; align-items: flex-start; }
+  .it .tm { width: 44px; flex-shrink: 0; color: #a8c8ff; font-size: 12.5px; line-height: 19px;
+    font-weight: 600; font-variant-numeric: tabular-nums; }
+  .it .bul { width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.28);
+    margin: 7px 4px 0 0; flex-shrink: 0; }
+  .it .bul.amber { background: #f0c052; }
+  .it .tt { font-size: 13px; line-height: 19px; color: #eceff4;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .foot-note { font-size: 11.5px; color: #5c6370; }
+  .empty-line { margin-top: 16px; font-size: 13.5px; line-height: 21px; color: #8f97a3; }
+
+  /* ─────────── V1 清简行卡 ─────────── */
+  .V1 .blk { margin-top: 17px; }
+  .V1 .blk-h { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: 1px;
+    color: #8f97a3; font-weight: 600; height: 16px; }
+  .V1 .blk-h .dot { width: 6px; height: 6px; border-radius: 2px; background: #88bbff; flex-shrink: 0; }
+  .V1 .blk-h .dot.amber { background: #f0c052; }
+  .V1 .blk-h::after { content: ""; order: 1; flex: 1; height: 1px; background: rgba(255,255,255,.06); }
+  .V1 .blk-h .n { order: 2; color: #5c6370; font-variant-numeric: tabular-nums; font-weight: 400; }
+  .V1 .it { padding: 6px 0 0 2px; }
+  .V1 .blk-foot { margin: 5px 0 0 8px; }
+
+  /* ─────────── V2 分组面板 ─────────── */
+  .V2 .panel { margin-top: 10px; background: rgba(255,255,255,.035); border: 1px solid rgba(255,255,255,.055);
+    border-radius: 12px; padding: 11px 14px 12px; }
+  .V2 .panel.first { margin-top: 16px; }
+  .V2 .p-h { display: flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: 1px;
+    color: #8f97a3; font-weight: 600; margin-bottom: 3px; }
+  .V2 .p-h .dot { width: 6px; height: 6px; border-radius: 2px; background: #88bbff; flex-shrink: 0; }
+  .V2 .p-h .dot.amber { background: #f0c052; }
+  .V2 .p-h .n { margin-left: auto; color: #5c6370; font-variant-numeric: tabular-nums; font-weight: 400; }
+  .V2 .it { padding-top: 5px; }
+  .V2 .p-foot { margin-top: 6px; padding-top: 6px; border-top: 1px dashed rgba(255,255,255,.07); font-size: 11.5px; color: #5c6370; }
+  .V2 .panel.empty { margin-top: 16px; }
+
+  /* ─────────── V3 紧凑色条 ─────────── */
+  .V3 .grp { display: flex; gap: 12px; margin-top: 15px; }
+  .V3 .grp .bar { width: 3px; border-radius: 2px; background: #88bbff; flex-shrink: 0; }
+  .V3 .grp .bar.amber { background: #f0c052; }
+  .V3 .grp .bar.mute { background: rgba(255,255,255,.16); }
+  .V3 .grp .body { flex: 1; min-width: 0; }
+  .V3 .grp .lb { font-size: 10px; letter-spacing: 1px; color: #8f97a3; margin-bottom: 3px; }
+  .V3 .it { padding: 3px 0; }
+  .V3 .it .tm { width: 42px; font-size: 12px; line-height: 18px; }
+  .V3 .it .tt { font-size: 12.5px; line-height: 18px; }
+  .V3 .it .bul { margin-top: 6px; }
+  .V3 .grp .foot-note { padding-top: 2px; }
+
+  /* ─────────── V4 摘要置顶 ─────────── */
+  .V4 .hero { margin-top: 14px; font-size: 13px; line-height: 21px; color: #ccd2db;
+    padding: 11px 13px; background: rgba(136,187,255,.07);
+    border: 1px solid rgba(136,187,255,.16); border-radius: 12px; }
+  .V4 .hero b { color: #eceff4; font-weight: 600; }
+  .V4 .blk { margin-top: 15px; }
+  .V4 .blk-h { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: 1px;
+    color: #8f97a3; font-weight: 600; height: 16px; }
+  .V4 .blk-h .dot { width: 6px; height: 6px; border-radius: 2px; background: #88bbff; flex-shrink: 0; }
+  .V4 .blk-h .dot.amber { background: #f0c052; }
+  .V4 .blk-h::after { content: ""; order: 1; flex: 1; height: 1px; background: rgba(255,255,255,.06); }
+  .V4 .blk-h .n { order: 2; color: #5c6370; font-variant-numeric: tabular-nums; font-weight: 400; }
+  .V4 .it { padding: 6px 0 0 2px; }
+  .V4 .blk-foot { margin: 5px 0 0 8px; }
+</style>
+</head>
+<body>
+
+<h1>今日简报卡片 · 四个版式版本对比</h1>
+<div class="legend">
+  <b>前提</b>：TTS 播报已断线，卡面底部「语音播报中 / 已播报 · 时间」那行已移除。<br />
+  <b>三条标准</b>：① 内容方便查看（标题两行内自适应、不再一行截断）② 颜值（去 emoji 块头，统一主色 #88bbff + 强调色 #f0c052）③ 整体不能乱（统一间距节奏、可选板块空则整块不出现）。<br />
+  <b>数据</b>：真实 demo（3 日程 / 1 待办 / 1 笔记 / 1 热搜 / 1 纪念日 / 1 行程）。三个状态都画：<b>内容齐（含行程）</b> / <b>内容少</b> / <b>全空</b>。窗口宽 400，与客户端渲染一致。
+</div>
+
+<!-- ══════════════════ V1 ══════════════════ -->
+<section class="ver">
+  <h2><span class="k">V1</span>清简行卡</h2>
+  <div class="desc">块头 = 6px 主色方块 + 小标签 + 发丝分隔线 + 右上计数；行 = 时间徽标 + 标题两行自适应。
+    <b>最接近现有气质</b>，改动最小、最克制、密度高。</div>
+  <div class="row">
+
+    <div>
+      <div class="col-cap">内容齐（含行程）</div>
+      <div class="card V1">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>3</b>日程</span><span class="chip"><b>1</b>待办</span><span class="chip"><b>1</b>笔记</span><span class="chip"><b>1</b>行程</span></div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日日程<span class="n">3</span></div>
+          <div class="it"><span class="tm">09:30</span><div class="tt">产品评审会</div></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+          <div class="it"><span class="tm">19:00</span><div class="tt">健身房</div></div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>待办跟进</div>
+          <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+          <div class="blk-foot foot-note">今天已完成 1 件</div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日行程</div>
+          <div class="it"><span class="bul"></span><div class="tt">成都 · 成都出差，第一站 09:00 双流机场</div></div>
+          <div class="blk-foot foot-note">记得带：身份证、充电宝、雨伞</div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>待复习笔记</div>
+          <div class="it"><span class="bul"></span><div class="tt">Q4 推荐引擎改造方案</div></div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>兴趣热搜</div>
+          <div class="it"><span class="bul"></span><div class="tt">某新机发布会定档 · 微博</div></div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot amber"></span>近期重要日子</div>
+          <div class="it"><span class="bul amber"></span><div class="tt">妈妈的生日 · 还有 3 天</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">内容少</div>
+      <div class="card V1">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>1</b>日程</span><span class="chip"><b>1</b>待办</span></div>
+        </div>
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日日程<span class="n">1</span></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+        </div>
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>待办跟进</div>
+          <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+          <div class="blk-foot foot-note">今天已完成 1 件</div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">全空</div>
+      <div class="card V1">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+        </div>
+        <div class="empty-line">今天日程空空的，轻松点过。</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════ V2 ══════════════════ -->
+<section class="ver">
+  <h2><span class="k">V2</span>分组面板</h2>
+  <div class="desc">每个板块独立成浅色面板，块间天然分隔 → <b>最不容易乱</b>；代价是视觉更重、卡片更高，板块多时信息密度下降。</div>
+  <div class="row">
+
+    <div>
+      <div class="col-cap">内容齐（含行程）</div>
+      <div class="card V2">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>3</b>日程</span><span class="chip"><b>1</b>待办</span></div>
+        </div>
+
+        <div class="panel first">
+          <div class="p-h"><span class="dot"></span>今日日程<span class="n">3</span></div>
+          <div class="it"><span class="tm">09:30</span><div class="tt">产品评审会</div></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+          <div class="it"><span class="tm">19:00</span><div class="tt">健身房</div></div>
+        </div>
+
+        <div class="panel">
+          <div class="p-h"><span class="dot"></span>待办跟进</div>
+          <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+          <div class="p-foot">今天已完成 1 件</div>
+        </div>
+
+        <div class="panel">
+          <div class="p-h"><span class="dot"></span>今日行程</div>
+          <div class="it"><span class="bul"></span><div class="tt">成都 · 成都出差，第一站 09:00 双流机场</div></div>
+          <div class="p-foot">记得带：身份证、充电宝、雨伞</div>
+        </div>
+
+        <div class="panel">
+          <div class="p-h"><span class="dot"></span>兴趣热搜</div>
+          <div class="it"><span class="bul"></span><div class="tt">某新机发布会定档 · 微博</div></div>
+        </div>
+
+        <div class="panel">
+          <div class="p-h"><span class="dot amber"></span>近期重要日子</div>
+          <div class="it"><span class="bul amber"></span><div class="tt">妈妈的生日 · 还有 3 天</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">内容少</div>
+      <div class="card V2">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>1</b>日程</span></div>
+        </div>
+        <div class="panel first">
+          <div class="p-h"><span class="dot"></span>今日日程<span class="n">1</span></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">全空</div>
+      <div class="card V2">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+        </div>
+        <div class="panel empty"><div class="empty-line" style="margin-top:0">今天日程空空的，轻松点过。</div></div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════ V3 ══════════════════ -->
+<section class="ver">
+  <h2><span class="k">V3</span>紧凑色条</h2>
+  <div class="desc">取消块头，靠左侧 3px 竖色条 + 10px 小字区分板块，行高收到 18px → <b>信息密度最高</b>，同样窗口高度能塞下更多条目；代价是块层次最弱，扫读靠颜色。</div>
+  <div class="row">
+
+    <div>
+      <div class="col-cap">内容齐（含行程）</div>
+      <div class="card V3">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>3</b>日程</span><span class="chip"><b>1</b>待办</span><span class="chip"><b>1</b>行程</span></div>
+        </div>
+
+        <div class="grp">
+          <div class="bar"></div>
+          <div class="body">
+            <div class="lb">今日日程 · 3</div>
+            <div class="it"><span class="tm">09:30</span><div class="tt">产品评审会</div></div>
+            <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+            <div class="it"><span class="tm">19:00</span><div class="tt">健身房</div></div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="bar mute"></div>
+          <div class="body">
+            <div class="lb">待办跟进</div>
+            <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+            <div class="foot-note">今天已完成 1 件</div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="bar"></div>
+          <div class="body">
+            <div class="lb">今日行程</div>
+            <div class="it"><span class="bul"></span><div class="tt">成都 · 成都出差，第一站 09:00 双流机场</div></div>
+            <div class="foot-note">记得带：身份证、充电宝、雨伞</div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="bar mute"></div>
+          <div class="body">
+            <div class="lb">待复习笔记 · 兴趣热搜</div>
+            <div class="it"><span class="bul"></span><div class="tt">Q4 推荐引擎改造方案</div></div>
+            <div class="it"><span class="bul"></span><div class="tt">某新机发布会定档 · 微博</div></div>
+          </div>
+        </div>
+
+        <div class="grp">
+          <div class="bar amber"></div>
+          <div class="body">
+            <div class="lb">近期重要日子</div>
+            <div class="it"><span class="bul amber"></span><div class="tt">妈妈的生日 · 还有 3 天</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">内容少</div>
+      <div class="card V3">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>1</b>日程</span></div>
+        </div>
+        <div class="grp">
+          <div class="bar"></div>
+          <div class="body">
+            <div class="lb">今日日程 · 1</div>
+            <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="bar mute"></div>
+          <div class="body">
+            <div class="lb">待办跟进</div>
+            <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">全空</div>
+      <div class="card V3">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+        </div>
+        <div class="empty-line">今天日程空空的，轻松点过。</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ══════════════════ V4 ══════════════════ -->
+<section class="ver">
+  <h2><span class="k">V4</span>摘要置顶</h2>
+  <div class="desc">TTS 下线后口播稿不再「只进耳朵」，把服务端那句口语摘要拉回卡面顶部当「今日一句话」，下面接结构化块。
+    <b>一眼看懂重点</b>，再往下扫细节；代价是卡更高，且摘要与结构化块可能信息重复。</div>
+  <div class="row">
+
+    <div>
+      <div class="col-cap">内容齐（含行程）</div>
+      <div class="card V4">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>3</b>日程</span><span class="chip"><b>1</b>待办</span></div>
+        </div>
+
+        <div class="hero">今天 3 个安排，最早 <b>9:30</b> 产品评审会；之前交代的事还有一件没办。</div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日日程<span class="n">3</span></div>
+          <div class="it"><span class="tm">09:30</span><div class="tt">产品评审会</div></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+          <div class="it"><span class="tm">19:00</span><div class="tt">健身房</div></div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>待办跟进</div>
+          <div class="it"><span class="bul"></span><div class="tt">早报定好了——明早 08:00 准时送到</div></div>
+          <div class="blk-foot foot-note">今天已完成 1 件</div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日行程</div>
+          <div class="it"><span class="bul"></span><div class="tt">成都 · 成都出差，第一站 09:00 双流机场</div></div>
+          <div class="blk-foot foot-note">记得带：身份证、充电宝、雨伞</div>
+        </div>
+
+        <div class="blk">
+          <div class="blk-h"><span class="dot amber"></span>近期重要日子</div>
+          <div class="it"><span class="bul amber"></span><div class="tt">妈妈的生日 · 还有 3 天</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">内容少</div>
+      <div class="card V4">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+          <div class="chips"><span class="chip"><b>1</b>日程</span></div>
+        </div>
+        <div class="hero">今天就一件事：<b>12:16</b> 科技早报。</div>
+        <div class="blk">
+          <div class="blk-h"><span class="dot"></span>今日日程<span class="n">1</span></div>
+          <div class="it"><span class="tm">12:16</span><div class="tt">科技早报</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div>
+      <div class="col-cap">全空</div>
+      <div class="card V4">
+        <div class="close"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg></div>
+        <div class="head">
+          <div><div class="name">早上好，王哥</div><div class="meta">9月24日 周四</div></div>
+        </div>
+        <div class="hero">今天日程空空的，轻松点过。</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+</body>
+</html>

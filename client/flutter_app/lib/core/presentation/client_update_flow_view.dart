@@ -117,7 +117,9 @@ class ClientUpdateFlowView extends StatelessWidget {
   }
 
   /// 主/次操作直接用主题按钮：颜色随主题（含暖色）自动走，与升级弹窗、
-  /// 更新浮卡同一语言；shrinkWrap + 紧凑内边距保持胶囊几何
+  /// 更新浮卡同一语言；shrinkWrap 保持胶囊几何。
+  /// 行高不写 1.0（旧运行时会无视纵向内边距、按 13px 字面行盒算高，
+  /// 中文墨迹溢出胶囊），并以 32px 最小高度兜底。
   Widget _pill(
     String label, {
     bool emphasized = false,
@@ -127,15 +129,15 @@ class ClientUpdateFlowView extends StatelessWidget {
   }) {
     const TextStyle textStyle = TextStyle(
       fontSize: 13,
-      height: 1.0,
+      height: 1.2,
       fontWeight: FontWeight.w600,
     );
     if (emphasized) {
       return FilledButton(
         onPressed: onTap,
         style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          minimumSize: const Size(0, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          minimumSize: const Size(0, 32),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           shape: const StadiumBorder(),
           textStyle: textStyle,
@@ -148,8 +150,8 @@ class ClientUpdateFlowView extends StatelessWidget {
       style: OutlinedButton.styleFrom(
         foregroundColor: ink,
         side: BorderSide(color: line ?? Colors.transparent),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        minimumSize: const Size(0, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        minimumSize: const Size(0, 32),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         shape: const StadiumBorder(),
         textStyle: textStyle,

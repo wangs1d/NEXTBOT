@@ -67,6 +67,9 @@ class LocalRuntimeConfig {
   }) async {
     final Map<String, String> cfg = Map.of(readSync()); // readSync 返回不可变 map，须拷贝后改
     cfg["OPENAI_API_KEY"] = apiKey;
+    // 显式锁定 openai 槽：byok 用户配的就是一个 OpenAI 兼容端点，而 auto 在当前
+    // 区域优先 moonshot-kimi/minimax——用户机器上若残留别的 key 会串台到别的厂商。
+    cfg["EXTERNAL_MODEL_PROVIDER"] = "openai";
     final String base = (baseUrl ?? "").trim();
     if (base.isNotEmpty) {
       cfg["OPENAI_BASE_URL"] = base;
@@ -76,8 +79,14 @@ class LocalRuntimeConfig {
     final String m = (model ?? "").trim();
     if (m.isNotEmpty) {
       cfg["OPENAI_MODEL"] = m;
+      // 必须同时写 FORCE_MODEL：openai 槽的 selectOptimalModel 在无 FORCE_MODEL
+      // 时会把模型名替换成硬编码 gpt-4o-mini/gpt-4o/gpt-4-turbo，用户自配的
+      // 非 OpenAI 端点（deepseek/minimax/通义等）收到未知模型名直接 400，整轮
+      // 工具循环报废、跌无工具兜底——用户体感就是「不调用工具 + 等待回复超时」。
+      cfg["FORCE_MODEL"] = m;
     } else {
       cfg.remove("OPENAI_MODEL");
+      cfg.remove("FORCE_MODEL");
     }
     await write(cfg);
   }

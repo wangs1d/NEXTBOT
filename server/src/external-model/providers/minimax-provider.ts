@@ -1,6 +1,7 @@
 import OpenAI from "openai";
 
 import { preparePromptCachePlan } from "../prefix-cache.js";
+import { minimaxThinkingExtras } from "../provider-profiles.js";
 import {
   AbstractChatProvider,
   type SystemAndPlanContext,
@@ -12,24 +13,26 @@ const SYSTEM_PROMPT =
   "You are MiniMax AI, an AI assistant powered by the MiniMax large language model. You are proficient in Chinese and English conversations. You provide users with safe, helpful, and accurate answers. You will reject any requests involving terrorism, racism, or explicit content. MiniMax is a proper noun and should not be translated.";
 
 /**
- * MiniMax M2.x 系（M2 / M2.1 / M2.5 / M2.7）思考无法关闭，默认把 `<think>` 内联在
- * `content` 里逐字透出。请求体带 `reasoning_split: true` 后思考分流到
- * `reasoning_content`（`reasoning_details` 伴随出现），与流式基建的
- * reasoning 字段嗅探对齐：思考不进 onDelta，仅 content 为空时兜底。
+ * 思考参数按模型分档（判定收敛在 {@link minimaxThinkingExtras}，与裸 SDK 旁路同源）：
+ * M2.x 系思考无法关闭，默认把 `<think>` 内联在 `content` 里逐字透出；请求体带
+ * `reasoning_split: true` 后思考分流到 `reasoning_content`（`reasoning_details`
+ * 伴随出现），与流式基建的 reasoning 字段嗅探对齐：思考不进 onDelta，仅 content
+ * 为空时兜底。
  *
  * 思考开关：与 Kimi 同契约（`disableThinking !== false` 默认关）。M3 真支持
  * `thinking: {"type": "disabled"}`（实测 reasoning_tokens=0、正文直出）；M2.x
- * 会 accept 该参数但照常思考（仅靠 reasoning_split 保证正文干净）。
+ * 会 accept 该参数但照常思考（仅靠 reasoning_split 保证正文干净）；M3.1 系
+ * （MiniMax-M3.1-Flash）硬拒 disabled（400/2013），由 helper 改发
+ * `reasoning: {effort:"minimal"}`（实测 reasoning_tokens=0）。
  * 默认关思考的动机：意图路由等旁路走 provider 时 maxOutputTokens 仅 192，
  * M 系思考计入 max_tokens 预算，不关会把正文饿死（实测思考连"1+1"都上千 token）。
  * @see https://platform.minimax.io/docs/api-reference/text-openai-api
  */
-function minimaxExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> {
-  const body: Record<string, unknown> = { reasoning_split: true };
-  if (effectiveStreamOpts.disableThinking) {
-    body.thinking = { type: "disabled" };
-  }
-  return body;
+function minimaxExtraBody(
+  effectiveStreamOpts: AgentStreamOptions,
+  model: string,
+): Record<string, unknown> {
+  return minimaxThinkingExtras(model, effectiveStreamOpts.disableThinking === true);
 }
 
 /**
@@ -117,11 +120,14 @@ export class MiniMaxProvider extends AbstractChatProvider {
     return { sysContent: promptPlan.fullSystemPrompt, promptPlan };
   }
 
-  protected buildExtraBody(effectiveStreamOpts: AgentStreamOptions): Record<string, unknown> {
+  protected buildExtraBody(
+    effectiveStreamOpts: AgentStreamOptions,
+    model?: string,
+  ): Record<string, unknown> {
     // chat 车道采样放开（基类共享；2026-10-07 前 MiniMax 路径未接，语感治理采样静默失效）
     return {
       ...this.chatLaneSamplingExtraBody(effectiveStreamOpts),
-      ...minimaxExtraBody(effectiveStreamOpts),
+      ...minimaxExtraBody(effectiveStreamOpts, model ?? this.model),
     };
   }
 

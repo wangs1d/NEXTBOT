@@ -159,6 +159,7 @@ import type {
   ToolLoopAfterBatchInfo,
   VisionFrame,
 } from "../external-model/types.js";
+import type { ActorModelBindingStore } from "../external-model/actor-model-bindings.js";
 import {
   isApologyStyleFallback,
   FALLBACK_TEXT_BACKGROUND_FAILED,
@@ -351,6 +352,11 @@ export class AgentCore {
   private readonly turnFinalizer: TurnFinalizer;
   private readonly toolPolicyResolver: ToolPolicyResolver;
   private readonly agentTaskOrchestrator: AgentTaskOrchestrator | null = null;
+  /**
+   * 按 actor 的用户自有模型绑定仓（云端连接版 BYOK，bootstrap 注入）：
+   * 用户对话轮优先走 actor 绑定的自有 provider，无绑定回落运营方 externalChat。
+   */
+  private actorModelBindings: ActorModelBindingStore | null = null;
   private desktopBridgeCoordinator: DesktopBridgeCoordinator | null = null;
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
@@ -436,6 +442,22 @@ export class AgentCore {
   /** 在 bootstrap 注册桌面桥接后注入，用于按轮检测电脑是否在线。 */
   setDesktopBridgeCoordinator(coordinator: DesktopBridgeCoordinator): void {
     this.desktopBridgeCoordinator = coordinator;
+  }
+
+  /** 注入按 actor 的用户自有模型绑定仓（云端连接版 BYOK；bootstrap 装配）。 */
+  setActorModelBindings(store: ActorModelBindingStore): void {
+    this.actorModelBindings = store;
+  }
+
+  /**
+   * 该 actor 本轮应使用的对话 provider：绑定了用户自有模型（BYOK）则用之，
+   * 否则回落全局 externalChat（运营方配置）。仅用户轮调用点使用；
+   * TurnFinalizer / AgentTaskOrchestrator 等旁路保持运营方 provider。
+   */
+  private chatProviderFor(actorId: string): ExternalChatProvider | null {
+    const byok = this.actorModelBindings?.get(actorId) ?? null;
+    if (byok && byok.isEnabled()) return byok;
+    return this.externalChat;
   }
 
   /** 在 bootstrap 注册手机桥接后注入，用于按轮检测手机是否在线。 */
@@ -634,7 +656,8 @@ export class AgentCore {
     dialogStateLines: string[] = [],
   ): Promise<import("../agent/task-router.js").RouteDecision> {
     return routeTurnByLlm(
-      this.externalChat,
+      // WS 主通道首参即 actorId（chat-user-message 传 msgActor）；无绑定回落运营方
+      this.chatProviderFor(sessionId),
       sessionId,
       text,
       recentUserTurns,
@@ -830,7 +853,7 @@ export class AgentCore {
       const routePromise = opts?.routeDecision
         ? Promise.resolve(opts.routeDecision)
         : routeTurnByLlm(
-            this.externalChat,
+            this.chatProviderFor(actorId),
             sessionId,
             text,
             recentUserTurns ?? [],
@@ -984,7 +1007,7 @@ export class AgentCore {
       }
       // 前置路由门：降级路径同样必跑语义分类（plane=task → 任务执行器）
       route = await routeTurnByLlm(
-        this.externalChat,
+        this.chatProviderFor(actorId),
         sessionId,
         text,
         this.getRecentUserTurnsForRouting(actorId, sessionId, text) ?? [],
@@ -997,7 +1020,7 @@ export class AgentCore {
 
     const perfStartTime = Date.now();
 
-    if (!this.externalChat?.isEnabled()) {
+    if (!this.chatProviderFor(actorId)?.isEnabled()) {
       const available = this.toolRegistry.list().join(", ");
       const fallback = `已收到：${text}。当前可用工具：${available}`;
       this.turnLifecycle.finalizeTurn({
@@ -2175,7 +2198,7 @@ if (route.plane === "task") {
       turnBudget?: TurnBudget;
     },
   ): Promise<AgentReply> {
-    const provider = this.externalChat!;
+    const provider = this.chatProviderFor(actorId)!;
     // 预算入口：外部未携带（首次进入/后台派发）则新建并登记主调用
     const turnBudget = ctx.turnBudget ?? new TurnBudget();
     if (!ctx.turnBudget) turnBudget.consumeMainPath();
@@ -3248,7 +3271,7 @@ if (route.plane === "task") {
       auditStage?: string;
     },
   ): string | null {
-    const provider = this.externalChat;
+    const provider = this.chatProviderFor(actorId);
     if (!provider?.isEnabled()) return null;
     // 预算闸门（2026-09-19 P1-2）：会话/单日 token 超限时拒绝新的重活派发——
     // 已在跑的任务不中断，只不再叠加。返回 null 让 task.dispatch 向用户如实说明。
@@ -3797,7 +3820,7 @@ if (route.plane === "task") {
     onAssistantDelta?: (delta: string) => void,
   ): Promise<string> {
     try {
-      const provider = this.externalChat;
+      const provider = this.chatProviderFor(actorId);
       if (!provider?.isEnabled()) return "";
       const text = await provider.streamCompletion(
         `emergency-${actorId}-${Date.now()}`,
@@ -3870,7 +3893,7 @@ private async finishLlmTurn(
       // 重新调用（不带工具上下文）让 LLM 基于对话历史生成自然回复。
       console.warn("[AgentCore] finishLlmTurn 收到空响应，重新调用 LLM 强制出文本");
       try {
-        const provider = this.externalChat;
+        const provider = this.chatProviderFor(actorId);
         if (provider?.isEnabled()) {
           const regenerateText = await provider.streamCompletion(
             `regen-${actorId}-${Date.now()}`,

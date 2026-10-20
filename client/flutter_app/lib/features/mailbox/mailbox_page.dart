@@ -156,7 +156,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         msg.contains("Connection refused");
   }
 
-  /// 发好友申请：输入对方身份号码（QQ 式数字短号；填邮箱也认）。
+  /// 发好友申请：凭证是对方注册即得的身份号码（QQ 式数字短号），不靠邮箱。
   Future<void> _showAddFriendDialog() async {
     final idController = TextEditingController();
     final msgController = TextEditingController();
@@ -170,9 +170,10 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
             TextField(
               controller: idController,
               autofocus: true,
+              keyboardType: TextInputType.number,
               decoration: const InputDecoration(
                 labelText: "对方身份号码",
-                hintText: "数字短号或邮箱，主页名字下方可复制",
+                hintText: "6–8 位数字短号，在对方主页名字下方复制",
               ),
             ),
             const SizedBox(height: 12),
@@ -200,9 +201,9 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
     if (ok != true || !mounted) return;
 
     final toActorId = idController.text.trim();
-    if (toActorId.isEmpty) {
+    if (!RegExp(r"^[1-9]\d{5,7}$").hasMatch(toActorId)) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("先填对方的身份号码")),
+        const SnackBar(content: Text("请填对方 6–8 位的数字身份号码（好友凭证是号码，不是邮箱）")),
       );
       return;
     }
@@ -383,7 +384,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
         itemBuilder: (context, index) {
           final friend = _friends[index];
           final displayName = friend["displayName"] as String? ?? friend["friendActorId"] as String;
-          final email = friend["email"] as String?;
+          final agentNumber = (friend["agentNumber"] as String?)?.trim();
 
           return ListTile(
             selected: _selectedFriend?["friendActorId"] == friend["friendActorId"],
@@ -395,8 +396,9 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
               ),
             ),
             title: Text(displayName),
-            subtitle: email != null && email.isNotEmpty
-                ? Text(email, style: theme.textTheme.bodySmall)
+            // 副行显示对方身份号码（添加好友的凭证）；标题已是号码时不重复，也不再直出邮箱
+            subtitle: agentNumber != null && agentNumber.isNotEmpty && agentNumber != displayName
+                ? Text("身份号码 $agentNumber", style: theme.textTheme.bodySmall)
                 : null,
             // 整行即点选目标：面板内切到该好友的聊天视图
             onTap: () => setState(() => _selectedFriend = friend),
@@ -455,6 +457,12 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
           // 判断是收到的还是发出的请求
           final bool isIncoming = fromActorId != ApiConfig.effectiveActorId;
           final String otherActorId = isIncoming ? fromActorId : toActorId;
+          // 对方名字：服务端已解析成昵称（按身份短号添加时 actorId 是邮箱，不能当名字显示）
+          final String otherName =
+              (request["displayName"] as String?)?.trim().isNotEmpty == true
+                  ? (request["displayName"] as String).trim()
+                  : otherActorId;
+          final String? otherNumber = (request["agentNumber"] as String?)?.trim();
 
           return Card(
             margin: _cardMargin,
@@ -470,7 +478,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
                             ? theme.colorScheme.secondaryContainer
                             : theme.colorScheme.tertiaryContainer,
                         child: Text(
-                          otherActorId.isNotEmpty ? otherActorId[0].toUpperCase() : "?",
+                          otherName.isNotEmpty ? otherName[0].toUpperCase() : "?",
                           style: TextStyle(
                             color: isIncoming 
                                 ? theme.colorScheme.onSecondaryContainer
@@ -487,7 +495,7 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
                               children: [
                                 Expanded(
                                   child: Text(
-                                    otherActorId,
+                                    otherName,
                                     style: theme.textTheme.titleSmall,
                                     overflow: TextOverflow.ellipsis,
                                   ),
@@ -513,6 +521,13 @@ class _MailboxPageState extends State<MailboxPage> with SingleTickerProviderStat
                                 ),
                               ],
                             ),
+                            if (otherNumber != null && otherNumber.isNotEmpty && otherNumber != otherName)
+                              Text(
+                                "身份号码 $otherNumber",
+                                style: theme.textTheme.bodySmall?.copyWith(
+                                  color: theme.colorScheme.onSurfaceVariant,
+                                ),
+                              ),
                             if (createdAt != null)
                               Text(
                                 DateTime.parse(createdAt).toString().substring(0, 19),

@@ -25,9 +25,9 @@ void main() {
           jsonEncode({
             "ok": true,
             "profile": {
-              "displayName": "晨昏线",
-              "handle": "terminator_line",
-              "signature": "昼与夜的边界，替你值守。",
+              "displayName": "过境",
+              "handle": "transit",
+              "signature": "备着，你叫我就到。",
               "statusText": "在线，温柔模式",
               "moodStyle": "gentle",
               "avatarPreset": "dawn",
@@ -35,8 +35,8 @@ void main() {
               "nameOrigin": "self",
             },
             "identity": {
-              "displayName": "晨昏线",
-              "handle": "terminator_line",
+              "displayName": "过境",
+              "handle": "transit",
               "origin": "self",
             },
             "posts": posts,
@@ -80,9 +80,9 @@ void main() {
     await tester.pump(); await tester.pump(const Duration(milliseconds: 50));
 
     // Header：纯文字，无头像光球
-    expect(find.text("晨昏线"), findsOneWidget);
-    expect(find.text("@terminator_line"), findsOneWidget);
-    expect(find.text("昼与夜的边界，替你值守。"), findsOneWidget);
+    expect(find.text("过境"), findsOneWidget);
+    expect(find.text("@transit"), findsOneWidget);
+    expect(find.text("备着，你叫我就到。"), findsOneWidget);
     expect(find.byIcon(Icons.person_outline), findsNothing);
     // 此刻块已下线（盯着/最近足迹只在右上角足迹卡展示）
     expect(find.text("此刻"), findsNothing);

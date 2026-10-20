@@ -281,9 +281,9 @@ class VoiceprintApi {
   }
 }
 
-/// 邮箱接入（邮箱盯梢）API：状态查询 + IMAP 授权码提交（设置页「邮箱接入」卡）。
-/// 授权码即刻生效（服务端当场启动轮询）；持久化由设置页写 config.env（重启后
-/// runtime 环境注入回来），服务端不落盘明文。
+/// 邮箱接入（邮箱盯梢）API：状态查询 + IMAP 授权码提交（「服务接入」页邮箱胶囊）。
+/// 授权码经 PUT /api/service-config（mail 块）落盘到服务端 data/service-config.json 并
+/// 即刻启动轮询；响应只回尾号，服务端不回发明文。
 class MailWatchApi {
   static Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path");
 
@@ -298,14 +298,64 @@ class MailWatchApi {
     }
   }
 
-  static Future<Map<String, dynamic>> applyPass(String pass) async {
-    final http.Response res = await http
-        .post(
-          _uri("/api/mail-watch/pass"),
-          headers: <String, String>{"Content-Type": "application/json"},
-          body: jsonEncode(<String, dynamic>{"pass": pass}),
-        )
-        .timeout(const Duration(seconds: 10));
-    return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+  /// 保存 IMAP 授权码（即刻生效 + 服务端持久化）。返回服务端响应（ok/error）。
+  static Future<Map<String, dynamic>> savePass(String pass) async {
+    try {
+      final http.Response res = await http
+          .put(
+            _uri("/api/service-config"),
+            headers: <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{
+              "mail": <String, dynamic>{"pass": pass},
+            }),
+          )
+          .timeout(const Duration(seconds: 10));
+      return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    } catch (e) {
+      return <String, dynamic>{"ok": false, "error": "保存请求失败：$e"};
+    }
+  }
+}
+
+/// 邮箱授权码获取引导（按登录邮箱域给分步说明 + 官方入口直达）。
+/// 两端「服务接入」页共用同一份文案，避免各写一份走偏。
+String mailGuideSteps(String email) {
+  final String domain = email.split("@").last.toLowerCase();
+  if (domain == "qq.com" || domain == "foxmail.com") {
+    return "① 电脑浏览器登录 mail.qq.com → 设置 → 账号与安全；\n"
+        "② 找到「IMAP/SMTP 服务」点开启，按提示用绑定手机发短信验证；\n"
+        "③ 验证通过后生成 16 位授权码（只显示一次），复制填到下面。";
+  }
+  if (domain == "163.com" || domain == "126.com" || domain == "yeah.net") {
+    return "① 电脑浏览器登录 mail.163.com → 设置（顶部）→ POP3/SMTP/IMAP；\n"
+        "② 开启 IMAP/SMTP 服务，按提示短信验证；\n"
+        "③ 生成授权码（只显示一次），复制填到下面。";
+  }
+  if (domain == "gmail.com") {
+    return "① Google 账号 → 安全性 → 应用专用密码（需先开两步验证）；\n"
+        "② 生成应用密码（16 位），复制填到下面。";
+  }
+  return "① 登录邮箱网页版 → 设置里找「IMAP/SMTP 服务」；\n"
+      "② 开启并生成授权码，复制填到下面。";
+}
+
+/// 按域返回官方入口页链接（设置页需登录后跳转，故落官网首页/帮助中心——
+/// 已实测 200 稳定可达；三步说明卡片内嵌，链接只是辅助）。未知域返回 null。
+String? mailGuideUrl(String email) {
+  switch (email.split("@").last.toLowerCase()) {
+    case "qq.com":
+    case "foxmail.com":
+      return "https://service.mail.qq.com/";
+    case "163.com":
+    case "126.com":
+    case "yeah.net":
+      return "https://help.mail.163.com/";
+    case "gmail.com":
+      return "https://myaccount.google.com/security";
+    case "outlook.com":
+    case "hotmail.com":
+      return "https://account.microsoft.com/security";
+    default:
+      return null;
   }
 }

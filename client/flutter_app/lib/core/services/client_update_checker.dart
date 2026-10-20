@@ -167,18 +167,8 @@ Future<ClientUpdateCheckResult?> _checkClientUpdateUncached() async {
     updateCheckTrace("release-branch packageInfo=${piSw.elapsedMilliseconds}ms v${info.version}");
     final String local = info.version;
 
-    ClientUpdateStatus status = ClientUpdateStatus.upToDate;
-    if (compareVersions(local, manifest.minVersion) < 0) {
-      status = manifest.url.isEmpty
-          ? ClientUpdateStatus.upToDate
-          : ClientUpdateStatus.forcedUpdate;
-    } else if (compareVersions(local, manifest.latest) < 0) {
-      status = manifest.url.isEmpty
-          ? ClientUpdateStatus.upToDate
-          : ClientUpdateStatus.optionalUpdate;
-    }
     return ClientUpdateCheckResult(
-      status: status,
+      status: classifyUpdate(local, manifest),
       manifest: manifest,
       localVersion: local,
     );
@@ -186,6 +176,26 @@ Future<ClientUpdateCheckResult?> _checkClientUpdateUncached() async {
     debugPrint("[update-check] failed (fail-open): $e");
     return null;
   }
+}
+
+/// 版本比对（纯函数，HTTP 轮询与 wss 推送共用）：
+/// 低于 minVersion → 强更（url 空时没有升级出口，按可继续使用处理）；
+/// 低于 latest → 可选升级；其余 → 已最新。
+ClientUpdateStatus classifyUpdate(String local, ClientManifest manifest) {
+  if (manifest.latest.isEmpty || manifest.minVersion.isEmpty) {
+    return ClientUpdateStatus.upToDate;
+  }
+  if (compareVersions(local, manifest.minVersion) < 0) {
+    return manifest.url.isEmpty
+        ? ClientUpdateStatus.upToDate
+        : ClientUpdateStatus.forcedUpdate;
+  }
+  if (compareVersions(local, manifest.latest) < 0) {
+    return manifest.url.isEmpty
+        ? ClientUpdateStatus.upToDate
+        : ClientUpdateStatus.optionalUpdate;
+  }
+  return ClientUpdateStatus.upToDate;
 }
 
 List<int> _parseVersionSegments(String v) => v

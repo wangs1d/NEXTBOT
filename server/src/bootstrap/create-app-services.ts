@@ -16,7 +16,7 @@ import {
   WorldService,
   type WorldRevisionEvent,
 } from "@private-ai-agent/agent-world";
-import { createExternalChatProviderFromEnv, MutableExternalChatProvider } from "../external-model/index.js";
+import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorModelBindingStore } from "../external-model/index.js";
 import { applyPersistedServiceConfig } from "../config/service-config-store.js";
 import { createPictureKit } from "@private-ai-agent/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
@@ -237,6 +237,7 @@ import { createIntelligentReminderSystem } from "../services/intelligent-reminde
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } from "../services/video-grab-service.js";
 import { WsConnectionRegistry } from "../services/ws-connection-registry.js";
+import { startClientUpdatePusher } from "../services/client-update-pusher.js";
 import { SkillManager } from "../skills/index.js";
 import { registerAgentWorldIdentityBuiltinSkills } from "../skills/builtin/agent-world-identity-skills.js";
 import { registerVirtualPhoneBuiltinSkills } from "../skills/builtin/virtual-phone-skills.js";
@@ -382,7 +383,11 @@ import {
 } from "../services/morning-briefing-service.js";
 import { MorningBriefingScheduler } from "../services/morning-briefing-scheduler.js";
 import { markMorningBriefingDelivered } from "../routes/http/user-preferences.js";
-import { getUserPreferences } from "../routes/http/user-preferences.js";
+import {
+  getUserPreferences,
+  listPrefsActorIds,
+  patchAgentProfile,
+} from "../routes/http/user-preferences.js";
 import { registerCapabilityQueryTools } from "../tools/agent-capability-query-tools.js";
 import { ServerEventType } from "../protocol.js";
 import { embodimentAlert, embodimentThinking } from "../services/agent-embodiment.js";
@@ -772,6 +777,9 @@ export async function createAppServices(): Promise<AppServices> {
 
   const agentRelayService = new AgentRelayService();
   const wsConnectionRegistry = new WsConnectionRegistry();
+  // 客户端版本更新推送（2026-10-21）：配了 UPDATE_MANIFEST_SOURCE_URL 才启用——
+  // 云端版（腾讯机）与 byok 本地 runtime 各自从更新控制面拉清单、变化沿 wss 广播
+  startClientUpdatePusher(wsConnectionRegistry);
   const embodimentAutonomy = new EmbodimentAutonomyService(wsConnectionRegistry);
   initEmbodimentAutonomy(embodimentAutonomy);
 
@@ -1319,6 +1327,7 @@ export async function createAppServices(): Promise<AppServices> {
   registerAgentWorldIdentityBuiltinSkills((skill) => skillManager.register(skill), {
     worldService,
     agentAccountService,
+    agentMemorySyncService,
   });
   
   // 注册虚拟电话内置Skills（版本闸：开源版剔除）
@@ -2087,6 +2096,9 @@ export async function createAppServices(): Promise<AppServices> {
   await applyPersistedServiceConfig();
   const externalChatHost = new MutableExternalChatProvider(createExternalChatProviderFromEnv());
   const externalChat = externalChatHost;
+  // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：key 纯内存（TTL 24h），
+  // session.init 上送时由 ws 层写入，agent-core 用户轮经 chatProviderFor 取用。
+  const actorModelBindings = new ActorModelBindingStore();
   // 主动话术生成器（内容型场景：行程变化/消息来临 → LLM 主动回复；模板兜底）。
   // 用量纪律：每日熔断 PROACTIVITY_MAX_PHRASE_PER_DAY（默认 30），PROACTIVITY_PHRASE_LLM=0 关闭。
   const speechPolisher = new SpeechPolisher({
@@ -2710,6 +2722,7 @@ export async function createAppServices(): Promise<AppServices> {
   agentCore.setMoodInferenceService(moodInferenceService);
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
+  agentCore.setActorModelBindings(actorModelBindings);
 
   // task.dispatch launch 晚绑定（2026-09-05 前后台架构）：派发端接到 agentCore
   taskDispatchLauncherRef.fn = (input) =>
@@ -6192,6 +6205,48 @@ export async function createAppServices(): Promise<AppServices> {
     memorySync: agentMemorySyncService,
     wsRegistry: wsConnectionRegistry,
   });
+  // 存量回填（2026-10-20）：名字统一管道上线前，部分账号只写了「账号 + prefs」，
+  // 漏了 prompt 自我认知用的 `agent.name` KV（小来包 就是这种半截态），另有从
+  // 已删除的出厂默认名继承下来的错配 handle（terminator_line）。启动时一次性补写，
+  // 此后所有名字写入都收口到 applyAgentIdentityRename。异步执行，不阻塞启动。
+  void (async () => {
+    try {
+      // 先确保 KV 磁盘快照已加载（load 幂等），否则会把半截态误判成「KV 为空」而回填
+      await agentMemorySyncService.load();
+      const actorIds = await listPrefsActorIds();
+      for (const actorId of actorIds) {
+        const profile = getUserPreferences(actorId).agentProfile;
+        const origin = profile.nameOrigin;
+        if ((origin !== "user" && origin !== "self") || !profile.displayName.trim()) continue;
+        // 遗留错配 handle：来自已删除的出厂默认名（晨昏线 @terminator_line）→ 清空
+        const legacyHandle = profile.handle === "terminator_line";
+        const kvRaw = agentMemorySyncService
+          .getSnapshot(actorId, [AGENT_NAME_KV_KEY])
+          .entries[AGENT_NAME_KV_KEY];
+        if (!parseAgentIdentityKv(kvRaw)?.displayName) {
+          const ok = await agentMemorySyncService.setEntryAndWait(
+            actorId,
+            AGENT_NAME_KV_KEY,
+            JSON.stringify({
+              displayName: profile.displayName.trim(),
+              handle: legacyHandle ? "" : profile.handle.trim(),
+              origin,
+              updatedAt: profile.updatedAt ?? new Date().toISOString(),
+            }),
+          );
+          console.log(
+            `[agent-identity-backfill] ${actorId} agent.name 回填${ok ? "成功" : "失败"}：${profile.displayName.trim()}`,
+          );
+        }
+        if (legacyHandle) {
+          patchAgentProfile(actorId, { handle: "" }, { allowIdentity: true });
+          console.log(`[agent-identity-backfill] ${actorId} 清除遗留错配 handle`);
+        }
+      }
+    } catch (e) {
+      console.warn("[agent-identity-backfill] 存量回填异常（不影响启动）", e);
+    }
+  })();
   // 站内信：平台/运营侧 → 用户收件箱（data/inbox/{actorId}.json 持久化 + 在线 WS 直推）
   const inboxService = new InboxService({
     rootDir: join(process.cwd(), "data", "inbox"),
@@ -7053,6 +7108,7 @@ export async function createAppServices(): Promise<AppServices> {
     accessAuthService,
     phoneCallCoordinator,
     agentAccountService,
+    actorModelBindings,
   });
 
   // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）

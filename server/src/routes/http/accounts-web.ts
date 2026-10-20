@@ -307,7 +307,7 @@ function renderAccountWebPage(otpEnabled: boolean): string {
           if (data.whitelisted) {
             setMsg("这个邮箱已在白名单内，直接点「注册 / 登录」即可进入", "ok");
           } else {
-            setMsg("已加入候补名单，管理员通过后会站内信通知您，届时用同一邮箱登录", "ok");
+            setMsg("已加入候补名单，届时用同一邮箱登录", "ok");
           }
         });
       }).catch(function (e) {

@@ -59,6 +59,32 @@ const THINKING_ROUTE = { routeMaxOutputTokens: 1024, routeTimeoutMs: 5000 } as c
 
 const disableThinking = () => ({ thinking: { type: "disabled" } as const });
 
+/**
+ * M3.1 系（如 MiniMax-M3.1-Flash）已改为「必须 adaptive 思考」：下发
+ * `thinking: {type:"disabled"}` 直接 400（error 2013），连 `reasoning.effort=none`
+ * 一并拒收——与 M2.x「accept 但仍思考」不同，这是硬拒。
+ */
+const MINIMAX_ADAPTIVE_ONLY = /^minimax-m3\.1/;
+
+/**
+ * MiniMax 系「关思考」意图的请求参数（provider 路径与裸 SDK 旁路共用同一判定，
+ * 避免同类适配在两处各写一遍——见本文件头部「换模型只改档案」的机制说明）。
+ * - 常规 M 系（M3 / M2.x）：`thinking: {type:"disabled"}`（M3 真生效；M2.x 接受但仍思考）
+ * - M3.1 系：改发 `reasoning: {effort:"minimal"}`（实测 reasoning_tokens=0，等价关思考
+ *   且不触发 400）
+ * `reasoning_split` 恒开：思考分流到 `reasoning_content`，正文不被思考段污染。
+ */
+export function minimaxThinkingExtras(
+  model: string,
+  disableThinking: boolean,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { reasoning_split: true };
+  if (!disableThinking) return body;
+  return MINIMAX_ADAPTIVE_ONLY.test((model ?? "").trim().toLowerCase())
+    ? { ...body, reasoning: { effort: "minimal" } }
+    : { ...body, thinking: { type: "disabled" } };
+}
+
 export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
   openai: {
     // openai 槽位可能托管 gpt 系（无思考）或 DeepSeek（deepseek-flash 默认带思考，
@@ -81,10 +107,12 @@ export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
   },
   minimax: {
     // M 系默认强制思考：M3 支持 thinking:disabled 真生效；M2.x accept 但仍思考
-    //（思考计入 max_tokens，路由预算必须放大，见 THINKING_ROUTE）。
+    //（思考计入 max_tokens，路由预算必须放大，见 THINKING_ROUTE）。M3.1 系（Flash）
+    // 硬拒 disabled（400/2013），旁路改发 reasoning.effort=minimal——判定收敛在
+    // {@link minimaxThinkingExtras}，provider 路径与本表共用。
     thinkingProne: true,
     canDisableThinking: true,
-    bypassRequestExtras: disableThinking,
+    bypassRequestExtras: (model) => minimaxThinkingExtras(model, true),
     ...THINKING_ROUTE,
     supportsJsonMode: true,
   },

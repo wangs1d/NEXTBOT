@@ -8,8 +8,6 @@
 // 编辑/删除后会失效记忆目录缓存（memory-inventory），保证下一轮召回即见最新。
 // 画像文件由 UserProfileAggregator 按轮次增量维护，这里仅提供只读视图。
 import type { FastifyInstance } from "fastify";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
 
 import { getAgenticMemoryRuntime, getMemoryComponents } from "../../agentic-memory/index.js";
 import { getMemorySuppressionStore } from "../../agentic-memory/memory-suppression.js";
@@ -28,18 +26,6 @@ type Mem0Record = {
 };
 
 export function registerMemoryCrudRoutes(app: FastifyInstance): void {
-  // 记忆面板页（单文件静态页，数据走本文件下面的 JSON API）。
-  // 目标：用户能看见"记了什么/什么时候记的/为什么记的"，并能一条条处理。
-  app.get("/memory", async (_request, reply) => {
-    const htmlPath = join(import.meta.dirname ?? ".", "../../../web/memory/panel.html");
-    if (!existsSync(htmlPath)) {
-      return reply.code(404).type("text/plain").send("memory panel missing");
-    }
-    reply.header("Cache-Control", "no-store");
-    reply.type("text/html; charset=utf-8");
-    return reply.send(readFileSync(htmlPath, "utf8"));
-  });
-
   app.get("/api/memory/items", async (request, reply) => {
     const query = request.query as { actorId?: string; q?: string; limit?: string };
     const actorId = String(query.actorId ?? "").trim();

@@ -269,7 +269,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
   );
 
   // ── 内测候补申请队列：登录页自助排队 → 后台批量「通过/拒绝」 ──
-  // 通过 = 逐个加入注册白名单 + 站内信通知（actorId=邮箱，注册后即达）。
+  // 通过 = 逐个加入注册白名单 + 邮件通知（申请人多半还没装客户端，邮件是唯一可达通道）。
   const waitlistDecideSchema = z.object({ emails: z.array(z.string()).min(1).max(200) });
 
   app.get("/api/admin/beta-waitlist", { preHandler: requireAdmin }, async () => {

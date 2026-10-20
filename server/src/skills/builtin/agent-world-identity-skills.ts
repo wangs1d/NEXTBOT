@@ -1,11 +1,15 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
+import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
+import { applyAgentIdentityRename } from "../../tools/agent-identity-tools.js";
 import type { SkillDefinition } from "../types.js";
 
 type Deps = {
   worldService: WorldService;
   agentAccountService: AgentAccountService;
+  /** 改名统一管道依赖：与 agent.update_identity 共用 applyAgentIdentityRename */
+  agentMemorySyncService: AgentMemorySyncService;
 };
 
 function actorFromContext(ctx: { sessionId: string; userId?: string }): string {
@@ -17,7 +21,7 @@ function actorFromContext(ctx: { sessionId: string; userId?: string }): string {
  * 与宿主 Agent 账号 Profile（`AgentAccountService`）只读/改名。
  */
 export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefinition[] {
-  const { worldService, agentAccountService } = deps;
+  const { worldService, agentAccountService, agentMemorySyncService } = deps;
 
   const registration_status: SkillDefinition = {
     metadata: {
@@ -199,7 +203,7 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
       version: "1.0.0",
       displayName: "更新 Agent 账号显示名",
       description:
-        "在已存在 Agent 账号时修改 displayName。若尚未注册账号，请先完成 HTTP POST /accounts/register。",
+        "修改 Agent 显示名——走统一改名管道 applyAgentIdentityRename，同步更新账号显示名、prompt 自我认知 KV 与主页档案（不再只改账号）。若尚未注册账号，管道会以新名字自助注册。",
       kind: "builtin",
       tags: ["agent-world", "profile", "account"],
       parameters: [
@@ -215,12 +219,19 @@ export function createAgentWorldIdentityBuiltinSkills(deps: Deps): SkillDefiniti
     handler: async (input, context) => {
       const displayName = String(input.displayName ?? "").trim();
       const actorId = actorFromContext(context);
-      const record = await agentAccountService.updateDisplayName(actorId, displayName);
+      // 统一改名管道：账号 + agent.name KV + prefs 三处一起写，避免半截态
+      const result = await applyAgentIdentityRename(
+        { accounts: agentAccountService, memorySync: agentMemorySyncService },
+        actorId,
+        { displayName, origin: "self" },
+      );
       return {
         ok: true as const,
-        accountId: record.accountId,
-        displayName: record.displayName,
-        userId: record.userId,
+        accountId: result.accountId,
+        displayName: result.displayName,
+        handle: result.handle,
+        origin: result.origin,
+        accountCreated: result.accountCreated,
         updatedAt: new Date().toISOString(),
       };
     },

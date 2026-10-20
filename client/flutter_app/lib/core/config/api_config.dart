@@ -163,14 +163,19 @@ class ApiConfig {
   static const String _wsUrlFromEnv = String.fromEnvironment("WS_URL");
 
   /// WebSocket 地址；未配置时由 [httpBase] 推导。
+  /// https 源默认 443（wss 走 nginx 反代），http 源维持 3000（云端裸端口直连
+  /// 与本地 runtime 同语义）；带显式端口的 httpBase 原样保留。
   static String get wsUrl {
     if (_wsUrlFromEnv.isNotEmpty) {
       return _wsUrlFromEnv;
     }
     final Uri api = Uri.parse(httpBase);
     final String wsScheme = api.scheme == "https" ? "wss" : "ws";
-    final int port = api.hasPort ? api.port : 3000;
-    return "$wsScheme://${api.host}:$port/ws";
+    final bool hasExplicitPort = api.hasPort;
+    final int port = hasExplicitPort ? api.port : (api.scheme == "https" ? 443 : 3000);
+    // https 无显式端口 → 省略（443 隐含）；http 无显式端口保持旧行为显式 :3000。
+    final String portPart = !hasExplicitPort && api.scheme == "https" ? "" : ":$port";
+    return "$wsScheme://${api.host}$portPart/ws";
   }
 
   /// 首次安装时的默认本地加密 PIN（可用 `--dart-define=LOCAL_PIN=` 覆盖）。

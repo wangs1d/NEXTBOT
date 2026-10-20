@@ -9,6 +9,7 @@ import "../../core/services/agent_sphere_voice_controller.dart";
 import "../../core/services/app_auto_start.dart";
 import "../../core/services/local_runtime_config.dart";
 import "../../core/services/local_runtime_manager.dart";
+import "../../core/services/cloud_model_binding_store.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
@@ -20,13 +21,15 @@ import "sleep_routine_section.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, model, phoneBridge }
+enum _SettingsSection { general, model, serviceAccess, phoneBridge }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
 ///
 /// 分区：
 ///  - 通用（仅 Windows）：开机自动启动（本地注册表，不依赖服务器）
+///  - 模型与声纹（仅 Windows）：主对话模型接入 + 声纹注册
+///  - 服务接入（仅 Windows）：需用户自行接入的外部服务，一样一个胶囊组件
 ///  - 手机桥接（仅 Android）：Agent 远程访问本机 / 消息捕捉 / 定位回传
 /// （「它眼里的你」2026-09-30 迁往 Agent 主页。）
 class SettingsPage extends StatefulWidget {
@@ -60,6 +63,15 @@ class _SettingsPageState extends State<SettingsPage>
   String _modelInitialKey = "";
   String? _modelInitialBase;
   String? _modelInitialModel;
+
+  // —— 云端连接版「用户自有模型」（BYOK over cloud，!isBundled 时替代 byok 卡） ——
+  final TextEditingController _cloudBaseCtrl = TextEditingController();
+  final TextEditingController _cloudKeyCtrl = TextEditingController();
+  final TextEditingController _cloudModelCtrl = TextEditingController();
+  bool _cloudKeyObscure = true;
+  bool _cloudSaving = false;
+  String? _cloudMsg;
+  bool _cloudConfigured = false;
   Map<String, dynamic>? _vpStatus;
   bool _vpClearing = false;
 
@@ -80,6 +92,7 @@ class _SettingsPageState extends State<SettingsPage>
     _loadLocalDeviceSettings();
     _refreshCaptureState();
     _loadModelConfig();
+    _loadCloudModelConfig();
     _refreshVoiceprintStatus();
     _refreshMailStatus();
   }
@@ -87,6 +100,9 @@ class _SettingsPageState extends State<SettingsPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _cloudBaseCtrl.dispose();
+    _cloudKeyCtrl.dispose();
+    _cloudModelCtrl.dispose();
     super.dispose();
   }
 
@@ -178,6 +194,8 @@ class _SettingsPageState extends State<SettingsPage>
         (_SettingsSection.general, Icons.tune_outlined, "通用"),
       if (_isWindows)
         (_SettingsSection.model, Icons.graphic_eq_outlined, "模型与声纹"),
+      if (_isWindows)
+        (_SettingsSection.serviceAccess, Icons.hub_outlined, "服务接入"),
       if (showPhoneBridge)
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
     ];
@@ -280,6 +298,7 @@ class _SettingsPageState extends State<SettingsPage>
     final String title = switch (_section) {
       _SettingsSection.general => "通用",
       _SettingsSection.model => "模型与声纹",
+      _SettingsSection.serviceAccess => "服务接入",
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
@@ -292,6 +311,7 @@ class _SettingsPageState extends State<SettingsPage>
           ],
         ),
       _SettingsSection.model => _buildModelSection(),
+      _SettingsSection.serviceAccess => _buildServiceAccessSection(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
     };
     return SingleChildScrollView(
@@ -332,6 +352,65 @@ class _SettingsPageState extends State<SettingsPage>
     _modelInitialModel = cfg["OPENAI_MODEL"];
   }
 
+  // ------------------------------------------------------------------ //
+  // 云端连接版「用户自有模型」（BYOK over cloud）
+  // ------------------------------------------------------------------ //
+
+  /// 云端连接版形态：非捆绑（无本地 runtime）的 Windows 发行包。
+  bool get _isCloudEdition =>
+      !kIsWeb && _isWindows && !LocalRuntimeManager.isBundled;
+
+  Future<void> _loadCloudModelConfig() async {
+    await CloudModelBindingStore.instance.load();
+    if (!mounted) return;
+    setState(() {
+      _cloudBaseCtrl.text = CloudModelBindingStore.instance.baseUrl ?? "";
+      _cloudKeyCtrl.text = CloudModelBindingStore.instance.apiKey ?? "";
+      _cloudModelCtrl.text = CloudModelBindingStore.instance.model ?? "";
+      _cloudConfigured = CloudModelBindingStore.instance.isConfigured;
+    });
+  }
+
+  /// 保存到本机（CloudModelBindingStore）；生效时机 = 下一次 WS 连接建立
+  /// （session.init 上送，服务端按账号绑定；重启应用立即生效）。
+  Future<void> _saveCloudModelConfig() async {
+    if (_cloudSaving) return;
+    final String base = _cloudBaseCtrl.text.trim();
+    final String key = _cloudKeyCtrl.text.trim();
+    final String model = _cloudModelCtrl.text.trim();
+    if (base.isEmpty || key.isEmpty || model.isEmpty) {
+      setState(() => _cloudMsg = "三项都要填写（不需要时点「停用」清除）");
+      return;
+    }
+    if (!base.startsWith("https://")) {
+      setState(() => _cloudMsg = "接口地址必须以 https:// 开头（服务器拒绝明文来源的 Key）");
+      return;
+    }
+    setState(() {
+      _cloudSaving = true;
+      _cloudMsg = null;
+    });
+    await CloudModelBindingStore.instance.save(baseUrl: base, apiKey: key, model: model);
+    if (!mounted) return;
+    setState(() {
+      _cloudSaving = false;
+      _cloudConfigured = true;
+      _cloudMsg = "已保存，重连服务器后生效（重启应用立即生效）";
+    });
+  }
+
+  Future<void> _clearCloudModelConfig() async {
+    await CloudModelBindingStore.instance.clear();
+    if (!mounted) return;
+    setState(() {
+      _cloudBaseCtrl.clear();
+      _cloudKeyCtrl.clear();
+      _cloudModelCtrl.clear();
+      _cloudConfigured = false;
+      _cloudMsg = "已停用自有模型，恢复使用平台默认模型";
+    });
+  }
+
   Future<void> _refreshVoiceprintStatus() async {
     final Map<String, dynamic> status = await VoiceprintApi.status();
     if (!mounted) return;
@@ -347,8 +426,8 @@ class _SettingsPageState extends State<SettingsPage>
     );
   }
 
-  /// 授权码保存：即刻生效（服务端当场启动轮询）+ 写 config.env 持久化（重启
-  /// runtime 后环境注入回来）。
+  /// 授权码保存：PUT /api/service-config（mail 块）——服务端落盘 data/service-config.json
+  /// 并即刻启动 IMAP 轮询（无需重启 runtime；重启后由服务端重放配置继续生效）。
   Future<void> _saveMailPass() async {
     if (_mailSaving) return;
     final String pass = _mailPassCtrl.text.trim();
@@ -361,13 +440,14 @@ class _SettingsPageState extends State<SettingsPage>
       _mailSaveMsg = null;
     });
     try {
-      // 持久化：config.env（与模型 Key 同通道）
-      final Map<String, String> cfg = Map.of(LocalRuntimeConfig.readSync());
-      cfg["MAIL_WATCH_PASS"] = pass;
-      cfg["MAIL_WATCH_ENABLED"] = "1";
-      LocalRuntimeConfig.write(cfg);
-      // 即刻生效：服务端当场启动轮询（无需重启 runtime）
-      final Map<String, dynamic> res = await MailWatchApi.applyPass(pass);
+      final Map<String, dynamic> saved = await MailWatchApi.savePass(pass);
+      if (saved["ok"] != true) {
+        if (!mounted) return;
+        setState(() => _mailSaveMsg = saved["error"]?.toString() ?? "保存失败");
+        return;
+      }
+      // 即刻生效后的真实状态（running/reason）以服务端快照为准
+      final Map<String, dynamic> res = await MailWatchApi.status();
       final Map<String, dynamic> st =
           res["status"] is Map ? res["status"] as Map<String, dynamic> : <String, dynamic>{};
       if (!mounted) return;
@@ -432,21 +512,35 @@ class _SettingsPageState extends State<SettingsPage>
       children: <Widget>[
         _buildModelCard(),
         const SizedBox(height: 16),
-        _buildMailCard(),
-        const SizedBox(height: 16),
         _buildVoiceprintCard(),
       ],
     );
   }
 
-  Widget _buildMailCard() {
+  /// 「服务接入」分区：每个需要用户自行接入的外部服务一块胶囊组件
+  /// （邮箱盯梢 → 填 IMAP 授权码；后续新增接入方在此追加胶囊）。
+  Widget _buildServiceAccessSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          "这些服务需要你自己接入一次，接好后 Agent 才能用上对应能力。",
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const SizedBox(height: 14),
+        _buildMailCapsule(),
+      ],
+    );
+  }
+
+  Widget _buildMailCapsule() {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final bool running = _mailStatus?["running"] == true;
     final String user = String.fromCharCodes(
       ((_mailStatus?["user"] ?? "") as String).codeUnits,
     );
     final String reason = (_mailStatus?["reason"] ?? "") as String;
-    final String? guideUrl = _mailGuideUrl(user);
+    final String? guideUrl = mailGuideUrl(user);
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -458,7 +552,7 @@ class _SettingsPageState extends State<SettingsPage>
               children: <Widget>[
                 const Icon(Icons.mark_email_unread_outlined, size: 18),
                 const SizedBox(width: 8),
-                Text("邮箱接入", style: Theme.of(context).textTheme.titleMedium),
+                Text("邮箱盯梢", style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 Text(
                   running ? "盯梢中" : "未接通",
@@ -500,7 +594,7 @@ class _SettingsPageState extends State<SettingsPage>
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    _mailGuideSteps(user),
+                    mailGuideSteps(user),
                     style: const TextStyle(fontSize: 12, height: 1.5),
                   ),
                   if (guideUrl != null) ...<Widget>[
@@ -566,50 +660,10 @@ class _SettingsPageState extends State<SettingsPage>
     );
   }
 
-  /// 按接入邮箱的域返回授权码生成的分步说明（未知域给通用说明）。
-  String _mailGuideSteps(String user) {
-    final String domain = user.split("@").last.toLowerCase();
-    if (domain == "qq.com" || domain == "foxmail.com") {
-      return "① 电脑浏览器登录 mail.qq.com → 设置 → 账号与安全；\n"
-          "② 找到「IMAP/SMTP 服务」点开启，按提示用绑定手机发短信验证；\n"
-          "③ 验证通过后生成 16 位授权码（只显示一次），复制填到下面。";
-    }
-    if (domain == "163.com" || domain == "126.com" || domain == "yeah.net") {
-      return "① 电脑浏览器登录 mail.163.com → 设置（顶部）→ POP3/SMTP/IMAP；\n"
-          "② 开启 IMAP/SMTP 服务，按提示短信验证；\n"
-          "③ 生成授权码（只显示一次），复制填到下面。";
-    }
-    if (domain == "gmail.com") {
-      return "① Google 账号 → 安全性 → 应用专用密码（需先开两步验证）；\n"
-          "② 生成应用密码（16 位），复制填到下面。";
-    }
-    return "① 登录邮箱网页版 → 设置里找「IMAP/SMTP 服务」；\n"
-        "② 开启并生成授权码，复制填到下面。";
-  }
-
-  /// 按域返回官方入口页链接（设置页需登录后跳转，故落官网首页/帮助中心——
-  /// 已实测 200 稳定可达；三步说明卡片内嵌，链接只是辅助）。未知域不显示链接。
-  String? _mailGuideUrl(String user) {
-    final String domain = user.split("@").last.toLowerCase();
-    switch (domain) {
-      case "qq.com":
-      case "foxmail.com":
-        return "https://service.mail.qq.com/";
-      case "163.com":
-      case "126.com":
-      case "yeah.net":
-        return "https://help.mail.163.com/";
-      case "gmail.com":
-        return "https://myaccount.google.com/security";
-      case "outlook.com":
-      case "hotmail.com":
-        return "https://account.microsoft.com/security";
-      default:
-        return null;
-    }
-  }
-
   Widget _buildModelCard() {
+    // 云端连接版：模型跑在云端服务器，byok 卡（写本地 config.env + 重启本地
+    // 引擎）不适用——展示用户自有模型三元组表单，随 session.init 上送。
+    if (_isCloudEdition) return _buildCloudModelCard();
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Card(
       margin: EdgeInsets.zero,
@@ -645,6 +699,107 @@ class _SettingsPageState extends State<SettingsPage>
                 if (mounted) setState(() {}); // 刷新头部「已配置」状态
               },
             ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 云端连接版模型卡：自有 OpenAI 兼容端点三元组表单。
+  /// Key 只落本机 JSON（与应用凭据同目录），仅 wss 连接时随 session.init 上送。
+  Widget _buildCloudModelCard() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Card(
+      margin: EdgeInsets.zero,
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                const Icon(Icons.memory_outlined, size: 18),
+                const SizedBox(width: 8),
+                Text("模型服务", style: Theme.of(context).textTheme.titleMedium),
+                const Spacer(),
+                Text(
+                  _cloudConfigured ? "已配置（用你自己的模型）" : "未配置（用平台默认模型）",
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                ),
+              ],
+            ),
+            const SizedBox(height: 6),
+            Text(
+              "填入你自己的 OpenAI 兼容接口，对话将使用你自己的模型账号。API Key 只保存在本机，仅在加密（wss）连接时上送服务器使用。",
+              style: Theme.of(context).textTheme.bodySmall,
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _cloudBaseCtrl,
+              keyboardType: TextInputType.url,
+              decoration: const InputDecoration(
+                labelText: "接口地址 baseUrl",
+                hintText: "https://api.example.com/v1",
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _cloudKeyCtrl,
+              obscureText: _cloudKeyObscure,
+              decoration: InputDecoration(
+                labelText: "API Key",
+                hintText: "sk-...",
+                isDense: true,
+                border: const OutlineInputBorder(),
+                suffixIcon: IconButton(
+                  icon: Icon(
+                    _cloudKeyObscure
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
+                    size: 18,
+                  ),
+                  onPressed: () => setState(() => _cloudKeyObscure = !_cloudKeyObscure),
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _cloudModelCtrl,
+              decoration: const InputDecoration(
+                labelText: "模型名",
+                hintText: "例如 deepseek-chat / gpt-4o-mini / kimi-k2.5",
+                isDense: true,
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Row(
+              children: <Widget>[
+                FilledButton(
+                  onPressed: _cloudSaving ? null : _saveCloudModelConfig,
+                  child: _cloudSaving
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text("保存", style: TextStyle(fontSize: 13)),
+                ),
+                if (_cloudConfigured) ...<Widget>[
+                  const SizedBox(width: 8),
+                  OutlinedButton(
+                    onPressed: _clearCloudModelConfig,
+                    child: const Text("停用", style: TextStyle(fontSize: 13)),
+                  ),
+                ],
+              ],
+            ),
+            if (_cloudMsg != null) ...<Widget>[
+              const SizedBox(height: 8),
+              Text(_cloudMsg!, style: const TextStyle(fontSize: 12)),
+            ],
           ],
         ),
       ),

@@ -562,19 +562,22 @@ class _UpdateResultCardState extends State<_UpdateResultCard>
   }
 
   /// 主/次操作直接用主题按钮：颜色随主题（含暖色）自动走，与升级弹窗
-  /// 的 FilledButton 同一语言；shrinkWrap + 紧凑内边距保持胶囊几何
+  /// 的 FilledButton 同一语言；shrinkWrap 保持胶囊几何。
+  /// 行高不写 1.0：旧运行时按纯字面行盒（13px）算按钮高、无视纵向
+  /// 内边距，中文墨迹（≈1.3em）直接溢出胶囊；改 1.2 并以 32px 最小
+  /// 高度兜底，无论运行时怎么算高，文字都包得住。
   Widget _buildPill(_UpdateCardPillSpec spec, Color ink, Color line) {
     const TextStyle textStyle = TextStyle(
       fontSize: 13,
-      height: 1.0,
+      height: 1.2,
       fontWeight: FontWeight.w600,
     );
     if (spec.emphasized) {
       return FilledButton(
         onPressed: spec.onTap,
         style: FilledButton.styleFrom(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          minimumSize: const Size(0, 0),
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          minimumSize: const Size(0, 32),
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
           shape: const StadiumBorder(),
           textStyle: textStyle,
@@ -587,8 +590,8 @@ class _UpdateResultCardState extends State<_UpdateResultCard>
       style: OutlinedButton.styleFrom(
         foregroundColor: ink,
         side: BorderSide(color: line),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-        minimumSize: const Size(0, 0),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        minimumSize: const Size(0, 32),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         shape: const StadiumBorder(),
         textStyle: textStyle,

@@ -55,6 +55,15 @@ export type StructuredCallOptions<T> = {
   label: string;
   /** 最大尝试次数，默认 2（网关式语义：首次失败后恰一次补救机会）。 */
   maxAttempts?: number;
+  /**
+   * 超时是否触发原参重试，默认 true。
+   *
+   * 置 false 的语义：超时≠坏输出。超时说明请求仍卡在服务端（原参立刻重试几乎
+   * 必然再次超时），把单次超时预算翻倍成 2×timeout 纯属空等。调用方若自带
+   * 确定性兜底（如意图路由的保守降级），应置 false——用兜底换掉这半程空等。
+   * 坏输出/调用异常的重试不受本开关影响（那才是真正的瞬态抖动）。
+   */
+  retryOnTimeout?: boolean;
   /** 单次自包含调用（不累积线程历史）。结构化调用默认 true。 */
   ephemeralTurn?: boolean;
   /** 剥掉聊天线程的【回复规则】【展示形式】等后缀（省全价输入）。结构化调用默认 true。 */
@@ -102,12 +111,17 @@ export async function structuredCall<T>(
       ]).finally(() => clearTimeout(timer));
 
       if (raw === undefined) {
-        if (attempt < maxAttempts) {
+        if (attempt < maxAttempts && opts.retryOnTimeout !== false) {
           console.warn(
             `[structured-call:${opts.label}] 超时（${opts.timeoutMs}ms），原参重试（${attempt + 1}/${maxAttempts}）`,
           );
           continue;
         }
+        console.warn(
+          `[structured-call:${opts.label}] 超时（${opts.timeoutMs}ms），` +
+            (opts.retryOnTimeout === false ? "按调用方约定不重试" : "已达最大尝试次数") +
+            "，交给调用方兜底",
+        );
         return { ok: false, reason: "timeout", attempts: attempt };
       }
 

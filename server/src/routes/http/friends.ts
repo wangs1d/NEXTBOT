@@ -1,8 +1,8 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { WorldService } from "@private-ai-agent/agent-world";
-import type { FriendService } from "../../services/friend-service.js";
-import type { AgentAccountService } from "../../services/agent-account-service.js";
+import type { FriendRequestRecord, FriendService } from "../../services/friend-service.js";
+import type { AgentAccountRecord, AgentAccountService } from "../../services/agent-account-service.js";
 import { AGENT_NUMBER_PATTERN } from "../../services/agent-account-service.js";
 import type { FriendMessageService } from "../../services/friend-message-service.js";
 
@@ -104,6 +104,43 @@ function accountActorFromBody(data: { userId?: string; sessionId?: string }): st
   const s = data.sessionId?.trim() ?? "";
   return u || s;
 }
+
+/**
+ * 好友展示名：只有「用户真正起过的昵称」才直接展示。
+ * 注册时自动派生自邮箱/实例 id 的占位名（等于账号 id 或邮箱 @ 前缀）不算昵称——
+ * 添加好友的凭证是注册即得的身份号码（不是邮箱），所以这类情况回退到身份号码。
+ */
+function friendDisplayName(account: AgentAccountRecord | undefined, actorId: string): string {
+  const name = account?.displayName?.trim() ?? "";
+  const localPart = (actorId.includes("@") ? actorId.split("@")[0] : actorId).toLowerCase();
+  const isDerivedPlaceholder =
+    !name || name.toLowerCase() === actorId.toLowerCase() || name.toLowerCase() === localPart;
+  if (!isDerivedPlaceholder) return name;
+  return account?.agentNumber?.trim() || name || actorId;
+}
+
+/**
+ * 给好友请求补上「对方」的账号资料（昵称 / 身份短号 / 邮箱），供客户端显示。
+ * 对方以身份短号添加时，请求里存的是登录主体（邮箱形态主体就是邮箱地址）；
+ * 客户端直接渲染 fromActorId/toActorId 会把邮箱当名字显示，故在服务端统一解析。
+ */
+function enrichRequestsWithAccount(
+  agentAccountService: AgentAccountService,
+  actorId: string,
+  requests: FriendRequestRecord[],
+): Array<Record<string, unknown>> {
+  return requests.map((r) => {
+    const counterpart = r.fromActorId === actorId ? r.toActorId : r.fromActorId;
+    const account = agentAccountService.getByActorId(counterpart);
+    return {
+      ...r,
+      displayName: friendDisplayName(account, counterpart),
+      agentNumber: account?.agentNumber ?? null,
+      email: account?.email ?? null,
+    };
+  });
+}
+
 
 /**
  * 解析好友申请目标：toActorId 优先（先按登录主体精确查）；
@@ -245,7 +282,7 @@ export function registerFriendRoutes(
     const actorId = accountActorFromBody(parsed.data);
     const requests = friendService.getIncomingRequests(actorId);
 
-    return { ok: true, requests };
+    return { ok: true, requests: enrichRequestsWithAccount(agentAccountService, actorId, requests) };
   });
 
   /**
@@ -261,7 +298,7 @@ export function registerFriendRoutes(
     const actorId = accountActorFromBody(parsed.data);
     const requests = friendService.getOutgoingRequests(actorId);
 
-    return { ok: true, requests };
+    return { ok: true, requests: enrichRequestsWithAccount(agentAccountService, actorId, requests) };
   });
 
   /**
@@ -277,7 +314,7 @@ export function registerFriendRoutes(
     const actorId = accountActorFromBody(parsed.data);
     const requests = friendService.getAllRequests(actorId);
 
-    return { ok: true, requests };
+    return { ok: true, requests: enrichRequestsWithAccount(agentAccountService, actorId, requests) };
   });
 
   /**
@@ -293,12 +330,12 @@ export function registerFriendRoutes(
     const actorId = accountActorFromBody(parsed.data);
     const friends = friendService.getFriends(actorId);
 
-    // 为每个好友添加账号信息
+    // 为每个好友添加账号信息（展示名走 friendDisplayName：无真昵称时用身份号码，不用邮箱）
     const friendsWithDetails = friends.map((f: any) => {
       const account = agentAccountService.getByActorId(f.friendActorId);
       return {
         ...f,
-        displayName: account?.displayName ?? f.friendActorId,
+        displayName: friendDisplayName(account, f.friendActorId),
         email: account?.email ?? null,
         agentNumber: account?.agentNumber ?? null,
       };

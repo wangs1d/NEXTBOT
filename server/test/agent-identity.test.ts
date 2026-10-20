@@ -21,21 +21,21 @@ process.env.AGENT_ACCOUNTS_FILE = join(testTmp, "accounts.json");
 // user-preferences 模块在加载时读 env，必须先于动态 import 设置
 process.env.USER_PREFERENCES_FILE = join(testTmp, "prefs.json");
 
-const { parseAgentIdentityKv, buildIdentityNameLine, AGENT_NAME_SUGGESTIONS, DEFAULT_AGENT_NAME, AGENT_NAME_KV_KEY } =
+const { parseAgentIdentityKv, buildIdentityNameLine, AGENT_NAME_SUGGESTIONS, AGENT_NAME_KV_KEY } =
   await import("../src/services/agent-identity.js");
 
 test("identity: parseAgentIdentityKv 宽容解析——合法/缺字段/坏 JSON/非字符串", () => {
   const good = parseAgentIdentityKv(
     JSON.stringify({
-      displayName: "晨昏线",
-      handle: "terminator_line",
+      displayName: "晚潮",
+      handle: "evening_tide",
       origin: "self",
       updatedAt: "2026-09-19T00:00:00Z",
     }),
   );
   assert.ok(good);
-  assert.equal(good.displayName, "晨昏线");
-  assert.equal(good.handle, "terminator_line");
+  assert.equal(good.displayName, "晚潮");
+  assert.equal(good.handle, "evening_tide");
   assert.equal(good.origin, "self");
 
   const noHandle = parseAgentIdentityKv(JSON.stringify({ displayName: "残响" }));
@@ -51,34 +51,33 @@ test("identity: parseAgentIdentityKv 宽容解析——合法/缺字段/坏 JSON
 
 test("identity: buildIdentityNameLine 按 origin 出措辞", () => {
   const self = buildIdentityNameLine({
-    displayName: "晨昏线",
-    handle: "terminator_line",
+    displayName: "晚潮",
+    handle: "evening_tide",
     origin: "self",
     updatedAt: "",
   });
-  assert.match(self, /「晨昏线」/);
-  assert.match(self, /@terminator_line/);
+  assert.match(self, /「晚潮」/);
+  assert.match(self, /@evening_tide/);
   assert.match(self, /你自己选/);
 
   const user = buildIdentityNameLine({
-    displayName: "晚潮",
+    displayName: "过境",
     handle: "",
     origin: "user",
     updatedAt: "",
   });
-  assert.match(user, /「晚潮」/);
+  assert.match(user, /「过境」/);
   assert.doesNotMatch(user, /@/);
   assert.match(user, /用户为你取/);
 });
 
-test("identity: 建议名池默认名不带萌宠味（审美约束）", () => {
+test("identity: 建议名池审美约束——不带萌宠味", () => {
   assert.ok(AGENT_NAME_SUGGESTIONS.length >= 3);
   assert.ok(AGENT_NAME_SUGGESTIONS.every((s: { reason: string }) => s.reason.trim().length > 0));
   assert.ok(
     AGENT_NAME_SUGGESTIONS.every((s: { displayName: string }) => !/^(小|阿)/.test(s.displayName)),
     "建议名不应走「小X」萌宠路线",
   );
-  assert.equal(DEFAULT_AGENT_NAME.displayName, "晨昏线");
 });
 
 test("identity: agent.update_identity 一次调用同步 账号+KV+叙事+WS", async () => {
@@ -111,23 +110,23 @@ test("identity: agent.update_identity 一次调用同步 账号+KV+叙事+WS", a
   assert.ok(registry.update, "agent.update_identity 未注册");
 
   const result = (await registry.update!(
-    { displayName: "晨昏线", handle: "terminator_line", reason: "昼与夜的分界线", origin: "self" },
+    { displayName: "晚潮", handle: "evening_tide", reason: "夜里漫上来的那一部分", origin: "self" },
     { sessionId: actorId },
   )) as { ok: boolean; displayName: string; accountCreated: boolean };
   assert.equal(result.ok, true);
-  assert.equal(result.displayName, "晨昏线");
+  assert.equal(result.displayName, "晚潮");
   assert.equal(result.accountCreated, false);
 
   // 1) 账号显示名已改
-  assert.equal(accountsSvc.getByActorId(actorId)?.displayName, "晨昏线");
+  assert.equal(accountsSvc.getByActorId(actorId)?.displayName, "晚潮");
   // 2) KV 名字档案已写（prompt 自我认知数据源）
   const identity = parseAgentIdentityKv(memorySync.getSnapshot(actorId, [AGENT_NAME_KV_KEY]).entries[AGENT_NAME_KV_KEY]);
   assert.ok(identity);
-  assert.equal(identity.displayName, "晨昏线");
+  assert.equal(identity.displayName, "晚潮");
   assert.equal(identity.origin, "self");
   // 3) 叙事记忆已落（人生史事件）
   const summary = String(memorySync.getSnapshot(actorId, ["memory_summary"]).entries["memory_summary"] ?? "");
-  assert.match(summary, /我为自己取名「晨昏线」/);
+  assert.match(summary, /我为自己取名「晚潮」/);
   // 4) WS 广播已发（客户端即时刷新）
   assert.ok(sent.some((m) => m.type === "identity_renamed"));
 });
@@ -165,11 +164,22 @@ test("identity: 未注册账号时改名 = 自助注册（给自己取网络名�
 
 test("identity: prefs 落盘持久化（重启不丢名字）", async () => {
   const prefsModule = await import("../src/routes/http/user-preferences.js");
-  prefsModule.patchAgentProfile("test-actor-persist", {
-    displayName: "过境",
-    handle: "transit",
-    nameOrigin: "self",
-  });
+  // 出厂不预设名字：全新会话的档案是「未命名」态，不带任何自拟名字/handle
+  const fresh = prefsModule.getUserPreferences("fresh-unnamed");
+  assert.equal(fresh.agentProfile.displayName, "");
+  assert.equal(fresh.agentProfile.handle, "");
+  assert.equal(fresh.agentProfile.nameOrigin, "default");
+
+  // 身份字段默认被拦，改名管道需显式放行（其余直写入口一律拦掉）
+  prefsModule.patchAgentProfile(
+    "test-actor-persist",
+    {
+      displayName: "过境",
+      handle: "transit",
+      nameOrigin: "self",
+    },
+    { allowIdentity: true },
+  );
   // 落盘是异步链：全量并发跑时 30ms 固定等待会抖，轮询至多 3s
   let parsed: { sessions: Record<string, { agentProfile: { displayName: string } }> } | null = null;
   for (let i = 0; i < 60; i++) {

@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   首次/更新部署 server 到阿里云 ECS（manifest 控制面 + 未来 platform 模式的 runtime）。
@@ -11,7 +11,7 @@
 param(
   [string]$Remote = "root@47.98.122.29",
   [string]$DeployDir = "/opt/private-agent",
-  [string]$ManifestUrl = "http://47.98.122.29:3000",
+  [string]$ManifestUrl = "https://nextbot.top",
   [switch]$SkipPackage
 )
 $ErrorActionPreference = 'Stop'
@@ -132,7 +132,7 @@ $public = & curl.exe -s -m 8 "$ManifestUrl/api/client/manifest"
 if ($public -match '"ok":true') {
   Write-Host "外网可达: $public" -ForegroundColor Green
 } else {
-  Write-Host "外网不可达——请到阿里云控制台安全组放行 TCP 3000 入方向后重试 curl $ManifestUrl/api/client/manifest" -ForegroundColor Yellow
+  Write-Host "外网不可达——请到阿里云控制台安全组放行 TCP 443 入方向后重试 curl $ManifestUrl/api/client/manifest" -ForegroundColor Yellow
 }
 
 Write-Host '== [5/5] 完成 =='

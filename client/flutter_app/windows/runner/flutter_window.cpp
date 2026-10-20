@@ -1100,8 +1100,9 @@ void FlutterWindow::HandleAgentProfileMethodCall(
     const auto* args = std::get_if<flutter::EncodableMap>(call.arguments());
     if (args && agent_profile_window_) {
       AgentProfileOverlayWindow::ProfileData data;
-      data.display_name = GetEncodableString(args, "displayName", "AI助手");
-      data.handle = GetEncodableString(args, "handle", "ai_agent");
+      // 出厂不预设名字：未设定前留空（界面显示「未命名」）
+      data.display_name = GetEncodableString(args, "displayName", "");
+      data.handle = GetEncodableString(args, "handle", "");
       data.signature = GetEncodableString(args, "signature", "");
       data.mood_style = GetEncodableString(args, "moodStyle", "gentle");
       data.status_text = GetEncodableString(args, "statusText", "");

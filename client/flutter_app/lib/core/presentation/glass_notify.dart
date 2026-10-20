@@ -852,7 +852,10 @@ class _GlassToastCardState extends State<_GlassToastCard>
         _requestClose(GlassNotifyCloseReason.action);
       },
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        // 固定 32px 高、居中排版：不依赖字号行高推算，中文墨迹不会溢出胶囊
+        height: 32,
+        alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
         decoration: BoxDecoration(
           color: solid ? p.ink : Colors.transparent,
           borderRadius: BorderRadius.circular(999),
@@ -864,7 +867,7 @@ class _GlassToastCardState extends State<_GlassToastCard>
           action.label,
           style: TextStyle(
             fontSize: 13,
-            height: 1.0,
+            height: 1.2,
             fontWeight: FontWeight.w600,
             color: solid ? p.emphasisText : p.ink,
           ),

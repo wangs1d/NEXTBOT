@@ -110,7 +110,6 @@ class AgentResultCard extends StatelessWidget {
                   const <String, dynamic>{};
           return _MorningBriefingChatCard(
             briefing: briefingPayload,
-            narrationText: extra?["narrationText"]?.toString(),
             modeLabel: extra?["modeLabel"]?.toString(),
             cs: cs,
           );
@@ -2567,13 +2566,11 @@ class _MorningBriefingChatCard extends StatelessWidget {
   const _MorningBriefingChatCard({
     required this.briefing,
     required this.cs,
-    this.narrationText,
     this.modeLabel,
   });
 
   final Map<String, dynamic> briefing;
   final ColorScheme cs;
-  final String? narrationText;
   final String? modeLabel;
 
   @override
@@ -2589,13 +2586,7 @@ class _MorningBriefingChatCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(10),
         child: MorningBriefingCard(
           briefing: briefing,
-          narrationText: narrationText,
           modeLabel: modeLabel,
-          onSpeak: (String text) {
-            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-              SnackBar(content: Text(text)),
-            );
-          },
         ),
       ),
     );
