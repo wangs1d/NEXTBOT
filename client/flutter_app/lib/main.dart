@@ -195,7 +195,15 @@ void main() async {
       _writeCrashLog("[BOOT]", "stage 5: before waitUntilReadyToShow", StackTrace.current);
       final WindowOptions options = WindowOptions(
         size: initialSize,
-        backgroundColor: Colors.transparent,
+        // 必须是实色，不能用 Colors.transparent（2026-10-20 白屏根修）。
+        //
+        // 窗口在 runApp 之前就 show() 了，此时首帧还没画出来；Windows 上
+        // Flutter 不支持逐像素透明，transparent 会被 DWM 填成**白色客户区**
+        // —— 引擎初始化慢时（Debug 版实测：窗口 3.25s 出现、4.66s 才有首帧，
+        // 中间 1.4s 纯白）用户看到的就是「启动白屏」。改成主面板实色后，
+        // 首帧前即是深色底、与加载页同色，衔接无闪烁；浅色主题下也只是一次
+        // 极短的深→浅过渡，远好过白屏。
+        backgroundColor: AppPalette.mainPanel,
         skipTaskbar: false,
         // 隐藏原生标题栏，由自绘的 AppWindowTitleBar 接管
         // （拖拽区 + 最小化/最大化/关闭按钮）。

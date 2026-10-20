@@ -10,6 +10,7 @@ import { registerBrainRoutes } from "./brain.js";
 import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
+import { registerInternalManifestEventRoutes } from "./internal-manifest-events.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
 import { registerServiceConfigRoutes } from "./service-config.js";
 import { registerFriendRoutes } from "./friends.js";
@@ -105,6 +106,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerSystemRoutes(app, deps);
   // 客户端版本清单（自包含，无 deps）：桌面客户端启动检查 + 后期 runtime 收回总开关
   registerClientManifestRoutes(app);
+  // 清单变化 SSE 事件流（自包含；MANIFEST_EVENT_TOKEN 未配置时 403 禁用）：
+  // 更新控制面机器（ECS）上启用，下游（云端网关/本地 runtime）订阅后秒级广播
+  registerInternalManifestEventRoutes(app);
   // 模型接入目录（自包含，无 deps）：向导/设置页目录式选模型，base URL 服务端统一下发
   registerModelProviderRoutes(app);
   // 服务接入（内测 byok）：用户自配模型/TTS/邮箱授权码（GET/PUT /api/service-config + tts-test）

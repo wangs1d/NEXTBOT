@@ -168,6 +168,23 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
     ::DispatchMessage(&msg);
   }
 
+  // ⚠️ 引擎与插件的析构必须发生在 CoUninitialize() 之前。
+  //
+  // 托盘「退出」走的是 window_manager.destroy()，其原生实现只有
+  // PostQuitMessage(0)——**窗口本身不会被销毁**。于是消息循环退出后，
+  // Flutter 引擎要到 main 返回时的栈对象析构才释放，而那时
+  // ::CoUninitialize() 已经执行过：引擎（DirectComposition/DXGI）与
+  // WebView2 插件都在 COM 已卸载的线程上销毁 → flutter_windows.dll
+  // 访问违例（事件日志实证：0xc0000005，偏移 0x1d7b0，随后回调二次异常
+  // 0xc000041d）。WER 随即挂起全部线程并收集 dump，内存从 ~220MB 涨到
+  // ~690MB，进程要 13~19 秒才消失——用户侧就是「点退出卡十几秒」。
+  //
+  // 官方模板之所以没这个问题，是因为正常关闭走 WM_CLOSE → DestroyWindow
+  // → WM_DESTROY（OnDestroy 里已释放引擎）→ PostQuitMessage，析构天然在
+  // CoUninitialize 之前。这里显式补上销毁，保证「先关窗口、再卸 COM」，
+  // 与正常关闭路径一致；若窗口已被正常关闭（句柄已空）则是幂等空操作。
+  window.Destroy();
+
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }

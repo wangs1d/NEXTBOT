@@ -337,6 +337,10 @@ void FlutterWindow::OnDestroy() {
   connected_call_channel_.reset();
   outgoing_call_window_.reset();
   outgoing_call_channel_.reset();
+  dynamic_island_window_.reset();
+  dynamic_island_channel_.reset();
+  agent_profile_window_.reset();
+  agent_profile_channel_.reset();
   window_titlebar_channel_.reset();
   overlay_window_.reset();
   overlay_channel_.reset();
@@ -348,6 +352,12 @@ void FlutterWindow::OnDestroy() {
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
+  // 摘掉内容视图句柄：main.cpp 的显式销毁路径（托盘退出兜底）会在主窗口
+  // 仍然活着时调进来，controller 析构会连带销毁 view 子窗口，若
+  // child_content_ 还指着它，随后 DestroyWindow 期间收到的 WM_SIZE /
+  // WM_ACTIVATE 会对着已释放的句柄 MoveWindow / SetFocus。
+  // 正常关闭路径下 WM_DESTROY 已把句柄置空，此处同样是幂等置空。
+  SetChildContent(nullptr);
   Win32Window::OnDestroy();
 }
 

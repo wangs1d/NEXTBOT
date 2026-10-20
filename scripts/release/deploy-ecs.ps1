@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   首次/更新部署 server 到阿里云 ECS（manifest 控制面 + 未来 platform 模式的 runtime）。

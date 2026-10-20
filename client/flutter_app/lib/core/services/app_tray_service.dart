@@ -174,21 +174,49 @@ class AppTrayService with WindowListener, TrayListener {
   }
 
   /// 托盘菜单「退出」：真正结束进程。
+  ///
+  /// 走标准关闭链路 [windowManager.close]（WM_CLOSE → DestroyWindow →
+  /// WM_DESTROY 里释放引擎 → PostQuitMessage），而**不是** destroy()。
+  ///
+  /// 坑（2026-10-20 实测）：window_manager 的 destroy() 原生实现只有
+  /// `PostQuitMessage(0)`，窗口压根没销毁。于是消息循环退出后引擎只能在
+  /// main() 返回、栈对象析构时才释放，而那时原生侧 `CoUninitialize()` 已经
+  /// 跑过——引擎与 WebView2 在 COM 已卸载的线程上析构，flutter_windows.dll
+  /// 必然访问违例（事件日志：0xc0000005 偏移 0x1d7b0，随后回调二次异常
+  /// 0xc000041d）。WER 随即挂起全部线程、收集 dump（内存 220MB→690MB），
+  /// 进程要 13~19 秒才消失——用户侧就是「点托盘退出卡十几秒」。
   Future<void> exitApp() async {
+    if (_exiting) return;
     _exiting = true;
+    // 先放手关闭拦截：close() 发的是 WM_CLOSE，preventClose 还挂着的话
+    // 只会走 onWindowClose 隐藏窗口，进程根本不会退出。
     try {
-      await windowManager.setSkipTaskbar(false);
       await windowManager.setPreventClose(false);
     } catch (e) {
-      debugPrint("[AppTray] release hooks failed: $e");
+      debugPrint("[AppTray] release preventClose failed: $e");
     }
+    // 托盘图标先摘：进程结束后 Windows 不会立即抹掉残影（要等鼠标划过）。
+    // 失败无妨，绝不影响下面真正决定退出的一步。
+    try {
+      await trayManager.destroy();
+    } catch (e) {
+      debugPrint("[AppTray] tray destroy failed: $e");
+    }
+    try {
+      await windowManager.close();
+    } catch (e) {
+      debugPrint("[AppTray] close failed: $e");
+    }
+    // 兜底：关闭链路任一环卡住（窗口不可见/插件未生效）时，短延时后
+    // 直接 PostQuitMessage + 强制结束，绝不让用户对着没反应的托盘干等。
+    await Future<void>.delayed(const Duration(milliseconds: 800));
     try {
       await windowManager.destroy();
     } catch (e) {
-      debugPrint("[AppTray] destroy failed: $e");
+      debugPrint("[AppTray] destroy fallback failed: $e");
     }
-    // 兜底：窗口销毁后消息循环应自然退出，极端情况下强制结束。
-    Future<void>.delayed(const Duration(seconds: 2), () => exit(0));
+    await Future<void>.delayed(const Duration(milliseconds: 400));
+    exit(0);
   }
 
   // ---- WindowListener ----
