@@ -51,6 +51,24 @@ export interface RelationshipTrajectory {
   totalInteractions: number;
 }
 
+/**
+ * 生活模型收敛接口（2026-10-20，P1）：把 warmth/rapport 状态映射为一条
+ * kind='self_agent' 的边，并追加变化轨迹点。由 LifeModelStore 提供实现。
+ */
+export interface LifeModelConvergenceLike {
+  convergeRelationshipState(
+    actorId: string,
+    state: { warmth: number; rapport: number },
+    changePoint?: { at: string; intimacy: number; sentiment: number; note?: string; triggerRef?: string },
+  ): unknown;
+  getSelfAgentEdge(actorId: string): { id: string; intimacy: number; sentiment: number } | null;
+  getEdgeChangeLog(
+    actorId: string,
+    edgeId: string,
+    limit?: number,
+  ): Array<{ at: string; intimacy: number; sentiment: number; note?: string }>;
+}
+
 /** HumanLikeMemoryService 的最小依赖接口 */
 export interface RelationshipStorageLike {
   ingest(
@@ -99,9 +117,16 @@ export class RelationshipGraphService {
    * 底层是对固定 query 的完整 humanLike 召回（含 embedding）。TTL 内直读缓存。
    */
   private summaryCache = new Map<string, { text: string; ts: number }>();
+  /** 生活模型收敛（P1）：非空时把 warmth/rapport 映射为 self_agent 边，摘要走结构化边 */
+  private lifeModelStore: LifeModelConvergenceLike | null = null;
 
   constructor(storage: RelationshipStorageLike) {
     this.storage = storage;
+  }
+
+  /** 注入生活模型（装配层接线；LifeModelStore 实例）。 */
+  setLifeModelStore(store: LifeModelConvergenceLike | null): void {
+    this.lifeModelStore = store;
   }
 
   /**
@@ -187,6 +212,29 @@ export class RelationshipGraphService {
     this.lastWarmthMap.set(actorId, current.warmth);
     this.lastRapportMap.set(actorId, current.rapport);
 
+    // 生活模型收敛（P1）：warmth/rapport 映射为 self_agent 边（与「我和妹妹的关系」
+    // 同构）；有触发里程碑时追加一个轨迹点（triggerRef 指向里程碑标题）。零 LLM。
+    if (this.lifeModelStore) {
+      const last = triggered[triggered.length - 1];
+      try {
+        this.lifeModelStore.convergeRelationshipState(
+          actorId,
+          current,
+          last
+            ? {
+                at: last.occurredAt,
+                intimacy: current.warmth,
+                sentiment: (current.rapport - 0.5) * 2,
+                note: last.title,
+              }
+            : undefined,
+        );
+        this.summaryCache.delete(actorId);
+      } catch (err) {
+        console.log(`[RelationshipGraph] 生活模型收敛失败（忽略）: ${err}`);
+      }
+    }
+
     return triggered;
   }
 
@@ -251,6 +299,25 @@ export class RelationshipGraphService {
     const cached = this.summaryCache.get(actorId);
     if (cached && Date.now() - cached.ts < RELATIONSHIP_SUMMARY_TTL_MS) {
       return cached.text;
+    }
+    // 结构化边摘要（P1 收敛）：self_agent 边存在时以生活模型为准（含亲疏/情感轨迹），
+    // 与人物关系同构；不再走文本 blob 解析。边不存在（尚未收敛）时回退旧路径。
+    if (this.lifeModelStore) {
+      try {
+        const edge = this.lifeModelStore.getSelfAgentEdge(actorId);
+        if (edge) {
+          const log = this.lifeModelStore.getEdgeChangeLog(actorId, edge.id, 5).slice(-3);
+          const trail = log
+            .map((p) => `${p.note ?? "变化"}(${p.at.slice(0, 10)})`)
+            .join("; ");
+          const structured = `关系(生活模型边): intimacy=${edge.intimacy.toFixed(2)}, sentiment=${edge.sentiment.toFixed(2)}${trail ? `; ${trail}` : ""}`;
+          const text = structured.length > 200 ? structured.slice(0, 197) + "..." : structured;
+          this.summaryCache.set(actorId, { text, ts: Date.now() });
+          return text;
+        }
+      } catch (err) {
+        console.log(`[RelationshipGraph] 结构化边摘要失败（回退旧路径）: ${err}`);
+      }
     }
     const trajectory = await this.getRelationshipTrajectory(actorId);
     if (trajectory.milestones.length === 0) {

@@ -108,6 +108,11 @@ class MobileHomePageState extends State<MobileHomePage>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     // resumed 才算前台；hidden/paused/detached 均按后台处理
     _appBackgrounded = state != AppLifecycleState.resumed;
+    if (state == AppLifecycleState.resumed) {
+      // 回前台确保 WS 在线（2026-10-20）：WsChatService 重连 10 次耗尽后
+      // 永久放弃，服务端主动消息只能挂起等这次补连。
+      _chatController.service.ensureConnected();
+    }
   }
 
   /// 装配环境信息流编排层端口（与桌面端 main.dart 同构）：

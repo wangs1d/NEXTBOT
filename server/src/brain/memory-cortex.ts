@@ -18,6 +18,7 @@ import type {
   InferenceResult,
 } from "./types.js";
 import type { RelationshipGraphService } from "../services/relationship-graph-service.js";
+import type { LifeModelStore } from "../agentic-memory/life-model-store.js";
 import type { MemoryAssociativeGraph } from "./memory-cognitive/memory-associative-graph.js";
 import type { MemoryMetacognitionBridge } from "./memory-cognitive/memory-metacognition-bridge.js";
 import type { MemoryForgettingController } from "./memory-cognitive/memory-forgetting-controller.js";
@@ -462,6 +463,8 @@ export class MemoryCortex {
   private personalityCache = new Map<string, PersonalityCore>();
   // relationship 域：关系图谱服务（Phase 1.2，里程碑/轨迹/共同经历）
   private relationshipGraph: RelationshipGraphService | null = null;
+  /** 用户生活模型（实体/关系/轨迹）——第 ④ 层建模，作为 lifeModel 召回通道 */
+  private lifeModelStore: LifeModelStore | null = null;
   // ---- 记忆认知架构升级（Phase 3）：子组件 ---------------------------
   private associativeGraph: MemoryAssociativeGraph | null = null;
   private metacognitionBridge: MemoryMetacognitionBridge | null = null;
@@ -554,6 +557,51 @@ export class MemoryCortex {
   registerRelationshipGraph(svc: RelationshipGraphService): void {
     this.relationshipGraph = svc;
     console.log("[MemoryCortex] 已注册 RelationshipGraph");
+  }
+
+  /**
+   * 注册用户生活模型（Life Model）存储：作为 lifeModel 召回通道并入仲裁，
+   * 命中用户问句里的人/关系/宠物实体。未注册时该通道跳过（零开销）。
+   */
+  registerLifeModelStore(svc: LifeModelStore | null): void {
+    this.lifeModelStore = svc;
+    console.log(`[MemoryCortex] 已注册 LifeModelStore（${svc ? "启用" : "停用"}）`);
+  }
+
+  /**
+   * lifeModel 通道召回：用户问句命中的实体（人/宠物/组织）及其与用户的关系边，
+   * 构造为召回条目（确定性建模，非语义检索）。命中不了则返回空（零开销）。
+   */
+  private buildLifeModelRecallItems(actorId: string, query: string): MemoryRecallItem[] {
+    const store = this.lifeModelStore;
+    const q = query?.trim();
+    if (!store || !q) return [];
+    try {
+      const entities = store.matchEntitiesInText(actorId, q).slice(0, 4);
+      if (entities.length === 0) return [];
+      const selfId = store.findEntityByName(actorId, "我")?.id ?? null;
+      const edges = store.getEdges(actorId).filter((e) => e.kind !== "self_agent");
+      const items: MemoryRecallItem[] = [];
+      for (const ent of entities) {
+        const edge =
+          (selfId ? edges.find((x) => x.fromEntityId === selfId && x.toEntityId === ent.id) : null) ??
+          edges.find((x) => x.toEntityId === ent.id) ??
+          null;
+        const rel = edge ? `（关系：${edge.subKind ?? edge.kind}）` : "";
+        items.push({
+          content: `生活模型：${ent.canonicalName}${rel}${ent.aliases.length ? `，也叫${ent.aliases.join("/")}` : ""}`,
+          domain: "semantic" as MemoryDomainKind,
+          source: "life_model",
+          importance: ent.kind === "pet" || edge ? "high" : "medium",
+          score: 0.68,
+          timestamp: ent.lastSeenAt,
+        });
+      }
+      return items;
+    } catch (err) {
+      console.log(`[MemoryCortex] lifeModel recall failed: ${err}`);
+      return [];
+    }
   }
 
   // ---- 记忆认知架构升级（Phase 3）：7 个子组件注册 ------------------------
@@ -1363,60 +1411,117 @@ export class MemoryCortex {
       !this.arbitratorConfig.enabled &&
       shouldShortCircuitAgentic(agenticItems, { minCount: 3, minTopScore: 0.6 });
 
-    if (shortCircuit) {
-      mergedItems = agenticItems;
-    } else {
-      // 3) 按需并行：narrative + kvSummary（agentic 不足时补充，三通道融合）
-      const channels: ChannelRecallResult[] = [];
-      if (agenticItems.length > 0) {
-        channels.push({ channel: "agentic", items: agenticItems });
-      }
+    // 3) 统一收集候选通道：agentic 主通道 + narrative / kvSummary / association /
+    //    relationship / experienceLearning / forgotten。
+    //    此前 relationship / experienceLearning / forgotten 挂在仲裁之后直接「拼接」，
+    //    绕过了归一化、跨通道指纹去重、domain 配额与 minScore 阈值（读侧未收敛）；
+    //    现统一作为通道交仲裁器融合，读侧与写侧一样收敛到单一出口。
+    const channels: ChannelRecallResult[] = [];
+    if (agenticItems.length > 0) {
+      channels.push({ channel: "agentic", items: agenticItems });
+    }
 
-      const [narrativeText, kvSummaryText, associationItems] = await Promise.all([
+    // 生活模型通道（第 ④ 层建模）：用户问句命中的人/宠物/组织实体及其关系边。
+    // 确定性建模来源，与其余通道同走仲裁（归一化/去重/配权重排），不新增旁路。
+    const lifeModelItems = this.buildLifeModelRecallItems(actorId, query);
+    if (lifeModelItems.length > 0) {
+      channels.push({ channel: "lifeModel", items: lifeModelItems });
+    }
+
+    // forgotten 仅在主通道稀疏（<3 条）时主动补（语义检索归档），避免每轮扫归档。
+    const sparseMainRecall = agenticItems.length < 3;
+    const learningPromise = (async (): Promise<MemoryRecallItem[]> => {
+      if (!this.experienceLearningLoop) return [];
+      try {
+        return this.experienceLearningLoop.recallLearningContext(
+          actorId,
+          query,
+          Math.max(1, Math.min(3, opts?.limit ?? 3)),
+        );
+      } catch (err) {
+        console.log(`[MemoryCortex] experienceLearningLoop recall failed: ${err}`);
+        return [];
+      }
+    })();
+
+    const [narrativeText, kvSummaryText, associationItems, relSummary, learningItems, forgottenHits] =
+      await Promise.all([
         // bridge 存在时 narrative 文本与融合候选同源（Mem0+图），跳过避免重复计入
         this.narrative && !this.bridge
           ? this.safeRecall(() => this.narrative!.buildNarrativeRecall(actorId, query))
           : Promise.resolve<string | null>(null),
         this.kvSummary ? this.safeKvSnapshot(actorId) : Promise.resolve<string | null>(null),
         this.buildAssociationRecallItems(actorId, query),
+        // relationship：与 query 无关的环境性关系摘要（单条通道 → 归一化保留原始分，
+        // 不会被 min-max 抬升），统一纳入仲裁参与去重/配额/阈值。
+        this.relationshipGraph
+          ? this.safeRecall(() => this.relationshipGraph!.getRelationshipSummary(actorId))
+          : Promise.resolve<string | null>(null),
+        learningPromise,
+        sparseMainRecall && this.kvSummary && this.memoryManager?.recallForgottenSemantic
+          ? this.safeRecall(() => this.memoryManager!.recallForgottenSemantic!(actorId, query))
+          : Promise.resolve<string[] | null>(null),
       ]);
 
-      if (narrativeText) {
-        const narrativeItems = this.parseRecallTextToItems(narrativeText, "narrative");
-        if (narrativeItems.length > 0) {
-          channels.push({ channel: "narrative", items: narrativeItems });
-        }
+    if (narrativeText) {
+      const narrativeItems = this.parseRecallTextToItems(narrativeText, "narrative");
+      if (narrativeItems.length > 0) {
+        channels.push({ channel: "narrative", items: narrativeItems });
       }
+    }
 
-      if (kvSummaryText) {
-        // P0 修复：不再用召回时刻冒充记忆发生时间（旧实现 timestamp: now 是假时间元数据）；
-        // kvSummary 通道无逐条时间，留空让仲裁器走"无时间信息"折中路径。
-        channels.push({
-          channel: "kvSummary",
-          items: [
-            {
-              content: kvSummaryText,
-              domain: "semantic" as MemoryDomainKind,
-              source: "kv_summary",
-              score: 0.5,
-            },
-          ],
-        });
+    if (kvSummaryText) {
+      // P0 修复：不再用召回时刻冒充记忆发生时间（旧实现 timestamp: now 是假时间元数据）；
+      // kvSummary 通道无逐条时间，留空让仲裁器走"无时间信息"折中路径。
+      channels.push({
+        channel: "kvSummary",
+        items: [
+          {
+            content: kvSummaryText,
+            domain: "semantic" as MemoryDomainKind,
+            source: "kv_summary",
+            score: 0.5,
+          },
+        ],
+      });
+    }
+
+    if (associationItems.length > 0) {
+      channels.push({ channel: "association", items: associationItems });
+    }
+
+    if (relSummary) {
+      const relItems = this.textToRecallItems(relSummary, "relationship").slice(0, 2);
+      if (relItems.length > 0) {
+        channels.push({ channel: "relationship", items: relItems });
       }
+    }
 
-      if (associationItems.length > 0) {
-        channels.push({ channel: "association", items: associationItems });
+    if (learningItems.length > 0) {
+      channels.push({ channel: "experienceLearning", items: learningItems });
+    }
+
+    if (forgottenHits && forgottenHits.length > 0) {
+      // 命中即异步恢复（把行从 forgotten 移回 memory_summary），不阻塞当前 recall
+      void this.memoryManager?.restoreForgottenLines?.(actorId, forgottenHits).catch(() => {});
+      const forgottenItems = this.textToRecallItems(forgottenHits.join("\n"), "semantic");
+      if (forgottenItems.length > 0) {
+        channels.push({ channel: "forgotten", items: forgottenItems });
       }
+    }
 
+    if (shortCircuit) {
+      // 仲裁关闭（MEMORY_ARBITRATOR_ENABLED=0 的降级模式）：各通道直接拼接，
+      // 不做归一化/跨通道去重/配额（与关闭仲裁的旧行为一致）。
+      mergedItems = channels.flatMap((ch) => ch.items);
+    } else if (channels.length > 0) {
       // 4) 统一仲裁：通道内归一化 + 跨通道指纹去重 + 通道权重综合重排
       //    （传入原始 query 供防串台一致性调制；时间衰减按条目 timestamp 计算）
-      if (channels.length > 0) {
-        // 强度模型作为一等因子参与统一排序：原实现在仲裁后由 finalizeRecallItems
-        // 二次按强度重排，会破坏仲裁器的 domain 配额多样性保证（两次排序互相覆盖）。
-        const strengthBoost = this.buildStrengthBoostMap(actorId, channels);
-        mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query, strengthBoost });
-        strengthBoostApplied = strengthBoost !== undefined;
-      }
+      // 强度模型作为一等因子参与统一排序：原实现在仲裁后由 finalizeRecallItems
+      // 二次按强度重排，会破坏仲裁器的 domain 配额多样性保证（两次排序互相覆盖）。
+      const strengthBoost = this.buildStrengthBoostMap(actorId, channels);
+      mergedItems = arbitrateMemories(channels, this.arbitratorConfig, { query, strengthBoost });
+      strengthBoostApplied = strengthBoost !== undefined;
 
       // 5) 仲裁降级：仲裁无结果但 agentic 有结果时回退（保护可用性）
       if (mergedItems.length === 0 && agenticItems.length > 0) {
@@ -1424,48 +1529,8 @@ export class MemoryCortex {
       }
     }
 
-    // Phase 1.2：附加关系记忆片段（最多 2 条，每条 ≤ 200 char，避免 token 膨胀）
-    if (this.relationshipGraph) {
-      const relSummary = await this.safeRecall(() =>
-        this.relationshipGraph!.getRelationshipSummary(actorId),
-      );
-      if (relSummary) {
-        const relItems = this.textToRecallItems(relSummary, "relationship").slice(0, 2);
-        mergedItems = [...mergedItems, ...relItems];
-      }
-    }
-
-    if (this.experienceLearningLoop) {
-      try {
-        const learningItems = this.experienceLearningLoop.recallLearningContext(
-          actorId,
-          query,
-          Math.max(1, Math.min(3, opts?.limit ?? 3)),
-        );
-        mergedItems = [...mergedItems, ...learningItems];
-      } catch (err) {
-        console.log(`[MemoryCortex] experienceLearningLoop recall failed: ${err}`);
-      }
-    }
-
-    // forgotten 主动补充（方案 B）：主召回 < 3 条时，用语义检索 forgotten 归档
-    // 改造前：仅三路全空才触发（被动降级，纯关键词匹配）
-    // 改造后：主召回不足时主动用 embedding 语义检索 forgotten，命中即补充 + 异步恢复
-    if (mergedItems.length < 3 && this.kvSummary && this.memoryManager?.recallForgottenSemantic) {
-      try {
-        const forgottenHits = await this.memoryManager.recallForgottenSemantic(actorId, query);
-        if (forgottenHits.length > 0) {
-          // 异步恢复（把命中行从 forgotten 移回 memory_summary），不阻塞当前 recall
-          void this.memoryManager.restoreForgottenLines?.(actorId, forgottenHits).catch(() => {});
-          mergedItems = [
-            ...mergedItems,
-            ...this.textToRecallItems(forgottenHits.join("\n"), "semantic"),
-          ];
-        }
-      } catch (err) {
-        console.log(`[MemoryCortex] forgotten 语义召回失败: ${err}`);
-      }
-    }
+    // （relationship / experienceLearning / forgotten 三段「仲裁后直接拼接」的旁路已移除：
+    //   三条通道现作为 ChannelRecallResult 在上方统一并入 arbitrateMemories。）
 
     // ---- 联想扩散并入当轮仲裁（当轮关联）----
     // 旧实现 spread 是 fire-and-forget，扩散结果只影响未来轮次，本轮"提到 A 想起 B"缺失。

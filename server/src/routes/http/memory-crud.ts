@@ -234,6 +234,80 @@ export function registerMemoryCrudRoutes(app: FastifyInstance): void {
     return { ok: true, fact: result.fact, changed: result.changed };
   });
 
+  // ─── 生活模型（Life Model）：实体 / 关系 可查可删（2026-10-20 P2）───
+  // 「我妹妹叫什么」「我和老王最近怎么样」这类问题的数据结构；用户可查看与删除。
+
+  app.get("/api/memory/life", async (request, reply) => {
+    const query = request.query as { actorId?: string };
+    const actorId = String(query.actorId ?? "").trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    const store = getMemoryComponents().lifeModel;
+    if (!store) return reply.code(503).send({ ok: false, error: "生活模型未启用" });
+    try {
+      const all = store.listEntities(actorId);
+      const byId = new Map(all.map((e) => [e.id, e]));
+      return {
+        ok: true,
+        actorId,
+        selfAgentEdge: store.getSelfAgentEdge(actorId),
+        entities: all
+          .filter((e) => e.kind !== "self")
+          .map((e) => ({
+            id: e.id,
+            kind: e.kind,
+            name: e.canonicalName,
+            aliases: e.aliases,
+            sensitivity: e.sensitivity,
+            lastSeenAt: e.lastSeenAt,
+          })),
+        relations: store
+          .getEdges(actorId)
+          .filter((e) => e.kind !== "self_agent")
+          .map((e) => ({
+            id: e.id,
+            kind: e.kind,
+            subKind: e.subKind,
+            intimacy: e.intimacy,
+            sentiment: e.sentiment,
+            status: e.status,
+            from: byId.get(e.fromEntityId)?.canonicalName ?? e.fromEntityId,
+            to: byId.get(e.toEntityId)?.canonicalName ?? e.toEntityId,
+          })),
+      };
+    } catch (err) {
+      return reply.code(500).send({
+        ok: false,
+        error: `读取生活模型失败: ${err instanceof Error ? err.message : String(err)}`,
+      });
+    }
+  });
+
+  /** 「忘掉这个人」：实体 + 边 + 轨迹 + 该实体名下事实 三清（隐私级物理删除）。 */
+  app.post("/api/memory/life/forget", async (request, reply) => {
+    const body = (request.body ?? {}) as { actorId?: string; entityId?: string; name?: string };
+    const actorId = String(body.actorId ?? "").trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    const store = getMemoryComponents().lifeModel;
+    if (!store) return reply.code(503).send({ ok: false, error: "生活模型未启用" });
+    const entityId = String(body.entityId ?? "").trim();
+    const name = String(body.name ?? "").trim();
+    const entity = entityId
+      ? store.getEntity(actorId, entityId)
+      : name
+        ? store.findEntityByName(actorId, name)
+        : null;
+    if (!entity) return reply.code(404).send({ ok: false, error: "实体不存在" });
+    const removed = store.deleteEntity(actorId, entity.id);
+    const removedFacts = getMemoryComponents().factStore?.deleteFactsByEntity(actorId, entity.canonicalName) ?? 0;
+    return {
+      ok: true,
+      entity: entity.canonicalName,
+      removedEntities: removed.entities,
+      removedEdges: removed.edges,
+      removedFacts,
+    };
+  });
+
   // ─── 软抑制："别再提这个"（不删源，只降低主动提及）───
 
   /** 精排门控观测（P0-3）：跑几天真实对话后据此决定 adaptive 是否设默认 */

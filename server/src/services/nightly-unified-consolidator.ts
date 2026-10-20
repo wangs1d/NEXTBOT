@@ -123,6 +123,7 @@ export async function runUnifiedNightlyConsolidation(input: {
       inputChars: system.length + user.length,
       outputChars: content.length,
       model,
+      actorId: input.actorId,
     });
 
     return { actorId: input.actorId, facts, scores };

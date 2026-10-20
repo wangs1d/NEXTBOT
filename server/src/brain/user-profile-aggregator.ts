@@ -30,7 +30,11 @@ import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { getModelForTask, TaskTier } from "../config/model-routing.js";
-import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
+import {
+  UserProfileStore,
+  isNoisyProfileLine,
+  sanitizeProfileMarkdown,
+} from "../services/user-personalization/user-profile-store.js";
 import {
   parseFieldLine,
   profileFieldOfLabel,
@@ -179,13 +183,17 @@ function insertLineToSection(lines: string[], section: ProfileSectionKey, line: 
  * - ADD：section 内无相同行才追加（幂等）；
  * - UPDATE：section 内首个含 match 的行替换为 line；match 缺省时按 line 的"字段："前缀定位；找不到则退化为 ADD；
  * - DELETE：移除 section 内所有含 match 的行。
+ * 写入门槛（2026-10-20）：ADD/UPDATE 的 line 先过确定性净噪器（isNoisyProfileLine），
+ * 疑问句 / meta 观察 / 临时行程 / 行为频率 / 不确定推断 / 无权威字段（如「常用语言」）
+ * 一律丢弃不进盘，落进 skipped（仅观测，不影响 applied 语义）。
  */
 export function applyProfileOps(
   profile: string,
   ops: ProfileOp[],
-): { profile: string; applied: AppliedOp[] } {
+): { profile: string; applied: AppliedOp[]; skipped: string[] } {
   let lines = profile.split("\n");
   const applied: AppliedOp[] = [];
+  const skipped: string[] = [];
 
   for (const op of ops) {
     const cleanLine = (op.line ?? "").trim();
@@ -193,6 +201,10 @@ export function applyProfileOps(
 
     if (op.op === "ADD") {
       if (!cleanLine) continue;
+      if (isNoisyProfileLine(cleanLine, op.section)) {
+        skipped.push(cleanLine);
+        continue;
+      }
       lines = ensureSection(lines, op.section);
       const bounds = sectionBounds(lines, op.section)!;
       const exists = lines.slice(bounds.start, bounds.end).some((l) => l.trim() === `- ${cleanLine}`);
@@ -205,6 +217,10 @@ export function applyProfileOps(
 
     if (op.op === "UPDATE") {
       if (!cleanLine) continue;
+      if (isNoisyProfileLine(cleanLine, op.section)) {
+        skipped.push(cleanLine);
+        continue;
+      }
       lines = ensureSection(lines, op.section);
       const bounds = sectionBounds(lines, op.section)!;
       // 定位词：显式 match 优先，否则用新行的"字段："前缀
@@ -247,7 +263,7 @@ export function applyProfileOps(
     }
   }
 
-  return { profile: lines.join("\n"), applied };
+  return { profile: lines.join("\n"), applied, skipped };
 }
 
 /**
@@ -318,6 +334,10 @@ function buildExtractMessages(
     "9. 只有「用户:」的话是事实来源：助手回复里的猜测、调侃、求证（如「到底哪位是正主」「可能是X吧」）不是用户事实，严禁据此 ADD/UPDATE 任何画像条目。",
     "10. 亲密关系是单值字段：老婆/媳妇/正主/未婚妻/对象等（含「未来老婆」等变体）视为同一字段。用户明确给出人名时，必须先 DELETE 画像中该字段下其他不同人名的条目，再写入新值；同一字段禁止并存两个人名，禁止输出「候选/备选/待确认」式的暧昧条目。",
     "11. 用户纠正旧信息时必须输出 DELETE（match=旧条目定位词）：只 ADD 新值不删旧值视为错误。",
+    "12. 身份类字段（职业/公司/学历）只在用户明确自述时写入（如「我是做…的」「我是产品经理」）；从上下文、助手推断、工具调用或行为表现得出的身份一律不写。",
+    "13. 禁止写入：疑问句（「我多少事？」「你能记住我多少事？」）；助手（Agent）自身的行为或对用户的观察（如「会主动询问宠物相关信息」「会主动让助手帮忙记事情」）；临时安排与行程（出差/旅行/周末计划、「近期在忙的事」）；行为频率与变化的描述（如「旅游目的频繁切换」「经常更换…」）；不确定推断（可能/大概/也许/似乎）。",
+    "14. 主语必须明确：每条要能回答「谁的什么」——主语是用户本人（「用户/我」）或明确属于用户的字段（称呼/所在地/职业…）；禁止主语缺失的观察句。",
+    "15. 「常用语言」不是画像字段，不要输出该条目。",
   ].join("\n");
   const user = [
     "【当前画像】",
@@ -371,7 +391,7 @@ function buildSynthesisMessages(
     "1. 保持 markdown 结构：# 用户画像 标题 + ## 基本信息 / ## 兴趣与习惯 / ## 沟通偏好 / ## 备注 四个 section；",
     "2. 只在有足够置信度时写入新信息（用户明确表达过，或多次出现）；冲突时以最新信息为准（人会改变）；",
     "3. 删除已被新信息取代的旧条目和过期的「（待了解）」占位符；",
-    "4. 从对话中提炼隐性偏好：语气偏好、专业领域深度、决策风格、常用语言、活跃时段；",
+    "4. 从对话中提炼隐性偏好：语气偏好、专业领域深度、决策风格、活跃时段；不要写「常用语言」（它不是画像字段，也没有对应权威值）；",
     "5. 每条信息一行，以「- 」开头，精炼不啰嗦；不要编造对话中没有的依据；",
     "6. 控制总尺寸（画像注入 prompt 有长度预算，超长会被整块丢弃）：全文不超过 1500 字；每个 section 至多 8 条；同类条目合并成一条；「备注」只保留长期有效的重要事项，过期的、临时性的、重复的条目直接删除；",
     "7. 亲密关系单值：老婆/对象/正主/未婚妻等（含「未来老婆」等变体）视为同一字段，以用户最新明确表述为准，删除旧表述与「候选/备选/关系未确认」式暧昧条目；助手的调侃、求证永远不是依据；",
@@ -379,6 +399,7 @@ function buildSynthesisMessages(
     "9. 直接输出 markdown 全文，不要任何解释或代码围栏。",
     "10. 跨库一致性：若提供了【结构化事实库当前值】/【理解档案当前要点】，它们是其他记忆库的权威快照——画像与它们矛盾时，以「最近对话轮」为最高权威统一口径，画像与快照必须改到一致；无矛盾证据时不要凭空改写快照内容。",
     "11. 陈旧裁决：若提供了【陈旧行候选】，逐条判断——近期对话或事实库/理解档案能证实的保留；已明显过时（换了工作/搬了家/关系变化）的删除或改写为现状；拿不准的保留原样。不要为了删而删。",
+    "12. 写入门槛与主语：只保留长期稳定的事实与偏好；临时安排与行程（出差/旅行/周末计划）、行为频率与变化的描述（如「旅游目的频繁切换」）、对助手（Agent）的观察（如「会主动询问宠物相关信息」）、疑问句、不确定推断（可能/大概/也许）一律不写，且画像里已有的同类条目要删掉；每条必须主语明确——用户本人（「用户/我」）或明确属于用户的字段（称呼/所在地/职业…）。身份类字段（职业/公司/学历）必须用户明确自述过，不得靠推断；「常用语言」不是画像字段，不要出现。",
   ].join("\n");
   const user = [
     "【现有画像】",
@@ -648,6 +669,40 @@ export class UserProfileAggregator {
     }
   }
 
+  /**
+   * 存量画像净噪（启动时一次性，幂等）：扫描画像目录下所有 actor 的
+   * USER_PROFILE.md，用确定性规则清掉历史坏行——疑问句、对助手的 meta 观察、
+   * 临时行程、行为频率描述、不确定推断、无权威字段（「常用语言」）、以及
+   * 「已有真实事实却仍残留的占位行」。零 LLM、零 token；无变化不写盘。
+   * 返回清理过的 actor 数（仅日志用）。
+   */
+  async sanitizeStoredProfiles(): Promise<number> {
+    const actorIds = await this.store.listActorIds();
+    let cleaned = 0;
+    for (const actorId of actorIds) {
+      try {
+        let raw: string;
+        try {
+          raw = await readFile(this.store.profilePath(actorId), "utf8");
+        } catch {
+          continue; // 目录在但没有画像文件：跳过（不创建）
+        }
+        const md = raw.trim();
+        if (!md) continue;
+        const next = sanitizeProfileMarkdown(md);
+        if (next === md) continue;
+        await this.store.write(actorId, next);
+        cleaned++;
+      } catch {
+        /* 单个 actor 失败不影响其余 */
+      }
+    }
+    if (cleaned > 0) {
+      console.info(`[ProfileAggregator] 存量画像净噪完成: ${cleaned} 个 actor 的清噪结果已落盘`);
+    }
+    return cleaned;
+  }
+
   /** 深度合成外部触发口（MemoryManager 巩固完成后调用） */
   triggerSynthesis(actorId: string): void {
     if (!this.config.enabled) return;
@@ -726,6 +781,7 @@ export class UserProfileAggregator {
           inputChars: JSON.stringify(messages).length,
           outputChars: content.length,
           model: this.config.extractModel,
+          actorId,
           // P1-3（2026-09-29）：非流式调用天然带 usage——真值进审计/预算闸，
           // 不再按字符估算虚高 ~1.8 倍记账
           ...(response.usage ? {
@@ -739,7 +795,12 @@ export class UserProfileAggregator {
       const ops = parseExtractOps(content);
       if (ops.length === 0) return true;
 
-      const { profile: next, applied } = applyProfileOps(currentProfile, ops);
+      const { profile: next, applied, skipped } = applyProfileOps(currentProfile, ops);
+      if (skipped.length > 0) {
+        console.info(
+          `[ProfileAggregator] 画像写入拒绝噪声条目: ${actorId} (${skipped.length} 条: ${skipped.join(" | ")})`,
+        );
+      }
       if (applied.length === 0) return true;
       // 单一权威源闭环：LLM 抽到的档案字段先回灌结构化事实库（唯一写入者），
       // 再把画像的档案字段行投影为权威值（去别名重复行 / 清行内历史注解）。
@@ -827,6 +888,7 @@ export class UserProfileAggregator {
             inputChars: JSON.stringify(messages).length,
             outputChars: content.length,
             model: this.config.model,
+            actorId,
             // P1-3（2026-09-29）：同 extract——非流式 usage 真值进审计
             ...(response.usage ? {
               apiPromptTokens: response.usage.prompt_tokens,

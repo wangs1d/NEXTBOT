@@ -168,6 +168,7 @@ export class SpeechPolisher {
         stage: "proactive_phrase",
         inputChars: userPrompt.length + SYSTEM_PROMPT.length,
         outputChars: full.length,
+        sessionId: input.sessionId,
       });
       const text = full.trim().replace(/^["'「」]|["'「」]$/g, "");
       if (!text || text.toUpperCase() === "SILENT" || text.length > 120 || text.includes("\n")) {

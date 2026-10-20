@@ -16,6 +16,12 @@ export type UserFact = {
   evidenceCount: number;
   lastSeenAt: string;
   createdAt: string;
+  /**
+   * 事情发生/生效的时间（用户原话里的时间线索），与 lastSeenAt（登记/被告知时间）
+   * 分开——统一到 structured_fact 的双时间轴（2026-10-20 P0）。
+   * 宁缺毋滥：抽不到事件时间就留 null，不拿 lastSeenAt 冒充事发时间。
+   */
+  occurredAt: string | null;
 };
 
 export type UserFactStore = {
@@ -48,6 +54,7 @@ export function toFactStore(v: unknown): UserFactStore {
   return {
     facts: facts
       .filter((f) => f && typeof f.key === "string" && typeof f.value === "string")
+      .map((f) => ({ ...f, occurredAt: typeof f.occurredAt === "string" ? f.occurredAt : null }))
       .slice(0, MAX_FACTS),
     updatedAt: typeof o.updatedAt === "string" ? o.updatedAt : nowIso(),
   };
@@ -172,6 +179,7 @@ export function mergeFactCandidates(store: UserFactStore, candidates: FactCandid
         evidenceCount: 1,
         lastSeenAt: now,
         createdAt: now,
+        occurredAt: null,
       });
       continue;
     }
@@ -184,6 +192,7 @@ export function mergeFactCandidates(store: UserFactStore, candidates: FactCandid
       evidenceCount: 1,
       lastSeenAt: now,
       createdAt: now,
+      occurredAt: null,
     });
   }
 

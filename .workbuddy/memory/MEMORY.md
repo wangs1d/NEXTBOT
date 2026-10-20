@@ -61,3 +61,13 @@
 - 「搜索引擎只返回文章链接」时：拉文章页 → 抠 `<img>` 真图 → `curl -e <referer>` 下载；信息也一并抽成 md。三模式：`--urls` 抓文章 / `--images` 直链下载 / `--prune` 清残留。
 - 铁律：**抽取端放宽，content-type + 真实分辨率才是闸门**（网易/腾讯图链无 `.jpg` 后缀）；**先切正文容器再抽图**（否则推荐流混入，163 实测 29→13）；**新浪是 GBK 必须解码**；JS 壳站点（头条）用 agent-browser 只取 `article img`。
 - **信息侧同思路**（2026-10-14）：正文清洗（模板噪声词表 + 附件清单行过滤 + 句级去重）→ `info/*.json` 结构化 → `--digest --topic` 聚合出时间线/要点/多源同事件。三个坑：标题必须防模板污染（论坛 og:title 是门户口号，要降级 `<h1>`）；**中文改写稿字面相似度极低（≤0.06），同事件归组要用共享实体（《书名号》）而非 n-gram**；要点必须过**主题相关性闸门**，否则多人红毯稿会把无关明星带进来。
+
+## 3D 桌宠 agent-sphere-avatar（2026-10-19）
+- **曲屏上不画脸**：SVG 表情系统（`src/face/**`、`ScreenFace.tsx`、`FacePreviewApp`）已按用户要求整体删除（做了 3 轮仍被判「不是很好」——方向没对上，不是细节不够）。**若日后重做，先对齐方向再动手。**
+- 屏幕质感层独立活在 **`src/screen/screen-panel.ts`**（`ScreenPanel`：背板/中心背光/扫描线/刷新带/暗角），组件是 **`src/components/OledScreen.tsx`**（导出 `ScreenSignals`），纹理上下文 `src/context/oled-screen-context.ts`。**DG2 玻璃开窗半角被 CAD 卡死在 45°**（`screenFaceHalfAngle` 由 `FACE_RADIUS=0.34` 派生），脸最大 `FACE_RADIUS`，超了会画到金属壳上 —— 别硬调 `model-proportions`。
+- **`boundaryBump` 的衰减责任在 `OledScreen`**（`useAgentBodyMotion` 只置 1、无别人衰减）；`userTouch`/`userSpin` 衰减在 `useSphereUserDrag`。
+- **用户偏好（2026-10-19 定调）：桌宠不要自己动、不要状态气泡。** `InnerThought`（底部「愉悦/待机/思考中」气泡）已整体删除；`useAgentBodyMotion` 的自主漫游靠 `roamArmedRef` 默认关闭（`lively = roamArmedRef || excited` 闸住四处自主行为），**只保留原地呼吸 + 命令驱动**（roam / move / excite / stop）。`.overlay-pet-pane` 的 padding-bottom / canvas height / message-list bottom 是一组联动数（现 88px / calc(100%-88px) / 10px），为气泡留白的旧值是 120px，别单独改一个。
+- overlay 模式 `verticalStable=true` 会连呼吸的 Y 向一起关掉 → overlay 里球体**完全静止**，只有曲屏内容在刷新。
+- **【真正病根】present_files 的静态代理只发 HTML 本身，同目录资源一律 403**（实测 `models/DG2.obj`、`assets/*.js` 均 403，HTML 自身 200）。所以预览面板里打开这种页面 = 骨架有了、脚本和模型没有 = **一片黑**。这不是「后台 http.server 挂了」，之前三次「没有看见」全是这个原因，别再往服务存活上查。
+- **对策：给用户看的页面必须「自包含单文件 HTML」**（esbuild 打 IIFE + CSS 内联 + 模型内联）。现有两个脚本：`scripts/build-face-preview-single.mjs`（2D）、`scripts/build-screen-preview-single.mjs`（3D，3.13 MB，产出 `dist/screen-preview.single.html`）。
+- 3D 单文件的模型内联手法（**不改产品代码**）：入口 `src/screen-preview-main.tsx` 在应用启动前劫持 `window.fetch`，命中 `/models/*.obj` 就直接回 `new Response(内联文本)` —— three 的 FileLoader 走 fetch。模型文本经 esbuild `define` 注入（`__DG2_OBJ__` / `__DG_OBJ__`，值用 `JSON.stringify`），会被编译成**模板字符串**且非 ASCII 转义为 `\uXXXX`，属正常。esbuild `write:false` 时主产物路径是 `<stdout>`，没有 `.js` 后缀，取产物要按「非 .css 即 js」来分。

@@ -1,0 +1,412 @@
+{
+  "phase": "after",
+  "generatedAt": "2026-10-19T17:25:31.353Z",
+  "totals": {
+    "totalCalls": 25,
+    "totalEstIn": 172452,
+    "totalEstOut": 5624,
+    "totalApiIn": 54833,
+    "totalApiOut": 489,
+    "attributed": 25,
+    "unattributed": 0
+  },
+  "byStage": {
+    "main_chat": {
+      "calls": 7,
+      "estIn": 20987,
+      "estOut": 1470,
+      "apiIn": 0,
+      "apiOut": 0,
+      "cache": 0,
+      "attr": 7,
+      "unattr": 0
+    },
+    "main_chat_tools": {
+      "calls": 5,
+      "estIn": 78509,
+      "estOut": 137,
+      "apiIn": 27452,
+      "apiOut": 97,
+      "cache": 384,
+      "attr": 5,
+      "unattr": 0
+    },
+    "tool_result_compaction": {
+      "calls": 5,
+      "estIn": 1893,
+      "estOut": 1819,
+      "apiIn": 0,
+      "apiOut": 0,
+      "cache": 0,
+      "attr": 5,
+      "unattr": 0
+    },
+    "mood_inference": {
+      "calls": 1,
+      "estIn": 1175,
+      "estOut": 116,
+      "apiIn": 0,
+      "apiOut": 0,
+      "cache": 0,
+      "attr": 1,
+      "unattr": 0
+    },
+    "task_plane_light": {
+      "calls": 4,
+      "estIn": 67187,
+      "estOut": 1111,
+      "apiIn": 26303,
+      "apiOut": 325,
+      "cache": 384,
+      "attr": 4,
+      "unattr": 0
+    },
+    "user_profile_extract": {
+      "calls": 1,
+      "estIn": 1409,
+      "estOut": 126,
+      "apiIn": 1078,
+      "apiOut": 67,
+      "cache": 0,
+      "attr": 1,
+      "unattr": 0
+    },
+    "memory_unified_extract": {
+      "calls": 1,
+      "estIn": 159,
+      "estOut": 815,
+      "apiIn": 0,
+      "apiOut": 0,
+      "cache": 0,
+      "attr": 1,
+      "unattr": 0
+    },
+    "rolling_summary": {
+      "calls": 1,
+      "estIn": 1133,
+      "estOut": 30,
+      "apiIn": 0,
+      "apiOut": 0,
+      "cache": 0,
+      "attr": 1,
+      "unattr": 0
+    }
+  },
+  "records": [
+    {
+      "scenario": "S1-chat",
+      "actor": "tko-after-1",
+      "port": 3151,
+      "ok": true,
+      "count": 2,
+      "records": [
+        {
+          "stage": "main_chat",
+          "inputChars": 4037,
+          "outputChars": 315,
+          "sessionId": "llm-route::tko-after-1",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:21:50.188Z",
+          "inputTokens": 3028,
+          "outputTokens": 236
+        },
+        {
+          "stage": "main_chat_tools",
+          "inputChars": 13485,
+          "outputChars": 10,
+          "sessionId": "tko-after-1",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 5125,
+          "apiCompletionTokens": 8,
+          "t": "2026-10-19T17:21:51.251Z",
+          "inputTokens": 10114,
+          "outputTokens": 8
+        }
+      ]
+    },
+    {
+      "scenario": "S2-weather",
+      "actor": "tko-after-2",
+      "port": 3152,
+      "ok": true,
+      "count": 4,
+      "records": [
+        {
+          "stage": "main_chat",
+          "inputChars": 4045,
+          "outputChars": 346,
+          "sessionId": "llm-route::tko-after-2",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:22:25.215Z",
+          "inputTokens": 3034,
+          "outputTokens": 260
+        },
+        {
+          "stage": "main_chat_tools",
+          "inputChars": 28043,
+          "outputChars": 11,
+          "sessionId": "tko-after-2",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 10648,
+          "apiCompletionTokens": 34,
+          "t": "2026-10-19T17:22:29.249Z",
+          "inputTokens": 21032,
+          "outputTokens": 8
+        },
+        {
+          "stage": "tool_result_compaction",
+          "inputChars": 442,
+          "outputChars": 442,
+          "sessionId": "tko-after-2",
+          "toolName": "weather.get_local",
+          "t": "2026-10-19T17:22:31.487Z",
+          "inputTokens": 332,
+          "outputTokens": 332
+        },
+        {
+          "stage": "main_chat_tools",
+          "inputChars": 15882,
+          "outputChars": 108,
+          "sessionId": "tko-after-2",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:22:33.918Z",
+          "inputTokens": 11912,
+          "outputTokens": 81
+        }
+      ]
+    },
+    {
+      "scenario": "S3-memory",
+      "actor": "tko-after-3",
+      "port": 3153,
+      "ok": true,
+      "count": 7,
+      "records": [
+        {
+          "stage": "main_chat",
+          "inputChars": 4052,
+          "outputChars": 306,
+          "sessionId": "llm-route::tko-after-3",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:10.637Z",
+          "inputTokens": 3039,
+          "outputTokens": 230
+        },
+        {
+          "stage": "mood_inference",
+          "inputChars": 1567,
+          "outputChars": 155,
+          "sessionId": "mood-inference:tko-after-3",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:17.524Z",
+          "inputTokens": 1175,
+          "outputTokens": 116
+        },
+        {
+          "stage": "main_chat",
+          "inputChars": 4052,
+          "outputChars": 306,
+          "sessionId": "llm-route::tko-after-3",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:17.761Z",
+          "inputTokens": 3039,
+          "outputTokens": 230
+        },
+        {
+          "stage": "task_plane_light",
+          "inputChars": 18868,
+          "outputChars": 318,
+          "sessionId": "tko-after-3",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 7098,
+          "apiCompletionTokens": 142,
+          "t": "2026-10-19T17:23:19.857Z",
+          "inputTokens": 14151,
+          "outputTokens": 239
+        },
+        {
+          "stage": "main_chat",
+          "inputChars": 3719,
+          "outputChars": 13,
+          "sessionId": "topic-extractor",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:19.915Z",
+          "inputTokens": 2789,
+          "outputTokens": 10
+        },
+        {
+          "stage": "user_profile_extract",
+          "inputChars": 1878,
+          "outputChars": 168,
+          "actorId": "tko-after-3",
+          "model": "MiniMax-M3",
+          "apiPromptTokens": 1078,
+          "apiCompletionTokens": 67,
+          "t": "2026-10-19T17:23:22.057Z",
+          "inputTokens": 1409,
+          "outputTokens": 126
+        },
+        {
+          "stage": "memory_unified_extract",
+          "inputChars": 212,
+          "outputChars": 1086,
+          "actorId": "tko-after-3",
+          "model": "deepseek-chat",
+          "t": "2026-10-19T17:23:22.277Z",
+          "inputTokens": 159,
+          "outputTokens": 815
+        }
+      ]
+    },
+    {
+      "scenario": "S4-reminder",
+      "actor": "tko-after-4",
+      "port": 3154,
+      "ok": true,
+      "count": 4,
+      "records": [
+        {
+          "stage": "main_chat",
+          "inputChars": 4037,
+          "outputChars": 332,
+          "sessionId": "llm-route::tko-after-4",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:53.685Z",
+          "inputTokens": 3028,
+          "outputTokens": 249
+        },
+        {
+          "stage": "main_chat_tools",
+          "inputChars": 31182,
+          "outputChars": 32,
+          "sessionId": "tko-after-4",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 11679,
+          "apiCompletionTokens": 55,
+          "t": "2026-10-19T17:23:55.408Z",
+          "inputTokens": 23387,
+          "outputTokens": 24
+        },
+        {
+          "stage": "tool_result_compaction",
+          "inputChars": 293,
+          "outputChars": 293,
+          "sessionId": "tko-after-4",
+          "toolName": "reminder.plan",
+          "t": "2026-10-19T17:23:55.454Z",
+          "inputTokens": 220,
+          "outputTokens": 220
+        },
+        {
+          "stage": "main_chat_tools",
+          "inputChars": 16085,
+          "outputChars": 21,
+          "sessionId": "tko-after-4",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:23:56.561Z",
+          "inputTokens": 12064,
+          "outputTokens": 16
+        }
+      ]
+    },
+    {
+      "scenario": "S5-plan",
+      "actor": "tko-after-5",
+      "port": 3155,
+      "ok": true,
+      "count": 8,
+      "records": [
+        {
+          "stage": "main_chat",
+          "inputChars": 4040,
+          "outputChars": 340,
+          "sessionId": "llm-route::tko-after-5",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:24:31.589Z",
+          "inputTokens": 3030,
+          "outputTokens": 255
+        },
+        {
+          "stage": "task_plane_light",
+          "inputChars": 25524,
+          "outputChars": 0,
+          "sessionId": "tko-after-5",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 9422,
+          "apiCompletionTokens": 61,
+          "t": "2026-10-19T17:24:43.101Z",
+          "inputTokens": 19143,
+          "outputTokens": 0
+        },
+        {
+          "stage": "tool_result_compaction",
+          "inputChars": 126,
+          "outputChars": 126,
+          "sessionId": "tko-after-5",
+          "toolName": "travel.search-poi",
+          "t": "2026-10-19T17:24:52.985Z",
+          "inputTokens": 95,
+          "outputTokens": 95
+        },
+        {
+          "stage": "task_plane_light",
+          "inputChars": 27168,
+          "outputChars": 0,
+          "sessionId": "tko-after-5",
+          "model": "MiniMax-M3",
+          "promptCacheHitTokens": 128,
+          "apiPromptTokens": 9783,
+          "apiCompletionTokens": 122,
+          "t": "2026-10-19T17:24:55.935Z",
+          "inputTokens": 20376,
+          "outputTokens": 0
+        },
+        {
+          "stage": "tool_result_compaction",
+          "inputChars": 50,
+          "outputChars": 50,
+          "sessionId": "tko-after-5",
+          "toolName": "search_web",
+          "t": "2026-10-19T17:24:57.708Z",
+          "inputTokens": 38,
+          "outputTokens": 38
+        },
+        {
+          "stage": "tool_result_compaction",
+          "inputChars": 1610,
+          "outputChars": 1512,
+          "sessionId": "tko-after-5",
+          "toolName": "search_web",
+          "t": "2026-10-19T17:24:57.746Z",
+          "inputTokens": 1208,
+          "outputTokens": 1134
+        },
+        {
+          "stage": "task_plane_light",
+          "inputChars": 18022,
+          "outputChars": 1163,
+          "sessionId": "tko-after-5",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:25:11.114Z",
+          "inputTokens": 13517,
+          "outputTokens": 872
+        },
+        {
+          "stage": "rolling_summary",
+          "inputChars": 1510,
+          "outputChars": 40,
+          "sessionId": "tko-after-5",
+          "model": "MiniMax-M3",
+          "t": "2026-10-19T17:25:12.848Z",
+          "inputTokens": 1133,
+          "outputTokens": 30
+        }
+      ]
+    }
+  ]
+}

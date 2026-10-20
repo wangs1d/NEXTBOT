@@ -70,6 +70,17 @@ class WsChatService {
     _connectWithRetry();
   }
 
+  /// 确保连接可用（App 回前台时调用，2026-10-20）。
+  ///
+  /// 已连接则空转；断线且重连次数耗尽（10 次退避后永久放弃）时重置计数
+  /// 强制重连——否则 App 在后台放久了 WS 就再也回不来，服务端主动消息
+  /// 只能挂起等下一次冷启动。不强制断开现有连接（与 [retryConnect] 的差异）。
+  void ensureConnected() {
+    if (_isConnected || _isConnecting || _manualClose) return;
+    if (_channel != null && _channel!.closeCode == null) return;
+    retryConnect();
+  }
+
   void _connectWithRetry() {
     if (_isConnecting) return;
     _reconnectTimer?.cancel();

@@ -1052,6 +1052,33 @@ function handleWs(msg) {
   if (type === "agent.peer_message") {
     const preview = String(p.preview ?? p.text ?? "新消息").slice(0, 40);
     patchAvatar({ mood: "alert", caption: preview, energy: 0.82 });
+    return;
+  }
+
+  if (type === "agent.proactive_message") {
+    // Agent 主动联系用户（2026-10-20）：管道直投的主动消息帧，与对话气泡同源
+    // 渲染（此前完全没有 handler——服务端推了电脑端也不显示）。多段投递
+    // （isPartial，无 deliveryId）各自成泡；带 title 的非默认标题前缀展示。
+    const text = String(p.text ?? "").trim();
+    if (!text) return;
+    const title = String(p.title ?? "").trim();
+    const id = String(p.deliveryId ?? `proactive-${Date.now().toString(36)}`);
+    const row = ensureAssistant(id);
+    // 标题去重：正文已包含主题核心（如「邮件：<主题>」而正文就是 <主题>…）时不加前缀
+    const core = title.replace(/^邮件：/, "").trim();
+    const prefix = title && title !== "Agent 主动联系" && core && !text.includes(core) ? `【${core}】` : "";
+    row.text = row.text ? `${row.text}\n${text}` : `${prefix}${text}`;
+    paintAssistant(id);
+    dailyChatStorage.saveMessage("assistant", row.text, id);
+    scrollToLatest();
+    const importance = String(p.importance ?? "");
+    pushFocus(`${prefix || "Agent 主动找你："}${text.slice(0, 40)}`);
+    patchAvatar({
+      mood: importance === "high" ? "alert" : "happy",
+      caption: (prefix || text).slice(0, 24),
+      energy: importance === "high" ? 0.85 : 0.68,
+    });
+    return;
   }
 }
 

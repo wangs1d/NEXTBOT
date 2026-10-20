@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
 import { OBJLoader } from "three/examples/jsm/loaders/OBJLoader.js";
 import { MODEL, dg2Scale } from "../constants/model-proportions";
-import { useOledFaceTexture } from "../context/oled-face-context";
+import { useOledScreenTexture } from "../context/oled-screen-context";
 import { applyGlassOledUv } from "../utils/glass-oled-uv";
 import { disableMeshRaycast } from "../utils/mesh-raycast";
 
@@ -34,7 +34,7 @@ export function DG2RobotModel({
   standaloneLighting = false,
   opacity = 1,
 }: DG2RobotModelProps) {
-  const oledMap = useOledFaceTexture();
+  const oledMap = useOledScreenTexture();
   const groupRef = useRef<THREE.Group>(null);
   const shellMatsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
   const glassMatRef = useRef<THREE.MeshPhysicalMaterial | null>(null);
@@ -112,12 +112,16 @@ export function DG2RobotModel({
       mesh.visible = opacity > 0.001;
       if (!gMat) continue;
       if (oledMap) {
-        // OLED 激活时保留黑色曲屏玻璃框，表情层叠在上方（OledScreenMesh）
-        gMat.color.set("#030508");
-        gMat.opacity = 0.98 * opacity;
+        // OLED 激活时曲屏就是「屏」：不能有任何金属度/高光，
+        // 否则环境反射会在屏面上打出块状亮斑，把表情盖掉
+        gMat.color.set("#020306");
+        gMat.opacity = opacity;
         gMat.transparent = true;
-        gMat.metalness = 0.35;
-        gMat.roughness = 0.12;
+        gMat.metalness = 0;
+        gMat.roughness = 1;
+        gMat.clearcoat = 0;
+        gMat.reflectivity = 0;
+        gMat.envMapIntensity = 0;
         gMat.depthWrite = true;
       } else {
         gMat.color.set(MODEL.glassColor);

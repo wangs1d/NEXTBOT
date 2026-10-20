@@ -503,6 +503,7 @@ export class AgenticMemoryLifecycleService {
         inputChars: auditInputChars,
         outputChars: content.length,
         model: getAgenticMemoryLlmModel(),
+        actorId: candidates[0] ? actorIdOf(candidates[0]) : undefined,
       });
       const parsed = JSON.parse(content) as { forget?: Array<{ n?: unknown; reason?: unknown }> };
       if (Array.isArray(parsed.forget)) {

@@ -279,6 +279,42 @@ test("仲裁: 未注入 onParkExpire 时保持原静默丢弃语义（回退兼�
   assert.equal(arbiter.parkedEntries().length, 0, "过期出队（无回调，行为不变）");
 });
 
+test("仲裁: 设备离线 → 不 park，直接直通管道（重连补投由管道 arbitrate 承担）", () => {
+  // 离线成本恒满分 → 必然 wait_for_pause；原行为 park 8h 后过期重投、
+  // 管道还是判 offline → 退避放弃（真实数据 digest_beat 连续 4 次丢弃）。
+  // 直通语义：deliver 被立即调用、不进挂起队列，挂起/补投交给管道。
+  const clock = new MockClock();
+  const delivered: string[] = [];
+  const arbiter = new ArbiterV2({
+    presence: { getPresence: () => "offline", listOnline: () => [], lastActivityAt: () => null } as never,
+    lastConversationAt: () => null,
+    screenFocus: () => null,
+    nextEventMin: () => null,
+    receptivity: () => 0.5,
+    primaryActorId: () => "user-1",
+    nowFn: () => clock.t,
+  });
+  const r = arbiter.admit({
+    actorId: "user-1",
+    urgency: "normal",
+    label: "t-offline",
+    deliver: () => delivered.push("t-offline"),
+  });
+  assert.equal(r.action, "wait_for_pause");
+  assert.equal(r.reason, "offline_passthrough_pipeline");
+  assert.equal(delivered.length, 1, "离线直通：deliver 已被调用（进管道挂起待重连）");
+  assert.equal(arbiter.parkedEntries().length, 0, "不进 park 队列");
+  // alert 档离线同样直通（must/interrupt 本来就直投，不在此断言范围）
+  const r2 = arbiter.admit({
+    actorId: "user-1",
+    urgency: "alert",
+    label: "t-offline-alert",
+    deliver: () => delivered.push("t-offline-alert"),
+  });
+  assert.equal(r2.reason, "offline_passthrough_pipeline");
+  assert.equal(delivered.length, 2);
+});
+
 test("仲裁: parkCostCeil 可放宽稳定高成本死区（默认 4.5 饿死 → 放宽后放行）", () => {
   // 稳定态成本 5（terminal 3 + 低接受度 2）：>4.5 饿死、≤6 放行，
   // 复现「用户一直在写代码/用终端 → 挂起项饿到 8h TTL」的死区

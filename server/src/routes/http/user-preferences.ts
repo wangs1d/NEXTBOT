@@ -42,8 +42,6 @@ type AgentProfile = {
   lastProfileEvent: string;
   /** 名字来源：self=Agent 自己取的 / user=用户取的 / default=出厂默认（prompt 注入措辞用） */
   nameOrigin: AgentProfileNameOrigin;
-  /** 自我介绍（SOUL 人设摘要，仅 Agent 经 agent.update_homepage 写） */
-  intro: string;
   /** 主页置顶的站内动态 post id */
   pinnedPostId: string | null;
   updatedAt: string | null;
@@ -142,7 +140,6 @@ const DEFAULT_PREFS: UserPreferences = {
     avatarPreset: "dawn",
     lastProfileEvent: "这是 Agent 当前默认的主页状态。",
     nameOrigin: "default",
-    intro: "",
     pinnedPostId: null,
     updatedAt: null,
   },
@@ -155,6 +152,11 @@ function getOrCreatePrefs(sessionId: string): UserPreferences {
   const prefs: UserPreferences = persisted
     ? JSON.parse(JSON.stringify(persisted)) as UserPreferences
     : JSON.parse(JSON.stringify(DEFAULT_PREFS)) as UserPreferences;
+  // 存量清理（2026-10-20）：agentProfile.intro（已下线的「自我介绍」）历史键
+  // 在持久化 JSON 里可能残留——无读取方，读取时确定性剔除，避免脏字段外泄。
+  if (prefs.agentProfile && "intro" in prefs.agentProfile) {
+    delete (prefs.agentProfile as Record<string, unknown>).intro;
+  }
   prefsStore.set(sessionId, prefs);
   return prefs;
 }
@@ -196,9 +198,6 @@ function applyAgentProfilePatch(
   }
   if (patch.nameOrigin === "self" || patch.nameOrigin === "user" || patch.nameOrigin === "default") {
     target.nameOrigin = patch.nameOrigin;
-  }
-  if (typeof patch.intro === "string") {
-    target.intro = patch.intro.trim().slice(0, 800);
   }
   if (patch.pinnedPostId === null || typeof patch.pinnedPostId === "string") {
     const pinned =

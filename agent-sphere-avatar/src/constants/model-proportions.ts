@@ -15,8 +15,19 @@ export const DG2_SOURCE = {
 } as const;
 
 /** 缩放后场景常量（bodyRadius = 0.5 → scale = 0.1） */
+
+const BODY_RADIUS = 0.5;
+
+/**
+ * 曲屏可视圆半径。
+ * 上限被 DG2 模型自身的玻璃开窗卡死：实测玻璃面与 -Y 极夹角 0–45°，
+ * 即开窗半角 45°。screenFaceRadius 超过 0.35（半角 44.4°）就会把脸画到
+ * 金属壳上。要更大的脸只能改 CAD 模型，别在这里硬调。
+ */
+const FACE_RADIUS = 0.34;
+
 export const MODEL = {
-  bodyRadius: 0.5,
+  bodyRadius: BODY_RADIUS,
   /** OBJ → 场景：绕 X 轴 -90°，使玻璃面朝向 +Z（相机） */
   objRotation: [-Math.PI / 2, 0, 0] as const,
   /** 将 OBJ 球心 (0, bodyCenterY, 0) 对齐到视觉原点 */
@@ -28,11 +39,11 @@ export const MODEL = {
   /** 曲屏内嵌表情 — 球冠半径（略小于外壳，贴在玻璃内侧） */
   screenCapRadius: 0.497,
   /** OLED 表情圆盘半径（与黑色曲屏可视圆一致） */
-  screenFaceRadius: 0.34,
-  /** 表情可见区域半角（球冠 UV 参考） */
-  screenFaceHalfAngle: Math.asin(0.34 / 0.5),
-  /** 交互热区半角 */
-  screenHitHalfAngle: Math.asin(0.38 / 0.5),
+  screenFaceRadius: FACE_RADIUS,
+  /** 表情可见区域半角（球冠 UV 参考）— 由 screenFaceRadius 派生，勿重复硬编码 */
+  screenFaceHalfAngle: Math.asin(FACE_RADIUS / BODY_RADIUS),
+  /** 交互热区半角（略大于可视圆，留一点边缘余量） */
+  screenHitHalfAngle: Math.asin(Math.min(0.44, FACE_RADIUS + 0.06) / BODY_RADIUS),
   /** 拉丝钢壳 */
   shellColor: "#9a9aa2",
   shellRoughness: 0.38,

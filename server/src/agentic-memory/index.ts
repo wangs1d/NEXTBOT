@@ -83,6 +83,7 @@ export {
   AgenticMemoryFtsStore,
   createMemoryFtsStoreIfEnabled,
 } from "./fts-store.js";
+export { LifeModelStore } from "./life-model-store.js";
 export {
   getAgenticMemoryCollection,
   getAgenticMemoryDir,
@@ -105,6 +106,8 @@ export interface AgenticMemoryComponents {
   factStore: import("./structured-fact-store.js").StructuredFactStore | null;
   /** FTS 关键词第三路（混合检索 P0）；bridge 融合召回的 BM25 rank 来源 */
   fts: import("./fts-store.js").AgenticMemoryFtsStore | null;
+  /** 用户生活模型（实体/关系/图式/信念）——第 ④ 层建模，purge 级联与 prompt 注入消费 */
+  lifeModel: import("./life-model-store.js").LifeModelStore | null;
 }
 
 const components: AgenticMemoryComponents = {
@@ -115,6 +118,7 @@ const components: AgenticMemoryComponents = {
   understandingStore: null,
   factStore: null,
   fts: null,
+  lifeModel: null,
 };
 
 export function registerMemoryComponents(part: Partial<AgenticMemoryComponents>): void {

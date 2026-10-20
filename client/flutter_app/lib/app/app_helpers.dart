@@ -37,7 +37,7 @@ extension RightPanelKindDefaults on RightPanelKind {
       case RightPanelKind.contentSummary:
         return 0.42; // 内容详情：长文阅读（书签栏 + 正文），需要较大空间
       case RightPanelKind.agentHome:
-        return 0.55; // Agent 主页：卡片流（动态/自我介绍），右面板中等宽度
+        return 0.55; // Agent 主页：动态卡片流，右面板中等宽度
     }
   }
 }

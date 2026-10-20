@@ -33,7 +33,8 @@ export type MemoryChannelId =
   | "forgotten"
   | "relationship"
   | "association"
-  | "experienceLearning";
+  | "experienceLearning"
+  | "lifeModel";
 
 /** 单个通道的召回结果（条目已带 source 与可选 score）。 */
 export interface ChannelRecallResult {
@@ -68,6 +69,9 @@ export const DEFAULT_ARBITRATOR_CONFIG: MemoryArbitratorConfig = {
     // 语义化种子修复后 spread 命中真实节点，联想结果质量提升，值得更高权重。
     association: 0.42,
     experienceLearning: 0.3,
+    // 生活模型通道（实体/关系/轨迹）：与结构化事实同为"确定性建模"来源，
+    // 权重对齐 relationship（0.25）——环境性、与 query 无强词面相关。
+    lifeModel: 0.25,
   },
   topN: 8,
   multiChannelBoost: 0.15,
@@ -107,6 +111,7 @@ export function loadArbitratorConfigFromEnv(
     "relationship",
     "association",
     "experienceLearning",
+    "lifeModel",
   ];
   for (const key of envKeys) {
     const envKey = `MEMORY_ARBITRATOR_${key.toUpperCase()}_WEIGHT`;

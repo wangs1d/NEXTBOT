@@ -22,6 +22,14 @@ export const FILE_WATCH_POLL_MS = 30_000;
 const MAX_SIGNALS_PER_COLLECT = 20;
 /** 忽略的临时/中间文件后缀（浏览器下载中间态） */
 const IGNORED_SUFFIXES = [".crdownload", ".part", ".tmp", ".partial", "!ut"];
+/**
+ * 忽略的系统文件名（小写比对，2026-10-20）：desktop.ini/缩略图缓存/NT 用户配置
+ * 等由系统反复触碰，产生零信息量信号刷满环形日志（真实运行数据 signals.jsonl
+ * 里 file 流 95% 是 desktop.ini），挤占排水名额且污染信号流。
+ */
+const IGNORED_FILENAMES = new Set(["desktop.ini", "thumbs.db", ".ds_store", "shellclasscache"]);
+/** Office/下载临时文件前缀（~$ 开头） */
+const IGNORED_FILENAME_PREFIXES = ["~$", "ntuser.dat"];
 /** 队列上限（内核长时间不可用时丢弃最旧事件，防内存膨胀） */
 const QUEUE_CAP = 200;
 
@@ -84,7 +92,11 @@ export class FileWatcherSensor implements ProactiveSensor {
         const watcher = watch(dir, { recursive: true }, (_event, filename) => {
           if (!filename) return;
           const file = String(filename);
-          if (IGNORED_SUFFIXES.some((s) => file.toLowerCase().endsWith(s))) return;
+          const lower = file.toLowerCase();
+          if (IGNORED_SUFFIXES.some((s) => lower.endsWith(s))) return;
+          const base = lower.split(/[\\/]/).pop() ?? lower;
+          if (IGNORED_FILENAMES.has(base)) return;
+          if (IGNORED_FILENAME_PREFIXES.some((p) => base.startsWith(p))) return;
           this.queue.push({ dir, file, kind: "added", at: this.nowFn() });
           if (this.queue.length > QUEUE_CAP) this.queue.splice(0, this.queue.length - QUEUE_CAP);
         });

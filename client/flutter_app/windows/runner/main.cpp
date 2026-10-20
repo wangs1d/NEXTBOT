@@ -8,6 +8,7 @@
 
 #include "embedded_font.h"
 #include "flutter_window.h"
+#include "single_instance.h"
 #include "utils.h"
 #include "webview_ghost_window_guardian.h"
 
@@ -92,6 +93,22 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   // plugins.
   ::CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
 
+  // 主应用单实例：同一登录会话内只允许一个主进程。
+  //
+  // 本 exe 还以「子窗口模式」被主应用 Process.start 拉起（行程窗 /
+  // 今日简报 / 注册预览，均由环境变量门控），那些子进程必须跳过本判定——
+  // 否则它们会把既有主实例当成重复实例、反而把自己杀掉。
+  const bool child_window_mode =
+      GetEnvironmentVariableW(L"PAI_TRAVEL_PLAN_MAILBOX", nullptr, 0) > 0 ||
+      GetEnvironmentVariableW(L"PAI_DAILY_BRIEFING_WINDOW", nullptr, 0) > 0 ||
+      GetEnvironmentVariableW(L"PAI_REGISTER_PREVIEW", nullptr, 0) > 0;
+  // 已有主实例（点 X 后驻留在托盘里）：请求它恢复并前置主窗口，本进程
+  // 立即退出，绝不再建第二个窗口/后台服务。窗口未就绪的启动竞态由模块
+  // 内部的短重试兜底。
+  if (!child_window_mode && !pai_single_instance::AcquirePrimaryInstance()) {
+    return EXIT_SUCCESS;
+  }
+
   // WebView2 幽灵窗防护：msedgewebview2.exe 滞留的内部顶层窗口曾以透明
   // "幽灵窗"形态拦截其他应用点击（见 webview_ghost_window_guardian.h）。
   // 在入口处启动常驻清扫，主窗口/简报/行程等所有子进程模式共用本入口，
@@ -136,6 +153,12 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   if (!window.Create(L"", origin, size)) {
     return EXIT_FAILURE;
+  }
+  // 标记主窗口：供后续启动的进程用 EnumWindows 定位并请求前置（窗口标题
+  // 被刻意置空、类名又与各子窗口共用，只能靠窗口属性区分）。子窗口模式
+  // 不打标，否则会被误当成主实例的窗口。
+  if (!child_window_mode) {
+    pai_single_instance::MarkPrimaryMainWindow(window.GetHandle());
   }
   window.SetQuitOnClose(true);
 

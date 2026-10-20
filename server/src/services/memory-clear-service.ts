@@ -132,6 +132,7 @@ export async function clearAllMemoryForActor(
   let factsCleared = 0;
   let ftsCleared = 0;
   let reinforcementCleared = 0;
+  let lifeModelCleared = 0;
   for (const variant of actorIdVariants(actorId)) {
     ledgerCleared += components.ledger?.purgeActor(variant) ?? 0;
     commitmentsCleared += components.commitmentBoard?.purgeActor(variant) ?? 0;
@@ -140,14 +141,16 @@ export async function clearAllMemoryForActor(
     understandingCleared += components.understandingStore?.purgeActor(variant) ?? 0;
     factsCleared += components.factStore?.purgeActor(variant) ?? 0;
     ftsCleared += components.fts?.purgeActor(variant) ?? 0;
+    // 生活模型（实体/关系/轨迹/图式/信念/经历）：级联清空，隐私闭环覆盖新表
+    lifeModelCleared += components.lifeModel?.purgeActor(variant) ?? 0;
     // 召回强化/归档侧表行（含两阶段遗忘的 archived 行）：Mem0 记录上面第 4 步已删，
     // 侧表行不回收会变成孤儿且归档量统计失真。
     reinforcementCleared += getMemoryReinforcementStore()?.purgeActor(variant) ?? 0;
   }
-  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared > 0) {
+  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared + lifeModelCleared > 0) {
     console.info(
       `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +
-        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared} facts=${factsCleared} fts=${ftsCleared} reinforcement=${reinforcementCleared}`,
+        `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared} facts=${factsCleared} fts=${ftsCleared} reinforcement=${reinforcementCleared} lifeModel=${lifeModelCleared}`,
     );
   }
 

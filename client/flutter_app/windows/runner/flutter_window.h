@@ -161,6 +161,11 @@ class FlutterWindow : public Win32Window {
       const flutter::MethodCall<flutter::EncodableValue>& call,
       std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 
+  // pai/single_instance —— 单实例激活：桌面再次启动本应用时，原生侧收到
+  // 「请前置」注册消息后经本通道通知 Dart 恢复托盘中的主窗口。
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      single_instance_channel_;
+
   // PCM 播放自然结束：音频线程 PostMessage 弹回平台线程后再通知 Dart
   static constexpr UINT kPcmPlayerDoneMsg = WM_APP + 0x7A;
 };

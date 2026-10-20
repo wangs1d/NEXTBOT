@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 import type { AgentMood } from "../types/agent";
-import type { FaceSignals } from "../components/ScreenFace";
+import type { ScreenSignals } from "../components/OledScreen";
 import type { TaskEvent } from "../types/agent";
 
 const MOOD_PROFILE: Record<
@@ -67,7 +67,7 @@ interface BehaviorMemoryEntry {
 interface UseAgentBodyMotionOptions {
   api?: PublicApi;
   visualRef: RefObject<THREE.Group | null>;
-  faceSignalsRef?: RefObject<FaceSignals>;
+  faceSignalsRef?: RefObject<ScreenSignals>;
   enabled?: boolean;
   bounds?: number;
   mood?: AgentMood;
@@ -119,6 +119,14 @@ export function useAgentBodyMotion({
   const excitedUntilRef = useRef(0);
   const lastBoundaryAt = useRef(0);
   const fidgetAt = useRef(0);
+  /**
+   * 自主漫游授权 —— 默认关闭，球体不再自己乱动（用户要求）。
+   *
+   * 只有显式命令才打开：`roam` / `pickRandomTarget` 授权后常驻，
+   * `excite` 期间临时生效（兴奋退去自动失效），`stop` 收回。
+   * 未授权时：不随机取点、不自主张望、不自主小动作，只剩原地呼吸。
+   */
+  const roamArmedRef = useRef(false);
   const intentRef = useRef<IntentState>({
     yaw: 0,
     yawVelocity: 0,
@@ -548,6 +556,8 @@ export function useAgentBodyMotion({
     emotion.caution = THREE.MathUtils.clamp(emotion.caution + recentAlertWeight * 0.001, 0, 1);
 
     const excited = excitementRef.current > 0.28;
+    /** 拿到漫游授权、或正处于命令触发的兴奋期，才允许自主行为；其余时间只呼吸 */
+    const lively = roamArmedRef.current || excited;
     const speedMul =
       profile.speed *
       (0.7 + energyRef.current * 0.55) *
@@ -613,7 +623,7 @@ export function useAgentBodyMotion({
     const attentionYaw = attention.x * (0.48 + attention.strength * 0.52) + spaceYawBias;
     const attentionPitch = attention.y * (0.14 + attention.strength * 0.12) + spacePitchBias;
 
-    if (nowMs > intent.phaseUntil) {
+    if (lively && nowMs > intent.phaseUntil) {
       if (moodRef.current === "listening" || focusedRef.current) {
         setPhase("observe", 1200 + Math.random() * 900 + emotion.familiarity * 700);
       } else if (moodRef.current === "thinking") {
@@ -626,11 +636,12 @@ export function useAgentBodyMotion({
       }
     }
 
-    if (t >= pauseUntil.current && horizDist < (excited ? 0.28 : 0.14)) {
+    // 两处「自己给自己找下一个点」—— 未授权时都不许触发，否则球会一直乱走
+    if (lively && t >= pauseUntil.current && horizDist < (excited ? 0.28 : 0.14)) {
       pickTarget(t);
     }
 
-    if (!excited && t > fidgetAt.current && horizDist < 0.08 && Math.random() < dt * 0.55) {
+    if (lively && !excited && t > fidgetAt.current && horizDist < 0.08 && Math.random() < dt * 0.55) {
       fidgetAt.current = t + 1.8 + Math.random() * 2.5;
       vel.current.x += (Math.random() - 0.5) * 0.45;
       vel.current.z += (Math.random() - 0.5) * 0.45;
@@ -717,20 +728,23 @@ export function useAgentBodyMotion({
         : moodRef.current === "thinking"
           ? 0.65
           : 0.35 + excitementRef.current * 0.45 + emotion.familiarity * 0.08;
-    const roamLook =
-      intent.phase === "roam"
+    // 自主张望 / 习惯性摆动：同样只在授权期生效，未授权时球体只剩注意力驱动的转头
+    const roamLook = lively
+      ? intent.phase === "roam"
         ? Math.sin(t * (0.7 + emotion.curiosity * 0.55)) * (0.05 + emotion.curiosity * 0.06)
         : intent.phase === "inspect"
           ? Math.sin(t * (1.4 + emotion.diligence * 1.2)) * (0.08 + emotion.curiosity * 0.08)
-          : 0;
-    const habitLook =
-      intent.habit === "irritated"
+          : 0
+      : 0;
+    const habitLook = lively
+      ? intent.habit === "irritated"
         ? Math.sin(t * 4.5) * 0.09
         : intent.habit === "seek"
           ? Math.sin(t * 1.25) * 0.18
           : intent.habit === "relax"
             ? Math.sin(t * 0.55) * 0.08
-            : 0;
+            : 0
+      : 0;
 
     intent.expression = THREE.MathUtils.lerp(
       intent.expression,
@@ -800,6 +814,7 @@ export function useAgentBodyMotion({
 
   const pickRandomTarget = useCallback(() => {
     pauseUntil.current = 0;
+    roamArmedRef.current = true;
   }, []);
 
   const setTarget = useCallback((x: number, y: number, z: number) => {
@@ -865,6 +880,7 @@ export function useAgentBodyMotion({
 
   const stopMotion = useCallback(() => {
     enabledRef.current = false;
+    roamArmedRef.current = false;
     excitementRef.current = 0;
     vel.current.set(0, 0, 0);
     if (api) api.velocity.set(0, 0, 0);
@@ -872,6 +888,7 @@ export function useAgentBodyMotion({
 
   const resumeMotion = useCallback(() => {
     enabledRef.current = true;
+    roamArmedRef.current = true;
   }, []);
 
   return { pickRandomTarget, setTarget, stopMotion, resumeMotion, excite, shake, applyVerticalBias, lookAtScreenPoint };

@@ -40,6 +40,8 @@ export type RecapSummarizerContext = {
   pendingLines?: string[];
   /** 本次滑动窗口溢出、需要被吸收进摘要的历史消息 */
   droppedMessages: ChatCompletionMessageParam[];
+  /** 会话标识（token 审计归属维度；可选，兼容旧调用方） */
+  sessionId?: string;
 };
 
 /** 摘要器输出：普通摘要行 + 新关键钉（mock 摘要器可只返回 string[]，见 normalize）。 */
@@ -340,6 +342,7 @@ export function createLlmRollingRecapSummarizer(opts?: {
           inputChars: auditInput.length,
           outputChars: content?.length ?? 0,
           model,
+          sessionId: ctx.sessionId,
         });
       }
       if (!content) return null;

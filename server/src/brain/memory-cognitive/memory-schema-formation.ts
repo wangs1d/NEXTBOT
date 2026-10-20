@@ -56,6 +56,15 @@ export interface NodeStepSequence {
   steps: string[];
 }
 
+/**
+ * 图式落盘适配器（P0，2026-10-20）：内存 schemaCache 重启即失 → 落盘后可跨重启。
+ * 由 LifeModelStore 提供实现（life_patterns 表）；结构兼容即可，不反向依赖。
+ */
+export interface SchemaPersistenceLike {
+  savePattern(actorId: string, schema: SchemaNode): void;
+  loadPatterns(actorId: string): SchemaNode[];
+}
+
 // ============================================================
 // 配置（从环境变量读取，带缺省值）
 // ============================================================
@@ -266,9 +275,33 @@ export class MemorySchemaFormation {
   private readonly schemaCache = new Map<string, SchemaNode>();
   /** id → cacheKey 反查表（便于按 schemaId 查找） */
   private readonly idIndex = new Map<string, string>();
+  /** 落盘适配器（P0）：非空时 read 先 hydrate、write 写穿；null 时保持纯内存旧行为 */
+  private persistence: SchemaPersistenceLike | null = null;
+  /** 已从盘内 hydrate 过的 actor（避免每轮重复加载） */
+  private readonly hydratedActors = new Set<string>();
 
   constructor(opts: { humanLike?: HumanLikeMemorySchemaLike | null } = {}) {
     this.humanLike = opts.humanLike ?? null;
+  }
+
+  /** 注入落盘适配器（装配层接线；LifeModelStore 实例）。 */
+  setPersistence(p: SchemaPersistenceLike | null): void {
+    this.persistence = p;
+  }
+
+  /** 首次访问某 actor 时把盘内图式载回内存缓存（幂等）。 */
+  private hydrate(actorId: string): void {
+    if (!this.persistence || this.hydratedActors.has(actorId)) return;
+    this.hydratedActors.add(actorId);
+    try {
+      for (const schema of this.persistence.loadPatterns(actorId)) {
+        const cacheKey = `${actorId}::${schema.sceneTag}`;
+        this.schemaCache.set(cacheKey, schema);
+        this.idIndex.set(schema.id, cacheKey);
+      }
+    } catch (err) {
+      console.log(`[SchemaFormation] hydrate 失败（忽略）: ${err}`);
+    }
   }
 
   /**
@@ -289,6 +322,7 @@ export class MemorySchemaFormation {
     const cfg = loadConfig();
     if (!cfg.enabled) return null;
     if (!this.humanLike || !this.humanLike.getNodesBySceneTag) return null;
+    this.hydrate(actorId);
 
     const nodes = this.humanLike.getNodesBySceneTag(actorId, sceneTag) ?? [];
     if (nodes.length < cfg.minInstances) return null;
@@ -353,6 +387,8 @@ export class MemorySchemaFormation {
 
     this.schemaCache.set(cacheKey, schema);
     this.idIndex.set(id, cacheKey);
+    // 写穿落盘（P0）：图式跨重启存活
+    this.persistence?.savePattern(actorId, schema);
     return schema;
   }
 
@@ -423,6 +459,9 @@ export class MemorySchemaFormation {
     if (!schema) return;
     schema.stereotypeWarningCount += 1;
     schema.updatedAt = new Date().toISOString();
+    // 写穿落盘（P0）：警告计数跨重启存活
+    const actorId = cacheKey.includes("::") ? cacheKey.slice(0, cacheKey.indexOf("::")) : "";
+    if (actorId) this.persistence?.savePattern(actorId, schema);
   }
 
   /** 获取指定 schema（不存在返回 null） */
@@ -434,6 +473,7 @@ export class MemorySchemaFormation {
 
   /** 获取所有 schema（可选按 actorId 过滤） */
   getAllSchemas(actorId?: string): SchemaNode[] {
+    if (actorId) this.hydrate(actorId);
     const all = [...this.schemaCache.values()];
     if (!actorId) return all;
     const prefix = `${actorId}::`;

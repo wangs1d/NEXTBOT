@@ -108,7 +108,7 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
 
     const store = new UserProfileStore();
     const current = await store.read(actorId);
-    const { profile: next, applied } = applyProfileOps(current, [
+    const { profile: next, applied, skipped } = applyProfileOps(current, [
       {
         op: op as "ADD" | "UPDATE" | "DELETE",
         section: section as "basic" | "interest" | "communication" | "note",
@@ -116,6 +116,14 @@ export function registerProfileManageRoutes(app: FastifyInstance): void {
         ...(match ? { match } : {}),
       },
     ]);
+    // 写入门槛：疑问句/临时安排/行为频率/对助手的观察/不确定推断/无明确主语
+    // 的条目被确定性丢弃——明确回绝而不是静默无变更，避免用户以为"写进去了"。
+    if (skipped.length > 0 && applied.length === 0) {
+      return reply.code(400).send({
+        ok: false,
+        error: `该内容不符合画像写入门槛（疑问句 / 临时安排 / 行为频率 / 对助手的观察 / 不确定推断 / 无明确主语），未写入：${skipped[0]}`,
+      });
+    }
     if (applied.length === 0) {
       return reply.code(409).send({ ok: false, error: "没有产生变更（行已存在或定位词未命中）" });
     }

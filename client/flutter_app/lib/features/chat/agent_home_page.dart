@@ -12,7 +12,7 @@ import "../settings/profile_insight_section.dart";
 ///
 /// 定位：主页是 Agent「自己打理的住处」——
 ///  - Header：纯排版无卡片（名字/@handle/身份号码/一行状态/签名），无头像光球（呼吸语义只在聊天页）
-///  - 自我介绍：Agent 自写（SOUL 摘要）；动态：站内社交里它自己的帖子（置顶帖排最前）
+///  - 动态：站内社交里它自己的帖子（置顶帖排最前）
 ///  - 它眼里的你：对用户的画像概览+行级纠错（右键改/删）
 /// 视觉语言（2026-09-30 重设计）：黑白极简——头部无渐变无徽章胶囊，
 /// 全页唯一彩色是状态行 6px 心情圆点；容器统一低面层+细边框+14 圆角；
@@ -76,7 +76,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
   String get _signature => _profile["signature"]?.toString() ?? "";
   String get _statusText => _profile["statusText"]?.toString() ?? "";
   String get _moodStyle => _profile["moodStyle"]?.toString() ?? "gentle";
-  String get _intro => _profile["intro"]?.toString() ?? "";
 
   @override
   Widget build(BuildContext context) {
@@ -92,11 +91,9 @@ class _AgentHomePageState extends State<AgentHomePage> {
                     _buildHeader(),
                     // 头部无卡片，靠留白与后面的区块分开
                     const SizedBox(height: 24),
-                    _buildIntroSection(),
-                    const SizedBox(height: 10),
                     _buildPostsSection(),
                     // 「它眼里的你」：agent 对用户的画像/理解/事实 + 行级纠错
-                    // （2026-09-30 从设置页迁入主页，跟着 agent 的自我介绍放最后）。
+                    // （2026-09-30 从设置页迁入主页）。
                     const SizedBox(height: 10),
                     const ProfileInsightSection(),
                   ],
@@ -331,29 +328,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
     return "${time.year}-${time.month}-${time.day}";
   }
 
-  // ─── 自我介绍 ───
-
-  Widget _buildIntroSection() {
-    final ThemeData theme = Theme.of(context);
-    final ColorScheme cs = theme.colorScheme;
-    final bool empty = _intro.trim().isEmpty;
-    return _SectionCard(
-      title: "自我介绍",
-      trailing: _HoverActionAnchor(
-        onTap: _showIntroEditDialog,
-        icon: Icons.edit_outlined,
-        label: "编辑",
-      ),
-      child: Text(
-        empty ? "还没写。对它说「去写写你的自我介绍」，或点右上角直接替它写。" : _intro,
-        style: theme.textTheme.bodyMedium?.copyWith(
-          height: 1.65,
-          color: empty ? cs.onSurfaceVariant : cs.onSurface,
-        ),
-      ),
-    );
-  }
-
   // ─── 编辑交互 ───
 
   Future<void> _showSignatureEditDialog() {
@@ -364,17 +338,6 @@ class _AgentHomePageState extends State<AgentHomePage> {
       maxLines: 3,
       hint: "一句它自己的话",
       field: "signature",
-    );
-  }
-
-  Future<void> _showIntroEditDialog() {
-    return _showTextEditDialog(
-      title: "修改自我介绍",
-      initial: _intro,
-      maxLength: 800,
-      maxLines: 8,
-      hint: "它的 SOUL 摘要",
-      field: "intro",
     );
   }
 
@@ -542,11 +505,10 @@ TextStyle sectionTitleStyle(TextTheme te, ColorScheme cs) => te.labelLarge!.copy
     );
 
 class _SectionCard extends StatelessWidget {
-  const _SectionCard({required this.title, required this.child, this.trailing});
+  const _SectionCard({required this.title, required this.child});
 
   final String title;
   final Widget child;
-  final Widget? trailing;
 
   @override
   Widget build(BuildContext context) {
@@ -563,13 +525,7 @@ class _SectionCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Row(
-            children: <Widget>[
-              Text(title, style: sectionTitleStyle(theme.textTheme, cs)),
-              const Spacer(),
-              if (trailing != null) trailing!,
-            ],
-          ),
+          Text(title, style: sectionTitleStyle(theme.textTheme, cs)),
           const SizedBox(height: 8),
           child,
         ],
@@ -806,7 +762,7 @@ class AgentHomepageApi {
     }
   }
 
-  /// 主页文案编辑（签名/状态/自我介绍/置顶）
+  /// 主页文案编辑（签名/状态/置顶）
   static Future<bool> patchHomepage(String actorId, Map<String, dynamic> patch) async {
     try {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/agent-homepage/patch");

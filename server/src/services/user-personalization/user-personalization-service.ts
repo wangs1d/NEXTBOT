@@ -759,6 +759,14 @@ export class UserPersonalizationService {
   private readonly personalityAdjuster: PersonalityAdjuster;
   /** MemoryCortex 引用，用于人格内核读写（registerMemoryCortex 注入） */
   private memoryCortex: MemoryCortexLike | null = null;
+  /**
+   * 关系状态观察者（2026-10-20，Life Model P1）：每轮 applyRelationshipSignals 更新
+   * warmth/rapport 后回调，供 RelationshipGraphService 做规则化里程碑检测并收敛为
+   * self_agent 边（零 LLM）。装配层注入；未注入时不回调。
+   */
+  private relationshipStateObserver:
+    | ((actorId: string, state: { warmth: number; rapport: number }) => void)
+    | null = null;
   /** 触达结果外发监听（Task 20 节律引擎桥接，registerContactOutcomeListener 注入） */
   private contactOutcomeListener:
     | ((actorId: string, params: { responded: boolean; feedback?: string; at: Date }) => void)
@@ -777,6 +785,13 @@ export class UserPersonalizationService {
     this.memoryCortex = mc;
   }
 
+  /** 注入关系状态观察者（Life Model 收敛：里程碑检测 + self_agent 边）。 */
+  setRelationshipStateObserver(
+    cb: ((actorId: string, state: { warmth: number; rapport: number }) => void) | null,
+  ): void {
+    this.relationshipStateObserver = cb;
+  }
+
   async getPromptSlice(actorId: string, userText?: string): Promise<PersonalizationPromptSlice> {
     if (!isUserPersonalizationEnabled()) return {};
     let state = this.loadEmotionState(actorId);
@@ -791,6 +806,15 @@ export class UserPersonalizationService {
       state = this.applyUserSignals(actorId, userText, state);
       behavior = this.applyBehaviorSignals(actorId, userText, behavior);
       relationship = this.applyRelationshipSignals(actorId, userText, relationship, state, behavior);
+      // 关系状态 → 生活模型收敛（规则化里程碑检测，零 LLM；装配层注入观察者）
+      try {
+        this.relationshipStateObserver?.(actorId, {
+          warmth: relationship.warmth,
+          rapport: relationship.rapport,
+        });
+      } catch {
+        /* 观察者失败不影响个性化主流程 */
+      }
       rhythm = this.applyTimeRhythmSignals(actorId, rhythm);
       style = this.applyStyleProfile(actorId, userText, relationship, behavior, style);
       replyLength = this.applyReplyLengthProfile(actorId, userText, replyLength);

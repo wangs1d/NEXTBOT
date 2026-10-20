@@ -341,6 +341,14 @@ export function inferValidRange(
 
 export class StructuredFactStore {
   private readonly db: SqliteDatabase;
+  /**
+   * 实体物化副作用（P0，2026-10-20 生活模型接线）：每次写入一个非 user 主体的事实时
+   * 回调一次，供 LifeModelStore 旁路 upsert life_entities（同一 LLM 产物，零新增调用）。
+   * 由 create-app-services 装配注入；未注入时为 null（纯事实库行为不变）。
+   */
+  private entityObserver:
+    | ((actorId: string, entity: string, seenAt: string, sourceRef: string | null) => void)
+    | null = null;
 
   constructor(db?: SqliteDatabase) {
     this.db = db ?? openAgenticSqlite();
@@ -664,7 +672,35 @@ export class StructuredFactStore {
       this.enforceCapacity(actorId);
       return { changed: true, fact: toFact(inserted), previous: actives.map(toFact).reverse() };
     });
-    return run();
+    const result = run();
+    // 实体物化（P0）：非 user 主体写事实时旁路通知生活模型建/更新实体节点。
+    if (result && this.entityObserver && entity !== "user") {
+      try {
+        this.entityObserver(actorId, entity, result.fact.updatedAt, input.sourceRef ?? null);
+      } catch (err) {
+        console.log(`[structured-facts] 实体物化回调失败（忽略）: ${err}`);
+      }
+    }
+    return result;
+  }
+
+  /** 注入实体物化副作用（装配层接线；LifeModelStore.upsertEntity 的薄封装）。 */
+  setEntityObserver(
+    cb: ((actorId: string, entity: string, seenAt: string, sourceRef: string | null) => void) | null,
+  ): void {
+    this.entityObserver = cb;
+  }
+
+  /** 某 actor 出现过的全部非 user 事实主体（实体物化迁移用，幂等）。 */
+  listFactEntities(actorId: string): string[] {
+    if (!actorId) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT entity FROM structured_facts
+         WHERE actor_id = ? AND entity <> 'user' ORDER BY entity ASC`,
+      )
+      .all(actorId) as Array<{ entity: string }>;
+    return rows.map((r) => r.entity).filter(Boolean);
   }
 
   /** 同值确认：刷新确认时间/置信度/事发时间/区间（不动 status 与 temporal） */
@@ -1274,6 +1310,21 @@ export class StructuredFactStore {
       return actives.length;
     });
     return run();
+  }
+
+  /**
+   * 实体级遗忘（2026-10-20，Life Model P2）：用户要求「忘掉我妹妹」时，把该实体
+   * 主体名下的全部事实行物理删除。与 clearFact 的字段级 supersede 不同——这是隐私
+   * 级删除，与 LifeModelStore.deleteEntity 配套「实体 + 边 + 轨迹 + 事实」三清。
+   * @returns 删除行数
+   */
+  deleteFactsByEntity(actorId: string, entity: string): number {
+    const actor = actorId?.trim();
+    const e = entity?.trim();
+    if (!actor || !e) return 0;
+    return this.db
+      .prepare(`DELETE FROM structured_facts WHERE actor_id = ? AND entity = ?`)
+      .run(actor, e).changes;
   }
 
   /** actor 级清理（memory-clear-service 级联调用，隐私闭环） */

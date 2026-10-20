@@ -17,9 +17,11 @@ import {
   UserProfileStore,
   hasRealProfileContent,
   defaultUserProfileMarkdown,
+  isNoisyProfileLine,
+  sanitizeProfileMarkdown,
 } from "../src/services/user-personalization/user-profile-store.js";
 import { mergeUserProfilePromptSources } from "../src/agent/prompt-context-builder.js";
-import { UserProfileAggregator } from "../src/brain/user-profile-aggregator.js";
+import { UserProfileAggregator, applyProfileOps } from "../src/brain/user-profile-aggregator.js";
 
 /* ── hasRealProfileContent：模板/样板行不算真实事实 ── */
 
@@ -37,7 +39,7 @@ test("模板判定：只含语气同步样板行 = 无真实内容", () => {
 
 test("模板判定：任一真实内容行（称呼/爱好）= 有真实内容", () => {
   const p = defaultUserProfileMarkdown("u1").replace(
-    "- （待了解：称呼、常用语言、所在地等）",
+    "- （待了解：称呼、所在地、职业等）",
     "- 称呼：周明远",
   );
   assert.equal(hasRealProfileContent(p), true);
@@ -69,6 +71,95 @@ test("合并：manager 摘要全部重复时不追加空尾巴", () => {
   const file = "- 称呼：周明远";
   const merged = mergeUserProfilePromptSources(file, "- 称呼：周明远");
   assert.equal(merged, file);
+});
+
+/* ── 确定性净噪器：写入门槛（2026-10-20） ── */
+
+test("净噪：疑问句不算事实（备注里的「我多少事？」）", () => {
+  assert.equal(isNoisyProfileLine("我多少事？", "note"), true);
+  assert.equal(isNoisyProfileLine("你现在能记住我多少事？", "note"), true);
+  assert.equal(isNoisyProfileLine("你会一直记得我吗", "note"), true);
+});
+
+test("净噪：对助手/记忆的 meta 观察不算用户画像", () => {
+  assert.equal(isNoisyProfileLine("会主动询问宠物相关信息", "interest"), true);
+  assert.equal(isNoisyProfileLine("会主动让助手帮忙记事情，并事后抽查记忆", "interest"), true);
+  // 规则边界：不以 meta 前缀开头的正经偏好不受影响
+  assert.equal(isNoisyProfileLine("习惯用简单问答方式获取信息，偏好直接回答而非展开说明", "communication"), false);
+});
+
+test("净噪：临时安排与行程不进画像（近期出差/周末计划）", () => {
+  assert.equal(isNoisyProfileLine("近期有出差安排，涉及与对接人接洽", "basic"), true);
+  assert.equal(isNoisyProfileLine("近期关注出差行程安排（深圳出差、酒店位置、往返时间规划）", "interest"), true);
+});
+
+test("净噪：行为频率与变化的描述不进画像（旅游目的频繁切换）", () => {
+  assert.equal(isNoisyProfileLine("旅游目的频繁切换", "interest"), true);
+  assert.equal(isNoisyProfileLine("经常更换旅行目的地", "interest"), true);
+});
+
+test("净噪：「常用语言」不是画像字段 + 不确定推断不写", () => {
+  assert.equal(isNoisyProfileLine("常用语言：中文", "basic"), true);
+  assert.equal(isNoisyProfileLine("职业：可能是个设计师", "basic"), true);
+});
+
+test("净噪：system 样板行与占位行永不判噪声", () => {
+  assert.equal(isNoisyProfileLine("语气风格：温馨亲切（系统根据对话自动调整）", "communication"), false);
+  assert.equal(isNoisyProfileLine("回复偏好：精简直接，口语化，像身边熟人回话；少客服腔、少标题、少表格、少长解释", "communication"), false);
+  assert.equal(isNoisyProfileLine("（待了解：称呼、所在地、职业等）", "basic"), false);
+});
+
+test("净噪：基本信息只留档案字段行（猫粮细节这类塞进来的细节清掉）", () => {
+  assert.equal(isNoisyProfileLine("养了一只白色短毛猫，名叫咪咪，今年两岁", "basic"), true);
+  assert.equal(isNoisyProfileLine("咪咪喜欢吃三文鱼味猫粮，不喜欢牛肉味", "basic"), true);
+  assert.equal(isNoisyProfileLine("称呼：王铭川", "basic"), false);
+});
+
+test("整文净噪：已删噪声行 + 有真实事实时清残留占位行（mem50 实盘样本）", () => {
+  const md = [
+    "# 用户画像",
+    "",
+    "## 基本信息",
+    "",
+    "- 养了一只白色短毛猫，名叫咪咪，今年两岁",
+    "- 称呼：王铭川",
+    "- （待了解：称呼、所在地、职业等）",
+    "",
+    "## 兴趣与习惯",
+    "",
+    "- 会主动询问宠物相关信息",
+    "- 周末有户外活动的意愿，关注爬山推荐",
+    "",
+    "## 备注",
+    "- 我多少事？",
+    "",
+  ].join("\n");
+  const out = sanitizeProfileMarkdown(md);
+  assert.ok(!out.includes("名叫咪咪"), "基本信息里的宠物细节被清");
+  assert.ok(!out.includes("待了解：称呼"), "有真实事实后占位行被清");
+  assert.ok(!out.includes("会主动询问宠物相关信息"), "meta 观察被清");
+  assert.ok(!out.includes("我多少事？"), "疑问句备注被清");
+  assert.ok(out.includes("- 称呼：王铭川"), "档案字段行保留");
+  assert.ok(out.includes("关注爬山推荐"), "正常的兴趣行保留");
+});
+
+test("整文净噪：幂等（无变化返回原字符串）", () => {
+  const clean = ["# 用户画像", "", "## 基本信息", "", "- 称呼：王铭川", ""].join("\n");
+  assert.equal(sanitizeProfileMarkdown(clean), clean);
+  assert.equal(sanitizeProfileMarkdown(defaultUserProfileMarkdown("u1")), defaultUserProfileMarkdown("u1"));
+});
+
+test("净噪落位：applyProfileOps 丢弃噪声条目并记 skipped，正常条目照写", () => {
+  const profile = ["# 用户画像", "", "## 备注", ""].join("\n");
+  const { profile: next, applied, skipped } = applyProfileOps(profile, [
+    { op: "ADD", section: "note", line: "我多少事？", match: "" },
+    { op: "ADD", section: "note", line: "用户养了两只猫", match: "" },
+  ]);
+  assert.equal(skipped.length, 1);
+  assert.equal(skipped[0], "我多少事？");
+  assert.equal(applied.length, 1);
+  assert.ok(!next.includes("我多少事？"), "噪声行未进盘");
+  assert.ok(next.includes("用户养了两只猫"), "正常条目已写入");
 });
 
 /* ── 抽取 token 闸（私有方法直测：shouldExtractNow） ── */

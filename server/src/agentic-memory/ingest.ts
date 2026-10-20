@@ -158,7 +158,7 @@ export class AgenticMemoryIngestService {
       isMemoryUnifiedExtractEnabled() &&
       getCommitmentExtractScope() === "all"
     ) {
-      void extractUnified(t, { client: this.extractionClient ?? undefined })
+      void extractUnified(t, { client: this.extractionClient ?? undefined, actorId })
         .then((orphan) => {
           if (!orphan) return;
           if (
@@ -216,7 +216,7 @@ export class AgenticMemoryIngestService {
     // P1-6 统一抽取：决策 + 记忆 + 承诺 + 纠正 + 事实 一次 LLM 完成（原最多 3 次调用）。
     // 返回 null（无 key/失败）时整体回退旧三段路径。
     const unified = isMemoryUnifiedExtractEnabled()
-      ? await extractUnified(body, { client: this.extractionClient ?? undefined })
+      ? await extractUnified(body, { client: this.extractionClient ?? undefined, actorId })
       : null;
     if (unified) {
       await this.persistUnifiedExtraction(actorId, sourceId, unified, context, true, body);

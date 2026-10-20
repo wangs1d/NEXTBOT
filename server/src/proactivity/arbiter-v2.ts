@@ -250,6 +250,16 @@ export class ArbiterV2 {
       return decision;
     }
     if (decision.action === "wait_for_pause") {
+      // 离线直通管道（2026-10-20）：offline 成本恒满分（L91 offline:10），落到这里
+      // 必然 wait_for_pause → park 8h → 过期重投 → 管道还是判 offline——事件根本到不了
+      // 管道的「重连即补投」链路（真实数据 digest_beat 连续 4 次全因设备离线丢弃）。
+      // 与 L91 注释「投递本来就到不了，交给管道挂起」的原设计对齐：直接 deliver()，
+      // 由管道 arbitrate 承担 offline_wait_reconnect 挂起 + 重连 flushDue 补投
+      // （预算计数只在真正 delivered 时发生，离线挂起不占社交预算）。
+      if (s.presence === "offline") {
+        input.deliver();
+        return { action: "wait_for_pause", cost, reason: "offline_passthrough_pipeline" };
+      }
       // 挂起等 pause（alert/normal 8h 保质期；静默时段顺延到静默结束+宽限）。
       // 入队时的上下文快照存进条目本身：pause 检测首个 tick 以"最旧挂起项入队时的
       // 状态"为比对起点。不能写进 per-actor 基线——多个挂起项在不同状态下入队会互相

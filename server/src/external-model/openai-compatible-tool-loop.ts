@@ -36,6 +36,7 @@ import { MESSAGE_HUB_CHAT_TOOL_DEFINITIONS } from "../tools/message-hub-chat-too
 import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-tools.js";
 import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence-chat-tools.js";
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
+import { LIFE_MANAGE_CHAT_TOOLS } from "../tools/life-manage-tools.js";
 import { AGENT_TASKS_CHAT_TOOLS } from "../tools/agent-tasks-tools.js";
 import { RHYTHM_REMINDER_CHAT_TOOLS } from "../tools/rhythm-reminder-tools.js";
 import {
@@ -1072,6 +1073,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...CLOCK_CHAT_TOOLS,
     ...INTERNET_INTELLIGENCE_CHAT_TOOLS,
     ...INTEREST_WATCH_CHAT_TOOLS,
+    ...LIFE_MANAGE_CHAT_TOOLS,
     ...AGENT_TASKS_CHAT_TOOLS,
     ...RHYTHM_REMINDER_CHAT_TOOLS,
     ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
@@ -1220,6 +1222,13 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     category: 'life',
     keywords: ['生日', 'birthday', '纪念日', '周年', '重要日子', '重要日期', '谁要过生日', '记住这个日子'],
     toolNames: ['care.set_important_date', 'care.get_important_dates', 'care.delete_important_date']
+  },
+  {
+    // 生活模型（人物关系）：用户提到家人/伴侣/朋友/同事/宠物等社会关系，
+    // 或问「我妹妹叫什么」「谁是我的上司」时召回 life.manage（记住/查询关系）。
+    category: 'life',
+    keywords: ['妹妹', '姐姐', '哥哥', '弟弟', '老婆', '妻子', '老公', '丈夫', '爸爸', '妈妈', '父母', '儿子', '女儿', '家人', '亲戚', '闺蜜', '发小', '伴侣', '我上司', '我老板', '同事', '同学', '宠物', '我家猫', '我家狗', '我养的', 'family', 'friend', 'colleague', 'relation'],
+    toolNames: ['life.manage']
   },
   {
     // 方案 C 承诺草稿板：用户提到承诺/答应/兑现/欠的事时召回 commitment.* 工具

@@ -21,6 +21,7 @@ add_executable(${BINARY_NAME} WIN32
   "outgoing_call_window.cpp"
   "dynamic_island_window.cpp"
   "pcm_stream_player.cpp"
+  "single_instance.cpp"
   "sphere_overlay_window.cpp"
   "utils.cpp"
   "webview_ghost_window_guardian.cpp"

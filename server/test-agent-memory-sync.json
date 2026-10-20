@@ -1,12 +1,9 @@
 {
   "sessions": {
-    "actor-4": {
+    "actor-5": {
       "revision": 2,
       "entries": {
-        "memory_summary": "[2026-10-19T15:01:41.471Z] [topic:general] I live in Shanghai\n[2026-10-19T15:01:41.472Z] [topic:general] I live in Beijing",
-        "memory_summary_forgotten": "",
-        "memory_facts": "[2026-10-19T15:01:41.472Z] [topic:general] I live in Beijing",
-        "session_recap": "[2026-10-19T15:01:41.471Z] [topic:general] I live in Shanghai\n[2026-10-19T15:01:41.472Z] [topic:general] I live in Beijing"
+        "memory_current_mission": ""
       }
     }
   }

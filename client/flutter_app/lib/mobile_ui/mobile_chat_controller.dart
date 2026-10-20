@@ -672,6 +672,13 @@ class MobileChatController extends ChangeNotifier {
             deliveryId, "viewed");
       }
       if (text.trim().isEmpty) return;
+      // 前台横幅（2026-10-20）：告知类是社交货币/情绪价值的主载体，只落流
+      // 用户大概率无感——前台经 AmbientFeeds 横幅通道并行触达（与
+      // schedule.reminder_fired 同源）；后台仍只落流，触达靠重连补投。
+      if (!_appBackgrounded) {
+        unawaited(AmbientFeedsController.instance.showForegroundReminder
+            ?.call(title, text.trim()));
+      }
       messages.add(ChatMessage(
         messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
         sessionId: ApiConfig.effectiveActorId,

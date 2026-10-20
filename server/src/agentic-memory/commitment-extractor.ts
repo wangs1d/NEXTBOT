@@ -84,7 +84,7 @@ function parseJsonArray(output: string): RawExtracted[] {
  */
 export async function extractCommitments(
   text: string,
-  opts?: { now?: Date; model?: string; client?: UnifiedLlmClient },
+  opts?: { now?: Date; model?: string; client?: UnifiedLlmClient; actorId?: string; sessionId?: string },
 ): Promise<ExtractedCommitment[]> {
   const body = text.trim();
   if (!body || body.length < 4) return [];
@@ -115,6 +115,8 @@ export async function extractCommitments(
       inputChars: body.length,
       outputChars: output.length,
       model: opts?.model ?? getAgenticMemoryLlmModel(),
+      actorId: opts?.actorId,
+      sessionId: opts?.sessionId,
     });
 
     return parseJsonArray(output)

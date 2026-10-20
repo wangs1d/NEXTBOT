@@ -929,7 +929,10 @@ export class PromptContextBuilder {
 
     // 用户兴趣关注列表（InterestWatcher 接线）：注入【用户兴趣关注列表】块。
     // 让 agent 知道用户在长期关注什么（话题接得住）；附工具引导：听到新的长期
-    // 兴趣时调 interest.manage 记录。无列表时零注入。
+    // 兴趣时调 interest.manage 记录。
+    // 冷启动（2026-10-20）：空池不再整体跳过——教学引导语随列表一起被门控的话，
+    // 模型永远不知道能入库、兴趣库永远空（真实运行数据 interest-watch.json 从未
+    // 产生）。空池时注入仅含引导语的最小块，教学与列表解耦。
     let interestListBlock: string | undefined;
     if (this.interestListProvider) {
       try {
@@ -939,6 +942,11 @@ export class PromptContextBuilder {
             `【用户兴趣关注列表】`,
             `（后台按常聊话题维护；话题被提起时自然接住、别背诵清单；出现新的长期兴趣时用 interest.manage 的 add/touch 记录，明确不喜欢用 remove）`,
             list,
+          ].join("\n");
+        } else {
+          interestListBlock = [
+            `【用户兴趣关注列表】（暂无）`,
+            `（当用户明确表达长期喜好、常关注的人或话题时，自然地用 interest.manage 的 add 记一条，后台好帮 TA 盯着新动态；不确定是不是长期兴趣就不记，宁缺毋滥）`,
           ].join("\n");
         }
       } catch (err) {
@@ -1000,6 +1008,10 @@ export class PromptContextBuilder {
     const facts = this.buildUserFactsBlock(input.actorId, userText);
     const userFactsBlock = facts.stableBlock;
 
+    // 用户关系一览（2026-10-20 生活模型）：人/宠物/组织的结构化关系，稳定层注入
+    // （字节稳定，随关系变更低频刷新）；未被问及也不暴露记忆系统存在。
+    const lifeRelationsBlock = this.buildLifeRelationsBlock(input.actorId);
+
     // 本轮寻址块（P0-1）：沉底注入动态层，等价承接旧版逐条寻址标记。
     const turnAddressingBlock = formatTurnAddressingBlock(
       understanding.matchedTopics,
@@ -1059,6 +1071,7 @@ export class PromptContextBuilder {
         : {}),
       ...(userUnderstandingBlock ? { userUnderstanding: userUnderstandingBlock } : {}),
       ...(userFactsBlock ? { userFacts: userFactsBlock } : {}),
+      ...(lifeRelationsBlock ? { lifeRelations: lifeRelationsBlock } : {}),
       // 时间问句定位（动态层：每轮随问句变，不能进稳定前缀）
       ...(facts.temporalBlock ? { temporalAddressing: facts.temporalBlock } : {}),
       ...(turnAddressingBlock ? { turnAddressing: turnAddressingBlock } : {}),
@@ -1123,6 +1136,7 @@ export class PromptContextBuilder {
     try {
       markInjectedMemory(input.actorId, promptMemory.userUnderstanding);
       markInjectedMemory(input.actorId, promptMemory.userFacts);
+      markInjectedMemory(input.actorId, promptMemory.lifeRelations);
       markInjectedMemory(input.actorId, promptMemory.narrativeRecall);
       markInjectedMemory(input.actorId, promptMemory.memorySummary);
       markInjectedMemory(input.actorId, promptMemory.memoryPreferences);
@@ -1212,6 +1226,21 @@ export class PromptContextBuilder {
     } catch (err) {
       console.log(`[PromptContextBuilder] 结构化事实块构建失败（忽略）: ${err}`);
       return { stableBlock: undefined, matchedFields: [] };
+    }
+  }
+
+  /**
+   * 用户关系一览块（2026-10-20 生活模型）：LifeModelStore 的实际/关系渲染。
+   * 无实体/关系时返回 undefined（宁缺毋滥，零注入）。失败零阻塞。
+   */
+  private buildLifeRelationsBlock(actorId: string): string | undefined {
+    try {
+      const store = getMemoryComponents().lifeModel;
+      if (!store) return undefined;
+      return store.renderRelationsForPrompt(actorId) ?? undefined;
+    } catch (err) {
+      console.log(`[PromptContextBuilder] 用户关系一览块构建失败（忽略）: ${err}`);
+      return undefined;
     }
   }
 

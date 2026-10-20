@@ -784,11 +784,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
     // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
     // （内部按 actorId 去重，已注册则空转）。
-    if (state == AppLifecycleState.resumed &&
-        !kIsWeb &&
-        (defaultTargetPlatform == TargetPlatform.android ||
-            defaultTargetPlatform == TargetPlatform.iOS)) {
-      unawaited(MobilePushRegistrar.registerIfNeeded());
+    if (state == AppLifecycleState.resumed) {
+      // 回前台补连（2026-10-20）：聊天 WS 重连次数耗尽后不再自愈，服务端
+      // 主动消息挂起等重连——回前台先确保在线（已连接空转）；手机桥接同款。
+      _ws.ensureConnected();
+      PhoneBridgeService.instance.pokeReconnect();
+      // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
+      // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
+      // （内部按 actorId 去重，已注册则空转）。
+      if (!kIsWeb &&
+          (defaultTargetPlatform == TargetPlatform.android ||
+              defaultTargetPlatform == TargetPlatform.iOS)) {
+        unawaited(MobilePushRegistrar.registerIfNeeded());
+      }
     }
     if (state == AppLifecycleState.detached) {
       _writeCrashLog("[EXIT]", "app detached (window closed)");

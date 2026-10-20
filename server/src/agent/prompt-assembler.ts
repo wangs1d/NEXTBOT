@@ -50,6 +50,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "worldCaps",
   "userUnderstanding",
   "userFacts",
+  "lifeRelations",
   "turnAddressing",
   "userProfileSummary",
   "memoryInventory",
@@ -211,6 +212,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 结构化事实库（事实档案 store）：用户档案字段的确定性记录，紧跟理解档案——
   // 块内自带使用指令（对应字段提问直接引用当前值，确定性高于语义检索来源）。
   if (m.userFacts) stableMemory.push(m.userFacts);
+  // 用户关系一览（生活模型）：用户生活中人物/宠物的结构化一览，紧跟结构化事实。
+  if (m.lifeRelations) stableMemory.push(m.lifeRelations);
   if (m.userProfileSummary) stableMemory.push(`【用户长期画像】\n${m.userProfileSummary}`);
   const persistentMemoryBlock = buildFamilyBlock(
     "【持久记忆】",

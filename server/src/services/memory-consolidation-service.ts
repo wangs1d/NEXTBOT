@@ -251,7 +251,7 @@ export class MemoryConsolidationService {
     for (const candidate of high) {
       try {
         const unified = isMemoryUnifiedExtractEnabled()
-          ? await extractUnified(candidate.text, { client: this.unifiedClient ?? undefined })
+          ? await extractUnified(candidate.text, { client: this.unifiedClient ?? undefined, actorId })
           : null;
         if (unified) {
           decided.push({
@@ -291,7 +291,7 @@ export class MemoryConsolidationService {
 
       try {
         const unified = isMemoryUnifiedExtractEnabled()
-          ? await extractUnified(combined, { client: this.unifiedClient ?? undefined })
+          ? await extractUnified(combined, { client: this.unifiedClient ?? undefined, actorId })
           : null;
         if (unified) {
           const persistedText =
@@ -307,7 +307,7 @@ export class MemoryConsolidationService {
           continue;
         }
 
-        const summarized = await this.summarizeLowSignal(combined);
+        const summarized = await this.summarizeLowSignal(actorId, combined);
         const decision = await decideMemoryWrite(
           summarized,
           { actorId, source: "chat:low_signal_summary", heuristicHint: "decay" },
@@ -463,7 +463,7 @@ export class MemoryConsolidationService {
     }
   }
 
-  private async summarizeLowSignal(text: string): Promise<string> {
+  private async summarizeLowSignal(actorId: string, text: string): Promise<string> {
     const apiKey = resolveOpenAiApiKey();
     const keyLines = extractKeyLowSignalLines(text);
     if (!apiKey) {
@@ -493,6 +493,7 @@ export class MemoryConsolidationService {
         inputChars: JSON.stringify(messages).length,
         outputChars: summary.length,
         model: getAgenticMemoryLlmModel(),
+        actorId,
       });
       return [...keyLines, summary].filter(Boolean).join("\n");
     } catch {

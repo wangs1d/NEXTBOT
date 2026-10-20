@@ -1233,6 +1233,7 @@ export class MemoryManagerService {
         inputChars: auditInputChars,
         outputChars: content.length,
         model: scoringModel,
+        actorId,
       });
       const parsed = JSON.parse(content) as { scores?: number[] };
       if (!Array.isArray(parsed.scores)) throw new Error("invalid memory score payload");

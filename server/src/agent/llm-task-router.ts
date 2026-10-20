@@ -72,6 +72,13 @@ function auditEvidenceAnchor(messageText: string, evidence: string[]): EvidenceA
 
 const routeCache = new Map<string, { decision: RouteDecision; at: number }>();
 
+/**
+ * 同轮在途路由去重（2026-10-20）：key → 首个在途路由 Promise。
+ * WS 层 routeTurnForWs 与 agent-core 侧在极端时序下可能对同一条消息并发触发，
+ * 完全相同的路由输入只允许发一次 LLM，后到者复用首个 Promise。
+ */
+const routeInflight = new Map<string, Promise<RouteDecision>>();
+
 function cacheGet(key: string): RouteDecision | undefined {
   const hit = routeCache.get(key);
   if (!hit) return undefined;
@@ -210,7 +217,35 @@ export async function routeTurnByLlm(
   const key = JSON.stringify([trimmed, recentUserTurns, entityContextLines, dialogStateLines]);
   const hit = cacheGet(key);
   if (hit) return hit;
+  // 同轮在途去重：完全相同的路由输入并发调用只发一次 LLM（见 routeInflight 注释）。
+  const pending = routeInflight.get(key);
+  if (pending) return pending;
+  const run = routeTurnByLlmInner(
+    externalChat,
+    sessionId,
+    trimmed,
+    recentUserTurns,
+    activeTasksSummary,
+    entityContextLines,
+    dialogStateLines,
+    key,
+  ).finally(() => {
+    routeInflight.delete(key);
+  });
+  routeInflight.set(key, run);
+  return run;
+}
 
+async function routeTurnByLlmInner(
+  externalChat: ExternalChatProvider | null,
+  sessionId: string,
+  trimmed: string,
+  recentUserTurns: string[],
+  activeTasksSummary: string | undefined,
+  entityContextLines: string[],
+  dialogStateLines: string[],
+  key: string,
+): Promise<RouteDecision> {
   if (!externalChat?.isEnabled()) {
     const decision = conservativeFallback(trimmed, "llm_route_fallback:provider_disabled");
     cacheSet(key, decision);

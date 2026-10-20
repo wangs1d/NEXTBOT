@@ -203,6 +203,7 @@ async function llmDecision(
       inputChars: auditInputChars,
       outputChars: content.length,
       model: process.env.AGENT_MEMORY_DECISION_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+      actorId: context.actorId,
     });
     const parsed = JSON.parse(content) as Partial<MemoryDecisionResult>;
     const decision = parsed.decision;

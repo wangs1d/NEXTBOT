@@ -11,7 +11,7 @@ const UV_SCALE = 0.5 / Math.tan(MODEL.screenFaceHalfAngle);
 
 /**
  * 为 DG2 玻璃网格重算 0–1 UV（CAD 导出 vt 约在 ±1.5，无法正确采样 Canvas）。
- * 以球心为基准、-Y 极点的立体投影，与 ScreenFace 画布坐标一致。
+ * 以球心为基准、-Y 极点的立体投影，与 OledScreen 的面板画布坐标一致。
  */
 export function applyGlassOledUv(geometry: THREE.BufferGeometry): void {
   const pos = geometry.attributes.position as THREE.BufferAttribute;

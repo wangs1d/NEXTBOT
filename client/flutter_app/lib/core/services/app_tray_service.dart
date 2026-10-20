@@ -2,7 +2,8 @@ import "dart:io" show Directory, File, Platform, exit;
 import "dart:typed_data" show ByteData;
 
 import "package:flutter/foundation.dart" show debugPrint;
-import "package:flutter/services.dart" show rootBundle;
+import "package:flutter/services.dart"
+    show MethodCall, MethodChannel, rootBundle;
 import "package:tray_manager/tray_manager.dart";
 import "package:window_manager/window_manager.dart";
 
@@ -24,6 +25,11 @@ class AppTrayService with WindowListener, TrayListener {
   static const String _menuKeyShow = "show_main_window";
   static const String _menuKeyExit = "exit_app";
 
+  /// 单实例激活通道：桌面再次启动本应用时，原生侧（新进程）发现已有主实例
+  /// 后不建新窗口，而是向本实例发「请前置」请求（见 runner/single_instance.h）。
+  static const MethodChannel _instanceChannel =
+      MethodChannel("pai/single_instance");
+
   /// 托盘图标资源（pubspec 已声明 assets/tray_icon.ico）。
   static const String _iconAssetKey = "assets/tray_icon.ico";
   static const String _iconFileName = "tray_icon.ico";
@@ -43,6 +49,10 @@ class AppTrayService with WindowListener, TrayListener {
     _initialized = true;
     windowManager.addListener(this);
     trayManager.addListener(this);
+
+    // 单实例激活监听：必须在托盘就绪判定之前注册——托盘装不上时应用点 X
+    // 会正常退出、没有驻留实例，但只要有实例在跑，再次点桌面图标就该前置它。
+    _instanceChannel.setMethodCallHandler(_handleInstanceCall);
 
     _trayReady = await _installTray();
     if (!_trayReady) {
@@ -135,6 +145,15 @@ class AppTrayService with WindowListener, TrayListener {
     } catch (e) {
       debugPrint("[AppTray] showMainWindow failed: $e");
     }
+  }
+
+  /// 原生「请前置」请求处理：桌面再次启动本应用时，新进程静默退出，转而
+  /// 经此请求本实例把托盘中的主窗口恢复并前置（复用托盘单击同一路径）。
+  Future<dynamic> _handleInstanceCall(MethodCall call) async {
+    if (call.method == "onActivateRequested") {
+      await showMainWindow();
+    }
+    return null;
   }
 
   /// 隐藏到托盘：任务栏图标一并摘掉。

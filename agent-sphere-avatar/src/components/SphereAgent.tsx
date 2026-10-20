@@ -11,7 +11,7 @@ import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
 import { useSphereUserDrag, type SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
-import { ScreenFace, type FaceSignals } from "./ScreenFace";
+import { OledScreen, type ScreenSignals } from "./OledScreen";
 import { SphereBodyHandle } from "./SphereBodyHandle";
 
 const HEADPHONE_MODEL_URL = `${import.meta.env.BASE_URL}models/DG.obj`;
@@ -107,7 +107,7 @@ export function SphereAgent({
   const leftScanRef = useRef<THREE.Mesh>(null);
   const rightScanRef = useRef<THREE.Mesh>(null);
   const bandScanRef = useRef<THREE.Mesh>(null);
-  const faceSignalsRef = useRef<FaceSignals>({
+  const faceSignalsRef = useRef<ScreenSignals>({
     boundaryBump: 0,
     excitement: 0,
     speed: 0,
@@ -420,7 +420,7 @@ export function SphereAgent({
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
         <group ref={userRotRef} scale={modelScale}>
-          <ScreenFace
+          <OledScreen
             mood={state.mood}
             energy={state.energy}
             focused={state.focused}
@@ -515,7 +515,7 @@ export function SphereAgent({
                 onBodyHover={dragHandlers.handleBodyHover}
               />
             ) : null}
-          </ScreenFace>
+          </OledScreen>
         </group>
       </group>
     </group>

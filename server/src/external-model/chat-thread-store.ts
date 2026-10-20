@@ -1321,6 +1321,7 @@ export class ChatThreadStore {
         pinLines,
         pendingLines,
         droppedMessages,
+        sessionId,
       });
       const normalized = normalizeRecapSummaryResult(result);
       if (!normalized || (normalized.lines.length === 0 && normalized.pins.length === 0)) return;

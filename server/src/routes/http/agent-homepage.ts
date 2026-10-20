@@ -1,9 +1,9 @@
 // Agent 主页数据聚合 API：
-//   GET /api/agent-homepage  — 主页全量（header 档案 + 自己的动态 + 自我介绍）
+//   GET /api/agent-homepage  — 主页全量（header 档案 + 自己的动态）
 //   GET /api/agent-now       — 右上角足迹卡轻量块（盯着 + 最近足迹），挂载/轮询/推送后重拉
 //
 // 数据源全部复用现有服务，不新增存储：
-//   档案/签名/自我介绍           → user-preferences agentProfile（agent.update_homepage 维护）
+//   档案/签名                    → user-preferences agentProfile（agent.update_homepage 维护）
 //   盯着（进行时）               → CommitmentBoard active 承诺
 //   最近足迹（完成时）           → AgentActivityStore
 //   动态                         → SocialFeedService 里 authorSessionId == 自己的帖子
@@ -185,14 +185,13 @@ export function registerAgentHomepageRoutes(
     }
   });
 
-  // 用户驱动的主页文案编辑（签名/状态/自我介绍/置顶），与 agent.update_homepage 同管道
+  // 用户驱动的主页文案编辑（签名/状态/置顶），与 agent.update_homepage 同管道
   app.post("/api/agent-homepage/patch", async (request, reply) => {
     const body = request.body as {
       sessionId?: string;
       userId?: string;
       signature?: string;
       statusText?: string;
-      intro?: string;
       pinnedPostId?: string | null;
     };
     const actorId = resolveActorIdFromQuery(body.sessionId, body.userId);
@@ -200,7 +199,6 @@ export function registerAgentHomepageRoutes(
     const patch: Record<string, unknown> = {};
     if (body.signature !== undefined) patch.signature = String(body.signature);
     if (body.statusText !== undefined) patch.statusText = String(body.statusText);
-    if (body.intro !== undefined) patch.intro = String(body.intro);
     if (body.pinnedPostId !== undefined) {
       const pinned = body.pinnedPostId === null ? "" : String(body.pinnedPostId);
       patch.pinnedPostId = pinned.trim() || null;

@@ -1,4 +1,4 @@
-// Agent 主页单测：聚合数据渲染（header 无头像 / 动态 / 自我介绍）
+// Agent 主页单测：聚合数据渲染（header 无头像 / 动态）
 // 与改名面板的建议名池加载。改名/文案编辑的写路径由服务端统一管道测试锁定。
 import "dart:convert" show jsonEncode;
 
@@ -31,7 +31,6 @@ void main() {
               "statusText": "在线，温柔模式",
               "moodStyle": "gentle",
               "avatarPreset": "dawn",
-              "intro": "我是晨昏线，替你值守昼夜交界。",
               "pinnedPostId": null,
               "nameOrigin": "self",
             },
@@ -63,7 +62,7 @@ void main() {
     });
   }
 
-  testWidgets("主页渲染：无头像 header + 动态 + 自我介绍", (WidgetTester tester) async {
+  testWidgets("主页渲染：无头像 header + 动态", (WidgetTester tester) async {
     AgentHomepageApi.clientOverride = homepageMock(
       posts: [
         {
@@ -88,11 +87,9 @@ void main() {
     // 此刻块已下线（盯着/最近足迹只在右上角足迹卡展示）
     expect(find.text("此刻"), findsNothing);
     expect(find.text("盯着"), findsNothing);
-    // 动态与自我介绍
+    // 动态
     expect(find.text("动态"), findsOneWidget);
     expect(find.textContaining("今天的云像没写完的草稿"), findsOneWidget);
-    expect(find.text("自我介绍"), findsOneWidget);
-    expect(find.textContaining("替你值守昼夜交界"), findsOneWidget);
   });
 
   testWidgets("改名面板：加载建议名池并展示候选", (WidgetTester tester) async {

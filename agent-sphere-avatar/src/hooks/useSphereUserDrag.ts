@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 import { MODEL } from "../constants/model-proportions";
-import type { FaceSignals } from "../components/ScreenFace";
+import type { ScreenSignals } from "../components/OledScreen";
 import { registerSphereDrag, type SphereDragApi } from "../bridge/sphere-drag-bridge";
 import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { pointerHitsSphere } from "../utils/sphere-hit";
@@ -20,7 +20,7 @@ interface UseSphereUserDragOptions {
   userRotRef: RefObject<THREE.Group | null>;
   /** 物理体/根 group — 用于 Canvas 级命中检测 */
   bodyRef?: RefObject<THREE.Object3D | null>;
-  faceSignalsRef?: RefObject<FaceSignals>;
+  faceSignalsRef?: RefObject<ScreenSignals>;
   enabled?: boolean;
   /** Canvas DOM 级拖拽 */
   canvasCapture?: boolean;
@@ -109,7 +109,7 @@ export function useSphereUserDrag({
   /** 防止同一轮拖拽重复触发 onEyeClick */
   const eyeClickFiredRef = useRef(false);
 
-  const applyFaceSignals = useCallback(
+  const applyScreenSignals = useCallback(
     (touch: number, spin: number) => {
       const signals = faceSignalsRef?.current;
       if (!signals) return;
@@ -198,11 +198,11 @@ export function useSphereUserDrag({
       }
 
       const spin = Math.min(1, (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.18);
-      applyFaceSignals(1, spin);
+      applyScreenSignals(1, spin);
 
       // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动（带冷却限流）
     },
-    [api, applyFaceSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
+    [api, applyScreenSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
   );
 
   /** 直接调用 applyDragDelta（移除 RAF 节流，消除与 R3F 渲染帧不同步导致的卡顿） */
@@ -245,9 +245,9 @@ export function useSphereUserDrag({
 
         if (spinStrength > SPIN_EXCITE_THRESHOLD) {
           onExcite?.(0.6 + spinStrength * 0.9);
-          applyFaceSignals(0.6, spinStrength);
+          applyScreenSignals(0.6, spinStrength);
         } else if (totalRotRef.current > 8) {
-          applyFaceSignals(0.45, spinStrength * 0.5);
+          applyScreenSignals(0.45, spinStrength * 0.5);
         }
 
         onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
@@ -311,7 +311,7 @@ export function useSphereUserDrag({
         }
       }
     },
-    [applyDragDelta, applyFaceSignals, camera, gl.domElement, onDragRelease, onExcite, onEyeClick, onPanEnd, onTouch, raycaster],
+    [applyDragDelta, applyScreenSignals, camera, gl.domElement, onDragRelease, onExcite, onEyeClick, onPanEnd, onTouch, raycaster],
   );
 
   const beginDrag = useCallback(
@@ -338,7 +338,7 @@ export function useSphereUserDrag({
       panRemainderRef.current = { x: 0, y: 0 };
       physicsSyncCounterRef.current = 0;
       touchPulseRef.current = 1;
-      applyFaceSignals(1, 0);
+      applyScreenSignals(1, 0);
       // 每轮拖拽开始时重置 eye-click 标记
       eyeClickFiredRef.current = false;
       if (mode === "rotate") {
@@ -346,7 +346,7 @@ export function useSphereUserDrag({
       }
       return true;
     },
-    [applyFaceSignals, onTouch, readPointer],
+    [applyScreenSignals, onTouch, readPointer],
   );
 
   const resolveDragMode = (button: number): DragMode | null => {

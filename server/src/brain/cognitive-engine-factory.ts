@@ -17,86 +17,43 @@
 //   - 设 COGNITIVE_ENGINE_IMPL=world-model 即可切换，bootstrap 零改动
 
 import type { CognitiveEngine, CognitiveInput, CognitiveContext } from "./types.js";
-import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 
 /**
- * 默认认知引擎实现：基于 OpenAI 兼容协议的路由决策器。
+ * 默认认知引擎实现：确定性路由（零 LLM）。
  *
- * 行为与原 create-app-services.ts 内联实现完全等价：
- *   - 单次 LLM 调用判断路由（complex / fast）
- *   - cognize 失败 → 默认 fast（主 Agent 自处理，最安全兜底）
+ * 行为与原 create-app-services.ts 内联实现等价（就路由结果而言）：
+ *   - 产出 route（mode=direct，交由外层 streamCompletion 生成回复）
  *   - 不产出 response（统一走 streamCompletion 让主 Agent 生成回复）
+ *   - needsToolLoop=true（与既有默认实现一致）
  *
- * 从 bootstrap 抽出后，bootstrap 只需调 createCognitiveEngineFromEnv() 即可。
+ * 2026-10-20 token 优化（短路死路径）：DecisionHub（规则驱动端到端认知）已在
+ * bootstrap 装配处**无条件**注册（create-app-services.ts 无条件 setDecisionHub），
+ * BrainCenter.cognize 阶段 2 优先走 decisionHub.decidePassive，本引擎的
+ * `else if (this.cognitiveEngine)` 分支永不执行——此处原先的 LLM 路由调用是
+ * 纯死路径，且其 prompt 本身硬编码 `{"mode": "direct"}`（模型无论怎么答都只能
+ * 得到 direct），LLM 调用对路由结果零影响。现直接短路为确定性诊断路由，
+ * 保留 CognitiveEngine 接口与诊断字段（rationale），可插拔扩展（COGNITIVE_ENGINE_IMPL
+ * / registerCognitiveEngineImpl）不受影响。
  */
 export function createDefaultCognitiveEngine(): CognitiveEngine {
   return {
     async cognize(input: CognitiveInput, ctx: CognitiveContext) {
       const userText = input.text ?? ctx.audioText ?? "";
-      // ── 极简 cognize：只判断「是否需要委派子 Agent」──
-      const visualBrief = ctx.visualDescription
-        ? ctx.visualDescription.slice(0, 200)
-        : "";
-      const prompt =
-        `你是路由决策器。只判断一件事：用户消息是否需要委派子 Agent 处理。\n\n` +
-        `用户消息：${userText}${visualBrief ? `\n视觉：${visualBrief}` : ""}\n\n` +
-        `判断规则（只选一个 mode）：\n` +
-        `  complex=需要委派子 Agent 的场景（满足任一即选）：\n` +
-        `    - 深度调研/比价/对比/评测/推荐（需要多步搜索整合）\n` +
-        `    - 写代码/调试/部署/自动化脚本/运维\n` +
-        `    - 截屏/操作电脑/桌面自动化/批量处理/RPA\n` +
-        `    - 转账/消费/充值/订票下单（生活服务类）\n` +
-        `    - 撰写文案/创作/策划/长文生成\n` +
-        `    - 复杂多步任务需要规划\n` +
-        `  fast=其他所有场景（寒暄/知识问答/查天气/查日历/查时间/简单工具调用）\n` +
-        `    主 Agent 自己有工具调用能力（天气/日历/时钟/search_web 等），无需委派。\n\n` +
-        `⚠️ 关键原则：宁可误判为 fast（主 Agent 自己能处理），不要漏判。\n` +
-        `  只有明确属于上述 complex 场景时才委派。\n` +
-        `  查天气、查时间、查日历、简单问答 → fast（主 Agent 自带工具）\n\n` +
-        `只输出 JSON：{"mode": "direct", "rationale": "..."}`;
-      let raw = "";
       const now = new Date().toISOString();
-      try {
-        const provider = createExternalChatProviderFromEnv();
-        if (!provider) throw new Error("no_chat_provider");
-        await provider.streamCompletion(
-          `cognize:${input.actorId}:${Date.now()}`,
-          { text: prompt },
-          (delta) => { raw += delta; },
-          undefined,
-          { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 0 },
-        );
-      } catch (e) {
-        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: `cognize_llm_failed:${String(e).slice(0, 60)}`, decidedAt: now };
-        return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: route.rationale };
-      }
-      const match = raw.match(/\{[\s\S]*\}/);
-      if (!match) {
-        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: "no_json", decidedAt: now };
-        return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: "no_json" };
-      }
-      try {
-        const parsed = JSON.parse(match[0]);
-        const mode = parsed.mode === "tool_loop" ? "tool_loop" : "direct";
-        const system = mode === "tool_loop" ? "system2" : "system1";
-        const route = {
-          userMessage: userText,
-          system: system as "system1" | "system2",
-          mode: mode as "direct" | "tool_loop",
-          rationale: typeof parsed.rationale === "string" ? parsed.rationale : "",
-          decidedAt: now,
-        };
-        return {
-          route,
-          response: "",
-          memoryWrites: [],
-          needsToolLoop: true,
-          rationale: route.rationale,
-        };
-      } catch {
-        const route = { userMessage: userText, system: "system1" as const, mode: "direct" as const, rationale: "parse_failed", decidedAt: now };
-        return { route, response: "", memoryWrites: [], needsToolLoop: true, rationale: "parse_failed" };
-      }
+      const route = {
+        userMessage: userText,
+        system: "system1" as const,
+        mode: "direct" as const,
+        rationale: "cognize_shortcircuit:decision_hub_authoritative",
+        decidedAt: now,
+      };
+      return {
+        route,
+        response: "",
+        memoryWrites: [],
+        needsToolLoop: true,
+        rationale: route.rationale,
+      };
     },
   };
 }

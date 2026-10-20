@@ -193,6 +193,19 @@ class PhoneBridgeService {
     _teardownChannel();
   }
 
+  /// 确保连接可用（App 回前台时调用，2026-10-20）。
+  ///
+  /// 已连接则空转；断线时取消挂着的退避定时器、重置退避计数后立即补连——
+  /// 后台放久了指数退避拉到 30s，回前台不等退避直接试。
+  void pokeReconnect() {
+    if (!_enabled || _manualStopped || _channel != null) return;
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempts = 0;
+    status.value = PhoneBridgeStatus.connecting;
+    _connect();
+  }
+
   void _connect() {
     if (_manualStopped || !_enabled) return;
     final WebSocketChannel channel = WebSocketChannel.connect(

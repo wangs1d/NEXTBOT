@@ -67,6 +67,8 @@ import {
   createStructuredFactStoreIfEnabled,
   isProfileField,
 } from "../agentic-memory/structured-fact-store.js";
+import { LifeModelStore } from "../agentic-memory/life-model-store.js";
+import { registerLifeManageTools } from "../tools/life-manage-tools.js";
 import {
   reconcileProfileFactsForActors,
   reconcileProfileFactsRuntime,
@@ -1492,6 +1494,29 @@ export async function createAppServices(): Promise<AppServices> {
   });
   const userUnderstandingStore = createUserUnderstandingStoreIfEnabled();
   const structuredFactStore = createStructuredFactStoreIfEnabled();
+  // 用户生活模型（Life Model，2026-10-20）：记忆四层金字塔第 ④ 层——把散在
+  // 结构化事实 / 图式 / 经验学习 / 关系图谱里的产出收敛为「实体-关系-时间」模型。
+  // 与其余 agentic-memory 表共用同一 SQLite（隐私级联天然覆盖）；初始化失败降级 null。
+  let lifeModelStore: LifeModelStore | null = null;
+  try {
+    lifeModelStore = new LifeModelStore();
+  } catch (err) {
+    console.warn("[life-model] 初始化失败（降级，生活模型不可用）:", err);
+  }
+  // 实体物化（P0 接线）：写非 user 主体的事实时旁路建/更新 life_entities（零新增调用）。
+  if (structuredFactStore) {
+    structuredFactStore.setEntityObserver((actorId, entity, seenAt, sourceRef) => {
+      if (!lifeModelStore) return;
+      lifeModelStore.upsertEntity({
+        actorId,
+        kind: "person",
+        canonicalName: entity,
+        seenAt,
+        confidence: 0.6,
+        sourceRef: sourceRef ?? "structured_fact",
+      });
+    });
+  }
   // FTS 关键词第三路（混合检索 P0）：与四件套共用同一 SQLite 文件，
   // 作为 bridge 融合召回的 BM25 rank 来源；关闭/初始化失败返回 null（无害降级）。
   const memoryFtsStore = createMemoryFtsStoreIfEnabled();
@@ -1592,7 +1617,9 @@ export async function createAppServices(): Promise<AppServices> {
       } else if (event.highSignal) {
         // 回退路径：独立承诺提取 LLM（统一抽取关闭/失败时；仅高信号——
         // 低信号在 unified 关闭时没有承诺抽取通道，scope 开关随之失效）
-        void extractCommitments(event.results.map((item) => item.memory).join("\n"))
+        void extractCommitments(event.results.map((item) => item.memory).join("\n"), {
+          actorId: event.actorId,
+        })
           .then((extracted) => {
             if (extracted.length === 0) return;
             const created = commitmentBoard.ingestExtracted(event.actorId, extracted, {
@@ -1802,6 +1829,7 @@ export async function createAppServices(): Promise<AppServices> {
     understandingStore: userUnderstandingStore,
     factStore: structuredFactStore,
     fts: memoryFtsStore,
+    lifeModel: lifeModelStore,
   });
 
   // ─── 档案字段单一权威源：启动期一次性收敛（2026-10-09）───
@@ -3992,7 +4020,15 @@ export async function createAppServices(): Promise<AppServices> {
     try {
       const { RelationshipGraphService } = await import("../services/relationship-graph-service.js");
       const relationshipGraph = new RelationshipGraphService(humanLikeMemory);
+      relationshipGraph.setLifeModelStore(lifeModelStore);
       memoryCortex.registerRelationshipGraph(relationshipGraph);
+      // 生活模型通道（实体/关系）并入召回仲裁；未初始化时传 null（通道跳过）
+      memoryCortex.registerLifeModelStore(lifeModelStore);
+      // 关系状态 → 生活模型收敛（真实挂载）：每轮 getPromptSlice 更新 warmth/rapport
+      // 后回调，规则化里程碑检测（零 LLM）→ 建/刷 self_agent 边 + 追加轨迹点。
+      userPersonalizationService.setRelationshipStateObserver((actorId, state) => {
+        void relationshipGraph.detectAndRecordMilestone(actorId, state).catch(() => {});
+      });
       console.log("[BrainCenter] 已注册 RelationshipGraphService（Phase 1 关系图谱）");
     } catch (err) {
       console.log("[BrainCenter] RelationshipGraphService 注册失败（忽略）:", err);
@@ -4329,6 +4365,12 @@ export async function createAppServices(): Promise<AppServices> {
         });
         const salienceFilter = new MemorySalienceFilter();
         const experienceLearningLoop = new MemoryExperienceLearningLoop();
+        // 生活模型持久化（P0 接线）：图式写入 life_patterns、经验/信念写入
+        // life_episodes/life_beliefs，否则原纯内存 Map 重启即失。未初始化时跳过。
+        if (lifeModelStore) {
+          schemaFormation.setPersistence(lifeModelStore);
+          experienceLearningLoop.setPersistence(lifeModelStore);
+        }
 
         // 推理引擎（多线索交叉推理）：BRAIN_MEMORY_INFERENCE_ENABLED 缺省开启
         // 注入依赖：humanLikeMemory（读节点 + 回写）+ associativeGraph（扩散）+ schemaFormation（图式匹配）
@@ -4455,6 +4497,12 @@ export async function createAppServices(): Promise<AppServices> {
         const userProfileAggregator = createUserProfileAggregator();
         userProfileAggregator.registerOnlineLearning(onlineLearningCortex);
         brainCenter.registerUserProfileAggregator(userProfileAggregator);
+        // 存量画像净噪（2026-10-20）：启动时一次性扫 data/user_profiles/*/USER_PROFILE.md，
+        // 用确定性规则清掉历史坏行（疑问句/对助手的 meta 观察/临时行程/行为频率/
+        // 无权威字段如「常用语言」/残留占位行）。零 LLM、幂等、不阻塞启动。
+        void userProfileAggregator.sanitizeStoredProfiles().catch(() => {
+          /* 净噪失败不阻断启动 */
+        });
         // 画像事实写入单一所有权：聚合器 LLM 抽取可用时，UserPersonalizationService
         // 不再走正则 patches（曾把「我叫什么？」的疑问词写成称呼）与周期性 LLM 整文件重写，
         // 避免两条写路径互相覆盖。
@@ -4987,6 +5035,9 @@ export async function createAppServices(): Promise<AppServices> {
   await interestWatcher.load();
   // 工具：让 LLM 在对话中自主维护关注列表（add/touch/remove/list）
   registerInterestWatchTools(toolRegistry, interestWatcher);
+  // 工具：生活模型管理（add/query/list/forget）——LLM 在对话中查询/维护
+  // 「实体-关系」模型（如「我妹妹叫什么」→ query）。未初始化时跳过。
+  if (lifeModelStore) registerLifeManageTools(toolRegistry, lifeModelStore);
   // 工具：主对话识别负反馈（别再提醒/别推了）后写入抑制表（suppress/remove/list）
   registerProactivityFeedbackTools(toolRegistry, proactivitySuppressionStore);
   // 工具：act 三分支 ask_first 确认闭环（用户回复"可以/不行"→ 推进挂起行动计划）

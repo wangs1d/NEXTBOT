@@ -312,6 +312,8 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
           const topic = typeof u.topic === "string" ? u.topic.trim() : "";
           const note = typeof u.note === "string" ? u.note.trim() : "";
           if (!topic || !note) return null;
+          // 落库守卫（2026-10-20）：疑问句不是「理解」，别把用户的提问当事实沉淀。
+          if (/[？?]\s*$/.test(note)) return null;
           const conf = Number(u.confidence);
           return {
             topic,
@@ -334,6 +336,10 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
           const field = typeof f.field === "string" ? f.field.trim() : "";
           const value = typeof f.value === "string" ? f.value.trim() : "";
           if (!field || !value) return null;
+          // 落库守卫（2026-10-20）：与 prompt「value 必须语义改写成无主语短值」的
+          // 约定一致，但从"靠模型自觉"落成确定性兜底——第一人称主语（会让 prompt
+          // 分不清「我」指谁）、含问号、超 20 字的都不是确定的档案字段值。
+          if (/^(我|我的|我在)/.test(value) || /[？?]/.test(value) || value.length > 20) return null;
           const conf = Number(f.confidence);
           // 时态：只认 past/upcoming/current 三个字面值；其余（含缺失）按现状
           // 处理——兼容旧模型输出，同时不因偶发脏值把现状误判成历史/计划。
@@ -505,7 +511,7 @@ export interface UnifiedLlmClient {
  */
 export async function extractUnified(
   text: string,
-  opts?: { client?: UnifiedLlmClient; model?: string; now?: Date },
+  opts?: { client?: UnifiedLlmClient; model?: string; now?: Date; actorId?: string; sessionId?: string },
 ): Promise<UnifiedExtraction | null> {
   const body = text.trim();
   if (!body || body.length < 4) return null;
@@ -537,6 +543,8 @@ export async function extractUnified(
       inputChars: body.length,
       outputChars: output.length,
       model: getAgenticMemoryLlmModel(),
+      actorId: opts?.actorId,
+      sessionId: opts?.sessionId,
     });
 
     return normalize(parseJsonObject(output) ?? {});

@@ -70,6 +70,17 @@ type ActorLearningState = {
   beliefs: BeliefRecord[];
 };
 
+/**
+ * 经验学习落盘适配器（P0，2026-10-20）：内存 store 重启即失 → 落盘后跨重启存活。
+ * 由 LifeModelStore 提供实现（life_beliefs / life_episodes 表）；结构兼容即可。
+ */
+export interface LearningPersistenceLike {
+  saveBeliefs(actorId: string, beliefs: BeliefRecord[]): void;
+  loadBeliefs(actorId: string): BeliefRecord[];
+  saveEpisodes(actorId: string, episodes: LearningEpisode[]): void;
+  loadEpisodes(actorId: string): LearningEpisode[];
+}
+
 const MAX_EPISODES_PER_ACTOR = 200;
 const MAX_BELIEFS_PER_ACTOR = 120;
 
@@ -167,6 +178,14 @@ function mergeConfidence(previous: number, incoming: number): number {
 
 export class MemoryExperienceLearningLoop {
   private readonly store = new Map<string, ActorLearningState>();
+  /** 落盘适配器（P0）：非空时 getState 先 hydrate、变更后写穿 */
+  private persistence: LearningPersistenceLike | null = null;
+  private readonly hydratedActors = new Set<string>();
+
+  /** 注入落盘适配器（装配层接线；LifeModelStore 实例）。 */
+  setPersistence(p: LearningPersistenceLike | null): void {
+    this.persistence = p;
+  }
 
   observeMemoryItem(actorId: string, item: MemoryItem): LearningEpisode | null {
     if (!shouldLearnFrom(item)) return null;
@@ -202,6 +221,7 @@ export class MemoryExperienceLearningLoop {
     state.episodes.unshift(episode);
     state.episodes = state.episodes.slice(0, MAX_EPISODES_PER_ACTOR);
     this.upsertBeliefFromEpisode(state, episode, outcome, item);
+    this.persist(actorId, state);
     return episode;
   }
 
@@ -244,6 +264,7 @@ export class MemoryExperienceLearningLoop {
         episode.updatedAt = now;
       }
     }
+    this.persist(feedback.actorId, state);
     return target;
   }
 
@@ -290,8 +311,29 @@ export class MemoryExperienceLearningLoop {
     const existing = this.store.get(actorId);
     if (existing) return existing;
     const created: ActorLearningState = { episodes: [], beliefs: [] };
+    // 首次访问：从盘内 hydrate（P0，跨重启存活）
+    if (this.persistence && !this.hydratedActors.has(actorId)) {
+      this.hydratedActors.add(actorId);
+      try {
+        created.episodes = this.persistence.loadEpisodes(actorId);
+        created.beliefs = this.persistence.loadBeliefs(actorId);
+      } catch (err) {
+        console.log(`[ExperienceLearning] hydrate 失败（忽略）: ${err}`);
+      }
+    }
     this.store.set(actorId, created);
     return created;
+  }
+
+  /** 写穿落盘（P0）：变更后把信念/经历同步到盘。 */
+  private persist(actorId: string, state: ActorLearningState): void {
+    if (!this.persistence) return;
+    try {
+      this.persistence.saveBeliefs(actorId, state.beliefs);
+      this.persistence.saveEpisodes(actorId, state.episodes);
+    } catch (err) {
+      console.log(`[ExperienceLearning] 落盘失败（忽略）: ${err}`);
+    }
   }
 
   private upsertBeliefFromEpisode(

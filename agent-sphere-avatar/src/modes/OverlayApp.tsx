@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EntranceAnimation } from "../components/EntranceAnimation";
-import { InnerThought } from "../components/InnerThought";
 import { MessageList } from "../components/MessageList";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
@@ -62,10 +61,10 @@ function resolveAttentionTargetFromDom(source?: string) {
       : source === "agent_task" || source === "tool"
         ? ".task-feed"
         : source === "pet_reaction"
-          ? ".inner-thought"
+          ? ".overlay-pet-pane"
           : source === "menu"
             ? ".overlay-quick-menu"
-            : ".inner-thought, .task-toast, .task-feed";
+            : ".task-toast, .task-feed";
   const center = readAttentionElementCenter(selector);
   if (!center) return undefined;
   return {
@@ -478,7 +477,6 @@ export function OverlayApp() {
           onShakeRequest={(strength, durationMs) => triggerVerticalShake(strength, durationMs)}
         />
         <MessageList messages={state.messages ?? []} />
-        <InnerThought state={state} />
       </div>
 
       <TaskFeed events={taskEvents} />

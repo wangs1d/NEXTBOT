@@ -157,6 +157,16 @@ while (!donePayload && Date.now() < deadline) {
 
 ws.close();
 
+// 后台旁路审计落盘宽限（2026-10-20）：记忆写入/画像抽取/滚动摘要等
+// fire-and-forget 调用常在 assistant_done 之后才完成，立即 exit 会丢失其审计
+// 记录（token A/B 采集时这些环节的归属不可见）。默认 0 保持既有行为；
+// 采集时设 PA_E2E_GRACE_MS=20000 即可等到旁路落盘。
+const graceMs = Number(process.env.PA_E2E_GRACE_MS ?? 0);
+if (graceMs > 0) {
+  log(`等待后台旁路审计落盘 ${graceMs}ms…`);
+  await new Promise((r) => setTimeout(r, graceMs));
+}
+
 // ── 结果输出 ──
 const finalText = String((donePayload as any)?.finalText ?? "");
 const toolCalls = ((donePayload as any)?.toolCalls ?? []) as Array<Record<string, unknown>>;

@@ -22,6 +22,7 @@
 
 #include "desktop_screen_capture.h"
 #include "glass_notify_window.h"
+#include "single_instance.h"
 #include "window_position_store.h"
 #include "flutter/generated_plugin_registrant.h"
 
@@ -192,6 +193,14 @@ bool FlutterWindow::OnCreate() {
         HandlePcmPlayerMethodCall(call, std::move(result));
       });
 
+  // pai/single_instance —— 单实例激活：桌面再次启动本应用时，原生侧（新进程）
+  // 定位到本实例的主窗口并 PostMessage 注册消息，本窗口处理消息后经此通道
+  // 通知 Dart 恢复托盘中的主窗口。
+  single_instance_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/single_instance",
+      &flutter::StandardMethodCodec::GetInstance());
+
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
     this->Show();
   });
@@ -335,6 +344,7 @@ void FlutterWindow::OnDestroy() {
   // 先关播放器（waveOutClose 会阻断后续音频线程回调），再释放 channel
   pcm_player_.reset();
   pcm_player_channel_.reset();
+  single_instance_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -352,6 +362,17 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
     if (result) {
       return *result;
     }
+  }
+
+  // 单实例激活：桌面再次启动本应用时，新进程已定位到本实例主窗口并
+  // PostMessage 注册消息（见 single_instance.cpp）。注册消息 id 是运行期
+  // 值，只能用 if 判定；命中即通知 Dart 恢复并前置托盘中的主窗口。
+  const UINT activate_request_msg = pai_single_instance::ActivateRequestMessage();
+  if (activate_request_msg != 0 && message == activate_request_msg) {
+    if (single_instance_channel_) {
+      single_instance_channel_->InvokeMethod("onActivateRequested", nullptr);
+    }
+    return 0;
   }
 
   switch (message) {
