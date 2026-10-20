@@ -103,3 +103,6 @@ scripts/autostart/autostart-launcher.vbs
 /shots/
 /*.png
 /scripts/*.png
+
+# docs 目录不入库（2026-10-21 定调）：设计稿、诊断文档、预览资源等只留本地，不再提交到 GitHub。
+/docs/
