@@ -79,6 +79,10 @@ test("闲聊/纯提问/知识问答 → auto（不强制工具）", () => {
     "电话是什么时候发明的",
     "为什么天空是蓝色的",
     "哈哈笑死我了",
+    // 2026-10-21 事故回归：「独立开发」含动作动词词根「开发」，曾被已删除的
+    // 「动词+长度」规则判成任务并强制 tool_choice=required，模型被迫搜明星近况。
+    "哎呀 这不是在做独立开发吗 我要追我老婆呀",
+    "今天分析了一下这个bug，有点意思",
   ]) {
     const choice = resolveForcedToolChoice(text, [fnTool("search_web")]);
     assert.equal(choice, "auto", `${text} 不该被强制调用工具`);

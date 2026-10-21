@@ -1,5 +1,10 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { normalizeRemindBeforeMinutes, type ScheduleTaskCategory } from "./schedule-task-service.js";
+import { extractReminderSubject, formatReminderMessage } from "./reminder-copy.js";
+
+// 展示文案规整已抽到 reminder-copy.ts（createTask 落库闸口共用）；此处按旧出口转发，
+// 既有调用方（schedule-user-reply / 测试）不受影响。
+export { extractReminderSubject, formatReminderMessage };
 
 export type ScheduleDraft = {
   title?: string;
@@ -142,7 +147,7 @@ export class ScheduleIntentService {
       '  "ok": true,',
       '  "task": {',
       '    "title": "完整标题，如「记得提醒我3点吃药」（可选；reminder 可不填，由 reminderMessage 自动生成）",',
-      '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」；用户对助手的称呼（如「小弟」「老哥」）不是事项，也要去掉。reminder 必填，其他类型与 title 相同或更短（可选）",',
+      '    "shortTitle": "简洁展示标题，用于「今日安排」紧凑列表：去掉时间与「记得/提醒我/帮我/给我」等指令词，只保留核心事项，如「记得提醒我3点吃药」→「吃药」；用户对助手的称呼（如「小弟」「老哥」）不是事项，也要去掉。必须是干净的事项词（≤12字），出现时间词/指令词/悬空的「的」开头都算错；不要复述原句。reminder 必填，其他类型与 title 相同或更短（可选)",',
       '    "description": "用户原句",',
       '    "kind": "reminder|action|weather_brief",',
       '    "category": "itinerary|trivia",',
@@ -151,7 +156,7 @@ export class ScheduleIntentService {
       '    "durationMinutes": "事件时长（分钟，整数，可选）。用户说了起止时间（如「9点到10点半开会」→ 90）或明确时长（「开会1小时」→ 60）时必须填写；只说「X点提醒我做某事」没有时长概念时省略",',
       '    "location": "事件地点（可选）。用户说了具体地点（如「去协和医院看牙」「首都机场T3」）就填；系统据此估算路程并动态安排分级提醒（前晚备忘/起床闹钟/出发预留）；没说地点就不填",',
       '    "remindBeforeMinutes": "提前量提醒（分钟数组，可选）。仅当用户明确说出提前量（如「提前15分钟提醒我开会」→ [15]）时填写；用户没说就省略——系统会按事项时间/重要程度/地点自动安排分级提醒，不要替用户默认填 [15]",',
-      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案（仅 reminder）",',
+      '    "reminderMessage": "到点时展示给用户的友好提醒，如「该吃药啦！记得按时服药」而非「喊我睡觉」或「睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案（仅 reminder）。禁止复述用户原句（「11点提醒我吃饭」这类回声是错的），禁止带时间表述——到点时刻会单独展示，文案只说事本身",',
       '    "action": { "url": "https://...", "method": "POST", "body": {} }',
       "  }",
       "}",
@@ -594,55 +599,6 @@ function isReminderIntent(text: string): boolean {
   return /提醒我|提醒一下|提醒|闹钟|叫我起床|喊我起床|起床|叫醒|叫我|喊我|定时叫|定时提醒/.test(
     text,
   );
-}
-
-/** 用户对助手的口语称呼（如「五分钟后提醒我睡觉 小弟」的「小弟」）：是称呼不是事项，须从主题中剥离。 */
-const VOCATIVE_WORDS =
-  "小弟|老弟|大哥|老哥|哥哥|姐姐|哥们|兄弟|老铁|老板|大佬|帅哥|美女|亲爱的|宝贝|师傅|师父|老师|同学";
-const LEADING_VOCATIVE_RE = new RegExp(`^(?:${VOCATIVE_WORDS})[\\s，,、；;。：:！!？?]+`);
-// 称呼须与事项有空格/标点分隔才剥离：「睡觉 小弟」剥，「打电话给大哥」不剥（大哥是宾语）。
-const TRAILING_VOCATIVE_RE = new RegExp(
-  `[\\s，,、；;。：:！!？?]+(?:${VOCATIVE_WORDS})[呀啊啦哟哦呗呢吧。！!？?]*$`,
-);
-
-/** 从用户句中提取提醒事项。 */
-export function extractReminderSubject(userText: string): string {
-  const normalized = userText.trim();
-  let rest = normalized.replace(LEADING_VOCATIVE_RE, "");
-  rest = stripLeadingTimeExpression(rest);
-  rest = rest.replace(/^[，,、；;。\s]+/, "");
-  rest = rest.replace(/^(请|帮我|把我)\s*/, "");
-  rest = rest.replace(/^(喊我|叫我)\s*/, "");
-  rest = rest.replace(/^提醒我\s*/, "");
-  rest = rest.replace(/^提醒一下\s*/, "");
-  rest = rest.replace(/^提醒\s*/, "");
-  rest = rest.replace(/\s*提醒我\s*$/, "");
-  rest = rest.replace(TRAILING_VOCATIVE_RE, "");
-  rest = rest.replace(/\s+/g, " ").trim();
-  return rest || "到点提醒";
-}
-
-/** 将提醒事项转为到点时展示的友好文案。 */
-export function formatReminderMessage(subject: string): string {
-  const s = subject.trim();
-  if (!s) return "到点提醒";
-  if (s === "起床") return "该起床啦！";
-  if (s === "吃药" || s === "用药") return "该吃药啦";
-  if (/[啦啊哦哟！!]$/.test(s)) return s;
-  if (s.length <= 8) return `该${s}啦`;
-  return s;
-}
-
-function stripLeadingTimeExpression(text: string): string {
-  const rel = text.match(
-    /^(?:半(?:个)?(?:小时|钟头)|\d+\s*秒(?:钟)?|[一二两三四五六七八九十]{1,3}|\d+)\s*(?:个)?(?:分钟|小时|钟头)(?:后|之后|以内)?|半(?:个)?(?:小时|钟头)(?:后|之后)?\s*/,
-  );
-  if (rel) return text.slice(rel[0].length);
-  const abs = text.match(
-    /^(?:(?:每天|每日|明天|今天|后天|大后天)\s*)?(?:(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜)\s*)?(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)\s*/,
-  );
-  if (abs) return text.slice(abs[0].length);
-  return text;
 }
 
 /** 天气/穿衣类定时简报（与普通「提醒我」区分：须含下列关键词之一） */

@@ -1,0 +1,163 @@
+{
+  "summary": {
+    "runId": "20261021041441",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 2,
+    "totalRuns": 10,
+    "passRuns": 10,
+    "passRate": "100.0%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 10,
+    "toolGroupHitRate": "100.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 7450,
+      "p95": 10174,
+      "max": 12157
+    },
+    "passAtK": {
+      "k": 2,
+      "cases": 5,
+      "totalCases": 5,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7090
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 2,
+      "text": "明天天气怎么样",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 8602
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 1,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7438
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 2,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7211
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7450
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 2,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7169
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 10174
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 2,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9385
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [
+        "weather.get_local",
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 12157
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 2,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [
+        "weather.get_local",
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 10123
+    }
+  ]
+}

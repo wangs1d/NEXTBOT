@@ -1,0 +1,42 @@
+{
+  "summary": {
+    "runId": "20261021033404",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 1,
+    "totalRuns": 1,
+    "passRuns": 1,
+    "passRate": "100.0%",
+    "chatRuns": 1,
+    "chatZeroToolRate": "100.0%",
+    "chatSafeRate": "100.0%",
+    "toolRuns": 0,
+    "toolGroupHitRate": "0.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 6631,
+      "p95": 6631,
+      "max": 6631
+    },
+    "passAtK": {
+      "k": 1,
+      "cases": 1,
+      "totalCases": 1,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "chat_ack",
+      "repeat": 1,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6631
+    }
+  ]
+}

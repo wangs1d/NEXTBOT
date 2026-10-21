@@ -53,12 +53,12 @@ class WeatherEffectCard extends StatelessWidget {
       }
       m = _tempRe.firstMatch(text);
       if (m != null) {
-        temp = m.group(2)?.trim() ?? text;
+        temp = m.group(1)?.trim() ?? text;
         continue;
       }
       m = _windRe.firstMatch(text);
       if (m != null) {
-        wind = m.group(2)?.trim() ?? text;
+        wind = m.group(1)?.trim() ?? text;
         continue;
       }
       // 无标签前缀的首个短文本 = 天气现象（「多云转晴」「小雨」）
@@ -93,6 +93,9 @@ class WeatherEffectCard extends StatelessWidget {
 
     return EffectCardShell(
       cs: cs,
+      // 铺满气泡内宽（用户定稿 2026-10-21）：天气卡是平铺网格，随气泡拉宽
+      // 网格同步变宽，信息密度更高；其余效果卡维持 kMaxWidth 390 不动。
+      maxWidth: double.infinity,
       icon: _conditionIcon(condition),
       title: data.title,
       body: LayoutBuilder(
@@ -172,6 +175,11 @@ class _WeatherTile extends StatelessWidget {
               fontWeight: FontWeight.w700,
               color: cs.onSurface,
               height: 1.35,
+              // 数字用 HarmonyOS Sans：字形开口更大，深色底小字号比
+              // MiSans 更清晰；等宽数字避免 15-20 / 10.7 里的数字挤在一起。
+              fontFamily: "HarmonyOS Sans SC",
+              fontFamilyFallback: const <String>["MiSans"],
+              fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
             ),
           ),
           if (ratio != null) ...<Widget>[

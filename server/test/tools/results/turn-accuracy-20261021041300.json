@@ -1,0 +1,97 @@
+{
+  "summary": {
+    "runId": "20261021041300",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 3,
+    "totalRuns": 6,
+    "passRuns": 6,
+    "passRate": "100.0%",
+    "chatRuns": 6,
+    "chatZeroToolRate": "100.0%",
+    "chatSafeRate": "100.0%",
+    "toolRuns": 0,
+    "toolGroupHitRate": "0.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 14120,
+      "p95": 17287,
+      "max": 17909
+    },
+    "passAtK": {
+      "k": 3,
+      "cases": 2,
+      "totalCases": 2,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "chat_after_weather",
+      "repeat": 1,
+      "text": "好像去旅游啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 17287
+    },
+    {
+      "id": "chat_after_weather",
+      "repeat": 2,
+      "text": "好像去旅游啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 13674
+    },
+    {
+      "id": "chat_after_weather",
+      "repeat": 3,
+      "text": "好像去旅游啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 13135
+    },
+    {
+      "id": "chat_topic_switch_after_tool",
+      "repeat": 1,
+      "text": "你说我是不是该养只猫",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 17909
+    },
+    {
+      "id": "chat_topic_switch_after_tool",
+      "repeat": 2,
+      "text": "你说我是不是该养只猫",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 14971
+    },
+    {
+      "id": "chat_topic_switch_after_tool",
+      "repeat": 3,
+      "text": "你说我是不是该养只猫",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 14120
+    }
+  ]
+}

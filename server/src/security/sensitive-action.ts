@@ -19,14 +19,28 @@ export type ActionSensitivity = "read" | "act_internal" | "act_external";
 /** 已知外部副作用工具前缀（act_external）。表外工具不默认升档，由调用方自行从严。 */
 const EXTERNAL_TOOL_PREFIXES: string[] = [
   "shopping.order.", // 下单/支付（阶段二提交）
-  "email_sms.", // 邮件/短信外发
-  "phone_call.", // 真实外呼
-  "message.send", // 代发消息
-  "messages.send",
+  "email_sms.", // 邮件/短信外发（旧族）
+  "email.send", // 邮件外发
+  "phone_call.", // 真实外呼（旧族）
+  "phone.dial", // 真实拨号外呼
+  "phone.call_user", // 代拨电话给用户联系人
+  "message.send", // 代发消息（旧族）
+  "messages.send", // 代发消息（旧族）
+  "messages.reply", // 代发短信/好友消息（触达真实收件人）
+  "world.link.send_message", // 站内消息直达他人
   "commitment.nudge", // 代发催促
-  "smart_home.execute", // 物理世界设备
-  "wallet.pay",
-  "payment.",
+  "smart_home.execute", // 物理世界设备（旧族）
+  "smart_home.control_device", // 物理设备控制
+  "smart_home.scene", // 场景一键执行（触发设备动作）
+  "wallet.pay", // 资金支出
+  "payment.", // 支付族
+  // alipay 支付/绑卡族（query-payment / check-wallet / merchant-list 是只读，不列）
+  "alipay.submit-payment",
+  "alipay.proxy-trade",
+  "alipay.merchant-order",
+  "alipay.apply-wallet",
+  "alipay.bind-wallet",
+  "alipay.pay-402",
 ];
 
 /** 只读工具前缀（声明性，供审计展示；未命中任何表的工具按调用方语义处理） */

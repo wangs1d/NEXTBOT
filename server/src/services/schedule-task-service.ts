@@ -5,6 +5,7 @@ import { isIP } from "net";
 import { dirname, join } from "path";
 
 import { buildReminderPolicy, type ScheduleHabitHints, type SchedulePreReminder } from "./schedule-reminder-policy.js";
+import { extractReminderSubject, formatReminderMessage, isEchoLikeReminderCopy } from "./reminder-copy.js";
 import type { RouteEstimate } from "./route-duration-service.js";
 import { taskHasOccurrenceInRange } from "./schedule-recurrence-expand.js";
 
@@ -282,6 +283,44 @@ export type ScheduleTaskServiceOptions = {
   now?: () => Date;
 };
 
+/**
+ * 提醒展示文案契约（落库闸口，2026-10-21 根修「的11点03分提醒我吃饭」类回声）：
+ * shortTitle/reminderMessage 是展示文案，不是原句回声。模型自己填的字段
+ * （reminder.plan 的 structured 分支、calendar.create_task 直填、HTTP 直写）
+ * 不经解析服务，全在此统一过检——含时间词/「提醒我」类指令词/悬空助词开头/
+ * 超长短标题即视为解析污染，从 description 重推导干净文案。
+ */
+function normalizeReminderDisplayCopy(
+  kind: ScheduleTaskKind,
+  description: string,
+  shortTitle: string | undefined,
+  reminderMessage: string | undefined,
+  source?: ScheduleTaskRecord["source"],
+): { shortTitle?: string; reminderMessage?: string } {
+  if (kind !== "reminder") {
+    return { shortTitle: shortTitle?.trim() || undefined };
+  }
+  // 非手动来源（承诺/ics/邮件/预订）有各自的确定性文案生成器，不是模型回声，不动。
+  if (source && source !== "manual") {
+    return {
+      shortTitle: shortTitle?.trim() || undefined,
+      reminderMessage: reminderMessage?.trim() || undefined,
+    };
+  }
+  const short = shortTitle?.trim() ?? "";
+  const message = reminderMessage?.trim() ?? "";
+  const subject = extractReminderSubject(description ?? "");
+  const shortBad = !short || short.length > 16 || isEchoLikeReminderCopy(short);
+  const msgBad = !message || isEchoLikeReminderCopy(message);
+  return {
+    // 短标题回退拿不到干净事项词时宁缺毋滥（今日安排走展示端剥离简化）
+    shortTitle: shortBad ? (subject === "到点提醒" ? undefined : subject) : short,
+    // 只拦回声（原句/半截原句），从原句重推导「该X啦」约定文案；干净文案
+    // 原样放行——无条件包装会把「睡觉了」「吃药时间到」改成「该睡觉了啦」类垃圾。
+    reminderMessage: msgBad ? formatReminderMessage(subject) : message || undefined,
+  };
+}
+
 export class ScheduleTaskService {
   private readonly byTaskId = new Map<string, ScheduleTaskRecord>();
   private readonly runsByTaskId = new Map<string, ScheduleTaskRun[]>();
@@ -511,17 +550,32 @@ export class ScheduleTaskService {
    */
   private findActiveDuplicate(
     input: CreateScheduleTaskInput,
+    incomingCopy: { shortTitle?: string; reminderMessage?: string },
     schedule: { recurrence: ScheduleRecurrence; runAt: string; cronExpression?: string },
     timezone: string,
   ): ScheduleTaskRecord | undefined {
     const description = normalizeScheduleContent(input.description);
-    const reminderMessage = normalizeScheduleContent(input.reminderMessage ?? input.description);
+    const reminderMessage = normalizeScheduleContent(
+      incomingCopy.reminderMessage ?? input.description,
+    );
     const runAtMs = Date.parse(schedule.runAt);
     for (const task of this.byTaskId.values()) {
       if (task.sessionId !== input.sessionId || task.kind !== input.kind) continue;
       if (task.status !== "active" && task.status !== "paused") continue;
       if (normalizeScheduleContent(task.description) !== description) continue;
-      if (normalizeScheduleContent(task.reminderMessage ?? task.description) !== reminderMessage) {
+      // 存量任务按同一文案契约规整后参与比较：签名必须与落库值同源，
+      // 否则闸口改写（回声文案重推导）会让同内容重放在签名上错位。
+      const taskCopy = normalizeReminderDisplayCopy(
+        task.kind,
+        task.description,
+        task.shortTitle,
+        task.reminderMessage,
+        task.source,
+      );
+      if (
+        normalizeScheduleContent(taskCopy.reminderMessage ?? task.description) !==
+        reminderMessage
+      ) {
         continue;
       }
       if (task.timezone !== timezone || task.recurrence !== schedule.recurrence) continue;
@@ -547,15 +601,23 @@ export class ScheduleTaskService {
     const schedule = this.resolveSchedule(input.runAt, input.recurrence, tz, input.cronExpression);
     const now = this.now().toISOString();
     this.validateKindPayload(input.kind, input.reminderMessage, input.action, input.agentTask);
+    // 文案契约先归一再判重：幂等签名与落库值同源（见 findActiveDuplicate 注释）。
+    const copy = normalizeReminderDisplayCopy(
+      input.kind,
+      input.description,
+      input.shortTitle,
+      input.reminderMessage,
+      input.source,
+    );
     // 幂等创建：命中重复时直接返回已有任务，不插入、不持久化、不广播 tasks_changed
     //（客户端本地镜像按 taskId 幂等，旧广播已存在，无需再发）。
-    const duplicate = this.findActiveDuplicate(input, schedule, tz);
+    const duplicate = this.findActiveDuplicate(input, copy, schedule, tz);
     if (duplicate) return duplicate;
     const task: ScheduleTaskRecord = {
       taskId: randomUUID(),
       sessionId: input.sessionId,
       title: input.title?.trim() || undefined,
-      shortTitle: input.shortTitle?.trim() || undefined,
+      shortTitle: copy.shortTitle,
       description: input.description.trim(),
       kind: input.kind,
       category: input.category,
@@ -566,7 +628,7 @@ export class ScheduleTaskService {
       cronExpression: schedule.cronExpression,
       webhookToken: this.normalizeWebhookToken(input.webhookToken),
       status: "active",
-      reminderMessage: input.reminderMessage?.trim() || undefined,
+      reminderMessage: copy.reminderMessage,
       action: input.action,
       agentTask: input.agentTask,
       durationMinutes: normalizeDurationMinutes(input.durationMinutes),
@@ -669,6 +731,15 @@ export class ScheduleTaskService {
         input.location !== undefined ? input.location?.trim() || undefined : task.location,
       updatedAt: this.now().toISOString(),
     };
+    // 更新同样过文案契约闸（改期/改写不得把回声文案带进展示链）。
+    const copy = normalizeReminderDisplayCopy(
+      next.kind,
+      next.description,
+      next.shortTitle,
+      next.reminderMessage,
+    );
+    next.shortTitle = copy.shortTitle;
+    next.reminderMessage = copy.reminderMessage;
     if (
       input.runAt !== undefined ||
       input.recurrence !== undefined ||

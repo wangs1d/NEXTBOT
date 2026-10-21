@@ -50,10 +50,9 @@ export const RHYTHM_REMINDER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "care.rhythm_reminder",
       description: [
-        "节律提醒预设模板管理（喝水/睡觉/运动，健康关怀）。",
-        "默认不创建任何提醒；当用户明确说「每天提醒我喝水」「到点提醒我睡觉」「开启运动提醒」时，",
-        "调本工具 action=enable 开启（preset=water/sleep/exercise，times 可自定义时刻数组，如 [\"09:00\",\"14:00\"]）；",
-        "用户说「别提醒我喝水了」「关掉睡觉提醒」时用 action=disable；action=list 查看各预设开关状态。",
+        "生活习惯节律提醒（每天循环提醒）：喝水提醒、睡觉提醒、运动提醒三类健康习惯预设，按固定时刻每天重复。",
+        "何时用：用户要「每天提醒我喝水」「每天多喝水」「到点提醒我睡觉/每天提醒我睡觉」「开启运动提醒」这类无具体日期、每天循环的习惯提醒时，调本工具 action=enable 开启（preset=water/sleep/exercise，times 可自定义时刻数组，如 [\"09:00\",\"14:00\"]）；",
+        "何时不用：单次提醒或有明确日期时间的日程用 reminder.plan / calendar.create_from_text。用户说「别提醒我喝水了」「关掉睡觉提醒」时用 action=disable；action=list 查看各预设开关状态。",
       ].join(" "),
       parameters: {
         type: "object",

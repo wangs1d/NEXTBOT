@@ -528,8 +528,14 @@ int DynamicIslandWindow::MeasureAttentionCapsuleW(
     const float gap = 7.0f * s;
     const float title_gap = 8.0f * s;
     const float icon_block = m_icon.Width + gap;
+    // 8 逻辑 px 安全余量：测量值落库取整（+0.5f 截断）会丢亚像素零头，渲染端
+    // title_cap 由本值反推，零头为负时 FitText 把末字符换成省略号——用户看到的
+    // 是「…吃饭」而非全部内容（2026-10-21 实证根修）。渲染端叠画图标块均不宽于
+    // 此处实测的 kSchedule 字形，余量同时覆盖该偏差。
+    const float fit_slack = 8.0f * s;
     const float needed =
-        pad_x * 2.0f + icon_block + m_title.Width + title_gap + trail_w;
+        pad_x * 2.0f + icon_block + m_title.Width + title_gap + trail_w +
+        fit_slack;
     const int logical =
         static_cast<int>(needed / dpi_scale_ + 0.5f);
     result = std::clamp(logical, kAttentionCapsuleW, kAttentionMaxCapsuleW);

@@ -1,0 +1,77 @@
+{
+  "summary": {
+    "runId": "20261021040403",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 1,
+    "totalRuns": 3,
+    "passRuns": 2,
+    "passRate": "66.7%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 3,
+    "toolGroupHitRate": "66.7%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 8156,
+      "p95": 8156,
+      "max": 90007
+    },
+    "passAtK": {
+      "k": 1,
+      "cases": 2,
+      "totalCases": 3,
+      "rate": "66.7%"
+    }
+  },
+  "failures": [
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "elapsedMs": 90007,
+      "reason": "error:timeout(90000ms)"
+    }
+  ],
+  "runs": [
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 8083
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:timeout(90000ms)",
+      "elapsedMs": 90007
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 1,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 8156
+    }
+  ]
+}

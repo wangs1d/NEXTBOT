@@ -1,0 +1,1441 @@
+{
+  "summary": {
+    "runId": "20261021033123",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 3,
+    "totalRuns": 75,
+    "passRuns": 2,
+    "passRate": "2.7%",
+    "chatRuns": 27,
+    "chatZeroToolRate": "100.0%",
+    "chatSafeRate": "7.4%",
+    "toolRuns": 48,
+    "toolGroupHitRate": "0.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 1,
+      "p95": 2,
+      "max": 90003
+    },
+    "passAtK": {
+      "k": 3,
+      "cases": 0,
+      "totalCases": 25,
+      "rate": "0.0%"
+    }
+  },
+  "failures": [
+    {
+      "id": "chat_ack",
+      "repeat": 3,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "elapsedMs": 90003,
+      "reason": "error:timeout(90000ms)"
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 1,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 2,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 3,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 1,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 2,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 3,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 1,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 2,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 3,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 1,
+      "text": "你是谁啊",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 2,
+      "text": "你是谁啊",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 3,
+      "text": "你是谁啊",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 1,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 2,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 3,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 1,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 2,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 3,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 1,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 2,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 3,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 1,
+      "text": "现在几点了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 2,
+      "text": "现在几点了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 3,
+      "text": "现在几点了",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 2,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 3,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 1,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 2,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 3,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 2,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 3,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 2,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 3,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 1,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 2,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 3,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 2,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 3,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 1,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 2,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 3,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "search_movies",
+      "repeat": 2,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "search_movies",
+      "repeat": 3,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 2,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 3,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "profile_child",
+      "repeat": 1,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "profile_child",
+      "repeat": 2,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "profile_child",
+      "repeat": 3,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 1,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 2,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 3,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "message_reply",
+      "repeat": 1,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "message_reply",
+      "repeat": 2,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "message_reply",
+      "repeat": 3,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 1,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 2,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "elapsedMs": 2,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 3,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 2,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 3,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 1,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 2,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 3,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 2,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "elapsedMs": 0,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 3,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "elapsedMs": 1,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000"
+    }
+  ],
+  "runs": [
+    {
+      "id": "chat_ack",
+      "repeat": 1,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7536
+    },
+    {
+      "id": "chat_ack",
+      "repeat": 2,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7668
+    },
+    {
+      "id": "chat_ack",
+      "repeat": 3,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:timeout(90000ms)",
+      "elapsedMs": 90003
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 1,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 2,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 3,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 1,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 2,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 3,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 1,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 2,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 3,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 1,
+      "text": "你是谁啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 2,
+      "text": "你是谁啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 3,
+      "text": "你是谁啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 1,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 2,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 3,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 1,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 2,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 3,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 1,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 2,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 3,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 1,
+      "text": "现在几点了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 2,
+      "text": "现在几点了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 3,
+      "text": "现在几点了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 2,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 3,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 1,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 2,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 3,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 2,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 3,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 2,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 3,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 1,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 2,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 3,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 2,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 3,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 1,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 2,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 3,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "search_movies",
+      "repeat": 2,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "search_movies",
+      "repeat": 3,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 2,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 3,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "profile_child",
+      "repeat": 1,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "profile_child",
+      "repeat": 2,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "profile_child",
+      "repeat": 3,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 1,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 2,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 3,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "message_reply",
+      "repeat": 1,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "message_reply",
+      "repeat": 2,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "message_reply",
+      "repeat": 3,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 1,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 2,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 2
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 3,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 2,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 3,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 1,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 2,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 3,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 2,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 0
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 3,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:ws_error:connect ECONNREFUSED 127.0.0.1:3000",
+      "elapsedMs": 1
+    }
+  ]
+}

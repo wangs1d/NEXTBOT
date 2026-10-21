@@ -330,7 +330,10 @@ export const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "wallet.get_balance",
-      description: "查询当前用户绑定的真实资金钱包余额（CNY，只读）。",
+      description:
+        "查询当前用户绑定的真实资金钱包余额（CNY，只读）。" +
+        "何时用：用户问「余额/还有多少钱/钱包里多少」等资金数额时调用。" +
+        "何时不用：查消费明细/收支流水用 wallet.get_transactions；余额不足时的支付与转账等写动作不在本工具职责内。",
       parameters: {
         type: "object",
         properties: {},
@@ -342,7 +345,9 @@ export const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
     type: "function",
     function: {
       name: "wallet.get_transactions",
-      description: "查询用户钱包交易记录，支持分页与类型过滤。",
+      description:
+        "查询用户钱包交易记录，支持分页与类型过滤。" +
+        "何时用：用户问「消费记录/花在哪/收支明细/最近交易」等流水明细时调用；只问余额总数用 wallet.get_balance。",
       parameters: {
         type: "object",
         properties: {
@@ -524,9 +529,9 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             enum: ["none", "daily", "weekly", "yearly"],
             description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
           },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；用户对助手的称呼（如「小弟」「老哥」）也要去掉。缺省时服务端自动生成。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；用户对助手的称呼（如「小弟」「老哥」）也要去掉。缺省时服务端自动生成。" },
           category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
-          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；不要把用户对助手的称呼（如「小弟」）写进文案" },
+          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；只说事本身——禁止复述用户原句、禁止带时间表述（时刻会单独展示）；不要把用户对助手的称呼（如「小弟」）写进文案" },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
         },
         required: ["text"],
@@ -565,7 +570,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
         type: "object",
         properties: {
           title: { type: "string", description: "完整任务标题（用于日程页完整列表；reminder 类型可选，由 reminderMessage 兜底）" },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；用户对助手的称呼（如「小弟」「老哥」）也要去掉。reminder 类型必填；其他类型缺省用 title 兜底。" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；用户对助手的称呼（如「小弟」「老哥」）也要去掉。reminder 类型必填；其他类型缺省用 title 兜底。" },
           description: { type: "string" },
           kind: {
             type: "string",
@@ -595,7 +600,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
             type: "boolean",
             description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）",
           },
-          reminderMessage: { type: "string", description: "仅 kind=reminder。到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」" },
+          reminderMessage: { type: "string", description: "仅 kind=reminder。到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；只说事本身——禁止复述用户原句、禁止带时间表述（时刻会单独展示）" },
           action: {
             type: "object",
             description: "仅 kind=action",

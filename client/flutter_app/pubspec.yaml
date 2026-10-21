@@ -91,3 +91,10 @@ flutter:
           weight: 600
         - asset: assets/fonts/MiSans-Bold.otf
           weight: 700
+    # 数字展示字体（天气卡等指标大数，字形开口更大、小字号更清晰）
+    - family: HarmonyOS Sans SC
+      fonts:
+        - asset: assets/fonts/harmonyos/HarmonyOS_Sans_SC_Medium.ttf
+          weight: 500
+        - asset: assets/fonts/harmonyos/HarmonyOS_Sans_SC_Bold.ttf
+          weight: 700

@@ -1,0 +1,64 @@
+{
+  "text": "今天天气怎么样",
+  "tools": [
+    "weather.get_local"
+  ],
+  "streamJoined": "",
+  "done": {
+    "sessionId": "probe-wx-1792553140752",
+    "messageId": "assistant-probe-1792553141975",
+    "traceId": "probe-1792553141975",
+    "finalText": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"兴义市 · 黔西南布依族苗族自治州 · 贵州省 · 中国 当前约 18°C（体感 17°C），小毛毛雨；今日约 15–20°C。 明日小毛毛雨，16–26°C，降水概率 29%。\",\"items\":[{\"type\":\"num\",\"text\":\"小毛毛雨\"},{\"type\":\"num\",\"text\":\"气温 15–20\"},{\"type\":\"num\",\"text\":\"湿度 79%\"},{\"type\":\"num\",\"text\":\"风速 11.5 km/h\"},{\"type\":\"num\",\"text\":\"峰值降水概率 100%\"}],\"footer\":\"薄外套或长袖叠穿；携带雨具（伞或雨衣）\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_1792553148815_i24bxc\"}\n[AGENT_RESULT_CARD_END]\n\n兴义今天小毛毛雨，一整天都阴着，出门记得带把伞——这种雨不大，但能从头湿到尾。回暖不多，穿件薄外套或者长袖叠一下正好，别穿太少，湿度高体感会凉。",
+    "utterance": {
+      "id": "probe-1792553141975",
+      "segments": 1,
+      "keptSegments": 1,
+      "collapse": false,
+      "collapseReason": "none",
+      "bookkeepingOnly": false
+    },
+    "finalTextReplacesStream": true,
+    "toolCalls": [],
+    "blocks": [
+      {
+        "type": "card",
+        "card": {
+          "avatar": "NB",
+          "avatarStyle": "default",
+          "title": "兴义市 · 黔西南布依族苗族自治州 · 贵州省 · 中国 当前约 18°C（体感 17°C），小毛毛雨；今日约 15–20°C。 明日小毛毛雨，16–26°C，降水概率 29%。",
+          "items": [
+            {
+              "type": "num",
+              "text": "小毛毛雨"
+            },
+            {
+              "type": "num",
+              "text": "气温 15–20"
+            },
+            {
+              "type": "num",
+              "text": "湿度 79%"
+            },
+            {
+              "type": "num",
+              "text": "风速 11.5 km/h"
+            },
+            {
+              "type": "num",
+              "text": "峰值降水概率 100%"
+            }
+          ],
+          "footer": "薄外套或长袖叠穿；携带雨具（伞或雨衣）",
+          "cardType": "weather",
+          "actions": [],
+          "speak": "",
+          "cardId": "card_1792553148815_i24bxc"
+        }
+      },
+      {
+        "type": "text",
+        "text": "兴义今天小毛毛雨，一整天都阴着，出门记得带把伞——这种雨不大，但能从头湿到尾。回暖不多，穿件薄外套或者长袖叠一下正好，别穿太少，湿度高体感会凉。"
+      }
+    ]
+  }
+}

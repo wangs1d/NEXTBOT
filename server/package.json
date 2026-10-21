@@ -25,6 +25,7 @@
     "bench:ttft": "tsx scripts/bench-ttft.ts",
     "dev:runtime": "npm run predev:server && node ../scripts/dev-server-watch.mjs runtime",
     "eval:tool-recall": "tsx scripts/eval-tool-recall.ts",
+    "eval:turn-accuracy": "node test/tools/eval-turn-accuracy.mjs",
     "eval:neural-ab": "tsx scripts/compare-neural-ab.ts",
     "bench:tool-chain": "tsx scripts/bench-tool-chain.ts",
     "eval:dispatch-tag": "tsx scripts/eval-dispatch-tag.ts"

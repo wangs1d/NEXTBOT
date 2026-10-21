@@ -1,0 +1,151 @@
+{
+  "summary": {
+    "runId": "20261021025507",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 3,
+    "totalRuns": 9,
+    "passRuns": 9,
+    "passRate": "100.0%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 9,
+    "toolGroupHitRate": "100.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 8036,
+      "p95": 11356,
+      "max": 11870
+    },
+    "passAtK": {
+      "k": 3,
+      "cases": 3,
+      "totalCases": 3,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "search_images"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 11870
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 2,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "search_images"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7965
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 3,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "search_images"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9520
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [
+        "tool_discover",
+        "smart_home.control_device"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9398
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 2,
+      "text": "把客厅的灯打开",
+      "tools": [
+        "tool_discover",
+        "smart_home_list_devices"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 8036
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 3,
+      "text": "把客厅的灯打开",
+      "tools": [
+        "tool_discover",
+        "smart_home.control_device"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 11356
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 1,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [
+        "vision.list_cameras"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7807
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 2,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [
+        "vision.list_cameras"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7683
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 3,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [
+        "vision.list_cameras"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7308
+    }
+  ]
+}

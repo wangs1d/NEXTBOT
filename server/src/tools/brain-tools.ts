@@ -257,7 +257,10 @@ export const BRAIN_RECALL_TOOL: ChatCompletionTool = {
   function: {
     name: "brain.recall",
     description:
-      "记忆召回：从记忆系统中检索与查询相关的信息。当需要回忆用户之前说过的事、或检索历史上下文时调用。",
+      "记忆召回：从用户长期记忆中检索与查询相关的历史信息（偏好、事实、承诺、经历）。" +
+      "何时用：用户让你回忆「我之前说过/提过/喜欢过什么」、或回答需要用户个人历史信息而当前对话里没有时调用。" +
+      "何时不用：当前对话上下文里刚说过的内容不用召回（直接看对话）；公开世界的实时事实用 search_web 而不是本工具。" +
+      "检索为空时照实说没找到相关记忆，禁止编造。",
     parameters: {
       type: "object",
       properties: {

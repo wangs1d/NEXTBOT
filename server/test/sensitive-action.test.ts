@@ -15,9 +15,25 @@ test("工具分档：外部副作用前缀 → act_external", () => {
     "email_sms.send_email",
     "phone_call.start",
     "message.send",
+    // 2026-10-21 表对齐真实工具名（旧表漏掉 → 被误判 act_internal，handoff/自动推进失守）
+    "messages.reply",
+    "world.link.send_message",
+    "email.send",
+    "phone.dial",
+    "phone.call_user",
+    "smart_home.control_device",
+    "smart_home.scene",
+    "alipay.submit-payment",
+    "alipay.proxy-trade",
   ]) {
     assert.equal(classifyToolSensitivity(name), "act_external", name);
   }
+});
+
+test("工具分档：alipay 只读/查询族不升档", () => {
+  assert.equal(classifyToolSensitivity("alipay.query-payment"), "act_internal");
+  assert.equal(classifyToolSensitivity("alipay.check-wallet"), "act_internal");
+  assert.equal(classifyToolSensitivity("alipay.merchant-list"), "act_internal");
 });
 
 test("工具分档：只读前缀 → read；未知工具 → act_internal", () => {

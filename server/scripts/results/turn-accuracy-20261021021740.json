@@ -1,0 +1,351 @@
+{
+  "summary": {
+    "runId": "20261021021740",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 3,
+    "totalRuns": 24,
+    "passRuns": 24,
+    "passRate": "100.0%",
+    "chatRuns": 6,
+    "chatZeroToolRate": "100.0%",
+    "toolRuns": 18,
+    "toolGroupHitRate": "100.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 3,
+    "latencyMs": {
+      "p50": 8033,
+      "p95": 32821,
+      "max": 41805
+    },
+    "passAtK": {
+      "k": 3,
+      "cases": 8,
+      "totalCases": 8,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "chat_ack",
+      "repeat": 1,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 4747
+    },
+    {
+      "id": "chat_ack",
+      "repeat": 2,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7204
+    },
+    {
+      "id": "chat_ack",
+      "repeat": 3,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6079
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 1,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6612
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 2,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7555
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 3,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7065
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7217
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 2,
+      "text": "明天天气怎么样",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6983
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 3,
+      "text": "明天天气怎么样",
+      "tools": [
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6247
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "calendar.create_from_text"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 6906
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 2,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 8033
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 3,
+      "text": "明天早上9点提醒我开会",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7249
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "search_images"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 12407
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 2,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "tool_discover",
+        "search_images"
+      ],
+      "extraTools": [
+        "tool_discover"
+      ],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 12739
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 3,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [
+        "search_images",
+        "tool_discover"
+      ],
+      "extraTools": [
+        "tool_discover"
+      ],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 13896
+    },
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 12502
+    },
+    {
+      "id": "search_movies",
+      "repeat": 2,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 16913
+    },
+    {
+      "id": "search_movies",
+      "repeat": 3,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 11802
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [
+        "weather.get_local",
+        "travel.search-poi",
+        "travel.plan-itinerary",
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 40997
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 2,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [
+        "travel.plan-itinerary",
+        "weather.get_local",
+        "travel.search-poi",
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 41805
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 3,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [
+        "travel.plan-itinerary",
+        "weather.get_local",
+        "clock.get_user_location",
+        "travel.search-poi",
+        "search_web"
+      ],
+      "extraTools": [
+        "clock.get_user_location"
+      ],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 32821
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [
+        "weather.get_local",
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 10355
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 2,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [
+        "weather.get_local",
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9270
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 3,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [
+        "weather.get_local",
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9463
+    }
+  ]
+}

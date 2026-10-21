@@ -2847,7 +2847,23 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         const hasSubstantiveAttempt = allToolExecResults.some(
           (r) => !META_TOOL_NAMES.has(r.toolName) && !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
         );
-        if (
+        // 只发现、不执行（2026-10-21 评估抓到的真实 miss）：模型调了
+        // tool_discover 拿到 schema 后直接收尾，业务工具一次都没调。此时
+        // 必须再给一波让它按 schema 真正执行，而不是停在发现阶段。
+        const discoverSucceeded = allToolExecResults.some(
+          (r) =>
+            r.ok &&
+            (r.toolName === "tool_discover" ||
+              r.toolName === "tool_search" ||
+              r.toolName === "tool_describe"),
+        );
+        if (!hasSubstantiveAttempt && discoverSucceeded) {
+          gateReason = "discover_without_execution";
+          gateInstruction =
+            "你已经从延迟工具目录加载了工具 schema，但本轮还没有调用任何具体业务工具。" +
+            "请立即按用户目标调用刚加载的工具（参数参照 schema），拿到真实结果后再回复；" +
+            "不要停在发现阶段，也不要只复述工具清单。";
+        } else if (
           finalText.trim() &&
           hasSubstantiveAttempt &&
           countSubstantiveOkResults() === 0

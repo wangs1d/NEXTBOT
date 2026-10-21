@@ -1,0 +1,57 @@
+{
+  "summary": {
+    "runId": "20261021040603",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 2,
+    "totalRuns": 2,
+    "passRuns": 2,
+    "passRate": "100.0%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 2,
+    "toolGroupHitRate": "100.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 9738,
+      "p95": 9738,
+      "max": 11152
+    },
+    "passAtK": {
+      "k": 2,
+      "cases": 1,
+      "totalCases": 1,
+      "rate": "100.0%"
+    }
+  },
+  "failures": [],
+  "runs": [
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 11152
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 2,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [
+        "reminder.plan"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9738
+    }
+  ]
+}
