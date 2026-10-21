@@ -6,6 +6,7 @@ import "package:flutter/material.dart";
 import "app/ambient_feeds_controller.dart";
 import "core/config/api_config.dart";
 import "core/services/account_session_store.dart";
+import "core/services/app_support_migration.dart";
 import "core/services/access_auth_api.dart";
 import "core/services/local_notification_service.dart";
 import "mobile_ui/mobile_home.dart";
@@ -72,6 +73,8 @@ class _MobileAppState extends State<MobileApp> {
   /// 启动恢复本机登录态：有会话先把邮箱写进运行时身份覆盖，
   /// 再进主壳——保证主壳里所有请求第一时间就带本账号身份。
   Future<void> _restoreSession() async {
+    // org 迁移（桌面 com.example → top.nextbot）；真机/非 Windows 为 no-op。
+    await AppSupportMigration.migrateIfNeeded();
     await AccountSessionStore.instance.load();
     // 设备凭据顺手加载（服务端开访问鉴权时 HTTP/WS 自动附带 Bearer token）
     await AccessCredentialStore.instance.load();

@@ -821,11 +821,20 @@ export async function createAppServices(): Promise<AppServices> {
   const funasrAdapter = new FunAsrAdapter();
 
   // 注册 OpenAI provider（默认）
+  const openaiLLMAdapter = new OpenAILLMAdapter();
   voiceDialogueService.registerProvider("openai", {
     asr: funasrAdapter,
     tts: new OpenAITTSAdapter(ttsService),
-    llm: new OpenAILLMAdapter(),
+    llm: openaiLLMAdapter,
   });
+  // 零配置启动门禁：byok 捆绑形态下用户首启还没填 key，这里必须能过——
+  // 否则服务在装配期就 abort，3000 从不监听，客户端只能「界面能开但连不上」。
+  if (!openaiLLMAdapter.isConfigured()) {
+    app.log.warn(
+      "[VoiceDialogue] 未配置 OPENAI_API_KEY —— 语音通话的 LLM 暂不可用" +
+        "（服务已降级，不影响其它能力）；在「设置-模型服务」填入 key 后重启 runtime 即恢复。",
+    );
+  }
 
   // 注册 MiniMax TTS provider（speech-2.5，中文拟真度最佳，优先使用）
   const minimaxTTS = new MiniMaxTTSAdapter();

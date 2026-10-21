@@ -22,6 +22,7 @@ import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../../external-model/resolve-provider.js";
 import { getModelForTask, TaskTier } from "../../config/model-routing.js";
+import { auditChatCompletion } from "../../services/llm-token-audit.js";
 
 export interface MemoryAssociation {
   conclusion: string;
@@ -185,14 +186,21 @@ export class MemoryAssociationSynthesizer {
   ): Promise<MemoryAssociation[]> {
     if (!this.config.enabled || items.length < 2) return [];
     try {
-      const response = await this.client.chat.completions.create({
-        model: this.config.model,
-        temperature: 0.3,
-        max_tokens: this.config.maxTokens,
-        messages: buildAssociationMessages(items, query, this.config.maxItems),
-        ...bypassChatRequestExtras(),
-      });
-      const content = response.choices[0]?.message?.content?.trim();
+        const assocMessages = buildAssociationMessages(items, query, this.config.maxItems);
+        const response = await this.client.chat.completions.create({
+          model: this.config.model,
+          temperature: 0.3,
+          max_tokens: this.config.maxTokens,
+          messages: assocMessages,
+          ...bypassChatRequestExtras(),
+        });
+        auditChatCompletion({
+          stage: "memory_association",
+          messages: assocMessages,
+          completion: response,
+          model: this.config.model,
+        });
+        const content = response.choices[0]?.message?.content?.trim();
       if (!content) return [];
       return parseAssociationsFromLlmOutput(content).filter(
         (a) => a.confidence >= this.config.minConfidence,

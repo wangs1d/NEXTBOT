@@ -24,6 +24,7 @@ import {
   type RelationshipSubject,
 } from "./memory-relationship-assertion.js";
 import type { InferenceNode } from "../brain/types.js";
+import { auditChatCompletion } from "./llm-token-audit.js";
 
 /** 读取节点来源角色：优先 metadata 打标，旧节点按文本形态即时分类（legacy 兼容）。 */
 function resolveNodeRole(node: MemoryNodeRecord): MemorySourceRole {
@@ -636,6 +637,19 @@ async function llmMergeLines(lines: string[]): Promise<string[] | null> {
       ],
       ...bypassChatRequestExtras(),
     });
+    auditChatCompletion({
+      stage: "sleep_agent",
+      messages: [
+        {
+          role: "system",
+          content:
+            'You merge redundant or fragmented memories into concise durable summaries. Return JSON only: {"merged":["..."]}.',
+        },
+        { role: "user", content: JSON.stringify({ lines }) },
+      ],
+      completion: response,
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+    });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;
     const parsed = JSON.parse(content) as { merged?: string[] };
@@ -666,6 +680,19 @@ async function llmExtractExperience(lines: string[]): Promise<string | null> {
       ],
       ...bypassChatRequestExtras(),
     });
+    auditChatCompletion({
+      stage: "sleep_agent",
+      messages: [
+        {
+          role: "system",
+          content:
+            'Extract a reusable experience rule from related memories. Return JSON only: {"summary":"..."}',
+        },
+        { role: "user", content: JSON.stringify({ lines }) },
+      ],
+      completion: response,
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
+    });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;
     const parsed = JSON.parse(content) as { summary?: string };
@@ -685,6 +712,21 @@ async function llmPlanSleepActions(
 
   try {
     const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
+    const planPayload = JSON.stringify({
+      actorId,
+      maxActions: Math.min(policy.sleepAgent.maxActionsPerRun, 24),
+      nodes: nodes.slice(0, 40).map((node) => ({
+        id: node.id,
+        domainId: node.domainId,
+        kind: node.kind,
+        summary: node.summary.slice(0, 160),
+        importance: node.importance,
+        confidence: node.confidence,
+        accessCount: node.accessCount,
+        correctness: node.correctness,
+        deletionStage: node.deletionStage,
+      })),
+    });
     const response = await openai.chat.completions.create({
       model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
       temperature: 0.1,
@@ -695,26 +737,22 @@ async function llmPlanSleepActions(
           content:
             'Plan incremental memory consolidation actions. Return JSON only: {"actions":[...]}. Allowed types: downrank,cold,soft_delete,hard_delete,merge,promote_knowledge,mark_error,mark_conflict.',
         },
-        {
-          role: "user",
-          content: JSON.stringify({
-            actorId,
-            maxActions: Math.min(policy.sleepAgent.maxActionsPerRun, 24),
-            nodes: nodes.slice(0, 40).map((node) => ({
-              id: node.id,
-              domainId: node.domainId,
-              kind: node.kind,
-              summary: node.summary.slice(0, 160),
-              importance: node.importance,
-              confidence: node.confidence,
-              accessCount: node.accessCount,
-              correctness: node.correctness,
-              deletionStage: node.deletionStage,
-            })),
-          }),
-        },
+        { role: "user", content: planPayload },
       ],
       ...bypassChatRequestExtras(),
+    });
+    auditChatCompletion({
+      stage: "sleep_agent",
+      messages: [
+        {
+          role: "system",
+          content:
+            'Plan incremental memory consolidation actions. Return JSON only: {"actions":[...]}. Allowed types: downrank,cold,soft_delete,hard_delete,merge,promote_knowledge,mark_error,mark_conflict.',
+        },
+        { role: "user", content: planPayload },
+      ],
+      completion: response,
+      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;

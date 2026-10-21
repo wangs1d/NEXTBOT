@@ -15,6 +15,7 @@ import OpenAI from "openai";
 import { loadImageBytes } from "./image-caption-service.js";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../external-model/vision-support.js";
+import { auditChatCompletion } from "./llm-token-audit.js";
 
 export interface ProductImageCandidate {
   /** 可被 loadImageBytes 读取的图地址（本地 /agent/images/... 或远程 URL） */
@@ -81,23 +82,30 @@ export async function pickBestProductImage(
         image_url: { url: `data:${img.mime};base64,${img.base64}` },
       })),
     ];
+    const scorerSystem = [
+      "你是电商推荐的「商品图质检员」。判断每张图是否适合单独展示该商品（作为推荐卡的主图）。",
+      "评分标准（0-10 整数）：",
+      "+ 白底/纯色背景、商品居中完整：8-10；普通商品实拍图且商品是画面主体：5-7。",
+      "- 大段促销文字/水印/价格标签贴图：-4；多商品拼图或对比图：-3；人群/生活场景为主、商品是配角：-3；截图/新闻图/与商品无关：0。",
+      "只输出 JSON：{\"scores\":[{\"i\":0,\"score\":8,\"why\":\"白底主体图\"},...]}，i 对应图片顺序（0 起），数组长度等于图片张数；不要输出 JSON 以外的任何文字。",
+    ].join("\n");
     const resp = await client.chat.completions.create({
       model: cfg.model,
       messages: [
-        {
-          role: "system",
-          content: [
-            "你是电商推荐的「商品图质检员」。判断每张图是否适合单独展示该商品（作为推荐卡的主图）。",
-            "评分标准（0-10 整数）：",
-            "+ 白底/纯色背景、商品居中完整：8-10；普通商品实拍图且商品是画面主体：5-7。",
-            "- 大段促销文字/水印/价格标签贴图：-4；多商品拼图或对比图：-3；人群/生活场景为主、商品是配角：-3；截图/新闻图/与商品无关：0。",
-            "只输出 JSON：{\"scores\":[{\"i\":0,\"score\":8,\"why\":\"白底主体图\"},...]}，i 对应图片顺序（0 起），数组长度等于图片张数；不要输出 JSON 以外的任何文字。",
-          ].join("\n"),
-        },
+        { role: "system", content: scorerSystem },
         { role: "user", content },
       ],
       temperature: 0.1,
       ...bypassChatRequestExtras(),
+    });
+    auditChatCompletion({
+      stage: "vision_product",
+      messages: [
+        { role: "system", content: scorerSystem },
+        { role: "user", content },
+      ],
+      completion: resp,
+      model: cfg.model,
     });
     raw = (resp.choices?.[0]?.message?.content ?? "").trim();
   }

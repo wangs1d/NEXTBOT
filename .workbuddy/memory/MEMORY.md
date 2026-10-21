@@ -56,7 +56,10 @@
 
 ## 部署拓扑
 - 后端两档：`159.75.52.2:3000`（腾讯云生产，King.pem，systemd pai-server）／`192.168.10.2:3000`（局域网）。`login.nextbot.top`（阿里云）只是控制面，HTTPS 全通（LE 自动续期）。客户端控制面 URL 必须烤 `https://`（80 已 301，POST 跨协议重定向不可靠）。
+- **零配置启动门禁（2026-10-21 血案）**：byok 捆绑包在新用户机器上，模型 key 的唯一来源是客户端注入的 `%APPDATA%\PrivateAgent\config.env`，**首启时该文件不存在**。因此**任何在 bootstrap 同步装配路径上因缺 key/缺配置而 throw 的代码，都会让整个服务 abort（退出码 134）、3000 永不监听**，用户表现为「界面能开但连不上」。新增启动期依赖必须允许零配置通过（改为调用期校验 + 降级 warn）。**测试三重假象**：本机 config.env 有 key + WorkBuddy shell 环境自带 `OPENAI_API_KEY` + 打包冒烟注入 `sk-smoke-...` → 零配置失败在本机永远复现不出来；验证必须显式清掉环境 key。
 - 桌面 exe：Windows+Release+非捆绑漏烤 HTTP_BASE 会在 api_config.dart fail-fast。华为 Push 凭据=AGC OAuth 2.0 Client ID，不是 client_secret。
+- 客户端拉起后端的唯一判据是 `LocalRuntimeManager.isBundled`（exe **同级**须有 `runtime\node.exe` + `runtime\dist\index.js`）；不满足时 `ensureRunning()` **静默 return true 且不写任何日志**。压 staging（`app\`+`runtime\` 并列）或从 zip 内直接双击运行都会踩中。排查入口：`scripts/release/diagnose-runtime.ps1`（放 exe 同级双击，七项检查 + 冷启动实测）。
+- `D:\nodejs` **已不存在**（旧记录作废）；Node 24 在 `C:\Program Files\nodejs\node.exe`。
 
 ## 媒体兜底抓取（`scripts/scrape-article-media.mjs`）
 - 拉文章页抠 `<img>` 真图 + `curl -e <referer>` 下载。铁律：**content-type + 真实分辨率才是闸门**；先切正文容器再抽图；新浪 GBK 必须解码；JS 壳站只取 `article img`。

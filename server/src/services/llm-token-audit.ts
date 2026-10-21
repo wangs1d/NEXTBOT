@@ -64,6 +64,32 @@ export type LlmAuditStage =
    * 每工具节省率（scripts/analyze-token-audit.mjs 按此聚合）。
    */
   | "tool_result_compaction"
+  /**
+   * 以下 11 项为 2026-10-21 补埋点：此前这些模块自行 new OpenAI 直接 create，
+   * 从未计入审计，是占比分析的系统性盲区（真实消耗恒为 0）。
+   */
+  /** 灵魂档案周更（agent/soul-store.ts） */
+  | "soul_store"
+  /** 记忆检索精排（agentic-memory/reranker.ts、rerank-cross-encoder.ts，LLM 档） */
+  | "memory_rerank"
+  /** 记忆联想合成（brain/memory-cognitive/memory-association-synthesizer.ts） */
+  | "memory_association"
+  /** 睡眠/夜间记忆整理（services/human-like-memory-service.ts 三处） */
+  | "sleep_agent"
+  /** 夜间记忆任务（services/nightly-memory-task-service.ts） */
+  | "nightly_task"
+  /** 语音对话 LLM（services/voice-dialogue/adapters/openai-llm-adapter.ts） */
+  | "voice_llm"
+  /** 行程规划技能（skills/travel-planning/*） */
+  | "travel_plan"
+  /**
+   * 视觉类四项（含 base64 图片）：inputChars 只统计文本部分，
+   * 图片 token 不计入 —— 这类记录「调用次数 + 文本规模」可见，但 token 偏低估。
+   */
+  | "vision_presence"
+  | "vision_caption"
+  | "vision_photo"
+  | "vision_product"
   /** 其他（外部科技扫描等低频旁路） */
   | "other";
 
@@ -282,6 +308,80 @@ export function countChars(values: Array<string | null | undefined>): number {
     if (typeof v === "string") total += v.length;
   }
   return total;
+}
+
+/**
+ * 抽取一条 message 的文本规模。
+ * content 可能是字符串，也可能是多模态数组（[{type:"text"},{type:"image_url"}]）
+ * ——视觉类只计文本部分，base64 图片不计入（无法按字符折算 token）。
+ */
+function textLengthOfContent(content: unknown): number {
+  if (typeof content === "string") return content.length;
+  if (!Array.isArray(content)) return 0;
+  let total = 0;
+  for (const part of content) {
+    if (!part || typeof part !== "object") continue;
+    const p = part as Record<string, unknown>;
+    // 文本段（type:"text"）与无 type 的裸文本都计入；图片段整体跳过
+    if (p.type === "text" || p.type === undefined) {
+      if (typeof p.text === "string") total += p.text.length;
+    }
+  }
+  return total;
+}
+
+/**
+ * 为「自行 new OpenAI 直接 chat.completions.create」的旁路调用补审计
+ *（2026-10-21：16 处历史盲区统一收编）。
+ *
+ * 用法：把发给 create 的 messages 与返回的 response 原样传进来即可，
+ * 字符折算与 recordLlmUsageByChars 完全一致（0.75 token/字符）。
+ * 失败/空响应也要调用——调用次数本身就是关键信号（否则失败调用永远不可见）。
+ */
+export function auditChatCompletion(args: {
+  stage: LlmAuditStage;
+  /** 发给 create 的 messages（数组或字符串） */
+  messages: unknown;
+  /** create 的返回值；也接受直接传响应文本字符串 */
+  completion?: unknown;
+  model?: string;
+  actorId?: string;
+  sessionId?: string;
+}): void {
+  try {
+    let inputChars = 0;
+    if (typeof args.messages === "string") {
+      inputChars = args.messages.length;
+    } else if (Array.isArray(args.messages)) {
+      for (const m of args.messages) {
+        if (!m || typeof m !== "object") continue;
+        const msg = m as Record<string, unknown>;
+        inputChars += textLengthOfContent(msg.content);
+      }
+    }
+
+    let outputChars = 0;
+    const c = args.completion;
+    if (typeof c === "string") {
+      outputChars = c.length;
+    } else if (c && typeof c === "object") {
+      const choices = (c as { choices?: Array<{ message?: { content?: unknown } }> }).choices;
+      const content = choices?.[0]?.message?.content;
+      if (typeof content === "string") outputChars = content.length;
+    }
+
+    if (inputChars <= 0 && outputChars <= 0) return;
+    recordLlmUsageByChars({
+      stage: args.stage,
+      inputChars,
+      outputChars,
+      model: args.model,
+      actorId: args.actorId,
+      sessionId: args.sessionId,
+    });
+  } catch {
+    /* 审计失败静默，绝不干扰主链路 */
+  }
 }
 
 /**

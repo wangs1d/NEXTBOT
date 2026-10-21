@@ -28,6 +28,7 @@ import OpenAI from "openai";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../external-model/vision-support.js";
 import type { MediaCardItem } from "./tool-result-processor.js";
+import { auditChatCompletion } from "./llm-token-audit.js";
 
 /** 本地转存 PNG 的 URL 前缀（与 ImageGenerationService.downloadAndStorePng 一致） */
 const LOCAL_IMAGE_URL_PREFIX = "/agent/images/";
@@ -212,35 +213,42 @@ async function describeImagesWithVlm(
     timeout: timeoutMs,
     maxRetries: 0,
   });
+  const captionSystem = [
+    hasVoice
+      ? "你不是图片描述器，你就是刚才在跟用户聊天的那个人。下面给你你刚才说出口的原话和用户的原话；你要为每一张照片写一句你本人顺口说的话。"
+      : "你是为照片写「氛围感」短句的助手。用户按顺序给若干张图片，你要为每张图片写一句传达照片感觉的中文短句。",
+    "",
+    "要求：",
+    hasVoice
+      ? "1. 用你刚才那句话的同一套人格、口吻、称呼和关系感（比如你叫他什么、你对照片里这个人的熟悉程度、你平时的说话习惯），像微信里看到图随口接一句。"
+      : "1. 写这张照片给人的感觉：光线、色调、氛围、情绪、瞬间的生动感，让没看图的人也能感受到那一刻。",
+    hasVoice
+      ? "2. 每句都要有「你」的反应：态度、调侃、夸赞、关心或懂他的那一下；不要写成中立的图片说明，也不要只描述光线/构图/穿搭。"
+      : "2. 禁止写成穿搭/物品清单：不要「女子穿…」「身穿…」「扎着…」「戴着…」式的外观罗列。",
+    "3. 内容必须贴着画面真实可见的东西，可适度渲染但不臆造：不编造具体人名、品牌、事件；判断不了的地点不要硬提。",
+    hasVoice
+      ? "4. 不要形成模板：对用户的称呼最多出现一次，不要每句都以称呼或「这张」开头；各句开头必须有明显差异。"
+      : "4. 不要使用统一的开头句式（「这张照片」「画面里」等）。",
+    "5. 每句 12~30 个字的陈述句，收尾干净完整，不要以冒号、破折号等悬空标点结尾；不要任何前缀，不要编号。",
+    `6. 只输出 JSON：{"captions":["第1张短句","第2张短句",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
+  ].join("\n");
   const resp = await client.chat.completions.create({
     model: cfg.model,
     messages: [
-      {
-        role: "system",
-        content: [
-          hasVoice
-            ? "你不是图片描述器，你就是刚才在跟用户聊天的那个人。下面给你你刚才说出口的原话和用户的原话；你要为每一张照片写一句你本人顺口说的话。"
-            : "你是为照片写「氛围感」短句的助手。用户按顺序给若干张图片，你要为每张图片写一句传达照片感觉的中文短句。",
-          "",
-          "要求：",
-          hasVoice
-            ? "1. 用你刚才那句话的同一套人格、口吻、称呼和关系感（比如你叫他什么、你对照片里这个人的熟悉程度、你平时的说话习惯），像微信里看到图随口接一句。"
-            : "1. 写这张照片给人的感觉：光线、色调、氛围、情绪、瞬间的生动感，让没看图的人也能感受到那一刻。",
-          hasVoice
-            ? "2. 每句都要有「你」的反应：态度、调侃、夸赞、关心或懂他的那一下；不要写成中立的图片说明，也不要只描述光线/构图/穿搭。"
-            : "2. 禁止写成穿搭/物品清单：不要「女子穿…」「身穿…」「扎着…」「戴着…」式的外观罗列。",
-          "3. 内容必须贴着画面真实可见的东西，可适度渲染但不臆造：不编造具体人名、品牌、事件；判断不了的地点不要硬提。",
-          hasVoice
-            ? "4. 不要形成模板：对用户的称呼最多出现一次，不要每句都以称呼或「这张」开头；各句开头必须有明显差异。"
-            : "4. 不要使用统一的开头句式（「这张照片」「画面里」等）。",
-          "5. 每句 12~30 个字的陈述句，收尾干净完整，不要以冒号、破折号等悬空标点结尾；不要任何前缀，不要编号。",
-          `6. 只输出 JSON：{"captions":["第1张短句","第2张短句",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
-        ].join("\n"),
-      },
+      { role: "system", content: captionSystem },
       { role: "user", content },
     ],
     temperature: 0.45,
     ...bypassChatRequestExtras(),
+  });
+  auditChatCompletion({
+    stage: "vision_caption",
+    messages: [
+      { role: "system", content: captionSystem },
+      { role: "user", content },
+    ],
+    completion: resp,
+    model: cfg.model,
   });
 
   const raw = (resp.choices?.[0]?.message?.content ?? "").trim();

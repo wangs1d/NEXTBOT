@@ -28,6 +28,7 @@ import {
   bypassChatRequestExtras,
 } from "../external-model/resolve-provider.js";
 import { getModelForTask, TaskTier } from "../config/model-routing.js";
+import { auditChatCompletion } from "../services/llm-token-audit.js";
 
 function soulDir(): string {
   const base = process.env.PA_DATA_DIR?.trim() || "data";
@@ -181,6 +182,15 @@ export async function maybeRunSoulReflection(input: {
         { role: "user", content: user },
       ],
       ...bypassChatRequestExtras(),
+    });
+    auditChatCompletion({
+      stage: "soul_store",
+      messages: [
+        { role: "system", content: system },
+        { role: "user", content: user },
+      ],
+      completion: response,
+      model: getModelForTask(TaskTier.MINI),
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return { applied: false, reason: "empty-response" };

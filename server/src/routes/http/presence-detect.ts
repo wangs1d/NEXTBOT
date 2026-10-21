@@ -6,6 +6,7 @@ import {
   bypassChatRequestExtras,
 } from "../../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../../external-model/vision-support.js";
+import { auditChatCompletion } from "../../services/llm-token-audit.js";
 
 /**
  * 在座检测端点（电脑开机简报门禁）。
@@ -103,6 +104,16 @@ async function defaultVlmCaller(image: {
     ],
     temperature: 0,
     ...bypassChatRequestExtras(),
+  });
+  // 视觉类只计文本规模：base64 图片无法按字符折算 token，且避免二次拼接大字符串
+  auditChatCompletion({
+    stage: "vision_presence",
+    messages: [
+      { role: "system", content: PRESENCE_SYSTEM_PROMPT },
+      { role: "user", content: [{ type: "text", text: "判断这张摄像头画面里是否有人坐在电脑前。" }] },
+    ],
+    completion: resp,
+    model: cfg.model,
   });
   return (resp.choices?.[0]?.message?.content ?? "").trim();
 }

@@ -34,6 +34,7 @@ import { extractDays, extractDestination, extractPreferences } from './intent-pa
 import { travelFavoritesStore } from './travel-favorites-store.js';
 import { emitTravelProgress } from './travel-progress-bus.js';
 import { gcj02ToWgs84 } from './coord-transform.js';
+import { auditChatCompletion } from "../../services/llm-token-audit.js";
 
 /** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
 type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
@@ -4617,6 +4618,21 @@ export class PlanningService {
         // 思考特性附加参数只对主模型生效（provider 档案表按主模型声明）；
         // SF 侧车是 OpenAI 兼容端点，多余参数可能 400
         ...(mainModel ? bypassChatRequestExtras() : {}),
+      });
+      // 视觉选图：base64 图片未计入（只统计文本规模），token 偏低估
+      auditChatCompletion({
+        stage: "travel_plan",
+        messages: [
+          {
+            role: "system",
+            content:
+              "你是旅游内容选图师。用户给出候选照片和目的地名，你只输出 JSON：" +
+              '{"best": 序号}。序号是 1 起始的整数，必须是给出的候选之一；不要输出任何其他文字。',
+          },
+          { role: "user", content },
+        ],
+        completion: resp,
+        model,
       });
       const raw = (resp.choices?.[0]?.message?.content ?? '').trim();
       const m = raw.match(/"best"\s*:\s*(\d+)/);

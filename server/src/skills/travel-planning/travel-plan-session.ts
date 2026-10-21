@@ -9,6 +9,7 @@ import {
 import { geocodeCity } from "../../services/weather-service.js";
 import { travelPlanStore } from "./travel-plan-store.js";
 import type { PlanningService } from "./travel-planning-service.js";
+import { auditChatCompletion } from "../../services/llm-token-audit.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // 行程规划会话（v3 旅游界面 · Agent 驱动规划流）
@@ -218,30 +219,37 @@ async function parseIntentByLlm(
     .join("；");
 
   try {
+    const intentSystem =
+      "你是行程规划助手的意图解析器。今天是 " +
+      `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}。` +
+      "从用户消息提取旅游意图，只输出 JSON：" +
+      '{"destination":"目的地|null","days":天数|null,"startDate":"YYYY-MM-DD|null",' +
+      '"endDate":"YYYY-MM-DD|null","slots":{"transport":[..]|null,"hotel":[..]|null,"food":[..]|null},' +
+      '"foodNote":"忌口/过敏等补充|null","skipAsking":[],"say":"一句自然的中文回应"}。' +
+      `槽位目录：${slotCatalogForPrompt()}。` +
+      "规则：未提及的字段一律 null/空，禁止编造；slots 只在用户明确表达该偏好时填目录中的选项；" +
+      "用户已确认不用问的事项放进 skipAsking（如「住的随便」→ skipAsking:[\"hotel\"]）；" +
+      "say ≤40 字、口语化、不复读用户原话、不列清单；已知信息不要在 say 里反问。" +
+      (known ? `会话已知：${known}。` : "");
     const response = await openai.chat.completions.create({
       model,
       temperature: 0.3,
       max_tokens: 500,
       response_format: { type: "json_object" },
       messages: [
-        {
-          role: "system",
-          content:
-            "你是行程规划助手的意图解析器。今天是 " +
-            `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}。` +
-            "从用户消息提取旅游意图，只输出 JSON：" +
-            '{"destination":"目的地|null","days":天数|null,"startDate":"YYYY-MM-DD|null",' +
-            '"endDate":"YYYY-MM-DD|null","slots":{"transport":[..]|null,"hotel":[..]|null,"food":[..]|null},' +
-            '"foodNote":"忌口/过敏等补充|null","skipAsking":[],"say":"一句自然的中文回应"}。' +
-            `槽位目录：${slotCatalogForPrompt()}。` +
-            "规则：未提及的字段一律 null/空，禁止编造；slots 只在用户明确表达该偏好时填目录中的选项；" +
-            "用户已确认不用问的事项放进 skipAsking（如「住的随便」→ skipAsking:[\"hotel\"]）；" +
-            "say ≤40 字、口语化、不复读用户原话、不列清单；已知信息不要在 say 里反问。" +
-            (known ? `会话已知：${known}。` : ""),
-        },
+        { role: "system", content: intentSystem },
         { role: "user", content: message.slice(0, 600) },
       ],
       ...bypassChatRequestExtras(),
+    });
+    auditChatCompletion({
+      stage: "travel_plan",
+      messages: [
+        { role: "system", content: intentSystem },
+        { role: "user", content: message.slice(0, 600) },
+      ],
+      completion: response,
+      model,
     });
     const content = response.choices[0]?.message?.content?.trim();
     if (!content) return null;

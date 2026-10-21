@@ -64,6 +64,7 @@ import "core/services/ws_chat_service.dart";
 import "core/services/inbox_api.dart";
 import "core/services/control_plane_account.dart";
 import "core/services/account_session_store.dart";
+import "core/services/app_support_migration.dart";
 import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_theme.dart";
@@ -136,6 +137,11 @@ void main() async {
   _installGlobalErrorHooks();
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // org 迁移（com.example → top.nextbot）：必须先于一切 app-support 目录
+    // 消费者（AccessCredentialStore / WindowBoundsSaver / Isar 历史库 / 账号
+    // 会话……），否则新目录为空、老用户表现为「重新登录 + 聊天历史消失」。
+    // 幂等 + 非 Windows no-op + 静默失败，见 AppSupportMigration。
+    await AppSupportMigration.migrateIfNeeded();
     // 行程规划独立窗口模式：主应用 spawn 本 exe 并经环境变量传递信箱目录，
     // 命中即只运行行程窗口，不 bootstrap 完整应用（见 travel_plan_window.dart）。
     // 窗口进程常驻：再次打开行程时主应用只写信箱指针，不再重复 spawn。

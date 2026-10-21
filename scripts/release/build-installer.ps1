@@ -377,6 +377,62 @@ if ($Edition -ne 'oss' -and -not (Test-Path (Join-Path $dataDir 'travel-knowledg
 }
 Write-Host 'runtime 启动冒烟通过' -ForegroundColor Green
 
+# 4.6 零配置启动门禁（2026-10-21 加）：4.5 那轮注入了占位 key（sk-smoke-…），
+# 恰好把「用户没配 key 时服务在装配期 abort」这个 P0 永久掩盖了 —— 绿色版在
+# 新机器上 3000 永不监听、客户端永远连不上，而打包门禁一路绿灯。
+# 真实首启（config.env 尚不存在、客户端注入空配置）就是零 key，这里必须复现。
+Write-Host '== [4.6/5] 零配置启动门禁（不注入任何模型 key）=='
+Remove-Item Env:OPENAI_API_KEY, Env:OPENAI_BASE_URL, Env:MOONSHOT_API_KEY, `
+  Env:MINIMAX_API_KEY, Env:AGENT_EMBEDDING_API_KEY, Env:AGENT_EMBEDDING_BASE_URL -ErrorAction SilentlyContinue
+$zeroLog = Join-Path $StageRoot 'runtime-smoke-zerokey.log'
+$env:PORT = "$smokePort"
+$env:FUNASR_AUTO_START = '0'
+$zeroPsi = New-Object System.Diagnostics.ProcessStartInfo
+$zeroPsi.FileName = Join-Path $StageRuntime 'node.exe'
+$zeroPsi.Arguments = 'dist\index.js'
+$zeroPsi.WorkingDirectory = $StageRuntime
+$zeroPsi.UseShellExecute = $false
+$zeroPsi.CreateNoWindow = $true
+$zeroPsi.RedirectStandardOutput = $true
+$zeroPsi.RedirectStandardError = $true
+$zeroProc = [System.Diagnostics.Process]::Start($zeroPsi)
+$zeroOutTask = $zeroProc.StandardOutput.ReadToEndAsync()
+$zeroErrTask = $zeroProc.StandardError.ReadToEndAsync()
+Remove-Item Env:PORT, Env:FUNASR_AUTO_START -ErrorAction SilentlyContinue
+$zeroReady = $false
+foreach ($i in 1..75) {
+  Start-Sleep -Milliseconds 800
+  if ($zeroProc.HasExited) { break }
+  try {
+    $res = Invoke-WebRequest -UseBasicParsing -TimeoutSec 2 -Uri $smokeManifestUri
+    if ($res.StatusCode -eq 200) { $zeroReady = $true; break }
+  } catch {}
+}
+& cmd /c "taskkill /T /F /PID $($zeroProc.Id) >nul 2>&1"
+$null = $zeroProc.WaitForExit(8000)
+try {
+  [System.IO.File]::WriteAllText($zeroLog, [string]$zeroOutTask.Result)
+  [System.IO.File]::WriteAllText("$zeroLog.err", [string]$zeroErrTask.Result)
+} catch {}
+if (-not $zeroReady) {
+  Write-Host '--- 零配置冒烟 stdout（尾部）---'
+  Get-Content $zeroLog -Tail 40 -ErrorAction SilentlyContinue
+  Write-Host '--- 零配置冒烟 stderr（尾部）---'
+  Get-Content "$zeroLog.err" -Tail 40 -ErrorAction SilentlyContinue
+  throw '零配置启动门禁失败：未注入任何模型 key 时服务未通过健康检查 —— 新用户首启（config.env 尚不存在）必然复现「界面能开但本地后端永不就绪」。检查是否有启动期依赖在缺配置时 throw（装配期 throw 会变成 uncaughtException，进程 abort，3000 从不监听）。'
+}
+Write-Host '零配置启动门禁通过（无 key 也能 health 200）' -ForegroundColor Green
+# 清掉本轮产生的运行期垃圾（与 4.5 同口径，保留 travel-knowledge 种子）
+foreach ($child in Get-ChildItem $dataDir -ErrorAction SilentlyContinue) {
+  if ($child.Name -ne 'travel-knowledge') {
+    Remove-Item $child.FullName -Recurse -Force -ErrorAction SilentlyContinue
+  }
+}
+foreach ($dir in 'logs') {
+  Remove-Item (Join-Path $StageRuntime $dir) -Recurse -Force -ErrorAction SilentlyContinue
+}
+Remove-Item $zeroLog, "$zeroLog.err" -Force -ErrorAction SilentlyContinue
+
 Write-Host '== [5/5] Inno 编译 =='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1

@@ -14,6 +14,7 @@
  * AGENT_MEMORY_CROSS_ENCODER_RERANK=1 显式开启。
  * 纯函数（buildRerankPrompt / applyRerankScores）单独可测，网络部分薄封装。
  */
+import { auditChatCompletion } from "../services/llm-token-audit.js";
 
 export interface RerankCandidate {
   id: string;
@@ -236,10 +237,17 @@ export async function rerankCandidates<T extends RerankCandidate>(
   const topN = Math.min(getCrossEncoderTopN(), items.length);
   const head = items.slice(0, topN);
   try {
+    const promptMessages = buildRerankPrompt(query, head);
     const res = await deps.client.chat.completions.create({
       model: deps.model,
       temperature: 0,
-      messages: buildRerankPrompt(query, head),
+      messages: promptMessages,
+    });
+    auditChatCompletion({
+      stage: "memory_rerank",
+      messages: promptMessages,
+      completion: res,
+      model: deps.model,
     });
     const content = res.choices?.[0]?.message?.content?.trim() ?? "";
     if (!content) return items;

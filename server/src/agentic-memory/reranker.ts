@@ -30,6 +30,7 @@ import {
   type MemoryRerankerMode,
 } from "./env.js";
 import { bypassChatRequestExtras } from "../external-model/resolve-provider.js";
+import { auditChatCompletion } from "../services/llm-token-audit.js";
 
 /** 单条精排结果：候选下标 → 相关分（0-1） */
 export interface RerankScore {
@@ -128,6 +129,15 @@ async function llmRerankScores(
         { role: "system", content: SYSTEM_PROMPT },
         { role: "user", content: `Query：${query}\n\n候选记忆：\n${listed}` },
       ],
+    });
+    auditChatCompletion({
+      stage: "memory_rerank",
+      messages: [
+        { role: "system", content: SYSTEM_PROMPT },
+        { role: "user", content: `Query：${query}\n\n候选记忆：\n${listed}` },
+      ],
+      completion: response,
+      model: opts.model ?? getAgenticMemoryLlmModel(),
     });
     const output = response.choices?.[0]?.message?.content?.trim() ?? "";
     if (!output) return null;

@@ -6,6 +6,7 @@ import type { ImageAsset, PictureKit } from "@private-ai-agent/picture";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../external-model/vision-support.js";
+import { auditChatCompletion } from "./llm-token-audit.js";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -157,6 +158,15 @@ function defaultAnalyzeFn(images: string[], timeoutMs: number): Promise<Array<Ph
       ],
       temperature: 0.3,
       ...bypassChatRequestExtras(),
+    });
+    auditChatCompletion({
+      stage: "vision_photo",
+      messages: [
+        { role: "system", content: "你是照片整理助手，输出严格的 JSON。" },
+        { role: "user", content },
+      ],
+      completion: resp,
+      model: cfg.model,
     });
     return parseAnalysisArray(resp.choices?.[0]?.message?.content ?? "", images.length);
   })();

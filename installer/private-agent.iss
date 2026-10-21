@@ -66,11 +66,14 @@ Name: "{autodesktop}\{#MyIconName}"; Filename: "{app}\NEXTBOT.exe"; Tasks: deskt
 Filename: "{app}\NEXTBOT.exe"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; 故意不删 %APPDATA%\PrivateAgent（用户 key 与数据），安装器只管应用目录
+; 用户数据默认保留（Windows 惯例：卸载只删应用目录，重装后直接登录可用）。
+; 是否删除由卸载时 CurUninstallStepChanged 询问用户显式决定，见 [Code]。
 
 [Code]
-// 安装前停掉旧版本残留进程（限定路径在本应用目录内，不误杀系统其他 node）
-function PrepareToInstall(var NeedsRestart: Boolean): String;
+// 停掉本应用目录内的残留进程：runtime node 常驻不随应用退出而杀
+// （LocalRuntimeManager 设计如此），安装/卸载前统一清场。
+// 限定路径在 {app} 内，不误杀系统其他 node。
+procedure StopAppProcesses;
 var
   ErrorCode: Integer;
 begin
@@ -78,5 +81,31 @@ begin
     '/C powershell -NoProfile -Command "Get-Process node,private_ai_agent,NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   Sleep(800);
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  StopAppProcesses;
   Result := '';
+end;
+
+// 卸载第一步询问是否同时删除用户数据（登录态 / API Key / 聊天记录 / 窗口
+// 位置）。默认「否」：保留数据是 Windows 桌面端惯例（Chrome/VS Code/Telegram
+// 同款策略）。勾选删除时清三处：
+//   %APPDATA%\PrivateAgent  —— byok config.env、runtime.log
+//   %APPDATA%\top.nextbot   —— 现行 org 的应用支持目录（登录态/历史库/安装身份）
+//   %APPDATA%\com.example   —— 旧 org 残留（Flutter 脚手架默认名时期的落盘）
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if CurUninstallStep <> usUninstall then Exit;
+  StopAppProcesses;
+  if TaskDialogMsgBox('', '是否同时删除用户数据？',
+      '选择「否」将保留登录状态与本地数据，下次安装后可直接登录使用。' #13#10 +
+      '选择「是」将删除登录态、API Key 与聊天记录，且不可恢复。',
+      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, []) = IDYES then
+  begin
+    DelTree(ExpandConstant('{userappdata}\PrivateAgent'), True, True, True);
+    DelTree(ExpandConstant('{userappdata}\top.nextbot'), True, True, True);
+    DelTree(ExpandConstant('{userappdata}\com.example'), True, True, True);
+  end;
 end;

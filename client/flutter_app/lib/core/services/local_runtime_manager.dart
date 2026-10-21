@@ -76,7 +76,10 @@ class LocalRuntimeManager {
   /// 确保 runtime 在跑：已在 → 直接返回 true；否则拉起并轮询 health 就绪。
   /// 超时返回 false（应用照常启动，WS 层会重试，不影响界面）。
   static Future<bool> ensureRunning({
-    Duration readyTimeout = const Duration(seconds: 25),
+    // 实测：本机 SSD 冷启动 ~6s，零配置首启（无 config.env）~16.2s；
+    // 低端机 + 冷磁盘 + onnxruntime/bge 装载很容易再翻倍。原 25s 太贴脸，
+    // 超时后应用照常起来但后端还没监听，用户只看到「连不上」且无任何提示。
+    Duration readyTimeout = const Duration(seconds: 45),
   }) async {
     if (!isBundled) return true;
     if (await probeHealth()) {
