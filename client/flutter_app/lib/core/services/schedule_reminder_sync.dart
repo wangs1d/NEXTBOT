@@ -256,6 +256,10 @@ String? _pickShortTitle(Map<String, dynamic> result) {
 }
 
 String _pickTitle(Map<String, dynamic> result) {
+  // 列表标题用短事项（「去游泳」），agent 口吻的到点文案（「到点了，快去游泳吧」）
+  // 归推送与备注展示——原句/回声式长标题不再直接上列表。
+  final String shortTitle = result["shortTitle"]?.toString().trim() ?? "";
+  if (shortTitle.isNotEmpty) return _displayReminderTitle(shortTitle);
   final String title = result["title"]?.toString().trim() ?? "";
   if (title.isNotEmpty && title != "AI 提醒任务") {
     return _displayReminderTitle(title);

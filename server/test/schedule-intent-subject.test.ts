@@ -16,7 +16,17 @@ test("extractReminderSubject strips trailing vocative appended after the subject
 
 test("extractReminderSubject strips leading vocative before the time expression", () => {
   assert.equal(extractReminderSubject("小弟，五分钟后提醒我睡觉"), "睡觉");
-  assert.equal(extractReminderSubject("老哥 帮我明天9点提醒我开会"), "明天9点提醒我开会");
+  // 「帮我」剥掉后紧跟的时间段一并剥离（9 点是日程锚点不是事项）：事项只留「开会」
+  assert.equal(extractReminderSubject("老哥 帮我明天9点提醒我开会"), "开会");
+});
+
+/** 2026-10-21 回归：「4分钟后（17:40）提醒我去游泳」的括号时间把正则链挡死，
+ * 回声原句「（17:40）提醒我去游泳」原样落库上了岛。括号包裹的时间段须逐段剥净。 */
+test("extractReminderSubject strips parenthesized time prefixes", () => {
+  assert.equal(extractReminderSubject("4分钟后（17:40）提醒我去游泳"), "去游泳");
+  assert.equal(extractReminderSubject("（17:40）提醒我去游泳"), "去游泳");
+  assert.equal(extractReminderSubject("提醒我（17:40）去游泳"), "去游泳");
+  assert.equal(extractReminderSubject("提醒我17:40去游泳"), "去游泳");
 });
 
 test("extractReminderSubject keeps vocative that is a sentence object (no separator)", () => {

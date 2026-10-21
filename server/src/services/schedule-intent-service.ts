@@ -1,6 +1,6 @@
 import type { ExternalChatProvider } from "../external-model/types.js";
 import { normalizeRemindBeforeMinutes, type ScheduleTaskCategory } from "./schedule-task-service.js";
-import { extractReminderSubject, formatReminderMessage } from "./reminder-copy.js";
+import { extractReminderSubject, formatReminderMessage, isEchoLikeReminderCopy } from "./reminder-copy.js";
 
 // 展示文案规整已抽到 reminder-copy.ts（createTask 落库闸口共用）；此处按旧出口转发，
 // 既有调用方（schedule-user-reply / 测试）不受影响。
@@ -105,10 +105,113 @@ export class ScheduleIntentService {
     now?: Date,
   ): Promise<ScheduleDraft | null> {
     const ruleDraft = this.parseByRule(userText, userTimezone, now);
-    if (ruleDraft) return applyRecurrenceFromUserText(userText, ruleDraft);
+    if (ruleDraft) {
+      return this.ensureReminderCopy(sessionId, userText, applyRecurrenceFromUserText(userText, ruleDraft));
+    }
     const modelDraft = await this.parseByModel(sessionId, userText, userTimezone);
     if (!modelDraft) return null;
-    return applyRecurrenceFromUserText(userText, backfillDurationFromUserText(userText, modelDraft));
+    return this.ensureReminderCopy(
+      sessionId,
+      userText,
+      applyRecurrenceFromUserText(userText, backfillDurationFromUserText(userText, modelDraft)),
+      true,
+    );
+  }
+
+  /**
+   * 提醒展示文案的生成权在模型，正则只做兜底（2026-10-21 根修）：
+   * 规则路径没有语言判断力，extractReminderSubject 一旦失手（括号时间、口语变体）
+   * 会把回声原句当「干净事项」放行——「4分钟后（17:40）提醒我去游泳」的文案
+   * 就这样原样落库。模型在场时到点文案一律由模型转写（agent 口吻是语言任务，
+   * 模板写不出「到点了，快去游泳吧」）；模型不可用/失败才落到
+   * extractReminderSubject + formatReminderMessage 的正则兜底。唯一免调用通道：
+   * 整句解析的模型草稿已在同一次调用里写好干净文案（fromModel 且非回声）。
+   */
+  private async ensureReminderCopy(
+    sessionId: string,
+    userText: string,
+    draft: ScheduleDraft,
+    fromModel = false,
+  ): Promise<ScheduleDraft> {
+    if (draft.kind !== "reminder") return draft;
+    const copyClean = this.isCleanReminderCopy(draft);
+    if (!this.externalChat?.isEnabled()) {
+      return copyClean ? draft : this.fallbackReminderCopy(draft, userText);
+    }
+    if (copyClean && fromModel) return draft;
+    const rewritten = await this.rewriteCopyByModel(sessionId, userText);
+    if (rewritten) {
+      return {
+        ...draft,
+        shortTitle: rewritten.shortTitle ?? draft.shortTitle,
+        reminderMessage: rewritten.reminderMessage ?? draft.reminderMessage,
+      };
+    }
+    // 模型调用失败：有干净文案就保留（模板/模型草稿），否则正则兜底重推导
+    return copyClean ? draft : this.fallbackReminderCopy(draft, userText);
+  }
+
+  private isCleanReminderCopy(draft: ScheduleDraft): boolean {
+    const message = draft.reminderMessage?.trim() ?? "";
+    const short = draft.shortTitle?.trim() ?? "";
+    return (
+      message.length > 0 &&
+      short.length > 0 &&
+      !isEchoLikeReminderCopy(message) &&
+      !isEchoLikeReminderCopy(short)
+    );
+  }
+
+  /** 模型不可用时的正则兜底：从原句重推导（可能仍有残缺，但不会比现状差）。 */
+  private fallbackReminderCopy(draft: ScheduleDraft, userText: string): ScheduleDraft {
+    const message = draft.reminderMessage?.trim() ?? "";
+    const short = draft.shortTitle?.trim() ?? "";
+    const subject = extractReminderSubject(userText);
+    return {
+      ...draft,
+      shortTitle:
+        short && !isEchoLikeReminderCopy(short)
+          ? draft.shortTitle
+          : subject === "到点提醒"
+            ? undefined
+            : subject,
+      reminderMessage:
+        message && !isEchoLikeReminderCopy(message)
+          ? draft.reminderMessage
+          : formatReminderMessage(subject),
+    };
+  }
+
+  /** 请模型把用户原句转写成到点时 agent 口吻的提醒文案（单次小调用）。 */
+  private async rewriteCopyByModel(
+    sessionId: string,
+    userText: string,
+  ): Promise<{ shortTitle?: string; reminderMessage?: string } | null> {
+    if (!this.externalChat?.isEnabled()) return null;
+    const prompt = [
+      "你是提醒文案助手。用户让助手到点提醒自己做一件事，下面是用户原句。",
+      "请把它转写成到点时展示的两条文案，用助手（agent）主动提醒用户的口吻：",
+      '1. reminderMessage：到点推送文案，像助手在身边催用户去做这件事，如「到点了，快去游泳吧」「时间到了，该吃药啦」；不复述用户原句，不出现「提醒我」类指令词，不带任何时间表述（时刻会单独展示），不把用户对助手的称呼写进文案。',
+      "2. shortTitle：不超过 8 字的纯事项短标题（如「去游泳」），无指令词、无时间词、无标点。",
+      "只返回 JSON，不要输出 markdown 或解释：{\"shortTitle\":\"...\",\"reminderMessage\":\"...\"}",
+      `用户原句：${userText}`,
+    ].join("\n");
+    try {
+      const text = await this.externalChat.streamCompletion(sessionId, { text: prompt }, () => {
+        // 后台转写，不需要流式回传。
+      });
+      const json = safeParseJsonObject(text);
+      if (!json) return null;
+      const reminderMessage = String(json.reminderMessage ?? "").trim();
+      if (!reminderMessage || isEchoLikeReminderCopy(reminderMessage)) return null;
+      const shortTitle = String(json.shortTitle ?? "").trim();
+      return {
+        shortTitle: shortTitle && !isEchoLikeReminderCopy(shortTitle) ? shortTitle : undefined,
+        reminderMessage,
+      };
+    } catch {
+      return null;
+    }
   }
 
   private async parseByModel(
@@ -339,7 +442,9 @@ function validateDraft(input: unknown): ScheduleDraft | null {
     return { title, shortTitle, description, kind: "weather_brief", category, runAt: runAtDate.toISOString(), recurrence };
   }
   if (kind === "reminder") {
-    const reminderMessage = String(v.reminderMessage ?? "").trim() || description;
+    // reminderMessage 缺省不回填 description（那等于构造性回声）：留空交给
+    // ensureReminderCopy 统一补齐（模型转写优先，正则兜底）。
+    const reminderMessage = String(v.reminderMessage ?? "").trim() || undefined;
     return {
       description,
       shortTitle,

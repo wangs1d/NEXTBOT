@@ -17,7 +17,7 @@ const TRAILING_VOCATIVE_RE = new RegExp(
   `[\\s，,、；;。：:！!？?]+(?:${VOCATIVE_WORDS})[呀啊啦哟哦呗呢吧。！!？?]*$`,
 );
 
-const LEADING_PUNCT_RE = /^[，,、；;。．：:！!？?\s]+/;
+const LEADING_PUNCT_RE = /^[，,、；;。．：:！!？?（()）\s]+/;
 
 /** 相对时间（X 分钟后 / 半小时后）前缀。第二个分支处理「半小时」不带重复
  * 单位词的独立用法；整体锚定句首（原版分支未锚定，会误匹配句中片段）。 */
@@ -28,20 +28,23 @@ const RELATIVE_TIME_PREFIX_RE =
 const ABSOLUTE_TIME_PREFIX_RE =
   /^(?:(?:每天|每日|明天|今天|后天|大后天|今晚|明晚|今早|明早|昨夜|昨晚|前天|大前天)\s*)?(?:(?:早上|上午|中午|下午|晚上|夜间|凌晨|半夜|傍晚)\s*)?(?:\d{1,2}[:：]\d{2}|[零一二两三四五六七八九十廿]{1,4}\s*点(?:\s*\d{1,2}\s*分?|半)?|\d{1,2}\s*点(?:\s*\d{1,2}\s*分?|半)?)\s*/;
 
-/** 从用户句中提取提醒事项。相对与绝对时间连用时逐段剥净
- * （「一分钟后的11点03分提醒我吃饭」→「吃饭」，旧版只剥第一段留下「11点03分提醒我吃饭」）。 */
+/** 从用户句中提取提醒事项。时间段/指令词/标点可能交错出现
+ * （「帮我明天9点提醒我开会」「提醒我（17:40）去游泳」），单遍定序剥离会漏——
+ * 循环剥到不再变化为止（输入是短句，迭代有界）。相对与绝对时间连用时逐段剥净。 */
 export function extractReminderSubject(userText: string): string {
   const normalized = userText.trim();
   let rest = normalized.replace(LEADING_VOCATIVE_RE, "");
-  rest = stripLeadingTimeExpression(rest);
-  rest = rest.replace(LEADING_PUNCT_RE, "");
-  rest = rest.replace(/^(请|帮我|把我)\s*/, "");
-  rest = rest.replace(/^(喊我|叫我)\s*/, "");
-  rest = rest.replace(/^提醒我\s*/, "");
-  rest = rest.replace(/^提醒一下\s*/, "");
-  rest = rest.replace(/^提醒\s*/, "");
-  // 指令词后残留标点：「今晚8点提醒我，闹钟」→「闹钟」而非「，闹钟」
-  rest = rest.replace(LEADING_PUNCT_RE, "");
+  for (let i = 0; i < 6; i += 1) {
+    const prev = rest;
+    rest = stripLeadingTimeExpression(rest);
+    rest = rest.replace(LEADING_PUNCT_RE, "");
+    rest = rest.replace(/^(请|帮我|把我)\s*/, "");
+    rest = rest.replace(/^(喊我|叫我)\s*/, "");
+    rest = rest.replace(/^提醒我\s*/, "");
+    rest = rest.replace(/^提醒一下\s*/, "");
+    rest = rest.replace(/^提醒\s*/, "");
+    if (rest === prev) break;
+  }
   rest = rest.replace(/\s*提醒我\s*$/, "");
   rest = rest.replace(TRAILING_VOCATIVE_RE, "");
   rest = rest.replace(/\s+/g, " ").trim();
@@ -51,11 +54,15 @@ export function extractReminderSubject(userText: string): string {
 function stripLeadingTimeExpression(text: string): string {
   let rest = text;
   for (;;) {
-    const rel = rest.match(RELATIVE_TIME_PREFIX_RE);
-    const abs = rel ? null : rest.match(ABSOLUTE_TIME_PREFIX_RE);
+    // 括号包裹的时间段（「4分钟后（17:40）提醒我…」剥掉相对段后剩「（17:40）…」）：
+    // 时间正则锚定句首，左括号不先剥掉会把它整个挡死，链式剥离在这里断链。
+    const unwrapped = rest.replace(/^[（(]\s*/, "");
+    const rel = unwrapped.match(RELATIVE_TIME_PREFIX_RE);
+    const abs = rel ? null : unwrapped.match(ABSOLUTE_TIME_PREFIX_RE);
     const matched = rel ?? (abs && abs[0] ? abs : null);
     if (!matched) return rest;
-    rest = rest.slice(matched[0].length);
+    rest = unwrapped.slice(matched[0].length);
+    rest = rest.replace(/^[）)]\s*/, "");
     // 结构助词紧跟时间段（「一分钟后的11点03分…」）：不剥会挡住下一段
     // 时间前缀的匹配，链式剥离在这里断链。剥完再继续循环。
     rest = rest.replace(/^的\s*/, "");
