@@ -30,8 +30,10 @@ class StructuredAssistantMessageBody extends StatelessWidget {
     // 多条路由共用的正文渲染器，收到的文本若混入摘要块（mediaCards 分支 /
     // RENDER_AS:structured / 历史落库消息），块没有折叠卡消费者，会整段以裸
     // JSON 渲染。这里统一剥掉——块要么被专属路由消费，要么在此消失，绝不透出。
+    // 展示形态声明兜底：本组件是多条路由共用的正文渲染器，媒体卡片分支与
+    // 历史落库消息可能带着 [RENDER_AS:xxx]/[RENDER_HINT:xxx] 进来，一律剥除。
     final String normalized =
-        ContentSummaryParser.stripSummaryBlocks(text)
+        _stripRenderMarkers(ContentSummaryParser.stripSummaryBlocks(text))
             .replaceAll("\r\n", "\n")
             .trimRight();
     if (normalized.isEmpty) {
@@ -232,6 +234,20 @@ _StructuredMessageParts _splitStructuredMessage(String text) {
     body: keepLead ? body : text,
     structured: true,
   );
+}
+
+/// 剥离展示形态声明（[RENDER_AS:xxx] / [RENDER_HINT:xxx]）：整行独占时删行，
+/// 行内嵌时就地删除并保留其余文本。
+String _stripRenderMarkers(String input) {
+  if (!input.contains("[RENDER_")) return input;
+  final RegExp token = RegExp(r"\[RENDER_(?:HINT|AS):\w+\]");
+  final List<String> out = <String>[];
+  for (final String line in input.split("\n")) {
+    final String stripped = line.replaceAll(token, "");
+    if (stripped.trim().isEmpty && line.trim().isNotEmpty) continue;
+    out.add(stripped);
+  }
+  return out.join("\n");
 }
 
 bool _isListLikeLine(String line) {

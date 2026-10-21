@@ -141,13 +141,20 @@ export function resolveProviderProfile(
 export function resolveRouteCallParams(
   externalChat: { id?: string } | null | undefined,
   env: NodeJS.ProcessEnv = process.env,
-): { maxOutputTokens: number; timeoutMs: number; jsonMode: boolean } {
+): { maxOutputTokens: number; timeoutMs: number; jsonMode: boolean; modelOverride?: string } {
   const profile = resolveProviderProfile(externalChat?.id);
   const raw = env.LLM_ROUTE_TIMEOUT_MS?.trim();
   const n = raw ? Number.parseInt(raw, 10) : NaN;
+  // 路由专用模型（2026-10-21 根修）：路由是 192 token 级别的封闭标签分类，
+  // 不需要思考链。M3.1 系强制 adaptive 思考，实测单次 4.6-9.9s，必然打穿
+  // 5s 路由超时 → 保守降级任务面（full 工具面 + 网页证据），普通搜图轮会
+  // 混进 search_web 与新闻表格。配一个不思考的快模型（如 MiniMax-M3）专跑
+  // 路由，主对话模型不受影响——超时不再靠兜底，而是从模型能力上消失。
+  const routeModel = env.LLM_ROUTE_MODEL?.trim();
   return {
     maxOutputTokens: profile.routeMaxOutputTokens,
     timeoutMs: Number.isFinite(n) && n > 0 ? n : profile.routeTimeoutMs,
     jsonMode: profile.supportsJsonMode,
+    ...(routeModel ? { modelOverride: routeModel } : {}),
   };
 }

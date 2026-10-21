@@ -62,7 +62,7 @@ import {
   createTurnEventEmitter,
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
-import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
 import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
 import {
   buildToolCard,
@@ -179,7 +179,6 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
     "tool_discover",
     "tool_search",
     "tool_describe",
-    "tool_call",
     "agent.query_capabilities",
     "brain.list_capabilities",
     "self.list_custom_skills",
@@ -1926,12 +1925,16 @@ async function processBatchedMessage(
       maxPerGroup: 4,
       maxPerSide: 2,
     });
-    // 真实图片描述（Coze 式「一图一句」）：对裁剪后的图片卡逐张看图生成 caption。
-    // 视觉模型批量调用（与主对话同 provider），失败/超时/模型不支持视觉时
-    // 静默跳过——卡片保持无 caption，渲染回退旧的正文交错排版。
+    // 真实图片描述（Coze 式「一图一句」）：对裁剪后的图片卡逐张看图生成 caption，
+    // 由 agent 用自己的口吻写（人格参照 = 用户原话 + 已说出口的正文）。
+    // 失败/超时/模型不支持视觉时静默跳过——该张照片下方不带文字，版式不变。
     if (mediaCards.length > 0 && isImageCaptionEnabled()) {
       try {
-        await captionMediaCards(mediaCards);
+        // caption 由 agent 用自己的口吻写（人格参照 = 本轮用户原话 + 它已经说出口的正文），
+        // 不是中立的图片说明。
+        await captionMediaCards(mediaCards, {
+          voice: { userText: batched.text, replyText: finalText },
+        });
       } catch (err) {
         console.info(
           `[chat] 图片描述生成异常（忽略，回退旧渲染）: ${
@@ -1981,6 +1984,7 @@ async function processBatchedMessage(
           actorId: msgActor,
           frames: batched.visionFrames,
           locationHint: batched.clientLocation?.label?.trim() || undefined,
+          voice: { userText: batched.text, replyText: finalText },
         });
         finalText = attachImageResultPhotos(finalText, photoItems);
         // 路由配对不变量（与 CONTENT_SUMMARY 泄漏同源）：块存在 ⇒ 路由必在。
@@ -2087,9 +2091,12 @@ async function processBatchedMessage(
     // 2026-09-03：图片卡全部带真实描述（caption）时改走 buildCaptionedRenderBlocks——
     // 正文保持完整一段，照片逐张附各自的 caption（描述由视觉模型看图生成），
     // 不再用位置启发式把正文切段钉到照片旁（那是「文字与照片对不上」的根源）。
+    // 2026-10-21：平铺图集（单次 search_images）**无条件**走 captioned 版式——
+    // 即使用例拿不到 caption，也不回退切段交错：照片之间只允许 caption，正文
+    // 整块留在图集之前/之后。切段交错会把新闻表格塞进照片中间（用户真机取证）。
     const renderBlocks =
       mediaCards.length > 0
-        ? allImageCardsHaveCaption(mediaCards)
+        ? allImageCardsHaveCaption(mediaCards) || isFlatImageGallery(mediaCards)
           ? buildCaptionedRenderBlocks(finalText, mediaCards)
           : buildInterleavedRenderBlocks(finalText, mediaCards)
         : [];

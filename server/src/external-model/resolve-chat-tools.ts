@@ -1,5 +1,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { toolInCapabilityDomains } from "../tools/tool-search/tool-category.js";
+import { isMediaOnlyRequest } from "../agent/realtime-search-query.js";
+import { filterTextSearchTools, filterMediaModalityTools } from "../agent/web-search-consent.js";
 
 import {
   mergeChatToolsForAccessMode,
@@ -301,12 +303,11 @@ function applyToolRankingHint(
 
 /** 能力束 → 域投影判定统一走域注册表（2026-10-01 S0：删本地重复前缀表）。 */
 
-/** 元工具/能力查询桥：任何裁剪集合都保留，保证延迟目录（tool_discover→tool_call）可达。 */
+/** 元工具/能力查询桥：任何裁剪集合都保留，保证延迟目录（tool_discover 加载 schema）可达。 */
 const CAPABILITY_BRIDGE_TOOLS = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "tool_call",
   "agent.query_capabilities",
 ]);
 
@@ -426,8 +427,19 @@ export function resolveChatToolPlanForStream(
   //   1. 把 desktop/visual/self-programming 工具合并进来污染 LLM 视野
   //   2. contextual 过滤误裁 weather/calendar 等对话面重要的工具
   //   3. 跑一遍关键词提取 + 分类匹配 ≈ 2-5ms × 每请求
-  const builtin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
-  const extra = streamOpts?.chatToolsExtra ?? [];
+  const rawBuiltin = streamOpts?.chatToolsBuiltin ?? getBuiltinAgentChatTools();
+  const rawExtra = streamOpts?.chatToolsExtra ?? [];
+  // 纯媒体请求（2026-10-21 根修）：无论走对话面还是任务面，文字检索族都不该
+  // 出现在工具面里。用户只索图时，模型连 search_web 的名字都看不到，更谈不上
+  // 「顺手查一下近况」把新闻表格贴到照片下面。
+  const mediaOnly = isMediaOnlyRequest(userText ?? "");
+  // 文字检索族剥离 + 媒体模态收敛（要照片就不给视频检索，反之亦然）。
+  const scopeMedia = (tools: ChatCompletionTool[]): ChatCompletionTool[] =>
+    mediaOnly
+      ? filterMediaModalityTools(filterTextSearchTools(tools), userText ?? "")
+      : tools;
+  const builtin = scopeMedia(rawBuiltin);
+  const extra = scopeMedia(rawExtra);
   const merged = [...builtin, ...extra];
   // explicit（2026-09-05 前后台架构）：chatToolsBuiltin 即最终可见工具集（精确
   // 白名单，可能是前台的 dispatch+快查，也可能是任务面 plan 点名的工具），跳过

@@ -192,5 +192,4 @@ test("isSubstantiveToolExecution：元工具/支撑管线不算实质执行（�
   assert.equal(isSubstantiveToolExecution("travel.plan-itinerary"), true);
   // 元工具（目录检索/桥调用）与支撑管线不改变「这轮调过工具吗」的答案
   assert.equal(isSubstantiveToolExecution("tool_discover"), false);
-  assert.equal(isSubstantiveToolExecution("tool_call"), false);
 });

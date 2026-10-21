@@ -36,7 +36,6 @@ const NON_PROMOTABLE_NAMES: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "tool_call",
   "obs_recall",
   "agent.query_capabilities",
   "task.dispatch",

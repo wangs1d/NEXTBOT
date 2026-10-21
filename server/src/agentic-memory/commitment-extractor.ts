@@ -12,7 +12,11 @@
 
 import OpenAI from "openai";
 
-import { getAgenticMemoryLlmModel, resolveOpenAiApiKey } from "./env.js";
+import {
+  getAgenticMemoryLlmModel,
+  resolveAgenticMemoryLlmBaseUrl,
+  resolveOpenAiApiKey,
+} from "./env.js";
 import type { ExtractedCommitment } from "./commitment-board.js";
 import type { UnifiedLlmClient } from "./unified-extractor.js";
 
@@ -93,7 +97,9 @@ export async function extractCommitments(
   if (!apiKey && !opts?.client) return [];
 
   try {
-    const openai = opts?.client ?? new OpenAI({ apiKey, maxRetries: 1 });
+    const openai =
+      opts?.client ??
+      new OpenAI({ apiKey, baseURL: resolveAgenticMemoryLlmBaseUrl(), maxRetries: 1 });
     const now = opts?.now ?? new Date();
     const response = await openai.chat.completions.create({
       model: opts?.model ?? getAgenticMemoryLlmModel(),

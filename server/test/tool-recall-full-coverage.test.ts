@@ -2,17 +2,16 @@
  * 全量工具检索召回覆盖测试（2026-09-11 检索收口验收）。
  *
  * 回答的问题：现有架构能否确保「所有被注册的工具」都能被正确调用，
- * 且调用方式是检索召回（tool_discover → tool_call），不依赖全量 schema 常驻？
+ * 且调用方式是检索召回（tool_discover 加载 schema → 模型原生 tool_calls），
+ * 不依赖全量 schema 常驻？
  *
- * 四层断言：
- *   A. 快速通道可见集 = 仅桥工具（tool_discover/tool_call），业务 schema 全部
- *      在延迟目录里——证明「不走全量暴露」这一前提成立；
+ * 三层断言：
+ *   A. 快速通道可见集 = 仅 tool_discover 桥，业务 schema 全部在延迟目录里——
+ *      证明「不走全量暴露」这一前提成立；
  *   B. 对目录中【每一个】工具，用其别名/示例/名称构造用户式查询，至少一条
  *      查询能把它召回进 top-10——证明检索召回对全目录覆盖；
- *   C. 对每一个工具，tool_call 能正确解析出 registryToolName 与参数——证明
- *      调用链路（检索命中 → 执行）对全目录贯通；
- *   D. 每一个工具都能取到完整参数 schema（describeDeferredTool）——证明召回
- *      之后模型有足够信息填参。
+ *   C. 每一个工具都能取到完整参数 schema（describeDeferredTool）——证明召回
+ *      之后模型有足够信息原生调用。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -37,7 +36,7 @@ import type { DeferredToolCatalog } from "../src/tools/tool-search/catalog.js";
 const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
 const catalog: DeferredToolCatalog = prepared.deferredCatalog;
 
-const BRIDGE_TOOLS = new Set(["tool_discover", "tool_call", "tool_search", "tool_describe"]);
+const BRIDGE_TOOLS = new Set(["tool_discover", "tool_search", "tool_describe"]);
 
 /** 工具名的用户口语化形式：calendar.create_task → "calendar create task" */
 function humanizeName(name: string): string {
@@ -79,7 +78,7 @@ test("A. 快速通道可见集仅桥工具——业务工具不靠全量 schema"
     [],
     `可见集必须只含桥工具，混入了业务 schema: ${nonBridge.join(", ")}`,
   );
-  assert.ok(visibleNames.includes("tool_discover") && visibleNames.includes("tool_call"));
+  assert.ok(visibleNames.includes("tool_discover"), "单一通道：只应产出 tool_discover 桥");
 });
 
 test("B. 全目录检索召回覆盖：每个工具至少一条用户式查询可召回进 top-10", async () => {
@@ -109,30 +108,7 @@ test("B. 全目录检索召回覆盖：每个工具至少一条用户式查询�
     misses.map((m) => `  ${m.tool}（最好名次 ${m.best}，查询: ${m.queries.map((q) => `「${q}」`).join(" / ")}）`).join("\n"));
 });
 
-test("C. 全目录 tool_call 调用解析贯通：每个工具可解析出注册名与参数", async () => {
-  const failures: string[] = [];
-  for (const entry of catalog.entries) {
-    const result = await executeToolSearchBridge(
-      "tool_call",
-      { name: entry.registryName, arguments: JSON.stringify({ query: "覆盖测试" }) },
-      catalog,
-    );
-    if (result.kind !== "call" || !result.ok) {
-      failures.push(`${entry.registryName}: ${JSON.stringify(result.result).slice(0, 120)}`);
-      continue;
-    }
-    if (result.registryToolName !== entry.registryName) {
-      failures.push(`${entry.registryName}: 解析出名不匹配 → ${result.registryToolName}`);
-    }
-    const args = result.parsedArgs as Record<string, unknown> | undefined;
-    if (!args || args.query !== "覆盖测试") {
-      failures.push(`${entry.registryName}: 参数未正确透传 → ${JSON.stringify(args)}`);
-    }
-  }
-  assert.deepEqual(failures, [], `tool_call 解析失败 ${failures.length}/${catalog.entries.length}:\n  ` + failures.join("\n  "));
-});
-
-test("D. 全目录 schema 可加载：召回后模型有足够信息填参", () => {
+test("C. 全目录 schema 可加载：召回后模型有足够信息原生调用", () => {
   const missing: string[] = [];
   for (const entry of catalog.entries) {
     if (!describeDeferredTool(catalog, entry.registryName)) missing.push(entry.registryName);

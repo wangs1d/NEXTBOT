@@ -48,6 +48,19 @@ test("图文混合轮（search_web 也成功）不走 photo_delivery，仍按常
   assert.notEqual(directive.strategy, "photo_delivery");
 });
 
+test("媒体意图轮即使有网页结果也强制 photo_delivery（2026-10-21 根修）", () => {
+  const directive = evaluateAndSelectStrategy(
+    [
+      { toolName: "search_images", ok: true, result: { items: [{ title: "图", mediaUrl: "/agent/images/a.png" }] } },
+      { toolName: "search_web", ok: true, result: { items: [{ title: "新闻", snippet: "正文" }] } },
+    ],
+    "我老婆最近的照片",
+    "media_retrieval",
+  );
+  assert.equal(directive.strategy, "photo_delivery");
+  assert.equal(directive.instruction, PHOTO_DELIVERY_INSTRUCTION);
+});
+
 test("search_images 失败的轮次不是纯图轮", () => {
   assert.equal(
     isPhotoDeliveryRound([{ toolName: "search_images", ok: false }]),

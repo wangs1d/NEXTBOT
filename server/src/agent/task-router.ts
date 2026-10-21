@@ -1,21 +1,22 @@
 /**
- * 任务路由类型与高精度闲聊短路（2026-09-05 双面架构，根源化收敛）。
+ * 任务路由类型与执行车道（2026-10-21 去路由化后）。
  *
- * 设计契约（不再使用话题关键词做路由）：
- *   - "这轮需不需要工具"由 L1 语义意图分类器判定（llm-task-router），
- *     语义理解天然泛化到未出现过的表达（"比特币多少钱"无需价格词表）。
- *   - 本模块只保留两类话题无关的确定性信号：
- *       1) 高精度纯闲聊短路（锚定全文匹配的寒暄/口头禅——这类句子结构上
- *          不可能需要工具，可安全直答零成本）；
- *       2) 降级路径的保守原则（无法语义判定时，除高精度闲聊外一律落任务面——
- *          错放对话面 = 零工具静默失败，错放任务面只是慢一点）。
- *   - 判错的纠错不在路由层，而在执行出口：TurnOutcomeGate（任务面续波）与
- *     对话面误判转任务（agent-core），路由不需要一次判对。
+ * 现行契约：
+ *   - 普通对话轮不做前置意图分类，统一走 chat 车道：工具常驻可见，
+ *     「这轮要不要用工具」由模型原生 tool_calls 决定——不调工具就是对话，
+ *     调了就是任务。执行形态由工具循环事后决定，不再提前判定平面。
+ *   - task 车道只剩两类确定性入口：
+ *       1) 计划续跑按钮（buildPlanContinuationDecision）；
+ *       2) 模型主动调用 task.dispatch 派发的后台重活。
+ *   - 高精度闲聊短路仅用于零 LLM 成本场景，不承担识别工具需求的职责。
+ *   - 误判纠错在执行出口：宣称一致性闸、工具全失败续波、手写行程补跑。
+ *   - 2026-09-07 的「前置路由门」与 2026-10-20 的「路由失败降保守任务面」
+ *     均已退役，不要再恢复 LLM 前置分类。
  */
 
 import { TASK_PLANE_FALLBACK_BUDGET, routePlanForIntent } from "./intent-router.js";
 
-/** 执行车道：chat=对话面（直答/前台工具直办）；task=任务面（后台执行）。 */
+/** 执行车道：chat=统一对话车道（工具自决、当轮执行）；task=后台任务执行器。 */
 export type LlmExecutionMode = "chat" | "task";
 
 export type TurnPlane = import("./intent-router.js").TurnPlane;
@@ -127,6 +128,27 @@ export function buildPlanContinuationDecision(): RouteDecision {
   };
 }
 
+/**
+ * 统一车道决策（2026-10-21 去路由化）：
+ *
+ * 前置 LLM 意图路由退役后，普通对话轮的唯一决策——固定对话面、工具常驻可见、
+ * 是否调用工具交给模型原生 tool_calls。`plane=chat` 只表示「对话面 prompt 风格 +
+ * 流式」，不再表示零工具（工具隔离分支已删除）。
+ *
+ * 保留 `buildPlanContinuationDecision` 作为唯一的确定性任务面入口（用户点
+ * 「我已完成，继续下一步」时不需要猜意图）。
+ */
+export function buildUnifiedLaneDecision(): RouteDecision {
+  return {
+    reasons: ["unified_lane"],
+    segmentable: true,
+    plane: "chat",
+    capabilities: [],
+    budget: 0,
+    tier: "flash",
+  };
+}
+
 /** 由车道派生词法级执行计划（降级路径用）。 */
 export function planFieldsForLane(lane: LlmExecutionMode): {  plane: TurnPlane;
   capabilities: TurnCapability[];
@@ -144,13 +166,10 @@ export function planFieldsForLane(lane: LlmExecutionMode): {  plane: TurnPlane;
 }
 
 /* ────────────────────────────────────────────────────────────
- * 前台自决模式（2026-09-05 引入，2026-09-07 退役为「触发权威」）
+ * 前台自决模式（2026-09-05 引入；2026-10-21 去路由化后回归默认）
  *
- * 失败模式已被实证：前台模型收到 task.dispatch/search_web schema 仍口头
- * 推脱（"这条路不通/翻不到"），触发是概率事件，出口词表闸永远慢一步。
- * 2026-09-07 前置路由门：「要不要办事」由 routeTurnByLlm 在主回复之前判定，
- * plane=task 由程序层确定性路由到任务执行器。前台白名单里的 task.dispatch
- * 保留为分类假阴性的安全网（+ 出口诚实闸/闪避闸兜底），不再是唯一触发路径。
+ * 工具可见 + 出口闸兜底之后，「要不要办事」由模型原生 tool_calls 决定；
+ * task.dispatch 是模型可主动调用的后台派发工具，不再是分类假阴性的补丁。
  * isForegroundDispatchMode 现仅控制：标签协议灰度与前台人格指引选择。
  * ──────────────────────────────────────────────────────────── */
 
@@ -188,7 +207,7 @@ export const TASK_TOOL_BRIDGE_NAMES: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "tool_call",
+
 ]);
 
 /* ────────────────────────────────────────────────────────────

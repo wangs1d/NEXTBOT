@@ -5,7 +5,6 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { shouldRecallLongTerm } from "../src/agent/recall-gate.js";
-import { parseUnderstanding } from "../src/agent/route-llm-call.js";
 import type { TurnUnderstanding } from "../src/agent/task-router.js";
 import { DailyJournalService } from "../src/services/daily-journal-service.js";
 import { ShortTermMemoryGatewayService } from "../src/services/short-term-memory-gateway.js";
@@ -102,71 +101,6 @@ test("anaphora escalation: 追问轮仅在长会话（超出注入窗口）时�
 
 test("empty text never triggers", () => {
   assert.equal(shouldRecallLongTerm({ text: "   ", understanding: u({ personalFact: true }) }).trigger, false);
-});
-
-// ===== parseUnderstanding 契约（L1 路由 LLM 产出 → 消费链入口）=====
-
-test("parseUnderstanding: 「你叫我什么？」期望产出（全 false）→ undefined（零注入）", () => {
-  // 回归锚：这句话曾被词表误判成追问轮 → 追问锚点注入带偏模型 → 手写行程
-  // 检测误触发强制规划。新契约下 L1 路由判 chat 且全标记 false → 解析层省略
-  // understanding → recall-gate off / 追问锚点无 / scheduleSnapshot 无 / travelState 无。
-  const raw = JSON.stringify({
-    intent: "chat",
-    confidence: 0.95,
-    understanding: {
-      is_follow_up: false,
-      reference: "none",
-      recall_intent: false,
-      memory_instruction: false,
-      personal_fact: false,
-      schedule_query: false,
-      travel_query: false,
-    },
-  });
-  assert.equal(parseUnderstanding(raw), undefined);
-});
-
-test("parseUnderstanding: snake_case 信号解析 + reference 封闭集校验", () => {
-  const parsed = parseUnderstanding(
-    JSON.stringify({
-      intent: "task",
-      understanding: {
-        is_follow_up: true,
-        reference: "earlier_session",
-        recall_intent: "true",
-        memory_instruction: false,
-        personal_fact: true,
-        schedule_query: false,
-        travel_query: false,
-      },
-    }),
-  );
-  assert.notEqual(parsed, undefined);
-  assert.equal(parsed!.isFollowUp, true);
-  assert.equal(parsed!.reference, "earlier_session");
-  assert.equal(parsed!.recallIntent, true);
-  assert.equal(parsed!.memoryInstruction, false);
-  assert.equal(parsed!.personalFact, true);
-  assert.equal(parsed!.scheduleQuery, false);
-  assert.equal(parsed!.travelQuery, false);
-});
-
-test("parseUnderstanding: 非法 reference 回落 none；坏 JSON/缺字段容错", () => {
-  // reference 非法值 → "none"，其余有效信号保留
-  const badRef = parseUnderstanding(
-    JSON.stringify({ understanding: { reference: "last_week", recall_intent: true } }),
-  );
-  assert.equal(badRef!.reference, "none");
-  assert.equal(badRef!.recallIntent, true);
-
-  // 坏 JSON / 空 / 无大括号 → undefined
-  assert.equal(parseUnderstanding("not json at all"), undefined);
-  assert.equal(parseUnderstanding(""), undefined);
-  assert.equal(parseUnderstanding(undefined), undefined);
-  assert.equal(parseUnderstanding('{"understanding": broken'), undefined);
-
-  // 未产出 understanding 字段（旧模型/降级响应）→ undefined
-  assert.equal(parseUnderstanding(JSON.stringify({ intent: "chat", confidence: 0.9 })), undefined);
 });
 
 // ===== 固化噪音过滤：闲聊语气行不进入长期记忆 =====

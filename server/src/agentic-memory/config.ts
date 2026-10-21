@@ -11,6 +11,7 @@ import {
   getAgenticMemoryDir,
   getAgenticMemoryEmbeddingDims,
   getAgenticMemoryLlmModel,
+  resolveAgenticMemoryLlmBaseUrl,
   resolveOpenAiApiKey,
 } from "./env.js";
 
@@ -49,6 +50,14 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
   // 不支持该参数，远端会返回 400（code 20015）。
   const embeddingDims = getAgenticMemoryEmbeddingDims(embeddingModel);
   const llmModel = getAgenticMemoryLlmModel();
+  const llmBaseUrl = resolveAgenticMemoryLlmBaseUrl();
+  // 单 provider 可观测性（2026-10-21）：启动/初始化时打出记忆侧 LLM 实际端点，
+  // 防止哪天又悄悄回落到第二个 provider。
+  console.info(
+    `[agentic-memory] llm model=${llmModel} baseURL=${llmBaseUrl ?? "(sdk-default)"} key=${
+      resolveOpenAiApiKey() ? "set" : "none"
+    }`,
+  );
 
   const qdrantUrl = process.env.AGENT_QDRANT_URL?.trim();
   const base: Partial<MemoryConfig> = {
@@ -63,10 +72,11 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
     llm: {
       provider: "openai",
       config: {
-        // LLM 必须用对话 key（OPENAI_API_KEY，如 DeepSeek）；embedding key 打 DeepSeek 端点会 401
+        // 2026-10-21 单模型统一：记忆侧 LLM 与主聊天共用同一 provider
+        //（MiniMax 优先；AGENT_AGENTIC_MEMORY_LLM_* 可单独覆盖）。
         apiKey: resolveOpenAiApiKey() ?? undefined,
         model: llmModel,
-        baseURL: process.env.OPENAI_BASE_URL?.trim() || undefined,
+        baseURL: llmBaseUrl,
       },
     },
     disableHistory: true,

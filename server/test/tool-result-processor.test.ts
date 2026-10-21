@@ -9,6 +9,7 @@ import {
   buildInterleavedRenderBlocks,
   buildCaptionedRenderBlocks,
   allImageCardsHaveCaption,
+  isFlatImageGallery,
   type MediaCardItem,
 } from "../src/services/tool-result-processor.js";
 import { travelItineraryStore } from "../src/skills/travel-planning/travel-itinerary-store.js";
@@ -542,6 +543,24 @@ test("allImageCardsHaveCaption: true only when every image card has non-empty ca
     ...buildPhotoCards(1),
   ];
   assert.equal(allImageCardsHaveCaption(partial), false);
+});
+
+test("isFlatImageGallery: 无分组的单次搜图 = 平铺图集，强制走一图一句版式", () => {
+  // 无 caption 也要按平铺图集处理：照片之间不再允许切段交错正文
+  assert.equal(isFlatImageGallery(buildPhotoCards(3)), true);
+  assert.equal(isFlatImageGallery(buildCaptionedPhotoCards(2)), true);
+  // 对比分组（groupTitle/side）不是平铺图集，保留原交错锚定
+  const grouped: MediaCardItem[] = [
+    { type: "image", title: "a", thumbnailUrl: "u1", groupTitle: "水屋", side: "A" },
+    { type: "image", title: "b", thumbnailUrl: "u2", groupTitle: "水屋", side: "B" },
+  ];
+  assert.equal(isFlatImageGallery(grouped), false);
+  // 混合视频/图片不是平铺图集
+  assert.equal(
+    isFlatImageGallery([{ type: "video", title: "v", thumbnailUrl: "" }]),
+    false,
+  );
+  assert.equal(isFlatImageGallery([]), false);
 });
 
 // ── 2026-10-11 变体声明剥离（[RENDER_AS]:xxx，括号在冒号前闭合）─────────

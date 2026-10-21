@@ -14,8 +14,8 @@
  * 光线、色调、情绪与瞬间感；禁止「女子穿…」式穿搭/外观清单描述。
  *
  * 降级策略（宁可没有，不可错位）：
- *   - 主模型不支持视觉 / 未配置密钥 / 调用失败 / 超时 → 不写 caption，
- *     前端回退到旧的交错排版（正文切段），不会出现"描述与照片无关"的更糟体验。
+ *   - 没有可用视觉模型 / 调用失败 / 超时 → 不写 caption。照片卡片仍走
+ *     「一图一句」版式（照片之间不再切段塞正文），只是该张照片下方没有描述。
  *   - 同一图片地址（本地 PNG 路径）跨轮复用内存缓存，避免重复看图。
  *
  * 开关：`IMAGE_CAPTION_ENABLED=0` 关闭（默认开启）。
@@ -58,6 +58,15 @@ export type CaptionOptions = {
    */
   locationHint?: string;
   /**
+   * 人格参照（2026-10-21）：本轮用户原话 + agent 已经说出口的正文。
+   * caption 要由 agent 用自己的人格/口吻来写，而不是中立的图片说明——
+   * 这两段就是它此刻的语气、称呼和关系感来源。
+   */
+  voice?: {
+    userText?: string;
+    replyText?: string;
+  };
+  /**
    * caption 生成器注入点（测试用）：默认用内置 VLM 批量看图。
    * 签名与 describeImagesWithVlm 一致（cards 已过滤为待生成的图片项）。
    */
@@ -92,11 +101,15 @@ export async function captionMediaCards(
   const todo = imageCards.filter((c) => !(c.caption ?? "").trim());
   if (todo.length === 0) return;
 
-  // 先吃缓存
+  // 先吃缓存。缓存键必须带人格参照（2026-10-21）：caption 现在是 agent 用自己
+  // 的口吻写的，不同用户/不同语境下同一张图应该说出不同的话——只按 URL 缓存
+  // 会把上一个用户的称呼（如「王哥」）跨会话泄漏出去。
+  const voiceKey = `${(opts.voice?.userText ?? "").trim()}\u0000${(opts.voice?.replyText ?? "").trim().slice(0, 60)}`;
+  const cacheKeyOf = (url: string): string => `${url}\u0000${voiceKey}`;
   const pending: MediaCardItem[] = [];
   for (const card of todo) {
     const url = (card.thumbnailUrl || card.mediaUrl || "").trim();
-    const cached = captionCache.get(url);
+    const cached = captionCache.get(cacheKeyOf(url));
     if (cached) {
       card.caption = cached;
     } else {
@@ -106,18 +119,19 @@ export async function captionMediaCards(
   if (pending.length === 0) return;
 
   // 主模型视觉能力闸仅约束默认的内置 VLM 通道；注入 describeFn（测试/自定义
-  // 生成器）本就不依赖主模型配置，提前 return 会让注入点完全失效（实测教训）
+  // 生成器）本就不依赖主模型配置，提前 return 会让注入点完全失效（实测教训）。
+  // MiniMax M3 系已实测支持 image_url（2026-10-21），主模型即可直接看图。
   const cfg = opts.describeFn ? null : resolvePrimaryLlmClientConfig();
   if (!opts.describeFn && (!cfg || !cfg.model || !modelSupportsVision(cfg.model))) {
     console.info(
-      "[image-caption] 主模型不支持视觉或未配置，跳过图片描述生成（回退旧渲染）",
+      "[image-caption] 主模型不支持视觉或未配置，跳过图片描述生成（照片不带描述）",
     );
     return;
   }
 
   const timeoutMs = opts.timeoutMs ?? CAPTION_TIMEOUT_MS;
   // cfg 仅在默认通道（describeFn 缺省）使用，上方守卫已保证非空
-  const describe = opts.describeFn ?? ((cards, ms) => describeImagesWithVlm(cards, cfg!, ms, opts.locationHint));
+  const describe = opts.describeFn ?? ((cards, ms) => describeImagesWithVlm(cards, cfg!, ms, opts.locationHint, opts.voice));
   try {
     const captions = await describe(pending, timeoutMs);
     for (let i = 0; i < pending.length; i++) {
@@ -131,7 +145,7 @@ export async function captionMediaCards(
           const first = captionCache.keys().next().value;
           if (first !== undefined) captionCache.delete(first);
         }
-        captionCache.set(url, caption);
+        captionCache.set(cacheKeyOf(url), caption);
       }
     }
   } catch (err) {
@@ -156,6 +170,7 @@ async function describeImagesWithVlm(
   cfg: LlmConfig,
   timeoutMs: number,
   locationHint?: string,
+  voice?: { userText?: string; replyText?: string },
 ): Promise<string[]> {
   // 1) 逐张取出图片字节（本地 PNG 优先直读文件；远程地址限时下载）
   const images: Array<{ base64: string; mime: string }> = [];
@@ -169,11 +184,20 @@ async function describeImagesWithVlm(
 
   // 2) 组装消息：一张图一个 image_url part，顺序即卡片顺序
   const hint = (locationHint ?? "").trim();
+  const replyText = (voice?.replyText ?? "").trim();
+  const userText = (voice?.userText ?? "").trim();
+  const hasVoice = Boolean(replyText || userText);
+  // 人格参照块：caption 不是中性图片说明，而是 agent 接着自己刚才那句话说的
+  const voiceLines: string[] = [];
+  if (replyText) voiceLines.push(`你刚才对用户说的话：\n「${replyText.slice(0, 240)}」`);
+  if (userText) voiceLines.push(`用户的原话：\n「${userText.slice(0, 100)}」`);
+  const voiceBlock = voiceLines.length > 0 ? `${voiceLines.join("\n")}\n\n` : "";
   const content: OpenAI.Chat.Completions.ChatCompletionContentPart[] = [
     {
       type: "text",
       text:
-        `下面按顺序给出 ${images.length} 张图片，请为每张图片生成一句中文描述，输出 JSON。` +
+        voiceBlock +
+        `下面按顺序给出 ${images.length} 张图片，请为每张图片生成一句中文短句，输出 JSON。` +
         (hint ? `\n拍摄位置参考：${hint}（仅当画面与之一致时才可在描述中提及地点）。` : ""),
     },
     ...images.map((img) => ({
@@ -194,19 +218,28 @@ async function describeImagesWithVlm(
       {
         role: "system",
         content: [
-          "你是为照片写「氛围感」短句的助手。用户按顺序给若干张图片，你要为每张图片写一句传达照片感觉的中文短句。",
+          hasVoice
+            ? "你不是图片描述器，你就是刚才在跟用户聊天的那个人。下面给你你刚才说出口的原话和用户的原话；你要为每一张照片写一句你本人顺口说的话。"
+            : "你是为照片写「氛围感」短句的助手。用户按顺序给若干张图片，你要为每张图片写一句传达照片感觉的中文短句。",
           "",
           "要求：",
-          "1. 写这张照片给人的感觉：光线、色调、氛围、情绪、瞬间的生动感（参考语感：「逆光把发丝照得发亮，整个画面都是夏天的松弛感」），让没看图的人也能感受到那一刻。",
-          "2. 禁止写成穿搭/物品清单：不要「女子穿…」「身穿…」「扎着…」「戴着…」式的外观罗列，也不要「服装+发型+氛围」的公式化拼接；人物只作为画面氛围的一部分自然带出，重心永远在感觉上。",
-          "3. 感觉必须来自画面真实可见的内容，可适度渲染但不臆造：不编造具体人名、品牌；能可靠判断场景时（如外滩、山林步道）可把地点自然融入氛围（如「外滩夜风里的霓虹」），判断不了就不提地点。",
-          "4. 每句 12~30 个字的陈述句，收尾干净完整，不要以冒号、破折号等悬空标点结尾；不要任何前缀（如「这张图片」「图中」「一张」开头），不要编号。",
-          `5. 只输出 JSON：{"captions":["第1张描述","第2张描述",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
+          hasVoice
+            ? "1. 用你刚才那句话的同一套人格、口吻、称呼和关系感（比如你叫他什么、你对照片里这个人的熟悉程度、你平时的说话习惯），像微信里看到图随口接一句。"
+            : "1. 写这张照片给人的感觉：光线、色调、氛围、情绪、瞬间的生动感，让没看图的人也能感受到那一刻。",
+          hasVoice
+            ? "2. 每句都要有「你」的反应：态度、调侃、夸赞、关心或懂他的那一下；不要写成中立的图片说明，也不要只描述光线/构图/穿搭。"
+            : "2. 禁止写成穿搭/物品清单：不要「女子穿…」「身穿…」「扎着…」「戴着…」式的外观罗列。",
+          "3. 内容必须贴着画面真实可见的东西，可适度渲染但不臆造：不编造具体人名、品牌、事件；判断不了的地点不要硬提。",
+          hasVoice
+            ? "4. 不要形成模板：对用户的称呼最多出现一次，不要每句都以称呼或「这张」开头；各句开头必须有明显差异。"
+            : "4. 不要使用统一的开头句式（「这张照片」「画面里」等）。",
+          "5. 每句 12~30 个字的陈述句，收尾干净完整，不要以冒号、破折号等悬空标点结尾；不要任何前缀，不要编号。",
+          `6. 只输出 JSON：{"captions":["第1张短句","第2张短句",...]}，数组长度必须等于图片张数，顺序与图片顺序一致；不要输出 JSON 以外的任何文字。`,
         ].join("\n"),
       },
       { role: "user", content },
     ],
-    temperature: 0.3,
+    temperature: 0.45,
     ...bypassChatRequestExtras(),
   });
 

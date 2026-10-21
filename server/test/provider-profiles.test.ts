@@ -31,7 +31,10 @@ test("minimax 档案：路由预算/超时放大（M2.x 思考计入 max_tokens 
   assert.equal(p, PROVIDER_MODEL_PROFILES.minimax);
   assert.ok(p.routeMaxOutputTokens >= 1024, `预算应 ≥1024，实际 ${p.routeMaxOutputTokens}`);
   assert.ok(p.routeTimeoutMs >= 5000, `超时应 ≥5000ms，实际 ${p.routeTimeoutMs}`);
-  assert.deepEqual(p.bypassRequestExtras("MiniMax-M3"), { thinking: { type: "disabled" } });
+  assert.deepEqual(p.bypassRequestExtras("MiniMax-M3"), {
+    reasoning_split: true,
+    thinking: { type: "disabled" },
+  });
 });
 
 test("快模型档案（openai/kimi）：维持现行验证值 192/3000 不回归", () => {
@@ -59,21 +62,35 @@ test("未登记 provider（failover/测试替身）：安全默认放大预算�
 /* ---------------- 路由调用参数 ---------------- */
 
 test("resolveRouteCallParams：按路由 provider 档案自适应（含 jsonMode 能力）", () => {
-  assert.deepEqual(resolveRouteCallParams({ id: "openai" }), {
+  // 显式空 env：避免宿主机 .env.local 的 LLM_ROUTE_MODEL 等覆盖干扰档案断言
+  assert.deepEqual(resolveRouteCallParams({ id: "openai" }, envWith({})), {
     maxOutputTokens: 192,
     timeoutMs: 3000,
     jsonMode: true,
   });
-  assert.deepEqual(resolveRouteCallParams({ id: "moonshot-kimi" }), {
+  assert.deepEqual(resolveRouteCallParams({ id: "moonshot-kimi" }, envWith({})), {
     maxOutputTokens: 192,
     timeoutMs: 3000,
     jsonMode: true,
   });
-  assert.deepEqual(resolveRouteCallParams({ id: "minimax" }), {
+  assert.deepEqual(resolveRouteCallParams({ id: "minimax" }, envWith({})), {
     maxOutputTokens: 1024,
     timeoutMs: 5000,
     jsonMode: true,
   });
+});
+
+test("resolveRouteCallParams：LLM_ROUTE_MODEL 作为路由模型覆盖透传", () => {
+  assert.equal(
+    resolveRouteCallParams({ id: "minimax" }, envWith({ LLM_ROUTE_MODEL: "MiniMax-M3" }))
+      .modelOverride,
+    "MiniMax-M3",
+  );
+  // 未配置时不产生 modelOverride（沿用 provider 主模型）
+  assert.equal(
+    resolveRouteCallParams({ id: "minimax" }, envWith({})).modelOverride,
+    undefined,
+  );
 });
 
 test("supportsJsonMode：已知端点 true，未登记端点默认 false（不冒险传参）", () => {
@@ -116,7 +133,10 @@ test("bypassChatRequestExtras：minimax 主模型附带 thinking:disabled", () =
   const extras = bypassChatRequestExtras(
     envWith({ EXTERNAL_MODEL_PROVIDER: "minimax", MINIMAX_API_KEY: "k" }),
   );
-  assert.deepEqual(extras, { thinking: { type: "disabled" } });
+  assert.deepEqual(extras, {
+    reasoning_split: true,
+    thinking: { type: "disabled" },
+  });
 });
 
 test("bypassChatRequestExtras：openai 槽位 deepseek-flash 关思考 / gpt 零侵入", () => {

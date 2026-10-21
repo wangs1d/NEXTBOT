@@ -241,7 +241,7 @@ test("L4 阈值：近窗成功 ≥3 次晋升，失败不计、跨窗口衰减",
 test("L4 名单纪律：桥/元工具/委派控制面永不晋升", () => {
   promotion.resetToolPromotionState();
   const actor = "actor-promote-2";
-  for (const name of ["tool_discover", "tool_call", "obs_recall", "task.dispatch", "agent.query_capabilities"]) {
+  for (const name of ["tool_discover", "obs_recall", "task.dispatch", "agent.query_capabilities"]) {
     for (let i = 0; i < 5; i++) promotion.recordToolUsageForPromotion(actor, name, true);
   }
   assert.deepEqual(promotion.getPromotedToolNames(actor), [], "召回通道工具不得晋升");
@@ -345,14 +345,14 @@ test("② 三条实证 miss 补齐：提醒/回复/记一下 在 router-first �
 });
 
 test("② router-first 判定收口：轻量常驻/桥不稀释「主力在目录」语义", () => {
-  const bridge = ["tool_discover", "tool_call"];
+  const bridge = ["tool_discover"];
   const mk = (names: string[]) => ({
     toolSearchActive: true,
     deferredToolCount: 100,
     visibleTools: [...bridge, ...names].map((n) => fn(n)),
   });
   const light = laneSets.buildTaskLaneRouterFirstLightTools(corpus).map(toolName);
-  // 轻量 7 + 桥 2 + travel 保底族 4 = 13 可见 → 业务 4 ≤ 6，仍判 router-first
+  // 轻量 7 + 桥 1 + travel 保底族 4 = 12 可见 → 业务 4 ≤ 6，仍判 router-first
   assert.equal(
     laneSets.isRouterFirstLaneTurn(
       mk([...light, "travel.plan-itinerary", "travel.search-poi", "travel.destination-info", "travel.compute-route"]),

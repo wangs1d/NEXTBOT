@@ -20,7 +20,7 @@ export type ToolCallTraceEntry = {
   /**
    * 工具到达通道（2026-10-01 S2 通道收敛观测；2026-10-09 L3 增幻觉转正）：
    *   visible    = 首波可见（Core/束投影/域信号预载/晋升常驻）
-   *   bridge     = 桥自身（tool_discover/tool_call 解析层）
+   *   bridge     = 桥自身（tool_discover 解析层）
    *   deferred   = 经桥按名/检索/请求卡调回的延迟工具
    *   hallucination_promoted = 模型未检索就直呼的不可见名，registry 放行执行
    *                            （调用即发现转正，等价 discover+call 合一波）

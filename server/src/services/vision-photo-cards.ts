@@ -90,6 +90,8 @@ export async function buildVisionPhotoCards(opts: {
   locationHint?: string;
   /** 帧落盘根目录（测试注入用） */
   baseDir?: string;
+  /** 人格参照（本轮用户原话 + agent 已说出口的正文），caption 用 agent 自己的口吻写 */
+  voice?: { userText?: string; replyText?: string };
   /** caption 生成注入点（测试注入用） */
   captioner?: (cards: MediaCardItem[], timeoutMs: number) => Promise<string[]>;
   timeoutMs?: number;
@@ -104,7 +106,7 @@ export async function buildVisionPhotoCards(opts: {
     mediaUrl: url,
   }));
 
-  const captionOpts: CaptionOptions = { locationHint: opts.locationHint };
+  const captionOpts: CaptionOptions = { locationHint: opts.locationHint, voice: opts.voice };
   if (opts.captioner) captionOpts.describeFn = opts.captioner;
   if (opts.timeoutMs != null) captionOpts.timeoutMs = opts.timeoutMs;
   try {

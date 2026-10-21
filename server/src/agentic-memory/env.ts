@@ -64,19 +64,52 @@ export function getAgenticMemoryEmbeddingDims(model: string): number {
   return 1536;
 }
 
+/**
+ * 记忆侧 LLM 的模型/端点解析（2026-10-21 单模型统一）：
+ * 优先级 = 记忆专用覆盖 → 主聊天 provider（MiniMax）→ 旧 OPENAI_* 兼容。
+ *
+ * 背景：此前 Mem0/extractor/reranker 走 `OPENAI_API_KEY`（DeepSeek），
+ * 主聊天走 MiniMax，等于两个模型 API 同时提供服务。统一后记忆侧调用
+ * 与主聊天共用同一 provider；`AGENT_AGENTIC_MEMORY_LLM_*` 仍可单独覆盖。
+ */
+function activeExternalProvider(): string {
+  return (process.env.EXTERNAL_MODEL_PROVIDER ?? "").trim().toLowerCase();
+}
+
 export function getAgenticMemoryLlmModel(): string {
-  return (
-    process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL?.trim() ||
-    process.env.OPENAI_MODEL?.trim() ||
-    "gpt-4o-mini"
-  );
+  const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL?.trim();
+  if (explicit) return explicit;
+  if (activeExternalProvider() === "minimax") {
+    return process.env.MINIMAX_MODEL?.trim() || "MiniMax-M3";
+  }
+  return process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini";
+}
+
+/**
+ * 记忆侧 LLM 的 baseURL：记忆专用覆盖 → 当前 provider 的端点。
+ * provider=minimax 时**不再回落 OPENAI_BASE_URL**（server/.env 里可能残留
+ * api.openai.com），否则 OpenAI SDK 会打到第二 provider。
+ */
+export function resolveAgenticMemoryLlmBaseUrl(): string | undefined {
+  const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_BASE_URL?.trim();
+  if (explicit) return explicit;
+  if (activeExternalProvider() === "minimax") {
+    return process.env.MINIMAX_BASE_URL?.trim() || "https://api.minimaxi.com/v1";
+  }
+  return process.env.OPENAI_BASE_URL?.trim();
 }
 
 export function resolveOpenAiApiKey(): string | null {
-  const key =
-    process.env.OPENAI_API_KEY?.trim() ||
-    process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
-    null;
+  const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_API_KEY?.trim();
+  // provider=minimax 时只认 MiniMax key：没有就禁用记忆侧 LLM，
+  // 绝不偷偷拿 OPENAI key 去请求另一个 provider。
+  const key = explicit
+    ? explicit
+    : activeExternalProvider() === "minimax"
+      ? process.env.MINIMAX_API_KEY?.trim() || null
+      : process.env.OPENAI_API_KEY?.trim() ||
+        process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
+        null;
   // 防御：占位符 key（sk-placeholder-... 等）不应被当作真 key 传给 mem0ai
   if (isPlaceholderApiKey(key)) return null;
   return key;

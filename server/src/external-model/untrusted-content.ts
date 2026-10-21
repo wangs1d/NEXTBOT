@@ -12,7 +12,7 @@
  *
  * 已知局限（诚实记录）：正则是词面防线，挡不住语义级伪装；但作为零成本
  * 确定性层，与出口检查/limbic 门禁同构，宁可误报（多一行警示）不漏报。
- * 元工具桥（tool_discover/tool_call 等）的结果由系统自身构造，跳过围栏。
+ * 元工具桥（tool_discover 等）的结果由系统自身构造，跳过围栏。
  */
 
 /** 注入意图模式（命中即标注；词面防线，语义伪装不在覆盖范围） */
@@ -70,7 +70,6 @@ const FENCE_SKIP_TOOLS: ReadonlySet<string> = new Set([
   "tool_discover",
   "tool_search",
   "tool_describe",
-  "tool_call",
   "agent.query_capabilities",
   "brain.list_capabilities",
   "brain.identify_capability_gap",

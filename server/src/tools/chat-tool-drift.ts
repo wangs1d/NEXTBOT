@@ -28,7 +28,6 @@ const SCHEMA_ONLY_ALLOWLIST = new Set<string>([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "tool_call",
   // obs_recall 在 openai-compatible-tool-loop 循环层直接服务（ObservationPack 读回），不进 ToolRegistry
   "obs_recall",
 ]);

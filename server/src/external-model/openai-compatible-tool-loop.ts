@@ -115,12 +115,7 @@ import {
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
 import { resolveForcedToolChoice } from "../gateway/forced-tool.js";
-import { buildRecoveryHint, hasExternalSideEffect } from "../agent/loop/tool-metadata.js";
-import {
-  claimsSideEffectCompletion,
-  promisesSideEffectCompletion,
-  messageHasWriteRequestSignal,
-} from "../agent/claim-consistency.js";
+import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isToolCallIdNotFoundError,
   isToolChoiceRejectedError,
@@ -226,7 +221,6 @@ const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
   // 2026-10-01 瘦身后实测 p50 1509 字符（top-3 瘦身 schema 全保）。旧 800 预算
   // 配 4k 胖载荷=常态截断（LLM 从未见过完整结果）；现预算覆盖瘦身后载荷 → 零截断。
   "tool_discover": 1600,
-  "tool_call": 1200,
   "shopping.order.search": 1500,
   "shopping.order.place": 1000,
   "shopping.order.track": 1000,
@@ -283,7 +277,6 @@ const META_TOOL_NAMES = new Set<string>([
   "tool_discover",
   "tool_search",
   "tool_describe",
-  "tool_call",
   "agent.query_capabilities",
   "brain.list_capabilities",
   "brain.identify_capability_gap",
@@ -2215,7 +2208,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         (domainCards ? domainCards + "\n\n" : "") +
         "工具调用原则：\n" +
         (routerFirstLane
-          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover/tool_call）：优先按上方【能力域目录】按名直呼 tool_call 或 tool_discover({domain:\"域名\"}) 拉取该域参数 schema；需要语义检索时再用 tool_discover({query})。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
+          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover）：先用 tool_discover({domain:\"域名\"}) 按上方【能力域目录】拉取该域参数 schema（或 tool_discover({query}) 做语义检索），schema 加载后下一轮直接调用对应工具。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
           : "") +
         planAndExecuteRules +
         "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
@@ -2840,12 +2833,12 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         }
       }
 
-      // ── 单一出口检查（2026-09-19 静态架构，取代出口自检/空正文闸多闸）──
-      // 一轮最多续波一次，判定只看服务端事实（工具执行结果），不再做
-      // 道歉文本风格判定（"零尝试+道歉"直接如实收尾，不再赌文本措辞）。
-      // 行动宣告兜底已下线（2026-10-06，见文件头部注释）。
-      // 优先级：写意图未尝试 > 实时/媒体意图未尝试 > 尝试全败 > 调了工具没正文。
-      // 预算耗尽 → 如实收尾。
+      // ── 单一出口检查（2026-10-21 去后置闸：只保留标准 ReAct loop 事实检查）──
+      // 不再扫描回复文本判断「宣称/承诺已办」——声称已办却未调工具属于模型
+      // 行为问题，由职责块铁律 + 请求层 tool_choice="required" 解决，
+      // 代码不在事后重跑整轮。这里只保留两条与服务端事实相关的循环行为：
+      //   1) 工具全失败 → 换关键词/换工具再试一次；
+      //   2) 调了工具但零正文 → 要求补叙述。
       if (staticToolArch && !exitGateEnforced && stableApiTools.length > 0) {
         let gateReason: string | null = null;
         let gateInstruction = "";
@@ -2854,81 +2847,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         const hasSubstantiveAttempt = allToolExecResults.some(
           (r) => !META_TOOL_NAMES.has(r.toolName) && !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
         );
-        // 宣称-证据一致性闸（2026-10-12 通用纠错，取代一切「写意图词表」补丁）：
-        // 回复宣称/承诺完成写操作 ∧ 本轮零个副作用工具执行 = 结构性违约，
-        // 与意图标签解耦——任何工具被嘴上糊弄都走这一条，不再按意图长新文件。
-        // 完成宣称（已设置/已创建…）无条件触发；未来承诺（会提醒你）仅当当前
-        // 用户消息带写请求信号时触发（防「你会提醒我吗」确认轮误伤）。
-        const currentUserTextForGate = (() => {
-          for (let i = messages.length - 1; i >= 0; i--) {
-            const m = messages[i] as { role?: string; content?: unknown };
-            if (m?.role === "user" && typeof m.content === "string" && m.content.trim()) {
-              return m.content.trim();
-            }
-          }
-          return "";
-        })();
-        const claimViolation =
-          claimsSideEffectCompletion(finalText) ||
-          (promisesSideEffectCompletion(finalText) &&
-            messageHasWriteRequestSignal(currentUserTextForGate));
         if (
-          finalText.trim() &&
-          claimViolation &&
-          !allToolExecResults.some((r) => r.ok && hasExternalSideEffect(r.toolName))
-        ) {
-          gateReason = "completion_claim_without_execution";
-          gateInstruction =
-            "你在回复里向用户宣称已经完成（或承诺会完成）某个写操作（设置/创建/发送/下单/提醒等），" +
-            "但本轮没有执行任何有副作用的工具——这是虚假宣称。请立即调用对应的工具真实完成这个动作，" +
-            "拿到工具返回的成功结果后再回复用户；如果确实无法完成（缺少必要信息就先向用户问一句），" +
-            "请如实向用户说明卡点，严禁在未执行工具的情况下宣称已办妥或承诺会办。";
-        } else if (
-          finalText.trim() &&
-          allToolExecResults.length === 0 &&
-          (options?.turnIntent === "action_write" || options?.turnIntent === "multi_step_task")
-        ) {
-          gateReason = "write_intent_never_attempted";
-          gateInstruction =
-            "用户这条消息是要你实际完成一个动作（设置/创建/操作/发送等），路由系统已把它判定为写操作意图，" +
-            "但你还没有调用任何工具就直接回复了。请立即调用对应工具真正完成这个动作，拿到工具返回的成功结果后再回复用户；" +
-            "严禁在未调用工具的情况下声称「已设置/已办妥/已发送」。只有在确实缺少必要信息（缺什么就先问一句）或工具确实办不到时才直接回复。";
-        } else if (
-          finalText.trim() &&
-          allToolExecResults.length === 0 &&
-          ((options?.turnIntent === "realtime_lookup" && options?.turnEvidenceInjected !== true) ||
-            options?.turnIntent === "media_retrieval" ||
-            options?.turnIntent === "travel_planning" ||
-            options?.turnIntent === "weather_query")
-        ) {
-          // 2026-09-23 扩面：realtime/media 意图轮此前零工具直答无任何拦截
-          //（真实日志：任务面 18 轮里 4 轮零工具）。证据块已注入的轮豁免——
-          // 答的就是刚检索到的事实，不需要再调工具；未注入（前置检索失败/
-          // 路由降级轮）时零工具直答 = 用训练记忆硬答当前事实，必须补搜。
-          // 2026-10-10 收窄豁免（马尔代夫搜图轮实证）：豁免只留给 realtime_lookup。
-          // media 轮注入的证据永远来自投机/路由的**文字**搜索（search_web），
-          // 拿到两条文字摘要 ≠ 照片已检索——豁免放行后模型零工具直答，
-          // 用想象把「水屋/海底/航拍」描述一遍，用户一张图都收不到。
-          // travel_planning（2026-10-10 P1）：确定性预执行要求目的地可抽，纯指代
-          // 轮不预执行 → 零工具直答 = 手写行程（行程卡缺席的原始事故形态），
-          // 同样不设豁免，强制补调 travel.plan-itinerary 或追问目的地。
-          gateReason = options?.turnIntent === "media_retrieval"
-            ? "media_intent_never_attempted"
-            : options?.turnIntent === "travel_planning"
-            ? "travel_intent_never_attempted"
-            : "realtime_intent_never_attempted";
-          gateInstruction = options?.turnIntent === "media_retrieval"
-            ? "用户在找图片/照片/视频，路由系统已把这条消息判定为媒体检索意图，但你还没有调用任何工具就直接回复了。" +
-              "请立即调用 search_images / search_videos（必要时配合 search_web）真实检索，基于真实结果回答；" +
-              "若确实无法检索，请如实向用户说明，不要凭想象描述或编造图片。"
-            : options?.turnIntent === "travel_planning"
-            ? "用户这条消息是在规划旅行行程，路由系统已把它判定为行程规划意图，但你还没有调用任何工具就直接回复了。" +
-              "请立即调用 travel.plan-itinerary 生成结构化行程（系统会自动附上行程卡），基于工具返回的行程草案回复；" +
-              "若确实缺少目的地等必要信息，先向用户追问一句，不要手写逐日行程清单。"
-            : "这条消息需要现实世界的当前信息，路由系统已把它判定为实时查询意图，但本轮既没有注入检索证据块、" +
-              "你也没有调用任何搜索工具就直接回答了。请先调用 search_web 真实检索，拿到结果后再回答用户；" +
-              "若确实查不到，如实说明，不要凭记忆硬答或编造。";
-        } else if (
           finalText.trim() &&
           hasSubstantiveAttempt &&
           countSubstantiveOkResults() === 0
@@ -3172,14 +3091,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           }
         }
       }
-      let registryToolName = resolveRegistryToolName(fn.name);
-      let notifyToolName = registryToolName;
-      if (isToolSearchBridgeName(registryToolName) && registryToolName === "tool_call") {
-        const bridge = await executeBridgeWithTimeout(registryToolName, args, deferredToolCatalog);
-        if (bridge.kind === "call" && bridge.ok) {
-          notifyToolName = bridge.registryToolName;
-        }
-      }
+      const registryToolName = resolveRegistryToolName(fn.name);
+      const notifyToolName = registryToolName;
       ctx.onToolExecuteStart?.({
         toolName: notifyToolName,
         input: args,
@@ -3873,7 +3786,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       const trimmedMessages = trimHistoryForSummary(summaryBaseMessages, SUMMARY_KEEP_USER_TURNS, userText);
 
       // 数据驱动策略评估：根据工具收集到的真实数据质量选择回复策略
-      const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText);
+      const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText, options?.turnIntent);
       const strategyBlock = strategyDirective.instruction
         ? `\n\n【回复策略】${strategyDirective.instruction}`
         : "";
@@ -3911,7 +3824,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       // 纯图轮例外（2026-10-06）：search_images 拿到照片且无文字检索结果时，
       // 交付就是图本身，「按主题分节、信息用足」会教出「已确认的/能说的/没查到的」
       // 盘点正文（真机事故形态）；展开要求由 strategyBlock 的照片轮指令承担。
-      const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults);
+      const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults, options?.turnIntent);
       const singleFactClause = isDirectFactQuery(userText)
         ? `这是单一事实求证（是/否、一个数据点）：给「结论 + 1 句依据」即可，最多保留一个简短追问。`
         : `把检索到的信息组织充分：按主题分节，用 Markdown 小标题/加粗/表格排版，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。`;

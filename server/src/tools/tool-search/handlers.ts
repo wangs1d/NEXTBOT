@@ -36,7 +36,7 @@ export type ResidentToolInfo = {
   parameters?: Record<string, unknown>;
 };
 
-const RESIDENT_HINT = "常驻工具：无需 discover 加载 schema，直接 tool_call 即可执行";
+const RESIDENT_HINT = "常驻工具：schema 已在可见工具列表中，直接调用即可执行";
 
 const ADAPTIVE_AGENT_SEARCH_PATH = [
   "intent_router",
@@ -127,25 +127,8 @@ export async function executeToolSearchBridge(
     return { kind: "describe", ok: true, result: schema };
   }
 
-  if (normalized === "tool_call") {
-    const name = String(args.name ?? "").trim();
-    if (!name) {
-      return { kind: "call", ok: false, result: { error: "name 不能为空" } };
-    }
-    const entry = resolveCatalogToolName(catalog, name);
-    if (!entry) {
-      return { kind: "call", ok: false, result: { error: `未找到延迟工具: ${name}` } };
-    }
-    const parsedArgs = resolveCallArguments(args.arguments);
-    recordToolCallFeedback(catalog, entry.registryName);
-    return {
-      kind: "call",
-      ok: true,
-      registryToolName: entry.registryName,
-      parsedArgs,
-    };
-  }
-
+  // 2026-10-21 单一通道：延迟工具的调用只走「discover 加载 schema → 模型原生
+  // tool_calls」；`tool_call` 自由 JSON 执行通道已删除，不再有第二条入口。
   return { kind: "search", ok: false, result: { error: `未知桥接工具: ${bridgeName}` } };
 }
 

@@ -61,10 +61,35 @@ test("Fast 模式跳过位置强制（system prompt 已注入定位上下文）"
   assert.equal(choice, "auto");
 });
 
-test("时效性查询不再强制 search_web（话题词强制已删，工具需求由语义路由 + 出口自检承担）", () => {
+test("明确动作/取料请求 → tool_choice=required（2026-10-21 请求层强制，替代后置闸）", () => {
+  for (const text of [
+    "帮我查查最新的新闻",
+    "帮我搜索成龙最近的照片",
+    "明天早上9点提醒我开会",
+    "帮我订明天中午的餐厅",
+  ]) {
+    const choice = resolveForcedToolChoice(text, [fnTool("search_web"), fnTool("reminder.plan")]);
+    assert.equal(choice, "required", `${text} 应强制本轮至少调一个工具`);
+  }
+});
+
+test("闲聊/纯提问/知识问答 → auto（不强制工具）", () => {
+  for (const text of [
+    "你还记得 不错不错",
+    "电话是什么时候发明的",
+    "为什么天空是蓝色的",
+    "哈哈笑死我了",
+  ]) {
+    const choice = resolveForcedToolChoice(text, [fnTool("search_web")]);
+    assert.equal(choice, "auto", `${text} 不该被强制调用工具`);
+  }
+});
+
+test("Fast 模式跳过 required 强制（system 已注入上下文，避免多一次 round trip）", () => {
   const choice = resolveForcedToolChoice(
     "帮我查查最新的新闻",
     [fnTool("search_web")],
+    true,
   );
   assert.equal(choice, "auto");
 });

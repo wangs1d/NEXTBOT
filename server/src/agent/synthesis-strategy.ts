@@ -86,7 +86,9 @@ const TEXT_SEARCH_TOOL_NAMES = new Set([
   "search_web",
   "deep_search",
   "hot_rankings",
-  "search_videos",
+  // 注意：search_videos 是**媒体**工具（视频结果同样由媒体卡交付），
+  // 不属于文字检索。此前误列在这里，模型顺手搜了视频就会把纯图轮判成
+  // 「图文混合」，正文退化成照片清单/视频介绍（2026-10-21 真机取证）。
   "fetch_web",
   "info.inspect_webpage",
   "info.navigate_site",
@@ -132,9 +134,14 @@ export type PreamblePolicy = "allow" | "suppress";
  */
 export function isPhotoDeliveryRound(
   results: Array<{ toolName: string; ok: boolean }>,
+  turnIntent?: string,
 ): boolean {
   const okResults = results.filter((r) => r.ok);
   if (!okResults.some((r) => r.toolName === "search_images")) return false;
+  // 媒体意图是结构性判据（2026-10-21 根修）：用户这一轮要的就是照片，即便
+  // 某次网页检索意外成功（历史事故），正文也不能转成「按主题分节 + 表格」的
+  // 资料汇总——交付形态由意图决定，不由工具结果的组合碰运气。
+  if (turnIntent === "media_retrieval") return true;
   return !okResults.some((r) => TEXT_SEARCH_TOOL_NAMES.has(r.toolName));
 }
 
@@ -423,6 +430,7 @@ export function collectToolDataFromResults(
 export function evaluateAndSelectStrategy(
   toolResults: Array<{ toolName: string; ok: boolean; result: Record<string, unknown> }>,
   userMessage: string,
+  turnIntent?: string,
 ): StrategyDirective {
   // 记账轮短路（2026-10-06）：本轮只有档案/记忆写入类回执、没有真实检索内容时，
   // 不做数据质量分档、不注入任何展开策略——回复形态交给车道人格（闲聊轮两三句）。
@@ -449,7 +457,7 @@ export function evaluateAndSelectStrategy(
   // 纯图轮短路（2026-10-06）：搜照片轮的交付是图本身，不走数据质量分档——
   // 否则 medium 档的「先已确认事实/再合理推断/最后待验证点」三段式会教出
   // 「已确认的/能说的/没查到的」盘点正文（真机取证的事故形态）。
-  if (isPhotoDeliveryRound(substantiveResults)) {
+  if (isPhotoDeliveryRound(substantiveResults, turnIntent)) {
     return {
       strategy: "photo_delivery",
       instruction: PHOTO_DELIVERY_INSTRUCTION,

@@ -15,6 +15,8 @@
  *   4. 注入一行 taskContext 说明，让模型知道为什么不联网、照实回答即可。
  */
 
+import { isMediaOnlyRequest, mediaToolNameForText } from "./realtime-search-query.js";
+
 /**
  * 显式禁网/禁搜索表达。锚定常见说法，宁可漏判不可误判——
  * 误判会把真正想搜的轮的联网能力摘掉（如「不要联网词典那个APP」是歧义表达，
@@ -35,6 +37,47 @@ const WEB_SEARCH_TOOL_RE =
 
 export function filterWebSearchTools(tools: import("openai/resources/chat/completions").ChatCompletionTool[]): import("openai/resources/chat/completions").ChatCompletionTool[] {
   return tools.filter((t) => !WEB_SEARCH_TOOL_RE.test(("function" in t ? t.function?.name : "") ?? ""));
+}
+
+/**
+ * 文字检索族（媒体轮只留图片/视频检索，网页检索整族不可见）。
+ *
+ * 2026-10-21 根修：用户只索图时从未要求查资料，但 search_web 在媒体轮里既被
+ * 词面预载召回、又被 pin 规则重新塞回可见集，模型就会"顺手"查人物近况，最后
+ * 把日期/来源表格贴到照片下面。媒体意图的工具面必须只有媒体工具——不是靠
+ * 出口删文字，而是让网页检索这一轮根本不存在。
+ */
+const TEXT_SEARCH_TOOL_RE =
+  /^(search_web|deep_search|fetch_web|hot_rankings|internet\.|info\.inspect_webpage|info\.navigate_site|info\.read_webpage|info\.search)/;
+
+export function filterTextSearchTools(tools: import("openai/resources/chat/completions").ChatCompletionTool[]): import("openai/resources/chat/completions").ChatCompletionTool[] {
+  return tools.filter((t) => !TEXT_SEARCH_TOOL_RE.test(("function" in t ? t.function?.name : "") ?? ""));
+}
+
+/**
+ * 纯媒体请求的**模态**工具面：用户说照片就只给图片检索，说视频就只给视频检索。
+ *
+ * 2026-10-21 根修：纯图轮的工具面此前同时保留 search_images 与 search_videos，
+ * 模型会顺手搜一段视频，正文随即变成「照片情况 / 视频 / 待验证」的盘点——
+ * 用户要的只是照片。模态由用户原话确定性决定（mediaToolNameForText），
+ * 工具面只提供该模态，另一模态整族不可见。
+ */
+export function filterMediaModalityTools(
+  tools: import("openai/resources/chat/completions").ChatCompletionTool[],
+  text: string,
+): import("openai/resources/chat/completions").ChatCompletionTool[] {
+  if (!isMediaOnlyRequest(text)) return tools;
+  const wantsVideo = mediaToolNameForText(text) === "search_videos";
+  const dropRe = wantsVideo
+    ? /^(search_images|search_images_batch)$/
+    : /^(search_videos|video\.(find|grab))$/;
+  // 委派/后台任务工具也收起：纯媒体请求是前台一次检索的事，模型不该把它
+  // 转成 task.dispatch 后台任务（真机实测：模型会派后台然后正文说"数据太少"）。
+  const delegationRe = /^task\.(dispatch|status|cancel)$/;
+  return tools.filter((t) => {
+    const name = ("function" in t ? t.function?.name : "") ?? "";
+    return !dropRe.test(name) && !delegationRe.test(name);
+  });
 }
 
 export const NO_WEB_TURN_NOTE =

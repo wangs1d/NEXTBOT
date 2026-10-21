@@ -138,7 +138,6 @@ export const TASK_LANE_CORE_NAMES: readonly string[] = [
   "obs_recall",
   // 元工具桥 + 逃生门 + 委派闭环（2026-09-19 P0-2）
   "tool_discover",
-  "tool_call",
   "task.dispatch",
   "task.status",
   "task.cancel",
@@ -515,7 +514,6 @@ export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "tool_call",
   "agent.query_capabilities",
 ]);
 

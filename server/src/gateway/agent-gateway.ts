@@ -156,7 +156,8 @@ export function resolveForcedTool(
   fastProfile?: boolean,
 ): ForcedToolChoice {
   const choice = resolveForcedToolChoice(userText, apiTools, fastProfile);
-  const decision = choice === "auto" ? "auto" : `forced:${choice.function.name}`;
+  const decision =
+    choice === "auto" || choice === "required" ? choice : `forced:${choice.function.name}`;
   return traced("forced_tool", decision, [`fastProfile=${fastProfile ?? false}`], () => choice);
 }
 

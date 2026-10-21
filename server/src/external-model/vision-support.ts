@@ -23,6 +23,9 @@ const VISION_MODEL_PATTERNS = [
   "deepseek-vl", "deepseek-vl2",
   // DeepSeek 官方 V4.1-Flash（deepseek-flash；旧名 deepseek-v4-flash[-vision-exp] 亦由其服务）
   "deepseek-flash", "deepseek-v4-flash",
+  // MiniMax M3 系（2026-10-21 实测：OpenAI 兼容端点已接受 image_url，
+  // M3 / M3.1-Flash 均能正确读图并输出描述；此前 1033 报错已不复现）
+  "minimax-m3",
 ];
 
 /** 检测模型是否支持视觉（多模态图片输入）。

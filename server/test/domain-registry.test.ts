@@ -40,7 +40,7 @@ const LEGACY_PREFIXES: Record<string, string[]> = {
 const corpus: ChatCompletionTool[] = [...getBuiltinAgentChatTools()];
 const nameOf = (t: ChatCompletionTool): string => (t.type === "function" ? t.function?.name ?? "" : "");
 
-const BRIDGES = new Set(["tool_search", "tool_discover", "tool_describe", "tool_call", "agent.query_capabilities"]);
+const BRIDGES = new Set(["tool_search", "tool_discover", "tool_describe", "agent.query_capabilities"]);
 
 function legacySet(cap: string): Set<string> {
   const prefixes = LEGACY_PREFIXES[cap] ?? [];

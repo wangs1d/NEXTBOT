@@ -3,13 +3,11 @@
  *
  *   npx tsx scripts/smoke-real-tools.ts
  *
- * 验证目标（2026-09-02 意图路由架构 + 工具真实调用）：
- *   ① 真实 LLM 意图分类：一批代表性消息经 routeTurnByLlm（真实 provider）→
- *      输出意图标签 + 车道，核对 fast/complex 是否被正确命中；
- *   ② 真实搜索工具：registry.execute("search_web") 走真实 AnySearch 链路返回结果；
- *   ③ 真实图片工具：registry.execute("search_images") 返回真实照片；
- *   ④ 其他工具：registry.execute("clock.get_current_time") 正确返回；
- *   ⑤ 真实端到端 tool-loop：真实 LLM + 真实工具执行器——搜索类请求是否
+ * 验证目标（2026-10-21 去路由化后：工具真实调用）：
+ *   ① 真实搜索工具：registry.execute("search_web") 走真实 AnySearch 链路返回结果；
+ *   ② 真实图片工具：registry.execute("search_images") 返回真实照片；
+ *   ③ 其他工具：registry.execute("clock.get_current_time") 正确返回；
+ *   ④ 真实端到端 tool-loop：真实 LLM + 真实工具执行器——搜索类请求是否
  *      「真的去调用了工具并基于结果作答」（文字搜索 + 照片各跑一轮）。
  */
 import dotenv from "dotenv";
@@ -26,10 +24,6 @@ const { registerWebTools } = await import("../src/tools/web-tools.js");
 const { registerClockTools } = await import("../src/tools/clock-tools.js");
 const { InfoHubService } = await import("../src/services/info-hub-service.js");
 const { UpstreamSearchService } = await import("../src/services/upstream-search-service.js");
-const { createExternalChatProviderFromEnv } = await import(
-  "../src/external-model/resolve-provider.js"
-);
-const { routeTurnByLlm } = await import("../src/agent/llm-task-router.js");
 const { streamCompletionWithTools, getBuiltinAgentChatTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"
 );
@@ -44,40 +38,9 @@ registerClockTools(registry);
 const section = (title: string) =>
   console.log(`\n════════════════════ ${title} ════════════════════`);
 
-/* ── ① 真实 LLM 意图分类 ── */
-async function smokeIntentRouting() {
-  section("① 真实 LLM 意图分类（routeTurnByLlm × 真实 provider）");
-  const provider = createExternalChatProviderFromEnv();
-  if (!provider) {
-    console.log("⚠ 未配置外部模型 provider（OPENAI_API_KEY?），跳过");
-    return;
-  }
-  const cases: Array<{ text: string; expectPlane: "chat" | "task" }> = [
-    { text: "在吗", expectPlane: "chat" },
-    { text: "你好呀，今天有点累", expectPlane: "chat" },
-    // 双面架构：realtime_lookup / media_retrieval 按路由表落任务面（搜索工具由任务面携带）
-    { text: "刘浩存最近的消息", expectPlane: "task" },
-    { text: "帮我搜索景甜的照片", expectPlane: "task" },
-    { text: "帮我找几张景甜最近的活动中照片", expectPlane: "task" },
-    { text: "明天早上八点提醒我开会", expectPlane: "task" },
-    { text: "在电脑上帮我打开微信给张三发个消息", expectPlane: "task" },
-    { text: "量子纠缠到底是什么原理", expectPlane: "chat" },
-  ];
-  let hit = 0;
-  for (const { text, expectPlane } of cases) {
-    const d = await routeTurnByLlm(provider, "smoke-intent", text);
-    const ok = d.plane === expectPlane;
-    if (ok) hit += 1;
-    console.log(
-      `${ok ? "✔" : "✖"} [${d.plane}${ok ? "" : `≠期望${expectPlane}`}] intent=${d.intent}@${d.confidence?.toFixed(2)} | ${text} | ${d.reasons[0] ?? ""}`,
-    );
-  }
-  console.log(`── 意图路由命中 ${hit}/${cases.length}`);
-}
-
-/* ── ②③④ 真实工具直调 ── */
+/* ── ①②③ 真实工具直调 ── */
 async function smokeDirectTools() {
-  section("②③④ 真实工具直调（registry.execute → 真实 AnySearch / 图片链路 / 时钟）");
+  section("①②③ 真实工具直调（registry.execute → 真实 AnySearch / 图片链路 / 时钟）");
   const ctx = { sessionId: "smoke-real-tools" };
 
   const web = await registry.execute("search_web", { query: "刘浩存 最新消息", limit: 5 }, ctx);
@@ -106,7 +69,7 @@ async function smokeDirectTools() {
   return { webOk: web.ok && webItems.length > 0, imgOk: imgs.ok && imgItems.length > 0, clockOk: clock.ok };
 }
 
-/* ── ⑤ 真实端到端 tool-loop（真实 LLM + 真实工具执行器）── */
+/* ── ④ 真实端到端 tool-loop（真实 LLM + 真实工具执行器）── */
 async function smokeE2E(userText: string, expectTool: string) {
   console.log(`\n── 端到端: "${userText}" （期望真实调用 ${expectTool}）`);
   const executed: Array<{ name: string; ok: boolean }> = [];
@@ -149,13 +112,6 @@ async function smokeE2E(userText: string, expectTool: string) {
 
 /* ── 主流程 ── */
 const results: Record<string, boolean> = {};
-results.intent = true;
-try {
-  await smokeIntentRouting();
-} catch (e) {
-  results.intent = false;
-  console.error("意图分类冒烟失败:", e);
-}
 try {
   const direct = await smokeDirectTools();
   Object.assign(results, direct);

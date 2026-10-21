@@ -391,7 +391,7 @@ export type AgentStreamOptions = {
   /** 强制保留的工具名列表(绕过 contextual 筛选)。状态机模式用此字段确保白名单工具始终可见。 */
   pinnedToolNames?: string[];
   /**
-   * 禁用 BM25 延迟工具目录（tool_discover→tool_call 两波召回）。
+   * 禁用 BM25 延迟工具目录（tool_discover 加载 schema → 原生调用）。
    * 轻量白名单链路（对话面 explicit 档等）必须置 true：maxRounds 小时
    * "发现→执行"两波必断头，延迟目录用不上。禁用后 visible 工具全量暴露，
    * 超出白名单能力的请求由服务端转任务面承担。

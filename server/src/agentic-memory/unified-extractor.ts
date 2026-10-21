@@ -25,6 +25,7 @@ import {
   getMemoryPersistenceFloor,
   getMemoryPromoteThreshold,
   getMemoryUselessThreshold,
+  resolveAgenticMemoryLlmBaseUrl,
   resolveOpenAiApiKey,
 } from "./env.js";
 import type { ExtractedCommitment } from "./commitment-board.js";
@@ -567,7 +568,9 @@ export async function extractUnified(
   const nowIso = new Date(now.getTime() - tzMin * 60_000).toISOString().replace("Z", tzStr);
 
   try {
-    const openai = opts?.client ?? new OpenAI({ apiKey, maxRetries: 1 });
+    const openai =
+      opts?.client ??
+      new OpenAI({ apiKey, baseURL: resolveAgenticMemoryLlmBaseUrl(), maxRetries: 1 });
     // 画像任务仅在调用方显式提供当前画像时拼接，普通轮 system 不变。
     const profileCtx = opts?.profileContext;
     const systemContent = profileCtx ? `${SYSTEM_PROMPT}\n${PROFILE_OPS_PROMPT}` : SYSTEM_PROMPT;

@@ -139,10 +139,9 @@ test("目录规模与桥工具：快速通道可见集仅桥工具", () => {
     .map((t) => (t.type === "function" ? t.function.name : ""))
     .filter(Boolean);
   assert.ok(visible.includes("tool_discover"), "可见集应含 tool_discover 桥工具");
-  assert.ok(visible.includes("tool_call"), "可见集应含 tool_call 桥工具");
   assert.equal(
-    visible.filter((n) => n !== "tool_discover" && n !== "tool_call").length,
+    visible.filter((n) => n !== "tool_discover").length,
     0,
-    `零业务 schema 契约：可见集只能是桥工具，实际：${visible.join(", ")}`,
+    `零业务 schema 契约：可见集只能是 tool_discover，实际：${visible.join(", ")}`,
   );
 });

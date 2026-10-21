@@ -14,7 +14,7 @@ function mergedBridgeTools(deferredCount: number): ChatCompletionTool[] {
       function: {
         name: "tool_discover",
         description:
-          `发现并加载延迟工具（合并 search+describe）。${countHint} 用法：① 仅 domain — 确定性拉取该能力域全部工具（见系统提示【能力域目录】）；② 仅 query — 语义检索；③ 仅 name — 直接拉取该工具 schema；④ query+name — 先搜索再校验 name。随后用 tool_call 执行。`,
+          `发现并加载延迟工具（合并 search+describe）。${countHint} 用法：① 仅 domain — 确定性拉取该能力域全部工具（见系统提示【能力域目录】）；② 仅 query — 语义检索；③ 仅 name — 直接拉取该工具 schema；④ query+name — 先搜索再校验 name。命中后工具 schema 会加载进本轮可见工具列表，下一轮直接调用即可。`,
         parameters: {
           type: "object",
           properties: {
@@ -31,29 +31,10 @@ function mergedBridgeTools(deferredCount: number): ChatCompletionTool[] {
         },
       },
     },
-    {
-      type: "function",
-      function: {
-        name: "tool_call",
-        description: "调用延迟目录中的工具。参数须符合 tool_discover 返回的 schema。",
-        parameters: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "工具注册名" },
-            arguments: {
-              type: "object",
-              description: "工具参数字典",
-              additionalProperties: true,
-            },
-          },
-          required: ["name", "arguments"],
-          additionalProperties: false,
-        },
-      },
-    },
   ];
 }
 
+/** @deprecated 2026-10-21 单一通道后不再产出；保留函数体仅作历史参考。 */
 function legacyBridgeTools(deferredCount: number): ChatCompletionTool[] {
   const countHint =
     deferredCount > 0
@@ -94,33 +75,19 @@ function legacyBridgeTools(deferredCount: number): ChatCompletionTool[] {
         },
       },
     },
-    {
-      type: "function",
-      function: {
-        name: "tool_call",
-        description: "调用一个延迟加载工具。",
-        parameters: {
-          type: "object",
-          properties: {
-            name: { type: "string", description: "工具注册名" },
-            arguments: {
-              type: "object",
-              description: "工具参数字典",
-              additionalProperties: true,
-            },
-          },
-          required: ["name", "arguments"],
-          additionalProperties: false,
-        },
-      },
-    },
   ];
 }
 
-/** 核心库之外的工具通过桥接按需披露（merged 默认 2 枚，legacy 为技能管理三件套）。 */
+/**
+ * 核心库之外的工具通过桥接按需披露。
+ *
+ * 2026-10-21 收缩为**唯一通道**：`tool_discover`（发现+加载 schema）→ 工具转正进
+ * 本轮可见集 → 模型原生 tool_calls 调用。`tool_call` / legacy 三件套不再产出，
+ * 避免同一能力存在两种调用形态（自由 JSON args 与 schema 约束并存）。
+ */
 export function buildToolSearchBridgeTools(
   deferredCount: number,
-  mode: ToolSearchBridgeMode = "merged",
+  _mode: ToolSearchBridgeMode = "merged",
 ): ChatCompletionTool[] {
-  return mode === "legacy" ? legacyBridgeTools(deferredCount) : mergedBridgeTools(deferredCount);
+  return mergedBridgeTools(deferredCount);
 }

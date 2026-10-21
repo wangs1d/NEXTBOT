@@ -41,12 +41,12 @@ function minimaxExtraBody(
  * 国内平台密钥仅对 `https://api.minimaxi.com/v1` 有效；海外平台
  * （`https://api.minimax.io/v1`）需在 `MINIMAX_BASE_URL` 显式覆盖。
  *
- * 模型差异（2026-09-05 实测）：
+ * 模型差异（2026-09-05 首测，2026-10-21 复测）：
  * - M2.x（M2 / M2.1 / M2.5 / M2.7）：思考无法关闭（thinking 开关被 accept 但仍思考）；
- * - M3：多模态模型但 OpenAI 兼容端点暂不接受 image_url（500 system error 1033），
- *   思考默认 adaptive、同样无法经 reasoning_split 之外的手段关闭。
- * 综上统一按纯文本 provider 处理（照片降级为文本说明，视觉理解依赖视觉模型），思考一律经
- * `reasoning_split` 分流到 `reasoning_content`，与流式基建的字段嗅探对齐。
+ * - M3 / M3.1-Flash：多模态，OpenAI 兼容端点现已接受 image_url（2026-10-21 实测
+ *   读图并输出描述，旧 1033 报错不再复现）；思考经 `reasoning_split` 分流到
+ *   `reasoning_content`，M3 可 `thinking:disabled`，M3.1 系只能 `reasoning.effort=minimal`。
+ * 图片理解直接走本 provider（照片不再降级为文本说明）。
  *
  * 继承 {@link AbstractChatProvider}：防串台（foldCompletedToolChains 根源折叠）、时间戳注入、
  * thread 维护等公共逻辑由基类模板方法固化，本类只实现 MiniMax 特有的 system prompt 构建与
@@ -59,7 +59,7 @@ export class MiniMaxProvider extends AbstractChatProvider {
     return {
       toolCallingProtocol: "openai" as const,
       supportsParallelToolCalls: true,
-      supportsVision: false,
+      supportsVision: true,
       supportsThinking: true,
       supportsStreaming: true,
       maxContextTokens: this.model.startsWith("MiniMax-M3") ? 1_000_000 : 204_800,

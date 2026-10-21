@@ -166,7 +166,7 @@ const RULES: ClassRule[] = [
   { prefix: "fetch_web", domain: "system", action: "query", risk: "read" },
   { prefix: "upstream", domain: "system", action: "query", risk: "read" },
   { exact: "tool_discover", domain: "system", action: "manage", risk: "system" },
-  { exact: "tool_call", domain: "system", action: "manage", risk: "system" },
+
   { prefix: "hot_rankings", domain: "system", action: "query", risk: "read" },
 ];
 

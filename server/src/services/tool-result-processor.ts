@@ -1930,3 +1930,21 @@ export function allImageCardsHaveCaption(cards: MediaCardItem[]): boolean {
   if (imageCards.length === 0) return false;
   return imageCards.every((c) => !!(c.caption ?? "").trim());
 }
+
+/**
+ * 平铺图集：全部是图片卡、且没有对比分组元数据（单次 search_images 的普通结果）。
+ *
+ * 2026-10-21 根修（用户反馈「文字/表格穿插在照片中间」）：这类轮次只允许
+ * 「一图一句」——照片按顺序铺开，每张下方是它自己的 caption；正文永远是一个
+ * 整体块（放在图集前），不再按句切段钉到照片之间。此前 caption 缺失时回退到
+ * buildInterleavedRenderBlocks 的切段交错排版，正文里的表格/新闻正好被塞进
+ * 照片之间。caption 现在由独立视觉模型生成，缺 caption 也不会再改变版式。
+ */
+export function isFlatImageGallery(cards: MediaCardItem[]): boolean {
+  if (cards.length === 0) return false;
+  const images = cards.filter((c) => c.type === "image");
+  if (images.length !== cards.length) return false;
+  return cards.every(
+    (c) => !(c.groupTitle ?? "").trim() && !(c.side ?? "").trim(),
+  );
+}

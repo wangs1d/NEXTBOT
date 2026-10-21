@@ -298,9 +298,13 @@ Widget _buildAssistantBodyInner(
     // 渲染层兜底（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏）：mediaCards
     // 分支在本方法提前 return，走不到 contentSummary 折叠卡路由，因此展示文本
     // 必须先剥掉摘要块——照片是主形态时，块没有消费者，只剩裸 JSON 泄漏一途。
-    final String displayText = recoveredImageUrls.isNotEmpty
-        ? _stripLegacyImageLines(message.text)
-        : ContentSummaryParser.stripSummaryBlocks(message.text);
+    // 形态声明必须在媒体卡片分支一并剥除：该分支在 RENDER_AS 路由之前提前
+    // return，此前只剥摘要块，导致 [RENDER_AS:structured] 混在图片轮正文里露出。
+    final String displayText = _stripRenderAsMarker(
+      recoveredImageUrls.isNotEmpty
+          ? _stripLegacyImageLines(message.text)
+          : ContentSummaryParser.stripSummaryBlocks(message.text),
+    );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,

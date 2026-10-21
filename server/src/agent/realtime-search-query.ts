@@ -226,6 +226,26 @@ export function mediaToolNameForText(text: string): "search_images" | "search_vi
   return VIDEO_ASK_RE.test(text ?? "") ? "search_videos" : "search_images";
 }
 
+/** 媒体载体词（图/视频类诉求的实体形态）。 */
+const MEDIA_CARRIER_RE = /照片|图片|相片|图像|写真|图集|壁纸|头像|表情包|美图|视频|影片|短片|片段/;
+/** 资讯诉求词：出现任一即说明用户要的是文字信息，不按纯媒体轮处理。 */
+const INFO_NEED_RE = /新闻|动态|近况|消息|资料|介绍|是谁|哪位|谁|年龄|生日|作品|行程|价格|对比|区别|怎么样|怎么|为什么|多少|哪[儿里个些]/;
+
+/**
+ * 是否是「纯媒体请求」（2026-10-21 根修，投机检索的输入半边）。
+ *
+ * 只用于决定**要不要在路由结果出来前先发一次网页检索**：用户原话是媒体
+ * 载体诉求（照片/图片/视频…）且没有资讯诉求词时，网页检索注定是白跑，
+ * 而且一旦路由超时降级，投机结果还会被注入成「新闻证据」污染照片卡。
+ * 命中即不投机；用户在问近况/资料/是谁时不算纯媒体（照常投机/走实时检索）。
+ */
+export function isMediaOnlyRequest(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t || t.length > 60) return false;
+  if (!MEDIA_CARRIER_RE.test(t)) return false;
+  return !INFO_NEED_RE.test(t);
+}
+
 /**
  * 构造 media 轮的图片/视频搜索词（确定性，无 LLM 参与）。
  * contextLines：最近对话 + 记忆档案行（仅在全被命令词剥光时的实体兜底用）。
