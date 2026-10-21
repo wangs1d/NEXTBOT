@@ -2,14 +2,11 @@ import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import { getDailyJournalService, DailyJournalService } from "./daily-journal-service.js";
-import OpenAI from "openai";
 import { join } from "node:path";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
-import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
-import { getModelForTask, TaskTier } from "../config/model-routing.js";
 
 /**
  * 真向量 cosine 相似度（替代 human-like-memory 里的假 cosineLikeScore）。
@@ -390,7 +387,7 @@ export class MemoryManagerService {
       if (topTopics.length > 0) {
         console.log(`[MemoryManager] consolidateNow: 当天高频话题加分 ${topTopics.length} 词 → ${actorId}`);
       }
-      const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics, actorId);
+      const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics);
       lastRetention = retention;
       result.entriesRemoved = retention.forgotten.length;
       result.rememberedCount = retention.remembered.length;
@@ -429,29 +426,12 @@ export class MemoryManagerService {
         await this.performDreamRehearsal(actorId, lastRetention);
       }
     }
-    // 巩固钩子（P0-1）：记忆整理完成后触发 UserProfileAggregator 深度画像合成，
-    // 让"夜间 dreaming / 白天 idle 整理"同时反哺 USER_PROFILE.md
-    // （整理出的稳定偏好/事实进入画像，agent 越来越了解用户）。
-    if (this.profileAggregatorHook) {
-      try {
-        this.profileAggregatorHook(actorId);
-      } catch {
-        /* 钩子失败不影响巩固主流程 */
-      }
-    }
+    // 画像维护不放这里：画像由对话内统一抽取（LLM 一次调用捎带 profileOps）
+    // 确定性落位写入；mem0/扣子等主流做法同样不在记忆整理阶段整文重写画像，
+    // 否则每轮整理都会重复调用一次大模型。
     this.turnCounters.set(actorId, 0);
     return result;
   }
-
-  /**
-   * 注入画像聚合器钩子（由 create-app-services 装配时调用，
-   * 回调指向 UserProfileAggregator.triggerSynthesis）。
-   */
-  setProfileAggregatorHook(hook: ((actorId: string) => void) | null): void {
-    this.profileAggregatorHook = hook;
-  }
-
-  private profileAggregatorHook: ((actorId: string) => void) | null = null;
 
   /**
    * forgotten 自动恢复：把命中的 forgotten 行移回 memory_summary。
@@ -504,10 +484,11 @@ export class MemoryManagerService {
   private static readonly FORGOTTEN_SEMANTIC_THRESHOLD = 0.7;
 
   /**
-   * 语义化 forgotten 召回（方案 A）：
+   * 语义化 forgotten 召回（零 LLM）：
    * 1. 路径 A（首选）：embedding cosine 相似度 > 0.7
-   * 2. 路径 B（降级）：LLM 批量语义判断（gpt-4.1-mini）
-   * 3. 路径 C（兜底）：关键词子串匹配（原逻辑，无 API key 时）
+   * 2. 路径 B（降级）：关键词子串匹配（embedding 不可用或无命中时）
+   * 检索阶段不调用 LLM——召回在每轮对话主链路上，按轮次付费的语义判断
+   * 属架构性滥用（主流记忆系统只用向量/关键词检索）。
    * 返回与 query 语义相关的 forgotten 行（最多 5 条）。
    */
   async recallForgottenSemantic(actorId: string, query: string): Promise<string[]> {
@@ -532,16 +513,9 @@ export class MemoryManagerService {
           console.log(`[MemoryManager] forgotten embedding 召回 ${embeddingHits.length} 行 (${actorId})`);
           return embeddingHits;
         }
-        // embedding 无命中，降级到 LLM 判断
-        const llmHits = await this.recallForgottenByLlm(query, forgottenLines);
-        if (llmHits.length > 0) {
-          console.log(`[MemoryManager] forgotten LLM 召回 ${llmHits.length} 行 (${actorId})`);
-          return llmHits;
-        }
-        return [];
       }
 
-      // 路径 C：无 API key 时降级到关键词匹配（原逻辑兜底）
+      // 路径 B：embedding 不可用或无命中 → 关键词匹配兜底（零 LLM）
       return this.recallForgottenByKeyword(query, forgottenLines);
     } catch (err) {
       console.log(`[MemoryManager] recallForgottenSemantic 失败: ${err}`);
@@ -586,52 +560,7 @@ export class MemoryManagerService {
     }
   }
 
-  /** 路径 B：LLM 批量语义相关性判断（复用 scoreLinesWithLlm 模式） */
-  private async recallForgottenByLlm(
-    query: string,
-    lines: string[],
-  ): Promise<string[]> {
-    const llm = resolvePrimaryLlmClientConfig();
-    if (!llm) return [];
-    // 补捞发生在"主召回已不足"的轮次，LLM 判断不能无限等：
-    // 超时按无命中处理（fail-closed），避免把整条 recall 链路拖过 3s 叙事超时。
-    const timeoutRaw = Number(process.env.MEMORY_FORGOTTEN_LLM_TIMEOUT_MS);
-    const timeoutMs = Number.isFinite(timeoutRaw) && timeoutRaw > 0 ? timeoutRaw : 2500;
-    try {
-      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, timeout: timeoutMs, maxRetries: 1 });
-      const response = await openai.chat.completions.create({
-        model: process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You judge whether each forgotten memory line is semantically relevant to the user's current query. " +
-              'Return JSON only: {"scores":[0..1]}. 1=directly relevant, 0.6=related topic, 0.3=tangential, 0=unrelated. ' +
-              "Consider semantic meaning, not just keyword overlap.",
-          },
-          { role: "user", content: JSON.stringify({ query, forgotten_lines: lines }) },
-        ],
-        ...bypassChatRequestExtras(),
-      });
-      const content = response.choices[0]?.message?.content?.trim();
-      if (!content) return [];
-      const parsed = JSON.parse(content) as { scores?: number[] };
-      if (!Array.isArray(parsed.scores)) return [];
-      return lines
-        .map((line, i) => ({ line, score: parsed.scores?.[i] ?? 0 }))
-        .filter((x) => x.score >= 0.6)
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 5)
-        .map((x) => x.line);
-    } catch (err) {
-      console.log(`[MemoryManager] recallForgottenByLlm 失败: ${err}`);
-      return [];
-    }
-  }
-
-  /** 路径 C：关键词子串匹配（无 API key 时的兜底） */
+  /** 路径 B：关键词子串匹配（embedding 不可用/无命中时的确定性兜底） */
   private recallForgottenByKeyword(query: string, lines: string[]): string[] {
     // 中文用 2-gram 滑动窗口切分（"我想喝咖啡" → "我想"、"想喝"、"喝咖"、"咖啡"）
     // 避免整句被当成一个词导致子串匹配失败
@@ -865,7 +794,6 @@ export class MemoryManagerService {
     lines: string[],
     forgottenRaw: string,
     topTopics: string[] = [],
-    actorId = "default",
   ): Promise<{
     remembered: string[];
     faded: string[];
@@ -873,7 +801,11 @@ export class MemoryManagerService {
     forgottenArchive: string[];
   }> {
     const now = Date.now();
-    const semanticScores = await this.scoreLinesWithLlm(lines, actorId);
+    // 确定性语义分：时间衰减 + 高价值信号正则（夜间零 LLM）。
+    // 原实现把整份 memory_summary 交给 LLM 逐行评分，一次就是上万输入 token，
+    // 且每晚对每个历史 actor 重跑；留存判定并不需要语义模型——衰减曲线和
+    // 高价值信号已能覆盖"稳定偏好/事实留下、寒暄淡出"的需求。
+    const semanticScores = lines.map((line) => this.heuristicSemanticScore(line));
     const scored = lines.map((line, index) => ({
       line,
       ...this.scoreMemoryLine(line, now, semanticScores[index] ?? 0.5, topTopics),
@@ -1177,184 +1109,11 @@ export class MemoryManagerService {
     }
   }
 
-  private async scoreLinesWithLlm(lines: string[], actorId: string): Promise<number[]> {
-    if (lines.length === 0) return [];
-    await this.loadScoreCacheState();
-
-    const today = this.getTodayDayKey();
-    const cache = this.scoreCache.get(actorId);
-    const fps = lines.map((line) => semanticFingerprint(line) || line.slice(0, 64));
-    const cached = fps.map((fp) => cache?.get(fp)?.score);
-    const missingIdx = lines.map((_, i) => i).filter((i) => cached[i] === undefined);
-    // 全部命中缓存：0 次 LLM 调用（unified 预通道种子/旧行重复评分时的常态）
-    if (missingIdx.length === 0) return cached as number[];
-
-    const llm = resolvePrimaryLlmClientConfig();
-    if (!llm) return lines.map((line, i) => cached[i] ?? this.heuristicSemanticScore(line));
-
-    // 2026-09-12 token 治理（P0-B）增量评分：只评缓存未命中的新行。行文本稳定，
-    // LLM 语义分不会过期（时间衰减由 scoreMemoryLine 的确定性部分承担）；缺失占比
-    // 过高或距上次全量重评 ≥7 天时才整批刷一遍并刷新缓存。
-    const fullRescore =
-      missingIdx.length / lines.length > 0.6 || this.isScoreFullRescoreDue(actorId, today);
-    const targetIdx = fullRescore ? lines.map((_, i) => i) : missingIdx;
-
-    // 评分模型走 MINI 档（默认跟随主模型，MODEL_MINI env 可统一切小模型）
-    const scoringModel =
-      process.env.AGENT_MEMORY_SCORING_MODEL?.trim() || getModelForTask(TaskTier.MINI);
-
-    try {
-      // maxRetries:1：SDK 默认 2 次静默重试会让瞬时失败双倍烧 token，后台评分失败
-      // 本就有启发式兜底，1 次重试足够。
-      const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
-      const targetLines = targetIdx.map((i) => lines[i]!);
-      const messages: OpenAI.Chat.Completions.ChatCompletionMessageParam[] = [
-        {
-          role: "system",
-          content:
-            "You score memory lines for long-term retention. Return JSON only: {\"scores\":[0..1]}. Higher means more durable preference, fact, commitment, risk, or action relevance.",
-        },
-        { role: "user", content: JSON.stringify({ lines: targetLines }) },
-      ];
-      const auditInputChars = JSON.stringify(messages).length;
-      const response = await openai.chat.completions.create({
-        model: scoringModel,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages,
-        ...bypassChatRequestExtras(),
-      });
-      const content = response.choices[0]?.message?.content?.trim();
-      if (!content) throw new Error("empty memory score response");
-      // Token 审计：记忆批次评分（夜间 consolidate），增量后输入大幅缩小
-      const { recordLlmUsageByChars } = await import("./llm-token-audit.js");
-      recordLlmUsageByChars({
-        stage: "memory_flush_summarize",
-        inputChars: auditInputChars,
-        outputChars: content.length,
-        model: scoringModel,
-        actorId,
-      });
-      const parsed = JSON.parse(content) as { scores?: number[] };
-      if (!Array.isArray(parsed.scores)) throw new Error("invalid memory score payload");
-
-      const targetScores = new Map<number, number>();
-      targetIdx.forEach((lineIdx, pos) => {
-        const value = parsed.scores?.[pos];
-        if (typeof value === "number" && Number.isFinite(value)) {
-          const clamped = Math.max(0, Math.min(1, value));
-          targetScores.set(lineIdx, clamped);
-          this.putScoreCacheEntry(actorId, fps[lineIdx]!, clamped, today);
-        }
-      });
-      if (fullRescore) this.scoreCacheFullRescoreDay.set(actorId, today);
-      void this.persistScoreCacheState();
-
-      return lines.map((_, i) => {
-        const scored = targetScores.get(i);
-        if (scored !== undefined) return scored;
-        return cached[i] ?? this.heuristicSemanticScore(lines[i]!);
-      });
-    } catch {
-      // 失败：缓存命中行用缓存分（不重评），缺失行走启发式（不缓存）
-      return lines.map((line, i) => cached[i] ?? this.heuristicSemanticScore(line));
-    }
-  }
-
-  // ---- P0-B 行分数缓存：actorId → 行指纹 → { score, day }，持久化到 data/ ----
-
-  private scoreCache = new Map<string, Map<string, { score: number; day: string }>>();
-  private scoreCacheFullRescoreDay = new Map<string, string>();
-  private scoreCacheLoadPromise: Promise<void> | null = null;
-
-  private get scoreCachePath(): string {
-    return join(process.cwd(), "data", "memory-score-cache.json");
-  }
-
-  private static readonly SCORE_CACHE_MAX_PER_ACTOR = 800;
-  private static readonly SCORE_FULL_RESCORE_INTERVAL_DAYS = 7;
-
-  private loadScoreCacheState(): Promise<void> {
-    if (this.scoreCacheLoadPromise) return this.scoreCacheLoadPromise;
-    this.scoreCacheLoadPromise = (async () => {
-      try {
-        const { readFile } = await import("node:fs/promises");
-        const raw = await readFile(this.scoreCachePath, "utf8");
-        const parsed = JSON.parse(raw) as {
-          actors?: Record<string, { scores?: [string, number, string][]; fullRescoreDay?: string }>;
-        };
-        for (const [actorId, entry] of Object.entries(parsed.actors ?? {})) {
-          this.scoreCache.set(actorId, new Map((entry.scores ?? []).map(([fp, score, day]) => [fp, { score, day }])));
-          if (entry.fullRescoreDay) this.scoreCacheFullRescoreDay.set(actorId, entry.fullRescoreDay);
-        }
-      } catch {
-        // 首次运行/文件缺失：空状态启动
-      }
-    })();
-    return this.scoreCacheLoadPromise;
-  }
-
-  private async persistScoreCacheState(): Promise<void> {
-    try {
-      const actors: Record<string, { scores: [string, number, string][]; fullRescoreDay?: string }> = {};
-      for (const [actorId, entries] of this.scoreCache) {
-        actors[actorId] = {
-          scores: [...entries].map(([fp, v]) => [fp, v.score, v.day] as [string, number, string]),
-          ...(this.scoreCacheFullRescoreDay.has(actorId)
-            ? { fullRescoreDay: this.scoreCacheFullRescoreDay.get(actorId) }
-            : {}),
-        };
-      }
-      await writeJsonAtomic(this.scoreCachePath, { version: 1, actors });
-    } catch (err) {
-      console.warn("[MemoryManager] score cache persist failed:", err);
-    }
-  }
-
-  private putScoreCacheEntry(actorId: string, fp: string, score: number, day: string): void {
-    let cache = this.scoreCache.get(actorId);
-    if (!cache) {
-      cache = new Map();
-      this.scoreCache.set(actorId, cache);
-    }
-    cache.set(fp, { score, day });
-    const max = MemoryManagerService.SCORE_CACHE_MAX_PER_ACTOR;
-    if (cache.size > max) {
-      const excess = cache.size - max;
-      let removed = 0;
-      for (const key of cache.keys()) {
-        cache.delete(key);
-        if (++removed >= excess) break;
-      }
-    }
-  }
-
-  private isScoreFullRescoreDue(actorId: string, today: string): boolean {
-    const last = this.scoreCacheFullRescoreDay.get(actorId);
-    if (!last) return false;
-    const days = (Date.parse(today) - Date.parse(last)) / 86_400_000;
-    return Number.isFinite(days) && days >= MemoryManagerService.SCORE_FULL_RESCORE_INTERVAL_DAYS;
-  }
-
-  /**
-   * P1 unified 预通道种子：夜间单遍巩固器把当日新行的留存分直接写入缓存，
-   * consolidateNow 的增量评分即可全部命中（0 次 LLM 调用）。
-   */
-  seedScoreCache(actorId: string, entries: Array<{ fp: string; score: number }>): void {
-    if (entries.length === 0) return;
-    const today = this.getTodayDayKey();
-    for (const entry of entries) {
-      if (!Number.isFinite(entry.score)) continue;
-      this.putScoreCacheEntry(actorId, entry.fp, Math.max(0, Math.min(1, entry.score)), today);
-    }
-    void this.persistScoreCacheState();
-  }
-
   private heuristicSemanticScore(line: string): number {
     let score = 0.35;
     if (this.isHighValueEntry(line)) score += 0.3;
-    if (/\[fast-path\]|\[Agent 鎵胯\/缁撹\]/.test(line)) score += 0.15;
-    if (/鍋忓ソ|鍠滄|璁ㄥ帉|绂佸繉|鐢熸棩|绾康|鎻愰啋|鍐冲畾|璁″垝|涔犳儻/.test(line)) score += 0.2;
+    if (/\[fast-path\]|\[Agent 承诺\/结论\]/.test(line)) score += 0.15;
+    if (/偏好|喜欢|讨厌|禁忌|生日|纪念|提醒|决定|计划|习惯/.test(line)) score += 0.2;
     if (semanticFingerprint(line).split(" ").length >= 4) score += 0.05;
     return Math.min(1, score);
   }

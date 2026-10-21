@@ -3,11 +3,12 @@
  * - P1-1 RecallQueryExpander：指代消解补上下文实体、多意图拆分、普通查询不误扩展
  * - P1-3 隐式反馈检测：纠正/认同/换话题 → 正/负/弱负信号
  * - P2-1 MemoryInventory：目录统计、TTL 缓存、同步缓存读（prompt 注入路径）
- * - P0-1 UserProfileAggregator：结构化画像操作确定性落位 USER_PROFILE.md（幂等/校验/持久化队列）
+ * - P0-1 UserProfileAggregator：结构化画像操作确定性落位 USER_PROFILE.md（幂等/校验/无后台队列）
  */
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -232,19 +233,19 @@ test("P0-1 parseExtractOps：解析 JSON + 丢弃非法项 + 去围栏", () => {
   assert.equal(ops[1].op, "DELETE");
 });
 
-test("P0-1 observeTurn：轮次持久化到 pending-turns.json（重启不丢）", async () => {
+test("P0-1 observeTurn：不再维护 pending-turns 队列（画像只在对话内 upsert）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "profile-queue-test-"));
   const prevDir = process.env.AGENT_USER_PROFILE_DIR;
   process.env.AGENT_USER_PROFILE_DIR = dir;
   try {
-    // 无 LLM key：extractAndApply/synthesis 跳过，但队列仍应落盘
-    const agg = new UserProfileAggregator({ synthesisTurnThreshold: 1_000_000, extractEnabled: false });
+    const agg = new UserProfileAggregator({ extractEnabled: false });
     agg.observeTurn("queue-actor", "王铭川 记住没有", "记住了");
-    await new Promise((r) => setTimeout(r, 200)); // fire-and-forget 落盘
-    const raw = await readFile(join(dir, "queue-actor", "pending-turns.json"), "utf8");
-    const list = JSON.parse(raw);
-    assert.ok(Array.isArray(list) && list.length === 1, `队列应持久化 1 条，实际: ${raw}`);
-    assert.ok(list[0].includes("王铭川"), "队列内容应含原始用户话语");
+    await new Promise((r) => setTimeout(r, 200)); // 等 fire-and-forget 落盘窗口
+    assert.equal(
+      existsSync(join(dir, "queue-actor", "pending-turns.json")),
+      false,
+      "不应再产生后台轮次队列（无后台 LLM 合成消费方）",
+    );
   } finally {
     if (prevDir === undefined) delete process.env.AGENT_USER_PROFILE_DIR;
     else process.env.AGENT_USER_PROFILE_DIR = prevDir;

@@ -4,27 +4,27 @@
  * 目标：让 agent 真正"越来越了解用户"。
  *
  * 设计（主流方案：LLM 决策 + 代码确定性写入，对齐 mem0 / 扣子记忆变量思路）：
- *   1. 每轮抽取（LLM，异步旁路）：每轮对话后，把【当前画像 + 本轮对话】交给轻量 LLM，
- *      输出结构化操作 JSON（ADD/UPDATE/DELETE + 目标 section + 定位关键词）。
+ *   1. 对话内抽取（LLM）：每轮把【当前画像 + 本轮对话】交给 LLM，输出结构化操作
+ *      JSON（ADD/UPDATE/DELETE + 目标 section + 定位关键词）。默认由统一抽取
+ *      一次调用捎带 profileOps（每轮仅 1 次 LLM）；统一抽取关闭时才单独发一次。
  *      LLM 只负责"记什么、放哪、改哪条"，不直接改写画像文件。
  *   2. 确定性落位（纯代码）：applyProfileOps 按 op 精确操作对应 section 的行；
  *      写盘后重读文件 verifyProfileOps 校验每条操作真实生效、落在正确 section，
  *      校验失败打日志（不静默）。
- *   3. 持久化轮次队列：每轮对话追加到 pending-turns.json（重启不丢），
- *      深度合成消费该队列；替代旧的内存环形缓冲（12 轮滑出即永久丢失，
- *      是"王铭川没进画像"的根源）。
- *   4. 深度合成（LLM，低频）：每 N 轮或巩固钩子触发，输入 = 现有画像 +
- *      规则引擎信号 + 未消费的持久化轮次，输出完整画像 markdown 重写文件。
+ *
+ * 明确不做的事（2026-10-21 架构收敛）：
+ *   - 不维护 pending-turns 轮次队列；
+ *   - 不在后台做 LLM 整文重写/深度合成——画像只由对话内的结构化事实 upsert 驱动，
+ *     后台（夜间 dreaming）只做确定性整理，零 LLM。
  *
  * 安全约束：
  *   - LLM 失败静默降级（画像保持旧版，不影响主链路）；
- *   - 同一 actor 的画像读写经串行链，抽取/合成不会并发覆盖；
+ *   - 同一 actor 的画像读写经串行链，不会并发覆盖；
  *   - 画像文件保持既定 markdown 结构（基本信息/兴趣与习惯/沟通偏好/备注），
  *     UserPersonalizationService.getPromptSlice 的消费格式不变。
  */
 
-import { mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
 
 import OpenAI from "openai";
 
@@ -43,47 +43,17 @@ import {
   type ProfileAuthorityDeps,
   type ProfileAuthorityReport,
 } from "../services/user-personalization/profile-fact-authority.js";
-import { touchProfileLines, rebuildProfileMeta, listStaleLines } from "./profile-lines-meta.js";
-
-/** 规则画像的最小接口（OnlineLearningCortex 子集，避免硬依赖） */
-export interface OnlineLearningLike {
-  getProfile(actorId: string): {
-    preferences: Array<{ key: string; value: string; stability: number }>;
-    habits: Array<{ key: string; value: string; stability: number }>;
-    taboos: Array<{ key: string; value: string; stability: number }>;
-    topics: string[];
-    totalObservations: number;
-  };
-}
+import { touchProfileLines } from "./profile-lines-meta.js";
+import { isMemoryUnifiedExtractEnabled, isProfileExtractHint } from "../agentic-memory/unified-extractor.js";
 
 export interface ProfileAggregatorConfig {
   enabled: boolean;
   /** 每轮 LLM 抽取开关 */
   extractEnabled: boolean;
-  /** 抽取 token 闸：仅高信号/个人陈述轮跑抽取（寒暄轮靠深度合成兜底） */
+  /** 抽取 token 闸：仅高信号/个人陈述轮跑抽取（统一抽取关闭时的回退路径） */
   extractPrescreen: boolean;
-  /** 画像行陈旧判定阈值（天）：超过该天数未被对话证实的行进合成裁决 */
-  staleLineDays: number;
   /** 每轮抽取使用的模型 */
   extractModel: string;
-  /** 每 N 轮触发一次 LLM 深度合成 */
-  synthesisTurnThreshold: number;
-  /** 距上次合成超过该毫秒数才允许再次合成 */
-  minSynthesisIntervalMs: number;
-  model: string;
-  maxTokens: number;
-}
-
-function parseIntEnv(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseInt(raw, 10);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
-}
-
-function parseFloatEnv(raw: string | undefined, fallback: number): number {
-  if (!raw) return fallback;
-  const n = parseFloat(raw);
-  return Number.isFinite(n) && n > 0 ? n : fallback;
 }
 
 function envFlag(raw: string | undefined, fallback: boolean): boolean {
@@ -92,19 +62,13 @@ function envFlag(raw: string | undefined, fallback: boolean): boolean {
 }
 
 export function loadProfileAggregatorConfig(): ProfileAggregatorConfig {
-  // 抽取/合成默认走 MINI 档（默认跟随主模型，MODEL_MINI env 可统一切小模型）
+  // 抽取默认走 MINI 档（默认跟随主模型，MODEL_MINI env 可统一切小模型）
   const miniModel = getModelForTask(TaskTier.MINI) || resolvePrimaryLlmClientConfig()?.model || "gpt-4.1-mini";
-  const primaryModel = miniModel;
   return {
     enabled: envFlag(process.env.MEMORY_PROFILE_AGGREGATOR_ENABLED, true),
     extractEnabled: envFlag(process.env.MEMORY_PROFILE_EXTRACT_ENABLED, true),
     extractPrescreen: envFlag(process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN, true),
-    staleLineDays: parseIntEnv(process.env.MEMORY_PROFILE_STALE_DAYS, 90),
-    extractModel: process.env.MEMORY_PROFILE_EXTRACT_MODEL?.trim() || primaryModel,
-    synthesisTurnThreshold: parseIntEnv(process.env.MEMORY_PROFILE_SYNTHESIS_TURNS, 12),
-    minSynthesisIntervalMs: parseFloatEnv(process.env.MEMORY_PROFILE_SYNTHESIS_INTERVAL_MS, 30 * 60 * 1000),
-    model: process.env.MEMORY_PROFILE_SYNTHESIS_MODEL?.trim() || primaryModel,
-    maxTokens: parseIntEnv(process.env.MEMORY_PROFILE_SYNTHESIS_MAX_TOKENS, 1200),
+    extractModel: process.env.MEMORY_PROFILE_EXTRACT_MODEL?.trim() || miniModel,
   };
 }
 
@@ -356,101 +320,15 @@ function buildExtractMessages(
 }
 
 /* ──────────────────────────────────────────────────────────────
- * 深度合成（低频整理）
+ * 对话内抽取 + 确定性落位
  * ────────────────────────────────────────────────────────────── */
-
-/** 规则画像 → 供 LLM 的文本块（只取 stability 较高的稳定条目） */
-function formatOnlineLearningForPrompt(profile: ReturnType<OnlineLearningLike["getProfile"]>): string {
-  const parts: string[] = [];
-  const fmt = (list: Array<{ key: string; value: string; stability: number }>, label: string) => {
-    const stable = list.filter((e) => e.stability >= 0.35).slice(0, 8);
-    if (stable.length > 0) {
-      parts.push(`${label}: ${stable.map((e) => `${e.key}=${e.value}(${(e.stability * 100).toFixed(0)}%)`).join("；")}`);
-    }
-  };
-  fmt(profile.preferences, "偏好");
-  fmt(profile.habits, "习惯");
-  fmt(profile.taboos, "禁忌");
-  if (profile.topics.length > 0) {
-    parts.push(`近期关注话题: ${profile.topics.slice(0, 8).join("、")}`);
-  }
-  parts.push(`累计观察轮数: ${profile.totalObservations}`);
-  return parts.join("\n");
-}
-
-function buildSynthesisMessages(
-  currentProfile: string,
-  onlineLearningBlock: string,
-  recentTurns: string,
-  extra?: { factBlock?: string; understandingBlock?: string; staleText?: string },
-): OpenAI.Chat.Completions.ChatCompletionMessageParam[] {
-  const system = [
-    "你是用户画像维护器。根据「现有画像」「规则引擎提取的画像信号」「最近对话轮」，输出更新后的完整用户画像 markdown。",
-    "",
-    "要求：",
-    "1. 保持 markdown 结构：# 用户画像 标题 + ## 基本信息 / ## 兴趣与习惯 / ## 沟通偏好 / ## 备注 四个 section；",
-    "2. 只在有足够置信度时写入新信息（用户明确表达过，或多次出现）；冲突时以最新信息为准（人会改变）；",
-    "3. 删除已被新信息取代的旧条目和过期的「（待了解）」占位符；",
-    "4. 从对话中提炼隐性偏好：语气偏好、专业领域深度、决策风格、活跃时段；不要写「常用语言」（它不是画像字段，也没有对应权威值）；",
-    "5. 每条信息一行，以「- 」开头，精炼不啰嗦；不要编造对话中没有的依据；",
-    "6. 控制总尺寸（画像注入 prompt 有长度预算，超长会被整块丢弃）：全文不超过 1500 字；每个 section 至多 8 条；同类条目合并成一条；「备注」只保留长期有效的重要事项，过期的、临时性的、重复的条目直接删除；",
-    "7. 亲密关系单值：老婆/对象/正主/未婚妻等（含「未来老婆」等变体）视为同一字段，以用户最新明确表述为准，删除旧表述与「候选/备选/关系未确认」式暧昧条目；助手的调侃、求证永远不是依据；",
-    "8. 画像开头保留一行引用块：`> 本文件由 Agent 在与你的对话中持续更新。最后更新：{ISO时间}`；",
-    "9. 直接输出 markdown 全文，不要任何解释或代码围栏。",
-    "10. 跨库一致性：若提供了【结构化事实库当前值】/【理解档案当前要点】，它们是其他记忆库的权威快照——画像与它们矛盾时，以「最近对话轮」为最高权威统一口径，画像与快照必须改到一致；无矛盾证据时不要凭空改写快照内容。",
-    "11. 陈旧裁决：若提供了【陈旧行候选】，逐条判断——近期对话或事实库/理解档案能证实的保留；已明显过时（换了工作/搬了家/关系变化）的删除或改写为现状；拿不准的保留原样。不要为了删而删。",
-    "12. 写入门槛与主语：只保留长期稳定的事实与偏好；临时安排与行程（出差/旅行/周末计划）、行为频率与变化的描述（如「旅游目的频繁切换」）、对助手（Agent）的观察（如「会主动询问宠物相关信息」）、疑问句、不确定推断（可能/大概/也许）一律不写，且画像里已有的同类条目要删掉；每条必须主语明确——用户本人（「用户/我」）或明确属于用户的字段（称呼/所在地/职业…）。身份类字段（职业/公司/学历）必须用户明确自述过，不得靠推断；「常用语言」不是画像字段，不要出现。",
-  ].join("\n");
-  const user = [
-    "【现有画像】",
-    currentProfile || "（空，首次生成）",
-    "",
-    "【规则引擎画像信号】",
-    onlineLearningBlock || "（无）",
-    "",
-    "【最近对话轮（供提炼隐性偏好）】",
-    recentTurns || "（无）",
-    "",
-    ...(extra?.factBlock ? [extra.factBlock, ""] : []),
-    ...(extra?.understandingBlock ? [extra.understandingBlock, ""] : []),
-    ...(extra?.staleText
-      ? ["【陈旧行候选（长期未被对话证实，逐条裁决：保留/删除/改写为现状）】", extra.staleText, ""]
-      : []),
-    "请输出更新后的完整画像 markdown：",
-  ].join("\n");
-  return [
-    { role: "system", content: system },
-    { role: "user", content: user },
-  ];
-}
-
-/** 容错提取 LLM 输出中的 markdown 正文（去围栏） */
-function cleanProfileMarkdownOutput(output: string): string {
-  let text = output.trim();
-  text = text.replace(/^```(?:markdown|md)?\s*/i, "").replace(/```\s*$/, "");
-  // 必须看起来像画像（含二级标题），否则视为无效输出
-  if (!/^#\s*用户画像/m.test(text) || !/##\s/.test(text)) return "";
-  return text.trim();
-}
-
-/** 轮次队列持久化上限 / 单次合成消费上限 */
-const PENDING_TURNS_CAP = 200;
-const PENDING_TURNS_PER_SYNTHESIS = 40;
 
 export class UserProfileAggregator {
   private readonly store = new UserProfileStore();
   private readonly config: ProfileAggregatorConfig;
   private readonly client: OpenAI | null;
-  private onlineLearning: OnlineLearningLike | null = null;
 
-  /** actorId → 未消费轮次队列（内存缓存，落盘到 pending-turns.json，重启不丢；合成触发判据） */
-  private readonly pendingTurns = new Map<string, string[]>();
-  private readonly pendingLoaded = new Set<string>();
-  /** actorId → 上次深度合成时间戳 */
-  private readonly lastSynthesisAt = new Map<string, number>();
-  /** in-flight 深度合成去重 */
-  private readonly synthesizing = new Set<string>();
-  /** actorId → 画像写操作串行链（抽取/合成/队列落盘互不并发覆盖） */
+  /** actorId → 画像写操作串行链（抽取/统一抽取落位互不并发覆盖） */
   private readonly writeChains = new Map<string, Promise<unknown>>();
 
   constructor(config?: Partial<ProfileAggregatorConfig>, apiKey?: string) {
@@ -466,27 +344,18 @@ export class UserProfileAggregator {
       : null;
   }
 
-  /** 是否具备 LLM 能力（无 key 时 observeTurn 只排队不落画像） */
-  get canSynthesize(): boolean {
-    return this.client !== null;
-  }
-
   /** 是否实际承担画像事实写入（有 LLM key 且抽取开关开启） */
   get canExtract(): boolean {
     return this.client !== null && this.config.enabled && this.config.extractEnabled;
   }
 
-  /** 注入规则画像源（OnlineLearningCortex） */
-  registerOnlineLearning(svc: OnlineLearningLike | null): void {
-    this.onlineLearning = svc;
-  }
-
   /**
    * 每轮 finalizeTurn 收尾时调用（2026-09-29 从 brain-center 阶段3.6.1 迁入：
    * 原位传 cognitive.response 恒空串，画像只见用户半边；finalizeTurn 拿真实全文）。
-   * - 轮次进入持久化队列（深度合成的输入 + 合成触发判据，重启不丢）；
-   * - 条件触发 LLM 抽取（token 闸预筛，ADD/UPDATE/DELETE 精确落位，不阻塞调用方）；
-   * - 队列条数达阈值时异步触发 LLM 深度合成。
+   *
+   * 画像只在对话内写入：统一抽取（每轮那一次 LLM）捎带 profileOps → 确定性落位。
+   * 不再维护「待合成轮次队列」，也不在后台做整文 LLM 重写（主流 agent 的画像
+   * 都是对话内事实 upsert 驱动，后台只做确定性整理）。
    */
   observeTurn(
     actorId: string,
@@ -499,65 +368,26 @@ export class UserProfileAggregator {
     const assistant = (assistantText ?? "").trim();
     if (!user && !assistant) return;
 
-    // 1. 持久化轮次队列
-    const block = `用户: ${user.slice(0, 200)}\n助手: ${assistant.slice(0, 200)}`;
-    void this.appendPendingTurn(actorId, block)
-      .then(() => this.maybeSynthesizeByPendingCount(actorId))
-      .catch(() => {
-        /* 队列落盘失败静默，内存仍有 */
-      });
-
-    // 2. 条件 LLM 抽取 → 结构化操作确定性写入画像。
-    //    token 闸：高信号轮或个人陈述预筛命中才跑 MINI 抽取，寒暄轮跳过；
-    //    漏掉的由深度合成兜底（轮次已在队列，零丢失）。
+    // 条件 LLM 抽取 → 结构化操作确定性写入画像。
+    // token 闸：高信号轮或个人陈述预筛命中才跑 MINI 抽取，寒暄轮跳过。
     if (user && this.shouldExtractNow(user, opts?.highSignal === true)) {
       void this.extractAndApply(actorId, user, assistant).catch(() => {
-        /* 抽取失败静默，深度合成兜底 */
+        /* 抽取失败静默，下一轮对话再补 */
       });
     }
   }
 
   /**
-   * 个人陈述信号（宽匹配：假阳性=多跑一次 MINI 抽取，假阴性=深度合成兜底）。
-   * 二组为改口/迁移类（2026-09-29 纠错腿盲区：「现在在泉州开咖啡店/以后长住」
-   * 无「住在/搬家/换工作」字样，被闸误跳过导致画像不更新）。
+   * 画像抽取 token 闸（2026-10-21 合并）：
+   * - 统一抽取通道启用时，本类不再单独发画像抽取 LLM——画像操作由 ingest 的
+   *   同一次统一抽取调用捎带（见 applyProfileOpsFromUnified），每轮只 1 次 LLM；
+   * - 统一抽取关闭时回退原行为：正则预筛命中才跑本地抽取。
    */
-  private static readonly EXTRACT_HINT_RE =
-    /我叫|我的(名字|小名|生日|猫|狗|爱好|工作|职业|公司|学校|专业|老婆|老公|男朋友|女朋友|女儿|儿子|家人|爸妈)|我是(一名|做|搞|学)|住在|在.{0,10}上班|喜欢|讨厌|害怕|最近在(学|练|看|读|准备|找)|养了|要考|结婚|订婚|分手|搬家|换工作|辞职|入职|毕业|记错|搞错|其实|直接一?点|绕弯子|现在(在|不|是)|以后(就|在)|长住|定居|转行|改行|搬(到|去|家)|转让|不干了|改(成|开|做)|换成/;
-
-  /** 抽取 token 闸（MEMORY_PROFILE_EXTRACT_PRESCREEN=0 关闭预筛，恢复每轮抽取） */
   private shouldExtractNow(userText: string, highSignal: boolean): boolean {
+    if (isMemoryUnifiedExtractEnabled()) return false;
     if (!this.config.extractPrescreen) return true;
     if (highSignal) return true;
-    return UserProfileAggregator.EXTRACT_HINT_RE.test(userText);
-  }
-
-  /**
-   * 跨库一致性快照块（P1-2）：事实库当前值 + 理解档案要点，进合成 prompt 交
-   * LLM 与画像统一裁决。库未装配/为空时返回空串（零注入）。
-   * 返回第三项恒为 "stale" 占位——陈旧行须在合成串行链内按最新画像全文计算。
-   */
-  private async buildCrossStoreBlocks(
-    actorId: string,
-  ): Promise<[factBlock: string, understandingBlock: string, staleMarker: string]> {
-    try {
-      const { getMemoryComponents } = await import("../agentic-memory/index.js");
-      const components = getMemoryComponents();
-      const facts = components.factStore?.getActiveFacts?.(actorId) ?? [];
-      const understandings =
-        components.understandingStore?.getActiveUnderstandings?.(actorId) ?? [];
-      const factText = facts
-        .slice(0, 20)
-        .map((f) => `- ${f.field}: ${f.value}`)
-        .join("\n");
-      const understandingText = understandings
-        .slice(0, 10)
-        .map((n) => `- [${n.kind}] ${n.topic}: ${n.note}`)
-        .join("\n");
-      return [factText, understandingText, "stale"];
-    } catch {
-      return ["", "", ""];
-    }
+    return isProfileExtractHint(userText);
   }
 
   /**
@@ -653,23 +483,6 @@ export class UserProfileAggregator {
   }
 
   /**
-   * 持久化队列条数达标即触发深度合成（2026-09-29 换锚：原内存计数器随 tsx watch
-   * 重启清零，阈值永远凑不齐；队列文件本就每轮落盘，判据读它重启不丢）。
-   * 间隔/在途去重由 synthesizeDeepProfile 内部闸承担；未放行时队列继续累积
-   * （上限 200），后续每轮重试直至合成。
-   */
-  private async maybeSynthesizeByPendingCount(actorId: string): Promise<void> {
-    try {
-      const pending = await this.ensurePendingLoaded(actorId);
-      if (pending.length >= this.config.synthesisTurnThreshold) {
-        await this.synthesizeDeepProfile(actorId);
-      }
-    } catch {
-      /* 静默 */
-    }
-  }
-
-  /**
    * 存量画像净噪（启动时一次性，幂等）：扫描画像目录下所有 actor 的
    * USER_PROFILE.md，用确定性规则清掉历史坏行——疑问句、对助手的 meta 观察、
    * 临时行程、行为频率描述、不确定推断、无权威字段（「常用语言」）、以及
@@ -703,14 +516,6 @@ export class UserProfileAggregator {
     return cleaned;
   }
 
-  /** 深度合成外部触发口（MemoryManager 巩固完成后调用） */
-  triggerSynthesis(actorId: string): void {
-    if (!this.config.enabled) return;
-    void this.synthesizeDeepProfile(actorId).catch(() => {
-      /* 静默 */
-    });
-  }
-
   /** 同一 actor 的画像相关写操作串行执行 */
   private runSerialized<T>(actorId: string, fn: () => Promise<T>): Promise<T> {
     const prev = this.writeChains.get(actorId) ?? Promise.resolve();
@@ -723,38 +528,6 @@ export class UserProfileAggregator {
       ),
     );
     return next;
-  }
-
-  /* ── 持久化轮次队列 ── */
-
-  private pendingPath(actorId: string): string {
-    return join(dirname(this.store.profilePath(actorId)), "pending-turns.json");
-  }
-
-  private async ensurePendingLoaded(actorId: string): Promise<string[]> {
-    if (this.pendingLoaded.has(actorId)) return this.pendingTurns.get(actorId) ?? [];
-    let list: string[] = [];
-    try {
-      const raw = await readFile(this.pendingPath(actorId), "utf8");
-      const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed)) list = parsed.filter((x): x is string => typeof x === "string");
-    } catch {
-      /* 文件不存在/损坏 → 空队列 */
-    }
-    this.pendingTurns.set(actorId, list);
-    this.pendingLoaded.add(actorId);
-    return list;
-  }
-
-  private async appendPendingTurn(actorId: string, block: string): Promise<void> {
-    await this.runSerialized(actorId, async () => {
-      const list = await this.ensurePendingLoaded(actorId);
-      list.push(block);
-      if (list.length > PENDING_TURNS_CAP) list.splice(0, list.length - PENDING_TURNS_CAP);
-      const path = this.pendingPath(actorId);
-      await mkdir(dirname(path), { recursive: true });
-      await writeFile(path, JSON.stringify(list, null, 0), "utf8");
-    });
   }
 
   /* ── 每轮 LLM 抽取：决策 → 确定性落位 → 写后校验 ── */
@@ -794,166 +567,83 @@ export class UserProfileAggregator {
 
       const ops = parseExtractOps(content);
       if (ops.length === 0) return true;
-
-      const { profile: next, applied, skipped } = applyProfileOps(currentProfile, ops);
-      if (skipped.length > 0) {
-        console.info(
-          `[ProfileAggregator] 画像写入拒绝噪声条目: ${actorId} (${skipped.length} 条: ${skipped.join(" | ")})`,
-        );
-      }
-      if (applied.length === 0) return true;
-      // 单一权威源闭环：LLM 抽到的档案字段先回灌结构化事实库（唯一写入者），
-      // 再把画像的档案字段行投影为权威值（去别名重复行 / 清行内历史注解）。
-      await this.feedBasicFieldsToCanonicalStore(actorId, applied.map((a) => a.op));
-      const projected = await this.projectProfileFields(actorId, next);
-      await this.store.write(actorId, projected);
-
-      // 写后校验：重读文件，确认每条操作真实生效且落在正确 section。
-      // 基本信息里的档案字段行由权威投影接管（会被重渲染），不计为失败。
-      const written = await this.store.read(actorId);
-      const failures = verifyProfileOps(written, applied).filter((a) => {
-        if (a.op.section !== "basic" || a.expectLine === undefined) return true;
-        const parsed = parseFieldLine(a.expectLine);
-        return !(parsed && profileFieldOfLabel(parsed.label));
-      });
-      if (failures.length > 0) {
-        console.warn(
-          `[ProfileAggregator] 画像写入校验未通过: ${actorId} (${failures.length}/${applied.length} 条未落位)`,
-        );
-      } else {
-        console.log(`[ProfileAggregator] LLM 抽取更新画像: ${actorId} (${applied.length} 条操作，校验通过)`);
-      }
-      // 新鲜度 sidecar：同步画像全文 + 证实本次落位的行（P1-1）
-      try {
-        await touchProfileLines(
-          actorId,
-          written,
-          applied.map((a) => a.expectLine ?? "").filter(Boolean),
-        );
-      } catch (metaErr) {
-        console.warn(`[ProfileAggregator] 行元数据同步失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
-      }
-      return failures.length === 0;
+      return this.applyOpsAndPersist(actorId, currentProfile, ops);
     });
   }
 
   /**
-   * LLM 深度画像合成：现有画像 + 规则增量 + 未消费轮次队列 + 跨库一致性快照 +
-   * 陈旧行裁决清单 → 更新后的画像 markdown。
-   * in-flight 去重 + 最小间隔控制；失败静默保持旧画像（轮次不清空，下次再消费）。
+   * 读取当前画像（供 ingest 的统一抽取捎带画像任务时使用）。
+   * 读失败按空画像处理，不阻断记忆主链路。
    */
-  async synthesizeDeepProfile(actorId: string): Promise<boolean> {
-    if (!this.config.enabled || !this.client) return false;
-    if (this.synthesizing.has(actorId)) return false;
-
-    const last = this.lastSynthesisAt.get(actorId) ?? 0;
-    if (Date.now() - last < this.config.minSynthesisIntervalMs) return false;
-
-    // 跨库一致性快照（P1-2）+ 陈旧行候选（P1-1）：都在合成 prompt 里交 LLM 统一裁决
-    const [factBlock, understandingBlock, staleBlock] = await this.buildCrossStoreBlocks(actorId);
-
-    this.synthesizing.add(actorId);
+  async readProfile(actorId: string): Promise<string> {
     try {
-      return await this.runSerialized(actorId, async () => {
-        const currentProfile = await this.store.read(actorId);
-        const onlineBlock = this.onlineLearning
-          ? formatOnlineLearningForPrompt(this.onlineLearning.getProfile(actorId))
-          : "";
-        const pending = await this.ensurePendingLoaded(actorId);
-        const recentTurns = pending.slice(-PENDING_TURNS_PER_SYNTHESIS).join("\n\n");
-        // 陈旧行要在拿到画像全文后按当前内容过滤（loadMeta 在串行链外读的，行集合可能有变）
-        const staleLines = staleBlock ? await listStaleLines(actorId, currentProfile, this.config.staleLineDays * 86_400_000) : [];
-        const staleText = staleLines.length > 0
-          ? staleLines.map((m) => `- 「${m.line}」（${m.section}，最近证实 ${m.lastConfirmedAt.slice(0, 10)}，证实 ${m.seenCount} 次）`).join("\n")
-          : "";
-
-        const messages = buildSynthesisMessages(
-          currentProfile,
-          onlineBlock,
-          recentTurns,
-          { factBlock, understandingBlock, staleText },
-        );
-        const response = await this.client!.chat.completions.create({
-          model: this.config.model,
-          temperature: 0.2,
-          max_tokens: this.config.maxTokens,
-          messages,
-          ...bypassChatRequestExtras(),
-        });
-        const content = response.choices[0]?.message?.content?.trim();
-        if (content) {
-          const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
-          recordLlmUsageByChars({
-            stage: "user_profile_aggregate",
-            inputChars: JSON.stringify(messages).length,
-            outputChars: content.length,
-            model: this.config.model,
-            actorId,
-            // P1-3（2026-09-29）：同 extract——非流式 usage 真值进审计
-            ...(response.usage ? {
-              apiPromptTokens: response.usage.prompt_tokens,
-              apiCompletionTokens: response.usage.completion_tokens,
-            } : {}),
-          });
-        }
-        if (!content) return false;
-
-        const cleaned = cleanProfileMarkdownOutput(content);
-        if (!cleaned) {
-          console.warn("[ProfileAggregator] LLM 输出不符合画像格式，保持旧画像");
-          return false;
-        }
-        // 单一权威源：整文重写同样受权威投影约束，档案字段行以事实库为准
-        const projected = await this.projectProfileFields(actorId, cleaned);
-
-        await this.store.write(actorId, projected);
-        this.lastSynthesisAt.set(actorId, Date.now());
-        // 新鲜度 sidecar 随整文重写重建（保留原有行的历史，新行从现在起算）
-        try {
-          await rebuildProfileMeta(actorId, projected);
-        } catch (metaErr) {
-          console.warn(`[ProfileAggregator] 行元数据重建失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
-        }
-        // 消费轮次队列（已在序列化链内，直接落盘避免嵌套死锁）
-        this.pendingTurns.set(actorId, []);
-        try {
-          await writeFile(this.pendingPath(actorId), "[]", "utf8");
-        } catch {
-          /* 静默 */
-        }
-        console.log(`[ProfileAggregator] 深度画像合成完成: ${actorId} (${cleaned.length} chars)`);
-        return true;
-      });
-    } catch (err) {
-      console.warn(
-        `[ProfileAggregator] LLM 深度画像合成失败（保持旧画像）: ${err instanceof Error ? err.message : err}`,
-      );
-      return false;
-    } finally {
-      this.synthesizing.delete(actorId);
+      return (await this.store.read(actorId)) ?? "";
+    } catch {
+      return "";
     }
   }
 
-  /** 诊断：当前累积状态 */
-  getStats(actorId: string): {
-    turnsSinceSynthesis: number;
-    bufferedTurns: number;
-    lastSynthesisAt: string | null;
-    canSynthesize: boolean;
-  } {
-    const buffered = (this.pendingTurns.get(actorId) ?? []).length;
-    return {
-      turnsSinceSynthesis: buffered,
-      bufferedTurns: buffered,
-      lastSynthesisAt: this.lastSynthesisAt.has(actorId)
-        ? new Date(this.lastSynthesisAt.get(actorId)!).toISOString()
-        : null,
-      canSynthesize: this.canSynthesize,
-    };
+  /**
+   * 消费统一抽取产物里的画像操作（与记忆/承诺/事实同一次 LLM 输出）。
+   * 落位路径与 extractAndApply 完全一致：确定性 apply → 权威库回灌 → 投影 → 写后校验。
+   */
+  async applyProfileOpsFromUnified(actorId: string, ops: ProfileOp[]): Promise<boolean> {
+    if (!this.config.enabled || ops.length === 0) return false;
+    return this.runSerialized(actorId, async () => {
+      const currentProfile = await this.store.read(actorId);
+      return this.applyOpsAndPersist(actorId, currentProfile, ops);
+    });
+  }
+
+  /** 确定性落位 + 权威库回灌 + 写后校验（抽取/统一抽取共用的唯一写入路径） */
+  private async applyOpsAndPersist(
+    actorId: string,
+    currentProfile: string,
+    ops: ProfileOp[],
+  ): Promise<boolean> {
+    const { profile: next, applied, skipped } = applyProfileOps(currentProfile, ops);
+    if (skipped.length > 0) {
+      console.info(
+        `[ProfileAggregator] 画像写入拒绝噪声条目: ${actorId} (${skipped.length} 条: ${skipped.join(" | ")})`,
+      );
+    }
+    if (applied.length === 0) return true;
+    // 单一权威源闭环：LLM 抽到的档案字段先回灌结构化事实库（唯一写入者），
+    // 再把画像的档案字段行投影为权威值（去别名重复行 / 清行内历史注解）。
+    await this.feedBasicFieldsToCanonicalStore(actorId, applied.map((a) => a.op));
+    const projected = await this.projectProfileFields(actorId, next);
+    await this.store.write(actorId, projected);
+
+    // 写后校验：重读文件，确认每条操作真实生效且落在正确 section。
+    // 基本信息里的档案字段行由权威投影接管（会被重渲染），不计为失败。
+    const written = await this.store.read(actorId);
+    const failures = verifyProfileOps(written, applied).filter((a) => {
+      if (a.op.section !== "basic" || a.expectLine === undefined) return true;
+      const parsed = parseFieldLine(a.expectLine);
+      return !(parsed && profileFieldOfLabel(parsed.label));
+    });
+    if (failures.length > 0) {
+      console.warn(
+        `[ProfileAggregator] 画像写入校验未通过: ${actorId} (${failures.length}/${applied.length} 条未落位)`,
+      );
+    } else {
+      console.log(`[ProfileAggregator] LLM 抽取更新画像: ${actorId} (${applied.length} 条操作，校验通过)`);
+    }
+    // 新鲜度 sidecar：同步画像全文 + 证实本次落位的行（P1-1）
+    try {
+      await touchProfileLines(
+        actorId,
+        written,
+        applied.map((a) => a.expectLine ?? "").filter(Boolean),
+      );
+    } catch (metaErr) {
+      console.warn(`[ProfileAggregator] 行元数据同步失败（忽略）: ${metaErr instanceof Error ? metaErr.message : metaErr}`);
+    }
+    return failures.length === 0;
   }
 }
 
-/** 工厂：始终返回实例（无 key 时 observeTurn 只排队不落画像） */
+/** 工厂：始终返回实例（无 key 时只跳过 LLM 抽取，不影响主链路） */
 export function createUserProfileAggregator(): UserProfileAggregator {
   return new UserProfileAggregator();
 }

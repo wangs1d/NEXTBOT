@@ -11,13 +11,6 @@ import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { writeJsonAtomic } from "../storage/atomic-json.js";
-import {
-  resolveNightlyMode,
-  runUnifiedNightlyConsolidation,
-  type NightlyFact,
-  type NightlyMode,
-} from "./nightly-unified-consolidator.js";
-import { semanticFingerprint } from "./memory-record-utils.js";
 import { maybeRunSoulReflection } from "../agent/soul-store.js";
 
 export type NightlySleepAgentReport = {
@@ -377,31 +370,19 @@ export class NightlyMemoryTaskService {
     if (this.lastProcessedDay === today) return;
     this.lastProcessedDay = today;
 
-    console.log(`[NightlyMemory] Running night tasks for ${today} (mode=${resolveNightlyMode()})`);
-
-    // P1 单遍巩固器（2026-09-12）：shadow/unified 模式下，在旧管路消费任何
-    // journal 游标之前，用一次 LLM 调用同时产出「持久事实 + 当日新行留存分」。
-    //   shadow：只计算并落盘对比报告，旧管路照常执行（零行为变化）；
-    //   unified：事实与评分直接采用本通道产物（extractDurableFacts / 评分 LLM 跳过）。
-    const mode = resolveNightlyMode();
-    const precomputedFacts = new Map<string, NightlyFact[]>();
-    if (mode !== "legacy") {
-      await this.runUnifiedPrePass(mode, precomputedFacts);
-    }
+    console.log(`[NightlyMemory] Running night tasks for ${today}`);
 
     try {
       // 记忆架构收敛：原「DailyDigest 归档」步骤已移除——它与下方 consolidateDailyJournals
       // （journal → 长期记忆图）对同批当天对话双写长期记忆。白天只写 journal 一份原始流水，
       // 夜间固化走 consolidateDailyJournals 单一入口。
-      // 巩固管线（episodic → semantic）：journal 固化前先做事实提炼，
-      // 此时未固化日志仍在，提炼出的稳定事实写入结构化槽位（latest-wins 归并）。
-      // unified 模式下 precomputedFacts 由单遍巩固器提供，跳过本通道的 LLM 调用。
-      const legacyFactCounts = await this.extractFactsFromJournals(
-        mode === "unified" ? precomputedFacts : undefined,
-      );
-      if (mode === "shadow") {
-        this.completeShadowReport(legacyFactCounts);
-      }
+      // 巩固管线（episodic → semantic）：journal 固化前先把日志批处理成稳定事实
+      // （写入结构化槽位，latest-wins 归并）。夜间常规只有这一次 LLM 调用，
+      // 且只对「有未固化 journal 行」的 actor 触发（buildNightlyTranscript 空即跳过）；
+      // 留存评分 / 画像维护全部确定性规则，不再在后台反复调用 LLM
+      // （灵魂反思另有周级门禁，每周最多一次）。
+      await this.extractFactsFromJournals();
+      await this.runSoulReflectionIfDue();
       // 记忆架构重构：当日对话日志固化（journal → 长期记忆图），
       // 必须在 dreaming 之前完成，让后续合并/衰减阶段能看到新固化内容。
       await this.consolidateDailyJournals();
@@ -415,74 +396,29 @@ export class NightlyMemoryTaskService {
   }
 
   /**
-   * P1 单遍巩固预通道：对每个 actor 一次 LLM 调用，同时产出
-   * 「持久事实（替代 extractDurableFacts）+ 当日新行留存分（种子进评分缓存，
-   * consolidateNow 增量评分命中缓存即 0 次调用）」。
-   * shadow 模式只计算与记录，不写任何记忆存储。
+   * 灵魂周级反思：复用夜间事实提炼阶段拼好的精简流水（零额外读盘）。
+   * 周级门禁在 soul-store 内部（changelog 最近一条 ≥7 天才调 LLM），
+   * 每周最多一次；LLM 缺失/失败静默跳过，绝不影响后续固化阶段。
    */
-  private async runUnifiedPrePass(
-    mode: Exclude<NightlyMode, "legacy">,
-    precomputedFacts: Map<string, NightlyFact[]>,
-  ): Promise<void> {
+  private async runSoulReflectionIfDue(): Promise<void> {
     const journal = getDailyJournalService();
-    if (!journal || !this.memoryManager) return;
-
-    let lastTranscript: string | null = null;
-    for (const actorId of this.getAllActorIds()) {
-      try {
+    if (!journal) return;
+    try {
+      for (const actorId of this.getAllActorIds()) {
         const transcript = await this.buildNightlyTranscript(journal, actorId);
         if (!transcript) continue;
-        lastTranscript = transcript;
-
-        // 评分行必须与 consolidateNow 的评分输入同源同格式（consumeTodayJournalLines
-        // 的行格式），指纹才能在缓存中精确命中；此处只读不消费游标。
-        const todayLines = await journal.readTodayLines(actorId).catch(() => []);
-        const formatRole = (role: string): string =>
-          role === "user" ? "用户" : role === "assistant" ? "Agent" : role;
-        const scoreLines = todayLines.map((h) => ({
-          fp: semanticFingerprint(`[${h.time}] ${formatRole(h.role)}: ${h.text}`),
-          text: `[${h.time}] ${formatRole(h.role)}: ${h.text}`,
-        }));
-
-        const outcome = await runUnifiedNightlyConsolidation({ actorId, transcript, scoreLines });
-        if (!outcome) continue;
-
-        if (mode === "shadow") {
-          this.recordShadowReport({
-            day: this.getTodayKey(),
-            actorId,
-            unifiedFacts: outcome.facts.length,
-            unifiedScoredLines: outcome.scores.length,
-          });
-          continue;
-        }
-
-        // unified 模式：产物直接采用
-        precomputedFacts.set(actorId, outcome.facts);
-        if (outcome.scores.length > 0) {
-          this.memoryManager.seedScoreCache(actorId, outcome.scores);
-        }
-      } catch (err) {
-        console.error(`[NightlyMemory] unified pre-pass failed for ${actorId}:`, err);
-      }
-    }
-
-    // 灵魂周级反思（2026-10-13）：复用本通道拼好的 transcript，产出受 drift guard
-    // 约束的 disposition patch。周级门禁在 soul-store 内部（changelog 最近一条
-    // ≥7 天才调 LLM），LLM 缺失/失败静默跳过，绝不影响后续固化阶段。
-    if (lastTranscript) {
-      try {
-        const soul = await maybeRunSoulReflection({ transcript: lastTranscript });
+        const soul = await maybeRunSoulReflection({ transcript });
         if (soul.applied) {
           console.log(`[NightlyMemory] Soul reflection applied (${soul.reason})`);
         }
-      } catch (err) {
-        console.error("[NightlyMemory] Soul reflection failed:", err);
+        return;
       }
+    } catch (err) {
+      console.error("[NightlyMemory] Soul reflection failed:", err);
     }
   }
 
-  /** 从未固化 journal 行拼装精简流水（extractFactsFromJournals / unified 预通道共用） */
+  /** 从未固化 journal 行拼装精简流水（夜间事实提炼 / 灵魂反思共用） */
   private async buildNightlyTranscript(
     journal: NonNullable<ReturnType<typeof getDailyJournalService>>,
     actorId: string,
@@ -505,41 +441,6 @@ export class NightlyMemoryTaskService {
     }
     if (transcriptLines.length < 4) return null;
     return transcriptLines.slice(-120).join("\n");
-  }
-
-  // ---- P1 shadow 对比报告（data/nightly-unified-shadow.json，保留最近 60 条） ----
-
-  private shadowRows: Array<{
-    day: string;
-    actorId: string;
-    unifiedFacts: number;
-    unifiedScoredLines: number;
-    legacyFacts?: number;
-  }> = [];
-
-  private recordShadowReport(row: {
-    day: string;
-    actorId: string;
-    unifiedFacts: number;
-    unifiedScoredLines: number;
-  }): void {
-    this.shadowRows.push(row);
-  }
-
-  private completeShadowReport(legacyFactCounts: Map<string, number>): void {
-    if (this.shadowRows.length === 0) return;
-    for (const row of this.shadowRows) {
-      row.legacyFacts = legacyFactCounts.get(row.actorId) ?? 0;
-    }
-    const path = join(process.cwd(), "data", "nightly-unified-shadow.json");
-    void writeJsonAtomic(path, { version: 1, rows: this.shadowRows.slice(-60) }).catch(() => {});
-    for (const row of this.shadowRows) {
-      console.log(
-        `[NightlyMemory][shadow] actor=${row.actorId} unifiedFacts=${row.unifiedFacts} ` +
-          `legacyFacts=${row.legacyFacts} unifiedScoredLines=${row.unifiedScoredLines}`,
-      );
-    }
-    this.shadowRows = [];
   }
 
   /**
@@ -690,35 +591,26 @@ export class NightlyMemoryTaskService {
    *
    * 设计要点：
    * - 单 actor 单次 LLM 批处理调用（替代逐条实时写入决策，便宜且质量更高）；
-   * - unified 模式下传入 precomputedFacts（单遍巩固器产物），跳过本通道 LLM；
+   * - 只处理有未固化 journal 行的 actor（buildNightlyTranscript 返回 null 直接跳过）；
    * - LLM 不可用 / 提炼失败 → 静默跳过该 actor，不影响后续固化与 dreaming；
    * - 行文本按 kind 加类型前缀，命中槽位分类正则后自动归入对应槽位。
    *
-   * @returns 每个 actor 实际落库的事实条数（shadow 对比报告用）
+   * @returns 每个 actor 实际落库的事实条数（日志用）
    */
-  private async extractFactsFromJournals(
-    precomputed?: Map<string, NightlyFact[]>,
-  ): Promise<Map<string, number>> {
+  private async extractFactsFromJournals(): Promise<Map<string, number>> {
     const appliedCounts = new Map<string, number>();
     const journal = getDailyJournalService();
     if (!journal || !this.memorySync) return appliedCounts;
     const llm = resolvePrimaryLlmClientConfig();
-    if (!llm && !precomputed) return appliedCounts;
+    if (!llm) return appliedCounts;
 
     const factStore = this.getFactStore();
     const actorIds = this.getAllActorIds();
     for (const actorId of actorIds) {
       try {
-        let facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }> | undefined;
-        if (precomputed?.has(actorId)) {
-          // unified 模式：单遍巩固器已产出事实，跳过本通道 LLM 调用
-          facts = precomputed.get(actorId);
-        } else {
-          if (!llm) continue;
-          const transcript = await this.buildNightlyTranscript(journal, actorId);
-          if (!transcript) continue;
-          facts = await this.extractDurableFacts(llm, transcript);
-        }
+        const transcript = await this.buildNightlyTranscript(journal, actorId);
+        if (!transcript) continue;
+        const facts = await this.extractDurableFacts(llm, transcript);
         if (!facts || facts.length === 0) continue;
 
         const { canonical, kvWritten } = await this.applyNightlyFacts(actorId, facts);
@@ -866,6 +758,13 @@ export class NightlyMemoryTaskService {
     }
   }
 
+  /**
+   * 夜间记忆巩固（确定性，零 LLM）。
+   *
+   * 留存评分改由 memory-manager 的时间衰减/信号正则计算；画像是对话内
+   * upsert 维护的，这里不再触发整文重写。因此即使遍历全部历史 actor，
+   * 也只是本地计算，不再产生 LLM 调用。
+   */
   private async runDreamPhase(): Promise<void> {
     const actorIds = this.getAllActorIds().slice(0, this.config.consolidationBatchSize);
     if (actorIds.length === 0) return;

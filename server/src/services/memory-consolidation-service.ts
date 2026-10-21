@@ -29,6 +29,7 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
+  isProfileExtractHint,
   type UnifiedExtraction,
   type UnifiedLlmClient,
 } from "../agentic-memory/unified-extractor.js";
@@ -103,6 +104,8 @@ export class MemoryConsolidationService {
   private loaded = false;
   /** 统一抽取 LLM 客户端（测试注入 fake；生产为 null 走内部 OpenAI 构造） */
   private unifiedClient: UnifiedLlmClient | null = null;
+  /** 当前画像快照读取口（bootstrap 接线到 UserProfileAggregator） */
+  private profileSnapshot: ((actorId: string) => Promise<string | null>) | null = null;
 
   constructor(private readonly deps: MemoryConsolidationDeps) {
     this.debounceMs = envNum("AGENT_MEMORY_CONSOLIDATION_DEBOUNCE_MS", 30_000);
@@ -116,6 +119,30 @@ export class MemoryConsolidationService {
   /** 注入统一抽取客户端（测试用；生产不调用） */
   setUnifiedClient(client: UnifiedLlmClient | null): void {
     this.unifiedClient = client;
+  }
+
+  /**
+   * 注入当前画像快照读取口（bootstrap 接线到 UserProfileAggregator）。
+   * 注入后，统一抽取这一次调用会捎带 profileOps（画像与记忆/承诺/事实同一次 LLM），
+   * 画像因此不再单独发调用。未注入时行为与旧版一致（不请求画像操作）。
+   */
+  setProfileSnapshotProvider(fn: ((actorId: string) => Promise<string | null>) | null): void {
+    this.profileSnapshot = fn;
+  }
+
+  /**
+   * 判断本次抽取是否捎带画像：高信号轮或命中个人陈述预筛才带当前画像，
+   * 普通闲聊不增加 prompt 体积。读画像失败按空画像处理，不阻断记忆主链路。
+   */
+  private async resolveProfileContext(
+    actorId: string,
+    text: string,
+    highSignal: boolean,
+  ): Promise<{ currentProfile: string } | undefined> {
+    if (!this.profileSnapshot) return undefined;
+    if (!highSignal && !isProfileExtractHint(text)) return undefined;
+    const currentProfile = await this.profileSnapshot(actorId).catch(() => null);
+    return { currentProfile: currentProfile ?? "" };
   }
 
   async load(): Promise<void> {
@@ -250,8 +277,15 @@ export class MemoryConsolidationService {
     const high = accepted.filter((c) => c.highSignal);
     for (const candidate of high) {
       try {
+        const profileContext = isMemoryUnifiedExtractEnabled()
+          ? await this.resolveProfileContext(actorId, candidate.text, true)
+          : undefined;
         const unified = isMemoryUnifiedExtractEnabled()
-          ? await extractUnified(candidate.text, { client: this.unifiedClient ?? undefined, actorId })
+          ? await extractUnified(candidate.text, {
+              client: this.unifiedClient ?? undefined,
+              actorId,
+              ...(profileContext ? { profileContext } : {}),
+            })
           : null;
         if (unified) {
           decided.push({
@@ -290,8 +324,15 @@ export class MemoryConsolidationService {
       if (combined.length < 20) continue;
 
       try {
+        const profileContext = isMemoryUnifiedExtractEnabled()
+          ? await this.resolveProfileContext(actorId, combined, false)
+          : undefined;
         const unified = isMemoryUnifiedExtractEnabled()
-          ? await extractUnified(combined, { client: this.unifiedClient ?? undefined, actorId })
+          ? await extractUnified(combined, {
+              client: this.unifiedClient ?? undefined,
+              actorId,
+              ...(profileContext ? { profileContext } : {}),
+            })
           : null;
         if (unified) {
           const persistedText =
@@ -363,7 +404,8 @@ export class MemoryConsolidationService {
         d.unified.understandings.length > 0 ||
         d.unified.commitments.length > 0 ||
         d.unified.corrections.length > 0 ||
-        d.unified.facts.length > 0;
+        d.unified.facts.length > 0 ||
+        (d.unified.profileOps?.length ?? 0) > 0;
       if (d.decision.decision === "reject" && !hasSideData) continue;
       try {
         await this.deps.narrative!.writeDecided(

@@ -16,7 +16,6 @@
 //    未配 env 时静默跟主聊天模型走（当前 deepseek-flash 足够便宜）；主模型
 //    将来升级时务必显式配 PROACTIVITY_PHRASE_MODEL，防止润色层跟着变贵。
 import type { ExternalChatProvider } from "../external-model/types.js";
-import { recordLlmUsageByChars } from "../services/llm-token-audit.js";
 
 const SYSTEM_PROMPT = `你是用户的私人助理，此刻需要主动开口联系用户（不是回复消息）。
 规则：
@@ -155,6 +154,10 @@ export class SpeechPolisher {
             ephemeralTurn: true,
             disableThinking: true,
             maxThreadMessages: 0,
+            // 2026-10-21 口径修复：此前没传 auditStage，provider 侧默认记成 main_chat，
+            // 这里又补记一条 proactive_phrase——同一次调用被记两遍，且污染主对话成本。
+            // 现在由 provider 单一出口按此 stage 记账。
+            auditStage: "proactive_phrase",
             ...(process.env.PROACTIVITY_PHRASE_MODEL
               ? { modelOverride: process.env.PROACTIVITY_PHRASE_MODEL }
               : process.env.PROACTIVITY_MODEL
@@ -164,12 +167,6 @@ export class SpeechPolisher {
         ),
       );
       this.bumpCounter();
-      recordLlmUsageByChars({
-        stage: "proactive_phrase",
-        inputChars: userPrompt.length + SYSTEM_PROMPT.length,
-        outputChars: full.length,
-        sessionId: input.sessionId,
-      });
       const text = full.trim().replace(/^["'「」]|["'「」]$/g, "");
       if (!text || text.toUpperCase() === "SILENT" || text.length > 120 || text.includes("\n")) {
         this.lastFallback = "bad_output";

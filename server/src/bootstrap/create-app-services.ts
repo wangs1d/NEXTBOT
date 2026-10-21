@@ -4505,11 +4505,29 @@ export async function createAppServices(): Promise<AppServices> {
         );
 
         // ─── 记忆模块整体优化装配（P0/P1/P2）──────────────────────────
-        // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（每轮 LLM 结构化抽取
-        //   ADD/UPDATE/DELETE 确定性落位 + 持久化轮次队列 + 每 12 轮深度合成 + 巩固钩子反哺）。
+        // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（对话内 LLM 结构化抽取
+        //   ADD/UPDATE/DELETE → 确定性落位；无轮次队列、无后台整文合成）。
         const userProfileAggregator = createUserProfileAggregator();
-        userProfileAggregator.registerOnlineLearning(onlineLearningCortex);
         brainCenter.registerUserProfileAggregator(userProfileAggregator);
+        // 2026-10-21 抽取链路合并：画像增量与记忆/承诺/事实走同一次统一抽取调用。
+        // ingest 侧读取当前画像快照并入 prompt，产物 profileOps 经写入钩子回到这里
+        // 确定性落位——不再单独为画像跑一次 LLM。
+        agenticMemoryRuntime?.ingest.setProfileSnapshotProvider((actorId) =>
+          userProfileAggregator.readProfile(actorId),
+        );
+        // 对话主链路走统一写入者（memory-consolidation-service）时，抽取发生在那条链路，
+        // 这里必须同样注入画像快照口，否则 profileOps 永远不被请求、画像断流。
+        memoryConsolidation?.setProfileSnapshotProvider((actorId) =>
+          userProfileAggregator.readProfile(actorId),
+        );
+        agenticMemoryRuntime?.ingest.addWriteHook((event) => {
+          if (!event.profileOps || event.profileOps.length === 0) return;
+          void userProfileAggregator
+            .applyProfileOpsFromUnified(event.actorId, event.profileOps)
+            .catch(() => {
+              /* 画像落位失败静默：不影响记忆主链路，深度合成兜底 */
+            });
+        });
         // 存量画像净噪（2026-10-20）：启动时一次性扫 data/user_profiles/*/USER_PROFILE.md，
         // 用确定性规则清掉历史坏行（疑问句/对助手的 meta 观察/临时行程/行为频率/
         // 无权威字段如「常用语言」/残留占位行）。零 LLM、幂等、不阻塞启动。
@@ -4522,14 +4540,8 @@ export async function createAppServices(): Promise<AppServices> {
         userPersonalizationService.setProfileWritesDelegatedToAggregator(
           userProfileAggregator.canExtract,
         );
-        // 巩固钩子：MemoryManager.consolidateNow（夜间 dreaming / 白天 idle）
-        // 完成后触发深度画像合成，让记忆整理反哺画像。
-        const memMgrForProfileHook = getMemoryManagerService();
-        if (memMgrForProfileHook?.setProfileAggregatorHook) {
-          memMgrForProfileHook.setProfileAggregatorHook((actorId) =>
-            userProfileAggregator.triggerSynthesis(actorId),
-          );
-        }
+        // 画像写入只在对话内发生（统一抽取一次调用捎带 profileOps → 确定性落位）。
+        // 不再从记忆整理（夜间 dreaming / idle）反触发整文画像 LLM 重写。
 
         // P1-1 召回查询扩展器：recall 前指代消解 + 话题扩展 + 多意图拆分
         //（单窗口长会话优化核心，纯规则零延迟）。

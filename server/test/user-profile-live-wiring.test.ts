@@ -8,7 +8,7 @@
  *  - UserProfileStore.deleteAll：隐私闭环级联删除
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -171,63 +171,87 @@ const gate = (text: string, highSignal = false) =>
     highSignal,
   );
 
-test("抽取闸：highSignal 轮无条件放行", () => {
-  assert.equal(gate("在吗", true), true);
-  assert.equal(gate("嗯", true), true);
+/** 关闭统一抽取，回退到"本类自己抽画像"的旧档语义 */
+function withLegacyUnified<T>(fn: () => T): T {
+  const prev = process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED;
+  process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED = "0";
+  try {
+    return fn();
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED;
+    else process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED = prev;
+  }
+}
+
+test("抽取闸：统一抽取启用时不单独发画像 LLM（改由同一次调用捎带）", () => {
+  assert.equal(gate("我叫周明远，在成都当消防员"), false);
+  assert.equal(gate("在吗", true), false);
 });
 
-test("抽取闸：个人陈述正则命中放行（我叫/住在/喜欢/最近在学）", () => {
-  assert.equal(gate("我叫周明远，在成都当消防员"), true);
-  assert.equal(gate("我最近在学日语"), true);
-  assert.equal(gate("我喜欢钓鱼"), true);
+test("抽取闸（回退档）：highSignal 轮无条件放行", () => {
+  withLegacyUnified(() => {
+    assert.equal(gate("在吗", true), true);
+    assert.equal(gate("嗯", true), true);
+  });
 });
 
-test("抽取闸：寒暄轮拦截（省 MINI 抽取调用）", () => {
-  assert.equal(gate("在吗"), false);
-  assert.equal(gate("晚上一起吃饭不"), false);
-  assert.equal(gate("今天加班好累啊"), false);
-  assert.equal(gate("嗯嗯好的"), false);
+test("抽取闸（回退档）：个人陈述正则命中放行（我叫/住在/喜欢/最近在学）", () => {
+  withLegacyUnified(() => {
+    assert.equal(gate("我叫周明远，在成都当消防员"), true);
+    assert.equal(gate("我最近在学日语"), true);
+    assert.equal(gate("我喜欢钓鱼"), true);
+  });
 });
 
-test("抽取闸：改口/迁移类表述放行（2026-09-29 纠错腿盲区回归）", () => {
-  assert.equal(gate("我民宿上个月转让出去了，现在在泉州开咖啡店，以后就在泉州长住了"), true);
-  assert.equal(gate("我改行了，现在不教书了"), true);
-  assert.equal(gate("过阵子搬到杭州去"), true);
+test("抽取闸（回退档）：寒暄轮拦截（省 MINI 抽取调用）", () => {
+  withLegacyUnified(() => {
+    assert.equal(gate("在吗"), false);
+    assert.equal(gate("晚上一起吃饭不"), false);
+    assert.equal(gate("今天加班好累啊"), false);
+    assert.equal(gate("嗯嗯好的"), false);
+  });
 });
 
-test("抽取闸：MEMORY_PROFILE_EXTRACT_PRESCREEN=0 关闭预筛全放行", () => {
+test("抽取闸（回退档）：改口/迁移类表述放行（2026-09-29 纠错腿盲区回归）", () => {
+  withLegacyUnified(() => {
+    assert.equal(gate("我民宿上个月转让出去了，现在在泉州开咖啡店，以后就在泉州长住了"), true);
+    assert.equal(gate("我改行了，现在不教书了"), true);
+    assert.equal(gate("过阵子搬到杭州去"), true);
+  });
+});
+
+test("抽取闸（回退档）：MEMORY_PROFILE_EXTRACT_PRESCREEN=0 关闭预筛全放行", () => {
   const prev = process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN;
   process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN = "0";
   try {
-    // config 在构造时定格：预筛开关必须作用于新实例
-    const a2 = new UserProfileAggregator();
-    const gate2 = (t: string) =>
-      (a2 as unknown as { shouldExtractNow: (t: string, h: boolean) => boolean }).shouldExtractNow(t, false);
-    assert.equal(gate2("在吗"), true, "关闭预筛后寒暄也放行");
+    withLegacyUnified(() => {
+      // config 在构造时定格：预筛开关必须作用于新实例
+      const a2 = new UserProfileAggregator();
+      const gate2 = (t: string) =>
+        (a2 as unknown as { shouldExtractNow: (t: string, h: boolean) => boolean }).shouldExtractNow(t, false);
+      assert.equal(gate2("在吗"), true, "关闭预筛后寒暄也放行");
+    });
   } finally {
     if (prev === undefined) delete process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN;
     else process.env.MEMORY_PROFILE_EXTRACT_PRESCREEN = prev;
   }
 });
 
-/* ── observeTurn 新签名：highSignal 透传不抛错 + 队列落盘 ── */
+/* ── observeTurn 新签名：highSignal 透传 + 不再落后台队列 ── */
 
-test("observeTurn：新签名（含 highSignal）正常入队", async () => {
+test("observeTurn：新签名（含 highSignal）正常调用且不落后台队列", async () => {
   const dir = mkdtempSync(join(tmpdir(), "profile-store-"));
   const prevExtract = process.env.MEMORY_PROFILE_EXTRACT_ENABLED;
   try {
     process.env.AGENT_USER_PROFILE_DIR = dir;
-    // 关掉每轮抽取（有 key 环境防真实 LLM 调用）；本测只验证入队语义
+    // 关掉每轮抽取（有 key 环境防真实 LLM 调用）；本测只验证无队列副作用
     process.env.MEMORY_PROFILE_EXTRACT_ENABLED = "0";
     const a = new UserProfileAggregator();
     a.observeTurn("actor-x", "我叫周明远", "你好呀", { highSignal: true });
     a.observeTurn("actor-y", "在吗", "在的");
     await new Promise((r) => setTimeout(r, 400));
-    const pendingX = JSON.parse(readFileSync(join(dir, "actor-x", "pending-turns.json"), "utf8"));
-    assert.equal(pendingX.length, 1);
-    assert.ok(pendingX[0].includes("你好呀"), "助手半边进入队列");
-    const pendingY = JSON.parse(readFileSync(join(dir, "actor-y", "pending-turns.json"), "utf8"));
-    assert.ok(pendingY[0].includes("在的"), "低信号轮同样入队（等深度合成兜底）");
+    assert.equal(existsSync(join(dir, "actor-x", "pending-turns.json")), false);
+    assert.equal(existsSync(join(dir, "actor-y", "pending-turns.json")), false);
   } finally {
     delete process.env.AGENT_USER_PROFILE_DIR;
     if (prevExtract === undefined) delete process.env.MEMORY_PROFILE_EXTRACT_ENABLED;
@@ -238,13 +262,13 @@ test("observeTurn：新签名（含 highSignal）正常入队", async () => {
 
 /* ── deleteAll：隐私闭环级联删除 ── */
 
-test("deleteAll：画像文件 + 轮次队列目录整删", async () => {
+test("deleteAll：画像文件 + 附属文件目录整删", async () => {
   const dir = mkdtempSync(join(tmpdir(), "profile-del-"));
   try {
     process.env.AGENT_USER_PROFILE_DIR = dir;
     const store = new UserProfileStore();
     await store.write("actor-z", "# 用户画像\n- 称呼：测试");
-    writeFileSync(join(dir, "actor-z", "pending-turns.json"), "[]", "utf8");
+    writeFileSync(join(dir, "actor-z", "profile-lines.json"), "{}", "utf8");
     assert.ok(existsSync(store.profilePath("actor-z")));
     assert.equal(await store.deleteAll("actor-z"), true);
     assert.ok(!existsSync(join(dir, "actor-z")), "目录整删");

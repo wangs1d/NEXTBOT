@@ -49,6 +49,8 @@ export type LlmAuditStage =
   | "code_repair"
   /** 任务面后台任务（首轮：轻量档） */
   | "task_plane_fast"
+  /** 复杂任务显式规划轮（2026-10-21 单列归因：紧凑 system + 无工具 schema） */
+  | "task_plane_plan"
   /** goal 计划步骤派发的后台任务（2026-10-01 单列归因：主动性执行成本可见） */
   | "goal_plan_stage"
   /** 任务面后台任务（升级段/完整通道） */
