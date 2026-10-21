@@ -4,7 +4,7 @@
  * 为什么需要它：
  *   本机 `flutter` 工具完全跑不起来（Dart VM 起子进程报 CreateFile failed 231 /
  *   ERROR_PIPE_BUSY，系统命名管道耗尽），官方 `flutter run -d windows` 那条热重载
- *   路径用不了；而 windows_dist\Debug\private_ai_agent.exe 是编译产物，改完 Dart
+ *   路径用不了；而 windows_dist\Debug\NEXTBOT.exe 是编译产物，改完 Dart
  *   代码只能整包重建 + 重启进程（scripts/rebuild-desktop-debug.ps1）。
  *
  * 它怎么做的（自己实现 flutter run 的热重载，链路等价）：
@@ -57,7 +57,7 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const APP_DIR = path.join(ROOT, 'client', 'flutter_app');
 const LIB_DIR = path.join(APP_DIR, 'lib');
 const DIST_DIR = path.join(ROOT, 'windows_dist', 'Debug');
-const EXE = path.join(DIST_DIR, 'private_ai_agent.exe');
+const EXE = path.join(DIST_DIR, 'NEXTBOT.exe');
 /** 应用启动时引擎真正加载的 kernel（相对 exe 目录的 data/flutter_assets）。 */
 const BUNDLE_KERNELS = [
   path.join(DIST_DIR, 'data', 'flutter_assets', 'kernel_blob.bin'),
@@ -74,7 +74,7 @@ const KERNEL_BACKUP = path.join(WORK_DIR, 'kernel_blob.orig.bin');
 
 const CACHE = 'D:\\Flutter\\bin\\cache';
 const PKG_NAME = 'private_ai_agent';
-const PROC_NAME = 'private_ai_agent.exe';
+const PROC_NAME = 'NEXTBOT.exe';
 const DEBOUNCE_MS = 1200;
 const BOOT_TIMEOUT_MS = 45000;
 /** 全量 kernel 约 80MB；增量产物低于此值判定编译异常。 */
@@ -151,7 +151,7 @@ function run(cmd, args, { timeoutMs = 180000 } = {}) {
 
 // ---------------------------------------------------------------- 进程 / 端口
 
-/** private_ai_agent.exe 的全部 pid（主窗、简报、行程等子进程模式共用同一 exe）。 */
+/** NEXTBOT.exe 的全部 pid（主窗、简报、行程等子进程模式共用同一 exe）。 */
 async function appPids() {
   const r = await run('tasklist', ['/FI', `IMAGENAME eq ${PROC_NAME}`, '/FO', 'CSV', '/NH'], {
     timeoutMs: 15000,
@@ -191,7 +191,7 @@ async function killApp() {
   // 注意：不要加 /T。应用会把「本地 runtime（node 起的 3000 服务）」和
   // 「灵动岛/简报等子进程模式（同 exe 再起一份）」都挂在自己名下，
   // /T 会把 runtime 一起带走（应用随后连不上后端、重试耗尽后自杀）。
-  // 子进程模式本身就是 private_ai_agent.exe，/IM 已全覆盖。
+  // 子进程模式本身就是 NEXTBOT.exe，/IM 已全覆盖。
   await run('taskkill', ['/IM', PROC_NAME, '/F'], { timeoutMs: 20000 });
   for (let i = 0; i < 40; i++) {
     if ((await appPids()).length === 0) return;

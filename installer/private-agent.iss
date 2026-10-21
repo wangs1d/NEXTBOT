@@ -49,7 +49,7 @@ Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 CloseApplications=yes
-UninstallDisplayIcon={app}\private_ai_agent.exe
+UninstallDisplayIcon={app}\NEXTBOT.exe
 
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: checkedonce
@@ -59,11 +59,11 @@ Source: "{#Stage}\app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion 
 Source: "{#Stage}\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs ignoreversion createallsubdirs
 
 [Icons]
-Name: "{autoprograms}\{#MyIconName}"; Filename: "{app}\private_ai_agent.exe"
-Name: "{autodesktop}\{#MyIconName}"; Filename: "{app}\private_ai_agent.exe"; Tasks: desktopicon
+Name: "{autoprograms}\{#MyIconName}"; Filename: "{app}\NEXTBOT.exe"
+Name: "{autodesktop}\{#MyIconName}"; Filename: "{app}\NEXTBOT.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\private_ai_agent.exe"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\NEXTBOT.exe"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
 ; 故意不删 %APPDATA%\PrivateAgent（用户 key 与数据），安装器只管应用目录
@@ -75,7 +75,7 @@ var
   ErrorCode: Integer;
 begin
   Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "Get-Process node,private_ai_agent -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
+    '/C powershell -NoProfile -Command "Get-Process node,private_ai_agent,NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   Sleep(800);
   Result := '';

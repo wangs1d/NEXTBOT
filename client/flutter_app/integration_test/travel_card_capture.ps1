@@ -1,5 +1,5 @@
 # Chat travel-card visual capture: find the Flutter main window of the
-# private_ai_agent.exe process and copy it from screen to a PNG.
+# NEXTBOT.exe process and copy it from screen to a PNG.
 #   powershell -File integration_test/travel_card_capture.ps1 -OutPng <path>
 param([string] $OutPng = 'C:\Users\Administrator\AppData\Local\Temp\pai_travel_card.png')
 $ErrorActionPreference = 'Stop'
@@ -31,7 +31,7 @@ public class PaiTravelCap {
 "@
 [PaiTravelCap]::SetProcessDPIAware() | Out-Null
 
-$procIds = (Get-Process -Name 'private_ai_agent' -ErrorAction Stop | Select-Object -ExpandProperty Id)
+$procIds = (Get-Process -Name 'NEXTBOT' -ErrorAction Stop | Select-Object -ExpandProperty Id)
 $found = [IntPtr]::Zero
 $cb = {
   param($h, $lp)

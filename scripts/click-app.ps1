@@ -1,10 +1,10 @@
-# Click inside the private_ai_agent window by relative coordinates (client area).
+# Click inside the NEXTBOT window by relative coordinates (client area).
 # ASCII only. Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File click-app.ps1 -X 640 -Y 670
 param(
   [int] $X = 0,
   [int] $Y = 0,
-  [string] $ProcName = "private_ai_agent"
+  [string] $ProcName = "NEXTBOT"
 )
 $ErrorActionPreference = 'Stop'
 Add-Type @"

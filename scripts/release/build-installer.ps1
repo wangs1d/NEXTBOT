@@ -70,6 +70,10 @@ New-Item -ItemType Directory -Force -Path $StageApp, $StageRuntime | Out-Null
 Copy-Item (Join-Path $FlutterApp 'build\windows\x64\runner\Release\*') $StageApp -Recurse -Force
 foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   Copy-Item (Join-Path $env:windir "System32\$dll") $StageApp -Force
+  # runtime 同拷：better_sqlite3/onnxruntime 的 .node 加载时按 DLL 搜索顺序只看
+  # node.exe 所在目录（runtime\）→ System32，够不着 app\。开发机 System32 常有
+  # VC redist 所以冒烟不暴露，干净用户机器上会加载崩——表现就是后端拉不起。
+  Copy-Item (Join-Path $env:windir "System32\$dll") $StageRuntime -Force
 }
 
 # 3.2 捆绑 node.exe：必须与仓库里已编译的原生模块 ABI 对齐。
@@ -242,7 +246,7 @@ if ($Edition -eq 'oss') {
 }
 
 Write-Host '== [4/5] 校验关键文件 =='
-foreach ($f in (Join-Path $StageApp 'private_ai_agent.exe'),
+foreach ($f in (Join-Path $StageApp 'NEXTBOT.exe'),
                (Join-Path $StageRuntime 'node.exe'),
                (Join-Path $StageRuntime 'dist\index.js'),
                (Join-Path $StageRuntime 'node_modules\@private-ai-agent\agent-world\dist'),

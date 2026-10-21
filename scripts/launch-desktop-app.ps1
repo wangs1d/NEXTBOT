@@ -4,7 +4,7 @@
 # -> scripts/autostart/autostart-server.mjs) so the resident instance is never duplicated.
 # Keep this file pure ASCII: PowerShell 5.1 decodes BOM-less .ps1 as ANSI/GBK.
 $Root     = "D:\ws-project\Private-Agent"
-$AppExe   = Join-Path $Root "windows_dist\Release\private_ai_agent.exe"
+$AppExe   = Join-Path $Root "windows_dist\Release\NEXTBOT.exe"
 $TaskName = "PrivateAgentServer"
 $Port     = 3000
 $WaitMs   = 30000
@@ -22,7 +22,7 @@ function Test-BackendPort {
 function Start-App {
     # Zombie guard: a crashed-but-unreaped process object (0 threads, 0 handles)
     # still matches by name and must not block a fresh launch.
-    $live = Get-Process -Name "private_ai_agent" -ErrorAction SilentlyContinue |
+    $live = Get-Process -Name "NEXTBOT" -ErrorAction SilentlyContinue |
         Where-Object { $_.Threads.Count -gt 0 }
     if ($live) { return }
     Start-Process -FilePath $AppExe -WorkingDirectory (Split-Path $AppExe)

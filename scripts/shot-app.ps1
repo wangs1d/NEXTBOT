@@ -1,9 +1,9 @@
-# Screenshot the largest visible top-level window of private_ai_agent via PrintWindow.
+# Screenshot the largest visible top-level window of NEXTBOT via PrintWindow.
 # Pure ASCII only (GBK swallows newlines in wscript/powershell). Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File shot-app.ps1 -Out C:\path\shot.png
 param(
   [string] $Out = "E:\ws-project\Private-Agent\bubble-e2e-shot.png",
-  [string] $ProcName = "private_ai_agent"
+  [string] $ProcName = "NEXTBOT"
 )
 
 $ErrorActionPreference = 'Stop'

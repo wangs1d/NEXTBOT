@@ -1,5 +1,5 @@
 # Register preview visual capture: pick the LARGEST visible FLUTTER_* window
-# of private_ai_agent (the preview window), skipping small overlays such as
+# of NEXTBOT (the preview window), skipping small overlays such as
 # the dynamic-island capsule that the runner also creates at startup.
 #   powershell -File integration_test/register_capture.ps1 -OutPng <path>
 param([string] $OutPng = 'C:\Users\Administrator\AppData\Local\Temp\pai_register.png')
@@ -30,7 +30,7 @@ public class PaiRegisterCap {
 "@
 [PaiRegisterCap]::SetProcessDPIAware() | Out-Null
 
-$procIds = (Get-Process -Name 'private_ai_agent' -ErrorAction Stop | Select-Object -ExpandProperty Id)
+$procIds = (Get-Process -Name 'NEXTBOT' -ErrorAction Stop | Select-Object -ExpandProperty Id)
 $best = [IntPtr]::Zero
 $bestArea = 0
 $cb = {

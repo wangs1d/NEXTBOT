@@ -6,7 +6,7 @@
 #   1. 构建带注入引导的 Debug 包：
 #        flutter build windows --debug --dart-define=PAI_ISLAND_E2E=true
 #      （若 flutter 选不到 VS18 工具链，可手动 cmake 构建，见 README 注释）
-#   2. 启动 build\windows\x64\runner\runner\Debug\private_ai_agent.exe
+#   2. 启动 build\windows\x64\runner\runner\Debug\NEXTBOT.exe
 #   3. powershell -ExecutionPolicy Bypass -File dynamic_island_stage_capture.ps1
 #   4. 截图在 %TEMP%\pai_island_stage\*.png，应用收到 driver_done 后自动退出。
 $ErrorActionPreference = 'Stop'

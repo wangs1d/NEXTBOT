@@ -34,16 +34,16 @@ $Cache    = 'D:\Flutter\bin\cache'
 $Package  = 'private_ai_agent'
 $BuildOut = Join-Path $App 'build\windows\x64\runner\Debug\data\flutter_assets\kernel_blob.bin'
 $DistOut  = Join-Path $Root 'windows_dist\Debug\data\flutter_assets\kernel_blob.bin'
-$Exe      = Join-Path $Root 'windows_dist\Debug\private_ai_agent.exe'
+$Exe      = Join-Path $Root 'windows_dist\Debug\NEXTBOT.exe'
 
 function To-Fwd([string] $p) { return ($p -replace '\\', '/') }
 
 # --- 0. stop the running app ---------------------------------------------------------
-# Must happen BEFORE syncing: while private_ai_agent.exe is up it keeps
+# Must happen BEFORE syncing: while NEXTBOT.exe is up it keeps
 # kernel_blob.bin memory-mapped, and Copy-Item onto it fails with
 # "The requested operation cannot be performed on a file with a user-mapped section open."
 Write-Host '[0/4] stopping running app (if any)...'
-Get-Process -Name 'private_ai_agent' -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name 'NEXTBOT' -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 800
 
 # --- 1. locate the build dir the currently shipped kernel_blob.bin came from ---------
@@ -123,7 +123,7 @@ foreach ($out in @($BuildOut, $DistOut)) {
 
 # --- 4. restart the app ---------------------------------------------------------------
 Write-Host '[4/4] starting desktop app...'
-Get-Process -Name 'private_ai_agent' -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process -Name 'NEXTBOT' -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 500
 Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe)
 Write-Host 'Done. Hover a message bubble to reveal the delete entry.'
