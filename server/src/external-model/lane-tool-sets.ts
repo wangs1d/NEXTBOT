@@ -54,16 +54,19 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   // 动作，提为 chat 常驻（profile.update 同款教训）。
   "weather.get_local",
   // 联网信息（只读）
+  // 2026-10-21 工具面收敛：媒体/热榜三件套移入延迟目录——它们是低频按需检索，
+  // 且 media 域有 BM25 域预载兜底（"找张图/猫咪视频/热搜"会确定性带回来），
+  // 每轮常驻约 850 字符并不划算。search_web/fetch_web 仍是对话刚需，常驻。
   "search_web",
   "fetch_web",
-  "search_images",
-  "search_videos",
-  "hot_rankings",
   // 日程/提醒（轻动作）
   "reminder.plan",
   "calendar.create_from_text",
   "calendar.list_tasks",
   // 通讯（轻动作）
+  // phone.ensure_my_number 保留常驻（2026-10-21 实测）：「我的手机号」这类口语
+  // 召回不稳（BM25 top-10 缺位），而它一旦进目录，模型会直接嘴硬"查不到号码"。
+  // 228 字符换掉一次"没权限"事故，划算。
   "phone.ensure_my_number",
   "messages.overview",
   "messages.reply",
@@ -76,11 +79,9 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   // 持续感知回溯（只读，2026-09-19 P0-1）
   "perception.overview",
   // 自我/能力（模型自救入口）
+  // agent.query_capabilities 必须常驻：它是模型"以为没权限"时的自救入口。
+  // self.list_custom_skills 低频，移入延迟目录（"我会什么/自定义技能"可召回）。
   "agent.query_capabilities",
-  "self.list_custom_skills",
-  // 钱（只读）
-  "wallet.get_balance",
-  "wallet.get_transactions",
   // 表达/控制
   "surface.show",
   // 重活逃生门（委派后台）+ 委派闭环（查询/取消，2026-09-19 P0-2）

@@ -18,6 +18,24 @@ export function isSimpleDirectTask(message: string): boolean {
   return false;
 }
 
+/**
+ * 显式计划门槛（2026-10-21）：复杂任务才值得多一次规划调用。
+ *
+ * 与 requiresTaskDecomposition 的区别：后者把「查一下天气」这类单步事实查询也算
+ * 需要拆解（它服务于工具面选择），而显式「计划→执行」只在真正多步/长任务上
+ * 划算——加一次 LLM 调用必须换回更少的废波次。故这里排除简单直办、单独事实查询，
+ * 只认多步连接词 / 多分句 / 长任务。
+ */
+export function requiresExplicitPlan(message: string): boolean {
+  if (isSimpleDirectTask(message)) return false;
+  const t = message.trim();
+  if (!t) return false;
+  if (MULTI_STEP_RE.test(t)) return true;
+  const clauses = t.split(/[，；,;]/).filter((s) => s.trim().length > 4);
+  if (clauses.length >= 3) return true;
+  return t.length > 160;
+}
+
 export function requiresTaskDecomposition(message: string): boolean {
   if (isSimpleDirectTask(message)) return false;
 

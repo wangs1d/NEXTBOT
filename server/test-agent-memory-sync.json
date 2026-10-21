@@ -1,9 +1,12 @@
 {
   "sessions": {
-    "actor-5": {
+    "actor-zombie": {
       "revision": 2,
       "entries": {
-        "memory_current_mission": ""
+        "memory_commitments": "[2026-10-20T18:47:01.915Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_summary": "[2026-10-20T18:47:01.915Z] [topic:general] I will send the morning briefing at 8am",
+        "memory_summary_forgotten": "",
+        "session_recap": "[2026-10-20T18:47:01.915Z] [topic:general] I will send the morning briefing at 8am"
       }
     }
   }

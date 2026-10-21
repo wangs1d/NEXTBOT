@@ -122,8 +122,10 @@ function loadMasterDelegationConfig(): MasterDelegationConfig {
 }
 
 function loadPlanExecuteConfig(): PlanExecuteConfig {
+  // 与 isPlanExecuteLoopEnabled 同口径：默认开启，显式 0/off/false/no 关闭。
+  const raw = process.env.AGENT_PLAN_EXECUTE_LOOP?.trim();
   return {
-    enabled: envTruthy(process.env.AGENT_PLAN_EXECUTE_LOOP),
+    enabled: raw ? envTruthy(raw) : true,
     verboseStream: envTruthy(process.env.AGENT_PE_VERBOSE_STREAM),
   };
 }

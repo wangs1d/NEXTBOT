@@ -138,7 +138,55 @@ export interface UnifiedExtraction {
   forget: string[];
   /** 角色→人名指代映射（结构化事实库 指代·role 字段，realtime 消解直查） */
   referents: UnifiedReferent[];
+  /**
+   * 画像写入操作（仅在调用方传 `profileContext` 时请求）：
+   * 与 user-profile-aggregator 的 ProfileOp 同构，由 aggregator 侧确定性落位，
+   * 避免同一条用户消息再跑一次独立的画像抽取 LLM。
+   */
+  profileOps?: UnifiedProfileOp[];
 }
+
+/** 画像 section（与 user-profile-aggregator 的 ProfileSectionKey 保持一致） */
+export type UnifiedProfileSection = "basic" | "interest" | "communication" | "note";
+
+/** 画像增量操作（ADD/UPDATE/DELETE + 目标 section + 定位关键词） */
+export interface UnifiedProfileOp {
+  op: "ADD" | "UPDATE" | "DELETE";
+  section: UnifiedProfileSection;
+  /** ADD/UPDATE 的新内容（一行，不带 "- " 前缀） */
+  line: string;
+  /** UPDATE/DELETE 的旧条目定位关键词 */
+  match?: string;
+}
+
+/**
+ * 画像抽取信号（与 user-profile-aggregator 原 EXTRACT_HINT_RE 同一份）：
+ * 迁移到本模块，供 ingest 侧判断"这轮是否值得在统一抽取里捎带画像操作"，
+ * 避免两个模块各自维护一份正则导致漂移。
+ */
+export const PROFILE_EXTRACT_HINT_RE =
+  /我叫|我的(名字|小名|生日|猫|狗|爱好|工作|职业|公司|学校|专业|老婆|老公|男朋友|女朋友|女儿|儿子|家人|爸妈)|我是(一名|做|搞|学)|住在|在.{0,10}上班|喜欢|讨厌|害怕|最近在(学|练|看|读|准备|找)|养了|要考|结婚|订婚|分手|搬家|换工作|辞职|入职|毕业|记错|搞错|其实|直接一?点|绕弯子|现在(在|不|是)|以后(就|在)|长住|定居|转行|改行|搬(到|去|家)|转让|不干了|改(成|开|做)|换成/;
+
+export function isProfileExtractHint(text: string): boolean {
+  return PROFILE_EXTRACT_HINT_RE.test(text ?? "");
+}
+
+/**
+ * 画像操作输出段：只在调用方传了当前画像时拼进 system prompt。
+ * 普通轮不拼——不增加日常对话的输入 token。
+ */
+const PROFILE_OPS_PROMPT = [
+
+  "",
+  "【附加任务·用户画像增量】除上面的 JSON 字段外，再输出 profileOps 数组：",
+  '"profileOps":[{"op":"ADD|UPDATE|DELETE","section":"basic|interest|communication|note","line":"一行短句（≤40字，不带 - 前缀）","match":"UPDATE/DELETE 时的旧条目定位关键词"}]',
+  "  // section：basic=称呼/所在地/职业；interest=兴趣与习惯；communication=沟通偏好；note=其他长期备注",
+  "  // op：ADD=画像中不存在该事实；UPDATE=已有同类条目需修正（match 填旧条目定位关键词）；DELETE=旧条目已被否定或过时",
+  "  // 只提取用户明确陈述、对未来对话仍有价值的稳定信息；寒暄/一次性任务/当下情绪/临时行程不提取",
+  "  // 疑问不是事实；助手话里的猜测、调侃、求证不是用户事实；与现有画像语义重复的不要重复输出",
+  "  // 用户纠正旧信息时必须 DELETE 旧条目再 ADD 新值；身份类字段只在用户明确自述时写入",
+  "  // 无值得记录的信息时输出空数组",
+].join("\n");
 
 export function isMemoryUnifiedExtractEnabled(): boolean {
   const raw = process.env.AGENT_MEMORY_UNIFIED_EXTRACT_ENABLED?.trim();
@@ -149,76 +197,31 @@ export function isMemoryUnifiedExtractEnabled(): boolean {
 const SYSTEM_PROMPT = [
   "你是记忆理解处理器，一次完成四件事，输出严格 JSON（不要任何其他文字）：",
   "{",
-  '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文（近期有用、过期即弃）；reject=无价值/寒暄/日常琐事/重复/敏感',
-  '"scores":{"persistence":0到1,"frequency":0到1,"emotion":0到1,"impact":0到1,"certainty":0到1},  // 五维重要性评分，逐维独立打分：',
-  "  // persistence 持久性=信息是否长期有效：「用户是全栈开发」≈0.9，「今天天气好」≈0.1；",
-  "  // frequency 频率=是否反复出现：多次提到的技术栈/习惯≈0.8，首次随口一提≈0.2；",
-  "  // emotion 情感强度=用户是否强烈表达：「我非常讨厌X」≈0.9，中性陈述≈0.3；",
-  "  // impact 影响范围=会影响多少未来决策/回答：「项目用React」≈0.8，「我喝了咖啡」≈0.1；",
-  "  // certainty 确定性=明确陈述还是随口一说：明确陈述≈0.9，猜测/听说/可能/大概≈0.2",
-  '"importance":0到1,  // 你的综合判断（系统会按五维加权重算，并据阈值裁决是否值得植入长期库）',
+  '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文（近期有用、过期即弃）；reject=寒暄/日常琐事/重复/敏感',
+  '"scores":{"persistence":0到1,"frequency":0到1,"emotion":0到1,"impact":0到1,"certainty":0到1},  // 五维独立打分：持久性/复现频率/情感强度/影响范围/确定性（明确陈述≈0.9，猜测/听说/可能≈0.2）',
+  '"importance":0到1,  // 你的综合判断（系统会按五维加权重算并裁决）',
   '"semanticClass":"事实|偏好|计划|承诺|人物|事件|其他",',
-  '"memories":["你对这段对话的理解记录（第三人称、自包含、可长期召回；无则空数组）"],',
-  "  // memories 必须保留语气与性质（玩笑/粉丝式称呼/比喻/正式），不要剥掉语境输出字面断言：",
-  "  // 例：用户说「我老婆是刘浩存」→「用户半开玩笑地自称'老婆'是明星刘浩存（粉丝式称呼）」，",
-  "  // 而不是「用户的老婆是刘浩存」",
-  '"understandings":[{"topic":"话题词","note":"你对这条内容的理解（第三人称，保留语气与性质判断）","kind":"literal|joke|fandom|figurative|preference|correction|other","confidence":0到1}]',
-  "  // 用户关于自身/关系/偏好的值得记住的表达，逐条写理解；topic 用用户原话里的核心称谓（如：老婆|工作|居住地）",
-  "  // kind 判断：公众人物/明星被冠以亲属称谓（老婆/老公/女儿…）默认是粉丝式称呼 kind=fandom，",
-  "  // note 必须写明「粉丝式称呼，并非真实关系」——除非用户明确表示是真实关系；",
-  "  // 玩笑/调侃 kind=joke；比喻夸张 kind=figurative；改口/更正 kind=correction（note 写明从什么改成什么）；",
-  "  // 字面陈述（我叫X/我住在X）kind=literal",
+  '"memories":["第三称、自包含、可长期召回的记录；无则空数组"],',
+  "  // 保留语气与性质：「我老婆是刘浩存」→「用户半开玩笑地自称老婆是明星刘浩存（粉丝式称呼）」，而不是「用户的老婆是刘浩存」",
+  '"understandings":[{"topic":"话题词（用原话核心称谓，如 老婆|工作|居住地）","note":"第三人称理解，保留语气与性质判断","kind":"literal|joke|fandom|figurative|preference|correction|other","confidence":0到1}]',
+  "  // 明星/公众人物被冠亲属称谓（老婆/老公/女儿…）默认 kind=fandom，note 写明「粉丝式称呼，并非真实关系」（除非用户明确是真实关系）；玩笑/调侃=joke；比喻夸张=figurative；改口=correction（写明从什么改成什么）；字面陈述=literal",
   '"facts":[{"field":"档案字段名","value":"确定值","temporal":"current|past|upcoming","eventTime":"时间线索或省略","validFrom":"YYYY-MM-DD 或 YYYY-MM","validTo":"同上或省略","confidence":0到1}]',
-  "  // 用户关于自身的字面为真的确定性字段，只收字面陈述（我叫X→称呼:X；我住在X→居住地:X；",
-  "  // 我是做后端的→职业:后端开发；我用 TS 和 Python→技术栈:TS/Python）。",
-  "  // 【时态铁律】temporal 必填，三态区分：",
-  "  //   现状（住/是/在做）→ temporal:current；",
-  "  //   过去时态（以前/之前/原来/曾经/过去/那时候/待过/搬走了/小时候）→ temporal:past，",
-  "  //   例：「我以前住浙江」→ 居住地:浙江 temporal:past eventTime:以前；",
-  "  //   同一句里既有过去又有现在（「我以前在杭州，现在搬来兴义了」）→ 输出两条：",
-  "  //   居住地:杭州(past) + 居住地:兴义(current)；",
-  "  //   未来才生效的**长期状态变更**（「我下个月搬去成都」「明年换工作去字节」「毕业后去深圳」）",
-  "  //   → temporal:upcoming，validFrom 写计划生效日；**它不会覆盖现状，也不算已经发生**。",
-  "  //   ⚠️ 临时行程不算状态变更（「周末去上海玩」「下周出差」）→ 不进 facts（属 plan/decay 域）；",
-  "  //   只有「居住/工作/身份这类会持续存在的状态要变」才用 upcoming。",
-  "  // 【证据铁律】不得把计划写成已发生：用户说「我要搬去成都」只能记 upcoming，",
-  "  //   除非他明确说「我已经搬过来了/我到了」才记 current/past。",
-  "  // validFrom/validTo 用 ISO（YYYY-MM-DD 或 YYYY-MM），只写用户明确给出的时间，",
-  "  // 把「去年」「上个月」按给定的当前时间换算成绝对时间；「至今/现在」→ validTo 省略。",
-  "  // 无法确定就省略字段，**不要编日期**。",
-  "  // 疑问、玩笑、粉丝式称呼、比喻、假设一律不进 facts（那些只进 understandings）；",
-  "  // 例外：agent 给用户起的昵称/小名，用户接受了（没纠正、自然继续对话）也算称呼事实，",
-  "  // 例：agent 叫用户「老王」后用户正常回应 → facts 输出 称呼:老王（confidence≈0.6）；",
-  "  // 用户表示不喜欢这个称呼则不输出（按更正处理，字段级覆盖由系统完成）。",
-  "  // 拿不准是不是字面为真就不输出。用户更正旧信息时 facts 输出新值（字段级覆盖由系统完成）。",
-  "  // field 用短字段名（称呼|职业|居住地|技术栈|生日|公司|学历 或其他 ≤6 字字段）；value 是确定短值（≤20 字）。",
-  "  // value 必须语义改写成无主语短值（Mem0/ChatGPT 式口径）：抽取时归一，不照抄原句——",
-  "  // 「我在兴义」→ 居住地:兴义；「我是做后端的」→ 职业:后端开发；「我叫王铭川」→ 称呼:王铭川；",
-  "  // 禁止以「我/我的/我在」开头（第一人称原话进 prompt 会让模型分不清「我」指谁，主语翻转）",
-  "  // 用户明确要求忘掉/清除某字段时输出 forget（如「别记我住哪了」→ forget:[\"居住地\"]），",
-  "  // 不确定的遗忘请求不输出（拿不准就不删）；forget 与 facts 同轮冲突时以 forget 为准",
-  '"forget":["字段名"]  // 仅当用户明确要求忘掉/清除档案字段时输出，无则省略或空数组',
+  "  // 只收用户自身的字面陈述：我叫X→称呼:X；我住X→居住地:X；我是做后端的→职业:后端开发；我用TS和Python→技术栈:TS/Python",
+  "  // 【时态铁律】temporal 必填：现状（住/是/在做）→current；以前/之前/曾经/小时候/搬走了→past（「我以前住浙江」→居住地:浙江,past,eventTime:以前）；同一句含过去与现在（「以前在杭州，现在搬来兴义了」）→两条：杭州/past + 兴义/current；未来长期状态变更（下月搬去成都/明年换工作/毕业后去深圳）→upcoming + validFrom，不算已发生、不覆盖现状；临时行程（周末去上海玩/下周出差）不进 facts（属 plan/decay）",
+  "  // 【证据铁律】计划不得写成已发生：「我要搬去成都」只能 upcoming，除非「我已经搬过来了/我到了」；validFrom/validTo 只写用户明确给出的时间，把去年/上个月按给定当前时间换算成绝对时间，至今→省略 validTo，无法确定就省略，不要编日期",
+  "  // 疑问/玩笑/粉丝式称呼/比喻/假设不进 facts（只进 understandings）；例外：Agent 给用户起昵称且用户接受（没纠正、自然继续）→ 称呼:X，confidence≈0.6，用户表示不喜欢则不输出",
+  "  // field 用 ≤6 字短字段名（称呼|职业|居住地|技术栈|生日|公司|学历…），value ≤20 字并改写成无主语短值（我在兴义→居住地:兴义），禁止以「我/我的/我在」开头；用户更正旧信息时输出新值（字段级覆盖由系统完成）",
+  '"forget":["字段名"],  // 仅用户明确要求忘掉/清除档案字段时输出（「别记我住哪了」→["居住地"]），拿不准就不删；与 facts 同轮冲突时以 forget 为准',
   '"referents":[{"role":"称谓","name":"人名","confidence":0到1}],',
-  "  // 用户用角色/亲属称谓指代具体人物时输出映射：「我老婆是刘浩存」→ role:老婆 name:刘浩存；",
-  "  // 粉丝式称呼同样输出（如「我老婆最近在哪」指代某明星）——本字段只记录「用户这么指代」，",
-  "  // 不断言真实关系；role 用用户原话里的称谓（老婆|老公|女朋友|偶像|儿子，≤12 字），",
-  "  // name 是具体人名/专名（≤40 字，能定位到唯一人物；泛指如「我妈」无名字则不输出）；无则空数组",
+  "  // 用户用角色/亲属称谓指代具体人物：「我老婆是刘浩存」→ role:老婆 name:刘浩存；粉丝式称呼同样输出——只记录「用户这么指代」，不断言真实关系；role 用原话称谓（≤12 字），name 是能唯一定位的专名/人名（≤40 字，泛指如「我妈」不输出）；无则空数组",
   '"commitments":[{"text":"承诺内容（第三人称）","committedBy":"user|agent|third_party","deadline":"ISO 8601 或 null","confidence":0到1,"evidence":"原文片段","category":"报价|交付|会面|转账|其他"}],',
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
-  "归属铁律：Assistant 话中的「我」指 Agent 自己——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；"
-  + "临时行程与安排（下周去上海玩/周末的安排）不进 facts（属 decay/计划域，不是档案）；"
-  + "但会改变长期状态的计划（搬家/换工作/换城市）要用 temporal:upcoming 记下来；",
-  "裁决基准：持久性与影响范围双低的日常琐事（天气、吃了什么、喝了咖啡、",
-  "寒暄问候、今天的心情）必须 reject，绝不允许 remember；今天的安排/临时",
-  "事项 decay；只有长期有效且影响未来回答的信息才 remember；",
-  "承诺只收真正的承诺（排除意愿/假设/客套）；对话中转述的第三方承诺",
-  "（如「老板说下周三前交付」「他说周五前发货」）也是承诺，committedBy=third_party；",
-  "deadline 的相对时间（明天/周五/下周三/晚上8点）必须结合输入给出的当前时间",
-  "换算为绝对 ISO 8601 时间，无法确定才用 null；",
-  "corrections 仅当文本在否定或更正「旧信息」时输出（如「不对，会议改到周三了」），",
-  "无法确定旧陈述原文时用最接近的概括。",
+  "归属铁律：Assistant 话中的「我」指 Agent——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；",
+  "裁决基准：持久性与影响范围双低的琐事（天气/吃了什么/喝咖啡/寒暄/今天心情）必须 reject；今天的安排/临时事项 decay；只有长期有效且影响未来回答的信息才 remember；",
+  "承诺只收真正的承诺（排除意愿/假设/客套）；转述的第三方承诺（「老板说下周三前交付」）也算，committedBy=third_party；deadline 的相对时间（明天/周五/晚上8点）必须结合输入的当前时间换算为绝对 ISO，无法确定才 null；",
+  "corrections 仅在否定/更正旧信息时输出（「不对，会议改到周三了」），旧陈述原文不确定时用最接近的概括。",
 ].join("\n");
 
 interface RawUnified {
@@ -233,6 +236,7 @@ interface RawUnified {
   facts?: unknown;
   forget?: unknown;
   referents?: unknown;
+  profileOps?: unknown;
 }
 
 function asStringArray(raw: unknown): string[] {
@@ -409,6 +413,32 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
         .slice(0, 6);
 
   const scores = parseScores(raw.scores);
+
+  // 画像增量操作（仅在请求画像任务时出现）：严格字段校验，非法项丢弃。
+  const profileOps: UnifiedProfileOp[] = Array.isArray(raw.profileOps)
+    ? (raw.profileOps as unknown[])
+        .map((item): UnifiedProfileOp | null => {
+          if (!item || typeof item !== "object") return null;
+          const o = item as Record<string, unknown>;
+          const op = o.op === "ADD" || o.op === "UPDATE" || o.op === "DELETE" ? o.op : null;
+          const section =
+            o.section === "basic" ||
+            o.section === "interest" ||
+            o.section === "communication" ||
+            o.section === "note"
+              ? o.section
+              : null;
+          const line = typeof o.line === "string" ? o.line.trim().slice(0, 80) : "";
+          if (!op || !section) return null;
+          if (op !== "DELETE" && !line) return null;
+          const match = typeof o.match === "string" ? o.match.trim().slice(0, 60) : "";
+          if (op !== "ADD" && !match) return null;
+          return { op, section, line, ...(match ? { match } : {}) };
+        })
+        .filter((o): o is UnifiedProfileOp => o !== null)
+        .slice(0, 8)
+    : [];
+
   return applyPromotionGate({
     decision,
     ...(typeof raw.semanticClass === "string" ? { semanticClass: raw.semanticClass } : {}),
@@ -421,6 +451,7 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     facts,
     forget,
     referents,
+    ...(profileOps.length > 0 ? { profileOps } : {}),
   });
 }
 
@@ -511,7 +542,18 @@ export interface UnifiedLlmClient {
  */
 export async function extractUnified(
   text: string,
-  opts?: { client?: UnifiedLlmClient; model?: string; now?: Date; actorId?: string; sessionId?: string },
+  opts?: {
+    client?: UnifiedLlmClient;
+    model?: string;
+    now?: Date;
+    actorId?: string;
+    sessionId?: string;
+    /**
+     * 画像上下文：传入后同一次调用捎带 profileOps（当前画像 + 本轮对话交给同一 LLM）。
+     * 不传则不拼画像段，普通轮输入体积不变。
+     */
+    profileContext?: { currentProfile: string };
+  },
 ): Promise<UnifiedExtraction | null> {
   const body = text.trim();
   if (!body || body.length < 4) return null;
@@ -526,12 +568,18 @@ export async function extractUnified(
 
   try {
     const openai = opts?.client ?? new OpenAI({ apiKey, maxRetries: 1 });
+    // 画像任务仅在调用方显式提供当前画像时拼接，普通轮 system 不变。
+    const profileCtx = opts?.profileContext;
+    const systemContent = profileCtx ? `${SYSTEM_PROMPT}\n${PROFILE_OPS_PROMPT}` : SYSTEM_PROMPT;
+    const userContent = profileCtx
+      ? `当前时间：${nowIso}\n\n【当前用户画像】\n${profileCtx.currentProfile.trim() || "（空）"}\n\n对话文本：\n${body.slice(0, 8000)}`
+      : `当前时间：${nowIso}\n\n对话文本：\n${body.slice(0, 8000)}`;
     const response = await openai.chat.completions.create({
       model: opts?.model ?? getAgenticMemoryLlmModel(),
       temperature: 0,
       messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content: `当前时间：${nowIso}\n\n对话文本：\n${body.slice(0, 8000)}` },
+        { role: "system", content: systemContent },
+        { role: "user", content: userContent },
       ],
     });
     const output = response.choices?.[0]?.message?.content?.trim() ?? "";
@@ -540,7 +588,9 @@ export async function extractUnified(
     const { recordLlmUsageByChars } = await import("../services/llm-token-audit.js");
     recordLlmUsageByChars({
       stage: "memory_unified_extract",
-      inputChars: body.length,
+      // 口径修复（2026-10-21）：此前只记用户文本（3~23 tok），漏掉 system prompt
+      // 与模板，导致"记忆抽取很便宜"的错误判断。这里记录真实发往 API 的全部字符。
+      inputChars: systemContent.length + userContent.length,
       outputChars: output.length,
       model: getAgenticMemoryLlmModel(),
       actorId: opts?.actorId,

@@ -13,7 +13,9 @@ import { gateLtmWrite } from "./ltm-write-gate.js";
 import {
   extractUnified,
   isMemoryUnifiedExtractEnabled,
+  isProfileExtractHint,
   type UnifiedExtraction,
+  type UnifiedProfileOp,
   type UnifiedUnderstanding,
   type UnifiedLlmClient,
 } from "./unified-extractor.js";
@@ -52,6 +54,11 @@ export interface Mem0WriteEvent {
   forget?: string[];
   /** 统一抽取路径携带：角色→人名指代映射（钩子走事实库 指代·role 字段落库） */
   referents?: import("./unified-extractor.js").UnifiedReferent[];
+  /**
+   * 统一抽取路径携带：用户画像增量操作（同一次 LLM 的产物）。
+   * 画像聚合器注册钩子消费后确定性落位，不再单独跑画像抽取调用。
+   */
+  profileOps?: UnifiedProfileOp[];
 }
 
 export type Mem0WriteHook = (event: Mem0WriteEvent) => void;
@@ -81,12 +88,38 @@ export class AgenticMemoryIngestService {
   private writeHooks: Mem0WriteHook[] = [];
   /** 统一抽取 LLM 客户端（测试注入 fake；生产为 null 走内部 OpenAI 构造） */
   private extractionClient: UnifiedLlmClient | null = null;
+  /** 当前画像快照读取口（统一抽取捎带画像任务用；未注入则不带画像） */
+  private profileSnapshot: ((actorId: string) => Promise<string | null>) | null = null;
 
   constructor(private readonly memory: Memory) {}
 
   /** 注入统一抽取客户端（e2e 测试用；生产不调用） */
   setExtractionClient(client: UnifiedLlmClient | null): void {
     this.extractionClient = client;
+  }
+
+  /**
+   * 注入当前画像快照读取口（bootstrap 接线到 UserProfileAggregator）。
+   * 未注入时统一抽取不捎带画像任务，行为与旧版一致。
+   */
+  setProfileSnapshotProvider(fn: ((actorId: string) => Promise<string | null>) | null): void {
+    this.profileSnapshot = fn;
+  }
+
+  /**
+   * 判断本轮是否需要在统一抽取里捎带画像操作：
+   * 高信号轮或命中个人陈述预筛才带当前画像（普通闲聊不增加 prompt 体积）。
+   * 读取画像失败按无画像处理，不阻断记忆主链路。
+   */
+  private async resolveProfileContext(
+    actorId: string,
+    text: string,
+    highSignal: boolean,
+  ): Promise<{ currentProfile: string } | undefined> {
+    if (!this.profileSnapshot) return undefined;
+    if (!highSignal && !isProfileExtractHint(text)) return undefined;
+    const currentProfile = await this.profileSnapshot(actorId).catch(() => null);
+    return { currentProfile: currentProfile ?? "" };
   }
 
   /**
@@ -158,7 +191,14 @@ export class AgenticMemoryIngestService {
       isMemoryUnifiedExtractEnabled() &&
       getCommitmentExtractScope() === "all"
     ) {
-      void extractUnified(t, { client: this.extractionClient ?? undefined, actorId })
+      void this.resolveProfileContext(actorId, t, false)
+        .then((profileContext) =>
+          extractUnified(t, {
+            client: this.extractionClient ?? undefined,
+            actorId,
+            ...(profileContext ? { profileContext } : {}),
+          }),
+        )
         .then((orphan) => {
           if (!orphan) return;
           if (
@@ -166,7 +206,8 @@ export class AgenticMemoryIngestService {
             orphan.corrections.length === 0 &&
             orphan.understandings.length === 0 &&
             orphan.facts.length === 0 &&
-            orphan.forget.length === 0
+            orphan.forget.length === 0 &&
+            (orphan.profileOps?.length ?? 0) === 0
           ) {
             return;
           }
@@ -183,6 +224,8 @@ export class AgenticMemoryIngestService {
             facts: orphan.facts.length > 0 ? orphan.facts : undefined,
             forget: orphan.forget.length > 0 ? orphan.forget : undefined,
             referents: orphan.referents.length > 0 ? orphan.referents : undefined,
+            profileOps:
+              orphan.profileOps && orphan.profileOps.length > 0 ? orphan.profileOps : undefined,
           });
         })
         .catch((err) =>
@@ -215,8 +258,16 @@ export class AgenticMemoryIngestService {
   ): Promise<void> {
     // P1-6 统一抽取：决策 + 记忆 + 承诺 + 纠正 + 事实 一次 LLM 完成（原最多 3 次调用）。
     // 返回 null（无 key/失败）时整体回退旧三段路径。
-    const unified = isMemoryUnifiedExtractEnabled()
-      ? await extractUnified(body, { client: this.extractionClient ?? undefined, actorId })
+    const unifiedEnabled = isMemoryUnifiedExtractEnabled();
+    const profileContext = unifiedEnabled
+      ? await this.resolveProfileContext(actorId, body, true)
+      : undefined;
+    const unified = unifiedEnabled
+      ? await extractUnified(body, {
+          client: this.extractionClient ?? undefined,
+          actorId,
+          ...(profileContext ? { profileContext } : {}),
+        })
       : null;
     if (unified) {
       await this.persistUnifiedExtraction(actorId, sourceId, unified, context, true, body);
@@ -272,10 +323,12 @@ export class AgenticMemoryIngestService {
     // forget 防御性取值：测试/旧调用方手工构造的 extraction 可能缺该字段
     const forget = (extraction.forget?.length ?? 0) > 0 ? extraction.forget : undefined;
     const referents = extraction.referents && extraction.referents.length > 0 ? extraction.referents : undefined;
+    const profileOps =
+      extraction.profileOps && extraction.profileOps.length > 0 ? extraction.profileOps : undefined;
 
     if (extraction.decision === "reject") {
       // 被拒存：results 为空（账本不落 claim），但承诺/纠正/理解/事实仍要落地
-      if (understandings || commitments || corrections || facts || forget || referents) {
+      if (understandings || commitments || corrections || facts || forget || referents || profileOps) {
         this.fireWriteHooks({
           actorId,
           sourceId,
@@ -288,6 +341,7 @@ export class AgenticMemoryIngestService {
           facts,
           forget,
           referents,
+          profileOps,
         });
       }
       return [];
@@ -362,7 +416,16 @@ export class AgenticMemoryIngestService {
       }
     }
     // Mem0 全部写入失败但承诺/纠正/理解/事实存在时也要触发钩子（不随存储失败丢失）
-    if (results.length > 0 || understandings || commitments || corrections || facts || forget || referents) {
+    if (
+      results.length > 0 ||
+      understandings ||
+      commitments ||
+      corrections ||
+      facts ||
+      forget ||
+      referents ||
+      profileOps
+    ) {
       this.fireWriteHooks({
         actorId,
         sourceId,
@@ -375,6 +438,7 @@ export class AgenticMemoryIngestService {
         facts,
         forget,
         referents,
+        profileOps,
       });
     }
     return results;

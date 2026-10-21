@@ -144,9 +144,9 @@ import type {
 } from "./user-personalization/user-personalization-service.js";
 import {
   type TaskExecutionPlan,
-  isPlanExecuteLoopEnabled,
   planExecuteSessionId,
   runPlanExecuteLoop,
+  shouldPlanExecute,
 } from "../agent/plan-execute-loop.js";
 import type {
   AgentStreamOptions,
@@ -2734,12 +2734,13 @@ if (route.plane === "task") {
 
     let full = "";
     let modelCallsConsumed = 1;
-    // 任务面引擎选择（2026-09-05）：唯一引擎 = 工具循环（波内一次性规划 + 并行工具 +
-    // 出口自检续波）。显式 plan 调用（独立规划 LLM 请求）仅在 AGENT_PLAN_EXECUTE_LOOP
-    // 开启时叠加——默认关闭：one-shot 规划省一次带全量上下文的规划请求（省 token + 提速），
-    // 且出口自检的 NEED_MORE_TOOLS 探测已承担 replan 职责。
+    // 任务面引擎选择（2026-10-21 收敛）：复杂任务走显式「计划→执行」，简单任务仍由
+    // 工具循环一波内并行规划。判定 = 任务面 && requiresExplicitPlan（多步/多分句/长任务），
+    // 不再对所有任务无条件加计划调用，也不再用无计划的逐步波次冒充规划。
+    // 规划轮自身已收敛为「紧凑 system + 无工具 schema」（见 plan-execute-loop），
+    // 不再重发整套 chat 底板；关闭开关：AGENT_PLAN_EXECUTE_LOOP=0。
     // 旧 ReactLoopStrategy / LoopOrchestrator（含每轮 LLM 进展评估）已删除。
-    const useExplicitPlanner = mode === "task" && isPlanExecuteLoopEnabled();
+    const useExplicitPlanner = mode === "task" && shouldPlanExecute(text);
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 

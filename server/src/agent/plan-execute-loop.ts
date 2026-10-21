@@ -3,14 +3,24 @@
  *
  * 优化说明（2026-05-22）：
  * - 移除了"自检 → 重试"环节，减少 50%+ 的 LLM 调用次数
- * - 采用主流的 ReAct 风格：先计划，然后直接执行并通过工具环自动处理多轮调用
+ * - 显式计划一次，执行阶段交给波次工具循环（波内并行工具 + 出口自检续波），
+ *   不再逐步 ReAct
  * - 保留计划解析失败时的兜底逻辑，确保稳定性
  *
  * 环境变量：
- * - `AGENT_PLAN_EXECUTE_LOOP=1|true|yes` 启用（默认关闭）。
+ * - `AGENT_PLAN_EXECUTE_LOOP=0|off|false|no` 关闭（默认开启，仅复杂任务触发，
+ *   见 shouldPlanExecute / requiresExplicitPlan）。
  * - `AGENT_PE_VERBOSE_STREAM=1`：将计划阶段标题写入用户可见流（默认仅推 phase 状态）。
+ *
+ * 2026-10-21 token 收敛：
+ * - 规划轮不再携带全量 system / 画像记忆 / 工具 schema（此前沿用 baseStreamOpts，
+ *   一次计划调用就重发整套 chat 底板）。改为紧凑规划 system + BM25 相关工具名提示，
+ *   无工具走非工具分支，单独打 `task_plane_plan` 审计 stage。
+ * - 计划落定后清空规划会话，执行轮只从「原任务 + 紧凑计划」重建上下文，
+ *   不把规划脚手架（指令 + JSON 原文）带进后续每一波。
  */
-import { requiresTaskDecomposition } from "./simple-task.js";
+import { requiresExplicitPlan } from "./simple-task.js";
+import { bm25HitsForQuery } from "../tools/tool-search/index.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { dedupeToolsByName, slimToolSchema } from "../external-model/lane-tool-sets.js";
 import type {
@@ -60,10 +70,17 @@ export type PlanExecuteLoopResult = {
 
 export function isPlanExecuteLoopEnabled(): boolean {
   const raw = process.env.AGENT_PLAN_EXECUTE_LOOP?.trim().toLowerCase();
-  if (!raw || raw === "0" || raw === "off" || raw === "false" || raw === "no") {
-    return false;
-  }
-  return raw === "1" || raw === "true" || raw === "yes";
+  // 默认开启（2026-10-21）：复杂任务走显式「计划→执行」，简单任务不受影响。
+  if (!raw) return true;
+  return !(raw === "0" || raw === "off" || raw === "false" || raw === "no");
+}
+
+/**
+ * 本轮是否走显式计划：任务面 + 复杂任务才算（简单直办/单步查询不额外出计划调用）。
+ * 调用方（agent-core）只在 mode==="task" 时使用本判定。
+ */
+export function shouldPlanExecute(message: string): boolean {
+  return isPlanExecuteLoopEnabled() && requiresExplicitPlan(message);
 }
 
 function isPeVerboseStreamEnabled(): boolean {
@@ -196,6 +213,47 @@ export function resolveSuggestedToolDefinitions(
   return out;
 }
 
+/**
+ * 规划轮紧凑 system（2026-10-21）：只讲输出契约，不重复人格/记忆/展示协议。
+ * 规划质量靠 steps 契约 + 相关工具名提示，不靠全量 chat system（那套 ~6k 字符/次）。
+ */
+const PLAN_SYSTEM_PROMPT = [
+  "你是任务规划器。只输出一个 JSON 对象，不要 Markdown 围栏或任何解释文字。",
+  '格式：{"goal":"一句话概括要达成的结果","steps":[{"id":"1","intent":"这一步做什么","successCriteria":"如何判定该步完成","suggestedTools":[]}]}',
+  "步骤 2-6 个，必须可执行、可检验；suggestedTools 只能从给出的工具名中选，不确定就留空数组。",
+].join("\n");
+
+/** 规划提示里最多列出的相关工具名数量（BM25 top-N，避免把目录整本塞进计划轮）。 */
+const PLAN_TOOL_HINTS_MAX = 16;
+
+/** 规划轮的工具名提示：BM25 只取与用户任务相关的少量名字，不传任何 schema。 */
+function planToolHints(
+  baseStreamOpts: AgentStreamOptions | undefined,
+  userText: string,
+): string[] {
+  const corpus = [
+    ...(baseStreamOpts?.chatToolsBuiltin ?? []),
+    ...(baseStreamOpts?.chatToolsExtra ?? []),
+  ];
+  if (corpus.length === 0) return [];
+  try {
+    const hits = bm25HitsForQuery(userText, corpus, PLAN_TOOL_HINTS_MAX);
+    return [...new Set(hits.map((h) => h.name).filter(Boolean))];
+  } catch {
+    return [];
+  }
+}
+
+function buildPlanSystemPrompt(
+  baseStreamOpts: AgentStreamOptions | undefined,
+  userText: string,
+): string {
+  const hints = planToolHints(baseStreamOpts, userText);
+  return hints.length > 0
+    ? `${PLAN_SYSTEM_PROMPT}\n可用工具名（参考，只填确实要用的）：${hints.join(", ")}`
+    : PLAN_SYSTEM_PROMPT;
+}
+
 async function emitPhase(
   _onPhaseStatus: ((label: string) => void) | undefined,
   onDelta: StreamDeltaHandler | undefined,
@@ -285,16 +343,48 @@ export async function runPlanExecuteLoop(args: RunPlanExecuteLoopArgs): Promise<
     ].join("\n"),
   };
 
-  const planAssistant = await provider.streamCompletion(
-    planSessionId,
-    planUserTurn,
-    () => {},
-    undefined,
-    baseStreamOpts,
-  );
-  modelCalls += 1;
+  // 规划轮收敛（2026-10-21）：不带工具、不带全量 system/画像记忆。
+  // 此前沿用 baseStreamOpts → 一次计划调用就重发整套 chat 底板（system ~6k 字符 +
+  // 工具 schema）；计划只需要「任务 → 步骤」的契约，用紧凑 system 足矣。
+  const planOpts: AgentStreamOptions = {
+    ...baseStreamOpts,
+    systemPromptOverride: buildPlanSystemPrompt(baseStreamOpts, userText),
+    // 覆盖掉 baseStreamOpts 里的画像/记忆拼装与工具面
+    promptContext: undefined,
+    suppressRuntimeSuffixes: true,
+    // 连功能性后缀（回复规则/展示协议等）一并裁掉：规划轮只要 JSON 契约
+    functionalSuffixes: false,
+    chatToolsBuiltin: [],
+    chatToolsExtra: [],
+    toolExposureProfile: "none",
+    auditStage: "task_plane_plan",
+    maxThreadMessages: 8,
+  };
 
-  const plan = parseExecutionPlan(planAssistant);
+  let planAssistant = "";
+  try {
+    planAssistant = await provider.streamCompletion(
+      planSessionId,
+      planUserTurn,
+      () => {},
+      undefined,
+      planOpts,
+    );
+    modelCalls += 1;
+  } catch (err) {
+    // 规划失败不阻断任务：退回执行轮（工具循环内部自带波内规划），与解析失败同路径
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[plan-execute] 规划轮失败，退回直接执行: ${err instanceof Error ? err.message : String(err)}`,
+    );
+    planAssistant = "";
+  }
+
+  const plan = planAssistant ? parseExecutionPlan(planAssistant) : null;
+
+  // 规划脚手架（指令 + JSON 原文）不进入执行波：计划已紧凑写进 executePrompt，
+  // 清空后执行轮只从 full system + 原任务 + 计划重建，避免规划轮残留在每一波重发。
+  provider.clearSession?.(planSessionId);
 
   // v2：计划生成后立即回调，让上层发 chat.execution_event(plan_step, status=pending)
   if (plan && !isPlanTriviallySimple(plan) && onPlanReady) {
