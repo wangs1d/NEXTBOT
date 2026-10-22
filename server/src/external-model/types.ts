@@ -52,8 +52,6 @@ export type AgentPromptMemoryContext = {
   abilities?: string;
   /** 宿主 Agent 内置能力说明（钱包、日程、虚拟电话、子 Agent 委派等，非 UAP KV） */
   agentCaps?: string;
-  /** Agent World 环境说明：注册、世界点数、自由市场、Agent 间对局等（非 UAP KV） */
-  worldCaps?: string;
   /** BM25+Qdrant+RRF 融合后的履历/叙事摘录，供本轮推理引用 */
   narrativeRecall?: string;
   /**

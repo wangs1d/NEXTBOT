@@ -1,5 +1,4 @@
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
-import type { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
@@ -42,7 +41,7 @@ export type FinalizeTurnResult = {
 };
 
 /**
- * 每轮对话前后统一钩子：记忆召回、写入、配额、进化环。
+ * 每轮对话前后统一钩子：记忆召回、写入、配额。
  */
 export class TurnLifecycle {
   private readonly stmConfig = getShortTermMemoryConfig();
@@ -51,7 +50,6 @@ export class TurnLifecycle {
     private readonly deps: {
       narrativeMemory: NarrativeMemoryPort | null;
       computeQuotaService: ComputeQuotaService | null;
-      evolutionLoopService: EvolutionLoopService | null;
       userPersonalizationService: UserPersonalizationService | null;
       agentMemorySyncService: AgentMemorySyncService | null;
       shortTermMemoryGateway: ShortTermMemoryGatewayService | null;
@@ -261,7 +259,6 @@ export class TurnLifecycle {
       );
     }
 
-    this.deps.evolutionLoopService?.onAssistantDone(input.actorId, input.userText, full);
     this.deps.userPersonalizationService?.observeTurn(input.actorId, input.userText, full);
     // 用户画像聚合器观察（2026-09-29 从 brain-center 阶段3.6.1 迁入）：
     // 这里拿得到真实助手全文（原位 cognitive.response 恒空串，画像只见用户半边）；

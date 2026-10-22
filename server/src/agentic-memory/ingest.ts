@@ -367,6 +367,16 @@ export class AgenticMemoryIngestService {
         : fallbackText
           ? [fallbackText]
           : [];
+    // 原文兜底标记（写入即精简原则的补丁）：抽取未产出条目时落库的是未蒸馏
+    // 原文/合并残片——这类条目打 extractionFallback 标记并压低 importance，
+    // TTL 按低分加速淡出（base 90d × (0.5+0.15) ≈ 59d，且不享受 ≥0.8 豁免），
+    // 而非按 remember=0.7 的待遇长期占位。精简失败的记忆不值得永久保留。
+    const usedFallback = extraction.memories.length === 0 && !!fallbackText && fallbackText.length > 0;
+    if (usedFallback) {
+      console.log(
+        `[agentic-memory] unified 抽取未产条目，原文兜底入库（extractionFallback，低重要度） source=${sourceId}: ${fallbackText!.slice(0, 60)}`,
+      );
+    }
     const results: Mem0WrittenItem[] = [];
     for (const item of memories) {
       // v3 写入门：任务态/一次性提醒/协议残留/回声体在入口即拒（此前靠生命周期
@@ -401,11 +411,17 @@ export class AgenticMemoryIngestService {
             context,
             highSignal,
             memoryDecision: extraction.decision,
-            // 连续重要性分（0-1）：检索加权与 TTL 豁免的依据（unified 缺省按 decision 推导）
-            importance: extraction.importance ?? (extraction.decision === "remember" ? 0.7 : 0.3),
-            ...(extraction.semanticClass
-              ? { memorySemanticClass: extraction.semanticClass }
-              : {}),
+            // 连续重要性分（0-1）：检索加权与 TTL 豁免的依据（unified 缺省按 decision 推导）；
+            // 原文兜底条目固定低分 0.15，覆盖抽取分（兜底=精简失败，不该享受高待遇）
+            importance: usedFallback
+              ? 0.15
+              : (extraction.importance ?? (extraction.decision === "remember" ? 0.7 : 0.3)),
+            ...(usedFallback ? { extractionFallback: true } : {}),
+            ...(usedFallback
+              ? {}
+              : extraction.semanticClass
+                ? { memorySemanticClass: extraction.semanticClass }
+                : {}),
             extractSource: "unified",
             // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
             ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),

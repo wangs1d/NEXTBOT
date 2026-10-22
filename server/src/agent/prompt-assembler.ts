@@ -47,7 +47,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "values",
   "abilities",
   "agentCaps",
-  "worldCaps",
   "userUnderstanding",
   "userFacts",
   "lifeRelations",
@@ -174,7 +173,6 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 能力合并：KV 能力倾向 + 宿主 Agent 能力说明本就是同一语义（"我能干什么"）
   const abilitiesCombined = [m.abilities, m.agentCaps].filter(Boolean).join("\n");
   if (abilitiesCombined) stableCore.push(`【能力与工具】\n${abilitiesCombined}`);
-  if (m.worldCaps) stableCore.push(`【Agent World】\n${m.worldCaps}`);
   if (m.skillIndex) stableCore.push(m.skillIndex);
   if (m.interestList) stableCore.push(m.interestList);
   // 静态人格块常驻（称呼/关系档变化才重算，前缀缓存友好）。动态 mood 块

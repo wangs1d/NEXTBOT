@@ -289,6 +289,44 @@ test("persistUnifiedExtraction: memories infer:false 直存 + 钩子携带 under
   }
 });
 
+test("persistUnifiedExtraction: memories 为空时原文兜底打低重要度标记（TTL 加速淡出）", async () => {
+  const added: Array<{ content: string; opts: Record<string, unknown> }> = [];
+  const fakeMemory = {
+    async add(entries: Array<{ content: string }>, opts: Record<string, unknown>) {
+      added.push({ content: entries[0]!.content, opts });
+      return { results: [{ id: "mem0-fb", memory: entries[0]!.content }] };
+    },
+  } as unknown as Memory;
+  const ingest = new AgenticMemoryIngestService(fakeMemory);
+
+  const results = await ingest.persistUnifiedExtraction(
+    "user-1",
+    "chat:turn-10",
+    {
+      decision: "remember",
+      semanticClass: "stable_preference",
+      memories: [], // 抽取未产出条目 → 走 fallbackText 原文兜底
+      commitments: [],
+      corrections: [],
+      understandings: [],
+      facts: [],
+    },
+    "main",
+    true,
+    "用户说了一堆没被蒸馏出条目的原话",
+  );
+
+  assert.equal(results.length, 1, "兜底条目应落库");
+  const meta = (added[0]!.opts as { metadata?: Record<string, unknown> }).metadata ?? {};
+  assert.equal(meta.extractionFallback, true, "兜底条目应有 extractionFallback 标记");
+  assert.equal(meta.importance, 0.15, "兜底条目重要度压到 0.15（TTL 加速淡出，无 ≥0.8 豁免）");
+  assert.equal(
+    meta.memorySemanticClass,
+    undefined,
+    "stable_* 语义类豁免不套在未蒸馏原文上（防原文永久保留）",
+  );
+});
+
 test("persistUnifiedExtraction: reject 决策记忆不落库，understandings 仍进钩子", async () => {
   const fakeMemory = {
     async add() {

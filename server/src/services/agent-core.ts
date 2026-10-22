@@ -132,7 +132,6 @@ function chatLaneMaxRounds(): number {
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { SkillManager } from "../skills/index.js";
-import type { EvolutionLoopService } from "./evolution-loop-service.js";
 import type { MoodInferenceService } from "./mood-inference-service.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { LifeSignalHubService } from "./life-signal-hub-service.js";
@@ -198,7 +197,7 @@ const MEMORY_DOMAIN_LABELS: Record<string, string> = {
 };
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
-import { getDailyJournalService, type JournalHit } from "./daily-journal-service.js";
+import { getDailyJournalService } from "./daily-journal-service.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import { type LlmExecutionMode, type RouteDecision, buildUnifiedLaneDecision } from "../agent/task-router.js";
@@ -378,7 +377,6 @@ export class AgentCore {
     private readonly externalChat: ExternalChatProvider | null = null,
     private readonly computeQuotaService: ComputeQuotaService | null = null,
     private readonly agentMemorySyncService: AgentMemorySyncService | null = null,
-    private readonly evolutionLoopService: EvolutionLoopService | null = null,
     private readonly userPersonalizationService: UserPersonalizationService | null = null,
     private readonly worldService: WorldService | null = null,
     private readonly skillManager: SkillManager | null = null,
@@ -402,7 +400,6 @@ export class AgentCore {
     this.turnLifecycle = new TurnLifecycle({
       narrativeMemory: this.narrativeMemory,
       computeQuotaService: this.computeQuotaService,
-      evolutionLoopService: this.evolutionLoopService,
       userPersonalizationService: this.userPersonalizationService,
       agentMemorySyncService: this.agentMemorySyncService,
       shortTermMemoryGateway: this.shortTermMemoryGateway,
@@ -416,7 +413,6 @@ export class AgentCore {
       toolCallGuard: getToolCallGuard(),
     });
     this.toolPolicyResolver = new ToolPolicyResolver({
-      agentMemorySyncService: this.agentMemorySyncService,
       getBrainCenter: () => this.brainCenter,
     });
     this.turnFinalizer = new TurnFinalizer({
@@ -701,19 +697,6 @@ export class AgentCore {
     fn: ((actorId: string) => string | null) | null,
   ): void {
     this.promptContextBuilder.setActiveGoalsProvider(fn);
-  }
-
-  /**
-   * 当日 journal 命中块：只产出带时间标签的命中行（2026-08-28 注入路径统一后，
-   * 块标题与免责声明由 prompt-assembler 的【短期上下文】家族统一添加，
-   * 服务层不再手拼【】标题头）。
-   * 仅扫当天（短期记忆），过往日期已固化进长期记忆图，不走文件检索。
-   */
-  private buildJournalRecallBlock(hits: JournalHit[]): string | undefined {
-    if (hits.length === 0) return undefined;
-    const roleLabel = (role: JournalHit["role"]) =>
-      role === "user" ? "用户" : role === "assistant" ? "助手" : "事实";
-    return hits.map((h) => `[今天 ${h.time}·${roleLabel(h.role)}] ${h.text}`).join("\n");
   }
 
   /**
@@ -1005,48 +988,26 @@ export class AgentCore {
     // 抑制长期记忆召回，避免把旧话题/跨会话记忆注入当前新话题（串台根治）。
     // 仅抑制长期记忆（narrativeRecall），当前会话的【最近对话回顾】/STM 上下文仍正常注入。
     //
-    // v3 记忆架构读路径（去路由化后）：长期记忆进上下文只走两条有意路径——
+    // v3 记忆架构读路径（2026-10-22 管道拆除）：长期记忆进上下文只走两条有意路径——
     //   1. 画像层速览常驻（结构化事实块无条件注入，prompt-context-builder）；
     //   2. brain.recall 工具按需检索（chat 车道常驻，模型自主决定何时查记忆）。
-    // 第三条「窄线索兜底」随 understanding 语义标记一起退役（2026-10-21）：
-    // 系统不再擅自注入旧记忆，跨会话衔接交给恒驻速览与模型主动 recall。
-    const recallGate = {
-      trigger: false,
-      reason: ("memory_cue" as const),
-    };
-    const gateTriggered = recallGate.trigger;
-    const suppressNarrativeRecall = !gateTriggered;
-    // 向量预筛已随 v3 退役（每轮 embedding 调用既慢又把召回权从模型手里收走）；
-    // 保留占位常量供 orchestrate ctx 下游管道兼容。
-    const semanticRecallHit = false;
-
-    // 当日对话日志检索：门控触发时并行扫今日 journal（零 embedding 词法检索，短期记忆）。
-    // 只扫当天；过往日期已固化进长期记忆图，跨天指代由图谱/KV 召回兜底（见 recallGate）。
-    // "刚才/刚刚"窗口内指代走 thread/STM（IN_WINDOW_DEIXIS_RE），不进入这里。
-    const journalHitsPromise: Promise<JournalHit[]> = gateTriggered
-      ? (getDailyJournalService()?.searchToday(actorId, text).catch(() => []) ?? Promise.resolve([]))
-      : Promise.resolve([]);
+    // 原 recallGate / suppressNarrativeRecall / semanticRecallHit 三个恒定门控变量
+    // （v3 起即硬编码 trigger:false / true / false）连同下游恒空分支已删除：
+    //   - narrativeRecall / recentConversationHistory：恒 undefined（主循环不再生产，
+    //     跨会话衔接交给恒驻速览与 brain.recall 工具）；
+    //   - journal 当日检索：从未随门控运行过（恒空），整段拆除。
+    // 系统不擅自注入旧记忆；话题级防串台由「画像常驻 + 工具拉取」结构性承担。
 
     const [narrativeRecall, workingMemorySummary, recentConversationHistory, userLocation, personalization, frequentPlaces] =
       route.plane === "chat"
       ? await Promise.all([
-          // 对话面记忆注入：
-          // - 有 cognize 召回结果时直接复用（Complex 路径）
-          // - 无 cognize 召回结果时（Fast 跳过 cognize 路径），走 prepareNarrativeRecall
-          // ctxTiming：成员级计时（2026-09-28 延迟诊断配套，定位冷会话 6s 装配黑洞）
-          ctxTiming("narrativeRecall",
-            suppressNarrativeRecall
-            ? Promise.resolve(undefined)
-            : (cognitiveRecallItems && cognitiveRecallItems.length > 0
-                ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, text))),
+          // 对话面记忆注入（v3）：主循环恒 undefined；cognize 召回结果经
+          // appendLearningDecisionGuidance 走 belief 提示，长期检索走 brain.recall 工具
+          Promise.resolve(undefined) as Promise<string | undefined>,
           // 工作记忆摘要独立透传（不再拼入 narrativeRecall）
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
-          // 话题切换时也抑制，避免旧话题待办打断新话题
-          suppressNarrativeRecall
-            ? Promise.resolve(undefined)
-            : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
+          // 跨会话待办衔接块（v3 起恒 undefined，见上注释）
+          Promise.resolve(undefined) as Promise<string | undefined>,
           // 2026-09-05：对话面也注入位置背景（纯缓存/按需 RPC，零 LLM）
           ctxTiming("userLocation", this.resolveUserLocationForPrompt(actorId, opts)),
           // 2026-09-29 画像接通对话面：chat 面注入文件画像（轻量切片零副作用；
@@ -1059,35 +1020,20 @@ export class AgentCore {
           ctxTiming("frequentPlaces", Promise.resolve(this.resolveFrequentPlacesPrompt(actorId))),
         ])
       : await Promise.all([
-          // 复用 cognize 阶段已召回的记忆条目，避免同一轮用户消息重复触发 MemoryCortex.recall
-          // （cognize 未召回或降级路径未填充 recallItems 时，仍走原 prepareNarrativeRecall 逻辑）
-          suppressNarrativeRecall
-            ? Promise.resolve(undefined)
-            : (cognitiveRecallItems && cognitiveRecallItems.length > 0
-                ? Promise.resolve(this.recallItemsToNarrative(cognitiveRecallItems))
-                : this.turnLifecycle.prepareNarrativeRecall(actorId, text)),
+          // 任务面同 v3 语义：主循环不擅自注入长期记忆
+          Promise.resolve(undefined) as Promise<string | undefined>,
           Promise.resolve(cognitiveWorkingMemorySummary || undefined),
-          // 跨会话待办衔接块（最近对话原文不再注入——messages 数组已含同样内容）：
-          // 话题切换时也抑制，避免上一轮 agent 输出被 LLM 复读
-          suppressNarrativeRecall
-            ? Promise.resolve(undefined)
-            : Promise.resolve(this.buildRecentConversationHistoryBlock(actorId)),
+          Promise.resolve(undefined) as Promise<string | undefined>,
           // 2026-09-05：每轮无条件注入（缓存/按需 RPC，零 LLM；措辞层已禁止反问）
           this.resolveUserLocationForPrompt(actorId, opts),
           this.userPersonalizationService?.getPromptSlice(actorId, text) ?? Promise.resolve({}),
           Promise.resolve(this.resolveFrequentPlacesPrompt(actorId)),
         ]);
-    
+
     // 位置证据门（2026-10-19）：本轮有定位、且定位落到某个"计划搬去 X"的目标地，
     // 才把计划转成现状。**没有位置就不动**——位置是唯一能确定性证明"他真的到了"
     // 的证据；计划到期本身不构成证据（用户可能根本没去，也没说）。
     void this.maybeConfirmPlansByLocation(actorId, userLocation);
-
-    // 当日日志命中块：作为独立字段透传（当天问题优先命中今天日志，而非长期图）。
-    // 不并入 narrativeRecall——formatNarrativeRecallPrompt 会对 narrativeRecall 做
-    // 6 条截断 + 「【」免责头过滤 + 字符压缩，拼进去会被拍平丢框架（workingMemorySummary 同款旧 bug）。
-    const journalHits = await journalHitsPromise;
-    const journalRecallBlock = this.buildJournalRecallBlock(journalHits);
 
     const enrichedNarrativeRecall = appendLearningDecisionGuidance(
       narrativeRecall,
@@ -1116,10 +1062,6 @@ export class AgentCore {
       shortTermTurn,
       workingMemorySummary,
       recentConversationHistory,
-      journalRecallBlock,
-      suppressNarrativeRecall,
-      semanticRecallHit,
-      recallGate.trigger,
     );
 
     try {
@@ -1689,59 +1631,8 @@ if (route.plane === "task") {
     return text;
   }
 
-  /**
-   * 构建跨会话衔接块（2026-09-05 token 优化：不再注入最近对话原文）。
-   *
-   * 原实现把 thread slice(-12) 格式化成【最近对话回顾】文本块注入 system——
-   * 但这些消息本就以 user/assistant 消息存在于 messages 数组（thread 未满时甚至是
-   * 全量复制），同一内容发两遍。现仅保留该块的唯一非重复职责：
-   * 跨会话开放环路（记忆连续性 Phase 2）——新会话开场并入上一会话未完成的
-   * 待办与承诺（来自 KV session_epitome，不在 messages 数组中）。
-   *
-   * 注入去重：KV 长期槽 memory_open_loops/memory_commitments 同轮也会注入
-   * 待办/承诺行，按语义指纹过滤避免同一事项出现两次。
-   */
-  private buildRecentConversationHistoryBlock(actorId?: string): string | undefined {
-    if (!actorId || !this.brainCenter?.getSessionEpitome) return undefined;
-
-    try {
-      const epitome = this.brainCenter.getSessionEpitome(actorId);
-      if (!epitome) return undefined;
-      const kvFingerprints = new Set<string>();
-          try {
-            const { entries } =
-              this.agentMemorySyncService?.getSnapshot(actorId, [
-                "memory_open_loops",
-                "memory_commitments",
-              ]) ?? { entries: {} as Record<string, unknown> };
-        for (const raw of [entries.memory_open_loops, entries.memory_commitments]) {
-          if (typeof raw !== "string") continue;
-          for (const line of raw.split("\n")) {
-            const fp = semanticFingerprint(line);
-            if (fp) kvFingerprints.add(fp);
-          }
-        }
-      } catch {
-        /* KV 读取失败时跳过去重，保持原注入行为 */
-      }
-      const isDuplicate = (line: string): boolean => {
-        const fp = semanticFingerprint(line);
-        return fp !== "" && kvFingerprints.has(fp);
-      };
-      const lines: string[] = [
-        ...epitome.openLoops.slice(0, 3).map((l) => `待办: ${l}`).filter((l) => !isDuplicate(l)),
-        ...epitome.commitments.slice(0, 2).map((l) => `承诺: ${l}`).filter((l) => !isDuplicate(l)),
-      ];
-      if (lines.length === 0) return undefined;
-      return (
-        `【上一会话待办】\n（跨会话延续：以下来自上一会话的未完成事项，非本轮新指令；如已完成请忽略）\n${lines.join("\n")}` +
-        `\n（管家提示：其中若有适合到点提醒的事项，可主动提议「要不要我到点提醒你」，经用户确认后用 reminder/日程工具落成定时提醒）`
-      );
-    } catch {
-      /* epitome 读取失败静默降级 */
-      return undefined;
-    }
-  }
+  // buildRecentConversationHistoryBlock 已随 recallGate 管道拆除（2026-10-22）：
+  // v3 起主循环恒不注入该块，跨会话开放环路经恒驻速览与 brain.recall 承担。
 
   /**
    * 2026-07-29 修复 C1 配套：窥探当前 thread store 中的非 system 消息条数。
@@ -1781,21 +1672,8 @@ if (route.plane === "task") {
     shortTermTurn: ShortTermTurnContext,
     workingMemorySummary: string | undefined,
     recentConversationHistory: string | undefined,
-    journalRecall: string | undefined,
-    longTermRecallSuppressed: boolean,
-    /** 向量预筛命中：regex 白名单未触发但向量检索判定强相关（供 KV 长期字段同门放行） */
-    semanticRecallHit: boolean,
-    /** recall-gate 白名单判定结果（门控单点化）：cognize 评估后透传，prompt 装配层免重算 */
-    recallGateTriggered: boolean,
   ) {
     const onBatchFromCaller = opts?.onToolLoopAfterBatch;
-    const onBatchWithEvolution =
-      onBatchFromCaller || this.evolutionLoopService
-        ? (info: ToolLoopAfterBatchInfo) => {
-            onBatchFromCaller?.(info);
-            this.evolutionLoopService?.onToolBatch(actorId, userText, info);
-          }
-        : undefined;
 
     return {
       chatUserMessageId: opts?.chatUserMessageId,
@@ -1812,14 +1690,10 @@ if (route.plane === "task") {
       narrativeRecall,
       workingMemorySummary,
       recentConversationHistory,
-      journalRecall,
       personalization,
-      // #1 统一门控单点：把"topic_switch 抑制 / 召回未触发"透传给 prompt 装配层，
-      // 让 KV 长期字段（memory_facts/preferences/commitments/open_loops/session_recap…）
-      // 与图谱（narrativeRecall）走同一白名单，话题切换时全部抑制（串台根治）。
-      longTermRecallSuppressed,
-      semanticRecallHit,
-      recallGateTriggered,
+      // v3 门控单点已随 recallGate 管道拆除（2026-10-22）：KV 长期字段注入与否
+      // 由 prompt-context-builder 内的 v3 常量语义（longTermEnabled=false）决定，
+      // 长期检索统一走 brain.recall 工具。
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
@@ -1839,7 +1713,7 @@ if (route.plane === "task") {
               : undefined,
         });
       },
-      onToolLoopAfterBatch: onBatchWithEvolution,
+      onToolLoopAfterBatch: onBatchFromCaller,
       // 记忆架构重构：thread 消息数透传给 prompt 装配层（长期快照注入门控用）
       threadMessageCount: this.peekThreadMessageCount(actorId, sessionId),
     };
@@ -1862,8 +1736,6 @@ if (route.plane === "task") {
       narrativeRecall?: string;
       workingMemorySummary?: string;
       recentConversationHistory?: string;
-      /** 当日/近几天对话日志检索命中（独立块注入） */
-      journalRecall?: string;
       userLocation?: string;
       /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
       frequentPlaces?: string;
@@ -1930,7 +1802,6 @@ if (route.plane === "task") {
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
-            journalRecall: ctx.journalRecall,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
             orchestrateToolCtx: ctx.orchestrateOpts,
@@ -1981,8 +1852,6 @@ if (route.plane === "task") {
       workingMemorySummary?: string;
       /** 最近对话回顾（独立块注入，thread 较短时填充） */
       recentConversationHistory?: string;
-      /** 当日/近几天对话日志检索命中（独立块注入，不复用 formatNarrativeRecallPrompt，防拍平） */
-      journalRecall?: string;
       userLocation?: string;
       /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
       frequentPlaces?: string;
@@ -2135,7 +2004,7 @@ if (route.plane === "task") {
       },
     );
 
-    const onBatchWithEvolution = ctx.orchestrateToolCtx?.onToolLoopAfterBatch;
+    const onBatchFromCaller = ctx.orchestrateToolCtx?.onToolLoopAfterBatch;
     const toolExposureProfile = this.toolPolicyResolver.resolveExposureProfile(mode);
     const toolRankingHint = this.toolPolicyResolver.resolveRankingHint(actorId);
     // 2026-09-06 P0 修复：前台回归原生 function calling——task.dispatch + search_web
@@ -2239,7 +2108,6 @@ if (route.plane === "task") {
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
-            journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
@@ -2247,10 +2115,6 @@ if (route.plane === "task") {
             personalization: ctx.personalization ?? {},
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
-            // #1 统一门控单点：KV 长期字段与图谱走同一 gate
-            longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
-            semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
-            recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
             // 单一调用点在 chat 车道分支（isChatLane），plane 固定 chat：
             // 顺嘴搭车块按车道门控只进对话面
             plane: "chat",
@@ -2287,19 +2151,14 @@ if (route.plane === "task") {
             narrativeRecall: ctx.narrativeRecall,
             workingMemorySummary: ctx.workingMemorySummary,
             recentConversationHistory: ctx.recentConversationHistory,
-            journalRecall: ctx.journalRecall,
             interruptedContext: opts?.interruptedContext,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
             deviceClass: opts?.deviceClass,
             personalization: ctx.personalization ?? {},
-            onToolLoopAfterBatch: onBatchWithEvolution,
+            onToolLoopAfterBatch: onBatchFromCaller,
             userPattern: ctx.cognitiveUserPattern,
             toolPlan: ctx.cognitiveToolPlan,
-            // #1 统一门控单点：KV 长期字段与图谱走同一 gate
-            longTermRecallSuppressed: ctx.orchestrateToolCtx?.longTermRecallSuppressed,
-            semanticRecallHit: ctx.orchestrateToolCtx?.semanticRecallHit,
-            recallGateTriggered: ctx.orchestrateToolCtx?.recallGateTriggered,
           }) ?? {}),
           toolExposureProfile,
           toolRankingHint,
@@ -2724,7 +2583,7 @@ if (route.plane === "task") {
         // 晋升）对 plan-execute 路径同样生效，计划步 suggestedTools 才有语料
         // 可转正（此前编排器拿的是未装配的 streamOpts，绕过了整个可见集组装）。
         baseStreamOpts: execStreamOpts,
-        onToolBatchForExecute: onBatchWithEvolution,
+        onToolBatchForExecute: onBatchFromCaller,
       });
       full = result.finalText;
       modelCallsConsumed = Math.max(1, result.modelCalls);
@@ -2734,14 +2593,14 @@ if (route.plane === "task") {
       provider.appendThreadTurn?.(chatSessionId, userTurn, full);
     } else {
       const mergedStreamOpts: AgentStreamOptions | undefined =
-        execStreamOpts || onBatchWithEvolution || opts || provider.id === "moonshot-kimi"
+        execStreamOpts || onBatchFromCaller || opts || provider.id === "moonshot-kimi"
           ? {
               ...(execStreamOpts ?? {}),
-              ...(onBatchWithEvolution
+              ...(onBatchFromCaller
                 ? {
                     toolLoop: {
                       ...(execStreamOpts?.toolLoop ?? {}),
-                      onAfterToolBatch: onBatchWithEvolution,
+                      onAfterToolBatch: onBatchFromCaller,
                     },
                   }
                 : {}),

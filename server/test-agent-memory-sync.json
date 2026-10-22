@@ -1,12 +1,12 @@
 {
   "sessions": {
-    "actor-3": {
+    "actor-4": {
       "revision": 2,
       "entries": {
-        "memory_summary": "[2026-10-21T16:58:50.609Z] [topic:general] user prefers concise answers\n[2026-10-21T16:58:50.610Z] [topic:general] user dislikes concise answers",
+        "memory_summary": "[2026-10-22T15:56:38.082Z] [topic:general] I live in Shanghai\n[2026-10-22T15:56:38.083Z] [topic:general] I live in Beijing",
         "memory_summary_forgotten": "",
-        "memory_preferences": "[2026-10-21T16:58:50.610Z] [topic:general] user dislikes concise answers",
-        "session_recap": "[2026-10-21T16:58:50.609Z] [topic:general] user prefers concise answers\n[2026-10-21T16:58:50.610Z] [topic:general] user dislikes concise answers"
+        "memory_facts": "[2026-10-22T15:56:38.084Z] [topic:general] I live in Beijing",
+        "session_recap": "[2026-10-22T15:56:38.082Z] [topic:general] I live in Shanghai\n[2026-10-22T15:56:38.084Z] [topic:general] I live in Beijing"
       }
     }
   }

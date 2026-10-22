@@ -38,12 +38,6 @@ export type NarrativeMemoryPort = {
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
   buildDetailedRecall(actorId: string, query: string): Promise<string>;
   buildSourceRecall(actorId: string, query: string): Promise<string>;
-  /**
-   * 词法预筛分数（0~1，进程内 BM25 归一）。
-   * 供 recall-gate 的廉价放行通道在 embedding 预筛前快筛，省掉非门控轮次的 API 调用。
-   * 未实现（纯 facade）/ 无索引时返回 0。
-   */
-  lexicalPreScreen?(actorId: string, query: string): Promise<number>;
   runSleepConsolidation(actorIds: string[]): Promise<
     Array<{
       actorId: string;
@@ -318,7 +312,7 @@ export function createNarrativeMemoryPort(opts: {
  * - ingest：双写（facade 做人脑记忆沉淀，hybrid 做 BM25+Qdrant 索引）。
  *   bridgeActive 时短文本（< 切块阈值）跳过 hybrid 向量嵌入——其内容已由
  *   Mem0×认知图×FTS 融合召回覆盖，重复嵌入只是多烧一次 API 与一份向量存储；
- *   BM25 仍写入，lexicalPreScreen 覆盖不变。
+ *   BM25 仍照常写入。
  * - buildNarrativeRecall：双通道召回后拼接结果（facade 优先，hybrid 补充）；
  *   hybrid 块与 facade 已展示内容做跨通道去重，避免同一记忆原文+抽取事实
  *   双份进 Prompt。
@@ -392,10 +386,6 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
     ]);
     const hybridResult = formatHybridRecall(this.dedupeChunksAgainstFacade(chunks, facadeResult));
     return [facadeResult, hybridResult].filter(Boolean).join("\n\n");
-  }
-
-  async lexicalPreScreen(actorId: string, query: string): Promise<number> {
-    return this.hybrid.lexicalPreScreen(actorId, query);
   }
 
   async buildCrossContextRecall(actorId: string, query: string): Promise<string> {

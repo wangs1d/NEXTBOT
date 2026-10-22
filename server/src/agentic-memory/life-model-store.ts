@@ -11,7 +11,6 @@
  *   - 实体属性不另存值——指向 structured_facts（entity 字段物化），superseded 链、
  *     双时间轴（event_time/observed_at）、valid_from/valid_to 全部白拿；
  *   - relationship-graph 的 warmth/rapport 里程碑收敛为一条 kind='self_agent' 的边；
- *   - MemorySchemaFormation 的内存 schemaCache → life_patterns 表（落盘，重启不失）；
  *   - MemoryExperienceLearningLoop 的内存 beliefs/episodes → life_beliefs / life_episodes。
  *
  * 隐私：与其余 agentic-memory 表共用同一个 SQLite 文件（openAgenticSqlite），
@@ -652,6 +651,7 @@ export class LifeModelStore {
 
   /* ───────────────────── 图式 / 经验学习（落盘收敛） ───────────────────── */
 
+  /** 图式落盘（SchemaPersistenceLike）：savePattern/loadPatterns 供 SchemaFormation 写穿/hydrate。 */
   savePattern(actorId: string, schema: SchemaNode): void {
     if (!actorId || !schema?.id) return;
     const now = new Date().toISOString();

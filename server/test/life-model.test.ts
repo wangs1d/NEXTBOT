@@ -19,7 +19,6 @@ import { LifeModelStore } from "../src/agentic-memory/life-model-store.js";
 import { StructuredFactStore } from "../src/agentic-memory/structured-fact-store.js";
 import { openAgenticSqlite } from "../src/agentic-memory/sqlite-store.js";
 import { arbitrateMemories, DEFAULT_ARBITRATOR_CONFIG } from "../src/brain/memory-arbitrator.js";
-import { MemorySchemaFormation } from "../src/brain/memory-cognitive/memory-schema-formation.js";
 import { MemoryExperienceLearningLoop } from "../src/brain/memory-cognitive/memory-experience-learning-loop.js";
 import { RelationshipGraphService } from "../src/services/relationship-graph-service.js";
 import { registerLifeManageTools } from "../src/tools/life-manage-tools.js";
@@ -214,44 +213,9 @@ test("P1：【用户关系一览】块命中；敏感实体默认不进块", asy
 });
 
 // ============================================================
-// P0：图式 / 经历 落盘（跨重启 hydrate）
+// P0：经历 / 信念 落盘（跨重启 hydrate）
+// （图式落盘测试随 SchemaFormation 链路 2026-10-22 删除）
 // ============================================================
-
-test("P0：SchemaNode 落盘后，新实例 getAllSchemas 仍非空（hydrate）", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "life-model-"));
-  const path = join(dir, "life.db");
-  const schema = {
-    id: "schema-1",
-    name: "餐厅图式",
-    steps: ["进门", "点餐", "结账"],
-    preconditions: ["饿"],
-    expectedOutcomes: ["吃饱"],
-    instances: ["ep-1", "ep-2"],
-    stereotypeWarningCount: 0,
-    sceneTag: "restaurant",
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
-  };
-  try {
-    const db1 = openAgenticSqlite(path);
-    const store1 = new LifeModelStore(db1);
-    const f1 = new MemorySchemaFormation({});
-    f1.setPersistence(store1);
-    store1.savePattern(ACTOR, schema as never); // 模拟前次落盘
-    store1.close();
-
-    const db2 = openAgenticSqlite(path);
-    const store2 = new LifeModelStore(db2);
-    const f2 = new MemorySchemaFormation({});
-    f2.setPersistence(store2);
-    const all = f2.getAllSchemas(ACTOR);
-    assert.equal(all.length, 1, "重启后图式仍在");
-    assert.equal(all[0]!.sceneTag, "restaurant");
-    store2.close();
-  } finally {
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-  }
-});
 
 test("P0：ExperienceLearning episodes 落盘后，新实例 hydrate 出经历", async () => {
   const dir = await mkdtemp(join(tmpdir(), "life-model-"));

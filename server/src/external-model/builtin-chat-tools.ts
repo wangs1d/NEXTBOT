@@ -428,8 +428,19 @@ export const WALLET_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** Agent Link：好友列表、好友请求（Agent World 域能力 world.link.*；与 App 侧栏「Agent Link」/ MailboxPage 对齐）。 */
+/** Agent Link：好友列表、好友请求、世界状态（Agent World 域能力 world.*；与 App 侧栏「Agent Link」/ MailboxPage 对齐）。 */
 export const AGENT_LINK_CHAT_TOOLS: ChatCompletionTool[] = [
+  {
+    type: "function",
+    function: {
+      name: "world.status",
+      description:
+        "查询 Agent World 状态：世界注册状态、世界点数余额、已解锁/已购技能、上架的社区技能，" +
+        "及 world.* 工具族（注册/房间/技能商店/社交）说明。用户问「世界点数」「技能商店」「我的技能」" +
+        "「Agent World 注册了吗」时调用。只读零副作用。",
+      parameters: { type: "object", properties: {}, additionalProperties: false },
+    },
+  },
   {
     type: "function",
     function: {
@@ -1110,21 +1121,27 @@ export const CLOCK_CHAT_TOOLS: ChatCompletionTool[] = [
   },
 ];
 
-/** Agent 能力详细查询工具（Layer 3）：system prompt 已包含行为规则和路由表（Layer 2），本工具用于获取某领域的完整能力描述和运行时状态。 */
+/**
+ * Agent 宿主能力详细查询工具：用户问「你能做什么」时返回宿主侧各域能力清单。
+ * 2026-10-22 复审：生活 12 域（Feature Catalog 分类面）与 Agent World 状态分支
+ * 已移除——某域有哪些工具走 tool_discover({domain})，世界状态走 world.status；
+ * 本工具只回答「宿主侧有什么能力域、各自干什么」。
+ */
 export const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [  {
     type: "function",
     function: {
       name: "agent.query_capabilities",
       description:
-        "查询指定领域的完整能力描述和运行时状态。system prompt 中已有基础规则和路由表，本工具用于：①用户问「你能做什么」需展示完整清单时 ②需要某领域的详细工具说明/参数提示时 ③查看Agent World完整状态(社交推文站/技能商店/world.*工具族)时 ④确认虚拟电话号码等动态信息时。结果会保留在对话上下文供后续参考。",
+        "查询宿主侧各能力域的清单与说明。用户问「你能做什么/你有哪些功能」时调用，按域给出能力描述；" +
+        "需要某域具体工具的参数 schema 时优先用 tool_discover；Agent World 的注册/点数/技能状态用 world.status。结果会保留在对话上下文供后续参考。",
       parameters: {
         type: "object",
         properties: {
           domain: {
             type: "string",
-            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "world", "embodiment", "all", "travel", "dining", "home", "finance", "health", "social", "media", "learning", "work", "comms", "self", "system"],
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "embodiment", "all"],
             description:
-              "能力领域过滤。不传或传 'all' 返回全部；传具体域名仅返回该领域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, self_programming=自我编程, agent_account=账号注册, embodiment=具身身体, world=Agent World。生活 12 域（Feature Catalog 自动分类）：travel=出行, dining=餐饮, home=居家, finance=财务, health=健康, social=社交, media=娱乐, learning=学习, work=生产力, comms=通讯触达, self=自身, system=系统基础。",
+              "能力领域过滤。不传或传 'all' 返回全部宿主域；传具体域名仅返回该域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, self_programming=自我编程, agent_account=账号注册, embodiment=具身身体。",
           },
         },
         additionalProperties: false,

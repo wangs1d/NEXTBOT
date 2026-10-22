@@ -235,7 +235,7 @@ export class MemoryForgettingController {
   }
 
   /**
-   * 压缩梯度（纯函数，非 LLM）。
+   * 压缩梯度（纯函数，非 LLM）——「该忘的退得掉」读侧体现。
    *
    * - score >= 0.5：原样返回
    * - 0.3 <= score < 0.5：保留 80% 内容（按字符长度截断）
@@ -243,6 +243,8 @@ export class MemoryForgettingController {
    * - score < 0.1：保留 20% 内容（仅前 20% 字符 + "…"）
    *
    * 空文本直接返回空串。截断长度至少为 1 个字符。
+   * 2026-10-22 接入 MemoryCortex.finalizeRecallItems：低遗忘分召回条目
+   * 以残缺形式被想起（模拟记忆褪色），容量治理仍由 lifecycle TTL 两阶段遗忘承担。
    */
   compactRecallText(text: string, score: number): string {
     if (score >= 0.5) return text;

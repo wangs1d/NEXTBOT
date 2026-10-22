@@ -180,7 +180,6 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
     "tool_search",
     "tool_describe",
     "agent.query_capabilities",
-    "brain.list_capabilities",
     "self.list_custom_skills",
   ]);
   if (META_TOOL_NAMES.has(toolName)) return "";

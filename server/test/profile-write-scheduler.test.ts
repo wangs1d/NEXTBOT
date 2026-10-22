@@ -16,6 +16,7 @@ import { getTurnWalService, type TurnWalEntry } from "../src/services/turn-wal-s
 import { getCalendarDay } from "../src/services/short-term-memory-config.js";
 import {
   readWalProfileCandidates,
+  readWalTurns,
   consolidateProfileFromWal,
   loadProfileCheckpoint,
 } from "../src/services/profile-write-scheduler.js";
@@ -130,6 +131,8 @@ test("T2 consolidateProfileFromWal：消费候选 → 落位 → 推进 checkpoi
         // 输入应为 WAL 全文（非 120 字残片），且带当前画像上下文
         assert.ok(opts.profileContext.currentProfile.includes("用户画像"));
         assert.ok(_text.includes("我叫王铭川"));
+        // 预算补齐：非候选轮「今天不错」也应进入同一批输入
+        assert.ok(_text.includes("今天不错"), "非候选轮应经预算补齐进入夜间输入");
         return fakeExtraction([{ op: "ADD", section: "basic", line: "称呼：王铭川", match: undefined }]);
       },
     },
@@ -138,6 +141,7 @@ test("T2 consolidateProfileFromWal：消费候选 → 落位 → 推进 checkpoi
 
   assert.equal(stats.candidates, 3);
   assert.equal(stats.processed, 3);
+  assert.equal(stats.topUpProcessed, 1, "非候选轮应被预算补齐装进同一批");
   assert.equal(stats.opsCount, 1);
   assert.equal(stats.applied, true);
   assert.equal(stats.checkpointAdvanced, true);
@@ -219,6 +223,80 @@ test("T2 consolidateProfileFromWal：空产物也推进 checkpoint（避免每�
   );
   assert.equal(stats.opsCount, 0);
   assert.equal(stats.checkpointAdvanced, true);
+});
+
+test("T2 预算补齐：hint 漏标的画像陈述经非候选补位进入夜间输入", async () => {
+  const walDir = await mkdtemp(join(tmpdir(), "wal-topup-test-"));
+  const ckptFile = join(walDir, "checkpoint.json");
+  await mkdir(walDir, { recursive: true });
+  // 「我最近迷上了攀岩」模拟 hint 正则漏标（无 profileCandidate 标记）
+  await writeFile(
+    join(walDir, "2026-10-22.jsonl"),
+    [
+      JSON.stringify({ ts: "2026-10-22T01:00:00.000Z", actorId: "u1", userText: "早", profileCandidate: false }),
+      JSON.stringify({ ts: "2026-10-22T02:00:00.000Z", actorId: "u1", userText: "我最近迷上了攀岩", profileCandidate: false }),
+      JSON.stringify({ ts: "2026-10-22T03:00:00.000Z", actorId: "u1", userText: "我叫王铭川", profileCandidate: true }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+
+  const stats = await consolidateProfileFromWal(
+    "u1",
+    {
+      readProfile: () => "",
+      applyOps: async () => true,
+      extractFn: async (text) => {
+        assert.ok(text.includes("我最近迷上了攀岩"), "漏标陈述必须进夜间 LLM 输入");
+        return fakeExtraction([]);
+      },
+    },
+    { walDir, checkpointFile: ckptFile },
+  );
+  assert.equal(stats.candidates, 1);
+  assert.equal(stats.topUpProcessed, 2, "两条非候选（含漏标陈述）都应补位");
+  assert.equal(stats.checkpointAdvanced, true);
+
+  const ckpt = await loadProfileCheckpoint(ckptFile);
+  assert.equal(ckpt.actors["u1"], "2026-10-22T03:00:00.000Z", "checkpoint 推进到含补位在内的最后一条");
+});
+
+test("T2 纯闲聊天（零候选）：零 LLM + checkpoint 推进越过闲聊段（防扫描窗口无限增长）", async () => {
+  const walDir = await mkdtemp(join(tmpdir(), "wal-chitchat-test-"));
+  const ckptFile = join(walDir, "checkpoint.json");
+  await mkdir(walDir, { recursive: true });
+  await writeFile(
+    join(walDir, "2026-10-22.jsonl"),
+    [
+      JSON.stringify({ ts: "2026-10-22T01:00:00.000Z", actorId: "u1", userText: "哈哈", profileCandidate: false }),
+      JSON.stringify({ ts: "2026-10-22T02:00:00.000Z", actorId: "u1", userText: "是的呢", profileCandidate: false }),
+    ].join("\n") + "\n",
+    "utf8",
+  );
+
+  let llmCalls = 0;
+  const stats = await consolidateProfileFromWal(
+    "u1",
+    {
+      readProfile: () => "",
+      applyOps: async () => true,
+      extractFn: async () => {
+        llmCalls++;
+        return fakeExtraction([]);
+      },
+    },
+    { walDir, checkpointFile: ckptFile },
+  );
+  assert.equal(stats.candidates, 0);
+  assert.equal(llmCalls, 0, "零候选不得调 LLM");
+  assert.equal(stats.checkpointAdvanced, true, "checkpoint 应越过纯闲聊段");
+
+  const ckpt = await loadProfileCheckpoint(ckptFile);
+  assert.equal(ckpt.actors["u1"], "2026-10-22T02:00:00.000Z");
+
+  // readWalTurns：全部条目含 candidate 标志
+  const turns = await readWalTurns("u1", "", { walDir });
+  assert.equal(turns.length, 2);
+  assert.equal(turns.every((t) => t.candidate === false), true);
 });
 
 /* ── 顺手修回归 ───────────────────────────────────────────────── */

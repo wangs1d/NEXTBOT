@@ -45,7 +45,6 @@ import {
   getAgentRuntimeConfig,
 } from "../agent/agent-runtime-config.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
-import { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { createNarrativeMemoryPort, wrapNarrativeWithHybrid } from "../services/narrative-memory-port.js";
 import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hybrid-retrieval-service.js";
@@ -127,8 +126,6 @@ import {
   initDailyChatSyncService,
   getDailyChatSyncService,
 } from "../services/daily-chat-sync-service.js";
-import { compactObserveLine } from "../tokenjuice/compactor.js";
-import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
 import { SkillGenerator } from "../services/skill-generator.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
@@ -291,9 +288,8 @@ import {
   buildCatalogIntentRules,
   classifyFeatureByName,
 } from "../catalog/index.js";
-import { setFeatureCatalog } from "../agent/agent-capabilities.js";
 import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
-import { registerAgentLinkTools } from "../tools/agent-link-tools.js";
+import { registerAgentLinkTools, registerWorldStatusTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
@@ -509,7 +505,6 @@ import { runPlanExecuteLoop, type PlanExecuteLoopResult } from "../agent/plan-ex
 import { InboxService } from "../services/inbox-service.js";
 import { setBudgetAlertSink } from "../services/llm-budget-guard.js";
 import { ProactiveContactPolicyService } from "../services/proactive-contact-policy.js";
-import { setCapabilityCortex } from "../agent/agent-capabilities.js";
 // 主动性多元化模块（ProactivityHub）+ 节律感知（RhythmCore）+ 统一主动性管道
 import { ProactivityHub } from "../proactivity/proactivity-hub.js";
 import { InterestWatcher } from "../proactivity/interest-watcher.js";
@@ -1465,12 +1460,13 @@ export async function createAppServices(): Promise<AppServices> {
   // 须在 worldService 创建（L~1264）之后注册；oss 版剔除
   if (!isOssEdition()) {
     registerAgentLinkTools(toolRegistry, friendService, agentAccountService, worldService);
+    registerWorldStatusTools(toolRegistry, worldService, skillManager);
   }
   // Feature Catalog：能力分类统一层（分类视图，不注册能力）。
   // build() 在全部注册完成后调用（hookBus 段首次 + onReady 二次刷新，
   // MCP 工具异步加载，onReady 时已就绪）。
   const featureCatalog = new FeatureCatalog(toolRegistry, skillManager, mcpClientService);
-  registerCapabilityQueryTools(toolRegistry, { skillManager, worldService, virtualPhoneService, featureCatalog });
+  registerCapabilityQueryTools(toolRegistry, { skillManager, virtualPhoneService });
 
   // 本地内置向量引擎（零配置记忆底座）：没有任何远端 Embedding 端点时，
   // 在记忆系统装配前预热回环 /v1/embeddings；远端显式配置时完全不启动。
@@ -2015,14 +2011,6 @@ export async function createAppServices(): Promise<AppServices> {
     `[ShortTermMemory] mode=${stmConfig.mode}, wal=${stmConfig.walEnabled ? "on" : "off"}, digest=${stmConfig.digestEnabled ? "on" : "off"}, deferArchive=${stmConfig.deferTurnArchive ? "on" : "off"}, tz=${stmConfig.digestTimezone}`,
   );
 
-  const evolutionLoopService = new EvolutionLoopService(agentMemorySyncService, {
-    onObserveForNarrative: (actorId, line) => {
-      void (async () => {
-        const compacted = await compactObserveLine("evolution.observe", line);
-        await narrativeMemory?.ingest(actorId, compacted, "evolution:observe");
-      })().catch(() => {});
-    },
-  });
   worldService.setEvolutionHooks({
     onWorldCreditsCredited: (ev) => {
       agentMemorySyncService.appendMemorySummaryLine(
@@ -2701,19 +2689,16 @@ export async function createAppServices(): Promise<AppServices> {
     virtualPhoneService,
     scheduleTaskService,
     shortTermMemoryGateway,
-    featureCatalog,
   });
   const agentCore = createAgentCore({
     toolRegistry,
     externalChat,
     computeQuotaService,
     agentMemorySyncService,
-    evolutionLoopService,
     userPersonalizationService,
     worldService,
     skillManager,
     narrativeMemory,
-    trajectorySkillPromotion,
     virtualPhoneService,
     scheduleTaskService,
     shortTermMemoryGateway,
@@ -2951,7 +2936,6 @@ export async function createAppServices(): Promise<AppServices> {
     awarenessCortex.setPersistPath(join(process.cwd(), "data", "proactivity"));
     proactionCortex = new ProactionCortex();
     // CapabilityCortex：注入回 prompt builder（让能力域出现在 prompt 中）
-    setCapabilityCortex(capabilityCortex);
 
     // AwarenessCortex：注册生命信号子系统
     awarenessCortex.registerLifeSignalHub(lifeSignalHubService);
@@ -3111,7 +3095,6 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ── Feature Catalog：首次构建（覆盖至此已注册的工具/技能）并注入消费方 ──
   featureCatalog.build();
-  setFeatureCatalog(featureCatalog);
   // CATALOG_WRITE_DOCS=1 时把能力地图落盘到仓库 docs/（自动生成，勿手改）
   if (process.env.CATALOG_WRITE_DOCS === "1") {
     try {
@@ -4147,11 +4130,14 @@ export async function createAppServices(): Promise<AppServices> {
             synapseBus as unknown as import("../brain/memory-cognitive/memory-forgetting-controller.js").SynapseBusLike,
           );
         }
+        const salienceFilter = new MemorySalienceFilter();
+        const experienceLearningLoop = new MemoryExperienceLearningLoop();
+        // 图式形成（记忆建立联系）：同 sceneTag 经验 ≥3 条时 LCS 抽取公共步骤；
+        // 2026-10-22 重新接线——写入侧由 MemoryCortex.scheduleSchemaFormation 触发，
+        // 读出侧 recall 匹配图式返回 schemaHint。
         const schemaFormation = new MemorySchemaFormation({
           humanLike: humanLikeMemory as unknown as import("../brain/memory-cognitive/memory-schema-formation.js").HumanLikeMemorySchemaLike,
         });
-        const salienceFilter = new MemorySalienceFilter();
-        const experienceLearningLoop = new MemoryExperienceLearningLoop();
         // 生活模型持久化（P0 接线）：图式写入 life_patterns、经验/信念写入
         // life_episodes/life_beliefs，否则原纯内存 Map 重启即失。未初始化时跳过。
         if (lifeModelStore) {
@@ -4160,7 +4146,7 @@ export async function createAppServices(): Promise<AppServices> {
         }
 
         // 推理引擎（多线索交叉推理）：BRAIN_MEMORY_INFERENCE_ENABLED 缺省开启
-        // 注入依赖：humanLikeMemory（读节点 + 回写）+ associativeGraph（扩散）+ schemaFormation（图式匹配）
+        // 注入依赖：humanLikeMemory（读节点 + 回写）+ associativeGraph（扩散）
         // 关闭时不实例化，MemoryCortex.inferFromClues 始终返回空结果（优雅降级）
         let inferenceEngine: MemoryInferenceEngine | null = null;
         const inferenceEnabled = !["0", "false", "off"].includes(
@@ -4210,7 +4196,6 @@ export async function createAppServices(): Promise<AppServices> {
           inferenceEngine = new MemoryInferenceEngine({
             humanLike: inferenceHumanLike,
             associativeGraph,
-            schemaFormation: schemaFormation as unknown as import("../brain/memory-cognitive/memory-inference-engine.js").MemorySchemaFormationLike,
             emotionModulator,
             ruleLearner,
             analogyMigrator,
@@ -4277,6 +4262,10 @@ export async function createAppServices(): Promise<AppServices> {
         memoryCortex.registerAssociationSynthesizer(
           createMemoryAssociationSynthesizer(),
         );
+
+        // 图式形成注册（2026-10-22 重新接线）：写入侧 scheduleSchemaFormation 触发抽取，
+        // 读出侧 recall 经 attachSchemaHint 返回图式提示（此前实例化后从未 register）。
+        memoryCortex.registerSchemaFormation(schemaFormation);
 
         // ─── 记忆模块整体优化装配（P0/P1/P2）──────────────────────────
         // P0-1 用户画像聚合器：USER_PROFILE.md 动态更新（对话内 LLM 结构化抽取
@@ -4388,44 +4377,11 @@ export async function createAppServices(): Promise<AppServices> {
     // 注册 brain.* 工具到 ToolRegistry，并把 schema 暴露给 LLM。
     // brainCenter 为 null 时（brain 未启用），registerBrainTools 不会注册任何 handler，
     // setBrainChatTools 也不会被调用，BRAIN_TOOLS schema 不进入 LLM 可见列表。
-    registerBrainTools(toolRegistry, brainCenter, (name) => {
-      // 先从 builtin chat tools 找 schema
-      const builtin = getBuiltinAgentChatTools().find(
-        (t) => t.type === "function" && t.function?.name === name,
-      );
-      if (builtin) return builtin;
-      // 找不到再从 SkillManager 找（self-programming / 社区 skill）
-      const sm = toolRegistry.getSkillManager?.();
-      if (sm) {
-        const manifest = sm.list(true).find((m) => m.name === name);
-        if (manifest) {
-          const properties: Record<string, unknown> = {};
-          const required: string[] = [];
-          for (const p of manifest.parameters) {
-            properties[p.name] = {
-              type: p.type,
-              description: p.description ?? "",
-              ...(p.enum ? { enum: p.enum } : {}),
-              ...(p.default !== undefined ? { default: p.default } : {}),
-            };
-            if (p.required) required.push(p.name);
-          }
-          return {
-            type: "function" as const,
-            function: {
-              name: manifest.name,
-              description: manifest.description,
-              parameters: { type: "object", properties, required },
-            },
-          };
-        }
-      }
-      return null;
-    });
+    registerBrainTools(toolRegistry, brainCenter);
     setBrainChatTools(BRAIN_TOOLS);
 
     // ─── 把 ToolRegistry 已注册工具名注入 CapabilityCortex ───
-    // 让 brain.list_capabilities / introspect 返回的 descriptor.tools 是真实工具名，
+    // 让 introspect 返回的 descriptor.tools 是真实工具名，
     // 而非 loadSeed 时的空数组。必须在所有 registerXxxTools 完成后调用。
     if (capabilityCortex) {
       // 先从 capability-modules 自动派生 domain → toolNames 映射，

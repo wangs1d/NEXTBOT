@@ -35,7 +35,6 @@ import { getTaskPlanStore, taskPlanKey } from "./task-plan-store.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
-import { shouldRecallLongTerm } from "./recall-gate.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import type { PersonalityCore } from "../brain/types.js";
 import type {
@@ -44,13 +43,10 @@ import type {
   ToolLoopAfterBatchInfo,
 } from "../external-model/types.js";
 import type { PersonalizationPromptSlice } from "../services/user-personalization/user-personalization-service.js";
-import { dedupeMemoryLines, semanticFingerprint, contentTokenSet, tokenOverlapRatio } from "../services/memory-record-utils.js";
+import { dedupeMemoryLines, semanticFingerprint } from "../services/memory-record-utils.js";
 import { markInjectedMemory } from "../services/memory-echo-guard.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
-import type { FeatureCatalog } from "../catalog/index.js";
 import { redactSensitiveText } from "../utils/redact.js";
-
-const WORLD_CACHE_TTL_MS = 5_000;
 
 /**
  * 追问锚点块（2026-10-10 语义化重写）：由模型判定的 reference 驱动。
@@ -76,37 +72,8 @@ function buildFollowUpAnchorFromUnderstanding(
 }
 
 /**
- * STM 会话情景记忆 与 journal 当日日志检索 双轨去重（P0-3）。
- * 同一批"今天早些时候的对话"可能同时出现在 STM（延续/指代轮注入原文，保真度高）
- * 与 journal 命中里。过滤掉与 STM 上下文词法重叠 ≥ 0.7 的 journal 行，
- * 只保留 STM 没覆盖的（跨 session / 更早时间段）行，防止同一内容双份注入导致重复/串台。
- * 无法解析的裸行（非 "[time role] content" 格式）原样保留。
- */
-function dedupeJournalVsStm(journalRecall?: string, stmContext?: string): string | undefined {
-  if (!journalRecall || !stmContext) return journalRecall;
-
-  const stmTokens = contentTokenSet(stmContext);
-  const kept: string[] = [];
-  for (const line of journalRecall.split("\n")) {
-    const t = line.trim();
-    if (!t) {
-      continue;
-    }
-    // journal 行格式为 "[标签 时间·角色] 内容"，取第一个 ] 之后作为内容做词汇重叠比对
-    const content = t.startsWith("[") ? t.slice(t.indexOf("]") + 1).trim() : t;
-    if (!content) {
-      kept.push(line);
-      continue;
-    }
-    const overlap = tokenOverlapRatio(contentTokenSet(content), stmTokens);
-    if (overlap < 0.7) {
-      kept.push(line);
-    }
-  }
-  return kept.length > 0 ? kept.join("\n") : undefined;
-}
-
-/**
+ * STM 会话情景记忆注入由 shortTermMemoryGateway.buildPromptContext 承担。
+ *//**
  * 从 `userLocation` 注入串（如「…，时区 Asia/Shanghai。…」）提取用户 IANA 时区。
  * 抽不出则返回 undefined，调用方回退到服务器进程时区。
  */
@@ -147,75 +114,20 @@ export function buildDeviceEnvironmentBlock(
 }
 
 /**
- * 人格层能力自述块。
+ * 人格层行为约束块（2026-10-22 复审：能力总览不再进 prompt）。
  *
- * 能力总览不再手写枚举（手写必然过时——agent 会照着旧清单否认自己其实有的能力，
- * 如「邮箱接不进来」事故），而是从 FeatureCatalog（启动时汇聚真实工具注册表/skill/
- * MCP 自动生成）派生：项目新增能力注册即自动出现在这里，无需改任何 prompt。
+ * 原实现把 FeatureCatalog 的 12 生活域总览（每域 5 个工具名）+「调用
+ * agent.query_capabilities」的场景映射注入每轮 prompt——违反红线 1（prompt
+ * 禁写工具名与场景映射），且与环 2 域卡 / 环 3 tool_discover 职责重复。
+ * 能力发现统一归 L2 域卡 + tool_discover；本块只保留与工具无关的行为约束。
  */
-function buildCompactAgentCapsPrompt(featureCatalog?: FeatureCatalog | null): string {
-  const lines: string[] = [];
-  if (featureCatalog) {
-    lines.push(...featureCatalog.toPromptLines());
-  } else {
-    lines.push(
-      "【能力概览】你是主 Agent，可直接处理日常对话，并按需调用时间、天气、搜索、日程、钱包、社交与 Agent World 相关工具。",
-    );
-  }
-  lines.push(
+function buildAgentBehaviorPrompt(): string {
+  return [
     "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务交给后台任务执行流程处理。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
-    "【真人感·行动宣告】本轮要调信息型/动作型工具（搜索、查日程、查余额、下单、派后台任务等）时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），只说这一句就立刻调用工具——不要在调用工具之前展开思考、分析、列计划或自我讨论，那些内容一律不要写给用户；然后在同一回合基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。档案/记忆类写入（profile.update、interest.manage 等）静默执行，不需要宣告，也不需要向用户交代写入过程。",
-    "以上能力总览来自真实装配的工具注册表——没列出的能力可先用 agent.query_capabilities 查询确认，不要凭印象断言自己没有某能力。",
-  );
-  return lines.join("\n");
-}
-
-const WORLD_DOMAIN_RULES: Array<{ domains: CapabilityDomain[]; pattern: RegExp }> = [
-  { domains: ["world"], pattern: /agent world|world\.|free_market|open_registry|世界点数|点数|技能商店|注册|市场/i },
-  { domains: ["social_feed", "world"], pattern: /社交|推文|帖子|动态|评论|点赞|social/i },
-  { domains: ["aip", "world"], pattern: /aip|提案|协议|联盟|投票/i },
-];
-
-interface WorldCacheEntry {
-  data: {
-    registered: boolean;
-    credits: number;
-    ownedSkillIds: string[];
-  };
-  at: number;
-}
-
-const worldCacheByActor = new Map<string, WorldCacheEntry>();
-
-function getCachedWorldState(worldService: WorldService, actorId: string): WorldCacheEntry["data"] {
-  const now = Date.now();
-  const cached = worldCacheByActor.get(actorId);
-  if (cached && now - cached.at < WORLD_CACHE_TTL_MS) {
-    return cached.data;
-  }
-  const state = worldService.getOrCreateRoom(actorId, actorId);
-  const data = {
-    // 有效注册：世界挑战注册 或 宿主已注册账号（另一处登录不重走注册）
-    registered: worldService.isAgentWorldRegistered(actorId),
-    credits: state.agentWorldCredits,
-    ownedSkillIds: state.ownedSkillIds,
-  };
-  worldCacheByActor.set(actorId, { data, at: now });
-  return data;
-}
-
-function detectRelevantCapabilityDomains(userText: string | undefined): CapabilityDomain[] {
-  const text = userText?.trim() ?? "";
-  if (!text) return [];
-  const detected = new Set<CapabilityDomain>();
-  for (const rule of WORLD_DOMAIN_RULES) {
-    if (!rule.pattern.test(text)) continue;
-    for (const domain of rule.domains) {
-      if (domain !== "all") detected.add(domain);
-    }
-  }
-  return [...detected];
+    "【真人感·行动宣告】本轮要调信息型/动作型工具时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），只说这一句就立刻调用工具——不要在调用工具之前展开思考、分析、列计划或自我讨论，那些内容一律不要写给用户；然后在同一回合基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。档案/记忆类写入静默执行，不需要宣告，也不需要向用户交代写入过程。",
+    "【能力边界】本块不含完整工具清单；不确定自己有没有某能力时，先用工具目录检索确认，不要凭印象断言。",
+  ].join("\n");
 }
 
 function compactPromptBlock(
@@ -414,26 +326,9 @@ export type BuildPromptContextInput = {
    * 缺省 undefined 时快照门控退化为仅文本线索触发（保守，不误判新会话）。
    */
   threadMessageCount?: number;
-  /**
-   * #1 统一门控单点（串台根治）：由 agent-core 在决策层计算并透传——
-   * 等于「召回未触发 ∥ topic_switch 抑制」。为 true 时，KV 长期字段
-   * (memory_facts/preferences/commitments/open_loops/session_recap/
-   * memory_current_mission/memory_summary) 与图谱 narrativeRecall 走同一
-   * 白名单，话题切换时不注入任何跨会话长期记忆（persona 稳定人设除外）。
-   */
-  longTermRecallSuppressed?: boolean;
-  /**
-   * 向量预筛命中（P0-4）：agent-core 侧 regex 白名单未触发，但廉价向量检索
-   * 判定当前话题与长期记忆强相关（top1 ≥ 阈值）。为 true 时与白名单命中等效，
-   * 放行 KV 长期字段与图谱召回（topic_switch 抑制仍然优先）。
-   */
-  semanticRecallHit?: boolean;
-  /**
-   * recall-gate 白名单判定结果（门控单点化）：cognize 已用完整输入评估过，
-   * agent-core 透传至此。提供时不再本地重评 shouldRecallLongTerm（消除
-   * 多处独立评估的漂移空间）；缺省时保持本地评估（向后兼容其他调用方）。
-   */
-  recallGateTriggered?: boolean;
+  // v3 门控字段（longTermRecallSuppressed / semanticRecallHit / recallGateTriggered）
+  // 已随 agent-core recallGate 管道拆除（2026-10-22）：KV 长期字段注入在 assembleMemory
+  // 内按 v3 常量语义（longTermEnabled=false）固化，长期检索统一走 brain.recall 工具。
   /**
    * 本轮语义理解标记（2026-10-10 词表判定退役）：L1 路由 LLM 产出的追问锚定/
    * 记忆召回/日程/旅行等语境标记。追问锚点、scheduleSnapshot、travelState、
@@ -453,14 +348,6 @@ export type BuildPromptContextInput = {
    * 作为独立块注入，"非用户最新指令"提示由 buildLayeredSystemPrompt 统一添加。
    */
   recentConversationHistory?: string;
-  /**
-   * 当日对话日志检索命中（DailyJournalService.searchToday 结果，短期记忆）。
-   * 只扫当天；过往日期已固化进长期记忆图，跨天由图谱/KV 召回兜底。
-   * 作为独立块注入——拼进 narrativeRecall 会被 formatNarrativeRecallPrompt
-   * 的条目上限/免责头过滤/字符压缩拍平（workingMemorySummary 同款旧 bug）。
-   * 与 STM 会话情景记忆是双轨（同一批对话两处都可能命中），组装端做指纹去重。
-   */
-  journalRecall?: string;
   onToolLoopAfterBatch?: (info: ToolLoopAfterBatchInfo) => void;
   /** 深度优化：用户画像（来自 OnlineLearningCortex），注入 prompt 让 LLM 感知用户偏好/习惯/否定模式 */
   userPattern?: {
@@ -519,7 +406,6 @@ function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContex
     ) {
       stable[key] = value;
     } else if (
-      key === "worldCaps" ||
       key === "userProfile" ||
       key === "userProfileSummary" ||
       key === "memorySummary" ||
@@ -564,7 +450,6 @@ export class PromptContextBuilder {
       virtualPhoneService: VirtualPhoneService | null;
       scheduleTaskService?: ScheduleTaskService | null;
       shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
-      featureCatalog?: FeatureCatalog | null;
     },
   ) {}
 
@@ -636,13 +521,12 @@ export class PromptContextBuilder {
     const layers = pickPromptContextLayers(this.assembleMemory(input));
     const memory = flattenPromptContextLayers(layers);
     // #7 记忆注入审计日志（诊断用，可 grep "mem-inject-audit"）：记录本轮实际注入了哪些
-    // 记忆块、是否被统一门控抑制（topic_switch/未触发），便于定位每次"串台"由哪一块引起。
+    // 记忆块。v3 起长期注入只走恒驻速览 + brain.recall，门控字段已随 recallGate 管道拆除。
     if (memory) {
-      const gated = input.longTermRecallSuppressed ? "suppressed" : "allowed";
       const injected = (Object.keys(memory) as (keyof AgentPromptMemoryContext)[])
         .filter((k) => memory[k] != null && memory[k] !== "")
         .join(",");
-      console.log(`[mem-inject-audit] actor=${input.actorId} gate=${gated} injected=[${injected}]`);
+      console.log(`[mem-inject-audit] actor=${input.actorId} injected=[${injected}]`);
     }
     const hasMemory = this.hasMemoryContent(memory);
     const chatToolsExtra = this.sessionSkillTools(input.actorId);
@@ -673,23 +557,12 @@ export class PromptContextBuilder {
     const digestService = getDailyDigestService();
     const memoryManager = getMemoryManagerService();
 
-    // 长期记忆注入门控（记忆架构重构，单一开关）：memoryContinuity / relationshipMemory /
-    // lifeThemeMemory / dreamMemory / yesterdayHighlight / KV 长期字段这类"历史整理快照"
-    // 每轮无条件注入是串台根因（昨天/前天的对话被当成当前上下文）。
-    // 统一走 recall-gate 白名单：新会话开场（仅本 session 首条用户消息）/ 显式记忆线索 /
-    // 个人事实陈述 / 长会话指代升级时才注入，且未被 topic_switch 抑制。
-    // 未命中时只保留稳定人设（persona/values/abilities），长期记忆交给 brain.recall
-    // 工具按需检索（结果以 tool 消息进上下文，身份隔离天然防串台）。
-    const longTermEnabled =
-      !input.longTermRecallSuppressed &&
-      // 门控单点化：cognize 评估的判定结果直接复用；未透传时本地评估（兼容其他调用方）
-      (input.recallGateTriggered ??
-        shouldRecallLongTerm({
-          text: userText,
-          threadMessageCount: input.threadMessageCount,
-          understanding: turnUnderstanding,
-        }).trigger) ||
-      input.semanticRecallHit === true;
+    // 长期记忆注入门控（v3 常量语义，2026-10-22 固化）：memoryContinuity /
+    // relationshipMemory / lifeThemeMemory / dreamMemory / yesterdayHighlight /
+    // KV 长期字段这类"历史整理快照"不再随轮注入（v3 起 agent-core 透传的门控
+    // 三字段恒为 suppressed，本处将其折叠为常量 false，消除恒定死分支）。
+    // 长期记忆统一走两条有意路径：恒驻速览（结构化事实块）+ brain.recall 工具。
+    const longTermEnabled = false;
 
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
@@ -739,26 +612,9 @@ export class PromptContextBuilder {
       }
     }
 
-    const agentCaps =
-      config.memoryPrompt.agentCapsInPrompt &&
-      (this.deps.featureCatalog || this.deps.skillManager)
-        ? buildCompactAgentCapsPrompt(this.deps.featureCatalog)
-        : undefined;
-
-    const relevantDomains = detectRelevantCapabilityDomains(userText);
-    let worldCaps: string | undefined;
-    if (
-      this.deps.worldService &&
-      config.memoryPrompt.worldCapsInPrompt &&
-      relevantDomains.includes("world")
-    ) {
-      const ws = getCachedWorldState(this.deps.worldService, input.actorId);
-      const ownedSkills = ws.ownedSkillIds.length ? ws.ownedSkillIds.join("、") : "（无）";
-      worldCaps = [
-        `【Agent World】注册：${ws.registered ? "已注册" : "未注册"}｜点数：${ws.credits}｜技能：${ownedSkills}`,
-        "需要完整世界状态、商店、市场或 world.* 工具细节时，调用 agent.query_capabilities(domain='world')。",
-      ].join("\n");
-    }
+    const agentCaps = config.memoryPrompt.agentCapsInPrompt
+      ? buildAgentBehaviorPrompt()
+      : undefined;
 
     // 压缩为一句指令（原头尾两段长指令 ~120 字符，语义不变）。
     const interruptedContext = input.interruptedContext?.trim()
@@ -834,14 +690,8 @@ export class PromptContextBuilder {
             shortTermTaskContextLimit,
           )
         : undefined;
-    // 当日日志检索块：独立注入（不拼 narrativeRecall，防 formatNarrativeRecallPrompt 拍平）。
-    // 与 STM 会话情景记忆双轨去重：同一批今天早些时候的对话，STM（延续/指代轮注入原文、
-    // 保真度高）优先保留；journal 命中与 STM 词汇重叠 ≥ 0.7 的行剔除，只留 STM 没覆盖的
-    // （跨 session / 更早时间段的行）。
-    const journalRecall = compactPromptBlock(
-      dedupeJournalVsStm(input.journalRecall, shortTermTaskContext),
-      700,
-    );
+    // 当日日志检索块已随 agent-core recallGate 管道拆除（2026-10-22）：
+    // journal 搜索自 v3 起从未随门控运行（恒空），不再保留装配分支。
     // 2026-09-06：聊天路径不再并入全局 Agent 风格指纹（agent-style-profile，
     // 固定平均句长/语气词）——全局固定指纹与"语感跟着用户走"直接打架。
     // 主动消息路径（create-app-services PROACTIVE_SYSTEM_PROMPT）继续使用它。
@@ -1079,15 +929,12 @@ export class PromptContextBuilder {
         ? { relationshipGuidance: input.personalization.relationshipGuidance }
         : {}),
       ...(agentCaps ? { agentCaps } : {}),
-      ...(worldCaps ? { worldCaps } : {}),
       ...(dedupedNarrativeRecall
         ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
       // 工作记忆 / 最近对话回顾：独立块，不参与跨字段语义去重（结构化上下文，非召回条目）
       ...(workingMemorySummary ? { workingMemorySummary } : {}),
       ...(recentConversationHistory ? { recentConversationHistory } : {}),
-      // 当日对话日志检索：当天 md 承载的对话历史，注入供 agent 读取当前对话历史（短期记忆）
-      ...(journalRecall ? { journalRecall } : {}),
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
       ...(userProfileSummary ? { userProfileSummary } : {}),
       ...(onboardingHint ? { onboardingHint } : {}),
@@ -1337,7 +1184,6 @@ export class PromptContextBuilder {
       Boolean(memory.abilities) ||
       Boolean(memory.memorySummary) ||
       Boolean(memory.agentCaps) ||
-      Boolean(memory.worldCaps) ||
       Boolean(memory.narrativeRecall) ||
       Boolean(memory.dailyDigest) ||
       Boolean(memory.memoryPreferences) ||

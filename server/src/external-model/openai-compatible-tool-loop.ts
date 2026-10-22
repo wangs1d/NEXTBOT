@@ -286,8 +286,6 @@ const META_TOOL_NAMES = new Set<string>([
   "tool_search",
   "tool_describe",
   "agent.query_capabilities",
-  "brain.list_capabilities",
-  "brain.identify_capability_gap",
   "self.list_custom_skills",
   "aip.list_my_state",
 ]);
@@ -1447,7 +1445,6 @@ export function buildToolCategoryMappings(
 const ALWAYS_INCLUDED_TOOLS = [
   'clock.get_current_time',
   'agent.query_capabilities',
-  'brain.list_capabilities',
   'phone.call_user',
   // ObservationPack 读回工具：压缩/折叠损失的原文按句柄分页读回（SoL-Pi 借鉴）。
   // 常驻保证会话内 schema 集稳定（不随是否出现归档而抖动，保护前缀缓存）。
@@ -1639,8 +1636,7 @@ export function selectRelevantTools(
     const FALLBACK_PRIORITY = [
       "clock.get_current_time",
       "agent.query_capabilities",
-      "brain.list_capabilities",
-      "search_web",
+          "search_web",
       "calendar.list_tasks",
       "wallet.get_balance",
       "phone.call_user",

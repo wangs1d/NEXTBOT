@@ -209,7 +209,7 @@ export class ToolRegistry {
 
   /**
    * 获取已注入的 SkillManager（可能未注入，返回 undefined）。
-   * 用于需要查询 skill schema 的场景（如 brain.list_capabilities include_schema）。
+   * 用于需要查询 skill schema 的场景（如能力自省带 schema 输出）。
    */
   getSkillManager(): SkillManager | undefined {
     return this.skillManager;

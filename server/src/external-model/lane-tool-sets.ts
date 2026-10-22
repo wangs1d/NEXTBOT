@@ -207,8 +207,8 @@ export function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTo
  *
  * 2026-10-22 定稿（架构文档 5.1.4）：环 1 常驻工具**一律全量 schema**——
  * BFCL 实测 62% 的失败在参数层，常驻工具是模型零往返直调的主战场，在
- * 这里剥字段级描述等于主动缴械（原 CHAT_FULL_SCHEMA_NAMES 白名单机制
- * 退役，留名以便回滚参考）。token 靠环 2 域卡紧凑与环 3 按需发现省。
+ * 这里剥字段级描述等于主动缴械（原 CHAT_FULL_SCHEMA_NAMES 白名单机制已随
+ * 死代码删除）。token 靠环 2 域卡紧凑与环 3 按需发现省。
  */
 export function buildLaneCoreTools(
   lane: LaneId,

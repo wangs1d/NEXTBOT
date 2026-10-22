@@ -4,7 +4,7 @@ import { HIGH_RISK_TOOL_REASON, isHighRiskToolName } from "../services/agent-tas
 /**
  * RuntimeKernel prompt 模式：
  * - legacy              保持旧式完整 prompt（包括身份/工具说明/记忆等全部字段）
- * - dynamic             剥离 stable 字段（persona/values/abilities/agentCaps/worldCaps/personalityCore 等），保留动态上下文（taskContext/memorySummary/currentTime 等）
+ * - dynamic             剥离 stable 字段（persona/values/abilities/agentCaps/personalityCore 等），保留动态上下文（taskContext/memorySummary/currentTime 等）
  * - conversation_only   仅保留 microPrompt + taskContext，其余全部剥离；同时 maxThreadMessages 收紧
  * - minimal             真正"层 A 不进 prompt"模式：只保留本轮对话必需的最小动态字段（taskContext/memorySummary/currentTime/narrativeRecall/scheduleSnapshot/interruptedContext），
  *                       身份/价值观/能力/工具说明/风格/时间戳说明全部下沉到 state 不发；身份由 buildSessionSystem 在会话首条 system 一次性注入

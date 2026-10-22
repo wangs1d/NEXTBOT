@@ -41,7 +41,6 @@ export type PlanExecuteConfig = {
 export type MemoryPromptConfig = {
   narrativeRecallTimeoutMs: number;
   agentCapsInPrompt: boolean;
-  worldCapsInPrompt: boolean;
   promptMemoryKeys: string[] | null;
   taskContextInPrompt: boolean;
 };
@@ -143,12 +142,7 @@ function loadMemoryPromptConfig(): MemoryPromptConfig {
     agentCapsRaw === "no"
   );
 
-  const capsRaw = process.env.AGENT_PROMPT_WORLD_CAPS?.trim().toLowerCase();
-  const worldCapsInPrompt =
-    capsRaw === "1" ||
-    capsRaw === "on" ||
-    capsRaw === "true" ||
-    capsRaw === "yes";
+  // worldCaps prompt 注入已删（2026-10-22）：世界状态归专属工具 world.status。
 
   return {
     // narrativeRecallTimeoutMs：默认 3000ms、上限 6000ms。
@@ -160,7 +154,6 @@ function loadMemoryPromptConfig(): MemoryPromptConfig {
       Math.max(200, envPositiveInt(process.env.AGENT_NARRATIVE_RECALL_TIMEOUT_MS, 3000)),
     ),
     agentCapsInPrompt,
-    worldCapsInPrompt,
     promptMemoryKeys,
     taskContextInPrompt: process.env.AGENT_TASK_CONTEXT_PROMPT !== "0",
   };
@@ -231,7 +224,6 @@ export function formatAgentRuntimeConfigSummary(config: AgentRuntimeConfig): str
     m.enabled ? `retry=${m.retryEnabled ? "on" : "off"}` : null,
     `planExecute=${pe.enabled ? "on" : "off"}`,
     `agentCapsPrompt=${config.memoryPrompt.agentCapsInPrompt ? "on" : "off"}`,
-    `worldCapsPrompt=${config.memoryPrompt.worldCapsInPrompt ? "on" : "off"}`,
     config.memoryPrompt.promptMemoryKeys
       ? `uapMemoryKeys=${config.memoryPrompt.promptMemoryKeys.length}`
       : "uapMemoryKeys=off",

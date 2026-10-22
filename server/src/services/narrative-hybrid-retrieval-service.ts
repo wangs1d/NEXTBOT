@@ -158,8 +158,7 @@ export class NarrativeHybridRetrievalService {
    *
    * opts.skipVector：文本短于切块阈值且上游已有 bridge 融合召回（Mem0 向量 ×
    * 认知图 × FTS）时，SQLite 向量索引与 Mem0 collection 内容高度重复，跳过可
-   * 省掉一次 embedding API 与一份向量存储；BM25 仍照常增量写入，
-   * lexicalPreScreen 的覆盖范围不受影响。
+   * 省掉一次 embedding API 与一份向量存储；BM25 仍照常增量写入。
    */
   async ingest(
     actorId: string,
@@ -273,18 +272,6 @@ export class NarrativeHybridRetrievalService {
   /** 格式化融合结果，注入 system 叙事块 */
   async buildNarrativeRecall(actorId: string, query: string): Promise<string> {
     return formatHybridRecall(await this.recallChunks(actorId, query));
-  }
-
-  /**
-   * 词法预筛分数（0~1 归一，供 recall-gate 的廉价放行通道使用）。
-   * 纯进程内 BM25，零 embedding 开销；归一方式与短期记忆网关一致（raw/(raw+3)）。
-   */
-  async lexicalPreScreen(actorId: string, query: string): Promise<number> {
-    const q = query.trim().replace(/\s+/g, " ");
-    if (!q) return 0;
-    await this.ensureBmRehydrated(actorId);
-    const top = this.bm(actorId).search(q, 1)[0]?.score ?? 0;
-    return top > 0 ? top / (top + 3) : 0;
   }
 }
 

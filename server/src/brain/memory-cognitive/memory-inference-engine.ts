@@ -22,7 +22,6 @@ import type {
   InferenceClue,
   InferenceNode,
   InferenceResult,
-  SchemaMatchResult,
 } from "../types.js";
 import type { MemoryAssociativeGraph } from "./memory-associative-graph.js";
 import type { EmotionState, InferenceEmotionModulator } from "./memory-inference-emotion-modulator.js";
@@ -60,20 +59,6 @@ export interface HumanLikeMemoryInferenceLike {
   }>;
   /** 回写推理结论为新节点（高置信时调用） */
   ingestInferredNode?(actorId: string, node: InferenceNode): void;
-}
-
-/**
- * MemorySchemaFormation 的最小化外观接口。
- *
- * 用于推理结论匹配已抽取图式时增加置信度加成。
- */
-export interface MemorySchemaFormationLike {
-  /** 匹配已抽取的图式（用于置信度加成） */
-  matchSchema(situation: {
-    sceneTag?: string;
-    keywords?: string[];
-    summary?: string;
-  }): SchemaMatchResult | null;
 }
 
 // ============================================================
@@ -133,8 +118,6 @@ interface InferenceEngineConfig {
   convergenceBonus: number;
   /** 因果链完整加成（BRAIN_MEMORY_INFERENCE_CAUSAL_BONUS，缺省 0.2） */
   causalChainBonus: number;
-  /** 图式匹配加成（BRAIN_MEMORY_INFERENCE_SCHEMA_BONUS，缺省 0.15） */
-  schemaMatchBonus: number;
   /** 反例惩罚（BRAIN_MEMORY_INFERENCE_COUNTER_PENALTY，缺省 0.3） */
   counterExamplePenalty: number;
 }
@@ -157,7 +140,6 @@ function loadConfig(): InferenceEngineConfig {
     writebackThreshold: num("BRAIN_MEMORY_INFERENCE_WRITEBACK_THRESHOLD", 0.6),
     convergenceBonus: num("BRAIN_MEMORY_INFERENCE_CONVERGENCE_BONUS", 0.15),
     causalChainBonus: num("BRAIN_MEMORY_INFERENCE_CAUSAL_BONUS", 0.2),
-    schemaMatchBonus: num("BRAIN_MEMORY_INFERENCE_SCHEMA_BONUS", 0.15),
     counterExamplePenalty: num("BRAIN_MEMORY_INFERENCE_COUNTER_PENALTY", 0.3),
   };
 }
@@ -252,7 +234,6 @@ function tokenize(text: string): string[] {
 export class MemoryInferenceEngine {
   private readonly humanLike: HumanLikeMemoryInferenceLike | null;
   private readonly associativeGraph: MemoryAssociativeGraph | null;
-  private readonly schemaFormation: MemorySchemaFormationLike | null;
   /** 规则集（按注册顺序） */
   private readonly rules: InferenceRule[] = [];
   /** 推理结论缓存：key = `${actorId}::${conclusionHash}` */
@@ -274,7 +255,6 @@ export class MemoryInferenceEngine {
   constructor(opts: {
     humanLike?: HumanLikeMemoryInferenceLike | null;
     associativeGraph?: MemoryAssociativeGraph | null;
-    schemaFormation?: MemorySchemaFormationLike | null;
     // 4 项仿人推理能力扩展（全部可选，未注入时行为与升级前完全一致）
     emotionModulator?: InferenceEmotionModulator | null;
     ruleLearner?: RuleLearner | null;
@@ -298,7 +278,6 @@ export class MemoryInferenceEngine {
   } = {}) {
     this.humanLike = opts.humanLike ?? null;
     this.associativeGraph = opts.associativeGraph ?? null;
-    this.schemaFormation = opts.schemaFormation ?? null;
     this.emotionModulator = opts.emotionModulator ?? null;
     this.analogyMigrator = opts.analogyMigrator ?? null;
     // ruleLearner：优先用传入的；未传入但 llmInducer 已注入且 humanLike 可用 → 自动创建
@@ -676,7 +655,6 @@ export class MemoryInferenceEngine {
         cluesWeight: normalizedClues.reduce((sum, c) => sum + (c.weight ?? 1.0), 0),
         hasConvergence,
         causalChainComplete: this.checkCausalChain(actorId, matched.clueA.text, matched.clueB.text),
-        schemaMatch: this.matchSchemaForConclusion(conclusion, candidateClues),
         hasCounterExample: this.checkCounterExample(candidateNodes, conclusion),
       });
 
@@ -862,7 +840,6 @@ export class MemoryInferenceEngine {
    *   + 线索数量加成：clues.length >= 2 → +0.1, >= 3 → +0.2
    *   + 扩散汇合加成：若两条线索的扩散节点有交集 → +0.15
    *   + 因果链完整加成：若能在记忆图中找到 A→B→C 完整路径 → +0.2
-   *   + 图式匹配加成：若结论匹配已存 schema → +0.15
    *   - 反例惩罚：若记忆中有反例节点 → -0.3
    *   最终 clamp 到 [0, 1]
    */
@@ -872,7 +849,6 @@ export class MemoryInferenceEngine {
     cluesWeight: number;
     hasConvergence: boolean;
     causalChainComplete: boolean;
-    schemaMatch: SchemaMatchResult | null;
     hasCounterExample: boolean;
   }): number {
     const cfg = loadConfig();
@@ -893,11 +869,6 @@ export class MemoryInferenceEngine {
     // 因果链完整加成
     if (params.causalChainComplete) {
       conf += cfg.causalChainBonus;
-    }
-
-    // 图式匹配加成
-    if (params.schemaMatch) {
-      conf += cfg.schemaMatchBonus;
     }
 
     // 反例惩罚
@@ -949,24 +920,6 @@ export class MemoryInferenceEngine {
     }
     // 用线索文本兜底：若两条线索本身就构成因果叙述，视为链完整
     return /导致|引起|造成|因为.*所以|结果|因此/.test(`${clueA} ${clueB}`);
-  }
-
-  /**
-   * 匹配已存 schema 以增加置信度加成。
-   */
-  private matchSchemaForConclusion(
-    conclusion: string,
-    candidateClues: string[],
-  ): SchemaMatchResult | null {
-    if (!this.schemaFormation) return null;
-    try {
-      return this.schemaFormation.matchSchema({
-        summary: conclusion,
-        keywords: [...tokenize(conclusion), ...candidateClues.flatMap(tokenize)],
-      });
-    } catch {
-      return null;
-    }
   }
 
   /**

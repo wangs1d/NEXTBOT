@@ -93,7 +93,7 @@ interface CapabilityCortexLike {
   introspect(actorId: string): CapabilityDescriptor[];
   /**
    * 用 ToolRegistry 当前全量工具名重新填充各 domain 的 descriptor.tools。
-   * 用于动态注册（MCP / self-programming）后让 list_capabilities 返回真实工具。
+   * 用于动态注册（MCP / self-programming）后保持能力域快照的工具名新鲜。
    * 带 TTL 节流避免短时间内重复刷新。
    */
   attachToolNames?(toolNames: string[]): void;
@@ -212,8 +212,6 @@ interface MemoryCortexLike {
   predictAssociation?(actorId: string, query: string): Promise<PredictedAssociation>;
   /** 显著性评估（委托 SalienceFilter，未注册返回默认接受） */
   evaluateSalience?(item: MemoryItem): SalienceDecision;
-  /** 向量预筛（recall-gate 白名单外的放行通道；未注册返回 false） */
-  semanticRecallPreScreen?(actorId: string, query: string): Promise<boolean>;
   /** 多线索交叉推理（委托 InferenceEngine，未注册返回空结果） */
   inferFromClues?(
     actorId: string,
@@ -546,19 +544,6 @@ export class BrainCenter {
     return this.memory?.getPersonalityCore?.(actorId) ?? null;
   }
 
-  /**
-   * recall-gate 向量预筛（P0-4）：白名单未命中时对用户原文做一次廉价向量检索，
-   * top1 分数 ≥ 阈值即放行长期记忆注入。委托 MemoryCortex.semanticRecallPreScreen；
-   * 未注册或检索失败时返回 false（fail-closed，保持白名单行为）。
-   */
-  async semanticRecallPreScreen(actorId: string, query: string): Promise<boolean> {
-    try {
-      return (await this.memory?.semanticRecallPreScreen?.(actorId, query)) ?? false;
-    } catch {
-      return false;
-    }
-  }
-
   registerSynapse(c: SynapseBusLike): void {
     this.synapse = c;
     console.log("[BrainCenter] 已注册 SynapseBus");
@@ -839,28 +824,6 @@ export class BrainCenter {
     }
     return this.cap.introspect(actorId);
   }
-
-  /**
-   * 用 ToolRegistry 当前全量工具名刷新各 domain 的 descriptor.tools。
-   *
-   * 场景：MCP 动态注册、self-programming 生成新 skill、社区 skill 启用后，
-   * capabilityCortex 的 loadSeed 快照已过期，需要重新填充才能让
-   * brain.list_capabilities 返回真实工具名。
-   *
-   * 内部有 60s 节流，避免每次调用都全量重算。
-   */
-  refreshCapabilityTools(toolNames: string[]): void {
-    if (!this.cap || typeof this.cap.attachToolNames !== "function") return;
-    const now = Date.now();
-    if (now - this._lastCapabilityRefreshTs < 60_000) return;
-    this._lastCapabilityRefreshTs = now;
-    try {
-      this.cap.attachToolNames(toolNames);
-    } catch (err) {
-      console.log(`[BrainCenter] refreshCapabilityTools 失败: ${err}`);
-    }
-  }
-  private _lastCapabilityRefreshTs = 0;
 
   /** 用户觉察：返回当前 actor 的活动状态 */
   observe(actorId: string): UserActivityState | null {

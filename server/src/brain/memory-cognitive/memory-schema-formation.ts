@@ -408,12 +408,17 @@ export class MemorySchemaFormation {
     sceneTag?: string;
     keywords?: string[];
     summary?: string;
+    /** actor 过滤（2026-10-22 补）：schemaCache 全 actor 共享，不传会跨身份串图式 */
+    actorId?: string;
   }): SchemaMatchResult | null {
     const cfg = loadConfig();
     if (!cfg.enabled) return null;
 
     let best: { schema: SchemaNode; score: number } | null = null;
-    for (const schema of this.schemaCache.values()) {
+    for (const [cacheKey, schema] of this.schemaCache.entries()) {
+      if (newSituation.actorId && !cacheKey.startsWith(`${newSituation.actorId}::`)) {
+        continue;
+      }
       let score: number;
       if (newSituation.sceneTag && newSituation.sceneTag === schema.sceneTag) {
         score = 0.6;

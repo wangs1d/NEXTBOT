@@ -71,11 +71,10 @@ const FENCE_SKIP_TOOLS: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_describe",
   "agent.query_capabilities",
-  "brain.list_capabilities",
-  "brain.identify_capability_gap",
   "self.list_custom_skills",
   "obs_recall",
   "task.status",
+  "world.status",
   "perception.overview",
 ]);
 

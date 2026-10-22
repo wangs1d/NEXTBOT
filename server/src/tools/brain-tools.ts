@@ -25,32 +25,6 @@ import type {
 
 // ---- 工具 schema ------------------------------------------------------
 
-/** brain.list_capabilities —— 查询自己拥有的能力域 */
-export const BRAIN_LIST_CAPABILITIES_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.list_capabilities",
-    description:
-      "查询自己当前已注册的能力域清单。当你需要知道自己有哪些能力、可调用哪些工具时调用，例如用户问「你能做什么」、或需要判断某任务是否在自己能力范围内时。设置 include_schema=true 可一并返回每个工具的 parameters schema（仅在需要直接构造工具调用参数时使用，避免 token 浪费）。",
-    parameters: {
-      type: "object",
-      properties: {
-        actorId: {
-          type: "string",
-          description: "用户/会话标识，用于按 actor 过滤能力；不传则使用当前上下文 actor。",
-        },
-        include_schema: {
-          type: "boolean",
-          description:
-            "是否返回每个工具的完整 parameters schema。默认 false 只返回工具名；设为 true 时会显著增加返回体积，仅在你需要立即构造工具调用参数且不想再单独 tool_discover 时使用。",
-          default: false,
-        },
-      },
-      additionalProperties: false,
-    },
-  },
-};
-
 /** brain.observe_user —— 查询当前用户活动状态 */
 export const BRAIN_OBSERVE_USER_TOOL: ChatCompletionTool = {
   type: "function",
@@ -388,7 +362,6 @@ export const BRAIN_RUNTIME_KERNEL_UPDATE_TOOL: ChatCompletionTool = {
 // 注：放在所有 *_TOOL schema 之后，避免 const 引用顺序问题。
 
 export const BRAIN_TOOLS: ChatCompletionTool[] = [
-  BRAIN_LIST_CAPABILITIES_TOOL,
   BRAIN_OBSERVE_USER_TOOL,
   BRAIN_LISTEN_TOOL,
   BRAIN_LOOK_TOOL,
@@ -490,18 +463,6 @@ function pickActorId(
 }
 
 /** 把能力清单格式化为紧凑文本：每行 `{domain} - {label} - tools: [...]` */
-function formatCapabilityList(capabilities: CapabilityDescriptor[]): string {
-  if (capabilities.length === 0) return "(无已注册能力域)";
-  return capabilities
-    .map((c) => {
-      const toolList = c.tools.length > 0
-        ? c.tools.join(", ")
-        : "(无工具)";
-      return `${c.domain} - ${c.label} [${c.status}] (${c.tools.length} tools)\n  ↳ ${toolList}`;
-    })
-    .join("\n");
-}
-
 /** 把 UserActivityState 格式化为面向 LLM 的紧凑文本 */
 function formatUserActivity(state: UserActivityState | null): string {
   if (!state) return "未推断出用户活动状态（awareness 皮层未就绪或无信号）";
@@ -525,61 +486,11 @@ function formatUserActivity(state: UserActivityState | null): string {
 export function registerBrainTools(
   registry: ToolRegistry,
   brainCenter: BrainCenter | null,
-  getToolSchema?: (name: string) => ChatCompletionTool | null,
 ): void {
   if (!brainCenter) {
     // brain 未启用：不注册 handler，避免运行时 KeyError
     return;
   }
-
-  // ---- brain.list_capabilities ----
-  registry.register("brain.list_capabilities", async (input, context) => {
-    try {
-      const actorId = pickActorId(input.actorId, context);
-      // 动态刷新：MCP / self-programming 新增工具后让 capabilityCortex 可见
-      // 内部有 60s 节流，避免每次调用都全量重算
-      brainCenter.refreshCapabilityTools(registry.list());
-      const capabilities = brainCenter.introspect(actorId);
-      const includeSchema = input.include_schema === true && typeof getToolSchema === "function";
-      const summary = formatCapabilityList(capabilities);
-      const capabilitiesOut = capabilities.map((c) => {
-        const base = {
-          domain: c.domain,
-          label: c.label,
-          status: c.status,
-          source: c.source,
-          toolCount: c.tools.length,
-          tools: c.tools,
-        };
-        if (!includeSchema) return base;
-        // include_schema=true：附带每个工具的 parameters schema
-        const toolSchemas: Array<{ name: string; description: string; parameters: unknown }> = [];
-        for (const name of c.tools) {
-          const tool = getToolSchema(name);
-          if (!tool || tool.type !== "function" || !tool.function) continue;
-          toolSchemas.push({
-            name,
-            description: tool.function.description ?? "",
-            parameters: tool.function.parameters ?? { type: "object", properties: {} },
-          });
-        }
-        return { ...base, toolSchemas };
-      });
-      return {
-        ok: true,
-        actorId,
-        count: capabilities.length,
-        includeSchema,
-        summary,
-        capabilities: capabilitiesOut,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.list_capabilities 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
 
 
 

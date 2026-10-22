@@ -32,7 +32,7 @@ export type CapabilityExpansionProposal = {
  *
  * 用途：bootstrap 阶段调用 {@link CapabilityCortex.attachToolNames}，
  * 把 ToolRegistry 中已注册的真实工具名按 domain 归类填到 descriptor.tools，
- * 让 brain.list_capabilities 返回的工具名对 LLM 可见。
+ * 让 introspect / 能力域快照里的工具名与 ToolRegistry 一致。
  *
  * 注意 social_feed / social_outreach 工具名前缀相同（`social.`），靠精确名区分：
  *   - social_feed 走 `world.social.*`（前缀 `world.social.`）
@@ -134,7 +134,7 @@ export class CapabilityCortex {
    * 归类填充到对应 domain 的 descriptor.tools。
    *
    * 在 bootstrap 完成所有 registerXxxTools 之后调用一次，确保
-   * `brain.list_capabilities` / `introspect` 返回的工具名是真实可调用的。
+   * `introspect` 返回的工具名是真实注册过的。
    *
    * 副作用：覆盖 registry 中已注册的 descriptor.tools 字段；
    * 未匹配到任何工具的 domain 仍保持空数组（不会创建新 domain）。

@@ -1,11 +1,8 @@
 import type { BrainCenter } from "../../brain/index.js";
-import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
-import { buildToolRankingHintFromProfile } from "../../services/evolution-tool-ranking.js";
 import type { AgentStreamOptions } from "../../external-model/types.js";
 import type { LlmExecutionMode } from "../task-router.js";
 
 export type ToolPolicyResolverDeps = {
-  agentMemorySyncService: AgentMemorySyncService | null;
   getBrainCenter: () => BrainCenter | null;
 };
 
@@ -17,25 +14,12 @@ export class ToolPolicyResolver {
   }
 
   resolveRankingHint(actorId: string): AgentStreamOptions["toolRankingHint"] {
-    // 兼容迁移：新 key evolution_profile 优先，旧 key hermes_profile 兜底（历史数据）
-    const entries = this.deps.agentMemorySyncService?.getSnapshot(actorId, [
-      "evolution_profile",
-      "hermes_profile",
-    ]).entries;
-    const profile = entries?.evolution_profile ?? entries?.hermes_profile;
-    const hint = buildToolRankingHintFromProfile(profile);
+    // 2026-10-22：EvolutionLoopService（evolution_profile 工具排序画像）已删除——
+    // 主 chat 车道被 stabilizeToolOrderForSession 会话冻结中和，数据全是测试灌水。
+    // 排序提示只剩 cautiousNamespaces（高危工具降权，源自记忆皮层 belief 快照）。
     const cautiousNamespaces = this.resolveCautiousNamespaces(actorId);
-    if (cautiousNamespaces.length === 0) return hint;
-
-    return {
-      ...(hint ?? {}),
-      cautiousNamespaces: [
-        ...new Set([
-          ...(hint?.cautiousNamespaces ?? []),
-          ...cautiousNamespaces,
-        ]),
-      ],
-    };
+    if (cautiousNamespaces.length === 0) return undefined;
+    return { cautiousNamespaces };
   }
 
   private resolveCautiousNamespaces(actorId: string): string[] {

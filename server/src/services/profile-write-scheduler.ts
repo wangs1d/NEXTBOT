@@ -72,17 +72,23 @@ export interface WalProfileCandidate {
   highSignal: boolean;
 }
 
+export interface WalTurnEntry extends WalProfileCandidate {
+  /** T0 hint 正则命中（高信号恒真）；false=普通闲聊轮（夜间预算补齐用） */
+  candidate: boolean;
+}
+
 const MAX_SCAN_DAYS = 60;
 
 /**
- * 读 turn-wal 中该 actor 自 sinceTs（不含）以来的 profileCandidate 条目。
+ * 读 turn-wal 中该 actor 自 sinceTs（不含）以来的**全部**条目（含非候选）。
  * 按天文件扫描（与 TurnWalService 写入同一天切分口径），ts 升序返回。
+ * 天数护栏：只扫最近 MAX_SCAN_DAYS 天，避免 checkpoint 丢失后全量重扫。
  */
-export async function readWalProfileCandidates(
+export async function readWalTurns(
   actorId: string,
   sinceTs: string,
   opts?: { walDir?: string },
-): Promise<WalProfileCandidate[]> {
+): Promise<WalTurnEntry[]> {
   const cfg = getShortTermMemoryConfig();
   const dir = opts?.walDir ?? join(process.cwd(), cfg.walDir);
   let dayFiles: string[];
@@ -94,7 +100,7 @@ export async function readWalProfileCandidates(
 
   // 空 checkpoint（首次运行）→ 不设起始天，靠 MAX_SCAN_DAYS 护栏限制扫描窗口
   const startDay = sinceTs ? getCalendarDay(new Date(sinceTs)) : "";
-  const out: WalProfileCandidate[] = [];
+  const out: WalTurnEntry[] = [];
   for (const f of dayFiles) {
     const day = f.slice(0, 10);
     if (day < startDay) continue;
@@ -118,17 +124,29 @@ export async function readWalProfileCandidates(
       if (!ts || ts <= sinceTs) continue;
       // 天数护栏：只扫最近 MAX_SCAN_DAYS 天，避免 checkpoint 丢失后全量重扫
       if (dayFiles.indexOf(f) < dayFiles.length - MAX_SCAN_DAYS) continue;
-      if (entry.profileCandidate !== true) continue;
       out.push({
         ts,
         userText: typeof entry.userText === "string" ? entry.userText : "",
         assistantText: typeof entry.assistantText === "string" ? entry.assistantText : "",
         highSignal: entry.highSignal === true,
+        candidate: entry.profileCandidate === true,
       });
     }
   }
   out.sort((a, b) => a.ts.localeCompare(b.ts));
   return out;
+}
+
+/** 读自 sinceTs 以来的候选条目（T2 主输入；兼容旧导出）。 */
+export async function readWalProfileCandidates(
+  actorId: string,
+  sinceTs: string,
+  opts?: { walDir?: string },
+): Promise<WalProfileCandidate[]> {
+  const turns = await readWalTurns(actorId, sinceTs, opts);
+  return turns
+    .filter((t) => t.candidate)
+    .map(({ ts, userText, assistantText, highSignal }) => ({ ts, userText, assistantText, highSignal }));
 }
 
 /* ───────────────────────── 夜间批抽取（T2） ───────────────────────── */
@@ -140,8 +158,10 @@ export interface ProfileConsolidationStats {
   actorId: string;
   /** WAL 中命中的候选轮数 */
   candidates: number;
-  /** 本次实际送入 LLM 的轮数（预算截断后） */
+  /** 本次实际送入 LLM 的候选轮数（预算截断后） */
   processed: number;
+  /** 预算补齐：送入 LLM 的非候选轮数（hint 漏标的第二次机会） */
+  topUpProcessed: number;
   /** LLM 产出的 profileOps 条数 */
   opsCount: number;
   /** 落位是否成功 */
@@ -176,30 +196,60 @@ export async function consolidateProfileFromWal(
   const checkpoint = await loadProfileCheckpoint(checkpointFile);
   const sinceTs = checkpoint.actors[actorId] ?? "";
 
-  const candidates = await readWalProfileCandidates(actorId, sinceTs, { walDir: opts?.walDir });
+  const turns = await readWalTurns(actorId, sinceTs, { walDir: opts?.walDir });
+  const candidates = turns.filter((t) => t.candidate);
   const stats: ProfileConsolidationStats = {
     actorId,
     candidates: candidates.length,
     processed: 0,
+    topUpProcessed: 0,
     opsCount: 0,
     applied: false,
     checkpointAdvanced: false,
   };
-  if (candidates.length === 0) return stats;
 
-  // 拼批量输入（user 侧 only；助手文本不作事实来源，与行业共识一致）
-  const lines: string[] = [];
+  const renderTurn = (t: WalProfileCandidate): string =>
+    `[${t.ts.slice(5, 16).replace("T", " ")}] 用户: ${t.userText.slice(0, PER_TURN_CAP_CHARS)}`;
+
+  // 纯闲聊天（零候选）：不调 LLM，但推进 checkpoint 越过该段——否则扫描窗口
+  // 随闲聊无限增长。漏标损失由「highSignal 恒候选 + memory.recall_history
+  // 当轮回查」双兜底，可接受。
+  if (candidates.length === 0) {
+    const lastTs = turns.length > 0 ? turns[turns.length - 1]!.ts : "";
+    if (lastTs) {
+      const next = await loadProfileCheckpoint(checkpointFile);
+      next.actors[actorId] = lastTs;
+      await saveProfileCheckpoint(next, checkpointFile);
+      stats.checkpointAdvanced = true;
+    }
+    return stats;
+  }
+
+  // 预算补齐（2026-10-22，取代「每周全量兜底扫描」提案）：候选优先装满预算，
+  // 剩余空间按 ts 序用非候选轮补位——hint 正则漏标的陈述由此获得第二次进
+  // LLM 的机会，召回上限拉到预算内 100%，且不新增任务/状态/LLM 调用。
   const included: WalProfileCandidate[] = [];
   let used = 0;
   for (const c of candidates) {
-    const text = `[${c.ts.slice(5, 16).replace("T", " ")}] 用户: ${c.userText.slice(0, PER_TURN_CAP_CHARS)}`;
+    const text = renderTurn(c);
     if (used + text.length > TRANSCRIPT_BUDGET_CHARS) break;
-    lines.push(text);
     used += text.length;
     included.push(c);
   }
-  if (included.length === 0) return stats;
   stats.processed = included.length;
+  if (included.length > 0) {
+    for (const t of turns) {
+      if (t.candidate) continue;
+      const text = renderTurn(t);
+      if (used + text.length > TRANSCRIPT_BUDGET_CHARS) break;
+      used += text.length;
+      included.push(t);
+      stats.topUpProcessed += 1;
+    }
+  }
+  if (included.length === 0) return stats;
+  included.sort((a, b) => a.ts.localeCompare(b.ts));
+  const lines = included.map(renderTurn);
   const lastTs = included[included.length - 1]!.ts;
 
   const currentProfile = (await deps.readProfile()) || "";

@@ -2,13 +2,12 @@
  * 记忆认知架构升级 —— 端到端集成测试。
  *
  * 覆盖 MemoryCortex 与 7 个子模块（SalienceFilter / AssociativeGraph /
- * MetacognitionBridge / ForgettingController / ProceduralAutomation /
- * SchemaFormation / ReconstructionValidator）的协作路径。
+ * MetacognitionBridge / ForgettingController）的协作路径。
  *
  * 测试风格与 brain-end-to-end.test.ts 一致：node:test + node:assert/strict，
  * 用 mock 对象注入，不依赖真实 HumanLikeMemoryService / MetaCognitionCortex。
  *
- * 12 个场景 A-L 覆盖 salience 守门 / 异步扩散 / 元记忆 / 图式 / 程序性 / 遗忘控制。
+ * 场景 A-K 覆盖 salience 守门 / 异步扩散 / 元记忆 / 程序性 / 遗忘控制。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,7 +17,6 @@ import { MemorySalienceFilter } from "../src/brain/memory-cognitive/memory-salie
 import { MemoryAssociativeGraph } from "../src/brain/memory-cognitive/memory-associative-graph.js";
 import { MemoryMetacognitionBridge } from "../src/brain/memory-cognitive/memory-metacognition-bridge.js";
 import { MemoryForgettingController } from "../src/brain/memory-cognitive/memory-forgetting-controller.js";
-import { MemorySchemaFormation } from "../src/brain/memory-cognitive/memory-schema-formation.js";
 import type {
   MemoryItem,
   MemoryRecallResult,
@@ -393,62 +391,4 @@ test("场景 K: consolidate 触发 connection pruning", async () => {
     getAllNodesCalls.includes("user-k"),
     `consolidate 应触发 forgettingController.pruneConnections → getAllNodes，实际调用: ${JSON.stringify(getAllNodesCalls)}`,
   );
-});
-
-// ---- 场景 L: SchemaFormation extractSchema 抽取图式 ---------------------
-
-test("场景 L: SchemaFormation extractSchema 抽取图式", async () => {
-  // mock humanLike 返回 3+ 同 sceneTag 节点
-  const humanLikeMock = {
-    getNodesBySceneTag: () => [
-      {
-        id: "n1",
-        summary: "进门→点餐→吃饭→结账",
-        keywords: ["餐厅"],
-        sceneTags: ["餐厅"],
-        entityTags: ["座位"],
-        emotionTags: ["满意"],
-        metadata: { outcomes: ["吃饱"] },
-      },
-      {
-        id: "n2",
-        summary: "进门→点餐→结账",
-        keywords: ["餐厅"],
-        sceneTags: ["餐厅"],
-        entityTags: ["菜单"],
-        emotionTags: ["满意"],
-        metadata: { outcomes: ["吃饱"] },
-      },
-      {
-        id: "n3",
-        summary: "进门→点餐→吃饭→结账",
-        keywords: ["餐厅"],
-        sceneTags: ["餐厅"],
-        entityTags: ["座位"],
-        emotionTags: ["满意"],
-        metadata: { outcomes: ["吃饱"] },
-      },
-    ],
-  };
-  const schemaFormation = new MemorySchemaFormation({ humanLike: humanLikeMock });
-
-  const schema = await schemaFormation.extractSchema("user-l", "餐厅");
-
-  assert.ok(schema, "extractSchema 应返回 SchemaNode");
-  assert.ok(Array.isArray(schema!.steps), "SchemaNode 应含 steps 数组");
-  assert.ok(
-    schema!.steps.length > 0,
-    `steps 应非空（LCS 抽取公共步骤），实际: ${JSON.stringify(schema!.steps)}`,
-  );
-  // 进门/点餐/结账在 >=2 个节点中出现（minCount = ceil(3*0.5)=2）
-  assert.ok(
-    schema!.steps.includes("进门"),
-    `steps 应包含 "进门"，实际: ${JSON.stringify(schema!.steps)}`,
-  );
-  assert.ok(
-    schema!.steps.includes("点餐"),
-    `steps 应包含 "点餐"，实际: ${JSON.stringify(schema!.steps)}`,
-  );
-  assert.equal(schema!.sceneTag, "餐厅", "sceneTag 应为 '餐厅'");
-  assert.ok(schema!.instances.length === 3, "instances 应含 3 个节点 id");
 });

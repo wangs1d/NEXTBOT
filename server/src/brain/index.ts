@@ -38,7 +38,6 @@ export {
   MemoryInferenceEngine,
   type InferenceRule,
   type HumanLikeMemoryInferenceLike,
-  type MemorySchemaFormationLike,
 } from "./memory-cognitive/memory-inference-engine.js";
 // 4 项仿人推理能力扩展：规则自学习 + 类比迁移 + 情感调制 + 无意识触发
 export {

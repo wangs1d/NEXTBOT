@@ -13,6 +13,7 @@ import type {
   PersonalityCore,
   PredictedAssociation,
   SchemaMatchResult,
+  SchemaNode,
   SalienceDecision,
   InferenceClue,
   InferenceResult,
@@ -233,8 +234,6 @@ interface NarrativeMemoryLike {
   ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
-  /** 词法预筛分数（0~1，进程内 BM25 归一）；仅 hybrid 适配器实现，未注册时为 undefined */
-  lexicalPreScreen?(actorId: string, query: string): Promise<number>;
   runSleepConsolidation(actorIds: string[]): Promise<NarrativeSleepReport[]>;
 }
 
@@ -351,6 +350,25 @@ const MAX_RECALL_ITEM_TEXT_LENGTH = 800;
 function clamp01(n: number): number {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(1, n));
+}
+
+/**
+ * 从写入 metadata 中提取图式场景标签（图式形成接线的取数口）：
+ * - metadata.sceneTags: string[]（优先）
+ * - metadata.sceneTag: string
+ * 均缺省时返回空数组（该条记忆不参与图式抽取——宁缺毋滥，不做猜测式打标）。
+ */
+function extractSceneTagsFromMetadata(
+  metadata: Record<string, unknown> | undefined,
+): string[] {
+  if (!metadata) return [];
+  const raw = metadata.sceneTags ?? metadata.sceneTag;
+  const list = Array.isArray(raw) ? raw : [raw];
+  return list
+    .filter((t): t is string => typeof t === "string")
+    .map((t) => t.trim())
+    .filter((t) => t.length > 0 && t.length <= 32)
+    .slice(0, 4);
 }
 
 /** 多模态媒体存储根目录（相对于 server 工作目录） */
@@ -688,6 +706,108 @@ export class MemoryCortex {
     } catch {
       return "";
     }
+  }
+
+  /**
+   * 图式形成调度（记忆建立联系，2026-10-22 接线）：
+   * 新记忆写入成功后，若 metadata 携带 sceneTags/sceneTag，则异步尝试对每个
+   * sceneTag 抽取"公共步骤序列"图式（同场景经历 ≥3 条时 LCS 抽取，纯算法零 LLM）。
+   *
+   * 不节流：extractSchema 未达 minInstances 时零成本返回 null（一次内存数组过滤），
+   * 真正的抽取只在达标写入后发生；节流反而会吞掉"第 3 条达标写入"的抽取时机。
+   * 夜审/测试可走 extractSchemaNow 同步触发。
+   */
+  private scheduleSchemaFormation(
+    actorId: string,
+    metadata: Record<string, unknown> | undefined,
+  ): void {
+    if (!this.schemaFormation) return;
+    const sceneTags = extractSceneTagsFromMetadata(metadata);
+    if (sceneTags.length === 0) return;
+    for (const sceneTag of sceneTags) {
+      void this.schemaFormation.extractSchema(actorId, sceneTag).catch(() => {
+        /* 图式抽取失败静默降级 */
+      });
+    }
+  }
+
+  /**
+   * 同步抽取指定 actor 指定场景的图式（公开出口）：
+   * 夜间巩固（consolidate）/ 测试 / 手动诊断使用；未注册 schemaFormation 返回 null。
+   */
+  async extractSchemaNow(actorId: string, sceneTag: string): Promise<SchemaNode | null> {
+    if (!this.schemaFormation) return null;
+    try {
+      return await this.schemaFormation.extractSchema(actorId, sceneTag);
+    } catch (err) {
+      console.log(`[MemoryCortex] extractSchemaNow 失败: ${err}`);
+      return null;
+    }
+  }
+
+  /**
+   * 图式提示附加（「被问起时想得起」的联想面）：query 命中已抽取图式时，
+   * 在召回结果上附加 schemaHint——告诉上层"这类事情通常的步骤/预期"，
+   * 仅建议不强制（刻板印象警告随 hint 透出）。未注册/无匹配时原样返回。
+   */
+  private attachSchemaHint(actorId: string, query: string, result: MemoryRecallResult): MemoryRecallResult {
+    if (!this.schemaFormation || result.schemaHint) return result;
+    try {
+      // 中文 query 无分词边界：sceneTag 直接做子串命中（「去餐厅吃饭」→「餐厅」），
+      // 命中后以 sceneTag 通道匹配（基础分 0.6），比 keywords overlap 可靠。
+      const schemas = this.schemaFormation.getAllSchemas(actorId);
+      const sceneTag = schemas.find((s) => s.sceneTag && query.includes(s.sceneTag))?.sceneTag;
+      const matched = this.schemaFormation.matchSchema({
+        sceneTag,
+        summary: query,
+        keywords: query.toLowerCase().split(/[\s,，。.、;；!！?？]+/).filter(Boolean),
+        actorId,
+      });
+      if (!matched) return result;
+      return {
+        ...result,
+        schemaHint: {
+          name: matched.schema.name,
+          steps: matched.schema.steps,
+          matchScore: matched.matchScore,
+          hasStereotypeWarning: matched.hasStereotypeWarning,
+        },
+      };
+    } catch {
+      return result;
+    }
+  }
+
+  /**
+   * 遗忘梯度衰减分（「该忘的退得掉」读侧，2026-10-22 接线）：
+   * recency（72h 半衰期，与检索层一致）与 importance 各占 50%。
+   * 得分 < 0.5 的召回条目按 ForgettingController.compactRecallText 梯度截断——
+   * 褪色的记忆以残缺形式被想起，而不是要么完整要么消失。
+   * 容量治理（真删除）仍由 lifecycle TTL 两阶段遗忘承担，二者分工明确。
+   */
+  private applyForgettingGradient(items: MemoryRecallItem[]): MemoryRecallItem[] {
+    if (!this.forgettingController) return items;
+    const nowMs = Date.now();
+    return items.map((item) => {
+      if (typeof item.content !== "string" || item.content.length < 12) return item;
+      const importanceFactor =
+        item.importance === "critical" ? 1.0
+        : item.importance === "high" ? 0.8
+        : item.importance === "medium" ? 0.5
+        : 0.2;
+      let recencyFactor = 0.5; // 无时间戳按半新处理（保守，不轻易截断）
+      if (item.timestamp) {
+        const ts = Date.parse(item.timestamp);
+        if (Number.isFinite(ts)) {
+          const ageHours = Math.max(0, (nowMs - ts) / 3_600_000);
+          recencyFactor = Math.pow(2, -ageHours / 72);
+        }
+      }
+      const score = 0.5 * recencyFactor + 0.5 * importanceFactor;
+      if (score >= 0.5) return item;
+      const faded = this.forgettingController!.compactRecallText(item.content, score);
+      return faded === item.content ? item : { ...item, content: faded };
+    });
   }
 
   /**
@@ -1056,6 +1176,8 @@ export class MemoryCortex {
         }
         // 写入时在线关联分析（P0-2）：新记忆 × 相关旧记忆 → LLM 合成联想
         this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        // 图式形成（记忆建立联系）：同 sceneTag 经验达标后异步抽取公共步骤
+        this.scheduleSchemaFormation(actorId, effectiveMetadata);
         // 记忆目录缓存失效（新增记忆后目录统计需要刷新）
         this.memoryInventory?.invalidate(actorId);
         return;
@@ -1082,6 +1204,7 @@ export class MemoryCortex {
           /* fire 失败不影响主流程 */
         }
         this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        this.scheduleSchemaFormation(actorId, effectiveMetadata);
         this.memoryInventory?.invalidate(actorId);
         return;
       } catch (err) {
@@ -1107,6 +1230,7 @@ export class MemoryCortex {
         }
         // 写入时在线关联分析（同 narrative 路径）
         this.triggerWriteTimeAssociation(actorId, effectiveContent);
+        this.scheduleSchemaFormation(actorId, effectiveMetadata);
         this.memoryInventory?.invalidate(actorId);
       } catch (err) {
         console.log(`[MemoryCortex] agentic.ingest.ingestText 失败: ${err}`);
@@ -1616,40 +1740,14 @@ export class MemoryCortex {
       });
     }
 
-    return finalResult;
+    // 图式提示（记忆建立联系）：query 命中已抽取图式时附加背景联想（仅建议）
+    return this.attachSchemaHint(actorId, query, finalResult);
   }
 
   /**
-   * 向量预筛（recall-gate 白名单外的廉价放行通道）：
-   * 对用户原文做一次 Mem0 向量检索（无 LLM），top1 原始分 ≥ 阈值即视为
-   * "当前话题与既有长期记忆强相关"，放行长期记忆注入——弥补纯 regex 白名单
-   * 的漏召（agent 明明记得却因为没命中关键词而"忘了你"）。
-   * 检索失败 / 无 agentic 通道 / query 为空时返回 false（fail-closed，保持白名单行为）。
-   * 阈值可用 MEMORY_PRESCREEN_TOP_SCORE 覆盖（缺省 0.45）。
+   * 向量预筛已于 v3 读路径改造中退役（每轮 embedding 调用既慢又把召回权从模型手里收走）。
+   * 历史方法 semanticRecallPreScreen 已删除：长期注入现只走恒驻速览 + brain.recall 工具。
    */
-  async semanticRecallPreScreen(actorId: string, query: string): Promise<boolean> {
-    const q = query.trim();
-    if (!q) return false;
-    const raw = process.env.MEMORY_PRESCREEN_TOP_SCORE;
-    const threshold = raw && Number.isFinite(parseFloat(raw)) ? parseFloat(raw) : 0.45;
-    // 词法快筛：进程内 BM25 强命中直接放行，非门控轮次不再每次都打 embedding 预筛。
-    // 无实现 / 低分时落回 Mem0 向量预筛，不改变既有放行行为。
-    try {
-      const lex = (await this.narrative?.lexicalPreScreen?.(actorId, q)) ?? null;
-      if (lex != null && lex >= threshold) return true;
-    } catch {
-      /* 词法快筛失败不阻塞向量预筛 */
-    }
-    if (!this.agentic) return false;
-    try {
-      const candidates = await this.agentic.retrieval.searchStructured(actorId, q);
-      return (candidates[0]?.score ?? 0) >= threshold;
-    } catch (err) {
-      console.log(`[MemoryCortex] semanticRecallPreScreen 失败（保持白名单行为）: ${err}`);
-      return false;
-    }
-  }
-
   async recordLearningFeedback(feedback: LearningFeedback): Promise<LearningSnapshot | null> {
     if (!this.experienceLearningLoop) return null;
     try {
@@ -1956,7 +2054,10 @@ export class MemoryCortex {
     // P1 精排：对候选做 (query, memory) 联合打分并按 relevance 重排/闸弃
     // （AGENT_MEMORY_RERANKER，默认 off）。关闭/超时/失败返回 null → 原序透传。
     const reranked = await this.rerankRecallItems(query, boosted);
-    const finalItems = this.dedupeAndLimitRecallItems(reranked ?? boosted, limit);
+    const deduped = this.dedupeAndLimitRecallItems(reranked ?? boosted, limit);
+    // 遗忘梯度（该忘的退得掉）：低遗忘分条目按梯度截断——褪色的记忆以残缺形式被想起。
+    // 在去重限长之后、联想合成之前应用，避免截断文本被当作合成输入污染。
+    const finalItems = this.applyForgettingGradient(deduped);
 
     // 记忆联想性增强：命中 ≥ 2 条时异步用 LLM 合成跨记忆新关联（高置信回灌 humanLike 图）
     if (finalItems.length >= 2) {

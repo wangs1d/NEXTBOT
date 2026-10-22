@@ -4,13 +4,13 @@
  * 验证 7 个子模块在主开关 / 单独开关关闭时的优雅降级行为：
  *  - BRAIN_MEMORY_COGNITIVE_ENABLED=0 → MemoryCortex 不注册任何子模块，
  *    各对外方法返回空/默认值
- *  - 各独立开关（SALIENCE / ASSOCIATIVE / METACOGNITION / SCHEMA）关闭时，
+ *  - 各独立开关（SALIENCE / ASSOCIATIVE / METACOGNITION）关闭时，
  *    对应子模块方法返回约定降级值
  *
  * 测试风格与 brain-end-to-end.test.ts 一致：node:test + node:assert/strict，
  * 环境变量测试用 process.env.X = "0" + try/finally 恢复。
  *
- * 5 个场景 M-Q 覆盖总开关 + 4 个独立开关的降级路径。
+ * 场景 M-P 覆盖总开关 + 3 个独立开关的降级路径。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -19,7 +19,6 @@ import { MemoryCortex } from "../src/brain/memory-cortex.js";
 import { MemorySalienceFilter } from "../src/brain/memory-cognitive/memory-salience-filter.js";
 import { MemoryAssociativeGraph } from "../src/brain/memory-cognitive/memory-associative-graph.js";
 import { MemoryMetacognitionBridge } from "../src/brain/memory-cognitive/memory-metacognition-bridge.js";
-import { MemorySchemaFormation } from "../src/brain/memory-cognitive/memory-schema-formation.js";
 import type { MemoryItem } from "../src/brain/types.js";
 
 // ---- helpers ------------------------------------------------------------
@@ -166,29 +165,5 @@ test("场景 P: BRAIN_MEMORY_METACOGNITION_ENABLED=0 时 recallWithProvenance �
     assert.equal(result.items.length, 0, "关闭后 recallWithProvenance 应返回空 items");
     assert.equal(result.actorId, "user-p", "actorId 应正确");
     assert.equal(result.query, "test", "query 应正确");
-  });
-});
-
-// ---- 场景 Q: BRAIN_MEMORY_SCHEMA_ENABLED=0 时 extractSchema 返回 null ---
-
-test("场景 Q: BRAIN_MEMORY_SCHEMA_ENABLED=0 时 extractSchema 返回 null", async () => {
-  await withEnv({ BRAIN_MEMORY_SCHEMA_ENABLED: "0" }, async () => {
-    // mock humanLike（即使有 3+ 节点，关闭后 extractSchema 也应返回 null）
-    const humanLikeMock = {
-      getNodesBySceneTag: () => [
-        { id: "n1", summary: "a→b→c", keywords: [], sceneTags: ["x"], entityTags: [], emotionTags: [] },
-        { id: "n2", summary: "a→b→c", keywords: [], sceneTags: ["x"], entityTags: [], emotionTags: [] },
-        { id: "n3", summary: "a→b→c", keywords: [], sceneTags: ["x"], entityTags: [], emotionTags: [] },
-      ],
-    };
-    const schemaFormation = new MemorySchemaFormation({ humanLike: humanLikeMock });
-
-    const result = await schemaFormation.extractSchema("user-q", "x");
-
-    assert.equal(result, null, "关闭后 extractSchema 应返回 null");
-
-    // matchSchema 在关闭后也应返回 null
-    const matchResult = schemaFormation.matchSchema({ sceneTag: "x", keywords: ["a"] });
-    assert.equal(matchResult, null, "关闭后 matchSchema 也应返回 null");
   });
 });

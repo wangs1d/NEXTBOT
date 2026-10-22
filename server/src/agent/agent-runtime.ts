@@ -1,7 +1,6 @@
 import type { WorldService } from "@private-ai-agent/agent-world";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
-import type { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { MoodInferenceService } from "../services/mood-inference-service.js";
 import { AgentCore } from "../services/agent-core.js";
@@ -22,7 +21,6 @@ export type AgentCoreDependencies = {
   externalChat: ExternalChatProvider | null;
   computeQuotaService: ComputeQuotaService | null;
   agentMemorySyncService?: AgentMemorySyncService | null;
-  evolutionLoopService?: EvolutionLoopService | null;
   userPersonalizationService?: UserPersonalizationService | null;
   worldService?: WorldService | null;
   skillManager?: SkillManager | null;
@@ -43,7 +41,6 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.externalChat,
     deps.computeQuotaService,
     deps.agentMemorySyncService ?? null,
-    deps.evolutionLoopService ?? null,
     deps.userPersonalizationService ?? null,
     deps.worldService ?? null,
     deps.skillManager ?? null,

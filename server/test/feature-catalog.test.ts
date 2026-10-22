@@ -117,15 +117,9 @@ test("FeatureCatalog：汇聚打标 + 12 域统计 + 未分类名单暴露", () 
   assert.equal(stats.get("system"), 1);
 });
 
-test("FeatureCatalog：prompt 行与 Markdown 视图包含全部 12 域", () => {
+test("FeatureCatalog：Markdown 视图包含全部 12 域（prompt 行视图已随 2026-10-22 复审退役）", () => {
   const catalog = makeCatalog([{ name: "habit.mine" }, { name: "clock.get_current_time" }]);
   catalog.build();
-
-  const promptText = catalog.toPromptLines().join("\n");
-  for (const label of ["自身", "系统基础"]) {
-    assert.ok(promptText.includes(label), `prompt 应含 ${label}`);
-  }
-  assert.ok(promptText.includes("agent.query_capabilities"));
 
   const markdown = catalog.toMarkdown();
   for (const domain of LIFE_DOMAINS as readonly LifeDomain[]) {

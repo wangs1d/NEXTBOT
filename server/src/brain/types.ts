@@ -355,6 +355,42 @@ export interface MemoryMedia {
   origin?: string;
 }
 
+/** 图式节点（语义抽象形成）：同 sceneTag 多次经验的公共 step 序列 */
+export interface SchemaNode {
+  /** 图式 id */
+  id: string;
+  /** 图式名称，如 "餐厅图式" */
+  name: string;
+  /** 步骤序列，如 ["进门", "点餐", "吃", "结账"] */
+  steps: string[];
+  /** 前置条件 */
+  preconditions: string[];
+  /** 预期结果 */
+  expectedOutcomes: string[];
+  /** 实例节点 id 列表（来源 episodic 节点） */
+  instances: string[];
+  /** 刻板印象警告次数（>3 时附加警告） */
+  stereotypeWarningCount: number;
+  /** 所属 sceneTag */
+  sceneTag: string;
+  /** 创建时间 */
+  createdAt: string;
+  /** 最后更新时间 */
+  updatedAt: string;
+}
+
+/** 图式匹配结果 */
+export interface SchemaMatchResult {
+  /** 匹配的图式 */
+  schema: SchemaNode;
+  /** 匹配分数 0-1 */
+  matchScore: number;
+  /** 是否附加刻板印象警告 */
+  hasStereotypeWarning: boolean;
+  /** 匹配时间 */
+  matchedAt: string;
+}
+
 // 记忆召回结果
 export interface MemoryRecallResult {
   actorId: string;
@@ -363,6 +399,16 @@ export interface MemoryRecallResult {
   domain: MemoryDomainKind;
   mode: "single_domain" | "cross_domain";
   recalledAt: string;
+  /**
+   * 图式提示（记忆建立联系）：query 命中已抽取图式时附加，
+   * 供上层把"这类事情通常的步骤/预期"作为背景联想注入（仅建议，不强制）。
+   */
+  schemaHint?: {
+    name: string;
+    steps: string[];
+    matchScore: number;
+    hasStereotypeWarning: boolean;
+  };
 }
 
 // 记忆召回条目
@@ -763,42 +809,6 @@ export interface PredictedAssociation {
   confidence: number;
   /** 预判时间 */
   predictedAt: string;
-}
-
-/** 图式节点（语义抽象形成） */
-export interface SchemaNode {
-  /** 图式 id */
-  id: string;
-  /** 图式名称，如 "餐厅图式" */
-  name: string;
-  /** 步骤序列，如 ["进门", "点餐", "吃", "结账"] */
-  steps: string[];
-  /** 前置条件 */
-  preconditions: string[];
-  /** 预期结果 */
-  expectedOutcomes: string[];
-  /** 实例节点 id 列表（来源 episodic 节点） */
-  instances: string[];
-  /** 刻板印象警告次数（>3 时附加警告） */
-  stereotypeWarningCount: number;
-  /** 所属 sceneTag */
-  sceneTag: string;
-  /** 创建时间 */
-  createdAt: string;
-  /** 最后更新时间 */
-  updatedAt: string;
-}
-
-/** 图式匹配结果 */
-export interface SchemaMatchResult {
-  /** 匹配的图式 */
-  schema: SchemaNode;
-  /** 匹配分数 0-1 */
-  matchScore: number;
-  /** 是否附加刻板印象警告 */
-  hasStereotypeWarning: boolean;
-  /** 匹配时间 */
-  matchedAt: string;
 }
 
 /** 显著性过滤决策 */
