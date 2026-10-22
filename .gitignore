@@ -91,6 +91,7 @@ server/*.json.bak
 
 # Tool / session residue
 .trae/
+.workbuddy/
 .zcode/
 .uploads/
 tmp/
