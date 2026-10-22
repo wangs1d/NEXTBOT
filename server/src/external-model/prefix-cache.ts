@@ -114,6 +114,18 @@ function resolvePromptCacheProfile(providerId: string, model: string): PromptCac
     };
   }
 
+  if (normalized === "deepseek") {
+    // DeepSeek 官方端点是**服务端隐式前缀缓存**：无显式 key、无断点标记，按
+    // 64 token 块自动命中并在 usage 回传 `prompt_cache_hit_tokens`（2026-10-22
+    // 实测：1222 token 的 system+首轮，第二轮命中 1024 = 块对齐后的全部前缀）。
+    // 因此不能走 openai 槽的 explicit-key（白算 key 不说，还会让请求体与
+    // 「纯前缀字节相等即命中」的服务端语义错位）。
+    return {
+      mode: envEnabled("DEEPSEEK_PREFIX_CACHE_ENABLED", true) ? "implicit-prefix" : "none",
+      namespace: process.env.DEEPSEEK_PROMPT_CACHE_NAMESPACE?.trim() || DEFAULT_NAMESPACE,
+    };
+  }
+
   if (normalized === "minimax") {
     // MiniMax 实测（2026-10-07 受控探针）：服务端多副本缓存不一致，被动缓存对
     // 字节级相同请求也会随机 128↔全量命中。显式断点（anthropic 风格块状
@@ -306,13 +318,36 @@ export function resetStablePromptSnapshotForTest(): void {
 /** 沉底块的包裹标签：让 LLM 明确这是本轮系统注入的上下文，而非用户消息正文。 */
 const DYNAMIC_CONTEXT_WRAP_BEGIN = "[system-context]";
 const DYNAMIC_CONTEXT_WRAP_END = "[/system-context]";
+const DYNAMIC_CONTEXT_NOTE =
+  "（本轮系统注入的上下文：记忆/时间/任务等，非用户消息正文，按 system 指令同等遵循）";
 
 function wrapTailDynamicContext(tail: string): string {
   return (
     `\n\n${DYNAMIC_CONTEXT_WRAP_BEGIN}\n` +
-    `（本轮系统注入的上下文：记忆/时间/任务等，非用户消息正文，按 system 指令同等遵循）\n` +
+    `${DYNAMIC_CONTEXT_NOTE}\n` +
     `${tail}\n${DYNAMIC_CONTEXT_WRAP_END}`
   );
+}
+
+/** 独立消息形态的包裹（无前导空行，块头即标签）。 */
+function standaloneTailDynamicContext(tail: string): string {
+  return `${DYNAMIC_CONTEXT_WRAP_BEGIN}\n${DYNAMIC_CONTEXT_NOTE}\n${tail}\n${DYNAMIC_CONTEXT_WRAP_END}`;
+}
+
+/**
+ * 沉底注入形态（2026-10-22，prefix cache 根治）：
+ * - `append`（默认）：作为**最后一条独立 system 消息**追加，历史消息字节一个不动；
+ * - `inline`（旧行为，回滚通道）：拼进最后一条 user 消息尾部。
+ *
+ * 为什么必须 append：inline 形态会**改写一条已落库的历史消息**——本轮请求里最后
+ * 那条 user 带尾巴，落库的是干净版，下一轮它作为历史出现时字节就变了。实测
+ * （2026-10-22，DeepSeek 隐式缓存）命中量恰好等于「system + tools」而历史段 0 命中，
+ * 正是从最后一条 user 起整段作废。改成独立尾消息后，历史前缀逐字节稳定，尾巴
+ * 每轮重新生成只影响它自己（本来也没被缓存过）。
+ */
+function tailContextMode(): "append" | "inline" {
+  const raw = (process.env.AGENT_TAIL_CONTEXT_MODE ?? "append").trim().toLowerCase();
+  return raw === "inline" ? "inline" : "append";
 }
 
 /** 找到最新一条 user 消息（从尾部向前扫）；无 user 消息返回 null。 */
@@ -327,18 +362,22 @@ function findLastUserMessage(
 }
 
 /**
- * 把 volatile 动态上下文沉底注入到「最新 user 消息尾部」，返回克隆后的消息数组。
- * - string content：追加一行包裹标签文本
- * - content parts 数组：追加一个 text part（保留 image_url 等既有 part）
- * - 找不到 user 消息（极罕见）：回退为附加到 system 之后，兼容旧行为，不丢语义
+ * 把 volatile 动态上下文沉底注入，返回克隆后的消息数组（绝不改写调用方持有的
+ * thread 消息对象——防污染会话历史）。
  *
- * 只克隆被修改的 user 消息，绝不改写调用方持有的 thread 消息对象（防污染会话历史）。
+ * - `append`（默认）：`[...messages, {role:"system", content: 包裹块}]`，末尾独立消息。
+ *   历史逐字节不变 → 隐式前缀缓存的命中边界从「最后一条 user」推到「整段历史之后」。
+ * - `inline`（回滚）：拼到最后一条 user 消息尾部（string 追加 / content parts 追加 text）。
+ * - 空 messages 或 inline 找不到 user 消息：回退为追加末尾 system，不丢语义。
  */
 export function applyTailDynamicContext(
   messages: ChatCompletionMessageParam[],
   tailDynamicContext: string,
 ): ChatCompletionMessageParam[] {
   if (!tailDynamicContext) return messages;
+  if (tailContextMode() === "append") {
+    return [...messages, { role: "system", content: standaloneTailDynamicContext(tailDynamicContext) }];
+  }
   const lastUser = findLastUserMessage(messages);
   if (!lastUser) {
     return [...messages, { role: "system", content: tailDynamicContext }];

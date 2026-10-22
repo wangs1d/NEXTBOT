@@ -17,6 +17,7 @@
 
 import type { DailyJournalService, JournalHit } from "./daily-journal-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
+import type { DdlItem } from "./ddl-radar-service.js";
 import { buildClothingAdvice, detectSevereWeatherAlerts } from "./weather-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
@@ -67,6 +68,21 @@ export interface EveningDigest {
   budgetAlert: TravelBudgetAlert | null;
   /** 口语化播报文本（供 TTS / 消息气泡） */
   narrationText: string;
+  /**
+   * DDL 三级提醒梯度的 L2 档（2026-10-22 大学生线）：
+   * 明天到期（tier=tomorrow）+ 今天已过期还没交（tier=today 且 overdue）。
+   * 由 DdlRadarService 确定性扫描，未注入 radar 时整块省略。
+   * L1（2~3 天后）与 L3（当天早晨）走晨报；这里只承担"明晚要交"。
+   */
+  deadlineReminders?: DdlItem[];
+}
+
+/** DDL 雷达最小结构接口（避免与扫描器实现耦合） */
+export interface DdlRadarLike {
+  forEvening(
+    sessionId: string,
+    actorId?: string,
+  ): { tomorrow: DdlItem[]; overdue: DdlItem[] };
 }
 
 export type EveningDigestDeps = {
@@ -98,6 +114,12 @@ export type EveningDigestDeps = {
    * 否则 null。未注入 = 不做预算块。
    */
   travelBudgetProvider?: (sessionId: string) => Promise<TravelBudgetAlert | null>;
+  /**
+   * DDL 雷达（大学生线 L2 档）：明日截止事项取数口。未注入 = 不做 DDL 块。
+   * 只读扫描，不推送——投递由本服务自身的睡前出口完成，避免与承诺板
+   * 分钟级梯度提醒撞车。
+   */
+  ddlRadar?: DdlRadarLike | null;
 };
 
 function localDateKey(d: Date): string {
@@ -115,6 +137,21 @@ function clipItemTitle(raw: string): string {
   const s = raw.trim().replace(/\s+/g, " ");
   if (!s) return "日程安排";
   return s.length <= 20 ? s : `${s.slice(0, 20)}…`;
+}
+
+/**
+ * DDL 事实行（供 LLM prompt）：相对日期 + 时刻 + 标题。
+ * 过期的显式标「已过期」，避免模型把它说成"明天要交"。
+ */
+function formatDeadlineFacts(items: DdlItem[]): string {
+  return items
+    .map((i) => {
+      const d = new Date(i.dueAt);
+      const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+      const dayWord = i.tier === "tomorrow" ? "明天" : i.overdue ? "今天已过" : "今天";
+      return `${dayWord} ${hm} 《${i.title}》`;
+    })
+    .join("；");
 }
 
 /** agent 输出净化：去包裹引号/围栏、压平换行、钳长——通知是一行表面 */
@@ -156,8 +193,24 @@ export class EveningDigestService {
       budgetAlert,
       narrationText: "",
     };
+    // L2 档：明天到期 + 今天已过期未交（过期项按时间自然排在前面）
+    const ddl = this.fetchDeadlineReminders(sessionId);
+    if (ddl.length > 0) digest.deadlineReminders = ddl;
     digest.narrationText = await this.composeNarrationText(sessionId, digest);
     return digest;
+  }
+
+  /** DDL L2 取数：radar 未注入 / 抛错 → 空数组（整块省略），不阻塞 digest */
+  private fetchDeadlineReminders(sessionId: string): DdlItem[] {
+    if (!this.deps.ddlRadar) return [];
+    try {
+      const { tomorrow, overdue } = this.deps.ddlRadar.forEvening(sessionId);
+      return [...overdue, ...tomorrow].sort(
+        (a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt),
+      );
+    } catch {
+      return [];
+    }
   }
 
   /** 行程超支提醒取数（travel 双端⑥）：未注入 provider 或判定不超支 → null */
@@ -227,6 +280,9 @@ export class EveningDigestService {
     if (weatherLine) dataLines.push(`- 明天天气：${weatherLine}`);
     if (d.outfitTip) dataLines.push(`- 明天穿衣：${d.outfitTip}`);
     if (d.budgetAlert) dataLines.push(`- 行程消费提醒：${budgetAlertFact(d.budgetAlert)}`);
+    if (d.deadlineReminders && d.deadlineReminders.length > 0) {
+      dataLines.push(`- 截止事项（必须提）：${formatDeadlineFacts(d.deadlineReminders)}`);
+    }
 
     return [
       "你是用户最熟的那个朋友，晚上临睡前顺口提一嘴明天的事。" +
@@ -243,6 +299,9 @@ export class EveningDigestService {
         "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。",
       "- 有行程消费提醒的话必须带上一句（今天花超了这种事睡前得说）：口语化说超了多少，" +
         "像「今天在成都花了九百多，超预算不少」这样，别念数字报表，也别责备人。",
+      "- 有截止事项的话必须提，这是睡前最该交代的一句：说明天/今天什么时候要交什么，" +
+        "像「明天下午三点前那个数据结构的作业得交了」；超过两件只说最紧的那一件+一共几件，" +
+        "别把清单念一遍，也别加「别忘了」「切记」这类催促腔。",
       "- 明天没安排就轻松带过一句，不许编事，也不许硬凑。",
       "- 可以有自然的语气词或一句收尾（「记得定闹钟」「早点睡」），但别每次都一个套路。",
       "- 不要：敬语、「亲爱的」、「您好」、「温馨提示」、汇报腔、排比、书面语、emoji、标题、引号、换行、任何解释。",
@@ -360,14 +419,15 @@ export class EveningDigestService {
     const items = d.tomorrowSchedule;
     const n = items.length;
     const bit = weatherOutfitBit(d);
+    const ddlBit = deadlineBit(d.deadlineReminders);
 
     // 明天没安排：天气穿衣照说，没数据才干脆的不打扰（bit 去掉「明天」主语避免重复）
     if (n === 0) {
       const tail = d.budgetAlert ? ` ${budgetAlertBit(d.budgetAlert)}` : "";
       if (bit) {
-        return `明天没安排，${bit.replace(/^明天/, "")}${tail}`;
+        return `明天没安排，${bit.replace(/^明天/, "")}${tail}${ddlBit}`;
       }
-      return `明天没安排，想睡就多睡会儿。${tail}`;
+      return `明天没安排，想睡就多睡会儿。${tail}${ddlBit}`;
     }
 
     const first = items[0]!;
@@ -392,8 +452,25 @@ export class EveningDigestService {
     if (d.budgetAlert) {
       line += ` ${budgetAlertBit(d.budgetAlert)}`;
     }
+    // DDL L2 档：明天要交的（兜底模板也要交代，不能只有 LLM 版本才有）
+    if (ddlBit) line += ddlBit;
     return line;
   }
+}
+
+/** DDL 一句（确定性兜底文案用）：只报最近一件 + 剩余件数，不念清单 */
+function deadlineBit(items: DdlItem[] | undefined): string {
+  if (!items || items.length === 0) return "";
+  const first = items[0]!;
+  const d = new Date(first.dueAt);
+  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  const when = first.overdue
+    ? `今天 ${hm} 那个已经过点了`
+    : first.tier === "tomorrow"
+      ? `明天 ${hm} 前`
+      : `今天 ${hm} 前`;
+  const rest = items.length > 1 ? `，另外还有 ${items.length - 1} 项要交` : "";
+  return ` ${when}要交「${first.title}」${rest}。`;
 }
 
 /** 超支事实行（LLM 提示词数据段用）：目的地/第几天/花费/档位上限，供 agent 转述 */

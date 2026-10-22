@@ -17,7 +17,10 @@ if (getRuntimeTopologyConfig().mode === "remote") {
 // 配置 undici 连接池 / keepAlive / strictContentLength=false，
 // 从根源上减少 undici Parser 在 socket 异常关闭时抛出 AssertionError 的频率。
 setupGlobalHttpAgent();
-import { createExternalChatProviderFromEnv } from "./external-model/index.js";
+import {
+  createExternalChatProviderFromEnv,
+  resolvePrimaryExternalModelBinding,
+} from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
@@ -36,13 +39,7 @@ import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
 // ─── 提前声明 shutdown（避免 uncaughtException 触发时遇到 const 暂时性死区） ───
 let shutdown: (() => void) | null = null;
 
-// ─── BrainCenter 引用（services 装配完成后赋值，让 process 监听器能转发 bug 信号） ───
-// 装配完成前的异常不会转发（services 还没建好，没有 CodeRepairCortex 可用）
-let brainCenterRef: import("./brain/brain-center.js").BrainCenter | null = null;
-
 // ─── 全局异常处理：防止未捕获异常导致进程意外崩溃 ───
-// 若 CodeRepairCortex 已启用（BRAIN_CODE_REPAIR_ENABLED=1），会把异常作为 BugSignal 转发，
-// 触发自动修复闭环。转发失败不影响原有的 shutdown 流程。
 
 // 判定是否为 undici HTTP parser 在 socket 异常关闭时抛出的良性断言错误。
 // 这类错误源自 node:internal/deps/undici 的 Parser.finish / onHttpSocketEnd，
@@ -73,16 +70,6 @@ process.on("uncaughtException", (err: Error) => {
   }
   console.error("[FATAL] uncaughtException:", err.message || err);
   console.error(err.stack || "(no stack)");
-  // 转发给 CodeRepairCortex（fire-and-forget，不阻塞 shutdown）
-  if (brainCenterRef) {
-    void brainCenterRef.reportBug({
-      source: "uncaught_exception",
-      title: err.message?.slice(0, 100) || "uncaughtException",
-      errorMessage: `${err.message ?? ""}\n${err.stack ?? ""}`,
-    }).catch(() => {
-      // 转发失败静默吞掉，不阻塞 shutdown
-    });
-  }
   // 记录错误后优雅退出，让外部进程管理器（如 node --watch / pm2）决定是否重启
   shutdown?.();
   setTimeout(() => process.exit(1), 2000).unref();
@@ -92,16 +79,6 @@ process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) =>
   const msg = reason instanceof Error ? reason.message : String(reason ?? "unknown");
   const stack = reason instanceof Error ? reason.stack ?? "" : "";
   console.error("[WARN] unhandledRejection:", msg);
-  // 转发给 CodeRepairCortex：unhandledRejection 不退出进程，可作为修复信号
-  if (brainCenterRef) {
-    void brainCenterRef.reportBug({
-      source: "unhandled_rejection",
-      title: msg.slice(0, 100),
-      errorMessage: `${msg}\n${stack}`,
-    }).catch(() => {
-      // 转发失败静默吞掉
-    });
-  }
   // 不退出进程，仅记录警告；如果是严重错误会触发后续的 uncaughtException
 });
 
@@ -110,12 +87,20 @@ await exitIfDevPortInUse(getRuntimeConfig().port);
 const runtime = getRuntimeConfig();
 const externalChatProbe = createExternalChatProviderFromEnv();
 if (externalChatProbe?.isEnabled()) {
+  // 日志里的模型名按 provider 自己的键位取（此前只认 MOONSHOT/OPENAI/MINIMAX，
+  // 配 deepseek 时会打出别家的模型名，看着像 provider 没生效）。
+  const probeModel =
+    resolvePrimaryExternalModelBinding()?.model ??
+    process.env.MOONSHOT_MODEL ??
+    process.env.OPENAI_MODEL ??
+    process.env.MINIMAX_MODEL ??
+    "default";
   console.log(
-    `[external-model] 已启用 ${externalChatProbe.displayLabel}（${process.env.MOONSHOT_MODEL ?? process.env.OPENAI_MODEL ?? process.env.MINIMAX_MODEL ?? "default"}）`,
+    `[external-model] 已启用 ${externalChatProbe.displayLabel}（${probeModel}）`,
   );
 } else {
   console.warn(
-    "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY / MINIMAX_API_KEY 或 OPENAI_API_KEY 后重启服务",
+    "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY / MINIMAX_API_KEY / DEEPSEEK_API_KEY 或 OPENAI_API_KEY 后重启服务",
   );
 }
 // ─── FunASR 自启动：必须在 createAppServices 之前，让 FunAsrAdapter.isEnabled() 返回 true ───
@@ -126,8 +111,6 @@ const stopFunasrEarly = startFunasrServer({
 });
 const services = await createAppServices();
 await initializeRuntimeState(services);
-// 把 BrainCenter 引用挂到 process 监听器，让后续异常能转发给 CodeRepairCortex
-brainCenterRef = services.brainCenter;
 try {
   await services.app.listen({
     port: runtime.port,

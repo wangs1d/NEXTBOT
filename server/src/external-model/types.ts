@@ -302,6 +302,15 @@ export type AgentStreamOptions = {
    */
   auditStage?: string;
   /**
+   * 会话工具面冻结的可增长项（2026-10-22）。
+   *
+   * 前台对话车道的 tools 数组首轮冻结后逐字节复用（保护前缀缓存），本轮新召回的
+   * 域预载工具不再进数组、只走 tool_request。唯一例外是「晋升常驻」——它可能在
+   * 会话中途跨过阈值，冻结会把这次晋升关到会话结束。由 agent-core 把晋升工具名
+   * 显式下发，工具循环据此把它们吸收进基准（一次增长 = 一次前缀断点，随后重新稳定）。
+   */
+  toolFaceGrowNames?: readonly string[];
+  /**
    * 会话级任务计划的主键（2026-10-19）。
    *
    * 工具层用 `ToolContext.sessionId` 写计划，而工具循环内只能拿到 provider 的

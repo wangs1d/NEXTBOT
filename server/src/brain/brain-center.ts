@@ -13,13 +13,11 @@ import type {
   BrainSignalInput,
   BrainSnapshot,
   CapabilityDescriptor,
-  CapabilityGapReport,
   CognitiveContext,
   CognitiveEngine,
   CognitiveInput,
   CognitiveResult,
   EmotionVector,
-  EvolutionProposal,
   MemoryConsolidationStats,
   MemoryDomainKind,
   MemoryItem,
@@ -93,7 +91,6 @@ interface CapabilityCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
   introspect(actorId: string): CapabilityDescriptor[];
-  identifyGap?(scenario: string): Promise<CapabilityGapReport>;
   /**
    * 用 ToolRegistry 当前全量工具名重新填充各 domain 的 descriptor.tools。
    * 用于动态注册（MCP / self-programming）后让 list_capabilities 返回真实工具。
@@ -134,56 +131,6 @@ interface ProactionCortexLike {
   stop?(): Promise<void>;
   decide(signal: BrainSignalInput): Promise<BrainDecision>;
   recentDecisions?(actorId: string): BrainDecision[];
-}
-
-// 进化皮层外观接口
-interface EvolutionCortexLike {
-  start?(): Promise<void>;
-  stop?(): Promise<void>;
-  evolve(
-    proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
-  ): EvolutionProposal;
-  listPending?(actorId?: string): EvolutionProposal[];
-  /** 显式查询入口：基于规则产出能力进化提案统计 */
-  proposeEvolution?(actorId: string): { proposals: number; reason: string };
-  /** 真正的失败时自我学习入口：AgentCore 工具调用结束（含失败）时通过 BrainCenter 转发到此 */
-  recordToolInteraction?(params: {
-    sessionId: string;
-    userRequest: string;
-    attemptedTools: string[];
-    success: boolean;
-    errorMessage?: string;
-    responseTime?: number;
-  }): Promise<void>;
-  /** 显式执行入口：外部（用户 / Agent）按 id 触发单个提案执行 */
-  executeProposal?(proposalId: string): Promise<{
-    ok: boolean;
-    proposal: EvolutionProposal | null;
-    error?: string;
-  }>;
-  approveByUser?(
-    proposalId: string,
-    sessionId?: string,
-  ): Promise<{ ok: boolean; proposal: EvolutionProposal | null; error?: string }>;
-  rejectByUser?(
-    proposalId: string,
-    reason: string | undefined,
-    sessionId?: string,
-  ): { ok: boolean; proposal: EvolutionProposal | null };
-}
-
-// 自我修复皮层外观接口
-interface CodeRepairCortexLike {
-  start?(): Promise<void>;
-  stop?(): Promise<void>;
-  /** 报告 bug 信号，触发自动修复 */
-  reportBug?(signal: import("./types.js").BugSignal): Promise<import("./types.js").RepairProposal>;
-  /** 列出修复提案（可按状态过滤） */
-  listRepairs?(status?: import("./types.js").RepairStatus): import("./types.js").RepairProposal[];
-  /** 查询单个修复提案 */
-  getRepair?(id: string): import("./types.js").RepairProposal | null;
-  /** 用户强制重试 */
-  retry?(id: string): Promise<import("./types.js").RepairProposal | null>;
 }
 
 // 感官皮层外观接口
@@ -412,7 +359,7 @@ interface MultimodalFusionCortexLike {
  * Brain Center —— 大脑中心外观类。
  *
  * 持有十一个脑区分区的可选引用（4 个核心皮层 + 5 个神经解剖皮层 + 2 个 subcortical 分区），
- * 对外提供统一的能力自省、用户觉察、主动决策、自我进化、
+ * 对外提供统一的能力自省、用户觉察、主动决策、
  * 感官感知、记忆、突触通信、边缘安全/情绪与规划路由入口。
  * subcortical 分区：BrainStem（脑干/自主节律）+ Cerebellum（小脑/时序协调）。
  * 任一分区缺失时方法优雅降级。
@@ -421,9 +368,6 @@ export class BrainCenter {
   private cap: CapabilityCortexLike | null = null;
   private awareness: AwarenessCortexLike | null = null;
   private proaction: ProactionCortexLike | null = null;
-  private evolution: EvolutionCortexLike | null = null;
-  /** 自我修复皮层（CodeRepairCortex）：可选注入，env BRAIN_CODE_REPAIR_ENABLED=1 时启用 */
-  private codeRepair: CodeRepairCortexLike | null = null;
   private sensory: SensoryCortexLike | null = null;
   private memory: MemoryCortexLike | null = null;
   private synapse: SynapseBusLike | null = null;
@@ -516,41 +460,6 @@ export class BrainCenter {
   registerProaction(c: ProactionCortexLike): void {
     this.proaction = c;
     console.log("[BrainCenter] 已注册 ProactionCortex");
-  }
-
-  registerEvolution(c: EvolutionCortexLike): void {
-    this.evolution = c;
-    console.log("[BrainCenter] 已注册 EvolutionCortex");
-  }
-
-  /** 注册自我修复皮层（可选；env BRAIN_CODE_REPAIR_ENABLED=1 时由装配阶段注入） */
-  registerCodeRepair(c: CodeRepairCortexLike): void {
-    this.codeRepair = c;
-    console.log("[BrainCenter] 已注册 CodeRepairCortex（自我修复）");
-  }
-
-  /** 转发 bug 信号给 CodeRepairCortex。未注册时静默返回 null。 */
-  async reportBug(signal: import("./types.js").BugSignal): Promise<import("./types.js").RepairProposal | null> {
-    if (!this.codeRepair?.reportBug) return null;
-    return await this.codeRepair.reportBug(signal);
-  }
-
-  /** 转发修复查询。未注册时返回空数组。 */
-  listRepairs(status?: import("./types.js").RepairStatus): import("./types.js").RepairProposal[] {
-    if (!this.codeRepair?.listRepairs) return [];
-    return this.codeRepair.listRepairs(status);
-  }
-
-  /** 转发修复详情查询。 */
-  getRepair(id: string): import("./types.js").RepairProposal | null {
-    if (!this.codeRepair?.getRepair) return null;
-    return this.codeRepair.getRepair(id);
-  }
-
-  /** 转发强制重试。 */
-  async retryRepair(id: string): Promise<import("./types.js").RepairProposal | null> {
-    if (!this.codeRepair?.retry) return null;
-    return await this.codeRepair.retry(id);
   }
 
   /**
@@ -953,19 +862,6 @@ export class BrainCenter {
   }
   private _lastCapabilityRefreshTs = 0;
 
-  /** 能力缺口识别：委托给 CapabilityCortex（async，支持 LLM 语义分析）；未注册或方法缺失时返回 null */
-  async identifyGap(scenario: string): Promise<CapabilityGapReport | null> {
-    if (!this.cap || typeof this.cap.identifyGap !== "function") {
-      return null;
-    }
-    try {
-      return await this.cap.identifyGap(scenario);
-    } catch (err) {
-      console.log(`[BrainCenter] identifyGap 调用失败: ${err}`);
-      return null;
-    }
-  }
-
   /** 用户觉察：返回当前 actor 的活动状态 */
   observe(actorId: string): UserActivityState | null {
     if (!this.awareness) {
@@ -1002,7 +898,7 @@ export class BrainCenter {
    * 记录一次工具交互到自我学习闭环。
    *
    * AgentCore 在工具调用结束（无论成功失败）时调用此方法。BrainCenter 转发到
-   * EvolutionCortex.recordToolInteraction → selfLearning.recordInteraction 持久化。
+   * selfLearning.recordInteraction 持久化失败轨迹。
    *
    * 后续显式 proposeEvolution 查询时从 selfLearning.getRecentRecords() 即可读到失败轨迹，
    * 生成进化提案。这是"失败时自我学习"的真正入口。
@@ -1072,21 +968,6 @@ export class BrainCenter {
       .catch((e) => {
         console.warn("[BrainCenter] recordToolInteraction learning feedback failed:", e);
       });
-
-    if (!this.evolution?.recordToolInteraction) {
-      // EvolutionCortex 未注册或未实现 recordToolInteraction，静默降级
-      return;
-    }
-    void this.evolution.recordToolInteraction({
-      sessionId: params.sessionId,
-      userRequest: params.userRequest,
-      attemptedTools: params.attemptedTools,
-      success: params.success,
-      errorMessage: params.errorMessage,
-      responseTime: params.responseTime,
-    }).catch((e) => {
-      console.warn("[BrainCenter] recordToolInteraction 转发失败:", e);
-    });
   }
 
   /** 记录用户纠正信号：例如“不是这样/应该是X/你前面错了”。 */
@@ -1838,68 +1719,6 @@ export class BrainCenter {
     return this.proaction.decide(signal);
   }
 
-  /** 自我进化：提交一个进化提案 */
-  evolve(
-    proposal: Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">,
-  ): EvolutionProposal {
-    if (!this.evolution) {
-      console.log("[BrainCenter] evolve: EvolutionCortex 缺失，返回未持久化的临时提案");
-      const now = new Date().toISOString();
-      return {
-        ...proposal,
-        id: randomUUID(),
-        status: "pending",
-        createdAt: now,
-        updatedAt: now,
-      };
-    }
-    return this.evolution.evolve(proposal);
-  }
-
-  /**
-   * 用户同意装载进化提案生成的 Skill（用户审批闸门）。
-   * 委托 EvolutionCortex.approveByUser：调 PromotionPipeline.promote 装载到 SkillManager。
-   */
-  async approveEvolution(
-    proposalId: string,
-    sessionId?: string,
-  ): Promise<{ ok: boolean; proposal: EvolutionProposal | null; error?: string }> {
-    if (!this.evolution?.approveByUser) {
-      return { ok: false, proposal: null, error: "EvolutionCortex 或 approveByUser 未注册" };
-    }
-    return this.evolution.approveByUser(proposalId, sessionId);
-  }
-
-  /**
-   * 用户拒绝装载进化提案生成的 Skill（用户审批闸门）。
-   * 委托 EvolutionCortex.rejectByUser：awaiting_user_approval → rejected。
-   */
-  rejectEvolution(
-    proposalId: string,
-    reason: string | undefined,
-    sessionId?: string,
-  ): { ok: boolean; proposal: EvolutionProposal | null } {
-    if (!this.evolution?.rejectByUser) {
-      return { ok: false, proposal: null };
-    }
-    return this.evolution.rejectByUser(proposalId, reason, sessionId);
-  }
-
-  /**
-   * 显式执行入口：外部（用户 / Agent）按 id 触发单个进化提案执行。
-   * 委托 EvolutionCortex.executeProposal；未注册 / 未实现时返回 ok=false。
-   */
-  async executeEvolution(proposalId: string): Promise<{
-    ok: boolean;
-    proposal: EvolutionProposal | null;
-    error?: string;
-  }> {
-    if (!this.evolution?.executeProposal) {
-      return { ok: false, proposal: null, error: "EvolutionCortex 或 executeProposal 未注册" };
-    }
-    return this.evolution.executeProposal(proposalId);
-  }
-
   /** 听：委托 SensoryCortex.listen 做语音识别；缺失时返回空结果 */
   async listen(
     audio: AudioBufferRef,
@@ -2254,7 +2073,6 @@ export class BrainCenter {
       capabilities: this.cap ? this.cap.introspect(actorId) : [],
       userActivity: this.awareness ? this.awareness.observe(actorId) : null,
       lastDecisions: this.proaction?.recentDecisions?.(actorId) ?? [],
-      pendingEvolutions: this.evolution?.listPending?.(actorId) ?? [],
       sensory: this.sensory ? { stats: this.sensory.getStats() } : undefined,
       memory: this.memory ? { recentItems: [] } : undefined,
       synapse: this.synapse
@@ -2328,8 +2146,6 @@ export class BrainCenter {
         { name: "CapabilityCortex", registered: this.cap !== null },
         { name: "AwarenessCortex", registered: this.awareness !== null },
         { name: "ProactionCortex", registered: this.proaction !== null },
-        { name: "EvolutionCortex", registered: this.evolution !== null },
-        { name: "CodeRepairCortex", registered: this.codeRepair !== null },
         { name: "SensoryCortex", registered: this.sensory !== null },
         { name: "MemoryCortex", registered: this.memory !== null },
         { name: "SynapseBus", registered: this.synapse !== null },
@@ -2362,8 +2178,6 @@ export class BrainCenter {
     await this.startCortex("CapabilityCortex", this.cap);
     await this.startCortex("AwarenessCortex", this.awareness);
     await this.startCortex("ProactionCortex", this.proaction);
-    await this.startCortex("EvolutionCortex", this.evolution);
-    await this.startCortex("CodeRepairCortex", this.codeRepair);
     await this.startCortex("SensoryCortex", this.sensory);
     await this.startCortex("MemoryCortex", this.memory);
     await this.startCortex("SynapseBus", this.synapse);
@@ -2385,8 +2199,6 @@ export class BrainCenter {
     await this.stopCortex("CapabilityCortex", this.cap);
     await this.stopCortex("AwarenessCortex", this.awareness);
     await this.stopCortex("ProactionCortex", this.proaction);
-    await this.stopCortex("EvolutionCortex", this.evolution);
-    await this.stopCortex("CodeRepairCortex", this.codeRepair);
     await this.stopCortex("SensoryCortex", this.sensory);
     await this.stopCortex("MemoryCortex", this.memory);
     await this.stopCortex("SynapseBus", this.synapse);

@@ -46,7 +46,9 @@ type ResolvedOpenClawModel = {
 };
 
 function toOpenClawModel(binding: NonNullable<ReturnType<typeof resolvePrimaryExternalModelBinding>>): ResolvedOpenClawModel {
-  if (binding.providerId === "openai") {
+  // deepseek 与 openai 同走 openai 系适配器（OpenAI 兼容协议 + 自定义 baseUrl）；
+  // OpenClaw 侧没有独立的 deepseek provider 键，落到 moonshot 分支会模型前缀错配。
+  if (binding.providerId === "openai" || binding.providerId === "deepseek") {
     return {
       openclawProvider: "openai",
       openclawModel: `openai/${binding.model}`,

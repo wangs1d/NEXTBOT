@@ -58,6 +58,12 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: ["reminder.plan"],
   },
   {
+    name: "watch",
+    summary: "盯梢任务（盯邮件/盯消息，相关消息一到主动报告，含截止时间推理）",
+    prefixes: ["watch."],
+    secondaryTools: [],
+  },
+  {
     name: "reminder",
     summary: "提醒/闹钟/定时通知",
     prefixes: ["reminder."],

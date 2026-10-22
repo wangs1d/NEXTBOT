@@ -8,7 +8,7 @@
 // 核心原则：
 //   1. 不调 LLM 想象关联——只在已存的 MemoryEdge 上做图扩散
 //   2. 不阻塞主 recall 返回——spread 本身可异步触发
-//   3. 优雅降级——humanLike / metaCognition / knowledgeGapExecutor 任一缺失都不报错
+//   3. 优雅降级——humanLike / metaCognition 任一缺失都不报错
 //
 // 详见 spec: .trae/specs/extend-memory-cognitive-architecture/spec.md
 
@@ -43,17 +43,6 @@ export interface HumanLikeMemoryAssociativeLike {
     decayFactor: number;
     hopCost: number;
   }>;
-}
-
-/**
- * KnowledgeGapExecutor 的最小化外观接口。
- *
- * 用于在联想置信度低时异步触发知识缺口查询，主动学习验证。
- * 学习结果回写为新的 semantic 记忆（confidence 初始 0.3）由上层接入负责。
- */
-export interface KnowledgeGapExecutorLike {
-  /** 触发知识缺口查询，返回学习结果（null 表示无结果 / 失败） */
-  executeGapQuery(query: string): Promise<string | null>;
 }
 
 // ============================================================
@@ -126,14 +115,9 @@ const OUTCOME_SEPARATOR = " | ";
  */
 export class MemoryAssociativeGraph {
   private readonly humanLike: HumanLikeMemoryAssociativeLike | null;
-  private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
-  constructor(opts: {
-    humanLike?: HumanLikeMemoryAssociativeLike | null;
-    knowledgeGapExecutor?: KnowledgeGapExecutorLike | null;
-  } = {}) {
+  constructor(opts: { humanLike?: HumanLikeMemoryAssociativeLike | null } = {}) {
     this.humanLike = opts.humanLike ?? null;
-    this.knowledgeGapExecutor = opts.knowledgeGapExecutor ?? null;
   }
 
   /**
@@ -349,7 +333,6 @@ export class MemoryAssociativeGraph {
    * - 检查 activatedNodes 中 confidence < 0.4 的占比
    * - 若占比 > exploreThreshold（缺省 0.3）：
    *   - 调 metaCognition.markShouldExplore(actorId, "low_confidence_association")
-   *   - 若 knowledgeGapExecutor 可用，异步 executeGapQuery（不阻塞）
    *
    * 不调 LLM。
    *
@@ -381,23 +364,6 @@ export class MemoryAssociativeGraph {
 
     const ratio = lowConfidenceCount / result.activatedNodes.length;
     if (ratio <= cfg.exploreThreshold) return;
-
-    // 异步触发知识缺口查询（不阻塞，不 await）
-    if (this.knowledgeGapExecutor && query) {
-      // fire-and-forget：主动学习完成后由上层接入负责回写 semantic 记忆
-      this.knowledgeGapExecutor
-        .executeGapQuery(query)
-        .then((learned) => {
-          if (learned) {
-            console.log(
-              `[MemoryAssociativeGraph] 主动学习完成（待回写 semantic，confidence=0.3）: ${learned.slice(0, 80)}`,
-            );
-          }
-        })
-        .catch((err) => {
-          console.error("[MemoryAssociativeGraph] executeGapQuery 失败（忽略）:", err);
-        });
-    }
   }
 
   // ---- 内部工具 ----

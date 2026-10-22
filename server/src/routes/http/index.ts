@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 import { registerAccountRoutes, isEmailOtpEnforced } from "./accounts.js";
 import { registerAccountWebRoutes } from "./accounts-web.js";
 import { registerFinanceIngestRoutes } from "./finance-ingest.js";
+import { registerIngestRoutes } from "./ingest.js";
 import { registerAgentCollaborationRoutes } from "./agent.js";
 import { registerBodyRoutes } from "./body.js";
 import { registerBrainRoutes } from "./brain.js";
@@ -88,6 +89,7 @@ import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
+import { registerExitGateMetricsRoutes } from "./exit-gate-metrics.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -141,6 +143,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     });
     // 旅行数据维护（快照 + 主动刷新：存量图片本地化 / 按目的地补图）
     registerTravelDataRoutes(app);
+    // 出口闸触发率看板（L4 运营闭环：持续高触发 ⇒ 改描述不加闸）
+    registerExitGateMetricsRoutes(app);
     registerPhoneRoutes(app, deps);
   }
   registerCompanionRoutes(app, deps);
@@ -160,6 +164,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 网页登录页按 OTP 闸状态渲染验证码步骤（SMTP 凭据齐备即自动收紧）
   registerAccountWebRoutes(app, { otpEnabled: isEmailOtpEnforced(deps) });
   registerFinanceIngestRoutes(app, deps);
+  // 数据入口：用户自助上传（截图/表格/ics/文本）→ 抽取草稿 → 确认入库。
+  // 与财务入站同构：未装配服务时端点 503，不影响其他路由。
+  registerIngestRoutes(app, deps);
   // 好友社交（world.link.* 工具族的 HTTP 面；开源版剔除）
   if (!isOssEdition()) {
     registerFriendRoutes(app, deps);

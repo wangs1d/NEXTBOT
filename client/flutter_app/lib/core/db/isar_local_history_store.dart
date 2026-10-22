@@ -185,6 +185,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             mediaCards: _decryptMediaCards(map["mediaCards"]),
             summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
+            eveningDigest: _decryptEveningDigest(map["eveningDigest"]),
           );
         }).toList();
       }
@@ -678,6 +679,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
           mediaCards: message.mediaCards,
           summaryCard: message.summaryCard,
           renderBlocks: message.renderBlocks,
+          eveningDigest: message.eveningDigest,
         ));
       } catch (e) {
         debugPrint(
@@ -751,6 +753,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       mediaCards: message.mediaCards,
       summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
+      eveningDigest: message.eveningDigest,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
     // done 后再存完整文本）只保留一条记录，避免本地历史出现重复气泡。
@@ -833,6 +836,24 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
+  /// 加密睡前备忘卡载荷（eveningDigest，2026-10-22）：null/空 → null。
+  String? _encryptEveningDigest(Map<String, dynamic>? digest) {
+    if (digest == null || digest.isEmpty) return null;
+    return _encryptFor(jsonEncode(digest), _userPin);
+  }
+
+  /// 解密睡前备忘卡载荷；损坏时不抛异常，返回 null（历史兼容）。
+  Map<String, dynamic>? _decryptEveningDigest(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! Map) return null;
+      return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
   String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
     if (blocks == null || blocks.isEmpty) return null;
@@ -904,6 +925,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                     "summaryCard": _encryptSummaryCard(m.summaryCard),
                   if (m.renderBlocks != null)
                     "renderBlocks": _encryptRenderBlocks(m.renderBlocks),
+                  if (m.eveningDigest != null)
+                    "eveningDigest": _encryptEveningDigest(m.eveningDigest),
                 },
               )
               .toList(),

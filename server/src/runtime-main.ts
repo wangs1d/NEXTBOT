@@ -40,18 +40,10 @@ const topology = getRuntimeTopologyConfig();
 process.env.PORT = String(topology.runtimeHttpPort);
 
 let shutdown: (() => void) | null = null;
-let brainCenterRef: import("./brain/brain-center.js").BrainCenter | null = null;
 
 process.on("uncaughtException", (err: Error) => {
   console.error("[runtime][FATAL] uncaughtException:", err.message || err);
   console.error(err.stack || "(no stack)");
-  if (brainCenterRef) {
-    void brainCenterRef.reportBug({
-      source: "uncaught_exception",
-      title: err.message?.slice(0, 100) || "uncaughtException",
-      errorMessage: `${err.message ?? ""}\n${err.stack ?? ""}`,
-    }).catch(() => {});
-  }
   shutdown?.();
   setTimeout(() => process.exit(1), 2000).unref();
 });
@@ -73,7 +65,6 @@ const stopFunasrEarly = startFunasrServer({ log: (line) => console.log(line) });
 
 const services = await createAppServices();
 await initializeRuntimeState(services);
-brainCenterRef = services.brainCenter;
 
 // 内部 HTTP/WS 监听（gateway 隧道与反代的上游）
 await services.app.listen({ port: topology.runtimeHttpPort, host: "127.0.0.1" });

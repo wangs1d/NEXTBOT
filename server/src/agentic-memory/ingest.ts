@@ -20,6 +20,7 @@ import {
   type UnifiedLlmClient,
 } from "./unified-extractor.js";
 import { topicTagsFor } from "./travel-tagger.js";
+import { isProfileWriteBatchMode } from "../services/profile-write-scheduler.js";
 
 /** Mem0 add(infer:true) 抽取出的单条记忆 */
 export interface Mem0WrittenItem {
@@ -191,7 +192,14 @@ export class AgenticMemoryIngestService {
       isMemoryUnifiedExtractEnabled() &&
       getCommitmentExtractScope() === "all"
     ) {
-      void this.resolveProfileContext(actorId, t, false)
+      // 三层写入调度（2026-10-22）：batch 模式下低信号轮不再捎带画像抽取——
+      // 这里能拿到的只是压缩残片（120 字快照/原子行），在残片上注入画像上下文
+      // 是纯 token 浪费且召回塌缩；候选已在 WAL 全文标记，由夜间批处理覆盖
+      // （profile-write-scheduler）。legacy 模式保持原行为。
+      const rideProfileContext = isProfileWriteBatchMode()
+        ? Promise.resolve(undefined)
+        : this.resolveProfileContext(actorId, t, false);
+      void rideProfileContext
         .then((profileContext) =>
           extractUnified(t, {
             client: this.extractionClient ?? undefined,
@@ -201,13 +209,20 @@ export class AgenticMemoryIngestService {
         )
         .then((orphan) => {
           if (!orphan) return;
+          // batch 调度：无画像上下文的低信号抽取不产权威 profileOps——
+          // 没看到当前画像的 ADD 无法判重、更做不了 DELETE，留给夜间批处理。
+          const orphanProfileOps = isProfileWriteBatchMode()
+            ? undefined
+            : orphan.profileOps && orphan.profileOps.length > 0
+              ? orphan.profileOps
+              : undefined;
           if (
             orphan.commitments.length === 0 &&
             orphan.corrections.length === 0 &&
             orphan.understandings.length === 0 &&
             orphan.facts.length === 0 &&
             orphan.forget.length === 0 &&
-            (orphan.profileOps?.length ?? 0) === 0
+            (orphanProfileOps?.length ?? 0) === 0
           ) {
             return;
           }
@@ -224,8 +239,7 @@ export class AgenticMemoryIngestService {
             facts: orphan.facts.length > 0 ? orphan.facts : undefined,
             forget: orphan.forget.length > 0 ? orphan.forget : undefined,
             referents: orphan.referents.length > 0 ? orphan.referents : undefined,
-            profileOps:
-              orphan.profileOps && orphan.profileOps.length > 0 ? orphan.profileOps : undefined,
+            profileOps: orphanProfileOps,
           });
         })
         .catch((err) =>

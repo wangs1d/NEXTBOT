@@ -28,6 +28,9 @@ dependencies:
   tray_manager: ^0.4.0
   # 查询显示器布局：还原主窗口位置时校验是否仍在屏幕内（window_manager 的传递依赖，显式声明以便直接 import）
   screen_retriever: ^0.2.2
+  # 系统级输入空闲查询（GetLastInputInfo）：久坐判断需要真实键鼠活动，
+  # 不引入全局钩子。ffi 同为传递依赖，显式声明以便直接 import（同 screen_retriever 惯例）
+  ffi: ^2.1.0
   flutter_timezone: ^5.1.0
   flutter_local_notifications: ^22.3.0
   highlight: ^0.7.0

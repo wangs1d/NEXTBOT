@@ -49,6 +49,13 @@ const FEEDBACK_SUPPRESSIBLE_KINDS = new Set([
 ]);
 
 export type ProactivityFabricDeps = {
+  /** 树枝配置面（2026-10-22 树状架构 Phase 3）：信息源树枝清单/启停/精简预算 */
+  branches?: () => unknown;
+  branchSetConfig?: (patch: { id: string; enabled?: boolean; condense?: boolean; dailyBudget?: number }) => unknown;
+  /** 盯梢任务面板（Muse 对齐件）：列表/删除/启停（创建走对话 watch.manage 工具） */
+  watchTasks?: (actorId?: string) => unknown;
+  watchTaskRemove?: (actorId: string, id: string) => unknown;
+  watchTaskSetActive?: (actorId: string, id: string, active: boolean) => unknown;
   /** 传感器健康快照（L1） */
   sensorHealth: () => unknown;
   /** 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模 */
@@ -131,6 +138,64 @@ export function registerProactivityPipelineRoutes(
   },
 ): void {
   const pipeline = deps.pipeline;
+
+  // ─── 树枝配置面（2026-10-22 树状架构 Phase 3）───
+  // GET  /api/proactivity/branches —— 信息源树枝清单（manifest+用户配置）+ 精简器用量。
+  // POST /api/proactivity/branches/config —— 动态启停 / 开关 L3 精简 / 调每日预算。
+  //        写穿 data/proactivity/branches.json，即刻生效无需重启。
+  app.get("/api/proactivity/branches", async () => {
+    if (!deps.fabric?.branches) return { ok: false, error: "树枝配置面未装配" };
+    return { ok: true, ...(deps.fabric.branches() as Record<string, unknown>) };
+  });
+
+  app.post("/api/proactivity/branches/config", async (request, reply) => {
+    if (!deps.fabric?.branchSetConfig) return { ok: false, error: "树枝配置面未装配" };
+    const body = (request.body ?? {}) as {
+      id?: string;
+      enabled?: boolean;
+      condense?: boolean;
+      dailyBudget?: number;
+    };
+    const id = String(body.id ?? "").trim();
+    if (!id) return reply.code(400).send({ ok: false, error: "id required" });
+    if (
+      body.enabled === undefined &&
+      body.condense === undefined &&
+      body.dailyBudget === undefined
+    ) {
+      return reply.code(400).send({ ok: false, error: "至少提供 enabled / condense / dailyBudget 之一" });
+    }
+    return deps.fabric.branchSetConfig({
+      id,
+      ...(body.enabled !== undefined ? { enabled: body.enabled === true } : {}),
+      ...(body.condense !== undefined ? { condense: body.condense === true } : {}),
+      ...(body.dailyBudget !== undefined ? { dailyBudget: Number(body.dailyBudget) } : {}),
+    }) as Record<string, unknown>;
+  });
+
+  // ─── 盯梢任务面板（2026-10-22 Muse 对齐件）───
+  // GET  /api/proactivity/watch-tasks?actorId= —— 列表（创建走对话内 watch.manage 工具）
+  // POST /api/proactivity/watch-tasks/config —— remove / pause / resume
+  app.get("/api/proactivity/watch-tasks", async (request) => {
+    if (!deps.fabric?.watchTasks) return { ok: false, error: "盯梢任务面未装配" };
+    const q = request.query as { actorId?: string };
+    return { ok: true, ...(deps.fabric.watchTasks(q.actorId?.trim() || undefined) as Record<string, unknown>) };
+  });
+
+  app.post("/api/proactivity/watch-tasks/config", async (request, reply) => {
+    if (!deps.fabric?.watchTaskRemove || !deps.fabric.watchTaskSetActive) {
+      return { ok: false, error: "盯梢任务面未装配" };
+    }
+    const body = (request.body ?? {}) as { id?: string; actorId?: string; action?: string };
+    const id = String(body.id ?? "").trim();
+    const actorId = String(body.actorId ?? "").trim();
+    const action = String(body.action ?? "").trim();
+    if (!id || !actorId) return reply.code(400).send({ ok: false, error: "id / actorId required" });
+    if (action === "remove") return deps.fabric.watchTaskRemove(actorId, id);
+    if (action === "pause") return deps.fabric.watchTaskSetActive(actorId, id, false);
+    if (action === "resume") return deps.fabric.watchTaskSetActive(actorId, id, true);
+    return reply.code(400).send({ ok: false, error: "action 可选：remove / pause / resume" });
+  });
 
   // ─── Goal 成本-产出 / 夜间内省（2026-10-19）───
   // 放在 pipeline 守卫之前：成本面与内省是否可用，不该取决于主动性管道装没装。

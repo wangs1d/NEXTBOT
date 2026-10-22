@@ -17,6 +17,7 @@ import {
   parseIcsCalendar,
   readIcsWatchConfig,
   resolveIcsOccurrences,
+  validateIcsFeedUrl,
 } from "../src/services/ics-subscription-service.js";
 import { ScheduleTaskService } from "../src/services/schedule-task-service.js";
 import type { ProactiveIntent } from "../src/proactivity/proactivity-types.js";
@@ -126,12 +127,17 @@ type IcsHarness = {
   setIcs: (text: string) => void;
 };
 
-async function withIcsService(fn: (h: IcsHarness) => Promise<void>): Promise<void> {
+async function withIcsService(
+  fn: (h: IcsHarness) => Promise<void>,
+  overrides?: { fetchImpl?: typeof fetch },
+): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "ics-sub-"));
   const prev = process.env.SCHEDULE_TASKS_FILE;
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   let icsText = SAMPLE_ICS;
-  const fetchImpl = (async () => new Response(icsText, { status: 200 })) as unknown as typeof fetch;
+  const fetchImpl =
+    overrides?.fetchImpl ??
+    ((async () => new Response(icsText, { status: 200 })) as unknown as typeof fetch);
   // 时基贯通：日程服务用同一个冻结时钟，否则 createTask 的「runAt 必须在未来」
   // 按真实时钟判定，真实日期越过 fixture 后建日程全部失败（时间炸弹）。
   const tasks = new ScheduleTaskService({ now: () => new Date(NOW) });
@@ -147,6 +153,8 @@ async function withIcsService(fn: (h: IcsHarness) => Promise<void>): Promise<voi
     tasks,
     notify: (intent) => intents.push(intent),
     statePath: join(dir, "state.json"),
+    // 自助订阅源必须落在临时目录，否则会写进项目自己的 data/ics-sub/feeds.json
+    feedsPath: join(dir, "feeds.json"),
     fetchImpl,
     now: () => new Date(NOW),
   });
@@ -213,5 +221,100 @@ test("ICS 服务 diff：源里改期 → 日程改期；源里消失 → 日程�
 
     assert.equal(intents.length, 2, "第二轮发一条更新提醒");
     assert.ok(intents[1]!.title.includes("有更新"));
+  });
+});
+
+// ---------------------------------------------------------------------- //
+// 自助订阅（2026-10-22）：用户自己粘链接就能接日历，不用部署方改环境变量
+// ---------------------------------------------------------------------- //
+
+test("订阅链接校验：协议与内网地址（防 SSRF）", () => {
+  assert.equal(validateIcsFeedUrl("https://calendar.example.com/team.ics").ok, true);
+  assert.equal(validateIcsFeedUrl("http://cal.example.com/a.ics").ok, true);
+
+  const ftp = validateIcsFeedUrl("ftp://example.com/a.ics");
+  assert.equal(ftp.ok, false);
+
+  for (const url of [
+    "http://127.0.0.1:5232/a.ics",
+    "http://localhost/a.ics",
+    "http://10.0.0.5/a.ics",
+    "http://192.168.1.10/a.ics",
+    "http://172.20.0.3/a.ics",
+  ]) {
+    const r = validateIcsFeedUrl(url);
+    assert.equal(r.ok, false, `${url} 必须被拦`);
+    if (!r.ok) assert.match(r.error, /内网|本机/);
+  }
+
+  // 自建日历在内网时，部署方可用环境变量放行
+  const allowed = validateIcsFeedUrl("http://192.168.1.10:5232/dav/cal.ics", {
+    ICS_SUB_ALLOW_PRIVATE: "1",
+  } as NodeJS.ProcessEnv);
+  assert.equal(allowed.ok, true);
+
+  assert.equal(validateIcsFeedUrl("这不是链接").ok, false);
+  assert.equal(validateIcsFeedUrl("").ok, false);
+});
+
+test("自助订阅：粘链接即完成接入，并立刻导入存量事件", async () => {
+  await withIcsService(async ({ service, tasks }) => {
+    const r = await service.addFeed({
+      name: "公司日历",
+      url: "https://calendar.example.com/team.ics",
+    });
+    assert.equal(r.ok, true, `addFeed 失败：${r.error ?? "(无 error)"}`);
+    assert.equal(r.feed?.name, "公司日历");
+    assert.ok((r.imported ?? 0) > 0, "添加后应立即拉一轮，让用户当场看到结果");
+
+    const status = service.status();
+    assert.equal(status.feeds.length, 2, "env 配置的源 + 用户自助的源都在");
+    assert.ok(status.feeds.some((f) => f.name === "公司日历"));
+    assert.equal(status.enabled, true);
+
+    const icsTasks = tasks.listAllTasks().filter((t) => t.source === "ics");
+    assert.ok(icsTasks.length > 0, "自助添加的源也会物化成日程");
+  });
+});
+
+test("自助订阅：重复添加同一链接不产生第二个源", async () => {
+  await withIcsService(async ({ service }) => {
+    const url = "https://calendar.example.com/team.ics";
+    await service.addFeed({ url });
+    const again = await service.addFeed({ url });
+    assert.equal(again.ok, true);
+    assert.equal(service.status().feeds.length, 2, "同一链接只算一个源");
+  });
+});
+
+test("自助订阅：拉不到日历就不落盘，避免留一个永远失败的源", async () => {
+  const failing = (async () =>
+    new Response("not found", { status: 404 })) as unknown as typeof fetch;
+  await withIcsService(
+    async ({ service }) => {
+      const r = await service.addFeed({ url: "https://bad.example.com/x.ics" });
+      assert.equal(r.ok, false);
+      assert.match(r.error ?? "", /拉不到日历/);
+      assert.equal(service.status().feeds.length, 1, "失败的源不能留在系统里");
+    },
+    { fetchImpl: failing },
+  );
+});
+
+test("自助订阅：用户能删自己加的源，但删不掉部署方配置的源", async () => {
+  await withIcsService(async ({ service }) => {
+    const added = await service.addFeed({
+      name: "公司日历",
+      url: "https://calendar.example.com/team.ics",
+    });
+    assert.equal(added.ok, true, `addFeed 失败：${added.error ?? "(无 error)"}`);
+
+    const ok = service.removeFeed("公司日历");
+    assert.equal(ok.ok, true, `removeFeed 失败：${ok.error ?? "(无 error)"}`);
+    assert.equal(service.status().feeds.length, 1);
+
+    const denied = service.removeFeed("测试日历");
+    assert.equal(denied.ok, false);
+    assert.match(denied.error ?? "", /环境变量/);
   });
 });

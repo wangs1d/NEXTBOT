@@ -67,8 +67,13 @@ html.embed-root #root {
   letter-spacing: 0.04em;
 }
 
+/* 桌宠主窗：常态即 flex row —— 顺序 [附加面板槽位][球体 pane][快捷菜单]
+   附加面板槽位宽度由宿主窗口宽度决定（打开面板时宿主向左扩窗） */
 .mode-overlay {
   background: transparent !important;
+  display: flex;
+  flex-direction: row;
+  align-items: stretch;
 }
 
 .mode-overlay--menu-open {

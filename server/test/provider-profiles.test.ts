@@ -109,6 +109,40 @@ test("resolveRouteCallParams：无 id（测试替身/null）回落安全默认�
   assert.equal(noId.maxOutputTokens, FALLBACK_PROVIDER_PROFILE.routeMaxOutputTokens);
 });
 
+/* ---------------- deepseek 原生 provider（2026-10-22 接入） ---------------- */
+
+test("deepseek 档案：快档路由参数 + json mode + 旁路必关思考", () => {
+  const p = resolveProviderProfile("deepseek");
+  assert.equal(p, PROVIDER_MODEL_PROFILES.deepseek);
+  // flash 关思考后单次小请求实测 0.6-0.8s，无需放大预算（192/3000 足够）
+  assert.equal(p.routeMaxOutputTokens, 192);
+  assert.equal(p.routeTimeoutMs, 3000);
+  assert.equal(p.supportsJsonMode, true);
+  // DeepSeek 关思考只能用 thinking 字段：reasoning_effort=minimal 仍烧 35 个思考 token
+  assert.deepEqual(p.bypassRequestExtras("deepseek-flash"), {
+    thinking: { type: "disabled" },
+  });
+});
+
+test("resolveRouteCallParams：deepseek 与快模型同档", () => {
+  assert.deepEqual(resolveRouteCallParams({ id: "deepseek" }, envWith({})), {
+    maxOutputTokens: 192,
+    timeoutMs: 3000,
+    jsonMode: true,
+  });
+});
+
+test("bypassChatRequestExtras：deepseek 主模型走自有键位，附 thinking:disabled", () => {
+  const extras = bypassChatRequestExtras(
+    envWith({
+      EXTERNAL_MODEL_PROVIDER: "deepseek",
+      DEEPSEEK_API_KEY: "k",
+      DEEPSEEK_MODEL: "deepseek-flash",
+    }),
+  );
+  assert.deepEqual(extras, { thinking: { type: "disabled" } });
+});
+
 test("resolveRouteCallParams：LLM_ROUTE_TIMEOUT_MS 显式覆盖档案超时", () => {
   const overridden = resolveRouteCallParams(
     { id: "minimax" },

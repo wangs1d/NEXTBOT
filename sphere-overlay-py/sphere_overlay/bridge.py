@@ -53,6 +53,15 @@ class SphereOverlayBridge(QObject):
     def setIgnoreMouseEvents(self, ignore: bool, forward: bool = True) -> None:
         self._host.set_click_through(ignore)
 
+    @Slot(int)
+    def setAttachPanel(self, width: int) -> None:
+        """桌宠附加面板（专注计时板 / 下班打卡卡）。
+
+        面板长在桌宠窗口内部：宿主按面板宽度向左扩窗，桌宠在屏幕上的绝对位置
+        保持不变；宽度归零即恢复原窗口。窗口被拖动时面板随之移动，无需位置同步。
+        """
+        self._host.set_attach_panel(width)
+
     @Slot(bool)
     def setMenuExpanded(self, expanded: bool) -> None:
         self._host.set_menu_expanded(expanded)

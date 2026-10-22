@@ -223,9 +223,10 @@ export function finalizeChatSystemPrompt(
   // 非 minimal 模式：完整追加所有后缀（legacy/dynamic/conversation_only 行为不变）
   let out = appendTruthfulnessSystemSuffix(baseContent);
   out = appendMessageTimestampSystemSuffix(out);
-  if (opts?.tools) {
-    out = appendAgentToolCallingSystemSuffix(out);
-  }
+  // 2026-10-22 架构定稿：工具用法说明不再进 prompt。
+  // 原来的五段后缀（【时钟与位置】【联网检索】【语音电话】【生活管家】【消息时间戳】）
+  // 与 tool schema 的 description 逐句同义（search_web 三份、当前时间五份、天气卡三份），
+  // 是「同一语义多处定义」的主要来源。工具怎么用只在 schema 里说一次。
   out = appendAgentAccessModeSystemSuffix(out, parseAgentAccessMode(opts?.agentAccessMode), {
     desktopBridgeOnline: opts?.desktopBridgeOnline,
     phoneBridgeOnline: opts?.phoneBridgeOnline,

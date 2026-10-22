@@ -1,0 +1,125 @@
+{
+  "summary": {
+    "runId": "20261022134112",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 3,
+    "totalRuns": 6,
+    "passRuns": 4,
+    "passRate": "66.7%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 6,
+    "toolGroupHitRate": "66.7%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 18786,
+      "p95": 20904,
+      "max": 90004
+    },
+    "passAtK": {
+      "k": 3,
+      "cases": 1,
+      "totalCases": 2,
+      "rate": "50.0%"
+    }
+  },
+  "failures": [
+    {
+      "id": "travel_xingyi",
+      "repeat": 2,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 6745,
+      "reason": "未命中期望组: #1[travel.plan-itinerary]；实际: -"
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 3,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 90004,
+      "reason": "error:timeout(90000ms)"
+    }
+  ],
+  "runs": [
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 12200
+    },
+    {
+      "id": "search_movies",
+      "repeat": 2,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web",
+        "deep_search"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 20904
+    },
+    {
+      "id": "search_movies",
+      "repeat": 3,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "search_web",
+        "deep_search"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 18786
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [
+        "travel.plan-itinerary",
+        "weather.get_local"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 19475
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 2,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[travel.plan-itinerary]；实际: -",
+      "elapsedMs": 6745
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 3,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "error:timeout(90000ms)",
+      "elapsedMs": 90004
+    }
+  ]
+}

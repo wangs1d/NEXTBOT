@@ -345,10 +345,6 @@ export const ServerEventType = {
   DeviceEventRelay: "device.event_relay",
   /** device.list 查询应答（同步拉取当前设备清单） */
   DeviceListResult: "device.list_result",
-  /** 进化审批请求：EvolutionCortex 检测到能力缺口 + 生成 Skill 后，请求用户批准装载 */
-  EvolutionApprovalRequest: "evolution.approval_request",
-  /** 进化审批结果：用户批准或拒绝后的状态通知 */
-  EvolutionApprovalResult: "evolution.approval_result",
   /**
    * 服务端按需向客户端请求实时位置（如 weather.get_local 需要经纬度）。
    * 客户端收到后拉 GPS，通过 `client.location_report` 回传（携带相同 jobId）。
@@ -362,16 +358,12 @@ export const ServerEventType = {
    */
   LocationTrackingConfig: "agent.location_tracking_config",
   /**
-   * Surface-on-Demand：服务端（`surface.show` 工具）要求客户端展示一个
-   * 按需召唤的信息面板（如"今日安排"悬浮窗）。客户端按 surface 名执行，
-   * 不支持的面板静默忽略；ttlSeconds 后自动淡出。
-   * payload: { surface: string, ttlSeconds?: number, jobId?: string }
-   */
-  SurfaceShow: "surface.show",
-  /**
    * Surface-on-Demand：服务端（`surface.dismiss` 工具）要求客户端收起已
    * 展示的面板（如媒体中央展示页）。客户端按 surface 名执行，
    * 不支持的面板静默忽略；未展示时为 no-op。
+   * 历史注记（2026-10-22）：SurfaceShow（"surface.show"）已随 surface.show
+   * 工具删除——召唤面板不由 LLM 工具实现；客户端如仍有 _handleSurfaceShow
+   * 分支属死代码，可随后清理。
    * payload: { surface?: string, jobId?: string }
    */
   SurfaceDismiss: "surface.dismiss",

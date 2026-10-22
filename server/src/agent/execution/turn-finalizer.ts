@@ -6,7 +6,6 @@ import type { TaskExecutionPlan } from "../plan-execute-loop.js";
 import type { ExternalChatProvider } from "../../external-model/types.js";
 import type { ShortTermMemoryGatewayService } from "../../services/short-term-memory-gateway.js";
 import { getDailyJournalService } from "../../services/daily-journal-service.js";
-import type { TrajectorySkillPromotionService } from "../../services/trajectory-skill-promotion-service.js";
 import { normalizeTraditionalToSimplified } from "../../utils/simplified-chinese.js";
 
 export type FinishTurnMeta = {
@@ -15,7 +14,6 @@ export type FinishTurnMeta = {
   planExecuteUsed: boolean;
   pePlan: TaskExecutionPlan | null;
   peExhausted: boolean;
-  trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
   messageId?: string;
   sessionId?: string;
 };
@@ -86,12 +84,6 @@ export class TurnFinalizer {
       };
     }
 
-    TurnLifecycle.finalizeTrajectory(meta.trajCap, trimmed, {
-      planExecuteUsed: meta.planExecuteUsed,
-      modelCallsApprox: meta.modelCallsConsumed,
-      pePlan: meta.pePlan,
-      peExhausted: meta.peExhausted,
-    });
 
     const { quotaSuffix } = this.deps.turnLifecycle.finalizeTurn({
       actorId,

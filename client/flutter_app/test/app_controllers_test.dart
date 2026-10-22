@@ -4,7 +4,18 @@ import "package:private_ai_agent/app/phone_call_controller.dart";
 import "package:private_ai_agent/core/models/agent_relay_models.dart";
 import "package:private_ai_agent/core/services/account_profile_api.dart";
 import "package:private_ai_agent/core/presentation/dynamic_island.dart";
+import "package:private_ai_agent/core/presentation/foreground_banner.dart";
 import "package:flutter_test/flutter_test.dart";
+
+/// ForegroundBanner 桩：捕获横幅入参供断言。
+class _FakeBanner implements ForegroundBanner {
+  _FakeBanner({required this.onShow});
+
+  final Future<void> Function(String title, String message) onShow;
+
+  @override
+  Future<void> show(String title, String message) => onShow(title, message);
+}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -93,13 +104,16 @@ void main() {
 
       // 单文案链（message → reminderMessage → title/shortTitle → 到点了）：
       // 横幅只出主行文案，message 传空（副行收起），标题前缀不再拼接。
+      // 横幅端口是 ForegroundBanner 抽象接口（2026-10-21），测试用桩实现注入。
       String? bannerTitle;
       String? bannerMessage;
-      c.showForegroundReminder = (String title, String message) async {
-        bannerTitle = title;
-        bannerMessage = message;
-      };
-      addTearDown(() => c.showForegroundReminder = null);
+      c.foregroundBanner = _FakeBanner(
+        onShow: (String title, String message) async {
+          bannerTitle = title;
+          bannerMessage = message;
+        },
+      );
+      addTearDown(() => c.foregroundBanner = null);
       await c.onScheduleReminderFired(<String, dynamic>{"title": "吃药"});
       expect(bannerTitle, "吃药");
       expect(bannerMessage, isEmpty);

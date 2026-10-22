@@ -2,17 +2,25 @@ import type { ExternalChatProvider } from "./types.js";
 import { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 import { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
 import { MiniMaxProvider } from "./providers/minimax-provider.js";
+import { DeepSeekProvider } from "./providers/deepseek-provider.js";
 import { FailoverChatProvider } from "./failover-chat-provider.js";
 import { instantiateKnownProvider } from "./instantiate-provider.js";
 import { resolveProviderProfile } from "./provider-profiles.js";
 import { resolveRegion } from "../config/load-server-env.js";
 
 /** 与 `EXTERNAL_MODEL_PROVIDER` 对齐 */
-export type ExternalModelMode = "auto" | "none" | "moonshot-kimi" | "openai" | "minimax" | "failover";
+export type ExternalModelMode =
+  | "auto"
+  | "none"
+  | "moonshot-kimi"
+  | "openai"
+  | "minimax"
+  | "deepseek"
+  | "failover";
 
 /** 主服务当前生效的外部模型（供 OpenClaw 等下游同步） */
 export type PrimaryExternalModelBinding = {
-  providerId: "moonshot-kimi" | "openai" | "minimax";
+  providerId: "moonshot-kimi" | "openai" | "minimax" | "deepseek";
   model: string;
   apiKey: string;
   baseUrl: string;
@@ -25,6 +33,7 @@ function parseMode(env: NodeJS.ProcessEnv = process.env): ExternalModelMode {
   if (raw === "moonshot-kimi" || raw === "moonshot" || raw === "kimi") return "moonshot-kimi";
   if (raw === "openai") return "openai";
   if (raw === "minimax") return "minimax";
+  if (raw === "deepseek" || raw === "ds") return "deepseek";
   if (raw === "failover") return "failover";
   console.warn(
     `[external-model] Unknown EXTERNAL_MODEL_PROVIDER="${raw}", falling back to auto.`,
@@ -69,6 +78,17 @@ function minimaxBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | n
   };
 }
 
+function deepseekBinding(env: NodeJS.ProcessEnv): PrimaryExternalModelBinding | null {
+  const apiKey = env.DEEPSEEK_API_KEY?.trim();
+  if (!apiKey) return null;
+  return {
+    providerId: "deepseek",
+    model: (env.DEEPSEEK_MODEL ?? "deepseek-flash").trim(),
+    apiKey,
+    baseUrl: (env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1").trim(),
+  };
+}
+
 function firstEnabledBinding(
   env: NodeJS.ProcessEnv,
   tokens: string[],
@@ -88,6 +108,10 @@ function firstEnabledBinding(
       const b = minimaxBinding(env);
       if (b) return b;
     }
+    if (p.id === "deepseek") {
+      const b = deepseekBinding(env);
+      if (b) return b;
+    }
   }
   return null;
 }
@@ -104,6 +128,7 @@ export function resolvePrimaryExternalModelBinding(
   if (mode === "moonshot-kimi") return moonshotBinding(env);
   if (mode === "openai") return openaiBinding(env);
   if (mode === "minimax") return minimaxBinding(env);
+  if (mode === "deepseek") return deepseekBinding(env);
   if (mode === "failover") {
     const tokens = defaultFailoverChain(env)
       .split(",")
@@ -115,11 +140,17 @@ export function resolvePrimaryExternalModelBinding(
   // - domestic（默认）：优先 Kimi，其次 MiniMax、OpenAI（保持向后兼容）
   // - intl：优先 OpenAI，其次 MiniMax、Kimi
   // 显式设置 EXTERNAL_MODEL_PROVIDER 始终优先于本推断。
+  // DeepSeek 排在两家之后：新增 provider 不改变既有部署的 auto 选择（只有显式
+  // 指定 deepseek 或前几家全无密钥时才轮到它）。
   const region = resolveRegion(env);
   if (region === "intl") {
-    return openaiBinding(env) ?? minimaxBinding(env) ?? moonshotBinding(env);
+    return (
+      openaiBinding(env) ?? minimaxBinding(env) ?? moonshotBinding(env) ?? deepseekBinding(env)
+    );
   }
-  return moonshotBinding(env) ?? minimaxBinding(env) ?? openaiBinding(env);
+  return (
+    moonshotBinding(env) ?? minimaxBinding(env) ?? openaiBinding(env) ?? deepseekBinding(env)
+  );
 }
 
 /** 供旁路 LLM（滚动摘要 / 记忆联想 / 记忆决策 / 记忆评分等）使用的客户端配置，跟随当前 provider。 */
@@ -188,6 +219,7 @@ export function bypassChatRequestExtras(
  * - `moonshot-kimi`：仅 Kimi；缺密钥则 null 并警告。
  * - `openai`：仅 OpenAI；缺密钥则 null 并警告。
  * - `minimax`：仅 MiniMax；缺密钥则 null 并警告。
+ * - `deepseek`：仅 DeepSeek（`DEEPSEEK_API_KEY`）；缺密钥则 null 并警告。
  * - `failover`：按 `EXTERNAL_MODEL_FAILOVER_CHAIN`（默认 `moonshot-kimi,openai`）顺序尝试，链上至少一个已配置密钥才启用。
  */
 export function createExternalChatProviderFromEnv(): ExternalChatProvider | null {
@@ -197,6 +229,7 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
   const moonshot = new MoonshotKimiProvider();
   const openai = new OpenAiOfficialProvider();
   const minimax = new MiniMaxProvider();
+  const deepseek = new DeepSeekProvider();
 
   if (mode === "moonshot-kimi") {
     if (moonshot.isEnabled()) return moonshot;
@@ -218,6 +251,14 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
     if (minimax.isEnabled()) return minimax;
     console.warn(
       "[external-model] EXTERNAL_MODEL_PROVIDER=minimax but MINIMAX_API_KEY is not set.",
+    );
+    return null;
+  }
+
+  if (mode === "deepseek") {
+    if (deepseek.isEnabled()) return deepseek;
+    console.warn(
+      "[external-model] EXTERNAL_MODEL_PROVIDER=deepseek but DEEPSEEK_API_KEY is not set.",
     );
     return null;
   }
@@ -251,15 +292,18 @@ export function createExternalChatProviderFromEnv(): ExternalChatProvider | null
   // auto：按 REGION 决定优先级。
   // - domestic（默认）：优先 Kimi，其次 MiniMax、OpenAI（保持向后兼容）
   // - intl：优先 OpenAI，其次 MiniMax、Kimi
+  // DeepSeek 两家之后兜底：新增 provider 不改变既有部署的 auto 选择。
   const region = resolveRegion();
   if (region === "intl") {
     if (openai.isEnabled()) return openai;
     if (minimax.isEnabled()) return minimax;
     if (moonshot.isEnabled()) return moonshot;
+    if (deepseek.isEnabled()) return deepseek;
   } else {
     if (moonshot.isEnabled()) return moonshot;
     if (minimax.isEnabled()) return minimax;
     if (openai.isEnabled()) return openai;
+    if (deepseek.isEnabled()) return deepseek;
   }
   return null;
 }

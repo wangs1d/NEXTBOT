@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EntranceAnimation } from "../components/EntranceAnimation";
+import { FocusTimerPanel } from "../components/FocusTimerPanel";
 import { MessageList } from "../components/MessageList";
+import { OffWorkPanel } from "../components/OffWorkPanel";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
 import { TaskFeed } from "../components/TaskFeed";
@@ -8,6 +10,7 @@ import { TaskNotificationCenter } from "../components/TaskNotificationCenter";
 import type { QuickCommand } from "../constants/quick-commands";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
+import { useAttachPanel } from "../hooks/useAttachPanel";
 import { useDynamicSpeech, type DynamicSpeechContext } from "../hooks/useDynamicSpeech";
 import { useOverlaySpeech } from "../hooks/useOverlaySpeech";
 import { useEmbodimentCommandRelay } from "../hooks/useEmbodimentCommandRelay";
@@ -15,9 +18,11 @@ import { useOverlayPointerCapture } from "../hooks/useOverlayPointerCapture";
 import { useOverlayWindowMotion } from "../hooks/useOverlayWindowMotion";
 import { useTaskEventAccumulator } from "../hooks/useTaskEventAccumulator";
 import { useTaskEventStream } from "../hooks/useTaskEventStream";
+import { useWidgetsAgent } from "../hooks/useWidgetsAgent";
 import type { AgentMood } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "../index.css";
+import "../components/overlay-panels.css";
 import "./modes.css";
 
 /** TTS 语音播报：使用浏览器 SpeechSynthesis API 让主agent直接说话 */
@@ -169,6 +174,75 @@ export function OverlayApp() {
     send: sendPetReaction,
     setMood: (m) => setMood(m),
   });
+
+  // ── 桌宠附加面板（专注计时板 / 下班打卡）──
+  // 面板在桌宠窗口内部，宿主向左扩窗，因此天然跟随桌宠移动。
+  // 打开时让球先顿一下（"掏出"的物理铺垫），板随后从球侧被拉出来。
+  const pulseForDraw = useCallback(() => {
+    triggerVerticalShake(0.16, 170);
+  }, [triggerVerticalShake]);
+  const attach = useAttachPanel(pulseForDraw);
+  // 评语走独立轻连接（pet.reaction），不污染主对话/TTS
+  const { requestLine } = useWidgetsAgent({
+    wsUrl: wsUrl ?? undefined,
+    sessionId: sessionId ?? undefined,
+  });
+  const offworkTime = useMemo(() => readQuery("offwork") ?? "18:30", []);
+
+  // 下班打卡：每天到点弹一次（按本地日期记已弹，避免刷新重复）
+  useEffect(() => {
+    const openPanel = attach.open;
+    const check = () => {
+      const now = new Date();
+      const [h, m] = offworkTime.split(":").map((v) => Number.parseInt(v, 10));
+      if (!Number.isFinite(h) || !Number.isFinite(m)) return;
+      const target = new Date(now);
+      target.setHours(h, m, 0, 0);
+      if (now < target) return;
+      const key = `pai_offwork_fired_${now.toISOString().slice(0, 10)}`;
+      try {
+        if (localStorage.getItem(key) === "1") return;
+        localStorage.setItem(key, "1");
+      } catch {
+        return;
+      }
+      openPanel("offwork");
+    };
+    check();
+    const id = window.setInterval(check, 30_000);
+    return () => window.clearInterval(id);
+  }, [attach.open, offworkTime]);
+
+  // 对外入口：球形动画做完后由球体回调 / 主窗口工具调用
+  useEffect(() => {
+    const openPanel = attach.open;
+    const closePanel = attach.close;
+    const api = {
+      openFocus: () => openPanel("focus"),
+      openOffWork: () => openPanel("offwork"),
+      close: () => closePanel(),
+    };
+    (window as unknown as { __paiPet?: typeof api }).__paiPet = api;
+    const onEvent = (e: Event) => {
+      const kind = (e as CustomEvent<{ panel?: string }>).detail?.panel;
+      if (kind === "focus" || kind === "offwork") openPanel(kind);
+      else if (kind === "close") closePanel();
+    };
+    window.addEventListener("pai-pet-panel", onEvent);
+    return () => {
+      window.removeEventListener("pai-pet-panel", onEvent);
+      delete (window as unknown as { __paiPet?: typeof api }).__paiPet;
+    };
+  }, [attach.open, attach.close]);
+
+  // demo / 手动打开：?panel=focus|offwork
+  useEffect(() => {
+    const preset = readQuery("panel");
+    if (preset !== "focus" && preset !== "offwork") return;
+    const openPanel = attach.open;
+    const t = window.setTimeout(() => openPanel(preset), 500);
+    return () => window.clearTimeout(t);
+  }, [attach.open]);
 
   /** 对话过程中不发送 pet.reaction 请求（避免与主agent回复冲突） */
   const safeSpeak = useCallback(
@@ -457,8 +531,20 @@ export function OverlayApp() {
   return (
     <div className={`mode-shell mode-overlay${menuVisible ? " mode-overlay--menu-open" : ""}`}>
       <EntranceAnimation />
-      <div
-        className="overlay-pet-pane"
+      <div className="overlay-attach-slot" style={{ width: attach.width }}>
+        {attach.panel === "focus" && (
+          <FocusTimerPanel retracting={attach.retracting} onClose={attach.close} />
+        )}
+        {attach.panel === "offwork" && (
+          <OffWorkPanel
+            retracting={attach.retracting}
+            onClose={attach.close}
+            offworkTime={offworkTime}
+            requestLine={requestLine}
+          />
+        )}
+      </div>
+      <div className="overlay-pet-pane"
         onPointerDown={handlePetPanePointerDown}
         onPointerUp={handlePetPanePointerUp}
       >

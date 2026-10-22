@@ -5,7 +5,8 @@
   2. 通过 QWebChannel 注入 window.sphereOverlay API（兼容 Tauri preload）
   3. 与 PAI server WebSocket 连接，接收 agent.embodiment.command 等事件
   4. 日程悬浮窗（独立窗口，加载 schedule-floating.html）
-  5. 系统托盘 + 单实例锁
+  5. 悬浮组件窗（独立全屏透明层，加载 widgets-floating.html：灵动岛 / 专注番茄钟 / 下班打卡）
+  6. 系统托盘 + 单实例锁
 """
 from __future__ import annotations
 
@@ -78,6 +79,7 @@ class SphereConfig:
     user_id: str = ""
     dev_url: Optional[str] = None  # 开发模式前端 dev server URL
     avatar_dist: str = "../agent-sphere-avatar/dist"
+    offwork_at: str = "18:30"  # 下班打卡时刻（HH:MM）
 
 
 # 注入前端 WebChannel 初始化脚本 + window.sphereOverlay 包装。
@@ -115,6 +117,11 @@ WEBCHANNEL_INIT = r"""
                 },
                 setIgnoreMouseEvents: function (ignore, forward) {
                     bridge.setIgnoreMouseEvents(!!ignore, forward !== false);
+                },
+                setAttachPanel: function (width) {
+                    if (typeof bridge.setAttachPanel === 'function') {
+                        bridge.setAttachPanel(Math.max(0, Math.round(width) || 0));
+                    }
                 },
                 setMenuExpanded: function (expanded) {
                     bridge.setMenuExpanded(!!expanded);
@@ -259,6 +266,7 @@ class SphereMainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self._menu_expanded = False
+        self._attach_w = 0
         self._move_anim: Optional[QPropertyAnimation] = None
         self._bridge = SphereOverlayBridge(self)
         self._setup_window()
@@ -321,6 +329,7 @@ class SphereMainWindow(QMainWindow):
             "sessionId": self.cfg.session_id,
             "petW": str(PET_WIDTH),
             "petH": str(PET_HEIGHT),
+            "offwork": self.cfg.offwork_at,
         })
         url.setQuery(query)
         return url.toString()
@@ -362,10 +371,34 @@ class SphereMainWindow(QMainWindow):
     def set_window_position(self, x: int, y: int) -> None:
         self.move(x, y)
 
+    def set_attach_panel(self, width: int) -> None:
+        """桌宠附加面板：向左扩窗，保证桌宠在屏幕上的绝对位置不变。
+
+        面板（专注计时板 / 下班打卡卡）是桌宠窗口内的 flex 兄弟节点，
+        排在球体 pane 左侧。窗口加宽多少，就把窗口左边界左移多少；
+        桌宠被拖到屏幕左缘时钳制在可用区内，宁可面板变窄也不出屏。
+        """
+        w = max(0, int(width))
+        if w == self._attach_w:
+            return
+        delta = w - self._attach_w
+        self._attach_w = w
+        if delta:
+            area = self.work_area()
+            nx = self.x() - delta
+            if area and area.get("width"):
+                nx = max(area["x"], nx)
+            self.move(nx, self.y())
+        self._apply_width()
+
+    def _apply_width(self) -> None:
+        """窗口总宽 = 球体 + 附加面板 + 快捷菜单（菜单只向右扩）。"""
+        menu_w = MENU_WIDTH if self._menu_expanded else 0
+        self.resize(PET_WIDTH + self._attach_w + menu_w, PET_HEIGHT)
+
     def set_menu_expanded(self, expanded: bool) -> None:
         self._menu_expanded = expanded
-        width = PET_WIDTH + (MENU_WIDTH if expanded else 0)
-        self.resize(width, PET_HEIGHT)
+        self._apply_width()
 
     def set_schedule_collapsed(self, collapsed: bool) -> None:
         self.schedule_toggle_requested.emit(collapsed)
@@ -461,6 +494,7 @@ class SphereOverlayApp(QApplication):
         parser.add_argument("--user-id", default=os.environ.get("PAI_USER_ID", ""))
         parser.add_argument("--dev-url", default=os.environ.get("PAI_OVERLAY_DEV_URL"))
         parser.add_argument("--avatar-dist", default=os.environ.get("PAI_AVATAR_DIST", "../agent-sphere-avatar/dist"))
+        parser.add_argument("--offwork-at", default=os.environ.get("PAI_OFFWORK_AT", "18:30"))
         parser.add_argument("--single-instance", action="store_true", default=True)
         args = parser.parse_args(argv[1:])
         return SphereConfig(
@@ -471,6 +505,7 @@ class SphereOverlayApp(QApplication):
             user_id=args.user_id,
             dev_url=args.dev_url,
             avatar_dist=args.avatar_dist,
+            offwork_at=args.offwork_at,
         )
 
     def ensure_single_instance(self) -> bool:

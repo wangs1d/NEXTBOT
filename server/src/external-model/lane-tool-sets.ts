@@ -1,16 +1,14 @@
 /**
- * 静态双车道 Core 工具清单（2026-09-19 架构级工具暴露改造）。
+ * 工具暴露清单 —— 唯一事实源（2026-10-21 去路由化后的口径）。
  *
- * 根源问题：旧架构里"模型每轮看到哪些工具"由三个动态层叠加决定——
- * contextual 按关键词逐工具裁剪、前台 4 工具白名单 + 能力域关键词临时注入、
- * 任务面 per-turn LLM planner——同一输入每轮算出的可见集不同，行为不可复现，
- * 且每轮重算打爆前缀缓存。主流 agent（Claude Code / OpenAI Agents SDK / Manus）
- * 的稳定来自"选一种暴露模式然后不动"。
+ * 普通对话轮**没有前置意图分类**（buildUnifiedLaneDecision）：可见集 =
+ * chat 常驻（CHAT_LANE_CORE_NAMES）∪ 确定性 BM25 域预载（≤12）∪ 高频晋升
+ * （≤6）∪ 桥工具；「这轮调不调工具」由模型原生 tool_calls 自决。
  *
- * 本模块是新的唯一事实源：
- *   - chat 车道：CHAT_LANE_CORE_NAMES 静态常驻（感知只读 + 单步轻动作 + 控制工具）
- *   - task 车道：TASK_LANE_CORE_NAMES 静态常驻 + 路由能力束（Tier-2 确定性增量注入）
- *   - 其余工具全部进延迟目录，经 tool_discover / tool_call / tool_request 到达
+ *   - CHAT_LANE_CORE_NAMES：普通对话轮常驻（感知只读 + 单步轻动作 + 控制工具）
+ *   - TASK_LANE_CORE_NAMES：仅**后台任务执行器**（task_plane：task.dispatch
+ *     派发的重活 / 计划续跑）使用的执行主力清单，不进普通对话轮
+ *   - 其余工具全部进延迟目录，经 tool_discover / tool_search / tool_request 到达
  *
  * 回滚：AGENT_TOOL_ARCH=legacy 恢复旧路径（见 isStaticToolArchEnabled）。
  */
@@ -31,7 +29,7 @@ import {
 
 export type LaneId = "chat" | "task";
 
-/** 架构开关：默认静态双车道；AGENT_TOOL_ARCH=legacy 回退旧暴露链路。 */
+/** 架构开关：默认现行暴露链路；AGENT_TOOL_ARCH=legacy 回退旧路径。 */
 export function isStaticToolArchEnabled(): boolean {
   const raw = process.env.AGENT_TOOL_ARCH?.trim().toLowerCase();
   return raw !== "legacy";
@@ -76,14 +74,13 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   // 用户画像自编辑（2026-09-29）：「越来越了解用户」是对话基本动作；
   // 进延迟目录模型会忘记搜索、直接嘴硬说记了（真机实证），须常驻可见。
   "profile.update",
-  // 持续感知回溯（只读，2026-09-19 P0-1）
-  "perception.overview",
+  // 持续感知回溯（只读）——2026-10-22 移出常驻：主动感知模块（SensorKernel/
+  // 世界板/晨报）会**主动**推送感知信号，"我刚才在干嘛"属低频回查，留在延迟
+  // 目录由 BM25 召回（描述含「我刚才在干嘛/你看到什么了」，词面可命中）。
   // 自我/能力（模型自救入口）
   // agent.query_capabilities 必须常驻：它是模型"以为没权限"时的自救入口。
   // self.list_custom_skills 低频，移入延迟目录（"我会什么/自定义技能"可召回）。
   "agent.query_capabilities",
-  // 表达/控制
-  "surface.show",
   // 重活逃生门（委派后台）+ 委派闭环（查询/取消，2026-09-19 P0-2）
   "task.dispatch",
   "task.status",
@@ -91,7 +88,9 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
 ];
 
 /**
- * task 车道静态 Core：在 chat Core 基础上替换进执行主力（深网/桌面/代码）。
+ * 后台任务执行器 Core（task_plane 专用）：在 chat 常驻基础上换进执行主力
+ * （深网/桌面/代码）。2026-10-21 去路由化后不存在"task 车道"前置分类——
+ * 本清单只服务 task.dispatch 派发的后台重活与计划续跑。
  * 长尾（购物订单、智能家居、财务域、vision.periodic_* 等）留在延迟目录。
  */
 export const TASK_LANE_CORE_NAMES: readonly string[] = [
@@ -144,35 +143,14 @@ export const TASK_LANE_CORE_NAMES: readonly string[] = [
 ];
 
 /**
- * chat 车道保留完整 schema 的高频工具；其余 Core 工具做 schema 瘦身。
- * 瘦身 = description 压到首句（≤120 字符）+ 丢弃字段级描述；schema 仍在
- * tools 数组中（零往返直调），只是写得短——与"菜单式隐藏 schema"（需一次
- * discover 往返）有本质区别，后者已论证在 Core 规模下不划算。
- */
-const CHAT_FULL_SCHEMA_NAMES: ReadonlySet<string> = new Set([
-  "task.dispatch",
-  "task.status",
-  "task.cancel",
-  "search_web",
-  "reminder.plan",
-  "calendar.create_from_text",
-  "clock.get_current_time",
-  "weather.get_local",
-  "messages.reply",
-]);
-
-/** task 车道 schema 全保留（仅 core 模式回滚时使用；router-first 下不进 prompt）。 */
-const TASK_FULL_SCHEMA_NAMES: ReadonlySet<string> | null = null;
-
-/**
- * task 车道暴露模式（2026-09-23 token 优化）：router-first（默认）。
+ * task 执行器暴露模式（2026-09-23 token 优化）：router-first（默认）。
  *
  * 背景：task Core 36 个全量 schema ≈ 5.1k token/轮，占 light 档单次输入
  * （API 实测均值 8.2k）的一半以上，而 light 档 2-3 波的编排深度根本用不满
  * 36 个工具。router-first 下可见集只留桥工具（tool_discover/tool_call 由
  * prepareToolsWithToolSearch 自动注入），全量语料进 BM25 延迟目录按需召回；
  * 质量护栏：意图预召回（top-1 高置信工具免 discover 直转正）+ <tool_request>
- * 请求卡 + 高频调用自动晋升（PROMOTE_THRESHOLD=3）。chat 车道不受影响。
+ * 请求卡 + 高频调用自动晋升（PROMOTE_THRESHOLD=3）。普通对话轮不受影响。
  *
  * 回滚：AGENT_TASK_LANE=core 恢复静态 Core 全量注入。
  */
@@ -226,6 +204,11 @@ export function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTo
 /**
  * 按静态清单解析车道 Core 工具。extraDefinitions 用于注册表外单独注入的
  * 定义（如 task.dispatch 在 agent-core 晚绑定）。清单外工具一律不进。
+ *
+ * 2026-10-22 定稿（架构文档 5.1.4）：环 1 常驻工具**一律全量 schema**——
+ * BFCL 实测 62% 的失败在参数层，常驻工具是模型零往返直调的主战场，在
+ * 这里剥字段级描述等于主动缴械（原 CHAT_FULL_SCHEMA_NAMES 白名单机制
+ * 退役，留名以便回滚参考）。token 靠环 2 域卡紧凑与环 3 按需发现省。
  */
 export function buildLaneCoreTools(
   lane: LaneId,
@@ -239,11 +222,7 @@ export function buildLaneCoreTools(
   for (const tool of pool) {
     const name = tool.type === "function" ? tool.function?.name : undefined;
     if (!name || !wanted.has(name)) continue;
-    const fullSchema =
-      lane === "chat"
-        ? CHAT_FULL_SCHEMA_NAMES.has(name)
-        : TASK_FULL_SCHEMA_NAMES === null || TASK_FULL_SCHEMA_NAMES.has(name);
-    resolved.push(fullSchema ? tool : slimToolSchema(tool));
+    resolved.push(tool);
   }
   return dedupeToolsByName(resolved);
 }
@@ -438,14 +417,14 @@ function toolNameOfPreload(tool: ChatCompletionTool): string {
 }
 
 /**
- * task 车道 router-first 轻量常驻子集（2026-10-10 ②）。
+ * 后台执行器 router-first 轻量常驻子集（2026-10-10 ②）。
  *
- * 根因：router-first 可见集 = 纯预载，chat 车道 Core 常驻的轻动作/感知工具
- * 在任务面完全不可见，而短口语动作 query 的 BM25 词面召回天然弱——「提醒」
+ * 根因：router-first 可见集 = 纯预载，chat 常驻的轻动作/感知工具
+ * 在后台执行轮完全不可见，而短口语动作 query 的 BM25 词面召回天然弱——「提醒」
  * 「回复」「记」是跨域通词被 IDF 闸杀掉，强票位被描述更长更具体的族占走
  * （实测：「明早八点提醒我交周报」calendar:5 vs reminder:1；「回复妈妈微信」
  * geofence:3「到家」撞车；「帮我记一下女儿叫小雨」无强域 top-4 全噪声）。
- * 这类轻动作单步工具确定性常驻（瘦身 schema），任务面「记一下/提醒我/回复」
+ * 这类轻动作单步工具确定性常驻（瘦身 schema），后台执行轮「记一下/提醒我/回复」
  * 不再赌词面召回；长尾重活仍走预载/discover/晋升通道。
  */
 export const TASK_LANE_ROUTER_FIRST_LIGHT_NAMES: readonly string[] = [

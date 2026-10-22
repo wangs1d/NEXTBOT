@@ -116,6 +116,24 @@ export type LlmUsageRecord = {
   apiPromptTokens?: number;
   /** API usage 真实返回的 completion tokens。 */
   apiCompletionTokens?: number;
+  /**
+   * 输入分段实测（2026-10-21）：工具循环把审计输入拆成 system / history /
+   * tools 三段字符数，用于回答「成本到底堆在哪一段」——只砍得动最大的那一段。
+   * 仅 main_chat_tools 有值；三者之和 ≈ inputChars（差值为多模态等非文本部分）。
+   */
+  breakdown?: LlmInputBreakdown;
+};
+
+/** 输入分段字符数（见 {@link LlmUsageRecord.breakdown}）。 */
+export type LlmInputBreakdown = {
+  /** system 消息字符数（人设 + 记忆注入 + 工具使用说明等全部拼在首条）。 */
+  system: number;
+  /** 除首条外其余消息（历史对话 + 工具结果回灌）字符数。 */
+  history: number;
+  /** 本轮可见工具 schema 序列化字符数（BM25 检索后，非全量）。 */
+  tools: number;
+  /** 本轮可见工具个数。 */
+  toolCount: number;
 };
 
 export type LlmUsageAggregate = {
@@ -263,6 +281,8 @@ export function recordLlmUsageByChars(args: {
   apiPromptTokens?: number;
   /** API usage 真实 completion tokens（可选） */
   apiCompletionTokens?: number;
+  /** 输入分段实测（仅 main_chat_tools 传入） */
+  breakdown?: LlmInputBreakdown;
 }): void {
   recordLlmUsage({
     stage: args.stage,
@@ -276,6 +296,7 @@ export function recordLlmUsageByChars(args: {
     promptCacheMissTokens: args.promptCacheMissTokens,
     apiPromptTokens: args.apiPromptTokens,
     apiCompletionTokens: args.apiCompletionTokens,
+    breakdown: args.breakdown,
   });
 }
 

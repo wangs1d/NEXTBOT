@@ -31,6 +31,10 @@ import {
   handleAgentEmbodimentInteractEvent,
 } from "./handlers/agent-embodiment-interact.js";
 import {
+  handlePetReactionEvent,
+  type PetReactionChatLike,
+} from "./handlers/pet-reaction.js";
+import {
   handleChatAgentProcessingUiEvent,
   handleChatUserMessageEvent,
   messageBatchProcessor,
@@ -229,6 +233,11 @@ export type WsRouteDeps = {
    * payload.modelProvider 三元组并按 actorId 绑定；未装配时该字段被忽略。
    */
   actorModelBindings?: ActorModelBindingStore | null;
+  /**
+   * 桌宠台词一次性 LLM 通道（pet.reaction → pet.reaction.ack）。
+   * 可选：未装配时台词请求降级为 ok:false（桌宠不说话，不影响其他功能）。
+   */
+  petReactionChat?: PetReactionChatLike | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -265,6 +274,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     phoneCallCoordinator,
     agentAccountService,
     actorModelBindings,
+    petReactionChat,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -2274,6 +2284,16 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 reason: result.reason,
               },
             }),
+          );
+          return;
+        }
+
+        if (event.type === "pet.reaction") {
+          // 桌宠即兴台词：一次性 LLM 生成（无词库），失败时 ack ok:false 客户端静默
+          await handlePetReactionEvent(
+            { socket, boundActorId: boundActorId ?? "" },
+            event.payload,
+            { chat: petReactionChat ?? null },
           );
           return;
         }

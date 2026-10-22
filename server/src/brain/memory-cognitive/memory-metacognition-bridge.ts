@@ -1,6 +1,6 @@
 // Agent Brain Center — MemoryMetacognitionBridge（元记忆桥接器）
 //
-// 职责：桥接 MemoryCortex 与 KnowledgeVerificationService（元认知能力由本模块自身承载），
+// 职责：桥接 MemoryCortex（元认知能力由本模块自身承载），
 //   程序化实现"知之为知之，不知为不知"，防幻觉并触发自我探索。
 //   **不通过 prompt 实现**——所有置信分层、防幻觉标记、探索触发都是规则计算。
 //
@@ -11,7 +11,6 @@
 //      - 构造 MemoryProvenance（source / sourceType / capturedAt）
 //   2. 低置信触发自我探索
 //      - unknown 占比 > 阈值（默认 50%）时
-//      - 标记 shouldExplore + 异步触发 KnowledgeGapExecutor.executeGapQuery
 //      - 不阻塞当前 recall 返回
 //   3. 防幻觉过滤
 //      - confidenceTier=unknown 的条目在 content 前附加显式标记
@@ -19,7 +18,7 @@
 //
 // 设计要点：
 //   - 纯规则计算，不调 LLM（避免幻觉）
-//   - 任何依赖（MemoryCortex / KnowledgeVerification / KnowledgeGapExecutor）
+//   - 任何依赖（MemoryCortex 等）
 //     均可缺失，缺失时优雅降级
 //   - BRAIN_MEMORY_METACOGNITION_ENABLED=0 可全局关闭，方法空操作
 
@@ -48,42 +47,19 @@ export interface MemoryCortexLike {
 }
 
 /**
- * KnowledgeVerificationService 的最小化外观接口。
- *
- * 只需要 getStatus：按 nodeId 查询验证状态，用于 confidenceTier 计算。
- */
-export interface KnowledgeVerificationLike {
-  /** 查询某条知识的验证状态；未注册时返回 null */
-  getStatus?(
-    knowledgeId: string,
-  ): "pending_verification" | "verified" | "verified_strong" | "disputed" | "rejected" | null;
-}
-
-/**
- * KnowledgeGapExecutor 的最小化外观接口。
- *
- * 只需要 executeGapQuery：联网兜底 + LLM 摘要 + 记忆沉淀 + 注册验证，
- * 返回学习到的知识文本（或 null 表示查询失败）。
- */
-export interface KnowledgeGapExecutorLike {
-  /** 触发知识缺口查询（联网学习），返回学习结果文本；失败返回 null */
-  executeGapQuery(query: string): Promise<string | null>;
-}
-
-/**
  * 节点元信息外观（用于 confidenceTier 计算）。
  *
  * 由于 MemoryRecallItem 不直接携带 accessCount / correctness / verificationStatus，
- * 桥接器内部基于 item 字段 + KnowledgeVerificationService 查询构造此对象。
+ * 桥接器内部基于 item 字段构造此对象。
  */
 export interface NodeMetaInfo {
-  /** 节点 id（用于关联 KnowledgeVerificationService） */
+  /** 节点 id（内容简易 hash） */
   nodeId: string;
   /** 召回次数（影响 confidenceTier：>= confirmThreshold 且 confirmed → known） */
   accessCount: number;
   /** 正确性状态：unknown / confirmed / suspected_error / rejected */
   correctness: string;
-  /** 验证状态（来自 KnowledgeVerificationService）：pending / verified / verified_strong / disputed / rejected */
+  /** 验证状态（历史字段，知识验证层已下线，恒为 undefined） */
   verificationStatus?: string;
   /** 来源标识 */
   source: string;
@@ -116,10 +92,6 @@ const VALID_SOURCE_TYPES = new Set<string>(["chat", "tool", "digest", "world", "
 export interface MemoryMetacognitionBridgeOpts {
   /** 记忆皮层（基础召回来源）；null 时优雅降级为空召回 */
   memoryCortex?: MemoryCortexLike | null;
-  /** 知识验证服务（查询验证状态）；null 时跳过验证状态查询 */
-  knowledgeVerification?: KnowledgeVerificationLike | null;
-  /** 知识缺口执行器（触发联网学习）；null 时跳过自我探索 */
-  knowledgeGapExecutor?: KnowledgeGapExecutorLike | null;
 }
 
 // ============================================================
@@ -129,7 +101,7 @@ export interface MemoryMetacognitionBridgeOpts {
 /**
  * 元记忆桥接器。
  *
- * 桥接 MemoryCortex（召回）与 KnowledgeVerificationService，
+ * 桥接 MemoryCortex（召回）与元认知分层，
  * 程序化实现"知之为知之，不知为不知"。
  *
  * 用法：
@@ -137,23 +109,12 @@ export interface MemoryMetacognitionBridgeOpts {
  *   const result = await bridge.recallWithProvenance(actorId, query);
  *   // result.items 已附带 provenance / confidenceTier
  *   // confidenceTier=unknown 的条目已附加防幻觉标记
- *   // 若 unknown 占比 > 阈值，已异步触发 executeGapQuery（不阻塞）
  */
 export class MemoryMetacognitionBridge {
   private readonly memoryCortex: MemoryCortexLike | null;
-  private readonly knowledgeVerification: KnowledgeVerificationLike | null;
-  private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
   constructor(opts: MemoryMetacognitionBridgeOpts = {}) {
     this.memoryCortex = opts.memoryCortex ?? null;
-    this.knowledgeVerification = opts.knowledgeVerification ?? null;
-    // 依赖形状校验：只保留真正实现了 executeGapQuery 的执行器，
-    // 误传类构造函数 / mock / 空壳对象时统一降级为 null（符合"依赖可缺失、缺失时优雅降级"约定）。
-    const suppliedGapExecutor = opts.knowledgeGapExecutor ?? null;
-    this.knowledgeGapExecutor =
-      suppliedGapExecutor && typeof suppliedGapExecutor.executeGapQuery === "function"
-        ? suppliedGapExecutor
-        : null;
   }
 
   // ------------------------------------------------------------
@@ -219,7 +180,7 @@ export class MemoryMetacognitionBridge {
   /**
    * 规则计算置信分层。
    *
-   * 优先级（verificationStatus 优先于 correctness + accessCount）：
+   * 优先级（verificationStatus 优先于 correctness + accessCount，验证层已下线恒走后者）：
    *   - verificationStatus = "verified" / "verified_strong" → "known"
    *   - verificationStatus = "pending_verification" → "uncertain"
    *   - verificationStatus = "disputed" / "rejected" → "unknown"
@@ -295,10 +256,8 @@ export class MemoryMetacognitionBridge {
    * - 计算 unknown 占比
    * - 占比 > exploreThreshold 时：
    *   - 调用 metaCognition.markShouldExplore(actorId, "low_confidence_recall")（若可用）
-   *   - 异步调用 knowledgeGapExecutor.executeGapQuery(query)（若可用，不阻塞）
    * - 不调 LLM
    *
-   * 注意：本方法本身是 async，但内部对 executeGapQuery 是 fire-and-forget，
    * 不会 await 它，因此调用方（如 recallWithProvenance）不会被阻塞。
    */
   async triggerSelfExplorationIfNeeded(
@@ -315,24 +274,6 @@ export class MemoryMetacognitionBridge {
     const ratio = this.computeUnknownRatio(items);
     if (ratio <= this.exploreThreshold) {
       return;
-    }
-
-    // 异步触发联网学习（fire-and-forget，不阻塞）
-    if (!this.knowledgeGapExecutor) {
-      return;
-    }
-    if (this.knowledgeGapExecutor) {
-      void Promise.resolve(this.knowledgeGapExecutor.executeGapQuery(query))
-        .then((learned) => {
-          if (learned) {
-            console.log(
-              `[MemoryMetacognitionBridge] executeGapQuery 学习成功（${learned.length} 字符），已沉淀`,
-            );
-          }
-        })
-        .catch((e) => {
-          console.error("[MemoryMetacognitionBridge] executeGapQuery 失败（忽略）:", e);
-        });
     }
   }
 
@@ -369,9 +310,8 @@ export class MemoryMetacognitionBridge {
    * MemoryRecallItem 不直接携带 accessCount / correctness / verificationStatus，
    * 这里：
    *   - source / sourceType / capturedAt 从 item.source / item.timestamp 派生
-   *   - nodeId 从 content 派生（简易 hash），用于关联 KnowledgeVerificationService
-   *   - accessCount / correctness 使用保守默认值（0 / "unknown"）
-   *   - verificationStatus 优先从 KnowledgeVerificationService 查询
+   *   - nodeId 从 content 派生（简易 hash）
+   *   - accessCount / correctness / verificationStatus 使用保守默认值
    */
   private buildNodeMeta(item: MemoryRecallItem): NodeMetaInfo {
     const source = item.source ?? "system";
@@ -379,26 +319,12 @@ export class MemoryMetacognitionBridge {
     const capturedAt = item.timestamp ?? new Date().toISOString();
     const nodeId = this.deriveNodeId(item.content);
 
-    let verificationStatus: string | undefined;
-    if (this.knowledgeVerification?.getStatus) {
-      try {
-        const status = this.knowledgeVerification.getStatus(nodeId);
-        if (status) {
-          verificationStatus = status;
-        }
-      } catch (e) {
-        // 查询失败按无验证状态处理
-        console.error("[MemoryMetacognitionBridge] getStatus 失败（忽略）:", e);
-      }
-    }
-
     return {
       nodeId,
       // MemoryRecallItem 不携带 accessCount，保守取 0
       accessCount: 0,
       // MemoryRecallItem 不携带 correctness，保守取 "unknown"
       correctness: "unknown",
-      verificationStatus,
       source,
       sourceType,
       capturedAt,

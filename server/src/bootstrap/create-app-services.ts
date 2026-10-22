@@ -104,6 +104,9 @@ import { getShortTermMemoryConfig } from "../services/short-term-memory-config.j
 import { initShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import { initDailyJournalService, getDailyJournalService } from "../services/daily-journal-service.js";
 import { EveningDigestService } from "../services/evening-digest-service.js";
+import { DdlRadarService } from "../services/ddl-radar-service.js";
+import { IngestService } from "../services/ingest-service.js";
+import { createIngestVisionExtract } from "../services/ingest-vision.js";
 import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
 import { LifeRhythmEngine } from "../rhythm/engine.js";
 import { RhythmProfileStore } from "../rhythm/profile-store.js";
@@ -125,13 +128,8 @@ import {
   getDailyChatSyncService,
 } from "../services/daily-chat-sync-service.js";
 import { compactObserveLine } from "../tokenjuice/compactor.js";
-import { TrajectoryPromotionPipeline, parseSkillPromotionPipelineMode } from "../services/skill-promotion-pipeline.js";
 import { SkillPromotionQueueService } from "../services/skill-promotion-queue-service.js";
-import { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
-import { AgentSelfLearningService } from "../services/agent-self-learning-service.js";
 import { SkillGenerator } from "../services/skill-generator.js";
-import { KnowledgeGapExecutor } from "../services/knowledge-gap-executor.js";
-import { KnowledgeVerificationService } from "../services/knowledge-verification-service.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
 import {
@@ -371,7 +369,6 @@ import { BrowserSessionService } from "../services/browser-session-service.js";
 import { InternetIntelligenceService } from "../services/internet-intelligence-service.js";
 import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
 import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
-import { registerSelfLearningTools } from "../tools/self-learning-tools.js";
 import { registerSkillManageTools } from "../tools/skill-manage-tools.js";
 import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
@@ -404,7 +401,6 @@ import { join } from "path";
 import {
   getHttpRateLimitRuntime,
   isAgentWorldSocialEnabled,
-  isBrainEvolutionEnabled,
   isAccessAuthRequired,
   isOssEdition,
 } from "../config/env.js";
@@ -424,10 +420,6 @@ import {
   CapabilityCortex,
   AwarenessCortex,
   ProactionCortex,
-  EvolutionCortex,
-  CodeRepairCortex,
-  DefaultTestRunner,
-  type CodeRepairLlmLike,
   SensoryCortex,
   MemoryCortex,
   SynapseBus,
@@ -453,7 +445,6 @@ import {
   type EndToEndDecisionMaker,
   type MemoryCortexLike,
   type RecentConversationProvider,
-  type GapAnalyzer,
   type DelegateJudge,
   createCognitiveEngineFromEnv,
   createDefaultEndToEndDecisionMaker,
@@ -592,6 +583,12 @@ import { ProactiveCaller, type CallOutcome } from "../proactivity/proactive-call
 import { fabricSelftest } from "../proactivity/selftest.js";
 import { CostCalibrator } from "../proactivity/cost-calibrator.js";
 import { MessageWatchTrigger } from "../proactivity/triggers/message-watch-trigger.js";
+import { ScheduleAssertionStore } from "../proactivity/branches/schedule-assertion-store.js";
+import { AssertionConflictWatcher } from "../proactivity/branches/assertion-conflict-watcher.js";
+import { BranchRegistry } from "../proactivity/branches/branch-registry.js";
+import { BranchCondenser } from "../proactivity/branches/branch-condenser.js";
+import { WatchTaskStore, WatchTaskWatcher } from "../proactivity/branches/watch-tasks.js";
+import { registerWatchTaskTools } from "../tools/watch-task-tools.js";
 import { SpeechPolisher } from "../proactivity/speech-polisher.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
@@ -1217,7 +1214,8 @@ export async function createAppServices(): Promise<AppServices> {
     registerAgentPhoneTools(toolRegistry, virtualPhoneService);
   }
   registerAgentVoiceTools(toolRegistry, voiceCapabilityService, voiceMessageService);
-  // Surface-on-Demand：LLM 可召唤客户端信息面板（语音模式"念+显"双通道）
+  // Surface-on-Demand：surface.dismiss（收起媒体页等浮层）。surface.show 已于
+  // 2026-10-22 删除——召唤面板不由 LLM 工具实现。
   registerSurfaceTools(toolRegistry, {
     trySend: (actorId, data) => wsConnectionRegistry.trySend(actorId, data),
   });
@@ -2017,47 +2015,6 @@ export async function createAppServices(): Promise<AppServices> {
     `[ShortTermMemory] mode=${stmConfig.mode}, wal=${stmConfig.walEnabled ? "on" : "off"}, digest=${stmConfig.digestEnabled ? "on" : "off"}, deferArchive=${stmConfig.deferTurnArchive ? "on" : "off"}, tz=${stmConfig.digestTimezone}`,
   );
 
-  const pipelineMode = parseSkillPromotionPipelineMode();
-  const skillPromoValidateDeps = { skillManager, skillMetadataValidator };
-  let skillPromotionQueue: SkillPromotionQueueService | null = null;
-  if (pipelineMode === "queue") {
-    skillPromotionQueue = new SkillPromotionQueueService(skillPromoValidateDeps);
-    skillPromotionQueue.start();
-  }
-  const trajectoryPromotionPipeline =
-    pipelineMode === "off" ?
-      null
-    : new TrajectoryPromotionPipeline(
-        pipelineMode,
-        skillPromoValidateDeps,
-        skillPromotionQueue,
-        // onSkillPromoted 回调：自我进化装载 Skill 成功后触发，
-        // 把新能力同步到 CapabilityCortex + 清缓存。
-        // 闭包引用 capabilityCortex（在下方 brainEnabled 块创建），
-        // 回调运行时（EvolutionCortex.execute 装载阶段）capabilityCortex 已初始化。
-        ({ metadata, skillName }) => {
-          // 1. 通知 CapabilityCortex 注册新能力描述符（让 agent.query_capabilities 可见）
-          if (capabilityCortex) {
-            capabilityCortex.register({
-              domain: `evolved_${skillName.replace(/\./g, "_")}`,
-              label: metadata.displayName || skillName,
-              description: metadata.description,
-              tools: [skillName],
-              status: "active",
-              source: "dynamic",
-              registeredAt: new Date().toISOString(),
-            });
-          }
-          // 2026-09-11：原「注册到 Python tool-router」步骤已随 router 删除——
-          // skill 已在上方注册进 SkillManager，invalidateBuiltinToolsCache 后
-          // 经进程内延迟目录即可被检索。
-          // 2. 清除 builtin 工具缓存，确保下次请求看到新能力
-          invalidateBuiltinToolsCache();
-        },
-      );
-
-  const trajectorySkillPromotion = new TrajectorySkillPromotionService(trajectoryPromotionPipeline);
-
   const evolutionLoopService = new EvolutionLoopService(agentMemorySyncService, {
     onObserveForNarrative: (actorId, line) => {
       void (async () => {
@@ -2159,6 +2116,26 @@ export async function createAppServices(): Promise<AppServices> {
     if (live) return live;
     return coordinator.getCachedWithTime(sessionId)?.payload ?? null;
   };
+  // 数据入口（统一上传）：用户自助把课表/DDL/行程塞进来——截图、复制的表格、
+  // .ics 文件、一段文字都行，按信息形态选抽取器（见 ingest-extractors 的说明）。
+  //   - chat：文本抽取走一次性 LLM（ephemeral，不进对话线程、不污染前缀缓存）
+  //   - visionExtract：截图抽取。当前模型不支持 image_url 或未配置时为 null，
+  //     此时入口页如实显示"读不了图"，用户可改传 ics / 表格（不该假装能读）
+  //   - scheduleTasks：课表条目的真实载体。落成 weekly 周期日程后自动获得
+  //     到点提醒 / 今日安排 / schedule-sensor 扫进世界板 / 晨报，不再只躺在台账里
+  const ingestService = new IngestService({
+    chat: externalChat,
+    visionExtract: createIngestVisionExtract(process.env),
+    scheduleTasks: scheduleTaskService,
+  });
+  // DDL 雷达（大学生线三级提醒梯度）：确定性扫描承诺板 + 作业类日程 + 用户上传的
+  // 截止项，分档后交给两个既有投递面（晨报 L3/L1、睡前备忘 L2）。只读，不推送——
+  // 分钟级梯度提醒仍由承诺板自身负责，避免双通道骚扰。
+  const ddlRadarService = new DdlRadarService({
+    commitmentBoard,
+    scheduleTaskService,
+    ingestService,
+  });
   const morningBriefingService = new MorningBriefingService({
     weatherService,
     weatherPrefsService,
@@ -2197,6 +2174,8 @@ export async function createAppServices(): Promise<AppServices> {
           return full;
         }
       : undefined,
+    // 第七源：DDL（今天截止置顶 + 这周还要交一句）
+    ddlRadar: ddlRadarService,
   });
 
   const morningBriefingScheduler = new MorningBriefingScheduler({
@@ -2296,6 +2275,8 @@ export async function createAppServices(): Promise<AppServices> {
     soulProvider: eveningDigestSoulProvider,
     // 行程预算守门（travel 双端⑥）：今日在行程中且当日消费超预算档日上限 → 晚报带超支提醒
     travelBudgetProvider: (sessionId) => travelBudgetGuard.checkBudget(sessionId),
+    // DDL 三级梯度 L2 档：明天要交的 + 今天已过期的（睡前最该交代的一句）
+    ddlRadar: ddlRadarService,
     llmComplete: externalChat?.isEnabled()
       ? async (prompt, opts) => {
           let full = "";
@@ -2582,7 +2563,19 @@ export async function createAppServices(): Promise<AppServices> {
   // 闹钟服务在装配序列后段（alarm-clock 段）才构造；calendar 工具经此 getter 懒取用，
   // 创建「闹钟类提醒」时同步补建真闹钟（alarm.sync → 手机端本地精确响铃）
   let alarmClockServiceRef: AlarmClockService | null = null;
-  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService, () => alarmClockServiceRef);
+  // 上传树枝日程主张库（2026-10-22 树状架构 Phase 1）：calendar.batch_create 批量导入
+  // 课表/行程表 → 事实主张版本链入库；消费方 AssertionConflictWatcher 在主动性段装配
+  const scheduleAssertionStore = new ScheduleAssertionStore({
+    persistPath: join(process.cwd(), "data", "proactivity", "schedule-assertions.json"),
+  });
+  registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService, () => alarmClockServiceRef, scheduleAssertionStore);
+  // 盯梢任务（2026-10-22 Muse 对齐件）：用户对话里说"帮我盯着XXX" → watch.manage
+  // 创建任务（创建时一次 LLM 提取关键词，运行期匹配零 LLM）；消费方 WatchTaskWatcher
+  // 在主动性段装配。Muse 的"任务驱动盯梢"对齐件 + 截止×日历缺口推理。
+  const watchTaskStore = new WatchTaskStore({
+    persistPath: join(process.cwd(), "data", "proactivity", "watch-tasks.json"),
+  });
+  registerWatchTaskTools(toolRegistry, watchTaskStore);
   const smartHomeService = new SmartHomeService();
   registerSmartHomeTools(toolRegistry, smartHomeService);
   // 启动智能家居设备状态轮询（若 HA 已配置），将状态变化发布为 smart_home 信号
@@ -2894,11 +2887,6 @@ export async function createAppServices(): Promise<AppServices> {
     (process.env.BRAIN_PROACTION_LEGACY ?? "").trim().toLowerCase(),
   );
 
-  // ─── 实验性子系统开关（默认关闭，偏离 C 端私人管家主链路；见 .env.example 末尾注释块） ───
-  // BRAIN_EVOLUTION_ENABLED：EvolutionCortex 子系统总开关（兼容旧变量
-  //   BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED / AGENT_EVOLUTION_LOOP_ENABLED，=1 等效开启）。
-  const brainEvolutionEnabled = isBrainEvolutionEnabled();
-
   const proactiveLifeRuntimeService = new ProactiveLifeRuntimeService(
     lifeSignalHubService,
     anticipationEngineService,
@@ -2925,13 +2913,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 启用 brain 时：实例化四皮层、注册子系统、注入 prompt builder、启动。
   // 关闭 brain 时（BRAIN_CENTER_ENABLED=0）：整个 brain/ 模块不实例化、不启动，
   //   旧路径完全保留（proactiveCenter / proactiveLifeRuntimeService 已在上面 start）。
-  // 共享实例：供 brain EvolutionCortex 与 agent 工具共用同一份状态
+  // 共享实例：供 brain 皮层与 agent 工具共用同一份状态
   const skillGenerator = new SkillGenerator(externalChat);
-  const agentSelfLearningService = new AgentSelfLearningService(
-    externalChat,
-    toolRegistry,
-    skillManager,
-  );
 
   let brainCenter: BrainCenter | null = null;
   // synapseBus 在 brainNeuroEnabled 块内创建；此处预先声明，
@@ -2948,13 +2931,6 @@ export async function createAppServices(): Promise<AppServices> {
   //  DecisionHub 装配块在两者之外，故需提升至外层作用域）
   let capabilityCortex: CapabilityCortex | null = null;
   let limbicCortex: LimbicCortex | null = null;
-  // evolutionCortex 外层声明：brainEnabled 块创建，后续 brainNeuroEnabled 块与工具装配需访问
-  let evolutionCortex: EvolutionCortex | null = null;
-  // 记忆认知架构升级（Phase 4）：knowledge 服务外层声明
-  // brainEnabled 块内实例化，brainNeuroEnabled 块内 7 子模块装配需访问。
-  // 两者均为 null 时子模块走降级路径（不阻塞主流程）。
-  let knowledgeVerificationService: KnowledgeVerificationService | null = null;
-  let knowledgeGapExecutor: KnowledgeGapExecutor | null = null;
   // 顺嘴搭车队列（2026-10-01 P1）：low 级主动意图挂起等下一轮对话织入回复末尾。
   // 共享单例——主动外发执行器（挂起点）与 ProactivityHub（挂起点+取货口）用同一队列。
   const turnAsideQueue = new TurnAsideQueue();
@@ -2974,83 +2950,8 @@ export async function createAppServices(): Promise<AppServices> {
     // 凑齐 SLEEP_WINDOW_MIN_SAMPLES 让节律引擎有真实作息数据
     awarenessCortex.setPersistPath(join(process.cwd(), "data", "proactivity"));
     proactionCortex = new ProactionCortex();
-    // EvolutionCortex 四子系统总开关（BRAIN_EVOLUTION_ENABLED，实验性子系统默认关闭）：
-    // 关闭时整个 EvolutionCortex 块跳过装配（evolutionCortex 保持 null），Phase 5
-    // 定时器与 self_evolution.* 工具均不创建；开启后行为与现状一致。
-    if (brainEvolutionEnabled) {
-      evolutionCortex = new EvolutionCortex();
-    } else {
-      console.log("[skip] EvolutionCortex disabled by ENV");
-    }
-
     // CapabilityCortex：注入回 prompt builder（让能力域出现在 prompt 中）
     setCapabilityCortex(capabilityCortex);
-
-    // ─── GapAnalyzer 装配（identifyGap 的 LLM 语义分析）───
-    // identifyGap 不是热路径（由 EvolutionCortex 周期触发），可承受 LLM 调用成本。
-    // BRAIN_LLM_IDENTIFYGAP_ENABLED=0 时降级到 SCENARIO_KEYWORD_MAP 规则匹配。
-    const gapAnalyzer: GapAnalyzer = {
-      async analyze(params) {
-        const { scenario, existingDomains } = params;
-        const failures = params.recentFailures?.slice(0, 5) ?? [];
-        const failureBrief = failures.length > 0
-          ? `\n最近工具失败记录：\n${failures.map((f) => `- ${f.tool}: ${f.errorMessage ?? "未知错误"}（请求：${f.userRequest ?? ""}）`).join("\n")}`
-          : "";
-        const prompt =
-          `你是能力缺口分析器。分析用户场景，识别 Agent 当前能力是否足以应对，找出缺失的能力域。\n\n` +
-          `用户场景：${scenario}${failureBrief}\n` +
-          `当前已注册能力域：${existingDomains.join("、") || "（无）"}\n\n` +
-          `已知能力域参考（可缺失的）：travel_planning, finance_deep, code_sandbox, self_programming, weather, shopping_order, calendar, health_fitness, email_sms, image_gen, smart_home, notes\n\n` +
-          `分析规则：\n` +
-          `  - 场景所需能力域已在 existingDomains 中 → 不是缺口\n` +
-          `  - 场景所需能力域不在 existingDomains 中 → 是缺口\n` +
-          `  - 缺口域属可 self-programming 扩展的（travel_planning/notes/code_sandbox/self_programming）→ suggestedAction 填"走 self-programming 生成"\n` +
-          `  - 其他缺口 → suggestedAction 填"接入第三方工具"\n\n` +
-          `只输出 JSON：{"gaps": [{"scenario": "场景描述", "missingCapability": "能力域标识", "suggestedAction": "建议动作"}], "rationale": "整体分析理由"}`;
-        let raw = "";
-        try {
-          const provider = createExternalChatProviderFromEnv();
-          if (!provider) throw new Error("no_chat_provider");
-          await provider.streamCompletion(
-            `gap-analyzer:${Date.now()}`,
-            { text: prompt },
-            (delta) => { raw += delta; },
-            undefined,
-            { ephemeralTurn: true, disableThinking: true, maxThreadMessages: 0 },
-          );
-        } catch (e) {
-          throw new Error(`gap_analyzer_llm_failed:${String(e).slice(0, 60)}`);
-        }
-        const match = raw.match(/\{[\s\S]*\}/);
-        if (!match) throw new Error("gap_analyzer_no_json");
-        try {
-          const parsed = JSON.parse(match[0]);
-          const gaps: Array<{
-            scenario: string;
-            missingCapability: string;
-            suggestedAction: string;
-          }> = [];
-          if (Array.isArray(parsed.gaps)) {
-            for (const g of parsed.gaps) {
-              if (g && typeof g === "object" && typeof g.missingCapability === "string") {
-                gaps.push({
-                  scenario: typeof g.scenario === "string" ? g.scenario : scenario,
-                  missingCapability: g.missingCapability,
-                  suggestedAction: typeof g.suggestedAction === "string" ? g.suggestedAction : "",
-                });
-              }
-            }
-          }
-          return {
-            gaps,
-            rationale: typeof parsed.rationale === "string" ? parsed.rationale : undefined,
-          };
-        } catch {
-          throw new Error("gap_analyzer_parse_failed");
-        }
-      },
-    };
-    capabilityCortex.registerGapAnalyzer(gapAnalyzer);
 
     // AwarenessCortex：注册生命信号子系统
     awarenessCortex.registerLifeSignalHub(lifeSignalHubService);
@@ -3120,9 +3021,6 @@ export async function createAppServices(): Promise<AppServices> {
     // Stage 3 Task 4：反向注入 ProactionCortex，让 AwarenessCortex 查询 recentDecisions
     // 识别 in_focus 状态（持续 busy > 25min 且无 speak 打断）
     awarenessCortex.registerProaction(proactionCortex);
-    // Stage 4 Task 3：注入 AgentSelfLearningService，让 assessConfidence 读取历史失败率
-    // 作为元认知置信度评估的因子之一（失败率 > 0.3 → -0.2）。
-    awarenessCortex.registerSelfLearning(agentSelfLearningService);
     // 语义觉察推断器：让 observeWithMental 能产出 UserMentalState（纯规则、零 token）。
     // 供对话内主动钩子(AgentCore.maybeTriggerConversationProactive)在需要主动开口时
     // 按需感知用户当下意图，避免常驻注入浪费 token。
@@ -3135,140 +3033,10 @@ export async function createAppServices(): Promise<AppServices> {
       proactionCortex.setShadowMode(true);
     }
 
-    // EvolutionCortex：注册四个子系统（自学习 / 技能生成 / 晋升管道 / 进化循环）
-    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，整块跳过
-    if (evolutionCortex) {
-      evolutionCortex.registerSelfLearning(agentSelfLearningService);
-      evolutionCortex.registerSkillGenerator(skillGenerator);
-      if (trajectoryPromotionPipeline) {
-        evolutionCortex.registerPromotionPipeline(trajectoryPromotionPipeline);
-      }
-      // 经验沉淀落地：skill_distill 提案执行成功后把 SKILL.md 写入磁盘 + 注册
-      evolutionCortex.registerProceduralSink(skillManager);
-      evolutionCortex.registerEvolutionLoop(evolutionLoopService);
-    }
-
-    // 知识缺口执行器（学知识层）：RAG 召回 + 联网兜底 + LLM 摘要 + 记忆沉淀 + 验证状态机
-    // - 复用 toolRegistry 调 desktop.http_get（享受 URL 白名单+超时+审计）
-    // - 复用 narrativeMemory（NarrativeMemoryPort：HumanLikeMemory + Mem0 + 向量库）
-    // - 复用 agentMemorySyncService 写入 memory_facts KV（带验证状态标签）
-    // - 复用 externalChat 做 LLM 摘要（去噪 + 提炼核心事实）
-    // - 复用 knowledgeVerificationService 跟踪置信度 + 反馈累积
-    // 记忆认知架构升级（Phase 4）：提升至外层作用域，brainNeuroEnabled 块内 7 子模块装配需访问。
-    knowledgeVerificationService = new KnowledgeVerificationService();
-    await knowledgeVerificationService.start();
-    knowledgeGapExecutor = new KnowledgeGapExecutor({
-      toolRegistry,
-      narrativeMemory,
-      memorySync: agentMemorySyncService,
-      verification: knowledgeVerificationService,
-      chatProvider: externalChat,
-    });
-    if (evolutionCortex) {
-      evolutionCortex.registerKnowledgeExecutor(knowledgeGapExecutor);
-      // 反馈回路：每次工具交互都通知 verification service，触发状态机演进
-      evolutionCortex.registerKnowledgeVerification(knowledgeVerificationService);
-    }
-
-    // 注册 WS 审批推送器：自主进化闭环的关键依赖
-    // EvolutionCortex 自动生成 Skill 后，通过此推送器向用户发送审批请求 WS 事件
-    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，跳过注册
-    if (evolutionCortex) {
-      evolutionCortex.registerApprovalEmitter({
-        emitApprovalRequest: (sessionId, request) => {
-          try {
-            const payload = {
-              type: "evolution.approval_request" as const,
-              payload: { sessionId, ...request, timestamp: new Date().toISOString() },
-            };
-            // 推送给所有活跃连接（自主进化不绑定特定 session）
-            wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
-          } catch {
-            // 静默失败
-          }
-        },
-        emitApprovalResult: (sessionId, result) => {
-          try {
-            const payload = {
-              type: "evolution.approval_result" as const,
-              payload: { sessionId, ...result, timestamp: new Date().toISOString() },
-            };
-            wsConnectionRegistry.trySend(sessionId, JSON.stringify(payload));
-          } catch {
-            // 静默失败
-          }
-        },
-      });
-    }
-
     // 注册皮层到 BrainCenter
     brainCenter.registerCapability(capabilityCortex);
     brainCenter.registerAwareness(awarenessCortex);
     brainCenter.registerProaction(proactionCortex);
-    // BRAIN_EVOLUTION_ENABLED=0 时 evolutionCortex 为 null，不注册进化皮层
-    if (evolutionCortex) {
-      brainCenter.registerEvolution(evolutionCortex);
-    }
-
-    // ─── 自我修复皮层（CodeRepairCortex）装配 ───
-    // 默认开启（BRAIN_CODE_REPAIR_ENABLED=0 关闭）。
-    // 理由：用户明确要求"出问题的地方把它隔离，然后让 agent 自己去修复，
-    // 去测试，然后自己改正"——这是核心能力，必须默认工作。
-    // 安全边界已在 cortex 内部通过白名单 + 黑名单 + 危险模式黑名单三道闸门保证。
-    // 装配 4 个依赖：
-    //   1. LLM 适配器：把 ExternalChatProvider 包装成 CodeRepairLlmLike（一次性非流式调用）
-    //   2. TestRunner：默认 DefaultTestRunner（跑 tsc --noEmit + 相关 test）
-    //   3. BrainCenter.registerCodeRepair：外观层注入
-    //   4. BrainCenter.start()：随主生命周期启动 autoLoop
-    if (process.env.BRAIN_CODE_REPAIR_ENABLED?.trim() !== "0") {
-      const codeRepairCortex = new CodeRepairCortex({
-        serverRoot: process.cwd(),
-      });
-
-      // LLM 适配器：复用主聊天通道，但用 ephemeralTurn 避免污染会话历史
-      // externalChat 可能为 null（未配置 OPENAI_API_KEY 时），适配器内部处理
-      const codeRepairLlm: CodeRepairLlmLike = {
-        async complete(systemPrompt, userPrompt, opts) {
-          if (!externalChat) {
-            throw new Error("externalChat 未配置（未设置 OPENAI_API_KEY 等环境变量）");
-          }
-          let fullContent = "";
-          await externalChat.streamCompletion(
-            `code-repair-${Date.now()}`,
-            { text: userPrompt },
-            (delta) => {
-              fullContent += delta;
-            },
-            undefined,
-            {
-              systemPromptOverride: systemPrompt,
-              ephemeralTurn: true,
-              maxThreadMessages: 2,
-            },
-          );
-          // 简单截断到 maxTokens（如果指定），避免 LLM 输出过长
-          if (opts?.maxTokens && fullContent.length > opts.maxTokens * 4) {
-            return fullContent.slice(0, opts.maxTokens * 4);
-          }
-          return fullContent;
-        },
-      };
-      codeRepairCortex.registerLlm(codeRepairLlm);
-
-      // 默认测试运行器：tsc --noEmit（60s）+ 相关 test（30s）
-      const testRunner = new DefaultTestRunner(process.cwd(), {
-        tscTimeoutMs: 60_000,
-        testTimeoutMs: 30_000,
-      });
-      codeRepairCortex.registerTestRunner(testRunner);
-
-      brainCenter.registerCodeRepair(codeRepairCortex);
-      if (process.env.BRAIN_CODE_REPAIR_ENABLED?.trim() === "0") {
-        console.log("[Bootstrap] CodeRepairCortex 未启用（BRAIN_CODE_REPAIR_ENABLED=0）");
-      } else {
-        console.log("[Bootstrap] CodeRepairCortex 已启用（默认开启）");
-      }
-    }
 
     // 注：BrainCenter.start() / registerBrainTools / setBrainChatTools
     // 已移至 5 个神经解剖分区装配完成之后调用，确保 9 分区均注册后再启动。
@@ -4366,12 +4134,9 @@ export async function createAppServices(): Promise<AppServices> {
         // 实例化子模块（依赖注入：humanLikeMemory / knowledge 服务 / synapseBus）
         const associativeGraph = new MemoryAssociativeGraph({
           humanLike: humanLikeMemory as unknown as import("../brain/memory-cognitive/memory-associative-graph.js").HumanLikeMemoryAssociativeLike,
-          knowledgeGapExecutor: knowledgeGapExecutor as unknown as import("../brain/memory-cognitive/memory-associative-graph.js").KnowledgeGapExecutorLike,
         });
         const metacognitionBridge = new MemoryMetacognitionBridge({
           memoryCortex: memoryCortex as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").MemoryCortexLike,
-          knowledgeVerification: knowledgeVerificationService as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").KnowledgeVerificationLike,
-          knowledgeGapExecutor: knowledgeGapExecutor as unknown as import("../brain/memory-cognitive/memory-metacognition-bridge.js").KnowledgeGapExecutorLike,
         });
         const forgettingController = new MemoryForgettingController();
         forgettingController.registerHumanLikeMemory(
@@ -4737,7 +4502,6 @@ export async function createAppServices(): Promise<AppServices> {
   // ========== 注册自我编程和智能生成工具 ==========
   registerSelfProgrammingTools(toolRegistry, skillManager);
   registerAISkillGenerationTools(toolRegistry, externalChat, skillManager, skillGenerator);
-  registerSelfLearningTools(toolRegistry, externalChat, skillManager, agentSelfLearningService);
   registerNotesTools(
     toolRegistry,
     notesService,
@@ -6676,6 +6440,48 @@ export async function createAppServices(): Promise<AppServices> {
   // 消息监控触发器：手机入站消息（微信桥/通用消息桥统一汇入 MessageHub）落库后
   // 识别「日程变动」信号（延迟/改期/取消×会议/时间语境，零 LLM 规则）→ 主动提案。
   // 投递成功后由 delivery 层按 action.* 前缀自动落入代办足迹台账。
+  // 树枝注册表（2026-10-22 树状架构 Phase 1）：可插拔信息源的声明与用户启停配置面。
+  // 配置落盘 data/proactivity/branches.json，缺配置回落内置默认（零配置启动门禁：
+  // 不 throw）。message 树枝的闸语义现役由 message-gate 承担（ingestInbound 直调），
+  // Phase 2 迁移为经本注册表按树枝分发——先立接缝，不动行为。
+  const branchRegistry = new BranchRegistry({
+    configPath: join(process.cwd(), "data", "proactivity", "branches.json"),
+  });
+  // L3 精简器（Phase 2）：挂在注册表统一编排入口（ingest），按树枝配置决定
+  // 是否花 LLM；全模板兜底。熔断/kill switch 与 SpeechPolisher 同纪律。
+  const branchCondenser = new BranchCondenser({ chat: () => (externalChat?.isEnabled() ? externalChat : null) });
+  branchRegistry.attachCondenser(branchCondenser);
+  console.log(
+    `[Bootstrap] 树枝注册表已装配：${branchRegistry.list().map((b) => `${b.id}(${b.mode})${b.enabled ? "" : "[停用]"}`).join(" / ")}`,
+  );
+
+  // 断言冲突监察（消息树枝 × 上传树枝，零 LLM）：日程变动信号撞上已导入的
+  // 课表/行程表主张 → "模型修正"提案 → 主动性板块开口（批量导入 ≥3 条才入库）。
+  const assertionConflictWatcher = new AssertionConflictWatcher({
+    store: scheduleAssertionStore,
+    submitProposal: (p) => {
+      proactivePipeline.submitProposal(p);
+    },
+  });
+
+  // 盯梢任务触发器（2026-10-22 Muse 对齐件）：用户点名要盯的事命中入站消息 →
+  // 主动提案（must 层：用户自己下的单）。截止时间可抽且日历有缺口 → 升级为
+  // "要我设个提醒吗"（Muse 体育选拔案例的确定性实现）。运行期零 LLM。
+  const watchTaskWatcher = new WatchTaskWatcher({
+    store: watchTaskStore,
+    submitProposal: (p) => {
+      proactivePipeline.submitProposal(p);
+    },
+    hasRelatedEntry: (actorId, keywords, startMs, endMs) =>
+      scheduleTaskService.listAllTasks().some((t) => {
+        if (t.status !== "active") return false;
+        const at = Date.parse(t.nextRunAt ?? t.runAt ?? "");
+        if (!Number.isFinite(at) || at < startMs || at > endMs) return false;
+        const hay = `${t.title ?? ""} ${t.shortTitle ?? ""} ${t.description}`;
+        return keywords.some((k) => hay.includes(k));
+      }),
+  });
+
   const messageWatchTrigger = new MessageWatchTrigger({
     submitProposal: (p) => {
       // 行程/安排变化 = 内容型场景：LLM 基于消息原话生成主动回复（模板兜底），
@@ -6713,6 +6519,11 @@ export async function createAppServices(): Promise<AppServices> {
     // messageWatchTrigger 识别高价值信号（日程变动等）→ 主动提案链路按价值
     // 推送；messageFeeder 供传感内核 unread_burst 评估；finance 静默入账。
     messageWatchTrigger.handleInbound(input);
+    // 断言冲突监察（上传树枝 × 消息树枝，零 LLM）：变动信号撞上已导入的课表/行程
+    // 主张 → 专门冲突提案（比通用日程变动提醒更具体：指名哪节课、哪个时间）
+    assertionConflictWatcher.handleInbound(input);
+    // 盯梢任务触发器（用户点名要盯的事命中 → 主动报告；Muse 任务驱动盯梢对齐件）
+    watchTaskWatcher.handleInbound(input);
     // 入站消息 → 传感内核 message 流（unread_burst 评估器数据源；30min 窗口 ≥3 条触发）。
     // payload.text 带正文（截 500 字）：SourceStore 按 payload.text 建实体索引，
     // 消息正文从此参与跨源检索（「提到三亚的所有来源」能命中消息）。
@@ -6896,6 +6707,29 @@ export async function createAppServices(): Promise<AppServices> {
     proactivePushService,
     proactivityFabric: {
       sensorHealth: () => sensorKernel.health(),
+      // 树枝配置面（2026-10-22 树状架构 Phase 3）：信息源树枝清单/启停/精简预算。
+      // 全部读内存+写 branches.json，零 LLM 零副作用；缺配置回落默认。
+      branches: () => ({
+        branches: branchRegistry.list().map((b) => ({ ...b, ...branchRegistry.getConfig(b.id) })),
+        condenser: branchCondenser.stats(),
+      }),
+      // 盯梢任务面板（2026-10-22 Muse 对齐件）：列表/删除（创建走对话 watch.manage 工具）
+      watchTasks: (actorId?: string) => ({
+        tasks: watchTaskStore.list(actorId),
+      }),
+      watchTaskRemove: (actorId: string, id: string) => ({ ok: watchTaskStore.remove(actorId, id) }),
+      watchTaskSetActive: (actorId: string, id: string, active: boolean) => ({ ok: watchTaskStore.setActive(actorId, id, active) }),
+      branchSetConfig: (patch: { id: string; enabled?: boolean; condense?: boolean; dailyBudget?: number }) => {
+        branchRegistry.setConfig(patch.id, {
+          ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
+          ...(patch.condense !== undefined ? { condense: patch.condense } : {}),
+          ...(patch.dailyBudget !== undefined ? { dailyBudget: patch.dailyBudget } : {}),
+        });
+        return {
+          ok: true,
+          branch: { ...branchRegistry.get(patch.id), ...branchRegistry.getConfig(patch.id) },
+        };
+      },
       // 目标自驱循环状态（GoalRunner）：无人对话时 goal 是否在后台推进
       goalRunnerStatus: () => goalRunner.status(),
       // 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模
@@ -7051,6 +6885,8 @@ export async function createAppServices(): Promise<AppServices> {
     betaWaitlistService,
     betaInviteService,
     financeIngestService,
+    ingestService,
+    icsSubscriptionService,
     computeQuotaService,
     agentMemorySyncService,
     weatherService,
@@ -7130,6 +6966,7 @@ export async function createAppServices(): Promise<AppServices> {
     phoneCallCoordinator,
     agentAccountService,
     actorModelBindings,
+    petReactionChat: externalChat,
   });
 
   // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）

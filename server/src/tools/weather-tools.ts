@@ -1,5 +1,6 @@
 import type { ToolRegistry } from "./tool-registry.js";
 import { geocodeCity, WeatherService } from "../services/weather-service.js";
+import type { WeatherDailyForecastItem } from "../services/weather-service.js";
 import { resolveUserGeo } from "../services/user-location-service.js";
 import { reverseGeocodeCoordinates } from "../services/reverse-geocode-service.js";
 
@@ -89,7 +90,10 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
     console.log(
       `[weather.get_local] 位置来源=${locSource} 坐标=${lat.toFixed(4)},${lon.toFixed(4)} label=${label || "-"} city=${city || "-"}`,
     );
-    const brief = await weather.getBrief(lat, lon, timezone, label || undefined);
+    // days：用户问多日（"这周""后天""去玩三天"）时由模型传 1–16；缺省 2 = 今天+明天。
+    const daysInput = Number(input.days);
+    const days = Number.isFinite(daysInput) ? Math.max(1, Math.min(Math.trunc(daysInput), 16)) : 2;
+    const brief = await weather.getBrief(lat, lon, timezone, label || undefined, days);
     return {
       ok: true,
       summary: brief.summaryLine,
@@ -102,6 +106,20 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       windKmh: brief.windKmh,
       peakRainPct: brief.peakRainPct,
       locationLabel: brief.locationLabel,
+      // 多日逐日预报（index 0 = 今天；仅当请求 >2 天时携带，避免单日轮次撑大返回）
+      ...(days > 2 && brief.daily && brief.daily.length > 0
+        ? { dailyForecast: brief.daily.map(withDayLabel) }
+        : {}),
     };
   });
+}
+
+const WEEKDAY_LABELS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/** 给逐日条目加人类可读标签：前 3 天固定今天/明天/后天，其余标周几（确定性 UTC 计算，无 Date.now） */
+function withDayLabel(item: WeatherDailyForecastItem, index: number): WeatherDailyForecastItem & { dayLabel: string } {
+  const fixed = ["今天", "明天", "后天"][index];
+  if (fixed) return { ...item, dayLabel: fixed };
+  const weekday = new Date(`${item.date}T00:00:00Z`).getUTCDay();
+  return { ...item, dayLabel: WEEKDAY_LABELS[weekday] ?? item.date };
 }

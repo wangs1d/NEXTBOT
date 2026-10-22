@@ -21,6 +21,7 @@ import "media_disk_cache.dart";
 import "voice_message_bubble.dart";
 import "message_body_renderer.dart";
 import "agent_result_card.dart";
+import "evening_digest_card.dart";
 import "plan_steps_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
@@ -2316,6 +2317,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
         widget.mainMessage.contentType == "task_receipt";
     final bool isDecisionCard =
         widget.mainMessage.contentType == "decision_card";
+    final bool isEveningDigest =
+        widget.mainMessage.contentType == "evening_digest" &&
+            widget.mainMessage.eveningDigest != null;
     final bool isVoiceMessage = widget.mainMessage.contentType == "audio" &&
         widget.mainMessage.attachments.any(
             (MessageAttachment a) => a.type == MessageAttachmentType.audio);
@@ -2333,6 +2337,13 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       bubble = _DecisionCardBubble(
         message: widget.mainMessage,
         onAction: widget.onConfirmDecisionCard,
+      );
+    } else if (isEveningDigest) {
+      // 睡前备忘卡（2026-10-22 定调）：结构化块专属渲染，不框进气泡外壳
+      //（同 travel_itinerary 的独立消息元素形态），人话段在卡顶部。
+      bubble = ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 440),
+        child: EveningDigestCard(digest: widget.mainMessage.eveningDigest!),
       );
     } else if (isVoiceMessage) {
       final MessageAttachment audio = widget.mainMessage.attachments.firstWhere(

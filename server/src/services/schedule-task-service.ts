@@ -83,7 +83,7 @@ export type ScheduleTaskRecord = {
   /** 生成当前分段计划的因子指纹（如 "high/mid"），改期重算判定与排查用。 */
   reminderPolicy?: string;
   /** 来源标记：manual=用户/LLM 直建；booking=预订下单联动；commitment=承诺板物化；ics=日历订阅导入；email=票务邮件提取。 */
-  source?: "manual" | "booking" | "commitment" | "ics" | "email";
+  source?: "manual" | "booking" | "commitment" | "ics" | "email" | "ingest";
   /** 关联的本地预订订单号（source=booking 时写入，用于取消/改期反向同步）。 */
   sourceBookingOrderId?: string;
   /** 关联的外部引用 id（source=commitment 时为承诺 id；source=ics 时为「uid/occurrenceStartMs」事件键），用于反向同步。 */
@@ -129,7 +129,7 @@ export type CreateScheduleTaskInput = {
   durationMinutes?: number;
   remindBeforeMinutes?: number[];
   location?: string;
-  source?: "manual" | "booking" | "commitment" | "ics" | "email";
+  source?: "manual" | "booking" | "commitment" | "ics" | "email" | "ingest";
   sourceBookingOrderId?: string;
   sourceRefId?: string;
 };
@@ -281,6 +281,15 @@ const DEPART_ESCALATE_SLACK_MIN = 5;
 export type ScheduleTaskServiceOptions = {
   /** 时间源注入（测试/回放用）；缺省读真实时钟。 */
   now?: () => Date;
+  /**
+   * 持久化路径。**构造时快照**，服务生命周期内不再变化。
+   *
+   * 为什么不在每次 persist 时读 `SCHEDULE_TASKS_FILE`：测试会连续创建多个实例
+   * 并各自换目录，残留实例的异步 persist 会跟着新的 env 写到**下一个测试**的
+   * 文件上，两个实例并发写同一路径，Windows 上直接 `EPERM`（表现为随机红灯）。
+   * 路径本就该是实例的属性，不是进程的全局状态。
+   */
+  persistPath?: string;
 };
 
 /**
@@ -327,6 +336,8 @@ export class ScheduleTaskService {
   private readonly runningTaskIds = new Set<string>();
   /** 统一时间源（见 ScheduleTaskServiceOptions）。 */
   private readonly clock: () => Date;
+  /** 持久化路径（构造时快照，见 ScheduleTaskServiceOptions.persistPath）。 */
+  private readonly persistPathValue: string;
   private tickHandle: NodeJS.Timeout | undefined;
   private weatherBriefHandler?: WeatherBriefHandler;
   private reminderHandler?: ScheduleReminderHandler;
@@ -353,6 +364,11 @@ export class ScheduleTaskService {
 
   constructor(options: ScheduleTaskServiceOptions = {}) {
     this.clock = options.now ?? (() => new Date());
+    // 路径在构造时就定死（见 ScheduleTaskServiceOptions.persistPath 的说明）
+    this.persistPathValue =
+      options.persistPath?.trim() ||
+      process.env.SCHEDULE_TASKS_FILE?.trim() ||
+      join(process.cwd(), "data", "schedule-tasks.json");
   }
 
   /** 当前时间（统一时间源，禁止在本类里直接使用 Date.now()）。 */
@@ -391,7 +407,7 @@ export class ScheduleTaskService {
   }
 
   private get persistPath(): string {
-    return process.env.SCHEDULE_TASKS_FILE ?? join(process.cwd(), "data", "schedule-tasks.json");
+    return this.persistPathValue;
   }
 
   setWeatherBriefHandler(handler: WeatherBriefHandler | undefined): void {
@@ -457,7 +473,22 @@ export class ScheduleTaskService {
     await mkdir(dir, { recursive: true });
     const tasks = Array.from(this.byTaskId.values());
     const runs = Array.from(this.runsByTaskId.values()).flat();
-    await writeFile(this.persistPath, JSON.stringify({ tasks, runs }, null, 2), "utf8");
+    const payload = JSON.stringify({ tasks, runs }, null, 2);
+    // Windows 上目标文件可能被短暂占用（杀毒扫描、索引、另一个实例正在读）→
+    // EPERM/EBUSY。这类占用是毫秒级的，直接抛会让调用方以为"日程没存上"，
+    // 所以有限重试；仍失败才如实抛出（不能让调用方以为写成功了）。
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await writeFile(this.persistPath, payload, "utf8");
+        return;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        const retriable =
+          code === "EPERM" || code === "EBUSY" || code === "EACCES" || code === "EAGAIN";
+        if (!retriable || attempt >= 4) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 20 * (attempt + 1)));
+      }
+    }
   }
 
   /** 全量任务列表（跨会话；UpcomingScheduleWatcher 临近日程扫描用） */

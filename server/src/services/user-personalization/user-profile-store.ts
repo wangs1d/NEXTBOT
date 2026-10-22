@@ -22,8 +22,11 @@ const TEMPLATE_BOILERPLATE_LINES = new Set([
  * ────────────────────────────────────────────────────────────── */
 
 const PROFILE_PLACEHOLDER_RE = /^（.*）$/;
-/** 系统同步样板行（语气风格/回复偏好）：永不判噪声 */
-const SYSTEM_SAMPLE_LINE_RE = /^(语气风格：.*（系统根据对话自动调整）|回复偏好：.*)$/;
+/** 系统同步样板行（语气风格/回复偏好）：永不判噪声。
+ *  注意「(会)?」：writer（profile-heuristics.syncPreferredToneInProfile）写的是
+ *  「系统会根据对话自动调整」，默认模板是「系统根据对话自动调整」——2026-10-22
+ *  修复三处文案漂移，判定统一容忍「会」。 */
+const SYSTEM_SAMPLE_LINE_RE = /^(语气风格：.*（系统(?:会)?根据对话自动调整）|回复偏好：.*)$/;
 /** section 标题 → 内部键（净噪时需要按 section 判定，如「基本信息」只收档案字段行） */
 const SECTION_TITLE_TO_KEY: Record<string, string> = {
   "基本信息": "basic",
@@ -173,7 +176,7 @@ export function hasRealProfileContent(profile: string): boolean {
     if (!content) continue;
     if (TEMPLATE_BOILERPLATE_LINES.has(content)) continue;
     if (content.startsWith("（") && content.endsWith("）")) continue;
-    if (/^语气风格：.*（系统根据对话自动调整）$/.test(content)) continue;
+    if (/^语气风格：.*（系统(?:会)?根据对话自动调整）$/.test(content)) continue;
     return true;
   }
   return false;

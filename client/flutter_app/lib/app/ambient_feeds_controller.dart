@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "../core/models/agent_relay_models.dart";
+import "../core/presentation/foreground_banner.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/presentation/dynamic_island.dart";
 
@@ -35,9 +36,10 @@ class AmbientFeedsController {
   /// 是否处于手机后台（类微信常在线分流：后台走系统通知）。
   bool Function()? isAppBackgrounded;
 
-  /// 手机端前台提醒呈现端口（应用内横幅）。桌面端不注入走灵动岛；
-  /// 手机端灵动岛未装配，不注入此端口时到点提醒在前台会静默丢失（2026-10-12 修复）。
-  Future<void> Function(String title, String message)? showForegroundReminder;
+  /// 手机端前台提醒呈现端口（横幅抽象接口 ForegroundBanner，2026-10-21 定调）。
+  /// 桌面端不注入走灵动岛；手机端未注入此端口时到点提醒在前台会静默丢失
+  /// （2026-10-12 修复，2026-10-21 由裸函数端口升级为抽象接口）。
+  ForegroundBanner? foregroundBanner;
 
   /// 站内信未读角标 +1 并喂岛（State 持 _inboxUnread 镜像供侧栏 widget）。
   void Function()? bumpInboxUnread;
@@ -111,12 +113,12 @@ class AmbientFeedsController {
       if (isMobile && _backgrounded) {
         // 单文案制：标题即全部内容，body 留空避免系统通知里自我重复。
         unawaited(LocalNotificationService.show(title: text, body: ""));
-      } else if (showForegroundReminder != null) {
-        // 应用内横幅（端口注入即生效）：手机端前台主路；Windows 桌面调试
-        // 手机 UI（main_mobile.dart -d windows）同样注入，横幅可见可验。
-        // 桌面端主壳不注入此端口，走下方灵动岛原路。message 留空 =
-        // 横幅只出加粗主行（mobile_home._showReminderBanner 空串即收起副行）。
-        unawaited(showForegroundReminder!(text, ""));
+      } else if (foregroundBanner != null) {
+        // 应用内横幅（ForegroundBanner 接口注入即生效）：手机端前台主路；
+        // Windows 桌面调试手机 UI（main_mobile.dart -d windows）同样注入，
+        // 横幅可见可验。桌面端主壳不注入此端口，走下方灵动岛原路。
+        // message 留空 = 横幅只出加粗主行（实现方空串即收起副行）。
+        unawaited(foregroundBanner!.show(text, ""));
       } else {
         // 岛上只出提醒文案本身（2026-10-19 修订，取代 2026-10-07「标题+说明
         // 全展示」）：胶囊单句，宽度原生端自适应伸缩。

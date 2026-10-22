@@ -7,6 +7,8 @@ import {
   tagUserMessageClientId,
 } from "./chat-thread-store.js";
 import { tagMessageTimestampMeta } from "./chat-thread-ts-meta.js";
+import { isTurnScaffold } from "./turn-scaffold.js";
+import { domainCardsForTurn } from "./turn-domain-cards.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { isUnknownModelError } from "./chat-thread-sanitize.js";
@@ -337,6 +339,22 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
       sessionId,
     });
 
+    // 能力域目录并入 **system 段**（2026-10-22）：它原本挂在请求尾部的轮内 system
+    // 消息里，位置每轮后移 → 隐式前缀缓存永远命中不了（实测每轮全价 3,200 token）。
+    // 工具面已按会话冻结，域卡语料（可见 ∪ 延迟）在会话内字节稳定，放进 system
+    // 就能随 system 一起命中。只改「发往 LLM 的 system」，不改写进线程的 msgs[0]
+    //（后者要落盘，不必背这份目录）。
+    const domainCards = domainCardsForTurn(toolSearchPrepared);
+    if (domainCards) {
+      const withCards = (base: string): string => (base ? `${base}\n\n${domainCards}` : domainCards);
+      promptPlan.requestSystemMessages = promptPlan.requestSystemMessages.map((m, i) =>
+        i === 0 && m.role === "system" && typeof m.content === "string"
+          ? { ...m, content: withCards(m.content) }
+          : m,
+      );
+      promptPlan.fullSystemPrompt = withCards(promptPlan.fullSystemPrompt);
+    }
+
     // system 写入 msgs：三分支逻辑（ephemeral/空 → push；minimal+override → 内容不同才覆盖；else → 覆盖）
     if (ephemeral || msgs.length === 0) {
       msgs.push({ role: "system", content: sysContent });
@@ -393,17 +411,20 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     const llmView = buildTimestampFreeLlmView(msgs, {
       includeTimeline: timeContextAllowed,
     }).messages;
-    // 线程原有消息的对象身份集合：工具循环只应往线程回写「视图新增」的消息，
-    // 视图剥离产生的克隆与线程原消息一律不回写。
+    // 线程原有消息的对象身份集合：工具循环只应往线程回写「视图新增」的消息。
     const llmViewLiveObjects = new Set<ChatCompletionMessageParam>(msgs);
-    // 回写边界：视图里最后一个「线程原有对象」即本轮 user 消息（循环只在它之后追加）。
-    let llmViewTurnBoundary = -1;
-    for (let i = llmView.length - 1; i >= 0; i--) {
-      if (llmViewLiveObjects.has(llmView[i])) {
-        llmViewTurnBoundary = i;
-        break;
-      }
-    }
+    /**
+     * 回写边界 = 视图构建完成时的长度（**不是**「最后一个活对象的下标」）。
+     *
+     * 2026-10-22 根因修复：视图构建会剥离内部元数据（`__ts` / clientMessageId），
+     * 本轮 user 消息必然被克隆成新对象——旧实现按「最后一个活对象的索引」定界，
+     * 于是从本轮 user 起整段都被当成「视图新增」回写，**每轮往线程里多插一条
+     * 一模一样的 user 消息**（实测 n=2→4→7→10，且它每轮位置/内容固定，
+     * 让下一轮请求与上一轮在 user 消息处必然分叉，历史段缓存全废）。
+     * 按长度定界后，视图内既有的消息无论被克隆/插入与否都不回写，只回写循环
+     * 真正追加的（assistant tool_calls / tool 结果 / 收尾正文）。
+     */
+    const llmViewAppendBoundary = llmView.length;
 
     // ── 工具分支 ──
     if (tools && toolPlan && toolSearchPrepared) {
@@ -442,6 +463,12 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 复活——提醒/搜索轮 discover 成功后 call 不到工具，只剩口头承诺。
             toolSearchSourceTools: searchableForTurn,
             maxRounds: effectiveStreamOpts.toolLoop?.maxRounds,
+            // 会话工具面冻结（2026-10-22）：晋升常驻可能在会话中途跨过阈值，
+            // 冻结后不会自动吸收——由 agent-core 显式声明可增长项，漏掉 = 晋升
+            // 要等下个会话才生效。
+            ...(effectiveStreamOpts.toolFaceGrowNames?.length
+              ? { toolFaceGrowNames: effectiveStreamOpts.toolFaceGrowNames }
+              : {}),
             // 路由意图标签：出口检查用它确定性拦截"声明要动手但零工具尝试"的轮次
             turnIntent: effectiveStreamOpts.turnIntent,
             // 证据注入豁免 + 路由置信度（2026-09-23 扩面配套，见工具循环出口检查处）
@@ -475,10 +502,19 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         if (!ephemeral) {
           // 回写工具循环新增的消息（assistant tool_calls / tool 结果 / 规划注入）到线程。
           // 循环操作的是视图副本；这里按边界 + 对象身份只回写新增，剥离克隆不入线程。
-          if (llmViewTurnBoundary >= 0) {
-            for (let i = llmViewTurnBoundary + 1; i < llmView.length; i++) {
+          // 轮内脚手架（域卡/时间轴/请求卡与出口闸的转向指令）同样排除：它们只对
+          // 本轮请求有效，落库会变成每轮重发的大块死 token + 前缀漂移源
+          // （2026-10-22 实测：8,266 字符域卡常驻历史，历史段缓存 0 命中）。
+          if (llmViewAppendBoundary >= 0) {
+            for (let i = llmViewAppendBoundary; i < llmView.length; i++) {
               const m = llmView[i];
-              if (m && !llmViewLiveObjects.has(m)) msgs.push(m);
+              if (process.env.PREFIX_DEBUG === "1") {
+                console.log(
+                  `[writeback] i=${i} role=${m?.role} live=${m ? llmViewLiveObjects.has(m) : "-"} ` +
+                    `scaffold=${isTurnScaffold(m)} keep=${Boolean(m && !llmViewLiveObjects.has(m) && !isTurnScaffold(m))}`,
+                );
+              }
+              if (m && !llmViewLiveObjects.has(m) && !isTurnScaffold(m)) msgs.push(m);
             }
           }
           // 中断兜底（2026-09-08）：循环正常返回但回写内容里没有最终 assistant 正文
@@ -488,8 +524,17 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
           const hasFinalAssistant = msgs
             .slice(turnStartLen)
             .some((m) => m.role === "assistant" && !hasToolCallPayload(m));
-          if (!hasFinalAssistant && streamedVisible.trim()) {
-            msgs.push({ role: "assistant", content: streamedVisible.trim() });
+          // 兜底第二梯队（2026-10-22 根修·重复回复事故）：holdAnswer 轮正文不进
+          // 流式通道（streamedVisible 恒空），但本轮最终答案就在返回值 full 里——
+          // 用户亲眼看到的回复必须落 thread（2026-09-08 契约），否则线程停在
+          // tool 链上被 fold 成「未生成可见回复」台账，下一轮模型重复调工具。
+          // 正常路径（最终波 / schema-less 汇总落 messages）hasFinalAssistant
+          // 已为 true，不会走到这里，无双重落库。
+          if (!hasFinalAssistant) {
+            const finalFallback = streamedVisible.trim() || full.trim();
+            if (finalFallback) {
+              msgs.push({ role: "assistant", content: finalFallback });
+            }
           }
           this.trimThread(msgs, streamOpts?.maxThreadMessages, sessionId);
           this.threads.afterTurnCompleted(sessionId, msgs);

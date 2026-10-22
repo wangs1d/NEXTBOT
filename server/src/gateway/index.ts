@@ -8,15 +8,15 @@
 
 export {
   prepareTools,
-  resolveForcedTool,
   executeBridge,
   searchResources,
   routeRender,
 } from "./agent-gateway.js";
 
 export {
-  resolveForcedToolChoice,
-  type ForcedToolChoice,
+  needsToolChoiceRequired,
+  turnSuggestsToolNeed,
+  resolveExplicitActionTool,
 } from "./forced-tool.js";
 
 export {

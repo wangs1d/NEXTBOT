@@ -27,6 +27,7 @@ import { fetchIPLocation } from "./ip-geolocation.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
+import type { DdlItem } from "./ddl-radar-service.js";
 
 /**
  * 内部天气快照：仅供生成期恶劣天气预警检测（onSevereWeatherAlert 联动），
@@ -130,7 +131,19 @@ export interface MorningBriefing {
   upcomingImportantDays?: MorningBriefingImportantDay[];
   /** 用户称呼（可选）：记忆「称呼」行的得体称呼（用户指定优先，大名→「王先生」式）；问候语用 */
   appellation?: string;
+  /**
+   * DDL 三级提醒梯度的 L3 + L1 档（2026-10-22 大学生线）：
+   * today = 今天到期或已过期（置顶，比日程更紧）；soon = 2~3 天后到期（一行汇总）。
+   * 由 DdlRadarService 确定性扫描；未注入 radar 或两档皆空时整块省略。
+   * L2（明天到期）走睡前备忘卡，不在晨报重复。
+   */
+  deadlines?: MorningBriefingDeadlines;
   agentGreeting: string;
+}
+
+export interface MorningBriefingDeadlines {
+  today: DdlItem[];
+  soon: DdlItem[];
 }
 
 export interface MorningBriefingNarration {
@@ -208,6 +221,16 @@ export type MorningBriefingDeps = {
    * 绝不阻塞简报主链路。装配层用 externalChat.streamCompletion 薄包装。
    */
   llmComplete?: (prompt: string) => Promise<string>;
+  /**
+   * DDL 雷达（大学生线 L3/L1 档）：今天截止 + 这周还要交的取数口。
+   * 未注入 = 不做 DDL 块；只读扫描，不推送。
+   */
+  ddlRadar?: {
+    forMorning(
+      sessionId: string,
+      actorId?: string,
+    ): { today: DdlItem[]; soon: DdlItem[] };
+  } | null;
 };
 
 function todayIsoDate(): string {
@@ -245,6 +268,31 @@ function formatHhmm(iso: string | null | undefined): string {
   if (!Number.isFinite(t)) return "";
   const d = new Date(t);
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+}
+
+/**
+ * DDL 一句（晨报确定性兜底文案）：今天截止置顶，只报最近一件 + 件数，
+ * 再加一句"这周还有 N 项"。过期的显式说过点，避免误读成"还没到"。
+ */
+function formatDeadlinesBit(d: MorningBriefingDeadlines | undefined): string {
+  if (!d) return "";
+  const { today, soon } = d;
+  const parts: string[] = [];
+  if (today.length > 0) {
+    const first = today[0]!;
+    const due = new Date(first.dueAt);
+    const hm = `${String(due.getHours()).padStart(2, "0")}:${String(due.getMinutes()).padStart(2, "0")}`;
+    if (first.overdue) {
+      parts.push(`《${first.title}》已经过点了`);
+    } else {
+      parts.push(`今天 ${hm} 前要交《${first.title}》`);
+    }
+    if (today.length > 1) parts.push(`今天一共 ${today.length} 项截止`);
+  }
+  if (soon.length > 0) {
+    parts.push(`这周还有 ${soon.length} 项要交`);
+  }
+  return parts.length > 0 ? `${parts.join("，")}。` : "";
 }
 
 function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
@@ -361,6 +409,26 @@ function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
  */
 export function buildNarrationFacts(briefing: MorningBriefing): string {
   const lines: string[] = [];
+  // DDL 放在最前：今天截止比日程更硬，模型看到的第一条应是最紧的事
+  const ddl = briefing.deadlines;
+  if (ddl && ddl.today.length > 0) {
+    lines.push(
+      `今天截止（必须说）：${ddl.today
+        .map((i) => {
+          const d = new Date(i.dueAt);
+          const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+          return `${hm} ${i.title}${i.overdue ? "（已过点）" : ""}`;
+        })
+        .join("；")}`,
+    );
+  }
+  if (ddl && ddl.soon.length > 0) {
+    lines.push(
+      `这两三天内还要交（只需提一句件数，不逐条念）：${ddl.soon
+        .map((i) => i.title)
+        .join("、")}`,
+    );
+  }
   if (briefing.todaySchedule.length > 0) {
     lines.push(
       `今日日程：${briefing.todaySchedule
@@ -428,6 +496,7 @@ export function buildNarrationPrompt(briefing: MorningBriefing): string {
     "3. 不要问候语、不要日期星期（卡片抬头已有）；直接从内容说起。",
     "4. 时间一律原样保留 HH:mm 写法（如 09:30）。",
     "5. 只说材料里有的板块；材料为空就轻松地说今天没什么安排。",
+    "5.1 材料里有「今天截止」的必须说出来（最紧的事，通常放第一句），超过两件只说最紧的一件加一共几件；「这两天还要交」的只带一句件数，不逐条念，也不要用「切记」「别忘了」催促腔。",
     "6. 禁止空话和客套收尾：不许出现「祝你今天顺利」「我随时在这儿」「想起来喊我一声」「有事随时找我」这类句子；也不许模糊地提「你之前交代的事」「我一直给你留着」——要提待办就说出材料里的具体事项，没有具体事项就一个字都不提。",
     "7. 篇幅由内容决定：有几条说几句，宁短勿凑，全文不超过 140 字，1~4 句。",
     "8. 直接输出播报稿正文，不要引号、前缀或任何解释。",
@@ -507,6 +576,10 @@ export class MorningBriefingService {
     // → 当天第一站 + 天气叮嘱（行前主动提醒）
     const travel = await this.fetchTravelToday().catch(() => null);
 
+    // 第七源：DDL（确定性扫描，无 LLM）——今天截止置顶、这周还要交的只汇总一行。
+    // 大学生线三级梯度的 L3/L1 档（L2 在睡前备忘卡，不在晨报重复）。
+    const deadlines = this.fetchDeadlines(sessionId);
+
     return {
       date: todayIsoDate(),
       todaySchedule,
@@ -519,10 +592,24 @@ export class MorningBriefingService {
       ...(upcomingImportantDays.length > 0 ? { upcomingImportantDays } : {}),
       // 行程段（可选块）：无进行中行程时省略
       ...(travel ? { travel } : {}),
+      // DDL（可选块）：两档皆空时省略
+      ...(deadlines ? { deadlines } : {}),
       // 用户称呼（可选）：无称呼时省略该字段
       ...(appellation ? { appellation } : {}),
       agentGreeting: MORNING_GREETING,
     };
+  }
+
+  /** DDL 取数：radar 未注入 / 抛错 / 两档皆空 → null（整块省略） */
+  private fetchDeadlines(sessionId: string): MorningBriefingDeadlines | null {
+    if (!this.deps.ddlRadar) return null;
+    try {
+      const { today, soon } = this.deps.ddlRadar.forMorning(sessionId);
+      if (today.length === 0 && soon.length === 0) return null;
+      return { today, soon };
+    } catch {
+      return null;
+    }
   }
 
   /** 行程段取数：今天 ∈ [startDate, endDate] 的最近一份行程 → 当天第一站 */
@@ -942,6 +1029,10 @@ export class MorningBriefingService {
     // 播报稿对齐设计稿（design/daily-briefing-floating.html）：问候与日期由
     // 卡片头（greeting/meta 行）展示，正文直接从内容开始，不再重复
     // 「下午好，今天9月10日周四」。天气/穿衣已迁往睡前提醒，不再进播报稿。
+
+    // DDL（第七源）：今天截止要置顶——比日程更硬，先说要交什么
+    const ddlBit = formatDeadlinesBit(briefing.deadlines);
+    if (ddlBit) parts.push(ddlBit);
 
     if (briefing.todaySchedule.length > 0) {
       parts.push(formatScheduleBit(briefing.todaySchedule));

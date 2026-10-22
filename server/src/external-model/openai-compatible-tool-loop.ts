@@ -1,8 +1,15 @@
 import type OpenAI from "openai";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { recordLlmUsageByChars, recordToolCompactionByChars, type LlmAuditStage } from "../services/llm-token-audit.js";
+import {
+  recordLlmUsageByChars,
+  recordToolCompactionByChars,
+  type LlmAuditStage,
+  type LlmInputBreakdown,
+} from "../services/llm-token-audit.js";
 import { currentBlockingStep, getTaskPlanStore, taskPlanKey } from "../agent/task-plan-store.js";
+import { isMediaOnlyRequest } from "../agent/realtime-search-query.js";
+import { filterMediaModalityTools, filterTextSearchTools } from "../agent/web-search-consent.js";
 import { classifyToolSensitivity } from "../security/sensitive-action.js";
 import type {
   ChatCompletionMessageParam,
@@ -114,7 +121,8 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
-import { resolveForcedToolChoice } from "../gateway/forced-tool.js";
+import { resolveExplicitActionTool } from "../gateway/forced-tool.js";
+import { recordExitGateFire, recordTurnFinished } from "./exit-gate-metrics.js";
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isToolCallIdNotFoundError,
@@ -169,7 +177,7 @@ import {
   isRouterFirstLaneTurn,
 } from "./lane-tool-sets.js";
 import { topToolMatchesForQuery } from "../tools/tool-search/index.js";
-import { buildDomainCards } from "../tools/tool-search/domain-cards.js";
+import { markTurnScaffold } from "./turn-scaffold.js";
 import { recordTurnTrace, inferToolCallTimedOut, type ToolCallTraceEntry } from "./turn-trace.js";
 import {
   fenceUntrustedToolContent,
@@ -290,6 +298,15 @@ const META_TOOL_NAMES = new Set<string>([
  * 也不写入 allToolExecResults（避免读回的旧内容虚增数据质量评分）。
  */
 const SUPPORT_PLUMBING_TOOLS = new Set<string>([OBS_RECALL_TOOL_NAME]);
+
+/**
+ * 派发型工具（2026-10-22 完成语义契约）：成功只代表「已排队」，**不代表办完**。
+ *
+ * 判定优先读结果体里的 `produces: "queued"`（工具自己声明，见 task-dispatch-tool），
+ * 名字集合只是旧结果/低版本工具的兜底。出口闸据此区分「拿到了能回答用户的内容」
+ * 与「只是把活派出去了」——不读任何措辞。
+ */
+const QUEUED_PRODUCER_TOOLS = new Set<string>(["task.dispatch"]);
 
 /**
  * 实质工具执行判定（2026-10-13 导出，答案留存契约共用）：
@@ -864,29 +881,66 @@ export function prepareToolsForChatApi(tools: ChatCompletionTool[]): {
 }
 
 /**
- * P2：会话级工具 schema 稳定（排序 + 快照）。
+ * 会话级工具面稳定化（排序 + 快照）。tools 数组参与服务端请求前缀哈希，
+ * 数组一变（顺序或成员），前缀缓存从 tools 位置整段作废。
  *
- * 背景：多分类工具检索每轮召回顺序可能不同，同一会话内请求体 `tools` 数组顺序
- * 一抖动，DeepSeek / Kimi 等基于「请求前缀」的上下文缓存命中率就下降（tools 参与
- * 服务端请求哈希/前缀比对）。
+ * ## 演进史（别重复踩坑）
  *
- * 方案：
- * - 首轮按工具名确定性排序（字母序）建立会话基准快照；
- * - 后续轮已知工具严格按基准序重排，仅本轮动态新召回的匹配工具追加到末尾，
- *   同时吸收进基准（保留多分类检索的动态召回能力，不让快照变成死工具集）。
+ * 1. **2026-10-12 P0 根修**：旧快照只存「名字→序号」，contextual/light 档每轮按
+ *    userText 重筛工具集，某个**中间工具落选**即被剔除、其后全部前移 → 前缀从该处
+ *    分叉（实盘指纹：跨轮 hit 只有 ~2.2K 或 0，同循环内秒级连发 76-99%；探针证明
+ *    同请求连发 MiniMax 命中 ≈100%）。当时的解是**会话级单调并集**：落选工具保留、
+ *    新工具只追加尾部。
  *
- * 模块级 LRU 防膨胀：只保留最近 128 个会话的顺序基准。
+ * 2. **2026-10-22 修正（本段）**：并集消掉了「中间落选」，但把**每轮域预载**也吸收
+ *    进并集 → 工具面在会话内单调膨胀（实测 33 → 38 → 45，schema 13,860 → 19,480
+ *    字符）。膨胀本身是次要的，真正代价是**数组每一轮都在变**：分段埋点实测 tools
+ *    占进入输入 51.5%（最大单段），而缓存命中率只有 29.8%；同期工具集稳定的评测
+ *    会话命中 98.5%。→ 并集只是把「每轮小幅分叉」换成了「每轮持续增长 + 持续分叉」。
  *
- * **P0 根修（2026-10-12，MiniMax 缓存命中率 22% 实盘审计 + 受控探针定位）**：
- * 旧快照只存「名字→序号」，而 contextual/light 档每轮按 userText 重新筛工具集
- * ——当某个**中间工具本轮落选**时它被剔除，其后全部工具前移一位，请求前缀从该
- * 处分叉（实盘指纹：跨轮 hit 只有 ~2.2K 或 0，同循环内秒级连发却 76-99%；
- * 探针证明同请求连发 MiniMax 命中 ≈100%，缓存本身是好的，分叉全在客户端）。
- * 修复：快照升级为**工具对象级单调并集**——落选工具保留在会话列表（不剔除），
- * 新工具只追加尾部，列表在会话内只增不减；本轮未选中的工具保持可见（行为影响：
- * 可见集向并集收敛，deferred 目录相应变小，BM25 召回兜底不变）。超过
- * SESSION_TOOLS_UNION_MAX 才整表重置为本轮排序结果（一次性 miss，有界）。
+ * ## 现行契约（lock 模式，默认）
+ *
+ * - 首轮把可见集**冻结**为会话基准，此后逐字节复用，**不随本轮检索结果变化**；
+ * - 本轮新召回的域预载工具**不进** tools 数组，仍留在延迟目录，经 tool_request
+ *   转正（转正是显式 grow，可能是本地模型唯一缺的能力，故不能顺手丢掉）；
+ * - `isHidden` 只影响本次返回、**不改快照**（安全闸 / 媒体模态收敛用：等待用户
+ *   操作的轮次里外部动作族不能因快照而复现）；
+ * - 唯一允许的增长是 `growNames`（请求卡转正、晋升常驻）。一次增长 = 一次前缀
+ *   断点，但次数有界（每会话个位数），之后重新稳定。
+ *
+ * 冻结基准在**被裁剪过的轮次**（纯媒体请求）不建立——否则该会话会永久丢掉网页
+ * 检索族。建立失败不致命，下一轮正常轮次再建。
+ *
+ * 回滚：`AGENT_TOOL_FACE=union` 恢复旧的单调并集（行为等价于 2026-10-12 版本）。
+ * 作用域：只有前台对话车道（main_chat*）走 lock；任务/计划车道每步工具面本就
+ * 不同，冻结会直接切断多步执行，那里继续走并集。
  */
+export type SessionToolFaceMode = "lock" | "union";
+
+/** 工具面模式（默认 lock）。 */
+export function resolveToolFaceMode(): SessionToolFaceMode {
+  const raw = process.env.AGENT_TOOL_FACE?.trim().toLowerCase();
+  return raw === "union" || raw === "legacy" ? "union" : "lock";
+}
+
+/** lock 作用域：前台对话车道。任务面 stage 一律不走（见上方说明）。 */
+const TOOL_FACE_LOCK_STAGES: ReadonlySet<string> = new Set(["main_chat", "main_chat_tools"]);
+
+export function isToolFaceLockStage(stage: string | undefined): boolean {
+  return TOOL_FACE_LOCK_STAGES.has(stage?.trim() || "main_chat_tools");
+}
+
+export interface SessionToolFaceOptions {
+  /** 缺省取 {@link resolveToolFaceMode}。 */
+  mode?: SessionToolFaceMode;
+  /** 允许吸收进会话基准的增量工具名（请求卡转正 / 晋升常驻）。仅 lock 模式生效。 */
+  growNames?: ReadonlySet<string>;
+  /** 本轮隐藏谓词（安全闸 / 模态收敛）。**不改快照**，只作用于本次返回。 */
+  isHidden?: (name: string) => boolean;
+  /** 本轮能否建立会话基准（false = 本轮工具面是被裁剪过的，不建）。缺省可建。 */
+  allowFreeze?: boolean;
+}
+
 const SESSION_TOOLS_UNION_MAX = 48;
 type SessionToolSnapshot = { tools: ChatCompletionTool[]; byName: Map<string, number> };
 const SESSION_TOOL_ORDER = new Map<string, SessionToolSnapshot>();
@@ -896,22 +950,39 @@ function apiToolNameOf(tool: ChatCompletionTool): string {
   return tool.type === "function" ? (tool.function?.name ?? "") : "";
 }
 
+function sortedByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
+  return [...tools].sort((a, b) => apiToolNameOf(a).localeCompare(apiToolNameOf(b)));
+}
+
+function snapshotOf(tools: ChatCompletionTool[]): SessionToolSnapshot {
+  return { tools, byName: new Map(tools.map((t, i) => [apiToolNameOf(t), i])) };
+}
+
+function applyHidden(
+  tools: ChatCompletionTool[],
+  isHidden: ((name: string) => boolean) | undefined,
+): ChatCompletionTool[] {
+  if (!isHidden) return tools;
+  const kept = tools.filter((t) => !isHidden(apiToolNameOf(t)));
+  return kept.length === tools.length ? tools : kept;
+}
+
 /** 仅供测试使用：清空会话工具序快照 */
 export function resetSessionToolOrderForTest(): void {
   SESSION_TOOL_ORDER.clear();
 }
 
-/** 导出供测试锁定「会话级单调并集」契约（P0 根修 2026-10-12，见上方块注释）。 */
+/** 导出供测试锁定契约（lock = 首轮冻结；union = 旧单调并集，见上方块注释）。 */
 export { stabilizeToolOrderForSession };
 
 function stabilizeToolOrderForSession(
   apiTools: ChatCompletionTool[],
   sessionId: string | undefined,
+  opts: SessionToolFaceOptions = {},
 ): ChatCompletionTool[] {
-  const sorted = [...apiTools].sort((a, b) =>
-    apiToolNameOf(a).localeCompare(apiToolNameOf(b)),
-  );
-  if (!sessionId) return sorted;
+  const sorted = sortedByName(apiTools);
+  const hide = opts.isHidden;
+  if (!sessionId) return applyHidden(sorted, hide);
 
   // LRU 淘汰 + touch（命中也续位，活跃会话不被误逐）
   if (SESSION_TOOL_ORDER.size >= SESSION_TOOL_ORDER_MAX && !SESSION_TOOL_ORDER.has(sessionId)) {
@@ -924,38 +995,63 @@ function stabilizeToolOrderForSession(
   }
 
   if (!existing) {
-    const snap: SessionToolSnapshot = {
-      tools: sorted,
-      byName: new Map(sorted.map((t, i) => [apiToolNameOf(t), i])),
-    };
+    // 被裁剪过的轮次（纯媒体请求）不建基准，否则整会话永久缺网页检索族。
+    if (opts.allowFreeze === false) return applyHidden(sorted, hide);
+    const snap = snapshotOf(sorted);
     SESSION_TOOL_ORDER.set(sessionId, snap);
-    return snap.tools;
+    return applyHidden(snap.tools, hide);
   }
 
-  // 单调并集：快照内工具全保留（含本轮落选的），新工具按字母序追加尾部。
-  // 关键不变量：同一会话内 tools 数组只增不减、顺序稳定 → 前缀缓存每轮只
-  // 付出「新增尾部 + 动态层」的新鲜 token，stable 层 + 既有工具 + 全部历史全命中。
-  const fresh = sorted.filter((t) => !existing.byName.has(apiToolNameOf(t)));
-  if (fresh.length === 0) {
-    SESSION_TOOL_ORDER.set(sessionId, existing);
-    return existing.tools;
-  }
-  if (existing.tools.length + fresh.length > SESSION_TOOLS_UNION_MAX) {
-    // 并集超上限（异常膨胀/跨车道共用 sessionId）：整表重置为本轮集合，
-    // 代价是一次全量 miss，换取列表有界。
-    const snap: SessionToolSnapshot = {
-      tools: sorted,
-      byName: new Map(sorted.map((t, i) => [apiToolNameOf(t), i])),
-    };
+  const mode = opts.mode ?? resolveToolFaceMode();
+
+  if (mode === "union") {
+    // ── 旧行为（回滚通道）：单调并集，只增不减，超上限整表重置 ──
+    const fresh = sorted.filter((t) => !existing.byName.has(apiToolNameOf(t)));
+    if (fresh.length === 0) {
+      SESSION_TOOL_ORDER.set(sessionId, existing);
+      return applyHidden(existing.tools, hide);
+    }
+    if (existing.tools.length + fresh.length > SESSION_TOOLS_UNION_MAX) {
+      const snap = snapshotOf(sorted);
+      SESSION_TOOL_ORDER.set(sessionId, snap);
+      return applyHidden(snap.tools, hide);
+    }
+    const tools = [...existing.tools, ...fresh];
+    const byName = new Map(existing.byName);
+    fresh.forEach((t, i) => byName.set(apiToolNameOf(t), existing.tools.length + i));
+    const snap: SessionToolSnapshot = { tools, byName };
     SESSION_TOOL_ORDER.set(sessionId, snap);
-    return snap.tools;
+    return applyHidden(snap.tools, hide);
   }
-  const tools = [...existing.tools, ...fresh];
-  const byName = new Map(existing.byName);
-  fresh.forEach((t, i) => byName.set(apiToolNameOf(t), existing.tools.length + i));
-  const snap: SessionToolSnapshot = { tools, byName };
+
+  // ── lock：基准即真相。本轮集合只用来识别 growNames 的增量，不参与收缩 ──
+  let snap = existing;
+  const grow = opts.growNames;
+  if (grow && grow.size > 0) {
+    const fresh = sorted.filter((t) => {
+      const name = apiToolNameOf(t);
+      return Boolean(name) && grow.has(name) && !existing.byName.has(name);
+    });
+    if (fresh.length > 0) {
+      if (existing.tools.length + fresh.length > SESSION_TOOLS_UNION_MAX) {
+        console.warn(
+          `[openai-tool-loop] 会话工具面已达上限 ${SESSION_TOOLS_UNION_MAX}，本次不追加：${fresh
+            .map(apiToolNameOf)
+            .join(", ")}`,
+        );
+      } else {
+        const tools = [...existing.tools, ...fresh];
+        snap = { tools, byName: new Map(tools.map((t, i) => [apiToolNameOf(t), i])) };
+        console.info(
+          `[openai-tool-loop] 会话工具面 grow +${fresh.length} → ${tools.length}：${fresh
+            .map(apiToolNameOf)
+            .join(", ")}`,
+        );
+      }
+    }
+  }
   SESSION_TOOL_ORDER.set(sessionId, snap);
-  return snap.tools;
+  return applyHidden(snap.tools, hide);
 }
 
 // 强制工具路由（forced tool choice）统一收口到 gateway/forced-tool.ts：
@@ -1978,6 +2074,14 @@ export async function streamCompletionWithTools(
     signal?: AbortSignal;
     /** Token 用量审计打点信息（可选，内部自动记录每轮输入/输出） */
     audit?: { sessionId?: string; stage?: LlmAuditStage; planKey?: string };
+    /**
+     * 允许吸收进会话工具面基准的工具名（注册表名）。缺省空 = 冻结后不再增长。
+     *
+     * 目前唯一生产来源是「晋升常驻」（近窗成功调用 ≥3 次的延迟工具）：它可能在
+     * 会话中途跨过阈值，冻结会把这次晋升关在门外，要等下个会话才生效。请求卡
+     * 转正在循环内部自行加入同一集合（见 faceGrowNames）。
+     */
+    toolFaceGrowNames?: readonly string[];
   },
 ): Promise<string> {
   const userText = extractUserTextFromMessages(messages) || "";
@@ -1987,7 +2091,9 @@ export async function streamCompletionWithTools(
     const preset = getToolResultBudget(toolName);
     return preset === undefined ? undefined : Math.round(preset * toolBudgetScale);
   };
-  // 2026-08-01 性能优化：从 extraBody 推断 fastProfile（对话面轻量档），传递给 resolveForcedToolChoice 跳过强制 tool_choice。
+  // 2026-08-01 性能优化：从 extraBody 推断 fastProfile（对话面轻量档）。该档
+  // system prompt 已注入 currentTime / userLocation / scheduleSnapshot，只影响
+  // 波次预算；tool_choice 已统一 auto，不再有请求层强制（2026-10-22）。
   // fastProfile = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
   // 强制工具调用会多 1 次 round trip，徒增延迟。
   const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
@@ -2031,13 +2137,43 @@ export async function streamCompletionWithTools(
     );
   }
 
-  // ── P0 根修（2026-10-12）：会话级单调并集在注册表名层面先完成 ──
-  // 旧流程先把本轮可见集转成 api 形态再稳定化 → 并集里「此前轮可见、本轮
-  // contextual 落选被保留」的工具不进 apiToRegistry 执行映射，模型调用会落空。
-  // 新流程：先在注册表形态上做会话并集，再统一转换注册——并集内全部工具可执行。
-  // schema 转换（改名/压缩）是确定性纯函数，同一注册表工具逐轮产出字节一致的
-  // api 形态，前缀稳定性反而更强（快照还顺带钉住了逐轮 schema 微抖动）。
-  let stableRegistryTools = stabilizeToolOrderForSession(registryTools, options?.audit?.sessionId);
+  // ── 会话工具面冻结（2026-10-22，替换 10-12 的单调并集）──
+  // 旧流程把「本轮可见集」与「会话基准」做并集 → 数组每轮增长且每轮都在变，
+  // 前缀缓存从 tools 位置整段作废（实测命中 29.8%；工具集稳定的会话 98.5%）。
+  // 新流程：首轮冻结、此后逐字节复用；本轮新召回的域工具留在延迟目录走
+  // tool_request。契约与回滚开关见 stabilizeToolOrderForSession 上方注释。
+  const faceLocked = isToolFaceLockStage(options?.audit?.stage);
+  // 纯媒体轮的工具面被模态收敛裁剪过（网页检索族整族剥离），不能拿来当会话
+  // 基准——否则该会话永久丢掉检索能力。这类轮次只借基准、不建基准；已建基准的
+  // 会话则在返回时把被裁族隐藏（不改快照，下一轮自动复原）。
+  const mediaOnlyTurn = isMediaOnlyRequest(userText);
+  // 2026-10-22 根修（search_movies 三样本全挂的真根因）：原实现无条件套
+  // filterTextSearchTools——它内部没有媒体轮守卫，导致 search_web/fetch_web/
+  // internet.*/info.*/deep_search 在【每一轮】都被藏出可见集，而媒体三件套
+  // 反而常在。模型想搜却看不到搜索工具，discover 也召不回（recall 注入的还是
+  // 媒体工具），只能空转后如实说「查不到」。修复：藏匿只在真媒体轮生效——
+  // 非媒体轮的工具可见性完全交给常驻清单与按需发现，不做输入侧预判剥离。
+  const mediaHidden = (name: string): boolean => {
+    if (!mediaOnlyTurn || !name) return false;
+    const probe: ChatCompletionTool = {
+      type: "function",
+      function: { name, description: "", parameters: { type: "object", properties: {} } },
+    };
+    return filterMediaModalityTools(filterTextSearchTools([probe]), userText).length === 0;
+  };
+  // 允许吸收进基准的增量（请求卡转正会在循环内往同一集合里加名字）。
+  const faceGrowNames = new Set<string>(options?.toolFaceGrowNames ?? []);
+  const faceOpts: SessionToolFaceOptions = {
+    mode: faceLocked ? "lock" : "union",
+    growNames: faceGrowNames,
+    allowFreeze: !mediaOnlyTurn,
+    isHidden: (name) => isHandoffBlockedTool(name) || mediaHidden(name),
+  };
+  let stableRegistryTools = stabilizeToolOrderForSession(
+    registryTools,
+    options?.audit?.sessionId,
+    faceOpts,
+  );
   const { resolveRegistryToolName, registerApiTool } = prepareToolsForChatApi([]);
   const apiFormByRegistry = new Map<string, ChatCompletionTool>();
   for (const rt of stableRegistryTools) {
@@ -2054,6 +2190,12 @@ export async function streamCompletionWithTools(
       .map((t) => (t.type === "function" ? resolveRegistryToolName(t.function?.name ?? "") : ""))
       .filter(Boolean),
   );
+  if (process.env.PA_TOOL_DEBUG === "1") {
+    console.info(
+      `[tool-dump] n=${stableApiTools.length} ` +
+        stableApiTools.map((t) => (t.type === "function" ? t.function?.name : "")).join(","),
+    );
+  }
   // ── 调用即发现观测（2026-10-09 L3）──
   // 本轮经桥检索结果面出现过的延迟工具名：模型先 discover 再 call 的名字归
   // "deferred"（常规召回通道）；未检索就直呼的不可见名 = 幻觉转正
@@ -2098,9 +2240,29 @@ export async function streamCompletionWithTools(
   // 任务面轮次结束时有「实质成功的工具结果」才算诉求被满足；
   // 没有成功结果且收尾是道歉式/机制话（风格判定，话题无关）→ 换路续波一次。
   // 置信而答的直答（含模型凭既有知识回答）不拦截，避免空转烧 token。
-  /** 有实质产出的成功工具数：元工具（能力查询/目录检索）、上下文管线支撑工具（obs_recall）与失败执行不计入。 */
+  /**
+   * 派发型成功（2026-10-22 完成语义契约）：工具返回了 ok，但用户要的答案还不存在。
+   * 判定只看结果体/工具名，不猜措辞；`queued` 的轮次一律不算「已办完」。
+   */
+  const isQueuedResult = (r: { toolName: string; result: Record<string, unknown> }): boolean => {
+    if ((r.result as { produces?: unknown } | null)?.produces === "queued") return true;
+    // 名字兜底：allToolExecResults 存的是 wire 名（API 形态，点号已转下划线，
+    // 如 task_dispatch），而 QUEUED_PRODUCER_TOOLS 用的是注册表名。此处归一化后比较。
+    const registryName = r.toolName.replace(/_/g, ".");
+    return QUEUED_PRODUCER_TOOLS.has(registryName) || QUEUED_PRODUCER_TOOLS.has(r.toolName);
+  };
+  /**
+   * 有实质产出的成功工具数：元工具（能力查询/目录检索）、上下文管线支撑工具（obs_recall）、
+   * 失败执行、**派发型（queued）**均不计入——「完成 = 返回了能回答用户的内容」。
+   */
   const countSubstantiveOkResults = (): number =>
-    allToolExecResults.filter((r) => r.ok && !META_TOOL_NAMES.has(r.toolName) && !SUPPORT_PLUMBING_TOOLS.has(r.toolName)).length;
+    allToolExecResults.filter(
+      (r) =>
+        r.ok &&
+        !isQueuedResult(r) &&
+        !META_TOOL_NAMES.has(r.toolName) &&
+        !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
+    ).length;
   // ── 答案留存闸（2026-10-13 根修：工具轮的答案不进流式通道）──
   // 决策点唯一且确定性：本函数是唯一知道「本轮是否执行过工具」的地方。
   // 命中后波内直推（onContentDelta → onDelta → chat.assistant_chunk）对正文
@@ -2113,17 +2275,36 @@ export async function streamCompletionWithTools(
   /** 出口自检：本轮收尾是否「用户诉求未满足」。null = 满足，可正常收尾。 */
   const assessTurnUnsatisfied = (finalText: string): string | null => {
     if (countSubstantiveOkResults() > 0) return null;
+    // 派发型成功 ≠ 完成（2026-10-22 完成语义契约）：本轮只把活派出去了，
+    // 服务端没有任何 content 类结果。与静态架构的 queued_without_content 同构。
+    if (allToolExecResults.some((r) => r.ok && isQueuedResult(r))) {
+      return "queued_without_content";
+    }
     // 事实判定（话题无关）：任务面轮次尝试过实质工具但零成功 → 诉求未满足。
     // 任务面本身由路由层语义分类选定（声明了能力需求），"有没有真的办成"
     // 只看服务端工具执行结果，不猜话题、不看措辞。
     if (allToolExecResults.length > 0) {
       return "substantive_tools_attempted_but_none_succeeded";
     }
+    // 零尝试但用户明确要求外部动作（2026-10-22，事前指定门的替代）：与静态
+    // 架构出口闸同构——只看服务端有没有对应工具的执行记录，不看回复措辞。
+    // 放在道歉式判定之前：道歉也不能顶替「明确要求的动作」。
+    const explicitActionTool = resolveExplicitActionTool(userText);
+    if (
+      explicitActionTool &&
+      !allToolExecResults.some((r) => r.toolName === explicitActionTool) &&
+      finalText.trim()
+    ) {
+      return "explicit_action_no_attempt";
+    }
     // 零尝试：仅当收尾是道歉式/机制话（风格判定，天然话题无关）才续波——
     // 置信的知识直答与向用户追问澄清的轮次不拦截，避免空转烧 token。
     if (isApologyStyleFallback(finalText.trim())) {
       return "no_attempt_and_hedged";
     }
+    // 「零尝试 + 办事怀疑信号 + 宣称办过」词面判据已于 2026-10-22 删除：
+    // 判断「该不该调工具」的权限归模型，服务端只核对账目（有没有 content 结果），
+    // 不再用话题词表 + 完成态措辞反推意图。
     return null;
   };
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
@@ -2143,6 +2324,10 @@ export async function streamCompletionWithTools(
   const requestCardLoadedNames = new Set<string>();
   // 单一出口检查（2026-09-19 静态架构）：一轮最多续波一次。
   let exitGateEnforced = false;
+  // 2026-10-22 架构定稿：全项目不再存在任何非 auto 的 tool_choice。
+  // 原 forceRequiredNextWave（出口闸授权下一波 required）已彻底删除——
+  // Anthropic 明确强制调用会让模型跳过 thinking、把推理挤进参数，
+  // 且新模型对 any/tool 直接返 400。续波改为「auto + system 指令点名工具」。
   // 档3 委派引导状态：汇总探测报不足且命中探索型信号 → 向下一次 replan 波次
   // 前缀缓存命中统计（本调用内聚合，结束时打印一行，验证优化前后命中率变化）
   const prefixCacheStats = { hit: 0, miss: 0 };
@@ -2168,30 +2353,11 @@ export async function streamCompletionWithTools(
   // （轻量常驻子集/桥不计入），单点定义防漂移。
   const routerFirstLane = isRouterFirstLaneTurn(toolSearchPrepared);
 
-/** 域卡语料去重（名字优先者胜，保序）。 */
-function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
-  const seen = new Set<string>();
-  const out: ChatCompletionTool[] = [];
-  for (const t of tools) {
-    const n = t.type === "function" ? t.function?.name : "";
-    if (!n || seen.has(n)) continue;
-    seen.add(n);
-    out.push(t);
-  }
-  return out;
-}
-
-  // 域卡（2026-10-01 S1）：延迟目录激活时，全能力面（域+工具名）常驻指导语位置。
-  // 治"不知道有这个能力所以不搜"的元认知盲区——检索再准也只能回应已想找的查询。
-  // 确定性派生（同语料签名恒同字节），位于消息尾部动态区，前缀缓存不受影响。
-  const domainCards = toolSearchPrepared.toolSearchActive
-    ? buildDomainCards(
-        dedupeToolsByName([
-          ...registryTools,
-          ...deferredToolCatalog.entries.map((e) => e.tool),
-        ]),
-      )
-    : "";
+  // 域卡（2026-10-01 S1 → 2026-10-22 迁出）：目录已并入 **system 段**
+  // （见 abstract-chat-provider 的 domainCardsForTurn 注入点）。原因：挂在这里
+  // 是一条轮内 system 消息，位置每轮后移，隐式前缀缓存永远命中不了，等于每轮
+  // 全价重发 8.2k 字符；system 段是会话级冻结的，字节稳定才可命中。
+  // 这里只保留「工具调用原则」（短、且随车道/任务面变化，无法冻结）。
   if (stableApiTools.length > 0) {
     // 任务面用全量 Plan-and-Execute 研究纪律；对话面瘦身（2026-10-06 治啰嗦 P2-7）：
     // 闲聊/轻查询轮用不到「一次性并行规划/换角度补搜/code.run 分段读」三条例，
@@ -2202,22 +2368,26 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         "2. 不要用完全相同的 query 重复搜索；但对比/多主题/盘点类需求，或首轮结果覆盖不全时，应换角度拆多个 query 补搜，或用 fetch_web / deep_search 深读，把信息收齐再回答，不要急着收尾。\n" +
         "3. code.run 的 stdout/stderr 如果已包含答案，不要重跑同样代码。输出被截断(truncated=true)时，改用 code.write_file 写产物再 code.read_file 分段读，不要重跑。\n"
       : "";
-    messages.push({
-      role: "system",
-      content:
-        (domainCards ? domainCards + "\n\n" : "") +
-        "工具调用原则：\n" +
-        (routerFirstLane
-          ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover）：先用 tool_discover({domain:\"域名\"}) 按上方【能力域目录】拉取该域参数 schema（或 tool_discover({query}) 做语义检索），schema 加载后下一轮直接调用对应工具。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
-          : "") +
-        planAndExecuteRules +
-        "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
-        "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
-        "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。" +
-        (toolSearchPrepared.toolSearchActive
-          ? "\n7. 当可见工具不足以完成任务时，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会从延迟工具目录检索并加载对应工具供你下一轮直接调用（每轮最多一次）。拿到加载的工具后继续完成任务，不要只输出请求标记就停。"
-          : ""),
-    });
+    // 轮内脚手架（2026-10-22）：域卡/守则只在**本轮**有意义，标记后轮末写回会跳过，
+    // 否则一份 8,266 字符的域卡会常驻历史、每轮重发（实测 ≈3,200 real tokens/轮），
+    // 且位置随历史漂移，跨轮前缀缓存从注入点起整段作废。
+    messages.push(
+      markTurnScaffold({
+        role: "system",
+        content:
+          "工具调用原则：\n" +
+          (routerFirstLane
+            ? "0. 本轮业务工具都在延迟目录中（可见的只有 tool_discover）：先用 tool_discover({domain:\"域名\"}) 按上方【能力域目录】拉取该域参数 schema（或 tool_discover({query}) 做语义检索），schema 加载后下一轮直接调用对应工具。发现和执行加起来也在总波次预算内，别一次 discover 完就收尾。\n"
+            : "") +
+          planAndExecuteRules +
+          "4. 拿到工具结果后优先直接回答用户，不要为了「确认」再调一次工具。\n" +
+          "5. 图片/照片类需求用 search_images，不要用 search_web 编造图片来源（如 duitang.com 这类假域名）——前端拿不到真实图片。搜到的每张照片会由视觉模型自动生成真实画面描述并展示在照片下方，正文**不要**逐张介绍照片、不要用「第一张图/第二张图」这类指代（你看不见图片内容，写了必然对不上），也不要把图片链接复述进正文；正文只写整体性的结论、建议或补充信息。\n" +
+          "6. 如果此前（含更早轮次）就任务细节向用户追问过（目的地/时间/选项/偏好等），而用户本轮给出了答案、确认或补充（哪怕只有几个字如「先去A吧」「就这个」）：不要只回一句「好的/收到/不错」——立即调用对应工具把任务真正完成，拿到结果后再回复用户。只确认不兑现 = 任务失败。" +
+          (toolSearchPrepared.toolSearchActive
+            ? "\n7. 当可见工具不足以完成任务时，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会从延迟工具目录检索并加载对应工具供你下一轮直接调用（每轮最多一次）。拿到加载的工具后继续完成任务，不要只输出请求标记就停。"
+            : ""),
+      }),
+    );
   }
 
   // 失败换路预算（2026-09-02）：存在失败的工具执行时，fast 追加 1 波
@@ -2386,7 +2556,6 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       if (tryPushPlanNudge(messages, planSessionKey)) planNudgeSent = true;
     }
     let retriedToolCallIdError = false;
-    let retriedToolChoice = false;
     let stream: Awaited<ReturnType<OpenAI["chat"]["completions"]["create"]>>;
     // ③/④ 规划轮：非思考模型走非流式（协议更省、usage 确定、防正文烧 token）；
     // 思考模型（deepseek-reasoner 等）保持流式。输出上限默认不设（长回复不会被
@@ -2400,6 +2569,13 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         : undefined;
     // Token 用量审计：本轮发往 LLM 的输入规模（估算）
     let auditInputChars = 0;
+    /**
+     * 输入分段实测（2026-10-21）：把输入拆成 system / history / tools 三段。
+     * 目的只有一个——回答「成本堆在哪一段」，因为瘦身只能砍最大的那一段，
+     * 而 tools 与 history 的优化手段完全不同（砍工具 vs 缩历史）。
+     * 只在工具循环（main_chat_tools）采集，量可控。
+     */
+    let auditBreakdown: LlmInputBreakdown | undefined;
     // LLM 计时（2026-09-28 延迟诊断配套）：波内 request → 首原始 chunk →
     // 首个可见 delta → 流结束，区分「API 排队/首 token 慢」与「生成长」。
     const waveTimingStart = Date.now();
@@ -2434,12 +2610,77 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           )
         : sanitizedMessages;
       headFps = fingerprintRequestHead({ tools: stableApiTools, messages: requestMessages });
+      // 前缀分叉定位（PREFIX_DEBUG=1 开启，默认关）：与**本进程内上一次请求**
+      // 逐条比对，直接报出「第几条消息开始不一样」。
+      //
+      // 为什么需要它：prefix-watchdog 只比对 tools / system 两段，而实测最大的
+      // 分叉源恰恰在 messages 内部——(a) 尾部动态上下文挂在最后一条 user 上，
+      // 该消息落库时是干净的，下一轮作为历史出现内容就变了；(b) [session-recap]
+      // 以 system 消息插在头部且内容逐轮更新；(c) 历史被折叠/摘要后变短。
+      // 三者都让「上一轮的请求」不再是「本轮请求」的前缀，而 watchdog 全看不见。
+      if (process.env.PREFIX_DEBUG === "1") {
+        const prev = (globalThis as any).__prevReq as
+          | { texts: string[]; tools: string; sess: string }
+          | undefined;
+        const curTexts = requestMessages.map((m) => JSON.stringify(m));
+        const curTools = JSON.stringify(stableApiTools);
+        const sess = options?.audit?.sessionId ?? "-";
+        let diffAt = -1;
+        let reason = "";
+        if (prev && prev.sess === sess) {
+          if (prev.tools !== curTools) reason += "TOOLS ";
+          const n = Math.min(prev.texts.length, curTexts.length);
+          for (let i = 0; i < n; i++) {
+            if (prev.texts[i] !== curTexts[i]) {
+              diffAt = i;
+              break;
+            }
+          }
+          if (diffAt < 0 && curTexts.length < prev.texts.length) {
+            diffAt = curTexts.length;
+            reason += "SHRINK ";
+          }
+        }
+        try {
+          const brief = (m: ChatCompletionMessageParam | undefined): string => {
+            if (!m) return "-";
+            const raw = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
+            return `${m.role}:${(raw ?? "").slice(0, 60).replace(/\s+/g, " ")}`;
+          };
+          appendFileSync(
+            "data/prefix-dbg.log",
+            `${new Date().toISOString()} wave=${wave} msgs=${headFps.msgCount} ` +
+              `tools=${headFps.toolsHash}(${headFps.toolCount}) system=${headFps.systemHash} ` +
+              `history=${headFps.historyHash} tail=${headFps.tailHash} ` +
+              `diffAt=${diffAt}(${diffAt >= 0 ? (requestMessages[diffAt] as { role?: string })?.role ?? "?" : "-"}) ${reason}\n` +
+              (diffAt >= 0 && prev
+                ? `  prev[${diffAt}]=${brief(JSON.parse(prev.texts[diffAt] ?? "null"))}\n` +
+                  `  cur [${diffAt}]=${brief(requestMessages[diffAt])}\n`
+                : "") +
+              // PREFIX_DEBUG_FULL=1：整条请求逐条角色+预览，定位分叉结构用
+              (process.env.PREFIX_DEBUG_FULL === "1"
+                ? requestMessages
+                    .map((m, i) => `  #${i} ${brief(m)}`)
+                    .join("\n") + "\n"
+                : ""),
+          );
+        } catch {
+          // 诊断写盘失败不影响主流程
+        }
+        (globalThis as any).__prevReq = {
+          texts: curTexts,
+          tools: curTools,
+          sess,
+        };
+      }
       try {
-        const request = {
-          model,
-          messages: requestMessages,
-          tools: stableApiTools,
-          tool_choice: retriedToolChoice ? "auto" : resolveForcedToolChoice(userText, stableApiTools, fastProfile),
+      // 请求层恒为 auto（2026-10-22 定稿，唯一发射点）：所有轮次、所有波次一律
+      // 交给模型自决，服务端不因任何措辞预判收紧请求约束。
+      const request = {
+        model,
+        messages: requestMessages,
+        tools: stableApiTools,
+        tool_choice: "auto" as const,
           // 明确启用并行工具调用，让 LLM 在单轮内返回多个 tool_calls。
           // 配合工具描述里的并行引导，减少串行轮次。
           parallel_tool_calls: true,
@@ -2459,6 +2700,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           request as Parameters<typeof client.chat.completions.create>[0],
           options?.signal ? { signal: options.signal } : undefined,
         );
+        // tool_choice 恒为 auto，端点不会再因 tool_choice 拒绝请求，
+        // 原 retriedToolChoice 降级分支随 required 一起删除（2026-10-22）。
         if (promptTraceEnabled()) {
           // 诊断转储（2026-10-11）：排「模型答错时间/自述泄漏」这类问题时，需要看
           // 模型实际收到的 system 与末尾消息。触发方式二选一：环境变量
@@ -2477,7 +2720,32 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
             `--- tail ---\n${JSON.stringify(tail).slice(0, 12000)}`,
           );
         }
-        auditInputChars = JSON.stringify(requestMessages).length + JSON.stringify(stableApiTools ?? []).length;
+        const toolsChars = JSON.stringify(stableApiTools ?? []).length;
+        auditInputChars = JSON.stringify(requestMessages).length + toolsChars;
+        // 分段：只统计文本部分（与审计口径一致——多模态 base64 无法按字符折算）
+        const textCharsOf = (content: unknown): number => {
+          if (typeof content === "string") return content.length;
+          if (Array.isArray(content)) {
+            let n = 0;
+            for (const part of content) {
+              const p = part as { text?: unknown } | null;
+              if (typeof p?.text === "string") n += p.text.length;
+            }
+            return n;
+          }
+          return 0;
+        };
+        let historyChars = 0;
+        for (let i = 1; i < requestMessages.length; i++) {
+          const m = requestMessages[i] as { content?: unknown };
+          historyChars += textCharsOf(m?.content);
+        }
+        auditBreakdown = {
+          system: textCharsOf((requestMessages[0] as { content?: unknown } | undefined)?.content),
+          history: historyChars,
+          tools: toolsChars,
+          toolCount: stableApiTools.length,
+        };
         break;
       } catch (e) {
         if (!retriedToolCallIdError && isToolCallIdNotFoundError(e)) {
@@ -2486,16 +2754,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           console.warn("[openai-tool-loop] Retrying completion after tool_call_id repair");
           continue;
         }
-        // tool_choice 兼容性保护：部分端点（DeepSeek、thinking 模式 Moonshot 等）
-        // 拒绝非 auto 的 tool_choice（"Thinking mode does not support this tool_choice"→400）。
-        // 首次带强制 tool_choice 失败后，降级为 auto 重试一次，不丢强制工具的优化收益。
-        if (!retriedToolChoice && isToolChoiceRejectedError(e)) {
-          retriedToolChoice = true;
-          console.warn(
-            `[openai-tool-loop] tool_choice 被端点拒绝（${(e as { status?: number }).status}），降级 auto 重试`,
-          );
-          continue;
-        }
+        // 2026-10-22：tool_choice 恒 auto，不再有「端点拒绝非 auto」的分支。
         throw e;
       }
     }
@@ -2685,6 +2944,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           ...(typeof streamUsage?.outputTokens === "number"
             ? { apiCompletionTokens: streamUsage.outputTokens }
             : {}),
+          breakdown: auditBreakdown,
         });
       }
     } catch {
@@ -2760,13 +3020,13 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
               requestCardUsed = true;
               traceRequestCard = { fired: true, loaded: [], blockedRisk: [best.name] };
               messages.push({ role: "assistant", content: fullText || "" });
-              messages.push({
+              messages.push(markTurnScaffold({
                 role: "system",
                 content:
                   `你请求的能力（${best.name}）涉及资金或对外发送，属于高危操作，系统不会自动加载。` +
                   `如用户明确要求办理，请改用 task.dispatch 把它派发为后台任务（会经人工审批），` +
                   `并先向用户复述将执行的操作内容；不要再次输出请求标记直接索要该工具。`,
-              });
+              }));
               lastAssistantText = "";
               console.info(
                 `[openai-tool-loop] 请求卡高危拦截：${best.name}（stage=${stage}）`,
@@ -2784,11 +3044,14 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
               } else {
                 loaded.push(entry.registryName);
                 requestCardLoadedNames.add(entry.registryName);
-                // P0 根修：注册表层面并集追加（快照存注册表形态），再重建 api 数组，
-                // 保证转正工具既进请求（缓存前缀尾部追加）也进执行映射。
+                // 转正 = 显式 grow：lock 模式下这是唯一能把新工具吸收进会话基准的
+                // 通道（一次增长 = 一次前缀断点，但之后重新稳定）。union 模式下
+                // growNames 被忽略，行为与旧并集等价。
+                faceGrowNames.add(entry.registryName);
                 stableRegistryTools = stabilizeToolOrderForSession(
                   [...stableRegistryTools, tool],
                   options?.audit?.sessionId,
+                  faceOpts,
                 );
                 if (entry.registryName) apiFormByRegistry.set(entry.registryName, apiTool);
                 stableApiTools = stableRegistryTools
@@ -2810,35 +3073,44 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           );
           if (loaded.length > 0) {
             messages.push({ role: "assistant", content: fullText || "" });
-            messages.push({
+            messages.push(markTurnScaffold({
               role: "system",
               content:
                 `已根据你的能力请求从延迟工具目录检索并加载：${loaded.join("、")}（完整 schema 已进入本轮工具列表）。` +
                 `请立即调用合适的工具完成用户任务；若这些工具仍不匹配，请直接如实向用户说明，不要再次输出请求标记。`,
-            });
+            }));
             lastAssistantText = "";
             continue;
           }
           if (alreadyVisible.length > 0) {
             messages.push({ role: "assistant", content: fullText || "" });
-            messages.push({
+            messages.push(markTurnScaffold({
               role: "system",
               content:
                 `你请求的能力对应的工具（${alreadyVisible.join("、")}）已经在你的可见工具列表中（系统预注入）。` +
                 `请直接调用它完成任务，不要再输出请求标记。`,
-            });
+            }));
             lastAssistantText = "";
             continue;
           }
         }
       }
 
-      // ── 单一出口检查（2026-10-21 去后置闸：只保留标准 ReAct loop 事实检查）──
-      // 不再扫描回复文本判断「宣称/承诺已办」——声称已办却未调工具属于模型
-      // 行为问题，由职责块铁律 + 请求层 tool_choice="required" 解决，
-      // 代码不在事后重跑整轮。这里只保留两条与服务端事实相关的循环行为：
+      // ── 单一出口检查（2026-10-22：静态架构下只保留与服务端事实相关的循环行为）──
+      // 判定「这轮要不要工具」的权责划分（去路由化后）：
+      //   - 请求层：恒 tool_choice="auto"，不做任何事前预判（2026-10-22 定稿：
+      //     不预测，只验证；原指定门与祈使扳机已退役，见 forced-tool.ts）；
+      //   - 本出口：只做事实对账——不管措辞像不像「办过」，只看服务端工具
+      //     执行结果是否兑现用户明确诉求（宣称未兑现 / 显式动作未执行 → 续波）。
+      // 保留的循环行为：
       //   1) 工具全失败 → 换关键词/换工具再试一次；
-      //   2) 调了工具但零正文 → 要求补叙述。
+      //   2) 调了工具但零正文 → 要求补叙述；
+      //   3) 只发现不执行 → 按 schema 真正执行；
+      //   4) 零实质成功却宣称办过 → required 续波（2026-10-22 新增，兜底
+      //     「该调没调」；与 2026-10-06 下线的宣告兜底的区别是多了服务端
+      //      事实对账与办事怀疑信号双条件，误判只剩一次可逆 round trip）；
+      //   5) 显式动作（打电话/报位置）整轮未执行 → required 续波并指名工具
+      //     （2026-10-22，事前指定门的替代：不看措辞，只看执行记录）。
       if (staticToolArch && !exitGateEnforced && stableApiTools.length > 0) {
         let gateReason: string | null = null;
         let gateInstruction = "";
@@ -2857,12 +3129,51 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
               r.toolName === "tool_search" ||
               r.toolName === "tool_describe"),
         );
-        if (!hasSubstantiveAttempt && discoverSucceeded) {
+        // 显式外部动作未执行（2026-10-22，事前指定门的替代）：用户明确要求打电话/
+        // 报位置，而服务端整轮没有该工具的执行记录——确定性违约事实，不看回复
+        // 措辞（沉默幻觉、敷衍推脱也拦得住）。这是「显式请求最终必执行」的保证。
+        // 排除两种不该打回的情形：fastProfile（system 已注入定位，直答是正确的）
+        // 与最后一波（没有续波预算，continue 只会空转）。
+        const explicitActionTool = resolveExplicitActionTool(userText);
+        const explicitActionMissing =
+          explicitActionTool != null &&
+          !allToolExecResults.some((r) => r.toolName === explicitActionTool);
+        const explicitActionAnswerableByInjection =
+          fastProfile && explicitActionTool === "clock.get_user_location";
+        if (
+          explicitActionTool &&
+          explicitActionMissing &&
+          !explicitActionAnswerableByInjection &&
+          finalText.trim() &&
+          wave + 1 < effectiveMaxWaves()
+        ) {
+          gateReason = "explicit_action_no_attempt";
+          gateInstruction =
+            `出口对账：用户明确提出了${explicitActionTool === "phone.call_user" ? "打电话" : "查询位置"}的请求，` +
+            `但服务端记录显示本轮还没有调用过 ${explicitActionTool}。请立即调用该工具完成动作（参数按 schema）；` +
+            `若确实无法完成（如缺少联系方式/定位权限），如实向用户说明卡点，不要用文字假装已完成。`;
+        } else if (!hasSubstantiveAttempt && discoverSucceeded) {
           gateReason = "discover_without_execution";
           gateInstruction =
             "你已经从延迟工具目录加载了工具 schema，但本轮还没有调用任何具体业务工具。" +
             "请立即按用户目标调用刚加载的工具（参数参照 schema），拿到真实结果后再回复；" +
             "不要停在发现阶段，也不要只复述工具清单。";
+        } else if (
+          // 派发代替执行（2026-10-22 完成度判据，取代原「宣称未兑现」词面闸）：
+          // 本轮把活派给了后台，服务端没有任何 content 类结果。只报状态、不下命令，
+          // 两条出路都合法：当场查完再答，或如实告诉用户稍后才会有结果。
+          finalText.trim() &&
+          allToolExecResults.some((r) => r.ok && isQueuedResult(r)) &&
+          countSubstantiveOkResults() === 0
+        ) {
+          gateReason = "queued_without_content";
+          const queuedNames = Array.from(
+            new Set(allToolExecResults.filter((r) => isQueuedResult(r)).map((r) => r.toolName)),
+          );
+          gateInstruction =
+            `本轮只完成了派发（${queuedNames.join("、")}），还没有拿到能回答用户的内容。用户仍在等。` +
+            `如果这件事现在用工具就能查完，就直接查完再答；` +
+            `如果确实需要后台长跑，就明确告诉他结果稍后出现——不要说得像已经办好了。`;
         } else if (
           finalText.trim() &&
           hasSubstantiveAttempt &&
@@ -2886,10 +3197,14 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         }
         if (gateReason) {
           exitGateEnforced = true;
+          // 续波不再收紧请求（tool_choice 恒 auto）：靠 gateInstruction 里的
+          // 具体信息 + 模型自决。这是 Anthropic 官方给的替代路径
+          // （auto + 提示里点名 + 事后检查再重试）。
           traceExitGate = { fired: true, reason: gateReason };
+          recordExitGateFire(gateReason, options?.audit?.sessionId);
           console.info(`[openai-tool-loop] 出口检查续波：${gateReason}`);
           messages.push({ role: "assistant", content: finalText || fullText || "" });
-          messages.push({ role: "system", content: gateInstruction });
+          messages.push(markTurnScaffold({ role: "system", content: gateInstruction }));
           lastAssistantText = "";
           continue;
         }
@@ -2912,6 +3227,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           wave + 1 < effectiveMaxWaves()
         ) {
           outcomeGateEnforced = true;
+          recordExitGateFire(unsatisfiedReason, options?.audit?.sessionId);
           console.info(
             `[openai-tool-loop] 出口自检：${unsatisfiedReason}` +
               `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 换路续波`,
@@ -2923,9 +3239,17 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           messages.push({
             role: "system",
             content:
-              "出口自检：到目前为止还没有任何一次成功的工具结果能回答用户的问题。" +
-              "请换一个关键词重搜、换一个工具（如 search_web / fetch_web / internet.*）或换数据源再试一次，" +
-              "拿到真实结果后再回答。若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。",
+              unsatisfiedReason === "queued_without_content"
+                ? "本轮只完成了派发，还没有拿到能回答用户的内容，用户仍在等。" +
+                  "如果这件事现在用工具就能查完，就直接查完再答；如果确实需要后台长跑，" +
+                  "就明确告诉他结果稍后出现——不要说得像已经办好了。"
+                : unsatisfiedReason === "explicit_action_no_attempt"
+                  ? `出口对账：用户明确提出了${resolveExplicitActionTool(userText) === "phone.call_user" ? "打电话" : "查询位置"}的请求，` +
+                    "但服务端记录显示本轮还没有调用过对应工具。请立即调用该工具完成动作（参数按 schema）；" +
+                    "若确实无法完成（如缺少联系方式/定位权限），如实向用户说明卡点，不要用文字假装已完成。"
+                  : "出口自检：到目前为止还没有任何一次成功的工具结果能回答用户的问题。" +
+                    "请换一个关键词重搜、换一个工具（如 search_web / fetch_web / internet.*）或换数据源再试一次，" +
+                    "拿到真实结果后再回答。若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。",
           });
           // 同宣告闸门：重试轮替换而非拼接，上一轮自语/道歉文本不进最终回复。
           lastAssistantText = "";
@@ -3006,6 +3330,7 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
         content: sanitizedFinalText || null,
       });
       logPrefixCacheStats();
+      recordTurnFinished();
       recordTurnTrace({
         ts: traceStartTs,
         stage: options?.audit?.stage ?? "main_chat_tools",
@@ -3674,8 +3999,16 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
 
     const allSucceeded = toolResults.length > 0 && toolResults.every((r) => r.ok);
     const hasMetaTool = toolResults.some((r) => META_TOOL_NAMES.has(r.name));
+    // 完成语义契约（2026-10-22）：派发型（queued）成功 ≠ 有内容。全部成功但
+    // 成功项都是派发时，禁走汇总捷径——捷径会把「已派发」直接收尾成最终回复
+    // （模型据 dispatch 的 ack 写「已经让后台去查了」，出口闸被整个绕过，这正是
+    // search_movies 病灶）。必须回落正常波次循环：模型带着派发回执继续，要么
+    // 真正查询，要么如实说明「稍后给」；若零内容收尾，出口闸 queued_without_content 兜底。
+    const allQueued =
+      allSucceeded &&
+      toolResults.every((r) => QUEUED_PRODUCER_TOOLS.has(r.name.replace(/_/g, ".")));
 
-    if (allSucceeded && !hasMetaTool && !waveUsedInteractiveTool) {
+    if (allSucceeded && !allQueued && !hasMetaTool && !waveUsedInteractiveTool) {
       // 充分性探测（token 最省路径）：不带 schema 的轻量汇总调用。工具结果已完整
       // 存在于上方 tool 消息里（无压缩/折叠），汇总指令不再重复 dump。
       // 首行输出 NEED_MORE_TOOLS → 结果不足，升级一次 replan（带 schema）。
@@ -3685,7 +4018,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           `[plan-execute] wave=${wave} ${toolResults.length} 个工具全部成功，探测通过 → 无 schema 汇总收尾（工具 schema 不再重发）`,
         );
         logPrefixCacheStats();
-        recordTurnTrace({
+        recordTurnFinished();
+      recordTurnTrace({
           ts: traceStartTs,
           stage: options?.audit?.stage ?? "main_chat_tools",
           model,
@@ -3706,6 +4040,15 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
           finalTextChars: probe.text.length,
           durationMs: Date.now() - traceStartTs,
         });
+        // 线程落库契约（2026-10-22 根修·重复回复事故）：schema-less 汇总的答案此前
+        // 只随返回值交 done，从不进 messages——回写后线程停在 assistant(tool_calls)
+        // → tool*，foldCompletedToolChains 折成「[动作台账]…本轮未生成可见回复」，
+        // 下一轮模型看到「问了天气但没回复」就把工具重新调一遍。最终答案必须与
+        // 最终波路径（上方 messages.push assistant(content)）同契约落进 messages。
+        // holdAnswer 轮 streamedVisible 为空，provider 层兜底也救不回来，只能在这里补。
+        if (probe.text.trim()) {
+          messages.push({ role: "assistant", content: probe.text });
+        }
         return probe.text;
       }
       console.info(`[plan-execute] wave=${wave} 汇总探测报告结果不足，进入 replan 波次`);
@@ -3729,7 +4072,8 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
       );
     }
   }
-  recordTurnTrace({
+  recordTurnFinished();
+      recordTurnTrace({
     ts: traceStartTs,
     stage: options?.audit?.stage ?? "main_chat_tools",
     model,
@@ -3752,6 +4096,11 @@ function dedupeToolsByName(tools: ChatCompletionTool[]): ChatCompletionTool[] {
     finalTextChars: finalSummary.text.length,
     durationMs: Date.now() - traceStartTs,
   });
+  // 同上（2026-10-22 根修）：预算耗尽的兜底汇总同样只返回不落 messages，
+  // 线程会停在 tool 链上被折成「未生成可见回复」的动作台账 → 下一轮重复调工具。
+  if (finalSummary.text.trim()) {
+    messages.push({ role: "assistant", content: finalSummary.text });
+  }
   return finalSummary.text;
 
   /**

@@ -172,7 +172,7 @@ import {
   isStaticToolArchEnabled,
   isTaskLaneRouterFirst,
   isToolRecallEnabled,
-  slimToolSchema,
+
   toolsMatchingCapabilityBeam,
 } from "../external-model/lane-tool-sets.js";
 import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
@@ -197,7 +197,6 @@ const MEMORY_DOMAIN_LABELS: Record<string, string> = {
   personality: "特质",
 };
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
-import type { TrajectorySkillPromotionService } from "./trajectory-skill-promotion-service.js";
 import type { ShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { getDailyJournalService, type JournalHit } from "./daily-journal-service.js";
 import { resolveUserLocationPrompt } from "../services/user-location-service.js";
@@ -236,6 +235,7 @@ import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-servic
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
 import { resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
+import { isActionableTaskRequest } from "../agent/task-intent.js";
 import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, type TravelPlanRequest } from "../agent/realtime-search-query.js";
 import { needsToolChoiceRequired } from "../gateway/forced-tool.js";
 import { buildCurrentTimePrompt } from "../agent/prompt-builder.js";
@@ -383,7 +383,6 @@ export class AgentCore {
     private readonly worldService: WorldService | null = null,
     private readonly skillManager: SkillManager | null = null,
     private readonly narrativeMemory: NarrativeMemoryPort | null = null,
-    private readonly trajectorySkillPromotion: TrajectorySkillPromotionService | null = null,
     private readonly virtualPhoneService: VirtualPhoneService | null = null,
     private readonly scheduleTaskService: ScheduleTaskService | null = null,
     private readonly shortTermMemoryGateway: ShortTermMemoryGatewayService | null = null,
@@ -1105,11 +1104,6 @@ export class AgentCore {
       );
     }
 
-    const trajCap = this.trajectorySkillPromotion?.beginCapture(
-      actorId,
-      opts?.chatUserMessageId,
-      text,
-    );
     const access = this.streamAccessFields(actorId, opts);
     const orchestrateOpts = this.buildOrchestrateOpts(
       actorId,
@@ -1117,7 +1111,6 @@ export class AgentCore {
       opts,
       enrichedNarrativeRecall,
       personalization,
-      trajCap,
       access,
       sessionId,
       shortTermTurn,
@@ -1181,7 +1174,6 @@ if (route.plane === "task") {
             cognitiveEmotion,
             cognitiveUserPattern,
             cognitiveToolPlan,
-            trajCap,
           });
           if (dispatchedTaskId) {
             this.turnLifecycle.finalizeTurn({
@@ -1204,7 +1196,6 @@ if (route.plane === "task") {
           userLocation,
           frequentPlaces,
           personalization,
-          trajCap,
           orchestrateOpts,
           sessionId,
           shortTermTurn,
@@ -1233,7 +1224,6 @@ if (route.plane === "task") {
         userLocation,
         frequentPlaces,
         personalization,
-        trajCap,
         orchestrateToolCtx: orchestrateOpts,
         sessionId,
         shortTermTurn,
@@ -1289,7 +1279,6 @@ if (route.plane === "task") {
             userLocation,
             frequentPlaces,
             personalization,
-            trajCap,
             orchestrateToolCtx: orchestrateOpts,
             sessionId,
             shortTermTurn,
@@ -1787,7 +1776,6 @@ if (route.plane === "task") {
     opts: HandleUserMessageOptions | undefined,
     narrativeRecall: string | undefined,
     personalization: PersonalizationPromptSlice,
-    trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
     access: { agentAccessMode: AgentAccessMode; desktopBridgeOnline: boolean; phoneBridgeOnline: boolean },
     sessionId: string,
     shortTermTurn: ShortTermTurnContext,
@@ -1835,11 +1823,6 @@ if (route.plane === "task") {
       onToolExecuteStart: opts?.onExternalToolExecuteStart,
       onAgentStatusLine: opts?.onAgentPhaseStatus,
       onToolExecuted: (info: ToolExecutedInfo) => {
-        trajCap?.observeToolExecuted({
-          toolName: info.toolName,
-          ok: info.ok,
-          result: info.result,
-        });
         opts?.onExternalToolExecuted?.(info);
         // 失败时自我学习闭环：把工具调用结果（含失败）写入 selfLearning
         // → DMN 周期扫描时即可读到失败轨迹 → 触发 proposeEvolution 生成进化提案
@@ -1884,7 +1867,6 @@ if (route.plane === "task") {
       userLocation?: string;
       /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
       frequentPlaces?: string;
-      trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       orchestrateOpts: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization: PersonalizationPromptSlice;
       sessionId: string;
@@ -1951,7 +1933,6 @@ if (route.plane === "task") {
             journalRecall: ctx.journalRecall,
             userLocation: ctx.userLocation,
             frequentPlaces: ctx.frequentPlaces,
-            trajCap: ctx.trajCap,
             orchestrateToolCtx: ctx.orchestrateOpts,
             personalization: ctx.personalization ?? {},
             sessionId: ctx.sessionId,
@@ -2005,7 +1986,6 @@ if (route.plane === "task") {
       userLocation?: string;
       /** 常去地点背景块（DBSCAN 纯算法挖掘，零 LLM） */
       frequentPlaces?: string;
-      trajCap?: ReturnType<TrajectorySkillPromotionService["beginCapture"]>;
       /** 后台派发路径（dispatchBackgroundTask）可不传：执行层逐项可选化 */
       orchestrateToolCtx?: ReturnType<AgentCore["buildOrchestrateOpts"]>;
       personalization?: PersonalizationPromptSlice;
@@ -2225,6 +2205,7 @@ if (route.plane === "task") {
           .map((d) => (d.type === "function" ? d.function?.name : ""))
           .filter(Boolean),
       );
+      const promotedTools = buildPromotedChatTools(corpusLane, coreNames);
       return {
         toolExposureProfile: "explicit" as const,
         chatToolsBuiltin: [
@@ -2232,9 +2213,19 @@ if (route.plane === "task") {
           ...buildDomainPreloadTools(text, corpusLane, coreNames),
           // 晋升常驻（2026-10-09 L4）：该 actor 近窗真实成功调用 ≥3 次的延迟工具
           // 直接常驻可见集——预载/top-K/两波 discover 都不需要，晋升工具已是主力。
-          ...buildPromotedChatTools(corpusLane, coreNames),
+          ...promotedTools,
         ],
         chatToolsExtra: corpusLane,
+        // 会话工具面冻结（2026-10-22）：晋升阈值可能在本会话中途被跨过，而冻结
+        // 之后可见集不再吸收新工具——显式声明「晋升是可增长项」，下轮进基准。
+        // 不做这件事，用户刚用熟的工具会在本会话内一直隐身，只能靠请求卡转正。
+        ...(promotedTools.length > 0
+          ? {
+              toolFaceGrowNames: promotedTools
+                .map((t) => (t.type === "function" ? t.function?.name ?? "" : ""))
+                .filter(Boolean),
+            }
+          : {}),
         toolLoop: { maxRounds: chatLaneMaxRounds() },
       };
     };
@@ -2539,9 +2530,15 @@ if (route.plane === "task") {
     // 任务/多步动作轮走显式「计划→执行」；单步查询与闲聊仍走一波内并行
     // （等价于一步计划），不额外付一次规划调用。
     // 判据是确定性的复杂度信号（requiresExplicitPlan）+ 动作信号，不是意图路由。
+    // 动作信号 = 祈使结构（isActionableTaskRequest）∪ 提醒/闹钟句式
+    // （needsToolChoiceRequired）：planner 升级的误判代价只是一次规划调用
+    // （可逆、慢而不错），与请求层 tool_choice 强制的不可逆误判不同，
+    // 因此这里沿用宽信号，不随 2026-10-22 的事前门收窄而收窄。
     const useExplicitPlanner =
       shouldPlanExecute(text) &&
-      (mode === "task" || (this.isChatLane(mode) && needsToolChoiceRequired(text)));
+      (mode === "task" ||
+        (this.isChatLane(mode) &&
+          (isActionableTaskRequest(text) || needsToolChoiceRequired(text))));
     let pePlan: TaskExecutionPlan | null = null;
     let peExhausted = false;
 
@@ -2584,7 +2581,9 @@ if (route.plane === "task") {
         const caps = ctx.turnPlan?.capabilities ?? [];
         const lightBeam =
           caps.length > 0 && !caps.includes("full")
-            ? toolsMatchingCapabilityBeam(corpusSafe, caps).map(slimToolSchema)
+            ? // 2026-10-22 定稿：束投影全量 schema（架构文档 5.1.4）——束的价值
+              // 在「确定性可达」，schema 瘦身省下的 token 抵不过参数错误的重试。
+              toolsMatchingCapabilityBeam(corpusSafe, caps)
             : [];
         if (lightBeam.length > 0 && !isSessionBudgetExceeded(ctx.sessionId ?? undefined, actorId)) {
           execStreamOpts = {
@@ -2607,7 +2606,8 @@ if (route.plane === "task") {
           // 与「路由判需要 → 工具必然可见」的束投影同一条结构保证。
           const travelForcePreload =
             ctx.routeIntent === "travel_planning"
-              ? toolsInDomain(corpusSafe, "travel").map(slimToolSchema)
+              ? // 2026-10-22 定稿：travel 强制预载全量 schema（架构文档 5.1.4）。
+                toolsInDomain(corpusSafe, "travel")
               : [];
           // 轻量常驻（2026-10-10 ②）：router-first 不再是纯预载——「提醒/回复/
           // 记一下」类短口语动作的 BM25 词面召回天然弱（通词被 IDF 闸杀、强票位
@@ -2835,7 +2835,6 @@ if (route.plane === "task") {
       planExecuteUsed: useExplicitPlanner,
       pePlan,
       peExhausted,
-      trajCap: ctx.trajCap,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
     }, opts?.onAssistantDelta);
@@ -3025,7 +3024,6 @@ if (route.plane === "task") {
         learningActive?: boolean;
       };
       cognitiveToolPlan?: import("../brain/tool-planning-cortex.js").ToolPlan;
-      trajCap?: ReturnType<TrajectorySkillPromotionService["beginCapture"]>;
       /**
        * 自动重跑代数（2026-09-23 重启恢复）：restart-recovery 重派被打断任务时
        * 传入（上一代 +1），TaskHub 台账据此累计，达上限不再自动重跑。
@@ -3188,7 +3186,6 @@ if (route.plane === "task") {
         ...(input.cognitiveEmotion ? { cognitiveEmotion: input.cognitiveEmotion } : {}),
         ...(input.cognitiveUserPattern ? { cognitiveUserPattern: input.cognitiveUserPattern } : {}),
         ...(input.cognitiveToolPlan ? { cognitiveToolPlan: input.cognitiveToolPlan } : {}),
-        ...(input.trajCap ? { trajCap: input.trajCap } : {}),
       };
       /** 媒体结果捕获：search_images/search_videos 结果随任务结果消息投递 mediaCards。 */
       const capturedMedia: Array<{ toolName: string; result: Record<string, unknown> }> = [];
@@ -3476,7 +3473,6 @@ if (route.plane === "task") {
         planExecuteUsed: false,
         pePlan: null,
         peExhausted: false,
-        trajCap: undefined,
         ...(meta?.messageId ? { messageId: meta.messageId } : {}),
         ...(meta?.sessionId ? { sessionId: meta.sessionId } : {}),
       })
@@ -3527,7 +3523,6 @@ private async finishLlmTurn(
       planExecuteUsed: boolean;
       pePlan: TaskExecutionPlan | null;
       peExhausted: boolean;
-      trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined;
       messageId?: string;
       sessionId?: string;
     },
@@ -3600,12 +3595,6 @@ private async finishLlmTurn(
       };
     }
 
-    TurnLifecycle.finalizeTrajectory(meta.trajCap, trimmed, {
-      planExecuteUsed: meta.planExecuteUsed,
-      modelCallsApprox: meta.modelCallsConsumed,
-      pePlan: meta.pePlan,
-      peExhausted: meta.peExhausted,
-    });
 
     const { quotaSuffix } = this.turnLifecycle.finalizeTurn({
       actorId,

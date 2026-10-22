@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 
 import "../app/ambient_feeds_controller.dart";
 import "../core/config/api_config.dart";
+import "../core/presentation/foreground_banner.dart";
 import "../core/services/schedule_api_client.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../features/chat/travel_plan_launcher.dart";
@@ -50,7 +51,7 @@ class MobileHomePage extends StatefulWidget {
 }
 
 class MobileHomePageState extends State<MobileHomePage>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver implements ForegroundBanner {
   late final MobileChatController _chatController;
   late final ScheduleApiClient _scheduleApi;
 
@@ -94,7 +95,7 @@ class MobileHomePageState extends State<MobileHomePage>
     final AmbientFeedsController c = AmbientFeedsController.instance;
     c.isAppBackgrounded = null;
     c.syncSchedule = null;
-    c.showForegroundReminder = null;
+    c.foregroundBanner = null;
     _chatController.dispose();
     super.dispose();
   }
@@ -116,7 +117,8 @@ class MobileHomePageState extends State<MobileHomePage>
   }
 
   /// 装配环境信息流编排层端口（与桌面端 main.dart 同构）：
-  /// 前后台判定、日程页刷新、前台提醒横幅。后台系统通知由
+  /// 前后台判定、日程页刷新、前台提醒横幅（ForegroundBanner 接口，
+  /// State 自身即实现，dispose 随端口清空）。后台系统通知由
   /// LocalNotificationService 承接（main_mobile.dart 启动时 init）。
   void _wireAmbientFeeds() {
     final AmbientFeedsController c = AmbientFeedsController.instance;
@@ -124,9 +126,13 @@ class MobileHomePageState extends State<MobileHomePage>
     c.syncSchedule = () async {
       _scheduleKey.currentState?.refresh();
     };
-    c.showForegroundReminder = (String title, String message) async {
-      _showReminderBanner(title, message);
-    };
+    c.foregroundBanner = this;
+  }
+
+  /// ForegroundBanner 接口实现：主动触达统一入口，具体呈现委托横幅。
+  @override
+  Future<void> show(String title, String message) async {
+    _showReminderBanner(title, message);
   }
 
   /// 到点提醒前台横幅：浮层 SnackBar 6s 自动收，点击跳日程页。

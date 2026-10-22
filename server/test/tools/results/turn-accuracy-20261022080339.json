@@ -1,0 +1,68 @@
+{
+  "summary": {
+    "runId": "20261022080339",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 1,
+    "totalRuns": 2,
+    "passRuns": 1,
+    "passRate": "50.0%",
+    "chatRuns": 0,
+    "chatZeroToolRate": "0.0%",
+    "chatSafeRate": "0.0%",
+    "toolRuns": 2,
+    "toolGroupHitRate": "50.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 9241,
+      "p95": 9241,
+      "max": 11442
+    },
+    "passAtK": {
+      "k": 1,
+      "cases": 1,
+      "totalCases": 2,
+      "rate": "50.0%"
+    }
+  },
+  "failures": [
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "tool_discover"
+      ],
+      "elapsedMs": 11442,
+      "reason": "未命中期望组: #1[search_web|deep_search]；实际: tool_discover"
+    }
+  ],
+  "runs": [
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [
+        "tool_discover"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[search_web|deep_search]；实际: tool_discover",
+      "elapsedMs": 11442
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [
+        "smart_home.control_device"
+      ],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 9241
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import "../core/utils/agent_result_parser.dart";
 import "../core/vision/pick_gallery_vision.dart";
 import "../core/vision/vision_wire_frame.dart";
 import "../features/chat/agent_result_card.dart";
+import "../features/chat/evening_digest_card.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/typewriter_reveal.dart";
 import "mobile_chat_controller.dart";
@@ -240,6 +241,20 @@ class _MobileChatPageState extends State<MobileChatPage> {
             // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
             // 服务端推送，「帮我叫车/不用了」一键回复。
             return _buildTransferReminderCard(context, m, p);
+          }
+          if (m.contentType == "evening_digest" && m.eveningDigest != null) {
+            // 睡前备忘卡（2026-10-22 与桌面端对齐）：结构化块专属渲染，
+            // 不框进气泡外壳（独立消息元素形态，卡自带完整外观）。
+            return Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 360),
+                  child: EveningDigestCard(digest: m.eveningDigest!),
+                ),
+              ),
+            );
           }
           if (!isUser) {
             // 行程卡独立第二条消息形态（2026-10-12 与桌面端对齐）：气泡只装

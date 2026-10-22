@@ -16,16 +16,11 @@ import type { BrainCenter } from "../brain/brain-center.js";
 import type {
   AudioBufferRef,
   CapabilityDescriptor,
-  EvolutionProposal,
-  EvolutionProposalType,
   MemoryDomainKind,
   MemoryItem,
   MemoryItemKind,
   UserActivityKind,
   UserActivityState,
-  BugSignal,
-  BugSignalSource,
-  RepairStatus,
 } from "../brain/types.js";
 
 // ---- 工具 schema ------------------------------------------------------
@@ -51,71 +46,6 @@ export const BRAIN_LIST_CAPABILITIES_TOOL: ChatCompletionTool = {
           default: false,
         },
       },
-      additionalProperties: false,
-    },
-  },
-};
-
-/** brain.identify_gap —— 描述一个场景，返回可能缺失的能力 */
-export const BRAIN_IDENTIFY_GAP_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.identify_gap",
-    description:
-      "基于一段场景描述识别可能缺失的能力域。当用户提出新需求但现有工具难以覆盖、或需要判断是否要走 self-programming 扩展时调用。返回缺失能力、已就绪可复用的相邻能力、是否可走 self-programming 扩展。",
-    parameters: {
-      type: "object",
-      properties: {
-        scenario: {
-          type: "string",
-          description: "场景描述，自然语言，例如「帮用户规划一次出国旅游行程」。",
-        },
-      },
-      required: ["scenario"],
-      additionalProperties: false,
-    },
-  },
-};
-
-/** brain.propose_capability —— 提议新增能力 / 优化现有能力 */
-export const BRAIN_PROPOSE_CAPABILITY_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.propose_capability",
-    description:
-      "向 Brain Center 提交一个能力进化提案（新增能力 / 优化现有能力 / 增加工具 / 更新 prompt）。当你判断需要扩展自身能力、或识别到反复失败的能力缺口时调用。提案进入 pending 状态，由后续流程审批与执行。",
-    parameters: {
-      type: "object",
-      properties: {
-        title: { type: "string", description: "提案标题，简短一句话。" },
-        description: { type: "string", description: "提案详细描述：要新增/优化什么能力。" },
-        rationale: { type: "string", description: "提出该提案的理由：为什么需要它。" },
-        type: {
-          type: "string",
-          enum: ["new_capability", "optimize_existing", "add_tool", "update_prompt"],
-          description:
-            "提案类型：new_capability=新增能力域，optimize_existing=优化现有能力，add_tool=为现有能力新增工具，update_prompt=更新 prompt 策略。默认 new_capability。",
-        },
-      },
-      required: ["title", "description", "rationale"],
-      additionalProperties: false,
-    },
-  },
-};
-
-/** brain.execute_proposal —— 显式按 id 触发单个进化提案执行 */
-export const BRAIN_EXECUTE_PROPOSAL_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.execute_proposal",
-    description:
-      "显式按 id 触发单个进化提案的执行（approved → 生成 Skill / 装载）。当你或用户已确认一个进化提案需要真正落地时调用。返回执行结果与提案最新状态；若提案不存在、已是终态或未处于 approved 状态则返回 error。",
-    parameters: {
-      type: "object",
-      properties: {
-        id: { type: "string", description: "进化提案 id（evolve 创建或 listPending 返回的 id）。" },
-      },
-      required: ["id"],
       additionalProperties: false,
     },
   },
@@ -457,112 +387,8 @@ export const BRAIN_RUNTIME_KERNEL_UPDATE_TOOL: ChatCompletionTool = {
 /** brain 工具的 schema 数组（供 setBrainChatTools 注入到 getBuiltinAgentChatTools） */
 // 注：放在所有 *_TOOL schema 之后，避免 const 引用顺序问题。
 
-// ---- 自我修复工具 schema -----------------------------------------------
-
-/** brain.report_bug —— 报告一个 bug，触发自动修复闭环 */
-export const BRAIN_REPORT_BUG_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.report_bug",
-    description:
-      "向 CodeRepairCortex 报告一个 bug（运行时异常/兜底频发/编译失败/用户报告等）。会自动触发隔离→分析→patch→测试→应用闭环。修复成功后源码会被实际修改，失败会自动回滚。",
-    parameters: {
-      type: "object",
-      properties: {
-        source: {
-          type: "string",
-          description: "bug 来源",
-          enum: [
-            "unhandled_rejection",
-            "uncaught_exception",
-            "tool_loop_max_rounds",
-            "apology_fallback_burst",
-            "compile_error",
-            "user_report",
-            "runtime_error",
-          ] as BugSignalSource[],
-        },
-        title: {
-          type: "string",
-          description: "简短标题，例如 'chat-user-message.ts 状态行重复推送'",
-        },
-        errorMessage: {
-          type: "string",
-          description: "错误消息/堆栈/关键日志（多行字符串，可选）",
-        },
-        suspectFiles: {
-          type: "array",
-          items: { type: "string" },
-          description: "嫌疑文件路径列表（相对 server/ 根，如 src/ws/handlers/foo.ts）",
-        },
-        userReport: {
-          type: "string",
-          description: "用户原始报告内容（source=user_report 时必填）",
-        },
-      },
-      required: ["source", "title"],
-      additionalProperties: false,
-    },
-  },
-};
-
-/** brain.list_repairs —— 列出修复提案 */
-export const BRAIN_LIST_REPAIRS_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.list_repairs",
-    description:
-      "列出 CodeRepairCortex 中的修复提案（可按状态过滤）。返回最近修复历史与状态。",
-    parameters: {
-      type: "object",
-      properties: {
-        status: {
-          type: "string",
-          description: "按状态过滤（不传则返回全部）",
-          enum: [
-            "pending",
-            "isolating",
-            "analyzing",
-            "patching",
-            "testing",
-            "applying",
-            "fixed",
-            "failed",
-            "rejected",
-          ] as RepairStatus[],
-        },
-      },
-      additionalProperties: false,
-    },
-  },
-};
-
-/** brain.retry_repair —— 强制重试一个 failed 的修复提案 */
-export const BRAIN_RETRY_REPAIR_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.retry_repair",
-    description:
-      "强制重试一个 failed 状态的修复提案。重置状态为 pending 并触发新一轮修复闭环。",
-    parameters: {
-      type: "object",
-      properties: {
-        repairId: {
-          type: "string",
-          description: "修复提案 id（reportBug 返回的 id）",
-        },
-      },
-      required: ["repairId"],
-      additionalProperties: false,
-    },
-  },
-};
-
 export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_LIST_CAPABILITIES_TOOL,
-  BRAIN_IDENTIFY_GAP_TOOL,
-  BRAIN_PROPOSE_CAPABILITY_TOOL,
-  BRAIN_EXECUTE_PROPOSAL_TOOL,
   BRAIN_OBSERVE_USER_TOOL,
   BRAIN_LISTEN_TOOL,
   BRAIN_LOOK_TOOL,
@@ -575,22 +401,11 @@ export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_DELEGATE_TOOL,
   BRAIN_RUNTIME_KERNEL_GET_TOOL,
   BRAIN_RUNTIME_KERNEL_UPDATE_TOOL,
-  // 自我修复（CodeRepairCortex）：3 个工具
-  BRAIN_REPORT_BUG_TOOL,
-  BRAIN_LIST_REPAIRS_TOOL,
-  BRAIN_RETRY_REPAIR_TOOL,
 ];
 
 // ---- 内部常量与辅助 ----------------------------------------------------
 
 const DEFAULT_ACTOR_ID = "default";
-
-const VALID_PROPOSAL_TYPES: ReadonlySet<EvolutionProposalType> = new Set([
-  "new_capability",
-  "optimize_existing",
-  "add_tool",
-  "update_prompt",
-]);
 
 const VALID_RUNTIME_KERNEL_PROMPT_MODES: ReadonlySet<RuntimeKernelPromptMode> = new Set([
   "legacy",
@@ -698,19 +513,6 @@ function formatUserActivity(state: UserActivityState | null): string {
   return `用户${label}（置信度 ${state.confidence}） | 证据：${evidence}${meta} | occurredAt=${state.occurredAt}`;
 }
 
-/** 把 EvolutionProposal 摘要为返回给 LLM 的对象 */
-function formatProposalResult(proposal: EvolutionProposal) {
-  return {
-    ok: true,
-    proposalId: proposal.id,
-    status: proposal.status,
-    type: proposal.type,
-    title: proposal.title,
-    createdAt: proposal.createdAt,
-    message: `提案已提交，id=${proposal.id}，状态=${proposal.status}。后续可由审批流程推进至 reviewing / approved / executed。`,
-  };
-}
-
 // ---- 工具 handler 注册 ------------------------------------------------
 
 /**
@@ -779,120 +581,7 @@ export function registerBrainTools(
     }
   });
 
-  // ---- brain.identify_gap ----
-  registry.register("brain.identify_gap", async (input) => {
-    try {
-      const scenario = String(input.scenario ?? "").trim();
-      if (!scenario) {
-        return { ok: false, error: "缺少必填字段：scenario（场景描述）" };
-      }
 
-      const report = await brainCenter.identifyGap(scenario);
-      if (!report) {
-        return {
-          ok: false,
-          error:
-            "CapabilityCortex.identifyGap 不可用（皮层未注册或内部结构变化），无法识别能力缺口。",
-        };
-      }
-
-      const summaryParts: string[] = [];
-      summaryParts.push(`场景：${report.scenario}`);
-      if (report.missingDomains.length > 0) {
-        summaryParts.push(`缺失能力域：${report.missingDomains.join("、")}`);
-      } else {
-        summaryParts.push("缺失能力域：（无）");
-      }
-      if (report.relatedExisting.length > 0) {
-        summaryParts.push(`已有相邻能力：${report.relatedExisting.join("、")}`);
-      }
-      summaryParts.push(`可走 self-programming 扩展：${report.expandable ? "是" : "否"}`);
-      summaryParts.push(`判定理由：${report.rationale}`);
-
-      return {
-        ok: true,
-        summary: summaryParts.join("\n"),
-        missingDomains: report.missingDomains,
-        relatedExisting: report.relatedExisting,
-        expandable: report.expandable,
-        rationale: report.rationale,
-        detectedAt: report.detectedAt,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.identify_gap 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
-
-  // ---- brain.propose_capability ----
-  registry.register("brain.propose_capability", async (input) => {
-    try {
-      const title = String(input.title ?? "").trim();
-      const description = String(input.description ?? "").trim();
-      const rationale = String(input.rationale ?? "").trim();
-      const rawType = String(input.type ?? "new_capability").trim() as EvolutionProposalType;
-
-      if (!title || !description || !rationale) {
-        return {
-          ok: false,
-          error: "缺少必填字段：title, description, rationale",
-        };
-      }
-      if (!VALID_PROPOSAL_TYPES.has(rawType)) {
-        return {
-          ok: false,
-          error: `无效的 type：${rawType}（允许：new_capability / optimize_existing / add_tool / update_prompt）`,
-        };
-      }
-
-      const proposal = brainCenter.evolve({
-        type: rawType,
-        title,
-        description,
-        rationale,
-      });
-      return formatProposalResult(proposal);
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.propose_capability 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
-
-  // ---- brain.execute_proposal ----
-  registry.register("brain.execute_proposal", async (input) => {
-    try {
-      const rawInput =
-        typeof input === "object" && input !== null && !Array.isArray(input)
-          ? (input as Record<string, unknown>)
-          : {};
-      const id = typeof rawInput.id === "string" ? rawInput.id.trim() : "";
-      if (!id) {
-        return { ok: false, error: "缺少必填字段：id（进化提案 id）" };
-      }
-      const result = await brainCenter.executeEvolution(id);
-      if (!result.ok) {
-        return {
-          ok: false,
-          error: result.error ?? `提案 ${id} 执行未成功`,
-        };
-      }
-      return {
-        ok: true,
-        proposalId: id,
-        status: result.proposal?.status,
-        message: `提案 ${id} 执行完成，状态=${result.proposal?.status}`,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.execute_proposal 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
 
   // ---- brain.observe_user ----
   registry.register("brain.observe_user", async (input, context) => {
@@ -1270,109 +959,7 @@ export function registerBrainTools(
     }
   });
 
-  // ---- 自我修复（CodeRepairCortex）工具 handler ----
 
-  registry.register("brain.report_bug", async (input) => {
-    try {
-      const rawInput =
-        typeof input === "object" && input !== null && !Array.isArray(input)
-          ? (input as Record<string, unknown>)
-          : {};
-      const source = rawInput.source as BugSignalSource | undefined;
-      const title = typeof rawInput.title === "string" ? rawInput.title : "";
-      if (!source || !title) {
-        return { ok: false, error: "source 和 title 为必填" };
-      }
-      const signal: BugSignal = {
-        source,
-        title,
-        errorMessage: typeof rawInput.errorMessage === "string" ? rawInput.errorMessage : undefined,
-        suspectFiles: Array.isArray(rawInput.suspectFiles)
-          ? (rawInput.suspectFiles as unknown[]).filter((s): s is string => typeof s === "string")
-          : undefined,
-        userReport:
-          typeof rawInput.userReport === "string" ? rawInput.userReport : undefined,
-      };
-      const proposal = await brainCenter.reportBug(signal);
-      if (!proposal) {
-        return {
-          ok: false,
-          error: "CodeRepairCortex 未注册或 reportBug 不可用",
-        };
-      }
-      return {
-        ok: true,
-        repairId: proposal.id,
-        status: proposal.status,
-        message: `已收到 bug 信号，正在自动修复。可调用 brain.list_repairs 查看进度，brain.retry_repair 强制重试。`,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.report_bug 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
 
-  registry.register("brain.list_repairs", async (input) => {
-    try {
-      const rawInput =
-        typeof input === "object" && input !== null && !Array.isArray(input)
-          ? (input as Record<string, unknown>)
-          : {};
-      const status = typeof rawInput.status === "string" ? (rawInput.status as RepairStatus) : undefined;
-      const repairs = brainCenter.listRepairs(status);
-      return {
-        ok: true,
-        total: repairs.length,
-        repairs: repairs.map((r) => ({
-          id: r.id,
-          title: r.title,
-          source: r.source,
-          status: r.status,
-          retryCount: r.retryCount,
-          lastError: r.lastError,
-          rootCause: r.rootCause,
-          explanation: r.explanation,
-          testPassed: r.testPassed,
-          createdAt: r.createdAt,
-          updatedAt: r.updatedAt,
-        })),
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.list_repairs 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
 
-  registry.register("brain.retry_repair", async (input) => {
-    try {
-      const rawInput =
-        typeof input === "object" && input !== null && !Array.isArray(input)
-          ? (input as Record<string, unknown>)
-          : {};
-      const repairId = typeof rawInput.repairId === "string" ? rawInput.repairId : "";
-      if (!repairId) {
-        return { ok: false, error: "repairId 为必填" };
-      }
-      const proposal = await brainCenter.retryRepair(repairId);
-      if (!proposal) {
-        return { ok: false, error: "CodeRepairCortex 未注册或修复提案不存在" };
-      }
-      return {
-        ok: true,
-        repairId: proposal.id,
-        status: proposal.status,
-        retryCount: proposal.retryCount,
-        message: `已重置为 pending，正在重新触发修复闭环。`,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.retry_repair 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
 }

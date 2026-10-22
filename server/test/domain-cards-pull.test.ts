@@ -24,7 +24,7 @@ const { executeToolSearchBridge, prepareToolsWithToolSearch } = await import(
 const { buildDomainCards, CARD_TOOLS_PER_DOMAIN } = await import(
   "../src/tools/tool-search/domain-cards.js"
 );
-const { domainsForTool } = await import("../src/tools/tool-search/tool-category.js");
+const { domainsForTool, resolveDomainDef } = await import("../src/tools/tool-search/tool-category.js");
 const { SkillManager } = await import("../src/skills/skill-manager.js");
 const { skillManifestToChatTool } = await import("../src/skills/skill-openai-bridge.js");
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
@@ -82,20 +82,39 @@ for (const tool of corpus) {
   for (const d of domainsForTool(name)) domainSize.set(d, (domainSize.get(d) ?? 0) + 1);
 }
 
-test("域卡：覆盖全部非 misc 工具名、含使用指引、同语料恒同字节", () => {
+test("域卡（紧凑定稿）：覆盖全部非 misc 域、含发现指引、同语料恒同字节", () => {
   const cards = buildDomainCards(corpus);
   assert.ok(cards.includes("【能力域目录】"));
-  assert.ok(cards.includes('tool_discover({domain:"域名"})'));
+  // 紧凑契约（2026-10-22）：不再列工具名，改为域名+一句话，发现靠 tool_discover({domain})。
+  assert.ok(cards.includes('tool_discover({domain:"域名"})'), "紧凑卡应带按域拉取指引");
   for (const tool of corpus) {
     const name = tool.type === "function" ? tool.function?.name ?? "" : "";
     if (!name || name.startsWith("tool_")) continue;
     const domains = domainsForTool(name);
-    if (domains.length === 1 && domains[0] === "misc") continue; // misc 域工具在卡上由 misc 兜底行覆盖
-    // 域内工具数超上限的域会被截断（卡片标注 +N），成员不逐一列出——跳过
-    if (domains.some((d) => (domainSize.get(d) ?? 0) > CARD_TOOLS_PER_DOMAIN)) continue;
-    assert.ok(cards.includes(name), `卡片缺失工具名: ${name}`);
+    if (domains.length === 1 && domains[0] === "misc") continue;
+    const visible = domains.some((d) => {
+      const def = resolveDomainDef(d);
+      return cards.includes(`- ${def.name}｜`);
+    });
+    assert.ok(visible, `工具 ${name} 的所属域均未出现在卡上`);
   }
   assert.equal(cards, buildDomainCards(corpus));
+});
+
+test("域卡回滚开关：AGENT_DOMAIN_CARDS_COMPACT=0 恢复详版（列工具名）", () => {
+  const prev = process.env.AGENT_DOMAIN_CARDS_COMPACT;
+  process.env.AGENT_DOMAIN_CARDS_COMPACT = "0";
+  try {
+    const cards = buildDomainCards(corpus);
+    const sample = corpus
+      .map((t) => (t.type === "function" ? t.function?.name ?? "" : ""))
+      .find((n) => n && !n.startsWith("tool_") && (domainsForTool(n).length > 1 || domainsForTool(n)[0] !== "misc"));
+    assert.ok(sample, "语料中应有非 misc 工具");
+    assert.ok(cards.includes(sample), `详版应列工具名: ${sample}`);
+  } finally {
+    if (prev === undefined) delete process.env.AGENT_DOMAIN_CARDS_COMPACT;
+    else process.env.AGENT_DOMAIN_CARDS_COMPACT = prev;
+  }
 });
 
 test("技能族域可见性（2026-10-10 根修回归）：habit 等派生域在域卡可见 + 按域可拉取", async () => {
@@ -112,7 +131,8 @@ test("技能族域可见性（2026-10-10 根修回归）：habit 等派生域在
       .map((e) => e.registryName)
       .filter((n) => n.startsWith(`${family}.`));
     if (members.length === 0) continue; // 该族未注册进语料（环境裁剪）→ 不误判
-    assert.ok(cards.includes(`${family}.`), `域卡缺失技能族 ${family}（能力面对模型不可见）`);
+    // 紧凑模式：卡片行是「- 域名｜摘要」，派生域 def.name 即域名本身。
+    assert.ok(cards.includes(`- ${family}｜`), `域卡缺失技能族 ${family}（能力面对模型不可见）`);
     const r = await executeToolSearchBridge("tool_discover", { domain: family }, catalog);
     assert.equal(r.ok, true, `按域拉取 ${family} 失败：${JSON.stringify(r.result)}`);
     const result = r.result as { mode: string; domain: string; matches: Array<{ name: string }> };

@@ -556,7 +556,7 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
 - http.request {url, method?, headers?, body?, timeoutMs?}: **通用 HTTP 客户端**(GET/POST/PUT/DELETE 等),带 SSRF 防护。调外部 API/Webhook 用此工具
 - info.inspect_webpage {url}: 巡检网页,返回链接列表(便于继续导航)
 - info.navigate_site {startUrl, goalKeywords?}: 同站多页 BFS 爬取
-- weather.get_local {latitude?, longitude?, city?}: 获取天气与穿衣建议
+- weather.get_local {latitude?, longitude?, city?, days?}: 获取天气与穿衣建议（days=预报天数 1-16，默认 2；问后天/周末等多日时传）
 
 ## 浏览器自动化(服务端 Playwright 无头浏览器)
 当任务需要"在网页上操作"(填表单/点按钮/多步交互/JS 渲染页面)时用以下工具:

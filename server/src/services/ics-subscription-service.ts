@@ -94,6 +94,51 @@ function isTruthyEnv(raw: string | undefined): boolean {
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
 }
 
+/**
+ * 私网 / 环回 / 链路本地地址字面量。
+ *
+ * 用户可自助填 URL 意味着服务端会去 fetch 任意地址——公开部署下这是标准的
+ * SSRF 面（拿它探内网、扫端口）。所以默认拦掉这些字面量；
+ * 自建日历（Radicale/群晖）确实在内网时，由部署方用 ICS_SUB_ALLOW_PRIVATE=1 放行。
+ */
+const PRIVATE_HOST_PATTERN =
+  /^(localhost|127\.\d{1,3}\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|169\.254\.\d{1,3}\.\d{1,3}|0\.0\.0\.0|::1|\[::1\])$/i;
+
+/** 校验用户填的订阅链接。**不合法就别落盘**，否则会留一个永远失败的源。 */
+export function validateIcsFeedUrl(
+  raw: string,
+  env: NodeJS.ProcessEnv = process.env,
+): { ok: true; url: string } | { ok: false; error: string } {
+  const s = (raw ?? "").trim();
+  if (!s) return { ok: false, error: "请提供一个 ics 订阅链接" };
+  let parsed: URL;
+  try {
+    parsed = new URL(s);
+  } catch {
+    return { ok: false, error: "链接格式不对，应为 https:// 开头的一段地址" };
+  }
+  if (parsed.protocol !== "https:" && parsed.protocol !== "http:") {
+    return { ok: false, error: "只支持 http / https 链接" };
+  }
+  if (isTruthyEnv(env.ICS_SUB_ALLOW_PRIVATE)) return { ok: true, url: parsed.toString() };
+  if (PRIVATE_HOST_PATTERN.test(parsed.hostname)) {
+    return {
+      ok: false,
+      error: "不能填内网或本机地址。自建日历（群晖/Radicale 等）请由部署方用 ICS_SUB_URLS 配置",
+    };
+  }
+  return { ok: true, url: parsed.toString() };
+}
+
+/** 从链接生成可读源名（用域名），用户不填名字时用。 */
+export function safeFeedName(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "") || "日历订阅";
+  } catch {
+    return "日历订阅";
+  }
+}
+
 // ---------------------------------------------------------------------- //
 // ICS 解析（RFC 5545 子集）
 // ---------------------------------------------------------------------- //
@@ -499,6 +544,16 @@ export class IcsSubscriptionService {
   private readonly tasks: ScheduleTaskService;
   private readonly notify: ((intent: ProactiveIntent) => void) | null;
   private readonly statePath: string;
+  /**
+   * 用户自助添加的订阅源（data/ics-sub/feeds.json）。
+   *
+   * 为什么必须有这一层：原来订阅源只能通过 ICS_SUB_URLS 环境变量配置，
+   * 意味着"接日历"这件事永远得由部署方改配置重启。而上班族的安排表
+   * （Outlook / Google / 飞书 / 企微 / 钉钉）恰恰都能导出 ics 订阅链接——
+   * 只要用户能把链接粘进来，就不需要任何一方改代码。
+   */
+  private readonly feedsPath: string;
+  private userFeeds: IcsFeedConfig[] = [];
   private readonly fetchImpl: typeof fetch;
   private readonly now: () => Date;
   private state: IcsWatchPersistedState;
@@ -521,6 +576,8 @@ export class IcsSubscriptionService {
     tasks: ScheduleTaskService;
     notify?: ((intent: ProactiveIntent) => void) | null;
     statePath?: string;
+    /** 用户自助订阅源落盘路径，缺省 <cwd>/data/ics-sub/feeds.json */
+    feedsPath?: string;
     fetchImpl?: typeof fetch;
     now?: () => Date;
   }) {
@@ -528,23 +585,43 @@ export class IcsSubscriptionService {
     this.tasks = deps.tasks;
     this.notify = deps.notify ?? null;
     this.statePath = deps.statePath ?? join(process.cwd(), "data", "ics-sub", "state.json");
+    this.feedsPath = deps.feedsPath ?? join(process.cwd(), "data", "ics-sub", "feeds.json");
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.now = deps.now ?? (() => new Date());
     this.state = readJson<IcsWatchPersistedState>(this.statePath, { version: 1, feeds: {} });
+    this.userFeeds = readJson<{ version: 1; feeds: IcsFeedConfig[] }>(this.feedsPath, {
+      version: 1,
+      feeds: [],
+    }).feeds.filter((f) => f && typeof f.url === "string" && typeof f.name === "string");
+  }
+
+  /** 生效的订阅源 = 环境变量配置 + 用户自助添加（按 URL 去重，env 优先）。 */
+  private allFeeds(): IcsFeedConfig[] {
+    const seen = new Set<string>();
+    const out: IcsFeedConfig[] = [];
+    for (const feed of [...this.config.feeds, ...this.userFeeds]) {
+      if (seen.has(feed.url)) continue;
+      seen.add(feed.url);
+      out.push(feed);
+    }
+    return out;
+  }
+
+  /** 是否有源在生效（env 开启且有源，或用户自助加了源）。 */
+  private isActive(): boolean {
+    return (this.config.enabled && this.config.feeds.length > 0) || this.userFeeds.length > 0;
   }
 
   start(): void {
-    if (!this.config.enabled) {
-      console.info("[ics-sub] 未启用（ICS_SUB_ENABLED=0），不拉取日历订阅");
+    if (!this.isActive()) {
+      console.info(
+        "[ics-sub] 未启用（ICS_SUB_ENABLED=0 且没有用户自助订阅源），不拉取日历订阅",
+      );
       return;
     }
-    if (this.config.feeds.length === 0) {
-      console.info("[ics-sub] 未配置订阅源（ICS_SUB_URLS 为空），不拉取");
-      return;
-    }
-    for (const feed of this.config.feeds) this.ensureFeedState(feed.name);
+    for (const feed of this.allFeeds()) this.ensureFeedState(feed.name);
     // 启动即拉第一轮（日历订阅首接就该看到存量），之后按间隔轮询
-    void this.pollAll().finally(() => this.scheduleNext());
+    void this.pollAll().catch(() => {}).finally(() => this.scheduleNext());
   }
 
   stop(): void {
@@ -556,10 +633,10 @@ export class IcsSubscriptionService {
 
   status(): IcsWatchStatus {
     return {
-      enabled: this.config.enabled,
+      enabled: this.isActive(),
       pollSec: this.config.pollSec,
       lookaheadDays: this.config.lookaheadDays,
-      feeds: this.config.feeds.map((feed) => {
+      feeds: this.allFeeds().map((feed) => {
         const st = this.feedStatus.get(feed.name);
         return {
           name: feed.name,
@@ -570,6 +647,80 @@ export class IcsSubscriptionService {
         };
       }),
     };
+  }
+
+  /**
+   * 用户自助添加订阅源（粘一个 ics 链接就完事）。
+   *
+   * 添加后**立刻拉一轮**并把导入条数返回给调用方：用户粘完链接要马上知道
+   * "成了没有、导进来几条"，而不是等 15 分钟后的下一次轮询。
+   *
+   * 失败话术分层：
+   *   - 链接不合法 → 400 语义（invalid）
+   *   - 拉取失败（404/超时/内容不是日历）→ 也返回 error，但不落盘，
+   *     免得用户留一个永远失败的源在系统里
+   */
+  async addFeed(input: { name?: string; url: string }): Promise<{
+    ok: boolean;
+    feed?: IcsFeedConfig;
+    imported?: number;
+    error?: string;
+  }> {
+    const checked = validateIcsFeedUrl(input.url);
+    if (!checked.ok) return { ok: false, error: checked.error };
+
+    const existing = this.allFeeds().find((f) => f.url === checked.url);
+    if (existing) {
+      // 已经在（env 或用户）里：不重复加，但顺手拉一次，让用户看到当前状态
+      const imported = await this.pollFeed(existing).catch(() => 0);
+      return { ok: true, feed: existing, imported };
+    }
+
+    const feed: IcsFeedConfig = {
+      name: (input.name ?? "").trim() || safeFeedName(checked.url),
+      url: checked.url,
+    };
+
+    let imported: number;
+    try {
+      imported = await this.pollFeed(feed);
+    } catch (e) {
+      return {
+        ok: false,
+        error: `这个链接拉不到日历：${e instanceof Error ? e.message : String(e)}。请确认是「.ics 订阅地址」而不是日历网页地址。`,
+      };
+    }
+
+    this.userFeeds = [...this.userFeeds, feed];
+    this.persistUserFeeds();
+    this.ensureFeedState(feed.name);
+    // 之前可能因为"没有源"而没启动轮询，加完要接上
+    if (!this.timer) void this.pollAll().catch(() => {}).finally(() => this.scheduleNext());
+    return { ok: true, feed, imported };
+  }
+
+  /** 删订阅源。只删用户自助加的那些；环境变量配置的删不掉（那是部署方的）。 */
+  removeFeed(nameOrUrl: string): { ok: boolean; removed: boolean; error?: string } {
+    const target = nameOrUrl.trim();
+    const idx = this.userFeeds.findIndex((f) => f.name === target || f.url === target);
+    if (idx < 0) {
+      const fromEnv = this.config.feeds.some((f) => f.name === target || f.url === target);
+      return {
+        ok: false,
+        removed: false,
+        error: fromEnv
+          ? "这个订阅源来自服务端环境变量（ICS_SUB_URLS），不能在客户端删除"
+          : "没有这个订阅源",
+      };
+    }
+    const [removedFeed] = this.userFeeds.splice(idx, 1);
+    this.persistUserFeeds();
+    this.feedStatus.delete(removedFeed.name);
+    return { ok: true, removed: true };
+  }
+
+  private persistUserFeeds(): void {
+    writeJson(this.feedsPath, { version: 1, feeds: this.userFeeds });
   }
 
   private ensureFeedState(name: string): IcsFeedState {
@@ -621,7 +772,7 @@ export class IcsSubscriptionService {
     if (this.timer) clearTimeout(this.timer);
     this.timer = setTimeout(() => {
       this.timer = null;
-      void this.pollAll().finally(() => this.scheduleNext());
+      void this.pollAll().catch(() => {}).finally(() => this.scheduleNext());
     }, this.config.pollSec * 1000);
     this.timer.unref?.();
   }
@@ -632,7 +783,7 @@ export class IcsSubscriptionService {
     this.polling = true;
     try {
       let changed = false;
-      for (const feed of this.config.feeds) {
+      for (const feed of this.allFeeds()) {
         try {
           const diff = await this.pollFeed(feed);
           changed = changed || diff > 0;

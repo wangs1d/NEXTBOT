@@ -69,35 +69,61 @@ test("recent-window policy: 大 maxThreadMessages 下超窗内容折叠进 recap
 
 // ---- 滑动窗口 + 增量摘要（2026-09-05 新契约）----
 
-test("增量摘要：LLM 合并成功后吸收待归纳区并清空 [unsummarized]", async () => {
+test("增量摘要：合并结果延后到下一次折叠才落地（不中途改 recap，守住前缀缓存）", async () => {
   const store = new ChatThreadStore(null);
   const sessionId = "incremental-summary-test";
   let capturedExisting: string[] = [];
   let capturedPending: string[] = [];
   let sawPendingInInput = false;
+  let calls = 0;
   store.setRecapSummarizer(async (ctx) => {
-    capturedExisting = [...ctx.existingLines];
-    capturedPending = [...(ctx.pendingLines ?? [])];
-    // 已有摘要行与待归纳原文行分字段传递（漂移修复契约）：待归纳原文是必须被吸收的素材
-    sawPendingInInput = capturedPending.some((l) => l.includes("user turn 1"));
+    calls += 1;
+    if (calls === 1) {
+      capturedExisting = [...ctx.existingLines];
+    }
+    // 待归纳原文可能来自「本批滑出」或「上一批留下的占位行」，两批都要看到才算不丢内容
+    capturedPending.push(...(ctx.pendingLines ?? []), ...ctx.droppedMessages.map((m) => String(m.content ?? "")));
+    if (!sawPendingInInput) {
+      sawPendingInInput =
+        (ctx.pendingLines ?? []).some((l) => l.includes("user turn 1")) ||
+        ctx.droppedMessages.some((m) => String(m.content ?? "").includes("user turn 1"));
+    }
     return ["[2026/09/05 10:00] 合并后的关键事实"];
   });
+
+  const flush = async () => {
+    await new Promise((resolve) => setImmediate(() => setImmediate(() => resolve(null))));
+  };
+  const recapOf = () => {
+    const thread = store.thread(sessionId, "system");
+    const recap = thread.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+    return recap ? String(recap!.content) : "";
+  };
 
   for (let i = 1; i <= 20; i++) {
     store.appendTurn(sessionId, "system", { text: `user turn ${i}` }, `assistant turn ${i}`, 200);
   }
-  // enhanceRecap 为 fire-and-forget，等待微任务链完成
-  await new Promise((resolve) => setImmediate(() => setImmediate(() => resolve(null))));
+  await flush();
 
-  const thread = store.thread(sessionId, "system");
-  const recap = thread.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.ok(recap, "应存在摘要消息");
-  const content = String(recap!.content);
-  assert.ok(content.includes("合并后的关键事实"), `摘要区应替换为 LLM 合并结果，实际: ${content}`);
-  assert.ok(!content.includes("[unsummarized]"), "待归纳区应被增量摘要吸收清空");
+  // 2026-10-22 契约变更：增强结果不再原地替换第 1 条 recap——
+  // recap 位于 messages 段最前端，中途改它等于把本轮请求与上一轮的前缀在 index 1 处砍断，
+  // 整个 messages 段（recap + 窗口）白掉一次缓存。改为暂存，等下一次真折叠时一并合入。
   assert.ok(sawPendingInInput, "合并输入应包含待归纳的原文占位行（不静默丢内容）");
   assert.ok(capturedExisting.length === 0, "已有摘要行不应混入待归纳素材（禁止 LLM 复述）");
   assert.ok(capturedPending.length > 0);
+  const beforeFold = recapOf();
+  assert.ok(!beforeFold.includes("合并后的关键事实"), "增强结果在折叠前不得落地（会打断前缀缓存）");
+  assert.ok(beforeFold.includes("[unsummarized]"), "折叠前待归纳原文必须仍在线程内（信息不丢）");
+
+  // 再聊到窗口再次超阈值 → 触发折叠 → 延后的增强在折叠这一轮一并合入
+  for (let i = 21; i <= 24; i++) {
+    store.appendTurn(sessionId, "system", { text: `user turn ${i}` }, `assistant turn ${i}`, 200);
+  }
+  await flush();
+  const afterFold = recapOf();
+  assert.ok(afterFold.includes("合并后的关键事实"), `折叠后摘要区应合入 LLM 增强结果，实际: ${afterFold}`);
+  // 被增强吸收的旧待归纳行应清出（本批新滑出的行照常进区，所以 [unsummarized] 仍存在）
+  assert.ok(!/user turn 1$/m.test(afterFold), `被吸收的待归纳行不应残留，实际: ${afterFold}`);
 });
 
 test("无摘要器降级：滑出窗口的内容以原文占位行保留在待归纳区，不静默丢失", () => {

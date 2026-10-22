@@ -529,8 +529,13 @@ export interface UnifiedLlmClient {
       create(args: {
         model: string;
         temperature: number;
+        /** json_object 约束（2026-10-22）；fake 实现可忽略该字段 */
+        response_format?: { type: "json_object" };
         messages: Array<{ role: string; content: string }>;
-      }): Promise<{ choices?: Array<{ message?: { content?: string } }> }>;
+      }): Promise<{
+        choices?: Array<{ message?: { content?: string | null } }>;
+        usage?: { prompt_tokens?: number; completion_tokens?: number };
+      }>;
     };
   };
 }
@@ -577,14 +582,38 @@ export async function extractUnified(
     const userContent = profileCtx
       ? `当前时间：${nowIso}\n\n【当前用户画像】\n${profileCtx.currentProfile.trim() || "（空）"}\n\n对话文本：\n${body.slice(0, 8000)}`
       : `当前时间：${nowIso}\n\n对话文本：\n${body.slice(0, 8000)}`;
-    const response = await openai.chat.completions.create({
-      model: opts?.model ?? getAgenticMemoryLlmModel(),
-      temperature: 0,
-      messages: [
-        { role: "system", content: systemContent },
-        { role: "user", content: userContent },
-      ],
-    });
+    const model = opts?.model ?? getAgenticMemoryLlmModel();
+    // json_object 约束（2026-10-22）：主路径 OpenAI 兼容端普遍支持；个别 provider
+    // 不支持时按 400 降级重试一次（只丢格式约束，不丢抽取任务）。
+    let response: {
+      choices?: Array<{ message?: { content?: string | null } }>;
+      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    };
+    try {
+      response = await openai.chat.completions.create({
+        model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: systemContent },
+          { role: "user", content: userContent },
+        ],
+      });
+    } catch (fmtErr) {
+      const msg = fmtErr instanceof Error ? fmtErr.message : String(fmtErr);
+      if (/400|response_format|json_object/i.test(msg)) {
+        response = await openai.chat.completions.create({
+          model,
+          temperature: 0,
+          messages: [
+            { role: "system", content: systemContent },
+            { role: "user", content: userContent },
+          ],
+        });
+      } else {
+        throw fmtErr;
+      }
+    }
     const output = response.choices?.[0]?.message?.content?.trim() ?? "";
     if (!output) return null;
 
@@ -598,6 +627,13 @@ export async function extractUnified(
       model: getAgenticMemoryLlmModel(),
       actorId: opts?.actorId,
       sessionId: opts?.sessionId,
+      // 真 usage 优先（2026-10-22）：非流式调用天然带 usage，有真值不再按字符估算
+      ...(response.usage
+        ? {
+            apiPromptTokens: response.usage.prompt_tokens,
+            apiCompletionTokens: response.usage.completion_tokens,
+          }
+        : {}),
     });
 
     return normalize(parseJsonObject(output) ?? {});

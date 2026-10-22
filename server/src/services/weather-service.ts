@@ -24,7 +24,25 @@ export type WeatherBrief = {
   summaryLine: string;
   /** 次日预报（结构化；Task 15 晚间 digest"明日预告"与次日预警检测用） */
   tomorrow?: WeatherTomorrow;
-};
+  /**
+   * 多日逐日预报（2026-10-22 扩展：getBrief 支持 days 参数）。
+   * index 0 = 今天，与请求的 forecast_days 对齐（1–16 天）。
+   * 下游兼容：tomorrow 恒等于 daily[1]（存在时）。
+   */
+  daily?: WeatherDailyForecastItem[];
+}
+
+/** 单日逐日预报概要（daily 数组元素，无逐小时行——逐小时走 getMultiDayForecast） */
+export type WeatherDailyForecastItem = {
+  /** 形如 2026-10-22 */
+  date: string;
+  weatherCode: number;
+  weatherText: string;
+  minC: number;
+  maxC: number;
+  /** 当日最大降水概率（0-100） */
+  rainPct: number;
+};;
 
 /** 次日预报摘要（来自 open-meteo daily 数组第 2 天） */
 export type WeatherTomorrow = {
@@ -153,7 +171,10 @@ export class WeatherService {
     longitude: number,
     timezone: string,
     locationLabel?: string,
+    /** 请求天数（1–16，Open-Meteo forecast_days 免费硬上限 16）；默认 2 = 今天+明天，保持旧行为 */
+    days = 2,
   ): Promise<WeatherBrief> {
+    const forecastDays = Math.max(1, Math.min(Math.trunc(days) || 2, 16));
     const params = new URLSearchParams({
       latitude: String(latitude),
       longitude: String(longitude),
@@ -168,7 +189,7 @@ export class WeatherService {
       ].join(","),
       hourly: ["temperature_2m", "precipitation_probability", "weather_code"].join(","),
       daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max"].join(","),
-      forecast_days: "2",
+      forecast_days: String(forecastDays),
     });
     const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
     const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
@@ -191,6 +212,7 @@ time?: (string | null)[];
         weather_code?: (number | null)[];
       };
       daily?: {
+        time?: (string | null)[];
         weather_code?: (number | null)[];
         temperature_2m_max?: (number | null)[];
         temperature_2m_min?: (number | null)[];
@@ -237,25 +259,41 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       summaryLine: "",
     };
 
-    // 构建明天预报摘要（用户常问"明天天气"）
-    const tomorrowMax = raw.daily?.temperature_2m_max?.[1];
-    const tomorrowMin = raw.daily?.temperature_2m_min?.[1];
-    const tomorrowRainPct = raw.daily?.precipitation_probability_max?.[1];
-    let tomorrowSummary = "";
-    if (tomorrowMax != null && tomorrowMin != null) {
-      const tomorrowText = wmoText(Number(raw.daily?.weather_code?.[1] ?? 0));
-      const rainInfo = tomorrowRainPct != null ? `，降水概率 ${tomorrowRainPct}%` : "";
-      tomorrowSummary = ` 明日${tomorrowText}，${tomorrowMin.toFixed(0)}–${tomorrowMax.toFixed(0)}°C${rainInfo}。`;
+    // 多日逐日预报（index 0 = 今天；days>1 时 daily[1] 即明天）
+    const dailyDates = raw.daily?.time ?? [];
+    const dailyItems: WeatherDailyForecastItem[] = [];
+    for (let d = 0; d < dailyDates.length; d++) {
+      const date = dailyDates[d];
+      const dMax = raw.daily?.temperature_2m_max?.[d];
+      const dMin = raw.daily?.temperature_2m_min?.[d];
+      if (!date || dMax == null || dMin == null) continue;
+      const dCode = Number(raw.daily?.weather_code?.[d] ?? 0);
+      dailyItems.push({
+        date,
+        weatherCode: dCode,
+        weatherText: wmoText(dCode),
+        minC: Number(dMin),
+        maxC: Number(dMax),
+        rainPct: Number(raw.daily?.precipitation_probability_max?.[d] ?? 0),
+      });
+    }
+    if (dailyItems.length > 0) {
+      brief.daily = dailyItems;
     }
 
-    // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）
-    if (tomorrowMax != null && tomorrowMin != null) {
+    // 明天一句话摘要（用户常问"明天天气"）
+    const tomorrow = dailyItems[1];
+    let tomorrowSummary = "";
+    if (tomorrow) {
+      const rainInfo = tomorrow.rainPct > 0 ? `，降水概率 ${tomorrow.rainPct}%` : "";
+      tomorrowSummary = ` 明日${tomorrow.weatherText}，${tomorrow.minC.toFixed(0)}–${tomorrow.maxC.toFixed(0)}°C${rainInfo}。`;
+      // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）
       brief.tomorrow = {
-        weatherCode: Number(raw.daily?.weather_code?.[1] ?? 0),
-        weatherText: wmoText(Number(raw.daily?.weather_code?.[1] ?? 0)),
-        minC: Number(tomorrowMin),
-        maxC: Number(tomorrowMax),
-        rainPct: Number(tomorrowRainPct ?? 0),
+        weatherCode: tomorrow.weatherCode,
+        weatherText: tomorrow.weatherText,
+        minC: tomorrow.minC,
+        maxC: tomorrow.maxC,
+        rainPct: tomorrow.rainPct,
       };
     }
 

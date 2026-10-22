@@ -74,10 +74,20 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   String _mailReason = "";
   bool _obscureMailPass = true;
 
+  /// 信息源树枝（GET /api/proactivity/branches；树状可插拔架构 Phase 3 配置面）。
+  List<Map<String, dynamic>> _branches = const <Map<String, dynamic>>[];
+  bool _branchesLoading = false;
+  String? _branchMessage;
+  bool _branchMessageError = false;
+
+  /// 盯梢任务（GET /api/proactivity/watch-tasks；Muse 对齐件的任务面板）。
+  List<Map<String, dynamic>> _watchTasks = const <Map<String, dynamic>>[];
+
   @override
   void initState() {
     super.initState();
     unawaited(_load());
+    unawaited(_loadBranches());
   }
 
   @override
@@ -455,6 +465,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _buildTtsCard(p),
         const SizedBox(height: 16),
         _buildMailCard(p),
+        const SizedBox(height: 16),
+        _buildBranchesCard(p),
         const SizedBox(height: 24),
       ],
     );
@@ -820,6 +832,296 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   // ═══════════════════════════════════════════════
   // 通用小组件
   // ═══════════════════════════════════════════════
+
+  // ═══════════════════════════════════════════════
+  // 信息源树枝卡（树状可插拔架构 Phase 3 配置面）
+  // ═══════════════════════════════════════════════
+
+  Future<void> _loadBranches() async {
+    setState(() => _branchesLoading = true);
+    try {
+      final http.Response resp = await http
+          .get(Uri.parse("${ApiConfig.httpBase}/api/proactivity/branches"),
+              headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        throw Exception("HTTP ${resp.statusCode}");
+      }
+      final Map<String, dynamic> parsed =
+          jsonDecode(resp.body) as Map<String, dynamic>;
+      if (parsed["ok"] != true) {
+        throw Exception(parsed["error"]?.toString() ?? "读取树枝配置失败");
+      }
+      List<Map<String, dynamic>> watchTasks =
+          const <Map<String, dynamic>>[];
+      try {
+        final http.Response wt = await http
+            .get(Uri.parse("${ApiConfig.httpBase}/api/proactivity/watch-tasks"),
+                headers: AccessCredentialStore.instance.authHeaders)
+            .timeout(const Duration(seconds: 15));
+        if (wt.statusCode == 200) {
+          final Map<String, dynamic> wp =
+              jsonDecode(wt.body) as Map<String, dynamic>;
+          if (wp["ok"] == true) {
+            watchTasks = ((wp["tasks"] as List<dynamic>?) ?? const <dynamic>[])
+                .map((e) => (e as Map<String, dynamic>))
+                .toList();
+          }
+        }
+      } catch (_) {
+        // 盯梢任务面缺失不挡树枝卡（旧服务端兼容）
+      }
+      if (!mounted) return;
+      setState(() {
+        _branches = ((parsed["branches"] as List<dynamic>?) ?? const <dynamic>[])
+            .map((e) => (e as Map<String, dynamic>))
+            .toList();
+        _watchTasks = watchTasks;
+        _branchMessage = null;
+        _branchMessageError = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _branchMessage = "树枝配置读取失败：$e";
+        _branchMessageError = true;
+      });
+    } finally {
+      if (mounted) setState(() => _branchesLoading = false);
+    }
+  }
+
+  Future<void> _patchBranch(
+    String id, {
+    bool? enabled,
+    bool? condense,
+  }) async {
+    try {
+      final http.Response resp = await http
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/proactivity/branches/config"),
+            headers: AccessCredentialStore.instance.authHeaders,
+            body: jsonEncode(<String, dynamic>{
+              "id": id,
+              if (enabled != null) "enabled": enabled,
+              if (condense != null) "condense": condense,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        throw Exception("HTTP ${resp.statusCode}");
+      }
+      await _loadBranches();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _branchMessage = "保存树枝配置失败：$e";
+        _branchMessageError = true;
+      });
+      await _loadBranches();
+    }
+  }
+
+  Future<void> _patchWatchTask(String actorId, String id, String action) async {
+    try {
+      final http.Response resp = await http
+          .post(
+            Uri.parse("${ApiConfig.httpBase}/api/proactivity/watch-tasks/config"),
+            headers: AccessCredentialStore.instance.authHeaders,
+            body: jsonEncode(<String, dynamic>{
+              "id": id,
+              "actorId": actorId,
+              "action": action,
+            }),
+          )
+          .timeout(const Duration(seconds: 15));
+      if (resp.statusCode != 200) {
+        throw Exception("HTTP ${resp.statusCode}");
+      }
+      await _loadBranches();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _branchMessage = "盯梢任务操作失败：$e";
+        _branchMessageError = true;
+      });
+    }
+  }
+
+  Widget _buildBranchesCard(MobilePalette p) {
+    return _card(
+      p,
+      children: <Widget>[
+        Row(
+          children: <Widget>[
+            Icon(Icons.account_tree_outlined, color: p.textSecondary, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text("信息源树枝",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600)),
+            ),
+            if (_branchesLoading)
+              const SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(strokeWidth: 2)),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          "每根树枝是一个信息源：停用后该来源不再进主动提醒管道；"
+          "「AI 精简」打开后由模型对过闸内容做摘要上报（每日有预算，失败自动回退原文摘要）。",
+          style: TextStyle(color: p.textSecondary, fontSize: 12.5, height: 1.45)),
+        const SizedBox(height: 12),
+        for (final Map<String, dynamic> b in _branches) ...<Widget>[
+          _branchRow(p, b),
+          if (b != _branches.last) const SizedBox(height: 4),
+        ],
+        if (_watchTasks.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 14),
+          Divider(height: 1, color: p.textMuted.withValues(alpha: 0.2)),
+          const SizedBox(height: 10),
+          Row(
+            children: <Widget>[
+              Icon(Icons.visibility_outlined, color: p.textSecondary, size: 16),
+              const SizedBox(width: 6),
+              Text("盯梢任务",
+                  style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              Text("对话里说「帮我盯着…」创建",
+                  style: TextStyle(color: p.textMuted, fontSize: 11.5)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          for (final Map<String, dynamic> t in _watchTasks)
+            _watchTaskRow(p, t),
+        ],
+        if (_branches.isEmpty && !_branchesLoading) ...<Widget>[
+          const SizedBox(height: 8),
+          Text("暂无树枝清单（服务端未装配或版本过旧）",
+              style: TextStyle(color: p.textMuted, fontSize: 12.5)),
+        ],
+        if (_branchMessage != null) ...<Widget>[
+          const SizedBox(height: 10),
+          Text(_branchMessage!,
+              style: TextStyle(
+                  color: _branchMessageError
+                      ? const Color(0xFFE5484D)
+                      : const Color(0xFF34C759),
+                  fontSize: 12.5)),
+        ],
+      ],
+    );
+  }
+
+  Widget _branchRow(MobilePalette p, Map<String, dynamic> b) {
+    final String id = b["id"]?.toString() ?? "";
+    final String label = b["label"]?.toString() ?? id;
+    final String mode = b["mode"]?.toString() ?? "streaming";
+    final bool enabled = b["enabled"] == true;
+    final bool condense = b["condense"] == true;
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(label,
+                  style: TextStyle(
+                      color: enabled ? p.textPrimary : p.textMuted,
+                      fontSize: 14.5,
+                      fontWeight: FontWeight.w500)),
+              const SizedBox(height: 2),
+              Text(
+                mode == "upload" ? "上传类 · 版本链" : "连接类 · 游标增量",
+                style: TextStyle(color: p.textMuted, fontSize: 11.5),
+              ),
+            ],
+          ),
+        ),
+        Text("AI 精简",
+            style: TextStyle(color: p.textSecondary, fontSize: 12)),
+        SizedBox(
+          width: 40,
+          height: 28,
+          child: FittedBox(
+            child: Switch(
+              value: condense,
+              activeThumbColor: Theme.of(context).colorScheme.primary,
+              onChanged: (bool v) => unawaited(_patchBranch(id, condense: v)),
+            ),
+          ),
+        ),
+        const SizedBox(width: 4),
+        SizedBox(
+          width: 40,
+          height: 28,
+          child: FittedBox(
+            child: Switch(
+              value: enabled,
+              activeThumbColor: Theme.of(context).colorScheme.primary,
+              onChanged: (bool v) => unawaited(_patchBranch(id, enabled: v)),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _watchTaskRow(MobilePalette p, Map<String, dynamic> t) {
+    final String id = t["id"]?.toString() ?? "";
+    final String actorId = t["actorId"]?.toString() ?? "";
+    final String label = t["label"]?.toString() ?? id;
+    final bool active = t["active"] == true;
+    final String keywords =
+        ((t["keywords"] as List<dynamic>?) ?? const <dynamic>[]).join("、");
+    return Row(
+      children: <Widget>[
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Text(label,
+                  style: TextStyle(
+                      color: active ? p.textPrimary : p.textMuted,
+                      fontSize: 13.5)),
+              if (keywords.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 1),
+                Text("关键词：$keywords",
+                    style: TextStyle(
+                        color: p.textMuted,
+                        fontSize: 11,
+                        overflow: TextOverflow.ellipsis)),
+              ],
+            ],
+          ),
+        ),
+        GestureDetector(
+          onTap: () => unawaited(_patchWatchTask(actorId, id, active ? "pause" : "resume")),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Text(active ? "暂停" : "恢复",
+                style: TextStyle(
+                    color: Theme.of(context).colorScheme.primary, fontSize: 12.5)),
+          ),
+        ),
+        GestureDetector(
+          onTap: () => unawaited(_patchWatchTask(actorId, id, "remove")),
+          child: Padding(
+            padding: const EdgeInsets.all(6),
+            child: Text("删除",
+                style: TextStyle(color: const Color(0xFFE5484D), fontSize: 12.5)),
+          ),
+        ),
+      ],
+    );
+  }
 
   Widget _card(MobilePalette p, {required List<Widget> children}) {
     return Container(

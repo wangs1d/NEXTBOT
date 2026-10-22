@@ -76,37 +76,74 @@ function activeExternalProvider(): string {
   return (process.env.EXTERNAL_MODEL_PROVIDER ?? "").trim().toLowerCase();
 }
 
+/**
+ * 「provider 自有键位」映射：只有在这里登记的 provider 才**独占**自己的
+ * key/endpoint（绝不回落到 OPENAI_*）。未登记的（openai / auto / failover /
+ * 空）继续沿用 OPENAI_* 兼容语义——这是历史行为，改动会打断既有部署。
+ *
+ * 2026-10-22 新增 deepseek：此前 provider=deepseek 时记忆侧会拿 OPENAI_* 兜底，
+ * 而 OPENAI_* 恰好也可能指向别家网关 → 记忆调用打到第二 provider（同一 bug
+ * 曾在 minimax 上演过，见本文件下方 origin 注释）。
+ */
+type ProviderLlmEnv = {
+  keyEnv: string;
+  baseUrlEnv: string;
+  modelEnv: string;
+  fallbackModel: string;
+  fallbackBaseUrl: string;
+};
+
+const PROVIDER_LLM_ENV: Record<string, ProviderLlmEnv> = {
+  minimax: {
+    keyEnv: "MINIMAX_API_KEY",
+    baseUrlEnv: "MINIMAX_BASE_URL",
+    modelEnv: "MINIMAX_MODEL",
+    fallbackModel: "MiniMax-M3",
+    fallbackBaseUrl: "https://api.minimaxi.com/v1",
+  },
+  deepseek: {
+    keyEnv: "DEEPSEEK_API_KEY",
+    baseUrlEnv: "DEEPSEEK_BASE_URL",
+    modelEnv: "DEEPSEEK_MODEL",
+    fallbackModel: "deepseek-flash",
+    fallbackBaseUrl: "https://api.deepseek.com/v1",
+  },
+};
+
+function ownProviderLlmEnv(): ProviderLlmEnv | null {
+  return PROVIDER_LLM_ENV[activeExternalProvider()] ?? null;
+}
+
 export function getAgenticMemoryLlmModel(): string {
   const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_MODEL?.trim();
   if (explicit) return explicit;
-  if (activeExternalProvider() === "minimax") {
-    return process.env.MINIMAX_MODEL?.trim() || "MiniMax-M3";
-  }
+  const own = ownProviderLlmEnv();
+  if (own) return process.env[own.modelEnv]?.trim() || own.fallbackModel;
   return process.env.OPENAI_MODEL?.trim() || "gpt-4o-mini";
 }
 
 /**
  * 记忆侧 LLM 的 baseURL：记忆专用覆盖 → 当前 provider 的端点。
- * provider=minimax 时**不再回落 OPENAI_BASE_URL**（server/.env 里可能残留
- * api.openai.com），否则 OpenAI SDK 会打到第二 provider。
+ * provider 有自有键位时**不再回落 OPENAI_BASE_URL**（server/.env 里可能残留
+ * 指向第二 provider 的地址），否则 OpenAI SDK 会打到别家。
  */
 export function resolveAgenticMemoryLlmBaseUrl(): string | undefined {
   const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_BASE_URL?.trim();
   if (explicit) return explicit;
-  if (activeExternalProvider() === "minimax") {
-    return process.env.MINIMAX_BASE_URL?.trim() || "https://api.minimaxi.com/v1";
-  }
+  const own = ownProviderLlmEnv();
+  if (own) return process.env[own.baseUrlEnv]?.trim() || own.fallbackBaseUrl;
   return process.env.OPENAI_BASE_URL?.trim();
 }
 
 export function resolveOpenAiApiKey(): string | null {
   const explicit = process.env.AGENT_AGENTIC_MEMORY_LLM_API_KEY?.trim();
-  // provider=minimax 时只认 MiniMax key：没有就禁用记忆侧 LLM，
+  // provider 有自有键位时只认自己的 key：没有就禁用记忆侧 LLM，
   // 绝不偷偷拿 OPENAI key 去请求另一个 provider。
+  const own = ownProviderLlmEnv();
   const key = explicit
     ? explicit
-    : activeExternalProvider() === "minimax"
-      ? process.env.MINIMAX_API_KEY?.trim() || null
+    : own
+      ? process.env[own.keyEnv]?.trim() || null
       : process.env.OPENAI_API_KEY?.trim() ||
         process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
         null;

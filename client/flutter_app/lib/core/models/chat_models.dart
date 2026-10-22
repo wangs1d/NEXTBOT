@@ -114,6 +114,7 @@ class ChatMessage {
     this.pendingMediaCards,
     this.followUpPrompts,
     this.decisionCard,
+    this.eveningDigest,
     this.transferReminder,
     this.taskId,
     this.taskState,
@@ -238,6 +239,16 @@ class ChatMessage {
   ///   - deliveryId: 主动性消息的 outcome 目标（kind=proactive）
   final Map<String, dynamic>? decisionCard;
 
+  /// 睡前备忘卡（contentType="evening_digest"，2026-10-22 定调）。
+  ///
+  /// 晚间 digest（evening.digest 事件）落对话流一张专属卡：结构化块
+  /// （明日行程 / 次日天气穿衣 / 行程超支 / 今日回顾）由 EveningDigestCard
+  /// 专属渲染，narrationText 保留为卡顶部的 agent 文案段。载荷与服务端
+  /// EveningDigest 同构（ws payload.digest）。
+  /// 持久化（手机端）：随消息落本地历史，重启后仍以卡片形态渲染
+  /// （isar store 加密存储，同 summaryCard 模式）。
+  final Map<String, dynamic>? eveningDigest;
+
   /// 接驳确认卡（contentType="transfer_reminder"）。
   ///
   /// 行程段临近到达（如高铁快到站）时服务端经 `agent.transfer_reminder`
@@ -296,6 +307,7 @@ class ChatMessage {
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
     Map<String, dynamic>? decisionCard,
+    Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
     String? taskId,
     String? taskState,
@@ -324,6 +336,7 @@ class ChatMessage {
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
       decisionCard: decisionCard ?? this.decisionCard,
+      eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,
       taskId: taskId ?? this.taskId,
       taskState: taskState ?? this.taskState,

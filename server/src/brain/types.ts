@@ -15,16 +15,6 @@ export interface CapabilityDescriptor {
   registeredAt: string;       // ISO timestamp
 }
 
-// 能力缺口报告
-export interface CapabilityGapReport {
-  scenario: string;                          // 输入的场景描述
-  missingDomains: string[];                   // 缺失的能力域标识
-  relatedExisting: string[];                  // 可复用的相邻能力域
-  expandable: boolean;                        // 是否可走 self-programming 扩展
-  rationale: string;
-  detectedAt: string;
-}
-
 // 用户活动状态
 // 注：活动类型仅作为「打扰评分上下文」（如 sleeping 状态打扰分高），
 // 不作为主动决策的入口。主动决策由 LifeSignal 原始字段驱动通用评分。
@@ -132,123 +122,12 @@ export interface BrainDecision {
   decidedAt: string;
 }
 
-// 进化提案
-// - new_capability / optimize_existing / add_tool / update_prompt：技能层（缺工具或工具需优化）
-// - knowledge_gap：知识层（工具齐全且调用成功，但用户反复问同类问题 → 缺背景知识）
-// - self_upgrade：自我改写层（依赖升级/代码修复，经 CodeRepairCortex 显式执行路径）
-// - skill_distill：经验沉淀层（复杂任务成功后，把踩坑经验提炼成 procedural 技能文档 SKILL.md）
-export type EvolutionProposalType =
-  | "new_capability"
-  | "optimize_existing"
-  | "add_tool"
-  | "update_prompt"
-  | "knowledge_gap"
-  | "self_upgrade"
-  | "skill_distill";
-export type EvolutionProposalStatus =
-  | "pending"
-  | "reviewing"
-  | "approved"          // Cortex 自动批准（规则判定可执行）
-  | "awaiting_user_approval"  // 已生成 Skill，等待用户确认是否装载
-  | "rejected"
-  | "generated"         // 已生成但未装载（PromotionPipeline 不可用或用户拒绝）
-  | "loaded";           // 已装载到运行时
-export interface EvolutionProposal {
-  id: string;
-  type: EvolutionProposalType;
-  title: string;
-  description: string;
-  rationale: string;
-  status: EvolutionProposalStatus;
-  relatedGap?: CapabilityGapReport;
-  createdAt: string;
-  updatedAt: string;
-}
-
-// ============================================================
-// CodeRepairCortex 自我修复类型
-// ============================================================
-
-/** Bug 信号来源 */
-export type BugSignalSource =
-  | "unhandled_rejection" // process.on('unhandledRejection')
-  | "uncaught_exception" // process.on('uncaughtException')
-  | "tool_loop_max_rounds" // 工具循环达到最大轮次仍未完成
-  | "apology_fallback_burst" // 道歉式兜底短时间高频出现
-  | "compile_error" // tsc --noEmit 失败
-  | "user_report" // 用户主动报告
-  | "runtime_error"; // 运行时抛错被捕获
-
-/** Bug 信号（CodeRepairCortex 触发入口） */
-export interface BugSignal {
-  /** 唯一 id（不传则 cortex 自动生成） */
-  id?: string;
-  source: BugSignalSource;
-  /** 简短标题：如 "chat-user-message.ts 状态行重复推送" */
-  title: string;
-  /** 错误消息 / 堆栈 / 关键日志（多行字符串） */
-  errorMessage?: string;
-  /** 嫌疑文件路径（绝对或相对 server/，cortex 内部归一） */
-  suspectFiles?: string[];
-  /** 触发该信号的会话 id（可选，用于日志关联） */
-  sessionId?: string;
-  /** 用户原始消息（user_report 时必填） */
-  userReport?: string;
-  /** 触发时间戳（不传则 cortex 自动生成） */
-  observedAt?: string;
-}
-
-/** 修复提案状态 */
-export type RepairStatus =
-  | "pending" // 刚接收到 BugSignal
-  | "isolating" // 正在隔离问题（收集文件 + 日志）
-  | "analyzing" // 正在分析根因
-  | "patching" // 正在生成 patch
-  | "testing" // 正在跑 tsc + test
-  | "applying" // 正在应用 patch 到源码
-  | "fixed" // 修复成功（终态）
-  | "failed" // 修复失败（可重试）
-  | "rejected"; // 超过重试上限（终态）
-
-/** 修复提案 */
-export interface RepairProposal {
-  id: string;
-  /** 关联 BugSignal id */
-  bugSignalId: string;
-  source: BugSignalSource;
-  title: string;
-  errorMessage?: string;
-  suspectFiles: string[];
-  status: RepairStatus;
-  /** 重试次数（失败后递增，达到 maxRetries 转 rejected） */
-  retryCount: number;
-  /** 已隔离的相关文件内容快照（路径 → 内容片段） */
-  isolatedContext?: Record<string, string>;
-  /** LLM 分析出的根因 */
-  rootCause?: string;
-  /** 生成的 unified diff patch */
-  patch?: string;
-  /** LLM 对修复的简要说明 */
-  explanation?: string;
-  /** 测试输出（tsc/test 的 stderr+stdout） */
-  testOutput?: string;
-  /** 是否测试通过 */
-  testPassed?: boolean;
-  /** 最近一次失败原因 */
-  lastError?: string;
-  /** 备份目录路径（修复成功后保留 7 天） */
-  backupDir?: string;
-  createdAt: string;
-  updatedAt: string;
-}
-
 // 大脑状态快照
 export interface BrainSnapshot {
   actorId: string;
   capabilities: CapabilityDescriptor[];
   userActivity: UserActivityState | null;
   lastDecisions: BrainDecision[];
-  pendingEvolutions: EvolutionProposal[];
   capturedAt: string;
   // 神经解剖扩展（可选）
   sensory?: {

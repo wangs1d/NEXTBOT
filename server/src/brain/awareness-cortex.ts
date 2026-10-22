@@ -88,16 +88,6 @@ interface ProactionLike {
   recentDecisions(actorId: string): BrainDecision[];
 }
 
-/**
- * AgentSelfLearningService 的最小化结构接口（Stage 4 Task 3）。
- *
- * assessConfidence 用 getRecentFailureRate 注入「历史失败率」因子：
- * 失败率 > 0.3 → -0.2。未注册时跳过该因子（不扣分）。
- */
-interface SelfLearningLike {
-  getRecentFailureRate?(): number;
-}
-
 // ---- 关键词表 ----------------------------------------------------------
 
 // 出行类关键词（中文 + 英文）
@@ -181,8 +171,6 @@ export class AwarenessCortex {
   private anticipation: AnticipationLike | null = null;
   private scheduleTask: ScheduleTaskLike | null = null;
   private proaction: ProactionLike | null = null;
-  /** AgentSelfLearningService（可选，供 assessConfidence 注入历史失败率因子） */
-  private selfLearning: SelfLearningLike | null = null;
   /** SemanticAwarenessInferrer（可选，注入后 observeWithMental 产出 UserMentalState） */
   private semanticInferrer: SemanticAwarenessInferrer | null = null;
 
@@ -367,15 +355,6 @@ export class AwarenessCortex {
   registerProaction(svc: ProactionLike): void {
     this.proaction = svc;
     console.log("[AwarenessCortex] 已注册 ProactionCortex");
-  }
-
-  /**
-   * 注册自我学习服务（Stage 4 Task 3），供 assessConfidence 注入历史失败率因子。
-   * 未注册时跳过该因子（不扣分）。
-   */
-  registerSelfLearning(svc: SelfLearningLike): void {
-    this.selfLearning = svc;
-    console.log("[AwarenessCortex] 已注册 AgentSelfLearningService");
   }
 
   /**
@@ -627,20 +606,6 @@ export class AwarenessCortex {
     } else {
       score -= 0.2;
       reasons.push("capability_match=none(-0.2)");
-    }
-
-    if (this.selfLearning && typeof this.selfLearning.getRecentFailureRate === "function") {
-      try {
-        const failureRate = this.selfLearning.getRecentFailureRate();
-        if (failureRate > 0.3) {
-          score -= 0.2;
-          reasons.push(`failure_rate=${failureRate.toFixed(2)}(-0.2)`);
-        } else {
-          reasons.push(`failure_rate=${failureRate.toFixed(2)}(0)`);
-        }
-      } catch (err) {
-        console.log(`[AwarenessCortex] assessConfidence getRecentFailureRate 异常（跳过）: ${err}`);
-      }
     }
 
     const finalScore = Math.max(0, Math.min(1, score));

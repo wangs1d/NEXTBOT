@@ -85,6 +85,28 @@ export function minimaxThinkingExtras(
     : { ...body, thinking: { type: "disabled" } };
 }
 
+/**
+ * DeepSeek 系「关思考」意图的请求参数（provider 路径与裸 SDK 旁路共用同一判定）。
+ *
+ * 2026-10-22 实测（deepseek-flash，同一句「只回复两个字」）：
+ * - 不表态：`effort` 默认 high，带思考；
+ * - `thinking: {type:"disabled"}` → 200，`reasoning_tokens=0`（**唯一真关掉的方式**）；
+ * - `reasoning_effort: "minimal"` / `"low"` → 200 但仍烧 35/40 个思考 token（只是降档）。
+ * 所以关思考必须走 thinking 字段；思考开着时允许 `DEEPSEEK_REASONING_EFFORT`
+ * （low|high|max）调档，不设则用服务端默认 high。
+ */
+export function deepseekThinkingExtras(
+  model: string,
+  disableThinking: boolean,
+): Record<string, unknown> {
+  void model; // 思考开关与模型无关（flash / v4-pro 均识 thinking 字段）
+  if (!disableThinking) {
+    const effort = process.env.DEEPSEEK_REASONING_EFFORT?.trim().toLowerCase();
+    return effort ? { reasoning_effort: effort } : {};
+  }
+  return { thinking: { type: "disabled" } };
+}
+
 export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
   openai: {
     // openai 槽位可能托管 gpt 系（无思考）或 DeepSeek（deepseek-flash 默认带思考，
@@ -102,6 +124,15 @@ export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
     thinkingProne: true,
     canDisableThinking: true,
     bypassRequestExtras: disableThinking,
+    ...FAST_ROUTE,
+    supportsJsonMode: true,
+  },
+  deepseek: {
+    // flash 档 effort 默认 high（=带思考）；thinking:disabled 真生效，关掉后单次
+    // 小请求 0.6-0.8s，故路由沿用快档预算。图像输入只有 flash 支持，v4-pro 纯文本。
+    thinkingProne: true,
+    canDisableThinking: true,
+    bypassRequestExtras: (model) => deepseekThinkingExtras(model, true),
     ...FAST_ROUTE,
     supportsJsonMode: true,
   },

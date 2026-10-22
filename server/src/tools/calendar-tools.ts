@@ -3,6 +3,8 @@
  * 与 Web 聊天里用自然语言建日程、`/chat/schedule-draft` 同源解析（`calendar.create_from_text`）。
  */
 import { resolveActorId } from "../agent/actor-id.js";
+import { primarySubjectOf } from "../proactivity/discovery-layer.js";
+import type { ScheduleAssertionStore } from "../proactivity/branches/schedule-assertion-store.js";
 import { isAlarmLikeReminderText, repeatRuleFromRecurrence, type ScheduleRecurrence } from "../services/alarm-clock/alarm-intent.js";
 import type { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import type { ScheduleConflictService } from "../services/schedule-conflict-service.js";
@@ -158,6 +160,8 @@ export function registerCalendarTools(
   conflictService?: ScheduleConflictService,
   /** 闹钟服务懒取用器：闹钟服务在装配序列后段构造，用 getter 解耦创建顺序 */
   getAlarmClockService?: () => AlarmClockService | null,
+  /** 上传树枝日程主张库（可选）：批量导入课表/行程表时落版本链（缺省跳过） */
+  assertionStore?: ScheduleAssertionStore,
 ): void {
   registry.register("calendar.create_from_text", async (input, context) => {
     const text = String(input.text ?? "").trim();
@@ -681,6 +685,43 @@ export function registerCalendarTools(
         results.push({ index: i, description: itemLabel, ok: false, error: e instanceof Error ? e.message : String(e) });
       }
     }
+
+    // 上传树枝挂点（2026-10-22 树状架构 Phase 1）：批量导入（≥3 条或显式 sourceName）
+    // 视为用户上传的课表/行程表 → 事实主张入库（版本链）。此后消息树枝的日程变动
+    // 信号 × 本库主张 → 冲突检测 → 主动性板块开口（AssertionConflictWatcher）。
+    // 单条/双条创建不是文档导入，不入库。失败不影响批量创建主结果。
+    if (assertionStore && created > 0 && (rawItems.length >= 3 || String(input.sourceName ?? "").trim())) {
+      try {
+        const ingestItems = results
+          .filter((r): r is (typeof results)[number] & { ok: true; taskId: string; description: string } => r.ok === true)
+          .map((r) => {
+            const raw = rawItems[Number(r.index)] ?? {};
+            const title = String(raw.title ?? "").trim() || r.description;
+            const subject = primarySubjectOf(`${title} ${r.description}`) ?? title.slice(0, 4);
+            return {
+              subject,
+              title,
+              runAt: Date.parse(String(raw.runAt ?? "")),
+              durationMinutes: normalizeDurationMinutes(raw.durationMinutes),
+              taskId: r.taskId,
+            };
+          })
+          .filter((it) => it.subject.length >= 2 && Number.isFinite(it.runAt) && it.runAt > 0);
+        if (ingestItems.length > 0) {
+          const ingest = assertionStore.ingestDocument(sessionId, String(input.sourceName ?? "批量导入").trim(), ingestItems);
+          if (ingest.documentId) {
+            (results as Array<Record<string, unknown>>).push({
+              assertionDocument: ingest.documentId,
+              assertionVersion: ingest.version,
+              assertionSuperseded: ingest.superseded,
+            });
+          }
+        }
+      } catch {
+        /* 主张入库失败不影响日程创建主链路 */
+      }
+    }
+
     return {
       ok: failed === 0,
       summary: `批量创建完成：成功 ${created} 条${skipped > 0 ? `，冲突跳过 ${skipped} 条` : ""}${failed > 0 ? `，失败 ${failed} 条` : ""}。请逐条转述（用 nextRunAtLocal 展示时间），冲突与失败条目如实说明，不要声称全部成功。`,

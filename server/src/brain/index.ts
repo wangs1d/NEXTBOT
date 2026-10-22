@@ -1,16 +1,9 @@
 // Agent Brain Center — 模块出口
 export * from "./types.js";
 export { BrainCenter } from "./brain-center.js";
-export { CapabilityCortex, type GapAnalyzer, type GapAnalysisResult } from "./capability-cortex.js";
+export { CapabilityCortex } from "./capability-cortex.js";
 export { AwarenessCortex } from "./awareness-cortex.js";
 export { ProactionCortex, type EndToEndDecisionMaker, type EndToEndDecisionContext, type MemoryCortexLike, type RecentConversationProvider } from "./proaction-cortex.js";
-export { EvolutionCortex } from "./evolution-cortex.js";
-export {
-  CodeRepairCortex,
-  DefaultTestRunner,
-  type CodeRepairLlmLike,
-  type RepairTestRunnerLike,
-} from "./code-repair-cortex.js";
 export { SensoryCortex } from "./sensory-cortex.js";
 export { MemoryCortex } from "./memory-cortex.js";
 export { SynapseBus } from "./synapse-bus.js";

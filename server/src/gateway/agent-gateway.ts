@@ -1,16 +1,18 @@
 /**
  * AgentGateway — 统一资源路由网关（唯一收口）。
  *
- * 所有工具/技能/MCP 资源的「准备、检索、桥接执行、强制路由」都经由本模块发起，
+ * 所有工具/技能/MCP 资源的「准备、检索、桥接执行」都经由本模块发起，
  * 底层委托：
  *   - tool-search/：延迟目录（deferred catalog 构建 + 进程内 adaptive 检索 + 桥接执行）
- *   - gateway/forced-tool.ts：强制工具路由（phone/clock/search_web）
+ *   - gateway/forced-tool.ts：办事信号供给（只作出口对账授权，不再事前强制）
  *
  * 网关职责：
  *   1. prepareTools：core/deferred 工具切分 + tool_discover 桥注入（trace: tool_prepare）
- *   2. resolveForcedTool：事实型问题强制工具选择（trace: forced_tool）
- *   3. executeBridge：tool_discover / tool_call 桥接执行（trace: bridge_execute）
- *   4. searchResources：直接检索延迟目录（诊断/管理端，trace: resource_search）
+ *   2. executeBridge：tool_discover / tool_call 桥接执行（trace: bridge_execute）
+ *   3. searchResources：直接检索延迟目录（诊断/管理端，trace: resource_search）
+ *
+ * 2026-10-22：resolveForcedTool（事实型问题强制 tool_choice）已退役——请求层
+ * 恒 auto，确定性全部后移到工具循环的出口对账闸（不预测，只验证）。
  *
  * 调用方一律 import gateway（不直接 import tool-search），保证路由行为可追踪、可治理。
  */
@@ -31,7 +33,6 @@ import {
   type ToolSearchPreparedTurn,
 } from "../tools/tool-search/index.js";
 import { adaptiveSearchDeferredTools, type AdaptiveDeferredToolSearchMatch } from "../tools/tool-search/adaptive-catalog.js";
-import { resolveForcedToolChoice, type ForcedToolChoice } from "./forced-tool.js";
 import { recordGatewayTrace } from "./gateway-trace.js";
 
 let _traceCounter = 0;
@@ -144,21 +145,6 @@ export async function prepareTools(
     });
     throw error;
   }
-}
-
-/**
- * 强制工具路由：phone/clock/search_web 场景强制 tool_choice，
- * 避免 LLM 在事实型问题上编造（weather 已并入 tool-router 由检索召回）。
- */
-export function resolveForcedTool(
-  userText: string,
-  apiTools: ChatCompletionTool[],
-  fastProfile?: boolean,
-): ForcedToolChoice {
-  const choice = resolveForcedToolChoice(userText, apiTools, fastProfile);
-  const decision =
-    choice === "auto" || choice === "required" ? choice : `forced:${choice.function.name}`;
-  return traced("forced_tool", decision, [`fastProfile=${fastProfile ?? false}`], () => choice);
 }
 
 /**

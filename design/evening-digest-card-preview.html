@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>睡前备忘卡 · 效果预览</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: "MiSans", "PingFang SC", "Microsoft YaHei", "Noto Sans SC", sans-serif;
+    background: #F7F7F8;
+    color: #111112;
+    padding: 40px 16px 64px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 36px;
+  }
+  .page-title { font-size: 15px; color: #70707A; text-align: center; line-height: 1.6; }
+  .page-title b { color: #111112; font-weight: 500; }
+  .row { display: flex; gap: 24px; flex-wrap: wrap; justify-content: center; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 10px; }
+  .col-label { font-size: 12px; color: #A6A6AF; }
+
+  /* ── 卡片本体（1:1 还原 EveningDigestCard）── */
+  .card {
+    width: 360px;
+    background: #FFFFFF;
+    border: 1px solid #EDEDEF;
+    border-radius: 14px;
+    padding: 14px 16px 14px;
+  }
+  .head { display: flex; align-items: center; }
+  .head-icon {
+    width: 30px; height: 30px; border-radius: 50%;
+    background: rgba(0,0,0,0.12);
+    display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0;
+  }
+  .head-icon svg { width: 17px; height: 17px; fill: #000; }
+  .head-title { font-size: 16px; font-weight: 600; margin-left: 10px; flex: 1; }
+  .head-date { font-size: 12px; color: #70707A; }
+  .narration { margin-top: 12px; font-size: 14px; line-height: 1.55; color: #111112; }
+  .sec { margin-top: 14px; display: flex; align-items: center; }
+  .sec svg { width: 16px; height: 16px; fill: #70707A; }
+  .sec span { font-size: 13.5px; font-weight: 500; margin-left: 6px; }
+  .items { margin-top: 4px; }
+  .item { display: flex; align-items: flex-start; margin-top: 7px; }
+  .item-time {
+    width: 44px; flex-shrink: 0;
+    font-size: 12px; font-weight: 600; color: #000;
+    line-height: 1.45;
+  }
+  .item-main { flex: 1; }
+  .item-title { font-size: 14px; color: #111112; line-height: 1.45; }
+  .item-notes { font-size: 12px; color: #70707A; margin-top: 2px; }
+  .weather-row { margin-top: 6px; display: flex; align-items: center; }
+  .weather-temp { font-size: 22px; font-weight: 600; letter-spacing: 0.5px; }
+  .weather-line { font-size: 14px; color: #70707A; margin-left: 10px; flex: 1; }
+  .chips { margin-top: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .chip {
+    background: #F9DEDC; color: #410E0B;
+    font-size: 11px; padding: 3px 8px; border-radius: 8px;
+  }
+  .outfit { margin-top: 8px; display: flex; align-items: flex-start; }
+  .outfit svg { width: 15px; height: 15px; fill: #70707A; flex-shrink: 0; margin-top: 1px; }
+  .outfit p { font-size: 12px; color: #70707A; line-height: 1.45; margin-left: 6px; flex: 1; }
+  .budget {
+    margin-top: 12px; background: #F7EEDD; border-radius: 10px;
+    padding: 9px 12px; display: flex; align-items: center;
+  }
+  .budget svg { width: 16px; height: 16px; fill: #8A5A00; flex-shrink: 0; }
+  .budget p { font-size: 12px; color: #6E4A02; margin-left: 8px; flex: 1; }
+
+  /* ── 深色主题 ── */
+  .dark { background: #121214; color: #F2F2F4; }
+  .dark .card { background: #1B1B1E; border-color: #26262B; }
+  .dark .head-icon { background: rgba(255,255,255,0.14); }
+  .dark .head-icon svg { fill: #FFF; }
+  .dark .head-date { color: #9A9AA2; }
+  .dark .narration { color: #E9E9EC; }
+  .dark .sec svg { fill: #9A9AA2; }
+  .dark .item-time { color: #FFF; }
+  .dark .item-title { color: #E9E9EC; }
+  .dark .item-notes { color: #9A9AA2; }
+  .dark .weather-line { color: #9A9AA2; }
+  .dark .chip { background: #5C1616; color: #FFDAD6; }
+  .dark .outfit svg { fill: #9A9AA2; }
+  .dark .outfit p { color: #9A9AA2; }
+  .dark .budget { background: #332B1B; }
+  .dark .budget svg { fill: #E8C476; }
+  .dark .budget p { color: #E8C476; }
+</style>
+</head>
+<body>
+  <div class="page-title"><b>睡前备忘卡</b>效果预览 · 1:1 还原 Flutter 组件（黑白极简主题）<br>每晚对「明天要做的事」的简短汇报，整卡恒展开、无折叠</div>
+
+  <div class="row">
+    <div class="col">
+      <div class="card">
+        <div class="head">
+          <div class="head-icon"><svg viewBox="0 0 24 24"><path d="M12.34 2.02C6.59 1.82 2 6.42 2 12c0 5.52 4.48 10 10 10 3.71 0 6.93-2.02 8.66-5.02-7.51-.25-12.09-8.43-8.32-14.96z"/></svg></div>
+          <div class="head-title">睡前备忘</div>
+          <div class="head-date">明天 10月23日 周五</div>
+        </div>
+        <p class="narration">明天九点半有个周会，我八点五十提醒你出门。降温了，外套备好，早点睡。</p>
+
+        <div class="sec"><svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V9h14v10zm0-12H5V5h14v2zM7 11h5v5H7z"/></svg><span>明天的行程</span></div>
+        <div class="items">
+          <div class="item">
+            <div class="item-time">07:20</div>
+            <div class="item-main">
+              <div class="item-title">晨跑 30 分钟</div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="item-time">09:30</div>
+            <div class="item-main">
+              <div class="item-title">项目周会</div>
+              <div class="item-notes">8:50该出门了</div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="item-time">19:00</div>
+            <div class="item-main">
+              <div class="item-title">健身课</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sec"><svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg><span>明天天气</span></div>
+        <div class="weather-row">
+          <div class="weather-temp">14~22°</div>
+          <div class="weather-line">小雨，降水 40%</div>
+        </div>
+        <div class="chips"><span class="chip">大风预警</span></div>
+        <div class="outfit">
+          <svg viewBox="0 0 24 24"><path d="M9 3l-5 4 2 2 1-1v13h10V8l1 1 2-2-5-4c-.83 1.25-2.21 2-3.5 2S9.83 4.25 9 3z"/></svg>
+          <p>外套，记得带伞</p>
+        </div>
+
+        <div class="budget">
+          <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 14.93V18h-2v-1.07c-1.9-.34-3-1.5-3.08-3.02h1.96c.08.98.86 1.59 2.14 1.59 1.28 0 1.98-.62 1.98-1.44 0-.9-.62-1.28-2.26-1.62-2.1-.42-3.6-1.24-3.6-3.1 0-1.44 1.1-2.56 2.86-2.9V5h2v1.44c1.7.4 2.72 1.5 2.8 3h-1.94c-.08-.94-.76-1.5-1.9-1.5-1.14 0-1.8.52-1.8 1.28 0 .84.76 1.18 2.44 1.56 2.12.46 3.44 1.3 3.44 3.14-.02 1.56-1.16 2.68-3.04 3.01z"/></svg>
+          <p>今天在成都花了 938 元，超出日预算 800 元</p>
+        </div>
+      </div>
+      <div class="col-label">浅色 · 数据齐全（行程 + 天气预警 + 超支）</div>
+    </div>
+
+    <div class="col">
+      <div class="card">
+        <div class="head">
+          <div class="head-icon"><svg viewBox="0 0 24 24"><path d="M12.34 2.02C6.59 1.82 2 6.42 2 12c0 5.52 4.48 10 10 10 3.71 0 6.93-2.02 8.66-5.02-7.51-.25-12.09-8.43-8.32-14.96z"/></svg></div>
+          <div class="head-title">睡前备忘</div>
+          <div class="head-date">明天 10月23日 周五</div>
+        </div>
+        <p class="narration">明天没安排，想睡就多睡会儿。18 度，长袖刚好。早点睡。</p>
+
+        <div class="sec"><svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg><span>明天天气</span></div>
+        <div class="weather-row">
+          <div class="weather-temp">12~18°</div>
+          <div class="weather-line">多云</div>
+        </div>
+        <div class="outfit">
+          <svg viewBox="0 0 24 24"><path d="M9 3l-5 4 2 2 1-1v13h10V8l1 1 2-2-5-4c-.83 1.25-2.21 2-3.5 2S9.83 4.25 9 3z"/></svg>
+          <p>长袖就行，早晚偏凉</p>
+        </div>
+      </div>
+      <div class="col-label">浅色 · 明天没安排（只说天气，安静形态）</div>
+    </div>
+  </div>
+
+  <div class="row">
+    <div class="col dark" style="background:#121214;padding:24px;border-radius:16px;">
+      <div class="card">
+        <div class="head">
+          <div class="head-icon"><svg viewBox="0 0 24 24"><path d="M12.34 2.02C6.59 1.82 2 6.42 2 12c0 5.52 4.48 10 10 10 3.71 0 6.93-2.02 8.66-5.02-7.51-.25-12.09-8.43-8.32-14.96z"/></svg></div>
+          <div class="head-title">睡前备忘</div>
+          <div class="head-date">明天 10月23日 周五</div>
+        </div>
+        <p class="narration">明天九点半有个周会，我八点五十提醒你出门。降温了，外套备好，早点睡。</p>
+
+        <div class="sec"><svg viewBox="0 0 24 24"><path d="M19 3h-1V1h-2v2H8V1H6v2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2V5c0-1.1-.9-2-2-2zm0 16H5V9h14v10zm0-12H5V5h14v2zM7 11h5v5H7z"/></svg><span>明天的行程</span></div>
+        <div class="items">
+          <div class="item">
+            <div class="item-time">07:20</div>
+            <div class="item-main">
+              <div class="item-title">晨跑 30 分钟</div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="item-time">09:30</div>
+            <div class="item-main">
+              <div class="item-title">项目周会</div>
+              <div class="item-notes">8:50该出门了</div>
+            </div>
+          </div>
+          <div class="item">
+            <div class="item-time">19:00</div>
+            <div class="item-main">
+              <div class="item-title">健身课</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="sec"><svg viewBox="0 0 24 24"><path d="M19.35 10.04C18.67 6.59 15.64 4 12 4 9.11 4 6.6 5.64 5.35 8.04 2.34 8.36 0 10.91 0 14c0 3.31 2.69 6 6 6h13c2.76 0 5-2.24 5-5 0-2.64-2.05-4.78-4.65-4.96z"/></svg><span>明天天气</span></div>
+        <div class="weather-row">
+          <div class="weather-temp">14~22°</div>
+          <div class="weather-line">小雨，降水 40%</div>
+        </div>
+        <div class="chips"><span class="chip">大风预警</span></div>
+        <div class="outfit">
+          <svg viewBox="0 0 24 24"><path d="M9 3l-5 4 2 2 1-1v13h10V8l1 1 2-2-5-4c-.83 1.25-2.21 2-3.5 2S9.83 4.25 9 3z"/></svg>
+          <p>外套，记得带伞</p>
+        </div>
+
+        <div class="budget">
+          <svg viewBox="0 0 24 24"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 14.93V18h-2v-1.07c-1.9-.34-3-1.5-3.08-3.02h1.96c.08.98.86 1.59 2.14 1.59 1.28 0 1.98-.62 1.98-1.44 0-.9-.62-1.28-2.26-1.62-2.1-.42-3.6-1.24-3.6-3.1 0-1.44 1.1-2.56 2.86-2.9V5h2v1.44c1.7.4 2.72 1.5 2.8 3h-1.94c-.08-.94-.76-1.5-1.9-1.5-1.14 0-1.8.52-1.8 1.28 0 .84.76 1.18 2.44 1.56 2.12.46 3.44 1.3 3.44 3.14-.02 1.56-1.16 2.68-3.04 3.01z"/></svg>
+          <p>今天在成都花了 938 元，超出日预算 800 元</p>
+        </div>
+      </div>
+      <div class="col-label" style="color:#6C6C75;">深色 · 同一卡片自适应</div>
+    </div>
+  </div>
+</body>
+</html>

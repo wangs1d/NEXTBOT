@@ -14,8 +14,17 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { DOMAIN_REGISTRY, domainsForTool, resolveDomainDef, type DomainDef } from "./tool-category.js";
 import { firstSentence } from "./schema-slim.js";
 
-/** 卡片工具清单每域上限（超出的长尾域截断并标注；misc 域本就受控） */
+/** 卡片工具清单每域上限（仅详版使用；超出的长尾域截断并标注） */
 export const CARD_TOOLS_PER_DOMAIN = 14;
+
+/**
+ * 紧凑模式（2026-10-22 定稿，架构文档 5.2 环 2）：域卡只保留「域名｜一句话」，
+ * 不再列举工具名。依据：①Tool Search 实测按需发现省 95% 上下文且选择准确率
+ * 反升（49%→74%）；②域名→tool_discover({domain}) 一跳可达，工具名清单的
+ * 引导价值低于体量代价（14 名×N 域 ≈3.4k tokens）。回滚开关：
+ * AGENT_DOMAIN_CARDS_COMPACT=0 恢复详版（列工具名）。
+ */
+const isDomainCardsCompact = (): boolean => process.env.AGENT_DOMAIN_CARDS_COMPACT !== "0";
 
 function nameOf(tool: ChatCompletionTool): string {
   return tool.type === "function" ? tool.function?.name ?? "" : "";
@@ -38,8 +47,10 @@ export function buildDomainCards(corpus: ChatCompletionTool[]): string {
     }
   }
 
+  const compact = isDomainCardsCompact();
   const lines: string[] = [];
   const line = (def: DomainDef, names: string[]): string => {
+    if (compact) return `- ${def.name}｜${def.summary}`;
     const shown = names.slice(0, CARD_TOOLS_PER_DOMAIN);
     const more = names.length - shown.length;
     return `- ${def.name}｜${def.summary}：${shown.join("·")}` + (more > 0 ? `（+${more}）` : "");
@@ -67,10 +78,16 @@ export function buildDomainCards(corpus: ChatCompletionTool[]): string {
   }
   if (lines.length === 0) return "";
 
-  return [
-    "【能力域目录】以下是延迟目录按域组织的全部能力（当轮可见工具之外的都在这里）：",
-    "简单参数的工具可直接 tool_call 按名调用；参数复杂的先用 tool_discover({domain:\"域名\"}) 拉取该域工具的参数 schema 再调用；",
-    "不确定该用哪个域时可用 tool_discover({query:\"...\"}) 按语义检索。动手类任务先查此目录，不要凭常识断言做不到。",
-    ...lines,
-  ].join("\n");
+  const header = compact
+    ? [
+        "【能力域目录】以下是延迟目录按域组织的全部能力（当轮可见工具之外的都在这里）：",
+        "需要某域能力时用 tool_discover({domain:\"域名\"}) 拉取该域的工具名与参数 schema，再按 schema 调用；",
+        "不确定该用哪个域时可用 tool_discover({query:\"...\"}) 按语义检索。动手类任务先查此目录，不要凭常识断言做不到。",
+      ]
+    : [
+        "【能力域目录】以下是延迟目录按域组织的全部能力（当轮可见工具之外的都在这里）：",
+        "简单参数的工具可直接 tool_call 按名调用；参数复杂的先用 tool_discover({domain:\"域名\"}) 拉取该域工具的参数 schema 再调用；",
+        "不确定该用哪个域时可用 tool_discover({query:\"...\"}) 按语义检索。动手类任务先查此目录，不要凭常识断言做不到。",
+      ];
+  return [...header, ...lines].join("\n");
 }

@@ -83,58 +83,16 @@ const DEFAULT_TOOL_META: Record<string, ToolMetadata> = {
   browser_navigate: { name: "browser_navigate", category: "ui", avgTokens: 600, avgDurationMs: 2000, criticality: "medium" },
 };
 
-// 任务关键词 → 工具链映射（规则驱动）
+// 2026-10-22 架构定稿：任务关键词 → 工具链映射整表退役。
+// 原因：①硬编码映射会随工具增长漂移——它曾产出 weather_query/clock_now/
+// calendar_query/fetch_page/desktop_open 五个注册表里根本不存在的名字，并被
+// 写进 prompt 的【建议工具链】；②它把「该用哪个工具」的判断从模型手里抢走，
+// 表外场景只能掉兜底。工具选择权归模型：本表恒空，planTools 返回空链。
 const TASK_TOOL_PATTERNS: Array<{
   pattern: RegExp;
   tools: Array<{ name: string; purpose: string; critical?: boolean; dependsOn?: string }>;
   reasoning: string;
-}> = [
-  {
-    pattern: /搜索|查一下|查询|search/i,
-    tools: [
-      { name: "search_web", purpose: "执行搜索", critical: true },
-      { name: "fetch_page", purpose: "抓取搜索结果详情", critical: false, dependsOn: "search_web" },
-    ],
-    reasoning: "搜索任务 → search_web 主路径 + fetch_page 补充详情",
-  },
-  {
-    pattern: /天气|气温|weather/i,
-    tools: [{ name: "weather_query", purpose: "查询天气", critical: true }],
-    reasoning: "天气查询 → 单工具调用",
-  },
-  {
-    pattern: /时间|几点|now|clock/i,
-    tools: [{ name: "clock_now", purpose: "获取当前时间", critical: true }],
-    reasoning: "时间查询 → 单工具调用",
-  },
-  {
-    pattern: /日历|日程|安排|calendar|schedule/i,
-    tools: [{ name: "calendar_query", purpose: "查询日历", critical: true }],
-    reasoning: "日程查询 → 单工具调用",
-  },
-  {
-    pattern: /打开|启动|运行|open|launch/i,
-    tools: [
-      { name: "desktop_open", purpose: "打开应用/文件", critical: true },
-      { name: "desktop_uia_query", purpose: "查询 UI 元素", critical: false, dependsOn: "desktop_open" },
-      { name: "desktop_run_input", purpose: "执行 UI 操作", critical: false, dependsOn: "desktop_uia_query" },
-    ],
-    reasoning: "桌面操作 → open → uia_query → run_input 三步链",
-  },
-  {
-    pattern: /浏览器|网页|browser|navigate/i,
-    tools: [
-      { name: "browser_navigate", purpose: "导航到 URL", critical: true },
-      { name: "desktop_uia_query", purpose: "查询页面元素", critical: false, dependsOn: "browser_navigate" },
-    ],
-    reasoning: "浏览器操作 → navigate → uia_query",
-  },
-  {
-    pattern: /截图|截屏|screenshot/i,
-    tools: [{ name: "desktop_uia_query", purpose: "获取屏幕元素", critical: true }],
-    reasoning: "截图任务 → uia_query 获取视觉信息",
-  },
-];
+}> = [];
 
 /**
  * 工具规划皮层。
@@ -194,15 +152,11 @@ export class ToolPlanningCortex {
         });
       }
     } else {
-      // 无匹配 → 通用方案：search_web 兜底
-      reasoning = "未匹配具体任务模式，建议 search_web 兜底";
-      if (!capabilityTools.has("search_web")) capabilityGaps.push("search_web");
-      toolChain.push({
-        name: "search_web",
-        purpose: "通用搜索兜底",
-        estimatedTokens: 800,
-        critical: true,
-      });
+      // 2026-10-22 架构定稿：不再用 search_web 做「未匹配兜底」——那等于把
+      // 「要不要搜」写死在代码里。空链 = 不给建议，模型按工具 schema 与域目录
+      // 自行决定。下游 prompt-context-builder 以 toolChain.length>0 为渲染条件，
+      // 空链时【建议工具链】块自然消失。
+      reasoning = "不预设工具链：由模型按工具目录与 schema 自行决定";
     }
 
     // 3. 预估成本

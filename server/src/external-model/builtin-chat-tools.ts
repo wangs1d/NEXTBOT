@@ -225,8 +225,11 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
         "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
         "可选 timezone（IANA，默认 Asia/Shanghai）。\n" +
-        "⚠️ 回执里的天气数值（天气/气温/湿度/风速/降水概率）系统会自动渲染成结构化卡片，" +
+        "可选 days：预报天数 1-16。默认 2（今天+明天）；用户问后天/周末/未来一周等多日天气时传对应天数" +
+        "（如「后天下雨吗」→ days:3，「周末天气」→ days:7），回执会带 dailyForecast 逐日数组（含 dayLabel 今天/明天/后天/周X）。\n" +
+        "⚠️ 回执里的当日天气数值（天气/气温/湿度/风速/降水概率）系统会自动渲染成结构化卡片，" +
         "你的文字回复里禁止再用 markdown 标题、表格或引用块复述这些数据（同屏会出现两份）；" +
+        "⚠️ 例外：dailyForecast 逐日数据不在卡片里，用户问多日时正文直接口语化转述即可。" +
         "正文只写口语化的结论与建议（穿搭/出行提醒等）。\n" +
         "示例（卡片已展示数值时）：「明天有小雨，早晚偏凉，长袖加薄外套足够，出门顺手带把伞。」",
       parameters: {
@@ -237,6 +240,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
           city: { type: "string", description: "城市名（与坐标二选一）" },
           timezone: { type: "string" },
           locationLabel: { type: "string", description: "展示用地点名" },
+          days: { type: "integer", description: "预报天数 1-16，默认 2（今天+明天）；问多日时传" },
         },
         additionalProperties: false,
       },
@@ -947,39 +951,12 @@ export const VISION_CHAT_TOOLS: ChatCompletionTool[] = VISION_SANDBOX_RESTRICTED
  */
 
 /**
- * Surface-on-Demand：召唤客户端信息面板（语音模式"念+显"双通道的"显"）。
- * handler 在 ToolRegistry（surface-tools.ts）；核心库 dialogue 分组收录，
- * 每轮注入。典型场景：语音模式下用户问"今天有什么安排"→ 调用本工具把
- * 「今日安排」悬浮窗召唤到桌面，同时文本给出简短口头摘要（会被 TTS 朗读）。
+ * Surface-on-Demand：收起客户端已展示的面板。
+ * handler 在 ToolRegistry（surface-tools.ts）。
+ * 历史注记（2026-10-22）：surface.show（语音模式"念+显"召唤悬浮卡）已删除，
+ * 召唤面板不由 LLM 工具实现；仅保留对称的收起动作（媒体页关闭）。
  */
 export const SURFACE_CHAT_TOOLS: ChatCompletionTool[] = [
-  {
-    type: "function",
-    function: {
-      name: "surface.show",
-      description:
-        "【召唤桌面悬浮卡】要求客户端在桌面上展示一个信息面板（悬浮卡），配合文本回答形成" +
-        "\"念+显\"双通道：文本回答给口头摘要（语音模式下会被朗读），悬浮卡给可视化细节。" +
-        "典型场景：用户问「今天有什么安排」「看看日程」「今天要做什么」→ 调用本工具展示" +
-        "today_schedule，同时用一两句话口头概括今日要点。不要为纯闲聊调用本工具。",
-      parameters: {
-        type: "object",
-        properties: {
-          surface: {
-            type: "string",
-            enum: ["today_schedule"],
-            description: "要召唤的面板：today_schedule=今日安排悬浮卡",
-          },
-          ttlSeconds: {
-            type: "number",
-            description: "可选：悬浮卡展示时长（秒，5~300，默认 30，到期自动淡出）",
-          },
-        },
-        required: ["surface"],
-        additionalProperties: false,
-      },
-    },
-  },
   {
     type: "function",
     function: {

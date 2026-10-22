@@ -2,7 +2,6 @@ import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { EvolutionLoopService } from "../services/evolution-loop-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
-import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import { detectMemorySignals } from "./memory-signal.js";
@@ -298,37 +297,6 @@ export class TurnLifecycle {
       };
     }
     return {};
-  }
-
-  /** 轨迹晋升捕获收尾（与 finalizeTurn 分离，便于传入 trajCap 实例） */
-  static finalizeTrajectory(
-    trajCap: ReturnType<TrajectorySkillPromotionService["beginCapture"]> | undefined,
-    assistantText: string,
-    meta: {
-      planExecuteUsed: boolean;
-      modelCallsApprox: number;
-      pePlan: TaskExecutionPlan | null;
-      peExhausted: boolean;
-    },
-  ): void {
-    if (!trajCap) return;
-    trajCap.observePePlan(meta.pePlan);
-    trajCap.observeSelfCheck(
-      meta.planExecuteUsed
-        ? meta.peExhausted
-          ? "自检未通过或已达到最大重试"
-          : "PE 自检通过或未触发重试阈值"
-        : "单轮工具环路径",
-      meta.planExecuteUsed ? !meta.peExhausted : undefined,
-    );
-    void trajCap
-      .finalizeEvolution(assistantText, {
-        planExecuteEnabled: meta.planExecuteUsed,
-        modelCallsApprox: meta.modelCallsApprox,
-        pePlan: meta.pePlan,
-        peExhaustedRetries: meta.peExhausted,
-      })
-      .catch(() => {});
   }
 }
 

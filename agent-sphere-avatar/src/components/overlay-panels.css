@@ -1,0 +1,389 @@
+/**
+ * 桌宠附加面板（专注计时板 / 下班打卡卡）
+ *
+ * 铁律：面板长在桌宠窗口内，不在独立浮窗里。
+ * - 位置靠 `flex` 排在 `.overlay-pet-pane` 左侧，随窗口移动 → 天然跟随桌宠
+ * - 打开时由宿主向左扩窗（`setAttachPanel`），桌宠在屏幕上的绝对位置不变
+ * - 「掏出」动画的物理说法：面板从靠球那一侧（右侧）被抽出来
+ */
+
+.overlay-attach-slot {
+  position: relative;
+  flex: 0 0 auto;
+  height: 100%;
+  width: 0;
+  pointer-events: none;
+}
+
+.overlay-attach-slot > * {
+  pointer-events: auto;
+}
+
+/* ── 抽出动画 ──
+   外层：从球那一侧（右）向左横向揭示 + 轻微右偏移归位 = 「板被拉出来」
+   内层：轻微展开（scale 0.84 → 1），给出厚度感
+   两步错开比单纯 scale 弹出更像"掏出"，也不会闪一下就到位 */
+.pet-panel {
+  position: absolute;
+  right: 4px;
+  border-radius: 18px;
+  transform-origin: 100% 62%;
+  will-change: transform, opacity;
+}
+
+/* 揭示层：单独一层做 clip-path / 位移，避免把框外的接线一起裁掉 */
+.pet-panel__draw {
+  animation: pet-panel-draw 480ms cubic-bezier(0.22, 0.92, 0.3, 1) both;
+  will-change: transform, clip-path, opacity;
+}
+
+@keyframes pet-panel-draw {
+  0% {
+    opacity: 0;
+    clip-path: inset(0 0 0 100%);
+    transform: translateX(26px);
+  }
+  14% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 1;
+    clip-path: inset(0 0 0 0);
+    transform: translateX(0);
+  }
+}
+
+.pet-panel__body {
+  animation: pet-panel-unfold 480ms cubic-bezier(0.22, 0.92, 0.3, 1) both;
+  transform-origin: 100% 50%;
+}
+
+@keyframes pet-panel-unfold {
+  0% {
+    transform: scale(0.84);
+  }
+  72% {
+    transform: scale(1.012);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* 抽出瞬间的高光扫过，读起来像"板子被拉出来"而不是"弹出一张卡" */
+.pet-panel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  background: linear-gradient(
+    100deg,
+    transparent 0%,
+    rgba(190, 220, 255, 0.16) 45%,
+    transparent 70%
+  );
+  animation: pet-panel-sheen 620ms ease-out both;
+}
+
+@keyframes pet-panel-sheen {
+  0% {
+    opacity: 0;
+    transform: translateX(38%);
+  }
+  35% {
+    opacity: 1;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-42%);
+  }
+}
+
+.pet-panel--leaving {
+  animation: pet-panel-retract 190ms cubic-bezier(0.55, 0, 0.85, 0.55) both;
+}
+
+@keyframes pet-panel-retract {
+  0% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.2) translate(18px, 4px);
+  }
+}
+
+/* ── 通用玻璃底 ── */
+.pet-panel__body {
+  position: relative;
+  border-radius: 18px;
+  background: rgba(9, 12, 19, 0.94);
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  box-shadow:
+    0 14px 34px rgba(0, 0, 0, 0.46),
+    inset 0 1px 0 rgba(255, 255, 255, 0.07);
+  backdrop-filter: blur(18px);
+  color: #eef2fa;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+/* 面板与球之间的"接线"：pane 内球体左右各有约 105px 留白，
+   板贴不到球面，用一根从板右缘伸到球缘的细线把两者连起来，
+   读作「桌宠接着一块板」，而不是两块无关的东西。 */
+.pet-panel__tether {
+  position: absolute;
+  right: -124px;
+  top: 50%;
+  width: 120px;
+  height: 1px;
+  background: linear-gradient(
+    270deg,
+    rgba(136, 187, 255, 0.5) 0%,
+    rgba(136, 187, 255, 0.22) 45%,
+    rgba(136, 187, 255, 0) 100%
+  );
+  animation: pet-panel-tether 520ms 200ms ease-out both;
+}
+
+.pet-panel__tether::after {
+  content: "";
+  position: absolute;
+  right: -2px;
+  top: -1.5px;
+  width: 4px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(160, 205, 255, 0.62);
+  box-shadow: 0 0 6px rgba(136, 187, 255, 0.7);
+}
+
+@keyframes pet-panel-tether {
+  0% {
+    opacity: 0;
+    transform: scaleX(0.1);
+    transform-origin: 100% 50%;
+  }
+  100% {
+    opacity: 1;
+    transform: scaleX(1);
+    transform-origin: 100% 50%;
+  }
+}
+
+.pet-panel__close {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: rgba(238, 242, 250, 0.36);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 160ms ease, color 160ms ease, background 160ms ease;
+}
+
+.pet-panel__body:hover .pet-panel__close {
+  opacity: 1;
+}
+
+.pet-panel__close:hover {
+  color: #eef2fa;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* ─────────────────── 专注计时板（小，不需要大） ─────────────────── */
+.focus-timer {
+  width: 166px;
+  top: 103px;
+  cursor: pointer;
+  user-select: none;
+}
+
+.focus-timer .pet-panel__body {
+  padding: 11px 13px 10px;
+}
+
+.focus-timer__head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 1.4px;
+  color: rgba(238, 242, 250, 0.5);
+}
+
+.focus-timer__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 3px;
+  background: #7fd4a8;
+  box-shadow: 0 0 7px rgba(127, 212, 168, 0.8);
+}
+
+.focus-timer__dot--break {
+  background: #ffc46b;
+  box-shadow: 0 0 7px rgba(255, 196, 107, 0.8);
+}
+
+.focus-timer__dot--paused {
+  background: rgba(238, 242, 250, 0.4);
+  box-shadow: none;
+}
+
+.focus-timer__time {
+  margin-top: 2px;
+  font-size: 31px;
+  font-weight: 300;
+  letter-spacing: 0.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+  color: #f4f8ff;
+}
+
+.focus-timer__time small {
+  font-size: 12px;
+  color: rgba(238, 242, 250, 0.4);
+  margin-left: 4px;
+  letter-spacing: 0;
+}
+
+.focus-timer__bar {
+  margin-top: 8px;
+  height: 2px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+}
+
+.focus-timer__bar i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #6ec6ff, #9d7bff);
+  transition: width 900ms linear;
+}
+
+.focus-timer__foot {
+  margin-top: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  color: rgba(238, 242, 250, 0.42);
+}
+
+.focus-timer__pips {
+  display: flex;
+  gap: 3px;
+}
+
+.focus-timer__pips i {
+  width: 4px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.focus-timer__pips i.on {
+  background: #7fd4a8;
+}
+
+/* ─────────────────── 下班打卡卡 ─────────────────── */
+.offwork-card {
+  width: 220px;
+  top: 50px;
+}
+
+.offwork-card__body {
+  padding: 16px 16px 13px;
+  text-align: center;
+}
+
+.offwork-card__confetti {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 42px;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.offwork-card__confetti i {
+  position: absolute;
+  top: -10px;
+  width: 5px;
+  height: 8px;
+  border-radius: 1.5px;
+  animation: offwork-confetti both ease-in;
+}
+
+@keyframes offwork-confetti {
+  0% {
+    opacity: 1;
+    transform: translateY(0) rotate(0deg);
+  }
+  100% {
+    opacity: 0;
+    transform: translateY(54px) rotate(420deg);
+  }
+}
+
+.offwork-card__kicker {
+  font-size: 10px;
+  letter-spacing: 3px;
+  color: rgba(238, 242, 250, 0.5);
+}
+
+.offwork-card__time {
+  margin-top: 3px;
+  font-size: 30px;
+  font-weight: 300;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+  color: #f4f8ff;
+}
+
+.offwork-card__rows {
+  margin-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.offwork-card__row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 6px 1px;
+  font-size: 11.5px;
+  color: rgba(238, 242, 250, 0.58);
+  border-bottom: 1px dashed rgba(255, 255, 255, 0.07);
+}
+
+.offwork-card__row b {
+  color: #f4f8ff;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+}
+
+.offwork-card__line {
+  margin-top: 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: rgba(238, 242, 250, 0.86);
+  min-height: 18px;
+  text-align: left;
+}
+
+.offwork-card__line--muted {
+  color: rgba(238, 242, 250, 0.3);
+  letter-spacing: 2px;
+}

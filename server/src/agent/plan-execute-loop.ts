@@ -22,7 +22,7 @@
 import { requiresExplicitPlan } from "./simple-task.js";
 import { bm25HitsForQuery } from "../tools/tool-search/index.js";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { dedupeToolsByName, slimToolSchema } from "../external-model/lane-tool-sets.js";
+import { dedupeToolsByName } from "../external-model/lane-tool-sets.js";
 import type {
   AgentStreamOptions,
   ChatToolExecutionContext,
@@ -208,7 +208,9 @@ export function resolveSuggestedToolDefinitions(
   for (const name of names) {
     if (builtinNames.has(name)) continue;
     const tool = byName.get(name);
-    if (tool) out.push(slimToolSchema(tool));
+    // 2026-10-22 定稿：规划/执行工具全量 schema（架构文档 5.1.4）——模型
+    // 拿到即直调，字段级描述是参数正确率的第一保障（BFCL 62% 失败在参数层）。
+    if (tool) out.push(tool);
   }
   return out;
 }

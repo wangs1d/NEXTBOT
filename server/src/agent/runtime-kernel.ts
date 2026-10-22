@@ -539,9 +539,12 @@ export class RuntimeKernel {
     if (!this.state.enabled) return undefined;
     const lines: string[] = [];
     if (pinnedToolNames.length > 0) {
+      // 2026-10-22：措辞从「only these tools」改为「相关工具族」。原措辞把
+      // 「本轮只能用这些」写进 system，等于用关键词表替模型做了选择；
+      // 现在只提示这一族工具与当前请求相关，用不用、用哪个由模型按 schema 判断。
       lines.push(
-        `[Runtime Kernel] Intent hook selected this turn's tool suite only: ${pinnedToolNames.slice(0, 6).join(", ")}.`,
-        "Use these tools only when they are needed for the user's current request; do not infer hidden device state.",
+        `[Runtime Kernel] 与当前请求相关的工具族：${pinnedToolNames.slice(0, 6).join(", ")}。`,
+        "按需取用，不必都用；是否调用、调用哪个由你根据用户这句话判断，参数以工具 schema 为准。",
       );
     }
     if (isMemoryIsolationTurn(userText)) {

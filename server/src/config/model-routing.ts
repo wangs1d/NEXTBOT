@@ -23,7 +23,7 @@ export enum TaskTier {
   PRO = "pro",
   /** 最简单：情绪识别 L2、技术扫描评估、简单分类 */
   NANO = "nano",
-  /** 中等：EndToEndDecisionMaker、SkillGenerator、CodeRepairCortex、子 Agent */
+  /** 中等：EndToEndDecisionMaker、SkillGenerator、子 Agent */
   MINI = "mini",
   /** 最复杂：cognize、master_delegate、复杂推理 */
   FULL = "full",

@@ -638,22 +638,33 @@ class MobileChatController extends ChangeNotifier {
     });
   }
 
-  /// 睡前提醒（evening.digest）→ 落对话流文字气泡。
-  /// narrationText 是唯一文案源（2026-10-13 服务端定调），不渲染结构化块。
+  /// 睡前提醒（evening.digest）→ 对话流专属卡片。
+  /// 2026-10-22 定调升级：结构化块（明日行程/天气/超支/今日回顾）由
+  /// EveningDigestCard 渲染，narrationText 保留为卡顶部 agent 文案段；
+  /// 旧服务端无 digest 结构时回退纯文本气泡。同为「真实消息」落本地
+  /// 历史（重启后仍以卡片形态渲染，结构化载荷随消息加密持久化）。
   void _handleEveningDigestEvent(Map<String, dynamic> payload) {
+    final Object? rawDigest = payload["digest"];
+    final Map<String, dynamic>? digestMap =
+        rawDigest is Map ? rawDigest.cast<String, dynamic>() : null;
     String text = payload["narrationText"]?.toString() ?? "";
     if (text.trim().isEmpty) {
-      final Object? digest = payload["digest"];
-      if (digest is Map) text = digest["narrationText"]?.toString() ?? "";
+      text = digestMap?["narrationText"]?.toString() ?? "";
     }
     if (text.trim().isEmpty) return;
-    messages.add(ChatMessage(
+    // 睡前提醒同为「真实消息」（2026-10-21）：落本地历史，重启后仍在。
+    final ChatMessage digest = ChatMessage(
       messageId: "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "assistant",
       text: text.trim(),
       timestamp: DateTime.now(),
-    ));
+      contentType:
+          (digestMap != null && digestMap.isNotEmpty) ? "evening_digest" : "text",
+      eveningDigest: (digestMap != null && digestMap.isNotEmpty) ? digestMap : null,
+    );
+    messages.add(digest);
+    _persist(digest);
     notifyListeners();
   }
 
@@ -676,16 +687,20 @@ class MobileChatController extends ChangeNotifier {
       // 用户大概率无感——前台经 AmbientFeeds 横幅通道并行触达（与
       // schedule.reminder_fired 同源）；后台仍只落流，触达靠重连补投。
       if (!_appBackgrounded) {
-        unawaited(AmbientFeedsController.instance.showForegroundReminder
-            ?.call(title, text.trim()));
+        unawaited(AmbientFeedsController.instance.foregroundBanner
+            ?.show(title, text.trim()));
       }
-      messages.add(ChatMessage(
+      // 手机端定调（2026-10-21）：主动消息是「真实消息」——与正常对话回复
+      // 同等地位落本地历史（重启后仍在），而非一次性浮层。
+      final ChatMessage proactive = ChatMessage(
         messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
         sessionId: ApiConfig.effectiveActorId,
         role: "assistant",
         text: title.isNotEmpty && text.isNotEmpty ? "$title\n$text" : (text.isNotEmpty ? text : title),
         timestamp: DateTime.now(),
-      ));
+      );
+      messages.add(proactive);
+      _persist(proactive);
       notifyListeners();
       return;
     }

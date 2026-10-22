@@ -97,8 +97,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "voice.speak": "voice",
   "voice.send_message": "voice",
   "voice.transcribe": "voice",
-  // surface（召唤客户端悬浮卡）
-  "surface.show": "ui",
   // clock
   "clock.get_current_time": "clock",
   "clock.get_user_location": "clock",

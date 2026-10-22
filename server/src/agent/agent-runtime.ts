@@ -9,7 +9,6 @@ import type { SkillManager } from "../skills/index.js";
 import type { ToolRegistry } from "../tools/tool-registry.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
-import type { TrajectorySkillPromotionService } from "../services/trajectory-skill-promotion-service.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
@@ -28,7 +27,6 @@ export type AgentCoreDependencies = {
   worldService?: WorldService | null;
   skillManager?: SkillManager | null;
   narrativeMemory?: NarrativeMemoryPort | null;
-  trajectorySkillPromotion?: TrajectorySkillPromotionService | null;
   virtualPhoneService?: VirtualPhoneService | null;
   scheduleTaskService?: ScheduleTaskService | null;
   shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
@@ -50,7 +48,6 @@ export function createAgentCore(deps: AgentCoreDependencies): AgentCore {
     deps.worldService ?? null,
     deps.skillManager ?? null,
     deps.narrativeMemory ?? null,
-    deps.trajectorySkillPromotion ?? null,
     deps.virtualPhoneService ?? null,
     deps.scheduleTaskService ?? null,
     deps.shortTermMemoryGateway ?? null,

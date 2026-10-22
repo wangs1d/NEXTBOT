@@ -20,6 +20,7 @@ import "core/presentation/client_update_dialog.dart";
 import "core/presentation/dynamic_island.dart";
 import "core/presentation/dynamic_island_stage_e2e.dart";
 import "core/presentation/dynamic_island_reminder_e2e.dart";
+import "core/presentation/health_reminder_feeds.dart";
 import "core/presentation/glass_notify.dart";
 import "core/presentation/update_result_card.dart";
 import "core/presentation/voice_call_ui_labels.dart";
@@ -1115,6 +1116,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       unawaited(windowManager.focus());
     });
     unawaited(initDynamicIsland());
+    // 久坐 / 喝水 / 护眼：复用既有灵动岛（无自建 UI、岛上无按钮），
+    // 只产出功能文案 + 真实分钟数，自动收回。
+    HealthReminderFeeds.start();
     // E2E 专用（--dart-define=PAI_ISLAND_E2E=true 才生效）：三级渐进展开
     // 真机截图回归的数据注入引导，见 dynamic_island_stage_e2e.dart。
     if (const bool.fromEnvironment('PAI_ISLAND_E2E')) {
@@ -4689,17 +4693,44 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 睡前提醒（evening.digest，2026-10-16 接线）：以消息形式落对话聊天流，
-  /// 不走应用内玻璃胶囊弹窗（2026-10-19 用户定调）。narrationText 是唯一
-  /// 文案源（2026-10-13 服务端定调），不渲染结构化块；后台不另发系统通知
-  /// （离线兜底由 proactivePipeline 承担）。
+  /// 不走应用内玻璃胶囊弹窗（2026-10-19 用户定调）。2026-10-22 定调升级：
+  /// 结构化块（明日行程/天气/超支/今日回顾）由 EveningDigestCard 专属渲染，
+  /// narrationText 保留为卡顶部的 agent 文案段；旧服务端无 digest 结构时
+  /// 回退纯文本气泡。后台不另发系统通知（离线兜底由 proactivePipeline 承担）。
   Future<void> _handleEveningDigestEvent(Map<String, dynamic> payload) async {
+    final Object? rawDigest = payload["digest"];
+    final Map<String, dynamic>? digest =
+        rawDigest is Map ? rawDigest.cast<String, dynamic>() : null;
     String text = payload["narrationText"]?.toString() ?? "";
     if (text.trim().isEmpty) {
-      final Object? digest = payload["digest"];
-      if (digest is Map) text = digest["narrationText"]?.toString() ?? "";
+      text = digest?["narrationText"]?.toString() ?? "";
     }
     text = text.trim();
     if (text.isEmpty) return;
+    if (digest != null && digest.isNotEmpty) {
+      // 结构化主路：专属卡片（内存态，与现有 evening digest 消息同口径）
+      final ChatMessage message = ChatMessage(
+        messageId:
+            "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
+        sessionId: ApiConfig.effectiveActorId,
+        role: "assistant",
+        text: text,
+        timestamp: DateTime.now(),
+        contentType: "evening_digest",
+        eveningDigest: digest,
+      );
+      void apply() {
+        _messages.add(message);
+        _assistantMessageIndexById[message.messageId] = _messages.length - 1;
+      }
+
+      if (mounted) {
+        setState(apply);
+      } else {
+        apply();
+      }
+      return;
+    }
     _appendAssistantText("assistant-evening-digest", text);
   }
 

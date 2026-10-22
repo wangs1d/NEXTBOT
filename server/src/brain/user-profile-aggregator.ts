@@ -171,9 +171,32 @@ export function applyProfileOps(
       }
       lines = ensureSection(lines, op.section);
       const bounds = sectionBounds(lines, op.section)!;
-      const exists = lines.slice(bounds.start, bounds.end).some((l) => l.trim() === `- ${cleanLine}`);
-      if (!exists) {
-        lines = insertLineToSection(lines, op.section, cleanLine);
+      // basic 段字段行按 label 维度去重/升级（2026-10-22）：同一字段只留一行，
+      // 值相同 = 幂等跳过插入；值不同 = 原位替换（与权威投影「一字段一行」不变式一致）。
+      // 其余 section 维持纯追加（如兴趣多条并存）。
+      let handledByLabelDedup = false;
+      if (op.section === "basic") {
+        const parsed = parseFieldLine(cleanLine);
+        if (parsed) {
+          const labelPattern = new RegExp(`^[-*+]\\s*${parsed.label.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\s*[：:]`);
+          for (let i = bounds.start; i < bounds.end; i++) {
+            if (!labelPattern.test(lines[i]!)) continue;
+            handledByLabelDedup = true;
+            const existing = lines[i]!.replace(/^[-*+]\s*/, "").trim();
+            if (existing !== cleanLine) {
+              const next = [...lines];
+              next[i] = `- ${cleanLine}`;
+              lines = next;
+            }
+            break;
+          }
+        }
+      }
+      if (!handledByLabelDedup) {
+        const exists = lines.slice(bounds.start, bounds.end).some((l) => l.trim() === `- ${cleanLine}`);
+        if (!exists) {
+          lines = insertLineToSection(lines, op.section, cleanLine);
+        }
       }
       applied.push({ op, expectLine: cleanLine });
       continue;
@@ -371,8 +394,12 @@ export class UserProfileAggregator {
     // 条件 LLM 抽取 → 结构化操作确定性写入画像。
     // token 闸：高信号轮或个人陈述预筛命中才跑 MINI 抽取，寒暄轮跳过。
     if (user && this.shouldExtractNow(user, opts?.highSignal === true)) {
-      void this.extractAndApply(actorId, user, assistant).catch(() => {
-        /* 抽取失败静默，下一轮对话再补 */
+      void this.extractAndApply(actorId, user, assistant).catch((err) => {
+        // 2026-10-22：失败不再完全静默——「时好时坏」排查第一步是确认抽取跑没跑/败没败
+        console.warn(
+          `[ProfileAggregator] 画像抽取失败（不影响主链路）actor=${actorId}:`,
+          err instanceof Error ? err.message : err,
+        );
       });
     }
   }

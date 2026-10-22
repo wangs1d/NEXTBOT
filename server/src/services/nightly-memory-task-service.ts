@@ -13,6 +13,11 @@ import { dirname, join } from "node:path";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { maybeRunSoulReflection } from "../agent/soul-store.js";
 import { auditChatCompletion } from "./llm-token-audit.js";
+import {
+  isProfileWriteBatchMode,
+  getDefaultProfileConsolidator,
+  type ProfileConsolidationStats,
+} from "./profile-write-scheduler.js";
 
 export type NightlySleepAgentReport = {
   runAt: string;
@@ -209,6 +214,8 @@ export class NightlyMemoryTaskService {
       // 白天只写 journal 一份原始流水，夜间固化单一入口。
       result.archived = true;
 
+      await this.extractFactsFromJournals();
+      await this.consolidateUserProfiles();
       await this.runDreamPhase();
       result.consolidated = true;
 
@@ -383,6 +390,7 @@ export class NightlyMemoryTaskService {
       // 留存评分 / 画像维护全部确定性规则，不再在后台反复调用 LLM
       // （灵魂反思另有周级门禁，每周最多一次）。
       await this.extractFactsFromJournals();
+      await this.consolidateUserProfiles();
       await this.runSoulReflectionIfDue();
       // 记忆架构重构：当日对话日志固化（journal → 长期记忆图），
       // 必须在 dreaming 之前完成，让后续合并/衰减阶段能看到新固化内容。
@@ -581,6 +589,45 @@ export class NightlyMemoryTaskService {
 
   setFactStore(store: UserFactStore): void {
     this.factStore = store;
+  }
+
+  /**
+   * 注入画像批抽取口（T2，2026-10-22 三层写入调度）。缺省用
+   * profile-write-scheduler 的默认实现（UserProfileAggregator 唯一写入路径）。
+   * 测试注入 fake 以断言 WAL 候选消费与 checkpoint 语义。
+   */
+  setProfileConsolidator(
+    fn: ((actorId: string) => Promise<ProfileConsolidationStats>) | null,
+  ): void {
+    this.profileConsolidator = fn;
+  }
+
+  private profileConsolidator:
+    | ((actorId: string) => Promise<ProfileConsolidationStats>)
+    | null = null;
+
+  /**
+   * 画像批抽取（每 actor 最多 1 次 LLM）：读 turn-wal 自 checkpoint 以来的
+   * profileCandidate 全文候选 → 批量 extractUnified → 确定性落位 → 推进
+   * checkpoint。仅 batch 调度模式生效；无候选 actor 零成本跳过。
+   */
+  private async consolidateUserProfiles(): Promise<void> {
+    if (!isProfileWriteBatchMode()) return;
+    const consolidate = this.profileConsolidator ?? getDefaultProfileConsolidator();
+    for (const actorId of this.getAllActorIds()) {
+      try {
+        const s = await consolidate(actorId);
+        if (s.candidates > 0) {
+          console.log(
+            `[NightlyMemory] 画像批抽取: actor=${actorId} 候选=${s.candidates} 处理=${s.processed} ` +
+              `ops=${s.opsCount} applied=${s.applied} checkpoint=${s.checkpointAdvanced ? "已推进" : "未推进"}` +
+              (s.extractionFailed ? "（抽取失败，下晚重试）" : ""),
+          );
+        }
+      } catch (err) {
+        console.error(`[NightlyMemory] 画像批抽取失败（跳过该 actor） ${actorId}:`, err);
+      }
+    }
   }
 
   /**

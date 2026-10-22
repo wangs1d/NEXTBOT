@@ -4,7 +4,6 @@ import type { HttpRouteDeps } from "./types.js";
 import type {
   AudioBufferRef,
   BrainSignalInput,
-  EvolutionProposal,
   MemoryDomainKind,
   MemoryItem,
   MemoryItemKind,
@@ -35,35 +34,10 @@ function buildSignal(body: Record<string, unknown>): BrainSignalInput {
 }
 
 /**
- * 从请求体构建进化提案输入（用于 /brain/evolve/propose）。
- * 校验必填字段，组装为 Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt">。
- */
-function buildProposal(
-  body: Record<string, unknown>,
-): Omit<EvolutionProposal, "id" | "status" | "createdAt" | "updatedAt"> {
-  const type = String(body.type ?? "").trim();
-  if (!type) throw new Error("type is required");
-  const title = String(body.title ?? "").trim();
-  if (!title) throw new Error("title is required");
-  const description = String(body.description ?? "").trim();
-  if (!description) throw new Error("description is required");
-  const rationale = String(body.rationale ?? "").trim();
-  if (!rationale) throw new Error("rationale is required");
-  return {
-    type: type as EvolutionProposal["type"],
-    title,
-    description,
-    rationale,
-    relatedGap: body.relatedGap as EvolutionProposal["relatedGap"],
-  };
-}
-
-/**
  * 注册 Brain Center 相关的 HTTP 路由。
  * - GET  /brain/capabilities      程序化能力清单
  * - GET  /brain/state             大脑状态快照
  * - POST /brain/proactive/test    注入测试信号走完整决策流水线
- * - POST /brain/evolve/propose    提交能力缺口提案
  * - POST /brain/sensory/listen    感官「听」：base64 音频 → ASR
  * - POST /brain/sensory/look      感官「看」：截屏 + VLM 描述
  * - POST /brain/sensory/speak     感官「说」：TTS 合成 + 投递
@@ -77,8 +51,6 @@ function buildProposal(
  * - POST /brain/limbic/inferEmotion  边缘情绪推断（facade 未暴露，503）
  * - POST /brain/planner/plan      规划
  * - POST /brain/planner/routeSystem  快慢双系统路由
- * - POST /brain/evolution/:id/approve  用户同意装载进化提案生成的 Skill
- * - POST /brain/evolution/:id/reject   用户拒绝装载进化提案生成的 Skill
  *
  * brainCenter 为 null（未启用）时，每个端点返回 503 + not enabled。
  */
@@ -126,21 +98,6 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       const signal = buildSignal((request.body ?? {}) as Record<string, unknown>);
       const decision = await deps.brainCenter.decide(signal);
       return reply.send({ ok: true, decision });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(500).send({ ok: false, error: message });
-    }
-  });
-
-  // 提交能力缺口提案
-  app.post("/brain/evolve/propose", async (request, reply) => {
-    try {
-      if (!deps.brainCenter) {
-        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
-      }
-      const proposal = buildProposal((request.body ?? {}) as Record<string, unknown>);
-      const result = deps.brainCenter.evolve(proposal);
-      return reply.send({ ok: true, proposal: result });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(500).send({ ok: false, error: message });
@@ -453,47 +410,6 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       const actorId = body.actorId != null ? String(body.actorId) : undefined;
       const result = deps.brainCenter.routeSystem(userMessage, { actorId });
       return reply.send({ ok: true, result });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(500).send({ ok: false, error: message });
-    }
-  });
-
-  // 用户同意装载进化提案生成的 Skill（用户审批闸门）
-  app.post("/brain/evolution/:id/approve", async (request, reply) => {
-    try {
-      if (!deps.brainCenter) {
-        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
-      }
-      const { id } = request.params as { id: string };
-      if (!id) {
-        return reply.code(400).send({ ok: false, error: "proposal id is required" });
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-      const result = await deps.brainCenter.approveEvolution(id, sessionId);
-      return reply.send(result);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(500).send({ ok: false, error: message });
-    }
-  });
-
-  // 用户拒绝装载进化提案生成的 Skill
-  app.post("/brain/evolution/:id/reject", async (request, reply) => {
-    try {
-      if (!deps.brainCenter) {
-        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
-      }
-      const { id } = request.params as { id: string };
-      if (!id) {
-        return reply.code(400).send({ ok: false, error: "proposal id is required" });
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      const sessionId = typeof body.sessionId === "string" ? body.sessionId : undefined;
-      const reason = typeof body.reason === "string" ? body.reason : undefined;
-      const result = deps.brainCenter.rejectEvolution(id, reason, sessionId);
-      return reply.send(result);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       return reply.code(500).send({ ok: false, error: message });

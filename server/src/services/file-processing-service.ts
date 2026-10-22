@@ -7,6 +7,18 @@ import mammoth from "mammoth";
 import * as XLSX from "xlsx";
 
 /**
+ * `xlsx@0.18.5` 的运行时**只有** `XLSX.utils.sheet_to_json`，顶层没有这个函数
+ * （但类型声明把它挂在了顶层，写 `XLSX.sheet_to_json` 能过 tsc、运行时直接
+ * "is not a function"）。这个坑曾让 `file.parse_office` 的 xlsx 分支 100% 失败
+ * 并被 catch 成"xlsx 解析失败"，看起来像文件坏了。修于 2026-10-22。
+ */
+const xlsxSheetToJson = (
+  XLSX.utils as unknown as {
+    sheet_to_json: <T>(sheet: unknown, opts?: Record<string, unknown>) => T[];
+  }
+).sheet_to_json;
+
+/**
  * 文件 / 文档处理能力服务。
  *
  * 设计要点（对齐 voice-message-service / image-generation-service 的模式）：
@@ -278,7 +290,7 @@ export class FileProcessingService {
         const wb = XLSX.read(buffer, { type: "buffer" });
         const sheets = wb.SheetNames.map((name) => {
           const ws = wb.Sheets[name];
-          const rows = XLSX.sheet_to_json<Record<string, unknown>>(ws);
+          const rows = xlsxSheetToJson<Record<string, unknown>>(ws);
           return { name, rowCount: rows.length, rows: rows.slice(0, 200) };
         });
         return {

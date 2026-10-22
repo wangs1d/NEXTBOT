@@ -1,0 +1,457 @@
+{
+  "summary": {
+    "runId": "20261021171614",
+    "server": "ws://127.0.0.1:3000/ws",
+    "repeats": 1,
+    "totalRuns": 27,
+    "passRuns": 11,
+    "passRate": "40.7%",
+    "chatRuns": 11,
+    "chatZeroToolRate": "100.0%",
+    "chatSafeRate": "100.0%",
+    "toolRuns": 16,
+    "toolGroupHitRate": "0.0%",
+    "forbiddenViolations": 0,
+    "runsWithExtraTools": 0,
+    "latencyMs": {
+      "p50": 3447,
+      "p95": 4126,
+      "max": 7925
+    },
+    "passAtK": {
+      "k": 1,
+      "cases": 11,
+      "totalCases": 27,
+      "rate": "40.7%"
+    }
+  },
+  "failures": [
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "elapsedMs": 3537,
+      "reason": "未命中期望组: #1[weather.get_local]；实际: -"
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 1,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "elapsedMs": 3371,
+      "reason": "未命中期望组: #1[weather.get_local]；实际: -"
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "elapsedMs": 3423,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -"
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "elapsedMs": 3625,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -"
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 1,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "elapsedMs": 3396,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -"
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "elapsedMs": 3379,
+      "reason": "未命中期望组: #1[search_images|search_images_batch]；实际: -"
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 1,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "elapsedMs": 3363,
+      "reason": "未命中期望组: #1[search_images|search_images_batch]；实际: -"
+    },
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "elapsedMs": 3465,
+      "reason": "未命中期望组: #1[search_web|deep_search]；实际: -"
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "elapsedMs": 3691,
+      "reason": "未命中期望组: #1[travel.plan-itinerary]；实际: -"
+    },
+    {
+      "id": "profile_child",
+      "repeat": 1,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "elapsedMs": 3420,
+      "reason": "未命中期望组: #1[profile.update]；实际: -"
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 1,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "elapsedMs": 3350,
+      "reason": "未命中期望组: #1[wallet.get_balance]；实际: -"
+    },
+    {
+      "id": "message_reply",
+      "repeat": 1,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "elapsedMs": 3416,
+      "reason": "未命中期望组: #1[messages.reply|messages_list_conversations|messages.overview|world.link.send_message]；实际: -"
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 1,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "elapsedMs": 3840,
+      "reason": "未命中期望组: #1[brain.recall|memory.recall_episodic]；实际: -"
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "elapsedMs": 3280,
+      "reason": "未命中期望组: #1[smart_home.control_device|smart_home_list_devices|smart_home.list_devices]；实际: -"
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 1,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "elapsedMs": 3638,
+      "reason": "未命中期望组: #1[vision.list_cameras]；实际: -"
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "elapsedMs": 3888,
+      "reason": "未命中期望组: #1[weather.get_local], #2[reminder.plan|calendar.create_from_text]；实际: -"
+    }
+  ],
+  "runs": [
+    {
+      "id": "chat_ack",
+      "repeat": 1,
+      "text": "你还记得 不错不错",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 4126
+    },
+    {
+      "id": "chat_laugh",
+      "repeat": 1,
+      "text": "哈哈笑死我了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3377
+    },
+    {
+      "id": "chat_opinion",
+      "repeat": 1,
+      "text": "你觉得周末宅家好还是出去走走好？",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3364
+    },
+    {
+      "id": "chat_fatigue",
+      "repeat": 1,
+      "text": "今天有点累，不想干活",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3364
+    },
+    {
+      "id": "chat_identity",
+      "repeat": 1,
+      "text": "你是谁啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3389
+    },
+    {
+      "id": "chat_knowledge",
+      "repeat": 1,
+      "text": "为什么天空是蓝色的",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3469
+    },
+    {
+      "id": "chat_confirm_reminder",
+      "repeat": 1,
+      "text": "你会提醒我吗",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3509
+    },
+    {
+      "id": "chat_negation",
+      "repeat": 1,
+      "text": "以后别提醒我开会了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3447
+    },
+    {
+      "id": "clock_injected",
+      "repeat": 1,
+      "text": "现在几点了",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 3533
+    },
+    {
+      "id": "chat_after_weather",
+      "repeat": 1,
+      "text": "好像去旅游啊",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 7925
+    },
+    {
+      "id": "chat_topic_switch_after_tool",
+      "repeat": 1,
+      "text": "你说我是不是该养只猫",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": true,
+      "reason": "",
+      "elapsedMs": 5856
+    },
+    {
+      "id": "weather_tomorrow",
+      "repeat": 1,
+      "text": "明天天气怎么样",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[weather.get_local]；实际: -",
+      "elapsedMs": 3537
+    },
+    {
+      "id": "weather_rain",
+      "repeat": 1,
+      "text": "帮我查一下明天会不会下雨",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[weather.get_local]；实际: -",
+      "elapsedMs": 3371
+    },
+    {
+      "id": "reminder_meeting",
+      "repeat": 1,
+      "text": "明天早上9点提醒我开会",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -",
+      "elapsedMs": 3423
+    },
+    {
+      "id": "reminder_alarm",
+      "repeat": 1,
+      "text": "帮我设个晚上8点的闹钟",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -",
+      "elapsedMs": 3625
+    },
+    {
+      "id": "reminder_weekly",
+      "repeat": 1,
+      "text": "后天下午3点提醒我交周报",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[reminder.plan|calendar.create_from_text|calendar.create_task]；实际: -",
+      "elapsedMs": 3396
+    },
+    {
+      "id": "photo_cheng",
+      "repeat": 1,
+      "text": "帮我搜索成龙最近的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[search_images|search_images_batch]；实际: -",
+      "elapsedMs": 3379
+    },
+    {
+      "id": "photo_liu",
+      "repeat": 1,
+      "text": "来几张刘亦菲的照片",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[search_images|search_images_batch]；实际: -",
+      "elapsedMs": 3363
+    },
+    {
+      "id": "search_movies",
+      "repeat": 1,
+      "text": "帮我查一下最近有什么值得看的新电影",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[search_web|deep_search]；实际: -",
+      "elapsedMs": 3465
+    },
+    {
+      "id": "travel_xingyi",
+      "repeat": 1,
+      "text": "帮我规划一个周末去兴义玩的行程",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[travel.plan-itinerary]；实际: -",
+      "elapsedMs": 3691
+    },
+    {
+      "id": "profile_child",
+      "repeat": 1,
+      "text": "记一下，我女儿叫小雨，今年三岁",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[profile.update]；实际: -",
+      "elapsedMs": 3420
+    },
+    {
+      "id": "wallet_balance",
+      "repeat": 1,
+      "text": "我钱包余额还有多少",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[wallet.get_balance]；实际: -",
+      "elapsedMs": 3350
+    },
+    {
+      "id": "message_reply",
+      "repeat": 1,
+      "text": "帮我回复妈妈微信说我马上到家",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[messages.reply|messages_list_conversations|messages.overview|world.link.send_message]；实际: -",
+      "elapsedMs": 3416
+    },
+    {
+      "id": "memory_recall",
+      "repeat": 1,
+      "text": "帮我回忆一下我之前说过喜欢喝什么",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[brain.recall|memory.recall_episodic]；实际: -",
+      "elapsedMs": 3840
+    },
+    {
+      "id": "smart_home_light",
+      "repeat": 1,
+      "text": "把客厅的灯打开",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[smart_home.control_device|smart_home_list_devices|smart_home.list_devices]；实际: -",
+      "elapsedMs": 3280
+    },
+    {
+      "id": "vision_camera",
+      "repeat": 1,
+      "text": "帮我看看家里摄像头的画面",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[vision.list_cameras]；实际: -",
+      "elapsedMs": 3638
+    },
+    {
+      "id": "multi_step_weather_reminder",
+      "repeat": 1,
+      "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
+      "tools": [],
+      "extraTools": [],
+      "forbiddenHit": [],
+      "pass": false,
+      "reason": "未命中期望组: #1[weather.get_local], #2[reminder.plan|calendar.create_from_text]；实际: -",
+      "elapsedMs": 3888
+    }
+  ]
+}

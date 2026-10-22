@@ -63,7 +63,6 @@ export const CORE_TOOL_LIBRARY = {
       "ride_hailing.quote",
       "ride_hailing.book",
       "self.list_custom_skills",
-      "surface.show",
     ],
     prefixes: [
       "calendar.",

@@ -34,10 +34,16 @@ export class ScheduleSensor implements ProactiveSensor {
 
   collect(_since: number): Signal[] {
     const now = this.nowFn();
-    const tasks = this.opts.listTasks().filter((t) => t.status !== "cancelled");
+    // 只看还在跑的：completed 的 nextRunAt 已为 null，paused 是用户主动停的，
+    // 拿它们算"下一个日程"会给出一个不会发生的事。
+    const tasks = this.opts.listTasks().filter((t) => t.status === "active");
     const upcoming = tasks
       .map((t) => {
-        const runAt = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
+        // **重复任务（weekly/daily）必须读 nextRunAt**：runAt 是首次触发时刻，
+        // 第一次响过之后它就成了过去，用 runAt 会让"每周三的课"在第二周起
+        // 从世界板上彻底消失（meeting_soon 再也不认它）。
+        const raw = t.nextRunAt ?? t.runAt;
+        const runAt = typeof raw === "number" ? raw : Date.parse(String(raw));
         return Number.isFinite(runAt) ? { title: t.title, runAt } : null;
       })
       .filter((v): v is { title: string; runAt: number } => v !== null)

@@ -91,6 +91,10 @@ export type HttpRouteDeps = {
   betaInviteService?: BetaInviteService;
   /** 财务入站邮件记账（未装配时 /finance/ingest/* 端点返回 503） */
   financeIngestService?: FinanceIngestService;
+  /** 数据入口：用户自助上传（截图/表格/ics/文本）→ 抽取 → 确认入库（未装配时 /ingest/* 返回 503） */
+  ingestService?: import("../../services/ingest-service.js").IngestService;
+  /** ics 日历订阅：用户自助粘贴订阅链接（未装配时 /ingest/subscriptions 返回 503） */
+  icsSubscriptionService?: import("../../services/ics-subscription-service.js").IcsSubscriptionService;
   /** 支付订单服务（未装配时管理概览不含支付统计） */
   paymentService?: import("../../services/payment-service.js").PaymentService;
   computeQuotaService: ComputeQuotaService;

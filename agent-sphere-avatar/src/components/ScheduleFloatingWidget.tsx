@@ -358,17 +358,5 @@ declare global {
       moveWindow: (dx: number, dy: number) => void;
       resizeWindow: (collapsed: boolean) => void;
     };
-    sphereOverlay?: {
-      moveTo: (x: number, y: number, animateMs?: number) => void;
-      moveBy: (dx: number, dy: number) => void;
-      setPosition: (x: number, y: number) => void;
-      getPosition: () => Promise<{ x: number; y: number }>;
-      getWorkArea: () => Promise<{ x: number; y: number; width: number; height: number }>;
-      setIgnoreMouseEvents: (ignore: boolean, forward?: boolean) => void;
-      setMenuExpanded?: (expanded: boolean) => void;
-      setScheduleCollapsed?: (collapsed: boolean) => void;
-      onPatch?: (cb: (patch: Record<string, unknown>) => void) => void;
-      onRoam?: (cb: () => void) => void;
-    };
   }
 }

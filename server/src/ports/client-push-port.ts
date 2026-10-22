@@ -5,7 +5,7 @@ import type { ClientLocationWire } from "../types/client-location.js";
  *
  * 分层约束：Agent runtime 一侧不允许直接持有客户端 socket
  * （`WsConnectionRegistry` 属于 gateway 的传输层）。所有「Agent 命令客户端」
- * 的流量（具身补丁、媒体控制、语音播报、虚拟电话、surface.show 等）
+ * 的流量（具身补丁、媒体控制、语音播报、虚拟电话、surface.dismiss 等）
  * 必须经本端口发出。同进程模式下由 gateway 直接注入 registry
  * （结构兼容）；拆进程后由 gateway 侧 WS 链路适配器实现同一接口。
  */

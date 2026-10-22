@@ -179,19 +179,6 @@ export function envFlagEnabled(name: string, legacyNames: readonly string[] = []
 }
 
 /**
- * BRAIN_EVOLUTION_ENABLED：EvolutionCortex 四子系统（自学习/技能生成/晋升管道/进化循环）总开关。
- * 实验性子系统，默认 0=关闭（整个 EvolutionCortex 块跳过装配、Phase 5 定时器不创建）。
- * 兼容旧变量：BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED=1 或 AGENT_EVOLUTION_LOOP_ENABLED=1
- * 等效开启（旧变量读法参考 services/evolution-loop-service.ts 的 isEvolutionLoopEnabled）。
- */
-export function isBrainEvolutionEnabled(): boolean {
-  return envFlagEnabled(
-    "BRAIN_EVOLUTION_ENABLED",
-    ["BRAIN_SELF_DRIVEN_EVOLUTION_ENABLED", "AGENT_EVOLUTION_LOOP_ENABLED"],
-  );
-}
-
-/**
  * 发行版本（NEXTBOT_EDITION）：
  *   internal —— 内测版（默认）：能力全量，开发机 / ECS / 内测安装包零变化；
  *   oss      —— 开源版（GitHub 发行）：剔除内测独占能力家族（旅游 / 虚拟电话 /

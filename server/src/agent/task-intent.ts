@@ -21,9 +21,21 @@
 //
 // 本判定不替代域名关键词（转账/下单/写代码/部署/桌面自动化等），那些精确且强意作法保留在原处。
 
-// 强"做某事"动作动词（任务句式里常见核心动词；无需穷举，祈使结构兜底）
-const ACTION_VERB_RE =
-  /整理|归纳|归类|分类|排序|分组|重命名|归档|下载|上传|导入|导出|转换|压缩|解压|打包|解包|合并|拆分|分割|拼接|剪辑|翻译|改写|润色|润饰|校对|重写|概括|总结|摘要|生成|制作|创建|新建|撰写|起草|设计|策划|拟定|做成|画|绘|设置|设定|配置|修改|调整|取消|删除|清除|重置|启用|禁用|开通|备份|恢复|迁移|同步|清理|美化|优化|升级|发送|发给|分享|转发|推送|截图|录屏|采集|抓取|收集|搜集|统计|汇总|修复|调试|重构|搭建|开发|实现|安装|卸载|解析|分析|对比|比价|核验|验证|校验|调研|查看|看看|安排|筹备|预约|制定|规划/i;
+// 强"做某事"动作动词（任务句式里常见核心动词；无需穷举，祈使结构兜底）。
+// 2026-10-22 补设备控制/媒体类（把字句「把客厅的灯打开」复盘：动词表原先
+// 只有文件/任务类操作，漏掉整族智能家居与播放控制句式）。
+const ACTION_VERB_SOURCE =
+  "整理|归纳|归类|分类|排序|分组|重命名|归档|下载|上传|导入|导出|转换|压缩|解压|打包|解包|合并|拆分|分割|拼接|剪辑|翻译|改写|润色|润饰|校对|重写|概括|总结|摘要|生成|制作|创建|新建|撰写|起草|设计|策划|拟定|做成|画|绘|设置|设定|配置|修改|调整|取消|删除|清除|重置|启用|禁用|开通|备份|恢复|迁移|同步|清理|美化|优化|升级|发送|发给|分享|转发|推送|截图|录屏|采集|抓取|收集|搜集|统计|汇总|修复|调试|重构|搭建|开发|实现|安装|卸载|解析|分析|对比|比价|核验|验证|校验|调研|查看|看看|安排|筹备|预约|制定|规划|打开|关闭|关上|播放|暂停|停止|静音|调高|调低|调亮|调暗|切换|全屏|投屏";
+const ACTION_VERB_RE = new RegExp(ACTION_VERB_SOURCE, "i");
+
+// 把字句祈使（2026-10-22 补盖）：「把客厅的灯打开」「把钱转给妈妈」这类无
+// 「帮我」前缀的祈使。结构信号 = 把 + 短宾语 + 动作动词；用负向后行排除
+// 「我把门关了」这类既往陈述（把前带主语「我/他/她/它」）——「帮我把…」
+// 已由 IMPERATIVE_RE 覆盖，把前是「我」时不再重复命中。
+const BA_IMPERATIVE_RE = new RegExp(
+  `(?<![我他她它])把[^，。！？,.!?]{1,12}(?:${ACTION_VERB_SOURCE})`,
+  "i",
+);
 
 // 祈使句式引导词：明确"要我做某事"
 const IMPERATIVE_RE =
@@ -32,6 +44,20 @@ const IMPERATIVE_RE =
 // 实时单一查询（由 fast 的简单工具循环覆盖）→ 不应判为任务
 const REALTIME_ONLY_RE =
   /现在.*几点|几点了|今天(?:的)?天气|天气(?:怎么|如何|怎么样|如何)|星期几|今天.*几号|当前.*时间|你叫什么|你是谁/i;
+
+/**
+ * 「注入即可回答」的单一查询（时间/日期/身份）——【当前时间】块每轮注入，
+ * 设计上不调工具（2026-10-07 拍板：工具查时间又慢又费 token）。
+ * 天气刻意不在此列：天气必须真调工具（weather_get_local），正是
+ * ZERO_TOOL_UNSAFE_RE 收录它的原因。出口对账闸的怀疑信号用它排除
+ * 「无需工具」的轮次。
+ */
+const INJECTION_ANSWERED_RE =
+  /现在.*几点|几点了|星期几|今天.*几号|明天.*几号|当前.*时间|你叫什么|你是谁/i;
+
+export function isInjectionAnsweredQuery(message: string): boolean {
+  return INJECTION_ANSWERED_RE.test((message ?? "").trim());
+}
 
 // 纯提问句式（以问词引导）→ 交 fast 正常作答
 const QUESTION_OPENING_RE =
@@ -65,7 +91,7 @@ export function isActionableTaskRequest(message: string): boolean {
   if (REALTIME_ONLY_RE.test(t)) return false;
   if (KNOWLEDGE_QA_RE.test(t)) return false;
 
-  const imperative = IMPERATIVE_RE.test(t);
+  const imperative = IMPERATIVE_RE.test(t) || BA_IMPERATIVE_RE.test(t);
   const verbHit = ACTION_VERB_RE.test(t);
 
   // 1) 祈使 + 动作动词 → 明确任务
@@ -88,4 +114,25 @@ const ZERO_TOOL_UNSAFE_RE =
 export function turnNeedsToolFloor(message: string): boolean {
   const t = (message ?? "").trim();
   return t.length > 0 && ZERO_TOOL_UNSAFE_RE.test(t);
+}
+
+/**
+ * 回复是否「宣称已完成某个外部动作」（办事诉求对账闸的词面半边，2026-10-22）。
+ *
+ * 与 realtime-search-query.ts 的 claimsWebSearch 同构：词面只识别「宣称」
+ * 本身，办没办成由服务端工具执行结果对账（代码确定知道）——零成功工具 +
+ * 完成态宣告 = 确定性违约，与回复聊什么话题无关。
+ *
+ * 刻意收窄到有服务端副作用的外部动作（设提醒/发消息/下单/创建/提交…），
+ * 不含「我知道了/我记住了/我想好了」这类纯口头回应——后者不承诺任何
+ * 服务端副作用，拦截它们只会空转烧 token（2026-10-06 误伤两次的教训：
+ * 那时的宣告兜底没有服务端事实对账，只看文本形状）。
+ */
+const ACTION_COMPLETION_CLAIM_RE =
+  /已经(?:帮你|给你|替你|为你|为您)?(?:设(?:好|定|了)|定(?:好|了)|创建(?:好|了)?|建(?:好|了)|加(?:好|了)|发(?:给|了|过去)|回复(?:了|好)|提交(?:了)?|下单(?:了)?|叫(?:好|了)|订(?:好|了)|转(?:发|给|到|过去)|安排(?:好|了)?|备份(?:好|了)?|同步(?:好|了)?|提醒)/;
+
+export function claimsActionCompleted(text: string): boolean {
+  const t = (text ?? "").trim();
+  if (!t || t.length > 2000) return false;
+  return ACTION_COMPLETION_CLAIM_RE.test(t);
 }
