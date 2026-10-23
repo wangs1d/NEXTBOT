@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
@@ -45,7 +46,7 @@ export class FileProcessingService {
 
   constructor(rootDir?: string) {
     // 默认 <server>/data/user-files/
-    this.rootDir = resolve(rootDir ?? join(process.cwd(), "data", "user-files"));
+    this.rootDir = resolve(rootDir ?? join(getDataDir(), "user-files"));
     try {
       mkdirSync(this.rootDir, { recursive: true });
     } catch {

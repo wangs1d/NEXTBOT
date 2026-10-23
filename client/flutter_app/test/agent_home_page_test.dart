@@ -7,8 +7,8 @@ import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:http/testing.dart";
 
-import "package:private_ai_agent/core/config/api_config.dart";
-import "package:private_ai_agent/features/chat/agent_home_page.dart";
+import "package:nextbot/core/config/api_config.dart";
+import "package:nextbot/features/chat/agent_home_page.dart";
 
 void main() {
   setUp(() {

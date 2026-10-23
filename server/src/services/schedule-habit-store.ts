@@ -18,6 +18,7 @@
  * 数据量极小；读路径全内存（provider 每次建任务都会调一次，须同步零 IO）。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -289,7 +290,7 @@ function formatHour(h: number): string {
 let singleton: ScheduleHabitStore | null = null;
 
 export function initScheduleHabitStore(filePath?: string): ScheduleHabitStore {
-  const path = filePath ?? join(process.cwd(), "data", "schedule", "sleep-routine.json");
+  const path = filePath ?? join(getDataDir(), "schedule", "sleep-routine.json");
   const store = new ScheduleHabitStore(path);
   store.load();
   singleton = store;

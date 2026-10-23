@@ -6,7 +6,7 @@ import "dart:io" show HttpOverrides;
 import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 
-import "package:private_ai_agent/core/services/feedback_api.dart";
+import "package:nextbot/core/services/feedback_api.dart";
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

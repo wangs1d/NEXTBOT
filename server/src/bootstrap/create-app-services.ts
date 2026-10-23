@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
@@ -15,10 +16,10 @@ import {
   WorldPartitionWsRegistry,
   WorldService,
   type WorldRevisionEvent,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorModelBindingStore } from "../external-model/index.js";
 import { applyPersistedServiceConfig } from "../config/service-config-store.js";
-import { createPictureKit } from "@private-ai-agent/picture";
+import { createPictureKit } from "@nextbot/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { createRecommendationCatalog, fetchLiveProducts, liveProductToRecord } from "../recommendation/index.js";
 import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
@@ -117,7 +118,7 @@ import { InteractionSignalSensor } from "../rhythm/sensors/interaction-signal-se
 import { createReminderReschedulerConsumer } from "../rhythm/consumers/reminder-rescheduler.js";
 import { createReceptiveHoursWriterConsumer } from "../rhythm/consumers/receptive-hours-writer.js";
 import { createProactiveCandidateSourceConsumer } from "../rhythm/consumers/proactive-candidate-source.js";
-import type { RhythmProfileUpdatedPayload } from "@private-ai-agent/agent-protocol";
+import type { RhythmProfileUpdatedPayload } from "@nextbot/agent-protocol";
 import {
   initNightlyMemoryTaskService,
   getNightlyMemoryTaskService,
@@ -658,7 +659,7 @@ export async function createAppServices(): Promise<AppServices> {
   const alipayBotService = new AlipayBotService();
   // 商家下单服务：从 data/merchants.json 加载商家目录，按意图路由商家并桥接支付宝下单→支付短链
   const merchantOrderService = new MerchantOrderService(
-    process.env.MERCHANT_REGISTRY_FILE ?? join(process.cwd(), "data", "merchants.json"),
+    process.env.MERCHANT_REGISTRY_FILE ?? join(getDataDir(), "merchants.json"),
     alipayBotService,
   );
   bootLoads.push(merchantOrderService.load());
@@ -669,16 +670,16 @@ export async function createAppServices(): Promise<AppServices> {
   const unifiedIdempotencyService = new UnifiedIdempotencyService();
   const toolRegistry = new ToolRegistry();
   const lifeSignalHubService = new LifeSignalHubService(
-    join(process.cwd(), "data", "life-signals.json"),
+    join(getDataDir(), "life-signals.json"),
   );
   bootLoads.push(lifeSignalHubService.load());
   const anticipationEngineService = new AnticipationEngineService(
-    join(process.cwd(), "data", "anticipation-candidates.json"),
+    join(getDataDir(), "anticipation-candidates.json"),
   );
   bootLoads.push(anticipationEngineService.load());
   const marketSignalService = new MarketSignalService(lifeSignalHubService);
   const desktopPresenceSignalService = new DesktopPresenceSignalService(lifeSignalHubService);
-  const messageHubService = new MessageHubService(join(process.cwd(), "data", "message-hub.json"));
+  const messageHubService = new MessageHubService(join(getDataDir(), "message-hub.json"));
   bootLoads.push(messageHubService.load());
   // 订单信号派生（2026-10-19 handoff 数据源半边）：手机通知捕捉里命中订单词的
   // （美团/饿了么/骑手/已送达…），派生成 shopping 流信号喂进 SensorKernel →
@@ -700,10 +701,10 @@ export async function createAppServices(): Promise<AppServices> {
   const messagePlatformGateway = new MessagePlatformGateway();
 
   const skillManager = new SkillManager();
-  skillManager.configureEnabledPersistence(join(process.cwd(), "data", "skill-enabled.json"));
+  skillManager.configureEnabledPersistence(join(getDataDir(), "skill-enabled.json"));
   // 自我进化技能（code + procedural）磁盘持久化目录：跨重启恢复"越用越强"的技能
-  skillManager.configureEvolvedSkillsDir(join(process.cwd(), "data", "skills-evolved"));
-  skillManager.configureProceduralSkillsDir(join(process.cwd(), "data", "skills"));
+  skillManager.configureEvolvedSkillsDir(join(getDataDir(), "skills-evolved"));
+  skillManager.configureProceduralSkillsDir(join(getDataDir(), "skills"));
   // SkillCurator 质量巡检：每小时归档长期未使用的 procedural 技能（磁盘保留，不物理删除）
   const curatorTimer = setInterval(() => {
     try {
@@ -875,9 +876,9 @@ export async function createAppServices(): Promise<AppServices> {
   // 播放 URL 解析带用户身份（VIP 曲目用其会员权益）；无会话自动回退匿名。
   const mediaMusicService = new MediaMusicService(wsConnectionRegistry, undefined, browserSessionService);
   // 初始化健康/运动数据服务（data/health/{actorId}.json，1s 防抖落盘）。
-  const healthFitnessService = new HealthFitnessService(join(process.cwd(), "data", "health"));
+  const healthFitnessService = new HealthFitnessService(join(getDataDir(), "health"));
   // 初始化财务深度服务（data/finance/{actorId}/{transactions,budgets}.json + reports/）。
-  const financeDeepService = new FinanceDeepService(join(process.cwd(), "data", "finance"));
+  const financeDeepService = new FinanceDeepService(join(getDataDir(), "finance"));
   // 初始化订阅盘点服务（财务管家 P0：候选检测/确认/使用率/续费前提醒，
   // 与账本同目录 subscriptions.json，懒加载 + 写穿）。
   const subscriptionAuditService = new SubscriptionAuditService({
@@ -894,7 +895,7 @@ export async function createAppServices(): Promise<AppServices> {
   const codeSandboxService = new CodeSandboxService();
   // 初始化购物/下单服务（页面执行：内置浏览器优先 + 无头兜底 + 扫码登录门）。
   // 本地订单表 data/shopping/orders.json（单日预算统计依据）+ 支付宝钱包通道（收银台代付）。
-  const shoppingOrderStore = new ShoppingOrderStore(join(process.cwd(), "data", "shopping", "orders.json"));
+  const shoppingOrderStore = new ShoppingOrderStore(join(getDataDir(), "shopping", "orders.json"));
   // 共用浏览器桥：用户与 Agent 共用客户端内嵌浏览器（WebView2）。
   // Agent 的 shared_browser.* 动作经此转发到用户正在看的浏览器执行；
   // 所有 invoke/失败写审计（AuditService）。
@@ -925,7 +926,7 @@ export async function createAppServices(): Promise<AppServices> {
     shoppingOrderService,
     upstreamSearchService,
     officialPriceGateway,
-    dataDir: join(process.cwd(), "data", "shopping"),
+    dataDir: join(getDataDir(), "shopping"),
   });
   // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
   // open 撞白名单站点登录页时，经 QrAssistService 自动把登录二维码推到聊天。
@@ -952,7 +953,7 @@ export async function createAppServices(): Promise<AppServices> {
     // 滴滴官方 MCP 桥接（travel-upgrade-plan P2）：接驳下单真实走滴滴
     mcpClient: mcpClientService,
   });
-  const bookingOrderStore = new BookingOrderStore(join(process.cwd(), "data", "booking", "orders.json"));
+  const bookingOrderStore = new BookingOrderStore(join(getDataDir(), "booking", "orders.json"));
   // 行后旅行回忆录（travel 双端⑦）：订单库/账本服务在这里注入真实实例
   // （travel-map 路由经 travelMemoir 单例取用，避免同文件双实例读写不一致）
   travelMemoir.configure({
@@ -1049,7 +1050,7 @@ export async function createAppServices(): Promise<AppServices> {
       return emailSmsService.sendSms({ to, text, templateParams: JSON.stringify({ content: text }) });
     },
     // 升级链持久化：提醒实例与升级计时落盘，重启后恢复并补升级（此前重启即蒸发）
-    statePath: join(process.cwd(), "data", "intelligent-reminder", "active-reminders.json"),
+    statePath: join(getDataDir(), "intelligent-reminder", "active-reminders.json"),
     onContactOutcome: (params) => {
       const channel =
         params.channel === "popup"
@@ -1243,8 +1244,8 @@ export async function createAppServices(): Promise<AppServices> {
   // registerAllCapabilityModules 把 handler 注册到 ToolRegistry。
   // 图片能力套件(图库/解析/缩略图/存储管理),存储根 data/pictures
   const pictureKit = await createPictureKit({
-    rootDir: join(process.cwd(), "data", "pictures"),
-    batchOutputDir: join(process.cwd(), "data", "pictures", "batch"),
+    rootDir: join(getDataDir(), "pictures"),
+    batchOutputDir: join(getDataDir(), "pictures", "batch"),
   });
   // ─── 女性关怀（M1）：生理周期关怀 + 安全守护（docs/women-care-proposal.md）───
   // 主动通知走 proactivity 管道、SOS 按需定位走位置协调器，两者都在本文件下方
@@ -1253,14 +1254,14 @@ export async function createAppServices(): Promise<AppServices> {
   const wellnessLocationRef: { current: LocationCoordinator | null } = { current: null };
   // 生理周期关怀：加密存储 data/period-care/，每分钟 tick 临近提醒
   const periodCareService = new PeriodCareService({
-    dataDir: join(process.cwd(), "data", "period-care"),
+    dataDir: join(getDataDir(), "period-care"),
     getPipeline: () => wellnessPipelineRef.current,
   });
   await periodCareService.load();
   periodCareService.start();
   // 安全守护：紧急联系人/SOS/借口来电；SOS 位置按需取一次，不持续上传不落库
   const safetyGuardService = new SafetyGuardService({
-    dataDir: join(process.cwd(), "data", "safety-guard"),
+    dataDir: join(getDataDir(), "safety-guard"),
     sendSms: (params) => emailSmsService.sendSms(params),
     prepareCall: (actorId, input) =>
       phoneCallCoordinator.prepare(actorId, {
@@ -2057,11 +2058,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 用量纪律：每日熔断 PROACTIVITY_MAX_PHRASE_PER_DAY（默认 30），PROACTIVITY_PHRASE_LLM=0 关闭。
   const speechPolisher = new SpeechPolisher({
     chat: () => (externalChat?.isEnabled() ? externalChat : null),
-    dataPath: join(process.cwd(), "data", "proactivity"),
+    dataPath: join(getDataDir(), "proactivity"),
   });
   const moodInferenceService = new MoodInferenceService({
     externalChat,
-    persistFilePath: join(process.cwd(), "data", "mood-inferences.jsonl"),
+    persistFilePath: join(getDataDir(), "mood-inferences.jsonl"),
     logger: {
       info: (msg) => app.log.info(msg),
       warn: (msg) => app.log.warn(msg),
@@ -2071,7 +2072,7 @@ export async function createAppServices(): Promise<AppServices> {
   await moodInferenceService.load();
   app.log.info("[MoodInference] 服务已初始化并加载历史数据");
 
-  const notesService = new NotesService(join(process.cwd(), "data"));
+  const notesService = new NotesService(getDataDir());
   await notesService.load().catch((err) => {
     app.log.error({ err }, "NotesService 加载失败");
   });
@@ -2396,7 +2397,7 @@ export async function createAppServices(): Promise<AppServices> {
   /** 屏幕状态条件化的信号源（proactivity 内核 signals 日志；内核创建后赋值） */
   let screenSignalSourceRef: (() => Signal[]) | null = null;
   if (rhythmEnabled) {
-    const rhythmProfileStore = new RhythmProfileStore(join(process.cwd(), "data", "rhythm_profiles"));
+    const rhythmProfileStore = new RhythmProfileStore(join(getDataDir(), "rhythm_profiles"));
     await rhythmProfileStore.load();
     rhythmProfileStoreRef = rhythmProfileStore;
     rhythmEngine = new LifeRhythmEngine({ profileStore: rhythmProfileStore });
@@ -2460,7 +2461,7 @@ export async function createAppServices(): Promise<AppServices> {
   const scheduleIntentService = new ScheduleIntentService(externalChat);
   // 购物建议商品库（runtime 内置能力）：shopping.suggest 工具数据源；数据落 data/recommendation/。
   const recommendationCatalog = createRecommendationCatalog(
-    join(process.cwd(), "data", "recommendation"),
+    join(getDataDir(), "recommendation"),
   );
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService, {
     catalog: recommendationCatalog,
@@ -2554,14 +2555,14 @@ export async function createAppServices(): Promise<AppServices> {
   // 上传树枝日程主张库（2026-10-22 树状架构 Phase 1）：calendar.batch_create 批量导入
   // 课表/行程表 → 事实主张版本链入库；消费方 AssertionConflictWatcher 在主动性段装配
   const scheduleAssertionStore = new ScheduleAssertionStore({
-    persistPath: join(process.cwd(), "data", "proactivity", "schedule-assertions.json"),
+    persistPath: join(getDataDir(), "proactivity", "schedule-assertions.json"),
   });
   registerCalendarTools(toolRegistry, scheduleTaskService, scheduleIntentService, scheduleConflictService, () => alarmClockServiceRef, scheduleAssertionStore);
   // 盯梢任务（2026-10-22 Muse 对齐件）：用户对话里说"帮我盯着XXX" → watch.manage
   // 创建任务（创建时一次 LLM 提取关键词，运行期匹配零 LLM）；消费方 WatchTaskWatcher
   // 在主动性段装配。Muse 的"任务驱动盯梢"对齐件 + 截止×日历缺口推理。
   const watchTaskStore = new WatchTaskStore({
-    persistPath: join(process.cwd(), "data", "proactivity", "watch-tasks.json"),
+    persistPath: join(getDataDir(), "proactivity", "watch-tasks.json"),
   });
   registerWatchTaskTools(toolRegistry, watchTaskStore);
   const smartHomeService = new SmartHomeService();
@@ -2933,7 +2934,7 @@ export async function createAppServices(): Promise<AppServices> {
     awarenessCortex = new AwarenessCortex();
     // 睡眠样本落盘（2026-10-01 rhythm 断供根修）：重启不丢积累，3 晚即可
     // 凑齐 SLEEP_WINDOW_MIN_SAMPLES 让节律引擎有真实作息数据
-    awarenessCortex.setPersistPath(join(process.cwd(), "data", "proactivity"));
+    awarenessCortex.setPersistPath(join(getDataDir(), "proactivity"));
     proactionCortex = new ProactionCortex();
     // CapabilityCortex：注入回 prompt builder（让能力域出现在 prompt 中）
 
@@ -3123,8 +3124,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 执行出口：toolExecutor 走 toolRegistry（保留可用性/沙箱/两阶段等全部门禁）。
   const habitLoopService = new HabitLoopService({
     outbound: proactiveOutbound,
-    storeFile: join(process.cwd(), "data", "habit-loop", "rules.json"),
-    observationsFile: join(process.cwd(), "data", "habit-loop", "observations.json"),
+    storeFile: join(getDataDir(), "habit-loop", "rules.json"),
+    observationsFile: join(getDataDir(), "habit-loop", "observations.json"),
     toolExecutor: async (tool, input, actorId, mode) => {
       // 分类层护栏：自动执行路径禁止 spend（花钱）/outbound（外发第三方）工具；
       // 用户已确认（confirmed）路径不拦（金融类仍有 AgentTaskSafety/两阶段确认兜底）
@@ -3695,7 +3696,7 @@ export async function createAppServices(): Promise<AppServices> {
     // 6.0 节律感知核心（第 10 个 BodyModule）：用户作息学习（最后活跃→就寝
     //     基线），经 UserTimingService 统一取用口供各定时场景消费
     //     （过劳检测/干预链路 2026-10-16 已删除）。
-    rhythmCore = new RhythmCore({ bodyBus }, join(process.cwd(), "data", "body"));
+    rhythmCore = new RhythmCore({ bodyBus }, join(getDataDir(), "body"));
     bodyCenter.registerModule(rhythmCore);
 
     // 6.1 工具路由：仅保留仍有 BodyModule 承接的前缀（当前为空——
@@ -4479,7 +4480,7 @@ export async function createAppServices(): Promise<AppServices> {
   const proactivitySuppressionStore = new ProactivitySuppressionStore({
     dirPath:
       process.env.PROACTIVITY_SUPPRESSION_DIR ??
-      join(process.cwd(), "data", "proactivity-suppression"),
+      join(getDataDir(), "proactivity-suppression"),
   });
   await proactivitySuppressionStore.load();
   // 共享频控器：hub 快路径与统一管道同一预算口径（单一预算才是真预算），
@@ -4487,7 +4488,7 @@ export async function createAppServices(): Promise<AppServices> {
   const proactivityGovernor = new FrequencyGovernor();
   // 每用户自主性等级 + 勿扰（客户端设置页可调；等级经 hub 执行端生效，勿扰经 governor 全局生效）
   const autonomySettings = new AutonomySettingsStore(
-    join(process.cwd(), "data", "autonomy-settings.json"),
+    join(getDataDir(), "autonomy-settings.json"),
   );
   proactivityGovernor.setDndCheck((actorId) => autonomySettings.isDnd(actorId));
   // 在场感知（active/idle/offline）：WS 连接事件 + 对话活跃喂入，供仲裁择时与投递选通道
@@ -4495,17 +4496,17 @@ export async function createAppServices(): Promise<AppServices> {
   proactivityPresenceRef = proactivityPresence;
   // 沉默日志（方案 B）：hub act 沉默与管道 silenced 共用同一实例，落盘 data/proactivity/silence-log.json
   const proactivitySilenceLog = new SilenceLog(
-    join(process.cwd(), "data", "proactivity", "silence-log.json"),
+    join(getDataDir(), "proactivity", "silence-log.json"),
   );
   // 挂起确认存储（ask_first）：hub 行动级与管道提案级共用，落盘 data/proactivity/confirmations.json
   const proactivityConfirmations = new PendingConfirmationStore(
-    join(process.cwd(), "data", "proactivity", "confirmations.json"),
+    join(getDataDir(), "proactivity", "confirmations.json"),
   );
   // ─── 分级触达（ReachRouter）：「多急 × 要不要拍板」决定通道，ack 归一 ───
   // 通道阶梯 chat→popup→voice→phone（phone 仅 interrupt 白名单），
   // 静默事件只进台账。通道适配在此装配；push/台账在下方创建后补齐（闭包晚绑定）。
   const attentionStore = new AttentionStore(
-    join(process.cwd(), "data", "proactivity", "attention.json"),
+    join(getDataDir(), "proactivity", "attention.json"),
   );
   const reachChannels: ReachChannelDeps = {
     // L2 对话气泡：synapseBus（WS + MessageHub 离线降级）→ wsRegistry 直推兜底
@@ -4554,7 +4555,7 @@ export async function createAppServices(): Promise<AppServices> {
     onConversationTurn: (actorId, text) =>
       worldBoardRef.current?.append(actorId, "session", "recentTurns", { at: Date.now(), text }, 20),
     // 防重记忆持久化：跨栈去重重启不失效
-    dataPath: join(process.cwd(), "data", "proactivity"),
+    dataPath: join(getDataDir(), "proactivity"),
     // 分级触达：ask_first 挂起确认 → Router 投递+升级（hub 的 speak 信号已投
     // chat，这里 assumeDelivered 避免双发；未响应时步进升 popup/voice）
     onPendingConfirmation: (entry) => {
@@ -4759,7 +4760,7 @@ export async function createAppServices(): Promise<AppServices> {
   const interestWatcher = new InterestWatcher({
     persistPath:
       process.env.INTEREST_WATCH_FILE ??
-      join(process.cwd(), "data", "interest-watch.json"),
+      join(getDataDir(), "interest-watch.json"),
     fetchHot: async (limit) => {
       const res = await fetchHotRankings(limit);
       return res.items.map((item) => ({
@@ -4858,7 +4859,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 全部零 LLM：传感层持续追踪状态 delta，评估器把 delta 变成事件，
   // 仲裁层按"打断成本 × 紧迫度"裁决何时说，目标板后台预执行备结果。
   // LLM 只在两个点出现：InitiativeEngine 开放评估（有熔断上限）+ 可选话术。
-  const proactivityFabricPath = join(process.cwd(), "data", "proactivity");
+  const proactivityFabricPath = join(getDataDir(), "proactivity");
   /** 管道 outcome 存储（提升为命名引用：CostCalibrator 定时读取） */
   let outcomesStoreForCalibrator: InstanceType<typeof OutcomeStore> | null = null;
   const sensorKernel = new SensorKernel({ dataPath: proactivityFabricPath });
@@ -5025,7 +5026,7 @@ export async function createAppServices(): Promise<AppServices> {
     onOutcome: (input) => {
       // 通话结果回灌：接受率口径（replied=正反馈，no_response/user_hangup=负反馈）
       costCalibrator.observe(input.outcome === "replied" ? "accepted" : "ignored");
-      appendEventAudit(join(process.cwd(), "data", "proactivity", "events.ndjson"), {
+      appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), {
         at: Date.now(),
         eventId: input.callId || `call_${Date.now().toString(36)}`,
         kind: `call:${input.kind}`,
@@ -5056,7 +5057,7 @@ export async function createAppServices(): Promise<AppServices> {
         const rhythmV = byHour?.[hour];
         const base =
           typeof rhythmV === "number" && Number.isFinite(rhythmV) ? Math.max(0, Math.min(1, rhythmV)) : 0.5;
-        const outcomes = outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json")));
+        const outcomes = outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(getDataDir(), "proactivity", "outcomes.json")));
         const stat = outcomes.hourlyReceptivity(actorId).get(hour);
         if (stat && stat.samples >= 3) return Math.max(0, Math.min(1, 0.6 * stat.rate + 0.4 * base));
         return base;
@@ -5664,11 +5665,11 @@ export async function createAppServices(): Promise<AppServices> {
   // 频控与 hub 共用 proactivityGovernor（单一预算口径）；known actor 状态随管道落盘重启恢复，
   // 重启后 hub 才能在用户开口前自主发起问候。
   const proactivePushService = new MobilePushService({
-    registryPath: join(process.cwd(), "data", "proactivity", "push-tokens.json"),
+    registryPath: join(getDataDir(), "proactivity", "push-tokens.json"),
   });
   // 助手动态台账：action.* 代办提案投递成功后落一条记录，右侧面板「助手动态」卡读取
   const agentActivityStore = new AgentActivityStore(
-    join(process.cwd(), "data", "proactivity", "activities.json"),
+    join(getDataDir(), "proactivity", "activities.json"),
   );
   // ─── 计划推进（2026-09-24，对标 Muse 大目标模式）+ 行为审计时间线 ───
   // plan 型目标拆步 → 逐步派后台任务（agentCore.dispatchBackgroundTask）→
@@ -5739,7 +5740,7 @@ export async function createAppServices(): Promise<AppServices> {
   // TaskPlan 是三层尺度里的中间层：单次多步任务、会话内可续跑、完成即归档。
   // 存储独立（data/session-plans/），绝不进 goals.json——短任务会冲爆长期台账，
   // 而那里是每轮注入的数据源。进程级单例，工具层 getTaskPlanStore() 直取。
-  initTaskPlanStore({ dataPath: join(process.cwd(), "data") });
+  initTaskPlanStore({ dataPath: getDataDir() });
 
   // ─── 等待步的客观探测（2026-10-19 handoff · checkMode=probe）───
   // 把执行权交给用户后，「他做完了」有两种收回方式：他自己点（已接），或客观
@@ -5916,8 +5917,8 @@ export async function createAppServices(): Promise<AppServices> {
   );
   // 任务面台账/离线结果落盘：重启后台账恢复（非终态如实标记 failed，
   // "怎么样了"答得出"重启中断"）；已入箱未投递的任务结果重连后照常补投
-  getTaskHub().enablePersistence(join(process.cwd(), "data", "task-plane", "task-hub.json"));
-  getTaskOutbox().enablePersistence(join(process.cwd(), "data", "task-plane", "task-outbox.json"));
+  getTaskHub().enablePersistence(join(getDataDir(), "task-plane", "task-hub.json"));
+  getTaskOutbox().enablePersistence(join(getDataDir(), "task-plane", "task-outbox.json"));
   // 被打断任务收口 + 自动重跑（2026-09-23）：清扫只标 failed（无连接无监听，
   // 终态送不出去），由 restart-recovery 延迟统一处理——沿原结果通道推收口
   // 通知（状态带据此收口），再把"被重启错杀"的任务自动重派（代数封顶防死循环）。
@@ -5990,7 +5991,7 @@ export async function createAppServices(): Promise<AppServices> {
   })();
   // 站内信：平台/运营侧 → 用户收件箱（data/inbox/{actorId}.json 持久化 + 在线 WS 直推）
   const inboxService = new InboxService({
-    rootDir: join(process.cwd(), "data", "inbox"),
+    rootDir: join(getDataDir(), "inbox"),
     wsRegistry: wsConnectionRegistry,
   });
   // LLM 预算告警出口（上线护栏）：阈值命中（80% warn / 100% exceeded 各一次）
@@ -6026,13 +6027,13 @@ export async function createAppServices(): Promise<AppServices> {
     });
   };
   const proactivePipeline = new ProactivePipeline({
-    dataPath: join(process.cwd(), "data", "proactivity"),
+    dataPath: join(getDataDir(), "proactivity"),
     governor: proactivityGovernor,
     suppression: proactivitySuppressionStore,
     presence: proactivityPresence,
     // 话题级 dismiss 追踪（2026-10-01）：同话题连续划掉 3 条 → 投「要不要少提这类」建议；
     // 真正的静音仍只走用户明说（proactivity.feedback mute_topic / 抑制表）
-    topicDismiss: new TopicDismissTracker({ dataPath: join(process.cwd(), "data", "proactivity") }),
+    topicDismiss: new TopicDismissTracker({ dataPath: join(getDataDir(), "proactivity") }),
     // 共享发现层（2026-10-19）：所有触发源的唯一收口——write/composeBeforeOpen/noteSpoken
     // 都在管道这一个入口发生（messageWatch / commitmentTrigger / 到点提醒 / 早报 / 承诺
     // 代催 / wellness 等直接调 submitProposal 的旁路，从此结构性走共享层，不必各自打补丁）。
@@ -6155,7 +6156,7 @@ export async function createAppServices(): Promise<AppServices> {
           }),
       },
     }),
-    outcomes: outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(process.cwd(), "data", "proactivity", "outcomes.json"))),
+    outcomes: outcomesStoreForCalibrator ?? (outcomesStoreForCalibrator = new OutcomeStore(join(getDataDir(), "proactivity", "outcomes.json"))),
     // 无 directText 的提案走 speak 闭环（现有 ProactionCortex 话术——管道唯一 LLM 调用点）
     speak: (p) =>
       proactivityHub.submitIntent({
@@ -6357,7 +6358,7 @@ export async function createAppServices(): Promise<AppServices> {
     });
     audit.action = action.action;
     audit.cost = action.cost;
-    appendEventAudit(join(process.cwd(), "data", "proactivity", "events.ndjson"), audit);
+    appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), audit);
   });
   // 会前准备包触发：60s 检查下一个日程，20-40min 窗口内启动后台预执行（幂等）。
   // actor 遍历状态板已知用户（与映射执行器同源），primaryActor 仅作兜底——
@@ -6401,7 +6402,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 不 throw）。message 树枝的闸语义现役由 message-gate 承担（ingestInbound 直调），
   // Phase 2 迁移为经本注册表按树枝分发——先立接缝，不动行为。
   const branchRegistry = new BranchRegistry({
-    configPath: join(process.cwd(), "data", "proactivity", "branches.json"),
+    configPath: join(getDataDir(), "proactivity", "branches.json"),
   });
   // L3 精简器（Phase 2）：挂在注册表统一编排入口（ingest），按树枝配置决定
   // 是否花 LLM；全模板兜底。熔断/kill switch 与 SpeechPolisher 同纪律。
@@ -6626,7 +6627,7 @@ export async function createAppServices(): Promise<AppServices> {
   const alarmClockService = new AlarmClockService({
     wsRegistry: wsConnectionRegistry,
     mobilePush: proactivePushService,
-    dataDir: join(process.cwd(), "data", "alarm-clock"),
+    dataDir: join(getDataDir(), "alarm-clock"),
     // 二阶段语音叫醒：TTS 合成开场白随 alarm.trigger 下发；不可用时客户端文本兜底
     synthesizeSpeech: async (text) => {
       const result = await ttsService.synthesizeMp3Base64(text);

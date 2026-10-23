@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -266,7 +267,7 @@ export class PhoneCallCoordinator {
   }
 
   private paths() {
-    const root = this.deps.dataDir ?? join(process.cwd(), "data", "phone-call");
+    const root = this.deps.dataDir ?? join(getDataDir(), "phone-call");
     return { root, sessions: join(root, "sessions"), index: join(root, "index.json") };
   }
 

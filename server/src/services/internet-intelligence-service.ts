@@ -486,7 +486,7 @@ async function fetchHtmlHead(url: string): Promise<string> {
       signal: controller.signal,
       headers: {
         accept: "text/html,application/xhtml+xml,*/*;q=0.8",
-        "user-agent": "PrivateAIAgent-MediaSensor/1.0",
+        "user-agent": "Nextbot-MediaSensor/1.0",
       },
     });
     if (!res.ok) return "";

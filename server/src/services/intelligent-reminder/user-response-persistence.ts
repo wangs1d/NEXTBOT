@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { randomUUID } from "crypto";
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { dirname, join } from "path";
@@ -59,7 +60,7 @@ export class UserResponsePersistenceService {
   private get persistPath(): string {
     return (
       process.env.REMINDER_RESPONSES_FILE ??
-      join(process.cwd(), "data", "reminder-responses.json")
+      join(getDataDir(), "reminder-responses.json")
     );
   }
 

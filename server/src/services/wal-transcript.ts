@@ -1,6 +1,7 @@
 import { readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { resolveDataPath } from "../config/data-dir.js";
 import { getShortTermMemoryConfig } from "./short-term-memory-config.js";
 
 /**
@@ -76,7 +77,7 @@ export async function setActorTranscriptClearedAt(
 
 /** 生产路径：清空某 actor 的聊天记录可见性（clear-all 接线用）。 */
 export function clearActorTranscript(actorId: string, atMs = Date.now()): Promise<void> {
-  const dir = join(process.cwd(), getShortTermMemoryConfig().walDir);
+  const dir = resolveDataPath(getShortTermMemoryConfig().walDir);
   return setActorTranscriptClearedAt(dir, actorId, atMs);
 }
 
@@ -147,6 +148,6 @@ export async function readActorTranscriptFromWal(
 
 /** 生产路径：默认 WAL 目录下读某 actor 的转史。 */
 export function readActorTranscript(actorId: string, maxDays = 90): Promise<WalTranscriptTurn[]> {
-  const dir = join(process.cwd(), getShortTermMemoryConfig().walDir);
+  const dir = resolveDataPath(getShortTermMemoryConfig().walDir);
   return readActorTranscriptFromWal(dir, actorId, maxDays);
 }

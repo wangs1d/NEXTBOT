@@ -11,6 +11,7 @@
  * 存储风格与 travel-plan-store.ts 一致：单文件同步读写（分享是低频事件），
  * 测试可用 TRAVEL_SHARE_STORE_FILE 覆盖文件路径。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
@@ -28,7 +29,7 @@ class TravelShareStore {
   constructor() {
     this.file = path.resolve(
       process.env.TRAVEL_SHARE_STORE_FILE ||
-        path.join(process.cwd(), "data", "travel-share-codes.json"),
+        path.join(getDataDir(), "travel-share-codes.json"),
     );
     this.load();
   }

@@ -22,6 +22,7 @@
  * 打点频繁（每次工具调用/每轮对话），故落盘走 30s 防抖 + 显式 flush。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -310,7 +311,7 @@ export class PresenceFootprintStore {
 let singleton: PresenceFootprintStore | null = null;
 
 export function initPresenceFootprintStore(filePath?: string): PresenceFootprintStore {
-  const path = filePath ?? join(process.cwd(), "data", "rhythm", "presence-footprint.json");
+  const path = filePath ?? join(getDataDir(), "rhythm", "presence-footprint.json");
   const store = new PresenceFootprintStore(path);
   store.load();
   singleton = store;

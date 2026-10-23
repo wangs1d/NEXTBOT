@@ -21,7 +21,7 @@ import "core/services/outgoing_call_launcher.dart";
 
 /// 哨兵与截图目录（与捕获 PS 脚本一致；刻意不用 Directory.systemTemp，
 /// 避免 Git Bash 启动 app 时 TEMP 被污染解析到别处）。
-const String _dir = r"D:\ws-project\Private-Agent\.tmp_shot\pai_call_e2e";
+const String _dir = r"D:\ws-project\NextBot\.tmp_shot\pai_call_e2e";
 
 void _log(String msg) {
   final String line = "[${DateTime.now().toIso8601String()}] $msg";

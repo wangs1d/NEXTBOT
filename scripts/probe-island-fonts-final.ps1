@@ -66,20 +66,20 @@ public class FinalProbe {
   }
 
   public static void LoadMemOtf() {
-    string dir = @"E:\ws-project\Private-Agent\client\flutter_app\assets\fonts\noto";
+    string dir = @"E:\ws-project\NextBot\client\flutter_app\assets\fonts\noto";
     foreach (string f in new string[]{"NotoSansSC-Regular.otf","NotoSansSC-Medium.otf","NotoSansSC-Bold.otf"}) {
       byte[] b = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, f));
       uint c = 0; AddFontMemResourceEx(b, (uint)b.Length, IntPtr.Zero, ref c);
     }
   }
   public static void LoadPrivateOtf() {
-    string dir = @"E:\ws-project\Private-Agent\client\flutter_app\assets\fonts\noto";
+    string dir = @"E:\ws-project\NextBot\client\flutter_app\assets\fonts\noto";
     foreach (string f in new string[]{"NotoSansSC-Regular.otf","NotoSansSC-Medium.otf","NotoSansSC-Bold.otf"}) {
       AddFontResourceExW(System.IO.Path.Combine(dir, f), 0x10, IntPtr.Zero);
     }
   }
   public static void LoadLabTtf() {
-    string lab = @"E:\ws-project\Private-Agent\build\font-lab2";
+    string lab = @"E:\ws-project\NextBot\build\font-lab2";
     foreach (string f in new string[]{"X-Reg.ttf","X-Med.ttf","X-Bold.ttf","Y-Med.ttf","Y-Bold.ttf"}) {
       AddFontResourceExW(System.IO.Path.Combine(lab, f), 0x10, IntPtr.Zero);
     }

@@ -1,6 +1,6 @@
 import type { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
-import { getStateEventManager, type StateChangeEvent } from "@private-ai-agent/agent-world";
+import { getStateEventManager, type StateChangeEvent } from "@nextbot/agent-world";
 import type {
   PersonalizationPromptSlice,
   UserPersonalizationService,

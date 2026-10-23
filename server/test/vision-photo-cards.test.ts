@@ -53,9 +53,9 @@ test("persistVisionFrames：帧落盘并返回 /agent/images 访问 URL", async 
     assert.ok(urls[0].startsWith("/agent/images/actor-1/vision-"));
     assert.ok(urls[0].endsWith(".png"));
     assert.ok(urls[1].endsWith(".jpg"));
-    // 文件确实落盘（URL → data/images/{actor}/{file}）
+    // 文件确实落盘（URL → images/{actor}/{file}）
     const rel = urls[0].replace("/agent/images/", "");
-    const buf = await readFile(join(dir, "data", "images", rel));
+    const buf = await readFile(join(dir, "images", rel));
     assert.ok(buf.length > 0);
   } finally {
     await rm(dir, { recursive: true, force: true });

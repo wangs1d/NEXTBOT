@@ -27,7 +27,7 @@ function Stop-OrphanDevServerNodes {
         $cmd = $p.CommandLine
         if (-not $cmd) { continue }
         if ($cmd -notmatch 'src[/\\]index\.ts') { continue }
-        if ($cmd -notmatch 'Private AI Agent[/\\]server|private-ai-agent-server') { continue }
+        if ($cmd -notmatch 'Nextbot[/\\]server|nextbot-server') { continue }
         $id = $p.ProcessId
         if ($id -and $id -notin $script:freed) {
             Stop-Process -Id $id -Force -ErrorAction SilentlyContinue

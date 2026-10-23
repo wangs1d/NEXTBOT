@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:private_ai_agent/core/presentation/dynamic_island.dart';
+import 'package:nextbot/core/presentation/dynamic_island.dart';
 
 void main() {
   // 渲染端已迁至原生 C++ 分层窗口；Dart 侧保留状态大脑的确定性测试。

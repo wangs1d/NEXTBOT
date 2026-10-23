@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { mkdir, readFile, stat, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import net from "node:net";
@@ -86,7 +87,7 @@ async function dataDirBreakdown(): Promise<{
   totalBytes: number;
   entries: Array<{ name: string; bytes: number; files: number; isDir: boolean }>;
 }> {
-  const dataDir = resolve(process.cwd(), "data");
+  const dataDir = resolve(getDataDir());
   let entries: Array<{ name: string; bytes: number; files: number; isDir: boolean }> = [];
   let totalBytes = 0;
   try {

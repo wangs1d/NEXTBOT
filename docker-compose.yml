@@ -1,4 +1,4 @@
-# Private AI Agent — Web（Nginx 静态 + 反代） + API（Fastify）
+# Nextbot — Web（Nginx 静态 + 反代） + API（Fastify）
 #
 # 启动：docker compose up -d --build
 # npm 源：默认 npmmirror；可在同目录 .env 写 NPM_REGISTRY=https://registry.npmjs.org

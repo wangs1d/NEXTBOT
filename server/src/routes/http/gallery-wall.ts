@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 
 import { analyzePendingPhotos, countPendingAnalysis } from "../../services/photo-analysis-service.js";
 import type { PhotoAnalyzeFn } from "../../services/photo-analysis-service.js";

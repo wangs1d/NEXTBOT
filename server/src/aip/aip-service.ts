@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -31,7 +32,7 @@ export class AipService {
   private readonly conflicts = new Map<string, ConflictRecord>();
 
   private get persistPath(): string {
-    return process.env.AIP_STATE_FILE ?? join(process.cwd(), "data", "aip-state.json");
+    return process.env.AIP_STATE_FILE ?? join(getDataDir(), "aip-state.json");
   }
 
   constructor(

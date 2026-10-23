@@ -73,7 +73,7 @@ const DILL_PREV = path.join(WORK_DIR, 'app.prev.dill');
 const KERNEL_BACKUP = path.join(WORK_DIR, 'kernel_blob.orig.bin');
 
 const CACHE = 'D:\\Flutter\\bin\\cache';
-const PKG_NAME = 'private_ai_agent';
+const PKG_NAME = 'nextbot';
 const PROC_NAME = 'NEXTBOT.exe';
 const DEBOUNCE_MS = 1200;
 const BOOT_TIMEOUT_MS = 45000;

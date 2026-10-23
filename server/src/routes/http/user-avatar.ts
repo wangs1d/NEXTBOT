@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
@@ -30,7 +31,7 @@ type MultipartRequest = FastifyRequest & {
  *     对焦显著区域），客户端无需裁剪 UI。
  */
 export function registerUserAvatarRoutes(app: FastifyInstance, deps?: { rootDir?: string }): void {
-  const rootDir = deps?.rootDir?.trim() || process.env.USER_AVATAR_DIR?.trim() || join(process.cwd(), "data", "avatars");
+  const rootDir = deps?.rootDir?.trim() || process.env.USER_AVATAR_DIR?.trim() || join(getDataDir(), "avatars");
   const MAX_UPLOAD_BYTES = 10 * 1024 * 1024;
   const FILE_NAME_RE = /^[A-Za-z0-9_-]+\.webp$/;
 

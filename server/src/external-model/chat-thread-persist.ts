@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
@@ -153,7 +154,7 @@ export class ChatThreadPersistence {
     private readonly readFileImpl: (path: string) => Promise<string> = (path) =>
       readFile(path, "utf8"),
   ) {
-    const defaultDir = join(process.cwd(), "data");
+    const defaultDir = getDataDir();
     this.filePath =
       filePath?.trim() ||
       process.env.AGENT_CHAT_THREAD_PERSIST_FILE?.trim() ||

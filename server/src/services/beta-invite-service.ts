@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { randomInt } from "node:crypto";
@@ -48,7 +49,7 @@ const CODE_PATTERN = /^[A-Z0-9-]{4,32}$/;
  */
 export class BetaWaitlistService {
   private get persistPath(): string {
-    return process.env.BETA_WAITLIST_FILE ?? join(process.cwd(), "data", "beta-waitlist.json");
+    return process.env.BETA_WAITLIST_FILE ?? join(getDataDir(), "beta-waitlist.json");
   }
 
   async list(): Promise<BetaWaitlistRequest[]> {
@@ -116,7 +117,7 @@ export class BetaWaitlistService {
 
 export class BetaInviteService {
   private get persistPath(): string {
-    return process.env.BETA_INVITE_CODES_FILE ?? join(process.cwd(), "data", "beta-invite-codes.json");
+    return process.env.BETA_INVITE_CODES_FILE ?? join(getDataDir(), "beta-invite-codes.json");
   }
 
   private static normalize(code: string): string {

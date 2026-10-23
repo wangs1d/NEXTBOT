@@ -75,7 +75,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     final File probe = File("${dir.path}${Platform.pathSeparator}.pai_write_probe");
     await probe.writeAsString("probe");
     await probe.delete();
-    return File("${dir.path}${Platform.pathSeparator}private_ai_agent_store.json");
+    return File("${dir.path}${Platform.pathSeparator}nextbot_store.json");
   }
 
   /// 并发安全的初始化：共享同一个 in-flight future。旧的
@@ -105,6 +105,19 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     if (_storageFile == null) {
       debugPrint('[IsarLocalHistoryStore] 未找到可写存储目录，使用内存存储');
       return;
+    }
+
+    // 旧版文件名一次性迁移（2026-10-23 前：private_ai_agent_store.json）：
+    // 新文件缺失且旧文件存在 → 原样复制，老用户聊天历史/偏好无缝续用。
+    try {
+      final File legacy = File("${_storageFile!.parent.path}"
+          "${Platform.pathSeparator}private_ai_agent_store.json");
+      if (!await _storageFile!.exists() && await legacy.exists()) {
+        await legacy.copy(_storageFile!.path);
+        debugPrint('[IsarLocalHistoryStore] migrated legacy store file');
+      }
+    } catch (e) {
+      debugPrint('[IsarLocalHistoryStore] 旧存储文件迁移失败（忽略）: $e');
     }
 
     try {

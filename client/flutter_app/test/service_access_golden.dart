@@ -17,10 +17,10 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/features/settings/settings_page.dart";
-import "package:private_ai_agent/mobile_ui/mobile_service_access_page.dart";
-import "package:private_ai_agent/mobile_ui/mobile_theme.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/features/settings/settings_page.dart";
+import "package:nextbot/mobile_ui/mobile_service_access_page.dart";
+import "package:nextbot/mobile_ui/mobile_theme.dart";
 
 /// 加载 MiSans 正文与 MaterialIcons 图标字体（测试环境默认不加载，
 /// 否则图标渲染为豆腐块）。

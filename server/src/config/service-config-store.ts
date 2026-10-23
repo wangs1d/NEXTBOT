@@ -6,13 +6,14 @@
  * 并即时写入 process.env 热生效——主对话 provider 由 MutableExternalChatProvider
  * 代理热替换；TtsService 按密钥变化惰性重建客户端；旁路 LLM（resolve-provider）
  * 每次调用动态读 env，天然热生效。重启后由 create-app-services 启动时重放本文件，
- * 与桌面端 byok 的 %APPDATA%\PrivateAgent\config.env 启动注入同一时序语义。
+ * 与桌面端 byok 的 %APPDATA%\Nextbot\config.env 启动注入同一时序语义。
  *
  * env 语义与桌面端写 config.env 完全同键：OPENAI_API_KEY / OPENAI_BASE_URL /
  * OPENAI_MODEL（OpenAI 兼容网关），并显式置 EXTERNAL_MODEL_PROVIDER=openai，
  * 防止部署机残留的 MOONSHOT/MINIMAX 等密钥在 auto 模式下抢占用户自配的绑定。
  */
 
+import { getDataDir } from "./data-dir.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -63,12 +64,12 @@ export function maskServiceKey(key: string | undefined): string | null {
   return k.length <= 4 ? `****${k}` : `****${k.slice(-4)}`;
 }
 
-export function serviceConfigFilePath(dir: string = join(process.cwd(), "data")): string {
+export function serviceConfigFilePath(dir: string = getDataDir()): string {
   return join(dir, "service-config.json");
 }
 
 export async function readServiceConfigFile(
-  dir: string = join(process.cwd(), "data"),
+  dir: string = getDataDir(),
 ): Promise<ServiceConfigFile | null> {
   let raw: string;
   try {
@@ -113,7 +114,7 @@ export function applyServiceConfigToEnv(
 
 /** 启动时重放持久化配置（create-app-services 在解析 externalChat 之前调用）。返回应用了的配置。 */
 export async function applyPersistedServiceConfig(
-  dir: string = join(process.cwd(), "data"),
+  dir: string = getDataDir(),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ServiceConfigFile | null> {
   const cfg = await readServiceConfigFile(dir);
@@ -125,7 +126,7 @@ export async function applyPersistedServiceConfig(
 /** 合并保存一个补丁并即时应用到 env；返回落盘后的完整配置。 */
 export async function saveServiceConfigPatch(
   patch: ServiceConfigPatch,
-  dir: string = join(process.cwd(), "data"),
+  dir: string = getDataDir(),
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<ServiceConfigFile> {
   const existing = (await readServiceConfigFile(dir)) ?? {

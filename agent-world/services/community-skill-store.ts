@@ -7,6 +7,7 @@ import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readdirSync, rmSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
 
+import { getDataDir } from "../config/data-dir.js";
 import type {
   CommunitySkillPersistMetadata,
   HttpRouteDepsLike,
@@ -17,7 +18,7 @@ const MAX_HANDLER_BYTES = 128 * 1024;
 const UPLOAD_HANDLER_MIN_LEN = 20;
 
 function communityRoot(): string {
-  return join(process.cwd(), "data", "community-skills");
+  return join(getDataDir(), "community-skills");
 }
 
 function wrapHandlerCode(code: string): string {

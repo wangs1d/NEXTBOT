@@ -17,6 +17,7 @@
  *                       → 下一次 search 即可用 hybrid
  */
 
+import { getDataDir } from "../../config/data-dir.js";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -50,7 +51,7 @@ export type ToolEmbeddingCache = {
   };
 };
 
-const DEFAULT_CACHE_PATH = resolve(process.cwd(), "data", "tool-embeddings.json");
+const DEFAULT_CACHE_PATH = resolve(getDataDir(), "tool-embeddings.json");
 
 let _cache: ToolEmbeddingCache | null = null;
 let _cacheLoaded = false;

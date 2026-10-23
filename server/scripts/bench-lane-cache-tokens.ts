@@ -43,7 +43,7 @@ function buildMemory(turn: number): AgentPromptMemoryContext {
     memoryInventory: rep("记忆条目索引。", 60),
     relationshipMemory: rep("关系背景。", 30),
     lifeThemeMemory: rep("生活主题。", 20),
-    memorySummary: rep("持久记忆：用户在做 Private-Agent 项目。", 30),
+    memorySummary: rep("持久记忆：用户在做 NextBot 项目。", 30),
     // sessionRecap 随轮增长（模拟滚动 recap 追加行）
     sessionRecap: `[ts:09:00] 早上讨论了构建问题。[ts:10:30] 优化了工具路由。`.repeat(turn),
     skillIndex: rep("- skill_demo：演示技能。", 12),

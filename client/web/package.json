@@ -1,5 +1,5 @@
 {
-  "name": "private-ai-agent-web",
+  "name": "nextbot-web",
   "private": true,
   "version": "0.1.0",
   "description": "浏览器聊天页源码位于 server/web/chat，由主服务在 /chat 提供",

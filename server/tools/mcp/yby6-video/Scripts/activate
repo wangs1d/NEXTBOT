@@ -1,4 +1,4 @@
-# This file must be used with "source bin/activate" *from bash*
+﻿# This file must be used with "source bin/activate" *from bash*
 # you cannot run it directly
 
 deactivate () {
@@ -35,7 +35,7 @@ deactivate () {
 # unset irrelevant variables
 deactivate nondestructive
 
-VIRTUAL_ENV="E:\ws-project\Private-Agent\server\tools\mcp\yby6-video"
+VIRTUAL_ENV="E:\ws-project\NextBot\server\tools\mcp\yby6-video"
 export VIRTUAL_ENV
 
 _OLD_VIRTUAL_PATH="$PATH"

@@ -22,10 +22,10 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart" show rootBundle, FontLoader;
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/core/utils/content_summary_parser.dart";
-import "package:private_ai_agent/features/chat/content_summary_card.dart";
-import "package:private_ai_agent/features/chat/structured_assistant_message_body.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/core/utils/content_summary_parser.dart";
+import "package:nextbot/features/chat/content_summary_card.dart";
+import "package:nextbot/features/chat/structured_assistant_message_body.dart";
 
 Future<void> _loadFonts() async {
   final FontLoader sans = FontLoader("MiSans");

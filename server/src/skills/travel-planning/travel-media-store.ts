@@ -13,6 +13,7 @@
  * poiKey：type + 归一化名称（确定性），同一 POI 在缓存/上传/回填间靠它对齐。
  *        名称归一化忽略大小写/空白/常见中英文标点；坐标轻微漂移不影响命中。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
@@ -166,7 +167,7 @@ class TravelMediaStore {
   private mem = new Map<string, PoiMediaEntry>();
 
   constructor() {
-    this.root = path.join(process.cwd(), 'data', 'travel-media');
+    this.root = path.join(getDataDir(), 'travel-media');
     this.assetsRoot = path.join(this.root, 'assets');
     this.ensureDir(this.root);
     this.ensureDir(this.assetsRoot);

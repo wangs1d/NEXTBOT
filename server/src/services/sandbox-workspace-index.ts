@@ -20,6 +20,7 @@ import Database from "better-sqlite3";
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
 import { buildContentMap, renderOutline } from "../external-model/content-map.js";
+import { getDataDir } from "../config/data-dir.js";
 
 /** 建索引时读取的文件头部字节数（超出部分不影响 outline 的导航价值）。 */
 const OUTLINE_HEAD_BYTES = 64 * 1024;
@@ -50,7 +51,7 @@ interface OutlineRow {
 }
 
 export function getSandboxIndexDbPath(): string {
-  const base = process.env.PA_DATA_DIR?.trim() || "data";
+  const base = process.env.PA_DATA_DIR?.trim() || getDataDir();
   return join(base, "sandbox-index.sqlite");
 }
 

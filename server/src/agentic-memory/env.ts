@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { join } from "node:path";
 
 import { envBool } from "../config/memory-env.js";
@@ -23,7 +24,7 @@ export function isAgenticMemoryEnabled(): boolean {
 export function getAgenticMemoryDir(): string {
   return (
     process.env.AGENT_AGENTIC_MEMORY_DIR?.trim() ||
-    join(process.cwd(), "data", "agentic_memory")
+    join(getDataDir(), "agentic_memory")
   );
 }
 

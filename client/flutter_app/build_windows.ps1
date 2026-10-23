@@ -6,24 +6,27 @@
 .DESCRIPTION
   Flutter still writes under project build\windows\...; every install (including
   plain "flutter build windows") also mirrors the bundle to windows_dist via
-  windows/cmake (see PRIVATE_AI_AGENT_SKIP_WINDOWS_DIST to opt out). This script
+  windows/cmake (see NEXTBOT_SKIP_WINDOWS_DIST to opt out). This script
   additionally mirrors the full Release or Debug folder (entire folder, not only .exe),
   including stopping processes that lock the deploy folder.
 
   Default dist root: <repo>\windows_dist\Release | Debug —— 与 cmake_install 的
-  镜像目标（windows/cmake/private_ai_agent_deploy_windows_dist.cmake）保持同一处，
+  镜像目标（windows/cmake/nextbot_deploy_windows_dist.cmake）保持同一处，
   不再指向机器相关的绝对路径（旧默认 E:\W-Project\... 早已不是本仓）。
-  Override: set env PRIVATE_AI_AGENT_WINDOWS_DIST to any folder.
+  Override: set env NEXTBOT_WINDOWS_DIST to any folder.
 
   Requires: Flutter on PATH or FLUTTER_ROOT, Visual Studio desktop C++, Windows Developer Mode for symlinks.
 #>
 param(
   [ValidateSet('Release', 'Debug', 'Both')]
   [string] $Configuration = 'Release',
-  # 发布版服务器地址：不传时客户端默认连 http://127.0.0.1:3000（仅本机联调）。
-  # 发给用户的安装包必须烤进真实服务器，例：
-  #   .\build_windows_release.ps1 -HttpBase https://your-server-domain
-  [string] $HttpBase = '',
+  # 发布版服务器地址：默认 http://127.0.0.1:3000（本机日常构建入口，连本地 dev server）。
+  # 不能留空默认：api_config.dart 的 P0 防线在 Windows Release 非捆绑形态下
+  # 对空 HTTP_BASE 直接 fail-fast（2026-10-20 / 10-23 两次白屏复发），空默认
+  # 产出的包启动即白屏。发给用户的分发构建走 build_windows_release.ps1，
+  # 那里强制显式传真实服务器，例：
+  #   .\build_windows_release.ps1 -HttpBase https://api.nextbot.top
+  [string] $HttpBase = 'http://127.0.0.1:3000',
   # 版本清单（更新检查）地址：byok 捆绑形态下 chat 走本地 runtime，而版本控制面
   # 在云端，必须单独烤入。默认烤入云端域名（nginx login 子域反代 Node，勿烤裸 IP：
   # 登录页等页面会直接进用户浏览器地址栏）——控制面常量是编译期烤死的，漏传时客户端
@@ -84,17 +87,17 @@ if (-not $flutterExe) {
 }
 
 # 部署目录默认落在本仓 <repo>\windows_dist，与 cmake_install 的镜像目标一致。
-# 旧默认写死 'E:\W-Project\Private AI Agent\windows_dist'（早已不是本仓路径），
+# 旧默认写死 'E:\W-Project\Nextbot\windows_dist'（早已不是本仓路径），
 # 在别的机器/别的盘符上会凭空造目录、与真正在跑的包不是同一份——「改了代码但
 # 界面上没变」的经典来源之一。
 # 仓根 = 本脚本所在目录（client\flutter_app）往上两级；与 CMakeLists.txt 里
 # ${CMAKE_SOURCE_DIR}/../../.. 的口径一致（CMAKE_SOURCE_DIR 是 windows\）。
 $RepoRoot = Split-Path (Split-Path $Root -Parent) -Parent
 $DistRoot = Join-Path $RepoRoot 'windows_dist'
-if ($env:PRIVATE_AI_AGENT_WINDOWS_DIST) {
-  $override = $env:PRIVATE_AI_AGENT_WINDOWS_DIST.Trim()
+if ($env:NEXTBOT_WINDOWS_DIST) {
+  $override = $env:NEXTBOT_WINDOWS_DIST.Trim()
   if (-not $override) {
-    Write-Error 'PRIVATE_AI_AGENT_WINDOWS_DIST is set but empty.'
+    Write-Error 'NEXTBOT_WINDOWS_DIST is set but empty.'
   }
   $DistRoot = if ([System.IO.Path]::IsPathRooted($override)) {
     $override
@@ -177,7 +180,7 @@ function Invoke-BuildAndDeploy {
       # 2026-10-16 复发：无 HttpBase 的 Release 包静默回落 127.0.0.1:3000，
       # 用户机器上没人监听 → 「行程列表加载失败/拒绝连接」。byok 捆绑构建
       # （exe 旁会有 runtime\）合法回落，不受影响；非捆绑包运行期直接 fail-fast。
-      Write-Host 'WARNING: 本次 Release 构建未烤入 HttpBase，客户端将回落 http://127.0.0.1:3000。' -ForegroundColor Yellow
+      Write-Host 'WARNING: 本次 Release 构建未烤入 HttpBase（显式传了空值），非捆绑包启动即 fail-fast 白屏。' -ForegroundColor Yellow
       Write-Host '  发给用户（连云端后端）请加：-HttpBase http://<后端地址>:3000' -ForegroundColor Yellow
       Write-Host '  仅 byok 捆绑形态（安装器会放置 runtime\）允许不带 HttpBase。' -ForegroundColor Yellow
     }

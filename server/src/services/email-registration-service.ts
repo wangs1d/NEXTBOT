@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomInt, randomUUID } from "crypto";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
@@ -72,7 +73,7 @@ export class EmailRegistrationService {
   constructor(private readonly mailDomain: string = getAgentMailDomain()) {}
 
   private get persistPath(): string {
-    return process.env.AGENT_EMAIL_PENDING_FILE ?? join(process.cwd(), "data", "email-pending.json");
+    return process.env.AGENT_EMAIL_PENDING_FILE ?? join(getDataDir(), "email-pending.json");
   }
 
   getDomain(): string {

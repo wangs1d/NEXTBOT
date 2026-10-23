@@ -12,7 +12,7 @@ import "../lib/core/utils/agent_result_parser.dart";
 
 Future<void> main() async {
   final File planFile =
-      File("E:/ws-project/Private-Agent/server/data/travel-plans/plan-1790266331245.json");
+      File("E:/ws-project/NextBot/server/data/travel-plans/plan-1790266331245.json");
   final Map<String, dynamic> plan =
       jsonDecode(planFile.readAsStringSync()) as Map<String, dynamic>;
   final List<dynamic> days = (plan["days"] as List<dynamic>? ?? <dynamic>[]);

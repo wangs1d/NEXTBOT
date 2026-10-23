@@ -29,7 +29,7 @@ import "../../widgets/app_window_titlebar.dart";
 /// 进度条反映实际就绪度；向导步骤落点：
 ///   称呼   → POST /api/profile/manage/fact（结构化事实，prompt 现成通道）
 ///   名字   → POST /api/agent-identity/rename（账号+记忆KV+prefs 统一管道）
-///   模型   → %APPDATA%\PrivateAgent\config.env + runtime 重启 + 直连测试
+///   模型   → %APPDATA%\Nextbot\config.env + runtime 重启 + 直连测试
 class OnboardingFlow extends StatefulWidget {
   const OnboardingFlow({
     super.key,

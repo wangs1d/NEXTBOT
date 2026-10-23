@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -487,7 +488,7 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   },
 ];
 
-const DEFAULT_METADATA_PATH = resolve(process.cwd(), "data", "tool-intent-metadata.json");
+const DEFAULT_METADATA_PATH = resolve(getDataDir(), "tool-intent-metadata.json");
 const RELOAD_INTERVAL_MS = 5_000;
 
 let cachedRules = DEFAULT_TOOL_INTENT_RULES;

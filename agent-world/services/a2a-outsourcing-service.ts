@@ -1,6 +1,7 @@
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
+import { getDataDir } from "../config/data-dir.js";
 import {
   AGENT_WORLD_CREDIT_REASONS,
   type WorldService,
@@ -85,7 +86,7 @@ export class A2aOutsourcingService {
   constructor(private readonly worldService: WorldService) {}
 
   private get persistPath(): string {
-    return process.env.A2A_CONTRACTS_FILE ?? join(process.cwd(), "data", "a2a-contracts.json");
+    return process.env.A2A_CONTRACTS_FILE ?? join(getDataDir(), "a2a-contracts.json");
   }
 
   /** 进程启动时加载；文件不存在则空。 */

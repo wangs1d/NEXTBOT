@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { appendFile, readFile, rename, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
@@ -37,7 +38,7 @@ const GROUPS = [
 type GroupKey = (typeof GROUPS)[number]["key"];
 
 function sentLogPath(): string {
-  return join(process.cwd(), "data", "inbox", "_admin-sent-log.jsonl");
+  return join(getDataDir(), "inbox", "_admin-sent-log.jsonl");
 }
 
 async function appendSentLog(entry: Record<string, unknown>): Promise<void> {

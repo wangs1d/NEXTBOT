@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
@@ -28,7 +29,7 @@ import {
   registerWorldFreeMarketRoutes,
   registerWorldRoutes,
   registerWorldSocialRoutes,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import { registerChatWeb } from "./chat-web.js";
 import { isAgentWorldSocialEnabled, isOssEdition } from "../../config/env.js";
 import { registerMultiAgentMonitorRoutes } from "./multi-agent-monitor.js";
@@ -366,7 +367,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 购物建议能力（runtime 内置；商品图/商品库只读端点，推荐卡走 shopping.suggest 工具卡）
   registerRecommendationRoutes(app, {
     catalog: deps.recommendationCatalog ?? null,
-    mediaDir: join(process.cwd(), "data", "recommendation", "media"),
+    mediaDir: join(getDataDir(), "recommendation", "media"),
   });
   // Feature Catalog 能力分类路由（featureCatalog 为 null 时端点返回 503）
   registerCatalogRoutes(app, deps);

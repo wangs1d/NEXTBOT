@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -50,7 +51,7 @@ export function registerPhoneBridgeCaptureRoutes(
     },
   );
 
-  const rootDir = deps.rootDir ?? path.join(process.cwd(), "data", "captures");
+  const rootDir = deps.rootDir ?? path.join(getDataDir(), "captures");
 
   app.post<{
     Querystring: { actorId?: string; ext?: string; kind?: string; token?: string };

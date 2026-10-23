@@ -12,7 +12,7 @@ import "package:http/http.dart" as http;
 /// 用户点「重启完成更新」→ 写 apply_update.cmd（等当前进程退出 → 安装器
 /// /VERYSILENT 覆盖安装 → 拉起新版）→ spawn 分离进程执行 → 本应用 exit(0)。
 ///
-/// 安装器侧职责（installer/private-agent.iss 已预埋，勿在客户端重复做）：
+/// 安装器侧职责（installer/nextbot.iss 已预埋，勿在客户端重复做）：
 /// `PrepareToInstall` 按路径限定 kill 残留 runtime/node 进程（本地 runtime
 /// 常驻复用、应用退出不杀，其文件锁由安装器清）；`[Run] skipifsilent`
 /// 保证静默安装不会自动拉起造成双开，重启由 cmd 脚本负责。

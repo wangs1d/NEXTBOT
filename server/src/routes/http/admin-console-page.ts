@@ -27,7 +27,7 @@ export function renderAdminConsolePage(): string {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>管理控制台 · Private-Agent</title>
+<title>管理控制台 · NextBot</title>
 <style>
   :root {
     --bg: #f5f6f8; --card: #ffffff; --line: #e6e9ef; --line-soft: #eef1f5;
@@ -289,7 +289,7 @@ export function renderAdminConsolePage(): string {
 <body>
 <aside>
   <div class="brand">管理控制台</div>
-  <div class="brand-sub">Private-Agent · 部署后台</div>
+  <div class="brand-sub">NextBot · 部署后台</div>
   <nav id="nav">
     <a href="#overview" data-tab="overview">概览</a>
     <a href="#users" data-tab="users">用户</a>

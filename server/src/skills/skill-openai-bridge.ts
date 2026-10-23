@@ -1,4 +1,4 @@
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { SkillManager } from "./skill-manager.js";
 import type { SkillManifest, SkillParameter } from "./types.js";

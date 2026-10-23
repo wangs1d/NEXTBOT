@@ -19,6 +19,7 @@
 
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { getDataDir } from "../config/data-dir.js";
 
 import type { VisionFrame } from "../external-model/types.js";
 import { captionMediaCards, type CaptionOptions } from "./image-caption-service.js";
@@ -34,8 +35,8 @@ export interface VisionPhotoItem {
 export const IMAGE_RESULT_START = "[IMAGE_RESULT_START]";
 export const IMAGE_RESULT_END = "[IMAGE_RESULT_END]";
 
-/** 帧落盘根目录（相对 process.cwd()，与 image-files 路由的 data/images 约定一致） */
-const IMAGES_DIR = "data/images";
+/** 帧落盘子目录（位于统一数据目录下，与 image-files 路由的 images/ 约定一致） */
+const IMAGES_DIR = "images";
 
 function extForMime(mimeType: string | undefined): string {
   const m = (mimeType ?? "").toLowerCase();
@@ -52,7 +53,7 @@ function extForMime(mimeType: string | undefined): string {
 export async function persistVisionFrames(
   actorId: string,
   frames: VisionFrame[],
-  baseDir: string = process.cwd(),
+  baseDir: string = getDataDir(),
 ): Promise<string[]> {
   const safeActor = actorId.replace(/[^A-Za-z0-9_-]/g, "");
   if (!safeActor || frames.length === 0) return [];

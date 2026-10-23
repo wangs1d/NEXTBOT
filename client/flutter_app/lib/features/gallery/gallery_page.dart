@@ -11,7 +11,7 @@ import "../chat/media_disk_cache.dart";
 
 /// 图库页：常用工具「图库」入口的落地页。
 ///
-/// 对接服务端 `/picture/*` 路由（@private-ai-agent/picture 套件）：
+/// 对接服务端 `/picture/*` 路由（@nextbot/picture 套件）：
 /// - 网格浏览已入库照片（缩略图分页加载）
 /// - 本地图片上传入库
 /// - 点开大图后可删除照片（连源文件与缩略图一并移除）

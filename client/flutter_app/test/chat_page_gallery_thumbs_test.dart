@@ -4,8 +4,8 @@ import "dart:typed_data" show Uint8List;
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/chat_models.dart";
-import "package:private_ai_agent/features/chat/chat_page.dart";
+import "package:nextbot/core/models/chat_models.dart";
+import "package:nextbot/features/chat/chat_page.dart";
 
 /// 1×1 像素 PNG（测试占位图）
 final Uint8List _kPng1x1 =

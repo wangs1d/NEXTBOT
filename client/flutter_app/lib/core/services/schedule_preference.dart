@@ -77,8 +77,21 @@ class SchedulePreference {
   static Future<File> _getPrefFile() async {
     final Directory appDir = await getApplicationSupportDirectory();
     final String dirPath =
-        "${appDir.path}${Platform.pathSeparator}private_ai_agent";
-    return File("$dirPath${Platform.pathSeparator}$_fileName");
+        "${appDir.path}${Platform.pathSeparator}nextbot";
+    final File prefFile = File("$dirPath${Platform.pathSeparator}$_fileName");
+    // 旧叶子目录一次性迁移（2026-10-23 前：...\private_ai_agent）：新文件缺失
+    // 且旧文件存在 → 复制过来，老用户偏好无缝续用。
+    try {
+      final File legacy = File(
+        "${appDir.path}${Platform.pathSeparator}private_ai_agent"
+        "${Platform.pathSeparator}$_fileName",
+      );
+      if (!await prefFile.exists() && await legacy.exists()) {
+        await Directory(dirPath).create(recursive: true);
+        await legacy.copy(prefFile.path);
+      }
+    } catch (_) {}
+    return prefFile;
   }
 
   /// 清除缓存（用于测试或热重启后）

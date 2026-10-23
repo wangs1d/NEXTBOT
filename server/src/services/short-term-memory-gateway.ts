@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
@@ -307,7 +308,7 @@ export class ShortTermMemoryGatewayService {
 
   constructor(filePath?: string) {
     this.filePath =
-      filePath ?? process.env.AGENT_SHORT_TERM_STACK_FILE?.trim() ?? join(process.cwd(), "data", "short-term-task-stack.json");
+      filePath ?? process.env.AGENT_SHORT_TERM_STACK_FILE?.trim() ?? join(getDataDir(), "short-term-task-stack.json");
   }
 
   async load(): Promise<void> {

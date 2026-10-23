@@ -17,6 +17,7 @@
  *  - 语癖包刷新节拍：slang-lexicon.json 人工/管线更新后重启生效；过气词条
  *    由刷新方降级 tier，本模块只渲染 active 条目。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -84,7 +85,7 @@ function loadActiveSlangTerms(): string[] {
   slangCache = { at: Date.now(), terms: [] };
   const candidates = [
     process.env.SLANG_LEXICON_PATH,
-    join(process.cwd(), "data", "slang-lexicon.json"),
+    join(getDataDir(), "slang-lexicon.json"),
   ].filter((p): p is string => Boolean(p));
   for (const path of candidates) {
     try {

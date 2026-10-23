@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import {
@@ -193,7 +194,7 @@ export class CodeSandboxService {
   private pythonCmdCache: string | null | undefined;
 
   constructor(rootDir?: string) {
-    this.rootDir = resolve(rootDir ?? join(process.cwd(), "data", "sandbox"));
+    this.rootDir = resolve(rootDir ?? join(getDataDir(), "sandbox"));
   }
 
   /** 落盘根目录（绝对路径，供路由层做路径穿越防护比对）。 */

@@ -1,4 +1,4 @@
-import type { EventEnvelope } from "@private-ai-agent/agent-protocol";
+import type { EventEnvelope } from "@nextbot/agent-protocol";
 
 /**
  * runtime 链路线缆协议（gateway/外壳 ⇄ runtime 进程，WS 承载）。

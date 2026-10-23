@@ -38,7 +38,7 @@ function buildFullMemory(overrides?: Partial<AgentPromptMemoryContext>): AgentPr
     userUnderstanding: "【用户理解档案】\n用户偏好简洁直接的回复。",
     userFacts: "【用户事实库】\n所在城市：杭州",
     userProfileSummary: "用户是开发者，常调研 AI 产品。",
-    memorySummary: "持久记忆：用户在做 Private-Agent 项目。",
+    memorySummary: "持久记忆：用户在做 NextBot 项目。",
     ...overrides,
   } as AgentPromptMemoryContext;
 }

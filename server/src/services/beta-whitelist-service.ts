@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -28,7 +29,7 @@ type PersistedWhitelist = { emails?: unknown; updatedAt?: unknown };
  */
 export class BetaWhitelistService {
   private get persistPath(): string {
-    return process.env.BETA_WHITELIST_FILE ?? join(process.cwd(), "data", "beta-whitelist.json");
+    return process.env.BETA_WHITELIST_FILE ?? join(getDataDir(), "beta-whitelist.json");
   }
 
   /** 邮箱归一：白名单与登录身份同一主键语义，统一小写。 */

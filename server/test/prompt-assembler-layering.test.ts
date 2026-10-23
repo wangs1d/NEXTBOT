@@ -13,7 +13,7 @@ function buildMemory(turn: number): AgentPromptMemoryContext {
   return {
     personalityCore: "你是可靠的私人管家。",
     userFacts: "【用户事实库】\n所在城市：杭州",
-    memorySummary: "持久记忆：用户在做 Private-Agent 项目。",
+    memorySummary: "持久记忆：用户在做 NextBot 项目。",
     // 滚动 recap：随轮追加（模拟 thread 裁剪后 recap 增行）
     sessionRecap: `[session-recap] 第 ${turn} 轮前的摘要行。`,
     recentConversationHistory: `用户：第 ${turn} 轮消息`,

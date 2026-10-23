@@ -4,7 +4,7 @@ import "../services/local_runtime_config.dart";
 import "../theme/app_theme.dart";
 
 /// 首启「配置模型服务」对话框（byok 形态）：检测到 config.env 无
-/// OPENAI_API_KEY 时引导用户填自己的模型 key，写入 %APPDATA%\PrivateAgent。
+/// OPENAI_API_KEY 时引导用户填自己的模型 key，写入 %APPDATA%\Nextbot。
 /// 不可关闭（无 key 的 runtime 无法聊天），保存后由调用方重启 runtime。
 Future<bool?> showApiKeySetupDialog({required BuildContext context}) {
   return showDialog<bool>(

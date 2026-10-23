@@ -7,7 +7,7 @@ library;
 import "package:flutter/services.dart";
 
 class AlarmPlatform {
-  static const MethodChannel _channel = MethodChannel("private_ai_agent/alarm_clock");
+  static const MethodChannel _channel = MethodChannel("nextbot/alarm_clock");
 
   static bool _unavailable = false; // 桌面端/桥未注册时置位，避免反复抛异常
 

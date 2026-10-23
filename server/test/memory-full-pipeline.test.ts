@@ -162,7 +162,7 @@ describe("记忆模块全流程", () => {
     it("多条记忆写入后 recall 能按相关性排序", async () => {
       await cortex.remember(
         ACTOR,
-        makeMemoryItem("用户在做一个叫 PrivateAgent 的 AI 项目", {
+        makeMemoryItem("用户在做一个叫 Nextbot 的 AI 项目", {
           kind: "fact",
           domain: "semantic",
         }),
@@ -185,7 +185,7 @@ describe("记忆模块全流程", () => {
       // 第一条应该是项目相关的
       const topItem = result.items[0];
       assert.ok(
-        topItem.content.includes("PrivateAgent") || topItem.content.includes("AI") || topItem.content.includes("项目"),
+        topItem.content.includes("Nextbot") || topItem.content.includes("AI") || topItem.content.includes("项目"),
         `top item 应该与 AI 项目相关，实际: ${topItem.content}`,
       );
     });
@@ -285,12 +285,12 @@ describe("记忆模块全流程", () => {
       // 模拟白天对话累积
       manager.onTurnCompleted(ACTOR, "今天美联储加息了", "收到，美联储加息 25 个基点");
       manager.onTurnCompleted(ACTOR, "我的猫橘子今天不肯吃猫粮", "可能是不舒服，建议观察一下");
-      manager.onTurnCompleted(ACTOR, "PrivateAgent 项目进度不错", "很高兴听到项目进展顺利");
+      manager.onTurnCompleted(ACTOR, "Nextbot 项目进度不错", "很高兴听到项目进展顺利");
 
       // 先写入 KV memory_summary（consolidateNow 会读）
       memorySync.appendMemorySummaryLine(ACTOR, "用户关注美联储利率决议");
       memorySync.appendMemorySummaryLine(ACTOR, "用户的猫叫橘子，是橘猫");
-      memorySync.appendMemorySummaryLine(ACTOR, "用户在做 PrivateAgent AI 项目");
+      memorySync.appendMemorySummaryLine(ACTOR, "用户在做 Nextbot AI 项目");
       await sleep(300);
 
       // 执行整理（触发 dreaming）

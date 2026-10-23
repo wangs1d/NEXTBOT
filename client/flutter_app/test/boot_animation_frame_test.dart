@@ -3,7 +3,7 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/presentation/boot_animation.dart";
+import "package:nextbot/core/presentation/boot_animation.dart";
 
 void main() {
   testWidgets("boot animation key frames", (WidgetTester tester) async {

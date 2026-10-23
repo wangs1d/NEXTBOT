@@ -10,14 +10,14 @@
 #>
 param(
   [string]$Remote = "root@47.98.122.29",
-  [string]$DeployDir = "/opt/private-agent",
+  [string]$DeployDir = "/opt/nextbot",
   [string]$ManifestUrl = "https://nextbot.top",
   [switch]$SkipPackage
 )
 $ErrorActionPreference = 'Stop'
 $Repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $DistDir = Join-Path $Repo 'windows_dist\ecs-deploy'
-$Tarball = Join-Path $DistDir 'private-agent-ecs.tar.gz'
+$Tarball = Join-Path $DistDir 'nextbot-ecs.tar.gz'
 
 # ── 0. SSH 连通性（公钥未授权时直接给出可执行指引） ──
 Write-Host '== [0/5] SSH 连通性 =='
@@ -43,7 +43,7 @@ if (-not $SkipPackage) {
   if (Test-Path $Tarball) { Remove-Item -Force $Tarball }
   Push-Location $Repo
   # 相对路径：GNU tar 会把 "E:\x" 里的冒号解析成 远程主机:path
-  & tar -czf windows_dist/ecs-deploy/private-agent-ecs.tar.gz package.json package-lock.json `
+  & tar -czf windows_dist/ecs-deploy/nextbot-ecs.tar.gz package.json package-lock.json `
     server/dist server/package.json server/config server/.env server/public `
     server/scripts/admin-set-password.mjs `
     agent-world/package.json agent-world/dist agent-world/config agent-world/deps agent-world/data `
@@ -56,7 +56,7 @@ if (-not $SkipPackage) {
 
 # ── 2. 上传 ──
 Write-Host '== [2/5] 上传 =='
-& scp $Tarball "${Remote}:/tmp/private-agent-ecs.tar.gz"
+& scp $Tarball "${Remote}:/tmp/nextbot-ecs.tar.gz"
 if ($LASTEXITCODE -ne 0) { throw 'scp 失败' }
 
 # ── 3. 服务器端：node（缺则装）→ 解包 → npm ci → systemd ──
@@ -77,17 +77,17 @@ fi
 node -v
 NODE_BIN=`$(command -v node)
 mkdir -p $DeployDir
-tar -xzf /tmp/private-agent-ecs.tar.gz -C $DeployDir
-rm -f /tmp/private-agent-ecs.tar.gz /tmp/node.tar.xz
+tar -xzf /tmp/nextbot-ecs.tar.gz -C $DeployDir
+rm -f /tmp/nextbot-ecs.tar.gz /tmp/node.tar.xz
 cd $DeployDir
 export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 # onnxruntime-node 的 postinstall 要直连 GitHub 下 build list（302 被墙即 npm ci 全挂）；
 # CPU 二进制本就捆绑在包里，ECS 也只做惰性 import（声纹/本地嵌入是桌面特性）——直接跳过下载。
 export ONNXRUNTIME_NODE_INSTALL=skip
 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3
-cat > /etc/systemd/system/private-agent.service <<UNIT
+cat > /etc/systemd/system/nextbot.service <<UNIT
 [Unit]
-Description=PrivateAgent runtime (manifest + platform API)
+Description=Nextbot runtime (manifest + platform API)
 After=network.target
 
 [Service]
@@ -106,14 +106,14 @@ WantedBy=multi-user.target
 UNIT
 systemctl daemon-reload
 # 注意：enable --now 对已运行的服务不会重启（代码更新后必须显式 restart）
-systemctl enable private-agent
-systemctl restart private-agent
+systemctl enable nextbot
+systemctl restart nextbot
 echo '[ecs] 等待就绪（冷启动约 15s）...'
 for i in `$(seq 1 30); do
   if curl -sf http://127.0.0.1:3000/api/client/manifest >/dev/null 2>&1; then break; fi
   sleep 1
 done
-systemctl is-active private-agent
+systemctl is-active nextbot
 # 终验带重试：冷启动偶发超过首轮 30s 时，单独一次 curl 会误报部署失败（实际服务 active 且健康）
 for i in `$(seq 1 15); do
   if curl -sf http://127.0.0.1:3000/api/client/manifest; then echo; echo '[ecs] deploy verify OK'; exit 0; fi

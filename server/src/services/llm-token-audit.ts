@@ -1,5 +1,6 @@
 import { appendFileSync, mkdirSync, existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
+import { getDataDir } from "../config/data-dir.js";
 import { recordBudgetUsage } from "./llm-budget-guard.js";
 
 /**
@@ -151,7 +152,7 @@ export type LlmUsageAggregate = {
 
 /** 简短环境信息，便于区分不同部署实例 */
 function auditLogPath(): string {
-  const base = process.env.PA_DATA_DIR?.trim() || "data";
+  const base = process.env.PA_DATA_DIR?.trim() || getDataDir();
   return join(base, "llm-token-audit.ndjson");
 }
 

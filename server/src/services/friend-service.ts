@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync } from "fs";
 import { dirname, join } from "path";
@@ -65,11 +66,11 @@ export class FriendService {
     this.dbPath =
       options?.dbPath?.trim() ||
       process.env.AGENT_FRIENDS_DB?.trim() ||
-      join(process.cwd(), "data", "agent-friends.db");
+      join(getDataDir(), "agent-friends.db");
     this.legacyJsonPath =
       options?.legacyJsonPath?.trim() ||
       process.env.AGENT_FRIENDS_FILE?.trim() ||
-      join(process.cwd(), "data", "agent-friends.json");
+      join(getDataDir(), "agent-friends.json");
     const parsedMax = options?.maxFriendsPerActor ?? Number(process.env.AGENT_FRIEND_MAX_PER_ACTOR ?? "");
     this.maxFriendsPerActor =
       Number.isFinite(parsedMax) && parsedMax > 0 ? Math.floor(parsedMax) : DEFAULT_FRIEND_MAX_PER_ACTOR;

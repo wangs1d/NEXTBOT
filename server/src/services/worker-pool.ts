@@ -22,6 +22,7 @@ import { Worker } from "node:worker_threads";
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
+import { getDataDir } from "../config/data-dir.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -151,7 +152,7 @@ class WorkerPoolManager {
 
     const workerScript = this.resolveWorkerScript(type);
     const worker = new Worker(workerScript, {
-      workerData: { type },
+      workerData: { type, dataDir: getDataDir() },
     });
 
     worker.on("message", (msg: WorkerTaskResponse) => {

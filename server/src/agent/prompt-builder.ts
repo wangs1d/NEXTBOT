@@ -1,4 +1,4 @@
-import { buildUserAgentToolSystemSuffix } from "@private-ai-agent/agent-world";
+import { buildUserAgentToolSystemSuffix } from "@nextbot/agent-world";
 import { isAgentWorldSocialEnabled } from "../config/env.js";
 import {
   appendAgentAccessModeSystemSuffix,

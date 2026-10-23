@@ -1,7 +1,7 @@
 import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/app_auto_start.dart";
+import "package:nextbot/core/services/app_auto_start.dart";
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();

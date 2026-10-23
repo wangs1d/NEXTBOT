@@ -1,5 +1,5 @@
-name: private_ai_agent
-description: Private AI agent MVP client
+name: nextbot
+description: Nextbot MVP client
 publish_to: "none"
 version: 0.1.6+8
 

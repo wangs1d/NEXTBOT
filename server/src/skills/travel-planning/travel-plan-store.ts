@@ -12,6 +12,7 @@
  * 存储：data/travel-plans/{planId}.json 单文件单行程（planId 含时间戳唯一），
  * 进程内 Map 索引 + 惰性磁盘读；写入同步刷盘（行程生成是低频事件）。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -187,7 +188,7 @@ class TravelPlanStore {
   constructor() {
     // 测试可用 TRAVEL_PLAN_STORE_DIR 覆盖存储目录（默认 data/travel-plans）
     this.root = path.resolve(
-      process.env.TRAVEL_PLAN_STORE_DIR || path.join(process.cwd(), "data", "travel-plans"),
+      process.env.TRAVEL_PLAN_STORE_DIR || path.join(getDataDir(), "travel-plans"),
     );
     this.ensureDir(this.root);
   }

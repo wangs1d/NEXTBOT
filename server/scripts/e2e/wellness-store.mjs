@@ -19,7 +19,7 @@ const secret =
   process.env.BROWSER_SESSION_SECRET?.trim() ||
   process.env.SESSION_SECRET?.trim() ||
   "dev-insecure-wellness-key-change-me";
-const key = scryptSync(secret, "private-ai-agent-wellness-v1", 32);
+const key = scryptSync(secret, "nextbot-wellness-v1", 32);
 
 function encryptJson(value) {
   const iv = randomBytes(12);

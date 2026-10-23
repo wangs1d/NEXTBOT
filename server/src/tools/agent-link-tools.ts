@@ -1,5 +1,5 @@
 import { resolveActorId } from "../agent/actor-id.js";
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { AgentAccountService } from "../services/agent-account-service.js";
 import { AGENT_NUMBER_PATTERN } from "../services/agent-account-service.js";
 import type { FriendService } from "../services/friend-service.js";

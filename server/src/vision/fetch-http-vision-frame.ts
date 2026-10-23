@@ -42,7 +42,7 @@ export async function fetchHttpVisionFrame(
       signal: controller.signal,
       headers: {
         Accept: "image/*,*/*;q=0.8",
-        "User-Agent": "PrivateAIAgent-VisionPull/1.0",
+        "User-Agent": "Nextbot-VisionPull/1.0",
       },
     });
     if (!res.ok) {

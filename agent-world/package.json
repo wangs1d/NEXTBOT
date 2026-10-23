@@ -1,5 +1,5 @@
 {
-  "name": "@private-ai-agent/agent-world",
+  "name": "@nextbot/agent-world",
   "version": "0.1.0",
   "private": true,
   "type": "module",

@@ -1,6 +1,6 @@
 # Project-level configuration.
 cmake_minimum_required(VERSION 3.14)
-project(private_ai_agent LANGUAGES CXX)
+project(nextbot LANGUAGES CXX)
 
 # The name of the executable created for the application. Change this to change
 # the on-disk name of your application.
@@ -124,28 +124,28 @@ install(FILES "${AOT_LIBRARY}" DESTINATION "${INSTALL_BUNDLE_DATA_DIR}"
   COMPONENT Runtime)
 
 # After every install (flutter build / IDE), mirror the full bundle to
-# <repo>/windows_dist/<Config> or PRIVATE_AI_AGENT_WINDOWS_DIST (same as build_windows.ps1).
-option(PRIVATE_AI_AGENT_SKIP_WINDOWS_DIST "Do not copy build output to windows_dist after install" OFF)
-if(WIN32 AND NOT PRIVATE_AI_AGENT_SKIP_WINDOWS_DIST)
-  set(_private_ai_agent_env_dist "$ENV{PRIVATE_AI_AGENT_WINDOWS_DIST}")
-  string(STRIP "${_private_ai_agent_env_dist}" _private_ai_agent_env_dist)
+# <repo>/windows_dist/<Config> or NEXTBOT_WINDOWS_DIST (same as build_windows.ps1).
+option(NEXTBOT_SKIP_WINDOWS_DIST "Do not copy build output to windows_dist after install" OFF)
+if(WIN32 AND NOT NEXTBOT_SKIP_WINDOWS_DIST)
+  set(_nextbot_env_dist "$ENV{NEXTBOT_WINDOWS_DIST}")
+  string(STRIP "${_nextbot_env_dist}" _nextbot_env_dist)
   # 反斜杠路径（Windows 惯用写法）经 configure_file 原样写进 set() 会变成非法转义
   # （如 \w），INSTALL 阶段才报语法错误——统一换成正斜杠
-  string(REPLACE "\\" "/" _private_ai_agent_env_dist "${_private_ai_agent_env_dist}")
-  if(_private_ai_agent_env_dist)
-    set(PRIVATE_AI_AGENT_DEPLOY_ROOT "${_private_ai_agent_env_dist}")
+  string(REPLACE "\\" "/" _nextbot_env_dist "${_nextbot_env_dist}")
+  if(_nextbot_env_dist)
+    set(NEXTBOT_DEPLOY_ROOT "${_nextbot_env_dist}")
   else()
-    get_filename_component(_private_ai_agent_repo_root "${CMAKE_SOURCE_DIR}/../../.." ABSOLUTE)
-    set(PRIVATE_AI_AGENT_DEPLOY_ROOT "${_private_ai_agent_repo_root}/windows_dist")
+    get_filename_component(_nextbot_repo_root "${CMAKE_SOURCE_DIR}/../../.." ABSOLUTE)
+    set(NEXTBOT_DEPLOY_ROOT "${_nextbot_repo_root}/windows_dist")
   endif()
   if(CMAKE_BUILD_TYPE)
-    set(PRIVATE_AI_AGENT_DEFAULT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
+    set(NEXTBOT_DEFAULT_BUILD_TYPE "${CMAKE_BUILD_TYPE}")
   else()
-    set(PRIVATE_AI_AGENT_DEFAULT_BUILD_TYPE "")
+    set(NEXTBOT_DEFAULT_BUILD_TYPE "")
   endif()
   configure_file(
     "${CMAKE_CURRENT_SOURCE_DIR}/cmake/deploy_windows_dist.cmake.in"
-    "${CMAKE_CURRENT_BINARY_DIR}/private_ai_agent_deploy_windows_dist.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/nextbot_deploy_windows_dist.cmake"
     @ONLY)
-  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/private_ai_agent_deploy_windows_dist.cmake")
+  install(SCRIPT "${CMAKE_CURRENT_BINARY_DIR}/nextbot_deploy_windows_dist.cmake")
 endif()

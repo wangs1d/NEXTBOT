@@ -13,6 +13,7 @@
  * better-sqlite3 为同步本地库：所有方法都是同步的，调用方 await 兼容。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -24,7 +25,7 @@ import type { MessageHubConversation, MessageHubMessage } from "./message-hub-se
 export function getMessageHubDbPath(): string {
   return (
     process.env.AGENT_MESSAGE_HUB_DB?.trim() ||
-    join(process.cwd(), "data", "message-hub", "message-hub.db")
+    join(getDataDir(), "message-hub", "message-hub.db")
   );
 }
 

@@ -23,6 +23,7 @@
  * 若时间进键就会变成两条重复的课。时间变化由 diff 处理。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
@@ -175,7 +176,7 @@ export class IngestService {
   private readonly nowFn: () => Date;
 
   constructor(private readonly opts: IngestServiceOptions = {}) {
-    this.rootDir = resolve(opts.rootDir ?? join(process.cwd(), "data", "ingest"));
+    this.rootDir = resolve(opts.rootDir ?? join(getDataDir(), "ingest"));
     this.draftDir = join(this.rootDir, "drafts");
     this.nowFn = opts.now ?? (() => new Date());
     try {

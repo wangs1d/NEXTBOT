@@ -5,9 +5,9 @@ import "dart:io" show HttpClient, HttpClientRequest, HttpClientResponse, HttpHea
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart";
-import "package:private_ai_agent/features/chat/travel_plan_models.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/travel_plan_models.dart";
 
 /// 1x1 透明 PNG（候选链回退测试的「真实可解码图」）
 const String _kPng1x1Base64 =

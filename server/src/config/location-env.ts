@@ -9,6 +9,7 @@
  *   - 用户可随时清除历史（工具 / clearHistory），地理围栏事件全量审计。
  */
 
+import { getDataDir } from "./data-dir.js";
 import { join } from "node:path";
 
 export type LocationTrackingMode = "ondemand" | "continuous";
@@ -49,7 +50,7 @@ export function getLocationHistoryRetentionDays(): number {
 export function getLocationDbPath(): string {
   return (
     process.env.AGENT_LOCATION_DB?.trim() ||
-    join(process.cwd(), "data", "location", "location.db")
+    join(getDataDir(), "location", "location.db")
   );
 }
 

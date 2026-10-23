@@ -12,7 +12,7 @@ import "dart:io";
 
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/mobile_ui/mobile_chat_controller.dart";
+import "package:nextbot/mobile_ui/mobile_chat_controller.dart";
 
 /// 本地 WebSocket 服务器：控制器构造即连接，连不上会走重连定时器并触发
 /// web_socket 包的异步断连错误污染测试 zone。起真监听端最稳。

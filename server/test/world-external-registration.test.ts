@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { WorldService } from "@private-ai-agent/agent-world";
+import { WorldService } from "@nextbot/agent-world";
 
 import { AgentAccountService } from "../src/services/agent-account-service.js";
 

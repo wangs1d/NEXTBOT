@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
@@ -84,7 +85,7 @@ const prefsStore = new Map<string, UserPreferences>();
 // prefsStore 原本是纯内存 Map，服务重启即丢（名字/主页状态全回到默认）。
 // 现在懒加载单文件 JSON（data/user-preferences.json），写入经持久化链排队原子落盘。
 const prefsFilePath =
-  process.env.USER_PREFERENCES_FILE?.trim() || join(process.cwd(), "data", "user-preferences.json");
+  process.env.USER_PREFERENCES_FILE?.trim() || join(getDataDir(), "user-preferences.json");
 let prefsLoadPromise: Promise<void> | null = null;
 let prefsPersistChain: Promise<void> = Promise.resolve();
 

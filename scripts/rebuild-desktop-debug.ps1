@@ -28,10 +28,10 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Root     = 'E:\ws-project\Private-Agent'
+$Root     = 'E:\ws-project\NextBot'
 $App      = Join-Path $Root 'client\flutter_app'
 $Cache    = 'D:\Flutter\bin\cache'
-$Package  = 'private_ai_agent'
+$Package  = 'nextbot'
 $BuildOut = Join-Path $App 'build\windows\x64\runner\Debug\data\flutter_assets\kernel_blob.bin'
 $DistOut  = Join-Path $Root 'windows_dist\Debug\data\flutter_assets\kernel_blob.bin'
 $Exe      = Join-Path $Root 'windows_dist\Debug\NEXTBOT.exe'

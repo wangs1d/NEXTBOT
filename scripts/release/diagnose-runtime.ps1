@@ -4,7 +4,7 @@
   Nextbot 本地后端拉起自检（绿色版 / zip 解压版专用）。
 
 .DESCRIPTION
-  放置位置：private_ai_agent.exe 的同级目录。
+  放置位置：nextbot.exe 的同级目录。
   运行方式：双击同目录的「诊断后端.bat」，或对本文件右键「使用 PowerShell 运行」。
 
   回答一个问题：客户端为什么没能把本地后端拉起来。
@@ -40,7 +40,7 @@ Say "时间:     $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
 Say "系统:     $([System.Environment]::OSVersion.VersionString)"
 Say ''
 
-$exe = Join-Path $Root 'private_ai_agent.exe'
+$exe = Join-Path $Root 'nextbot.exe'
 $runtime = Join-Path $Root 'runtime'
 $node = Join-Path $runtime 'node.exe'
 $entry = Join-Path $runtime 'dist\index.js'
@@ -51,12 +51,12 @@ Say '[1] 客户端拉起判据（LocalRuntimeManager.isBundled）' 'Yellow'
 $hasExe = Test-Path $exe
 $hasNode = Test-Path $node
 $hasEntry = Test-Path $entry
-Verdict $hasExe 'private_ai_agent.exe 存在'
+Verdict $hasExe 'nextbot.exe 存在'
 Verdict $hasNode 'runtime\node.exe 存在'
 Verdict $hasEntry 'runtime\dist\index.js 存在'
 
 if (-not $hasExe) {
-  Say '  >> 当前目录不是应用根目录，请把本脚本放到 private_ai_agent.exe 旁边再运行。' 'Red'
+  Say '  >> 当前目录不是应用根目录，请把本脚本放到 nextbot.exe 旁边再运行。' 'Red'
   Say ''
   $out = Join-Path $Root 'runtime-diagnose-report.txt'
   [System.IO.File]::WriteAllLines($out, $report, [System.Text.UTF8Encoding]::new($true))
@@ -111,7 +111,7 @@ Say ''
 # ---------- 4. Mark-of-the-Web ----------
 Say '[4] 网络下载标记（Mark-of-the-Web）' 'Yellow'
 $motw = Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
-  Where-Object { $_.Name -in @('private_ai_agent.exe', 'node.exe', 'flutter_windows.dll') } |
+  Where-Object { $_.Name -in @('nextbot.exe', 'node.exe', 'flutter_windows.dll') } |
   ForEach-Object { Get-Item -LiteralPath $_.FullName -Stream Zone.Identifier -ErrorAction SilentlyContinue }
 if ($motw) {
   Say '  [WARN] 部分主文件带 Zone.Identifier（下载自网络）' 'Yellow'
@@ -139,10 +139,10 @@ Say ''
 # ---------- 6. 冷启动实测 ----------
 Say '[6] 按客户端的方式冷启动一次（最多等 60 秒）' 'Yellow'
 
-# 复现 LocalRuntimeManager 的注入行为：把 %APPDATA%\PrivateAgent\config.env
+# 复现 LocalRuntimeManager 的注入行为：把 %APPDATA%\Nextbot\config.env
 # 灌进本进程环境，子进程继承 —— 与客户端 spawn runtime 时完全一致。
 # 新机器首启没有这个文件，注入的即是空配置（这正是根因高发区）。
-$cfgPath = Join-Path $env:APPDATA 'PrivateAgent\config.env'
+$cfgPath = Join-Path $env:APPDATA 'Nextbot\config.env'
 $cfg = @{}
 if (Test-Path $cfgPath) {
   foreach ($line in (Get-Content -LiteralPath $cfgPath -ErrorAction SilentlyContinue)) {
@@ -217,7 +217,7 @@ if ($hasNode -and $hasEntry -and -not $fatal) {
       Say "  [FAIL] $secs 秒内后端未就绪" 'Red'
       if ($proc.HasExited) { Say "         node.exe 已退出，退出码 $($proc.ExitCode)" 'Red' }
       foreach ($pat in @(
-        @{ K = 'OpenAI API key is required'; M = '根因命中：未配置模型 Key，服务端在装配期 abort（3000 永不监听）。到「设置-模型服务」填 Key，或在本目录建 %APPDATA%\PrivateAgent\config.env 写入 OPENAI_API_KEY 后重启。' },
+        @{ K = 'OpenAI API key is required'; M = '根因命中：未配置模型 Key，服务端在装配期 abort（3000 永不监听）。到「设置-模型服务」填 Key，或在本目录建 %APPDATA%\Nextbot\config.env 写入 OPENAI_API_KEY 后重启。' },
         @{ K = 'Cannot find module'; M = 'zip 解压不完整：换 7-Zip 重新解压到短路径（如 D:\Nextbot）。' },
         @{ K = 'ERR_MODULE_NOT_FOUND'; M = '依赖缺失：dist\node_modules 没随包带上。' },
         @{ K = 'EADDRINUSE'; M = '3000 端口被别的程序占用。' },
@@ -233,8 +233,8 @@ if ($hasNode -and $hasEntry -and -not $fatal) {
 Say ''
 
 # ---------- 7. 客户端日志 ----------
-Say '[7] 客户端 runtime 日志（%APPDATA%\PrivateAgent\runtime.log）' 'Yellow'
-$log = Join-Path $env:APPDATA 'PrivateAgent\runtime.log'
+Say '[7] 客户端 runtime 日志（%APPDATA%\Nextbot\runtime.log）' 'Yellow'
+$log = Join-Path $env:APPDATA 'Nextbot\runtime.log'
 if (Test-Path $log) {
   $tail = Get-Content -LiteralPath $log -Tail 12 -ErrorAction SilentlyContinue
   foreach ($l in $tail) { Say "  | $l" 'DarkGray' }

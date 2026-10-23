@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -40,7 +41,7 @@ export class SqliteNarrativeStore {
     this.dbPath =
       opts?.dbPath?.trim() ||
       process.env.AGENT_NARRATIVE_DB_PATH?.trim() ||
-      join(process.cwd(), "data", "narrative-memory.sqlite");
+      join(getDataDir(), "narrative-memory.sqlite");
     mkdirSync(dirname(this.dbPath), { recursive: true });
     this.db = new Database(this.dbPath);
     this.db.pragma("journal_mode = WAL");

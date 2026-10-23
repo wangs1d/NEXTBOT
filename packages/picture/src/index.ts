@@ -1,5 +1,5 @@
 /**
- * @private-ai-agent/picture
+ * @nextbot/picture
  * 图片能力套件:图像生成、图像处理、图像解析、缩略图、存储管理,
  * 以及摄影 Agent 工具(移植自 photography_agent)。
  */

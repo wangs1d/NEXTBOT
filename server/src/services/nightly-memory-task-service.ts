@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
@@ -115,7 +116,7 @@ export class NightlyMemoryTaskService {
   private dreamingTriggeredActors = new Map<string, string>();
   private readonly reportFilePath =
     process.env.AGENT_MEMORY_SLEEP_REPORT_FILE?.trim() ??
-    join(process.cwd(), "data", "nightly-memory-reports.json");
+    join(getDataDir(), "nightly-memory-reports.json");
   private latestReport: NightlySleepAgentReport | null = null;
   private recentReports: NightlySleepAgentReport[] = [];
 
@@ -894,7 +895,7 @@ export class NightlyMemoryTaskService {
     try {
       console.log("[NightlyMemory] Syncing to long-term storage (local archive)");
       const actorIds = this.getAllActorIds();
-      const longTermDir = join(process.cwd(), "data", "long-term-memory");
+      const longTermDir = join(getDataDir(), "long-term-memory");
       try {
         mkdirSync(longTermDir, { recursive: true });
       } catch {
@@ -935,7 +936,7 @@ export class NightlyMemoryTaskService {
     // 缺口 7 修复：清理过期的长期存储归档
     // 删除 30 天前的 long-term-memory 归档文件（保留近期备份）
     try {
-      const longTermDir = join(process.cwd(), "data", "long-term-memory");
+      const longTermDir = join(getDataDir(), "long-term-memory");
       let files: string[] = [];
       try {
         files = readdirSync(longTermDir);

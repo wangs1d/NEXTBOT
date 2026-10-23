@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { getRuntimeConfig } from "../config/env.js";
@@ -10,7 +11,7 @@ export class AgentPairingService {
   private readonly sessionToCode = new Map<string, string>();
 
   private get persistPath(): string {
-    return process.env.AGENT_PAIRING_FILE ?? join(process.cwd(), "data", "agent-pairing.json");
+    return process.env.AGENT_PAIRING_FILE ?? join(getDataDir(), "agent-pairing.json");
   }
 
   /** 启动时加载；文件不存在则保持空映射。 */

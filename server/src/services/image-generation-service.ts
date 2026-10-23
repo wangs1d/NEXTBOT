@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
@@ -25,7 +26,7 @@ export class ImageGenerationService {
     storageRoot?: string;
     providers?: ImageGenerationProvider[];
   } = {}) {
-    this.storageRoot = opts.storageRoot ?? join(process.cwd(), "data", "images");
+    this.storageRoot = opts.storageRoot ?? join(getDataDir(), "images");
     // 默认装载 OpenAI 兼容 provider（如未配置 key 则跳过）
     const openaiCompat = new OpenAICompatibleImageProvider();
     if (openaiCompat.isEnabled()) this.providers.push(openaiCompat);

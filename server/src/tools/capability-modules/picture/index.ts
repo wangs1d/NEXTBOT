@@ -1,11 +1,11 @@
 /**
  * 图片能力模块(图库)统一出口。
  *
- * 数据源:`@private-ai-agent/picture` 的 PictureKit,
+ * 数据源:`@nextbot/picture` 的 PictureKit,
  * 存储根目录 data/pictures(assets/thumbs/index.json)。
  */
 import type { ToolRegistry } from "../../tool-registry.js";
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 
 import { createPictureGalleryHandler } from "./handlers.js";
 

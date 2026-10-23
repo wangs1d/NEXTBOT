@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { join } from "node:path";
 
+import { resolveDataPath } from "../config/data-dir.js";
 import { getCalendarDay, getShortTermMemoryConfig } from "./short-term-memory-config.js";
 import { redactSensitiveText } from "../utils/redact.js";
 import { isProfileExtractHint } from "../agentic-memory/unified-extractor.js";
@@ -33,8 +34,8 @@ export class TurnWalService {
     if (!this.config.walEnabled) return;
 
     const day = getCalendarDay(new Date(entry.ts));
-    // resolve 兼容 walDir 配置为绝对路径的场景（join 会把绝对路径拼坏）
-    const dir = resolve(process.cwd(), this.config.walDir);
+    // resolveDataPath 兼容 walDir 配置为绝对路径的场景
+    const dir = resolveDataPath(this.config.walDir);
     const filePath = join(dir, `${day}.jsonl`);
 
     const safe: TurnWalEntry = {

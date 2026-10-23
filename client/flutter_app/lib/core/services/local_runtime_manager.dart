@@ -17,7 +17,7 @@ class LocalRuntimeManager {
 
   static Process? _process;
 
-  /// exe 同级的 runtime 目录（安装布局：PrivateAgent.exe + runtime\node.exe）。
+  /// exe 同级的 runtime 目录（安装布局：NEXTBOT.exe + runtime\node.exe）。
   static String? get _exeDir {
     final String exe = Platform.resolvedExecutable;
     final int idx = exe.lastIndexOf(Platform.pathSeparator);
@@ -45,7 +45,7 @@ class LocalRuntimeManager {
   static File get _logFile {
     final String appData =
         Platform.environment["APPDATA"] ?? Directory.systemTemp.path;
-    return File("$appData${Platform.pathSeparator}PrivateAgent"
+    return File("$appData${Platform.pathSeparator}Nextbot"
         "${Platform.pathSeparator}runtime.log");
   }
 

@@ -72,9 +72,9 @@ function scanRuntime(path, sessions) {
 }
 
 const sources = [
-  ["server/data/chat-threads.json", "E:/ws-project/Private-Agent/server/data/chat-threads.json"],
-  ["server/data/chat-threads-notes.json", "E:/ws-project/Private-Agent/server/data/chat-threads-notes.json"],
-  ["root data/chat-threads.json", "E:/ws-project/Private-Agent/data/chat-threads.json"],
+  ["server/data/chat-threads.json", "E:/ws-project/NextBot/server/data/chat-threads.json"],
+  ["server/data/chat-threads-notes.json", "E:/ws-project/NextBot/server/data/chat-threads-notes.json"],
+  ["root data/chat-threads.json", "E:/ws-project/NextBot/data/chat-threads.json"],
 ];
 
 const dir = mkdtempSync(join(tmpdir(), "thread-audit-"));

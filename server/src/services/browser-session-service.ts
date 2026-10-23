@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
@@ -30,7 +31,7 @@ export class BrowserSessionService {
   private readonly cache = new Map<string, ActorBrowserSessionsFile>();
 
   private get dataDir(): string {
-    return process.env.BROWSER_SESSION_DATA_DIR ?? join(process.cwd(), "data", "browser-sessions");
+    return process.env.BROWSER_SESSION_DATA_DIR ?? join(getDataDir(), "browser-sessions");
   }
 
   private filePath(actorId: string): string {

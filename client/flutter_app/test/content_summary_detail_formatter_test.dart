@@ -1,8 +1,8 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/utils/content_summary_parser.dart";
-import "package:private_ai_agent/features/chat/content_summary_detail_formatter.dart";
+import "package:nextbot/core/utils/content_summary_parser.dart";
+import "package:nextbot/features/chat/content_summary_detail_formatter.dart";
 
 /// markdown 结构化内容展示标杆回归。
 ///

@@ -122,7 +122,7 @@ export class BarkProvider implements PushProvider {
       const result = await postJson(
         this.url,
         {},
-        { title: input.title, body: input.body, group: "private-agent", level: input.importance === "critical" ? "timeSensitive" : "active" },
+        { title: input.title, body: input.body, group: "nextbot", level: input.importance === "critical" ? "timeSensitive" : "active" },
       );
       return result.ok ? { ok: true } : { ok: false, reason: `bark HTTP ${result.status}: ${result.text}` };
     } catch (err) {

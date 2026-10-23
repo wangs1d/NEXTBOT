@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -104,11 +105,11 @@ function sanitizeDiagnostics(
 }
 
 function feedbackDbPath(): string {
-  return process.env.FEEDBACK_DB?.trim() || join(process.cwd(), "data", "feedback.db");
+  return process.env.FEEDBACK_DB?.trim() || join(getDataDir(), "feedback.db");
 }
 
 function legacyJsonPath(): string {
-  return join(process.cwd(), "data", "feedback.json");
+  return join(getDataDir(), "feedback.json");
 }
 
 class FeedbackStoreManager {

@@ -20,7 +20,7 @@
  * 差别只在于"各层不共享发现源"这件事本身。
  *
  * 运行：cd server && npx tsx scripts/compare-shared-discovery.ts
- * 输出：控制台对比表 + e:\ws-project\Private-Agent\shared-discovery-before-after.html
+ * 输出：控制台对比表 + e:\ws-project\NextBot\shared-discovery-before-after.html
  */
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

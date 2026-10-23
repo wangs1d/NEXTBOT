@@ -9,6 +9,7 @@
  * 存储：data/travel-tickets/{ticketId}.json 单文件单票，
  * 进程内 Map 索引 + 惰性磁盘读；写入同步刷盘（票务录入是低频事件）。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -106,7 +107,7 @@ class TravelTicketStore {
   constructor() {
     // 测试可用 TRAVEL_TICKET_STORE_DIR 覆盖存储目录（默认 data/travel-tickets）
     this.root = path.resolve(
-      process.env.TRAVEL_TICKET_STORE_DIR || path.join(process.cwd(), "data", "travel-tickets"),
+      process.env.TRAVEL_TICKET_STORE_DIR || path.join(getDataDir(), "travel-tickets"),
     );
     this.ensureDir(this.root);
   }

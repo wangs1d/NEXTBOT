@@ -19,6 +19,7 @@
 import type { Memory } from "mem0ai/oss";
 import OpenAI from "openai";
 
+import { getDataDir } from "../config/data-dir.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { MemoryDecisionResult } from "./memory-decision-engine.js";
@@ -113,7 +114,7 @@ export class MemoryConsolidationService {
     this.filePath =
       deps.filePath ??
       (process.env.AGENT_MEMORY_CANDIDATES_FILE?.trim() ||
-        `${process.cwd()}/data/memory-candidates.json`);
+      `${getDataDir()}/memory-candidates.json`);
   }
 
   /** 注入统一抽取客户端（测试用；生产不调用） */

@@ -1,8 +1,8 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/db/isar_local_history_store.dart";
-import "package:private_ai_agent/features/schedule/schedule_page.dart";
+import "package:nextbot/core/db/isar_local_history_store.dart";
+import "package:nextbot/features/schedule/schedule_page.dart";
 
 Widget _host(int Function() chatCallCounter) {
   return MaterialApp(

@@ -24,6 +24,7 @@
  * 诚实失败约定：Cookie 未导入 / 未授权 agentAllowed / 登录态失效 / 接口改版
  * 解析不出数据，都如实返回错误并记录在 status()，绝不编造"已同步"。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { join } from "node:path";
 
 import { readJson, writeJson } from "../proactivity/persist-file.js";
@@ -139,7 +140,7 @@ export class FinanceBillAutoFetchService {
   constructor(private readonly deps: FinanceBillAutoFetchDeps) {
     this.cfg = readFinanceBillAutoFetchConfig(deps.env ?? process.env);
     this.statePath =
-      deps.persistPath ?? join(process.cwd(), "data", "finance-bill-auto-fetch", "state.json");
+      deps.persistPath ?? join(getDataDir(), "finance-bill-auto-fetch", "state.json");
   }
 
   /** 启动调度（每分钟 tick 检查到点）。未启用时 no-op（status 可查原因）。 */

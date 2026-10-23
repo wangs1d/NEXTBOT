@@ -3,8 +3,8 @@ import "dart:convert";
 
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/features/chat/travel_plan_models.dart";
-import "package:private_ai_agent/features/chat/travel_web_panel_controller.dart";
+import "package:nextbot/features/chat/travel_plan_models.dart";
+import "package:nextbot/features/chat/travel_web_panel_controller.dart";
 
 /// 整页 WebView 行程面板：桥接控制器 + 载荷构建。
 void main() {

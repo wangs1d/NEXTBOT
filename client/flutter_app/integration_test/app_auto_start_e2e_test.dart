@@ -4,7 +4,7 @@
 //   flutter test integration_test/app_auto_start_e2e_test.dart -d windows
 //
 // 等价于「不重启的虚拟开机自启测试」：
-//  1. setEnabled(true)  → Run 键出现 PrivateAIAgent 值，REG_SZ，内容为带引号的
+//  1. setEnabled(true)  → Run 键出现 Nextbot 值，REG_SZ，内容为带引号的
 //                          当前 exe 完整路径，且该路径真实存在；
 //  2. isEnabled()       → true（原生查询链路）；
 //  3. setEnabled(false) × 2 → 值被删且幂等（第二次删不存在的值仍成功）；
@@ -13,11 +13,11 @@ import "dart:io";
 
 import "package:flutter_test/flutter_test.dart";
 import "package:integration_test/integration_test.dart";
-import "package:private_ai_agent/core/services/app_auto_start.dart";
+import "package:nextbot/core/services/app_auto_start.dart";
 
 const String _regPath =
     r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-const String _valueName = "PrivateAIAgent";
+const String _valueName = "Nextbot";
 
 Future<ProcessResult> _regQuery() => Process.run("reg", <String>[
       "query",

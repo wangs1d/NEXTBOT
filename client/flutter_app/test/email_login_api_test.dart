@@ -3,7 +3,7 @@ import "dart:convert";
 import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:http/testing.dart";
-import "package:private_ai_agent/core/services/email_login_api.dart";
+import "package:nextbot/core/services/email_login_api.dart";
 
 /// utf8 响应构造：http.Response(String) 默认 latin1，中文会炸；
 /// 生产客户端走 utf8.decode(bodyBytes)，这里对齐构造方式。

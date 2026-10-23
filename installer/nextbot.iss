@@ -1,4 +1,4 @@
-; PrivateAgent Windows 安装包（Inno Setup 6）
+; Nextbot Windows 安装包（Inno Setup 6）
 ; 打包入口：scripts/release/build-installer.ps1（负责 staging，再调 ISCC 编译本文件）
 ; 发行版本（/DEdition 由打包脚本传入）：
 ;   internal —— 内测版（默认）：全量能力，AppId 固定为历史 GUID；
@@ -10,9 +10,9 @@
 #define AppVersion "0.1.0"
 #endif
 
-; staging 目录由打包脚本经 /DStage 传入（默认短路径 E:\PAStage，避开深路径上限）
+; staging 目录由打包脚本经 /DStage 传入（默认短路径 E:\NBStage，避开深路径上限）
 #ifndef Stage
-#define Stage "E:\PAStage"
+#define Stage "E:\NBStage"
 #endif
 
 #ifndef Edition
@@ -78,7 +78,7 @@ var
   ErrorCode: Integer;
 begin
   Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "Get-Process node,private_ai_agent,NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
+    '/C powershell -NoProfile -Command "Get-Process node,NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   Sleep(800);
 end;
@@ -91,10 +91,13 @@ end;
 
 // 卸载第一步询问是否同时删除用户数据（登录态 / API Key / 聊天记录 / 窗口
 // 位置）。默认「否」：保留数据是 Windows 桌面端惯例（Chrome/VS Code/Telegram
-// 同款策略）。勾选删除时清三处：
-//   %APPDATA%\PrivateAgent  —— byok config.env、runtime.log
+// 同款策略）。勾选删除时清四处：
+//   %APPDATA%\Nextbot      —— 统一数据目录（server data/ + byok config.env + runtime.log
+//                             + 窗口位置，2026-10-23 起运行期产物全部收拢到这里）
+//   %APPDATA%\PrivateAgent —— 旧版用户数据目录（2026-10-23 前的 config.env / runtime.log /
+//                             window_positions.ini），保留条目用于升级用户清残留
 //   %APPDATA%\top.nextbot   —— 现行 org 的应用支持目录（登录态/历史库/安装身份）
-//   %APPDATA%\com.example   —— 旧 org 残留（Flutter 脚手架默认名时期的落盘）
+//   %APPDATA%\com.example   —— 更早 org 残留（Flutter 脚手架默认名时期的落盘）
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep <> usUninstall then Exit;
@@ -104,6 +107,7 @@ begin
       '选择「是」将删除登录态、API Key 与聊天记录，且不可恢复。',
       mbConfirmation, MB_YESNO or MB_DEFBUTTON2, []) = IDYES then
   begin
+    DelTree(ExpandConstant('{userappdata}\Nextbot'), True, True, True);
     DelTree(ExpandConstant('{userappdata}\PrivateAgent'), True, True, True);
     DelTree(ExpandConstant('{userappdata}\top.nextbot'), True, True, True);
     DelTree(ExpandConstant('{userappdata}\com.example'), True, True, True);

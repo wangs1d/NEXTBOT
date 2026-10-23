@@ -10,6 +10,7 @@
  *
  * 安全：只代理白名单域名（cartocdn.com / arcgisonline.com），不是开放代理。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -54,7 +55,7 @@ class TravelTileCache {
 
   constructor() {
     this.dir = path.resolve(
-      process.env.TRAVEL_TILE_CACHE_DIR || path.join(process.cwd(), "data", "tile-cache"),
+      process.env.TRAVEL_TILE_CACHE_DIR || path.join(getDataDir(), "tile-cache"),
     );
     fs.mkdirSync(this.dir, { recursive: true });
     this.extraHosts = (process.env.TRAVEL_TILE_ALLOW_HOSTS || "")
@@ -138,7 +139,7 @@ class TravelTileCache {
     try {
       const res = await fetch(url, {
         signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: { "User-Agent": "PrivateAgentTravelTileCache/1.0" },
+        headers: { "User-Agent": "NextbotTravelTileCache/1.0" },
       });
       if (!res.ok) {
         return { ok: false, status: res.status, contentType: "text/plain", body: Buffer.from(`upstream ${res.status}`), fromCache: false };

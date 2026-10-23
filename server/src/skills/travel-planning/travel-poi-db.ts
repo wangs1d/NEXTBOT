@@ -15,6 +15,7 @@
  * 迁移：首次启动把旧 data/poi-cache/*.json 与 data/travel-media/*.json
  *       导入本库，成功后旧目录重命名为 *.migrated（assets 资源目录保留原地）。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import { DatabaseSync } from 'node:sqlite';
 import fs from 'fs';
 import path from 'path';
@@ -70,7 +71,7 @@ class TravelPoiDb {
 
   constructor() {
     // 测试可用 TRAVEL_POI_DB_DIR 覆盖库目录（默认 data/），避免夹具写穿真实 POI 库
-    this.dataDir = process.env.TRAVEL_POI_DB_DIR || path.join(process.cwd(), 'data');
+    this.dataDir = process.env.TRAVEL_POI_DB_DIR || getDataDir();
     this.dbPath = path.join(this.dataDir, 'travel-poi.db');
     fs.mkdirSync(this.dataDir, { recursive: true });
     this.db = new DatabaseSync(this.dbPath);

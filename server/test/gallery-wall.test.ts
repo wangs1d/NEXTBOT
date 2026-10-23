@@ -19,7 +19,7 @@ import path from "node:path";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "gallery-wall-test-"));
 
-const { createPictureKit } = await import("@private-ai-agent/picture");
+const { createPictureKit } = await import("@nextbot/picture");
 const {
   clusterAssetsByTime,
   computeWallLayout,
@@ -28,8 +28,8 @@ const { parseExifGps } = await import("../src/services/photo-analysis-service.js
 const { registerGalleryWallRoutes } = await import("../src/routes/http/gallery-wall.js");
 const { default: Fastify } = await import("fastify");
 
-type PictureKit = import("@private-ai-agent/picture").PictureKit;
-type ImageAsset = import("@private-ai-agent/picture").ImageAsset;
+type PictureKit = import("@nextbot/picture").PictureKit;
+type ImageAsset = import("@nextbot/picture").ImageAsset;
 
 const PNG_1PX = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",

@@ -1,4 +1,4 @@
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";

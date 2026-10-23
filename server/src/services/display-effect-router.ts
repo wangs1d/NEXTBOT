@@ -55,9 +55,9 @@ import {
   ratio,
   TOOL_WEIGHT,
 } from "./render-scoring.js";
-import type { DisplayEffectType } from "@private-ai-agent/agent-protocol";
+import type { DisplayEffectType } from "@nextbot/agent-protocol";
 
-/** 展示效果类型枚举的唯一契约源：@private-ai-agent/agent-protocol（display-effects.ts）。 */
+/** 展示效果类型枚举的唯一契约源：@nextbot/agent-protocol（display-effects.ts）。 */
 export type { DisplayEffectType };
 
 /** 路由输入：一次结构化输出的全部信号。 */

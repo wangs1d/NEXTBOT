@@ -23,10 +23,10 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart" show rootBundle, FontLoader;
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart";
-import "package:private_ai_agent/features/chat/travel_plan_models.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/travel_plan_models.dart";
 
 /// 加载 MiSans 正文与 MaterialIcons 图标字体（测试环境默认不加载，
 /// 否则图标渲染为豆腐块）。

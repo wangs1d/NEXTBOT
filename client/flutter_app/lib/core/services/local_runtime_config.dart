@@ -1,7 +1,7 @@
 import "dart:async";
 import "dart:io";
 
-/// 用户侧运行配置（byok 捆绑形态）：%APPDATA%\PrivateAgent\config.env
+/// 用户侧运行配置（byok 捆绑形态）：%APPDATA%\Nextbot\config.env
 ///
 /// 为什么不放 server/.env：覆盖安装会冲掉、Program Files 下不可写。客户端启动器
 /// 读取本文件并把键值注入 runtime 子进程环境（server 侧 dotenv 默认不覆盖已有
@@ -9,14 +9,34 @@ import "dart:io";
 class LocalRuntimeConfig {
   LocalRuntimeConfig._();
 
+  static bool _migrated = false;
+
   static String get _dir {
     final String appData =
         Platform.environment["APPDATA"] ?? Directory.systemTemp.path;
-    return "$appData${Platform.pathSeparator}PrivateAgent";
+    return "$appData${Platform.pathSeparator}Nextbot";
   }
 
   static File get configFile =>
       File("$_dir${Platform.pathSeparator}config.env");
+
+  /// 旧版目录一次性迁移（2026-10-23 前 config.env 落 %APPDATA%\PrivateAgent）：
+  /// 新文件缺失且旧文件存在 → 复制进新目录。旧文件保留不删（.iss 卸载清单
+  /// 负责清残留）。失败静默，后果只是用户重填一次模型 key。
+  static void _ensureMigrated() {
+    if (_migrated) return;
+    _migrated = true;
+    try {
+      final String appData =
+          Platform.environment["APPDATA"] ?? Directory.systemTemp.path;
+      final File legacy = File("$appData${Platform.pathSeparator}PrivateAgent"
+          "${Platform.pathSeparator}config.env");
+      if (legacy.existsSync() && !configFile.existsSync()) {
+        Directory(_dir).createSync(recursive: true);
+        legacy.copySync(configFile.path);
+      }
+    } catch (_) {}
+  }
 
   /// 解析 KEY=VALUE 行（# 注释、空行忽略；值内不解析引号，保持字面）。
   static Map<String, String> parse(String text) {
@@ -34,6 +54,7 @@ class LocalRuntimeConfig {
   }
 
   static Map<String, String> readSync() {
+    _ensureMigrated();
     try {
       if (!configFile.existsSync()) return const <String, String>{};
       return parse(configFile.readAsStringSync());
@@ -43,8 +64,9 @@ class LocalRuntimeConfig {
   }
 
   static Future<void> write(Map<String, String> values) async {
+    _ensureMigrated();
     await Directory(_dir).create(recursive: true);
-    final StringBuffer sb = StringBuffer("# PrivateAgent 用户配置\n");
+    final StringBuffer sb = StringBuffer("# Nextbot 用户配置\n");
     for (final MapEntry<String, String> e in values.entries) {
       sb.write("${e.key}=${e.value}\n");
     }

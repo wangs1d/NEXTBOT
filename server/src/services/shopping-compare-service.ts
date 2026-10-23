@@ -15,6 +15,7 @@
  * 安全性：全部只读（搜索/读价），不产生任何订单或支付副作用；
  * 平台访问复用 shopping-order 的 Cookie 门禁与审计。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
@@ -267,7 +268,7 @@ export class ShoppingCompareService {
   private readonly watchTickMs = Math.max(readEnvInt("PRICE_WATCH_TICK_MS", 60 * 60 * 1000), 5 * 60 * 1000);
 
   constructor(private readonly deps: ShoppingCompareServiceDeps) {
-    this.dataDir = deps.dataDir ?? join(process.cwd(), "data", "shopping");
+    this.dataDir = deps.dataDir ?? join(getDataDir(), "shopping");
     this.watchWriter = new JsonFileWriter(join(this.dataDir, "price-watches.json"));
     this.historyWriter = new JsonFileWriter(join(this.dataDir, "price-history.json"));
     this.clock = deps.now ?? Date.now;

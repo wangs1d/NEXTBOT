@@ -1,17 +1,17 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/chat_models.dart";
-import "package:private_ai_agent/features/chat/assistant_brief_message.dart";
-import "package:private_ai_agent/features/chat/data_brief_message.dart";
-import "package:private_ai_agent/features/chat/display_effects/chips_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/comparison_table_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/fold_list_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/metric_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/steps_effect_card.dart";
-import "package:private_ai_agent/features/chat/image_result_message.dart";
-import "package:private_ai_agent/features/chat/message_body_renderer.dart";
-import "package:private_ai_agent/features/chat/structured_assistant_message_body.dart";
+import "package:nextbot/core/models/chat_models.dart";
+import "package:nextbot/features/chat/assistant_brief_message.dart";
+import "package:nextbot/features/chat/data_brief_message.dart";
+import "package:nextbot/features/chat/display_effects/chips_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/comparison_table_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/fold_list_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/metric_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/steps_effect_card.dart";
+import "package:nextbot/features/chat/image_result_message.dart";
+import "package:nextbot/features/chat/message_body_renderer.dart";
+import "package:nextbot/features/chat/structured_assistant_message_body.dart";
 
 /// 展示形态客户端覆盖回归（与服务端 test/render-forms-coverage.test.ts 配对）。
 ///

@@ -6,8 +6,8 @@
 import "package:flutter/material.dart";
 import "package:window_manager/window_manager.dart";
 
-import "package:private_ai_agent/features/model_config/model_provider_card.dart";
-import "package:private_ai_agent/features/model_config/model_provider_catalog.dart";
+import "package:nextbot/features/model_config/model_provider_card.dart";
+import "package:nextbot/features/model_config/model_provider_catalog.dart";
 
 Future<void> _noopSave(ModelConfigDraft draft) async {}
 

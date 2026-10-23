@@ -1670,7 +1670,7 @@ def _handle_http_get(req: dict) -> dict:
         return {"ok": False, "error": ssrf_err}
 
     # headers
-    headers: dict[str, str] = {"User-Agent": "Private-Agent-Desktop/1.0"}
+    headers: dict[str, str] = {"User-Agent": "NextBot-Desktop/1.0"}
     extra_headers = req.get("headers")
     if isinstance(extra_headers, dict):
         for k, v in extra_headers.items():

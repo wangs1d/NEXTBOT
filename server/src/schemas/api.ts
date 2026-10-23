@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-// chat turn 相关 schema 已抽到 @private-ai-agent/agent-protocol（外壳/runtime 共用契约），
+// chat turn 相关 schema 已抽到 @nextbot/agent-protocol（外壳/runtime 共用契约），
 // 此处 re-export 保持既有引用路径不变。
 export {
   visionFrameWireSchema,
   agentProcessingUiSchema,
   userMessageSchema,
   aipDispatchWsSchema,
-} from "@private-ai-agent/agent-protocol";
+} from "@nextbot/agent-protocol";
 
 /** WebSocket `agent.embodiment.interact` — 球形 Agent 用户交互 */
 export const agentEmbodimentInteractSchema = z.object({
@@ -40,7 +40,7 @@ export {
   worldRegisterVerifyBodySchema,
   worldSessionQuerySchema,
   worldSkillUploadBodySchema,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 
 export const agentInboxQuerySchema = z.object({
   sessionId: z.string().min(1),

@@ -7,6 +7,7 @@
 // ingest() 是树枝上报管道的统一入口（Phase 2 三段式编排）：
 //   树枝启用？→ L1 确定性闸 → L2 游标去重 → L3 精简（配置开才花 LLM，模板兜底）
 //   → BranchSignal 交主动性板块。原文不进管道（留在树枝权威库）。
+import { getDataDir } from "../../config/data-dir.js";
 import { readJson, writeJson } from "../persist-file.js";
 import { join } from "node:path";
 import type { BranchManifest, BranchSignal } from "./branch-types.js";
@@ -193,7 +194,7 @@ export class BranchRegistry {
           this.deps.cursorPath ??
           (this.deps.configPath
             ? this.deps.configPath.replace(/[^\\/]+$/, "branch-cursors.json")
-            : join(process.cwd(), "data", "proactivity", "branch-cursors.json"));
+            : join(getDataDir(), "proactivity", "branch-cursors.json"));
         gate = new BranchGate({
           manifest: this.manifests.get(branchId)!,
           cursor: new BranchCursor({ persistPath: cursorPath }),

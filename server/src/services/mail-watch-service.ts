@@ -31,6 +31,7 @@
  *   MAIL_WATCH_VIP_SENDERS 逗号分隔的发件人白名单（命中即 critical），支持 @domain 整域
  *   MAIL_WATCH_FILTER_PROMO 默认 1：营销/广告邮件自动过滤（不推送、不进消息中心）；置 0 关闭
  */
+import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 
@@ -788,8 +789,8 @@ export class MailWatchService {
   constructor(deps: MailWatchDeps = {}) {
     this.deps = deps;
     this.cfg = readMailWatchConfig(deps.env ?? process.env);
-    // 数据路径沿用仓库约定：相对 process.cwd() 的 data/ 目录（与其他服务一致）
-    this.statePath = deps.persistPath ?? join(process.cwd(), "data", "mail-watch", "processed-uids.json");
+    // 数据路径与其他服务一致：统一数据目录（config/data-dir）
+    this.statePath = deps.persistPath ?? join(getDataDir(), "mail-watch", "processed-uids.json");
     this.windowSize = deps.windowSize ?? DEFAULT_WINDOW_SIZE;
   }
 

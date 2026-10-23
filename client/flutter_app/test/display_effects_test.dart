@@ -1,16 +1,16 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/image_preview_launcher.dart";
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/carousel_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/chips_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/compare_slider.dart";
-import "package:private_ai_agent/features/chat/display_effects/display_effects.dart";
-import "package:private_ai_agent/features/chat/display_effects/fold_list_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/metric_effect_card.dart";
-import "package:private_ai_agent/features/chat/display_effects/steps_effect_card.dart";
+import "package:nextbot/core/services/image_preview_launcher.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/display_effects/carousel_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/chips_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/compare_slider.dart";
+import "package:nextbot/features/chat/display_effects/display_effects.dart";
+import "package:nextbot/features/chat/display_effects/fold_list_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/metric_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/steps_effect_card.dart";
 
 Widget wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 

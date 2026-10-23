@@ -1,5 +1,5 @@
 import type { ToolHandler } from "../../tool-registry.js";
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 import { PHOTO_STYLES, applyPhotoStyle, type PhotoStyleId } from "../../../services/photo-style-service.js";
 
 /**

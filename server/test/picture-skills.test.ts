@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 import { SkillValidator } from "../src/skills/skill-validator.js";
 import type { SkillDefinition } from "../src/skills/types.js";
 import { createPictureBuiltinSkills } from "../src/skills/builtin/picture-skills.js";

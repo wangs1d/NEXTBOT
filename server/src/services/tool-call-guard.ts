@@ -13,6 +13,7 @@
  * 数据源：data/tool-guard/（idempotency.json 写穿原子替换；audit.ndjson 追加+轮转）。
  * 判级：services/tool-risk.ts 的 classifyToolRisk（单一口径）。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -162,7 +163,7 @@ const globalForToolGuard = globalThis as unknown as { __toolCallGuard?: ToolCall
 /** 进程级单例（data/tool-guard/ 为持久化根目录）。 */
 export function getToolCallGuard(): ToolCallGuard {
   globalForToolGuard.__toolCallGuard ??= new ToolCallGuard({
-    dirPath: join(process.cwd(), "data", "tool-guard"),
+    dirPath: join(getDataDir(), "tool-guard"),
   });
   return globalForToolGuard.__toolCallGuard;
 }

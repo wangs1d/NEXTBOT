@@ -23,7 +23,8 @@ const NETWORK_ENV_KEYS = [
   "http_proxy", "https_proxy", "all_proxy", "no_proxy",
 ];
 
-const rootDir = resolve(process.cwd(), "data", "sandbox");
+// 数据目录由主进程经 workerData 注入（config/data-dir 统一解析）
+const rootDir = resolve(workerData.dataDir, "sandbox");
 let pythonCmdCache = null;
 
 async function detectCommand(candidates) {

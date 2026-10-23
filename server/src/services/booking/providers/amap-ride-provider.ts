@@ -120,7 +120,7 @@ export class AmapRideProvider implements BookingProvider {
       mode: "car",
       coordinate: "gaode",
       callnative: "1",
-      src: "private-agent",
+      src: "nextbot",
     });
     return `https://uri.amap.com/navigation?${params.toString()}`;
   }

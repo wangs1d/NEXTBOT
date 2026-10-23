@@ -11,6 +11,7 @@
  * 需要改代码。外置后：新增/修正目的地只需改 JSON（服务重启生效），代码只保留
  * 匹配与构造逻辑；数据与代码职责分离，也为 A1 服务拆分提供独立模块。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
 import type { Coordinates } from './types.js';
@@ -72,7 +73,7 @@ class KnowledgeBase {
 
   constructor() {
     this.dir = path.resolve(
-      process.env.TRAVEL_KNOWLEDGE_DIR || path.join(process.cwd(), 'data', 'travel-knowledge'),
+      process.env.TRAVEL_KNOWLEDGE_DIR || path.join(getDataDir(), 'travel-knowledge'),
     );
     this.coordinates = loadJson<CoordinateEntry[]>(this.dir, 'coordinates.json', []);
     this.poiDb = loadJson<PoiDbEntry[]>(this.dir, 'poi-db.json', []);

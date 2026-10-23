@@ -12,7 +12,8 @@ import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const storageRoot = join(process.cwd(), "data", "images");
+// 数据目录由主进程经 workerData 注入（config/data-dir 统一解析）
+const storageRoot = join(workerData.dataDir, "images");
 
 async function generateImage(payload) {
   const { prompt, actorId, options = {} } = payload;

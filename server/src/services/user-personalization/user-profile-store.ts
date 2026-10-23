@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -215,7 +216,7 @@ export class UserProfileStore {
     this.baseDir =
       baseDir?.trim() ||
       process.env.AGENT_USER_PROFILE_DIR?.trim() ||
-      join(process.cwd(), "data", "user_profiles");
+      join(getDataDir(), "user_profiles");
   }
 
   profilePath(actorId: string): string {

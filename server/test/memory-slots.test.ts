@@ -1,12 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { buildLayeredSystemPrompt, sliceMemoryEntriesToPromptContext } from "../src/agent/prompt-builder.js";
 import { AgentMemorySyncService } from "../src/services/agent-memory-sync-service.js";
 import { dropExpiredCommitmentLines } from "../src/services/memory-record-utils.js";
 
+// 存储文件放进系统临时目录，避免测试数据散落到仓库（见项目记忆：测试文件统一管理）
+const storePath = join(mkdtempSync(join(tmpdir(), "memory-slots-")), "test-agent-memory-sync.json");
+
 test("appendMemorySummaryLine populates structured memory slots", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
 
   service.appendMemorySummaryLine("actor-1", "user prefers concise answers");
   service.appendMemorySummaryLine("actor-1", "I will continue following up on this fix");
@@ -46,7 +52,7 @@ test("sliceMemoryEntriesToPromptContext exposes structured slots to prompt build
 });
 
 test("reconcileStructuredMemoryAfterTurn only clears resolved commitments and loops", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
   service.appendMemorySummaryLine("actor-2", "I will continue following up on the context fix");
   service.appendMemorySummaryLine("actor-2", "todo: verify continuity after 100 messages");
   service.appendMemorySummaryLine("actor-2", "todo: prepare regression notes for memory rollout");
@@ -77,7 +83,7 @@ test("reconcileStructuredMemoryAfterTurn only clears resolved commitments and lo
 });
 
 test("latest preference replaces older preference for the same subject", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
 
   service.appendMemorySummaryLine("actor-3", "user prefers concise answers");
   service.appendMemorySummaryLine("actor-3", "user dislikes concise answers");
@@ -92,7 +98,7 @@ test("latest preference replaces older preference for the same subject", async (
 });
 
 test("latest fact replaces older fact for the same slot", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
 
   service.appendMemorySummaryLine("actor-4", "I live in Shanghai");
   service.appendMemorySummaryLine("actor-4", "I live in Beijing");
@@ -107,7 +113,7 @@ test("latest fact replaces older fact for the same slot", async () => {
 });
 
 test("current mission can be updated and cleared", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
 
   service.setCurrentMission("actor-5", "continue fixing memory continuity across long chats");
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -153,7 +159,7 @@ test("sliceMemoryEntriesToPromptContext filters zombie commitments before inject
 });
 
 test("appendMemorySummaryLine sweeps expired commitments from the slot on write", async () => {
-  const service = new AgentMemorySyncService("test-agent-memory-sync.json");
+  const service = new AgentMemorySyncService(storePath);
   const stale = "[2026-09-01T00:00:00Z] [topic:consolidate] 承诺：我会在00:50睡觉";
   const seed = service.getSnapshot("actor-zombie");
   await service.applyPatch("actor-zombie", seed.revision, [

@@ -5,7 +5,7 @@ namespace {
 
 // 主实例互斥体名。Local\ 前缀 = 当前登录会话命名空间：多用户/RDP 各自独立，
 // 互不干扰；同一会话内则全局唯一。
-constexpr wchar_t kMutexName[] = L"Local\\PrivateAIAgent.PrimaryInstance";
+constexpr wchar_t kMutexName[] = L"Local\\Nextbot.PrimaryInstance";
 
 // 主窗口属性键：给主实例的主窗口打标记，供后续进程遍历定位。
 constexpr wchar_t kPrimaryWindowProp[] = L"PAI_PrimaryMainWindow";

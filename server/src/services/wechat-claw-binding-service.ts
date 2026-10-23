@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { spawn as spawnProcess } from "node:child_process";
@@ -143,7 +144,7 @@ export class WechatClawBindingService {
   }
 
   private get persistPath(): string {
-    return this.env.WECHAT_CLAW_BINDING_FILE ?? join(process.cwd(), "data", "wechat-claw-bindings.json");
+    return this.env.WECHAT_CLAW_BINDING_FILE ?? join(getDataDir(), "wechat-claw-bindings.json");
   }
 
   async load(): Promise<void> {

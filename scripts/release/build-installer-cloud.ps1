@@ -22,8 +22,8 @@ param(
   [string]$ControlPlaneUrl = "https://login.nextbot.top",
   # 云端 wss 网关（模型对话与 Agent 运行时全走这里）
   [string]$HttpBase = "https://api.nextbot.top",
-  # staging 根目录：与 byok 版（E:\PAStage）隔离，避免互相覆盖 staging
-  [string]$StageRootPath = "E:\PACloudStage",
+  # staging 根目录：与 byok 版（E:\NBStage）隔离，避免互相覆盖 staging
+  [string]$StageRootPath = "E:\NBCloudStage",
   [switch]$SkipClientBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -81,11 +81,11 @@ if (-not $soText.Contains('manifest?edition=') -or -not $soText.Contains('cloud'
 }
 Write-Host '烤入校验通过（wss + 控制面 + cloud 更新通道）' -ForegroundColor Green
 
-Write-Host '== [3/3] Inno 编译（private-agent-cloud.iss）=='
+Write-Host '== [3/3] Inno 编译（nextbot-cloud.iss）=='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw '未找到 ISCC.exe，请安装 Inno Setup 6' }
-& $iscc (Join-Path $Repo 'installer\private-agent-cloud.iss') "/DAppVersion=$Version" "/DStage=$StageRootPath" "/DEdition=cloud"
+& $iscc (Join-Path $Repo 'installer\nextbot-cloud.iss') "/DAppVersion=$Version" "/DStage=$StageRootPath" "/DEdition=cloud"
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
 
 $out = Join-Path $Repo "windows_dist\installer\Nextbot-Cloud-Setup.exe"

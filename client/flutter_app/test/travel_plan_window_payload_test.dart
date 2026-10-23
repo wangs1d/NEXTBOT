@@ -1,8 +1,8 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/travel_plan_window.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/travel_plan_window.dart";
 
 void main() {
   test("TravelPlanWindowPayload 编解码往返：卡片与主题无损", () {
@@ -42,16 +42,18 @@ void main() {
         TravelPlanWindowPayload.tryDecode(raw);
 
     expect(decoded, isNotNull);
-    expect(decoded!.theme, AppThemeVariant.warm);
-    expect(decoded.card.cardType, "travel_itinerary");
-    expect(decoded.card.title, "大理2日游");
-    expect(decoded.card.autoOpen, isTrue);
-    expect(decoded.card.items.single.text, "Day 1");
-    expect(decoded.card.items.single.depth, 1);
-    expect(decoded.card.items.single.url, "u");
-    expect(decoded.card.travelPlan?["destination"], "大理");
+    final TravelPlanWindowPayload payload = decoded!;
+    expect(payload.theme, AppThemeVariant.warm);
+    final AgentResultData decodedCard = payload.card!;
+    expect(decodedCard.cardType, "travel_itinerary");
+    expect(decodedCard.title, "大理2日游");
+    expect(decodedCard.autoOpen, isTrue);
+    expect(decodedCard.items.single.text, "Day 1");
+    expect(decodedCard.items.single.depth, 1);
+    expect(decodedCard.items.single.url, "u");
+    expect(decodedCard.travelPlan?["destination"], "大理");
     expect(
-      (decoded.card.travelPlan?["days"] as List<dynamic>).first,
+      (decodedCard.travelPlan?["days"] as List<dynamic>).first,
       isA<Map<String, dynamic>>(),
     );
   });

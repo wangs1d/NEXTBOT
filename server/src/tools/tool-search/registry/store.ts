@@ -19,6 +19,7 @@
 
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
+import { resolveDataPath } from "../../../config/data-dir.js";
 
 import { QdrantClient } from "@qdrant/js-client-rest";
 import Database from "better-sqlite3";
@@ -40,7 +41,7 @@ const QDRANT_COLLECTION_PREFIX = "tool_idx_";
 const REDIS_L1_KEY_PREFIX = "tool:l1:";
 /** resource_id → 所属 domain 列表的反查 key（极小，用于 getLevel1/deleteLevel1 的 Qdrant 回查定位） */
 const REDIS_L1_DOMAINS_KEY_PREFIX = "tool:l1:domains:";
-const DEFAULT_SQLITE_PATH = "data/tool-registry.db";
+const DEFAULT_SQLITE_PATH = "tool-registry.db";
 const SCROLL_PAGE_LIMIT = 256;
 
 // ===== SQLite 行类型 =====
@@ -145,7 +146,7 @@ export class ToolRegistryStore {
 
     // 1. SQLite（同步 API，先建表）
     try {
-      const absPath = resolve(process.cwd(), this.sqlitePath);
+      const absPath = resolveDataPath(this.sqlitePath);
       const dir = dirname(absPath);
       mkdirSync(dir, { recursive: true });
       this.sqlite = new Database(absPath);

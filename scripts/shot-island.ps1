@@ -2,7 +2,7 @@
 # FindWindowW must be CharSet=Unicode (memory: bare FindWindow returns 0).
 # ASCII only.
 $ErrorActionPreference = 'Stop'
-$out = 'E:\ws-project\Private-Agent\build\island-shot.png'
+$out = 'E:\ws-project\NextBot\build\island-shot.png'
 
 Add-Type -AssemblyName System.Drawing
 $src = @"

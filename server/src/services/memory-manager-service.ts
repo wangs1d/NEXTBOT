@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
@@ -1019,7 +1020,7 @@ export class MemoryManagerService {
   private dreamRehearsedLoadPromise: Promise<void> | null = null;
 
   private get dreamRehearsalStatePath(): string {
-    return join(process.cwd(), "data", "dream-rehearsal-state.json");
+    return join(getDataDir(), "dream-rehearsal-state.json");
   }
 
   /** 每 actor 保留的已强化指纹上限（Map 保插入序，超限裁最旧） */

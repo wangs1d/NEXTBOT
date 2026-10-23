@@ -7,6 +7,7 @@
 // POST/DELETE /api/proactivity/push/register —— 客户端上报/注销推送 token（provider + token）。
 // GET  /api/proactivity/push/status —— 已配置 provider 与各 actor 注册的 token 概览。
 // POST /api/proactivity/push/test —— 给指定 actor 发一条测试推送（验证通道连通）。
+import { getDataDir } from "../../config/data-dir.js";
 import type { FastifyInstance } from "fastify";
 import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
@@ -507,7 +508,7 @@ export function registerProactivityPipelineRoutes(
     if (!body.token?.trim()) {
       const errLine = `${new Date().toISOString()} actor=${actorId || "(empty)"} provider=${provider || "?"} err=${String(body.err ?? "token missing").slice(0, 300)}\n`;
       try {
-        const diagDir = join(process.cwd(), "data", "debug");
+        const diagDir = join(getDataDir(), "debug");
         mkdirSync(diagDir, { recursive: true });
         appendFileSync(join(diagDir, "push-register-errors.log"), errLine);
       } catch {

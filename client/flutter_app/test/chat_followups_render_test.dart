@@ -1,8 +1,8 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/chat_models.dart";
-import "package:private_ai_agent/features/chat/message_body_renderer.dart";
+import "package:nextbot/core/models/chat_models.dart";
+import "package:nextbot/features/chat/message_body_renderer.dart";
 
 /// 「接下来你可以」接续建议渲染测试（NEXT_UP 协议客户端半边）：
 /// - followUpPrompts 非空且接线 onFollowupTap → 渲染「接下来你可以」行 + 胶囊；

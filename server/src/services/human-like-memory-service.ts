@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { watch, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
@@ -792,11 +793,11 @@ export class HumanLikeMemoryService {
 
   constructor(filePath?: string, policyFilePath?: string) {
     this.filePath =
-      filePath ?? process.env.AGENT_HUMAN_MEMORY_FILE?.trim() ?? join(process.cwd(), "data", "human-memory.json");
+      filePath ?? process.env.AGENT_HUMAN_MEMORY_FILE?.trim() ?? join(getDataDir(), "human-memory.json");
     this.policyFilePath =
       policyFilePath ??
       process.env.AGENT_HUMAN_MEMORY_POLICY_FILE?.trim() ??
-      join(process.cwd(), "data", "human-memory-policy.json");
+      join(getDataDir(), "human-memory-policy.json");
   }
 
   async load(): Promise<void> {
@@ -2144,7 +2145,7 @@ export class HumanLikeMemoryService {
   }
 
   private get sleepCommunityStatePath(): string {
-    return join(process.cwd(), "data", "sleep-agent-state.json");
+    return join(getDataDir(), "sleep-agent-state.json");
   }
 
   private loadSleepCommunityState(): Promise<void> {

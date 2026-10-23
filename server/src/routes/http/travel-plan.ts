@@ -910,5 +910,5 @@ li.empty{color:#5f6368}
 .a{font-size:12px;color:#9aa0a6;margin-top:2px}
 .m{display:inline-block;margin-top:6px;font-size:12px;color:#8ab4f8;text-decoration:none}
 .foot{color:#5f6368;font-size:11px;text-align:center;margin-top:24px}
-</style></head><body><div class="wrap"><h1>${esc(plan.title || `${plan.destination}行程`)}</h1><div class="sub">${esc(plan.destination)} · ${esc(plan.startDate ?? "")} ~ ${esc(plan.endDate ?? "")}${plan.totalCost ? ` · 预算约 ¥${esc(Math.round(plan.totalCost))}` : ""}</div>${daysHtml}<div class="foot">由 Private-Agent 行程规划生成 · 分享码 ${esc(code)} · 价格为估算参考</div></div></body></html>`;
+</style></head><body><div class="wrap"><h1>${esc(plan.title || `${plan.destination}行程`)}</h1><div class="sub">${esc(plan.destination)} · ${esc(plan.startDate ?? "")} ~ ${esc(plan.endDate ?? "")}${plan.totalCost ? ` · 预算约 ¥${esc(Math.round(plan.totalCost))}` : ""}</div>${daysHtml}<div class="foot">由 NextBot 行程规划生成 · 分享码 ${esc(code)} · 价格为估算参考</div></div></body></html>`;
 }

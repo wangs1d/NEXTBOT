@@ -10,6 +10,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { resolveDataPath } from "../config/data-dir.js";
 
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 
@@ -144,7 +145,7 @@ export class DailyDigestService {
 
   constructor(config?: ShortTermMemoryConfig) {
     this.config = config ?? getShortTermMemoryConfig();
-    this.filePath = join(process.cwd(), this.config.digestFile);
+    this.filePath = resolveDataPath(this.config.digestFile);
   }
 
   async load(): Promise<void> {

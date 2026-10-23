@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
@@ -41,7 +42,7 @@ export class CompanionService {
   private readonly priceWatches = new Map<string, PriceWatch[]>();
 
   private get persistPath(): string {
-    return process.env.COMPANION_STATE_FILE ?? join(process.cwd(), "data", "companion-state.json");
+    return process.env.COMPANION_STATE_FILE ?? join(getDataDir(), "companion-state.json");
   }
 
   async load(): Promise<void> {

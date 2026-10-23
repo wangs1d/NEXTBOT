@@ -1,10 +1,10 @@
-import "package:private_ai_agent/app/ambient_feeds_controller.dart";
-import "package:private_ai_agent/app/chat_turn_controller.dart";
-import "package:private_ai_agent/app/phone_call_controller.dart";
-import "package:private_ai_agent/core/models/agent_relay_models.dart";
-import "package:private_ai_agent/core/services/account_profile_api.dart";
-import "package:private_ai_agent/core/presentation/dynamic_island.dart";
-import "package:private_ai_agent/core/presentation/foreground_banner.dart";
+import "package:nextbot/app/ambient_feeds_controller.dart";
+import "package:nextbot/app/chat_turn_controller.dart";
+import "package:nextbot/app/phone_call_controller.dart";
+import "package:nextbot/core/models/agent_relay_models.dart";
+import "package:nextbot/core/services/account_profile_api.dart";
+import "package:nextbot/core/presentation/dynamic_island.dart";
+import "package:nextbot/core/presentation/foreground_banner.dart";
 import "package:flutter_test/flutter_test.dart";
 
 /// ForegroundBanner 桩：捕获横幅入参供断言。

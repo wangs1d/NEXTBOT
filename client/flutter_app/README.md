@@ -1,4 +1,4 @@
-# private_ai_agent
+# nextbot
 
 A new Flutter project.
 

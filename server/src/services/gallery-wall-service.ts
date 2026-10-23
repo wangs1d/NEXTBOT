@@ -1,11 +1,11 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
-import type { ImageAsset, PictureKit } from "@private-ai-agent/picture";
+import type { ImageAsset, PictureKit } from "@nextbot/picture";
 
 /**
  * 3D 照片墙「贴墙」服务（B 面数据管线）——沙龙照片墙版。
  *
- * 职责：把图库（@private-ai-agent/picture，data/pictures）里的照片整理成
+ * 职责：把图库（@nextbot/picture，data/pictures）里的照片整理成
  * 3D 时间走廊的布局 JSON。挂法是「簇即墙」：一个事件簇密集铺满一面墙
  * （沙龙式密贴，按原始比例错落大小），墙与墙之间留空白 + 月份门洞过渡。
  *

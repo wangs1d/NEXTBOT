@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。
@@ -21,7 +21,7 @@ param(
   # 云端 ANYSEARCH_PROXY_ACCESS_TOKEN 校验——扫描器拿到端点无令牌 403。与云端同值
   [string]$SearchApiToken = "nbsrch_9f4c2e7a81d63b504ae7c2f19d83b546",
   # staging 根目录：刻意用短路径，避开 node_modules 深路径 260 字符上限
-  [string]$StageRootPath = "E:\PAStage",
+  [string]$StageRootPath = "E:\NBStage",
   # 发行版本：internal=内测版（默认，能力全量，AppId/文件名同历史）；oss=开源版
   # （GitHub 发行）：烤 PAI_EDITION=oss、runtime\.env 写 NEXTBOT_EDITION=oss、
   # 独立 AppId 与 Nextbot-Setup-OSS.exe 文件名、跳过 travel-knowledge 种子。
@@ -106,21 +106,21 @@ $nodeAbi = & $nodeExe -p "process.version + '/abi' + process.versions.modules"
 Write-Host "bundled node: $nodeExe ($nodeAbi)" -ForegroundColor Green
 Copy-Item $nodeExe (Join-Path $StageRuntime 'node.exe') -Force
 
-# 3.3 node_modules：解引用复制（排除 @private-ai-agent 软链，workspace 包单独按需拷）
+# 3.3 node_modules：解引用复制（排除 @nextbot 软链，workspace 包单独按需拷）
 # 必须经 cmd 原生管道：PowerShell 5.1 管道会按行解码，毁掉 tar 的二进制流
 $repoPosix = ($Repo.Path -replace '\\', '/')
 $stagePosix = ($StageRuntime -replace '\\', '/')
-& cmd /c "tar -chf - -C $repoPosix --exclude=./node_modules/@private-ai-agent --exclude=./node_modules/private-ai-agent-server ./node_modules | tar -xf - -C $stagePosix"
+& cmd /c "tar -chf - -C $repoPosix --exclude=./node_modules/@nextbot --exclude=./node_modules/nextbot-server ./node_modules | tar -xf - -C $stagePosix"
 if ($LASTEXITCODE -ne 0) { throw 'node_modules tar copy failed' }
 
 # 3.4 workspace 包：只带运行时必需的 dist+package.json。dist 自包含（包内相对
 # import 全部落在 dist 内，数据文件走 cwd\data），包根的 .ts 源码/config/deps/data
 # 均为开发态产物——整目录拷贝等于把源码随安装包公开。.d.ts/.d.ts.map 运行时
 # 不加载且描述 API 面，一并剥掉。
-$paDir = Join-Path $StageRuntime 'node_modules\@private-ai-agent'
-New-Item -ItemType Directory -Force -Path $paDir | Out-Null
+$nbDir = Join-Path $StageRuntime 'node_modules\@nextbot'
+New-Item -ItemType Directory -Force -Path $nbDir | Out-Null
 foreach ($pkg in 'agent-world', 'packages\agent-protocol', 'packages\picture') {
-  $pkgDst = Join-Path $paDir (Split-Path $pkg -Leaf)
+  $pkgDst = Join-Path $nbDir (Split-Path $pkg -Leaf)
   Copy-Item (Join-Path $Repo "$pkg\dist") (Join-Path $pkgDst 'dist') -Recurse -Force
   Copy-Item (Join-Path $Repo "$pkg\package.json") (Join-Path $pkgDst 'package.json') -Force
   Get-ChildItem $pkgDst -Recurse -Include '*.d.ts', '*.d.ts.map' -File | Remove-Item -Force
@@ -249,7 +249,7 @@ Write-Host '== [4/5] 校验关键文件 =='
 foreach ($f in (Join-Path $StageApp 'NEXTBOT.exe'),
                (Join-Path $StageRuntime 'node.exe'),
                (Join-Path $StageRuntime 'dist\index.js'),
-               (Join-Path $StageRuntime 'node_modules\@private-ai-agent\agent-world\dist'),
+               (Join-Path $StageRuntime 'node_modules\@nextbot\agent-world\dist'),
                (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin\napi-v6\win32\x64'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\model_quantized.onnx'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\vocab.txt'),
@@ -437,7 +437,7 @@ Write-Host '== [5/5] Inno 编译 =='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw '未找到 ISCC.exe，请安装 Inno Setup 6' }
-& $iscc (Join-Path $Repo 'installer\private-agent.iss') "/DAppVersion=$Version" "/DStage=$StageRoot" "/DEdition=$Edition"
+& $iscc (Join-Path $Repo 'installer\nextbot.iss') "/DAppVersion=$Version" "/DStage=$StageRoot" "/DEdition=$Edition"
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
 
 $setupName = if ($Edition -eq 'oss') { 'Nextbot-Setup-OSS.exe' } else { 'Nextbot-Setup.exe' }

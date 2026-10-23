@@ -14,4 +14,11 @@ param(
   [string]$ControlPlaneUrl = 'https://login.nextbot.top'
 )
 $ErrorActionPreference = 'Stop'
+# 分发构建（绿色 zip）门禁：必须显式烤真实服务器地址。非捆绑形态下空 HTTP_BASE
+# 会在客户端启动时 fail-fast（api_config.dart P0 防线）→ 用户拿到手即白屏
+# （2026-10-23 根修）。本地日常构建走 build_windows.ps1（默认 127.0.0.1:3000）。
+if (-not $HttpBase) {
+  throw '分发构建必须显式传 -HttpBase（例：-HttpBase https://api.nextbot.top）。' +
+    '本地日常构建请直接用 build_windows.ps1（默认连本机 dev server）。'
+}
 & (Join-Path $PSScriptRoot 'build_windows.ps1') -Configuration Release -HttpBase $HttpBase -UpdateManifestUrl $UpdateManifestUrl -ControlPlaneUrl $ControlPlaneUrl

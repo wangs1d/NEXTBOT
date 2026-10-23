@@ -1,7 +1,7 @@
-# @private-ai-agent/picture
+# @nextbot/picture
 
 图片能力套件(本地子包),将 `E:\ws-project\picture` 的摄影 Agent 能力移植进
-Private-Agent monorepo,并扩展图片生成、图像处理、图像解析、缩略图与
+NextBot monorepo,并扩展图片生成、图像处理、图像解析、缩略图与
 图片存储管理。
 
 ## 模块总览
@@ -18,7 +18,7 @@ Private-Agent monorepo,并扩展图片生成、图像处理、图像解析、缩
 ## 快速开始
 
 ```ts
-import { createPictureKit } from '@private-ai-agent/picture';
+import { createPictureKit } from '@nextbot/picture';
 
 const kit = await createPictureKit({
   rootDir: 'data/pictures',     // assets/thumbs/index.json 存放根,默认 .picture_data
@@ -35,7 +35,7 @@ await kit.invokeRaw('evaluation', { action: 'evaluate', photo_path: './cat.jpg' 
 也可以按需直接使用各 Service:
 
 ```ts
-import { ImageStore, ImageProcessingService, EvaluationService } from '@private-ai-agent/picture';
+import { ImageStore, ImageProcessingService, EvaluationService } from '@nextbot/picture';
 
 const store = new ImageStore({ rootDir: 'data/pictures' });
 await store.init();
@@ -48,7 +48,7 @@ const result = await new EvaluationService().evaluate('./cat.jpg');
 ## 与 server 集成
 
 包已加入根 `workspaces`;server 只需在依赖中加入
-`"@private-ai-agent/picture": "0.1.0"` 即可 import 使用,例如在
+`"@nextbot/picture": "0.1.0"` 即可 import 使用,例如在
 `create-app-services` 中实例化 `createPictureKit({ rootDir: 'data/pictures' })`,
 并把 11 个工具经 `registry.listTools()` 暴露给意图路由/工具循环。
 

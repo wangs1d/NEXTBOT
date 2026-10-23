@@ -6,7 +6,7 @@ import {
   unifiedMemoryGetSchema,
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { AuditService } from "../services/audit-service.js";

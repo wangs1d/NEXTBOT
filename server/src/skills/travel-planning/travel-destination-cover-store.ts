@@ -23,6 +23,7 @@
  * 形状（整体即 covers）。
  * TRAVEL_MEDIA_STORE_DIR 环境变量可覆盖存储根目录（与 POI 媒体库一致，测试用）。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
 
@@ -76,7 +77,7 @@ class TravelDestinationCoverStore {
   private loaded = false;
 
   constructor() {
-    const root = process.env.TRAVEL_MEDIA_STORE_DIR || path.join(process.cwd(), 'data', 'travel-media');
+    const root = process.env.TRAVEL_MEDIA_STORE_DIR || path.join(getDataDir(), 'travel-media');
     this.file = path.join(root, 'destination-covers.json');
   }
 

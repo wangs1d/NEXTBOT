@@ -3,8 +3,8 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/feedback_api.dart";
-import "package:private_ai_agent/features/help/feedback_dialog.dart";
+import "package:nextbot/core/services/feedback_api.dart";
+import "package:nextbot/features/help/feedback_dialog.dart";
 
 class _FakeApi extends FeedbackApi {
   _FakeApi() : super(baseUrl: "http://127.0.0.1:1");

@@ -118,7 +118,7 @@ async function generateCa(
     "-out",
     "ca.crt",
     "-subj",
-    "/CN=Private-Agent Local Dev CA",
+    "/CN=NextBot Local Dev CA",
     "-addext",
     "basicConstraints=critical,CA:TRUE",
     "-addext",
@@ -155,7 +155,7 @@ async function generateLeaf(
     "-out",
     "server.csr",
     "-subj",
-    "/CN=Private-Agent Local Dev",
+    "/CN=NextBot Local Dev",
   ], certDir);
   await openssl(bin, [
     "x509",

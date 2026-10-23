@@ -48,7 +48,7 @@ subprojects {
     project.plugins.withId("com.android.library") {
         project.extensions.configure<com.android.build.gradle.LibraryExtension>("android") {
             if (namespace.isNullOrBlank()) {
-                namespace = "com.privateagent.plugin." + project.name.replace(Regex("[^a-zA-Z0-9_.]"), "_")
+                namespace = "com.nextbot.plugin." + project.name.replace(Regex("[^a-zA-Z0-9_.]"), "_")
             }
         }
     }

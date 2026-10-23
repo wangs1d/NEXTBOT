@@ -55,7 +55,7 @@ export type PreparedPromptCachePlan = {
   promptCache?: PrefixCacheRequest;
 };
 
-const DEFAULT_NAMESPACE = "private-ai-agent-system-prompt-v1";
+const DEFAULT_NAMESPACE = "nextbot-system-prompt-v1";
 
 function envEnabled(name: string, defaultValue: boolean): boolean {
   const raw = process.env[name]?.trim();

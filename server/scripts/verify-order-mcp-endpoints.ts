@@ -19,7 +19,7 @@ async function probe(name: string, url: string) {
     params: {
       protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: "private-ai-agent", version: "1.0.0" },
+      clientInfo: { name: "nextbot", version: "1.0.0" },
     },
   };
 

@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { randomUUID } from "crypto";
@@ -81,7 +82,7 @@ export class InfoHubService {
   });
 
   private get persistPath(): string {
-    return process.env.INFO_TRACKING_FILE ?? join(process.cwd(), "data", "info-tracking.json");
+    return process.env.INFO_TRACKING_FILE ?? join(getDataDir(), "info-tracking.json");
   }
 
   async load(): Promise<void> {

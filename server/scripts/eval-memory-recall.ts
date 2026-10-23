@@ -19,6 +19,8 @@
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
+import { getDataDir } from "../src/config/data-dir.js";
+
 interface AnchorItem {
   content: string;
   score?: number;
@@ -139,7 +141,7 @@ async function main(): Promise<void> {
   const filePath =
     args.find((a) => !a.startsWith("--")) ??
     process.env.AGENT_MEMORY_SYNC_FILE ??
-    join(process.cwd(), "data", "agent-memory-sync.json");
+    join(getDataDir(), "agent-memory-sync.json");
 
   let raw: string;
   try {
@@ -204,7 +206,7 @@ async function main(): Promise<void> {
   }
 
   if (saveReport) {
-    const outPath = join(process.cwd(), "data", "recall-eval-latest.json");
+    const outPath = join(getDataDir(), "recall-eval-latest.json");
     try {
       await mkdir(dirname(outPath), { recursive: true });
       await writeFile(

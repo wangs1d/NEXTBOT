@@ -1,10 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { ShortTermMemoryGatewayService } from "../src/services/short-term-memory-gateway.js";
 
+// 存储文件放进系统临时目录，避免测试数据散落到仓库（见项目记忆：测试文件统一管理）
+const storePath = join(mkdtempSync(join(tmpdir(), "short-term-memory-")), "test-short-term-memory.json");
+
 test("buildPromptContext carries mission, preferences, open loops, and recent context across turns", () => {
-  const service = new ShortTermMemoryGatewayService("test-short-term-memory.json");
+  const service = new ShortTermMemoryGatewayService(storePath);
   const sessionId = "session-memory-test";
 
   service.syncTaskForTurn(sessionId, "continue fixing the Flutter chat context continuity issue");
@@ -27,7 +33,7 @@ test("buildPromptContext carries mission, preferences, open loops, and recent co
 // 白名单门控，query 只用用户原文，不再拼接任务/使命上下文。
 
 test("casual follow-up does not inject stale task context", () => {
-  const service = new ShortTermMemoryGatewayService("test-short-term-memory.json");
+  const service = new ShortTermMemoryGatewayService(storePath);
   const sessionId = "session-casual-test";
 
   service.syncTaskForTurn(sessionId, "continue fixing the memory continuity issue in the agent");

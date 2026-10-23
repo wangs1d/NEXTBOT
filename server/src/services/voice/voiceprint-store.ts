@@ -6,6 +6,7 @@
  * 与语音消息同款的 per-actor 数据目录约定。
  */
 
+import { getDataDir } from "../../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -23,7 +24,7 @@ export type VoiceprintRecord = {
 export class VoiceprintStore {
   private readonly db: SqliteDatabase;
 
-  constructor(dbPath = process.env.VOICEPRINT_DB_PATH?.trim() || join(process.cwd(), "data", "voiceprint", "voiceprint.db")) {
+  constructor(dbPath = process.env.VOICEPRINT_DB_PATH?.trim() || join(getDataDir(), "voiceprint", "voiceprint.db")) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new Database(dbPath);
     this.db.pragma("journal_mode = WAL");

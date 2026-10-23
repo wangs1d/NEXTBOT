@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 
 import sharp from "sharp";
-import type { ImageAsset, PictureKit } from "@private-ai-agent/picture";
+import type { ImageAsset, PictureKit } from "@nextbot/picture";
 
 /**
  * 图库回收站（批量删除/盲盒清理的安全网）。

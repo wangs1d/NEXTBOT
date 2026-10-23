@@ -17,14 +17,14 @@ import path from "node:path";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "photo-hk-test-"));
 
-const { createPictureKit } = await import("@private-ai-agent/picture");
+const { createPictureKit } = await import("@nextbot/picture");
 const {
   createPictureHousekeepingHandler,
   createPictureMemoriesHandler,
 } = await import("../src/tools/capability-modules/photo/handlers.js");
 const { extractMediaCards } = await import("../src/services/tool-result-processor.js");
 
-type PictureKit = import("@private-ai-agent/picture").PictureKit;
+type PictureKit = import("@nextbot/picture").PictureKit;
 
 const PNG_1PX = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",

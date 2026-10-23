@@ -2,7 +2,7 @@
 // 平台调用（audioplayers）收敛在 MediaPlaybackAdapter，此处注入 fake，
 // 只验证状态机与诚实错误上报，不触碰真实音频栈。
 import "package:flutter_test/flutter_test.dart";
-import "package:private_ai_agent/core/services/media_playback_service.dart";
+import "package:nextbot/core/services/media_playback_service.dart";
 
 /// fake 适配器：记录调用序列，play 可配置失败，手动触发播完事件。
 class FakeMediaPlaybackAdapter extends MediaPlaybackAdapter {

@@ -6,6 +6,7 @@ import type { SkillManagerLike } from "../host-types.js";
 import type { SkillManifestLike } from "../host-types.js";
 
 import { allowAgentWorldPlaceholderRegister } from "../config/world-register-placeholder.js";
+import { getDataDir } from "../config/data-dir.js";
 
 import type { VerifyChallengeResult, WorldRegisterChallenge } from "./world-agent-registration.js";
 import { WorldAgentRegistrationService } from "./world-agent-registration.js";
@@ -232,7 +233,7 @@ export class WorldService {
   }
 
   private get persistPath(): string {
-    return process.env.WORLD_STATE_FILE ?? join(process.cwd(), "data", "world-state.json");
+    return process.env.WORLD_STATE_FILE ?? join(getDataDir(), "world-state.json");
   }
 
   /** 启动时加载；无文件则保持空映射（会话首次访问时再创建）。支持 v1 `sessions` 与 v2 `rooms`。 */

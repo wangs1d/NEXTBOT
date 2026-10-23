@@ -14,6 +14,7 @@
  * （USER_FACT_RE / USER_PREFERENCE_RE / ASSISTANT_COMMITMENT_RE）。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile, appendFile, readdir, unlink } from "node:fs/promises";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
@@ -136,7 +137,7 @@ export class DailyJournalService {
 
   constructor(rootDir?: string) {
     this.rootDir =
-      rootDir ?? process.env.AGENT_JOURNAL_DIR?.trim() ?? join(process.cwd(), "data", "journal");
+      rootDir ?? process.env.AGENT_JOURNAL_DIR?.trim() ?? join(getDataDir(), "journal");
   }
 
   private actorDir(actorId: string): string {

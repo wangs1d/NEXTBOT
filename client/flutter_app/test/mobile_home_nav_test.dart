@@ -8,8 +8,8 @@ import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:path_provider_platform_interface/path_provider_platform_interface.dart";
-import "package:private_ai_agent/mobile_ui/mobile_briefing_page.dart";
-import "package:private_ai_agent/mobile_ui/mobile_home.dart";
+import "package:nextbot/mobile_ui/mobile_briefing_page.dart";
+import "package:nextbot/mobile_ui/mobile_home.dart";
 
 import "helpers/temp_path_provider.dart";
 

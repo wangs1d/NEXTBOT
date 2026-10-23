@@ -21,6 +21,7 @@
  * 开关：`IMAGE_CAPTION_ENABLED=0` 关闭（默认开启）。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import OpenAI from "openai";
@@ -297,7 +298,7 @@ export async function loadImageBytes(
       // 路径穿越防护：只允许单层 actorId + 纯文件名
       const m = rel.match(/^([A-Za-z0-9_-]+)\/([A-Za-z0-9_.-]+)$/);
       if (!m) return null;
-      const full = join(process.cwd(), "data", "images", m[1], m[2]);
+      const full = join(getDataDir(), "images", m[1], m[2]);
       buf = await readFile(full);
     } else if (/^https?:\/\//i.test(url)) {
       const res = await fetch(url, { signal: AbortSignal.timeout(8_000) });

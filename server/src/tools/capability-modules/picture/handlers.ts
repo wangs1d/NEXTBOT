@@ -1,10 +1,10 @@
 import type { ToolHandler } from "../../tool-registry.js";
-import type { PictureKit, ImageAsset } from "@private-ai-agent/picture";
+import type { PictureKit, ImageAsset } from "@nextbot/picture";
 
 /**
  * picture.gallery 工具 handler。
  *
- * 图库数据源是 `@private-ai-agent/picture` 的 PictureKit(存储根 data/pictures);
+ * 图库数据源是 `@nextbot/picture` 的 PictureKit(存储根 data/pictures);
  * 返回给 LLM 的条目附带缩略图/原图 URL(由 routes/http/picture.ts 提供静态服务),
  * 客户端可直接展示。
  */

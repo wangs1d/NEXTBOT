@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomBytes, randomInt, randomUUID } from "crypto";
 import { mkdir, readdir, readFile, rename, unlink, writeFile } from "fs/promises";
 import { dirname, join } from "path";
@@ -447,11 +448,11 @@ export class VirtualPhoneService {
   }
 
   private get historyDir(): string {
-    return process.env.VIRTUAL_PHONE_HISTORY_DIR ?? join(process.cwd(), "data", "virtual-phone-history");
+    return process.env.VIRTUAL_PHONE_HISTORY_DIR ?? join(getDataDir(), "virtual-phone-history");
   }
 
   private get sessionsPath(): string {
-    return process.env.VIRTUAL_PHONE_CALLS_FILE ?? join(process.cwd(), "data", "virtual-phone-calls.json");
+    return process.env.VIRTUAL_PHONE_CALLS_FILE ?? join(getDataDir(), "virtual-phone-calls.json");
   }
 
   /** 活跃通话会话落盘（原子写 + 全局写队列，同 virtual-phones.json 策略） */
@@ -553,7 +554,7 @@ export class VirtualPhoneService {
   }
 
   private get persistPath(): string {
-    return process.env.VIRTUAL_PHONES_FILE ?? join(process.cwd(), "data", "virtual-phones.json");
+    return process.env.VIRTUAL_PHONES_FILE ?? join(getDataDir(), "virtual-phones.json");
   }
 
   async load(): Promise<void> {

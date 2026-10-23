@@ -6,6 +6,7 @@
  * 避免高频写盘与并发冲突。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -39,7 +40,7 @@ export class AgentTaskStore {
   private readonly debounceTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(filePath?: string) {
-    const defaultDir = join(process.cwd(), "data");
+    const defaultDir = getDataDir();
     this.filePath =
       filePath?.trim() ||
       process.env.AGENT_TASK_PERSIST_FILE?.trim() ||

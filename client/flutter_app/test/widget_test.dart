@@ -3,7 +3,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:private_ai_agent/main.dart';
+import 'package:nextbot/main.dart';
 
 void main() {
   testWidgets('App root smoke test', (WidgetTester tester) async {

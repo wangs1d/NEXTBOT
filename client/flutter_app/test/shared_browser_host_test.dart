@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/shared_browser_host.dart";
+import "package:nextbot/core/services/shared_browser_host.dart";
 
 void main() {
   group("SharedBrowserHost.resolveInputToUrl", () {

@@ -510,7 +510,7 @@ class SphereOverlayApp(QApplication):
 
     def ensure_single_instance(self) -> bool:
         """尝试建立本地 server 实现单实例；若已存在则发送激活信号。"""
-        name = "com.private-agent.sphere-overlay-py"
+        name = "com.nextbot.sphere-overlay-py"
         socket = QLocalSocket()
         socket.connectToServer(name)
         if socket.waitForConnected(500):

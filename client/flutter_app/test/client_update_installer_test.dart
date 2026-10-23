@@ -7,7 +7,7 @@ import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:http/testing.dart" as http;
 
-import "package:private_ai_agent/core/services/client_update_installer.dart";
+import "package:nextbot/core/services/client_update_installer.dart";
 
 void main() {
   late Directory storageDir;

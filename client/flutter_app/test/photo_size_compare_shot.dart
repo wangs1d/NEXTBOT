@@ -27,10 +27,10 @@ import "package:flutter/painting.dart" show debugNetworkImageHttpClientProvider;
 import "package:flutter/services.dart" show rootBundle, FontLoader;
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart";
-import "package:private_ai_agent/features/chat/structured_assistant_message_body.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/structured_assistant_message_body.dart";
 
 Future<void> _loadFonts() async {
   final FontLoader sans = FontLoader("MiSans");

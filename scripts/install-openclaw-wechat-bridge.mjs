@@ -11,7 +11,7 @@ import { config as dotenvConfig } from "dotenv";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const serverDir = join(root, "server");
-const pluginDir = join(root, "openclaw-plugins", "private-agent-wechat-bridge");
+const pluginDir = join(root, "openclaw-plugins", "nextbot-wechat-bridge");
 
 dotenvConfig({ path: join(serverDir, ".env"), quiet: true });
 dotenvConfig({ path: join(serverDir, ".env.local"), override: true, quiet: true });
@@ -57,9 +57,9 @@ async function main() {
   }
 
   const plugins = config.plugins ?? {};
-  plugins.allow = ["openclaw-weixin", "private-agent-wechat-bridge", "moonshot"];
+  plugins.allow = ["openclaw-weixin", "nextbot-wechat-bridge", "moonshot"];
   const entries = plugins.entries ?? {};
-  entries["private-agent-wechat-bridge"] = {
+  entries["nextbot-wechat-bridge"] = {
     enabled: true,
     config: {
       serverBaseUrl: `http://127.0.0.1:${port}`,

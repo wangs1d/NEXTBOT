@@ -19,6 +19,7 @@
  * - 派生同步只做归并：与事实冲突的旧槽位行被替换，未提升的近期捕获行保留。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -145,7 +146,7 @@ export class UserFactStore {
   private readonly cache = new Map<string, FactFileShape>();
   private readonly writeChains = new Map<string, Promise<void>>();
 
-  constructor(private readonly dir: string = join(process.cwd(), "data", "user-facts")) {}
+  constructor(private readonly dir: string = join(getDataDir(), "user-facts")) {}
 
   private filePath(actorId: string): string {
     return join(this.dir, `${sanitizeSegment(actorId)}.json`);

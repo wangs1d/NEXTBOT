@@ -10,7 +10,7 @@ import { getSoulOverlay } from "../agent/soul-store.js";
 import { buildVoiceBaselineBlock } from "../agent/chat-voice-baseline.js";
 import { TurnBudget } from "../agent/turn-budget.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { ComputeQuotaService } from "./compute-quota-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { ToolMediaCard, ToolRegistry } from "../tools/tool-registry.js";

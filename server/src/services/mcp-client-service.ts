@@ -7,6 +7,7 @@
  * 3. http 模式：远程 streamable-http 端点（如滴滴/瑞幸等远程 MCP），请求头鉴权
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -78,7 +79,7 @@ type HttpSession = {
 
 // ---------- 配置加载 ----------
 
-const DEFAULT_CONFIG_PATH = join(process.cwd(), "data", "mcp-servers.json");
+const DEFAULT_CONFIG_PATH = join(getDataDir(), "mcp-servers.json");
 
 function loadServerConfigs(): McpServerConfig[] {
   const configPath = process.env.MCP_SERVERS_CONFIG?.trim() || DEFAULT_CONFIG_PATH;
@@ -432,7 +433,7 @@ export class McpClientService {
           const initResponse = await this.sendStdioRequest(instance, "initialize", {
             protocolVersion: "2024-11-05",
             capabilities: {},
-            clientInfo: { name: "private-ai-agent", version: "1.0.0" },
+            clientInfo: { name: "nextbot", version: "1.0.0" },
           });
 
           if (initResponse) {
@@ -631,7 +632,7 @@ export class McpClientService {
     await this.sendHttpRpc(server, "initialize", {
       protocolVersion: "2025-03-26",
       capabilities: {},
-      clientInfo: { name: "private-ai-agent", version: "1.0.0" },
+      clientInfo: { name: "nextbot", version: "1.0.0" },
     });
 
     const session: HttpSession = this.httpSessions.get(server.alias) ?? { initialized: false };

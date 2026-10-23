@@ -17,11 +17,11 @@ import path from "node:path";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picture-routes-test-"));
 
-const { createPictureKit } = await import("@private-ai-agent/picture");
+const { createPictureKit } = await import("@nextbot/picture");
 const { registerPictureRoutes } = await import("../src/routes/http/picture.js");
 const { default: Fastify } = await import("fastify");
 
-type PictureKit = import("@private-ai-agent/picture").PictureKit;
+type PictureKit = import("@nextbot/picture").PictureKit;
 
 // ────────────────────────────────────────────────────────────
 // 夹具：临时 PictureKit + fastify，预置一张 1x1 PNG

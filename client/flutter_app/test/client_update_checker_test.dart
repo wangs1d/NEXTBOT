@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/client_update_checker.dart";
+import "package:nextbot/core/services/client_update_checker.dart";
 
 void main() {
   group("compareVersions", () {
@@ -37,7 +37,7 @@ void main() {
         "ok": true,
         "latest": "0.2.0",
         "minVersion": "0.1.5",
-        "url": "https://obs.example.com/Private-Agent-Setup-0.2.0.exe",
+        "url": "https://obs.example.com/NextBot-Setup-0.2.0.exe",
         "notes": "修复若干问题",
         "channel": "byok",
       });

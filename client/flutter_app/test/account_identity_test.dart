@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/config/api_config.dart";
+import "package:nextbot/core/config/api_config.dart";
 
 /// 登录身份覆盖与归一化：邮箱登录后全链身份=登录邮箱（按账号隔离），
 /// 退出登录回落编译期默认；同一邮箱大小写不同写法归一成同一身份。

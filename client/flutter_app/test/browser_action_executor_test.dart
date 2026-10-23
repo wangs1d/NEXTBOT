@@ -3,9 +3,9 @@ import "dart:typed_data";
 
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/browser/browser_action_executor.dart";
-import "package:private_ai_agent/core/browser/browser_driver.dart";
-import "package:private_ai_agent/core/browser/shared_browser_protocol.dart"
+import "package:nextbot/core/browser/browser_action_executor.dart";
+import "package:nextbot/core/browser/browser_driver.dart";
+import "package:nextbot/core/browser/shared_browser_protocol.dart"
     as proto;
 
 /// 按 `SB.<fn>(...)` 调用名分发返回值的假驱动（不依赖任何引擎）。

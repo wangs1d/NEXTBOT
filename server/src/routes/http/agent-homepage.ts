@@ -18,7 +18,7 @@ import {
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
 import type { AgentAccountService } from "../../services/agent-account-service.js";
 import type { AgentActivityStore } from "../../proactivity/activity-store.js";
-import type { SocialFeedService } from "@private-ai-agent/agent-world";
+import type { SocialFeedService } from "@nextbot/agent-world";
 import { getUserPreferences } from "./user-preferences.js";
 import {
   applyAgentHomepagePatch,

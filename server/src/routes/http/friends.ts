@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { FriendRequestRecord, FriendService } from "../../services/friend-service.js";
 import type { AgentAccountRecord, AgentAccountService } from "../../services/agent-account-service.js";
 import { AGENT_NUMBER_PATTERN } from "../../services/agent-account-service.js";

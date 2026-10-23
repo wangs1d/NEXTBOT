@@ -7,8 +7,8 @@ import "dart:convert";
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
-import "package:private_ai_agent/core/services/schedule_api_client.dart";
-import "package:private_ai_agent/mobile_ui/mobile_schedule_page.dart";
+import "package:nextbot/core/services/schedule_api_client.dart";
+import "package:nextbot/mobile_ui/mobile_schedule_page.dart";
 
 /// 假 http client：/schedule/tasks 返回样例任务。
 class _MockScheduleHttp extends http.BaseClient {

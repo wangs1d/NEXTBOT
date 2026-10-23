@@ -16,9 +16,9 @@ import "dart:io" show File;
 
 import "package:flutter_test/flutter_test.dart";
 import "package:integration_test/integration_test.dart";
-import "package:private_ai_agent/core/services/connected_call_launcher.dart";
-import "package:private_ai_agent/core/services/incoming_call_launcher.dart";
-import "package:private_ai_agent/core/services/outgoing_call_launcher.dart";
+import "package:nextbot/core/services/connected_call_launcher.dart";
+import "package:nextbot/core/services/incoming_call_launcher.dart";
+import "package:nextbot/core/services/outgoing_call_launcher.dart";
 
 const String _tmp = r"C:\Users\Administrator\AppData\Local\Temp";
 

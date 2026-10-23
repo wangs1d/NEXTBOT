@@ -11,8 +11,11 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
-const TASK_NAME = "PrivateAgentServer";
-const RUN_VALUE_NAME = "PrivateAgentServer";
+const TASK_NAME = "NextbotServer";
+const RUN_VALUE_NAME = "NextbotServer";
+// 旧版注册名（2026-10-23 前），残留一并清理
+const LEGACY_TASK_NAME = "PrivateAgentServer";
+const LEGACY_RUN_VALUE_NAME = "PrivateAgentServer";
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const PIDS_FILE = path.join(ROOT, "logs", "autostart", "pids.json");
 
@@ -73,5 +76,13 @@ if (regDel.status === 0) console.log("✓ 已删除 Run 键");
 
 if (del.status !== 0 && regDel.status !== 0) {
   console.log("未发现已注册的开机自启（计划任务与 Run 键均不存在）。");
+}
+
+// 4. 旧版注册名残留清理（静默）
+spawnSync("schtasks.exe", ["/end", "/tn", LEGACY_TASK_NAME], { windowsHide: true, stdio: "ignore" });
+const legacyDel = spawnSync("schtasks.exe", ["/delete", "/tn", LEGACY_TASK_NAME, "/f"], { windowsHide: true, stdio: "ignore" });
+const legacyRegDel = spawnSync("reg.exe", ["delete", RUN_KEY, "/v", LEGACY_RUN_VALUE_NAME, "/f"], { windowsHide: true, stdio: "ignore" });
+if (legacyDel.status === 0 || legacyRegDel.status === 0) {
+  console.log(`✓ 已清理旧版自启残留「${LEGACY_TASK_NAME}」`);
 }
 console.log("完成。服务端此后不再随登录自启；如服务仍在运行，为手动启动的实例，不受影响。");

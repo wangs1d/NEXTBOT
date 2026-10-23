@@ -19,6 +19,7 @@
  * 写操作与失败调用不计数；桥工具/元工具/obs_recall 永不晋升。
  */
 
+import { getDataDir } from "../../config/data-dir.js";
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 
@@ -61,7 +62,7 @@ function isPersistenceDisabled(): boolean {
 
 function resolveStatePath(): string {
   const override = process.env[STATE_PATH_ENV]?.trim();
-  return override ? resolve(override) : resolve(process.cwd(), "data", "tool-promotion-state.json");
+  return override ? resolve(override) : resolve(getDataDir(), "tool-promotion-state.json");
 }
 
 let loadAttempted = false;

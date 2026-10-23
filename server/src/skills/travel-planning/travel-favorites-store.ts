@@ -6,6 +6,7 @@
  * data/travel-favorites.json；travel.plan-itinerary 排序时对命中收藏键
  * （type:name）的 POI 加权（C5：用户收藏的地点在后续规划中优先排入）。
  */
+import { getDataDir } from "../../config/data-dir.js";
 import fs from "fs";
 import path from "path";
 
@@ -18,7 +19,7 @@ class TravelFavoritesStore {
   constructor() {
     this.file = path.resolve(
       process.env.TRAVEL_FAVORITES_FILE ||
-        path.join(process.cwd(), "data", "travel-favorites.json"),
+        path.join(getDataDir(), "travel-favorites.json"),
     );
   }
 

@@ -1,5 +1,5 @@
 /**
- * @private-ai-agent/agent-protocol
+ * @nextbot/agent-protocol
  *
  * Agent 系统的正式线缆契约（wire contract）：外壳（shell）、gateway、runtime
  * 三方共用的事件信封、载荷类型、chat turn 入参 schema 与统一错误码。

@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/services/daily_briefing_card_model.dart";
+import "package:nextbot/core/services/daily_briefing_card_model.dart";
 
 void main() {
   final DateTime morning = DateTime(2026, 9, 10, 8, 47); // 周四

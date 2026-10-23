@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "crypto";
 import { lookup } from "dns/promises";
 import { mkdir, readFile, writeFile } from "fs/promises";
@@ -368,7 +369,7 @@ export class ScheduleTaskService {
     this.persistPathValue =
       options.persistPath?.trim() ||
       process.env.SCHEDULE_TASKS_FILE?.trim() ||
-      join(process.cwd(), "data", "schedule-tasks.json");
+      join(getDataDir(), "schedule-tasks.json");
   }
 
   /** 当前时间（统一时间源，禁止在本类里直接使用 Date.now()）。 */

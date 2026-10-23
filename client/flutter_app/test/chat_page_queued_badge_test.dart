@@ -1,8 +1,8 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/chat_models.dart";
-import "package:private_ai_agent/features/chat/chat_page.dart";
+import "package:nextbot/core/models/chat_models.dart";
+import "package:nextbot/features/chat/chat_page.dart";
 
 ChatMessage _user(String id, String text) => ChatMessage(
       messageId: id,

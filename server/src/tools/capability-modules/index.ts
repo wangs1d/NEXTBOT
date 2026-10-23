@@ -144,7 +144,7 @@ import {
   PICTURE_INTENT_RULES,
   registerPictureModuleTools,
 } from "./picture/index.js";
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 import { buildGoalPlanningModule } from "./goal-planning/index.js";
 import { buildTaskPlanModule } from "./task-plan/index.js";
 import { buildMemoryGovernanceModule } from "./memory-governance/index.js";

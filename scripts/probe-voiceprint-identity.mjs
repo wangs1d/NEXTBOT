@@ -13,7 +13,7 @@
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 
-const require = createRequire("E:/ws-project/Private-Agent/server/package.json");
+const require = createRequire("E:/ws-project/NextBot/server/package.json");
 const WebSocket = require("ws");
 
 const BASE = "http://127.0.0.1:3000";
@@ -23,7 +23,7 @@ const ACTOR_B = "probe-vp-user-b";
 
 // ── .env 里抓 MINIMAX_API_KEY（探针自给自足，不污染进程环境） ──
 function loadApiKey() {
-  const env = readFileSync("E:/ws-project/Private-Agent/server/.env", "utf8");
+  const env = readFileSync("E:/ws-project/NextBot/server/.env", "utf8");
   const m = env.match(/^MINIMAX_API_KEY=(.+)$/m);
   if (!m) throw new Error("server/.env 缺少 MINIMAX_API_KEY");
   return m[1].trim();

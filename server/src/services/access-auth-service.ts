@@ -19,6 +19,7 @@
  *  - bootstrap：token 库为空且鉴权开启时，允许免鉴权签发首台设备的绑定码，
  *    并在启动时向控制台打印一枚引导码（wire 在 create-app-services 装配层）
  */
+import { getDataDir } from "../config/data-dir.js";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "path";
 
@@ -67,7 +68,7 @@ export class AccessAuthService {
   private lastSeenFlushTimer: NodeJS.Timeout | null = null;
 
   private get persistPath(): string {
-    return process.env.ACCESS_TOKENS_FILE ?? join(process.cwd(), "data", "access-tokens.json");
+    return process.env.ACCESS_TOKENS_FILE ?? join(getDataDir(), "access-tokens.json");
   }
 
   /** 启动时从 data/access-tokens.json 恢复（文件缺失 = 尚无绑定设备，进入 bootstrap）。 */

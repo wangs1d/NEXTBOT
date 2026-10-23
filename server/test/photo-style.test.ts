@@ -21,9 +21,9 @@ const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "photo-style-test-"));
 const { applyPhotoStyle, PHOTO_STYLES } = await import("../src/services/photo-style-service.js");
 const { createPictureStylizeHandler } = await import("../src/tools/capability-modules/photo/handlers.js");
 const { extractMediaCards } = await import("../src/services/tool-result-processor.js");
-const { createPictureKit } = await import("@private-ai-agent/picture");
+const { createPictureKit } = await import("@nextbot/picture");
 
-type PictureKit = import("@private-ai-agent/picture").PictureKit;
+type PictureKit = import("@nextbot/picture").PictureKit;
 
 /** 64x48 内容确定的测试图（渐变，避免 sha256 撞车） */
 async function samplePhoto(seed: number): Promise<Buffer> {

@@ -2,7 +2,7 @@ import "dart:convert";
 
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
 
 /// AgentResultParser：多卡片块场景下的选卡与剥离规则。
 ///

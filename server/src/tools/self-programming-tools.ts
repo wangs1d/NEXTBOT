@@ -73,6 +73,7 @@
  * ```
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, writeFile, readFile, readdir, rm } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -153,7 +154,7 @@ export function registerSelfProgrammingTools(
       }
       
       // 保存技能文件
-      const skillDir = join(process.cwd(), "data", "community-skills", skillName);
+      const skillDir = join(getDataDir(), "community-skills", skillName);
       await mkdir(skillDir, { recursive: true });
       
       // 写入 skill.json
@@ -218,7 +219,7 @@ export function registerSelfProgrammingTools(
         return { ok: false, error: `技能不存在：${skillName}` };
       }
       
-      const skillDir = join(process.cwd(), "data", "community-skills", skillName);
+      const skillDir = join(getDataDir(), "community-skills", skillName);
       
       // 更新 handler 代码
       if (handlerCode) {
@@ -290,7 +291,7 @@ export function registerSelfProgrammingTools(
         };
       }
       
-      const skillDir = join(process.cwd(), "data", "community-skills", skillName);
+      const skillDir = join(getDataDir(), "community-skills", skillName);
       
       // 卸载技能
       skillManager.uninstall(skillName);

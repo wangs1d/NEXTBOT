@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
@@ -24,7 +25,7 @@ export class WeatherPrefsService {
   private readonly bySession = new Map<string, WeatherPrefsRecord>();
 
   private get persistPath(): string {
-    return process.env.WEATHER_PREFS_FILE ?? join(process.cwd(), "data", "weather-prefs.json");
+    return process.env.WEATHER_PREFS_FILE ?? join(getDataDir(), "weather-prefs.json");
   }
 
   async load(): Promise<void> {

@@ -11,14 +11,14 @@ import "dart:io";
 
 import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
-import "package:private_ai_agent/core/services/model_api_tester.dart";
-import "package:private_ai_agent/features/model_config/model_provider_catalog.dart";
+import "package:nextbot/core/services/model_api_tester.dart";
+import "package:nextbot/features/model_config/model_provider_catalog.dart";
 
 const String _runtimeBase = "http://127.0.0.1:3000";
 
 Map<String, String> _readLocalModelConfig() {
   final Map<String, String> env = <String, String>{};
-  for (final String line in File("E:/ws-project/Private-Agent/server/.env.local").readAsLinesSync()) {
+  for (final String line in File("E:/ws-project/NextBot/server/.env.local").readAsLinesSync()) {
     final int eq = line.indexOf("=");
     if (eq > 0) env[line.substring(0, eq).trim()] = line.substring(eq + 1).trim();
   }

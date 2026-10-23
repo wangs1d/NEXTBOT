@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 
 import { routeDisplayEffect } from "../src/services/display-effect-router.js";
 import { classifyRenderHint } from "../src/services/render-hint-service.js";
-import { DISPLAY_EFFECT_TYPES } from "@private-ai-agent/agent-protocol";
+import { DISPLAY_EFFECT_TYPES } from "@nextbot/agent-protocol";
 import { CARD_CORPUS, HINT_CORPUS } from "./fixtures/display-routing-corpus.js";
 
 test("contract drift: corpus expectations only use contracted display effect types", () => {

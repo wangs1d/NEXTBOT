@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { join, extname } from "node:path";
 
-const ROOT = "E:/ws-project/Private-Agent/client/flutter_app/assets/agent_avatars";
+const ROOT = "E:/ws-project/NextBot/client/flutter_app/assets/agent_avatars";
 const MIME = { ".png": "image/png", ".html": "text/html" };
 const SITE = `<!doctype html><html><head><meta charset="utf-8"><style>
 body{background:#1a1c1f;font-family:sans-serif;color:#ccc;display:flex;gap:40px;align-items:center;justify-content:center;height:100vh;margin:0}

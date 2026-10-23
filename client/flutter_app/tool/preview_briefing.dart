@@ -7,7 +7,7 @@
 import "dart:convert";
 import "dart:io";
 
-import "package:private_ai_agent/core/services/daily_briefing_card_render.dart";
+import "package:nextbot/core/services/daily_briefing_card_render.dart";
 
 /// 简报窗口载荷（与 daily_briefing_window.dart 的 DailyBriefingWindowPayload 同结构）。
 class _Payload {

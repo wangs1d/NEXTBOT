@@ -1,4 +1,4 @@
-import type { WorldService } from "@private-ai-agent/agent-world";
+import type { WorldService } from "@nextbot/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { getMemoryComponents } from "../agentic-memory/index.js";

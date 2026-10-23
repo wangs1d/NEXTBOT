@@ -1,4 +1,4 @@
-import type { StateChangeEvent } from "@private-ai-agent/agent-world";
+import type { StateChangeEvent } from "@nextbot/agent-world";
 
 export type ProactiveRuleHint = {
   priority?: number;

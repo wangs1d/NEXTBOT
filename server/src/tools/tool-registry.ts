@@ -1,5 +1,5 @@
-import type { WorldService } from "@private-ai-agent/agent-world";
-import { UnifiedErrorCode } from "@private-ai-agent/agent-protocol";
+import type { WorldService } from "@nextbot/agent-world";
+import { UnifiedErrorCode } from "@nextbot/agent-protocol";
 import {
   getToolMetadata as inferToolMetadata,
   type ToolMetadata,

@@ -58,7 +58,7 @@ if (toStart.length === 0) {
   process.exit(0);
 }
 
-await runAndWait(() => spawnNpm(["run", "build", "-w", "@private-ai-agent/agent-world"]));
+await runAndWait(() => spawnNpm(["run", "build", "-w", "@nextbot/agent-world"]));
 
 toStart = await filterAvailable(toStart);
 

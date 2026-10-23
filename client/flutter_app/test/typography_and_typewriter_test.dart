@@ -3,9 +3,9 @@ import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 import "package:highlight/highlight.dart" as hl;
 
-import "package:private_ai_agent/core/theme/app_typography.dart";
-import "package:private_ai_agent/features/chat/code_highlight.dart";
-import "package:private_ai_agent/features/chat/typewriter_reveal.dart";
+import "package:nextbot/core/theme/app_typography.dart";
+import "package:nextbot/features/chat/code_highlight.dart";
+import "package:nextbot/features/chat/typewriter_reveal.dart";
 
 void main() {
   group("TypewriterReveal", () {

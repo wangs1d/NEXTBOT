@@ -13,7 +13,7 @@ function deriveKey(): Buffer {
     process.env.BROWSER_SESSION_SECRET?.trim() ||
     process.env.SESSION_SECRET?.trim() ||
     "dev-insecure-wellness-key-change-me";
-  return scryptSync(secret, "private-ai-agent-wellness-v1", 32);
+  return scryptSync(secret, "nextbot-wellness-v1", 32);
 }
 
 /** 加密任意 JSON（iv + tag + ciphertext，base64）。 */

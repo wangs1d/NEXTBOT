@@ -1,6 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { createReadStream, existsSync } from "node:fs";
-import type { PictureKit, ImageAsset, ThumbnailSize } from "@private-ai-agent/picture";
+import type { PictureKit, ImageAsset, ThumbnailSize } from "@nextbot/picture";
 
 import { PictureTrashService } from "../../services/picture-trash-service.js";
 

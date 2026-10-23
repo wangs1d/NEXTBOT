@@ -6,9 +6,9 @@ import "package:flutter_test/flutter_test.dart";
 import "package:http/http.dart" as http;
 import "package:http/testing.dart";
 
-import "package:private_ai_agent/core/config/api_config.dart";
-import "package:private_ai_agent/core/presentation/user_avatar.dart";
-import "package:private_ai_agent/core/services/user_avatar_api.dart";
+import "package:nextbot/core/config/api_config.dart";
+import "package:nextbot/core/presentation/user_avatar.dart";
+import "package:nextbot/core/services/user_avatar_api.dart";
 
 /// 用户头像能力测试（客户端侧）：
 /// - [UserAvatarApi.resolveUrl] 相对路径 → 本端绝对 URL 的拼装规则

@@ -186,7 +186,7 @@ export class MeituanService {
           express_type: req.expressType || 1,
           tip_amount: req.tipAmount || 0,
           remark: req.remark || "",
-          order_source: req.orderSource || "private-ai-agent",
+          order_source: req.orderSource || "nextbot",
         }
       );
 

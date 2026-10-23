@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -207,7 +208,7 @@ const ROUTE_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 // 10min 熔断，期间用户看到的全是直线降级。路线几何基本不变，取到一次就该
 // 永久用——落盘后重启/断网/熔断都不再退化直线。
 const ROUTE_DISK_DIR = resolve(
-  process.env.TRAVEL_ROUTE_CACHE_DIR || join(process.cwd(), "data", "route-cache"),
+  process.env.TRAVEL_ROUTE_CACHE_DIR || join(getDataDir(), "route-cache"),
 );
 /** 磁盘新鲜期：路网月级变化，30 天足够；过期先回旧数据再后台刷新（SWR） */
 const ROUTE_DISK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
@@ -727,7 +728,7 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
       : encodeURIComponent(name);
     reply.header("Cache-Control", "no-store");
     return reply.send({
-      url: `https://uri.amap.com/navigation?to=${to}&mode=${mode}&policy=&src=PrivateAgent&coordinate=gaode&callnative=0`,
+      url: `https://uri.amap.com/navigation?to=${to}&mode=${mode}&policy=&src=Nextbot&coordinate=gaode&callnative=0`,
       resolved: Boolean(coord),
     });
   });
@@ -899,7 +900,7 @@ const poiCache = new Map<string, { at: number; data: PoiLiveDetails }>();
 /** 缓存 7 天（照片/电话/官网低频变化）+ 磁盘持久化：进程重启不再全量重抓 */
 const POI_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const POI_DISK_FILE = resolve(
-  process.env.TRAVEL_POI_CACHE_FILE || join(process.cwd(), "data", "travel-cache", "poi-live-cache.json"),
+  process.env.TRAVEL_POI_CACHE_FILE || join(getDataDir(), "travel-cache", "poi-live-cache.json"),
 );
 
 function loadPoiCacheDisk(): void {

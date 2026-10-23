@@ -9,6 +9,7 @@
  * 5. POI 级覆盖 - data/travel-pricing-overrides.json 支持按 POI 名称/正则覆盖基价（热加载）
  */
 
+import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
 
@@ -325,7 +326,7 @@ export class PricingService {
 
   /** 热加载 data/travel-pricing-overrides.json（mtime 变化才重读） */
   private _loadOverrides(): PriceOverride[] {
-    const file = path.join(process.cwd(), 'data', 'travel-pricing-overrides.json');
+    const file = path.join(getDataDir(), 'travel-pricing-overrides.json');
     try {
       const st = fs.statSync(file);
       if (st.mtimeMs !== this.overrideFileMtimeMs) {

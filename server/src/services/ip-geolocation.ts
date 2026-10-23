@@ -11,6 +11,7 @@
  *  - 任何失败返回 null（调用方省略天气块，不阻塞简报）。
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 
@@ -36,7 +37,7 @@ const REQUEST_TIMEOUT_MS = 4_000;
 function cachePath(): string {
   return (
     process.env.IP_LOCATION_CACHE_FILE ??
-    join(process.cwd(), "data", "ip-location-cache.json")
+    join(getDataDir(), "ip-location-cache.json")
   );
 }
 

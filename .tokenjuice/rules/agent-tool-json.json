@@ -1,7 +1,7 @@
 {
-  "id": "private-ai-agent-tool-json",
+  "id": "nextbot-tool-json",
   "family": "generic-json",
-  "description": "Compact large JSON tool results from Private AI Agent registry tools",
+  "description": "Compact large JSON tool results from Nextbot registry tools",
   "priority": 50,
   "match": {
     "toolNames": [

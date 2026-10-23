@@ -10,7 +10,7 @@
 #include <stdio.h>
 #include <vector>
 
-#include "E:\ws-project\Private-Agent\client\flutter_app\windows\runner\embedded_font.h"
+#include "E:\ws-project\NextBot\client\flutter_app\windows\runner\embedded_font.h"
 
 #pragma comment(lib, "gdiplus.lib")
 
@@ -132,7 +132,7 @@ int main() {
     if (wcscmp(infos[i].MimeType, L"image/png") == 0) { png = infos[i].Clsid; }
   }
   Gdiplus::Bitmap bitmap(W, H, 4 * W, PixelFormat32bppARGB, (BYTE*)bits);
-  bitmap.Save(L"E:\\ws-project\\Private-Agent\\build\\island-font-ab.png", &png);
+  bitmap.Save(L"E:\\ws-project\\NextBot\\build\\island-font-ab.png", &png);
   printf("[harness] stage: saved\n"); fflush(stdout);
 
   SelectObject(mem, old_bmp);

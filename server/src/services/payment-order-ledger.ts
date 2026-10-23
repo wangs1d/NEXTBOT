@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -43,7 +44,7 @@ export type LedgerModeStats = {
 export function paymentLedgerDbPath(): string {
   return (
     process.env.PAYMENT_LEDGER_DB?.trim() ||
-    join(process.cwd(), "data", "payment", "orders.db")
+    join(getDataDir(), "payment", "orders.db")
   );
 }
 

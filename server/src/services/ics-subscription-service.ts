@@ -30,6 +30,7 @@
  *   ICS_SUB_LOOKAHEAD_DAYS 向前展开天数，默认 35，范围 [7, 180]
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { join } from "node:path";
 
 import { readJson, writeJson } from "../proactivity/persist-file.js";
@@ -584,8 +585,8 @@ export class IcsSubscriptionService {
     this.config = deps.config;
     this.tasks = deps.tasks;
     this.notify = deps.notify ?? null;
-    this.statePath = deps.statePath ?? join(process.cwd(), "data", "ics-sub", "state.json");
-    this.feedsPath = deps.feedsPath ?? join(process.cwd(), "data", "ics-sub", "feeds.json");
+    this.statePath = deps.statePath ?? join(getDataDir(), "ics-sub", "state.json");
+    this.feedsPath = deps.feedsPath ?? join(getDataDir(), "ics-sub", "feeds.json");
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.now = deps.now ?? (() => new Date());
     this.state = readJson<IcsWatchPersistedState>(this.statePath, { version: 1, feeds: {} });

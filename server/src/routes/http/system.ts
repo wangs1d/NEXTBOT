@@ -4,7 +4,7 @@ import {
   UNIFIED_PROTOCOL_VERSION,
   UnifiedClientEventType,
   UnifiedServerEventType,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import { PROTOCOL_UNIFIED_TOOL_NAMES } from "../../tools/protocol-unified-tools.js";
 import type { HttpRouteDeps } from "./types.js";
 import type { BrainCenter } from "../../brain/brain-center.js";

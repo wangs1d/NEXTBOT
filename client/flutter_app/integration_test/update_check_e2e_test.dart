@@ -27,12 +27,12 @@ import "package:flutter/scheduler.dart" show SchedulerBinding, TimingsCallback;
 import "package:flutter_test/flutter_test.dart";
 import "package:integration_test/integration_test.dart";
 import "package:package_info_plus/package_info_plus.dart";
-import "package:private_ai_agent/core/presentation/glass_notify.dart";
-import "package:private_ai_agent/core/presentation/update_result_card.dart";
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/features/chat/sidebar_user_menu.dart"
+import "package:nextbot/core/presentation/glass_notify.dart";
+import "package:nextbot/core/presentation/update_result_card.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/features/chat/sidebar_user_menu.dart"
     show ThemeChoice;
-import "package:private_ai_agent/widgets/app_sidebar.dart";
+import "package:nextbot/widgets/app_sidebar.dart";
 
 const String _statePath =
     r"C:\Users\Administrator\AppData\Local\Temp\manifest_e2e_state.json";

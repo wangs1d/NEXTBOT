@@ -1,8 +1,8 @@
 import "package:flutter/material.dart";
 import "package:flutter/scheduler.dart";
 
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/features/chat/sidebar_user_menu.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/features/chat/sidebar_user_menu.dart";
 
 /// 侧栏 hover 延后到下一帧，避免 AnimatedCrossFade 切换时触发
 /// mouse_tracker 断言失败

@@ -1,4 +1,4 @@
-#!E:\ws-project\Private-Agent\server\tools\mcp\yby6-video\Scripts\python.exe
+#!E:\ws-project\NextBot\server\tools\mcp\yby6-video\Scripts\python.exe
 
 import sys
 import json

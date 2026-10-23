@@ -2,8 +2,8 @@
 //
 // 用法（在 server 目录下运行，data/admin-auth.db 按 cwd 解析）：
 //   本地:  node scripts/admin-set-password.mjs
-//   ECS:   该脚本随 deploy-ecs.ps1 的 tarball 分发到 /opt/private-agent/server/scripts，
-//          ssh 上去后: cd /opt/private-agent/server && node scripts/admin-set-password.mjs
+//   ECS:   该脚本随 deploy-ecs.ps1 的 tarball 分发到 /opt/nextbot/server/scripts，
+//          ssh 上去后: cd /opt/nextbot/server && node scripts/admin-set-password.mjs
 //   非交互: --user <账号> --password <新密码>（会留在 shell 历史，谨慎使用）
 //
 // 重置会清空全部会话（所有已登录立即失效）。scrypt 参数与

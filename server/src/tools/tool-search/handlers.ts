@@ -11,6 +11,7 @@ import { slimJsonSchema, firstSentence } from "./schema-slim.js";
 import { domainsForTool, resolveDomainDef } from "./tool-category.js";
 import { getAdaptiveSearchRouting } from "./adaptive-catalog.js";
 import { getToolSearchConfig } from "./env.js";
+import { getDataDir } from "../../config/data-dir.js";
 import { getQueryEmbedding, getQueryEmbeddingBounded, peekQueryEmbedding } from "./tool-embedding.js";
 import { sharedHistoryStore, type HistoryScoreStore } from "./retrieval/history-score.js";
 import { ResourceType } from "./registry/models.js";
@@ -513,7 +514,7 @@ function recordRecallMissSample(
   chosen: string,
   matches: string[],
 ): void {
-  const base = process.env.PA_DATA_DIR?.trim() || "data";
+  const base = process.env.PA_DATA_DIR?.trim() || getDataDir();
   const path = join(base, "tool-recall-miss-samples.ndjson");
   const line =
     JSON.stringify({

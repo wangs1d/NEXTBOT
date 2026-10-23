@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { getDataDir } from "../config/data-dir.js";
 
 /**
  * LLM 预算闸门（BudgetGuard，2026-09-19 P1-2）。
@@ -204,7 +205,7 @@ export function resetBudgetGuardForTest(): void {
 /** 重启后尽力恢复当日/近期累计（读审计 NDJSON 的最后 5000 行，丢了从头计）。 */
 export function restoreBudgetFromAuditFile(): void {
   try {
-    const base = process.env.PA_DATA_DIR?.trim() || "data";
+    const base = process.env.PA_DATA_DIR?.trim() || getDataDir();
     const lines = readFileSync(join(base, "llm-token-audit.ndjson"), "utf8")
       .trim()
       .split("\n")

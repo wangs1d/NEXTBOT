@@ -14,7 +14,7 @@
  * 全部 fire-and-forget：任何消费方失败都不影响位置协调器主链路。
  */
 
-import type { ClientLocationWire } from "@private-ai-agent/agent-protocol";
+import type { ClientLocationWire } from "@nextbot/agent-protocol";
 
 import type { GeofenceService } from "./geofence-service.js";
 import type { LocationHistoryService, LocationSampleSource } from "./location-history-service.js";

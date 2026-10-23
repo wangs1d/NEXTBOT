@@ -14,9 +14,9 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/schedule_models.dart";
-import "package:private_ai_agent/core/theme/app_theme.dart";
-import "package:private_ai_agent/features/chat/right_side_panel.dart";
+import "package:nextbot/core/models/schedule_models.dart";
+import "package:nextbot/core/theme/app_theme.dart";
+import "package:nextbot/features/chat/right_side_panel.dart";
 
 /// 加载 MiSans 正文与 MaterialIcons 图标字体（测试环境默认不加载,
 /// 否则图标渲染为豆腐块）。

@@ -7,7 +7,7 @@
 
 /// 窗口位置持久化存储（INI 文件，header-only）。
 ///
-/// 文件路径：%APPDATA%\PrivateAgent\window_positions.ini
+/// 文件路径：%APPDATA%\Nextbot\window_positions.ini
 /// 每个 section 对应一个窗口，保存 x / y / width / height。
 ///
 /// 用法：
@@ -15,13 +15,23 @@
 ///   window_position_store::SaveRect(L"schedule_floating", rc);
 namespace window_position_store {
 
-/// 获取 INI 文件完整路径（确保目录存在）。
+/// 获取 INI 文件完整路径（确保目录存在，并把旧版目录的文件一次性搬过来）。
 inline std::wstring GetIniPath() {
   wchar_t path[MAX_PATH] = {};
   if (SUCCEEDED(SHGetFolderPathW(nullptr, CSIDL_APPDATA, nullptr, 0, path))) {
-    std::wstring dir = std::wstring(path) + L"\\PrivateAgent";
+    std::wstring dir = std::wstring(path) + L"\\Nextbot";
     CreateDirectoryW(dir.c_str(), nullptr);
-    return dir + L"\\window_positions.ini";
+    std::wstring ini = dir + L"\\window_positions.ini";
+    // 旧版目录一次性迁移（2026-10-23 前落 %APPDATA%\PrivateAgent）：新文件缺失
+    // 且旧文件存在 → 改名搬入；失败静默（后果只是窗口位置回到默认）。
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+      std::wstring legacy =
+          std::wstring(path) + L"\\PrivateAgent\\window_positions.ini";
+      if (GetFileAttributesW(legacy.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        MoveFileExW(legacy.c_str(), ini.c_str(), MOVEFILE_REPLACE_EXISTING);
+      }
+    }
+    return ini;
   }
   return L"window_positions.ini";
 }

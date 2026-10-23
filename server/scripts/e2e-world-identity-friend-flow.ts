@@ -26,7 +26,7 @@ const dir = await mkdtemp(join(tmpdir(), "world-identity-e2e-"));
 process.env.AGENT_ACCOUNTS_FILE = join(dir, "agent-accounts.json");
 process.env.WORLD_STATE_FILE = join(dir, "world-state.json");
 
-const { WorldService } = await import("@private-ai-agent/agent-world");
+const { WorldService } = await import("@nextbot/agent-world");
 const { AgentAccountService } = await import("../src/services/agent-account-service.js");
 const { AgentRelayService } = await import("../src/services/agent-relay-service.js");
 const { FriendService } = await import("../src/services/friend-service.js");

@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { appendFile, readFile, rename, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -82,7 +83,7 @@ export type AdminAuditEntry = {
 };
 
 function auditFilePath(): string {
-  return join(process.cwd(), "data", "admin-audit.jsonl");
+  return join(getDataDir(), "admin-audit.jsonl");
 }
 
 /** 追加一条管理操作审计（写失败只记错误日志，不影响主流程）。 */

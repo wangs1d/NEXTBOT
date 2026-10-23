@@ -23,6 +23,7 @@
  *  - 结构：{ deviceId -> { ownerUserId, kind, name, boundAt } }
  *  - 同一 deviceId 重复配对会覆盖（解绑后再绑）
  */
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
@@ -55,7 +56,7 @@ export class DevicePairingService {
   private readonly ownerIndex = new Map<string, Set<string>>();
 
   private get persistPath(): string {
-    return process.env.DEVICE_PAIRING_FILE ?? join(process.cwd(), "data", "device-pairing.json");
+    return process.env.DEVICE_PAIRING_FILE ?? join(getDataDir(), "device-pairing.json");
   }
 
   async load(): Promise<void> {

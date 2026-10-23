@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import type OpenAI from "openai";
 import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -17,7 +18,7 @@ import type {
   ChatCompletionTool,
 } from "openai/resources/chat/completions";
 
-import { AGENT_WORLD_CHAT_TOOLS, filterSocialChatTools } from "@private-ai-agent/agent-world";
+import { AGENT_WORLD_CHAT_TOOLS, filterSocialChatTools } from "@nextbot/agent-world";
 import { isAgentWorldSocialEnabled } from "../config/env.js";
 import {
   AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
@@ -69,7 +70,7 @@ import { stripAllTimestampFrameLines } from "../utils/timestamp-frame.js";
 function promptTraceEnabled(): boolean {
   if (process.env.AGENT_PROMPT_TRACE === "1") return true;
   try {
-    return existsSync(join(process.cwd(), "data", "prompt-trace.flag"));
+    return existsSync(join(getDataDir(), "prompt-trace.flag"));
   } catch {
     return false;
   }
@@ -161,7 +162,7 @@ import { executeWithToolLimit } from "../services/concurrency-limiter.js";
 import {
   classifyToolFailure,
   UnifiedErrorCode,
-} from "@private-ai-agent/agent-protocol";
+} from "@nextbot/agent-protocol";
 import {
   BOOKKEEPING_TOOL_NAMES,
   evaluateAndSelectStrategy,

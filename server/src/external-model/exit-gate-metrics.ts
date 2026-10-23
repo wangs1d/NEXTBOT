@@ -11,6 +11,7 @@
  *
  * 无依赖叶子模块：tool-loop 可安全 import，不成环。
  */
+import { getDataDir } from "../config/data-dir.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -21,8 +22,7 @@ let turnsFinished = 0;
 let startedAt = new Date().toISOString();
 
 const DATA_FILE = path.resolve(
-  process.cwd(),
-  "data/metrics/exit-gate-metrics.json",
+  getDataDir(), "metrics/exit-gate-metrics.json",
 );
 const KEEP_DAYS = 30;
 const FLUSH_EVERY = 20;

@@ -1,7 +1,7 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/features/mailbox/inbox_message_box.dart";
+import "package:nextbot/features/mailbox/inbox_message_box.dart";
 
 void main() {
   testWidgets("站内信消息框浮层：锚定渲染不溢出，头部可见", (WidgetTester tester) async {

@@ -1,4 +1,4 @@
-import { reconcileWorldA2aEscrows, restorePurchasedSkillsFromWorldState } from "@private-ai-agent/agent-world";
+import { reconcileWorldA2aEscrows, restorePurchasedSkillsFromWorldState } from "@nextbot/agent-world";
 import type { AppServices } from "./types.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isAgentWorldSocialEnabled } from "../config/env.js";

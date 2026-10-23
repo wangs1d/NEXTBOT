@@ -24,7 +24,7 @@ import type {
   SkillMetadataValidatorLike,
   SocialFeedService,
   WorldService,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import type { AgentMemorySyncService } from "../../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../../services/compute-quota-service.js";
 import type { WeatherPrefsService } from "../../services/weather-prefs-service.js";
@@ -33,7 +33,7 @@ import type { TtsService } from "../../services/tts-service.js";
 import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import type { ImageGenerationService } from "../../services/image-generation-service.js";
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";

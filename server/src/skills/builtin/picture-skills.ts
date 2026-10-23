@@ -1,4 +1,4 @@
-import type { PictureKit } from "@private-ai-agent/picture";
+import type { PictureKit } from "@nextbot/picture";
 
 import type { ToolHandler } from "../../tools/tool-registry.js";
 import type { SkillDefinition, SkillHandler } from "../types.js";
@@ -12,7 +12,7 @@ import {
 /**
  * 内置 Skill：图片能力套件（PictureKit）→ skill 库（进程内检索）。
  *
- * 数据源是 `@private-ai-agent/picture` 的 PictureKit（存储根 data/pictures），
+ * 数据源是 `@nextbot/picture` 的 PictureKit（存储根 data/pictures），
  * skill 注册后经 buildSessionSkillChatTools → 延迟工具目录 →
  * 检索进程内化后，skill schema 直接进入进程内延迟目录，
  * 执行时 ToolRegistry 优先走 SkillManager（picture.gallery

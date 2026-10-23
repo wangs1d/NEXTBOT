@@ -2,6 +2,7 @@
  * 智能技能生成工具 - 将 SkillGenerator 集成到 ToolRegistry
  */
 
+import { getDataDir } from "../config/data-dir.js";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { SkillManager } from "../skills/index.js";
@@ -191,7 +192,7 @@ ${description}
       // 读取现有的 handler 代码
       const { readFile } = await import("node:fs/promises");
       const { join } = await import("node:path");
-      const skillDir = join(process.cwd(), "data", "community-skills", skillName);
+      const skillDir = join(getDataDir(), "community-skills", skillName);
       const handlerPath = join(skillDir, "skill.handler.js");
       
       let existingCode: string;

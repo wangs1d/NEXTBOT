@@ -23,7 +23,7 @@ import { reportChatToolDrift } from "../src/tools/chat-tool-drift.js";
 import {
   classifyToolFailure,
   UnifiedErrorCode,
-} from "@private-ai-agent/agent-protocol";
+} from "@nextbot/agent-protocol";
 
 // ---------- 假 LLM client（脚本化 chunk 流） ----------
 

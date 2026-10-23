@@ -18,6 +18,7 @@
  * 回滚开关：PROFILE_WRITE_SCHEDULING=legacy 回到「低信号轮也捎带、无夜间批」的旧行为。
  */
 
+import { getDataDir, resolveDataPath } from "../config/data-dir.js";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -41,7 +42,7 @@ export interface ProfileExtractCheckpoint {
 function defaultCheckpointFile(): string {
   return (
     process.env.PROFILE_EXTRACT_CHECKPOINT_FILE?.trim() ||
-    join(process.cwd(), "data", "profile-extract-checkpoint.json")
+    join(getDataDir(), "profile-extract-checkpoint.json")
   );
 }
 
@@ -90,7 +91,7 @@ export async function readWalTurns(
   opts?: { walDir?: string },
 ): Promise<WalTurnEntry[]> {
   const cfg = getShortTermMemoryConfig();
-  const dir = opts?.walDir ?? join(process.cwd(), cfg.walDir);
+  const dir = opts?.walDir ?? resolveDataPath(cfg.walDir);
   let dayFiles: string[];
   try {
     dayFiles = (await readdir(dir)).filter((f) => /^\d{4}-\d{2}-\d{2}\.jsonl$/.test(f)).sort();

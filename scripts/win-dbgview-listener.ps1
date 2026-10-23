@@ -1,6 +1,6 @@
 # Global OutputDebugString listener (DBWIN protocol).
 # Writes "<pid> <text>" lines to the log file given as -Out, until killed.
-param([string] $Out = 'E:\ws-project\Private-Agent\shots\dbgview.log')
+param([string] $Out = 'E:\ws-project\NextBot\shots\dbgview.log')
 
 $ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'

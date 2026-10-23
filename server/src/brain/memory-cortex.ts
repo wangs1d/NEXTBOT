@@ -1,4 +1,5 @@
 // Agent Brain Center — 记忆皮层（海马体）
+import { getDataDir } from "../config/data-dir.js";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { createHash } from "node:crypto";
@@ -372,7 +373,7 @@ function extractSceneTagsFromMetadata(
 }
 
 /** 多模态媒体存储根目录（相对于 server 工作目录） */
-const MEMORY_MEDIA_ROOT = resolve(process.cwd(), ".memory-media");
+const MEMORY_MEDIA_ROOT = resolve(getDataDir(), "memory-media");
 
 /** 根据 media.kind + mime 推断文件扩展名 */
 function inferMediaExt(media: MemoryMedia): string {
@@ -401,7 +402,7 @@ function inferMediaExt(media: MemoryMedia): string {
 
 /**
  * 持久化多模态媒体到本地文件系统。
- * 路径：.memory-media/<actorId>/<sha256>.<ext>
+ * 路径：<数据目录>/memory-media/<actorId>/<sha256>.<ext>
  * 返回 storageId（文件名，不含路径），供召回时拉取。
  * 写入失败时返回 null（不阻塞记忆主流程，降级为纯文本记忆）。
  */

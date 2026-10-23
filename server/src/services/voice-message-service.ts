@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -30,7 +31,7 @@ export class VoiceMessageService {
 
   constructor(rootDir?: string) {
     // 默认 <server>/data/voice-messages/
-    this.rootDir = resolve(rootDir ?? join(process.cwd(), "data", "voice-messages"));
+    this.rootDir = resolve(rootDir ?? join(getDataDir(), "voice-messages"));
     try {
       mkdirSync(this.rootDir, { recursive: true });
     } catch {

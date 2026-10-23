@@ -1,6 +1,6 @@
 // RRULE Dart 镜像实现的独立验证脚本（dart run scripts/alarm_rrule_smoke.dart）
 //与服务端 test/alarm-clock.test.ts 的用例一一对应，验证双算互验两侧结果一致。
-import "package:private_ai_agent/features/alarm/alarm_models.dart";
+import "package:nextbot/features/alarm/alarm_models.dart";
 
 int failures = 0;
 

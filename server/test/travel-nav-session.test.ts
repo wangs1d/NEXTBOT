@@ -30,7 +30,7 @@ test("amap provider: full leg url with from/to/mode/coordinate/callnative", () =
   assert.ok(url.includes("mode=walk"));
   assert.ok(url.includes("coordinate=gaode"));
   assert.ok(url.includes("callnative=0"));
-  assert.ok(url.includes("src=PrivateAgent"));
+  assert.ok(url.includes("src=Nextbot"));
 });
 
 test("amap provider: no from when origin unknown, name commas sanitized", () => {

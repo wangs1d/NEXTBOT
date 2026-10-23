@@ -11,6 +11,7 @@
  * 兴趣列表（字段结构见 proactivity/interest-watcher.ts），结合 hot-rankings.ts 的
  * 实时热搜聚合做简单 includes 匹配，最多取 3 条；无命中则整体省略该块。
  */
+import { getDataDir } from "../config/data-dir.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -958,7 +959,7 @@ export class MorningBriefingService {
     const path =
       this.deps.interestWatchPath ??
       process.env.INTEREST_WATCH_FILE ??
-      join(process.cwd(), "data", "interest-watch.json");
+      join(getDataDir(), "interest-watch.json");
 
     // 兴趣池文件不存在（用户从未设置兴趣）→ 直接省略，不触发网络请求
     let raw: string;

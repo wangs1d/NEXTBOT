@@ -13,9 +13,9 @@ import "package:flutter/rendering.dart";
 import "package:flutter/painting.dart" show debugNetworkImageHttpClientProvider;
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/utils/agent_result_parser.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart";
-import "package:private_ai_agent/features/chat/travel_plan_models.dart";
+import "package:nextbot/core/utils/agent_result_parser.dart";
+import "package:nextbot/features/chat/agent_result_card.dart";
+import "package:nextbot/features/chat/travel_plan_models.dart";
 
 /// 真实 HttpClient：必须在 main() 里、flutter_test 安装全局 400 mock
 /// （HttpOverrides.global = _MockHttpOverrides）之前创建——之后 new 的
@@ -32,7 +32,7 @@ void main() {
       return;
     }
     final File planFile =
-        File("E:/ws-project/Private-Agent/server/data/travel-plans/plan-1790266331245.json");
+        File("E:/ws-project/NextBot/server/data/travel-plans/plan-1790266331245.json");
     if (!planFile.existsSync()) {
       markTestSkipped("找不到真实行程数据 plan-1790266331245.json");
       return;
@@ -116,7 +116,7 @@ void main() {
     final ByteData? bytes = await tester
         .runAsync<ByteData?>(() => rawImage.toByteData(format: ImageByteFormat.png));
     final File out =
-        File("E:/ws-project/Private-Agent/tmp-card-render-evidence.png");
+        File("E:/ws-project/NextBot/tmp-card-render-evidence.png");
     out.writeAsBytesSync(bytes!.buffer.asUint8List());
     // ignore: avoid_print
     print("evidence saved: ${out.path} (${bytes.lengthInBytes}B)");

@@ -293,7 +293,7 @@ class GatewaySession {
       maxProtocol: 4,
       client: {
         id: "gateway-client",
-        version: "private-ai-agent/0.1",
+        version: "nextbot/0.1",
         platform: process.platform,
         mode: "backend",
       },
@@ -304,7 +304,7 @@ class GatewaySession {
       permissions: {},
       auth,
       locale: "zh-CN",
-      userAgent: "private-ai-agent-server/0.1",
+      userAgent: "nextbot-server/0.1",
     });
 
     if ((res as { type?: string } | null)?.type !== "hello-ok") {

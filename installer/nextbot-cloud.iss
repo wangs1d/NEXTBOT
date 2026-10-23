@@ -1,7 +1,7 @@
 ; Nextbot Cloud（云端连接版）Windows 安装包（Inno Setup 6）
 ; 打包入口：scripts/release/build-installer-cloud.ps1（只组 app staging，再调 ISCC 编译本文件）
 ;
-; 与 byok 版（private-agent.iss）的关键差异：
+; 与 byok 版（nextbot.iss）的关键差异：
 ;   - AppId 独立：AppId 相同会互相覆盖升级（内测版被云端版安装动作顶掉），永不可共用。
 ;   - 无 runtime：模型跑在运营方云端（HTTP_BASE 烤入 https://api.nextbot.top），
 ;     用户在「设置-模型服务」填自己的模型 API Key，经 wss 上送、服务端内存驻留。
@@ -13,9 +13,9 @@
 #define AppVersion "0.1.0"
 #endif
 
-; staging 目录由打包脚本经 /DStage 传入（短路径 E:\PACloudStage，避开深路径上限）
+; staging 目录由打包脚本经 /DStage 传入（短路径 E:\NBCloudStage，避开深路径上限）
 #ifndef Stage
-#define Stage "E:\PACloudStage"
+#define Stage "E:\NBCloudStage"
 #endif
 
 ; Edition 固定 cloud（保留与 byok 版相同的 /D 传参形态，将来细分仍走同一开关）
@@ -60,7 +60,7 @@ Name: "{autodesktop}\{#MyIconName}"; Filename: "{app}\NEXTBOT.exe"; Tasks: deskt
 Filename: "{app}\NEXTBOT.exe"; Description: "立即启动 {#MyAppName}"; Flags: nowait postinstall skipifsilent
 
 [UninstallDelete]
-; 故意不删 %APPDATA%\PrivateAgent（用户模型 Key 与数据），安装器只管应用目录
+; 故意不删 %APPDATA%\Nextbot（用户模型 Key 与数据），安装器只管应用目录
 
 [Code]
 // 安装前停掉旧版本残留进程（限定路径在本应用目录内，不误杀系统其他进程；
@@ -70,7 +70,7 @@ var
   ErrorCode: Integer;
 begin
   Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "Get-Process private_ai_agent,NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
+    '/C powershell -NoProfile -Command "Get-Process NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   Sleep(800);
   Result := '';

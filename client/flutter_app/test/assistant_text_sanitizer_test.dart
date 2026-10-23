@@ -1,6 +1,6 @@
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/utils/assistant_text_sanitizer.dart";
+import "package:nextbot/core/utils/assistant_text_sanitizer.dart";
 
 void main() {
   test("strips leading timestamp frame from full text", () {

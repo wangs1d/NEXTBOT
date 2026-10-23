@@ -11,8 +11,11 @@ import { isTcpPortInUse } from "../port-in-use.mjs";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
-const TASK_NAME = "PrivateAgentServer";
-const RUN_VALUE_NAME = "PrivateAgentServer";
+const TASK_NAME = "NextbotServer";
+const RUN_VALUE_NAME = "NextbotServer";
+// 旧版注册名（2026-10-23 前），仅用于残留检测提示
+const LEGACY_TASK_NAME = "PrivateAgentServer";
+const LEGACY_RUN_VALUE_NAME = "PrivateAgentServer";
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 const LOG_DIR = path.join(ROOT, "logs", "autostart");
 const PIDS_FILE = path.join(LOG_DIR, "pids.json");
@@ -75,6 +78,18 @@ const runValue = regQuery();
 if (runValue) console.log(`注册方式：Run 键（${runValue}）`);
 if ((!taskInfo.STATE || taskInfo.STATE === "NOT_FOUND") && !runValue) {
   console.log("当前未注册开机自启，执行 npm run autostart:install 注册。");
+  // 旧版注册名残留检测（重装新版本后可能遗留，会双重拉起服务端）
+  const legacyRun = spawnSync("reg.exe", ["query", RUN_KEY, "/v", LEGACY_RUN_VALUE_NAME], {
+    windowsHide: true,
+    encoding: "utf8",
+  });
+  const legacyTask = runPs(
+    `try { Get-ScheduledTask -TaskName '${LEGACY_TASK_NAME}' -ErrorAction Stop | Out-Null; Write-Output 'FOUND' } ` +
+      "catch { Write-Output 'NOT_FOUND' }",
+  );
+  if (legacyRun.status === 0 || legacyTask.includes("FOUND")) {
+    console.log(`⚠ 发现旧版自启残留「${LEGACY_TASK_NAME}」，执行 npm run autostart:uninstall 清理，避免双重拉起。`);
+  }
 }
 
 // ─── 运行状态 ───

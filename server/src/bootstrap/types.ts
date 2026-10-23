@@ -22,7 +22,7 @@ import type {
   SkillMetadataValidatorLike,
   SocialFeedService,
   WorldService,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import type { ComputeQuotaService } from "../services/compute-quota-service.js";
 import type { UnifiedIdempotencyService } from "../services/unified-idempotency-service.js";

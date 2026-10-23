@@ -12,8 +12,11 @@ import { fileURLToPath } from "node:url";
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(SCRIPT_DIR, "..", "..");
 
-const TASK_NAME = "PrivateAgentServer";
-const RUN_VALUE_NAME = "PrivateAgentServer";
+const TASK_NAME = "NextbotServer";
+const RUN_VALUE_NAME = "NextbotServer";
+// 旧版名（2026-10-23 前的注册名），注册成功后顺带清理，避免双重拉起
+const LEGACY_TASK_NAME = "PrivateAgentServer";
+const LEGACY_RUN_VALUE_NAME = "PrivateAgentServer";
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 // 登录后延迟启动：等桌面/网络栈就绪，避免开机竞态
 const LOGON_DELAY_S = 15;
@@ -63,7 +66,7 @@ function registerTask() {
     `$trigger.Delay = 'PT${LOGON_DELAY_S}S'`,
     `$principal = New-ScheduledTaskPrincipal -UserId '${user}' -LogonType Interactive -RunLevel Limited`,
     "$settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)",
-    `Register-ScheduledTask -TaskName '${TASK_NAME}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'Private-Agent 服务端开机自启（今日简报等定时任务依赖）' -Force | Out-Null`,
+    `Register-ScheduledTask -TaskName '${TASK_NAME}' -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description 'NextBot 服务端开机自启（今日简报等定时任务依赖）' -Force | Out-Null`,
     "Write-Output '__REGISTER_OK__'",
   ].join("; ");
   const r = runPs(ps);
@@ -79,22 +82,25 @@ function registerRunKey() {
   return r.status === 0;
 }
 
-function removeRunKey() {
-  spawnSync("reg.exe", ["delete", RUN_KEY, "/v", RUN_VALUE_NAME, "/f"], { windowsHide: true, stdio: "ignore" });
+function removeRunKey(valueName = RUN_VALUE_NAME) {
+  spawnSync("reg.exe", ["delete", RUN_KEY, "/v", valueName, "/f"], { windowsHide: true, stdio: "ignore" });
 }
 
-function removeTask() {
-  spawnSync("schtasks.exe", ["/end", "/tn", TASK_NAME], { windowsHide: true, stdio: "ignore" });
-  spawnSync("schtasks.exe", ["/delete", "/tn", TASK_NAME, "/f"], { windowsHide: true, stdio: "ignore" });
+function removeTask(taskName = TASK_NAME) {
+  spawnSync("schtasks.exe", ["/end", "/tn", taskName], { windowsHide: true, stdio: "ignore" });
+  spawnSync("schtasks.exe", ["/delete", "/tn", taskName, "/f"], { windowsHide: true, stdio: "ignore" });
 }
 
 console.log("正在注册开机自启…");
 if (registerTask()) {
-  // 此前若用过 Run 键方式，清理残留避免双重拉起
+  // 此前若用过 Run 键方式（含旧版注册名），清理残留避免双重拉起
   removeRunKey();
+  removeRunKey(LEGACY_RUN_VALUE_NAME);
+  removeTask(LEGACY_TASK_NAME);
   console.log(`✓ 已创建计划任务「${TASK_NAME}」：每次登录后 ${LOGON_DELAY_S} 秒隐藏启动服务端栈`);
 } else if (registerRunKey()) {
   removeTask();
+  removeTask(LEGACY_TASK_NAME);
   console.log("✓ 已写入当前用户 Run 键：登录后隐藏启动服务端栈");
   console.log("  （计划任务创建失败，通常因缺少管理员权限；Run 键方式功能等价）");
 } else {

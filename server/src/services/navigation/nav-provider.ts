@@ -76,7 +76,7 @@ export class AmapWebNavProvider implements NavigationProvider {
     parts.push(
       `to=${fmtCoord(req.to.lng)},${fmtCoord(req.to.lat)},${encodeURIComponent(safeName(req.to.name))}`,
     );
-    parts.push(`mode=${mode}`, "policy=", "src=PrivateAgent", "coordinate=gaode", "callnative=0");
+    parts.push(`mode=${mode}`, "policy=", "src=Nextbot", "coordinate=gaode", "callnative=0");
     return `https://uri.amap.com/navigation?${parts.join("&")}`;
   }
 }

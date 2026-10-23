@@ -1,9 +1,9 @@
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:private_ai_agent/core/models/chat_models.dart";
-import "package:private_ai_agent/features/chat/agent_result_card.dart" show MediaInlineRow;
-import "package:private_ai_agent/features/chat/message_body_renderer.dart";
+import "package:nextbot/core/models/chat_models.dart";
+import "package:nextbot/features/chat/agent_result_card.dart" show MediaInlineRow;
+import "package:nextbot/features/chat/message_body_renderer.dart";
 
 /// 回复信封块（reply blocks）渲染测试：
 /// blocks 分支优先于正文标记解析；card 块直读 AgentResultPayload JSON 建卡；

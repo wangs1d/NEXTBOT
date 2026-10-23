@@ -2,7 +2,7 @@
 # Pure ASCII only (GBK swallows newlines in wscript/powershell). Usage:
 #   powershell -NoProfile -ExecutionPolicy Bypass -File shot-app.ps1 -Out C:\path\shot.png
 param(
-  [string] $Out = "E:\ws-project\Private-Agent\bubble-e2e-shot.png",
+  [string] $Out = "E:\ws-project\NextBot\bubble-e2e-shot.png",
   [string] $ProcName = "NEXTBOT"
 )
 

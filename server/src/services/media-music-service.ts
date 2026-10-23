@@ -149,7 +149,7 @@ export async function resolveTrackPlayUrl(
     const res = await fetchImpl(url, {
       method: "GET",
       headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; PrivateAgent/1.0)",
+        "User-Agent": "Mozilla/5.0 (compatible; Nextbot/1.0)",
         Accept: "application/json",
         Referer: "https://music.163.com",
         ...(cookieHeader ? { Cookie: cookieHeader } : {}),
@@ -305,7 +305,7 @@ export class MediaMusicService {
         method: "GET",
         headers: {
           // 网易云 API 对 UA 敏感，加常见浏览器 UA 兜底
-          "User-Agent": "Mozilla/5.0 (compatible; PrivateAgent/1.0)",
+          "User-Agent": "Mozilla/5.0 (compatible; Nextbot/1.0)",
           Accept: "application/json",
         },
       });

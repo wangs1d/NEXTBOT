@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { mkdir, readFile, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 import { randomInt, randomUUID } from "crypto";
@@ -34,7 +35,7 @@ export class AgentAccountService {
   private readonly byAgentNumber = new Map<string, string>();
 
   private get persistPath(): string {
-    return process.env.AGENT_ACCOUNTS_FILE ?? join(process.cwd(), "data", "agent-accounts.json");
+    return process.env.AGENT_ACCOUNTS_FILE ?? join(getDataDir(), "agent-accounts.json");
   }
 
   /**

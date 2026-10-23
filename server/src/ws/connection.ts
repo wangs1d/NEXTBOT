@@ -83,7 +83,7 @@ import {
   unifiedMemoryGetSchema,
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
-} from "@private-ai-agent/agent-world";
+} from "@nextbot/agent-world";
 import { isAgentWorldSocialEnabled, isAccessAuthRequired } from "../config/env.js";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";

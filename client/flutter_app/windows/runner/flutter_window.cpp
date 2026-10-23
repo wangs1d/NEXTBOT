@@ -1348,7 +1348,9 @@ void FlutterWindow::HandleWindowTitleBarMethodCall(
 namespace {
 constexpr wchar_t kAutoStartRunKey[] =
     L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
-constexpr wchar_t kAutoStartValueName[] = L"PrivateAIAgent";
+constexpr wchar_t kAutoStartValueName[] = L"Nextbot";
+// 旧版值名（exe 更名前），写入/删除新值时顺带清理，避免双重拉起
+constexpr wchar_t kAutoStartLegacyValueName[] = L"PrivateAIAgent";
 
 std::wstring GetAutoStartExePath() {
   wchar_t path[MAX_PATH] = {0};
@@ -1391,10 +1393,16 @@ void FlutterWindow::HandleAppLifecycleMethodCall(
       res = RegSetValueExW(key, kAutoStartValueName, 0, REG_SZ,
                            reinterpret_cast<const BYTE*>(exe.c_str()),
                            static_cast<DWORD>((exe.size() + 1) * sizeof(wchar_t)));
+      if (res == ERROR_SUCCESS) {
+        // 旧值名残留一并清掉
+        RegDeleteValueW(key, kAutoStartLegacyValueName);
+      }
     } else {
       res = RegDeleteValueW(key, kAutoStartValueName);
       // 值本就不存在视为成功（幂等）
       if (res == ERROR_FILE_NOT_FOUND) res = ERROR_SUCCESS;
+      // 旧值名（旧版本写入的）一并删除
+      RegDeleteValueW(key, kAutoStartLegacyValueName);
     }
     RegCloseKey(key);
     if (res != ERROR_SUCCESS) {
@@ -1415,11 +1423,19 @@ void FlutterWindow::HandleAppLifecycleMethodCall(
     DWORD type = 0;
     BYTE buffer[MAX_PATH * 2] = {0};
     DWORD size = sizeof(buffer);
-    const LONG res = RegQueryValueExW(key, kAutoStartValueName, nullptr, &type,
-                                      buffer, &size);
+    LONG res = RegQueryValueExW(key, kAutoStartValueName, nullptr, &type,
+                                buffer, &size);
+    bool enabled = res == ERROR_SUCCESS && type == REG_SZ &&
+                   size > sizeof(wchar_t);
+    if (!enabled) {
+      // 新值名未命中时回查旧值名（老版本写入的，语义等价）
+      size = sizeof(buffer);
+      res = RegQueryValueExW(key, kAutoStartLegacyValueName, nullptr, &type,
+                             buffer, &size);
+      enabled = res == ERROR_SUCCESS && type == REG_SZ &&
+                size > sizeof(wchar_t);
+    }
     RegCloseKey(key);
-    const bool enabled =
-        res == ERROR_SUCCESS && type == REG_SZ && size > sizeof(wchar_t);
     result->Success(flutter::EncodableValue(enabled));
     return;
   }

@@ -1,3 +1,4 @@
+import { getDataDir } from "../../config/data-dir.js";
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -43,7 +44,7 @@ const LOGIN_MAX_FAILS = 5;
 const LOGIN_LOCK_MS = 15 * 60 * 1000;
 
 function adminAuthDbPath(): string {
-  return process.env.ADMIN_AUTH_DB?.trim() || join(process.cwd(), "data", "admin-auth.db");
+  return process.env.ADMIN_AUTH_DB?.trim() || join(getDataDir(), "admin-auth.db");
 }
 
 type AdminAuthRow = { id: number; username: string; pwhash: string; updated_at: string };

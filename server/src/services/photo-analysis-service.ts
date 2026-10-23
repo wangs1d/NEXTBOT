@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import OpenAI from "openai";
 
-import type { ImageAsset, PictureKit } from "@private-ai-agent/picture";
+import type { ImageAsset, PictureKit } from "@nextbot/picture";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { modelSupportsVision } from "../external-model/vision-support.js";

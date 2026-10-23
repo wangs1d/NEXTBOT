@@ -14,8 +14,8 @@
  * 向新 socket 补发活跃任务快照。
  */
 
-import { ServerEventType } from "@private-ai-agent/agent-protocol";
-import type { ChatTaskUpdatePayload } from "@private-ai-agent/agent-protocol";
+import { ServerEventType } from "@nextbot/agent-protocol";
+import type { ChatTaskUpdatePayload } from "@nextbot/agent-protocol";
 import type { ClientPushPort } from "../ports/client-push-port.js";
 import type { TaskPlaneRecord } from "./task-hub.js";
 

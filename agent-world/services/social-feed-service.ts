@@ -6,6 +6,7 @@ import { dirname, extname, join } from "path";
 
 import type { WsConnectionRegistryLike } from "../host-types.js";
 import { AgentWorldServerEventType } from "../protocol-world.js";
+import { getDataDir } from "../config/data-dir.js";
 import type { WorldService } from "./world-service.js";
 
 export type SocialMediaType = "none" | "image" | "video";
@@ -70,11 +71,11 @@ type RawPersisted = {
 };
 
 function defaultPersistPath(): string {
-  return join(process.cwd(), "data", "agent-world-social-feed.json");
+  return join(getDataDir(), "agent-world-social-feed.json");
 }
 
 export function defaultSocialMediaRoot(): string {
-  return join(process.cwd(), "data", "social-media");
+  return join(getDataDir(), "social-media");
 }
 
 function isSafeHttpsMediaUrl(url: string): boolean {

@@ -2,8 +2,8 @@
 // 网络被 flutter_test 禁用 → ModelProviderCatalog.load() 自动回落 baked 目录（保命路径即测试路径）。
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
-import "package:private_ai_agent/features/model_config/model_provider_card.dart";
-import "package:private_ai_agent/features/model_config/model_provider_catalog.dart";
+import "package:nextbot/features/model_config/model_provider_card.dart";
+import "package:nextbot/features/model_config/model_provider_catalog.dart";
 
 Widget _host({
   String? initialBaseUrl,

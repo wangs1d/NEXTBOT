@@ -1,3 +1,4 @@
+import { getDataDir } from "../config/data-dir.js";
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, writeFile, mkdir } from "node:fs/promises";
 import { join } from "node:path";
@@ -119,7 +120,7 @@ export class WechatClawBridgeService {
   private async resolveBoundActorId(): Promise<string | null> {
     const path =
       this.env.WECHAT_CLAW_BINDING_FILE?.trim() ||
-      join(process.cwd(), "data", "wechat-claw-bindings.json");
+      join(getDataDir(), "wechat-claw-bindings.json");
     try {
       const raw = await readFile(path, "utf8");
       const data = JSON.parse(raw) as {
