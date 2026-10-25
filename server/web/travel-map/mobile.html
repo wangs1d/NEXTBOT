@@ -936,7 +936,7 @@ function tryMapRender(items) {
     });
     MMAP.on('load', function () {
       MMAP_STATE = 'ready';
-      $('mapAttrib').textContent = '© OpenStreetMap · CARTO';
+      $('mapAttrib').textContent = '© OpenStreetMap · OpenFreeMap';
       if (PLAN) { renderMap(); if (state.view === 'detail') renderDetail(); }
       if (navSession) syncNavLeg();   // 页面重载恢复会话时，refreshNav 先于地图就绪 → 此处补画当前段
     });

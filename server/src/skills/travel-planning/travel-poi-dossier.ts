@@ -427,7 +427,19 @@ export function verifyItinerary(input: VerifyInput): DossierIssue[] {
       }
 
       if (!parsed.parsed) {
-        if (item.type === "attraction" && /门票|收费|¥|元/.test(item.priceInfo ?? "")) {
+        // 没取到官方开放时间时，场馆类的周一闭馆是行业惯例——排到周一要明确提示，
+        // 不能因为「数据没跑到」就当它一定开门（用户要的是哪天闭馆说清楚）。
+        if (item.type === "attraction" && CATEGORY_RE.test(item.name) && wd === 1) {
+          issues.push({
+            level: "warn",
+            kind: "closed_day",
+            day: d,
+            stop: s,
+            name: item.name,
+            message: `${item.name} 属场馆类，行业惯例周一闭馆；Day ${d + 1} 正是周一，且未取到官方闭馆日`,
+            suggestion: "与后一天对调，或出发前用官方公众号确认当天是否开放",
+          });
+        } else if (item.type === "attraction" && /门票|收费|¥|元/.test(item.priceInfo ?? "")) {
           issues.push({
             level: "info",
             kind: "unknown_hours",

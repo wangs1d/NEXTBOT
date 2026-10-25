@@ -1,14 +1,18 @@
 /**
  * 地图瓦片/底图资源本地缓存与预热
  *
- * 解决「每次打开行程地图都慢慢加载」：底图资源（Carto 矢量瓦片/样式/字形、
+ * 解决「每次打开行程地图都慢慢加载」：底图资源（OpenFreeMap 矢量瓦片/样式/字形、
  * Esri 卫星瓦片）原先每次都从境外 CDN 现拉，国内网络下动辄数十秒。
  * 本模块把资源代理到本机 server：
  *   - 首次拉取后落盘（data/tile-cache，TRAVEL_TILE_CACHE_DIR 可覆盖）
  *   - 后续请求毫秒级本地命中；过期条目先回旧数据再后台刷新（SWR）
  *   - 规划完成后预取目的地城市级 + POI 周边瓦片，用户打开地图前已热
  *
- * 安全：只代理白名单域名（cartocdn.com / arcgisonline.com），不是开放代理。
+ * 安全：只代理白名单域名（tiles.openfreemap.org / arcgisonline.com），不是开放代理。
+ *
+ * 2026-10-25 上游变更：CARTO 免费底图开始强制 API key，未授权瓦片只返回
+ * 「API KEY REQUIRED」水印（地图一片黑）。底图改接 OpenFreeMap：免费、无 key、
+ * OSM 数据、矢量暗色、自带中文标注；缓存/预热/离线包机制保持不变。
  */
 import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
@@ -16,19 +20,33 @@ import fs from "node:fs";
 import path from "node:path";
 
 /** 上游域名白名单（后缀匹配） */
-const ALLOWED_HOST_SUFFIXES = ["cartocdn.com", "arcgisonline.com"];
+const ALLOWED_HOST_SUFFIXES = ["tiles.openfreemap.org", "arcgisonline.com"];
+
+/** OpenFreeMap 暗色矢量样式（免费、无需 key；瓦片路径按日期版本化） */
+const OPENFREEMAP_DARK_STYLE_URL = "https://tiles.openfreemap.org/styles/dark";
 
 /** 改写规则版本（改写 URL 形态变化时 +1，让浏览器旧缓存自然失效） */
 const REWRITE_VERSION = 2;
 
+/** 清单类资源（style / TileJSON / sprite.json）：带 .json 或**无扩展名**
+ *  （MapLibre source.url 约定，如 OpenFreeMap 的 `/planet`、`/styles/dark`）。 */
+function isJsonManifestRef(url: string): boolean {
+  if (/\.json(\?|$)/.test(url)) return true;
+  try {
+    return !/\.[a-z0-9]{2,6}$/i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+}
+
 /** 缓存条目新鲜期：瓦片基本不可变，30 天足够长 */
 const FRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/** 清单类资源（style.json / sprite.json / tiles.json）随上游版本升级换路径
- *  （2026-10-25 实例：Carto 切到 /v/<date>/ 版本化路径，旧 sprite 404 导致
- *  MapLibre 永远等不到 load）。这类资源用短新鲜期：过期回源一次，失败仍可用旧盘。 */
+/** 清单类资源（样式 / TileJSON / sprite）随上游升级换内容或换路径
+ *  （2026-10-25 实例：CARTO 开始强制 API key + 换版本化路径，旧样式静默失效）。
+ *  这类资源用短新鲜期：过期回源一次，失败仍可用旧盘。 */
 const MANIFEST_FRESH_TTL_MS = 10 * 60 * 1000;
 function freshTtlOf(url: string): number {
-  return /\.json(\?|$)/.test(url) ? MANIFEST_FRESH_TTL_MS : FRESH_TTL_MS;
+  return isJsonManifestRef(url) ? MANIFEST_FRESH_TTL_MS : FRESH_TTL_MS;
 }
 /** 内存 LRU 上限（条目数；瓦片均 ~10-50KB，500 条 ≤ ~25MB） */
 const MEMORY_MAX_ENTRIES = 500;
@@ -41,17 +59,6 @@ const WARM_CONCURRENCY = 6;
 const FETCH_TIMEOUT_MS = 20_000;
 /** 超时/5xx 后的重试间隔 */
 const FETCH_RETRY_DELAY_MS = 800;
-
-/**
- * 上游主机改写：Carto 底图的 a/b/c/d.basemaps.cartocdn.com 分片子域在部分
- * 国内网络被 DNS 污染（解析到 Dropbox/Facebook 段地址，请求挂起直到超时），
- * 而 apex 域 basemaps.cartocdn.com 解析到 Fastly、同路径同内容。
- * 统一改写到 apex：缓存键仍用原始 URL（浏览器缓存/磁盘缓存都不受影响），
- * 仅上游请求换健康主机。
- */
-function normalizeUpstreamHost(url: string): string {
-  return url.replace(/^(https:\/\/)[abcd]\.basemaps\.cartocdn\.com\//i, "$1basemaps.cartocdn.com/");
-}
 
 interface MemoryEntry {
   body: Buffer;
@@ -162,7 +169,7 @@ class TravelTileCache {
     // 重试不会放大上游压力）
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const res = await fetch(normalizeUpstreamHost(url), {
+        const res = await fetch(url, {
           signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
           headers: { "User-Agent": "NextbotTravelTileCache/1.0" },
         });
@@ -253,59 +260,77 @@ class TravelTileCache {
   }
 
   /**
-   * 拉取 Carto 暗色矢量样式 JSON，把其中所有白名单域名的绝对 URL 改写为本地
-   * 代理路径，并把 TileJSON 引用（sources[*].url=tiles.json）服务端展开为
-   * 内联 tiles[] 模板——worker 不再需要运行时二次请求 TileJSON，
-   * 也杜绝 worker 侧对 TileJSON 内容缓存的依赖。
+   * 行迹底图样式：OpenFreeMap 暗色矢量（MapLibre style JSON）。
+   *
+   * 2026-10-25 上游变更：CARTO 免费底图开始强制 API key，未授权瓦片只返回
+   * 「API KEY REQUIRED」水印。改接 OpenFreeMap：免费、无 key、OSM 数据、矢量
+   * 暗色、自带中文名（name:zh），瓦片路径按日期版本化（上游升级 = 换路径）。
+   *
+   * 这里做三件事：
+   *  ① 样式内所有白名单 URL（glyphs / sprite / TileJSON / 自然地球底衬瓦片）
+   *     改写成本机代理，worker 不再绕出去直连 CDN；
+   *  ② 文本字段统一成中文优先（name:zh → name → name:en）——上游样式对中文
+   *     地名输出「拼音 + 中文」两行，行程页要的是干净中文；
+   *  ③ sources[*].url 指向的 TileJSON 由代理层的 JSON 改写展开成内联 tiles[]。
    */
-  /**
-   * 行迹底图样式：自建 Carto dark 栅格版（2026-10-25 起上游矢量 style 切换
-   * protomaps 版本化路径且瓦片数据残缺，MapLibre 解析新 style 挂起不 load；
-   * 栅格 dark_all 与原 dark-matter 同视觉系，raster source 简单可靠）。
-   * 瓦片经本机代理（含 @2x Retina），仍然磁盘缓存 + 离线可用。
-   */
-  darkStyleProxied(origin?: string): { ok: boolean; body: string; contentType: string } {
-    const base = (origin ?? "").replace(/\/$/, "");
-    const tileUp = "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png";
-    // 令牌保持明文：MapLibre 按 {z}/{x}/{y} 字面替换后再请求（encodeURIComponent 会把它们变成 %7Bz%7D 导致替换失效）
-    const u = encodeURIComponent(tileUp)
-      .replace("%7Bz%7D", "{z}")
-      .replace("%7Bx%7D", "{x}")
-      .replace("%7By%7D", "{y}");
-    const proxied = `${base}/travel-basemap/fetch?u=${u}&v=2`;
-    const style = {
-      version: 8,
-      name: "nextbot-carto-dark-raster",
-      sources: {
-        "carto-dark": {
-          type: "raster",
-          tiles: [proxied],
-          tileSize: 256,
-          minzoom: 0,
-          maxzoom: 20,
-          attribution: "",
-        },
-      },
-      layers: [
-        { id: "background", type: "background", paint: { "background-color": "#0d0f13" } },
-        {
-          id: "carto-dark-raster",
-          type: "raster",
-          source: "carto-dark",
-          paint: { "raster-opacity": 1, "raster-fade-duration": 240 },
-        },
-      ],
+  async darkStyleProxied(
+    origin?: string,
+  ): Promise<{ ok: boolean; body: string; contentType: string }> {
+    const res = await this.fetch(OPENFREEMAP_DARK_STYLE_URL);
+    if (!res.ok) return { ok: false, body: "", contentType: "application/json" };
+    let style: {
+      layers?: Array<{
+        id?: string;
+        type?: string;
+        layout?: Record<string, unknown>;
+        paint?: Record<string, unknown>;
+      }>;
     };
-    return { ok: true, body: JSON.stringify(style), contentType: "application/json" };
+    try {
+      style = JSON.parse(res.body.toString("utf-8")) as typeof style;
+    } catch {
+      return { ok: false, body: "", contentType: "application/json" };
+    }
+    const cnName = ["coalesce", ["get", "name:zh"], ["get", "name"], ["get", "name:en"]];
+    for (const layer of style.layers ?? []) {
+      // 上游 dark 的湖面 rgb(27,27,29) 与陆地 rgb(12,12,12) 几乎同色，湖名还是
+      // 近黑字压深水：手机端不做页面调色，必须在这里把水域与湖名抬起来
+      if (layer.id === "water" && layer.paint) {
+        layer.paint["fill-color"] = "#17414F";
+      }
+      if (layer.id === "water_name") {
+        layer.paint = {
+          ...(layer.paint ?? {}),
+          "text-color": "rgba(168,206,216,1)",
+          "text-halo-color": "#05202A",
+          "text-halo-width": 1.6,
+        };
+        layer.layout = {
+          ...(layer.layout ?? {}),
+          "text-size": ["interpolate", ["linear"], ["zoom"], 8, 10, 12, 13, 13, 15, 16, 17],
+        };
+      }
+      if (layer.type !== "symbol" || !layer.layout) continue;
+      // 路号层（highway_name_motorway 用 ref）与纯图标层没有 text-field：不动
+      if (!("text-field" in layer.layout)) continue;
+      layer.layout["text-field"] = cnName;
+    }
+    return {
+      ok: true,
+      body: this.rewriteWhitelistedUrls(JSON.stringify(style), origin),
+      contentType: "application/json",
+    };
   }
   /**
    * 从已代理的样式里提取需要预热的资源。
    *
-   * 两个必须注意的点（旧实现都踩过，表现为「预热了一批但一大半 404」）：
+   * 三个必须注意的点（旧实现都踩过，表现为「预热了一批但一大半 404」）：
    * ① 样式里的 URL 带代理注入的去重参数（`&v=2`），必须剥掉再打上游；
    * ② 带 `{z}/{x}/{y}` 的是**瓦片模板**，要按坐标实例化后请求，不能当静态资源
    *    直接请求（直接请求只会拿到 404）；sprite 同理——它是 `sprite.json` +
-   *    `sprite.png`（含 @2x）四件套，基础路径本身不是资源。
+   *    `sprite.png`（含 @2x）四件套，基础路径本身不是资源；
+   * ③ TileJSON 引用可能是无扩展名的（OpenFreeMap 的 sources.url 就是 `/planet`），
+   *    不能只认 `.json` 结尾，否则矢量模板收集不到、预热等于没做。
    */
   private async collectStyleResources(): Promise<{ statics: string[]; templates: string[] }> {
     const statics: string[] = [];
@@ -320,7 +345,7 @@ class TravelTileCache {
         templates.push(raw);
         continue;
       }
-      if (/\.json(\?|$)/.test(raw)) {
+      if (isJsonManifestRef(raw)) {
         // TileJSON：取回并提取 tiles[] 里的模板
         const tj = await this.fetch(raw);
         if (tj.ok) {
@@ -344,7 +369,7 @@ class TravelTileCache {
 
   /**
    * 目的地瓦片预热：城市级缩放围绕中心、POI 周边高缩放逐点预热。
-   * 矢量（Carto）+ 卫星（Esri）双底图都热；预算封顶，fire-and-forget 调用。
+   * 矢量（OpenFreeMap）+ 卫星（Esri）双底图都热；预算封顶，fire-and-forget 调用。
    */
   async warmDestination(
     center: { latitude: number; longitude: number },
@@ -355,16 +380,14 @@ class TravelTileCache {
     // 1. 样式内资源（sprite 等）+ 矢量瓦片模板（统一从样式提取，见 collectStyleResources）
     const { statics, templates: styleTemplates } = await this.collectStyleResources();
     for (const s of statics) urls.add(s);
-    const vectorPrimary = pickPrimaryTemplates(
-      styleTemplates.length > 0 ? styleTemplates : CARTO_VECTOR_TEMPLATES,
-    );
+    const vectorPrimary = pickPrimaryTemplates(styleTemplates.filter(isVectorTileTemplate));
 
     // 2. 城市级缩放（中心点 3×3）：中低缩放覆盖整城概览
     for (const z of [3, 5, 7, 9, 11, 12]) {
       collectTileUrls(vectorPrimary, center.latitude, center.longitude, z, 1, urls);
     }
     // 3. POI 周边高缩放：行程实际浏览的细节层（矢量 + 卫星双底图）
-    //    上限 z14（Carto 免费底图最高级），更高缩放交给 MapLibre 的 overzoom
+    //    上限 z14（OpenFreeMap planet maxzoom），更高缩放交给 MapLibre 的 overzoom
     const points = [center, ...pois].slice(0, 40);
     for (const p of points) {
       for (const z of [12, 13, 14]) {
@@ -417,7 +440,7 @@ class TravelTileCache {
       (p) => Number.isFinite(p.latitude) && Number.isFinite(p.longitude) && !(p.latitude === 0 && p.longitude === 0),
     );
     const overviewZooms = opts.overviewZooms ?? [6, 8, 10, 11];
-    // 细节层到 z14 为止：Carto 免费底图最高 z14，更高缩放由 MapLibre 的 overzoom 实现
+    // 细节层到 z14 为止：OpenFreeMap planet maxzoom 14，更高缩放由 MapLibre 的 overzoom 实现
     const detailZooms = opts.detailZooms ?? [12, 13, 14];
     const budget = opts.budget ?? 800;
     const slug = packSlugOf(destination);
@@ -428,9 +451,7 @@ class TravelTileCache {
     // 样式内静态资源（sprite 等）+ 矢量模板：离线时样式本身也必须能本地化解析
     const { statics, templates: styleTemplates } = await this.collectStyleResources();
     for (const s of statics) urls.add(s);
-    const primary = pickPrimaryTemplates(
-      styleTemplates.length > 0 ? styleTemplates : CARTO_VECTOR_TEMPLATES,
-    );
+    const primary = pickPrimaryTemplates(styleTemplates.filter(isVectorTileTemplate));
 
     if (bounds) {
       for (const z of overviewZooms) collectTileUrlsForBounds(primary, bounds, z, urls);
@@ -530,10 +551,12 @@ class TravelTileCache {
   }
 }
 
-/** Carto 矢量瓦片模板（TileJSON 提取失败时的兜底，与线上 carto.streets 实际地址一致） */
-const CARTO_VECTOR_TEMPLATES = [
-  "https://tiles-a.basemaps.cartocdn.com/vectortiles/carto.streets/v1/{z}/{x}/{y}.mvt",
-];
+/** 样式里可能同时有矢量瓦片（.pbf/.mvt）与栅格底衬（自然地球 .png）：
+ *  预热只认矢量——栅格底衬只在低缩放显示，按高缩放预热只会 404。 */
+function isVectorTileTemplate(url: string): boolean {
+  return /\.(pbf|mvt)(\?|$)/.test(url);
+}
+
 /** Esri 卫星瓦片模板（与 panel.html satelliteStyle 一致） */
 const ESRI_RASTER_TEMPLATES = [
   "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
@@ -665,7 +688,7 @@ export function pickPrimaryTemplates(templates: string[]): string[] {
   return first && first.length > 0 ? first : templates.slice(0, 1);
 }
 
-/** Carto 免费底图最高 z14；再往上由 MapLibre 用 z14 瓦片放大（overzoom），不需要下载 */
+/** OpenFreeMap planet 最高 z14；再往上由 MapLibre 用 z14 瓦片放大（overzoom），不需要下载 */
 const MAX_TILE_ZOOM = 14;
 
 /** 全局单例 */

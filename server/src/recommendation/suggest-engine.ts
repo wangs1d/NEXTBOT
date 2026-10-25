@@ -69,9 +69,7 @@ export type SuggestResult = {
   pick?: SuggestPick;
   /** 备选定位（与 candidates[1..] 一一对应） */
   alternatives?: SuggestAlternative[];
-  /** 数据来源：catalog=自有商品库；live=联盟API实时聚合（或混合） */
-  source?: "catalog" | "live";
-  /** 聚合过程说明（溯源：哪些平台失败/未配置），透传到工具回执 */
+  /** 聚合过程说明（溯源），透传到工具回执 */
   notes?: string[];
   /** 真实口碑摘要（P3 UGC：归属主推商品；聚合失败/空时缺省） */
   ugc?: SuggestUgc;
@@ -90,7 +88,7 @@ function priceLabelOf(p: ProductRecord): string {
 
 function toCandidate(p: ProductRecord): SuggestCandidate {
   const review = p.reviewSummary;
-  // live 实时商品无口碑快照（UGC 聚合接入前）：依据改用实时在售价/渠道，不装作有口碑
+  // 无口碑快照的商品：依据改用渠道价/在售渠道，不装作有口碑
   const hasReview = review.pros.length > 0 || review.sampleSize > 0;
   const reasons = hasReview
     ? [
@@ -203,7 +201,6 @@ export function buildSuggestion(
           })),
         }
       : {}),
-    source: found.some((p) => p.source === "live") ? "live" : "catalog",
     ...(candidates.length >= 2 ? { compare: buildCompare(found) } : {}),
   };
 }

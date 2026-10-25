@@ -496,7 +496,7 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
   const originOf = (req: FastifyRequest): string =>
     `${req.protocol}://${req.headers.host ?? "127.0.0.1:3000"}`;
 
-  /** GET /travel-basemap/style/dark — Carto 暗色矢量样式（内部 URL 已改写为本地代理） */
+  /** GET /travel-basemap/style/dark — OpenFreeMap 暗色矢量样式（内部 URL 已改写为本地代理） */
   app.get("/travel-basemap/style/dark", async (req, reply) => {
     const style = await travelTileCache.darkStyleProxied(originOf(req));
     if (!style.ok) return reply.code(502).send({ error: "style upstream unavailable" });
@@ -523,9 +523,10 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     const res = await travelTileCache.fetch(u);
     if (!res.ok) return reply.code(res.status).type("text/plain").send(res.body.toString());
     reply.header("X-Tile-Cache", res.fromCache ? "hit" : "miss");
-    // TileJSON 内容改写：tiles.json 里的 tiles[] 是上游绝对地址，不改写会让
-    // MapLibre worker 绕过代理直连 CDN（国内网络下挂起 → 地图永远渲染不出）
-    if (/\.json(\?|$)/.test(u) && res.contentType.includes("json")) {
+    // 清单类 JSON（TileJSON / sprite.json）内容改写：tiles[] 若还是上游绝对地址，
+    // MapLibre worker 会绕过代理直连 CDN（国内网络下挂起 → 地图永远渲染不出）。
+    // 不能按 .json 后缀判断：OpenFreeMap 的 TileJSON 引用是无扩展名的 /planet。
+    if (res.contentType.includes("json")) {
       // JSON 清单（style/tiles.json）内容会随改写行为升级：浏览器侧必须可失效，
       // 服务端磁盘缓存兜底速度（ms 级）
       reply.header("Cache-Control", "no-cache");

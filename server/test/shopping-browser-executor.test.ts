@@ -5,7 +5,8 @@
  *   1. canUseSharedBrowser 三重条件（网关开关/执行端在线/CDP 端点上报）
  *   2. shared 可用时 acquirePage 走内置浏览器路径，release 只关标签页
  *   3. shared 不可用 + 无 Cookie + 不允许交互式登录 → 抛 no_cookie（不启动浏览器）
- *   4. 登录页 URL 启发式（jd passport 命中 / 订单页不命中 / 正文关键词兜底）
+ *   4. preferHeadless 且无 Cookie → 回落 shared 可见浏览器
+ *   5. 登录页 URL 启发式（jd passport 命中 / 订单页不命中 / 正文关键词兜底）
  *   5. waitForLogin：扫码后（URL 离开登录域）自动落回目标页
  *   6. Cookie value 非法字符提前报错（RFC 6265）
  */
@@ -125,6 +126,21 @@ test("acquirePage throws no_cookie before launching browser when no cookie and n
       return true;
     },
   );
+});
+
+test("preferHeadless 且无 Cookie 时回落 shared 可见浏览器", async () => {
+  const { coordinator, gateway, executor } = makeExecutor({ sharedAvailable: true });
+  const actor = "u-prefer-headless";
+  coordinator.bindExecutor(actor, { send: () => {} });
+  coordinator.setCdpEndpoint(actor, "http://127.0.0.1:9222");
+
+  const lease = await executor.acquirePage(actor, "jd", "https://search.jd.com/Search?keyword=x", {
+    preferHeadless: true,
+    interactiveLogin: false,
+  });
+  assert.equal(lease.mode, "shared");
+  assert.equal(gateway.openedUrls[0], "https://search.jd.com/Search?keyword=x");
+  await lease.release();
 });
 
 test("detectLoginPage URL heuristics (jd login page vs order page) + body keyword fallback", async () => {

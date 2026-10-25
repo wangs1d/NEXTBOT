@@ -269,11 +269,34 @@ export function extractDiningStyle(input: string): 'local' | 'trendy' | 'mixed' 
 export function extractParty(input: string): 'solo' | 'solo_female' | 'couple' | 'family' | 'friends' | undefined {
   const text = input;
   if (/(一个女生|女生一人|女 solo|姐妹俩|闺蜜俩|两个女生|一个人.{0,4}(女|她))/.test(text)) return "solo_female";
-  if (/(情侣|对象|男朋友|女朋友|蜜月|两个人|两人|俩人|二人|新婚)/.test(text)) return "couple";
+  if (/(情侣|伴侣|对象|男朋友|女朋友|蜜月|两个人|两人|俩人|二人|新婚)/.test(text)) return "couple";
   if (/(一家三口|带孩子|带娃|亲子|全家|一家人|父母|爸妈|爹妈|老人|长辈)/.test(text)) return "family";
   if (/(朋友|同学|同事|闺蜜|兄弟|几个人|组团|团)/.test(text)) return "friends";
   if (/(一个人|独自|单独|独行|自己一人|solo)/.test(text)) return "solo";
   return undefined;
+}
+
+/**
+ * 同行人 → 默认节奏（用户没明说「想紧凑/想休闲」时才用）：
+ * 情侣/家人留出慢下来的时间，朋友出行更愿意多跑几个点，独自则居中。
+ * 这是「这次带女朋友、下次和朋友、再下次和家人」节奏不一样的落点，
+ * 具体密度仍由 paceCapFor 统一裁决（带老人/亲子会再降一档）。
+ */
+export function paceForParty(
+  party: TripPreferences['party'],
+): TripPreferences['pace'] | undefined {
+  switch (party) {
+    case "couple":
+    case "family":
+      return "relaxed";
+    case "friends":
+      return "intensive";
+    case "solo":
+    case "solo_female":
+      return "balanced";
+    default:
+      return undefined;
+  }
 }
 
 /**
@@ -516,10 +539,14 @@ export function extractPreferences(
   }
 
   // 节奏
-  if (has(/休闲/) || has(/慢游/) || has(/度假/) || has(/放松/) || has(/悠闲/) || has(/懒/)) {
+  if (has(/休闲/) || has(/慢游/) || has(/度假/) || has(/放松/) || has(/悠闲/) || has(/懒/) ||
+      has(/松弛/) || has(/宽松/) || has(/慢逛/) || has(/随性/)) {
     prefs.pace = 'relaxed'; prefs.sources.pace = 'user';
-  } else if (has(/紧凑/) || has(/高效/) || has(/深度游/) || has(/打卡/) || has(/多去/)) {
+  } else if (has(/紧凑/) || has(/高效/) || has(/深度游/) || has(/打卡/) || has(/多去/) || has(/特种兵/)) {
     prefs.pace = 'intensive'; prefs.sources.pace = 'user';
+  } else if (has(/均衡/) || has(/适中/) || has(/张弛有度/) || has(/正常节奏/)) {
+    // 同行人卡上「改」成均衡时也当用户明说处理，否则会被同行人的默认档盖掉
+    prefs.pace = 'balanced'; prefs.sources.pace = 'user';
   }
 
   // 活动类型偏好
@@ -602,6 +629,14 @@ export function extractPreferences(
   if (party) {
     prefs.party = party;
     prefs.sources.party = 'user';
+    // 同行人决定默认节奏：用户自己说了「紧凑/休闲」就不动它。
+    if (prefs.sources.pace === 'default') {
+      const partyPace = paceForParty(party);
+      if (partyPace) {
+        prefs.pace = partyPace;
+        prefs.sources.pace = 'user';
+      }
+    }
   }
 
   const originExplicit = explicit?.origin?.trim();

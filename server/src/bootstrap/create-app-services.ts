@@ -21,7 +21,7 @@ import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorMo
 import { applyPersistedServiceConfig } from "../config/service-config-store.js";
 import { createPictureKit } from "@nextbot/picture";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
-import { createRecommendationCatalog, fetchLiveProducts, liveProductToRecord } from "../recommendation/index.js";
+import { createRecommendationCatalog } from "../recommendation/index.js";
 import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
 import { pickBestProductImage } from "../services/product-image-scorer.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
@@ -210,7 +210,6 @@ import { ShoppingOrderService } from "../services/shopping-order-service.js";
 import { ShoppingOrderStore } from "../services/shopping-order-store.js";
 import { ShoppingCompareService } from "../services/shopping-compare-service.js";
 import { recordShoppingDecisionPage } from "../services/shopping-decision-store.js";
-import { OfficialPriceGateway } from "../services/shopping-platforms/official-price-source.js";
 import { AgentBrowserService } from "../services/agent-browser-service.js";
 import {
   BookingService,
@@ -931,12 +930,10 @@ export async function createAppServices(): Promise<AppServices> {
   });
   // 初始化购物比价服务（跨平台同款比价 + 降价监控 + 保险/服务调研对比，只读零副作用）。
   // 到价推送 onPriceAlert 在 ProactivityHub 装配段经 setOnPriceAlert 晚接线。
-  // 联盟网关单例：比价线与推荐实时聚合线（shopping.suggest 库未命中兜底）共用。
-  const officialPriceGateway = new OfficialPriceGateway();
+  // 取数链路：Playwright + 已授权 Cookie（内置浏览器兜底）。
   const shoppingCompareService = new ShoppingCompareService({
     shoppingOrderService,
     upstreamSearchService,
-    officialPriceGateway,
     dataDir: join(getDataDir(), "shopping"),
   });
   // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
@@ -2499,20 +2496,6 @@ export async function createAppServices(): Promise<AppServices> {
   );
   registerLifeTools(toolRegistry, scheduleTaskService, scheduleIntentService, {
     catalog: recommendationCatalog,
-    // 库未命中 → 联盟 API 实时聚合兜底（推荐数据源 P1-A 决策：实时聚合为主、
-    // 种子库为冷启动缓存）：拉在售商品转 ProductRecord 落库缓存后重检索，
-    // 与比价线共用同一 OfficialPriceGateway 单例；8s 死线在 fetchLiveProducts 内。
-    liveSourcing: async (query, budget) => {
-      const live = await fetchLiveProducts(
-        { gateway: officialPriceGateway },
-        query,
-        { budgetMax: budget },
-      );
-      return {
-        records: live.products.map((p) => liveProductToRecord(p, query)),
-        notes: live.notes,
-      };
-    },
     // 缺图候选多图网搜（图片三优先级第二级）：searchImages 拿 3 张真实图源并
     // 转存 PNG（本地相对路径），交给 pickProductImage 做 VLM 主体图质检。
     // 转存落固定共享命名空间（非触发用户个人目录）：照片按 productId 进程级

@@ -1,0 +1,895 @@
+{
+  "steps": [
+    {
+      "name": "create",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "gathering",
+        "say": "成都三天，下周末我按周六出发算～先确认下同行的人，节奏我一并定好。",
+        "cards": [
+          {
+            "type": "choice",
+            "id": "party",
+            "stage": "同行人",
+            "title": "这次和谁一起去？",
+            "multi": false,
+            "options": [
+              "和伴侣",
+              "和朋友",
+              "带爸妈",
+              "一个人"
+            ],
+            "infer": {
+              "和伴侣": {
+                "pace": "松弛",
+                "detail": "每天 2–3 站 · 慢一点出门 · 留午休",
+                "options": [
+                  "松弛",
+                  "均衡",
+                  "紧凑"
+                ]
+              },
+              "和朋友": {
+                "pace": "紧凑",
+                "detail": "每天 4 站 · 早出晚归",
+                "options": [
+                  "松弛",
+                  "均衡",
+                  "紧凑"
+                ]
+              },
+              "带爸妈": {
+                "pace": "松弛",
+                "detail": "每天 2–3 站 · 慢一点出门 · 留午休",
+                "options": [
+                  "松弛",
+                  "均衡",
+                  "紧凑"
+                ]
+              },
+              "一个人": {
+                "pace": "均衡",
+                "detail": "每天 3 站 · 正常作息",
+                "options": [
+                  "松弛",
+                  "均衡",
+                  "紧凑"
+                ]
+              }
+            },
+            "progress": {
+              "done": 3,
+              "total": 5,
+              "summary": "成都 · 北京出发 · 3天"
+            }
+          }
+        ],
+        "draft": null,
+        "budget": null
+      }
+    },
+    {
+      "name": "turn1",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "gathering",
+        "say": "两个人出行，我按松弛节奏排：每天两三个点，不赶。",
+        "cards": [
+          {
+            "type": "choice",
+            "id": "budget",
+            "stage": "预算",
+            "title": "这趟想花得松点还是省点？",
+            "multi": false,
+            "options": [
+              "经济 · 能省则省",
+              "舒适 · 性价比",
+              "品质 · 住好吃好",
+              "豪华 · 不将就"
+            ],
+            "placeholder": "或直接说个大概预算",
+            "allowNote": true,
+            "progress": {
+              "done": 3,
+              "total": 4,
+              "summary": "成都 · 3天 · 女朋友 · 松弛慢逛"
+            }
+          }
+        ],
+        "draft": null,
+        "budget": null
+      }
+    },
+    {
+      "name": "turn2",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "guide_ready",
+        "say": "成都的候选整理好了：勾掉不想要的，我再按你选的地点排行程、核实时价。",
+        "cards": [
+          {
+            "type": "guide",
+            "stage": "挑一挑",
+            "title": "成都 · 先挑想去的地方",
+            "destination": "成都",
+            "cats": [
+              {
+                "key": "view",
+                "label": "必玩景点",
+                "items": [
+                  {
+                    "name": "都江堰景区",
+                    "rec": 96,
+                    "rating": 4.8,
+                    "intro": "都江堰景区，位于都江堰市城西岷江干流上，由秦国蜀郡太守李冰及其子于西元前256年左右修建，是目前中国保存完整的古代水利工程。工程由都江堰景区鱼嘴分水堤、飞沙堰溢洪道、宝瓶口引水口三大主体工程和百丈堤、人字堤等附属工程构成，把汹涌的岷江分隔成外江和內江，外江排洪，內江引水灌溉，使川西平原成为了“天府之国”。\n\n都江堰景区碧水浩荡、危崖奇峰、古木参天的佳自然风光",
+                    "photos": [
+                      "/travel/media/assets/poi-ef778669319f/5d57f922d888c52b.jpg"
+                    ],
+                    "address": "公园路",
+                    "price": 68,
+                    "priceNote": "飞猪实时票价，以下单页为准",
+                    "pricePending": false,
+                    "picked": true
+                  },
+                  {
+                    "name": "宽窄巷子景区",
+                    "rec": 96,
+                    "rating": 4.8,
+                    "intro": "宽窄巷子位于四川省成都市青羊区长顺街附近，由宽巷子、窄巷子、井巷子平行排列组成，全为青黛砖瓦的仿古四合院落，这里也是成都遗留下来的较成规模的清朝古街道，与大慈寺、文殊院一起并称为成都三大历史文化名城保护街区。里面的小店都很精致，能够感受到老成都的特色。有很多高档餐厅，有的餐厅很有古朴的味道。美中不足的是商业气息非常浓厚，长假的时候人太多太拥挤。",
+                    "photos": [
+                      "/travel/media/assets/poi-07de28661463/a526df953594a5a3.jpg"
+                    ],
+                    "address": "少城街道金河路口宽窄巷子",
+                    "price": 0,
+                    "priceNote": "免费景点",
+                    "pricePending": false,
+                    "picked": true
+                  },
+                  {
+                    "name": "川西竹海景区",
+                    "rec": 92,
+                    "rating": 4.6,
+                    "intro": "景区，位于邛崃市 · 游客评分 4.6",
+                    "photos": [
+                      "/travel/media/assets/poi-e2feca4d02f7/479718a8bef83c92.jpg"
+                    ],
+                    "address": "平乐镇茶马古道中段",
+                    "price": null,
+                    "priceNote": "实时票价查询失败，待核价",
+                    "pricePending": true,
+                    "picked": true
+                  },
+                  {
+                    "name": "麓湖水线公园",
+                    "rec": 92,
+                    "rating": 4.6,
+                    "intro": "公园，位于四川天府新区成都直管区 · 游客评分 4.6",
+                    "photos": [
+                      "/travel/media/assets/poi-41c7fa64d597/a8ea75420999d951.jpg"
+                    ],
+                    "address": "麓湖中路西段",
+                    "price": null,
+                    "priceNote": "实时票价查询失败，待核价",
+                    "pricePending": true,
+                    "picked": false
+                  },
+                  {
+                    "name": "千佛山景区",
+                    "rec": 90,
+                    "rating": 4.5,
+                    "intro": "自然风光，位于大邑县 · 游客评分 4.5 · 适合慢逛拍照",
+                    "photos": [
+                      "/travel/media/assets/poi-d7c96cc09db1/f4d8d5ed47280b58.jpg"
+                    ],
+                    "address": "花水湾镇风景区花水湾温泉度假区内",
+                    "price": null,
+                    "priceNote": "实时票价查询失败，待核价",
+                    "pricePending": true,
+                    "picked": false
+                  },
+                  {
+                    "name": "香脂湖公园",
+                    "rec": 90,
+                    "rating": 4.5,
+                    "intro": "公园，位于郫都区 · 游客评分 4.5",
+                    "photos": [
+                      "/travel/media/assets/poi-d6a2609178d6/cafdcfdfc6c02913.jpg"
+                    ],
+                    "address": "府河庭院南侧250米",
+                    "price": null,
+                    "priceNote": "实时票价查询失败，待核价",
+                    "pricePending": true,
+                    "picked": false
+                  }
+                ]
+              },
+              {
+                "key": "stay",
+                "label": "住宿推荐",
+                "items": [
+                  {
+                    "name": "NOX酒店(成都春熙路太古里店)",
+                    "rec": 96,
+                    "rating": 4.8,
+                    "intro": "经济型酒店，位于猛追湾 · 住客评分 4.8",
+                    "photos": [
+                      "/travel/media/assets/poi-bd579c05f76f/b7f80caa55eaf25b.jpg"
+                    ],
+                    "price": 158,
+                    "priceNote": "飞猪实时房价，以下单页为准",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "CYBO君亭尚品酒店(成都春熙路天府广场店)",
+                    "rec": 96,
+                    "rating": 4.8,
+                    "intro": "舒适型酒店，位于顺城街 · 住客评分 4.8",
+                    "photos": [
+                      "/travel/media/assets/poi-6e5089158069/8fecbd5841f382c5.jpg"
+                    ],
+                    "address": "上翔街35号附3号",
+                    "price": 213,
+                    "priceNote": "飞猪实时房价，以下单页为准",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "隐栖堂酒店(成都杜甫草堂光华村地铁站店)",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "高档型酒店，位于草堂 · 住客评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-72f7883279e1/780ff79174d7893b.jpg"
+                    ],
+                    "address": "青华路59号(光华村地铁站F口旁)",
+                    "price": null,
+                    "priceNote": "未取到该酒店实时价，待核价",
+                    "pricePending": true,
+                    "picked": false
+                  },
+                  {
+                    "name": "FPS·王者之梦赛事电竞酒店(成都春熙路店)",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "电竞酒店酒店，位于春熙路 · 住客评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-c39127345033/5fea8860749a8c28.jpg"
+                    ],
+                    "address": "岳府街60号(太升南路地铁站B口步行310米)",
+                    "price": 27,
+                    "priceNote": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "城市便捷酒店(成都师范学院西南财经大学店)",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "快捷酒店酒店，位于凤溪大道 · 住客评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-bb1119d6ab15/3f3171a6fa455cbc.jpg"
+                    ],
+                    "address": "杨柳东路南段18号(距杨柳河地铁口B站100米)",
+                    "price": 112,
+                    "priceNote": "飞猪实时房价，以下单页为准",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "非羽酒店(成都双流国际机场店)",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "经济型酒店，位于四川天府新区成都直管区 · 住客评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-25e91e80782f/7eb8aee458041ffd.jpg"
+                    ],
+                    "address": "长顺路四段21-27号",
+                    "price": 27,
+                    "priceNote": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考",
+                    "pricePending": false,
+                    "picked": false
+                  }
+                ]
+              },
+              {
+                "key": "food",
+                "label": "美食推荐",
+                "items": [
+                  {
+                    "name": "森宏鱼庄",
+                    "rec": 96,
+                    "rating": 4.8,
+                    "intro": "本地特色，位于新都区 · 评分 4.8",
+                    "photos": [
+                      "/travel/media/assets/poi-f29eb426bffc/7e0f7899b494058f.jpg"
+                    ],
+                    "address": "西朱路甘露村独桥河甘露小学旁",
+                    "price": 82,
+                    "priceNote": "高德人均消费",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "十八里家常鱼庄",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "本地特色，位于四川天府新区 · 评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-e6d9743e3803/8b8ca2ec2022ccb7.jpg"
+                    ],
+                    "address": "白沙镇白沙村6组75号",
+                    "price": 81,
+                    "priceNote": "高德人均消费",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "蜀宴百汇",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "本地特色，位于锦江区 · 评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-17f03c77864a/01239eedc06a3152.jpg"
+                    ],
+                    "address": "三圣街道幸福社区联合四组329号",
+                    "price": null,
+                    "priceNote": "未公布人均，待核价",
+                    "pricePending": true,
+                    "picked": false
+                  },
+                  {
+                    "name": "黑石香村柴火鸡",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "本地特色，位于四川天府新区成都直管区 · 评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-ac12fd62f5c9/388414295d34fe2e.jpg"
+                    ],
+                    "address": "穿心路过铁路桥110米左侧",
+                    "price": 70,
+                    "priceNote": "高德人均消费",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "御苑精品川菜馆",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "本地特色，位于龙舟路 · 评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-bb698bd2a3c0/03b362349cb8f2c4.jpg"
+                    ],
+                    "address": "龙舟路108号秀城大厦2楼",
+                    "price": 80,
+                    "priceNote": "高德人均消费",
+                    "pricePending": false,
+                    "picked": false
+                  },
+                  {
+                    "name": "空港·杏花村花园酒店",
+                    "rec": 94,
+                    "rating": 4.7,
+                    "intro": "本地特色，位于四川天府新区 · 评分 4.7",
+                    "photos": [
+                      "/travel/media/assets/poi-1c493ded5c75/4fc2e851cf2e01e9.jpg"
+                    ],
+                    "address": "广都大道480号",
+                    "price": 99,
+                    "priceNote": "高德人均消费",
+                    "pricePending": false,
+                    "picked": false
+                  }
+                ]
+              }
+            ]
+          }
+        ],
+        "draft": null,
+        "budget": null
+      }
+    },
+    {
+      "name": "guide",
+      "payload": {
+        "view": [
+          "都江堰景区",
+          "宽窄巷子景区"
+        ],
+        "stay": [
+          "NOX酒店(成都春熙路太古里店)"
+        ],
+        "food": [
+          "森宏鱼庄"
+        ]
+      },
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "wishlist_ready",
+        "say": "就按这几处来排：必玩 都江堰景区、宽窄巷子景区；住宿 NOX酒店(成都春熙路太古里店)；美食 森宏鱼庄。还有非去不可、但不在列表里的地方吗？没有就直接算预算。",
+        "cards": [
+          {
+            "type": "wishlist",
+            "stage": "再补一句",
+            "title": "还有非去不可的地方吗？",
+            "sub": "勾选已记下。想加景点、酒店或餐厅，直接写名字（多个用顿号/逗号分隔）；没有就点跳过。",
+            "selected": {
+              "view": [
+                "都江堰景区",
+                "宽窄巷子景区"
+              ],
+              "stay": [
+                "NOX酒店(成都春熙路太古里店)"
+              ],
+              "food": [
+                "森宏鱼庄"
+              ]
+            },
+            "placeholders": {
+              "view": "例如：都江堰、熊猫基地",
+              "stay": "例如：太古里附近的酒店",
+              "food": "例如：陈麻婆豆腐"
+            }
+          }
+        ],
+        "draft": null,
+        "budget": null
+      }
+    },
+    {
+      "name": "extras",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "ready",
+        "say": "加上 都江堰、成都大熊猫繁育研究基地、太古里附近的酒店、陈麻婆豆腐，我去核实时价、排行程和预算。",
+        "cards": [],
+        "draft": null,
+        "budget": null
+      }
+    },
+    {
+      "name": "generate",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "budget_ready",
+        "say": "预算算好了：住宿/门票/餐饮/交通合计约 ¥1,755（含往返大交通，9 项待核价未计入）；2 处待核实已列进最终方案。确认后我再出最终方案。",
+        "cards": [],
+        "draft": null,
+        "budget": {
+          "currency": "CNY",
+          "total": 1755,
+          "original": 1755,
+          "discount": 0,
+          "items": [
+            {
+              "key": "transport",
+              "label": "往返机票（中联航 KN5102）",
+              "amount": 1050,
+              "note": "单价按 1 人计，往返总价，单程约 5 小时，以下单页为准"
+            },
+            {
+              "key": "hotel",
+              "label": "住宿",
+              "amount": 330,
+              "note": "2 晚 · 实时房价"
+            },
+            {
+              "key": "ticket",
+              "label": "门票",
+              "amount": 68,
+              "note": "实时票价"
+            },
+            {
+              "key": "food",
+              "label": "餐饮",
+              "amount": 307,
+              "note": "按每日餐厅人均累计"
+            }
+          ],
+          "pricingMode": "real-api",
+          "warnings": [
+            "价格来自飞猪/高德实时数据，下单时可能因库存/日期小幅波动",
+            "9 个条目未取到实时价，已标「待核价」且不计入合计",
+            "往返机票（中联航 KN5102）已计入合计：单价按 1 人计，往返总价，单程约 5 小时，以下单页为准",
+            "未绑定任何平台账户，价格为非会员参考价；绑定 Booking/Agoda/携程/美团 等平台可享真实会员优惠"
+          ],
+          "pendingItems": 9
+        },
+        "verification": {
+          "summary": "2 处待核实",
+          "checkedAt": "2026-10-25",
+          "issues": [
+            {
+              "level": "info",
+              "kind": "unknown_hours",
+              "day": 2,
+              "stop": 4,
+              "name": "都江堰景区",
+              "message": "都江堰景区 的开放时间没取到，排程按建议游览时长估算",
+              "suggestion": "出发前查官方公众号确认场次与闭馆日"
+            },
+            {
+              "level": "info",
+              "kind": "weather",
+              "day": 0,
+              "stop": 0,
+              "name": "成都",
+              "message": "逐日天气预报获取失败，本次编排未按每日天气调整（早晚时段/室内外）",
+              "suggestion": "可稍后重新生成行程，或出发前查看目的地天气手动微调"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "approve",
+      "status": 200,
+      "json": {
+        "ok": true,
+        "sessionId": "ps-mvnmhxb5-ke79jz",
+        "state": "generated",
+        "say": "方案出好了：每站的时刻、两站间距离、开放与预约提醒都写在卡片里；想改随时告诉我。",
+        "cards": [],
+        "draft": {
+          "planId": "plan-1792920390871",
+          "title": "成都3日游·经济/休闲",
+          "destination": "成都",
+          "startDate": "2026-10-31",
+          "endDate": "2026-11-02",
+          "days": [
+            {
+              "label": "Day 1",
+              "stops": "NOX酒店(成都春熙路太古里店) → 宽窄巷子景区 → 陈麻婆豆腐(南门店) → Bluehaus Cafe&Objects → 成都大熊猫繁育研究基地 → 森宏鱼庄",
+              "date": "2026-10-31",
+              "theme": "吃好喝好",
+              "travelMin": 84,
+              "items": [
+                {
+                  "time": "08:00",
+                  "endTime": "08:30",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165",
+                  "issues": [
+                    "逐日天气预报获取失败，本次编排未按每日天气调整（早晚时段/室内外）（可稍后重新生成行程，或出发前查看目的地天气手动微调）"
+                  ]
+                },
+                {
+                  "time": "09:00",
+                  "endTime": "11:30",
+                  "name": "宽窄巷子景区",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "打车/Grab",
+                    "durationMin": 5,
+                    "distanceKm": 4.666399999999999
+                  },
+                  "visitDuration": 150,
+                  "price": "免费"
+                },
+                {
+                  "time": "11:35",
+                  "endTime": "12:50",
+                  "name": "陈麻婆豆腐(南门店)",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 16,
+                    "distanceKm": 14.996
+                  },
+                  "visitDuration": 75,
+                  "price": "待核价"
+                },
+                {
+                  "time": "13:30",
+                  "endTime": "14:15",
+                  "name": "Bluehaus Cafe&Objects",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 16,
+                    "distanceKm": 14.534
+                  },
+                  "visitDuration": 45,
+                  "price": "待核价"
+                },
+                {
+                  "time": "14:15",
+                  "endTime": "16:45",
+                  "name": "成都大熊猫繁育研究基地",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 21,
+                    "distanceKm": 15.2307
+                  },
+                  "visitDuration": 150,
+                  "price": "待核价"
+                },
+                {
+                  "time": "17:36",
+                  "endTime": "18:51",
+                  "name": "森宏鱼庄",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 26,
+                    "distanceKm": 20.901799999999998
+                  },
+                  "visitDuration": 75,
+                  "price": "¥82"
+                },
+                {
+                  "time": "19:21",
+                  "endTime": "19:51",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165"
+                }
+              ]
+            },
+            {
+              "label": "Day 2",
+              "stops": "NOX酒店(成都春熙路太古里店) → 樱桃山旅游景区 → 稻香村鱼庄 → 不二山宗·躺岛咖啡 → 川西竹海景区 → 薇轩庭院私房菜.川式下午茶(太古里店)",
+              "date": "2026-11-01",
+              "theme": "吃好喝好",
+              "travelMin": 279,
+              "items": [
+                {
+                  "time": "08:30",
+                  "endTime": "09:00",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165"
+                },
+                {
+                  "time": "09:00",
+                  "endTime": "11:30",
+                  "name": "樱桃山旅游景区",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 68,
+                    "distanceKm": 87.9488
+                  },
+                  "visitDuration": 150,
+                  "price": "免费"
+                },
+                {
+                  "time": "12:38",
+                  "endTime": "13:53",
+                  "name": "稻香村鱼庄",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 37,
+                    "distanceKm": 35.1232
+                  },
+                  "visitDuration": 75,
+                  "price": "¥94"
+                },
+                {
+                  "time": "13:53",
+                  "endTime": "14:38",
+                  "name": "不二山宗·躺岛咖啡",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 49,
+                    "distanceKm": 48.631099999999996
+                  },
+                  "visitDuration": 45,
+                  "price": "待核价"
+                },
+                {
+                  "time": "14:38",
+                  "endTime": "17:08",
+                  "name": "川西竹海景区",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 48,
+                    "distanceKm": 56.0689
+                  },
+                  "visitDuration": 150,
+                  "price": "待核价"
+                },
+                {
+                  "time": "18:26",
+                  "endTime": "19:41",
+                  "name": "薇轩庭院私房菜.川式下午茶(太古里店)",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 77,
+                    "distanceKm": 103.64739999999999
+                  },
+                  "visitDuration": 75,
+                  "price": "¥131"
+                },
+                {
+                  "time": "20:11",
+                  "endTime": "20:41",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165"
+                }
+              ]
+            },
+            {
+              "label": "Day 3",
+              "stops": "NOX酒店(成都春熙路太古里店) → 香脂湖公园 → 印象泰和园(望丛西路店) → 空山咖啡 → 都江堰景区 → 泉佳乐冷水鱼庄(小鱼洞店)",
+              "date": "2026-11-02",
+              "theme": "吃好喝好",
+              "travelMin": 130,
+              "items": [
+                {
+                  "time": "08:30",
+                  "endTime": "09:00",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165"
+                },
+                {
+                  "time": "09:00",
+                  "endTime": "11:30",
+                  "name": "香脂湖公园",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 22,
+                    "distanceKm": 25.0517
+                  },
+                  "visitDuration": 150,
+                  "price": "待核价"
+                },
+                {
+                  "time": "11:52",
+                  "endTime": "13:07",
+                  "name": "印象泰和园(望丛西路店)",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 14,
+                    "distanceKm": 11.72
+                  },
+                  "visitDuration": 75,
+                  "price": "待核价"
+                },
+                {
+                  "time": "13:30",
+                  "endTime": "14:15",
+                  "name": "空山咖啡",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 31,
+                    "distanceKm": 40.0567
+                  },
+                  "visitDuration": 45,
+                  "price": "待核价"
+                },
+                {
+                  "time": "14:15",
+                  "endTime": "16:45",
+                  "name": "都江堰景区",
+                  "type": "attraction",
+                  "leg": {
+                    "mode": "包车/网约车",
+                    "durationMin": 19,
+                    "distanceKm": 14.5227
+                  },
+                  "visitDuration": 150,
+                  "price": "¥68",
+                  "issues": [
+                    "都江堰景区 的开放时间没取到，排程按建议游览时长估算（出发前查官方公众号确认场次与闭馆日）"
+                  ]
+                },
+                {
+                  "time": "17:34",
+                  "endTime": "18:49",
+                  "name": "泉佳乐冷水鱼庄(小鱼洞店)",
+                  "type": "restaurant",
+                  "leg": {
+                    "mode": "城际交通",
+                    "durationMin": 44,
+                    "distanceKm": 47.6479
+                  },
+                  "visitDuration": 75,
+                  "price": "待核价"
+                },
+                {
+                  "time": "19:19",
+                  "endTime": "19:49",
+                  "name": "NOX酒店(成都春熙路太古里店)",
+                  "type": "hotel",
+                  "visitDuration": 30,
+                  "openingHours": "24小时前台 · 14:00入住 12:00退房",
+                  "booking": "旺季建议提前2周以上预订",
+                  "price": "¥165"
+                }
+              ]
+            }
+          ],
+          "totalCost": 1755,
+          "verification": {
+            "summary": "2 处待核实",
+            "checkedAt": "2026-10-25",
+            "issues": [
+              {
+                "level": "info",
+                "kind": "unknown_hours",
+                "day": 2,
+                "stop": 4,
+                "name": "都江堰景区",
+                "message": "都江堰景区 的开放时间没取到，排程按建议游览时长估算",
+                "suggestion": "出发前查官方公众号确认场次与闭馆日"
+              },
+              {
+                "level": "info",
+                "kind": "weather",
+                "day": 0,
+                "stop": 0,
+                "name": "成都",
+                "message": "逐日天气预报获取失败，本次编排未按每日天气调整（早晚时段/室内外）",
+                "suggestion": "可稍后重新生成行程，或出发前查看目的地天气手动微调"
+              }
+            ]
+          }
+        },
+        "budget": null,
+        "verification": {
+          "summary": "2 处待核实",
+          "checkedAt": "2026-10-25",
+          "issues": [
+            {
+              "level": "info",
+              "kind": "unknown_hours",
+              "day": 2,
+              "stop": 4,
+              "name": "都江堰景区",
+              "message": "都江堰景区 的开放时间没取到，排程按建议游览时长估算",
+              "suggestion": "出发前查官方公众号确认场次与闭馆日"
+            },
+            {
+              "level": "info",
+              "kind": "weather",
+              "day": 0,
+              "stop": 0,
+              "name": "成都",
+              "message": "逐日天气预报获取失败，本次编排未按每日天气调整（早晚时段/室内外）",
+              "suggestion": "可稍后重新生成行程，或出发前查看目的地天气手动微调"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

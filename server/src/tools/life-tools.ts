@@ -17,7 +17,6 @@ import {
   buildSuggestion,
   type ProductCatalog,
 } from "../recommendation/index.js";
-import type { ProductRecord } from "../recommendation/product-catalog.js";
 import {
   applyPersonalization,
   buildPersonalizationUserPrompt,
@@ -50,14 +49,6 @@ export interface SuggestPersonalizationDeps {
     deadlineMs: number,
   ) => Promise<string | null>;
   /**
-   * 库未命中时的实时聚合端口（联盟 API，方案 P1-A）：返回标准化商品记录
-   * （内部已转 ProductRecord 并带 source=live）与溯源 notes；8s 死线由端口内保证。
-   */
-  liveSourcing?: (
-    query: string,
-    budget?: number,
-  ) => Promise<{ records: ProductRecord[]; notes: string[] }>;
-  /**
    * 真实口碑聚合端口（P3：小红书 UGC，归属主推商品）：返回 null=无口碑
    * （alias 未配置/失败/空），卡口碑区整体不渲染；6s 死线由 handler 保证。
    */
@@ -77,7 +68,7 @@ type SuggestImageCache = Map<string, { url: string | null; cachedAt: number }>;
 
 /**
  * 对无图候选并行补图（有图候选不动——官方/商品库一手图优先于网搜图）。
- * 图片三优先级：联盟官方主图（live 记录自带，此处天然有图）＞多图网搜＋
+ * 图片三优先级：商品库主图＞多图网搜＋
  * VLM 选主体图（webImageCandidates + pickProductImage）＞单图网搜（旧路径）。
  * VLM 选图超时/失败/全负分时取首图兜底，不阻断推荐。
  */
@@ -182,29 +173,12 @@ export function registerLifeTools(
     // ① 确定性检索：商品库真实数据圈定候选（视频/价格/对比表都出自这里；
     //    图片出自官方主图/商品库 + 缺图时网搜补齐）
     let recommendation = buildSuggestion(suggestDeps.catalog, { item, budget });
-    // ①.2 库未命中 → 实时聚合兜底（方案 P1-A，2026-10-05 拍板：实时聚合为主、
-    //    种子库为冷启动缓存）：联盟 API 拉在售商品落库缓存后重检索。
-    //    端口内 8s 死线；未配置凭据/全失败返回空，保持「库无此品」的诚实话术。
-    const liveNotes: string[] = [];
-    if (!recommendation && suggestDeps.liveSourcing) {
-      try {
-        const live = await suggestDeps.liveSourcing(item, budget);
-        liveNotes.push(...(live.notes ?? []));
-        if (live.records.length > 0) {
-          suggestDeps.catalog.upsertLive(live.records);
-          recommendation = buildSuggestion(suggestDeps.catalog, { item, budget });
-        }
-      } catch {
-        // 实时聚合失败降级：与未命中同样如实告知，不阻断工具
-      }
-    }
     if (!recommendation) {
       return {
         ok: true,
         summary: `商品库中「${item}」无匹配商品`,
         item,
         budget,
-        ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
         suggestion: "如实告知库里没有匹配商品，可给泛选购建议；不编造在售商品。",
       };
     }
@@ -280,7 +254,6 @@ export function registerLifeTools(
             recommendation: personalized,
             suggestionText: buildAdvisorSuggestionText(personalized),
             personalized: applied,
-            ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
           };
         }
       } catch {
@@ -294,7 +267,6 @@ export function registerLifeTools(
       budget,
       recommendation,
       suggestionText: buildAdvisorSuggestionText(recommendation),
-      ...(liveNotes.length > 0 ? { notes: liveNotes } : {}),
     };
   });
 

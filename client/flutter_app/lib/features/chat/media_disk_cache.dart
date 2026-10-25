@@ -200,6 +200,7 @@ class CachedMediaImage extends StatefulWidget {
     this.height,
     this.alignment = Alignment.center,
     this.filterQuality,
+    this.cacheWidth,
     this.gaplessPlayback = false,
     this.loadingBuilder,
     this.errorBuilder,
@@ -211,6 +212,10 @@ class CachedMediaImage extends StatefulWidget {
   final double? height;
   final AlignmentGeometry alignment;
   final FilterQuality? filterQuality;
+
+  /// 解码宽度（物理像素）。缩略图窗按显示宽度的 3~4 倍解码，既清晰又不
+  /// 把 4000px 原图整张塞进内存。
+  final int? cacheWidth;
   final bool gaplessPlayback;
   final WidgetBuilder? loadingBuilder;
   final Widget Function(BuildContext, Object error, StackTrace?)? errorBuilder;
@@ -244,6 +249,7 @@ class _CachedMediaImageState extends State<CachedMediaImage> {
       height: widget.height,
       alignment: widget.alignment,
       filterQuality: widget.filterQuality ?? FilterQuality.medium,
+      cacheWidth: widget.cacheWidth,
       gaplessPlayback: widget.gaplessPlayback,
       loadingBuilder: withLoading
           ? (BuildContext context, Widget child, ImageChunkEvent? progress) {
@@ -274,6 +280,7 @@ class _CachedMediaImageState extends State<CachedMediaImage> {
             height: widget.height,
             alignment: widget.alignment,
             filterQuality: widget.filterQuality ?? FilterQuality.medium,
+            cacheWidth: widget.cacheWidth,
             gaplessPlayback: true,
             errorBuilder: widget.errorBuilder != null
                 ? (BuildContext context, Object e, StackTrace? s) =>

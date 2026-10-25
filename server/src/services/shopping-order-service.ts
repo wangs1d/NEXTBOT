@@ -223,7 +223,7 @@ export class ShoppingOrderService {
     run: (page: Page, mode: "shared" | "headless") => Promise<ShoppingOrderResult>,
     opts: {
       interactiveLogin?: boolean;
-      /** 跳过内置浏览器路径（多平台比价的非首位平台，防排队拖死工具预算）。 */
+      /** Playwright+Cookie 优先（比价/后台取数，防排队拖死工具预算）。 */
       preferHeadless?: boolean;
       /** 页面获取不可用时的自定义兜底（如 track 回退本地订单记录）。 */
       onUnavailable?: (err: ShoppingPageUnavailableError) => ShoppingOrderResult;
@@ -240,7 +240,7 @@ export class ShoppingOrderService {
       lease = await this.browserExecutor.acquirePage(actorId, platform, targetUrl, {
         cookies,
         interactiveLogin,
-        disableSharedBrowser: opts.preferHeadless === true,
+        preferHeadless: opts.preferHeadless === true,
       });
     } catch (err) {
       if (err instanceof ShoppingPageUnavailableError) {

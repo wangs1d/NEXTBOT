@@ -159,6 +159,11 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       rec: num(x.rec) ?? 0,
       rating: num(x.rating) ?? 0,
       photos: Array.isArray(x.photos) ? x.photos.map((u) => str(u)).filter(Boolean).slice(0, 3) : [],
+      intro: str(x.intro),
+      price: typeof x.price === "number" ? x.price : null,
+      priceNote: str(x.priceNote),
+      pricePending: x.pricePending === true,
+      address: str(x.address),
       picked,
     });
     const cats = [
@@ -395,11 +400,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       ...(ugcPayload && ((ugcPayload.mentions ?? 0) > 0 || (ugcPayload.posts?.length ?? 0) > 0)
         ? { ugc: ugcPayload }
         : {}),
-      footer:
-        pickHeadline ||
-        (rec.source === "live"
-          ? "实时在售价来自联盟接口，以实际渠道为准"
-          : "参数来自商品库，价格以实际渠道为准"),
+      footer: pickHeadline || "参数来自商品库，价格以实际渠道为准",
     };
   },
 
@@ -499,8 +500,8 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   },
 
   // 跨平台比价结果卡（2026-10-24 升级：图 + 可点行 + 决策页入口）。
-  // 每组一行：缩略图（联盟 API 官方图）+ 最低价 + 平台 + 商品名 + 店铺 +
-  // 疑似同款标注 + 数据源标注；行带 offer.url 整行可点跳平台商品页；
+  // 每组一行：缩略图 + 最低价 + 平台 + 商品名 + 店铺 + 疑似同款标注；
+  // 行带 offer.url 整行可点跳平台商品页；
   // 服务端存档了决策页时追加「打开比价决策页」行（决策页 = 大图/报价/口碑一页看全）。
   "shopping.compare.prices": (r) => {
     const groups = Array.isArray(r.groups) ? r.groups : [];
@@ -519,7 +520,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const shop = str(best.shop);
       const url = str(best.url);
       const image = str(best.imageUrl) || str(rec.imageUrl);
-      const official = str(best.source) === "official_api";
       const similar = rec.matchType === "similar";
       const priceText = price != null ? `¥${price}` : "价格待查";
       const parts = [
@@ -529,7 +529,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         shop ? `（${shop.slice(0, 12)}）` : "",
         similar ? "（疑似同款）" : "",
         offers.length > 1 ? ` 等${offers.length}家` : "",
-        official ? "  [官方API]" : "",
       ].filter(Boolean);
       items.push({
         type: "num",

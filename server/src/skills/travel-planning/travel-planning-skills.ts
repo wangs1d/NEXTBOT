@@ -624,7 +624,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       outputSchema: {
         ok: "是否成功",
         destination: "目的地",
-        view: "景点候选 [{name,rating,rec,address,tags,latitude,longitude,photos[]}]",
+        view: "景点候选 [{name,rating,rec,address,tags,latitude,longitude,photos[],intro,price,priceNote,pricePending}]",
         stay: "住宿候选",
         food: "美食候选",
         fromCache: "POI 是否命中缓存",

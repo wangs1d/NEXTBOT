@@ -29,15 +29,6 @@ export function createRecommendationCatalog(dataDir: string): ProductCatalog {
 
 export { buildAdvisorSuggestionText } from "./suggest-text.js";
 export {
-  fetchLiveProducts,
-  liveProductToRecord,
-  dedupeByNormalizedTitle,
-  platformLabel,
-  type LiveProduct,
-  type LiveFetchResult,
-  type LiveSourcingDeps,
-} from "./live-sourcing.js";
-export {
   aggregateXiaohongshuUgc,
   parseUgcPosts,
   summarizeUgc,

@@ -104,6 +104,8 @@ export interface PriceQuote {
   lastUpdated: string;
   /** 备注/警告（如"估算价，建议核对"） */
   note?: string;
+  /** true=实时价没查到，金额不可信（展示「待核价」且不计入合计） */
+  pricePending?: boolean;
 }
 
 export interface PricingContext {
@@ -213,6 +215,46 @@ export class PricingService {
             : `${country.label} · ${cuisine}`),
       priceSource: override ? 'list' : undefined,
     });
+  }
+
+  /**
+   * 用实时价（飞猪/高德）构造报价：不再查静态基价表，会员/绑定平台折扣照常叠加。
+   */
+  quoteLivePrice(
+    basePrice: number,
+    type: 'hotel' | 'attraction' | 'restaurant',
+    poiName: string,
+    ctx: PricingContext,
+    extra: { note?: string; priceSource?: PriceSource },
+  ): PriceQuote {
+    return this._buildQuote(
+      Math.max(0, Math.round(basePrice)),
+      type,
+      poiName,
+      ctx,
+      { season: 'shoulder', rate: 1, label: '实时价' },
+      { priceSource: 'api', ...extra },
+    );
+  }
+
+  /** 实时价缺失的占位报价：金额置 0 且标记 pending，汇总时剔除并单列「待核价」。 */
+  quotePending(
+    type: 'hotel' | 'attraction' | 'restaurant',
+    poiName: string,
+    ctx: PricingContext,
+    note: string,
+  ): PriceQuote {
+    return {
+      currency: this._resolveCountry(ctx.destination).currency,
+      originalPrice: 0,
+      finalPrice: 0,
+      discount: 0,
+      breakdown: {},
+      priceSource: 'estimated',
+      lastUpdated: new Date().toISOString(),
+      note,
+      pricePending: true,
+    };
   }
 
   /**
@@ -622,6 +664,7 @@ export class PricingService {
  *  - 免费：免费
  */
 export function formatQuotePriceInfo(q: PriceQuote): string {
+  if (q.pricePending) return '待核价';
   if (q.originalPrice === 0) return '免费';
   const fmt = (n: number) => `¥${n.toLocaleString('zh-CN')}`;
   if (q.discount > 0) {

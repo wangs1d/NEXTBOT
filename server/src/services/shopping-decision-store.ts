@@ -24,7 +24,6 @@ export interface ShoppingDecisionPayload {
       shop?: string;
       url?: string;
       imageUrl?: string;
-      source?: "official_api" | "browser";
       fetchedAt?: number;
     }>;
   }>;

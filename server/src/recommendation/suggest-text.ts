@@ -26,11 +26,6 @@ export function buildAdvisorSuggestionText(result: SuggestResult): string {
       lines.push(`  视频：${v.title}${v.url ? `（${v.url}）` : ""}`);
     }
   }
-  if (result.source) {
-    lines.push(
-      `数据来源：${result.source === "live" ? "联盟API实时在售价（以实际渠道为准）" : "商品库参考价（以实际渠道为准）"}`,
-    );
-  }
   if (result.compare && result.compare.rows.length > 0) {
     lines.push("对比：");
     for (const row of result.compare.rows) {

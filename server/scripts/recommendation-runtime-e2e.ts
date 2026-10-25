@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { mkdtemp, rm } from "node:fs/promises";
 
-import { createRecommendationCatalog, liveProductToRecord } from "../src/recommendation/index.js";
+import { createRecommendationCatalog } from "../src/recommendation/index.js";
 import { registerLifeTools } from "../src/tools/life-tools.js";
 import type { ToolRegistry } from "../src/tools/tool-registry.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
@@ -257,7 +257,6 @@ console.log("\n[场景7] 多图网搜 + VLM 选主体图（智能手表，库内
 const multiQueries: Array<{ q: string; limit: number }> = [];
 const pickedRounds: string[][] = [];
 const tmpDir7 = await mkdtemp(join(tmpdir(), "e2e-cat7-"));
-const tmpDir8 = await mkdtemp(join(tmpdir(), "e2e-cat8-"));
 {
   const r7 = new ToolRegistry();
   registerLifeTools(r7, {} as never, {} as never, {
@@ -295,63 +294,7 @@ const tmpDir8 = await mkdtemp(join(tmpdir(), "e2e-cat8-"));
   check("每候选一轮 VLM 打分", pickedRounds.length === (r7raw.result.recommendation?.candidates?.length ?? 0));
 }
 
-// ── 场景 8：库未命中 → 实时聚合兜底（联盟 API；落库缓存二次命中） ──
-// 查询词带运行级后缀：落库缓存是产品行为（前次 E2E 落库的记录会直接命中），
-// 唯一 query 保证每轮 E2E 都真正走到「库未命中 → 实时聚合」路径。
-console.log("\n[场景8] 实时聚合兜底（库外品类，种子库无此品类）");
-{
-  const item8 = "空气炸锅";
-  const r8 = new ToolRegistry();
-  const liveCalls: string[] = [];
-  registerLifeTools(r8, {} as never, {} as never, {
-    catalog: createRecommendationCatalog(tmpDir8),
-    liveSourcing: async (query, budget) => {
-      liveCalls.push(`${query}:${budget ?? ""}`);
-      return {
-        // 与 fetchLiveProducts 真实行为一致：按实时价升序返回
-        records: [
-          liveProductToRecord({ platform: "taobao", itemId: "air-t1", title: "空气炸锅 4.5L 机械旋钮", price: 399 }, query),
-          liveProductToRecord({ platform: "jd", itemId: "air-j1", title: "空气炸锅 5.5L 视窗大容量", price: 599, imageUrl: "https://img.example/jd/air.jpg", shop: "京东自营" }, query),
-          liveProductToRecord({ platform: "pdd", itemId: "air-p1", title: "空气炸锅 6.5L 双区 独立控温", price: 899 }, query),
-        ],
-        notes: ["jd/taobao/pdd：ok"],
-      };
-    },
-  });
-  const exec8 = (
-    r8 as unknown as {
-      execute: (name: string, input: Record<string, unknown>, ctx: unknown) => Promise<{ ok: boolean; result: Record<string, unknown> }>;
-    }
-  ).execute.bind(r8);
-  const r8raw = (await exec8("shopping.suggest", { item: item8, budget: 1000 }, { sessionId: "e2e-local_user" })) as {
-    ok: boolean;
-    result: {
-      recommendation?: {
-        candidates: Array<{ productId: string; priceLabel: string; image?: string }>;
-        source?: string;
-        pick?: { productId: string; headline: string };
-        alternatives?: Array<{ productId: string; whenChoose: string }>;
-      };
-      notes?: string[];
-      suggestionText?: string;
-    };
-  };
-  check("工具执行成功", r8raw.ok === true);
-  const rec8 = r8raw.result.recommendation;
-  check("实时聚合出 3 款（全部预算内）", rec8?.candidates?.length === 3);
-  check("source=live", rec8?.source === "live");
-  check("主推为实时价最低款（399）", rec8?.pick?.productId === rec8?.candidates?.[0]?.productId && rec8.candidates[0]!.priceLabel.includes("399"));
-  check("备选定位（什么时候选它）", (rec8?.alternatives?.length ?? 0) >= 1);
-  check("溯源 notes 透传", (r8raw.result.notes?.length ?? 0) > 0);
-  check("官方主图直达（联盟 imageUrl 外链）", rec8?.candidates?.some((c) => c.image === "https://img.example/jd/air.jpg") === true);
-  check("建议文本含实时来源说明", (r8raw.result.suggestionText ?? "").includes("联盟API"));
-  // 落库缓存：二次查询不再触发实时聚合
-  await exec8("shopping.suggest", { item: item8, budget: 1000 }, { sessionId: "e2e-local_user" });
-  check("落库缓存生效（二次查询零实时调用）", liveCalls.length === 1);
-}
-
 console.log(failed === 0 ? "\n全部通过 ✓" : `\n${failed} 项失败 ✗`);
-// 清理场景 7/8 的临时 catalog 目录（断言已在内存中完成）
+// 清理场景 7 的临时 catalog 目录（断言已在内存中完成）
 await rm(tmpDir7, { recursive: true, force: true }).catch(() => {});
-await rm(tmpDir8, { recursive: true, force: true }).catch(() => {});
 process.exit(failed === 0 ? 0 : 1);

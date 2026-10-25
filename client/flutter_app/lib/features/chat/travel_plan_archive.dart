@@ -2,7 +2,7 @@ import "dart:async" show unawaited;
 import "dart:convert";
 import "dart:io" show Platform;
 import "dart:math" as math;
-import "dart:ui" show ImageFilter;
+import "dart:ui" show FontFeature, ImageFilter;
 
 import "package:flutter/material.dart";
 import "package:flutter/services.dart" show Clipboard, ClipboardData;
@@ -10,12 +10,15 @@ import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
 import "../../core/theme/app_theme.dart";
+import "../../core/utils/link_utils.dart";
 import "media_disk_cache.dart";
 import "travel_plan_mobile_page.dart";
 import "travel_plan_models.dart";
 import "travel_plan_panel.dart";
 import "travel_plan_window.dart";
 import "travel_theme.dart";
+
+part "travel_ticket_book.dart";
 
 // ═══════════════════════════════════════════════════════════════════
 // 旅游界面 v3（应用内「常用工具 → 行程」入口）· 左侧 tab 双空间
@@ -41,8 +44,13 @@ const double _kTabRailWidth = 64;
 /// 对话内容最大宽度（规划页单栏阅读宽度，比主对话更聚焦）。
 const double _kContentMaxWidth = 720;
 
-/// 阶段卡宽度：与主对话行程卡（agent_result_card）同宽。
-const double _kCardWidth = 460;
+/// 阶段卡宽度：铺满 720 内容列并留出呼吸边（窄窗时随列收缩）。
+const double _kCardWidth = 660;
+
+/// 卡片规范：16 圆角 / 16 内边距 / 主按钮 10 圆角。
+const double _kCardRadius = 16;
+const double _kCardPad = 16;
+const double _kBtnRadius = 10;
 
 /// 规划页字体：内嵌 HarmonyOS Sans SC（开口大、小字更清透），回退 MiSans/系统。
 const String _kFontFamily = "HarmonyOS Sans SC";
@@ -463,7 +471,9 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   /// 刷新左栏列表（规划生成新行程后由规划流回调）。
   void _refresh() {
     if (!mounted) return;
-    setState(() => _future = _fetchSummaries());
+    setState(() {
+      _future = _fetchSummaries();
+    });
   }
 
   @override
@@ -690,6 +700,12 @@ class _ArchivePane extends StatelessWidget {
                             fontSize: 12.5,
                             fontWeight: FontWeight.w700,
                             color: c.text2)),
+                    const Spacer(),
+                    if (_lastTripLabel(plans).isNotEmpty)
+                      Text(
+                        _lastTripLabel(plans),
+                        style: _monoStyle(7.5, c.muted, spacing: 1.5),
+                      ),
                   ],
                 ),
               ),
@@ -820,419 +836,40 @@ class _RailSegs extends StatelessWidget {
   }
 }
 
-/// 当前分段的行程卡列表。
-class _RailList extends StatelessWidget {
-  const _RailList({
-    required this.colors,
-    required this.plans,
-    required this.seg,
-    required this.onOpen,
-    required this.onShare,
-    required this.onDelete,
-  });
-
-  final _StageColors colors;
-  final List<_PlanSummary> plans;
-  final int seg;
-  final ValueChanged<_PlanSummary> onOpen;
-  final ValueChanged<_PlanSummary> onShare;
-  final ValueChanged<_PlanSummary> onDelete;
-
-  static const List<String> _emptyHints = <String>[
-    "暂无进行中的行程\n规划一个，出发后它会出现在这里",
-    "暂无即将出发的行程\n确定日期后行程会提前出现在这里",
-    "还没有往期行程\n走完的旅行会自动归档到这里",
-  ];
-
-  @override
-  Widget build(BuildContext context) {
-    final List<_PlanSummary> items = <_PlanSummary>[
-      for (final _PlanSummary s in plans)
-        if (s.bucket == seg) s,
-    ];
-    if (items.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 28),
-          child: Text(
-            _emptyHints[seg],
-            textAlign: TextAlign.center,
-            style: TextStyle(fontSize: 12, height: 1.8, color: colors.muted),
-          ),
-        ),
-      );
-    }
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
-      child: LayoutBuilder(
-        builder: (BuildContext context, BoxConstraints cons) {
-          final double maxW = cons.maxWidth;
-          final int n = maxW >= 980 ? 3 : (maxW >= 620 ? 2 : 1);
-          final double w = ((maxW - (n - 1) * 12) / n).clamp(236.0, 420.0);
-          return Wrap(
-            spacing: 12,
-            runSpacing: 14,
-            children: <Widget>[
-              for (int i = 0; i < items.length; i++)
-                SizedBox(
-                  width: w,
-                  child: _TripCard(
-                    colors: colors,
-                    summary: items[i],
-                    tilt: (i.isEven ? -1 : 1) * 0.006,
-                    onOpen: () => onOpen(items[i]),
-                    onShare: () => onShare(items[i]),
-                    onDelete: () => onDelete(items[i]),
-                  ),
-                ),
-            ],
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// 行程卡：左缘状态色条 + 封面（往期置灰）+ 状态徽章。
-class _TripCard extends StatelessWidget {
-  const _TripCard({
-    required this.colors,
-    required this.summary,
-    this.tilt = 0,
-    required this.onOpen,
-    required this.onShare,
-    required this.onDelete,
-  });
-
-  final _StageColors colors;
-  final _PlanSummary summary;
-
-  /// 交错微倾角(弧度):票根墙收藏感,由列表按奇偶传入。
-  final double tilt;
-  final VoidCallback onOpen;
-  final VoidCallback onShare;
-  final VoidCallback onDelete;
-
-  @override
-  Widget build(BuildContext context) {
-    final _StageColors colors = this.colors;
-    final bool ongoing = summary.bucket == 0;
-    final bool upcoming = summary.bucket == 1;
-    final bool past = summary.bucket == 2;
-    // 顶条状态色:进行中=青→绿 / 即将出发=橙 / 往期=灰。
-    final Color barColor = ongoing
-        ? colors.accent
-        : upcoming
-            ? colors.orange
-            : colors.muted;
-    final Color barColor2 = ongoing
-        ? colors.green
-        : upcoming
-            ? colors.orange.withValues(alpha: 0.55)
-            : colors.muted.withValues(alpha: 0.3);
-    final String digits =
-        summary.planId.replaceAll(RegExp(r"[^0-9]"), "");
-    final String ticketNo =
-        "NB-${digits.length >= 4 ? digits.substring(digits.length - 4) : digits.padLeft(4, "0")}";
-    // 状态胶囊:进行中=Day 进度 / 即将出发=倒计时 / 往期=归档。
-    final String pillText = ongoing
-        ? (summary.progressLabel.isEmpty ? "行程进行中" : "${summary.progressLabel} · 进行中")
-        : upcoming
-            ? (summary.countdownLabel.isEmpty ? "即将出发" : "${summary.countdownLabel} · 即将出发")
-            : "已完成 · 已归档";
-    final Color pillColor = ongoing ? colors.accent : upcoming ? colors.orange : colors.green;
-    final String dateText = past && summary.endDate.isNotEmpty
-        ? "${summary.endDate.substring(5)} 结束"
-        : summary.dateRangeLabel;
-    final String metaLine = <String>[
-      if (dateText.isNotEmpty) dateText,
-      if (summary.dayCount > 0) "${summary.dayCount} 天",
-      if (summary.costLabel != null) summary.costLabel!,
-    ].join(" · ");
-
-    return Transform.rotate(
-      angle: tilt,
-      child: Opacity(
-        opacity: past ? 0.82 : 1,
-        child: Material(
-          color: colors.card,
-          borderRadius: BorderRadius.circular(16),
-          child: InkWell(
-            onTap: onOpen,
-            borderRadius: BorderRadius.circular(16),
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(16),
-                border: Border.all(color: colors.border),
-              ),
-              child: ClipRRect(
-                borderRadius: BorderRadius.circular(16),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: <Widget>[
-                    // 顶部状态渐变条
-                    Container(
-                      height: 4,
-                      width: double.infinity,
-                      decoration: BoxDecoration(
-                        gradient: LinearGradient(
-                          colors: <Color>[barColor, barColor2],
-                        ),
-                      ),
-                    ),
-                    IntrinsicHeight(
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: <Widget>[
-                          // 票面主体
-                          Expanded(
-                            child: Padding(
-                              padding: const EdgeInsets.fromLTRB(16, 12, 10, 12),
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: <Widget>[
-                                  Row(
-                                    children: <Widget>[
-                                      Expanded(
-                                        child: Text(
-                                          "ITINERARY PASS · $ticketNo",
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                          style: TextStyle(
-                                            fontSize: 8,
-                                            fontWeight: FontWeight.w600,
-                                            letterSpacing: 1.5,
-                                            color: colors.muted,
-                                          ),
-                                        ),
-                                      ),
-                                      _CardMenu(
-                                        colors: colors,
-                                        onShare: onShare,
-                                        onDelete: onDelete,
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Row(
-                                    crossAxisAlignment: CrossAxisAlignment.end,
-                                    children: <Widget>[
-                                      Column(
-                                        crossAxisAlignment: CrossAxisAlignment.start,
-                                        children: <Widget>[
-                                          Text("出发 FROM",
-                                              style: TextStyle(
-                                                  fontSize: 8,
-                                                  letterSpacing: 1,
-                                                  color: colors.muted)),
-                                          const SizedBox(height: 4),
-                                          Text("此地",
-                                              style: TextStyle(
-                                                  fontSize: 15,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: colors.text)),
-                                        ],
-                                      ),
-                                      Padding(
-                                        padding: const EdgeInsets.only(
-                                            left: 10, right: 10, bottom: 3),
-                                        child: Row(
-                                          children: <Widget>[
-                                            Container(
-                                                width: 16,
-                                                height: 1,
-                                                color: colors.accent
-                                                    .withValues(alpha: 0.5)),
-                                            const SizedBox(width: 4),
-                                            Icon(Icons.flight_takeoff,
-                                                size: 12, color: colors.accent),
-                                            const SizedBox(width: 4),
-                                            Container(
-                                                width: 16,
-                                                height: 1,
-                                                color: colors.accent
-                                                    .withValues(alpha: 0.5)),
-                                          ],
-                                        ),
-                                      ),
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment:
-                                              CrossAxisAlignment.start,
-                                          children: <Widget>[
-                                            Text("目的地 TO",
-                                                style: TextStyle(
-                                                    fontSize: 8,
-                                                    letterSpacing: 1,
-                                                    color: colors.muted)),
-                                            const SizedBox(height: 4),
-                                            Text(
-                                              summary.destination.isNotEmpty
-                                                  ? summary.destination
-                                                  : summary.displayTitle,
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
-                                              style: TextStyle(
-                                                  fontSize: 17,
-                                                  fontWeight: FontWeight.w700,
-                                                  color: colors.text),
-                                            ),
-                                          ],
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 10),
-                                  Text(
-                                    metaLine,
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        fontSize: 9.5, color: colors.muted),
-                                  ),
-                                  const SizedBox(height: 8),
-                                  Container(
-                                    padding: const EdgeInsets.symmetric(
-                                        horizontal: 8, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(999),
-                                      border: Border.all(
-                                          color:
-                                              pillColor.withValues(alpha: 0.4)),
-                                      color: pillColor.withValues(alpha: 0.12),
-                                    ),
-                                    child: Row(
-                                      mainAxisSize: MainAxisSize.min,
-                                      children: <Widget>[
-                                        Icon(Icons.verified_outlined,
-                                            size: 10, color: pillColor),
-                                        const SizedBox(width: 4),
-                                        Text(pillText,
-                                            style: TextStyle(
-                                                fontSize: 9,
-                                                fontWeight: FontWeight.w600,
-                                                color: pillColor)),
-                                      ],
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                          // 窄存根:撕线 + 打孔 + 绿勾 + 竖排「已出票」
-                          SizedBox(
-                            width: 58,
-                            child: Stack(
-                              clipBehavior: Clip.none,
-                              children: <Widget>[
-                                Positioned(
-                                  left: -7,
-                                  top: -7,
-                                  child: Container(
-                                    width: 14,
-                                    height: 14,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: colors.side,
-                                      border: Border.all(color: colors.border),
-                                    ),
-                                  ),
-                                ),
-                                Positioned(
-                                  left: -7,
-                                  bottom: -7,
-                                  child: Container(
-                                    width: 14,
-                                    height: 14,
-                                    decoration: BoxDecoration(
-                                      shape: BoxShape.circle,
-                                      color: colors.side,
-                                      border: Border.all(color: colors.border),
-                                    ),
-                                  ),
-                                ),
-                                Center(
-                                  child: Container(
-                                    width: double.infinity,
-                                    decoration: BoxDecoration(
-                                      border: Border(
-                                        left: BorderSide(
-                                            color: colors.border, width: 1.5),
-                                      ),
-                                    ),
-                                    padding: const EdgeInsets.symmetric(
-                                        vertical: 10),
-                                    child: Column(
-                                      mainAxisAlignment: MainAxisAlignment.center,
-                                      children: <Widget>[
-                                        Container(
-                                          width: 26,
-                                          height: 26,
-                                          decoration: BoxDecoration(
-                                            shape: BoxShape.circle,
-                                            color: colors.greenSoft,
-                                            border: Border.all(
-                                                color: colors.green,
-                                                width: 1.5),
-                                          ),
-                                          child: Icon(Icons.check_rounded,
-                                              size: 14, color: colors.green),
-                                        ),
-                                        const SizedBox(height: 6),
-                                        Text(
-                                          "已\n出\n票",
-                                          textAlign: TextAlign.center,
-                                          style: TextStyle(
-                                            fontSize: 8.5,
-                                            letterSpacing: 1,
-                                            height: 1.6,
-                                            color: colors.muted,
-                                          ),
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// 卡片右上角更多菜单（分享码 / 删除）。
 class _CardMenu extends StatelessWidget {
-  const _CardMenu({required this.colors, required this.onShare, required this.onDelete});
+  const _CardMenu({
+    required this.colors,
+    required this.onShare,
+    required this.onDelete,
+    this.foreground,
+    this.iconSize = 15,
+    this.boxSize = 24,
+  });
 
   final _StageColors colors;
   final VoidCallback onShare;
   final VoidCallback onDelete;
+  final Color? foreground;
+  final double iconSize;
+  final double boxSize;
 
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      width: 24,
-      height: 24,
+      width: boxSize,
+      height: boxSize,
       child: PopupMenuButton<String>(
         tooltip: "更多操作",
         padding: EdgeInsets.zero,
-        iconSize: 15,
+        iconSize: iconSize,
         color: colors.card,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(12),
           side: BorderSide(color: colors.borderSoft),
         ),
-        icon: Icon(Icons.more_horiz, size: 15, color: colors.muted),
+        icon: Icon(Icons.more_horiz,
+            size: iconSize, color: foreground ?? colors.muted),
         onSelected: (String action) {
           if (action == "share") onShare();
           if (action == "delete") onDelete();
@@ -1375,6 +1012,30 @@ class _CardProgress {
   final String summary;
 }
 
+/// 选项 → 推断结论（同行人卡：选了同行人，节奏作为结论直接给出来）。
+class _ChoiceInferData {
+  const _ChoiceInferData({
+    required this.pace,
+    required this.detail,
+    required this.options,
+  });
+
+  factory _ChoiceInferData.fromJson(Map<String, dynamic> json) {
+    return _ChoiceInferData(
+      pace: json["pace"]?.toString() ?? "",
+      detail: json["detail"]?.toString() ?? "",
+      options: <String>[
+        for (final dynamic o in (json["options"] as List<dynamic>? ?? const <dynamic>[]))
+          if (o != null) o.toString(),
+      ],
+    );
+  }
+
+  final String pace;
+  final String detail;
+  final List<String> options;
+}
+
 /// 服务端卡片载荷：选择卡。
 class _ChoiceCardData {
   _ChoiceCardData({
@@ -1387,9 +1048,13 @@ class _ChoiceCardData {
     this.placeholder,
     this.allowNote = false,
     this.progress,
+    this.infer = const <String, _ChoiceInferData>{},
   });
 
   factory _ChoiceCardData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> rawInfer = json["infer"] is Map<String, dynamic>
+        ? json["infer"] as Map<String, dynamic>
+        : const <String, dynamic>{};
     return _ChoiceCardData(
       id: json["id"]?.toString() ?? "",
       title: json["title"]?.toString() ?? "",
@@ -1408,6 +1073,11 @@ class _ChoiceCardData {
       progress: json["progress"] is Map<String, dynamic>
           ? _CardProgress.fromJson(json["progress"] as Map<String, dynamic>)
           : null,
+      infer: <String, _ChoiceInferData>{
+        for (final MapEntry<String, dynamic> e in rawInfer.entries)
+          if (e.value is Map<String, dynamic>)
+            e.key: _ChoiceInferData.fromJson(e.value as Map<String, dynamic>),
+      },
     );
   }
 
@@ -1421,6 +1091,302 @@ class _ChoiceCardData {
   final bool allowNote;
   final _CardProgress? progress;
   final String? placeholder;
+
+  /// 选项 → 推断结论（空 = 普通问题卡）。
+  final Map<String, _ChoiceInferData> infer;
+}
+
+/// 筛选卡条目（必玩/住宿/美食候选）：文字介绍 + 实拍图 + 实时价。
+class _GuideItemData {
+  _GuideItemData({
+    required this.name,
+    required this.rec,
+    required this.rating,
+    required this.intro,
+    required this.photos,
+    required this.price,
+    required this.priceNote,
+    required this.pricePending,
+    required this.address,
+    required this.picked,
+  });
+
+  factory _GuideItemData.fromJson(Map<String, dynamic> json) {
+    return _GuideItemData(
+      name: json["name"]?.toString() ?? "",
+      rec: (json["rec"] as num?)?.toInt() ?? 0,
+      rating: (json["rating"] as num?)?.toDouble() ?? 0,
+      intro: json["intro"]?.toString() ?? "",
+      photos: <String>[
+        for (final dynamic p in (json["photos"] as List<dynamic>? ?? const <dynamic>[]))
+          if (p != null && p.toString().isNotEmpty) p.toString(),
+      ],
+      price: (json["price"] as num?)?.toDouble(),
+      priceNote: json["priceNote"]?.toString() ?? "",
+      pricePending: json["pricePending"] == true,
+      address: json["address"]?.toString() ?? "",
+      picked: json["picked"] == true,
+    );
+  }
+
+  final String name;
+  final int rec;
+  final double rating;
+  final String intro;
+  final List<String> photos;
+  final double? price;
+  final String priceNote;
+  final bool pricePending;
+  final String address;
+
+  /// 勾选状态（服务端默认预选必玩 Top3）。
+  bool picked;
+}
+
+class _GuideCatData {
+  _GuideCatData({required this.key, required this.label, required this.items});
+
+  factory _GuideCatData.fromJson(Map<String, dynamic> json) {
+    return _GuideCatData(
+      key: json["key"]?.toString() ?? "",
+      label: json["label"]?.toString() ?? "",
+      items: <_GuideItemData>[
+        for (final dynamic i in (json["items"] as List<dynamic>? ?? const <dynamic>[]))
+          if (i is Map<String, dynamic>) _GuideItemData.fromJson(i),
+      ],
+    );
+  }
+
+  final String key;
+  final String label;
+  final List<_GuideItemData> items;
+}
+
+/// 信息齐后、「出方案」前的筛选卡（必玩景点/住宿推荐/美食推荐）。
+class _GuideCardData {
+  _GuideCardData({
+    required this.stage,
+    required this.title,
+    required this.destination,
+    required this.cats,
+  });
+
+  factory _GuideCardData.fromJson(Map<String, dynamic> json) {
+    return _GuideCardData(
+      stage: json["stage"]?.toString() ?? "挑一挑",
+      title: json["title"]?.toString() ?? "",
+      destination: json["destination"]?.toString() ?? "",
+      cats: <_GuideCatData>[
+        for (final dynamic c in (json["cats"] as List<dynamic>? ?? const <dynamic>[]))
+          if (c is Map<String, dynamic>) _GuideCatData.fromJson(c),
+      ],
+    );
+  }
+
+  final String stage;
+  final String title;
+  final String destination;
+  final List<_GuideCatData> cats;
+}
+
+/// 筛选后的自选补充卡（景点/酒店/餐厅自由输入，可跳过）。
+class _WishlistCardData {
+  _WishlistCardData({
+    required this.stage,
+    required this.title,
+    required this.sub,
+    required this.view,
+    required this.stay,
+    required this.food,
+    required this.placeholders,
+  });
+
+  factory _WishlistCardData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> sel =
+        json["selected"] is Map<String, dynamic>
+            ? json["selected"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    final Map<String, dynamic> ph =
+        json["placeholders"] is Map<String, dynamic>
+            ? json["placeholders"] as Map<String, dynamic>
+            : const <String, dynamic>{};
+    List<String> listOf(Object? v) => <String>[
+          for (final dynamic n in (v as List<dynamic>? ?? const <dynamic>[]))
+            if (n != null && n.toString().isNotEmpty) n.toString(),
+        ];
+    return _WishlistCardData(
+      stage: json["stage"]?.toString() ?? "再补一句",
+      title: json["title"]?.toString() ?? "还有非去不可的地方吗？",
+      sub: json["sub"]?.toString() ?? "",
+      view: listOf(sel["view"]),
+      stay: listOf(sel["stay"]),
+      food: listOf(sel["food"]),
+      placeholders: <String, String>{
+        for (final String key in const <String>["view", "stay", "food"])
+          key: ph[key]?.toString() ?? "",
+      },
+    );
+  }
+
+  final String stage;
+  final String title;
+  final String sub;
+  final List<String> view;
+  final List<String> stay;
+  final List<String> food;
+  final Map<String, String> placeholders;
+
+  bool get hasSelection => view.isNotEmpty || stay.isNotEmpty || food.isNotEmpty;
+}
+
+/// 相邻两站的真实交通腿（OSRM 路网优先，失败降级估算）。
+class _DraftLegData {
+  _DraftLegData({
+    required this.mode,
+    required this.durationMin,
+    this.distanceKm,
+    this.note = "",
+  });
+
+  factory _DraftLegData.fromJson(Map<String, dynamic> json) {
+    return _DraftLegData(
+      mode: json["mode"]?.toString() ?? "",
+      durationMin: (json["durationMin"] as num?)?.toInt() ?? 0,
+      distanceKm: (json["distanceKm"] as num?)?.toDouble(),
+      note: json["note"]?.toString() ?? "",
+    );
+  }
+
+  final String mode;
+  final int durationMin;
+  final double? distanceKm;
+  final String note;
+}
+
+/// 方案里的单站：时刻、交通、开放预约与核实问题。
+class _DraftStopData {
+  _DraftStopData({
+    required this.time,
+    required this.name,
+    required this.type,
+    this.endTime = "",
+    this.leg,
+    this.visitDuration,
+    this.openingHours = "",
+    this.booking = "",
+    this.price = "",
+    this.issues = const <String>[],
+  });
+
+  factory _DraftStopData.fromJson(Map<String, dynamic> json) {
+    return _DraftStopData(
+      time: json["time"]?.toString() ?? "",
+      endTime: json["endTime"]?.toString() ?? "",
+      name: json["name"]?.toString() ?? "",
+      type: json["type"]?.toString() ?? "attraction",
+      leg: json["leg"] is Map<String, dynamic>
+          ? _DraftLegData.fromJson(json["leg"] as Map<String, dynamic>)
+          : null,
+      visitDuration: (json["visitDuration"] as num?)?.toInt(),
+      openingHours: json["openingHours"]?.toString() ?? "",
+      booking: json["booking"]?.toString() ?? "",
+      price: json["price"]?.toString() ?? "",
+      issues: <String>[
+        for (final dynamic x in (json["issues"] as List<dynamic>? ?? const <dynamic>[]))
+          if (x != null && x.toString().isNotEmpty) x.toString(),
+      ],
+    );
+  }
+
+  final String time;
+  final String endTime;
+  final String name;
+  final String type;
+  final _DraftLegData? leg;
+  final int? visitDuration;
+  final String openingHours;
+  final String booking;
+  final String price;
+  final List<String> issues;
+}
+
+class _DraftDayData {
+  _DraftDayData({
+    required this.label,
+    required this.stops,
+    required this.items,
+    this.date = "",
+    this.theme = "",
+    this.weather = "",
+    this.travelMin = 0,
+  });
+
+  factory _DraftDayData.fromJson(Map<String, dynamic> json) {
+    return _DraftDayData(
+      label: json["label"]?.toString() ?? "",
+      stops: json["stops"]?.toString() ?? "",
+      date: json["date"]?.toString() ?? "",
+      theme: json["theme"]?.toString() ?? "",
+      weather: json["weather"]?.toString() ?? "",
+      travelMin: (json["travelMin"] as num?)?.toInt() ?? 0,
+      items: <_DraftStopData>[
+        for (final dynamic i in (json["items"] as List<dynamic>? ?? const <dynamic>[]))
+          if (i is Map<String, dynamic>) _DraftStopData.fromJson(i),
+      ],
+    );
+  }
+
+  final String label;
+  final String stops;
+  final String date;
+  final String theme;
+  final String weather;
+  final int travelMin;
+  final List<_DraftStopData> items;
+}
+
+/// 核实问题（闭馆日/开放时段/停止入场/预约/密度）。
+class _VerificationIssueData {
+  _VerificationIssueData({
+    required this.level,
+    required this.name,
+    required this.message,
+    required this.day,
+    this.suggestion = "",
+  });
+
+  factory _VerificationIssueData.fromJson(Map<String, dynamic> json) {
+    return _VerificationIssueData(
+      level: json["level"]?.toString() ?? "info",
+      name: json["name"]?.toString() ?? "",
+      message: json["message"]?.toString() ?? "",
+      day: (json["day"] as num?)?.toInt() ?? 0,
+      suggestion: json["suggestion"]?.toString() ?? "",
+    );
+  }
+
+  final String level;
+  final String name;
+  final String message;
+  final int day;
+  final String suggestion;
+}
+
+class _VerificationData {
+  _VerificationData({required this.summary, required this.issues});
+
+  factory _VerificationData.fromJson(Map<String, dynamic> json) {
+    return _VerificationData(
+      summary: json["summary"]?.toString() ?? "",
+      issues: <_VerificationIssueData>[
+        for (final dynamic i in (json["issues"] as List<dynamic>? ?? const <dynamic>[]))
+          if (i is Map<String, dynamic>) _VerificationIssueData.fromJson(i),
+      ],
+    );
+  }
+
+  final String summary;
+  final List<_VerificationIssueData> issues;
 }
 
 /// 服务端草案载荷（真实规划结果）。
@@ -1433,6 +1399,8 @@ class _DraftData {
     this.startDate = "",
     this.endDate = "",
     this.totalCost,
+    this.verification,
+    this.wishlistMissed = const <String>[],
   });
 
   factory _DraftData.fromJson(Map<String, dynamic> json) {
@@ -1443,13 +1411,17 @@ class _DraftData {
       startDate: json["startDate"]?.toString() ?? "",
       endDate: json["endDate"]?.toString() ?? "",
       totalCost: (json["totalCost"] as num?)?.toDouble(),
-      days: <({String label, String stops})>[
+      verification: json["verification"] is Map<String, dynamic>
+          ? _VerificationData.fromJson(
+              json["verification"] as Map<String, dynamic>)
+          : null,
+      wishlistMissed: <String>[
+        for (final dynamic n in (json["wishlistMissed"] as List<dynamic>? ?? const <dynamic>[]))
+          if (n != null && n.toString().isNotEmpty) n.toString(),
+      ],
+      days: <_DraftDayData>[
         for (final dynamic d in (json["days"] as List<dynamic>? ?? const <dynamic>[]))
-          if (d is Map<String, dynamic>)
-            (
-              label: d["label"]?.toString() ?? "",
-              stops: d["stops"]?.toString() ?? "",
-            ),
+          if (d is Map<String, dynamic>) _DraftDayData.fromJson(d),
       ],
     );
   }
@@ -1460,7 +1432,9 @@ class _DraftData {
   final String startDate;
   final String endDate;
   final double? totalCost;
-  final List<({String label, String stops})> days;
+  final _VerificationData? verification;
+  final List<String> wishlistMissed;
+  final List<_DraftDayData> days;
 }
 
 /// 服务端预算明细（真实报价；amount=null 表示该类目未接入计价）。
@@ -1496,6 +1470,7 @@ class _BudgetData {
     required this.items,
     required this.pricingMode,
     required this.warnings,
+    this.pendingItems = 0,
   });
 
   factory _BudgetData.fromJson(Map<String, dynamic> json) {
@@ -1513,6 +1488,7 @@ class _BudgetData {
         for (final dynamic w in (json["warnings"] as List<dynamic>? ?? const <dynamic>[]))
           if (w != null) w.toString(),
       ],
+      pendingItems: (json["pendingItems"] as num?)?.toInt() ?? 0,
     );
   }
 
@@ -1523,13 +1499,25 @@ class _BudgetData {
   final List<_BudgetItemData> items;
   final String pricingMode;
   final List<String> warnings;
+  final int pendingItems;
 
   /// 用户已确认这版预算（确认后按钮收起，避免重复出方案）。
   bool approved = false;
 }
 
 /// 对话流条目。
-enum _FlowKind { user, say, weather, choice, typing, budget, draft, error }
+enum _FlowKind {
+  user,
+  say,
+  weather,
+  choice,
+  guide,
+  wishlist,
+  typing,
+  budget,
+  draft,
+  error,
+}
 
 class _FlowItem {
   _FlowItem._(
@@ -1537,6 +1525,8 @@ class _FlowItem {
     this.text = "",
     this.weather,
     this.choice,
+    this.guide,
+    this.wishlist,
     this.budget,
     this.draft,
   });
@@ -1547,6 +1537,10 @@ class _FlowItem {
       _FlowItem._(_FlowKind.weather, weather: data);
   factory _FlowItem.choice(_ChoiceCardData data) =>
       _FlowItem._(_FlowKind.choice, choice: data);
+  factory _FlowItem.guide(_GuideCardData data) =>
+      _FlowItem._(_FlowKind.guide, guide: data);
+  factory _FlowItem.wishlist(_WishlistCardData data) =>
+      _FlowItem._(_FlowKind.wishlist, wishlist: data);
   factory _FlowItem.typing() => _FlowItem._(_FlowKind.typing);
   factory _FlowItem.budget(_BudgetData data) =>
       _FlowItem._(_FlowKind.budget, budget: data);
@@ -1558,6 +1552,8 @@ class _FlowItem {
   final String text;
   final _WeatherCardData? weather;
   final _ChoiceCardData? choice;
+  final _GuideCardData? guide;
+  final _WishlistCardData? wishlist;
   final _BudgetData? budget;
   final _DraftData? draft;
 }
@@ -1582,7 +1578,11 @@ class _TurnResult {
             if (c["type"] == "weather")
               _WeatherCardData.fromJson(c)
             else if (c["type"] == "choice")
-              _ChoiceCardData.fromJson(c),
+              _ChoiceCardData.fromJson(c)
+            else if (c["type"] == "guide")
+              _GuideCardData.fromJson(c)
+            else if (c["type"] == "wishlist")
+              _WishlistCardData.fromJson(c),
       ],
       budget: json["budget"] is Map<String, dynamic>
           ? _BudgetData.fromJson(json["budget"] as Map<String, dynamic>)
@@ -1697,6 +1697,10 @@ class _PlanningStageState extends State<_PlanningStage> {
         _append(_FlowItem.weather(card));
       } else if (card is _ChoiceCardData) {
         _append(_FlowItem.choice(card));
+      } else if (card is _GuideCardData) {
+        _append(_FlowItem.guide(card));
+      } else if (card is _WishlistCardData) {
+        _append(_FlowItem.wishlist(card));
       }
     }
     if (r.budget != null) _append(_FlowItem.budget(r.budget!));
@@ -1711,6 +1715,8 @@ class _PlanningStageState extends State<_PlanningStage> {
     _flow.removeWhere(
       (_FlowItem f) =>
           f.kind == _FlowKind.choice ||
+          f.kind == _FlowKind.guide ||
+          f.kind == _FlowKind.wishlist ||
           f.kind == _FlowKind.budget ||
           f.kind == _FlowKind.draft,
     );
@@ -1834,6 +1840,103 @@ class _PlanningStageState extends State<_PlanningStage> {
           "cardId": card.id,
           "values": values,
           if (note != null && note.trim().isNotEmpty) "note": note.trim(),
+        },
+        _turnTimeout,
+      );
+      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
+      _insertSayAndCards(r);
+      ready = r.state == "ready";
+    } catch (e) {
+      _recoverFromError(e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (ready) await _generate();
+  }
+
+  /// 筛选卡确认：勾选结果作为心愿清单提交，随后进入真实生成（核价）。
+  Future<void> _submitGuide(
+    _FlowItem item,
+    _GuideCardData card, {
+    bool delegate = false,
+  }) async {
+    final String? id = _sessionId;
+    if (id == null || _busy) return;
+    final Map<String, List<String>> selected = <String, List<String>>{
+      "view": <String>[],
+      "stay": <String>[],
+      "food": <String>[],
+    };
+    for (final _GuideCatData cat in card.cats) {
+      for (final _GuideItemData entry in cat.items) {
+        if (entry.picked) selected[cat.key]?.add(entry.name);
+      }
+    }
+    if (!delegate &&
+        selected.values.every((List<String> l) => l.isEmpty)) {
+      return;
+    }
+    setState(() {
+      _flow.remove(item);
+      _dropStaleOutput();
+      _busy = true;
+    });
+    _append(_FlowItem.typing());
+    bool ready = false;
+    try {
+      final Map<String, dynamic>? decoded = await _post(
+        "/travel/plan-session/$id/guide",
+        delegate
+            ? <String, dynamic>{"delegate": true}
+            : <String, dynamic>{
+                "view": selected["view"],
+                "stay": selected["stay"],
+                "food": selected["food"],
+              },
+        _turnTimeout,
+      );
+      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
+      _insertSayAndCards(r);
+      ready = r.state == "ready";
+    } catch (e) {
+      _recoverFromError(e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (ready) await _generate();
+  }
+
+  /// 自选补充：带上用户自己写的景点/酒店/餐厅（可为空=跳过），随后进入核价。
+  Future<void> _submitExtras(
+    _FlowItem item,
+    Map<String, List<String>> extras,
+    String note,
+  ) async {
+    final String? id = _sessionId;
+    if (id == null || _busy) return;
+    final List<String> added = <String>[
+      ...?extras["view"],
+      ...?extras["stay"],
+      ...?extras["food"],
+    ];
+    setState(() {
+      _flow.remove(item);
+      _dropStaleOutput();
+      _busy = true;
+    });
+    _append(_FlowItem.user(
+      added.isEmpty ? "没有补充了，直接算预算" : "还想加：${added.join("、")}",
+    ));
+    _append(_FlowItem.typing());
+    bool ready = false;
+    try {
+      final Map<String, dynamic>? decoded = await _post(
+        "/travel/plan-session/$id/extras",
+        <String, dynamic>{
+          "view": extras["view"] ?? const <String>[],
+          "stay": extras["stay"] ?? const <String>[],
+          "food": extras["food"] ?? const <String>[],
+          if (note.trim().isNotEmpty) "note": note.trim(),
         },
         _turnTimeout,
       );
@@ -2049,10 +2152,19 @@ class _PlanningStageState extends State<_PlanningStage> {
             startDate: "2026-10-26",
             endDate: "2026-10-28",
             totalCost: 1180,
-            days: <({String label, String stops})>[
-              (label: "Day 1", stops: "宽窄巷子 · 人民公园 · 火锅"),
-              (label: "Day 2", stops: "都江堰 · 犀浦夜市"),
-              (label: "Day 3", stops: "大熊猫基地 · 春熙路"),
+            days: <_DraftDayData>[
+              _DraftDayData(
+                  label: "Day 1",
+                  stops: "宽窄巷子 · 人民公园 · 火锅",
+                  items: <_DraftStopData>[]),
+              _DraftDayData(
+                  label: "Day 2",
+                  stops: "都江堰 · 犀浦夜市",
+                  items: <_DraftStopData>[]),
+              _DraftDayData(
+                  label: "Day 3",
+                  stops: "大熊猫基地 · 春熙路",
+                  items: <_DraftStopData>[]),
             ],
           ),
           pricingMode: "real-api",
@@ -2123,12 +2235,54 @@ class _PlanningStageState extends State<_PlanningStage> {
                   colors: c,
                 )
               : null,
+          lead: card.title.isEmpty ? null : card.title,
+          desc: card.infer.isNotEmpty
+              ? "选了同行人，节奏我替你定；不合适点「改」。"
+              : card.multi
+                  ? "可以多选，选完按「就这些」。"
+                  : card.allowNote
+                      ? "点一个就好，也可以直接写。"
+                      : null,
           child: _ChoiceCard(
             card: card,
             colors: c,
             enabled: !_busy,
             onConfirm: (List<String> values, String? note) =>
                 _sendChoice(item, card, values, note),
+          ),
+        );
+      case _FlowKind.guide:
+        final _GuideCardData card = item.guide!;
+        return _StageCardShell(
+          colors: c,
+          icon: Icons.explore_outlined,
+          stage: card.stage.isEmpty ? "挑一挑" : card.stage,
+          trailing: _StageTrailing(text: "图文 · 实时价", colors: c),
+          lead: card.title.isEmpty ? "这三天想给${card.destination}留哪些地方？" : card.title,
+          desc: "勾掉不想要的；想去的没在列表里，下一步可以自己补。",
+          child: _GuideSelectCard(
+            card: card,
+            colors: c,
+            enabled: !_busy,
+            onConfirm: () => _submitGuide(item, card),
+            onDelegate: () => _submitGuide(item, card, delegate: true),
+          ),
+        );
+      case _FlowKind.wishlist:
+        final _WishlistCardData card = item.wishlist!;
+        return _StageCardShell(
+          colors: c,
+          icon: Icons.playlist_add_outlined,
+          stage: card.stage.isEmpty ? "再补一句" : card.stage,
+          trailing: _StageTrailing(text: "可跳过", colors: c),
+          lead: card.title,
+          desc: card.sub.isEmpty ? "写名字就行，几个用顿号隔开；没有就跳过。" : card.sub,
+          child: _WishlistAddCard(
+            card: card,
+            colors: c,
+            enabled: !_busy,
+            onSubmit: (Map<String, List<String>> extras, String note) =>
+                _submitExtras(item, extras, note),
           ),
         );
       case _FlowKind.budget:
@@ -2145,6 +2299,7 @@ class _PlanningStageState extends State<_PlanningStage> {
             colors: c,
             tone: _StageTone.green,
           ),
+          lead: "确认这版预算，我就按它出方案",
           child: _BudgetCard(
             budget: item.budget!,
             colors: c,
@@ -2235,7 +2390,8 @@ class _AgentBlock extends StatelessWidget {
   }
 }
 
-/// 阶段独立卡外壳（对齐「明日速览」卡：圆角 14 + 细描边 + 头部图标/阶段名）。
+/// 阶段独立卡外壳（对齐「明日速览」卡：圆角 16 + 细描边 + 头部图标/阶段名）。
+/// 头部之后先给一句结论（lead），再放内容；用户不必读完整张卡才知道要做什么。
 class _StageCardShell extends StatelessWidget {
   const _StageCardShell({
     required this.colors,
@@ -2243,45 +2399,52 @@ class _StageCardShell extends StatelessWidget {
     required this.stage,
     required this.child,
     this.trailing,
+    this.lead,
+    this.desc,
   });
 
   final _StageColors colors;
   final IconData icon;
   final String stage;
   final Widget? trailing;
+
+  /// 一句话结论（15px 粗体），内容之前先给。
+  final String? lead;
+
+  /// 结论下的补充说明（元信息口径）。
+  final String? desc;
   final Widget child;
 
   @override
   Widget build(BuildContext context) {
-    // 与主对话行程卡（_TravelItineraryCard）同款卡面：surfaceContainerHigh +
-    // 14 圆角 + 细描边，宽度固定 460，不再撑满整列。
     final ColorScheme cs = Theme.of(context).colorScheme;
     return Align(
       alignment: Alignment.centerLeft,
       child: Container(
+        width: double.infinity,
         margin: const EdgeInsets.only(bottom: 16),
         constraints: const BoxConstraints(maxWidth: _kCardWidth),
         decoration: BoxDecoration(
           color: cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+          borderRadius: BorderRadius.circular(_kCardRadius),
+          border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
         ),
-        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        padding: const EdgeInsets.all(_kCardPad),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             Row(
               children: <Widget>[
                 Container(
-                  width: 30,
-                  height: 30,
+                  width: 28,
+                  height: 28,
                   decoration: BoxDecoration(
-                    color: colors.accent.withValues(alpha: 0.16),
-                    shape: BoxShape.circle,
+                    color: colors.accent.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(9),
                   ),
-                  child: Icon(icon, size: 17, color: colors.accent),
+                  child: Icon(icon, size: 16, color: colors.accent),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: 9),
                 Expanded(
                   child: Text(stage,
                       maxLines: 1,
@@ -2297,9 +2460,98 @@ class _StageCardShell extends StatelessWidget {
                 ],
               ],
             ),
+            if (lead != null && lead!.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 12),
+              Text(lead!,
+                  style: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      height: 1.45,
+                      color: colors.text)),
+            ],
+            if (desc != null && desc!.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 5),
+              Text(desc!,
+                  style: TextStyle(
+                      fontSize: 11.5, height: 1.6, color: colors.muted)),
+            ],
             const SizedBox(height: 12),
             child,
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 卡片主操作：实底 + 10 圆角，一张卡只允许一个。
+class _KitPrimaryButton extends StatelessWidget {
+  const _KitPrimaryButton({
+    required this.label,
+    required this.colors,
+    required this.onTap,
+    this.enabled = true,
+  });
+
+  final String label;
+  final _StageColors colors;
+  final VoidCallback? onTap;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool on = enabled && onTap != null;
+    return GestureDetector(
+      onTap: on ? onTap : null,
+      child: Container(
+        height: 36,
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: on ? colors.accentBg : colors.card2,
+          borderRadius: BorderRadius.circular(_kBtnRadius),
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            color: on ? colors.onAccent : colors.muted,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 卡片次操作：纯文字（不描边、不抢主按钮）。
+class _KitTextAction extends StatelessWidget {
+  const _KitTextAction({
+    required this.label,
+    required this.colors,
+    required this.onTap,
+    this.enabled = true,
+  });
+
+  final String label;
+  final _StageColors colors;
+  final VoidCallback? onTap;
+  final bool enabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final bool on = enabled && onTap != null;
+    return GestureDetector(
+      onTap: on ? onTap : null,
+      behavior: HitTestBehavior.opaque,
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 11.5,
+          color: on ? colors.text2 : colors.muted,
+          decoration: TextDecoration.underline,
+          decorationColor: colors.border,
+          decorationStyle: TextDecorationStyle.solid,
         ),
       ),
     );
@@ -2326,14 +2578,14 @@ class _StageTrailing extends StatelessWidget {
     final Color bg =
         tone == _StageTone.green ? colors.greenSoft : colors.accentSoft;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
         color: bg,
-        borderRadius: BorderRadius.circular(9),
+        borderRadius: BorderRadius.circular(7),
       ),
       child: Text(text,
           style: TextStyle(
-              fontSize: 9.5, fontWeight: FontWeight.w600, color: fg)),
+              fontSize: 10.5, fontWeight: FontWeight.w600, color: fg)),
     );
   }
 }
@@ -2344,6 +2596,8 @@ IconData _stageIcon(String id) => switch (id) {
       "transport" => Icons.flight_takeoff_rounded,
       "hotel" => Icons.hotel_outlined,
       "food" => Icons.restaurant_outlined,
+      "party" => Icons.groups_outlined,
+      "pace" => Icons.speed_rounded,
       _ => Icons.tune_rounded,
     };
 
@@ -2489,6 +2743,7 @@ class _WeatherPanel extends StatelessWidget {
 }
 
 /// 串行问题卡（目的地/天数/预算/交通/住房/吃的）：单选点选即答，答完即消失。
+/// 同行人卡例外：选人先亮出推断的节奏，确认（或改）后才回传。
 class _ChoiceCard extends StatefulWidget {
   const _ChoiceCard({
     required this.card,
@@ -2511,6 +2766,16 @@ class _ChoiceCardState extends State<_ChoiceCard> {
   late final TextEditingController _note =
       TextEditingController(text: widget.card.prefill.join(" "));
 
+  /// 用户手动改过的节奏（null = 用同行人推断出来的那档）。
+  String? _paceOverride;
+  bool _showPace = false;
+
+  /// 当前选中的同行人选项对应的推断结论（单选且命中才非空）。
+  _ChoiceInferData? get _inferForSelected {
+    if (widget.card.multi || _selected.length != 1) return null;
+    return widget.card.infer[_selected.first];
+  }
+
   void _tapChip(String option) {
     if (!widget.enabled) return;
     if (widget.card.multi) {
@@ -2519,11 +2784,35 @@ class _ChoiceCardState extends State<_ChoiceCard> {
       });
       return;
     }
-    // 单选：立即回传（服务端回执会带回下一张卡）；已输入的备注一并带上，
+    // 同行人卡：选人只定结论，节奏先亮出来（可直接改），按「就按这个来」才回传。
+    if (widget.card.infer.containsKey(option)) {
+      setState(() {
+        _selected
+          ..clear()
+          ..add(option);
+        _paceOverride = null;
+        _showPace = false;
+      });
+      return;
+    }
+    // 普通单选：立即回传（服务端回执会带回下一张卡）；已输入的备注一并带上，
     // 例如「5天」+「10月1日出发」两者都保留。
     final String note = _note.text.trim();
     widget.onConfirm(
       <String>[option],
+      note.isEmpty ? null : note,
+    );
+  }
+
+  void _confirmInfer() {
+    final _ChoiceInferData? infer = _inferForSelected;
+    if (!widget.enabled || infer == null) return;
+    final String note = _note.text.trim();
+    widget.onConfirm(
+      <String>[
+        _selected.first,
+        if (_paceOverride != null && _paceOverride != infer.pace) _paceOverride!,
+      ],
       note.isEmpty ? null : note,
     );
   }
@@ -2545,20 +2834,19 @@ class _ChoiceCardState extends State<_ChoiceCard> {
     final _StageColors c = widget.colors;
     final _ChoiceCardData card = widget.card;
     final _CardProgress? progress = card.progress;
+    final _ChoiceInferData? infer = _inferForSelected;
     final bool hasNote = _note.text.trim().isNotEmpty;
+    final bool showInferConfirm = infer != null && widget.enabled;
     final bool showConfirm =
         card.multi && widget.enabled && (_selected.isNotEmpty || hasNote);
     final bool showNoteOnly =
-        !card.multi && card.allowNote && widget.enabled && hasNote;
+        !card.multi && infer == null && card.allowNote && widget.enabled && hasNote;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text(card.title,
-            style: TextStyle(
-                fontSize: 13, fontWeight: FontWeight.w700, color: c.text)),
         if (progress != null && progress.summary.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 5),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Text(
               progress.summary,
               maxLines: 1,
@@ -2568,32 +2856,36 @@ class _ChoiceCardState extends State<_ChoiceCard> {
           ),
         if (card.prefill.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.only(bottom: 8),
             child: Text("记得你偏好过：${card.prefill.join("、")}",
                 style: TextStyle(fontSize: 11, color: c.muted)),
           ),
-        const SizedBox(height: 11),
         Wrap(
-          spacing: 7,
-          runSpacing: 7,
+          spacing: 8,
+          runSpacing: 8,
           children: <Widget>[
             for (final String option in card.options)
               GestureDetector(
                 onTap: () => _tapChip(option),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 120),
+                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
                   decoration: BoxDecoration(
                     color: _selected.contains(option) ? c.accentSoft : c.card2,
-                    borderRadius: BorderRadius.circular(15),
-                    border: _selected.contains(option)
-                        ? Border.all(color: c.accentBorder)
-                        : Border.all(color: Colors.transparent),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: _selected.contains(option)
+                          ? c.accentBorder
+                          : c.borderSoft,
+                    ),
                   ),
                   child: Text(
                     option,
                     style: TextStyle(
-                      fontSize: 11.5,
-                      fontWeight: FontWeight.w600,
+                      fontSize: 12.5,
+                      fontWeight: _selected.contains(option)
+                          ? FontWeight.w700
+                          : FontWeight.w600,
                       color: _selected.contains(option) ? c.accent : c.text2,
                     ),
                   ),
@@ -2601,32 +2893,150 @@ class _ChoiceCardState extends State<_ChoiceCard> {
               ),
           ],
         ),
+        if (infer != null) ...<Widget>[
+          const SizedBox(height: 12),
+          Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: c.card2,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: c.borderSoft),
+            ),
+            child: IntrinsicHeight(
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  Container(width: 2.5, color: c.accent),
+                  Expanded(
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: <Widget>[
+                          Row(
+                            children: <Widget>[
+                              Expanded(
+                                child: Text.rich(
+                                  TextSpan(
+                                    style:
+                                        TextStyle(fontSize: 12.5, color: c.text2),
+                                    children: <InlineSpan>[
+                                      const TextSpan(text: "节奏 "),
+                                      TextSpan(
+                                        text: _paceOverride ?? infer.pace,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          fontWeight: FontWeight.w700,
+                                          color: c.accent,
+                                        ),
+                                      ),
+                                      TextSpan(
+                                        text: "　按「${_selected.first}」推断",
+                                        style: TextStyle(
+                                            fontSize: 10.5, color: c.muted),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                              _KitTextAction(
+                                label: _showPace ? "收起" : "改",
+                                colors: c,
+                                enabled: widget.enabled,
+                                onTap: () =>
+                                    setState(() => _showPace = !_showPace),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 4),
+                          Text(
+                            infer.detail,
+                            style: TextStyle(
+                                fontSize: 10.5, height: 1.5, color: c.muted),
+                          ),
+                          if (_showPace) ...<Widget>[
+                            const SizedBox(height: 9),
+                            Wrap(
+                              spacing: 7,
+                              runSpacing: 7,
+                              children: <Widget>[
+                                for (final String pace in infer.options)
+                                  GestureDetector(
+                                    onTap: widget.enabled
+                                        ? () => setState(() {
+                                              _paceOverride =
+                                                  pace == infer.pace ? null : pace;
+                                            })
+                                        : null,
+                                    child: Container(
+                                      padding: const EdgeInsets.symmetric(
+                                          horizontal: 12, vertical: 6),
+                                      decoration: BoxDecoration(
+                                        color:
+                                            (_paceOverride ?? infer.pace) == pace
+                                                ? c.accentSoft
+                                                : c.card,
+                                        borderRadius: BorderRadius.circular(9),
+                                        border: Border.all(
+                                          color:
+                                              (_paceOverride ?? infer.pace) ==
+                                                      pace
+                                                  ? c.accentBorder
+                                                  : c.borderSoft,
+                                        ),
+                                      ),
+                                      child: Text(
+                                        pace,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w600,
+                                          color:
+                                              (_paceOverride ?? infer.pace) ==
+                                                      pace
+                                                  ? c.accent
+                                                  : c.text2,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
         if (card.placeholder != null) ...<Widget>[
-          const SizedBox(height: 9),
+          const SizedBox(height: 10),
           SizedBox(
             width: 280,
-            height: 32,
+            height: 34,
             child: TextField(
               controller: _note,
-              style: TextStyle(fontSize: 11.5, color: c.text),
+              style: TextStyle(fontSize: 12, color: c.text),
               decoration: InputDecoration(
                 isDense: true,
                 contentPadding:
-                    const EdgeInsets.symmetric(horizontal: 11, vertical: 7),
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 filled: true,
                 fillColor: c.card2,
                 hintText: card.placeholder,
-                hintStyle: TextStyle(fontSize: 11.5, color: c.muted),
+                hintStyle: TextStyle(fontSize: 12, color: c.muted),
                 border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(color: c.borderSoft),
                 ),
                 enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(color: c.borderSoft),
                 ),
                 focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(10),
                   borderSide: BorderSide(color: c.accent),
                 ),
               ),
@@ -2634,52 +3044,555 @@ class _ChoiceCardState extends State<_ChoiceCard> {
             ),
           ),
         ],
-        if (showConfirm || showNoteOnly) ...<Widget>[
-          const SizedBox(height: 11),
+        if (showInferConfirm || showConfirm || showNoteOnly) ...<Widget>[
+          const SizedBox(height: 12),
           Row(
             children: <Widget>[
-              GestureDetector(
-                onTap: showConfirm
-                    ? () => widget.onConfirm(
-                          _selected.toList(growable: false),
-                          _note.text,
-                        )
-                    : _submitNoteOnly,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                  decoration: BoxDecoration(
-                    color: c.accentBg,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text(showConfirm ? "就这些" : "就用这个",
-                      style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: c.onAccent)),
-                ),
+              _KitPrimaryButton(
+                label: showInferConfirm
+                    ? "就按这个来"
+                    : showConfirm
+                        ? "就这些"
+                        : "就用这个",
+                colors: c,
+                enabled: widget.enabled,
+                onTap: showInferConfirm
+                    ? _confirmInfer
+                    : showConfirm
+                        ? () => widget.onConfirm(
+                              _selected.toList(growable: false),
+                              _note.text,
+                            )
+                        : _submitNoteOnly,
               ),
               if (card.multi) ...<Widget>[
-                const SizedBox(width: 8),
-                GestureDetector(
+                const SizedBox(width: 14),
+                _KitTextAction(
+                  label: "先不选",
+                  colors: c,
+                  enabled: widget.enabled,
                   onTap: () {
                     setState(_selected.clear);
-                    widget.onConfirm(<String>[], null);
+                    widget.onConfirm(const <String>[], null);
                   },
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                    decoration: BoxDecoration(
-                      border: Border.all(color: c.border),
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text("先不选",
-                        style: TextStyle(fontSize: 11.5, color: c.text2)),
-                  ),
                 ),
               ],
             ],
           ),
         ],
+      ],
+    );
+  }
+}
+
+/// 规划前筛选卡：必玩/住宿/美食三分类，图文 + 实时价 + 勾选。
+/// 数据来自服务端真实 POI 与实时报价；价格缺失显示「待核价」。
+class _GuideSelectCard extends StatefulWidget {
+  const _GuideSelectCard({
+    required this.card,
+    required this.colors,
+    required this.enabled,
+    required this.onConfirm,
+    required this.onDelegate,
+  });
+
+  final _GuideCardData card;
+  final _StageColors colors;
+  final bool enabled;
+  final VoidCallback onConfirm;
+  final VoidCallback onDelegate;
+
+  @override
+  State<_GuideSelectCard> createState() => _GuideSelectCardState();
+}
+
+class _GuideSelectCardState extends State<_GuideSelectCard> {
+  late String _filter;
+
+  @override
+  void initState() {
+    super.initState();
+    _filter = widget.card.cats.isNotEmpty ? widget.card.cats.first.key : "view";
+  }
+
+  List<_GuideItemData> get _visible {
+    for (final _GuideCatData c in widget.card.cats) {
+      if (c.key == _filter) return c.items;
+    }
+    return const <_GuideItemData>[];
+  }
+
+  int get _pickedCount {
+    int n = 0;
+    for (final _GuideCatData c in widget.card.cats) {
+      for (final _GuideItemData i in c.items) {
+        if (i.picked) n++;
+      }
+    }
+    return n;
+  }
+
+  /// 已勾选里还没取到实时价的条目数（只在底栏提示，不吓人）。
+  int get _pendingSelected {
+    int n = 0;
+    for (final _GuideCatData c in widget.card.cats) {
+      for (final _GuideItemData i in c.items) {
+        if (i.picked && (i.pricePending || i.price == null)) n++;
+      }
+    }
+    return n;
+  }
+
+  String _money(double value) => value
+      .round()
+      .toString()
+      .replaceAllMapped(RegExp(r"\B(?=(\d{3})+(?!\d))"), (Match _) => ",");
+
+  String _priceText(_GuideItemData item, String catKey) {
+    if (item.pricePending || item.price == null) return "待核价";
+    if (item.price == 0) return "免费";
+    final String base = "¥${_money(item.price!)}";
+    if (catKey == "food") return "$base/人";
+    if (catKey == "stay") return "$base/晚";
+    return base;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final List<_GuideCatData> cats = widget.card.cats;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (cats.isNotEmpty) ...<Widget>[
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: <Widget>[
+                for (final _GuideCatData cat in cats)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: GestureDetector(
+                      onTap: widget.enabled
+                          ? () => setState(() => _filter = cat.key)
+                          : null,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 12, vertical: 5),
+                        decoration: BoxDecoration(
+                          color: _filter == cat.key
+                              ? c.accentSoft
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(999),
+                          border: Border.all(
+                            color: _filter == cat.key
+                                ? c.accentBorder
+                                : c.borderSoft,
+                          ),
+                        ),
+                        child: Text(
+                          "${cat.label} ${cat.items.length}",
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: _filter == cat.key
+                                ? FontWeight.w700
+                                : FontWeight.w400,
+                            color: _filter == cat.key ? c.accent : c.text2,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        for (int i = 0; i < _visible.length; i += 2)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 10),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Expanded(child: _tile(c, _visible[i], _filter)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: i + 1 < _visible.length
+                      ? _tile(c, _visible[i + 1], _filter)
+                      : const SizedBox.shrink(),
+                ),
+              ],
+            ),
+          ),
+        Row(
+          children: <Widget>[
+            Expanded(
+              child: Text(
+                _pendingSelected > 0
+                    ? "已选 $_pickedCount 处 · $_pendingSelected 项待核价"
+                    : "已选 $_pickedCount 处",
+                style: TextStyle(fontSize: 11, color: c.muted),
+              ),
+            ),
+            _KitTextAction(
+              label: "全部交给你",
+              colors: c,
+              enabled: widget.enabled,
+              onTap: widget.onDelegate,
+            ),
+            const SizedBox(width: 12),
+            _KitPrimaryButton(
+              label: "就按这些排行程",
+              colors: c,
+              enabled: widget.enabled && _pickedCount > 0,
+              onTap: widget.onConfirm,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _tile(_StageColors c, _GuideItemData entry, String catKey) {
+    final bool picked = entry.picked;
+    return GestureDetector(
+      onTap: widget.enabled
+          ? () => setState(() => entry.picked = !entry.picked)
+          : null,
+      child: Container(
+        clipBehavior: Clip.antiAlias,
+        decoration: BoxDecoration(
+          color: picked ? c.accent.withValues(alpha: 0.05) : c.card2,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: picked ? c.accentBorder : c.borderSoft,
+            width: picked ? 1.4 : 1,
+          ),
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            SizedBox(
+              height: 76,
+              width: double.infinity,
+              child: Stack(
+                fit: StackFit.expand,
+                children: <Widget>[
+                  if (entry.photos.isEmpty)
+                    _photoFallback(c, entry.name)
+                  else
+                    CachedMediaImage(
+                      url: LinkUtils.resolveMediaUrl(entry.photos.first),
+                      fit: BoxFit.cover,
+                      errorBuilder:
+                          (BuildContext _, Object __, StackTrace? ___) =>
+                              _photoFallback(c, entry.name),
+                    ),
+                  Positioned(
+                    right: 7,
+                    top: 7,
+                    child: Container(
+                      width: 18,
+                      height: 18,
+                      decoration: BoxDecoration(
+                        color: picked
+                            ? c.accent
+                            : Colors.black.withValues(alpha: 0.38),
+                        shape: BoxShape.circle,
+                        border: picked
+                            ? null
+                            : Border.all(
+                                color: Colors.white.withValues(alpha: 0.45)),
+                      ),
+                      child: picked
+                          ? Icon(Icons.check_rounded,
+                              size: 12, color: c.onAccent)
+                          : null,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(9, 8, 9, 10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Expanded(
+                        child: Text(
+                          entry.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: c.text,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      Text(
+                        _priceText(entry, catKey),
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: entry.pricePending || entry.price == null
+                              ? c.muted
+                              : (entry.price == 0 ? c.green : c.orange),
+                        ),
+                      ),
+                    ],
+                  ),
+                  if (entry.intro.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 4),
+                      child: Text(
+                        entry.intro,
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                            fontSize: 10.5, height: 1.45, color: c.text2),
+                      ),
+                    ),
+                  if (entry.rec > 0 ||
+                      (entry.priceNote.isNotEmpty && !entry.pricePending))
+                    Padding(
+                      padding: const EdgeInsets.only(top: 5),
+                      child: Row(
+                        children: <Widget>[
+                          if (entry.rec > 0)
+                            Text("推荐 ${entry.rec}%",
+                                style: TextStyle(
+                                    fontSize: 9.5,
+                                    fontWeight: FontWeight.w600,
+                                    color: c.green)),
+                          if (entry.rec > 0 &&
+                              entry.priceNote.isNotEmpty &&
+                              !entry.pricePending)
+                            const SizedBox(width: 8),
+                          if (entry.priceNote.isNotEmpty && !entry.pricePending)
+                            Flexible(
+                              child: Text(
+                                entry.priceNote,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style:
+                                    TextStyle(fontSize: 9.5, color: c.muted),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 无实拍图时的兜底：地名首字色块（不能塌成一行纯文字）。
+  Widget _photoFallback(_StageColors c, String name) {
+    final String ch = name.isEmpty ? "?" : name.substring(0, 1);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: <Color>[
+            c.accent.withValues(alpha: 0.22),
+            c.accent.withValues(alpha: 0.05),
+          ],
+        ),
+      ),
+      child: Center(
+        child: Text(
+          ch,
+          style: TextStyle(
+            fontSize: 26,
+            fontWeight: FontWeight.w700,
+            color: c.accent.withValues(alpha: 0.55),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 筛选后的自选补充卡：景点/酒店/餐厅各一行自由输入，也可直接跳过。
+class _WishlistAddCard extends StatefulWidget {
+  const _WishlistAddCard({
+    required this.card,
+    required this.colors,
+    required this.enabled,
+    required this.onSubmit,
+  });
+
+  final _WishlistCardData card;
+  final _StageColors colors;
+  final bool enabled;
+  final void Function(Map<String, List<String>> extras, String note) onSubmit;
+
+  @override
+  State<_WishlistAddCard> createState() => _WishlistAddCardState();
+}
+
+class _WishlistAddCardState extends State<_WishlistAddCard> {
+  final Map<String, TextEditingController> _fields =
+      <String, TextEditingController>{
+    "view": TextEditingController(),
+    "stay": TextEditingController(),
+    "food": TextEditingController(),
+  };
+
+  static const List<String> _keys = <String>["view", "stay", "food"];
+
+  @override
+  void dispose() {
+    for (final TextEditingController c in _fields.values) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  List<String> _parse(String raw) {
+    final List<String> out = <String>[];
+    for (final String part in raw.split(RegExp(r"[、,，;；/\s]+"))) {
+      final String v = part.trim();
+      if (v.length < 2) continue;
+      if (!out.contains(v)) out.add(v);
+    }
+    return out;
+  }
+
+  Map<String, List<String>> get _extras => <String, List<String>>{
+        for (final String key in _keys) key: _parse(_fields[key]!.text),
+      };
+
+  String get _note {
+    final List<String> parts = <String>[];
+    for (final String key in _keys) {
+      final String text = _fields[key]!.text.trim();
+      if (text.isEmpty) continue;
+      parts.add("${_labelOf(key)}：$text");
+    }
+    return parts.join("；");
+  }
+
+  String _labelOf(String key) => switch (key) {
+        "view" => "必去景点",
+        "stay" => "想住",
+        "food" => "想吃",
+        _ => key,
+      };
+
+  IconData _iconOf(String key) => switch (key) {
+        "stay" => Icons.hotel_outlined,
+        "food" => Icons.restaurant_outlined,
+        _ => Icons.place_outlined,
+      };
+
+  bool get _hasInput =>
+      _fields.values.any((TextEditingController x) => x.text.trim().isNotEmpty);
+
+  void _submit() {
+    if (!widget.enabled) return;
+    widget.onSubmit(_extras, _note);
+  }
+
+  void _skip() {
+    if (!widget.enabled) return;
+    widget.onSubmit(const <String, List<String>>{}, "");
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final List<String> picked = <String>[
+      ...widget.card.view,
+      ...widget.card.stay,
+      ...widget.card.food,
+    ];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (picked.isNotEmpty) ...<Widget>[
+          Text("已选", style: TextStyle(fontSize: 10.5, color: c.muted)),
+          const SizedBox(height: 6),
+          Wrap(
+            spacing: 6,
+            runSpacing: 6,
+            children: <Widget>[
+              for (final String n in picked)
+                Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: c.accentSoft,
+                    borderRadius: BorderRadius.circular(999),
+                  ),
+                  child: Text(n,
+                      style: TextStyle(fontSize: 10.5, color: c.accent)),
+                ),
+            ],
+          ),
+          const SizedBox(height: 12),
+        ],
+        for (final String key in _keys)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: TextField(
+              controller: _fields[key],
+              enabled: widget.enabled,
+              onChanged: (_) => setState(() {}),
+              style: TextStyle(fontSize: 12.5, color: c.text),
+              decoration: InputDecoration(
+                isDense: true,
+                filled: true,
+                fillColor: c.card2,
+                hintText: widget.card.placeholders[key] ?? "",
+                hintStyle: TextStyle(fontSize: 11.5, color: c.muted),
+                prefixIcon: Icon(_iconOf(key), size: 15, color: c.muted),
+                prefixIconConstraints:
+                    const BoxConstraints(minWidth: 32, minHeight: 36),
+                contentPadding:
+                    const EdgeInsets.symmetric(horizontal: 8, vertical: 10),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: c.borderSoft),
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: c.borderSoft),
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                  borderSide: BorderSide(color: c.accentBorder),
+                ),
+              ),
+            ),
+          ),
+        const SizedBox(height: 2),
+        Row(
+          children: <Widget>[
+            _KitTextAction(
+              label: "没有补充，直接算",
+              colors: c,
+              enabled: widget.enabled,
+              onTap: _skip,
+            ),
+            const Spacer(),
+            _KitPrimaryButton(
+              label: "加上这些，算预算",
+              colors: c,
+              enabled: widget.enabled && _hasInput,
+              onTap: _submit,
+            ),
+          ],
+        ),
       ],
     );
   }
@@ -2719,9 +3632,19 @@ class _BudgetCard extends StatelessWidget {
     );
   }
 
+  Color _keyColor(BuildContext context, String key) => switch (key) {
+        "transport" => colors.accent,
+        "hotel" => colors.green,
+        "ticket" => TravelPalette.of(context).purple,
+        _ => colors.orange,
+      };
+
   @override
   Widget build(BuildContext context) {
     final _StageColors c = colors;
+    final List<_BudgetItemData> items = budget.items;
+    final double barTotal = items.fold<double>(
+        0, (double s, _BudgetItemData i) => s + (i.amount ?? 0));
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -2731,15 +3654,20 @@ class _BudgetCard extends StatelessWidget {
           children: <Widget>[
             Text(budget.total > 0 ? "$_symbol${_money(budget.total)}" : "待核价",
                 style: TextStyle(
-                    fontSize: 25,
-                    fontWeight: FontWeight.w800,
+                    fontSize: 28,
+                    fontWeight: FontWeight.w700,
+                    letterSpacing: -0.5,
                     color: c.text)),
             const SizedBox(width: 8),
             Expanded(
-              child: Text("住宿 / 门票 / 餐饮合计，大交通按实际购票",
+              child: Text(
+                  items.any((_BudgetItemData i) =>
+                          i.key == "transport" && i.amount != null)
+                      ? "含往返大交通（单人）· 实时价"
+                      : "住宿 / 门票 / 餐饮合计",
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: TextStyle(fontSize: 10, color: c.muted)),
+                  style: TextStyle(fontSize: 10.5, color: c.muted)),
             ),
           ],
         ),
@@ -2749,58 +3677,99 @@ class _BudgetCard extends StatelessWidget {
             child: Text("已省 $_symbol${_money(budget.discount)}",
                 style: TextStyle(fontSize: 10.5, color: c.green)),
           ),
-        const SizedBox(height: 10),
-        Container(
-          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-          decoration: BoxDecoration(
-            color: c.card2,
-            border: Border.all(color: c.borderSoft),
-            borderRadius: BorderRadius.circular(12),
+        const SizedBox(height: 12),
+        if (barTotal > 0) ...<Widget>[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: Row(
+              children: <Widget>[
+                for (final _BudgetItemData item in items)
+                  if ((item.amount ?? 0) > 0)
+                    Expanded(
+                      flex: ((item.amount! / barTotal) * 1000)
+                          .round()
+                          .clamp(1, 1000)
+                          .toInt(),
+                      child: Container(
+                        height: 6,
+                        margin: const EdgeInsets.only(right: 2),
+                        color: _keyColor(context, item.key),
+                      ),
+                    ),
+              ],
+            ),
           ),
-          child: Column(
-            children: <Widget>[
-              for (final _BudgetItemData item in budget.items)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 5),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: <Widget>[
-                            Text(item.label,
-                                style: TextStyle(fontSize: 12, color: c.text2)),
-                            if (item.note.isNotEmpty)
-                              Text(item.note,
-                                  style: TextStyle(fontSize: 9.5, color: c.muted)),
-                          ],
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        item.amount == null
-                            ? "未含"
-                            : "$_symbol${_money(item.amount!)}",
-                        style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w700,
-                          color: item.amount == null ? c.muted : c.text,
-                        ),
-                      ),
-                    ],
+          const SizedBox(height: 10),
+        ],
+        for (final _BudgetItemData item in items)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 5),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: _keyColor(context, item.key)),
+                ),
+                const SizedBox(width: 7),
+                Text(item.label,
+                    style: TextStyle(fontSize: 12, color: c.text2)),
+                if (item.note.isNotEmpty) ...<Widget>[
+                  const SizedBox(width: 7),
+                  Flexible(
+                    child: Text(item.note,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 10, color: c.muted)),
+                  ),
+                ],
+                const SizedBox(width: 10),
+                Text(
+                  item.amount == null
+                      ? "未含"
+                      : "$_symbol${_money(item.amount!)}",
+                  style: TextStyle(
+                    fontSize: 12.5,
+                    fontWeight: FontWeight.w700,
+                    color: item.amount == null ? c.muted : c.text,
                   ),
                 ),
-            ],
+              ],
+            ),
           ),
-        ),
+        if (budget.pendingItems > 0)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            decoration: BoxDecoration(
+              color: c.orange.withValues(alpha: 0.06),
+              borderRadius: BorderRadius.circular(9),
+              border: Border.all(color: c.orange.withValues(alpha: 0.25)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Icon(Icons.info_outline, size: 12, color: c.orange),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    "${budget.pendingItems} 项未取到实时价，标「待核价」且不计入合计",
+                    style: TextStyle(
+                        fontSize: 10.5, height: 1.45, color: c.orange),
+                  ),
+                ),
+              ],
+            ),
+          ),
         if (budget.warnings.isNotEmpty)
           Padding(
-            padding: const EdgeInsets.only(top: 8),
+            padding: const EdgeInsets.only(top: 5),
             child: Text(budget.warnings.first,
                 style: TextStyle(fontSize: 10, height: 1.45, color: c.muted)),
           ),
-        const SizedBox(height: 12),
+        const SizedBox(height: 14),
         if (budget.approved)
           Row(
             children: <Widget>[
@@ -2815,41 +3784,15 @@ class _BudgetCard extends StatelessWidget {
           )
         else
           Row(
+            mainAxisAlignment: MainAxisAlignment.end,
             children: <Widget>[
-              Expanded(
-                child: GestureDetector(
-                  onTap: enabled ? onApprove : null,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(vertical: 11),
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      color: enabled ? c.accentBg : c.card2,
-                      borderRadius: BorderRadius.circular(12),
-                    ),
-                    child: Text("同意，出方案",
-                        style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w800,
-                            color: enabled ? c.onAccent : c.muted)),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 9),
-              GestureDetector(
-                onTap: onAdjust,
-                child: Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: c.border),
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text("再调整",
-                      style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.w600,
-                          color: c.text2)),
-                ),
+              _KitTextAction(label: "再调整", colors: c, onTap: onAdjust),
+              const SizedBox(width: 12),
+              _KitPrimaryButton(
+                label: "同意，出方案",
+                colors: c,
+                enabled: enabled,
+                onTap: onApprove,
               ),
             ],
           ),
@@ -2859,6 +3802,436 @@ class _BudgetCard extends StatelessWidget {
 }
 
 /// 最终规划卡：沿用主对话行程卡的设计（封面海报 + 标题 + 主入口按钮）。
+/// 最终方案明细：逐日逐站的时刻、两站间交通、开放/预约、闭馆与排程核实。
+/// 这是「照着能走」的那一版方案，不只是跳去完整行程的入口。
+class _DraftPlanSection extends StatefulWidget {
+  const _DraftPlanSection({required this.draft, required this.colors});
+
+  final _DraftData draft;
+  final _StageColors colors;
+
+  @override
+  State<_DraftPlanSection> createState() => _DraftPlanSectionState();
+}
+
+class _DraftPlanSectionState extends State<_DraftPlanSection> {
+  /// 折叠的天（默认全展开：用户要的就是一眼看完的整体安排）。
+  final Set<int> _collapsed = <int>{};
+
+  static const List<String> _weekdays = <String>[
+    "周一",
+    "周二",
+    "周三",
+    "周四",
+    "周五",
+    "周六",
+    "周日",
+  ];
+
+  String _dateLabel(String iso) {
+    if (iso.length < 10) return "";
+    final DateTime? d = DateTime.tryParse(iso);
+    if (d == null) return iso.substring(5).replaceAll("-", ".");
+    final String mm = d.month.toString().padLeft(2, "0");
+    final String dd = d.day.toString().padLeft(2, "0");
+    return "$mm.$dd ${_weekdays[(d.weekday - 1).clamp(0, 6)]}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final _VerificationData? v = widget.draft.verification;
+    final List<_DraftDayData> days = widget.draft.days;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (v != null && (v.summary.isNotEmpty || v.issues.isNotEmpty))
+          _buildVerification(c, v),
+        if (v != null && (v.summary.isNotEmpty || v.issues.isNotEmpty))
+          const SizedBox(height: 8),
+        for (int i = 0; i < days.length; i++) _buildDay(c, days[i], i),
+        if (widget.draft.wishlistMissed.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Text(
+              "没排进去：${widget.draft.wishlistMissed.join("、")}（候选池里没找到，可换个名字告诉我）",
+              style: TextStyle(fontSize: 10.5, height: 1.4, color: c.orange),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildVerification(_StageColors c, _VerificationData v) {
+    final List<_VerificationIssueData> issues = <_VerificationIssueData>[
+      ...v.issues,
+    ]..sort((_VerificationIssueData a, _VerificationIssueData b) {
+        int rank(String level) => level == "block" ? 0 : level == "warn" ? 1 : 2;
+        return rank(a.level).compareTo(rank(b.level));
+      });
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: c.orange.withValues(alpha: 0.08),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: c.orange.withValues(alpha: 0.28)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Row(
+            children: <Widget>[
+              Icon(Icons.rule_outlined, size: 14, color: c.orange),
+              const SizedBox(width: 5),
+              Expanded(
+                child: Text(
+                  v.summary.isEmpty ? "出发前核实提醒" : v.summary,
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w700,
+                      color: c.orange),
+                ),
+              ),
+            ],
+          ),
+          for (final _VerificationIssueData issue in issues.take(6))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Icon(
+                    issue.level == "block"
+                        ? Icons.block
+                        : issue.level == "warn"
+                            ? Icons.warning_amber_rounded
+                            : Icons.info_outline,
+                    size: 12,
+                    color: issue.level == "info" ? c.text2 : c.orange,
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      "Day ${issue.day + 1} · "
+                      "${issue.name.isEmpty ? "" : "${issue.name}："}"
+                      "${issue.message}"
+                      "${issue.suggestion.isEmpty ? "" : " → ${issue.suggestion}"}",
+                      style: TextStyle(
+                        fontSize: 10.5,
+                        height: 1.4,
+                        color: issue.level == "info" ? c.text2 : c.orange,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          if (issues.length > 6)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                "另有 ${issues.length - 6} 条核实提醒，可在完整行程里查看",
+                style: TextStyle(fontSize: 10, color: c.muted),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Text(
+              "开放时间/预约规则以官方为准，出发前再确认一次。",
+              style: TextStyle(fontSize: 9.5, color: c.muted),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildDay(_StageColors c, _DraftDayData day, int index) {
+    final bool collapsed = _collapsed.contains(index);
+    final List<_DraftStopData> stops = day.items
+        .where((_DraftStopData s) => s.type != "hotel")
+        .toList(growable: false);
+    String hotel = "";
+    for (final _DraftStopData s in day.items) {
+      if (s.type == "hotel") {
+        hotel = s.name;
+        break;
+      }
+    }
+    final String date = _dateLabel(day.date);
+    final String meta = <String>[
+      if (day.theme.isNotEmpty) day.theme,
+      if (day.weather.isNotEmpty) day.weather,
+    ].join(" · ");
+    return Container(
+      margin: const EdgeInsets.only(bottom: 8),
+      decoration: BoxDecoration(
+        color: c.card2,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: c.borderSoft),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: () => setState(() {
+              if (collapsed) {
+                _collapsed.remove(index);
+              } else {
+                _collapsed.add(index);
+              }
+            }),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 8, 10),
+              child: Row(
+                children: <Widget>[
+                  Text(
+                    day.label,
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w700,
+                        color: c.text),
+                  ),
+                  if (date.isNotEmpty) ...<Widget>[
+                    const SizedBox(width: 7),
+                    Text(date,
+                        style: TextStyle(fontSize: 10.5, color: c.muted)),
+                  ],
+                  const Spacer(),
+                  Text(
+                    "${stops.length} 站 · 路上 ${day.travelMin} 分",
+                    style: TextStyle(fontSize: 10.5, color: c.muted),
+                  ),
+                  const SizedBox(width: 2),
+                  Icon(
+                    collapsed ? Icons.expand_more : Icons.expand_less,
+                    size: 16,
+                    color: c.muted,
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (!collapsed)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  if (meta.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 7),
+                      child: Text(meta,
+                          style:
+                              TextStyle(fontSize: 10.5, color: c.text2)),
+                    ),
+                  if (hotel.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 10),
+                      child: Row(
+                        children: <Widget>[
+                          Icon(Icons.hotel_outlined, size: 12, color: c.muted),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: Text(
+                              "住 $hotel",
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  TextStyle(fontSize: 10.5, color: c.text2),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  if (stops.isEmpty)
+                    Text("当天以休整/自由活动为主",
+                        style: TextStyle(fontSize: 10.5, color: c.muted))
+                  else
+                    for (int i = 0; i < stops.length; i++)
+                      _buildStop(c, stops[i], last: i == stops.length - 1),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStop(_StageColors c, _DraftStopData stop, {required bool last}) {
+    final _DraftLegData? leg = stop.leg;
+    final String legText = leg == null
+        ? ""
+        : "${leg.mode.isEmpty ? "前往" : leg.mode} ${leg.durationMin} 分"
+            "${leg.distanceKm == null ? "" : " · ${leg.distanceKm! >= 10 ? leg.distanceKm!.toStringAsFixed(0) : leg.distanceKm!.toStringAsFixed(1)} km"}";
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        SizedBox(
+          width: 40,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: <Widget>[
+              Text(stop.time,
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: c.text)),
+              if (stop.endTime.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 1),
+                  child: Text(stop.endTime,
+                      style: TextStyle(fontSize: 9.5, color: c.muted)),
+                ),
+            ],
+          ),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: IntrinsicHeight(
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                SizedBox(
+                  width: 8,
+                  child: Column(
+                    children: <Widget>[
+                      Container(
+                        width: 7,
+                        height: 7,
+                        margin: const EdgeInsets.only(top: 5),
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: c.accent,
+                        ),
+                      ),
+                      if (!last)
+                        Expanded(
+                          child: Container(width: 1, color: c.borderSoft),
+                        ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(bottom: last ? 0 : 12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Row(
+                          children: <Widget>[
+                            Expanded(
+                              child: Text(
+                                stop.name,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w600,
+                                    color: c.text),
+                              ),
+                            ),
+                            if (stop.price.isNotEmpty) ...<Widget>[
+                              const SizedBox(width: 6),
+                              Text(
+                                stop.price,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style:
+                                    TextStyle(fontSize: 10.5, color: c.text2),
+                              ),
+                            ],
+                          ],
+                        ),
+                        if (legText.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Row(
+                              children: <Widget>[
+                                Icon(Icons.route_outlined,
+                                    size: 11, color: c.muted),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(legText,
+                                      style: TextStyle(
+                                          fontSize: 10, color: c.muted)),
+                                ),
+                              ],
+                            ),
+                          ),
+                        if (stop.openingHours.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 3),
+                            child: Text(
+                              "开放 ${stop.openingHours}",
+                              style: TextStyle(fontSize: 10, color: c.muted),
+                            ),
+                          ),
+                        if (stop.booking.isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 5),
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 7, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: c.orange.withValues(alpha: 0.08),
+                                borderRadius: BorderRadius.circular(6),
+                                border: Border.all(
+                                    color: c.orange.withValues(alpha: 0.25)),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: <Widget>[
+                                  Icon(Icons.event_available_outlined,
+                                      size: 11, color: c.orange),
+                                  const SizedBox(width: 4),
+                                  Flexible(
+                                    child: Text(stop.booking,
+                                        style: TextStyle(
+                                            fontSize: 10,
+                                            height: 1.4,
+                                            color: c.orange)),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        for (final String issue in stop.issues)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Icon(Icons.error_outline,
+                                    size: 11, color: c.orange),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(issue,
+                                      style: TextStyle(
+                                          fontSize: 10,
+                                          height: 1.4,
+                                          color: c.orange)),
+                                ),
+                              ],
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}
+
 class _DraftCard extends StatefulWidget {
   const _DraftCard({
     required this.draft,
@@ -2922,8 +4295,8 @@ class _DraftCardState extends State<_DraftCard> {
       constraints: const BoxConstraints(maxWidth: _kCardWidth),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(14),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+        borderRadius: BorderRadius.circular(_kCardRadius),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
       ),
       clipBehavior: Clip.antiAlias,
       child: Column(
@@ -2932,7 +4305,7 @@ class _DraftCardState extends State<_DraftCard> {
         children: <Widget>[
           _buildPoster(c, cover, dayCount),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            padding: const EdgeInsets.fromLTRB(_kCardPad, 12, _kCardPad, 14),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
@@ -2996,8 +4369,15 @@ class _DraftCardState extends State<_DraftCard> {
                   ],
                 ),
                 const SizedBox(height: 8),
-                Text("逐日安排、门票和报价都在完整行程里",
+                Text(
+                    draft.days.isEmpty
+                        ? "逐日安排、门票和报价都在完整行程里"
+                        : "下面是照着能走的整体安排；点开完整行程可编辑、看地图",
                     style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                if (draft.days.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 10),
+                  _DraftPlanSection(draft: draft, colors: c),
+                ],
               ],
             ),
           ),

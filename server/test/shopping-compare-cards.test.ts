@@ -1,7 +1,7 @@
 /**
  * 比价卡升级链路测试（2026-10-24）：
  *   1. shopping.compare.prices builder：缩略图（imageUrl）+ 整行可点（url）
- *      + 官方API/疑似同款标注 + 决策页入口行
+ *      + 疑似同款标注 + 决策页入口行
  *   2. shopping.compare.watch builder：建档/列表卡
  *   3. shopping.compare.research builder：可点来源清单 + disclaimer
  *   4. ShoppingCompareService：CompareGroup 代表图透传 + onCompareResult →
@@ -46,7 +46,6 @@ function compareResultFixture(): Record<string, unknown> {
           {
             platform: "拼多多", title: "Sony WH-1000XM5 头戴降噪耳机", priceCny: 1869,
             shop: "百亿补贴", url: "https://pdd.com/xm5", imageUrl: "https://img.example.com/xm5.jpg",
-            source: "official_api",
           },
           { platform: "京东", title: "Sony WH-1000XM5 头戴降噪耳机", priceCny: 1899, url: "https://jd.com/xm5" },
         ],
@@ -64,7 +63,7 @@ function compareResultFixture(): Record<string, unknown> {
   };
 }
 
-test("compare.prices 卡：行带缩略图与可点链接，官方API/疑似同款标注，决策页行", () => {
+test("compare.prices 卡：行带缩略图与可点链接，疑似同款标注，决策页行", () => {
   const p = buildToolCard("shopping.compare.prices", {
     ...compareResultFixture(),
     decisionPageUrl: "/shopping/decision-page?id=abc123",
@@ -78,7 +77,6 @@ test("compare.prices 卡：行带缩略图与可点链接，官方API/疑似同�
   assert.ok(row0.text.includes("¥1869"), `实际：${row0.text}`);
   assert.ok(row0.text.includes("[拼多多]"));
   assert.ok(row0.text.includes("等2家"), `应标注组内报价数：${row0.text}`);
-  assert.ok(row0.text.includes("[官方API]"));
   assert.equal(row0.url, "https://pdd.com/xm5");
   assert.equal(row0.thumbnailUrl, "https://img.example.com/xm5.jpg");
   const row1 = p.items[1]!;
@@ -287,7 +285,7 @@ function decisionPayload(): Record<string, unknown> {
         minPriceCny: 1869,
         imageUrl: "https://img.example.com/xm5.jpg",
         offers: [
-          { platform: "拼多多", title: "Sony WH-1000XM5", priceCny: 1869, url: "https://pdd.com/x", source: "official_api" },
+          { platform: "拼多多", title: "Sony WH-1000XM5", priceCny: 1869, url: "https://pdd.com/x" },
         ],
       },
     ],

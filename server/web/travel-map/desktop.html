@@ -194,6 +194,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
   font-size:25px;font-weight:700;letter-spacing:6px;color:rgba(255,255,255,.10);
   text-shadow:0 2px 16px rgba(0,0,0,.65);white-space:nowrap}
 .map-mark span{font-size:13px;letter-spacing:3px;color:rgba(245,165,82,.32);margin-left:8px}
+/* 底图署名（OSM 数据要求）：不抢视线，常驻右下角 */
+.map-attrib{position:absolute;right:14px;bottom:10px;z-index:4;pointer-events:none;
+  font-size:9.5px;color:rgba(255,255,255,.26);letter-spacing:.2px}
 /* 冷启动（首拉矢量样式/瓦片）占位：避免几秒纯黑，也避免被误读成"界面挂了" */
 .map-loading{position:absolute;inset:0;z-index:3;display:grid;place-items:center;background:#0D0F13;
   color:var(--t3);font-size:12.5px;letter-spacing:.4px;transition:opacity .45s}
@@ -213,7 +216,11 @@ img{display:block;width:100%;height:100%;object-fit:cover}
    22px 圆点（半径 11）的圆心正好落在坐标点上。 */
 .poi{width:0;height:0}
 .poi .wrap{position:absolute;left:0;top:0;display:flex;align-items:center;
-  transform:translate(-11px,-11px);cursor:pointer}
+  transform:translate(-11px,-11px) scale(1);transform-origin:11px 11px;
+  transition:transform .18s cubic-bezier(.2,.8,.2,1);cursor:pointer}
+/* 悬停只做轻微放大（原点在 pin 圆心，坐标不漂）；移出即回到原尺寸 */
+.poi .wrap:hover{transform:translate(-11px,-11px) scale(1.14)}
+.poi:hover{z-index:4}
 .poi .pin{width:22px;height:22px;border-radius:50%;background:var(--card2);border:1.6px solid var(--amberLine);
   color:var(--t2);font-family:var(--num);font-size:11px;font-weight:600;display:grid;place-items:center;
   transition:.2s;flex:0 0 auto}
@@ -280,17 +287,17 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 /* 当前站多图照片条：点小图换主图（主图沿用 .now-photo 的渐变遮罩与角标） */
 .now-strip{display:flex;align-items:stretch;padding:0 2px}
 .now-strip .ns-cnt{flex:0 0 auto;align-self:center;font-family:var(--num);font-size:10.5px;color:var(--t3);
-  line-height:1.55;text-align:right;width:46px}
-.ns-t{flex:0 0 auto;width:37%;aspect-ratio:16/11;border-radius:12px;overflow:hidden;position:relative;cursor:pointer;
+  line-height:1.55;text-align:right;width:46px;margin-right:10px}
+.ns-t{flex:0 0 auto;width:31.5%;aspect-ratio:16/11;border-radius:12px;overflow:hidden;position:relative;cursor:pointer;
   border:1px solid var(--line2);background:#14323C;padding:0;min-width:0;
   transform:rotate(var(--r,0deg));transition:transform .16s;box-shadow:0 6px 16px rgba(0,0,0,.35)}
 /* 交错叠压（小红书式一叠随手撒开的照片）：负 margin 压边 + 中张最上，不整齐并排。
-   注意 strip 首个子元素是「实拍 N 张」计数标签，照片的 nth-child 从 3 起。
+   注意 strip 首个子元素是「实拍 N 张」计数标签，照片从第 2 个子元素起（共 3 张）。
    悬停整叠 → 照片动态散开摊平（露出每张全貌），移开收回成叠。 */
 .ns-t{margin:0 -7px;transition:transform .18s,margin .24s cubic-bezier(.34,1.3,.5,1)}
-.ns-t:nth-child(3){z-index:2}
-.ns-t:nth-child(4){z-index:3}
-.ns-t:nth-child(5){z-index:1}
+.ns-t:nth-child(2){z-index:1}
+.ns-t:nth-child(3){z-index:3}
+.ns-t:nth-child(4){z-index:2}
 .now-strip:hover .ns-t{margin:0 4px}
 .ns-t:hover{z-index:5}
 .ns-t img{width:100%;height:100%;object-fit:cover;display:block}
@@ -435,6 +442,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
             <div class="map-legend" id="mapLegend"></div>
             <div id="map"></div>
             <div class="map-mark" id="mapMark"></div>
+            <div class="map-attrib">© OpenStreetMap · OpenFreeMap</div>
             <div class="map-loading" id="mapLoading">底图加载中…</div>
           </div>
         </div>
@@ -825,12 +833,13 @@ function renderStopNav(items){
    数据口径：图片全部来自载荷 images / 补图接口 photos，缺图走兜底渐变；
    推荐度由站点评分换算（无评分不显示），不虚构「N% 人推荐」统计。
    ═══════════════════════════════════════════════════════════════════ */
-var STRIP_ROT=[-2,1.6,-1.3,1.9];
+var STRIP_ROT=[-2,1.6,-1.3];
 var BUB_ROT=[-2.4,1.8,-1.6];   /* 气泡卡三图簇：与小红书原版同量级 */
 function nowImgsOf(sp){
   var list=(sp.imgs&&sp.imgs.length)?sp.imgs.slice():[];
   if(!list.length&&sp.img)list=[sp.img];
-  return list.slice(0,4);
+  /* 2026-10-25 定调：照片条最多 3 张（4 张会顶出左栏压到右栏文字） */
+  return list.slice(0,3);
 }
 /** 当前站大图 + 照片条；单图站不显示照片条（视觉与旧版一致）。 */
 function setNowGallery(sp){
@@ -839,10 +848,9 @@ function setNowGallery(sp){
   setImg($('nowImg'),$('nowPhoto'),list[sp.imgIdx]||'',sp.n);
   if(!strip)return;
   if(list.length<2){strip.style.display='none';strip.innerHTML='';return;}
-  var total=(sp.imgs&&sp.imgs.length)?sp.imgs.length:(sp.img?1:0);
-  var h='<span class="ns-cnt">实拍<br>'+total+' 张</span>';
+  var h='<span class="ns-cnt">实拍<br>'+list.length+' 张</span>';
   list.forEach(function(u,i){
-    h+='<button class="ns-t'+(i===sp.imgIdx?' on':'')+'" data-k="'+i+'" style="--r:'+STRIP_ROT[i%4]+'deg" title="第 '+(i+1)+' 张">'+
+    h+='<button class="ns-t'+(i===sp.imgIdx?' on':'')+'" data-k="'+i+'" style="--r:'+STRIP_ROT[i%3]+'deg" title="第 '+(i+1)+' 张">'+
        '<img src="'+escHtml(u)+'" alt="" onerror="this.parentNode.style.display=\'none\'"></button>';
   });
   strip.innerHTML=h;
@@ -922,14 +930,15 @@ function placeBubbleByIdx(items,idx){
 /* * ═══════════════════════════════════════════════════════════════════
    真实地图（MapLibre GL）
    ═══════════════════════════════════════════════════════════════════
-   底图：Carto 暗色矢量，走本机 /travel-basemap 代理（磁盘缓存 + 规划完成即预热）。
+   底图：OpenFreeMap 暗色矢量（免费、无 key），走本机 /travel-basemap 代理
+        （磁盘缓存 + 规划完成即预热）。
    站点：当天行程 POI 按真实经纬度落点（编号 + 名称，点击切站）。
    路线：GET /travel-route（OSRM 开放路网，按段选步行/骑行/驾车）取真实几何；
         首次打开该天时白线「依次连接」——逐段生长，连完转流光。
    降级：无坐标的站不上图；某段取不到路网几何 → 该段用直线连并在图例里明示
         「N 段未接路网」，不静默丢段、不假装是真路。 */
 var MAP_STYLE_PATH='/travel-basemap/style/dark';
-var MAP_STYLE_FALLBACK='https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json';
+var MAP_STYLE_FALLBACK='https://tiles.openfreemap.org/styles/dark';
 var ROUTE_SRC='travel-route';
 var LEG_SRC='travel-leg';
 var DASH_SEQ=[[0,4,3],[.5,4,2.5],[1,4,2],[1.5,4,1.5],[2,4,1],[2.5,4,.5],[3,4,0],
@@ -947,36 +956,42 @@ function mapStyleUrl(){
 }
 /** 底图调色（只改 paint/layout，不动几何与数据）。
  *
- * Carto dark-matter 的水域是 #2C353C、陆地是 #0e0e0e —— 两个深色贴在一起，
- * 西湖这种大水面在屏幕上就是"一片黑"，看不出是在湖边；湖名在 z13 只有 9px
- * 灰字，读数接近于无。行程地图的第一职责是让人一眼认出"这是哪"，所以：
- * 水域提成偏青的湖色（与页面 jade 令牌同族）、湖名放大提亮、社区名压暗退后。 */
+ * OpenFreeMap dark 的水域是 rgb(27,27,29)、陆地/背景是 rgb(12,12,12) ——
+ * 两个深色贴在一起，西湖这种大水面在屏幕上就是"一片黑"，看不出是在湖边；
+ * 湖名默认还是近黑字压深灰水，几乎读不出。行程地图的第一职责是让人一眼认出
+ * "这是哪"，所以：水域提成偏青的湖色（与页面 jade 令牌同族）、湖名放大提亮、
+ * 路名与社区名略微提亮/压暗分层。
+ * 图层 id 仍按 Carto 旧 id 保留兜底：直连上游样式（MAP_STYLE_FALLBACK）与
+ * 本机代理样式都走同一套调色。 */
 function tuneBasemap(map){
   var setP=function(id,prop,val){try{if(map.getLayer(id))map.setPaintProperty(id,prop,val);}catch(e){/* 样式版本差异：忽略 */}};
   var setL=function(id,prop,val){try{if(map.getLayer(id))map.setLayoutProperty(id,prop,val);}catch(e){/* ignore */}};
-  // 水：深灰蓝 → 湖青；水岸留一圈更深的影，边界更清楚
+  // 水：近黑 → 湖青（水岸阴影只在旧 Carto 样式里存在，没有就跳过）
   setP('water','fill-color','#17414F');
   setP('water_shadow','fill-color','#07161C');
-  // 湖名/水域名：z13 从 9px 提到 15px，颜色提到可读、描边压深保证压在任何底上都能读
-  setL('watername_lake','text-size',['interpolate',['linear'],['zoom'],8,10,12,13,13,15,16,17]);
+  // 湖名/水域名：默认是近黑字，压深水上等于隐形；提亮 + 加大 + 深描边
+  setP('water_name','text-color','rgba(168,206,216,1)');
+  setP('water_name','text-halo-color','#05202A');
+  setP('water_name','text-halo-width',1.6);
+  setL('water_name','text-size',['interpolate',['linear'],['zoom'],8,10,12,13,13,15,16,17]);
   setP('watername_lake','text-color','rgba(168,206,216,1)');
   setP('watername_lake','text-halo-color','#05202A');
   setP('watername_lake','text-halo-width',1.6);
-  setL('watername_lake_line','text-size',['interpolate',['linear'],['zoom'],8,10,12,12,13,14,16,16]);
-  setP('watername_lake_line','text-color','rgba(132,170,182,1)');
-  setP('watername_lake_line','text-halo-color','#05202A');
-  setP('watername_lake_line','text-halo-width',1.4);
+  setL('watername_lake','text-size',['interpolate',['linear'],['zoom'],8,10,12,13,13,15,16,17]);
+  // 路名：上游 dark 是深灰字压近黑底，远看等于没有；提到可读又不过亮
+  setP('highway_name_other','text-color','rgba(132,132,132,1)');
   // 社区/郊区名：略压暗，把注意力让给站点标签与湖名
-  setP('place_suburbs','text-color','rgba(118,124,134,1)');
-  // 中文行程配中文地名：Carto 默认按 zoom 切字段（z<13 用 {name_en}），于是
-  // 低 zoom 下整张图是 XINGYI / Pingdong / Zerong 这类拉丁文，跟行程里的地点名
-  // 对不上。这里把「地名/水域名/路名」三类图层的字段统一成本地名优先
-  // （name → name_zh → name_en），其余图层（housenumber/poi 等）不动，避免错取字段。
-  var CN_NAME_FIELD=['coalesce',['get','name'],['get','name_zh'],['get','name_en']];
+  ['place_suburb','place_other','place_village','place_town'].forEach(function(id){
+    setP(id,'text-color','rgba(118,124,134,1)');
+  });
+  // 中文行程配中文地名：上游按「拼音 + 本地名」两行输出，这里统一成本地名优先。
+  // 走本机代理时服务端已改写，这段是直连上游样式（无 apiBase）时的兜底。
+  var CN_NAME_FIELD=['coalesce',['get','name:zh'],['get','name'],['get','name:en']];
   var layers=(map.getStyle()||{}).layers||[];
   layers.forEach(function(l){
     if(l.type!=='symbol')return;
-    if(!/^(place_|watername_|roadname_)/.test(l.id))return;
+    var isNameLayer=/^(place_|water_name$|watername_|roadname_|highway_name_)/.test(l.id);
+    if(!isNameLayer||/motorway/.test(l.id))return;   // 高速层是路号（ref），不换
     try{map.setLayoutProperty(l.id,'text-field',CN_NAME_FIELD);}catch(e){/* ignore */}
   });
 }
@@ -1474,9 +1489,9 @@ function enrichLive(sp){
       var wiki=j.wiki&&j.wiki.extract?String(j.wiki.extract):null;
       if(!ph&&!wiki)return;
       if(!sp.img&&ph)sp.img=ph;
-      /* 小红书式多图：补图接口返回几张就收几张（≤4），大图/照片条/气泡卡/胶卷共用 */
+      /* 小红书式多图：补图接口返回几张就收几张（≤3），大图/照片条/气泡卡/胶卷共用 */
       if(j.photos&&j.photos.length){
-        var more=j.photos.map(function(p){return p.thumb||p.full;}).filter(Boolean).slice(0,4);
+        var more=j.photos.map(function(p){return p.thumb||p.full;}).filter(Boolean).slice(0,3);
         if(more.length>((sp.imgs||[]).length))sp.imgs=more;
       }
       if(sp.img)enqueuePreload([sp.img].concat((sp.imgs||[]).slice(1)));
@@ -1514,7 +1529,7 @@ function preloadDayAssets(dayKey){
     var sp=S[id];if(!sp)return;
     if(sp.img){
       (dayKey===state.day?here:later).push(sp.img);
-      (sp.imgs||[]).slice(1,4).forEach(function(u){(dayKey===state.day?here:later).push(u);});
+      (sp.imgs||[]).slice(1,3).forEach(function(u){(dayKey===state.day?here:later).push(u);});
     }
     else enrichLive(sp);   // 缺图站：先补图（补到后经 enqueuePreload 自动入队）
   });

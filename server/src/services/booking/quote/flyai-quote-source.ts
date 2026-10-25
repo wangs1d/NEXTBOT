@@ -16,7 +16,8 @@
  */
 
 import { exec, execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import type {
   QuoteRequest,
@@ -99,13 +100,41 @@ function resolveFlyAiBin(bin: string): string | null {
   const dirs = (process.env.PATH ?? "")
     .split(process.platform === "win32" ? ";" : ":")
     .filter(Boolean);
-  for (const dir of dirs) {
-    for (const ext of exts) {
-      const full = join(dir, bin + ext);
-      if (existsSync(full)) return full;
+  const findIn = (list: string[]): string | null => {
+    for (const dir of list) {
+      if (!dir) continue;
+      for (const ext of exts) {
+        const full = join(dir, bin + ext);
+        if (existsSync(full)) return full;
+      }
     }
+    return null;
+  };
+  const onPath = findIn(dirs);
+  if (onPath) return onPath;
+
+  // 桌面应用从资源管理器启动时 PATH 往往不含 npm 全局目录（本机实测
+  // D:\cache\npm-global 不在 PATH），只靠 PATH 会把已安装的 flyai 判成未安装。
+  // 依次补：NPM_CONFIG_PREFIX → ~/.npmrc 的 prefix → 各平台默认全局目录。
+  const prefixDirs: string[] = [];
+  const envPrefix = process.env.NPM_CONFIG_PREFIX?.trim();
+  if (envPrefix) prefixDirs.push(envPrefix);
+  try {
+    const npmrc = readFileSync(join(homedir(), ".npmrc"), "utf-8");
+    for (const line of npmrc.split(/\r?\n/)) {
+      const m = /^\s*prefix\s*=\s*(.+?)\s*$/.exec(line);
+      if (m?.[1]) prefixDirs.push(m[1].replace(/^["']|["']$/g, ""));
+    }
+  } catch {
+    /* 没有 .npmrc 就走默认目录 */
   }
-  return null;
+  if (process.platform === "win32") {
+    const appData = process.env.APPDATA?.trim();
+    if (appData) prefixDirs.push(join(appData, "npm"));
+  } else {
+    prefixDirs.push("/usr/local/bin", "/usr/local/lib/node_modules/.bin");
+  }
+  return findIn(prefixDirs);
 }
 
 /** 默认 runner：调 PATH 里的 flyai（Windows 下 npm 全局 shim 是 flyai.cmd）。 */
@@ -141,11 +170,11 @@ interface FlyAiEnvelope {
   data?: { itemList?: unknown } | null;
 }
 
-function isRecord(v: unknown): v is Record<string, unknown> {
+export function isRecord(v: unknown): v is Record<string, unknown> {
   return typeof v === "object" && v !== null;
 }
 
-function strOf(rec: Record<string, unknown> | null, key: string): string {
+export function strOf(rec: Record<string, unknown> | null, key: string): string {
   return rec && typeof rec[key] === "string" ? (rec[key] as string).trim() : "";
 }
 
@@ -165,7 +194,7 @@ function itemList(envelope: FlyAiEnvelope): Array<Record<string, unknown>> {
 }
 
 /** "¥618" / "¥400.0" / 618 / "618" → number；体验模式脱敏价（"¥2x"/"¥2xx"）与非数一律 NaN。 */
-function parsePriceCny(v: unknown): number {
+export function parsePriceCny(v: unknown): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : NaN;
   if (typeof v === "string") {
     // 必须是完整数字：脱敏价「¥2x」若宽松匹配会谎报成 ¥2，这里直接拒绝
@@ -184,7 +213,7 @@ function nightsBetween(checkIn?: string, checkOut?: string): number {
 }
 
 /** 公共失败分支：runner 失败 / 非 JSON / status 非 0，一律 ok:false 如实带原因。 */
-async function callFlyAi(
+export async function callFlyAi(
   runner: FlyAiRunner,
   args: string[],
 ): Promise<{ items: Array<Record<string, unknown>>; systemMessage: string } | { error: string }> {

@@ -34,6 +34,12 @@ import { extractDays, extractDestination, extractPreferences } from './intent-pa
 import { addDaysISO, daysFromToday, isValidISODate, localTodayISO } from './travel-date.js';
 import { verifyItinerary, summarizeIssues, type DossierIssue } from './travel-poi-dossier.js';
 import { travelFavoritesStore } from './travel-favorites-store.js';
+import {
+  lookupAttractionPrice,
+  lookupHotelPrice,
+  lookupTransportPrice,
+  restaurantCostOf,
+} from './travel-live-pricing.js';
 import { emitTravelProgress } from './travel-progress-bus.js';
 import { gcj02ToWgs84 } from './coord-transform.js';
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
@@ -385,6 +391,10 @@ export interface PlanningResult {
     boundPlatforms?: BoundPlatform[];
     pricingMode: 'real-api' | 'real-database' | 'estimated';
     warnings: string[];
+    /** 未取到实时价、标「待核价」的条目数（不计入合计） */
+    pendingItems?: number;
+    /** 往返大交通实时价（已计入合计；单人） */
+    transport?: { amount: number; label: string; note: string };
   };
   fromCache: boolean;
   /** 出发日天气一句话摘要（Open-Meteo 实时预报；天气获取失败缺省，前端隐藏天气胶囊） */
@@ -757,6 +767,8 @@ const SCORING = {
     cuisineMatch: 15,
     seasideMatch: 8,
     budgetMatch: 5,
+    /** 筛选卡点名餐厅：高于距离分上限（100×0.6），确保用户勾选的店能排进去 */
+    wishMatch: 80,
     reusePenalty: 10,
   },
 } as const;
@@ -776,6 +788,14 @@ export interface GuideCandidate {
   latitude?: number;
   longitude?: number;
   photos: string[];
+  /** 文字介绍：优先用飞猪官方简介，取不到时按真实属性（等级/商圈/评分/菜系）生成 */
+  intro?: string;
+  /** 实时价（景点门票/酒店房价/餐饮人均）；null=查不到 → 前端标「待核价」 */
+  price?: number | null;
+  /** 价格说明（实时价/市场均价/人均/待核价原因） */
+  priceNote?: string;
+  /** 价格是否为真实可计入报价（false=待核价） */
+  pricePending?: boolean;
 }
 
 export class PlanningService {
@@ -1030,6 +1050,8 @@ export class PlanningService {
       preferences.diningStyle ?? '',
       preferences.party ?? '',
       `${preferences.hotelFocus ?? ''}:${preferences.hotelFocusRef ?? ''}`,
+      // 出发地决定往返大交通实时价，必须进签名，否则换出发地仍返回旧交通价
+      preferences.origin ?? '',
     ]);
     const itinKey =
       `itin|${normalizedDest}|${dayCount}|${startDate}|${prefSig}|${weatherSig}`;
@@ -1128,8 +1150,17 @@ export class PlanningService {
       this.backfillMediaBackground(missing, cacheEntry);
     }
 
-    // 8. 汇总价格
-    const pricingSummary = this._summarizePricing(days, pricingCtx);
+    // 8. 实时计价：静态基价全部替换成飞猪/高德实时价；取不到的标「待核价」
+    this.reportProgress(request.sessionId, "pricing", "正在核对门票/房价/餐饮/大交通实时价…");
+    const livePricing = await this._applyLivePricing(days, {
+      destination: destName,
+      startDate,
+      endDate,
+      ctx: pricingCtx,
+      data: cacheEntry.data,
+      origin: preferences.origin ?? request.origin,
+    });
+    const pricingSummary = this._summarizePricing(days, pricingCtx, livePricing);
 
     // 8.5 剧本式攻略（travel-upgrade-plan）：逐站 why/photoTip/pitfall 标注 + 每日
     //     主题线 + 横向聚合清单（出片/漂亮饭/避雷）。全模板化生成，数据只来自
@@ -1236,6 +1267,51 @@ export class PlanningService {
    * 图源：媒体库已有 → 直接用；未命中 → 必应抓取（并发 6）→ 本地化落盘。
    * 单点失败不带图，宁缺毋假；推荐度 = 评分/5 换算（无评分排后、rec 置 0）。
    */
+  /** 由 POI 的 keytag/星级推导酒店档次（用于同城同档市场均价） */
+  private _hotelTierOfPoi(poi: RawPOI): 'budget' | 'mid' | 'luxury' {
+    const raw = (poi.raw ?? {}) as Record<string, unknown>;
+    const keytag = typeof raw.keytag === 'string' ? raw.keytag : '';
+    const star = Number((raw as { star?: unknown }).star);
+    if (/豪华|五星|五星级/.test(keytag) || star >= 5) return 'luxury';
+    if (/高档|四星|五星|舒适/.test(keytag) || (star >= 3 && star <= 4)) return 'mid';
+    return 'budget';
+  }
+
+  /** 无官方简介时，用真实属性（等级/商圈/评分/菜系）拼一句介绍，不编造卖点。 */
+  private _guideIntro(poi: RawPOI, type: 'view' | 'stay' | 'food'): string {
+    const raw = (poi.raw ?? {}) as Record<string, unknown>;
+    const keytag = typeof raw.keytag === 'string' ? raw.keytag.trim() : '';
+    const area =
+      (typeof raw.business_area === 'string' && raw.business_area.trim()) ||
+      (typeof raw.adname === 'string' && raw.adname.trim()) ||
+      '';
+    const rating = Number(poi.rating) || 0;
+    if (type === 'view') {
+      const kind = keytag || '当地热门景点';
+      const hint = /5A|4A/.test(kind)
+        ? '建议预留半天'
+        : /湖|山|自然|风景/.test(kind)
+          ? '适合慢逛拍照'
+          : /博物馆|纪念馆|古迹|寺/.test(kind)
+            ? '适合午后或雨天'
+            : '';
+      const parts = [kind + (area ? `，位于${area}` : '')];
+      if (rating > 0) parts.push(`游客评分 ${rating.toFixed(1)}`);
+      if (hint) parts.push(hint);
+      return parts.join(' · ');
+    }
+    if (type === 'stay') {
+      const kind = keytag ? `${keytag}酒店` : '酒店';
+      const parts = [kind + (area ? `，位于${area}` : '')];
+      if (rating > 0) parts.push(`住客评分 ${rating.toFixed(1)}`);
+      return parts.join(' · ');
+    }
+    const cuisine = this.inferCuisine(poi.tags || [], poi.name);
+    const parts = [`${cuisine}${area ? `，位于${area}` : ''}`];
+    if (rating > 0) parts.push(`评分 ${rating.toFixed(1)}`);
+    return parts.join(' · ');
+  }
+
   async buildDestinationGuide(
     destination: string,
     per = 6,
@@ -1258,13 +1334,19 @@ export class PlanningService {
       { key: 'stay', type: 'hotel', list: take(dest.hotels) },
       { key: 'food', type: 'restaurant', list: take(dest.restaurants) },
     ];
-    const jobs: Array<{ cat: 'view' | 'stay' | 'food'; type: PoiMediaType; cand: GuideCandidate }> = [];
+    const jobs: Array<{
+      cat: 'view' | 'stay' | 'food';
+      type: PoiMediaType;
+      poi: RawPOI;
+      cand: GuideCandidate;
+    }> = [];
     for (const cat of cats) {
       for (const poi of cat.list) {
         const rating = Number(poi.rating) || 0;
         jobs.push({
           cat: cat.key,
           type: cat.type,
+          poi,
           cand: {
             name: poi.name,
             rating,
@@ -1274,6 +1356,7 @@ export class PlanningService {
             latitude: poi.latitude,
             longitude: poi.longitude,
             photos: travelMediaStore.imageUrls(cat.type, poi.name).slice(0, 3),
+            intro: this._guideIntro(poi, cat.key),
           },
         });
       }
@@ -1303,6 +1386,43 @@ export class PlanningService {
       }
     });
     await Promise.all(workers);
+
+    // 实时价 + 官方简介：景点走飞猪门票、酒店走飞猪房价、餐饮走高德人均。
+    // 与补图并发（4 路），单点失败只让该项「待核价」，不影响整卡。
+    let priceCursor = 0;
+    const priceWorkers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
+      while (priceCursor < jobs.length) {
+        const job = jobs[priceCursor++]!;
+        const { poi, cand, type } = job;
+        try {
+          if (type === 'attraction') {
+            const live = await lookupAttractionPrice(poi.name, dest.destination);
+            cand.price = live.amount;
+            cand.pricePending = live.amount == null;
+            cand.priceNote = live.note;
+            if (live.description) cand.intro = live.description.slice(0, 180);
+          } else if (type === 'hotel') {
+            const live = await lookupHotelPrice(poi.name, dest.destination, {
+              tier: this._hotelTierOfPoi(poi),
+            });
+            cand.price = live?.amount ?? null;
+            cand.pricePending = !live;
+            cand.priceNote = live?.note ?? '未取到该酒店实时价，待核价';
+          } else {
+            const cost = restaurantCostOf(poi.raw);
+            cand.price = cost;
+            cand.pricePending = cost == null;
+            cand.priceNote = cost == null ? '未公布人均，待核价' : '高德人均消费';
+          }
+        } catch {
+          cand.price = null;
+          cand.pricePending = true;
+          cand.priceNote = '实时价查询失败，待核价';
+        }
+      }
+    });
+    await Promise.all(priceWorkers);
+
     const out: Record<'view' | 'stay' | 'food', GuideCandidate[]> = { view: [], stay: [], food: [] };
     for (const j of jobs) out[j.cat].push(j.cand);
     return { destination: dest.destination, center: dest.center, view: out.view, stay: out.stay, food: out.food, fromCache: dest.fromCache };
@@ -1718,9 +1838,171 @@ export class PlanningService {
   }
 
   /**
+   * 把静态基价报价替换成实时价（飞猪门票/房价、高德餐饮人均、飞猪往返大交通）。
+   * 查不到的条目写 pending 占位，由汇总层剔除并在卡面标「待核价」。
+   */
+  private async _applyLivePricing(
+    days: PlannedDay[],
+    opts: {
+      destination: string;
+      startDate: string;
+      endDate: string;
+      ctx: PricingContext;
+      data: CacheEntry['data'];
+      origin?: string;
+    },
+  ): Promise<{
+    pending: number;
+    marketHotels: number;
+    transport: { amount: number; label: string; note: string } | null;
+  }> {
+    const { destination, startDate, endDate, ctx, data } = opts;
+    const nights = Math.max(1, days.length - 1);
+    const checkOut = addDaysISO(startDate, nights);
+
+    const poiByName = new Map<string, RawPOI>();
+    const poiById = new Map<string, RawPOI>();
+    for (const p of [...data.attractions, ...data.hotels, ...data.restaurants]) {
+      poiByName.set(p.name, p);
+      poiById.set(p.id, p);
+    }
+
+    const hotelNames = new Set<string>();
+    const attractionNames = new Set<string>();
+    for (const day of days) {
+      for (const it of day.items) {
+        if (it.type === 'hotel') hotelNames.add(it.name);
+        else if (it.type === 'attraction') attractionNames.add(it.name);
+      }
+    }
+
+    const attractionPrices = new Map<
+      string,
+      Awaited<ReturnType<typeof lookupAttractionPrice>>
+    >();
+    const hotelPrices = new Map<string, Awaited<ReturnType<typeof lookupHotelPrice>>>();
+    const attractionList = [...attractionNames].slice(0, 12);
+    const hotelList = [...hotelNames].slice(0, 4);
+
+    const tasks: Array<() => Promise<void>> = [
+      ...attractionList.map((name) => async () => {
+        attractionPrices.set(name, await lookupAttractionPrice(name, destination));
+      }),
+      ...hotelList.map((name) => async () => {
+        const poi = poiByName.get(name);
+        hotelPrices.set(
+          name,
+          await lookupHotelPrice(name, destination, {
+            tier: poi ? this._hotelTierOfPoi(poi) : 'mid',
+            checkIn: startDate,
+            checkOut,
+          }),
+        );
+      }),
+    ];
+    let cursor = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(4, tasks.length) }, async () => {
+        while (cursor < tasks.length) await tasks[cursor++]!();
+      }),
+    );
+
+    // 同一 POI 可能在多天出现，待核价按「类型+名称」去重计数（不重复吓用户）
+    const pendingKeys = new Set<string>();
+    let marketHotels = 0;
+    for (const day of days) {
+      for (const it of day.items) {
+        if (it.type === 'hotel') {
+          const live = hotelPrices.get(it.name);
+          if (live) {
+            const q = pricingService.quoteLivePrice(live.amount, 'hotel', it.name, ctx, {
+              note: live.kind === 'market' ? live.note : '飞猪实时房价，以下单页为准',
+            });
+            it.priceQuote = q;
+            it.priceInfo = this._formatPriceInfo(q);
+            it.pricePerNight = q.finalPrice;
+            it.rooms = [
+              { name: '标准间', pricePerNight: q.finalPrice, capacity: 2, amenities: ['WiFi', '空调', '独立卫浴'], image: '' },
+              { name: '豪华房', pricePerNight: Math.round(q.finalPrice * 1.4), capacity: 2, amenities: ['WiFi', '空调', '独立卫浴', '观景窗'], image: '' },
+            ];
+            if (live.kind === 'market') marketHotels++;
+          } else {
+            it.priceQuote = pricingService.quotePending('hotel', it.name, ctx, '未取到该酒店实时房价，待核价');
+            it.priceInfo = '待核价';
+            it.pricePerNight = 0;
+            pendingKeys.add(`hotel:${it.name}`);
+          }
+        } else if (it.type === 'attraction') {
+          const live = attractionPrices.get(it.name);
+          if (live && live.amount != null) {
+            const q = pricingService.quoteLivePrice(live.amount, 'attraction', it.name, ctx, {
+              note: live.note,
+            });
+            it.priceQuote = q;
+            it.priceInfo = this._formatPriceInfo(q);
+            it.ticketPrice = q.finalPrice;
+          } else {
+            it.priceQuote = pricingService.quotePending(
+              'attraction',
+              it.name,
+              ctx,
+              live?.note ?? '未取到实时票价，待核价',
+            );
+            it.priceInfo = '待核价';
+            it.ticketPrice = 0;
+            pendingKeys.add(`attraction:${it.name}`);
+          }
+        } else if (it.type === 'restaurant') {
+          const poi = (it.poiId ? poiById.get(it.poiId) : undefined) ?? poiByName.get(it.name);
+          const cost = restaurantCostOf(poi?.raw);
+          if (cost != null) {
+            const q = pricingService.quoteLivePrice(cost, 'restaurant', it.name, ctx, {
+              note: '高德人均消费',
+            });
+            it.priceQuote = q;
+            it.priceInfo = this._formatPriceInfo(q);
+            it.avgPrice = q.finalPrice;
+            it.priceLevel = q.finalPrice < 50 ? 1 : q.finalPrice < 100 ? 2 : 3;
+            it.menuItems = [
+              { name: '招牌推荐', price: q.finalPrice, desc: '人均参考', image: '', isSignature: true, tag: '招牌' },
+              { name: '经典菜', price: Math.round(q.finalPrice * 0.7), desc: '单点参考', image: '', isSignature: true, tag: '必点' },
+            ];
+          } else {
+            it.priceQuote = pricingService.quotePending('restaurant', it.name, ctx, '未公布人均，待核价');
+            it.priceInfo = '待核价';
+            it.avgPrice = 0;
+            pendingKeys.add(`restaurant:${it.name}`);
+          }
+        }
+      }
+    }
+
+    let transport: { amount: number; label: string; note: string } | null = null;
+    if (opts.origin) {
+      const t = await lookupTransportPrice({
+        origin: opts.origin,
+        destination,
+        startDate,
+        endDate,
+      });
+      if (t) transport = { amount: t.amount, label: t.label, note: t.note };
+    }
+
+    return { pending: pendingKeys.size, marketHotels, transport };
+  }
+
+  /**
    * 汇总整个行程的价格：按 dayCount 折算酒店晚数、聚合景点/餐厅
    */
-  private _summarizePricing(days: PlannedDay[], ctx: import('./pricing-service.js').PricingContext): PlanningResult['pricingSummary'] {
+  private _summarizePricing(
+    days: PlannedDay[],
+    ctx: import('./pricing-service.js').PricingContext,
+    live?: {
+      pending: number;
+      marketHotels: number;
+      transport: { amount: number; label: string; note: string } | null;
+    },
+  ): PlanningResult['pricingSummary'] {
     let totalOriginal = 0, totalFinal = 0;
     const warnings: string[] = [];
     const nightCount = Math.max(1, days.length - 1);
@@ -1728,40 +2010,65 @@ export class PlanningService {
     const hotelQuotes: PriceQuote[] = [];
     const attractionQuotes: PriceQuote[] = [];
     const restaurantQuotes: PriceQuote[] = [];
+    const pendingQuoteKeys = new Set<string>();
 
     days.forEach(day => {
       (day.items || []).forEach(it => {
+        const quote = it.priceQuote;
+        if (!quote) return;
+        // 待核价不计入合计（金额不可信，宁可少算也不虚报）；同一 POI 多天出现只计一次
+        if (quote.pricePending) {
+          pendingQuoteKeys.add(`${it.type}:${it.name}`);
+          return;
+        }
         if (it.type === 'hotel') {
           // hotel: 价格只算一次（取首次），qty = nightCount
-          if (hotelQuotes.length === 0 && it.priceQuote) {
-            hotelQuotes.push(it.priceQuote);
-            totalOriginal += it.priceQuote.originalPrice * nightCount;
-            totalFinal += it.priceQuote.finalPrice * nightCount;
+          if (hotelQuotes.length === 0) {
+            hotelQuotes.push(quote);
+            totalOriginal += quote.originalPrice * nightCount;
+            totalFinal += quote.finalPrice * nightCount;
           }
         } else if (it.type === 'attraction') {
-          if (it.priceQuote) {
-            attractionQuotes.push(it.priceQuote);
-            totalOriginal += it.priceQuote.originalPrice;
-            totalFinal += it.priceQuote.finalPrice;
-          }
+          attractionQuotes.push(quote);
+          totalOriginal += quote.originalPrice;
+          totalFinal += quote.finalPrice;
         } else if (it.type === 'restaurant') {
-          if (it.priceQuote) {
-            restaurantQuotes.push(it.priceQuote);
-            totalOriginal += it.priceQuote.originalPrice;
-            totalFinal += it.priceQuote.finalPrice;
-          }
+          restaurantQuotes.push(quote);
+          totalOriginal += quote.originalPrice;
+          totalFinal += quote.finalPrice;
         }
       });
     });
 
-    // 价格模式提示
-    const mode = (process.env.PRICING_MODE as 'real-api' | 'real-database' | 'estimated') || 'real-database';
-    if (mode === 'estimated') {
+    // 大交通（实时往返价，单人）
+    if (live?.transport) {
+      totalOriginal += live.transport.amount;
+      totalFinal += live.transport.amount;
+    }
+
+    // 价格模式提示：只要有实时价就是 real-api；全程未取到则如实标 estimated
+    const hasLive = [...hotelQuotes, ...attractionQuotes, ...restaurantQuotes].some(
+      (q) => q.priceSource === 'api',
+    );
+    const mode: 'real-api' | 'real-database' | 'estimated' = hasLive
+      ? 'real-api'
+      : (process.env.PRICING_MODE as 'real-api' | 'real-database' | 'estimated') || 'real-database';
+    if (mode === 'real-api') {
+      warnings.push('价格来自飞猪/高德实时数据，下单时可能因库存/日期小幅波动');
+    } else if (mode === 'estimated') {
       warnings.push('当前为估算价，建议在预订平台核对后再下单');
-    } else if (mode === 'real-database') {
-      warnings.push('价格来自真实市场数据库，最终以下单平台为准');
     } else {
-      warnings.push('价格来自实时预订 API，下单时可能因库存/汇率小幅波动');
+      warnings.push('未取到实时价，以下价格为参考价');
+    }
+    const pendingTotal = Math.max(live?.pending ?? 0, pendingQuoteKeys.size);
+    if (pendingTotal > 0) {
+      warnings.push(`${pendingTotal} 个条目未取到实时价，已标「待核价」且不计入合计`);
+    }
+    if (live?.marketHotels) {
+      warnings.push('酒店实时价未命中时按同城同档在售中位数参考，卡面已标注');
+    }
+    if (live?.transport) {
+      warnings.push(`${live.transport.label}已计入合计：${live.transport.note}`);
     }
 
     // 绑定平台提示
@@ -1783,6 +2090,8 @@ export class PlanningService {
       boundPlatforms: ctx.boundPlatforms,
       pricingMode: mode,
       warnings,
+      pendingItems: pendingTotal,
+      ...(live?.transport ? { transport: live.transport } : {}),
     };
   }
 
@@ -2550,7 +2859,13 @@ export class PlanningService {
       ...(prefs.wishlist ?? []).map((name) => ({ name, type: 'attraction' as const })),
       ...(prefs.foodWishlist ?? []).map((name) => ({ name, type: 'restaurant' as const })),
       ...(prefs.stayWishlist ?? []).map((name) => ({ name, type: 'hotel' as const })),
-    ].filter((w) => w.name.trim().length >= 2);
+    ].filter((w) => {
+      const name = w.name.trim();
+      if (name.length < 2) return false;
+      // 「XX 附近/周边/一带的酒店」是位置偏好（hotelFocus/hotelFocusRef 已承接），
+      // 不是可检索的 POI 名：拿去搜必然搜不到，还会被当成「没排进去」误导用户。
+      return !/附近|周边|一带|旁边|边上|区域|商圈|市中心|市区/.test(name);
+    });
     if (wanted.length === 0) return { attractions: [], restaurants: [], hotels: [], missed: [] };
 
     const alreadyIn = (w: { name: string; type: 'attraction' | 'restaurant' | 'hotel' }): boolean => {
@@ -3620,6 +3935,10 @@ export class PlanningService {
           const leg = legFor();
           if (leg) item.transportFromPrev = leg;
           item.tips = [...(item.tips || []), entry.note || '午后茶歇，稍作休整'];
+          // 茶歇在时间线上只占 45 分钟：条目时长/结束时刻跟着排程走，
+          // 不能沿用餐厅默认 75 分钟，否则方案里会和下一站时间重叠。
+          item.visitDuration = 45;
+          item.endTime = `${seq.date}T${formatTime(teaTime + 45)}:00`;
           items.push(item);
           lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
           lastPointId = entry.poi.id;
@@ -3762,6 +4081,12 @@ export class PlanningService {
   ): RawPOI | undefined {
     if (hotels.length === 0) return undefined;
 
+    // 用户在筛选卡里点名的酒店是明确决定，直接采用（距离/评分不再推翻用户选择）
+    for (const wanted of prefs.stayWishlist ?? []) {
+      const hit = hotels.find((h) => wishNameMatch(h.name, wanted));
+      if (hit) return hit;
+    }
+
     // 景点加权质心：排序靠前的景点（代表性强/评分高）权重更高
     let wSum = 0;
     let latSum = 0;
@@ -3845,6 +4170,8 @@ export class PlanningService {
       if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) prefScore += SCORING.routePick.seasideMatch;
       if (prefs.budget === 'low' && /(小吃|快餐|平价|local|经济)/i.test(hay)) prefScore += SCORING.routePick.budgetMatch;
       if (prefs.budget === 'high' && /(精致|高档|fine|dining|luxury)/i.test(hay)) prefScore += SCORING.routePick.budgetMatch;
+      // 筛选卡点名的餐厅优先排入（用户明确选过，压过顺路距离分）
+      if (prefs.foodWishlist?.some((w) => wishNameMatch(r.name, w))) prefScore += SCORING.routePick.wishMatch;
       if (indoorHint === 'indoor' && (r.tags || []).includes('indoor')) prefScore += SCORING.routePick.cuisineMatch;
 
       const usePenalty = (usageCount?.get(r.id) || 0) * SCORING.routePick.reusePenalty;

@@ -9,13 +9,15 @@ import { SharedBrowserCdpGateway } from "../shared-browser/cdp-gateway.js";
 /**
  * 购物流程页面获取器。
  *
- * 策略（用户拍板：内置浏览器优先 + 无头兜底）：
- *   1. shared 优先——客户端在线且开启调试端口时，经 CDP 直连用户可见的
- *      WebView2 内置浏览器新开标签页执行（登录态即用户自身，免 Cookie 导入；
- *      操作全程可见、可随时人工接管）。
- *   2. headless 兜底——服务端无头 Chromium + 已导入授权的 Cookie（原行为）。
- *      无 Cookie 且允许交互式登录时以匿名态打开（由调用方走扫码登录门，
- *      二维码推给用户），Cookie 不再是硬前提。
+ * 策略：
+ *   1. Playwright+Cookie 主通道——服务端无头 Chromium + 已导入授权的 Cookie，
+ *      比价等多平台取数默认走这条（无头可并行，不抢唯一的内置浏览器面板）。
+ *      无 Cookie 且允许交互式登录时以匿名态打开（由调用方走扫码登录门）。
+ *   2. shared 兜底——无头不可用（无 Cookie/Playwright 缺失/启动失败）且客户端
+ *      在线并开启调试端口时，经 CDP 直连用户可见的 WebView2 内置浏览器新开
+ *      标签页执行（登录态即用户自身，免 Cookie 导入；可随时人工接管）。
+ *
+ * 下单/支付等需要用户看着的交互式流程不传 preferHeadless，仍以 shared 优先。
  *
  * 平台适配器（ShoppingPlatformAdapter）只依赖 Playwright Page——CDP 连接
  * WebView2 拿到的 Page 同样支持 evaluate/截图，适配器零改动跑在两条路径上。
@@ -106,8 +108,8 @@ export type AcquireShoppingPageOptions = {
    * 时直接抛 no_cookie（不启动浏览器）。
    */
   interactiveLogin?: boolean;
-  /** 跳过内置浏览器路径（多平台比价的非首位平台用，直接 headless+Cookie）。 */
-  disableSharedBrowser?: boolean;
+  /** Playwright+Cookie 优先，内置浏览器兜底（比价/后台取数用，可无头并行）。 */
+  preferHeadless?: boolean;
 };
 
 export type ShoppingBrowserExecutorDeps = {
@@ -161,16 +163,32 @@ export class ShoppingBrowserExecutor {
     targetUrl: string,
     opts: AcquireShoppingPageOptions = {},
   ): Promise<ShoppingPageLease> {
-    // 1) 用户可见的内置浏览器（WebView2 over CDP）。disableSharedBrowser=
-    //    多平台并行比价的非首位平台：面板页只有一个，排队等会拖死整轮工具
-    //    预算（2026-10-25 小米 15 实测超时根因）——这些平台直接走已授权
-    //    Cookie 的 headless 并行，不抢面板。
-    if (opts.disableSharedBrowser !== true) {
-      const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
-      if (shared) return shared;
+    // 1) 比价/后台取数：Playwright+Cookie 主通道（无头并行，不抢面板）。
+    //    无头不可用（无 Cookie/Playwright 缺失/启动失败）才回落可见浏览器。
+    if (opts.preferHeadless === true) {
+      try {
+        return await this.acquireHeadlessPage(platform, targetUrl, opts);
+      } catch (err) {
+        const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
+        if (shared) return shared;
+        throw err;
+      }
     }
 
-    // 2) 服务端无头兜底（CDP 连接/开页失败 → 静默降级，客户端可能刚断开/端口失效）
+    // 2) 交互式流程（下单/支付）：用户可见的内置浏览器优先（WebView2 over CDP）
+    const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
+    if (shared) return shared;
+
+    // 3) 无头兜底（CDP 连接/开页失败 → 静默降级，客户端可能刚断开/端口失效）
+    return this.acquireHeadlessPage(platform, targetUrl, opts);
+  }
+
+  /** 服务端无头 Chromium + 已授权 Cookie。 */
+  private async acquireHeadlessPage(
+    platform: string,
+    targetUrl: string,
+    opts: AcquireShoppingPageOptions,
+  ): Promise<ShoppingPageLease> {
     const cookies = opts.cookies ?? [];
     if (cookies.length === 0 && !opts.interactiveLogin) {
       throw new ShoppingPageUnavailableError(
