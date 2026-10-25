@@ -392,6 +392,7 @@ export class ShoppingCompareService {
     platform: string,
     query: string,
     opts: { maxPrice?: number; sort?: "default" | "price_asc" | "price_desc" | "sales"; limit?: number } = {},
+    preferHeadless = false,
   ): Promise<{ products: Array<ProductSummary & { __source: OfferSource }>; error?: string }> {
     const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
     const gateway = this.deps.officialPriceGateway;
@@ -407,11 +408,17 @@ export class ShoppingCompareService {
         console.log(`[ShoppingCompare] 官方源 ${platform} 失败，落浏览器兜底：${official.error ?? "?"}`);
       }
     }
-    const res = await this.deps.shoppingOrderService.searchProduct(ctx, platform, query, {
-      maxPrice: opts.maxPrice,
-      sort: opts.sort ?? "price_asc",
-      limit,
-    });
+    const res = await this.deps.shoppingOrderService.searchProduct(
+      ctx,
+      platform,
+      query,
+      {
+        maxPrice: opts.maxPrice,
+        sort: opts.sort ?? "price_asc",
+        limit,
+      },
+      { preferHeadless },
+    );
     if (!res.ok) {
       return { products: [], error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")) };
     }
@@ -441,9 +448,12 @@ export class ShoppingCompareService {
     // 并行取各平台报价（官方源优先/浏览器兜底在 fetchPlatformQuotes 内闭环；
     // 单平台失败不拖垮整体）
     const settled = await Promise.allSettled(
-      requested.map(async (platform) => ({
+      requested.map(async (platform, i) => ({
         platform,
-        quotes: await this.fetchPlatformQuotes(ctx, platform, q, opts),
+        // 面板页只有一个：首位平台走可见内置浏览器（用户可看可接管），
+        // 其余平台直接走已授权 Cookie 的 headless 并行——排队等面板会把
+        // 整轮工具预算拖爆（2026-10-25 小米 15 比价超时实测根因）。
+        quotes: await this.fetchPlatformQuotes(ctx, platform, q, opts, i > 0),
       })),
     );
 

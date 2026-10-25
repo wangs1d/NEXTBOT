@@ -456,6 +456,48 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 
+  // 单平台商品搜索（shopping.order.search）：与跨平台比价卡同一版式——
+  // 缩略图 + 可点行（链接直达商品页）+ 结算页免责。没有它，模型在比价超时
+  // 后改调本工具的结果会退化成 LLM 手写价格列表（2026-10-25 小米 15 实测）。
+  "shopping.order.search": (r) => {
+    if (r.ok !== true) return null;
+    const products = Array.isArray(r.products) ? r.products : [];
+    if (products.length === 0) return null;
+    const items: ToolCardItem[] = [];
+    for (const raw of products) {
+      if (items.length >= 6) break;
+      const p = (raw ?? {}) as Record<string, unknown>;
+      const price = num(p.price);
+      const title = str(p.title);
+      if (!title) continue;
+      const url = str(p.url);
+      const image = str(p.imageUrl);
+      const shop = str(p.shop);
+      const priceText = price != null ? `¥${price}` : "价格待查";
+      items.push({
+        type: "num",
+        text: [priceText, title.slice(0, 40), shop ? `（${shop.slice(0, 12)}）` : ""].filter(Boolean).join(" "),
+        ...(url ? { url } : {}),
+        ...(image ? { thumbnailUrl: image } : {}),
+      });
+    }
+    if (items.length === 0) return null;
+    const platform = str(r.platform);
+    const best = products
+      .map((p) => num((p as Record<string, unknown>).price))
+      .filter((v): v is number => v != null)
+      .sort((a, b) => a - b)[0];
+    return {
+      title: `搜索结果：${str(r.query)}${platform ? ` · ${platform}` : ""}`,
+      items,
+      footer:
+        best != null
+          ? `最低 ¥${best} · 行可点直达商品页 · 实时抓取，以下单结算页为准`
+          : "行可点直达商品页 · 实时抓取，以下单结算页为准",
+      cardType: "",
+    };
+  },
+
   // 跨平台比价结果卡（2026-10-24 升级：图 + 可点行 + 决策页入口）。
   // 每组一行：缩略图（联盟 API 官方图）+ 最低价 + 平台 + 商品名 + 店铺 +
   // 疑似同款标注 + 数据源标注；行带 offer.url 整行可点跳平台商品页；

@@ -1213,6 +1213,28 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
+  /// 工具名 → 用户能懂的进行时文案（感知升级：不再裸露内部工具名）。
+  String _friendlyToolLabel(String tool) {
+    if (tool.startsWith("shopping.compare")) return "正在跨平台比价";
+    if (tool.startsWith("shopping.order.search")) return "正在搜索商品";
+    if (tool.startsWith("shopping.suggest")) return "正在挑选商品";
+    if (tool.startsWith("shopping.order.place")) return "正在创建订单";
+    if (tool.startsWith("shopping.pay")) return "正在处理支付";
+    if (tool.startsWith("plan.")) return "正在拆解任务";
+    if (tool.startsWith("travel.")) return "正在规划行程";
+    if (tool.startsWith("weather.")) return "正在查看天气";
+    if (tool.startsWith("search_web") || tool.startsWith("info.search")) {
+      return "正在联网检索";
+    }
+    if (tool.startsWith("search_images")) return "正在搜图";
+    if (tool.startsWith("video.")) return "正在找视频";
+    if (tool.startsWith("agent_browser.") || tool.startsWith("shared_browser.")) {
+      return "正在操作浏览器";
+    }
+    if (tool.startsWith("memory.")) return "正在翻记忆";
+    return "正在调用：$tool";
+  }
+
   /// 输入框上方的统一 Agent 状态条。
   ///
   /// 处理状态收拢到这一处（取代旧的「消息流内进度气泡 + 工具徽标」两处展示）：
@@ -1233,7 +1255,7 @@ class _ChatPageState extends State<ChatPage>
     }
 
     final String text = tool.isNotEmpty
-        ? "正在调用：$tool"
+        ? _friendlyToolLabel(tool)
         : foregroundActive
             ? _processingStatusText()
             : "$bgCount 个任务后台进行中";
@@ -1287,6 +1309,11 @@ class _ChatPageState extends State<ChatPage>
                         ),
                   ),
                 ),
+                // 进行中动画：无确定进度时文案后缀动态省略号（感知升级）
+                if (tool.isNotEmpty && percent == null) ...<Widget>[
+                  const SizedBox(width: 2),
+                  _WorkingDots(color: cs.onSurface.withValues(alpha: 0.6)),
+                ],
                 if (percent != null) ...<Widget>[
                   const SizedBox(width: 8),
                   Text(
@@ -1310,7 +1337,8 @@ class _ChatPageState extends State<ChatPage>
                 ],
               ],
             ),
-            // 进度条：长工具心跳带 percent 时渲染
+            // 进度条：长工具心跳带 percent 时渲染确定进度；其余进行中状态
+            // 渲染不定进度动画——「正在动」的感知比静态文案强（动画升级）
             if (percent != null) ...<Widget>[
               const SizedBox(height: 6),
               SizedBox(
@@ -1322,6 +1350,21 @@ class _ChatPageState extends State<ChatPage>
                     minHeight: 4,
                     backgroundColor: cs.outline.withValues(alpha: 0.15),
                     valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                  ),
+                ),
+              ),
+            ] else if (foregroundActive || tool.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 6),
+              SizedBox(
+                width: 220,
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    minHeight: 3,
+                    backgroundColor: cs.outline.withValues(alpha: 0.12),
+                    valueColor: AlwaysStoppedAnimation<Color>(
+                      cs.primary.withValues(alpha: 0.7),
+                    ),
                   ),
                 ),
               ),
@@ -3581,6 +3624,44 @@ class _DecisionCardBubble extends StatelessWidget {
           ),
         ),
       ),
+    );
+  }
+}
+
+/// 进行中动画省略号（·/··/··· 循环），给「正在 xxx」文案加动感。
+class _WorkingDots extends StatefulWidget {
+  const _WorkingDots({required this.color});
+
+  final Color color;
+
+  @override
+  State<_WorkingDots> createState() => _WorkingDotsState();
+}
+
+class _WorkingDotsState extends State<_WorkingDots> {
+  int _n = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer.periodic(const Duration(milliseconds: 420), (_) {
+      if (mounted) setState(() => _n = (_n + 1) % 4);
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Text(
+      "·" * _n,
+      style: TextStyle(
+          fontSize: 13, color: widget.color, fontWeight: FontWeight.w700),
     );
   }
 }

@@ -97,6 +97,9 @@ class SharedBrowserHost {
   final ValueNotifier<SbSaveLoginAsk?> saveLoginAsk =
       ValueNotifier<SbSaveLoginAsk?>(null);
 
+  /// 服务端 CDP 桥正在驱动本浏览器（比价抓取等）——面板状态条感知用。
+  final ValueNotifier<bool> cdpBusy = ValueNotifier<bool>(false);
+
   /// 动作轨迹（足迹回放，最新在前，环形上限 50 条）。
   final ValueNotifier<List<proto.SbActionTrace>> actionTrace =
       ValueNotifier<List<proto.SbActionTrace>>(<proto.SbActionTrace>[]);
@@ -134,6 +137,12 @@ class SharedBrowserHost {
   /// browser.bridge.result（jobId 配对）。服务端下发的 gate.required=true
   /// 表示高风险动作：先弹确认条，用户允许才执行（120 秒未决视为拒绝）。
   Future<void> handleServerEvent(String type, Map<String, dynamic> payload) async {
+    if (type == "shared.browser.busy") {
+      // 服务端 CDP 直接驱动面板页（不经 shared.browser.invoke）：点亮/熄灭
+      // 「Agent 正在操作浏览器」状态条，用户知道页面为什么自己在动。
+      cdpBusy.value = payload["busy"] == true;
+      return;
+    }
     if (type == "shared.browser.ask_save_login") {
       // 服务端捕获 Cookie 前的授权征询：弹条等用户表态，答复回传（问一次记住）。
       saveLoginAsk.value = SbSaveLoginAsk(

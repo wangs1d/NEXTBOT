@@ -1107,12 +1107,27 @@ export async function createAppServices(): Promise<AppServices> {
         preReminder: boolean,
       ) => void)
     | undefined;
+  // 分级预告段（睡前备忘/起床闹钟/出发预留）的统一语气层（晚绑定）：
+  // speechPolisher 在下方 brain 段才构造，运行期回调触发时已就绪；
+  // 失败/未装配回退模板原文，提醒永不因润色失败而中断。
+  let preReminderPolish:
+    | ((input: { sessionId: string; draft: string }) => Promise<string>)
+    | undefined;
   scheduleTaskService.setReminderHandler(async (task, message, options) => {
     const displayMessage = formatReminderDisplayMessage(message);
     // 到点提醒 vs 提前量预告：客户端据此分流（岛默认短档 / 岛长驻留档；
     // 2026-10-05 定调提醒统一归灵动岛，桌面弹窗退役为纯决策出口）。
     // 预告段无 task.title 时给出段名，避免岛上只有泛化「提醒」。
     const preReminder = options?.preReminder === true;
+    // 预告段过统一语气层（2026-10-25）：模板是报数机器腔，润色成对话式
+    // 「你说的今天10点…现在可以出发了」；到点主提醒与升档决策出口不过润色
+    // （主提醒创建时已是模型手笔，升档要快、要确定性）。
+    const outboundMessage =
+      preReminder && preReminderPolish
+        ? await preReminderPolish({ sessionId: task.sessionId, draft: displayMessage }).catch(
+            () => displayMessage,
+          )
+        : displayMessage;
     const wsDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
       JSON.stringify({
@@ -1121,7 +1136,7 @@ export async function createAppServices(): Promise<AppServices> {
           taskId: task.taskId,
           title: task.title,
           shortTitle: task.shortTitle,
-          message: displayMessage,
+          message: outboundMessage,
           reminderMessage: message,
           preReminder,
           recurrence: task.recurrence,
@@ -1134,7 +1149,7 @@ export async function createAppServices(): Promise<AppServices> {
       embodimentAlert(
         task.sessionId,
         (json) => wsConnectionRegistry.trySend(task.sessionId, json),
-        displayMessage,
+        outboundMessage,
         "schedule.reminder_fired",
       );
     }
@@ -1148,7 +1163,7 @@ export async function createAppServices(): Promise<AppServices> {
         task.taskId,
         task.sessionId,
         task.title ?? "",
-        displayMessage,
+        outboundMessage,
         task.nextRunAt ?? task.runAt,
         preReminder,
       );
@@ -1158,7 +1173,7 @@ export async function createAppServices(): Promise<AppServices> {
         task.taskId,
         task.sessionId,
         task.title ?? "",
-        displayMessage,
+        outboundMessage,
         task.nextRunAt ?? task.runAt,
         preReminder,
       );
@@ -2039,6 +2054,16 @@ export async function createAppServices(): Promise<AppServices> {
         (await userProfileAggregatorRef.current?.readProfile(actorId)) ?? "",
     }),
   });
+  // 日程分级预告段回填统一语气层（上方 reminderHandler 处晚绑定声明）：
+  // 带用户画像浅层背景（称呼/沟通偏好），模板兜底不受熔断影响。
+  preReminderPolish = (input) =>
+    speechPolisher.polish({
+      kind: "schedule_pre_reminder",
+      sessionId: input.sessionId,
+      facts: { draft: input.draft },
+      fallback: input.draft,
+      importance: "high",
+    });
   // 画像 v2 统一输出（ProfileRouter）：query/snapshot/brief 三视图 + 意图→类
   // 动态路由（PROFILE_ROUTER_ENABLED 灰度闸在消费侧）。画像聚合器晚绑定回填。
   const profileRouter = new ProfileRouter({
@@ -5283,10 +5308,65 @@ export async function createAppServices(): Promise<AppServices> {
         (line) => line.trim().length > 0,
       );
       const goalLine = builtinServices.activeGoalLine?.(actorId) ?? null;
-      if (!tasks.length && !unread.length && !goals.length && !interests.length && !goalLine) {
+      // 共享发现层未消费发现（邮件/日历/目标/承诺等攒下还没说出口的事）：
+      // Muse 式聚合的主体——agent 审阅后开口时经 openMouth 按主题/实体合并消费
+      const findings = (discoveryRef.current?.allUnconsumed(actorId, 5) ?? []).map(
+        (f) => `${f.source}：${f.content.slice(0, 80)}`,
+      );
+      // 世界板此刻状态 + 最近对话（agent 才真正"知道你在干嘛、你已经知道什么"）。
+      // since → 持续时长：焦点切换/上下线本身就是"情境变了"的信号（进材料指纹）。
+      const board = worldBoardRef.current;
+      const sinceLabel = (since?: number): string => {
+        if (!since) return "";
+        const min = Math.round((Date.now() - since) / 60_000);
+        return min >= 1 ? `（已持续 ${min} 分钟）` : "（刚刚）";
+      };
+      const FOCUS_LABEL: Record<string, string> = {
+        coding: "写代码",
+        terminal: "终端操作",
+        browsing: "浏览网页",
+        video: "看视频",
+        game: "打游戏",
+        office: "办公文档",
+        chat: "聊天",
+      };
+      const presenceRow = board?.read<{ state?: string; since?: number }>(
+        actorId,
+        "current",
+        "presence",
+      );
+      const presence = presenceRow?.state
+        ? `${presenceRow.state}${sinceLabel(presenceRow.since)}`
+        : null;
+      const focusRow = board?.read<{ kind?: string; since?: number }>(
+        actorId,
+        "current",
+        "screenFocus",
+      );
+      const screenFocus =
+        focusRow?.kind && focusRow.kind !== "unknown"
+          ? `${FOCUS_LABEL[focusRow.kind] ?? focusRow.kind}${sinceLabel(focusRow.since)}`
+          : null;
+      const turns = board?.read<Array<{ at?: number; text?: string }>>(
+        actorId,
+        "session",
+        "recentTurns",
+      ) ?? [];
+      const recentTurns = turns
+        .slice(0, 4) // 追加列表新值在前
+        .map((t) => String(t.text ?? "").slice(0, 80))
+        .filter((t) => t.length > 0);
+      if (
+        !tasks.length &&
+        !unread.length &&
+        !goals.length &&
+        !interests.length &&
+        !findings.length &&
+        !goalLine
+      ) {
         return null;
       }
-      return { tasks, unread, goals, interests, goalLine };
+      return { tasks, unread, goals, interests, goalLine, findings, presence, screenFocus, recentTurns };
     },
     // 单次小 LLM 审阅。调用形态刻意对齐 decision-maker-factory 的 e2e-proaction
     // 决策器（同机实测稳定出字）：**新建** provider（不走共享 externalChat 的
@@ -5310,6 +5390,9 @@ export async function createAppServices(): Promise<AppServices> {
                 ephemeralTurn: true,
                 disableThinking,
                 maxThreadMessages: 0,
+                // 审计归位（同 mood_inference 口径）：不传会被记成 main_chat，
+                // 污染主对话成本账——pulse 的 token 消耗单独一栏可查
+                auditStage: "agent_pulse",
               },
             );
             return full ?? "";
@@ -5324,8 +5407,9 @@ export async function createAppServices(): Promise<AppServices> {
     // + 每日熔断），与兴趣推送/比价到价同一副嗓子；失败回退初稿不阻塞
     polish: (input) => speechPolisher.polish(input),
     submitProposal: (p) => {
-      // 管道在下方主动性段才构造：闭包晚绑定（首查延迟 3min，装配早已完成）
-      proactivePipeline.submitProposal(p);
+      // 管道在下方主动性段才构造：闭包晚绑定（首查延迟 3min，装配早已完成）。
+      // 返回仲裁结果（测试端点据此回显 verdict）
+      return proactivePipeline.submitProposal(p);
     },
     statePath: join(proactivityFabricPath, "agent-pulse.json"),
   });

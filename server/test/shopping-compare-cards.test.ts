@@ -110,6 +110,26 @@ test("compare.prices 卡：无图无链接的旧形态回执仍出卡（向后�
   assert.ok(!p.items[0]!.text.includes("决策页"));
 });
 
+test("order.search 卡：单平台搜索与比价卡同版式（缩略图+可点行+最低价 footer）", () => {
+  const p = buildToolCard("shopping.order.search", {
+    ok: true,
+    query: "小米 15",
+    platform: "taobao",
+    summary: "在taobao搜索「小米 15」找到 2 个商品",
+    products: [
+      { title: "小米15 御中版 12+256", price: 3799, shop: "能良数码官方旗舰店", url: "https://item.taobao.com/item.htm?id=1" },
+      { title: "小米15 御中版 16+512", price: 4099, shop: "能良数码官方旗舰店", url: "https://item.taobao.com/item.htm?id=2" },
+    ],
+  });
+  assert.ok(p);
+  assert.equal(p.cardType, "");
+  assert.ok(p.title!.includes("搜索结果：小米 15 · taobao"));
+  assert.equal(p.items.length, 2);
+  assert.ok(p.items[0]!.text.includes("¥3799"));
+  assert.equal(p.items[0]!.url, "https://item.taobao.com/item.htm?id=1");
+  assert.ok(p.footer!.includes("最低 ¥3799"));
+});
+
 /* ─────────────── 2. compare.watch builder ─────────────── */
 
 test("compare.watch 卡：add 建档 → 标题已建档 + 每条监控一行", () => {

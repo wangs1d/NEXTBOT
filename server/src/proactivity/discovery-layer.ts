@@ -189,6 +189,11 @@ export class DiscoveryLayer {
     return this.deps.store.unconsumedFindings(subject, opts);
   }
 
+  /** 全量未消费发现（不分主题；agent pulse 审阅材料读点，可见性口径同 findingsFor） */
+  allUnconsumed(actorId?: string, limit = 6): DiscoveryFinding[] {
+    return this.deps.store.allUnconsumedFindings(actorId, limit);
+  }
+
   /** 跨源实体联系：给定实体词，一次拿到**所有来源**里提到它的条目 */
   linksFor(entity: string, limit = 3): Array<{ stream: string; text: string }> {
     return this.deps.store

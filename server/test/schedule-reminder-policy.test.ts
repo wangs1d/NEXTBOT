@@ -56,7 +56,8 @@ test("牙医（high/mid）提前3天创建 → 前晚备忘+起床闹钟+出发�
   assert.deepEqual(stageLabels(plan), ["睡前备忘", "起床闹钟", "该出门了"]);
   assert.match(plan.preReminders[0]!.message, /【睡前备忘】明天10:00有「该去看牙医啦/);
   assert.match(plan.preReminders[1]!.message, /【起床闹钟】今天10:00/);
-  assert.match(plan.preReminders[2]!.message, /【该出门了】10:00.*60分钟/);
+  // 2026-10-25 口吻改版：出发段=回指原话的出发指令，估算路程不再写进文案
+  assert.match(plan.preReminders[2]!.message, /你说的今天10:00有「.*牙医.*」，现在可以出发了/);
   assert.match(plan.summary, /睡前备忘 → .*起床闹钟 → .*该出门了/);
 });
 
@@ -258,7 +259,7 @@ test("firePreReminders：到期的策略段按各自脚本文案推送（一次 
     assert.equal(delivered.length, 3);
     assert.match(delivered[0]!, /【睡前备忘】明天10:00/);
     assert.match(delivered[1]!, /【起床闹钟】今天10:00/);
-    assert.match(delivered[2]!, /【该出门了】10:00/);
+    assert.match(delivered[2]!, /你说的今天10:00有「.*」/);
     // 触发记录落库，不重复推送
     const after = store.get(task.taskId);
     assert.deepEqual((after?.firedPreReminderOffsets ?? []).sort((a, b) => b - a), [780, 120, 60]);
@@ -417,7 +418,8 @@ test("travelMinutesOverride 有效值替代 venue 静态表，policyName 带 rou
   assert.deepEqual(plan.remindBeforeMinutes, [780, 150, 90]);
   const depart = plan.preReminders.find((p) => p.stage === "depart");
   assert.ok(depart);
-  assert.match(depart.message, /90分钟/);
+  // 路程改由偏移量表达（上面 remindBeforeMinutes 已断言 90），文案只留出发指令
+  assert.match(depart.message, /现在可以出发了/);
 });
 
 test("travelMinutesOverride 无效（0/负数/超 8h 上限）→ 回退 venue 静态表", () => {
@@ -478,7 +480,7 @@ test("出发段触达实时富化：文案带当前车程（准点触发不升�
     stored.nextRunAt = new Date(Date.now() + 69 * 60_000).toISOString();
     await service.runSchedulerTick();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    const depart = delivered.find((d) => /该出门了/.test(d.message));
+    const depart = delivered.find((d) => /现在可以出发了/.test(d.message));
     assert.ok(depart);
     assert.equal(depart.pre, true);
     assert.match(depart.message, /当前车程约 70 分钟（含实时路况）/);

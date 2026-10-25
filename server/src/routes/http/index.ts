@@ -332,9 +332,22 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // check()，闸门语义与定时路径完全一致
   if (deps.agentPulseCheck) {
     app.post("/api/test/trigger-agent-pulse", async (request) => {
-      const body = (request.body ?? {}) as { force?: boolean };
+      const body = (request.body ?? {}) as {
+        force?: boolean;
+        fixture?: {
+          tasks?: string[];
+          unread?: string[];
+          goals?: string[];
+          interests?: string[];
+          goalLine?: string;
+          findings?: string[];
+          presence?: string;
+          screenFocus?: string;
+          recentTurns?: string[];
+        };
+      };
       try {
-        const result = await deps.agentPulseCheck!({ force: body.force === true });
+        const result = await deps.agentPulseCheck!({ force: body.force === true, fixture: body.fixture });
         return { ok: true, result };
       } catch (err) {
         return { ok: false, error: String(err) };

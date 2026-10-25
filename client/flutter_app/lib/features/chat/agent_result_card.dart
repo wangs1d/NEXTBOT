@@ -68,6 +68,22 @@ class AgentResultCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 入场动画（感知升级）：新结果卡滑入+淡入一次性过渡——消息流里
+    // 「砰地出现」变成「滑进对话」。TweenAnimationBuilder 首帧自动播放。
+    return TweenAnimationBuilder<double>(
+      tween: Tween<double>(begin: 0, end: 1),
+      duration: const Duration(milliseconds: 260),
+      curve: Curves.easeOutCubic,
+      builder: (BuildContext context, double t, Widget? child) => Opacity(
+        opacity: t,
+        child: Transform.translate(offset: Offset(0, 8 * (1 - t)), child: child),
+      ),
+      child: buildCard(context),
+    );
+  }
+
+  /// 卡片本体（原 build）：按 cardType 分发到效果组件/专用卡/通用卡。
+  Widget buildCard(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
 
     // 展示效果独立模块（display_effects/）：服务端 display-effect-router

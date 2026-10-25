@@ -147,13 +147,23 @@ class _BrowserPageState extends State<BrowserPage> {
                     : _buildToolbar(cs),
               ),
         ),
-        // Agent 操作状态条（共用浏览器：操作可见、可接管）
-        ValueListenableBuilder<int>(
-          valueListenable: host.pendingAgentActions,
-          builder: (BuildContext context, int pending, _) => _AnimatedBar(
-            visible: pending > 0,
-            child: _AgentStatusBar(cs: cs, action: host.lastAgentAction.value),
-          ),
+        // Agent 操作状态条（共用浏览器：操作可见、可接管）。
+        // 两个来源：注入通道（shared.browser.invoke）与 CDP 桥抓取（比价等）
+        ValueListenableBuilder<bool>(
+          valueListenable: host.cdpBusy,
+          builder: (BuildContext context, bool cdpBusy, _) =>
+              ValueListenableBuilder<int>(
+                valueListenable: host.pendingAgentActions,
+                builder: (BuildContext context, int pending, _) => _AnimatedBar(
+                  visible: pending > 0 || cdpBusy,
+                  child: _AgentStatusBar(
+                    cs: cs,
+                    action: pending > 0
+                        ? host.lastAgentAction.value
+                        : "页面任务",
+                  ),
+                ),
+              ),
         ),
         // 高风险动作确认条（提交/支付类操作需用户点头才执行）。
         // 注意：null 态不能急切求值 cast（child 参数总会先构建），

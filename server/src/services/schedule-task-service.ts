@@ -975,7 +975,7 @@ export class ScheduleTaskService {
                 // 升档推送失败 → 退回轻触达，不吞掉提醒
               }
             } else {
-              message = `${message}（${routeNote}）`;
+              message = `${message.replace(/。$/, "")}，${routeNote}。`;
             }
           }
         }

@@ -106,6 +106,8 @@ export type AcquireShoppingPageOptions = {
    * 时直接抛 no_cookie（不启动浏览器）。
    */
   interactiveLogin?: boolean;
+  /** 跳过内置浏览器路径（多平台比价的非首位平台用，直接 headless+Cookie）。 */
+  disableSharedBrowser?: boolean;
 };
 
 export type ShoppingBrowserExecutorDeps = {
@@ -137,10 +139,15 @@ export class ShoppingBrowserExecutor {
     if (!connected) return null;
     const page = await this.deps.gateway.openPage(targetUrl).catch(() => null);
     if (!page) return null;
+    // 感知：CDP 抓取期间点亮客户端面板的「Agent 正在操作浏览器」状态条
+    this.deps.coordinator.notifyBrowserBusy?.(actorId, true, "页面任务");
     return {
       page,
       mode: "shared",
-      release: () => this.deps.gateway.closePage(page),
+      release: () => {
+        this.deps.coordinator.notifyBrowserBusy?.(actorId, false, "");
+        return this.deps.gateway.closePage(page);
+      },
     };
   }
 
@@ -154,9 +161,14 @@ export class ShoppingBrowserExecutor {
     targetUrl: string,
     opts: AcquireShoppingPageOptions = {},
   ): Promise<ShoppingPageLease> {
-    // 1) 用户可见的内置浏览器（WebView2 over CDP）
-    const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
-    if (shared) return shared;
+    // 1) 用户可见的内置浏览器（WebView2 over CDP）。disableSharedBrowser=
+    //    多平台并行比价的非首位平台：面板页只有一个，排队等会拖死整轮工具
+    //    预算（2026-10-25 小米 15 实测超时根因）——这些平台直接走已授权
+    //    Cookie 的 headless 并行，不抢面板。
+    if (opts.disableSharedBrowser !== true) {
+      const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
+      if (shared) return shared;
+    }
 
     // 2) 服务端无头兜底（CDP 连接/开页失败 → 静默降级，客户端可能刚断开/端口失效）
     const cookies = opts.cookies ?? [];

@@ -8,6 +8,7 @@ import type {
   ScheduleTaskService,
 } from "../services/schedule-task-service.js";
 import { parseScheduleTaskCategory } from "../services/schedule-task-service.js";
+import { describeRemindPlan } from "../services/schedule-reminder-policy.js";
 import { buildScheduleCreateInput, formatNextRunAtLocal } from "./calendar-tools.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
 import type { ToolRegistry } from "./tool-registry.js";
@@ -353,6 +354,9 @@ export function registerLifeTools(
           nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
           recurrence: task.recurrence,
           reminderMessage,
+          // 分级预告计划（睡前备忘/起床闹钟/出发预留）随回执透出，
+          // 确认轮按 CONFIRM_RECEIPT_INSTRUCTION 一句话转告，不再自创提前量
+          remindPlan: describeRemindPlan(task),
           webhookToken: task.webhookToken,
           cronExpression: task.cronExpression,
         };
@@ -396,6 +400,8 @@ export function registerLifeTools(
         nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage ?? draft.reminderMessage,
+        // 与上方结构化路径同源：分级预告计划随回执透出，确认轮一句话转告
+        remindPlan: describeRemindPlan(task),
       };
       return response;
     } catch (e) {

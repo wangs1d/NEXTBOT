@@ -394,11 +394,22 @@ export function buildReminderPolicy(input: ReminderPolicyInput): ReminderPolicyP
         message: `【提前上线】${eventHm}开始的「${subject}」快到了，提前${departOffset}分钟进会议候场。`,
       });
     } else if (factors.importance === "high" && (factors.venue === "far" || factors.venue === "mid")) {
+      // 2026-10-25 口吻对齐用户定调：预告=出发时刻的当下行动指令，回指用户原话
+      // （「你说的今天10点…现在可以出发了」），不再用【该出门了】报数机器腔；
+      // 估算路程不再写进文案（无地点时是估算值，写实了反而像承诺）。
+      // 「今天/明天」按预告触发时刻算（文案创建在提前量前，相对创建日算会错）。
+      const departLocal = localParts(departMs, tz);
+      const dayWord =
+        departLocal.year === eventLocal.year &&
+        departLocal.month === eventLocal.month &&
+        departLocal.day === eventLocal.day
+          ? "今天"
+          : "明天";
       stages.push({
         offsetMinutes: departOffset,
         stage: "depart",
         label: "该出门了",
-        message: `【该出门了】${eventHm}的「${subject}」预留了约${departOffset}分钟路上时间，现在出发不慌。`,
+        message: `你说的${dayWord}${eventHm}有「${subject}」，现在可以出发了。`,
       });
     } else {
       // 保底：与历史「【提前X分钟】」模板一致，普通提醒的观感不变

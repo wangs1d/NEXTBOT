@@ -12,6 +12,7 @@ import { test } from "node:test";
 import {
   AgentPulseService,
   buildPulsePrompt,
+  isPriceNews,
   pulseSignature,
   sanitizePulseMessage,
   type PulseAggregate,
@@ -30,7 +31,7 @@ function mkAggregate(overrides: Partial<PulseAggregate> = {}): PulseAggregate {
 
 type Harness = {
   svc: AgentPulseService;
-  submitted: Array<{ kind: string; title: string; directText: string; dedupKey: string }>;
+  submitted: Array<{ kind: string; tier: string; title: string; directText: string; dedupKey: string }>;
   llmCalls: string[];
   polishCalls: Array<{ kind: string; facts: Record<string, unknown> }>;
   setAggregate: (a: PulseAggregate | null) => void;
@@ -64,7 +65,14 @@ function mkHarness(opts: { statePath?: string; now?: Date; polish?: boolean } = 
         }
       : {}),
     submitProposal: (p) => {
-      submitted.push({ kind: p.kind, title: p.title, directText: p.directText, dedupKey: p.dedupKey });
+      submitted.push({
+        kind: p.kind,
+        tier: p.tier,
+        title: p.title,
+        directText: p.directText,
+        dedupKey: p.dedupKey,
+      });
+      return { verdict: "delivered" };
     },
     statePath: opts.statePath,
     nowFn: () => now.getTime(),
@@ -200,6 +208,53 @@ test("agent pulse: 输出清洗——剥引号/围栏、NOP 变体、折行限�
   assert.ok(sanitizePulseMessage("x".repeat(300))!.length <= 220, "超长截断");
 });
 
+test("agent pulse: 发现层材料进 prompt、计入指纹与有料判定", () => {
+  // 发现段进 prompt
+  const prompt = buildPulsePrompt(new Date("2026-10-25T14:00:00"), mkAggregate({
+    findings: ["mail_watch：房东提到搬家时间定了"],
+  }));
+  assert.ok(prompt.includes("房东提到搬家时间定了"), "发现进 prompt");
+  assert.ok(prompt.includes("还没跟用户说过的发现"), "发现段标头在 prompt");
+  // 指纹对发现变化敏感
+  assert.notEqual(
+    pulseSignature({ tasks: [], unread: [], goals: [], interests: [], findings: ["a"] }),
+    pulseSignature({ tasks: [], unread: [], goals: [], interests: [], findings: ["b"] }),
+  );
+});
+
+test("agent pulse: 只有发现层材料也触发评审", async () => {
+  const h = mkHarness();
+  h.setAggregate({ tasks: [], unread: [], goals: [], interests: [], goalLine: null, findings: ["calendar：承诺到期"] });
+  h.setLlm("NOP");
+  const r = await h.svc.check();
+  assert.equal(r.ran, true, "只有发现也算有材料");
+  assert.equal(r.reason, "nop");
+});
+
+test("agent pulse: 降价类消息走 must 层随到随送（agent_pulse_price），普通消息保持 social", async () => {
+  const h = mkHarness({ polish: true });
+  h.setLlm("你让我盯的机械键盘降价了，要看一眼吗？");
+  h.setPolish("王哥，你让我盯的那款机械键盘降价了，要不要看一眼？");
+  await h.svc.check();
+  assert.equal(h.submitted[0].kind, "agent_pulse_price");
+  assert.equal(h.submitted[0].tier, "must", "用户点名盯的结果 = must 层随到随送");
+
+  const h2 = mkHarness();
+  h2.setLlm("你下午有个项目周会，要不要提前过一眼材料？");
+  await h2.svc.check();
+  assert.equal(h2.submitted[0].kind, "agent_pulse");
+  assert.equal(h2.submitted[0].tier, "social", "非降价消息保持 social 层");
+});
+
+test("agent pulse: isPriceNews 关键词边界", () => {
+  assert.ok(isPriceNews("机械键盘降价了"));
+  assert.ok(isPriceNews("价格降到 200 以内了"));
+  assert.ok(isPriceNews("你让我盯的快递有动静了"));
+  assert.ok(isPriceNews("双十一打折了"));
+  assert.ok(!isPriceNews("你下午有个项目周会"));
+  assert.ok(!isPriceNews("妈妈发消息来了"));
+});
+
 test("agent pulse: 指纹对材料变化敏感", () => {
   const a = mkAggregate();
   const b = mkAggregate({ unread: ["妈妈", "老师"] });
@@ -213,4 +268,22 @@ test("agent pulse: prompt 带判断标准与现在时间", () => {
   assert.ok(prompt.includes("2026-10-25"));
   assert.ok(prompt.includes("NOP"));
   assert.ok(prompt.includes("14:00 项目周会"));
+});
+
+test("agent pulse: 此刻状态与最近对话进 prompt（状态段 + 已知勿重复段）", () => {
+  const prompt = buildPulsePrompt(new Date("2026-10-25T14:00:00"), mkAggregate({
+    presence: "active（已持续 8 分钟）",
+    screenFocus: "写代码（已持续 52 分钟）",
+    recentTurns: ["帮我盯着这个 bug", "好的正在改"],
+  }));
+  assert.ok(prompt.includes("【用户此刻状态】"), "状态段标头");
+  assert.ok(prompt.includes("在线：active（已持续 8 分钟）"));
+  assert.ok(prompt.includes("屏幕：写代码（已持续 52 分钟）"));
+  assert.ok(prompt.includes("【最近对话摘录"), "最近对话段标头");
+  assert.ok(prompt.includes("帮我盯着这个 bug"));
+  assert.ok(prompt.includes("开口时机参考用户此刻状态"), "时机判断标准");
+  // 空状态不出空段
+  const bare = buildPulsePrompt(new Date("2026-10-25T14:00:00"), mkAggregate());
+  assert.ok(!bare.includes("【用户此刻状态】"));
+  assert.ok(!bare.includes("【最近对话摘录"));
 });

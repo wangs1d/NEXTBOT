@@ -54,7 +54,8 @@ export type SynthesisStrategy =
   | "multi_perspective"      // 矛盾数据：多视角对比
   | "direct_answer"         // 无工具数据：直接回答（纯知识）
   | "photo_delivery"        // 纯图轮：交图即交付，正文一两句话收束
-  | "weather_card";          // 天气卡轮：数值由系统卡片展示，正文只给口语建议
+  | "weather_card"          // 天气卡轮：数值由系统卡片展示，正文只给口语建议
+  | "confirm_receipt";      // 办妥确认轮：提醒/日程写入回执，一两句收口
 
 /**
  * 照片轮专用指令（2026-10-06）：用户搜照片要的是图本身，每张照片下方已由
@@ -80,6 +81,19 @@ export const WEATHER_CARD_INSTRUCTION =
   `严禁用 markdown 标题、表格或引用块罗列天气数据，严禁把工具回执的数值抄写成清单。` +
   `严禁向用户展示经纬度坐标数字（如 35.68, 139.77）——坐标仅供工具入参，位置只说城市/区域名，解析不出就不提位置。` +
   `直接用两三句口语给结论和建议（穿什么/要不要带伞/出行提醒），像朋友聊天一样自然收束。`;
+
+/**
+ * 办妥确认轮专用指令（2026-10-25）：提醒/日程创建回执是「已写入」状态，不是
+ * 可供组织成回复的外部信息。此前无豁免，low 档 honest_sparse 会把它教成
+ * 「已确定（复述用户原话）/目前未知/一句提醒」三段式盘点卡（真机：牙医提醒轮，
+ * 「目前未知」四字即 prompt 原词）。用户拍板：已确定的不必说；没说清的提醒要留，
+ * 但一句话就够。与记账轮同理由短路，不走数据质量分档。
+ */
+export const CONFIRM_RECEIPT_INSTRUCTION =
+  `提醒/日程已写入成功，这是一次办妥确认，一两句话收尾：办成了什么、何时生效（用回执的 nextRunAtLocal）。` +
+  `回执带 remindPlan 分级计划时，用一句话把已排好的预告段转告用户（如「明早9点会喊你出发」），不要自己另建议提前量。` +
+  `严禁复述用户原话，严禁罗列「已确定」类信息清单；用户没说清且确实影响这件事的信息（如地点、诊所要求）最多问一句，问完就收。` +
+  `不预告到点会交付什么内容，不解释执行机制。`;
 
 /** 有文字检索/抓取结果的工具：出现它们说明本轮是图文混合研究，不按纯图轮处理 */
 const TEXT_SEARCH_TOOL_NAMES = new Set([
@@ -119,6 +133,17 @@ export function isBookkeepingOnlyToolSet(toolNames: readonly string[]): boolean 
   if (toolNames.length === 0) return false;
   return toolNames.every((name) => BOOKKEEPING_TOOL_NAMES.has(name));
 }
+
+/**
+ * 办妥确认轮工具（与 services/agent-core 的 CALENDAR_CONFIRM_TOOLS 同源：
+ * 提醒/日程创建类，本轮任一成功返回即按「办妥确认轮」收口）。此处不复用该
+ * 导出——services→agent 的反向依赖不进策略层，两侧各自维护并以注释互指。
+ */
+const CALENDAR_CONFIRM_TOOL_NAMES = new Set([
+  "reminder.plan",
+  "calendar.create_from_text",
+  "calendar.create_task",
+]);
 
 /**
  * 过程话（工具执行前的过渡话）许可：
@@ -453,6 +478,30 @@ export function evaluateAndSelectStrategy(
       // 记账轮：过程话与结论必然同义（"好的，记下了" vs "已经记上啦"）→ 抑制
       preamblePolicy: "suppress",
     };
+  }
+  // 办妥确认轮短路（2026-10-25）：提醒/日程创建回执是「已写入」状态，与记账轮
+  // 同理不走数据质量分档——否则 low 档 honest_sparse 教出「已确定/目前未知」
+  // 三段式盘点卡（真机：牙医提醒轮）。仅当本轮全部是确认工具且有成功返回时生效；
+  // 失败轮与混检索轮照常评估（失败要解释原因、混合轮要组织真实数据）。
+  if (substantiveResults.length > 0 && substantiveResults.every((r) => CALENDAR_CONFIRM_TOOL_NAMES.has(r.toolName))) {
+    if (substantiveResults.some((r) => r.ok)) {
+      return {
+        strategy: "confirm_receipt",
+        instruction: CONFIRM_RECEIPT_INSTRUCTION,
+        quality: {
+          sourceCount: toolResults.length,
+          searchCount: 0,
+          fetchCount: 0,
+          successCount: substantiveResults.filter((r) => r.ok).length,
+          failureCount: toolResults.filter((r) => !r.ok).length,
+          totalContentLength: 0,
+          toolDiversity: substantiveResults.length,
+          level: "high",
+          reason: "办妥确认轮：提醒/日程创建成功回执，一两句收口",
+        },
+        preamblePolicy: "suppress",
+      };
+    }
   }
   // 纯图轮短路（2026-10-06）：搜照片轮的交付是图本身，不走数据质量分档——
   // 否则 medium 档的「先已确认事实/再合理推断/最后待验证点」三段式会教出

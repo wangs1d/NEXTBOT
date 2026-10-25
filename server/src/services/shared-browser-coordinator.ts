@@ -135,6 +135,17 @@ export class SharedBrowserCoordinator {
     this.onSaveLoginDecision?.(actorId, siteId, allowed);
   }
 
+  /**
+   * CDP 桥操作占用/释放通知（感知升级）：服务端直接驱动用户可见的内置浏览器
+   * 时（比价抓取等，不经 shared.browser.invoke），客户端面板据此点亮
+   * 「Agent 正在操作浏览器」状态条——用户知道页面为什么自己在动。
+   */
+  notifyBrowserBusy(actorId: string, busy: boolean, action: string): void {
+    const socket = this.executors.get(actorId);
+    if (!socket) return;
+    safeSend(socket, { type: "shared.browser.busy", payload: { busy, action } });
+  }
+
   /** 未绑定时的调用返回立即失败（不抛错），工具层据此回退提示。 */
   invoke(
     actorId: string,

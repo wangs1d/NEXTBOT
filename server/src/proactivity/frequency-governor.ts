@@ -32,6 +32,8 @@ const DEFAULT_KIND_COOLDOWN_MS: Record<string, number> = {
   geofence_event: 30 * 60 * 1000,       // 地理围栏动作的 speak 告知：30min 兜底（围栏层自有防抖）
   // ── 旅游接驳（travel-upgrade-plan P2）──
   transfer_reminder: 60 * 60 * 1000,    // 接驳提醒：同段行程只问一次（调度器自有 sent 表，此处是兜底冷却）
+  // ── agent pulse（Muse 式聚合审阅）──
+  agent_pulse_price: 30 * 60 * 1000,    // pulse 降价道：用户点名盯的结果走 must 层随到随送，30min 仅作防连发兜底
 };
 
 /**

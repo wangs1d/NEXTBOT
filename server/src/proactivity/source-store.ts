@@ -419,6 +419,27 @@ export class SourceStore {
   }
 
   /**
+   * 全量未消费 finding（不分 subject；agent pulse 审阅材料读点）。
+   * 与 findingsFor 同一套可见性口径：已消费/被预留/过期的不可见。
+   * 按时间倒序（最新发现优先审阅），limit 截断。
+   */
+  allUnconsumedFindings(actorId?: string, limit = 6): DiscoveryFinding[] {
+    const now = this.nowFn();
+    const out: DiscoveryFinding[] = [];
+    for (const s of this.window) {
+      if (s.stream !== "finding") continue;
+      const f = findingOf(s);
+      if (!f) continue;
+      if (actorId !== undefined && s.actorId !== actorId) continue;
+      if (f.at + f.ttlMs <= now) continue;
+      if (this.consumedFindings.has(f.fingerprint) || this.isFindingReserved(f.fingerprint)) continue;
+      out.push(f);
+    }
+    out.sort((a, b) => b.at - a.at);
+    return out.slice(0, Math.max(1, limit));
+  }
+
+  /**
    * 按**实体词**找发现（跨共同键的联系：邮件那边的 subject 是「房东」、目标那边的
    * subject 是 goalId，光靠 subject 永远碰不到面；倒排让它们因「搬家」而相遇）。
    * 走 findByEntity 的常驻索引，重启后仍可查。

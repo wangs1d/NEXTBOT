@@ -531,7 +531,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 2026-09-05 与 calendar.create_from_text/create_task 的重复行为规则互相去重：
       // 每个 tool 只保留自身必需的最小说明（delegate 全量注入时 schema 按轮计费）。
       description:
-        "【生活助手】按用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具，不要追问、不要只口头答应。仅当返回 needsRecurrenceConfirm=true 时，按 suggestedQuestion 向用户追问一次后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示给用户必须用此字段）、recurrence。\n提醒方式默认弹窗（popup）；仅用户明确要求（「打电话提醒我」「语音喊我」）才用 TTS/电话，不要主动升级。",
+        "【生活助手】按用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具，不要追问、不要只口头答应。仅当返回 needsRecurrenceConfirm=true 时，按 suggestedQuestion 向用户追问一次后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示给用户必须用此字段）、recurrence。单次正事提醒未指定提前量时，系统会按事项时间/重要程度/地点自动生成分级提醒（前晚备忘/起床闹钟/出发预留），结果在 remindPlan 字段——转述时把各段计划一并告知用户，不要自己另建议提前量。\n提醒方式默认弹窗（popup）；仅用户明确要求（「打电话提醒我」「语音喊我」）才用 TTS/电话，不要主动升级。",
       parameters: {
         type: "object",
         properties: {

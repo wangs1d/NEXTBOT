@@ -142,10 +142,24 @@ export type HttpRouteDeps = {
   eveningDigestService?: import("../../services/evening-digest-service.js").EveningDigestService;
   /**
    * agent pulse 手动触发（Muse 式聚合评审）：仅供 /api/test/trigger-agent-pulse，
-   * 返回聚合材料/prompt/LLM 原始输出/最终文案/是否提交的完整留痕；force 绕过
-   * delta 指纹强制重评（测试用）。未注入时该路由不挂载。
+   * 返回聚合材料/prompt/LLM 原始输出/最终文案/是否提交/管道 verdict 的完整留痕；
+   * force 绕过 delta 指纹强制重评，fixture 注入替代材料走真实投递链路（测试用，
+   * 不写指纹）。未注入时该路由不挂载。
    */
-  agentPulseCheck?: (opts?: { force?: boolean }) => Promise<unknown>;
+  agentPulseCheck?: (opts?: {
+    force?: boolean;
+    fixture?: {
+      tasks?: string[];
+      unread?: string[];
+      goals?: string[];
+      interests?: string[];
+      goalLine?: string;
+      findings?: string[];
+      presence?: string;
+      screenFocus?: string;
+      recentTurns?: string[];
+    };
+  }) => Promise<unknown>;
   /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */
   proactivitySuppressionStore?: ProactivitySuppressionStore;
   /** 统一主动性管道（docs/proactivity-architecture.md）；可选，未注入时诊断路由不挂载 */
