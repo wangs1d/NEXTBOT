@@ -169,6 +169,19 @@ class TravelPoiDb {
     return (this.db.prepare('SELECT * FROM cities WHERE slug = ?').get(slug) as DbCityRow | undefined) ?? null;
   }
 
+  /** SQLite 绑定归一：脏数据源（高德 address 可能是数组、坐标可能 NaN）
+   * 会让 better-sqlite3 抛 "Provided value cannot be bound"，整城缓存写入失败。 */
+  private static bindableStr(v: unknown): string {
+    if (typeof v === 'string') return v;
+    if (v == null) return '';
+    if (typeof v === 'object') { try { return JSON.stringify(v); } catch { return ''; } }
+    return String(v);
+  }
+  private static bindableNum(v: unknown): number | null {
+    const n = typeof v === 'number' ? v : Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+
   upsertCity(row: {
     slug: string;
     destination: string;
@@ -189,7 +202,15 @@ class TravelPoiDb {
            last_accessed_at = excluded.last_accessed_at,
            access_count = excluded.access_count`,
       )
-      .run(row.slug, row.destination, row.centerLat, row.centerLng, row.createdAt, row.lastAccessedAt, row.accessCount);
+      .run(
+        TravelPoiDb.bindableStr(row.slug),
+        TravelPoiDb.bindableStr(row.destination),
+        TravelPoiDb.bindableNum(row.centerLat) ?? 0,
+        TravelPoiDb.bindableNum(row.centerLng) ?? 0,
+        TravelPoiDb.bindableStr(row.createdAt),
+        TravelPoiDb.bindableStr(row.lastAccessedAt),
+        TravelPoiDb.bindableNum(row.accessCount) ?? 1,
+      );
   }
 
   /** 触达统计（get 命中时调用） */
@@ -244,15 +265,15 @@ class TravelPoiDb {
       this.db.prepare('DELETE FROM pois WHERE city_slug = ?').run(slug);
       for (const r of rows) {
         stmt.run(
-          slug,
-          r.poiId,
-          r.type,
-          r.name,
+          TravelPoiDb.bindableStr(slug),
+          TravelPoiDb.bindableStr(r.poiId),
+          TravelPoiDb.bindableStr(r.type),
+          TravelPoiDb.bindableStr(r.name),
           norm(r.name),
-          r.latitude,
-          r.longitude,
-          r.address,
-          r.rating ?? null,
+          TravelPoiDb.bindableNum(r.latitude) ?? 0,
+          TravelPoiDb.bindableNum(r.longitude) ?? 0,
+          TravelPoiDb.bindableStr(r.address),
+          TravelPoiDb.bindableNum(r.rating),
           r.tags ? JSON.stringify(r.tags) : null,
           JSON.stringify(r.payload),
           now,

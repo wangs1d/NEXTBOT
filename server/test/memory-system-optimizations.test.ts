@@ -6,7 +6,6 @@
  *      / 五维评分植入闸门（无用消息 reject、临时内容 decay）
  *   2. ledger FTS5 检索 + 保留策略 + purgeActor（P1-10 / P0-2）
  *   3. bridge 删除调和 / 删除失败封顶 / 存量回填 / purgeActor（P0-3 / P2-15 / P0-2）
- *   4. board 升级退避表 / 类别维度经验学习 / statsByStatus（P2-14 / P2-13）
  *   5. 认知图 SQLite 行级持久化 round-trip 与 JSON 迁移（P1-9）
  *
  * 全部封闭：fake Mem0、临时目录、无外部 LLM。
@@ -26,7 +25,6 @@ import {
 import { AgenticLedger } from "../src/agentic-memory/ledger.js";
 import { MemoryBridgeService } from "../src/agentic-memory/memory-bridge-service.js";
 import type { BridgeGraphLike } from "../src/agentic-memory/memory-bridge-service.js";
-import { CommitmentBoard } from "../src/agentic-memory/commitment-board.js";
 import { GraphSqlitePersistence } from "../src/services/graph-sqlite-store.js";
 import { openAgenticSqlite } from "../src/agentic-memory/sqlite-store.js";
 
@@ -43,23 +41,11 @@ test("parseJsonObject：容忍围栏与杂文，坏 JSON 返回 null", () => {
   assert.equal(parseJsonObject('{"broken": '), null);
 });
 
-test("normalizeUnified：决策校验 / 承诺规范化 / 纠正项 / 无效决策拒绝", () => {
+test("normalizeUnified：决策校验 / 纠正项 / 无效决策拒绝", () => {
   const ok = normalizeUnified({
     decision: "remember",
     semanticClass: "承诺",
     memories: ["用户周五前转账给供应商", "", "x"],
-    commitments: [
-      {
-        text: "用户承诺周五前转账",
-        committedBy: "user",
-        deadline: "2026-09-05T10:00:00Z",
-        confidence: 1.5,
-        evidence: "我周五前一定转",
-        category: "转账",
-      },
-      { text: "无证据丢弃", committedBy: "user", deadline: null, confidence: 0.9, evidence: "" },
-      { text: "方向非法丢弃", committedBy: "robot", deadline: null, confidence: 0.9, evidence: "x" },
-    ],
     corrections: [
       { oldClaim: "9月去北京出差", newClaim: "行程取消" },
       { oldClaim: "", newClaim: "x" },
@@ -68,9 +54,6 @@ test("normalizeUnified：决策校验 / 承诺规范化 / 纠正项 / 无效决�
   assert.ok(ok);
   assert.equal(ok.decision, "remember");
   assert.deepEqual(ok.memories, ["用户周五前转账给供应商"]);
-  assert.equal(ok.commitments.length, 1);
-  assert.equal(ok.commitments[0]!.confidence, 1);
-  assert.equal(ok.commitments[0]!.category, "转账");
   assert.deepEqual(ok.corrections, [{ oldClaim: "9月去北京出差", newClaim: "行程取消" }]);
 
   assert.equal(normalizeUnified({ decision: "maybe" }), null);
@@ -426,100 +409,6 @@ test("bridge：backfillLinks 用文本相似度回填存量 linkage（零 LLM）
       },
     },
   );
-});
-
-// ============================================================
-// 4. board：升级退避 / 类别经验学习 / statsByStatus
-// ============================================================
-
-async function withOptBoard(fn: (ctx: { board: CommitmentBoard; setNow: (iso: string) => void }) => Promise<void>): Promise<void> {
-  const dir = await mkdtemp(join(tmpdir(), "board-opt-"));
-  let nowMs = Date.parse("2026-09-04T10:00:00Z");
-  const board = new CommitmentBoard(openAgenticSqlite(join(dir, "b.db")), () => new Date(nowMs));
-  try {
-    await fn({ board, setNow: (iso) => { nowMs = Date.parse(iso); } });
-  } finally {
-    board.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-}
-
-test("board：升级退避表按次数取值（[1,2,3]分钟快进验证），固定 escalateAfterMin 兼容", async () => {
-  await withOptBoard(async ({ board, setNow }) => {
-    const events: string[] = [];
-    board.setNotifier((e) => events.push(e.type));
-    board.create({
-      actorId: "u1",
-      text: "第三方承诺交付",
-      committedBy: "third_party",
-      deadline: "2026-09-04T09:00:00Z", // 创建时已超时 1h
-      escalationPolicy: { escalateAfterMinSchedule: [60, 360, 1440], maxEscalations: 3 },
-    });
-
-    // 10:00（超时 60min = step1）→ 第 1 次升级
-    setNow("2026-09-04T10:00:00Z");
-    await board.scanOnce();
-    assert.equal(events.filter((e) => e === "escalation").length, 1);
-
-    // 12:00（距上次 120min < step2=360min）→ 不升级
-    setNow("2026-09-04T12:00:00Z");
-    await board.scanOnce();
-    assert.equal(events.filter((e) => e === "escalation").length, 1);
-
-    // 16:30（距上次 390min ≥ 360min）→ 第 2 次升级
-    setNow("2026-09-04T16:30:00Z");
-    await board.scanOnce();
-    assert.equal(events.filter((e) => e === "escalation").length, 2);
-
-    // 旧语义兼容：显式固定 escalateAfterMin 且无退避表 → 固定间隔
-    const board2Dir = await mkdtemp(join(tmpdir(), "board-opt2-"));
-    let now2 = Date.parse("2026-09-04T10:00:00Z");
-    const board2 = new CommitmentBoard(openAgenticSqlite(join(board2Dir, "b.db")), () => new Date(now2));
-    try {
-      board2.create({
-        actorId: "u1",
-        text: "固定间隔承诺",
-        committedBy: "user",
-        deadline: "2026-09-04T09:00:00Z",
-        escalationPolicy: { escalateAfterMin: 30, maxEscalations: 2 },
-      });
-      const policy = board2.list({ status: ["active"] })[0]!.escalationPolicy;
-      assert.deepEqual(policy.escalateAfterMinSchedule, [], "显式固定间隔 → 退避表清空");
-    } finally {
-      board2.close();
-      await rm(board2Dir, { recursive: true, force: true });
-    }
-  });
-});
-
-test("board：类别维度经验学习——同类违约 2 次提前提醒，异类不触发", async () => {
-  await withOptBoard(async ({ board, setNow }) => {
-    setNow("2026-09-04T10:00:00Z");
-    for (const text of ["答应交报价一", "答应交报价二"]) {
-      board.create({
-        actorId: "u1",
-        text,
-        committedBy: "user",
-        category: "报价",
-        deadline: "2026-09-04T09:00:00Z",
-        escalationPolicy: { escalateAfterMin: 1, maxEscalations: 0 },
-      });
-    }
-    await board.scanOnce(); // 两条 broken
-
-    const hot = board.create({ actorId: "u1", text: "再交一次报价", committedBy: "user", category: "报价" }) as {
-      escalationPolicy: { remindBeforeMinTiers: number[] };
-    };
-    assert.deepEqual(hot.escalationPolicy.remindBeforeMinTiers, [4320, 1440, 120], "同类 2 次违约 → 提前");
-
-    const cold = board.create({ actorId: "u1", text: "约定会面时间", committedBy: "user", category: "会面" }) as {
-      escalationPolicy: { remindBeforeMinTiers: number[] };
-    };
-    assert.deepEqual(cold.escalationPolicy.remindBeforeMinTiers, [1440, 120], "异类不受影响");
-
-    assert.deepEqual(board.getFailurePatternByCategory("u1"), { "user:报价": 2 });
-    assert.deepEqual(board.statsByStatus(), { active: 2, broken: 2 });
-  });
 });
 
 // ============================================================

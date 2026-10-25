@@ -1,6 +1,8 @@
 import "dart:async" show unawaited;
 import "dart:convert";
 import "dart:io" show Platform;
+import "dart:math" as math;
+import "dart:ui" show ImageFilter;
 
 import "package:flutter/material.dart";
 import "package:flutter/services.dart" show Clipboard, ClipboardData;
@@ -16,28 +18,39 @@ import "travel_plan_window.dart";
 import "travel_theme.dart";
 
 // ═══════════════════════════════════════════════════════════════════
-// 旅游界面 v3（应用内「常用工具 → 行程」入口）· Agent 驱动规划 + 左栏行程
+// 旅游界面 v3（应用内「常用工具 → 行程」入口）· 左侧 tab 双空间
 //
-// 主区 = 规划入口：初始只有垂直居中的罗盘图标 + 输入框（无任何引导文案），
-// 一句话发起后输入框落到底部继续对话；缺的信息由 Agent 在规划过程中按需
-// 吐卡片（天气面板 / 出行方式 / 住房 / 吃的）让用户点选，信息齐了自动
-// 真实生成草案（服务端复用 PlanningService 主链路 + travelPlanStore 落盘），
-// 点「生成完整行程」直达完整行程界面（详情由旅游规划界面承载）。
-//
-// 左栏 = 行程收纳：分段式状态切换（进行中 | 即将出发 | 往期，往期默认不
-// 出现），卡片左缘状态色条（青=进行中 / 橙=即将出发 / 灰=往期），往期封面
-// 置灰；卡片只做收纳与状态，点开直达完整行程界面。
+// 左侧窄 tab = 空间切换：「规划」与「行程」各自占满内容区，互不挤压。
+// 规划空间：初始只有垂直居中的罗盘图标 + 输入框，一句话发起后按
+// 天数/日期 → 预算档位 → 交通 → 住宿 → 饮食 串行追问（目的地不出卡，
+// 只在文字里问），一次只出一张卡，答完即消失；已提供的信息不再出卡；
+// 信息齐后真实生成（服务端复用
+// PlanningService + travelPlanStore 落盘），先出预算明细卡，用户确认后
+// 才展示最终规划文字与行程卡。
+// 行程空间：分段式状态切换（进行中 | 即将出发 | 往期），卡片左缘状态
+// 色条（青=进行中 / 橙=即将出发 / 灰=往期），点开直达完整行程界面。
 //
 // 协议：POST /travel/plan-session（发起）→ :id/turn（消息/点选）→
-// :id/generate（真实生成，10~120s）。配色全部走 AppPalette + TravelPalette
-// （随主题深/暖变体热切换，窗口内无切换按钮）。
+// :id/generate（真实生成，10~120s）→ :id/approve（确认预算后出方案）。
+// 配色全部走 AppPalette + TravelPalette（随主题深/暖变体热切换）。
 // ═══════════════════════════════════════════════════════════════════
 
-/// 双栏布局断点：可用宽度达到该值才展开左栏 + 主区双栏。
-const double _kDualPaneBreakpoint = 900;
+/// 左侧竖向 tab 的宽度。
+const double _kTabRailWidth = 64;
 
-/// 左栏固定宽度。
-const double _kLeftPaneWidth = 300;
+/// 对话内容最大宽度（规划页单栏阅读宽度，比主对话更聚焦）。
+const double _kContentMaxWidth = 720;
+
+/// 阶段卡宽度：与主对话行程卡（agent_result_card）同宽。
+const double _kCardWidth = 460;
+
+/// 规划页字体：内嵌 HarmonyOS Sans SC（开口大、小字更清透），回退 MiSans/系统。
+const String _kFontFamily = "HarmonyOS Sans SC";
+const List<String> _kFontFallback = <String>[
+  "MiSans",
+  "Noto Sans SC",
+  "Microsoft YaHei",
+];
 
 /// 行程摘要（GET /travel/plans 的单条记录）。
 class _PlanSummary {
@@ -176,14 +189,46 @@ class _PlanSummary {
 // 页面骨架：宽窗双栏（左栏行程 + 主区规划流） / 窄窗顶部切换
 // ═══════════════════════════════════════════════════════════════════
 
+/// 主对话 → 旅游入口的交接判定（2026-10-24）：旅游规划主战场在旅游界面的
+/// 规划对话，主对话只保留单点查询（天气/票价等）。命中即把用户原话带过去。
+bool looksLikeTravelPlanningRequest(String text) {
+  final String t = text.trim();
+  if (t.isEmpty || t.length > 200) return false;
+  final bool planWord = RegExp(r"行程|攻略|规划|度假|旅游|旅行|自由行|自驾游|多日游")
+      .hasMatch(t);
+  final bool dayWord = RegExp(r"(\d+|[一二三四五六七八九十两])\s*[天日]").hasMatch(t);
+  final bool tripPhrase =
+      RegExp(r"(去|到)[^\s，。！？]{2,10}(玩|旅游|度假|逛|游)").hasMatch(t);
+  if (!(planWord || tripPhrase)) return false;
+  // 单点查询不交接：「三亚明天天气」「门票多少钱」不是规划行程
+  if (!dayWord &&
+      RegExp(r"天气|气温|下雨|门票|票价|机票|高铁票|酒店价格|多少钱").hasMatch(t)) {
+    return false;
+  }
+  return true;
+}
+
 class TravelPlanArchivePage extends StatefulWidget {
-  const TravelPlanArchivePage({super.key});
+  const TravelPlanArchivePage({super.key, this.seedMessage, this.agentName});
+
+  /// 主对话交接过来的原始诉求：进入即自动发起一轮规划会话。
+  final String? seedMessage;
+
+  /// 用户给 Agent 取的名字（空=未设定，界面不显示名字）。
+  final String? agentName;
 
   /// 全屏路由打开（与图库工作台同款打开方式）。
-  static Future<void> show(BuildContext context) {
+  static Future<void> show(
+    BuildContext context, {
+    String? seedMessage,
+    String? agentName,
+  }) {
     return Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
-        builder: (BuildContext context) => const TravelPlanArchivePage(),
+        builder: (BuildContext context) => TravelPlanArchivePage(
+          seedMessage: seedMessage,
+          agentName: agentName,
+        ),
       ),
     );
   }
@@ -196,11 +241,11 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   late Future<List<_PlanSummary>> _future = _fetchSummaries();
   bool _opening = false;
 
-  /// 左栏当前分段：0 进行中 / 1 即将出发 / 2 往期（往期默认不出现）。
-  int _seg = 0;
+  /// 左侧 tab：0 规划 / 1 行程。
+  int _tab = 0;
 
-  /// 窄窗顶部切换：0 规划 / 1 行程。
-  int _narrowTab = 0;
+  /// 行程空间当前分段：0 进行中 / 1 即将出发 / 2 往期（往期默认不出现）。
+  int _seg = 0;
 
   /// 完整行程缓存（打开详情共用，避免重复拉取）。
   final Map<String, TravelPlanData> _planCache = <String, TravelPlanData>{};
@@ -374,6 +419,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       ),
     );
     if (confirmed != true) return;
+    bool verifiedGone = false;
     try {
       final http.Response resp = await http
           .delete(Uri.parse("${ApiConfig.httpBase}/travel/plans/${summary.planId}"))
@@ -381,6 +427,11 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       if (resp.statusCode != 200) {
         throw Exception("HTTP ${resp.statusCode}");
       }
+      // 假成功兜底：200 只代表在某个数据根上删掉了；历史上双数据根 split-brain
+      // 出过「删 A 根、刷 B 根」的假成功。按 planId 复查列表，仍在即如实报错。
+      final List<_PlanSummary> after = await _fetchSummaries();
+      verifiedGone =
+          !after.any((_PlanSummary s) => s.planId == summary.planId);
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -397,8 +448,12 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: Text("已删除「${summary.displayTitle}」",
-            style: const TextStyle(fontSize: 12)),
+        content: Text(
+          verifiedGone
+              ? "已删除「${summary.displayTitle}」"
+              : "删除未生效：服务端列表仍包含该行程（数据根不一致？）",
+          style: const TextStyle(fontSize: 12),
+        ),
         behavior: SnackBarBehavior.floating,
         duration: const Duration(seconds: 2),
       ),
@@ -414,89 +469,59 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   @override
   Widget build(BuildContext context) {
     final _StageColors c = _StageColors.of(context);
-    return Scaffold(
-      backgroundColor: c.bg,
-      body: LayoutBuilder(
-        builder: (BuildContext context, BoxConstraints constraints) {
-          final bool dual = constraints.maxWidth >= _kDualPaneBreakpoint;
-          if (dual) {
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                _LeftRail(
-                  state: this,
-                  future: _future,
-                  seg: _seg,
-                  onSegChanged: (int v) => setState(() => _seg = v),
-                  onOpen: _openFromSummary,
-                  onShare: _copyShareCode,
-                  onDelete: _deletePlan,
-                  onRetry: _refresh,
-                ),
-                VerticalDivider(width: 1, thickness: 1, color: c.sideSep),
-                Expanded(child: _PlanningStage(
-                  onPlanGenerated: _refresh,
-                  onOpenPlan: (String planId) async {
-                    final TravelPlanData? plan = await _ensureFullPlan(planId);
-                    if (plan != null) await _openDetail(plan);
-                  },
-                )),
-              ],
-            );
-          }
-          // 窄窗（手机 / 分屏）：顶部双页签切换 规划 / 行程。
-          return Column(
-            children: <Widget>[
-              Container(
-                height: 46,
-                decoration: BoxDecoration(
-                  color: c.side,
-                  border: Border(bottom: BorderSide(color: c.sideSep)),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-                child: Row(
-                  children: <Widget>[
-                    _BackButton(colors: c),
-                    const SizedBox(width: 12),
-                    _NarrowToggle(
-                      colors: c,
-                      index: _narrowTab,
-                      onChanged: (int v) => setState(() => _narrowTab = v),
+    // 本页统一用 HarmonyOS Sans SC（全局主题是 MiSans），文字与输入框一起换。
+    final ThemeData base = Theme.of(context);
+    final TextTheme typography = base.textTheme.apply(
+      fontFamily: _kFontFamily,
+      fontFamilyFallback: _kFontFallback,
+    );
+    return Theme(
+      data: base.copyWith(
+        textTheme: typography,
+        primaryTextTheme: typography,
+      ),
+      child: Scaffold(
+        backgroundColor: c.bg,
+        body: Row(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            _TravelTabRail(
+              colors: c,
+              index: _tab,
+              onChanged: (int v) => setState(() => _tab = v),
+            ),
+            VerticalDivider(width: 1, thickness: 1, color: c.sideSep),
+            Expanded(
+              child: _tab == 0
+                  ? _PlanningStage(
+                      seedMessage: widget.seedMessage,
+                      agentName: widget.agentName,
+                      onPlanGenerated: _refresh,
+                      onOpenPlan: (String planId) async {
+                        final TravelPlanData? plan = await _ensureFullPlan(planId);
+                        if (plan != null) await _openDetail(plan);
+                      },
+                    )
+                  : _ArchivePane(
+                      future: _future,
+                      seg: _seg,
+                      onSegChanged: (int v) => setState(() => _seg = v),
+                      onOpen: _openFromSummary,
+                      onShare: _copyShareCode,
+                      onDelete: _deletePlan,
+                      onRetry: _refresh,
                     ),
-                  ],
-                ),
-              ),
-              Expanded(
-                child: _narrowTab == 0
-                    ? _PlanningStage(
-                        onPlanGenerated: _refresh,
-                        onOpenPlan: (String planId) async {
-                          final TravelPlanData? plan = await _ensureFullPlan(planId);
-                          if (plan != null) await _openDetail(plan);
-                        },
-                      )
-                    : _LeftRail(
-                        state: this,
-                        future: _future,
-                        seg: _seg,
-                        onSegChanged: (int v) => setState(() => _seg = v),
-                        onOpen: _openFromSummary,
-                        onShare: _copyShareCode,
-                        onDelete: _deletePlan,
-                        onRetry: _refresh,
-                      ),
-              ),
-            ],
-          );
-        },
+            ),
+          ],
+        ),
       ),
     );
   }
 }
 
-/// 窄窗顶部页签（规划 / 行程）。
-class _NarrowToggle extends StatelessWidget {
-  const _NarrowToggle({
+/// 左侧竖向 tab：规划 / 行程。
+class _TravelTabRail extends StatelessWidget {
+  const _TravelTabRail({
     required this.colors,
     required this.index,
     required this.onChanged,
@@ -509,49 +534,85 @@ class _NarrowToggle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: colors.card2,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colors.borderSoft),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
+      width: _kTabRailWidth,
+      color: colors.side,
+      padding: const EdgeInsets.symmetric(vertical: 14),
+      child: Column(
         children: <Widget>[
-          for (final (int i, String label) in const <(int, String)>[(0, "规划"), (1, "行程")])
-            GestureDetector(
-              onTap: () => onChanged(i),
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 160),
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 5),
-                decoration: BoxDecoration(
-                  color: index == i ? colors.card : Colors.transparent,
-                  borderRadius: BorderRadius.circular(9),
-                  boxShadow: index == i
-                      ? <BoxShadow>[BoxShadow(color: colors.shadow, blurRadius: 8, offset: const Offset(0, 2))]
-                      : null,
-                ),
-                child: Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: index == i ? colors.text : colors.muted,
-                  ),
-                ),
-              ),
-            ),
+          _TabButton(
+            colors: colors,
+            icon: Icons.explore_outlined,
+            label: "规划",
+            active: index == 0,
+            onTap: () => onChanged(0),
+          ),
+          const SizedBox(height: 8),
+          _TabButton(
+            colors: colors,
+            icon: Icons.luggage_outlined,
+            label: "行程",
+            active: index == 1,
+            onTap: () => onChanged(1),
+          ),
         ],
       ),
     );
   }
 }
 
+class _TabButton extends StatelessWidget {
+  const _TabButton({
+    required this.colors,
+    required this.icon,
+    required this.label,
+    required this.active,
+    required this.onTap,
+  });
+
+  final _StageColors colors;
+  final IconData icon;
+  final String label;
+  final bool active;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color fg = active ? colors.accent : colors.muted;
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 160),
+        width: 50,
+        padding: const EdgeInsets.symmetric(vertical: 9),
+        decoration: BoxDecoration(
+          color: active ? colors.accentSoft : Colors.transparent,
+          borderRadius: BorderRadius.circular(13),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(icon, size: 19, color: fg),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                color: fg,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
-// 左栏：行程收纳（分段式状态切换 + 状态色条卡片）
+// 行程空间：分段式状态切换 + 状态色条卡片
 // ═══════════════════════════════════════════════════════════════════
 
-/// 返回按钮（退出行程页回到上一界面；双栏=规划区顶栏，窄窗=顶部页签栏）。
+/// 返回按钮（退出行程页回到上一界面）。
 class _BackButton extends StatelessWidget {
   const _BackButton({required this.colors});
 
@@ -574,9 +635,8 @@ class _BackButton extends StatelessWidget {
   }
 }
 
-class _LeftRail extends StatelessWidget {
-  const _LeftRail({
-    required this.state,
+class _ArchivePane extends StatelessWidget {
+  const _ArchivePane({
     required this.future,
     required this.seg,
     required this.onSegChanged,
@@ -586,7 +646,6 @@ class _LeftRail extends StatelessWidget {
     required this.onRetry,
   });
 
-  final _TravelPlanArchivePageState state;
   final Future<List<_PlanSummary>> future;
   final int seg;
   final ValueChanged<int> onSegChanged;
@@ -599,7 +658,6 @@ class _LeftRail extends StatelessWidget {
   Widget build(BuildContext context) {
     final _StageColors c = _StageColors.of(context);
     return Container(
-      width: _kLeftPaneWidth,
       color: c.side,
       child: FutureBuilder<List<_PlanSummary>>(
         future: future,
@@ -618,26 +676,34 @@ class _LeftRail extends StatelessWidget {
           return Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Padding(
-                padding: const EdgeInsets.fromLTRB(18, 20, 18, 0),
+              Container(
+                height: 46,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+                decoration:
+                    BoxDecoration(border: Border(bottom: BorderSide(color: c.borderSoft))),
                 child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.baseline,
-                  textBaseline: TextBaseline.alphabetic,
                   children: <Widget>[
+                    _BackButton(colors: c),
+                    const SizedBox(width: 10),
                     Text("行程",
                         style: TextStyle(
-                            fontSize: 17,
-                            fontWeight: FontWeight.w800,
-                            color: c.text)),
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: c.text2)),
                   ],
                 ),
               ),
               const SizedBox(height: 14),
-              _RailSegs(
-                colors: c,
-                seg: seg,
-                counts: <int>[ongoingCount, upcomingCount, pastCount],
-                onChanged: onSegChanged,
+              Center(
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 720),
+                  child: _RailSegs(
+                    colors: c,
+                    seg: seg,
+                    counts: <int>[ongoingCount, upcomingCount, pastCount],
+                    onChanged: onSegChanged,
+                  ),
+                ),
               ),
               const SizedBox(height: 6),
               Expanded(
@@ -796,15 +862,32 @@ class _RailList extends StatelessWidget {
         ),
       );
     }
-    return ListView.builder(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-      itemCount: items.length,
-      itemBuilder: (BuildContext context, int index) => _TripCard(
-        colors: colors,
-        summary: items[index],
-        onOpen: () => onOpen(items[index]),
-        onShare: () => onShare(items[index]),
-        onDelete: () => onDelete(items[index]),
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(24, 8, 24, 24),
+      child: LayoutBuilder(
+        builder: (BuildContext context, BoxConstraints cons) {
+          final double maxW = cons.maxWidth;
+          final int n = maxW >= 980 ? 3 : (maxW >= 620 ? 2 : 1);
+          final double w = ((maxW - (n - 1) * 12) / n).clamp(236.0, 420.0);
+          return Wrap(
+            spacing: 12,
+            runSpacing: 14,
+            children: <Widget>[
+              for (int i = 0; i < items.length; i++)
+                SizedBox(
+                  width: w,
+                  child: _TripCard(
+                    colors: colors,
+                    summary: items[i],
+                    tilt: (i.isEven ? -1 : 1) * 0.006,
+                    onOpen: () => onOpen(items[i]),
+                    onShare: () => onShare(items[i]),
+                    onDelete: () => onDelete(items[i]),
+                  ),
+                ),
+            ],
+          );
+        },
       ),
     );
   }
@@ -815,6 +898,7 @@ class _TripCard extends StatelessWidget {
   const _TripCard({
     required this.colors,
     required this.summary,
+    this.tilt = 0,
     required this.onOpen,
     required this.onShare,
     required this.onDelete,
@@ -822,136 +906,302 @@ class _TripCard extends StatelessWidget {
 
   final _StageColors colors;
   final _PlanSummary summary;
+
+  /// 交错微倾角(弧度):票根墙收藏感,由列表按奇偶传入。
+  final double tilt;
   final VoidCallback onOpen;
   final VoidCallback onShare;
   final VoidCallback onDelete;
 
   @override
   Widget build(BuildContext context) {
+    final _StageColors colors = this.colors;
+    final bool ongoing = summary.bucket == 0;
+    final bool upcoming = summary.bucket == 1;
     final bool past = summary.bucket == 2;
-    final Color barColor = summary.bucket == 0
+    // 顶条状态色:进行中=青→绿 / 即将出发=橙 / 往期=灰。
+    final Color barColor = ongoing
         ? colors.accent
-        : summary.bucket == 1
+        : upcoming
             ? colors.orange
             : colors.muted;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 9),
-      child: Material(
-        color: colors.card,
-        borderRadius: BorderRadius.circular(13),
-        child: InkWell(
-          onTap: onOpen,
-          borderRadius: BorderRadius.circular(13),
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(13),
-              border: Border.all(color: colors.borderSoft),
-            ),
-            padding: const EdgeInsets.fromLTRB(14, 9, 9, 9),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                // 左缘状态色条
-                Container(
-                  width: 3,
-                  height: 56,
-                  margin: const EdgeInsets.only(right: 10),
-                  decoration: BoxDecoration(
-                    color: barColor.withValues(alpha: past ? 0.35 : 1),
-                    borderRadius: BorderRadius.circular(3),
-                  ),
-                ),
-                // 封面（正常色彩；往期状态由左缘色条区分）
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(10),
-                  child: SizedBox(
-                    width: 60,
-                    height: 60,
-                    child: summary.coverImage.isNotEmpty
-                        ? CachedMediaImage(
-                            url: resolveTravelMediaUrl(summary.coverImage),
-                            fit: BoxFit.cover,
-                            errorBuilder: (_, __, ___) =>
-                                _CoverFallback(colors: colors, label: summary.destination),
-                          )
-                        : _CoverFallback(colors: colors, label: summary.destination),
-                  ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
+    final Color barColor2 = ongoing
+        ? colors.green
+        : upcoming
+            ? colors.orange.withValues(alpha: 0.55)
+            : colors.muted.withValues(alpha: 0.3);
+    final String digits =
+        summary.planId.replaceAll(RegExp(r"[^0-9]"), "");
+    final String ticketNo =
+        "NB-${digits.length >= 4 ? digits.substring(digits.length - 4) : digits.padLeft(4, "0")}";
+    // 状态胶囊:进行中=Day 进度 / 即将出发=倒计时 / 往期=归档。
+    final String pillText = ongoing
+        ? (summary.progressLabel.isEmpty ? "行程进行中" : "${summary.progressLabel} · 进行中")
+        : upcoming
+            ? (summary.countdownLabel.isEmpty ? "即将出发" : "${summary.countdownLabel} · 即将出发")
+            : "已完成 · 已归档";
+    final Color pillColor = ongoing ? colors.accent : upcoming ? colors.orange : colors.green;
+    final String dateText = past && summary.endDate.isNotEmpty
+        ? "${summary.endDate.substring(5)} 结束"
+        : summary.dateRangeLabel;
+    final String metaLine = <String>[
+      if (dateText.isNotEmpty) dateText,
+      if (summary.dayCount > 0) "${summary.dayCount} 天",
+      if (summary.costLabel != null) summary.costLabel!,
+    ].join(" · ");
+
+    return Transform.rotate(
+      angle: tilt,
+      child: Opacity(
+        opacity: past ? 0.82 : 1,
+        child: Material(
+          color: colors.card,
+          borderRadius: BorderRadius.circular(16),
+          child: InkWell(
+            onTap: onOpen,
+            borderRadius: BorderRadius.circular(16),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(16),
+                border: Border.all(color: colors.border),
+              ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    // 顶部状态渐变条
+                    Container(
+                      height: 4,
+                      width: double.infinity,
+                      decoration: BoxDecoration(
+                        gradient: LinearGradient(
+                          colors: <Color>[barColor, barColor2],
+                        ),
+                      ),
+                    ),
+                    IntrinsicHeight(
+                      child: Row(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
                         children: <Widget>[
+                          // 票面主体
                           Expanded(
-                            child: Text(
-                              summary.displayTitle,
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                              style: TextStyle(
-                                  fontSize: 12.5,
-                                  fontWeight: FontWeight.w700,
-                                  color: colors.text),
-                            ),
-                          ),
-                          _CardMenu(
-                            colors: colors,
-                            onShare: onShare,
-                            onDelete: onDelete,
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        <String>[
-                          if (summary.destination.isNotEmpty) summary.destination,
-                          if (summary.bucket == 2 && summary.endDate.isNotEmpty)
-                            "${summary.endDate.substring(5)} 结束"
-                          else if (summary.dateRangeLabel.isNotEmpty)
-                            summary.dateRangeLabel,
-                        ].join(" · "),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(fontSize: 10.5, color: colors.muted),
-                      ),
-                      const SizedBox(height: 5),
-                      Wrap(
-                        spacing: 4,
-                        runSpacing: 4,
-                        children: <Widget>[
-                          if (summary.bucket == 0 && summary.progressLabel.isNotEmpty)
-                            _MetaTag(colors: colors, text: summary.progressLabel, accent: true)
-                          else if (summary.bucket == 1 && summary.countdownLabel.isNotEmpty)
-                            _MetaTag(colors: colors, text: summary.countdownLabel, orange: true),
-                          if (summary.dayCount > 0)
-                            _MetaTag(colors: colors, text: "${summary.dayCount} 天"),
-                          if (summary.costLabel != null)
-                            _MetaTag(colors: colors, text: summary.costLabel!),
-                          if (past) _MetaTag(colors: colors, text: "已归档", green: true),
-                        ],
-                      ),
-                      if (summary.bucket == 0 && summary.progressFraction != null)
-                        Padding(
-                          padding: const EdgeInsets.only(top: 7),
-                          child: ClipRRect(
-                            borderRadius: BorderRadius.circular(2),
-                            child: SizedBox(
-                              height: 3,
-                              child: LinearProgressIndicator(
-                                value: summary.progressFraction,
-                                minHeight: 3,
-                                backgroundColor: colors.borderSoft,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(colors.accent),
+                            child: Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 12, 10, 12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: <Widget>[
+                                  Row(
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: Text(
+                                          "ITINERARY PASS · $ticketNo",
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                            fontSize: 8,
+                                            fontWeight: FontWeight.w600,
+                                            letterSpacing: 1.5,
+                                            color: colors.muted,
+                                          ),
+                                        ),
+                                      ),
+                                      _CardMenu(
+                                        colors: colors,
+                                        onShare: onShare,
+                                        onDelete: onDelete,
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Row(
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: <Widget>[
+                                      Column(
+                                        crossAxisAlignment: CrossAxisAlignment.start,
+                                        children: <Widget>[
+                                          Text("出发 FROM",
+                                              style: TextStyle(
+                                                  fontSize: 8,
+                                                  letterSpacing: 1,
+                                                  color: colors.muted)),
+                                          const SizedBox(height: 4),
+                                          Text("此地",
+                                              style: TextStyle(
+                                                  fontSize: 15,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: colors.text)),
+                                        ],
+                                      ),
+                                      Padding(
+                                        padding: const EdgeInsets.only(
+                                            left: 10, right: 10, bottom: 3),
+                                        child: Row(
+                                          children: <Widget>[
+                                            Container(
+                                                width: 16,
+                                                height: 1,
+                                                color: colors.accent
+                                                    .withValues(alpha: 0.5)),
+                                            const SizedBox(width: 4),
+                                            Icon(Icons.flight_takeoff,
+                                                size: 12, color: colors.accent),
+                                            const SizedBox(width: 4),
+                                            Container(
+                                                width: 16,
+                                                height: 1,
+                                                color: colors.accent
+                                                    .withValues(alpha: 0.5)),
+                                          ],
+                                        ),
+                                      ),
+                                      Expanded(
+                                        child: Column(
+                                          crossAxisAlignment:
+                                              CrossAxisAlignment.start,
+                                          children: <Widget>[
+                                            Text("目的地 TO",
+                                                style: TextStyle(
+                                                    fontSize: 8,
+                                                    letterSpacing: 1,
+                                                    color: colors.muted)),
+                                            const SizedBox(height: 4),
+                                            Text(
+                                              summary.destination.isNotEmpty
+                                                  ? summary.destination
+                                                  : summary.displayTitle,
+                                              maxLines: 1,
+                                              overflow: TextOverflow.ellipsis,
+                                              style: TextStyle(
+                                                  fontSize: 17,
+                                                  fontWeight: FontWeight.w700,
+                                                  color: colors.text),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 10),
+                                  Text(
+                                    metaLine,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: TextStyle(
+                                        fontSize: 9.5, color: colors.muted),
+                                  ),
+                                  const SizedBox(height: 8),
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 3),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(
+                                          color:
+                                              pillColor.withValues(alpha: 0.4)),
+                                      color: pillColor.withValues(alpha: 0.12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: <Widget>[
+                                        Icon(Icons.verified_outlined,
+                                            size: 10, color: pillColor),
+                                        const SizedBox(width: 4),
+                                        Text(pillText,
+                                            style: TextStyle(
+                                                fontSize: 9,
+                                                fontWeight: FontWeight.w600,
+                                                color: pillColor)),
+                                      ],
+                                    ),
+                                  ),
+                                ],
                               ),
                             ),
                           ),
-                        ),
-                    ],
-                  ),
+                          // 窄存根:撕线 + 打孔 + 绿勾 + 竖排「已出票」
+                          SizedBox(
+                            width: 58,
+                            child: Stack(
+                              clipBehavior: Clip.none,
+                              children: <Widget>[
+                                Positioned(
+                                  left: -7,
+                                  top: -7,
+                                  child: Container(
+                                    width: 14,
+                                    height: 14,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: colors.side,
+                                      border: Border.all(color: colors.border),
+                                    ),
+                                  ),
+                                ),
+                                Positioned(
+                                  left: -7,
+                                  bottom: -7,
+                                  child: Container(
+                                    width: 14,
+                                    height: 14,
+                                    decoration: BoxDecoration(
+                                      shape: BoxShape.circle,
+                                      color: colors.side,
+                                      border: Border.all(color: colors.border),
+                                    ),
+                                  ),
+                                ),
+                                Center(
+                                  child: Container(
+                                    width: double.infinity,
+                                    decoration: BoxDecoration(
+                                      border: Border(
+                                        left: BorderSide(
+                                            color: colors.border, width: 1.5),
+                                      ),
+                                    ),
+                                    padding: const EdgeInsets.symmetric(
+                                        vertical: 10),
+                                    child: Column(
+                                      mainAxisAlignment: MainAxisAlignment.center,
+                                      children: <Widget>[
+                                        Container(
+                                          width: 26,
+                                          height: 26,
+                                          decoration: BoxDecoration(
+                                            shape: BoxShape.circle,
+                                            color: colors.greenSoft,
+                                            border: Border.all(
+                                                color: colors.green,
+                                                width: 1.5),
+                                          ),
+                                          child: Icon(Icons.check_rounded,
+                                              size: 14, color: colors.green),
+                                        ),
+                                        const SizedBox(height: 6),
+                                        Text(
+                                          "已\n出\n票",
+                                          textAlign: TextAlign.center,
+                                          style: TextStyle(
+                                            fontSize: 8.5,
+                                            letterSpacing: 1,
+                                            height: 1.6,
+                                            color: colors.muted,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ],
                 ),
-              ],
+              ),
             ),
           ),
         ),
@@ -999,71 +1249,6 @@ class _CardMenu extends StatelessWidget {
             child: Text("删除", style: TextStyle(fontSize: 12.5, color: colors.text)),
           ),
         ],
-      ),
-    );
-  }
-}
-
-class _MetaTag extends StatelessWidget {
-  const _MetaTag({
-    required this.colors,
-    required this.text,
-    this.accent = false,
-    this.orange = false,
-    this.green = false,
-  });
-
-  final _StageColors colors;
-  final String text;
-  final bool accent;
-  final bool orange;
-  final bool green;
-
-  @override
-  Widget build(BuildContext context) {
-    final Color bg = accent
-        ? colors.accentSoft
-        : orange
-            ? colors.orangeSoft
-            : green
-                ? colors.greenSoft
-                : colors.card2;
-    final Color fg = accent
-        ? colors.accent
-        : orange
-            ? colors.orange
-            : green
-                ? colors.green
-                : colors.muted;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-      decoration: BoxDecoration(
-        color: bg,
-        borderRadius: BorderRadius.circular(9),
-      ),
-      child: Text(
-        text,
-        style: TextStyle(fontSize: 9, fontWeight: FontWeight.w600, color: fg),
-      ),
-    );
-  }
-}
-
-class _CoverFallback extends StatelessWidget {
-  const _CoverFallback({required this.colors, required this.label});
-
-  final _StageColors colors;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      color: colors.card2,
-      alignment: Alignment.center,
-      child: Text(
-        label.isNotEmpty ? label.characters.first : "旅",
-        style: TextStyle(
-            fontSize: 18, fontWeight: FontWeight.w700, color: colors.muted),
       ),
     );
   }
@@ -1169,6 +1354,27 @@ class _WeatherDay {
   }
 }
 
+/// 卡片顶部的进度摘要（已答/总数 + 已确认要点）。
+class _CardProgress {
+  const _CardProgress({
+    required this.done,
+    required this.total,
+    required this.summary,
+  });
+
+  factory _CardProgress.fromJson(Map<String, dynamic> json) {
+    return _CardProgress(
+      done: (json["done"] as num?)?.toInt() ?? 0,
+      total: (json["total"] as num?)?.toInt() ?? 0,
+      summary: json["summary"]?.toString() ?? "",
+    );
+  }
+
+  final int done;
+  final int total;
+  final String summary;
+}
+
 /// 服务端卡片载荷：选择卡。
 class _ChoiceCardData {
   _ChoiceCardData({
@@ -1176,14 +1382,18 @@ class _ChoiceCardData {
     required this.title,
     required this.multi,
     required this.options,
+    this.stage = "",
     this.prefill = const <String>[],
     this.placeholder,
+    this.allowNote = false,
+    this.progress,
   });
 
   factory _ChoiceCardData.fromJson(Map<String, dynamic> json) {
     return _ChoiceCardData(
       id: json["id"]?.toString() ?? "",
       title: json["title"]?.toString() ?? "",
+      stage: json["stage"]?.toString() ?? "",
       multi: json["multi"] == true,
       options: <String>[
         for (final dynamic o in (json["options"] as List<dynamic>? ?? const <dynamic>[]))
@@ -1194,14 +1404,22 @@ class _ChoiceCardData {
           if (o != null) o.toString(),
       ],
       placeholder: json["placeholder"]?.toString(),
+      allowNote: json["allowNote"] == true,
+      progress: json["progress"] is Map<String, dynamic>
+          ? _CardProgress.fromJson(json["progress"] as Map<String, dynamic>)
+          : null,
     );
   }
 
   final String id;
   final String title;
+  /// 阶段名（卡片头部，如「大交通」「住宿」）
+  final String stage;
   final bool multi;
   final List<String> options;
   final List<String> prefill;
+  final bool allowNote;
+  final _CardProgress? progress;
   final String? placeholder;
 }
 
@@ -1212,6 +1430,8 @@ class _DraftData {
     required this.title,
     required this.destination,
     required this.days,
+    this.startDate = "",
+    this.endDate = "",
     this.totalCost,
   });
 
@@ -1220,6 +1440,8 @@ class _DraftData {
       planId: json["planId"]?.toString() ?? "",
       title: json["title"]?.toString() ?? "行程草案",
       destination: json["destination"]?.toString() ?? "",
+      startDate: json["startDate"]?.toString() ?? "",
+      endDate: json["endDate"]?.toString() ?? "",
       totalCost: (json["totalCost"] as num?)?.toDouble(),
       days: <({String label, String stops})>[
         for (final dynamic d in (json["days"] as List<dynamic>? ?? const <dynamic>[]))
@@ -1235,15 +1457,89 @@ class _DraftData {
   final String planId;
   final String title;
   final String destination;
+  final String startDate;
+  final String endDate;
   final double? totalCost;
   final List<({String label, String stops})> days;
 }
 
+/// 服务端预算明细（真实报价；amount=null 表示该类目未接入计价）。
+class _BudgetItemData {
+  const _BudgetItemData({
+    required this.key,
+    required this.label,
+    required this.amount,
+    this.note = "",
+  });
+
+  factory _BudgetItemData.fromJson(Map<String, dynamic> json) {
+    return _BudgetItemData(
+      key: json["key"]?.toString() ?? "",
+      label: json["label"]?.toString() ?? "",
+      amount: (json["amount"] as num?)?.toDouble(),
+      note: json["note"]?.toString() ?? "",
+    );
+  }
+
+  final String key;
+  final String label;
+  final double? amount;
+  final String note;
+}
+
+class _BudgetData {
+  _BudgetData({
+    required this.currency,
+    required this.total,
+    required this.original,
+    required this.discount,
+    required this.items,
+    required this.pricingMode,
+    required this.warnings,
+  });
+
+  factory _BudgetData.fromJson(Map<String, dynamic> json) {
+    return _BudgetData(
+      currency: json["currency"]?.toString() ?? "CNY",
+      total: (json["total"] as num?)?.toDouble() ?? 0,
+      original: (json["original"] as num?)?.toDouble() ?? 0,
+      discount: (json["discount"] as num?)?.toDouble() ?? 0,
+      items: <_BudgetItemData>[
+        for (final dynamic i in (json["items"] as List<dynamic>? ?? const <dynamic>[]))
+          if (i is Map<String, dynamic>) _BudgetItemData.fromJson(i),
+      ],
+      pricingMode: json["pricingMode"]?.toString() ?? "",
+      warnings: <String>[
+        for (final dynamic w in (json["warnings"] as List<dynamic>? ?? const <dynamic>[]))
+          if (w != null) w.toString(),
+      ],
+    );
+  }
+
+  final String currency;
+  final double total;
+  final double original;
+  final double discount;
+  final List<_BudgetItemData> items;
+  final String pricingMode;
+  final List<String> warnings;
+
+  /// 用户已确认这版预算（确认后按钮收起，避免重复出方案）。
+  bool approved = false;
+}
+
 /// 对话流条目。
-enum _FlowKind { user, say, weather, choice, typing, draft, error }
+enum _FlowKind { user, say, weather, choice, typing, budget, draft, error }
 
 class _FlowItem {
-  _FlowItem._(this.kind, {this.text = "", this.weather, this.choice, this.draft});
+  _FlowItem._(
+    this.kind, {
+    this.text = "",
+    this.weather,
+    this.choice,
+    this.budget,
+    this.draft,
+  });
 
   factory _FlowItem.user(String text) => _FlowItem._(_FlowKind.user, text: text);
   factory _FlowItem.say(String text) => _FlowItem._(_FlowKind.say, text: text);
@@ -1252,6 +1548,8 @@ class _FlowItem {
   factory _FlowItem.choice(_ChoiceCardData data) =>
       _FlowItem._(_FlowKind.choice, choice: data);
   factory _FlowItem.typing() => _FlowItem._(_FlowKind.typing);
+  factory _FlowItem.budget(_BudgetData data) =>
+      _FlowItem._(_FlowKind.budget, budget: data);
   factory _FlowItem.draft(_DraftData data) =>
       _FlowItem._(_FlowKind.draft, draft: data);
   factory _FlowItem.error(String text) => _FlowItem._(_FlowKind.error, text: text);
@@ -1260,10 +1558,8 @@ class _FlowItem {
   final String text;
   final _WeatherCardData? weather;
   final _ChoiceCardData? choice;
+  final _BudgetData? budget;
   final _DraftData? draft;
-
-  /// 选择卡是否已作答（作答后锁定不再可点）。
-  bool answered = false;
 }
 
 /// 服务端一轮回执。
@@ -1272,6 +1568,7 @@ class _TurnResult {
     required this.state,
     required this.say,
     required this.cards,
+    required this.budget,
     required this.draft,
   });
 
@@ -1287,6 +1584,9 @@ class _TurnResult {
             else if (c["type"] == "choice")
               _ChoiceCardData.fromJson(c),
       ],
+      budget: json["budget"] is Map<String, dynamic>
+          ? _BudgetData.fromJson(json["budget"] as Map<String, dynamic>)
+          : null,
       draft: json["draft"] is Map<String, dynamic>
           ? _DraftData.fromJson(json["draft"] as Map<String, dynamic>)
           : null,
@@ -1296,6 +1596,7 @@ class _TurnResult {
   final String state;
   final String say;
   final List<Object> cards;
+  final _BudgetData? budget;
   final _DraftData? draft;
 }
 
@@ -1304,6 +1605,8 @@ class _PlanningStage extends StatefulWidget {
   const _PlanningStage({
     required this.onPlanGenerated,
     required this.onOpenPlan,
+    this.seedMessage,
+    this.agentName,
   });
 
   /// 真实生成成功后回调（宿主刷新左栏列表）。
@@ -1311,6 +1614,12 @@ class _PlanningStage extends StatefulWidget {
 
   /// 「生成完整行程」：按 planId 打开完整行程界面。
   final Future<void> Function(String planId) onOpenPlan;
+
+  /// 主对话交接过来的原始诉求（进入即自动发起一轮规划会话）。
+  final String? seedMessage;
+
+  /// 用户给 Agent 取的名字（空=未设定，说话块不显示名字）。
+  final String? agentName;
 
   @override
   State<_PlanningStage> createState() => _PlanningStageState();
@@ -1330,6 +1639,22 @@ class _PlanningStageState extends State<_PlanningStage> {
   String? _sessionId;
 
   final List<_FlowItem> _flow = <_FlowItem>[];
+
+  /// 出票时刻（预算确认 → 播打印出票动画；null=未播放）。
+  _TicketPrintMoment? _ticketMoment;
+
+  @override
+  void initState() {
+    super.initState();
+    // 主对话交接：进来就把原话当作第一条用户消息，直接起会话。
+    final String seed = (widget.seedMessage ?? "").trim();
+    if (seed.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _flowStarted) return;
+      _append(_FlowItem.user(seed));
+      unawaited(_start(seed));
+    });
+  }
 
   @override
   void dispose() {
@@ -1374,10 +1699,21 @@ class _PlanningStageState extends State<_PlanningStage> {
         _append(_FlowItem.choice(card));
       }
     }
+    if (r.budget != null) _append(_FlowItem.budget(r.budget!));
     if (r.draft != null) {
       _append(_FlowItem.draft(r.draft!));
       unawaited(Future<void>.delayed(Duration.zero).then((_) => widget.onPlanGenerated()));
     }
+  }
+
+  /// 用户重新补充信息：未答的问题卡与上一版预算/最终方案都不再代表当前需求，先移出流。
+  void _dropStaleOutput() {
+    _flow.removeWhere(
+      (_FlowItem f) =>
+          f.kind == _FlowKind.choice ||
+          f.kind == _FlowKind.budget ||
+          f.kind == _FlowKind.draft,
+    );
   }
 
   // ── 服务端调用 ─────────────────────────────────────────────────
@@ -1415,6 +1751,7 @@ class _PlanningStageState extends State<_PlanningStage> {
     if (text.isEmpty || _busy) return;
     _input.clear();
     _inputFocus.unfocus();
+    setState(_dropStaleOutput);
     _append(_FlowItem.user(text));
     if (!_flowStarted) {
       await _start(text);
@@ -1482,8 +1819,12 @@ class _PlanningStageState extends State<_PlanningStage> {
   ) async {
     final String? id = _sessionId;
     if (id == null || _busy) return;
-    setState(() => item.answered = true);
-    setState(() => _busy = true);
+    // 串行节奏：答完这张卡立即从流里消失，下一张由服务端回执带来。
+    setState(() {
+      _flow.remove(item);
+      _dropStaleOutput();
+      _busy = true;
+    });
     _append(_FlowItem.typing());
     bool ready = false;
     try {
@@ -1518,9 +1859,49 @@ class _PlanningStageState extends State<_PlanningStage> {
       final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
       _removeTyping();
       if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
+      // flow A：生成完先只给预算明细，用户确认后才出最终方案。
+      if (r.budget != null) _append(_FlowItem.budget(r.budget!));
       if (r.draft != null) {
         _append(_FlowItem.draft(r.draft!));
         unawaited(Future<void>.delayed(Duration.zero).then((_) => widget.onPlanGenerated()));
+      }
+    } catch (e) {
+      _recoverFromError(e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// 预算确认 → 服务端下发最终草案。
+  Future<void> _approve() async {
+    final String? id = _sessionId;
+    if (id == null || _busy) return;
+    if (_flow.any((_FlowItem f) => f.budget?.approved == true)) return;
+    setState(() => _busy = true);
+    _append(_FlowItem.typing());
+    try {
+      final Map<String, dynamic>? decoded = await _post(
+        "/travel/plan-session/$id/approve",
+        <String, dynamic>{},
+        _turnTimeout,
+      );
+      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
+      setState(() {
+        for (final _FlowItem f in _flow) {
+          if (f.kind == _FlowKind.budget) f.budget!.approved = true;
+        }
+      });
+      _insertSayAndCards(r);
+      // 出票时刻：预算确认且服务端下发最终草案 → 播打印出票动画。
+      if (r.draft != null && mounted) {
+        String pricingMode = "";
+        for (final _FlowItem f in _flow) {
+          if (f.kind == _FlowKind.budget) pricingMode = f.budget?.pricingMode ?? "";
+        }
+        setState(() => _ticketMoment = _TicketPrintMoment(
+              draft: r.draft!,
+              pricingMode: pricingMode,
+            ));
       }
     } catch (e) {
       _recoverFromError(e);
@@ -1550,8 +1931,10 @@ class _PlanningStageState extends State<_PlanningStage> {
   @override
   Widget build(BuildContext context) {
     final _StageColors c = _StageColors.of(context);
-    return Column(
+    return Stack(
       children: <Widget>[
+        Column(
+          children: <Widget>[
         // 顶栏（返回 + 标题；无主题切换按钮：颜色跟随应用主题）
         Container(
           height: 46,
@@ -1569,15 +1952,20 @@ class _PlanningStageState extends State<_PlanningStage> {
             ],
           ),
         ),
-        // 对话流（idle 时隐藏）：flow 独占剩余空间
+        // 对话流（idle 时隐藏）：flow 独占剩余空间；内容居中，与主对话同宽
         if (_flowStarted)
           Expanded(
             child: ListView.builder(
               controller: _scroll,
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
               itemCount: _flow.length,
-              itemBuilder: (BuildContext context, int index) =>
-                  _buildFlowItem(context, _flow[index], c),
+              itemBuilder: (BuildContext context, int index) => Align(
+                alignment: Alignment.topCenter,
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
+                  child: _buildFlowItem(context, _flow[index], c),
+                ),
+              ),
             ),
           ),
         // 输入区：idle 垂直居中，flow 落底部
@@ -1585,6 +1973,22 @@ class _PlanningStageState extends State<_PlanningStage> {
           _buildComposer(c)
         else
           Expanded(child: Center(child: _buildComposer(c))),
+          ],
+        ),
+        // 出票时刻覆盖层（预算确认后）
+        if (_ticketMoment != null)
+          Positioned.fill(
+            child: _TicketPrintOverlay(
+              moment: _ticketMoment!,
+              colors: c,
+              onClose: () => setState(() => _ticketMoment = null),
+              onOpenPlan: () {
+                final _DraftData d = _ticketMoment!.draft;
+                setState(() => _ticketMoment = null);
+                unawaited(_openDraft(d));
+              },
+            ),
+          ),
       ],
     );
   }
@@ -1594,20 +1998,24 @@ class _PlanningStageState extends State<_PlanningStage> {
       padding: EdgeInsets.fromLTRB(
           24, 8, 24, _flowStarted ? 18 : 0),
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxWidth: 620),
+        constraints: const BoxConstraints(maxWidth: _kContentMaxWidth),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
             // 居中罗盘图标（仅 idle，无引导文案）
             if (!_flowStarted) ...<Widget>[
-              Container(
-                width: 46,
-                height: 46,
-                decoration: BoxDecoration(
-                  color: c.accentSoft,
-                  borderRadius: BorderRadius.circular(15),
+              GestureDetector(
+                // 临时调试：点罗盘直接预览出票动画（验证后移除）。
+                onTap: _previewTicketMoment,
+                child: Container(
+                  width: 46,
+                  height: 46,
+                  decoration: BoxDecoration(
+                    color: c.accentSoft,
+                    borderRadius: BorderRadius.circular(15),
+                  ),
+                  child: Icon(Icons.explore_outlined, size: 24, color: c.accent),
                 ),
-                child: Icon(Icons.explore_outlined, size: 24, color: c.accent),
               ),
               const SizedBox(height: 18),
             ],
@@ -1627,6 +2035,34 @@ class _PlanningStageState extends State<_PlanningStage> {
       ),
     );
   }
+
+  /// 你的 Agent 名字；未设定时为空（说话块不显示名字）。
+  String get _agentLabel => (widget.agentName ?? "").trim();
+
+  /// 临时调试：点罗盘直接预览出票动画（验证后移除）。
+  void _previewTicketMoment() {
+    setState(() => _ticketMoment = _TicketPrintMoment(
+          draft: _DraftData(
+            planId: "plan-preview-1024",
+            title: "成都吃三天",
+            destination: "成都",
+            startDate: "2026-10-26",
+            endDate: "2026-10-28",
+            totalCost: 1180,
+            days: <({String label, String stops})>[
+              (label: "Day 1", stops: "宽窄巷子 · 人民公园 · 火锅"),
+              (label: "Day 2", stops: "都江堰 · 犀浦夜市"),
+              (label: "Day 3", stops: "大熊猫基地 · 春熙路"),
+            ],
+          ),
+          pricingMode: "real-api",
+        ));
+  }
+
+  /// 「再调整」提示：有名字就用名字，没设定就退回无人称说法。
+  String _adjustHint(String example) => _agentLabel.isEmpty
+      ? "在输入框说想改哪里，比如：$example"
+      : "告诉 $_agentLabel 想改哪里，比如：$example";
 
   Widget _buildFlowItem(BuildContext context, _FlowItem item, _StageColors c) {
     switch (item.kind) {
@@ -1650,6 +2086,7 @@ class _PlanningStageState extends State<_PlanningStage> {
       case _FlowKind.error:
         final bool isError = item.kind == _FlowKind.error;
         return _AgentBlock(
+          name: _agentLabel,
           colors: c,
           child: Text(
             item.text,
@@ -1661,27 +2098,75 @@ class _PlanningStageState extends State<_PlanningStage> {
           ),
         );
       case _FlowKind.typing:
-        return _AgentBlock(colors: c, child: _TypingDots(colors: c));
+        return _AgentBlock(name: _agentLabel, colors: c, child: _TypingDots(colors: c));
       case _FlowKind.weather:
-        return _AgentBlock(
+        final _WeatherCardData card = item.weather!;
+        return _StageCardShell(
           colors: c,
-          child: _WeatherPanel(card: item.weather!, colors: c),
+          icon: Icons.wb_sunny_outlined,
+          stage: card.title.isEmpty ? "目的地天气" : card.title,
+          trailing: card.sub.isEmpty
+              ? null
+              : Text(card.sub, style: TextStyle(fontSize: 10.5, color: c.muted)),
+          child: _WeatherPanel(card: card, colors: c),
         );
       case _FlowKind.choice:
-        return _AgentBlock(
+        final _ChoiceCardData card = item.choice!;
+        final _CardProgress? progress = card.progress;
+        return _StageCardShell(
           colors: c,
+          icon: _stageIcon(card.id),
+          stage: card.stage.isNotEmpty ? card.stage : "行程偏好",
+          trailing: progress != null && progress.total > 0
+              ? _StageTrailing(
+                  text: "已确认 ${progress.done}/${progress.total}",
+                  colors: c,
+                )
+              : null,
           child: _ChoiceCard(
-            item: item,
-            card: item.choice!,
+            card: card,
             colors: c,
-            enabled: !item.answered && !_busy,
+            enabled: !_busy,
             onConfirm: (List<String> values, String? note) =>
-                _sendChoice(item, item.choice!, values, note),
+                _sendChoice(item, card, values, note),
+          ),
+        );
+      case _FlowKind.budget:
+        return _StageCardShell(
+          colors: c,
+          icon: Icons.receipt_long_outlined,
+          stage: "预算确认",
+          trailing: _StageTrailing(
+            text: switch (item.budget!.pricingMode) {
+              "real-api" => "实时报价",
+              "real-database" => "市场数据库",
+              _ => "参考价",
+            },
+            colors: c,
+            tone: _StageTone.green,
+          ),
+          child: _BudgetCard(
+            budget: item.budget!,
+            colors: c,
+            enabled: !_busy,
+            onApprove: _approve,
+            onAdjust: () {
+              _inputFocus.requestFocus();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text(
+                      _adjustHint("住宿换民宿、预算再省一点"),
+                      style: const TextStyle(fontSize: 12)),
+                  behavior: SnackBarBehavior.floating,
+                  duration: const Duration(seconds: 2),
+                ),
+              );
+            },
           ),
         );
       case _FlowKind.draft:
-        return _AgentBlock(
-          colors: c,
+        return Align(
+          alignment: Alignment.centerLeft,
           child: _DraftCard(
             draft: item.draft!,
             colors: c,
@@ -1690,11 +2175,12 @@ class _PlanningStageState extends State<_PlanningStage> {
             onAdjust: () {
               _inputFocus.requestFocus();
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text("在输入框告诉 Agent 改哪里，比如：第二天想去都江堰",
-                      style: TextStyle(fontSize: 12)),
+                SnackBar(
+                  content: Text(
+                      _adjustHint("第二天想去都江堰"),
+                      style: const TextStyle(fontSize: 12)),
                   behavior: SnackBarBehavior.floating,
-                  duration: Duration(seconds: 2),
+                  duration: const Duration(seconds: 2),
                 ),
               );
             },
@@ -1704,10 +2190,15 @@ class _PlanningStageState extends State<_PlanningStage> {
   }
 }
 
-/// Agent 说话块（名字点 + 内容）。
+/// 说话块（用户给 Agent 取的名字 + 内容；未命名时不显示名字行）。
 class _AgentBlock extends StatelessWidget {
-  const _AgentBlock({required this.colors, required this.child});
+  const _AgentBlock({
+    required this.name,
+    required this.colors,
+    required this.child,
+  });
 
+  final String name;
   final _StageColors colors;
   final Widget child;
 
@@ -1718,32 +2209,143 @@ class _AgentBlock extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
-          Row(
-            children: <Widget>[
-              Container(
-                width: 6,
-                height: 6,
-                decoration:
-                    BoxDecoration(shape: BoxShape.circle, color: colors.accent),
-              ),
-              const SizedBox(width: 6),
-              Text("Agent",
-                  style: TextStyle(
-                      fontSize: 10.5,
-                      fontWeight: FontWeight.w700,
-                      color: colors.muted)),
-            ],
-          ),
-          const SizedBox(height: 7),
-          DefaultTextStyle(
-            style: const TextStyle(),
-            child: child,
-          ),
+          if (name.isNotEmpty) ...<Widget>[
+            Row(
+              children: <Widget>[
+                Container(
+                  width: 6,
+                  height: 6,
+                  decoration:
+                      BoxDecoration(shape: BoxShape.circle, color: colors.accent),
+                ),
+                const SizedBox(width: 6),
+                Text(name,
+                    style: TextStyle(
+                        fontSize: 10.5,
+                        fontWeight: FontWeight.w700,
+                        color: colors.muted)),
+              ],
+            ),
+            const SizedBox(height: 7),
+          ],
+          child,
         ],
       ),
     );
   }
 }
+
+/// 阶段独立卡外壳（对齐「明日速览」卡：圆角 14 + 细描边 + 头部图标/阶段名）。
+class _StageCardShell extends StatelessWidget {
+  const _StageCardShell({
+    required this.colors,
+    required this.icon,
+    required this.stage,
+    required this.child,
+    this.trailing,
+  });
+
+  final _StageColors colors;
+  final IconData icon;
+  final String stage;
+  final Widget? trailing;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    // 与主对话行程卡（_TravelItineraryCard）同款卡面：surfaceContainerHigh +
+    // 14 圆角 + 细描边，宽度固定 460，不再撑满整列。
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        constraints: const BoxConstraints(maxWidth: _kCardWidth),
+        decoration: BoxDecoration(
+          color: cs.surfaceContainerHigh,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+        ),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Container(
+                  width: 30,
+                  height: 30,
+                  decoration: BoxDecoration(
+                    color: colors.accent.withValues(alpha: 0.16),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, size: 17, color: colors.accent),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(stage,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w700,
+                          color: colors.text)),
+                ),
+                if (trailing != null) ...<Widget>[
+                  const SizedBox(width: 8),
+                  trailing!,
+                ],
+              ],
+            ),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+enum _StageTone { accent, green }
+
+/// 卡片头部右侧的小徽标（进度 / 报价口径）。
+class _StageTrailing extends StatelessWidget {
+  const _StageTrailing({
+    required this.text,
+    required this.colors,
+    this.tone = _StageTone.accent,
+  });
+
+  final String text;
+  final _StageColors colors;
+  final _StageTone tone;
+
+  @override
+  Widget build(BuildContext context) {
+    final Color fg = tone == _StageTone.green ? colors.green : colors.accent;
+    final Color bg =
+        tone == _StageTone.green ? colors.greenSoft : colors.accentSoft;
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Text(text,
+          style: TextStyle(
+              fontSize: 9.5, fontWeight: FontWeight.w600, color: fg)),
+    );
+  }
+}
+
+IconData _stageIcon(String id) => switch (id) {
+      "days" => Icons.calendar_today_outlined,
+      "budget" => Icons.savings_outlined,
+      "transport" => Icons.flight_takeoff_rounded,
+      "hotel" => Icons.hotel_outlined,
+      "food" => Icons.restaurant_outlined,
+      _ => Icons.tune_rounded,
+    };
 
 /// 打字中三点动画。
 class _TypingDots extends StatefulWidget {
@@ -1808,20 +2410,6 @@ class _WeatherPanel extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Row(
-          children: <Widget>[
-            Text(card.title,
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w700,
-                    color: colors.text)),
-            const Spacer(),
-            if (card.sub.isNotEmpty)
-              Text(card.sub,
-                  style: TextStyle(fontSize: 10.5, color: colors.muted)),
-          ],
-        ),
-        const SizedBox(height: 11),
         Wrap(
           spacing: 8,
           runSpacing: 8,
@@ -1900,17 +2488,15 @@ class _WeatherPanel extends StatelessWidget {
   }
 }
 
-/// 选择卡（出行方式 / 住房 / 吃的）：点选即答。
+/// 串行问题卡（目的地/天数/预算/交通/住房/吃的）：单选点选即答，答完即消失。
 class _ChoiceCard extends StatefulWidget {
   const _ChoiceCard({
-    required this.item,
     required this.card,
     required this.colors,
     required this.enabled,
     required this.onConfirm,
   });
 
-  final _FlowItem item;
   final _ChoiceCardData card;
   final _StageColors colors;
   final bool enabled;
@@ -1925,21 +2511,27 @@ class _ChoiceCardState extends State<_ChoiceCard> {
   late final TextEditingController _note =
       TextEditingController(text: widget.card.prefill.join(" "));
 
-  bool get _locked => widget.item.answered;
-
   void _tapChip(String option) {
-    if (_locked || !widget.enabled) return;
+    if (!widget.enabled) return;
     if (widget.card.multi) {
       setState(() {
         if (!_selected.remove(option)) _selected.add(option);
       });
       return;
     }
-    // 单选：立即回传
-    setState(() => _selected
-      ..clear()
-      ..add(option));
-    widget.onConfirm(<String>[option], _note.text);
+    // 单选：立即回传（服务端回执会带回下一张卡）；已输入的备注一并带上，
+    // 例如「5天」+「10月1日出发」两者都保留。
+    final String note = _note.text.trim();
+    widget.onConfirm(
+      <String>[option],
+      note.isEmpty ? null : note,
+    );
+  }
+
+  void _submitNoteOnly() {
+    final String text = _note.text.trim();
+    if (!widget.enabled || text.isEmpty) return;
+    widget.onConfirm(const <String>[], text);
   }
 
   @override
@@ -1952,15 +2544,29 @@ class _ChoiceCardState extends State<_ChoiceCard> {
   Widget build(BuildContext context) {
     final _StageColors c = widget.colors;
     final _ChoiceCardData card = widget.card;
+    final _CardProgress? progress = card.progress;
+    final bool hasNote = _note.text.trim().isNotEmpty;
     final bool showConfirm =
-        card.multi && !_locked && (_selected.isNotEmpty || _note.text.trim().isNotEmpty);
+        card.multi && widget.enabled && (_selected.isNotEmpty || hasNote);
+    final bool showNoteOnly =
+        !card.multi && card.allowNote && widget.enabled && hasNote;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
         Text(card.title,
             style: TextStyle(
                 fontSize: 13, fontWeight: FontWeight.w700, color: c.text)),
-        if (card.prefill.isNotEmpty && !_locked)
+        if (progress != null && progress.summary.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 5),
+            child: Text(
+              progress.summary,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 10.5, color: c.muted),
+            ),
+          ),
+        if (card.prefill.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 6),
             child: Text("记得你偏好过：${card.prefill.join("、")}",
@@ -1988,21 +2594,17 @@ class _ChoiceCardState extends State<_ChoiceCard> {
                     style: TextStyle(
                       fontSize: 11.5,
                       fontWeight: FontWeight.w600,
-                      color: _locked && !_selected.contains(option)
-                          ? c.muted
-                          : _selected.contains(option)
-                              ? c.accent
-                              : c.text2,
+                      color: _selected.contains(option) ? c.accent : c.text2,
                     ),
                   ),
                 ),
               ),
           ],
         ),
-        if (card.placeholder != null && !_locked) ...<Widget>[
+        if (card.placeholder != null) ...<Widget>[
           const SizedBox(height: 9),
           SizedBox(
-            width: 220,
+            width: 280,
             height: 32,
             child: TextField(
               controller: _note,
@@ -2032,42 +2634,49 @@ class _ChoiceCardState extends State<_ChoiceCard> {
             ),
           ),
         ],
-        if (showConfirm) ...<Widget>[
+        if (showConfirm || showNoteOnly) ...<Widget>[
           const SizedBox(height: 11),
           Row(
             children: <Widget>[
               GestureDetector(
-                onTap: () =>
-                    widget.onConfirm(_selected.toList(growable: false), _note.text),
+                onTap: showConfirm
+                    ? () => widget.onConfirm(
+                          _selected.toList(growable: false),
+                          _note.text,
+                        )
+                    : _submitNoteOnly,
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                   decoration: BoxDecoration(
                     color: c.accentBg,
                     borderRadius: BorderRadius.circular(12),
                   ),
-                  child: Text("就这些",
+                  child: Text(showConfirm ? "就这些" : "就用这个",
                       style: TextStyle(
                           fontSize: 11.5,
                           fontWeight: FontWeight.w700,
                           color: c.onAccent)),
                 ),
               ),
-              const SizedBox(width: 8),
-              GestureDetector(
-                onTap: () {
-                  setState(_selected.clear);
-                  widget.onConfirm(<String>[], null);
-                },
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: c.border),
-                    borderRadius: BorderRadius.circular(12),
+              if (card.multi) ...<Widget>[
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: () {
+                    setState(_selected.clear);
+                    widget.onConfirm(<String>[], null);
+                  },
+                  child: Container(
+                    padding:
+                        const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: c.border),
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text("先不选",
+                        style: TextStyle(fontSize: 11.5, color: c.text2)),
                   ),
-                  child: Text("先不选",
-                      style: TextStyle(fontSize: 11.5, color: c.text2)),
                 ),
-              ),
+              ],
             ],
           ),
         ],
@@ -2076,8 +2685,181 @@ class _ChoiceCardState extends State<_ChoiceCard> {
   }
 }
 
-/// 草案卡（真实规划结果，Day 行 + 操作按钮）。
-class _DraftCard extends StatelessWidget {
+/// 预算确认卡：明细来自真实报价，用户确认后才出最终方案。
+class _BudgetCard extends StatelessWidget {
+  const _BudgetCard({
+    required this.budget,
+    required this.colors,
+    required this.enabled,
+    required this.onApprove,
+    required this.onAdjust,
+  });
+
+  final _BudgetData budget;
+  final _StageColors colors;
+  final bool enabled;
+  final VoidCallback onApprove;
+  final VoidCallback onAdjust;
+
+  String get _symbol => switch (budget.currency) {
+        "USD" => r"$",
+        "EUR" => "€",
+        "JPY" => "¥",
+        "THB" => "฿",
+        "IDR" => "Rp",
+        "HKD" => r"HK$",
+        _ => "¥",
+      };
+
+  String _money(double value) {
+    final String digits = value.round().toString();
+    return digits.replaceAllMapped(
+      RegExp(r"\B(?=(\d{3})+(?!\d))"),
+      (Match _) => ",",
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: <Widget>[
+            Text(budget.total > 0 ? "$_symbol${_money(budget.total)}" : "待核价",
+                style: TextStyle(
+                    fontSize: 25,
+                    fontWeight: FontWeight.w800,
+                    color: c.text)),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text("住宿 / 门票 / 餐饮合计，大交通按实际购票",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10, color: c.muted)),
+            ),
+          ],
+        ),
+        if (budget.discount > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 3),
+            child: Text("已省 $_symbol${_money(budget.discount)}",
+                style: TextStyle(fontSize: 10.5, color: c.green)),
+          ),
+        const SizedBox(height: 10),
+        Container(
+          padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
+          decoration: BoxDecoration(
+            color: c.card2,
+            border: Border.all(color: c.borderSoft),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            children: <Widget>[
+              for (final _BudgetItemData item in budget.items)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 5),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Text(item.label,
+                                style: TextStyle(fontSize: 12, color: c.text2)),
+                            if (item.note.isNotEmpty)
+                              Text(item.note,
+                                  style: TextStyle(fontSize: 9.5, color: c.muted)),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        item.amount == null
+                            ? "未含"
+                            : "$_symbol${_money(item.amount!)}",
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w700,
+                          color: item.amount == null ? c.muted : c.text,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
+          ),
+        ),
+        if (budget.warnings.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Text(budget.warnings.first,
+                style: TextStyle(fontSize: 10, height: 1.45, color: c.muted)),
+          ),
+        const SizedBox(height: 12),
+        if (budget.approved)
+          Row(
+            children: <Widget>[
+              Icon(Icons.check_circle_rounded, size: 15, color: c.green),
+              const SizedBox(width: 5),
+              Text("已确认 · 最终方案在下方",
+                  style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: c.green)),
+            ],
+          )
+        else
+          Row(
+            children: <Widget>[
+              Expanded(
+                child: GestureDetector(
+                  onTap: enabled ? onApprove : null,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(vertical: 11),
+                    alignment: Alignment.center,
+                    decoration: BoxDecoration(
+                      color: enabled ? c.accentBg : c.card2,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text("同意，出方案",
+                        style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w800,
+                            color: enabled ? c.onAccent : c.muted)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 9),
+              GestureDetector(
+                onTap: onAdjust,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: c.border),
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Text("再调整",
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: c.text2)),
+                ),
+              ),
+            ],
+          ),
+      ],
+    );
+  }
+}
+
+/// 最终规划卡：沿用主对话行程卡的设计（封面海报 + 标题 + 主入口按钮）。
+class _DraftCard extends StatefulWidget {
   const _DraftCard({
     required this.draft,
     required this.colors,
@@ -2093,88 +2875,276 @@ class _DraftCard extends StatelessWidget {
   final VoidCallback onAdjust;
 
   @override
+  State<_DraftCard> createState() => _DraftCardState();
+}
+
+class _DraftCardState extends State<_DraftCard> {
+  /// 目的地当前封面（活取，和主对话行程卡同一来源）；null=无图走渐变兜底。
+  String? _cover;
+
+  /// 海报兜底渐变（与主对话行程卡一致）。
+  static const List<Color> _posterFallback = <Color>[
+    Color(0xFF123243),
+    Color(0xFF071A24),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    final String destination = widget.draft.destination.trim();
+    if (destination.isEmpty) return;
+    TravelLiveCover.fetch(destination).then((String? url) {
+      if (!mounted || url == null || url.isEmpty) return;
+      setState(() => _cover = url);
+      MediaDiskCache.instance.warm(<String>[url]);
+    });
+  }
+
+  String get _dateRange {
+    final String start = widget.draft.startDate;
+    final String end = widget.draft.endDate;
+    String fmt(String v) => v.length >= 10 ? v.substring(5).replaceAll("-", ".") : v;
+    if (start.isEmpty && end.isEmpty) return "";
+    if (start.isEmpty) return fmt(end);
+    if (end.isEmpty || end == start) return fmt(start);
+    return "${fmt(start)} - ${fmt(end)}";
+  }
+
+  @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Text("${draft.title} · 草案",
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: colors.text)),
-            ),
-            Text("按你的偏好生成",
-                style: TextStyle(fontSize: 10.5, color: colors.muted)),
-          ],
-        ),
-        const SizedBox(height: 10),
-        for (final ({String label, String stops}) day in draft.days)
+    final _StageColors c = widget.colors;
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final _DraftData draft = widget.draft;
+    final int dayCount = draft.days.length;
+    final String cover = (_cover ?? "").trim();
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      constraints: const BoxConstraints(maxWidth: _kCardWidth),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          _buildPoster(c, cover, dayCount),
           Padding(
-            padding: const EdgeInsets.only(bottom: 7),
-            child: Row(
+            padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+            child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                SizedBox(
-                  width: 46,
-                  child: Text(day.label,
-                      style: TextStyle(
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
-                          color: colors.accent)),
+                Row(
+                  children: <Widget>[
+                    if (draft.totalCost != null && draft.totalCost! > 0)
+                      _MetaChip(
+                        colors: c,
+                        icon: Icons.payments_outlined,
+                        text: "¥${draft.totalCost!.round()}",
+                      ),
+                    if (draft.totalCost != null && draft.totalCost! > 0)
+                      const SizedBox(width: 6),
+                    _MetaChip(
+                      colors: c,
+                      icon: Icons.auto_awesome_outlined,
+                      text: "真实数据生成",
+                    ),
+                  ],
                 ),
-                Expanded(
-                  child: Text(day.stops,
-                      maxLines: 2,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          TextStyle(fontSize: 12, height: 1.5, color: colors.text2)),
+                const SizedBox(height: 9),
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: FilledButton.icon(
+                        onPressed: widget.enabled ? widget.onGenerate : null,
+                        style: FilledButton.styleFrom(
+                          backgroundColor: c.accentBg,
+                          foregroundColor: c.onAccent,
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 12, vertical: 9),
+                          minimumSize: const Size(0, 40),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                        icon: const Icon(Icons.travel_explore, size: 16),
+                        label: const Text("打开完整行程",
+                            style: TextStyle(
+                                fontSize: 13.5, fontWeight: FontWeight.w700)),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: widget.onAdjust,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 14, vertical: 11),
+                        decoration: BoxDecoration(
+                          border: Border.all(color: c.border),
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        child: Text("再调整",
+                            style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w600,
+                                color: c.text2)),
+                      ),
+                    ),
+                  ],
                 ),
+                const SizedBox(height: 8),
+                Text("逐日安排、门票和报价都在完整行程里",
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
               ],
             ),
           ),
-        const SizedBox(height: 8),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: GestureDetector(
-                onTap: enabled ? onGenerate : null,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(vertical: 11),
-                  alignment: Alignment.center,
-                  decoration: BoxDecoration(
-                    color: enabled ? colors.accentBg : colors.card2,
-                    borderRadius: BorderRadius.circular(12),
-                  ),
-                  child: Text("生成完整行程",
-                      style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w800,
-                          color: enabled ? colors.onAccent : colors.muted)),
-                ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildPoster(_StageColors c, String cover, int dayCount) {
+    return SizedBox(
+      height: 180,
+      width: double.infinity,
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          DecoratedBox(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: _posterFallback,
               ),
             ),
-            const SizedBox(width: 9),
-            GestureDetector(
-              onTap: onAdjust,
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 11),
-                decoration: BoxDecoration(
-                  border: Border.all(color: colors.border),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text("再调整",
-                    style: TextStyle(
-                        fontSize: 12, fontWeight: FontWeight.w600, color: colors.text2)),
+          ),
+          if (cover.isNotEmpty)
+            CachedMediaImage(
+              url: cover,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => const SizedBox.shrink(),
+            ),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: <Color>[
+                  Color(0x66000000),
+                  Color(0x14000000),
+                  Color(0xE6000000),
+                ],
+                stops: <double>[0.0, 0.42, 1.0],
               ),
             ),
-          ],
-        ),
-      ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    if (widget.draft.destination.isNotEmpty) ...<Widget>[
+                      _DestinationBadge(destination: widget.draft.destination),
+                      const SizedBox(width: 8),
+                    ],
+                    if (dayCount > 0)
+                      Text("$dayCount 天行程",
+                          style: TextStyle(
+                              fontSize: 11.5,
+                              color: Colors.white.withValues(alpha: 0.85))),
+                    const Spacer(),
+                    if (_dateRange.isNotEmpty)
+                      Text(_dateRange,
+                          style: TextStyle(
+                              fontSize: 11,
+                              color: Colors.white.withValues(alpha: 0.72))),
+                  ],
+                ),
+                const Spacer(),
+                Text(widget.draft.title,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 16.5,
+                        fontWeight: FontWeight.w700,
+                        color: Colors.white,
+                        height: 1.35)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 海报上的目的地徽章（玻璃态，与主对话行程卡一致）。
+class _DestinationBadge extends StatelessWidget {
+  const _DestinationBadge({required this.destination});
+
+  final String destination;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.32),
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.28)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          const Icon(Icons.map_outlined, size: 13, color: Color(0xFF18D6F3)),
+          const SizedBox(width: 4),
+          Text(destination,
+              style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.white)),
+        ],
+      ),
+    );
+  }
+}
+
+/// 行程卡信息区的小标签（天数 / 预算 / 数据来源）。
+class _MetaChip extends StatelessWidget {
+  const _MetaChip({
+    required this.colors,
+    required this.icon,
+    required this.text,
+  });
+
+  final _StageColors colors;
+  final IconData icon;
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+      decoration: BoxDecoration(
+        color: colors.card2,
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 12, color: colors.muted),
+          const SizedBox(width: 4),
+          Text(text,
+              style: TextStyle(
+                  fontSize: 10, fontWeight: FontWeight.w600, color: colors.text2)),
+        ],
+      ),
     );
   }
 }
@@ -2338,4 +3308,844 @@ class _StageColors {
       green.withValues(alpha: 0.12);
 
   Color get orangeSoft => orange.withValues(alpha: 0.14);
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 出票时刻：预算确认后，行程票从出票缝打印出来的仪式动画。
+// 吐票（顿挫节奏）→ 字段逐行打印 → 绿章「已出票」盖章 + 票身轻震
+// → 指示灯琥珀转绿 → 标题「叮——」→ 操作按钮浮现。
+// ═══════════════════════════════════════════════════════════════════
+
+/// 出票时刻数据（最终草案 + 预算卡的定价模式）。
+class _TicketPrintMoment {
+  const _TicketPrintMoment({required this.draft, this.pricingMode = ""});
+
+  final _DraftData draft;
+  final String pricingMode;
+}
+
+/// 票面视窗高度（吐票位移幅度基准；票实际高度小于它，底部自然留白）。
+const double _kTicketExtent = 258;
+
+/// 条码竖线宽度序列（打印质感的手写条码）。
+const List<double> _kBarcodeBars = <double>[
+  2, 1, 1, 3, 1, 2, 1, 1, 2, 3, 1, 1, 2, 1, 3, 1, 2, 1, 1, 3, 1, 2,
+];
+
+class _TicketPrintOverlay extends StatefulWidget {
+  const _TicketPrintOverlay({
+    required this.moment,
+    required this.colors,
+    required this.onClose,
+    required this.onOpenPlan,
+  });
+
+  final _TicketPrintMoment moment;
+  final _StageColors colors;
+  final VoidCallback onClose;
+  final VoidCallback onOpenPlan;
+
+  @override
+  State<_TicketPrintOverlay> createState() => _TicketPrintOverlayState();
+}
+
+class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
+    with TickerProviderStateMixin {
+  late final AnimationController _master = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 3200),
+  )..forward();
+
+  /// 打印中指示灯的琥珀闪烁。
+  late final AnimationController _blink = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 480),
+  )..repeat(reverse: true);
+
+  @override
+  void dispose() {
+    _master.dispose();
+    _blink.dispose();
+    super.dispose();
+  }
+
+  /// 吐票轨迹：出半截 → 停顿 → 出完（打印机顿挫节奏），值为票位移比例。
+  static final Animatable<double> _passTrack =
+      TweenSequence<double>(<TweenSequenceItem<double>>[
+    TweenSequenceItem<double>(
+      tween: Tween<double>(begin: -1.04, end: -0.46)
+          .chain(CurveTween(curve: Curves.easeInOutCubic)),
+      weight: 42,
+    ),
+    TweenSequenceItem<double>(tween: ConstantTween<double>(-0.46), weight: 16),
+    TweenSequenceItem<double>(
+      tween: Tween<double>(begin: -0.46, end: 0)
+          .chain(CurveTween(curve: Curves.easeOutCubic)),
+      weight: 42,
+    ),
+  ]);
+
+  double _seg(double v, double begin, double len) {
+    final double t = (v - begin) / len;
+    if (t <= 0) return 0;
+    if (t >= 1) return 1;
+    return t;
+  }
+
+  /// 字段逐行打印：opacity + 6px 上浮。
+  Widget _stag(double v, double begin, Widget child) {
+    final double t = Curves.easeOut.transform(_seg(v, begin, 0.08));
+    return Opacity(
+      opacity: t,
+      child: Transform.translate(offset: Offset(0, (1 - t) * 6), child: child),
+    );
+  }
+
+  String _shortDate(String s) {
+    final String t = s.trim();
+    if (t.length >= 10) return t.substring(5, 10).replaceAll('-', '.');
+    return t;
+  }
+
+  String _money(double value) => value.round().toString().replaceAllMapped(
+        RegExp(r"\B(?=(\d{3})+(?!\d))"),
+        (Match _) => ",",
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final _DraftData d = widget.moment.draft;
+    final bool warm = AppThemeController.instance.value == AppThemeVariant.warm;
+
+    final String destination =
+        d.destination.isNotEmpty ? d.destination : d.title;
+    final String d1 = _shortDate(d.startDate);
+    final String d2 = _shortDate(d.endDate);
+    final String dateLabel = d1.isEmpty && d2.isEmpty
+        ? "待定"
+        : d1 == d2 || d2.isEmpty
+            ? (d1.isEmpty ? d2 : d1)
+            : "$d1 – $d2";
+    final int dayCount = d.days.length;
+    final String dayLabel = dayCount <= 0
+        ? "—"
+        : "$dayCount 天${dayCount > 1 ? " ${dayCount - 1} 晚" : ""}";
+    final String costLabel =
+        d.totalCost != null && d.totalCost! > 0 ? "¥${_money(d.totalCost!)}" : "待核价";
+    final String quoteLabel = switch (widget.moment.pricingMode) {
+      "real-api" => "REAL QUOTE · 实时报价已确认",
+      "real-database" => "REAL QUOTE · 市场价已确认",
+      _ => "REAL QUOTE · 预算已确认",
+    };
+    final String digits =
+        d.planId.replaceAll(RegExp(r"[^0-9]"), "");
+    final String ticketNo =
+        "NB-${digits.length >= 4 ? digits.substring(digits.length - 4) : digits.padLeft(4, "0")}";
+    final String stampDate =
+        "${DateTime.now().month.toString().padLeft(2, "0")}.${DateTime.now().day.toString().padLeft(2, "0")}";
+
+    return AnimatedBuilder(
+      animation: Listenable.merge(<Listenable>[_master, _blink]),
+      builder: (BuildContext context, _) {
+        final double v = _master.value;
+        final bool printing = v < 0.72;
+        // 宽窗自适应放大：票基准 600 宽按 1050 基准窗口设计，宽屏上
+        // 固定 600 会显得小而空（实测 1344 宽窗口仅占 45%）。
+        final double scale =
+            (MediaQuery.sizeOf(context).width / 1050).clamp(1.0, 1.45);
+
+        return BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 6, sigmaY: 6),
+          child: GestureDetector(
+            // 点遮罩随时收起（数据已入对话流，不打断结果）。
+            onTap: widget.onClose,
+            child: Container(
+              color: c.bg.withValues(alpha: warm ? 0.52 : 0.62),
+              alignment: Alignment.center,
+              child: Transform.scale(
+                scale: scale,
+                child: GestureDetector(
+                  onTap: () {},
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: 600),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                      _buildCopy(v, c),
+                      const SizedBox(height: 22),
+                      _buildPrinter(v, c, warm, printing),
+                      _buildSlot(
+                        v, c, destination, dateLabel, dayLabel, costLabel,
+                        quoteLabel, ticketNo, stampDate,
+                      ),
+                      const SizedBox(height: 26),
+                      _buildActions(v, c),
+                    ],
+                  ),
+                ),
+              ),
+                ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  /// 文案区：「正在出票 · · ·」→「叮——你的行程票打好了」交叉切换。
+  Widget _buildCopy(double v, _StageColors c) {
+    final double aIn = Curves.easeOut.transform(_seg(v, 0.02, 0.09));
+    final double aOut = _seg(v, 0.78, 0.05);
+    final double bIn = Curves.easeOut.transform(_seg(v, 0.83, 0.1));
+    return Column(
+      children: <Widget>[
+        Opacity(
+          opacity: Curves.easeOut.transform(_seg(v, 0.0, 0.1)),
+          child: Text(
+            "预算已确认 · 规划完成",
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 4,
+              color: c.accent,
+            ),
+          ),
+        ),
+        const SizedBox(height: 10),
+        SizedBox(
+          height: 30,
+          width: double.infinity,
+          child: Stack(
+            children: <Widget>[
+              Opacity(
+                opacity: aIn * (1 - aOut),
+                child: Center(
+                  child: Text(
+                    "正在出票 · · ·",
+                    style: TextStyle(
+                      fontSize: 18,
+                      fontWeight: FontWeight.w600,
+                      color: c.text2,
+                    ),
+                  ),
+                ),
+              ),
+              Opacity(
+                opacity: bIn,
+                child: Center(
+                  child: Text(
+                    "叮——你的行程票打好了",
+                    style: TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.w700,
+                      letterSpacing: 0.5,
+                      color: c.text,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 出票缝：机身 + 黑缝 + 指示灯（琥珀闪 → 绿常亮）。
+  Widget _buildPrinter(double v, _StageColors c, bool warm, bool printing) {
+    final Color metal1 =
+        warm ? const Color(0xFFE8E1D2) : const Color(0xFF1A1E24);
+    final Color metal2 =
+        warm ? const Color(0xFFDCD4C2) : const Color(0xFF0E1116);
+    final Color mouthDark =
+        warm ? const Color(0xFF8F8471) : const Color(0xFF05060A);
+    // 琥珀灯随主题：深色底用柔和金琥珀（TravelPalette.orange），
+    // 暖色米白底换亮琥珀——#B45309 在浅底上闪烁会发脏。
+    final Color lampAmber =
+        warm ? const Color(0xFFD97706) : c.orange;
+    // 浅底上低 alpha 直接隐没，闪烁下限抬高。
+    final double lampAlpha = warm
+        ? 0.45 + 0.55 * _blink.value
+        : 0.25 + 0.75 * _blink.value;
+    final double glow =
+        printing ? 0.22 + 0.3 * _blink.value : 0.12;
+    return Column(
+      children: <Widget>[
+        Container(
+          height: 52,
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: <Color>[metal1, metal2],
+            ),
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(14)),
+            border: Border.all(color: c.border),
+          ),
+          child: Stack(
+            children: <Widget>[
+              Center(
+                child: Text(
+                  "NEXTBOT · TICKET PRINTER",
+                  style: TextStyle(
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 3,
+                    color: c.muted,
+                  ),
+                ),
+              ),
+              Positioned(
+                right: 26,
+                top: 22,
+                child: Container(
+                  width: 8,
+                  height: 8,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: printing
+                        ? lampAmber.withValues(alpha: lampAlpha)
+                        : c.green,
+                    boxShadow: <BoxShadow>[
+                      if (!printing)
+                        BoxShadow(
+                          color: c.green.withValues(alpha: 0.7),
+                          blurRadius: 8,
+                        )
+                      else if (_blink.value > 0.5)
+                        BoxShadow(
+                          color: lampAmber.withValues(alpha: warm ? 0.45 : 0.6),
+                          blurRadius: 6,
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+        Container(
+          height: 12,
+          decoration: BoxDecoration(
+            color: mouthDark,
+            borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+            border: Border.all(color: c.border),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: c.accent.withValues(alpha: glow),
+                blurRadius: 14,
+                spreadRadius: -4,
+                offset: const Offset(0, 5),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 票视窗：票从缝后吐出（ClipRect 裁切）。
+  // ignore: long-parameter-list
+  Widget _buildSlot(
+    double v,
+    _StageColors c,
+    String destination,
+    String dateLabel,
+    String dayLabel,
+    String costLabel,
+    String quoteLabel,
+    String ticketNo,
+    String stampDate,
+  ) {
+    final double passT = _seg(v, 0.12, 0.5);
+    final double dy = _passTrack.transform(passT) * _kTicketExtent;
+    final double sway = math.sin(passT * math.pi) * 0.004;
+    final double joltT = _seg(v, 0.7, 0.06);
+    final double jolt = math.sin(joltT * 2 * math.pi) * 2 * (1 - joltT);
+    return SizedBox(
+      height: _kTicketExtent + 8,
+      width: double.infinity,
+      child: ClipRect(
+        child: Stack(
+          children: <Widget>[
+            Positioned(
+              top: 4,
+              left: 0,
+              right: 0,
+              child: Transform.translate(
+                offset: Offset(0, dy + jolt),
+                child: Transform.rotate(
+                  angle: sway,
+                  child: _buildTicket(
+                    v, c, destination, dateLabel, dayLabel, costLabel,
+                    quoteLabel, ticketNo, stampDate,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // ignore: long-parameter-list
+  Widget _buildTicket(
+    double v,
+    _StageColors c,
+    String destination,
+    String dateLabel,
+    String dayLabel,
+    String costLabel,
+    String quoteLabel,
+    String ticketNo,
+    String stampDate,
+  ) {
+    final double stampT = _seg(v, 0.68, 0.12);
+    final double stampScale =
+        2.3 + (1 - 2.3) * Curves.easeOutCubic.transform(stampT);
+    final double stampOpacity = _seg(v, 0.68, 0.04);
+    final double sheenT = _seg(v, 0.64, 0.2);
+
+    return Container(
+      constraints: const BoxConstraints(minHeight: 220),
+      decoration: BoxDecoration(
+        color: c.card,
+        borderRadius: BorderRadius.circular(18),
+        border: Border.all(color: c.border),
+        boxShadow: <BoxShadow>[
+          BoxShadow(color: c.shadow, blurRadius: 34, offset: const Offset(0, 12)),
+        ],
+      ),
+      child: Stack(
+        clipBehavior: Clip.none,
+        children: <Widget>[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(18),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                // 顶部渐变条 + 出票完成的高光扫过
+                SizedBox(
+                  height: 5,
+                  child: Stack(
+                    children: <Widget>[
+                      Container(
+                        width: double.infinity,
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: <Color>[c.accent, c.green],
+                          ),
+                        ),
+                      ),
+                      if (sheenT > 0 && sheenT < 1)
+                        Align(
+                          alignment:
+                              Alignment(-1.8 + sheenT * 4.4, 0),
+                          child: FractionallySizedBox(
+                            widthFactor: 0.34,
+                            child: Container(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  colors: <Color>[
+                                    Colors.white.withValues(alpha: 0),
+                                    Colors.white.withValues(alpha: 0.55),
+                                    Colors.white.withValues(alpha: 0),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+                // IntrinsicHeight 提供有界高度：stretch 在无界约束下会
+                // 给子元素强加 h=∞,布局损坏(票画不出来)。
+                IntrinsicHeight(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      Expanded(
+                        child: Padding(
+                        padding: const EdgeInsets.fromLTRB(24, 16, 18, 16),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            _stag(
+                              v,
+                              0.34,
+                              Row(
+                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                                children: <Widget>[
+                                  Text(
+                                    "NEXTBOT TRAVEL · ITINERARY PASS",
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 2,
+                                      color: c.muted,
+                                    ),
+                                  ),
+                                  Text(
+                                    ticketNo,
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      fontWeight: FontWeight.w600,
+                                      letterSpacing: 2,
+                                      color: c.muted,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            _stag(
+                              v,
+                              0.4,
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: <Widget>[
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text("出发 FROM",
+                                          style: TextStyle(
+                                              fontSize: 9.5,
+                                              letterSpacing: 2,
+                                              color: c.muted)),
+                                      const SizedBox(height: 5),
+                                      Text("此地",
+                                          style: TextStyle(
+                                              fontSize: 21,
+                                              fontWeight: FontWeight.w700,
+                                              color: c.text)),
+                                    ],
+                                  ),
+                                  Padding(
+                                    padding: const EdgeInsets.only(
+                                        left: 14, right: 14, bottom: 5),
+                                    child: Row(
+                                      children: <Widget>[
+                                        Container(
+                                            width: 26,
+                                            height: 1,
+                                            color: c.accent.withValues(alpha: 0.5)),
+                                        const SizedBox(width: 6),
+                                        Icon(Icons.flight,
+                                            size: 15, color: c.accent),
+                                        const SizedBox(width: 6),
+                                        Container(
+                                            width: 26,
+                                            height: 1,
+                                            color: c.accent.withValues(alpha: 0.5)),
+                                      ],
+                                    ),
+                                  ),
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: <Widget>[
+                                        Text("目的地 TO",
+                                            style: TextStyle(
+                                                fontSize: 9.5,
+                                                letterSpacing: 2,
+                                                color: c.muted)),
+                                        const SizedBox(height: 5),
+                                        Text(
+                                          destination,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                          style: TextStyle(
+                                              fontSize: 21,
+                                              fontWeight: FontWeight.w700,
+                                              color: c.text),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 16),
+                            _stag(
+                              v,
+                              0.46,
+                              Row(
+                                crossAxisAlignment: CrossAxisAlignment.end,
+                                children: <Widget>[
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text("日期 DATE",
+                                          style: TextStyle(
+                                              fontSize: 9.5,
+                                              letterSpacing: 2,
+                                              color: c.muted)),
+                                      const SizedBox(height: 5),
+                                      Text(dateLabel,
+                                          style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: c.text2)),
+                                    ],
+                                  ),
+                                  const SizedBox(width: 26),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text("行程 PLAN",
+                                          style: TextStyle(
+                                              fontSize: 9.5,
+                                              letterSpacing: 2,
+                                              color: c.muted)),
+                                      const SizedBox(height: 5),
+                                      Text(dayLabel,
+                                          style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: c.text2)),
+                                    ],
+                                  ),
+                                  const SizedBox(width: 26),
+                                  Column(
+                                    crossAxisAlignment: CrossAxisAlignment.start,
+                                    children: <Widget>[
+                                      Text("预算 BUDGET",
+                                          style: TextStyle(
+                                              fontSize: 9.5,
+                                              letterSpacing: 2,
+                                              color: c.muted)),
+                                      const SizedBox(height: 5),
+                                      Text(costLabel,
+                                          style: TextStyle(
+                                              fontSize: 13,
+                                              fontWeight: FontWeight.w600,
+                                              color: c.text2)),
+                                    ],
+                                  ),
+                                  const Spacer(),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 14),
+                            _stag(
+                              v,
+                              0.52,
+                              Row(
+                                children: <Widget>[
+                                  Container(
+                                    padding: const EdgeInsets.symmetric(
+                                        horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      borderRadius: BorderRadius.circular(999),
+                                      border: Border.all(
+                                          color: c.green.withValues(alpha: 0.4)),
+                                      color: c.greenSoft,
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: <Widget>[
+                                        Icon(Icons.verified_outlined,
+                                            size: 11, color: c.green),
+                                        const SizedBox(width: 5),
+                                        Text(quoteLabel,
+                                            style: TextStyle(
+                                                fontSize: 10,
+                                                fontWeight: FontWeight.w600,
+                                                color: c.green)),
+                                      ],
+                                    ),
+                                  ),
+                                  const Spacer(),
+                                  // 手写条码
+                                  Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    crossAxisAlignment: CrossAxisAlignment.end,
+                                    children: <Widget>[
+                                      for (int i = 0; i < _kBarcodeBars.length; i++) ...<Widget>[
+                                        if (i > 0) const SizedBox(width: 1.6),
+                                        Container(
+                                          width: _kBarcodeBars[i],
+                                          height: 22,
+                                          color: c.text2.withValues(alpha: 0.5),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    // 存根联
+                    _stag(
+                      v,
+                      0.58,
+                      Container(
+                        width: 104,
+                        decoration: BoxDecoration(
+                          border: Border(
+                            left: BorderSide(color: c.border, width: 1.5),
+                          ),
+                        ),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: <Widget>[
+                            Container(
+                              width: 40,
+                              height: 40,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                color: c.greenSoft,
+                                border: Border.all(
+                                    color: c.green,
+                                    width: 1.5),
+                              ),
+                              child: Icon(Icons.check_rounded,
+                                  size: 20, color: c.green),
+                            ),
+                            const SizedBox(height: 8),
+                            Text(
+                              "TICKETED\n已出票",
+                              textAlign: TextAlign.center,
+                              style: TextStyle(
+                                fontSize: 9.5,
+                                letterSpacing: 2,
+                                height: 1.7,
+                                color: c.muted,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          // 绿章：出票完成时砸下
+            if (stampT > 0)
+              Positioned(
+                right: 132,
+                top: 42,
+                child: IgnorePointer(
+                  child: Opacity(
+                    opacity: stampOpacity,
+                    child: Transform.scale(
+                      scale: stampScale,
+                      child: Transform.rotate(
+                        angle: -0.21,
+                        child: Container(
+                          width: 92,
+                          height: 92,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            border: Border.all(
+                                color: c.green.withValues(alpha: 0.9), width: 2),
+                          ),
+                          child: Container(
+                            margin: const EdgeInsets.all(5),
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              border: Border.all(
+                                  color: c.green.withValues(alpha: 0.55)),
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: <Widget>[
+                                Text("已出票",
+                                    style: TextStyle(
+                                        fontSize: 14,
+                                        fontWeight: FontWeight.w800,
+                                        letterSpacing: 3,
+                                        color: c.green)),
+                                const SizedBox(height: 3),
+                                Text("NEXTBOT TRAVEL",
+                                    style: TextStyle(
+                                        fontSize: 7.5,
+                                        letterSpacing: 1.5,
+                                        color: c.green.withValues(alpha: 0.85))),
+                                Text(stampDate,
+                                    style: TextStyle(
+                                        fontSize: 8.5,
+                                        letterSpacing: 1.5,
+                                        color: c.green.withValues(alpha: 0.85))),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+    );
+  }
+
+  Widget _buildActions(double v, _StageColors c) {
+    final double t = Curves.easeOut.transform(_seg(v, 0.86, 0.1));
+    return IgnorePointer(
+      ignoring: t < 0.5,
+      child: Opacity(
+        opacity: t,
+        child: Transform.translate(
+        offset: Offset(0, (1 - t) * 10),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: <Widget>[
+            GestureDetector(
+              onTap: widget.onOpenPlan,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: c.accentBg,
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Row(
+                  children: <Widget>[
+                    Icon(Icons.map_outlined, size: 14, color: c.onAccent),
+                    const SizedBox(width: 7),
+                    Text("查看完整行程",
+                        style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: c.onAccent)),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(width: 10),
+            GestureDetector(
+              onTap: widget.onClose,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: c.border),
+                ),
+                child: Text("稍后再看",
+                    style: TextStyle(
+                        fontSize: 12.5,
+                        fontWeight: FontWeight.w600,
+                        color: c.text2)),
+              ),
+            ),
+          ],
+          ),
+        ),
+      ),
+    );
+  }
 }

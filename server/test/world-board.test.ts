@@ -148,24 +148,6 @@ test("映射规则: sleep_boundary —— 23 点屏幕活跃触发一次且带�
   assert.equal(events.length, 1, "同日只发一次");
 });
 
-test("映射规则: digest_beat —— 命中 10/16/21 点节拍，同拍只发一次", async () => {
-  const d = new Date();
-  d.setHours(16, 5, 0, 0);
-  const clock = new MockClock(d.getTime());
-  const { tick, events } = mkExecutor(clock, "digest_beat", {
-    listTodayTasks: () => [{ title: "写周报" }],
-    unreadSenders: () => ["妈妈"],
-  });
-  await tick();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "digest_beat");
-  assert.ok(events[0].body.includes("写周报"));
-  assert.ok(events[0].body.includes("妈妈"));
-  clock.advance(11 * 60_000); // 越过规则 tick 周期（10min）
-  await tick();
-  assert.equal(events.length, 1, "同一天同一拍不重发");
-});
-
 test("映射规则: goal_ready —— 同 goalId 只投一次", async () => {
   const clock = new MockClock(Date.now());
   const { board, events, tick } = mkExecutor(clock, "goal_ready");

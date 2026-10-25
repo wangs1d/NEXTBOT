@@ -43,8 +43,12 @@ export type AttentionEvent = {
 
 /** 规则可消费的外部数据源（查询型程序数据：日程/承诺/天气/未读/兴趣/记忆） */
 export type RuleServices = {
-  listTodayTasks?: () => Array<{ title: string; runAt?: number | string }>;
-  commitmentsDue?: (withinMs: number) => Array<{ id: string; title: string; dueAt?: number }>;
+  /**
+   * 今日日程（**按 actor 过滤**，2026-10-23 跨账号泄漏根修）。
+   * 旧签名 `() => …` 走的是全库查询，规则按 actor tick 时把别人的日程
+   * 显示给了当前用户（实测 eval 账号的日程出现在真实用户的时间轴里）。
+   */
+  listTodayTasks?: (actorId: string) => Array<{ title: string; runAt?: number | string }>;
   weatherLine?: () => string | null;
   unreadSenders?: () => string[];
   readyGoals?: () => Array<{ title: string; body: string }>;

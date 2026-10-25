@@ -38,7 +38,6 @@ const CALL_LOG_MAX_BYTES = 3 * 1024 * 1024;
 /** 呼叫冷却（分 kind；未列出的 kind 用默认） */
 const CALL_COOLDOWN_MS: Record<string, number> = {
   schedule_change: 30 * 60_000,
-  commitment_chain: 2 * 3600_000,
   morning_call: 22 * 3600_000,
   meeting_soon: 4 * 3600_000,
   default: 4 * 3600_000,

@@ -24,6 +24,8 @@ export interface ToolCardItem {
   /** 搜索结果卡等场景的跳转链接（前端 _SearchResultCard 整条可点击） */
   url?: string;
   source?: string;
+  /** 行首缩略图（比价卡商品主图等；客户端通用卡渲染为 40x40 圆角图） */
+  thumbnailUrl?: string;
   /** A/B 对比类条目的分侧标注 */
   side?: string;
   sideLabel?: string;
@@ -72,6 +74,11 @@ export interface ToolCardPayload {
     image?: string;
     whenChoose?: string;
   }>;
+  /**
+   * 专用卡型的附加载荷（随卡 JSON 原样透传给前端，AgentResultData.extra 消费）：
+   * 如 travel_guide_select 卡的分类候选（多图+推荐度+预选态）。
+   */
+  extra?: Record<string, unknown>;
   /** product_pick 卡：真实口碑摘要（小红书 UGC，归属主推；无口碑缺省） */
   ugc?: {
     platformLabel?: string;
@@ -122,6 +129,83 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
    */
   "search_web": (r) => buildSearchCardFromItems(r.items),
   "info.search": (r) => buildSearchCardFromItems(r.items),
+
+  /**
+   * travel.destination-guide → travel_guide_select 卡（规划前种草选择卡）。
+   *
+   * 数据源：buildDestinationGuide 的 {view[],stay[],food[]}（评分序、带实拍图）。
+   * - extra.guide 携带分类候选（多图+推荐度+预选态），前端专用卡渲染可勾选网格；
+   * - items 平铺兜底（旧客户端通用卡仍可渲染文字清单）；
+   * - actions 走 AgentActionChoiceCard 同一回传链：确认按钮 label 由前端拼
+   *   「就按这些去规划：必玩 A、B；住宿 C；美食 D」，服务端把 user_action
+   *   转写为用户消息，LLM 按语义把选中项填 wishlist/foodWishlist/stayWishlist。
+   * 预选口径：必玩前 3（评分序）——把「从零选」变成「确认微调」。
+   */
+  "travel.destination-guide": (r) => {
+    if (r.ok !== true) return null;
+    const dest = str(r.destination) || "目的地";
+    const pickCat = (key: "view" | "stay" | "food"): Array<Record<string, unknown>> => {
+      const list = r[key];
+      return Array.isArray(list)
+        ? list.filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
+        : [];
+    };
+    const view = pickCat("view");
+    const stay = pickCat("stay");
+    const food = pickCat("food");
+    if (!view.length && !stay.length && !food.length) return null;
+    const guideItem = (x: Record<string, unknown>, picked: boolean) => ({
+      name: str(x.name),
+      rec: num(x.rec) ?? 0,
+      rating: num(x.rating) ?? 0,
+      photos: Array.isArray(x.photos) ? x.photos.map((u) => str(u)).filter(Boolean).slice(0, 3) : [],
+      picked,
+    });
+    const cats = [
+      { key: "view", label: "必玩景点", items: view.map((x, i) => guideItem(x, i < 3)) },
+      { key: "stay", label: "住宿推荐", items: stay.map((x) => guideItem(x, false)) },
+      { key: "food", label: "美食推荐", items: food.map((x) => guideItem(x, false)) },
+    ].filter((c) => c.items.length > 0);
+    // 平铺兜底 items：旧客户端通用卡按文字清单渲染
+    const catOf: Record<string, string> = { view: "必玩", stay: "住宿", food: "美食" };
+    const items: ToolCardItem[] = [];
+    for (const c of cats) {
+      for (const it of c.items as Array<ReturnType<typeof guideItem>>) {
+        items.push({
+          type: "check",
+          text: `${catOf[c.key]} · ${it.name}（推荐 ${it.rec}%）`,
+          thumbnailUrl: it.photos[0],
+          side: c.key,
+          sideLabel: c.label,
+        });
+      }
+    }
+    return {
+      title: `🌿 ${dest} · 种草手册`,
+      items,
+      footer: `已预选必玩 Top${Math.min(3, view.length)} · 勾选后按你的选择规划行程`,
+      cardType: "travel_guide_select",
+      actions: [
+        {
+          id: "select_confirm",
+          label: "就按勾选的去规划",
+          variant: "primary",
+          payload: { multiSelect: true },
+        },
+        {
+          id: "select_delegate",
+          label: "全部交给你，直接规划",
+          variant: "secondary",
+        },
+      ],
+      extra: {
+        guide: {
+          destination: dest,
+          cats: cats.map((c) => ({ key: c.key, label: c.label, items: c.items })),
+        },
+      },
+    };
+  },
 
   /**
    * shopping.suggest → product_compare 卡（二分化对比）。
@@ -372,14 +456,17 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 
-  // 跨平台比价结果：组内最低价升序，每组一行「¥价格 [平台] 商品名（店铺）」
+  // 跨平台比价结果卡（2026-10-24 升级：图 + 可点行 + 决策页入口）。
+  // 每组一行：缩略图（联盟 API 官方图）+ 最低价 + 平台 + 商品名 + 店铺 +
+  // 疑似同款标注 + 数据源标注；行带 offer.url 整行可点跳平台商品页；
+  // 服务端存档了决策页时追加「打开比价决策页」行（决策页 = 大图/报价/口碑一页看全）。
   "shopping.compare.prices": (r) => {
     const groups = Array.isArray(r.groups) ? r.groups : [];
     if (groups.length === 0) return null;
     const items: ToolCardItem[] = [];
     let shown = 0;
     for (const g of groups) {
-      if (shown >= 8) break;
+      if (shown >= 6) break;
       const rec = (g ?? {}) as Record<string, unknown>;
       const offers = Array.isArray(rec.offers) ? rec.offers : [];
       if (offers.length === 0) continue;
@@ -388,27 +475,113 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const platform = str(best.platform);
       const title = str(best.title);
       const shop = str(best.shop);
-      const similar = rec.matchType === "similar" ? "（疑似同款）" : "";
+      const url = str(best.url);
+      const image = str(best.imageUrl) || str(rec.imageUrl);
+      const official = str(best.source) === "official_api";
+      const similar = rec.matchType === "similar";
       const priceText = price != null ? `¥${price}` : "价格待查";
+      const parts = [
+        priceText,
+        `[${platform || "未知平台"}]`,
+        title.slice(0, 40),
+        shop ? `（${shop.slice(0, 12)}）` : "",
+        similar ? "（疑似同款）" : "",
+        offers.length > 1 ? ` 等${offers.length}家` : "",
+        official ? "  [官方API]" : "",
+      ].filter(Boolean);
       items.push({
         type: "num",
-        text: `${priceText} [${platform || "未知平台"}] ${title.slice(0, 40)}${shop ? `（${shop.slice(0, 12)}）` : ""}${similar}`,
+        text: parts.join(" "),
+        ...(url ? { url } : {}),
+        ...(image ? { thumbnailUrl: image } : {}),
       });
       shown += 1;
     }
     if (items.length === 0) return null;
+    const decisionPageUrl = str(r.decisionPageUrl);
+    if (decisionPageUrl) {
+      items.push({
+        type: "num",
+        text: "打开比价决策页（大图 / 全部报价 / 走势一页看全）",
+        url: decisionPageUrl,
+      });
+    }
     const bestOffer = (r.bestOffer ?? {}) as Record<string, unknown>;
     const bestPlatform = str(bestOffer.platform);
     const bestPrice = num(bestOffer.priceCny);
     const footer =
       bestPrice != null && bestPlatform
-        ? `最低价 ¥${bestPrice} 来自 ${bestPlatform} · 信息为平台实时抓取，以下单结算页为准`
-        : "信息为平台实时抓取，以下单结算页为准";
+        ? `最低价 ¥${bestPrice} 来自 ${bestPlatform} · 行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准`
+        : "行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准";
     return {
       title: `比价结果：${str(r.query)}`,
       items,
       footer,
       cardType: "",
+    };
+  },
+
+  // 降价监控建档/列表卡：watch 工具回执 watches[] → 每条监控一行
+  // （盯什么/目标价/当前价）；footer 固定说明复查频率与推送去重策略。
+  "shopping.compare.watch": (r) => {
+    if (r.ok !== true) return null;
+    const watches = Array.isArray(r.watches) ? r.watches : [];
+    if (watches.length === 0) return null;
+    const action = str(r.action);
+    const items: ToolCardItem[] = watches.slice(0, 8).map((w) => {
+      const rec = (w ?? {}) as Record<string, unknown>;
+      const query = str(rec.query);
+      const platform = str(rec.platform);
+      const target = num(rec.targetPrice);
+      const last = num(rec.lastPriceCny);
+      const lastText = last != null ? `（当前 ¥${last}）` : "（待首次复查）";
+      return {
+        type: "num",
+        text: `「${query || "（未命名）"}」@${platform || "?"} 目标 ≤¥${target ?? "?"}${lastText}`,
+      };
+    });
+    const count = num(r.count) ?? watches.length;
+    const title = action === "add" ? "降价监控 · 已建档" : "降价监控列表";
+    const footer =
+      (count > 8 ? `共 ${count} 条，仅显示前 8 条 · ` : "") +
+      "每 60 分钟自动复查 · 到价即推，新低价需再降 2% 以上，同价位不打扰";
+    return { title, items, footer, cardType: "" };
+  },
+
+  // 调研比价卡（保险/服务等无法结构化抓价的领域）：sources → 可点来源清单，
+  // 复用 search_result 卡型（客户端 _SearchResultCard 整行可点跳外部浏览器）；
+  // 对比表本体由 LLM 口头正文承载（disclaimer 已要求整理成表）。
+  "shopping.compare.research": (r) => {
+    if (r.ok !== true) return null;
+    const sources = Array.isArray(r.sources) ? r.sources : [];
+    if (sources.length === 0) return null;
+    const items: ToolCardItem[] = [];
+    const seen = new Set<string>();
+    for (const raw of sources) {
+      if (items.length >= 8) break;
+      if (!raw || typeof raw !== "object") continue;
+      const rec = raw as Record<string, unknown>;
+      const title = str(rec.title);
+      const url = str(rec.url);
+      if (!title && !url) continue;
+      if (url && seen.has(url)) continue;
+      if (url) seen.add(url);
+      const snippet = str(rec.snippet);
+      const source = str(rec.source);
+      const text = snippet ? `${title || url}：${snippet.slice(0, 90)}` : title || url;
+      items.push({
+        type: "num",
+        text,
+        url: url || undefined,
+        source: source || undefined,
+      });
+    }
+    if (items.length === 0) return null;
+    return {
+      title: `调研对比：${str(r.topic)}`,
+      items,
+      footer: str(r.disclaimer) || undefined,
+      cardType: "search_result",
     };
   },
 
@@ -631,6 +804,7 @@ function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
     ...(payload.pick ? { pick: payload.pick } : {}),
     ...(payload.alternatives ? { alternatives: payload.alternatives } : {}),
     ...(payload.ugc ? { ugc: payload.ugc } : {}),
+    ...(payload.extra ? { extra: payload.extra } : {}),
   });
   const parts: string[] = [];
   if (leadText.trim()) parts.push(leadText.trim());

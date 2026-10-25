@@ -19,7 +19,7 @@
   --line:rgba(255,255,255,.07); --line2:rgba(255,255,255,.14);
   --txt:#F3F1EC; --t2:#9BA0AA; --t3:#626873;
   --amber:#F5A552; --amber2:#D88434; --amberSoft:rgba(245,165,82,.13); --amberLine:rgba(245,165,82,.4);
-  --jade:#63AAA1; --ok:#63C98C;
+  --jade:#63AAA1; --ok:#63C98C; --red:#E06A5A;
   --num:'Sora','Noto Sans SC',-apple-system,sans-serif;
   --cn:'Noto Sans SC','Sora',-apple-system,'PingFang SC',sans-serif;
 }
@@ -111,8 +111,9 @@ img{display:block;width:100%;height:100%;object-fit:cover}
    Now 卡的大标题会穿透到地图上面）。 */
 .view-map.open{display:flex;z-index:4}
 
-/* 当前站大卡 */
-.now-photo{flex:0 0 44%;border-radius:16px;overflow:hidden;position:relative;min-height:0}
+/* 当前站大卡：外层 .now-left 列 = 大图 + 多图照片条（小红书式，样式见文末「多图种草」段） */
+.now-left{flex:0 0 44%;min-width:0;display:flex;flex-direction:column;gap:10px}
+.now-photo{flex:1;border-radius:16px;overflow:hidden;position:relative;min-height:0}
 .now-photo::after{content:"";position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,12,14,0) 50%,rgba(11,12,14,.7))}
 /* 无实拍图时的兜底：不闪占位框，走同族深青渐变（真实行程缺图常见） */
 .now-photo.noimg{background:linear-gradient(150deg,#14323C,#0A151B 70%)}
@@ -146,6 +147,20 @@ img{display:block;width:100%;height:100%;object-fit:cover}
 .now-video span{overflow:hidden;text-overflow:ellipsis}
 .now-reason .rk{flex:0 0 auto;font-size:10.5px;color:var(--jade);border:1px solid rgba(99,170,161,.38);
   background:rgba(99,170,161,.1);border-radius:4px;padding:1px 6px;margin-top:1px}
+/* 站点硬事实行（S4 字段贯通）：营业时间/出片/避雷/预约/评分——有几条显示几条，全空整行隐藏 */
+.now-facts{display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:12px;color:var(--t2);line-height:1.55}
+.now-facts .f{display:flex;align-items:flex-start;gap:6px}
+.now-facts .fk{flex:0 0 auto;font-size:10.5px;color:var(--t3);border:1px solid rgba(255,255,255,.14);
+  border-radius:4px;padding:1px 6px;margin-top:1px}
+.now-facts .f.warn .fk{color:var(--red);border-color:rgba(224,106,90,.4);background:rgba(224,106,90,.1)}
+.now-facts .f.photo .fk{color:var(--jade);border-color:rgba(99,170,161,.4);background:rgba(99,170,161,.1)}
+.now-facts .f.book .fk{color:var(--amber);border-color:var(--amberLine);background:var(--amberSoft)}
+/* 就地编辑按钮（桌面可编辑）：低存在感小按钮，只有拿到 planId 的正式行程才出现 */
+.now-acts{display:flex;gap:8px;margin-top:12px}
+.now-acts button{font:inherit;font-size:11.5px;color:var(--t2);background:rgba(255,255,255,.05);
+  border:1px solid rgba(255,255,255,.14);border-radius:999px;padding:4px 12px;cursor:pointer;transition:.15s}
+.now-acts button:hover{color:var(--t1);background:rgba(255,255,255,.1)}
+.now-acts button:disabled{opacity:.45;cursor:default}
 .stay-row{display:flex;align-items:center;gap:10px;margin-top:18px;font-size:12px;color:var(--t2);font-family:var(--num)}
 .stay-row svg{width:15px;height:15px;color:var(--amber)}
 .stay-bar{flex:1;height:4px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden}
@@ -259,6 +274,65 @@ img{display:block;width:100%;height:100%;object-fit:cover}
   background:#23262E;border:1px solid var(--line2);font-size:12.5px;padding:10px 20px;border-radius:999px;
   opacity:0;pointer-events:none;transition:.28s;white-space:nowrap;box-shadow:0 20px 50px -15px rgba(0,0,0,.7)}
 #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+/* ═════════ 小红书式多图种草（2026-10-24 改版）：照片条 / 推荐徽章 / 故事卡 /
+   时间线缩略图 / 地图照片 chip + 气泡卡 ═════════ */
+.now-info{min-height:0;overflow-y:auto;scrollbar-width:thin}
+/* 当前站多图照片条：点小图换主图（主图沿用 .now-photo 的渐变遮罩与角标） */
+.now-strip{display:flex;align-items:stretch;padding:0 2px}
+.now-strip .ns-cnt{flex:0 0 auto;align-self:center;font-family:var(--num);font-size:10.5px;color:var(--t3);
+  line-height:1.55;text-align:right;width:46px}
+.ns-t{flex:0 0 auto;width:37%;aspect-ratio:16/11;border-radius:12px;overflow:hidden;position:relative;cursor:pointer;
+  border:1px solid var(--line2);background:#14323C;padding:0;min-width:0;
+  transform:rotate(var(--r,0deg));transition:transform .16s;box-shadow:0 6px 16px rgba(0,0,0,.35)}
+/* 交错叠压（小红书式一叠随手撒开的照片）：负 margin 压边 + 中张最上，不整齐并排。
+   注意 strip 首个子元素是「实拍 N 张」计数标签，照片的 nth-child 从 3 起。
+   悬停整叠 → 照片动态散开摊平（露出每张全貌），移开收回成叠。 */
+.ns-t{margin:0 -7px;transition:transform .18s,margin .24s cubic-bezier(.34,1.3,.5,1)}
+.ns-t:nth-child(3){z-index:2}
+.ns-t:nth-child(4){z-index:3}
+.ns-t:nth-child(5){z-index:1}
+.now-strip:hover .ns-t{margin:0 4px}
+.ns-t:hover{z-index:5}
+.ns-t img{width:100%;height:100%;object-fit:cover;display:block}
+.ns-t:hover{transform:rotate(var(--r,0deg)) translateY(-3px)}
+.ns-t.on{outline:2px solid var(--amber);outline-offset:2px}
+/* 信息区头：推荐度徽章 + 星级（评分换算，无分整行隐藏，不编数） */
+.now-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rec-badge{font-family:var(--num);font-size:11px;color:#7BD0C6;background:rgba(99,170,161,.13);
+  border:1px solid rgba(99,170,161,.32);border-radius:999px;padding:4px 11px;white-space:nowrap}
+.now-star{font-family:var(--num);font-size:12.5px;color:var(--amber);display:inline-flex;align-items:center;gap:4px}
+.now-star svg{width:13px;height:13px;fill:var(--amber)}
+/* 站点硬事实 → 故事卡（出片/避雷/预约分色，与小红书式锐评同构） */
+.now-facts .f{background:var(--card);border:1px solid var(--line);border-radius:11px;padding:8px 12px}
+/* 右栏时间线缩略图（替代时间轴圆点，一眼扫出哪站最好看） */
+.rb-thumb{width:30px;height:30px;border-radius:9px;overflow:hidden;flex:0 0 auto;position:relative;
+  border:1px solid var(--line);background:linear-gradient(150deg,#14323C,#0A151B)}
+.rb-thumb img{width:100%;height:100%;object-fit:cover;display:block}
+.rb-thumb.noimg span{position:absolute;inset:0;display:grid;place-items:center;font-size:12px;color:var(--t3)}
+.rb-row.done .rb-thumb{opacity:.5}
+.rb-row.now .rb-thumb{border-color:var(--amberLine)}
+/* 顶栏：今日预计花费（priceInfo 可解析才出现，解析不出不编造） */
+.budget-chip{font-family:var(--num);font-size:11px;color:var(--txt);background:var(--card);border:1px solid var(--line2);
+  padding:5px 10px;border-radius:999px;white-space:nowrap}
+/* 地图：选中站点气泡卡（顶部三图错位簇，MapLibre Marker 承载，自动跟随坐标与缩放） */
+.poi-bubble{width:250px;background:#17191F;border:1px solid var(--line2);border-radius:14px;overflow:hidden;
+  box-shadow:0 18px 44px rgba(0,0,0,.62);cursor:pointer}
+.poi-bubble .pb-photos{display:flex;align-items:center;justify-content:center;padding:11px 11px 3px}
+/* 交错叠压：每张 84px、压边 22px，z 序中张最上（与当日照片条同一语言）；
+   悬停照片区 → 三张散开摊平，移开收回成叠（与照片条同一动态） */
+.poi-bubble .pb-ph{flex:0 0 auto;width:84px;aspect-ratio:5/4;border-radius:10px;overflow:hidden;background:#14323C;
+  border:1px solid var(--line2);transform:rotate(var(--r,0deg));box-shadow:0 5px 12px rgba(0,0,0,.4);
+  margin:0 -11px;transition:margin .24s cubic-bezier(.34,1.3,.5,1)}
+.poi-bubble .pb-ph:nth-child(2){z-index:3}
+.poi-bubble .pb-ph:nth-child(3){z-index:2}
+.poi-bubble .pb-photos:hover .pb-ph{margin:0 3px}
+.poi-bubble .pb-ph img{width:100%;height:100%;object-fit:cover;display:block}
+.poi-bubble .pb-cap{display:flex;align-items:center;gap:8px;padding:8px 13px 0;
+  font-family:var(--num);font-size:11px;color:var(--amber);letter-spacing:.5px}
+.poi-bubble .pb-cap .pb-tag{margin-left:auto;color:var(--t2);font-size:10px;font-family:var(--cn)}
+.poi-bubble .pb-meta{padding:0 13px 11px}
+.poi-bubble .pb-name{font-size:12.5px;font-weight:600;line-height:1.35;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.poi-bubble .pb-sub{font-family:var(--num);font-size:10.5px;color:var(--t3);margin-top:4px}
 @media(prefers-reduced-motion:reduce){*{animation-duration:.01ms!important;transition-duration:.05s!important}}
 </style>
 </head>
@@ -301,6 +375,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
           <div class="band" id="band"></div>
         </div>
         <div class="tb-right">
+          <div class="budget-chip" id="budgetChip" style="display:none"></div>
           <div class="dq-chip" id="dqChip" style="display:none"></div>
           <div class="persona-chip" id="personaChip" style="display:none" title=""></div>
           <div class="weather" id="weather"></div>
@@ -313,6 +388,7 @@ img{display:block;width:100%;height:100%;object-fit:cover}
       <div class="content" id="content">
         <!-- 当前站视图 -->
         <div class="view" id="viewNow">
+          <div class="now-left">
           <div class="now-photo" id="nowPhoto">
             <img id="nowImg" src="" alt="">
             <div class="now-tag" id="nowTag"></div>
@@ -322,8 +398,12 @@ img{display:block;width:100%;height:100%;object-fit:cover}
               <div class="now-name" id="nowName"></div>
             </div>
           </div>
+          <div class="now-strip" id="nowStrip" style="display:none"></div>
+          </div>
           <div class="now-info">
+            <div class="now-head" id="nowHead" style="display:none"></div>
             <div class="now-reason" id="nowReason" style="display:none"><span class="rk">为什么推荐给你</span><span id="nowReasonText"></span></div>
+            <div class="now-facts" id="nowFacts" style="display:none"></div>
             <div class="now-note" id="nowNote"></div>
             <a class="now-video" id="nowVideo" target="_blank" rel="noopener" style="display:none">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M10 8.8l5.2 3.2L10 15.2z" fill="currentColor" stroke="none"/></svg>
@@ -333,6 +413,11 @@ img{display:block;width:100%;height:100%;object-fit:cover}
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
               <span id="stayText">建议停留</span>
               <span class="stay-bar"><i id="stayFill"></i></span>
+            </div>
+            <!-- 就地编辑（桌面可编辑）：改完直接写回冷层，卡片与聊天侧下一步读到的就是这版 -->
+            <div class="now-acts" id="nowActs" style="display:none">
+              <button id="actDrop" title="删掉这一站，后面自动顺排">删掉这站</button>
+              <button id="actSwap" title="换成同类另一处（按点评与距离挑）">换一个</button>
             </div>
           </div>
           <!-- 右下角站点跳转：上一个地方 / 下一个地方（端点置灰） -->
@@ -392,21 +477,21 @@ hotel:'https://aka.doubaocdn.com/s/xiu7PH2DoS'};
 var DEMO={
 S:{
 hotel:{n:'湖滨精品酒店',k:'stay',tag:'出发',img:IMG.hotel,base:10,xy:[300,118],note:'退房寄存行李，沿北山街步行出发，今天单向环湖、不走回头路。'},
-duanqiao:{n:'断桥残雪',k:'sight',tag:'景点',img:IMG.duanqiao,base:45,xy:[150,168],note:'清晨湖面最静，先占白堤这一段光，人少好拍。'},
-gushan:{n:'孤山 · 西泠印社',k:'sight',tag:'景点',img:IMG.gushan,base:70,xy:[108,252],note:'沿白堤走到孤山，林间石阶与金石篆刻，慢慢走。'},
-louwailou:{n:'楼外楼',k:'food',tag:'午餐 · 已订 12:15',img:IMG.louwailou,base:80,anchor:735,book:'已预订临湖位',xy:[132,352],note:'时间锚点不动：西湖醋鱼、东坡肉，临湖位已为你留好。'},
+duanqiao:{n:'断桥残雪',k:'sight',tag:'景点',img:IMG.duanqiao,imgs:[IMG.duanqiao,IMG.gushan,IMG.sudi],base:45,xy:[150,168],note:'清晨湖面最静，先占白堤这一段光，人少好拍。'},
+gushan:{n:'孤山 · 西泠印社',k:'sight',tag:'景点',img:IMG.gushan,imgs:[IMG.gushan,IMG.duanqiao,IMG.cafe],base:70,xy:[108,252],note:'沿白堤走到孤山，林间石阶与金石篆刻，慢慢走。'},
+louwailou:{n:'楼外楼',k:'food',tag:'午餐 · 已订 12:15',img:IMG.louwailou,imgs:[IMG.louwailou,IMG.veggie,IMG.hefang],base:80,anchor:735,book:'已预订临湖位',xy:[132,352],note:'时间锚点不动：西湖醋鱼、东坡肉，临湖位已为你留好。'},
 boat:{n:'游船渡湖 · 花港观鱼',k:'ride',tag:'游船',img:IMG.boat,base:65,xy:[252,432],note:'孤山码头上船，在水上看雷峰塔，最省力的一段。'},
 museum:{n:'浙江省博物馆',k:'indoor',tag:'室内 · 备选',img:IMG.museum,base:70,optional:true,xy:[168,306],note:'青瓷与良渚玉器，走得动或下雨时再进来。'},
 cafe:{n:'湖畔咖啡',k:'rest',tag:'歇脚',img:IMG.cafe,rest:true,base:30,xy:[372,336],note:'临窗湖景，喝杯手冲，节奏由你，想坐多久坐多久。'},
-leifeng:{n:'雷峰塔',k:'sight',tag:'景点',img:IMG.leifeng,base:70,xy:[338,478],note:'傍晚光线最好，登塔看夕照，是今天的高光。'},
-sudi:{n:'苏堤追日落',k:'sight',tag:'日落 · 约18:05',img:IMG.sudi,base:60,anchor:1055,xy:[212,398],note:'时间锚点：18:05 落日，沿长堤往西走，光最好的十分钟。'},
-hefang:{n:'河坊街',k:'food',tag:'晚餐夜游',img:IMG.hefang,base:100,xy:[452,250],note:'灯笼老街，定胜糕、葱包桧，晚餐与夜游都在这。'},
+leifeng:{n:'雷峰塔',k:'sight',tag:'景点',img:IMG.leifeng,imgs:[IMG.leifeng,IMG.sudi,IMG.boat],base:70,xy:[338,478],note:'傍晚光线最好，登塔看夕照，是今天的高光。'},
+sudi:{n:'苏堤追日落',k:'sight',tag:'日落 · 约18:05',img:IMG.sudi,imgs:[IMG.sudi,IMG.leifeng,IMG.duanqiao],base:60,anchor:1055,xy:[212,398],note:'时间锚点：18:05 落日，沿长堤往西走，光最好的十分钟。'},
+hefang:{n:'河坊街',k:'food',tag:'晚餐夜游',img:IMG.hefang,imgs:[IMG.hefang,IMG.louwailou,IMG.cafe],base:100,xy:[452,250],note:'灯笼老街，定胜糕、葱包桧，晚餐与夜游都在这。'},
 d2start:{n:'酒店出发进山',k:'stay',tag:'出发 · 已约车',img:IMG.hotel,base:10,xy:[468,92],note:'盘山路约 28 分钟，9:20 的车已叫好。'},
-lingyin:{n:'灵隐寺 · 飞来峰',k:'sight',tag:'景点 · 已预约',img:IMG.lingyin,base:120,book:'已实名预约',xy:[150,300],note:'趁上午人少先看飞来峰石窟，再进五大殿。'},
-veggie:{n:'灵隐素斋',k:'food',tag:'午餐',img:IMG.veggie,base:65,xy:[206,372],note:'素鹅、罗汉斋，寺旁小院，清幽。'},
+lingyin:{n:'灵隐寺 · 飞来峰',k:'sight',tag:'景点 · 已预约',img:IMG.lingyin,imgs:[IMG.lingyin,IMG.veggie,IMG.longjing],base:120,book:'已实名预约',xy:[150,300],note:'趁上午人少先看飞来峰石窟，再进五大殿。'},
+veggie:{n:'灵隐素斋',k:'food',tag:'午餐',img:IMG.veggie,imgs:[IMG.veggie,IMG.louwailou,IMG.cafe],base:65,xy:[206,372],note:'素鹅、罗汉斋，寺旁小院，清幽。'},
 teamuseum:{n:'中国茶叶博物馆',k:'indoor',tag:'室内 · 备选',img:IMG.teamuseum,base:70,optional:true,xy:[256,472],note:'看龙井制茶史、坐下品茶，走得动或下雨时进来。'},
-longjing:{n:'龙井村 · 茶园',k:'sight',tag:'景点',img:IMG.longjing,base:90,xy:[312,548],note:'茶垄层层，到茶农家喝一杯明前龙井。'},
-jiuxi:{n:'九溪烟树',k:'sight',tag:'徒步',img:IMG.jiuxi,base:110,xy:[312,668],note:'踩汀步沿溪下行，最出片但也最耗体力。'},
+longjing:{n:'龙井村 · 茶园',k:'sight',tag:'景点',img:IMG.longjing,imgs:[IMG.longjing,IMG.jiuxi,IMG.lingyin],base:90,xy:[312,548],note:'茶垄层层，到茶农家喝一杯明前龙井。'},
+jiuxi:{n:'九溪烟树',k:'sight',tag:'徒步',img:IMG.jiuxi,imgs:[IMG.jiuxi,IMG.longjing,IMG.teamuseum],base:110,xy:[312,668],note:'踩汀步沿溪下行，最出片但也最耗体力。'},
 d2back:{n:'返程回酒店',k:'stay',tag:'返程',img:IMG.hotel,base:20,xy:[468,92],note:'龙井村口上车，顺路送回湖滨。'}
 }};
 DEMO.ORDER={1:['hotel','duanqiao','gushan','louwailou','boat','museum','cafe','leifeng','sudi','hefang'],
@@ -612,6 +697,17 @@ function render(){
     if(p){el.style.display='';el.textContent=p.label;el.title=p.desc||p.label;}
     else{el.style.display='none';el.title='';}
   })();
+  /* 今日预计花费：只从站点 priceInfo 里解析数字求和，解析不出就整枚隐藏（不编造预算） */
+  (function(){
+    var el=$('budgetChip'),sum=0,found=0;
+    items.forEach(function(it){
+      if(!it.sp.price)return;
+      var m=/(\d+(?:\.\d+)?)/.exec(it.sp.price);
+      if(m){var v=parseFloat(m[1]);if(v>=3){sum+=v;found++;}}
+    });
+    if(found){el.style.display='';el.textContent='今日预计 ¥'+Math.round(sum);}
+    else el.style.display='none';
+  })();
 
   /* 旅程带 */
   var total=items.reduce(function(a,it){return a+it.dur+(it.edge?it.edge[1]:0);},0);
@@ -627,18 +723,41 @@ function render(){
     el.addEventListener('click',function(){state.forceShow[el.dataset.alt]=true;commit();toast('已把「'+S[el.dataset.alt].n+'」加回');});});
 
   /* Now 卡 */
-  setImg($('nowImg'),$('nowPhoto'),cur.sp.img,cur.sp.n);
+  setNowGallery(cur.sp);
   enrichLive(cur.sp);
   $('nowTag').textContent=cur.sp.tag;
   if(cur.sp.book){$('nowBook').style.display='flex';$('nowBookText').textContent=cur.sp.book;}else{$('nowBook').style.display='none';}
   $('nowTime').textContent=t2s(cur.start)+' — '+t2s(cur.end)+(cur.sp.anchor?' · 时间锚点':'');
   $('nowName').textContent=cur.sp.n;
+  /* 推荐度徽章 + 星级：由站点评分换算（小红书式「N% 人推荐」的诚实版），无评分不显示 */
+  (function(){
+    var sp=cur.sp,el=$('nowHead'),h='';
+    if(sp.star>0){
+      h+='<span class="rec-badge">推荐度 '+clamp(Math.round(sp.star/5*100),5,99)+'%</span>'+
+         '<span class="now-star"><svg viewBox="0 0 24 24"><path d="M12 2.8l2.8 5.7 6.3.9-4.6 4.4 1.1 6.3L12 17.2l-5.6 2.9 1.1-6.3L2.9 9.4l6.3-.9z"/></svg>'+sp.star.toFixed(1)+'</span>';
+    }
+    if(h){el.style.display='flex';el.innerHTML=h;}else{el.style.display='none';el.innerHTML='';}
+  })();
   $('nowNote').textContent=cur.sp.note;
   /* 「为什么推荐给你」（travel 双端②）：画像信号命中才有（宁缺毋滥） */
   (function(){
     var r=cur.sp.reason||'';
     if(r){$('nowReason').style.display='flex';$('nowReasonText').textContent=r;}
     else{$('nowReason').style.display='none';$('nowReasonText').textContent='';}
+  })();
+  /* 站点硬事实（S4 字段贯通）：营业时间/评分/出片/预约/避雷——有几条显几条，全空留白 */
+  (function(){
+    var sp=cur.sp,rows=[];
+    if(sp.hours)rows.push(['营业时间',sp.hours,'']);
+    if(sp.photo)rows.push(['出片',sp.photo,'photo']);
+    if(sp.bknote)rows.push(['预约',sp.bknote,'book']);
+    if(sp.warn)rows.push(['避雷',sp.warn,'warn']);
+    var el=$('nowFacts');
+    if(!rows.length){el.style.display='none';el.innerHTML='';return;}
+    el.style.display='flex';
+    el.innerHTML=rows.map(function(r){
+      return '<div class="f '+r[2]+'"><span class="fk">'+escHtml(r[0])+'</span><div>'+escHtml(r[1])+'</div></div>';
+    }).join('');
   })();
   /* 打卡视频（travel 视频下放）：后台回填命中的站点带 1 条真实播放页，点开新窗口看 */
   (function(){
@@ -648,6 +767,14 @@ function render(){
   })();
   $('stayText').textContent='建议停留 '+cur.dur+' 分钟';
   $('stayFill').style.width=clamp(cur.dur/120*100,8,100)+'%';
+  /* 就地编辑入口：只有落过盘的正式行程可改（演示数据/宿主没给 planId 时整行不出现），
+     每次重绘解除上一次点击留下的置灰 */
+  (function(){
+    var el=$('nowActs');
+    if(!META.planId||DEMO_MODE){el.style.display='none';return;}
+    el.style.display='flex';
+    $('actDrop').disabled=false;$('actSwap').disabled=false;
+  })();
 
   renderRight(items,alts);
   renderStopNav(items);
@@ -658,8 +785,11 @@ function renderRight(items,alts){
   $('rbFabCnt').textContent=$('rbCnt').textContent;
   var h='';
   items.forEach(function(it,i){
+    var thu=(it.sp.imgs&&it.sp.imgs[0])||it.sp.img;
     h+='<div class="rb-row '+(i===state.cur?'now ':(i<state.cur?'done':''))+'" data-i="'+i+'">'+
-      '<div class="rb-time">'+t2s(it.start)+'</div><div class="rb-dot"></div>'+
+      '<div class="rb-time">'+t2s(it.start)+'</div>'+
+      (thu?'<div class="rb-thumb" data-thumb="'+it.sp.id+'"><img src="'+escHtml(thu)+'" alt="" onerror="this.style.display=\'none\'"></div>'
+          :'<div class="rb-thumb noimg" data-thumb="'+it.sp.id+'"><span>'+escHtml((it.sp.n||'·').slice(0,1))+'</span></div>')+
       '<div class="rb-main"><div class="rb-name">'+it.sp.n+'</div>'+
       '<div class="rb-sub">停留 '+it.dur+' 分'+(it.edge?' · '+TNAME[it.edge[0]]+' '+it.edge[1]+' 分':'')+(it.picked?' · 刚加回':'')+'</div></div>'+
       '<div class="rb-tag">'+it.sp.tag.split(' ')[0]+'</div></div>';
@@ -686,6 +816,110 @@ function renderStopNav(items){
 }
 
 /* ═══════════════════════════════════════════════════════════════════
+   小红书式多图种草（2026-10-24 改版）：
+     ① 当前站多图照片条（点小图换主图）；
+     ② 右栏时间线缩略图；
+     ③ 地图 marker 实拍三图簇（卡片包裹 + 悬停放大）+ 选中站 3 图气泡卡。
+   （原第 4 块「种草手册页」已迁出：改为规划前的聊天侧种草选择卡，
+     行迹窗口保持 今日/地图 两个 tab——2026-10-24 二次定调）
+   数据口径：图片全部来自载荷 images / 补图接口 photos，缺图走兜底渐变；
+   推荐度由站点评分换算（无评分不显示），不虚构「N% 人推荐」统计。
+   ═══════════════════════════════════════════════════════════════════ */
+var STRIP_ROT=[-2,1.6,-1.3,1.9];
+var BUB_ROT=[-2.4,1.8,-1.6];   /* 气泡卡三图簇：与小红书原版同量级 */
+function nowImgsOf(sp){
+  var list=(sp.imgs&&sp.imgs.length)?sp.imgs.slice():[];
+  if(!list.length&&sp.img)list=[sp.img];
+  return list.slice(0,4);
+}
+/** 当前站大图 + 照片条；单图站不显示照片条（视觉与旧版一致）。 */
+function setNowGallery(sp){
+  var list=nowImgsOf(sp),strip=$('nowStrip');
+  if(sp.imgIdx==null||sp.imgIdx>=list.length)sp.imgIdx=0;
+  setImg($('nowImg'),$('nowPhoto'),list[sp.imgIdx]||'',sp.n);
+  if(!strip)return;
+  if(list.length<2){strip.style.display='none';strip.innerHTML='';return;}
+  var total=(sp.imgs&&sp.imgs.length)?sp.imgs.length:(sp.img?1:0);
+  var h='<span class="ns-cnt">实拍<br>'+total+' 张</span>';
+  list.forEach(function(u,i){
+    h+='<button class="ns-t'+(i===sp.imgIdx?' on':'')+'" data-k="'+i+'" style="--r:'+STRIP_ROT[i%4]+'deg" title="第 '+(i+1)+' 张">'+
+       '<img src="'+escHtml(u)+'" alt="" onerror="this.parentNode.style.display=\'none\'"></button>';
+  });
+  strip.innerHTML=h;
+  strip.style.display='flex';
+  Array.prototype.forEach.call(strip.querySelectorAll('.ns-t'),function(b){
+    b.addEventListener('click',function(){sp.imgIdx=+b.dataset.k;setNowGallery(sp);});
+  });
+}
+/** 站点媒体异步到位后统一刷新：右栏缩略图 / marker chip / 胶卷条 / 当前站大图。 */
+function updateRightThumbs(){
+  Array.prototype.forEach.call(document.querySelectorAll('.rb-thumb[data-thumb]'),function(el){
+    var sp=S[el.dataset.thumb];if(!sp)return;
+    var u=(sp.imgs&&sp.imgs[0])||sp.img;
+    if(u&&!el.querySelector('img')){el.classList.remove('noimg');el.innerHTML='<img src="'+escHtml(u)+'" alt="" onerror="this.style.display=\'none\'">';}
+  });
+}
+function refreshStopMedia(sp){
+  if(!sp)return;
+  updateRightThumbs();
+  var plan=replan(),idx=-1;
+  plan.items.forEach(function(x,i){if(x.id===sp.id)idx=i;});
+  if(idx<0)return;
+  if(idx===state.cur&&state.view==='now')setNowGallery(sp);
+  if(state.view!=='map')return;
+  if(bubbleMode!=='none'&&bubbleIdx===idx)placeBubbleByIdx(plan.items,idx);
+}
+/* ── 地图：站点 3 图气泡卡（悬停临时看 / 点击固定；平时不占屏） ── */
+var bubbleMarker=null,bubbleMode='none',bubbleIdx=-1,bubbleHideTimer=0;
+function removeBubble(){if(bubbleMarker){try{bubbleMarker.remove();}catch(e){/* ignore */}}bubbleMarker=null;}
+function cancelHideBubble(){if(bubbleHideTimer){clearTimeout(bubbleHideTimer);bubbleHideTimer=0;}}
+/** idx 站点大卡：sticky=true 点击固定（切站/悬停他站才换）；false 悬停临时看。 */
+function showBubbleAt(idx,sticky){
+  cancelHideBubble();
+  bubbleMode=sticky?'sticky':'hover';
+  bubbleIdx=idx;
+  placeBubbleByIdx(replan().items,idx);
+}
+/** 悬停离开后延时收卡：给「鼠标从 pin 移到卡上」留路径（卡自身 enter 会取消）。 */
+function scheduleHideBubble(idx){
+  cancelHideBubble();
+  bubbleHideTimer=setTimeout(function(){
+    bubbleHideTimer=0;
+    if(bubbleMode==='hover'&&bubbleIdx===idx){bubbleMode='none';bubbleIdx=-1;removeBubble();}
+  },180);
+}
+/** 重建当前显示的卡（地图移动选边 / 媒体到位刷新 / renderMap 重摆共用）。 */
+function placeBubbleByIdx(items,idx){
+  removeBubble();cancelHideBubble();bubbleMode='none';bubbleIdx=-1;
+  var map=mapState.map;
+  if(!map||!mapState.ready)return;
+  var it=items&&items[idx];
+  if(!it||!it.sp.loc)return;
+  var imgs=nowImgsOf(it.sp);
+  var el=document.createElement('div');
+  el.className='poi-bubble';
+  el.title='点击回到今日视图';
+  el.innerHTML=(imgs.length?'<div class="pb-photos">'+imgs.slice(0,3).map(function(u,i){
+    return '<span class="pb-ph" style="--r:'+BUB_ROT[i%3]+'deg"><img src="'+escHtml(u)+'" alt="" onerror="this.style.display=\'none\'"></span>';
+  }).join('')+'</div>':'')+
+    '<div class="pb-cap"><span>'+t2s(it.start)+' — '+t2s(it.end)+'</span><span class="pb-tag">'+escHtml(it.sp.tag)+'</span></div>'+
+    '<div class="pb-meta"><div class="pb-name">'+escHtml(it.sp.n)+'</div>'+
+    '<div class="pb-sub">'+(it.sp.star>0?'★ '+it.sp.star.toFixed(1)+' · ':'')+'停留 '+it.dur+' 分</div></div>';
+  el.addEventListener('mouseenter',cancelHideBubble);
+  el.addEventListener('mouseleave',function(){scheduleHideBubble(bubbleIdx);});
+  el.addEventListener('click',function(e){e.stopPropagation();switchView('now');});
+  // 屏幕右侧 1/3 的站点气泡往左弹；视野下缘的站点气泡改从 pin 上方弹出，
+  // 避免被地图容器（overflow:hidden）裁掉
+  var pt=map.project([it.sp.loc.lng,it.sp.loc.lat]);
+  var cw=map.getCanvas().clientWidth,ch=map.getCanvas().clientHeight;
+  var flip=pt.x>cw-290,below=pt.y>ch-250,anchor,offset;
+  if(below){anchor=flip?'bottom-right':'bottom-left';offset=flip?[-14,-16]:[14,-16];}
+  else{anchor=flip?'right':'left';offset=flip?[-16,16]:[16,16];}
+  bubbleMarker=new maplibregl.Marker({element:el,anchor:anchor,offset:offset,closeOnClick:false})
+    .setLngLat([it.sp.loc.lng,it.sp.loc.lat]).addTo(map);
+}
+
+/* * ═══════════════════════════════════════════════════════════════════
    真实地图（MapLibre GL）
    ═══════════════════════════════════════════════════════════════════
    底图：Carto 暗色矢量，走本机 /travel-basemap 代理（磁盘缓存 + 规划完成即预热）。
@@ -769,6 +1003,10 @@ function ensureMap(cb){
     if(vm&&!vm.classList.contains('open'))vm.classList.remove('boot');
     tuneBasemap(map);
     addRouteLayers();
+    // 视野挪动后气泡卡可能被甩出屏幕边缘：停稳后按当前位置重新选边
+    map.on('moveend',function(){
+      if(state.view==='map'&&bubbleMarker&&bubbleMode!=='none'&&bubbleIdx>=0)placeBubbleByIdx(replan().items,bubbleIdx);
+    });
     if(state.view==='map')renderMap(replan().items);
     cb&&cb();
     // 占位要在「首屏瓦片真的画出来」之后撤：`load` 只代表样式就绪，
@@ -855,7 +1093,10 @@ function poiEl(it,i,num){
   d.innerHTML='<span class="wrap"><span class="pulse"></span><span class="pin">'+(num||'•')+'</span>'+
     '<span class="lb">'+escHtml(it.sp.n.split(' · ')[0])+'</span></span>';
   d.addEventListener('mousedown',function(e){e.stopPropagation();});
-  d.addEventListener('click',function(e){e.stopPropagation();setCur(i);});
+  /* 大卡按需显现：悬停临时看（移开即收）；点击选中并固定，直到悬停别的站 */
+  d.addEventListener('mouseenter',function(){showBubbleAt(i,false);});
+  d.addEventListener('mouseleave',function(){scheduleHideBubble(i);});
+  d.addEventListener('click',function(e){e.stopPropagation();setCur(i);showBubbleAt(i,true);});
   return d;
 }
 function renderMapPois(items){
@@ -956,7 +1197,8 @@ function fitToSeq(seq,animate){
   }
   var b=new maplibregl.LngLatBounds();
   seq.forEach(function(p){b.extend([p.lng,p.lat]);});
-  map.fitBounds(b,{padding:{top:70,bottom:70,left:120,right:170},
+  // 底部留白给下缘站点的气泡卡让位（气泡从 pin 上方弹出时需要余量）
+  map.fitBounds(b,{padding:{top:80,bottom:120,left:120,right:290},
     duration:opts.duration,maxZoom:15.5});
 }
 /** 真实腿回填：底部「下一站」与右栏的交通耗时换成路网实测，而不是 haversine 估算 */
@@ -1059,6 +1301,9 @@ function renderMap(items){
   }else{
     updatePoiActive();
   }
+  /* 大卡按需显现：只重摆当前正显示的（sticky 或 hover），平时不占屏 */
+  if(bubbleMode!=='none'&&bubbleIdx>=0&&bubbleIdx<items.length)placeBubbleByIdx(items,bubbleIdx);
+  else{bubbleMode='none';bubbleIdx=-1;removeBubble();}
   loadDayRoute(items,seqOf(items));
 }
 
@@ -1077,26 +1322,29 @@ $('undoBtn').addEventListener('click',function(){if(!state.prev)return;
 /* 天数胶囊条由 renderDayPills() 动态生成并自行绑定事件 */
 
 /* 左栏视图切换（偏好已下线：偏好由用户画像 Agent 潜移默化注入，不做手动设置面板） */
+/** 视图切换统一入口（今日 / 地图）：侧栏按钮、地图气泡卡共用。 */
+function switchView(v){
+  if(v!=='now'&&v!=='map')return false;
+  state.view=v;
+  $('viewMap').classList.remove('open');
+  if(v==='map'){
+    $('viewMap').classList.remove('boot');   /* 离屏预建期就点开：摘掉屏外定位 */
+    $('viewMap').classList.add('open');
+  }
+  Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x.dataset.view===v);});
+  if(v==='map'){
+    // 容器刚从 display:none 恢复：等一帧拿到真实尺寸，再让 MapLibre 重算视口
+    requestAnimationFrame(function(){
+      if(mapState.map)mapState.map.resize();
+      renderMap(replan().items);
+    });
+  }
+  return true;
+}
 Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(b){
-  b.addEventListener('click',function(){
-    var v=b.dataset.view;
-    if(v==='now'){state.view='now';$('viewMap').classList.remove('open');}
-    else if(v==='map'){
-      state.view='map';
-      $('viewMap').classList.remove('boot');   /* 离屏预建期就点开：摘掉屏外定位 */
-      $('viewMap').classList.add('open');
-      // 容器刚从 display:none 恢复：等一帧拿到真实尺寸，再让 MapLibre 重算视口
-      requestAnimationFrame(function(){
-        if(mapState.map)mapState.map.resize();
-        renderMap(replan().items);
-      });
-    }
-    else{return;} /* 未知视图：不响应也不改选中态 */
-    Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x===b);});
-  });
+  b.addEventListener('click',function(){switchView(b.dataset.view);});
 });
-$('mapBack').addEventListener('click',function(){state.view='now';$('viewMap').classList.remove('open');
-  Array.prototype.forEach.call(document.querySelectorAll('.side-ic'),function(x){x.classList.toggle('on',x.dataset.view==='now');});});
+$('mapBack').addEventListener('click',function(){switchView('now');});
 /* 今日安排弹窗：头部按钮收起 → 右上角浮标唤回（收起不销毁，列表状态保留） */
 $('rbCollapse').addEventListener('click',function(){
   $('rightbar').classList.add('collapsed');
@@ -1113,6 +1361,66 @@ $('stopNext').addEventListener('click',function(){
   var n=replan().items.length;
   if(state.cur<n-1)setCur(state.cur+1);
 });
+
+/* ═══════════════════════════════════════════════════════════════════
+   就地编辑（桌面可编辑）：删掉这站 / 换一个同类的
+   —— 走 /travel/plans/:id 的编辑端点（与聊天侧 travel.edit-itinerary 同一
+   条链：服务端定位 POI、重算交通腿与时间、乐观锁防双开互相覆盖）。
+   载荷里没有 planId（演示数据/宿主没注入）时整行不出现，不假装可改。
+   ═══════════════════════════════════════════════════════════════════ */
+function editPlanReq(method,path,body,done){
+  if(!META.planId){toast('这版行程还没落盘，改不了');return;}
+  var h={'Accept':'application/json'};
+  if(META.version!=null)h['x-plan-version']=String(META.version);
+  var opt={method:method,headers:h};
+  if(body){h['Content-Type']='application/json';opt.body=JSON.stringify(body);}
+  fetch(apiBase()+'/travel/plans/'+encodeURIComponent(META.planId)+path,opt)
+    .then(function(r){
+      return r.text().then(function(t){
+        var j=null;try{j=JSON.parse(t);}catch(e){/* 非 JSON（网关错误页）按状态报 */}
+        return{s:r.status,j:j};
+      });
+    })
+    .then(function(res){
+      if(res.s<200||res.s>=300||!res.j||!res.j.days){
+        var m=res.j&&res.j.error;
+        toast(typeof m==='string'?m:('编辑失败（HTTP '+res.s+'）'));
+        return;
+      }
+      done(res.j);
+    })
+    .catch(function(){toast('编辑请求没发出去（离线或服务端没起来）');});
+}
+/** 编辑后的 plan 就地重绘：停在原来那天那一站附近，别把用户弹回 Day1。 */
+function applyEditedPlan(plan,day,curIdx){
+  DEMO_MODE=!adaptPlan(plan);
+  DATA_READY=true;
+  var n=dayCount();
+  state.day=clamp(day||1,1,Math.max(1,n));
+  var ids=ORDER[state.day]||[];
+  state.cur=clamp(curIdx||0,0,Math.max(0,ids.length-1));
+  state.forceShow={};
+  render();
+}
+function bindEditAct(id,method,pathOf,body,okMsg){
+  var el=$(id);
+  el.addEventListener('click',function(){
+    if(el.disabled||!META.planId)return;
+    var cur=replan().items[state.cur];
+    if(!cur||!cur.sp)return;
+    var sp=cur.sp,day=state.day,curIdx=state.cur;
+    el.disabled=true;$('actSwap').disabled=true;$('actDrop').disabled=true;
+    editPlanReq(method,pathOf(sp),body,function(plan){
+      applyEditedPlan(plan,day,curIdx);
+      toast(okMsg(sp));
+    });
+  });
+}
+bindEditAct('actDrop','DELETE',function(sp){return '/days/'+sp.di+'/items/'+sp.ii;},null,
+  function(sp){return '已删掉「'+sp.n+'」，后面的时间顺过了';});
+bindEditAct('actSwap','POST',function(sp){return '/days/'+sp.di+'/items/'+sp.ii+'/comment';},
+  {comment:'换一个同类的'},
+  function(sp){return '这一站换掉了，位置和营业时间都重算过';});
 
 function toast(m){var t=$('toast');t.textContent=m;t.classList.add('show');clearTimeout(t._h);t._h=setTimeout(function(){t.classList.remove('show');},1900);}
 
@@ -1165,12 +1473,16 @@ function enrichLive(sp){
       var ph=j.photos&&j.photos.length?(j.photos[0].thumb||j.photos[0].full):null;
       var wiki=j.wiki&&j.wiki.extract?String(j.wiki.extract):null;
       if(!ph&&!wiki)return;
-      if(!sp.img&&ph){sp.img=ph;enqueuePreload([ph]);}
+      if(!sp.img&&ph)sp.img=ph;
+      /* 小红书式多图：补图接口返回几张就收几张（≤4），大图/照片条/气泡卡/胶卷共用 */
+      if(j.photos&&j.photos.length){
+        var more=j.photos.map(function(p){return p.thumb||p.full;}).filter(Boolean).slice(0,4);
+        if(more.length>((sp.imgs||[]).length))sp.imgs=more;
+      }
+      if(sp.img)enqueuePreload([sp.img].concat((sp.imgs||[]).slice(1)));
       if(!sp.note&&wiki)sp.note=wiki;
-      var plan=replan(),isCur=plan.items[state.cur]&&plan.items[state.cur].id===sp.id;
-      if(!isCur)return;
-      if(ph)setImg($('nowImg'),$('nowPhoto'),sp.img,sp.n);
-      if(sp.note)$('nowNote').textContent=sp.note;
+      refreshStopMedia(sp);
+      if(sp.note&&replan().items[state.cur]&&replan().items[state.cur].id===sp.id)$('nowNote').textContent=sp.note;
     })
     .catch(function(){/* 取不到：保持占位态 */});
 }
@@ -1200,7 +1512,10 @@ function preloadDayAssets(dayKey){
   var ids=ORDER[dayKey]||[],here=[],later=[];
   ids.forEach(function(id){
     var sp=S[id];if(!sp)return;
-    if(sp.img)(dayKey===state.day?here:later).push(sp.img);
+    if(sp.img){
+      (dayKey===state.day?here:later).push(sp.img);
+      (sp.imgs||[]).slice(1,4).forEach(function(u){(dayKey===state.day?here:later).push(u);});
+    }
     else enrichLive(sp);   // 缺图站：先补图（补到后经 enqueuePreload 自动入队）
   });
   enqueuePreload(here.concat(later));
@@ -1217,6 +1532,7 @@ function normalizePlan(raw){
     destination:str(raw.destination),title:str(raw.title),center:raw.center||null,
     // 顶层可选字段透传：items→entries 形态转换不再丢数据角标/天气/人格徽章/起止日期
     dataQuality:raw.dataQuality,weather:raw.weather,persona:raw.persona||null,
+    planId:raw.planId,version:raw.version,status:raw.status,
     startDate:raw.startDate,endDate:raw.endDate,
     days:days.map(function(d,i){
       return{
@@ -1231,6 +1547,8 @@ function normalizePlan(raw){
             address:str(it.address),images:Array.isArray(it.images)?it.images:[],
             latitude:it.latitude,longitude:it.longitude,
             recommendReason:it.recommendReason,
+            why:it.why,photoTip:it.photoTip,pitfall:it.pitfall,
+            bookingNote:it.bookingNote,openingHours:it.openingHours,rating:it.rating,
             videos:Array.isArray(it.videos)?it.videos:[],
             optional:it.type==='optional'
           };
@@ -1305,8 +1623,12 @@ function adaptStop(entry,dayKey,idx){
   if(!note&&entry.tips&&entry.tips.length)note=entry.tips.filter(Boolean).join('；');
   if(!note)note=str(entry.address);
   return{id:'d'+dayKey+'e'+idx,n:str(entry.name)||'行程安排',k:k,tag:TAG_BY_TYPE[type]||'安排',
-    img:imgs.length?str(imgs[0]):'',base:dur,xy:null,loc:loc,note:note,
-    reason:str(entry.recommendReason),
+    di:dayKey-1,ii:idx,
+    img:imgs.length?str(imgs[0]):'',imgs:imgs.slice(0,6),base:dur,xy:null,loc:loc,note:note,price:str(entry.priceInfo),
+    reason:str(entry.recommendReason||entry.why),
+    // S4 字段贯通：出片/避雷/预约/营业时间/评分——POI 实测数据，拿不到就不显示（不编）
+    photo:str(entry.photoTip),warn:str(entry.pitfall),bknote:str(entry.bookingNote),
+    hours:str(entry.openingHours),star:Number(entry.rating)>0?Number(entry.rating):0,
     video:(entry.videos&&entry.videos[0]&&str(entry.videos[0].url))?{u:str(entry.videos[0].url),t:str(entry.videos[0].title)}:null,
     tips:Array.isArray(entry.tips)?entry.tips.map(str).filter(Boolean):[],
     t:type,anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
@@ -1364,6 +1686,8 @@ function adaptPlan(raw){
   var en=/^[\x20-\x7E]+$/.test(dest)?dest.toUpperCase():'';
   META={city:dest,cityEn:en,days:days.length,dates:DATES,title:'行迹 · '+dest+' '+days.length+' 日',dq:str(raw.dataQuality),
     start:str(raw.startDate),end:str(raw.endDate),
+    planId:str(raw.planId),version:raw.version==null?null:Number(raw.version),
+    status:str(raw.status)||'draft',
     persona:(raw.persona&&raw.persona.id&&raw.persona.label)?{id:str(raw.persona.id),label:str(raw.persona.label),desc:str(raw.persona.desc)}:null};
   WEATHER_TEXT=str(raw.weather);
   liveCache={};
@@ -1383,6 +1707,7 @@ function resetMapState(){
   var src=mapState.map&&mapState.map.getSource(ROUTE_SRC);
   if(src)src.setData(emptyFC());
   var el=$('mapLegend');if(el){el.className='map-legend';el.innerHTML='';}
+  removeBubble();
 }
 /** 提前让服务端把目的地底图落到磁盘缓存：用户还在「今日」视图的这几秒里，
     后台已把矢量样式/精灵/首屏瓦片备好，点开「路线」几乎瞬开（不再几秒黑屏）。

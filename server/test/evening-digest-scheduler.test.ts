@@ -34,7 +34,6 @@ function makeScheduler(bedtimeHour: number | null = null) {
         fired.push(sessionId);
         return {
           date: "2026-10-16",
-          todayHighlights: [],
           tomorrowSchedule: [],
           tomorrowWeather: null,
           outfitTip: null,

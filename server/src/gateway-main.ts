@@ -15,6 +15,7 @@
 import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { getRuntimeTopologyConfig } from "./config/env.js";
+import { writeServerInstance } from "./config/server-instance.js";
 
 setupGlobalHttpAgent();
 import Fastify from "fastify";
@@ -201,6 +202,8 @@ process.on("unhandledRejection", (reason: unknown) => {
 });
 
 await app.listen({ port: topology.gatewayPort, host: "0.0.0.0" });
+// 身份档案：端口被谁、用哪个数据根占着（启动器与 watchdog 据此做异数据根互斥）
+writeServerInstance(topology.gatewayPort, "gateway");
 console.log(
   `[gateway] ws/http -> http://127.0.0.1:${topology.gatewayPort} (tunnel → ${runtimeHttpOrigin}) | health: /__gateway/health`,
 );

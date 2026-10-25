@@ -338,36 +338,6 @@ export function isStructuredFactsEnabled(): boolean {
 }
 
 // ============================================================
-// 方案 C：承诺草稿板（commitment board）
-// ============================================================
-
-export function isCommitmentBoardEnabled(): boolean {
-  return envBool("AGENT_COMMITMENT_BOARD_ENABLED", true);
-}
-
-/** 扫描循环间隔（分钟） */
-export function getCommitmentScanIntervalMin(): number {
-  return envPositiveInt("AGENT_COMMITMENT_SCAN_INTERVAL_MIN", 5);
-}
-
-/** 对话自动提取承诺（LLM）开关；关闭后仅显式工具通道 */
-export function isCommitmentAutoExtractEnabled(): boolean {
-  return envBool("AGENT_COMMITMENT_AUTO_EXTRACT_ENABLED", true);
-}
-
-/**
- * 承诺自动提取范围（P0-2 捕获与记忆路由解耦）：
- *   high = 仅高信号路径抽取（旧行为，灰度回退档）
- *   all  = 低信号写入也 fire-and-forget 抽取——口语承诺（"明天发你"）通常
- *          被记忆侧判为临时上下文/decay，与存储价值无关，承诺照样要抓。
- *          抽取是 LLM 通道自身产出，无词表预筛。
- */
-export function getCommitmentExtractScope(): "high" | "all" {
-  const raw = process.env.AGENT_COMMITMENT_EXTRACT_SCOPE?.trim().toLowerCase();
-  return raw === "high" ? "high" : "all";
-}
-
-// ============================================================
 // 方案 D：溯源作废（provenance）
 // ============================================================
 

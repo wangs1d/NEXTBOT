@@ -5,7 +5,7 @@ import {
   DdlRadarService,
   localDayDiff,
   MAX_ITEMS_PER_TIER,
-  type CommitmentBoardLike,
+  type IngestDeadlinesLike,
   type ScheduleTasksLike,
 } from "../src/services/ddl-radar-service.js";
 
@@ -16,11 +16,18 @@ const at = (dayOffset: number, h = 15, m = 0): string => {
   return d.toISOString();
 };
 
-function boardOf(
-  rows: Array<{ id: string; text: string; deadline: string | null; category?: string }>,
-): CommitmentBoardLike {
+function ingestOf(
+  rows: Array<{ key: string; title: string; dueAt: string; category?: string }>,
+): IngestDeadlinesLike {
   return {
-    list: () => rows.map((r) => ({ ...r, actorId: "u1", status: "active" })),
+    listDeadlines: () =>
+      rows.map((r) => ({
+        key: r.key,
+        title: r.title,
+        dueAt: r.dueAt,
+        category: r.category,
+        sourceLabel: "测试台账",
+      })),
   };
 }
 
@@ -48,11 +55,11 @@ function scheduleOf(
 }
 
 const radar = (deps: {
-  commitments?: CommitmentBoardLike | null;
+  ingest?: IngestDeadlinesLike | null;
   schedule?: ScheduleTasksLike | null;
 }) =>
   new DdlRadarService({
-    commitmentBoard: deps.commitments ?? null,
+    ingestService: deps.ingest ?? null,
     scheduleTaskService: deps.schedule ?? null,
     now: () => NOW,
   });
@@ -61,10 +68,10 @@ const radar = (deps: {
 
 test("今天到期 → tier=today；明天 → tomorrow；2~3 天 → soon", () => {
   const r = radar({
-    commitments: boardOf([
-      { id: "a", text: "交数据结构作业", deadline: at(0, 23) },
-      { id: "b", text: "交英语论文提纲", deadline: at(1, 12) },
-      { id: "c", text: "报名四六级", deadline: at(3, 9) },
+    ingest: ingestOf([
+      { key: "a", title: "交数据结构作业", dueAt: at(0, 23) },
+      { key: "b", title: "交英语论文提纲", dueAt: at(1, 12) },
+      { key: "c", title: "报名四六级", dueAt: at(3, 9) },
     ]),
   }).scan("s1", "u1");
 
@@ -79,9 +86,7 @@ test("今天到期 → tier=today；明天 → tomorrow；2~3 天 → soon", () 
 
 test("超过 3 天的远期 DDL 不进任何档（不打扰）", () => {
   const r = radar({
-    commitments: boardOf([
-      { id: "far", text: "期末大作业", deadline: at(9, 23) },
-    ]),
+    ingest: ingestOf([{ key: "far", title: "期末大作业", dueAt: at(9, 23) }]),
   }).scan("s1", "u1");
   assert.equal(r.total, 0);
   assert.deepEqual([r.today, r.tomorrow, r.soon], [[], [], []]);
@@ -89,7 +94,7 @@ test("超过 3 天的远期 DDL 不进任何档（不打扰）", () => {
 
 test("已过截止时间 → 归 today 且 overdue=true（不能凭空消失）", () => {
   const r = radar({
-    commitments: boardOf([{ id: "late", text: "交实习报告", deadline: at(-1, 18) }]),
+    ingest: ingestOf([{ key: "late", title: "交实习报告", dueAt: at(-1, 18) }]),
   }).scan("s1", "u1");
   assert.equal(r.today.length, 1);
   assert.equal(r.today[0]!.overdue, true);
@@ -130,11 +135,9 @@ test("已取消/已完成的日程不进 DDL", () => {
 
 // ───────────────────────── 去重 / 降级 ─────────────────────────
 
-test("同一件事既在承诺板又被物化成日程 → 去重保留更早的截止", () => {
+test("同一件事既在 ingest 台账又命中日程 → 去重保留更早的截止", () => {
   const r = radar({
-    commitments: boardOf([
-      { id: "cm1", text: "交毕业论文初稿", deadline: at(1, 20) },
-    ]),
+    ingest: ingestOf([{ key: "cm1", title: "交毕业论文初稿", dueAt: at(1, 20) }]),
     schedule: scheduleOf([
       { taskId: "t9", title: "交毕业论文初稿", description: "提交毕业论文初稿", when: at(1, 9) },
     ]),
@@ -149,8 +152,8 @@ test("数据源缺失或抛错 → 降级为空，不抛异常", () => {
   assert.equal(empty.total, 0);
 
   const broken = new DdlRadarService({
-    commitmentBoard: {
-      list: () => {
+    ingestService: {
+      listDeadlines: () => {
         throw new Error("db locked");
       },
     },
@@ -165,25 +168,17 @@ test("数据源缺失或抛错 → 降级为空，不抛异常", () => {
   assert.equal(r.total, 0);
 });
 
-test("未传 actorId 时用 sessionId 兜底查承诺板", () => {
+test("未传 actorId 时用 sessionId 兜底查 ingest 台账", () => {
   const seen: Array<string | undefined> = [];
-  const board: CommitmentBoardLike = {
-    list: (opts) => {
-      seen.push(opts?.actorId);
-      return opts?.actorId === "sess-9"
-        ? [
-            {
-              id: "x",
-              actorId: "sess-9",
-              text: "交作业",
-              status: "active",
-              deadline: at(0, 22),
-            },
-          ]
+  const ingest: IngestDeadlinesLike = {
+    listDeadlines: (actorId) => {
+      seen.push(actorId);
+      return actorId === "sess-9"
+        ? [{ key: "x", title: "交作业", dueAt: at(0, 22), sourceLabel: "测试台账" }]
         : [];
     },
   };
-  const r = radar({ commitments: board }).scan("sess-9");
+  const r = radar({ ingest }).scan("sess-9");
   assert.deepEqual(seen, ["sess-9"]);
   assert.equal(r.today.length, 1);
 });
@@ -192,37 +187,37 @@ test("未传 actorId 时用 sessionId 兜底查承诺板", () => {
 
 test("forEvening 只给 L2：明天到期 + 今天已过期（不含今天还没到点的）", () => {
   const svc = radar({
-    commitments: boardOf([
-      { id: "a", text: "今天还没到点的", deadline: at(0, 23) },
-      { id: "b", text: "今天已经过点的", deadline: at(-1, 18) },
-      { id: "c", text: "明天要交的", deadline: at(1, 12) },
-      { id: "d", text: "这周要交的", deadline: at(3, 12) },
+    ingest: ingestOf([
+      { key: "a", title: "今天还没到点的", dueAt: at(0, 23) },
+      { key: "b", title: "今天已经过点的", dueAt: at(-1, 18) },
+      { key: "c", title: "明天要交的", dueAt: at(1, 12) },
+      { key: "d", title: "这周要交的", dueAt: at(3, 12) },
     ]),
   });
   const { tomorrow, overdue } = svc.forEvening("s1", "u1");
-  assert.deepEqual(tomorrow.map((i) => i.id), ["commitment:c"]);
-  assert.deepEqual(overdue.map((i) => i.id), ["commitment:b"]);
+  assert.deepEqual(tomorrow.map((i) => i.id), ["ingest:c"]);
+  assert.deepEqual(overdue.map((i) => i.id), ["ingest:b"]);
 });
 
 test("forMorning 给 L3 + L1，且不含明天的（L2 不在晨报重复）", () => {
   const svc = radar({
-    commitments: boardOf([
-      { id: "a", text: "今天截止", deadline: at(0, 20) },
-      { id: "b", text: "明天截止", deadline: at(1, 12) },
-      { id: "c", text: "后天截止", deadline: at(2, 12) },
+    ingest: ingestOf([
+      { key: "a", title: "今天截止", dueAt: at(0, 20) },
+      { key: "b", title: "明天截止", dueAt: at(1, 12) },
+      { key: "c", title: "后天截止", dueAt: at(2, 12) },
     ]),
   });
   const { today, soon } = svc.forMorning("s1", "u1");
-  assert.deepEqual(today.map((i) => i.id), ["commitment:a"]);
-  assert.deepEqual(soon.map((i) => i.id), ["commitment:c"]);
+  assert.deepEqual(today.map((i) => i.id), ["ingest:a"]);
+  assert.deepEqual(soon.map((i) => i.id), ["ingest:c"]);
 });
 
 test("单档最多 5 条（防卡片被撑爆）", () => {
   const rows = Array.from({ length: 9 }, (_, i) => ({
-    id: `m${i}`,
-    text: `作业${i}`,
-    deadline: at(1, 8 + i),
+    key: `m${i}`,
+    title: `作业${i}`,
+    dueAt: at(1, 8 + i),
   }));
-  const r = radar({ commitments: boardOf(rows) }).scan("s1", "u1");
+  const r = radar({ ingest: ingestOf(rows) }).scan("s1", "u1");
   assert.equal(r.tomorrow.length, MAX_ITEMS_PER_TIER);
 });

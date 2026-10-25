@@ -429,7 +429,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - home_service.reschedule（改期）：须用户明确给出新时间后调用",
         "   - home_service.cancel（取消）：两阶段确认取消",
         "   - Provider：BOOKING_MODE=mock（默认）为模拟套餐（simulated=true，必须如实告知）；真实平台（美团家政/58同城/天鹅到家）实现 BookingProvider 接口后即可接入",
-        "   - 安全护栏与 ride_hailing 相同（单笔/单日限额 + 两阶段确认 + 审计 + 承诺板跟踪）",
+        "   - 安全护栏与 ride_hailing 相同（单笔/单日限额 + 两阶段确认 + 审计）",
       ],
     },
     {
@@ -456,7 +456,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - travel_booking.cancel（取消）：两阶段确认；仅限未出票订单",
         "   - travel_booking.refund（退改工单）：已支付/已出票订单的退票、改签。两阶段确认创建工单（rft_*，随订单保存可断点续办）；真实退改只能在原下单平台办理且涉及资金退回，Agent 不代办最终提交——经用户批准后用 agent_browser 打开原平台订单页导航到退改签入口，页面上的「提交」必须由用户本人点击。费用与时效以平台规则为准，须如实转告",
         "   - 报价来源现状：本地价格库（保底，估算价如实标注）；飞猪 FlyAI CLI（酒店/机票实时 api 价，装 flyai CLI 即自动出价：npm i -g @fly-ai/flyai-cli，报价选项自带 extra.bookingUrl 飞猪预订链接，可直接作 cashierUrl，无需再代走浏览器）；浏览器代查·携程机票（Playwright 可用时出 scraped 价）",
-        "   - 安全护栏与 ride_hailing 相同（单笔/单日限额 + 两阶段确认 + 审计 + 承诺板跟踪）；Agent 不代付、不持有支付凭证",
+        "   - 安全护栏与 ride_hailing 相同（单笔/单日限额 + 两阶段确认 + 审计）；Agent 不代付、不持有支付凭证",
         "   - 【诚实边界】必须向用户如实转述价格来源与「以平台实价为准」；估算价（estimated）不得当作实价汇报，缺实时报价时先引导用户确认基准价或说明是估算",
         "   - 与 ride_hailing.*（市内打车）的区别：本工具为城际交通票务与酒店住宿的报价比价与预订；行程规划（travel.plan-itinerary / travel.search-poi）只出候选不下单——规划结果里的订酒店/机票一律由本工具承接（travel_booking.search 飞猪实时比价 → travel_booking.book 两阶段下单）",
       ],

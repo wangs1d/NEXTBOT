@@ -136,7 +136,7 @@ export interface MorningBriefing {
    * DDL 三级提醒梯度的 L3 + L1 档（2026-10-22 大学生线）：
    * today = 今天到期或已过期（置顶，比日程更紧）；soon = 2~3 天后到期（一行汇总）。
    * 由 DdlRadarService 确定性扫描；未注入 radar 或两档皆空时整块省略。
-   * L2（明天到期）走睡前备忘卡，不在晨报重复。
+   * L2（明天到期）走明日速览卡，不在晨报重复。
    */
   deadlines?: MorningBriefingDeadlines;
   agentGreeting: string;
@@ -578,7 +578,7 @@ export class MorningBriefingService {
     const travel = await this.fetchTravelToday().catch(() => null);
 
     // 第七源：DDL（确定性扫描，无 LLM）——今天截止置顶、这周还要交的只汇总一行。
-    // 大学生线三级梯度的 L3/L1 档（L2 在睡前备忘卡，不在晨报重复）。
+    // 大学生线三级梯度的 L3/L1 档（L2 在明日速览卡，不在晨报重复）。
     const deadlines = this.fetchDeadlines(sessionId);
 
     return {

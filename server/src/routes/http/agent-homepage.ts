@@ -4,12 +4,12 @@
 //
 // 数据源全部复用现有服务，不新增存储：
 //   档案/签名                    → user-preferences agentProfile（agent.update_homepage 维护）
-//   盯着（进行时）               → CommitmentBoard active 承诺
+//   盯着（进行时）               → GoalBoard track 目标（2026-10-23 承诺板下线后改挂）
 //   最近足迹（完成时）           → AgentActivityStore
 //   动态                         → SocialFeedService 里 authorSessionId == 自己的帖子
 import type { FastifyInstance } from "fastify";
 
-import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
+import type { GoalBoard } from "../../proactivity/goal-board.js";
 import type { WsConnectionRegistry } from "../../services/ws-connection-registry.js";
 import {
   AGENT_NAME_KV_KEY,
@@ -31,8 +31,8 @@ export type AgentHomepageRouteDeps = {
   agentMemorySyncService: AgentMemorySyncService;
   socialFeedService: SocialFeedService;
   agentAccountService: AgentAccountService;
-  /** 承诺板（未启用时「盯着」小节为空，端点不报错） */
-  commitmentBoard?: CommitmentBoard | null;
+  /** 目标板（「盯着」小节数据源：track 类目标；未注入时该小节为空） */
+  goalBoard?: GoalBoard | null;
   wsConnectionRegistry?: WsConnectionRegistry | null;
 };
 
@@ -40,23 +40,23 @@ function resolveActorIdFromQuery(sessionId?: string, userId?: string): string {
   return (userId ?? sessionId ?? "").trim();
 }
 
-/** 「盯着」小节：承诺板 active 承诺，带下次复核时间（deadline 升序，最多 max 条） */
-function watchingCommitments(
+/** 「盯着」小节：目标板 track 类进行中目标（创建时间倒序，最多 max 条） */
+function watchingGoals(
   deps: AgentHomepageRouteDeps,
   actorId: string,
   max: number,
-): Array<{ id: string; text: string; deadline: string | null; category: string | null }> {
-  if (!deps.commitmentBoard) return [];
+): Array<{ id: string; text: string; deadline: null; category: string | null }> {
+  if (!deps.goalBoard) return [];
   try {
-    return deps.commitmentBoard
-      .list({ actorId, status: ["active"], limit: 50 })
-      .sort((a, b) => (a.deadline ?? "9999").localeCompare(b.deadline ?? "9999"))
+    return deps.goalBoard
+      .list(actorId)
+      .filter((g) => g.kind === "track" && (g.status === "watching" || g.status === "preparing"))
       .slice(0, max)
-      .map((c) => ({
-        id: c.id,
-        text: c.text.slice(0, 120),
-        deadline: c.deadline,
-        category: c.category,
+      .map((g) => ({
+        id: g.goalId,
+        text: g.title.slice(0, 120),
+        deadline: null,
+        category: g.type ?? null,
       }));
   } catch {
     return [];
@@ -115,7 +115,7 @@ export function registerAgentHomepageRoutes(
     const watchingLimit = Math.min(Math.max(Number(q.watchingLimit ?? 3), 0), 10);
     return {
       ok: true,
-      watching: watchingCommitments(deps, actorId, watchingLimit),
+      watching: watchingGoals(deps, actorId, watchingLimit),
       recent: recentActivities(deps, actorId, 5),
     };
   });

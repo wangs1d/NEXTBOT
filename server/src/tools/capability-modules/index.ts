@@ -152,7 +152,6 @@ import type { GoalPlanner } from "../../proactivity/goal-planner.js";
 import type { GoalRunner } from "../../proactivity/goal-runner.js";
 import type { AuditTrailService } from "../../proactivity/audit-timeline.js";
 import type { InterestWatcher } from "../../proactivity/interest-watcher.js";
-import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
 
 /**
  * 能力模块描述符：把一个能力域的所有挂载点打包成单一对象，
@@ -237,8 +236,6 @@ export interface CapabilityModuleDeps {
   auditTrailService?: AuditTrailService | null;
   /** 兴趣池（memory.forget 联动清除）：晚绑定 */
   interestWatcher?: InterestWatcher | null;
-  /** 承诺板（memory.forget 联动清除）：晚绑定 */
-  commitmentBoard?: CommitmentBoard | null;
   /** 目标板（memory.forget 清理 plan/track 目标）：晚绑定 */
   goalBoard?: import("../../proactivity/goal-board.js").GoalBoard | null;
 }

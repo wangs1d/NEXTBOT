@@ -2,7 +2,7 @@
  * memory.forget / activity.timeline 行为测试（2026-09-24）。
  *
  * 契约：
- *   - forget 按关键词联动清除：兴趣池 / 降价监控 / 承诺 / 计划目标，逐项如实计数
+ *   - forget 按关键词联动清除：兴趣池 / 降价监控 / 计划目标，逐项如实计数
  *   - 长期记忆未启用 → skipped 如实说明（不假装删除）
  *   - scope 收窄生效（scope=interest 只清兴趣）
  *   - timeline：聚合真实台账返回 + 空态零编造
@@ -60,24 +60,15 @@ async function makeDeps() {
   planner.createPlan({ actorId: "u1", title: "戴森吹风机比价采购", steps: ["查价格"] });
   planner.createPlan({ actorId: "u1", title: "无关计划", steps: ["做别的"] });
 
-  const commitmentBoard = {
-    list: (_q: unknown) => [
-      { id: "c1", text: "用户承诺买戴森吹风机", status: "active" },
-      { id: "c2", text: "用户承诺周五交报告", status: "active" },
-    ],
-    markSuperseded: (id: string, _by: string, _reason: string) => ({ id, status: "superseded" }),
-  };
-
-  return { watcher, compare, board, planner, commitmentBoard };
+  return { watcher, compare, board, planner };
 }
 
-test("forget auto：五处台账联动清除并如实计数", async (t) => {
-  const { watcher, compare, board, planner, commitmentBoard } = await makeDeps();
+test("forget auto：多处台账联动清除并如实计数", async (t) => {
+  const { watcher, compare, board, planner } = await makeDeps();
   const handler = createForgetHandler({
     interestWatcher: watcher,
     shoppingCompareService: compare,
     goalBoard: board,
-    commitmentBoard: commitmentBoard as never,
   });
   const r = (await handler({ target: "戴森吹风机" }, CTX)) as {
     ok: boolean;
@@ -87,7 +78,6 @@ test("forget auto：五处台账联动清除并如实计数", async (t) => {
   assert.equal(r.ok, true);
   assert.equal(r.cleared.interests, 1);
   assert.equal(r.cleared.watches, 1);
-  assert.equal(r.cleared.commitments, 1);
   assert.equal(r.cleared.goals, 1);
   assert.equal(r.cleared.memories, 0);
   assert.ok(r.skipped.some((s) => s.startsWith("memory(")), "mem0 未启用 → skipped 如实说明");
@@ -102,12 +92,11 @@ test("forget auto：五处台账联动清除并如实计数", async (t) => {
 });
 
 test("forget scope=interest：只清兴趣，监控与计划不动", async (t) => {
-  const { watcher, compare, board, planner, commitmentBoard } = await makeDeps();
+  const { watcher, compare, board, planner } = await makeDeps();
   const handler = createForgetHandler({
     interestWatcher: watcher,
     shoppingCompareService: compare,
     goalBoard: board,
-    commitmentBoard: commitmentBoard as never,
   });
   const r = (await handler({ target: "戴森吹风机", scope: "interest" }, CTX)) as {
     cleared: Record<string, number>;

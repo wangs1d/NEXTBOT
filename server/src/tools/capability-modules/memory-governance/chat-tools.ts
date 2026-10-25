@@ -27,10 +27,10 @@ export const MEMORY_GOVERNANCE_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           scope: {
             type: "string",
-            enum: ["auto", "interest", "watch", "commitment", "plan", "memory"],
+            enum: ["auto", "interest", "watch", "plan", "memory"],
             description:
               "清理范围：auto=全部台账联动（默认）；" +
-              "interest=仅兴趣关注；watch=仅降价监控；commitment=仅承诺；plan=仅计划/盯梢目标；memory=仅长期记忆",
+              "interest=仅兴趣关注；watch=仅降价监控；plan=仅计划/盯梢目标；memory=仅长期记忆",
           },
           reason: { type: "string", description: "可选：用户给的原因（记录用）" },
         },

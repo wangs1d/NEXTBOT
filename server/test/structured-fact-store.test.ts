@@ -426,62 +426,10 @@ test("persistUnifiedExtraction: forget 字段遗忘经钩子携带（钩子走�
   assert.deepEqual(hookForget, ["居住地"]);
 });
 
-test("ingestText 低信号 orphan 路径：extractUnified 的 facts 进钩子", { timeout: 30_000 }, async () => {
-  const savedScope = process.env.AGENT_COMMITMENT_EXTRACT_SCOPE;
-  delete process.env.AGENT_COMMITMENT_EXTRACT_SCOPE; // 缺省 all
-  const dir = await mkdtemp(join(tmpdir(), "facts-orphan-"));
-  try {
-    const fakeMemory = {
-      async add() {
-        throw new Error("低信号 orphan 路径不应直写 Mem0");
-      },
-    } as unknown as Memory;
-    const ingest = new AgenticMemoryIngestService(fakeMemory);
-    ingest.setLowSignalSink(() => {}); // 统一写入者接管：主链路不落库
-
-    let hookFacts: Array<{ field: string; value: string }> | undefined = undefined;
-    ingest.addWriteHook((event) => {
-      hookFacts = event.facts;
-    });
-    ingest.setExtractionClient({
-      chat: {
-        completions: {
-          async create() {
-            return {
-              choices: [
-                {
-                  message: {
-                    content: JSON.stringify({
-                      decision: "decay",
-                      memories: [],
-                      commitments: [],
-                      corrections: [],
-                      understandings: [],
-                      facts: [{ field: "居住地", value: "深圳", confidence: 0.9 }],
-                    }),
-                  },
-                },
-              ],
-            };
-          },
-        },
-      },
-    });
-
-    await ingest.ingestText("user-1", "chat:turn-3", "对了，我现在住在深圳了");
-    // fire-and-forget：轮询等待 orphan 抽取完成
-    for (let i = 0; i < 50 && !hookFacts; i++) {
-      await new Promise((r) => setTimeout(r, 20));
-    }
-    assert.ok(hookFacts);
-    assert.equal(hookFacts![0]!.field, "居住地");
-    assert.equal(hookFacts![0]!.value, "深圳");
-  } finally {
-    if (savedScope === undefined) delete process.env.AGENT_COMMITMENT_EXTRACT_SCOPE;
-    else process.env.AGENT_COMMITMENT_EXTRACT_SCOPE = savedScope;
-    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
-  }
-});
+// 低信号轮的捎带抽取已收进 PROFILE_WRITE_SCHEDULING=legacy 这一条回滚档
+// （batch 默认档由统一写入者/夜间批覆盖，不再在压缩残片上二次抽取），本文件
+// 跑在默认 batch 档，"orphan 路径 facts 进钩子" 不再成立；legacy 档的行为由
+// test/memory-unified-profile-merge.test.ts 显式设 PROFILE_WRITE_SCHEDULING=legacy 守住。
 
 // ============================================================
 // 5. 端到端闭环：抽取 facts → 钩子落库 → 换值覆盖旧档

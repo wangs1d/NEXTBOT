@@ -10,6 +10,7 @@ import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "../port-in-use.mjs";
+import { warnPortOwner } from "../server-instance.mjs";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..");
 const isWin = process.platform === "win32";
@@ -184,6 +185,8 @@ async function main() {
     return;
   }
   if (await isTcpPortInUse(SERVER_PORT)) {
+    // 占用者身份可见化：异数据根的双实例正是「删了行程却没变」的成因（2026-10-24）
+    warnPortOwner(SERVER_PORT);
     log(`端口 ${SERVER_PORT} 已被占用，服务疑似已在运行，本实例退出`);
     return;
   }
@@ -195,6 +198,7 @@ async function main() {
   let consecutiveFailures = 0;
   while (!shuttingDown) {
     if (await isTcpPortInUse(SERVER_PORT)) {
+      warnPortOwner(SERVER_PORT);
       log(`端口 ${SERVER_PORT} 已被占用，视为服务已在运行，启动器退出`);
       break;
     }

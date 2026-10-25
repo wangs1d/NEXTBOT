@@ -3,6 +3,7 @@
 #include <windowsx.h>
 #include <io.h>
 
+#include <dwmapi.h>
 #include <gdiplus.h>
 #include <mmsystem.h>
 #include <shellapi.h>
@@ -23,6 +24,7 @@
 #define USER_DEFAULT_SCREEN_DPI 96
 #endif
 
+#pragma comment(lib, "dwmapi.lib")
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "winmm.lib")
 
@@ -42,13 +44,60 @@ void IslandLifecycleLog(HWND hwnd, const wchar_t* event) {
   }
 }
 
+// ── 「谁压在岛这块像素上面」的候选窗口筛选 ──
+// 壁纸层（Progman/WorkerW）与任务栏永远铺满屏幕，但它们不是「应用占着
+// 全屏」，不剔掉的话光站在桌面上岛就会让位。
+bool IsShellLayerWindow(HWND hwnd) {
+  wchar_t cls[64] = {};
+  if (GetClassNameW(hwnd, cls, _countof(cls)) <= 0) return false;
+  return _wcsicmp(cls, L"Progman") == 0 || _wcsicmp(cls, L"WorkerW") == 0 ||
+         _wcsicmp(cls, L"SHELLDLL_DefView") == 0 ||
+         _wcsicmp(cls, L"Shell_TrayWnd") == 0 ||
+         _wcsicmp(cls, L"Shell_SecondaryTrayWnd") == 0 ||
+         _wcsicmp(cls, L"NotifyIconOverflowWindow") == 0;
+}
+
+// DWM 隐身：最小化的 UWP、被切到别的虚拟桌面的窗口，IsWindowVisible 依旧
+// 返回真——不靠 cloak 标志识破，一个切走的满屏 UWP 就能把岛永久按住。
+bool IsDwmCloaked(HWND hwnd) {
+  int cloaked = 0;
+  if (FAILED(DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, &cloaked,
+                                   sizeof(cloaked))))
+    return false;
+  return cloaked != 0;
+}
+
+// 参与「盖岛」竞争的顶层窗口。过滤按代价从低到高排，DWM 查询放最后。
+bool IsCoverCandidate(HWND hwnd, HWND island, const RECT& rc) {
+  if (hwnd == nullptr || hwnd == island) return false;
+  if (!IsWindowVisible(hwnd)) return false;
+  // 工具窗（岛自己那类悬浮层）与点击穿透层都不算「占住这块地方」：
+  // 待机光球（Qt Tool + click-through）、webview 幽灵窗全在这条被挡掉。
+  const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  if (ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) return false;
+  if (rc.right - rc.left <= 1 || rc.bottom - rc.top <= 1) return false;
+  if (IsShellLayerWindow(hwnd)) return false;
+  return !IsDwmCloaked(hwnd);
+}
+
 // ── 录屏豁免全屏抑制 ──
 // 拍摄灵动岛（录屏演示）是核心场景：录制期间即使系统上报 QUNS_BUSY
 // 也让岛保持显示；非录制态的全屏视频/游戏/演示模式照旧让位。
-// 名单按 exe 名匹配（大小写不敏感）。注意 ffmpeg.exe 绝不能入列——
-// 服务端代码沙箱会拉起 ffmpeg，会把「全屏视频 + 后台跑任务」误判成录制。
-constexpr const wchar_t* kRecorderProcessNames[] = {
+// 注意 ffmpeg.exe 绝不能入列——服务端代码沙箱会拉起 ffmpeg，会把
+// 「全屏视频 + 后台跑任务」误判成录制。
+//
+// 2026-10-24 收紧豁免条件：名单类应用（OBS/剪映/ShareX…）常驻托盘或
+// 关窗后残留后台进程，「进程在跑」≠「在录屏」——剪映残留 10 个后台
+// 进程就把全屏抑制永久关掉（本机实证）。除 gamebarftserver.exe（无
+// 窗口、只在 Game Bar 录制会话期间存在，保留纯存在判定）外，改为
+// 「该进程存在可见、未最小化的顶层窗口」才豁免。代价：录制时把 OBS
+// 最小化到托盘则不豁免，录制期间保持窗口打开即可。
+constexpr const wchar_t* kRecorderBareProcessNames[] = {
     L"gamebarftserver.exe",  // Xbox Game Bar 录制服务（Win+Alt+R）
+};
+
+// 需「存在可见顶层窗口」才豁免的名单（大小写不敏感）。
+constexpr const wchar_t* kRecorderWindowedProcessNames[] = {
     L"obs64.exe",
     L"obs32.exe",
     L"snippingtool.exe",  // Win11 剪切工具录屏
@@ -64,7 +113,48 @@ constexpr const wchar_t* kRecorderProcessNames[] = {
                          // 全屏遮罩会盖住岛触发让位，入列豁免）
 };
 
-bool IsScreenRecordingActive() {
+template <size_t N>
+bool ExeNameInList(const wchar_t* exe, const wchar_t* const (&names)[N]) {
+  for (size_t i = 0; i < N; ++i) {
+    if (_wcsicmp(exe, names[i]) == 0) return true;
+  }
+  return false;
+}
+
+// |pid| 是否拥有「真在用」的顶层窗口：可见、未最小化、非工具/穿透窗、
+// 未被 DWM cloak、有实际面积——托盘常驻与关窗残留的后台进程全在此挡掉。
+struct RecorderWindowProbe {
+  DWORD pid = 0;
+  bool found = false;
+};
+
+BOOL CALLBACK RecorderWindowEnumProc(HWND hwnd, LPARAM lparam) {
+  auto* probe = reinterpret_cast<RecorderWindowProbe*>(lparam);
+  DWORD pid = 0;
+  GetWindowThreadProcessId(hwnd, &pid);
+  if (pid != probe->pid) return TRUE;
+  if (!IsWindowVisible(hwnd) || IsIconic(hwnd)) return TRUE;
+  const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+  if (ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) return TRUE;
+  RECT rc = {};
+  if (!GetWindowRect(hwnd, &rc) || rc.right - rc.left <= 1 ||
+      rc.bottom - rc.top <= 1) {
+    return TRUE;
+  }
+  if (IsDwmCloaked(hwnd)) return TRUE;
+  probe->found = true;
+  return FALSE;  // 命中即停
+}
+
+bool ProcessHasVisibleTopLevelWindow(DWORD pid) {
+  RecorderWindowProbe probe{pid, false};
+  EnumWindows(RecorderWindowEnumProc, reinterpret_cast<LPARAM>(&probe));
+  return probe.found;
+}
+
+// |matched_exe| 非空时回填命中的进程名——豁免误命中会把全屏抑制永久关掉，
+// 日志必须能直接指认是谁（2026-10-25 取证）。
+bool IsScreenRecordingActive(std::wstring* matched_exe) {
   HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
   if (snapshot == INVALID_HANDLE_VALUE) return false;
   PROCESSENTRY32W entry{};
@@ -72,11 +162,15 @@ bool IsScreenRecordingActive() {
   bool found = false;
   if (Process32FirstW(snapshot, &entry)) {
     do {
-      for (const wchar_t* name : kRecorderProcessNames) {
-        if (_wcsicmp(entry.szExeFile, name) == 0) {
-          found = true;
-          break;
-        }
+      const bool bare =
+          ExeNameInList(entry.szExeFile, kRecorderBareProcessNames);
+      const bool windowed =
+          ExeNameInList(entry.szExeFile, kRecorderWindowedProcessNames);
+      if (!bare && !windowed) continue;
+      if (bare || ProcessHasVisibleTopLevelWindow(entry.th32ProcessID)) {
+        found = true;
+        if (matched_exe != nullptr) *matched_exe = entry.szExeFile;
+        break;
       }
     } while (!found && Process32NextW(snapshot, &entry));
   }
@@ -295,13 +389,13 @@ bool DynamicIslandWindow::Create() {
   IslandLifecycleLog(window_handle_, L"created");
   const UINT dpi = GetDpiForWindow(window_handle_);
   if (dpi != 0) dpi_scale_ = static_cast<double>(dpi) / USER_DEFAULT_SCREEN_DPI;
-  PositionAtTopCenter();
-  Render();
   // Create 即落屏（PositionAtTopCenter 带 SWP_SHOWWINDOW），标志必须对齐
   // 真实状态——否则全屏抑制的恢复分支被 visible_=false 卡死：忙碌结束后
-  // 岛再也不出现（2026-09-28「灵动岛自己消失」终局根因，黑匣子实证：
-  // 创建后第 2 秒 suppress-tick busy=0 suppressed=0 visible=0）。
+  // 岛再也不出现（2026-09-28「灵动岛自己消失」终局根因）。
+  // 先置位再定位：定位是否附带 SWP_SHOWWINDOW 以 visible_/抑制态为前提。
   visible_ = true;
+  PositionAtTopCenter();
+  Render();
   // 动画心跳随即启动：待机呼吸灯依赖它。
   // （真实数据版待机不再有 present/Show 调用，若不在此启动则呼吸冻结。）
   StartAnimTimer();
@@ -310,6 +404,9 @@ bool DynamicIslandWindow::Create() {
   SetTimer(window_handle_, kSuppressTimerId, 2000, nullptr);
   // 顶边唤出探针（kPeekTimerId）：抑制期间鼠标贴屏幕顶边临时唤回岛。
   SetTimer(window_handle_, kPeekTimerId, 200, nullptr);
+  // 创建/重建瞬间就可能已经处在全屏应用里（游戏内自愈重建、开机自启）：
+  // 立即复核一次，别让岛在游戏画面上挂到下一跳。
+  UpdateFullscreenSuppression();
   return true;
 }
 
@@ -328,8 +425,15 @@ void DynamicIslandWindow::PositionAtTopCenter() {
   const int h = S(kWindowH);
   const int x = wa.left + ((wa.right - wa.left) - w) / 2;
   const int y = wa.top;
-  SetWindowPos(window_handle_, HWND_TOPMOST, x, y, w, h,
-               SWP_NOACTIVATE | SWP_SHOWWINDOW);
+  UINT flags = SWP_NOACTIVATE;
+  // 抑制期间（或 Dart 已把岛藏起时）绝不借定位露头：显示模式切换 / DPI 变化
+  // 都会走到这里，SWP_SHOWWINDOW 曾把已让位的岛重新弹到全屏游戏画面之上，
+  // 而抑制标志没变、下一跳直接早退，岛就再也收不回去（2026-10-25 根因）。
+  // peek 唤出是唯一例外（用户主动贴顶边要岛）。
+  if (peek_active_ || (visible_ && !suppressed_by_fullscreen_)) {
+    flags |= SWP_SHOWWINDOW;
+  }
+  SetWindowPos(window_handle_, HWND_TOPMOST, x, y, w, h, flags);
 }
 
 void DynamicIslandWindow::Show() {
@@ -572,6 +676,7 @@ void DynamicIslandWindow::SetDpiScale(double scale) {
   if (window_handle_ != nullptr) {
     PositionAtTopCenter();
     Render();
+    UpdateFullscreenSuppression();
   }
 }
 
@@ -612,62 +717,116 @@ void DynamicIslandWindow::CheckSuppression() {
   UpdateFullscreenSuppression();
 }
 
-// suppress-on 取证：记录触发让位时刻的前台窗口进程 exe 名（仅抑制转向瞬间
-// 打一条，零稳态开销）。录屏豁免名单再遇漏网工具时，日志直接给出增补依据。
-void LogSuppressOnForeground() {
-  wchar_t exe[MAX_PATH] = L"?";
-  const HWND fg = GetForegroundWindow();
+// 取 |hwnd| 所属进程的 exe 全路径（失败回 "?"），仅供取证日志。
+void ExeNameOfWindow(HWND hwnd, wchar_t* buf, size_t cch) {
+  buf[0] = L'?';
+  buf[1] = L'\0';
   DWORD pid = 0;
-  if (fg != nullptr && GetWindowThreadProcessId(fg, &pid) && pid != 0) {
-    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-    if (h != nullptr) {
-      DWORD size = MAX_PATH;
-      if (!QueryFullProcessImageNameW(h, 0, exe, &size)) exe[0] = L'?';
-      CloseHandle(h);
-    }
-  }
-  wchar_t line[MAX_PATH + 48];
-  _snwprintf_s(line, _countof(line), _TRUNCATE, L"suppress-on fg=%ls", exe);
+  if (hwnd == nullptr || !IsWindow(hwnd) ||
+      GetWindowThreadProcessId(hwnd, &pid) == 0 || pid == 0)
+    return;
+  HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+  if (h == nullptr) return;
+  DWORD size = static_cast<DWORD>(cch);
+  if (QueryFullProcessImageNameW(h, 0, buf, &size) == FALSE) buf[0] = L'?';
+  CloseHandle(h);
+}
+
+// suppress-on 取证：记录触发让位时刻「压在岛上面的窗口」与前台窗口的进程
+// exe 名（仅抑制转向瞬间打一条，零稳态开销）。cov=? 表示这次让位不是窗口
+// 几何触发的（D3D 全屏 / 放映模式 / QUNS 忙碌）。录屏豁免名单再遇漏网工具
+// 时，日志直接给出增补依据。
+void LogSuppressSource(HWND covering, bool fg_fullscreen, int quns_state) {
+  wchar_t cov[MAX_PATH] = L"?";
+  wchar_t fg[MAX_PATH] = L"?";
+  ExeNameOfWindow(covering, cov, MAX_PATH);
+  ExeNameOfWindow(GetForegroundWindow(), fg, MAX_PATH);
+  wchar_t line[MAX_PATH * 2 + 64];
+  _snwprintf_s(line, _countof(line), _TRUNCATE,
+               L"suppress-on cov=%ls fg=%ls fill=%d quns=%d", cov, fg,
+               fg_fullscreen ? 1 : 0, quns_state);
   IslandLifecycleLog(nullptr, line);
 }
 
 // 由 kSuppressTimerId 常开心跳驱动（与动画心跳无关，窗口存活期间一直跑）。
 // 注意：窗口定时器随窗口同死——窗口被销毁后本心跳也随之消失，
 // 「窗口失活后的重建」由 Dart 侧看门狗（周期 ping）负责，不在这里。
-// 录屏进程在跑时豁免三种忙碌态（IsScreenRecordingActive，见文件头说明），
-// 忙碌判定本身不变：录制一停，全屏/忙碌仍照常抑制。
+// 录屏豁免命中时（IsScreenRecordingActive，规则见上文「录屏豁免」段）
+// 豁免三种忙碌态，忙碌判定本身不变：录制一停，全屏/忙碌仍照常抑制。
 // 提醒豁免（2026-10-05 拍板，2026-10-13 收紧）：仅 urgent attention 进行中
 // 即使全屏也上屏——「现在不看会错过」的唯一强打断态（外卖等高优消息、
 // 日程到点）；非紧急档在抑制中由 StartAttention 整体跳过。urgent attention
 // 播完/点击收口后由各结束点回推一次本函数立即让位，心跳 2s 兜底。
-void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATION_STATE state;
-  if (FAILED(SHQueryUserNotificationState(&state))) return;
-  const bool recording = IsScreenRecordingActive();
+void DynamicIslandWindow::UpdateFullscreenSuppression() {
+  // QUNS 只是三条独立证据之一，查询失败（独占全屏 / DWM 合成关闭时 shell
+  // 偶尔给不出状态）绝不能连几何判定一起丢——旧代码直接 return，那一刻
+  // 起岛就再没人管了。
+  QUERY_USER_NOTIFICATION_STATE state = QUNS_ACCEPTS_NOTIFICATIONS;
+  const bool state_ok = SUCCEEDED(SHQueryUserNotificationState(&state));
+  std::wstring recorder;
+  const bool recording = IsScreenRecordingActive(&recorder);
+  // 录屏豁免命中/解除各打一条：豁免误命中会把全屏抑制永久关掉，日志要能
+  // 直接指认是哪个进程（2026-10-25 取证）。
+  static bool rec_prev = false;
+  if (recording != rec_prev) {
+    rec_prev = recording;
+    if (recording) {
+      wchar_t rec_line[96];
+      _snwprintf_s(rec_line, _countof(rec_line), _TRUNCATE,
+                   L"rec-on exe=%ls", recorder.c_str());
+      IslandLifecycleLog(nullptr, rec_line);
+    } else {
+      IslandLifecycleLog(nullptr, L"rec-off");
+    }
+  }
   // 提醒豁免收紧（2026-10-13 定调）：只有 urgent attention（外卖等高优
   // 消息、日程到点）可豁免全屏抑制；非紧急档由 StartAttention 在抑制中
   // 整体跳过，不破屏。
   const bool attention_active = attention_start_s_ >= 0 && attention_urgent_;
-  // 最大化前台窗口与全屏同权：盖住岛就让位（2026-10-09 拍板，
-  // 自家主窗口一视同仁）——否则待机光球悬浮遮挡应用顶部内容。
-  const bool covered = IsForegroundCoveringIsland();
+  // 压在岛上面的窗口与全屏同权：盖住岛就让位（2026-10-09 拍板最大化让位，
+  // 自家主窗口一视同仁；2026-10-23 根修：判定对象换成 Z 序命中岛形的那个
+  // 窗口，不再盯前台）——否则待机光球悬浮遮挡应用顶部内容。
+  const HWND covering = CoveringFullscreenWindow();
+  const bool covered = covering != nullptr;
+  // 前台全屏是独立第二条证据：全屏窗之上再挂小浮层时 Z 序探测可能被挡，
+  // 但前台仍是那个全屏应用（独占全屏游戏最典型）。
+  const bool fg_fullscreen = IsForegroundFullscreenApp();
+  const bool quns_busy =
+      state_ok && (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
+                   state == QUNS_PRESENTATION_MODE || state == QUNS_BUSY);
   const bool busy = !recording && !attention_active &&
-                    (covered || state == QUNS_RUNNING_D3D_FULL_SCREEN ||
-                     state == QUNS_PRESENTATION_MODE ||
-                     state == QUNS_BUSY);
+                    (covered || fg_fullscreen || quns_busy);
   // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
   static int tick_count = 0;
   const bool heartbeat = (++tick_count % 75) == 1;
   if (heartbeat) {
-    wchar_t hb[160];
-    _snwprintf_s(hb, _countof(hb), _TRUNCATE,
-                 L"suppress-tick busy=%d rec=%d cov=%d suppressed=%d visible=%d",
-                 busy ? 1 : 0, recording ? 1 : 0, covered ? 1 : 0,
-                 suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0);
+    wchar_t hb[200];
+    _snwprintf_s(
+        hb, _countof(hb), _TRUNCATE,
+        L"suppress-tick busy=%d rec=%d cov=%d fill=%d quns=%d suppressed=%d "
+        L"visible=%d winvis=%d",
+        busy ? 1 : 0, recording ? 1 : 0, covered ? 1 : 0,
+        fg_fullscreen ? 1 : 0, quns_busy ? 1 : 0,
+        suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0,
+        (window_handle_ != nullptr && IsWindowVisible(window_handle_)) ? 1 : 0);
     IslandLifecycleLog(window_handle_, hb);
   }
-  if (busy == suppressed_by_fullscreen_) return;
+  if (busy == suppressed_by_fullscreen_) {
+    // 标志没变不代表窗口没被露出来：定位（显示模式/DPI 切换）、重建、
+    // 外部 ShowWindow 都可能在抑制期间把岛重新弹回全屏画面之上，而旧代码
+    // 到这里直接早退，永远收不回去（2026-10-25 独占全屏游戏根因）。
+    // 每跳强制兜底隐藏；peek 是用户主动唤出，免收。
+    if (busy && window_handle_ != nullptr && !peek_active_) {
+      if (IsWindowVisible(window_handle_)) {
+        IslandLifecycleLog(window_handle_, L"suppress-enforce-hide");
+        ShowWindow(window_handle_, SW_HIDE);
+      }
+      StopAnimTimer();
+    }
+    return;
+  }
   if (busy) {
-    LogSuppressOnForeground();
+    LogSuppressSource(covering, fg_fullscreen, state_ok ? state : 0);
   } else {
     IslandLifecycleLog(window_handle_, L"suppress-off");
   }
@@ -685,31 +844,43 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {  QUERY_USER_NOTIFICATI
   }
 }
 
-// 前台窗口「盖住岛」判定（2026-10-14 根修），两条独立路径：
-//   1) 最大化（IsZoomed）且覆盖岛窗口中心点——常规最大化应用（原路保留）；
-//   2) 无边框全屏：前台窗口铺满岛所在整台显示器（含任务栏区，±8px 容差）
-//      ——浏览器 F11 / 无边框全屏游戏既不是 IsZoomed，shell 的 QUNS_BUSY
-//      启发式对这类窗口也时灵时不灵（此前「网页/游戏全屏岛照显」的根因）。
-// 均排除工具窗（含岛自身，虽然 NOACTIVATE 一般当不上前台）。路径 2 按岛
-// 所在显示器取界，多显示器下副屏的全屏窗口不盖岛屏就不触发。
-// 判定失败一律返回 false（宁可多显示，不可误隐藏）。
-bool DynamicIslandWindow::IsForegroundCoveringIsland() const {
-  if (window_handle_ == nullptr) return false;
-  const HWND fg = GetForegroundWindow();
-  if (fg == nullptr || fg == window_handle_) return false;
-  if (!IsWindowVisible(fg)) return false;
-  const LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
-  if (ex & WS_EX_TOOLWINDOW) return false;
-  RECT fr = {};
-  if (!GetWindowRect(fg, &fr)) return false;
-  // 路径 1：最大化且盖住岛中心点。
-  if (IsZoomed(fg)) {
-    RECT ir = {};
-    if (!GetWindowRect(window_handle_, &ir)) return false;
-    const POINT center = {(ir.left + ir.right) / 2, (ir.top + ir.bottom) / 2};
-    if (PtInRect(&fr, center) != FALSE) return true;
+// Z 序自顶向下走顶层窗口，返回第一个「盖住岛形中心且呈全屏形态」的真实
+// 应用窗口。
+// 2026-10-23 根修的核心：旧判定拿 GetForegroundWindow() 当「岛上面是谁」，
+// 底部一个 F11 全屏页 + 上面再开一个非全屏小应用，前台一换人判定就翻 false，
+// 岛在全屏体验里复活。按 Z 序命中就不受前台归属影响：岛这块像素下面还是全屏
+// 页 → 继续让位；用户把普通窗口挪到岛上面 → 才恢复显示。
+// 走 GetWindow 链（桌面窗口的 GW_CHILD 是 Z 序最顶，GW_HWNDNEXT 依次向下，
+// 这是唯一有 Z 序保证的走法；EnumWindows 的顺序不作保证）。
+// 探测点取岛形中心：全屏页之上叠一个只盖住岛一侧的小窗时，中心仍落在全屏页
+// 上，判定保持让位——与用户诉求同向（宁可少弹，不可打断全屏）。
+// 判定失败一律返回 nullptr（宁可多显示，不可误隐藏）。
+HWND DynamicIslandWindow::CoveringFullscreenWindow() const {
+  if (window_handle_ == nullptr) return nullptr;
+  const RECT island = IslandScreenRect();
+  if (island.right <= island.left || island.bottom <= island.top) return nullptr;
+  const POINT probe = {(island.left + island.right) / 2,
+                       (island.top + island.bottom) / 2};
+  for (HWND w = GetWindow(GetDesktopWindow(), GW_CHILD); w != nullptr;
+       w = GetWindow(w, GW_HWNDNEXT)) {
+    RECT rc = {};
+    if (!GetWindowRect(w, &rc)) continue;
+    if (!IsCoverCandidate(w, window_handle_, rc)) continue;
+    if (PtInRect(&rc, probe) == FALSE) continue;
+    // 2026-10-25：不再「命中第一个窗口就收手」。游戏/播放器常在全屏窗之上
+    // 再挂一个很小的顶层浮层（提示条、输入窗、叠加控件），旧逻辑命中浮层后
+    // 判它不是全屏就翻 false，岛在全屏里复活。继续往下走，任一层盖住岛心
+    // 且呈全屏形态就让位。
+    if (IsZoomed(w) || WindowFillsIslandMonitor(w)) return w;
   }
-  // 路径 2：无边框全屏——铺满岛所在显示器（含任务栏区域）。
+  return nullptr;
+}
+
+// |hwnd| 是否铺满岛所在显示器（含任务栏区）。多显示器下按岛所在那块取界：
+// 副屏的全屏窗口不盖岛屏就不触发。
+bool DynamicIslandWindow::WindowFillsIslandMonitor(HWND hwnd) const {
+  RECT fr = {};
+  if (!GetWindowRect(hwnd, &fr)) return false;
   const HMONITOR mon =
       MonitorFromWindow(window_handle_, MONITOR_DEFAULTTONEAREST);
   MONITORINFO mi = {};
@@ -720,6 +891,41 @@ bool DynamicIslandWindow::IsForegroundCoveringIsland() const {
          fr.top <= mi.rcMonitor.top + kSlack &&
          fr.right >= mi.rcMonitor.right - kSlack &&
          fr.bottom >= mi.rcMonitor.bottom - kSlack;
+}
+
+// 岛这块像素是否被「全屏形态」的应用占着（2026-10-14 两条路径原样保留，
+// 只是判定对象从「前台窗口」换成「Z 序里盖住岛心且全屏形态的窗口」）：
+//   1) 最大化（IsZoomed）——命中岛形中心即视为盖岛；
+//   2) 无边框全屏——铺满岛所在显示器（浏览器 F11 / 无边框游戏既非 IsZoomed，
+//      shell 的 QUNS_BUSY 启发式对这类窗口也时灵时不灵）。
+bool DynamicIslandWindow::IsIslandCoveredByApp() const {
+  return CoveringFullscreenWindow() != nullptr;
+}
+
+// 前台窗口自身的全屏判定（与 Z 序探测互相独立）：独占全屏游戏/播放器之上
+// 常挂着自家小浮层，Z 序探测有可能被挡在前面；而「谁在前台」是系统给的
+// 确定答案，全屏应用在前台时岛必然被盖住。最大化按老规则只认盖住岛心的
+// （多显示器下副屏的最大化窗口不误伤）。
+bool DynamicIslandWindow::IsForegroundFullscreenApp() const {
+  const HWND fg = GetForegroundWindow();
+  if (fg == nullptr || fg == window_handle_ || !IsWindowVisible(fg)) {
+    return false;
+  }
+  const LONG_PTR ex = GetWindowLongPtrW(fg, GWL_EXSTYLE);
+  if (ex & (WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT)) return false;
+  if (IsShellLayerWindow(fg) || IsDwmCloaked(fg)) return false;
+  if (IsZoomed(fg)) {
+    const RECT island = IslandScreenRect();
+    if (island.right <= island.left || island.bottom <= island.top) {
+      return false;
+    }
+    RECT fr = {};
+    if (!GetWindowRect(fg, &fr)) return false;
+    const POINT probe = {(island.left + island.right) / 2,
+                         (island.top + island.bottom) / 2};
+    return PtInRect(&fr, probe) != FALSE;
+  }
+  return WindowFillsIslandMonitor(fg);
 }
 
 // 顶边唤出探针（kPeekTimerId 200ms，窗口存活期间常开）：
@@ -1546,12 +1752,16 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         dpi_scale_ = static_cast<double>(dpi) / USER_DEFAULT_SCREEN_DPI;
         PositionAtTopCenter();
         Render();
+        UpdateFullscreenSuppression();
       }
       return 0;
     }
     case WM_DISPLAYCHANGE:
+      // 显示模式切换（独占全屏游戏进出、改分辨率/刷新率）后立即复核抑制：
+      // 定位本身已不会再硬露头，这里再兜一层，保证切换瞬间的岛状态正确。
       PositionAtTopCenter();
       Render();
+      UpdateFullscreenSuppression();
       return 0;
     case WM_CLOSE:
       // HUD 不响应关闭请求：外部 WM_CLOSE 走 DefWindowProc 会直接销毁岛，

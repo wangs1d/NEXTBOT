@@ -4,9 +4,15 @@
 import { execSync, spawn } from "node:child_process";
 import { config } from "dotenv";
 import { dirname, join } from "node:path";
-import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "./port-in-use.mjs";
+import {
+  isPidAlive,
+  ownDataDir,
+  readServerInstance,
+  sameDataRoot,
+  warnPortOwner,
+} from "./server-instance.mjs";
 import {
   readGatewayPort,
   spawnOpenClawGateway,
@@ -45,6 +51,7 @@ const runtimeHttpPort =
     : 3211;
 
 if (await isTcpPortInUse(isRemoteEntry ? runtimeHttpPort : port)) {
+  warnPortOwner(isRemoteEntry ? runtimeHttpPort : port);
   process.exit(0);
 }
 
@@ -60,22 +67,12 @@ if (!(await isTcpPortInUse(gatewayPort))) {
   }
 }
 
-// dev 数据目录与安装版隔离（同在系统应用数据目录下，但用 -dev 后缀）：
-// server 侧 config/data-dir 优先读 NEXTBOT_DATA_DIR，不设置则 dev 会与真实
-// 安装版共用 %APPDATA%\Nextbot\data，开发实验会直接污染真实照片/POI 库。
-function resolveDevDataDir() {
-  const home = join(homedir(), "AppData", "Roaming");
-  if (process.platform === "win32") {
-    return join(process.env.APPDATA?.trim() || home, "Nextbot-dev", "data");
-  }
-  if (process.platform === "darwin") {
-    return join(homedir(), "Library", "Application Support", "Nextbot-dev", "data");
-  }
-  return join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "Nextbot-dev", "data");
-}
-
-// runtime 与 gateway 必须同数据目录，否则 remote 拓扑下两个进程各写各的（split-brain）
-const DEV_DATA_DIR = process.env.NEXTBOT_DATA_DIR?.trim() || resolveDevDataDir();
+// 数据根不在本脚本注入（2026-10-24 双根 split-brain 修复）：此前 dev 默认注入
+// %APPDATA%\Nextbot-dev\data，而 autostart/prod 链默认 %APPDATA%\Nextbot\data，
+// 同一个 :3000 谁占着读谁的根，删除落在 A 根、列表刷新读 B 根。现在统一由
+// server/.env.local 的 NEXTBOT_DATA_DIR 决定（loadServerEnv 以 override 加载，
+// server 侧自行对齐）；本脚本顶部的 dotenv 已把它带进本进程 env，子进程随之继承。
+// 需要临时隔离实验数据时改 server/.env.local，不要在这里另注入。
 
 let child = null;
 let respawning = false;
@@ -88,7 +85,6 @@ function spawnWatchChild() {
     env: {
       ...process.env,
       ...(isRemoteEntry ? { RUNTIME_MODE: "remote" } : {}),
-      NEXTBOT_DATA_DIR: DEV_DATA_DIR,
       NODE_OPTIONS: [process.env.NODE_OPTIONS, "--max-old-space-size=512"].filter(Boolean).join(" "),
       AGENT_WORLD_PLACEHOLDER_REGISTER: "1",
       ALLOW_WORLD_HTTP_MUTATIONS: "1",
@@ -192,6 +188,25 @@ function startPortWatchdog() {
         process.exit(1);
         return;
       }
+      // 异数据根互斥（2026-10-24 双根修复）：有活着的异根服务进程在（例如它自己
+      // 的 watch 重启窗口短暂让出端口）时绝不抢滩，退出交由对方自愈；同根则维持
+      // 原有重拉自愈逻辑
+      const owner = readServerInstance();
+      if (owner && isPidAlive(owner.pid) && !sameDataRoot(owner.dataDir, ownDataDir())) {
+        console.error(
+          `[dev-server] 端口 ${targetPort} 长时间未监听，但异数据根服务进程仍存活 ` +
+            `pid=${owner.pid}（root=${owner.dataDir}）；不抢滩，退出交由其自愈`,
+        );
+        try {
+          execSync(`taskkill /PID ${child.pid} /T /F`, { stdio: "ignore", windowsHide: true });
+        } catch {
+          /* 进程可能已自行退出 */
+        }
+        stopPortWatchdog();
+        stopAll();
+        process.exit(1);
+        return;
+      }
       console.warn(
         `[dev-server] 端口 ${targetPort} 超过 ${WATCHDOG_PORT_DOWN_MS / 1000}s 未监听（入口疑似崩溃空转），重拉 tsx watch（第 ${watchdogKills} 次）`,
       );
@@ -212,7 +227,7 @@ if (isRemoteEntry && !(await isTcpPortInUse(port))) {
     cwd: serverDir,
     stdio: "inherit",
     shell: isWin,
-    env: { ...process.env, RUNTIME_MODE: "remote", NEXTBOT_DATA_DIR: DEV_DATA_DIR },
+    env: { ...process.env, RUNTIME_MODE: "remote" },
   });
   gatewayWatchChild.on("exit", (code) => {
     if (code !== 0 && code !== null) {

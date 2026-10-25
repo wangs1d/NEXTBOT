@@ -7,7 +7,7 @@
 // 规则来源：原 builtin-evaluators 九个确定性场景整体迁移（语义一一对应，
 // 数据源从"信号缓冲窗口"换成"状态板字段"）：
 //   away_return / meeting_soon / work_marathon / unread_burst / digest_beat /
-//   goal_ready / sleep_boundary / commitment_chain / morning_brief
+//   goal_ready / sleep_boundary / morning_brief
 import { renderDigestCard, renderProactiveText } from "./voice-templates.js";
 import type { BoardRule, RuleServices } from "./mapping-executor.js";
 
@@ -264,52 +264,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
       },
     },
 
-    // 5. digest_beat：每天 10/16/21 点的心跳回顾 —— 后台常驻检测的确定性节拍
-    {
-      id: "digest_beat",
-      layers: [],
-      tickEveryMs: 10 * 60_000,
-      eval(ctx) {
-        const st = ctx.state;
-        const hour = ctx.now.getHours();
-        const slot = hour === 10 || hour === 16 ? "midday" : hour === 21 ? "evening" : null;
-        if (!slot) return [];
-        const dayKey = ctx.now.toISOString().slice(0, 10);
-        const beatKey = `${dayKey}:${hour}`;
-        if (st.has(beatKey)) return [];
-        st.set(beatKey, true);
-        const tasks = (services.listTodayTasks?.() ?? []).map((t) => t.title).slice(0, 4);
-        const commitments = (services.commitmentsDue?.(24 * 3600_000) ?? []).map((c) => c.title).slice(0, 3);
-        const body = renderDigestCard({
-          slot,
-          tasks,
-          commitments,
-          weather: services.weatherLine?.() ?? null,
-          unread: services.unreadSenders?.() ?? [],
-          interests: services.interestLines?.() ?? [],
-          goals: (services.readyGoals?.() ?? []).map((g) => g.title),
-        });
-        return [
-          {
-            kind: "digest_beat",
-            urgency: "normal",
-            // P1-1（2026-10-10）：独立 kind，不再与 budget 超支/天气等共享
-            // life_reminder 的 4h 冷却——此前多个无关场景串在同一冷却上，
-            // 一个先到就吃掉另一个的资格（通过率相乘）。规则内 beatKey 已按
-            // (日,时) 槽位去重，频控层只需兜底防连发（未知 kind 默认 2h）。
-            proposalKind: "digest_beat",
-            tier: "social",
-            importance: "low",
-            title: "心跳回顾",
-            body,
-            dedupKey: `digest:${beatKey}`,
-            salience: "low",
-          },
-        ];
-      },
-    },
-
-    // 6. goal_ready：预执行目标就绪 —— "哇"时刻的投递触发
+    // 5. goal_ready：预执行目标就绪 —— "哇"时刻的投递触发
     {
       id: "goal_ready",
       layers: ["obligations"],
@@ -340,7 +295,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
       },
     },
 
-    // 7. sleep_boundary：23 点屏幕仍活跃 —— 节律关怀
+    // 6. sleep_boundary：23 点屏幕仍活跃 —— 节律关怀
     {
       id: "sleep_boundary",
       layers: ["current"],
@@ -372,39 +327,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
       },
     },
 
-    // 8. commitment_chain：承诺到期前 2h 的守约链（ask_first 代催）
-    {
-      id: "commitment_chain",
-      layers: [],
-      tickEveryMs: 10 * 60_000,
-      eval(ctx) {
-        const st = ctx.state;
-        const out: ReturnType<BoardRule["eval"]> = [];
-        const due = services.commitmentsDue?.(2 * 3600_000) ?? [];
-        for (const c of due) {
-          if (st.has(`nudged:${c.id}`)) continue;
-          st.set(`nudged:${c.id}`, true);
-          const min = c.dueAt ? Math.max(1, Math.round((c.dueAt - ctx.nowMs) / 60_000)) : null;
-          out.push({
-            kind: "commitment_chain",
-            urgency: "alert",
-            proposalKind: "action.commitment.nudge",
-            tier: "must",
-            importance: "high",
-            title: `承诺临近：${c.title}`,
-            body:
-              `答应别人的「${c.title}」${min ? `还有 ${min} 分钟到期` : "快到时间了"}。` +
-              `要我帮你催一下吗？`,
-            dedupKey: `commit_nudge:${c.id}`,
-            salience: "high",
-            confirmLabel: "帮我催一下",
-          });
-        }
-        return out;
-      },
-    },
-
-    // 9. morning_brief：晨间唤醒触发（7-10 点首次活跃）—— 旗舰预执行场景
+    // 7. morning_brief：晨间唤醒触发（7-10 点首次活跃）—— 旗舰预执行场景
     {
       id: "morning_brief",
       layers: ["current"],
@@ -422,12 +345,10 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
         const fallbackTrigger = hour === 8 && ctx.now.getMinutes() >= 30;
         if (!wakeTrigger && !fallbackTrigger) return [];
         st.set("lastBriefDay", dayKey);
-        const tasks = (services.listTodayTasks?.() ?? []).map((t) => t.title);
-        const commitments = (services.commitmentsDue?.(24 * 3600_000) ?? []).map((c) => c.title);
+        const tasks = (services.listTodayTasks?.(ctx.actorId) ?? []).map((t) => t.title);
         const body = renderDigestCard({
           slot: "morning",
           tasks,
-          commitments,
           weather: services.weatherLine?.() ?? null,
           unread: services.unreadSenders?.() ?? [],
           interests: services.interestLines?.() ?? [],

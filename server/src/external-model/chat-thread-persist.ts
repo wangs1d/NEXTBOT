@@ -9,6 +9,7 @@ import { MASTER_CHAT_SESSION_PREFIX, NOTES_CHAT_SESSION_PREFIX } from "../agent/
 import { attachPersistedClientIds } from "./chat-thread-client-id.js";
 import { mergeActorThreadIntoMasterThread } from "./chat-thread-merge.js";
 import { compactValidChatMessages, repairKimiAssistantToolCallReasoning, sanitizeToolCallMessageChain } from "./chat-thread-sanitize.js";
+import { sanitizeThreadPollution } from "./chat-thread-pollution.js";
 import { stripSystemReminderBlocks, SYSTEM_REMINDER_ANY_RE } from "./internal-frames.js";
 
 const PE_SESSION_MARKER = "\u007fpe\u007f";
@@ -260,6 +261,19 @@ export class ChatThreadPersistence {
         console.warn(
           `[chat-thread-persist] Stripped <system-reminder> pollution from session ${sessionId} on load`,
         );
+        row.updatedAt = new Date().toISOString();
+        changed = true;
+      }
+      // 内部子调用泄漏 / 相邻重复用户消息治愈（2026-10-23「重复设置、重复回复」根因）：
+      // 内部提示词被当用户发言灌进主线程后，模型会把它当真实指令再执行一遍；同一句
+      // 用户消息相邻重复则会让模型做两遍。两者都是结构性脏数据，启动时一次清掉并写回。
+      const poll = sanitizeThreadPollution(row.messages as unknown[]);
+      if (poll.removedInternalCalls > 0 || poll.removedDuplicateUserTurns > 0) {
+        console.warn(
+          `[chat-thread-persist] Healed session ${sessionId} on load: ` +
+            `内部子调用 ${poll.removedInternalCalls} 轮 / 重复用户消息 ${poll.removedDuplicateUserTurns} 条`,
+        );
+        row.messages = poll.messages as typeof row.messages;
         row.updatedAt = new Date().toISOString();
         changed = true;
       }

@@ -168,7 +168,9 @@ Future<void> runDailyBriefingWindow(String payloadPath) async {
   // WebView2 环境与访问凭据与主应用同款预热（TTS / 简报数据走 httpBase 直连）。
   // 环境初始化必须先于下方 WebviewController.initialize() 完成——
   // await 而非 unawaited，否则存在初始化竞争导致控制器创建失败。
-  await bootstrapWindowsWebView();
+  // 优先加入主应用的浏览器进程（省一份实例内存）；失败退回 _briefing
+  // 专属目录自建（见 ensureChildWebViewEnvironment 注释）。
+  await ensureChildWebViewEnvironment("_briefing");
   unawaited(AccessCredentialStore.instance.load());
 
   await windowManager.ensureInitialized();
@@ -267,7 +269,7 @@ class _DailyBriefingWindowAppState extends State<DailyBriefingWindowApp> {
   Future<void> _bootstrap() async {
     try {
       // 双保险：入口处已 await 过，这里兜底（幂等）
-      await bootstrapWindowsWebView();
+      await ensureChildWebViewEnvironment("_briefing");
       await _controller.initialize();
       // 与窗口底色一致（不透明深底），避免圆角/边缘露出白底或残留
       await _controller.setBackgroundColor(const Color(0xFF0A0B0E));

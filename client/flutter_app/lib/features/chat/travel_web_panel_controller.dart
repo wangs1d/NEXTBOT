@@ -269,6 +269,13 @@ abstract final class TravelWebPanelPayload {
                   "description": e.description,
                   "tips": e.tips,
                   "address": e.address,
+                  // S4 字段贯通：站点硬事实（兜底壳与 /travel/plans 直读两条数据路同口径）
+                  if (e.why.isNotEmpty) "why": e.why,
+                  if (e.photoTip.isNotEmpty) "photoTip": e.photoTip,
+                  if (e.pitfall.isNotEmpty) "pitfall": e.pitfall,
+                  if (e.bookingNote.isNotEmpty) "bookingNote": e.bookingNote,
+                  if (e.openingHours.isNotEmpty) "openingHours": e.openingHours,
+                  if (e.rating != null) "rating": e.rating,
                   "images": e.images,
                   "splatUrl": resolveTravelMediaUrl(e.splatUrl),
                   if (e.latitude != null && e.longitude != null)

@@ -118,7 +118,6 @@ const RULES: ClassRule[] = [
   { prefix: "calendar.", domain: "work" },
   { prefix: "reminder", domain: "work", trigger: "scheduled" },
   { prefix: "care", domain: "work", trigger: "scheduled" },
-  { prefix: "commitment", domain: "work" },
   { exact: "file.write_text", domain: "work", action: "execute", risk: "write" },
   { prefix: "file.", domain: "work", action: "query", risk: "read" },
   { prefix: "code.", domain: "work", action: "execute", risk: "write" },

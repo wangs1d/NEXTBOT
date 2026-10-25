@@ -4,6 +4,7 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 
 import { formatMemoryTopicTag, inferMemoryTopic } from "../agent/memory-topic.js";
+import { sanitizeMemoryLinesForPrompt } from "../agent/memory-line-hygiene.js";
 import { gateLtmWrite } from "../agentic-memory/ltm-write-gate.js";
 import {
   areLinesConflicting,
@@ -30,8 +31,6 @@ export type MemoryPatchResult =
 
 type MemoryPatchOp = { key: string; op: "put" | "delete"; value?: unknown };
 
-const TURN_COMPLETED_RE =
-  /(搞定了|完成了|结束了|处理好了|已经完成|处理完成|任务完成|执行完成|全部完成|done|fixed|resolved)/i;
 
 export class AgentMemorySyncService {
   private readonly filePath: string;
@@ -53,6 +52,7 @@ export class AgentMemorySyncService {
         const parsed = JSON.parse(raw) as PersistedShape;
         if (parsed?.sessions && typeof parsed.sessions === "object") {
           this.data = parsed;
+          this.healPollutedMemoryLines();
         }
       } catch (e: unknown) {
         const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
@@ -60,6 +60,47 @@ export class AgentMemorySyncService {
       }
     })();
     return this.loadPromise;
+  }
+
+  /**
+   * 启动时治愈存量污染行（2026-10-23「新对话把上次对话算进去」根因收口）。
+   *
+   * 写入侧的洞已在 {@link gateLtmWrite} 补上（新数据不再产生），但库里已有
+   * `[11:15] Agent: …` 这类**无日期逐字对话行**与 `[RENDER_HINT]` 残留。
+   * 读取侧（memory-line-hygiene）虽然已在注入前剔除，但脏行仍会影响导出、
+   * 诊断与二次抽取。这里在加载时一次性清掉并落盘，与 chat-thread-persist
+   * 的「启动治愈」同款（幂等：无脏行时零写入）。
+   */
+  private healPollutedMemoryLines(): void {
+    const keys = ["memory_summary", "session_recap", "memory_summary_forgotten"] as const;
+    let sessions = 0;
+    let removed = 0;
+    for (const session of Object.values(this.data.sessions)) {
+      const entries = session?.entries;
+      if (!entries) continue;
+      let dirty = false;
+      for (const key of keys) {
+        const value = entries[key];
+        if (typeof value !== "string" || !value) continue;
+        const r = sanitizeMemoryLinesForPrompt(value);
+        if (r.dropped > 0) {
+          entries[key] = r.text;
+          removed += r.dropped;
+          dirty = true;
+        }
+      }
+      if (dirty) {
+        session.revision += 1;
+        sessions++;
+      }
+    }
+    if (removed > 0) {
+      console.warn(
+        `[agent-memory-sync] 启动治愈：清理存量污染行 ${removed} 条（${sessions} 个会话）` +
+          `——逐字对话行/协议残留不进长期记忆`,
+      );
+      this.schedulePersist();
+    }
   }
 
   /**
@@ -225,8 +266,15 @@ export class AgentMemorySyncService {
   }
 
   appendSessionRecapLine(actorId: string, line: string, topicHint?: string): void {
+    // 与 memory_summary 同门过闸（2026-10-23 recap 污染收口）：此前本入口无门，
+    // daily-chat-sync 曾把 `[HH:MM] [客户端同步] Agent: …` 逐字对话整批塞进来。
+    const verdict = gateLtmWrite(line, "kv:recap");
+    if (!verdict.admit) {
+      console.log(`[ltm-gate] 拒绝 KV recap 写入(${verdict.reason}): ${line.slice(0, 60)}`);
+      return;
+    }
     void this.enqueueActorWrite(actorId, () =>
-      this.doAppendMemorySlotLine(actorId, "session_recap", line, topicHint ?? "recap"),
+      this.doAppendMemorySlotLine(actorId, "session_recap", verdict.cleaned, topicHint ?? "recap"),
     );
   }
 
@@ -236,11 +284,10 @@ export class AgentMemorySyncService {
     );
   }
 
-  reconcileStructuredMemoryAfterTurn(actorId: string, userText: string, assistantText: string): void {
-    void this.enqueueActorWrite(actorId, () =>
-      this.doReconcileStructuredMemoryAfterTurn(actorId, userText, assistantText),
-    );
-  }
+  // reconcileStructuredMemoryAfterTurn 已删除（2026-10-23 根因收口）：
+  // 它按「token 重叠≥5字符 ≈ 该承诺已完成」的启发式从 commitments/open_loops/recap
+  // 槽里删行——承诺板下线后这些槽没有合法写入者，而误判"已完成"会静默吞掉真实待办。
+  // 未闭环事项的收口归 consolidation / 统一抽取的语义决策，不做词面猜测。
 
   private doAppendStructuredMemoryLine(actorId: string, line: string, topicHint?: string): boolean {
     const maxRaw = process.env.AGENT_MEMORY_SUMMARY_MAX_CHARS;
@@ -465,83 +512,4 @@ export class AgentMemorySyncService {
     return null;
   }
 
-  private doReconcileStructuredMemoryAfterTurn(actorId: string, userText: string, assistantText: string): boolean {
-    if (!TURN_COMPLETED_RE.test(userText) && !TURN_COMPLETED_RE.test(assistantText)) {
-      return false;
-    }
-
-    const completionContext = `${userText}\n${assistantText}`.trim();
-
-    for (let i = 0; i < 12; i++) {
-      const { revision, entries } = this.getSnapshot(actorId, [
-        "memory_commitments",
-        "memory_open_loops",
-        "session_recap",
-      ]);
-      const currentCommitments =
-        typeof entries.memory_commitments === "string" ? entries.memory_commitments.split("\n").filter(Boolean) : [];
-      const currentOpenLoops =
-        typeof entries.memory_open_loops === "string" ? entries.memory_open_loops.split("\n").filter(Boolean) : [];
-      const currentRecap =
-        typeof entries.session_recap === "string" ? entries.session_recap.split("\n").filter(Boolean) : [];
-
-      const filteredCommitments = dropExpiredCommitmentLines(
-        currentCommitments.filter((line) => !this.isResolvedByTurnContext(line, completionContext)),
-      );
-      const filteredOpenLoops = dropExpiredCommitmentLines(
-        currentOpenLoops.filter((line) => !this.isResolvedByTurnContext(line, completionContext)),
-      );
-      const filteredRecap = currentRecap.filter((line) => !this.isResolvedByTurnContext(line, completionContext));
-
-      if (
-        filteredCommitments.length === currentCommitments.length &&
-        filteredOpenLoops.length === currentOpenLoops.length &&
-        filteredRecap.length === currentRecap.length
-      ) {
-        return false;
-      }
-
-      const patches: MemoryPatchOp[] = [
-        { key: "memory_commitments", op: "put", value: filteredCommitments.join("\n") },
-        { key: "memory_open_loops", op: "put", value: filteredOpenLoops.join("\n") },
-        { key: "session_recap", op: "put", value: filteredRecap.join("\n") },
-      ];
-      const result = this.applyPatchUnsafe(actorId, revision, patches);
-      if (result.ok) return true;
-    }
-
-    return false;
-  }
-
-  private isResolvedByTurnContext(line: string, completionContext: string): boolean {
-    const lineTokens = this.extractComparableTokens(line);
-    const contextTokens = this.extractComparableTokens(completionContext);
-    if (lineTokens.length === 0 || contextTokens.length === 0) {
-      return false;
-    }
-
-    const contextSet = new Set(contextTokens);
-    const overlap = lineTokens.filter((token) => contextSet.has(token));
-    if (overlap.length === 0) {
-      return false;
-    }
-
-    const significantOverlap = overlap.filter((token) => token.length >= 5);
-    if (significantOverlap.length > 0) {
-      return true;
-    }
-
-    return overlap.length >= Math.min(2, lineTokens.length);
-  }
-
-  private extractComparableTokens(text: string): string[] {
-    const normalized = normalizeMemoryLine(stripMemoryLineDecorators(text));
-    if (!normalized) return [];
-
-    return normalized
-      .split(" ")
-      .map((token) => token.trim())
-      .filter((token) => token.length >= 3)
-      .filter((token, index, arr) => arr.indexOf(token) === index);
-  }
 }

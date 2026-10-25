@@ -119,7 +119,8 @@ class _DayPlan {
 
 String _t2s(int m) {
   m = m.round();
-  final String h = (m ~/ 60).toString().padLeft(2, "0");
+  // 跨午夜回绕：行程挤爆时递推链会给出 >24 点，显示 25:54 这类时刻只会困惑
+  final String h = ((m ~/ 60) % 24).toString().padLeft(2, "0");
   final String mm = (m % 60).toString().padLeft(2, "0");
   return "$h:$mm";
 }

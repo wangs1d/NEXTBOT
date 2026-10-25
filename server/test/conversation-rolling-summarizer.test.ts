@@ -170,7 +170,32 @@ function registeredThread(store: ChatThreadStore, sessionId: string): ChatComple
   return msgs;
 }
 
-test("ChatThreadStore: 折叠触发后同步兜底 recap + LLM 增强回写", async () => {
+/**
+ * 再触发一次折叠：追加一批溢出消息后 trimThread。
+ *
+ * 2026-10-22 前缀缓存根修之后，LLM 增量摘要增强**不在完成时回写线程**，只暂存，
+ * 等下一次折叠（前缀本来就要断的时机）才合入 recap。断言增强产物必须先进一次折叠。
+ */
+function foldOnceAgain(
+  store: ChatThreadStore,
+  msgs: ChatCompletionMessageParam[],
+  sessionId: string,
+  tag: string,
+  pairs = 10,
+): void {
+  const at = new Date(Date.now() - 4 * 86_400_000);
+  for (let i = 0; i < pairs; i++) {
+    msgs.push(makeTsMsg("user", at, `${tag}-${i}号用户消息`));
+    msgs.push(makeTsMsg("assistant", at, `${tag}-${i}号助手回复`));
+  }
+  store.trimThread(msgs, undefined, sessionId);
+}
+
+function findRecap(msgs: ChatCompletionMessageParam[]): ChatCompletionMessageParam | undefined {
+  return msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+}
+
+test("ChatThreadStore: 折叠触发后同步兜底 recap + LLM 增强延后到下次折叠回写", async () => {
   const store = new ChatThreadStore(null);
   let enhanced: string[] | null = null;
   store.setRecapSummarizer(async (ctx) => {
@@ -183,7 +208,7 @@ test("ChatThreadStore: 折叠触发后同步兜底 recap + LLM 增强回写", as
 
   // 同步路径：被折叠消息先生成原文兜底 recap（占位，防增强缺失时断层）
   const sys = msgs[0];
-  const syncRecap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  const syncRecap = findRecap(msgs);
   assert.ok(sys && sys.role === "system");
   assert.ok(syncRecap, "折叠触发时应同步生成兜底 recap");
   assert.ok(
@@ -196,11 +221,20 @@ test("ChatThreadStore: 折叠触发后同步兜底 recap + LLM 增强回写", as
   assert.ok(enhanced && enhanced.length > 0, "summarizer 应收到被丢弃的历史消息");
   assert.ok(enhanced!.some((l) => l.includes("第0轮")), "丢弃消息应包含最旧的对话");
 
-  const recapAfter = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.ok(recapAfter, "增强完成后应保留 recap 消息");
+  // 延后契约（前缀缓存根修）：两次折叠之间绝不改线程里的 recap，否则那轮对话白断一次全段缓存
+  const recapDeferred = findRecap(msgs);
+  assert.ok(
+    typeof recapDeferred?.content === "string" && !recapDeferred.content.includes("LLM增强"),
+    "增强完成后不得立即回写 recap（只暂存，等下一次折叠）",
+  );
+
+  // 下一次折叠 = 前缀本来就要断的时刻：暂存的增强在这里合入
+  foldOnceAgain(store, msgs, "session-a", "延后落地");
+  const recapAfter = findRecap(msgs);
+  assert.ok(recapAfter, "折叠后应保留 recap 消息");
   assert.ok(
     typeof recapAfter?.content === "string" && recapAfter.content.includes("LLM增强"),
-    "LLM 新行应写入 recap 消息",
+    "LLM 新行应在下一次折叠写入 recap 消息",
   );
 });
 
@@ -260,22 +294,21 @@ test("ChatThreadStore: seq 防覆盖——期间有新 trim 时丢弃旧增强�
   }
   store.trimThread(msgs, undefined, "session-b");
 
-  // 等待第二次增强完成并回写
+  // 等待第二次增强完成（结果暂存，尚未回写线程）
   await new Promise((r) => setTimeout(r, 20));
-  const recapAfterSecond = msgs.find(
-    (m) => typeof m.content === "string" && m.content.includes("[session-recap]"),
-  );
+  foldOnceAgain(store, msgs, "session-b", "落地第二次增强");
+  const recapAfterSecond = findRecap(msgs);
   assert.ok(
     typeof recapAfterSecond?.content === "string" && recapAfterSecond.content.includes("第二版增强"),
-    "第二次增强应回写",
+    "第二次增强应在下一次折叠回写",
   );
 
   // 现在放行第一次增强（慢的那个）——seq 已过期，必须被丢弃，不得覆盖第二版
   resolveFirst(["第一版增强"]);
   await new Promise((r) => setTimeout(r, 20));
-  const recapFinal = msgs.find(
-    (m) => typeof m.content === "string" && m.content.includes("[session-recap]"),
-  );
+  // 再折叠一次：过期结果若被误暂存/误回写，这一步就会暴露
+  foldOnceAgain(store, msgs, "session-b", "过期增强复放");
+  const recapFinal = findRecap(msgs);
   assert.ok(
     typeof recapFinal?.content === "string" && recapFinal.content.includes("第二版增强"),
     "旧增强结果（第一版）不得覆盖新增强结果",
@@ -323,19 +356,20 @@ test("ChatThreadStore: 未注入 summarizer 时保留已有 recap 行且不生�
   );
 });
 
-test("ChatThreadStore: 无已有 recap 行时 LLM 增强完成后插入到 system 之后", async () => {
+test("ChatThreadStore: 无已有 recap 行时 LLM 增强在下一次折叠插入到 system 之后", async () => {
   const store = new ChatThreadStore(null);
   store.setRecapSummarizer(async () => ["[3天前] 用户前天计划爬山（LLM摘要）"]);
-  // 无已有 recap 的折叠线程：同步先生成兜底 recap，LLM 完成后原位更新
+  // 无已有 recap 的折叠线程：同步先生成兜底 recap，增强延后到下次折叠原位更新
   const msgs = registeredThread(store, "session-e");
   store.trimThread(msgs, undefined, "session-e");
 
-  const syncRecap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  const syncRecap = findRecap(msgs);
   assert.ok(syncRecap, "折叠时应有同步兜底 recap");
 
   await new Promise((r) => setTimeout(r, 20));
-  const after = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
-  assert.ok(after, "LLM 增强完成后应保留 recap 消息");
+  foldOnceAgain(store, msgs, "session-e", "增强落地");
+  const after = findRecap(msgs);
+  assert.ok(after, "LLM 增强落地后应保留 recap 消息");
   assert.ok(
     typeof after!.content === "string" && after!.content.includes("LLM摘要"),
     "增强后的 recap 应包含 LLM 摘要内容",
@@ -377,13 +411,23 @@ test("ChatThreadStore: LLM 关键钉增量并入 [关键钉] 区，已有钉逐�
     capturedPins?.some((l) => l.includes("素食")),
     "summarizer 应收到已有关键钉（去重参考）",
   );
-  const recap = msgs.find((m) => typeof m.content === "string" && m.content.includes("[session-recap]"));
+  // 增强结果延后：下一次折叠才合入
+  foldOnceAgain(store, msgs, "session-pins", "钉落地");
+  const recap = findRecap(msgs);
   assert.ok(recap && typeof recap.content === "string");
   const content = recap.content;
   assert.ok(content.includes("用户明确偏好：素食"), "已有钉应逐字保留，不被 LLM 重写");
   assert.ok(content.includes("周六上午十点机场T3集合"), "LLM 新钉应增量并入");
-  assert.ok(!content.includes("[unsummarized]"), "合并成功后待归纳区应清空");
-  // 混合式布局：摘要区 → [关键钉] → 待归纳区（此处已清空）
+  // 精确移除：只删本次增强吸收掉的那批待归纳原文，其后新折叠进来的行保留
+  assert.ok(
+    !content.includes("第0轮用户消息"),
+    "增强已吸收的待归纳行应在折叠时移除（否则原文与摘要重复占位）",
+  );
+  assert.ok(
+    content.includes("[unsummarized]"),
+    "本次新滑出的窗口仍应有待归纳区（不被上一次增强误清）",
+  );
+  // 混合式布局：摘要区 → [关键钉] → 待归纳区
   const summaryIdx = content.indexOf("用户要求晚上七点提醒开线上会议");
   const pinIdx = content.indexOf("[关键钉]");
   const newPinIdx = content.indexOf("周六上午十点机场T3集合");

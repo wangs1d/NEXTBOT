@@ -28,7 +28,6 @@ const EXTERNAL_TOOL_PREFIXES: string[] = [
   "messages.send", // 代发消息（旧族）
   "messages.reply", // 代发短信/好友消息（触达真实收件人）
   "world.link.send_message", // 站内消息直达他人
-  "commitment.nudge", // 代发催促
   "smart_home.execute", // 物理世界设备（旧族）
   "smart_home.control_device", // 物理设备控制
   "smart_home.scene", // 场景一键执行（触发设备动作）
@@ -51,7 +50,6 @@ const READ_TOOL_PREFIXES: string[] = [
   "web.",
   "weather.",
   "memory.recall",
-  "commitment.list",
   "finance.list",
   "activity.timeline",
 ];

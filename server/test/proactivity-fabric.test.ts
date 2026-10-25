@@ -94,7 +94,7 @@ test("ScreenSensor: 零 LLM app 分类", () => {
 
 test("ScheduleSensor: 只在 24h 日程集变化时产出，nextEventMin 可读", () => {
   const clock = new MockClock();
-  const task = { title: "牙医复诊", runAt: clock.t + 30 * 60_000, status: "scheduled" };
+  const task = { title: "牙医复诊", runAt: clock.t + 30 * 60_000, status: "active" };
   const sensor = new ScheduleSensor({
     listTasks: () => [task] as never[],
     nowFn: () => clock.t,
@@ -175,7 +175,6 @@ test("映射规则: morning_brief + digest 数据拼接，全缺数据也非空"
   const services = {
     listTodayTasks: () => [{ title: "10点站会" }, { title: "14点评审" }],
     weatherLine: () => "小雨，18-24°C",
-    commitmentsDue: () => [{ id: "c1", title: "给小李发报价", dueAt: clock.t + 3600_000 }],
   };
   const { feed, tick, events } = makeExecutor(clock, services, "morning_brief");
   feed("presence", { state: "active" });
@@ -184,23 +183,9 @@ test("映射规则: morning_brief + digest 数据拼接，全缺数据也非空"
   assert.equal(events[0].kind, "morning_brief");
   const body = events[0].body;
   assert.ok(body.includes("10点站会"), `简报含日程: ${body}`);
-  assert.ok(body.includes("给小李发报价"), `简报含承诺: ${body}`);
   assert.ok(body.includes("小雨"), `简报含天气: ${body}`);
 });
 
-test("映射规则: commitment_chain —— 承诺2h内到期产出 ask_first 代催事件", async () => {
-  const clock = new MockClock(MockClock.localAt(12, 0));
-  const { tick, events } = makeExecutor(
-    clock,
-    { commitmentsDue: () => [{ id: "c9", title: "回复张总邮件", dueAt: clock.t + 90 * 60_000 }] },
-    "commitment_chain",
-  );
-  await tick();
-  assert.equal(events.length, 1);
-  assert.equal(events[0].kind, "commitment_chain");
-  assert.equal(events[0].confirmLabel, "帮我催一下");
-  assert.equal(events[0].urgency, "alert");
-});
 
 test("映射规则: 传感信号入板（桥接映射）——meeting/unread/goal 三场景", async () => {
   const clock = new MockClock(MockClock.localAt(14, 0));

@@ -176,9 +176,12 @@ void main() async {
     // （仅云端连接版消费；byok 本地版不读此文件）。
     await CloudModelBindingStore.instance.load();
     _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
-    // WebView2 环境进程内只初始化一次：若用户开启了共用浏览器 CDP 调试端口
-    // （SharedBrowserHost.remoteDebugPort），必须在这里一并传入，晚于首次
-    // 环境初始化则不再生效。默认 null（CDP 桥关闭）。
+    // WebView2 环境进程内只初始化一次：共用浏览器 CDP 调试端口（默认开启，
+    // Agent 比价/下单页面直接开在内置浏览器，登录态即本人）必须在这里传入，
+    // 晚于首次环境初始化则不再生效。端口仅绑 127.0.0.1，与旅游面板共用
+    // 同一 WebView2 环境（调试参数对旅游面板无影响）。
+    SharedBrowserHost.instance.remoteDebugPort =
+        SharedBrowserHost.defaultRemoteDebugPort;
     final int? sbDebugPort = SharedBrowserHost.instance.remoteDebugPort;
     unawaited(bootstrapWindowsWebView(
       additionalArguments:
@@ -1116,9 +1119,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       unawaited(windowManager.focus());
     });
     unawaited(initDynamicIsland());
-    // 久坐 / 喝水 / 护眼：复用既有灵动岛（无自建 UI、岛上无按钮），
-    // 只产出功能文案 + 真实分钟数，自动收回。
-    HealthReminderFeeds.start();
+    // 久坐提醒：复用既有灵动岛（无自建 UI、岛上无按钮），只产出功能文案
+    // + 真实分钟数，自动收回。护眼、喝水均已删除（定时弹窗打扰价值低）；
+    // 久坐节奏按用户身份从服务端档位拉取（/api/health/rhythm，认不出身份
+    // 给保守默认），不再用统一的上班族参数。
+    // 仅电脑端启用（用户 2026-10-23 拍板）：手机端没有「连续在座」语义，
+    // 组件内部也按平台 no-op 双重防护。
+    if (!_isMobile) HealthReminderFeeds.start();
     // E2E 专用（--dart-define=PAI_ISLAND_E2E=true 才生效）：三级渐进展开
     // 真机截图回归的数据注入引导，见 dynamic_island_stage_e2e.dart。
     if (const bool.fromEnvironment('PAI_ISLAND_E2E')) {
@@ -1143,6 +1150,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _ws.onConnected = () {
       SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
       _sendSessionInit();
+      // 断线重连后服务端已清 CDP 端点（unbindIfSocket），这里补报，
+      // 让共用浏览器桥（比价/下单页面开在内置浏览器）不掉线。
+      SharedBrowserHost.instance.announceCdpEndpoint();
+      // 共用开启时提前拉起浏览器宿主（否则首次开面板前驱动不存在、
+      // 端点永远报不上去）；_start 完成后会自行 announce。
+      if (SharedBrowserHost.instance.remoteDebugPort != null) {
+        unawaited(SharedBrowserHost.instance.ensureStarted());
+      }
       unawaited(_flushScheduleOfflineDeletes());
       if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
         DesktopBridgeService.instance.start();
@@ -2119,6 +2134,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             // 也不进接受率分母——此前应用内阅读与忽略无法区分，学习信号有偏）
             if (deliveryId.isNotEmpty) {
               AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, "viewed");
+            }
+            // 告知类同为 agent 主动消息（2026-10-25 用户定调：都要保存）：落
+            // 对话流一条文本气泡（手机端同款），SnackBar 即时触达照旧
+            if (text.trim().isNotEmpty) {
+              _appendAssistantText("assistant-proactive", text.trim(),
+                  title: title, persist: true);
             }
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
@@ -3145,24 +3166,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (message.role != "assistant") return message;
     final String sanitizedText = _sanitizeAssistantVisibleText(message.text);
     if (sanitizedText == message.text) return message;
-    // 重建时必须带上媒体字段：mediaCards/renderBlocks 是图片卡片的唯一来源，
-    // 漏掉会导致「正文含协议标记的消息重启后图片全部消失」。
-    return ChatMessage(
-      messageId: message.messageId,
-      sessionId: message.sessionId,
-      role: message.role,
-      text: sanitizedText,
-      timestamp: message.timestamp,
-      attachmentImageCount: message.attachmentImageCount,
-      playUrl: message.playUrl,
-      attachments: message.attachments,
-      contentType: message.contentType,
-      durationMs: message.durationMs,
-      waveform: message.waveform,
-      mediaCards: message.mediaCards,
-      renderBlocks: message.renderBlocks,
-      pendingMediaCards: message.pendingMediaCards,
-    );
+    // copyWith 全字段保留：手抄重建清单曾漏 mediaCards（「重启后图片全部
+    // 消失」），2026-10-25 又漏 eveningDigest/decisionCard（明日速览卡重启
+    // 退化成纯文本气泡）——新增消息字段一律靠 copyWith 兜住，别再手抄。
+    return message.copyWith(text: sanitizedText);
   }
 
   /// 消息是否带有可渲染的媒体内容（图片/视频卡片或交错渲染块）。
@@ -3534,7 +3541,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         ..clear()
         ..addAll(frames);
     });
-    ScaffoldMessenger.of(context).showSnackBar(
+    ScaffoldMessenger.maybeOf(context)?.showSnackBar(
       SnackBar(content: Text("已选择 ${frames.length} 张图片，发送时将一并传与 Agent")),
     );
   }
@@ -3665,6 +3672,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
 
     if (effectiveText.isEmpty && attachmentFrames == null) {
+      return;
+    }
+
+    // 旅游规划主战场在旅游入口的规划对话（2026-10-24）：主对话只保留
+    // 天气/票价这类单点查询，识别到规划意图就把原话交接过去。
+    if (!isRetry &&
+        attachmentFrames == null &&
+        looksLikeTravelPlanningRequest(effectiveText)) {
+      _inputController.clear();
+      _openTravelArchive(seedMessage: effectiveText);
       return;
     }
 
@@ -4020,10 +4037,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 常用工具「行程」入口：全屏路由打开应用内行程归档页。
   /// 对话中创建过的行程（服务端 data/travel-plans 落盘）都在这里沉淀，
   /// 点条目回看详情：桌面 = 应用内 WebView 面板，手机 = 原生行程页。
-  void _openTravelArchive() {
+  ///
+  /// [seedMessage]：主对话识别到规划意图时把原话交接过来，进页即自动发起会话。
+  void _openTravelArchive({String? seedMessage}) {
     final BuildContext? navCtx = _rootNavigatorKey.currentContext;
     if (navCtx == null || !navCtx.mounted) return;
-    unawaited(TravelPlanArchivePage.show(navCtx));
+    unawaited(TravelPlanArchivePage.show(
+      navCtx,
+      seedMessage: seedMessage,
+      agentName: _agentName,
+    ));
   }
 
   /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
@@ -4671,13 +4694,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 往对话流追加一条 assistant 纯文字气泡（内存态，同决策卡模式构造）。
-  void _appendAssistantText(String messageIdPrefix, String text) {
+  /// 往对话流追加一条 assistant 纯文字气泡。[persist] 为 true 时落本地历史
+  /// （agent 主动消息落流，2026-10-25 用户定调「主动消息都要保存」）；缺省
+  /// 内存态（临时气泡，重启即消失）。[title] 非空且异于正文时拼在正文前。
+  void _appendAssistantText(
+    String messageIdPrefix,
+    String text, {
+    String? title,
+    bool persist = false,
+  }) {
+    final String t = (title ?? "").trim();
     final ChatMessage message = ChatMessage(
       messageId: "$messageIdPrefix-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "assistant",
-      text: text,
+      text: t.isEmpty || t == text ? text : "$t\n$text",
       timestamp: DateTime.now(),
     );
     void apply() {
@@ -4690,6 +4721,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     } else {
       apply();
     }
+    if (persist) _persistMessage(message, "proactive");
+  }
+
+  /// 异步落库统一出口（失败不阻塞 UI）。saveMessage 按 (sessionId, messageId)
+  /// upsert：流式补存/终态翻转重复调用安全。[tag] 用于失败日志定位。
+  void _persistMessage(ChatMessage message, String tag) {
+    unawaited(_store.saveMessage(message).catchError((Object e) {
+      debugPrint("[$tag] saveMessage failed: $e");
+    }));
   }
 
   /// 睡前提醒（evening.digest，2026-10-16 接线）：以消息形式落对话聊天流，
@@ -4708,7 +4748,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     text = text.trim();
     if (text.isEmpty) return;
     if (digest != null && digest.isNotEmpty) {
-      // 结构化主路：专属卡片（内存态，与现有 evening digest 消息同口径）
+      // 结构化主路：专属卡片。同为「真实消息」（2026-10-21 口径，与手机端
+      // mobile_chat_controller 同源）：落本地历史，重启后仍以卡片形态渲染
+      // （store 落盘链路保真 contentType/eveningDigest，见 saveMessage）。
       final ChatMessage message = ChatMessage(
         messageId:
             "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
@@ -4729,13 +4771,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       } else {
         apply();
       }
+      _persistMessage(message, "evening_digest");
       return;
     }
     _appendAssistantText("assistant-evening-digest", text);
   }
 
-  /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
-  /// 同 task_receipt）。追加即展示：chat_page 的消息列表监听自动滚底。
+  /// 往对话流追加一张决策卡（contentType="decision_card"）。追加即展示：
+  /// chat_page 的消息列表监听自动滚底。2026-10-25 定调（用户拍板：agent
+  /// 主动发送的消息都要保存）：随消息落本地历史，重启后仍以卡片形态渲染，
+  /// 终态翻转（_handleDecisionCardAction）时再存一次。
   void _appendDecisionCard(Map<String, dynamic> card) {
     final String title = card["title"]?.toString() ?? "";
     final String body = card["message"]?.toString() ?? "";
@@ -4758,6 +4803,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     } else {
       apply();
     }
+    _persistMessage(message, "decision-card");
   }
 
   /// 决策卡按钮回调：回传 ack/outcome + 原地翻转卡片为终态。
@@ -4798,6 +4844,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     } else {
       apply();
     }
+    // 终态落库（2026-10-25）：重启后回看这张卡保持已确认形态
+    _persistMessage(_messages[idx], "decision-card");
   }
 
   // ====== 桌面端独立来电悬浮窗回调 ======
@@ -5132,11 +5180,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 弹窗询问 GPS 定位权限：仅询问一次，未显式拒绝则默认同意并立即拉一次 GPS。
+  /// 「常驻定位」= 始终允许 + 位移触发后台上报（Agent 感知位置改变/进出常去地点）。
   Future<void> _promptLocationConsentIfNeeded() async {
     final bool? existing = await ClientLocationService.getLocationConsent();
     if (existing != null) {
       if (existing) {
         unawaited(ClientLocationService.warmUpGpsIfConsented());
+        // 常驻开关开着 → 恢复常驻流（权限不够时 start 内部静默跳过，不重复打扰）
+        unawaited(_startResidentLocationReporting());
       }
       return;
     }
@@ -5146,13 +5197,29 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
 
-    final bool? allow = await showLocationPermissionDialog(context: ctx);
+    final LocationConsentChoice? choice =
+        await showLocationPermissionDialog(context: ctx);
     // 默认同意：用户没显式点「暂不允许」就视为允许，让 Agent 默认能拿到实时位置。
-    final bool decided = allow ?? true;
+    final bool decided = choice != LocationConsentChoice.deny;
     await ClientLocationService.setLocationConsent(decided);
     if (decided) {
       await ClientLocationService.requestGpsAfterConsent();
+      if (choice == LocationConsentChoice.alwaysResident) {
+        await ClientLocationService.setResidentLocationEnabled(true);
+        unawaited(_startResidentLocationReporting());
+      }
     }
+  }
+
+  /// 常驻定位上报：位移 ≥150m 产一次 fix → client.location_report 推给服务端
+  /// （服务端管线：位置历史 + 围栏 enter/leave 判定 + 到达触发器）。
+  /// 权限不足/开关未开时 startResidentTracking 内部静默返回 false，不弹窗骚扰。
+  Future<void> _startResidentLocationReporting() async {
+    await ClientLocationService.startResidentTracking(
+      onFix: (ClientLocationPayload payload) {
+        _ws.sendEvent("client.location_report", payload.toJson());
+      },
+    );
   }
 
   /// 启动时静默拉一次定位并上报（无 jobId 纯上报，填充服务端位置缓存供 Agent

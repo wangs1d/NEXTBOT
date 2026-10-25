@@ -176,6 +176,23 @@ class _BrowserPageState extends State<BrowserPage> {
             );
           },
         ),
+        // 「允许保存登录态」征询条：服务端捕获 Cookie 前必问，问一次记住
+        ValueListenableBuilder<SbSaveLoginAsk?>(
+          valueListenable: host.saveLoginAsk,
+          builder: (BuildContext context, SbSaveLoginAsk? ask, _) {
+            return _AnimatedBar(
+              visible: ask != null,
+              child: ask == null
+                  ? const SizedBox(width: double.infinity)
+                  : _SaveLoginAskBar(
+                      cs: cs,
+                      ask: ask,
+                      onAllow: () => host.resolveSaveLoginAsk(true),
+                      onDeny: () => host.resolveSaveLoginAsk(false),
+                    ),
+            );
+          },
+        ),
         ValueListenableBuilder<String>(
           valueListenable: host.currentUrl,
           builder: (BuildContext context, String url, _) {
@@ -703,6 +720,66 @@ class _AgentStatusBar extends StatelessWidget {
             style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 「允许保存登录态」征询条：服务端捕获 Cookie 前必问（与主流做法一致），
+/// 问一次记住；secondaryContainer 语义色，与错误色确认条区分。
+class _SaveLoginAskBar extends StatelessWidget {
+  const _SaveLoginAskBar({
+    required this.cs,
+    required this.ask,
+    required this.onAllow,
+    required this.onDeny,
+  });
+
+  final ColorScheme cs;
+  final SbSaveLoginAsk ask;
+  final VoidCallback onAllow;
+  final VoidCallback onDeny;
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: cs.secondaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        child: Row(
+          children: <Widget>[
+            Icon(Icons.key_rounded, size: 16, color: cs.onSecondaryContainer),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                "允许 NextBot 保存你在${ask.siteLabel}的登录态吗？加密存本机，比价 / 下单免重复登录",
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12, color: cs.onSecondaryContainer),
+              ),
+            ),
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: onDeny,
+              style: TextButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                foregroundColor:
+                    cs.onSecondaryContainer.withValues(alpha: 0.75),
+              ),
+              child: const Text("不保存", style: TextStyle(fontSize: 12.5)),
+            ),
+            const SizedBox(width: 2),
+            FilledButton.tonal(
+              onPressed: onAllow,
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 14),
+              ),
+              child: const Text("允许保存", style: TextStyle(fontSize: 12.5)),
+            ),
+          ],
+        ),
       ),
     );
   }

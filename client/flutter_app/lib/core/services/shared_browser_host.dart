@@ -9,6 +9,7 @@ import "../browser/browser_action_executor.dart";
 import "../browser/browser_driver.dart";
 import "../browser/shared_browser_protocol.dart" as proto;
 import "../browser/webview_windows_driver.dart";
+import "windows_webview_bootstrap.dart" show kSharedWebViewDebugPort;
 
 export "../browser/shared_browser_protocol.dart"
     show SbActionTrace, SbConfirmRequest, resolveInputToUrl, searchUrlFor;
@@ -18,6 +19,14 @@ typedef SharedBrowserResult = Map<String, dynamic>;
 
 /// 发送 ws 事件的回调（启动时由 main 注入 WsChatService.sendEvent）。
 typedef WsEventSender = void Function(String type, Map<String, dynamic> payload);
+
+/// 「允许保存登录态」征询（服务端捕获 Cookie 前必问，问一次记住）。
+class SbSaveLoginAsk {
+  const SbSaveLoginAsk({required this.siteId, required this.siteLabel});
+
+  final String siteId;
+  final String siteLabel;
+}
 
 /// 用户与 Agent 共用的浏览器宿主（进程级单例）。
 ///
@@ -52,9 +61,16 @@ class SharedBrowserHost {
   StreamSubscription<String>? _titleSub;
   StreamSubscription<DriverLoadingState>? _loadingSub;
 
-  /// 远程调试端口（CDP 桥用）。null = 关闭（默认）。必须在 ensureStarted 前
-  /// 设置；开启后客户端会把 `http://127.0.0.1:<port>` 经 browser.bridge.info
-  /// 上报服务端，供 trusted 工具（Playwright CDP 直连，isTrusted=true 输入）使用。
+  /// 远程调试端口（CDP 桥用），默认开启（main 启动时设为
+  /// [defaultRemoteDebugPort]）。开启后客户端把 `http://127.0.0.1:<port>`
+  /// 经 browser.bridge.info 上报服务端，供服务端（Playwright CDP 直连）
+  /// 把比价/下单页面直接开在这个用户可见的浏览器里——登录态即用户本人，
+  /// 免 Cookie 导入。端口仅绑 127.0.0.1；与旅游面板共用同一 WebView2
+  /// 环境，调试参数对旅游面板无影响。
+  /// 单一事实源在 [kSharedWebViewDebugPort]：子进程窗口（早报/行程）靠
+  /// 逐字一致的参数加入本浏览器进程（省一份实例内存），改端口只改一处。
+  static const int defaultRemoteDebugPort = kSharedWebViewDebugPort;
+
   int? remoteDebugPort;
 
   /// ws 发送函数（main.dart 注入 _ws.sendEvent）。
@@ -77,6 +93,10 @@ class SharedBrowserHost {
   final ValueNotifier<proto.SbConfirmRequest?> confirmRequest =
       ValueNotifier<proto.SbConfirmRequest?>(null);
 
+  /// 「允许保存登录态」征询（服务端捕获 Cookie 前必问；null = 无待答复）。
+  final ValueNotifier<SbSaveLoginAsk?> saveLoginAsk =
+      ValueNotifier<SbSaveLoginAsk?>(null);
+
   /// 动作轨迹（足迹回放，最新在前，环形上限 50 条）。
   final ValueNotifier<List<proto.SbActionTrace>> actionTrace =
       ValueNotifier<List<proto.SbActionTrace>>(<proto.SbActionTrace>[]);
@@ -93,15 +113,35 @@ class SharedBrowserHost {
 
   bool get atHome => currentUrl.value.isEmpty || currentUrl.value == "about:blank";
 
-  /// 绑定 ws 发送函数（幂等）。
+  /// 绑定 ws 发送函数（幂等）。绑定晚于浏览器启动时补报一次 CDP 端点。
   void bindSend(WsEventSender send) {
     _sendEvent = send;
+    announceCdpEndpoint();
+  }
+
+  /// 上报 CDP 调试端点（browser.bridge.info）。幂等条件发送：端口已开、
+  /// 浏览器已启动、ws 已绑定。三条时机都会走到这里——
+  /// bindSend（ws 晚于浏览器）、_start 完成（浏览器晚于 ws）、
+  /// main 的 onConnected（断线重连后服务端已清端点，需重报）。
+  void announceCdpEndpoint() {
+    if (remoteDebugPort == null || !isReady || _sendEvent == null) return;
+    _sendEvent!.call("browser.bridge.info", <String, dynamic>{
+      "endpoint": "http://127.0.0.1:$remoteDebugPort",
+    });
   }
 
   /// main.dart 的 ws 事件入口：命中 shared.browser.invoke 时执行并回执
   /// browser.bridge.result（jobId 配对）。服务端下发的 gate.required=true
   /// 表示高风险动作：先弹确认条，用户允许才执行（120 秒未决视为拒绝）。
   Future<void> handleServerEvent(String type, Map<String, dynamic> payload) async {
+    if (type == "shared.browser.ask_save_login") {
+      // 服务端捕获 Cookie 前的授权征询：弹条等用户表态，答复回传（问一次记住）。
+      saveLoginAsk.value = SbSaveLoginAsk(
+        siteId: payload["siteId"]?.toString() ?? "",
+        siteLabel: payload["siteLabel"]?.toString() ?? "该网站",
+      );
+      return;
+    }
     if (type != "shared.browser.invoke") return;
     final String jobId = payload["jobId"]?.toString() ?? "";
     final String action = payload["action"]?.toString() ?? "";
@@ -156,6 +196,17 @@ class SharedBrowserHost {
   void resolveConfirmation(bool allow) {
     final Completer<bool>? c = _confirmCompleter;
     if (c != null && !c.isCompleted) c.complete(allow);
+  }
+
+  /// 用户对「保存登录态」征询表态：答复回传服务端并收条（问一次记住）。
+  void resolveSaveLoginAsk(bool allowed) {
+    final SbSaveLoginAsk? ask = saveLoginAsk.value;
+    if (ask == null) return;
+    saveLoginAsk.value = null;
+    _sendEvent?.call("browser.save_login_decision", <String, dynamic>{
+      "siteId": ask.siteId,
+      "allowed": allowed,
+    });
   }
 
   Future<bool> _requestConfirmation(proto.SbConfirmRequest request) async {
@@ -260,12 +311,9 @@ class SharedBrowserHost {
         onTrace: _recordTrace,
       );
 
-      // CDP 桥：仅在用户显式开启调试端口时上报端点（默认关闭）
-      if (remoteDebugPort != null) {
-        _sendEvent?.call("browser.bridge.info", <String, dynamic>{
-          "endpoint": "http://127.0.0.1:$remoteDebugPort",
-        });
-      }
+      // CDP 桥：仅在用户显式开启调试端口时上报端点（默认关闭）；
+      // ws 尚未绑定时由 bindSend 补报。
+      announceCdpEndpoint();
     } catch (e) {
       _error = "浏览器初始化失败：$e";
       _starting = null;

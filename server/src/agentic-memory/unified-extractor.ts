@@ -1,15 +1,14 @@
 /**
  * 统一结构化抽取器（P1-6，用户决策 2026-09-04）。
  *
- * 高信号写入此前的 LLM 链：decideMemoryWrite（决策）→ Mem0 infer（抽取）→
- * commitment-extractor（承诺识别）——最多 3 次调用，且前两次的输入高度重叠。
+ * 高信号写入此前的 LLM 链：decideMemoryWrite（决策）→ Mem0 infer（抽取）——
+ * 多次调用且输入高度重叠。
  * 本模块合并为**一次调用**，同时产出：
  *   - decision：写入决策（remember/decay/reject，替代 decideMemoryWrite）
  *   - scores：五维重要性评分（持久性/频率/情感强度/影响范围/确定性）——代码侧
  *     加权合成综合分并按阈值闸门裁决，无用的消息（低持久+低影响的日常琐事）
  *     不会被植入长期记忆（防 LLM 单一直觉分手松，见 applyPromotionGate）
  *   - memories：独立可召回的陈述条目（替代 Mem0 infer，落库走 infer:false）
- *   - commitments：承诺识别（含 category，替代 commitment-extractor）
  *   - corrections：用户纠正（"不对，是周二"→ oldClaim/newClaim，驱动账本
  *     supersession + 溯源级联作废，见 bootstrap 钩子）
  *   - understandings：对话理解（理解档案 topic 级 upsert）
@@ -28,7 +27,6 @@ import {
   resolveAgenticMemoryLlmBaseUrl,
   resolveOpenAiApiKey,
 } from "./env.js";
-import type { ExtractedCommitment } from "./commitment-board.js";
 
 export interface UnifiedCorrection {
   oldClaim: string;
@@ -129,7 +127,6 @@ export interface UnifiedExtraction {
   scores?: UnifiedScoreDimensions;
   /** 独立、自包含、可长期召回的陈述条目（第三人称、保留语气/性质/语境） */
   memories: string[];
-  commitments: ExtractedCommitment[];
   corrections: UnifiedCorrection[];
   /** 对话理解（理解档案 topic 级 upsert + 演变历史） */
   understandings: UnifiedUnderstanding[];
@@ -201,27 +198,25 @@ const SYSTEM_PROMPT = [
   '"decision":"remember|decay|reject",  // remember=值得长期记住；decay=临时上下文（近期有用、过期即弃）；reject=寒暄/日常琐事/重复/敏感',
   '"scores":{"persistence":0到1,"frequency":0到1,"emotion":0到1,"impact":0到1,"certainty":0到1},  // 五维独立打分：持久性/复现频率/情感强度/影响范围/确定性（明确陈述≈0.9，猜测/听说/可能≈0.2）',
   '"importance":0到1,  // 你的综合判断（系统会按五维加权重算并裁决）',
-  '"semanticClass":"事实|偏好|计划|承诺|人物|事件|其他",',
+  '"semanticClass":"事实|偏好|计划|人物|事件|其他",',
   '"memories":["第三称、自包含、可长期召回的记录；无则空数组"],',
   "  // 保留语气与性质：「我老婆是刘浩存」→「用户半开玩笑地自称老婆是明星刘浩存（粉丝式称呼）」，而不是「用户的老婆是刘浩存」",
   '"understandings":[{"topic":"话题词（用原话核心称谓，如 老婆|工作|居住地）","note":"第三人称理解，保留语气与性质判断","kind":"literal|joke|fandom|figurative|preference|correction|other","confidence":0到1}]',
   "  // 明星/公众人物被冠亲属称谓（老婆/老公/女儿…）默认 kind=fandom，note 写明「粉丝式称呼，并非真实关系」（除非用户明确是真实关系）；玩笑/调侃=joke；比喻夸张=figurative；改口=correction（写明从什么改成什么）；字面陈述=literal",
   '"facts":[{"field":"档案字段名","value":"确定值","temporal":"current|past|upcoming","eventTime":"时间线索或省略","validFrom":"YYYY-MM-DD 或 YYYY-MM","validTo":"同上或省略","confidence":0到1}]',
-  "  // 只收用户自身的字面陈述：我叫X→称呼:X；我住X→居住地:X；我是做后端的→职业:后端开发；我用TS和Python→技术栈:TS/Python",
+  "  // 只收用户自身的字面陈述：我叫X→称呼:X；我住X→居住地:X；我是做后端的→职业:后端开发；我用TS和Python→技术栈:TS/Python；我收拾得快20分钟就能出门→出门准备:20分钟",
   "  // 【时态铁律】temporal 必填：现状（住/是/在做）→current；以前/之前/曾经/小时候/搬走了→past（「我以前住浙江」→居住地:浙江,past,eventTime:以前）；同一句含过去与现在（「以前在杭州，现在搬来兴义了」）→两条：杭州/past + 兴义/current；未来长期状态变更（下月搬去成都/明年换工作/毕业后去深圳）→upcoming + validFrom，不算已发生、不覆盖现状；临时行程（周末去上海玩/下周出差）不进 facts（属 plan/decay）",
   "  // 【证据铁律】计划不得写成已发生：「我要搬去成都」只能 upcoming，除非「我已经搬过来了/我到了」；validFrom/validTo 只写用户明确给出的时间，把去年/上个月按给定当前时间换算成绝对时间，至今→省略 validTo，无法确定就省略，不要编日期",
   "  // 疑问/玩笑/粉丝式称呼/比喻/假设不进 facts（只进 understandings）；例外：Agent 给用户起昵称且用户接受（没纠正、自然继续）→ 称呼:X，confidence≈0.6，用户表示不喜欢则不输出",
-  "  // field 用 ≤6 字短字段名（称呼|职业|居住地|技术栈|生日|公司|学历…），value ≤20 字并改写成无主语短值（我在兴义→居住地:兴义），禁止以「我/我的/我在」开头；用户更正旧信息时输出新值（字段级覆盖由系统完成）",
+  "  // field 用 ≤6 字短字段名（称呼|职业|居住地|技术栈|生日|公司|学历|出门准备…）；「我20分钟就能出门/我收拾要半小时」→ 出门准备:20分钟|30分钟，value ≤20 字并改写成无主语短值（我在兴义→居住地:兴义），禁止以「我/我的/我在」开头；用户更正旧信息时输出新值（字段级覆盖由系统完成）",
   '"forget":["字段名"],  // 仅用户明确要求忘掉/清除档案字段时输出（「别记我住哪了」→["居住地"]），拿不准就不删；与 facts 同轮冲突时以 forget 为准',
   '"referents":[{"role":"称谓","name":"人名","confidence":0到1}],',
   "  // 用户用角色/亲属称谓指代具体人物：「我老婆是刘浩存」→ role:老婆 name:刘浩存；粉丝式称呼同样输出——只记录「用户这么指代」，不断言真实关系；role 用原话称谓（≤12 字），name 是能唯一定位的专名/人名（≤40 字，泛指如「我妈」不输出）；无则空数组",
-  '"commitments":[{"text":"承诺内容（第三人称）","committedBy":"user|agent|third_party","deadline":"ISO 8601 或 null","confidence":0到1,"evidence":"原文片段","category":"报价|交付|会面|转账|其他"}],',
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
   "归属铁律：Assistant 话中的「我」指 Agent——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；",
   "裁决基准：持久性与影响范围双低的琐事（天气/吃了什么/喝咖啡/寒暄/今天心情）必须 reject；今天的安排/临时事项 decay；只有长期有效且影响未来回答的信息才 remember；",
-  "承诺只收真正的承诺（排除意愿/假设/客套）；转述的第三方承诺（「老板说下周三前交付」）也算，committedBy=third_party；deadline 的相对时间（明天/周五/晚上8点）必须结合输入的当前时间换算为绝对 ISO，无法确定才 null；",
   "corrections 仅在否定/更正旧信息时输出（「不对，会议改到周三了」），旧陈述原文不确定时用最接近的概括。",
 ].join("\n");
 
@@ -231,7 +226,6 @@ interface RawUnified {
   importance?: unknown;
   scores?: unknown;
   memories?: unknown;
-  commitments?: unknown;
   corrections?: unknown;
   understandings?: unknown;
   facts?: unknown;
@@ -263,42 +257,13 @@ export function parseJsonObject(output: string): RawUnified | null {
   }
 }
 
-/** 导出供测试：结构规范化（决策校验/承诺字段/纠正项） */
+/** 导出供测试：结构规范化（决策校验/纠正项） */
 export function normalize(raw: RawUnified): UnifiedExtraction | null {
   const decision =
     raw.decision === "remember" || raw.decision === "decay" || raw.decision === "reject"
       ? raw.decision
       : null;
   if (!decision) return null;
-
-  const commitments = Array.isArray(raw.commitments)
-    ? (raw.commitments as Array<Record<string, unknown>>)
-        .map((c) => {
-          const text = typeof c.text === "string" ? c.text.trim() : "";
-          const committedBy =
-            c.committedBy === "user" || c.committedBy === "agent" || c.committedBy === "third_party"
-              ? c.committedBy
-              : null;
-          const evidence = typeof c.evidence === "string" ? c.evidence.trim() : "";
-          const conf = Number(c.confidence);
-          if (!text || !committedBy || !evidence) return null;
-          let deadline: string | null = null;
-          if (typeof c.deadline === "string" && c.deadline.trim() && !/^null$/i.test(c.deadline.trim())) {
-            const ts = Date.parse(c.deadline);
-            if (Number.isFinite(ts)) deadline = new Date(ts).toISOString();
-          }
-          return {
-            text,
-            committedBy,
-            deadline,
-            confidence: Number.isFinite(conf) ? Math.max(0, Math.min(1, conf)) : 0,
-            evidence,
-            ...(typeof c.category === "string" && c.category.trim() ? { category: c.category.trim() } : {}),
-          } as ExtractedCommitment;
-        })
-        .filter((c): c is ExtractedCommitment => c !== null)
-        .slice(0, 5)
-    : [];
 
   const corrections = Array.isArray(raw.corrections)
     ? (raw.corrections as Array<Record<string, unknown>>)
@@ -446,7 +411,6 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     importance: clampImportance(raw.importance, decision),
     ...(scores ? { scores } : {}),
     memories: decision === "reject" ? [] : asStringArray(raw.memories),
-    commitments,
     corrections,
     understandings,
     facts,
@@ -541,9 +505,9 @@ export interface UnifiedLlmClient {
 }
 
 /**
- * 单次 LLM 完成写入决策 + 记忆抽取 + 承诺识别 + 纠正识别。
+ * 单次 LLM 完成写入决策 + 记忆抽取 + 纠正识别。
  * 任何失败返回 null（调用方回退旧路径），绝不抛错、绝不阻塞写入主链路。
- * 4 字下限为纯卫生闸（挡"好的/哈哈"）：口语承诺可以很短（"明天发你"），
+ * 4 字下限为纯卫生闸（挡"好的/哈哈"）：口语短句也可以很短，
  * 路由不看词表——识别交给 LLM。
  */
 export async function extractUnified(

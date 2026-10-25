@@ -54,9 +54,10 @@ import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerProfileManageRoutes } from "./profile-manage.js";
+import { registerHealthRhythmRoutes } from "./health-rhythm.js";
 import { registerUserAvatarRoutes } from "./user-avatar.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
-import { registerBriefingTestRoutes } from "./briefing-test.js";
+import { registerBriefingTestRoutes, registerEveningDigestTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
 import { registerVoiceprintRoutes } from "./voiceprint.js";
@@ -89,6 +90,7 @@ import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
+import { registerShoppingDecisionRoutes } from "./shopping-decision.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerExitGateMetricsRoutes } from "./exit-gate-metrics.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
@@ -151,6 +153,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerCompanionRoutes(app, deps);
   registerChatRoutes(app, deps);
   registerWalletRoutes(app, deps);
+  // 商品决策页（比价卡 → 决策页；自包含页面 + 内存载荷，模式同 travel-map）
+  registerShoppingDecisionRoutes(app, {
+    shoppingCompareService: deps.shoppingCompareService,
+  });
   registerWorldRoutes(app, worldRouteDeps);
   // Agent World 社交经济域开关（AGENT_WORLD_SOCIAL_ENABLED，实验性子系统默认关闭）：
   // 关闭时跳过社交经济域路由 mount（自由市场/技能商店/A2A 外包/社交动态），
@@ -297,6 +303,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);
   registerProfileManageRoutes(app);
+  // 健康节奏（自包含，无 deps）：灵动岛久坐/喝水提醒的按身份档位下发
+  registerHealthRhythmRoutes(app);
   // 用户头像（自包含，无 deps）：上传/查询/静态拉流
   registerUserAvatarRoutes(app);
   // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
@@ -314,6 +322,25 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     requestClientLocation: briefingClientLocation,
     llmComplete: briefingLlmComplete,
   });
+  // 明日速览手动触发：与到点自动推送同实例、同 WS 事件，用于验证卡片渲染与文案口径
+  registerEveningDigestTestRoutes(app, {
+    wsConnectionRegistry: deps.wsConnectionRegistry,
+    eveningDigestService: deps.eveningDigestService,
+  });
+  // agent pulse 手动触发（Muse 式聚合评审）：返回聚合/prompt/LLM 原始输出/最终
+  // 文案/是否提交的完整留痕，用于验证触发链路与内容口径——走的就是服务本体
+  // check()，闸门语义与定时路径完全一致
+  if (deps.agentPulseCheck) {
+    app.post("/api/test/trigger-agent-pulse", async (request) => {
+      const body = (request.body ?? {}) as { force?: boolean };
+      try {
+        const result = await deps.agentPulseCheck!({ force: body.force === true });
+        return { ok: true, result };
+      } catch (err) {
+        return { ok: false, error: String(err) };
+      }
+    });
+  }
   registerBriefingTtsRoutes(app, { ttsService: deps.ttsService });
   // MiniMax 端到端实时语音对话探针（text 或 PCM 音频进 → 24kHz wav 语音+转录出）
   registerVoiceRealtimeRoutes(app);
@@ -324,7 +351,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     agentMemorySyncService: deps.agentMemorySyncService,
     socialFeedService: deps.socialFeedService,
     agentAccountService: deps.agentAccountService,
-    commitmentBoard: deps.commitmentBoard ?? null,
+    goalBoard: deps.goalBoard ?? null,
   });
   registerFeedbackRoutes(app, { inboxService: deps.inboxService ?? null });
   // 管理后台账号密码登录 + 可吊销会话（status/setup/login/logout；requireAdmin 已升级双通道）

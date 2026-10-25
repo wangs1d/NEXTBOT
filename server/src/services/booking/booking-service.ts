@@ -28,7 +28,6 @@
 
 import { randomBytes } from "node:crypto";
 import { resolveActorId } from "../../agent/actor-id.js";
-import type { CommitmentBoard } from "../../agentic-memory/commitment-board.js";
 import type { AuditService } from "../audit-service.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 
@@ -62,8 +61,6 @@ function isRecord(v: unknown): v is Record<string, unknown> {
 export interface BookingServiceDeps {
   providers: BookingProvider[];
   store?: BookingOrderStore;
-  /** 承诺板可延后注入（bootstrap 中晚于服务构造） */
-  board?: CommitmentBoard | null;
   audit?: AuditService | null;
   /** 日程联动桥可延后注入（bootstrap 中晚于冲突服务构造） */
   scheduleBridge?: ScheduleBookingBridge | null;
@@ -74,7 +71,6 @@ export interface BookingServiceDeps {
 export class BookingService {
   private readonly providers: BookingProvider[];
   private readonly store: BookingOrderStore;
-  private board: CommitmentBoard | null;
   private readonly audit: AuditService | null;
   private bridge: ScheduleBookingBridge | null;
   private readonly config: BookingConfig;
@@ -86,7 +82,6 @@ export class BookingService {
   constructor(deps: BookingServiceDeps) {
     this.providers = deps.providers;
     this.store = deps.store ?? new BookingOrderStore(null);
-    this.board = deps.board ?? null;
     this.audit = deps.audit ?? null;
     this.bridge = deps.scheduleBridge ?? null;
     this.config = { ...getBookingConfig(), ...(deps.config ?? {}) };
@@ -95,11 +90,6 @@ export class BookingService {
       ttlMs: this.config.confirmationTtlMs,
       now: () => this.now().getTime(),
     });
-  }
-
-  /** bootstrap 中承诺板构造完成后注入（见 create-app-services.ts）。 */
-  setCommitmentBoard(board: CommitmentBoard | null): void {
-    this.board = board;
   }
 
   /** bootstrap 中日程冲突服务构造完成后注入（见 create-app-services.ts）。 */
@@ -473,25 +463,6 @@ export class BookingService {
         dateKey: localDateKey(this.now()),
       };
 
-      // 写入承诺板跟踪状态（失败不阻断下单结果）
-      let commitmentId: string | null = null;
-      if (this.board) {
-        try {
-          const created = this.board.create({
-            actorId,
-            text: `【${DOMAIN_LABELS[draft.domain]}】${draft.title}${draft.amountCny != null ? `（¥${draft.amountCny}）` : ""} 已下单${simulated ? "（模拟）" : ""}`,
-            committedBy: "agent",
-            deadline: draft.scheduleAt ?? null,
-            source: "manual",
-            notes: `bookingOrderId=${orderId}; provider=${provider.key}; providerOrderId=${bookResult.providerOrderId ?? "-"}`,
-          });
-          if (created && !("error" in created)) commitmentId = created.id;
-        } catch {
-          // 承诺板异常不影响预订主链路
-        }
-      }
-      order.commitmentId = commitmentId;
-
       // 落库失败不回滚平台订单（假失败会诱导用户重复下单，比缺失本地记录更危险），
       // 如实返回部分成功并由调用方转告用户
       let persistenceError: string | null = null;
@@ -546,7 +517,7 @@ export class BookingService {
         scheduleAt: order.scheduleAt,
         paymentUrl: order.paymentUrl,
         simulated,
-        commitmentId,
+        commitmentId: null, // 兼容保留：承诺板下线后恒为 null
         tracking: bookResult.tracking,
         ...(scheduleTaskId ? { scheduleTaskId } : {}),
         ...(scheduleWarning
@@ -637,20 +608,10 @@ export class BookingService {
     };
   }
 
-  /** 状态迁移时同步本地订单与承诺板。 */
+  /** 状态迁移时同步本地订单。 */
   private async applyStatusTransition(order: StoredBookingOrder, next: BookingOrderStatus, message?: string): Promise<void> {
     await this.store.update(order.orderId, { status: next });
-    if (this.board && order.commitmentId) {
-      try {
-        if (next === "completed") {
-          this.board.fulfill(order.commitmentId);
-        } else if (next === "cancelled" || next === "failed") {
-          this.board.cancel(order.commitmentId, message ?? `预订状态变为 ${next}`);
-        }
-      } catch {
-        // 承诺板异常不影响主链路
-      }
-    }
+    void message;
   }
 
   // ------------------------------------------------------------------ //
@@ -734,13 +695,6 @@ export class BookingService {
     }
 
     await this.store.update(order.orderId, { status: "cancelled" });
-    if (this.board && order.commitmentId) {
-      try {
-        this.board.cancel(order.commitmentId, reason ?? "用户主动取消预订");
-      } catch {
-        // 承诺板异常不影响主链路
-      }
-    }
     // 日程反向同步：取消预订 → 取消关联日程（失败不阻断）
     let scheduleSyncWarning: string | null = null;
     if (this.bridge) {
@@ -937,13 +891,6 @@ export class BookingService {
     }
 
     await this.store.update(order.orderId, { scheduleAt, deadline: scheduleAt });
-    if (this.board && order.commitmentId) {
-      try {
-        this.board.update(order.commitmentId, { deadline: scheduleAt });
-      } catch {
-        // 承诺板异常不影响主链路
-      }
-    }
     // 日程反向同步：改期预订 → 更新关联日程时间（失败不阻断）
     let scheduleSyncWarning: string | null = null;
     if (this.bridge) {

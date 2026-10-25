@@ -9,6 +9,7 @@
  *
  * 顺序即优先级（先附上的卡生效，后续 attach 各自含结构化标记 guard 让位）：
  *   1. travel_itinerary 行程卡（直跑 + loop 冷层回捞，handler 解析后传入）
+ *      1b. travel_brief 简报卡（紧跟行程卡：这版怎么排的 + 一键补心愿点）
  *   2. weather 天气卡（loop 多次调用合并为一张多地卡）
  *   3. search_result 搜索卡（loop 多次调用按 url 去重合并；搜索类媒体有产出
  *      时整卡让位——照片是主形态，意图仲裁见 searchMediaHasItems）
@@ -27,6 +28,11 @@ import {
   containsTravelItineraryCard,
 } from "./tool-result-processor.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
+import type { StoredTravelPlan } from "../skills/travel-planning/travel-plan-store.js";
+import {
+  buildBriefCardPayload,
+  briefFromStoredPlan,
+} from "../skills/travel-planning/travel-brief.js";
 
 /** 一次真实工具执行的回执（来自 onExternalToolExecuted 或直跑 toolResult）。 */
 export interface ExecutedToolReceipt {
@@ -176,6 +182,94 @@ export function classifyTravelCardMissing(input: {
   return null;
 }
 
+/* ────────────────────────────────────────────────────────────
+ * 简报卡（travel 主线 F1：规划直出后把假设摊开 + 一次偏好问询）
+ *
+ * 为什么确定性附卡而不是让模型转述：用户要的是「点一下就能把这版改掉」，
+ * 模型口头追问会漏、会把按钮文案改写成另一句话（回传后槽位就对不上）。
+ * 卡面数据全部来自冷层存档（slots.sources / verification / pois），
+ * 不重跑解析——读到的就是刚才真正用来排程的那一版。
+ * ──────────────────────────────────────────────────────────── */
+
+const TRAVEL_BRIEF_MARKER = '"cardKind":"travel_brief"';
+
+/** 正文里是否已有简报卡（同一轮只附一张）。 */
+export function containsTravelBriefCard(text: string): boolean {
+  return (text ?? "").includes(TRAVEL_BRIEF_MARKER);
+}
+
+/** 行程回执 → 冷层存档（回执只有 planId 时直读；冷层回捞路径已是全量 plan）。 */
+function resolveBriefPlan(result?: Record<string, unknown>): StoredTravelPlan | null {
+  if (!result) return null;
+  const planId = typeof result.planId === "string" ? result.planId : "";
+  if (planId) {
+    const stored = travelPlanStore.get(planId);
+    if (stored) return stored;
+  }
+  const asPlan = result as unknown as StoredTravelPlan;
+  return Array.isArray(asPlan.days) && typeof asPlan.destination === "string"
+    ? asPlan
+    : null;
+}
+
+/**
+ * 候选心愿点：POI 池里有、这版没排上的真地点（优先高分景点 2 个 + 餐厅 1 个）。
+ * 让用户点一下就有得改，而不是逼用户凭空想名字。
+ */
+function briefCandidates(plan: StoredTravelPlan): Array<{ name: string; type?: string }> {
+  const placed = new Set<string>();
+  for (const d of plan.days ?? []) {
+    for (const it of d.items ?? []) {
+      if (it.name) placed.add(it.name.trim());
+    }
+  }
+  const pool = (plan.pois ?? []).filter((p) => p.name && !placed.has(p.name.trim()));
+  const byRating = (a: { rating?: number }, b: { rating?: number }) =>
+    (b.rating ?? 0) - (a.rating ?? 0);
+  const attractions = pool.filter((p) => p.type === "attraction").sort(byRating).slice(0, 2);
+  const foods = pool.filter((p) => p.type === "restaurant" || p.type === "cafe").sort(byRating).slice(0, 1);
+  return [...attractions, ...foods].map((p) => ({ name: p.name, type: p.type }));
+}
+
+/** 简报卡块（无内容可说时返回 null）；调用方负责拼到正文末尾。 */
+export function buildTravelBriefCardBlock(plan: StoredTravelPlan): string | null {
+  const issues: Array<{ level: "block" | "warn" | "info"; message: string }> = (
+    plan.verification?.issues ?? []
+  ).map((i) => ({ level: i.level, message: i.message }));
+  for (const missed of plan.wishlistMissed ?? []) {
+    issues.unshift({
+      level: "warn",
+      message: `你点名的「${missed}」这版没排进去：当地没搜到对得上的地点，给个更全的名字我就补进去。`,
+    });
+  }
+  const payload = buildBriefCardPayload({
+    brief: briefFromStoredPlan(plan),
+    destination: plan.destination,
+    candidates: briefCandidates(plan),
+    issues,
+    status: plan.status,
+    totalCost: plan.totalCost,
+  });
+  if (!payload) return null;
+  return `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
+}
+
+/**
+ * 行程卡之后附简报卡。没有行程卡（规划失败/未规划）不附——
+ * 简报是「这版怎么排的」，没有版本就没什么可摊开的。
+ */
+export function attachTravelBriefCard(
+  text: string,
+  travelResult?: Record<string, unknown>,
+): string {
+  if (!containsTravelItineraryCard(text) || containsTravelBriefCard(text)) return text;
+  const plan = resolveBriefPlan(travelResult);
+  if (!plan) return text;
+  const block = buildTravelBriefCardBlock(plan);
+  if (!block) return text;
+  return `${text}\n\n${block}`;
+}
+
 export interface DeterministicCardChainInput {
   /** processAssistantText 之后的正文（LLM 口语回复，可能已含 L2 卡块）。 */
   text: string;
@@ -203,6 +297,7 @@ export interface DeterministicCardChainInput {
 export function attachDeterministicCards(input: DeterministicCardChainInput): string {
   let text = input.text;
   text = attachTravelItineraryCard(text, input.travelToolName, input.travelResult);
+  text = attachTravelBriefCard(text, input.travelResult);
   text = attachWeatherResultCardFromExecuted(text, input.weatherResults ?? []);
   text = attachSearchResultCardFromExecuted(text, input.searchResults ?? [], {
     yieldToSearchMedia: input.searchMediaHasItems === true,

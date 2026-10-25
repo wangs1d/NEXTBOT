@@ -246,9 +246,11 @@ class TravelPlanWindowLauncher {
 Future<void> runTravelPlanWindow(String mailboxDirPath) async {
   WidgetsFlutterBinding.ensureInitialized();
 
-  // WebView2 环境与访问凭据同款预热；共享 WebView 进程级预加载要在最早期
-  // 启动（与窗口创建并行），首次显示即有热地图，不再「打开后看转圈」。
-  unawaited(bootstrapWindowsWebView());
+  // WebView2 环境预热后预热共享 WebView：环境初始化是轻量 COM 调用（毫秒级），
+  // await 住再 preload，避免 preload 的控制器初始化与环境兜底竞争；首次显示
+  // 即有热地图，不再「打开后看转圈」。优先加入主应用的浏览器进程（省一份
+  // 实例内存）；失败退回 _travel 专属目录自建（见 ensureChildWebViewEnvironment）。
+  await ensureChildWebViewEnvironment("_travel");
   unawaited(AccessCredentialStore.instance.load());
   TravelWebPanelHost.preload();
 

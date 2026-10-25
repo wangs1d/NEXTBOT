@@ -94,3 +94,25 @@ export function detectMemorySignals(
 
   return { isHighSignal, reasons, extractLines };
 }
+
+/**
+ * 热路径候选筛选（2026-10-23，对齐 Mem0 async_mode / LangMem hot path）。
+ *
+ * 主流记忆层当轮写入的只有一类东西：**用户侧的原子事实**（显式要求记住 / 用户
+ * 自我陈述）。agent 自己的回执与结论（`[Agent 承诺/结论]`）不进——那是过程叙述，
+ * 执行状态由日程/任务系统承载；落库只会造出"答应别人的『Agent 承诺于…』"式
+ * 的假待办（本次事故）。「用户: x | Agent: y」合并行是对话原文，同样不进。
+ *
+ * 返回清洗后的原子事实（剥掉 `[用户事实]` / `[用户要求记住]` 标记）。
+ */
+export function selectHotPathMemoryLines(lines: string[]): string[] {
+  const out: string[] = [];
+  for (const raw of lines ?? []) {
+    const line = (raw ?? "").trim();
+    const match = /^\[(用户要求记住|用户事实)\]\s*/.exec(line);
+    if (!match) continue;
+    const fact = line.slice(match[0].length).trim();
+    if (fact.length >= 4) out.push(fact);
+  }
+  return out;
+}

@@ -232,7 +232,7 @@ import {
 } from "./tool-result-processor.js";
 import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-service.js";
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
-import { resolveTravelReceipt } from "./deterministic-card-chain.js";
+import { attachTravelBriefCard, resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
 import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, type TravelPlanRequest } from "../agent/realtime-search-query.js";
@@ -3222,6 +3222,8 @@ if (route.plane === "task") {
               resolvedTravel.toolName,
               resolvedTravel.result,
             );
+            // 简报卡与对话面同构：把「这版按哪些假设排的」摊开 + 一键补心愿点
+            finalText = attachTravelBriefCard(finalText, resolvedTravel.result);
           }
           // 视频媒体卡（2026-10-02）：video.grab/video.find 回执带可播放流时附
           // [RENDER_AS:video] 媒体标记，与 WS 对话面 attachDeterministicCards 的

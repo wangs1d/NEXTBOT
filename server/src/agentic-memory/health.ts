@@ -13,7 +13,7 @@ import { getMemoryRerankerMode } from "./env.js";
 
 export function getMemoryHealthSnapshot(): Record<string, unknown> {
   const runtime = getAgenticMemoryRuntime();
-  const { ledger, commitmentBoard, provenance, bridge, understandingStore, factStore, fts } =
+  const { ledger, provenance, bridge, understandingStore, factStore, fts } =
     getMemoryComponents();
   const humanLike = getHumanLikeMemoryService();
 
@@ -26,7 +26,6 @@ export function getMemoryHealthSnapshot(): Record<string, unknown> {
       nodeCount: humanLike ? countGraphNodes(humanLike) : null,
     },
     ledger: ledger?.stats() ?? null,
-    commitments: commitmentBoard?.statsByStatus() ?? null,
     provenance: provenance?.stats() ?? null,
     bridge: bridge
       ? {

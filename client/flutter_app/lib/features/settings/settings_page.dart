@@ -17,7 +17,6 @@ import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
 import "../model_config/model_provider_card.dart";
 import "../model_config/model_provider_catalog.dart";
-import "sleep_routine_section.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
@@ -65,11 +64,8 @@ class _SettingsPageState extends State<SettingsPage>
   String? _modelInitialModel;
 
   // —— 云端连接版「用户自有模型」（BYOK over cloud，!isBundled 时替代 byok 卡） ——
-  final TextEditingController _cloudBaseCtrl = TextEditingController();
-  final TextEditingController _cloudKeyCtrl = TextEditingController();
-  final TextEditingController _cloudModelCtrl = TextEditingController();
-  bool _cloudKeyObscure = true;
-  bool _cloudSaving = false;
+  // 收集 UI 全在一键更换弹窗内的 ModelProviderCard（与首启向导共用），这里只存
+  // 状态与落盘回调。
   String? _cloudMsg;
   bool _cloudConfigured = false;
   Map<String, dynamic>? _vpStatus;
@@ -95,14 +91,12 @@ class _SettingsPageState extends State<SettingsPage>
     _loadCloudModelConfig();
     _refreshVoiceprintStatus();
     _refreshMailStatus();
+    _loadMailPassPrefill();
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _cloudBaseCtrl.dispose();
-    _cloudKeyCtrl.dispose();
-    _cloudModelCtrl.dispose();
     super.dispose();
   }
 
@@ -302,14 +296,7 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
-      _SettingsSection.general => Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            _buildGeneralCard(),
-            const SizedBox(height: 16),
-            const SleepRoutineSection(),
-          ],
-        ),
+      _SettingsSection.general => _buildGeneralCard(),
       _SettingsSection.model => _buildModelSection(),
       _SettingsSection.serviceAccess => _buildServiceAccessSection(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
@@ -363,49 +350,71 @@ class _SettingsPageState extends State<SettingsPage>
   Future<void> _loadCloudModelConfig() async {
     await CloudModelBindingStore.instance.load();
     if (!mounted) return;
-    setState(() {
-      _cloudBaseCtrl.text = CloudModelBindingStore.instance.baseUrl ?? "";
-      _cloudKeyCtrl.text = CloudModelBindingStore.instance.apiKey ?? "";
-      _cloudModelCtrl.text = CloudModelBindingStore.instance.model ?? "";
-      _cloudConfigured = CloudModelBindingStore.instance.isConfigured;
-    });
+    setState(() => _cloudConfigured = CloudModelBindingStore.instance.isConfigured);
   }
 
-  /// 保存到本机（CloudModelBindingStore）；生效时机 = 下一次 WS 连接建立
-  /// （session.init 上送，服务端按账号绑定；重启应用立即生效）。
-  Future<void> _saveCloudModelConfig() async {
-    if (_cloudSaving) return;
-    final String base = _cloudBaseCtrl.text.trim();
-    final String key = _cloudKeyCtrl.text.trim();
-    final String model = _cloudModelCtrl.text.trim();
-    if (base.isEmpty || key.isEmpty || model.isEmpty) {
-      setState(() => _cloudMsg = "三项都要填写（不需要时点「停用」清除）");
-      return;
-    }
+  /// 一键更换模型弹窗：复用与首启向导共用的 [ModelProviderCard]（目录式选型，
+  /// 接口地址由服务端目录自动匹配下发，不再让用户手填）。保存即写本机
+  /// CloudModelBindingStore，下一次 WS 连接建立（session.init 上送）生效。
+  Future<void> _showCloudModelDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (BuildContext dialogContext) {
+        final NavigatorState nav = Navigator.of(dialogContext);
+        return AlertDialog(
+          title: const Text(
+            "更换模型",
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          ),
+          contentPadding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520),
+            child: SingleChildScrollView(
+              child: ModelProviderCard(
+                initialBaseUrl: CloudModelBindingStore.instance.baseUrl,
+                initialModel: CloudModelBindingStore.instance.model,
+                initialApiKey: CloudModelBindingStore.instance.apiKey,
+                autofocusKey: !_cloudConfigured,
+                saveLabel: _cloudConfigured ? "保存并更换" : "保存并接入",
+                onSave: _saveCloudBinding,
+                onSaved: () {
+                  nav.pop();
+                  if (mounted) {
+                    setState(() {
+                      _cloudConfigured = true;
+                      _cloudMsg = "已更换模型，重连服务器后生效（重启应用立即生效）";
+                    });
+                  }
+                },
+              ),
+            ),
+          ),
+          actions: <Widget>[
+            TextButton(onPressed: nav.pop, child: const Text("取消")),
+          ],
+        );
+      },
+    );
+  }
+
+  /// 落盘本机 BYOK 三元组（baseUrl 由目录自动匹配而来）；https 门禁与原表单一致。
+  /// 抛异常由 ModelProviderCard 捕获并展示「保存失败」。
+  Future<void> _saveCloudBinding(ModelConfigDraft draft) async {
+    final String base = draft.baseUrl.trim();
     if (!base.startsWith("https://")) {
-      setState(() => _cloudMsg = "接口地址必须以 https:// 开头（服务器拒绝明文来源的 Key）");
-      return;
+      throw Exception("接口地址必须以 https:// 开头（服务器拒绝明文来源的 Key）");
     }
-    setState(() {
-      _cloudSaving = true;
-      _cloudMsg = null;
-    });
-    await CloudModelBindingStore.instance.save(baseUrl: base, apiKey: key, model: model);
-    if (!mounted) return;
-    setState(() {
-      _cloudSaving = false;
-      _cloudConfigured = true;
-      _cloudMsg = "已保存，重连服务器后生效（重启应用立即生效）";
-    });
+    await CloudModelBindingStore.instance.save(
+      baseUrl: base,
+      apiKey: draft.apiKey.trim(),
+      model: draft.model.trim(),
+    );
   }
 
   Future<void> _clearCloudModelConfig() async {
     await CloudModelBindingStore.instance.clear();
     if (!mounted) return;
     setState(() {
-      _cloudBaseCtrl.clear();
-      _cloudKeyCtrl.clear();
-      _cloudModelCtrl.clear();
       _cloudConfigured = false;
       _cloudMsg = "已停用自有模型，恢复使用平台默认模型";
     });
@@ -424,6 +433,17 @@ class _SettingsPageState extends State<SettingsPage>
       () => _mailStatus =
           res["status"] is Map ? res["status"] as Map<String, dynamic> : null,
     );
+  }
+
+  /// 已接入时把服务端存着的授权码回填进输入框（默认打码，眼睛钮显隐）。
+  Future<void> _loadMailPassPrefill() async {
+    final Map<String, dynamic> cfg = await MailWatchApi.serviceConfig();
+    if (!mounted) return;
+    final Map<String, dynamic> mail = cfg["mail"] is Map
+        ? cfg["mail"] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    final String key = mail["keyValue"]?.toString() ?? "";
+    if (key.isNotEmpty) setState(() => _mailPassCtrl.text = key);
   }
 
   /// 授权码保存：PUT /api/service-config（mail 块）——服务端落盘 data/service-config.json
@@ -453,11 +473,12 @@ class _SettingsPageState extends State<SettingsPage>
       if (!mounted) return;
       setState(() {
         _mailStatus = st;
-        _mailPassCtrl.clear();
         _mailSaveMsg = st["running"] == true
             ? "已接通，正在盯邮箱"
             : "已保存，但未启动：${st["reason"] ?? "未知原因"}";
       });
+      // 回填服务端实际生效的授权码（输入框与已存值保持一致，默认打码）
+      await _loadMailPassPrefill();
     } catch (e) {
       if (!mounted) return;
       setState(() => _mailSaveMsg = "保存失败：$e");
@@ -705,10 +726,13 @@ class _SettingsPageState extends State<SettingsPage>
     );
   }
 
-  /// 云端连接版模型卡：自有 OpenAI 兼容端点三元组表单。
+  /// 云端连接版模型卡：一键更换模型（弹窗内目录式选型）。
+  /// 接口地址由服务端 /api/model-providers 目录自动匹配下发，不再让用户手填；
   /// Key 只落本机 JSON（与应用凭据同目录），仅 wss 连接时随 session.init 上送。
   Widget _buildCloudModelCard() {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final String? currentModel = CloudModelBindingStore.instance.model;
+    final String? currentBase = CloudModelBindingStore.instance.baseUrl;
     return Card(
       margin: EdgeInsets.zero,
       child: Padding(
@@ -723,69 +747,57 @@ class _SettingsPageState extends State<SettingsPage>
                 Text("模型服务", style: Theme.of(context).textTheme.titleMedium),
                 const Spacer(),
                 Text(
-                  _cloudConfigured ? "已配置（用你自己的模型）" : "未配置（用平台默认模型）",
+                  _cloudConfigured
+                      ? "已配置 · ${currentModel ?? ""}"
+                      : "未配置（用平台默认模型）",
                   style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                 ),
               ],
             ),
             const SizedBox(height: 6),
             Text(
-              "填入你自己的 OpenAI 兼容接口，对话将使用你自己的模型账号。API Key 只保存在本机，仅在加密（wss）连接时上送服务器使用。",
+              "选服务商、填 API Key 即可一键更换模型，接口地址由服务端目录自动匹配，无需手填。"
+              "API Key 只保存在本机，仅在加密（wss）连接时上送服务器使用。",
               style: Theme.of(context).textTheme.bodySmall,
             ),
             const SizedBox(height: 12),
-            TextField(
-              controller: _cloudBaseCtrl,
-              keyboardType: TextInputType.url,
-              decoration: const InputDecoration(
-                labelText: "接口地址 baseUrl",
-                hintText: "https://api.example.com/v1",
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _cloudKeyCtrl,
-              obscureText: _cloudKeyObscure,
-              decoration: InputDecoration(
-                labelText: "API Key",
-                hintText: "sk-...",
-                isDense: true,
-                border: const OutlineInputBorder(),
-                suffixIcon: IconButton(
-                  icon: Icon(
-                    _cloudKeyObscure
-                        ? Icons.visibility_off_outlined
-                        : Icons.visibility_outlined,
-                    size: 18,
-                  ),
-                  onPressed: () => setState(() => _cloudKeyObscure = !_cloudKeyObscure),
+            if (_cloudConfigured) ...<Widget>[
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest.withValues(alpha: 0.45),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: cs.outlineVariant),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Text(
+                      "当前模型：${currentModel ?? "-"}",
+                      style: const TextStyle(
+                          fontSize: 13, fontWeight: FontWeight.w600),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "接口地址 ${currentBase ?? "-"}（自动匹配）",
+                      style: TextStyle(
+                          fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                  ],
                 ),
               ),
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: _cloudModelCtrl,
-              decoration: const InputDecoration(
-                labelText: "模型名",
-                hintText: "例如 deepseek-chat / gpt-4o-mini / kimi-k2.5",
-                isDense: true,
-                border: OutlineInputBorder(),
-              ),
-            ),
-            const SizedBox(height: 12),
+              const SizedBox(height: 12),
+            ],
             Row(
               children: <Widget>[
-                FilledButton(
-                  onPressed: _cloudSaving ? null : _saveCloudModelConfig,
-                  child: _cloudSaving
-                      ? const SizedBox(
-                          width: 14,
-                          height: 14,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Text("保存", style: TextStyle(fontSize: 13)),
+                FilledButton.icon(
+                  onPressed: _showCloudModelDialog,
+                  icon: const Icon(Icons.swap_horiz_rounded, size: 16),
+                  label: Text(
+                    _cloudConfigured ? "一键更换模型" : "一键接入模型",
+                    style: const TextStyle(fontSize: 13),
+                  ),
                 ),
                 if (_cloudConfigured) ...<Widget>[
                   const SizedBox(width: 8),

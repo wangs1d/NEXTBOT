@@ -6,7 +6,8 @@
 //
 // 用量纪律（不乱调用 LLM）：
 //  - 只服务内容型 kind（message_watch / unread_burst / meeting_soon），
-//    晨间简报/心跳回顾等数据拼装场景仍走零 LLM 模板
+//    晨间简报等数据拼装场景仍走零 LLM 模板（「是否开口」的 agent 审阅
+//    在 agent-pulse.ts，不在本层——本层只在触发点已决定要说时润色表达）
 //  - 按重要性分配：低于 PROACTIVITY_PHRASE_MIN_IMPORTANCE（默认 high）的
 //    提案直接走模板——低优提醒不值得花一次润色调用（2026-10-01）
 //  - 每日调用熔断（PROACTIVITY_MAX_PHRASE_PER_DAY，默认 30）
@@ -51,6 +52,13 @@ function buildUserPrompt(kind: string, facts: Record<string, unknown>): string {
         `相关背景：${f("memory") || "无"}`,
         `请提醒时间，并自然带一句背景（有背景才提，没有就纯提醒）。`,
       ].join("\n");
+    case "agent_pulse":
+      return [
+        `场景：你后台聚合了用户的安排/未读/目标等信息，已经判断值得主动说一件事。`,
+        `要说的内容（初稿）：${f("draft")}`,
+        `相关事实：${f("context") || "无"}`,
+        `请把初稿用你的语气说出口：可以精简或换个说法，但不得添加相关事实之外的新信息，不得改成汇报腔。`,
+      ].join("\n");
     default:
       return [
         `场景：你察觉到一件事需要主动告诉用户。`,
@@ -64,6 +72,12 @@ export type SpeechPolisherDeps = {
   /** 外部模型（晚绑定：bootstrap 运行期取值；null/未启用 = 全模板模式） */
   chat: () => ExternalChatProvider | null;
   dataPath: string;
+  /**
+   * 用户画像浅层摘要（user-style-brief）：agent 开口的每句话都应带用户的细节
+   * 区分——称呼/沟通偏好/所在地等。晚绑定（bootstrap 装配画像后注入）；
+   * 未注入/返回 null = 无画像浅层背景，行为与旧版一致。
+   */
+  styleBrief?: (sessionId: string) => Promise<string | null> | string | null;
   /** 测试注入 */
   nowFn?: () => number;
   timeoutMs?: number;
@@ -84,11 +98,13 @@ export class SpeechPolisher {
   private readonly nowFn: () => number;
   private readonly timeoutMs: number;
   private readonly cap: number;
+  private readonly styleBrief?: NonNullable<SpeechPolisherDeps["styleBrief"]>;
   private callsDate = "";
   private callsToday = 0;
   private lastFallback?: string;
 
   constructor(private readonly deps: SpeechPolisherDeps) {
+    this.styleBrief = deps.styleBrief;
     this.nowFn = deps.nowFn ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? 8_000;
     const raw = process.env.PROACTIVITY_MAX_PHRASE_PER_DAY;
@@ -139,6 +155,19 @@ export class SpeechPolisher {
     const chat = this.deps.chat();
     if (!chat) return input.fallback;
     const userPrompt = buildUserPrompt(input.kind, input.facts);
+    // 画像浅层影响：私人管家的细节区分（称呼/偏好/节奏）。读取失败/为空 = 无画像。
+    let systemPrompt = SYSTEM_PROMPT;
+    try {
+      const style = await this.styleBrief?.(input.sessionId);
+      if (style) {
+        systemPrompt =
+          SYSTEM_PROMPT +
+          "\n\n用户画像浅层背景（细节区分用；没提到的不要编，与事实冲突时以事实为准）：\n" +
+          style;
+      }
+    } catch {
+      /* 画像读取失败不阻塞润色 */
+    }
     try {
       let full = "";
       await this.withTimeout(
@@ -150,7 +179,7 @@ export class SpeechPolisher {
           },
           undefined,
           {
-            systemPromptOverride: SYSTEM_PROMPT,
+            systemPromptOverride: systemPrompt,
             ephemeralTurn: true,
             disableThinking: true,
             maxThreadMessages: 0,

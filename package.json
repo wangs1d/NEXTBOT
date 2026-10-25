@@ -11,6 +11,7 @@
   ],
   "scripts": {
     "dev:all": "node scripts/dev-all.mjs",
+    "migrate:legacy": "node scripts/migrate-legacy-data.mjs",
     "dev:client:watch": "node scripts/dev-client-watch.mjs",
     "dev:desktop": "node scripts/desktop-hot-reload.mjs",
     "dev:desktop:once": "node scripts/desktop-hot-reload.mjs --once",

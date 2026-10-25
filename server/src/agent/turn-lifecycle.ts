@@ -3,16 +3,16 @@ import type { UserPersonalizationService } from "../services/user-personalizatio
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
 import type { TaskExecutionPlan } from "./plan-execute-loop.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
-import { detectMemorySignals } from "./memory-signal.js";
+import { detectMemorySignals, selectHotPathMemoryLines } from "./memory-signal.js";
 import type { TurnUnderstanding } from "./task-router.js";
 import { getShortTermMemoryConfig } from "../services/short-term-memory-config.js";
 import { getDailyDigestService } from "../services/daily-digest-service.js";
 import { getTurnWalService } from "../services/turn-wal-service.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
-import { isKvSummaryMinimal } from "../config/memory-env.js";
 import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
+
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
 import { isNotesChatSessionId, isIncognitoChatSessionId } from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
@@ -215,35 +215,42 @@ export class TurnLifecycle {
     }
 
     if (signal.isHighSignal) {
-      // 高信号原子行：统一写入者启用时同时覆盖长期图（Mem0/海马体）与
-      // KV summary 行两个出口（每候选一次决策，替代旧 fast-path + KV 双链路双决策）；
-      // 未启用时走 ingestFastPath 旧链路 + 下方 KV fast-path 直写。
+      // 高信号原子行的两个去向（对齐 Mem0 async_mode / LangMem hot+background）：
+      // ① 冷路径：全部候选进整理队列（consolidation.submitCandidate → 夜间去重合并）
+      //    或 narrative 长期图（带写决策）；
+      // ② 热路径（2026-10-23 恢复，按主流形态）：**用户侧原子事实**（显式要求记住 /
+      //    用户自我陈述）经写决策后当轮落 KV——brain.recall 的 kvSummary 召回通道
+      //    需要新鲜数据，等夜间整理会丢一整天。
+      // 与旧实现的区别（旧实现正是污染源）：只写用户侧事实，**不写** agent 回执/
+      // 自述（`[Agent 承诺/结论]`，那是过程叙述，执行状态由日程系统承载）与
+      // 「用户: x | Agent: y」对话合并行；落库前过写决策 + ltm-write-gate +
+      // ISO 时间戳（appendMemorySummaryLine 统一盖）。行内容是干净原子事实，
+      // 不带 [fast-path] 内部标记。承诺板已下线，回执不会再生成为待办，
+      // 热路径无条件启用（无 kill switch）。
       this.ingestFastPath(input.actorId, signal.extractLines, memContext, inferMemoryTopic(input.userText));
-      if (!getMemoryConsolidationService() && this.deps.agentMemorySyncService && !isKvSummaryMinimal()) {
-        void (async () => {
-          for (const line of signal.extractLines) {
-            const decision = await decideMemoryWrite(line, {
-              actorId: input.actorId,
-              source: "memory_summary:fast_path",
-              userText: input.userText,
-              assistantText: full,
-              heuristicHint: "remember",
-            });
-            this.deps.agentMemorySyncService?.appendMemorySummaryLine(
-              input.actorId,
-              `[fast-path][${decision.decision}][${decision.semanticClass}] ${line}`,
-              inferMemoryTopic(input.userText),
-            );
-          }
-        })().catch(() => {});
+      if (this.deps.agentMemorySyncService) {
+        const hotFacts = selectHotPathMemoryLines(signal.extractLines);
+        if (hotFacts.length > 0) {
+          void (async () => {
+            for (const fact of hotFacts) {
+              const decision = await decideMemoryWrite(fact, {
+                actorId: input.actorId,
+                source: "chat:hot_path",
+                userText: input.userText,
+                assistantText: full,
+                heuristicHint: "remember",
+              });
+              if (decision.decision !== "remember" && decision.decision !== "overwrite") continue;
+              this.deps.agentMemorySyncService?.appendMemorySummaryLine(
+                input.actorId,
+                fact,
+                inferMemoryTopic(input.userText),
+              );
+            }
+          })().catch(() => {});
+        }
       }
     }
-
-    this.deps.agentMemorySyncService?.reconcileStructuredMemoryAfterTurn(
-      input.actorId,
-      input.userText,
-      full,
-    );
 
     const deferArchive =
       this.stmConfig.mode === "enhanced" &&

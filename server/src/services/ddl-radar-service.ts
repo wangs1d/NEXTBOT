@@ -9,15 +9,13 @@
  *   L2 tomorrow （明天到期）    → 晚间备忘卡的"明天要交"
  *   L3 today    （今天到期/已过期）→ 晨报"今天截止"置顶
  *
- * 为什么不在这里推送：项目已有承诺板（commitment-board，自带
- * remindBeforeMinTiers 分钟级梯度）与日程 preReminders，再发一遍推送会撞车。
+ * 为什么不在这里推送：日程任务自带 preReminders，再发一遍推送会撞车。
  * 本模块只把"跨天的 DDL 语义"补齐，让睡前/晨间两个既有出口看到它们。
  *
  * 数据源（全部可选注入，缺失即降级为空，不抛错）：
- *   1. 承诺板（actorId 维度）：active / pending_confirmation 且 deadline 非空。
- *      这是 DDL 最权威的来源——承诺是"答应了要做的事"，天然带截止时间。
- *   2. 日程任务（sessionId 维度）：只收**命中 DDL 语义**的条目（截止/提交/
+ *   1. 日程任务（sessionId 维度）：只收**命中 DDL 语义**的条目（截止/提交/
  *      交作业/考试/答辩…），普通会议与提醒一律不收——否则整天的会都变成 DDL。
+ *   2. 数据入口台账（ingest，actorId 维度）：用户上传的课表/DDL 截止项。
  *
  * 分档口径：按**本地日历日差**（不是小时数）。用户感知的"明天截止"是日历
  * 概念，23:50 和次日 00:10 只差 20 分钟却是两个档，按小时切会切错。
@@ -25,10 +23,10 @@
 
 export type DdlTier = "today" | "tomorrow" | "soon";
 
-export type DdlSourceKind = "commitment" | "schedule" | "ingest";
+export type DdlSourceKind = "schedule" | "ingest";
 
 export interface DdlItem {
-  /** 全局唯一 id（commitment:xxx / schedule:xxx），供上层去重与跳转 */
+  /** 全局唯一 id（schedule:xxx / ingest:xxx），供上层去重与跳转 */
   id: string;
   title: string;
   /** ISO 截止时间 */
@@ -41,7 +39,7 @@ export interface DdlItem {
   hoursLeft: number;
   /** 是否已过截止时间（保留在 today 档，文案用「已过期」） */
   overdue: boolean;
-  /** 承诺类别（作业/报告/交付…）或日程 category */
+  /** 日程 category 或 ingest 类别（作业/报告/交付…） */
   category?: string;
 }
 
@@ -54,22 +52,6 @@ export interface DdlScanResult {
   soon: DdlItem[];
   /** 三档合计（已过滤 >3 天的远期项） */
   total: number;
-}
-
-/** 承诺板最小结构接口（避免与 agentic-memory 重类型耦合） */
-export interface CommitmentBoardLike {
-  list(opts?: {
-    actorId?: string;
-    status?: string | string[];
-    limit?: number;
-  }): Array<{
-    id: string;
-    actorId: string;
-    text: string;
-    status: string;
-    deadline: string | null;
-    category?: string | null;
-  }>;
 }
 
 /** 日程服务最小结构接口 */
@@ -87,7 +69,6 @@ export interface ScheduleTasksLike {
 }
 
 export interface DdlRadarDeps {
-  commitmentBoard?: CommitmentBoardLike | null;
   scheduleTaskService?: ScheduleTasksLike | null;
   /**
    * 数据入口台账（用户自己上传的课表/DDL/行程）。
@@ -152,20 +133,17 @@ export class DdlRadarService {
   /**
    * 扫描并分档。任一数据源缺失/抛错 → 该源当作空，不影响另一源。
    * @param sessionId 日程维度 key
-   * @param actorId   承诺板维度 key（缺省则跳过承诺源）
+   * @param actorId   ingest 维度 key
    */
   scan(sessionId: string, actorId?: string): DdlScanResult {
     const now = this.now();
-    // 承诺板按 actorId 存、日程按 sessionId 存；二者在本项目多数链路上同值
-    // （ws 的 boundActorId 即会话 actor），缺省时用 sessionId 兜底，去重靠标题归一。
     const actorKey = actorId ?? sessionId;
     const items: DdlItem[] = [
-      ...this.fromCommitments(actorKey, now),
       ...this.fromSchedule(sessionId, now),
       ...this.fromIngested(actorKey, now),
     ];
 
-    // 同一件事可能既在承诺板又被物化成日程（source=commitment）：按标题去重，
+    // 同一件事可能既在日程又在 ingest 台账：按标题去重，
     // 保留截止更早的那条（更紧迫）。
     const deduped = new Map<string, DdlItem>();
     for (const item of items) {
@@ -207,42 +185,6 @@ export class DdlRadarService {
   }
 
   // ---- 数据源 ---------------------------------------------------------
-
-  private fromCommitments(actorId: string | undefined, now: Date): DdlItem[] {
-    if (!actorId || !this.deps.commitmentBoard) return [];
-    let rows: ReturnType<CommitmentBoardLike["list"]> = [];
-    try {
-      rows = this.deps.commitmentBoard.list({
-        actorId,
-        status: ["active", "pending_confirmation"],
-        limit: 200,
-      });
-    } catch {
-      return [];
-    }
-    const out: DdlItem[] = [];
-    for (const row of rows) {
-      if (!row.deadline) continue;
-      const due = new Date(row.deadline);
-      const dueMs = due.getTime();
-      if (!Number.isFinite(dueMs)) continue;
-      const dayDiff = localDayDiff(now, due);
-      const tier = tierOf(dayDiff);
-      if (!tier) continue;
-      out.push({
-        id: `commitment:${row.id}`,
-        title: clipTitle(row.text),
-        dueAt: due.toISOString(),
-        source: "commitment",
-        tier,
-        dayDiff,
-        hoursLeft: Math.round(((dueMs - now.getTime()) / 3_600_000) * 10) / 10,
-        overdue: dueMs < now.getTime(),
-        category: row.category ?? undefined,
-      });
-    }
-    return out;
-  }
 
   private fromSchedule(sessionId: string, now: Date): DdlItem[] {
     if (!sessionId || !this.deps.scheduleTaskService) return [];

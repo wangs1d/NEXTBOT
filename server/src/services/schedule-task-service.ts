@@ -83,11 +83,11 @@ export type ScheduleTaskRecord = {
   preReminders?: SchedulePreReminder[];
   /** 生成当前分段计划的因子指纹（如 "high/mid"），改期重算判定与排查用。 */
   reminderPolicy?: string;
-  /** 来源标记：manual=用户/LLM 直建；booking=预订下单联动；commitment=承诺板物化；ics=日历订阅导入；email=票务邮件提取。 */
-  source?: "manual" | "booking" | "commitment" | "ics" | "email" | "ingest";
+  /** 来源标记：manual=用户/LLM 直建；booking=预订下单联动；ics=日历订阅导入；email=票务邮件提取。 */
+  source?: "manual" | "booking" | "ics" | "email" | "ingest";
   /** 关联的本地预订订单号（source=booking 时写入，用于取消/改期反向同步）。 */
   sourceBookingOrderId?: string;
-  /** 关联的外部引用 id（source=commitment 时为承诺 id；source=ics 时为「uid/occurrenceStartMs」事件键），用于反向同步。 */
+  /** 关联的外部引用 id（source=ics 时为「uid/occurrenceStartMs」事件键），用于反向同步。 */
   sourceRefId?: string;
   /** 本次待触发周期内已发出的提前提醒偏移（主触发后重置）。 */
   firedPreReminderOffsets?: number[];
@@ -130,7 +130,7 @@ export type CreateScheduleTaskInput = {
   durationMinutes?: number;
   remindBeforeMinutes?: number[];
   location?: string;
-  source?: "manual" | "booking" | "commitment" | "ics" | "email" | "ingest";
+  source?: "manual" | "booking" | "ics" | "email" | "ingest";
   sourceBookingOrderId?: string;
   sourceRefId?: string;
 };
@@ -202,8 +202,7 @@ export function taskEndMs(startMs: number, durationMinutes?: number): number {
 }
 
 /**
- * 分级提醒策略的适用面：单次提醒类正事。承诺物化由承诺板管梯度提醒
- * （双响治理定调见 commitment-schedule-outlet.ts）。
+ * 分级提醒策略的适用面：单次提醒类正事。
  * ics 日历事件原被排除（「外部日历自带提醒」），但事件本身并无提醒数据——
  * 岛的提前预示此前靠客户端关键词 Timer 撑着；该客户端调度器已按
  * 「提醒统一信服务端」定调（2026-10-05）删除，ics 纳入本策略补位。
@@ -218,8 +217,7 @@ function isReminderPolicyEligible(
     task.kind === "reminder" &&
     task.recurrence === "none" &&
     task.status === "active" &&
-    task.category !== "trivia" &&
-    task.source !== "commitment"
+    task.category !== "trivia"
   );
 }
 
@@ -389,6 +387,28 @@ export class ScheduleTaskService {
     provider: ((sessionId: string) => ScheduleHabitHints | null | undefined) | undefined,
   ): void {
     this.reminderHabitProvider = provider;
+  }
+
+  private reminderRhythmProvider?: (sessionId: string) =>
+    | import("./user-rhythm-store.js").UserRhythmHints
+    | null
+    | undefined;
+
+  /** 用户节奏因子源（user-rhythm-store）：出门准备分钟按人给（bootstrap 接线）。 */
+  setReminderRhythmProvider(
+    provider:
+      | ((sessionId: string) => import("./user-rhythm-store.js").UserRhythmHints | null | undefined)
+      | undefined,
+  ): void {
+    this.reminderRhythmProvider = provider;
+  }
+
+  private rhythmHintsFor(sessionId: string): import("./user-rhythm-store.js").UserRhythmHints | null {
+    try {
+      return this.reminderRhythmProvider?.(sessionId) ?? null;
+    } catch {
+      return null; // 节奏读取失败不挡创建主链路
+    }
   }
 
   private habitHintsFor(sessionId: string): ScheduleHabitHints | null {
@@ -699,8 +719,8 @@ export class ScheduleTaskService {
   /**
    * 分级提醒策略（schedule-reminder-policy.ts）：用户没显式给提前量时，按事件
    * 时间/重要程度/地点动态生成前晚备忘/起床闹钟/出发预留的分段计划。
-   * 显式 remindBeforeMinutes 优先（用户自己说了提前量），ics/commitment 上游
-   * 各有提醒分工不进策略层，trivia/周期任务不做分级。
+   * 显式 remindBeforeMinutes 优先（用户自己说了提前量），ics 上游
+   * 自带提醒分工不进策略层，trivia/周期任务不做分级。
    */
   private async applyReminderPolicyOnCreate(task: ScheduleTaskRecord, input: CreateScheduleTaskInput): Promise<void> {
     if (input.remindBeforeMinutes != null) return;
@@ -714,6 +734,10 @@ export class ScheduleTaskService {
       location: task.location,
       source: task.source,
       habits: this.habitHintsFor(task.sessionId),
+      rhythm: this.rhythmHintsFor(task.sessionId),
+      // 提前量段要按统一时间源判「是否还来得及」：漏传时策略层回退 new Date()，
+      // 冻结时钟的调用方（含测试）会被真实墙上时钟判定成「全部已过期」而整段丢弃
+      now: this.now(),
       ...(route
         ? { travelMinutesOverride: route.durationMin, routeSource: route.source }
         : {}),
@@ -882,6 +906,8 @@ export class ScheduleTaskService {
       location: next.location,
       source: next.source,
       habits: this.habitHintsFor(next.sessionId),
+      rhythm: this.rhythmHintsFor(next.sessionId),
+      now: this.now(),
       ...(route
         ? { travelMinutesOverride: route.durationMin, routeSource: route.source }
         : {}),

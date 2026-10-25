@@ -541,11 +541,12 @@ function buildTravelItineraryFooter(plan: Record<string, unknown>): string {
   );
   const parts = [`共 ${days.length} 天 · ${totalItems} 项安排`];
   const pricing = plan.pricingSummary;
-  if (pricing && typeof pricing === "object" && !Array.isArray(pricing)) {
-    const totalFinal = Number((pricing as Record<string, unknown>).totalFinal);
-    if (Number.isFinite(totalFinal) && totalFinal > 0) {
-      parts.push(`预计约 ¥${Math.round(totalFinal).toLocaleString("en-US")}`);
-    }
+  const totalFinal =
+    pricing && typeof pricing === "object" && !Array.isArray(pricing)
+      ? Number((pricing as Record<string, unknown>).totalFinal)
+      : Number(plan.totalCost);
+  if (Number.isFinite(totalFinal) && totalFinal > 0) {
+    parts.push(`预计约 ¥${Math.round(totalFinal).toLocaleString("en-US")}`);
   }
   return parts.join(" · ");
 }
@@ -623,6 +624,41 @@ function snapshotFromRawPlan(
 }
 
 /**
+ * 逐日逐站成文介绍（2026-10-25 需求：文字介绍随行程卡一起出来，放在卡之前）。
+ * 形态：每天一块「Day N · 日期」，每站一行「HH:mm 站名 — 一句话介绍」；
+ * 介绍优先级 why（为什么推荐）→ description；单条截 80 字，全空则该站只列名。
+ * items 与 entries 两种键都读（冷层快照 / summarizeItinerary 瘦身版兼容）。
+ */
+export function buildTravelStoryText(plan: Record<string, unknown>): string {
+  const days = Array.isArray(plan.days) ? (plan.days as Array<Record<string, unknown>>) : [];
+  const blocks: string[] = [];
+  days.forEach((day, i) => {
+    const raw = Array.isArray(day?.items)
+      ? (day.items as Array<Record<string, unknown>>)
+      : Array.isArray(day?.entries)
+        ? (day.entries as Array<Record<string, unknown>>)
+        : [];
+    const stops = raw.filter((it) => strField(it?.name));
+    if (stops.length === 0) return;
+    const date = strField(day?.date) || strField(day?.label);
+    const lines: string[] = [`Day ${i + 1}${date ? ` · ${date}` : ""}`];
+    stops.forEach((it) => {
+      const name = strField(it?.name);
+      let time = strField(it?.startTime) || strField(it?.time);
+      const dash = time.search(/[-~—]/);
+      if (dash > 0) time = time.slice(0, dash).trim();
+      if (time.length > 5) time = time.slice(0, 5);
+      const intro = [strField(it?.why), strField(it?.description)].find((s) => s.length > 0) ?? "";
+      const introCut = intro.length > 80 ? `${intro.slice(0, 79)}…` : intro;
+      const timeTag = time ? `${time} ` : "";
+      lines.push(introCut ? `${timeTag}${name} — ${introCut}` : `${timeTag}${name}`);
+    });
+    blocks.push(lines.join("\n"));
+  });
+  return blocks.join("\n\n");
+}
+
+/**
  * 把行程 JSON 转换成 travel_itinerary 双面板卡（detectRawTravelItineraryJson 的修复器）。
  *
  * 卡片结构化数据（travelPlan）来源优先级：
@@ -672,7 +708,9 @@ function buildTravelItineraryCardFromPlan(
   // 卡前导：优先模型的口语回复；正文为空（被内部帧清空 / 模型没叙述）时补一段
   // 确定性短介绍 → 回复形态恒为「前面一段简短介绍 + 后面跟行程卡片」。
   const lead = leadText || buildTravelIntro(travelPlan as unknown as Record<string, unknown>);
-  return `${lead}\n\n${card}`;
+  // 2026-10-25 需求：文字介绍放在行程卡之前——模型口语引导 + 逐日逐站介绍 + 卡片
+  const story = buildTravelStoryText(travelPlan as unknown as Record<string, unknown>);
+  return [lead, story, card].filter((s) => s.trim().length > 0).join("\n\n");
 }
 
 /**
@@ -828,7 +866,8 @@ function buildTravelPlainTextSummary(
   const lines = buildTravelDaySummaryItems(plan);
   const footer = buildTravelItineraryFooter(plan);
   const lead = leadText || buildTravelIntro(plan);
-  return [lead, title, ...lines, footer].filter(Boolean).join("\n");
+  const story = buildTravelStoryText(plan);
+  return [lead, story, title, ...lines, footer].filter(Boolean).join("\n\n");
 }
 
 export interface ToolResultProcessorOptions {

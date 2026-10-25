@@ -6,7 +6,7 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, readFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -43,6 +43,10 @@ test("getSoulOverlay：disposition 手工编辑后 overlay 跟随更新", () => 
     getSoulOverlay(); // 触发播种
     const dir = join(root, "profile", "soul");
     writeFileSync(join(dir, "disposition.md"), "# 处事层\n\n- 默契度: 3/5，接得住黑话\n", "utf8");
+    // overlay 是 mtime 缓存；播种与手工编辑落在同一毫秒时缓存不会失效，
+    // 显式把 mtime 推后，测的是「编辑后跟随更新」而不是文件系统精度。
+    const stamp = new Date(Date.now() + 5000);
+    utimesSync(join(dir, "disposition.md"), stamp, stamp);
     const overlay = getSoulOverlay();
     assert.ok(overlay?.includes("- 默契度: 3/5，接得住黑话"));
   } finally {
@@ -57,7 +61,11 @@ test("maybeRunSoulReflection：changelog 最近一条不足 7 天 → 冷却跳�
     getSoulOverlay(); // 播种
     const dir = join(root, "profile", "soul");
     writeFileSync(join(dir, "changelog.md"), "# 演化日志\n- 2026-10-13 更新:默契度 | 证据:「测试」\n", "utf8");
-    const outcome = await maybeRunSoulReflection({ transcript: "用户: 测试\nAgent: 好的" });
+    // now 显式传入：冷却判定必须相对日志日期，否则日历一走测试就烂（2026-10-24 踩过）
+    const outcome = await maybeRunSoulReflection({
+      transcript: "用户: 测试\nAgent: 好的",
+      now: new Date("2026-10-16T00:00:00Z"),
+    });
     assert.equal(outcome.applied, false);
     assert.equal(outcome.reason, "cooldown");
     // 冷却路径绝不改写 disposition

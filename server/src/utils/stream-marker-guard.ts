@@ -38,8 +38,10 @@ const STRUCTURAL_MARKER_TOKEN_RE =
 
 const CARD_START_LINE = "[AGENT_RESULT_CARD_START]";
 const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
-const NEXT_UP_START_LINE = "[NEXT_UP_START]";
-const NEXT_UP_END_LINE = "[NEXT_UP_END]";
+/** NEXT_UP 标记容错：模型实测会漏写下划线（[NEXT_UPSTART]，2026-10-24 真机）。 */
+const NEXT_UP_START_RE = /\[NEXT[ _]?UP[ _]?START\]/i;
+const NEXT_UP_END_RE = /\[NEXT[ _]?UP[ _]?END\]/i;
+const NEXT_UP_MARKER_TOKEN_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
 
 /** 已知标记起始段：残段命中其前缀才继续扣留（普通方括号文本不受影响） */
 const MARKER_HEADS = [
@@ -52,6 +54,7 @@ const MARKER_HEADS = [
   "[CHAT_MEDIA_",
   "[IMAGE_RESULT_",
   "[NEXT_UP_",
+  "[NEXTUP", "[NEXT ",
   "[RENDER_", "[AGENT_", "[DATA_", "[VIDEO_", "[CONTENT_", "[CHAT_", "[IMAGE_", "[NEXT_",
 ];
 
@@ -100,29 +103,29 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     // 现按 token 在行内的实际位置裁决：丢弃态中整行扣下直到行内嵌 END（END 后
     // 的正文照发，与 extraction 的 replace 语义一致）；非丢弃态遇行内嵌 START，
     // START 前的正文照发并进入丢弃态；单行完整块（START…END 同行）取块外两段。
-    const startIdx = line.indexOf(NEXT_UP_START_LINE);
-    const endIdx = line.indexOf(NEXT_UP_END_LINE);
+    const startMatch = NEXT_UP_START_RE.exec(line);
+    const endMatch = NEXT_UP_END_RE.exec(line);
+    const startIdx = startMatch ? startMatch.index : -1;
+    const endIdx = endMatch ? endMatch.index : -1;
+    const cleanInline = (part: string): string =>
+      part.replace(MARKER_TOKEN_RE, "").replace(NEXT_UP_MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
     if (inNextUpBlock) {
       if (endIdx === -1) return null;
       inNextUpBlock = false;
-      const after = line
-        .slice(endIdx + NEXT_UP_END_LINE.length)
-        .replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
+      const after = cleanInline(line.slice(endIdx + endMatch![0].length));
       return after.trim() ? after : null;
     }
     if (startIdx !== -1) {
-      const before = line.slice(0, startIdx).replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
+      const before = cleanInline(line.slice(0, startIdx));
       if (endIdx > startIdx) {
-        const after = line
-          .slice(endIdx + NEXT_UP_END_LINE.length)
-          .replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
+        const after = cleanInline(line.slice(endIdx + endMatch![0].length));
         const merged = `${before}${after}`;
         return merged.trim() ? merged : null;
       }
       inNextUpBlock = true;
       return before.trim() ? before : null;
     }
-    const stripped = line.replace(MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
+    const stripped = cleanInline(line);
     if (stripped !== line) {
       if (STRUCTURAL_MARKER_TOKEN_RE.test(line)) sawStructured = true;
       // 行内嵌标记被剥离：剩余纯空白则整行丢弃，否则发剩余文本

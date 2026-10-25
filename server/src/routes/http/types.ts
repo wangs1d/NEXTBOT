@@ -138,6 +138,14 @@ export type HttpRouteDeps = {
   runtime?: RuntimeFacade;
   wsConnectionRegistry?: WsConnectionRegistry;
   lifeSignalHubService?: LifeSignalHubService;
+  /** 明日速览服务：仅供 /api/test/trigger-evening-digest 手动触发；未注入时该路由不挂载 */
+  eveningDigestService?: import("../../services/evening-digest-service.js").EveningDigestService;
+  /**
+   * agent pulse 手动触发（Muse 式聚合评审）：仅供 /api/test/trigger-agent-pulse，
+   * 返回聚合材料/prompt/LLM 原始输出/最终文案/是否提交的完整留痕；force 绕过
+   * delta 指纹强制重评（测试用）。未注入时该路由不挂载。
+   */
+  agentPulseCheck?: (opts?: { force?: boolean }) => Promise<unknown>;
   /** 主动触达负反馈抑制表（Task 20 统一频控框架）；可选，未注入时抑制路由不挂载 */
   proactivitySuppressionStore?: ProactivitySuppressionStore;
   /** 统一主动性管道（docs/proactivity-architecture.md）；可选，未注入时诊断路由不挂载 */
@@ -155,8 +163,8 @@ export type HttpRouteDeps = {
   agentActivityStore: import("../../proactivity/activity-store.js").AgentActivityStore;
   /** 行为审计时间线（GET /agent/audit-timeline；可选，未注入时该端点 503） */
   auditTrailService?: import("../../proactivity/audit-timeline.js").AuditTrailService | null;
-  /** 承诺板（主页「盯着」小节数据源；未启用时该小节为空） */
-  commitmentBoard?: import("../../agentic-memory/commitment-board.js").CommitmentBoard | null;
+  /** 目标板（主页「盯着」小节数据源：track 类目标；未注入时该小节为空） */
+  goalBoard?: import("../../proactivity/goal-board.js").GoalBoard | null;
   marketSignalService?: MarketSignalService;
   proactiveLifeRuntimeService?: ProactiveLifeRuntimeService;
   userPersonalizationService?: UserPersonalizationService;
@@ -193,4 +201,6 @@ export type HttpRouteDeps = {
   featureCatalog?: import("../../catalog/index.js").FeatureCatalog;
   /** 购物建议商品库（runtime 内置能力，shopping.suggest 工具数据源；未装配时只读端点 503） */
   recommendationCatalog?: import("../../recommendation/index.js").ProductCatalog;
+  /** 跨平台比价服务（shopping.compare.* 工具同源；POST /shopping/compare 只读触发用） */
+  shoppingCompareService?: import("../../services/shopping-compare-service.js").ShoppingCompareService;
 };

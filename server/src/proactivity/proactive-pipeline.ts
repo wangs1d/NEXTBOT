@@ -378,7 +378,7 @@ export class ProactivePipeline {
         summary: entry.rationale,
         evidence: [],
         createdAt: entry.createdAt,
-        source: "commitment-board",
+        source: "confirm-flow",
       } as ProactiveProposal);
     try {
       this.deps.onProposalApproved?.(proposal);

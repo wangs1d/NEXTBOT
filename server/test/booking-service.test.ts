@@ -3,12 +3,11 @@
  *
  * 覆盖：
  *   1. 网约车全链路：quote → book 两阶段 → status → cancel 两阶段（模拟 Provider）
- *   2. 承诺板联动：下单写入 → 取消同步 cancelled → 完成同步 fulfilled
- *   3. 安全护栏：单笔上限 / 单日累计上限 / token TTL 过期
- *   4. 家政：search → book → reschedule（订单 + 承诺板 deadline 同步）
- *   5. 订单存储：JSON 文件持久化往返 + 单日金额统计
+ *   2. 安全护栏：单笔上限 / 单日累计上限 / token TTL 过期
+ *   3. 家政：search → book → reschedule
+ *   4. 订单存储：JSON 文件持久化往返 + 单日金额统计
  *
- * 测试封闭：内存 store（或临时目录）、临时 SQLite 承诺板、注入时钟、无网络。
+ * 测试封闭：内存 store（或临时目录）、注入时钟、无网络。
  */
 
 import assert from "node:assert/strict";
@@ -17,8 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CommitmentBoard } from "../src/agentic-memory/commitment-board.js";
-import { openAgenticSqlite } from "../src/agentic-memory/sqlite-store.js";
 import {
   BookingOrderStore,
   BookingService,
@@ -49,7 +46,6 @@ function makeContext(overrides?: Partial<ToolContext>): ToolContext {
 
 interface BookingCtx {
   service: BookingService;
-  board: CommitmentBoard;
   setNow: (iso: string) => void;
   cleanup: () => Promise<void>;
 }
@@ -59,9 +55,7 @@ async function withBooking(
   configOverrides: Partial<BookingConfig> = {},
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "booking-service-"));
-  const db = openAgenticSqlite(join(dir, "board.db"));
   let nowMs = Date.parse("2026-09-04T10:00:00Z");
-  const board = new CommitmentBoard(db, () => new Date(nowMs));
   const service = new BookingService({
     providers: [
       new SimulatedRideProvider({ now: () => nowMs }),
@@ -69,16 +63,14 @@ async function withBooking(
       new SimulatedRestaurantProvider(),
     ],
     store: new BookingOrderStore(null),
-    board,
     config: { maxAmountCny: 1000, dailyBudgetCny: 500, confirmationTtlMs: 300_000, ...configOverrides },
     now: () => new Date(nowMs),
   });
   const setNow = (iso: string) => (nowMs = Date.parse(iso));
   try {
-    await fn({ service, board, setNow, cleanup: async () => {} });
+    await fn({ service, setNow, cleanup: async () => {} });
   } finally {
     service.dispose();
-    board.close();
     await rm(dir, { recursive: true, force: true });
   }
 }
@@ -86,7 +78,7 @@ async function withBooking(
 // --------------------------------------------------------------------------- //
 
 test("booking-service - 网约车全链路（quote → 两阶段 book → status → 两阶段 cancel）", async () => {
-  await withBooking(async ({ service, board }) => {
+  await withBooking(async ({ service }) => {
     const ctx = makeContext();
 
     // 报价
@@ -153,17 +145,10 @@ test("booking-service - 网约车全链路（quote → 两阶段 book → status
     });
     assert.equal(stage2.ok, true);
     const s2 = stage2 as {
-      orderId: string; simulated: boolean; commitmentId: string;
+      orderId: string; simulated: boolean;
     };
     assert.match(s2.orderId, /^bkg_/);
     assert.equal(s2.simulated, true);
-    assert.ok(s2.commitmentId);
-
-    // 承诺板：active 承诺已登记
-    const commitment = board.get(s2.commitmentId);
-    assert.ok(commitment);
-    assert.equal(commitment.status, "active");
-    assert.match(commitment.text, /网约车/);
 
     // 状态查询：confirmed + 司机信息
     const status = await service.getStatus(ctx, "ride", s2.orderId);
@@ -190,9 +175,6 @@ test("booking-service - 网约车全链路（quote → 两阶段 book → status
     assert.equal(cancel2.ok, true);
     const c2 = cancel2 as { status: string };
     assert.equal(c2.status, "cancelled");
-
-    // 承诺板同步 cancelled
-    assert.equal(board.get(s2.commitmentId)?.status, "cancelled");
   });
 });
 
@@ -269,8 +251,8 @@ test("booking-service - 确认 token TTL 过期", async () => {
   );
 });
 
-test("booking-service - 家政改期：订单与承诺板 deadline 同步", async () => {
-  await withBooking(async ({ service, board }) => {
+test("booking-service - 家政改期：订单时间同步", async () => {
+  await withBooking(async ({ service }) => {
     const ctx = makeContext();
     const params = { serviceType: "cleaning", address: "望京SOHO" };
     const scheduleAt = "2026-09-10T14:00:00+08:00";
@@ -282,23 +264,19 @@ test("booking-service - 家政改期：订单与承诺板 deadline 同步", asyn
     });
     assert.equal(stage2.ok, true);
     if (!stage2.ok) return;
-    const commitmentId = (stage2 as { commitmentId: string }).commitmentId;
 
     const newSchedule = "2026-09-12T09:00:00+08:00";
     const rescheduled = await service.reschedule(ctx, "home_service", (stage2 as { orderId: string }).orderId, newSchedule);
     assert.equal(rescheduled.ok, true);
 
-    // 承诺板会把 deadline 规范化为 ISO（UTC）字符串，按时间戳等价比较
-    const boardDeadline = board.get(commitmentId)?.deadline ?? "";
-    assert.equal(Date.parse(boardDeadline), Date.parse(newSchedule));
     const status = await service.getStatus(ctx, "home_service", (stage2 as { orderId: string }).orderId);
     assert.equal(status.ok, true);
     assert.equal((status as { order: { scheduleAt: string } }).order.scheduleAt, newSchedule);
   });
 });
 
-test("booking-service - 餐厅订座：完成后承诺板 fulfilled", async () => {
-  await withBooking(async ({ service, board }) => {
+test("booking-service - 餐厅订座：过时用餐自动 completed", async () => {
+  await withBooking(async ({ service }) => {
     const ctx = makeContext();
     const dineAt = "2026-01-01T19:00:00+08:00"; // 已过去的用餐时间 → provider 判定 completed
     const params = { query: "", cuisine: "火锅", covers: 2, dineAt }; // 130×2=260，不触发单日限额
@@ -311,12 +289,10 @@ test("booking-service - 餐厅订座：完成后承诺板 fulfilled", async () =
     assert.equal(stage2.ok, true);
     if (!stage2.ok) return;
     const orderId = (stage2 as { orderId: string }).orderId;
-    const commitmentId = (stage2 as { commitmentId: string }).commitmentId;
 
     const status = await service.getStatus(ctx, "restaurant", orderId);
     assert.equal(status.ok, true);
     assert.equal((status as { order: { status: string } }).order.status, "completed");
-    assert.equal(board.get(commitmentId)?.status, "fulfilled");
   });
 });
 

@@ -50,6 +50,11 @@ export const ClientEventType = {
    */
   BrowserBridgeInfo: "browser.bridge.info",
   /**
+   * 共用浏览器桥：客户端对「保存登录态」征询的答复（服务端 ask_save_login
+   * 征询后回传）。payload { siteId, allowed }；服务端据此决定是否落库 Cookie。
+   */
+  BrowserSaveLoginDecision: "browser.save_login_decision",
+  /**
    * 手机桥接：消息捕捉批量上报（通知监听/短信等 → 服务端消息聚合中心）。
    * payload.messages 为消息数组，每条带 externalMessageId 供服务端去重；
    * 服务端落库后回 phone.msg.report_ack（按 batchId），手机端凭 ack 出队。

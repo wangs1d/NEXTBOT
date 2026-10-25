@@ -3,12 +3,16 @@ import "package:flutter/services.dart";
 
 import "../theme/app_theme.dart";
 
+/// 定位权限选择结果：allow=使用期间允许；alwaysResident=始终允许并常驻定位；
+/// deny=暂不允许。
+enum LocationConsentChoice { allow, alwaysResident, deny }
+
 /// 简洁的定位权限弹窗：默认聚焦「允许」按钮（按 Enter/回车直接确认）。
 /// 任何 dismiss（点空白、系统返回、Esc）行为均视为同意；只有显式点击「暂不允许」才回退。
-Future<bool?> showLocationPermissionDialog({
+Future<LocationConsentChoice?> showLocationPermissionDialog({
   required BuildContext context,
 }) {
-  return showDialog<bool>(
+  return showDialog<LocationConsentChoice>(
     context: context,
     barrierDismissible: false,
     barrierColor: Colors.black54,
@@ -45,7 +49,7 @@ class _LocationPermissionDialogBodyState
             _ConfirmIntent: CallbackAction<_ConfirmIntent>(
               onInvoke: (_) {
                 if (Navigator.canPop(context)) {
-                  Navigator.pop(context, true);
+                  Navigator.pop(context, LocationConsentChoice.allow);
                 }
                 return null;
               },
@@ -76,21 +80,42 @@ class _LocationPermissionDialogBodyState
                       height: 1.5,
                     ),
                   ),
+                  const SizedBox(height: 12),
+                  Text(
+                    "「常驻定位」= 始终允许 + 位置变化时后台告知 Agent（进出常去地点提醒、到点路上提示需要它）。",
+                    style: TextStyle(
+                      color: AppPalette.locationDialogMuted,
+                      fontSize: 12.5,
+                      height: 1.4,
+                    ),
+                  ),
                   const SizedBox(height: 20),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,
                     children: <Widget>[
                       TextButton(
-                        onPressed: () => Navigator.pop(context, false),
+                        onPressed: () => Navigator.pop(context, LocationConsentChoice.deny),
                         style: TextButton.styleFrom(
                           foregroundColor: AppPalette.locationDialogMuted,
                         ),
                         child: const Text("暂不允许"),
                       ),
                       const SizedBox(width: 8),
+                      OutlinedButton(
+                        onPressed: () =>
+                            Navigator.pop(context, LocationConsentChoice.alwaysResident),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: AppPalette.locationDialogButtonFg,
+                          side: BorderSide(
+                            color: AppPalette.locationDialogButtonBg.withValues(alpha: 0.6),
+                          ),
+                        ),
+                        child: const Text("常驻定位"),
+                      ),
+                      const SizedBox(width: 8),
                       FilledButton(
                         autofocus: true,
-                        onPressed: () => Navigator.pop(context, true),
+                        onPressed: () => Navigator.pop(context, LocationConsentChoice.allow),
                         style: FilledButton.styleFrom(
                           backgroundColor: AppPalette.locationDialogButtonBg,
                           foregroundColor: AppPalette.locationDialogButtonFg,

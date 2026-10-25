@@ -26,4 +26,9 @@ export type PersistedBrowserSiteSession = {
 export type ActorBrowserSessionsFile = {
   actorId: string;
   sites: Record<string, PersistedBrowserSiteSession>;
+  /**
+   * 登录态保存授权（2026-10-25 用户拍板：保存 Cookie 须用户同意，与主流做法
+   * 一致）。siteId → { allowed, at }；缺省 = 未表态（先征询再保存）。
+   */
+  captureConsents?: Record<string, { allowed: boolean; at: string }>;
 };

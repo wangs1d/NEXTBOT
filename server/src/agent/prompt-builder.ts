@@ -6,6 +6,7 @@ import {
   parseAgentAccessMode,
 } from "./agent-access-mode.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
+import { sanitizeMemoryLinesForPrompt } from "./memory-line-hygiene.js";
 import { dropExpiredCommitmentLines } from "../services/memory-record-utils.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 import type { PersonalityCore } from "../brain/types.js";
@@ -543,7 +544,9 @@ export function sliceMemoryEntriesToPromptContext(
   // 这些字段已各自独立注入，避免重复 + 跨话题串扰。
   const maxChars = promptMemorySummaryMaxChars();
   let memorySummary: string | undefined;
-  const rawSummary = str(entries["memory_summary"]);
+  // 注入卫生（2026-10-23）：存量 KV 里混着「[11:15] Agent: …」这类无日期逐字对话行与
+  // RENDER_HINT 残留，一旦注入就是"新对话把上次对话算进去"。读完即净化，存储不动。
+  const rawSummary = sanitizeMemoryLinesForPrompt(str(entries["memory_summary"])).text;
   if (rawSummary) {
     // #5 主题×时间分桶召回：优先本话题桶，再补全局与最近跨主题，收敛跨话题串台
     const sorted = recallMemorySummaryByTopic(rawSummary, maxChars, promptMemorySummaryMaxLines(), userQuery, {
@@ -561,14 +564,14 @@ export function sliceMemoryEntriesToPromptContext(
   // （Letta core block / ChatGPT relevant-memories 同款设计）。
   // 上限收紧：画像块是每轮固定开销，只保留最新最有信息量的行。
   const memoryPreferences = sortAndTruncateMemoryLines(
-    str(entries["memory_preferences"]),
+    sanitizeMemoryLinesForPrompt(str(entries["memory_preferences"])).text,
     500,
     6,
     undefined,
     { fallbackOnEmpty: false },
   );
   const memoryFacts = sortAndTruncateMemoryLines(
-    str(entries["memory_facts"]),
+    sanitizeMemoryLinesForPrompt(str(entries["memory_facts"])).text,
     500,
     6,
     undefined,
@@ -577,7 +580,8 @@ export function sliceMemoryEntriesToPromptContext(
   // 「待兑现承诺 / 未完成事项」默认仅在 topic 相关时才注入 prompt；
   // 计算得分低于 0.45 的行直接丢弃（与用户当前话题弱相关就别让 LLM 主动提）。
   // 注入前先滤掉超 TTL 的僵尸承诺（服务端清理只在写路径触发，这里保每轮兜底）。
-  const kvLines = (v: unknown): string[] => (typeof v === "string" ? v.split("\n").filter(Boolean) : []);
+  const kvLines = (v: unknown): string[] =>
+    sanitizeMemoryLinesForPrompt(typeof v === "string" ? v : "").text.split("\n").filter(Boolean);
   const memoryCommitments = sortAndTruncateMemoryLines(
     dropExpiredCommitmentLines(kvLines(entries["memory_commitments"])).join("\n"),
     400,
@@ -592,7 +596,12 @@ export function sliceMemoryEntriesToPromptContext(
     userQuery,
     { minRelevance: 0.45, fallbackOnEmpty: false },
   );
-  const sessionRecap = sortAndTruncateMemoryLines(str(entries["session_recap"]), 400, 3, userQuery);
+  const sessionRecap = sortAndTruncateMemoryLines(
+    sanitizeMemoryLinesForPrompt(str(entries["session_recap"])).text,
+    400,
+    3,
+    userQuery,
+  );
 
   const out: AgentPromptMemoryContext = {};
   if (persona) out.persona = persona;
@@ -618,7 +627,7 @@ export function sliceSubAgentMemoryEntries(
   const persona = str(entries["persona"]) || str(entries["soul"]);
   if (persona) out.persona = persona;
 
-  const rawSummary = str(entries["memory_summary"]);
+  const rawSummary = sanitizeMemoryLinesForPrompt(str(entries["memory_summary"])).text;
   if (rawSummary) {
     // #5 子 Agent 同样按主题分桶召回，避免无关旧摘要污染子任务上下文
     const sorted = recallMemorySummaryByTopic(

@@ -36,48 +36,123 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
   }
 
   async extractProducts(page: Page, limit: number): Promise<ProductSummary[]> {
+    // 注意：evaluate 回调体内**禁止出现任何函数表达式/箭头函数**——tsx 的
+    // esbuild keepNames 会给内部函数注入 __name() 辅助调用，序列化到浏览器
+    // 执行时 ReferenceError（2026-10 实测踩坑；字符串形式在 connectOverCDP
+    // 下又恒返 undefined，只能用「纯语句」函数体）。
     try {
-      // 等待商品卡片渲染
-      await page.waitForSelector('[class*="Card--doubleCardWrapper"], [class*="Content--contentInner"], .items .item', {
-        timeout: 10_000,
-      }).catch(() => {});
+      // 等待商品卡片渲染（含 2026-10 改版后的 doubleCard--<hash> 哈希类）
+      await page.waitForSelector(
+        '[class*="Card--doubleCardWrapper"], [class*="Content--contentInner"], .items .item, [class*="doubleCard"], a[href*="item.htm"], a[href*="detail.tmall.com"]',
+        { timeout: 10_000 },
+      ).catch(() => {});
 
-      const raw = await page.evaluate((maxLimit: number) => {
-        // 多组选择器兜底，匹配不同淘宝改版
-        const selectors = [
-          '[class*="Card--doubleCardWrapper"]',
-          '[class*="Content--contentInner"]',
-          ".items .item",
-          '[data-spm="dlist"]',
-        ];
-        const seen = new Set<string>();
-        const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
-        for (const sel of selectors) {
-          const nodes = document.querySelectorAll(sel);
-          if (!nodes.length) continue;
-          for (const node of Array.from(nodes)) {
+      const raw = await page.evaluate(
+        (maxLimit: number) => {
+          const selectors = [
+            '[class*="Card--doubleCardWrapper"]',
+            '[class*="Content--contentInner"]',
+            '[class*="doubleCard"]',
+            ".items .item",
+            '[data-spm="dlist"]',
+          ];
+          const seen = new Set<string>();
+          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
+          for (const sel of selectors) {
+            const nodes = document.querySelectorAll(sel);
+            if (nodes.length === 0) continue;
+            for (const node of Array.from(nodes)) {
+              if (out.length >= maxLimit) break;
+              const titleEl = node.querySelector(
+                '[class*="Title--title"], .title, h4, [class*="title" i]',
+              );
+              const priceEl = node.querySelector(
+                '[class*="Price--price"], .price, [class*="priceInt"], [class*="price" i]',
+              );
+              const linkEl = node.querySelector("a[href]");
+              const shopEl = node.querySelector(
+                '[class*="Shop--shopName"], .shop, [class*="shopName"], [class*="shop" i]',
+              );
+              const title = String((titleEl as HTMLElement | null)?.innerText ?? "").trim();
+              if (!title || seen.has(title)) continue;
+              seen.add(title);
+              const url = (linkEl as HTMLAnchorElement | null)?.href;
+              const itemIdMatch = url ? /[?&]id=(\d+)/.exec(url) : null;
+              // 价格取文本里第一个数字（「¥\n2899\n2000+ 人付款」→ 2899）
+              const priceMatch = /\d[\d,]*(?:\.\d+)?/.exec(
+                String((priceEl as HTMLElement | null)?.innerText ?? ""),
+              );
+              out.push({
+                title,
+                price: priceMatch ? priceMatch[0].replace(/,/g, "") : undefined,
+                url,
+                shop: String((shopEl as HTMLElement | null)?.innerText ?? "").trim() || undefined,
+                itemId: itemIdMatch?.[1],
+              });
+            }
             if (out.length >= maxLimit) break;
-            const titleEl = node.querySelector('[class*="Title--title"], .title, h4, [class*="title"]') as HTMLElement | null;
-            const priceEl = node.querySelector('[class*="Price--price"], .price, [class*="priceInt"]') as HTMLElement | null;
-            const linkEl = node.querySelector("a[href]") as HTMLAnchorElement | null;
-            const shopEl = node.querySelector('[class*="Shop--shopName"], .shop, [class*="shopName"]') as HTMLElement | null;
-            const title = (titleEl?.innerText ?? "").trim();
-            if (!title || seen.has(title)) continue;
-            seen.add(title);
-            const url = linkEl?.href ?? undefined;
-            const itemIdMatch = url?.match(/[?&]id=(\d+)/) ?? url?.match(/item\.taobao\.com.*?\/(\d+)/);
-            out.push({
-              title,
-              price: (priceEl?.innerText ?? "").replace(/[^\d.]/g, "") || undefined,
-              url,
-              shop: (shopEl?.innerText ?? "").trim() || undefined,
-              itemId: itemIdMatch?.[1],
-            });
           }
-          if (out.length >= maxLimit) break;
-        }
-        return out;
-      }, limit);
+          // 链接锚定兜底（2026-10 搜索页改版：卡片/字段 class 全部换哈希，
+          // 上面的容器选择器可能全部失配）。锚定 item.htm / detail.tmall 链接，
+          // 向上找卡片容器；字段用大小写不敏感的 class 子串 + 叶子文本兜底，
+          // 不依赖任何具体类名。
+          if (out.length === 0) {
+            const anchors = document.querySelectorAll(
+              'a[href*="item.htm"], a[href*="detail.tmall.com"]',
+            );
+            for (const link of Array.from(anchors)) {
+              if (out.length >= maxLimit) break;
+              let card: HTMLElement | null = link as HTMLElement;
+              for (let i = 0; i < 8 && card; i++) {
+                card = card.parentElement;
+                if (!card) break;
+                const cls = String(card.className || "");
+                if (/doubleCard|Card|item/i.test(cls) && card.querySelector("a[href]") === link) {
+                  break;
+                }
+              }
+              const scope = card ?? (link as HTMLElement);
+              const titleEl2 = scope.querySelector('[class*="title" i]') as HTMLElement | null;
+              const title2 = String(titleEl2?.innerText ?? (link as HTMLElement).innerText ?? "")
+                .trim()
+                .replace(/\s+/g, " ");
+              if (!title2 || title2.length < 4 || seen.has(title2)) continue;
+              seen.add(title2);
+              let priceEl2: HTMLElement | null = scope.querySelector(
+                '[class*="priceInt"], [class*="price" i]',
+              ) as HTMLElement | null;
+              if (!priceEl2) {
+                const leaves = scope.querySelectorAll("*");
+                for (const n of Array.from(leaves)) {
+                  if (
+                    n.children.length === 0 &&
+                    /^\s*¥?\s*\d{2,5}(\.\d+)?\s*$/.test(String(n.textContent ?? ""))
+                  ) {
+                    priceEl2 = n as HTMLElement;
+                    break;
+                  }
+                }
+              }
+              const shopEl2 = scope.querySelector(
+                '[class*="shopName"], [class*="shop" i]',
+              ) as HTMLElement | null;
+              const itemIdMatch2 = /[?&]id=(\d+)/.exec((link as HTMLAnchorElement).href);
+              const priceMatch2 = /\d[\d,]*(?:\.\d+)?/.exec(
+                String(priceEl2?.innerText ?? priceEl2?.textContent ?? ""),
+              );
+              out.push({
+                title: title2,
+                price: priceMatch2 ? priceMatch2[0].replace(/,/g, "") : undefined,
+                url: (link as HTMLAnchorElement).href,
+                shop: String(shopEl2?.innerText ?? "").trim() || undefined,
+                itemId: itemIdMatch2?.[1],
+              });
+            }
+          }
+          return out;
+        },
+        limit,
+      );
 
       return raw.map((r) => ({
         title: r.title,
@@ -88,7 +163,7 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
         itemId: r.itemId,
       }));
     } catch (err) {
-      // extractProducts 失败时返回空数组，由 service 层判断是否"无结果"还是"页面变更"
+      console.log("[TaobaoAdapter] extractProducts 异常:", err instanceof Error ? err.message : err);
       return [];
     }
   }

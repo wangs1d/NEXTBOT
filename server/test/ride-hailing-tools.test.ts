@@ -16,8 +16,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { CommitmentBoard } from "../src/agentic-memory/commitment-board.js";
-import { openAgenticSqlite } from "../src/agentic-memory/sqlite-store.js";
 import {
   BookingOrderStore,
   BookingService,
@@ -52,8 +50,6 @@ async function withRegistry(
   fn: (registry: ToolRegistry) => Promise<void>,
 ): Promise<void> {
   const dir = await mkdtemp(join(tmpdir(), "ride-tools-"));
-  const db = openAgenticSqlite(join(dir, "board.db"));
-  const board = new CommitmentBoard(db, () => new Date());
   const service = new BookingService({
     providers: [
       new SimulatedRideProvider(),
@@ -61,7 +57,6 @@ async function withRegistry(
       new SimulatedRestaurantProvider(),
     ],
     store: new BookingOrderStore(null),
-    board,
     config: { maxAmountCny: 1000, dailyBudgetCny: 500 },
   });
   const registry = new ToolRegistry();
@@ -72,7 +67,6 @@ async function withRegistry(
     await fn(registry);
   } finally {
     service.dispose();
-    board.close();
     await rm(dir, { recursive: true, force: true });
   }
 }

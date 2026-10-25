@@ -23,8 +23,13 @@ if(EXISTS "${_dest}")
   file(REMOVE_RECURSE "${_dest}")
 endif()
 
+# copy_directory_if_different：未变的文件跳过写入。其他程序（编辑器索引器）
+# 以独占只读句柄持有产物文件时，REMOVE_RECURSE 会静默失败、copy_directory 再
+# 撞上同一把锁把整个构建打挂（2026-10-25：ZCode 持有两个字体文件 →
+# MSB3073 / Permission denied，编译早已成功）。内容未变的锁定文件跳过即可，
+# 内容真变了的文件照样会失败——该失败仍是真问题。
 execute_process(
-  COMMAND "${CMAKE_COMMAND}" -E copy_directory "${_src}" "${_dest}"
+  COMMAND "${CMAKE_COMMAND}" -E copy_directory_if_different "${_src}" "${_dest}"
   RESULT_VARIABLE _nextbot_copy_rc)
 if(NOT _nextbot_copy_rc EQUAL 0)
   message(FATAL_ERROR "Nextbot: copy to windows_dist failed (code ${_nextbot_copy_rc})")

@@ -51,7 +51,6 @@ function makeFabric(dir: string, wire: boolean): { kernel: SensorKernel; board: 
   const presenceFeeder = registerFeeder(kernel, "presence_probe", "presence");
   const services = {
     listTodayTasks: () => [{ title: "周会", runAt: Date.now() + 10 * 60_000 }],
-    commitmentsDue: () => [],
     weatherLine: () => null,
     unreadSenders: () => [],
     readyGoals: () => [],

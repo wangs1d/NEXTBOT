@@ -15,10 +15,12 @@
  * 数据流：缓存优先 → 网络实时搜索（高德/OSM，失败自动降级）→ 内置知识库/合成兜底。
  */
 import type { SkillDefinition } from "../types.js";
-import type { PlanningService, PlannedDay, POISummary } from "./travel-planning-service.js";
+import type { PlanningService, PlannedDay, POISummary, TripPreferences } from "./travel-planning-service.js";
 import { travelItineraryStore } from "./travel-itinerary-store.js";
 import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
+import { composeTravelPlanRequest } from "../../agent/realtime-search-query.js";
+import { looksLikeDestinationName } from "./intent-parser.js";
 import {
   pricingService,
   formatQuotePriceInfo,
@@ -84,8 +86,86 @@ function mapDaysToStored(days: PlannedDay[] | undefined) {
       visitDuration: item.visitDuration,
       // travel 双端②：「为什么推荐给你」随冷层/快照透传到攻略页
       recommendReason: item.recommendReason,
+      // S4 字段贯通：核实闸（营业时间/结束时刻）与桌面编辑（按 ID 定位）都要这些，
+      // 以前只落展示字段 → 冷层回读再核实时拿不到 openingHours，闸形同虚设
+      itemId: item.itemId,
+      poiId: item.poiId,
+      endTime: item.endTime,
+      openingHours: item.openingHours,
+      phone: item.phone,
+      rating: item.rating,
+      tags: item.tags,
+      why: item.why,
+      photoTip: item.photoTip,
+      pitfall: item.pitfall,
+      bookingNote: item.bookingNote,
     })),
   }));
+}
+
+/** 字符串数组入参清洗（去空、去重、限长，模型给的形状不可信） */
+function cleanNames(raw: unknown): string[] | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const out: string[] = [];
+  for (const v of raw) {
+    const s = typeof v === "string" ? v.trim() : "";
+    if (s && s.length <= 30 && !out.includes(s)) out.push(s);
+    if (out.length >= 8) break;
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+/**
+ * 规划主线 F0：工具入参 → 规划服务结构化槽位。
+ * 只透传真实存在的字段（缺省项由服务端从 input 正则兜底），不做任何猜测性填充。
+ */
+function planSlotsFromToolInput(
+  input: Record<string, unknown>,
+): Partial<import("./travel-planning-service.js").PlanningRequest> {
+  const str = (v: unknown): string | undefined =>
+    typeof v === "string" && v.trim() ? v.trim().slice(0, 40) : undefined;
+  const party = str(input.party);
+  const hotelFocus = str(input.hotelFocus);
+  const names = cleanNames(input.wishlist);
+  const foodNames = cleanNames(input.foodWishlist);
+  const stayNames = cleanNames(input.stayWishlist);
+  return {
+    ...(str(input.origin) ? { origin: str(input.origin) } : {}),
+    ...(str(input.startDate) ? { startDate: str(input.startDate) } : {}),
+    ...(party && ["solo", "solo_female", "couple", "family", "friends"].includes(party)
+      ? { party: party as TripPreferences["party"] }
+      : {}),
+    ...(names ? { wishlist: names } : {}),
+    ...(foodNames ? { foodWishlist: foodNames } : {}),
+    ...(stayNames ? { stayWishlist: stayNames } : {}),
+    ...(hotelFocus && ["seaside", "airport", "station", "attraction", "downtown"].includes(hotelFocus)
+      ? { hotelFocus: hotelFocus as TripPreferences["hotelFocus"] }
+      : {}),
+    ...(str(input.hotelFocusRef) ? { hotelFocusRef: str(input.hotelFocusRef) } : {}),
+  };
+}
+
+/**
+ * 规划结果 → 冷层槽位存档（F0）：结构化诉求 + 每项来源档位。
+ * 简报卡（「这版怎么排的」）靠它区分「你说的」和「我们替你定的」。
+ */
+function planSlotsFromPreferences(prefs: TripPreferences | undefined): StoredTravelPlan["slots"] {
+  if (!prefs) return undefined;
+  const sources: Record<string, string> = {};
+  for (const [key, tag] of Object.entries(prefs.sources ?? {})) {
+    if (tag) sources[key] = tag;
+  }
+  return {
+    ...(prefs.origin ? { origin: prefs.origin } : {}),
+    ...(prefs.startDate ? { startDate: prefs.startDate } : {}),
+    ...(prefs.party ? { party: prefs.party } : {}),
+    ...(prefs.diningStyle ? { diningStyle: prefs.diningStyle } : {}),
+    ...(prefs.hotelFocus ? { hotelFocus: prefs.hotelFocus } : {}),
+    ...(prefs.hotelFocusRef ? { hotelFocusRef: prefs.hotelFocusRef } : {}),
+    ...(prefs.wishlist?.length ? { wishlist: prefs.wishlist } : {}),
+    ...(prefs.foodWishlist?.length ? { foodWishlist: prefs.foodWishlist } : {}),
+    sources,
+  };
 }
 
 /** 候选 POI 池映射（行程卡地图常驻展示用，两处写入共用） */
@@ -188,6 +268,17 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
   }
   const pricing = r.pricingSummary as Record<string, unknown> | null | undefined;
   const totalFinal = Number(pricing?.totalFinal);
+  // 核实闸（F3）：只带汇总 + 最多 3 条 block/warn 的一句话，明细留给行程页徽章
+  const verification = r.verification as
+    | { summary: string | null; issues: Array<{ level: string; kind: string; name: string; message: string; suggestion?: string }> }
+    | undefined;
+  const needFix = (verification?.issues ?? [])
+    .filter((i) => i.level === "block" || i.level === "warn")
+    .slice(0, 3)
+    .map((i) => `${i.name}：${i.message}${i.suggestion ? `（建议${i.suggestion}）` : ""}`);
+  const wishlistMissed = Array.isArray(r.wishlistMissed)
+    ? (r.wishlistMissed as string[]).filter((n) => typeof n === "string" && n.trim())
+    : [];
   const quality = typeof r.dataQuality === "string" ? r.dataQuality : "real";
   const qualityNote =
     quality === "synthetic"
@@ -206,15 +297,25 @@ function summarizeItinerary(result: unknown): Record<string, unknown> {
     ...(Number.isFinite(totalFinal) && totalFinal > 0 ? { totalCost: Math.round(totalFinal) } : {}),
     ...(highlights.length > 0 ? { highlights } : {}),
     dataQuality: quality,
+    // 核实闸结论（F3）与心愿点未落位（F0）：模型必须如实提，但不能逐条罗列明细
+    ...(verification?.summary ? { verification: verification.summary, needFix } : {}),
+    ...(wishlistMissed.length > 0 ? { wishlistMissed } : {}),
     bookingHint:
-      "用户想订行程中的酒店或机票时，直接用 travel_booking.search 实时比价（飞猪实时价，酒店/机票选项自带预订链接）" +
-      "→ travel_booking.book 两阶段确认下单，无需让用户自己去平台下单。",
+      "预订后置（用户满意这版方案之前不要谈下单）：先用一句话问「这样行不行、要改哪里」，" +
+      "用户明确说满意/就这么定之后，先调 travel.approve-plan 定稿，才用 travel_booking.search 实时比价（飞猪实时价，选项自带预订链接）" +
+      "→ travel_booking.book 两阶段确认下单。未确认满意的行程，预订工具会被满意门拦下。",
     displayNote:
       qualityNote +
       "完整行程会以独立的行程卡附在回复最末尾，卡面直接逐日展示安排，" +
       "用户点卡片上的「打开行程规划」可进入双面板查看全部明细，卡片保留在回复中供随时回看。" +
       "请勿在回复中复述 JSON、逐条罗列行程或重复任何明细数据；" +
-      "用一两句话自然告知用户行程已排好（目的地/天数/亮点一句带过）即可。",
+      "用一两句话自然告知用户行程已排好（目的地/天数/亮点一句带过）即可。" +
+      (needFix.length
+        ? `核实发现 ${verification?.summary ?? ""}：把这几条用人话提醒用户（哪天真去不了、要改哪站），不逐条罗列、不编造解决方案。`
+        : "") +
+      (wishlistMissed.length
+        ? `用户点名的「${wishlistMissed.join("、")}」在目的地数据里没找到，必须如实说明并请用户确认名称或换点，不要假装排进去了。`
+        : ""),
   };
 }
 
@@ -233,7 +334,10 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "严禁不调工具自己手写逐日行程——系统会把结构化行程卡附在回复末尾（可点开看地图与逐日明细），手写文本没有这张卡。" +
         "触发表达包括但不限于「帮我规划去X的行程」「去X玩几天怎么安排」「X旅游攻略」「X自由行」「周末附近游玩」；" +
         "规划对话进行中用户只回复目的地名称（如单独发「兴义」）或天数/偏好时，同样视为规划请求，必须调用。" +
-        "参数：input 为自然语言需求（如「去成都玩5天，喜欢美食和古迹，预算中等」）；destination 可显式指定目的地；days 指定天数；preferences 为偏好标签数组。" +
+        "开放意图分流：用户只是表达「想去X玩」还没确认具体清单时，先调 travel.destination-guide 出种草选择卡让用户勾选，再按选中项（wishlist/foodWishlist/stayWishlist）调本工具；用户已确认清单或明确要直接出行程时跳过分流直接调用。参数：input 为自然语言需求（如「去成都玩5天，喜欢美食和古迹，预算中等」）；destination 可显式指定目的地；days 指定天数；preferences 为偏好标签数组。" +
+        "用户点名了具体地方或餐厅/酒店时，务必同时用 wishlist / foodWishlist / stayWishlist 传入名字数组——工具会保证点名点排进日程" +
+        "（候选池没有的会定向补搜，补不到会在回执里如实标注）；说了出发地/出发日期/同行人/住宿落位（靠海·近机场·近车站·近某景点·市中心）" +
+        "时，用 origin / startDate / party / hotelFocus(+hotelFocusRef) 显式传入，别只写在 input 里靠正则猜。" +
         "若 input 已含目的地/天数/偏好则无需重复传参。生成后可配合 travel.destination-info 补充签证/货币等实用信息。" +
         "用户想订行程中的酒店/机票时，接 travel_booking.search 实时比价（飞猪实时价，选项自带预订链接）→ travel_booking.book 两阶段确认下单。",
       kind: "builtin",
@@ -244,6 +348,14 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         { name: "destination", type: "string", required: false, description: "目的地（如 成都/大理/东京），input 已含时可不传" },
         { name: "days", type: "number", required: false, description: "行程天数，默认 3" },
         { name: "preferences", type: "array", required: false, description: "偏好标签数组（如 ['美食','古迹','亲子']）" },
+        { name: "origin", type: "string", required: false, description: "出发地城市（大交通方式判定的前提）" },
+        { name: "startDate", type: "string", required: false, description: "出发日 YYYY-MM-DD；未传按今天起排" },
+        { name: "party", type: "string", required: false, enum: ["solo", "solo_female", "couple", "family", "friends"], description: "同行人构成（安全/节奏/住宿取向的判据）" },
+        { name: "wishlist", type: "array", required: false, description: "用户点名的景点（必须排进日程；候选池没有的会自动定向补搜，补不到在回执里如实标注）" },
+        { name: "foodWishlist", type: "array", required: false, description: "用户点名的餐厅（排进对应餐次）" },
+        { name: "stayWishlist", type: "array", required: false, description: "用户点名的酒店/民宿（排序置顶 + 定向补搜；种草卡勾选回传）" },
+        { name: "hotelFocus", type: "string", required: false, enum: ["seaside", "airport", "station", "attraction", "downtown"], description: "住宿落位诉求：靠海/近机场/近车站/近某景点/市中心" },
+        { name: "hotelFocusRef", type: "string", required: false, description: "hotelFocus=attraction 时的参照景点名" },
       ],
       outputSchema: {
         ok: "是否成功",
@@ -271,10 +383,31 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       // （用户没重说也生效；跨目的地偏好不强并，避免旧旅程标签污染新需求）
       const explicitDest =
         typeof input.destination === "string" && input.destination.trim() ? input.destination.trim() : undefined;
+      // 目的地以**用户原话的字面证据**为准（2026-10-24 实测串味事故）：
+      // 「帮我规划三亚3天…从成都出发坐高铁…」这一轮模型把出发地成都填进了
+      // destination，整份行程按成都排站、用户点名的蜈支洲岛/西岛零命中——
+      // 而确定性嗅探对同一句原话给的是三亚。模型参数是二手转述，原话是一手证据。
+      // 只在两者都是地名且互不包含时覆盖（同族写法「云南大理」vs「大理」不动）。
+      // 嗅探器对纯指代轮也会吐出伪地名（「就按你想的排」→「就按你」），
+      // 覆盖前必须过可信地名闸门：宁可漏判，不可把对的改成垃圾。
+      const sniffedDest = composeTravelPlanRequest(rawInput).destination;
+      const destConflict =
+        looksLikeDestinationName(sniffedDest) &&
+        !!sniffedDest &&
+        !!explicitDest &&
+        sniffedDest !== explicitDest &&
+        !sniffedDest.includes(explicitDest) &&
+        !explicitDest.includes(sniffedDest);
+      const destName = destConflict ? sniffedDest : explicitDest;
+      if (destConflict) {
+        console.log(
+          `[travel.plan-itinerary] destination 以原话为准：模型传「${explicitDest}」→ 改用「${destName}」`,
+        );
+      }
       const userPrefs = Array.isArray(input.preferences)
         ? input.preferences.filter((p): p is string => typeof p === "string")
         : undefined;
-      const memoryPrefs = recallSameDestinationPreferenceLabels(explicitDest ?? rawInput, userPrefs ?? []);
+      const memoryPrefs = recallSameDestinationPreferenceLabels(destName ?? rawInput, userPrefs ?? []);
       const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
       try {
         // 画像静默注入（travel-upgrade-plan 画像引擎）：UserFact 里的长期旅行
@@ -285,9 +418,11 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           input: rawInput,
           // 进度流式：规划引擎各阶段经 travel-progress-bus 汇报，聊天侧按 sessionId 订阅下发
           sessionId: execContext?.sessionId,
-          destination: explicitDest,
+          destination: destName,
           days: typeof input.days === "number" && input.days > 0 ? input.days : undefined,
           preferences: mergedPrefs.length > 0 ? mergedPrefs : undefined,
+          // 规划主线 F0：结构化槽位（模型从对话里对齐/简报卡回传），优先级高于原文正则
+          ...planSlotsFromToolInput(input),
           ...(profileHints &&
           (profileHints.photoDriven ||
             profileHints.experienceDriven ||
@@ -368,6 +503,19 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           transferSegments: result.transferSegments,
           // 规划会话：接驳提醒推送给该会话（多端 fan-out 由 WS 注册表承担）
           sessionId: execContext?.sessionId,
+          // 核实闸结果（F3）：桌面行程页与简报卡同一份事实
+          verification: result.verification
+            ? {
+                issues: result.verification.issues,
+                summary: result.verification.summary,
+                checkedAt: result.verification.checkedAt,
+              }
+            : undefined,
+          // 规划槽位与来源（F0）：简报卡回读时还原「这版怎么排的」
+          slots: planSlotsFromPreferences(result.preferences),
+          wishlistMissed: result.wishlistMissed,
+          // 满意门：新行程一律 draft，用户确认满意后才允许进入预订
+          status: "draft",
         };
         travelPlanStore.save(storedPlan);
         // POI 打卡视频回填（travel 视频下放）：落盘后后台逐景点补 1 条真实相关
@@ -451,6 +599,59 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         };
       } catch (err) {
         return { ok: false, error: `POI 搜索失败：${err instanceof Error ? err.message : String(err)}` };
+      }
+    },
+  };
+
+  /** 2.5 规划前种草候选（小红书式选择卡数据源） */
+  const destination_guide: SkillDefinition = {
+    metadata: {
+      name: "travel.destination-guide",
+      version: "1.0.0",
+      displayName: "目的地种草候选（规划前选择卡）",
+      description:
+        "规划前给用户出「种草选择卡」：景点/住宿/美食三类候选按评分取前列，每条带实拍图（本地媒体库缓存，未命中自动抓取）与推荐度（评分换算）。" +
+        "【规划前第一卡】用户表达开放出行意图（「我想去大理玩」「想去成都耍」这类没带具体清单的想法）时必须先调本工具，不要直接生成行程——把候选整理成可勾选的种草选择卡（系统自动附卡），用户确认后再调 travel.plan-itinerary。用户已点名具体清单（「去大理玩洱海和喜洲」）或明确要求直接出行程时才跳过本工具。" +
+        "用户选定后：选中的景点传 travel.plan-itinerary 的 wishlist、餐厅传 foodWishlist、住宿传 stayWishlist，再生成正式行程。" +
+        "用户不想挑就按推荐度代选并说明一句，不要反复追问。候选与实拍图来自真实地点库与图库抓取，不是榜单编造。",
+      kind: "builtin",
+      tags: ["travel", "种草", "候选", "规划前", "选择卡"],
+      icon: "🌿",
+      parameters: [
+        { name: "destination", type: "string", required: true, description: "目的地名称（如 大理/成都）" },
+        { name: "perCategory", type: "number", required: false, description: "每类返回条数（默认 6，3~8）" },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        destination: "目的地",
+        view: "景点候选 [{name,rating,rec,address,tags,latitude,longitude,photos[]}]",
+        stay: "住宿候选",
+        food: "美食候选",
+        fromCache: "POI 是否命中缓存",
+      },
+      permissions: ["network:external"],
+      timeoutMs: 120_000,
+    },
+    handler: async (input) => {
+      const destination = typeof input.destination === "string" ? input.destination.trim() : "";
+      if (!destination) {
+        return { ok: false, error: "缺少必填参数 destination" };
+      }
+      try {
+        const per = Number(input.perCategory) || 6;
+        const g = await travelPlanningService.buildDestinationGuide(destination, per);
+        return {
+          ok: true,
+          destination: g.destination,
+          center: g.center,
+          view: g.view,
+          stay: g.stay,
+          food: g.food,
+          fromCache: g.fromCache,
+          hint: "让用户按类勾选；选中项 → plan-itinerary 的 wishlist(景点)/foodWishlist(餐厅)/stayWishlist(住宿)；不想挑就按 rec 代选",
+        };
+      } catch (err) {
+        return { ok: false, error: `种草候选获取失败：${err instanceof Error ? err.message : String(err)}` };
       }
     },
   };
@@ -783,6 +984,14 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         }
         const exact = candidates.find((c) => c.name.trim().toLowerCase() === nameOrKeyword.toLowerCase());
         const poi = exact ?? candidates[0]!;
+        // 同天查重：同名地点已在当天时拒绝追加（时间轴会出现两条同名行程）
+        if (day.items.some((it) => it.name.trim().toLowerCase() === poi.name.trim().toLowerCase())) {
+          return {
+            ok: false,
+            error: `第 ${dayIdx + 1} 天已排入「${poi.name}」，不能重复添加`,
+            hint: "调整时间用 update，换同类地点用 replace，或改添加到其他天",
+          };
+        }
         const quote = quoteByType(pricingService, poi.name, poi.tags || [], poiType, plan.destination);
         day.items.push({
           type: poiType,
@@ -861,6 +1070,17 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         } else {
           // update：字段补丁（字段级白名单，与 HTTP itemPatchSchema 一致的子集）
           const patch = (input.patch ?? {}) as Record<string, unknown>;
+          // startTime 只收 24 小时制时刻（HH:MM 或 YYYY-MM-DD HH:MM，retime 同口径）：
+          // 时间段/说明文字会让前端时间解析得到 240 分钟停留或 25:54 这类跨午夜显示
+          const timeRe =
+            /^(?:\d{4}-\d{2}-\d{2}[T ])?([01]\d|2[0-3]):[0-5]\d(?::\d{2})?$/;
+          if (patch.startTime != null && !timeRe.test(String(patch.startTime).trim())) {
+            return {
+              ok: false,
+              error: `update 的 startTime 需为 24 小时制 HH:MM（如 09:30），收到：「${String(patch.startTime).slice(0, 20)}」`,
+              hint: "游玩时长用 visitDuration（分钟），说明文字放 description",
+            };
+          }
           const allowed = ["name", "startTime", "address", "priceInfo", "description"] as const;
           let applied = 0;
           for (const key of allowed) {
@@ -899,7 +1119,69 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  return [plan_itinerary, search_poi, destination_info, compute_route, get_itinerary, pickup_answer, edit_itinerary];
+  /** 8. 满意门定稿（travel 主线 F5：用户说满意了，才打开预订闸） */
+  const approve_plan: SkillDefinition = {
+    metadata: {
+      name: "travel.approve-plan",
+      version: "1.0.0",
+      displayName: "确认行程方案",
+      description:
+        "用户对这版行程明确表示满意/就按这个走时调用，把行程置为已定稿（approved）。" +
+        "预订闸按目的地+最近 2 小时判定：未定稿时 travel_booking.search/book 会拒绝报价与下单，" +
+        "所以「订酒店/买车票」之前必须先调本工具——但只能在用户真的表态满意之后调，" +
+        "用户还在提修改意见时不要调（那版还没定）。" +
+        "planId 缺省时按 destination（或最近一份行程）定位。",
+      kind: "builtin",
+      tags: ["travel", "行程", "满意", "定稿", "预订"],
+      icon: "✅",
+      parameters: [
+        { name: "planId", type: "string", required: false, description: "行程 ID（回执中的 planId）" },
+        { name: "destination", type: "string", required: false, description: "目的地（planId 缺失时按目的地定位最近一份行程）" },
+      ],
+      outputSchema: {
+        ok: "是否成功",
+        planId: "已定稿的行程 ID",
+        summary: "定稿结论",
+        next: "下一步（预订）指引",
+      },
+      permissions: [],
+      timeoutMs: 5_000,
+    },
+    handler: async (input: Record<string, unknown>) => {
+      const planId = typeof input.planId === "string" ? input.planId.trim() : "";
+      const destination = typeof input.destination === "string" ? input.destination.trim() : "";
+      // 指名了就只认那一份：定稿是有后果的动作（打开预订闸），不能找不到就
+      // 顺手把最近一份别的行程定了
+      const plan = planId
+        ? travelPlanStore.get(planId)
+        : destination
+          ? travelPlanStore.findRecentForDestination(destination)
+          : travelPlanStore.get(travelPlanStore.listSummaries(1)[0]?.planId ?? "");
+      if (!plan) {
+        return { ok: false, error: "没找到对应行程（这轮还没规划过行程？）" };
+      }
+      const already = plan.status === "approved";
+      if (!travelPlanStore.approvePlan(plan.planId)) {
+        return { ok: false, error: `行程定稿失败：${plan.planId} 存档不可写` };
+      }
+      return {
+        ok: true,
+        planId: plan.planId,
+        destination: plan.destination,
+        title: plan.title,
+        ...(plan.totalCost ? { totalCost: plan.totalCost } : {}),
+        summary: `${plan.destination}这版行程已定稿${already ? "（此前已确认）" : ""}`,
+        next:
+          "现在可以按这版预订：travel_booking.search 实时比价（酒店用行程里的入住日与城市，" +
+          "机票/车票用出发地与日期）→ 把选项讲给用户 → travel_booking.book 两阶段确认下单。",
+        displayNote:
+          "用户已确认这版方案。用一句话回应（如「那就按这版走，要不要我把酒店和车票也订上？」），" +
+          "不要复述行程明细。",
+      };
+    },
+  };
+
+  return [plan_itinerary, search_poi, destination_guide, destination_info, compute_route, get_itinerary, pickup_answer, edit_itinerary, approve_plan];
 }
 
 /**

@@ -1,11 +1,12 @@
 import "package:flutter/material.dart";
 
-/// 睡前备忘卡（contentType="evening_digest"，2026-10-22 定调）。
+/// 明日速览卡（contentType="evening_digest"，2026-10-22 定调；原名「睡前备忘」，
+/// 2026-10-24 因内容实为明日信息而改名，载荷与事件名未变）。
 ///
 /// 晚间 digest（evening.digest 事件）不再渲染纯文本气泡：本卡是每晚对
 /// 「明天要做的事」的简短汇报——narrationText（agent 口吻睡前文案）为
 /// 卡顶部的「agent 说的话」段落，下面接结构化的明日信息块（行程 / 天气
-/// 与穿衣 / 行程超支提醒）。整卡恒展开，无折叠展开（2026-10-22 用户定稿：
+/// 与穿衣 / 截止事项）。整卡恒展开，无折叠展开（2026-10-22 用户定稿：
 /// 不做今日回顾，不做折叠）。
 ///
 /// 载荷与服务端 [EveningDigest] 同构（ws EveningDigest payload.digest）：
@@ -14,9 +15,11 @@ import "package:flutter/material.dart";
 ///   - tomorrowSchedule: [{ id, title, time?, advanceNotes?: string[] }]
 ///   - tomorrowWeather: { text, minC, maxC, rainPct, alerts[] } | null
 ///   - outfitTip: string | null
-///   - budgetAlert: { destination, dayIndex, totalDays, spentToday, dailyCap } | null
 class EveningDigestCard extends StatelessWidget {
   const EveningDigestCard({super.key, required this.digest});
+
+  /// 月黄：实心月亮与其底盘同色系，明暗主题下都不依赖主题色（否则夜里会变成冷紫）
+  static const Color _moonColor = Color(0xFFF6C445);
 
   final Map<String, dynamic> digest;
 
@@ -59,9 +62,6 @@ class EveningDigestCard extends StatelessWidget {
     final Map<String, dynamic> weather =
         rawWeather is Map ? rawWeather.cast<String, dynamic>() : const <String, dynamic>{};
     final String outfitTip = (digest["outfitTip"]?.toString() ?? "").trim();
-    final Object? rawBudget = digest["budgetAlert"];
-    final Map<String, dynamic> budget =
-        rawBudget is Map ? rawBudget.cast<String, dynamic>() : const <String, dynamic>{};
     final String? tomorrowLabel = _tomorrowLabel();
 
     return Card(
@@ -77,26 +77,26 @@ class EveningDigestCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            // ── 头部：月亮图标 + 「睡前备忘」+ 明日日期 ──
+            // ── 头部：月亮图标 + 「明日速览」+ 明日日期 ──
             Row(
               children: <Widget>[
                 Container(
                   width: 30,
                   height: 30,
                   decoration: BoxDecoration(
-                    color: cs.primary.withValues(alpha: 0.12),
+                    color: _moonColor.withValues(alpha: 0.16),
                     shape: BoxShape.circle,
                   ),
                   child: Icon(
-                    Icons.bedtime_outlined,
+                    Icons.bedtime,
                     size: 17,
-                    color: cs.primary,
+                    color: _moonColor,
                   ),
                 ),
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    "睡前备忘",
+                    "明日速览",
                     style: theme.textTheme.titleMedium,
                   ),
                 ),
@@ -262,40 +262,6 @@ class EveningDigestCard extends StatelessWidget {
                 ),
               ],
             ],
-            // ── 行程超支提醒（要紧事，强调条）──
-            // 琥珀色不取 ColorScheme（手机端主题未定义 tertiaryContainer，
-            // 会回退 Material 基线紫色与黑白极简风打架），按亮度定稿。
-            if (budget.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 12),
-              Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
-                decoration: BoxDecoration(
-                  color: isLight ? const Color(0xFFF7EEDD) : const Color(0xFF332B1B),
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: Row(
-                  children: <Widget>[
-                    Icon(Icons.savings_outlined,
-                        size: 16,
-                        color: isLight
-                            ? const Color(0xFF8A5A00)
-                            : const Color(0xFFE8C476)),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        _budgetLine(budget),
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: isLight
-                              ? const Color(0xFF6E4A02)
-                              : const Color(0xFFE8C476),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ],
           ],
         ),
       ),
@@ -329,15 +295,6 @@ class EveningDigestCard extends StatelessWidget {
     final String rainPart =
         rain is num && rain >= 20 ? "，降水 ${rain.toStringAsFixed(0)}%" : "";
     return "$text$rainPart";
-  }
-
-  String _budgetLine(Map<String, dynamic> b) {
-    final String dest = b["destination"]?.toString() ?? "行程";
-    final Object? spent = b["spentToday"];
-    final Object? cap = b["dailyCap"];
-    final String spentStr = spent is num ? spent.toStringAsFixed(0) : "--";
-    final String capStr = cap is num ? cap.toStringAsFixed(0) : "--";
-    return "今天在$dest花了 $spentStr 元，超出日预算 $capStr 元";
   }
 }
 

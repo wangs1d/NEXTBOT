@@ -52,7 +52,7 @@ export interface IngestScheduleCreateInput {
   remindBeforeMinutes?: number[];
   /** kind=reminder 必填：到点弹出的那一句话（日程服务会校验非空） */
   reminderMessage?: string;
-  source?: "manual" | "booking" | "commitment" | "ics" | "email" | "ingest";
+  source?: "manual" | "booking" | "ics" | "email" | "ingest";
   sourceRefId?: string;
 }
 

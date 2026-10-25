@@ -57,8 +57,9 @@ import {
   AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
   AGENT_UPDATE_IDENTITY_CHAT_TOOL,
 } from "../tools/agent-identity-tools.js";
-import { COMMITMENT_CHAT_TOOLS } from "../tools/commitment-tools.js";
 import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
+import { WATCH_TRACK_CHAT_TOOLS } from "../tools/watch-board-tools.js";
+import { PROFILE_QUERY_CHAT_TOOLS } from "../tools/profile-query-tool.js";
 import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
@@ -1170,7 +1171,8 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...AGENT_UPDATE_HOMEPAGE_CHAT_TOOL,
     ...PROACTIVITY_CONFIRM_CHAT_TOOLS,
     ...CARE_REMINDER_CHAT_TOOLS,
-    ...COMMITMENT_CHAT_TOOLS,
+    ...WATCH_TRACK_CHAT_TOOLS,
+    ...PROFILE_QUERY_CHAT_TOOLS,
     ...GEOFENCE_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
     ...EMBODIMENT_CHAT_TOOLS,
@@ -1319,10 +1321,10 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     toolNames: ['life.manage']
   },
   {
-    // 方案 C 承诺草稿板：用户提到承诺/答应/兑现/欠的事时召回 commitment.* 工具
+    // 统一盯梢：用户想长期盯着某件事被主动告知时召回 watch.track
     category: 'life',
-    keywords: ['承诺', '答应', '保证', '说好', '约好', '兑现', '爽约', '答应过', '答应我', '我保证', '欠着', '还没给', '说过要', '改主意了', '不算了', 'commitment', 'promise'],
-    toolNames: ['commitment.create', 'commitment.list', 'commitment.confirm', 'commitment.cancel', 'commitment.retract', 'commitment.update', 'commitment.fulfill']
+    keywords: ['帮我盯着', '盯住', '盯着点', '帮我盯着点', '持续跟踪', '帮我蹲', '降价', '降到', '打折了叫我', '便宜了叫我', '有消息了叫我', '一有动静', 'watch'],
+    toolNames: ['watch.track']
   },
   {
     // 方案 D 溯源作废：用户否认说过/要求删除记忆时召回 memory.invalidate

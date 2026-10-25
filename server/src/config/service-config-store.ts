@@ -57,7 +57,7 @@ export type ServiceConfigPatch = {
   mail?: Omit<MailServiceConfig, "updatedAt">;
 };
 
-/** 密钥脱敏：只留尾 4 位，供状态回显（绝不下发完整 key） */
+/** 密钥脱敏：只留尾 4 位，供状态角标（完整密钥经路由 GET 的 keyValue 回显给已鉴权客户端） */
 export function maskServiceKey(key: string | undefined): string | null {
   const k = (key ?? "").trim();
   if (!k) return null;

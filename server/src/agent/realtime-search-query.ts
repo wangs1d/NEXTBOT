@@ -302,8 +302,13 @@ const TRAVEL_COMMAND_WORDS: string[] = [
   // 脏目的地让实时 POI 搜索空转（餐厅恒 0）→ 多跑一轮空类别重试（每轮死镜像 ~20s），
   // 直接推高规划耗时。同族其他载体词（旅游/旅行/游玩/出游）本就在表内。
   "旅程", "之旅", "出行", "度假",
+  // 2026-10-24 串味事故补漏：礼貌前缀与规划动词同样是载体，不剥掉会与地名粘成
+  // 一段 CJK（「帮我规划兴义」整口吞下），技能入口的地名闸门就只能拒收干净地名。
+  "帮我规划", "帮我安排", "帮我", "帮忙", "请", "麻烦", "规划", "安排", "计划",
   // 方位/动作连接词
   "去", "到", "在", "玩", "逛", "游", "出发",
+  // 「想」是意愿动词，粘在地名后会被 {2,6} CJK 连续段整口吞下（「上海想杭州」）
+  "想",
   // 量词与结构助词
   "一份", "一个", "一下", "个", "的",
   // 时间限定（出发时间不是目的地：下周去三亚 → 三亚）
@@ -356,14 +361,39 @@ function sniffTravelDays(text: string): number | undefined {
   return undefined;
 }
 
-/** 从剥净命令词/天数后的文本抽目的地：首个 2-6 字 CJK 串，退拉丁词。 */
+/**
+ * 出发地判定（2026-10-24 三亚/成都串味事故）：必须在**未清洗**的原文上量——
+ * 清洗会把「出发/到」这类角色线索一起擦掉。`从成都出发去三亚`、`成都到三亚4天`
+ * 里的成都都是出发地，不是目的地。
+ */
+function isDepartureMention(rawText: string, name: string): boolean {
+  const at = rawText.indexOf(name);
+  if (at < 0) return false;
+  const after = rawText
+    .slice(at + name.length, at + name.length + 4)
+    .replace(/[^一-鿿]/g, "");
+  const before = rawText
+    .slice(Math.max(0, at - 2), at)
+    .replace(/[^一-鿿]/g, "");
+  if (/^(出发|起飞|动身|到|去|飞)/.test(after)) return true;
+  return /(从|自|在)$/.test(before);
+}
+
+/** 从剥净命令词/天数后的文本抽目的地：跳过出发地，取首个剩下的 2-6 字 CJK 串，退拉丁词。 */
 function sniffTravelDestination(text: string): string | undefined {
   const cleaned = (text ?? "")
     .replace(/([一二两三四五六七八九十\d]+)\s*个?\s*(?:天|日|夜|个?星期|周)[两一二三四五六七八九十\d]*夜?/g, " ")
     .replace(/晚|夜/g, " ")
     .replace(TRAVEL_COMMAND_RE, " ");
-  const cjk = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,6}/g)].map((m) => m[0]);
-  if (cjk.length > 0) return cjk[0];
+  const cjk = [...cleaned.matchAll(/[\u4e00-\u9fff]{2,6}/g)]
+    .map((m) => m[0])
+    // 连接词粘在开头（「从成都出发」里的「从成都」）时剥掉；剩余不足 2 字不剥，
+    // 免得「从江」「自贡」这类真地名被削成单字。
+    .map((run) => (/^[从自在]/.test(run) && run.length > 2 ? run.slice(1) : run));
+  if (cjk.length > 0) {
+    // 全是出发地提及时退回首个候选（宁可给个次优目的地，也不能没有目的地）
+    return cjk.find((run) => !isDepartureMention(text, run)) ?? cjk[0];
+  }
   const latin = [...cleaned.matchAll(/\b[A-Za-z][A-Za-z0-9-]{1,}\b/g)].map((m) => m[0]);
   return latin.length > 0 ? latin[0] : undefined;
 }

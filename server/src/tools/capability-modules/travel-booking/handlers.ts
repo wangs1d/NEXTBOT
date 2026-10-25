@@ -1,5 +1,6 @@
 import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
+import { travelPlanStore } from "../../../skills/travel-planning/travel-plan-store.js";
 
 /**
  * travel_booking.* 工具 handler 工厂集合 + 注册入口。
@@ -44,6 +45,36 @@ function travelParams(input: Record<string, unknown>): Record<string, unknown> {
   return params;
 }
 
+/**
+ * 满意门（travel 主线 F5，预订后置）：用户说满意了才谈预订。
+ *
+ * 拦的是「刚排完一版就顺手下单」——规划轮用户大概率还要改（换酒店/挪景点），
+ * 此时报价→确认→扣款走完，改一版就得退改。判据只认「这个城市 2 小时内刚规划
+ * 过、且那版还没定稿」：单独订酒店（没规划过）与改订已定稿行程都不拦，
+ * 避免把闸门变成对所有预订的无差别阻拦。
+ *
+ * @returns 需要用户先表态时返回阶段一拒绝回执；放行时返回 null。
+ */
+export function satisfactionGate(input: Record<string, unknown>): Record<string, unknown> | null {
+  const type = str(input, "type");
+  if (type !== "flight" && type !== "train" && type !== "hotel") return null;
+  const city = str(input, "city") ?? (type === "hotel" ? str(input, "to") : undefined);
+  if (!city) return null;
+  const plan = travelPlanStore.findRecentForDestination(city);
+  if (!plan || plan.status === "approved") return null;
+  return {
+    ok: false,
+    needApproval: true,
+    planId: plan.planId,
+    destination: plan.destination,
+    summary:
+      `「${plan.destination}」这版行程（${plan.title}）用户还没确认满意，先不下单。` +
+      "把方案讲回给用户、问要不要改；用户明确说满意/就按这个订之后，" +
+      "先调 travel.approve-plan 定稿，再回来报价下单。",
+    error: "行程未定稿（满意门）：需用户先确认方案",
+  };
+}
+
 /** travel_booking.search —— 多源报价比价。 */
 export function createTravelSearchHandler(service: BookingService): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
@@ -51,6 +82,8 @@ export function createTravelSearchHandler(service: BookingService): ToolHandler 
     if (type !== "flight" && type !== "train" && type !== "hotel") {
       return { ok: false, error: "type 必须是 flight / train / hotel" };
     }
+    const gate = satisfactionGate(input);
+    if (gate) return gate;
     const params = travelParams(input);
     const city = str(input, "city") ?? (type === "hotel" ? str(input, "to") : undefined);
     const scheduleAt = type === "hotel" ? str(input, "checkInDate") : str(input, "departTime");
@@ -72,6 +105,8 @@ export function createTravelBookHandler(service: BookingService): ToolHandler {
     if (type !== "flight" && type !== "train" && type !== "hotel") {
       return { ok: false, error: "type 必须是 flight / train / hotel" };
     }
+    const gate = satisfactionGate(input);
+    if (gate) return gate;
     const confirm = input.confirm === true;
     const confirmationToken = str(input, "confirmationToken");
     if (confirm && !confirmationToken) {

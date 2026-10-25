@@ -168,3 +168,23 @@ test("普通方括号文本（非标记变体）不受影响", () => {
   const out = g.feed("参见 [附录A] 与 [注1]:内容\n");
   assert.equal(out, "参见 [附录A] 与 [注1]:内容\n");
 });
+
+// ── 2026-10-24 漏下划线变体（真机截图：[NEXT_UPSTART] 整块漏进气泡）────────
+
+test("漏下划线变体 [NEXT_UPSTART]…[NEXT_UPEND] 整块扣下，不出流", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("日期你定。\n[NEXT_UPSTART]\n按两个人重算预算\n把行程改成3天\n[NEXT_UPEND]\n");
+  assert.equal(out, "日期你定。\n");
+});
+
+test("漏下划线变体行内嵌：START 前正文照发，块内容扣下", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("先给结论。[NEXT_UPSTART]改3天[NEXT_UPEND]\n");
+  assert.equal(out, "先给结论。\n");
+});
+
+test("漏下划线变体单行完整块：块外两段拼接", () => {
+  const g = createStreamMarkerGuard();
+  const out = g.feed("前文[NEXT_UPSTART]建议[NEXT_UPEND]后文\n");
+  assert.equal(out, "前文后文\n");
+});

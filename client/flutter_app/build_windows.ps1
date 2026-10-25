@@ -142,27 +142,17 @@ function Stop-ProcessesUsingDeployFolder {
   Start-Sleep -Milliseconds 600
 }
 
-function Remove-DeployFolder {
-  param([string] $LiteralPath)
-  Stop-ProcessesUsingDeployFolder -FolderPath $LiteralPath
-  $max = 8
-  for ($i = 0; $i -lt $max; $i++) {
-    try {
-      Remove-Item -LiteralPath $LiteralPath -Recurse -Force -ErrorAction Stop
-      return
-    } catch {
-      if ($i -eq $max - 1) { throw }
-      Stop-ProcessesUsingDeployFolder -FolderPath $LiteralPath
-      Start-Sleep -Milliseconds (500 * ($i + 1))
-    }
-  }
-}
-
 function Invoke-BuildAndDeploy {
   param(
     [ValidateSet('Release', 'Debug')]
     [string] $Mode
   )
+
+  # 构建前先放行：windows/cmake 的 install 步骤会把产物镜像到 windows_dist\<Mode>，
+  # App 正在跑就锁着该目录（以及 build\...\runner\<Mode> 本体），构建必挂在最后
+  # 一步（2026-10-24 实测：Release exit 1，MSB3073 on INSTALL.vcxproj）。
+  Stop-ProcessesUsingDeployFolder -FolderPath (Join-Path $DistRoot $Mode)
+  Stop-ProcessesUsingDeployFolder -FolderPath (Join-Path $Root "build\windows\x64\runner\$Mode")
 
   $dartDefines = @('--dart-define', "PAI_EDITION=$Edition")
   if ($HttpBase) { $dartDefines += @('--dart-define', "HTTP_BASE=$HttpBase") }
@@ -200,11 +190,17 @@ function Invoke-BuildAndDeploy {
   }
 
   $dest = Join-Path $DistRoot $Mode
-  if (Test-Path -LiteralPath $dest) {
-    Remove-DeployFolder -LiteralPath $dest
-  }
   $null = New-Item -ItemType Directory -Force -Path $dest
-  Copy-Item -Path (Join-Path $src '*') -Destination $dest -Recurse -Force
+  # 不再「整目录删掉再拷」：其它程序（编辑器/索引器）会以独占只读句柄持有产物
+  # 文件，删除必抛异常，构建明明已成功却被判失败（2026-10-25：ZCode 持有两个
+  # 字体文件 → Remove-Item 报「正在被另一进程使用」）。robocopy /MIR 对
+  # 「时间戳+大小相同」的文件直接跳过，不会去写那类锁住的未变文件；内容真变了
+  # 的文件照样会失败——那才是需要人介入的失败。
+  $copyArgs = @($src, $dest, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS')
+  $copy = Start-Process -FilePath 'robocopy.exe' -ArgumentList $copyArgs -NoNewWindow -Wait -PassThru
+  if ($copy.ExitCode -ge 8) {
+    Write-Error "robocopy to $dest failed (code $($copy.ExitCode))"
+  }
 
   Write-Host ''
   Write-Host "$Mode build OK. Deployed folder:" -ForegroundColor Green

@@ -229,7 +229,9 @@ class ChatMessage {
   /// 决策类通知（reminder_popup / 高重要度主动性消息）不再飘独立弹窗或
   /// 玻璃卡，直接落进对话流一张卡：用户点「确认/忽略」后由 main.dart
   /// 原地翻转 state 并回传 attention ack / proactive outcome。
-  /// 内存态不持久化（同 task_receipt：重启后消失，服务端升级链自行收敛）。
+  /// 2026-10-25 定调（用户拍板：agent 主动发送的消息都要保存）：随消息
+  /// 落本地历史（isar store 加密存储），重启后仍以卡片形态渲染，终态
+  /// 翻转时再存一次。
   ///
   /// 载荷：
   ///   - kind: "attention" | "proactive"

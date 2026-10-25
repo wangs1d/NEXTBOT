@@ -15,7 +15,8 @@ import "mobile_theme.dart";
 /// 服务端不代充模型/语音额度：用户在此自行填 API Key，经
 /// PUT /api/service-config 持久化到服务端 data/service-config.json 并
 /// 即时热生效（主对话 provider 热替换、TTS 客户端按密钥重建，无需重启）。
-/// 密钥绝不下发明文——状态回显只带尾号（如 ****ab12）。
+/// 已接入的密钥/授权码由 GET 回显 keyValue 回填进输入框，默认打码显示
+/// （眼睛钮显隐）；状态角标仍只带尾号（如 ****ab12）。
 ///
 /// - 模型服务：从 /api/model-providers 目录选服务商（自动带出网关/默认模型），
 ///   或选「自定义」手填 OpenAI 兼容网关地址 + 模型名 + API Key
@@ -73,6 +74,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   String _mailUser = "";
   String _mailReason = "";
   bool _obscureMailPass = true;
+  bool _obscureModelKey = true;
+  bool _obscureTtsKey = true;
 
   /// 信息源树枝（GET /api/proactivity/branches；树状可插拔架构 Phase 3 配置面）。
   List<Map<String, dynamic>> _branches = const <Map<String, dynamic>>[];
@@ -157,6 +160,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       }
 
       if (!mounted) return;
+      // 已接入服务的密钥/授权码全文回显（keyValue），供回填进输入框（默认打码）
+      final String modelKeyFull = modelBlock["keyValue"]?.toString() ?? "";
+      final String ttsKeyFull = ttsBlock["keyValue"]?.toString() ?? "";
+      final String mailKeyFull = mailBlock["keyValue"]?.toString() ?? "";
       setState(() {
         _providers = providers;
         _modelConfigured = modelBlock["configured"] == true;
@@ -179,6 +186,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         if ((ttsBlock["provider"]?.toString() ?? "").isNotEmpty) {
           _ttsProvider = ttsBlock["provider"].toString();
         }
+        // 回填：已接入的服务把已存密钥/授权码带进输入框（默认打码，眼睛钮显隐）
+        if (_modelConfigured && modelKeyFull.isNotEmpty) _apiKey.text = modelKeyFull;
+        if (_ttsConfigured && ttsKeyFull.isNotEmpty) _ttsApiKey.text = ttsKeyFull;
+        if (_mailConfigured && mailKeyFull.isNotEmpty) _mailPass.text = mailKeyFull;
         _loading = false;
       });
     } catch (e) {
@@ -239,7 +250,6 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       _savingModel = false;
       if (err == null) {
         _modelConfigured = true;
-        _apiKey.clear();
         _modelMessage = "已保存并即时生效，直接开聊即可";
         _modelMessageError = false;
       } else {
@@ -247,6 +257,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _modelMessageError = true;
       }
     });
+    if (err == null) await _refillSecrets();
   }
 
   /// 保存 TTS：PUT /api/service-config（minimax 留空 = 沿用已存密钥）。
@@ -272,7 +283,6 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       _savingTts = false;
       if (err == null) {
         _ttsConfigured = true;
-        _ttsApiKey.clear();
         _ttsMessage = "已保存，语音回复即刻生效";
         _ttsMessageError = false;
       } else {
@@ -280,6 +290,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _ttsMessageError = true;
       }
     });
+    if (err == null) await _refillSecrets();
   }
 
   /// 保存邮箱授权码：PUT /api/service-config（mail 块）→ 服务端落盘 + 即刻启动
@@ -308,8 +319,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       return;
     }
     _mailConfigured = true;
-    _mailPass.clear();
     await _refreshMailStatus();
+    await _refillSecrets();
     if (!mounted) return;
     setState(() {
       _savingMail = false;
@@ -333,6 +344,38 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       final String user = st["user"]?.toString() ?? "";
       if (user.isNotEmpty) _mailUser = user;
     });
+  }
+
+  /// 保存成功后重拉服务端回显：把实际生效的密钥/授权码重新填回输入框
+  /// （清空后保存=沿用已存密钥时，也能看到当前真正在用的值）。
+  Future<void> _refillSecrets() async {
+    try {
+      final http.Client client = http.Client();
+      final http.Response res = await client
+          .get(Uri.parse("${ApiConfig.httpBase}/api/service-config"),
+              headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 15));
+      client.close();
+      final Map<String, dynamic> cfg =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (cfg["ok"] != true || !mounted) return;
+      final Map<String, dynamic> modelBlock =
+          (cfg["model"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      final Map<String, dynamic> ttsBlock =
+          (cfg["tts"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      final Map<String, dynamic> mailBlock =
+          (cfg["mail"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+      final String modelKeyFull = modelBlock["keyValue"]?.toString() ?? "";
+      final String ttsKeyFull = ttsBlock["keyValue"]?.toString() ?? "";
+      final String mailKeyFull = mailBlock["keyValue"]?.toString() ?? "";
+      setState(() {
+        if (modelKeyFull.isNotEmpty) _apiKey.text = modelKeyFull;
+        if (ttsKeyFull.isNotEmpty) _ttsApiKey.text = ttsKeyFull;
+        if (mailKeyFull.isNotEmpty) _mailPass.text = mailKeyFull;
+      });
+    } catch (_) {
+      // 回填失败不打断保存流程：输入框里通常已有用户刚填的值
+    }
   }
 
   void _setMailMessage(String text, {required bool error}) {
@@ -532,12 +575,23 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           ),
         ],
         const SizedBox(height: 12),
-        _fieldLabel(p, "API Key${_modelConfigured ? "（留空则沿用已存密钥）" : ""}"),
+        _fieldLabel(p, "API Key${_modelConfigured ? "（已保存，可改）" : ""}"),
         _buildField(
           p,
           controller: _apiKey,
           hint: _modelConfigured ? "已配置 ${_modelKeyTail ?? ""}，留空不改" : "sk-...",
-          obscure: true,
+          obscure: _obscureModelKey,
+          suffixIcon: IconButton(
+            icon: Icon(
+              _obscureModelKey
+                  ? Icons.visibility_off_outlined
+                  : Icons.visibility_outlined,
+              size: 18,
+              color: p.textMuted,
+            ),
+            onPressed: () =>
+                setState(() => _obscureModelKey = !_obscureModelKey),
+          ),
         ),
         if (consoleUrl != null && consoleUrl.isNotEmpty) ...<Widget>[
           const SizedBox(height: 8),
@@ -614,12 +668,23 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         ),
         if (_ttsProvider == "minimax") ...<Widget>[
           const SizedBox(height: 12),
-          _fieldLabel(p, "MiniMax API Key${_ttsConfigured ? "（留空则沿用已存密钥）" : ""}"),
+          _fieldLabel(p, "MiniMax API Key${_ttsConfigured ? "（已保存，可改）" : ""}"),
           _buildField(
             p,
             controller: _ttsApiKey,
             hint: _ttsConfigured ? "已配置 ${_ttsKeyTail ?? ""}，留空不改" : "eyJ...",
-            obscure: true,
+            obscure: _obscureTtsKey,
+            suffixIcon: IconButton(
+              icon: Icon(
+                _obscureTtsKey
+                    ? Icons.visibility_off_outlined
+                    : Icons.visibility_outlined,
+                size: 18,
+                color: p.textMuted,
+              ),
+              onPressed: () =>
+                  setState(() => _obscureTtsKey = !_obscureTtsKey),
+            ),
           ),
         ],
         const SizedBox(height: 16),
@@ -766,7 +831,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         ),
         const SizedBox(height: 12),
         _fieldLabel(
-            p, "IMAP 授权码${_mailConfigured ? "（已存 ${_mailKeyTail ?? ""}，留空沿用）" : ""}"),
+            p, "IMAP 授权码${_mailConfigured ? "（已保存，可改）" : ""}"),
         TextField(
           controller: _mailPass,
           obscureText: _obscureMailPass,
@@ -774,7 +839,9 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           enableSuggestions: false,
           style: TextStyle(color: p.textPrimary, fontSize: 14),
           decoration: InputDecoration(
-            hintText: "邮箱设置里生成的授权码",
+            hintText: _mailConfigured
+                ? "已存 ${_mailKeyTail ?? ""}，留空沿用"
+                : "邮箱设置里生成的授权码",
             hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
             filled: true,
             fillColor: p.background,
@@ -1239,6 +1306,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     required TextEditingController controller,
     required String hint,
     bool obscure = false,
+    Widget? suffixIcon,
   }) {
     return TextField(
       controller: controller,
@@ -1253,6 +1321,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         fillColor: p.background,
         contentPadding:
             const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        suffixIcon: suffixIcon,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(10),
           borderSide: BorderSide(color: p.divider),

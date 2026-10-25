@@ -17,6 +17,23 @@ import type { AgentMemorySyncService } from "../../services/agent-memory-sync-se
 import { clearAllMemoryForActor } from "../../services/memory-clear-service.js";
 
 /**
+ * 回放文本的长度上限（2026-10-24）。
+ *
+ * 普通回复按 8000 字截断即可；但含行程卡的回复里，卡片 JSON 有几十 KB
+ * （3 天约 27KB），按 8000 硬截会把 [AGENT_RESULT_CARD_START] 切成半截，
+ * 客户端解析失败 → 回放时卡片整张消失（真机：行程卡只在当轮可见，重启即无）。
+ * 有卡片块时截到最后一个卡片结束标记，正文部分仍按 8000 控制。
+ */
+export function capAssistantTextForHistory(text: string): string {
+  const PROSE_CAP = 8000;
+  if (text.length <= PROSE_CAP) return text;
+  const endMarker = "[AGENT_RESULT_CARD_END]";
+  const lastEnd = text.lastIndexOf(endMarker);
+  if (lastEnd < 0) return text.slice(0, PROSE_CAP);
+  return text.slice(0, lastEnd + endMarker.length);
+}
+
+/**
  * 用户数据管理路由：删除全部聊天记录 + 清空 Agent 记忆 / 删除单轮对话。
  * 供客户端“删除全部聊天”与“删除这一轮”按钮调用。
  */
@@ -138,7 +155,7 @@ export function registerChatDataRoutes(
           if (turn.assistantText) {
             messages.push({
               role: "assistant",
-              text: turn.assistantText.slice(0, 8000),
+              text: capAssistantTextForHistory(turn.assistantText),
               // 同轮 user/assistant 共享同一 ts（同一毫秒）会让客户端渲染层
               // 的不稳定排序随机翻序（回复冒到提问上面）——assistant 恒 +1ms
               // 保证「问在上、答在下」的次序在一切排序下确定（2026-10-16）。

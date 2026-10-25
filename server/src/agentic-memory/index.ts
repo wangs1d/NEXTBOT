@@ -93,13 +93,12 @@ export {
 
 // ============================================================
 // 组件注册表：create-app-services 装配后登记四件套实例，
-// 供 memory-clear-service（级联清理）/ prompt-context（承诺注入）/
+// 供 memory-clear-service（级联清理）/ prompt-context /
 // health 快照等无装配上下文的消费方获取。测试环境默认全 null。
 // ============================================================
 
 export interface AgenticMemoryComponents {
   ledger: import("./ledger.js").AgenticLedger | null;
-  commitmentBoard: import("./commitment-board.js").CommitmentBoard | null;
   provenance: import("./provenance.js").ProvenanceService | null;
   bridge: import("./memory-bridge-service.js").MemoryBridgeService | null;
   understandingStore: import("./user-understanding-store.js").UserUnderstandingStore | null;
@@ -112,7 +111,6 @@ export interface AgenticMemoryComponents {
 
 const components: AgenticMemoryComponents = {
   ledger: null,
-  commitmentBoard: null,
   provenance: null,
   bridge: null,
   understandingStore: null,

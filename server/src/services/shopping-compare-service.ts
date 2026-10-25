@@ -41,6 +41,8 @@ export interface CompareOffer {
   shop?: string;
   url?: string;
   itemId?: string;
+  /** 商品主图（联盟 API 官方图源；浏览器抓取未提取时缺省） */
+  imageUrl?: string;
   /** 数据来源（比价卡呈现须注明数据源与时效） */
   source?: OfferSource;
   /** 抓取时刻（ms） */
@@ -56,6 +58,8 @@ export interface CompareGroup {
   /** 同款置信度 0~1（组内与代表成员的最高相似度） */
   confidence: number;
   minPriceCny: number | null;
+  /** 组代表图（组内首个带官方主图的报价；比价卡缩略图/决策页主图用） */
+  imageUrl?: string;
   offers: CompareOffer[];
 }
 
@@ -117,6 +121,15 @@ export interface ShoppingCompareServiceDeps {
   dataDir?: string;
   /** 到价回调（装配层接 ProactivityHub.submitIntent 主动推送） */
   onPriceAlert?: (actorId: string, watch: PriceWatch, hit: PriceWatchHit) => void;
+  /**
+   * 比价完成回调（装配层接决策页内存存储，模式同 travel-plans）。
+   * 回调返回页面 id 时，工具回执携带 decisionPageUrl 供比价卡「打开决策页」。
+   * 回调异常/返回空不影响比价主流程。
+   */
+  onCompareResult?: (
+    actorId: string,
+    payload: CompareResult & { fetchedAt: number },
+  ) => string | null | void;
   /** 测试注入时钟 */
   now?: () => number;
 }
@@ -192,11 +205,13 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
 
   return groups.map((g) => {
     const prices = g.offers.map((o) => o.priceCny).filter((v): v is number => v != null);
+    const repImage = g.offers.find((o) => o.imageUrl)?.imageUrl;
     return {
       normalizedTitle: g.repNorm,
       matchType: g.exact ? ("exact" as const) : ("similar" as const),
       confidence: Math.round(g.confidence * 100) / 100,
       minPriceCny: prices.length ? Math.min(...prices) : null,
+      ...(repImage ? { imageUrl: repImage } : {}),
       offers: g.offers,
     };
   });
@@ -210,6 +225,7 @@ function toOffer(platform: string, p: ProductSummary, source?: OfferSource, fetc
     shop: p.shop,
     url: p.url,
     itemId: p.itemId,
+    ...(p.imageUrl ? { imageUrl: p.imageUrl } : {}),
     ...(source ? { source } : {}),
     ...(fetchedAt ? { fetchedAt } : {}),
   };
@@ -259,6 +275,7 @@ export class ShoppingCompareService {
   private readonly historyWriter: JsonFileWriter;
   private readonly clock: () => number;
   private onPriceAlert: ShoppingCompareServiceDeps["onPriceAlert"];
+  private onCompareResult: ShoppingCompareServiceDeps["onCompareResult"];
   private loaded = false;
   private timer: ReturnType<typeof setInterval> | null = null;
   private started = false;
@@ -273,12 +290,21 @@ export class ShoppingCompareService {
     this.historyWriter = new JsonFileWriter(join(this.dataDir, "price-history.json"));
     this.clock = deps.now ?? Date.now;
     this.onPriceAlert = deps.onPriceAlert;
+    this.onCompareResult = deps.onCompareResult;
   }
 
   /** 到价回调（装配层晚接线；构造时也可注入。晚于构造是因为 ProactivityHub 后创建） */
   setOnPriceAlert(fn: NonNullable<ShoppingCompareServiceDeps["onPriceAlert"]>): void {
     (this.deps as { onPriceAlert?: ShoppingCompareServiceDeps["onPriceAlert"] }).onPriceAlert = fn;
     this.onPriceAlert = fn;
+  }
+
+  /** 比价完成回调（装配层接决策页存储；同 setOnPriceAlert 的晚接线模式） */
+  setOnCompareResult(
+    fn: NonNullable<ShoppingCompareServiceDeps["onCompareResult"]>,
+  ): void {
+    (this.deps as { onCompareResult?: ShoppingCompareServiceDeps["onCompareResult"] }).onCompareResult = fn;
+    this.onCompareResult = fn;
   }
 
   // ---- 生命周期 ----
@@ -467,6 +493,24 @@ export class ShoppingCompareService {
     const platformSummary = searchedPlatforms.join("/");
     const bestText = bestOffer?.priceCny != null ? `，最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
     const sourceText = sourceNotes.length > 0 ? `；数据源：${sourceNotes.join("、")}，其余为浏览器抓取` : "";
+
+    // 决策页存档（fire-and-forget：存储失败/未装配不影响比价回执）
+    const fetchedAt = Date.now();
+    let decisionPageUrl: string | undefined;
+    try {
+      const pageId = this.onCompareResult?.(actorId, {
+        query: q,
+        platforms: requested,
+        searchedPlatforms,
+        groups,
+        bestOffer,
+        fetchedAt,
+      });
+      if (pageId) decisionPageUrl = `/shopping/decision-page?id=${encodeURIComponent(pageId)}`;
+    } catch (err) {
+      console.log(`[ShoppingCompare] 决策页存档失败（忽略）: ${err}`);
+    }
+
     return {
       ok: true,
       summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${sourceText}`,
@@ -475,6 +519,8 @@ export class ShoppingCompareService {
       searchedPlatforms,
       groups,
       bestOffer,
+      fetchedAt,
+      ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };
   }
 

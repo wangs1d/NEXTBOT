@@ -1,6 +1,10 @@
 import type { WorldService } from "@nextbot/agent-world";
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import {
+  getProfileRouter,
+  recallTagsForTurn,
+} from "../brain/profile-router.js";
 import { getMemoryComponents } from "../agentic-memory/index.js";
 import { peekMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
 import { buildTemporalFactAddressing } from "./memory-temporal-intent.js";
@@ -904,8 +908,8 @@ export class PromptContextBuilder {
       ...fromKv,
       // 【当前时间】每轮注入（2026-10-07 用户拍板，撤 10-06 按需闸对本块的控制）：
       // 一行动态文本，走动态层不伤 prefix cache；缺它模型会拿「没有注入时间」当
-      // 借口拒绝办事（真机实证：「明天天气」轮自称无时间无天气权限）。【对话时间轴】
-      // 块仍按需放行（abstract-chat-provider 侧 time-context-gate 判定不变）。
+      // 借口拒绝办事（真机实证：「明天天气」轮自称无时间无天气权限）。
+      // 【对话时间轴】同样改为每轮注入（2026-10-23 删除按需闸，见 abstract-chat-provider）。
       currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
       ...(buildDeviceEnvironmentBlock(input.deviceClass)
         ? { deviceEnvironment: buildDeviceEnvironmentBlock(input.deviceClass) }
@@ -959,8 +963,8 @@ export class PromptContextBuilder {
       ...(userPatternBlock ? { userProfile: userPatternBlock } : {}),
       ...(toolPlanBlock ? { toolPlan: toolPlanBlock } : {}),
       ...(interestListBlock ? { interestList: interestListBlock } : {}),
-      // commitmentBoard（未兑现承诺块）不再构建：prompt-assembler 从不渲染该字段，
-      // 每轮白查一次承诺板。承诺信息仍经 KV memory_commitments 与 epitome 注入。
+      // 承诺板已整体下线（2026-10-23）：不再有未兑现承诺块。待办/承诺类信息
+      // 仍经 KV memory_commitments / memory_open_loops 与 epitome 条目注入。
       ...(conversationTimeline ? { conversationTimeline } : {}),
       ...(input.semanticIntent ? { semanticIntent: input.semanticIntent } : {}),
       // 2026-08-20 修复「对话面第二句说没拿到定位」：
@@ -1065,8 +1069,25 @@ export class PromptContextBuilder {
       } catch {
         temporalBlock = undefined;
       }
+      // 画像 v2 动态路由（PROFILE_ROUTER_ENABLED，默认开）：恒带层（身份/沟通/
+      // 禁忌）+ 按本轮意图路由的类——替代全量注入；health 敏感类结构性排除。
+      // Router 未装配/灰度关闭 → categories 为 undefined，走全量渲染（旧行为）。
+      let categories: readonly string[] | undefined;
+      if (process.env.PROFILE_ROUTER_ENABLED !== "0") {
+        try {
+          const router = getProfileRouter();
+          if (router) {
+            // 三级召回时机合并：T0 恒带 + T1 意图路由 + T2 字段命中（直提信号）
+            categories = recallTagsForTurn(router, actorId, userText).categories;
+          }
+        } catch {
+          categories = undefined;
+        }
+      }
       return {
-        stableBlock: store.renderForPrompt(actorId, undefined, "user", { suppressedFields }) ?? undefined,
+        stableBlock:
+          store.renderForPrompt(actorId, undefined, "user", { suppressedFields, categories }) ??
+          undefined,
         matchedFields,
         ...(temporalBlock ? { temporalBlock } : {}),
       };

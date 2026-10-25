@@ -166,6 +166,11 @@ export class ShoppingOrderService {
       imageStore?: { savePng(actorId: string, png: Buffer): Promise<string> };
       /** 通用二维码推送服务。缺省时按 imageStore 构造。 */
       qrAssist?: QrAssistService;
+      /**
+       * 「保存登录态」征询通道（2026-10-25 用户拍板：存 Cookie 须用户同意）。
+       * 未表态时经此向客户端弹征询条；缺省时跳过捕获（宁可不存）。
+       */
+      askSaveLoginConsent?: (actorId: string, siteId: string, siteLabel: string) => void;
     },
   ) {
     this.browserExecutor =
@@ -336,6 +341,15 @@ export class ShoppingOrderService {
     source: "scan_login" | "shared_login" | "headless_refresh",
     opts: { agentAllowed?: boolean } = {},
   ): Promise<void> {
+    // 保存须用户同意（与主流做法一致）：deny=不存；未表态=弹征询条 + 本轮不存
+    //（同意后下一轮起静默保存）。捕获失败/被拒都不影响主流程。
+    const consentActor = resolveActorId(ctx);
+    const consent = await this.deps.browserSessionService.getCaptureConsent(consentActor, platform);
+    if (consent === "deny") return;
+    if (consent === "ask") {
+      this.deps.askSaveLoginConsent?.(consentActor, platform, this.platformLabel(platform));
+      return;
+    }
     try {
       const raw = await page.context().cookies(targetUrl);
       const mapped = toImportedCookies(raw);

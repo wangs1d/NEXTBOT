@@ -96,7 +96,7 @@ class FeedbackApi {
         ...AccessCredentialStore.instance.authHeaders,
       };
 
-  /// 提交一条反馈；[diagnostics] 只包含用户勾选放行的诊断项。
+  /// 提交一条反馈；[diagnostics] 为可选的附加诊断信息（服务端会做标量化清洗）。
   Future<FeedbackResult<FeedbackRecord>> submit({
     required String type,
     required String title,

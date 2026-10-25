@@ -498,12 +498,20 @@ test("fromIngested：按本地日历日分档，过期项归今天不消失", ()
   assert.equal(r.total, 4, "超过 3 天的远期项不进三档");
 });
 
-test("fromIngested 的条目可以和承诺板同标题去重", () => {
+test("fromIngested 的条目可以和日程同标题去重", () => {
   const radar = new DdlRadarService({
     now: () => NOW,
-    commitmentBoard: {
-      list: () => [
-        { id: "c1", actorId: "u1", text: "数据结构作业", status: "active", deadline: at(1, 9, 0) },
+    scheduleTaskService: {
+      listTasksBySession: () => [
+        {
+          taskId: "t1",
+          title: "数据结构作业",
+          description: "提交数据结构作业",
+          runAt: at(1, 9, 0),
+          nextRunAt: null,
+          status: "pending",
+          category: "study",
+        },
       ],
     },
     ingestService: ingestOf([
@@ -513,15 +521,23 @@ test("fromIngested 的条目可以和承诺板同标题去重", () => {
   const r = radar.scan("u1", "u1");
   assert.equal(r.total, 1, "同一件事只出现一次");
   assert.equal(r.tomorrow.length, 1, "保留截止更早的那条");
-  assert.equal(r.tomorrow[0].source, "commitment");
+  assert.equal(r.tomorrow[0].source, "schedule");
 });
 
 test("fromIngested：台账抛错不影响其他数据源", () => {
   const radar = new DdlRadarService({
     now: () => NOW,
-    commitmentBoard: {
-      list: () => [
-        { id: "c1", actorId: "u1", text: "论文初稿", status: "active", deadline: at(0, 23, 0) },
+    scheduleTaskService: {
+      listTasksBySession: () => [
+        {
+          taskId: "t1",
+          title: "论文初稿",
+          description: "提交论文初稿",
+          runAt: at(0, 23, 0),
+          nextRunAt: null,
+          status: "pending",
+          category: "study",
+        },
       ],
     },
     ingestService: {

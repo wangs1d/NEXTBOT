@@ -21,6 +21,17 @@ type Persisted = {
   bySession?: Record<string, WeatherPrefsRecord>;
 };
 
+/**
+ * 天气取数用的位置（2026-10-23）：显式偏好记录（{@link WeatherPrefsRecord}）
+ * 与被动定位兜底（位置历史的最新定位）归一成同一个形状喂给 WeatherService。
+ */
+export type WeatherLocation = {
+  latitude: number;
+  longitude: number;
+  timezone?: string;
+  label?: string;
+};
+
 export class WeatherPrefsService {
   private readonly bySession = new Map<string, WeatherPrefsRecord>();
 

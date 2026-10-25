@@ -114,6 +114,27 @@ export class SharedBrowserCoordinator {
     return this.cdpEndpoints.get(actorId) ?? "";
   }
 
+  /**
+   * 「保存登录态」征询回调（装配层接线 → BrowserSessionService.setCaptureConsent）。
+   * 客户端弹条后回 browser.save_login_decision，经 connection 层转到这里。
+   */
+  onSaveLoginDecision?: (actorId: string, siteId: string, allowed: boolean) => void;
+
+  /** 向客户端弹「允许保存登录态」征询条（未绑执行器时静默跳过）。 */
+  askSaveLoginConsent(actorId: string, siteId: string, siteLabel: string): void {
+    const socket = this.executors.get(actorId);
+    if (!socket) return;
+    safeSend(socket, {
+      type: "shared.browser.ask_save_login",
+      payload: { siteId, siteLabel },
+    });
+  }
+
+  /** 客户端征询答复入口（connection 层调用）。 */
+  forwardSaveLoginDecision(actorId: string, siteId: string, allowed: boolean): void {
+    this.onSaveLoginDecision?.(actorId, siteId, allowed);
+  }
+
   /** 未绑定时的调用返回立即失败（不抛错），工具层据此回退提示。 */
   invoke(
     actorId: string,

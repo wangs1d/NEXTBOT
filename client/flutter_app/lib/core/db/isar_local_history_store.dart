@@ -192,6 +192,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             role: map["role"] as String,
             text: map["text"] as String,
             timestamp: DateTime.parse(map["timestamp"] as String),
+            contentType: map["contentType"] as String? ?? "text",
             attachmentImageCount: (map["attachmentImageCount"] as num?)?.toInt() ?? 0,
             playUrl: map["playUrl"] as String?,
             pendingDelivery: map["pendingDelivery"] == true,
@@ -199,6 +200,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
             eveningDigest: _decryptEveningDigest(map["eveningDigest"]),
+            decisionCard: _decryptDecisionCard(map["decisionCard"]),
           );
         }).toList();
       }
@@ -619,17 +621,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         final ChatMessage m = list[i];
         final String plain = _decryptFor(m.text, oldPin);
         final String enc = _encryptFor(plain, trimmed);
-        list[i] = ChatMessage(
-          messageId: m.messageId,
-          sessionId: m.sessionId,
-          role: m.role,
-          text: enc,
-          timestamp: m.timestamp,
-          attachmentImageCount: m.attachmentImageCount,
-          playUrl: m.playUrl,
-          mediaCards: m.mediaCards,
-          renderBlocks: m.renderBlocks,
-        );
+        // copyWith 全字段保留，只换 text 的密文（手抄清单会漏卡片载荷字段）
+        list[i] = m.copyWith(text: enc);
       }
     }
 
@@ -680,20 +673,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     final List<ChatMessage> out = <ChatMessage>[];
     for (final ChatMessage message in deduped) {
       try {
-        out.add(ChatMessage(
-          messageId: message.messageId,
-          sessionId: message.sessionId,
-          role: message.role,
-          text: _decryptFor(message.text, _userPin),
-          timestamp: message.timestamp,
-          attachmentImageCount: message.attachmentImageCount,
-          playUrl: message.playUrl,
-          pendingDelivery: message.pendingDelivery,
-          mediaCards: message.mediaCards,
-          summaryCard: message.summaryCard,
-          renderBlocks: message.renderBlocks,
-          eveningDigest: message.eveningDigest,
-        ));
+        // copyWith 全字段保留、只解密 text：手抄构造清单曾漏 contentType /
+        // decisionCard（卡片消息读出后退化成纯文本气泡，2026-10-25）——
+        // 消息字段增长时这里最容易烂，别再手抄。
+        out.add(message.copyWith(text: _decryptFor(message.text, _userPin)));
       } catch (e) {
         debugPrint(
           '[IsarLocalHistoryStore] 跳过损坏消息 ${message.messageId}: $e',
@@ -722,17 +705,9 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
         final String sanitizedText = stripAllTimestampFrameLines(plainText);
         if (sanitizedText == plainText) continue;
 
-        encryptedMessages[index] = ChatMessage(
-          messageId: message.messageId,
-          sessionId: message.sessionId,
-          role: message.role,
-          text: _encryptFor(sanitizedText, _userPin),
-          timestamp: message.timestamp,
-          attachmentImageCount: message.attachmentImageCount,
-          playUrl: message.playUrl,
-          mediaCards: message.mediaCards,
-          renderBlocks: message.renderBlocks,
-        );
+        // copyWith 全字段保留，只替换净化后的 text
+        encryptedMessages[index] =
+            message.copyWith(text: _encryptFor(sanitizedText, _userPin));
         changed++;
       }
     }
@@ -760,6 +735,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       role: message.role,
       text: encrypted,
       timestamp: message.timestamp,
+      contentType: message.contentType,
       attachmentImageCount: message.attachmentImageCount,
       playUrl: message.playUrl,
       pendingDelivery: message.pendingDelivery,
@@ -767,6 +743,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
       eveningDigest: message.eveningDigest,
+      decisionCard: message.decisionCard,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
     // done 后再存完整文本）只保留一条记录，避免本地历史出现重复气泡。
@@ -867,6 +844,25 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
+  /// 加密决策卡载荷（decisionCard，2026-10-25：agent 主动消息都要保存）：
+  /// null/空 → null。
+  String? _encryptDecisionCard(Map<String, dynamic>? card) {
+    if (card == null || card.isEmpty) return null;
+    return _encryptFor(jsonEncode(card), _userPin);
+  }
+
+  /// 解密决策卡载荷；损坏时不抛异常，返回 null（历史兼容）。
+  Map<String, dynamic>? _decryptDecisionCard(Object? stored) {
+    if (stored is! String || stored.isEmpty) return null;
+    try {
+      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
+      if (decoded is! Map) return null;
+      return Map<String, dynamic>.from(decoded);
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
   String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
     if (blocks == null || blocks.isEmpty) return null;
@@ -929,6 +925,9 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                   "role": m.role,
                   "text": m.text,
                   "timestamp": m.timestamp.toIso8601String(),
+                  // 卡片类消息（evening_digest 等）靠 contentType 复原专属渲染；
+                  // 默认 "text" 不写盘，旧记录读回时同样缺省 "text"。
+                  if (m.contentType != "text") "contentType": m.contentType,
                   "attachmentImageCount": m.attachmentImageCount,
                   if (m.playUrl != null) "playUrl": m.playUrl,
                   if (m.pendingDelivery) "pendingDelivery": true,
@@ -940,6 +939,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                     "renderBlocks": _encryptRenderBlocks(m.renderBlocks),
                   if (m.eveningDigest != null)
                     "eveningDigest": _encryptEveningDigest(m.eveningDigest),
+                  if (m.decisionCard != null)
+                    "decisionCard": _encryptDecisionCard(m.decisionCard),
                 },
               )
               .toList(),

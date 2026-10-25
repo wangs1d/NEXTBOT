@@ -283,7 +283,7 @@ class VoiceprintApi {
 
 /// 邮箱接入（邮箱盯梢）API：状态查询 + IMAP 授权码提交（「服务接入」页邮箱胶囊）。
 /// 授权码经 PUT /api/service-config（mail 块）落盘到服务端 data/service-config.json 并
-/// 即刻启动轮询；响应只回尾号，服务端不回发明文。
+/// 即刻启动轮询；已接入的授权码经 GET 回显 keyValue，供输入框回填（客户端默认打码）。
 class MailWatchApi {
   static Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path");
 
@@ -291,6 +291,19 @@ class MailWatchApi {
     try {
       final http.Response res = await http
           .get(_uri("/api/mail-watch/status"))
+          .timeout(const Duration(seconds: 5));
+      return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+    } catch (_) {
+      return <String, dynamic>{"ok": false};
+    }
+  }
+
+  /// 服务接入回显（GET /api/service-config）：mail.keyValue 为已存授权码全文，
+  /// 供「已接入 → 回填输入框（默认打码）」；读取失败返回 ok:false。
+  static Future<Map<String, dynamic>> serviceConfig() async {
+    try {
+      final http.Response res = await http
+          .get(_uri("/api/service-config"))
           .timeout(const Duration(seconds: 5));
       return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     } catch (_) {

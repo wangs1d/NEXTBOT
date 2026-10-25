@@ -79,7 +79,7 @@ const GOLDEN: GoldenCase[] = [
   { query: "到家的时候提醒我拿快递", expect: ["geofence.create"], topK: 3 },
   { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "reminder.plan"], topK: 3 },
   { query: "看一下门口摄像头", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
-  { query: "我答应过你什么", expect: ["commitment.list"], topK: 3 },
+  { query: "帮我盯着这款耳机降价", expect: ["watch.track"], topK: 3 },
   // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 world.link.send_message
   // （2026-10-16 工具归域改名：agent.send_to_peer / agent.link.* → world.link.*）
   { query: "给好友发消息", expect: ["world.link.send_message"] },

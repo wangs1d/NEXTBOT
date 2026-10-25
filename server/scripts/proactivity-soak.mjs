@@ -662,8 +662,8 @@ expect("E3 编码马拉松干预 d0（恰1次）", marathon.length === 1, marath
 const confirmNudge = dayDeliveries(0).filter((d) => d.kind === "action.commitment.nudge");
 expect("E4a 承诺代催提醒 d0", confirmNudge.length === 1, confirmNudge.map((d) => hhmm(d.at)).join(",") || "未触发");
 expect("E4b 承诺批准落地", approvedProposals >= 1, `批准 ${approvedProposals} 条`);
-const digest0 = dayDeliveries(0).filter((d) => d.kind === "life_reminder" && /理了一遍|日程|未读/.test(d.text));
-expect("E5 心跳回顾 d0（当日送达）", digest0.length >= 1, digest0.map((d) => hhmm(d.at)).join(",") || "未触发");
+const digestLeftover = sortedDeliveries.filter((d) => d.kind === "digest_beat" || /心跳回顾/.test(d.text ?? ""));
+expect("E5 心跳回顾已退役（digest_beat 固定节拍不再产出）", digestLeftover.length === 0, digestLeftover.length ? `残留 ${digestLeftover.length} 条` : "已改 Muse 式 agent_pulse（LLM 评审，soak 不含）");
 const trueAway = dayDeliveries(1).filter((d) => d.kind === "away_return");
 expect("E6a 白天真实外出久别问候 d1 17:30 后", trueAway.length === 1 && trueAway[0].at >= at(1, 17, 30), trueAway.map((d) => `${hhmm(d.at)}`).join(",") || "未触发");
 const sleepCare = sortedDeliveries.filter((d) => d.kind === "sleep_care" && d.at >= at(2, 23, 0) && d.at <= at(3, 1, 0));

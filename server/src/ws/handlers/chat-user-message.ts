@@ -20,6 +20,7 @@ import { formatStatusForDisplay, normalizeDashTypos, stripSentencesAlreadySaid }
 import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
+import { getTurnWalService } from "../../services/turn-wal-service.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
@@ -2081,6 +2082,17 @@ async function processBatchedMessage(
     // finalText（此前 renderBlocks 在归一化前构建，媒体锚点与卡片版式会分叉），
     // 见 normalizeReplyCardLayout。
     finalText = normalizeReplyCardLayout(finalText);
+
+    // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
+    // 这里的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
+    // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
+    void getTurnWalService()
+      .replaceAssistantText({
+        actorId: msgActor,
+        messageId: batched.originalMessageId,
+        assistantText: finalText,
+      })
+      .catch(() => {});
 
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
     // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，

@@ -73,6 +73,11 @@ export class WsConnectionRegistry {
     }
   }
 
+  /** 当前有活连接的 session 键（调试/手动触发用：不传 sessionId 时取它） */
+  connectedSessionIds(): string[] {
+    return [...this.connections.keys()];
+  }
+
   get(sessionId: string): WsLike | undefined {
     const set = this.connections.get(sessionId);
     if (!set || set.size === 0) return undefined;

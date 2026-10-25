@@ -363,13 +363,36 @@ bool isInternalFrameText(String text) {
   return _internalFrameLeadingRe.hasMatch(trimmed);
 }
 
+/// NEXT_UP 接续建议协议块（服务端 render-protocol-prompt 第三节）：
+/// 本应由服务端提取成 chips 后剥掉；历史回放/模型漏剥时会带进气泡。
+/// 2026-10-24 真机实证：模型把 `[NEXT_UP_START]` 写成 `[NEXT_UPSTART]`
+/// （漏下划线），故下划线/空格一律可缺省。
+final RegExp _nextUpBlockRe = RegExp(
+  r"\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)",
+  caseSensitive: false,
+);
+final RegExp _nextUpOrphanRe = RegExp(
+  r"\[NEXT[ _]?UP[ _]?(?:START|END)\]",
+  caseSensitive: false,
+);
+
+String _stripNextUpProtocolBlocks(String text) {
+  if (!text.contains("NEXT")) return text;
+  final String out = text
+      .replaceAll(_nextUpBlockRe, "")
+      .replaceAll(_nextUpOrphanRe, "");
+  return out.replaceAll(RegExp(r"\n{3,}"), "\n\n");
+}
+
 String stripAssistantProtocolFrames(String text) {
   // 先剥 recap 回显块，再剥线程内部帧（整块围栏 / 帧整行 / 开头连续帧），
   // 再剥行首时间戳帧、删整行时间戳帧，最后剥 DSML 工具调用标记。
   return stripDsmlToolCallMarkup(
     stripAllTimestampFrameLines(
       stripAssistantTimestampFrames(
-        stripInternalFrames(stripRecapEchoBlocks(text)),
+        _stripNextUpProtocolBlocks(
+          stripInternalFrames(stripRecapEchoBlocks(text)),
+        ),
       ),
     ),
   );

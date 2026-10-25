@@ -70,12 +70,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: ["phone.call_user"],
   },
   {
-    name: "commitment",
-    summary: "承诺管理（记下答应的事/兑现追踪）",
-    prefixes: ["commitment."],
-    secondaryTools: [],
-  },
-  {
     name: "geofence",
     summary: "位置围栏（到家/离家触发提醒）",
     prefixes: ["geofence."],
@@ -344,7 +338,6 @@ export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
     "voice",
     "phone",
     "shopping",
-    "commitment",
     "wallet",
     "agent",
     "surface",

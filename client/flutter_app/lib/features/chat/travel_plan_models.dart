@@ -137,6 +137,12 @@ class TravelDayEntry {
     this.splatUrl = "",
     this.images = const <String>[],
     this.anchor = false,
+    this.why = "",
+    this.photoTip = "",
+    this.pitfall = "",
+    this.bookingNote = "",
+    this.openingHours = "",
+    this.rating,
   });
 
   /// 条目唯一键（服务端 itemId，缺省用名称兜底；预订清单聚合用）。
@@ -164,6 +170,24 @@ class TravelDayEntry {
 
   /// 时间锚点：时刻被用户/预订钉住，重排不动（服务端 retimeDayAfterEdit 保护）。
   final bool anchor;
+
+  /// 「为什么推荐给你」（画像信号命中才写，无信号为空）。
+  final String why;
+
+  /// 出片建议（POI 实测机位/最佳时段，拿不到不编）。
+  final String photoTip;
+
+  /// 避坑提示（真实点评聚合出的坑，如「里面比外面晒」「节假日排两小时队」）。
+  final String pitfall;
+
+  /// 预订提示（需预约/提前放票/酒店入住口径）。
+  final String bookingNote;
+
+  /// POI 公示营业时间原文（核实闸的输入，展示给用户自己复核）。
+  final String openingHours;
+
+  /// 评分（真实点评聚合口径；无则 null，不显示星）。
+  final double? rating;
 
   /// 兼容旧面板的拼接备注（价格 · 描述 · 贴士 · 地址）。
   String get note => <String>[
@@ -212,6 +236,12 @@ class TravelDayEntry {
       ],
       images: images,
       anchor: raw["anchor"] == true,
+      why: raw["why"]?.toString() ?? raw["recommendReason"]?.toString() ?? "",
+      photoTip: raw["photoTip"]?.toString() ?? "",
+      pitfall: raw["pitfall"]?.toString() ?? "",
+      bookingNote: raw["bookingNote"]?.toString() ?? "",
+      openingHours: raw["openingHours"]?.toString() ?? "",
+      rating: (raw["rating"] as num?)?.toDouble(),
     );
   }
 

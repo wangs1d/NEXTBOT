@@ -51,37 +51,6 @@ test("sliceMemoryEntriesToPromptContext exposes structured slots to prompt build
   assert.match(prompt, /会话回顾/);
 });
 
-test("reconcileStructuredMemoryAfterTurn only clears resolved commitments and loops", async () => {
-  const service = new AgentMemorySyncService(storePath);
-  service.appendMemorySummaryLine("actor-2", "I will continue following up on the context fix");
-  service.appendMemorySummaryLine("actor-2", "todo: verify continuity after 100 messages");
-  service.appendMemorySummaryLine("actor-2", "todo: prepare regression notes for memory rollout");
-
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  service.reconcileStructuredMemoryAfterTurn(
-    "actor-2",
-    "done: the context fix and 100 message continuity verification are finished",
-    "fixed and resolved the context retention issue",
-  );
-  await new Promise((resolve) => setTimeout(resolve, 20));
-
-  const { entries } = service.getSnapshot("actor-2", [
-    "memory_commitments",
-    "memory_open_loops",
-    "session_recap",
-  ]);
-  const commitments = String(entries.memory_commitments ?? "");
-  const openLoops = String(entries.memory_open_loops ?? "");
-  const recap = String(entries.session_recap ?? "");
-
-  assert.equal(commitments, "");
-  assert.doesNotMatch(openLoops, /100 messages/);
-  assert.match(openLoops, /memory rollout/);
-  assert.doesNotMatch(recap, /100 messages|context fix/);
-  assert.match(recap, /memory rollout/);
-});
-
 test("latest preference replaces older preference for the same subject", async () => {
   const service = new AgentMemorySyncService(storePath);
 

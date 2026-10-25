@@ -180,6 +180,38 @@ test("DELETE 删除条目：条目移除、同日其余保留（响应顶层即 
   assert.ok(!items.some((i) => i.name === "沙滩餐厅B"));
 });
 
+test("乐观锁往返：编辑响应回带的 version 可直接用于下一次编辑（桌面连改两站不 409）", async () => {
+  // 桌面页就地编辑是「拿上一份响应里的 version 发下一次请求」——若 save 只把
+  // 自增后的版本写进克隆、不回写响应载荷，第二次请求就永远基于旧版本 → 必 409
+  travelPlanStore.save({ ...buildPlan(), planId: "plan-lock-chain", createdAt: Date.now() });
+  const v0 = travelPlanStore.get("plan-lock-chain")!.version;
+  const first = await app.inject({
+    method: "DELETE",
+    url: "/travel/plans/plan-lock-chain/days/0/items/0",
+    headers: { "x-plan-version": String(v0) },
+  });
+  assert.equal(first.statusCode, 200);
+  const v1 = (first.json() as StoredTravelPlan).version;
+  assert.equal(v1, (v0 ?? 0) + 1, "响应必须回带自增后的版本，而不是请求基于的那一版");
+  const second = await app.inject({
+    method: "DELETE",
+    url: "/travel/plans/plan-lock-chain/days/0/items/0",
+    headers: { "x-plan-version": String(v1) },
+  });
+  assert.equal(second.statusCode, 200);
+  assert.deepEqual(
+    (second.json() as StoredTravelPlan).days[0]!.items.map((i) => i.name),
+    ["海景餐厅A"],
+  );
+  // 真正过期的版本仍然要挡（乐观锁本身没被削弱）
+  const stale = await app.inject({
+    method: "DELETE",
+    url: "/travel/plans/plan-lock-chain/days/0/items/0",
+    headers: { "x-plan-version": String(v0) },
+  });
+  assert.equal(stale.statusCode, 409);
+});
+
 test("GET 完整行程：存在返回 plan，不存在返回 404", async () => {
   const ok = await app.inject({ method: "GET", url: "/travel/plans/plan-routes-test-1" });
   assert.equal(ok.statusCode, 200);

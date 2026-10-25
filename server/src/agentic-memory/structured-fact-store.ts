@@ -27,6 +27,7 @@
 
 import type { Database as SqliteDatabase } from "better-sqlite3";
 
+import { taxonomyTagFor } from "./field-taxonomy.js";
 import { isEphemeralActorId } from "../agent/actor-id.js";
 import { isStructuredFactsEnabled } from "./env.js";
 import { openAgenticSqlite } from "./sqlite-store.js";
@@ -60,6 +61,8 @@ export interface StructuredFact {
   field: string;
   /** 字段值（确定性短值） */
   value: string;
+  /** 类目标签（画像 v2）：identity/rhythm/preference/aversion/relations/comms/goals/health/spending/note */
+  category: string;
   confidence: number | null;
   sourceRef: string | null;
   createdAt: string;
@@ -90,6 +93,7 @@ interface FactRow {
   entity: string;
   field: string;
   value: string;
+  category?: string | null;
   confidence: number | null;
   source_ref: string | null;
   status: string;
@@ -146,6 +150,7 @@ function toFact(row: FactRow): StructuredFact {
     entity: row.entity,
     field: row.field,
     value: row.value,
+    category: (row as { category?: string }).category || taxonomyTagFor(row.field),
     confidence: row.confidence,
     sourceRef: row.source_ref,
     createdAt: row.created_at,
@@ -359,6 +364,7 @@ export class StructuredFactStore {
         entity TEXT NOT NULL DEFAULT 'user',
         field TEXT NOT NULL,
         value TEXT NOT NULL,
+        category TEXT,
         confidence REAL,
         source_ref TEXT,
         status TEXT NOT NULL DEFAULT 'active',
@@ -409,6 +415,11 @@ export class StructuredFactStore {
     if (!cols.has("valid_to")) {
       this.db.exec(`ALTER TABLE structured_facts ADD COLUMN valid_to TEXT`);
     }
+    if (!cols.has("category")) {
+      // 画像 v2 P0：类目标签列 + 存量回填（按 field-taxonomy 推导，幂等）
+      this.db.exec(`ALTER TABLE structured_facts ADD COLUMN category TEXT`);
+      this.db.exec(`UPDATE structured_facts SET category = NULL`);
+    }
     if (!cols.has("confirm_count")) {
       // 重复确认计数（P1-6）：同一现状被用户反复说起会升权，防止后来一次
       // 中等置信的说法覆盖多次确认的值。存量行回填默认 1。
@@ -432,6 +443,14 @@ export class StructuredFactStore {
         const range = inferValidRange(row.event_time);
         if (range) upd.run(range.from, range.to, row.id);
       }
+    }
+    // 画像 v2 P0 类标回填：只回填 category 为空的行（幂等；写入侧此后自动打标）
+    const untagged = this.db
+      .prepare(`SELECT id, field FROM structured_facts WHERE category IS NULL`)
+      .all() as Array<{ id: string; field: string }>;
+    if (untagged.length > 0) {
+      const tagStmt = this.db.prepare(`UPDATE structured_facts SET category = ? WHERE id = ?`);
+      for (const row of untagged) tagStmt.run(taxonomyTagFor(row.field), row.id);
     }
   }
 
@@ -775,10 +794,10 @@ export class StructuredFactStore {
     this.db
       .prepare(
         `INSERT INTO structured_facts
-           (id, actor_id, entity, field, value, confidence, source_ref,
+           (id, actor_id, entity, field, value, category, confidence, source_ref,
             status, created_at, updated_at, temporal, event_time, observed_at,
             valid_from, valid_to)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         id,
@@ -786,6 +805,7 @@ export class StructuredFactStore {
         args.entity,
         args.field,
         args.value,
+        taxonomyTagFor(args.field),
         args.confidence,
         args.sourceRef ?? null,
         args.status,
@@ -858,6 +878,32 @@ export class StructuredFactStore {
       )
       .all(actorId, entity) as FactRow[];
     return rows.map(toFact);
+  }
+
+  /**
+   * 画像 v2：按类目取活跃事实（ProfileRouter 的取数口）。
+   * category 为空的存量行按 taxonomy 实时推导兜底（迁移脚本已回填，此处双保险）。
+   */
+  getActiveFactsByCategory(actorId: string, categories: readonly string[], entity = "user", limit = 40): StructuredFact[] {
+    if (!actorId || categories.length === 0) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM structured_facts
+         WHERE actor_id = ? AND entity = ? AND status = 'active'
+         ORDER BY updated_at DESC`,
+      )
+      .all(actorId, entity) as FactRow[];
+    const wanted = new Set(categories);
+    const out: StructuredFact[] = [];
+    for (const row of rows) {
+      const cat = row.category || taxonomyTagFor(row.field);
+      if (!wanted.has(cat)) continue;
+      const f = toFact(row);
+      if (f.temporal !== "current") continue;
+      out.push(f);
+      if (out.length >= limit) break;
+    }
+    return out;
   }
 
   /** 精确寻址（KV 语义，无向量检索）：单字段当前值 */
@@ -1149,6 +1195,21 @@ export class StructuredFactStore {
     );
   }
 
+  /**
+   * 画像 v2 T2 召回信号（字段或值命中）：用户原话里出现字段名**或字段值**
+   * （"我还吃香菜吗"——字段「不吃」没出现，值「香菜」出现了）都算直提召回。
+   * 值匹配要求 ≥2 字且非纯数字（避免"800"这类数字误命中）。
+   */
+  matchFactsInText(actorId: string, text: string, entity = "user"): StructuredFact[] {
+    const t = text?.trim();
+    if (!t) return [];
+    return this.getActiveFacts(actorId, entity).filter((f) => {
+      if (f.field.length >= 2 && t.includes(f.field)) return true;
+      const v = f.value?.trim();
+      return !!v && v.length >= 2 && v.length <= 20 && !/^\d+$/.test(v) && t.includes(v);
+    });
+  }
+
   /** 某当前值的演变历史（沿 superseded_by 链回溯，最新在前，limit 条） */
   getHistoryFor(actorId: string, factId: string, limit = 2, entity = "user"): StructuredFact[] {
     const out: StructuredFact[] = [];
@@ -1177,19 +1238,25 @@ export class StructuredFactStore {
     actorId: string,
     groundedFields?: Set<string>,
     entity = "user",
-    opts?: { suppressedFields?: ReadonlySet<string> },
+    opts?: { suppressedFields?: ReadonlySet<string>; categories?: readonly string[] },
   ): string | null {
-    const facts = this.getActiveFacts(actorId, entity);
+    // 画像 v2：categories 传入时按类过滤（动态路由注入——恒带层+意图路由层）；
+    // 不传 = 全量渲染（旧行为，灰度回退路径）。
+    const catFilter = opts?.categories && opts.categories.length > 0 ? new Set(opts.categories) : null;
+    const inCategory = (f: StructuredFact): boolean =>
+      !catFilter || catFilter.has(f.category || taxonomyTagFor(f.field));
+    const facts = this.getActiveFacts(actorId, entity).filter(inCategory);
     const activeFields = new Set(facts.map((f) => f.field));
     // 只有历史陈述、没有现状的字段（用户只说过"我以前住浙江"）：
     // 不冒充现状，但要进入模型视野——否则它会当作"从没听过"。
     const pastOnly = this.getPastFacts(actorId, undefined, entity)
+      .filter(inCategory)
       .filter((f) => !activeFields.has(f.field))
       .reduce<StructuredFact[]>((acc, f) => {
         if (!acc.some((x) => x.field === f.field)) acc.push(f);
         return acc;
       }, []);
-    const plannedFacts = this.getPlannedFacts(actorId, entity);
+    const plannedFacts = this.getPlannedFacts(actorId, entity).filter(inCategory);
     if (facts.length === 0 && pastOnly.length === 0 && plannedFacts.length === 0) return null;
 
     const day = (iso: string | null | undefined): string =>

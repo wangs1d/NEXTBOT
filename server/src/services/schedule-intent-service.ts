@@ -56,6 +56,39 @@ export type ScheduleIntentParseResult =
 export class ScheduleIntentService {
   constructor(private readonly externalChat: ExternalChatProvider | null = null) {}
 
+  /**
+   * 内部子调用一律走 ephemeral + 独立会话键（2026-10-23 上下文污染根修）。
+   *
+   * 事故实证（`Nextbot-dev/data/chat-threads.json` 真实用户线程）：
+   *
+   *   user:      你是提醒文案助手。用户让助手到点提醒自己做一件事…（整段内部提示词）
+   *   assistant: {"shortTitle":"去游泳","reminderMessage":"到点了，快去游泳吧"}
+   *
+   * 两个内部调用（解析器 / 文案转写）此前把**主聊天 sessionId** 直接传给
+   * provider，且没置 `ephemeralTurn`。`streamCompletion` 于是把内部提示词当
+   * 用户发言 push 进主线程、把 JSON 当助手发言落库。后果正是用户看到的两件事：
+   *   1. 下一轮主模型把「用户让我转写提醒文案」当真实指令 → 重走一遍提醒流程
+   *      （重复设置）、或对着 JSON 再说一遍（重复回复）；
+   *   2. 内部 JSON/提示词进 recap 与记忆抽取 → 复读、污染。
+   *
+   * ephemeral 轮次的 `msgs` 是空数组、所有落库分支都被 `!ephemeral` 短路，
+   * 主线程与持久化零接触；独立 session 键再兜一层（即便某 provider 忽略
+   * ephemeral，也不会落到用户线程）。
+   */
+  private internalStreamOpts(stage: string): {
+    ephemeralTurn: true;
+    disableThinking: true;
+    maxThreadMessages: number;
+    auditStage: string;
+  } {
+    return {
+      ephemeralTurn: true,
+      disableThinking: true,
+      maxThreadMessages: 0,
+      auditStage: stage,
+    };
+  }
+
   /** 解析并判断是否可立即创建（提醒类在未说明重复时会要求先追问）。 */
   async parseForCreate(
     sessionId: string,
@@ -197,9 +230,16 @@ export class ScheduleIntentService {
       `用户原句：${userText}`,
     ].join("\n");
     try {
-      const text = await this.externalChat.streamCompletion(sessionId, { text: prompt }, () => {
-        // 后台转写，不需要流式回传。
-      });
+      const text = await this.externalChat.streamCompletion(
+        // 独立会话键：内部子调用不得复用主聊天线程（见 internalStreamOpts 注释）。
+        `schedule_copy:${sessionId}`,
+        { text: prompt },
+        () => {
+          // 后台转写，不需要流式回传。
+        },
+        undefined,
+        this.internalStreamOpts("schedule_copy"),
+      );
       const json = safeParseJsonObject(text);
       if (!json) return null;
       const reminderMessage = String(json.reminderMessage ?? "").trim();
@@ -266,9 +306,16 @@ export class ScheduleIntentService {
       `用户输入：${userText}`,
     ].join("\n");
     try {
-      const text = await this.externalChat.streamCompletion(sessionId, { text: prompt }, () => {
-        // HTTP 路由不需要流式回传。
-      });
+      const text = await this.externalChat.streamCompletion(
+        // 同上：解析器是内部子调用，必须 ephemeral + 独立会话键。
+        `schedule_parse:${sessionId}`,
+        { text: prompt },
+        () => {
+          // HTTP 路由不需要流式回传。
+        },
+        undefined,
+        this.internalStreamOpts("schedule_parse"),
+      );
       const json = safeParseJsonObject(text);
       if (!json || json.ok !== true || !json.task) return null;
       const task = validateDraft(json.task);

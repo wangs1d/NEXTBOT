@@ -5,17 +5,18 @@ import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import sharp from "sharp";
 
-import type { ImageGenerationProvider, ImageGenerationResult } from "./image-generation-providers.js";
-import { OpenAICompatibleImageProvider } from "./image-generation-providers.js";
+import type { ImageGenerationProvider, ImageGenerationResult, ImageGenerateInput } from "./image-generation-providers.js";
+import { OpenAICompatibleImageProvider, GeminiImageProvider } from "./image-generation-providers.js";
 
 /**
- * 图像生成服务：调用 LLM 提供商（OpenAI 兼容 images 接口）的 text-to-image
- * 生成图片，下载到本地 `data/images/{actorId}/{imageId}.png` 后返回可访问 URL。
+ * 图像生成服务：调用 LLM 提供商的图像接口生成图片，
+ * 落盘到本地 `data/images/{actorId}/{imageId}.png` 后返回可访问 URL。
  *
  * 设计要点：
  *   - 与社交动态 / 语音消息独立目录，便于按能力域管理
- *   - 提供商走 OpenAI 兼容通道（key 复用对话 OPENAI_API_KEY）
- *   - 图片下载到本地，避免上游链接 24h 过期问题
+ *   - 文生图走 OpenAI 兼容通道（key 复用对话 OPENAI_API_KEY）；
+ *     图生图（输入参考图，照片风格化用）走 Gemini 图像模型（GEMINI_API_KEY，Nano Banana 系）
+ *   - 图片下载/落盘到本地，避免上游链接 24h 过期问题
  *   - HTTP 拉流走 `/agent/images/:actorId/:fileName`（与 voice-messages 同模式）
  */
 export class ImageGenerationService {
@@ -27,9 +28,11 @@ export class ImageGenerationService {
     providers?: ImageGenerationProvider[];
   } = {}) {
     this.storageRoot = opts.storageRoot ?? join(getDataDir(), "images");
-    // 默认装载 OpenAI 兼容 provider（如未配置 key 则跳过）
+    // 默认装载内置 provider（未配置对应 key 则各自跳过）
     const openaiCompat = new OpenAICompatibleImageProvider();
     if (openaiCompat.isEnabled()) this.providers.push(openaiCompat);
+    const gemini = new GeminiImageProvider();
+    if (gemini.isEnabled()) this.providers.push(gemini);
     // 允许外部注入额外 provider
     if (opts.providers) this.providers.push(...opts.providers);
   }
@@ -70,8 +73,8 @@ export class ImageGenerationService {
           imageSize: options.imageSize,
           batchSize: options.batchSize ?? 1,
         });
-        // 下载第一张图到本地
-        const localUrl = await this.downloadAndStorePng(result.images[0].url, actorId);
+        // 落盘第一张图到本地
+        const localUrl = await this.storeFirstImage(result.images[0], actorId);
         return {
           ok: true,
           imageUrl: localUrl,
@@ -86,6 +89,88 @@ export class ImageGenerationService {
       }
     }
     return { ok: false, error: lastError };
+  }
+
+  /**
+   * 图生图：以输入参考图为底进行风格化重绘并落盘（照片风格化等内置能力用）。
+   *
+   * 仅会命中声明了 `supportsImageInput()` 的 provider（当前为 Gemini 图像模型）；
+   * 未配置时返回明确的错误信息。
+   */
+  async generateFromImage(
+    input: ImageGenerateInput,
+    prompt: string,
+    actorId: string,
+    options: {
+      model?: string;
+      aspectRatio?: string;
+    } = {},
+  ): Promise<{ ok: true; imageUrl: string; model: string; seed?: number; revisedPrompt?: string } | { ok: false; error: string }> {
+    if (!input?.dataBase64?.trim()) {
+      return { ok: false, error: "图生图缺少输入图片数据" };
+    }
+    if (!input.mimeType.startsWith("image/")) {
+      return { ok: false, error: `图生图输入必须是图片类型，收到 ${input.mimeType}` };
+    }
+    if (!prompt.trim()) {
+      return { ok: false, error: "prompt 不能为空" };
+    }
+    const capable = this.providers.filter((p) => p.supportsImageInput?.() === true);
+    if (capable.length === 0) {
+      return { ok: false, error: "图生图未配置：服务端需 GEMINI_API_KEY（Gemini 图像模型 / Nano Banana）" };
+    }
+
+    let lastError = "所有图生图 provider 都失败";
+    for (const provider of capable) {
+      try {
+        const result = await provider.generate({
+          prompt,
+          model: options.model,
+          aspectRatio: options.aspectRatio,
+          image: input,
+        });
+        const localUrl = await this.storeFirstImage(result.images[0], actorId);
+        return {
+          ok: true,
+          imageUrl: localUrl,
+          model: result.model,
+          seed: result.images[0].seed,
+          revisedPrompt: result.images[0].revisedPrompt,
+        };
+      } catch (e) {
+        lastError = e instanceof Error ? e.message : String(e);
+        console.warn(`[ImageGenerationService] img2img provider ${provider.name} failed: ${lastError}`);
+      }
+    }
+    return { ok: false, error: lastError };
+  }
+
+  /** 兼容两种上游返回（公网 URL / base64 数据），统一落盘为本地 PNG。 */
+  private async storeFirstImage(
+    image: ImageGenerationResult["images"][number],
+    actorId: string,
+  ): Promise<string> {
+    if (image.url) {
+      return this.downloadAndStorePng(image.url, actorId);
+    }
+    if (image.base64) {
+      return this.saveImageBuffer(actorId, Buffer.from(image.base64, "base64"));
+    }
+    throw new Error("上游返回的图片既无 url 也无 base64 数据");
+  }
+
+  /**
+   * 把图片 buffer 统一转成 PNG 落盘（Gemini 系直接返回 base64 数据时使用），
+   * 复用 data/images/{actorId}/ 目录与 /agent/images/ 静态拉流路由。
+   */
+  async saveImageBuffer(actorId: string, buf: Buffer): Promise<string> {
+    const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
+    const dir = join(this.storageRoot, safeActorId);
+    await mkdir(dir, { recursive: true });
+    const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+    const png = await sharp(buf, { animated: false }).rotate().png().toBuffer();
+    await writeFile(join(dir, fileName), png);
+    return `/agent/images/${safeActorId}/${fileName}`;
   }
 
   /**

@@ -160,7 +160,7 @@ test("因子评估：预订/票务来源按 high，地点词优先级 线上>长
   assert.equal(assessScheduleEventFactors({ description: "办手续", location: "协和医院" }).venue, "mid");
 });
 
-test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia/周期/承诺来源不走策略", async () => {
+test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia/周期不走策略", async () => {
   await withTempScheduleFile(async (service) => {
     const base = {
       sessionId: "policy-session",
@@ -214,17 +214,6 @@ test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia
       runAt: DENTIST_RUN_AT,
     });
     assert.equal(daily.preReminders, undefined);
-
-    // 承诺物化：承诺板自带梯度提醒，日程只管到点那一响
-    const commitment = await service.createTask({
-      ...base,
-      description: "承诺板自动物化：交房租",
-      reminderMessage: "承诺到期：交房租",
-      runAt: DENTIST_RUN_AT,
-      source: "commitment" as const,
-      sourceRefId: "c-1",
-    });
-    assert.equal(commitment.preReminders, undefined);
 
     // ics 日历事件：事件本身无提醒数据，纳入分级策略补位
     // （客户端关键词 Timer 已按「提醒统一信服务端」定调删除）

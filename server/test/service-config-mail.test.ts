@@ -2,7 +2,8 @@
  * 服务接入 · 邮箱授权码块单测（2026-10-20）：「服务接入」页邮箱胶囊把 IMAP 授权码
  * 经 PUT /api/service-config 落盘 data/service-config.json 并写 env 热生效。
  * 语义锁：① 落盘可重放（applyPersistedServiceConfig 把 pass/enabled 写回 env）；
- *        ② 授权码只回尾号（maskServiceKey），绝不下发明文；③ mail 补丁不动别的块。
+ *        ② 已存授权码经 GET 回显 keyValue 供输入框回填（keyTail 只回尾号，
+ *          路由级断言见 service-config-route.test.ts）；③ mail 补丁不动别的块。
  */
 import test from "node:test";
 import assert from "node:assert/strict";

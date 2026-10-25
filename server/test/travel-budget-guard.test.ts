@@ -5,12 +5,11 @@ import os from "node:os";
 import path from "node:path";
 
 /**
- * 行程预算守门测试（travel 双端⑥，travel-budget-guard-service + 晚报集成）：
+ * 行程预算守门测试（travel 双端⑥，travel-budget-guard-service）：
  *
  * 1. checkBudget 判定：无行程/无预算档/不在行程日期/未超支 → null；
  *    当日旅行消费（travel+ride 域）超档 → alert（日上限/第几天/金额正确）
  * 2. 非旅行域订单（restaurant/home_service）不计入
- * 3. EveningDigestService：budgetAlert 透传 + 兜底文案带超支句 / 无 alert 干净
  *
  * 运行：npx tsx --test test/travel-budget-guard.test.ts
  */
@@ -22,7 +21,6 @@ process.env.TRAVEL_PLAN_STORE_DIR = path.join(tmpDir, "plans");
 const { TravelBudgetGuardService, BUDGET_DAILY_CAP_CNY } = await import(
   "../src/services/travel-budget-guard-service.js"
 );
-type TravelBudgetAlert = import("../src/services/travel-budget-guard-service.js").TravelBudgetAlert;
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
@@ -32,9 +30,6 @@ const { BookingOrderStore } = await import(
 );
 const { newBookingOrderId, localDateKey } = await import(
   "../src/services/booking/booking-order-store.js"
-);
-const { EveningDigestService } = await import(
-  "../src/services/evening-digest-service.js"
 );
 
 // ==================== checkBudget 判定 ====================
@@ -133,25 +128,3 @@ test("budget: 非旅行域不计入；cancelled 不计入；其他 actor 不串�
   assert.equal(await guard.checkBudget("actor-a"), null);
 });
 
-// ==================== EveningDigest 集成 ====================
-
-test("digest: 有 alert → budgetAlert 透传 + 兜底文案带超支句；无 provider → 字段 null", async () => {
-  const alert: TravelBudgetAlert = {
-    destination: "成都", dayIndex: 2, totalDays: 3,
-    spentToday: 900, dailyCap: 800, ratio: 900 / 800,
-  };
-  const svc = new EveningDigestService({
-    travelBudgetProvider: async () => alert,
-  });
-  const digest = await svc.generateDigest("actor-a");
-  assert.deepEqual(digest.budgetAlert, alert);
-  assert.ok(digest.narrationText.includes("成都"));
-  assert.ok(digest.narrationText.includes("900"));
-  // 兜底模板必有「明天」开头与超支尾句
-  assert.ok(digest.narrationText.includes("超预算") || digest.narrationText.includes("省着点"));
-
-  const svcNoProvider = new EveningDigestService({});
-  const digest2 = await svcNoProvider.generateDigest("actor-a");
-  assert.equal(digest2.budgetAlert, null);
-  assert.ok(!digest2.narrationText.includes("花了"));
-});

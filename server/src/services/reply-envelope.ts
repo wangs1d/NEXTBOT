@@ -103,7 +103,7 @@ export function stripRenderHintDeclarations(text: string): string {
  * 同时作为回复文本的出口收口之一：先剥 RENDER_HINT 声明，再重排卡片。
  *
  * 回复含卡片时的版式固定为：
- *   [模型总览卡（Day 概览/要点等，首位）] → [正文散文（原顺序）] → [travel_itinerary 行程卡（尾部）]
+ *   [模型总览卡（Day 概览/要点等，首位）] → [正文散文（原顺序）] → [travel_itinerary 行程卡（尾部）] → [travel_brief 简报卡]
  *
  * 行为：
  *   - 剥全部 [RENDER_HINT:xxx] 声明（独占行整行删、行内就地剥）；
@@ -120,6 +120,7 @@ export function normalizeReplyCardLayout(text: string): string {
   const proseSegments: string[] = [];
   const genericCards: string[] = [];
   const travelCards: string[] = [];
+  const briefCards: string[] = [];
   let cursor = 0;
   while (true) {
     const start = source.indexOf(CARD_START, cursor);
@@ -140,6 +141,9 @@ export function normalizeReplyCardLayout(text: string): string {
     if (!card || typeof card !== "object" || Array.isArray(card)) return source;
     if ((card as Record<string, unknown>).cardType === "travel_itinerary") {
       travelCards.push(rawBlock);
+    } else if ((card as Record<string, unknown>).cardKind === "travel_brief") {
+      // 简报卡跟行程卡同区（尾部）：它说的就是这张行程，提到正文前会读不通
+      briefCards.push(rawBlock);
     } else {
       genericCards.push(rawBlock);
     }
@@ -147,9 +151,9 @@ export function normalizeReplyCardLayout(text: string): string {
   }
   const tail = source.slice(cursor).trim();
   if (tail) proseSegments.push(tail);
-  if (genericCards.length + travelCards.length === 0) return source;
+  if (genericCards.length + travelCards.length + briefCards.length === 0) return source;
 
-  return [...genericCards, ...proseSegments, ...travelCards].join("\n\n").trim();
+  return [...genericCards, ...proseSegments, ...travelCards, ...briefCards].join("\n\n").trim();
 }
 
 /**
@@ -245,7 +249,16 @@ function scanCardSegments(text: string): ReplyBlock[] | null {
  * 规则：块内逐行一条，剥掉行首列表符；1-3 条、每条 >40 字丢弃；无配对 END
  * 不提取（残缺块只按孤立标记兜底剥离，宁可不给不给脏的）。
  */
-const NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\]\s*([\s\S]*?)\[NEXT_UP_END\]/;
+/**
+ * NEXT_UP 标记容错（2026-10-24 真机实证）：模型偶尔把 `[NEXT_UP_START]` 写成
+ * `[NEXT_UPSTART]`（漏下划线），旧正则只认标准写法 → 整块建议原样漏进气泡，
+ * 用户看到一串 `[NEXT_UPSTART] 按两个人重算…`。放宽为「下划线/空格可缺省」。
+ */
+const NEXT_UP_MARKER_GLOBAL_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
+const NEXT_UP_BLOCK_GLOBAL_RE =
+  /\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)/gi;
+const NEXT_UP_OPEN_RE = /\[NEXT[ _]?UP[ _]?START\]/i;
+const NEXT_UP_BLOCK_RE = /\[NEXT[ _]?UP[ _]?START\]\s*([\s\S]*?)\[NEXT[ _]?UP[ _]?END\]/i;
 
 /**
  * 块外复读兜底（2026-09-22）：模型偶尔会把建议在正文里再写一遍——跟在正文
@@ -284,7 +297,7 @@ function stripTrailingFollowupEcho(text: string, followups: string[]): string {
 export function extractNextUpSuggestions(
   text: string,
 ): { text: string; followups: string[] } {
-  if (!text || !text.includes("[NEXT_UP_START]")) {
+  if (!text || !NEXT_UP_OPEN_RE.test(text)) {
     return { text, followups: <string[]>[] };
   }
   let followups: string[] = [];
@@ -293,7 +306,7 @@ export function extractNextUpSuggestions(
   // 残缺块打捞（2026-09-22 真机实证）：模型偶尔漏发 END——旧逻辑只剥孤立标记，
   // 块内建议文案原样漏进正文（用户在回复尾部看到第二人称任务句）。
   // 现在无配对 END 时按同样过滤规则打捞 START 之后的内容。
-  const malformedTail = match ? null : text.split(/\[NEXT_UP_START\]/)[1];
+  const malformedTail = match ? null : text.split(NEXT_UP_OPEN_RE)[1];
   const rawBlock = match?.[1] ?? malformedTail;
   if (rawBlock) {
     followups = rawBlock
@@ -303,13 +316,13 @@ export function extractNextUpSuggestions(
       .slice(0, 3);
     const cutFrom = match
       ? text.indexOf(match[0])
-      : text.indexOf("[NEXT_UP_START]");
+      : text.search(NEXT_UP_OPEN_RE);
     out = (cutFrom > 0 ? text.slice(0, cutFrom) : "").trim();
     if (followups.length > 0) {
       out = stripTrailingFollowupEcho(out, followups);
     }
   }
-  out = out.replace(/\[NEXT_UP_(?:START|END)\]/g, "");
+  out = out.replace(NEXT_UP_MARKER_GLOBAL_RE, "");
   return { text: out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), followups };
 }
 
@@ -355,7 +368,7 @@ export function stripMarkersToPlainText(text: string): string {
   out = out.replace(blockRe, (_m, rawJson: string) => blockToPlainText(String(rawJson)));
 
   // 2.5 接续建议块 → 纯文本渠道直接丢弃（点不了，透出反成噪音）
-  out = out.replace(/\[NEXT_UP_START\][\s\S]*?\[NEXT_UP_END\]/g, "");
+  out = out.replace(NEXT_UP_BLOCK_GLOBAL_RE, "");
 
   // 3. 标记行剥除（RENDER_HINT / RENDER_AS / 残留孤立标记）
   out = out
@@ -363,9 +376,10 @@ export function stripMarkersToPlainText(text: string): string {
     .filter((line) => !/^[ \t]*\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+)\][ \t]*$/.test(line))
     .join("\n");
   out = out.replace(
-    /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CHAT_MEDIA_START|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|IMAGE_RESULT_START|IMAGE_RESULT_END|NEXT_UP_START|NEXT_UP_END)\]/g,
+    /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CHAT_MEDIA_START|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|IMAGE_RESULT_START|IMAGE_RESULT_END)\]/g,
     "",
   );
+  out = out.replace(NEXT_UP_MARKER_GLOBAL_RE, "");
 
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }

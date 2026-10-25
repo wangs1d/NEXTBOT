@@ -52,6 +52,32 @@ export interface StoredDayItem {
    */
   anchor?: boolean;
   reviews?: unknown[];
+  /**
+   * 以下为规划主线 S4 字段贯通补齐：核实与编辑链路需要条目自带的原信息，
+   * 此前只落盘展示字段，冷层回读再核实（verifyItinerary）就拿不到开放时间。
+   */
+  /** 规划服务内的条目 ID（编辑/预订按 ID 定位，名称可能重名） */
+  itemId?: string;
+  /** POI 缓存原始 ID（图片复用、缓存回写） */
+  poiId?: string;
+  /** 结束时刻（ISO，与 startTime 同口径；核实闸算停留窗口要用） */
+  endTime?: string;
+  /** POI 公示营业时间（核实闸的原始输入，原文保留不预处理） */
+  openingHours?: string;
+  /** 联系电话（预约/改期时用户要打的那个号） */
+  phone?: string;
+  /** POI 评分（真实点评聚合口径） */
+  rating?: number;
+  /** 标签（室内/夜景/菜系等，核实与筛选依据） */
+  tags?: string[];
+  /** 一句话种草：为什么去 */
+  why?: string;
+  /** 出片建议（来自 POI 实测机位数据，无则省略） */
+  photoTip?: string;
+  /** 避坑提示 */
+  pitfall?: string;
+  /** 预订提示（酒店/付费景点） */
+  bookingNote?: string;
 }
 
 export interface StoredTravelPlan {
@@ -120,6 +146,48 @@ export interface StoredTravelPlan {
    * 条目（宁缺毋滥，不用计划站点冒充到访）。
    */
   visits?: TravelPlanVisit[];
+  /**
+   * 核实闸结果（travel 主线 F3）：规划完成后逐站核验的开放时间/闭馆日/预约/密度
+   * 冲突清单。落盘是为了让桌面行程页与简报卡在同一份事实上说话（编辑后可重跑）。
+   */
+  verification?: {
+    issues: Array<{
+      level: "block" | "warn" | "info";
+      kind: string;
+      day: number;
+      stop: number;
+      name: string;
+      message: string;
+      suggestion?: string;
+    }>;
+    summary: string | null;
+    checkedAt: string;
+  };
+  /**
+   * 规划槽位（travel 主线 F0）：结构化诉求 + 每项来源，供简报卡回读时还原
+   * 「这版怎么排的」。sources 只记来源档位，不记推断过程。
+   */
+  slots?: {
+    origin?: string;
+    startDate?: string;
+    party?: string;
+    diningStyle?: string;
+    hotelFocus?: string;
+    hotelFocusRef?: string;
+    wishlist?: string[];
+    foodWishlist?: string[];
+    sources?: Record<string, string>;
+  };
+  /** 点名地点里没排进去的名字（如实交代，不静默丢弃） */
+  wishlistMissed?: string[];
+  /**
+   * 行程状态（预订后置的「满意门」）：draft=还在调，approved=用户说满意了。
+   * 缺省按 draft 处理；travel.approve-plan 置 approved，
+   * 同目的地的 travel_booking.search/book 在未定稿时先要一句「就按这版订」。
+   */
+  status?: "draft" | "approved";
+  /** 用户确认满意的时间戳（毫秒）：预订窗口以此为准 */
+  approvedAt?: number;
 }
 
 /** 单条到访足迹（回忆录⑦）：同站重复到达只记首次 */
@@ -203,6 +271,9 @@ class TravelPlanStore {
       createdAt: plan.createdAt ?? Date.now(),
       version: (prev?.version ?? 0) + 1,
     };
+    // 自增后的版本只活在这份克隆里：不写回调用方手里的对象，编辑端点就会把旧
+    // version 当载荷下发，客户端下一次乐观锁请求必 409（桌面就地编辑实测）
+    plan.version = withTs.version;
     this.mem.set(plan.planId, withTs);
     try {
       fs.writeFileSync(
@@ -268,6 +339,37 @@ class TravelPlanStore {
       }
     }
     return bestId ? this.get(bestId) : null;
+  }
+
+  /**
+   * 满意门落定（travel 主线 F5）：用户确认这版方案后置 approved。
+   * 仿 updateProgress 直改内存 + 刷盘，不自增编辑乐观锁——定稿不是改内容，
+   * 不能让用户正在编辑的桌面面板下一次 PATCH 撞 409。
+   */
+  approvePlan(planId: string): boolean {
+    const plan = this.get(planId);
+    if (!plan) return false;
+    if (plan.status === "approved") return true;
+    plan.status = "approved";
+    plan.approvedAt = Date.now();
+    this.mem.set(planId, plan);
+    try {
+      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+    } catch {
+      /* 落盘失败不影响本轮定稿判定 */
+    }
+    return true;
+  }
+
+  /**
+   * 目的地最近一份行程（预订闸用）：预订诉求命中某城市时，先看该城最近的行程
+   * 有没有定稿。窗口收窄到「这次规划还热乎」的 2 小时——三天前排过的行程不该
+   * 拦住用户今天单独订酒店。
+   */
+  findRecentForDestination(destination: string, withinMs = 2 * 60 * 60 * 1000): StoredTravelPlan | null {
+    const plan = this.findByDestination(destination);
+    if (!plan?.createdAt) return null;
+    return Date.now() - plan.createdAt <= withinMs ? plan : null;
   }
 
   /**

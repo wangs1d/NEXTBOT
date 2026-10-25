@@ -21,6 +21,7 @@ import "display_effects/display_effects.dart";
 import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "morning_briefing_card.dart";
+import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
 
 /// 智能体结果卡片 —— 用于呈现「任务执行总结」「工具调用结果」
@@ -92,6 +93,16 @@ class AgentResultCard extends StatelessWidget {
           // 版本闸（开源版剔除旅游家族）：oss 服务端不产此卡，此处纵深防御
           if (ApiConfig.isOssEdition) return const SizedBox.shrink();
           return _TravelItineraryCard(data: data, cs: cs);
+        case "travel_guide_select":
+          // 规划前种草选择卡（travel.destination-guide 工具结果）：
+          // 四分类多图勾选 → 确认把分组选择回传成用户消息。
+          // 同旅游家族做 oss 纵深防御闸。
+          if (ApiConfig.isOssEdition) return const SizedBox.shrink();
+          return TravelGuideSelectCard(
+            data: data,
+            cs: cs,
+            onUserAction: onUserAction,
+          );
         case "product_compare":
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
@@ -162,26 +173,82 @@ class AgentResultCard extends StatelessWidget {
               ),
             if (data.items.isNotEmpty)
               ...data.items.map((AgentResultItem it) {
-                return Padding(
-                  padding: EdgeInsets.symmetric(vertical: listItemGap),
-                  child: Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      _ItemMark(type: it.type, colorScheme: cs),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: _InlineMarkdownBody(
-                          it.text,
-                          style: TextStyle(
-                            fontSize: itemSize,
-                            color: itemColor,
-                            height: 1.55,
+                // 行级可点：url 非空整行可点（相对路径补服务端基址），
+                // 比价卡报价行跳平台商品页、决策页入口行跳决策页。
+                final String? itemUrl = (it.url != null && it.url!.isNotEmpty)
+                    ? LinkUtils.resolveMediaUrl(it.url!)
+                    : null;
+                // 行首缩略图（比价卡商品主图等）；无图回退 ✓/•/! 标记。
+                final String? thumb = (it.thumbnailUrl != null && it.thumbnailUrl!.isNotEmpty)
+                    ? LinkUtils.resolveMediaUrl(it.thumbnailUrl!)
+                    : null;
+                final Widget row = Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    if (thumb != null)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            width: 40,
+                            height: 40,
+                            child: CachedMediaImage(
+                              url: thumb,
+                              fit: BoxFit.cover,
+                              filterQuality: FilterQuality.low,
+                              errorBuilder: (_, __, ___) => Container(
+                                color: cs.surfaceContainerHighest,
+                                alignment: Alignment.center,
+                                child: Icon(
+                                  Icons.shopping_bag_outlined,
+                                  size: 16,
+                                  color: cs.onSurfaceVariant,
+                                ),
+                              ),
+                              loadingBuilder: (BuildContext context) => Container(
+                                color: cs.surfaceContainerHighest,
+                              ),
+                            ),
                           ),
-                          colorScheme: cs,
+                        ),
+                      )
+                    else
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: _ItemMark(type: it.type, colorScheme: cs),
+                      ),
+                    Expanded(
+                      child: _InlineMarkdownBody(
+                        it.text,
+                        style: TextStyle(
+                          fontSize: itemSize,
+                          color: itemColor,
+                          height: 1.55,
+                        ),
+                        colorScheme: cs,
+                      ),
+                    ),
+                    if (itemUrl != null)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 2),
+                        child: Icon(
+                          Icons.chevron_right_rounded,
+                          size: 15,
+                          color: cs.onSurfaceVariant,
                         ),
                       ),
-                    ],
-                  ),
+                  ],
+                );
+                return Padding(
+                  padding: EdgeInsets.symmetric(vertical: listItemGap),
+                  child: itemUrl == null
+                      ? row
+                      : InkWell(
+                          onTap: () => LinkUtils.launchExternal(itemUrl),
+                          borderRadius: BorderRadius.circular(6),
+                          child: row,
+                        ),
                 );
               }),
             if (data.footer.isNotEmpty) ...<Widget>[

@@ -119,6 +119,27 @@ export class BrowserSessionService {
   }
 
   /**
+   * 登录态保存授权（2026-10-25 用户拍板：保存 Cookie 须用户同意，与主流做法
+   * 一致）。allow=已同意（可静默捕获）；deny=已拒绝（不再问也不保存）；
+   * ask=未表态（每次捕获前先向客户端征询，本轮不保存）。
+   */
+  async getCaptureConsent(actorId: string, siteId: string): Promise<"allow" | "deny" | "ask"> {
+    const file = await this.loadActor(actorId);
+    const c = file.captureConsents?.[siteId];
+    if (!c) return "ask";
+    return c.allowed ? "allow" : "deny";
+  }
+
+  async setCaptureConsent(actorId: string, siteId: string, allowed: boolean): Promise<void> {
+    const file = await this.loadActor(actorId);
+    file.captureConsents = {
+      ...(file.captureConsents ?? {}),
+      [siteId]: { allowed, at: new Date().toISOString() },
+    };
+    await this.saveActor(file);
+  }
+
+  /**
    * 登录态捕获写入（「一次登录一直使用」）。
    *
    * 与手动 importCookies 的区别：

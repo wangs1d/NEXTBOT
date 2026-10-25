@@ -10,8 +10,8 @@ import "effect_card_shell.dart";
 /// footer = 着装建议。此前本卡落在通用列表卡（逐行小字），LLM 正文又常写
 /// markdown 表格复述数据（手机端渲染成横向滚动表格，要左右滑动才能看全）。
 ///
-/// 本组件按参考稿改为平铺卡：两列大字网格（标签小字 + 数值大字 + 百分比
-/// 自带微型进度条）+ 着装整行——一屏展示全部内容，无任何滑动交互。
+/// 本组件按参考稿改为平铺卡：两列大字网格（标签小字 + 数值大字）+ 着装整行
+/// ——一屏展示全部内容，无任何滑动交互。
 /// 骨架与 [MetricEffectCard] 共用一条视觉基线（EffectCardShell）。
 class WeatherEffectCard extends StatelessWidget {
   const WeatherEffectCard({super.key, required this.data, required this.cs});
@@ -22,8 +22,8 @@ class WeatherEffectCard extends StatelessWidget {
   // ── 服务端条目文本解析（tool-card-registry "weather.get_local" 的稳定格式）──
 
   static final RegExp _rainRe =
-      RegExp(r"^(?:峰值|最大)?(?:降水|降雨)概率\s*(\d+(?:\.\d+)?)\s*%$");
-  static final RegExp _humidityRe = RegExp(r"^湿度\s*(\d+(?:\.\d+)?)\s*%$");
+      RegExp(r"^(?:峰值|最大)?(?:降水|降雨)概率\s*\d+(?:\.\d+)?\s*%$");
+  static final RegExp _humidityRe = RegExp(r"^湿度\s*\d+(?:\.\d+)?\s*%$");
   static final RegExp _tempRe = RegExp(r"^(?:气温|温度)\s*(.+)$");
   static final RegExp _windRe = RegExp(r"^(?:风速|风力)\s*(.+)$");
 
@@ -31,27 +31,23 @@ class WeatherEffectCard extends StatelessWidget {
   Widget build(BuildContext context) {
     String? condition;
     String? temp;
-    (String, double)? rain;
-    (String, double)? humidity;
+    String? rain;
+    String? humidity;
     String? wind;
     final List<String> extras = <String>[];
 
     for (final AgentResultItem item in data.items) {
       final String text = item.text.trim();
       if (text.isEmpty) continue;
-      RegExpMatch? m = _rainRe.firstMatch(text);
-      if (m != null) {
-        final double? v = double.tryParse(m.group(1)!);
-        if (v != null) rain = (text, v / 100.0);
+      if (_rainRe.hasMatch(text)) {
+        rain = text;
         continue;
       }
-      m = _humidityRe.firstMatch(text);
-      if (m != null) {
-        final double? v = double.tryParse(m.group(1)!);
-        if (v != null) humidity = (text, v / 100.0);
+      if (_humidityRe.hasMatch(text)) {
+        humidity = text;
         continue;
       }
-      m = _tempRe.firstMatch(text);
+      RegExpMatch? m = _tempRe.firstMatch(text);
       if (m != null) {
         temp = m.group(1)?.trim() ?? text;
         continue;
@@ -73,11 +69,9 @@ class WeatherEffectCard extends StatelessWidget {
       if (condition != null)
         _WeatherTile(label: "天气", value: condition, cs: cs),
       if (temp != null) _WeatherTile(label: "气温", value: temp, cs: cs),
-      if (rain != null)
-        _WeatherTile(label: "降水概率", value: rain.$1, ratio: rain.$2, cs: cs),
+      if (rain != null) _WeatherTile(label: "降水概率", value: rain, cs: cs),
       if (humidity != null)
-        _WeatherTile(
-            label: "湿度", value: humidity.$1, ratio: humidity.$2, cs: cs),
+        _WeatherTile(label: "湿度", value: humidity, cs: cs),
       if (wind != null) _WeatherTile(label: "风速", value: wind, cs: cs),
     ];
     // 无法归类的余项与着装建议整行铺满（着装恒在最后，与参考稿一致）。
@@ -129,20 +123,17 @@ class WeatherEffectCard extends StatelessWidget {
   }
 }
 
-/// 天气指标格：标签小字（onSurfaceVariant）+ 数值大字（onSurface 加粗），
-/// 百分比值带微型语义进度条（与 MetricEffectCard 同视觉语言）。
+/// 天气指标格：标签小字（onSurfaceVariant）+ 数值大字（onSurface 加粗）。
 class _WeatherTile extends StatelessWidget {
   const _WeatherTile({
     required this.label,
     required this.value,
     required this.cs,
-    this.ratio,
   });
 
   final String label;
   final String value;
   final ColorScheme cs;
-  final double? ratio;
 
   @override
   Widget build(BuildContext context) {
@@ -182,20 +173,6 @@ class _WeatherTile extends StatelessWidget {
               fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
             ),
           ),
-          if (ratio != null) ...<Widget>[
-            const SizedBox(height: 5),
-            ClipRRect(
-              borderRadius: BorderRadius.circular(3),
-              child: LinearProgressIndicator(
-                value: ratio!.clamp(0.0, 1.0),
-                minHeight: 5,
-                backgroundColor: cs.surfaceContainerHighest,
-                valueColor: AlwaysStoppedAnimation<Color>(
-                  cs.primary.withValues(alpha: 0.85),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );

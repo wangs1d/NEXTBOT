@@ -88,3 +88,53 @@ export function registerBriefingTestRoutes(
     };
   });
 }
+
+/**
+ * 测试专用：手动触发一次明日速览（晚间 digest）WS 事件。
+ *
+ * 调用方式：POST /api/test/trigger-evening-digest，body { sessionId?: string,
+ * previewDate?: string }——previewDate（YYYY-MM-DD，被预告的那天）为跨零点
+ * 补推用：昨晚的卡没送达、过了零点才补时传昨晚口径的「明天」，行程/天气/
+ * 日期标签都会按那天对齐（DDL 块因实时扫描时点错位而省略）；不传 = 实时生成。
+ * 走的是调度器同款路径（同一个 EveningDigestService 实例 + 同一种 WS 事件），
+ * 所以预览出来的卡片内容、文案口径与到点自动推送一致；不等 next tick、
+ * 也不写 lastSentDay，当天到点仍会正常再推一次。
+ */
+export function registerEveningDigestTestRoutes(
+  app: FastifyInstance,
+  deps: Pick<HttpRouteDeps, "wsConnectionRegistry" | "eveningDigestService">,
+): void {
+  const service = deps.eveningDigestService;
+  if (!service) return;
+  app.post("/api/test/trigger-evening-digest", async (request, reply) => {
+    const wsRegistry = deps.wsConnectionRegistry;
+    if (!wsRegistry) {
+      return reply.code(503).send({ ok: false, error: "wsConnectionRegistry 未注入" });
+    }
+    const body = (request.body ?? {}) as { sessionId?: string; previewDate?: string };
+    const online = wsRegistry.connectedSessionIds();
+    // 不传 sessionId 时取当前在线的第一个 session（明日速览只认在线的那一位）
+    const sessionId = body.sessionId?.trim() || online[0] || "";
+    if (!sessionId) {
+      return reply.code(400).send({ ok: false, error: "无在线 session，且未指定 sessionId" });
+    }
+
+    const digest = await service.generateDigest(sessionId, { previewDate: body.previewDate });
+    const sent = wsRegistry.trySend(
+      sessionId,
+      JSON.stringify({
+        type: ServerEventType.EveningDigest,
+        payload: { sessionId, narrationText: digest.narrationText, digest },
+      }),
+    );
+
+    return {
+      ok: true,
+      delivered: sent,
+      sessionId,
+      onlineSessions: online,
+      narrationText: digest.narrationText,
+      digest,
+    };
+  });
+}

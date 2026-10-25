@@ -62,7 +62,7 @@ type DecidedCandidate = {
   text: string;
   /**
    * 统一抽取产物（decide 融合后回填）。存在时 egress 走 writeDecided(unified)
-   * ——抽取产物直存（infer:false）且 facts/commitments/corrections 驱动
+   * ——抽取产物直存（infer:false）且 facts/corrections 驱动
    * 事实注册表等下游，不再让 Mem0 二次 LLM 抽取。
    */
   unified?: UnifiedExtraction;
@@ -395,15 +395,14 @@ export class MemoryConsolidationService {
       }
     }
 
-    // unified 候选逐条直存（understandings/commitments/corrections/facts 经钩子驱动下游）。
-    // reject 且无旁路数据（承诺/纠正/理解/事实）的候选整体跳过；reject 但携带
+    // unified 候选逐条直存（understandings/corrections/facts 经钩子驱动下游）。
+    // reject 且无旁路数据（纠正/理解/事实）的候选整体跳过；reject 但携带
     // 旁路数据的仍要走 writeDecided——persistUnifiedExtraction 的 reject 分支
-    // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存的闲聊里的承诺/理解照样要抓）。
+    // 只触发钩子、不落记忆（P0-2 解耦语义：被拒存闲聊里的理解照样要抓）。
     for (const d of decided) {
       if (!d.unified) continue;
       const hasSideData =
         d.unified.understandings.length > 0 ||
-        d.unified.commitments.length > 0 ||
         d.unified.corrections.length > 0 ||
         d.unified.facts.length > 0 ||
         (d.unified.profileOps?.length ?? 0) > 0;

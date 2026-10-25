@@ -38,7 +38,7 @@ export interface StoredBookingOrder {
   params: Record<string, unknown>;
   /** 平台支付链接（用户手动支付） */
   paymentUrl: string | null;
-  /** 关联承诺板记录 id */
+  /** （已废弃）原承诺板关联 id，承诺板下线后恒为 null；保留字段兼容存量订单 */
   commitmentId: string | null;
   /** 模拟模式订单标记 */
   simulated: boolean;

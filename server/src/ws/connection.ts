@@ -1151,6 +1151,25 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.BrowserSaveLoginDecision) {
+          // 共用浏览器桥：客户端对「保存登录态」征询的答复 → 落授权（问一次记住）。
+          if (!boundActorId) {
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
+              }),
+            );
+            return;
+          }
+          const siteId = String((event.payload as Record<string, unknown>)?.siteId ?? "");
+          const allowed = (event.payload as Record<string, unknown>)?.allowed === true;
+          if (siteId) {
+            sharedBrowserCoordinator.forwardSaveLoginDecision(boundActorId, siteId, allowed);
+          }
+          return;
+        }
+
         if (event.type === ClientEventType.PhoneMsgReport) {
           // 手机桥接消息捕捉批量上报 → 消息聚合中心落库 → ack 回执供手机端出队。
           if (!boundActorId || !initAsPhoneBridge) {

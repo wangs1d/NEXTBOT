@@ -1,5 +1,6 @@
 import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
+import "package:flutter/gestures.dart" show Drag;
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
@@ -10,7 +11,8 @@ import "../../core/models/turn_state.dart";
 import "../../core/db/local_history_store.dart";
 import "../../core/presentation/agent_avatar_catalog.dart";
 import "../../core/presentation/voice_call_ui_labels.dart";
-import "../../core/utils/agent_result_parser.dart";import "../../core/utils/content_summary_parser.dart";
+import "../../core/utils/agent_result_parser.dart";
+import "../../core/utils/content_summary_parser.dart";
 import "../../core/services/speech_service.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "../../core/theme/app_typography.dart";
@@ -30,6 +32,7 @@ import "utterance_grouping.dart";
 import "../../core/services/profile_manage_api.dart";
 import "../../core/services/account_profile_api.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
+import "../../core/utils/chat_time_label.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -323,10 +326,33 @@ class _ChatPageState extends State<ChatPage>
   bool get _isPreviewAnchorActive =>
       _previewAnchorPixels != null || _previewAnchorBox != null;
 
+  /// 贴底容差（px）：像素小于此值视为「停在最新消息处」，自动跟底仍生效。
+  static const double _stickToBottomEpsilon = 24;
+
+  /// 指针按住拖动进行中（`ScrollStartNotification.dragDetails != null`）。
+  bool _isUserDragging = false;
+
+  /// 用户已接管视口：滚轮 / 右侧滚动条滑块 / 拖动把视图带离底部后置真，
+  /// 期间所有自动跳底逻辑让路，直到用户滚回贴底区或点「滚到底部」按钮。
+  /// 之所以单独记这个标记而不是只看 `isScrollingNotifier`：滚动条滑块拖拽走
+  /// `position.jumpTo`，既不置 `isScrollingNotifier` 也不发 `UserScrollNotification`，
+  /// 只有「非程序性像素变化」能认出它。
+  bool _userTookOverViewport = false;
+
+  /// 右侧滑块拖拽热区宽度（px）。滚动条本体 8px 左右，这里放宽到 14px 便于按住。
+  static const double _scrollbarGrabWidth = 14;
+
+  /// 滑块拖拽换算比例（内容像素 / 指针像素），按下瞬间固化。
+  double _thumbDragScale = 1;
+
+  /// 滑块拖拽会话（由 `ScrollPosition.drag` 创建，走标准滚动通知链路）。
+  Drag? _thumbDrag;
+
   // 预定义常量 - 减少重复创建对象
   /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
   /// 避免长文本横向铺满整个窗口。
   static const double _contentMaxWidth = 860;
+
   /// 空态居中问候语（豆包式，无对话/工作分栏）：称呼 + 俏皮尾句；
   /// 称呼取不到（新用户/跳过向导/接口失败）时退化为不带称呼。
   static const String _emptyGreetingTail = "今天想搞点什么？";
@@ -372,6 +398,7 @@ class _ChatPageState extends State<ChatPage>
     }
     return "";
   }
+
   static const EdgeInsets _listPadding =
       EdgeInsets.symmetric(horizontal: 12, vertical: 4);
   static const EdgeInsets _cardPadding = EdgeInsets.all(7);
@@ -417,6 +444,11 @@ class _ChatPageState extends State<ChatPage>
     if (_isAutoScrolling) return;
     // 图片预览锚点校正中不抢滚动，否则会把视图从照片位置拽回底部
     if (_isPreviewAnchorActive) return;
+    // 用户已接管视口（滚轮上滑、拖右侧滚动条滑块）或正按住拖动时绝不抢滚动：
+    // 流式输出期间每条 SSE 都会排一次 postFrame 跟底，与指针输入互相拉扯，
+    // 表现为「拖动不跟手、忽上忽下」。
+    if (_userTookOverViewport || _isUserDragging) return;
+    if (_scrollController.position.isScrollingNotifier.value) return;
     // reverse 模式下，pixels=0 就是列表底部（最新消息处）
     // instant 时直接 jumpTo(0)，非 instant 用短动画过渡
     if (instant) {
@@ -426,8 +458,11 @@ class _ChatPageState extends State<ChatPage>
     if (_scrollController.position.pixels <= 1) return; // 已贴近底部，无需滚动
     _isAutoScrolling = true;
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // 排帧与实际执行之间，用户可能已按住滑块或滚动，执行前再确认一次
       if (!_scrollController.hasClients ||
-          _scrollController.position.pixels <= 1) {
+          _scrollController.position.pixels <= 1 ||
+          _userTookOverViewport ||
+          _isUserDragging) {
         _isAutoScrolling = false;
         return;
       }
@@ -459,6 +494,86 @@ class _ChatPageState extends State<ChatPage>
         _hasNewAgentMessage = false;
       }
     }
+  }
+
+  /// 滚动通知 → 维护「用户是否已接管视口」。
+  ///
+  /// 判定依据：只要不是本页自己发起的滚动（跟底动画 / Tab 恢复 / 预览锚点
+  /// 校正）引起的像素变化，就是用户输入（滚轮、触摸板、右侧滚动条滑块）。
+  /// 滑块拖拽必须这样认，因为它内部用 `position.jumpTo`，既不点亮
+  /// `isScrollingNotifier` 也不发 `UserScrollNotification`。
+  /// 返回 false：只旁听，不消费通知。
+  bool _handleScrollNotification(ScrollNotification notification) {
+    // 只认本列表自己的滚动：气泡内的横向图片轮播等嵌套滚动视图的通知
+    // depth 会 >= 1（穿过一层视口），不能算成用户在拖主列表。
+    if (notification.depth != 0) return false;
+    if (notification is ScrollStartNotification &&
+        notification.dragDetails != null) {
+      _isUserDragging = true;
+    } else if (notification is ScrollEndNotification) {
+      _isUserDragging = false;
+    }
+    if (_isAutoScrolling || _isRestoringPosition || _isPreviewAnchorActive) {
+      return false;
+    }
+    _userTookOverViewport = notification.metrics.pixels > _stickToBottomEpsilon;
+    return false;
+  }
+
+  /// 滑块长度占轨迹的比例 = 可见比例；由此反推「拖动 1px 指针 = 移动多少内容像素」。
+  ///
+  /// SDK 自带的滑块拖拽（`RawScrollbarState._getPrimaryDelta`）是绝对映射：
+  /// `getTrackToScroll(按下时的滑块位置 + 指针位移)`，其中
+  /// `getTrackToScroll(x) = 总高 × x ÷ (轨迹长 − 滑块长)`——**分母每帧按最新
+  /// metrics 重算**。可是拖动期间视口高度和懒加载估算的总高都在变（实测视口
+  /// 512→400、总高抖 ±45px），同一个指针位置于是对应到完全不同的偏移，超出
+  /// `maxScrollExtent` 的部分被 clamp——表现为拖到中间突然窜到列表最顶、
+  /// 拖动过程中来回漂。这里改为按下时算一次比例、拖动期间不再重算。
+  double _computeThumbDragScale(ScrollPosition position) {
+    final double range = position.maxScrollExtent - position.minScrollExtent;
+    final double track = position.viewportDimension;
+    if (range <= 0 || track <= 0) return 1;
+    final double movable = track * range / (range + track);
+    if (movable <= 0) return 1;
+    return range / movable;
+  }
+
+  void _onThumbDragStart(DragStartDetails details) {
+    if (!_scrollController.hasClients) return;
+    final ScrollPosition position = _scrollController.position;
+    if (position.maxScrollExtent <= position.minScrollExtent) return;
+    _thumbDragScale = _computeThumbDragScale(position);
+    // 立刻认领：`position.drag` 会打断进行中的跟底动画，首帧起就压住自动滚动
+    _isUserDragging = true;
+    _userTookOverViewport = position.pixels > _stickToBottomEpsilon;
+    _thumbDrag = position.drag(details, () => _thumbDrag = null);
+  }
+
+  void _onThumbDragUpdate(DragUpdateDetails details) {
+    final Drag? drag = _thumbDrag;
+    if (drag == null) return;
+    // `ScrollDragController` 的 primaryDelta 是「内容像素增量」，反向列表
+    // （axisDirection.up）里内容像素增量 = −指针纵向位移 × 比例。
+    final double scaled = -details.delta.dy * _thumbDragScale;
+    drag.update(DragUpdateDetails(
+      globalPosition: details.globalPosition,
+      localPosition: details.localPosition,
+      delta: Offset(0, scaled),
+      primaryDelta: scaled,
+    ));
+  }
+
+  void _onThumbDragEnd(DragEndDetails details) {
+    // 桌面滑块拖拽松手即停，不接力惯性（也避开反向列表速度符号的换算）
+    _thumbDrag?.end(DragEndDetails(primaryVelocity: 0));
+    _thumbDrag = null;
+    _isUserDragging = false;
+  }
+
+  void _onThumbDragCancel() {
+    _thumbDrag?.cancel();
+    _thumbDrag = null;
+    _isUserDragging = false;
   }
 
   /// ====== 图片预览滚动锚点（内容锚点版） ======
@@ -496,8 +611,7 @@ class _ChatPageState extends State<ChatPage>
       }
       return true;
     });
-    final RenderObject? viewportRo =
-        listScrollable?.context.findRenderObject();
+    final RenderObject? viewportRo = listScrollable?.context.findRenderObject();
     final RenderObject? tapRo = anchorContext.findRenderObject();
     if (viewportRo is RenderBox &&
         viewportRo.attached &&
@@ -522,6 +636,11 @@ class _ChatPageState extends State<ChatPage>
 
   void _restorePreviewAnchor() {
     if (!mounted || !_isPreviewAnchorActive) {
+      _endPreviewAnchorSession();
+      return;
+    }
+    // 用户按住列表拖动时放弃锚点校正：逐帧 jumpTo 会和指针互相抢滚动
+    if (_isUserDragging) {
       _endPreviewAnchorSession();
       return;
     }
@@ -551,8 +670,8 @@ class _ChatPageState extends State<ChatPage>
       return;
     }
 
-    final RenderObject? viewportRo = _scrollController
-        .position.context.storageContext.findRenderObject();
+    final RenderObject? viewportRo =
+        _scrollController.position.context.storageContext.findRenderObject();
     if (viewportRo is! RenderBox || !viewportRo.attached) {
       _endPreviewAnchorSession();
       return;
@@ -586,8 +705,7 @@ class _ChatPageState extends State<ChatPage>
     _previewAnchorStableFrames = 0;
     _previewAnchorFrames = 0;
     if (_scrollController.hasClients) {
-      _isUserScrollingNotifier.value =
-          _scrollController.position.pixels > 100;
+      _isUserScrollingNotifier.value = _scrollController.position.pixels > 100;
     }
   }
 
@@ -632,7 +750,10 @@ class _ChatPageState extends State<ChatPage>
         widget.messages.length == oldWidget.messages.length;
     if (messagesUnchanged) {
       // Agent 正在流式输出（消息文本在增长），且用户没有主动上滑 → 跟踪到底部
-      if (widget.isAgentProcessing && !_isUserScrollingNotifier.value) {
+      if (widget.isAgentProcessing &&
+          !_isUserScrollingNotifier.value &&
+          !_userTookOverViewport &&
+          !_isUserDragging) {
         WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
       }
       return;
@@ -646,6 +767,7 @@ class _ChatPageState extends State<ChatPage>
 
     // 用户发送消息时，无论是否在滑动，都自动滚动到底部
     if (hasNewUserMessage) {
+      _userTookOverViewport = false;
       _isUserScrollingNotifier.value = false;
       _hasNewAgentMessage = false;
       WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
@@ -659,13 +781,20 @@ class _ChatPageState extends State<ChatPage>
             widget.messages.last.role != "user";
 
     // 用户在滑动时不自动滚动，标记有新消息
-    if (hasNewAgentMessage && _isUserScrollingNotifier.value) {
+    if (hasNewAgentMessage &&
+        (_isUserScrollingNotifier.value || _userTookOverViewport)) {
       _hasNewAgentMessage = true;
       return;
     }
 
     // 用户没有主动滑动时，自动滚动到底部
     if (widget.messages.length != oldWidget.messages.length) {
+      // 用户已接管视口（拖滑块/滚轮看历史）→ 不跳底，只提示有新消息
+      if (_userTookOverViewport || _isUserDragging) {
+        _hasNewAgentMessage =
+            widget.messages.length > oldWidget.messages.length;
+        return;
+      }
       _isUserScrollingNotifier.value = false;
       _hasNewAgentMessage = false;
 
@@ -720,6 +849,7 @@ class _ChatPageState extends State<ChatPage>
   /// ====== 滚动位置保持：恢复之前保存的滚动位置（reverse 模式） ======
   void _restoreOrScrollToBottom() {
     // 重置滚动状态
+    _userTookOverViewport = false;
     _isUserScrollingNotifier.value = false;
     _hasNewAgentMessage = false;
 
@@ -731,6 +861,8 @@ class _ChatPageState extends State<ChatPage>
 
       // 加锁：防止后续 didUpdateWidget 调用中的自动滚动覆盖恢复位置
       _isRestoringPosition = true;
+      // 恢复到历史位置＝用户正在看历史，流式跟底不得再把他拽回底部
+      _userTookOverViewport = targetPixels > _stickToBottomEpsilon;
 
       // IndexedStack 切换后需要等待布局完成，用双重 postFrameCallback 保证可靠
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1093,8 +1225,7 @@ class _ChatPageState extends State<ChatPage>
     // 前台轮次（流式回复/工具调用）与后台任务面（回执聚合）都会点亮状态条；
     // 前台空闲时条上只显示「N 个任务后台进行中」——前后台分工后,
     // 「没在流式回复」不再等于「没在干活」。
-    final bool foregroundActive =
-        widget.isAgentProcessing || tool.isNotEmpty;
+    final bool foregroundActive = widget.isAgentProcessing || tool.isNotEmpty;
     final int bgCount = widget.backgroundTaskCount;
     final bool active = foregroundActive || bgCount > 0;
     if (!active) {
@@ -1120,65 +1251,65 @@ class _ChatPageState extends State<ChatPage>
             width: 1,
           ),
         ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
-                  // 思考动画首位:emotion-ball 小球,情绪跟随全局 MoodBridge
-                  // (listening/thinking/speaking/happy/alert 自动换表情);
-                  // 工具调用中优先显示「检索资料」,挂载初期按思考/检索兜底;
-                  // 仅后台任务活跃时按检索态(干活力反馈)。
-                  MoodDrivenEmotionBall(
-                    fallback: tool.isNotEmpty
-                        ? EmotionBallIds.retrieving
-                        : foregroundActive
-                            ? EmotionBallIds.thinking
-                            : EmotionBallIds.retrieving,
-                    toolOverride:
-                        tool.isNotEmpty ? EmotionBallIds.retrieving : null,
-                    size: 22,
-                    bodyColor: cs.primary,
-                    eyeScale: 1.35,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                // 思考动画首位:emotion-ball 小球,情绪跟随全局 MoodBridge
+                // (listening/thinking/speaking/happy/alert 自动换表情);
+                // 工具调用中优先显示「检索资料」,挂载初期按思考/检索兜底;
+                // 仅后台任务活跃时按检索态(干活力反馈)。
+                MoodDrivenEmotionBall(
+                  fallback: tool.isNotEmpty
+                      ? EmotionBallIds.retrieving
+                      : foregroundActive
+                          ? EmotionBallIds.thinking
+                          : EmotionBallIds.retrieving,
+                  toolOverride:
+                      tool.isNotEmpty ? EmotionBallIds.retrieving : null,
+                  size: 22,
+                  bodyColor: cs.primary,
+                  eyeScale: 1.35,
+                ),
+                const SizedBox(width: 8),
+                ConstrainedBox(
+                  constraints: const BoxConstraints(maxWidth: 420),
+                  child: Text(
+                    text,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.onSurface.withValues(alpha: 0.75),
+                          fontWeight: FontWeight.w500,
+                        ),
                   ),
+                ),
+                if (percent != null) ...<Widget>[
                   const SizedBox(width: 8),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxWidth: 420),
-                    child: Text(
-                      text,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.onSurface.withValues(alpha: 0.75),
-                            fontWeight: FontWeight.w500,
-                          ),
-                    ),
+                  Text(
+                    "$percent%",
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.primary,
+                          fontWeight: FontWeight.w700,
+                        ),
                   ),
-                  if (percent != null) ...<Widget>[
-                    const SizedBox(width: 8),
-                    Text(
-                      "$percent%",
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.primary,
-                            fontWeight: FontWeight.w700,
-                          ),
-                    ),
-                  ],
-                  // 前台处理中且后台还有任务时，附一个轻量计数提示
-                  if (bgCount > 0 && foregroundActive) ...<Widget>[
-                    const SizedBox(width: 10),
-                    Text(
-                      "另有 $bgCount 个后台任务",
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.primary.withValues(alpha: 0.85),
-                            fontWeight: FontWeight.w600,
-                          ),
-                    ),
-                  ],
                 ],
-              ),
+                // 前台处理中且后台还有任务时，附一个轻量计数提示
+                if (bgCount > 0 && foregroundActive) ...<Widget>[
+                  const SizedBox(width: 10),
+                  Text(
+                    "另有 $bgCount 个后台任务",
+                    style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                          color: cs.primary.withValues(alpha: 0.85),
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ],
+              ],
+            ),
             // 进度条：长工具心跳带 percent 时渲染
             if (percent != null) ...<Widget>[
               const SizedBox(height: 6),
@@ -1296,7 +1427,8 @@ class _ChatPageState extends State<ChatPage>
 
     // 轮次右边界：下一条 user 消息（不含）
     int end = start + 1;
-    while (end < widget.messages.length && widget.messages[end].role != "user") {
+    while (
+        end < widget.messages.length && widget.messages[end].role != "user") {
       end++;
     }
 
@@ -1314,10 +1446,8 @@ class _ChatPageState extends State<ChatPage>
     if (draft.trim().isEmpty) {
       widget.controller.text = prompt;
     } else {
-      final bool endsWithGap =
-          draft.endsWith(" ") || draft.endsWith("\n");
-      widget.controller.text =
-          endsWithGap ? "$draft$prompt" : "$draft $prompt";
+      final bool endsWithGap = draft.endsWith(" ") || draft.endsWith("\n");
+      widget.controller.text = endsWithGap ? "$draft$prompt" : "$draft $prompt";
     }
     widget.controller.selection = TextSelection.collapsed(
       offset: widget.controller.text.length,
@@ -1380,8 +1510,7 @@ class _ChatPageState extends State<ChatPage>
                   Align(
                     alignment: Alignment.bottomLeft,
                     child: Padding(
-                      padding: const EdgeInsets.only(
-                          left: 12, bottom: 4),
+                      padding: const EdgeInsets.only(left: 12, bottom: 4),
                       child: EmptyStateSuggestions(
                         onSuggestionTap: _sendSuggestion,
                         onSuggestionInsert: _insertSuggestion,
@@ -1389,70 +1518,150 @@ class _ChatPageState extends State<ChatPage>
                       ),
                     ),
                   ),
-                ]
-                else
+                ] else
                   // 使整块消息文字支持鼠标框选复制。
                   // 居中内容列：宽屏下消息流和输入框共同收敛到同一最大宽度，
                   // 避免长文本横向铺满整个窗口。
                   SelectionArea(
                     child: Center(
                       child: ConstrainedBox(
-                        constraints: const BoxConstraints(
-                            maxWidth: _contentMaxWidth),
-                        child: ListView.builder(
-                          controller: _scrollController,
-                          reverse: true,
-                          padding: _listPadding,
-                          scrollCacheExtent: const ScrollCacheExtent.pixels(500),
-                          itemCount: itemCount,
-                          itemBuilder: (BuildContext context, int index) {
-                            // reverse 模式下 index 0 = 视觉底部（最新消息）
-                            final Map<String, dynamic> messageGroup =
-                                renderItems[index];
-                            final bool isUser =
-                                messageGroup['isUser'] as bool;
-                            final ChatMessage mainMessage =
-                                messageGroup['main'] as ChatMessage;
-                            final ContentSummaryParseResult? contentSummary =
-                                isUser
-                                    ? null
-                                    : ContentSummaryParser.parse(
-                                        mainMessage.text);
+                        constraints:
+                            const BoxConstraints(maxWidth: _contentMaxWidth),
+                        child: NotificationListener<ScrollNotification>(
+                          onNotification: _handleScrollNotification,
+                          child: ListView.builder(
+                            controller: _scrollController,
+                            reverse: true,
+                            padding: _listPadding,
+                            scrollCacheExtent:
+                                const ScrollCacheExtent.pixels(500),
+                            itemCount: itemCount,
+                            itemBuilder: (BuildContext context, int index) {
+                              // reverse 模式下 index 0 = 视觉底部（最新消息）
+                              final Map<String, dynamic> messageGroup =
+                                  renderItems[index];
+                              final bool isUser =
+                                  messageGroup['isUser'] as bool;
+                              final ChatMessage mainMessage =
+                                  messageGroup['main'] as ChatMessage;
+                              final ContentSummaryParseResult? contentSummary =
+                                  isUser
+                                      ? null
+                                      : ContentSummaryParser.parse(
+                                          mainMessage.text);
 
-                            // 发言归组（2026-10-09 重复回复根源修复）：reverse 列表
-                            // 里 index+1 = 视觉上的上一条（更早）。同一条发言的后续
-                            // 分段渲染为「续泡」（不重复头像/名字/时间头），避免把
-                            // 「一条发言的两段」读成两条独立回复。
-                            final ChatMessage? aboveMessage = index + 1 < itemCount
-                                ? renderItems[index + 1]['main'] as ChatMessage
-                                : null;
-                            final bool isUtteranceContinuation = !isUser &&
-                                aboveMessage != null &&
-                                UtteranceGrouping.isContinuationOf(
-                                  aboveMessage.messageId,
-                                  mainMessage.messageId,
-                                );
+                              // 发言归组（2026-10-09 重复回复根源修复）：reverse 列表
+                              // 里 index+1 = 视觉上的上一条（更早）。同一条发言的后续
+                              // 分段渲染为「续泡」（不重复头像/名字/时间头），避免把
+                              // 「一条发言的两段」读成两条独立回复。
+                              final ChatMessage? aboveMessage =
+                                  index + 1 < itemCount
+                                      ? renderItems[index + 1]['main']
+                                          as ChatMessage
+                                      : null;
+                              final bool isUtteranceContinuation = !isUser &&
+                                  aboveMessage != null &&
+                                  UtteranceGrouping.isContinuationOf(
+                                    aboveMessage.messageId,
+                                    mainMessage.messageId,
+                                  );
 
-                            // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
-                            // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
-                            // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
-                            return KeyedSubtree(
-                              key: ValueKey<String>(
-                                  'msg-${mainMessage.messageId}'),
-                              child: _buildHoverableMessage(
-                                cs: cs,
-                                mainMessage: mainMessage,
-                                isUser: isUser,
-                                contentSummary: contentSummary,
-                                isUtteranceContinuation:
-                                    isUtteranceContinuation,
-                              ),
-                            );
-                          },
+                              // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
+                              // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
+                              // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
+                              return KeyedSubtree(
+                                key: ValueKey<String>(
+                                    'msg-${mainMessage.messageId}'),
+                                child: _buildHoverableMessage(
+                                  cs: cs,
+                                  mainMessage: mainMessage,
+                                  isUser: isUser,
+                                  contentSummary: contentSummary,
+                                  isUtteranceContinuation:
+                                      isUtteranceContinuation,
+                                ),
+                              );
+                            },
+                          ),
                         ),
                       ),
                     ),
                   ),
+                // 右侧滑块拖拽层：宽度与消息列右缘对齐（滚动条画在同一个右缘）。
+                // 用它替换 SDK 自带的滑块拖拽，换算比例在按下时固化；原因见
+                // `_computeThumbDragScale`。
+                Positioned.fill(
+                  child: Center(
+                    child: ConstrainedBox(
+                      constraints:
+                          const BoxConstraints(maxWidth: _contentMaxWidth),
+                      child: Align(
+                        alignment: Alignment.centerRight,
+                        child: SizedBox(
+                          width: _scrollbarGrabWidth,
+                          height: double.infinity,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onVerticalDragStart: _onThumbDragStart,
+                            onVerticalDragUpdate: _onThumbDragUpdate,
+                            onVerticalDragEnd: _onThumbDragEnd,
+                            onVerticalDragCancel: _onThumbDragCancel,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                // 「滚到底部」悬浮层：它原本待在下方输入区 Column 里，出现/消失
+                // 会把消息列表的视口高度压掉 ~54px，实测 pixels 越过阈值那一帧
+                // viewport 512→458、maxScrollExtent 2391→2478。滚动条滑块的位置是
+                // 按「指针 / 轨道高度 × maxScrollExtent」算的，这两个数一变就互相
+                // 映射错位——表现为拖到中间突然窜到顶、来回漂移。改为浮层后列表
+                // 视口高度恒定。
+                Align(
+                  alignment: Alignment.bottomCenter,
+                  child: ValueListenableBuilder<bool>(
+                    valueListenable: _isUserScrollingNotifier,
+                    builder: (BuildContext context, bool isUserScrolling,
+                        Widget? child) {
+                      if (!isUserScrolling) return const SizedBox.shrink();
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 6),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            if (_hasNewAgentMessage)
+                              Padding(
+                                padding: const EdgeInsets.only(right: 12),
+                                child: Text(
+                                  "Agent 有新消息",
+                                  style: TextStyle(
+                                    color: cs.primary,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            FloatingActionButton.small(
+                              heroTag: 'scroll_to_bottom',
+                              onPressed: () {
+                                if (_scrollController.hasClients) {
+                                  _userTookOverViewport = false;
+                                  _isUserScrollingNotifier.value = false;
+                                  _hasNewAgentMessage = false;
+                                  _scrollToBottom();
+                                }
+                              },
+                              backgroundColor: cs.primaryContainer,
+                              child: Icon(Icons.arrow_downward,
+                                  color: cs.onPrimaryContainer),
+                            ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
               ],
             ),
           ),
@@ -1464,395 +1673,384 @@ class _ChatPageState extends State<ChatPage>
               child: Align(
                 alignment: Alignment.topCenter,
                 child: ConstrainedBox(
-                  constraints:
-                      const BoxConstraints(maxWidth: _contentMaxWidth),
+                  constraints: const BoxConstraints(maxWidth: _contentMaxWidth),
                   child: Padding(
                     padding: _inputHorizontalPadding,
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: <Widget>[
-                    // 语音识别状态提示
-                    if (_isListening)
-                      Container(
-                        margin: const EdgeInsets.only(bottom: 6),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 8),
-                        decoration: BoxDecoration(
-                          color: cs.errorContainer.withValues(alpha: 0.2),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: cs.error.withValues(alpha: 0.5),
-                            width: 1,
-                          ),
-                        ),
-                        child: Row(
-                          children: <Widget>[
-                            SizedBox(
-                              width: 16,
-                              height: 16,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor:
-                                    AlwaysStoppedAnimation<Color>(cs.error),
+                        // 语音识别状态提示
+                        if (_isListening)
+                          Container(
+                            margin: const EdgeInsets.only(bottom: 6),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: cs.errorContainer.withValues(alpha: 0.2),
+                              borderRadius: BorderRadius.circular(12),
+                              border: Border.all(
+                                color: cs.error.withValues(alpha: 0.5),
+                                width: 1,
                               ),
                             ),
-                            const SizedBox(width: 8),
-                            Expanded(
-                              child: Text(
-                                _recognizedText.isNotEmpty
-                                    ? "正在识别: $_recognizedText"
-                                    : "正在聆听...",
-                                style: Theme.of(context)
-                                    .textTheme
-                                    .labelMedium
-                                    ?.copyWith(
-                                      color: cs.error,
-                                    ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    // 滚动到底部按钮（用户滑动时显示）—— 使用 ValueListenableBuilder 避免整树重建
-                    ValueListenableBuilder<bool>(
-                      valueListenable: _isUserScrollingNotifier,
-                      builder: (BuildContext context, bool isUserScrolling,
-                          Widget? child) {
-                        if (!isUserScrolling) return const SizedBox.shrink();
-                        return Padding(
-                          padding: const EdgeInsets.only(bottom: 6),
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (_hasNewAgentMessage)
-                                Padding(
-                                  padding: const EdgeInsets.only(right: 12),
-                                  child: Text(
-                                    "Agent 有新消息",
-                                    style: TextStyle(
-                                      color: cs.primary,
-                                      fontSize: 13,
-                                      fontWeight: FontWeight.w500,
-                                    ),
+                            child: Row(
+                              children: <Widget>[
+                                SizedBox(
+                                  width: 16,
+                                  height: 16,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    valueColor:
+                                        AlwaysStoppedAnimation<Color>(cs.error),
                                   ),
                                 ),
-                              FloatingActionButton.small(
-                                heroTag: 'scroll_to_bottom',
-                                onPressed: () {
-                                  if (_scrollController.hasClients) {
-                                    _isUserScrollingNotifier.value = false;
-                                    _hasNewAgentMessage = false;
-                                    _scrollToBottom();
-                                  }
-                                },
-                                backgroundColor: cs.primaryContainer,
-                                child: Icon(Icons.arrow_downward,
-                                    color: cs.onPrimaryContainer),
-                              ),
-                            ],
-                          ),
-                        );
-                      },
-                    ),
-                    // 「为你推荐」横滑条：Agent 空闲时偶现的能力引导
-                    // （忙碌时整体隐藏，位置让给状态条；出现时机由组件内治理）
-                    if (widget.messages.isNotEmpty)
-                      ChatSuggestionBar(
-                        agentIdle: widget.agentIdle,
-                        messageCount: widget.messages.length,
-                        onSuggestionTap: _sendSuggestion,
-                        onSuggestionInsert: _insertSuggestion,
-                        localStore: widget.localStore,
-                      ),
-                    // 任务步骤条（2026-10-19 handoff）：有未完成计划时常驻在输入框
-                    // 上方显示步骤与进度；等待步摊开 handoff 说明并给「我已完成」按钮
-                    // （点击＝发一句话，服务端据此收回执行权并继续）。
-                    if ((widget.planSteps.isNotEmpty ||
-                            (widget.turnState?.plan.isNotEmpty ?? false)))
-                      PlanStepsCard(
-                        steps: widget.planSteps.isNotEmpty
-                            ? widget.planSteps
-                            : widget.turnState!.plan,
-                        onConfirm: () => _sendSuggestion("我已完成，继续下一步"),
-                      ),
-                    // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
-                    // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: AnimatedSwitcher(
-                        duration: const Duration(milliseconds: 250),
-                        reverseDuration: const Duration(milliseconds: 200),
-                        transitionBuilder: (Widget child,
-                            Animation<double> animation) {
-                          return FadeTransition(
-                            opacity: animation,
-                            child: SlideTransition(
-                              position: Tween<Offset>(
-                                begin: const Offset(0, -0.15),
-                                end: Offset.zero,
-                              ).animate(animation),
-                              child: child,
-                            ),
-                          );
-                        },
-                        child: KeyedSubtree(
-                          key: ValueKey<String>(
-                            (widget.isAgentProcessing ||
-                                    (widget.currentToolName?.trim()
-                                        .isNotEmpty ??
-                                        false))
-                                ? "status-${widget.currentToolName?.trim() ?? ""}"
-                                : widget.backgroundTaskCount > 0
-                                    ? "status-bg"
-                                    : "__idle__",
-                          ),
-                          child: _buildAgentStatusStrip(cs),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    // 主输入框容器
-                    // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
-                    // - 空闲时：维持原本的浅灰描边 + 柔和投影
-                    // 工具徽标（真 3D 球形机器人）通过 Stack 浮在输入框外左上角，
-                    // 不计入内部布局，不挤压输入框高度。
-                    Stack(
-                      clipBehavior: Clip.none,
-                      alignment: Alignment.topLeft,
-                      children: <Widget>[
-                        AnimatedBuilder(
-                          animation: _breathingAnimation!,
-                          builder: (context, child) {
-                            final double breath = _breathingAnimation!.value;
-                            final bool busy = widget.isAgentProcessing;
-                            // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
-                            final double pulse = busy
-                                ? (0.6 + 0.4 * breath)
-                                : (0.05 + 0.2 * breath);
-                            // 描边/光晕主题色化：深色主题沿用白光呼吸，
-                            // 暖色主题下白色在近白背景上不可见，
-                            // 改用中性灰描边 + 暖棕光晕（与主题种子色一致）。
-                            final bool isDark =
-                                Theme.of(context).brightness == Brightness.dark;
-                            final Color rimColor =
-                                isDark ? Colors.white : const Color(0xFF9AA3B2);
-                            final Color glowColor = isDark
-                                ? Colors.white
-                                : const Color(0xFFB98B43);
-                            final double rimAlpha = isDark
-                                ? 0.15 + 0.45 * pulse
-                                : 0.35 + 0.3 * pulse;
-                            return Container(
-                              decoration: BoxDecoration(
-                                color: cs.surface,
-                                borderRadius: BorderRadius.circular(20),
-                                // 外层描边：busy 强光，idle 弱光，随呼吸脉动
-                                border: Border.all(
-                                  color: rimColor.withValues(alpha: rimAlpha),
-                                  width: 0.8 + 0.6 * pulse,
-                                ),
-                                boxShadow: <BoxShadow>[
-                                  if (busy) ...<BoxShadow>[
-                                    // 外圈光晕（主呼吸）
-                                    BoxShadow(
-                                      color: glowColor
-                                          .withValues(alpha: 0.18 * pulse),
-                                      blurRadius: 14 + 10 * breath,
-                                      spreadRadius: 0.5 + 1.5 * breath,
-                                    ),
-                                    // 内圈近场光雾
-                                    BoxShadow(
-                                      color: glowColor
-                                          .withValues(alpha: 0.28 * breath),
-                                      blurRadius: 4,
-                                    ),
-                                  ] else ...<BoxShadow>[
-                                    // 柔和投影，更轻盈
-                                    BoxShadow(
-                                      color:
-                                          Colors.black.withValues(alpha: 0.08),
-                                      blurRadius: 20,
-                                      spreadRadius: 0,
-                                      offset: const Offset(0, 4),
-                                    ),
-                                  ],
-                                ],
-                              ),
-                              child: child,
-                            );
-                          },
-                          child: Padding(
-                            padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
-                            child: Column(
-                              mainAxisSize: MainAxisSize.min,
-                              children: <Widget>[
-                                // 第一行：[待发缩略图（最左侧，豆包样式）] + 输入框 + 发送/停止按钮
-                                // 有待发图时行高被缩略图撑起，文字/按钮改为垂直居中更自然
-                                // LayoutBuilder 在 Row 内会拿到无界宽度，须包在 Row 外
-                                // 算出可用宽度，供缩略图条按比例限宽。
-                                LayoutBuilder(
-                                  builder:
-                                      (BuildContext context, BoxConstraints b) {
-                                    return Row(
-                                      crossAxisAlignment: widget
-                                              .galleryPendingImages.isNotEmpty
-                                          ? CrossAxisAlignment.center
-                                          : CrossAxisAlignment.end,
-                                      children: <Widget>[
-                                        // 最左侧：待发相册图缩略图（挂在输入框内部，与文字同行）
-                                        if (widget.galleryPendingImages
-                                            .isNotEmpty)
-                                          _buildPendingGalleryStrip(
-                                            cs,
-                                            b.maxWidth * 0.45,
-                                          ),
-                                        // 中间：输入框
-                                    Expanded(
-                                      child: Padding(
-                                        padding: const EdgeInsets.symmetric(
-                                            horizontal: 4, vertical: 2),
-                                        child: Focus(
-                                          // Enter 键发送消息；Shift+Enter 换行
-                                          onKeyEvent: (FocusNode node,
-                                              KeyEvent event) {
-                                            if (event is! KeyDownEvent) {
-                                              return KeyEventResult.ignored;
-                                            }
-                                            final bool isEnter = event
-                                                        .logicalKey ==
-                                                    LogicalKeyboardKey.enter ||
-                                                event.logicalKey ==
-                                                    LogicalKeyboardKey
-                                                        .numpadEnter;
-                                            if (!isEnter) {
-                                              return KeyEventResult.ignored;
-                                            }
-                                            if (HardwareKeyboard
-                                                .instance.isShiftPressed) {
-                                              return KeyEventResult.ignored;
-                                            }
-                                            // agent 回复中也允许发送：会打断当前回复并开新轮次
-                                            if (widget.controller.text
-                                                .trim()
-                                                .isNotEmpty) {
-                                              widget.onSend();
-                                              return KeyEventResult.handled;
-                                            }
-                                            return KeyEventResult.ignored;
-                                          },
-                                          child: TextField(
-                                            controller: widget.controller,
-                                            focusNode: widget.inputFocusNode,
-                                            style: TextStyle(
-                                                color: cs.onSurface,
-                                                fontSize: 15),
-                                            cursorColor: cs.primary,
-                                            maxLines: 6,
-                                            minLines: 1,
-                                            textInputAction:
-                                                TextInputAction.newline,
-                                            keyboardType:
-                                                TextInputType.multiline,
-                                            decoration: InputDecoration(
-                                              hintText: "",
-                                              // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
-                                              border: InputBorder.none,
-                                              enabledBorder: InputBorder.none,
-                                              focusedBorder:
-                                                  InputBorder.none,
-                                              disabledBorder:
-                                                  InputBorder.none,
-                                              errorBorder: InputBorder.none,
-                                              focusedErrorBorder:
-                                                  InputBorder.none,
-                                              hintStyle: TextStyle(
-                                                color: cs.onSurfaceVariant
-                                                    .withValues(alpha: 0.5),
-                                                fontSize: 15,
-                                              ),
-                                              contentPadding: EdgeInsets.zero,
-                                              isDense: true,
-                                            ),
-                                          ),
+                                const SizedBox(width: 8),
+                                Expanded(
+                                  child: Text(
+                                    _recognizedText.isNotEmpty
+                                        ? "正在识别: $_recognizedText"
+                                        : "正在聆听...",
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .labelMedium
+                                        ?.copyWith(
+                                          color: cs.error,
                                         ),
-                                      ),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    // 右侧：发送/停止按钮（常显，根据状态切换）
-                                    // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
-                                    // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
-                                    ValueListenableBuilder<TextEditingValue>(
-                                      valueListenable: widget.controller,
-                                      builder: (_, TextEditingValue value,
-                                          __) {
-                                        final bool hasText =
-                                            value.text.trim().isNotEmpty;
-                                        return AnimatedSwitcher(
-                                          duration: const Duration(
-                                              milliseconds: 180),
-                                          switchInCurve: Curves.easeOutCubic,
-                                          switchOutCurve: Curves.easeInCubic,
-                                          transitionBuilder: (Widget child,
-                                              Animation<double> anim) {
-                                            return FadeTransition(
-                                              opacity: anim,
-                                              child: ScaleTransition(
-                                                scale: Tween<double>(
-                                                        begin: 0.85, end: 1)
-                                                    .animate(anim),
-                                                child: child,
-                                              ),
-                                            );
-                                          },
-                                          child:
-                                              widget.isAgentProcessing &&
-                                                      !hasText
-                                                  ? _buildStopButton(cs)
-                                                  : _buildSendButton(cs),
-                                        );
-                                      },
-                                    ),
-                                      ],
-                                    );
-                                  },
-                                ),
-                                // 第二行：辅助功能按钮（左下：上传图片；右下：通话）
-                                Padding(
-                                  padding: const EdgeInsets.only(top: 2),
-                                  child: Row(
-                                    children: <Widget>[
-                                      // 左下：上传图片
-                                      if (widget.onPickGalleryImage != null)
-                                        _buildInputIconButton(
-                                          icon: Icons.add_rounded,
-                                          tooltip: "上传图片",
-                                          onTap: widget.onPickGalleryImage,
-                                          cs: cs,
-                                          size: 18,
-                                        ),
-                                      const Spacer(),
-                                      // 右下：电话按钮
-                                      if (widget.onOpenPhoneDialer != null)
-                                        _buildInputIconButton(
-                                          icon: Icons.phone_in_talk,
-                                          tooltip:
-                                              VoiceCallUiLabels.chatTooltip,
-                                          onTap: widget.onOpenPhoneDialer,
-                                          cs: cs,
-                                          size: 18,
-                                        ),
-                                    ],
                                   ),
                                 ),
                               ],
                             ),
                           ),
+                        // 「为你推荐」横滑条：Agent 空闲时偶现的能力引导
+                        // （忙碌时整体隐藏，位置让给状态条；出现时机由组件内治理）
+                        if (widget.messages.isNotEmpty)
+                          ChatSuggestionBar(
+                            agentIdle: widget.agentIdle,
+                            messageCount: widget.messages.length,
+                            onSuggestionTap: _sendSuggestion,
+                            onSuggestionInsert: _insertSuggestion,
+                            localStore: widget.localStore,
+                          ),
+                        // 任务步骤条（2026-10-19 handoff）：有未完成计划时常驻在输入框
+                        // 上方显示步骤与进度；等待步摊开 handoff 说明并给「我已完成」按钮
+                        // （点击＝发一句话，服务端据此收回执行权并继续）。
+                        if ((widget.planSteps.isNotEmpty ||
+                            (widget.turnState?.plan.isNotEmpty ?? false)))
+                          PlanStepsCard(
+                            steps: widget.planSteps.isNotEmpty
+                                ? widget.planSteps
+                                : widget.turnState!.plan,
+                            onConfirm: () => _sendSuggestion("我已完成，继续下一步"),
+                          ),
+                        // Agent 状态条：处理状态统一收拢在这一条（工具名 / 口语化进度 /
+                        // 百分比 + 进度条），固定在输入框上方，淡入淡出避免闪现/抖动
+                        Align(
+                          alignment: Alignment.centerLeft,
+                          child: AnimatedSwitcher(
+                            duration: const Duration(milliseconds: 250),
+                            reverseDuration: const Duration(milliseconds: 200),
+                            transitionBuilder:
+                                (Widget child, Animation<double> animation) {
+                              return FadeTransition(
+                                opacity: animation,
+                                child: SlideTransition(
+                                  position: Tween<Offset>(
+                                    begin: const Offset(0, -0.15),
+                                    end: Offset.zero,
+                                  ).animate(animation),
+                                  child: child,
+                                ),
+                              );
+                            },
+                            child: KeyedSubtree(
+                              key: ValueKey<String>(
+                                (widget.isAgentProcessing ||
+                                        (widget.currentToolName
+                                                ?.trim()
+                                                .isNotEmpty ??
+                                            false))
+                                    ? "status-${widget.currentToolName?.trim() ?? ""}"
+                                    : widget.backgroundTaskCount > 0
+                                        ? "status-bg"
+                                        : "__idle__",
+                              ),
+                              child: _buildAgentStatusStrip(cs),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        // 主输入框容器
+                        // - agent 工作中：边框附上白色呼吸灯光晕（boxShadow + 边框色同步脉动）
+                        // - 空闲时：维持原本的浅灰描边 + 柔和投影
+                        // 工具徽标（真 3D 球形机器人）通过 Stack 浮在输入框外左上角，
+                        // 不计入内部布局，不挤压输入框高度。
+                        Stack(
+                          clipBehavior: Clip.none,
+                          alignment: Alignment.topLeft,
+                          children: <Widget>[
+                            AnimatedBuilder(
+                              animation: _breathingAnimation!,
+                              builder: (context, child) {
+                                final double breath =
+                                    _breathingAnimation!.value;
+                                final bool busy = widget.isAgentProcessing;
+                                // 0~1 的呼吸强度，busy 时拉到 0.6~1.0，空闲时 0~0.25
+                                final double pulse = busy
+                                    ? (0.6 + 0.4 * breath)
+                                    : (0.05 + 0.2 * breath);
+                                // 描边/光晕主题色化：深色主题沿用白光呼吸，
+                                // 暖色主题下白色在近白背景上不可见，
+                                // 改用中性灰描边 + 暖棕光晕（与主题种子色一致）。
+                                final bool isDark =
+                                    Theme.of(context).brightness ==
+                                        Brightness.dark;
+                                final Color rimColor = isDark
+                                    ? Colors.white
+                                    : const Color(0xFF9AA3B2);
+                                final Color glowColor = isDark
+                                    ? Colors.white
+                                    : const Color(0xFFB98B43);
+                                final double rimAlpha = isDark
+                                    ? 0.15 + 0.45 * pulse
+                                    : 0.35 + 0.3 * pulse;
+                                return Container(
+                                  decoration: BoxDecoration(
+                                    color: cs.surface,
+                                    borderRadius: BorderRadius.circular(20),
+                                    // 外层描边：busy 强光，idle 弱光，随呼吸脉动
+                                    border: Border.all(
+                                      color:
+                                          rimColor.withValues(alpha: rimAlpha),
+                                      width: 0.8 + 0.6 * pulse,
+                                    ),
+                                    boxShadow: <BoxShadow>[
+                                      if (busy) ...<BoxShadow>[
+                                        // 外圈光晕（主呼吸）
+                                        BoxShadow(
+                                          color: glowColor.withValues(
+                                              alpha: 0.18 * pulse),
+                                          blurRadius: 14 + 10 * breath,
+                                          spreadRadius: 0.5 + 1.5 * breath,
+                                        ),
+                                        // 内圈近场光雾
+                                        BoxShadow(
+                                          color: glowColor.withValues(
+                                              alpha: 0.28 * breath),
+                                          blurRadius: 4,
+                                        ),
+                                      ] else ...<BoxShadow>[
+                                        // 柔和投影，更轻盈
+                                        BoxShadow(
+                                          color: Colors.black
+                                              .withValues(alpha: 0.08),
+                                          blurRadius: 20,
+                                          spreadRadius: 0,
+                                          offset: const Offset(0, 4),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                  child: child,
+                                );
+                              },
+                              child: Padding(
+                                padding: const EdgeInsets.fromLTRB(8, 8, 6, 8),
+                                child: Column(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: <Widget>[
+                                    // 第一行：[待发缩略图（最左侧，豆包样式）] + 输入框 + 发送/停止按钮
+                                    // 有待发图时行高被缩略图撑起，文字/按钮改为垂直居中更自然
+                                    // LayoutBuilder 在 Row 内会拿到无界宽度，须包在 Row 外
+                                    // 算出可用宽度，供缩略图条按比例限宽。
+                                    LayoutBuilder(
+                                      builder: (BuildContext context,
+                                          BoxConstraints b) {
+                                        return Row(
+                                          crossAxisAlignment: widget
+                                                  .galleryPendingImages
+                                                  .isNotEmpty
+                                              ? CrossAxisAlignment.center
+                                              : CrossAxisAlignment.end,
+                                          children: <Widget>[
+                                            // 最左侧：待发相册图缩略图（挂在输入框内部，与文字同行）
+                                            if (widget.galleryPendingImages
+                                                .isNotEmpty)
+                                              _buildPendingGalleryStrip(
+                                                cs,
+                                                b.maxWidth * 0.45,
+                                              ),
+                                            // 中间：输入框
+                                            Expanded(
+                                              child: Padding(
+                                                padding:
+                                                    const EdgeInsets.symmetric(
+                                                        horizontal: 4,
+                                                        vertical: 2),
+                                                child: Focus(
+                                                  // Enter 键发送消息；Shift+Enter 换行
+                                                  onKeyEvent: (FocusNode node,
+                                                      KeyEvent event) {
+                                                    if (event
+                                                        is! KeyDownEvent) {
+                                                      return KeyEventResult
+                                                          .ignored;
+                                                    }
+                                                    final bool isEnter = event
+                                                                .logicalKey ==
+                                                            LogicalKeyboardKey
+                                                                .enter ||
+                                                        event.logicalKey ==
+                                                            LogicalKeyboardKey
+                                                                .numpadEnter;
+                                                    if (!isEnter) {
+                                                      return KeyEventResult
+                                                          .ignored;
+                                                    }
+                                                    if (HardwareKeyboard
+                                                        .instance
+                                                        .isShiftPressed) {
+                                                      return KeyEventResult
+                                                          .ignored;
+                                                    }
+                                                    // agent 回复中也允许发送：会打断当前回复并开新轮次
+                                                    if (widget.controller.text
+                                                        .trim()
+                                                        .isNotEmpty) {
+                                                      widget.onSend();
+                                                      return KeyEventResult
+                                                          .handled;
+                                                    }
+                                                    return KeyEventResult
+                                                        .ignored;
+                                                  },
+                                                  child: TextField(
+                                                    controller:
+                                                        widget.controller,
+                                                    focusNode:
+                                                        widget.inputFocusNode,
+                                                    style: TextStyle(
+                                                        color: cs.onSurface,
+                                                        fontSize: 15),
+                                                    cursorColor: cs.primary,
+                                                    maxLines: 6,
+                                                    minLines: 1,
+                                                    textInputAction:
+                                                        TextInputAction.newline,
+                                                    keyboardType:
+                                                        TextInputType.multiline,
+                                                    decoration: InputDecoration(
+                                                      hintText: "",
+                                                      // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
+                                                      border: InputBorder.none,
+                                                      enabledBorder:
+                                                          InputBorder.none,
+                                                      focusedBorder:
+                                                          InputBorder.none,
+                                                      disabledBorder:
+                                                          InputBorder.none,
+                                                      errorBorder:
+                                                          InputBorder.none,
+                                                      focusedErrorBorder:
+                                                          InputBorder.none,
+                                                      hintStyle: TextStyle(
+                                                        color: cs
+                                                            .onSurfaceVariant
+                                                            .withValues(
+                                                                alpha: 0.5),
+                                                        fontSize: 15,
+                                                      ),
+                                                      contentPadding:
+                                                          EdgeInsets.zero,
+                                                      isDense: true,
+                                                    ),
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+                                            const SizedBox(width: 4),
+                                            // 右侧：发送/停止按钮（常显，根据状态切换）
+                                            // agent 回复中：输入框有文本时显示「发送」（会打断当前回复并开新轮次），
+                                            // 输入框为空时显示「停止」（仅停止当前回复）。空闲时始终显示「发送」。
+                                            ValueListenableBuilder<
+                                                TextEditingValue>(
+                                              valueListenable:
+                                                  widget.controller,
+                                              builder: (_,
+                                                  TextEditingValue value, __) {
+                                                final bool hasText = value.text
+                                                    .trim()
+                                                    .isNotEmpty;
+                                                return AnimatedSwitcher(
+                                                  duration: const Duration(
+                                                      milliseconds: 180),
+                                                  switchInCurve:
+                                                      Curves.easeOutCubic,
+                                                  switchOutCurve:
+                                                      Curves.easeInCubic,
+                                                  transitionBuilder: (Widget
+                                                          child,
+                                                      Animation<double> anim) {
+                                                    return FadeTransition(
+                                                      opacity: anim,
+                                                      child: ScaleTransition(
+                                                        scale: Tween<double>(
+                                                                begin: 0.85,
+                                                                end: 1)
+                                                            .animate(anim),
+                                                        child: child,
+                                                      ),
+                                                    );
+                                                  },
+                                                  child:
+                                                      widget.isAgentProcessing &&
+                                                              !hasText
+                                                          ? _buildStopButton(cs)
+                                                          : _buildSendButton(
+                                                              cs),
+                                                );
+                                              },
+                                            ),
+                                          ],
+                                        );
+                                      },
+                                    ),
+                                    // 第二行：辅助功能按钮（左下：上传图片；右下：通话）
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 2),
+                                      child: Row(
+                                        children: <Widget>[
+                                          // 左下：上传图片
+                                          if (widget.onPickGalleryImage != null)
+                                            _buildInputIconButton(
+                                              icon: Icons.add_rounded,
+                                              tooltip: "上传图片",
+                                              onTap: widget.onPickGalleryImage,
+                                              cs: cs,
+                                              size: 18,
+                                            ),
+                                          const Spacer(),
+                                          // 右下：电话按钮
+                                          if (widget.onOpenPhoneDialer != null)
+                                            _buildInputIconButton(
+                                              icon: Icons.phone_in_talk,
+                                              tooltip:
+                                                  VoiceCallUiLabels.chatTooltip,
+                                              onTap: widget.onOpenPhoneDialer,
+                                              cs: cs,
+                                              size: 18,
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
                       ],
                     ),
-                  ],
-                ),
-              ),
+                  ),
                 ),
               ),
             ),
@@ -2313,8 +2511,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   Widget _buildMessageRow(BuildContext context) {
     // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
-    final bool isTaskReceipt =
-        widget.mainMessage.contentType == "task_receipt";
+    final bool isTaskReceipt = widget.mainMessage.contentType == "task_receipt";
     final bool isDecisionCard =
         widget.mainMessage.contentType == "decision_card";
     final bool isEveningDigest =
@@ -2602,9 +2799,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
-  static String _formatTime(DateTime time) {
-    return "${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}";
-  }
+  /// 气泡头部时间：今天只显示时刻，跨天带日期（2026-10-23）。
+  /// 跨天仍只显示 HH:mm 时，「昨天 21:10」和「今天 09:10」视觉上无法区分。
+  static String _formatTime(DateTime time) => chatTimeLabel(time);
 
   Widget _buildAvatar(BuildContext context, {required bool isUser}) {
     // 头像顶部与「名称/时间行」的字形顶部对齐:
@@ -2658,9 +2855,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                   height: 34,
                   fit: BoxFit.cover,
                   gaplessPlayback: true,
-                  errorBuilder:
-                      (BuildContext context, Object error, StackTrace? stackTrace) =>
-                          fallbackIcon,
+                  errorBuilder: (BuildContext context, Object error,
+                          StackTrace? stackTrace) =>
+                      fallbackIcon,
                 ),
               ),
       );
@@ -2693,7 +2890,8 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 「轨道光球」矢量头像：与桌面悬浮球形 Agent 的意象一致，
     // 配色跟随 Agent 自选的 avatarPreset（dawn/ember/tide/...）。
     return Padding(
-      padding: EdgeInsets.only(right: 10, top: AppTypography.avatarHeaderOffset),
+      padding:
+          EdgeInsets.only(right: 10, top: AppTypography.avatarHeaderOffset),
       child: AgentOrbAvatar(
         size: 36,
         palette: AgentAvatarPalette.fromPreset(widget.agentAvatarPreset),
@@ -2791,8 +2989,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
             )
           : decoration,
       child: ClipRRect(
-        borderRadius:
-            widget.isUser ? borderRadius : BorderRadius.circular(14),
+        borderRadius: widget.isUser ? borderRadius : BorderRadius.circular(14),
         child: Padding(
           padding: widget.isUser
               ? widget.cardPadding
@@ -2851,10 +3048,9 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 onFollowupTap: widget.onFollowupTap,
                 // 打字机：assistant 流式消息用「已 reveal」前缀渲染，
                 // 光标随打字闪烁；非打字场景传 null 走原文。
-                typewriterRawText:
-                    (!widget.isUser && _typewriter.isPartial)
-                        ? _typewriter.revealed
-                        : null,
+                typewriterRawText: (!widget.isUser && _typewriter.isPartial)
+                    ? _typewriter.revealed
+                    : null,
                 typewriterCursor:
                     _typewriter.isRevealing && _typewriter.cursorOn,
               ),
@@ -2928,7 +3124,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   // 已下线：原「底部来源链接」组件（把正文裸 URL 抽成可点击域名 chip）。
   // 产品规则：任何卡片/消息下方都不再附来源链接，需要跳转时由卡片自身承载。
 }
-
 
 /// 删除确认栏：整轮问答对的高亮确认条。
 ///
@@ -3094,7 +3289,8 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
     if (msg.isTaskTerminal) return null;
     final int? startedAt = msg.taskStartedAt;
     if (startedAt == null || startedAt <= 0) return null;
-    final int mins = (DateTime.now().millisecondsSinceEpoch - startedAt) ~/ 60000;
+    final int mins =
+        (DateTime.now().millisecondsSinceEpoch - startedAt) ~/ 60000;
     if (mins < 1) return "刚刚开始";
     if (mins < 60) return "已 $mins 分钟";
     return "已 ${mins ~/ 60} 小时 ${mins % 60} 分";
@@ -3107,7 +3303,8 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
       case "failed":
         return Icon(Icons.error_outline, size: 16, color: cs.error);
       case "cancelled":
-        return Icon(Icons.cancel_outlined, size: 16, color: cs.onSurfaceVariant);
+        return Icon(Icons.cancel_outlined,
+            size: 16, color: cs.onSurfaceVariant);
       case "awaiting_input":
         return Icon(Icons.help_outline, size: 16, color: cs.tertiary);
       default:
@@ -3130,8 +3327,9 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
     final bool active = !msg.isTaskTerminal;
     final String goal =
         (msg.taskGoal?.isNotEmpty == true) ? msg.taskGoal! : msg.text;
-    final String? progress =
-        active && (msg.taskProgress?.isNotEmpty == true) ? msg.taskProgress : null;
+    final String? progress = active && (msg.taskProgress?.isNotEmpty == true)
+        ? msg.taskProgress
+        : null;
     final String? elapsed = _elapsedLabel(msg);
     final String trailing = elapsed ?? _stateLabel(msg.taskState);
 
@@ -3176,9 +3374,9 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context)
-                                .textTheme
-                                .labelSmall
-                                ?.copyWith(color: cs.onSurfaceVariant),
+                            .textTheme
+                            .labelSmall
+                            ?.copyWith(color: cs.onSurfaceVariant),
                       ),
                     ],
                   ],
@@ -3203,8 +3401,7 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
                     padding: EdgeInsets.zero,
                     iconSize: 15,
                     tooltip: "取消此任务",
-                    icon: Icon(Icons.close_rounded,
-                        color: cs.onSurfaceVariant),
+                    icon: Icon(Icons.close_rounded, color: cs.onSurfaceVariant),
                     onPressed: () {
                       final String? taskId = msg.taskId;
                       if (taskId != null && taskId.isNotEmpty) {
@@ -3312,10 +3509,8 @@ class _DecisionCardBubble extends StatelessWidget {
                           confirmed
                               ? "${_priorityLabel()} · 已确认"
                               : "${_priorityLabel()} · 需要你确认",
-                          style: Theme.of(context)
-                                  .textTheme
-                                  .labelSmall
-                                  ?.copyWith(
+                          style:
+                              Theme.of(context).textTheme.labelSmall?.copyWith(
                                     color: cs.onSurfaceVariant,
                                     fontWeight: FontWeight.w600,
                                     letterSpacing: 0.3,
@@ -3327,27 +3522,21 @@ class _DecisionCardBubble extends StatelessWidget {
                       const SizedBox(height: 8),
                       Text(
                         title,
-                        style: Theme.of(context)
-                                .textTheme
-                                .titleSmall
-                                ?.copyWith(
-                                  color: cs.onSurface.withValues(alpha: 0.92),
-                                  fontWeight: FontWeight.w600,
-                                  height: 1.3,
-                                ),
+                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                              color: cs.onSurface.withValues(alpha: 0.92),
+                              fontWeight: FontWeight.w600,
+                              height: 1.3,
+                            ),
                       ),
                     ],
                     if (body.isNotEmpty && body != title) ...<Widget>[
                       const SizedBox(height: 4),
                       Text(
                         body,
-                        style: Theme.of(context)
-                                .textTheme
-                                .bodySmall
-                                ?.copyWith(
-                                  color: cs.onSurface.withValues(alpha: 0.72),
-                                  height: 1.4,
-                                ),
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                              color: cs.onSurface.withValues(alpha: 0.72),
+                              height: 1.4,
+                            ),
                       ),
                     ],
                     // 动作区：pending 态给确认主按钮 + 忽略次入口；

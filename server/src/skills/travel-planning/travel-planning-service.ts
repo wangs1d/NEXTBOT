@@ -20,7 +20,7 @@ import https from 'node:https';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { searchFoursquarePois, isFoursquareConfigured } from './foursquare-service.js';
 import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
-import { travelMediaStore } from './travel-media-store.js';
+import { travelMediaStore, type PoiMediaType } from './travel-media-store.js';
 import { fetchBingPhotoUrls } from './bing-photos.js';
 import { destinationCoverStore, type DestinationCoverSource } from './travel-destination-cover-store.js';
 import { compressImage } from '../../services/image-caption-service.js';
@@ -31,6 +31,8 @@ import fs from 'node:fs';
 import { WeatherService, type WeatherBrief } from '../../services/weather-service.js';
 import { knowledgeBase } from './knowledge-base.js';
 import { extractDays, extractDestination, extractPreferences } from './intent-parser.js';
+import { addDaysISO, daysFromToday, isValidISODate, localTodayISO } from './travel-date.js';
+import { verifyItinerary, summarizeIssues, type DossierIssue } from './travel-poi-dossier.js';
 import { travelFavoritesStore } from './travel-favorites-store.js';
 import { emitTravelProgress } from './travel-progress-bus.js';
 import { gcj02ToWgs84 } from './coord-transform.js';
@@ -149,6 +151,23 @@ export interface PlanningRequest {
   };
   /** 交通大段（对话中收集到的车次/航班；未提供时从 input 正则兜底抽取） */
   transfers?: TransferSegment[];
+  // ===== 规划主线 F0：结构化槽位（工具入参/简报卡回传；优先级高于 input 正则） =====
+  /** 出发地城市 */
+  origin?: string;
+  /** 出发日 YYYY-MM-DD；未传则按本地今天兜底 */
+  startDate?: string;
+  /** 同行人构成 */
+  party?: TripPreferences['party'];
+  /** 心愿景点（必须排进日程；未在 POI 池命中的会如实回报「没找到」） */
+  wishlist?: string[];
+  /** 点名餐厅 */
+  foodWishlist?: string[];
+  /** 点名酒店/民宿（种草卡勾选；排序置顶 + 定向补搜） */
+  stayWishlist?: string[];
+  /** 住宿落位诉求（与 hotelFocusRef 配对使用） */
+  hotelFocus?: TripPreferences['hotelFocus'];
+  /** 住宿落位参照点（hotelFocus='attraction' 时的景点名） */
+  hotelFocusRef?: string;
 }
 
 /**
@@ -182,10 +201,34 @@ export interface TripPreferences {
   photoDriven: boolean;
   /** 体验向：项目/玩法优先（原文或用户画像 travel_style=experience_driven） */
   experienceDriven: boolean;
+  // ===== 规划主线 F0 新增槽位（全部可缺省；缺省即由 brief 层推断/追问） =====
+  /** 心愿景点：用户点名的地点必须排进日程（原文或简报卡回传） */
+  wishlist?: string[];
+  /** 点名餐厅：用户说要吃的那几家 */
+  foodWishlist?: string[];
+  /** 点名酒店/民宿：种草卡勾选回传（排序置顶 + 定向补搜） */
+  stayWishlist?: string[];
+  /** 吃饭倾向：本地人常去 / 网红打卡 / 搭配 */
+  diningStyle?: 'local' | 'trendy' | 'mixed';
+  /** 同行人构成（画像与原文都可给） */
+  party?: 'solo' | 'solo_female' | 'couple' | 'family' | 'friends';
+  /** 出发地城市（大交通方式判定的前提） */
+  origin?: string;
+  /** 出发日 YYYY-MM-DD（原文说了才非空；没说由服务侧按本地今天兜底并标注来源） */
+  startDate?: string;
+  /** 住宿落位诉求：靠海 / 近机场 / 近车站 / 近某景点 / 市中心 */
+  hotelFocus?: 'seaside' | 'airport' | 'station' | 'attraction' | 'downtown';
+  /** hotelFocus=attraction 时的参照点名称 */
+  hotelFocusRef?: string;
   /** 旅行人格分型（travel 双端③）：UserFact 聚合，控制每日景点密度并随载荷下发 */
   persona?: TravelPersona;
-  /** 偏好来源标签：user=用户原文说 / destination=目的地常识 / default=系统默认 / profile=用户画像 */
-  sources: Record<keyof Omit<TripPreferences, 'raw' | 'sources' | 'persona'>, 'user' | 'destination' | 'default' | 'profile'>;
+  /**
+   * 偏好来源标签：user=用户原文说 / destination=目的地常识 / default=系统默认 /
+   * profile=用户画像 / asked=简报卡追问后用户答的。
+   * Partial：extractPreferences 全量初始化，但离线兜底/合成路径只写它关心的
+   * 几档（缺项按「未标注」处理，读侧统一兜 default）。
+   */
+  sources: Partial<Record<keyof Omit<TripPreferences, 'raw' | 'sources' | 'persona'>, 'user' | 'destination' | 'default' | 'profile' | 'asked'>>;
 }
 
 /**
@@ -303,6 +346,18 @@ export interface ItineraryItem {
   priceQuote?: PriceQuote;
 }
 
+/**
+ * 核实闸产出（travel 主线 F3）：问题清单 + 一行汇总 + 逐日核验时间戳。
+ * 只描述冲突与建议，不改行程本身——改由用户或桌面端编辑路径决定。
+ */
+export interface ItineraryVerification {
+  issues: DossierIssue[];
+  /** 「2 处时间冲突 · 1 处需调整」；零问题为 null（不硬凑话） */
+  summary: string | null;
+  /** 核验基准日（内置预约知识会过期，展示时需带「以官方为准」） */
+  checkedAt: string;
+}
+
 export interface PlanningResult {
   id: string;
   title: string;
@@ -342,6 +397,13 @@ export interface PlanningResult {
   coverImage?: string;
   /** 数据可信度：real=实时API数据 / knowledge=知识库真实POI / synthetic=离线合成占位（前端需明示用户） */
   dataQuality?: "real" | "knowledge" | "synthetic";
+  /**
+   * 核实闸结果（travel 主线 F3）：逐站开放时间/闭馆日/停止入场/预约/密度核查。
+   * 建议闸不是硬拦截——冲突如实列出，改不改由用户决定（桌面端在站点上打徽章）。
+   */
+  verification?: ItineraryVerification;
+  /** 心愿点里最终没能排进日程的名字（简报卡如实交代「没找到」，不静默丢弃） */
+  wishlistMissed?: string[];
 }
 
 export interface POISummary {
@@ -644,12 +706,30 @@ export function paceCapFor(preferences: Pick<TripPreferences, 'pace' | 'activiti
 }
 
 /**
+ * 心愿名与 POI 名的匹配（用户说「都江堰」，池子里是「都江堰景区」/「都江堰市…」）。
+ * 只做包含式匹配、不做模糊编辑距离：点名匹配错一个点，行程里就塞进用户没要的地方。
+ */
+function wishNameMatch(poiName: string, wanted: string): boolean {
+  const a = (poiName || "").toLowerCase().replace(/\s+/g, "");
+  const b = (wanted || "").toLowerCase().replace(/\s+/g, "");
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+/**
  * 评分与排序权重集中配置（替代散落在排序函数里的魔法数字）。
  * 调整排序手感只改这里；语义见各字段名与使用处注释。
  */
 const SCORING = {
   /** 收藏命中加权（「type:name」精确匹配） */
   favoriteBoost: 3,
+  /**
+   * 用户点名加权（景点心愿 / 点名餐厅）。分值刻意远大于评级量纲（0~5）：
+   * 「用户说要去」必须压过算法认为的好玩，这是决策权归还的硬保证。
+   */
+  wishlistBoost: 100,
+  /** 吃饭取向（local=本地人常去 / trendy=网红打卡）：命中加分、反向减分 */
+  diningStyle: { match: 3, mismatch: -2 },
   /** 酒店偏好加分 */
   hotel: { seaside: 5, pool: 4, kids: 2, elderly: 2, luxuryTier: 3, budgetTier: 3 },
   /** 餐厅偏好加分（目的地排序阶段） */
@@ -682,6 +762,21 @@ const SCORING = {
 } as const;
 
 // ======================== 主服务类 ========================
+
+/**
+ * 种草选择卡候选条目（travel.destination-guide 数据源）
+ */
+export interface GuideCandidate {
+  name: string;
+  rating: number;
+  /** 推荐度 = 评分/5 换算（0-99；无评分为 0） */
+  rec: number;
+  address: string;
+  tags: string[];
+  latitude?: number;
+  longitude?: number;
+  photos: string[];
+}
 
 export class PlanningService {
 
@@ -809,7 +904,19 @@ export class PlanningService {
     // 1. 解析用户输入
     const destName = extractDestination(request.input, request.destination);
     const dayCount = request.days || extractDays(request.input) || 3;
-    const preferences = extractPreferences(request.input, request.preferences, destName, request.profileHints);
+    const preferences = extractPreferences(request.input, request.preferences, destName, request.profileHints, {
+      // 结构化槽位（工具入参 / 简报卡回传）与原文同权，来源标 'user'
+      explicit: {
+        origin: request.origin,
+        startDate: request.startDate,
+        party: request.party,
+        wishlist: request.wishlist,
+        foodWishlist: request.foodWishlist,
+        stayWishlist: request.stayWishlist,
+        hotelFocus: request.hotelFocus,
+        hotelFocusRef: request.hotelFocusRef,
+      },
+    });
     // 旅行人格分型（travel 双端③）不进 extractPreferences（原文/画像优先级在那里已定），
     // 直接随 preferences 下发：排程密度 + 载荷透传共用这一份
     preferences.persona = request.profileHints?.persona;
@@ -857,9 +964,12 @@ export class PlanningService {
     }
 
     // 3.5 生成日期范围（提前：逐日天气需要 startDate 对齐预报日期）
-    const today = new Date();
-    const startDate: string = today.toISOString().split('T')[0] ?? '';
-    const endDate: string = new Date(today.getTime() + (dayCount - 1) * 86400000).toISOString().split('T')[0] ?? '';
+    // 起日取用户说明的出发日（未说过/已过期则回退本地今天）；旧实现用
+    // toISOString 截 UTC 日，东八区凌晨会得到「昨天」，Day1 排进过去。
+    const startHint = isValidISODate(preferences.startDate ?? "") ? preferences.startDate! : "";
+    const startDate: string =
+      startHint && (daysFromToday(startHint) ?? -1) >= 0 ? startHint : localTodayISO();
+    const endDate: string = addDaysISO(startDate, dayCount - 1);
 
     // 3.6 天气感知：Day1 实况（结果摘要/兜底）+ 逐日预报（每天按当天天气排程；
     // 2026-10-15 根修——旧实现只拉当天逐小时，多天行程 Day2+ 全用 Day1 天气分槽）。
@@ -912,9 +1022,17 @@ export class PlanningService {
       preferences.persona?.id ?? '',
       (request.profileHints?.dislikeTags ?? []).join(','),
       (request.profileHints?.dislikeNames ?? []).join(','),
+      // 规划主线 F0：心愿点/点名餐厅/吃饭取向/同行人/住宿落位都会改变排序与落位结果，
+      // 不进签名就会被行程缓存吃掉（用户点完「把青城山排进去」再规划还是老行程）
+      (preferences.wishlist ?? []).join(','),
+      (preferences.foodWishlist ?? []).join(','),
+      (preferences.stayWishlist ?? []).join(','),
+      preferences.diningStyle ?? '',
+      preferences.party ?? '',
+      `${preferences.hotelFocus ?? ''}:${preferences.hotelFocusRef ?? ''}`,
     ]);
     const itinKey =
-      `itin|${normalizedDest}|${dayCount}|${prefSig}|${weatherSig}`;
+      `itin|${normalizedDest}|${dayCount}|${startDate}|${prefSig}|${weatherSig}`;
     const cachedItin = itineraryCache.get(itinKey);
     if (
       cachedItin &&
@@ -926,15 +1044,24 @@ export class PlanningService {
       return structuredClone(cachedItin.result);
     }
 
-    // 6. 依据偏好+天气对POI排序/筛选（只排序不删除，保留回退池）
+    // 6. 心愿点补搜：点名地点没进候选池时定向搜索补上（用户点名的必须能排进去）
+    const wishSupplement = await this.searchWishlistPois(
+      preferences,
+      { attractions: cacheEntry.data.attractions, restaurants: cacheEntry.data.restaurants, hotels: cacheEntry.data.hotels },
+      destName,
+    );
+
+    // 6.5 依据偏好+天气对POI排序/筛选（只排序不删除，保留回退池）
     const ranked = this.rankPOIsByPreferences(
-      cacheEntry.data.attractions,
-      cacheEntry.data.hotels,
-      cacheEntry.data.restaurants,
+      [...cacheEntry.data.attractions, ...wishSupplement.attractions],
+      [...cacheEntry.data.hotels, ...wishSupplement.hotels],
+      [...cacheEntry.data.restaurants, ...wishSupplement.restaurants],
       preferences,
       rankedWeatherCtx,
       { dislikeTags: request.profileHints?.dislikeTags, dislikeNames: request.profileHints?.dislikeNames }
     );
+    // 住宿落位参照点（F0：住哪儿跟着「为什么住这儿」走——靠机场/车站/某景点）
+    const hotelAnchor = await this.resolveHotelFocusAnchor(preferences, ranked.attractions, cacheEntry.center, destName);
     const tParsed = Date.now() - t0;
 
     // 7. 提取目的地实用信息（用户没问也补）
@@ -964,11 +1091,11 @@ export class PlanningService {
     console.log(`[PlanningService] 阶段1：构建行程数据...`);
     const tBuild0 = Date.now();
     const cafes = await cafePoolPromise;
-    const { days: daysRaw, pois } = await this.buildDaysFast(
+    const { days: daysRaw, pois, farPoiNames } = await this.buildDaysFast(
       dayCount, startDate,
       ranked.attractions, ranked.hotels, ranked.restaurants,
       cacheEntry.center, preferences, travelInfo, pricingCtx,
-      perDayWeather, cafes, request.sessionId
+      perDayWeather, cafes, request.sessionId, hotelAnchor ?? undefined
     );
     const tBuild = Date.now() - tBuild0;
 
@@ -1018,6 +1145,43 @@ export class PlanningService {
     // 8.6 交通大段（接驳提醒数据源）：调用方传入优先，正则从规划输入兜底抽取
     const transferSegments = this.resolveTransferSegments(request);
 
+    // 8.65 核实闸（F3）：逐站核对开放时间/闭馆日/停止入场/预约/当日密度。
+    //      只出建议不删点——排程已经过聚类与时间预算，静默改点比冲突更难解释。
+    const verification = this.verifyPlan(days, preferences);
+    // 顺路闸/天气降级的「全局说明」并入核实清单：用户能看到「为什么没排某些点、
+    // 这次有没有按天气微调」，而不是静默降级后毫不知情。
+    const globalIssues: DossierIssue[] = [];
+    if (farPoiNames && farPoiNames.length > 0) {
+      globalIssues.push({
+        level: 'warn',
+        kind: 'route',
+        day: 0,
+        stop: 0,
+        name: farPoiNames[0]!,
+        message: `${farPoiNames.length} 个景点距住宿超出单日合理通勤半径（${farPoiNames.slice(0, 5).join('、')}${farPoiNames.length > 5 ? ' 等' : ''}），为保证顺路未排入行程`,
+        suggestion: '如需前往，建议调整住宿位置，或告诉我为这些景点单独安排一天',
+      });
+    }
+    if (perDayWeather.every(d => !d)) {
+      globalIssues.push({
+        level: 'info',
+        kind: 'weather',
+        day: 0,
+        stop: 0,
+        name: destName,
+        message: '逐日天气预报获取失败，本次编排未按每日天气调整（早晚时段/室内外）',
+        suggestion: '可稍后重新生成行程，或出发前查看目的地天气手动微调',
+      });
+    }
+    if (globalIssues.length > 0) {
+      verification.issues = [...verification.issues, ...globalIssues];
+      verification.summary = summarizeIssues(verification.issues);
+    }
+    if (verification.summary) {
+      this.reportProgress(request.sessionId, "verify", `核实发现 ${verification.summary}`);
+      console.log(`[PlanningService] 核实闸: ${verification.summary}`);
+    }
+
     const result: PlanningResult = {
       id: `plan-${Date.now()}`,
       title: this.buildTitle(destName, dayCount, preferences),
@@ -1037,6 +1201,10 @@ export class PlanningService {
       coverImage,
       weather: weatherCtx?.summary || undefined,
       dataQuality: this.deriveDataQuality(cacheEntry.data),
+      verification,
+      wishlistMissed: wishSupplement.missed.length
+        ? [...new Set(wishSupplement.missed.map((m) => m.name))]
+        : undefined,
     };
 
     // 8.7 社交热度后台回填（fire-and-forget：小红书/抖音聚合 + LLM 名单内归类，
@@ -1063,6 +1231,83 @@ export class PlanningService {
    * Skill 只读入口：搜索目的地 POI（景点/酒店/餐厅）。
    * 走缓存优先 → 网络实时搜索 → 内置知识库真实POI兜底（无合成占位），返回扁平 POI 摘要列表。
    */
+  /**
+   * 规划前种草候选（小红书式选择卡数据源）：三类 POI 按评分取前列并带实拍图。
+   * 图源：媒体库已有 → 直接用；未命中 → 必应抓取（并发 6）→ 本地化落盘。
+   * 单点失败不带图，宁缺毋假；推荐度 = 评分/5 换算（无评分排后、rec 置 0）。
+   */
+  async buildDestinationGuide(
+    destination: string,
+    per = 6,
+  ): Promise<{
+    destination: string;
+    center: Coordinates;
+    view: GuideCandidate[];
+    stay: GuideCandidate[];
+    food: GuideCandidate[];
+    fromCache: boolean;
+  }> {
+    const perCat = Math.min(8, Math.max(3, Math.floor(per) || 6));
+    const dest = await this.searchDestination(destination);
+    const take = (list: RawPOI[]) =>
+      [...list]
+        .sort((a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0))
+        .slice(0, perCat);
+    const cats: Array<{ key: 'view' | 'stay' | 'food'; type: PoiMediaType; list: RawPOI[] }> = [
+      { key: 'view', type: 'attraction', list: take(dest.attractions) },
+      { key: 'stay', type: 'hotel', list: take(dest.hotels) },
+      { key: 'food', type: 'restaurant', list: take(dest.restaurants) },
+    ];
+    const jobs: Array<{ cat: 'view' | 'stay' | 'food'; type: PoiMediaType; cand: GuideCandidate }> = [];
+    for (const cat of cats) {
+      for (const poi of cat.list) {
+        const rating = Number(poi.rating) || 0;
+        jobs.push({
+          cat: cat.key,
+          type: cat.type,
+          cand: {
+            name: poi.name,
+            rating,
+            rec: rating > 0 ? Math.min(99, Math.max(5, Math.round((rating / 5) * 100))) : 0,
+            address: typeof poi.address === 'string' ? poi.address : '',
+            tags: Array.isArray(poi.tags) ? poi.tags : [],
+            latitude: poi.latitude,
+            longitude: poi.longitude,
+            photos: travelMediaStore.imageUrls(cat.type, poi.name).slice(0, 3),
+          },
+        });
+      }
+    }
+    // 缺图的补抓（并发 6；单点失败不影响整体）
+    const missing = jobs.filter((j) => j.cand.photos.length === 0);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(6, missing.length) }, async () => {
+      while (cursor < missing.length) {
+        const job = missing[cursor++];
+        try {
+          const urls = await fetchBingPhotoUrls(job.cand.name, 2);
+          if (urls.length) {
+            await travelMediaStore.localizeAndAttach(
+              job.type,
+              job.cand.name,
+              urls.slice(0, 1),
+              job.cand.latitude != null && job.cand.longitude != null
+                ? { latitude: Number(job.cand.latitude), longitude: Number(job.cand.longitude) }
+                : undefined,
+            );
+            job.cand.photos = travelMediaStore.imageUrls(job.type, job.cand.name).slice(0, 3);
+          }
+        } catch (e) {
+          console.log(`[PlanningService] 种草候选补图失败 ${job.cand.name}: ${e instanceof Error ? e.message : String(e)}`);
+        }
+      }
+    });
+    await Promise.all(workers);
+    const out: Record<'view' | 'stay' | 'food', GuideCandidate[]> = { view: [], stay: [], food: [] };
+    for (const j of jobs) out[j.cat].push(j.cand);
+    return { destination: dest.destination, center: dest.center, view: out.view, stay: out.stay, food: out.food, fromCache: dest.fromCache };
+  }
+
   async searchDestination(destName: string, type?: 'attraction' | 'hotel' | 'restaurant'): Promise<{
     destination: string;
     center: Coordinates;
@@ -1452,8 +1697,7 @@ export class PlanningService {
     // LLM 输出格式 { days: [...] } → 包装
     if ('days' in obj && Array.isArray(obj.days)) {
       const destName = request.destination || extractDestination(request.input, request.destination);
-      const today = new Date();
-      const startDate = today.toISOString().split('T')[0] ?? '';
+      const startDate = localTodayISO();
       return {
         id: `plan-agent-${Date.now()}`,
         title: request.input.slice(0, 50),
@@ -1628,6 +1872,20 @@ export class PlanningService {
       attractions = fsqResult.attractions;
       hotels = fsqResult.hotels;
       restaurants = fsqResult.restaurants;
+
+      // 国内冷门地名（泸沽湖/西江千户苗寨等）会被 domestic-keywords 漏判为
+      // 国际；Foursquare 无 key/无结果时回落高德（能搜到即按国内处理）——
+      // 与 domestic 分支的「高德无结果降级 Foursquare」对称。
+      if (
+        attractions.length === 0 && hotels.length === 0 && restaurants.length === 0 &&
+        AMAP_KEY
+      ) {
+        console.warn(`[PlanningService] Foursquare 无结果，回落高德搜索（可能是漏判的国内目的地）...`);
+        const amapResult = await this.searchWithAmap(center, destName);
+        attractions = amapResult.attractions;
+        hotels = amapResult.hotels;
+        restaurants = amapResult.restaurants;
+      }
     }
 
     // Step 2.4: 类别缺口二次搜索（按行程需求补齐，结果合并）：
@@ -1818,6 +2076,25 @@ export class PlanningService {
    * Nominatim 地理编码：地名 → 经纬度
    */
   private async geocode(query: string): Promise<{ center: Coordinates; displayName: string }> {
+    // 高德地理编码优先（有 key 时）：国内网络下 Nominatim/Photon 都不稳，
+    // 冷门目的地（泸沽湖等）曾因 geocode 失败整城检索失败（2026-10-25 实测）。
+    // 高德坐标系 GCJ-02，与 POI 检索同源，无需转换。
+    if (AMAP_KEY) {
+      try {
+        const url = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(query)}`;
+        const res = await fetch(url, { signal: AbortSignal.timeout(8000) });
+        const j = await res.json() as { status?: string; geocodes?: Array<{ location?: string; formatted_address?: string }> };
+        const loc = j.geocodes?.[0]?.location;
+        if (j.status === '1' && loc && loc.includes(',')) {
+          const [lng, lat] = loc.split(',').map(Number);
+          if (Number.isFinite(lat) && Number.isFinite(lng)) {
+            return { center: { latitude: lat, longitude: lng }, displayName: j.geocodes?.[0]?.formatted_address ?? query };
+          }
+        }
+      } catch (e) {
+        console.warn('[Geocode] 高德地理编码失败(' + query + '):', e instanceof Error ? e.message : String(e));
+      }
+    }
     // 提速优化：先查本地已知坐标表。命中则毫秒级返回，跳过 Nominatim 网络请求。
     // 绝大多数热门/常见目的地都命中本地表，首询可省掉最长 20s 的地理编码网络等待，
     // 只有冷门目的地才回落到 Nominatim 兜底。
@@ -2125,7 +2402,202 @@ export class PlanningService {
       this.amapSearchPOI('餐厅|美食|饭店|小吃|火锅|烧烤|咖啡|茶馆|特色菜|当地菜', cityHint, 'restaurant', 20, 1),
     ]);
 
+    // 自然地名（泸沽湖/西江千户苗寨等）extractCityName 推不出有效城市 →
+    // 文本搜索 city 参数无效返回空。此时用地理编码坐标做周边搜索（50km，
+    // 不需要 city），行程场景本来就以中心周边为半径。
+    if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
+      console.warn(`[PlanningService] 文本搜索空（city="${cityHint}" 疑似无效），改坐标周边搜索...`);
+      const loc = `${center.longitude},${center.latitude}`;
+      const [a2, h2, r2] = await Promise.all([
+        this.amapAroundPOI(loc, 'attraction', 25),
+        this.amapAroundPOI(loc, 'hotel', 12),
+        this.amapAroundPOI(loc, 'restaurant', 20),
+      ]);
+      return { attractions: a2, hotels: h2, restaurants: r2 };
+    }
+
     return { attractions, hotels, restaurants };
+  }
+
+  /** 高德周边搜索（place/around）：自然地名的行程检索兜底，按中心 50km。
+   * 本 key 的 around 接口 type 参数不生效（实测传任何分类码都返回全类），
+   * 改用 keywords 搜索 + POI type 字段白名单双重过滤保证分类纯净。 */
+  private async amapAroundPOI(
+    location: string,
+    type: 'attraction' | 'hotel' | 'restaurant',
+    limit: number,
+  ): Promise<RawPOI[]> {
+    const KW: Record<'attraction' | 'hotel' | 'restaurant', string> = {
+      attraction: '景区|风景名胜|公园|景点',
+      hotel: '酒店|民宿|客栈|宾馆',
+      restaurant: '餐厅|美食|饭店|小吃',
+    };
+    const TYPE_OK: Record<'attraction' | 'hotel' | 'restaurant', RegExp> = {
+      attraction: /风景名胜|公园|观景|景点|古迹|博物馆|植物园|动物园|广场|宗教/,
+      hotel: /住宿|酒店|宾馆/,
+      restaurant: /餐饮/,
+    };
+    const url =
+      `${AMAP_POI_BASE.replace('/place/text', '/place/around')}?key=${AMAP_KEY}` +
+      `&location=${encodeURIComponent(location)}&radius=50000&offset=25` +
+      `&page=1&extensions=all&keywords=${encodeURIComponent(KW[type])}`;
+    try {
+      const res = await amapThrottledFetch(url);
+      const j = (await res.json()) as { status?: string; pois?: Array<Record<string, unknown>> };
+      if (j.status !== '1' || !Array.isArray(j.pois)) return [];
+      // 复用 amapSearchPOI 的行映射（via 构造同款 RawPOI）：字段结构一致
+      const rows: RawPOI[] = [];
+      j.pois.slice(0, limit).forEach((poi, idx) => {
+        const ll = String(poi.location ?? '').split(',');
+        const lng = Number(ll[0]);
+        const lat = Number(ll[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        const wgs = gcj02ToWgs84(lat, lng);
+        rows.push({
+          id: `amap-${poi.id || `around-${idx}`}`,
+          name: String(poi.name ?? ''),
+          latitude: wgs.latitude,
+          longitude: wgs.longitude,
+          address: Array.isArray(poi.address) ? String(poi.address[0] ?? '') : String(poi.address ?? ''),
+          type,
+          rating: Number((poi as { biz_ext?: { rating?: unknown } }).biz_ext?.rating) || undefined,
+          tags: String(poi.type ?? '').split(';').filter(Boolean),
+          raw: { ...poi, source: 'amap-around', coordSystem: 'wgs84 (converted from gcj02)' },
+        });
+      });
+      // 双重过滤：POI 的 type 字段白名单（高德真实分类）+ 名称黑名单保底
+      // （杂项的正身分别在 hotel/restaurant 类）
+      const NAME_BAD = /酒店|宾馆|民宿|客栈|美宿|旅馆|度假村|餐厅|餐馆|川菜|火锅|烧烤|汤锅|粉面|写真|旅拍|摄影|工作室|菜馆|厨房|饭店/;
+      const filtered = rows.filter((r) => {
+        if (NAME_BAD.test(r.name) && type !== 'hotel') return false;
+        if (type === 'hotel' && !/酒店|民宿|客栈|宾馆|旅馆/.test(r.name)) return false;
+        return TYPE_OK[type].test((r.tags ?? []).join(';'));
+      });
+      console.log(`[Amap] around(${type}) 命中 ${filtered.length}/${rows.length} 条 @${location}`);
+      return filtered;
+    } catch (e) {
+      console.warn(`[Amap] around 搜索失败(${type}):`, e instanceof Error ? e.message : String(e));
+      return [];
+    }
+  }
+
+  /**
+   * 住宿落位参照点（规划主线 F0）。缺省不返回锚（沿用景点加权质心）：
+   *   attraction → 在候选景点里按名匹配参照点（零额外请求，命中即以它为锚）；
+   *   airport / station → 按需搜一次枢纽 POI（国内高德，失败退回 null）；
+   *   downtown → 目的地中心；seaside → 交给酒店名称侧的海景加权，不需要坐标锚。
+   */
+  private async resolveHotelFocusAnchor(
+    prefs: TripPreferences,
+    attractions: RawPOI[],
+    center: Coordinates,
+    destName: string,
+  ): Promise<{ label: string; latitude: number; longitude: number } | null> {
+    const focus = prefs.hotelFocus;
+    if (!focus || focus === 'seaside') return null;
+    if (focus === 'downtown') {
+      return { label: `${destName}市中心`, latitude: center.latitude, longitude: center.longitude };
+    }
+    if (focus === 'attraction') {
+      const ref = (prefs.hotelFocusRef || prefs.wishlist?.[0] || attractions[0]?.name || '').trim();
+      const hit = ref ? attractions.find((a) => wishNameMatch(a.name, ref)) : undefined;
+      if (!hit) return null;
+      return { label: hit.name, latitude: hit.latitude, longitude: hit.longitude };
+    }
+    if (!isDomesticDestination(destName)) return null;
+    const keywords = focus === 'airport' ? '机场' : '火车站|高铁站|动车站';
+    try {
+      const list = await this.amapSearchPOI(keywords, this.extractCityName(destName), 'attraction', 6, 1);
+      const named = list.filter((p) => (focus === 'airport' ? /机场/i.test(p.name) : /(火车站|高铁站|动车站|站)/.test(p.name)));
+      // 多个枢纽（如「成都站/成都东站」）取离目的地中心最近的：那是行程真正的落位点
+      let best = named[0];
+      let bestKm = Infinity;
+      for (const p of named) {
+        const km = this.haversineKm(center.latitude, center.longitude, p.latitude, p.longitude);
+        if (km < bestKm) {
+          bestKm = km;
+          best = p;
+        }
+      }
+      return best ? { label: best.name, latitude: best.latitude, longitude: best.longitude } : null;
+    } catch (err) {
+      console.warn(`[PlanningService] 枢纽落位检索失败（退回景点质心）:`, err instanceof Error ? err.message : err);
+      return null;
+    }
+  }
+
+  /**
+   * 心愿点补搜（规划主线 F0：用户点名的地方必须进得了行程）。
+   *
+   * 目的地粗搜的浅池（25 景点 / 20 餐厅）不含所有点名 POI——「想去青城山」规划成都
+   * 时池子里可能根本没有它。这里对没命中池子的点名项做一次定向搜索补进候选池
+   * （排序阶段的心愿加权随之生效）。补不上的名字如实返回，由简报卡交代，
+   * 不静默丢弃、也不用相似名称糊上去。
+   *
+   * 仅国内（高德关键词检索）补搜；国际目的地无文本检索接口，如实标未命中。
+   */
+  private async searchWishlistPois(
+    prefs: TripPreferences,
+    pool: { attractions: RawPOI[]; restaurants: RawPOI[]; hotels: RawPOI[] },
+    destName: string,
+  ): Promise<{
+    attractions: RawPOI[];
+    restaurants: RawPOI[];
+    hotels: RawPOI[];
+    missed: Array<{ name: string; type: 'attraction' | 'restaurant' | 'hotel' }>;
+  }> {
+    const wanted: Array<{ name: string; type: 'attraction' | 'restaurant' | 'hotel' }> = [
+      ...(prefs.wishlist ?? []).map((name) => ({ name, type: 'attraction' as const })),
+      ...(prefs.foodWishlist ?? []).map((name) => ({ name, type: 'restaurant' as const })),
+      ...(prefs.stayWishlist ?? []).map((name) => ({ name, type: 'hotel' as const })),
+    ].filter((w) => w.name.trim().length >= 2);
+    if (wanted.length === 0) return { attractions: [], restaurants: [], hotels: [], missed: [] };
+
+    const alreadyIn = (w: { name: string; type: 'attraction' | 'restaurant' | 'hotel' }): boolean => {
+      const list = w.type === 'attraction' ? pool.attractions : w.type === 'hotel' ? pool.hotels : pool.restaurants;
+      return list.some((p) => wishNameMatch(p.name, w.name));
+    };
+    const missing = wanted.filter((w) => !alreadyIn(w));
+    if (missing.length === 0) return { attractions: [], restaurants: [], hotels: [], missed: [] };
+
+    if (!isDomesticDestination(destName)) {
+      console.log(`[PlanningService] 心愿点未命中候选池（国际目的地无关键词补搜接口）: ${missing.map((m) => m.name).join('、')}`);
+      return { attractions: [], restaurants: [], hotels: [], missed: missing };
+    }
+
+    const cityHint = this.extractCityName(destName);
+    const found = await Promise.all(
+      missing.map(async (w) => {
+        try {
+          const list = await this.amapSearchPOI(w.name, cityHint, w.type, 3, 1);
+          // 只接受名称真正对得上的结果：关键词检索会带出同名机构/分店，
+          // 拿「附近」的杂项冒充用户点名的地点，比排不进去更糟
+          const hit = list.find((p) => wishNameMatch(p.name, w.name));
+          return hit ? { ...hit, tags: [...(hit.tags ?? []), '心愿点'] } : null;
+        } catch {
+          return null;
+        }
+      }),
+    );
+    const attractions: RawPOI[] = [];
+    const restaurants: RawPOI[] = [];
+    const hotels: RawPOI[] = [];
+    const missed: Array<{ name: string; type: 'attraction' | 'restaurant' | 'hotel' }> = [];
+    missing.forEach((w, i) => {
+      const p = found[i];
+      if (!p) {
+        missed.push(w);
+        return;
+      }
+      (w.type === 'attraction' ? attractions : w.type === 'hotel' ? hotels : restaurants).push(p);
+    });
+    if (attractions.length + restaurants.length + hotels.length > 0) {
+      console.log(`[PlanningService] 心愿点补搜入池: ${[...attractions, ...restaurants, ...hotels].map((p) => p.name).join('、')}`);
+    }
+    if (missed.length > 0) {
+      console.log(`[PlanningService] 心愿点补搜仍未命中: ${missed.map((m) => m.name).join('、')}`);
+    }
+    return { attractions, restaurants, hotels, missed };
   }
 
   /**
@@ -2271,6 +2743,9 @@ export class PlanningService {
       let s = this.effectiveRating(poi, type); // 本地评论聚合分混合（媒体库优先）
       // C5 收藏加权：用户收藏过的地点（type:name 精确匹配，餐厅与景点同名互不污染）
       if (this.favoriteKeys.has(`${type}:${poi.name}`)) s += SCORING.favoriteBoost;
+      // 规划主线 F0：用户点名的景点/餐厅直接置顶（压过评级量纲）
+      const wished = type === 'attraction' ? prefs.wishlist : type === 'restaurant' ? prefs.foodWishlist : type === 'hotel' ? prefs.stayWishlist : undefined;
+      if (wished?.some((w) => wishNameMatch(poi.name, w))) s += SCORING.wishlistBoost;
       if (type === 'hotel') {
         if (prefs.seaside && /(海|滩|湾|beach|bay|coast|seaside|ocean)/i.test(hay)) s += SCORING.hotel.seaside;
         if (prefs.pool && /(泳池|游泳池|pool|swimming)/i.test(hay)) s += SCORING.hotel.pool;
@@ -2284,6 +2759,15 @@ export class PlanningService {
           if (re.test(hay)) s += SCORING.restaurant.cuisineMatch;
         }
         if (prefs.seaside && /(海|海景|beach|seafood|海鲜)/i.test(hay)) s += SCORING.restaurant.seaside;
+        // 吃饭取向（本地人常去 vs 网红打卡）：画像派生也算，命中加分、走反减分
+        if (prefs.diningStyle === 'local' || prefs.diningStyle === 'trendy') {
+          const localRe = /(本地|老字号|苍蝇馆子|地道|街坊|居民|社区|老店|人少)/i;
+          const trendyRe = /(网红|打卡|漂亮饭|ins|小红书|排队|米其林|黑珍珠)/i;
+          const want = prefs.diningStyle === 'local' ? localRe : trendyRe;
+          const shun = prefs.diningStyle === 'local' ? trendyRe : localRe;
+          if (want.test(hay)) s += SCORING.diningStyle.match;
+          if (shun.test(hay)) s += SCORING.diningStyle.mismatch;
+        }
       } else if (type === 'attraction') {
         if (prefs.activities) s += SCORING.attraction.activities; // 想看"有什么好玩的" → 把景点都前置
         if (prefs.seaside && /(海|滩|湾|岛|beach|coast|reef|dive|潜水|冲浪)/i.test(hay)) s += SCORING.attraction.seaside;
@@ -2357,8 +2841,20 @@ export class PlanningService {
     dayCount: number,
   ): Promise<Array<TripDayWeather | null>> {
     if (!this.weatherService) return Array.from({ length: dayCount }, () => null);
+    // open-meteo 从本机访问偶发慢（首击可到 9s+），一次失败即全程按中性天气排
+    // 会静默丢掉「按天气排程」能力——重试一次再降级（降级本身会进核实提醒）
+    let forecast: Awaited<ReturnType<typeof this.weatherService.getMultiDayForecast>> | null = null;
+    for (let attempt = 0; attempt < 2 && !forecast; attempt++) {
+      try {
+        forecast = await this.weatherService.getMultiDayForecast(center.latitude, center.longitude, dayCount);
+      } catch (err) {
+        if (attempt > 0) {
+          console.warn(`[PlanningService] 逐日天气获取失败（已重试），按中性天气规划: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    if (!forecast) return Array.from({ length: dayCount }, () => null);
     try {
-      const forecast = await this.weatherService.getMultiDayForecast(center.latitude, center.longitude, dayCount);
       const byDate = new Map(forecast.days.map(d => [d.date, d]));
       const out: Array<TripDayWeather | null> = [];
       for (let i = 0; i < dayCount; i++) {
@@ -2701,6 +3197,31 @@ export class PlanningService {
   }
 
   /**
+   * 核实编排结果（travel 主线 F3）。密度上限沿用 paceCapFor——「排得太满必然崩」
+   * 既是编排约束也是核实口径，两处必须同一个数，否则核实天天喊超编而编排天天超编。
+   * 餐厅时间来自排程约定（12:00 午餐）而非场馆公示，默认不核实。
+   */
+  private verifyPlan(days: PlannedDay[], preferences: TripPreferences): ItineraryVerification {
+    const issues = verifyItinerary({
+      days: days.map((d) => ({
+        date: d.date,
+        items: d.items.map((it) => ({
+          name: it.name,
+          type: it.type,
+          startTime: it.startTime,
+          ...(it.endTime ? { endTime: it.endTime } : {}),
+          ...(it.visitDuration != null ? { visitDuration: it.visitDuration } : {}),
+          openingHours: it.openingHours,
+          tags: it.tags,
+          priceInfo: it.priceInfo,
+        })),
+      })),
+      maxStopsPerDay: paceCapFor(preferences),
+    });
+    return { issues, summary: summarizeIssues(issues), checkedAt: localTodayISO() };
+  }
+
+  /**
    * 将原始POI数据构建为每天的行程项目
    *
    * 改进点：
@@ -2728,8 +3249,10 @@ export class PlanningService {
     pricingCtx: import('./pricing-service.js').PricingContext,
     perDayWeather: Array<TripDayWeather | null>,
     cafes: RawPOI[],
-    sessionId?: string
-  ): Promise<{ days: PlannedDay[]; pois: POISummary[] }> {
+    sessionId?: string,
+    /** 住宿落位参照点（用户说「住得离机场/某景点近」时替代景点质心） */
+    hotelAnchor?: { label: string; latitude: number; longitude: number } | null
+  ): Promise<{ days: PlannedDay[]; pois: POISummary[]; farPoiNames?: string[] }> {
     const allPois: POISummary[] = [];
 
     // A4：过滤非法坐标（(0,0)/非有限值/越界），避免把 POI 画到错误位置
@@ -2776,14 +3299,40 @@ export class PlanningService {
 
     // 住宿锚定与优选（2026-10-15「从住宿开始规划」）：先定酒店，再围绕酒店
     // 聚类/编排每天行程。旧实现盲取搜索结果第一个（可能离全部景点几十公里）。
-    const primaryHotel = this.pickPrimaryHotel(hotels, attractions, preferences);
+    let primaryHotel = this.pickPrimaryHotel(hotels, attractions, preferences, hotelAnchor ?? undefined);
     // 起点优先用酒店（第一天入住后出发、其余天从酒店往返），无酒店退回目的地中心
-    const startPoint: Coordinates = primaryHotel
+    let startPoint: Coordinates = primaryHotel
       ? { latitude: primaryHotel.latitude, longitude: primaryHotel.longitude }
       : center;
 
+    // 顺路闸（2026-10-25）：省/跨市级目的地（如「新疆」）的 POI 池会混进上千公里
+    // 外的景点，聚类后出现「住乌鲁木齐、当天往返泽普」的荒谬路线。以住宿为锚，
+    // 把超出单日合理通勤半径的景点移出编排（心愿点豁免、保留在 pois 候选池可见，
+    // 不删除），并把「为什么没排」写进核实提醒；随后基于留下的景点重选主酒店。
+    let farPoiNames: string[] = [];
+    if (attractions.length > dayCount) {
+      const wishedSet = new Set((preferences.wishlist ?? []).map(w => w.trim().toLowerCase()));
+      const anchorDist = (a: RawPOI) => this.haversineKm(startPoint.latitude, startPoint.longitude, a.latitude, a.longitude);
+      const withinRadius = (km: number) => attractions.filter(a => wishedSet.has((a.name || '').trim().toLowerCase()) || anchorDist(a) <= km);
+      let near = withinRadius(150);
+      if (near.length < dayCount) near = withinRadius(400);
+      if (near.length > 0 && near.length < attractions.length) {
+        const nearSet = new Set(near);
+        farPoiNames = attractions.filter(a => !nearSet.has(a)).map(a => a.name).slice(0, 8);
+        console.log(
+          `[PlanningService] 顺路闸: ${attractions.length - near.length} 个景点距住宿超出合理通勤半径，` +
+          `移出编排（心愿点不受限）：${farPoiNames.join('、')}`
+        );
+        attractions = near;
+        primaryHotel = this.pickPrimaryHotel(hotels, attractions, preferences, hotelAnchor ?? undefined);
+        startPoint = primaryHotel
+          ? { latitude: primaryHotel.latitude, longitude: primaryHotel.longitude }
+          : center;
+      }
+    }
+
     // 地理聚类分配景点（farthest-first 初始化 + 空簇回收 + 每天内 NN+2-opt 排序）
-    const clusteredDays = this.clusterAttractionsByGeo(attractions, dayCount, startPoint, maxAttractionsPerDay);
+    const clusteredDays = this.clusterAttractionsByGeo(attractions, dayCount, startPoint, maxAttractionsPerDay, preferences.wishlist);
     // 餐厅去重：按名称去除重复
     const seenRestNames = new Set<string>();
     const dedupedRestaurants = restaurants.filter(r => {
@@ -2932,15 +3481,25 @@ export class PlanningService {
       return overflow;
     };
     const overflowPool: DaySequence['entries'] = [];
+    const normName = (n: string) => (n || '').trim().toLowerCase();
     for (let i = 0; i < dayCount; i++) {
       const seq = sequences[i]!;
       const overflow = estimateDay(seq, i);
       if (overflow.length === 0) continue;
+      // 顺延项必须从当天序列真正移除：estimateDay（haversine×1.25 估时）与
+      // timeDay（OSRM 真实路网）时长口径不一致，旧实现只把副本插进下一天、
+      // 原件仍留在当天，两边都排得下时同一景点会重复出现（同天/跨天）。
+      const overflowSet = new Set(overflow);
+      seq.entries = seq.entries.filter(e => !overflowSet.has(e));
       if (i + 1 < dayCount) {
-        // 顺延到下一天：常规景点插到午餐前（上午段），晚间景点插到晚餐后
-        const morningLike = overflow.filter(e => e.slot !== 'evening').map(e => ({ ...e, slot: 'morning' as const }));
-        const eveningLike = overflow.filter(e => e.slot === 'evening');
+        // 顺延到下一天：常规景点插到午餐前（上午段），晚间景点插到晚餐后；
+        // 下一天已有同名景点时不再插入（聚类输入已按名去重，这里挡补位/顺延路径）
         const next = sequences[i + 1]!;
+        const nextNames = new Set(next.entries.map(e => normName(e.poi.name)));
+        const morningLike = overflow
+          .filter(e => e.slot !== 'evening' && !nextNames.has(normName(e.poi.name)))
+          .map(e => ({ ...e, slot: 'morning' as const }));
+        const eveningLike = overflow.filter(e => e.slot === 'evening' && !nextNames.has(normName(e.poi.name)));
         let insertAt = next.entries.findIndex(e => e.kind === 'lunch');
         if (insertAt < 0) insertAt = next.entries.findIndex(e => e.kind === 'dinner');
         if (insertAt < 0) insertAt = next.entries.length;
@@ -3013,6 +3572,11 @@ export class PlanningService {
         checkin.tips = [...(checkin.tips || []), '第一天办理入住、寄存行李后出发；早餐建议在酒店或出发途中解决'];
         items.push(checkin);
         currentTimeMin = 9 * 60;
+      } else if (dayIdx > 0 && seq.hotel && seq.entries.length > 0) {
+        // 后续每天以「从酒店出发」开篇：起点锚定住宿，时间线/地图上能看出每天从哪出发
+        const depart = this.convertToItemSync(seq.hotel, 'hotel', seq.date, '08:30', preferences, travelInfo, pricingCtx);
+        depart.tips = [...(depart.tips || []), '从酒店出发，开始今天的行程'];
+        items.push(depart);
       }
 
       for (const entry of seq.entries) {
@@ -3131,6 +3695,13 @@ export class PlanningService {
       if (from.length === 0) continue;
       const stillDropped: DaySequence['entries'] = [];
       for (const entry of from) {
+        // 已在任何一天排入的景点不再补位：补位只做「挪位」，不做「复制」
+        const alreadyScheduled = days.some(d =>
+          d.items.some(it => it.poiId === entry.poi.id || normName(it.name) === normName(entry.poi.name)));
+        if (alreadyScheduled) {
+          console.log(`[PlanningService] 补位跳过「${entry.poi.name}」：已排入其他天`);
+          continue;
+        }
         let placed = false;
         const order = Array.from({ length: dayCount }, (_, d) => d)
           .sort((a, b) => nearestDistToDay(a, entry.poi) - nearestDistToDay(b, entry.poi));
@@ -3147,7 +3718,7 @@ export class PlanningService {
           seq.entries = trial;
           const ret = timeDay(d);
           if (!ret.dropped.some(de => de.poi.id === trialEntry.poi.id)) {
-            days[d] = { date: seq.date, items: ret.items };
+            days[d] = { date: seq.date, items: ret.items, dayWeather: perDayWeather[d]?.summary };
             dayDropped[d] = ret.dropped;
             placed = true;
             console.log(`[PlanningService] 补位: 「${trialEntry.poi.name}」排入 Day${d + 1}`);
@@ -3174,7 +3745,7 @@ export class PlanningService {
       `补位后仍未排入 ${dayDropped.reduce((n, l) => n + l.length, 0)} 个景点（POI 池/时间预算所限）`,
     );
 
-    return { days, pois: allPois };
+    return { days, pois: allPois, ...(farPoiNames.length ? { farPoiNames } : {}) };
   }
 
   /**
@@ -3186,6 +3757,8 @@ export class PlanningService {
     hotels: RawPOI[],
     attractions: RawPOI[],
     prefs: TripPreferences,
+    /** 落位参照点（机场/车站/指定景点/市中心）：给了就以它为锚，不再用景点质心 */
+    anchor?: { label: string; latitude: number; longitude: number }
   ): RawPOI | undefined {
     if (hotels.length === 0) return undefined;
 
@@ -3199,15 +3772,15 @@ export class PlanningService {
       latSum += a.latitude * w;
       lonSum += a.longitude * w;
     });
-    const cLat = wSum > 0 ? latSum / wSum : (attractions[0]?.latitude ?? hotels[0]!.latitude);
-    const cLon = wSum > 0 ? lonSum / wSum : (attractions[0]?.longitude ?? hotels[0]!.longitude);
+    const cLat = anchor?.latitude ?? (wSum > 0 ? latSum / wSum : (attractions[0]?.latitude ?? hotels[0]!.latitude));
+    const cLon = anchor?.longitude ?? (wSum > 0 ? lonSum / wSum : (attractions[0]?.longitude ?? hotels[0]!.longitude));
 
     let best = hotels[0]!;
     let bestScore = -Infinity;
     for (const h of hotels) {
-      // 距离主权重：每远 1km 扣 10 分，10km 外归零
+      // 距离主权重：每远 1km 扣 10 分，10km 外归零；有落位锚时距离即用户诉求，权重翻倍
       const dist = this.haversineKm(cLat, cLon, h.latitude, h.longitude);
-      const distScore = Math.max(0, 100 - dist * 10);
+      const distScore = anchor ? Math.max(0, 160 - dist * 16) : Math.max(0, 100 - dist * 10);
       const blended = this.effectiveRating(h, 'hotel');
       let score = distScore + (blended > 0 ? blended : SCORING.routePick.ratingFallback) * 6;
 
@@ -3629,7 +4202,9 @@ export class PlanningService {
     attractions: RawPOI[],
     dayCount: number,
     startPoint: Coordinates,
-    maxPerDay: number
+    maxPerDay: number,
+    /** 心愿点名单，透传给逐日截断（点名的地方不被容量截掉） */
+    wishedNames?: string[]
   ): RawPOI[][] {
     // 去重：按名称（忽略大小写/空格）去除重复景点
     const seenNames = new Set<string>();
@@ -3655,7 +4230,7 @@ export class PlanningService {
       sorted.forEach((attr, idx) => {
         result[idx % dayCount]?.push(attr);
       });
-      this.reorderDays(result, dayCount, startPoint, maxPerDay);
+      this.reorderDays(result, dayCount, startPoint, maxPerDay, wishedNames);
       return result;
     }
 
@@ -3755,7 +4330,7 @@ export class PlanningService {
     }
 
     // ===== Step 4: 每天内按最近邻 + 2-opt 优化顺序 =====
-    this.reorderDays(result, dayCount, startPoint, maxPerDay);
+    this.reorderDays(result, dayCount, startPoint, maxPerDay, wishedNames);
 
     // 处理未被分配的景点（被 maxPerDay 截断的，重新分配到有空位的日期）
     // 用 ID 集合追踪已分配的景点，避免重复添加
@@ -3793,7 +4368,7 @@ export class PlanningService {
 
     // 补位后受影响的天重跑排序（否则补进去的点会破坏最优邻接序）
     if (touchedDays.size > 0) {
-      this.reorderDays(result, dayCount, startPoint, maxPerDay);
+      this.reorderDays(result, dayCount, startPoint, maxPerDay, wishedNames);
     }
 
     console.log(`[PlanningService] 地理聚类完成: ${result.map((d, i) => `Day${i+1}:${d.length}个景点`).join(', ')}`);
@@ -3809,7 +4384,11 @@ export class PlanningService {
     dayCount: number,
     startPoint: Coordinates,
     maxPerDay: number,
+    /** 心愿点名单：截断只砍非心愿点（用户点名的地方不能因为「今天排满了」被丢掉） */
+    wishedNames?: string[]
   ): void {
+    const wished = (p: RawPOI | undefined): boolean =>
+      !!p && (wishedNames ?? []).some((w) => wishNameMatch(p.name, w));
     const pathLen = (arr: RawPOI[]): number => {
       let s = 0;
       let prev: Coordinates = startPoint;
@@ -3867,7 +4446,19 @@ export class PlanningService {
         }
       }
 
-      result[d] = ordered.slice(0, maxPerDay); // 限制每天最大数量
+      // 截断只砍非心愿点：尾部排不进去时，与窗口内最后一个「非心愿」点位交换位置，
+      // 保住用户点名的地方（路径顺序仍连续——换的是同一条游览序列上的槽位）
+      const kept = ordered.slice(0, maxPerDay);
+      for (let i = maxPerDay; i < ordered.length; i++) {
+        if (!wished(ordered[i])) continue;
+        const swapIdx = [...kept].reverse().findIndex((p) => !wished(p));
+        if (swapIdx < 0) break; // 窗口内全是心愿点：容量所限，只能顺延到别的天
+        const from = kept.length - 1 - swapIdx;
+        const tmp = kept[from]!;
+        kept[from] = ordered[i]!;
+        ordered[i] = tmp;
+      }
+      result[d] = kept; // 限制每天最大数量
     }
   }
 

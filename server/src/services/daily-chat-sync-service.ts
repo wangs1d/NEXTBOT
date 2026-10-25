@@ -1,6 +1,5 @@
 import type { DailyDigestService } from "./daily-digest-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
-import { isKvSummaryMinimal } from "../config/memory-env.js";
 
 export type ChatSyncRecord = {
   actorId: string;
@@ -33,6 +32,7 @@ class DailyChatSyncService {
   private readonly config: ChatSyncConfig;
   private readonly pendingSyncs = new Map<string, ChatSyncRecord>();
   private dailyDigest: DailyDigestService | null = null;
+  /** 兼容保留：KV recap 写入已下线（2026-10-23 recap 污染收口），依赖注入不再消费 */
   private memorySync: AgentMemorySyncService | null = null;
 
   constructor(config?: Partial<ChatSyncConfig>) {
@@ -88,8 +88,12 @@ class DailyChatSyncService {
   async processSyncToMemorySystems(record: ChatSyncRecord): Promise<void> {
     try {
       await this.updateDailyDigest(record);
-      await this.updateMemorySummary(record);
-      
+      // KV session_recap 逐字对话写入已移除（2026-10-23 recap 污染收口）：
+      // 这里曾把客户端历史转成 `[HH:MM] [客户端同步] Agent: …` 整批塞进 KV
+      // session_recap —— 只有钟点没有日期的逐字对话，正是「锚点只在今天 /
+      // 新对话复述旧对话」的污染源之一。逐字对话属 turn-wal/journal；
+      // 跨设备记忆走 dailyDigest.observeTurn 与统一抽取，不走 KV 流水。
+
       console.log(
         `[DailyChatSync] ✅ Successfully synced ${record.messages.length} messages for ${record.actorId}`,
       );
@@ -116,35 +120,6 @@ class DailyChatSyncService {
     }
   }
 
-  private async updateMemorySummary(record: ChatSyncRecord): Promise<void> {
-    if (!this.memorySync || isKvSummaryMinimal()) return;
-
-    try {
-      const newLines: string[] = [];
-      for (const msg of record.messages.slice(-50)) {
-        const timeLabel = new Intl.DateTimeFormat("zh-CN", {
-          hour: "2-digit",
-          minute: "2-digit",
-          hour12: false,
-          timeStyle: "short",
-        }).format(new Date(msg.timestamp));
-
-        if (msg.role === "user") {
-          newLines.push(`[${timeLabel}] [客户端同步] 用户: ${msg.text.slice(0, 150)}`);
-        } else if (msg.role === "assistant") {
-          newLines.push(`[${timeLabel}] [客户端同步] Agent: ${msg.text.slice(0, 150)}`);
-        }
-      }
-
-      if (newLines.length > 0) {
-        for (const line of newLines.slice(-12)) {
-          this.memorySync.appendSessionRecapLine(record.actorId, line, "recap");
-        }
-      }
-    } catch (err) {
-      console.error(`[DailyChatSync] Memory update failed for ${record.actorId}:`, err);
-    }
-  }
 
   getSyncStatus(actorId?: string): {
     totalPendingSyncs: number;

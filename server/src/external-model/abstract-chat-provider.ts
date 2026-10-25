@@ -12,7 +12,6 @@ import { domainCardsForTurn } from "./turn-domain-cards.js";
 import type { ChatThreadStore } from "./chat-thread-store.js";
 import { openAiUserContentFromTurn } from "./build-user-message-content.js";
 import { isUnknownModelError } from "./chat-thread-sanitize.js";
-import { resolveTimeContextAccess } from "../agent/time-context-gate.js";
 import { modelSupportsVision } from "./vision-support.js";
 import {
   adaptOpenAiChatCompletionStream,
@@ -404,13 +403,10 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     //   存储层（msgs）前缀原样保留（按天裁剪 / recap / 恢复 / 编辑都依赖解析它）——
     //   模型上下文里不再有「每条消息以 [ts: 开头」的 in-context 模仿源，从根源消除
     //   时间戳帧复述泄漏到用户气泡的问题。
-    //   按需时间上下文闸（2026-10-06）：【对话时间轴】system 块不再每轮注入，仅当
-    //   本轮用户消息显式涉及时刻/日期/时长/定时动作（或会话保持期内）才放行；
-    //   与 prompt-context-builder 的【当前时间】块同一判定源（time-context-gate）。
-    const timeContextAllowed = resolveTimeContextAccess(sessionId, userTurn.text);
-    const llmView = buildTimestampFreeLlmView(msgs, {
-      includeTimeline: timeContextAllowed,
-    }).messages;
+    //   2026-10-23（用户拍板）**删除按需时间闸**：【对话时间轴】不再看本轮有没有时间词，
+    //   有 ≥2 条带时间的消息就每轮注入（按自然日分组 + 今天/昨天/N天前）。
+    //   旧闸的代价是"普通续聊轮历史零时间锚"，模型只能把昨天当今天。
+    const llmView = buildTimestampFreeLlmView(msgs).messages;
     // 线程原有消息的对象身份集合：工具循环只应往线程回写「视图新增」的消息。
     const llmViewLiveObjects = new Set<ChatCompletionMessageParam>(msgs);
     /**

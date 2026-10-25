@@ -497,7 +497,6 @@ export class NightlyMemoryTaskService {
             const fixationExtraction: UnifiedExtraction = {
               decision: highSignal ? "remember" : "decay",
               memories: [fixationText],
-              commitments: [],
               corrections: [],
               understandings: [],
               facts: [],

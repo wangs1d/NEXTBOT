@@ -49,6 +49,11 @@ UninstallDisplayIcon={app}\NEXTBOT.exe
 [Tasks]
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: checkedonce
 
+[InstallDelete]
+; 旧名可执行文件（2026-10-23 更名前为 private_ai_agent.exe）：Inno 只覆盖同路径文件，
+; 旧 exe 不会自动消失，升级后目录里会并存两个入口，用户/排障都会误开旧包。
+Type: files; Name: "{app}\private_ai_agent.exe"
+
 [Files]
 Source: "{#Stage}\app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
 
@@ -64,13 +69,15 @@ Filename: "{app}\NEXTBOT.exe"; Description: "立即启动 {#MyAppName}"; Flags: 
 
 [Code]
 // 安装前停掉旧版本残留进程（限定路径在本应用目录内，不误杀系统其他进程；
-// cloud 版无本地 runtime，路径匹配天然只命中应用自身）
+// cloud 版无本地 runtime，路径匹配天然只命中应用自身）。
+// 同时列出旧名 private_ai_agent：老安装升级时跑的还是旧 exe，只按 NEXTBOT 匹配
+// 会漏杀，{app} 被占用则覆盖安装失败。
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
   ErrorCode: Integer;
 begin
   Exec(ExpandConstant('{cmd}'),
-    '/C powershell -NoProfile -Command "Get-Process NEXTBOT -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
+    '/C powershell -NoProfile -Command "Get-Process NEXTBOT,private_ai_agent -ErrorAction SilentlyContinue | Where-Object { $_.Path -like ''' + ExpandConstant('{app}') + '*'' } | Stop-Process -Force"',
     '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   Sleep(800);
   Result := '';

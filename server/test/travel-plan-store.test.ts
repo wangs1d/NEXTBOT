@@ -153,3 +153,54 @@ test("get-itinerary skill: unknown plan returns not-found", async () => {
   assert.equal(out.ok, true); // 落到 recentPlans 兜底而非硬失败
   assert.ok(Array.isArray(out.recentPlans));
 });
+
+test("S4 字段贯通：核实与攻略要用的条目原信息落盘后仍在冷层", () => {
+  travelPlanStore.save({
+    planId: "plan-fields-1",
+    destination: "字段城",
+    title: "字段城1日游",
+    startDate: "2026-11-02",
+    endDate: "2026-11-02",
+    days: [
+      {
+        date: "2026-11-02",
+        items: [
+          {
+            type: "attraction",
+            name: "闭馆测试馆",
+            startTime: "2026-11-02T09:00:00",
+            endTime: "2026-11-02T10:30:00",
+            latitude: 1,
+            longitude: 2,
+            address: "",
+            priceInfo: "¥60",
+            description: "",
+            itemId: "it-1",
+            poiId: "poi-1",
+            openingHours: "周二至周日 09：00-17：00，周一闭馆",
+            phone: "0891-1234",
+            rating: 4.6,
+            tags: ["室内"],
+            why: "本地人才知道的馆",
+            photoTip: "顶层平台逆光",
+            pitfall: "周一闭馆，白跑",
+            bookingNote: "需提前 3 天预约",
+          },
+        ],
+      },
+    ],
+  } as never);
+  const item = travelPlanStore.get("plan-fields-1")!.days[0]!.items[0]!;
+  // 冷层回读再核实（verifyItinerary）依赖 openingHours/endTime，丢一个字段闸就瞎
+  assert.equal(item.openingHours, "周二至周日 09：00-17：00，周一闭馆");
+  assert.equal(item.endTime, "2026-11-02T10:30:00");
+  assert.equal(item.rating, 4.6);
+  assert.deepEqual(item.tags, ["室内"]);
+  assert.equal(item.why, "本地人才知道的馆");
+  assert.equal(item.photoTip, "顶层平台逆光");
+  assert.equal(item.pitfall, "周一闭馆，白跑");
+  assert.equal(item.bookingNote, "需提前 3 天预约");
+  assert.equal(item.phone, "0891-1234");
+  assert.equal(item.itemId, "it-1");
+  assert.equal(item.poiId, "poi-1");
+});

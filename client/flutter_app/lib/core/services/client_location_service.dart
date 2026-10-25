@@ -1,3 +1,4 @@
+import "dart:async";
 import "dart:convert";
 
 import "package:flutter/foundation.dart";
@@ -62,6 +63,7 @@ class ClientLocationService {
 
   static const String _prefsKey = "clientLocationCache";
   static const String _consentKey = "clientLocationConsent";
+  static const String _residentKey = "clientLocationResident";
   static ClientLocationPayload? _cached;
   static DateTime? _cachedAt;
   /// 仅供 App 启动预热使用；聊天发消息走 `getCurrentLocationForChat()` 实时拉取。
@@ -72,6 +74,10 @@ class ClientLocationService {
   /// `null` 尚未询问；`true`/`false` 用户已选择。
   /// 默认 `true`：让 Agent 实时拿到用户位置；用户可在权限弹窗里显式「暂不允许」回退。
   static bool? _locationConsent = true;
+  /// 常驻定位开关（用户显式开启；开启后走「始终允许」权限 + 位移触发的后台上报）。
+  static bool? _residentEnabled;
+  /// 常驻定位流订阅（Android 走前台服务保活；iOS 依赖 Always 授权的 Significant-change）。
+  static StreamSubscription<Position>? _residentSub;
 
   /// 注入本地持久化（如 IsarLocalHistoryStore.savePreference）。
   static void bindPreferences({
@@ -98,7 +104,120 @@ class ClientLocationService {
     }
     if (!allowed) {
       clearCache();
+      // 撤回定位同意 = 连常驻一起停（权限都没了，流留着只报错）
+      await setResidentLocationEnabled(false);
     }
+  }
+
+  // ─── 常驻定位（始终允许 + 位移触发上报） ───────────────────────────
+
+  /// 常驻开关（持久化）。`null` 从未设置；开启需用户显式选择。
+  static Future<bool> getResidentLocationEnabled() async {
+    if (_residentEnabled != null) return _residentEnabled!;
+    if (_readPref == null) return false;
+    final dynamic raw = await _readPref!(_residentKey);
+    _residentEnabled = raw == true;
+    return _residentEnabled!;
+  }
+
+  static Future<void> setResidentLocationEnabled(bool enabled) async {
+    _residentEnabled = enabled;
+    if (_writePref != null) {
+      await _writePref!(_residentKey, enabled);
+    }
+    if (!enabled) {
+      await stopResidentTracking();
+    }
+  }
+
+  /// 升级到「始终允许」：iOS 在已授 WhileUsing 后再调 requestPermission 会弹
+  /// Always 升级框；Android 10+ 的二级弹窗含「始终允许」，11+ 可能落在系统设置，
+  /// 此时打开本应用的定位设置页引导。返回最终拿到的权限档位。
+  static Future<LocationPermission> ensureAlwaysPermission() async {
+    if (!await Geolocator.isLocationServiceEnabled()) {
+      return LocationPermission.denied;
+    }
+    LocationPermission permission = await Geolocator.checkPermission();
+    if (permission == LocationPermission.denied) {
+      permission = await Geolocator.requestPermission();
+    }
+    if (permission == LocationPermission.whileInUse) {
+      permission = await Geolocator.requestPermission();
+      // Android 11+ 二级弹窗可能只给「仅本次」：仍差一级时引导去系统设置
+      if (permission == LocationPermission.whileInUse) {
+        await Geolocator.openLocationSettings();
+        permission = await Geolocator.checkPermission();
+      }
+    }
+    return permission;
+  }
+
+  static bool get isResidentTrackingActive => _residentSub != null;
+
+  /// 启动常驻定位流（位移 ≥ [distanceFilterMeters] 米才产一次 fix，不动不报——
+  /// 不是 GPS 轮询，省电）。Android 走前台服务常驻（通知栏可见、可随时关）；
+  /// iOS 依赖 Always 授权 + 系统对位移事件的唤醒。
+  /// 返回 false 表示前置条件不满足（未开开关 / 定位同意撤回 / 权限不够），未启动。
+  static Future<bool> startResidentTracking({
+    required void Function(ClientLocationPayload payload) onFix,
+    int distanceFilterMeters = 150,
+  }) async {
+    if (isResidentTrackingActive) return true;
+    final bool consent = await getLocationConsent() == true;
+    final bool enabled = await getResidentLocationEnabled();
+    if (!consent || !enabled) return false;
+    final LocationPermission permission = await ensureAlwaysPermission();
+    if (permission != LocationPermission.always) {
+      debugPrint(
+        "[ClientLocationService] 常驻定位需要「始终允许」权限，当前: $permission（暂不启动，等下次引导）",
+      );
+      return false;
+    }
+    try {
+      LocationSettings settings;
+      if (defaultTargetPlatform == TargetPlatform.android) {
+        settings = AndroidSettings(
+          accuracy: LocationAccuracy.medium,
+          distanceFilter: distanceFilterMeters,
+          foregroundNotificationConfig: const ForegroundNotificationConfig(
+            notificationTitle: "NEXTBOT 位置服务",
+            notificationText: "让 Agent 在你位置变化时知道（可在系统设置关闭）",
+            notificationChannelName: "resident_location",
+            setOngoing: true,
+            enableWakeLock: true,
+          ),
+        );
+      } else {
+        settings = LocationSettings(
+          accuracy: LocationAccuracy.medium,
+          distanceFilter: distanceFilterMeters,
+        );
+      }
+      _residentSub = Geolocator.getPositionStream(locationSettings: settings)
+          .listen((Position position) async {
+        final ClientLocationPayload payload = ClientLocationPayload(
+          latitude: position.latitude,
+          longitude: position.longitude,
+          timezone: await _deviceTimezone(),
+          label:
+              "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
+        );
+        await _remember(payload);
+        onFix(payload);
+      }, onError: (Object e) {
+        debugPrint("[ClientLocationService] 常驻定位流出错: $e");
+      });
+      debugPrint("[ClientLocationService] 常驻定位已启动（位移阈值 ${distanceFilterMeters}m）");
+      return true;
+    } catch (e) {
+      debugPrint("[ClientLocationService] 常驻定位启动失败: $e");
+      return false;
+    }
+  }
+
+  static Future<void> stopResidentTracking() async {
+    await _residentSub?.cancel();
+    _residentSub = null;
   }
 
   /// 获取实时位置（右侧天气面板/启动预热路径）。

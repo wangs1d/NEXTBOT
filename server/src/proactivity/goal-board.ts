@@ -1,8 +1,8 @@
 // 目标板与预执行（GoalBoard + ReadyTray）—— 五层主动性架构 L4 的落地。
 //
 // 三类目标：
-//  - track：跟踪型（盯某件事直到状态变化）—— commitment-board / interest-watch
-//    等现有服务保持独立，本板负责跨类型的统一台账与生命周期
+//  - track：跟踪型（盯某件事直到状态变化）—— interest-watch 等现有服务
+//    保持独立，本板负责跨类型的统一台账与生命周期
 //  - preexec：预执行型（后台把"用户接下来大概率要的东西"提前备好）——
 //    完成后进 ReadyTray，经 goal 信号流 → goal_ready 评估器 → 仲裁挑时机投递。
 //    这是"用户还没开口，东西已经在了"的哇时刻来源。
@@ -14,7 +14,6 @@
 //  1. 晨间简报 —— 见 evaluators/morning_brief（数据全本地，即时拼接）
 //  2. 会前准备包 —— 本模块 maybeStartMeetingPrep：会议前 20-40min 后台
 //     召回相关记忆/待办，备好材料包（异步，完成后进托盘）
-//  3. 承诺守约链 —— 见 evaluators/commitment_chain（ask_first 代催，管道确认回流）
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -25,7 +24,7 @@ export type GoalRecord = {
   actorId: string;
   /** track=盯一件事；preexec=后台提前备一件事；plan=长期目标拆步推进 */
   kind: "track" | "preexec" | "plan";
-  /** 场景类型（morning_brief / meeting_prep / commitment_chain / custom） */
+  /** 场景类型（morning_brief / meeting_prep / custom） */
   type: string;
   title: string;
   status: GoalStatus;
@@ -328,7 +327,7 @@ export class GoalBoard {
     return true;
   }
 
-  /** ReadyTray：status=ready 且未过期的目标（晨间简报/心跳回顾拼接展示） */
+  /** ReadyTray：status=ready 且未过期的目标（晨间简报/agent pulse 聚合拼接展示） */
   readyTray(): GoalRecord[] {
     const now = this.nowFn();
     const ready: GoalRecord[] = [];

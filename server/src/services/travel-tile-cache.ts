@@ -23,14 +23,35 @@ const REWRITE_VERSION = 2;
 
 /** 缓存条目新鲜期：瓦片基本不可变，30 天足够长 */
 const FRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+/** 清单类资源（style.json / sprite.json / tiles.json）随上游版本升级换路径
+ *  （2026-10-25 实例：Carto 切到 /v/<date>/ 版本化路径，旧 sprite 404 导致
+ *  MapLibre 永远等不到 load）。这类资源用短新鲜期：过期回源一次，失败仍可用旧盘。 */
+const MANIFEST_FRESH_TTL_MS = 10 * 60 * 1000;
+function freshTtlOf(url: string): number {
+  return /\.json(\?|$)/.test(url) ? MANIFEST_FRESH_TTL_MS : FRESH_TTL_MS;
+}
 /** 内存 LRU 上限（条目数；瓦片均 ~10-50KB，500 条 ≤ ~25MB） */
 const MEMORY_MAX_ENTRIES = 500;
 /** 预热单次瓦片预算（防城市过大打爆磁盘/上游） */
 const WARM_TILE_BUDGET = 800;
 /** 预热并发 */
 const WARM_CONCURRENCY = 6;
-/** 单资源拉取超时 */
-const FETCH_TIMEOUT_MS = 10_000;
+/** 单资源拉取超时：上游 CDN 偶发慢（TLS 握手/边缘节点），10s 会把 curl 3s
+ *  能拿到的资源判死 → 502 → 地图永远等不到 idle、marker 上不来 */
+const FETCH_TIMEOUT_MS = 20_000;
+/** 超时/5xx 后的重试间隔 */
+const FETCH_RETRY_DELAY_MS = 800;
+
+/**
+ * 上游主机改写：Carto 底图的 a/b/c/d.basemaps.cartocdn.com 分片子域在部分
+ * 国内网络被 DNS 污染（解析到 Dropbox/Facebook 段地址，请求挂起直到超时），
+ * 而 apex 域 basemaps.cartocdn.com 解析到 Fastly、同路径同内容。
+ * 统一改写到 apex：缓存键仍用原始 URL（浏览器缓存/磁盘缓存都不受影响），
+ * 仅上游请求换健康主机。
+ */
+function normalizeUpstreamHost(url: string): string {
+  return url.replace(/^(https:\/\/)[abcd]\.basemaps\.cartocdn\.com\//i, "$1basemaps.cartocdn.com/");
+}
 
 interface MemoryEntry {
   body: Buffer;
@@ -110,13 +131,14 @@ class TravelTileCache {
     const key = this.keyOf(url);
 
     const mem = this.memory.get(key);
-    if (mem && Date.now() - mem.createdAt < FRESH_TTL_MS) {
+    const ttl = freshTtlOf(url);
+    if (mem && Date.now() - mem.createdAt < ttl) {
       this.touch(key, mem);
       return { ok: true, status: 200, contentType: mem.contentType, body: mem.body, fromCache: true };
     }
 
     const disk = this.readDisk(key);
-    if (disk && Date.now() - disk.createdAt < FRESH_TTL_MS) {
+    if (disk && Date.now() - disk.createdAt < ttl) {
       this.remember(key, disk);
       return { ok: true, status: 200, contentType: disk.contentType, body: disk.body, fromCache: true };
     }
@@ -136,26 +158,39 @@ class TravelTileCache {
   }
 
   private async fetchUpstream(url: string, key: string): Promise<ProxyFetchResult> {
-    try {
-      const res = await fetch(url, {
-        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-        headers: { "User-Agent": "NextbotTravelTileCache/1.0" },
-      });
-      if (!res.ok) {
-        return { ok: false, status: res.status, contentType: "text/plain", body: Buffer.from(`upstream ${res.status}`), fromCache: false };
+    // 超时/5xx 重试一次（404 等确定失败不浪费；并发去重在 fetch() 入口已做，
+    // 重试不会放大上游压力）
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await fetch(normalizeUpstreamHost(url), {
+          signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+          headers: { "User-Agent": "NextbotTravelTileCache/1.0" },
+        });
+        if (!res.ok) {
+          if (res.status >= 500 && attempt === 0) {
+            await new Promise((r) => setTimeout(r, FETCH_RETRY_DELAY_MS));
+            continue;
+          }
+          return { ok: false, status: res.status, contentType: "text/plain", body: Buffer.from(`upstream ${res.status}`), fromCache: false };
+        }
+        const body = Buffer.from(await res.arrayBuffer());
+        const entry: MemoryEntry = {
+          body,
+          contentType: res.headers.get("content-type") || "application/octet-stream",
+          createdAt: Date.now(),
+        };
+        this.remember(key, entry);
+        this.writeDisk(key, url, entry);
+        return { ok: true, status: 200, contentType: entry.contentType, body: entry.body, fromCache: false };
+      } catch {
+        if (attempt === 0) {
+          await new Promise((r) => setTimeout(r, FETCH_RETRY_DELAY_MS));
+          continue;
+        }
+        return { ok: false, status: 502, contentType: "text/plain", body: Buffer.from("upstream fetch failed"), fromCache: false };
       }
-      const body = Buffer.from(await res.arrayBuffer());
-      const entry: MemoryEntry = {
-        body,
-        contentType: res.headers.get("content-type") || "application/octet-stream",
-        createdAt: Date.now(),
-      };
-      this.remember(key, entry);
-      this.writeDisk(key, url, entry);
-      return { ok: true, status: 200, contentType: entry.contentType, body: entry.body, fromCache: false };
-    } catch {
-      return { ok: false, status: 502, contentType: "text/plain", body: Buffer.from("upstream fetch failed"), fromCache: false };
     }
+    return { ok: false, status: 502, contentType: "text/plain", body: Buffer.from("upstream fetch failed"), fromCache: false };
   }
 
   private remember(key: string, entry: MemoryEntry): void {
@@ -223,39 +258,46 @@ class TravelTileCache {
    * 内联 tiles[] 模板——worker 不再需要运行时二次请求 TileJSON，
    * 也杜绝 worker 侧对 TileJSON 内容缓存的依赖。
    */
-  async darkStyleProxied(origin?: string): Promise<{ ok: boolean; body: string; contentType: string }> {
-    const styleUrl = "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
-    const res = await this.fetch(styleUrl);
-    if (!res.ok) return { ok: false, body: "", contentType: "application/json" };
-    const json = this.rewriteWhitelistedUrls(res.body.toString("utf-8"), origin);
-    try {
-      const style = JSON.parse(json) as {
-        sources?: Record<string, { url?: string; tiles?: string[] }>;
-      };
-      for (const source of Object.values(style.sources ?? {})) {
-        const tileJsonUrl = source?.url;
-        if (!tileJsonUrl || !tileJsonUrl.includes("tiles.json")) continue;
-        // 样式里的 url 已被改写为本机代理地址，取回原始上游地址直查缓存
-        const upstreamMatch = tileJsonUrl.match(/[?&]u=(https:\/\/[^&]+)/);
-        const upstream = upstreamMatch ? upstreamMatch[1]! : tileJsonUrl;
-        const tj = await this.fetch(upstream);
-        if (!tj.ok) continue;
-        const parsed = JSON.parse(tj.body.toString("utf-8")) as { tiles?: string[] };
-        const tiles = (parsed.tiles ?? [])
-          .filter((t) => t.includes("{z}"))
-          .map((t) => this.rewriteWhitelistedUrls(t, origin));
-        if (tiles.length > 0) {
-          source.tiles = tiles;
-          delete source.url;
-        }
-      }
-      return { ok: true, body: JSON.stringify(style), contentType: "application/json" };
-    } catch {
-      // 样式结构异常时退回纯 URL 改写版本
-      return { ok: true, body: json, contentType: "application/json" };
-    }
+  /**
+   * 行迹底图样式：自建 Carto dark 栅格版（2026-10-25 起上游矢量 style 切换
+   * protomaps 版本化路径且瓦片数据残缺，MapLibre 解析新 style 挂起不 load；
+   * 栅格 dark_all 与原 dark-matter 同视觉系，raster source 简单可靠）。
+   * 瓦片经本机代理（含 @2x Retina），仍然磁盘缓存 + 离线可用。
+   */
+  darkStyleProxied(origin?: string): { ok: boolean; body: string; contentType: string } {
+    const base = (origin ?? "").replace(/\/$/, "");
+    const tileUp = "https://basemaps.cartocdn.com/dark_all/{z}/{x}/{y}@2x.png";
+    // 令牌保持明文：MapLibre 按 {z}/{x}/{y} 字面替换后再请求（encodeURIComponent 会把它们变成 %7Bz%7D 导致替换失效）
+    const u = encodeURIComponent(tileUp)
+      .replace("%7Bz%7D", "{z}")
+      .replace("%7Bx%7D", "{x}")
+      .replace("%7By%7D", "{y}");
+    const proxied = `${base}/travel-basemap/fetch?u=${u}&v=2`;
+    const style = {
+      version: 8,
+      name: "nextbot-carto-dark-raster",
+      sources: {
+        "carto-dark": {
+          type: "raster",
+          tiles: [proxied],
+          tileSize: 256,
+          minzoom: 0,
+          maxzoom: 20,
+          attribution: "",
+        },
+      },
+      layers: [
+        { id: "background", type: "background", paint: { "background-color": "#0d0f13" } },
+        {
+          id: "carto-dark-raster",
+          type: "raster",
+          source: "carto-dark",
+          paint: { "raster-opacity": 1, "raster-fade-duration": 240 },
+        },
+      ],
+    };
+    return { ok: true, body: JSON.stringify(style), contentType: "application/json" };
   }
-
   /**
    * 从已代理的样式里提取需要预热的资源。
    *

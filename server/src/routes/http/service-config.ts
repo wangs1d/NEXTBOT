@@ -6,8 +6,9 @@
 // TtsService 按密钥变化惰性重建，旁路 LLM 每次调用动态读 env）。
 // 与桌面端 byok 的 config.env 同键同义：OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL。
 //
-// 安全约定：所有响应只回脱敏 key 尾号（maskServiceKey），绝不下发完整密钥；
-// 路由位于 /api/* 周界鉴权 hook 之后（ACCESS_AUTH_REQUIRED=1 时须设备 token）。
+// 安全约定：keyTail 只回脱敏尾号供状态角标；已接入的完整密钥/授权码经 keyValue
+// 回显（路由位于 /api/* 周界鉴权 hook 之后，ACCESS_AUTH_REQUIRED=1 时须设备 token），
+// 客户端把它回填进输入框、默认打码显示（眼睛钮显隐）。
 
 import type { FastifyInstance } from "fastify";
 
@@ -40,6 +41,12 @@ function isValidHttpUrl(raw: string): boolean {
   }
 }
 
+/** 完整密钥回显（keyValue）：供已鉴权客户端把已存密钥/授权码回填进输入框（默认打码）。 */
+function fullSecret(value: string | undefined | null): string | null {
+  const k = (value ?? "").trim();
+  return k ? k : null;
+}
+
 export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceConfigRouteDeps): void {
   // 状态查询：持久化配置 + 当前生效绑定（含部署机 env 直配的情形），key 一律脱敏
   app.get("/api/service-config", async () => {
@@ -53,6 +60,7 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
         baseUrl: persisted?.model?.baseUrl ?? binding?.baseUrl ?? null,
         model: persisted?.model?.model ?? binding?.model ?? null,
         keyTail: maskServiceKey(persisted?.model?.apiKey ?? binding?.apiKey),
+        keyValue: fullSecret(persisted?.model?.apiKey ?? binding?.apiKey),
         source: persisted?.model ? "service-config" : binding ? "env" : null,
         updatedAt: persisted?.model?.updatedAt ?? null,
       },
@@ -60,6 +68,7 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
         provider: persisted?.tts?.provider ?? null,
         configured: Boolean(persisted?.tts?.apiKey) || Boolean(process.env.MINIMAX_API_KEY?.trim()),
         keyTail: maskServiceKey(persisted?.tts?.apiKey ?? process.env.MINIMAX_API_KEY),
+        keyValue: fullSecret(persisted?.tts?.apiKey ?? process.env.MINIMAX_API_KEY),
         updatedAt: persisted?.tts?.updatedAt ?? null,
       },
       mail: {
@@ -67,6 +76,7 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
         configured:
           Boolean(persisted?.mail?.pass) || Boolean(process.env.MAIL_WATCH_PASS?.trim()),
         keyTail: maskServiceKey(persisted?.mail?.pass ?? process.env.MAIL_WATCH_PASS),
+        keyValue: fullSecret(persisted?.mail?.pass ?? process.env.MAIL_WATCH_PASS),
         updatedAt: persisted?.mail?.updatedAt ?? null,
       },
     };

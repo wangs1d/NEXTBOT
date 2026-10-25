@@ -250,6 +250,90 @@ describe("buildDaysFast 每日完整性 (真实逐日规划)", () => {
     assert.ok(total >= 9, `顺延后总排入 ${total} 个景点，应明显多于单天容量 3~4`);
   });
 
+  it("顺延/补位不产生重复景点：同名景点全行程至多出现一次", async () => {
+    // 回归：旧实现顺延只把副本插进下一天、原件仍留在当天，同一点会
+    // 同天/跨天重复出现（线上「喀什古城景区一天两次」即此路径）
+    const { days } = await buildDays(
+      service,
+      3,
+      "2026-09-15",
+      attractionGrid(18, 0.02),
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(10),
+      CENTER,
+      PREFERENCES,
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [],
+      [],
+    );
+    const names = days.flatMap((d: { items: Array<{ type: string; name: string }> }) =>
+      d.items.filter((it) => it.type === "attraction").map((it) => it.name),
+    );
+    const unique = new Set(names);
+    assert.equal(
+      names.length,
+      unique.size,
+      `出现重复景点: ${names.filter((n: string, i: number) => names.indexOf(n) !== i).join("、")}`,
+    );
+  });
+
+  it("顺路闸：距住宿超合理通勤半径的景点移出编排并回报名单", async () => {
+    // 近点 2 个（酒店周边 ~1km）+ 远点 6 个（约 550km 外，模拟「新疆」混入全疆 POI）
+    const near = attractionGrid(2, 0.01);
+    const far = Array.from({ length: 6 }, (_, i) =>
+      mkPoi(`远方景点${i + 1}`, CENTER.latitude + 5, CENTER.longitude + i * 0.1, "attraction"),
+    );
+    const { days, farPoiNames } = await buildDays(
+      service,
+      2,
+      "2026-09-15",
+      [...near, ...far],
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(6),
+      CENTER,
+      PREFERENCES,
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [],
+      [],
+    );
+    const scheduled = days.flatMap((d: { items: Array<{ type: string; name: string }> }) =>
+      d.items.filter((it) => it.type === "attraction").map((it) => it.name),
+    );
+    assert.ok(scheduled.length > 0, "近点应正常排入");
+    for (const name of scheduled) {
+      assert.ok(!name.startsWith("远方景点"), `远点「${name}」不应被排入行程`);
+    }
+    assert.ok((farPoiNames ?? []).length === 6, `farPoiNames 应含 6 个远点，实际 ${farPoiNames?.length}`);
+  });
+
+  it("第 2 天起以「从酒店出发」开篇（起点锚定住宿）", async () => {
+    const { days } = await buildDays(
+      service,
+      3,
+      "2026-09-15",
+      attractionGrid(9),
+      [mkPoi("酒店1", CENTER.latitude, CENTER.longitude, "hotel")],
+      restaurantRing(8),
+      CENTER,
+      PREFERENCES,
+      TRAVEL_INFO,
+      PRICING_CTX,
+      [],
+      [],
+    );
+    for (let i = 1; i < days.length; i++) {
+      const first = days[i].items[0];
+      assert.ok(first, `Day${i + 1} 应有条目`);
+      assert.equal(first.type, "hotel", `Day${i + 1} 首条应为酒店出发锚点，实际 ${first.type}`);
+      assert.ok(
+        (first.tips ?? []).some((t: string) => t.includes("从酒店出发")),
+        `Day${i + 1} 首条应注明「从酒店出发」`,
+      );
+    }
+  });
+
   it("5 天行程 × 12 景点（池子紧张）：依然每天有安排，绝无空天", async () => {
     const { days } = await buildDays(
       service,

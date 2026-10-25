@@ -1,17 +1,11 @@
-import "dart:io";
-
 import "package:flutter/material.dart";
-import "package:package_info_plus/package_info_plus.dart";
 
-import "../../core/config/api_config.dart";
-import "../../core/services/access_auth_api.dart";
 import "../../core/services/feedback_api.dart";
 
 /// 用户菜单「反馈」弹窗 —— 轻量吐槽/建议入口,替代原全屏反馈页。
 ///
 /// 分区（弹窗内 tab 切换,不再跳页）:
 ///  - 写反馈:类型 chips + 吐槽正文（标题自动取正文首行） + 联系方式（选填）
-///    + 诊断信息（可折叠,默认全开）
 ///  - 我的反馈:已提交记录与处理状态;管理员回复同时走站内信实时通知
 ///
 /// 提交走控制面（POST /api/feedback,FeedbackApi）,管理员在后台流转状态。
@@ -45,15 +39,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
   String _type = "bug";
   bool _submitting = false;
 
-  // —— 诊断信息开关（默认全开,只提交勾选项） ——
-  bool _includeVersion = true;
-  bool _includePlatform = true;
-  bool _includeDeviceId = true;
-  bool _includeServer = true;
-
-  /// 真实客户端版本（pubspec version,弹窗打开时异步读取）。
-  String _appVersion = "";
-
   bool _loadingHistory = true;
   List<FeedbackRecord> _history = const <FeedbackRecord>[];
 
@@ -61,13 +46,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
   void initState() {
     super.initState();
     _api = widget.api ?? FeedbackApi();
-    PackageInfo.fromPlatform()
-        .then((PackageInfo info) {
-          if (mounted) {
-            setState(() => _appVersion = info.version);
-          }
-        })
-        .catchError((Object _) {});
     _reloadHistory();
   }
 
@@ -109,7 +87,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
       title: _deriveTitle(content),
       description: content,
       contact: _contactCtrl.text.trim(),
-      diagnostics: _collectDiagnostics(),
     );
     if (!mounted) return;
     setState(() => _submitting = false);
@@ -119,18 +96,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
     } else {
       _toast(res.error ?? "提交失败，请检查服务连接");
     }
-  }
-
-  Map<String, Object> _collectDiagnostics() {
-    return <String, Object>{
-      if (_includeVersion)
-        "客户端版本": _appVersion.isEmpty ? "unknown" : _appVersion,
-      if (_includePlatform)
-        "操作系统": "${Platform.operatingSystem} ${Platform.operatingSystemVersion}",
-      if (_includeDeviceId)
-        "设备标识": AccessCredentialStore.instance.deviceId,
-      if (_includeServer) "服务地址": ApiConfig.httpBase,
-    };
   }
 
   void _toast(String message) {
@@ -190,7 +155,7 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
               ),
               const SizedBox(height: 14),
               if (_tab == _FeedbackTab.write)
-                _buildWriteForm(te, cs)
+                _buildWriteForm()
               else
                 _buildHistoryTab(te, cs),
             ],
@@ -202,7 +167,7 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
 
   // —— 写反馈 ——
 
-  Widget _buildWriteForm(TextTheme te, ColorScheme cs) {
+  Widget _buildWriteForm() {
     return Flexible(
       child: SingleChildScrollView(
         child: Column(
@@ -250,7 +215,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
                 counterText: "",
               ),
             ),
-            _buildDiagnosticsSection(te, cs),
             const SizedBox(height: 4),
             FilledButton(
               onPressed: _submitting ? null : _submit,
@@ -265,65 +229,6 @@ class _FeedbackDialogState extends State<FeedbackDialog> {
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildDiagnosticsSection(TextTheme te, ColorScheme cs) {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        tilePadding: EdgeInsets.zero,
-        childrenPadding: const EdgeInsets.only(bottom: 4),
-        dense: true,
-        title: Text(
-          "诊断信息（默认随反馈提交，可逐项关闭）",
-          style: te.bodySmall?.copyWith(color: cs.onSurfaceVariant),
-        ),
-        children: <Widget>[
-          _diagTile(
-            value: _includeVersion,
-            onChanged: (bool v) => setState(() => _includeVersion = v),
-            label: "客户端版本",
-            detail: _appVersion.isEmpty ? "读取中…" : _appVersion,
-          ),
-          _diagTile(
-            value: _includePlatform,
-            onChanged: (bool v) => setState(() => _includePlatform = v),
-            label: "操作系统",
-            detail:
-                "${Platform.operatingSystem} ${Platform.operatingSystemVersion}",
-          ),
-          _diagTile(
-            value: _includeDeviceId,
-            onChanged: (bool v) => setState(() => _includeDeviceId = v),
-            label: "设备标识",
-            detail: AccessCredentialStore.instance.deviceId,
-          ),
-          _diagTile(
-            value: _includeServer,
-            onChanged: (bool v) => setState(() => _includeServer = v),
-            label: "服务地址",
-            detail: ApiConfig.httpBase,
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _diagTile({
-    required bool value,
-    required ValueChanged<bool> onChanged,
-    required String label,
-    required String detail,
-  }) {
-    return CheckboxListTile(
-      value: value,
-      onChanged: (bool? v) => onChanged(v ?? false),
-      controlAffinity: ListTileControlAffinity.leading,
-      contentPadding: EdgeInsets.zero,
-      dense: true,
-      title: Text(label),
-      subtitle: Text(detail, maxLines: 1, overflow: TextOverflow.ellipsis),
     );
   }
 

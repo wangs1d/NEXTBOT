@@ -1,30 +1,28 @@
 /**
- * 晚间 digest 服务（Task 15 场景A 生活节律）——「今日回顾 + 明日预告」。
+ * 晚间 digest 服务（Task 15 场景A 生活节律）——「明日速览」。
  *
  * 与晨报（MorningBriefingService）互补：晨报面向"今天怎么安排"，晚间 digest
- * 面向"今天过了什么 + 明天要准备什么"。全部确定性聚合，零 LLM：
- *   - 今日回顾：journal 当日记录要点（DailyJournalService.readTodayLines）
- *   - 明日预告：明日行程（ScheduleTaskService 次日任务）
- *              + 次日天气与预警（WeatherService.getBrief().tomorrow + 预警检测）
- *              + 明日穿衣（buildClothingAdvice 同源）
+ * 只面向"明天要准备什么"。全部确定性聚合，零 LLM：
+ *   - 明日行程（ScheduleTaskService 次日任务 + 各预告段时刻）
+ *   - 次日天气与预警（WeatherService.getBrief().tomorrow + 预警检测）
+ *   - 明日穿衣（buildClothingAdvice 同源）
+ *   - 截止事项 DDL L2 档（DdlRadarService.forEvening）
  *
  * 送达链路参考晨报：调度器（EveningDigestScheduler）到点触发 → 装配层
  * onDigestTriggered → WS 推送（ServerEventType.EveningDigest）。
  *
- * 2026-10-13 定调：本 digest 即「睡前备忘」——narrationText 是唯一文案源
+ * 2026-10-13 定调：本 digest 即「明日速览」（原名「睡前备忘」，2026-10-24 与
+ * 客户端卡名对齐）——narrationText 是唯一文案源
  * （通知/卡片/口播路径统一），只说「明天的事」+ 可行动的天气，活人感短句。
+ * 2026-10-24 收敛（用户拍板）：删「今日回顾」与「行程超支」两块——今日回顾
+ * 从来不进文案也不上卡片（纯白算），超支属消费提醒不进睡前场景。
  */
 
-import type { DailyJournalService, JournalHit } from "./daily-journal-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { DdlItem } from "./ddl-radar-service.js";
 import { buildClothingAdvice, detectSevereWeatherAlerts } from "./weather-service.js";
 import type { WeatherService } from "./weather-service.js";
-import type { WeatherPrefsService } from "./weather-prefs-service.js";
-import type { TravelBudgetAlert } from "./travel-budget-guard-service.js";
-
-/** 今日回顾：journal 当日要点（最多呈现条数） */
-const TODAY_HIGHLIGHT_MAX = 6;
+import type { WeatherLocation, WeatherPrefsService } from "./weather-prefs-service.js";
 
 export interface EveningDigestScheduleItem {
   id: string;
@@ -49,11 +47,9 @@ export interface EveningDigestTomorrowWeather {
 
 export interface EveningDigest {
   date: string;
-  /** 今日回顾：journal 当日记录要点（时间 + 角色 + 首句） */
-  todayHighlights: JournalHit[];
-  /** 明日预告：行程条目（2026-10-16 口径：日程统一叫「行程」） */
+  /** 明日行程条目（2026-10-16 口径：日程统一叫「行程」） */
   tomorrowSchedule: EveningDigestScheduleItem[];
-  /** 明日预告：次日天气（未配置天气位置时 null） */
+  /** 次日天气（既无天气位置偏好、也无定位兜底时 null） */
   tomorrowWeather: EveningDigestTomorrowWeather | null;
   /**
    * 明日穿衣建议（2026-10-16：早间简报的天气/穿衣迁来睡前提醒）。
@@ -61,11 +57,6 @@ export interface EveningDigest {
    * 以明天最高温定层级、明天降水/天气码定雨具等提示；无明日天气时 null。
    */
   outfitTip: string | null;
-  /**
-   * 行程超支提醒（travel 双端⑥）：今日在行程中且当日消费超过预算档日上限时
-   * 由 TravelBudgetGuardService 给出；无行程/无档位/未超支 → null（整块省略）。
-   */
-  budgetAlert: TravelBudgetAlert | null;
   /** 口语化播报文本（供 TTS / 消息气泡） */
   narrationText: string;
   /**
@@ -86,10 +77,16 @@ export interface DdlRadarLike {
 }
 
 export type EveningDigestDeps = {
-  journalService?: DailyJournalService | null;
   scheduleTaskService?: ScheduleTaskService;
   weatherService?: WeatherService;
   weatherPrefsService?: WeatherPrefsService;
+  /**
+   * 天气定位兜底（2026-10-23）：`weatherPrefsService` 只有 PUT /weather/prefs 一个
+   * 写入口、客户端从不调用，于是明日速览常年「天气我这儿没真实数据」。装配层
+   * 在这里注入被动定位来源（位置历史的最新定位样本）。
+   * 与晨报不同，睡前是后台定时路径：不做按需 GPS 请求（会唤醒手机并等 12s）。
+   */
+  locationProvider?: (sessionId: string) => Promise<WeatherLocation | null>;
   /**
    * 文案生成 agent（2026-10-13 定调：文案交给 agent，不硬编码）。
    * 传入结构化的明日信息，agent 动态产出睡前文案；未注入/失败/空输出
@@ -108,12 +105,6 @@ export type EveningDigestDeps = {
    * 文案只受睡前 prompt 自身约束。
    */
   soulProvider?: (sessionId: string) => string | null;
-  /**
-   * 行程预算守门取数口（travel 双端⑥）：装配层组装 TravelBudgetGuardService
-   * 闭包（行程冷层 + 订单库）；今日在行程中且当日消费超档 → 返回 alert，
-   * 否则 null。未注入 = 不做预算块。
-   */
-  travelBudgetProvider?: (sessionId: string) => Promise<TravelBudgetAlert | null>;
   /**
    * DDL 雷达（大学生线 L2 档）：明日截止事项取数口。未注入 = 不做 DDL 块。
    * 只读扫描，不推送——投递由本服务自身的睡前出口完成，避免与承诺板
@@ -171,31 +162,52 @@ function sanitizeNarration(raw: string): string {
 export class EveningDigestService {
   constructor(private readonly deps: EveningDigestDeps = {}) {}
 
-  /** 生成晚间 digest（确定性聚合，零 LLM；任一源缺失/失败 → 该块省略） */
-  async generateDigest(sessionId: string): Promise<EveningDigest> {
-    const now = new Date();
-    const [todayHighlights, tomorrowSchedule, tomorrowBundle, budgetAlert] = await Promise.all([
-      this.fetchTodayHighlights(sessionId).catch(() => [] as JournalHit[]),
+  /**
+   * 生成晚间 digest（确定性聚合，零 LLM；任一源缺失/失败 → 该块省略）。
+   * opts.previewDate（YYYY-MM-DD，被预告的那天）：跨零点补推用——把「今天」
+   * 虚拟成 previewDate 前一天，digest.date / 明日行程筛选 / 文案日期标签随之
+   * 对齐（不传 = 实时口径，明天 = 真实明天）。DDL 块是真实时钟扫描，补推口径
+   * 下 tier 时点错位，整块省略。
+   */
+  async generateDigest(
+    sessionId: string,
+    opts: { previewDate?: string } = {},
+  ): Promise<EveningDigest> {
+    const previewMatch = /^(\d{4})-(\d{2})-(\d{2})$/.exec((opts.previewDate ?? "").trim());
+    // 虚拟今天 = 被预告日前一天（时刻取正午；生成逻辑只看日期不看时刻）
+    const now = previewMatch
+      ? new Date(Number(previewMatch[1]), Number(previewMatch[2]) - 1, Number(previewMatch[3]) - 1, 12)
+      : new Date();
+    const tomorrowKey = localDateKey(
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
+    );
+    const [tomorrowSchedule, tomorrowBundle] = await Promise.all([
       this.fetchTomorrowSchedule(sessionId, now).catch(() => [] as EveningDigestScheduleItem[]),
-      this.fetchTomorrowBundle(sessionId).catch(() => ({
-        weather: null,
-        outfitTip: null,
-      })),
-      this.fetchBudgetAlert(sessionId).catch(() => null),
+      this.fetchTomorrowBundle(sessionId, tomorrowKey).catch((e) => {
+        // 天气块整块静默省略过太多次（Open-Meteo 抖动 / 无定位），留一行可查痕迹
+        console.warn(
+          `[EveningDigest] 明日天气块省略：${e instanceof Error ? e.message : String(e)}`,
+        );
+        return {
+          weather: null,
+          outfitTip: null,
+        };
+      }),
     ]);
 
     const digest: EveningDigest = {
       date: localDateKey(now),
-      todayHighlights,
       tomorrowSchedule,
       tomorrowWeather: tomorrowBundle.weather,
       outfitTip: tomorrowBundle.outfitTip,
-      budgetAlert,
       narrationText: "",
     };
-    // L2 档：明天到期 + 今天已过期未交（过期项按时间自然排在前面）
-    const ddl = this.fetchDeadlineReminders(sessionId);
-    if (ddl.length > 0) digest.deadlineReminders = ddl;
+    // L2 档：明天到期 + 今天已过期未交（过期项按时间自然排在前面）。
+    // 补推口径（previewDate）下 radar 按真实时钟分 tier，时点错位 → 省略
+    if (!previewMatch) {
+      const ddl = this.fetchDeadlineReminders(sessionId);
+      if (ddl.length > 0) digest.deadlineReminders = ddl;
+    }
     digest.narrationText = await this.composeNarrationText(sessionId, digest);
     return digest;
   }
@@ -211,12 +223,6 @@ export class EveningDigestService {
     } catch {
       return [];
     }
-  }
-
-  /** 行程超支提醒取数（travel 双端⑥）：未注入 provider 或判定不超支 → null */
-  private async fetchBudgetAlert(sessionId: string): Promise<TravelBudgetAlert | null> {
-    if (!this.deps.travelBudgetProvider) return null;
-    return await this.deps.travelBudgetProvider(sessionId);
   }
 
   /**
@@ -279,7 +285,6 @@ export class EveningDigestService {
     ];
     if (weatherLine) dataLines.push(`- 明天天气：${weatherLine}`);
     if (d.outfitTip) dataLines.push(`- 明天穿衣：${d.outfitTip}`);
-    if (d.budgetAlert) dataLines.push(`- 行程消费提醒：${budgetAlertFact(d.budgetAlert)}`);
     if (d.deadlineReminders && d.deadlineReminders.length > 0) {
       dataLines.push(`- 截止事项（必须提）：${formatDeadlineFacts(d.deadlineReminders)}`);
     }
@@ -295,10 +300,8 @@ export class EveningDigestService {
       "写法：",
       "- 一到两句，短句。只挑最早或最要紧的那件事说，别把日程从头到尾念一遍。" +
         "时间要口语化，比如「九点半有个周会」，不要写成「9:30 项目周会」这种条目。",
-      "- 明天天气和穿衣要说（这是睡前备忘的正经内容，不是可省项）：预警优先；" +
+      "- 明天天气和穿衣要说（这是明日速览的正经内容，不是可省项）：预警优先；" +
         "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。",
-      "- 有行程消费提醒的话必须带上一句（今天花超了这种事睡前得说）：口语化说超了多少，" +
-        "像「今天在成都花了九百多，超预算不少」这样，别念数字报表，也别责备人。",
       "- 有截止事项的话必须提，这是睡前最该交代的一句：说明天/今天什么时候要交什么，" +
         "像「明天下午三点前那个数据结构的作业得交了」；超过两件只说最紧的那一件+一共几件，" +
         "别把清单念一遍，也别加「别忘了」「切记」这类催促腔。",
@@ -309,19 +312,7 @@ export class EveningDigestService {
     ].join("\n");
   }
 
-  /** 今日回顾 1/2：journal 当日记录要点（按时间顺序，U/A/fact 行精简） */
-  private async fetchTodayHighlights(sessionId: string): Promise<JournalHit[]> {
-    if (!this.deps.journalService) return [];
-    const lines = await this.deps.journalService.readTodayLines(sessionId);
-    // 回顾要点优先保留 user/fact 行（用户做了什么/说了什么），assistant 行次之
-    const ranked = [...lines].sort((a, b) => {
-      const rank = (h: JournalHit) => (h.role === "user" ? 0 : h.role === "fact" ? 1 : 2);
-      return rank(a) - rank(b);
-    });
-    return ranked.slice(0, TODAY_HIGHLIGHT_MAX);
-  }
-
-  /** 明日预告 1/2：次日行程（schedule 服务） */
+  /** 次日行程（schedule 服务） */
   private async fetchTomorrowSchedule(
     sessionId: string,
     now: Date,
@@ -370,28 +361,30 @@ export class EveningDigestService {
     }
   }
 
-  /**
-   * 明日预告 2/2：次日天气 + 预警检测 + 明日穿衣建议（weather-service 每日数据）。
+  /** 次日天气 + 预警检测 + 明日穿衣建议（weather-service 每日数据）。
    * 穿衣复用 buildClothingAdvice（weather_brief 定时任务同源）：以明天最高温定
    * 衣物层级、明天降水概率/天气码定雨具防滑提示；与天气块同取自一次 getBrief。
+   * 天气按日历日期从 brief.daily 取「被预告那天」（previewDateKey）：跨零点补推
+   * 时 brief.tomorrow 指向真实明天，日期已错位不能再用；当日无数据 → 省略。
    */
   private async fetchTomorrowBundle(
     sessionId: string,
+    previewDateKey: string,
   ): Promise<{ weather: EveningDigestTomorrowWeather | null; outfitTip: string | null }> {
-    const { weatherService, weatherPrefsService } = this.deps;
-    if (!weatherService || !weatherPrefsService) {
+    const { weatherService } = this.deps;
+    if (!weatherService) {
       return { weather: null, outfitTip: null };
     }
-    const prefs = weatherPrefsService.get(sessionId);
-    if (!prefs) return { weather: null, outfitTip: null };
+    const loc = await this.resolveWeatherLocation(sessionId);
+    if (!loc) return { weather: null, outfitTip: null };
     const brief = await weatherService.getBrief(
-      prefs.latitude,
-      prefs.longitude,
-      prefs.timezone || "Asia/Shanghai",
-      prefs.label,
+      loc.latitude,
+      loc.longitude,
+      loc.timezone || "Asia/Shanghai",
+      loc.label,
     );
-    if (!brief.tomorrow) return { weather: null, outfitTip: null };
-    const t = brief.tomorrow;
+    const t = brief.daily?.find((d) => d.date === previewDateKey) ?? null;
+    if (!t) return { weather: null, outfitTip: null };
     const weather: EveningDigestTomorrowWeather = {
       text: t.weatherText,
       minC: t.minC,
@@ -410,6 +403,25 @@ export class EveningDigestService {
     return { weather, outfitTip };
   }
 
+  /** 明日天气的定位来源：用户显式保存的天气位置 > 装配层的被动定位兜底 */
+  private async resolveWeatherLocation(sessionId: string): Promise<WeatherLocation | null> {
+    const prefs = this.deps.weatherPrefsService?.get(sessionId);
+    if (prefs) {
+      return {
+        latitude: prefs.latitude,
+        longitude: prefs.longitude,
+        timezone: prefs.timezone,
+        label: prefs.label,
+      };
+    }
+    const live = await this.deps.locationProvider?.(sessionId);
+    if (!live) {
+      console.log("[EveningDigest] 无天气位置偏好、无可用定位 → 明日天气块省略");
+      return null;
+    }
+    return live;
+  }
+
   /**
    * 确定性兜底文案（LLM 未注入/失败/空输出时降级用，不再是文案主源）。
    * 2026-10-16 口径更新（天气/穿衣自早间简报迁来）：睡前文案说「明天的事」+
@@ -423,11 +435,10 @@ export class EveningDigestService {
 
     // 明天没安排：天气穿衣照说，没数据才干脆的不打扰（bit 去掉「明天」主语避免重复）
     if (n === 0) {
-      const tail = d.budgetAlert ? ` ${budgetAlertBit(d.budgetAlert)}` : "";
       if (bit) {
-        return `明天没安排，${bit.replace(/^明天/, "")}${tail}${ddlBit}`;
+        return `明天没安排，${bit.replace(/^明天/, "")}${ddlBit}`;
       }
-      return `明天没安排，想睡就多睡会儿。${tail}${ddlBit}`;
+      return `明天没安排，想睡就多睡会儿。${ddlBit}`;
     }
 
     const first = items[0]!;
@@ -448,10 +459,6 @@ export class EveningDigestService {
     if (bit) {
       line += ` ${bit}`;
     }
-    // 行程超支（travel 双端⑥）：要紧事，兜底文案直接说
-    if (d.budgetAlert) {
-      line += ` ${budgetAlertBit(d.budgetAlert)}`;
-    }
     // DDL L2 档：明天要交的（兜底模板也要交代，不能只有 LLM 版本才有）
     if (ddlBit) line += ddlBit;
     return line;
@@ -471,17 +478,6 @@ function deadlineBit(items: DdlItem[] | undefined): string {
       : `今天 ${hm} 前`;
   const rest = items.length > 1 ? `，另外还有 ${items.length - 1} 项要交` : "";
   return ` ${when}要交「${first.title}」${rest}。`;
-}
-
-/** 超支事实行（LLM 提示词数据段用）：目的地/第几天/花费/档位上限，供 agent 转述 */
-function budgetAlertFact(a: TravelBudgetAlert): string {
-  return `用户在${a.destination}的行程今天是第 ${a.dayIndex}/${a.totalDays} 天，` +
-    `当日消费 ${a.spentToday.toFixed(0)} 元，已超过该行程预算档的每日上限 ${a.dailyCap.toFixed(0)} 元`;
-}
-
-/** 超支一句（确定性兜底文案用）：口语短句，不念报表 */
-function budgetAlertBit(a: TravelBudgetAlert): string {
-  return `对了，今天在${a.destination}花了 ${a.spentToday.toFixed(0)} 块，比预算高出不少，明天省着点。`;
 }
 
 /**

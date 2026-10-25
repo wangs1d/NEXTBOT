@@ -2,6 +2,7 @@ import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { exitIfDevPortInUse, isDevListenConflict } from "./utils/port-in-use.js";
 import { getRuntimeConfig, getRuntimeTopologyConfig, getServerEdition, getHttpsRuntimeConfig } from "./config/env.js";
+import { writeServerInstance } from "./config/server-instance.js";
 import { startDevHttpsListener } from "./utils/dev-https.js";
 
 // remote 拓扑下本入口（embedded 单进程形态）不再使用：改用 runtime-main + gateway-main，
@@ -120,6 +121,8 @@ try {
   if (isDevListenConflict(err)) process.exit(0);
   throw err;
 }
+// 身份档案：端口被谁、用哪个数据根占着（启动器与 watchdog 据此做异数据根互斥）
+writeServerInstance(runtime.port, "embedded");
 
 // ─── HTTPS 双监听：浏览器访问 https://<本机IP>:3443/chat 时地址栏不再显示"不安全" ───
 // 与 HTTP 同实例同路由（含 wss）；HTTP 端口行为零变化，Flutter/WS 客户端不受影响。

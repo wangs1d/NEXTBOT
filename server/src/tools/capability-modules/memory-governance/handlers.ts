@@ -3,7 +3,6 @@ import { resolveActorId } from "../../../agent/actor-id.js";
 import type { InterestWatcher } from "../../../proactivity/interest-watcher.js";
 import type { AuditTrailService } from "../../../proactivity/audit-timeline.js";
 import type { GoalBoard } from "../../../proactivity/goal-board.js";
-import type { CommitmentBoard } from "../../../agentic-memory/commitment-board.js";
 import type { ShoppingCompareService } from "../../../services/shopping-compare-service.js";
 import { getAgenticMemoryRuntime } from "../../../agentic-memory/index.js";
 import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
@@ -11,13 +10,12 @@ import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
 /**
  * memory.forget / activity.timeline handler + 注册入口。
  *
- * forget 是「按关键词的定向遗忘」统一入口：五处可见台账（兴趣/降价监控/承诺/
+ * forget 是「按关键词的定向遗忘」统一入口：四处可见台账（兴趣/降价监控/
  * 计划盯梢/长期记忆）逐处尝试、逐处如实报告，清不了的（如未启用 Mem0）如实说明。
  * 语义记忆的溯源级作废（来源/断言级级联）走既有 memory.invalidate，本工具不重复。
  */
 export interface MemoryGovernanceModuleDeps {
   interestWatcher?: InterestWatcher | null;
-  commitmentBoard?: CommitmentBoard | null;
   shoppingCompareService?: ShoppingCompareService | null;
   goalBoard?: GoalBoard | null;
   auditTrailService?: AuditTrailService | null;
@@ -33,7 +31,6 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
     const cleared: Record<string, number | string[]> = {
       interests: 0,
       watches: 0,
-      commitments: 0,
       goals: 0,
       memories: 0,
     };
@@ -62,22 +59,6 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
         );
         for (const w of matched) await service.removeWatch(actorId, w.id);
         cleared.watches = matched.length;
-      }
-    }
-
-    // 3) 承诺（文本命中的未完结承诺 → superseded；不级联溯源，那归 memory.invalidate）
-    if (hitScope("commitment")) {
-      const board = deps.commitmentBoard;
-      if (!board) skipped.push("commitment(承诺板未装配)");
-      else {
-        const items = board.list({ actorId });
-        let n = 0;
-        for (const c of items) {
-          if (!c.text.toLowerCase().includes(kw)) continue;
-          const r = board.markSuperseded(c.id, "retract", `用户要求遗忘：${target}`);
-          if (!("error" in r)) n += 1;
-        }
-        cleared.commitments = n;
       }
     }
 
@@ -126,7 +107,7 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
       }
     }
 
-    const total = (cleared.interests as number) + (cleared.watches as number) + (cleared.commitments as number) + (cleared.goals as number) + (cleared.memories as number);
+    const total = (cleared.interests as number) + (cleared.watches as number) + (cleared.goals as number) + (cleared.memories as number);
     return {
       ok: true,
       target,

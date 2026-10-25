@@ -87,4 +87,45 @@ void main() {
     expect(sanitizer.ingest("\n[ts:2026-09-03 21:35:07]周四[now]"), "");
     expect(sanitizer.ingest("\n稍等"), "\n稍等");
   });
+
+  test("strips canonical NEXT_UP block", () {
+    expect(
+      stripAssistantProtocolFrames(
+        "行程给你排好了。\n[NEXT_UP_START]\n- 帮我订酒店\n- 看看天气\n[NEXT_UP_END]",
+      ).trim(),
+      "行程给你排好了。",
+    );
+  });
+
+  test("strips underscore-missing NEXT_UP variant (2026-10-24 leak)", () {
+    expect(
+      stripAssistantProtocolFrames(
+        "行程给你排好了。\n[NEXT_UPSTART]\n- 帮我订酒店\n- 看看天气\n[NEXT_UP_END]",
+      ).trim(),
+      "行程给你排好了。",
+    );
+    expect(
+      stripAssistantProtocolFrames(
+        "行程给你排好了。\n[NEXT_UPSTART]\n- 帮我订酒店\n[NEXT_UPEND]",
+      ).trim(),
+      "行程给你排好了。",
+    );
+  });
+
+  test("removes orphan NEXT_UP markers", () {
+    expect(
+      stripAssistantProtocolFrames("行程给你排好了。[NEXT_UP_END]").trim(),
+      "行程给你排好了。",
+    );
+  });
+
+  test("ingest strips NEXT_UP block arriving mid-stream", () {
+    final AssistantTextSanitizer sanitizer = AssistantTextSanitizer();
+
+    expect(sanitizer.ingest("行程给你排好了。\n"), "行程给你排好了。\n");
+    expect(
+      sanitizer.ingest("[NEXT_UPSTART]\n- 帮我订酒店\n[NEXT_UP_END]"),
+      "",
+    );
+  });
 }

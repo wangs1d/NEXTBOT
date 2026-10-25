@@ -578,6 +578,10 @@ function adaptStop(entry, dayIndex, stopIndex, prev) {
       tips: Array.isArray(entry.tips) ? entry.tips.map(str).filter(Boolean) : [],
       ticket: str(entry.priceInfo),
       hours: str(entry.hours),
+      photoTip: str(entry.photoTip),
+      pitfall: str(entry.pitfall),
+      bookingNote: str(entry.bookingNote),
+      rating: Number(entry.rating) || 0,
       addr: str(entry.address),
       reviews: entry.reviews || []
     }
@@ -656,6 +660,12 @@ function normalizePlan(raw) {
             description: str(it.description),
             tips: it.tips || [],
             highlights: it.highlights || [],
+            // S4 字段贯通：冷层用的是 openingHours，此前手机端读 .hours 恒空
+            hours: str(it.openingHours || it.hours),
+            photoTip: str(it.photoTip),
+            pitfall: str(it.pitfall),
+            bookingNote: str(it.bookingNote),
+            rating: Number(it.rating) || 0,
             images: it.images || [],
             splatUrl: str(it.splatUrl),
             reviews: it.reviews || [],
@@ -1187,6 +1197,10 @@ function renderDetail() {
 
   var rows = '';
   if (d.hours) rows += '<div class="irow"><span class="k">开放时间</span><span class="v">' + esc(d.hours) + '</span></div>';
+  if (d.rating) rows += '<div class="irow"><span class="k">评分</span><span class="v">' + d.rating.toFixed(1) + '</span></div>';
+  if (d.bookingNote) rows += '<div class="irow"><span class="k">预约</span><span class="v">' + esc(d.bookingNote) + '</span></div>';
+  if (d.photoTip) rows += '<div class="irow"><span class="k">出片</span><span class="v">' + esc(d.photoTip) + '</span></div>';
+  if (d.pitfall) rows += '<div class="irow"><span class="k">避雷</span><span class="v">' + esc(d.pitfall) + '</span></div>';
   if (d.ticket) rows += '<div class="irow"><span class="k">费用</span><span class="v">' + esc(d.ticket) + '</span></div>';
   if (d.addr) rows += '<div class="irow"><span class="k">位置</span><span class="v">' + esc(d.addr) + '</span></div>';
   // 经纬度禁令（2026-10-08 硬性要求）：坐标只进工具入参（地图/导航），不进任何用户可见内容

@@ -181,13 +181,12 @@ export function renderProactiveText(kind: string, ctx: TemplateCtx): string {
 }
 
 /**
- * 晨间简报 / 心跳回顾的卡片正文（多行模板拼接，零 LLM）。
+ * 晨间简报（morning_brief 映射规则）的卡片正文（多行模板拼接，零 LLM）。
  * 各段数据缺失自动跳段，全缺时输出一句极简开场（保证永不空洞）。
  */
 export function renderDigestCard(parts: {
   slot: string;
   tasks?: string[];
-  commitments?: string[];
   weather?: string | null;
   unread?: string[];
   interests?: string[];
@@ -198,9 +197,6 @@ export function renderDigestCard(parts: {
   lines.push(`${slotLabel}。今天的事我理了一遍：`);
   if (parts.tasks?.length) {
     lines.push(`· 日程：${parts.tasks.slice(0, 4).join("；")}${parts.tasks.length > 4 ? " 等" : ""}`);
-  }
-  if (parts.commitments?.length) {
-    lines.push(`· 答应别人的：${parts.commitments.slice(0, 3).join("；")}`);
   }
   if (parts.unread?.length) {
     lines.push(`· 未读消息：${parts.unread.slice(0, 3).join("、")}`);

@@ -125,7 +125,6 @@ export async function clearAllMemoryForActor(
   //    形式并存（journal 目录名下划线形写穿），单形式 purge 会漏（2026-10-04）。
   const components = getMemoryComponents();
   let ledgerCleared = 0;
-  let commitmentsCleared = 0;
   let provenanceCleared = 0;
   let bridgeLinksCleared = 0;
   let understandingCleared = 0;
@@ -135,7 +134,6 @@ export async function clearAllMemoryForActor(
   let lifeModelCleared = 0;
   for (const variant of actorIdVariants(actorId)) {
     ledgerCleared += components.ledger?.purgeActor(variant) ?? 0;
-    commitmentsCleared += components.commitmentBoard?.purgeActor(variant) ?? 0;
     provenanceCleared += components.provenance?.purgeActor(variant) ?? 0;
     bridgeLinksCleared += components.bridge?.purgeActor(variant) ?? 0;
     understandingCleared += components.understandingStore?.purgeActor(variant) ?? 0;
@@ -147,9 +145,9 @@ export async function clearAllMemoryForActor(
     // 侧表行不回收会变成孤儿且归档量统计失真。
     reinforcementCleared += getMemoryReinforcementStore()?.purgeActor(variant) ?? 0;
   }
-  if (ledgerCleared + commitmentsCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared + lifeModelCleared > 0) {
+  if (ledgerCleared + provenanceCleared + bridgeLinksCleared + understandingCleared + factsCleared + ftsCleared + reinforcementCleared + lifeModelCleared > 0) {
     console.info(
-      `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} commitments=${commitmentsCleared} ` +
+      `[memory-clear] agentic-memory 级联清理：ledger=${ledgerCleared} ` +
         `provenance=${provenanceCleared} bridgeLinks=${bridgeLinksCleared} understanding=${understandingCleared} facts=${factsCleared} fts=${ftsCleared} reinforcement=${reinforcementCleared} lifeModel=${lifeModelCleared}`,
     );
   }

@@ -23,9 +23,7 @@ export type LlmAuditStage =
   | "memory_write_decision"
   /** 低信号记忆批次摘要（flush 时） */
   | "memory_flush_summarize"
-  /** 对话承诺自动提取（方案 C：ingest 写入钩子旁路 LLM） */
-  | "commitment_extract"
-  /** 统一结构化抽取（P1-6：决策+记忆+承诺+纠正 单次调用） */
+  /** 统一结构化抽取（P1-6：决策+记忆+纠正 单次调用） */
   | "memory_unified_extract"
   /** 记忆库 LLM 定期审查（lifecycle：过时/矛盾/冗余 → 归档） */
   | "memory_llm_review"

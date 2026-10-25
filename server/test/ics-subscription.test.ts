@@ -164,7 +164,9 @@ async function withIcsService(
     service.stop();
     if (prev == null) delete process.env.SCHEDULE_TASKS_FILE;
     else process.env.SCHEDULE_TASKS_FILE = prev;
-    await rm(dir, { recursive: true, force: true });
+    // Windows 竞态：stop() 返回后 debounce 落盘句柄可能还挂着目录 → ENOTEMPTY。
+    // 用重试吸收，别让清理噪声冒充测试失败。
+    await rm(dir, { recursive: true, force: true, maxRetries: 6, retryDelay: 100 });
   }
 }
 

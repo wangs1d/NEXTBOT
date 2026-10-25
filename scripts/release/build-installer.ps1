@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   一键产出 Windows 安装包：客户端构建 → server dist → staging 组装 → Inno 编译。

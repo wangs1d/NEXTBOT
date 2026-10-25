@@ -56,12 +56,15 @@ export { PERSISTED_CLIENT_ID_FIELD, tagUserMessageClientId };
  * done 载荷已剥但线程未剥，残块实测进历史）。卡片标记（AGENT_RESULT_CARD）不剥
  * ——历史渲染依赖正文标记还原行程卡。
  */
-const THREAD_NEXT_UP_BLOCK_RE = /\[NEXT_UP_START\][\s\S]*?(?:\[NEXT_UP_END\]|$)/g;
-const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT_UP_(?:START|END)\]/g;
+// 2026-10-24：模型漏写下划线的变体 [NEXT_UPSTART]/[NEXT_UPEND] 同样要剥，
+// 否则协议块会随线程与历史回放漏到用户气泡（真机截图实证）。
+const THREAD_NEXT_UP_BLOCK_RE =
+  /\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)/gi;
+const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
 const THREAD_RENDER_DECL_RE = /^\s*\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?\s*$/gm;
 const THREAD_RENDER_DECL_INLINE_RE = /\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?/g;
 const THREAD_PROTOCOL_ANY_RE =
-  /\[NEXT_UP_(?:START|END)\]|\[RENDER_(?:HINT|AS)\]?\s*[:：]|<\s*\/?\s*system-reminder/i;
+  /\[NEXT[ _]?UP[ _]?(?:START|END)\]|\[RENDER_(?:HINT|AS)\]?\s*[:：]|<\s*\/?\s*system-reminder/i;
 
 function stripProtocolMarkersForThread(text: string): string {
   // <system-reminder>（2026-10-08 事故根源）：上游 harness 注入块被模型复读后
@@ -437,8 +440,49 @@ type TimelineEntry = { date: Date; roleLabel: string };
 // 每轮全变、永远全价计费）。绝对时间 + system 当前时间已足够推算相对时间。
 const TIMELINE_MAX_ENTRIES = 24;
 const TIMELINE_HEADER =
-  "【对话时间轴｜系统元数据】以下是此前各条消息的发生时间（本地时间），供时间关联推理使用；" +
-  "「现在」以 system 提示中的当前时间为准。本块是系统注入的元数据，不是对话内容，严禁复述或引用本块格式。";
+  "【对话时间轴｜系统元数据】以下是此前各条消息的发生时间（本地时间，按自然日分组；" +
+  "`- —— 日期 周X（今天/昨天/前天/N天前）——` 是分日行）。「现在」以 system 提示中的当前时间为准。" +
+  "跨天的内容必须按日期或「昨天/前天」叙述，禁止说成「刚才/刚刚/今天」；" +
+  "本块是系统注入的元数据，不是对话内容，严禁复述或引用本块格式。";
+/** 分日行前缀：`- —— 2026-10-22 周四（昨天）——`（2026-10-23 时间锚修复）。 */
+const TIMELINE_DAY_HEADER = "- —— ";
+
+/** 自然日键（本地时区，YYYY-MM-DD）：分组用。 */
+function dayKeyOf(date: Date): string {
+  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+}
+
+/**
+ * 相对日标签（2026-10-23「真实时间观」）：`（今天）/（昨天）/（前天）/（N天前）`。
+ *
+ * 绝对日期负责"可定位"，相对日负责"可叙述"——模型不必每轮自己做减法就能
+ * 说出"昨天你说的"而不是"刚才你说"。跨天不变、同一天内字节恒定（护 prefix cache）。
+ */
+function relativeDayLabel(date: Date, now: Date): string {
+  const a = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
+  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const diffDays = Math.round((b - a) / 86_400_000);
+  if (diffDays <= 0) return "（今天）";
+  if (diffDays === 1) return "（昨天）";
+  if (diffDays === 2) return "（前天）";
+  return `（${diffDays}天前）`;
+}
+
+/**
+ * 时间轴窗口选择（2026-10-23）：原实现硬 `slice(-24)`，跨天会话里窗口起点
+ * 常常落在「今天」中间，昨天/前天的消息被整段切掉，注释里那句「会话跨度」
+ * 也只剩最近几小时。改为**按天扩展**：先取最近 N 条，再把起点前移到该自然日
+ * 的第一条（最多再向前扩 N 条做上界保护），让最后两个自然日至少各有一天完整锚点。
+ */
+function selectTimelineWindow(timeline: TimelineEntry[]): TimelineEntry[] {
+  if (timeline.length <= TIMELINE_MAX_ENTRIES) return timeline;
+  const hardStart = Math.max(0, timeline.length - TIMELINE_MAX_ENTRIES * 2);
+  let from = timeline.length - TIMELINE_MAX_ENTRIES;
+  const edgeDay = dayKeyOf(timeline[from]!.date);
+  while (from > hardStart && dayKeyOf(timeline[from - 1]!.date) === edgeDay) from--;
+  return timeline.slice(from);
+}
+
 
 export type TimestampFreeLlmView = {
   /** 供本次 LLM 请求使用的消息视图：历史正文已去 `[ts:]` 前缀，末尾前注入时间轴 system 消息。 */
@@ -490,14 +534,8 @@ function stripPersistedClientIdField(
 
 export type TimestampFreeLlmViewOptions = {
   /**
-   * 是否注入【对话时间轴】system 块（2026-10-06 按需时间上下文闸）。
-   * 默认 true（旧行为）；时间闸关闭的轮次传 false——正文剥离照常执行
-   * （防 `[ts:]` 复述的根修不回退），只是不再附时间轴块。
-   */
-  includeTimeline?: boolean;
-  /**
-   * 注入层时间锚基准时刻（2026-10-09）：给 recap 行算「距今多久」用。
-   * 默认取当前时间；测试可注入固定时刻。仅影响视图克隆，存储不动。
+   * 注入层时间锚基准时刻（2026-10-09）：给 recap 行算「距今多久」、给时间轴算
+   * 「今天/昨天」用。默认取当前时间；测试可注入固定时刻。仅影响视图克隆，存储不动。
    */
   now?: Date;
 };
@@ -527,7 +565,6 @@ export function buildTimestampFreeLlmView(
   msgs: ChatCompletionMessageParam[],
   options: TimestampFreeLlmViewOptions = {},
 ): TimestampFreeLlmView {
-  const includeTimeline = options.includeTimeline !== false;
   const now = options.now ?? new Date();
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((raw) => {
@@ -586,9 +623,13 @@ export function buildTimestampFreeLlmView(
     return cloneMessageWithClientId(msg, stripped);
   });
 
-  // 时间轴注入点：最后一条 user 消息（本轮输入）之前。条目过少（<2，如 ephemeral 单轮）
-  // 时时间轴无增量价值，跳过注入，只保留剥离。includeTimeline=false（时间闸关）同样只剥离。
-  if (includeTimeline && timeline.length >= 2) {
+  // 时间锚注入点：最后一条 user 消息（本轮输入）之前。
+  //
+  // 2026-10-23（用户拍板）：**删除按需闸**。旧实现只在"本轮出现时间词"时才放行
+  // 【对话时间轴】，普通续聊轮历史消息零时间信息——模型只能把昨天当今天。
+  // 现在只要有 ≥2 条带时间的消息就**每轮注入完整时间轴**（按自然日分组 +
+  // 相对日标签）。成本可控：块就在最后一条 user 消息之前，前缀断点固定在这一小段。
+  if (timeline.length >= 2) {
     let lastUserIdx = -1;
     for (let i = view.length - 1; i >= 0; i--) {
       if (view[i]?.role === "user") {
@@ -596,22 +637,31 @@ export function buildTimestampFreeLlmView(
         break;
       }
     }
-    const rows = timeline.slice(-TIMELINE_MAX_ENTRIES).map((entry) => {
-      // 不再拼相对时间段：它每轮随请求时刻重算，导致整个时间轴块字节每轮变化，
-      // prefix cache 永远失配、按全价计费；绝对时间 + 当前时间足以推算相对时间。
-      return `- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}`;
-    });
-    // 会话跨度（2026-10-19 时间认知）：时间轴会被 TIMELINE_MAX_ENTRIES 截断，
-    // 截断后模型只看得到最近若干条，容易把"这段对话就是今天开始的"当成事实。
-    // 首行给出完整跨度，跨天/跨周会话的时间位置才立得住。
-    const first = timeline[0];
-    const last = timeline[timeline.length - 1];
-    if (first && last && timeline.length > 1) {
-      rows.unshift(
-        `- 本段对话跨度：${formatLocalDateTime(first.date)} → ${formatLocalDateTime(last.date)}` +
-          `（共 ${timeline.length} 条有时间的消息）`,
-      );
+    const first = timeline[0]!;
+    const last = timeline[timeline.length - 1]!;
+    const rows: string[] = [];
+    let currentDay = "";
+    for (const entry of selectTimelineWindow(timeline)) {
+      // 分日行：硬 slice 的窗口里「今天 14:30 / 今天 09:10 / 昨天 23:40」混排时，
+      // 模型只能逐行比较绝对时间；插一条 `—— 2026-10-22 周四（昨天）——` 把
+      // 「哪几条属于同一天、距现在几天」变成结构而非推理。
+      const dayKey = dayKeyOf(entry.date);
+      if (dayKey !== currentDay) {
+        currentDay = dayKey;
+        rows.push(
+          `${TIMELINE_DAY_HEADER}${dayKey} ${weekdayCn(entry.date)}${relativeDayLabel(entry.date, now)} ——`,
+        );
+      }
+      // 不再拼相对时间段（「3m ago」每轮重算会让整个块字节每轮变化）：
+      // 绝对时间 + 分日相对标签 + system 当前时间，已足够精确到分钟。
+      rows.push(`- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}`);
     }
+    // 会话跨度：时间轴会被窗口截断，截断后模型只看得到最近若干条，容易把
+    // "这段对话就是今天开始的"当成事实。首行给出完整跨度（含窗口外的首条）。
+    rows.unshift(
+      `- 本段对话跨度：${formatLocalDateTime(first.date)} → ${formatLocalDateTime(last.date)}` +
+        `（共 ${timeline.length} 条有时间的消息）`,
+    );
     const timelineMsg: ChatCompletionMessageParam = markTurnScaffold({
       role: "system",
       content: `${TIMELINE_HEADER}\n${rows.join("\n")}`,
@@ -1385,7 +1435,18 @@ export class ChatThreadStore {
       }
       // 延后落地：只暂存，不碰线程（碰了就等于在正常轮次中途改掉 messages 段前缀）。
       // 一并记录本次被吸收的待归纳行，折叠时精确移除，不误删其后新增的行。
-      this.applyEnhancedRecap(sessionId, merged, mergedPins, pendingLines);
+      //
+      // 「被吸收的行」= 传进来的遗留待归纳行 + **本次滑出消息刚写进待归纳区的原文行**。
+      // 后者不在 `pendingLines` 里（它由 buildSessionRecapMessage 从 droppedMessages 现算），
+      // 但 LLM 摘要吃的正是这批素材；漏掉它们会让已摘要的原文永久占着待归纳区，
+      // 而 `capPendingLines` 保旧弃新——真正还没归纳的行反被静默丢弃（2026-10-22 延后
+      // 改造引入，旧即时回写路径靠 `pending: []` 整体清空掩盖了）。
+      // 只在真的产出摘要行时才清原文；只返回钉（没归纳出摘要）时原文必须留着。
+      const coveredPending =
+        normalized.lines.length > 0
+          ? [...pendingLines, ...minimalRecapLinesFromDropped(droppedMessages)]
+          : pendingLines;
+      this.applyEnhancedRecap(sessionId, merged, mergedPins, coveredPending);
     } catch {
       // 静默失败：保留同步生成的已有摘要行、关键钉与待归纳区
     }

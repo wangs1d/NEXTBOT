@@ -87,6 +87,8 @@ export type ReminderPolicyInput = {
   source?: string;
   /** 用户作息画像（agent 对用户习惯的了解）：样本足够时个性化睡前/闹钟时刻，不足时回退默认 */
   habits?: ScheduleHabitHints | null;
+  /** 用户节奏因子（user-rhythm-store）：出门准备分钟按人给，证据不足回退默认 */
+  rhythm?: UserRhythmHints | null;
   now?: Date;
 };
 
@@ -102,6 +104,15 @@ export type ReminderPolicyInput = {
  *     行为比自述更接近真实）。
  */
 export type ScheduleHabitSource = "samples" | "explicit" | "chat" | "observed";
+
+/**
+ * 用户节奏因子（user-rhythm-store，2026-10-23 个性化闭环）：做事节奏按人给。
+ * departurePrepMin=null 表示证据不足，策略层回退默认（high=60/normal=40）。
+ */
+export type UserRhythmHints = {
+  departurePrepMin: number | null;
+  source?: "explicit" | "observed";
+};
 
 /**
  * 用户作息提示（来自睡眠样本链：AwarenessCortex 桌面无活动判定 → 按日样本 →
@@ -190,6 +201,7 @@ export function assessScheduleEventFactors(input: {
   location?: string;
   source?: string;
   travelMinutesOverride?: number;
+  rhythm?: UserRhythmHints | null;
 }): ScheduleEventFactors {
   const text = `${input.location ?? ""} ${input.description ?? ""}`;
   const importance: ScheduleEventImportance =
@@ -212,7 +224,14 @@ export function assessScheduleEventFactors(input: {
       : override != null && Number.isFinite(override) && override > 0 && override <= MAX_ROUTE_MINUTES
         ? Math.round(override)
         : TRAVEL_MINUTES[venue][importance];
-  const prepMinutes = importance === "high" ? 60 : 40;
+  // 出门准备分钟：用户节奏档案优先（对症下药），无实测/自述回退按重要度默认
+  const rhythmPrep = input.rhythm?.departurePrepMin;
+  const prepMinutes =
+    rhythmPrep != null && Number.isFinite(rhythmPrep) && rhythmPrep > 0 && rhythmPrep <= 240
+      ? Math.round(rhythmPrep)
+      : importance === "high"
+        ? 60
+        : 40;
   return { importance, venue, travelMinutes, prepMinutes };
 }
 
