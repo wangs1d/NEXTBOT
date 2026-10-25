@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<meta name="theme-color" content="#0B0C0E">
+<title>旅行回忆录 · TRAVEL MEMOIR</title>
+<style>
+/* ============================================================================
+   行后旅行回忆录长页（travel 双端⑦）。与 mobile/panel 同路由域、同设计语法。
+   - 数据只来自 GET /travel-map/memoir/data?planId=（服务端聚合真实落库数据）：
+     足迹（导航 arrive 落盘）+ 订单（travel/ride 域）+ 账本（区间支出）+ 照片
+   - 宁缺毋滥：任一源为空则该节整体隐藏；未打卡的站点不冒充「已到达」
+   - 铁律：全链路不含经纬度（回忆页只做回顾，不做导航）
+   - 打印/长图分享友好：单列纵向流，无固定视口约束
+   ========================================================================== */
+:root{
+  --bg:#000; --screen:#0B0C0E; --card:#17191F; --card2:#1F222A;
+  --line:rgba(255,255,255,.08); --line2:rgba(255,255,255,.16);
+  --txt:#F5F3EE; --t2:#9A9FA9; --t3:#626873;
+  --amber:#F5A552; --amber2:#D88434; --amberSoft:rgba(245,165,82,.14); --amberLine:rgba(245,165,82,.4);
+  --jade:#63AAA1; --ok:#63C98C;
+  --r:22px;
+  --num:-apple-system,'SF Pro Display','Segoe UI Variable Display','Segoe UI',system-ui,sans-serif;
+  --cn:'Noto Sans SC',-apple-system,'PingFang SC','Hiragino Sans GB','Microsoft YaHei',sans-serif;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{background:var(--bg);color:var(--txt);font-family:var(--cn);-webkit-font-smoothing:antialiased}
+img{display:block;width:100%;height:100%;object-fit:cover}
+button{font-family:inherit;color:inherit;background:none;border:none;cursor:pointer}
+.tnum{font-family:var(--num);font-variant-numeric:tabular-nums}
+.wrap{max-width:720px;min-height:100vh;margin:0 auto;background:var(--screen);padding:0 22px 64px}
+.eyebrow{font-family:var(--num);font-size:11px;letter-spacing:2.6px;color:var(--t3);text-transform:uppercase}
+
+/* ===== 封面 ===== */
+.cover{position:relative;height:280px;margin:0 -22px 0;overflow:hidden;background:linear-gradient(160deg,#1B1E26,#0B0C0E)}
+.cover img{width:100%;height:100%}
+.cover .fade{position:absolute;inset:0;background:linear-gradient(180deg,rgba(11,12,14,.15) 0%,rgba(11,12,14,.86) 88%)}
+.cover .cap{position:absolute;left:22px;right:22px;bottom:20px}
+.cover h1{font-size:27px;font-weight:600;letter-spacing:.6px;line-height:1.3}
+.dates{margin-top:8px;font-size:12px;color:var(--t2);letter-spacing:1px}
+.persona{display:inline-flex;align-items:center;gap:7px;margin-top:12px;font-size:11px;color:var(--amber);
+  border:1px solid var(--amberLine);background:var(--amberSoft);padding:5px 11px;border-radius:999px}
+
+/* ===== 总览 ===== */
+.intro{margin:20px 0 4px;font-size:14px;line-height:1.85;color:var(--t2)}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:18px 0 6px}
+.stat{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:13px 10px;text-align:center}
+.stat b{display:block;font-family:var(--num);font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.stat i{display:block;font-style:normal;font-size:10.5px;color:var(--t3);margin-top:4px;letter-spacing:.6px}
+.stat.amber b{color:var(--amber)}
+.stat.jade b{color:var(--jade)}
+
+/* ===== 节标题 ===== */
+.sec{margin-top:34px}
+.sec-h{display:flex;align-items:baseline;justify-content:space-between;gap:12px;margin-bottom:14px}
+.sec-h h2{font-size:16px;font-weight:600;letter-spacing:1px}
+.sec-h span{font-size:11px;color:var(--t3)}
+
+/* ===== 逐日时间线 ===== */
+.day{margin-bottom:22px}
+.day-h{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.day-h .d{font-family:var(--num);font-size:13px;font-weight:600;color:var(--amber);letter-spacing:1px;font-variant-numeric:tabular-nums}
+.day-h .rule{flex:1;height:1px;background:var(--line)}
+.day-h .cnt{font-size:11px;color:var(--t3)}
+.stop{display:flex;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}
+.stop:last-child{border-bottom:none}
+.stop .dot{flex:0 0 auto;width:11px;height:11px;margin-top:5px;border-radius:50%;
+  border:1.5px solid var(--line2);background:transparent}
+.stop.visited .dot{border-color:var(--ok);background:var(--ok)}
+.stop .body{flex:1;min-width:0}
+.stop .nm{font-size:14.5px;font-weight:500;line-height:1.45;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.stop .tag{font-size:10px;color:var(--t3);border:1px solid var(--line);border-radius:999px;padding:2px 8px;font-weight:400}
+.stop .chip-ok{font-size:10px;color:var(--ok);background:rgba(99,201,140,.12);border-radius:999px;padding:2px 8px;font-weight:400}
+.stop .meta{margin-top:5px;font-size:12px;color:var(--t2);line-height:1.6}
+.stop .price{color:var(--amber)}
+.stop .miss{color:var(--t3)}
+.shots{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin-top:9px}
+.shots a{position:relative;display:block;aspect-ratio:4/3;border-radius:10px;overflow:hidden;background:var(--card2)}
+.shots a.dead{pointer-events:none;filter:grayscale(1);opacity:.6}
+
+/* ===== 订单 / 账本 ===== */
+.ord{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid var(--line)}
+.ord:last-child{border-bottom:none}
+.ord .l{min-width:0}
+.ord .t{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.ord .s{margin-top:4px;font-size:11px;color:var(--t3)}
+.ord .amt{flex:0 0 auto;font-family:var(--num);font-size:14px;font-variant-numeric:tabular-nums;color:var(--txt)}
+.ledger-total{display:flex;align-items:flex-end;gap:8px;margin-bottom:14px}
+.ledger-total b{font-family:var(--num);font-size:30px;font-weight:600;color:var(--amber);font-variant-numeric:tabular-nums;line-height:1}
+.ledger-total i{font-style:normal;font-size:11.5px;color:var(--t3);padding-bottom:4px}
+.bar{margin-bottom:11px}
+.bar .row{display:flex;justify-content:space-between;font-size:12px;color:var(--t2);margin-bottom:5px}
+.bar .row em{font-style:normal;font-family:var(--num);font-variant-numeric:tabular-nums;color:var(--txt)}
+.bar .track{height:5px;border-radius:999px;background:var(--card2);overflow:hidden}
+.bar .fill{height:100%;border-radius:999px;background:linear-gradient(90deg,var(--amber2),var(--amber))}
+
+/* ===== 空态 / 错误 ===== */
+.state{padding:84px 24px;text-align:center}
+.state h3{font-size:17px;font-weight:600;margin-bottom:9px}
+.state p{font-size:12.5px;color:var(--t3);line-height:1.9}
+.state code{color:var(--amber);font-family:var(--num)}
+.hide{display:none!important}
+
+@media print{
+  body{background:#fff;color:#111}
+  .wrap{background:#fff}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <!-- 封面 -->
+  <div id="cover" class="cover hide">
+    <img id="coverImg" alt="">
+    <div class="fade"></div>
+    <div class="cap">
+      <div class="eyebrow">TRAVEL MEMOIR</div>
+      <h1 id="mTitle">旅行回忆录</h1>
+      <div class="dates tnum" id="mDates"></div>
+      <div class="persona hide" id="mPersona"></div>
+    </div>
+  </div>
+
+  <!-- 空态 / 错误态 -->
+  <div id="state" class="state hide">
+    <h3 id="stateTitle"></h3>
+    <p id="stateBody"></p>
+  </div>
+
+  <div id="main" class="hide">
+    <div class="intro" id="mIntro"></div>
+
+    <div class="stats">
+      <div class="stat jade"><b class="tnum" id="sVisited">0</b><i>已打卡</i></div>
+      <div class="stat"><b class="tnum" id="sStops">0</b><i>计划站点</i></div>
+      <div class="stat"><b class="tnum" id="sPhotos">0</b><i>照片</i></div>
+      <div class="stat amber"><b class="tnum" id="sOrders">0</b><i>订单支出</i></div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-h"><h2>足迹</h2><span id="fNote">绿色圆点＝导航「已到达」真实记录</span></div>
+      <div id="days"></div>
+    </div>
+
+    <div class="sec hide" id="secOrders">
+      <div class="sec-h"><h2>行程订单</h2><span id="oCount"></span></div>
+      <div id="orders"></div>
+    </div>
+
+    <div class="sec hide" id="secLedger">
+      <div class="sec-h"><h2>这趟花了多少</h2><span>区间内账本支出</span></div>
+      <div class="ledger-total"><b class="tnum" id="lTotal">¥0</b><i id="lCount"></i></div>
+      <div id="ledger"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+var $ = function (id) { return document.getElementById(id); };
+
+function esc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+/** 服务端绝对基址：同源直读（回忆页由应用内浏览器/WebView2 打开） */
+function apiBase() {
+  try { if (/^https?:/i.test(location.origin)) return location.origin; } catch (e) { /* about:blank */ }
+  return '';
+}
+function showState(title, body) {
+  $('main').classList.add('hide');
+  $('cover').classList.add('hide');
+  $('state').classList.remove('hide');
+  $('stateTitle').textContent = title;
+  $('stateBody').innerHTML = body;
+}
+function fmtTime(ms) {
+  if (!ms) return '';
+  var d = new Date(ms);
+  var p = function (n) { return (n < 10 ? '0' : '') + n; };
+  return p(d.getHours()) + ':' + p(d.getMinutes());
+}
+/** 图片 URL 白名单：只放本地资产/http(s)/同源路径，挡掉 javascript: 之类注入 */
+function safeSrc(u) {
+  var s = String(u || '');
+  return /^(https?:\/\/|file:\/\/|\/|data:image\/)/i.test(s) ? s : '';
+}
+
+function renderDays(days) {
+  var box = $('days');
+  box.innerHTML = (days || []).map(function (day, i) {
+    var stops = day.stops || [];
+    var visited = stops.filter(function (s) { return s.visited; }).length;
+    var rows = stops.map(function (s) {
+      var shots = (s.images || []).filter(safeSrc).slice(0, 3);
+      return '<div class="stop' + (s.visited ? ' visited' : '') + '">' +
+        '<span class="dot"></span><div class="body">' +
+        '<div class="nm">' + esc(s.name) +
+          (s.type ? '<span class="tag">' + esc(s.type) + '</span>' : '') +
+          (s.visited ? '<span class="chip-ok">打卡 ' + esc(fmtTime(s.arrivedAt)) + '</span>' : '') +
+        '</div>' +
+        '<div class="meta">' +
+          (s.priceInfo ? '<span class="price">' + esc(s.priceInfo) + '</span>' : '') +
+          (s.address ? (s.priceInfo ? ' · ' : '') + esc(s.address) : '') +
+          (!s.visited ? '<span class="miss">' + (s.priceInfo || s.address ? ' · ' : '') + '未记录到达</span>' : '') +
+        '</div>' +
+        (shots.length ? '<div class="shots">' + shots.map(function (u) {
+          return '<a href="' + esc(u) + '" target="_blank" rel="noopener"><img src="' + esc(u) + '" alt="" loading="lazy"></a>';
+        }).join('') + '</div>' : '') +
+        '</div></div>';
+    }).join('');
+    return '<div class="day">' +
+      '<div class="day-h"><span class="d">' + esc(day.date || ('第 ' + (i + 1) + ' 天')) + '</span>' +
+      '<span class="rule"></span><span class="cnt">' + visited + '/' + stops.length + ' 打卡</span></div>' +
+      rows + '</div>';
+  }).join('');
+}
+
+function renderOrders(orders) {
+  if (!orders || !orders.length) return;
+  $('secOrders').classList.remove('hide');
+  $('oCount').textContent = orders.length + ' 笔';
+  $('orders').innerHTML = orders.map(function (o) {
+    return '<div class="ord"><div class="l">' +
+      '<div class="t">' + esc(o.title || o.provider || '订单') + '</div>' +
+      '<div class="s">' + esc(o.dateKey || '') + (o.provider ? ' · ' + esc(o.provider) : '') + '</div>' +
+      '</div><div class="amt">' + (o.amountCny == null ? '—' : '¥' + Number(o.amountCny).toFixed(2)) + '</div></div>';
+  }).join('');
+}
+
+function renderLedger(ledger) {
+  if (!ledger || !ledger.byCategory || !ledger.byCategory.length) return;
+  $('secLedger').classList.remove('hide');
+  $('lTotal').textContent = '¥' + Number(ledger.totalExpense || 0).toFixed(2);
+  $('lCount').textContent = '共 ' + ledger.count + ' 笔支出';
+  var max = ledger.byCategory.reduce(function (m, c) { return Math.max(m, c.total); }, 0) || 1;
+  $('ledger').innerHTML = ledger.byCategory.map(function (c) {
+    return '<div class="bar"><div class="row"><span>' + esc(c.category) + '</span>' +
+      '<em>¥' + Number(c.total).toFixed(2) + '</em></div>' +
+      '<div class="track"><div class="fill" style="width:' + Math.max(4, Math.round(c.total / max * 100)) + '%"></div></div></div>';
+  }).join('');
+}
+
+function renderMemoir(m) {
+  $('state').classList.add('hide');
+  $('main').classList.remove('hide');
+
+  var cover = $('cover');
+  var src = safeSrc(m.coverImage);
+  if (src) { cover.classList.remove('hide'); $('coverImg').src = src; }
+  $('mTitle').textContent = (m.title || (m.destination + ' 之行'));
+  $('cover').querySelector('.eyebrow').textContent = 'TRAVEL MEMOIR · ' + (m.destination || '');
+  $('mDates').textContent = [m.startDate, m.endDate].filter(Boolean).join(' — ');
+  if (m.persona && m.persona.label) {
+    var p = $('mPersona');
+    p.classList.remove('hide');
+    p.textContent = m.persona.label + (m.persona.desc ? ' · ' + m.persona.desc : '');
+    p.title = m.persona.desc || '';
+  }
+  $('mIntro').textContent = m.intro || '';
+
+  var st = m.stats || {};
+  $('sVisited').textContent = st.visitedCount || 0;
+  $('sStops').textContent = st.totalStops || 0;
+  $('sPhotos').textContent = st.photoCount || 0;
+  $('sOrders').textContent = '¥' + Math.round(st.orderTotal || 0);
+  if (!st.visitedCount) $('fNote').textContent = '这趟没用导航，全部按计划展示';
+
+  renderDays(m.days);
+  renderOrders(m.orders);
+  renderLedger(m.ledger);
+  document.title = '旅行回忆录 · ' + (m.destination || '') + ' · ' + (m.title || '');
+}
+
+function load(planId) {
+  fetch(apiBase() + '/travel-map/memoir/data?planId=' + encodeURIComponent(planId), {
+    headers: { 'Accept': 'application/json' }
+  }).then(function (res) {
+    if (res.status === 404) throw { notFound: true };
+    if (!res.ok) throw { http: res.status };
+    return res.json();
+  }).then(renderMemoir).catch(function (err) {
+    if (err && err.notFound) {
+      showState('没找到这趟行程', '回忆录按 <code>?planId=</code> 定位，行程可能已过期清理。<br>请从应用内的行程卡重新进入。');
+    } else {
+      showState('回忆录暂时打不开', '数据服务没响应（' + esc((err && (err.http || err.message)) || '未知错误') + '）。<br>稍后重试即可，行程与订单数据都在本地。');
+    }
+  });
+}
+
+(function boot() {
+  var pm = /[?&]planId=([A-Za-z0-9_-]+)/.exec(location.search);
+  if (!pm) {
+    showState('未携带行程参数', '请从应用内的旅游卡片进入，<br>或带 <code>?planId=&lt;行程id&gt;</code> 打开本页。');
+    return;
+  }
+  load(pm[1]);
+})();
+</script>
+</body>
+</html>
