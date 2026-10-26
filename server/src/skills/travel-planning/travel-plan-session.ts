@@ -16,6 +16,8 @@ import type {
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
 import { extractWishlist, extractFoodWishlist, extractParty, paceForParty } from "./intent-parser.js";
 import { findReservationRule } from "./travel-poi-dossier.js";
+import { resolveOriginFromLocation } from "./travel-origin.js";
+import type { LocationCoordinator } from "../../services/location-coordinator.js";
 
 // ═══════════════════════════════════════════════════════════════════
 // 行程规划会话（v3 旅游界面 · Agent 驱动规划流）
@@ -280,6 +282,10 @@ export type PlanSession = {
   endDate?: string;
   /** 出发地（大交通实时价必需；未知则不报价，如实标「未含」） */
   origin?: string;
+  /** 出发地来源：located=按用户定位补的默认值（预算/简报如实标注，不冒充用户原话） */
+  originSource?: "located";
+  /** 用户定位解析出的默认出发地（会话创建时从 LocationCoordinator 最近缓存被动读取） */
+  locatedOrigin?: { city: string; region: string; locatedAt: number };
   /** 用户原始诉求（generate 时并入规划 input，extractPreferences 继续生效） */
   originalMessage: string;
   /** 已确认问答（id 命中的维度不再出卡） */
@@ -375,13 +381,21 @@ async function orchestrateTurn(session: PlanSession): Promise<Orchestration | nu
     session.answers.length > 0
       ? session.answers.map((a) => `- ${a.question}：${a.answer}`).join("\n")
       : "（暂无）";
+  const located = session.locatedOrigin;
+  const locAgeMin = located ? Math.floor((Date.now() - located.locatedAt) / 60_000) : 0;
+  const locAgeText =
+    locAgeMin < 60 ? `${Math.max(1, locAgeMin)} 分钟前` : `${Math.floor(locAgeMin / 60)} 小时前`;
+  const locationBlock = located
+    ? `【用户定位】${located.region ? `${located.region} · ` : ""}${located.city}（GPS 定位于 ${locAgeText}）。这是系统后台定位，不是用户说的话。\n`
+    : "";
 
   const system =
     "你是行程规划会话的编排器，逐轮决定「回复什么、信息还缺什么、下一张问题卡问什么」。" +
     `今天是 ${today}。\n` +
     `【当前已知】${knownStateText(session)}\n` +
-    `【已确认问答】\n${qa}\n\n` +
-    "只输出 JSON：\n" +
+    `【已确认问答】\n${qa}\n` +
+    locationBlock +
+    "\n只输出 JSON：\n" +
     '{"updates":{"destination":"目的地|null","origin":"出发城市|null","days":天数|null,"startDate":"YYYY-MM-DD|null","endDate":"YYYY-MM-DD|null"},' +
     '"answerUpdates":{"维度id":{"question":"维度名","answer":"用户给的答案"}},' +
     '"say":"口语回应","ready":false,' +
@@ -397,7 +411,7 @@ async function orchestrateTurn(session: PlanSession): Promise<Orchestration | nu
     "6. 每轮最多一问；options 2~6 个、每个 ≤8 字；multi 仅在确实可多选时 true；天数/日期类问题可给 placeholder（如「或直接说日期，如：10月1日出发」）并 allowNote=true。\n" +
     "7. 预算类问题的选项带档位词锚点（经济/舒适/品质/豪华），可加口语后缀（如「舒适 · 性价比」），保证下游规划引擎能识别。\n" +
     "8. 问得像朋友聊天，不要查户口：目的地+天数/日期之外，最多再挑 2 个有用的维度问（出发地/预算/大交通/同行人…按需取用），其余交给生成引擎。具体玩哪些景点、住哪家酒店、吃什么由下一步的图文筛选卡负责，绝对不要问这些。同行人类问题的 question.id 固定写 party，options 给 2~5 个同行人（一个人/情侣/朋友/带父母/带孩子…，选项要写成能认出同行关系的词，卡片才能顺手给出节奏推断）。同行人已知后绝不再单独问节奏：节奏按同行人自动定（情侣、家人→松弛；朋友→紧凑；独自→均衡），卡片会把推断结果显示出来让用户改。只有用户主动说「想紧凑/想放松」或与同行人明显矛盾时，在 say 里确认一句即可，不出节奏卡。\n" +
-    "8.1 大交通要按真实票价算，必须先有出发地：出发地未知时优先问「从哪儿出发」（question.id 固定用 origin，multi=false），选项可给几个常见城市或让用户直接说。用户明确表示不坐大交通/不用管交通，就不必再问。\n" +
+    "8.1 大交通要按真实票价算，必须先有出发地：用户没说出发地时，优先把【用户定位】城市当默认出发地——updates.origin 直接填该城市，say 里顺带自然说一句「按你的定位从X出发」，绝不出 origin 问题卡；只有【用户定位】缺失时才问「从哪儿出发」（question.id 固定用 origin，multi=false），选项可给几个常见城市或让用户直接说。用户明确表示不坐大交通/不用管交通，就不必再问。\n" +
     "9. 信息足够出方案时 ready=true 且 question=null（前提：目的地与天数/日期都已定；其余维度问到 1~2 个就够），不要为了凑进度而问。\n" +
     "10. progress.done=已确认维度数、total=预计总数（3~6）、summary 用「 · 」串已确认要点（如「新疆 · 5天 · 舒适」）。\n" +
     "11. say ≤40 字、口语化、不复读用户原话、不列清单；ready 时 say 表达「信息齐了，我来出方案」。";
@@ -608,6 +622,20 @@ function applyOriginAnswer(session: PlanSession): void {
   }
 }
 
+/**
+ * 出发地按定位兜底（2026-10-26）：编排器/正则都没拿到出发地、而会话创建时
+ * 解析到了用户定位城市 → 直接当默认出发地（标 located，简报/预算如实标注）。
+ * say 没提及时补一句说明——用户在兴义这类无直飞城市时，计价层会自动给
+ * 枢纽转机方案。回填后 filterQuestion 自然拦掉 origin 卡。
+ */
+export function backfillOriginFromLocation(session: PlanSession, say: string): string {
+  if (session.origin || !session.locatedOrigin) return say;
+  const { city } = session.locatedOrigin;
+  session.origin = city;
+  session.originSource = "located";
+  return say.includes(city) ? say : `${say}出发地按你的定位取${city}。`;
+}
+
 function applyAnswerUpdates(
   session: PlanSession,
   updates: Array<{ id: string; question: string; answer: string }>,
@@ -717,11 +745,12 @@ function fallbackTurn(session: PlanSession): PlanSessionTurn {
   const days = effectiveDays(session);
   const ready = Boolean(session.destination) && days != null;
   session.ready = ready;
-  const say = !session.destination
+  let say = !session.destination
     ? "想去哪儿玩？直接告诉我目的地。"
     : days == null
       ? `${session.destination}好地方！打算玩几天？说天数或日期都行。`
       : "信息差不多齐了，我来出一版方案。";
+  if (session.destination) say = backfillOriginFromLocation(session, say);
   session.history.push({ role: "assistant", content: say });
   return {
     ok: true,
@@ -1123,6 +1152,8 @@ async function runTurn(
   applyAnswerUpdates(session, orch.answerUpdates);
   applyOriginAnswer(session);
 
+  let ready = Boolean(session.destination) && orch.ready;
+  let say = backfillOriginFromLocation(session, orch.say);
   // 目的地换了：旧候选和勾选全部作废，重新出一版筛选卡
   if (session.destination !== prevDestination) {
     session.guide = undefined;
@@ -1131,9 +1162,6 @@ async function runTurn(
     session.extras = undefined;
     session.awaitingExtras = false;
   }
-
-  let ready = Boolean(session.destination) && orch.ready;
-  let say = orch.say;
   // ready 却天数/日期两头空：判不住，降回 gathering 并文字补问天数。
   if (ready && effectiveDays(session) == null) {
     ready = false;
@@ -1473,6 +1501,9 @@ async function generateDraft(
     ...(wish.food.length ? { foodWishlist: wish.food } : {}),
     ...(party ? { party } : {}),
     ...(session.origin ? { origin: session.origin } : {}),
+    ...(session.origin && session.originSource === "located" && session.locatedOrigin
+      ? { originRegion: session.locatedOrigin.region || undefined, originSource: "located" as const }
+      : {}),
     ...(session.startDate ? { startDate: session.startDate } : {}),
   });
   const planId = String(result.id ?? "");
@@ -1505,6 +1536,7 @@ async function generateDraft(
       ...(result.wishlistMissed?.length ? { wishlistMissed: result.wishlistMissed } : {}),
       slots: {
         ...(session.origin ? { origin: session.origin } : {}),
+        ...(session.originSource === "located" && session.origin ? { sources: { origin: "located" } } : {}),
         ...(session.startDate ? { startDate: session.startDate } : {}),
         ...(party ? { party } : {}),
         ...(result.preferences?.diningStyle
@@ -1625,7 +1657,7 @@ function requireService(
  */
 export function registerTravelPlanSessionRoutes(
   app: FastifyInstance,
-  deps: { travelPlanningService?: PlanningService },
+  deps: { travelPlanningService?: PlanningService; locationCoordinator?: LocationCoordinator },
 ): void {
   app.get("/travel/plan-session/_meta", async () => ({
     domain: "travel-plan-session",
@@ -1650,6 +1682,24 @@ export function registerTravelPlanSessionRoutes(
     }
     pruneSessions();
     const message = body.data.message.trim();
+    // 出发地按定位兜底（2026-10-26）：plan-session 是独立 HTTP 会话、没有 actorId，
+    // 这里被动读 LocationCoordinator 最近一次定位缓存（个人 agent 单用户语义，
+    // 多端在线取最新上报），逆地理出城市存会话——编排器与回填都据此用定位
+    // 出发地，不再反问「从哪个城市出发」。只读缓存，绝不向客户端要 GPS。
+    let locatedOrigin: PlanSession["locatedOrigin"];
+    if (deps.locationCoordinator) {
+      const latest = deps.locationCoordinator.getLatest();
+      if (latest) {
+        const resolved = await resolveOriginFromLocation(latest.payload).catch(() => null);
+        if (resolved) {
+          locatedOrigin = { ...resolved, locatedAt: latest.at };
+          console.log(
+            `[travel-plan-session] 出发地按定位兜底：${resolved.city}（${resolved.region || "未知省份"}，` +
+              `定位于 ${Math.round((Date.now() - latest.at) / 60_000)} 分钟前）`,
+          );
+        }
+      }
+    }
     const session: PlanSession = {
       id: newSessionId(),
       createdAt: Date.now(),
@@ -1663,6 +1713,7 @@ export function registerTravelPlanSessionRoutes(
       budgetApproved: false,
       weatherSent: false,
       guideSent: false,
+      ...(locatedOrigin ? { locatedOrigin } : {}),
     };
     sessions.set(session.id, session);
     const turn = await runTurn(session, deps.travelPlanningService);
@@ -1858,8 +1909,18 @@ export function registerTravelPlanSessionRoutes(
     try {
       const { budget, draft } = await generateDraft(session, deps.travelPlanningService!);
       const total = budget.total > 0 ? `¥${budget.total.toLocaleString("zh-CN")}` : "待核价";
-      const transportAmount = budget.items.find((i) => i.key === "transport")?.amount;
-      const transportNote = transportAmount ? "含往返大交通" : "大交通未含";
+      const transportItem = budget.items.find((i) => i.key === "transport");
+      const transportAmount = transportItem?.amount;
+      // 无直飞按枢纽转机计价时，say 里直接点明（「经贵阳转机」），明细在预算卡 note
+      const viaHub =
+        transportAmount != null
+          ? /转机（经(.+?)）/.exec(transportItem?.label ?? "")?.[1]
+          : undefined;
+      const transportNote = transportAmount
+        ? viaHub
+          ? `含往返大交通（经${viaHub}转机）`
+          : "含往返大交通"
+        : "大交通未含";
       const pendingNote = budget.pendingItems ? `，${budget.pendingItems} 项待核价未计入` : "";
       const verifyNote = draft.verification?.summary
         ? `；${draft.verification.summary}已列进最终方案`

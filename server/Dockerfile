@@ -22,7 +22,7 @@ COPY package.json package-lock.json ./
 COPY server ./server
 COPY agent-world ./agent-world
 RUN npm config set registry "${NPM_REGISTRY}" && npm ci
-RUN npm run build -w private-ai-agent-server
+RUN npm run build -w nextbot-server
 
 FROM node:22-alpine AS runner
 WORKDIR /app
@@ -32,8 +32,8 @@ RUN mkdir -p /app/data /app/logs && chown -R node:node /app/data /app/logs
 COPY --from=deps --chown=node:node /app/node_modules ./node_modules
 COPY --from=deps --chown=node:node /app/server/package.json ./package.json
 # 显式提供 workspace 包与其运行时依赖，避免软链接在精简镜像中失效
-COPY --from=build --chown=node:node /app/agent-world/package.json ./node_modules/@private-ai-agent/agent-world/package.json
-COPY --from=build --chown=node:node /app/agent-world/dist ./node_modules/@private-ai-agent/agent-world/dist
+COPY --from=build --chown=node:node /app/agent-world/package.json ./node_modules/@nextbot/agent-world/package.json
+COPY --from=build --chown=node:node /app/agent-world/dist ./node_modules/@nextbot/agent-world/dist
 COPY --from=build --chown=node:node /app/agent-world/node_modules/zod ./node_modules/zod
 COPY --from=build --chown=node:node /app/server/dist ./dist
 USER node

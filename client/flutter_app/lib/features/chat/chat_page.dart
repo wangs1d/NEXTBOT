@@ -33,6 +33,7 @@ import "../../core/services/profile_manage_api.dart";
 import "../../core/services/account_profile_api.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
 import "../../core/utils/chat_time_label.dart";
+import "../../core/utils/tool_friendly_label.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -1213,35 +1214,13 @@ class _ChatPageState extends State<ChatPage>
     );
   }
 
-  /// 工具名 → 用户能懂的进行时文案（感知升级：不再裸露内部工具名）。
-  String _friendlyToolLabel(String tool) {
-    if (tool.startsWith("shopping.compare")) return "正在跨平台比价";
-    if (tool.startsWith("shopping.order.search")) return "正在搜索商品";
-    if (tool.startsWith("shopping.suggest")) return "正在挑选商品";
-    if (tool.startsWith("shopping.order.place")) return "正在创建订单";
-    if (tool.startsWith("shopping.pay")) return "正在处理支付";
-    if (tool.startsWith("plan.")) return "正在拆解任务";
-    if (tool.startsWith("travel.")) return "正在规划行程";
-    if (tool.startsWith("weather.")) return "正在查看天气";
-    if (tool.startsWith("search_web") || tool.startsWith("info.search")) {
-      return "正在联网检索";
-    }
-    if (tool.startsWith("search_images")) return "正在搜图";
-    if (tool.startsWith("video.")) return "正在找视频";
-    if (tool.startsWith("agent_browser.") || tool.startsWith("shared_browser.")) {
-      return "正在操作浏览器";
-    }
-    if (tool.startsWith("memory.")) return "正在翻记忆";
-    return "正在调用：$tool";
-  }
-
   /// 输入框上方的统一 Agent 状态条。
   ///
   /// 处理状态收拢到这一处（取代旧的「消息流内进度气泡 + 工具徽标」两处展示）：
-  /// - 工具调用中：优先显示「正在调用：xxx」
+  /// - 工具调用中：优先显示工具族的进行时文案（[friendlyToolLabel]，未入表
+  ///   的工具显示通用「正在调用工具」，不裸露原始工具名）
   /// - 其余处理中：显示口语化进度（`agent_status` > interim ack > 默认，
   ///   复用 [_processingStatusText] 的优先级）
-  /// - 长工具心跳带 percent 时附进度百分比 + 细进度条
   Widget _buildAgentStatusStrip(ColorScheme cs) {
     final String tool = widget.currentToolName?.trim() ?? "";
     // 前台轮次（流式回复/工具调用）与后台任务面（回执聚合）都会点亮状态条；
@@ -1255,7 +1234,7 @@ class _ChatPageState extends State<ChatPage>
     }
 
     final String text = tool.isNotEmpty
-        ? _friendlyToolLabel(tool)
+        ? friendlyToolLabel(tool)
         : foregroundActive
             ? _processingStatusText()
             : "$bgCount 个任务后台进行中";
@@ -1337,38 +1316,6 @@ class _ChatPageState extends State<ChatPage>
                 ],
               ],
             ),
-            // 进度条：长工具心跳带 percent 时渲染确定进度；其余进行中状态
-            // 渲染不定进度动画——「正在动」的感知比静态文案强（动画升级）
-            if (percent != null) ...<Widget>[
-              const SizedBox(height: 6),
-              SizedBox(
-                width: 220,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(3),
-                  child: LinearProgressIndicator(
-                    value: percent / 100,
-                    minHeight: 4,
-                    backgroundColor: cs.outline.withValues(alpha: 0.15),
-                    valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
-                  ),
-                ),
-              ),
-            ] else if (foregroundActive || tool.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 6),
-              SizedBox(
-                width: 220,
-                child: ClipRRect(
-                  borderRadius: BorderRadius.circular(3),
-                  child: LinearProgressIndicator(
-                    minHeight: 3,
-                    backgroundColor: cs.outline.withValues(alpha: 0.12),
-                    valueColor: AlwaysStoppedAnimation<Color>(
-                      cs.primary.withValues(alpha: 0.7),
-                    ),
-                  ),
-                ),
-              ),
-            ],
           ],
         ),
       ),

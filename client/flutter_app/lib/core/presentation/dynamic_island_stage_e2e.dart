@@ -71,11 +71,27 @@ Future<void> runIslandStageE2EBootstrap() async {
     },
   );
 
-  // 喂点 2：站内信未读（hover 环境行「N 未读」）。
-  IslandRealFeeds.setInboxUnread(3);
+  // 喂点 2：站内信未读（hover 环境行「N 未读」+ 展开卡「未读消息」节）。
+  IslandRealFeeds.setInboxUnread(
+    3,
+    unreadTitles: <String>[
+      "快递已到驿站，请及时领取",
+      "订阅的「AI 周报」已更新",
+      "好友申请：产品经理小王",
+    ],
+  );
 
   // 喂点 3：后台任务计数/状态行（hover「任务」页激活；胶囊无任务条目）。
   IslandRealFeeds.setTaskActivity(activeCount: 1, statusLine: "正在搜索资料");
+
+  // 喂点 4：agent 工具步骤流（展开卡「任务动态」节：成功/失败/进行中三态）。
+  DynamicIslandController.instance
+    ..setForegroundAgent(active: true)
+    ..beginAgentStep("web_search", "搜索目的地攻略")
+    ..beginAgentStep("calendar_add_task", "创建日程 · 14:00 设计评审")
+    ..beginAgentStep("shopping_compare", "正在比价 · 3 个平台")
+    ..finishAgentStep("web_search", ok: true)
+    ..finishAgentStep("calendar_add_task", ok: false);
 
   readyFlag.writeAsStringSync(DateTime.now().toIso8601String());
 
@@ -93,6 +109,8 @@ Future<void> runIslandStageE2EBootstrap() async {
       .writeAsStringSync(DateTime.now().toIso8601String());
   DynamicIslandController.instance.collapse();
   // 任务计数清零（hover「任务」页回空闲文案；胶囊本就无任务条目）。
+  // 前台轮次收尾：步骤流保留在展开卡供回看（新一轮开始才清空）。
+  DynamicIslandController.instance.setForegroundAgent(active: false);
   IslandRealFeeds.setTaskActivity(activeCount: 0);
   Future<void> hold(int ms) async =>
       await Future<void>.delayed(Duration(milliseconds: ms));

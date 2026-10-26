@@ -19,6 +19,7 @@ export type Provenance =
   | "asked" // 简报卡追问后用户点的
   | "profile" // 用户画像长期偏好
   | "inferred" // 目的地常识/上下文推断
+  | "located" // 按用户 GPS 定位补的默认值（出发地专用，如实标注可改）
   | "default" // 系统默认兜的
   | "unknown"; // 真的不知道
 
@@ -74,6 +75,8 @@ function prov(tag: string | undefined): Provenance {
       return "profile";
     case "destination":
       return "inferred";
+    case "located":
+      return "located";
     case "default":
       return "default";
     default:
@@ -114,7 +117,7 @@ const HOTEL_FOCUS_LABEL: Record<NonNullable<TripPreferences["hotelFocus"]>, stri
  * 放宽成结构化切片是为了让冷层存档（StoredTravelPlan.slots）也能直接回读成简报——
  * 桌面端重开行程页时讲的是同一份假设，不是重新解析一遍原文再猜一次。
  */
-export type BriefSourceTag = "user" | "destination" | "default" | "profile" | "asked";
+export type BriefSourceTag = "user" | "destination" | "default" | "profile" | "asked" | "located";
 export type BriefPrefsLike = {
   budget?: "low" | "mid" | "high";
   origin?: string;
@@ -194,7 +197,15 @@ export function buildBrief(input: BuildBriefInput = {}): TravelBrief {
 
   const originExplicit = explicit?.origin?.trim();
   brief.origin = originExplicit || prefs?.origin || null;
-  brief.provenance.origin = originExplicit ? "asked" : prefs?.origin ? "stated" : "unknown";
+  // 溯源优先读落盘的 sources.origin（located=按定位补的默认值必须如实呈现，
+  // 不能冒充「stated」）；无标注时维持旧口径「prefs 里有就当用户说过」
+  brief.provenance.origin = originExplicit
+    ? "asked"
+    : prefs?.origin
+      ? prefs.sources.origin
+        ? prov(prefs.sources.origin)
+        : "stated"
+      : "unknown";
 
   const startExplicit = explicit?.startDate?.trim();
   if (startExplicit && isValidISODate(startExplicit)) {
@@ -268,7 +279,7 @@ export function briefFromStoredPlan(plan: StoredBriefSource): TravelBrief {
   const slots = plan.slots ?? {};
   const sources: Partial<Record<string, BriefSourceTag>> = {};
   for (const [k, v] of Object.entries(slots.sources ?? {})) {
-    if (v === "user" || v === "asked" || v === "profile" || v === "destination" || v === "default") {
+    if (v === "user" || v === "asked" || v === "profile" || v === "destination" || v === "default" || v === "located") {
       sources[k] = v;
     }
   }
@@ -316,6 +327,7 @@ const SUFFIX: Record<Provenance, string> = {
   asked: "（你刚补的）",
   profile: "（按你的习惯）",
   inferred: "（按目的地常规）",
+  located: "（按定位，可改）",
   default: "（先这么定，可改）",
   unknown: "",
 };
@@ -337,7 +349,11 @@ export function briefAssumptions(brief: TravelBrief): AssumptionRow[] {
       ? `${formatDateLabel(brief.startDate)}${SUFFIX[brief.provenance.startDate] ?? ""}`
       : `没提到${SUFFIX.unknown}`,
   );
-  push("origin", "出发地", brief.origin ?? "没提到（先不排大交通）");
+  push(
+    "origin",
+    "出发地",
+    brief.origin ? `${brief.origin}${SUFFIX[brief.provenance.origin] ?? ""}` : "没提到（先不排大交通）",
+  );
   push("party", "同行人", `${brief.party ?? "2 位成人"}${SUFFIX[brief.provenance.party] ?? ""}`);
   if (brief.budget) push("budget", "预算", `${BUDGET_LABEL[brief.budget]}${SUFFIX[brief.provenance.budget] ?? ""}`);
   if (brief.hotelFocus) push("hotelFocus", "住宿落位", `${brief.hotelFocus}${SUFFIX[brief.provenance.hotelFocus] ?? ""}`);

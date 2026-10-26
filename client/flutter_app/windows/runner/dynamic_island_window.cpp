@@ -252,6 +252,21 @@ void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
   g.DrawLine(&pen, cx + w / 2, cy - h / 2, cx, cy + h * 0.08f);
 }
 
+// 步骤状态勾/叉（展开卡「任务动态」行首）：勾=成功，叉=失败。
+void DrawCheckMark(Gdiplus::Graphics& g, float cx, float cy, float s,
+                   BYTE alpha) {
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 150, 235, 165), 1.7f);
+  g.DrawLine(&pen, cx - 3.5f * s, cy + 0.4f * s, cx - 0.8f * s, cy + 3.1f * s);
+  g.DrawLine(&pen, cx - 0.8f * s, cy + 3.1f * s, cx + 4.2f * s, cy - 3.2f * s);
+}
+
+void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
+                   BYTE alpha) {
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 130, 120), 1.7f);
+  g.DrawLine(&pen, cx - 3.1f * s, cy - 3.1f * s, cx + 3.1f * s, cy + 3.1f * s);
+  g.DrawLine(&pen, cx - 3.1f * s, cy + 3.1f * s, cx + 3.1f * s, cy - 3.1f * s);
+}
+
 double EaseOutCubic(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
 
 double Clamp01(double v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
@@ -488,6 +503,22 @@ void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
   ambient_unread_ = unread_count;
   agent_active_ = agent_active;
   agent_status_ = agent_status;
+  if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::SetAgentSteps(std::vector<AgentStep> steps) {
+  if (steps.size() > static_cast<size_t>(kMaxSteps)) {
+    steps.erase(steps.begin(), steps.end() - kMaxSteps);
+  }
+  agent_steps_ = std::move(steps);
+  if (window_handle_ != nullptr) Render();
+}
+
+void DynamicIslandWindow::SetUnreadPreview(std::vector<UnreadItem> rows) {
+  if (rows.size() > static_cast<size_t>(kMaxUnreadRows)) {
+    rows.erase(rows.begin(), rows.end() - kMaxUnreadRows);
+  }
+  unread_rows_ = std::move(rows);
   if (window_handle_ != nullptr) Render();
 }
 
@@ -999,7 +1030,14 @@ int DynamicIslandWindow::CompactWidth() const {
 
 int DynamicIslandWindow::ExpandedHeight() const {
   const int rows = std::clamp(static_cast<int>(agenda_.size()), 0, kMaxRows);
-  const int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
+  int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
+  if (rows == 0) h += kRowH;  // 空态「今日无日程」占位行
+  const int step_rows =
+      std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
+  if (step_rows > 0) h += 6 + 20 + step_rows * kStepRowH + 4;
+  const int unread_rows =
+      std::min(static_cast<int>(unread_rows_.size()), kMaxUnreadRows);
+  if (unread_rows > 0) h += 6 + 20 + unread_rows * kUnreadRowH + 4;
   return h + 10;
 }
 
@@ -1109,7 +1147,8 @@ void DynamicIslandWindow::OnWheelDelta(short delta) {
   }
 }
 
-// hover 态环境信息行：今日页 = 日期 · 下一日程 · 未读数；任务页 = agent 状态。
+// hover 态环境信息行：今日页 = 下一日程 · 未读数；任务页 = agent 状态。
+// （日期已删，2026-10-26 用户拍板：任务栏右下角已有时钟，纯重复信息。）
 std::wstring DynamicIslandWindow::BuildHoverLine() const {
   if (hover_tab_ == HoverTab::kAgent) {
     if (agent_active_) {
@@ -1123,19 +1162,14 @@ std::wstring DynamicIslandWindow::BuildHoverLine() const {
     }
     return line;
   }
-  SYSTEMTIME st;
-  GetLocalTime(&st);
-  static const wchar_t* kWeek[] = {L"周日", L"周一", L"周二",
-                                   L"周三", L"周四", L"周五", L"周六"};
-  std::wstring line = std::to_wstring(st.wMonth) + L"月" +
-                      std::to_wstring(st.wDay) + L"日 " +
-                      kWeek[st.wDayOfWeek % 7];
+  std::wstring line;
   for (const AgendaItem& it : agenda_) {
     if (it.completed) continue;
-    line += L" · 下一节 " + Utf8ToWide(it.time_text) + L" " +
-            Utf8ToWide(it.title);
+    line = L"下一节 " + Utf8ToWide(it.time_text) + L" " +
+           Utf8ToWide(it.title);
     break;
   }
+  if (line.empty()) line = L"今日无日程";
   if (ambient_unread_ > 0) {
     line += L" · " + std::to_wstring(ambient_unread_) + L" 未读";
   }
@@ -1555,6 +1589,96 @@ void DynamicIslandWindow::Render() {
           y += static_cast<float>(kRowH) * s;
         }
         y += 6.0f * s;
+      } else {
+        // 空态占位：展开卡只有「接下来」标签会显得断档，补一行弱文案。
+        Gdiplus::Font empty_font(mem_dc, MakeIslandFont(S(15), 650));
+        Gdiplus::SolidBrush empty_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 55 / 100), 255, 255, 255));
+        g.DrawString(L"今日无日程", -1, &empty_font,
+                     Gdiplus::PointF(cap_x + pad, y + 5.0f * s), &empty_brush);
+        y += static_cast<float>(kRowH) * s + 6.0f * s;
+      }
+
+      // ── 任务动态：agent 工具步骤流（进行中转圈 / 成功勾 / 失败叉）──
+      const int step_rows =
+          std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
+      if (step_rows > 0) {
+        Gdiplus::SolidBrush step_div_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
+        g.FillRectangle(&step_div_brush, cap_x + pad, y, cur_w - pad * 2,
+                        1.0f * s);
+        y += 6.0f * s;
+
+        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(14), 700));
+        Gdiplus::SolidBrush step_label_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
+        g.DrawString(L"任务动态", -1, &step_label_font,
+                     Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
+        y += 20.0f * s;
+
+        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(15), 650));
+        for (int i = 0; i < step_rows; i++) {
+          const AgentStep& st = agent_steps_[i];
+          const float glyph_cx = cap_x + pad + 5.0f * s;
+          const float glyph_cy = y + 9.0f * s;
+          if (st.state == 0) {
+            DrawTaskIcon(g, glyph_cx, glyph_cy, 4.5f * s, now_s_,
+                         static_cast<BYTE>(fade * 80 / 100));
+          } else if (st.state == 1) {
+            DrawCheckMark(g, glyph_cx, glyph_cy, s,
+                          static_cast<BYTE>(fade * 70 / 100));
+          } else {
+            DrawCrossMark(g, glyph_cx, glyph_cy, s,
+                          static_cast<BYTE>(fade * 80 / 100));
+          }
+          const std::wstring step_text = FitText(
+              g, Utf8ToWide(st.label), step_font,
+              cur_w - pad * 2 - 16.0f * s);
+          Gdiplus::SolidBrush step_brush(
+              Gdiplus::Color(static_cast<BYTE>(fade), 255, 255, 255));
+          g.DrawString(step_text.c_str(), -1, &step_font,
+                       Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
+                       &step_brush);
+          y += static_cast<float>(kStepRowH) * s;
+        }
+        y += 4.0f * s;
+      }
+
+      // ── 未读消息：最近未读标题摘要（行首未读圆点，点击出口暂无）──
+      const int unread_rows =
+          std::min(static_cast<int>(unread_rows_.size()), kMaxUnreadRows);
+      if (unread_rows > 0) {
+        Gdiplus::SolidBrush unread_div_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
+        g.FillRectangle(&unread_div_brush, cap_x + pad, y, cur_w - pad * 2,
+                        1.0f * s);
+        y += 6.0f * s;
+
+        Gdiplus::Font unread_label_font(mem_dc, MakeIslandFont(S(14), 700));
+        Gdiplus::SolidBrush unread_label_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
+        g.DrawString(L"未读消息", -1, &unread_label_font,
+                     Gdiplus::PointF(cap_x + pad, y), &unread_label_brush);
+        y += 20.0f * s;
+
+        Gdiplus::Font unread_font(mem_dc, MakeIslandFont(S(15), 650));
+        for (int i = 0; i < unread_rows; i++) {
+          const UnreadItem& row = unread_rows_[i];
+          Gdiplus::SolidBrush dot_brush(Gdiplus::Color(
+              static_cast<BYTE>(fade * 90 / 100), 255, 255, 255));
+          g.FillEllipse(&dot_brush, cap_x + pad + 2.0f * s, y + 8.0f * s,
+                        4.0f * s, 4.0f * s);
+          const std::wstring unread_text = FitText(
+              g, Utf8ToWide(row.title), unread_font,
+              cur_w - pad * 2 - 16.0f * s);
+          Gdiplus::SolidBrush unread_brush(Gdiplus::Color(
+              static_cast<BYTE>(fade * 92 / 100), 255, 255, 255));
+          g.DrawString(unread_text.c_str(), -1, &unread_font,
+                       Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
+                       &unread_brush);
+          y += static_cast<float>(kUnreadRowH) * s;
+        }
+        y += 4.0f * s;
       }
     }
 

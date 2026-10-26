@@ -70,6 +70,7 @@ import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_theme.dart";
 import "core/utils/play_url_utils.dart";
+import "core/utils/tool_friendly_label.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
@@ -1438,13 +1439,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (line.isNotEmpty) {
               _updateAgentStatusLine(line);
             }
-            // hover「任务」页：agent 状态行上岛（步骤流不上岛）。
+            // hover「任务」页：agent 状态行 + 展开卡「任务动态」步骤流上岛
+            // （2026-10-26 拍板：步骤流随展开卡信息总览复活）。
+            // 无口语化文案时不得把原始工具名亮到岛上，走共享友好映射。
             final String islandLabel = line.isNotEmpty
                 ? line
-                : (toolName.isNotEmpty ? toolName : "正在处理");
+                : (toolName.isNotEmpty ? friendlyToolLabel(toolName) : "正在处理");
             DynamicIslandController.instance
               ..setForegroundAgent(active: true)
               ..updateAgentStatusLine(islandLabel);
+            if (toolName.isNotEmpty) {
+              DynamicIslandController.instance
+                  .beginAgentStep(toolName, islandLabel);
+            }
           }
         }
         if (type == "tool.result") {
@@ -1464,6 +1471,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
           final String toolName = payload["toolName"]?.toString() ?? "";
           final bool toolOk = payload["ok"] == true;
+          // 展开卡「任务动态」：步骤收尾（进行中 → 成功/失败；无对应步骤则空过）。
+          DynamicIslandController.instance
+              .finishAgentStep(toolName, ok: toolOk);
           if (isMasterInvokeSubAgentTool(toolName) && result != null) {
             final bool delegateOk = result["ok"] != false;
             if (!toolOk || !delegateOk) {
@@ -3904,10 +3914,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 站内信未读轮询（15s）：站内信角标数据源。MessageHub 聚合未读轮询已随
   /// 「消息」工具撤除（2026-10-14），仅保留 InboxService 记账的未读数。
   Future<void> _pollUnreadMessages() async {
-    final inboxResult = await _inboxApi.unreadCount();
+    // list 一次带回未读数 + 未读标题摘要（展开卡「未读消息」节），
+    // 替代 unreadCount（内部同样走 list，只是丢了标题）。
+    final inboxResult = await _inboxApi.list(limit: 50);
     if (inboxResult.ok && mounted) {
-      setState(() => _inboxUnread = inboxResult.value ?? 0);
-      IslandRealFeeds.setInboxUnread(_inboxUnread);
+      final InboxSnapshot? snapshot = inboxResult.value;
+      final int unread = snapshot?.unreadCount ?? 0;
+      setState(() => _inboxUnread = unread);
+      IslandRealFeeds.setInboxUnread(
+        unread,
+        unreadTitles: (snapshot?.messages ?? const <InboxMessageItem>[])
+            .where((InboxMessageItem m) => !m.read)
+            .map((InboxMessageItem m) => m.title)
+            .toList(),
+      );
     }
   }
 

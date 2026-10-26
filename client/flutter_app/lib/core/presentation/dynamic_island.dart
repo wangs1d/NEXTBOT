@@ -39,6 +39,24 @@ class IslandEntry {
   final int priority;
 }
 
+/// 展开卡「任务动态」节的一行：agent 工具调用步骤。
+class IslandAgentStep {
+  const IslandAgentStep({
+    required this.key,
+    required this.label,
+    this.state = 0,
+  });
+
+  /// 工具名（幂等定位用，不上屏）。
+  final String key;
+
+  /// 展示文案（口语化状态行，无则友好工具名映射）。
+  final String label;
+
+  /// 0=进行中 1=成功 2=失败（与原生 AgentStep.state 对齐）。
+  final int state;
+}
+
 /// 灵动岛状态控制器：单插槽 + 优先级抢占 + 有界队列。
 /// 纯状态大脑，不碰平台通道——渲染端是原生窗口，
 /// 由 [DynamicIslandLauncher] 监听本控制器并同步过去。
@@ -68,6 +86,14 @@ class DynamicIslandController extends ChangeNotifier {
   int _ambientUnread = 0;
   String _agentStatusLine = '';
 
+  // 展开卡数据：任务动态（步骤流）+ 未读摘要（hover 只有数字，明细在展开层）。
+  static const int agentStepLimit = 4;  // 与原生 kMaxSteps 对齐
+  final List<IslandAgentStep> _agentSteps = <IslandAgentStep>[];
+  List<IslandAgentStep> get agentSteps =>
+      List<IslandAgentStep>.unmodifiable(_agentSteps);
+  List<String> _unreadTitles = const <String>[];
+  List<String> get unreadTitles => _unreadTitles;
+
   IslandEntry? get entry => _entry;
   bool get expanded => _expanded;
   /// hover 环境行未读数（站内信）。
@@ -85,9 +111,12 @@ class DynamicIslandController extends ChangeNotifier {
   }
 
   /// 前台轮次 agent 处理状态（tool.call 开始 / 收尾清位）。
+  /// false→true = 新一轮开始，清上一轮步骤——上一轮结果保留到此刻，
+  /// 用户在轮次结束后仍可展开回看「刚才干了什么」。
   void setForegroundAgent({required bool active}) {
     if (_foregroundAgentActive == active) return;
     _foregroundAgentActive = active;
+    if (active) _agentSteps.clear();
     notifyListeners();
   }
 
@@ -99,11 +128,57 @@ class DynamicIslandController extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 步骤开始：同 key 且仍进行中 → 原地刷新文案；否则追加（滚动窗口）。
+  void beginAgentStep(String key, String label) {
+    if (key.isEmpty) return;
+    final int i = _lastInFlightIndex(key);
+    if (i >= 0) {
+      if (_agentSteps[i].label == label) return;
+      _agentSteps[i] = IslandAgentStep(key: key, label: label);
+    } else {
+      _agentSteps.add(IslandAgentStep(key: key, label: label));
+      if (_agentSteps.length > agentStepLimit) _agentSteps.removeAt(0);
+    }
+    notifyListeners();
+  }
+
+  /// 步骤收尾：标记最后一个该 key 的进行中步骤（同名工具重试各自成步）。
+  void finishAgentStep(String key, {required bool ok}) {
+    final int i = _lastInFlightIndex(key);
+    if (i < 0) return;
+    _agentSteps[i] = IslandAgentStep(
+        key: key, label: _agentSteps[i].label, state: ok ? 1 : 2);
+    notifyListeners();
+  }
+
+  int _lastInFlightIndex(String key) {
+    for (int i = _agentSteps.length - 1; i >= 0; i--) {
+      if (_agentSteps[i].key == key && _agentSteps[i].state == 0) return i;
+    }
+    return -1;
+  }
+
   /// 站内信未读数（hover 环境行数据源）。
   void setAmbientUnread(int count) {
     if (_ambientUnread == count) return;
     _ambientUnread = count;
     notifyListeners();
+  }
+
+  /// 展开卡「未读消息」节标题摘要（最多 3 条，与原生 kMaxUnreadRows 对齐）。
+  void setUnreadPreview(List<String> titles) {
+    final List<String> t = titles.take(3).toList(growable: false);
+    if (_sameStrings(_unreadTitles, t)) return;
+    _unreadTitles = t;
+    notifyListeners();
+  }
+
+  static bool _sameStrings(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (int i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   /// 展示/刷新一条信息。同 id 原地刷新；不同 id 按优先级抢占或排队。
@@ -396,6 +471,18 @@ class DynamicIslandLauncher {
         'agentActive': _controller!.agentActive,
         'agentStatus': _controller!.agentStatusLine,
       });
+      // 展开卡总览节：任务动态步骤流 + 未读摘要（数据量小，随同步直推）。
+      await _channel.invokeMethod<bool>('setAgentSteps', <String, Object?>{
+        'steps': _controller!.agentSteps
+            .map((IslandAgentStep s) => <String, Object?>{
+                  'label': s.label,
+                  'state': s.state,
+                })
+            .toList(),
+      });
+      await _channel.invokeMethod<bool>('setUnreadPreview', <String, Object?>{
+        'titles': _controller!.unreadTitles,
+      });
     } on PlatformException catch (_) {}
   }
 }
@@ -614,9 +701,11 @@ class IslandRealFeeds {
   }
 
   /// 站内信未读（inbox.message / 轮询校准驱动）。
-  /// 未读数同时进 hover 环境行（「日期 · 下一日程 · N 未读」）。
-  static void setInboxUnread(int count) {
+  /// 未读数进 hover 环境行（「下一节 … · N 未读」）；
+  /// [unreadTitles] 未读标题摘要进展开卡「未读消息」节（缺省只更新数字）。
+  static void setInboxUnread(int count, {List<String> unreadTitles = const []}) {
     _c.setAmbientUnread(count);
+    _c.setUnreadPreview(unreadTitles);
     if (count > 0) {
       _c.present(IslandEntry(
         id: 'inbox',

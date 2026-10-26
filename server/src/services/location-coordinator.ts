@@ -148,6 +148,22 @@ export class LocationCoordinator {
   }
 
   /**
+   * 跨 actor 取最近一次定位（单用户个人 agent 语义：手机/桌面多端在线时取最新上报）。
+   * 供没有 actorId 的 HTTP 会话（如旅游规划 plan-session）被动读位置用——
+   * 只读缓存，绝不向客户端要 GPS。超过 maxAgeMs 视为过期返回 null。
+   */
+  getLatest(
+    maxAgeMs = 48 * 60 * 60 * 1000,
+  ): { actorId: string; payload: ClientLocationWire; at: number } | null {
+    let best: { actorId: string; payload: ClientLocationWire; at: number } | null = null;
+    for (const [actorId, hit] of this.cache) {
+      if (Date.now() - hit.at > maxAgeMs) continue;
+      if (!best || hit.at > best.at) best = { actorId, payload: hit.payload, at: hit.at };
+    }
+    return best;
+  }
+
+  /**
    * 按需请求实时位置。优先复用新鲜缓存；缓存过期或缺失时向客户端下发
    * `agent.location_request` 并等待回包，超时返回 null。
    */

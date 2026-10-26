@@ -17,9 +17,10 @@
 ///     → 展开卡；点击逐级下行，收起从展开先回 hover 而非一步缩回
 ///   - 待机态：小胶囊 + 中央金属球「镜头」（呼吸光）
 ///   - 内容态：胶囊横向撑开（图标 + 标题 + 尾注 / 呼吸活点 / 进度线）
-///   - hover 态：360×58 环境胶囊（日期 · 下一日程 · 未读数；导航点 +
+///   - hover 态：360×58 环境胶囊（下一日程 · 未读数；导航点 +
 ///     滚轮切换「今日/任务」，滚到「展开」进展开卡）
-///   - 展开态：胶囊本体向下生长成日程卡（圆角连续变形），头部行保留
+///   - 展开态：胶囊本体向下生长成信息总览卡（圆角连续变形），头部行保留，
+///     分节：接下来（日程）/ 任务动态（agent 步骤流）/ 未读消息（摘要）
 ///   - 形变保护：morphing 期间吞掉点击/滚轮，避免按出半截状态
 ///   - 岛这块像素被全屏应用盖住时自动隐藏（D3D 全屏 / 放映模式 / 忙碌 /
 ///     无边框全屏铺满显示器 / 最大化盖岛）：2026-10-09 拍板应用最大化同样
@@ -38,7 +39,8 @@
 /// 通过 MethodChannel `pai/dynamic_island` 与 Dart 端通信：
 ///   - Dart -> C++：create / destroy / setVisible / present / dismiss /
 ///     dismissAll / setAgenda / expand / collapse / setDpi /
-///     setAmbient（未读数 + agent 状态行）
+///     setAmbient（未读数 + agent 状态行）/ setAgentSteps（步骤流）/
+///     setUnreadPreview（未读摘要行）
 ///   - C++ -> Dart：onNativeEvent（expandedChanged / action / tapped）
 class DynamicIslandWindow {
  public:
@@ -66,6 +68,17 @@ class DynamicIslandWindow {
     std::string title;
     std::string hint;  // 右侧提示（"25 分钟后" / "已完成" 等）
     bool completed = false;
+  };
+
+  /// 展开卡「任务动态」里的一行：agent 工具调用步骤流。
+  struct AgentStep {
+    std::string label;
+    int state = 0;  // 0=进行中 1=成功 2=失败
+  };
+
+  /// 展开卡「未读消息」摘要行（标题单行截断展示）。
+  struct UnreadItem {
+    std::string title;
   };
 
   enum class EventType {
@@ -99,6 +112,10 @@ class DynamicIslandWindow {
   void SetStage(Stage stage);
   void SetAmbient(int unread_count, bool agent_active,
                   const std::string& agent_status);
+  /// 展开卡「任务动态」节：agent 工具步骤流（超出行数截断，Dart 侧滚动窗口）。
+  void SetAgentSteps(std::vector<AgentStep> steps);
+  /// 展开卡「未读消息」节：最近未读标题摘要（空 = 无未读，节整体不画）。
+  void SetUnreadPreview(std::vector<UnreadItem> rows);
   /// 纯语音模式标志（对话全语音免点击）：开启后胶囊态悬停自动 glance
   /// 环境行，无需点击进 hover。
   void SetVoiceTalkMode(bool enabled);
@@ -135,6 +152,10 @@ class DynamicIslandWindow {
   static constexpr int kTopMargin = 5;       // 胶囊顶边距
   static constexpr int kRowH = 30;           // 日程行高
   static constexpr int kMaxRows = 5;         // 最多展示行数
+  static constexpr int kStepRowH = 26;       // 任务动态行高
+  static constexpr int kMaxSteps = 4;        // 任务动态最多行数
+  static constexpr int kUnreadRowH = 26;     // 未读摘要行高
+  static constexpr int kMaxUnreadRows = 3;   // 未读摘要最多行数
   static constexpr int kHoverDotPitch = 20;  // hover 导航点间距（逻辑 px）
   static constexpr UINT kIslandWheelMsg = WM_APP + 0x49;  // 滚轮钩子 -> 窗口
   // 全屏抑制检查心跳（id=3，窗口存活期间常开）：与动画心跳（id=1）解耦。
@@ -223,6 +244,8 @@ class DynamicIslandWindow {
   int ambient_unread_ = 0;
   bool agent_active_ = false;
   std::string agent_status_;  // utf8，hover「任务」页状态行
+  std::vector<AgentStep> agent_steps_;   // 展开卡「任务动态」节
+  std::vector<UnreadItem> unread_rows_;  // 展开卡「未读消息」节
   bool voice_talk_mode_ = false;  // 纯语音模式：对话全语音（悬停自动 glance）
   std::vector<RECT> hover_dot_rects_;  // hover 导航点命中区（物理像素）
 

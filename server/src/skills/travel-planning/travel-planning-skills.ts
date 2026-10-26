@@ -20,7 +20,8 @@ import { travelItineraryStore } from "./travel-itinerary-store.js";
 import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
 import { composeTravelPlanRequest } from "../../agent/realtime-search-query.js";
-import { looksLikeDestinationName } from "./intent-parser.js";
+import { extractOrigin, looksLikeDestinationName } from "./intent-parser.js";
+import { resolveOriginFromContext } from "./travel-origin.js";
 import {
   pricingService,
   formatQuotePriceInfo,
@@ -338,6 +339,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "用户点名了具体地方或餐厅/酒店时，务必同时用 wishlist / foodWishlist / stayWishlist 传入名字数组——工具会保证点名点排进日程" +
         "（候选池没有的会定向补搜，补不到会在回执里如实标注）；说了出发地/出发日期/同行人/住宿落位（靠海·近机场·近车站·近某景点·市中心）" +
         "时，用 origin / startDate / party / hotelFocus(+hotelFocusRef) 显式传入，别只写在 input 里靠正则猜。" +
+        "用户没说出发地时绝不要反问「从哪个城市出发/从哪里坐飞机」：直接调用本工具，服务端会按用户实时定位补默认出发地（无直飞时自动给枢纽转机方案并在价格明细标注）；仅当用户主动质疑出发地时才向其确认。" +
         "若 input 已含目的地/天数/偏好则无需重复传参。生成后可配合 travel.destination-info 补充签证/货币等实用信息。" +
         "用户想订行程中的酒店/机票时，接 travel_booking.search 实时比价（飞猪实时价，选项自带预订链接）→ travel_booking.book 两阶段确认下单。",
       kind: "builtin",
@@ -348,7 +350,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         { name: "destination", type: "string", required: false, description: "目的地（如 成都/大理/东京），input 已含时可不传" },
         { name: "days", type: "number", required: false, description: "行程天数，默认 3" },
         { name: "preferences", type: "array", required: false, description: "偏好标签数组（如 ['美食','古迹','亲子']）" },
-        { name: "origin", type: "string", required: false, description: "出发地城市（大交通方式判定的前提）" },
+        { name: "origin", type: "string", required: false, description: "出发地城市（大交通方式判定的前提）；用户说了才传，没说不要反问——服务端按定位补默认值" },
         { name: "startDate", type: "string", required: false, description: "出发日 YYYY-MM-DD；未传按今天起排" },
         { name: "party", type: "string", required: false, enum: ["solo", "solo_female", "couple", "family", "friends"], description: "同行人构成（安全/节奏/住宿取向的判据）" },
         { name: "wishlist", type: "array", required: false, description: "用户点名的景点（必须排进日程；候选池没有的会自动定向补搜，补不到在回执里如实标注）" },
@@ -410,6 +412,19 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       const memoryPrefs = recallSameDestinationPreferenceLabels(destName ?? rawInput, userPrefs ?? []);
       const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
       try {
+        // 出发地按定位兜底（2026-10-26）：模型没传、原话也没说时，用用户实时定位
+        // 城市作默认出发地（简报卡如实标「按定位」），不再反问「从哪个城市出发」。
+        // 用户定位在兴义这类无直飞城市时，计价层会自动给枢纽转机方案。
+        const slots = planSlotsFromToolInput(input);
+        let originRegion: string | undefined;
+        if (!slots.origin && !extractOrigin(rawInput, destName)) {
+          const located = await resolveOriginFromContext(execContext);
+          if (located) {
+            slots.origin = located.city;
+            originRegion = located.region || undefined;
+            console.log(`[travel.plan-itinerary] 出发地按定位兜底：${located.city}（${located.region || "未知省份"}）`);
+          }
+        }
         // 画像静默注入（travel-upgrade-plan 画像引擎）：UserFact 里的长期旅行
         // 偏好（出片向/体验向/负向偏好/人格分型）并入本次偏好推断；
         // 原文表达优先级更高（不覆盖）。任一字段存在即传（travel 双端②③）
@@ -422,7 +437,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           days: typeof input.days === "number" && input.days > 0 ? input.days : undefined,
           preferences: mergedPrefs.length > 0 ? mergedPrefs : undefined,
           // 规划主线 F0：结构化槽位（模型从对话里对齐/简报卡回传），优先级高于原文正则
-          ...planSlotsFromToolInput(input),
+          ...slots,
+          ...(originRegion ? { originRegion, originSource: "located" as const } : {}),
           ...(profileHints &&
           (profileHints.photoDriven ||
             profileHints.experienceDriven ||

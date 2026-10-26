@@ -14,8 +14,25 @@
 import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'node:url';
 import type { Coordinates } from './types.js';
 import type { RawPOI } from './poi-cache-manager.js';
+
+/**
+ * 仓库内置种子数据目录（server/data/travel-knowledge，随代码分发）。
+ * 数据根（getDataDir）只装运行时可写数据，种子 JSON 不会自动播种过去——
+ * 2026-10-25 巴厘岛规划事故：数据根无 travel-knowledge → 四份全空载 →
+ * 国内分流恒国外 + 坐标/POI 兜底全失效。数据根缺文件时逐文件回落到这里，
+ * 用户在数据根放的扩充/修正仍然优先（回落只在「读取失败」时发生）。
+ */
+const BUNDLED_SEED_DIR = (() => {
+  const candidates = [
+    // src/skills/travel-planning → 上溯三级 = server（tsx 跑 src 与 dist 跑编译产物同构）
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'travel-knowledge'),
+    path.join(process.cwd(), 'data', 'travel-knowledge'),
+  ];
+  return candidates.find((d) => fs.existsSync(d)) ?? null;
+})();
 
 /** 目的地实用信息（与 PlanningService.TravelInfo 结构一致，避免循环依赖用结构类型） */
 export interface KnownTravelInfo {
@@ -52,16 +69,27 @@ interface PoiDbEntry {
 }
 
 function loadJson<T>(dir: string, file: string, fallback: T): T {
-  try {
-    const raw = fs.readFileSync(path.join(dir, file), 'utf-8');
-    const parsed = JSON.parse(raw) as T;
-    if (Array.isArray(parsed)) return parsed;
-    console.warn(`[KnowledgeBase] ${file} 不是数组，使用空数据`);
-    return fallback;
-  } catch {
-    console.warn(`[KnowledgeBase] ${file} 读取失败，使用空数据（目录: ${dir}）`);
-    return fallback;
+  const parse = (p: string): T | null => {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(p, 'utf-8')) as T;
+      return Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+  const primary = parse(path.join(dir, file));
+  if (primary !== null) return primary;
+  if (BUNDLED_SEED_DIR && path.resolve(BUNDLED_SEED_DIR) !== path.resolve(dir)) {
+    const seeded = parse(path.join(BUNDLED_SEED_DIR, file));
+    if (seeded !== null) {
+      console.warn(
+        `[KnowledgeBase] ${file} 在数据根缺失或不合法，回落内置种子（${BUNDLED_SEED_DIR}）`,
+      );
+      return seeded;
+    }
   }
+  console.warn(`[KnowledgeBase] ${file} 读取失败，使用空数据（目录: ${dir}）`);
+  return fallback;
 }
 
 class KnowledgeBase {

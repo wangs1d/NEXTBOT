@@ -133,7 +133,7 @@ $capCy = [int]($top + 24 * $dpi)     # 胶囊/hover 行中心/展开卡头部（
 #    声明档胶囊）。
 Capture '00_compact_task_entry'
 
-# 2. 点击胶囊 → hover 态（环境行：日期 · 下一节 · 未读）
+# 2. 点击胶囊 → hover 态（环境行：下一节 · 未读；日期已删）
 Log-Marker 's2_click_compact'
 Click $cx $capCy
 Start-Sleep -Milliseconds 1400

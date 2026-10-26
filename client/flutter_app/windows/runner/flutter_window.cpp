@@ -959,6 +959,55 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
     return;
   }
 
+  if (method == "setAgentSteps") {
+    // 展开卡「任务动态」节：agent 工具步骤流。
+    std::vector<DynamicIslandWindow::AgentStep> steps;
+    if (args != nullptr) {
+      auto it = args->find(flutter::EncodableValue("steps"));
+      if (it != args->end()) {
+        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
+          for (const auto& elem : *list) {
+            if (const auto* m = std::get_if<flutter::EncodableMap>(&elem)) {
+              DynamicIslandWindow::AgentStep step;
+              step.label = GetEncodableString(m, "label", "");
+              step.state = GetEncodableInt(m, "state", 0);
+              steps.push_back(std::move(step));
+            }
+          }
+        }
+      }
+    }
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetAgentSteps(std::move(steps));
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
+  if (method == "setUnreadPreview") {
+    // 展开卡「未读消息」节：最近未读标题摘要。
+    std::vector<DynamicIslandWindow::UnreadItem> rows;
+    if (args != nullptr) {
+      auto it = args->find(flutter::EncodableValue("titles"));
+      if (it != args->end()) {
+        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
+          for (const auto& elem : *list) {
+            if (const auto* s = std::get_if<std::string>(&elem)) {
+              if (!s->empty()) {
+                rows.push_back(DynamicIslandWindow::UnreadItem{*s});
+              }
+            }
+          }
+        }
+      }
+    }
+    if (dynamic_island_window_) {
+      dynamic_island_window_->SetUnreadPreview(std::move(rows));
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+
   if (method == "suppressCheck") {
     // Dart 看门狗兜底：原生 WM_TIMER 心跳失效时由 Dart 直推抑制检查，
     // 保证退出全屏后岛必然恢复（不再依赖原生定时器存活）。

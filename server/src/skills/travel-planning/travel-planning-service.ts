@@ -160,6 +160,10 @@ export interface PlanningRequest {
   // ===== 规划主线 F0：结构化槽位（工具入参/简报卡回传；优先级高于 input 正则） =====
   /** 出发地城市 */
   origin?: string;
+  /** 出发地所在省级行政区（定位回填时携带，供无直飞时选转机枢纽） */
+  originRegion?: string;
+  /** 出发地来源：located=按用户 GPS 定位补的默认值（简报卡如实标注「按定位」） */
+  originSource?: 'located';
   /** 出发日 YYYY-MM-DD；未传则按本地今天兜底 */
   startDate?: string;
   /** 同行人构成 */
@@ -230,11 +234,11 @@ export interface TripPreferences {
   persona?: TravelPersona;
   /**
    * 偏好来源标签：user=用户原文说 / destination=目的地常识 / default=系统默认 /
-   * profile=用户画像 / asked=简报卡追问后用户答的。
+   * profile=用户画像 / asked=简报卡追问后用户答的 / located=按用户 GPS 定位补的默认出发地。
    * Partial：extractPreferences 全量初始化，但离线兜底/合成路径只写它关心的
    * 几档（缺项按「未标注」处理，读侧统一兜 default）。
    */
-  sources: Partial<Record<keyof Omit<TripPreferences, 'raw' | 'sources' | 'persona'>, 'user' | 'destination' | 'default' | 'profile' | 'asked'>>;
+  sources: Partial<Record<keyof Omit<TripPreferences, 'raw' | 'sources' | 'persona'>, 'user' | 'destination' | 'default' | 'profile' | 'asked' | 'located'>>;
 }
 
 /**
@@ -393,8 +397,8 @@ export interface PlanningResult {
     warnings: string[];
     /** 未取到实时价、标「待核价」的条目数（不计入合计） */
     pendingItems?: number;
-    /** 往返大交通实时价（已计入合计；单人） */
-    transport?: { amount: number; label: string; note: string };
+    /** 往返大交通实时价（已计入合计；单人；viaHub=无直飞时的转机经停枢纽） */
+    transport?: { amount: number; label: string; note: string; viaHub?: string };
   };
   fromCache: boolean;
   /** 出发日天气一句话摘要（Open-Meteo 实时预报；天气获取失败缺省，前端隐藏天气胶囊） */
@@ -940,6 +944,11 @@ export class PlanningService {
     // 旅行人格分型（travel 双端③）不进 extractPreferences（原文/画像优先级在那里已定），
     // 直接随 preferences 下发：排程密度 + 载荷透传共用这一份
     preferences.persona = request.profileHints?.persona;
+    // 定位回填的出发地不是用户说的：来源标 located，简报卡如实显示「按定位」而非冒充原话
+    if (request.originSource === 'located' && request.origin) {
+      preferences.origin = preferences.origin || request.origin;
+      if (preferences.origin === request.origin) preferences.sources.origin = 'located';
+    }
     const normalizedDest = destName.toLowerCase().trim();
 
     this.reportProgress(request.sessionId, "resolve", `正在规划「${destName}」${dayCount}天行程，解析偏好中…`);
@@ -1159,6 +1168,7 @@ export class PlanningService {
       ctx: pricingCtx,
       data: cacheEntry.data,
       origin: preferences.origin ?? request.origin,
+      originRegion: request.originRegion,
     });
     const pricingSummary = this._summarizePricing(days, pricingCtx, livePricing);
 
@@ -1850,11 +1860,13 @@ export class PlanningService {
       ctx: PricingContext;
       data: CacheEntry['data'];
       origin?: string;
+      /** 出发地所在省级行政区：无直飞时据此选转机枢纽（省会优先） */
+      originRegion?: string;
     },
   ): Promise<{
     pending: number;
     marketHotels: number;
-    transport: { amount: number; label: string; note: string } | null;
+    transport: { amount: number; label: string; note: string; viaHub?: string } | null;
   }> {
     const { destination, startDate, endDate, ctx, data } = opts;
     const nights = Math.max(1, days.length - 1);
@@ -1977,15 +1989,16 @@ export class PlanningService {
       }
     }
 
-    let transport: { amount: number; label: string; note: string } | null = null;
+    let transport: { amount: number; label: string; note: string; viaHub?: string } | null = null;
     if (opts.origin) {
       const t = await lookupTransportPrice({
         origin: opts.origin,
+        originRegion: opts.originRegion,
         destination,
         startDate,
         endDate,
       });
-      if (t) transport = { amount: t.amount, label: t.label, note: t.note };
+      if (t) transport = { amount: t.amount, label: t.label, note: t.note, ...(t.viaHub ? { viaHub: t.viaHub } : {}) };
     }
 
     return { pending: pendingKeys.size, marketHotels, transport };
@@ -2000,7 +2013,7 @@ export class PlanningService {
     live?: {
       pending: number;
       marketHotels: number;
-      transport: { amount: number; label: string; note: string } | null;
+      transport: { amount: number; label: string; note: string; viaHub?: string } | null;
     },
   ): PlanningResult['pricingSummary'] {
     let totalOriginal = 0, totalFinal = 0;
@@ -2445,17 +2458,19 @@ export class PlanningService {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       console.warn(`[OSM] 地理编码失败(${query}):`, msg);
-      // 备用 geocoder：Nominatim 超时/限流时切 Photon 重试，而不是直接抛错走知识库
-      const photon = await this.geocodeByPhoton(query);
-      if (photon) {
-        console.log(`[OSM] Photon 备用命中: ${photon.displayName} [${photon.center.longitude}, ${photon.center.latitude}]`);
-        return photon;
-      }
-      // 知识库坐标兜底（真实地点坐标，可在地图上查到）
+      // 知识库坐标兜底优先于 Photon：人工校对过的坐标比互联网 geocoder 的
+      // 第一个命中可信——「巴厘岛」曾被 Photon 定位到宿迁的「巴厘岛假日酒店」
+      // （2026-10-25），整条 POI 检索建立在错误坐标上。
       const known = this.findKnownCoordinates(query);
       if (known) {
         console.log(`[OSM] 使用已知坐标: ${known.name} [${known.center.longitude}, ${known.center.latitude}]`);
         return { center: known.center, displayName: known.name };
+      }
+      // 备用 geocoder：知识库未收录的冷门地名才走 Photon
+      const photon = await this.geocodeByPhoton(query);
+      if (photon) {
+        console.log(`[OSM] Photon 备用命中: ${photon.displayName} [${photon.center.longitude}, ${photon.center.latitude}]`);
+        return photon;
       }
       // 诚实失败：绝不返回猜测坐标。历史版本兜底到「中国中心」——那会让整个行程
       // 建在错误的坐标上（假数据），现已改为向上抛错由调用方明确告知用户。
@@ -2466,10 +2481,13 @@ export class PlanningService {
   /**
    * Photon 备用地理编码（photon.komoot.io，免费、无需 Key）。
    * 失败返回 null 由调用方继续降级，绝不抛错。
+   * 只接受政区/地物级结果（osm_key=place/boundary）：Photon 盲取首个命中会
+   * 「按名字撞库」——「巴厘岛」曾定位到宿迁的「巴厘岛假日酒店」
+   * （osm_key=tourism，2026-10-25），POI 检索会整城建在错误坐标上。
    */
   private async geocodeByPhoton(query: string): Promise<{ center: Coordinates; displayName: string } | null> {
     try {
-      const url = `${PHOTON_GEOCODE_BASE}?q=${encodeURIComponent(query)}&limit=1`;
+      const url = `${PHOTON_GEOCODE_BASE}?q=${encodeURIComponent(query)}&limit=5`;
       const res = await fetch(url, {
         headers: { 'User-Agent': USER_AGENT },
         signal: AbortSignal.timeout(PHOTON_REQUEST_TIMEOUT_MS),
@@ -2480,9 +2498,17 @@ export class PlanningService {
           properties?: Record<string, unknown>;
         }>;
       };
-      const coords = json.features?.[0]?.geometry?.coordinates;
-      if (!coords || !Number.isFinite(coords[0]) || !Number.isFinite(coords[1])) return null;
-      const p = json.features?.[0]?.properties ?? {};
+      const hit = (json.features ?? []).find((f) => {
+        const osmKey = f.properties?.osm_key;
+        const coords = f.geometry?.coordinates;
+        return (
+          (osmKey === 'place' || osmKey === 'boundary') &&
+          Array.isArray(coords) && Number.isFinite(coords[0]) && Number.isFinite(coords[1])
+        );
+      });
+      if (!hit) return null;
+      const coords = hit.geometry!.coordinates!;
+      const p = hit.properties ?? {};
       const displayName = [p.name, p.city, p.country].filter((v) => typeof v === 'string' && v).join(', ') || query;
       return { center: { latitude: coords[1]!, longitude: coords[0]! }, displayName };
     } catch {

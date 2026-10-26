@@ -20,7 +20,9 @@ import {
   isRecord,
   parsePriceCny,
   strOf,
+  type FlyAiRunner,
 } from "../../services/booking/quote/flyai-quote-source.js";
+import { transferHubCandidates } from "./travel-origin.js";
 
 export type LivePriceKind = "exact" | "market" | "free";
 
@@ -47,6 +49,8 @@ export interface LiveTransportPrice {
   mode: "flight" | "train";
   label: string;
   note: string;
+  /** 转机经停枢纽（无直飞按枢纽两段计价时有值） */
+  viaHub?: string;
 }
 
 const runner = createDefaultFlyAiRunner();
@@ -291,6 +295,10 @@ interface TransportOption {
   label: string;
   /** 单程最短耗时（分钟） */
   durationMin: number;
+  /** 转机经停枢纽（两段拼接选项时有值） */
+  viaHub?: string;
+  /** 转机两段明细（拼进 note，如实标注） */
+  legsNote?: string;
 }
 
 async function searchTransportOption(
@@ -300,13 +308,14 @@ async function searchTransportOption(
   destination: string,
   startDate?: string,
   endDate?: string,
+  runnerFn: FlyAiRunner = runner,
 ): Promise<TransportOption | null> {
   const args = [cmd, "--origin", origin, "--destination", destination, "--sort-type", "3"];
   if (startDate) args.push("--dep-date", startDate);
   if (endDate) args.push("--back-date", endDate);
   const key = `${mode}|${args.join("|")}`;
   return cached(key, CACHE_TTL_MS.transport, async () => {
-    const res = await callFlyAi(runner, args);
+    const res = await callFlyAi(runnerFn, args);
     if ("error" in res || res.items.length === 0) return null;
     let best: TransportOption | null = null;
     for (const item of res.items) {
@@ -340,41 +349,112 @@ async function searchTransportOption(
 }
 
 /**
- * 往返大交通最低价（单人）。机票与火车并行查询，按「耗时 ≤12h 的选项中取最低价」
- * 选型：火车 38 小时这种极端行程即使便宜也不作为默认推荐。
- * 缺出发地/日期查不到 → null，上层如实标「未含」。
+ * 无直飞时的转机方案：按枢纽候选（省会优先）并行查「出发地→枢纽」「枢纽→目的地」
+ * 两段各自往返实价，两段都查到才成选项——绝不编造价格。耗时计 90 分钟候机估计。
  */
-export async function lookupTransportPrice(args: {
-  origin?: string;
+async function lookupTransferOptions(args: {
+  origin: string;
   destination: string;
   startDate?: string;
   endDate?: string;
+  originRegion?: string;
+  runnerFn: FlyAiRunner;
+}): Promise<TransportOption[]> {
+  const hubs = transferHubCandidates(args.origin, args.originRegion);
+  if (hubs.length === 0) return [];
+  const results = await Promise.all(
+    hubs.map(async (hub): Promise<TransportOption | null> => {
+      const [leg1, leg2] = await Promise.all([
+        searchTransportOption(
+          "search-flight",
+          "flight",
+          args.origin,
+          hub,
+          args.startDate,
+          args.endDate,
+          args.runnerFn,
+        ).catch(() => null),
+        searchTransportOption(
+          "search-flight",
+          "flight",
+          hub,
+          args.destination,
+          args.startDate,
+          args.endDate,
+          args.runnerFn,
+        ).catch(() => null),
+      ]);
+      if (!leg1 || !leg2) return null;
+      return {
+        mode: "flight",
+        viaHub: hub,
+        amount: leg1.amount + leg2.amount,
+        label: `转机往返机票（经${hub}）`,
+        durationMin: leg1.durationMin + leg2.durationMin + 90,
+        legsNote: `${args.origin}—${hub} ${leg1.label.replace(/（.*?）/g, "")}、${hub}—${args.destination} ${leg2.label.replace(/（.*?）/g, "")}`,
+      };
+    }),
+  );
+  return results.filter((o): o is TransportOption => o !== null);
+}
+
+/**
+ * 往返大交通最低价（单人）。机票与火车并行查询，按「耗时 ≤12h 的选项中取最低价」
+ * 选型：火车 38 小时这种极端行程即使便宜也不作为默认推荐。
+ * 出发地无直飞（直飞查询为空）时，自动按枢纽候选查两段转机实价并同池比价，
+ * 如实标注「经 X 转机」；两段也查不到 → null，上层如实标「未含」。
+ * 缺出发地/日期查不到 → null。
+ */
+export async function lookupTransportPrice(args: {
+  origin?: string;
+  originRegion?: string;
+  destination: string;
+  startDate?: string;
+  endDate?: string;
+  /** 测试注入：替换 flyai CLI runner */
+  runner?: FlyAiRunner;
 }): Promise<LiveTransportPrice | null> {
   const origin = (args.origin ?? "").trim();
   const destination = (args.destination ?? "").trim();
   if (!origin || !destination || normalizeName(origin) === normalizeName(destination)) return null;
+  const runnerFn = args.runner ?? runner;
   try {
     const [flight, train] = await Promise.all([
-      searchTransportOption("search-flight", "flight", origin, destination, args.startDate, args.endDate),
-      searchTransportOption("search-train", "train", origin, destination, args.startDate, args.endDate),
+      searchTransportOption("search-flight", "flight", origin, destination, args.startDate, args.endDate, runnerFn),
+      searchTransportOption("search-train", "train", origin, destination, args.startDate, args.endDate, runnerFn),
     ]);
-    const reasonable = [flight, train].filter(
-      (o): o is TransportOption => !!o && (o.durationMin === 0 || o.durationMin <= 12 * 60),
-    );
-    const pool = reasonable.length > 0 ? reasonable : [flight, train].filter((o): o is TransportOption => !!o);
-    if (pool.length === 0) return null;
-    const chosen = pool.reduce((a, b) => (a.amount <= b.amount ? a : b));
-    const alternatives = pool
+    let pool: TransportOption[] = [flight, train].filter((o): o is TransportOption => !!o);
+    if (!flight) {
+      const transfers = await lookupTransferOptions({
+        origin,
+        destination,
+        startDate: args.startDate,
+        endDate: args.endDate,
+        originRegion: args.originRegion,
+        runnerFn,
+      });
+      pool = [...pool, ...transfers];
+    }
+    const reasonable = pool.filter((o) => o.durationMin === 0 || o.durationMin <= 12 * 60);
+    const candidates = reasonable.length > 0 ? reasonable : pool;
+    if (candidates.length === 0) return null;
+    const chosen = candidates.reduce((a, b) => (a.amount <= b.amount ? a : b));
+    const alternatives = candidates
       .filter((o) => o !== chosen)
-      .map((o) => `${o.label.replace(/（.*?）/g, "")} ¥${o.amount}`);
+      .map((o) => `${o.label.replace(/（.*?）/g, "")}${o.viaHub ? `经${o.viaHub}` : ""} ¥${o.amount}`);
     const hours = chosen.durationMin > 0 ? Math.round(chosen.durationMin / 60) : 0;
     const durationNote = hours > 0 ? `，单程约 ${hours} 小时` : "";
+    const transferNote = chosen.viaHub
+      ? `${origin}无直飞${destination}航班，已按经${chosen.viaHub}转机计价（${chosen.legsNote ?? "两段单订"}），候机时间未含`
+      : "";
     return {
       amount: chosen.amount,
       mode: chosen.mode,
       label: chosen.label,
+      ...(chosen.viaHub ? { viaHub: chosen.viaHub } : {}),
       note:
         `单价按 1 人计，${args.endDate ? "往返" : "单程"}总价${durationNote}` +
+        (transferNote ? `；${transferNote}` : "") +
         (alternatives.length ? `；另一方案：${alternatives.join("、")}` : "") +
         "，以下单页为准",
     };
