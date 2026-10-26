@@ -5,11 +5,18 @@ import {
 } from "./morning-briefing-service.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 
+type BriefingPayload = MorningBriefingNarration & { mode: string };
+
 type SchedulerDeps = {
   briefingService: MorningBriefingService;
+  /**
+   * payload = 手机端版本（含在途行程段）；desktopPayload = 电脑端版本
+   * （无在途行程段）。无在途行程时两者是同一份。
+   */
   onBriefingTriggered: (
     sessionId: string,
-    payload: MorningBriefingNarration & { mode: string },
+    payload: BriefingPayload,
+    desktopPayload: BriefingPayload,
   ) => void | Promise<void>;
   getSessionPrefs: (sessionId: string) => UserPreferences;
 };
@@ -76,11 +83,20 @@ export class MorningBriefingScheduler {
       // 当日已从任意渠道投递过（如客户端启动简报已展示）→ 不再重复播报
       if (isSameDay(prefs.morningBriefing.deliveredAt)) continue;
       try {
-        const payload = await this.deps.briefingService.narrateBriefing(sessionId);
-        await this.deps.onBriefingTriggered(sessionId, {
-          ...payload,
-          mode: prefs.morningBriefing.mode,
-        });
+        // 在途行程段只给手机端：手机版本显式带上，电脑端另生成一份不带。
+        const payload = await this.deps.briefingService.narrateBriefing(
+          sessionId,
+          { includeInProgressTravel: true },
+        );
+        const desktopPayload = payload.briefing.travel
+          ? await this.deps.briefingService.narrateBriefing(sessionId)
+          : payload;
+        const mode = prefs.morningBriefing.mode;
+        await this.deps.onBriefingTriggered(
+          sessionId,
+          { ...payload, mode },
+          { ...desktopPayload, mode },
+        );
         prefs.morningBriefing.lastSentAt = new Date().toISOString();
       } catch (e) {
         // ignore single failure

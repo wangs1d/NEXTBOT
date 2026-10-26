@@ -236,24 +236,16 @@ const DEAD_LETTER_AFTER_FAILURES = Math.max(
 );
 
 /**
- * 补发（catch-up）判定：runtime 离线跨过触发点后，tick 在重启时会补执行到期的任务。
- * 实际执行晚于计划时间超过该阈值（默认 5 分钟）即视为补发，而非准点触发——
- * 提醒文案带【补发】前缀、agent_task 注入补发语境，避免把迟到的推送当成准点交付。
+ * 迟跑判定：实际执行晚于计划时间超过该阈值（默认 5 分钟，env 可调）视为
+ * runtime 离线跨过了触发点（重启补跑）→ 不执行，记 status=missed 的 run 并
+ * 一次性通知。日程提醒的价值锚在时刻本身，迟到的「到点了」比不提醒更误导；
+ * 阈值内（tick 间隔/重启抖动）照常执行。
  */
-const CATCHUP_MIN_LAG_MS =
+const MISSED_LAG_MS =
   Math.max(
     1,
-    Number.parseInt(process.env.SCHEDULE_TASK_CATCHUP_MIN_LAG_MINUTES ?? "", 10) || 5,
+    Number.parseInt(process.env.SCHEDULE_TASK_MISSED_LAG_MINUTES ?? "", 10) || 5,
   ) * 60_000;
-
-/**
- * 补发窗口：晚于计划时间超过该值（默认 24 小时）的到期任务不再执行，
- * 记 status=missed 的 run 并一次性通知用户——陈年任务静默补发比不补发更吓人。
- */
-const CATCHUP_MAX_LAG_MS = (() => {
-  const hours = Number.parseInt(process.env.SCHEDULE_TASK_CATCHUP_MAX_LAG_HOURS ?? "", 10) || 24;
-  return Math.max(CATCHUP_MIN_LAG_MS, hours * 3_600_000);
-})();
 
 /** 内容归一化：去全部空白 + 小写，跨创建路径（程序层/工具/HTTP）对同一句话稳定可比。 */
 function normalizeScheduleContent(value: string | undefined): string {
@@ -271,7 +263,7 @@ const DEPART_ESCALATE_SLACK_MIN = 5;
 /**
  * 日程服务装配选项。
  *
- * `now` 是**统一时间源**：调度链路里所有「当前时间」（未来时间闸、补发判定、
+ * `now` 是**统一时间源**：调度链路里所有「当前时间」（未来时间闸、迟跑判定、
  * 退避基准、周期推进基准）都必须走它，禁止直接 `Date.now()`。
  * 教训：注入了冻结时钟的测试，一旦服务内部偷读真实时钟，真实时间越过 fixture
  * 日期后就会集体失效（时间炸弹）——表现为「不物化 / 预算 spent=0」这类
@@ -344,7 +336,7 @@ export class ScheduleTaskService {
   private taskChangeHandler?: ScheduleTaskChangeHandler;
   /** 死信通知（进入 status=failed 时调用一次；bootstrap 接 proactivityHub 主动告知用户） */
   private taskDeadLetterHandler?: (task: ScheduleTaskRecord) => void;
-  /** 超窗未补发通知（到期任务超过补发窗口被记 missed 时调用一次） */
+  /** 迟跑未执行通知（到期任务迟到超阈被记 missed 时调用一次） */
   private taskMissedHandler?: (task: ScheduleTaskRecord, plannedAt: string) => void;
   /**
    * 用户作息画像提供方（agent 对用户习惯的了解，bootstrap 接睡眠样本链/节律画像）：
@@ -989,14 +981,12 @@ export class ScheduleTaskService {
   }
 
   private async executeTask(task: ScheduleTaskRecord, plannedAt: string): Promise<void> {
-    // 补发判定：实际执行比计划晚太多 = runtime 离线跨过了触发点（重启补跑）。
-    // 超窗 → 不执行、记 missed、通知一次；窗内 → 照常执行但带补发语境。
+    // 迟跑判定：超过阈值不执行、记 missed、通知一次；阈值内照常执行
     const lagMs = this.now().getTime() - new Date(plannedAt).getTime();
-    if (Number.isFinite(lagMs) && lagMs > CATCHUP_MAX_LAG_MS) {
+    if (Number.isFinite(lagMs) && lagMs > MISSED_LAG_MS) {
       await this.recordMissedRun(task, plannedAt);
       return;
     }
-    const catchUp = Number.isFinite(lagMs) && lagMs > CATCHUP_MIN_LAG_MS;
     const startedAt = this.now().toISOString();
     const runId = randomUUID();
     const run: ScheduleTaskRun = {
@@ -1014,7 +1004,6 @@ export class ScheduleTaskService {
           type: "reminder",
           title: task.title,
           message,
-          ...(catchUp ? { catchUp: true } : {}),
         };
       } else if (task.kind === "weather_brief") {
         if (!this.weatherBriefHandler) {
@@ -1025,11 +1014,7 @@ export class ScheduleTaskService {
         if (!this.agentTaskHandler) {
           throw new Error("agent task handler is not configured");
         }
-        run.output = await this.agentTaskHandler(
-          catchUp
-            ? { ...task, agentTask: { ...task.agentTask, prompt: this.buildCatchUpAgentPrompt(task.agentTask?.prompt ?? "", plannedAt) } }
-            : task,
-        );
+        run.output = await this.agentTaskHandler(task);
       } else {
         run.output = await this.executeAction(task);
       }
@@ -1055,16 +1040,13 @@ export class ScheduleTaskService {
       }
       if (task.kind === "reminder" && run.status === "success" && this.reminderHandler) {
         const message = task.reminderMessage || task.description;
-        await this.reminderHandler(
-          nextTaskState,
-          catchUp ? `【补发】${message}` : message,
-        );
+        await this.reminderHandler(nextTaskState, message);
       }
     }
   }
 
   /**
-   * 到期但超过补发窗口：不执行任何 handler，记 status=missed 的 run，
+   * 到期但迟到超阈：不执行任何 handler，记 status=missed 的 run，
    * 任务状态按"已处理"收口（单次 → completed；周期 → 推进到下一个未来槽位，
    * 循环推进避免停机多天后每个陈旧槽位连环触发 missed）。
    */
@@ -1077,7 +1059,7 @@ export class ScheduleTaskService {
       startedAt: nowIso,
       endedAt: nowIso,
       status: "missed",
-      error: `补发窗口已过：原定 ${plannedAt}，超 ${Math.round(CATCHUP_MAX_LAG_MS / 3_600_000)} 小时未执行，不再补发`,
+      error: `原定 ${plannedAt}，迟到超过阈值未执行，不再补跑`,
     };
     let next = this.computeNextTaskState(task, true);
     let guard = 0;
@@ -1100,16 +1082,6 @@ export class ScheduleTaskService {
     } catch {
       /* 通知失败不影响任务记账 */
     }
-  }
-
-  /** agent_task 补发语境：显式给出原定时间与当前时间，防相对时间（"今早/今天"）被按现在理解。 */
-  private buildCatchUpAgentPrompt(prompt: string, plannedAt: string): string {
-    const nowIso = this.now().toISOString();
-    return (
-      `【补发任务】此任务原定 ${plannedAt} 触发，因 runtime 未运行错过，现在补跑（当前实际时间 ${nowIso}）。` +
-      `任务里"今早/今天/昨晚"等相对时间按原定时间点理解；产出开头用一句话说明这是原定 ${plannedAt} 的补发。` +
-      `原任务：${prompt}`
-    );
   }
 
   private computeNextTaskState(

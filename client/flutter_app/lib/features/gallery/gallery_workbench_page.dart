@@ -3,6 +3,7 @@ import "dart:async" show unawaited;
 import "package:flutter/material.dart";
 import "package:webview_windows/webview_windows.dart";
 
+import "../../widgets/app_window_titlebar.dart";
 import "gallery_page.dart";
 import "gallery_review_page.dart";
 import "gallery_wall_host.dart";
@@ -92,6 +93,8 @@ class _GalleryWorkbenchPageState extends State<GalleryWorkbenchPage> {
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
+          // 整屏路由会盖掉主窗口唯一的拖拽区与窗口按钮，须补回标题栏
+          const AppWindowTitleBar(),
           _buildViewToggle(cs),
           Expanded(child: body),
         ],

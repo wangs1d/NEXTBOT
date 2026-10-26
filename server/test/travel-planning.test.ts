@@ -691,12 +691,14 @@ describe("travel-tile-cache (地图预加载)", () => {
     delete process.env.TRAVEL_TILE_ALLOW_HOSTS;
   });
 
-  it("白名单：cartocdn/arcgisonline 放行，其它域名与 http 拒绝", () => {
-    assert.ok(cache.isAllowedUpstream("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"));
-    assert.ok(cache.isAllowedUpstream("https://a.basemaps.cartocdn.com/vt/1/2/3.pbf"));
+  it("白名单：openfreemap/arcgisonline 放行，其它域名与 http 拒绝", () => {
+    // CARTO 已下线，仍要在拒绝列表里
+    assert.ok(cache.isAllowedUpstream("https://tiles.openfreemap.org/styles/dark"));
+    assert.ok(cache.isAllowedUpstream("https://tiles.openfreemap.org/tiles/basemap/1/2/3.pbf"));
     assert.ok(cache.isAllowedUpstream("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/1/2/3"));
+    assert.ok(!cache.isAllowedUpstream("https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json"));
     assert.ok(!cache.isAllowedUpstream("https://evil.example.com/tile.png"));
-    assert.ok(!cache.isAllowedUpstream("http://basemaps.cartocdn.com/tile.png"));
+    assert.ok(!cache.isAllowedUpstream("http://tiles.openfreemap.org/tiles/basemap/1/2/3.pbf"));
     assert.ok(!cache.isAllowedUpstream("not a url"));
   });
 

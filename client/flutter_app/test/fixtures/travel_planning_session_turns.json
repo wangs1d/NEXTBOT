@@ -125,89 +125,141 @@
                 "items": [
                   {
                     "name": "都江堰景区",
-                    "rec": 96,
-                    "rating": 4.8,
                     "intro": "都江堰景区，位于都江堰市城西岷江干流上，由秦国蜀郡太守李冰及其子于西元前256年左右修建，是目前中国保存完整的古代水利工程。工程由都江堰景区鱼嘴分水堤、飞沙堰溢洪道、宝瓶口引水口三大主体工程和百丈堤、人字堤等附属工程构成，把汹涌的岷江分隔成外江和內江，外江排洪，內江引水灌溉，使川西平原成为了“天府之国”。\n\n都江堰景区碧水浩荡、危崖奇峰、古木参天的佳自然风光",
                     "photos": [
-                      "/travel/media/assets/poi-ef778669319f/5d57f922d888c52b.jpg"
+                      "/travel/media/assets/poi-ef778669319f/bfb712fc5c1df730.jpg",
+                      "/travel/media/assets/poi-ef778669319f/ffdd94b66748bb86.jpg"
                     ],
                     "address": "公园路",
-                    "price": 68,
-                    "priceNote": "飞猪实时票价，以下单页为准",
-                    "pricePending": false,
-                    "picked": true
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.8",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥68 起",
+                        "source": "飞猪实时票价，以下单页为准"
+                      }
+                    ],
+                    "picked": false
                   },
                   {
                     "name": "宽窄巷子景区",
-                    "rec": 96,
-                    "rating": 4.8,
                     "intro": "宽窄巷子位于四川省成都市青羊区长顺街附近，由宽巷子、窄巷子、井巷子平行排列组成，全为青黛砖瓦的仿古四合院落，这里也是成都遗留下来的较成规模的清朝古街道，与大慈寺、文殊院一起并称为成都三大历史文化名城保护街区。里面的小店都很精致，能够感受到老成都的特色。有很多高档餐厅，有的餐厅很有古朴的味道。美中不足的是商业气息非常浓厚，长假的时候人太多太拥挤。",
                     "photos": [
-                      "/travel/media/assets/poi-07de28661463/a526df953594a5a3.jpg"
+                      "/travel/media/assets/poi-07de28661463/c6e7391b6a4d7deb.jpg",
+                      "/travel/media/assets/poi-07de28661463/03100f5243324da5.jpg",
+                      "/travel/media/assets/poi-07de28661463/0108d764f3f4a5b1.jpg"
                     ],
                     "address": "少城街道金河路口宽窄巷子",
-                    "price": 0,
-                    "priceNote": "免费景点",
-                    "pricePending": false,
-                    "picked": true
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.8",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "免费",
+                        "source": "免费景点"
+                      }
+                    ],
+                    "picked": false
                   },
                   {
                     "name": "川西竹海景区",
-                    "rec": 92,
-                    "rating": 4.6,
                     "intro": "景区，位于邛崃市 · 游客评分 4.6",
                     "photos": [
-                      "/travel/media/assets/poi-e2feca4d02f7/479718a8bef83c92.jpg"
+                      "/travel/media/assets/poi-e2feca4d02f7/bb3ef2b4551e0855.jpg",
+                      "/travel/media/assets/poi-e2feca4d02f7/479718a8bef83c92.jpg",
+                      "/travel/media/assets/poi-e2feca4d02f7/677bb51c58c58411.jpg"
                     ],
                     "address": "平乐镇茶马古道中段",
-                    "price": null,
-                    "priceNote": "实时票价查询失败，待核价",
-                    "pricePending": true,
-                    "picked": true
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.6",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "实时票价查询失败，待核价"
+                      }
+                    ],
+                    "picked": false
                   },
                   {
                     "name": "麓湖水线公园",
-                    "rec": 92,
-                    "rating": 4.6,
                     "intro": "公园，位于四川天府新区成都直管区 · 游客评分 4.6",
                     "photos": [
-                      "/travel/media/assets/poi-41c7fa64d597/a8ea75420999d951.jpg"
+                      "/travel/media/assets/poi-41c7fa64d597/556619b1c0e2817f.jpg"
                     ],
                     "address": "麓湖中路西段",
-                    "price": null,
-                    "priceNote": "实时票价查询失败，待核价",
-                    "pricePending": true,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.6",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "实时票价查询失败，待核价"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "千佛山景区",
-                    "rec": 90,
-                    "rating": 4.5,
                     "intro": "自然风光，位于大邑县 · 游客评分 4.5 · 适合慢逛拍照",
                     "photos": [
-                      "/travel/media/assets/poi-d7c96cc09db1/f4d8d5ed47280b58.jpg"
+                      "/travel/media/assets/poi-d7c96cc09db1/22be88ec9c04cb92.jpg",
+                      "/travel/media/assets/poi-d7c96cc09db1/54ec02f9d9a52ccb.jpg",
+                      "/travel/media/assets/poi-d7c96cc09db1/aec7368bc320a7c1.jpg"
                     ],
                     "address": "花水湾镇风景区花水湾温泉度假区内",
-                    "price": null,
-                    "priceNote": "实时票价查询失败，待核价",
-                    "pricePending": true,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.5",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "实时票价查询失败，待核价"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "香脂湖公园",
-                    "rec": 90,
-                    "rating": 4.5,
                     "intro": "公园，位于郫都区 · 游客评分 4.5",
                     "photos": [
-                      "/travel/media/assets/poi-d6a2609178d6/cafdcfdfc6c02913.jpg"
+                      "/travel/media/assets/poi-d6a2609178d6/cafdcfdfc6c02913.jpg",
+                      "/travel/media/assets/poi-d6a2609178d6/62e232b4c7fcf87d.jpg",
+                      "/travel/media/assets/poi-d6a2609178d6/0a2c611b5ad74fb9.jpg"
                     ],
                     "address": "府河庭院南侧250米",
-                    "price": null,
-                    "priceNote": "实时票价查询失败，待核价",
-                    "pricePending": true,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.5",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "实时票价查询失败，待核价"
+                      }
+                    ],
                     "picked": false
                   }
-                ]
+                ],
+                "sortNote": "6/6 条有真实评分，按评分排"
               },
               {
                 "key": "stay",
@@ -215,88 +267,135 @@
                 "items": [
                   {
                     "name": "NOX酒店(成都春熙路太古里店)",
-                    "rec": 96,
-                    "rating": 4.8,
                     "intro": "经济型酒店，位于猛追湾 · 住客评分 4.8",
                     "photos": [
-                      "/travel/media/assets/poi-bd579c05f76f/b7f80caa55eaf25b.jpg"
+                      "/travel/media/assets/poi-bd579c05f76f/36211bcaa4caf4f6.jpg",
+                      "/travel/media/assets/poi-bd579c05f76f/a54ba6e9b3831481.jpg",
+                      "/travel/media/assets/poi-bd579c05f76f/79c3fde837d85613.jpg"
                     ],
-                    "price": 158,
-                    "priceNote": "飞猪实时房价，以下单页为准",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.8",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥158/晚",
+                        "source": "飞猪实时房价，以下单页为准"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "CYBO君亭尚品酒店(成都春熙路天府广场店)",
-                    "rec": 96,
-                    "rating": 4.8,
                     "intro": "舒适型酒店，位于顺城街 · 住客评分 4.8",
                     "photos": [
                       "/travel/media/assets/poi-6e5089158069/8fecbd5841f382c5.jpg"
                     ],
                     "address": "上翔街35号附3号",
-                    "price": 213,
-                    "priceNote": "飞猪实时房价，以下单页为准",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.8",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥213/晚",
+                        "source": "飞猪实时房价，以下单页为准"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "隐栖堂酒店(成都杜甫草堂光华村地铁站店)",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "高档型酒店，位于草堂 · 住客评分 4.7",
                     "photos": [
-                      "/travel/media/assets/poi-72f7883279e1/780ff79174d7893b.jpg"
+                      "/travel/media/assets/poi-72f7883279e1/6b9c91c95114123f.jpg"
                     ],
                     "address": "青华路59号(光华村地铁站F口旁)",
-                    "price": null,
-                    "priceNote": "未取到该酒店实时价，待核价",
-                    "pricePending": true,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.7",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "未取到该酒店实时价，待核价"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "FPS·王者之梦赛事电竞酒店(成都春熙路店)",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "电竞酒店酒店，位于春熙路 · 住客评分 4.7",
                     "photos": [
                       "/travel/media/assets/poi-c39127345033/5fea8860749a8c28.jpg"
                     ],
                     "address": "岳府街60号(太升南路地铁站B口步行310米)",
-                    "price": 27,
-                    "priceNote": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.7",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥27/晚",
+                        "source": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "城市便捷酒店(成都师范学院西南财经大学店)",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "快捷酒店酒店，位于凤溪大道 · 住客评分 4.7",
                     "photos": [
-                      "/travel/media/assets/poi-bb1119d6ab15/3f3171a6fa455cbc.jpg"
+                      "/travel/media/assets/poi-bb1119d6ab15/6d990dcf26e97357.jpg",
+                      "/travel/media/assets/poi-bb1119d6ab15/2c13f80abb0e58a2.jpg",
+                      "/travel/media/assets/poi-bb1119d6ab15/beec8b8df1a28ac3.jpg"
                     ],
                     "address": "杨柳东路南段18号(距杨柳河地铁口B站100米)",
-                    "price": 112,
-                    "priceNote": "飞猪实时房价，以下单页为准",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.7",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥112/晚",
+                        "source": "飞猪实时房价，以下单页为准"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "非羽酒店(成都双流国际机场店)",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "经济型酒店，位于四川天府新区成都直管区 · 住客评分 4.7",
                     "photos": [
-                      "/travel/media/assets/poi-25e91e80782f/7eb8aee458041ffd.jpg"
+                      "/travel/media/assets/poi-25e91e80782f/9c69b88895593d99.jpg"
                     ],
                     "address": "长顺路四段21-27号",
-                    "price": 27,
-                    "priceNote": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "住客评分 4.7",
+                        "source": "飞猪住客评分（同名命中该酒店才取）"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥27/晚",
+                        "source": "未取到该酒店实时价，按同城同档 10 家在售酒店中位数参考"
+                      }
+                    ],
                     "picked": false
                   }
-                ]
+                ],
+                "sortNote": "6/6 条有真实评分，按评分排"
               },
               {
                 "key": "food",
@@ -304,89 +403,131 @@
                 "items": [
                   {
                     "name": "森宏鱼庄",
-                    "rec": 96,
-                    "rating": 4.8,
                     "intro": "本地特色，位于新都区 · 评分 4.8",
                     "photos": [
-                      "/travel/media/assets/poi-f29eb426bffc/7e0f7899b494058f.jpg"
+                      "/travel/media/assets/poi-f29eb426bffc/f26fb03481d79985.jpg",
+                      "/travel/media/assets/poi-f29eb426bffc/7045df0f2a61805d.jpg",
+                      "/travel/media/assets/poi-f29eb426bffc/9d5ec0ccb86cbbce.jpg"
                     ],
                     "address": "西朱路甘露村独桥河甘露小学旁",
-                    "price": 82,
-                    "priceNote": "高德人均消费",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.8",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥82/人",
+                        "source": "高德人均消费"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "十八里家常鱼庄",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "本地特色，位于四川天府新区 · 评分 4.7",
                     "photos": [
                       "/travel/media/assets/poi-e6d9743e3803/8b8ca2ec2022ccb7.jpg"
                     ],
                     "address": "白沙镇白沙村6组75号",
-                    "price": 81,
-                    "priceNote": "高德人均消费",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.7",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥81/人",
+                        "source": "高德人均消费"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "蜀宴百汇",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "本地特色，位于锦江区 · 评分 4.7",
-                    "photos": [
-                      "/travel/media/assets/poi-17f03c77864a/01239eedc06a3152.jpg"
-                    ],
+                    "photos": [],
                     "address": "三圣街道幸福社区联合四组329号",
-                    "price": null,
-                    "priceNote": "未公布人均，待核价",
-                    "pricePending": true,
+                    "metrics": [
+                      {
+                        "kind": "price",
+                        "label": "待核价",
+                        "source": "未公布人均，待核价"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "黑石香村柴火鸡",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "本地特色，位于四川天府新区成都直管区 · 评分 4.7",
                     "photos": [
                       "/travel/media/assets/poi-ac12fd62f5c9/388414295d34fe2e.jpg"
                     ],
                     "address": "穿心路过铁路桥110米左侧",
-                    "price": 70,
-                    "priceNote": "高德人均消费",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.7",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥70/人",
+                        "source": "高德人均消费"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "御苑精品川菜馆",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "本地特色，位于龙舟路 · 评分 4.7",
                     "photos": [
-                      "/travel/media/assets/poi-bb698bd2a3c0/03b362349cb8f2c4.jpg"
+                      "/travel/media/assets/poi-bb698bd2a3c0/bfac1d43c01c2b17.jpg",
+                      "/travel/media/assets/poi-bb698bd2a3c0/4cd7dd7794acc83a.jpg",
+                      "/travel/media/assets/poi-bb698bd2a3c0/a96d089c628b13f7.jpg"
                     ],
                     "address": "龙舟路108号秀城大厦2楼",
-                    "price": 80,
-                    "priceNote": "高德人均消费",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.7",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥80/人",
+                        "source": "高德人均消费"
+                      }
+                    ],
                     "picked": false
                   },
                   {
                     "name": "空港·杏花村花园酒店",
-                    "rec": 94,
-                    "rating": 4.7,
                     "intro": "本地特色，位于四川天府新区 · 评分 4.7",
                     "photos": [
-                      "/travel/media/assets/poi-1c493ded5c75/4fc2e851cf2e01e9.jpg"
+                      "/travel/media/assets/poi-1c493ded5c75/b52d8d6bc1a06bc5.jpg",
+                      "/travel/media/assets/poi-1c493ded5c75/5fd310fd02bbf176.jpg",
+                      "/travel/media/assets/poi-1c493ded5c75/676d8afaf8082aa9.jpg"
                     ],
                     "address": "广都大道480号",
-                    "price": 99,
-                    "priceNote": "高德人均消费",
-                    "pricePending": false,
+                    "metrics": [
+                      {
+                        "kind": "rating",
+                        "label": "评分 4.7",
+                        "source": "高德用户评分"
+                      },
+                      {
+                        "kind": "price",
+                        "label": "¥99/人",
+                        "source": "高德人均消费"
+                      }
+                    ],
                     "picked": false
                   }
-                ]
+                ],
+                "sortNote": "5/6 条有真实评分，按评分排"
               }
             ]
           }

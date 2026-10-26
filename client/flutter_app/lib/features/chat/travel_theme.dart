@@ -4,12 +4,13 @@ import "../../core/theme/app_theme.dart";
 
 /// 旅游功能跨表面共享强调色（随 [AppThemeVariant] 对齐）。
 ///
-/// - dark：霓虹青/翠绿科技风（默认，历史配色不变）；
+/// - dark：跟随 App 深色主题的中性灰阶（#D4D4D8 强调 / #2C2C2C 按钮底），
+///   不再使用霓虹青，界面与主侧栏、主对话保持同一套灰阶；
 /// - warm：奶油白主题下收敛为低饱和蓝绿，与 `AppPalette.warm*` 的
-///   按钮（#EAF3FF 底 / #0055B8 字）和强调色一致，避免青色在米白底上刺眼。
+///   按钮（#EAF3FF 底 / #0055B8 字）和强调色一致。
 ///
 /// 海报照片遮罩、地图画布等「恒深色底」上的元素不适用本调色板
-///（两类底色下都用霓虹青保证可读，见各使用处注释）。
+///（两类底色下都用白色系保证可读，见各使用处注释）。
 class TravelPalette {
   const TravelPalette({
     required this.accent,
@@ -44,11 +45,11 @@ class TravelPalette {
           ? warm
           : dark;
 
-  /// 深色主题（默认）：科技感霓虹青。
+  /// 深色主题（默认）：中性灰阶，与主侧栏 / 主对话一致。
   static const TravelPalette dark = TravelPalette(
-    accent: Color(0xFF18D6F3),
-    accentBg: Color(0xFF18D6F3),
-    onAccentBg: Color(0xFF06222C),
+    accent: Color(0xFFD4D4D8),
+    accentBg: Color(0xFF2C2C2C),
+    onAccentBg: Color(0xFFE8E8E8),
     green: Color(0xFF1ED7A6),
     orange: Color(0xFFD7B85A),
     purple: Color(0xFF8B5CF6),

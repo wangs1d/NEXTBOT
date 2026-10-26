@@ -1,0 +1,1086 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>行程页 · 优化方案稿 02</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --board: #08090a;
+    --rule: #1e2024;
+    --ink: #e9eaec;
+    --ink-2: #a9adb4;
+    --ink-3: #6d727b;
+    --accent: #18d6f3;
+    --green: #1ed7a6;
+    --orange: #d7b85a;
+    --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
+    --noise: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='140' height='140'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.86' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='140' height='140' filter='url(%23n)' opacity='.55'/%3E%3C/svg%3E");
+  }
+  html { -webkit-font-smoothing: antialiased; }
+  body {
+    background:
+      radial-gradient(1200px 620px at 50% -12%, #15171b 0%, transparent 62%),
+      var(--board);
+    color: var(--ink);
+    font-family: "HarmonyOS Sans SC", "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    padding: 56px 30px 96px;
+  }
+  .board { max-width: 1020px; margin: 0 auto; }
+
+  /* ── 板头 ─────────────────────────────────────── */
+  .eyebrow { font: 10px/1 var(--mono); letter-spacing: .24em; color: var(--accent); text-transform: uppercase; }
+  h1 { font-size: 40px; line-height: 1.08; font-weight: 750; letter-spacing: -.02em; margin: 14px 0 12px; }
+  .lede { max-width: 760px; font-size: 14.5px; line-height: 1.95; color: var(--ink-2); }
+  .lede em { font-style: normal; color: #f0e9da; }
+  .meta-row {
+    display: flex; flex-wrap: wrap; gap: 22px;
+    margin-top: 26px; padding-top: 14px;
+    border-top: 1px solid var(--rule);
+    font: 10px/1.4 var(--mono); letter-spacing: .1em; color: var(--ink-3);
+  }
+
+  section { margin-top: 68px; }
+  .sec-head { display: flex; align-items: baseline; gap: 14px; padding-bottom: 12px; margin-bottom: 22px; border-bottom: 1px solid var(--rule); }
+  .sec-head .no { font: 10px var(--mono); letter-spacing: .14em; color: var(--accent); }
+  .sec-head h2 { font-size: 18px; font-weight: 680; letter-spacing: .01em; }
+  .sec-head .sec-sub { margin-left: auto; font-size: 10.5px; color: var(--ink-3); letter-spacing: .04em; }
+
+  /* ── 01 诊断 ──────────────────────────────────── */
+  .diag-grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 18px; }
+  .diag { border-left: 1px solid var(--rule); padding-left: 14px; }
+  .diag .dno { font: 9px var(--mono); letter-spacing: .14em; color: var(--accent); }
+  .diag b { display: block; margin: 7px 0 6px; font-size: 12.5px; font-weight: 650; line-height: 1.5; }
+  .diag p { font-size: 10.8px; line-height: 1.8; color: var(--ink-3); }
+  .diag p code { font: 10px var(--mono); color: var(--ink-2); }
+
+  /* ── 02 主张 ──────────────────────────────────── */
+  .quote { max-width: 900px; font-size: 31px; line-height: 1.45; font-weight: 720; letter-spacing: -.012em; }
+  .quote .w-paper { color: #f1eadb; }
+  .quote .w-light { color: var(--accent); }
+  .quote-sub { max-width: 760px; margin-top: 16px; font-size: 13px; line-height: 1.95; color: var(--ink-2); }
+  .principles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-top: 28px; }
+  .principle { padding: 18px 18px 17px; border: 1px solid var(--rule); border-radius: 14px; background: linear-gradient(180deg, #101114, #0b0c0e); }
+  .principle .pno { font: 9px var(--mono); letter-spacing: .16em; color: var(--accent); }
+  .principle h3 { font-size: 14px; font-weight: 650; margin: 10px 0 7px; }
+  .principle p { font-size: 11.2px; line-height: 1.85; color: var(--ink-3); }
+
+  .handoff { margin-top: 14px; display: grid; grid-template-columns: minmax(0, .9fr) minmax(0, 1.1fr); border: 1px solid var(--rule); border-radius: 14px; overflow: hidden; background: linear-gradient(180deg, #101114, #0b0c0e); }
+  .handoff-lead { padding: 18px; border-right: 1px solid var(--rule); }
+  .handoff-lead .pno { font: 9px var(--mono); letter-spacing: .16em; color: var(--accent); }
+  .handoff-lead h3 { font-size: 14px; font-weight: 650; margin: 10px 0 7px; }
+  .handoff-lead p { font-size: 11.2px; line-height: 1.85; color: var(--ink-3); }
+  .handoff-cells { display: flex; flex-direction: column; justify-content: center; }
+  .handoff-cell { display: grid; grid-template-columns: 118px minmax(0, 1fr); gap: 14px; align-items: baseline; padding: 14px 18px; }
+  .handoff-cell + .handoff-cell { border-top: 1px solid var(--rule); }
+  .handoff-cell b { font: 9.5px var(--mono); letter-spacing: .06em; color: var(--ink-2); font-weight: 600; }
+  .handoff-cell span { font-size: 11px; line-height: 1.7; color: var(--ink-3); }
+  .handoff-cell em { font-style: normal; color: var(--accent); }
+
+  /* ── 生命线 ──────────────────────────────────── */
+  .life { display: grid; grid-template-columns: auto 34px auto 34px auto 1fr; align-items: center; gap: 12px; margin-top: 24px; padding: 18px 20px; border: 1px solid var(--rule); border-radius: 14px; background: linear-gradient(180deg, #0f1012, #0b0c0e); }
+  .life-node { display: flex; align-items: center; gap: 9px; }
+  .life-node i { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+  .life-node b { font-size: 11.5px; font-weight: 650; }
+  .life-node span { font: 7.5px var(--mono); letter-spacing: .12em; color: var(--ink-3); }
+  .life-node.n1 i { background: #a5761b; box-shadow: 0 0 0 4px rgba(165,118,27,.14); }
+  .life-node.n2 i { background: #18d6f3; box-shadow: 0 0 0 4px rgba(24,214,243,.14); }
+  .life-node.n3 i { background: #1f7a5a; box-shadow: 0 0 0 4px rgba(31,122,90,.18); }
+  .life-arr { height: 1px; background: repeating-linear-gradient(90deg, #2c3036 0 4px, transparent 4px 8px); }
+  .life-note { text-align: right; font-size: 10px; color: var(--ink-3); }
+  .life-note b { color: var(--ink-2); font-weight: 500; }
+
+  /* ── 舞台通用 ────────────────────────────────── */
+  .stage-cap { display: flex; align-items: center; justify-content: space-between; gap: 16px; margin-bottom: 10px; font: 10px var(--mono); letter-spacing: .1em; color: var(--ink-3); }
+  .stage-cap b { color: var(--ink-2); font-weight: 500; letter-spacing: .06em; }
+  .stage {
+    position: relative; overflow: hidden; border: 1px solid var(--rule); border-radius: 18px;
+    box-shadow: 0 40px 90px -50px #000, 0 10px 30px -20px #000;
+  }
+  .stage-pad { padding: 22px; }
+  .dark-stage {
+    --app-bg: #131313; --app-side: #131313; --app-card: #0f0f0f; --app-card2: #171717;
+    --app-line: #353535; --app-line-soft: #27272a;
+    --app-text: #e8e8e8; --app-text2: #bbbbbb; --app-muted: #989898;
+    --app-accent: #18d6f3; --app-green: #1ed7a6; --app-orange: #d7b85a;
+    --app-page: #131313; --app-shadow: rgba(0,0,0,.72);
+    --dot: rgba(255,255,255,.045); --glow: rgba(24,214,243,.065);
+  }
+  .app { position: relative; background: var(--app-bg); color: var(--app-text); padding-bottom: 26px; }
+  .app::before {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background-image: radial-gradient(var(--dot) 1px, transparent 1px);
+    background-size: 22px 22px;
+    -webkit-mask-image: radial-gradient(88% 78% at 50% 32%, #000 20%, transparent 100%);
+    mask-image: radial-gradient(88% 78% at 50% 32%, #000 20%, transparent 100%);
+  }
+  .app::after {
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: radial-gradient(680px 300px at 72% -6%, var(--glow), transparent 72%);
+  }
+  .app > * { position: relative; z-index: 1; }
+
+  .app-top { height: 48px; display: flex; align-items: center; gap: 10px; padding: 0 20px; border-bottom: 1px solid var(--app-line-soft); }
+  .back-btn { width: 30px; height: 30px; border-radius: 10px; flex: none; display: grid; place-items: center; background: var(--app-card2); color: var(--app-text2); font-size: 14px; }
+  .app-title { font-size: 12.5px; font-weight: 700; color: var(--app-text2); }
+  .page { padding: 4px 34px 0; }
+
+  /* ── 两段 tab ─────────────────────────────────── */
+  .tabbar { display: flex; align-items: stretch; gap: 26px; border-bottom: 1px solid var(--app-line-soft); }
+  .tab { position: relative; display: flex; align-items: baseline; gap: 7px; padding: 8px 0 9px; font-size: 12px; font-weight: 600; color: var(--app-muted); }
+  .tab .tcnt { font: 8px var(--mono); letter-spacing: .08em; color: var(--app-muted); }
+  .tab.on { color: var(--app-text); }
+  .tab.on .tcnt { color: var(--app-orange); }
+  .tab.on::after { content: ""; position: absolute; left: 0; right: 0; bottom: -1px; height: 2px; border-radius: 1px; background: #e9e3d4; }
+  .tab-hint { margin-left: auto; align-self: center; font: 8px var(--mono); letter-spacing: .1em; color: var(--app-muted); }
+
+  .sec-h { display: flex; align-items: baseline; gap: 10px; margin: 24px 0 12px; }
+  .sec-h h4 { font-size: 14px; font-weight: 680; color: var(--app-text); }
+  .sec-h .count { font: 8.5px var(--mono); letter-spacing: .08em; color: var(--app-muted); }
+  .sec-h .note { margin-left: auto; font-size: 9.5px; color: var(--app-muted); }
+
+  /* ── 旧 Tab（对照） ───────────────────────────── */
+  .old-segs { display: flex; max-width: 680px; margin: 0 auto; padding: 3px; background: var(--app-card2); border: 1px solid var(--app-line-soft); border-radius: 12px; }
+  .old-seg { flex: 1; display: flex; align-items: center; justify-content: center; gap: 5px; padding: 6px 0; border-radius: 9px; font-size: 11px; font-weight: 600; color: var(--app-muted); }
+  .old-seg .sdot { width: 5px; height: 5px; border-radius: 50%; background: var(--app-accent); }
+  .old-seg:nth-child(2) .sdot { background: var(--app-orange); }
+  .old-seg:nth-child(3) .sdot { background: var(--app-muted); }
+  .old-seg .cnt { font-size: 9.5px; color: var(--app-muted); }
+  .old-seg.on { background: var(--app-card); color: var(--app-text); box-shadow: 0 2px 8px var(--app-shadow); }
+  .old-seg.on .cnt { color: var(--app-text2); }
+  .nc-inner .old-segs { width: 100%; }
+  .nc-inner .old-seg { font-size: 10.5px; white-space: nowrap; }
+
+  /* ── 纸票 ────────────────────────────────────── */
+  .ticket {
+    --tpaper: #f2ebdc; --tpaper2: #e7ddc9; --tink: #272219; --tink2: #5d5444; --tmuted: #7c7059;
+    --tline: rgba(39,34,25,.24); --stamp: #1f7a5a;
+    --tw: 104px; --photo: 150px; --stamp-size: 58px; --stamp-half: 29px;
+    --notch-size: 16px; --notch-half: 8px; --notch-bg: #131313;
+    position: relative; display: block; width: 100%;
+  }
+  .ticket-clip {
+    position: relative; display: grid; grid-template-columns: var(--photo) minmax(0, 1fr) var(--tw);
+    border-radius: 12px; overflow: hidden;
+    background: var(--tpaper); color: var(--tink);
+    box-shadow:
+      0 1px 0 rgba(255,255,255,.55) inset,
+      0 -1px 0 rgba(0,0,0,.06) inset,
+      0 24px 42px -18px rgba(0,0,0,.72),
+      0 4px 10px rgba(0,0,0,.16);
+  }
+  .ticket-clip::after {
+    content: ""; position: absolute; inset: 0; z-index: 5; pointer-events: none;
+    background-image: var(--noise); opacity: .055; mix-blend-mode: multiply;
+  }
+  .t-photo {
+    --ridge: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 320 180' preserveAspectRatio='none'%3E%3Cpath d='M0 132 L38 96 L70 116 L104 74 L140 108 L176 64 L212 100 L250 78 L286 106 L320 88 L320 180 L0 180Z' fill='%23091512' fill-opacity='.62'/%3E%3Cpath d='M0 150 L42 124 L84 140 L122 112 L162 136 L206 108 L246 130 L286 116 L320 128 L320 180 L0 180Z' fill='%23040a08' fill-opacity='.9'/%3E%3C/svg%3E");
+    position: relative; overflow: hidden;
+    background-size: cover; background-position: center;
+    filter: saturate(.92) contrast(1.06) sepia(.03);
+    box-shadow: inset -1px 0 0 rgba(255,255,255,.22);
+  }
+  .t-photo::before {
+    content: ""; position: absolute; inset: 0;
+    background-image:
+      linear-gradient(180deg, rgba(24,18,8,.02) 40%, rgba(24,18,8,.5) 100%),
+      var(--ridge);
+    background-size: 100% 100%, 100% 54%;
+    background-position: center, bottom;
+    background-repeat: no-repeat;
+  }
+  .t-photo::after { content: ""; position: absolute; inset: 0; background-image: var(--noise); opacity: .13; mix-blend-mode: multiply; }
+  .t-photo .cap { position: absolute; left: 10px; bottom: 9px; z-index: 2; font: 7px/1 var(--mono); letter-spacing: .2em; color: rgba(255,255,255,.86); text-shadow: 0 1px 5px rgba(0,0,0,.55); }
+  .t-body { display: flex; flex-direction: column; min-width: 0; padding: 14px 16px 12px; }
+  .t-micro { display: flex; align-items: center; justify-content: space-between; gap: 10px; font: 7.5px/1 var(--mono); letter-spacing: .16em; color: var(--tmuted); text-transform: uppercase; }
+  .t-micro .no { color: var(--tink2); font-weight: 600; }
+  .board-chip { display: inline-flex; align-items: center; gap: 5px; color: #8a5f13; letter-spacing: .1em; }
+  .board-chip i { width: 4px; height: 4px; border-radius: 50%; background: #a5761b; }
+  .t-dest { display: flex; align-items: flex-end; gap: 10px; min-width: 0; margin-top: 10px; }
+  .t-name { font-size: 30px; line-height: 1; font-weight: 780; letter-spacing: .01em; color: var(--tink); white-space: nowrap; }
+  .t-sub { padding-bottom: 2px; font-size: 10px; color: var(--tmuted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .t-fields { display: flex; gap: 24px; margin-top: auto; padding-top: 12px; }
+  .t-field .k { display: block; margin-bottom: 3px; font: 7.2px/1 var(--mono); letter-spacing: .16em; color: var(--tmuted); }
+  .t-field .v { font-size: 11.5px; font-weight: 650; font-variant-numeric: tabular-nums; color: var(--tink2); white-space: nowrap; }
+  .t-route { display: flex; align-items: center; gap: 10px; margin-top: 9px; }
+  .r-track { position: relative; flex: 1; height: 8px; display: flex; align-items: center; justify-content: space-between; }
+  .r-track::before { content: ""; position: absolute; left: 0; right: 0; top: 50%; border-top: 1px dashed var(--tline); }
+  .r-track i { position: relative; flex: none; width: 5px; height: 5px; border-radius: 50%; background: var(--tpaper); border: 1px solid var(--tink2); opacity: .55; }
+  .r-track i:last-of-type { background: var(--tink2); border-color: var(--tink2); opacity: .85; }
+  .r-sum { flex: none; font: 6.8px var(--mono); letter-spacing: .12em; color: var(--tmuted); white-space: nowrap; }
+  .t-stub {
+    position: relative; display: flex; flex-direction: column; align-items: center;
+    justify-content: space-between; padding: 10px 6px 9px;
+    background: linear-gradient(180deg, rgba(0,0,0,.012), rgba(0,0,0,.065));
+  }
+  .t-stub::before { content: ""; position: absolute; left: 0; top: 11px; bottom: 11px; border-left: 1.5px dashed var(--tline); }
+  .stub-top { font: 6.5px/1 var(--mono); letter-spacing: .18em; color: var(--tmuted); }
+  .stub-mid { text-align: center; }
+  .big-num { font-size: 34px; line-height: 1; font-weight: 300; font-variant-numeric: tabular-nums; color: var(--tink); letter-spacing: -.02em; }
+  .big-cap { margin-top: 3px; font: 6.5px/1 var(--mono); letter-spacing: .18em; color: var(--tmuted); }
+  .stub-note { margin-top: 5px; font-size: 8.5px; color: var(--tink2); }
+  .barcode { width: 44px; height: 16px; opacity: .72; background: repeating-linear-gradient(90deg, var(--tink2) 0 1px, transparent 1px 2.4px, var(--tink2) 2.4px 3.6px, transparent 3.6px 5px, var(--tink2) 5px 5.6px, transparent 5.6px 7.2px); }
+  .stub-no { font: 6px/1 var(--mono); letter-spacing: .14em; color: var(--tmuted); }
+  .notch { position: absolute; z-index: 6; width: var(--notch-size); height: var(--notch-size); border-radius: 50%; right: calc(var(--tw) - var(--notch-half)); background: var(--notch-bg); box-shadow: inset 0 0 0 1px rgba(0,0,0,.05); }
+  .notch.top { top: calc(var(--notch-half) * -1); }
+  .notch.bottom { bottom: calc(var(--notch-half) * -1); }
+  .stamp {
+    position: absolute; z-index: 7; pointer-events: none;
+    right: calc(var(--tw) - var(--stamp-half)); top: 50%;
+    width: var(--stamp-size); height: var(--stamp-size);
+    transform: translateY(-50%) rotate(-12deg);
+    border: 2px solid var(--stamp); border-radius: 50%;
+    color: var(--stamp); opacity: .78; mix-blend-mode: multiply;
+  }
+  .stamp-in { position: absolute; inset: 3px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 1px; border: 1px solid var(--stamp); border-radius: 50%; opacity: .78; }
+  .stamp-in b { font-size: 9.5px; font-weight: 800; letter-spacing: .12em; line-height: 1.2; }
+  .stamp-in span { font: 5.2px/1.2 var(--mono); letter-spacing: .08em; }
+  .ticket.upcoming { --stamp: #a5761b; }
+
+  .ticket.hero { --photo: 168px; --tw: 104px; --stamp-size: 62px; --stamp-half: 31px; }
+  .ticket.hero.multi { --photo: 132px; --tw: 96px; }
+  .ticket.hero.multi .city-chain { flex-wrap: wrap; row-gap: 2px; }
+  .ticket.hero.multi .city-chain .city { font-size: 19px; }
+  .ticket.hero .ticket-clip { min-height: 196px; }
+  .ticket.hero .big-num { font-size: 40px; }
+  .ticket.stage-hero { --photo: 128px; --tw: 88px; --stamp-size: 48px; --stamp-half: 24px; }
+  .ticket.stage-hero .ticket-clip { min-height: 154px; }
+  .ticket.stage-hero .t-name { font-size: 24px; }
+  .ticket.stage-hero .t-body { padding: 11px 13px 9px; }
+  .ticket.stage-hero .big-num { font-size: 30px; }
+  .ticket.stage-hero.multi { --photo: 104px; --tw: 84px; }
+  .ticket.stage-hero.multi .city-chain .city { font-size: 16px; }
+
+  .city-chain { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+  .city-chain .city { font-size: 21px; line-height: 1.1; font-weight: 760; color: var(--tink); white-space: nowrap; }
+  .city-chain .arr { font-size: 10px; color: var(--tmuted); }
+  .city-chain .more { font: 8px var(--mono); color: var(--tmuted); }
+  .city-dates { display: flex; flex-wrap: wrap; gap: 9px; margin-top: 7px; }
+  .city-dates span { font: 7.2px var(--mono); letter-spacing: .08em; color: var(--tmuted); }
+  .city-dates b { font-weight: 600; color: var(--tink2); }
+
+  /* 照片（CSS 实景替代） */
+  .ph-chengdu { background-image:
+    linear-gradient(180deg, transparent 58%, rgba(6,14,12,.62) 100%),
+    radial-gradient(58% 40% at 70% 26%, rgba(255,212,160,.5), transparent 68%),
+    linear-gradient(172deg, #5c7863 0%, #345246 40%, #172c26 72%, #091512 100%); }
+  .ph-xian { background-image:
+    linear-gradient(180deg, transparent 58%, rgba(28,10,6,.66) 100%),
+    radial-gradient(52% 38% at 74% 22%, rgba(255,204,146,.52), transparent 66%),
+    linear-gradient(170deg, #93603f 0%, #623828 44%, #2b1811 74%, #140b08 100%); }
+  .ph-luoyang { background-image:
+    linear-gradient(180deg, transparent 56%, rgba(10,18,8,.6) 100%),
+    radial-gradient(56% 40% at 28% 20%, rgba(214,226,168,.42), transparent 68%),
+    linear-gradient(168deg, #596b4b 0%, #36472e 46%, #1a2617 76%, #0b1209 100%); }
+  .ph-qingdao { background-image:
+    linear-gradient(180deg, transparent 54%, rgba(4,18,22,.62) 100%),
+    radial-gradient(55% 36% at 24% 20%, rgba(196,232,236,.44), transparent 68%),
+    linear-gradient(172deg, #3d6a73 0%, #22505a 46%, #0e2a30 78%, #06171b 100%); }
+  .ph-haerbin { background-image:
+    linear-gradient(180deg, transparent 54%, rgba(10,18,28,.58) 100%),
+    radial-gradient(58% 40% at 72% 18%, rgba(238,246,252,.55), transparent 68%),
+    linear-gradient(170deg, #6a8094 0%, #40566a 46%, #1d2c3b 78%, #0c1620 100%); }
+  .ph-sanya { background-image:
+    linear-gradient(180deg, transparent 52%, rgba(3,20,24,.6) 100%),
+    radial-gradient(56% 38% at 30% 14%, rgba(255,232,182,.5), transparent 66%),
+    linear-gradient(172deg, #3a8c8a 0%, #1f6a70 44%, #0c3d44 78%, #052026 100%); }
+  .ph-hz { background-image:
+    linear-gradient(180deg, transparent 54%, rgba(6,18,12,.6) 100%),
+    radial-gradient(56% 38% at 62% 16%, rgba(208,230,204,.44), transparent 66%),
+    linear-gradient(170deg, #4a6c58 0%, #2d4c3d 46%, #15281f 78%, #08140e 100%); }
+
+  /* ── 行 ──────────────────────────────────────── */
+  .up-list { border-top: 1px solid var(--app-line-soft); }
+  .up-row { display: grid; grid-template-columns: 72px minmax(0, 1fr) auto 14px; align-items: center; gap: 16px; padding: 11px 4px; border-bottom: 1px solid var(--app-line-soft); }
+  .up-date b { display: block; font-size: 13px; font-weight: 650; color: var(--app-text); font-variant-numeric: tabular-nums; }
+  .up-date span { display: block; font: 7.5px var(--mono); letter-spacing: .1em; color: var(--app-muted); }
+  .up-name { font-size: 12px; font-weight: 600; color: var(--app-text); }
+  .up-name .arr { margin: 0 5px; color: var(--app-muted); font-weight: 400; }
+  .up-meta { margin-top: 2px; font-size: 9px; color: var(--app-muted); }
+  .up-meta b { color: var(--app-text2); font-weight: 500; }
+  .up-count { text-align: right; }
+  .up-count b { display: block; font-size: 14px; font-weight: 650; color: var(--app-orange); font-variant-numeric: tabular-nums; }
+  .up-count span { font: 7px var(--mono); letter-spacing: .12em; color: var(--app-muted); }
+  .up-arrow { color: var(--app-muted); font-size: 12px; }
+
+  /* ── 往期（原样） ─────────────────────────────── */
+  .mini-ledger { margin-top: 6px; }
+  .mini-ledger-head { display: flex; align-items: flex-end; gap: 18px; padding: 4px 0 12px; }
+  .mini-ledger-head b { font-size: 22px; font-weight: 300; color: var(--app-text); }
+  .mini-ledger-head b strong { font-weight: 650; }
+  .mini-ledger-head .st { font: 7.5px var(--mono); letter-spacing: .1em; color: var(--app-muted); }
+  .mini-month { display: grid; grid-template-columns: 42px minmax(0, 1fr); column-gap: 16px; }
+  .mini-rail { position: relative; }
+  .mini-rail::after { content: ""; position: absolute; left: 46px; top: 22px; bottom: 0; border-left: 1px dashed var(--app-line); opacity: .7; }
+  .mini-month-label { text-align: right; padding-top: 14px; }
+  .mini-month-label b { display: block; font-size: 10.5px; color: var(--app-text2); }
+  .mini-month-label span { font: 6.5px var(--mono); letter-spacing: .14em; color: var(--app-muted); }
+  .mini-punch { position: absolute; left: 42px; top: 18px; width: 8px; height: 8px; border-radius: 50%; background: var(--app-side); border: 1.5px solid var(--app-line); box-shadow: 0 0 0 3px var(--app-side); }
+  .mini-tickets { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; padding-bottom: 4px; }
+  .ticket.compact { --tw: 70px; --photo: 74px; --stamp-size: 40px; --stamp-half: 20px; }
+  .ticket.compact .ticket-clip { min-height: 98px; }
+  .ticket.compact .t-body { padding: 10px 11px 8px; }
+  .ticket.compact .t-name { font-size: 18px; }
+  .ticket.compact .t-sub { font-size: 8.5px; }
+  .ticket.compact .t-dest { margin-top: 8px; }
+  .ticket.compact .t-fields { gap: 14px; padding-top: 7px; }
+  .ticket.compact .t-field .v { font-size: 10px; }
+  .ticket.compact .big-num { font-size: 0; }
+  .ticket.compact .stub-mid { display: none; }
+  .ticket.compact .t-photo .cap { font-size: 6px; }
+
+  /* ── 进行中：只读状态条 ───────────────────────── */
+  .live-strip {
+    position: relative; display: grid;
+    grid-template-columns: minmax(0, 1.15fr) auto auto auto auto;
+    align-items: center; gap: 22px; min-height: 84px;
+    padding: 16px 18px; border-radius: 12px;
+    background: linear-gradient(100deg, #102224, #0d1517 58%, #0c1113);
+    border: 1px solid rgba(24,214,243,.20);
+    box-shadow: 0 12px 30px -24px rgba(24,214,243,.5);
+  }
+  .live-strip::before { content: ""; position: absolute; left: 0; top: 10px; bottom: 10px; width: 2px; border-radius: 2px; background: linear-gradient(180deg, #18d6f3, rgba(24,214,243,.15)); }
+  .live-main { display: flex; align-items: center; gap: 10px; min-width: 0; }
+  .live-dot { width: 7px; height: 7px; flex: none; border-radius: 50%; background: #18d6f3; box-shadow: 0 0 0 4px rgba(24,214,243,.12); }
+  .live-k { font: 7px var(--mono); letter-spacing: .18em; color: #7fb9c2; }
+  .live-city { display: flex; align-items: baseline; gap: 7px; margin-top: 3px; }
+  .live-city b { font-size: 16px; font-weight: 700; color: #eaf6f7; }
+  .live-city span { font: 7.5px var(--mono); letter-spacing: .08em; color: #7fb9c2; }
+  .live-cell .k { font: 6.5px var(--mono); letter-spacing: .16em; color: #6f8d93; }
+  .live-cell .v { margin-top: 3px; font-size: 10.5px; color: #d7e6e8; white-space: nowrap; }
+  .live-cell .v b { font-weight: 650; color: #fff; }
+  .live-prog { display: flex; align-items: center; gap: 3px; }
+  .live-prog i { width: 14px; height: 4px; border-radius: 2px; background: rgba(255,255,255,.12); }
+  .live-prog i.done { background: rgba(24,214,243,.5); }
+  .live-prog i.now { background: #18d6f3; box-shadow: 0 0 8px rgba(24,214,243,.5); }
+  .phone-chip { display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px; border-radius: 8px; border: 1px solid rgba(24,214,243,.34); background: rgba(24,214,243,.06); color: #18d6f3; font-size: 9px; font-weight: 600; white-space: nowrap; }
+  .live-plus { font: 7px var(--mono); letter-spacing: .06em; color: #7fb9c2; border: 1px solid rgba(24,214,243,.22); border-radius: 20px; padding: 3px 7px; white-space: nowrap; }
+
+  /* 手机端示意 */
+  .phone { width: 198px; flex: none; border-radius: 24px; border: 1px solid #2e2e2e; background: #0b0c0d; padding: 9px 9px 11px; box-shadow: 0 24px 50px -30px #000; }
+  .phone-pill { width: 54px; height: 4px; border-radius: 3px; background: #26282b; margin: 2px auto 10px; }
+  .phone-top { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4px 8px; }
+  .phone-top b { font-size: 10.5px; color: #e8e8e8; }
+  .phone-top span { font: 7px var(--mono); color: #6f8d93; }
+  .phone-sub { padding: 0 4px 8px; font-size: 8px; color: #7b8b8f; }
+  .phone-row { display: grid; grid-template-columns: 34px minmax(0, 1fr) 14px; align-items: center; gap: 8px; padding: 7px 4px; border-top: 1px solid rgba(255,255,255,.05); }
+  .phone-time { font: 7.5px var(--mono); color: #8b9a9e; font-variant-numeric: tabular-nums; }
+  .phone-name { font-size: 8.5px; color: #c9d4d6; }
+  .phone-check { width: 13px; height: 13px; border-radius: 4px; border: 1px solid #3a4247; }
+  .phone-check.on { border-color: #1ed7a6; background: #1ed7a6; }
+  .phone-row.done .phone-name { color: #6d7b7f; text-decoration: line-through; }
+  .phone-row.now { background: linear-gradient(90deg, rgba(24,214,243,.1), transparent 80%); }
+  .phone-row.now .phone-name { color: #fff; }
+  .phone-row.now .phone-time { color: #18d6f3; }
+  .phone-note { margin-top: 9px; padding-top: 8px; border-top: 1px dashed rgba(255,255,255,.08); font-size: 7.5px; line-height: 1.7; color: #6f8d93; text-align: center; }
+
+  .split-stage { display: grid; grid-template-columns: minmax(0, 1fr) 214px; gap: 20px; align-items: start; }
+
+  /* ── 对照 ────────────────────────────────────── */
+  .nav-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .nc-card { border: 1px solid var(--rule); border-radius: 16px; background: linear-gradient(180deg, #0f1012, #0b0c0e); overflow: hidden; }
+  .nc-cap { display: flex; align-items: baseline; gap: 9px; padding: 14px 16px 0; }
+  .nc-cap b { font-size: 11.5px; font-weight: 650; }
+  .nc-cap span { font: 8px var(--mono); letter-spacing: .12em; color: var(--ink-3); }
+  .nc-cap .tag { margin-left: auto; font: 8px var(--mono); letter-spacing: .1em; color: var(--accent); }
+  .nc-card .dark-stage { margin: 12px 14px 0; border-radius: 12px; }
+  .nc-inner { display: flex; align-items: center; justify-content: center; height: 86px; padding: 0 14px; }
+  .nc-inner.axis { justify-content: flex-start; padding: 0 16px; }
+  .nc-note { padding: 11px 16px 14px; font-size: 10px; line-height: 1.75; color: var(--ink-3); }
+  .nc-note em { font-style: normal; color: var(--ink-2); }
+  .tabbar.mini { width: 100%; }
+  .tabbar.mini .tab { font-size: 11px; padding: 8px 0 9px; }
+
+  /* ── 空态 / 边界 ─────────────────────────────── */
+  .tiles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .tile { border: 1px solid var(--rule); border-radius: 14px; background: linear-gradient(180deg, #0f1012, #0b0c0e); padding: 16px 16px 14px; }
+  .tile .tk { font: 8px var(--mono); letter-spacing: .16em; color: var(--accent); }
+  .tile h4 { font-size: 12px; font-weight: 650; margin: 8px 0 10px; }
+  .tile p { font-size: 10px; line-height: 1.75; color: var(--ink-3); }
+  .tile .demo { margin-top: 10px; }
+  .dashed { border: 1px dashed rgba(255,255,255,.18); border-radius: 10px; padding: 12px; text-align: center; color: var(--ink-3); }
+  .dashed b { display: block; font-size: 10.5px; color: var(--ink-2); margin-bottom: 6px; }
+  .chips { display: flex; justify-content: center; flex-wrap: wrap; gap: 5px; }
+  .chips span { font-size: 8.5px; padding: 2px 7px; border-radius: 20px; border: 1px solid var(--rule); color: var(--ink-3); }
+  .mini-chain { font-size: 11px; color: #e9e3d4; display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .mini-chain .arr { color: #7c7059; font-size: 9px; }
+  .mini-chain .more { font: 8px var(--mono); color: #7c7059; }
+  .mini-date { display: flex; align-items: center; gap: 8px; font-size: 10.5px; color: #e9e3d4; }
+  .mini-date .d { font: 8.5px var(--mono); color: #98a2b3; }
+  .mini-live { display: flex; align-items: center; gap: 7px; font-size: 10px; color: #cfe9ec; }
+  .mini-live i { width: 6px; height: 6px; border-radius: 50%; background: #18d6f3; }
+  .mini-live .plus { margin-left: auto; font: 7.5px var(--mono); color: #7fb9c2; }
+
+  /* ── 标注 ────────────────────────────────────── */
+  .annot { display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px; margin-top: 16px; }
+  .annot div { border-top: 1px solid var(--rule); padding-top: 9px; }
+  .annot b { display: block; font: 8px var(--mono); letter-spacing: .14em; color: var(--accent); margin-bottom: 5px; }
+  .annot span { font-size: 10px; line-height: 1.7; color: var(--ink-3); }
+
+  .hero-demos { display: flex; flex-direction: column; gap: 16px; }
+  .hero-demo { display: grid; grid-template-columns: minmax(0, 1fr) 236px; gap: 16px; align-items: stretch; }
+  .hero-demo .stage { border-radius: 16px; }
+  .hd-tip { display: flex; flex-direction: column; border: 1px solid var(--rule); border-radius: 16px; padding: 18px 18px 16px; background: linear-gradient(180deg, #0f1012, #0b0c0e); }
+  .hd-spec { margin-top: auto; padding-top: 14px; border-top: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 5px 16px; font: 8.5px var(--mono); letter-spacing: .06em; color: var(--ink-3); }
+  .hd-spec b { color: var(--ink-2); font-weight: 600; }
+  .hd-tip .vt { display: flex; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+  .hd-tip .vt b { font-size: 12px; font-weight: 650; }
+  .hd-tip .vt span { font: 8px var(--mono); letter-spacing: .12em; color: var(--ink-3); }
+  .hd-tip .tip { font-size: 10px; line-height: 1.8; color: var(--ink-3); }
+  .hd-tip .tip em { font-style: normal; color: var(--ink-2); }
+  .hd-tip .tip + .tip { margin-top: 9px; padding-top: 9px; border-top: 1px solid var(--rule); }
+
+  /* ── 规格 / 数据 / 清单 ───────────────────────── */
+  .spec-grid { display: grid; grid-template-columns: 1.15fr 1fr; gap: 22px; }
+  .spec-table { width: 100%; border-collapse: collapse; }
+  .spec-table th, .spec-table td { text-align: left; padding: 8px 0; border-bottom: 1px solid var(--rule); font-size: 11px; }
+  .spec-table th { font: 8px var(--mono); letter-spacing: .14em; color: var(--ink-3); font-weight: 500; }
+  .spec-table td:first-child { color: var(--ink-3); width: 44%; }
+  .spec-table td:last-child { color: var(--ink); font-variant-numeric: tabular-nums; }
+  .token-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .token { display: flex; align-items: center; gap: 7px; padding: 6px 10px; border: 1px solid var(--rule); border-radius: 9px; font: 9px var(--mono); color: var(--ink-2); }
+  .token i { width: 10px; height: 10px; border-radius: 3px; }
+  .data-note { margin-top: 16px; padding: 14px 16px; border: 1px solid rgba(215,184,90,.24); border-radius: 12px; background: rgba(215,184,90,.045); }
+  .data-note b { display: block; font-size: 11px; color: #e3cf98; margin-bottom: 5px; }
+  .data-note p { font-size: 10.5px; line-height: 1.8; color: var(--ink-3); }
+  .data-note code { font: 9.5px var(--mono); color: #d9c58f; }
+
+  .checklist { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 22px; }
+  .check { display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--rule); }
+  .check i { width: 9px; height: 9px; margin-top: 6px; border-radius: 50%; border: 1px solid #4a4d53; }
+  .check b { display: block; font: 10px var(--mono); letter-spacing: .06em; color: var(--ink-2); font-weight: 600; }
+  .check span { display: block; margin-top: 3px; font-size: 10.5px; line-height: 1.7; color: var(--ink-3); }
+  .check code { font: 9.5px var(--mono); color: var(--ink-2); }
+
+  @media (max-width: 920px) {
+    .diag-grid, .annot { grid-template-columns: repeat(2, 1fr); }
+    .tiles { grid-template-columns: repeat(2, 1fr); }
+    .spec-grid, .nav-compare, .checklist { grid-template-columns: 1fr; }
+    .hero-demo, .split-stage { grid-template-columns: 1fr; }
+    .principles { grid-template-columns: 1fr; }
+    .handoff { grid-template-columns: 1fr; }
+    .handoff-lead { border-right: 0; border-bottom: 1px solid var(--rule); }
+    .life { grid-template-columns: 1fr; }
+    .life-arr { display: none; }
+    .life-note { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="board">
+
+  <!-- 板头 -->
+  <div class="eyebrow">TRAVEL ARCHIVE · REFINE 03</div>
+  <h1>行程页 · 优化方案稿 02</h1>
+  <p class="lede">
+    「进行中」和「即将出发」是同一段行程的两种状态，不是一个去处。桌面端只留<em>「即将出发」</em>，往期<em>单独一个 tab、界面不动</em>；进行中压成一条<em>只读状态条</em>。今天要打卡、改计划、加站的事，回手机端做；这段行程的消息与提醒也只投递手机端，电脑端每日简报的行程段不含在路上那段。
+  </p>
+  <div class="meta-row">
+    <span>2026-10-26</span>
+    <span>NEXTBOT · 行程归档</span>
+    <span>两段导航 / 桌面只读</span>
+    <span>在途消息走手机</span>
+    <span>往期不改</span>
+  </div>
+
+  <!-- 01 诊断 -->
+  <section>
+    <div class="sec-head"><span class="no">01</span><h2>为什么现在别扭</h2><span class="sec-sub">五个具体问题</span></div>
+    <div class="diag-grid">
+      <div class="diag">
+        <div class="dno">01</div>
+        <b>一段行程占两个入口</b>
+        <p>进行中与即将出发本是一段行程的前后两段状态，现在被拆成两个并列 tab；桌面端真正要用的只有「即将出发」。</p>
+      </div>
+      <div class="diag">
+        <div class="dno">02</div>
+        <b>打开先看到空</b>
+        <p><code>_seg = 0</code>，落在「进行中 0」。规划未来的人第一眼什么都没有，还得先学会怎么切。</p>
+      </div>
+      <div class="diag">
+        <div class="dno">03</div>
+        <b>状态在 tab 之间搬家</b>
+        <p>待出发 → 在路上 → 往期，同一段行程换三个位置。每次进来都要重新找，往期也被绑在另两个状态旁边。</p>
+      </div>
+      <div class="diag">
+        <div class="dno">04</div>
+        <b>桌面重复手机端的活</b>
+        <p>进行中铺开今日时间线、逐站勾选；这些操作实际发生在手机上。桌面再铺一遍，只是两套状态要同步。</p>
+      </div>
+      <div class="diag">
+        <div class="dno">05</div>
+        <b>三段并排，没有主次</b>
+        <p>三个等宽胶囊居中漂浮，和内容轴脱开；同时把「下一步去哪」这件桌面端最常做的事压到第二屏。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 02 主张 -->
+  <section>
+    <div class="sec-head"><span class="no">02</span><h2>改法</h2><span class="sec-sub">两个 tab，一条状态</span></div>
+    <p class="quote">
+      往期是走过的路，<span class="w-paper">单独一个 tab，原样不动</span>；<br />
+      即将出发是桌面端<span class="w-paper">唯一的主场</span>；<br />
+      进行中不是一个去处，是一条<span class="w-light">「此刻」只读条</span>。
+    </p>
+    <p class="quote-sub">
+      导航只剩两个：即将出发（默认）和往期。进行中不再占入口，只在这段行程真的在路上时，以一条 84 高的状态条浮在「即将出发」顶部：第几天、今日几站、下一站几点。要打卡、改计划，回手机端。
+    </p>
+
+    <div class="life">
+      <div class="life-node n1"><i></i><b>待出发</b><span>金章 · 主票</span></div>
+      <div class="life-arr"></div>
+      <div class="life-node n2"><i></i><b>在路上</b><span>青条 · 只读</span></div>
+      <div class="life-arr"></div>
+      <div class="life-node n3"><i></i><b>已归档</b><span>绿章 · 票根册</span></div>
+      <div class="life-note">同一段行程只在<b>同一页</b>里前移，不换导航位置。</div>
+    </div>
+
+    <div class="principles">
+      <div class="principle">
+        <div class="pno">P1</div>
+        <h3>两个 tab，左对齐</h3>
+        <p>「即将出发 03 / 往期 12」，文字 + 2px 下划线，和内容轴对齐；不再用三段居中胶囊。往期界面一行不改，只是搬进自己的 tab。</p>
+      </div>
+      <div class="principle">
+        <div class="pno">P2</div>
+        <h3>状态原地升级</h3>
+        <p>待出发金章 → 在路上青色状态条 → 已归档绿章。行程不换页面，用户不用重新找；往期只在真正结束后才多一段。</p>
+      </div>
+      <div class="principle">
+        <div class="pno">P3</div>
+        <h3>桌面看，手机做</h3>
+        <p>进行中只读：第几天、今日几站、下一站几点。打卡、改时间、加站都在手机端；桌面不铺今日清单，省下的空间留给下一段规划。</p>
+      </div>
+    </div>
+
+    <div class="handoff">
+      <div class="handoff-lead">
+        <div class="pno">P4 · 在路上</div>
+        <h3>这段行程的事，绕开电脑端</h3>
+        <p>在路上的行程只占桌面一条只读条；它的操作、消息、播报全部走手机，电脑端不重复一遍。</p>
+      </div>
+      <div class="handoff-cells">
+        <div class="handoff-cell"><b>消息 / 提醒</b><span>打卡、改时间、加站的回执与通知，<em>只投递手机端</em>；桌面不订阅这段行程的消息。</span></div>
+        <div class="handoff-cell"><b>电脑端每日简报</b><span>行程段<em>只写即将出发</em>，不含正在路上的那段；避免和手机端重复播报。</span></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 03 骨架 -->
+  <section>
+    <div class="sec-head"><span class="no">03</span><h2>新页面骨架</h2><span class="sec-sub">常态 · 没在路上</span></div>
+    <div class="stage-cap"><b>即将出发 tab</b><span>Content 880 · 两段导航 · 一条滚动</span></div>
+    <div class="stage dark-stage">
+      <div class="app">
+        <div class="app-top">
+          <span class="back-btn">←</span>
+          <span class="app-title">行程</span>        </div>
+        <div class="page">
+          <div class="tabbar">
+            <div class="tab on">即将出发<span class="tcnt">03</span></div>
+            <div class="tab">往期<span class="tcnt">12</span></div>
+            <div class="tab-hint">按出发时间 · 最近在前</div>
+          </div>
+
+          <article class="ticket upcoming stage-hero" style="margin-top:18px;">
+            <div class="ticket-clip">
+              <div class="t-photo ph-chengdu"><span class="cap">CHENGDU · OCT 2026</span></div>
+              <div class="t-body">
+                <div class="t-micro"><span class="board-chip"><i></i>BOARDING · 还有 3 天</span><span class="no">NB-5210</span></div>
+                <div class="t-dest"><div class="t-name">成都</div><div class="t-sub">5 天 4 晚 · 12 站</div></div>
+                <div class="t-fields">
+                  <div class="t-field"><span class="k">DEPART</span><span class="v">10.28 周三</span></div>
+                  <div class="t-field"><span class="k">RETURN</span><span class="v">11.01 周日</span></div>
+                </div>
+                <div class="t-route">
+                  <span class="r-track"><i></i><i></i><i></i><i></i></span>
+                  <span class="r-sum">SHA → CTU</span>
+                </div>
+              </div>
+              <div class="t-stub">
+                <div class="stub-top">DAYS TO GO</div>
+                <div class="stub-mid"><div class="big-num">03</div><div class="big-cap">OCT 28</div><div class="stub-note">待出发</div></div>
+                <div class="stub-no">NB-5210</div>
+              </div>
+            </div>
+            <span class="notch top"></span><span class="notch bottom"></span>
+            <div class="stamp"><div class="stamp-in"><b>待出发</b><span>03 DAYS</span></div></div>
+          </article>
+
+          <div class="up-list" style="margin-top:14px;">
+            <div class="up-row">
+              <div class="up-date"><b>11.06</b><span>周五</span></div>
+              <div>
+                <div class="up-name">上海<span class="arr">→</span>西安<span class="arr">→</span>洛阳</div>
+                <div class="up-meta"><b>3 城</b> · 8 天 7 晚 · 16 站</div>
+              </div>
+              <div class="up-count"><b>12</b><span>天后</span></div>
+              <div class="up-arrow">›</div>
+            </div>
+            <div class="up-row">
+              <div class="up-date"><b>11.20</b><span>周五</span></div>
+              <div>
+                <div class="up-name">青岛</div>
+                <div class="up-meta"><b>4 天 3 晚</b> · 9 站</div>
+              </div>
+              <div class="up-count"><b>26</b><span>天后</span></div>
+              <div class="up-arrow">›</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="annot">
+      <div><b>01 · 顶栏</b><span>只剩返回与标题。往期有了自己的 tab，顶栏不再需要「往期 ↓」跳转，也不再写状态摘要；右上角不放「规划新行程」。</span></div>
+      <div><b>02 · 两段 tab</b><span>左对齐、文字 + 下划线、带计数；默认落在「即将出发」，打开就有内容。</span></div>
+      <div><b>03 · 主票</b><span>最近一段给完整票面：照片、城市链、日期、倒计时副券。一屏只给一张。</span></div>
+      <div><b>04 · 行程行</b><span>其余即将出发退成 64 高日期行；多城直接写全链「上海 → 西安 → 洛阳」。</span></div>
+      <div><b>05 · 在路上</b><span>只有真的在路上，才在主票上方插一条只读状态条，整页结构不变（见 07）。</span></div>
+    </div>
+  </section>
+
+  <!-- 04 导航对照 -->
+  <section>
+    <div class="sec-head"><span class="no">04</span><h2>导航：三段胶囊 → 两段文字 tab</h2><span class="sec-sub">只动导航，不动往期</span></div>
+    <div class="nav-compare">
+      <div class="nc-card">
+        <div class="nc-cap"><b>现在</b><span>三段居中胶囊</span><span class="tag">BEFORE</span></div>
+        <div class="dark-stage">
+          <div class="nc-inner">
+            <div class="old-segs">
+              <div class="old-seg on"><span class="sdot"></span>进行中<span class="cnt">0</span></div>
+              <div class="old-seg"><span class="sdot"></span>即将出发<span class="cnt">3</span></div>
+              <div class="old-seg"><span class="sdot"></span>往期<span class="cnt">12</span></div>
+            </div>
+          </div>
+        </div>
+        <p class="nc-note">三个并列，其中一个是<em>空状态</em>；居中漂浮、等宽平分，和内容轴脱开，还占掉页面最贵的一行。</p>
+      </div>
+      <div class="nc-card">
+        <div class="nc-cap"><b>改后</b><span>两段文字 tab</span><span class="tag">AFTER</span></div>
+        <div class="dark-stage">
+          <div class="nc-inner axis">
+            <div class="tabbar mini">
+              <div class="tab on">即将出发<span class="tcnt">03</span></div>
+              <div class="tab">往期<span class="tcnt">12</span></div>
+            </div>
+          </div>
+        </div>
+        <p class="nc-note">左对齐、文字 + 2px 下划线；默认即将出发。<em>往期只是第二个 tab</em>，内容与版式一行不改。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- 05 主票 -->
+  <section>
+    <div class="sec-head"><span class="no">05</span><h2>即将出发 · 主票</h2><span class="sec-sub">单城 / 多城两种形态</span></div>
+    <div class="hero-demos">
+      <div class="hero-demo">
+        <div class="stage dark-stage" style="border-radius:16px;">
+          <div class="stage-pad">
+            <article class="ticket upcoming hero">
+              <div class="ticket-clip">
+                <div class="t-photo ph-chengdu"><span class="cap">CHENGDU · OCT 2026</span></div>
+                <div class="t-body">
+                  <div class="t-micro"><span class="board-chip"><i></i>BOARDING · 还有 3 天</span><span class="no">NB-5210</span></div>
+                  <div class="t-dest"><div class="t-name">成都</div><div class="t-sub">5 天 4 晚 · 12 站</div></div>
+                  <div class="t-fields">
+                    <div class="t-field"><span class="k">DEPART</span><span class="v">10.28 周三</span></div>
+                    <div class="t-field"><span class="k">RETURN</span><span class="v">11.01 周日</span></div>
+                    <div class="t-field"><span class="k">STOPS</span><span class="v">12</span></div>
+                  </div>
+                  <div class="t-route">
+                    <span class="r-track"><i></i><i></i><i></i><i></i></span>
+                    <span class="r-sum">SHA → CTU</span>
+                  </div>
+                </div>
+                <div class="t-stub">
+                  <div class="stub-top">DAYS TO GO</div>
+                  <div class="stub-mid"><div class="big-num">03</div><div class="big-cap">OCT 28</div><div class="stub-note">待出发</div></div>
+                  <div class="stub-no">NB-5210</div>
+                </div>
+              </div>
+              <span class="notch top"></span><span class="notch bottom"></span>
+              <div class="stamp"><div class="stamp-in"><b>待出发</b><span>03 DAYS</span></div></div>
+            </article>
+          </div>
+        </div>
+        <div class="hd-tip">
+          <div class="vt"><b>单城</b><span>SINGLE CITY</span></div>
+          <p class="tip"><em>目的地是主角，倒计时是副券。</em> 出发日写「10.28 周三」，返程与站数退到二线。</p>
+          <p class="tip">主票只给最近一段。这一段开始时它让位给下一段，<em>票面不动，只换章</em>。</p>
+          <div class="hd-spec"><span><b>196</b> 票面</span><span><b>168</b> 照片</span><span><b>104</b> 副券</span></div>
+        </div>
+      </div>
+
+      <div class="hero-demo">
+        <div class="stage dark-stage" style="border-radius:16px;">
+          <div class="stage-pad">
+            <article class="ticket upcoming hero multi">
+              <div class="ticket-clip">
+                <div class="t-photo ph-xian"><span class="cap">XI'AN · NOV 2026</span></div>
+                <div class="t-body">
+                  <div class="t-micro"><span class="board-chip"><i></i>BOARDING · 还有 12 天</span><span class="no">NB-5316</span></div>
+                  <div class="t-dest">
+                    <div class="city-chain"><span class="city">上海</span><span class="arr">→</span><span class="city">西安</span><span class="arr">→</span><span class="city">洛阳</span></div>
+                  </div>
+                  <div class="city-dates"><span><b>11.06</b> 上海</span><span><b>11.09</b> 西安</span><span><b>11.12</b> 洛阳</span></div>
+                  <div class="t-fields">
+                    <div class="t-field"><span class="k">SPAN</span><span class="v">11.06 – 11.13</span></div>
+                    <div class="t-field"><span class="k">CITIES</span><span class="v">3 城 · 8 天</span></div>
+                  </div>
+                  <div class="t-route">
+                    <span class="r-track"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                    <span class="r-sum">SHA → SIA → LYA</span>
+                  </div>
+                </div>
+                <div class="t-stub">
+                  <div class="stub-top">DAYS TO GO</div>
+                  <div class="stub-mid"><div class="big-num">12</div><div class="big-cap">NOV 06</div><div class="stub-note">待出发</div></div>
+                  <div class="stub-no">NB-5316</div>
+                </div>
+              </div>
+              <span class="notch top"></span><span class="notch bottom"></span>
+              <div class="stamp"><div class="stamp-in"><b>待出发</b><span>12 DAYS</span></div></div>
+            </article>
+          </div>
+        </div>
+        <div class="hd-tip">
+          <div class="vt"><b>多城</b><span>MULTI-CITY</span></div>
+          <p class="tip"><em>多城不再折成一个目的地。</em> 标题直接写城市链，下面给每城落点日期；超过 3 城显示「+1」。</p>
+          <p class="tip">目的地字号降一级，路线轨延长，保证不换行。</p>
+          <div class="hd-spec"><span><b>3</b> 城</span><span><b>21px</b> 城市名</span><span><b>+N</b> 超出</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 06 行 -->
+  <section>
+    <div class="sec-head"><span class="no">06</span><h2>其余即将出发 · 行程行</h2><span class="sec-sub">第二段起不再是大票</span></div>
+    <div class="stage dark-stage">
+      <div class="stage-pad">
+        <div class="up-list" style="border-top:0;">
+          <div class="up-row">
+            <div class="up-date"><b>11.20</b><span>周五</span></div>
+            <div>
+              <div class="up-name">青岛</div>
+              <div class="up-meta"><b>4 天 3 晚</b> · 9 站</div>
+            </div>
+            <div class="up-count"><b>26</b><span>天后</span></div>
+            <div class="up-arrow">›</div>
+          </div>
+          <div class="up-row">
+            <div class="up-date"><b>12.20</b><span>周日</span></div>
+            <div>
+              <div class="up-name">哈尔滨<span class="arr">→</span>漠河</div>
+              <div class="up-meta"><b>2 城</b> · 6 天 5 晚 · 11 站</div>
+            </div>
+            <div class="up-count"><b>56</b><span>天后</span></div>
+            <div class="up-arrow">›</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="annot" style="grid-template-columns: repeat(3, 1fr);">
+      <div><b>01 · 日期列</b><span>MM.DD + 周几放最左，视觉上就是一条时间线；用户先扫日期，再读目的地。</span></div>
+      <div><b>02 · 倒计时</b><span>数字用金色、单位小一号；多段行程的倒计时在同一条竖线上，方便比较。</span></div>
+      <div><b>03 · 高度</b><span>64 高、无卡框；只有 1px 分隔线，hover 抬 2px 并让箭头右移，不做倾斜。</span></div>
+    </div>
+  </section>
+
+  <!-- 07 进行中 -->
+  <section>
+    <div class="sec-head"><span class="no">07</span><h2>进行中 · 只读状态条</h2><span class="sec-sub">桌面看，手机做</span></div>
+    <div class="stage dark-stage">
+      <div class="app">
+        <div class="app-top">
+          <span class="back-btn">←</span>
+          <span class="app-title">行程</span>        </div>
+        <div class="page">
+          <div class="tabbar">
+            <div class="tab on">即将出发<span class="tcnt">02</span></div>
+            <div class="tab">往期<span class="tcnt">12</span></div>
+            <div class="tab-hint">按出发时间 · 最近在前</div>
+          </div>
+
+          <div class="live-strip" style="margin-top:16px;">
+            <div class="live-main">
+              <span class="live-dot"></span>
+              <div>
+                <div class="live-k">LIVE · 在路上</div>
+                <div class="live-city"><b>成都</b><span>DAY 3 / 5</span></div>
+              </div>
+            </div>
+            <div class="live-cell"><div class="k">今日</div><div class="v"><b>3 站</b> · 已走 1</div></div>
+            <div class="live-cell"><div class="k">下一站</div><div class="v"><b>15:20</b> 宽窄巷</div></div>
+            <div class="live-prog"><i class="done"></i><i class="done"></i><i class="now"></i><i></i><i></i></div>
+            <div class="phone-chip">手机端查看今日 ↗</div>
+          </div>
+
+          <article class="ticket upcoming hero multi" style="margin-top:16px;">
+            <div class="ticket-clip">
+              <div class="t-photo ph-xian"><span class="cap">XI'AN · NOV 2026</span></div>
+              <div class="t-body">
+                <div class="t-micro"><span class="board-chip"><i></i>BOARDING · 还有 12 天</span><span class="no">NB-5316</span></div>
+                <div class="t-dest">
+                  <div class="city-chain"><span class="city">上海</span><span class="arr">→</span><span class="city">西安</span><span class="arr">→</span><span class="city">洛阳</span></div>
+                </div>
+                <div class="city-dates"><span><b>11.06</b> 上海</span><span><b>11.09</b> 西安</span><span><b>11.12</b> 洛阳</span></div>
+                <div class="t-fields">
+                  <div class="t-field"><span class="k">SPAN</span><span class="v">11.06 – 11.13</span></div>
+                  <div class="t-field"><span class="k">CITIES</span><span class="v">3 城 · 8 天</span></div>
+                </div>
+                <div class="t-route">
+                  <span class="r-track"><i></i><i></i><i></i><i></i><i></i><i></i></span>
+                  <span class="r-sum">SHA → SIA → LYA</span>
+                </div>
+              </div>
+              <div class="t-stub">
+                <div class="stub-top">DAYS TO GO</div>
+                <div class="stub-mid"><div class="big-num">12</div><div class="big-cap">NOV 06</div><div class="stub-note">待出发</div></div>
+                <div class="stub-no">NB-5316</div>
+              </div>
+            </div>
+            <span class="notch top"></span><span class="notch bottom"></span>
+            <div class="stamp"><div class="stamp-in"><b>待出发</b><span>12 DAYS</span></div></div>
+          </article>
+
+          <div class="up-list" style="margin-top:14px;">
+            <div class="up-row">
+              <div class="up-date"><b>11.20</b><span>周五</span></div>
+              <div>
+                <div class="up-name">青岛</div>
+                <div class="up-meta"><b>4 天 3 晚</b> · 9 站</div>
+              </div>
+              <div class="up-count"><b>26</b><span>天后</span></div>
+              <div class="up-arrow">›</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="split-stage" style="margin-top:16px;">
+      <div class="hd-tip">
+        <div class="vt"><b>桌面上它只是一条状态</b><span>READ ONLY · 84px</span></div>
+        <p class="tip"><em>三个信息，一个动作。</em>第几天、今日几站、下一站几点；右边唯一的按钮是「手机端查看今日」。点它不展开、不勾选，桌面不承载任务。</p>
+        <p class="tip"><em>它在路上才出现，位置固定。</em>插在 tab 和主票之间，主票始终是「下一段」。行程结束当天，这条消失，那段自动落进往期。</p>
+        <p class="tip"><em>两段同时在路上</em>时只显示最近一段，旁边给一个「+1 段在路上」小 chip，点开才切换。</p>
+      </div>
+      <div>
+        <div class="stage dark-stage" style="border-radius:18px;">
+          <div style="display:flex; justify-content:center; padding:18px 0;">
+            <div class="phone">
+              <div class="phone-pill"></div>
+              <div class="phone-top"><b>今日 · 成都</b><span>DAY 3/5</span></div>
+              <div class="phone-sub">10.25 周日 · 3 站 · 预计 21:30 回酒店</div>
+              <div class="phone-row done">
+                <span class="phone-time">09:30</span>
+                <span class="phone-name">大熊猫繁育研究基地</span>
+                <span class="phone-check on"></span>
+              </div>
+              <div class="phone-row now">
+                <span class="phone-time">15:20</span>
+                <span class="phone-name">宽窄巷子</span>
+                <span class="phone-check"></span>
+              </div>
+              <div class="phone-row">
+                <span class="phone-time">18:00</span>
+                <span class="phone-name">春熙路 · 晚餐</span>
+                <span class="phone-check"></span>
+              </div>
+              <div class="phone-note">打卡 / 改时间 / 加站<br />只在手机端</div>
+            </div>
+          </div>
+        </div>
+        <div class="stage-cap" style="margin:8px 2px 0;"><b>手机端</b><span>同一份数据，操作面</span></div>
+      </div>
+    </div>
+    <p class="quote-sub" style="margin-top:14px;">
+      在路上的这段，桌面只有这一条 84 高的只读条：它的提醒、变更、打卡回执<em>只推手机端</em>；电脑端每日简报的行程段<em>也只写下一段</em>，不会把在路上的再播报一遍。
+    </p>
+  </section>
+
+  <!-- 08 往期 -->
+  <section>
+    <div class="sec-head"><span class="no">08</span><h2>往期 · 保持原样</h2><span class="sec-sub">只换入口，不换界面</span></div>
+    <div class="stage dark-stage">
+      <div class="app">
+        <div class="app-top">
+          <span class="back-btn">←</span>
+          <span class="app-title">行程</span>        </div>
+        <div class="page">
+          <div class="tabbar">
+            <div class="tab">即将出发<span class="tcnt">03</span></div>
+            <div class="tab on">往期<span class="tcnt">12</span></div>
+            <div class="tab-hint">按结束时间 · 月份归档</div>
+          </div>
+
+          <div class="mini-ledger">
+            <div class="mini-ledger-head">
+              <b>20<strong>26</strong></b>
+              <span class="st">12 TRIPS · 68 STOPS · 24,860 KM</span>
+            </div>
+            <div class="mini-month">
+              <div class="mini-rail">
+                <div class="mini-month-label"><b>十月</b><span>OCT</span></div>
+                <div class="mini-punch"></div>
+              </div>
+              <div class="mini-tickets">
+                <article class="ticket compact">
+                  <div class="ticket-clip">
+                    <div class="t-photo ph-sanya"><span class="cap">SANYA</span></div>
+                    <div class="t-body">
+                      <div class="t-micro"><span>ARCHIVED</span></div>
+                      <div class="t-dest"><div class="t-name">三亚</div><div class="t-sub">5 天</div></div>
+                      <div class="t-fields"><div class="t-field"><span class="k">DATE</span><span class="v">10.02–10.06</span></div></div>
+                    </div>
+                    <div class="t-stub"><div class="stub-top">ADMIT</div><div class="barcode"></div><div class="stub-no">NB-4821</div></div>
+                  </div>
+                  <span class="notch top"></span><span class="notch bottom"></span>
+                  <div class="stamp"><div class="stamp-in"><b>已出票</b><span>10.06</span></div></div>
+                </article>
+                <article class="ticket compact">
+                  <div class="ticket-clip">
+                    <div class="t-photo ph-hz"><span class="cap">HANGZHOU</span></div>
+                    <div class="t-body">
+                      <div class="t-micro"><span>ARCHIVED</span></div>
+                      <div class="t-dest"><div class="t-name">杭州</div><div class="t-sub">4 天</div></div>
+                      <div class="t-fields"><div class="t-field"><span class="k">DATE</span><span class="v">09.12–09.15</span></div></div>
+                    </div>
+                    <div class="t-stub"><div class="stub-top">ADMIT</div><div class="barcode"></div><div class="stub-no">NB-4402</div></div>
+                  </div>
+                  <span class="notch top"></span><span class="notch bottom"></span>
+                  <div class="stamp"><div class="stamp-in"><b>已出票</b><span>09.15</span></div></div>
+                </article>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <p class="quote-sub" style="margin-top:14px;">
+      往期<em>组件、版式、数据逻辑全部不动</em>：年份、月份脊椎、打孔、缺口、绿章、条码都保留。这次只做两件事——把它挂到第二个 tab，去掉它在「即将出发」页尾的重复出现，和顶栏的「往期 ↓」。
+    </p>
+  </section>
+
+  <!-- 09 空态 -->
+  <section>
+    <div class="sec-head"><span class="no">09</span><h2>空态与边界</h2><span class="sec-sub">四种真实情况</span></div>
+    <div class="tiles">
+      <div class="tile">
+        <div class="tk">EMPTY</div>
+        <h4>没有即将出发</h4>
+        <p>给「去哪儿」入口 + 最近想过的地方，直接开始规划；不写「暂无行程」。</p>
+        <div class="demo">
+          <div class="dashed">
+            <b>下一段从哪儿开始？</b>
+            <div class="chips"><span>成都</span><span>西安</span><span>大理</span></div>
+          </div>
+        </div>
+      </div>
+      <div class="tile">
+        <div class="tk">LIVE · EMPTY</div>
+        <h4>在路上，没有下一段</h4>
+        <p>状态条照常在上，下面直接给规划入口；页面永远有内容。</p>
+        <div class="demo">
+          <div class="mini-live"><i></i>成都 · DAY 3/5</div>
+          <div class="dashed" style="margin-top:8px;"><b>下一段从哪儿开始？</b></div>
+        </div>
+      </div>
+      <div class="tile">
+        <div class="tk">SAME DAY</div>
+        <h4>同一天两段</h4>
+        <p>日期列合并成一组，副标题写「10.28 周三 · 两段行程」，避免重复日期占两行。</p>
+        <div class="demo">
+          <div class="mini-date"><span class="d">10.28 周三</span> 成都 · 重庆 <span class="d">两段行程</span></div>
+        </div>
+      </div>
+      <div class="tile">
+        <div class="tk">MULTI LIVE</div>
+        <h4>两段同时在路上</h4>
+        <p>只显示最近一段，另一段用 chip 提示，点开再切；不分两条条抢注意力。</p>
+        <div class="demo">
+          <div class="mini-live"><i></i>正在 · 成都<span class="plus">+1 段在路上</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 10 规格 -->
+  <section>
+    <div class="sec-head"><span class="no">10</span><h2>落地规格</h2><span class="sec-sub">尺寸 / 颜色 / 数据</span></div>
+    <div class="spec-grid">
+      <div>
+        <table class="spec-table">
+          <thead><tr><th>SIZE</th><th>SPEC</th></tr></thead>
+          <tbody>
+            <tr><td>内容宽</td><td>880（窄窗 100% − 32）</td></tr>
+            <tr><td>两段 tab</td><td>36 高 · 间距 26 · 下划线 2</td></tr>
+            <tr><td>状态条</td><td>84 高（只读，不展开）</td></tr>
+            <tr><td>主票</td><td>196 / 照片 168 / 副券 104</td></tr>
+            <tr><td>主票目的地</td><td>30px · 780（多城 21px）</td></tr>
+            <tr><td>主票倒计时</td><td>40px / 300 · tabular</td></tr>
+            <tr><td>行程行</td><td>64 高 · 日期列 72</td></tr>
+            <tr><td>往期票</td><td>大票 150 / 紧凑 112（不变）</td></tr>
+            <tr><td>默认 tab</td><td>即将出发（index 0）</td></tr>
+            <tr><td>动效</td><td>状态条 120ms；tab 140ms；hover 160ms</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div>
+        <table class="spec-table">
+          <thead><tr><th>COLOR</th><th>VALUE</th></tr></thead>
+          <tbody>
+            <tr><td>纸 / 纸边</td><td>#F2EBDC / #E7DDC9</td></tr>
+            <tr><td>纸墨 / 次墨</td><td>#272219 / #5D5444</td></tr>
+            <tr><td>待出发章</td><td>#A5761B（金）</td></tr>
+            <tr><td>已归档章</td><td>#1F7A5A（绿）</td></tr>
+            <tr><td>进行中</td><td>#18D6F3（青）</td></tr>
+            <tr><td>深色底 / 卡</td><td>#131313 / #0F0F0F</td></tr>
+            <tr><td>分割线</td><td>#27272A / 纸 24% 墨</td></tr>
+          </tbody>
+        </table>
+        <div class="token-row">
+          <span class="token"><i style="background:#f2ebdc"></i>PAPER</span>
+          <span class="token"><i style="background:#a5761b"></i>BOARDING</span>
+          <span class="token"><i style="background:#1f7a5a"></i>ARCHIVED</span>
+          <span class="token"><i style="background:#18d6f3"></i>LIVE</span>
+        </div>
+        <div class="data-note">
+          <b>数据接线（不补也能降级）</b>
+          <p>
+            <code>GET /travel/plans</code> 的 summary 已有 <code>progress{day,stops}</code>，状态条直接用「DAY 3/5」。<br />
+            「下一站 15:20」取今日第一条未完成项；取不到就退成「今日 3 站」，不空着。<br />
+            多城标题仍建议补 <code>cities[]</code>；缺失时退回 <code>destination</code>，不阻塞上线。<br />
+            桌面不再需要 <code>today</code> 全量任务；手机端接口与数据保持不变，往期逻辑零改动。<br />
+            进行中的提醒 / 消息只投手机端；电脑端每日简报的行程段过滤掉 <code>progress</code> 非空的在途行程，只写即将出发。
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- 11 落地清单 -->
+  <section>
+    <div class="sec-head"><span class="no">11</span><h2>落地清单</h2><span class="sec-sub">照这个改，往期零风险</span></div>
+    <div class="checklist">
+      <div class="check"><i></i><div><b>travel_plan_archive.dart</b><span><code>_RailSegs</code> 三段 → 两个文字 tab；<code>_seg</code> 默认 0 指向「即将出发」；删掉「进行中」分段与空态。</span></div></div>
+      <div class="check"><i></i><div><b>新增 _LiveStrip</b><span>84 高只读条，仅在 <code>progress</code> 存在时插在 tab 与主票之间；右侧接手机端入口。</span></div></div>
+      <div class="check"><i></i><div><b>往期 pane</b><span>组件不动，挂到第二个 tab；删掉页尾重复的往期章节和顶栏「往期 ↓」。</span></div></div>
+      <div class="check"><i></i><div><b>travel_ticket_book.dart</b><span>保留主票 + 64 行；删掉进行中 / 即将出发各复制一遍的 digital pass 列表。</span></div></div>
+      <div class="check"><i></i><div><b>server（可选）</b><span>summary 补 <code>cities[]</code>，其余不动；状态条只依赖已有 <code>progress</code>。</span></div></div>
+      <div class="check"><i></i><div><b>消息路由</b><span>进行中行程的提醒、变更、回执只投递手机端；桌面端不再订阅这段行程的消息。</span></div></div>
+      <div class="check"><i></i><div><b>每日简报取数</b><span>电脑端每日简报的行程段只取即将出发，过滤 <code>progress</code> 非空的在途行程。</span></div></div>
+      <div class="check"><i></i><div><b>不做的事</b><span>不改往期票根结构、不改照片与印章、不在桌面做今日勾选、不新增第三个 tab。</span></div></div>
+    </div>
+  </section>
+
+</div>
+</body>
+</html>

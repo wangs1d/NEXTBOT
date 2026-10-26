@@ -427,7 +427,8 @@ export interface POISummary {
   latitude: number;
   longitude: number;
   address: string;
-  rating: number;
+  /** 真实评分；高德没给就不下发（曾兜底 4.5，会伪装成高分） */
+  rating?: number;
   cost?: string;
   description?: string;
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL */
@@ -766,6 +767,7 @@ const SCORING = {
     distanceBase: 100,
     distanceScale: 1.5,
     ratingWeight: 0.25,
+    /** 无评分 POI 的内部打分基准：只参与排序，绝不上卡面（卡面宁缺毋滥） */
     ratingFallback: 4.0,
     ratingScale: 5,
     cuisineMatch: 15,
@@ -779,14 +781,34 @@ const SCORING = {
 
 // ======================== 主服务类 ========================
 
+/** 卡面指标胶囊：label 上卡，source 是这条数字的真实出处（hover 才显示）。 */
+export interface GuideMetric {
+  kind: 'rating' | 'price' | 'distance' | 'heat' | 'favorite';
+  label: string;
+  source: string;
+}
+
+/** 住宿/餐饮的落位参照点（由用户原话或候选几何推得，拿不到就不下发）。 */
+export interface GuideAnchor {
+  id: string;
+  /** 参照点名称，如「宽窄巷子景区」「成都市中心」 */
+  label: string;
+  /** 这个锚是怎么来的（用户明示 / 本屏首选景点 / 目的地中心） */
+  why: string;
+  latitude: number;
+  longitude: number;
+}
+
 /**
  * 种草选择卡候选条目（travel.destination-guide 数据源）
+ *
+ * 铁律：卡面每个数字都必须来自真实数据源。取不到的字段一律不下发
+ * （不发 0、不发空串、不发派生百分比），由展示层「有就放、没有就不放」。
  */
 export interface GuideCandidate {
   name: string;
-  rating: number;
-  /** 推荐度 = 评分/5 换算（0-99；无评分为 0） */
-  rec: number;
+  /** 真实评分（高德 biz_ext.rating / 飞猪住客评分）；未取到不下发 */
+  rating?: number;
   address: string;
   tags: string[];
   latitude?: number;
@@ -796,10 +818,16 @@ export interface GuideCandidate {
   intro?: string;
   /** 实时价（景点门票/酒店房价/餐饮人均）；null=查不到 → 前端标「待核价」 */
   price?: number | null;
-  /** 价格说明（实时价/市场均价/人均/待核价原因） */
+  /** 价格说明（实时价/人均/待核价原因），只作为 price metric 的 source 原料 */
   priceNote?: string;
   /** 价格是否为真实可计入报价（false=待核价） */
   pricePending?: boolean;
+  /** 已按「有什么才放什么」装配好的指标胶囊 */
+  metrics: GuideMetric[];
+  /** 社媒热度（仅已完整规划过的目的地非空） */
+  heat?: { level: 'hot' | 'mid'; source?: string };
+  /** 用户自己收藏过（本机收藏库，不是舆论计数） */
+  favorite?: boolean;
 }
 
 export class PlanningService {
@@ -1273,9 +1301,11 @@ export class PlanningService {
    * 走缓存优先 → 网络实时搜索 → 内置知识库真实POI兜底（无合成占位），返回扁平 POI 摘要列表。
    */
   /**
-   * 规划前种草候选（小红书式选择卡数据源）：三类 POI 按评分取前列并带实拍图。
+   * 规划前种草候选（选择卡数据源）：三类 POI 按真实信号排前列并带实拍图。
    * 图源：媒体库已有 → 直接用；未命中 → 必应抓取（并发 6）→ 本地化落盘。
-   * 单点失败不带图，宁缺毋假；推荐度 = 评分/5 换算（无评分排后、rec 置 0）。
+   * 单点失败不带图，宁缺毋假。卡面数字只有两条来路：真实评分（高德/飞猪）与
+   * 本店实时报价；取不到就是没有这条指标，价格显示「待核价」——绝不拿同城同档
+   * 中位数冒充某家酒店的报价。
    */
   /** 由 POI 的 keytag/星级推导酒店档次（用于同城同档市场均价） */
   private _hotelTierOfPoi(poi: RawPOI): 'budget' | 'mid' | 'luxury' {
@@ -1325,24 +1355,49 @@ export class PlanningService {
   async buildDestinationGuide(
     destination: string,
     per = 6,
+    opts: {
+      /** 用户原话里的住宿落位诉求（extractHotelFocus 的产物） */
+      hotelFocus?: TripPreferences['hotelFocus'];
+      hotelFocusRef?: string;
+    } = {},
   ): Promise<{
     destination: string;
     center: Coordinates;
     view: GuideCandidate[];
     stay: GuideCandidate[];
     food: GuideCandidate[];
+    /** 住宿段的落位参照点；坐标不可用时为 null，整段就不出距离理由 */
+    stayAnchor: GuideAnchor | null;
+    /** 每段「这几条是按什么排出来的」——由实际参与排序的信号拼出 */
+    sortNotes: Record<'view' | 'stay' | 'food', string>;
     fromCache: boolean;
   }> {
     const perCat = Math.min(8, Math.max(3, Math.floor(per) || 6));
     const dest = await this.searchDestination(destination);
-    const take = (list: RawPOI[]) =>
-      [...list]
-        .sort((a, b) => (Number(b.rating) || 0) - (Number(a.rating) || 0))
-        .slice(0, perCat);
+    const favKeys = this.favoriteKeys;
+    // 排序键只用真实信号，缺失一律沉底，末位用原始搜索序（同输入必同序，不抖）。
+    const favRank = (p: RawPOI, type: 'attraction' | 'hotel' | 'restaurant') =>
+      favKeys.has(`${type}:${p.name}`) ? 1 : 0;
+    const heatRank = (p: RawPOI) =>
+      p.socialHeat?.level === 'hot' ? 2 : p.socialHeat?.level === 'mid' ? 1 : 0;
+    const ratingRank = (p: RawPOI) =>
+      Number.isFinite(Number(p.rating)) && Number(p.rating) > 0 ? Number(p.rating) : -1;
+    const take = (list: RawPOI[], type: 'attraction' | 'hotel' | 'restaurant') =>
+      list
+        .map((p, idx) => ({ p, idx }))
+        .sort(
+          (a, b) =>
+            favRank(b.p, type) - favRank(a.p, type) ||
+            ratingRank(b.p) - ratingRank(a.p) ||
+            heatRank(b.p) - heatRank(a.p) ||
+            a.idx - b.idx,
+        )
+        .slice(0, perCat)
+        .map((x) => x.p);
     const cats: Array<{ key: 'view' | 'stay' | 'food'; type: PoiMediaType; list: RawPOI[] }> = [
-      { key: 'view', type: 'attraction', list: take(dest.attractions) },
-      { key: 'stay', type: 'hotel', list: take(dest.hotels) },
-      { key: 'food', type: 'restaurant', list: take(dest.restaurants) },
+      { key: 'view', type: 'attraction', list: take(dest.attractions, 'attraction') },
+      { key: 'stay', type: 'hotel', list: take(dest.hotels, 'hotel') },
+      { key: 'food', type: 'restaurant', list: take(dest.restaurants, 'restaurant') },
     ];
     const jobs: Array<{
       cat: 'view' | 'stay' | 'food';
@@ -1352,38 +1407,44 @@ export class PlanningService {
     }> = [];
     for (const cat of cats) {
       for (const poi of cat.list) {
-        const rating = Number(poi.rating) || 0;
+        const rating = Number(poi.rating);
+        const favorite = favRank(poi, cat.type as 'attraction' | 'hotel' | 'restaurant') === 1;
         jobs.push({
           cat: cat.key,
           type: cat.type,
           poi,
           cand: {
             name: poi.name,
-            rating,
-            rec: rating > 0 ? Math.min(99, Math.max(5, Math.round((rating / 5) * 100))) : 0,
+            // 高德没给评分时不再兜底成 4.0：没有真数就没有这条指标
+            ...(Number.isFinite(rating) && rating > 0 ? { rating } : {}),
             address: typeof poi.address === 'string' ? poi.address : '',
             tags: Array.isArray(poi.tags) ? poi.tags : [],
             latitude: poi.latitude,
             longitude: poi.longitude,
             photos: travelMediaStore.imageUrls(cat.type, poi.name).slice(0, 3),
             intro: this._guideIntro(poi, cat.key),
+            ...(poi.socialHeat ? { heat: { level: poi.socialHeat.level, ...(poi.socialHeat.source ? { source: poi.socialHeat.source } : {}) } } : {}),
+            ...(favorite ? { favorite: true } : {}),
+            metrics: [],
           },
         });
       }
     }
-    // 缺图的补抓（并发 6；单点失败不影响整体）
-    const missing = jobs.filter((j) => j.cand.photos.length === 0);
+    // 缺图的补抓（并发 6；单点失败不影响整体）：补到 3 张为止，
+    // 卡面每行按「错落三图」排版，只有 1 张的行会显得空。
+    const missing = jobs.filter((j) => j.cand.photos.length < 3);
     let cursor = 0;
     const workers = Array.from({ length: Math.min(6, missing.length) }, async () => {
       while (cursor < missing.length) {
         const job = missing[cursor++];
         try {
-          const urls = await fetchBingPhotoUrls(job.cand.name, 2);
+          const need = 3 - job.cand.photos.length;
+          const urls = await fetchBingPhotoUrls(job.cand.name, need);
           if (urls.length) {
             await travelMediaStore.localizeAndAttach(
               job.type,
               job.cand.name,
-              urls.slice(0, 1),
+              urls.slice(0, need),
               job.cand.latitude != null && job.cand.longitude != null
                 ? { latitude: Number(job.cand.latitude), longitude: Number(job.cand.longitude) }
                 : undefined,
@@ -1415,9 +1476,21 @@ export class PlanningService {
             const live = await lookupHotelPrice(poi.name, dest.destination, {
               tier: this._hotelTierOfPoi(poi),
             });
-            cand.price = live?.amount ?? null;
-            cand.pricePending = !live;
-            cand.priceNote = live?.note ?? '未取到该酒店实时价，待核价';
+            if (live?.kind === 'exact') {
+              cand.price = live.amount;
+              cand.pricePending = false;
+              cand.priceNote = live.note;
+              // 飞猪住客评分比高德的酒店分更对得上「住这家的人怎么看」
+              if (live.rating) cand.rating = live.rating;
+            } else {
+              // 中位数不是本店报价：种草行上不放数字，也不参与任何合计
+              cand.price = null;
+              cand.pricePending = true;
+              cand.priceNote =
+                live?.kind === 'market'
+                  ? `未取到本店报价（同城同档 ${live.sampleSize} 家中位数只作预算参考，不当作它家价）`
+                  : '未取到本店报价，待核价';
+            }
           } else {
             const cost = restaurantCostOf(poi.raw);
             cand.price = cost;
@@ -1435,7 +1508,214 @@ export class PlanningService {
 
     const out: Record<'view' | 'stay' | 'food', GuideCandidate[]> = { view: [], stay: [], food: [] };
     for (const j of jobs) out[j.cat].push(j.cand);
-    return { destination: dest.destination, center: dest.center, view: out.view, stay: out.stay, food: out.food, fromCache: dest.fromCache };
+
+    // 住宿落位锚点：用户原话 → 本屏首选景点 → 目的地中心 → 不下发。
+    const stayAnchor = await this._guideStayAnchor(
+      opts,
+      dest.attractions,
+      out.view,
+      dest.destination,
+      dest.center,
+    );
+    // 用户明确点了落位诉求（「住得离她近点」「赶早班机」）才按距离重排住宿段；
+    // 没点就维持喜好序，距离只作为「为什么是这家」的理由展示在行上。
+    const stayDistanceLed = !!(stayAnchor && opts.hotelFocus);
+    if (stayAnchor && stayDistanceLed) {
+      const rank = (c: GuideCandidate) => {
+        const d = this._guideDistanceMeters(c, stayAnchor);
+        return d == null ? Number.MAX_SAFE_INTEGER : d;
+      };
+      out.stay = [...out.stay].sort((a, b) => rank(a) - rank(b));
+    }
+    this._assembleGuideMetrics(out, stayAnchor);
+
+    return {
+      destination: dest.destination,
+      center: dest.center,
+      view: out.view,
+      stay: out.stay,
+      food: out.food,
+      stayAnchor,
+      sortNotes: {
+        view: this._guideSortNote(out.view, null, false),
+        stay: this._guideSortNote(out.stay, stayAnchor, stayDistanceLed),
+        food: this._guideSortNote(out.food, null, false),
+      },
+      fromCache: dest.fromCache,
+    };
+  }
+
+  /** 住宿落位锚点（拿不到可信坐标就返回 null，让整段没有距离理由）。 */
+  private async _guideStayAnchor(
+    opts: { hotelFocus?: TripPreferences['hotelFocus']; hotelFocusRef?: string },
+    attractions: RawPOI[],
+    view: GuideCandidate[],
+    destName: string,
+    center: Coordinates,
+  ): Promise<GuideAnchor | null> {
+    const top = view.find((v) => Number.isFinite(v.latitude) && Number.isFinite(v.longitude));
+    if (opts.hotelFocus) {
+      const resolved = await this.resolveHotelFocusAnchor(
+        { hotelFocus: opts.hotelFocus, hotelFocusRef: opts.hotelFocusRef } as TripPreferences,
+        attractions,
+        center,
+        destName,
+      );
+      if (resolved && Number.isFinite(resolved.latitude) && Number.isFinite(resolved.longitude)) {
+        return {
+          id: 'user',
+          label: resolved.label,
+          why: this._guideAnchorWhy(opts.hotelFocus),
+          latitude: resolved.latitude,
+          longitude: resolved.longitude,
+        };
+      }
+    }
+    if (top) {
+      return {
+        id: 'top-view',
+        label: top.name,
+        why: `本屏首选景点「${top.name}」，先按离它近排`,
+        latitude: top.latitude!,
+        longitude: top.longitude!,
+      };
+    }
+    if (Number.isFinite(center.latitude) && Number.isFinite(center.longitude) && (center.latitude || center.longitude)) {
+      return {
+        id: 'center',
+        label: `${destName}中心`,
+        why: '没取到可用参照点，先按离目的地中心近排',
+        latitude: center.latitude,
+        longitude: center.longitude,
+      };
+    }
+    return null;
+  }
+
+  private _guideAnchorWhy(focus: TripPreferences['hotelFocus']): string {
+    switch (focus) {
+      case 'airport':
+        return '你说要离机场近';
+      case 'station':
+        return '你说要离车站近';
+      case 'downtown':
+        return '你说要住市区';
+      default:
+        return '你原话里点名的参照点';
+    }
+  }
+
+  /**
+   * 装配卡面指标胶囊：有什么真数才放什么，顺序=（住宿）距离 → 评分 → 价格 → 热度 → 收藏。
+   * 客户端拿到数组原样渲染，不再做任何换算。
+   */
+  private _assembleGuideMetrics(
+    out: Record<'view' | 'stay' | 'food', GuideCandidate[]>,
+    anchor: GuideAnchor | null,
+  ): void {
+    for (const [catKey, list] of Object.entries(out) as Array<
+      ['view' | 'stay' | 'food', GuideCandidate[]]
+    >) {
+      const withDistance = catKey === 'stay' && !!anchor;
+      for (const cand of list) {
+        const metrics: GuideMetric[] = [];
+        if (withDistance) {
+          const meters = this._guideDistanceMeters(cand, anchor!);
+          if (meters != null) {
+            metrics.push({
+              kind: 'distance',
+              label: `离${anchor!.label} ${this._guideDistanceText(meters)}`,
+              source: `与「${anchor!.label}」的直线距离估算（未算路网绕行），按双方坐标算`,
+            });
+          }
+        }
+        if (cand.rating != null) {
+          metrics.push({
+            kind: 'rating',
+            label: `${catKey === 'stay' ? '住客' : ''}评分 ${cand.rating.toFixed(1)}`,
+            source:
+              catKey === 'stay'
+                ? '飞猪住客评分（同名命中该酒店才取）'
+                : '高德用户评分',
+          });
+        }
+        if (cand.price != null && !cand.pricePending) {
+          metrics.push({
+            kind: 'price',
+            label:
+              cand.price === 0
+                ? '免费'
+                : `¥${Math.round(cand.price)}${catKey === 'stay' ? '/晚' : catKey === 'food' ? '/人' : ' 起'}`,
+            source: cand.priceNote || '实时报价',
+          });
+        } else {
+          metrics.push({
+            kind: 'price',
+            label: '待核价',
+            source: cand.priceNote || '未取到本店报价',
+          });
+        }
+        if (cand.heat) {
+          metrics.push({
+            kind: 'heat',
+            label: cand.heat.level === 'hot' ? '社媒热议' : '社媒在聊',
+            source: `${cand.heat.source || '社媒聚合'}（小红书/抖音搜索归纳，非人数统计）`,
+          });
+        }
+        if (cand.favorite) {
+          metrics.push({ kind: 'favorite', label: '你收藏过', source: '本机收藏清单' });
+        }
+        cand.metrics = metrics;
+      }
+    }
+  }
+
+  /** 直线距离（米）；没有可信坐标返回 null。排序用，不做阈值裁剪。 */
+  private _guideDistanceMeters(
+    cand: GuideCandidate,
+    anchor: GuideAnchor,
+  ): number | null {
+    if (!Number.isFinite(cand.latitude) || !Number.isFinite(cand.longitude)) return null;
+    const km = this.haversineKm(cand.latitude!, cand.longitude!, anchor.latitude, anchor.longitude);
+    if (!Number.isFinite(km)) return null;
+    return Math.round(km * 1000);
+  }
+
+  /**
+   * 距离文案：3km 内才谈步行时间——再远的「步行约 40 分」是噪声；
+   * 超过 1km 用 km 一位小数，否则取整到 10m。
+   */
+  private _guideDistanceText(meters: number): string {
+    if (meters < 1000) {
+      const shown = Math.round(meters / 10) * 10;
+      const min = Math.max(1, Math.round(((shown || meters) / 1000) * 14));
+      return `${shown || meters}m · 走约 ${min} 分`;
+    }
+    const km = meters / 1000;
+    return km <= 3 ? `${km.toFixed(1)}km · 走约 ${Math.max(1, Math.round(km * 14))} 分` : `${km.toFixed(1)}km`;
+  }
+
+  /** 「这几条是怎么排出来的」——只描述实际参与排序的信号，一个都不吹。 */
+  private _guideSortNote(
+    list: GuideCandidate[],
+    anchor: GuideAnchor | null,
+    distanceLed: boolean,
+  ): string {
+    if (list.length === 0) return '';
+    const rated = list.filter((i) => i.rating != null).length;
+    const heated = list.filter((i) => i.heat).length;
+    const faved = list.filter((i) => i.favorite).length;
+    const parts: string[] = [];
+    if (faved) parts.push('你收藏过的排最前');
+    if (distanceLed && anchor) parts.push(`再按离${anchor.label}近`);
+    parts.push(
+      rated
+        ? `${rated}/${list.length} 条有真实评分，按评分排`
+        : '这一屏没取到评分，按搜索原序',
+    );
+    if (heated) parts.push(`${heated} 条带社媒热度`);
+    if (!faved && rated < list.length && !distanceLed) parts.push('没取到评分的按搜索原序补位');
+    return parts.join(' · ');
   }
 
   async searchDestination(destName: string, type?: 'attraction' | 'hotel' | 'restaurant'): Promise<{
@@ -1927,7 +2207,10 @@ export class PlanningService {
         if (it.type === 'hotel') {
           const live = hotelPrices.get(it.name);
           if (live) {
-            const q = pricingService.quoteLivePrice(live.amount, 'hotel', it.name, ctx, {
+            // 预算合计允许用同城同档中位数兜底，但取的是 reference 字段——
+            // 它不是本店报价，所以 note 必须带着「中位数参考」原文进合计。
+            const basis = live.kind === 'exact' ? live.amount : live.reference;
+            const q = pricingService.quoteLivePrice(basis, 'hotel', it.name, ctx, {
               note: live.kind === 'market' ? live.note : '飞猪实时房价，以下单页为准',
             });
             it.priceQuote = q;
@@ -2066,9 +2349,7 @@ export class PlanningService {
     const mode: 'real-api' | 'real-database' | 'estimated' = hasLive
       ? 'real-api'
       : (process.env.PRICING_MODE as 'real-api' | 'real-database' | 'estimated') || 'real-database';
-    if (mode === 'real-api') {
-      warnings.push('价格来自飞猪/高德实时数据，下单时可能因库存/日期小幅波动');
-    } else if (mode === 'estimated') {
+    if (mode === 'estimated') {
       warnings.push('当前为估算价，建议在预订平台核对后再下单');
     } else {
       warnings.push('未取到实时价，以下价格为参考价');
@@ -2680,6 +2961,7 @@ export class PlanningService {
       // 入库前统一转 WGS-84，全链路（缓存/行程/地图/算路）单边 WGS-84。
       const wgs = gcj02ToWgs84(lat, lon);
       // 评分优先 biz_ext.rating（all 档才有），base 档的顶层 rating 仅兜底。
+      // 两档都没给就是没有——不兜底成 4.0，假评分会流到卡面指标与排序里。
       // 实拍图不再随搜索种子（2026-10-15 定调：高德实拍=商家门脸/位置示意图，
       // 观感差整批退役），POI 一律无图进装配 → missing → 后台 web 图搜回填
       // （search image 端口 → 必应，见 fetchRealImages）。
@@ -2693,7 +2975,7 @@ export class PlanningService {
         longitude: Number.isFinite(wgs.longitude) ? wgs.longitude : 0,
         address: poi.address || `${poi.cityname || ''}${poi.adname || ''}${name}`,
         type: poiType,
-        rating: Number.isFinite(amapRating) && amapRating > 0 ? amapRating : 4.0,
+        rating: Number.isFinite(amapRating) && amapRating > 0 ? amapRating : undefined,
         tags: [
           poi.type || poiType,
           poi.typecode || '',
@@ -3187,7 +3469,7 @@ export class PlanningService {
     let forecast: Awaited<ReturnType<typeof this.weatherService.getMultiDayForecast>> | null = null;
     for (let attempt = 0; attempt < 2 && !forecast; attempt++) {
       try {
-        forecast = await this.weatherService.getMultiDayForecast(center.latitude, center.longitude, dayCount);
+        forecast = await this.weatherService.getMultiDayForecast(center.latitude, center.longitude, dayCount, "auto", startDate);
       } catch (err) {
         if (attempt > 0) {
           console.warn(`[PlanningService] 逐日天气获取失败（已重试），按中性天气规划: ${err instanceof Error ? err.message : String(err)}`);
@@ -3610,7 +3892,7 @@ export class PlanningService {
       return {
         id: poi.id, name: poi.name, type,
         latitude: poi.latitude, longitude: poi.longitude,
-        address: poi.address, rating: poi.rating ?? 4.5,
+        address: poi.address, rating: poi.rating,
         cost: poi.tags?.[0], description: poi.tags?.join(','),
         splatUrl: poi.splatUrl,
       };

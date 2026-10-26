@@ -365,22 +365,22 @@ class TurnState {
 
   // ---- UI 辅助 ----
 
-  /// 顶栏主标题（豆包式「正在思考…」/「正在搜索…」/「正在整理答案…」）。
+  /// 顶栏主标题：第一人称短句，不承诺「思考」（思考过程未接前端，别占这个词）。
   String get headerTitle {
     switch (phase) {
       case TurnPhase.pendingStart:
       case TurnPhase.routing:
-        return '正在思考…';
+        return '我看看';
       case TurnPhase.planning:
-        return '正在整理思路…';
+        return '我想下怎么办';
       case TurnPhase.executing:
-        if (toolCalls.isNotEmpty) return '正在执行…';
+        if (toolCalls.isNotEmpty) return '我在办';
         if (subAgents.any((a) => a.status == TurnSubAgentStatus.running)) {
-          return '正在协作…';
+          return '我叫了个帮手';
         }
-        return '正在处理…';
+        return '我搭把手';
       case TurnPhase.streaming:
-        return '正在收尾…';
+        return '快说完了';
       case TurnPhase.done:
         return '';
       case TurnPhase.canceled:

@@ -40,6 +40,18 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    prefix: "package.",
+    metadata: {
+      aliases: [
+        "express delivery", "parcel", "package tracking", "logistics", "tracking number", "pickup code",
+        "快递", "包裹", "物流", "运单", "运单号", "取件码", "驿站", "快递柜", "签收", "到哪了",
+      ],
+      negativeAliases: ["takeout rider status", "desktop screenshot", "weather lookup"],
+      examples: ["我的快递到哪了", "今天有到的包裹吗", "取件码是多少", "查一下这个运单号"],
+      negativeExamples: ["外卖骑手到了吗", "帮我截个图"],
+    },
+  },
+  {
     prefix: "budget.",
     metadata: {
       aliases: ["budget", "cost estimate", "expense planning", "预算", "花费"],

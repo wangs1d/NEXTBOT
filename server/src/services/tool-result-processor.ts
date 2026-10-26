@@ -645,6 +645,8 @@ export function buildTravelStoryText(plan: Record<string, unknown>): string {
     stops.forEach((it) => {
       const name = strField(it?.name);
       let time = strField(it?.startTime) || strField(it?.time);
+      const isoTimeStart = time.indexOf("T");
+      if (isoTimeStart >= 0) time = time.slice(isoTimeStart + 1);
       const dash = time.search(/[-~—]/);
       if (dash > 0) time = time.slice(0, dash).trim();
       if (time.length > 5) time = time.slice(0, 5);

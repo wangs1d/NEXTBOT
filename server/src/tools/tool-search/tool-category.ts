@@ -136,6 +136,12 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: ["order.status"],
   },
   {
+    name: "package",
+    summary: "快递包裹（在途件/轨迹/取件码/手动补录）",
+    prefixes: ["package."],
+    secondaryTools: [],
+  },
+  {
     name: "wechat",
     summary: "微信接入（扫码登录/连接状态）",
     prefixes: ["wechat."],

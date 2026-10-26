@@ -92,6 +92,12 @@ bool IsCoverCandidate(HWND hwnd, HWND island, const RECT& rc) {
 // 窗口、只在 Game Bar 录制会话期间存在，保留纯存在判定）外，改为
 // 「该进程存在可见、未最小化的顶层窗口」才豁免。代价：录制时把 OBS
 // 最小化到托盘则不豁免，录制期间保持窗口打开即可。
+//
+// 2026-10-26 剪映（jianyingpro.exe）移出名单：「有可见顶层窗口」对剪辑器
+// 恒真——剪映一开就最大化占满整屏，而压住岛的那个全屏窗口正是被认成
+// 「在录屏」的那个进程自己，全屏让位被它自己豁免掉了（本机实证：
+// COVERED=1 且 rec=1 → busy=0，岛骑在剪映全屏画面上）。名单只留专职录屏
+// 工具；拍灵动岛演示用 OBS 或 Win+Alt+R（Game Bar），二者行为不变。
 constexpr const wchar_t* kRecorderBareProcessNames[] = {
     L"gamebarftserver.exe",  // Xbox Game Bar 录制服务（Win+Alt+R）
 };
@@ -107,7 +113,6 @@ constexpr const wchar_t* kRecorderWindowedProcessNames[] = {
     L"camtasiarecorder.exe",
     L"camtasiastudio.exe",
     L"sharex.exe",
-    L"jianyingpro.exe",  // 剪映专业版
     L"apowerrec.exe",    // 傲软录屏
     L"cap.exe",          // Cap（cap.so 开源录屏，2026-10-14 实证其选区
                          // 全屏遮罩会盖住岛触发让位，入列豁免）

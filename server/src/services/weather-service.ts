@@ -303,14 +303,15 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
 
   /**
    * 逐日预报（多日行程「每天按当天天气排程」用，2026-10-15）。
-   * Open-Meteo 一次请求 forecast_days=N（免费无 Key，上限 7），返回逐日
-   * daily 概要 + 当日逐小时行（供折叠为上午/下午/晚间三段语境）。
+   * 传 startDate/endDate 时按行程窗口请求（Open-Meteo start_date/end_date，
+   * 免费无 Key 上限 16 天外）；否则 forecast_days=N 从今天起算（上限 7）。
    */
   async getMultiDayForecast(
     latitude: number,
     longitude: number,
     days: number,
     timezone = "auto",
+    startDate?: string,
   ): Promise<MultiDayForecast> {
     const n = Math.max(1, Math.min(days, 7));
     const params = new URLSearchParams({
@@ -319,8 +320,16 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       timezone,
       hourly: ["temperature_2m", "precipitation_probability", "weather_code"].join(","),
       daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max"].join(","),
-      forecast_days: String(n),
     });
+    if (startDate && /^\d{4}-\d{2}-\d{2}$/.test(startDate)) {
+      const end = new Date(new Date(`${startDate}T00:00:00Z`).getTime() + (Math.max(1, days) - 1) * 86400000)
+        .toISOString()
+        .split("T")[0];
+      params.set("start_date", startDate);
+      params.set("end_date", end ?? startDate);
+    } else {
+      params.set("forecast_days", String(n));
+    }
     const url = `https://api.open-meteo.com/v1/forecast?${params.toString()}`;
     const res = await fetch(url, { headers: { Accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
     if (!res.ok) {

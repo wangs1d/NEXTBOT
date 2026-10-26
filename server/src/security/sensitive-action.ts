@@ -46,6 +46,8 @@ const EXTERNAL_TOOL_PREFIXES: string[] = [
 const READ_TOOL_PREFIXES: string[] = [
   "shopping.compare.",
   "order.status", // 订单状态查询（只读跨源采集库；probe 判定用）
+  "package.list", // 在途包裹查询（只读本地登记表）
+  "package.track", // 单件轨迹查询（只读登记表 + 丰桥补全，不外呼用户侧动作）
   "search.",
   "web.",
   "weather.",

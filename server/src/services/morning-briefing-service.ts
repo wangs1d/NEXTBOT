@@ -115,13 +115,23 @@ export interface MorningBriefingTravel {
   packing: string[];
 }
 
+/**
+ * 晨报生成选项。
+ * in-progress 行程（今天落在行程区间内）的消息与提醒只投手机端，
+ * 电脑端每日简报不带行程段——默认 false，仅手机端 / 手机启动简报显式开启。
+ */
+export interface MorningBriefingOptions {
+  includeInProgressTravel?: boolean;
+}
+
 export interface MorningBriefing {
   date: string;
   todaySchedule: MorningBriefingScheduleItem[];
   pendingNotes: MorningBriefingPendingNote[];
   /**
    * 行程段（可选块，第六源）：今天落在某份行程区间内（startDate ≤ 今天 ≤ endDate）
-   * → 当天第一站 + 目的地/天气 + 随身叮嘱；无进行中行程时省略该字段。
+   * → 当天第一站 + 目的地/天气 + 随身叮嘱。在途行程的消息与提醒只投手机端，
+   * 电脑端晨报默认不带该段（generateBriefing 的 includeInProgressTravel 开启才取）。
    */
   travel?: MorningBriefingTravel;
   /** 兴趣热搜命中（可选块）：无命中时省略该字段，三源结构不受影响 */
@@ -526,7 +536,10 @@ export class MorningBriefingService {
 
   constructor(private readonly deps: MorningBriefingDeps = {}) {}
 
-  async generateBriefing(sessionId: string): Promise<MorningBriefing> {
+  async generateBriefing(
+    sessionId: string,
+    options: MorningBriefingOptions = {},
+  ): Promise<MorningBriefing> {
     const prefs = this.deps.getSessionPrefs?.(sessionId);
     const sections = prefs?.morningBriefing.sections ?? {
       schedule: true,
@@ -574,8 +587,11 @@ export class MorningBriefingService {
     const todoFollowups = this.fetchTodoFollowups(sessionId);
 
     // 第六源：行程段（确定性读行程仓库，无 LLM）——今天落在某份行程区间内
-    // → 当天第一站 + 天气叮嘱（行前主动提醒）
-    const travel = await this.fetchTravelToday().catch(() => null);
+    // → 当天第一站 + 天气叮嘱（行前主动提醒）。在途行程只给手机端，
+    // 电脑端晨报默认不取（includeInProgressTravel 显式开启才取）。
+    const travel = options.includeInProgressTravel
+      ? await this.fetchTravelToday().catch(() => null)
+      : null;
 
     // 第七源：DDL（确定性扫描，无 LLM）——今天截止置顶、这周还要交的只汇总一行。
     // 大学生线三级梯度的 L3/L1 档（L2 在明日速览卡，不在晨报重复）。
@@ -644,8 +660,11 @@ export class MorningBriefingService {
     return null;
   }
 
-  async narrateBriefing(sessionId: string): Promise<MorningBriefingNarration> {
-    const briefing = await this.generateBriefing(sessionId);
+  async narrateBriefing(
+    sessionId: string,
+    options: MorningBriefingOptions = {},
+  ): Promise<MorningBriefingNarration> {
+    const briefing = await this.generateBriefing(sessionId, options);
     const narrationText =
       (await this.polishNarration(briefing)) ?? this.composeNarration(briefing);
     return { narrationText, briefing };

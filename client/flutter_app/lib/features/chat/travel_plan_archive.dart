@@ -5,13 +5,21 @@ import "dart:math" as math;
 import "dart:ui" show FontFeature, ImageFilter;
 
 import "package:flutter/material.dart";
-import "package:flutter/services.dart" show Clipboard, ClipboardData;
+import "package:flutter/services.dart"
+    show
+        Clipboard,
+        ClipboardData,
+        KeyDownEvent,
+        KeyRepeatEvent,
+        LogicalKeyboardKey;
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
 import "../../core/theme/app_theme.dart";
 import "../../core/utils/link_utils.dart";
+import "../../widgets/app_window_titlebar.dart";
 import "media_disk_cache.dart";
+import "travel_image_warmer.dart";
 import "travel_plan_mobile_page.dart";
 import "travel_plan_models.dart";
 import "travel_plan_panel.dart";
@@ -30,8 +38,9 @@ part "travel_ticket_book.dart";
 // 信息齐后真实生成（服务端复用
 // PlanningService + travelPlanStore 落盘），先出预算明细卡，用户确认后
 // 才展示最终规划文字与行程卡。
-// 行程空间：分段式状态切换（进行中 | 即将出发 | 往期），卡片左缘状态
-// 色条（青=进行中 / 橙=即将出发 / 灰=往期），点开直达完整行程界面。
+// 行程空间：两段导航（即将出发 | 往期）。待出发金章 → 在路上只读条 →
+// 已归档绿章，同一段行程原地升级；在途任务与消息留在手机端。
+// 往期票根册保持不变，只是搬进第二个 tab。
 //
 // 协议：POST /travel/plan-session（发起）→ :id/turn（消息/点选）→
 // :id/generate（真实生成，10~120s）→ :id/approve（确认预算后出方案）。
@@ -46,6 +55,14 @@ const double _kContentMaxWidth = 720;
 
 /// 阶段卡宽度：铺满 720 内容列并留出呼吸边（窄窗时随列收缩）。
 const double _kCardWidth = 660;
+
+/// 行程页内容轴：两段 tab、在途状态条、即将出发列表共用同一条左缘。
+const double _kArchiveMaxWidth = 880;
+
+/// 档案栏宽度；中栏 + 档案栏放不下这个组合时（可用宽度低于门槛），
+/// 档案降级成顶部「已定」胶囊条。
+const double _kDossierWidth = 300;
+const double _kDossierBreakpoint = 1020;
 
 /// 卡片规范：16 圆角 / 16 内边距 / 主按钮 10 圆角。
 const double _kCardRadius = 16;
@@ -169,14 +186,6 @@ class _PlanSummary {
     return "还剩 $d 天";
   }
 
-  /// 「Day x / y」进度徽章文案（有进度记录时）。
-  String get progressLabel {
-    final ({int day, int stop})? p = progress;
-    if (p == null || dayCount <= 0) return "";
-    final int dayNo = (p.day + 1).clamp(1, dayCount);
-    return "Day $dayNo/$dayCount";
-  }
-
   /// 花费徽章（无记录不显示）。
   String? get costLabel {
     final double? c = totalCost;
@@ -185,12 +194,33 @@ class _PlanSummary {
     return "¥${c.round()}";
   }
 
-  /// 进行中进度条比例（0~1；无进度为 null）。
-  double? get progressFraction {
+  /// 在途当天序号（0 基）：优先进度记录，缺失时按今天与出发日推算。
+  int liveDayIndex() {
+    final int maxIndex = dayCount > 0 ? dayCount - 1 : 0;
     final ({int day, int stop})? p = progress;
-    if (p == null || dayCount <= 0) return null;
-    return ((p.day + 1) / dayCount).clamp(0.0, 1.0);
+    if (p != null) {
+      if (p.day < 0) return 0;
+      return p.day > maxIndex ? maxIndex : p.day;
+    }
+    final DateTime? start = DateTime.tryParse(startDate);
+    if (start == null) return 0;
+    final DateTime now = DateTime.now();
+    final int offset = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(start.year, start.month, start.day))
+        .inDays;
+    if (offset < 0) return 0;
+    return offset > maxIndex ? maxIndex : offset;
   }
+
+  /// 列表标题：多城行程直接给完整路线，否则只写目的地城市。
+  String get listTitle {
+    final String t = displayTitle;
+    if (t.contains("→")) return t;
+    return destination.isNotEmpty ? destination : t;
+  }
+
+  /// 住宿晚数（N 天 N-1 晚；单日行程为 0）。
+  int get nightCount => dayCount > 1 ? dayCount - 1 : 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -252,7 +282,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   /// 左侧 tab：0 规划 / 1 行程。
   int _tab = 0;
 
-  /// 行程空间当前分段：0 进行中 / 1 即将出发 / 2 往期（往期默认不出现）。
+  /// 行程空间当前分段：0 即将出发（默认） / 1 往期。
   int _seg = 0;
 
   /// 完整行程缓存（打开详情共用，避免重复拉取）。
@@ -262,8 +292,9 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   final Map<String, Map<String, dynamic>> _rawPlanCache =
       <String, Map<String, dynamic>>{};
 
-  /// 详情加载态（按 planId 记录）。
-  final Set<String> _loadingPlans = <String>{};
+  /// 详情加载中的请求（同一 planId 并发只发一次，状态条预取与点开共用）。
+  final Map<String, Future<TravelPlanData?>> _planFutures =
+      <String, Future<TravelPlanData?>>{};
 
   static const Duration _timeout = Duration(seconds: 6);
 
@@ -293,11 +324,24 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   }
 
   /// 拉取完整行程（带进程内缓存），失败返回 null 并提示。
-  Future<TravelPlanData?> _ensureFullPlan(String planId) async {
+  /// [silent] 用于在途状态条的后台预取：失败不弹提示，状态条自己降级。
+  Future<TravelPlanData?> _ensureFullPlan(
+    String planId, {
+    bool silent = false,
+  }) {
     final TravelPlanData? cached = _planCache[planId];
-    if (cached != null) return cached;
-    if (_loadingPlans.contains(planId)) return null;
-    if (mounted) setState(() => _loadingPlans.add(planId));
+    if (cached != null) return Future<TravelPlanData?>.value(cached);
+    final Future<TravelPlanData?> pending = _planFutures.putIfAbsent(
+      planId,
+      () => _fetchFullPlan(planId, silent: silent),
+    );
+    return pending.whenComplete(() => _planFutures.remove(planId));
+  }
+
+  Future<TravelPlanData?> _fetchFullPlan(
+    String planId, {
+    required bool silent,
+  }) async {
     try {
       final http.Response resp = await http
           .get(Uri.parse("${ApiConfig.httpBase}/travel/plans/$planId"))
@@ -315,7 +359,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       _planCache[planId] = plan;
       return plan;
     } catch (e) {
-      if (mounted) {
+      if (!silent && mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text("行程详情加载失败：$e", style: const TextStyle(fontSize: 12)),
@@ -325,8 +369,6 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
         );
       }
       return null;
-    } finally {
-      if (mounted) setState(() => _loadingPlans.remove(planId));
     }
   }
 
@@ -492,35 +534,48 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       ),
       child: Scaffold(
         backgroundColor: c.bg,
-        body: Row(
+        body: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _TravelTabRail(
-              colors: c,
-              index: _tab,
-              onChanged: (int v) => setState(() => _tab = v),
-            ),
-            VerticalDivider(width: 1, thickness: 1, color: c.sideSep),
+            // 原生标题栏是 hidden 的，AppWindowTitleBar 是全窗口唯一的拖拽区与
+            // 窗口按钮；本页走整屏路由会把它盖掉，故须自己补回一条。
+            const AppWindowTitleBar(),
             Expanded(
-              child: _tab == 0
-                  ? _PlanningStage(
-                      seedMessage: widget.seedMessage,
-                      agentName: widget.agentName,
-                      onPlanGenerated: _refresh,
-                      onOpenPlan: (String planId) async {
-                        final TravelPlanData? plan = await _ensureFullPlan(planId);
-                        if (plan != null) await _openDetail(plan);
-                      },
-                    )
-                  : _ArchivePane(
-                      future: _future,
-                      seg: _seg,
-                      onSegChanged: (int v) => setState(() => _seg = v),
-                      onOpen: _openFromSummary,
-                      onShare: _copyShareCode,
-                      onDelete: _deletePlan,
-                      onRetry: _refresh,
-                    ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  _TravelTabRail(
+                    colors: c,
+                    index: _tab,
+                    onChanged: (int v) => setState(() => _tab = v),
+                  ),
+                  VerticalDivider(width: 1, thickness: 1, color: c.sideSep),
+                  Expanded(
+                    child: _tab == 0
+                        ? _PlanningStage(
+                            seedMessage: widget.seedMessage,
+                            agentName: widget.agentName,
+                            onPlanGenerated: _refresh,
+                            onOpenPlan: (String planId) async {
+                              final TravelPlanData? plan =
+                                  await _ensureFullPlan(planId);
+                              if (plan != null) await _openDetail(plan);
+                            },
+                          )
+                        : _ArchivePane(
+                            future: _future,
+                            seg: _seg,
+                            onSegChanged: (int v) => setState(() => _seg = v),
+                            loadPlan: (String planId) =>
+                                _ensureFullPlan(planId, silent: true),
+                            onOpen: _openFromSummary,
+                            onShare: _copyShareCode,
+                            onDelete: _deletePlan,
+                            onRetry: _refresh,
+                          ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -570,7 +625,7 @@ class _TravelTabRail extends StatelessWidget {
   }
 }
 
-class _TabButton extends StatelessWidget {
+class _TabButton extends StatefulWidget {
   const _TabButton({
     required this.colors,
     required this.icon,
@@ -586,32 +641,61 @@ class _TabButton extends StatelessWidget {
   final VoidCallback onTap;
 
   @override
+  State<_TabButton> createState() => _TabButtonState();
+}
+
+class _TabButtonState extends State<_TabButton> {
+  bool _hovering = false;
+
+  @override
   Widget build(BuildContext context) {
-    final Color fg = active ? colors.accent : colors.muted;
-    return GestureDetector(
-      onTap: onTap,
-      child: AnimatedContainer(
-        duration: const Duration(milliseconds: 160),
-        width: 50,
-        padding: const EdgeInsets.symmetric(vertical: 9),
-        decoration: BoxDecoration(
-          color: active ? colors.accentSoft : Colors.transparent,
-          borderRadius: BorderRadius.circular(13),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            Icon(icon, size: 19, color: fg),
-            const SizedBox(height: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                fontWeight: active ? FontWeight.w700 : FontWeight.w500,
-                color: fg,
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    final _StageColors c = widget.colors;
+    final bool active = widget.active;
+
+    // 选中/悬停一律取主题中性色（与主侧栏 SidebarNavItem 同款），
+    // 不再用旅游强调色铺底，跟随深/暖主题切换。
+    final Color fg = active
+        ? c.text
+        : (_hovering ? c.text2 : c.muted);
+    final Color bg = active
+        ? cs.surfaceContainerHighest
+        : (_hovering
+            ? cs.surfaceContainer.withValues(alpha: 0.6)
+            : Colors.transparent);
+    final Color border = cs.outline.withValues(alpha: active ? 0.6 : 0.35);
+
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hovering = true),
+      onExit: (_) => setState(() => _hovering = false),
+      cursor: SystemMouseCursors.click,
+      child: GestureDetector(
+        onTap: widget.onTap,
+        behavior: HitTestBehavior.opaque,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 160),
+          width: 50,
+          padding: const EdgeInsets.symmetric(vertical: 9),
+          decoration: BoxDecoration(
+            color: bg,
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: border),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(widget.icon, size: 19, color: fg),
+              const SizedBox(height: 4),
+              Text(
+                widget.label,
+                style: TextStyle(
+                  fontSize: 10,
+                  fontWeight: active ? FontWeight.w700 : FontWeight.w500,
+                  color: fg,
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -619,7 +703,10 @@ class _TabButton extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// 行程空间：分段式状态切换 + 状态色条卡片
+// 行程空间：两个文字 tab（即将出发 | 往期）
+//
+// 「即将出发」= 在途只读状态条（若有）+ 主票 + 日期行；
+// 「往期」= 原票根册，原样搬过来。进行中不再单独成段，随日期原地升级。
 // ═══════════════════════════════════════════════════════════════════
 
 /// 返回按钮（退出行程页回到上一界面）。
@@ -650,6 +737,7 @@ class _ArchivePane extends StatelessWidget {
     required this.future,
     required this.seg,
     required this.onSegChanged,
+    required this.loadPlan,
     required this.onOpen,
     required this.onShare,
     required this.onDelete,
@@ -659,6 +747,7 @@ class _ArchivePane extends StatelessWidget {
   final Future<List<_PlanSummary>> future;
   final int seg;
   final ValueChanged<int> onSegChanged;
+  final Future<TravelPlanData?> Function(String planId) loadPlan;
   final ValueChanged<_PlanSummary> onOpen;
   final ValueChanged<_PlanSummary> onShare;
   final ValueChanged<_PlanSummary> onDelete;
@@ -677,14 +766,17 @@ class _ArchivePane extends StatelessWidget {
         ) {
           final List<_PlanSummary> plans =
               snapshot.data ?? const <_PlanSummary>[];
-          final int ongoingCount =
-              plans.where((_PlanSummary s) => s.bucket == 0).length;
+          final List<_PlanSummary> live = <_PlanSummary>[
+            for (final _PlanSummary s in plans)
+              if (s.bucket == 0) s,
+          ]..sort((_PlanSummary a, _PlanSummary b) =>
+              _liveSortKey(b).compareTo(_liveSortKey(a)));
           final int upcomingCount =
               plans.where((_PlanSummary s) => s.bucket == 1).length;
           final int pastCount =
               plans.where((_PlanSummary s) => s.bucket == 2).length;
           return Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               Container(
                 height: 46,
@@ -700,28 +792,45 @@ class _ArchivePane extends StatelessWidget {
                             fontSize: 12.5,
                             fontWeight: FontWeight.w700,
                             color: c.text2)),
-                    const Spacer(),
-                    if (_lastTripLabel(plans).isNotEmpty)
-                      Text(
-                        _lastTripLabel(plans),
-                        style: _monoStyle(7.5, c.muted, spacing: 1.5),
-                      ),
                   ],
                 ),
               ),
-              const SizedBox(height: 14),
+              const SizedBox(height: 12),
               Center(
                 child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 720),
-                  child: _RailSegs(
-                    colors: c,
-                    seg: seg,
-                    counts: <int>[ongoingCount, upcomingCount, pastCount],
-                    onChanged: onSegChanged,
+                  constraints: const BoxConstraints(maxWidth: _kArchiveMaxWidth),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    child: _ArchiveTabs(
+                      colors: c,
+                      seg: seg,
+                      counts: <int?>[
+                        snapshot.hasData ? upcomingCount : null,
+                        snapshot.hasData ? pastCount : null,
+                      ],
+                      onChanged: onSegChanged,
+                    ),
                   ),
                 ),
               ),
-              const SizedBox(height: 6),
+              if (seg == 0 && live.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 12),
+                Center(
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxWidth: _kArchiveMaxWidth),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: _LiveStrip(
+                        colors: c,
+                        plans: live,
+                        loadPlan: loadPlan,
+                        onOpen: onOpen,
+                      ),
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(height: 4),
               Expanded(
                 child: snapshot.hasError
                     ? _RailError(colors: c, detail: "${snapshot.error}", onRetry: onRetry)
@@ -738,6 +847,7 @@ class _ArchivePane extends StatelessWidget {
                             colors: c,
                             plans: plans,
                             seg: seg,
+                            hasLive: live.isNotEmpty,
                             onOpen: onOpen,
                             onShare: onShare,
                             onDelete: onDelete,
@@ -751,9 +861,25 @@ class _ArchivePane extends StatelessWidget {
   }
 }
 
-/// 分段式状态切换（进行中 | 即将出发 | 往期）。
-class _RailSegs extends StatelessWidget {
-  const _RailSegs({
+int _liveSortKey(_PlanSummary s) {
+  final DateTime? start = DateTime.tryParse(s.startDate.trim());
+  return start?.millisecondsSinceEpoch ?? s.createdAt;
+}
+
+class _ArchiveTabSpec {
+  const _ArchiveTabSpec(this.label, this.hint);
+  final String label;
+  final String hint;
+}
+
+const List<_ArchiveTabSpec> _kArchiveTabs = <_ArchiveTabSpec>[
+  _ArchiveTabSpec("即将出发", "按出发时间 · 最近在前"),
+  _ArchiveTabSpec("往期", "按结束时间 · 月份归档"),
+];
+
+/// 两段导航：左对齐的文字 tab + 计数 + 2px 下划线。
+class _ArchiveTabs extends StatelessWidget {
+  const _ArchiveTabs({
     required this.colors,
     required this.seg,
     required this.counts,
@@ -762,78 +888,499 @@ class _RailSegs extends StatelessWidget {
 
   final _StageColors colors;
   final int seg;
-  final List<int> counts;
+  final List<int?> counts;
   final ValueChanged<int> onChanged;
-
-  static const List<String> _labels = <String>["进行中", "即将出发", "往期"];
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 14),
-      padding: const EdgeInsets.all(3),
-      decoration: BoxDecoration(
-        color: colors.card2,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colors.borderSoft),
-      ),
-      child: Row(
-        children: <Widget>[
-          for (int i = 0; i < 3; i++)
-            Expanded(
-              child: GestureDetector(
-                onTap: () => onChanged(i),
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 160),
-                  padding: const EdgeInsets.symmetric(vertical: 6),
-                  decoration: BoxDecoration(
-                    color: seg == i ? colors.card : Colors.transparent,
-                    borderRadius: BorderRadius.circular(9),
-                    boxShadow: seg == i
-                        ? <BoxShadow>[BoxShadow(color: colors.shadow, blurRadius: 8, offset: const Offset(0, 2))]
-                        : null,
-                  ),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: <Widget>[
-                      Container(
-                        width: 5,
-                        height: 5,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: i == 0
-                              ? colors.accent
-                              : i == 1
-                                  ? colors.orange
-                                  : colors.muted,
-                        ),
+    return LayoutBuilder(
+      builder: (BuildContext ctx, BoxConstraints cons) {
+        final bool showHint = cons.maxWidth >= 440;
+        return Container(
+          decoration: BoxDecoration(
+            border: Border(bottom: BorderSide(color: colors.borderSoft)),
+          ),
+          child: Row(
+            children: <Widget>[
+              for (int i = 0; i < _kArchiveTabs.length; i++)
+                _tab(context, i),
+              if (showHint)
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerRight,
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 4),
+                      child: Text(
+                        _kArchiveTabs[seg].hint,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: _monoStyle(8, colors.muted, spacing: 1.1),
                       ),
-                      const SizedBox(width: 5),
-                      Text(
-                        _labels[i],
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                          color: seg == i ? colors.text : colors.muted,
-                        ),
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        "${counts[i]}",
-                        style: TextStyle(
-                          fontSize: 9.5,
-                          color: seg == i ? colors.text2 : colors.muted,
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _tab(BuildContext context, int index) {
+    final bool active = seg == index;
+    final int? count = index < counts.length ? counts[index] : null;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => onChanged(index),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 140),
+        margin: const EdgeInsets.only(right: 26),
+        padding: const EdgeInsets.only(top: 8, bottom: 7),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: active ? colors.text : Colors.transparent,
+              width: 2,
+            ),
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: <Widget>[
+            Text(
+              _kArchiveTabs[index].label,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: active ? colors.text : colors.muted,
               ),
             ),
-        ],
+            if (count != null) ...<Widget>[
+              const SizedBox(width: 6),
+              Text(
+                "$count",
+                style: _monoStyle(
+                  8,
+                  active ? colors.text2 : colors.muted,
+                  spacing: .8,
+                ),
+              ),
+            ],
+          ],
+        ),
       ),
     );
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// 在途只读条：桌面只看，不做（打卡 / 改时间 / 加站在手机端）
+// ═══════════════════════════════════════════════════════════════════
+
+class _LiveToday {
+  const _LiveToday({
+    this.total = 0,
+    this.done = 0,
+    this.next,
+    this.hasPlan = false,
+  });
+
+  /// 当天站点总数（0 = 还没拿到完整行程）。
+  final int total;
+
+  /// 已走站数（0 基当前站之前的站）。
+  final int done;
+  final TravelDayEntry? next;
+
+  /// 完整行程是否已加载成功。
+  final bool hasPlan;
+
+}
+
+class _LiveStrip extends StatefulWidget {
+  const _LiveStrip({
+    required this.colors,
+    required this.plans,
+    required this.loadPlan,
+    required this.onOpen,
+  });
+
+  final _StageColors colors;
+  final List<_PlanSummary> plans;
+  final Future<TravelPlanData?> Function(String planId) loadPlan;
+  final ValueChanged<_PlanSummary> onOpen;
+
+  @override
+  State<_LiveStrip> createState() => _LiveStripState();
+}
+
+class _LiveStripState extends State<_LiveStrip> {
+  int _index = 0;
+  TravelPlanData? _plan;
+  String _loadedId = "";
+  bool _loading = true;
+
+  _PlanSummary get _summary => widget.plans[_index];
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  @override
+  void didUpdateWidget(covariant _LiveStrip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.plans.isEmpty) return;
+    final bool changed = oldWidget.plans.isEmpty ||
+        oldWidget.plans.length != widget.plans.length ||
+        oldWidget.plans.first.planId != widget.plans.first.planId;
+    if (changed || _index >= widget.plans.length) {
+      _index = 0;
+      _plan = null;
+      _loadedId = "";
+      _loading = true;
+      _load();
+    }
+  }
+
+  Future<void> _load() async {
+    if (widget.plans.isEmpty) return;
+    final String id = _summary.planId;
+    if (id.isEmpty || id == _loadedId) return;
+    final TravelPlanData? plan = await widget.loadPlan(id);
+    if (!mounted || widget.plans.isEmpty || id != _summary.planId) return;
+    setState(() {
+      _loadedId = id;
+      _plan = plan;
+      _loading = false;
+    });
+  }
+
+  void _cycleLive() {
+    if (widget.plans.length <= 1) return;
+    setState(() {
+      _index = (_index + 1) % widget.plans.length;
+      _plan = null;
+      _loadedId = "";
+      _loading = true;
+    });
+    _load();
+  }
+
+  _LiveToday _resolveToday() {
+    final _PlanSummary s = _summary;
+    final TravelPlanData? plan = _plan;
+    if (plan == null) return const _LiveToday();
+    TravelPlanDay? day;
+    final String today = _todayIso();
+    for (final TravelPlanDay d in plan.days) {
+      if (d.date == today) {
+        day = d;
+        break;
+      }
+    }
+    int dayIndex = s.liveDayIndex();
+    if (day == null && dayIndex < plan.days.length) {
+      day = plan.days[dayIndex];
+    }
+    if (day == null) return const _LiveToday(hasPlan: true);
+    dayIndex = plan.days.indexOf(day);
+    final int total = day.entries.length;
+    final ({int day, int stop})? p = s.progress;
+    int done = 0;
+    if (p != null && p.day == dayIndex) {
+      final int stop = p.stop;
+      done = stop < 0 ? 0 : (stop > total ? total : stop);
+    }
+    return _LiveToday(
+      total: total,
+      done: done,
+      next: done < total ? day.entries[done] : null,
+      hasPlan: true,
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final _PlanSummary s = _summary;
+    final bool hasMore = widget.plans.length > 1;
+    final _LiveToday today = _resolveToday();
+    return LayoutBuilder(
+      builder: (BuildContext ctx, BoxConstraints cons) {
+        final bool compact = cons.maxWidth < 720;
+        final Widget head = _head(c, s, hasMore);
+        final Widget stats = Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(child: _todayCell(c, today)),
+            const SizedBox(width: 18),
+            Expanded(flex: 2, child: _nextCell(c, s, today)),
+          ],
+        );
+        final Widget body = compact
+            ? Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[head, const SizedBox(height: 12), stats],
+              )
+            : Row(
+                children: <Widget>[
+                  Expanded(flex: 5, child: head),
+                  const SizedBox(width: 20),
+                  SizedBox(width: 84, child: _todayCell(c, today)),
+                  const SizedBox(width: 20),
+                  SizedBox(width: 176, child: _nextCell(c, s, today)),
+                  const SizedBox(width: 20),
+                  _ticks(c, s),
+                ],
+              );
+        return Tooltip(
+          message: "查看这段行程",
+          waitDuration: const Duration(milliseconds: 500),
+          child: MouseRegion(
+            cursor: SystemMouseCursors.click,
+            child: GestureDetector(
+              onTap: () => widget.onOpen(s),
+              child: Container(
+                constraints: const BoxConstraints(minHeight: 84),
+                padding: EdgeInsets.fromLTRB(18, compact ? 14 : 16, 18, compact ? 14 : 16),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: c.accent.withValues(alpha: .20)),
+                  gradient: LinearGradient(
+                    begin: Alignment.centerLeft,
+                    end: Alignment.centerRight,
+                    colors: <Color>[
+                      Color.alphaBlend(c.accent.withValues(alpha: .06), c.card2),
+                      c.card,
+                    ],
+                  ),
+                ),
+                child: body,
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _head(_StageColors c, _PlanSummary s, bool hasMore) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: c.accent,
+            boxShadow: <BoxShadow>[
+              BoxShadow(color: c.accent.withValues(alpha: .45), blurRadius: 8),
+            ],
+          ),
+        ),
+        const SizedBox(width: 10),
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Text("LIVE · 在路上",
+                  style: _monoStyle(8, c.muted, spacing: 1.6)),
+              const SizedBox(height: 4),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.baseline,
+                textBaseline: TextBaseline.alphabetic,
+                children: <Widget>[
+                  Flexible(
+                    child: Text(
+                      s.listTitle,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w700,
+                        color: c.text,
+                      ),
+                    ),
+                  ),
+                  if (s.dayCount > 0) ...<Widget>[
+                    const SizedBox(width: 8),
+                    Text(
+                      "DAY ${s.liveDayIndex() + 1} / ${s.dayCount}",
+                      style: _monoStyle(9, c.accent, spacing: .8),
+                    ),
+                  ],
+                  if (hasMore) ...<Widget>[
+                    const SizedBox(width: 8),
+                    GestureDetector(
+                      onTap: _cycleLive,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(color: c.borderSoft),
+                          color: c.card2,
+                        ),
+                        child: Text(
+                          "+${widget.plans.length - 1} 段",
+                          style: _monoStyle(8, c.muted, spacing: .4),
+                        ),
+                      ),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _todayCell(_StageColors c, _LiveToday today) {
+    final String? subtitle;
+    if (!today.hasPlan) {
+      subtitle = null;
+    } else if (today.total <= 0) {
+      subtitle = "今日无站";
+    } else if (today.done > 0) {
+      subtitle = "已走 ${today.done}";
+    } else {
+      subtitle = null;
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Text("今日", style: _monoStyle(8, c.muted, spacing: 1.2)),
+        const SizedBox(height: 5),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: <Widget>[
+            Text(
+              today.hasPlan ? "${today.total} 站" : "— 站",
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: today.hasPlan ? c.text : c.muted,
+              ),
+            ),
+            if (subtitle != null) ...<Widget>[
+              const SizedBox(width: 6),
+              Flexible(
+                child: Text(
+                  "· $subtitle",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 10, color: c.muted),
+                ),
+              ),
+            ],
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _nextCell(_StageColors c, _PlanSummary s, _LiveToday today) {
+    final Widget value;
+    if (!today.hasPlan) {
+      final ({int day, int stop})? p = s.progress;
+      value = Text(
+        _loading ? "读取中…" : (p != null ? "第 ${p.stop + 1} 站" : "在${s.destination}"),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(fontSize: 11, color: c.muted),
+      );
+    } else if (today.next == null) {
+      value = Text(
+        today.total > 0 ? "今日已走完" : "今天没有排站",
+        style: TextStyle(fontSize: 11, color: c.text2),
+      );
+    } else {
+      final TravelDayEntry next = today.next!;
+      value = Row(
+        children: <Widget>[
+          Text(
+            _hhmm(next.time),
+            style: _monoStyle(10, c.accent, spacing: .4, weight: FontWeight.w600),
+          ),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              next.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11.5, color: c.text2),
+            ),
+          ),
+        ],
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Text("下一站", style: _monoStyle(8, c.muted, spacing: 1.2)),
+        const SizedBox(height: 5),
+        value,
+      ],
+    );
+  }
+
+  Widget _ticks(_StageColors c, _PlanSummary s) {
+    final int total = s.dayCount;
+    if (total <= 0) return const SizedBox.shrink();
+    if (total > 10) {
+      return SizedBox(
+        width: 96,
+        child: ClipRRect(
+          borderRadius: BorderRadius.circular(2),
+          child: LinearProgressIndicator(
+            value: (s.liveDayIndex() + 1) / total,
+            minHeight: 3,
+            backgroundColor: c.borderSoft,
+            valueColor: AlwaysStoppedAnimation<Color>(c.accent),
+          ),
+        ),
+      );
+    }
+    final int current = s.liveDayIndex();
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        for (int i = 0; i < total; i++)
+          AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: i == current ? 16 : 10,
+            height: 3,
+            margin: EdgeInsets.only(right: i == total - 1 ? 0 : 3),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(2),
+              color: i <= current ? c.accent : c.borderSoft,
+            ),
+          ),
+      ],
+    );
+  }
+
+}
+
+String _todayIso() {
+  final DateTime now = DateTime.now();
+  String two(int v) => v.toString().padLeft(2, "0");
+  return "${now.year}-${two(now.month)}-${two(now.day)}";
+}
+
+String _hhmm(String raw) {
+  final RegExpMatch? m = RegExp(r"(\d{1,2}:\d{2})").firstMatch(raw);
+  return m?.group(1) ?? raw.trim();
 }
 
 /// 卡片右上角更多菜单（分享码 / 删除）。
@@ -1096,17 +1643,35 @@ class _ChoiceCardData {
   final Map<String, _ChoiceInferData> infer;
 }
 
-/// 筛选卡条目（必玩/住宿/美食候选）：文字介绍 + 实拍图 + 实时价。
+/// 卡面指标胶囊：label 是服务端算好的成品文案，source 是这条数的出处。
+/// 客户端原样渲染，不做任何换算或补数。
+class _GuideMetricData {
+  _GuideMetricData({
+    required this.kind,
+    required this.label,
+    required this.source,
+  });
+
+  factory _GuideMetricData.fromJson(Map<String, dynamic> json) {
+    return _GuideMetricData(
+      kind: json["kind"]?.toString() ?? "",
+      label: json["label"]?.toString() ?? "",
+      source: json["source"]?.toString() ?? "",
+    );
+  }
+
+  final String kind;
+  final String label;
+  final String source;
+}
+
+/// 筛选卡条目：名称挂真实指标 + 文字介绍 + 实拍图。没取到的指标服务端就不下发。
 class _GuideItemData {
   _GuideItemData({
     required this.name,
-    required this.rec,
-    required this.rating,
     required this.intro,
     required this.photos,
-    required this.price,
-    required this.priceNote,
-    required this.pricePending,
+    required this.metrics,
     required this.address,
     required this.picked,
   });
@@ -1114,37 +1679,55 @@ class _GuideItemData {
   factory _GuideItemData.fromJson(Map<String, dynamic> json) {
     return _GuideItemData(
       name: json["name"]?.toString() ?? "",
-      rec: (json["rec"] as num?)?.toInt() ?? 0,
-      rating: (json["rating"] as num?)?.toDouble() ?? 0,
       intro: json["intro"]?.toString() ?? "",
       photos: <String>[
         for (final dynamic p in (json["photos"] as List<dynamic>? ?? const <dynamic>[]))
           if (p != null && p.toString().isNotEmpty) p.toString(),
       ],
-      price: (json["price"] as num?)?.toDouble(),
-      priceNote: json["priceNote"]?.toString() ?? "",
-      pricePending: json["pricePending"] == true,
+      metrics: <_GuideMetricData>[
+        for (final dynamic m in (json["metrics"] as List<dynamic>? ?? const <dynamic>[]))
+          if (m is Map<String, dynamic>) _GuideMetricData.fromJson(m),
+      ],
       address: json["address"]?.toString() ?? "",
       picked: json["picked"] == true,
     );
   }
 
   final String name;
-  final int rec;
-  final double rating;
   final String intro;
   final List<String> photos;
-  final double? price;
-  final String priceNote;
-  final bool pricePending;
+  final List<_GuideMetricData> metrics;
   final String address;
 
-  /// 勾选状态（服务端默认预选必玩 Top3）。
+  /// 勾选状态（服务端恒 false，选谁全部由用户在这里定）。
   bool picked;
 }
 
+/// 住宿段的落位参照点（离哪儿近）。
+class _GuideAnchorData {
+  _GuideAnchorData({required this.id, required this.label, required this.why});
+
+  factory _GuideAnchorData.fromJson(Map<String, dynamic> json) {
+    return _GuideAnchorData(
+      id: json["id"]?.toString() ?? "anchor",
+      label: json["label"]?.toString() ?? "",
+      why: json["why"]?.toString() ?? "",
+    );
+  }
+
+  final String id;
+  final String label;
+  final String why;
+}
+
 class _GuideCatData {
-  _GuideCatData({required this.key, required this.label, required this.items});
+  _GuideCatData({
+    required this.key,
+    required this.label,
+    required this.items,
+    required this.sortNote,
+    this.anchor,
+  });
 
   factory _GuideCatData.fromJson(Map<String, dynamic> json) {
     return _GuideCatData(
@@ -1154,12 +1737,20 @@ class _GuideCatData {
         for (final dynamic i in (json["items"] as List<dynamic>? ?? const <dynamic>[]))
           if (i is Map<String, dynamic>) _GuideItemData.fromJson(i),
       ],
+      sortNote: json["sortNote"]?.toString() ?? "",
+      anchor: json["anchor"] is Map<String, dynamic>
+          ? _GuideAnchorData.fromJson(json["anchor"] as Map<String, dynamic>)
+          : null,
     );
   }
 
   final String key;
   final String label;
   final List<_GuideItemData> items;
+
+  /// 这一段「是按什么排出来的」，由实际参与排序的信号拼出。
+  final String sortNote;
+  final _GuideAnchorData? anchor;
 }
 
 /// 信息齐后、「出方案」前的筛选卡（必玩景点/住宿推荐/美食推荐）。
@@ -1505,6 +2096,87 @@ class _BudgetData {
   bool approved = false;
 }
 
+/// 档案栏「已定条」：服务端从会话状态确定性投影出来的一条结论。
+class _DossierFactData {
+  const _DossierFactData({
+    required this.id,
+    required this.label,
+    required this.value,
+    required this.set,
+  });
+
+  factory _DossierFactData.fromJson(Map<String, dynamic> json) {
+    final String value = json["value"]?.toString() ?? "";
+    return _DossierFactData(
+      id: json["id"]?.toString() ?? "",
+      label: json["label"]?.toString() ?? "",
+      value: value,
+      set: json["state"]?.toString() != "todo" && value.isNotEmpty,
+    );
+  }
+
+  final String id;
+  final String label;
+  final String value;
+  final bool set;
+}
+
+/// 档案栏五步进度轨（问答 / 挑想去 / 补心愿 / 核预算 / 出方案）。
+class _DossierStepData {
+  const _DossierStepData({
+    required this.label,
+    required this.state,
+  });
+
+  factory _DossierStepData.fromJson(Map<String, dynamic> json) => _DossierStepData(
+        label: json["label"]?.toString() ?? "",
+        state: json["state"]?.toString() ?? "todo",
+      );
+
+  final String label;
+
+  /// done / active / todo
+  final String state;
+
+  bool get isDone => state == "done";
+  bool get isActive => state == "active";
+}
+
+/// 右侧行程档案栏快照（每轮回执整份替换，客户端不缓存局部状态）。
+class _DossierData {
+  _DossierData({
+    required this.head,
+    required this.steps,
+    required this.facts,
+  });
+
+  factory _DossierData.fromJson(Map<String, dynamic> json) {
+    return _DossierData(
+      head: json["head"]?.toString() ?? "",
+      steps: <_DossierStepData>[
+        for (final dynamic s in (json["steps"] as List<dynamic>? ?? const <dynamic>[]))
+          if (s is Map<String, dynamic>) _DossierStepData.fromJson(s),
+      ],
+      facts: <_DossierFactData>[
+        for (final dynamic f in (json["facts"] as List<dynamic>? ?? const <dynamic>[]))
+          if (f is Map<String, dynamic>) _DossierFactData.fromJson(f),
+      ],
+    );
+  }
+
+  final String head;
+  final List<_DossierStepData> steps;
+  final List<_DossierFactData> facts;
+
+  /// 当前所处步骤名（档案头下面那句「第 N 步 · 挑想去」）。
+  String get activeLabel => steps.firstWhere(
+        (_DossierStepData s) => s.isActive,
+        orElse: () => steps.isNotEmpty ? steps.first : const _DossierStepData(label: "", state: "todo"),
+      ).label;
+
+  int get doneCount => steps.where((_DossierStepData s) => s.isDone).length;
+}
+
 /// 对话流条目。
 enum _FlowKind {
   user,
@@ -1566,6 +2238,7 @@ class _TurnResult {
     required this.cards,
     required this.budget,
     required this.draft,
+    this.dossier,
   });
 
   factory _TurnResult.fromJson(Map<String, dynamic> json) {
@@ -1590,6 +2263,9 @@ class _TurnResult {
       draft: json["draft"] is Map<String, dynamic>
           ? _DraftData.fromJson(json["draft"] as Map<String, dynamic>)
           : null,
+      dossier: json["dossier"] is Map<String, dynamic>
+          ? _DossierData.fromJson(json["dossier"] as Map<String, dynamic>)
+          : null,
     );
   }
 
@@ -1598,6 +2274,9 @@ class _TurnResult {
   final List<Object> cards;
   final _BudgetData? budget;
   final _DraftData? draft;
+
+  /// 右侧档案栏快照（旧服务端不下发时为 null，档案栏整栏隐藏）。
+  final _DossierData? dossier;
 }
 
 /// 规划主区（宽窗右栏 / 窄窗默认页）。
@@ -1640,8 +2319,17 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   final List<_FlowItem> _flow = <_FlowItem>[];
 
+  /// 右侧档案栏快照（服务端每轮回执整份替换；null=旧服务端，不显示档案栏）。
+  _DossierData? _dossier;
+
+  /// 从档案栏点「改」带过来的输入提示（null=常规提示语）。
+  String? _adjustHintText;
+
   /// 出票时刻（预算确认 → 播打印出票动画；null=未播放）。
   _TicketPrintMoment? _ticketMoment;
+
+  /// 挑一挑的双面板看图（点实拍图打开；null=未打开）。
+  _GuidePreviewData? _guidePreview;
 
   @override
   void initState() {
@@ -1671,6 +2359,28 @@ class _PlanningStageState extends State<_PlanningStage> {
     _scrollToBottom();
   }
 
+  /// 档案栏整份替换：结论口径只在服务端，客户端不存增量。
+  void _setDossier(_DossierData? data) {
+    if (!mounted) return;
+    setState(() => _dossier = data);
+  }
+
+  /// 档案栏的「钱的水位」：直接读流里最新那张预算卡，与卡面永远一致。
+  _BudgetData? get _latestBudget {
+    for (final _FlowItem f in _flow.reversed) {
+      if (f.kind == _FlowKind.budget) return f.budget;
+    }
+    return null;
+  }
+
+  /// 档案栏的「核实风险」：读最新草案的核实闸结果。
+  _DraftData? get _latestDraft {
+    for (final _FlowItem f in _flow.reversed) {
+      if (f.kind == _FlowKind.draft) return f.draft;
+    }
+    return null;
+  }
+
   /// 移除 typing 占位（有则移除）。
   void _removeTyping() {
     final int i = _flow.lastIndexWhere((_FlowItem f) => f.kind == _FlowKind.typing);
@@ -1691,6 +2401,7 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   void _insertSayAndCards(_TurnResult r) {
     _removeTyping();
+    if (r.dossier != null) _setDossier(r.dossier);
     if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
     for (final Object card in r.cards) {
       if (card is _WeatherCardData) {
@@ -1712,6 +2423,8 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   /// 用户重新补充信息：未答的问题卡与上一版预算/最终方案都不再代表当前需求，先移出流。
   void _dropStaleOutput() {
+    // 档案栏里「改」的输入提示属于一次性引导，任何一次作答/发话后都收回。
+    _adjustHintText = null;
     _flow.removeWhere(
       (_FlowItem f) =>
           f.kind == _FlowKind.choice ||
@@ -1771,6 +2484,7 @@ class _PlanningStageState extends State<_PlanningStage> {
       _busy = true;
       _flowStarted = true;
       _sessionId = null;
+      _dossier = null;
     });
     _append(_FlowItem.typing());
     bool ready = false;
@@ -1960,6 +2674,7 @@ class _PlanningStageState extends State<_PlanningStage> {
       final Map<String, dynamic>? decoded =
           await _post("/travel/plan-session/$id/generate", <String, dynamic>{}, _generateTimeout);
       final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
+      if (r.dossier != null) _setDossier(r.dossier);
       _removeTyping();
       if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
       // flow A：生成完先只给预算明细，用户确认后才出最终方案。
@@ -2029,32 +2744,133 @@ class _PlanningStageState extends State<_PlanningStage> {
     await widget.onOpenPlan(draft.planId);
   }
 
+  /// 档案栏「改」：改口径走自由消息（服务端 answerUpdates 覆盖旧答案），
+  /// 这里只负责聚焦输入框并给一句「该说什么」的提示。
+  void _beginAdjust(_DossierFactData fact) {
+    if (_busy) return;
+    setState(() => _adjustHintText =
+        '想改「${fact.label} · ${fact.value}」？直接说，例如：${_adjustExample(fact.id)}');
+    _inputFocus.requestFocus();
+  }
+
+  static String _adjustExample(String id) => switch (id) {
+        "destination" => "改成去重庆",
+        "days" => "改成玩 4 天",
+        "origin" => "从上海出发",
+        "party" => "改成和朋友",
+        "budget" => "住宿标准再省一点",
+        "transport" => "去程改坐高铁",
+        "picks" => "把都江堰换成乐山大佛",
+        "stay" => "住宿换春熙路附近",
+        "food" => "加一家陈麻婆豆腐",
+        _ => "第二天想去都江堰",
+      };
+
   // ── UI ────────────────────────────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final _StageColors c = _StageColors.of(context);
+    final _DossierData? dossier = _flowStarted ? _dossier : null;
     return Stack(
       children: <Widget>[
-        Column(
-          children: <Widget>[
-        // 顶栏（返回 + 标题；无主题切换按钮：颜色跟随应用主题）
-        Container(
-          height: 46,
-          padding: const EdgeInsets.symmetric(horizontal: 14),
-          decoration: BoxDecoration(
-            border: Border(bottom: BorderSide(color: c.borderSoft)),
-          ),
-          child: Row(
-            children: <Widget>[
-              _BackButton(colors: c),
-              const SizedBox(width: 10),
-              Text("行程规划",
-                  style: TextStyle(
-                      fontSize: 12.5, fontWeight: FontWeight.w700, color: c.text2)),
-            ],
-          ),
+        LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints cons) {
+            // 第三栏放不下时（窄窗），档案降级成顶部一条横向「已定」胶囊。
+            final bool sideDossier =
+                dossier != null && cons.maxWidth >= _kDossierBreakpoint;
+            return Column(
+              children: <Widget>[
+                _buildTopBar(c),
+                if (dossier != null && !sideDossier)
+                  KeyedSubtree(
+                    key: const Key("planning-dossier-strip"),
+                    child: _DossierStrip(
+                        dossier: dossier, colors: c, onEdit: _beginAdjust),
+                  ),
+                Expanded(
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      Expanded(child: _buildFlowColumn(c)),
+                      if (sideDossier)
+                        Container(
+                          key: const Key("planning-dossier"),
+                          width: _kDossierWidth,
+                          decoration: BoxDecoration(
+                            color: c.card,
+                            border: Border(left: BorderSide(color: c.borderSoft)),
+                          ),
+                          child: _TripDossier(
+                            dossier: dossier,
+                            colors: c,
+                            budget: _latestBudget,
+                            draft: _latestDraft,
+                            enabled: !_busy,
+                            onEdit: _beginAdjust,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         ),
+        // 出票时刻覆盖层（预算确认后）
+        if (_ticketMoment != null)
+          Positioned.fill(
+            child: _TicketPrintOverlay(
+              moment: _ticketMoment!,
+              colors: c,
+              onClose: () => setState(() => _ticketMoment = null),
+              onOpenPlan: () {
+                final _DraftData d = _ticketMoment!.draft;
+                setState(() => _ticketMoment = null);
+                unawaited(_openDraft(d));
+              },
+            ),
+          ),
+        // 挑一挑的双面板看图（点实拍图）
+        if (_guidePreview != null)
+          Positioned.fill(
+            child: _GuideViewerOverlay(
+              preview: _guidePreview!,
+              colors: c,
+              onClose: () => setState(() => _guidePreview = null),
+              onToggle: () => setState(
+                  () => _guidePreview!.item.picked = !_guidePreview!.item.picked),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildTopBar(_StageColors c) {
+    return Container(
+      height: 46,
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      decoration: BoxDecoration(
+        border: Border(bottom: BorderSide(color: c.borderSoft)),
+      ),
+      child: Row(
+        children: <Widget>[
+          _BackButton(colors: c),
+          const SizedBox(width: 10),
+          Text("行程规划",
+              style: TextStyle(
+                  fontSize: 12.5, fontWeight: FontWeight.w700, color: c.text2)),
+        ],
+      ),
+    );
+  }
+
+  /// 中栏：对话流 + 输入框（idle 时输入框垂直居中）。
+  /// Key 供实机取证定位「流内动作」与「档案栏动作」，避免两处同名文字互相误点。
+  Widget _buildFlowColumn(_StageColors c) {
+    return Column(
+      key: const Key("planning-flow"),
+      children: <Widget>[
         // 对话流（idle 时隐藏）：flow 独占剩余空间；内容居中，与主对话同宽
         if (_flowStarted)
           Expanded(
@@ -2076,22 +2892,6 @@ class _PlanningStageState extends State<_PlanningStage> {
           _buildComposer(c)
         else
           Expanded(child: Center(child: _buildComposer(c))),
-          ],
-        ),
-        // 出票时刻覆盖层（预算确认后）
-        if (_ticketMoment != null)
-          Positioned.fill(
-            child: _TicketPrintOverlay(
-              moment: _ticketMoment!,
-              colors: c,
-              onClose: () => setState(() => _ticketMoment = null),
-              onOpenPlan: () {
-                final _DraftData d = _ticketMoment!.draft;
-                setState(() => _ticketMoment = null);
-                unawaited(_openDraft(d));
-              },
-            ),
-          ),
       ],
     );
   }
@@ -2127,9 +2927,10 @@ class _PlanningStageState extends State<_PlanningStage> {
               focusNode: _inputFocus,
               colors: c,
               enabled: !_busy,
-              placeholder: _flowStarted
-                  ? "随时补充或调整，比如：第二天想去都江堰"
-                  : "想去哪儿玩？比如：成都吃三天",
+              placeholder: _adjustHintText ??
+                  (_flowStarted
+                      ? "随时补充或调整，比如：第二天想去都江堰"
+                      : "想去哪儿玩？比如：成都吃三天"),
               onSend: _send,
             ),
             if (!_flowStarted) const SizedBox(height: 48),
@@ -2141,6 +2942,17 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   /// 你的 Agent 名字；未设定时为空（说话块不显示名字）。
   String get _agentLabel => (widget.agentName ?? "").trim();
+
+  /// 分段筛选卡的说明文案：单段卡按段写，兼容多段合卡的旧口径。
+  String _guideStageDesc(_GuideCardData card) {
+    final String key = card.cats.length == 1 ? card.cats.first.key : "";
+    return switch (key) {
+      "view" => "勾掉不想要的景点；想去的没在列表里，后面可以自己补。",
+      "stay" => "勾掉不想住的；没合适的后面可以自己补。",
+      "food" => "勾掉不想吃的；想吃的馆子没在列表里，后面可以自己补。",
+      _ => "勾掉不想要的；想去的没在列表里，下一步可以自己补。",
+    };
+  }
 
   /// 临时调试：点罗盘直接预览出票动画（验证后移除）。
   void _previewTicketMoment() {
@@ -2200,12 +3012,22 @@ class _PlanningStageState extends State<_PlanningStage> {
         return _AgentBlock(
           name: _agentLabel,
           colors: c,
-          child: Text(
-            item.text,
-            style: TextStyle(
-              fontSize: 13.5,
-              height: 1.65,
-              color: isError ? c.orange : c.text2,
+          child: Container(
+            width: double.infinity,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+            decoration: BoxDecoration(
+              color: c.card,
+              border: Border.all(
+                  color: isError ? c.orange.withValues(alpha: 0.45) : c.borderSoft),
+              borderRadius: BorderRadius.circular(15),
+            ),
+            child: Text(
+              item.text,
+              style: TextStyle(
+                fontSize: 13.5,
+                height: 1.65,
+                color: isError ? c.orange : c.text,
+              ),
             ),
           ),
         );
@@ -2213,132 +3035,149 @@ class _PlanningStageState extends State<_PlanningStage> {
         return _AgentBlock(name: _agentLabel, colors: c, child: _TypingDots(colors: c));
       case _FlowKind.weather:
         final _WeatherCardData card = item.weather!;
-        return _StageCardShell(
+        return _AgentBlock(
+          name: _agentLabel,
           colors: c,
-          icon: Icons.wb_sunny_outlined,
-          stage: card.title.isEmpty ? "目的地天气" : card.title,
-          trailing: card.sub.isEmpty
-              ? null
-              : Text(card.sub, style: TextStyle(fontSize: 10.5, color: c.muted)),
-          child: _WeatherPanel(card: card, colors: c),
+          child: _StageCardShell(
+            colors: c,
+            icon: Icons.wb_sunny_outlined,
+            stage: card.title.isEmpty ? "目的地天气" : card.title,
+            trailing: card.sub.isEmpty
+                ? null
+                : Text(card.sub, style: TextStyle(fontSize: 10.5, color: c.muted)),
+            child: _WeatherPanel(card: card, colors: c),
+          ),
         );
       case _FlowKind.choice:
         final _ChoiceCardData card = item.choice!;
         final _CardProgress? progress = card.progress;
-        return _StageCardShell(
+        return _AgentBlock(
+          name: _agentLabel,
           colors: c,
-          icon: _stageIcon(card.id),
-          stage: card.stage.isNotEmpty ? card.stage : "行程偏好",
-          trailing: progress != null && progress.total > 0
-              ? _StageTrailing(
-                  text: "已确认 ${progress.done}/${progress.total}",
-                  colors: c,
-                )
-              : null,
-          lead: card.title.isEmpty ? null : card.title,
-          desc: card.infer.isNotEmpty
-              ? "选了同行人，节奏我替你定；不合适点「改」。"
-              : card.multi
-                  ? "可以多选，选完按「就这些」。"
-                  : card.allowNote
-                      ? "点一个就好，也可以直接写。"
-                      : null,
-          child: _ChoiceCard(
-            card: card,
+          child: _StageCardShell(
             colors: c,
-            enabled: !_busy,
-            onConfirm: (List<String> values, String? note) =>
-                _sendChoice(item, card, values, note),
+            icon: _stageIcon(card.id),
+            stage: card.stage.isNotEmpty ? card.stage : "行程偏好",
+            trailing: progress != null && progress.total > 0
+                ? _StageTrailing(
+                    text: "已确认 ${progress.done}/${progress.total}",
+                    colors: c,
+                  )
+                : null,
+            lead: card.title.isEmpty ? null : card.title,
+            desc: card.infer.isNotEmpty
+                ? "选了同行人，节奏我替你定；不合适点「改」。"
+                : card.multi
+                    ? "可以多选，选完按「就这些」。"
+                    : card.allowNote
+                        ? "点一个就好，也可以直接写。"
+                        : null,
+            child: _ChoiceCard(
+              card: card,
+              colors: c,
+              enabled: !_busy,
+              onConfirm: (List<String> values, String? note) =>
+                  _sendChoice(item, card, values, note),
+            ),
           ),
         );
       case _FlowKind.guide:
         final _GuideCardData card = item.guide!;
-        return _StageCardShell(
+        return _AgentBlock(
+          name: _agentLabel,
           colors: c,
-          icon: Icons.explore_outlined,
-          stage: card.stage.isEmpty ? "挑一挑" : card.stage,
-          trailing: _StageTrailing(text: "图文 · 实时价", colors: c),
-          lead: card.title.isEmpty ? "这三天想给${card.destination}留哪些地方？" : card.title,
-          desc: "勾掉不想要的；想去的没在列表里，下一步可以自己补。",
-          child: _GuideSelectCard(
-            card: card,
+          child: _StageCardShell(
             colors: c,
-            enabled: !_busy,
-            onConfirm: () => _submitGuide(item, card),
-            onDelegate: () => _submitGuide(item, card, delegate: true),
+            icon: Icons.explore_outlined,
+            stage: card.stage.isEmpty ? "挑一挑" : card.stage,
+            lead: card.title.isEmpty ? "这三天想给${card.destination}留哪些地方？" : card.title,
+            desc: _guideStageDesc(card),
+            child: _GuideSelectCard(
+              card: card,
+              colors: c,
+              enabled: !_busy,
+              onConfirm: () => _submitGuide(item, card),
+              onDelegate: () => _submitGuide(item, card, delegate: true),
+              onPreview: (_GuideItemData entry, String catLabel, int index) =>
+                  setState(() => _guidePreview = _GuidePreviewData(
+                      catLabel: catLabel, item: entry, index: index)),
+            ),
           ),
         );
       case _FlowKind.wishlist:
         final _WishlistCardData card = item.wishlist!;
-        return _StageCardShell(
+        return _AgentBlock(
+          name: _agentLabel,
           colors: c,
-          icon: Icons.playlist_add_outlined,
-          stage: card.stage.isEmpty ? "再补一句" : card.stage,
-          trailing: _StageTrailing(text: "可跳过", colors: c),
-          lead: card.title,
-          desc: card.sub.isEmpty ? "写名字就行，几个用顿号隔开；没有就跳过。" : card.sub,
-          child: _WishlistAddCard(
-            card: card,
+          child: _StageCardShell(
             colors: c,
-            enabled: !_busy,
-            onSubmit: (Map<String, List<String>> extras, String note) =>
-                _submitExtras(item, extras, note),
+            icon: Icons.playlist_add_outlined,
+            stage: card.stage.isEmpty ? "再补一句" : card.stage,
+            trailing: _StageTrailing(text: "可跳过", colors: c),
+            lead: card.title,
+            desc: card.sub.isEmpty ? "写名字就行，几个用顿号隔开；没有就跳过。" : card.sub,
+            child: _WishlistAddCard(
+              card: card,
+              colors: c,
+              enabled: !_busy,
+              onSubmit: (Map<String, List<String>> extras, String note) =>
+                  _submitExtras(item, extras, note),
+            ),
           ),
         );
       case _FlowKind.budget:
-        return _StageCardShell(
+        return _AgentBlock(
+          name: _agentLabel,
           colors: c,
-          icon: Icons.receipt_long_outlined,
-          stage: "预算确认",
-          trailing: _StageTrailing(
-            text: switch (item.budget!.pricingMode) {
-              "real-api" => "实时报价",
-              "real-database" => "市场数据库",
-              _ => "参考价",
-            },
+          child: _StageCardShell(
             colors: c,
-            tone: _StageTone.green,
-          ),
-          lead: "确认这版预算，我就按它出方案",
-          child: _BudgetCard(
-            budget: item.budget!,
-            colors: c,
-            enabled: !_busy,
-            onApprove: _approve,
-            onAdjust: () {
-              _inputFocus.requestFocus();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                      _adjustHint("住宿换民宿、预算再省一点"),
-                      style: const TextStyle(fontSize: 12)),
-                  behavior: SnackBarBehavior.floating,
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            },
+            icon: Icons.receipt_long_outlined,
+            stage: "预算确认",
+            lead: "确认这版预算，我就按它出方案",
+            child: _BudgetCard(
+              budget: item.budget!,
+              colors: c,
+              enabled: !_busy,
+              onApprove: _approve,
+              onAdjust: () {
+                _inputFocus.requestFocus();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        _adjustHint("住宿换民宿、预算再省一点"),
+                        style: const TextStyle(fontSize: 12)),
+                    behavior: SnackBarBehavior.floating,
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
+            ),
           ),
         );
       case _FlowKind.draft:
-        return Align(
-          alignment: Alignment.centerLeft,
-          child: _DraftCard(
-            draft: item.draft!,
-            colors: c,
-            enabled: !_busy,
-            onGenerate: () => _openDraft(item.draft!),
-            onAdjust: () {
-              _inputFocus.requestFocus();
-              ScaffoldMessenger.of(context).showSnackBar(
-                SnackBar(
-                  content: Text(
-                      _adjustHint("第二天想去都江堰"),
-                      style: const TextStyle(fontSize: 12)),
-                  behavior: SnackBarBehavior.floating,
-                  duration: const Duration(seconds: 2),
-                ),
-              );
-            },
+        return _AgentBlock(
+          name: _agentLabel,
+          colors: c,
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: _DraftCard(
+              draft: item.draft!,
+              colors: c,
+              enabled: !_busy,
+              onGenerate: () => _openDraft(item.draft!),
+              onAdjust: () {
+                _inputFocus.requestFocus();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text(
+                        _adjustHint("第二天想去都江堰"),
+                        style: const TextStyle(fontSize: 12)),
+                    behavior: SnackBarBehavior.floating,
+                    duration: const Duration(seconds: 2),
+                  ),
+                );
+              },
+            ),
           ),
         );
     }
@@ -2422,7 +3261,6 @@ class _StageCardShell extends StatelessWidget {
       alignment: Alignment.centerLeft,
       child: Container(
         width: double.infinity,
-        margin: const EdgeInsets.only(bottom: 16),
         constraints: const BoxConstraints(maxWidth: _kCardWidth),
         decoration: BoxDecoration(
           color: cs.surfaceContainerHigh,
@@ -2558,34 +3396,29 @@ class _KitTextAction extends StatelessWidget {
   }
 }
 
-enum _StageTone { accent, green }
-
-/// 卡片头部右侧的小徽标（进度 / 报价口径）。
+/// 卡片头部右侧的小徽标（进度提示）。
 class _StageTrailing extends StatelessWidget {
   const _StageTrailing({
     required this.text,
     required this.colors,
-    this.tone = _StageTone.accent,
   });
 
   final String text;
   final _StageColors colors;
-  final _StageTone tone;
 
   @override
   Widget build(BuildContext context) {
-    final Color fg = tone == _StageTone.green ? colors.green : colors.accent;
-    final Color bg =
-        tone == _StageTone.green ? colors.greenSoft : colors.accentSoft;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       decoration: BoxDecoration(
-        color: bg,
+        color: colors.accentSoft,
         borderRadius: BorderRadius.circular(7),
       ),
       child: Text(text,
           style: TextStyle(
-              fontSize: 10.5, fontWeight: FontWeight.w600, color: fg)),
+              fontSize: 10.5,
+              fontWeight: FontWeight.w600,
+              color: colors.accent)),
     );
   }
 }
@@ -2600,6 +3433,378 @@ IconData _stageIcon(String id) => switch (id) {
       "pace" => Icons.speed_rounded,
       _ => Icons.tune_rounded,
     };
+
+// ═══════════════════════════════════════════════════════════════════
+// 行程档案栏（骨架 A「行程工作台」的右栏）
+//
+// 会话状态确定性投影，每轮回执整份替换：行程头 / 五步进度轨 / 已定条 /
+// 钱的水位 / 核实风险。钱与风险读的是流里最新的预算卡与草案核实结果，
+// 与卡面永远一致；已定条点「改」= 聚焦输入框并提示该怎么说（改口径走
+// 自由消息，服务端 answerUpdates 覆盖旧答案）。
+// ═══════════════════════════════════════════════════════════════════
+
+/// 预算类目色：与预算卡同 key，颜色全部走主题 token（暖色变体也能跟上）。
+Color _budgetTint(String key, _StageColors c) => switch (key) {
+      "hotel" => c.green,
+      "ticket" => c.orange,
+      "food" => c.rainBlue,
+      _ => c.accent,
+    };
+
+/// 右侧常驻档案栏。
+class _TripDossier extends StatelessWidget {
+  const _TripDossier({
+    required this.dossier,
+    required this.colors,
+    required this.enabled,
+    required this.onEdit,
+    this.budget,
+    this.draft,
+  });
+
+  final _DossierData dossier;
+  final _StageColors colors;
+  final bool enabled;
+  final ValueChanged<_DossierFactData> onEdit;
+  final _BudgetData? budget;
+  final _DraftData? draft;
+
+  String get _stepText {
+    if (dossier.steps.every((_DossierStepData s) => s.isDone)) {
+      return "五步走完，方案已出";
+    }
+    final String label = dossier.activeLabel;
+    return "第 ${dossier.doneCount + 1} 步 · $label";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    final List<_VerificationIssueData> risks =
+        (draft?.verification?.issues ?? const <_VerificationIssueData>[])
+            .take(3)
+            .toList();
+    return SingleChildScrollView(
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 20),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text("行程档案",
+              style: TextStyle(
+                  fontSize: 10, letterSpacing: 1.4, color: c.muted)),
+          const SizedBox(height: 5),
+          Text(dossier.head.isEmpty ? "还没定目的地" : dossier.head,
+              style: TextStyle(
+                  fontSize: 14.5, fontWeight: FontWeight.w700, color: c.text)),
+          const SizedBox(height: 3),
+          Text(_stepText, style: TextStyle(fontSize: 10.5, color: c.muted)),
+          const SizedBox(height: 12),
+          _DossierStepRail(steps: dossier.steps, colors: c),
+          const SizedBox(height: 14),
+          _section(c, "已定"),
+          const SizedBox(height: 4),
+          for (final _DossierFactData f in dossier.facts) _factRow(f, c),
+          if (budget != null) ...<Widget>[
+            const SizedBox(height: 14),
+            _section(c, "钱的水位"),
+            const SizedBox(height: 6),
+            _money(c),
+          ],
+          if (risks.isNotEmpty || (draft?.wishlistMissed.isNotEmpty ?? false)) ...<Widget>[
+            const SizedBox(height: 14),
+            _section(c, "核实"),
+            const SizedBox(height: 4),
+            for (final _VerificationIssueData issue in risks)
+              _riskRow(issue.message, c,
+                  hard: issue.level == "block"),
+            if (draft != null && draft!.wishlistMissed.isNotEmpty)
+              _riskRow(
+                  "没排进：${draft!.wishlistMissed.take(3).join("、")}", c,
+                  hard: false),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _section(_StageColors c, String title) => Text(title,
+      style: TextStyle(
+          fontSize: 10, letterSpacing: 1.2, color: c.muted));
+
+  Widget _factRow(_DossierFactData f, _StageColors c) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          SizedBox(
+            width: 46,
+            child: Padding(
+              padding: const EdgeInsets.only(top: 1),
+              child: Text(f.label,
+                  style: TextStyle(fontSize: 10.5, color: c.muted)),
+            ),
+          ),
+          Expanded(
+            child: Text(
+              f.set ? f.value : "还没定",
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.45,
+                fontWeight: f.set ? FontWeight.w600 : FontWeight.w400,
+                color: f.set ? c.text2 : c.muted,
+              ),
+            ),
+          ),
+          if (f.set)
+            Padding(
+              padding: const EdgeInsets.only(left: 6, top: 1),
+              child: _KitTextAction(
+                label: "改",
+                colors: c,
+                enabled: enabled,
+                onTap: () => onEdit(f),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  Widget _money(_StageColors c) {
+    final _BudgetData b = budget!;
+    final List<_BudgetItemData> parts =
+        b.items.where((_BudgetItemData i) => (i.amount ?? 0) > 0).toList();
+    final double sum = parts.fold<double>(
+        0, (double acc, _BudgetItemData i) => acc + (i.amount ?? 0));
+    final double base = sum <= 0 ? 1 : sum;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        Text(
+          b.total > 0 ? "¥${b.total.toStringAsFixed(0)}" : "待核价",
+          style: TextStyle(
+              fontSize: 17, fontWeight: FontWeight.w700, color: c.text),
+        ),
+        const SizedBox(height: 8),
+        ClipRRect(
+          borderRadius: BorderRadius.circular(4),
+          child: SizedBox(
+            height: 6,
+            child: parts.isEmpty
+                ? Container(color: c.card2)
+                : Row(
+                    children: <Widget>[
+                      for (final _BudgetItemData i in parts)
+                        Expanded(
+                          flex: ((i.amount ?? 0) / base * 100).round().clamp(1, 100),
+                          child: Container(color: _budgetTint(i.key, c)),
+                        ),
+                    ],
+                  ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        for (final _BudgetItemData i in parts)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 2),
+            child: Row(
+              children: <Widget>[
+                Container(
+                  width: 6,
+                  height: 6,
+                  margin: const EdgeInsets.only(right: 6),
+                  decoration: BoxDecoration(
+                    color: _budgetTint(i.key, c),
+                    shape: BoxShape.circle,
+                  ),
+                ),
+                Expanded(
+                  child: Text(i.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 10.5, color: c.muted)),
+                ),
+                Text("¥${(i.amount ?? 0).toStringAsFixed(0)}",
+                    style: TextStyle(fontSize: 10.5, color: c.text2)),
+              ],
+            ),
+          ),
+        if (b.pendingItems > 0)
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Text("${b.pendingItems} 项待核价未计入",
+                style: TextStyle(fontSize: 10, color: c.orange)),
+          ),
+      ],
+    );
+  }
+
+  Widget _riskRow(String message, _StageColors c, {required bool hard}) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2.5),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Padding(
+            padding: const EdgeInsets.only(top: 4, right: 6),
+            child: Container(
+              width: 5,
+              height: 5,
+              decoration: BoxDecoration(
+                  color: hard ? c.orange : c.muted, shape: BoxShape.circle),
+            ),
+          ),
+          Expanded(
+            child: Text(message,
+                style:
+                    TextStyle(fontSize: 10.5, height: 1.45, color: c.text2)),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 五步进度轨（横向）：走完绿勾、当前亮青、未到灰圈。
+class _DossierStepRail extends StatelessWidget {
+  const _DossierStepRail({required this.steps, required this.colors});
+
+  final List<_DossierStepData> steps;
+  final _StageColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    if (steps.isEmpty) return const SizedBox.shrink();
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        for (int i = 0; i < steps.length; i++)
+          Expanded(
+            child: Column(
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Expanded(
+                      child: Container(
+                        height: 1.5,
+                        color: i == 0
+                            ? Colors.transparent
+                            : (steps[i - 1].isDone ? c.green : c.borderSoft),
+                      ),
+                    ),
+                    _node(steps[i], c),
+                    Expanded(
+                      child: Container(
+                        height: 1.5,
+                        color: i == steps.length - 1
+                            ? Colors.transparent
+                            : (steps[i].isDone ? c.green : c.borderSoft),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 5),
+                Text(
+                  steps[i].label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: steps[i].isActive
+                        ? c.accent
+                        : steps[i].isDone
+                            ? c.text2
+                            : c.muted,
+                    fontWeight: steps[i].isActive
+                        ? FontWeight.w700
+                        : FontWeight.w400,
+                  ),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _node(_DossierStepData s, _StageColors c) {
+    final Color fg = s.isActive ? c.accent : (s.isDone ? c.green : c.muted);
+    return Container(
+      width: 14,
+      height: 14,
+      decoration: BoxDecoration(
+        color: s.isDone || s.isActive ? fg.withValues(alpha: 0.16) : c.card2,
+        shape: BoxShape.circle,
+        border: Border.all(color: fg, width: 1.2),
+      ),
+      child: s.isDone
+          ? Icon(Icons.check, size: 9, color: fg)
+          : null,
+    );
+  }
+}
+
+/// 窄窗降级：档案栏收成顶部一条横向「已定」胶囊。
+class _DossierStrip extends StatelessWidget {
+  const _DossierStrip({
+    required this.dossier,
+    required this.colors,
+    required this.onEdit,
+  });
+
+  final _DossierData dossier;
+  final _StageColors colors;
+  final ValueChanged<_DossierFactData> onEdit;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    return Container(
+      height: 40,
+      // 横向滚动视图没有固有宽度，不撑满就会被外层 Column 居中成一小条。
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      decoration: BoxDecoration(
+        color: c.card,
+        border: Border(bottom: BorderSide(color: c.borderSoft)),
+      ),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: <Widget>[
+            Text(dossier.head,
+                style: TextStyle(
+                    fontSize: 11.5, fontWeight: FontWeight.w700, color: c.text)),
+            const SizedBox(width: 10),
+            for (final _DossierFactData f in dossier.facts)
+              if (f.set)
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: GestureDetector(
+                    onTap: () => onEdit(f),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 9, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: c.card2,
+                        border: Border.all(color: c.borderSoft),
+                        borderRadius: BorderRadius.circular(9),
+                      ),
+                      child: Text(
+                        "${f.label} ${f.value}",
+                        style: TextStyle(fontSize: 10.5, color: c.text2),
+                      ),
+                    ),
+                  ),
+                ),
+          ],
+        ),
+      ),
+    );
+  }
+}
 
 /// 打字中三点动画。
 class _TypingDots extends StatefulWidget {
@@ -3085,8 +4290,9 @@ class _ChoiceCardState extends State<_ChoiceCard> {
   }
 }
 
-/// 规划前筛选卡：必玩/住宿/美食三分类，图文 + 实时价 + 勾选。
-/// 数据来自服务端真实 POI 与实时报价；价格缺失显示「待核价」。
+/// 规划前筛选卡：服务端按段下发（先景点、再住宿、最后美食），一张卡一段。
+/// 每行「名称挂真数指标 / 全宽介绍 / 全宽错落三图」。
+/// 卡面上的数字全部由服务端算好下发：没取到的指标就不出现，价格取不到就是「待核价」。
 class _GuideSelectCard extends StatefulWidget {
   const _GuideSelectCard({
     required this.card,
@@ -3094,6 +4300,7 @@ class _GuideSelectCard extends StatefulWidget {
     required this.enabled,
     required this.onConfirm,
     required this.onDelegate,
+    required this.onPreview,
   });
 
   final _GuideCardData card;
@@ -3102,300 +4309,582 @@ class _GuideSelectCard extends StatefulWidget {
   final VoidCallback onConfirm;
   final VoidCallback onDelegate;
 
+  /// 点图看大图：双面板覆盖层挂在页面根 Stack（本页是全屏路由，
+  /// 通用 ImagePreviewLauncher 打的主壳右分栏在这里看不见）。
+  final void Function(_GuideItemData item, String catLabel, int index) onPreview;
+
   @override
   State<_GuideSelectCard> createState() => _GuideSelectCardState();
 }
 
 class _GuideSelectCardState extends State<_GuideSelectCard> {
-  late String _filter;
+  int get _pickedCount => widget.card.cats
+      .expand((_GuideCatData c) => c.items)
+      .where((_GuideItemData i) => i.picked)
+      .length;
 
   @override
   void initState() {
     super.initState();
-    _filter = widget.card.cats.isNotEmpty ? widget.card.cats.first.key : "view";
-  }
-
-  List<_GuideItemData> get _visible {
-    for (final _GuideCatData c in widget.card.cats) {
-      if (c.key == _filter) return c.items;
-    }
-    return const <_GuideItemData>[];
-  }
-
-  int get _pickedCount {
-    int n = 0;
-    for (final _GuideCatData c in widget.card.cats) {
-      for (final _GuideItemData i in c.items) {
-        if (i.picked) n++;
-      }
-    }
-    return n;
-  }
-
-  /// 已勾选里还没取到实时价的条目数（只在底栏提示，不吓人）。
-  int get _pendingSelected {
-    int n = 0;
-    for (final _GuideCatData c in widget.card.cats) {
-      for (final _GuideItemData i in c.items) {
-        if (i.picked && (i.pricePending || i.price == null)) n++;
-      }
-    }
-    return n;
-  }
-
-  String _money(double value) => value
-      .round()
-      .toString()
-      .replaceAllMapped(RegExp(r"\B(?=(\d{3})+(?!\d))"), (Match _) => ",");
-
-  String _priceText(_GuideItemData item, String catKey) {
-    if (item.pricePending || item.price == null) return "待核价";
-    if (item.price == 0) return "免费";
-    final String base = "¥${_money(item.price!)}";
-    if (catKey == "food") return "$base/人";
-    if (catKey == "stay") return "$base/晚";
-    return base;
+    // 出卡即预热本屏实拍图：滚到哪都能直接见画面，不闪一层占位。
+    TravelImageWarmer.warm(<String>[
+      for (final _GuideCatData cat in widget.card.cats)
+        for (final _GuideItemData i in cat.items)
+          for (final String u in i.photos) LinkUtils.resolveMediaUrl(u),
+    ]);
   }
 
   @override
   Widget build(BuildContext context) {
     final _StageColors c = widget.colors;
     final List<_GuideCatData> cats = widget.card.cats;
+    final String singleKey =
+        cats.length == 1 ? cats.first.key : "";
+    final String measure = singleKey == "stay" || singleKey == "food" ? "家" : "处";
+    final String confirmLabel = switch (singleKey) {
+      "view" => "就这些景点，挑住的",
+      "stay" => "就住这，挑吃的",
+      _ => "就按这些排行程",
+    };
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        if (cats.isNotEmpty) ...<Widget>[
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
-              children: <Widget>[
-                for (final _GuideCatData cat in cats)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 6),
-                    child: GestureDetector(
-                      onTap: widget.enabled
-                          ? () => setState(() => _filter = cat.key)
-                          : null,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 5),
-                        decoration: BoxDecoration(
-                          color: _filter == cat.key
-                              ? c.accentSoft
-                              : Colors.transparent,
-                          borderRadius: BorderRadius.circular(999),
-                          border: Border.all(
-                            color: _filter == cat.key
-                                ? c.accentBorder
-                                : c.borderSoft,
-                          ),
-                        ),
-                        child: Text(
-                          "${cat.label} ${cat.items.length}",
-                          style: TextStyle(
-                            fontSize: 11,
-                            fontWeight: _filter == cat.key
-                                ? FontWeight.w700
-                                : FontWeight.w400,
-                            color: _filter == cat.key ? c.accent : c.text2,
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-              ],
-            ),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 560),
+          child: CustomScrollView(
+            slivers: <Widget>[
+              for (final _GuideCatData cat in cats) ..._sectionSlivers(c, cat),
+            ],
           ),
-          const SizedBox(height: 10),
-        ],
-        for (int i = 0; i < _visible.length; i += 2)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 10),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                Expanded(child: _tile(c, _visible[i], _filter)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: i + 1 < _visible.length
-                      ? _tile(c, _visible[i + 1], _filter)
-                      : const SizedBox.shrink(),
+        ),
+        Container(
+          margin: const EdgeInsets.only(top: 12),
+          padding: const EdgeInsets.only(top: 12),
+          decoration:
+              BoxDecoration(border: Border(top: BorderSide(color: c.borderSoft))),
+          child: Row(
+            children: <Widget>[
+              Expanded(
+                child: Text(
+                  _pickedCount > 0
+                      ? "已选 $_pickedCount $measure"
+                      : "还没勾——想去的打勾",
+                  style: TextStyle(fontSize: 11.5, color: c.text2),
                 ),
-              ],
-            ),
-          ),
-        Row(
-          children: <Widget>[
-            Expanded(
-              child: Text(
-                _pendingSelected > 0
-                    ? "已选 $_pickedCount 处 · $_pendingSelected 项待核价"
-                    : "已选 $_pickedCount 处",
-                style: TextStyle(fontSize: 11, color: c.muted),
               ),
-            ),
-            _KitTextAction(
-              label: "全部交给你",
-              colors: c,
-              enabled: widget.enabled,
-              onTap: widget.onDelegate,
-            ),
-            const SizedBox(width: 12),
-            _KitPrimaryButton(
-              label: "就按这些排行程",
-              colors: c,
-              enabled: widget.enabled && _pickedCount > 0,
-              onTap: widget.onConfirm,
-            ),
-          ],
+              _KitTextAction(
+                label: "全部交给你",
+                colors: c,
+                enabled: widget.enabled,
+                onTap: widget.onDelegate,
+              ),
+              const SizedBox(width: 12),
+              _KitPrimaryButton(
+                label: confirmLabel,
+                colors: c,
+                enabled: widget.enabled && _pickedCount > 0,
+                onTap: widget.onConfirm,
+              ),
+            ],
+          ),
         ),
       ],
     );
   }
 
-  Widget _tile(_StageColors c, _GuideItemData entry, String catKey) {
-    final bool picked = entry.picked;
-    return GestureDetector(
-      onTap: widget.enabled
-          ? () => setState(() => entry.picked = !entry.picked)
-          : null,
-      child: Container(
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: picked ? c.accent.withValues(alpha: 0.05) : c.card2,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: picked ? c.accentBorder : c.borderSoft,
-            width: picked ? 1.4 : 1,
+  List<Widget> _sectionSlivers(_StageColors c, _GuideCatData cat) {
+    final List<_GuideItemData> items = cat.items;
+    return <Widget>[
+      SliverPersistentHeader(
+        pinned: true,
+        delegate: _GuideSectionHeaderDelegate(
+          colors: c,
+          label: cat.label,
+          count: items.length,
+          sortNote: cat.sortNote,
+        ),
+      ),
+      if (cat.anchor != null)
+        SliverToBoxAdapter(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(10, 0, 10, 6),
+            child: Text(
+              "${cat.anchor!.why} · 想换个参照点，直接在下面说一句",
+              style: TextStyle(fontSize: 10.5, height: 1.5, color: c.muted),
+            ),
           ),
+        ),
+      SliverList(
+        delegate: SliverChildBuilderDelegate(
+          (BuildContext _, int i) => _GuideRow(
+            entry: items[i],
+            catLabel: cat.label,
+            colors: c,
+            enabled: widget.enabled,
+            topSep: i > 0,
+            onToggle: () => setState(() => items[i].picked = !items[i].picked),
+            onPreview: (int photoIndex) =>
+                widget.onPreview(items[i], cat.label, photoIndex),
+          ),
+          childCount: items.length,
+        ),
+      ),
+    ];
+  }
+}
+
+/// 段标题（吸顶）：段名 + 条数 + 这一段的真实排序依据。
+class _GuideSectionHeaderDelegate extends SliverPersistentHeaderDelegate {
+  const _GuideSectionHeaderDelegate({
+    required this.colors,
+    required this.label,
+    required this.count,
+    required this.sortNote,
+  });
+
+  final _StageColors colors;
+  final String label;
+  final int count;
+  final String sortNote;
+
+  @override
+  double get minExtent => 40;
+
+  @override
+  double get maxExtent => 40;
+
+  @override
+  Widget build(
+      BuildContext context, double shrinkOffset, bool overlapsContent) {
+    final _StageColors c = colors;
+    return Container(
+      color: c.card,
+      padding: const EdgeInsets.fromLTRB(2, 12, 2, 8),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.baseline,
+        textBaseline: TextBaseline.alphabetic,
+        children: <Widget>[
+          Text(label,
+              style: TextStyle(
+                  fontSize: 13.5, fontWeight: FontWeight.w700, color: c.text)),
+          const SizedBox(width: 6),
+          Text("$count", style: TextStyle(fontSize: 10.5, color: c.muted)),
+          if (sortNote.isNotEmpty) ...<Widget>[
+            const SizedBox(width: 9),
+            Expanded(
+              child: Text(
+                sortNote,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                textAlign: TextAlign.right,
+                style: TextStyle(fontSize: 10.5, color: c.muted),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  @override
+  bool shouldRebuild(_GuideSectionHeaderDelegate oldDelegate) =>
+      oldDelegate.label != label ||
+      oldDelegate.sortNote != sortNote ||
+      oldDelegate.count != count ||
+      oldDelegate.colors != colors;
+}
+
+/// 一行一个地方：名称 + 指标胶囊 + 勾选 / 介绍 / 错落三图。
+/// hover 态只活在本 widget 里，不上提给父卡 setState。
+class _GuideRow extends StatefulWidget {
+  const _GuideRow({
+    required this.entry,
+    required this.catLabel,
+    required this.colors,
+    required this.enabled,
+    required this.topSep,
+    required this.onToggle,
+    required this.onPreview,
+  });
+
+  final _GuideItemData entry;
+  final String catLabel;
+  final _StageColors colors;
+  final bool enabled;
+  final bool topSep;
+  final VoidCallback onToggle;
+  final void Function(int photoIndex) onPreview;
+
+  @override
+  State<_GuideRow> createState() => _GuideRowState();
+}
+
+class _GuideRowState extends State<_GuideRow> {
+  bool _hover = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final _GuideItemData e = widget.entry;
+    return MouseRegion(
+      onEnter: (_) => setState(() => _hover = true),
+      onExit: (_) => setState(() => _hover = false),
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        curve: Curves.easeOut,
+        padding: const EdgeInsets.fromLTRB(10, 12, 10, 14),
+        decoration: BoxDecoration(
+          color: _hover ? c.card2 : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+          border: widget.topSep && !_hover
+              ? Border(top: BorderSide(color: c.borderSoft))
+              : null,
         ),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            SizedBox(
-              height: 76,
-              width: double.infinity,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  if (entry.photos.isEmpty)
-                    _photoFallback(c, entry.name)
-                  else
-                    CachedMediaImage(
-                      url: LinkUtils.resolveMediaUrl(entry.photos.first),
-                      fit: BoxFit.cover,
-                      errorBuilder:
-                          (BuildContext _, Object __, StackTrace? ___) =>
-                              _photoFallback(c, entry.name),
-                    ),
-                  Positioned(
-                    right: 7,
-                    top: 7,
-                    child: Container(
-                      width: 18,
-                      height: 18,
-                      decoration: BoxDecoration(
-                        color: picked
-                            ? c.accent
-                            : Colors.black.withValues(alpha: 0.38),
-                        shape: BoxShape.circle,
-                        border: picked
-                            ? null
-                            : Border.all(
-                                color: Colors.white.withValues(alpha: 0.45)),
-                      ),
-                      child: picked
-                          ? Icon(Icons.check_rounded,
-                              size: 12, color: c.onAccent)
-                          : null,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(9, 8, 9, 10),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Row(
-                    children: <Widget>[
-                      Expanded(
-                        child: Text(
-                          entry.name,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(
-                            fontSize: 12.5,
-                            fontWeight: FontWeight.w700,
-                            color: c.text,
+            Row(
+              children: <Widget>[
+                Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                      color: _hover ? c.accent : c.muted, shape: BoxShape.circle),
+                ),
+                const SizedBox(width: 9),
+                Flexible(
+                  child: GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTap: e.photos.isEmpty ? null : () => widget.onPreview(0),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Flexible(
+                          child: Text(
+                            e.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 14.5,
+                              fontWeight: FontWeight.w700,
+                              color: c.text,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 6),
-                      Text(
-                        _priceText(entry, catKey),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: entry.pricePending || entry.price == null
-                              ? c.muted
-                              : (entry.price == 0 ? c.green : c.orange),
-                        ),
-                      ),
+                        if (e.photos.isNotEmpty) ...<Widget>[
+                          const SizedBox(width: 4),
+                          Icon(Icons.search_rounded, size: 13, color: c.muted),
+                        ],
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 9),
+                Flexible(
+                  child: Wrap(
+                    spacing: 6,
+                    runSpacing: 4,
+                    alignment: WrapAlignment.end,
+                    children: <Widget>[
+                      for (final _GuideMetricData m in e.metrics)
+                        _MetricPill(metric: m, colors: c, hot: _hover),
                     ],
                   ),
-                  if (entry.intro.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 4),
-                      child: Text(
-                        entry.intro,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                            fontSize: 10.5, height: 1.45, color: c.text2),
-                      ),
-                    ),
-                  if (entry.rec > 0 ||
-                      (entry.priceNote.isNotEmpty && !entry.pricePending))
-                    Padding(
-                      padding: const EdgeInsets.only(top: 5),
-                      child: Row(
-                        children: <Widget>[
-                          if (entry.rec > 0)
-                            Text("推荐 ${entry.rec}%",
-                                style: TextStyle(
-                                    fontSize: 9.5,
-                                    fontWeight: FontWeight.w600,
-                                    color: c.green)),
-                          if (entry.rec > 0 &&
-                              entry.priceNote.isNotEmpty &&
-                              !entry.pricePending)
-                            const SizedBox(width: 8),
-                          if (entry.priceNote.isNotEmpty && !entry.pricePending)
-                            Flexible(
-                              child: Text(
-                                entry.priceNote,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style:
-                                    TextStyle(fontSize: 9.5, color: c.muted),
-                              ),
-                            ),
-                        ],
-                      ),
-                    ),
-                ],
+                ),
+                const SizedBox(width: 9),
+                _CheckDot(
+                  key: Key("guide-check-${e.name}"),
+                  picked: e.picked,
+                  colors: c,
+                  hover: _hover,
+                  onTap: widget.enabled ? widget.onToggle : null,
+                ),
+              ],
+            ),
+            if (e.intro.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(top: 7, bottom: 2),
+                child: Text(
+                  e.intro,
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style:
+                      TextStyle(fontSize: 12.5, height: 1.7, color: c.text2),
+                ),
               ),
+            _StaggerPhotoRow(
+              entry: e,
+              colors: c,
+              hover: _hover,
+              onTapPhoto: widget.onPreview,
             ),
           ],
         ),
       ),
     );
   }
+}
 
-  /// 无实拍图时的兜底：地名首字色块（不能塌成一行纯文字）。
-  Widget _photoFallback(_StageColors c, String name) {
+/// 指标胶囊：hover 时提亮 + 上浮 1px，Tooltip 给这条数的出处。
+class _MetricPill extends StatelessWidget {
+  const _MetricPill({
+    required this.metric,
+    required this.colors,
+    required this.hot,
+  });
+
+  final _GuideMetricData metric;
+  final _StageColors colors;
+  final bool hot;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    // 「待核价」是本店报价没取到的那格：保持灰、不抢注意力（真价格才给暖色）。
+    final bool pending = metric.kind == "price" && !metric.label.contains("¥");
+    final Color tint = metric.kind == "heat" || (metric.kind == "price" && !pending)
+        ? c.orange
+        : metric.kind == "distance"
+            ? c.rainBlue
+            : pending
+                ? c.muted
+                : c.text;
+    final Color fg = hot ? tint : (metric.kind == "rating" ? c.text2 : tint);
+    return Tooltip(
+      message: metric.source.isEmpty ? metric.label : metric.source,
+      waitDuration: const Duration(milliseconds: 500),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
+      textStyle: TextStyle(fontSize: 10.5, height: 1.5, color: c.text),
+      decoration: BoxDecoration(
+        color: c.card,
+        border: Border.all(color: c.borderSoft),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.help,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+          margin: EdgeInsets.only(top: hot ? -1 : 0),
+          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 3),
+          decoration: BoxDecoration(
+            color: hot ? c.accentSoft : Colors.transparent,
+            borderRadius: BorderRadius.circular(7),
+            border: Border.all(color: hot ? c.accentBorder : c.borderSoft),
+          ),
+          child: Text(
+            metric.label,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: hot ? FontWeight.w600 : FontWeight.w400,
+              color: fg,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 勾选圆：hover 放大 1.12，选中态填充反色。
+class _CheckDot extends StatelessWidget {
+  const _CheckDot({
+    super.key,
+    required this.picked,
+    required this.colors,
+    required this.hover,
+    required this.onTap,
+  });
+
+  final bool picked;
+  final _StageColors colors;
+  final bool hover;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: AnimatedScale(
+          duration: const Duration(milliseconds: 120),
+          curve: Curves.easeOut,
+          scale: hover && !picked ? 1.12 : 1.0,
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 120),
+            width: 20,
+            height: 20,
+            decoration: BoxDecoration(
+              color: picked ? c.accent : Colors.transparent,
+              shape: BoxShape.circle,
+              border: Border.all(
+                color: picked
+                    ? c.accent
+                    : (hover ? c.accentBorder : c.borderSoft),
+                width: 1.5,
+              ),
+            ),
+            child: picked
+                ? Icon(Icons.check_rounded, size: 13, color: c.onAccent)
+                : null,
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 全宽错落三图：单位宽按三列算，第一格下沉 6、第二格贴顶、第三格下沉 14；
+/// 实拍图有几张就摆几张，不拿假图补格（一张都没有时留一格地名首字块）。
+class _StaggerPhotoRow extends StatelessWidget {
+  const _StaggerPhotoRow({
+    required this.entry,
+    required this.colors,
+    required this.hover,
+    required this.onTapPhoto,
+  });
+
+  final _GuideItemData entry;
+  final _StageColors colors;
+  final bool hover;
+  final void Function(int index) onTapPhoto;
+
+  static const List<double> _tops = <double>[6, 0, 14];
+  static const double _gap = 10;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> photos = entry.photos.take(3).toList();
+    final List<String> slots = photos.isEmpty ? <String>[""] : photos;
+    return LayoutBuilder(
+      builder: (BuildContext _, BoxConstraints cons) {
+        final double unit = (cons.maxWidth - _gap * 2) / 3;
+        final double h = unit * 0.86;
+        return Padding(
+          padding: const EdgeInsets.only(top: 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              for (int i = 0; i < slots.length; i++) ...<Widget>[
+                if (i > 0) const SizedBox(width: _gap),
+                Padding(
+                  padding: EdgeInsets.only(top: _tops[i]),
+                  child: _PhotoTile(
+                    key: Key("guide-photo-$i"),
+                    url: slots[i],
+                    name: entry.name,
+                    width: unit,
+                    height: h,
+                    colors: colors,
+                    hover: hover,
+                    onTap: slots[i].isEmpty ? null : () => onTapPhoto(i),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _PhotoTile extends StatelessWidget {
+  const _PhotoTile({
+    super.key,
+    required this.url,
+    required this.name,
+    required this.width,
+    required this.height,
+    required this.colors,
+    required this.hover,
+    this.onTap,
+  });
+
+  final String url;
+  final String name;
+  final double width;
+  final double height;
+  final _StageColors colors;
+  final bool hover;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    return GestureDetector(
+      onTap: onTap,
+      child: MouseRegion(
+        cursor: onTap == null ? SystemMouseCursors.basic : SystemMouseCursors.zoomIn,
+        child: AnimatedContainer(
+          duration: const Duration(milliseconds: 120),
+          width: width,
+          height: height,
+          clipBehavior: Clip.antiAlias,
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: hover ? c.accentBorder : c.borderSoft),
+            boxShadow: <BoxShadow>[
+              BoxShadow(
+                color: c.shadow.withValues(alpha: 0.22),
+                blurRadius: 16,
+                offset: const Offset(0, 6),
+              ),
+            ],
+          ),
+          child: url.isEmpty
+              ? _GuidePhotoFallback(colors: c, name: name)
+              : Stack(
+                  fit: StackFit.expand,
+                  children: <Widget>[
+                    CachedMediaImage(
+                      url: LinkUtils.resolveMediaUrl(url),
+                      fit: BoxFit.cover,
+                      errorBuilder:
+                          (BuildContext _, Object __, StackTrace? ___) =>
+                              _GuidePhotoFallback(colors: c, name: name),
+                    ),
+                    if (hover)
+                      Positioned(
+                        right: 7,
+                        bottom: 6,
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.45),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: const Text(
+                            "看大图",
+                            style: TextStyle(
+                                fontSize: 9,
+                                fontWeight: FontWeight.w500,
+                                color: Color(0xD9FFFFFF)),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 没有实拍图（或图挂了）时的格子：地名首字实色块，不塌成一行文字。
+class _GuidePhotoFallback extends StatelessWidget {
+  const _GuidePhotoFallback({required this.colors, required this.name});
+
+  final _StageColors colors;
+  final String name;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
     final String ch = name.isEmpty ? "?" : name.substring(0, 1);
     return DecoratedBox(
       decoration: BoxDecoration(
@@ -3416,6 +4905,382 @@ class _GuideSelectCardState extends State<_GuideSelectCard> {
             fontWeight: FontWeight.w700,
             color: c.accent.withValues(alpha: 0.55),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 双面板看图的入参。
+class _GuidePreviewData {
+  _GuidePreviewData({
+    required this.catLabel,
+    required this.item,
+    required this.index,
+  });
+
+  final String catLabel;
+  final _GuideItemData item;
+  final int index;
+}
+
+/// 双面板看图：左边大图（‹ › 翻页、滚轮缩放、Esc 关），
+/// 右边完整介绍 + 每条指标的出处 + 地址 + 勾选（与行内圆点同源）。
+class _GuideViewerOverlay extends StatefulWidget {
+  const _GuideViewerOverlay({
+    required this.preview,
+    required this.colors,
+    required this.onClose,
+    required this.onToggle,
+  });
+
+  final _GuidePreviewData preview;
+  final _StageColors colors;
+  final VoidCallback onClose;
+  final VoidCallback onToggle;
+
+  @override
+  State<_GuideViewerOverlay> createState() => _GuideViewerOverlayState();
+}
+
+class _GuideViewerOverlayState extends State<_GuideViewerOverlay> {
+  final TransformationController _zoom = TransformationController();
+  late int _index = _clamped(widget.preview.index);
+
+  int _clamped(int i) {
+    final int total = widget.preview.item.photos.length;
+    if (total == 0) return 0;
+    return i.clamp(0, total - 1);
+  }
+
+  @override
+  void dispose() {
+    _zoom.dispose();
+    super.dispose();
+  }
+
+  void _step(int delta) {
+    final int total = widget.preview.item.photos.length;
+    if (total == 0) return;
+    setState(() {
+      _index = (_index + delta + total) % total;
+      _zoom.value = Matrix4.identity();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = widget.colors;
+    final _GuideItemData e = widget.preview.item;
+    final List<String> photos = e.photos;
+    return Focus(
+      key: const Key("planning-guide-viewer"),
+      autofocus: true,
+      onKeyEvent: (FocusNode _, KeyEvent event) {
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.ignored;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.escape) {
+          widget.onClose();
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowLeft) {
+          _step(-1);
+          return KeyEventResult.handled;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          _step(1);
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: widget.onClose,
+            child: ColoredBox(color: c.bg.withValues(alpha: 0.88)),
+          ),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: ConstrainedBox(
+                constraints:
+                    const BoxConstraints(maxWidth: 900, maxHeight: 620),
+                child: Container(
+                  padding: const EdgeInsets.all(14),
+                  decoration: BoxDecoration(
+                    color: c.card,
+                    borderRadius: BorderRadius.circular(16),
+                    border: Border.all(color: c.border),
+                  ),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: <Widget>[
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: <Widget>[
+                            Expanded(
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(14),
+                                child: Container(
+                                  color: c.card2,
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: <Widget>[
+                                      if (photos.isEmpty)
+                                        _GuidePhotoFallback(
+                                            colors: c, name: e.name)
+                                      else
+                                        InteractiveViewer(
+                                          transformationController: _zoom,
+                                          minScale: 0.6,
+                                          maxScale: 6,
+                                          child: CachedMediaImage(
+                                            url: LinkUtils.resolveMediaUrl(
+                                                photos[_index]),
+                                            fit: BoxFit.contain,
+                                            errorBuilder: (BuildContext _,
+                                                    Object __,
+                                                    StackTrace? ___) =>
+                                                _GuidePhotoFallback(
+                                                    colors: c, name: e.name),
+                                          ),
+                                        ),
+                                      if (photos.length > 1) ...<Widget>[
+                                        Positioned(
+                                          left: 8,
+                                          top: 0,
+                                          bottom: 0,
+                                          child: _ViewerArrow(
+                                            colors: c,
+                                            icon: Icons.chevron_left_rounded,
+                                            onTap: () => _step(-1),
+                                          ),
+                                        ),
+                                        Positioned(
+                                          right: 8,
+                                          top: 0,
+                                          bottom: 0,
+                                          child: _ViewerArrow(
+                                            colors: c,
+                                            icon: Icons.chevron_right_rounded,
+                                            onTap: () => _step(1),
+                                          ),
+                                        ),
+                                      ],
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ),
+                            if (photos.length > 1)
+                              Padding(
+                                padding: const EdgeInsets.only(top: 10),
+                                child: SizedBox(
+                                  height: 46,
+                                  child: ListView(
+                                    scrollDirection: Axis.horizontal,
+                                    children: <Widget>[
+                                      for (int i = 0; i < photos.length; i++)
+                                        Padding(
+                                          padding:
+                                              const EdgeInsets.only(right: 8),
+                                          child: GestureDetector(
+                                            onTap: () => setState(
+                                                () => _index = i),
+                                            child: AnimatedContainer(
+                                              duration: const Duration(
+                                                  milliseconds: 120),
+                                              width: 62,
+                                              clipBehavior: Clip.antiAlias,
+                                              decoration: BoxDecoration(
+                                                borderRadius:
+                                                    BorderRadius.circular(9),
+                                                border: Border.all(
+                                                  color: i == _index
+                                                      ? c.accent
+                                                      : c.borderSoft,
+                                                ),
+                                              ),
+                                              child: CachedMediaImage(
+                                                url: LinkUtils.resolveMediaUrl(
+                                                    photos[i]),
+                                                fit: BoxFit.cover,
+                                                errorBuilder: (BuildContext _,
+                                                        Object __,
+                                                        StackTrace? ___) =>
+                                                    _GuidePhotoFallback(
+                                                        colors: c, name: e.name),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      SizedBox(
+                        width: 268,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: <Widget>[
+                            Row(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: <Widget>[
+                                Expanded(
+                                  child: Text(
+                                    e.name,
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.w700,
+                                      color: c.text,
+                                    ),
+                                  ),
+                                ),
+                                IconButton(
+                                  key: const Key("guide-viewer-close"),
+                                  onPressed: widget.onClose,
+                                  icon: Icon(Icons.close_rounded,
+                                      size: 18, color: c.muted),
+                                  visualDensity: VisualDensity.compact,
+                                  padding: EdgeInsets.zero,
+                                  constraints: const BoxConstraints(),
+                                ),
+                              ],
+                            ),
+                            Text(widget.preview.catLabel,
+                                style:
+                                    TextStyle(fontSize: 10.5, color: c.muted)),
+                            const SizedBox(height: 9),
+                            Expanded(
+                              child: SingleChildScrollView(
+                                child: Column(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: <Widget>[
+                                    if (e.intro.isNotEmpty)
+                                      Text(
+                                        e.intro,
+                                        style: TextStyle(
+                                            fontSize: 12.5,
+                                            height: 1.7,
+                                            color: c.text2),
+                                      ),
+                                    if (e.metrics.isNotEmpty) ...<Widget>[
+                                      const SizedBox(height: 12),
+                                      for (final _GuideMetricData m
+                                          in e.metrics)
+                                        Padding(
+                                          padding:
+                                              const EdgeInsets.only(bottom: 7),
+                                          child: Column(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.start,
+                                            children: <Widget>[
+                                              Text(
+                                                m.label,
+                                                style: TextStyle(
+                                                    fontSize: 11,
+                                                    fontWeight:
+                                                        FontWeight.w600,
+                                                    color: c.text),
+                                              ),
+                                              if (m.source.isNotEmpty)
+                                                Padding(
+                                                  padding: const EdgeInsets
+                                                          .only(top: 2),
+                                                  child: Text(
+                                                    m.source,
+                                                    style: TextStyle(
+                                                        fontSize: 10,
+                                                        height: 1.5,
+                                                        color: c.muted),
+                                                  ),
+                                                ),
+                                            ],
+                                          ),
+                                        ),
+                                    ],
+                                    if (e.address.isNotEmpty) ...<Widget>[
+                                      const SizedBox(height: 10),
+                                      Text(
+                                        e.address,
+                                        style: TextStyle(
+                                            fontSize: 10.5,
+                                            height: 1.6,
+                                            color: c.muted),
+                                      ),
+                                    ],
+                                  ],
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 10),
+                            Row(
+                              children: <Widget>[
+                                _CheckDot(
+                                  picked: e.picked,
+                                  colors: c,
+                                  hover: true,
+                                  onTap: widget.onToggle,
+                                ),
+                                const SizedBox(width: 9),
+                                Expanded(
+                                  child: Text(
+                                    e.picked ? "已选，点这里去掉" : "想去就勾上",
+                                    style: TextStyle(
+                                        fontSize: 11.5, color: c.text2),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ViewerArrow extends StatelessWidget {
+  const _ViewerArrow({
+    required this.colors,
+    required this.icon,
+    required this.onTap,
+  });
+
+  final _StageColors colors;
+  final IconData icon;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: MouseRegion(
+        cursor: SystemMouseCursors.click,
+        child: Container(
+          width: 28,
+          height: 28,
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.42),
+            shape: BoxShape.circle,
+            border: Border.all(color: colors.borderSoft),
+          ),
+          child: Icon(icon, size: 16, color: colors.text2),
         ),
       ),
     );
@@ -4291,7 +6156,6 @@ class _DraftCardState extends State<_DraftCard> {
     final int dayCount = draft.days.length;
     final String cover = (_cover ?? "").trim();
     return Container(
-      margin: const EdgeInsets.only(bottom: 16),
       constraints: const BoxConstraints(maxWidth: _kCardWidth),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHigh,
@@ -4310,24 +6174,18 @@ class _DraftCardState extends State<_DraftCard> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: <Widget>[
-                Row(
-                  children: <Widget>[
-                    if (draft.totalCost != null && draft.totalCost! > 0)
+                if (draft.totalCost != null && draft.totalCost! > 0) ...[
+                  Row(
+                    children: <Widget>[
                       _MetaChip(
                         colors: c,
                         icon: Icons.payments_outlined,
                         text: "¥${draft.totalCost!.round()}",
                       ),
-                    if (draft.totalCost != null && draft.totalCost! > 0)
-                      const SizedBox(width: 6),
-                    _MetaChip(
-                      colors: c,
-                      icon: Icons.auto_awesome_outlined,
-                      text: "真实数据生成",
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 9),
+                    ],
+                  ),
+                  const SizedBox(height: 9),
+                ],
                 Row(
                   children: <Widget>[
                     Expanded(
@@ -4482,7 +6340,8 @@ class _DestinationBadge extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const Icon(Icons.map_outlined, size: 13, color: Color(0xFF18D6F3)),
+          Icon(Icons.map_outlined,
+              size: 13, color: Colors.white.withValues(alpha: 0.92)),
           const SizedBox(width: 4),
           Text(destination,
               style: const TextStyle(
@@ -4671,8 +6530,8 @@ class _StageColors {
       accent: t.accent,
       accentSoft: warm
           ? AppPalette.warmLocationDialogButtonBg
-          : const Color(0x1F18D6F3),
-      accentBorder: warm ? const Color(0xFF9DC3E8) : const Color(0x7318D6F3),
+          : const Color(0xFF232323),
+      accentBorder: warm ? const Color(0xFF9DC3E8) : const Color(0xFF3F3F46),
       accentBg: t.accentBg,
       onAccent: t.onAccentBg,
       green: t.green,

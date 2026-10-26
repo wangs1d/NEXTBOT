@@ -1439,18 +1439,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (line.isNotEmpty) {
               _updateAgentStatusLine(line);
             }
-            // hover「任务」页：agent 状态行 + 展开卡「任务动态」步骤流上岛
-            // （2026-10-26 拍板：步骤流随展开卡信息总览复活）。
-            // 无口语化文案时不得把原始工具名亮到岛上，走共享友好映射。
-            final String islandLabel = line.isNotEmpty
+            // hover「任务」页：agent 状态行 + 展开卡「任务动态」步骤流上岛。
+            // 无口语化文案时不得把原始工具名亮到岛上；友好映射也没命中就不上岛。
+            final String? islandLabel = line.isNotEmpty
                 ? line
-                : (toolName.isNotEmpty ? friendlyToolLabel(toolName) : "正在处理");
-            DynamicIslandController.instance
-              ..setForegroundAgent(active: true)
-              ..updateAgentStatusLine(islandLabel);
-            if (toolName.isNotEmpty) {
-              DynamicIslandController.instance
-                  .beginAgentStep(toolName, islandLabel);
+                : (toolName.isNotEmpty ? friendlyToolLabel(toolName) : null);
+            final DynamicIslandController island =
+                DynamicIslandController.instance
+                  ..setForegroundAgent(active: true);
+            if (islandLabel != null && islandLabel.isNotEmpty) {
+              island.updateAgentStatusLine(islandLabel);
+              if (toolName.isNotEmpty) {
+                island.beginAgentStep(toolName, islandLabel);
+              }
             }
           }
         }

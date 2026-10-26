@@ -1441,9 +1441,6 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
     });
   }
 
-  /// 海报区强调色（压在照片深色遮罩上，深浅主题恒可读，不随主题切换）。
-  static const Color _accent = Color(0xFF18D6F3);
-
   @override
   Widget build(BuildContext context) {
     final TravelPlanData plan = TravelPlanData.from(widget.data);
@@ -1669,7 +1666,8 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          const Icon(Icons.map_outlined, size: 13, color: _accent),
+          Icon(Icons.map_outlined,
+              size: 13, color: Colors.white.withValues(alpha: 0.92)),
           const SizedBox(width: 4),
           Text(
             destination,

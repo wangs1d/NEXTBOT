@@ -14,7 +14,14 @@ import type {
   PlanningService,
 } from "./travel-planning-service.js";
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
-import { extractWishlist, extractFoodWishlist, extractParty, paceForParty } from "./intent-parser.js";
+import {
+  extractWishlist,
+  extractFoodWishlist,
+  extractParty,
+  paceForParty,
+  extractPreferences,
+  extractHotelFocus,
+} from "./intent-parser.js";
 import { findReservationRule } from "./travel-poi-dossier.js";
 import { resolveOriginFromLocation } from "./travel-origin.js";
 import type { LocationCoordinator } from "../../services/location-coordinator.js";
@@ -67,18 +74,52 @@ export type PlanSessionProgress = {
   summary: string;
 };
 
-/** 筛选卡条目：文字介绍 + 实拍图 + 实时价（拿不到则待核价）。 */
+/** 档案栏「已定条」的一项：已确认的事实，或未定的关键维度（客户端灰显）。 */
+export type PlanSessionDossierFact = {
+  /** 维度 id（destination/days/origin/party/budget/transport/picks/stay/food） */
+  id: string;
+  /** 维度名（去哪儿 / 玩几天 / 和谁去…） */
+  label: string;
+  /** 结论展示文案；state=todo 时为空串 */
+  value: string;
+  /** set=已定 / todo=还缺 */
+  state: "set" | "todo";
+};
+
+/** 档案栏五步进度轨的一项。 */
+export type PlanSessionDossierStep = {
+  id: "gather" | "guide" | "extras" | "budget" | "plan";
+  label: string;
+  state: "done" | "active" | "todo";
+};
+
+/**
+ * 右侧行程档案栏快照：全部由会话状态确定性推出，不让编排器复述一遍，
+ * 避免「卡片说一套、档案说一套」。钱与风险不下发——客户端手里已有
+ * 预算卡与草案核实结果，从流里读比再算一份更不容易口径打架。
+ */
+export type PlanSessionDossier = {
+  /** 行程头，如「成都 · 3 天 · 北京出发」 */
+  head: string;
+  steps: PlanSessionDossierStep[];
+  facts: PlanSessionDossierFact[];
+};
+
+/** 卡面指标胶囊：服务端算好的成品文案 + 这条数的来源，客户端原样渲染不换算。 */
+export type PlanSessionGuideMetric = {
+  kind: "rating" | "price" | "distance" | "heat" | "favorite";
+  label: string;
+  source: string;
+};
+
+/** 筛选卡条目：名称挂真数指标 + 文字介绍 + 实拍图。没取到的指标不下发。 */
 export type PlanSessionGuideItem = {
   name: string;
-  rec: number;
-  rating: number;
   intro: string;
   photos: string[];
   address?: string;
-  /** 实时价；null=待核价 */
-  price: number | null;
-  priceNote: string;
-  pricePending: boolean;
+  metrics: PlanSessionGuideMetric[];
+  /** 服务端恒 false：勾选全部交给用户，不替用户预选 */
   picked: boolean;
 };
 
@@ -86,6 +127,10 @@ export type PlanSessionGuideCat = {
   key: "view" | "stay" | "food";
   label: string;
   items: PlanSessionGuideItem[];
+  /** 这一段的排序依据，由实际参与排序的信号拼出来 */
+  sortNote: string;
+  /** 住宿段的落位参照点（离哪儿近），其余段不下发 */
+  anchor?: { id: string; label: string; why: string };
 };
 
 /** 同行人 → 节奏的推断结论（卡片内展示，可改，不单独出问题卡）。 */
@@ -257,6 +302,8 @@ export type PlanSessionTurn = {
   budget: PlanSessionBudget | null;
   /** 核实闸摘要（闭馆日/需预约/排太满；生成后随预算一起给，确认前就能看到风险） */
   verification?: PlanSessionVerification | null;
+  /** 右侧档案栏快照（每轮随回执重算，客户端整栏替换） */
+  dossier: PlanSessionDossier;
 };
 
 // ======================== 会话状态 ========================
@@ -409,7 +456,7 @@ async function orchestrateTurn(session: PlanSession): Promise<Orchestration | nu
     "4. question 只问规划行程确实需要、且目前还不知道的信息。目的地未定时 question=null，用 say 文字问去哪儿；天数/日期未定时优先问它。\n" +
     "5. 用户给过模糊表达的顺着它问：选项必须贴合用户原话与目的地（说了「5、6天」→ options [\"5天\",\"6天\"]、title「5天还是6天？」），禁止与上下文无关的通用选项。\n" +
     "6. 每轮最多一问；options 2~6 个、每个 ≤8 字；multi 仅在确实可多选时 true；天数/日期类问题可给 placeholder（如「或直接说日期，如：10月1日出发」）并 allowNote=true。\n" +
-    "7. 预算类问题的选项带档位词锚点（经济/舒适/品质/豪华），可加口语后缀（如「舒适 · 性价比」），保证下游规划引擎能识别。\n" +
+    "7. 预算类问题 question.id 固定写 budget；选项带档位词锚点（经济/舒适/品质/豪华），可加口语后缀（如「舒适 · 性价比」），保证下游规划引擎能识别；必给 placeholder（如「或直接填个大概预算，如：人均 3000」）并 allowNote=true，用户可以不选档位、只填金额作答。用户自报了金额时，answerUpdates 的 budget 答案写成「自报¥N · 档位」，档位由你结合目的地与天数判断（经济/舒适/品质/豪华），金额原样保留。\n" +
     "8. 问得像朋友聊天，不要查户口：目的地+天数/日期之外，最多再挑 2 个有用的维度问（出发地/预算/大交通/同行人…按需取用），其余交给生成引擎。具体玩哪些景点、住哪家酒店、吃什么由下一步的图文筛选卡负责，绝对不要问这些。同行人类问题的 question.id 固定写 party，options 给 2~5 个同行人（一个人/情侣/朋友/带父母/带孩子…，选项要写成能认出同行关系的词，卡片才能顺手给出节奏推断）。同行人已知后绝不再单独问节奏：节奏按同行人自动定（情侣、家人→松弛；朋友→紧凑；独自→均衡），卡片会把推断结果显示出来让用户改。只有用户主动说「想紧凑/想放松」或与同行人明显矛盾时，在 say 里确认一句即可，不出节奏卡。\n" +
     "8.1 大交通要按真实票价算，必须先有出发地：用户没说出发地时，优先把【用户定位】城市当默认出发地——updates.origin 直接填该城市，say 里顺带自然说一句「按你的定位从X出发」，绝不出 origin 问题卡；只有【用户定位】缺失时才问「从哪儿出发」（question.id 固定用 origin，multi=false），选项可给几个常见城市或让用户直接说。用户明确表示不坐大交通/不用管交通，就不必再问。\n" +
     "9. 信息足够出方案时 ready=true 且 question=null（前提：目的地与天数/日期都已定；其余维度问到 1~2 个就够），不要为了凑进度而问。\n" +
@@ -476,7 +523,7 @@ function tryParseJson(text: string): Record<string, unknown> | null {
 }
 
 /** LLM 输出做钳制与兜底，坏字段静默丢弃而不是整轮失败。 */
-function normalizeOrchestration(
+export function normalizeOrchestration(
   raw: Record<string, unknown>,
   session: PlanSession,
 ): Orchestration {
@@ -543,7 +590,14 @@ function normalizeOrchestration(
       const rawId = typeof o.id === "string" && o.id.trim() ? o.id.trim().slice(0, 24) : "more";
       const id = /^(origin|departure|departureCity|depart|from)$/i.test(rawId)
         ? "origin"
-        : rawId;
+        : /^(budget|yusuan|预算)$/i.test(rawId)
+          ? "budget"
+          : rawId;
+      // 预算卡必须留自由填写入口：LLM 漏给 placeholder/allowNote 时确定性补上
+      const budgetFill = id === "budget";
+      const effAllowNote = allowNote || budgetFill;
+      const effPlaceholder =
+        placeholder ?? (budgetFill ? "或直接填个大概预算，如：人均 3000" : undefined);
       question = {
         id,
         stage:
@@ -553,8 +607,8 @@ function normalizeOrchestration(
         title,
         multi: o.multi === true,
         options,
-        ...(placeholder ? { placeholder } : {}),
-        ...(allowNote ? { allowNote: true } : {}),
+        ...(effPlaceholder ? { placeholder: effPlaceholder } : {}),
+        ...(effAllowNote ? { allowNote: true } : {}),
       };
     }
   }
@@ -760,6 +814,7 @@ function fallbackTurn(session: PlanSession): PlanSessionTurn {
     cards: [],
     draft: null,
     budget: null,
+    dossier: buildDossier(session, ready ? "ready" : "gathering"),
   };
 }
 
@@ -968,6 +1023,163 @@ export function paceInferForOptions(
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
+// ======================== 右侧行程档案栏 ========================
+
+/** 五步进度轨：与规划流的真实阶段一一对应。 */
+const DOSSIER_STEPS: Array<{ id: PlanSessionDossierStep["id"]; label: string }> = [
+  { id: "gather", label: "问答" },
+  { id: "guide", label: "挑想去" },
+  { id: "extras", label: "补心愿" },
+  { id: "budget", label: "核预算" },
+  { id: "plan", label: "出方案" },
+];
+
+/** 会话状态 → 当前停在哪一步（generated 视为五步全走完）。 */
+const DOSSIER_ACTIVE_INDEX: Record<PlanSessionTurn["state"], number> = {
+  gathering: 0,
+  guide_ready: 1,
+  wishlist_ready: 2,
+  ready: 3,
+  budget_ready: 3,
+  generated: 5,
+};
+
+/** 没点选、但原话里读得出的同行人 → 档案栏文案。 */
+const PARTY_DOSSIER_LABEL: Record<
+  NonNullable<ReturnType<typeof extractParty>>,
+  string
+> = {
+  solo: "一个人",
+  solo_female: "一个人",
+  couple: "和伴侣",
+  family: "带家人",
+  friends: "和朋友",
+};
+
+/** 「先不选/随便」这类占位回答不算已定。 */
+const UNANSWERED = /^(先不选|到地再说|随便|都行|不用|再说|没想好)/;
+
+/** 维度答案（点选与原话交代都算），命不中或属占位回答返回 null。 */
+function answerValueOf(
+  session: PlanSession,
+  ids: string[],
+  titleHint: RegExp,
+): string | null {
+  const hit = session.answers.find((a) => ids.includes(a.id) || titleHint.test(a.question));
+  if (!hit) return null;
+  const v = hit.answer.split("（")[0]!.trim();
+  return v && !UNANSWERED.test(v) ? v : null;
+}
+
+/** 同行人文案：点选优先，其次从原话里认（认出来就不该再出现在「还缺」里）。 */
+function partyValueOf(session: PlanSession): string | null {
+  const answered = answerValueOf(session, ["party"], PARTY_QUESTION_TITLE);
+  if (answered) return answered.split("、")[0]!.trim();
+  const fromText = extractParty(
+    [session.originalMessage, ...session.answers.map((a) => a.answer)].join("；"),
+  );
+  return fromText ? PARTY_DOSSIER_LABEL[fromText] : null;
+}
+
+/** 节奏档：走规划引擎同一套识别（用户明说优先，其次同行人默认）。 */
+function paceValueOf(session: PlanSession): string | null {
+  const pace = extractPreferences(
+    composePlanningInput(session),
+    undefined,
+    session.destination ?? "",
+  ).pace;
+  return pace ? PACE_INFER_TEXT[pace].pace : null;
+}
+
+/** 地名串展示：最多列 3 个，其余折成「等 N 处」。 */
+function briefNames(names: string[]): string {
+  const unique = [...new Set(names.map((n) => n.trim()).filter(Boolean))];
+  if (unique.length === 0) return "";
+  const head = unique.slice(0, 3).join("、");
+  return unique.length > 3 ? `${head} 等 ${unique.length} 处` : head;
+}
+
+function dossierFactsOf(session: PlanSession): PlanSessionDossierFact[] {
+  const facts: PlanSessionDossierFact[] = [];
+  // 关键维度恒挂（没定就标 todo，让用户看见还欠什么）
+  const core = (id: string, label: string, value: string | null | undefined): void => {
+    const v = (value ?? "").trim();
+    facts.push({ id, label, value: v, state: v ? "set" : "todo" });
+  };
+  // 选问维度只在已定时出现
+  const optional = (id: string, label: string, value: string | null | undefined): void => {
+    const v = (value ?? "").trim();
+    if (v) facts.push({ id, label, value: v, state: "set" });
+  };
+
+  const days = effectiveDays(session);
+  core("destination", "去哪儿", session.destination);
+  core(
+    "days",
+    "玩几天",
+    days
+      ? `${days} 天${session.startDate ? ` · ${session.startDate.slice(5)} 起` : ""}`
+      : session.startDate
+        ? `${session.startDate.slice(5)} 出发`
+        : null,
+  );
+  core(
+    "origin",
+    "从哪儿走",
+    session.origin
+      ? `${session.origin}${session.originSource === "located" ? "（定位）" : ""}出发`
+      : null,
+  );
+  const party = partyValueOf(session);
+  const pace = paceValueOf(session);
+  core("party", "和谁去", party ? [party, pace].filter(Boolean).join(" · ") : null);
+  optional("budget", "预算档", answerValueOf(session, ["budget"], /预算|花费|住宿标准/));
+  optional("transport", "大交通", answerValueOf(session, ["transport", "traffic"], /交通|怎么去|往返/));
+  optional(
+    "picks",
+    "想去",
+    briefNames([...(session.guideSelections?.view ?? []), ...(session.extras?.view ?? [])]),
+  );
+  optional(
+    "stay",
+    "住",
+    briefNames([...(session.guideSelections?.stay ?? []), ...(session.extras?.stay ?? [])]),
+  );
+  optional(
+    "food",
+    "吃",
+    briefNames([...(session.guideSelections?.food ?? []), ...(session.extras?.food ?? [])]),
+  );
+  return facts.slice(0, 9);
+}
+
+/**
+ * 档案栏快照：头 + 五步轨 + 已定条。会话状态一变就重算，客户端整栏替换，
+ * 不留本地副本（避免刷新恢复、重进页面时两处不一致）。
+ */
+export function buildDossier(
+  session: PlanSession,
+  state: PlanSessionTurn["state"],
+): PlanSessionDossier {
+  const active = DOSSIER_ACTIVE_INDEX[state] ?? 0;
+  const days = effectiveDays(session);
+  return {
+    head: [
+      session.destination ?? "目的地待定",
+      days ? `${days} 天` : null,
+      session.origin ? `${session.origin}出发` : null,
+    ]
+      .filter(Boolean)
+      .join(" · "),
+    steps: DOSSIER_STEPS.map((s, i) => ({
+      id: s.id,
+      label: s.label,
+      state: (i < active ? "done" : i === active ? "active" : "todo") as PlanSessionDossierStep["state"],
+    })),
+    facts: dossierFactsOf(session),
+  };
+}
+
 /**
  * 服务端硬护栏：没拿到目的地不出卡（文字问）；已答过的维度不再出卡
  * （改答案走 answerUpdates，不走重问）；天数已有定值时不再出天数卡。
@@ -1003,56 +1215,122 @@ const GUIDE_LABELS: Record<"view" | "stay" | "food", string> = {
   food: "美食推荐",
 };
 
+/** 三段筛选的先后顺序：先景点、再住宿、最后吃的，每段一张独立卡。 */
+const GUIDE_ORDER: Array<"view" | "stay" | "food"> = ["view", "stay", "food"];
+
+const GUIDE_SHORT_LABELS: Record<"view" | "stay" | "food", string> = {
+  view: "景点",
+  stay: "住宿",
+  food: "美食",
+};
+
+const GUIDE_STAGE_TITLES: Record<"view" | "stay" | "food", (dest: string) => string> = {
+  view: (d) => `${d} · 先挑想去的景点`,
+  stay: (d) => `${d} · 再挑住的地方`,
+  food: (d) => `${d} · 最后挑吃的`,
+};
+
+/** 每段卡出场时的引导语（段间过渡与打字岔开的召回都用它）。 */
+const GUIDE_STAGE_INVITE: Record<"view" | "stay" | "food", string> = {
+  view: "先挑想去的景点，勾掉不想要的——",
+  stay: "接着挑住的地方——",
+  food: "最后一轮，挑几家想吃的馆子——",
+};
+
 /**
- * 信息齐后、出方案前的筛选卡：真实候选（文字介绍 + 实拍图 + 实时价）。
- * 生成失败返回 null 走「直接出方案」，不让筛选环节挡住主链路。
+ * 分段筛选进行到哪段：有候选但还没勾定的一段；全部勾完返回 null。
+ * 「勾定」= guideSelections 里该段有勾选（每段至少勾一处或交给代选）。
  */
-async function buildGuideCard(
+function pendingGuideStage(session: PlanSession): "view" | "stay" | "food" | null {
+  if (!session.guideSent || !session.guide) return null;
+  for (const key of GUIDE_ORDER) {
+    const cat = session.guide.cats.find((c) => c.key === key);
+    if (!cat || cat.items.length === 0) continue;
+    if ((session.guideSelections?.[key]?.length ?? 0) === 0) return key;
+  }
+  return null;
+}
+
+/** 当前段的筛选卡：只带这一段的候选，标题与口播都按段走。 */
+function guideCardForStage(
+  session: PlanSession,
+  stage: "view" | "stay" | "food",
+): PlanSessionCard | null {
+  const cat = session.guide?.cats.find((c) => c.key === stage);
+  if (!session.guide || !cat) return null;
+  return {
+    type: "guide",
+    stage: "挑一挑",
+    title: GUIDE_STAGE_TITLES[stage](session.guide.destination),
+    destination: session.guide.destination,
+    cats: [cat],
+  };
+}
+
+/**
+ * 信息齐后、出方案前的候选生成：真实候选（文字介绍 + 实拍图 + 实时价），
+ * 全量存进 session.guide，由三段筛选卡逐段下发。生成失败返回 false 走
+ * 「直接出方案」，不让筛选环节挡住主链路。
+ */
+async function buildGuideCandidates(
   session: PlanSession,
   service: PlanningService,
-): Promise<PlanSessionCard | null> {
-  if (!session.destination) return null;
+): Promise<boolean> {
+  if (!session.destination) return false;
   try {
-    const g = await service.buildDestinationGuide(session.destination, 6);
+    // 落位诉求从用户原话里抽（「住得离兵马俑近点」）：抽到才按距离重排住宿段。
+    const focus = extractHotelFocus(composePlanningInput(session));
+    const g = await service.buildDestinationGuide(session.destination, 6, {
+      ...(focus ? { hotelFocus: focus.focus, hotelFocusRef: focus.ref } : {}),
+    });
     const toItems = (list: GuideCandidate[]): PlanSessionGuideItem[] =>
       list.map((c) => ({
         name: c.name,
-        rec: c.rec,
-        rating: c.rating,
         intro: c.intro ?? "",
         photos: c.photos,
         ...(c.address ? { address: c.address } : {}),
-        price: c.price ?? null,
-        priceNote: c.priceNote ?? "",
-        pricePending: c.pricePending ?? c.price == null,
+        metrics: c.metrics,
         picked: false,
       }));
     const allCats: PlanSessionGuideCat[] = [
-      { key: "view", label: GUIDE_LABELS.view, items: toItems(g.view) },
-      { key: "stay", label: GUIDE_LABELS.stay, items: toItems(g.stay) },
-      { key: "food", label: GUIDE_LABELS.food, items: toItems(g.food) },
+      {
+        key: "view",
+        label: GUIDE_LABELS.view,
+        items: toItems(g.view),
+        sortNote: g.sortNotes.view,
+      },
+      {
+        key: "stay",
+        label: GUIDE_LABELS.stay,
+        items: toItems(g.stay),
+        sortNote: g.sortNotes.stay,
+        ...(g.stayAnchor
+          ? {
+              anchor: {
+                id: g.stayAnchor.id,
+                label: g.stayAnchor.label,
+                why: g.stayAnchor.why,
+              },
+            }
+          : {}),
+      },
+      {
+        key: "food",
+        label: GUIDE_LABELS.food,
+        items: toItems(g.food),
+        sortNote: g.sortNotes.food,
+      },
     ];
     const cats = allCats.filter((c) => c.items.length > 0);
-    if (cats.length === 0) return null;
-    // 预选必玩 Top3：把「从零选」变成「确认微调」
-    const view = cats.find((c) => c.key === "view");
-    view?.items.slice(0, 3).forEach((it) => {
-      it.picked = true;
-    });
+    if (cats.length === 0) return false;
     session.guide = { destination: g.destination, cats };
-    return {
-      type: "guide",
-      stage: "挑一挑",
-      title: `${g.destination} · 先挑想去的地方`,
-      destination: g.destination,
-      cats,
-    };
+    return true;
   } catch (err) {
     console.warn(
       "[travel-plan-session] 筛选候选生成失败，直接出方案:",
       err instanceof Error ? err.message : err,
     );
-    return null;
+    return false;
   }
 }
 
@@ -1071,6 +1349,37 @@ function buildWishlistCard(
       stay: "例如：太古里附近的酒店",
       food: "例如：陈麻婆豆腐",
     },
+  };
+}
+
+/** 三段筛选全部勾完：记账 + 进补心愿（endpoint 内使用，抽出来复用代选路径）。 */
+function finalizeGuideTurn(
+  session: PlanSession,
+  selections: { view: string[]; stay: string[]; food: string[] },
+): PlanSessionTurn {
+  session.guideSelections = selections;
+  session.extras = undefined;
+  session.awaitingExtras = true;
+  session.ready = true;
+  session.pendingQuestion = undefined;
+  const parts: string[] = [];
+  if (selections.view.length) parts.push(`必玩 ${selections.view.join("、")}`);
+  if (selections.stay.length) parts.push(`住宿 ${selections.stay.join("、")}`);
+  if (selections.food.length) parts.push(`美食 ${selections.food.join("、")}`);
+  const say = `就按这几处来排：${parts.join("；")}。还有非去不可、但不在列表里的地方吗？没有就直接算预算。`;
+  session.history.push({ role: "user", content: `（筛选）${parts.join("；")}` });
+  session.history.push({ role: "assistant", content: say });
+  session.answers = session.answers.filter((a) => a.id !== "guide");
+  session.answers.push({ id: "guide", question: "想玩哪些", answer: parts.join("；") });
+  return {
+    ok: true,
+    sessionId: session.id,
+    state: "wishlist_ready",
+    say,
+    cards: [buildWishlistCard(selections)],
+    draft: null,
+    budget: null,
+    dossier: buildDossier(session, "wishlist_ready"),
   };
 }
 
@@ -1217,26 +1526,58 @@ async function runTurn(
         : "想去哪儿玩？";
   }
 
-  // 信息齐 → 先出「必玩/住宿/美食」筛选卡（只出一次）。用户勾选确认后
+  // 信息齐 → 生成全量候选，先下发第一段（景点）筛选卡。三段依次勾完
   // 才进入生成，选中的地点作为心愿清单交给规划引擎。
   if (ready && service && !session.guideSent && !session.guideSelections) {
-    const guideCard = await buildGuideCard(session, service);
-    if (guideCard) {
+    const built = await buildGuideCandidates(session, service);
+    if (built) {
       session.guideSent = true;
       session.ready = true;
       session.pendingQuestion = undefined;
-      const guideSay = `${session.destination}的候选整理好了：勾掉不想要的，我再按你选的地点排行程、核实时价。`;
-      session.history.push({ role: "assistant", content: guideSay });
-      return {
-        ok: true,
-        sessionId: session.id,
-        state: "guide_ready",
-        say: guideSay,
-        cards: [...cards.filter((c) => c.type !== "choice"), guideCard],
-        draft: null,
-        budget: null,
-      };
+      const stage = pendingGuideStage(session);
+      const guideCard = stage ? guideCardForStage(session, stage) : null;
+      if (guideCard && stage) {
+        const guideSay = `${session.destination}的候选整理好了，住宿和美食后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
+        session.history.push({ role: "assistant", content: guideSay });
+        return {
+          ok: true,
+          sessionId: session.id,
+          state: "guide_ready",
+          say: guideSay,
+          cards: [...cards.filter((c) => c.type !== "choice"), guideCard],
+          draft: null,
+          budget: null,
+          dossier: buildDossier(session, "guide_ready"),
+        };
+      }
     }
+  }
+
+  // 分段筛选进行中、用户却先打了字：说的景点/餐厅照收进补充心愿，再续发当前段的卡。
+  const stage = pendingGuideStage(session);
+  if (ready && service && stage && session.guide) {
+    const lastUser =
+      [...session.history].reverse().find((h) => h.role === "user")?.content ?? "";
+    const added = recordExtras(session, {
+      view: extractWishlist(lastUser, session.destination),
+      food: extractFoodWishlist(lastUser),
+      note: lastUser,
+    });
+    const say = added.length
+      ? `${added.slice(0, 6).join("、")}记下了，会并入心愿。${GUIDE_STAGE_INVITE[stage]}`
+      : GUIDE_STAGE_INVITE[stage];
+    session.pendingQuestion = undefined;
+    session.history.push({ role: "assistant", content: say });
+    return {
+      ok: true,
+      sessionId: session.id,
+      state: "guide_ready",
+      say,
+      cards: [guideCardForStage(session, stage)!],
+      draft: null,
+      budget: null,
+      dossier: buildDossier(session, "guide_ready"),
+    };
   }
 
   session.ready = ready;
@@ -1255,6 +1596,7 @@ async function runTurn(
     cards,
     draft: null,
     budget: null,
+    dossier: buildDossier(session, ready ? "ready" : "gathering"),
   };
 }
 
@@ -1301,14 +1643,15 @@ const BUDGET_TIER_HINT: Record<string, string> = {
 /**
  * 口语预算答案 → 引擎档位关键词（与 extractPreferences 同词表）。
  * 编排器生成的选项是自然语言（「不差钱随便玩」），这里兜住同义表达，
- * 避免落回引擎默认档。
+ * 避免落回引擎默认档；自报金额的答案由编排器补写成「自报¥N · 档位」，
+ * 靠档位词命中，纯金额判不出档位时返回 null（走引擎默认档）。
  */
-function budgetTierHintOf(answer: string): string | null {
+export function budgetTierHintOf(answer: string): string | null {
   const v = answer.split("（")[0]!.trim();
   if (BUDGET_TIER_HINT[v]) return BUDGET_TIER_HINT[v]!;
   if (/经济|便宜|省钱|穷游/.test(v)) return BUDGET_TIER_HINT["经济"]!;
   if (/不差钱|豪华|高端|奢|五星|品质/.test(v)) return "预算高端";
-  if (/舒适|中端|四星|中等/.test(v)) return BUDGET_TIER_HINT["舒适"]!;
+  if (/舒适|中端|四星|中等|适中/.test(v)) return BUDGET_TIER_HINT["舒适"]!;
   return null;
 }
 
@@ -1664,7 +2007,7 @@ export function registerTravelPlanSessionRoutes(
     endpoints: [
       "POST   /travel/plan-session            {message} 一句话发起规划会话",
       "POST   /travel/plan-session/:id/turn   {message} 或 {cardId,values,note?} 追加一轮（每轮至多一张问题卡，题目与选项由 LLM 编排器生成）",
-      "POST   /travel/plan-session/:id/guide  {view?,stay?,food?,delegate?} 提交筛选卡勾选（信息齐后的必玩/住宿/美食候选）",
+      "POST   /travel/plan-session/:id/guide  {view?,stay?,food?,delegate?} 提交筛选卡勾选（景点→住宿→美食三段依次勾选）",
       "POST   /travel/plan-session/:id/extras {view?,stay?,food?,note?} 提交筛选后的自选补充（可空）",
       "POST   /travel/plan-session/:id/generate   信息齐后真实生成并返回预算明细（待确认）",
       "POST   /travel/plan-session/:id/approve    用户确认预算后下发最终草案",
@@ -1769,6 +2112,7 @@ export function registerTravelPlanSessionRoutes(
           cards: [] as PlanSessionCard[],
           draft: null,
           budget: null,
+          dossier: buildDossier(session, "ready"),
         } satisfies PlanSessionTurn;
       }
       const turn = await runTurn(session, deps.travelPlanningService);
@@ -1778,7 +2122,7 @@ export function registerTravelPlanSessionRoutes(
     return reply.code(400).send({ ok: false, error: "body 需为 {message} 或 {cardId,values,note?}" });
   });
 
-  // 筛选卡确认：勾选结果作为心愿清单，进入生成前的最后一步
+  // 筛选卡确认（分段）：每段勾选当即记账，最后一段勾完才进入补心愿。
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/guide",
     async (request, reply) => {
@@ -1793,50 +2137,63 @@ export function registerTravelPlanSessionRoutes(
       if (!session.guide) {
         return reply.code(409).send({ ok: false, error: "候选已失效，请重新发起规划" });
       }
+      const stage = pendingGuideStage(session);
+      if (!stage) {
+        return reply.code(409).send({ ok: false, error: "筛选已完成，继续后面的步骤即可" });
+      }
       session.updatedAt = Date.now();
-      const allowed: Record<"view" | "stay" | "food", Set<string>> = {
-        view: new Set(session.guide.cats.find((c) => c.key === "view")?.items.map((i) => i.name) ?? []),
-        stay: new Set(session.guide.cats.find((c) => c.key === "stay")?.items.map((i) => i.name) ?? []),
-        food: new Set(session.guide.cats.find((c) => c.key === "food")?.items.map((i) => i.name) ?? []),
-      };
+      const allowed = (key: "view" | "stay" | "food"): Set<string> =>
+        new Set(session.guide!.cats.find((c) => c.key === key)?.items.map((i) => i.name) ?? []);
       const pick = (key: "view" | "stay" | "food", list?: string[]): string[] =>
-        (list ?? []).filter((n) => allowed[key].has(n)).slice(0, 20);
-      let selections = {
-        view: pick("view", body.data.view),
-        stay: pick("stay", body.data.stay),
-        food: pick("food", body.data.food),
-      };
+        (list ?? []).filter((n) => allowed(key).has(n)).slice(0, 20);
+      const merged = (): { view: string[]; stay: string[]; food: string[] } => ({
+        view: session.guideSelections?.view ?? [],
+        stay: session.guideSelections?.stay ?? [],
+        food: session.guideSelections?.food ?? [],
+      });
+
       if (body.data.delegate) {
-        const top = (key: "view" | "stay" | "food", n: number): string[] =>
-          session.guide!.cats.find((c) => c.key === key)?.items.slice(0, n).map((i) => i.name) ?? [];
-        selections = { view: top("view", 3), stay: top("stay", 2), food: top("food", 2) };
+        // 「全部交给你」：剩余各段按推荐序代选（景点3/住宿2/美食2），直接进补心愿。
+        const topN: Record<"view" | "stay" | "food", number> = { view: 3, stay: 2, food: 2 };
+        const selections = merged();
+        for (const key of GUIDE_ORDER) {
+          if (selections[key].length > 0) continue;
+          const cat = session.guide.cats.find((c) => c.key === key);
+          if (cat && cat.items.length > 0) {
+            selections[key] = cat.items.slice(0, topN[key]).map((i) => i.name);
+          }
+        }
+        return finalizeGuideTurn(session, selections);
       }
-      if (selections.view.length + selections.stay.length + selections.food.length === 0) {
-        return reply.code(400).send({ ok: false, error: "至少勾选一处，或选择「全部交给你」" });
+
+      const picks = pick(stage, body.data[stage]);
+      if (picks.length === 0) {
+        return reply
+          .code(400)
+          .send({ ok: false, error: `至少勾选一处${GUIDE_SHORT_LABELS[stage]}，或选择「全部交给你」` });
       }
-      session.guideSelections = selections;
-      session.extras = undefined;
-      session.awaitingExtras = true;
-      session.ready = true;
-      session.pendingQuestion = undefined;
-      const parts: string[] = [];
-      if (selections.view.length) parts.push(`必玩 ${selections.view.join("、")}`);
-      if (selections.stay.length) parts.push(`住宿 ${selections.stay.join("、")}`);
-      if (selections.food.length) parts.push(`美食 ${selections.food.join("、")}`);
-      const say = `就按这几处来排：${parts.join("；")}。还有非去不可、但不在列表里的地方吗？没有就直接算预算。`;
-      session.history.push({ role: "user", content: `（筛选）${parts.join("；")}` });
-      session.history.push({ role: "assistant", content: say });
-      session.answers = session.answers.filter((a) => a.id !== "guide");
-      session.answers.push({ id: "guide", question: "想玩哪些", answer: parts.join("；") });
-      return {
-        ok: true,
-        sessionId: session.id,
-        state: "wishlist_ready",
-        say,
-        cards: [buildWishlistCard(selections)],
-        draft: null,
-        budget: null,
-      } satisfies PlanSessionTurn;
+      session.guideSelections = { ...merged(), [stage]: picks };
+      session.history.push({
+        role: "user",
+        content: `（筛选·${GUIDE_SHORT_LABELS[stage]}）${picks.join("、")}`,
+      });
+      const next = pendingGuideStage(session);
+      if (next) {
+        const pickedSay = picks.slice(0, 6).join("、");
+        const say = `${GUIDE_SHORT_LABELS[stage]}就按这几处：${pickedSay}。${GUIDE_STAGE_INVITE[next]}`;
+        session.history.push({ role: "assistant", content: say });
+        return {
+          ok: true,
+          sessionId: session.id,
+          state: "guide_ready",
+          say,
+          cards: [guideCardForStage(session, next)!],
+          draft: null,
+          budget: null,
+          dossier: buildDossier(session, "guide_ready"),
+        } satisfies PlanSessionTurn;
+      }
+      return finalizeGuideTurn(session, session.guideSelections!);
     },
   );
 
@@ -1891,6 +2248,7 @@ export function registerTravelPlanSessionRoutes(
         cards: [] as PlanSessionCard[],
         draft: null,
         budget: null,
+        dossier: buildDossier(session, "ready"),
       } satisfies PlanSessionTurn;
     },
   );
@@ -1934,6 +2292,7 @@ export function registerTravelPlanSessionRoutes(
         draft: null,
         budget,
         verification: draft.verification ?? null,
+        dossier: buildDossier(session, "budget_ready"),
       } satisfies PlanSessionTurn;
     } catch (err) {
       return reply.code(502).send({
@@ -1965,6 +2324,7 @@ export function registerTravelPlanSessionRoutes(
       // 预算卡已在流程里展示过，这里只下发草案，避免客户端重复挂预算卡
       budget: null,
       verification: session.draft.verification ?? null,
+      dossier: buildDossier(session, "generated"),
     } satisfies PlanSessionTurn;
   });
 
@@ -1983,7 +2343,7 @@ export function registerTravelPlanSessionRoutes(
           ? "budget_ready"
           : session.awaitingExtras
             ? "wishlist_ready"
-            : session.ready && session.guideSent && !session.guideSelections
+            : session.ready && pendingGuideStage(session)
               ? "guide_ready"
               : session.ready
                 ? "ready"

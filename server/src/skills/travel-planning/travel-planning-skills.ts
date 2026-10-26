@@ -629,20 +629,30 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "规划前给用户出「种草选择卡」：景点/住宿/美食三类候选按评分取前列，每条带实拍图（本地媒体库缓存，未命中自动抓取）与推荐度（评分换算）。" +
         "【规划前第一卡】用户表达开放出行意图（「我想去大理玩」「想去成都耍」这类没带具体清单的想法）时必须先调本工具，不要直接生成行程——把候选整理成可勾选的种草选择卡（系统自动附卡），用户确认后再调 travel.plan-itinerary。用户已点名具体清单（「去大理玩洱海和喜洲」）或明确要求直接出行程时才跳过本工具。" +
         "用户选定后：选中的景点传 travel.plan-itinerary 的 wishlist、餐厅传 foodWishlist、住宿传 stayWishlist，再生成正式行程。" +
-        "用户不想挑就按推荐度代选并说明一句，不要反复追问。候选与实拍图来自真实地点库与图库抓取，不是榜单编造。",
+        "用户不想挑就按返回数组的既有顺序代选并说明一句，不要反复追问。候选与实拍图来自真实地点库与图库抓取，不是榜单编造；每行的 metrics 只放真实取到的数（评分/报价/距离），拿不到就没有这条。",
       kind: "builtin",
       tags: ["travel", "种草", "候选", "规划前", "选择卡"],
       icon: "🌿",
       parameters: [
         { name: "destination", type: "string", required: true, description: "目的地名称（如 大理/成都）" },
         { name: "perCategory", type: "number", required: false, description: "每类返回条数（默认 6，3~8）" },
+        {
+          name: "hotelFocus",
+          type: "string",
+          required: false,
+          description:
+            "用户原话里的住宿落位诉求：seaside/airport/station/attraction/downtown（如「住得离洱海近点」=attraction+洱海）。传了才按离参照点重排住宿段。",
+        },
+        { name: "hotelFocusRef", type: "string", required: false, description: "落位参照点名称（hotelFocus=attraction 时必填）" },
       ],
       outputSchema: {
         ok: "是否成功",
         destination: "目的地",
-        view: "景点候选 [{name,rating,rec,address,tags,latitude,longitude,photos[],intro,price,priceNote,pricePending}]",
-        stay: "住宿候选",
+        view: "景点候选 [{name,address,tags,latitude,longitude,photos[],intro,metrics[{kind,label,source}],pricePending,priceNote}]",
+        stay: "住宿候选（metrics 含「离锚点多远」，锚点见 stayAnchor）",
         food: "美食候选",
+        stayAnchor: "住宿落位参照点 {id,label,why,latitude,longitude}，没取到可信参照点则为 null",
+        sortNotes: "各段排序依据文案 {view,stay,food}（只描述实际参与排序的信号）",
         fromCache: "POI 是否命中缓存",
       },
       permissions: ["network:external"],
@@ -655,7 +665,15 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       }
       try {
         const per = Number(input.perCategory) || 6;
-        const g = await travelPlanningService.buildDestinationGuide(destination, per);
+        const focusRaw = typeof input.hotelFocus === "string" ? input.hotelFocus.trim() : "";
+        const hotelFocus = (["seaside", "airport", "station", "attraction", "downtown"] as const)
+          .find((f) => f === focusRaw);
+        const g = await travelPlanningService.buildDestinationGuide(destination, per, {
+          ...(hotelFocus ? { hotelFocus } : {}),
+          ...(hotelFocus && typeof input.hotelFocusRef === "string"
+            ? { hotelFocusRef: input.hotelFocusRef.trim() }
+            : {}),
+        });
         return {
           ok: true,
           destination: g.destination,
@@ -663,8 +681,10 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
           view: g.view,
           stay: g.stay,
           food: g.food,
+          stayAnchor: g.stayAnchor,
+          sortNotes: g.sortNotes,
           fromCache: g.fromCache,
-          hint: "让用户按类勾选；选中项 → plan-itinerary 的 wishlist(景点)/foodWishlist(餐厅)/stayWishlist(住宿)；不想挑就按 rec 代选",
+          hint: "让用户按类勾选；选中项 → plan-itinerary 的 wishlist(景点)/foodWishlist(餐厅)/stayWishlist(住宿)；不想挑就按数组既有顺序代选（顺序已按真实评分与收藏加权）",
         };
       } catch (err) {
         return { ok: false, error: `种草候选获取失败：${err instanceof Error ? err.message : String(err)}` };

@@ -39,7 +39,6 @@ double briefingWindowHeight({
     if (data.schedule.isNotEmpty) (data.schedule.length, false),
     if (data.todoPending.isNotEmpty)
       (data.todoPending.length, data.doneTodayCount > 0),
-    if (data.travel != null) (2, data.travelPacking > 0),
     if (data.notes.isNotEmpty) (data.notes.length, false),
     if (data.hits.isNotEmpty) (data.hits.length, false),
     if (data.days.isNotEmpty) (data.days.length, false),
@@ -61,8 +60,6 @@ class _BriefingData {
     required this.schedule,
     required this.todoPending,
     required this.doneTodayCount,
-    required this.travel,
-    required this.travelPacking,
     required this.notes,
     required this.hits,
     required this.days,
@@ -71,12 +68,6 @@ class _BriefingData {
   final List<Map<String, dynamic>> schedule;
   final List<String> todoPending;
   final int doneTodayCount;
-
-  /// 今日行程对象（无进行中行程时 null → 整块不出现）。
-  final Map<String, dynamic>? travel;
-
-  /// 行程随身叮嘱条数（决定行程面板是否有脚注行）。
-  final int travelPacking;
   final List<Map<String, dynamic>> notes;
   final List<Map<String, dynamic>> hits;
   final List<Map<String, dynamic>> days;
@@ -105,22 +96,10 @@ class _BriefingData {
       if (rawDone is num) doneCount = rawDone.round();
     }
 
-    final Object? rawTravel = briefing?["travel"];
-    final Map<String, dynamic>? travel =
-        rawTravel is Map ? rawTravel.cast<String, dynamic>() : null;
-    final Object? rawPacking = travel?["packing"];
-    final int packing = rawPacking is List
-        ? rawPacking
-            .where((Object? e) => (e?.toString() ?? "").isNotEmpty)
-            .length
-        : 0;
-
     return _BriefingData(
       schedule: listOf("todaySchedule"),
       todoPending: pending,
       doneTodayCount: doneCount,
-      travel: travel,
-      travelPacking: packing,
       notes: listOf("pendingNotes"),
       hits: listOf("interestHits"),
       days: listOf("upcomingImportantDays"),
@@ -252,36 +231,6 @@ String _composeBriefingBody(_BriefingData d, String narration) {
     ));
   }
 
-  // 今日行程（第六源）：第一站 + 目的地/标题 + 随身叮嘱
-  final Map<String, dynamic>? travel = d.travel;
-  if (travel != null) {
-    final Object? rawFirst = travel["firstStop"];
-    final String destination = travel["destination"]?.toString() ?? "";
-    final String title = travel["title"]?.toString() ?? "";
-    final List<String> packing = (travel["packing"] as List?)
-            ?.map((Object? e) => e?.toString() ?? "")
-            .where((String s) => s.isNotEmpty)
-            .toList() ??
-        const <String>[];
-    final StringBuffer rows = StringBuffer();
-    if (rawFirst is Map) {
-      rows.write(_itTime(
-        rawFirst["startTime"]?.toString() ?? "",
-        rawFirst["name"]?.toString() ?? "",
-      ));
-    }
-    rows.write(_itBullet(
-      (destination.isEmpty || title.isEmpty)
-          ? "$destination$title"
-          : "$destination · $title",
-    ));
-    buf.write(panel(
-      "🧳 今日行程",
-      rows.toString(),
-      foot: packing.isEmpty ? "" : "记得带：${packing.join("、")}",
-    ));
-  }
-
   // 待复习笔记
   if (d.notes.isNotEmpty) {
     final StringBuffer rows = StringBuffer();
@@ -331,7 +280,6 @@ String _buildChips(_BriefingData d) {
 
   add("日程", d.schedule.length);
   add("待办", d.todoPending.length);
-  add("行程", d.travel == null ? 0 : 1);
   add("笔记", d.notes.length);
   add("热搜", d.hits.length);
   add("纪念日", d.days.length);

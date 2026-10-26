@@ -11,6 +11,7 @@ import "mobile_theme.dart";
 ///
 /// 与桌面端简报同源:GET /api/morning-briefing?sessionId=<账号 id>,
 /// 服务端实时生成(天气/今日日程/待看笔记/待办跟进/近期重要日子/穿搭建议)。
+/// 在途行程段只给手机端：带 includeInProgressTravel=1 才取，桌面端不传。
 class MobileBriefingPage extends StatefulWidget {
   const MobileBriefingPage({super.key, this.client});
 
@@ -38,8 +39,9 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
       _error = null;
     });
     try {
+      // 在途行程段只投手机端：手机端显式开启（电脑端不传，晨报里没有行程段）
       final Uri uri = Uri.parse(
-          "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}");
+          "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&includeInProgressTravel=1");
       final http.Response res = await (widget.client ?? http.Client())
           .get(uri)
           .timeout(const Duration(seconds: 20));

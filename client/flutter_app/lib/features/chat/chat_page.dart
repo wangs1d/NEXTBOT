@@ -993,7 +993,7 @@ class _ChatPageState extends State<ChatPage>
     }
     final String? progress = progressMessage?.text.trim();
     if (progress != null && progress.isNotEmpty) return progress;
-    return "Agent 思考中...";
+    return "我看看";
   }
 
   /// 实时进度是否和最新一条 assistant 回复文本撞车。
@@ -1216,11 +1216,9 @@ class _ChatPageState extends State<ChatPage>
 
   /// 输入框上方的统一 Agent 状态条。
   ///
-  /// 处理状态收拢到这一处（取代旧的「消息流内进度气泡 + 工具徽标」两处展示）：
-  /// - 工具调用中：优先显示工具族的进行时文案（[friendlyToolLabel]，未入表
-  ///   的工具显示通用「正在调用工具」，不裸露原始工具名）
-  /// - 其余处理中：显示口语化进度（`agent_status` > interim ack > 默认，
-  ///   复用 [_processingStatusText] 的优先级）
+  /// - 工具调用中且工具已入表：显示该工具族的进行时文案（[friendlyToolLabel]）
+  /// - 其余情况（含未入表工具）：显示口语化进度（`agent_status` > interim ack >
+  ///   默认，复用 [_processingStatusText] 的优先级）
   Widget _buildAgentStatusStrip(ColorScheme cs) {
     final String tool = widget.currentToolName?.trim() ?? "";
     // 前台轮次（流式回复/工具调用）与后台任务面（回执聚合）都会点亮状态条；
@@ -1233,11 +1231,12 @@ class _ChatPageState extends State<ChatPage>
       return const SizedBox.shrink();
     }
 
-    final String text = tool.isNotEmpty
-        ? friendlyToolLabel(tool)
-        : foregroundActive
+    final String? toolLabel =
+        tool.isNotEmpty ? friendlyToolLabel(tool) : null;
+    final String text = toolLabel ??
+        (foregroundActive
             ? _processingStatusText()
-            : "$bgCount 个任务后台进行中";
+            : "$bgCount 个任务后台进行中");
     final int? percent = widget.agentStatusPercent;
 
     return Material(
@@ -2695,16 +2694,47 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       children: <Widget>[
         _buildMessageHeader(),
         bubble,
-        // 行程卡独立第二条消息形态（2026-09-25 用户定稿）：上一条气泡用文字/
-        // 照片介绍规划，卡片不框进任何气泡外壳，作为消息流中的独立大卡
-        // 跟在下方（卡自带完整外观与 460 限宽：海报/叮嘱/CTA/脚注）。正文
-        // 气泡内的卡渲染由 buildMessageBody(excludeTravelCard) 关闭，避免双份。
-        if (travelCard != null)
-          Padding(
-            padding: const EdgeInsets.only(top: AppTypography.space2),
-            child: AgentResultCard(data: travelCard),
-          ),
+        // 行程卡独立第二条消息（2026-09-25 定稿，2026-10-26 补消息头）：上一条
+        // 气泡只装文字/照片介绍，卡片不框进气泡外壳、自带名称/时间头，读作
+        // 助手紧接着发出的下一条独立消息。正文气泡内的卡渲染由
+        // buildMessageBody(excludeTravelCard) 关闭，避免双份。
+        if (travelCard != null) ...<Widget>[
+          const SizedBox(height: AppTypography.space3),
+          _buildTravelCardMessageHeader(),
+          AgentResultCard(data: travelCard),
+        ],
       ],
+    );
+  }
+
+  /// 行程卡作为独立消息的消息头（与助手气泡头同款式：名称 + 时间）。
+  Widget _buildTravelCardMessageHeader() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2, left: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Text(
+            widget.agentName ?? "AI 助手",
+            style: TextStyle(
+              fontSize: AppTypography.caption,
+              height: AppTypography.headingLineHeight,
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+          ),
+          const SizedBox(width: 6),
+          Text(
+            _formatTime(widget.mainMessage.timestamp),
+            style: TextStyle(
+              fontSize: AppTypography.micro,
+              height: AppTypography.headingLineHeight,
+              color: cs.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
     );
   }
 

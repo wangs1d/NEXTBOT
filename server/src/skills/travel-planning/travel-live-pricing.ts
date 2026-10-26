@@ -36,12 +36,30 @@ export interface LiveAttractionPrice {
   note: string;
 }
 
-export interface LiveHotelPrice {
-  amount: number;
-  kind: "exact" | "market";
-  note: string;
-  bookingUrl?: string;
-}
+export type HotelTier = "budget" | "mid" | "luxury";
+
+/**
+ * 酒店真实房价的两种成因，刻意做成判别联合：
+ * exact 是本店报价（可展示、可计入合计），market 是同城同档中位数
+ * （只是预算参考，字段名不叫 amount，防止任何展示层把它当本店报价）。
+ */
+export type LiveHotelPrice =
+  | {
+      kind: "exact";
+      amount: number;
+      note: string;
+      /** 飞猪住客评分（0-5，平台未返回时不填） */
+      rating?: number;
+      bookingUrl?: string;
+    }
+  | {
+      kind: "market";
+      /** 同城同档在售酒店价格中位数——不是任何一家的报价 */
+      reference: number;
+      sampleSize: number;
+      tier: HotelTier;
+      note: string;
+    };
 
 export interface LiveTransportPrice {
   /** 往返总价（单人） */
@@ -173,7 +191,7 @@ export async function lookupAttractionPrice(
 
 // ──────────────────────────── 酒店房价 ────────────────────────────
 
-const HOTEL_TIER_STARS: Record<"budget" | "mid" | "luxury", string> = {
+const HOTEL_TIER_STARS: Record<HotelTier, string> = {
   budget: "1,2",
   mid: "3,4",
   luxury: "5",
@@ -183,6 +201,8 @@ interface HotelItem {
   name: string;
   price: number;
   star: string;
+  /** 飞猪平台住客评分（0-5）；未返回即不填，绝不兜底成默认分 */
+  rating?: number;
   bookingUrl?: string;
 }
 
@@ -204,10 +224,13 @@ async function searchHotels(
       const name = strOf(item, "name");
       const price = parsePriceCny(item.price ?? item.adultPrice);
       if (!name || !Number.isFinite(price) || price <= 0) continue;
+      // rate 优先、score 兜底：与 flyai-quote-source 的酒店评分同一口径
+      const rating = parsePriceCny(item.rate ?? item.score);
       out.push({
         name,
         price: Math.round(price),
         star: strOf(item, "star"),
+        ...(Number.isFinite(rating) && rating > 0 ? { rating } : {}),
         bookingUrl: strOf(item, "detailUrl") || undefined,
       });
     }
@@ -224,7 +247,7 @@ export async function lookupHotelPrice(
   name: string,
   city: string,
   opts: {
-    tier?: "budget" | "mid" | "luxury";
+    tier?: HotelTier;
     checkIn?: string;
     checkOut?: string;
   } = {},
@@ -240,9 +263,10 @@ export async function lookupHotelPrice(
       const hit = exact.find((h) => sameName(h.name, name));
       if (hit) {
         return {
-          amount: hit.price,
           kind: "exact" as const,
+          amount: hit.price,
           note: "飞猪实时房价，以下单页为准",
+          ...(hit.rating ? { rating: hit.rating } : {}),
           ...(hit.bookingUrl ? { bookingUrl: hit.bookingUrl } : {}),
         };
       }
@@ -255,8 +279,10 @@ export async function lookupHotelPrice(
       const medianPrice = median(pool.map((h) => h.price));
       if (medianPrice == null || pool.length < 3) return null;
       return {
-        amount: medianPrice,
         kind: "market" as const,
+        reference: medianPrice,
+        sampleSize: pool.length,
+        tier,
         note: `未取到该酒店实时价，按同城同档 ${pool.length} 家在售酒店中位数参考`,
       };
     });

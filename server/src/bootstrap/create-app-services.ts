@@ -538,6 +538,12 @@ import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
 import { registerOrderStatusTools } from "../tools/shopping-tools.js";
+// 包裹聚合（2026-10-26）：通知/短信/邮件流里的运单号 → 包裹实体登记表 → 丰桥补轨迹。
+// 与 shopping 流并挂，互不替代（那边是订单事件原文，这边是有状态的运单实体）。
+import { PackageStore } from "../services/package-track/package-store.js";
+import { createPackageIntake } from "../services/package-track/package-intake.js";
+import { SfQiaoProvider } from "../services/package-track/express-provider.js";
+import { registerPackageTools } from "../tools/package-tools.js";
 import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
 import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
@@ -689,15 +695,34 @@ export async function createAppServices(): Promise<AppServices> {
   let emitShoppingOrder:
     | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
     | null = null;
+  // 包裹聚合接入（2026-10-26）：同一条入站消息同时喂订单流与包裹登记表。
+  // emit 晚绑定（sensorKernel 在下方才创建），emit 未就绪时线索仍照常登记，
+  // 只是这一次不播信号——宁可少一次开口，也不能丢实体。
+  let emitPackageTrack:
+    | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
+    | null = null;
+  const packageStore = new PackageStore(join(getDataDir(), "package-track", "packages.json"));
+  const packageIntake = createPackageIntake({
+    store: packageStore,
+    emit: (partial) => emitPackageTrack?.(partial),
+  });
   messageHubService.onInbound = (input, message) => {
-    if (!emitShoppingOrder) return;
-    const signal = deriveOrderSignal({
+    const inboundText = message.text ?? input.text ?? "";
+    if (emitShoppingOrder) {
+      const signal = deriveOrderSignal({
+        actorId: input.actorId,
+        platform: String(input.platform ?? ""),
+        title: input.title ?? "",
+        text: inboundText,
+      });
+      if (signal) emitShoppingOrder(signal);
+    }
+    packageIntake({
       actorId: input.actorId,
       platform: String(input.platform ?? ""),
       title: input.title ?? "",
-      text: message.text ?? input.text ?? "",
+      text: inboundText,
     });
-    if (signal) emitShoppingOrder(signal);
   };
   const messagePlatformGateway = new MessagePlatformGateway();
 
@@ -2207,24 +2232,41 @@ export async function createAppServices(): Promise<AppServices> {
   const morningBriefingScheduler = new MorningBriefingScheduler({
     briefingService: morningBriefingService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
-    onBriefingTriggered: async (sessionId, payload) => {
-      const sent = wsConnectionRegistry.trySend(
-        sessionId,
+    onBriefingTriggered: async (sessionId, payload, desktopPayload) => {
+      const frame = (p: typeof payload): string =>
         JSON.stringify({
           type: ServerEventType.MorningBriefing,
           payload: {
             sessionId,
-            mode: payload.mode,
-            narrationText: payload.narrationText,
-            briefing: payload.briefing,
+            mode: p.mode,
+            narrationText: p.narrationText,
+            briefing: p.briefing,
           },
-        }),
-      );
+        });
+      // 在途行程段只投手机端：手机收完整版，电脑收不含行程段的那份；
+      // 无在途行程时两端是同一份，一次全端广播即可。
+      let sent = false;
+      if (payload.briefing.travel) {
+        sent = wsConnectionRegistry.trySendToDeviceClasses(
+          sessionId,
+          frame(payload),
+          ["mobile"],
+        );
+        sent =
+          wsConnectionRegistry.trySendToDeviceClasses(
+            sessionId,
+            frame(desktopPayload),
+            ["desktop"],
+          ) || sent;
+      } else {
+        sent = wsConnectionRegistry.trySend(sessionId, frame(payload));
+      }
       if (sent) {
         markMorningBriefingDelivered(sessionId, "scheduled");
       } else {
         // 两端都不在线：转统一管道挂起（directText 零 LLM，must 层必达），任一设备
         // 重连 flushDue 直推；配置移动推送时升级系统通知。dedupKey 带日期防跨日重发。
+        // 管道可能落到任一设备 → 用电脑版（不含在途行程段）口径。
         proactivePipeline.submitProposal({
           proposalId: `p_${Date.now().toString(36)}_mbrief`,
           actorId: sessionId,
@@ -2233,9 +2275,9 @@ export async function createAppServices(): Promise<AppServices> {
           importance: "medium",
           dedupKey: `morning_briefing:${sessionId}:${new Date().toISOString().slice(0, 10)}`,
           title: "早安简报",
-          summary: payload.narrationText.slice(0, 200),
+          summary: desktopPayload.narrationText.slice(0, 200),
           evidence: ["morning_briefing_scheduled", "ws_push_failed"],
-          directText: payload.narrationText,
+          directText: desktopPayload.narrationText,
           createdAt: Date.now(),
           source: "time",
         });
@@ -2362,6 +2404,7 @@ export async function createAppServices(): Promise<AppServices> {
   // 询问是否预约滴滴（确认后 Agent 走 ride_hailing.quote/book 真实下单）。调度
   // 模式仿晚间 digest：每分钟 tick；WS 在线直推手机端确认卡，不在线走 proactive
   // 管道 must 层兜底（directText 零 LLM，重连即直推——覆盖航班落地恢复网络场景）。
+  // 在途行程的提醒只投手机端（2026-10-26）：人在路上，电脑端不响。
   const transferWatchService = new TransferWatchService({
     listPlans: () => travelPlanStore.listPlansWithTransfers(),
     setPickupState: (planId, segmentNo, state) =>
@@ -2374,7 +2417,7 @@ export async function createAppServices(): Promise<AppServices> {
           "[TransferWatch] 行程无 sessionId，跳过接驳提醒推送");
         return;
       }
-      const sent = wsConnectionRegistry.trySend(
+      const sent = wsConnectionRegistry.trySendToDeviceClasses(
         payload.sessionId,
         JSON.stringify({
           type: ServerEventType.AgentTransferReminder,
@@ -2388,9 +2431,10 @@ export async function createAppServices(): Promise<AppServices> {
             phase: payload.phase,
           },
         }),
+        ["mobile"],
       );
       if (!sent) {
-        // 全端离线：must 层兜底（用户重连后 directText 直推原文）
+        // 手机端离线：must 层兜底，定向手机（用户重连后 directText 直推原文）
         proactivePipeline.submitProposal({
           proposalId: `p_${Date.now().toString(36)}_transfer`,
           actorId: payload.sessionId,
@@ -2404,6 +2448,7 @@ export async function createAppServices(): Promise<AppServices> {
           directText: payload.message,
           createdAt: Date.now(),
           source: "time",
+          targetDeviceClass: "mobile",
         });
       }
     },
@@ -4866,16 +4911,16 @@ export async function createAppServices(): Promise<AppServices> {
       source: "time",
     });
   });
-  // 定时任务超窗未补发通知：runtime 离线跨过触发点且超过补发窗口（默认 24h）时，
-  // 不再静默执行也不再静默丢弃——告知一次"这个任务错过了，没补"，要补由用户决定。
+  // 定时任务迟跑未执行通知：runtime 离线跨过触发点且迟到超阈时，不再静默执行
+  // 也不再静默丢弃——告知一次"这个任务错过了，没补"，要补由用户决定。
   scheduleTaskService.setTaskMissedHandler((task, plannedAt) => {
     proactivityHub.submitIntent({
       actorId: task.sessionId,
       kind: "life_reminder",
       importance: "low",
-      title: `定时任务「${task.title ?? task.description.slice(0, 30)}」错过太久，已跳过`,
+      title: `定时任务「${task.title ?? task.description.slice(0, 30)}」错过了，已跳过`,
       summary:
-        `原定 ${plannedAt} 的这个任务在 runtime 未运行期间错过，已超过补发窗口，我没有再自动执行。` +
+        `原定 ${plannedAt} 的这个任务在 runtime 未运行期间错过了，我没有补跑。` +
         `还需要的话说一声，我重新安排一次。`,
       mode: "speak",
       source: "time",
@@ -5711,6 +5756,14 @@ export async function createAppServices(): Promise<AppServices> {
   // order.status：只读跨源库的订单状态查询（probe 判定 / 模型按需查）。
   // 只读工具，handoff 等待期不被 act_external 收缩拦下。
   registerOrderStatusTools(toolRegistry, { sourceStore });
+  // 包裹流（2026-10-26）：package-intake 的"新包裹/状态跃迁"信号从这里进内核，
+  // package.* 工具只读登记表 + 丰桥补轨迹。丰桥密钥未配置时工具仍能答
+  // （报通知侧状态 + 明说没补轨迹），不会拿假轨迹冒充。
+  emitPackageTrack = registerFeeder(sensorKernel, "package_track", "package");
+  registerPackageTools(toolRegistry, {
+    store: packageStore,
+    providers: [new SfQiaoProvider()],
+  });
   console.log(
     `[Bootstrap] 跨源统一采集库 ${sourceStore.enabled() ? "已启用" : "已关闭（SENSOR_SOURCE_STORE=0）"}；` +
       `外部信源收编 mail=${!sensorFabricDisabled("MAIL")} ics=${!sensorFabricDisabled("ICS")} finance=${!sensorFabricDisabled("FINANCE")}`,

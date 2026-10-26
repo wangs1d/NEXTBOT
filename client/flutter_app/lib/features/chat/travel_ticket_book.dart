@@ -5,24 +5,26 @@ part of "travel_plan_archive.dart";
 //
 // 往期是纸：年份 + 月份的时间脊椎，最新一段是大票，其余两列紧凑票；
 // 票身是真缺口（ClipPath 挖出来，不画假圆点）、撕线、印章、胶带、条形码。
-// 进行中 / 即将出发是光：同一套骨架换深色数字登机牌，进度与倒计时当主角。
+// 即将出发是光：最近一段给完整数字登机牌，其余退成 64 高日期行。
 //
 // 尺寸刻意压小：大票 150 高、次票 112 高，照片窗 80~128 宽，列表不会
 // 因为票根而过长。照片按显示宽度的 4 倍解码 + high 过滤，无图走等高线兜底。
 // ═══════════════════════════════════════════════════════════════════
 
 const double _kLedgerMaxWidth = 960;
-const double _kDigitalMaxWidth = 760;
+const double _kUpcomingMaxWidth = 880;
 const double _kTicketFeaturedH = 150;
 const double _kTicketCompactH = 112;
-const double _kTicketDigitalH = 126;
+const double _kTicketDigitalH = 150;
+const double _kUpcomingRowH = 64;
 
-/// 当前分段的行程列表：往期走票根册，进行中/即将出发走数字登机牌。
+/// 当前 tab 的行程列表：即将出发走主票 + 日期行，往期走票根册。
 class _RailList extends StatelessWidget {
   const _RailList({
     required this.colors,
     required this.plans,
     required this.seg,
+    required this.hasLive,
     required this.onOpen,
     required this.onShare,
     required this.onDelete,
@@ -30,39 +32,50 @@ class _RailList extends StatelessWidget {
 
   final _StageColors colors;
   final List<_PlanSummary> plans;
+
+  /// 0 即将出发 / 1 往期。
   final int seg;
+
+  /// 是否有在途行程（决定「即将出发」空态文案）。
+  final bool hasLive;
   final ValueChanged<_PlanSummary> onOpen;
   final ValueChanged<_PlanSummary> onShare;
   final ValueChanged<_PlanSummary> onDelete;
 
-  static const List<String> _emptyHints = <String>[
-    "暂无进行中的行程\n规划一个，出发后它会出现在这里",
-    "暂无即将出发的行程\n确定日期后行程会提前出现在这里",
-    "还没有往期行程\n走完的旅行会自动归档到这里",
-  ];
+  String get _emptyHint {
+    if (seg == 1) return "还没有往期行程\n走完的旅行会自动归档到这里";
+    if (hasLive) return "这段走完，下一段从哪儿开始？\n在「规划」里说一句，就能生成下一段行程";
+    return "还没有即将出发的行程\n在「规划」里说一句，行程会提前出现在这里";
+  }
 
   @override
   Widget build(BuildContext context) {
+    final bool paper = seg == 1;
+    final int bucket = paper ? 2 : 1;
     final List<_PlanSummary> items = <_PlanSummary>[
       for (final _PlanSummary s in plans)
-        if (s.bucket == seg) s,
+        if (s.bucket == bucket) s,
     ];
     if (items.isEmpty) {
       return Center(
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 28),
           child: Text(
-            _emptyHints[seg],
+            _emptyHint,
             textAlign: TextAlign.center,
             style: TextStyle(fontSize: 12, height: 1.8, color: colors.muted),
           ),
         ),
       );
     }
-    items.sort((_PlanSummary a, _PlanSummary b) =>
-        _summaryDate(b).compareTo(_summaryDate(a)));
+    if (paper) {
+      items.sort((_PlanSummary a, _PlanSummary b) =>
+          _summaryDate(b).compareTo(_summaryDate(a)));
+    } else {
+      items.sort((_PlanSummary a, _PlanSummary b) =>
+          _upcomingSortKey(a).compareTo(_upcomingSortKey(b)));
+    }
 
-    final bool paper = seg == 2;
     final bool warm = AppThemeController.instance.value == AppThemeVariant.warm;
     final _TicketSkin skin =
         paper ? _TicketSkin.paper(warm) : _TicketSkin.digital();
@@ -75,46 +88,51 @@ class _RailList extends StatelessWidget {
         child: Center(
           child: ConstrainedBox(
             constraints: BoxConstraints(
-                maxWidth: paper ? _kLedgerMaxWidth : _kDigitalMaxWidth),
+                maxWidth: paper ? _kLedgerMaxWidth : _kUpcomingMaxWidth),
             child: paper
                 ? _buildLedger(items, skin)
-                : _buildDigital(items, skin),
+                : _buildUpcoming(items, skin),
           ),
         ),
       ),
     );
   }
 
-  Widget _buildDigital(List<_PlanSummary> items, _TicketSkin skin) {
+  /// 最近一段给完整票面，其余退成 64 高日期行（一屏只给一张主票）。
+  Widget _buildUpcoming(List<_PlanSummary> items, _TicketSkin skin) {
+    final _PlanSummary hero = items.first;
+    final List<_PlanSummary> rest = items.sublist(1);
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        Padding(
-          padding: const EdgeInsets.fromLTRB(2, 10, 2, 12),
-          child: Row(
-            children: <Widget>[
-              Text(
-                seg == 0 ? "LIVE PASS · 正在发生" : "UPCOMING · 还没发生",
-                style: _monoStyle(7.5, colors.muted, spacing: 1.8),
-              ),
-              const Spacer(),
-              Text("${items.length} 段",
-                  style: _monoStyle(7.5, colors.muted, spacing: 1.2)),
-            ],
-          ),
+        const SizedBox(height: 14),
+        _TicketCard(
+          colors: colors,
+          skin: skin,
+          summary: hero,
+          featured: true,
+          digital: true,
+          tilt: 0,
+          onOpen: () => onOpen(hero),
+          onShare: () => onShare(hero),
+          onDelete: () => onDelete(hero),
         ),
-        for (int i = 0; i < items.length; i++) ...<Widget>[
-          if (i > 0) const SizedBox(height: 14),
-          _TicketCard(
-            colors: colors,
-            skin: skin,
-            summary: items[i],
-            featured: true,
-            digital: true,
-            tilt: 0,
-            onOpen: () => onOpen(items[i]),
-            onShare: () => onShare(items[i]),
-            onDelete: () => onDelete(items[i]),
+        if (rest.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 14),
+          DecoratedBox(
+            decoration: BoxDecoration(
+              border: Border(top: BorderSide(color: colors.borderSoft)),
+            ),
+            child: Column(
+              children: <Widget>[
+                for (final _PlanSummary s in rest)
+                  _UpcomingRow(
+                    colors: colors,
+                    summary: s,
+                    onTap: () => onOpen(s),
+                  ),
+              ],
+            ),
           ),
         ],
       ],
@@ -165,6 +183,202 @@ class _RailList extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: rows,
+    );
+  }
+}
+
+// ── 即将出发 · 64 高日期行 ─────────────────────────────────────────
+
+int _upcomingSortKey(_PlanSummary s) {
+  final DateTime? start = DateTime.tryParse(s.startDate.trim());
+  return start?.millisecondsSinceEpoch ?? s.createdAt;
+}
+
+/// 非主票的即将出发条目：日期 + 城市链 + 倒计时，一行 64 高。
+class _UpcomingRow extends StatelessWidget {
+  const _UpcomingRow({
+    required this.colors,
+    required this.summary,
+    required this.onTap,
+  });
+
+  final _StageColors colors;
+  final _PlanSummary summary;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final String iso =
+        summary.startDate.isNotEmpty ? summary.startDate : summary.endDate;
+    final String date = _mmddOf(iso);
+    final String weekday = _weekdayOf(iso);
+    final String route = summary.listTitle;
+    final List<String> chain = _chainOf(summary);
+    final int? days = summary.daysUntilStart;
+    final String num = days == null
+        ? "—"
+        : days <= 0
+            ? "今天"
+            : days == 1
+                ? "明天"
+                : "$days";
+    final String unit = days == null
+        ? "待定"
+        : days <= 1
+            ? "出发"
+            : "天后";
+
+    return _HoverTicket(
+      tilt: 0,
+      onTap: onTap,
+      child: Container(
+        height: _kUpcomingRowH,
+        padding: const EdgeInsets.symmetric(horizontal: 4),
+        decoration: BoxDecoration(
+          border: Border(bottom: BorderSide(color: colors.borderSoft)),
+        ),
+        child: Row(
+          children: <Widget>[
+            SizedBox(
+              width: 72,
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Text(
+                    date,
+                    style: TextStyle(
+                      fontFamily: _kFontFamily,
+                      fontFamilyFallback: _kFontFallback,
+                      fontSize: 13,
+                      height: 1.1,
+                      fontWeight: FontWeight.w600,
+                      color: colors.text,
+                      fontFeatures: const <FontFeature>[
+                        FontFeature.tabularFigures()
+                      ],
+                    ),
+                  ),
+                  const SizedBox(height: 3),
+                  Text(weekday,
+                      style: _monoStyle(7.5, colors.muted, spacing: 1)),
+                ],
+              ),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  _routeText(route, chain),
+                  const SizedBox(height: 3),
+                  _metaText(chain.length),
+                ],
+              ),
+            ),
+            const SizedBox(width: 12),
+            Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: <Widget>[
+                Text(
+                  num,
+                  style: TextStyle(
+                    fontFamily: _kFontFamily,
+                    fontFamilyFallback: _kFontFallback,
+                    fontSize: 14,
+                    height: 1,
+                    fontWeight: FontWeight.w600,
+                    color: colors.orange,
+                    fontFeatures: const <FontFeature>[
+                      FontFeature.tabularFigures()
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 3),
+                Text(unit,
+                    style: _monoStyle(7, colors.muted, spacing: 1.2)),
+              ],
+            ),
+            const SizedBox(width: 12),
+            Icon(Icons.chevron_right_rounded, size: 15, color: colors.muted),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 多城行程整条路线写全（「上海 → 西安 → 洛阳」），箭头压灰。
+  Widget _routeText(String route, List<String> chain) {
+    final TextStyle base = TextStyle(
+      fontFamily: _kFontFamily,
+      fontFamilyFallback: _kFontFallback,
+      fontSize: 12,
+      height: 1.2,
+      fontWeight: FontWeight.w600,
+      color: colors.text,
+    );
+    if (chain.length <= 1) {
+      return Text(
+        route.isEmpty ? "行程安排" : route,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: base,
+      );
+    }
+    return Text.rich(
+      TextSpan(
+        style: base,
+        children: <InlineSpan>[
+          for (int i = 0; i < chain.length; i++) ...<InlineSpan>[
+            if (i > 0)
+              TextSpan(
+                text: " → ",
+                style: base.copyWith(
+                    color: colors.muted, fontWeight: FontWeight.w400),
+              ),
+            TextSpan(text: chain[i]),
+          ],
+        ],
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
+    );
+  }
+
+  Widget _metaText(int cities) {
+    final String stay = _stayLabel(summary);
+    final List<String> parts = <String>[
+      if (cities > 1) "$cities 城",
+      if (stay.isNotEmpty) stay,
+      if (summary.stopCount > 0) "${summary.stopCount} 站",
+    ];
+    return Text.rich(
+      TextSpan(
+        children: <InlineSpan>[
+          for (int i = 0; i < parts.length; i++) ...<InlineSpan>[
+            if (i > 0)
+              TextSpan(text: " · ", style: TextStyle(color: colors.muted)),
+            TextSpan(
+              text: parts[i],
+              style: TextStyle(
+                color: i == 0 && cities > 1 ? colors.text2 : colors.muted,
+                fontWeight:
+                    i == 0 && cities > 1 ? FontWeight.w500 : FontWeight.w400,
+              ),
+            ),
+          ],
+        ],
+        style: TextStyle(
+          fontFamily: _kFontFamily,
+          fontFamilyFallback: _kFontFallback,
+          fontSize: 9,
+          height: 1.2,
+        ),
+      ),
+      maxLines: 1,
+      overflow: TextOverflow.ellipsis,
     );
   }
 }
@@ -516,7 +730,7 @@ class _TicketCard extends StatelessWidget {
                     ? _kTicketFeaturedH
                     : _kTicketCompactH;
             final double photoW = digital
-                ? 118
+                ? 128
                 : wide
                     ? 128
                     : 80;
@@ -556,9 +770,9 @@ class _TicketCard extends StatelessWidget {
                                   digital: digital,
                                   photoWidth: photoW,
                                   destination: name,
-                                  cap: digital
+                                  cap: digital && summary.bucket == 0
                                       ? "$name · LIVE"
-                                      : "${_monthEn(_summaryDate(summary).month)} · ${_summaryDate(summary).year}",
+                                      : _coverCaption(summary),
                                 ),
                               ),
                               Expanded(
@@ -599,6 +813,23 @@ class _TicketCard extends StatelessWidget {
                                   skin: skin,
                                   size: stampSize,
                                   date: _stampDate(summary),
+                                ),
+                              ),
+                            ),
+                          if (digital)
+                            Positioned(
+                              right: stubW - 25,
+                              top: 0,
+                              bottom: 0,
+                              child: Center(
+                                child: _TicketStamp(
+                                  skin: skin,
+                                  size: 50,
+                                  date: _mmddOf(summary.startDate).isEmpty
+                                      ? _stampDate(summary)
+                                      : _mmddOf(summary.startDate),
+                                  label: "待出发",
+                                  color: colors.orange,
                                 ),
                               ),
                             ),
@@ -761,13 +992,18 @@ class _TicketCard extends StatelessWidget {
     );
   }
 
+  /// 主票票面：BOARDING 章 + 城市链 + 出发/返程 + 站点轨道。
   Widget _digitalBody(String name, String ticketNo) {
-    final bool live = summary.bucket == 0;
-    final String sub = live
-        ? (summary.progressLabel.isEmpty ? "行程进行中" : "${summary.progressLabel} · 进行中")
-        : (summary.countdownLabel.isEmpty ? "即将出发" : summary.countdownLabel);
+    final List<String> chain = _chainOf(summary);
+    final bool multi = chain.length > 1;
+    final String sub = <String>[
+      if (_stayLabel(summary).isNotEmpty) _stayLabel(summary),
+      if (summary.stopCount > 0) "${summary.stopCount} 站",
+    ].join(" · ");
+    final String start = _dateFieldOf(summary.startDate);
+    final String end = _dateFieldOf(summary.endDate);
     return Padding(
-      padding: const EdgeInsets.fromLTRB(14, 10, 12, 9),
+      padding: const EdgeInsets.fromLTRB(14, 10, 12, 10),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: <Widget>[
@@ -776,10 +1012,9 @@ class _TicketCard extends StatelessWidget {
             child: Row(
               children: <Widget>[
                 _TripChip(
-                  color: live ? colors.accent : colors.orange,
-                  label: live
-                      ? "LIVE · 进行中"
-                      : "BOARDING · ${summary.countdownLabel.isEmpty ? "即将出发" : summary.countdownLabel}",
+                  color: colors.orange,
+                  label:
+                      "BOARDING · ${summary.countdownLabel.isEmpty ? "即将出发" : summary.countdownLabel}",
                 ),
                 const Spacer(),
                 Text(ticketNo,
@@ -797,53 +1032,122 @@ class _TicketCard extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 8),
+          const SizedBox(height: 9),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
             children: <Widget>[
               Flexible(
                 flex: 3,
-                child: Text(
-                  name,
-                  maxLines: 1,
+                child: Text.rich(
+                  TextSpan(
+                    children: <InlineSpan>[
+                      for (int i = 0; i < (multi ? chain.length : 1); i++)
+                        if (i == 0)
+                          TextSpan(text: multi ? chain[i] : name)
+                        else ...<InlineSpan>[
+                          TextSpan(
+                            text: " → ",
+                            style: TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.w400,
+                              color: skin.muted,
+                            ),
+                          ),
+                          TextSpan(text: chain[i]),
+                        ],
+                    ],
+                  ),
+                  maxLines: 2,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontFamily: _kFontFamily,
                     fontFamilyFallback: _kFontFallback,
-                    fontSize: 24,
-                    height: 1,
+                    fontSize: multi ? 19 : 24,
+                    height: 1.15,
                     fontWeight: FontWeight.w700,
                     letterSpacing: .3,
                     color: skin.ink,
                   ),
                 ),
               ),
-              const SizedBox(width: 8),
-              Flexible(
-                flex: 2,
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 2),
-                  child: Text(
-                    sub,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontFamily: _kFontFamily,
-                      fontFamilyFallback: _kFontFallback,
-                      fontSize: 9.5,
-                      height: 1.1,
-                      color: skin.muted,
+              if (sub.isNotEmpty) ...<Widget>[
+                const SizedBox(width: 8),
+                Flexible(
+                  flex: 2,
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 2),
+                    child: Text(
+                      sub,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontFamily: _kFontFamily,
+                        fontFamilyFallback: _kFontFallback,
+                        fontSize: 9.5,
+                        height: 1.1,
+                        color: skin.muted,
+                      ),
                     ),
                   ),
                 ),
-              ),
+              ],
             ],
           ),
           const Spacer(),
-          if (live)
-            _DayProgress(colors: colors, skin: skin, summary: summary)
-          else
-            _DayStrip(colors: colors, skin: skin, summary: summary),
+          Row(
+            children: <Widget>[
+              _TicketField(
+                skin: skin,
+                label: "DEPART",
+                value: start.isEmpty ? "—" : start,
+                size: 11,
+              ),
+              const SizedBox(width: 24),
+              _TicketField(
+                skin: skin,
+                label: "RETURN",
+                value: end.isEmpty ? "—" : end,
+                size: 11,
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _routeTrack(),
+        ],
+      ),
+    );
+  }
+
+  /// 站点轨道：虚线上按站点数等距排点，最后一站实心。
+  Widget _routeTrack() {
+    final int dots = summary.stopCount.clamp(2, 6).toInt();
+    return SizedBox(
+      height: 8,
+      child: Stack(
+        alignment: Alignment.center,
+        children: <Widget>[
+          Positioned.fill(
+            child: CustomPaint(painter: _DashTrackPainter(color: skin.line)),
+          ),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: <Widget>[
+              for (int i = 0; i < dots; i++)
+                Container(
+                  width: 5,
+                  height: 5,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: i == dots - 1 ? skin.ink2 : skin.paper,
+                    border: Border.all(
+                      color: i == dots - 1
+                          ? skin.ink2
+                          : skin.ink2.withValues(alpha: .55),
+                    ),
+                  ),
+                ),
+            ],
+          ),
         ],
       ),
     );
@@ -912,22 +1216,15 @@ class _TicketCard extends StatelessWidget {
     );
   }
 
+  /// 倒计时副券：离出发还剩几天（DAYS TO GO）。
   Widget _digitalStub(String ticketNo) {
-    final bool live = summary.bucket == 0;
-    final ({int day, int stop})? p = summary.progress;
-    final String big = live
-        ? (p == null ? "—" : _two((p.day + 1).clamp(1, summary.dayCount).toInt()))
-        : (summary.daysUntilStart == null
-            ? "—"
-            : _two(summary.daysUntilStart!));
-    final String cap = live
-        ? "OF ${_two(summary.dayCount)}"
-        : _shortDate(summary.startDate);
-    final String note = live
-        ? (_daysToEnd(summary) == null
-            ? "进行中"
-            : "距返程 ${_daysToEnd(summary)} 天")
-        : "待出发";
+    final int? days = summary.daysUntilStart;
+    final String big = days == null ? "—" : _two(days.clamp(0, 99));
+    final String note = days == null
+        ? "日期待定"
+        : days <= 0
+            ? "今天出发"
+            : "待出发";
     return DecoratedBox(
       decoration: const BoxDecoration(
         gradient: LinearGradient(
@@ -949,11 +1246,11 @@ class _TicketCard extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(6, 8, 6, 7),
+            padding: const EdgeInsets.fromLTRB(6, 10, 6, 9),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: <Widget>[
-                Text(live ? "TODAY" : "DAYS TO GO",
+                Text("DAYS TO GO",
                     style: _monoStyle(5.8, skin.muted, spacing: 1.5)),
                 Column(
                   mainAxisSize: MainAxisSize.min,
@@ -963,7 +1260,7 @@ class _TicketCard extends StatelessWidget {
                       style: TextStyle(
                         fontFamily: "Consolas",
                         fontFamilyFallback: const <String>["Courier New"],
-                        fontSize: 27,
+                        fontSize: 30,
                         height: 1,
                         fontWeight: FontWeight.w300,
                         letterSpacing: -.5,
@@ -973,10 +1270,10 @@ class _TicketCard extends StatelessWidget {
                         ],
                       ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(cap,
+                    const SizedBox(height: 3),
+                    Text(_shortDate(summary.startDate),
                         style: _monoStyle(5.4, skin.muted, spacing: 1.6)),
-                    const SizedBox(height: 2),
+                    const SizedBox(height: 3),
                     Text(
                       note,
                       style: TextStyle(
@@ -1025,24 +1322,23 @@ class _TicketPhoto extends StatelessWidget {
       digital: digital,
       initial: _initialOf(destination),
     );
+    final Widget photo = CachedMediaImage(
+      url: url,
+      fit: BoxFit.cover,
+      alignment: const Alignment(0, -0.08),
+      filterQuality: FilterQuality.high,
+      // 4 倍显示宽度解码：高 DPI 下不糊，也不把原图整张塞内存
+      cacheWidth: (photoWidth * 4).round().clamp(480, 1024).toInt(),
+      gaplessPlayback: true,
+      loadingBuilder: (BuildContext _) => fallback,
+      errorBuilder: (BuildContext _, Object __, StackTrace? ___) => fallback,
+    );
     final Widget visual = url.isEmpty
         ? fallback
-        : ColorFiltered(
-            colorFilter: ColorFilter.matrix(
-                digital ? _kDigitalMatrix : _kPaperMatrix),
-            child: CachedMediaImage(
-              url: url,
-              fit: BoxFit.cover,
-              alignment: const Alignment(0, -0.08),
-              filterQuality: FilterQuality.high,
-              // 4 倍显示宽度解码：高 DPI 下不糊，也不把原图整张塞内存
-              cacheWidth: (photoWidth * 4).round().clamp(480, 1024).toInt(),
-              gaplessPlayback: true,
-              loadingBuilder: (BuildContext _) => fallback,
-              errorBuilder: (BuildContext _, Object __, StackTrace? ___) =>
-                  fallback,
-            ),
-          );
+        : digital
+            ? photo
+            : ColorFiltered(
+                colorFilter: ColorFilter.matrix(_kPaperMatrix), child: photo);
     return Stack(
       fit: StackFit.expand,
       children: <Widget>[
@@ -1054,8 +1350,8 @@ class _TicketPhoto extends StatelessWidget {
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: <Color>[
-                      const Color(0xFF18D6F3).withValues(alpha: .18),
-                      const Color(0xFF041014).withValues(alpha: .84),
+                      Colors.white.withValues(alpha: .10),
+                      Colors.black.withValues(alpha: .84),
                     ],
                   )
                 : LinearGradient(
@@ -1127,7 +1423,7 @@ class _CoverFallback extends StatelessWidget {
               center: const Alignment(-.55, -.6),
               radius: 1.25,
               colors: digital
-                  ? const <Color>[Color(0xFF17323A), Color(0xFF08151A)]
+                  ? const <Color>[Color(0xFF242526), Color(0xFF0C0D0E)]
                   : const <Color>[Color(0xFFF3EAD7), Color(0xFFDFD3B8)],
             ),
           ),
@@ -1136,7 +1432,7 @@ class _CoverFallback extends StatelessWidget {
           child: CustomPaint(
             painter: _ContourPainter(
               color: digital
-                  ? const Color(0xFF18D6F3).withValues(alpha: .12)
+                  ? Colors.white.withValues(alpha: .10)
                   : skin.ink.withValues(alpha: .12),
             ),
           ),
@@ -1151,7 +1447,7 @@ class _CoverFallback extends StatelessWidget {
               fontWeight: FontWeight.w800,
               height: 1,
               color: digital
-                  ? const Color(0xFF18D6F3).withValues(alpha: .16)
+                  ? Colors.white.withValues(alpha: .14)
                   : skin.ink.withValues(alpha: .10),
             ),
           ),
@@ -1310,131 +1606,6 @@ class _TripChip extends StatelessWidget {
   }
 }
 
-class _DayProgress extends StatelessWidget {
-  const _DayProgress({
-    required this.colors,
-    required this.skin,
-    required this.summary,
-  });
-
-  final _StageColors colors;
-  final _TicketSkin skin;
-  final _PlanSummary summary;
-
-  @override
-  Widget build(BuildContext context) {
-    final double f = summary.progressFraction ?? 0;
-    final int n = summary.dayCount.clamp(1, 7).toInt();
-    final int done = (f * n).floor().clamp(0, n).toInt();
-    final String todayLabel = _todayLabel(summary);
-    return Column(
-      children: <Widget>[
-        Row(
-          children: <Widget>[
-            for (int i = 0; i < n; i++)
-              Expanded(
-                child: Container(
-                  height: 4,
-                  margin: EdgeInsets.only(right: i == n - 1 ? 0 : 4),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(2),
-                    color: i < done
-                        ? null
-                        : i == done
-                            ? colors.accent
-                            : skin.line,
-                    gradient: i < done
-                        ? LinearGradient(
-                            colors: <Color>[colors.accent, colors.green])
-                        : null,
-                    boxShadow: i == done
-                        ? <BoxShadow>[
-                            BoxShadow(
-                              color: colors.accent.withValues(alpha: .6),
-                              blurRadius: 6,
-                            ),
-                          ]
-                        : null,
-                  ),
-                ),
-              ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-          children: <Widget>[
-            Text(_mmddOf(summary.startDate),
-                style: _monoStyle(5.8, skin.muted, spacing: 1)),
-            Text(todayLabel, style: _monoStyle(5.8, skin.muted, spacing: 1)),
-            Text(_mmddOf(summary.endDate),
-                style: _monoStyle(5.8, skin.muted, spacing: 1)),
-          ],
-        ),
-      ],
-    );
-  }
-
-  String _todayLabel(_PlanSummary s) {
-    final ({int day, int stop})? p = s.progress;
-    final DateTime? start = DateTime.tryParse(s.startDate);
-    if (p == null || start == null) return "TODAY";
-    final DateTime d = start.add(Duration(days: p.day));
-    return "TODAY · ${_two(d.month)}.${_two(d.day)}";
-  }
-}
-
-class _DayStrip extends StatelessWidget {
-  const _DayStrip({
-    required this.colors,
-    required this.skin,
-    required this.summary,
-  });
-
-  final _StageColors colors;
-  final _TicketSkin skin;
-  final _PlanSummary summary;
-
-  @override
-  Widget build(BuildContext context) {
-    final DateTime? start = DateTime.tryParse(summary.startDate.trim());
-    if (start == null) return const SizedBox.shrink();
-    return Row(
-      children: <Widget>[
-        for (int i = 5; i >= 0; i--)
-          Container(
-            width: 23,
-            height: 23,
-            margin: EdgeInsets.only(right: i == 0 ? 0 : 4),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(6),
-              color: i == 0 ? colors.accent : null,
-              border: Border.all(
-                color: i == 0 ? colors.accent : skin.line,
-              ),
-            ),
-            child: Center(
-              child: Text(
-                "${start.subtract(Duration(days: i)).day}",
-                style: TextStyle(
-                  fontFamily: "Consolas",
-                  fontFamilyFallback: const <String>["Courier New"],
-                  fontSize: 7.5,
-                  height: 1,
-                  fontWeight: i == 0 ? FontWeight.w700 : FontWeight.w400,
-                  color: i == 0 ? const Color(0xFF06222C) : skin.muted,
-                  fontFeatures: const <FontFeature>[
-                    FontFeature.tabularFigures()
-                  ],
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-}
-
 // ── 票根壳：真缺口 + 阴影 + 纸纹 ──────────────────────────────────
 
 class _TicketShell extends StatelessWidget {
@@ -1552,15 +1723,23 @@ class _TicketStamp extends StatelessWidget {
     required this.skin,
     required this.size,
     required this.date,
+    this.label = "已出票",
+    this.color,
   });
 
   final _TicketSkin skin;
   final double size;
   final String date;
 
+  /// 章面主文案（往期「已出票」/ 待出发「待出发」）。
+  final String label;
+
+  /// 章色（缺省用皮肤自带的归档绿）。
+  final Color? color;
+
   @override
   Widget build(BuildContext context) {
-    final Color ink = skin.stamp.withValues(alpha: .82);
+    final Color ink = (color ?? skin.stamp).withValues(alpha: .82);
     return Transform.rotate(
       angle: -12 * math.pi / 180,
       child: Container(
@@ -1576,13 +1755,14 @@ class _TicketStamp extends StatelessWidget {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               border: Border.all(
-                  color: skin.stamp.withValues(alpha: .62), width: 1),
+                  color: (color ?? skin.stamp).withValues(alpha: .62),
+                  width: 1),
             ),
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
               children: <Widget>[
                 Text(
-                  "已出票",
+                  label,
                   style: TextStyle(
                     fontFamily: _kFontFamily,
                     fontFamilyFallback: _kFontFallback,
@@ -1741,6 +1921,30 @@ class _DashedLinePainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant _DashedLinePainter old) =>
       old.color != color || old.dash != dash || old.gap != gap;
+}
+
+class _DashTrackPainter extends CustomPainter {
+  const _DashTrackPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final Paint paint = Paint()
+      ..color = color
+      ..strokeWidth = 1;
+    final double y = size.height / 2;
+    for (double x = 0; x < size.width; x += 7) {
+      canvas.drawLine(
+        Offset(x, y),
+        Offset(math.min(x + 4, size.width), y),
+        paint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _DashTrackPainter old) => old.color != color;
 }
 
 class _BarcodePainter extends CustomPainter {
@@ -1923,13 +2127,6 @@ const List<double> _kPaperMatrix = <double>[
   0, 0, 0, 1, 0,
 ];
 
-const List<double> _kDigitalMatrix = <double>[
-  0.2296, 0.7724, 0.0780, 0, -10.24,
-  0.2296, 0.7724, 0.0780, 0, -10.24,
-  0.2296, 0.7724, 0.0780, 0, -10.24,
-  0, 0, 0, 1, 0,
-];
-
 TextStyle _monoStyle(
   double size,
   Color color, {
@@ -1965,6 +2162,38 @@ String _mmddOf(String iso) {
   final DateTime? d = DateTime.tryParse(iso.trim());
   if (d == null) return "";
   return "${_two(d.month)}.${_two(d.day)}";
+}
+
+String _weekdayOf(String iso) {
+  final DateTime? d = DateTime.tryParse(iso.trim());
+  if (d == null) return "";
+  const List<String> names = <String>["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
+  return names[(d.weekday - 1).clamp(0, 6)];
+}
+
+/// 照片角标月份：即将出发取出发月，往期取归档月。
+String _coverCaption(_PlanSummary s) {
+  final String iso = s.bucket == 1 && s.startDate.isNotEmpty
+      ? s.startDate
+      : (s.endDate.isNotEmpty ? s.endDate : s.startDate);
+  final DateTime? d = DateTime.tryParse(iso.trim());
+  if (d == null) return "";
+  return "${_monthEn(d.month)} · ${d.year}";
+}
+
+/// 城市链：标题里写了「A → B → C」就按站拆开，否则只有一站。
+List<String> _chainOf(_PlanSummary s) => s.listTitle
+    .split("→")
+    .map((String e) => e.trim())
+    .where((String e) => e.isNotEmpty)
+    .toList(growable: false);
+
+/// 票面日期字段（「10.28 周三」）。
+String _dateFieldOf(String iso) {
+  final String mmdd = _mmddOf(iso);
+  if (mmdd.isEmpty) return "";
+  final String weekday = _weekdayOf(iso);
+  return weekday.isEmpty ? mmdd : "$mmdd $weekday";
 }
 
 String _ymdOf(String iso) {
@@ -2003,15 +2232,6 @@ String _initialOf(String name) {
   return t.isEmpty ? "旅" : t.substring(0, 1);
 }
 
-int? _daysToEnd(_PlanSummary s) {
-  final DateTime? end = DateTime.tryParse(s.endDate.trim());
-  if (end == null) return null;
-  final DateTime now = DateTime.now();
-  return DateTime(end.year, end.month, end.day)
-      .difference(DateTime(now.year, now.month, now.day))
-      .inDays;
-}
-
 const List<String> _kMonthEn = <String>[
   "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
   "JUL", "AUG", "SEP", "OCT", "NOV", "DEC",
@@ -2019,17 +2239,3 @@ const List<String> _kMonthEn = <String>[
 
 String _monthEn(int month) =>
     month >= 1 && month <= 12 ? _kMonthEn[month - 1] : "—";
-
-/// 最近一次归档日期（页头 LAST TRIP 用）。
-String _lastTripLabel(List<_PlanSummary> plans) {
-  final List<_PlanSummary> past = <_PlanSummary>[
-    for (final _PlanSummary s in plans)
-      if (s.bucket == 2) s,
-  ]..sort((_PlanSummary a, _PlanSummary b) =>
-      _summaryDate(b).compareTo(_summaryDate(a)));
-  if (past.isEmpty) return "";
-  final _PlanSummary s = past.first;
-  final String iso = s.endDate.isNotEmpty ? s.endDate : s.startDate;
-  final String ymd = _ymdOf(iso);
-  return ymd.isEmpty ? "" : "LAST TRIP · $ymd";
-}

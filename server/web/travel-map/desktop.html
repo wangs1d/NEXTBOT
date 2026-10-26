@@ -880,6 +880,7 @@ function refreshStopMedia(sp){
 /* ── 地图：站点 3 图气泡卡（悬停临时看 / 点击固定；平时不占屏） ── */
 var bubbleMarker=null,bubbleMode='none',bubbleIdx=-1,bubbleHideTimer=0;
 function removeBubble(){if(bubbleMarker){try{bubbleMarker.remove();}catch(e){/* ignore */}}bubbleMarker=null;}
+function hideBubbleNow(){cancelHideBubble();bubbleMode='none';bubbleIdx=-1;removeBubble();}
 function cancelHideBubble(){if(bubbleHideTimer){clearTimeout(bubbleHideTimer);bubbleHideTimer=0;}}
 /** idx 站点大卡：sticky=true 点击固定（切站/悬停他站才换）；false 悬停临时看。 */
 function showBubbleAt(idx,sticky){
@@ -896,9 +897,10 @@ function scheduleHideBubble(idx){
     if(bubbleMode==='hover'&&bubbleIdx===idx){bubbleMode='none';bubbleIdx=-1;removeBubble();}
   },180);
 }
-/** 重建当前显示的卡（地图移动选边 / 媒体到位刷新 / renderMap 重摆共用）。 */
+/** 重建当前显示的卡（地图移动选边 / 媒体到位刷新 / renderMap 重摆共用）。
+    不动 bubbleMode/bubbleIdx——收卡判断依赖这组状态，重置会让悬停卡永不收起。 */
 function placeBubbleByIdx(items,idx){
-  removeBubble();cancelHideBubble();bubbleMode='none';bubbleIdx=-1;
+  removeBubble();cancelHideBubble();
   var map=mapState.map;
   if(!map||!mapState.ready)return;
   var it=items&&items[idx];
@@ -1018,9 +1020,10 @@ function ensureMap(cb){
     if(vm&&!vm.classList.contains('open'))vm.classList.remove('boot');
     tuneBasemap(map);
     addRouteLayers();
-    // 视野挪动后气泡卡可能被甩出屏幕边缘：停稳后按当前位置重新选边
+    // 视野挪动后固定卡可能被甩出屏幕边缘：停稳后按当前位置重新选边
+    // （悬停卡不重摆——鼠标没动就不会再触发 enter/leave，重摆会变成收不掉的孤儿）
     map.on('moveend',function(){
-      if(state.view==='map'&&bubbleMarker&&bubbleMode!=='none'&&bubbleIdx>=0)placeBubbleByIdx(replan().items,bubbleIdx);
+      if(state.view==='map'&&bubbleMarker&&bubbleMode==='sticky'&&bubbleIdx>=0)placeBubbleByIdx(replan().items,bubbleIdx);
     });
     if(state.view==='map')renderMap(replan().items);
     cb&&cb();
@@ -1316,9 +1319,10 @@ function renderMap(items){
   }else{
     updatePoiActive();
   }
-  /* 大卡按需显现：只重摆当前正显示的（sticky 或 hover），平时不占屏 */
-  if(bubbleMode!=='none'&&bubbleIdx>=0&&bubbleIdx<items.length)placeBubbleByIdx(items,bubbleIdx);
-  else{bubbleMode='none';bubbleIdx=-1;removeBubble();}
+  /* 大卡按需显现：点击固定的卡重摆跟随；悬停卡是「跟着鼠标」的临时态，
+     换天/重摆时鼠标多半已不在 pin 上，留着只会变成没人收的孤儿卡 */
+  if(bubbleMode==='sticky'&&bubbleIdx>=0&&bubbleIdx<items.length)placeBubbleByIdx(items,bubbleIdx);
+  else hideBubbleNow();
   loadDayRoute(items,seqOf(items));
 }
 
@@ -1341,6 +1345,7 @@ $('undoBtn').addEventListener('click',function(){if(!state.prev)return;
 function switchView(v){
   if(v!=='now'&&v!=='map')return false;
   state.view=v;
+  hideBubbleNow();
   $('viewMap').classList.remove('open');
   if(v==='map'){
     $('viewMap').classList.remove('boot');   /* 离屏预建期就点开：摘掉屏外定位 */

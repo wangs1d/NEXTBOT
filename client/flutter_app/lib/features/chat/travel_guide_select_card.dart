@@ -5,15 +5,16 @@ import '../../core/utils/link_utils.dart';
 import 'media_disk_cache.dart';
 
 /// 规划前「种草选择卡」（travel.destination-guide 工具结果 →
-/// travel_guide_select 卡）：四分类候选（必玩/住宿/美食）图文列表，
-/// 每条带文字介绍 + 实拍图 + 实时价（取不到标「待核价」），Agent 预选
-/// 必玩 Top3，「确认选择」把分组结果作为用户消息回传（服务端把
-/// chat.user_action 转写为 user_message，LLM 按语义把选中项填
-/// wishlist / foodWishlist / stayWishlist 再生成行程）。
+/// travel_guide_select 卡）：三分类候选（必玩/住宿/美食）图文列表，
+/// 每条带文字介绍 + 实拍图 + 服务端算好的真数指标（评分/本店报价/
+/// 距离/热度，没取到的就不出这条），勾选全部交给用户（服务端不预选），
+/// 「确认选择」把分组结果作为用户消息回传（服务端把 chat.user_action
+/// 转写为 user_message，LLM 按语义把选中项填 wishlist / foodWishlist /
+/// stayWishlist 再生成行程）。
 ///
 /// 数据在 [AgentResultData.extra]['guide']：
-/// {destination, cats: [{key: view|stay|food, label, items: [{name, rec,
-///  rating, intro, price, priceNote, pricePending, photos[], picked}]}]}。
+/// {destination, cats: [{key: view|stay|food, label, sortNote, anchor?,
+///  items: [{name, intro, photos[], metrics: [{kind, label, source}], address, picked}]}]}。
 /// 旧载荷缺 extra 时回退 items 文字清单（通用卡渲染），本组件不会被构建。
 class TravelGuideSelectCard extends StatefulWidget {
   const TravelGuideSelectCard({
@@ -62,12 +63,18 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
             if (it is! Map<String, dynamic>) continue;
             final _GuideEntry e = _GuideEntry(
               name: it['name']?.toString() ?? '',
-              cat: key,
-              rec: (it['rec'] as num?)?.toInt() ?? 0,
               intro: it['intro']?.toString() ?? '',
-              price: (it['price'] as num?)?.toDouble(),
-              priceNote: it['priceNote']?.toString() ?? '',
-              pricePending: it['pricePending'] == true,
+              metrics: <_GuideMetricEntry>[
+                for (final dynamic m in (it['metrics'] as List<dynamic>? ??
+                    const <dynamic>[]))
+                  if (m is Map<String, dynamic> &&
+                      (m['label']?.toString() ?? '').isNotEmpty)
+                    _GuideMetricEntry(
+                      kind: m['kind']?.toString() ?? '',
+                      label: m['label'].toString(),
+                      source: m['source']?.toString() ?? '',
+                    ),
+              ],
               photos: ((it['photos'] as List<dynamic>?)
                           ?.map((dynamic u) => u.toString())
                           .where((String u) => u.isNotEmpty)
@@ -89,13 +96,10 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
     _picked = <String, bool>{};
     _cats.forEach((String _, List<_GuideEntry> list) {
       for (final _GuideEntry e in list) {
+        // 零预选：一条都不替用户勾。
         _picked[e.key] = false;
       }
     });
-    // Agent 预选：必玩前 3（把「从零选」变成「确认微调」）
-    (_cats['view'] ?? const <_GuideEntry>[])
-        .take(3)
-        .forEach((_GuideEntry e) => _picked[e.key] = true);
   }
 
   int get _pickedCount =>
@@ -228,7 +232,9 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
               ),
               const SizedBox(height: 3),
               Text(
-                _done ? '选择已提交，正在按你的选择规划…' : '文字介绍与实拍图已备好，价格来自实时查询；勾掉不想要的再排行程',
+                _done
+                    ? '选择已提交，正在按你的选择规划…'
+                    : '文字介绍与实拍图已备好；卡上只放查得到的真数，勾掉不想要的再排行程',
                 style: TextStyle(fontSize: 11.5, color: cs.onSurfaceVariant),
               ),
             ],
@@ -286,22 +292,20 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
     );
   }
 
-  String _money(double value) => value
-      .round()
-      .toString()
-      .replaceAllMapped(RegExp(r'\B(?=(\d{3})+(?!\d))'), (Match _) => ',');
-
-  String _priceText(_GuideEntry e) {
-    if (e.pricePending || e.price == null) return '待核价';
-    if (e.price == 0) return '免费';
-    final String base = '¥${_money(e.price!)}';
-    if (e.cat == 'stay') return '$base/晚';
-    if (e.cat == 'food') return '$base/人';
-    return base;
+  /// 价格那条指标：服务端只在本店真报价取到时才给数字，取不到就是「待核价」。
+  _GuideMetricEntry? _priceOf(_GuideEntry e) {
+    for (final _GuideMetricEntry m in e.metrics) {
+      if (m.kind == 'price') return m;
+    }
+    return null;
   }
 
   Widget _buildRow(ColorScheme cs, _GuideEntry e) {
     final bool picked = _picked[e.key] == true;
+    final _GuideMetricEntry? price = _priceOf(e);
+    final bool priceReal = price != null && price.label.contains('¥');
+    final List<_GuideMetricEntry> others =
+        e.metrics.where((_GuideMetricEntry m) => m.kind != 'price').toList();
     return GestureDetector(
       onTap: () => setState(() => _picked[e.key] = !picked),
       child: Container(
@@ -358,16 +362,17 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
                         ),
                       ),
                       const SizedBox(width: 6),
-                      Text(
-                        _priceText(e),
-                        style: TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w700,
-                          color: e.pricePending
-                              ? cs.onSurfaceVariant
-                              : (e.price == 0 ? _jade : _amber),
+                      if (price != null)
+                        Text(
+                          price.label,
+                          style: TextStyle(
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700,
+                            color: priceReal
+                                ? (price.label.contains('免费') ? _jade : _amber)
+                                : cs.onSurfaceVariant,
+                          ),
                         ),
-                      ),
                     ],
                   ),
                   if (e.intro.isNotEmpty)
@@ -385,29 +390,38 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
                     ),
                   const SizedBox(height: 4),
                   Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
                     children: <Widget>[
-                      if (e.rec > 0)
-                        Text(
-                          '推荐 ${e.rec}%',
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: _jade,
-                            fontWeight: FontWeight.w600,
-                          ),
+                      Expanded(
+                        child: Wrap(
+                          spacing: 6,
+                          runSpacing: 3,
+                          children: <Widget>[
+                            for (final _GuideMetricEntry m in others)
+                              Tooltip(
+                                message: m.source.isEmpty ? m.label : m.source,
+                                waitDuration: const Duration(milliseconds: 500),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 7, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: cs.surfaceContainerLow,
+                                    borderRadius: BorderRadius.circular(6),
+                                    border:
+                                        Border.all(color: cs.outlineVariant),
+                                  ),
+                                  child: Text(
+                                    m.label,
+                                    style: TextStyle(
+                                        fontSize: 9.5,
+                                        color: cs.onSurfaceVariant),
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
-                      if (e.priceNote.isNotEmpty && !e.pricePending) ...<Widget>[
-                        const SizedBox(width: 8),
-                        Flexible(
-                          child: Text(
-                            e.priceNote,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 9.5, color: cs.onSurfaceVariant),
-                          ),
-                        ),
-                      ],
-                      const Spacer(),
+                      ),
+                      const SizedBox(width: 6),
                       Icon(
                         picked
                             ? Icons.check_circle_rounded
@@ -465,26 +479,32 @@ class _TravelGuideSelectCardState extends State<TravelGuideSelectCard> {
   }
 }
 
+class _GuideMetricEntry {
+  const _GuideMetricEntry({
+    required this.kind,
+    required this.label,
+    required this.source,
+  });
+
+  final String kind;
+  final String label;
+
+  /// 这个数怎么来的（服务端给的真源说明），悬停展示。
+  final String source;
+}
+
 class _GuideEntry {
   const _GuideEntry({
     required this.name,
-    required this.cat,
-    required this.rec,
     required this.photos,
     required this.intro,
-    required this.price,
-    required this.priceNote,
-    required this.pricePending,
+    required this.metrics,
   });
 
   final String name;
-  final String cat;
-  final int rec;
   final List<String> photos;
   final String intro;
-  final double? price;
-  final String priceNote;
-  final bool pricePending;
+  final List<_GuideMetricEntry> metrics;
 
   /// 勾选状态键（同目的地同名不同类视为同一处）。
   String get key => name;
