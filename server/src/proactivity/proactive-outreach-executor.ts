@@ -17,7 +17,6 @@ import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import type { ChatToolExecutionContext, ExternalChatProvider } from "../external-model/types.js";
 import { StreamSegmenter } from "../agent/stream-segmenter.js";
 import {
-  formatAgentStylePrompt,
   loadAgentStyleProfile,
   validateStyleConsistency,
 } from "../agent/agent-style-profile.js";
@@ -26,27 +25,12 @@ import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { ToolContext, ToolRegistry } from "../tools/tool-registry.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { isTurnAsideEnabled } from "./turn-aside-queue.js";
+import type { SpeechHub } from "./speech-express.js";
 import {
   ProactiveOutboundMessageService,
   type ProactiveOutboundChannel,
 } from "../services/proactive-outbound-message-service.js";
 import { stripProtocolMarkersForDirectOut } from "../services/reply-envelope.js";
-
-const PROACTIVE_SYSTEM_PROMPT = `你察觉到了一件事，需要主动联系用户。
-
-你有两个任务，按顺序执行：
-1. **主动做事**：如果信号涉及需要查询或操作的内容（如天气、新闻、行情、日程等），先调用相关工具获取信息。
-2. **生成话术**：基于工具结果（如有），生成一句话主动话术。
-
-话术指导（不给示例，自行把握）：
-- 这是你的主动开口，不是对用户消息的回复。禁止回答/确认用户最近聊天里的问题（那由聊天回复负责），不要用「记住了/好的/已存上」这类应答式开头。
-- 像朋友顺嘴提起一件事，不是助理汇报。
-- 带出你为什么主动开口，但别啰嗦。
-- 融入查到的关键信息，但别像在报数据。
-- 语气随场景调整，别一直一个调子。
-- 中文简短，别超过 30 字。
-
-直接给出话术正文，不要解释你的决定。`;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -151,6 +135,11 @@ export type ProactiveOutreachDeps = {
    * 话术 LLM 调用（还可能带工具循环），又产生「已发送」假台账。缺省视为在线。
    */
   isActorOnline?: (actorId: string) => boolean;
+  /**
+   * 统一开口出口（2026-10-26）：full 档 system 块装配（人格·静态 + 语感 + 通用
+   * 纪律 + 画像）与用量记账归 SpeechHub 单点——本执行器保留工具循环、择时与投递。
+   */
+  speech: SpeechHub;
 };
 
 export function createProactiveOutreachExecutor(
@@ -259,9 +248,9 @@ export function createProactiveOutreachExecutor(
 
     const brainCenter = deps.brainCenter();
     const externalChat = deps.externalChat();
-    // Task 5: 加载 Agent 自身风格指纹，注入 system prompt 供话术生成遵循
+    // Task 5: 加载 Agent 自身风格指纹（仅用于话术风格一致性校验；system 块装配
+    // 已单点化到 SpeechHub——人格·静态/语感/纪律/画像由其统一注入）
     const styleProfile = loadAgentStyleProfile(agentMemorySyncService);
-    const proactiveSystemPrompt = `${PROACTIVE_SYSTEM_PROMPT}\n\n${formatAgentStylePrompt(styleProfile)}`;
 
     // 1. 调 LLM 生成话术（启用 function calling，LLM 可自主调工具做事）
     let message = "";
@@ -289,11 +278,17 @@ export function createProactiveOutreachExecutor(
             ephemeralTurn: false,
             disableThinking: true,
             maxThreadMessages: 4,
-            systemPromptOverride: proactiveSystemPrompt,
+            systemPromptOverride: await deps.speech.buildSystemPrompt({
+              sessionId: signal.actorId,
+              kind: signal.kind,
+              tier: "full",
+            }),
             toolExposureProfile: "contextual",
             toolLoop: { maxRounds: 2 },
           },
         );
+        // full 档用量记账（与 light 档共享日熔断池）
+        deps.speech.recordUsage();
         // Task 5: LLM 话术生成后做风格一致性校验（非阻塞，仅记录警告日志，不修改输出内容）
         if (message.trim()) {
           const consistency = validateStyleConsistency(message, styleProfile);

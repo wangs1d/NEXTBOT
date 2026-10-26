@@ -298,8 +298,10 @@ class EveningDigestCard extends StatelessWidget {
   }
 }
 
-/// 明日行程条目：时刻（primary 强调）+ 标题 + 提前预告段小字
-/// （「7:20叫你起床、8:00该出门了」——服务端 preReminders 预渲染短句）。
+/// 明日行程条目：时刻（primary 强调）+ 简短文字描述。
+/// 2026-10-26 用户定稿：只放「12:00 看牙医」式一行，服务端 shortTitle 口径；
+/// 不渲染提醒原文与预告段小字（「到点了该干嘛」「10:00起床闹钟」不上卡，
+/// 顶部的 narration 已承担活人描述）。
 class _ScheduleItem extends StatelessWidget {
   const _ScheduleItem({required this.item, required this.theme});
 
@@ -309,11 +311,6 @@ class _ScheduleItem extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = theme.colorScheme;
-    final Object? rawNotes = item["advanceNotes"];
-    final List<String> notes = <String>[
-      if (rawNotes is List) for (final Object? n in rawNotes) n?.toString() ?? "",
-    ].where((String n) => n.isNotEmpty).toList();
-
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
@@ -329,24 +326,9 @@ class _ScheduleItem extends StatelessWidget {
         ),
         const SizedBox(width: 4),
         Expanded(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Text(
-                item["title"]?.toString() ?? "日程安排",
-                style: theme.textTheme.bodyMedium,
-              ),
-              if (notes.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.only(top: 2),
-                  child: Text(
-                    notes.join("，"),
-                    style: theme.textTheme.bodySmall?.copyWith(
-                      color: cs.onSurfaceVariant,
-                    ),
-                  ),
-                ),
-            ],
+          child: Text(
+            item["title"]?.toString() ?? "日程安排",
+            style: theme.textTheme.bodyMedium,
           ),
         ),
       ],

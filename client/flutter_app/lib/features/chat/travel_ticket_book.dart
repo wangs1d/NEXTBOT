@@ -78,7 +78,7 @@ class _RailList extends StatelessWidget {
 
     final bool warm = AppThemeController.instance.value == AppThemeVariant.warm;
     final _TicketSkin skin =
-        paper ? _TicketSkin.paper(warm) : _TicketSkin.digital();
+        paper ? _TicketSkin.paper(warm) : _TicketSkin.digital(warm);
 
     return MediaQuery.withClampedTextScaling(
       minScaleFactor: 1.0,
@@ -1422,18 +1422,14 @@ class _CoverFallback extends StatelessWidget {
             gradient: RadialGradient(
               center: const Alignment(-.55, -.6),
               radius: 1.25,
-              colors: digital
-                  ? const <Color>[Color(0xFF242526), Color(0xFF0C0D0E)]
-                  : const <Color>[Color(0xFFF3EAD7), Color(0xFFDFD3B8)],
+              colors: <Color>[skin.fallbackTop, skin.fallbackBottom],
             ),
           ),
         ),
         Positioned.fill(
           child: CustomPaint(
             painter: _ContourPainter(
-              color: digital
-                  ? Colors.white.withValues(alpha: .10)
-                  : skin.ink.withValues(alpha: .12),
+              color: skin.ink.withValues(alpha: digital ? .10 : .12),
             ),
           ),
         ),
@@ -1446,9 +1442,7 @@ class _CoverFallback extends StatelessWidget {
               fontSize: 46,
               fontWeight: FontWeight.w800,
               height: 1,
-              color: digital
-                  ? Colors.white.withValues(alpha: .14)
-                  : skin.ink.withValues(alpha: .10),
+              color: skin.ink.withValues(alpha: digital ? .14 : .10),
             ),
           ),
         ),
@@ -1802,7 +1796,7 @@ class _TicketTape extends StatelessWidget {
           borderRadius: BorderRadius.circular(1),
           border: Border.all(
             color: skin.digital
-                ? Colors.white.withValues(alpha: .14)
+                ? skin.tapeBorder
                 : Colors.white.withValues(alpha: .5),
           ),
           boxShadow: <BoxShadow>[
@@ -2056,6 +2050,9 @@ class _TicketSkin {
     required this.grain,
     required this.edge,
     required this.digital,
+    required this.fallbackTop,
+    required this.fallbackBottom,
+    required this.tapeBorder,
   });
 
   factory _TicketSkin.paper(bool warm) {
@@ -2073,6 +2070,9 @@ class _TicketSkin {
         grain: Color(0x0D232833),
         edge: Color(0xFFE9E1D0),
         digital: false,
+        fallbackTop: Color(0xFFF3EAD7),
+        fallbackBottom: Color(0xFFDFD3B8),
+        tapeBorder: Color(0x80FFFFFF),
       );
     }
     return const _TicketSkin(
@@ -2088,10 +2088,37 @@ class _TicketSkin {
       grain: Color(0x0D272219),
       edge: Color(0x00000000),
       digital: false,
+      fallbackTop: Color(0xFFF3EAD7),
+      fallbackBottom: Color(0xFFDFD3B8),
+      tapeBorder: Color(0x80FFFFFF),
     );
   }
 
-  factory _TicketSkin.digital() => const _TicketSkin(
+  /// 数字登机牌皮肤。
+  ///
+  /// 深色主题保持「夜航黑卡」原样；浅色（warm）主题切换为白底数字票，
+  /// 让「即将出发」的主票跟随主题，不再恒为黑色。
+  factory _TicketSkin.digital(bool warm) {
+    if (warm) {
+      return const _TicketSkin(
+        paper: Color(0xFFFFFFFF),
+        paperEdge: Color(0xFFEDF1F7),
+        ink: Color(0xFF232833),
+        ink2: Color(0xFF5B6472),
+        muted: Color(0xFF98A2B3),
+        line: Color(0x24232833),
+        stamp: Color(0xFF0E7F5C),
+        shadow: Color(0x3D232833),
+        tape: Color(0x00000000),
+        grain: Color(0x0A232833),
+        edge: Color(0xFFDCE3EC),
+        digital: true,
+        fallbackTop: Color(0xFFEDF1F7),
+        fallbackBottom: Color(0xFFDCE4EF),
+        tapeBorder: Color(0x1F232833),
+      );
+    }
+    return const _TicketSkin(
         paper: Color(0xFF151617),
         paperEdge: Color(0xFF101112),
         ink: Color(0xFFF2F4F6),
@@ -2104,7 +2131,11 @@ class _TicketSkin {
         grain: Color(0x0AFFFFFF),
         edge: Color(0x17FFFFFF),
         digital: true,
+        fallbackTop: Color(0xFF242526),
+        fallbackBottom: Color(0xFF0C0D0E),
+        tapeBorder: Color(0x24FFFFFF),
       );
+  }
 
   final Color paper;
   final Color paperEdge;
@@ -2118,6 +2149,13 @@ class _TicketSkin {
   final Color grain;
   final Color edge;
   final bool digital;
+
+  /// 无图封面兜底渐变（深→浅，左上到右下）。
+  final Color fallbackTop;
+  final Color fallbackBottom;
+
+  /// 胶带描边：数字票在深浅主题下各有一档。
+  final Color tapeBorder;
 }
 
 const List<double> _kPaperMatrix = <double>[

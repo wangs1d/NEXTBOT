@@ -760,18 +760,6 @@ class _SchedulePageState extends State<SchedulePage> {
             ],
           ],
         ),
-        if (e.notes != null && e.notes!.isNotEmpty) ...<Widget>[
-          const SizedBox(height: 4),
-          Text(
-            e.notes!,
-            maxLines: 2,
-            overflow: TextOverflow.ellipsis,
-            style: theme.textTheme.bodySmall?.copyWith(
-              color: cs.onSurfaceVariant,
-              fontSize: 11,
-            ),
-          ),
-        ],
         const SizedBox(height: 8),
         Row(
           children: <Widget>[
@@ -1055,11 +1043,8 @@ class _SchedulePageState extends State<SchedulePage> {
       }
     }
 
-    // 添加备注信息
-    if (representative.notes != null && representative.notes!.isNotEmpty) {
-      if (info.isNotEmpty) info.write(" · ");
-      info.write(representative.notes!);
-    }
+    // 2026-10-26 用户定稿：提醒卡文案组件只留标题，notes（「单次提醒 · 到点了…」）
+    // 不再拼进展示信息（新旧数据一致忽略）。
 
     return info.toString();
   }

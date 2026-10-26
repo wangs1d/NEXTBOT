@@ -1,4 +1,4 @@
-import "dart:async" show unawaited;
+import "dart:async" show Timer, unawaited;
 import "dart:convert";
 import "dart:io" show Platform;
 import "dart:math" as math;
@@ -44,6 +44,10 @@ part "travel_ticket_book.dart";
 //
 // 协议：POST /travel/plan-session（发起）→ :id/turn（消息/点选）→
 // :id/generate（真实生成，10~120s）→ :id/approve（确认预算后出方案）。
+// 会话留存（2026-10-26）：每轮落盘 data/travel-plan-sessions/{id}.json；
+// GET /travel/plan-sessions 列历史、GET /:id 带 history/dossier/resumeCard
+// 供恢复。会话入口收在规划顶栏右侧（历史下拉：新会话 + 历史对话列表），
+// 左侧竖栏保持只放「规划/行程」两个 tab（用户拍板）。
 // 配色全部走 AppPalette + TravelPalette（随主题深/暖变体热切换）。
 // ═══════════════════════════════════════════════════════════════════
 
@@ -223,6 +227,86 @@ class _PlanSummary {
   int get nightCount => dayCount > 1 ? dayCount - 1 : 0;
 }
 
+/// 历史规划会话摘要（GET /travel/plan-sessions 的单条记录）。
+/// 服务端把规划会话落盘到 data/travel-plan-sessions/{id}.json，
+/// 客户端凭 id 调 GET /travel/plan-session/:id 恢复对话流。
+class _PlanSessionSummary {
+  const _PlanSessionSummary({
+    required this.id,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.destination,
+    required this.days,
+    required this.startDate,
+    required this.endDate,
+    required this.originalMessage,
+    required this.state,
+    required this.turnCount,
+    required this.lastUserMessage,
+  });
+
+  factory _PlanSessionSummary.fromJson(Map<String, dynamic> json) {
+    return _PlanSessionSummary(
+      id: json["id"]?.toString() ?? "",
+      createdAt: (json["createdAt"] as num?)?.toInt() ?? 0,
+      updatedAt: (json["updatedAt"] as num?)?.toInt() ?? 0,
+      destination: json["destination"]?.toString() ?? "",
+      days: (json["days"] as num?)?.toInt(),
+      startDate: json["startDate"]?.toString() ?? "",
+      endDate: json["endDate"]?.toString() ?? "",
+      originalMessage: json["originalMessage"]?.toString() ?? "",
+      state: json["state"]?.toString() ?? "gathering",
+      turnCount: (json["turnCount"] as num?)?.toInt() ?? 0,
+      lastUserMessage: json["lastUserMessage"]?.toString() ?? "",
+    );
+  }
+
+  final String id;
+  final int createdAt;
+  final int updatedAt;
+  final String destination;
+  final int? days;
+  final String startDate;
+  final String endDate;
+  final String originalMessage;
+  final String state;
+  final int turnCount;
+  final String lastUserMessage;
+
+  /// 列表标题：目的地优先，没问到目的地就显示原话截断。
+  String get displayTitle {
+    final String d = destination.trim();
+    if (d.isNotEmpty) return d;
+    final String m = originalMessage.trim();
+    if (m.isEmpty) return "未命名规划";
+    return m.length > 18 ? "${m.substring(0, 18)}…" : m;
+  }
+
+  /// 状态标签（与服务端 sessionStateLabel 的取值一一对应）。
+  String get stateLabel => switch (state) {
+        "generated" => "已完成",
+        "budget_ready" => "待确认预算",
+        "wishlist_ready" => "待补心愿",
+        "guide_ready" => "待挑想去",
+        "ready" => "待出方案",
+        _ => "进行中",
+      };
+
+  bool get finished => state == "generated";
+
+  /// 相对时间标签：今天显示 时:分，今年显示 月-日，更早显示 年-月-日。
+  String get timeLabel {
+    final DateTime t = DateTime.fromMillisecondsSinceEpoch(updatedAt);
+    final DateTime now = DateTime.now();
+    String two(int v) => v.toString().padLeft(2, "0");
+    if (t.year == now.year && t.month == now.month && t.day == now.day) {
+      return "${two(t.hour)}:${two(t.minute)}";
+    }
+    if (t.year == now.year) return "${t.month}-${two(t.day)}";
+    return "${t.year}-${two(t.month)}-${two(t.day)}";
+  }
+}
+
 // ═══════════════════════════════════════════════════════════════════
 // 页面骨架：宽窗双栏（左栏行程 + 主区规划流） / 窄窗顶部切换
 // ═══════════════════════════════════════════════════════════════════
@@ -282,6 +366,18 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   /// 左侧 tab：0 规划 / 1 行程。
   int _tab = 0;
 
+  /// 历史规划会话（侧边栏列表；服务端落盘 30 天）。
+  List<_PlanSessionSummary> _planSessions = const <_PlanSessionSummary>[];
+
+  /// 当前打开的规划会话（null=新会话，尚未发过消息）。
+  String? _activePlanSessionId;
+
+  /// 规划主区句柄：侧边栏「新会话/点历史」直接指挥对话区切换。
+  final GlobalKey<_PlanningStageState> _planningKey = GlobalKey<_PlanningStageState>();
+
+  /// 会话列表防抖重拉（每轮对话后状态会变，但不能每秒打一次接口）。
+  Timer? _sessionsReloadTimer;
+
   /// 行程空间当前分段：0 即将出发（默认） / 1 往期。
   int _seg = 0;
 
@@ -297,6 +393,56 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
       <String, Future<TravelPlanData?>>{};
 
   static const Duration _timeout = Duration(seconds: 6);
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_loadPlanSessions());
+  }
+
+  @override
+  void dispose() {
+    _sessionsReloadTimer?.cancel();
+    super.dispose();
+  }
+
+  /// 拉历史规划会话（侧边栏列表；失败静默，不打断规划主流程）。
+  Future<void> _loadPlanSessions() async {
+    List<_PlanSessionSummary> list;
+    try {
+      final http.Response resp = await http
+          .get(Uri.parse("${ApiConfig.httpBase}/travel/plan-sessions?limit=30"))
+          .timeout(_timeout);
+      if (resp.statusCode != 200) {
+        throw Exception("HTTP ${resp.statusCode}");
+      }
+      final Object? decoded = jsonDecode(resp.body);
+      list = decoded is Map
+          ? _parseSessionList(decoded["sessions"] as List<dynamic>?)
+          : const <_PlanSessionSummary>[];
+    } catch (_) {
+      return; // 服务端不支持/网络失败 → 侧边栏维持现状
+    }
+    if (!mounted) return;
+    setState(() => _planSessions = list);
+  }
+
+  static List<_PlanSessionSummary> _parseSessionList(List<dynamic>? raw) =>
+      <_PlanSessionSummary>[
+        for (final dynamic s in raw ?? const <dynamic>[])
+          if (s is Map<String, dynamic>) _PlanSessionSummary.fromJson(s),
+      ];
+
+  /// 规划区上报「当前会话变了」（新会话出 id / 每轮成功 / 切回新会话）。
+  /// 高亮即时更新；列表状态延后防抖重拉，避免每轮打一次接口。
+  void _onPlanSessionActive(String? id) {
+    if (!mounted) return;
+    setState(() => _activePlanSessionId = (id ?? "").isEmpty ? null : id);
+    _sessionsReloadTimer?.cancel();
+    _sessionsReloadTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) unawaited(_loadPlanSessions());
+    });
+  }
 
   Future<List<_PlanSummary>> _fetchSummaries() async {
     final http.Response resp = await http
@@ -553,9 +699,16 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
                   Expanded(
                     child: _tab == 0
                         ? _PlanningStage(
+                            key: _planningKey,
                             seedMessage: widget.seedMessage,
                             agentName: widget.agentName,
-                            onPlanGenerated: _refresh,
+                            sessions: _planSessions,
+                            activeSessionId: _activePlanSessionId,
+                            onActiveSessionChanged: _onPlanSessionActive,
+                            onPlanGenerated: () {
+                              _refresh();
+                              unawaited(_loadPlanSessions());
+                            },
                             onOpenPlan: (String planId) async {
                               final TravelPlanData? plan =
                                   await _ensureFullPlan(planId);
@@ -2231,6 +2384,131 @@ class _FlowItem {
 }
 
 /// 服务端一轮回执。
+/// 顶栏的历史会话入口：下拉 =「新会话 + 历史对话列表」。
+/// 左侧竖栏只放「规划/行程」两个 tab，会话管理全部收在这里。
+class _PlanSessionMenu extends StatelessWidget {
+  const _PlanSessionMenu({
+    required this.colors,
+    required this.sessions,
+    required this.activeId,
+    required this.busy,
+    required this.onNew,
+    required this.onOpen,
+  });
+
+  final _StageColors colors;
+  final List<_PlanSessionSummary> sessions;
+  final String? activeId;
+  final bool busy;
+  final VoidCallback onNew;
+  final ValueChanged<_PlanSessionSummary> onOpen;
+
+  static const String _kNew = "-new";
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    return PopupMenuButton<String>(
+      key: const Key("planning-session-menu"),
+      tooltip: "历史规划会话",
+      icon: Icon(Icons.history_rounded, size: 19, color: c.text2),
+      position: PopupMenuPosition.under,
+      color: c.card,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: c.borderSoft),
+      ),
+      onSelected: (String v) {
+        if (v == _kNew) {
+          onNew();
+          return;
+        }
+        for (final _PlanSessionSummary s in sessions) {
+          if (s.id == v) {
+            onOpen(s);
+            return;
+          }
+        }
+      },
+      itemBuilder: (BuildContext context) => <PopupMenuEntry<String>>[
+        PopupMenuItem<String>(
+          enabled: !busy,
+          value: _kNew,
+          child: Row(
+            children: <Widget>[
+              Icon(Icons.add, size: 16, color: c.accent),
+              const SizedBox(width: 8),
+              Text("新会话",
+                  style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: c.accent)),
+            ],
+          ),
+        ),
+        PopupMenuDivider(),
+        if (sessions.isEmpty)
+          PopupMenuItem<String>(
+            enabled: false,
+            child: Text("还没有历史规划",
+                style: TextStyle(fontSize: 12, color: c.muted)),
+          )
+        else ...<PopupMenuEntry<String>>[
+          for (final _PlanSessionSummary s in sessions)
+            PopupMenuItem<String>(
+              value: s.id,
+              height: 52,
+              child: Row(
+                children: <Widget>[
+                  Icon(
+                    s.finished ? Icons.verified_outlined : Icons.autorenew,
+                    size: 14,
+                    color: s.finished ? c.muted : c.accent,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: <Widget>[
+                        Text(
+                          s.displayTitle,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: s.id == activeId
+                                ? FontWeight.w700
+                                : FontWeight.w500,
+                            color: c.text,
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          "${s.stateLabel} · ${s.timeLabel}",
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10.5,
+                            color: c.muted,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                  if (s.id == activeId) ...<Widget>[
+                    const SizedBox(width: 6),
+                    Icon(Icons.check, size: 14, color: c.accent),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ],
+    );
+  }
+}
+
 class _TurnResult {
   const _TurnResult({
     required this.state,
@@ -2282,8 +2560,12 @@ class _TurnResult {
 /// 规划主区（宽窗右栏 / 窄窗默认页）。
 class _PlanningStage extends StatefulWidget {
   const _PlanningStage({
+    super.key,
     required this.onPlanGenerated,
     required this.onOpenPlan,
+    required this.sessions,
+    required this.activeSessionId,
+    required this.onActiveSessionChanged,
     this.seedMessage,
     this.agentName,
   });
@@ -2293,6 +2575,15 @@ class _PlanningStage extends StatefulWidget {
 
   /// 「生成完整行程」：按 planId 打开完整行程界面。
   final Future<void> Function(String planId) onOpenPlan;
+
+  /// 侧边栏历史会话列表（宿主持有，规划区只读）。
+  final List<_PlanSessionSummary> sessions;
+
+  /// 当前活动会话 id（null=新会话未发消息）。
+  final String? activeSessionId;
+
+  /// 会话变化上报：出 sessionId / 每轮成功 / 点「新会话」时通知宿主刷新侧边栏。
+  final ValueChanged<String?> onActiveSessionChanged;
 
   /// 主对话交接过来的原始诉求（进入即自动发起一轮规划会话）。
   final String? seedMessage;
@@ -2400,6 +2691,7 @@ class _PlanningStageState extends State<_PlanningStage> {
   }
 
   void _insertSayAndCards(_TurnResult r) {
+    _notifyActive();
     _removeTyping();
     if (r.dossier != null) _setDossier(r.dossier);
     if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
@@ -2460,6 +2752,20 @@ class _PlanningStageState extends State<_PlanningStage> {
       final String error = decoded["error"]?.toString() ?? "HTTP ${resp.statusCode}";
       final String hint = decoded["hint"]?.toString() ?? "";
       throw Exception(hint.isEmpty ? error : "$error（$hint）");
+    }
+    return decoded;
+  }
+
+  Future<Map<String, dynamic>?> _get(String path, Duration timeout) async {
+    final http.Response resp =
+        await http.get(Uri.parse("${ApiConfig.httpBase}$path")).timeout(timeout);
+    final Object? decoded = jsonDecode(resp.body);
+    if (decoded is! Map<String, dynamic>) {
+      throw Exception("HTTP ${resp.statusCode}");
+    }
+    if (resp.statusCode != 200 || decoded["ok"] != true) {
+      final String error = decoded["error"]?.toString() ?? "HTTP ${resp.statusCode}";
+      throw Exception(error);
     }
     return decoded;
   }
@@ -2676,6 +2982,7 @@ class _PlanningStageState extends State<_PlanningStage> {
       final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
       if (r.dossier != null) _setDossier(r.dossier);
       _removeTyping();
+      _notifyActive();
       if (r.say.isNotEmpty) _append(_FlowItem.say(r.say));
       // flow A：生成完先只给预算明细，用户确认后才出最终方案。
       if (r.budget != null) _append(_FlowItem.budget(r.budget!));
@@ -2736,6 +3043,122 @@ class _PlanningStageState extends State<_PlanningStage> {
     final bool expired = msg.contains("会话不存在") || msg.contains("已过期");
     if (expired) _sessionId = null;
     _append(_FlowItem.error(expired ? "会话已过期，在下方重新说一句发起吧" : "出错了：$msg"));
+  }
+
+  // ── 历史规划会话（侧边栏驱动）────────────────────────────────
+
+  /// 会话变化上报宿主（出 sessionId / 每轮成功 / 点「新会话」）。
+  void _notifyActive() {
+    widget.onActiveSessionChanged(_sessionId);
+  }
+
+  /// history 载荷 → 对话流条目（恢复时用户气泡 / Agent 说话块原样重建）。
+  static List<_FlowItem> _flowFromHistory(List<dynamic>? history) => <_FlowItem>[
+        for (final dynamic h in history ?? const <dynamic>[])
+          if (h is Map<String, dynamic>)
+            if ((h["role"]?.toString() ?? "") == "user" &&
+                (h["content"]?.toString() ?? "").isNotEmpty)
+              _FlowItem.user(h["content"].toString())
+            else if ((h["role"]?.toString() ?? "") == "assistant" &&
+                (h["content"]?.toString() ?? "").isNotEmpty)
+              _FlowItem.say(h["content"].toString()),
+      ];
+
+  /// 服务端恢复卡（guide/wishlist 等确定性重建的挂起卡）→ 流条目。
+  static _FlowItem? _flowItemFromCard(Object? card) {
+    if (card is! Map<String, dynamic>) return null;
+    return switch (card["type"]?.toString()) {
+      "weather" => _FlowItem.weather(_WeatherCardData.fromJson(card)),
+      "choice" => _FlowItem.choice(_ChoiceCardData.fromJson(card)),
+      "guide" => _FlowItem.guide(_GuideCardData.fromJson(card)),
+      "wishlist" => _FlowItem.wishlist(_WishlistCardData.fromJson(card)),
+      _ => null,
+    };
+  }
+
+  /// 侧边栏点历史会话 → 拉全量状态恢复对话流。可从 idle 进入，也可在
+  /// 对话中直接切换（切换前旧会话已落盘，丢不了）。
+  Future<void> _resumeSession(_PlanSessionSummary s) async {
+    if (_busy) return;
+    if (_flowStarted && _sessionId == s.id) return;
+    setState(() => _busy = true);
+    try {
+      final Map<String, dynamic>? decoded =
+          await _get("/travel/plan-session/${s.id}", _turnTimeout);
+      if (decoded == null) throw Exception("空回执");
+      final String state = decoded["state"]?.toString() ?? "gathering";
+      final _DossierData? dossier = decoded["dossier"] is Map<String, dynamic>
+          ? _DossierData.fromJson(decoded["dossier"] as Map<String, dynamic>)
+          : null;
+      final _BudgetData? budget = decoded["budget"] is Map<String, dynamic>
+          ? _BudgetData.fromJson(decoded["budget"] as Map<String, dynamic>)
+          : null;
+      final _DraftData? draft = decoded["draft"] is Map<String, dynamic>
+          ? _DraftData.fromJson(decoded["draft"] as Map<String, dynamic>)
+          : null;
+      final List<_FlowItem> restored =
+          _flowFromHistory(decoded["history"] as List<dynamic>?);
+      final _FlowItem? resumeCard = _flowItemFromCard(decoded["resumeCard"]);
+      if (!mounted) return;
+      setState(() {
+        _flowStarted = true;
+        _sessionId = s.id;
+        _dossier = dossier;
+        _adjustHintText = null;
+        _ticketMoment = null;
+        _guidePreview = null;
+        _flow
+          ..clear()
+          ..addAll(restored);
+        if (state == "generated" && draft != null) {
+          // 已出方案：预算卡标已确认 + 草案卡补回，档案栏口径与中断前一致
+          if (budget != null) {
+            budget.approved = true;
+            _flow.add(_FlowItem.budget(budget));
+          }
+          _flow.add(_FlowItem.draft(draft));
+        } else if (state == "budget_ready" && budget != null) {
+          _flow.add(_FlowItem.budget(budget));
+        }
+        if (resumeCard != null) _flow.add(resumeCard);
+        if (state == "gathering" && resumeCard == null) {
+          // choice 问题卡的选项不落盘，恢复不了原卡：引导直接接着说
+          _flow.add(_FlowItem.say("接着上次的继续——想补或想改什么，直接说就行。"));
+        }
+      });
+      _notifyActive();
+      _scrollToBottom();
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+        content: Text(
+          "恢复规划会话失败：$e".replaceFirst("Exception: ", ""),
+          style: const TextStyle(fontSize: 12),
+        ),
+        behavior: SnackBarBehavior.floating,
+        duration: const Duration(seconds: 2),
+      ));
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// 侧边栏「新会话」：清空当前流回 idle 开新的一条；刚才的会话已落盘，
+  /// 侧边栏里随时点回来。
+  void _startNewPlan() {
+    if (_busy) return;
+    if (!_flowStarted && _sessionId == null) return;
+    setState(() {
+      _flowStarted = false;
+      _sessionId = null;
+      _dossier = null;
+      _adjustHintText = null;
+      _ticketMoment = null;
+      _guidePreview = null;
+      _flow.clear();
+    });
+    _input.clear();
+    _notifyActive();
   }
 
   /// 草案 → 打开完整行程界面。
@@ -2847,6 +3270,17 @@ class _PlanningStageState extends State<_PlanningStage> {
   }
 
   Widget _buildTopBar(_StageColors c) {
+    // 标题随当前会话变：在聊哪条规划一眼可见；新会话回退「行程规划」
+    String title = "行程规划";
+    final String? activeId = widget.activeSessionId;
+    if (activeId != null) {
+      for (final _PlanSessionSummary s in widget.sessions) {
+        if (s.id == activeId) {
+          title = s.displayTitle;
+          break;
+        }
+      }
+    }
     return Container(
       height: 46,
       padding: const EdgeInsets.symmetric(horizontal: 14),
@@ -2857,9 +3291,21 @@ class _PlanningStageState extends State<_PlanningStage> {
         children: <Widget>[
           _BackButton(colors: c),
           const SizedBox(width: 10),
-          Text("行程规划",
-              style: TextStyle(
-                  fontSize: 12.5, fontWeight: FontWeight.w700, color: c.text2)),
+          Expanded(
+            child: Text(title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                    fontSize: 12.5, fontWeight: FontWeight.w700, color: c.text2)),
+          ),
+          _PlanSessionMenu(
+            colors: c,
+            sessions: widget.sessions,
+            activeId: activeId,
+            busy: _busy,
+            onNew: _startNewPlan,
+            onOpen: (_PlanSessionSummary s) => unawaited(_resumeSession(s)),
+          ),
         ],
       ),
     );
@@ -6564,7 +7010,7 @@ class _TicketPrintMoment {
 }
 
 /// 票面视窗高度（吐票位移幅度基准；票实际高度小于它，底部自然留白）。
-const double _kTicketExtent = 258;
+const double _kTicketExtent = 288;
 
 /// 条码竖线宽度序列（打印质感的手写条码）。
 const List<double> _kBarcodeBars = <double>[
@@ -6948,7 +7394,7 @@ class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
     final double sheenT = _seg(v, 0.64, 0.2);
 
     return Container(
-      constraints: const BoxConstraints(minHeight: 220),
+      constraints: const BoxConstraints(minHeight: 252),
       decoration: BoxDecoration(
         color: c.card,
         borderRadius: BorderRadius.circular(18),
@@ -7008,7 +7454,7 @@ class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
                     children: <Widget>[
                       Expanded(
                         child: Padding(
-                        padding: const EdgeInsets.fromLTRB(24, 16, 18, 16),
+                        padding: const EdgeInsets.fromLTRB(28, 22, 20, 22),
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: <Widget>[
@@ -7108,7 +7554,7 @@ class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
                                 ],
                               ),
                             ),
-                            const SizedBox(height: 16),
+                            const SizedBox(height: 20),
                             _stag(
                               v,
                               0.46,
@@ -7169,7 +7615,7 @@ class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
                                 ],
                               ),
                             ),
-                            const SizedBox(height: 14),
+                            const SizedBox(height: 18),
                             _stag(
                               v,
                               0.52,
@@ -7346,37 +7792,37 @@ class _TicketPrintOverlayState extends State<_TicketPrintOverlay>
               onTap: widget.onOpenPlan,
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 6.5),
                 decoration: BoxDecoration(
                   color: c.accentBg,
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(9),
                 ),
                 child: Row(
                   children: <Widget>[
-                    Icon(Icons.map_outlined, size: 14, color: c.onAccent),
-                    const SizedBox(width: 7),
+                    Icon(Icons.map_outlined, size: 11.5, color: c.onAccent),
+                    const SizedBox(width: 5),
                     Text("查看完整行程",
                         style: TextStyle(
-                            fontSize: 12.5,
+                            fontSize: 11,
                             fontWeight: FontWeight.w700,
                             color: c.onAccent)),
                   ],
                 ),
               ),
             ),
-            const SizedBox(width: 10),
+            const SizedBox(width: 8),
             GestureDetector(
               onTap: widget.onClose,
               child: Container(
                 padding:
-                    const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    const EdgeInsets.symmetric(horizontal: 13, vertical: 6.5),
                 decoration: BoxDecoration(
-                  borderRadius: BorderRadius.circular(12),
+                  borderRadius: BorderRadius.circular(9),
                   border: Border.all(color: c.border),
                 ),
                 child: Text("稍后再看",
                     style: TextStyle(
-                        fontSize: 12.5,
+                        fontSize: 11,
                         fontWeight: FontWeight.w600,
                         color: c.text2)),
               ),

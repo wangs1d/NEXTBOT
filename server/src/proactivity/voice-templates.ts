@@ -26,6 +26,8 @@ export type TemplateCtx = {
   firstTask?: string;
   weather?: string;
   topic?: string;
+  /** away_return：离开时长标签（如 "11 小时" / "45 分钟"），正文「先说缘由」用 */
+  awayLabel?: string;
   body?: string;
   items?: string[];
 };
@@ -55,11 +57,13 @@ export function renderProactiveText(kind: string, ctx: TemplateCtx): string {
   const now = ctx.now ?? new Date();
   const c: TemplateCtx = { ...ctx, now };
   switch (kind) {
+    // 2026-10-26 修订：正文自带离开时长（先说缘由）——客户端气泡不再拼 title，
+    // 缘由必须写进正文本身，否则落对话流后「为什么开口」无处可寻。
     case "away_return":
       return pick(
         [
-          (x) => `回来了？${x.topic ? `之前${x.topic}聊到一半。` : "缓过来了就说一声。"}`,
-          () => "人回来了。有事直接说，没事我就在。",
+          (x) => `${x.awayLabel ?? "一段时间"}没见，回来了？${x.topic ? `之前${x.topic}聊到一半。` : "缓过来了就说一声。"}`,
+          (x) => `${x.awayLabel ? `离开了 ${x.awayLabel}，` : ""}人回来了。有事直接说，没事我就在。`,
         ],
         c,
       );

@@ -2150,7 +2150,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             // 对话流一条文本气泡（手机端同款），SnackBar 即时触达照旧
             if (text.trim().isNotEmpty) {
               _appendAssistantText("assistant-proactive", text.trim(),
-                  title: title, persist: true);
+                  persist: true);
             }
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
@@ -4721,15 +4721,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void _appendAssistantText(
     String messageIdPrefix,
     String text, {
-    String? title,
     bool persist = false,
   }) {
-    final String t = (title ?? "").trim();
+    // 2026-10-26 定调：气泡只放正文，与正常对话格式一致——不再把主动消息
+    // title 硬拼成 "title\ntext"（title 留给 SnackBar/系统通知触达）。
     final ChatMessage message = ChatMessage(
       messageId: "$messageIdPrefix-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "assistant",
-      text: t.isEmpty || t == text ? text : "$t\n$text",
+      text: text,
       timestamp: DateTime.now(),
     );
     void apply() {

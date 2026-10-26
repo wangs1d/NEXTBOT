@@ -2,7 +2,7 @@
  * 晚间 digest 调度器（Task 15 场景A 生活节律）。
  *
  * 调度模式参考 MorningBriefingScheduler：每分钟 tick，对已订阅 session
- * 到点触发一次晚间 digest（今日回顾+明日预告）。
+ * 到点触发一次晚间 digest。
  *
  * 推送时刻（2026-10-16 动态学习定调，用户拍板）：不再固定 21 点整，按优先级：
  *   1. env EVENING_DIGEST_HOUR 显式设置 → 锁死该整点（运维覆盖口径，
@@ -10,8 +10,10 @@
  *   2. 节律学习（bedtimeHourOf，装配层接 Task 20 RhythmCore.learnedBedtimeHour）
  *      → 习惯就寝前 30 分钟，钳位 [20:00, 23:30]
  *   3. 都没有（样本不足/未接节律）→ 默认 21:00
- * 触发判据为「当前分钟 ≥ 推送时刻」而非「小时相等」：错过时刻（服务器卡顿/
- * 休眠跳秒）在后续 tick 内补发，同日去重仍由 lastSentDay 表保证。
+ *
+ * 发送规则（2026-10-27 用户拍板，简单口径）：到点那一分钟发一次，一天只发
+ * 一次，过点不补发。lastSentDay 只做同一分钟内双 tick 的护栏（interval 漂移
+ * 时同一分钟可能跑两个 tick），不落盘——服务重启不在推送分钟内就什么都不发。
  */
 
 import type { EveningDigest, EveningDigestService } from "./evening-digest-service.js";
@@ -41,7 +43,7 @@ function clamp(n: number, min: number, max: number): number {
 export class EveningDigestScheduler {
   private timer: NodeJS.Timeout | null = null;
   private readonly subscribedSessions = new Set<string>();
-  /** 当日已送达表：sessionId → 送达日期（YYYY-MM-DD），防同日重复推送 */
+  /** 当日已发标记：sessionId → 日期（YYYY-MM-DD），保证一天只发一次 */
   private readonly lastSentDay = new Map<string, string>();
 
   constructor(private readonly deps: SchedulerDeps) {}
@@ -97,14 +99,15 @@ export class EveningDigestScheduler {
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
 
     for (const sessionId of this.subscribedSessions) {
+      // 一天只发一次；到点那一分钟才发，过点不补发
       if (this.lastSentDay.get(sessionId) === today) continue;
-      if (nowMinutes < this.triggerMinutesOf(sessionId)) continue;
+      if (nowMinutes !== this.triggerMinutesOf(sessionId)) continue;
+      this.lastSentDay.set(sessionId, today);
       try {
         const digest = await this.deps.digestService.generateDigest(sessionId);
         await this.deps.onDigestTriggered(sessionId, digest);
-        this.lastSentDay.set(sessionId, today);
       } catch {
-        // 单个 session 失败忽略，不阻断其他 session
+        // 单个 session 失败忽略，不阻断其他 session；当日不再重试
       }
     }
   }

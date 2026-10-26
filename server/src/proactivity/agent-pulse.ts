@@ -13,7 +13,7 @@
 // 沉默，不可打扰」+ NOP）与统一管道的 social 层仲裁（去重/频控/择时）。唯一保留
 // 的本地闸是材料 delta 指纹：材料没变不重复评审（省 token，不是打扰闸）。
 //
-// 语气统一：审阅产出初稿后过 SpeechPolisher（统一主动语气 + 用户画像语气浅层 +
+// 语气统一：审阅产出初稿后过 SpeechHub light 档（统一主动语气 + 用户画像语气浅层 +
 // 模型钉位 + 每日熔断），与兴趣推送/比价到价等主动话术同一副嗓子；polisher 未
 // 接入/失败时直接用初稿（表达永不因语气层失败而中断）。
 import { readJson, writeJson } from "./persist-file.js";
@@ -48,7 +48,7 @@ export type AgentPulseDeps = {
   /** agent 审阅（单次小 LLM 调用；未注入 = 功能关闭） */
   llmComplete?: (prompt: string) => Promise<string>;
   /**
-   * 统一主动语气层（SpeechPolisher.polish 薄包装）：把审阅初稿重写成与其它
+   * 统一主动语气层（SpeechHub.speak 薄包装）：把审阅初稿重写成与其它
    * 主动消息同一副嗓子的最终文案；失败/未接入回退 fallback（= 初稿）。
    */
   polish?: (input: {

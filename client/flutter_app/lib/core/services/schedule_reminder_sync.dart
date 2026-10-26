@@ -105,7 +105,6 @@ Future<bool> upsertLocalScheduleFromToolResult(
       rangeEnd: rangeEnd,
       title: _pickTitle(result),
       shortTitle: _pickShortTitle(result),
-      notes: _buildNotes(result),
       isTrivia: _isTriviaTask(result),
       previewLeadMinutes: previewLeadMinutesFromTask(result),
     );
@@ -183,7 +182,6 @@ Future<int> syncServerRemindersToLocal(
           rangeEnd: end,
           title: _pickTitle(t),
           shortTitle: _pickShortTitle(t),
-          notes: _buildNotes(t),
           isTrivia: _isTriviaTask(t),
           previewLeadMinutes: previewLeadMinutesFromTask(t),
         )
@@ -213,7 +211,6 @@ Future<bool> _persistExpandedTask(
   required DateTime rangeEnd,
   required String title,
   required String? shortTitle,
-  required String? notes,
   bool isTrivia = false,
   int? previewLeadMinutes,
 }) async {
@@ -233,7 +230,9 @@ Future<bool> _persistExpandedTask(
         startAt: occ,
         title: title,
         shortTitle: shortTitle,
-        notes: notes,
+        // 2026-10-26 用户定稿：提醒卡只留标题，不再落「单次提醒 · 到点了…」
+        // 式备注文案组件（旧数据里的 notes 由展示端忽略，见 schedule_page）。
+        notes: null,
         isTrivia: isTrivia,
         previewLeadMinutes: previewLeadMinutes,
       ),
@@ -276,19 +275,4 @@ String _displayReminderTitle(String raw) {
   if (s == "叫我" || s == "喊我") return "起床提醒";
   if (RegExp(r"吃药").hasMatch(s)) return "吃药提醒";
   return s;
-}
-
-String? _buildNotes(Map<String, dynamic> result) {
-  final String recurrence = result["recurrence"]?.toString() ?? "none";
-  final String recurrenceLabel = switch (recurrence) {
-    "daily" => "每天重复",
-    "weekly" => "每周重复",
-    "yearly" => "每年重复",
-    _ => "单次提醒",
-  };
-  final String msg = result["reminderMessage"]?.toString().trim() ?? "";
-  if (msg.isNotEmpty && msg != _pickTitle(result)) {
-    return "$recurrenceLabel · $msg";
-  }
-  return recurrenceLabel;
 }

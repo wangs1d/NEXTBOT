@@ -5,7 +5,7 @@
 // salience + entities）再上报主动性板块；原文留在树枝权威库不进管道（不丢失原文，
 // agent 要原文走工具回查——token 可控的根基）。
 //
-// 用量纪律（对齐 SpeechPolisher，LLM 只花在刀刃上）：
+// 用量纪律（对齐 SpeechHub，LLM 只花在刀刃上）：
 //  - 按树枝配置开关（branches.json condense 字段，缺省关——LLM 成本是 O(源数×消息量)）
 //  - 每日调用熔断（BRANCH_MAX_CONDENSE_PER_DAY，默认 20）
 //  - 8s 超时 / 任何失败 / 输出异常 → 确定性模板兜底（上报永不因 LLM 失败而中断）

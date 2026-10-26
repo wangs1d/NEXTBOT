@@ -32,6 +32,8 @@ export interface EveningDigestScheduleItem {
    * 该事项的预告段时刻（2026-10-13 口径：需要提前提醒的信息都进 prompt）。
    * 来源 = 任务 preReminders 的唤醒/出发段（night_before 是今晚的睡前备忘
    * 本身，不重复进明日数据），预渲染成「7:20 叫你起床」式短句供 agent 消化。
+   * 2026-10-26 用户拍板：advanceNotes 只进文案 prompt，不再上卡片
+   * （卡上行程 = 时刻 + 简短标题两列，预告信息由 narration 承担）。
    */
   advanceNotes?: string[];
 }
@@ -100,11 +102,11 @@ export type EveningDigestDeps = {
     opts?: { systemPrompt?: string },
   ) => Promise<string>;
   /**
-   * agent soul 取用口（装配层组装：agent 名 + 用户称呼 + 关系档 + 学到
-   * 的适配，主对话 buildPersonaStaticBlock 同源）。未注入 = 不带 system，
-   * 文案只受睡前 prompt 自身约束。
+   * agent soul 取用口（2026-10-26 单点化：走 SpeechHub.buildSystemPrompt 装配——
+   * 人格·静态 + 语感基准 + 通用纪律 + 画像浅层，主对话同源）。未注入 = 不带
+   * system，文案只受睡前 prompt 自身约束。异步签名兼容块装配的画像读取。
    */
-  soulProvider?: (sessionId: string) => string | null;
+  soulProvider?: (sessionId: string) => string | null | Promise<string | null>;
   /**
    * DDL 雷达（大学生线 L2 档）：明日截止事项取数口。未注入 = 不做 DDL 块。
    * 只读扫描，不推送——投递由本服务自身的睡前出口完成，避免与承诺板
@@ -237,7 +239,7 @@ export class EveningDigestService {
     if (!llm) return fallback;
     let systemPrompt: string | undefined;
     try {
-      systemPrompt = this.deps.soulProvider?.(sessionId) ?? undefined;
+      systemPrompt = (await this.deps.soulProvider?.(sessionId)) ?? undefined;
     } catch {
       /* soul 取用失败不阻塞文案 */
     }
@@ -331,7 +333,10 @@ export class EveningDigestService {
         .slice(0, 5)
         .map((t) => {
           const ts = Date.parse(t.nextRunAt ?? t.runAt ?? "");
-          const title = clipItemTitle(t.reminderMessage || t.title || "日程安排");
+          // 2026-10-26 用户拍板：行程区只放简短文字描述（shortTitle 口径，
+          // 如「看牙医」），不把提醒原文（reminderMessage「到点了该干嘛」）
+          // 原封搬进卡片——顶部 narration 已承担活人描述。
+          const title = clipItemTitle(t.shortTitle || t.title || "日程安排");
           // 预告段 → 绝对时刻短句（唤醒/出发段；night_before 排除）
           const advanceNotes = (t.preReminders ?? [])
             .filter(

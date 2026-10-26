@@ -698,7 +698,7 @@ export class PromptContextBuilder {
     // journal 搜索自 v3 起从未随门控运行（恒空），不再保留装配分支。
     // 2026-09-06：聊天路径不再并入全局 Agent 风格指纹（agent-style-profile，
     // 固定平均句长/语气词）——全局固定指纹与"语感跟着用户走"直接打架。
-    // 主动消息路径（create-app-services PROACTIVE_SYSTEM_PROMPT）继续使用它。
+    // 主动开口路径 2026-10-26 起经 SpeechHub 的 voiceProfile 块注入（统一出口）。
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 480);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断

@@ -593,7 +593,11 @@ import { createUserStyleBrief } from "../brain/user-style-brief.js";
 import { ProfileRouter, setProfileRouter } from "../brain/profile-router.js";
 import { registerProfileQueryTool } from "../tools/profile-query-tool.js";
 import { registerWatchBoardTools } from "../tools/watch-board-tools.js";
-import { SpeechPolisher } from "../proactivity/speech-polisher.js";
+import { SpeechHub } from "../proactivity/speech-express.js";
+import {
+  formatAgentStylePrompt,
+  loadAgentStyleProfile,
+} from "../agent/agent-style-profile.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
@@ -2068,22 +2072,38 @@ export async function createAppServices(): Promise<AppServices> {
   const userProfileAggregatorRef: {
     current: import("../brain/user-profile-aggregator.js").UserProfileAggregator | null;
   } = { current: null };
-  const speechPolisher = new SpeechPolisher({
+  // 人格·静态提供者晚绑定（2026-10-26）：主动开口的 LLM 层（SpeechHub 统一
+  // 出口）与主对话共用同源的专门人格提示文件（agent/SOUL.md → soul-store）。
+  const personaSoulProviderRef: {
+    current: ((sessionId: string) => string | null) | null;
+  } = { current: null };
+  const speechHub = new SpeechHub({
     chat: () => (externalChat?.isEnabled() ? externalChat : null),
     dataPath: join(getDataDir(), "proactivity"),
+    personaPrompt: (sessionId) => personaSoulProviderRef.current?.(sessionId) ?? null,
+    // agent 风格指纹（few-shot 语感）：与聊天同一副嗓子，读取失败不阻塞
+    voiceProfile: () => {
+      try {
+        return formatAgentStylePrompt(loadAgentStyleProfile(agentMemorySyncService));
+      } catch {
+        return null;
+      }
+    },
     styleBrief: createUserStyleBrief({
       readProfile: async (actorId) =>
         (await userProfileAggregatorRef.current?.readProfile(actorId)) ?? "",
     }),
   });
   // 日程分级预告段回填统一语气层（上方 reminderHandler 处晚绑定声明）：
-  // 带用户画像浅层背景（称呼/沟通偏好），模板兜底不受熔断影响。
+  // SpeechHub light 档（人格·静态 + 语感 + 画像浅层，必达不否决），
+  // 模板兜底不受熔断影响。
   preReminderPolish = (input) =>
-    speechPolisher.polish({
+    speechHub.speak({
       kind: "schedule_pre_reminder",
       sessionId: input.sessionId,
       facts: { draft: input.draft },
       fallback: input.draft,
+      tier: "light",
       importance: "high",
     });
   // 画像 v2 统一输出（ProfileRouter）：query/snapshot/brief 三视图 + 意图→类
@@ -2293,7 +2313,7 @@ export async function createAppServices(): Promise<AppServices> {
   // system 注入 agent 自身 soul（buildPersonaStaticBlock 与主对话同源，文案
   // 受 agent 人格影响），失败/未启用回退确定性模板；送达链路参考晨报
   // （WS 推送 EveningDigest 事件），调度模式参考 MorningBriefingScheduler。
-  const eveningDigestSoulProvider = (sessionId: string): string | null => {
+  const personaSoulProvider = (sessionId: string): string | null => {
     try {
       // agent 名（与聊天面同源：记忆同步 KV 的 agent.name）
       let agentName: string | undefined;
@@ -2330,13 +2350,25 @@ export async function createAppServices(): Promise<AppServices> {
       return null;
     }
   };
+  // 人格·静态单点回填（2026-10-26）：SpeechHub 统一出口与睡前备忘共用同一份
+  // 人格块（主对话同源）。
+  personaSoulProviderRef.current = personaSoulProvider;
   const eveningDigestService = new EveningDigestService({
     scheduleTaskService,
     weatherService,
     weatherPrefsService,
     // 天气位置偏好从未被客户端写入 → 明日天气兜底取位置历史的最新定位
     locationProvider: weatherLocationProvider,
-    soulProvider: eveningDigestSoulProvider,
+    // system 块装配单点化（2026-10-26）：narration 的 system 走 SpeechHub
+    // （人格·静态 + 语感 + 通用纪律），任务数据段仍由 digest 自己的 user prompt 承担
+    soulProvider: (sessionId) =>
+      speechHub.buildSystemPrompt({
+        sessionId,
+        kind: "evening_digest",
+        tier: "light",
+        maxChars: 150,
+        multiline: true,
+      }),
     // DDL 三级梯度 L2 档：明天要交的 + 今天已过期的（睡前最该交代的一句）
     ddlRadar: ddlRadarService,
     llmComplete: externalChat?.isEnabled()
@@ -2365,6 +2397,7 @@ export async function createAppServices(): Promise<AppServices> {
     digestService: eveningDigestService,
     // 推送时刻动态学习（2026-10-16）：经 UserTimingService 多源取就寝时刻
     // → 就寝前 30 分钟（钳位 [20:00, 23:30]）；未学出回退默认 21:00。
+    // 发送规则（2026-10-27 用户拍板）：到点那一分钟发一次，过点不补发。
     bedtimeHourOf: (sessionId) => userTiming.bedtimeHour(sessionId),
     onDigestTriggered: (sessionId, digest) => {
       const sent = wsConnectionRegistry.trySend(
@@ -3154,6 +3187,8 @@ export async function createAppServices(): Promise<AppServices> {
       turnAsideQueue,
       // 死信闸：全设备离线时放弃话术生成（省 LLM 调用，不产生假台账）
       isActorOnline: (actorId) => proactivityPresence.isOnline(actorId),
+      // 统一开口出口：full 档 system 块装配（人格·静态/语感/纪律/画像）与用量记账
+      speech: speechHub,
     });
 
   }
@@ -5431,9 +5466,16 @@ export async function createAppServices(): Promise<AppServices> {
           return run(false);
         }
       : undefined,
-    // 统一主动语气层：初稿过 SpeechPolisher（统一口吻 + 用户画像语气 + 模型钉位
-    // + 每日熔断），与兴趣推送/比价到价同一副嗓子；失败回退初稿不阻塞
-    polish: (input) => speechPolisher.polish(input),
+    // 统一主动语气层：初稿过 SpeechHub light 档（人格·静态 + 语感 + 用户画像
+    // 语气 + 模型钉位 + 每日熔断），与其它主动消息同一副嗓子；失败回退初稿不阻塞
+    polish: (input) =>
+      speechHub.speak({
+        kind: input.kind,
+        sessionId: input.sessionId,
+        facts: input.facts,
+        fallback: input.fallback,
+        tier: "light",
+      }),
     submitProposal: (p) => {
       // 管道在下方主动性段才构造：闭包晚绑定（首查延迟 3min，装配早已完成）。
       // 返回仲裁结果（测试端点据此回显 verdict）
@@ -5444,7 +5486,7 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ─── 购物降价监控装配（复用 InterestWatcher 轮询模式，tick=PRICE_WATCH_TICK_MS 默认 60min）───
   // shopping.compare.watch 工具入库 → 后台定时复查价格 → 到价且为新低价 →
-  // 话术润色（SpeechPolisher，模板兜底）→ 统一管道 must 层主动推。
+  // 话术润色（SpeechHub light 档，模板兜底）→ 统一管道 must 层主动推。
   // 管道在下方主动性段才构造：经晚绑定容器回填（构造前的命中走 hub speak 兜底）。
   const proactivePipelineRef: { current: ProactivePipeline | null } = { current: null };
   await shoppingCompareService.load();
@@ -5460,8 +5502,8 @@ export async function createAppServices(): Promise<AppServices> {
         `已经低于你说的 ¥${watch.targetPrice} 了。` +
         (hit.url ? `链接在这儿：${hit.url}。` : "") +
         `要我发你看看吗？`;
-      const directText = await speechPolisher
-        .polish({
+      const directText = await speechHub
+        .speak({
           kind: "price_watch_hit",
           sessionId: actorId,
           facts: {
@@ -5473,7 +5515,8 @@ export async function createAppServices(): Promise<AppServices> {
             ...(hit.url ? { url: hit.url } : {}),
           },
           fallback,
-          // 用户自己设的盯梢 = 用户自己下的单：值得花一次 LLM（重要性门槛不拦截）
+          tier: "light",
+          // 用户自己设的盯梢 = 用户自己下的单：值得花一次 LLM（不传 importance → 门槛不拦截）
         })
         .catch(() => fallback);
       const pipeline = proactivePipelineRef.current;
@@ -6489,6 +6532,37 @@ export async function createAppServices(): Promise<AppServices> {
   // 映射规则事件 → 仲裁裁决 → 管道投递（决策零 LLM；状态板不再喂任何 LLM 观察流）
   mappingExecutor.onEvent((event) => {
     const actorId = event.actorId ?? "local_user";
+    // ── 社交开口类 → 统一主动出口（2026-10-26 用户拍板）──
+    // away_return 不产模板提案：映射规则只负责「何时触发」，说什么交给统一出口——
+    // BrainCenter 决策时机 → agent 主动做事（查日程/聚合消息/看行程等，工具循环）
+    // → 通用话术生成（ProactiveOutreachExecutor，拟人节奏投递）。走 arbiterV2/管道
+    // 直投会把「事件摘要 + 兜底模板」这类提示词材料原样说给用户（实测反馈）。
+    // brain 关闭时回退旧管道保底（模板直投，降级可用）。
+    if (event.kind === "away_return" && brainCenter) {
+      lifeSignalHubService.publish({
+        id: `${actorId}:proactivity:${event.kind}:${event.dedupKey}`,
+        actorId,
+        source: "system",
+        kind: event.kind,
+        title: event.title,
+        summary: event.summary ? `离开了 ${event.summary}，刚回到电脑前` : event.body,
+        tags: [event.kind, "proactivity"],
+        importance: event.importance,
+        evidence: [`mapping:${event.kind}`, event.title],
+        occurredAt: new Date(event.at).toISOString(),
+      });
+      appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), {
+        at: Date.now(),
+        eventId: event.id,
+        kind: event.kind,
+        urgency: event.urgency,
+        actorId,
+        action: "life_signal",
+        title: event.title,
+      });
+      console.log(`[ArbiterV2] away_return → LifeSignal 统一主动出口（BrainCenter 决策话术）`);
+      return;
+    }
     // 归属判定（2026-10-19）：这条场景信号是不是在说某个在办目标的事？
     // 命中时**就地替换局部副本**——等级与正文都改由目标状态决定（卡在用户身上的
     // 目标该抢注意力），未命中时下面逐字不变（零风险回退）。生产者的等级从此不是
@@ -6527,6 +6601,7 @@ export async function createAppServices(): Promise<AppServices> {
       deliver: () => {
         // 内容型评估器事件（消息来临/临会提醒）→ LLM 话术润色后再投递；
         // 其余 kind 保持模板直投。polish 失败自动回退 event.body。
+        // （社交开口类 away_return 已在 onEvent 顶部分流进统一主动出口。）
         const phraseKinds = ["unread_burst", "meeting_soon"];
         // 呼叫路由：PROACTIVE_CALL_KINDS 白名单（默认行程变化）+
         // 任意 critical 事件——遇到事情打电话汇报，通话内可对话
@@ -6583,11 +6658,12 @@ export async function createAppServices(): Promise<AppServices> {
             });
         } else if (phraseKinds.includes(event.kind)) {
           void (async () => {
-            const polished = await speechPolisher.polish({
+            const polished = await speechHub.speak({
               kind: event.kind,
               sessionId: actorId,
               facts: { title: event.title, body: event.body },
               fallback: event.body,
+              tier: "light",
               // 重要性分配：低于门槛（默认 high）的提醒直接模板直投，不花润色调用
               importance: event.importance,
             });
@@ -6652,7 +6728,7 @@ export async function createAppServices(): Promise<AppServices> {
     configPath: join(getDataDir(), "proactivity", "branches.json"),
   });
   // L3 精简器（Phase 2）：挂在注册表统一编排入口（ingest），按树枝配置决定
-  // 是否花 LLM；全模板兜底。熔断/kill switch 与 SpeechPolisher 同纪律。
+  // 是否花 LLM；全模板兜底。熔断/kill switch 与 SpeechHub 同纪律。
   const branchCondenser = new BranchCondenser({ chat: () => (externalChat?.isEnabled() ? externalChat : null) });
   branchRegistry.attachCondenser(branchCondenser);
   console.log(
@@ -6678,8 +6754,8 @@ export async function createAppServices(): Promise<AppServices> {
       // 再进统一管道（must 层必达语义不变）——与 messageWatchTrigger 同范式。
       void (async () => {
         if (p.directText) {
-          p.directText = await speechPolisher
-            .polish({
+          p.directText = await speechHub
+            .speak({
               kind: "watch_task_hit",
               sessionId: p.actorId,
               facts: {
@@ -6689,6 +6765,7 @@ export async function createAppServices(): Promise<AppServices> {
                 ...(p.detail?.["截止"] ? { deadline: p.detail["截止"] } : {}),
               },
               fallback: p.directText,
+              tier: "light",
               importance: p.importance,
             })
             .catch(() => p.directText!);
@@ -6715,7 +6792,7 @@ export async function createAppServices(): Promise<AppServices> {
       void (async () => {
         if (p.directText) {
           // 仅话术生成可失败（回退模板）；提交只执行一次，避免异常路径双发
-          p.directText = await speechPolisher.polish({
+          p.directText = await speechHub.speak({
             kind: "message_watch",
             sessionId: p.actorId,
             facts: {
@@ -6724,6 +6801,7 @@ export async function createAppServices(): Promise<AppServices> {
               verb: (p.evidence.find((e) => e.startsWith("keyword:")) ?? "").slice(8),
             },
             fallback: p.directText,
+            tier: "light",
             // 重要性分配：低于门槛（默认 high）的消息提醒直接模板直投
             importance: p.importance,
           }).catch(() => p.directText!);
@@ -7028,7 +7106,7 @@ export async function createAppServices(): Promise<AppServices> {
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => mappingExecutor.probes(),
       observeOutcome: (outcome) => costCalibrator.observe(outcome),
-      phraseStats: () => speechPolisher.stats(),
+      phraseStats: () => speechHub.stats(),
       callStats: () => proactiveCaller.stats(),
       testCall: (actorId) =>
         proactiveCaller.callAndReport({
@@ -7066,7 +7144,7 @@ export async function createAppServices(): Promise<AppServices> {
           sensorKernel,
           evaluatorProbes: () => mappingExecutor.probes(),
           calibration: () => costCalibrator.snapshot(),
-          phraseStats: () => speechPolisher.stats(),
+          phraseStats: () => speechHub.stats(),
           callStats: () => proactiveCaller.stats(),
           goalStats: () => ({
             ready: goalBoard.readyTray().length,

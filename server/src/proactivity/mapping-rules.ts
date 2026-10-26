@@ -73,7 +73,9 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "low",
             title: `用户离开了 ${awayLabel} 后回归`,
-            body: renderProactiveText("away_return", { dedupKey: `away:${presence.since}`, now: ctx.now }),
+            // 事件背景：喂给 LLM 话术层的离开时长（away_return 走 polish 通道）
+            summary: awayLabel,
+            body: renderProactiveText("away_return", { dedupKey: `away:${presence.since}`, now: ctx.now, awayLabel }),
             dedupKey: `away_return:${new Date(presence.since).toISOString().slice(0, 10)}`,
             salience: "medium",
           });

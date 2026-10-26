@@ -24,7 +24,10 @@ import {
 } from "./intent-parser.js";
 import { findReservationRule } from "./travel-poi-dossier.js";
 import { resolveOriginFromLocation } from "./travel-origin.js";
+import { getDataDir } from "../../config/data-dir.js";
 import type { LocationCoordinator } from "../../services/location-coordinator.js";
+import fs from "node:fs";
+import path from "node:path";
 
 // ═══════════════════════════════════════════════════════════════════
 // 行程规划会话（v3 旅游界面 · Agent 驱动规划流）
@@ -42,8 +45,10 @@ import type { LocationCoordinator } from "../../services/location-coordinator.js
 // 明细（门票/房价/餐饮人均/往返大交通均来自实时报价，取不到的标「待核价」
 // 且不计入合计），用户 approve 之后才下发最终草案 + planId。
 //
-// 会话状态为内存态（2h TTL 惰性清扫）：规划是短生命周期交互，持久化由
-// 行程冷层承担；服务重启后用户重新发一句话即可。
+// 会话持久化（2026-10-26）：内存 Map + 磁盘双层（data/travel-plan-sessions/{id}.json，
+// 单文件单会话，惰性读盘）。内存 2h TTL 清出后磁盘仍在，客户端可凭 sessionId
+// 恢复对话；GET /travel/plan-sessions 列历史会话，磁盘 30 天过期随清扫删除。
+// 生成的行程本体仍由 travelPlanStore 冷层承担，这里只保对话流本身。
 // ═══════════════════════════════════════════════════════════════════
 
 // ======================== 卡片 / 回执类型 ========================
@@ -365,15 +370,76 @@ export type PlanSession = {
 /** 追问卡总数封顶：到顶后不再出卡，目的地在手就直接出方案。 */
 const MAX_QUESTION_TURNS = 8;
 
-// ======================== 会话存储（内存 + TTL） ========================
+// ======================== 会话存储（内存 + 磁盘双层） ========================
 
+/** 内存 TTL：清出后磁盘仍在（可恢复），不是删除。 */
 const SESSION_TTL_MS = 2 * 60 * 60 * 1000;
+/** 磁盘留存期：30 天后随清扫删除（规划会话是短生命周期数据，不是档案）。 */
+const SESSION_DISK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+// 测试可用 TRAVEL_PLAN_SESSIONS_DIR 覆盖存储目录（默认 data/travel-plan-sessions）
+const SESSIONS_DIR = path.resolve(
+  process.env.TRAVEL_PLAN_SESSIONS_DIR || path.join(getDataDir(), "travel-plan-sessions"),
+);
 const sessions = new Map<string, PlanSession>();
+let sessionsDirReady = false;
 
+function ensureSessionsDir(): void {
+  if (sessionsDirReady) return;
+  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  sessionsDirReady = true;
+}
+
+function sessionPath(id: string): string {
+  return path.join(SESSIONS_DIR, `${path.basename(id)}.json`);
+}
+
+/** 每轮变更后落盘（同步写：规划是低频交互，与 travelPlanStore 同一口径）。 */
+function saveSession(session: PlanSession): void {
+  sessions.set(session.id, session);
+  try {
+    ensureSessionsDir();
+    fs.writeFileSync(sessionPath(session.id), JSON.stringify(session), "utf8");
+  } catch (err) {
+    console.error("[travel-plan-session] save failed:", err);
+  }
+}
+
+/** 内存未命中 → 惰性读盘：服务重启 / 内存被 TTL 清出后凭 sessionId 仍可续聊。 */
+function getSession(id: string): PlanSession | null {
+  const cached = sessions.get(id);
+  if (cached) return cached;
+  if (!id || id.includes("/") || id.includes("\\") || id.includes("..")) return null;
+  try {
+    const parsed = JSON.parse(fs.readFileSync(sessionPath(id), "utf8")) as PlanSession;
+    if (parsed?.id && Array.isArray(parsed.history)) {
+      sessions.set(parsed.id, parsed);
+      return parsed;
+    }
+  } catch {
+    // 不存在/损坏 → null
+  }
+  return null;
+}
+
+/** 双层清扫：内存 2h 清出（磁盘保留可恢复）；磁盘 30 天过期删除。 */
 function pruneSessions(): void {
   const now = Date.now();
   for (const [id, s] of sessions) {
     if (now - s.updatedAt > SESSION_TTL_MS) sessions.delete(id);
+  }
+  try {
+    if (!fs.existsSync(SESSIONS_DIR)) return;
+    for (const f of fs.readdirSync(SESSIONS_DIR)) {
+      if (!f.endsWith(".json")) continue;
+      const p = path.join(SESSIONS_DIR, f);
+      try {
+        if (now - fs.statSync(p).mtimeMs > SESSION_DISK_TTL_MS) fs.rmSync(p, { force: true });
+      } catch {
+        // 单个文件失败不影响其余
+      }
+    }
+  } catch (err) {
+    console.error("[travel-plan-session] prune failed:", err);
   }
 }
 
@@ -1268,6 +1334,36 @@ function guideCardForStage(
 }
 
 /**
+ * 会话状态标签（GET /:id 与 GET /travel/plan-sessions 共用，口径必须一致）。
+ * 与客户端 _PlanningStageState 的恢复渲染分支一一对应。
+ */
+function sessionStateLabel(session: PlanSession): PlanSessionTurn["state"] {
+  if (session.budgetApproved) return "generated";
+  if (session.budget) return "budget_ready";
+  if (session.awaitingExtras) return "wishlist_ready";
+  if (session.ready && pendingGuideStage(session)) return "guide_ready";
+  if (session.ready) return "ready";
+  return "gathering";
+}
+
+/**
+ * 恢复用的「当前挂起卡」：筛选卡段 / 补心愿卡可以确定性重建；
+ * choice 问题卡的选项不落盘（编排器每轮现生成），恢复不了 → 返回 null，
+ * 客户端退化为「继续说一句」即可，下一轮回执自然带新卡。
+ */
+function resumeCardFor(session: PlanSession): PlanSessionCard | null {
+  if (session.budgetApproved) return null;
+  if (session.awaitingExtras) {
+    return buildWishlistCard(session.guideSelections ?? { view: [], stay: [], food: [] });
+  }
+  if (session.ready) {
+    const stage = pendingGuideStage(session);
+    return stage ? guideCardForStage(session, stage) : null;
+  }
+  return null;
+}
+
+/**
  * 信息齐后、出方案前的候选生成：真实候选（文字介绍 + 实拍图 + 实时价），
  * 全量存进 session.guide，由三段筛选卡逐段下发。生成失败返回 false 走
  * 「直接出方案」，不让筛选环节挡住主链路。
@@ -1356,6 +1452,7 @@ function buildWishlistCard(
 function finalizeGuideTurn(
   session: PlanSession,
   selections: { view: string[]; stay: string[]; food: string[] },
+  persist = false,
 ): PlanSessionTurn {
   session.guideSelections = selections;
   session.extras = undefined;
@@ -1371,6 +1468,7 @@ function finalizeGuideTurn(
   session.history.push({ role: "assistant", content: say });
   session.answers = session.answers.filter((a) => a.id !== "guide");
   session.answers.push({ id: "guide", question: "想玩哪些", answer: parts.join("；") });
+  if (persist) saveSession(session);
   return {
     ok: true,
     sessionId: session.id,
@@ -1996,7 +2094,8 @@ function requireService(
  *   POST /travel/plan-session/:id/turn  {message} 继续说 / {cardId,values,note} 点选回传
  *   POST /travel/plan-session/:id/guide {view?,stay?,food?,delegate?} 提交筛选卡勾选
  *   POST /travel/plan-session/:id/generate   真实生成（10~120s，客户端显示 typing）
- *   GET   /travel/plan-session/:id      会话状态（刷新恢复）
+ *   GET   /travel/plan-sessions        历史会话列表（规划界面的历史对话入口）
+ *   GET   /travel/plan-session/:id      会话状态 + history（刷新恢复 / 继续上次规划）
  */
 export function registerTravelPlanSessionRoutes(
   app: FastifyInstance,
@@ -2011,10 +2110,64 @@ export function registerTravelPlanSessionRoutes(
       "POST   /travel/plan-session/:id/extras {view?,stay?,food?,note?} 提交筛选后的自选补充（可空）",
       "POST   /travel/plan-session/:id/generate   信息齐后真实生成并返回预算明细（待确认）",
       "POST   /travel/plan-session/:id/approve    用户确认预算后下发最终草案",
-      "GET    /travel/plan-session/:id        会话状态（客户端刷新恢复）",
+      "GET    /travel/plan-session/:id        会话状态 + history + dossier + resumeCard（刷新恢复 / 继续上次规划）",
+      "GET    /travel/plan-sessions?limit=30  历史规划会话列表（按最近更新排序，供客户端「历史对话」入口）",
     ],
-    note: "会话为内存态（2h TTL）；持久化由 travelPlanStore 冷层承担",
+    note: "会话落盘 data/travel-plan-sessions/{id}.json：内存 2h 清出可恢复，磁盘 30 天过期；行程本体由 travelPlanStore 冷层承担",
   }));
+
+  // 历史规划会话列表（旅游界面「规划」tab 的历史对话入口）
+  app.get("/travel/plan-sessions", async (request) => {
+    const query = (request.query ?? {}) as { limit?: string };
+    const limit = Math.min(Math.max(Number(query.limit) || 30, 1), 100);
+    pruneSessions();
+    const list: Array<{
+      id: string;
+      createdAt: number;
+      updatedAt: number;
+      destination: string | null;
+      days: number | null;
+      startDate: string | null;
+      endDate: string | null;
+      originalMessage: string;
+      state: string;
+      turnCount: number;
+      lastUserMessage: string;
+    }> = [];
+    try {
+      if (fs.existsSync(SESSIONS_DIR)) {
+        for (const f of fs.readdirSync(SESSIONS_DIR)) {
+          if (!f.endsWith(".json")) continue;
+          try {
+            const parsed = JSON.parse(
+              fs.readFileSync(path.join(SESSIONS_DIR, f), "utf8"),
+            ) as PlanSession;
+            if (!parsed?.id || !Array.isArray(parsed.history)) continue;
+            const lastUser = [...parsed.history].reverse().find((h) => h.role === "user");
+            list.push({
+              id: parsed.id,
+              createdAt: parsed.createdAt,
+              updatedAt: parsed.updatedAt,
+              destination: parsed.destination ?? null,
+              days: effectiveDays(parsed),
+              startDate: parsed.startDate ?? null,
+              endDate: parsed.endDate ?? null,
+              originalMessage: parsed.originalMessage,
+              state: sessionStateLabel(parsed),
+              turnCount: parsed.history.length,
+              lastUserMessage: lastUser?.content ?? parsed.originalMessage,
+            });
+          } catch {
+            // 单个损坏文件跳过，不挡列表
+          }
+        }
+      }
+    } catch (err) {
+      console.error("[travel-plan-session] list failed:", err);
+    }
+    list.sort((a, b) => b.updatedAt - a.updatedAt);
+    return { ok: true, sessions: list.slice(0, limit) };
+  });
 
   // 一句话发起
   app.post("/travel/plan-session", async (request, reply) => {
@@ -2059,15 +2212,18 @@ export function registerTravelPlanSessionRoutes(
       ...(locatedOrigin ? { locatedOrigin } : {}),
     };
     sessions.set(session.id, session);
+    // 发起即落盘：哪怕首轮编排失败/进程中断，会话也已留痕可恢复
+    saveSession(session);
     const turn = await runTurn(session, deps.travelPlanningService);
     session.updatedAt = Date.now();
+    saveSession(session);
     return turn;
   });
 
   // 继续对话 / 点选回传
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/turn", async (request, reply) => {
     if (!requireService(deps, reply)) return;
-    const session = sessions.get(request.params.id);
+    const session = getSession(request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2079,6 +2235,7 @@ export function registerTravelPlanSessionRoutes(
       recordChoiceAnswer(session, cardId, values, note);
       const turn = await runTurn(session, deps.travelPlanningService);
       session.updatedAt = Date.now();
+      saveSession(session);
       return turn;
     }
 
@@ -2104,6 +2261,7 @@ export function registerTravelPlanSessionRoutes(
             : "好，就按勾选的来，我先算一版实时预算。";
         session.history.push({ role: "assistant", content: say });
         session.updatedAt = Date.now();
+        saveSession(session);
         return {
           ok: true,
           sessionId: session.id,
@@ -2117,6 +2275,7 @@ export function registerTravelPlanSessionRoutes(
       }
       const turn = await runTurn(session, deps.travelPlanningService);
       session.updatedAt = Date.now();
+      saveSession(session);
       return turn;
     }
     return reply.code(400).send({ ok: false, error: "body 需为 {message} 或 {cardId,values,note?}" });
@@ -2126,7 +2285,7 @@ export function registerTravelPlanSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/guide",
     async (request, reply) => {
-      const session = sessions.get(request.params.id);
+      const session = getSession(request.params.id);
       if (!session) {
         return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
       }
@@ -2163,7 +2322,7 @@ export function registerTravelPlanSessionRoutes(
             selections[key] = cat.items.slice(0, topN[key]).map((i) => i.name);
           }
         }
-        return finalizeGuideTurn(session, selections);
+        return finalizeGuideTurn(session, selections, true);
       }
 
       const picks = pick(stage, body.data[stage]);
@@ -2182,6 +2341,7 @@ export function registerTravelPlanSessionRoutes(
         const pickedSay = picks.slice(0, 6).join("、");
         const say = `${GUIDE_SHORT_LABELS[stage]}就按这几处：${pickedSay}。${GUIDE_STAGE_INVITE[next]}`;
         session.history.push({ role: "assistant", content: say });
+        saveSession(session);
         return {
           ok: true,
           sessionId: session.id,
@@ -2193,7 +2353,7 @@ export function registerTravelPlanSessionRoutes(
           dossier: buildDossier(session, "guide_ready"),
         } satisfies PlanSessionTurn;
       }
-      return finalizeGuideTurn(session, session.guideSelections!);
+      return finalizeGuideTurn(session, session.guideSelections!, true);
     },
   );
 
@@ -2204,7 +2364,7 @@ export function registerTravelPlanSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/extras",
     async (request, reply) => {
-      const session = sessions.get(request.params.id);
+      const session = getSession(request.params.id);
       if (!session) {
         return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
       }
@@ -2240,6 +2400,7 @@ export function registerTravelPlanSessionRoutes(
             ? "记下了，我按这个偏好去排，先算一版实时预算。"
             : "好，就按勾选的来，我先算一版实时预算。";
       session.history.push({ role: "assistant", content: say });
+      saveSession(session);
       return {
         ok: true,
         sessionId: session.id,
@@ -2256,7 +2417,7 @@ export function registerTravelPlanSessionRoutes(
   // 真实生成（与聊天 travel.plan-itinerary 同一引擎与冷层）
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/generate", async (request, reply) => {
     if (!requireService(deps, reply)) return;
-    const session = sessions.get(request.params.id);
+    const session = getSession(request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2266,6 +2427,8 @@ export function registerTravelPlanSessionRoutes(
     }
     try {
       const { budget, draft } = await generateDraft(session, deps.travelPlanningService!);
+      session.updatedAt = Date.now();
+      saveSession(session);
       const total = budget.total > 0 ? `¥${budget.total.toLocaleString("zh-CN")}` : "待核价";
       const transportItem = budget.items.find((i) => i.key === "transport");
       const transportAmount = transportItem?.amount;
@@ -2305,7 +2468,7 @@ export function registerTravelPlanSessionRoutes(
 
   // 预算确认：用户看过明细并同意后才下发最终草案
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/approve", async (request, reply) => {
-    const session = sessions.get(request.params.id);
+    const session = getSession(request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2314,6 +2477,7 @@ export function registerTravelPlanSessionRoutes(
       return reply.code(400).send({ ok: false, error: "预算还没算好，先完成信息对齐" });
     }
     session.budgetApproved = true;
+    saveSession(session);
     return {
       ok: true,
       sessionId: session.id,
@@ -2328,26 +2492,18 @@ export function registerTravelPlanSessionRoutes(
     } satisfies PlanSessionTurn;
   });
 
-  // 会话状态（客户端刷新恢复）
+  // 会话状态（客户端刷新恢复 / 继续上次规划）：带 history 让客户端重建对话流，
+  // dossier 整份快照、resumeCard 是当前挂起卡（choice 卡选项不落盘、重建不了时为 null）
   app.get<{ Params: { id: string } }>("/travel/plan-session/:id", async (request, reply) => {
-    const session = sessions.get(request.params.id);
+    const session = getSession(request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期" });
     }
+    const state = sessionStateLabel(session);
     return {
       ok: true,
       sessionId: session.id,
-      state: session.budgetApproved
-        ? "generated"
-        : session.budget
-          ? "budget_ready"
-          : session.awaitingExtras
-            ? "wishlist_ready"
-            : session.ready && pendingGuideStage(session)
-              ? "guide_ready"
-              : session.ready
-                ? "ready"
-                : "gathering",
+      state,
       destination: session.destination ?? null,
       origin: session.origin ?? null,
       days: effectiveDays(session),
@@ -2356,6 +2512,9 @@ export function registerTravelPlanSessionRoutes(
       extras: session.extras ?? null,
       draft: session.draft,
       budget: session.budget ?? null,
+      history: session.history,
+      dossier: buildDossier(session, state),
+      resumeCard: resumeCardFor(session),
     };
   });
 }

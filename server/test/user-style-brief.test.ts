@@ -1,17 +1,17 @@
 /**
- * 用户画像浅层影响（UserStyleBrief + SpeechPolisher styleBrief 注入）单测。
+ * 用户画像浅层影响（UserStyleBrief + SpeechHub styleBrief 注入）单测。
  *
  * 覆盖：
  *   1. 投影：行数/字符双上限、段头过滤、空画像 → null（宁缺勿错）
  *   2. TTL 缓存：5min 内不重读画像
- *   3. SpeechPolisher：styleBrief 注入 → system prompt 携带画像浅层背景；
+ *   3. SpeechHub：styleBrief 注入 → system prompt 携带画像浅层背景；
  *     未注入 → 与旧版一致；读取抛错 → 回退不阻塞
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { createUserStyleBrief } from "../src/brain/user-style-brief.js";
-import { SpeechPolisher } from "../src/proactivity/speech-polisher.js";
+import { SpeechHub } from "../src/proactivity/speech-express.js";
 
 const PROFILE = [
   "【基本信息】",
@@ -63,7 +63,7 @@ test("style-brief：字符上限截断 + 画像读取失败降级 null", async (
   assert.equal(await broken("u1"), null, "读取失败降级，不阻塞旁路生成");
 });
 
-// ───────────────────── SpeechPolisher 注入 ─────────────────────
+// ───────────────────── SpeechHub 注入 ─────────────────────
 
 type Capture = { systemPrompt?: string; text: string };
 
@@ -90,17 +90,18 @@ const POLISH_INPUT = {
   sessionId: "u1",
   facts: { item: "XM6", price: "¥800" },
   fallback: "你盯的耳机降价了。",
+  tier: "light",
 } as const;
 
-test("speech-polisher：styleBrief 注入 → system prompt 携带画像浅层背景", async () => {
+test("speech-hub：styleBrief 注入 → system prompt 携带画像浅层背景", async () => {
   const { chat, captures } = makeChat();
-  const polisher = new SpeechPolisher({
+  const hub = new SpeechHub({
     chat: () => chat as never,
-    dataPath: ".tmp-polisher-style-test",
+    dataPath: ".tmp-hub-style-test",
     styleBrief: async () => "称呼：老铁\n所在地：贵州兴义",
     nowFn: () => new Date("2026-10-23T10:00:00Z"),
   });
-  const out = await polisher.polish({ ...POLISH_INPUT });
+  const out = await hub.speak({ ...POLISH_INPUT });
   assert.equal(out, "好的呀，马上到。");
   const sys = captures[0]!.systemPrompt ?? "";
   assert.ok(sys.includes("私人助理"), "基础人设仍在");
@@ -108,24 +109,24 @@ test("speech-polisher：styleBrief 注入 → system prompt 携带画像浅层�
   assert.ok(sys.includes("称呼：老铁"), "画像行在 system prompt 里");
 });
 
-test("speech-polisher：未注入 styleBrief → 与旧版一致；读取抛错不阻塞", async () => {
+test("speech-hub：未注入 styleBrief → 与旧版一致；读取抛错不阻塞", async () => {
   const { chat, captures } = makeChat();
-  const plain = new SpeechPolisher({
+  const plain = new SpeechHub({
     chat: () => chat as never,
-    dataPath: ".tmp-polisher-style-test",
+    dataPath: ".tmp-hub-style-test",
     nowFn: () => new Date("2026-10-23T10:00:00Z"),
   });
-  await plain.polish({ ...POLISH_INPUT });
+  await plain.speak({ ...POLISH_INPUT });
   assert.ok(!(captures[0]!.systemPrompt ?? "").includes("用户画像浅层背景"), "无画像段");
 
-  const broken = new SpeechPolisher({
+  const broken = new SpeechHub({
     chat: () => chat as never,
-    dataPath: ".tmp-polisher-style-test",
+    dataPath: ".tmp-hub-style-test",
     styleBrief: async () => {
       throw new Error("boom");
     },
     nowFn: () => new Date("2026-10-23T10:00:00Z"),
   });
-  const out = await broken.polish({ ...POLISH_INPUT });
+  const out = await broken.speak({ ...POLISH_INPUT });
   assert.equal(out, "好的呀，马上到。", "画像读取抛错 → 照常润色");
 });

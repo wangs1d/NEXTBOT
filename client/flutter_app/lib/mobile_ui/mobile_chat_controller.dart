@@ -692,11 +692,13 @@ class MobileChatController extends ChangeNotifier {
       }
       // 手机端定调（2026-10-21）：主动消息是「真实消息」——与正常对话回复
       // 同等地位落本地历史（重启后仍在），而非一次性浮层。
+      // 2026-10-26 定调：气泡只放正文（与正常对话格式一致），title 留给
+      // 横幅/系统通知；离开时长等缘由由服务端写进正文。
       final ChatMessage proactive = ChatMessage(
         messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
         sessionId: ApiConfig.effectiveActorId,
         role: "assistant",
-        text: title.isNotEmpty && text.isNotEmpty ? "$title\n$text" : (text.isNotEmpty ? text : title),
+        text: text,
         timestamp: DateTime.now(),
       );
       messages.add(proactive);

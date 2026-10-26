@@ -254,6 +254,30 @@ const arbiter = new ArbiterV2({
 
 evaluatorChain.onEvent((event) => {
   log.events.push({ at: virtual.now, kind: event.kind, urgency: event.urgency, tier: event.tier, title: event.title.slice(0, 30), dedupKey: event.dedupKey });
+  // 社交开口类（away_return）→ 统一主动出口（同 bootstrap 2026-10-26 分流）：
+  // 映射规则只管「何时触发」，话术由 BrainCenter 决策 + agent 主动做事 + 通用话术
+  // 生成（ProactiveOutreachExecutor）。soak 无 BrainCenter/LLM → 模拟统一出口的
+  // 通用兜底直投（buildFallbackMessage 语义），投递经 deliver 记录器照常记账。
+  if (event.kind === "away_return") {
+    deliveryService.deliver(
+      {
+        proposalId: event.id,
+        actorId: event.actorId,
+        kind: event.proposalKind,
+        tier: event.tier,
+        importance: event.importance,
+        dedupKey: event.dedupKey,
+        title: event.title,
+        summary: event.title,
+        evidence: [`evaluator:${event.kind}`],
+        createdAt: virtual.now,
+        source: `evaluator:${event.kind}`,
+      },
+      `有个小情况：${event.title}。`,
+      event.title,
+    );
+    return;
+  }
   arbiter.admit({
     actorId: event.actorId,
     urgency: event.urgency,

@@ -8,7 +8,7 @@
  *      真实 ProactivePipeline（临时目录）端到端——3 次同话题 dismiss 后
  *      mute_suggest 提案应真实投递。
  * 腿4 goal 轻步骤判定 + goal 车道预算装配断言（bootstrap 源码级检查）。
- * 腿5 润色重要性闸：真实 SpeechPolisher 装配（无 provider）下 low 直落模板。
+ * 腿5 润色重要性闸：真实 SpeechHub 装配（无 provider）下 low 直落模板。
  *
  * 用法：cd server && npx tsx scripts/probe-proactivity-optimizations.ts
  */
@@ -22,7 +22,7 @@ import { InterestWatcher, type InterestHit } from "../src/proactivity/interest-w
 import { TurnAsideQueue } from "../src/proactivity/turn-aside-queue.js";
 import { OutcomeStore } from "../src/proactivity/outcome-store.js";
 import { TopicDismissTracker } from "../src/proactivity/topic-dismiss-tracker.js";
-import { SpeechPolisher } from "../src/proactivity/speech-polisher.js";
+import { SpeechHub } from "../src/proactivity/speech-express.js";
 import { isLightStep } from "../src/proactivity/goal-planner.js";
 import { ProactivePipeline } from "../src/proactivity/proactive-pipeline.js";
 import { ProactiveDeliveryService } from "../src/proactivity/delivery-service.js";
@@ -179,18 +179,19 @@ async function leg5PhraseGate(): Promise<void> {
       throw new Error("low 档不应到达 provider");
     },
   };
-  const polisher = new SpeechPolisher({ chat: () => chat as never, dataPath: tmpdir() });
-  const out = await polisher.polish({
+  const hub = new SpeechHub({ chat: () => chat as never, dataPath: tmpdir() });
+  const out = await hub.speak({
     kind: "unread_burst",
     sessionId: "probe",
     facts: {},
     fallback: "模板话术",
+    tier: "light",
     importance: "low",
   });
   report(
     "腿5 润色重要性闸",
-    out === "模板话术" && providerCalls === 0 && polisher.stats().lastFallback === "low_importance(low)",
-    `low 档直接模板零调用（providerCalls=${providerCalls}，lastFallback=${polisher.stats().lastFallback}）`,
+    out === "模板话术" && providerCalls === 0 && hub.stats().lastFallback === "low_importance(low)",
+    `low 档直接模板零调用（providerCalls=${providerCalls}，lastFallback=${hub.stats().lastFallback}）`,
   );
 }
 
