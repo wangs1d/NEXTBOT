@@ -23,7 +23,6 @@ export type ToolCategory =
   | "clock"
   | "life"
   | "capability"
-  | "embodiment"
   | "desktop"
   | "programming"
   | "world"
@@ -145,15 +144,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "smart_home.scene": "smart_home",
   // capability
   "agent.query_capabilities": "capability",
-  // embodiment
-  "embodiment.observe": "embodiment",
-  "embodiment.window_place": "embodiment",
-  "embodiment.roam": "embodiment",
-  "embodiment.move": "embodiment",
-  "embodiment.stop": "embodiment",
-  "embodiment.set_state": "embodiment",
-  "embodiment.excite": "embodiment",
-  "embodiment.window_roam": "embodiment",
   // social / messages（消息聚合中心：两级获取，reply 为短信代发写操作）
   "messages.overview": "social",
   "messages.list_conversations": "social",

@@ -18,8 +18,3 @@ export function useEmbodimentCommandRelay(enabled = true) {
     return () => window.removeEventListener("message", onMessage);
   }, [enabled]);
 }
-
-export function relayEmbodimentCommandFromWs(payload: Record<string, unknown>) {
-  const cmd = parseHostCommand({ type: SPHERE_HOST_MSG.command, ...payload });
-  if (cmd) dispatchEmbodimentCommand(cmd);
-}

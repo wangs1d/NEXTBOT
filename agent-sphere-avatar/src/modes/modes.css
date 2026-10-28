@@ -9,6 +9,35 @@ html.embed-root #root {
   background: transparent !important;
 }
 
+/* ── 换肤主题变量（托盘切换 data-theme） ── */
+:root,
+:root[data-theme="default"] {
+  --pai-accent: #60a5fa;
+  --pai-accent-2: #8b94ff;
+  --pai-accent-soft: rgba(96, 165, 250, 0.28);
+  --pai-accent-line: rgba(96, 165, 250, 0.35);
+  --pai-accent-user-bg: rgba(59, 130, 246, 0.28);
+  --pai-accent-user-line: rgba(59, 130, 246, 0.35);
+}
+
+:root[data-theme="night"] {
+  --pai-accent: #a78bfa;
+  --pai-accent-2: #e879f9;
+  --pai-accent-soft: rgba(167, 139, 250, 0.28);
+  --pai-accent-line: rgba(167, 139, 250, 0.4);
+  --pai-accent-user-bg: rgba(139, 92, 246, 0.3);
+  --pai-accent-user-line: rgba(167, 139, 250, 0.42);
+}
+
+:root[data-theme="fresh"] {
+  --pai-accent: #34d399;
+  --pai-accent-2: #2dd4bf;
+  --pai-accent-soft: rgba(52, 211, 153, 0.26);
+  --pai-accent-line: rgba(52, 211, 153, 0.38);
+  --pai-accent-user-bg: rgba(16, 185, 129, 0.26);
+  --pai-accent-user-line: rgba(52, 211, 153, 0.4);
+}
+
 .mode-shell {
   width: 100%;
   height: 100%;
@@ -74,6 +103,22 @@ html.embed-root #root {
   display: flex;
   flex-direction: row;
   align-items: stretch;
+  /* 分层渲染：整个页面默认不响应鼠标，由下面的角色/面板/菜单单独开放 */
+  pointer-events: none;
+}
+
+/* 角色实体区：可拖动 / 点击（命中椭圆内的留白也用于拖动） */
+.overlay-pet-pane,
+/* 附加面板（专注计时 / 下班打卡） */
+.overlay-attach-slot,
+/* 快捷菜单 */
+.overlay-menu-side {
+  pointer-events: auto;
+}
+
+/* 无内容的附加槽位不拦截 */
+.overlay-attach-slot:empty {
+  pointer-events: none;
 }
 
 .mode-overlay--menu-open {
@@ -151,8 +196,8 @@ html.embed-root #root {
   border-bottom-left-radius: 3px;
 }
 .overlay-pet-pane .message--user {
-  background: rgba(59, 130, 246, 0.28);
-  border: 1px solid rgba(59, 130, 246, 0.35);
+  background: var(--pai-accent-user-bg);
+  border: 1px solid var(--pai-accent-user-line);
   color: #f0f6ff;
   align-self: flex-end;
   border-bottom-right-radius: 3px;

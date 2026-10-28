@@ -268,7 +268,7 @@
   display: block;
   height: 100%;
   border-radius: 2px;
-  background: linear-gradient(90deg, #6ec6ff, #9d7bff);
+  background: linear-gradient(90deg, var(--pai-accent), var(--pai-accent-2));
   transition: width 900ms linear;
 }
 

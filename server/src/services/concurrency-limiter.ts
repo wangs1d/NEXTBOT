@@ -217,7 +217,6 @@ const DOMAIN_SINGLE_FLIGHT_PREFIXES = [
   "agent_browser.",
   "browser.",
   "phone.",
-  "embodiment.",
 ] as const;
 
 function getToolLimiter(toolName: string): Semaphore | null {

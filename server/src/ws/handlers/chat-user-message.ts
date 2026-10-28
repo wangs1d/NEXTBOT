@@ -26,7 +26,6 @@ import {
   embodimentListening,
   embodimentThinking,
 } from "../../services/agent-embodiment.js";
-import { getEmbodimentAutonomy } from "../../services/embodiment-autonomy-service.js";
 import type { PhoneCallCoordinator } from "../../services/phone-call-coordinator.js";
 import {
   MessageBatchProcessor,
@@ -575,8 +574,6 @@ async function processBatchedMessage(
   abortActiveTurn(msgActor);
   const turnAbortController = new AbortController();
   activeTurnAborters.set(msgActor, turnAbortController);
-
-  getEmbodimentAutonomy()?.setProcessing(msgActor, true, (json) => ctx.socket.send(json));
 
   let chunkSeq = 0;
   const assistantMessageId = `assistant-${batched.originalMessageId}`;
@@ -1999,7 +1996,6 @@ async function processBatchedMessage(
     if (isStale()) return;
 
     embodimentHappy(msgActor, (json) => ctx.socket.send(json));
-    getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
 
     // 兜底剥离 [ts:] 时间戳帧（chunk 出口已逐块剥，这里对 finalText 再整行兜底一次，
     // 容忍残缺帧，防路径绕过 sendAssistantChunk）
@@ -2120,7 +2116,6 @@ async function processBatchedMessage(
     // 内部错误日志保留完整信息（含 stack），便于排查
     console.error("[WS] chat.user_message failed:", err);
     embodimentAlert(msgActor, (json) => ctx.socket.send(json), msg, "error");
-    getEmbodimentAutonomy()?.setProcessing(msgActor, false, (json) => ctx.socket.send(json));
     ctx.sendUnifiedError("CHAT_HANDLER_ERROR", msg, batched.originalMessageId);
     // 不再用 apology 兜底文案掩盖错误：agent-core 已尝试 emergencyRegenerate，
     // 此处发空串让 UI 不显示虚假回复。sendUnifiedError 已通知前端出错。

@@ -879,7 +879,6 @@ function inferLatencyMs(domain: string, resourceType: ResourceType): number {
     agent: 19,
     wallet: 13,
     aip: 26,
-    embodiment: 23,
     desktop: 27,
     world: 28,
     travel: 22,
@@ -891,7 +890,7 @@ function inferLatencyMs(domain: string, resourceType: ResourceType): number {
 function looksLikeSessionSkill(entry: DeferredToolEntry): boolean {
   const name = entry.registryName;
   if (name.startsWith("self.")) return false;
-  if (/^(agent|aip|browser|calendar|clock|desktop|embodiment|fetch|info|phone|search|shopping|wallet|weather|world)\b/.test(name)) {
+  if (/^(agent|aip|browser|calendar|clock|desktop|fetch|info|phone|search|shopping|wallet|weather|world)\b/.test(name)) {
     return false;
   }
   const text = `${getFunction(entry.tool)?.description ?? ""} ${entry.searchText}`.toLowerCase();
@@ -1100,7 +1099,6 @@ function domainsFromQuery(query: string): string[] {
     [/\bcalendar\b|\bschedule\b|\bmeeting\b|\bremind\b|\btodo\b|\btasks?\b/, ["calendar", "reminder"]],
     [/\bphone\b|\bcall\b|\bmessage\b|\bsms\b|\bdial\b/, ["phone"]],
     [/\bwallet\b|\bbalance\b|\btransaction\b|\bpayment\b/, ["wallet"]],
-    [/\bavatar\b|\bembodiment\b|\broam\b|(?:\bplace\b.*\bwindow\b)|(?:\bwindow\b.*\bplace\b)/, ["embodiment", "desktop"]],
     [/\bdesktop\b|\bshell\b|\bscreenshot\b|\bautomation\b|\bwindow\b/, ["desktop"]],
     [/\bskill\b|\bcapabilit(?:y|ies)\b|\bcustom\b|\btools?\b|\bcan you\b/, ["agent", "self"]],
     [/\bworld\b|\bregistry\b|\bagent\b/, ["world", "agent"]],
@@ -1146,7 +1144,6 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
         groups.add("commerce");
         break;
       case "desktop":
-      case "embodiment":
       case "device":
       case "smart_home":
       case "vision":
@@ -1363,7 +1360,6 @@ function namespaceToDomain(namespace: string): string {
     calendar: "calendar",
     clock: "clock",
     desktop: "desktop",
-    embodiment: "embodiment",
     phone: "phone",
     reminder: "reminder",
     shopping: "shopping",

@@ -146,17 +146,6 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
     ],
   },
   {
-    id: "package_track",
-    label: "快递包裹",
-    description: "在途包裹聚合与轨迹查询（通知流捕捉免密钥可用，补官方轨迹需顺丰丰桥）",
-    groups: [
-      {
-        allOf: ["SF_QIAO_PARTNER_ID", "SF_QIAO_CHECK_WORD"],
-        hint: "配置 SF_QIAO_PARTNER_ID / SF_QIAO_CHECK_WORD 补全官方轨迹（丰桥个人认证即可，接口免费）",
-      },
-    ],
-  },
-  {
     id: "shopping_payment",
     label: "购物与代付",
     description: "商品比价、代下单、扫码代付（带护栏限额）",

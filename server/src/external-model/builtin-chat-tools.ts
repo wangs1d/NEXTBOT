@@ -1119,9 +1119,9 @@ export const AGENT_CAPABILITY_QUERY_CHAT_TOOLS: ChatCompletionTool[] = [  {
         properties: {
           domain: {
             type: "string",
-            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "embodiment", "all"],
+            enum: ["wallet", "agent_link", "calendar", "weather", "sub_agent", "aip", "vision", "desktop", "web", "life_assistant", "phone", "entertainment", "social_feed", "self_programming", "agent_account", "all"],
             description:
-              "能力领域过滤。不传或传 'all' 返回全部宿主域；传具体域名仅返回该域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, self_programming=自我编程, agent_account=账号注册, embodiment=具身身体。",
+              "能力领域过滤。不传或传 'all' 返回全部宿主域；传具体域名仅返回该域。建议优先指定领域以减少 token 消耗：wallet=钱包, agent_link=好友, calendar=日程, weather=天气, sub_agent=子Agent委派, aip=AIP协议, vision=视觉, desktop=桌面自动化, web=网页浏览, life_assistant=生活助手, phone=虚拟电话, entertainment=娱乐互动, self_programming=自我编程, agent_account=账号注册。",
           },
         },
         additionalProperties: false,

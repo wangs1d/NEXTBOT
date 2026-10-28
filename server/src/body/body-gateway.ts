@@ -129,7 +129,7 @@ export class BodyGateway {
   /**
    * 注册工具前缀到 BodyModule 的路由。
    *
-   * @param prefix 工具名前缀，如 "desktop.visual." / "tts." / "embodiment."
+   * @param prefix 工具名前缀，如 "desktop.visual." / "tts."
    * @param module 对应的 BodyModule kind
    *
    * Task 12 会按归属批量调用此方法填充 routeTable。
@@ -421,7 +421,7 @@ export class BodyGateway {
 
   /**
    * 从路由前缀提取 sense 域。
-   * 例："desktop.visual." → "eye"；"tts." → "mouth"（特殊映射）；"embodiment." → "vestibular"
+   * 例："desktop.visual." → "eye"；"tts." → "mouth"（特殊映射）
    *
    * Task 1 实现简化版本：取前缀最后一段。Task 12 会改为基于 BodyModule 自描述的 tools 列表路由。
    */
@@ -451,7 +451,6 @@ export class BodyGateway {
       smart_home: "skin",
       // 前庭类工具前缀 → vestibular 域
       vestibular: "vestibular",
-      embodiment: "vestibular",
       // 稳态类工具前缀 → homeostasis 域
       homeostasis: "homeostasis",
       battery: "homeostasis",

@@ -5,7 +5,6 @@ import {
   mapWsToAgentUpdate,
   resetWsMapperState,
 } from "../bridge/ws-agent-mapper";
-import { relayEmbodimentCommandFromWs } from "./useEmbodimentCommandRelay";
 import type { AgentState, EmbodimentInteractAction, TaskEvent } from "../types/agent";
 import { DEFAULT_AGENT_STATE } from "../types/agent";
 
@@ -191,11 +190,6 @@ export function useAgentWebSocket(
 
         if (msg.type === "chat.user_message") {
           applyRef.current(mapUserMessageSent());
-          return;
-        }
-
-        if (msg.type === "agent.embodiment.command") {
-          relayEmbodimentCommandFromWs(msg.payload ?? {});
           return;
         }
 

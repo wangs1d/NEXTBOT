@@ -136,12 +136,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: ["order.status"],
   },
   {
-    name: "package",
-    summary: "快递包裹（在途件/轨迹/取件码/手动补录）",
-    prefixes: ["package."],
-    secondaryTools: [],
-  },
-  {
     name: "wechat",
     summary: "微信接入（扫码登录/连接状态）",
     prefixes: ["wechat."],
@@ -163,12 +157,6 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     name: "surface",
     summary: "桌面浮层展示（召唤/收起悬浮卡）",
     prefixes: ["surface."],
-    secondaryTools: [],
-  },
-  {
-    name: "embodiment",
-    summary: "桌面化身移动/窗口定位",
-    prefixes: ["embodiment."],
     secondaryTools: [],
   },
   {

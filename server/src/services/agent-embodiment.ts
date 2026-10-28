@@ -1,6 +1,4 @@
 import { ServerEventType } from "../protocol.js";
-import type { ClientPushPort } from "../ports/client-push-port.js";
-import { getEmbodimentAutonomy } from "./embodiment-autonomy-service.js";
 
 /** 球形 Agent 视觉状态 — 与 agent-sphere-avatar 对齐 */
 export type EmbodimentMood =
@@ -22,33 +20,6 @@ export type EmbodimentPatch = {
 
 export type EmbodimentSender = (json: string) => void;
 
-/** 主 Agent 对球形身体的运动/姿态指令 */
-export type EmbodimentCommandAction =
-  | "roam"
-  | "move"
-  | "stop"
-  | "window_roam"
-  | "window_place"
-  | "query_state"
-  | "excite";
-
-export type EmbodimentCommand = {
-  action: EmbodimentCommandAction;
-  /** 3D 场景目标 x（约 -2.4～2.4） */
-  x?: number;
-  y?: number;
-  z?: number;
-  /** 屏幕归一化坐标 0～1（window_place） */
-  screenX?: number;
-  screenY?: number;
-  /** roam 推力倍率 0.2～2 */
-  strength?: number;
-  mood?: EmbodimentMood;
-  energy?: number;
-  caption?: string | null;
-  source?: string;
-};
-
 export function emitEmbodimentPatch(
   send: EmbodimentSender,
   sessionId: string,
@@ -60,7 +31,6 @@ export function emitEmbodimentPatch(
       payload: { sessionId, ...patch },
     }),
   );
-  getEmbodimentAutonomy()?.onPatch(sessionId, patch, send);
 }
 
 export function embodimentListening(sessionId: string, send: EmbodimentSender): void {
@@ -117,32 +87,4 @@ export function embodimentAlert(
     caption,
     source,
   });
-}
-
-export function emitEmbodimentCommand(
-  send: EmbodimentSender,
-  sessionId: string,
-  command: EmbodimentCommand,
-): void {
-  send(
-    JSON.stringify({
-      type: ServerEventType.AgentEmbodimentCommand,
-      payload: { sessionId, ...command },
-    }),
-  );
-}
-
-/** 向已注册 WS 会话推送具身指令（主 Agent 工具用） */
-export function pushEmbodimentCommand(
-  wsRegistry: ClientPushPort,
-  sessionId: string,
-  command: EmbodimentCommand,
-): boolean {
-  return wsRegistry.trySend(
-    sessionId,
-    JSON.stringify({
-      type: ServerEventType.AgentEmbodimentCommand,
-      payload: { sessionId, ...command },
-    }),
-  );
 }

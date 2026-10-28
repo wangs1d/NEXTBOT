@@ -38,8 +38,6 @@ import {
   handleChatUserMessageEvent,
   messageBatchProcessor,
 } from "./handlers/chat-user-message.js";
-import { handleAgentEmbodimentStateEvent } from "./handlers/agent-embodiment-state.js";
-import { getEmbodimentAutonomy } from "../services/embodiment-autonomy-service.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import {
@@ -401,7 +399,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             messageBatchProcessor.setClientProcessingUiActive(boundActorId, false);
             socialFeedService.unsubscribe(boundActorId);
             wsConnectionRegistry.unregister(boundActorId, socket);
-            getEmbodimentAutonomy()?.unregisterSession(boundActorId);
             morningBriefingScheduler?.unsubscribe(boundActorId);
             eveningDigestScheduler?.unsubscribe(boundActorId);
             // 会话结束触发：立即整合该 actor 待处理记忆候选（不等 30s 防抖）。
@@ -807,7 +804,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             wsConnectionRegistry.register(actorId, socket, {
               deviceClass: normalizeDeviceClass(payload.platform ?? payload.deviceClass),
             });
-            getEmbodimentAutonomy()?.registerSession(actorId);
             // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
             // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
             getTaskOutbox().replayFor(actorId, socket);
@@ -1503,21 +1499,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             event.payload,
             { runtime, auditService },
           );
-          return;
-        }
-
-        if (event.type === ClientEventType.AgentEmbodimentState) {
-          if (!boundActorId) {
-            socket.send(
-              JSON.stringify({
-                type: ServerEventType.ErrorEvent,
-                payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-              }),
-            );
-            return;
-          }
-          if (initAsDesktopBridge || initAsPhoneBridge) return;
-          handleAgentEmbodimentStateEvent(boundActorId, event.payload);
           return;
         }
 

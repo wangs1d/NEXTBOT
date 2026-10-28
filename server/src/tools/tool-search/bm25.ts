@@ -418,7 +418,6 @@ function toolSearchAliases(name: string): string[] {
     { prefix: "weather.", words: ["天气", "气温", "预报"] },
     { prefix: "shopping.", words: ["购物", "买东西", "比价", "推荐", "shopping", "buy"] },
     { prefix: "wallet.", words: ["钱包", "余额", "转账", "支付", "消费"] },
-    { prefix: "embodiment.", words: ["桌面", "窗口", "移动", "身体", "化身"] },
     { prefix: "memory.", words: ["记忆", "回忆", "笔记"] },
     { prefix: "schedule.", words: ["定时", "计划任务", "cron"] },
     { prefix: "desktop.visual.", words: ["截图", "屏幕", "键鼠", "computer"] },
@@ -545,7 +544,7 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     // （整串包含；或英文多词别名中有完整实词命中）才算。
     // 旧规则是"query 的任一 bigram 出现在别名串里"——中文 bigram 如「一下」「什么」
     // 会在无关工具的别名里撞上，于是把该工具的 registryName 拼进 query，
-    // rankByRegistryName 再按前缀把整个 embodiment.* 家族推到最前，
+    // rankByRegistryName 再按前缀把同族工具整体推到最前，
     // 反而把纯 BM25 已排到 top-1 的正确工具挤下去（召回噪声的主来源之一）。
     type ScoredEntry = { entry: SearchAliasEntry; score: number };
     const scored: ScoredEntry[] = [];

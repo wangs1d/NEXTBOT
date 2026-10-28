@@ -20,8 +20,13 @@ declare global {
       setAttachPanel?: (width: number) => void;
       setMenuExpanded?: (expanded: boolean) => void;
       setScheduleCollapsed?: (collapsed: boolean) => void;
+      /** 上报命中形状（JSON 字符串） */
+      setHitAreas?: (areasJson: string) => void;
+      /** 强制整个窗口可交互（菜单打开时） */
+      setForceInteractive?: (force: boolean) => void;
       onPatch?: (cb: (patch: Record<string, unknown>) => void) => void;
       onRoam?: (cb: () => void) => void;
+      onTheme?: (cb: (theme: string) => void) => () => void;
     };
     spherePetPos?: { x: number; y: number };
     SpeechRecognition?: typeof SpeechRecognition;

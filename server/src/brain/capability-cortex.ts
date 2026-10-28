@@ -55,7 +55,6 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   social_feed: ["world.social."],
   self_programming: ["self."],
   world: ["world."],
-  embodiment: ["embodiment."],
   smart_home: ["smart_home."],
   notes: ["notes."],
   image_gen: ["image."],

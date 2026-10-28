@@ -5,13 +5,12 @@
 //  2. 设备上下线时切换渲染主体，发布 body.vestibular.device_switch 信号
 //  3. 提供 where_am_i / vestibular.devices 两种 sense 查询
 //
-// 注：embodiment.* 下行控制工具已移除，统一由 tools/embodiment-tools.ts 直接注册
-//     到 ToolRegistry（避免同一工具双注册互相覆盖）。
+// 注：embodiment.* 下行控制工具链已整体移除（LLM 不再驱动身体），本模块仅保留感知职责。
 //
 // 设计原则：
 //  - 不持有 LLM，所有智能判断在 BrainCenter 侧
 //  - BodyBus 信号 fire-and-forget
-//  - EmbodimentMood / EmbodimentPatch 类型复用 agent-embodiment.ts，不重复造轮子
+//  - EmbodimentMood 类型复用 agent-embodiment.ts，不重复造轮子
 
 import type { BodyBus } from "./body-bus.js";
 import type {
@@ -22,35 +21,19 @@ import type {
   BodySenseQuery,
   BodySenseResult,
 } from "./types.js";
-import type {
-  EmbodimentMood,
-  EmbodimentPatch,
-} from "../services/agent-embodiment.js";
+import type { EmbodimentMood } from "../services/agent-embodiment.js";
 
-// ---- 外观接口（解耦具体 WsConnectionRegistry / EmbodimentAutonomyService）--
+// ---- 外观接口（解耦具体 WsConnectionRegistry）--
 
 /** WsConnectionRegistry 的最小外观：只需 trySend 即可 */
 export interface WsRegistryLike {
   trySend(sessionId: string, json: string): boolean;
 }
 
-/** EmbodimentAutonomyService 的最小外观：仅需 onPatch 等可选方法 */
-export interface EmbodimentAutonomyLike {
-  onPatch?(sessionId: string, patch: EmbodimentPatch, send?: (json: string) => void): void;
-  registerSession?(sessionId: string): void;
-  unregisterSession?(sessionId: string): void;
-  setProcessing?(
-    sessionId: string,
-    processing: boolean,
-    send?: (json: string) => void,
-  ): void;
-}
-
 /** VestibularApparatus 构造依赖 */
 export interface VestibularApparatusDeps {
   bodyBus: BodyBus;
   wsRegistry?: WsRegistryLike;
-  embodimentAutonomy?: EmbodimentAutonomyLike;
 }
 
 // ---- 设备存在状态 ------------------------------------------------------
@@ -103,7 +86,6 @@ export class VestibularApparatus implements BodyModuleLike {
 
   private readonly bodyBus: BodyBus;
   private readonly wsRegistry: WsRegistryLike | null;
-  private readonly embodimentAutonomy: EmbodimentAutonomyLike | null;
 
   /** 已知设备表：deviceId -> DevicePresence。初始含 desktop / phone 两条 */
   private readonly devices = new Map<string, DevicePresence>();
@@ -114,13 +96,9 @@ export class VestibularApparatus implements BodyModuleLike {
   /** 最近一次活动时间（ISO），无活动时为 null */
   private lastActivityAt: string | null = null;
 
-  /** 取消 embodimentAutonomy patch 订阅的函数（如未来扩展需要） */
-  private unsubscribeAutonomy: (() => void) | null = null;
-
   constructor(deps: VestibularApparatusDeps) {
     this.bodyBus = deps.bodyBus;
     this.wsRegistry = deps.wsRegistry ?? null;
-    this.embodimentAutonomy = deps.embodimentAutonomy ?? null;
 
     // 初始化 desktop / phone 两条占位记录
     const now = nowIso();
@@ -147,10 +125,7 @@ export class VestibularApparatus implements BodyModuleLike {
   // ─── 生命周期 ────────────────────────────────────────────────
 
   /**
-   * 启动模块。
-   *
-   * 当前实现：标记 started=true；若 embodimentAutonomy 可用，
-   * 订阅 BodyBus 上的 body.vestibular.* 信号（便于后续扩展自主意识联动）。
+   * 启动模块（标记 started=true）。
    */
   async start(): Promise<void> {
     if (this.started) {
@@ -159,31 +134,11 @@ export class VestibularApparatus implements BodyModuleLike {
     }
     console.log("[VestibularApparatus] 正在启动...");
     this.started = true;
-
-    // 若 embodimentAutonomy 可用，订阅 vestibular 自身的 moved 信号做后续联动
-    // 当前留作占位：自主意识已在 emitEmbodimentPatch 内部被 onPatch 触发，
-    // 此处仅作日志采样，便于调试
-    try {
-      this.unsubscribeAutonomy = this.bodyBus.subscribe(
-        "body.vestibular.*",
-        (signal) => {
-          if (!this.embodimentAutonomy) return;
-          // 仅日志，不阻塞信号通路
-          console.log(
-            `[VestibularApparatus] 自主意识采样 signal=${signal.kind} ` +
-              `payload=${JSON.stringify(signal.payload).slice(0, 80)}`,
-          );
-        },
-      );
-    } catch (err) {
-      console.log(`[VestibularApparatus] 订阅 body.vestibular.* 失败（不阻断）: ${err}`);
-    }
-
     console.log("[VestibularApparatus] 启动完成");
   }
 
   /**
-   * 停止模块：取消自主意识订阅，标记 started=false。
+   * 停止模块：标记 started=false。
    */
   async stop(): Promise<void> {
     if (!this.started) {
@@ -191,14 +146,6 @@ export class VestibularApparatus implements BodyModuleLike {
       return;
     }
     console.log("[VestibularApparatus] 正在停止...");
-    if (this.unsubscribeAutonomy) {
-      try {
-        this.unsubscribeAutonomy();
-      } catch {
-        // 取消订阅失败不阻断
-      }
-      this.unsubscribeAutonomy = null;
-    }
     this.started = false;
     console.log("[VestibularApparatus] 已停止");
   }
@@ -206,7 +153,7 @@ export class VestibularApparatus implements BodyModuleLike {
   // ─── 动作执行 ────────────────────────────────────────────────
 
   /**
-   * Vestibular 已无下行工具（embodiment.* 由 tools/embodiment-tools.ts 直接承接）。
+   * Vestibular 为纯感知模块（无任何下行工具）。
    * 保留 act 以满足 BodyModuleLike 接口；万一被路由到时优雅返回。
    */
   async act(action: BodyAction): Promise<BodyActionResult> {

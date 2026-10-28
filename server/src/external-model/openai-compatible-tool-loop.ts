@@ -61,7 +61,6 @@ import {
 import { GEOFENCE_CHAT_TOOLS } from "../tools/geofence-tools.js";
 import { WATCH_TRACK_CHAT_TOOLS } from "../tools/watch-board-tools.js";
 import { PROFILE_QUERY_CHAT_TOOLS } from "../tools/profile-query-tool.js";
-import { EMBODIMENT_CHAT_TOOLS } from "../tools/embodiment-tools.js";
 import { SMART_HOME_CHAT_TOOLS } from "../tools/smart-home-tools.js";
 import { DEVICE_CHAT_TOOLS } from "../tools/device-tools.js";
 import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
@@ -1182,7 +1181,6 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...PROFILE_QUERY_CHAT_TOOLS,
     ...GEOFENCE_CHAT_TOOLS,
     ...AGENT_CAPABILITY_QUERY_CHAT_TOOLS,
-    ...EMBODIMENT_CHAT_TOOLS,
     ...SMART_HOME_CHAT_TOOLS,
     ...DEVICE_CHAT_TOOLS,
     ...getDesktopVisualChatTools(),
@@ -1214,7 +1212,7 @@ export function invalidateBuiltinToolsCache(): void {
  * 预期效果：减少 60-80% 的工具 Token，首字延迟降低 30-50%
  */
 
-type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'embodiment' | 'smart_home' | 'mcp' | 'image' | string;
+type ToolCategory = 'web' | 'calendar' | 'wallet' | 'social' | 'phone' | 'vision' | 'clock' | 'life' | 'capability' | 'desktop' | 'programming' | 'world' | 'aip' | 'smart_home' | 'mcp' | 'image' | string;
 
 interface ToolCategoryMapping {
   category: ToolCategory;
@@ -1370,11 +1368,6 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
     toolNames: ['agent.query_capabilities']
   },
   {
-    category: 'embodiment',
-    keywords: ['身体', '移动', '动一动', '走动', '逛逛', '漫游', '球形', '机器人', '挪', '飞', '兴奋', '表情', 'roam', 'move', 'body', 'embodiment'],
-    toolNames: ['embodiment.observe', 'embodiment.window_place', 'embodiment.roam', 'embodiment.move', 'embodiment.stop', 'embodiment.set_state', 'embodiment.excite', 'embodiment.window_roam']
-  },
-  {
     // Body Center 器官层：让用户问"身体器官 / 大脑结构 / 我有哪些身体能力"时能命中 body.* 工具
     category: 'body',
     keywords: [
@@ -1472,8 +1465,6 @@ const ALWAYS_INCLUDED_TOOLS = [
   //   未要图"时仍被勾着调用。改为回落到 contextual 筛选：只有当当前轮用户意图命
   //   web/图片类别时才暴露。若模型未搜图但回复里回显了图片链接，服务端
   //   promoteImageUrlsToMedia 会确定性兜底渲染，不会退回"图显示不出来"。
-  // embodiment.* 已在 CORE_TOOL_LIBRARY 的 embodiment tier 整族暴露，每轮必带，
-  // 不需要再在此重复声明。
 ];
 
 function extractKeywords(text: string): string[] {
@@ -1807,7 +1798,6 @@ const INTERACTIVE_TOOL_PREFIXES = [
   "desktop.",
   "code.",
   "phone.",
-  "embodiment.",
   "browser.",
 ];
 

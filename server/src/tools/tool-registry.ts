@@ -94,14 +94,6 @@ export type ToolRegistrationMetadata = Partial<Omit<ToolMetadata, "name">> & {
 
 /** LLM/API 工具名（下划线）→ 注册名（点号），兼容历史会话与未走 prepareToolsForChatApi 的路径。 */
 const REGISTRY_TOOL_NAME_ALIASES: Record<string, string> = {
-  embodiment_roam: "embodiment.roam",
-  embodiment_move: "embodiment.move",
-  embodiment_stop: "embodiment.stop",
-  embodiment_set_state: "embodiment.set_state",
-  embodiment_excite: "embodiment.excite",
-  embodiment_window_roam: "embodiment.window_roam",
-  embodiment_window_place: "embodiment.window_place",
-  embodiment_observe: "embodiment.observe",
   desktop_visual_screenshot: "desktop.visual.screenshot",
   desktop_visual_run_task: "desktop.visual.run_task",
   // 2026-08-30 修复：self.list_custom_skills 只有 chat schema（fast 车道可见），

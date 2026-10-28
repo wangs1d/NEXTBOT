@@ -25,10 +25,19 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   {
     prefix: "shopping.",
     metadata: {
-      aliases: ["shopping", "buy", "compare prices", "product recommendation", "购物", "比价", "推荐商品"],
+      aliases: ["shopping", "buy", "compare prices", "product recommendation", "购物", "比价", "推荐商品", "查订单", "订单状态"],
       negativeAliases: ["phone call", "desktop movement", "weather lookup"],
       examples: ["compare prices for headphones", "recommend a power bank for travel"],
       negativeExamples: ["call me later", "move the desktop avatar"],
+    },
+  },
+  {
+    exact: "shopping.order.track",
+    metadata: {
+      aliases: ["express delivery", "parcel tracking", "logistics", "tracking number", "快递", "包裹", "物流", "运单", "运单号", "快递到哪了", "到哪了", "查快递"],
+      negativeAliases: ["takeout rider status", "desktop screenshot", "weather lookup"],
+      examples: ["我的快递到哪了", "查一下这个订单的物流", "帮我看下淘宝订单发货没"],
+      negativeExamples: ["外卖骑手到了吗", "帮我截个图"],
     },
   },
   {
@@ -37,18 +46,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       aliases: ["buy product", "shopping advice", "买东西", "商品推荐", "买什么", "买什么好", "性价比", "求推荐", "种草", "双十一买什么"],
       examples: ["help me pick a laptop under budget", "双十一买什么耳机性价比高", "预算五千买什么笔记本"],
       negativeExamples: ["what time is it now"],
-    },
-  },
-  {
-    prefix: "package.",
-    metadata: {
-      aliases: [
-        "express delivery", "parcel", "package tracking", "logistics", "tracking number", "pickup code",
-        "快递", "包裹", "物流", "运单", "运单号", "取件码", "驿站", "快递柜", "签收", "到哪了",
-      ],
-      negativeAliases: ["takeout rider status", "desktop screenshot", "weather lookup"],
-      examples: ["我的快递到哪了", "今天有到的包裹吗", "取件码是多少", "查一下这个运单号"],
-      negativeExamples: ["外卖骑手到了吗", "帮我截个图"],
     },
   },
   {
@@ -207,76 +204,6 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       ],
       negativeExamples: [
         "读一下这个网页说了什么",
-      ],
-    },
-  },
-  {
-    prefix: "embodiment.",
-    metadata: {
-      aliases: ["move", "roam", "avatar", "window", "移动", "漫游", "化身"],
-      negativeAliases: ["price compare", "weather", "wallet bill"],
-      examples: ["move a bit to the left"],
-      negativeExamples: ["compare product prices"],
-    },
-  },
-  {
-    exact: "embodiment.window_place",
-    metadata: {
-      aliases: [
-        "put window at position",
-        "place avatar window at coordinates",
-        "set window to specified position",
-        "桌面角色窗口放到指定位置",
-        "球形窗口精准定位",
-        "把化身放到屏幕某个位置",
-        "窗口精调",
-      ],
-      negativeAliases: [
-        "random wander",
-        "roam freely",
-        "无目标随机漫游",
-        "随便走走",
-      ],
-      examples: [
-        "把桌面角色窗口放到右下角",
-        "把球形化身窗口定位到屏幕中央",
-        "把悬浮窗放到指定坐标",
-        "move my avatar window to (0.5, 0.5)",
-      ],
-      negativeExamples: [
-        "让桌面角色随便走走",
-        "让窗口随机换个位置",
-        "roam around the screen",
-      ],
-    },
-  },
-  {
-    exact: "embodiment.roam",
-    metadata: {
-      aliases: ["3D 场景随机漫游", "无目标漫游", "随机走动", "自由漫游", "random roam", "free move", "漫游移动", "到处走走"],
-      negativeAliases: ["放到指定位置", "定位", "坐标", "place at", "position"],
-      examples: ["在 3D 场景里随机漫游", "让角色到处走走", "无目标移动"],
-      negativeExamples: ["把窗口放到指定位置", "移动到坐标 (1,2,3)"],
-    },
-  },
-  {
-    exact: "embodiment.move",
-    metadata: {
-      aliases: ["移动到坐标", "场景内移动", "移动到指定位置", "move to coordinates", "scene move"],
-      negativeAliases: ["随机漫游", "random roam", "无目标"],
-      examples: ["移动到场景坐标 (1,2,3)", "移动到指定位置"],
-      negativeExamples: ["随机漫游", "到处走走"],
-    },
-  },
-  {
-    exact: "embodiment.window_roam",
-    metadata: {
-      aliases: ["random window roam", "no-target window move", "随便换个位置", "随机挪一下窗口"],
-      examples: ["让窗口随机换到别处", "no specific target, just move"],
-      negativeExamples: [
-        "把窗口放到指定位置",
-        "定位到屏幕中央",
-        "place the avatar at a specific position",
       ],
     },
   },

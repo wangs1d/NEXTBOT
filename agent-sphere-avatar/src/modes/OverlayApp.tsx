@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { EntranceAnimation } from "../components/EntranceAnimation";
 import { FocusTimerPanel } from "../components/FocusTimerPanel";
+import type { EllipseShape } from "../components/HitAreaReporter";
 import { MessageList } from "../components/MessageList";
 import { OffWorkPanel } from "../components/OffWorkPanel";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
@@ -91,6 +92,8 @@ export function OverlayApp() {
   } = useAgentState({ mood: "idle", energy: 0.55 });
   const [menuOpen, setMenuOpen] = useState(false);
   const menuWasOpenOnPointerDown = useRef(false);
+  // 球体命中椭圆（由 Canvas 内 HitAreaReporter 投影上报）
+  const [sphereHit, setSphereHit] = useState<EllipseShape | null>(null);
   const wsUrl = readQuery("ws");
   const sessionId = readQuery("sessionId");
 
@@ -303,7 +306,8 @@ export function OverlayApp() {
     speech.stop();
     setMenuOpen(false);
     window.sphereOverlay?.setMenuExpanded?.(false);
-    window.sphereOverlay?.setIgnoreMouseEvents(true, true);
+    // 菜单关闭：恢复按命中区域动态穿透
+    window.sphereOverlay?.setForceInteractive?.(false);
   }, [speech]);
 
   closeMenuRef.current = closeMenu;
@@ -311,8 +315,17 @@ export function OverlayApp() {
   const openMenu = useCallback(() => {
     setMenuOpen(true);
     window.sphereOverlay?.setMenuExpanded?.(true);
-    window.sphereOverlay?.setIgnoreMouseEvents(false, true);
+    // 菜单打开：整个窗口可交互
+    window.sphereOverlay?.setForceInteractive?.(true);
   }, []);
+
+  // 托盘「设置」入口：宿主 runJavaScript 调用以打开快捷菜单
+  useEffect(() => {
+    (window as unknown as { __paiOpenMenu?: () => void }).__paiOpenMenu = openMenu;
+    return () => {
+      delete (window as unknown as { __paiOpenMenu?: () => void }).__paiOpenMenu;
+    };
+  }, [openMenu]);
 
   const { setMouseCapture } = useOverlayPointerCapture(menuVisible);
 
@@ -454,7 +467,6 @@ export function OverlayApp() {
 
   useEffect(() => {
     document.body.classList.add("overlay-body");
-    window.sphereOverlay?.setIgnoreMouseEvents(true, true);
 
     window.sphereOverlay?.onPatch?.((patch: {
       mood?: AgentMood;
@@ -493,14 +505,49 @@ export function OverlayApp() {
 
     window.sphereOverlay?.onRoam?.(() => roamNowRef.current?.());
 
-    return () => document.body.classList.remove("overlay-body");
+    // 托盘换肤：data-theme 切换配色变量
+    const unlistenTheme = window.sphereOverlay?.onTheme?.((theme: string) => {
+      document.documentElement.setAttribute("data-theme", theme);
+      try {
+        localStorage.setItem("pai_theme", theme);
+      } catch {
+        /* ignore */
+      }
+    });
+
+    // 启动时恢复上次主题
+    try {
+      const saved = localStorage.getItem("pai_theme");
+      if (saved) document.documentElement.setAttribute("data-theme", saved);
+    } catch {
+      /* ignore */
+    }
+
+    return () => {
+      document.body.classList.remove("overlay-body");
+      unlistenTheme?.();
+    };
   }, [apply]);
 
+  // 命中区域上报：球体椭圆 + 附加面板 + 消息列表（client 坐标）。
+  // 原生 ClickThroughController 据此动态切换穿透。
   useEffect(() => {
-    if (!menuVisible) {
-      window.sphereOverlay?.setIgnoreMouseEvents(true, true);
+    type RectShape = { type: "rect"; x: number; y: number; w: number; h: number };
+    const shapes: Array<EllipseShape | RectShape> = [];
+    if (sphereHit) shapes.push(sphereHit);
+
+    const selectors = [".overlay-attach-slot", ".overlay-pet-pane .message-list"];
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (!el) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width > 4 && r.height > 4) {
+        shapes.push({ type: "rect", x: r.left, y: r.top, w: r.width, h: r.height });
+      }
     }
-  }, [menuVisible]);
+
+    window.sphereOverlay?.setHitAreas?.(JSON.stringify({ shapes }));
+  }, [sphereHit, attach.width, attach.panel]);
 
   // caption 自动消失：显示一段时间后清除
   // - assistant_chunk / user_message / assistant_done 不自动清（主agent回复由TTS逻辑统一管理）
@@ -561,6 +608,7 @@ export function OverlayApp() {
           onLiveReact={handleLiveReact}
           onDragRelease={handleDragRelease}
           onShakeRequest={(strength, durationMs) => triggerVerticalShake(strength, durationMs)}
+          onHitAreaReport={setSphereHit}
         />
         <MessageList messages={state.messages ?? []} />
       </div>

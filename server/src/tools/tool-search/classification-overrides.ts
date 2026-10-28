@@ -108,12 +108,6 @@ export const TOOL_CLASSIFICATION_OVERRIDES: Record<string, ToolClassificationOve
       { pattern: "\\btransactions?\\b|\\brecent\\b|\\bhistory\\b", weight: 0.32 },
     ],
   },
-  "embodiment.roam": {
-    recallBoost: [{ pattern: "\\broam\\b|\\baround\\b", weight: 0.2 }],
-  },
-  "embodiment.window_roam": {
-    recallBoost: [{ pattern: "\\broam\\b|\\baround\\b", weight: -0.12 }],
-  },
   "desktop.run_automation": {
     recallBoost: [{ pattern: "\\bautomation\\b|\\bscript\\b|\\btask\\b", weight: 0.22 }],
   },

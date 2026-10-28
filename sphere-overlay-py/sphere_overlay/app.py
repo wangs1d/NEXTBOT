@@ -3,7 +3,7 @@
 职责：
   1. 无边框透明置顶主窗口，QWebEngineView 加载 agent-sphere-avatar/dist/overlay.html
   2. 通过 QWebChannel 注入 window.sphereOverlay API（兼容 Tauri preload）
-  3. 与 PAI server WebSocket 连接，接收 agent.embodiment.command 等事件
+  3. 与 PAI server WebSocket 连接，接收 agent.embodiment.patch 情绪事件
   4. 日程悬浮窗（独立窗口，加载 schedule-floating.html）
   5. 悬浮组件窗（独立全屏透明层，加载 widgets-floating.html：灵动岛 / 专注番茄钟 / 下班打卡）
   6. 系统托盘 + 单实例锁
@@ -32,7 +32,6 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QThread,
-    QTimer,
     QUrl,
     Signal,
 )
@@ -49,6 +48,7 @@ from PySide6.QtWidgets import (
 )
 
 from .bridge import SphereOverlayBridge
+from .click_through import ClickThroughController
 from .qwebchannel_support import load_qwebchannel_js as _load_qwebchannel_js
 from .win32_utils import (
     apply_desk_pet_shell,
@@ -129,6 +129,12 @@ WEBCHANNEL_INIT = r"""
                 setScheduleCollapsed: function (collapsed) {
                     bridge.setScheduleCollapsed(!!collapsed);
                 },
+                setHitAreas: function (areasJson) {
+                    bridge.setHitAreas(areasJson);
+                },
+                setForceInteractive: function (force) {
+                    bridge.setForceInteractive(!!force);
+                },
                 onPatch: function (cb) {
                     bridge.patch_event.connect(cb);
                     return function () {
@@ -139,6 +145,12 @@ WEBCHANNEL_INIT = r"""
                     bridge.roam_event.connect(cb);
                     return function () {
                         try { bridge.roam_event.disconnect(cb); } catch (e) {}
+                    };
+                },
+                onTheme: function (cb) {
+                    bridge.theme_event.connect(cb);
+                    return function () {
+                        try { bridge.theme_event.disconnect(cb); } catch (e) {}
                     };
                 }
             };
@@ -154,12 +166,11 @@ WEBCHANNEL_INIT = r"""
 
 
 class WsClient(QThread):
-    """与 PAI server 保持 WebSocket 连接，接收 embodiment 命令 / patch。"""
+    """与 PAI server 保持 WebSocket 连接，接收 embodiment patch。"""
 
     connected = Signal()
     disconnected = Signal(str)
     patch = Signal(dict)
-    command = Signal(dict)
     error = Signal(str)
 
     def __init__(
@@ -177,16 +188,6 @@ class WsClient(QThread):
     def send(self, envelope: dict) -> None:
         with self._queue_lock:
             self._send_queue.append(envelope)
-
-    def send_state(self, x: int, y: int, width: int, height: int) -> None:
-        self.send({
-            "type": "agent.embodiment.state",
-            "payload": {
-                "x": x, "y": y, "width": width, "height": height,
-                "actorId": self.cfg.actor_id,
-                "sessionId": self.cfg.session_id or None,
-            },
-        })
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -231,20 +232,15 @@ class WsClient(QThread):
             self.disconnected.emit(f"WS 异常：{exc}")
 
     async def _consume(self, ws: websockets.WebSocketClientProtocol) -> None:
-        async for raw in ws:
-            try:
-                msg = json.loads(raw)
-                typ = msg.get("type")
-                payload = msg.get("payload", {})
-                if typ == "agent.embodiment.command":
-                    self.command.emit(payload)
-                elif typ in ("agent.embodiment.patch", "agent.embodiment.command"):
-                    # patch 事件直接透传
-                    self.patch.emit(payload)
-                elif typ == "agent.embodiment.interact":
-                    self.patch.emit(payload)
-            except Exception as exc:  # noqa: BLE001
-                self.error.emit(f"解析失败：{exc}")
+            async for raw in ws:
+                try:
+                    msg = json.loads(raw)
+                    typ = msg.get("type")
+                    payload = msg.get("payload", {})
+                    if typ == "agent.embodiment.patch":
+                        self.patch.emit(payload)
+                except Exception as exc:  # noqa: BLE001
+                    self.error.emit(f"解析失败：{exc}")
 
     async def _sender(self, ws: websockets.WebSocketClientProtocol) -> None:
         import asyncio
@@ -272,6 +268,8 @@ class SphereMainWindow(QMainWindow):
         self._setup_window()
         self._setup_webview()
         self._setup_position()
+        # 穿透由控制器按命中区域动态切换（替代固定 set_click_through）
+        self._click_controller = ClickThroughController(self, self)
 
     def _setup_window(self) -> None:
         self.setWindowFlags(
@@ -343,6 +341,7 @@ class SphereMainWindow(QMainWindow):
     def showEvent(self, event) -> None:
         super().showEvent(event)
         apply_desk_pet_shell(self)
+        # 初始穿透；随后由 ClickThroughController 按命中区域动态切换
         set_click_through(self, True)
 
     # ---- bridge API ----
@@ -351,6 +350,19 @@ class SphereMainWindow(QMainWindow):
 
     def set_click_through(self, enable: bool) -> None:
         set_click_through(self, enable)
+
+    def set_hit_areas(self, areas_json: str) -> None:
+        self._click_controller.set_shapes_json(areas_json)
+
+    def set_force_interactive(self, force: bool) -> None:
+        self._click_controller.set_force_interactive(force)
+
+    def open_pet_menu(self) -> None:
+        """托盘「设置」：让前端打开桌宠快捷菜单。"""
+        if self._view is not None:
+            self._view.page().runJavaScript(
+                "window.__paiOpenMenu && window.__paiOpenMenu();"
+            )
 
     def move_window_to(self, x: int, y: int, animate_ms: int = 0) -> None:
         if animate_ms <= 0:
@@ -559,18 +571,52 @@ class SphereOverlayApp(QApplication):
         show_action.triggered.connect(lambda: self._main_win.show())
         hide_action = QAction("隐藏", self)
         hide_action.triggered.connect(lambda: self._main_win.hide())
-        quit_action = QAction("退出", self)
-        quit_action.triggered.connect(self.quit)
         menu.addAction(show_action)
         menu.addAction(hide_action)
+
+        # 换肤子菜单
+        skin_menu = menu.addMenu("换肤")
+        for label, theme in (
+            ("默认蓝", "default"),
+            ("暗夜紫", "night"),
+            ("清新绿", "fresh"),
+        ):
+            act = QAction(label, self)
+            act.triggered.connect(
+                lambda checked=False, t=theme: self._main_win.emit_theme(t)
+            )
+            skin_menu.addAction(act)
+
+        # 设置（打开桌宠快捷菜单）
+        settings_action = QAction("设置", self)
+        settings_action.triggered.connect(lambda: self._main_win.open_pet_menu())
+        menu.addAction(settings_action)
+
         menu.addSeparator()
+
+        # 关于
+        about_action = QAction("关于", self)
+        about_action.triggered.connect(self._show_about)
+        menu.addAction(about_action)
+
+        quit_action = QAction("退出", self)
+        quit_action.triggered.connect(self.quit)
         menu.addAction(quit_action)
 
         self._tray = QSystemTrayIcon(self)
         self._tray.setContextMenu(menu)
-        self._tray.setToolTip("Sphere Overlay")
+        self._tray.setToolTip("NextBot 桌宠")
         self._tray.activated.connect(self._on_tray_activated)
         self._tray.show()
+
+    def _show_about(self) -> None:
+        if self._tray is not None:
+            self._tray.showMessage(
+                "NextBot 桌宠",
+                "无边框透明置顶悬浮体 · 点击穿透\n版本 0.1.0",
+                QSystemTrayIcon.MessageIcon.Information,
+                3000,
+            )
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
@@ -578,21 +624,8 @@ class SphereOverlayApp(QApplication):
 
     def _connect_ws(self) -> None:
         self._ws.patch.connect(self._main_win.emit_patch)
-        self._ws.command.connect(self._main_win.emit_patch)
         self._ws.connected.connect(lambda: None)
         self._ws.disconnected.connect(lambda msg: print(f"WS disconnected: {msg}"))
-
-        # 定期上报窗口位置
-        self._state_timer = QTimer(self)
-        self._state_timer.timeout.connect(self._report_state)
-        self._state_timer.start(2000)
-
-    def _report_state(self) -> None:
-        if self._main_win and self._main_win.isVisible():
-            self._ws.send_state(
-                self._main_win.x(), self._main_win.y(),
-                self._main_win.width(), self._main_win.height(),
-            )
 
     def exec(self) -> int:
         return super().exec()

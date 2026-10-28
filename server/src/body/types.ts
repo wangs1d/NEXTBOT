@@ -37,7 +37,7 @@ export type BodyModuleKind =
  * 由 BrainCenter.ActionExecutor 委托到 BodyGateway.execute(action) 时构造。
  */
 export interface BodyAction {
-  /** 工具名，如 "desktop.visual.run_task" / "tts.speak" / "embodiment.window_place" */
+  /** 工具名，如 "desktop.visual.run_task" / "tts.speak" */
   tool: string;
   /** 工具参数 */
   args: Record<string, unknown>;

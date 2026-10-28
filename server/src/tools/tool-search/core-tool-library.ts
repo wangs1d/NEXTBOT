@@ -3,7 +3,7 @@
  *
  * - **essential**：时间、联网、能力查询、子 Agent 委派（几乎每轮都可能用到）
  * - **dialogue**：主对话高频（日程/通讯/只读钱包/关怀/协议等）
- * - **embodiment / games**：按前缀整族暴露，避免中文检索与多轮桥接
+ * - **games**：按前缀整族暴露，避免中文检索与多轮桥接
  *
  * 未列入核心库的工具进入 BM25 延迟目录，经 `tool_discover` + `tool_call` 按需加载。
  *
@@ -75,10 +75,6 @@ export const CORE_TOOL_LIBRARY = {
       "aip.",
     ],
   },
-  embodiment: {
-    label: "具身身体",
-    prefixes: ["embodiment."],
-  },
   desktop: {
     label: "桌面截图与键鼠",
     prefixes: ["desktop.visual."],
@@ -113,7 +109,6 @@ const CORE_EXACT_NAMES = new Set<string>([
 
 const CORE_PREFIXES: readonly string[] = [
   ...CORE_TOOL_LIBRARY.dialogue.prefixes,
-  ...CORE_TOOL_LIBRARY.embodiment.prefixes,
   ...CORE_TOOL_LIBRARY.desktop.prefixes,
   ...CORE_TOOL_LIBRARY.browser.prefixes,
 ];

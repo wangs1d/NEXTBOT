@@ -494,7 +494,11 @@ class _HomeSearchBoxState extends State<_HomeSearchBox> {
 }
 
 /// 「试试让 Agent」滚动展示栏：chips 从右往左循环滚动（跑马灯），
-/// 移到末尾无缝回到开头重复；鼠标悬停暂停，移开继续，方便点击。
+/// 移到末尾无缝回到开头重复；两侧各 48px 渐隐遮罩（边缘裁切不生硬）。
+///
+/// 滚动停止逻辑（2026-10-28 用户拍板）：鼠标悬停时暂停；一旦用户点击过
+/// 任意 chip，或悬停后把鼠标移开，跑马灯**永久停住**不再动——用户已经
+/// 注意到它了，继续滚只会打扰。
 class _AgentSuggestionsRow extends StatefulWidget {
   const _AgentSuggestionsRow({
     required this.cs,
@@ -515,12 +519,21 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
   /// 滚动速度（像素/秒，从右往左）。
   static const double _speedPxPerSec = 32;
 
+  /// 两侧渐隐遮罩宽度（像素）。
+  static const double _edgeFadePx = 48;
+
   final ScrollController _controller = ScrollController();
   final GlobalKey _setKey = GlobalKey();
   Ticker? _ticker;
   Duration _lastTick = Duration.zero;
   double _setContentWidth = 0;
   int _copies = 2;
+
+  /// 鼠标悬停中（暂停滚动，不移开不恢复——移开即永久停）。
+  bool _hovering = false;
+
+  /// 永久停止：点击过任意 chip 或悬停后移开即置位，跑马灯不再前进。
+  bool _stopped = false;
 
   @override
   void initState() {
@@ -559,7 +572,15 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
     _ticker ??= createTicker(_onTick)..start();
   }
 
+  /// 永久停止：停掉 ticker（省电，也保证语义上「不再动」）。
+  void _stopForGood() {
+    if (_stopped) return;
+    _stopped = true;
+    _ticker?.stop();
+  }
+
   void _onTick(Duration elapsed) {
+    if (_stopped || _hovering) return;
     final double deltaSec =
         (elapsed - _lastTick).inMicroseconds / Duration.microsecondsPerSecond;
     _lastTick = elapsed;
@@ -579,7 +600,11 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
           child: _AgentSuggestionChip(
             cs: widget.cs,
             label: skill.label,
-            onTap: () => widget.onTap(skill),
+            onTap: () {
+              // 点击即表示用户已注意到这排建议：跑马灯永久停住
+              _stopForGood();
+              widget.onTap(skill);
+            },
           ),
         ),
     ];
@@ -600,12 +625,42 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
         ],
       );
     }
-    return ClipRect(
-      child: SingleChildScrollView(
-        controller: _controller,
-        scrollDirection: Axis.horizontal,
-        physics: const NeverScrollableScrollPhysics(),
-        child: content,
+    // 两侧 48px 渐隐（dstIn：边缘 alpha→0），裁切边缘不再生硬
+    return ShaderMask(
+      blendMode: BlendMode.dstIn,
+      shaderCallback: (Rect bounds) {
+        final double w = bounds.width;
+        final double t = w > 0
+            ? (_edgeFadePx / w).clamp(0.0, 0.45)
+            : 0.0;
+        return LinearGradient(
+          begin: Alignment.centerLeft,
+          end: Alignment.centerRight,
+          colors: const <Color>[
+            Colors.transparent,
+            Colors.white,
+            Colors.white,
+            Colors.transparent,
+          ],
+          stops: <double>[0.0, t, 1 - t, 1.0],
+        ).createShader(bounds);
+      },
+      child: MouseRegion(
+        onEnter: (_) => setState(() => _hovering = true),
+        onExit: (_) {
+          // 悬停后移开：用户看过一眼了，永久停住
+          _hovering = false;
+          _stopForGood();
+          if (mounted) setState(() {});
+        },
+        child: ClipRect(
+          child: SingleChildScrollView(
+            controller: _controller,
+            scrollDirection: Axis.horizontal,
+            physics: const NeverScrollableScrollPhysics(),
+            child: content,
+          ),
+        ),
       ),
     );
   }

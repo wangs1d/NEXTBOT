@@ -288,11 +288,6 @@ import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
 import { registerAgentActivityTools } from "../tools/agent-activity-tools.js";
-import { registerEmbodimentTools } from "../tools/embodiment-tools.js";
-import {
-  EmbodimentAutonomyService,
-  initEmbodimentAutonomy,
-} from "../services/embodiment-autonomy-service.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
 import { registerDeviceTools } from "../tools/device-tools.js";
@@ -537,12 +532,6 @@ import { buildBoardRules } from "../proactivity/mapping-rules.js";
 import { WorldBoard, bridgeSensorKernelToBoard } from "../proactivity/world-board.js";
 import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
 import { registerOrderStatusTools } from "../tools/shopping-tools.js";
-// 包裹聚合（2026-10-26）：通知/短信/邮件流里的运单号 → 包裹实体登记表 → 丰桥补轨迹。
-// 与 shopping 流并挂，互不替代（那边是订单事件原文，这边是有状态的运单实体）。
-import { PackageStore } from "../services/package-track/package-store.js";
-import { createPackageIntake } from "../services/package-track/package-intake.js";
-import { SfQiaoProvider } from "../services/package-track/express-provider.js";
-import { registerPackageTools } from "../tools/package-tools.js";
 import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
 import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
@@ -702,17 +691,7 @@ export async function createAppServices(): Promise<AppServices> {
   let emitShoppingOrder:
     | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
     | null = null;
-  // 包裹聚合接入（2026-10-26）：同一条入站消息同时喂订单流与包裹登记表。
-  // emit 晚绑定（sensorKernel 在下方才创建），emit 未就绪时线索仍照常登记，
-  // 只是这一次不播信号——宁可少一次开口，也不能丢实体。
-  let emitPackageTrack:
-    | ((signal: Omit<import("../proactivity/sensors/types.js").Signal, "stream">) => void)
-    | null = null;
-  const packageStore = new PackageStore(join(getDataDir(), "package-track", "packages.json"));
-  const packageIntake = createPackageIntake({
-    store: packageStore,
-    emit: (partial) => emitPackageTrack?.(partial),
-  });
+  // （包裹聚合已下线，2026-10-28 用户拍板：查快递直接走平台订单页实时状态）
   messageHubService.onInbound = (input, message) => {
     const inboundText = message.text ?? input.text ?? "";
     if (emitShoppingOrder) {
@@ -724,12 +703,6 @@ export async function createAppServices(): Promise<AppServices> {
       });
       if (signal) emitShoppingOrder(signal);
     }
-    packageIntake({
-      actorId: input.actorId,
-      platform: String(input.platform ?? ""),
-      title: input.title ?? "",
-      text: inboundText,
-    });
   };
   const messagePlatformGateway = new MessagePlatformGateway();
 
@@ -806,8 +779,6 @@ export async function createAppServices(): Promise<AppServices> {
   // 客户端版本更新推送（2026-10-21）：配了 UPDATE_MANIFEST_SOURCE_URL 才启用——
   // 云端版（腾讯机）与 byok 本地 runtime 各自从更新控制面拉清单、变化沿 wss 广播
   startClientUpdatePusher(wsConnectionRegistry);
-  const embodimentAutonomy = new EmbodimentAutonomyService(wsConnectionRegistry);
-  initEmbodimentAutonomy(embodimentAutonomy);
 
   scheduleTaskService.setWeatherBriefHandler(async (task) => {
     const prefs = weatherPrefsService.get(task.sessionId);
@@ -3756,7 +3727,6 @@ export async function createAppServices(): Promise<AppServices> {
     const vestibularApparatus = new VestibularApparatus({
       bodyBus,
       wsRegistry: wsConnectionRegistry,
-      embodimentAutonomy,
     });
 
     const homeostasisCore = new HomeostasisCore({
@@ -4562,12 +4532,6 @@ export async function createAppServices(): Promise<AppServices> {
   messageBridgeService = new MessageBridgeService(runtime, messageHubService);
 
   registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime, friendMessages: friendMessageService, phoneBridgeCoordinator });
-
-  registerEmbodimentTools(toolRegistry, {
-    wsRegistry: wsConnectionRegistry,
-    localVisual: desktopVisual,
-    bridge: desktopBridgeCoordinator,
-  });
 
   // ========== 注册自我编程和智能生成工具 ==========
   registerSelfProgrammingTools(toolRegistry, skillManager);
@@ -5896,14 +5860,6 @@ export async function createAppServices(): Promise<AppServices> {
   // order.status：只读跨源库的订单状态查询（probe 判定 / 模型按需查）。
   // 只读工具，handoff 等待期不被 act_external 收缩拦下。
   registerOrderStatusTools(toolRegistry, { sourceStore });
-  // 包裹流（2026-10-26）：package-intake 的"新包裹/状态跃迁"信号从这里进内核，
-  // package.* 工具只读登记表 + 丰桥补轨迹。丰桥密钥未配置时工具仍能答
-  // （报通知侧状态 + 明说没补轨迹），不会拿假轨迹冒充。
-  emitPackageTrack = registerFeeder(sensorKernel, "package_track", "package");
-  registerPackageTools(toolRegistry, {
-    store: packageStore,
-    providers: [new SfQiaoProvider()],
-  });
   console.log(
     `[Bootstrap] 跨源统一采集库 ${sourceStore.enabled() ? "已启用" : "已关闭（SENSOR_SOURCE_STORE=0）"}；` +
       `外部信源收编 mail=${!sensorFabricDisabled("MAIL")} ics=${!sensorFabricDisabled("ICS")} finance=${!sensorFabricDisabled("FINANCE")}`,

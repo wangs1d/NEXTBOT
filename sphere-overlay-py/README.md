@@ -10,7 +10,7 @@
 - 日程悬浮窗
 - 系统托盘菜单
 - 单实例锁
-- WebSocket 连接 PAI server，透传 `agent.embodiment.command` / patch 事件
+- WebSocket 连接 PAI server，透传 `agent.embodiment.patch` 情绪事件
 
 ## 运行
 

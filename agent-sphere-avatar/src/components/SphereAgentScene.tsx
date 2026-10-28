@@ -6,6 +6,7 @@ import type { SceneMode } from "../constants/model-proportions";
 import { EMBED_SCENE, OVERLAY_SCENE } from "../constants/model-proportions";
 import type { AgentState } from "../types/agent";
 import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
+import { HitAreaReporter, type EllipseShape } from "./HitAreaReporter";
 import { OverlayCameraRig } from "./OverlayCameraRig";
 import { OverlaySceneLights } from "./OverlaySceneLights";
 import { SphereAgent } from "./SphereAgent";
@@ -34,6 +35,8 @@ interface SphereAgentSceneProps {
   onDragRelease?: (info: { mode: "pan" | "rotate"; totalRotationDeg: number; panDistance: number; spinStrength: number }) => void;
   /** 触发身体晃动函数 */
   onShakeRequest?: (strength: number, durationMs: number) => void;
+  /** 球体命中椭圆上报（overlay 模式） */
+  onHitAreaReport?: (shape: EllipseShape) => void;
 }
 
 /**
@@ -91,6 +94,7 @@ export function SphereAgentScene({
   onSpinDelta,
   onDragRelease,
   onShakeRequest,
+  onHitAreaReport,
 }: SphereAgentSceneProps) {
   const isOverlay = mode === "overlay";
   const isEmbed = mode === "embed";
@@ -152,6 +156,9 @@ export function SphereAgentScene({
         fov={isOverlay ? OVERLAY_SCENE.cameraFov : 48}
       />
       {isOverlay ? <OverlayCameraRig /> : null}
+      {isOverlay && onHitAreaReport ? (
+        <HitAreaReporter onReport={onHitAreaReport} />
+      ) : null}
 
       {isOverlay ? (
         <OverlaySceneLights />

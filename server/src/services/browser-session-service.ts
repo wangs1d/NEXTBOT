@@ -230,6 +230,9 @@ export class BrowserSessionService {
       const file: ActorBrowserSessionsFile = {
         actorId,
         sites: parsed.sites ?? {},
+        // 授权记录必须随文件还原（2026-10-28 用户反馈：允许保存后每次仍重新
+        // 征询——根因就是这里重建对象时丢掉了 captureConsents，重启即「未表态」）
+        captureConsents: parsed.captureConsents ?? {},
       };
       this.cache.set(actorId, file);
       return file;

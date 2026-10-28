@@ -22,6 +22,7 @@ class SphereOverlayBridge(QObject):
     # 前端订阅的信号（Python 侧 emit -> JS 回调）
     patch_event = Signal(dict)
     roam_event = Signal()
+    theme_event = Signal(str)
 
     def __init__(self, host_window, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -70,9 +71,22 @@ class SphereOverlayBridge(QObject):
     def setScheduleCollapsed(self, collapsed: bool) -> None:
         self._host.set_schedule_collapsed(collapsed)
 
+    @Slot(str)
+    def setHitAreas(self, areas_json: str) -> None:
+        """前端上报可交互命中形状（JSON：{shapes:[{type,...}]}）。"""
+        self._host.set_hit_areas(areas_json)
+
+    @Slot(bool)
+    def setForceInteractive(self, force: bool) -> None:
+        """强制整个窗口可交互（菜单/设置面板打开时）。"""
+        self._host.set_force_interactive(force)
+
     # ---- Python 侧触发 ----
     def emit_patch(self, payload: dict) -> None:
         self.patch_event.emit(payload)
 
     def emit_roam(self) -> None:
         self.roam_event.emit()
+
+    def emit_theme(self, theme: str) -> None:
+        self.theme_event.emit(theme)

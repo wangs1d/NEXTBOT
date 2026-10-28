@@ -153,7 +153,6 @@ const RULES: ClassRule[] = [
   { prefix: "agent.", domain: "self" },
   { prefix: "master_invoke_sub_agent", domain: "self", action: "execute", risk: "write" },
   { prefix: "body.", domain: "self", action: "execute", risk: "write" },
-  { prefix: "embodiment", domain: "self", action: "execute", risk: "write" },
   { prefix: "task-dispatch", domain: "self", trigger: "event" },
   { prefix: "proactivity", domain: "self", trigger: "event" },
   { prefix: "market-signal", domain: "self", trigger: "event", action: "query" },
