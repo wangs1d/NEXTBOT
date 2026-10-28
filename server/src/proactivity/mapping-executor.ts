@@ -26,7 +26,10 @@ export type AttentionEvent = {
   tier: "must" | "social";
   importance: ProactiveImportance;
   title: string;
-  /** 模板直出的用户可见文本（零 LLM） */
+  /**
+   * 调用方成稿（可空）：有值 → 提案 directText 直投；空 → 提案无 directText →
+   * 管道 speak 兜底（LLM 话术，模板层 2026-10-27 已删，绝不原样吐内部素材）。
+   */
   body: string;
   dedupKey: string;
   salience: "high" | "medium" | "low";

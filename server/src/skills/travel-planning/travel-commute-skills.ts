@@ -148,10 +148,11 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
         }
         let brief = null;
         if (Number.isFinite(lat) && Number.isFinite(lon)) {
-          brief = await weatherService.getBrief(lat, lon, "Asia/Shanghai", to);
+          // auto：日历日和逐小时由目的地坐标推导，不能按中国时区算（境外目的地会错一天）
+          brief = await weatherService.getBrief(lat, lon, "auto", to);
         } else {
           const hit = await geocodeCity(to);
-          if (hit) brief = await weatherService.getBrief(hit.latitude, hit.longitude, "Asia/Shanghai", to);
+          if (hit) brief = await weatherService.getBrief(hit.latitude, hit.longitude, "auto", to);
         }
         if (brief) {
           weather = {

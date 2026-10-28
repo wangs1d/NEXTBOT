@@ -1,7 +1,7 @@
 /**
  * 声纹底座单测：WAV 解析 / 引擎确定性 / 存取回环 / 注册-验证-注销全链。
  *
- * 真实语音样本用 data/funasr_test_audio/case_*.wav（真人录音，同库样本视为
+ * 真实语音样本用 data/voiceprint_test_audio/case_*.wav（真人录音，同库样本视为
  * 同人正例）；白噪声/纯音为确定性负例（实测 cos 0.24/0.41 << 阈值）。
  * 模型资产缺失时引擎相关用例 skip。跑法：
  *   node --import tsx --test test/voiceprint.test.ts
@@ -32,12 +32,12 @@ function synthPcm16(samples: number[], amp: (i: number) => number): Buffer {
   return buf;
 }
 
-const CASE_DIR = join(process.cwd(), "data", "funasr_test_audio");
+const CASE_DIR = join(process.cwd(), "data", "voiceprint_test_audio");
 const hasAssets = existsSync(join(CASE_DIR, "case_0.wav")) && existsSync(join(CASE_DIR, "case_1.wav"));
 const hasModel = resolveSpeakerModelDir() !== null;
 
 test("parseAudioToPcm16：WAV 头解析 + 裸 PCM16 兜底", () => {
-  assert.ok(hasAssets, "缺 funasr 测试音频");
+  assert.ok(hasAssets, "缺声纹测试音频");
   const { pcm, sampleRate } = parseAudioToPcm16(loadWavBuffer(join(CASE_DIR, "case_0.wav")));
   assert.equal(sampleRate, 22050);
   assert.ok(pcm.length > 16000, "4.5s 音频应有数万样本");

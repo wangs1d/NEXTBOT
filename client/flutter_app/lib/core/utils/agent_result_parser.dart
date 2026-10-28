@@ -362,6 +362,66 @@ class AgentResultCardVideo {
   final String? source;
 }
 
+/// price_compare 卡（跨平台实时比价 shopping.compare.prices）：
+/// 单个平台分组的最低价报价（同款归一后每组取最优报价）。
+class AgentResultPriceGroup {
+  const AgentResultPriceGroup({
+    required this.platform,
+    required this.title,
+    this.priceCny,
+    this.shop,
+    this.url,
+    this.image,
+    this.similar = false,
+    this.offerCount = 1,
+  });
+
+  factory AgentResultPriceGroup.fromJson(Map<String, dynamic> json) =>
+      AgentResultPriceGroup(
+        priceCny: (json["priceCny"] as num?)?.toDouble(),
+        platform: json["platform"]?.toString() ?? "",
+        title: json["title"]?.toString() ?? "",
+        shop: json["shop"]?.toString(),
+        url: json["url"]?.toString(),
+        image: json["image"]?.toString(),
+        similar: json["similar"] == true,
+        offerCount: (json["offerCount"] as num?)?.toInt() ?? 1,
+      );
+
+  /// 最低价（元）；抓取失败为 null（渲染「价格待查」）。
+  final double? priceCny;
+  final String platform;
+  final String title;
+  final String? shop;
+
+  /// 平台商品页链接（整行可点）。
+  final String? url;
+  final String? image;
+
+  /// 低置信同款标注。
+  final bool similar;
+
+  /// 组内报价数（>1 时渲染「等N家」）。
+  final int offerCount;
+}
+
+/// price_compare 卡：整体结构化载荷（分组报价 + 决策页入口）。
+class AgentResultPriceCompare {
+  const AgentResultPriceCompare({required this.groups, this.decisionPageUrl});
+
+  factory AgentResultPriceCompare.fromJson(Map<String, dynamic> json) =>
+      AgentResultPriceCompare(
+        groups: (json["groups"] as List<dynamic>? ?? const <dynamic>[])
+            .whereType<Map<String, dynamic>>()
+            .map(AgentResultPriceGroup.fromJson)
+            .toList(growable: false),
+        decisionPageUrl: json["decisionPageUrl"]?.toString(),
+      );
+
+  final List<AgentResultPriceGroup> groups;
+  final String? decisionPageUrl;
+}
+
 class AgentResultData {
   const AgentResultData({
     this.avatar = "NB",
@@ -384,6 +444,7 @@ class AgentResultData {
     this.pick,
     this.alternatives = const <AgentResultPickAlt>[],
     this.ugc,
+    this.priceCompare,
     this.extra,
   });
 
@@ -454,6 +515,10 @@ class AgentResultData {
   /// product_pick 卡：真实口碑摘要（小红书 UGC，归属主推；无口碑为 null）。
   final AgentResultUgc? ugc;
 
+  /// price_compare 卡（跨平台实时比价）：分组报价 + 决策页入口。
+  /// 为 null 时客户端回退通用卡渲染（服务端旧形态兜底）。
+  final AgentResultPriceCompare? priceCompare;
+
   /// 卡片私有载荷透传（morning_briefing 等自渲染卡携带的原始数据）。
   /// 通用卡不读它；由对应 cardType 的渲染分支自行解析。
   final Map<String, dynamic>? extra;
@@ -506,6 +571,10 @@ class AgentResultData {
           .toList(growable: false),
       ugc: json["ugc"] is Map<String, dynamic>
           ? AgentResultUgc.fromJson(json["ugc"] as Map<String, dynamic>)
+          : null,
+      priceCompare: json["priceCompare"] is Map<String, dynamic>
+          ? AgentResultPriceCompare.fromJson(
+              json["priceCompare"] as Map<String, dynamic>)
           : null,
     );
   }
@@ -582,6 +651,23 @@ class AgentResultData {
                       if (p.url != null) "url": p.url,
                     })
                 .toList(),
+          },
+        if (priceCompare != null)
+          "priceCompare": <String, dynamic>{
+            "groups": priceCompare!.groups
+                .map((AgentResultPriceGroup g) => <String, dynamic>{
+                      if (g.priceCny != null) "priceCny": g.priceCny,
+                      "platform": g.platform,
+                      "title": g.title,
+                      if (g.shop != null) "shop": g.shop,
+                      if (g.url != null) "url": g.url,
+                      if (g.image != null) "image": g.image,
+                      if (g.similar) "similar": true,
+                      "offerCount": g.offerCount,
+                    })
+                .toList(),
+            if (priceCompare!.decisionPageUrl != null)
+              "decisionPageUrl": priceCompare!.decisionPageUrl,
           },
         if (groupTitle != null) "groupTitle": groupTitle,
         if (sideA != null) "sideA": sideA,

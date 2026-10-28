@@ -164,6 +164,21 @@ export class LocationCoordinator {
   }
 
   /**
+   * 跨端按需定位（单用户个人 agent 语义，2026-10-27）：没有 actorId 的 HTTP 会话
+   * （旅游规划 plan-session）缓存为空时不再只能反问用户——挑最近上报过的端（或
+   * 任一在线连接）主动下发一次 location_request。无在线客户端立即返回 null，
+   * 上层维持反问兜底。
+   */
+  requestAnyLocation(reason?: string): Promise<ClientLocationWire | null> {
+    const latest = this.getLatest();
+    if (latest) return this.requestLocation(latest.actorId, reason);
+    for (const actorId of this.sockets.keys()) {
+      return this.requestLocation(actorId, reason);
+    }
+    return Promise.resolve(null);
+  }
+
+  /**
    * 按需请求实时位置。优先复用新鲜缓存；缓存过期或缺失时向客户端下发
    * `agent.location_request` 并等待回包，超时返回 null。
    */

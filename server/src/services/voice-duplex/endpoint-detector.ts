@@ -6,8 +6,8 @@
  *   - 说话状态下连续 silenceMs 低于阈值 → 端点（一句话说完）
  *   - 单句最长 maxUtteranceMs 强制端点（防止环境噪声把静音判爆）
  *
- * 仅在「非流式 ASR 回退路径」使用：FunASR 流式可用时以它的 partial/final
- * 为准，本检测器只做说话开始的辅助判断。
+ * 供实时全双工会话使用：在流式引擎之外提供本地能量端点判断，
+ * 用于识别「用户开始说话」与「一句话结束」的时机。
  */
 
 export interface EndpointDetectorOptions {
@@ -104,7 +104,7 @@ export class EndpointDetector {
   /**
    * 喂入一块 16-bit LE 单声道 PCM；返回本块之后的状态：
    *   speaking  — 正在说话（继续收集）
-   *   endpoint  — 一句话结束（调用方应取出缓冲做 ASR）
+   *   endpoint  — 一句话结束（调用方应取出缓冲喂给实时引擎）
    *   idle      — 无人说话
    */
   feed(pcm: Buffer, sampleRate: number): EndpointEvent {
@@ -152,7 +152,7 @@ export class EndpointDetector {
   }
 }
 
-/** 把裸 PCM 包装成最小 WAV 容器（非流式 ASR 回退路径用）。 */
+/** 把裸 PCM 包装成最小 WAV 容器（整段音频上传实时引擎前用）。 */
 export function pcmToWav(pcm: Buffer, sampleRate: number, channels = 1, bitsPerSample = 16): Buffer {
   const byteRate = sampleRate * channels * (bitsPerSample >> 3);
   const blockAlign = channels * (bitsPerSample >> 3);

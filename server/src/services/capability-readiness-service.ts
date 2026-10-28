@@ -186,7 +186,7 @@ const CAPABILITY_ENTRIES: CapabilityEntry[] = [
   {
     id: "voice_chat",
     label: "语音对话",
-    description: "中文语音识别（本地 FunASR）与语音播报",
+    description: "语音播报（TTS）与实时语音对话",
     groups: [
       {
         allOf: ["MINIMAX_API_KEY"],

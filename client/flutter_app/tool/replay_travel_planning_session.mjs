@@ -200,6 +200,129 @@ const server = http.createServer(async (req, res) => {
   };
   const route = `${req.method} ${url.pathname}`;
   if (route === "GET /travel/plans") return send({ ok: true, plans: [] });
+  // 完整行程（文字版长图取证用）：真实本机图 + 全套介绍板块字段。
+  if (url.pathname.startsWith("/travel/plans/")) {
+    const img = (p) => `/travel/media/.quarantine/2026-10-12T09-29-39-885Z/${p}`;
+    return send({
+      ok: true,
+      plan: {
+        planId: url.pathname.split("/").pop(),
+        title: "成都3日游·经济/休闲",
+        destination: "成都",
+        startDate: "2026-10-31",
+        endDate: "2026-11-02",
+        intro:
+          "成都是一座把「慢」过成本能的城市：早上看熊猫卖萌，中午一头扎进苍蝇馆子，下午在茶馆里掏耳朵，晚上再被火锅辣醒。三天时间刚好把老巷子、市井味和周边山水各体验一遍。",
+        weather: "10月底多云 12~19°C，早晚偏凉带件外套",
+        coverImage: "/travel/media/assets/destcover成都-5d5ed58e/1792816032378-63fd7040.jpg",
+        dataQuality: "real",
+        packing: ["身份证/优惠证件", "充电宝", "舒适的运动鞋", "薄外套（早晚穿）", "肠胃药", "雨伞"],
+        days: [
+          {
+            date: "2026-10-31",
+            items: [
+              {
+                name: "宽窄巷子景区",
+                type: "attraction",
+                startTime: "09:00",
+                address: "青羊区宽巷子·窄巷子·井巷子",
+                priceInfo: "免费",
+                description: "清代川西民居街巷，宽巷子看门头、窄巷子逛小店、井巷子看砖墙。人多但值得慢慢走。",
+                tips: ["早上 9 点前到人最少", "巷子里的盖碗茶可以坐一小时"],
+                images: [img("poi-017a87532d74/2aeae93a288814d2.jpg")],
+                photoTip: "井巷子的砖文化墙侧光最好，上午顺光",
+                pitfall: "主巷里的「三大炮」排长队且偏甜，巷口那家不用等",
+                bookingNote: "无需预约，周末人流大建议早到",
+                openingHours: "全天开放（店铺约 10:00 起营业）",
+                rating: 4.6,
+              },
+              {
+                name: "陈麻婆豆腐(南门店)",
+                type: "restaurant",
+                startTime: "11:35",
+                address: "锦江区东大街城守街59号",
+                priceInfo: "¥75/人",
+                description: "麻婆豆腐发源老店，麻辣烫嫩酥香，配米饭绝。",
+                tips: ["麻婆豆腐+甜烧白是老搭档"],
+                images: [img("poi-018c29a55b43/083407d4d3f6ff04.jpg")],
+                bookingNote: "饭点需排队，可提前取号",
+                openingHours: "11:00-14:00, 17:00-21:00",
+                rating: 4.5,
+              },
+              {
+                name: "成都大熊猫繁育研究基地",
+                type: "attraction",
+                startTime: "14:15",
+                address: "成华区外北熊猫大道1375号",
+                priceInfo: "¥55",
+                description: "看熊猫要趁早，上午最活跃；月亮产房的幼崽最抢手。",
+                tips: ["14:30 后熊猫多数在睡午觉，直奔太阳产房", "园区大，观光车 20 元值得买"],
+                images: [img("poi-02d495d64576/2626faad5faa3748.jpg")],
+                photoTip: "幼熊园玻璃前用长焦，别开闪光",
+                pitfall: "南门进要爬坡，体力一般从西门坐车直上",
+                bookingNote: "需提前在「中国大熊猫研究中心」公众号实名预约",
+                openingHours: "07:30-18:00（17:00 停止入园）",
+                rating: 4.7,
+              },
+            ],
+          },
+          {
+            date: "2026-11-01",
+            items: [
+              {
+                name: "樱桃山旅游景区",
+                type: "attraction",
+                startTime: "09:30",
+                address: "蒲江县樱桃山",
+                priceInfo: "免费",
+                description: "浅山徒步+农家茶歇，深秋满山红叶，节奏可以放很慢。",
+                tips: ["山上农家乐的柴火鸡要提前订"],
+                images: [img("poi-02f0fe1fbcfc/531f47f75872923c.jpg")],
+                pitfall: "周末上山车道堵，早出发或坐景区摆渡",
+                openingHours: "全天开放",
+                rating: 4.4,
+              },
+              {
+                name: "川西竹海景区",
+                type: "attraction",
+                startTime: "14:00",
+                address: "邛崃市平乐镇",
+                priceInfo: "¥40",
+                description: "十万亩竹海+玻璃栈道，负氧离子高，适合暴走洗肺。",
+                tips: ["玻璃栈道另收费 30 元", "穿防滑鞋，竹径雨后湿滑"],
+                images: [img("poi-032dfb390adc/1faff9e0e65512ec.jpg")],
+                photoTip: "仙侣牧云桥俯拍竹海全景",
+                pitfall: "停车场到入口还有 20 分钟步程，别坐黑车",
+                bookingNote: "无需预约，玻璃栈道现场购票",
+                openingHours: "08:30-17:30",
+                rating: 4.6,
+              },
+            ],
+          },
+          {
+            date: "2026-11-02",
+            items: [
+              {
+                name: "都江堰景区",
+                type: "attraction",
+                startTime: "09:30",
+                address: "都江堰市公园路76号",
+                priceInfo: "¥80",
+                description: "两千年前的水利奇迹，鱼嘴分水、飞沙堰泄洪，站在安澜索桥上看岷江奔涌。",
+                tips: ["按「鱼嘴→安澜索桥→二王庙」顺序走是下坡路线", "讲解器 20 元很值"],
+                images: [img("poi-02d495d64576/70c3148a060baad5.jpg")],
+                photoTip: "安澜索桥中段拍鱼嘴，下午逆光有雾气",
+                pitfall: "景区出口的商业街绕远，跟指示牌走正门",
+                bookingNote: "需在「都江堰」公众号预约，节假日票紧",
+                openingHours: "08:00-18:00（17:30 停止入园）",
+                rating: 4.8,
+              },
+            ],
+          },
+        ],
+      },
+    });
+  }
   if (route === "POST /travel/plan-session") {
     // 开新会话：重置已知量与轮次，上一条用例的作答不能漏进来。
     known = emptyKnown();

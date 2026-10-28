@@ -209,8 +209,7 @@ class ContentSummaryParser {
   static final RegExp _renderDeclarationLine =
       RegExp(r"^\[RENDER_(?:HINT|AS):\w+\]$");
 
-  /// 详情正文消毒：剥离裸露的形态标记行 + 删除与卡片标题重复的首行导语
-  /// （标题即取自正文首行时，面板/弹窗顶栏已展示标题，正文不再复读）。
+  /// 详情正文消毒：剥离裸露的形态标记行（只剥渲染路由信号，正文一律保留）。
   /// 服务端 2026-09 起生成即消毒，此处兜底历史消息。
   static String sanitizeDetailContent(String content, String title) {
     if (content.trim().isEmpty) return content;
@@ -228,27 +227,11 @@ class ContentSummaryParser {
       }
     }
 
-    final String titleTrim = title.trim();
-    final List<String> lines = text
+    return text
         .split("\n")
         .where((String line) => !_renderDeclarationLine.hasMatch(line.trim()))
-        .toList();
-    if (titleTrim.isEmpty) {
-      return lines.join("\n").trim();
-    }
-    final int firstIdx =
-        lines.indexWhere((String line) => line.trim().isNotEmpty);
-    if (firstIdx == -1) return lines.join("\n").trim();
-    final String first = lines[firstIdx].trim();
-    final String firstSansHash =
-        first.replaceFirst(RegExp(r"^#{1,3}\s+"), "").trim();
-    final bool echoed = first == titleTrim ||
-        firstSansHash == titleTrim ||
-        (titleTrim.length >= 12 && first.contains(titleTrim));
-    if (echoed) {
-      lines.removeAt(firstIdx);
-    }
-    return lines.join("\n").trim();
+        .join("\n")
+        .trim();
   }
 
   @Deprecated("Use taskSubject(summary) for display copy")

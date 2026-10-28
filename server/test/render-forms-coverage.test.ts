@@ -375,7 +375,7 @@ test("L1 比价：shopping.compare.prices 回执 → 比价结果卡", () => {
     },
   });
   const card = parseCard(out);
-  // 比价卡是通用列表卡（cardType=""，无专属卡型），标题带「比价结果」前缀
+  // 比价卡已升级为专属 price_compare 卡型（结构化分组报价走 priceCompare 字段）
   assert.ok(card.title.includes("比价结果"), `实际标题：${card.title}`);
   assert.ok(card.items.every((i: any) => i.type === "num"));
   assert.ok(card.items[0].text.includes("1899"), `实际条目：${card.items[0].text}`);

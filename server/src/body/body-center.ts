@@ -50,7 +50,7 @@ export class BodyCenter {
   // ---- BodyModule 引用（均可选，缺失时降级） ----
   /** 眼（视觉）：截屏 / 摄像头 / VLM 描述 */
   private eye: BodyModuleLike | null = null;
-  /** 耳（听觉）：ASR / phone-bridge 入站音频 */
+  /** 耳（听觉）：phone-bridge / voice-message 入站音频到达 */
   private ear: BodyModuleLike | null = null;
   /** 皮肤（体感）：智能家居 / 设备传感器 */
   private skin: BodyModuleLike | null = null;

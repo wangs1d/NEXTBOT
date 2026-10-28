@@ -126,8 +126,10 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
   },
 };
 
-/** 低于此字数不启用摘要折叠卡（原 800 过高导致实际对话几乎不触发；现降为 400） */
-const SUMMARY_MIN_CHARS = 400;
+/** 低于此字数不启用摘要折叠卡（2026-10-28 定版：正文须超过 800 字才折叠。
+ *  此前 800 → 400 的下调让日常比价/问答回复也触发出卡，气泡全文与卡内
+ *  速览复读同一内容；现回到 800，短内容直接平铺在气泡里，不再出卡） */
+const SUMMARY_MIN_CHARS = 800;
 
 const CONTENT_SUMMARY_MARKER = "[CONTENT_SUMMARY_V2_START]";
 
@@ -148,27 +150,6 @@ function stripRenderDeclarationLines(content: string): string {
     .filter((line) => !RENDER_DECLARATION_LINE_RE.test(line))
     .join("\n")
     .trim();
-}
-
-/**
- * detailContent 首行与卡片标题重复时删掉该行：标题（extractTitle）通常
- * 取自正文首行导语，面板/弹窗顶栏已展示标题，正文再复读一遍属于冗余。
- */
-function stripLeadingTitleEcho(content: string, title: string): string {
-  const titleTrim = title.trim();
-  if (!titleTrim) return content;
-  const lines = content.split("\n");
-  const firstIdx = lines.findIndex((line) => line.trim());
-  if (firstIdx === -1) return content;
-  const first = lines[firstIdx].trim();
-  const firstSansHash = first.replace(/^#{1,3}\s+/, "").trim();
-  const echoed =
-    first === titleTrim ||
-    firstSansHash === titleTrim ||
-    (titleTrim.length >= 12 && first.includes(titleTrim));
-  if (!echoed) return content;
-  lines.splice(firstIdx, 1);
-  return lines.join("\n").trim();
 }
 
 function looksLikeCapabilityOrToolDump(content: string): boolean {
@@ -326,34 +307,6 @@ function detectCategory(content: string, source?: string): ContentCategory {
   return detectContentType(content).category;
 }
 
-function extractTitle(content: string, category: ContentCategory): string {
-  const lines = content.split("\n").filter((line) => line.trim());
-  const config = CATEGORY_CONFIG[category];
-  const today = new Date().toISOString().split("T")[0];
-
-  const titlePatterns = [
-    /^#{1,2}\s+(.+)$/,
-    /^(一|二|三|四|五)[、.．\s](.+)$/,
-    /^\[(.+?)\]$/,
-  ];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    for (const pattern of titlePatterns) {
-      const match = trimmed.match(pattern);
-      if (match && match[1] && match[1].length < 100) {
-        return match[1].trim();
-      }
-    }
-    
-    if (trimmed.length > 8 && trimmed.length < 120 && !trimmed.startsWith("-") && !trimmed.startsWith("*")) {
-      return trimmed;
-    }
-  }
-
-  return `${config.label}_${today}`;
-}
-
 interface ParsedSection {
   title: string;
   items: string[];
@@ -424,16 +377,6 @@ function isMediaOnlyLine(line: string): boolean {
   return false;
 }
 
-function isGenericSummaryTitle(title: string, category: ContentCategory): boolean {
-  const config = CATEGORY_CONFIG[category];
-  return (
-    !title ||
-    title.length < 3 ||
-    title.startsWith(`${config.label}_`) ||
-    /^\d{4}-\d{2}-\d{2}$/.test(title)
-  );
-}
-
 /** 按内容关键词推断任务主体（如科技新闻、旅游计划） */
 const TASK_SUBJECT_RULES: ReadonlyArray<{ pattern: RegExp; subject: string }> = [
   { pattern: /旅游|行程|景点|攻略|自驾|民宿|机票|签证|出境|酒店预订|自由行/, subject: "旅游计划" },
@@ -477,19 +420,8 @@ const CATEGORY_SUBJECT_FALLBACK: Record<ContentCategory, string> = {
 export function inferTaskSubject(
   content: string,
   category: ContentCategory,
-  rawTitle: string,
 ): string {
-  const titleHint = rawTitle.trim();
-  if (
-    !isGenericSummaryTitle(titleHint, category) &&
-    titleHint.length >= 4 &&
-    titleHint.length <= 18 &&
-    /计划|攻略|指南|简报|总结|报告|清单|方案|安排|推荐|资讯|新闻/.test(titleHint)
-  ) {
-    return titleHint;
-  }
-
-  const sample = `${titleHint}\n${content}`.slice(0, 4000);
+  const sample = content.slice(0, 4000);
   for (const rule of TASK_SUBJECT_RULES) {
     if (rule.pattern.test(sample)) {
       return rule.subject;
@@ -497,17 +429,6 @@ export function inferTaskSubject(
   }
 
   return CATEGORY_SUBJECT_FALLBACK[category];
-}
-
-function resolveCardTitle(
-  rawTitle: string,
-  subjectLabel: string,
-  category: ContentCategory,
-): string {
-  if (!isGenericSummaryTitle(rawTitle, category) && rawTitle.length <= 48) {
-    return rawTitle.trim();
-  }
-  return subjectLabel;
 }
 
 /** 精简区要点：直接从正文提取真实内容（实际条目/句子）作为简洁介绍——
@@ -624,10 +545,12 @@ export function createContentSummary(
   }
 
   const config = CATEGORY_CONFIG[category];
-  const rawTitle = extractTitle(renderCleaned, category);
-  const subjectLabel = inferTaskSubject(renderCleaned, category, rawTitle);
-  const cardTitle = resolveCardTitle(rawTitle, subjectLabel, category);
-  const detailContent = stripLeadingTitleEcho(renderCleaned, cardTitle);
+  // 卡面标题就是内容主题（科技新闻/财经资讯…）：正文首行往往是模型的口语开场，
+  // 拿来当标题只会把「王哥，我扒了一圈…」印在卡上，故不再从正文取标题。
+  const subjectLabel = inferTaskSubject(renderCleaned, category);
+  const cardTitle = subjectLabel;
+  // 卡内是全文：整段正文原样进面板，不在首行做标题去重（删掉的是导语本身）
+  const detailContent = renderCleaned;
 
   const briefPoints = extractBriefPoints(
     renderCleaned,

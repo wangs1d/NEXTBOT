@@ -7,6 +7,7 @@ export type WeatherBrief = {
   source: "open-meteo";
   latitude: number;
   longitude: number;
+  /** 实际生效的时区：请求传 auto 时为接口按坐标推导出的 IANA 时区 */
   timezone: string;
   locationLabel: string;
   currentTempC: number;
@@ -18,7 +19,10 @@ export type WeatherBrief = {
   weatherText: string;
   todayMinC: number;
   todayMaxC: number;
+  /** 今天当日逐小时降水概率的最大值（不跨天，跨天的虚高会把今天报成有雨） */
   peakRainPct: number;
+  /** 今天雨最集中的钟点段（概率未达标或无数据时省略） */
+  rainWindow?: RainWindow;
   clothingAdvice: string;
   hourlyForecast: WeatherHourlyForecast[];
   summaryLine: string;
@@ -52,6 +56,8 @@ export type WeatherTomorrow = {
   maxC: number;
   /** 降水概率（0-100） */
   rainPct: number;
+  /** 次日雨最集中的钟点段（未达标则省略） */
+  rainWindow?: RainWindow;
 };
 
 export type WeatherHourlyForecast = {
@@ -98,6 +104,119 @@ function wmoText(code: number): string {
   return WMO_TEXT[code] ?? `天气码 ${code}`;
 }
 
+/** 降水集中时段：雨最集中的钟点段，只有整天概率时用户无法决定几点出门 */
+export type RainWindow = {
+  /** 峰值所在时段名，如「上午」（跨度跨段时看 label） */
+  period: string;
+  /** 起始小时（含，0-23） */
+  startHour: number;
+  /** 结束小时（不含，1-24） */
+  endHour: number;
+  peakPct: number;
+  /** 展示串：单段如「上午 9–12 点」，跨段如「早上到下午 6–15 点」 */
+  label: string;
+  /** true = 当日这段雨已经过去（今天下过了，不是还要下） */
+  alreadyPassed: boolean;
+};
+
+const RAIN_PERIODS: { name: string; from: number; to: number }[] = [
+  { name: "凌晨", from: 0, to: 6 },
+  { name: "早上", from: 6, to: 9 },
+  { name: "上午", from: 9, to: 12 },
+  { name: "中午", from: 12, to: 14 },
+  { name: "下午", from: 14, to: 18 },
+  { name: "晚上", from: 18, to: 22 },
+  { name: "深夜", from: 22, to: 24 },
+];
+
+function rainPeriodOf(hour: number): string {
+  const hit = RAIN_PERIODS.find((p) => hour >= p.from && hour < p.to);
+  return hit?.name ?? "白天";
+}
+
+/** 当日逐小时降水概率达标（≥thresholdPct）的小时 */
+export function qualifyingRainHours(
+  probs: (number | null | undefined)[],
+  thresholdPct = 40,
+): number[] {
+  const hours: number[] = [];
+  for (let h = 0; h < 24; h++) {
+    const p = probs[h];
+    if (p != null && Number(p) >= thresholdPct) hours.push(h);
+  }
+  return hours;
+}
+
+/**
+ * 从当日 24 个逐小时降水概率里取「雨最集中的那一段」。
+ * 达标线 40% 与穿衣建议的 rainy 判定同源；不到 40% 不编时段（低概率不值得承诺钟点）。
+ * nowHourOfDay（今天）只看还没到的钟点；全过了则标 alreadyPassed，避免下完雨还催带伞。
+ */
+export function extractRainWindow(input: {
+  probsByHour: (number | null | undefined)[];
+  nowHourOfDay?: number | null;
+  thresholdPct?: number;
+}): RainWindow | null {
+  const threshold = input.thresholdPct ?? 40;
+  const all = qualifyingRainHours(input.probsByHour, threshold);
+  if (all.length === 0) return null;
+
+  let hours = all;
+  let alreadyPassed = false;
+  if (typeof input.nowHourOfDay === "number") {
+    const upcoming = all.filter((h) => h >= input.nowHourOfDay!);
+    if (upcoming.length > 0) hours = upcoming;
+    else {
+      hours = all;
+      alreadyPassed = true;
+    }
+  }
+
+  // 连续成段，取峰值最高的那一段（同分取更早，出门决策更关心第一场的雨）
+  const runs: number[][] = [];
+  for (const h of hours) {
+    const last = runs[runs.length - 1];
+    if (last && h === last[last.length - 1] + 1) last.push(h);
+    else runs.push([h]);
+  }
+  let best = runs[0];
+  let bestPeak = -1;
+  let bestPeakHour = runs[0][0];
+  for (const run of runs) {
+    for (const h of run) {
+      const p = Number(input.probsByHour[h] ?? 0);
+      if (p > bestPeak) {
+        bestPeak = p;
+        bestPeakHour = h;
+        best = run;
+      }
+    }
+  }
+
+  const startHour = best[0];
+  const endHour = best[best.length - 1] + 1;
+  const period = rainPeriodOf(bestPeakHour);
+  // 时段名跟跨度走：只贴峰值那一段的名字会藏掉雨的收尾时间
+  const startPeriod = rainPeriodOf(startHour);
+  const endPeriod = rainPeriodOf(endHour - 1);
+  const periodText = startPeriod === endPeriod ? startPeriod : `${startPeriod}到${endPeriod}`;
+  const rangeText = `${startHour}–${endHour} 点`;
+  return {
+    period,
+    startHour,
+    endHour,
+    peakPct: bestPeak,
+    label: `${periodText} ${rangeText}`,
+    alreadyPassed,
+  };
+}
+
+/** 播报用后缀：无达标时段返回空串，避免低概率时硬编一个时间窗 */
+export function rainWindowSuffixText(window: RainWindow | null): string {
+  if (!window) return "";
+  return window.alreadyPassed ? `${window.label}已下过` : `${window.label}最明显`;
+}
+
 export function buildClothingAdvice(b: {
   currentTempC: number;
   todayMinC: number;
@@ -105,10 +224,15 @@ export function buildClothingAdvice(b: {
   peakRainPct: number;
   weatherCode: number;
   windKmh: number;
+  /**
+   * 当日降水集中时段；提供时以它决定带伞措辞与是否还该带，不提供时按 peakRainPct 判。
+   */
+  rainWindow?: RainWindow;
 }): string {
   const t = b.currentTempC;
   const feelsCold = Math.min(b.todayMinC, t);
-  const rainy = b.peakRainPct >= 40 || [61, 63, 65, 80, 81, 82, 95, 96, 99].includes(b.weatherCode);
+  const codeRainy = [61, 63, 65, 80, 81, 82, 95, 96, 99].includes(b.weatherCode);
+  const rainy = b.rainWindow ? !b.rainWindow.alreadyPassed || codeRainy : b.peakRainPct >= 40 || codeRainy;
   const snowy = [71, 73, 75, 77, 85, 86].includes(b.weatherCode);
 
   const layers: string[] = [];
@@ -133,7 +257,11 @@ export function buildClothingAdvice(b: {
     layers.push("风力较大，可加防风外层");
   }
   if (rainy) {
-    layers.push("携带雨具（伞或雨衣）");
+    layers.push(
+      b.rainWindow && !b.rainWindow.alreadyPassed
+        ? `携带雨具（${rainWindowSuffixText(b.rainWindow)}）`
+        : "携带雨具（伞或雨衣）",
+    );
   }
   if (snowy) {
     layers.push("防滑鞋、保暖手套与帽子");
@@ -166,19 +294,24 @@ export async function geocodeCity(name: string): Promise<GeocodeHit | null> {
 }
 
 export class WeatherService {
+  /**
+   * @param timezone IANA 时区；传 "auto"（缺省）让接口按经纬度推导——日历日和逐小时
+   *   时刻都以「那个坐标所在的时区」为准，绝不掺入服务器本地时区或出口 IP 的时区。
+   */
   async getBrief(
     latitude: number,
     longitude: number,
-    timezone: string,
+    timezone = "auto",
     locationLabel?: string,
     /** 请求天数（1–16，Open-Meteo forecast_days 免费硬上限 16）；默认 2 = 今天+明天，保持旧行为 */
     days = 2,
   ): Promise<WeatherBrief> {
     const forecastDays = Math.max(1, Math.min(Math.trunc(days) || 2, 16));
+    const tzParam = (timezone || "").trim() || "auto";
     const params = new URLSearchParams({
       latitude: String(latitude),
       longitude: String(longitude),
-      timezone,
+      timezone: tzParam,
       current: [
         "temperature_2m",
         "relative_humidity_2m",
@@ -197,6 +330,8 @@ export class WeatherService {
       throw new Error(`天气接口错误: ${res.status}`);
     }
     const raw = (await res.json()) as {
+      timezone?: string;
+      utc_offset_seconds?: number;
       current?: {
         temperature_2m?: number;
         relative_humidity_2m?: number;
@@ -224,16 +359,48 @@ time?: (string | null)[];
     const code = Number(cur.weather_code ?? 0);
     const tMax = Number(raw.daily?.temperature_2m_max?.[0] ?? cur.temperature_2m ?? 0);
     const tMin = Number(raw.daily?.temperature_2m_min?.[0] ?? cur.temperature_2m ?? 0);
-    const probs = raw.hourly?.precipitation_probability?.filter((x): x is number => x != null) ?? [];
-    const peakRainPct = probs.length > 0 ? Math.max(...probs) : Number(raw.daily?.precipitation_probability_max?.[0] ?? 0);
+    // 降水概率与时段都只取「今天」那一天：跨天取 max 会把后天的雨报成今天有雨。
+    const todayKey = raw.daily?.time?.[0];
+    const tomorrowKey = raw.daily?.time?.[1];
+    const hourlyTimes = raw.hourly?.time ?? [];
+    const hourlyProbs = raw.hourly?.precipitation_probability ?? [];
+    const todayProbsByHour: (number | null)[] = Array.from({ length: 24 }, () => null);
+    const tomorrowProbsByHour: (number | null)[] = Array.from({ length: 24 }, () => null);
+    for (let i = 0; i < hourlyTimes.length; i++) {
+      const t = hourlyTimes[i];
+      const p = hourlyProbs[i];
+      if (p == null || !t) continue;
+      const hour = Number(t.slice(11, 13));
+      if (!Number.isInteger(hour) || hour < 0 || hour > 23) continue;
+      const day = t.slice(0, 10);
+      if ((!todayKey || day === todayKey) && todayProbsByHour[hour] == null) todayProbsByHour[hour] = p;
+      if (tomorrowKey && day === tomorrowKey && tomorrowProbsByHour[hour] == null) {
+        tomorrowProbsByHour[hour] = p;
+      }
+    }
+    const todayProbs = todayProbsByHour.filter((p): p is number => p != null);
+    const peakRainPct =
+      todayProbs.length > 0
+        ? Math.max(...todayProbs)
+        : Number(raw.daily?.precipitation_probability_max?.[0] ?? 0);
 
+    const resolvedTimezone = raw.timezone?.trim() || tzParam;
+    const utcOffsetSeconds = Number(raw.utc_offset_seconds ?? 0);
+    // 该坐标的「现在」：接口返回的 time 是当地墙钟，比较已过去的钟点必须用同一个时区，
+    // 用服务器本地时间会比出 8 小时偏差，把还没下的雨说成「已下过」。
+    const localNow = new Date(Date.now() + utcOffsetSeconds * 1000);
+    const localNowDateKey = localNow.toISOString().slice(0, 10);
+    const rainWindow = extractRainWindow({
+      probsByHour: todayProbsByHour,
+      nowHourOfDay: todayKey === localNowDateKey ? localNow.getUTCHours() : null,
+    });
     const currentTempC = Number(cur.temperature_2m ?? 0);
-const hourlyForecast = buildHourlyForecast(raw.hourly);
+    const hourlyForecast = buildHourlyForecast(raw.hourly, utcOffsetSeconds);
     const brief: WeatherBrief = {
       source: "open-meteo",
       latitude,
       longitude,
-      timezone,
+      timezone: resolvedTimezone,
       // 逆地理失败时不放坐标兜底（2026-10-08 用户要求）：坐标对用户无意义还暴露隐私，
       // 没有城市名就让 summary/卡片标题直接以天气开头，不带位置前缀。
       locationLabel: locationLabel ?? "",
@@ -247,6 +414,7 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
       todayMinC: tMin,
       todayMaxC: tMax,
       peakRainPct,
+      ...(rainWindow ? { rainWindow } : {}),
       clothingAdvice: buildClothingAdvice({
         currentTempC,
         todayMinC: tMin,
@@ -254,6 +422,7 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
         peakRainPct,
         weatherCode: code,
         windKmh: Number(cur.wind_speed_10m ?? 0),
+        ...(rainWindow ? { rainWindow } : {}),
       }),
       hourlyForecast,
       summaryLine: "",
@@ -283,9 +452,12 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
 
     // 明天一句话摘要（用户常问"明天天气"）
     const tomorrow = dailyItems[1];
+    const tomorrowRainWindow = extractRainWindow({ probsByHour: tomorrowProbsByHour });
     let tomorrowSummary = "";
     if (tomorrow) {
-      const rainInfo = tomorrow.rainPct > 0 ? `，降水概率 ${tomorrow.rainPct}%` : "";
+      const rainInfo = tomorrow.rainPct > 0
+        ? `，降水概率 ${tomorrow.rainPct}%${tomorrowRainWindow ? `（${tomorrowRainWindow.label}）` : ""}`
+        : "";
       tomorrowSummary = ` 明日${tomorrow.weatherText}，${tomorrow.minC.toFixed(0)}–${tomorrow.maxC.toFixed(0)}°C${rainInfo}。`;
       // 结构化次日预报（Task 15 晚间 digest"明日预告"与次日预警检测）
       brief.tomorrow = {
@@ -294,10 +466,13 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
         minC: tomorrow.minC,
         maxC: tomorrow.maxC,
         rainPct: tomorrow.rainPct,
+        ...(tomorrowRainWindow ? { rainWindow: tomorrowRainWindow } : {}),
       };
     }
 
-    brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C。${tomorrowSummary}`.trim();
+    brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C${
+      rainWindow ? `，降水${rainWindow.alreadyPassed ? "主要落在" : "集中在"} ${rainWindow.label}` : ""
+    }。${tomorrowSummary}`.trim();
     return brief;
   }
 
@@ -317,7 +492,7 @@ const hourlyForecast = buildHourlyForecast(raw.hourly);
     const params = new URLSearchParams({
       latitude: String(latitude),
       longitude: String(longitude),
-      timezone,
+      timezone: (timezone || "").trim() || "auto",
       hourly: ["temperature_2m", "precipitation_probability", "weather_code"].join(","),
       daily: ["weather_code", "temperature_2m_max", "temperature_2m_min", "precipitation_probability_max"].join(","),
     });
@@ -450,18 +625,33 @@ export function detectSevereWeatherAlerts(input: {
   return alerts;
 }
 
-function buildHourlyForecast(raw: {
-  time?: (string | null)[];
-  temperature_2m?: (number | null)[];
-  precipitation_probability?: (number | null)[];
-  weather_code?: (number | null)[];
-} | undefined): WeatherHourlyForecast[] {
+function buildHourlyForecast(
+  raw: {
+    time?: (string | null)[];
+    temperature_2m?: (number | null)[];
+    precipitation_probability?: (number | null)[];
+    weather_code?: (number | null)[];
+  } | undefined,
+  locationUtcOffsetSeconds: number,
+): WeatherHourlyForecast[] {
   const times = raw?.time ?? [];
   const temps = raw?.temperature_2m ?? [];
   if (times.length === 0 || temps.length === 0) return [];
 
   const now = Date.now();
-  let start = times.findIndex((time) => time != null && new Date(time).getTime() >= now);
+  // 接口给的 time 是「那个坐标的本地时间」且不带偏移（形如 2026-10-28T09:00）。
+  // 必须用响应里的 utc_offset_seconds 还原真实时刻；直接 new Date(time) 会按
+  // 服务器本地时区解析，服务器跑 UTC 时逐小时面板整体错开 8 小时。
+  const toInstantMs = (time: string) => {
+    const withSeconds = time.length === 16 ? `${time}:00` : time;
+    const asUtc = Date.parse(withSeconds.endsWith("Z") ? withSeconds : `${withSeconds}Z`);
+    return asUtc - locationUtcOffsetSeconds * 1000;
+  };
+  let start = times.findIndex((time) => {
+    if (time == null) return false;
+    const instant = toInstantMs(time);
+    return Number.isFinite(instant) && instant >= now;
+  });
   if (start < 0) start = 0;
 
   const forecast: WeatherHourlyForecast[] = [];

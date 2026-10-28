@@ -24,7 +24,6 @@ import { detectSevereWeatherAlerts } from "./weather-service.js";
 import { fetchHotRankings } from "./hot-rankings.js";
 import { normalizeFp } from "../proactivity/interest-watcher.js";
 import { resolvePoliteAppellation } from "./user-personalization/appellation.js";
-import { fetchIPLocation } from "./ip-geolocation.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
@@ -695,8 +694,10 @@ export class MorningBriefingService {
     const { weatherService, weatherPrefsService } = this.deps;
     if (!weatherService) return null;
 
-    // 坐标来源优先级：用户配置的天气城市 > 客户端 GPS（实时/缓存） >
-    // 出口 IP 定位（后端直接拉取；均确定性 HTTP/WS，无 LLM）。
+    // 坐标来源优先级：用户配置的天气城市 > 客户端 GPS（实时/缓存）。
+    // 出口 IP 定位那条兜底已删除：它拿的是**服务器出口 IP** 的城市（实证：本机 IP 落在
+    // 广州、用户人在兴义；上云后更是服务器所在城市），报出来的天气与用户无关。
+    // 没有用户定位 → 天气块省略，宁缺毋错。
     const prefs = weatherPrefsService?.get(sessionId);
     let latitude: number;
     let longitude: number;
@@ -706,20 +707,15 @@ export class MorningBriefingService {
     if (prefs) {
       latitude = prefs.latitude;
       longitude = prefs.longitude;
-      timezone = prefs.timezone || "Asia/Shanghai";
+      timezone = prefs.timezone?.trim() || "auto";
       label = prefs.label;
     } else if (clientLocation) {
       latitude = clientLocation.latitude;
       longitude = clientLocation.longitude;
-      timezone = clientLocation.timezone || "Asia/Shanghai";
+      timezone = clientLocation.timezone?.trim() || "auto";
       label = clientLocation.label || clientLocation.city || undefined;
     } else {
-      const ipLocation = await fetchIPLocation();
-      if (!ipLocation) return null;
-      latitude = ipLocation.latitude;
-      longitude = ipLocation.longitude;
-      timezone = ipLocation.timezone;
-      label = ipLocation.label || undefined;
+      return null;
     }
 
     try {

@@ -1,6 +1,5 @@
 import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
-import "package:flutter/gestures.dart" show Drag;
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
 import "package:flutter/services.dart";
@@ -28,6 +27,7 @@ import "plan_steps_card.dart";
 import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
+import "composer_skill.dart";
 import "utterance_grouping.dart";
 import "../../core/services/profile_manage_api.dart";
 import "../../core/services/account_profile_api.dart";
@@ -118,6 +118,11 @@ class ChatPage extends StatefulWidget {
     /// 本地历史存储：「为你推荐」出现时机治理（频控/已知能力集合）的
     /// 持久化通道；null 时横滑条退化为纯内存治理。
     this.localStore,
+
+    /// 挂在输入框上的技能（引导 chip 选中后由父级注入）；非 null 时
+    /// 输入框上方渲染可移除的技能胶囊，占位提示改为该技能要补的参数。
+    this.composerSkill,
+    this.onClearComposerSkill,
   });
 
   final List<ChatMessage> messages;
@@ -219,8 +224,75 @@ class ChatPage extends StatefulWidget {
   /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合（父组件维护）
   final Set<String> queuedMessageIds;
 
+  /// 已挂到输入框上的技能；null 表示没有技能。
+  final ComposerSkill? composerSkill;
+
+  /// 移除输入框上的技能胶囊（× 按钮）。
+  final VoidCallback? onClearComposerSkill;
+
   @override
   State<ChatPage> createState() => _ChatPageState();
+}
+
+/// 懒加载列表的总高估算：只信「已排布过的最远前缀的平均条目高」。
+///
+/// SDK 默认用当前视口窗口内的平均高外推剩余条目；聊天消息高度差异极大，
+/// 滑过一张卡片就会让窗口均值跳变，总高随之在几万像素间摆动，滚动条滑块
+/// 的长度和位置跟着乱跳。这里把平均值钉在已见前缀上，总高只在真正看到
+/// 新条目时小幅修正，不再随当前窗口来回漂。
+class _StableExtentEstimator {
+  int _knownCount = 0;
+  double _knownEnd = 0;
+
+  void reset() {
+    _knownCount = 0;
+    _knownEnd = 0;
+  }
+
+  double estimate({
+    required int lastIndex,
+    required double trailingScrollOffset,
+    required int childCount,
+  }) {
+    if (lastIndex >= childCount - 1) {
+      // 全部条目都已排布：直接用真实总高，同时把前缀对齐到当前列表
+      _knownCount = childCount;
+      _knownEnd = trailingScrollOffset;
+      return trailingScrollOffset;
+    }
+    final int laidOut = lastIndex + 1;
+    if (laidOut > _knownCount || childCount < _knownCount) {
+      _knownCount = laidOut;
+      _knownEnd = trailingScrollOffset;
+    }
+    if (_knownCount <= 0) return trailingScrollOffset;
+    final double average = _knownEnd / _knownCount;
+    return _knownEnd + average * (childCount - _knownCount);
+  }
+}
+
+class _StableExtentChildDelegate extends SliverChildBuilderDelegate {
+  _StableExtentChildDelegate({
+    required NullableIndexedWidgetBuilder builder,
+    required int childCount,
+    required this.estimator,
+  }) : super(builder, childCount: childCount);
+
+  final _StableExtentEstimator estimator;
+
+  @override
+  double? estimateMaxScrollOffset(
+    int firstIndex,
+    int lastIndex,
+    double leadingScrollOffset,
+    double trailingScrollOffset,
+  ) {
+    return estimator.estimate(
+      lastIndex: lastIndex,
+      trailingScrollOffset: trailingScrollOffset,
+      childCount: childCount!,
+    );
+  }
 }
 
 class _ChatPageState extends State<ChatPage>
@@ -343,11 +415,19 @@ class _ChatPageState extends State<ChatPage>
   /// 右侧滑块拖拽热区宽度（px）。滚动条本体 8px 左右，这里放宽到 14px 便于按住。
   static const double _scrollbarGrabWidth = 14;
 
-  /// 滑块拖拽换算比例（内容像素 / 指针像素），按下瞬间固化。
-  double _thumbDragScale = 1;
+  /// 消息流总高估算器：跨 build 存活以累积「已排布前缀」。
+  final _StableExtentEstimator _extentEstimator = _StableExtentEstimator();
 
-  /// 滑块拖拽会话（由 `ScrollPosition.drag` 创建，走标准滚动通知链路）。
-  Drag? _thumbDrag;
+  /// 估算器当前对应的会话（取最旧一条可见消息的 id）：切会话时清空重估。
+  String? _extentConversationKey;
+
+  /// 滑块拖拽会话：按下时的指针 y、滑块顶（轨迹内坐标）和最新指针 y。
+  double? _thumbDragStartY;
+  double? _thumbDragLastY;
+  double? _thumbDragStartTop;
+
+  /// 帧末对齐滑块与指针的任务是否已排队。
+  bool _thumbDragCorrectionScheduled = false;
 
   // 预定义常量 - 减少重复创建对象
   /// 聊天内容列（消息流 + 输入区）的最大宽度：宽屏下共同居中收敛，
@@ -512,7 +592,13 @@ class _ChatPageState extends State<ChatPage>
         notification.dragDetails != null) {
       _isUserDragging = true;
     } else if (notification is ScrollEndNotification) {
-      _isUserDragging = false;
+      // 滑块拖拽期间我们自己 jumpTo，每帧都会发一次 Start/End，不能清掉标记
+      _isUserDragging = _thumbDragStartTop != null;
+    }
+    if (notification is ScrollMetricsNotification &&
+        _thumbDragStartTop != null) {
+      // 视口高度或总高在拖动途中变化：滑块长度变了，帧末重新钉回指针
+      _scheduleThumbDragCorrection();
     }
     if (_isAutoScrolling || _isRestoringPosition || _isPreviewAnchorActive) {
       return false;
@@ -521,60 +607,96 @@ class _ChatPageState extends State<ChatPage>
     return false;
   }
 
-  /// 滑块长度占轨迹的比例 = 可见比例；由此反推「拖动 1px 指针 = 移动多少内容像素」。
-  ///
-  /// SDK 自带的滑块拖拽（`RawScrollbarState._getPrimaryDelta`）是绝对映射：
-  /// `getTrackToScroll(按下时的滑块位置 + 指针位移)`，其中
-  /// `getTrackToScroll(x) = 总高 × x ÷ (轨迹长 − 滑块长)`——**分母每帧按最新
-  /// metrics 重算**。可是拖动期间视口高度和懒加载估算的总高都在变（实测视口
-  /// 512→400、总高抖 ±45px），同一个指针位置于是对应到完全不同的偏移，超出
-  /// `maxScrollExtent` 的部分被 clamp——表现为拖到中间突然窜到列表最顶、
-  /// 拖动过程中来回漂。这里改为按下时算一次比例、拖动期间不再重算。
-  double _computeThumbDragScale(ScrollPosition position) {
+  /// 按滚动条自身的绘制公式复算滑块几何：轨迹 = 视口高减去滚动条 padding，
+  /// 滑块长 = 轨迹 × 可见比例且不短于最小长度，可移动行程 = 轨迹 − 滑块长。
+  ({double range, double movable, double top}) _thumbGeometry(
+      ScrollPosition position) {
+    final double track =
+        position.viewportDimension - MediaQuery.paddingOf(context).vertical;
     final double range = position.maxScrollExtent - position.minScrollExtent;
-    final double track = position.viewportDimension;
-    if (range <= 0 || track <= 0) return 1;
-    final double movable = track * range / (range + track);
-    if (movable <= 0) return 1;
-    return range / movable;
+    if (range <= 0 || track <= 0) {
+      return (range: 0, movable: 0, top: 0);
+    }
+    final double natural = track * track / (range + track);
+    final double minThumb = ScrollbarTheme.of(context).minThumbLength ?? 18;
+    final double thumbLength =
+        natural.clamp(minThumb < track ? minThumb : track, track).toDouble();
+    final double movable = track - thumbLength;
+    final double top =
+        (1 - (position.pixels - position.minScrollExtent) / range) * movable;
+    return (range: range, movable: movable, top: top);
   }
 
   void _onThumbDragStart(DragStartDetails details) {
     if (!_scrollController.hasClients) return;
     final ScrollPosition position = _scrollController.position;
-    if (position.maxScrollExtent <= position.minScrollExtent) return;
-    _thumbDragScale = _computeThumbDragScale(position);
-    // 立刻认领：`position.drag` 会打断进行中的跟底动画，首帧起就压住自动滚动
+    final ({double range, double movable, double top}) geometry =
+        _thumbGeometry(position);
+    if (geometry.range <= 0 || geometry.movable <= 0) return;
+    _thumbDragStartY = details.globalPosition.dy;
+    _thumbDragLastY = details.globalPosition.dy;
+    _thumbDragStartTop = geometry.top;
+    // 立刻认领：首帧起就压住自动滚动
     _isUserDragging = true;
     _userTookOverViewport = position.pixels > _stickToBottomEpsilon;
-    _thumbDrag = position.drag(details, () => _thumbDrag = null);
   }
 
   void _onThumbDragUpdate(DragUpdateDetails details) {
-    final Drag? drag = _thumbDrag;
-    if (drag == null) return;
-    // `ScrollDragController` 的 primaryDelta 是「内容像素增量」，反向列表
-    // （axisDirection.up）里内容像素增量 = −指针纵向位移 × 比例。
-    final double scaled = -details.delta.dy * _thumbDragScale;
-    drag.update(DragUpdateDetails(
-      globalPosition: details.globalPosition,
-      localPosition: details.localPosition,
-      delta: Offset(0, scaled),
-      primaryDelta: scaled,
-    ));
+    if (_thumbDragStartTop == null) return;
+    _thumbDragLastY = details.globalPosition.dy;
+    _applyThumbDragAnchor();
+    _scheduleThumbDragCorrection();
   }
 
   void _onThumbDragEnd(DragEndDetails details) {
-    // 桌面滑块拖拽松手即停，不接力惯性（也避开反向列表速度符号的换算）
-    _thumbDrag?.end(DragEndDetails(primaryVelocity: 0));
-    _thumbDrag = null;
-    _isUserDragging = false;
+    // 桌面滑块松手即停，不接力惯性
+    _endThumbDrag();
   }
 
   void _onThumbDragCancel() {
-    _thumbDrag?.cancel();
-    _thumbDrag = null;
+    _endThumbDrag();
+  }
+
+  void _endThumbDrag() {
+    _thumbDragStartY = null;
+    _thumbDragLastY = null;
+    _thumbDragStartTop = null;
     _isUserDragging = false;
+  }
+
+  /// 本帧布局可能刷新了总高估算（滑块长度随之变化），帧末再对齐一次。
+  void _scheduleThumbDragCorrection() {
+    if (_thumbDragCorrectionScheduled) return;
+    _thumbDragCorrectionScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _thumbDragCorrectionScheduled = false;
+      _applyThumbDragAnchor();
+    });
+  }
+
+  /// 把滑块顶端钉在「按下位置 + 指针位移」上，再由滑块位置反解内容像素。
+  ///
+  /// 不能直接用总高估算换算内容增量：估算一变，滑块长度和位置就跟着变，
+  /// 滑块会从指针下面溜走。这里以指针为锚，滑块始终贴住指针；估算误差只
+  /// 表现为内容位移的疏密，不会让滑块脱手。
+  void _applyThumbDragAnchor() {
+    final double? startTop = _thumbDragStartTop;
+    final double? startY = _thumbDragStartY;
+    final double? lastY = _thumbDragLastY;
+    if (startTop == null || startY == null || lastY == null) return;
+    if (!_scrollController.hasClients) return;
+    final ScrollPosition position = _scrollController.position;
+    final ({double range, double movable, double top}) geometry =
+        _thumbGeometry(position);
+    if (geometry.range <= 0 || geometry.movable <= 0) return;
+    final double targetTop =
+        (startTop + (lastY - startY)).clamp(0.0, geometry.movable);
+    final double targetPixels =
+        ((1 - targetTop / geometry.movable) * geometry.range)
+            .clamp(0.0, geometry.range);
+    if ((targetPixels - position.pixels).abs() > 0.5) {
+      position.jumpTo(targetPixels);
+    }
   }
 
   /// ====== 图片预览滚动锚点（内容锚点版） ======
@@ -710,9 +832,25 @@ class _ChatPageState extends State<ChatPage>
     }
   }
 
+  /// 估算器的前缀统计只对同一段消息序列有效：最旧一条可见消息变化即视为
+  /// 换会话（或整段被替换），清空重估。
+  void _syncExtentConversation() {
+    String? key;
+    for (final ChatMessage m in widget.messages) {
+      if (m.role != "assistant_progress") {
+        key = m.messageId;
+        break;
+      }
+    }
+    if (key == _extentConversationKey) return;
+    _extentConversationKey = key;
+    _extentEstimator.reset();
+  }
+
   @override
   void didUpdateWidget(covariant ChatPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    _syncExtentConversation();
 
     // ====== 优先处理 Tab 切换（离开 / 进入） ======
     final bool wasActive = _isTabActive;
@@ -1025,11 +1163,66 @@ class _ChatPageState extends State<ChatPage>
   // ═══════════════════════════════════════════════════════════
   // 发送按钮（常显，有内容时高亮可点击）
   // ═══════════════════════════════════════════════════════════
+
+  /// 能否提交：有文字，或挂了不需要补参数的技能。
+  bool get _canSubmit =>
+      widget.controller.text.trim().isNotEmpty ||
+      widget.composerSkill?.detailRequired == false;
+
+  /// 输入框上方的技能胶囊：图标 + 技能名 + ×（点 × 摘掉技能）。
+  Widget _buildComposerSkillPill(ColorScheme cs, ComposerSkill skill) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Container(
+          key: const ValueKey('composer-skill-pill'),
+          padding: const EdgeInsets.fromLTRB(9, 4, 4, 4),
+          decoration: BoxDecoration(
+            color: cs.primary.withValues(alpha: 0.12),
+            borderRadius: BorderRadius.circular(9),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              Icon(skill.icon, size: 13, color: cs.primary),
+              const SizedBox(width: 5),
+              Text(
+                skill.label,
+                style: TextStyle(
+                  fontSize: 12.5,
+                  color: cs.primary,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+              const SizedBox(width: 2),
+              MouseRegion(
+                cursor: SystemMouseCursors.click,
+                child: GestureDetector(
+                  onTap: widget.onClearComposerSkill,
+                  child: Padding(
+                    padding: const EdgeInsets.all(3),
+                    child: Icon(
+                      Icons.close_rounded,
+                      size: 13,
+                      color: cs.primary.withValues(alpha: 0.8),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildSendButton(ColorScheme cs) {
     return ValueListenableBuilder<TextEditingValue>(
       valueListenable: widget.controller,
       builder: (_, TextEditingValue value, __) {
-        final bool canSend = value.text.trim().isNotEmpty;
+        final bool canSend = value.text.trim().isNotEmpty ||
+            widget.composerSkill?.detailRequired == false;
         return Container(
           key: const ValueKey('input-send-btn'),
           decoration: BoxDecoration(
@@ -1045,13 +1238,7 @@ class _ChatPageState extends State<ChatPage>
               color: canSend ? cs.onPrimary : cs.onSurfaceVariant,
             ),
             tooltip: widget.isAgentProcessing ? "发送（打断当前回复）" : "发送",
-            onPressed: canSend
-                ? () {
-                    if (widget.controller.text.trim().isNotEmpty) {
-                      widget.onSend();
-                    }
-                  }
-                : null,
+            onPressed: canSend ? widget.onSend : null,
             padding: EdgeInsets.zero,
             constraints: const BoxConstraints.tightFor(
               width: 34,
@@ -1231,12 +1418,9 @@ class _ChatPageState extends State<ChatPage>
       return const SizedBox.shrink();
     }
 
-    final String? toolLabel =
-        tool.isNotEmpty ? friendlyToolLabel(tool) : null;
+    final String? toolLabel = tool.isNotEmpty ? friendlyToolLabel(tool) : null;
     final String text = toolLabel ??
-        (foregroundActive
-            ? _processingStatusText()
-            : "$bgCount 个任务后台进行中");
+        (foregroundActive ? _processingStatusText() : "$bgCount 个任务后台进行中");
     final int? percent = widget.agentStatusPercent;
 
     return Material(
@@ -1450,6 +1634,7 @@ class _ChatPageState extends State<ChatPage>
   /// 内容。
   void _sendSuggestion(String prompt) {
     final String draft = widget.controller.text;
+    widget.onClearComposerSkill?.call();
     widget.controller.text = prompt;
     widget.onSend();
     if (draft.trim().isNotEmpty) {
@@ -1518,67 +1703,71 @@ class _ChatPageState extends State<ChatPage>
                             const BoxConstraints(maxWidth: _contentMaxWidth),
                         child: NotificationListener<ScrollNotification>(
                           onNotification: _handleScrollNotification,
-                          child: ListView.builder(
+                          child: ListView.custom(
                             controller: _scrollController,
                             reverse: true,
                             padding: _listPadding,
                             scrollCacheExtent:
                                 const ScrollCacheExtent.pixels(500),
-                            itemCount: itemCount,
-                            itemBuilder: (BuildContext context, int index) {
-                              // reverse 模式下 index 0 = 视觉底部（最新消息）
-                              final Map<String, dynamic> messageGroup =
-                                  renderItems[index];
-                              final bool isUser =
-                                  messageGroup['isUser'] as bool;
-                              final ChatMessage mainMessage =
-                                  messageGroup['main'] as ChatMessage;
-                              final ContentSummaryParseResult? contentSummary =
-                                  isUser
-                                      ? null
-                                      : ContentSummaryParser.parse(
-                                          mainMessage.text);
+                            semanticChildCount: itemCount,
+                            childrenDelegate: _StableExtentChildDelegate(
+                              childCount: itemCount,
+                              estimator: _extentEstimator,
+                              builder: (BuildContext context, int index) {
+                                // reverse 模式下 index 0 = 视觉底部（最新消息）
+                                final Map<String, dynamic> messageGroup =
+                                    renderItems[index];
+                                final bool isUser =
+                                    messageGroup['isUser'] as bool;
+                                final ChatMessage mainMessage =
+                                    messageGroup['main'] as ChatMessage;
+                                final ContentSummaryParseResult?
+                                    contentSummary = isUser
+                                        ? null
+                                        : ContentSummaryParser.parse(
+                                            mainMessage.text);
 
-                              // 发言归组（2026-10-09 重复回复根源修复）：reverse 列表
-                              // 里 index+1 = 视觉上的上一条（更早）。同一条发言的后续
-                              // 分段渲染为「续泡」（不重复头像/名字/时间头），避免把
-                              // 「一条发言的两段」读成两条独立回复。
-                              final ChatMessage? aboveMessage =
-                                  index + 1 < itemCount
-                                      ? renderItems[index + 1]['main']
-                                          as ChatMessage
-                                      : null;
-                              final bool isUtteranceContinuation = !isUser &&
-                                  aboveMessage != null &&
-                                  UtteranceGrouping.isContinuationOf(
-                                    aboveMessage.messageId,
-                                    mainMessage.messageId,
-                                  );
+                                // 发言归组（2026-10-09 重复回复根源修复）：reverse 列表
+                                // 里 index+1 = 视觉上的上一条（更早）。同一条发言的后续
+                                // 分段渲染为「续泡」（不重复头像/名字/时间头），避免把
+                                // 「一条发言的两段」读成两条独立回复。
+                                final ChatMessage? aboveMessage =
+                                    index + 1 < itemCount
+                                        ? renderItems[index + 1]['main']
+                                            as ChatMessage
+                                        : null;
+                                final bool isUtteranceContinuation = !isUser &&
+                                    aboveMessage != null &&
+                                    UtteranceGrouping.isContinuationOf(
+                                      aboveMessage.messageId,
+                                      mainMessage.messageId,
+                                    );
 
-                              // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
-                              // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
-                              // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
-                              return KeyedSubtree(
-                                key: ValueKey<String>(
-                                    'msg-${mainMessage.messageId}'),
-                                child: _buildHoverableMessage(
-                                  cs: cs,
-                                  mainMessage: mainMessage,
-                                  isUser: isUser,
-                                  contentSummary: contentSummary,
-                                  isUtteranceContinuation:
-                                      isUtteranceContinuation,
-                                ),
-                              );
-                            },
+                                // 稳定 Key：以 messageId 定位，保证 reverse ListView 中新增消息
+                                // 使其他条目 index 下移时，Flutter 仍按 messageId 复用 Element，
+                                // 打字机的 _revealedRaw 逐字进度不会因重建而重置（否则会反复重打）。
+                                return KeyedSubtree(
+                                  key: ValueKey<String>(
+                                      'msg-${mainMessage.messageId}'),
+                                  child: _buildHoverableMessage(
+                                    cs: cs,
+                                    mainMessage: mainMessage,
+                                    isUser: isUser,
+                                    contentSummary: contentSummary,
+                                    isUtteranceContinuation:
+                                        isUtteranceContinuation,
+                                  ),
+                                );
+                              },
+                            ),
                           ),
                         ),
                       ),
                     ),
                   ),
                 // 右侧滑块拖拽层：宽度与消息列右缘对齐（滚动条画在同一个右缘）。
-                // 用它替换 SDK 自带的滑块拖拽，换算比例在按下时固化；原因见
-                // `_computeThumbDragScale`。
+                // 用它替换 SDK 自带的滑块拖拽，指针位移按 `_computeThumbDragScale`
+                // 换算成内容偏移。
                 Positioned.fill(
                   child: Center(
                     child: ConstrainedBox(
@@ -1847,6 +2036,10 @@ class _ChatPageState extends State<ChatPage>
                                 child: Column(
                                   mainAxisSize: MainAxisSize.min,
                                   children: <Widget>[
+                                    // 技能胶囊：挂在输入框上方，参数人工补
+                                    if (widget.composerSkill != null)
+                                      _buildComposerSkillPill(
+                                          cs, widget.composerSkill!),
                                     // 第一行：[待发缩略图（最左侧，豆包样式）] + 输入框 + 发送/停止按钮
                                     // 有待发图时行高被缩略图撑起，文字/按钮改为垂直居中更自然
                                     // LayoutBuilder 在 Row 内会拿到无界宽度，须包在 Row 外
@@ -1902,9 +2095,7 @@ class _ChatPageState extends State<ChatPage>
                                                           .ignored;
                                                     }
                                                     // agent 回复中也允许发送：会打断当前回复并开新轮次
-                                                    if (widget.controller.text
-                                                        .trim()
-                                                        .isNotEmpty) {
+                                                    if (_canSubmit) {
                                                       widget.onSend();
                                                       return KeyEventResult
                                                           .handled;
@@ -1928,7 +2119,10 @@ class _ChatPageState extends State<ChatPage>
                                                     keyboardType:
                                                         TextInputType.multiline,
                                                     decoration: InputDecoration(
-                                                      hintText: "",
+                                                      hintText: widget
+                                                              .composerSkill
+                                                              ?.hint ??
+                                                          "",
                                                       // 彻底移除 TextField 内部各状态下的内边框（下划线/矩形）
                                                       border: InputBorder.none,
                                                       enabledBorder:

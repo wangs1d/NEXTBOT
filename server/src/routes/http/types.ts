@@ -30,7 +30,6 @@ import type { ComputeQuotaService } from "../../services/compute-quota-service.j
 import type { WeatherPrefsService } from "../../services/weather-prefs-service.js";
 import type { WeatherService } from "../../services/weather-service.js";
 import type { TtsService } from "../../services/tts-service.js";
-import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import type { ImageGenerationService } from "../../services/image-generation-service.js";
 import type { PictureKit } from "@nextbot/picture";
@@ -115,8 +114,6 @@ export type HttpRouteDeps = {
   ttsService: TtsService;
   /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */
   voiceMessageService: VoiceMessageService;
-  /** 语音能力中枢（ASR 端点 /agent/voice/transcribe 使用）；可选，未注入时该端点返回 503 */
-  voiceCapabilityService?: VoiceCapabilityService;
   /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
   imageGenerationService: ImageGenerationService;
   /** 图片能力套件(图库) */

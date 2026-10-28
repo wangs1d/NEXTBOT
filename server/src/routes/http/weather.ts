@@ -15,8 +15,9 @@ type WeatherCacheEntry = { brief: unknown; expiresAt: number };
 const weatherCache = new Map<string, WeatherCacheEntry>();
 const WEATHER_CACHE_TTL_MS = 5 * 60 * 1000; // 5 分钟
 
-function weatherCacheKey(latitude: number, longitude: number): string {
-  return `${latitude.toFixed(3)},${longitude.toFixed(3)}`;
+function weatherCacheKey(latitude: number, longitude: number, timezone: string): string {
+  // 时区入键：auto 与显式 IANA 推出来的日历日可能不是同一天，混用会把别天的数还回去
+  return `${latitude.toFixed(3)},${longitude.toFixed(3)}|${timezone}`;
 }
 
 export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps): void {
@@ -55,7 +56,8 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const { latitude, longitude, timezone, label } = parsed.data;
-    const key = weatherCacheKey(latitude, longitude);
+    const tzParam = timezone?.trim() || "auto";
+    const key = weatherCacheKey(latitude, longitude, tzParam);
     const now = Date.now();
     const hit = weatherCache.get(key);
     if (hit && hit.expiresAt > now) {
@@ -65,7 +67,7 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       const brief = await weatherService.getBrief(
         latitude,
         longitude,
-        timezone?.trim() || "Asia/Shanghai",
+        tzParam,
         label?.trim() || undefined,
       );
       // 缓存成功结果；只维护最近若干个条目，防止 Map 无限增长。
@@ -96,7 +98,8 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const body = parsed.data;
-    const tz = body.timezone?.trim() || "Asia/Shanghai";
+    // 客户端没给时区就存空（取数时按坐标推导），不写死 Asia/Shanghai 冒充用户所在时区
+    const tz = body.timezone?.trim() ?? "";
     const prev = weatherPrefsService.get(body.sessionId);
 
     const explicitMorning = body.morningReminderEnabled;

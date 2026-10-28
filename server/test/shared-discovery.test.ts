@@ -4,7 +4,8 @@
  * 锁住的是架构级行为，而不是某条规则的数值：
  *   - 一条总线：finding 落进 SourceStore（不新建存储），幂等、保期、可跨源检索
  *   - 一个共同键：subject 让三源（GoalRunner / 夜间内省 / 感知规则桥）互相读到
- *   - 一个单开口闸：composeBeforeOpen 合并他人未消费发现 + 实体联系，并在读走即消费
+ *   - 一个单开口闸：composeBeforeOpen 读他人未消费发现 + 实体联系，读走即预留，
+ *     但**不把旁注拼进正文**（用户看到的是出口自己那句话）
  *   - 重复不再各说一遍：窗口内二次开口降一档（needsUser 不降）
  */
 import assert from "node:assert/strict";
@@ -45,7 +46,7 @@ test("finding 落进同一条总线：幂等、未消费可读、读走即消费
   assert.equal(discovery.findingsFor(subject).length, 0, "读走后不再返回（同一发现不会被两个出口各说一遍）");
 });
 
-test("一个共同键：GoalRunner 的发现会被夜间内省的开口合并带走（不是各说一遍）", () => {
+test("一个共同键：GoalRunner 的发现被夜间内省读走预留，正文不拼旁注（也不各说一遍）", () => {
   const now = () => 1_700_000_000_000;
   const { store, discovery } = makeLayer(now);
   const subject = "g_搬家";
@@ -61,8 +62,8 @@ test("一个共同键：GoalRunner 的发现会被夜间内省的开口合并带
     importance: "medium",
     needsUser: true,
   });
-  assert.equal(composed.merged.length, 1);
-  assert.match(composed.body, /计划「搬家」卡在第 3 步/);
+  assert.equal(composed.merged.length, 1, "诊断视图仍记录读到的他人发现");
+  assert.equal(composed.body, "在办目标「搬家」还作数吗？", "正文原样输出，不拼「（另：…）」旁注");
   assert.equal(composed.pendingFingerprints.length, 1, "读到 1 条他人发现");
 
   // 没说出口（被频控/静默挡下）→ 发现不消费：留给下一个出口，信息不蒸发
@@ -94,7 +95,7 @@ test("重复降档：needsUser 的开口不降（用户是阻塞点，价值不�
   assert.equal(second.importance, "high", "needsUser 不参与降档");
 });
 
-test("实体联系由倒排自然产生：别的来源提到同一实体时被带进正文", () => {
+test("实体联系由倒排自然产生：别的来源提到同一实体时被联系上（仅诊断，不进正文）", () => {
   const now = () => 1_700_000_000_000;
   const { store, discovery } = makeLayer(now);
   // 邮件源的原始信号（不是 finding）：真实跨源资料
@@ -112,7 +113,7 @@ test("实体联系由倒排自然产生：别的来源提到同一实体时被�
     importance: "medium",
   });
   assert.equal(composed.linked.length >= 1, true, "命中「搬家」的邮件被联系上");
-  assert.match(composed.body, /邮件提到/);
+  assert.equal(composed.body, "计划「搬家」下一步是预约搬家公司", "实体联系只留诊断，不拼进用户正文");
 });
 
 test("时效：过期发现不再被读走（发现是「当下值得一提」，不是账本）", () => {
@@ -136,7 +137,7 @@ test("主体词推断（零 LLM）：给不出共同键时不硬绑", () => {
 // （所有触发源的共同底）。这条用例锁住：旁路提案的发现被登记，且能与其他源的发现
 // 交叉合并成同一条开口——不再需要给每个生产者各自打补丁。
 
-test("旁路生产者（直接 submitProposal）也走共享层：跨源发现被合并进同一条开口", () => {
+test("旁路生产者（直接 submitProposal）也走共享层：读走预留并结算，正文不拼旁注", () => {
   const now = () => 1_700_000_100_000;
   const dir = mkdtempSync(join(tmpdir(), "pa-discovery-pipe-"));
   try {
@@ -188,12 +189,8 @@ test("旁路生产者（直接 submitProposal）也走共享层：跨源发现�
 
     assert.equal(decision.verdict, "delivered");
     const payload = JSON.parse(delivered[0].json);
-    assert.match(
-      payload.payload.text,
-      /计划「搬家」卡在第 3 步/,
-      "旁路提案把源 1 的发现合并进了同一条开口（共享层收口生效）",
-    );
-    assert.equal(store.stats().findings.pending, 0, "说出口后未消费发现被消费");
+    assert.equal(payload.payload.text, "搬家这事有新动静", "投递正文保持原样（不拼「（另：…）」）");
+    assert.equal(store.stats().findings.pending, 0, "说出口后未消费发现被消费（不会在别处再各说一遍）");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

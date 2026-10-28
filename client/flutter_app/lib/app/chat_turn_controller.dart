@@ -1,12 +1,10 @@
-import "dart:async";
-
-/// 前台对话轮次控制器 —— 轮次 traceId 与回复 watchdog 的收口
-/// （原 `_PrivateAiAppState` 内联字段 `_pendingAgentUserMessageId` /
-/// `_agentReplyWatchdog`）。
+/// 前台对话轮次控制器 —— 轮次 traceId 的收口
+/// （原 `_PrivateAiAppState` 内联字段 `_pendingAgentUserMessageId`）。
 ///
-/// watchdog 语义：新前台轮次开始 [armTrace] 上弦；流式期间 [resetTimer]
-/// 续弦；超时（3 分钟无轮次事件）触发 [onTimeout]——写兜底消息等 UI
-/// 收尾由 main 注入，这里只管时序判定。纯状态机，fakeAsync 可单测。
+/// 2026-10-28 用户明确：**不设操作上限时间**——原「3 分钟无轮次事件报超时」
+/// 的 reply watchdog 已整体移除（Agent 长跑浏览器任务/工具链不再被客户端
+/// 掐断）。轮次收尾完全由确定性事件驱动：chat.assistant_done / error.event /
+/// 连接断开（main 直接调用收尾），这里只管 traceId 在途登记。纯状态机，可单测。
 class ChatTurnController {
   ChatTurnController._();
 
@@ -16,35 +14,16 @@ class ChatTurnController {
   /// 与岛/任务面的「后台任务」无关，仅描述聊天区当前前台轮次。
   String? activeTraceId;
 
-  static const Duration replyTimeout = Duration(minutes: 3);
-
-  Timer? _watchdog;
-
-  /// 超时回调（main 注入；watchdog 到点时 showSnackBar 缺省 true，
-  /// tool.result 提前收尾路径直接调用方传 false）。
-  void Function({bool showSnackBar})? onTimeout;
-
-  void _startTimer() {
-    _watchdog?.cancel();
-    _watchdog = Timer(replyTimeout, () => onTimeout?.call());
-  }
-
-  /// 新前台轮次开始：登记 traceId 并上弦。
+  /// 新前台轮次开始：登记 traceId（历史上弦 watchdog 已移除）。
   void armTrace(String userMessageId) {
     activeTraceId = userMessageId;
-    _startTimer();
   }
 
-  /// 轮次续弦（无在途轮次时为空操作，与原 watchdog 语义一致）。
-  void resetTimer() {
-    if (activeTraceId == null) return;
-    _startTimer();
-  }
+  /// 兼容空操作（原续弦接口；watchdog 移除后收尾由确定性事件驱动）。
+  void resetTimer() {}
 
-  void cancelTimer() {
-    _watchdog?.cancel();
-    _watchdog = null;
-  }
+  /// 兼容空操作（原解除上弦接口；保留调用点避免散弹式改动）。
+  void cancelTimer() {}
 
   bool get hasActiveTrace => activeTraceId != null;
 }

@@ -8,7 +8,6 @@ import {
   resolvePrimaryChatSessionId,
 } from "../agent/master-chat-session.js";
 import type {
-  AudioBufferRef,
   BrainDecision,
   BrainSignalInput,
   BrainSnapshot,
@@ -29,7 +28,6 @@ import type {
   ReActObservation,
   SafetyCheckResult,
   SensoryFrame,
-  SensoryListenResult,
   SensoryLookResult,
   SensorySpeakResult,
   SynapseEnvelope,
@@ -137,10 +135,6 @@ interface ProactionCortexLike {
 interface SensoryCortexLike {
   start?(): Promise<void>;
   stop?(): Promise<void>;
-  listen(
-    audio: AudioBufferRef,
-    opts?: { language?: string },
-  ): Promise<SensoryListenResult>;
   look(opts?: VisualInput): Promise<SensoryLookResult>;
   speak(
     text: string,
@@ -153,7 +147,7 @@ interface SensoryCortexLike {
     emotion?: EmotionVector;
     activity?: UserActivityState;
   }): SensoryFrame;
-  getStats(): { totalListen: number; totalLook: number; totalSpeak: number };
+  getStats(): { totalLook: number; totalSpeak: number };
 }
 
 // 记忆皮层外观接口
@@ -1056,7 +1050,7 @@ export class BrainCenter {
    *
    * 像真人一样一气呵成完成"感知 → 理解 → 决策 → 响应"：
    *  阶段 1 — 感知收集（并行，各脑区同时工作，不串行切片）：
-   *    listen(audio) / look(visual) / recall(query) / inferEmotion(text)
+   *    look(visual) / recall(query) / inferEmotion(text)
    *    / observe(actorId) / introspect(actorId) / recentDecisions(actorId)
    *  阶段 2 — 端到端认知 LLM（一次调用）：
    *    把所有脑区上下文一次性交给 CognitiveEngine，
@@ -1188,7 +1182,6 @@ export class BrainCenter {
     }
 
     const [
-      audioResult,
       visualResult,
       recallResult,
       emotion,
@@ -1196,9 +1189,6 @@ export class BrainCenter {
       bodySense,
       situation,
     ] = await Promise.all([
-      input.audio && this.sensory
-        ? this.sensory.listen(input.audio).catch(() => null)
-        : Promise.resolve(null),
       input.visual && this.sensory
         ? this.sensory.look(input.visual).catch(() => null)
         : Promise.resolve(null),
@@ -1245,13 +1235,12 @@ export class BrainCenter {
     ]);
 
     // === 阶段 1.5：组装多模态融合帧（SensoryFrame）===
-    // 将 audioResult/visualResult/emotion/userActivity 融合为统一感知帧，
+    // 将 visualResult/emotion/userActivity 融合为统一感知帧，
     // 让认知 LLM 一次拿到完整的多模态上下文。
     // Phase 4：若 MultimodalFusionCortex 已注册且启用，则用 fuse() 做结构化冲突检测；
     // BRAIN_MULTIMODAL_FUSION_ENABLED=0 时降级回 buildSensoryFrame（保持纯规则、无额外 token）。
     const fusionInputs = {
       actorId,
-      audioText: audioResult?.text,
       visualDescription: visualResult?.description,
       emotion: emotion ?? undefined,
       activity: userActivity ?? undefined,
@@ -1272,7 +1261,6 @@ export class BrainCenter {
       userActivity: userActivity ?? null,
       capabilities: capabilities ?? [],
       recentDecisions: recentDecisions ?? [],
-      audioText: audioResult?.text,
       visualDescription: visualResult?.description,
       sensoryFrame,
       recentConversationHistory: recentConversationHistory || undefined,
@@ -1680,35 +1668,6 @@ export class BrainCenter {
       };
     }
     return this.proaction.decide(signal);
-  }
-
-  /** 听：委托 SensoryCortex.listen 做语音识别；缺失时返回空结果 */
-  async listen(
-    audio: AudioBufferRef,
-    opts?: { language?: string },
-  ): Promise<SensoryListenResult> {
-    if (!this.sensory) {
-      console.log("[BrainCenter] listen: SensoryCortex 缺失");
-      return {
-        text: "",
-        confidence: 0,
-        isFinal: false,
-        processedAt: new Date().toISOString(),
-        error: "SensoryCortex 未注册",
-      };
-    }
-    try {
-      return await this.sensory.listen(audio, opts);
-    } catch (err) {
-      console.log(`[BrainCenter] listen 调用失败: ${err}`);
-      return {
-        text: "",
-        confidence: 0,
-        isFinal: false,
-        processedAt: new Date().toISOString(),
-        error: "SensoryCortex 未注册",
-      };
-    }
   }
 
   /** 看：委托 SensoryCortex.look 截屏并生成视觉描述；缺失时返回空结果 */

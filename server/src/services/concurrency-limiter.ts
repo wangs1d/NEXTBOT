@@ -233,7 +233,6 @@ function getToolLimiter(toolName: string): Semaphore | null {
     "image.generate": envPosInt("MAX_CONCURRENT_IMAGE_GEN", 2),
     "voice.speak": envPosInt("MAX_CONCURRENT_VOICE", 3),
     "voice.send_message": envPosInt("MAX_CONCURRENT_VOICE", 3),
-    "voice.transcribe": envPosInt("MAX_CONCURRENT_VOICE", 3),
   };
 
   const exactMax = limits[toolName];

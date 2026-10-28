@@ -21,6 +21,12 @@ export const ClientEventType = {
    * 后台任务——任务标记 cancelled 后不再向对话推送结果。
    */
   ChatTaskCancel: "chat.task_cancel",
+  /**
+   * 用户请求中断当前前台轮次（2026-10-28 内置浏览器面板「停止」按钮）。
+   * 服务端 abort 该 actor 进行中的 turn（中断 LLM 请求/工具链），与
+   * 「发送新消息打断」同源；与 chat.task_cancel（后台任务）语义分离。
+   */
+  ChatTurnStop: "chat.turn.stop",
   /** 客户端「Agent 处理中」UI 显隐；false 时服务端锁定本轮，不再合并后续消息 */
   ChatAgentProcessingUi: "chat.agent_processing_ui",
   /** 客户端请求清除聊天历史（服务端同步清除 ChatThreadStore + 持久化） */
@@ -301,14 +307,6 @@ export const ServerEventType = {
    * payload: { reminderId, text, channelPlan, escalateAfterSec, requireAck }
    */
   ReminderDeliver: "reminder.deliver",
-  /**
-   * 用户语音消息的 ASR 转写结果回执：
-   * 服务端在 `chat.user_message` 收到 `contentType=audio` 后跑 ASR，
-   * 把识别到的 transcript 推回给客户端，让本地 user 消息气泡直接显示转写文本
-   * （便于用户验证 ASR 准确率 + 留有可读副本）。
-   * payload.messageId 与客户端发出的 user 消息 messageId 一一对应。
-   */
-  ChatAudioTranscript: "chat.audio_transcript",
   /**
    * Agent 语音消息（微信式可重播）—— `voice.send_message` 工具触发。
    * 与 `agent.voice.speak` 区别：speak 是即时播报（一次性、后台播放、无 UI），

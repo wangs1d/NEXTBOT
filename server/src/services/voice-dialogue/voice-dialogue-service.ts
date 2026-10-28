@@ -1,12 +1,7 @@
 import type {
   VoiceDialogueProvider,
-  ASRProvider,
-  TTSProvider,
-  LLMProvider,
   AudioBuffer,
-  ASRResult,
   LLMMessage,
-  DialogueContext,
 } from "./types.js";
 
 export class VoiceDialogueService {
@@ -43,14 +38,6 @@ export class VoiceDialogueService {
     return Array.from(this.providers.keys());
   }
 
-  async transcribeAudio(
-    audio: AudioBuffer,
-    options?: { language?: string; providerName?: string },
-  ): Promise<ASRResult> {
-    const provider = this.getProvider(options?.providerName);
-    return provider.asr.transcribe(audio, options);
-  }
-
   async synthesizeSpeech(
     text: string,
     options?: {
@@ -76,59 +63,6 @@ export class VoiceDialogueService {
   ): Promise<string> {
     const provider = this.getProvider(options?.providerName);
     return provider.llm.chat(messages, options);
-  }
-
-  async processVoiceInput(
-    audio: AudioBuffer,
-    context: DialogueContext,
-    options?: {
-      language?: string;
-      systemPrompt?: string;
-      temperature?: number;
-      voiceId?: string;
-      speed?: number;
-      providerName?: string;
-    },
-  ): Promise<{
-    userInput: ASRResult;
-    llmResponse: string;
-    responseAudio: AudioBuffer;
-  }> {
-    const provider = this.getProvider(options?.providerName);
-
-    const userInput = await provider.asr.transcribe(audio, {
-      language: options?.language,
-    });
-
-    if (!userInput.text.trim()) {
-      throw new Error("No speech detected in audio input");
-    }
-
-    context.conversationHistory.push({
-      role: "user",
-      content: userInput.text,
-    });
-
-    const llmResponse = await provider.llm.chat(context.conversationHistory, {
-      temperature: options?.temperature,
-      systemPrompt: options?.systemPrompt,
-    });
-
-    context.conversationHistory.push({
-      role: "assistant",
-      content: llmResponse,
-    });
-
-    const responseAudio = await provider.tts.synthesize(llmResponse, {
-      voiceId: options?.voiceId,
-      speed: options?.speed,
-    });
-
-    return {
-      userInput,
-      llmResponse,
-      responseAudio,
-    };
   }
 
   async generateAndSpeak(

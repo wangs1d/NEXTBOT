@@ -70,7 +70,6 @@ const GLASSES_DEFAULT_CAPABILITIES: CapabilityDeclaration[] = [
   {
     id: "agent.listen",
     actions: ["start_listen", "stop_listen"],
-    streams: ["asr"],
   },
   // AR 具身：在镜片上呈现 Agent 形象
   {

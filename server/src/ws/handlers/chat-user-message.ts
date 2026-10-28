@@ -1,10 +1,7 @@
-import { readFile } from "node:fs/promises";
 import { appendFileSync } from "node:fs";
 
 import type { RuntimeFacade } from "../../runtime/runtime-facade.js";
 import type { AuditService } from "../../services/audit-service.js";
-import type { VoiceCapabilityService } from "../../services/voice-capability-service.js";
-import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import { resolveActorId } from "../../agent/actor-id.js";
 import { getTaskPlanStore, isHandoffDoneReply, taskPlanKey } from "../../agent/task-plan-store.js";
 import { buildPlanContinuationDecision } from "../../agent/task-router.js";
@@ -149,7 +146,7 @@ function withTurnHardTimeout<T>(
 }
 
 /** 中断指定 actor 当前进行中的 LLM 请求(如有)。 */
-function abortActiveTurn(actorId: string): void {
+export function abortActiveTurn(actorId: string): void {
   const prev = activeTurnAborters.get(actorId);
   if (prev) {
     try { prev.abort(); } catch { /* ignore */ }
@@ -321,10 +318,6 @@ function stripMediaEchoText(text: string): string {
 export type ChatUserMessageHandlerDeps = {
   runtime: RuntimeFacade;
   auditService: AuditService;
-  /** 语音能力中枢（可选；注入后支持 contentType=audio 的 ASR 链路） */
-  voiceCapabilityService?: VoiceCapabilityService;
-  /** 语音消息落盘服务（可选；用于解析 audio 消息的本地文件路径） */
-  voiceMessageService?: VoiceMessageService;
   /**
    * 电话代办协调器（可选）：等待确认期间用户文本明确「确认拨打」时的
    * 兜底确认入口（确认卡按钮渲染失败/旧客户端场景）。权威确认仍是
@@ -463,71 +456,10 @@ export async function handleChatUserMessageEvent(
     textTrim ||
     (visionFrames?.length ? "（用户发送了摄像头/配图画面，请根据图像描述内容并回答。）" : "");
 
-  // audio 消息：拉取本地 mp3 → ASR 识别 → 用 transcript 作为正文喂给 LLM
-  // 同时把 transcript 回推给客户端，让 user 消息气泡直接显示识别文本。
-  if (data.contentType === "audio" && data.mediaUrl && deps.voiceCapabilityService && deps.voiceMessageService) {
-    try {
-      const asrText = await transcribeAudioFromMediaUrl(
-        data.mediaUrl,
-        msgActor,
-        deps.voiceCapabilityService,
-        deps.voiceMessageService,
-      );
-      if (asrText) {
-        effectiveText = asrText;
-      } else {
-        effectiveText = "（用户发送了一段语音消息，但识别失败，请提示用户重试或用文字发送）";
-      }
-      // 回推 ASR 转写结果给客户端（无论成功失败，方便用户/客户端核对）
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.ChatAudioTranscript,
-          payload: {
-            sessionId: msgActor,
-            messageId: data.messageId,
-            mediaUrl: data.mediaUrl,
-            transcript: asrText ?? "",
-            language: "zh",
-            ok: Boolean(asrText),
-          },
-        }),
-      );
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      console.warn(`[chat.user_message] ASR 失败: ${msg}`);
-      effectiveText = `（用户发送了一段语音消息，识别失败：${msg}）`;
-      ctx.socket.send(
-        JSON.stringify({
-          type: ServerEventType.ChatAudioTranscript,
-          payload: {
-            sessionId: msgActor,
-            messageId: data.messageId,
-            mediaUrl: data.mediaUrl,
-            transcript: "",
-            language: "zh",
-            ok: false,
-            error: msg,
-          },
-        }),
-      );
-    }
-  } else if (data.contentType === "audio" && data.mediaUrl) {
-    // 未注入 ASR 服务：降级提示
-    effectiveText = "（用户发送了一段语音消息，但服务端未配置 ASR 能力，无法识别内容）";
-    ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ChatAudioTranscript,
-        payload: {
-          sessionId: msgActor,
-          messageId: data.messageId,
-          mediaUrl: data.mediaUrl,
-          transcript: "",
-          language: "zh",
-          ok: false,
-          error: "ASR 服务未注入",
-        },
-      }),
-    );
+  // audio 消息：语音转写能力已移除，只把「收到语音」这一事实交给 LLM。
+  if (data.contentType === "audio" && data.mediaUrl) {
+    effectiveText =
+      "（用户发送了一段语音消息，当前版本无法转写内容，请提示用户改用文字发送）";
   }
 
   // 电话代办文本兜底确认：会话等待确认期间，用户文本明确「确认拨打」时记录确认
@@ -1035,11 +967,11 @@ async function processBatchedMessage(
   );
 
   // 工具执行心跳：长工具（如 shopping.order.place 180s）执行期间定期发 chat.agent_status，
-  // 重置客户端 3 分钟 watchdog，防止用户感知"等待回复超时"。
+  // 让客户端状态行持续有真实进展（2026-10-28 起客户端 watchdog 已移除，操作不设
+  // 时间上限；心跳保留为状态反馈，不再是「防超时」手段）。
   const TOOL_HEARTBEAT_INTERVAL_MS = 30_000;
   // 心跳总时长封顶（自本轮 turnStartedAt 起算），env TOOL_HEARTBEAT_MAX_MS 可调。
-  // 默认 5 分钟：超时后客户端 watchdog（3 分钟）可在 8 分钟内正常触发；
-  // 本层硬超时（CHAT_TURN_TIMEOUT_MS 默认 540s）作为最终兜底。
+  // 本层硬超时（CHAT_TURN_TIMEOUT_MS 默认 540s）仍作为挂死轮次的最终兜底。
   const TOOL_HEARTBEAT_MAX_MS = (() => {
     const n = Number.parseInt(process.env.TOOL_HEARTBEAT_MAX_MS ?? "", 10);
     return Number.isFinite(n) && n > 0 ? n : 300_000;
@@ -2241,44 +2173,5 @@ async function processBatchedMessage(
     const turnDuration = Date.now() - turnStartedAt;
     recordTurnOutcome(turnSucceeded, turnDuration, turnError);
   }
-}
-
-/**
- * 从 mediaUrl 解析本地文件路径，读取 mp3 字节并调 ASR 识别。
- * mediaUrl 形如 `/agent/voice/messages/{actorId}/{msgId}.mp3`。
- * 失败时返回空字符串，由调用方降级处理。
- */
-async function transcribeAudioFromMediaUrl(
-  mediaUrl: string,
-  actorId: string,
-  voiceCapability: VoiceCapabilityService,
-  voiceMessageService: VoiceMessageService,
-): Promise<string> {
-  // 从 mediaUrl 提取 actorId 与 fileName
-  const match = mediaUrl.match(/^\/agent\/voice\/messages\/([^/]+)\/([^/]+)$/);
-  if (!match) {
-    console.warn(`[ASR] 无法解析 mediaUrl: ${mediaUrl}`);
-    return "";
-  }
-  const [, urlActorId, fileName] = match;
-  const fullPath = voiceMessageService.resolveFilePath(urlActorId, fileName);
-  if (!fullPath) {
-    console.warn(`[ASR] 文件不存在: ${mediaUrl}`);
-    return "";
-  }
-
-  const buffer = await readFile(fullPath);
-  const result = await voiceCapability.transcribe({
-    audio: { data: Buffer.from(buffer), format: "mp3" },
-    language: "zh",
-  });
-
-  if (!result.ok || !result.text) {
-    console.warn(`[ASR] 识别失败: ${result.error ?? "empty"}`);
-    return "";
-  }
-
-  console.log(`[ASR] 识别成功（actor=${actorId}, ${buffer.length} bytes）: ${result.text.slice(0, 80)}…`);
-  return result.text.trim();
 }
 

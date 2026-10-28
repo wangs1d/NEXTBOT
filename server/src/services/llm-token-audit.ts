@@ -42,6 +42,10 @@ export type LlmAuditStage =
   | "proactive_act_loop"
   /** 主动话术生成（内容型场景：行程变化/消息来临 → LLM 生成主动回复） */
   | "proactive_phrase"
+  /** 情报判断（面板目录行 → now/later/never，不写话） */
+  | "intel_judge"
+  /** 情报成稿（判定要说的条目 → 一两句对用户说的话） */
+  | "intel_compose"
   /** 自我进化 / 自动能力迭代 */
   | "self_evolution"
   /** 代码修复 */

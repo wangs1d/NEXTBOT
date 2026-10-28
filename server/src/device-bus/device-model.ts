@@ -32,7 +32,7 @@ export type DeviceKind =
 export type CapabilityId =
   // 感官输入
   | "camera" // 拍照 / 视频流
-  | "microphone" // 录音 / ASR
+  | "microphone" // 录音
   | "screen_capture" // 屏幕截图 / 屏幕流
   | "input" // 键鼠 / 触控输入
   // 输出

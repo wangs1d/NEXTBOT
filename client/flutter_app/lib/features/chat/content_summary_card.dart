@@ -38,6 +38,10 @@ class ContentSummaryMessageBody extends StatelessWidget {
     final bool briefDuplicatesCard =
         cardTitle.isNotEmpty && brief.contains(cardTitle);
 
+    // 卡外速览移除（2026-10-28，向豆包折叠策略看齐）：briefPoints 与卡内
+    // 文档预览同源提取，渲染出来必然是「卡外一遍、卡内再一遍」的复读。
+    // 豆包的摘要卡没有这层——卡片本身就是文档（标题 + 导读 + 结构预览 +
+    // 查看全文），气泡侧只留 briefText 前导说明与 extraText 尾注。
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
@@ -47,12 +51,6 @@ class ContentSummaryMessageBody extends StatelessWidget {
             content: brief,
             style: bodyStyle,
           ),
-          const SizedBox(height: AppTypography.space3),
-        ],
-        // 简洁要点（服务端 briefPoints）：折叠卡外的概要正文，
-        // 详细内容点卡片在右侧面板/弹窗查看
-        if (summary.briefPoints.isNotEmpty) ...<Widget>[
-          _BriefPointsList(points: summary.briefPoints),
           const SizedBox(height: AppTypography.space3),
         ],
         if (structuredItems.isNotEmpty) ...<Widget>[
@@ -73,50 +71,8 @@ class ContentSummaryMessageBody extends StatelessWidget {
   }
 }
 
-/// 简洁要点列表：折叠卡上方的概要正文（icon + 单行内联 markdown）。
-class _BriefPointsList extends StatelessWidget {
-  const _BriefPointsList({required this.points});
-
-  final List<ContentSummaryBriefPoint> points;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final TextStyle style = Theme.of(context).textTheme.bodyMedium!.copyWith(
-          color: cs.onSurface,
-          height: AppTypography.bodyLineHeight,
-        );
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        for (final ContentSummaryBriefPoint point in points)
-          Padding(
-            padding: const EdgeInsets.only(bottom: AppTypography.space1),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: <Widget>[
-                SizedBox(
-                  width: 20,
-                  child: Text(
-                    point.icon,
-                    style: const TextStyle(fontSize: 13),
-                    textAlign: TextAlign.start,
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: buildInlineMarkdownText(point.text, style, cs: cs),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-}
-
+/// 折叠卡：卡内正文的「文档缩略图」——标题栏 + 导语 + 前几个板块，
+/// 底部渐隐表示后面还有内容，点击进右侧面板看全文。
 class ContentSummaryDetailCard extends StatelessWidget {
   const ContentSummaryDetailCard({
     super.key,
@@ -127,14 +83,14 @@ class ContentSummaryDetailCard extends StatelessWidget {
   final ContentSummaryDataV2 summary;
   final VoidCallback? onTap;
 
+  static const double _previewHeight = 160;
+
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
-    final String displayLabel = ContentSummaryParser.taskSubject(summary);
-    final String subtitle = summary.sections != null &&
-            summary.sections!.length > 1
-        ? "$displayLabel · ${summary.sections!.length}个板块"
-        : displayLabel;
+    final String title =
+        summary.title.trim().isEmpty ? summary.cardLabel : summary.title.trim();
+    final List<_PreviewLine> lines = _previewLines(summary.detailContent ?? "");
 
     return Material(
       color: Colors.transparent,
@@ -143,65 +99,282 @@ class ContentSummaryDetailCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         child: Ink(
           width: double.infinity,
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
           decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest.withValues(alpha: 0.72),
+            color: cs.surfaceContainerLow.withValues(alpha: 0.65),
             borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: cs.outline.withValues(alpha: 0.28),
-            ),
+            border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
           ),
-          child: Row(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: <Widget>[
-              Container(
-                width: 34,
-                height: 34,
-                alignment: Alignment.center,
-                decoration: BoxDecoration(
-                  color: cs.primaryContainer.withValues(alpha: 0.45),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  summary.cardIcon,
-                  style: const TextStyle(fontSize: 16),
-                ),
-              ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 9, 12, 9),
+                child: Row(
                   children: <Widget>[
-                    Text(
-                      summary.title,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style:
-                          Theme.of(context).textTheme.bodyMedium?.copyWith(
-                                fontWeight: FontWeight.w600,
-                                color: cs.onSurface,
-                              ),
+                    Container(
+                      width: 22,
+                      height: 22,
+                      decoration: BoxDecoration(
+                        color: cs.primary.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Icon(
+                        _cardIconFor(summary.category),
+                        size: 13,
+                        color: cs.primary.withValues(alpha: 0.95),
+                      ),
                     ),
-                    const SizedBox(height: 2),
-                    Text(
-                      subtitle,
-                      style:
-                          Theme.of(context).textTheme.labelSmall?.copyWith(
-                                color: cs.onSurfaceVariant,
-                              ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          height: 1.2,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.2,
+                          color: cs.onSurface,
+                        ),
+                      ),
                     ),
                   ],
                 ),
               ),
-              Icon(
-                Icons.chevron_right,
-                size: 20,
-                color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+              _divider(cs),
+              if (lines.isNotEmpty) ...<Widget>[
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(10, 10, 10, 10),
+                  child: Container(
+                    height: _previewHeight,
+                    width: double.infinity,
+                    decoration: BoxDecoration(
+                      color: cs.surfaceContainerHighest.withValues(alpha: 0.3),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(
+                        color: cs.outline.withValues(alpha: 0.12),
+                      ),
+                    ),
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: ShaderMask(
+                        blendMode: BlendMode.dstIn,
+                        shaderCallback: (Rect bounds) => const LinearGradient(
+                          begin: Alignment.topCenter,
+                          end: Alignment.bottomCenter,
+                          colors: <Color>[
+                            Colors.white,
+                            Colors.white,
+                            Colors.transparent,
+                          ],
+                          stops: <double>[0, 0.8, 1],
+                        ).createShader(bounds),
+                        child: SingleChildScrollView(
+                          physics: const NeverScrollableScrollPhysics(),
+                          child: Padding(
+                            padding: const EdgeInsets.fromLTRB(11, 9, 11, 0),
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              mainAxisSize: MainAxisSize.min,
+                              children: <Widget>[
+                                for (final _PreviewLine line in lines)
+                                  _PreviewLineView(line: line, cs: cs),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+                _divider(cs),
+              ],
+              Padding(
+                padding: const EdgeInsets.fromLTRB(12, 7, 10, 7),
+                child: Row(
+                  children: <Widget>[
+                    Text(
+                      "查看全文",
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                        color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+                      ),
+                    ),
+                    const Spacer(),
+                    Icon(
+                      Icons.chevron_right,
+                      size: 16,
+                      color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                    ),
+                  ],
+                ),
               ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  static Widget _divider(ColorScheme cs) {
+    return Container(
+      height: 1,
+      color: cs.outline.withValues(alpha: 0.16),
+    );
+  }
+}
+
+enum _PreviewKind { heading, bullet, paragraph }
+
+class _PreviewLine {
+  const _PreviewLine(this.kind, this.text);
+
+  final _PreviewKind kind;
+  final String text;
+}
+
+/// 正文拆成卡片预览行：板块标题 / 条目 / 普通段落，最多取 10 行
+List<_PreviewLine> _previewLines(String content) {
+  final List<_PreviewLine> out = <_PreviewLine>[];
+  for (final String raw in content.split("\n")) {
+    final String line = raw.trim();
+    if (line.isEmpty || RegExp(r"^-{3,}$").hasMatch(line)) continue;
+    final RegExpMatch? heading = RegExp(r"^#{1,4}\s+(.+)$").firstMatch(line);
+    if (heading != null) {
+      out.add(_PreviewLine(_PreviewKind.heading, heading.group(1)!.trim()));
+    } else if (RegExp(r"^[-*•]\s+").hasMatch(line)) {
+      out.add(
+        _PreviewLine(
+          _PreviewKind.bullet,
+          line.replaceFirst(RegExp(r"^[-*•]\s+"), ""),
+        ),
+      );
+    } else if (RegExp(r"^\d+[.、]\s*").hasMatch(line)) {
+      out.add(
+        _PreviewLine(
+          _PreviewKind.bullet,
+          line.replaceFirst(RegExp(r"^\d+[.、]\s*"), ""),
+        ),
+      );
+    } else if (!line.startsWith("|") &&
+        !line.startsWith(">") &&
+        !line.startsWith("```")) {
+      out.add(_PreviewLine(_PreviewKind.paragraph, line));
+    }
+    if (out.length >= 16) break;
+  }
+  return out;
+}
+
+class _PreviewLineView extends StatelessWidget {
+  const _PreviewLineView({required this.line, required this.cs});
+
+  final _PreviewLine line;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    switch (line.kind) {
+      case _PreviewKind.heading:
+        return Padding(
+          padding: const EdgeInsets.only(top: 5, bottom: 4),
+          child: Text(
+            line.text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12.5,
+              height: 1.3,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.2,
+              color: cs.onSurface,
+            ),
+          ),
+        );
+      case _PreviewKind.bullet:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 2),
+          child: _bulletText(),
+        );
+      case _PreviewKind.paragraph:
+        return Padding(
+          padding: const EdgeInsets.only(bottom: 3),
+          child: Text(
+            _stripInlineMarkers(line.text),
+            maxLines: 3,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 11.5,
+              height: 1.45,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+            ),
+          ),
+        );
+    }
+  }
+
+  /// 条目：`**要点**：说明` 的要点加粗，其余弱化；单行截断以露出更多板块
+  Widget _bulletText() {
+    final String text = _stripLinks(line.text);
+    final RegExpMatch? lead =
+        RegExp(r"^\*\*(.+?)\*\*\s*[：:]\s*(.*)$").firstMatch(text);
+    final TextStyle base = TextStyle(
+      fontSize: 11.5,
+      height: 1.45,
+      color: cs.onSurface.withValues(alpha: 0.78),
+    );
+    if (lead == null) {
+      return Text(
+        _stripInlineMarkers(text),
+        maxLines: 4,
+        overflow: TextOverflow.ellipsis,
+        style: base,
+      );
+    }
+    return Text.rich(
+      TextSpan(
+        children: <TextSpan>[
+          TextSpan(
+            text: "${lead.group(1)}：",
+            style: base.copyWith(
+              fontWeight: FontWeight.w600,
+              color: cs.onSurface,
+            ),
+          ),
+          TextSpan(text: _stripInlineMarkers(lead.group(2) ?? "")),
+        ],
+      ),
+      maxLines: 4,
+      overflow: TextOverflow.ellipsis,
+      style: base,
+    );
+  }
+
+  static String _stripLinks(String text) =>
+      text.replaceAllMapped(RegExp(r"\[(.+?)\]\((.+?)\)"), (m) => m.group(1)!);
+
+  static String _stripInlineMarkers(String text) =>
+      _stripLinks(text).replaceAll(RegExp(r"\*\*|__|`"), "");
+}
+
+IconData _cardIconFor(String category) {
+  switch (category) {
+    case "news":
+      return Icons.newspaper_outlined;
+    case "code":
+      return Icons.code;
+    case "data":
+    case "table":
+      return Icons.table_chart_outlined;
+    case "list":
+      return Icons.checklist;
+    case "search_result":
+      return Icons.travel_explore_outlined;
+    default:
+      return Icons.article_outlined;
   }
 }
 
@@ -219,7 +392,8 @@ class _BriefContentPreview extends StatelessWidget {
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
     final List<String> lines = content.split("\n");
-    final bool hasBulletPoints = lines.any((line) => line.trim().startsWith("•"));
+    final bool hasBulletPoints =
+        lines.any((line) => line.trim().startsWith("•"));
 
     if (!hasBulletPoints) {
       // 纯文本模式：直接显示，轻微底色突出摘要性质（与引用块同源面板组件）

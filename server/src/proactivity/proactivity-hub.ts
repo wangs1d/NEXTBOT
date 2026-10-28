@@ -15,7 +15,7 @@ import type {
   ProactiveIntent,
 } from "./proactivity-types.js";
 import type { ArbitrationDecision, ProactiveProposal } from "./pipeline-types.js";
-import { renderProactiveText } from "./voice-templates.js";
+import type { SpeechHub } from "./speech-express.js";
 import { readJson, writeJson } from "./persist-file.js";
 import { join } from "node:path";
 import {
@@ -69,6 +69,12 @@ export interface ProactivityHubDeps {
     evidence: string[];
     metadata?: Record<string, unknown>;
   }) => void;
+  /**
+   * 统一话术层（SpeechHub，装配层注入）：直达车道的话术出口。light 档基于
+   * 信号 title/summary/facts 组织语言（不否决、单句必达）。未注入时（测试/
+   * 降级）直达车道回退 LifeSignal 旧闭环。
+   */
+  speechHub?: SpeechHub;
   /** 执行工具（act 模式，ToolRegistry.execute 的薄包装） */
   executeTool: (
     tool: string,
@@ -150,7 +156,7 @@ export interface ProactivityHubDeps {
   /**
    * 共享发现层（2026-10-19 二期）：顺嘴搭车是**第二条开口出口**（不经管道投递，而是
    * 织进下一轮对话）。注入后取货点也走同一道 composeBeforeOpen——把别的层就同一主题的
-   * 发现合并进旁注，并"取走即说出"地结算预留（消费）。未注入 = 退化为原文（既有测试不变）。
+   * 发现读走预留（不拼旁注），并"取走即说出"地结算预留（消费）。未注入 = 退化为原文（既有测试不变）。
    */
   discovery?: DiscoveryLayer;
   /**
@@ -572,8 +578,12 @@ export class ProactivityHub {
         // 顺嘴搭车（2026-10-01）：low 级 speak 先尝试挂起等下一轮对话织入；
         // 队列拒绝（同 kind 挂起中/间隔不足）或通道关闭时走原即时投递。
         if (this.tryDeferToTurnAside(intent)) break;
+        // asideOnly（2026-10-27 修订）：内部事件通报优先搭车（素材织入对话由
+        // agent 转述），拒绝/通道关闭时不再静默作废——私人管家语义，有重要的
+        // 事就开口；话术已统一走 LLM（SpeechHub light），内部素材不会被原样
+        // 吐给用户。
         if (this.isDirectLaneEnabled()) {
-          this.submitDirectSpeak(intent, admission.evidence);
+          await this.submitDirectSpeak(intent, admission.evidence);
         } else {
           this.emitSpeakSignal(intent, admission.evidence);
         }
@@ -594,27 +604,70 @@ export class ProactivityHub {
   }
 
   /**
-   * 直达车道提交：intent → 零 LLM 模板渲染 directText → 统一管道提案。
-   * 频控在管道仲裁层再查一次（socialCanTrigger），计数在真正 delivered 时发生。
+   * 直达车道提交：intent → SpeechHub light 话术（LLM 基于信号素材组织语言）
+   * → 统一管道提案。频控在管道仲裁层再查一次（socialCanTrigger），计数在真正
+   * delivered 时发生。
+   *
+   * 2026-10-27：零 LLM 模板层删除，话术统一走 SpeechHub light——把 title/
+   * summary/templateData 作为素材交给 LLM，让 agent 自己开口。LLM 不可用/
+   * 输出不合格时**沉默留痕**（绝不把系统态原句吐给用户）。不传 importance：
+   * 直达车道已过 admission+频控双闸，润色不再设重要度门槛
+   * （PROACTIVITY_PHRASE_MIN_IMPORTANCE 只约束其他调用方）。
    */
-  private submitDirectSpeak(intent: ProactiveIntent, admissionEvidence?: string): void {
+  private async submitDirectSpeak(intent: ProactiveIntent, admissionEvidence?: string): Promise<void> {
     if (!this.directLane) {
       // 车道未接线（管道未创建/测试环境）：回退旧路径
       this.emitSpeakSignal(intent, admissionEvidence);
       return;
     }
-    const text = renderProactiveText(intent.kind, {
-      dedupKey: `${intent.kind}:${intent.title}`.slice(0, 80),
-      title: intent.title,
-      ...(intent.templateData ?? {}),
-    });
+    const speechHub = this.deps.speechHub;
+    if (!speechHub) {
+      // 话术层未注入（测试/降级）：回退 LifeSignal 旧闭环（LLM decide 路径）
+      this.emitSpeakSignal(intent, admissionEvidence);
+      return;
+    }
+    let text = "";
+    try {
+      text = await speechHub.speak({
+        kind: intent.kind,
+        sessionId: intent.actorId,
+        title: intent.title,
+        summary: intent.summary,
+        ...(intent.templateData && Object.keys(intent.templateData).length > 0
+          ? { facts: intent.templateData }
+          : {}),
+        tier: "light",
+        // fallback 空串：LLM 失败/输出不合格 → 空串 → 沉默（下方判定），
+        // 宁可不开口也不吐系统态文案
+        fallback: "",
+      });
+    } catch (err) {
+      console.log(`[ProactivityHub] 话术层异常（沉默）kind=${intent.kind}: ${err}`);
+      text = "";
+    }
+    if (!text.trim()) {
+      this.silenceLog.record({
+        at: Date.now(),
+        actorId: intent.actorId,
+        kind: intent.kind,
+        title: intent.title.slice(0, 60),
+        source: intent.source,
+        scope: "speech_unavailable",
+        netUtility: 0,
+        riskScore: 0,
+        valueScore: 0,
+        reason: "llm_phrase_empty",
+      });
+      console.log(`[ProactivityHub] 话术为空，沉默留痕 kind=${intent.kind} actor=${intent.actorId}`);
+      return;
+    }
     const proposal: ProactiveProposal = {
       proposalId: `hub_${Date.now().toString(36)}_${(this.hubSeq++).toString(36)}`,
       actorId: intent.actorId,
       kind: intent.kind,
       tier: "social",
       importance: intent.importance,
-      // 归一化去重键：同一件事换说法（LLM 文案/模板差异）不再绕过 24h 去重窗口
+      // 归一化去重键：同一件事换说法（LLM 文案差异）不再绕过 24h 去重窗口
       dedupKey: `hub:${semanticDedupKey(intent.kind, intent.summary)}`,
       title: intent.title,
       summary: intent.summary,
@@ -679,13 +732,16 @@ export class ProactivityHub {
 
   /**
    * 行为反馈型 speak（act 执行结果/确认请求）的统一出口：
-   * 直达车道开启时走模板直投管道（带 deliveryId/outcome 闭环），否则回退
-   * LifeSignal 路径。与 route() 的 speak/advise 分发逻辑保持一致。
+   * 直达车道开启时走 SpeechHub light 话术 → 管道（带 deliveryId/outcome 闭环），
+   * 否则回退 LifeSignal 路径。与 route() 的 speak/advise 分发逻辑保持一致。
    * （不走顺嘴搭车：行为反馈有时效，挂起隔轮织入会丢语义。）
    */
   private speakFeedback(intent: ProactiveIntent): void {
     if (this.isDirectLaneEnabled()) {
-      this.submitDirectSpeak(intent);
+      // fire-and-forget：话术层是异步 LLM 调用，调用方（act 执行链）不等待
+      void this.submitDirectSpeak(intent).catch((err) => {
+        console.log(`[ProactivityHub] 反馈话术失败（忽略）kind=${intent.kind}: ${err}`);
+      });
     } else {
       this.emitSpeakSignal(intent);
     }
@@ -703,8 +759,9 @@ export class ProactivityHub {
       `[ProactivityHub] 顺嘴织入本轮 kind=${item.kind} actor=${actorId}`,
     );
     // 第二条开口出口接入共享发现层（2026-10-19 二期）：取货即"开口"——
-    // 走**同一个** openMouth 闸：① 自己的发现登记进总线；② 把同主题的他人发现
-    // 合并进旁注；③ 取走即说出（进对话 prompt）→ 结算预留为消费，读走的发现不再被重说。
+    // 走**同一个** openMouth 闸：① 自己的发现登记进总线；② 同主题的他人发现被读走
+    // 预留（不拼旁注，用户看到的是这条顺嘴内容本身）；③ 取走即说出（进对话 prompt）
+    // → 结算预留为消费，读走的发现不再被重说。
     const discovery = this.discovery ?? this.deps.discovery;
     if (!discovery) return formatTurnAsidePrompt(item);
     const subject = (item.subject ?? primarySubjectOf(`${item.title} ${item.hint}`) ?? "").trim();

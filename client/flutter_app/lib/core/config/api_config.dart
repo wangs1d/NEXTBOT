@@ -26,7 +26,35 @@ class ApiConfig {
   /// 捆绑形态（本地 runtime 监听 127.0.0.1:3000）不受影响。
   static bool? _windowsReleaseFallbackBlocked;
 
+  /// 运行通道（runtime 收回开关）："byok" = 本机 runtime（默认）；
+  /// "platform" = 统一 API 服务。由 main() 在 runApp 前从本地安装身份文件
+  /// 同步读入（`applyRuntimeChannel`），值是上一次启动从服务端清单拿到的 channel。
+  static String _runtimeChannel = "byok";
+
+  /// 当前生效的运行通道（埋点上报用）。
+  static String get runtimeChannel => _runtimeChannel;
+
+  static bool get usesPlatformChannel =>
+      _runtimeChannel == "platform" && _controlPlaneFromEnv.isNotEmpty;
+
+  /// 应用启动期读到的 channel；未烤入 CONTROL_PLANE_URL 时忽略 platform
+  /// （没有可切去的服务器，保持本机 runtime 是唯一正确行为）。
+  static void applyRuntimeChannel(String? channel) {
+    final String c = (channel ?? "").trim();
+    if (c == "byok") {
+      _runtimeChannel = "byok";
+      return;
+    }
+    if (c == "platform" && _controlPlaneFromEnv.isNotEmpty) {
+      _runtimeChannel = "platform";
+    }
+  }
+
   static String get httpBase {
+    // runtime 收回（channel=platform）：本机后端不再拉起，请求一律走烤入的控制面。
+    if (_runtimeChannel == "platform" && _controlPlaneFromEnv.isNotEmpty) {
+      return _controlPlaneFromEnv;
+    }
     if (_httpBaseFromEnv.isNotEmpty) {
       return _httpBaseFromEnv;
     }

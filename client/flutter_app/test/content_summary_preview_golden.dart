@@ -66,12 +66,11 @@ Future<void> _loadFonts() async {
 
 /// 与服务端产物同构的摘要 payload + 标记文本（科技新闻场景）
 String _buildServerOutput() {
-  const String title = "王哥，我扒了一圈今天（9月16日）的公开报道，给你按块捋一下——";
   final Map<String, dynamic> payload = <String, dynamic>{
     "type": "content_summary_v2",
     "id": "sum-preview-news",
     "category": "news",
-    "title": title,
+    "title": "科技新闻",
     "cardIcon": "☰",
     "cardLabel": "科技新闻",
     "subjectLabel": "科技新闻",
@@ -286,7 +285,7 @@ void main() {
       tester,
       () => _bubbleHarness(parsed),
       // physicalSize = 逻辑尺寸 × 2（devicePixelRatio 2.0，导出 2x 清晰图）
-      const Size(760 * 2, 480 * 2),
+      const Size(760 * 2, 560 * 2),
       "content_summary_bubble_dark.png",
       find.byType(ContentSummaryMessageBody),
     );

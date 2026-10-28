@@ -330,3 +330,73 @@ Directory resolveUpdateDirectory() {
   return Directory("$root${Platform.pathSeparator}Nextbot"
       "${Platform.pathSeparator}update");
 }
+
+/// ═══ 共享下载流（单飞，2026-10-28）═══
+///
+/// 主流式更新语义（VS Code / Chrome）：发现新版本即后台静默预下载，
+/// 任何 UI 入口（升级弹窗 / 检查更新浮卡 / 左下角胶囊）展示与触发的都是
+/// **同一条** ClientUpdateFlowController——进度互通、按钮态一致，并从根上
+/// 杜绝多入口各自 new 控制器并发写同一个 .part 文件的冲突。
+ClientUpdateFlowController? _sharedFlow;
+String? _sharedFlowKey;
+
+/// 测试注入点：非 null 时共享流用它创建 http.Client（否则走真实网络栈）
+@visibleForTesting
+http.Client Function()? debugUpdateHttpClientFactory;
+
+/// 测试注入点：非 null 时共享流的安装包落盘用该目录（否则真实 update 目录）
+@visibleForTesting
+Directory? debugUpdateStorageDirOverride;
+
+/// 取（或建）当前版本对应的共享下载流。同版本重复调用幂等返回同一实例；
+/// 版本/地址变了才换新流（旧流取消收尾）。
+ClientUpdateFlowController sharedUpdateFlow({
+  required String downloadUrl,
+  required String version,
+}) {
+  final String key = "$version\u241F$downloadUrl";
+  final ClientUpdateFlowController? existing = _sharedFlow;
+  if (existing != null && _sharedFlowKey == key) return existing;
+  if (existing != null) _teardownFlow(existing);
+  _sharedFlow = ClientUpdateFlowController(
+    downloadUrl: downloadUrl,
+    version: version,
+    httpClient: debugUpdateHttpClientFactory?.call(),
+    storageDir: debugUpdateStorageDirOverride,
+  );
+  _sharedFlowKey = key;
+  return _sharedFlow!;
+}
+
+/// 当前共享下载流（null = 尚未创建）；UI 侧只读状态/挂监听用
+ClientUpdateFlowController? get activeSharedUpdateFlow => _sharedFlow;
+
+/// 后台预下载：共享流处于待启动/失败态才 begin（下载中/启动中不重复触发）
+void ensureSharedUpdateDownloading() {
+  final ClientUpdateFlowController? flow = _sharedFlow;
+  if (flow == null) return;
+  if (flow.phase == ClientUpdatePhase.idle ||
+      flow.phase == ClientUpdatePhase.failed) {
+    unawaited(flow.begin());
+  }
+}
+
+/// 终止并丢弃共享下载流（已最新撤下提示时调用）
+void disposeSharedUpdateFlow() {
+  final ClientUpdateFlowController? flow = _sharedFlow;
+  if (flow == null) return;
+  _sharedFlow = null;
+  _sharedFlowKey = null;
+  _teardownFlow(flow);
+}
+
+/// 下载流收尾：下载中先 cancel（异步停流 + 清 .part，尾部还有一次
+/// notifyListeners）完成后再 dispose——同步连调两个会撞「dispose 后使用」
+/// 断言；其余相位可直接 dispose。
+void _teardownFlow(ClientUpdateFlowController flow) {
+  if (flow.phase == ClientUpdatePhase.downloading) {
+    unawaited(flow.cancel().whenComplete(flow.dispose));
+  } else {
+    flow.dispose();
+  }
+}

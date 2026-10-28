@@ -180,39 +180,21 @@ void main() {
       t.activeTraceId = null;
     });
 
-    testWidgets("watchdog：3 分钟无事件触发超时回调（默认 showSnackBar）",
-        (WidgetTester tester) async {
-      int timeouts = 0;
-      t.onTimeout = ({bool showSnackBar = true}) => timeouts++;
-      t.armTrace("user-1");
-      await tester.pump(ChatTurnController.replyTimeout);
-      expect(timeouts, 1);
-    });
-
-    testWidgets("watchdog：流式续弦推迟超时；disarm 后不再触发",
-        (WidgetTester tester) async {
-      int timeouts = 0;
-      t.onTimeout = ({bool showSnackBar = true}) => timeouts++;
-      t.armTrace("user-1");
-      await tester.pump(ChatTurnController.replyTimeout - const Duration(seconds: 1));
-      t.resetTimer(); // 续弦
-      await tester.pump(const Duration(seconds: 1));
-      expect(timeouts, 0); // 原窗口已过但被续弦
-      await tester.pump(ChatTurnController.replyTimeout);
-      expect(timeouts, 1);
-
-      t.armTrace("user-2");
-      t.cancelTimer();
-      await tester.pump(ChatTurnController.replyTimeout);
-      expect(timeouts, 1); // 不再增加
-    });
-
-    test("watchdog：无在途轮次时 resetTimer 为空操作", () {
-      int timeouts = 0;
-      t.onTimeout = ({bool showSnackBar = true}) => timeouts++;
-      t.resetTimer();
+    test("armTrace 登记在途 traceId；hasActiveTrace 跟随", () {
       expect(t.hasActiveTrace, isFalse);
-      expect(timeouts, 0);
+      t.armTrace("user-1");
+      expect(t.activeTraceId, "user-1");
+      expect(t.hasActiveTrace, isTrue);
+    });
+
+    test("2026-10-28 起不设操作时间上限：watchdog 已移除，timer 接口为兼容空操作", () {
+      int called = 0;
+      t.armTrace("user-1");
+      // 原 3 分钟 reply watchdog 已删；resetTimer/cancelTimer 空操作不再触发任何回调
+      t.resetTimer();
+      t.cancelTimer();
+      expect(t.activeTraceId, "user-1");
+      expect(called, 0);
     });
   });
 

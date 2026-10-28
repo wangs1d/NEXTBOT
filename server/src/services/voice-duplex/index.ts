@@ -10,7 +10,6 @@ export type {
 } from "./protocol.js";
 export { parseClientMessage } from "./protocol.js";
 export { EndpointDetector, pcmToWav, type EndpointEvent } from "./endpoint-detector.js";
-export { DuplexVoiceSession, type DuplexSessionDeps } from "./duplex-session.js";
 export {
   VoiceDuplexService,
   type VoiceDuplexServiceDeps,

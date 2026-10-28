@@ -65,9 +65,16 @@ export type ProactiveIntent = {
   /**
    * 共享发现层的共同键（2026-10-19）：这件事"属于哪个主题"。
    * 目标相关开口传 goalId；其余缺省由正文推主体词。带上它，开口前的
-   * composeBeforeOpen 才能把别的层就同一主题的发现合并进这一句（而不是各说各的）。
+   * composeBeforeOpen 才能把别的层就同一主题的发现读走预留（不再各说一遍）。
    */
   subject?: string;
+  /**
+   * 内部事件通报（2026-10-27）：title/summary 是写给 agent 看的素材，不是
+   * 用户可见文案。只能经顺嘴搭车织入下一轮对话（由 agent 自行转述）；搭车
+   * 通道拒绝/关闭时静默作废（沉默日志留痕），绝不回退直投——直达车道对无
+   * 模板 kind 会把系统态 title 原样吐给用户（实证：定时任务错过通知整句弹出）。
+   */
+  asideOnly?: boolean;
   /** 是否在请用户拍板（是则不参与跨源重复降档） */
   needsUser?: boolean;
   source:

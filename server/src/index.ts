@@ -24,8 +24,8 @@ import {
 } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
+import { logTravelSourceHealth } from "./skills/travel-planning/source-health-check.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
-import { startFunasrServer } from "./services/funasr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import {
   isWechatClawBridgeEnabled,
@@ -104,12 +104,6 @@ if (externalChatProbe?.isEnabled()) {
     "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY / MINIMAX_API_KEY / DEEPSEEK_API_KEY 或 OPENAI_API_KEY 后重启服务",
   );
 }
-// ─── FunASR 自启动：必须在 createAppServices 之前，让 FunAsrAdapter.isEnabled() 返回 true ───
-// 子进程 spawn 是异步的，但 BASE_URL 同步写入 env；adapter 实例化时就能看到。
-// 首次下模型期间 ASR 请求会 connection refused（adapter 内部 catch 返回空文本）。
-const stopFunasrEarly = startFunasrServer({
-  log: (line) => console.log(line),
-});
 const services = await createAppServices();
 await initializeRuntimeState(services);
 try {
@@ -123,6 +117,11 @@ try {
 }
 // 身份档案：端口被谁、用哪个数据根占着（启动器与 watchdog 据此做异数据根互斥）
 writeServerInstance(runtime.port, "embedded");
+
+// ─── 旅游数据源启动自检（2026-10-27）：把「静默降级」变启动期显式告警 ───
+// 10-15 至 10-27 事故链（FSQ key 从未配置 / Nominatim 不可达 / 高德冒充国际地名）
+// 的共同根因是降级无告警；此处并行探活 5 个外部源打一张健康表，缺配置当场给修复指引。
+void logTravelSourceHealth();
 
 // ─── HTTPS 双监听：浏览器访问 https://<本机IP>:3443/chat 时地址栏不再显示"不安全" ───
 // 与 HTTP 同实例同路由（含 wss）；HTTP 端口行为零变化，Flutter/WS 客户端不受影响。
@@ -196,7 +195,6 @@ const performShutdown = (): void => {
   );
   services.webhookService.stop();
   stopDesktopBridge();
-  stopFunasrEarly();
   stopOpenClawModelSync();
   void devHttpsHandle?.close();
   void services.app.close().finally(() => process.exit(0));

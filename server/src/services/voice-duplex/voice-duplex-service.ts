@@ -1,8 +1,5 @@
-import type { LLMMessage } from "../voice-dialogue/types.js";
-import type { VoiceDialogueService } from "../voice-dialogue/voice-dialogue-service.js";
-import type { MiniMaxRealtimeService } from "../voice-dialogue/minimax-realtime-service.js";
-import { DuplexVoiceSession } from "./duplex-session.js";
 import { RealtimeDuplexSession } from "./realtime-duplex-session.js";
+import type { MiniMaxRealtimeService } from "../voice-dialogue/minimax-realtime-service.js";
 import type { RealtimeVoiceEngine } from "./realtime-engine-port.js";
 import { MiniMaxRealtimeEngine } from "./engines/minimax-realtime-engine.js";
 import { parseClientMessage, type DuplexServerMessage } from "./protocol.js";
@@ -14,10 +11,8 @@ import { getVoiceprintService } from "../voice/voiceprint-service.js";
  * 职责：
  *   - 一条 WS 连接 = 一个会话（连接关闭即销毁）
  *   - 引擎选择：按注册的 RealtimeVoiceEngine 端口逐个判可用，命中即用端到端
- *     实时引擎（会话层 RealtimeDuplexSession）；否则回退 pipeline 引擎
- *     （FunASR/Whisper + LLM + TTS），provider 从 VoiceDialogueService 注册表解析
- *   - LLM 流优先 chatStream；provider 未实现时回退一次性 chat
- *     （把整段文本作为一个 delta 下发，管线其余部分不变）
+ *     实时引擎（会话层 RealtimeDuplexSession）；识别与合成都在引擎侧完成。
+ *     没有可用引擎时拒绝会话，不再回退本地 pipeline。
  *
  * 换本地/云端引擎 = 换 realtimeEngines 里的端口实现，本服务与协议层零改动。
  *
@@ -35,15 +30,12 @@ export interface DuplexSocketLike {
 }
 
 export interface VoiceDuplexServiceDeps {
-  voiceDialogueService: VoiceDialogueService;
-  /** VoiceDialogueService 里的 provider 名（缺省默认 provider） */
-  providerName?: string;
   /** 会话默认 system prompt（管家口语化短回复风格） */
   systemPrompt?: string;
   maxSessions?: number;
   /**
    * 端到端实时语音引擎注册表（端口实现）。按数组顺序取第一个 isEnabled() 的
-   * 引擎；都不满足时回退 pipeline 引擎（ASR+LLM+TTS）。
+   * 引擎；都不满足时拒绝会话（识别与合成均由引擎侧提供）。
    *
    * 接入本地引擎 / 换云端：实现 RealtimeVoiceEngine 端口后塞进这个数组即可，
    * 本服务与协议层、客户端均无需改动。
@@ -67,8 +59,8 @@ export interface VoiceDuplexServiceDeps {
 const DEFAULT_SYSTEM_PROMPT =
   "你是用户的私人管家，正在与用户进行实时语音对话。要求：回复口语化、简短（通常一两句话）、直接给出行动和结论，不要列表和标题；听不懂就简短追问。";
 
-/** 两种引擎会话的公共面（handle/stop/dispose）。 */
-type AnyDuplexSession = DuplexVoiceSession | RealtimeDuplexSession;
+/** 引擎会话类型（当前仅 realtime 一种）。 */
+type AnyDuplexSession = RealtimeDuplexSession;
 
 export class VoiceDuplexService {
   private readonly sessions = new Map<DuplexSocketLike, AnyDuplexSession>();
@@ -113,7 +105,17 @@ export class VoiceDuplexService {
           session.dispose();
           this.sessions.delete(socket);
         }
-        session = this.createSession(sink, msg.systemPrompt);
+        const created = this.createSession(sink, msg.systemPrompt);
+        if (!created) {
+          sink({
+            type: "error",
+            message: "实时语音引擎不可用：请配置 MINIMAX_API_KEY（或在 realtimeEngines 注册可用引擎）",
+            recoverable: false,
+          });
+          socket.close(1013, "no_realtime_engine");
+          return;
+        }
+        session = created;
         this.sessions.set(socket, session);
         const actorId = msg.actorId?.trim();
         speaker =
@@ -160,32 +162,17 @@ export class VoiceDuplexService {
   private createSession(
     sink: (msg: DuplexServerMessage) => void,
     systemPromptOverride?: string,
-  ): DuplexVoiceSession | RealtimeDuplexSession {
+  ): RealtimeDuplexSession | null {
     const systemPrompt = systemPromptOverride || this.deps.systemPrompt || DEFAULT_SYSTEM_PROMPT;
 
     // 引擎选择：按端口注册表取第一个可用引擎。MiniMax 云端只是其中一个实现，
     // 换本地/其它云端 = 换 realtimeEngines，此处逻辑不动。
     const engine = this.resolveEngines().find((e) => e.isEnabled());
-    if (engine) {
-      return new RealtimeDuplexSession(
-        `vdx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
-        sink,
-        { engine, systemPrompt, callVoiceContext: this.deps.callVoiceContext },
-      );
-    }
-
-    const provider = this.deps.voiceDialogueService.getProvider(this.deps.providerName);
-    const llmStream = createLlmStream(provider.llm);
-    return new DuplexVoiceSession(
-      `vds_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    if (!engine) return null;
+    return new RealtimeDuplexSession(
+      `vdx_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
       sink,
-      {
-        asr: provider.asr,
-        tts: provider.tts,
-        llmStream,
-        systemPrompt,
-        historyLimit: 20,
-      },
+      { engine, systemPrompt, callVoiceContext: this.deps.callVoiceContext },
     );
   }
 
@@ -204,19 +191,4 @@ export class VoiceDuplexService {
     }
     this.sessions.clear();
   }
-}
-
-/** provider.llm.chatStream 存在则直接用；否则一次性 chat 模拟流。 */
-function createLlmStream(llm: { chat: (m: LLMMessage[]) => Promise<string>; chatStream?: (m: LLMMessage[], o?: { onToken?: (t: string) => void }) => Promise<string> }): (
-  messages: LLMMessage[],
-  onToken: (t: string) => void,
-) => Promise<string> {
-  if (typeof llm.chatStream === "function") {
-    return async (messages, onToken) => llm.chatStream!(messages, { onToken });
-  }
-  return async (messages, onToken) => {
-    const text = await llm.chat(messages);
-    if (text) onToken(text);
-    return text;
-  };
 }

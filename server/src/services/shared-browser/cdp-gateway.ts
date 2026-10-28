@@ -18,6 +18,35 @@ import type { Browser, Page } from "playwright";
  * 远程部署时 CDP 端口不可达，工具层自动回退注入路径）。
  */
 /** 复用页面识别与释放规则见 openPage/closePage 注释。 */
+
+/**
+ * 按面板身份标记从候选页面里锁定用户可见的内置浏览器面板页。
+ *
+ * 2026-10-28 根因修复（用户实测「Agent 在操作但面板一直停在主页」）：
+ * 客户端进程内不止一个 WebView2 控制器共用同一个 remote-debugging 端点——
+ * 光球（emotion ball）用 NavigateToString 承载，URL 同样报 **about:blank**，
+ * 视频面板/画廊墙/行程面板各占一个目标。旧的「挑 about:blank 页」启发式
+ * 会随机抓到光球页，goto 全落在用户看不见的目标上。
+ *
+ * 面板控制器的每个文档都注入了 shared_browser_runtime.js（含
+ * window.__NB_SHARED_PANEL__ = true，见资产头注释与
+ * WebviewWindowsDriver.start 的首屏补标），按标记识别是唯一可靠依据。
+ */
+export async function pickMarkedPanelPage(pages: Page[]): Promise<Page | null> {
+  for (const page of pages) {
+    if (page.isClosed()) continue;
+    try {
+      const marked = await page.evaluate(
+        () => (window as unknown as { __NB_SHARED_PANEL__?: boolean })
+          .__NB_SHARED_PANEL__ === true,
+      );
+      if (marked) return page;
+    } catch {
+      // 页面销毁中/执行环境异常：跳过该候选
+    }
+  }
+  return null;
+}
 export class SharedBrowserCdpGateway {
   private browser?: Browser;
   private endpoint = "";
@@ -67,7 +96,9 @@ export class SharedBrowserCdpGateway {
     if (contexts.length === 0) return null;
     const pages = contexts.flatMap((c) => c.pages());
     if (pages.length === 0) return null;
-    return pages[pages.length - 1];
+    // 2026-10-28 根因修复：优先按面板身份标记锁定（见 pickMarkedPanelPage），
+    // 找不到才退回「最近活动页」旧启发式。
+    return (await pickMarkedPanelPage(pages)) ?? pages[pages.length - 1];
   }
 
   /** Agent 曾导航过的页面（closePage 后保留现场不关闭——「留痕」）。 */
@@ -106,10 +137,13 @@ export class SharedBrowserCdpGateway {
       if (!browser || !browser.isConnected()) return null;
       const context = browser.contexts()[0];
       if (!context) return null;
-      // 面板页 = 行迹等宿主页面之外的目标（优先主页态，其次任意面板目标）
+      // 面板页 = 按注入标记锁定的控制器页（见 pickMarkedPanelPage 注释）；
+      // 标记不可得时才退回 URL 启发式（优先主页态，其次任意面板目标）
+      const allPages = context.pages().filter((p) => !p.isClosed());
       const panelPage =
-        context.pages().find((p) => !p.isClosed() && p.url() === "about:blank") ??
-        context.pages().find((p) => !p.isClosed() && !p.url().includes("travel-map"));
+        (await pickMarkedPanelPage(allPages)) ??
+        allPages.find((p) => p.url() === "about:blank") ??
+        allPages.find((p) => !p.url().includes("travel-map"));
       if (!panelPage) return null;
       // 弹窗拦截（每个页面只装一次）：window.open 与 target=_blank 一律改为
       // 当前页内导航，根除「独立浏览器窗口」。注意初始化函数体内不用任何

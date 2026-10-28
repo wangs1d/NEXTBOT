@@ -45,36 +45,6 @@ export const BRAIN_OBSERVE_USER_TOOL: ChatCompletionTool = {
   },
 };
 
-/** brain.listen —— 语音识别 */
-export const BRAIN_LISTEN_TOOL: ChatCompletionTool = {
-  type: "function",
-  function: {
-    name: "brain.listen",
-    description:
-      "语音识别：将音频转为文本。当用户发送语音消息、或需要将录音转为文字时调用。",
-    parameters: {
-      type: "object",
-      properties: {
-        audioData: {
-          type: "string",
-          description: "base64 编码的音频数据。",
-        },
-        audioFormat: {
-          type: "string",
-          enum: ["mp3", "wav", "pcm", "ogg"],
-          description: "音频格式，默认 mp3。",
-        },
-        language: {
-          type: "string",
-          description: "识别语言代码（如 zh-CN / en-US），不传则自动检测。",
-        },
-      },
-      required: ["audioData"],
-      additionalProperties: false,
-    },
-  },
-};
-
 /** brain.look —— 截屏查看 */
 export const BRAIN_LOOK_TOOL: ChatCompletionTool = {
   type: "function",
@@ -363,7 +333,6 @@ export const BRAIN_RUNTIME_KERNEL_UPDATE_TOOL: ChatCompletionTool = {
 
 export const BRAIN_TOOLS: ChatCompletionTool[] = [
   BRAIN_OBSERVE_USER_TOOL,
-  BRAIN_LISTEN_TOOL,
   BRAIN_LOOK_TOOL,
   BRAIN_SPEAK_TOOL,
   BRAIN_REMEMBER_TOOL,
@@ -514,37 +483,6 @@ export function registerBrainTools(
       return {
         ok: false,
         error: `brain.observe_user 失败：${err instanceof Error ? err.message : String(err)}`,
-      };
-    }
-  });
-
-  // ---- brain.listen ----
-  registry.register("brain.listen", async (input) => {
-    try {
-      const audioData = String(input.audioData ?? "").trim();
-      if (!audioData) {
-        return { ok: false, error: "缺少必填字段：audioData（base64 编码的音频）" };
-      }
-      const audioFormat = typeof input.audioFormat === "string" ? input.audioFormat.trim() : undefined;
-      const language = typeof input.language === "string" ? input.language.trim() : undefined;
-
-      const audio: AudioBufferRef = {
-        data: Buffer.from(audioData, "base64"),
-        format: (audioFormat ?? "mp3") as AudioBufferRef["format"],
-      };
-      const result = await brainCenter.listen(audio, { language });
-      return {
-        ok: true,
-        text: result.text,
-        confidence: result.confidence,
-        language: result.language,
-        isFinal: result.isFinal,
-        processedAt: result.processedAt,
-      };
-    } catch (err) {
-      return {
-        ok: false,
-        error: `brain.listen 失败：${err instanceof Error ? err.message : String(err)}`,
       };
     }
   });
@@ -870,7 +808,18 @@ export function registerBrainTools(
     }
   });
 
-
-
-
+  // schema 与 handler 是两份清单，漏删任一侧都不会在编译期报错，这里做运行期对账
+  const schemaNames = BRAIN_TOOLS.flatMap((tool) =>
+    tool.type === "function" && tool.function?.name ? [tool.function.name] : [],
+  );
+  const handlerNames = registry.list().filter((name) => name.startsWith("brain."));
+  const missingHandler = schemaNames.filter((name) => !handlerNames.includes(name));
+  const missingSchema = handlerNames.filter((name) => !schemaNames.includes(name));
+  if (missingHandler.length > 0 || missingSchema.length > 0) {
+    console.error(
+      "[brain-tools] schema 与 handler 不一致，请同步 BRAIN_TOOLS 与 registerBrainTools" +
+        (missingHandler.length > 0 ? `｜缺 handler: ${missingHandler.join(", ")}` : "") +
+        (missingSchema.length > 0 ? `｜缺 schema: ${missingSchema.join(", ")}` : ""),
+    );
+  }
 }

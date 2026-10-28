@@ -1167,7 +1167,10 @@ class MobileChatController extends ChangeNotifier {
         messageId: messageId ?? prev.messageId,
         sessionId: prev.sessionId,
         role: prev.role,
-        text: finalText.isNotEmpty ? finalText : prev.text,
+        // 摘要卡轮：卡内已是全文，done 的 finalText 为空——流式长文不再留在气泡
+        text: summaryCard != null && finalText.trim().isEmpty
+            ? ""
+            : (finalText.isNotEmpty ? finalText : prev.text),
         timestamp: prev.timestamp,
         streaming: false,
         mediaCards: mediaCards ?? prev.mediaCards,
@@ -1298,7 +1301,10 @@ class MobileChatController extends ChangeNotifier {
           messageId: prev.messageId,
           sessionId: prev.sessionId,
           role: prev.role,
-          text: text.isNotEmpty ? text : prev.text,
+          // 末泡挂摘要卡且服务端正文为空：卡内已是全文，不再留流式长文
+          text: isLast && summaryCard != null && text.trim().isEmpty
+              ? ""
+              : (text.isNotEmpty ? text : prev.text),
           timestamp: prev.timestamp,
           mediaCards: isLast ? (mediaCards ?? prev.mediaCards) : prev.mediaCards,
           summaryCard: isLast ? (summaryCard ?? prev.summaryCard) : prev.summaryCard,

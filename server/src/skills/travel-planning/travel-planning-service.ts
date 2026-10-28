@@ -6,9 +6,10 @@
  * 数据流：
  *   用户输入 → 解析目的地/天数 → 查缓存 → 命中?直接返回 : 调POI源搜索→存缓存→返回
  *
- * API来源（2026-10-15 OSM Overpass 退役，POI 换消费级源）：
+ * API来源（2026-10-27：国际实时发现 Foursquare 优先 + Overpass 兜实时）：
  *   - 高德 v3 place/text: 国内 POI 搜索（景点/酒店/餐厅/咖啡茶馆，extensions=all 带实拍图）
- *   - Foursquare Places v3: 国际 POI 搜索（按类别 ID 分池，rating/photos 平台校验）
+ *   - Foursquare Places v3: 国际 POI 主源（按类别 ID 分池，rating/photos 平台校验，需 FSQ_API_KEY）
+ *   - OSM Overpass: 国际免 key 实时发现源（未配 FSQ key / 空结果时生效，见 overpass-service.ts）
  *   - Nominatim: 仅地理编码（地名→坐标）
  *
  * 缓存：POICacheManager（文件持久化 + 内存加速，全局共享）
@@ -19,6 +20,9 @@ import type { TravelPersona } from '../../services/user-personalization/user-per
 import https from 'node:https';
 import { poiCache, type CacheEntry, type RawPOI } from './poi-cache-manager.js';
 import { searchFoursquarePois, isFoursquareConfigured } from './foursquare-service.js';
+import { searchOverpassPois } from './overpass-service.js';
+import { searchWikidataAttractions } from './wikidata-service.js';
+import { isPlausiblePoiName } from './poi-name-filter.js';
 import { pricingService, formatQuotePriceInfo, type MemberTier, type PriceQuote, type BoundPlatform, type PricingContext } from './pricing-service.js';
 import { travelMediaStore, type PoiMediaType } from './travel-media-store.js';
 import { fetchBingPhotoUrls } from './bing-photos.js';
@@ -162,6 +166,14 @@ export interface PlanningRequest {
   origin?: string;
   /** 出发地所在省级行政区（定位回填时携带，供无直飞时选转机枢纽） */
   originRegion?: string;
+  /** 预订选择卡用户选定的往返大交通（有实价才传入；预算直接用该价，不再现查） */
+  selectedTransport?: {
+    mode: 'flight' | 'train';
+    amount: number;
+    label: string;
+    note?: string;
+    viaHub?: string;
+  };
   /** 出发地来源：located=按用户 GPS 定位补的默认值（简报卡如实标注「按定位」） */
   originSource?: 'located';
   /** 出发日 YYYY-MM-DD；未传则按本地今天兜底 */
@@ -437,35 +449,8 @@ export interface POISummary {
 
 // ======================== OpenStreetMap / 高德地图 配置 ========================
 
-/**
- * POI 名称可信度过滤（真实数据保证）：
- * OSM/高德会返回大量非旅游 POI（事故多发段、公厕、停车场、收费站、施工段…），
- * 这类名称混进行程会直接毁掉整份规划的可信度。命中黑名单的一律丢弃。
- */
-const POI_NAME_BLACKLIST = [
-  '事故', '公厕', '厕所', '洗手间', '停车场', '收费站', '加油', '充电桩',
-  '垃圾', '污水', '殡仪', '火葬', '墓', '变电站', '配电', '水厂', '污水处理',
-  '施工', '工地', '限速', '测速', '监控', '红绿灯', '信号灯', '公交站',
-  '地铁站入口', '出入口', '售票处', '检票口', '充值', '营业厅', '警务',
-  '派出所', '消防', '急诊', '发热门诊', '隔离', '收费站', '养护', '道班',
-  // 单位内部食堂在 OSM 里常挂 amenity=restaurant，被当「餐厅」排进行程（用户实测踩坑）
-  '食堂',
-  // 高德脏 POI（2026-10-15 实证：keywords「公园」会命中挂错类目的机构/地名）
-  '居委会', '村委会', '工作委员会', '社区服务', '绿道', '管理处', '工作站',
-  '服务区', '养护站', '道班房', '门禁', '值班室',
-];
-
-function isPlausiblePoiName(name: string): boolean {
-  const n = (name || '').trim();
-  if (n.length < 2 || n.length > 30) return false;
-  if (POI_NAME_BLACKLIST.some((bad) => n.includes(bad))) return false;
-  // 纯数字/纯符号名（如「1号」「①」）对行程毫无意义
-  if (!/[\u4e00-\u9fa5A-Za-z]/.test(n)) return false;
-  // 纯 ASCII 字母数字混排单 token（如「Mounbar423」）是 OSM 脏 name 标签的典型
-  // 形态；带空格/连字符的正常店名（「Bar 423」「798艺术区」不受影响——后者含 CJK）
-  if (/^[A-Za-z\d]+$/.test(n) && /[A-Za-z]/.test(n) && /\d/.test(n)) return false;
-  return true;
-}
+// POI 名称可信度过滤（真实数据保证）：抽出至 poi-name-filter.ts，
+// 与 Overpass 实时发现源（overpass-service.ts）共用同一份黑名单。
 
 /**
  * 配图查询限定词：给图搜补一个类型词（「同兴山庄 酒店」「黄鹤楼 景点」）。
@@ -569,11 +554,11 @@ const PHOTON_GEOCODE_BASE = 'https://photon.komoot.io/api';
 /** 地理编码超时：冷启动主要延迟来源，从 20s 压到 8s（Overpass 6s / OSRM 5s 同量级） */
 const GEOCODE_REQUEST_TIMEOUT_MS = 8000;
 const PHOTON_REQUEST_TIMEOUT_MS = 6000;
-// OSM Overpass POI 链路已整体退役（2026-10-15）：OSM 是地图贡献数据，旅游区脏 POI
-// 反复踩坑（居民小区挂 tourism=hotel、单位食堂挂 amenity=restaurant、乱码单 token 名），
-// 且镜像在大陆网络下超时频发曾把规划耗时推穿预算。POI 源现为：
-// 国内 → 高德（AMAP_WEB_KEY）；国际 → Foursquare（FSQ_API_KEY，foursquare-service.ts）；
-// 两者皆不可用时仅回退知识库真实 POI，绝不合成占位。
+// POI 源（2026-10-27 起）：国内 → 高德（AMAP_WEB_KEY）；
+// 国际 → Foursquare（FSQ_API_KEY）优先；未配 key / 空结果时：景点走 Wikidata
+// 免 key 实时发现（wikidata-service.ts，大陆网络实测可达），酒店/餐厅走 Overpass
+//（overpass-service.ts，大陆网络下镜像常挂，熔断后快速降级）；实时源全挂才
+// 回退知识库真实 POI，绝不合成占位。
 const USER_AGENT = 'TravelPlanner3D/1.0 (Educational Project)';
 
 /**
@@ -1089,6 +1074,12 @@ export class PlanningService {
       `${preferences.hotelFocus ?? ''}:${preferences.hotelFocusRef ?? ''}`,
       // 出发地决定往返大交通实时价，必须进签名，否则换出发地仍返回旧交通价
       preferences.origin ?? '',
+      // 预订选择卡（2026-10-27）：用户选定的班次决定交通价与行程交通段，
+      // 改选后必须重算，不能吃旧缓存的交通价/接驳时刻
+      request.selectedTransport
+        ? `${request.selectedTransport.mode}:${request.selectedTransport.amount}:${request.selectedTransport.label}`
+        : '',
+      (request.transfers ?? []).map((s) => `${s.type}:${s.role}:${s.no}:${s.depTime ?? ''}`).join(','),
     ]);
     const itinKey =
       `itin|${normalizedDest}|${dayCount}|${startDate}|${prefSig}|${weatherSig}`;
@@ -1197,6 +1188,7 @@ export class PlanningService {
       data: cacheEntry.data,
       origin: preferences.origin ?? request.origin,
       originRegion: request.originRegion,
+      selectedTransport: request.selectedTransport,
     });
     const pricingSummary = this._summarizePricing(days, pricingCtx, livePricing);
 
@@ -1354,11 +1346,21 @@ export class PlanningService {
 
   async buildDestinationGuide(
     destination: string,
-    per = 6,
+    per = 0,
     opts: {
       /** 用户原话里的住宿落位诉求（extractHotelFocus 的产物） */
       hotelFocus?: TripPreferences['hotelFocus'];
       hotelFocusRef?: string;
+      /** 游玩天数：条数按天动态（每天 2 条 + 4 条多元化冗余位），per 显式传入时优先生效 */
+      days?: number;
+      /** 用户画像（getUserTravelProfile 产物）：负反馈降权 + 出片/体验向加分，
+       *  让「选一选」卡按用户情况个性化，而不是全用户同一份热门榜 */
+      profileHints?: {
+        photoDriven?: boolean;
+        experienceDriven?: boolean;
+        dislikeTags?: string[];
+        dislikeNames?: string[];
+      };
     } = {},
   ): Promise<{
     destination: string;
@@ -1372,7 +1374,11 @@ export class PlanningService {
     sortNotes: Record<'view' | 'stay' | 'food', string>;
     fromCache: boolean;
   }> {
-    const perCat = Math.min(8, Math.max(3, Math.floor(per) || 6));
+    // 条数动态（2026-10-27）：按游玩天数取「每天 2 条 + 4 条多元化冗余位」，
+    // per 显式传入时优先；没传天数按 3 天（=10 条，与旧默认一致）。上下限 6~16。
+    const dayN = Number(opts.days) > 0 ? Math.floor(Number(opts.days)) : 3;
+    const dayBasedPer = Math.min(16, Math.max(6, dayN * 2 + 4));
+    const perCat = Math.min(16, Math.max(6, Math.floor(per) || dayBasedPer));
     const dest = await this.searchDestination(destination);
     const favKeys = this.favoriteKeys;
     // 排序键只用真实信号，缺失一律沉底，末位用原始搜索序（同输入必同序，不抖）。
@@ -1394,8 +1400,72 @@ export class PlanningService {
         )
         .slice(0, perCat)
         .map((x) => x.p);
+    // 画像信号（travel 双端②同源权重）：负反馈降权、出片/体验向加分。
+    // 只影响「选一选」卡的入选排序，不删除（保留兜底池）。
+    const hints = opts.profileHints ?? {};
+    const dislikeNames = new Set(hints.dislikeNames ?? []);
+    const dislikeTags = hints.dislikeTags ?? [];
+    const guideScore = (p: RawPOI) => {
+      const hay = `${p.name} ${(p.tags || []).join(' ')}`.toLowerCase();
+      let s = Math.max(ratingRank(p), 0) + heatRank(p) * 0.5;
+      if (favKeys.has(`attraction:${p.name}`)) s += SCORING.favoriteBoost;
+      if (dislikeNames.has(p.name)) s += SCORING.attraction.dislikeName;
+      if (dislikeTags.some((t) => t && hay.includes(t.toLowerCase()))) s += SCORING.attraction.dislikeTag;
+      if (hints.photoDriven && (p.photo?.spot || p.socialHeat?.level === 'hot')) s += SCORING.attraction.photoBoost;
+      if (hints.experienceDriven && SCORING.experienceTagRe.test(hay)) s += SCORING.attraction.experienceBoost;
+      return s;
+    };
+    /**
+     * 景点段「热门优先 + 少量小众冗余」：热门层按画像分吃掉主位并置顶，
+     * 小众层只占固定 ≤4 条冗余位（用户定调 2026-10-27：热门的优先，留几条
+     * 冗余供多元化选择），从剩余池按「商圈/区县不重复 + 离已选直线 ≥2km」
+     * 挑分散项垫尾。约束太紧补不满时按分补位。
+     */
+    const takeDiverseView = (): { list: RawPOI[]; nicheCount: number } => {
+      const scored = dest.attractions
+        .map((p, idx) => ({ p, idx, s: guideScore(p) }))
+        .sort((a, b) => b.s - a.s || a.idx - b.idx);
+      const nicheSlots = Math.min(4, Math.floor(perCat * 0.4));
+      const popularN = Math.min(perCat - nicheSlots, scored.length);
+      const picked = scored.slice(0, popularN);
+      const nicheWant = Math.min(nicheSlots, scored.length - popularN);
+      const bizOf = (x: { p: RawPOI }) => {
+        const raw = x.p.raw as Record<string, unknown> | undefined;
+        return (
+          (typeof raw?.business_area === 'string' && raw.business_area.trim()) ||
+          (typeof raw?.adname === 'string' && raw.adname.trim()) ||
+          ''
+        );
+      };
+      const kmBetween = (a: RawPOI, b: RawPOI) =>
+        this.haversineKm(a.latitude, a.longitude, b.latitude, b.longitude);
+      const pickedBiz = new Set(picked.map(bizOf).filter(Boolean));
+      const pickedPois = picked.map((x) => x.p);
+      const niche: typeof scored = [];
+      const deferred: typeof scored = [];
+      for (const cand of scored.slice(popularN)) {
+        if (niche.length >= nicheWant) break;
+        const biz = bizOf(cand);
+        const farEnough = [...pickedPois, ...niche.map((x) => x.p)].every(
+          (q) => kmBetween(cand.p, q) >= 2,
+        );
+        const bizFree = !biz || (!pickedBiz.has(biz) && !niche.some((x) => bizOf(x) === biz));
+        if (farEnough && bizFree) {
+          niche.push(cand);
+          if (biz) pickedBiz.add(biz);
+        } else {
+          deferred.push(cand);
+        }
+      }
+      for (const cand of deferred) {
+        if (niche.length >= nicheWant) break;
+        niche.push(cand);
+      }
+      return { list: [...picked, ...niche].map((x) => x.p), nicheCount: niche.length };
+    };
+    const viewTake = takeDiverseView();
     const cats: Array<{ key: 'view' | 'stay' | 'food'; type: PoiMediaType; list: RawPOI[] }> = [
-      { key: 'view', type: 'attraction', list: take(dest.attractions, 'attraction') },
+      { key: 'view', type: 'attraction', list: viewTake.list },
       { key: 'stay', type: 'hotel', list: take(dest.hotels, 'hotel') },
       { key: 'food', type: 'restaurant', list: take(dest.restaurants, 'restaurant') },
     ];
@@ -1537,7 +1607,7 @@ export class PlanningService {
       food: out.food,
       stayAnchor,
       sortNotes: {
-        view: this._guideSortNote(out.view, null, false),
+        view: this._guideSortNote(out.view, null, false, viewTake.nicheCount),
         stay: this._guideSortNote(out.stay, stayAnchor, stayDistanceLed),
         food: this._guideSortNote(out.food, null, false),
       },
@@ -1700,6 +1770,7 @@ export class PlanningService {
     list: GuideCandidate[],
     anchor: GuideAnchor | null,
     distanceLed: boolean,
+    nicheCount = 0,
   ): string {
     if (list.length === 0) return '';
     const rated = list.filter((i) => i.rating != null).length;
@@ -1714,6 +1785,7 @@ export class PlanningService {
         : '这一屏没取到评分，按搜索原序',
     );
     if (heated) parts.push(`${heated} 条带社媒热度`);
+    if (nicheCount > 0) parts.push(`含 ${nicheCount} 条小众分散项（商圈与位置错开）`);
     if (!faved && rated < list.length && !distanceLed) parts.push('没取到评分的按搜索原序补位');
     return parts.join(' · ');
   }
@@ -2142,6 +2214,14 @@ export class PlanningService {
       origin?: string;
       /** 出发地所在省级行政区：无直飞时据此选转机枢纽（省会优先） */
       originRegion?: string;
+      /** 预订选择卡用户选定的往返大交通（有实价时预算直接用，不再现查） */
+      selectedTransport?: {
+        mode: 'flight' | 'train';
+        amount: number;
+        label: string;
+        note?: string;
+        viaHub?: string;
+      };
     },
   ): Promise<{
     pending: number;
@@ -2273,7 +2353,15 @@ export class PlanningService {
     }
 
     let transport: { amount: number; label: string; note: string; viaHub?: string } | null = null;
-    if (opts.origin) {
+    if (opts.selectedTransport) {
+      // 预订卡用户已选定班次：预算直接用所选实价，不再现查（label 已含车次/航班号）
+      transport = {
+        amount: opts.selectedTransport.amount,
+        label: opts.selectedTransport.label,
+        note: opts.selectedTransport.note ?? '',
+        ...(opts.selectedTransport.viaHub ? { viaHub: opts.selectedTransport.viaHub } : {}),
+      };
+    } else if (opts.origin) {
       const t = await lookupTransportPrice({
         origin: opts.origin,
         originRegion: opts.originRegion,
@@ -2452,6 +2540,9 @@ export class PlanningService {
     const domestic = isDomesticDestination(destName);
     let attractions: RawPOI[], hotels: RawPOI[], restaurants: RawPOI[];
 
+    // 国外分支的知识库兜底可能在下方分支内置位，声明须在分支前
+    let knowledgeFallback = false;
+
     if (domestic) {
       // ===== 国内：高德地图 POI 搜索 =====
       console.log(`[PlanningService] 检测到国内目的地，使用高德地图API`);
@@ -2477,17 +2568,26 @@ export class PlanningService {
       restaurants = fsqResult.restaurants;
 
       // 国内冷门地名（泸沽湖/西江千户苗寨等）会被 domestic-keywords 漏判为
-      // 国际；Foursquare 无 key/无结果时回落高德（能搜到即按国内处理）——
+      // 国际；Foursquare 无 key/无结果时才回落高德（能搜到即按国内处理）——
       // 与 domestic 分支的「高德无结果降级 Foursquare」对称。
-      if (
-        attractions.length === 0 && hotels.length === 0 && restaurants.length === 0 &&
-        AMAP_KEY
-      ) {
-        console.warn(`[PlanningService] Foursquare 无结果，回落高德搜索（可能是漏判的国内目的地）...`);
-        const amapResult = await this.searchWithAmap(center, destName);
-        attractions = amapResult.attractions;
-        hotels = amapResult.hotels;
-        restaurants = amapResult.restaurants;
+      // 顺序铁律：知识库命中必须先于高德回落。高德只懂国内，若坐标已被
+      // 同名碰撞污染（「巴厘岛」geocode 到西安未央区同名小区，2026-10-26），
+      // 高德回落会把错误坐标周边的国内 POI 整批灌进国外目的地并落缓存；
+      // 知识库存的是真实国外 POI，命中即用、跳过高德。
+      if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
+        const known = this.knownPoiFallback(destName);
+        if (known) {
+          attractions = known.attractions;
+          hotels = known.hotels;
+          restaurants = known.restaurants;
+          knowledgeFallback = true;
+        } else if (AMAP_KEY) {
+          console.warn(`[PlanningService] Foursquare 无结果且知识库未命中，回落高德搜索（可能是漏判的国内目的地）...`);
+          const amapResult = await this.searchWithAmap(center, destName);
+          attractions = amapResult.attractions;
+          hotels = amapResult.hotels;
+          restaurants = amapResult.restaurants;
+        }
       }
     }
 
@@ -2561,7 +2661,6 @@ export class PlanningService {
 
     // Step 3: 所有 API 都返回空结果时，只回退到知识库真实地点；
     // 知识库也未命中 → 抛错诚实失败，绝不生成合成占位行程。
-    let knowledgeFallback = false;
     if (attractions.length === 0 && hotels.length === 0 && restaurants.length === 0) {
       console.warn(`[PlanningService] 所有API均无结果，尝试知识库真实POI兜底`);
       this.reportProgress(sessionId, 'search', '实时搜索暂不可用，正在改用内置真实地点库…');
@@ -2679,9 +2778,23 @@ export class PlanningService {
    * Nominatim 地理编码：地名 → 经纬度
    */
   private async geocode(query: string): Promise<{ center: Coordinates; displayName: string }> {
-    // 高德地理编码优先（有 key 时）：国内网络下 Nominatim/Photon 都不稳，
-    // 冷门目的地（泸沽湖等）曾因 geocode 失败整城检索失败（2026-10-25 实测）。
-    // 高德坐标系 GCJ-02，与 POI 检索同源，无需转换。
+    // 0. 本地已知坐标表最优先：人工校准的坐标比任何 geocoder 的首个命中可信，
+    //    且毫秒级返回。已有目的地（热门国内外城市全覆盖）绝不让 geocoder 抢答——
+    //    「巴厘岛」曾被高德地理编码解析到西安市未央区同名小区（level=住宅区，
+    //    2026-10-26 实锤），整城 POI 检索围着西安北站转，缓存被污染成西安数据。
+    const knownFirst = this.findKnownCoordinates(query);
+    if (knownFirst) {
+      console.log(
+        `[OSM] 使用本地坐标: ${knownFirst.name} [${knownFirst.center.longitude}, ${knownFirst.center.latitude}]`,
+      );
+      return { center: knownFirst.center, displayName: knownFirst.name };
+    }
+
+    // 高德地理编码其次（有 key 时）：国内网络下 Nominatim/Photon 都不稳，
+    // 冷门目的地（泸沽湖等，不在坐标表内）曾因 geocode 失败整城检索失败
+    // （2026-10-25 实测）。高德坐标系 GCJ-02，与 POI 检索同源，无需转换。
+    // 注意高德只懂国内：其结果落在国内属预期（含漏判为国外的国内冷门地名），
+    // 真国外目的地由上方坐标表兜住，不在此分支。
     if (AMAP_KEY) {
       try {
         const url = `https://restapi.amap.com/v3/geocode/geo?key=${AMAP_KEY}&address=${encodeURIComponent(query)}`;
@@ -2805,39 +2918,67 @@ export class PlanningService {
     return knowledgeBase.findKnownCoordinates(query);
   }
 
-  // ======================== Foursquare API 调用（国际目的地 POI 源） ========================
+  // ======================== 国际 POI 实时发现（Foursquare 优先 + Wikidata/Overpass 兜实时） ========================
+
+  /**
+   * 国际目的地单类目实时发现：Foursquare（消费级数据，需 key）优先；
+   * 景点类在无 key / 空结果时走 Wikidata 免 key 实时发现（大陆网络实测可达，
+   * 见 wikidata-service.ts）；酒店/餐厅 Wikidata 无此类数据，直接 Overpass。
+   * 顺序铁律：实时源必须先于知识库——「景点先查清当地真有什么」，
+   * 知识库只兜实时源全挂的最后场景（2026-10-26 巴厘岛事故诉求）。
+   */
+  private async searchIntlPoi(
+    center: Coordinates,
+    kind: 'attraction' | 'hotel' | 'restaurant' | 'cafe',
+    radius: number,
+    fsqLimit: number,
+    overpassLimit: number,
+  ): Promise<RawPOI[]> {
+    if (isFoursquareConfigured()) {
+      try {
+        const fsq = await searchFoursquarePois(center, kind, radius, fsqLimit);
+        const filtered = fsq.filter(p => isPlausiblePoiName(p.name));
+        if (filtered.length > 0) return filtered;
+        console.warn(`[IntlPOI] Foursquare ${kind} 空结果，回落免 key 实时源…`);
+      } catch (err) {
+        console.warn(`[IntlPOI] Foursquare ${kind} 失败，回落免 key 实时源: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    if (kind === 'attraction') {
+      const wd = await searchWikidataAttractions(center, Math.round(radius / 1000), overpassLimit);
+      if (wd.length > 0) return wd;
+      console.warn(`[IntlPOI] Wikidata 景点空结果，回落 Overpass…`);
+    }
+    return searchOverpassPois(center, kind, radius, overpassLimit);
+  }
 
   /**
    * Foursquare 搜索景点（替代 Overpass：消费级场馆数据，名称/分类/照片经平台校验）
    * 浅池口径与国内高德对齐（2026-10-15）：25 条覆盖 5 天 × intensive 4 景/天编排上限
    */
   private async searchAttractions(center: Coordinates, _cityHint: string, radius = 25000): Promise<RawPOI[]> {
-    const results = await searchFoursquarePois(center, 'attraction', radius, 25);
-    return results.filter(p => isPlausiblePoiName(p.name));
+    return this.searchIntlPoi(center, 'attraction', radius, 25, 30);
   }
 
   /**
    * Foursquare 搜索酒店（类别 19012 覆盖 Hotel 全型；民宿/客栈国际场景以类别名为准）
    */
   private async searchHotels(center: Coordinates, _cityHint: string, radius = 25000): Promise<RawPOI[]> {
-    const results = await searchFoursquarePois(center, 'hotel', radius, 12);
-    return results.filter(p => isPlausiblePoiName(p.name));
+    return this.searchIntlPoi(center, 'hotel', radius, 12, 14);
   }
 
   /**
    * Foursquare 搜索餐厅（类别 13065 Restaurant；每天午+晚两餐 × 5 天 = 10 餐，20 个留去重余量）
    */
   private async searchRestaurants(center: Coordinates, _cityHint: string, radius = 20000): Promise<RawPOI[]> {
-    const results = await searchFoursquarePois(center, 'restaurant', radius, 20);
-    return results.filter(p => isPlausiblePoiName(p.name));
+    return this.searchIntlPoi(center, 'restaurant', radius, 20, 24);
   }
 
   /**
    * Foursquare 搜索咖啡厅/茶座（茶歇/午休条目专用，见 buildDaysFast 茶歇编排）
    */
   private async searchCafes(center: Coordinates, radius = 15000): Promise<RawPOI[]> {
-    const results = await searchFoursquarePois(center, 'cafe', radius, 10);
-    return results.filter(p => isPlausiblePoiName(p.name));
+    return this.searchIntlPoi(center, 'cafe', radius, 10, 10);
   }
 
   /**

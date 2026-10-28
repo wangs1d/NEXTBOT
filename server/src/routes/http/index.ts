@@ -12,6 +12,7 @@ import { registerBrainRoutes } from "./brain.js";
 import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
+import { registerClientTelemetryRoutes } from "./client-telemetry.js";
 import { registerInternalManifestEventRoutes } from "./internal-manifest-events.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
 import { registerServiceConfigRoutes } from "./service-config.js";
@@ -111,6 +112,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerSystemRoutes(app, deps);
   // 客户端版本清单（自包含，无 deps）：桌面客户端启动检查 + 后期 runtime 收回总开关
   registerClientManifestRoutes(app);
+  // 安装包运行埋点（自包含，无 deps）：客户端启动上报 + 管理端 runtime 收回决策台账
+  registerClientTelemetryRoutes(app);
   // 清单变化 SSE 事件流（自包含；MANIFEST_EVENT_TOKEN 未配置时 403 禁用）：
   // 更新控制面机器（ECS）上启用，下游（云端网关/本地 runtime）订阅后秒级广播
   registerInternalManifestEventRoutes(app);
@@ -180,7 +183,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   }
   registerVoiceMessageRoutes(app, {
     voiceMessageService: deps.voiceMessageService,
-    voiceCapabilityService: deps.voiceCapabilityService,
   });
   registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
   registerPictureRoutes(app, { pictureKit: deps.pictureKit });

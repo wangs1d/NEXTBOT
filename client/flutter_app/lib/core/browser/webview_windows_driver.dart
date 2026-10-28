@@ -85,6 +85,15 @@ class WebviewWindowsDriver implements BrowserDriver {
     if (bootstrapScript != null && bootstrapScript.isNotEmpty) {
       await installDocumentBootstrap(bootstrapScript);
     }
+    // 2026-10-28 根因修复：上面的 loadUrl("about:blank") 先于 bootstrap 注册
+    // 执行，首屏文档拿不到注入标记 → 服务端 CDP 桥无法按
+    // window.__NB_SHARED_PANEL__ 识别面板页。这里给已存在的首屏文档补打
+    // 标记（后续导航由 bootstrap 自动携带）。
+    try {
+      await _controller.executeScript("window.__NB_SHARED_PANEL__ = true;");
+    } catch (_) {
+      // 引擎未就绪等异常不阻塞启动；bootstrap 会在下个文档补上
+    }
     _ready = true;
   }
 

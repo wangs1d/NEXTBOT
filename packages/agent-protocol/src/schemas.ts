@@ -41,7 +41,7 @@ export const userMessageSchema = z
     /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
     agentAccessMode: z.enum(["sandbox", "full"]).optional(),
     /** 消息内容类型；默认 "text"。当为 "audio" 时，text 可为空，
-     *  服务端会拉取 mediaUrl 对应的 mp3 并调 ASR 转文本，再走正常 LLM 链路。 */
+     *  携带 mediaUrl 对应的音频（服务端不再自动转写，客户端自行消费音频）。 */
     contentType: z.enum(["text", "audio"]).optional(),
     /** audio 类型时的可访问 URL，如 `/agent/voice/messages/{actorId}/{msgId}.mp3` */
     mediaUrl: z.string().max(500).optional(),

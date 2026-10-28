@@ -75,6 +75,25 @@ export interface ToolCardPayload {
     whenChoose?: string;
   }>;
   /**
+   * price_compare 卡（跨平台实时比价 shopping.compare.prices）：
+   * 分组报价结构化载荷（每组 = 该商品在某平台的最低价报价）。
+   * items 同时保留（兼容旧客户端 fallback 渲染）。
+   */
+  priceCompare?: {
+    query: string;
+    groups: Array<{
+      priceCny: number | null;
+      platform: string;
+      title: string;
+      shop?: string;
+      url?: string;
+      image?: string;
+      similar?: boolean;
+      offerCount: number;
+    }>;
+    decisionPageUrl?: string;
+  };
+  /**
    * 专用卡型的附加载荷（随卡 JSON 原样透传给前端，AgentResultData.extra 消费）：
    * 如 travel_guide_select 卡的分类候选（多图+推荐度+预选态）。
    */
@@ -108,6 +127,11 @@ function str(value: unknown): string {
 
 function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+/** 降水一行：概率 + 具体钟点段；无时段数据时只给整天口径 */
+function rainText(dayPrefix: string, pct: number, period: string): string {
+  return period ? `${dayPrefix}降水 ${pct}%（${period}）` : `${dayPrefix}降水 ${pct}%`;
 }
 
 /** ISO 时间「2026-09-10T08:00:00」→「09-10 08:00」；纯字符串截取，不经 Date，跨时区稳定 */
@@ -452,7 +476,10 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     const wind = num(r.windKmh);
     if (wind != null) items.push({ type: "num", text: `风速 ${wind} km/h` });
     const rain = num(r.peakRainPct);
-    if (rain != null) items.push({ type: "num", text: `峰值降水概率 ${rain}%` });
+    if (rain != null) items.push({ type: "num", text: rainText("今天", rain, str(r.todayRainPeriod)) });
+    const rainTomorrow = num(r.tomorrowRainPct);
+    if (rainTomorrow != null)
+      items.push({ type: "num", text: rainText("明天", rainTomorrow, str(r.tomorrowRainPeriod)) });
     const location = str(r.locationLabel);
     return {
       title: summary || `${location ? location + " " : ""}天气实况`,
@@ -534,14 +561,16 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 
-  // 跨平台比价结果卡（2026-10-24 升级：图 + 可点行 + 决策页入口）。
+  // 跨平台比价结果卡（2026-10-28 升级：专属 price_compare 卡型）。
   // 每组一行：缩略图 + 最低价 + 平台 + 商品名 + 店铺 + 疑似同款标注；
   // 行带 offer.url 整行可点跳平台商品页；
   // 服务端存档了决策页时追加「打开比价决策页」行（决策页 = 大图/报价/口碑一页看全）。
+  // items 保留为通用回退（旧客户端），结构化分组走 priceCompare 由专属卡消费。
   "shopping.compare.prices": (r) => {
     const groups = Array.isArray(r.groups) ? r.groups : [];
     if (groups.length === 0) return null;
     const items: ToolCardItem[] = [];
+    const priceGroups: NonNullable<ToolCardPayload["priceCompare"]>["groups"] = [];
     let shown = 0;
     for (const g of groups) {
       if (shown >= 6) break;
@@ -571,6 +600,16 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         ...(url ? { url } : {}),
         ...(image ? { thumbnailUrl: image } : {}),
       });
+      priceGroups.push({
+        priceCny: price,
+        platform: platform || "未知平台",
+        title: title.slice(0, 60),
+        ...(shop ? { shop: shop.slice(0, 12) } : {}),
+        ...(url ? { url } : {}),
+        ...(image ? { image } : {}),
+        ...(similar ? { similar: true } : {}),
+        offerCount: offers.length,
+      });
       shown += 1;
     }
     if (items.length === 0) return null;
@@ -582,18 +621,22 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         url: decisionPageUrl,
       });
     }
-    const bestOffer = (r.bestOffer ?? {}) as Record<string, unknown>;
-    const bestPlatform = str(bestOffer.platform);
-    const bestPrice = num(bestOffer.priceCny);
-    const footer =
-      bestPrice != null && bestPlatform
-        ? `最低价 ¥${bestPrice} 来自 ${bestPlatform} · 行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准`
-        : "行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准";
+    // footer 不再回显「最低价 ¥X 来自 平台」搜索源内容（与列表行重复，2026-10-28 移除），
+    // 仅保留操作提示与实时抓取免责说明。
     return {
       title: `比价结果：${str(r.query)}`,
       items,
-      footer,
-      cardType: "",
+      footer: "行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准",
+      cardType: "price_compare",
+      ...(priceGroups.length > 0
+        ? {
+            priceCompare: {
+              query: str(r.query),
+              groups: priceGroups,
+              ...(decisionPageUrl ? { decisionPageUrl } : {}),
+            },
+          }
+        : {}),
     };
   },
 
@@ -825,7 +868,7 @@ function buildMergedWeatherCard(
     const rain = num(r.peakRainPct);
     if (!weatherText && !range) continue;
     const parts = [weatherText, range ? `气温 ${range}` : ""].filter(Boolean);
-    if (rain != null) parts.push(`降水 ${rain}%`);
+    if (rain != null) parts.push(rainText("今天", rain, str(r.todayRainPeriod)));
     items.push({
       type: "num",
       text: `${location ? location + " " : ""}${parts.join("，")}`,
@@ -873,13 +916,15 @@ function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
     speak: "",
     cardId,
     // 扩展卡型的附加协议字段（product_compare 的分侧大图/转置对比表/视频入口；
-    // product_pick 的立场化主推/备选定位/渠道价 CTA）
+    // product_pick 的立场化主推/备选定位/渠道价 CTA；
+    // price_compare 的跨平台分组报价/决策页入口）
     ...(payload.sides ? { sides: payload.sides } : {}),
     ...(payload.compare ? { compare: payload.compare } : {}),
     ...(payload.videos ? { videos: payload.videos } : {}),
     ...(payload.pick ? { pick: payload.pick } : {}),
     ...(payload.alternatives ? { alternatives: payload.alternatives } : {}),
     ...(payload.ugc ? { ugc: payload.ugc } : {}),
+    ...(payload.priceCompare ? { priceCompare: payload.priceCompare } : {}),
     ...(payload.extra ? { extra: payload.extra } : {}),
   });
   const parts: string[] = [];

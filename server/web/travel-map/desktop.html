@@ -1189,8 +1189,8 @@ function commitRoute(seq,by,linkedCount){
 function growLeg(coords,done){
   var src=mapState.map&&mapState.map.getSource(LEG_SRC);
   if(!src){done();return;}
-  var dur=clamp(coords.length*13,240,860);
-  var steps=Math.max(6,Math.round(dur/16)),n=0;
+  var dur=clamp(coords.length*26,520,1800);
+  var steps=Math.max(12,Math.round(dur/16)),n=0;
   (function frame(){
     n++;
     var r=Math.min(1,n/steps);
@@ -1288,7 +1288,7 @@ function playRoute(items,seq,list,key){
     growLeg(coords,function(){
       i++;
       commitRoute(seq,by,i);
-      mapState.tick=setTimeout(nextLeg,140);
+      mapState.tick=setTimeout(nextLeg,260);
     });
   }
   mapState.tick=setTimeout(nextLeg,700);

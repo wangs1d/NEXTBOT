@@ -424,6 +424,329 @@ async function lookupTransferOptions(args: {
   return results.filter((o): o is TransportOption => o !== null);
 }
 
+// ──────────────────────── 大交通多选项（预订选择卡，2026-10-27） ────────────────────────
+
+/** 单段（去程/返程）真实时刻明细（来自飞猪 journeys[].segments[]，不臆造）。 */
+export interface TransportLegDetail {
+  from: string;
+  to: string;
+  /** 出发/到达日期（YYYY-MM-DD；与请求日期不一致时如实带出） */
+  date?: string;
+  /** 出发/到达时刻（HH:mm） */
+  dep?: string;
+  arr?: string;
+  /** ISO 时刻（2026-10-30T17:40:00），接驳提醒/TransferSegment 直接消费 */
+  depISO?: string;
+  arrISO?: string;
+  /** 出发/到达机场车站（如「萧山国际机场」） */
+  fromStation?: string;
+  toStation?: string;
+  /** 段耗时（分钟） */
+  durationMin?: number;
+}
+
+/** 预订选择卡的大交通选项：车次/航班、真实时刻与票价（价取不到如实置 null）。 */
+export interface TransportOptionDetail {
+  mode: "flight" | "train";
+  /** 车次号（G123）或航班号（EU2260）；多段中转取第一段号 */
+  no?: string;
+  /** 航司简称/车型（成都航/普快） */
+  carrier?: string;
+  /** 去程（出发地 → 目的地） */
+  outbound?: TransportLegDetail;
+  /** 返程（目的地 → 出发地；查了返程日期才有） */
+  inbound?: TransportLegDetail;
+  /** 往返总价（单人）；null=平台未公布（体验模式脱敏），上层如实标「待核价」 */
+  amount: number | null;
+  /** 去程耗时（分钟） */
+  durationMin?: number;
+  /** 飞猪下单页 */
+  bookingUrl?: string;
+  /** 转机经停枢纽（两段拼接选项时有值） */
+  viaHub?: string;
+}
+
+function isoOf(dateTime: string): string | undefined {
+  const m = /^(\d{4}-\d{2}-\d{2}) (\d{2}:\d{2}):\d{2}$/.exec(dateTime.trim());
+  return m ? `${m[1]}T${m[2]}:00` : undefined;
+}
+
+function legDetailOf(seg: Record<string, unknown> | null): TransportLegDetail | undefined {
+  if (!seg) return undefined;
+  const depISO = isoOf(strOf(seg, "depDateTime"));
+  const arrISO = isoOf(strOf(seg, "arrDateTime"));
+  const fromStation = strOf(seg, "depStationName");
+  const toStation = strOf(seg, "arrStationName");
+  const duration = Number(strOf(seg, "duration")) || 0;
+  return {
+    from: strOf(seg, "depCityName") || fromStation,
+    to: strOf(seg, "arrCityName") || toStation,
+    ...(depISO ? { date: depISO.slice(0, 10), depISO } : {}),
+    ...(arrISO ? { arrISO } : {}),
+    ...(depISO ? { dep: depISO.slice(11, 16) } : {}),
+    ...(arrISO ? { arr: arrISO.slice(11, 16) } : {}),
+    ...(fromStation ? { fromStation } : {}),
+    ...(toStation ? { toStation } : {}),
+    ...(duration > 0 ? { durationMin: duration } : {}),
+  };
+}
+
+/** 飞猪 itemList 单条 → 预订卡选项（journeys[0]=去程、journeys[1]=返程）。 */
+function transportDetailFromItem(
+  mode: "flight" | "train",
+  item: Record<string, unknown>,
+): TransportOptionDetail | null {
+  const journeys = Array.isArray(item.journeys) ? item.journeys : [];
+  const first = isRecord(journeys[0]) ? journeys[0] : null;
+  const outSegs = first && Array.isArray(first.segments) ? first.segments : [];
+  const outbound = legDetailOf(isRecord(outSegs[0]) ? outSegs[0] : null);
+  if (!outbound) return null;
+  const second = isRecord(journeys[1]) ? journeys[1] : null;
+  const inSegs = second && Array.isArray(second.segments) ? second.segments : [];
+  const inbound = legDetailOf(isRecord(inSegs[0]) ? inSegs[0] : null);
+  const firstSeg = isRecord(outSegs[0]) ? outSegs[0] : null;
+  const priceRaw =
+    mode === "flight"
+      ? (item.ticketPrice ?? item.adultPrice ?? item.price)
+      : (item.price ?? item.ticketPrice ?? item.adultPrice);
+  const amount = parsePriceCny(priceRaw);
+  const no = strOf(firstSeg, "marketingTransportNo");
+  const carrier = strOf(firstSeg, "marketingTransportName");
+  const durationMin =
+    Number(strOf(first, "totalDuration") || strOf(firstSeg, "duration")) || undefined;
+  const bookingUrl = strOf(item, "jumpUrl") || undefined;
+  return {
+    mode,
+    ...(no ? { no } : {}),
+    ...(carrier ? { carrier } : {}),
+    outbound,
+    ...(inbound ? { inbound } : {}),
+    amount: Number.isFinite(amount) && amount > 0 ? Math.round(amount) : null,
+    ...(durationMin && durationMin > 0 ? { durationMin } : {}),
+    ...(bookingUrl ? { bookingUrl } : {}),
+  };
+}
+
+/** 同一车次/航班同日期同时刻去重（体验模式不同日期重复出现的班次只留一条）。 */
+function dedupeDetails(list: TransportOptionDetail[]): TransportOptionDetail[] {
+  const seen = new Set<string>();
+  const out: TransportOptionDetail[] = [];
+  for (const o of list) {
+    const key = `${o.no ?? ""}|${o.outbound?.date ?? ""}|${o.outbound?.dep ?? ""}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(o);
+  }
+  return out;
+}
+
+async function searchTransportOptionsDetail(
+  cmd: "search-flight" | "search-train",
+  mode: "flight" | "train",
+  origin: string,
+  destination: string,
+  startDate?: string,
+  endDate?: string,
+  runnerFn: FlyAiRunner = runner,
+  limit = 3,
+): Promise<TransportOptionDetail[]> {
+  const args = [cmd, "--origin", origin, "--destination", destination, "--sort-type", "3"];
+  if (startDate) args.push("--dep-date", startDate);
+  if (endDate) args.push("--back-date", endDate);
+  const key = `${mode}-list|${args.join("|")}`;
+  return cached(key, CACHE_TTL_MS.transport, async () => {
+    const res = await callFlyAi(runnerFn, args);
+    if ("error" in res) return [];
+    const details = res.items
+      .map((it) => transportDetailFromItem(mode, it))
+      .filter((o): o is TransportOptionDetail => o !== null);
+    const ranked = [...dedupeDetails(details)].sort((a, b) => {
+      // 有实价者优先（价低在前）；都没价按原序（飞猪相关度）
+      if (a.amount != null && b.amount != null) return a.amount - b.amount;
+      if (a.amount != null) return -1;
+      if (b.amount != null) return 1;
+      return 0;
+    });
+    return ranked.slice(0, limit);
+  });
+}
+
+/**
+ * 往返大交通候选列表（预订选择卡数据源）：机票与火车各取前 N 条真实班次。
+ * 出发地无直飞时补转机拼接选项（经枢纽两段实价合计，无逐段时刻——如实不编）。
+ * 价格脱敏（体验模式）的选项保留但 amount=null，上层标「待核价」。
+ */
+export async function lookupTransportOptions(args: {
+  origin: string;
+  originRegion?: string;
+  destination: string;
+  startDate?: string;
+  endDate?: string;
+  runner?: FlyAiRunner;
+  limit?: number;
+}): Promise<{ flights: TransportOptionDetail[]; trains: TransportOptionDetail[] }> {
+  const origin = (args.origin ?? "").trim();
+  const destination = (args.destination ?? "").trim();
+  if (!origin || !destination || normalizeName(origin) === normalizeName(destination)) {
+    return { flights: [], trains: [] };
+  }
+  const runnerFn = args.runner ?? runner;
+  const limit = args.limit ?? 3;
+  try {
+    const [flights, trains] = await Promise.all([
+      searchTransportOptionsDetail(
+        "search-flight", "flight", origin, destination, args.startDate, args.endDate, runnerFn, limit,
+      ),
+      searchTransportOptionsDetail(
+        "search-train", "train", origin, destination, args.startDate, args.endDate, runnerFn, limit,
+      ),
+    ]);
+    if (flights.length === 0) {
+      const hubs = transferHubCandidates(origin, args.originRegion);
+      const transfers = await Promise.all(
+        hubs.map(async (hub): Promise<TransportOptionDetail | null> => {
+          const [leg1, leg2] = await Promise.all([
+            searchTransportOption("search-flight", "flight", origin, hub, args.startDate, args.endDate, runnerFn).catch(() => null),
+            searchTransportOption("search-flight", "flight", hub, destination, args.startDate, args.endDate, runnerFn).catch(() => null),
+          ]);
+          if (!leg1 || !leg2) return null;
+          // 两段都查到实价才合计；任一脱敏/缺失 → null（如实待核价）
+          const totalAmount =
+            leg1.amount != null && leg2.amount != null
+              ? leg1.amount + leg2.amount
+              : null;
+          return {
+            mode: "flight" as const,
+            amount: totalAmount,
+            ...(leg1.durationMin != null && leg2.durationMin != null
+              ? { durationMin: leg1.durationMin + leg2.durationMin + 90 }
+              : {}),
+            ...(args.startDate ? { outbound: { from: origin, to: destination, date: args.startDate } as TransportLegDetail } : {}),
+            viaHub: hub,
+          };
+        }),
+      );
+      const valid = transfers
+        .filter((t): t is TransportOptionDetail => t !== null && t.amount != null)
+        .sort((a, b) => (a.amount ?? 0) - (b.amount ?? 0))
+        .slice(0, 2);
+      flights.push(...valid);
+    }
+    return { flights: flights.slice(0, limit + 2), trains: trains.slice(0, limit) };
+  } catch {
+    return { flights: [], trains: [] };
+  }
+}
+
+// ──────────────────────── 酒店多选项（预订选择卡） ────────────────────────
+
+/** 预订选择卡的酒店选项：真实在售酒店与房价（脱敏/未命中时 amount=null）。 */
+export interface HotelOptionDetail {
+  name: string;
+  /** 每晚价；null=平台未公布（体验模式脱敏），上层如实标「待核价」 */
+  amount: number | null;
+  rating?: number;
+  /** 飞猪档次标签（舒适型/高档型…） */
+  star?: string;
+  address?: string;
+  /** 位置卖点（interestsPoi，如「近宽窄巷子景区」） */
+  near?: string;
+  image?: string;
+  bookingUrl?: string;
+  /** 价格口径说明（实时价/待核价原因），卡面原样展示 */
+  note?: string;
+  /** 来自用户在筛选卡勾选的酒店（置顶展示） */
+  fromPicks?: boolean;
+}
+
+function hotelOptionFromItem(item: Record<string, unknown>, opts?: { fromPicks?: boolean }): HotelOptionDetail | null {
+  const name = strOf(item, "name");
+  if (!name) return null;
+  const price = parsePriceCny(item.price ?? item.adultPrice);
+  const rating = parsePriceCny(item.rate ?? item.score);
+  const detailUrl = strOf(item, "detailUrl") || undefined;
+  return {
+    name,
+    amount: Number.isFinite(price) && price > 0 ? Math.round(price) : null,
+    ...(Number.isFinite(rating) && rating > 0 ? { rating } : {}),
+    ...(strOf(item, "star") ? { star: strOf(item, "star") } : {}),
+    ...(strOf(item, "address") ? { address: strOf(item, "address") } : {}),
+    ...(strOf(item, "interestsPoi") ? { near: strOf(item, "interestsPoi") } : {}),
+    ...(strOf(item, "mainPic") ? { image: strOf(item, "mainPic") } : {}),
+    ...(detailUrl ? { bookingUrl: detailUrl } : {}),
+    ...(opts?.fromPicks ? { fromPicks: true } : {}),
+  };
+}
+
+/**
+ * 目的地酒店候选列表（预订选择卡数据源）：
+ * 用户在筛选卡勾选的酒店先按名精确搜索（置顶、fromPicks），不足部分用
+ * 同城同档在售酒店补齐。价格按住/退日期查；脱敏或未公布时 amount=null。
+ */
+export async function lookupHotelOptions(args: {
+  city: string;
+  /** 用户勾选的酒店/民宿名（优先精确询价，≤3） */
+  names?: string[];
+  checkIn?: string;
+  checkOut?: string;
+  tier?: HotelTier;
+  /** 卡面总条数上限（含勾选置顶），默认 5 */
+  limit?: number;
+}): Promise<HotelOptionDetail[]> {
+  const city = (args.city ?? "").trim();
+  if (!city) return [];
+  const limit = Math.max(3, args.limit ?? 5);
+  try {
+    const out: HotelOptionDetail[] = [];
+    const seen = new Set<string>();
+    const push = (o: HotelOptionDetail | null): void => {
+      if (!o) return;
+      const k = normalizeName(o.name);
+      if (!k || seen.has(k)) return;
+      seen.add(k);
+      out.push(o);
+    };
+    const picks = (args.names ?? []).map((n) => n.trim()).filter(Boolean).slice(0, 3);
+    const lists = await Promise.all([
+      ...picks.map((name) =>
+        searchHotels(city, { keywords: name, checkIn: args.checkIn, checkOut: args.checkOut }),
+      ),
+      searchHotels(city, {
+        stars: HOTEL_TIER_STARS[args.tier ?? "mid"],
+        checkIn: args.checkIn,
+        checkOut: args.checkOut,
+      }),
+    ]);
+    picks.forEach((name, i) => {
+      const hit = lists[i]?.find((h) => sameName(h.name, name));
+      if (!hit) return;
+      const opt = hotelOptionFromItem({
+        ...hit,
+        // searchHotels 已折好 price/rating/star，直接复用字段名
+        price: hit.price,
+        rate: hit.rating,
+      } as Record<string, unknown>);
+      if (opt) push({ ...opt, fromPicks: true });
+    });
+    for (const it of lists[picks.length] ?? []) {
+      if (out.length >= limit) break;
+      push(hotelOptionFromItem({ ...it } as Record<string, unknown>));
+    }
+    // 有实价的排前面，勾选置顶的永远最先
+    return out
+      .slice(0, limit)
+      .sort((a, b) => {
+        if (a.fromPicks !== b.fromPicks) return a.fromPicks ? -1 : 1;
+        if (a.amount != null && b.amount != null) return a.amount - b.amount;
+        if (a.amount != null) return -1;
+        if (b.amount != null) return 1;
+        return 0;
+      });
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 往返大交通最低价（单人）。机票与火车并行查询，按「耗时 ≤12h 的选项中取最低价」
  * 选型：火车 38 小时这种极端行程即使便宜也不作为默认推荐。

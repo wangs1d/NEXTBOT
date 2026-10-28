@@ -1,12 +1,13 @@
 // Agent Brain Center —— 感官皮层（SensoryCortex）
 //
-// 职责：脑内感官皮层聚合（视觉/听觉/语言理解），统一封装「听（ASR）」「看（截屏 + VLM 描述）」
-// 「说（语言组织）」三条感知通道，并提供多模态融合帧 buildSensoryFrame 供其他皮层消费。
+// 职责：脑内感官皮层聚合（视觉/语言），封装「看（截屏 + VLM 描述）」「说（语言
+// 组织）」两条感知通道，并提供多模态融合帧 buildSensoryFrame 供其他皮层消费。
+// 语音识别（ASR）已从产品中移除：入站音频的理解由 realtime 语音引擎在云端完成。
 //
 // 与 BodyCenter 器官的分工：
-//   - BrainCenter.SensoryCortex（本类）= 脑内感官皮层，做语义理解（图像→描述、音频→文本、文本→话术）
-//   - BodyCenter.Eye/Ear = 身体感觉器官，做硬件采集（拉截屏、收音频、ASR 转写）
-//   - 协作通路：BodyCenter 器官发布 body.eye.frame / body.ear.transcript 信号到 BodyBus，
+//   - BrainCenter.SensoryCortex（本类）= 脑内感官皮层，做语义理解（图像→描述、文本→话术）
+//   - BodyCenter.Eye/Ear = 身体感觉器官，做硬件采集（拉截屏、收音频）
+//   - 协作通路：BodyCenter 器官发布 body.eye.frame 信号到 BodyBus，
 //     SensoryCortex 通过 attachBodyBus 订阅这些信号填充 SensoryFrame；决策后通过 BodyGateway 下行控制器官
 //
 // 设计原则：
@@ -17,7 +18,6 @@ import type {
   AudioBufferRef,
   EmotionVector,
   SensoryFrame,
-  SensoryListenResult,
   SensoryLookResult,
   SensorySpeakResult,
   UserActivityState,
@@ -31,23 +31,9 @@ type AudioFormat = "mp3" | "wav" | "pcm" | "ogg";
 
 /**
  * 语音对话子系统（VoiceDialogueService）的最小化结构接口。
- * 提供 ASR（transcribeAudio）+ TTS（synthesizeSpeech），LLM 为可选。
+ * 提供 TTS（synthesizeSpeech），LLM 为可选。
  */
 interface VoiceDialogueLike {
-  transcribeAudio(
-    audio: {
-      data: Buffer | unknown;
-      format: AudioFormat;
-      sampleRate?: number;
-      channels?: number;
-    },
-    opts?: { language?: string },
-  ): Promise<{
-    text: string;
-    confidence: number;
-    language?: string;
-    isFinal: boolean;
-  }>;
   synthesizeSpeech(
     text: string,
     opts?: { voiceId?: string },
@@ -132,14 +118,12 @@ export class SensoryCortex {
   private started = false;
 
   // 累计调用计数（含失败调用，反映感官使用频次）
-  private totalListen = 0;
   private totalLook = 0;
   private totalSpeak = 0;
 
   // BodyBus 上行信号缓存（attachBodyBus 注入后由 body.* 信号更新）
   // buildSensoryFrame 在 args 未提供时优先使用这些缓存值
   private lastVisualFrame: unknown = null;
-  private lastAudioText: string | undefined;
   /** BodyBus 订阅取消函数（attachBodyBus 注入后设置，stop 时清理） */
   private bodyBusUnsubscribe: (() => void) | null = null;
 
@@ -167,11 +151,9 @@ export class SensoryCortex {
   }
 
   /**
-   * 订阅 BodyBus 上行信号，把 body.eye.frame / body.ear.transcript
-   * 信号接入感官皮层。
+   * 订阅 BodyBus 上行信号，把 body.eye.frame 信号接入感官皮层。
    *
    * - body.eye.frame → 更新内部缓存 lastVisualFrame（供 buildSensoryFrame 优先使用）
-   * - body.ear.transcript → 更新内部缓存 lastAudioText
    *
    * 返回取消订阅函数（调用后移除所有 BodyBus 订阅）。
    * 此方法由 create-app-services.ts 在装配阶段调用，注入 BodyBus 引用。
@@ -196,20 +178,6 @@ export class SensoryCortex {
       }),
     );
 
-    // body.ear.transcript → 缓存最新音频文本
-    unsubs.push(
-      bodyBus.subscribe("body.ear.transcript", (signal) => {
-        try {
-          const s = signal as { payload?: { text?: string } };
-          if (s?.payload && typeof s.payload.text === "string") {
-            this.lastAudioText = s.payload.text;
-          }
-        } catch {
-          /* ignore */
-        }
-      }),
-    );
-
     const unsubAll = () => {
       for (const unsub of unsubs) {
         try {
@@ -220,7 +188,7 @@ export class SensoryCortex {
       }
     };
     this.bodyBusUnsubscribe = unsubAll;
-    console.log("[SensoryCortex] 已订阅 BodyBus（eye.frame / ear.transcript）");
+    console.log("[SensoryCortex] 已订阅 BodyBus（eye.frame）");
     return unsubAll;
   }
 
@@ -253,70 +221,6 @@ export class SensoryCortex {
   }
 
   // ---- 核心方法 ---------------------------------------------------------
-
-  /**
-   * 听：委托 VoiceDialogueService.transcribeAudio 做语音识别。
-   * voiceDialogue 未注册时返回空结果并带 error。
-   */
-  async listen(
-    audio: AudioBufferRef,
-    opts?: { language?: string },
-  ): Promise<SensoryListenResult> {
-    const now = new Date().toISOString();
-    this.totalListen += 1;
-
-    if (!this.voiceDialogue) {
-      console.log("[SensoryCortex] listen: VoiceDialogue 未注册");
-      return {
-        text: "",
-        confidence: 0,
-        isFinal: false,
-        processedAt: now,
-        error: "VoiceDialogueService 未注册",
-      };
-    }
-
-    try {
-      const result = await this.voiceDialogue.transcribeAudio(
-        {
-          data: audio.data,
-          format: audio.format,
-          sampleRate: audio.sampleRate,
-          channels: audio.channels,
-        },
-        opts?.language ? { language: opts.language } : undefined,
-      );
-      try {
-        this.synapseBus?.fire(
-          "sensory.listen",
-          {
-            text: result.text,
-            confidence: result.confidence,
-            language: result.language,
-          },
-          { source: "sensory" },
-        );
-      } catch {
-        /* fire 失败不影响主流程 */
-      }
-      return {
-        text: result.text,
-        confidence: result.confidence,
-        language: result.language,
-        isFinal: result.isFinal,
-        processedAt: now,
-      };
-    } catch (err) {
-      console.log(`[SensoryCortex] listen 调用失败: ${err}`);
-      return {
-        text: "",
-        confidence: 0,
-        isFinal: false,
-        processedAt: now,
-        error: err instanceof Error ? err.message : String(err),
-      };
-    }
-  }
 
   /**
    * 看：委托 DesktopVisual.screenshot 截屏；若暴露 describe 方法则生成 VLM 描述。
@@ -503,62 +407,12 @@ export class SensoryCortex {
   }
 
   /**
-   * 端到端语音：逐块串行处理音频流。
-   *
-   * 简化实现：对每块音频调 listen 识别；若 voiceDialogue 暴露 chatCompletion，
-   * 则把识别文本喂给 LLM 生成回复，再调 speak 合成语音，并 yield 回复文本；
-   * 否则直接 yield 识别中间结果（不真的过 LLM）。
-   *
-   * TODO: 完整端到端全双工语音 LLM（流式 ASR + 流式 LLM + 流式 TTS）在后续迭代实现。
-   *
-   * @param audioStream 输入音频流（异步可迭代或数组）
-   * @param opts.language 语言提示
-   */
-  async *endToEndVoice(
-    audioStream: AsyncIterable<AudioBufferRef> | AudioBufferRef[],
-    opts?: { language?: string },
-  ): AsyncIterable<string> {
-    // for await 同时接受 AsyncIterable 与数组（数组按同步迭代，逐项 await）
-    for await (const chunk of audioStream) {
-      const listened = await this.listen(chunk, opts);
-      if (!listened.text) {
-        continue;
-      }
-
-      // 若有 LLM 能力，生成回复并合成语音
-      if (
-        this.voiceDialogue &&
-        typeof this.voiceDialogue.chatCompletion === "function"
-      ) {
-        try {
-          const reply = await this.voiceDialogue.chatCompletion(
-            [
-              { role: "system", content: "你是用户的私人助理，请简短回复。" },
-              { role: "user", content: listened.text },
-            ],
-            {},
-          );
-          // 合成回复语音（失败不影响 yield 文本）
-          await this.speak(reply);
-          yield reply;
-        } catch (err) {
-          console.log(`[SensoryCortex] endToEndVoice LLM 失败: ${err}`);
-          yield listened.text;
-        }
-      } else {
-        // 简化实现：仅 yield ASR 中间结果，不真的过 LLM
-        yield listened.text;
-      }
-    }
-  }
-
-  /**
    * 组装多模态感官帧（纯函数式，不调用任何子系统）。
-   * 将 ASR 文本 / 视觉描述 / 情绪 / 活动状态融合为统一感知帧。
+   * 将视觉描述 / 情绪 / 活动状态融合为统一感知帧。
    *
-   * 当 args 未提供 audioText / visualDescription 时，优先使用 BodyBus 缓存的
-   * 最近一次 body.ear.transcript / body.eye.frame 信号值，
-   * 让 cognize 在没有显式调 listen/look 时也能拿到身体侧的感知数据。
+   * 当 args 未提供 visualDescription 时，优先使用 BodyBus 缓存的
+   * 最近一次 body.eye.frame 信号值，
+   * 让 cognize 在没有显式调 look 时也能拿到身体侧的感知数据。
    */
   buildSensoryFrame(args: {
     actorId: string;
@@ -568,12 +422,11 @@ export class SensoryCortex {
     activity?: UserActivityState;
   }): SensoryFrame {
     // 优先用 args 显式传入的值；缺失时回退到 BodyBus 缓存
-    const audioText = args.audioText ?? this.lastAudioText;
     const visualDescription =
       args.visualDescription ?? this.extractVisualDescriptionFromCache();
     return {
       actorId: args.actorId,
-      audioText,
+      audioText: args.audioText,
       visualDescription,
       emotion: args.emotion,
       activity: args.activity,
@@ -600,10 +453,9 @@ export class SensoryCortex {
 
   // ---- 统计 -------------------------------------------------------------
 
-  /** 返回累计的 listen / look / speak 调用次数。 */
-  getStats(): { totalListen: number; totalLook: number; totalSpeak: number } {
+  /** 返回累计的 look / speak 调用次数。 */
+  getStats(): { totalLook: number; totalSpeak: number } {
     return {
-      totalListen: this.totalListen,
       totalLook: this.totalLook,
       totalSpeak: this.totalSpeak,
     };

@@ -1,6 +1,12 @@
 /**
  * 共用浏览器注入运行时（framework-free，纯同步 JS）。
  *
+ * 面板身份标记（2026-10-28 根因修复）：本控制器的每个文档都带
+ * window.__NB_SHARED_PANEL__ —— 进程内多个 WebView2 控制器（光球
+ * NavigateToString 页也报 about:blank）共用同一个 CDP 端点，URL
+ * 无法唯一定位面板页；服务端 cdp-gateway 据此标记唯一锁定
+ * 用户可见的面板页，再也不会把页面开到看不见的目标上。
+ *
  * 设计约束：
  *   - 本文件只提供「单次同步探测/操作」原语；所有等待/重试/超时循环由
  *     宿主执行器（BrowserActionExecutor，Dart/其他语言）驱动，这里绝不内置轮询。
@@ -14,6 +20,8 @@
  *   - ref 是给 LLM 的稳定元素引用：read_page 返回 ref，click 按 ref 定位，
  *     页面局部刷新不会导致 ref 错位（相比按 DOM 序号 index）。
  */
+window.__NB_SHARED_PANEL__ = true;
+
 function __installSharedBrowser() {
   if (window.__sharedBrowser && window.__sharedBrowser.__ready) return;
   const SB = window.__sharedBrowser = (window.__sharedBrowser || {});

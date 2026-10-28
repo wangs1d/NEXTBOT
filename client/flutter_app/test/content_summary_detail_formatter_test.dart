@@ -191,7 +191,7 @@ void main() {
     expect(cleaned.contains("---"), isTrue);
   });
 
-  test("详情消毒：裸露 RENDER 声明标记行与标题回显首行仍被剥离", () {
+  test("详情消毒：只剥 RENDER 声明标记行，与标题同文的首行导语保留（卡内是全文）", () {
     const String dirty =
         "王哥，我扒了一圈今天的公开报道，给你按块捋一下——\n\n[RENDER_HINT:structured]\n\n## 板块一\n\n正文";
     final String cleaned = ContentSummaryParser.sanitizeDetailContent(
@@ -200,7 +200,7 @@ void main() {
     );
 
     expect(cleaned.contains("RENDER_HINT"), isFalse);
-    expect(cleaned.contains("王哥，我扒了一圈"), isFalse);
+    expect(cleaned.contains("王哥，我扒了一圈"), isTrue);
     expect(cleaned.contains("## 板块一"), isTrue);
   });
 }

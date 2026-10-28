@@ -119,16 +119,18 @@ void main() {
     addTearDown(tester.view.reset);
 
     final GlobalKey boundaryKey = GlobalKey();
+    // RepaintBoundary 包在最外层：对话框（文字版预览）渲染在 overlay 里，
+    // 只包页面 subtree 会把对话框截丢。
     await tester.pumpWidget(
-      MaterialApp(
-        debugShowCheckedModeBanner: false,
-        // 与 App 默认深色主题一致：卡片底色与文字色都按 dark 变体取。
-        theme: AppTheme.of(AppThemeVariant.dark),
-        darkTheme: AppTheme.of(AppThemeVariant.dark),
-        themeMode: ThemeMode.dark,
-        home: RepaintBoundary(
-          key: boundaryKey,
-          child: const TravelPlanArchivePage(
+      RepaintBoundary(
+        key: boundaryKey,
+        child: MaterialApp(
+          debugShowCheckedModeBanner: false,
+          // 与 App 默认深色主题一致：卡片底色与文字色都按 dark 变体取。
+          theme: AppTheme.of(AppThemeVariant.dark),
+          darkTheme: AppTheme.of(AppThemeVariant.dark),
+          themeMode: ThemeMode.dark,
+          home: const TravelPlanArchivePage(
             seedMessage: "下周末从北京出发去成都玩三天",
           ),
         ),
@@ -255,8 +257,8 @@ void main() {
     await tester.tap(find.text("稍后再看"), warnIfMissed: false);
     await tester.pump(const Duration(milliseconds: 300));
 
-    await _waitFor(tester, find.textContaining("下面是照着能走的整体安排"),
-        label: "方案明细尾注");
+    await _waitFor(tester, find.textContaining("站 · 路上"),
+        label: "方案明细卡");
     final Finder planList = find.byType(ListView).first;
     await tester.drag(planList, const Offset(0, -4000));
     await tester.pump(const Duration(milliseconds: 200));
@@ -270,6 +272,28 @@ void main() {
     expect(find.descendant(of: dossier, matching: find.text("核实")),
         findsOneWidget);
     await _shot(tester, boundaryKey, "05-plan");
+
+    // 7) 文字版行程：明细卡底部入口 → 预览对话框（拉完整行程 + 每站真图）
+    final Finder textBtn = find.text("文字版 · 存图分享");
+    await tester.ensureVisible(textBtn);
+    await tester.pump();
+    await tester.tap(textBtn);
+    await _waitFor(tester, find.text("每日安排"), label: "文字版长图");
+    await _settleImages(tester);
+    await _shot(tester, boundaryKey, "05b-text-sheet");
+    // 滚到长图中下部：每日安排的贴士/避坑/预约、出发前核实、行前清单、页脚
+    final Finder sheetScroll = find
+        .descendant(of: find.byType(Dialog), matching: find.byType(SingleChildScrollView))
+        .first;
+    await tester.drag(sheetScroll, const Offset(0, -2600));
+    await tester.pump(const Duration(milliseconds: 250));
+    await _shot(tester, boundaryKey, "05c-text-sheet-tail");
+    await tester.drag(sheetScroll, const Offset(0, -2600));
+    await tester.pump(const Duration(milliseconds: 250));
+    await _shot(tester, boundaryKey, "05d-text-sheet-end");
+    await tester.tap(find.byTooltip("关闭"), warnIfMissed: false);
+    await tester.pump(const Duration(milliseconds: 200));
+
     // 放开真实网络后 HttpClient 会留 15s keep-alive 空闲计时器；
     // 不收掉就是 teardown 报 pending timers（与本页渲染无关）。
     await tester.pump(const Duration(seconds: 16));

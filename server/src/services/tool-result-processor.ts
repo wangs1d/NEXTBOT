@@ -21,8 +21,10 @@ import {
   stripInternalFrames,
 } from "../external-model/internal-frames.js";
 
-/** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：400） */
-const CONTENT_LENGTH_THRESHOLD = 400;
+/** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：800。
+ *  2026-10-28 定版：正文须超过 800 字才折叠——400 门槛把日常比价/问答回复也折进卡里，
+ *  造成「气泡全文 + 卡内复读」的双份渲染；短内容直接平铺，向豆包的折叠策略看齐） */
+const CONTENT_LENGTH_THRESHOLD = 800;
 
 /** 提取 LLM 输出的 [RENDER_HINT:xxx] 标记，剥离后返回 hint 和清洗后的文本 */
 function extractLlmRenderHint(text: string): { rawHint: string | null; cleanText: string } {
@@ -736,7 +738,7 @@ export function stripMediaCardMarker(text: string): string {
   const END = "[AGENT_RESULT_CARD_END]";
   let out = "";
   let rest = text;
-  // 循环剥除，直到没有完整的一对开始/结束标记（含 ASR/搜索等链式注入）
+  // 循环剥除，直到没有完整的一对开始/结束标记（含搜索等链式注入）
   for (let guard = 0; guard < 20; guard++) {
     const si = rest.indexOf(START);
     const ei = si === -1 ? -1 : rest.indexOf(END, si);

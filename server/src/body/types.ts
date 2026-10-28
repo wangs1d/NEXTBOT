@@ -8,7 +8,7 @@
  *
  * 与人体器官对照：
  *  - eye         眼（视觉）：截屏 / 摄像头 / VLM 描述
- *  - ear         耳（听觉）：ASR / phone-bridge 入站音频
+ *  - ear         耳（听觉）：phone-bridge / voice-message 入站音频到达
  *  - skin        皮肤（体感）：智能家居 / 设备传感器（纯感知，无下行工具）
  *  - vestibular  前庭器（平衡）：多设备渲染状态（纯感知，无下行工具）
  *  - homeostasis 稳态（内脏）：电量 / 位置 / 算力配额 / 负载 / 疲劳度

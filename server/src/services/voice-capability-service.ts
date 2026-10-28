@@ -4,24 +4,21 @@ import type { TtsService } from "./tts-service.js";
 import type { VoiceMessageService } from "./voice-message-service.js";
 import type { VoiceDialogueService } from "./voice-dialogue/voice-dialogue-service.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
-import type { AudioBuffer } from "./voice-dialogue/types.js";
 
 /**
- * Agent 底层语音能力中枢（TTS + ASR + WS 推送 + 能力自描述）。
+ * Agent 底层语音能力中枢（TTS + WS 推送 + 能力自描述）。
  *
  * 设计目标：
- *   1. **底层能力**：TTS / ASR 是 Agent 的基础能力，与具体业务（电话触达、提醒闹钟、
- *      主动消息、对话式交互等）解耦。业务方只需向本服务请求"合成+推送"或"识别"。
+ *   1. **底层能力**：TTS 是 Agent 的基础能力，与具体业务（电话触达、提醒闹钟、
+ *      主动消息、对话式交互等）解耦。业务方只需向本服务请求"合成+推送"。
  *   2. **Agent 自调度**：通过 `voice.speak` 工具暴露给 LLM，Agent 可在不走电话触达
  *      （phone.call_user）的前提下，直接对用户进行语音播报。
- *   3. **未来扩展**：ASR 链路预留（依赖 VoiceDialogueService.transcribeAudio），
- *      全双工对话只需在合成/识别间加状态机即可，无需改动业务侧。
- *   4. **单一传输抽象**：所有"对用户说话"的 WS 推送走本服务统一的事件类型，
+ *   3. **单一传输抽象**：所有"对用户说话"的 WS 推送走本服务统一的事件类型，
  *      客户端只需订阅 `agent.voice.*` 事件族即可覆盖所有语音场景。
  *
  * 与既有模块的关系：
  *   - `TtsService`：保留，纯合成（mp3 base64），不感知 WS。
- *   - `VoiceDialogueService`：保留，Provider 注册表（多 TTS/ASR/LLM 提供商切换）。
+ *   - `VoiceDialogueService`：保留，Provider 注册表（多 TTS/LLM 提供商切换）。
  *   - `VirtualPhoneService`：保留，电话触达专用（带前摇振铃 + 来电 UI）；其 TTS 合成
  *     仍直接调 `TtsService`，但 `agent.proactive_voice` / `tts_alarm_play` 等非电话
  *     场景统一改走本服务。
@@ -68,33 +65,12 @@ export interface VoiceSpeakResult {
   skippedReason?: string;
 }
 
-/** ASR 识别参数。 */
-export interface VoiceTranscribeParams {
-  /** 音频数据。 */
-  audio: AudioBuffer;
-  /** 语言提示（如 "zh"、"en"）。 */
-  language?: string;
-  /** 指定 provider（默认走 VoiceDialogueService 的默认 provider）。 */
-  providerName?: string;
-}
-
-/** ASR 识别结果。 */
-export interface VoiceTranscribeResult {
-  ok: boolean;
-  text?: string;
-  confidence?: number;
-  language?: string;
-  error?: string;
-}
-
 /** Agent 语音能力自描述（供能力清单 / 工具元数据使用）。 */
 export interface VoiceCapabilityInfo {
   /** TTS 是否可用（至少一个 provider 已配置）。 */
   ttsEnabled: boolean;
   /** 当前 TTS 提供商。 */
   ttsProvider: "minimax" | "openai" | "none";
-  /** ASR 是否可用。 */
-  asrEnabled: boolean;
   /** 已注册的语音对话 provider 列表。 */
   availableProviders: string[];
 }
@@ -124,28 +100,6 @@ export class VoiceCapabilityService {
     | { ok: false; reason: string }
   > {
     return this.deps.ttsService.synthesizeMp3Base64(text);
-  }
-
-  /**
-   * ASR 识别（未来扩展点，目前为预留接口）。
-   * 当 ASR provider 已配置时即可工作；当前业务侧无调用方，但接口稳定。
-   */
-  async transcribe(params: VoiceTranscribeParams): Promise<VoiceTranscribeResult> {
-    try {
-      const result = await this.deps.voiceDialogueService.transcribeAudio(
-        params.audio,
-        { language: params.language, providerName: params.providerName },
-      );
-      return {
-        ok: true,
-        text: result.text,
-        confidence: result.confidence,
-        language: result.language,
-      };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
-    }
   }
 
   /**
@@ -336,7 +290,6 @@ export class VoiceCapabilityService {
     return {
       ttsEnabled: this.deps.ttsService.isEnabled(),
       ttsProvider: this.deps.ttsService.getProvider() as VoiceCapabilityInfo["ttsProvider"],
-      asrEnabled: this.deps.voiceDialogueService.getAvailableProviders().length > 0,
       availableProviders: this.deps.voiceDialogueService.getAvailableProviders(),
     };
   }

@@ -38,7 +38,7 @@ function listTsFiles(dir: string): string[] {
 // 吞掉大段代码，导致守卫误报；行注释足够覆盖本闸的断言需求）
 const stripLineComments = (src: string): string =>
   src
-    .split("\n")
+    .split(/\r?\n/)
     .map((l) => l.replace(/(^|[^:"'])\/\/.*$/, "$1"))
     .join("\n");
 

@@ -171,8 +171,8 @@ export class PhoneCallHandler {
             break;
           }
 
-          // 等待用户在通话中的真实回复（客户端经 phone.call_reply 上行，
-          // 打字或本地 ASR 转写均可）；超时/挂断返回 null
+          // 等待用户在通话中的真实回复（客户端经 phone.call_reply 上行，打字输入）；
+          // 超时/挂断返回 null
           const input = await this.deps.virtualPhoneService.waitForCallReply(callId, remainingMs);
           if (!input) break;
         const userText = input.text.trim();

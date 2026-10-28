@@ -1,10 +1,14 @@
 import "dart:async" show Timer, unawaited;
 import "dart:convert";
-import "dart:io" show Platform;
+import "dart:io" show File, Platform, Process;
 import "dart:math" as math;
+import "dart:typed_data" show ByteData;
+import "dart:ui" as ui show Image, ImageByteFormat;
 import "dart:ui" show FontFeature, ImageFilter;
 
+import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
+import "package:flutter/rendering.dart" show RenderRepaintBoundary;
 import "package:flutter/services.dart"
     show
         Clipboard,
@@ -27,6 +31,7 @@ import "travel_plan_window.dart";
 import "travel_theme.dart";
 
 part "travel_ticket_book.dart";
+part "travel_plan_text_sheet.dart";
 
 // ═══════════════════════════════════════════════════════════════════
 // 旅游界面 v3（应用内「常用工具 → 行程」入口）· 左侧 tab 双空间
@@ -1983,6 +1988,206 @@ class _WishlistCardData {
   bool get hasSelection => view.isNotEmpty || stay.isNotEmpty || food.isNotEmpty;
 }
 
+/// 预订卡的大交通腿（去程/返程；飞猪实时班次）。
+class _BookingLegData {
+  _BookingLegData({
+    required this.from,
+    required this.to,
+    required this.date,
+    required this.dep,
+    required this.arr,
+    required this.fromStation,
+    required this.toStation,
+    required this.durationMin,
+  });
+
+  factory _BookingLegData.fromJson(Map<String, dynamic> json) {
+    return _BookingLegData(
+      from: json["from"]?.toString() ?? "",
+      to: json["to"]?.toString() ?? "",
+      date: json["date"]?.toString() ?? "",
+      dep: json["dep"]?.toString() ?? "",
+      arr: json["arr"]?.toString() ?? "",
+      fromStation: json["fromStation"]?.toString() ?? "",
+      toStation: json["toStation"]?.toString() ?? "",
+      durationMin: (json["durationMin"] as num?)?.toInt(),
+    );
+  }
+
+  final String from;
+  final String to;
+  final String date;
+  final String dep;
+  final String arr;
+  final String fromStation;
+  final String toStation;
+  final int? durationMin;
+
+  /// 「17:40 萧山机场 → 20:15 天府机场」；缺时刻的段如实只报城市。
+  String get summary {
+    final String fromP = fromStation.isNotEmpty ? fromStation : from;
+    final String toP = toStation.isNotEmpty ? toStation : to;
+    final String depP = dep.isNotEmpty ? "$dep " : "";
+    final String arrP = arr.isNotEmpty ? " $arr" : "";
+    return "$depP$fromP →$arrP $toP";
+  }
+}
+
+/// 预订卡的大交通选项（票价取不到时 amount=null → 卡面标「待核价」）。
+class _BookingTransportData {
+  _BookingTransportData({
+    required this.key,
+    required this.mode,
+    required this.no,
+    required this.carrier,
+    required this.outbound,
+    required this.inbound,
+    required this.amount,
+    required this.durationMin,
+    required this.viaHub,
+    required this.recommended,
+  });
+
+  factory _BookingTransportData.fromJson(Map<String, dynamic> json) {
+    return _BookingTransportData(
+      key: json["key"]?.toString() ?? "",
+      mode: json["mode"]?.toString() == "train" ? "train" : "flight",
+      no: json["no"]?.toString() ?? "",
+      carrier: json["carrier"]?.toString() ?? "",
+      outbound: json["outbound"] is Map<String, dynamic>
+          ? _BookingLegData.fromJson(json["outbound"] as Map<String, dynamic>)
+          : null,
+      inbound: json["inbound"] is Map<String, dynamic>
+          ? _BookingLegData.fromJson(json["inbound"] as Map<String, dynamic>)
+          : null,
+      amount: (json["amount"] as num?)?.toDouble(),
+      durationMin: (json["durationMin"] as num?)?.toInt(),
+      viaHub: json["viaHub"]?.toString() ?? "",
+      recommended: json["recommended"] == true,
+    );
+  }
+
+  final String key;
+  final String mode;
+  final String no;
+  final String carrier;
+  final _BookingLegData? outbound;
+  final _BookingLegData? inbound;
+  final double? amount;
+  final int? durationMin;
+  final String viaHub;
+  final bool recommended;
+
+  bool get isTrain => mode == "train";
+
+  /// 「2小时35分」；null=平台未给耗时。
+  String? get durationLabel {
+    final int? m = durationMin;
+    if (m == null || m <= 0) return null;
+    return "${m ~/ 60}小时${m % 60 == 0 ? "" : "${m % 60}分"}";
+  }
+}
+
+/// 预订卡的酒店选项（飞猪在售，每晚价）。
+class _BookingHotelData {
+  _BookingHotelData({
+    required this.key,
+    required this.name,
+    required this.amount,
+    required this.rating,
+    required this.star,
+    required this.near,
+    required this.image,
+    required this.fromPicks,
+    required this.recommended,
+  });
+
+  factory _BookingHotelData.fromJson(Map<String, dynamic> json) {
+    return _BookingHotelData(
+      key: json["key"]?.toString() ?? "",
+      name: json["name"]?.toString() ?? "",
+      amount: (json["amount"] as num?)?.toDouble(),
+      rating: (json["rating"] as num?)?.toDouble(),
+      star: json["star"]?.toString() ?? "",
+      near: json["near"]?.toString() ?? "",
+      image: json["image"]?.toString() ?? "",
+      fromPicks: json["fromPicks"] == true,
+      recommended: json["recommended"] == true,
+    );
+  }
+
+  final String key;
+  final String name;
+  final double? amount;
+  final double? rating;
+  final String star;
+  final String near;
+  final String image;
+  final bool fromPicks;
+  final bool recommended;
+}
+
+/// 预订选择卡：大交通 + 住宿两段单选，可全不选（先不订按参考价走）。
+class _BookingCardData {
+  _BookingCardData({
+    required this.stage,
+    required this.title,
+    required this.sub,
+    required this.origin,
+    required this.destination,
+    required this.checkIn,
+    required this.checkOut,
+    required this.nights,
+    required this.transports,
+    required this.hotels,
+    required this.transportKey,
+    required this.hotelKey,
+    required this.trial,
+  });
+
+  factory _BookingCardData.fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> sel = json["selection"] is Map<String, dynamic>
+        ? json["selection"] as Map<String, dynamic>
+        : const <String, dynamic>{};
+    return _BookingCardData(
+      stage: json["stage"]?.toString() ?? "预订安排",
+      title: json["title"]?.toString() ?? "",
+      sub: json["sub"]?.toString() ?? "",
+      origin: json["origin"]?.toString() ?? "",
+      destination: json["destination"]?.toString() ?? "",
+      checkIn: json["checkIn"]?.toString() ?? "",
+      checkOut: json["checkOut"]?.toString() ?? "",
+      nights: (json["nights"] as num?)?.toInt() ?? 0,
+      transports: <_BookingTransportData>[
+        for (final dynamic t in (json["transports"] as List<dynamic>? ?? const <dynamic>[]))
+          if (t is Map<String, dynamic>) _BookingTransportData.fromJson(t),
+      ],
+      hotels: <_BookingHotelData>[
+        for (final dynamic h in (json["hotels"] as List<dynamic>? ?? const <dynamic>[]))
+          if (h is Map<String, dynamic>) _BookingHotelData.fromJson(h),
+      ],
+      transportKey: sel["transportKey"]?.toString() ?? "",
+      hotelKey: sel["hotelKey"]?.toString() ?? "",
+      trial: json["trial"] == true,
+    );
+  }
+
+  final String stage;
+  final String title;
+  final String sub;
+  final String origin;
+  final String destination;
+  final String checkIn;
+  final String checkOut;
+  final int nights;
+  final List<_BookingTransportData> transports;
+  final List<_BookingHotelData> hotels;
+  /// 已确认的回显选择（恢复会话时原样带回，卡面勾上）。
+  final String transportKey;
+  final String hotelKey;
+  final bool trial;
+}
+
 /// 相邻两站的真实交通腿（OSRM 路网优先，失败降级估算）。
 class _DraftLegData {
   _DraftLegData({
@@ -2338,6 +2543,7 @@ enum _FlowKind {
   choice,
   guide,
   wishlist,
+  booking,
   typing,
   budget,
   draft,
@@ -2352,6 +2558,7 @@ class _FlowItem {
     this.choice,
     this.guide,
     this.wishlist,
+    this.booking,
     this.budget,
     this.draft,
   });
@@ -2366,6 +2573,8 @@ class _FlowItem {
       _FlowItem._(_FlowKind.guide, guide: data);
   factory _FlowItem.wishlist(_WishlistCardData data) =>
       _FlowItem._(_FlowKind.wishlist, wishlist: data);
+  factory _FlowItem.booking(_BookingCardData data) =>
+      _FlowItem._(_FlowKind.booking, booking: data);
   factory _FlowItem.typing() => _FlowItem._(_FlowKind.typing);
   factory _FlowItem.budget(_BudgetData data) =>
       _FlowItem._(_FlowKind.budget, budget: data);
@@ -2379,6 +2588,7 @@ class _FlowItem {
   final _ChoiceCardData? choice;
   final _GuideCardData? guide;
   final _WishlistCardData? wishlist;
+  final _BookingCardData? booking;
   final _BudgetData? budget;
   final _DraftData? draft;
 }
@@ -2533,7 +2743,9 @@ class _TurnResult {
             else if (c["type"] == "guide")
               _GuideCardData.fromJson(c)
             else if (c["type"] == "wishlist")
-              _WishlistCardData.fromJson(c),
+              _WishlistCardData.fromJson(c)
+            else if (c["type"] == "booking")
+              _BookingCardData.fromJson(c),
       ],
       budget: json["budget"] is Map<String, dynamic>
           ? _BudgetData.fromJson(json["budget"] as Map<String, dynamic>)
@@ -2704,6 +2916,8 @@ class _PlanningStageState extends State<_PlanningStage> {
         _append(_FlowItem.guide(card));
       } else if (card is _WishlistCardData) {
         _append(_FlowItem.wishlist(card));
+      } else if (card is _BookingCardData) {
+        _append(_FlowItem.booking(card));
       }
     }
     if (r.budget != null) _append(_FlowItem.budget(r.budget!));
@@ -2722,6 +2936,7 @@ class _PlanningStageState extends State<_PlanningStage> {
           f.kind == _FlowKind.choice ||
           f.kind == _FlowKind.guide ||
           f.kind == _FlowKind.wishlist ||
+          f.kind == _FlowKind.booking ||
           f.kind == _FlowKind.budget ||
           f.kind == _FlowKind.draft,
     );
@@ -2971,6 +3186,64 @@ class _PlanningStageState extends State<_PlanningStage> {
     if (ready) await _generate();
   }
 
+  /// 预订选择卡：提交所选班次/酒店（可全不选=先不订，按参考价走），
+  /// 服务端回 ready 后自动进入真实生成——所选班次进预算与行程交通段。
+  Future<void> _submitBooking(
+    _FlowItem item,
+    _BookingCardData card,
+    String? transportKey,
+    String? hotelKey,
+  ) async {
+    final String? id = _sessionId;
+    if (id == null || _busy) return;
+    String labelOf(String? key, List<String> Function() pick) {
+      if (key == null || key.isEmpty) return "";
+      final List<String> names = pick();
+      return names.isEmpty ? "" : names.first;
+    }
+
+    final String tLabel = labelOf(transportKey, () => <String>[
+          for (final _BookingTransportData t in card.transports)
+            if (t.key == transportKey)
+              "${t.isTrain ? "车次" : "航班"} ${t.no}${t.carrier.isEmpty ? "" : " ${t.carrier}"}",
+        ]);
+    final String hLabel = labelOf(hotelKey, () => <String>[
+          for (final _BookingHotelData h in card.hotels)
+            if (h.key == hotelKey) h.name,
+        ]);
+    final String picked = <String>[
+      if (tLabel.isNotEmpty) "大交通：$tLabel",
+      if (hLabel.isNotEmpty) "住宿：$hLabel",
+    ].join("；");
+    setState(() {
+      _flow.remove(item);
+      _dropStaleOutput();
+      _busy = true;
+    });
+    _append(_FlowItem.user(picked.isEmpty ? "先不订，按参考价算" : picked));
+    _append(_FlowItem.typing());
+    bool ready = false;
+    try {
+      final Map<String, dynamic>? decoded = await _post(
+        "/travel/plan-session/$id/booking",
+        <String, dynamic>{
+          if (transportKey != null && transportKey.isNotEmpty)
+            "transportKey": transportKey,
+          if (hotelKey != null && hotelKey.isNotEmpty) "hotelKey": hotelKey,
+        },
+        _turnTimeout,
+      );
+      final _TurnResult r = _TurnResult.fromJson(decoded ?? <String, dynamic>{});
+      _insertSayAndCards(r);
+      ready = r.state == "ready";
+    } catch (e) {
+      _recoverFromError(e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+    if (ready) await _generate();
+  }
+
   Future<void> _generate() async {
     final String? id = _sessionId;
     if (id == null || _busy) return;
@@ -3072,6 +3345,7 @@ class _PlanningStageState extends State<_PlanningStage> {
       "choice" => _FlowItem.choice(_ChoiceCardData.fromJson(card)),
       "guide" => _FlowItem.guide(_GuideCardData.fromJson(card)),
       "wishlist" => _FlowItem.wishlist(_WishlistCardData.fromJson(card)),
+      "booking" => _FlowItem.booking(_BookingCardData.fromJson(card)),
       _ => null,
     };
   }
@@ -3571,6 +3845,29 @@ class _PlanningStageState extends State<_PlanningStage> {
             ),
           ),
         );
+      case _FlowKind.booking:
+        final _BookingCardData card = item.booking!;
+        return _AgentBlock(
+          name: _agentLabel,
+          colors: c,
+          child: _StageCardShell(
+            colors: c,
+            icon: Icons.book_online_outlined,
+            stage: card.stage.isEmpty ? "预订安排" : card.stage,
+            trailing: _StageTrailing(text: "可先不订", colors: c),
+            lead: card.title.isEmpty ? "先把大交通和住宿定一下" : card.title,
+            desc: card.sub.isEmpty
+                ? "实时班次与房价，选中的会算进预算和行程；不合适就先不订。"
+                : card.sub,
+            child: _BookingCard(
+              card: card,
+              colors: c,
+              enabled: !_busy,
+              onConfirm: (String? transportKey, String? hotelKey) =>
+                  _submitBooking(item, card, transportKey, hotelKey),
+            ),
+          ),
+        );
       case _FlowKind.budget:
         return _AgentBlock(
           name: _agentLabel,
@@ -3601,29 +3898,42 @@ class _PlanningStageState extends State<_PlanningStage> {
           ),
         );
       case _FlowKind.draft:
+        final _DraftData draft = item.draft!;
         return _AgentBlock(
           name: _agentLabel,
           colors: c,
-          child: Align(
-            alignment: Alignment.centerLeft,
-            child: _DraftCard(
-              draft: item.draft!,
-              colors: c,
-              enabled: !_busy,
-              onGenerate: () => _openDraft(item.draft!),
-              onAdjust: () {
-                _inputFocus.requestFocus();
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(
-                    content: Text(
-                        _adjustHint("第二天想去都江堰"),
-                        style: const TextStyle(fontSize: 12)),
-                    behavior: SnackBarBehavior.floating,
-                    duration: const Duration(seconds: 2),
-                  ),
-                );
-              },
-            ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Align(
+                alignment: Alignment.centerLeft,
+                child: _DraftCard(
+                  draft: draft,
+                  colors: c,
+                  enabled: !_busy,
+                  onGenerate: () => _openDraft(draft),
+                  onAdjust: () {
+                    _inputFocus.requestFocus();
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                            _adjustHint("第二天想去都江堰"),
+                            style: const TextStyle(fontSize: 12)),
+                        behavior: SnackBarBehavior.floating,
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                ),
+              ),
+              if (draft.days.isNotEmpty) ...<Widget>[
+                const SizedBox(height: 10),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: _DraftDetailCard(draft: draft, colors: c),
+                ),
+              ],
+            ],
           ),
         );
     }
@@ -5733,6 +6043,373 @@ class _ViewerArrow extends StatelessWidget {
   }
 }
 
+/// 预订选择卡：大交通（机票/高铁）与住宿两段单选，均可不选。
+/// 票价取不到时如实标「待核价」；选中的项由服务端算进预算与行程。
+class _BookingCard extends StatefulWidget {
+  const _BookingCard({
+    required this.card,
+    required this.colors,
+    required this.enabled,
+    required this.onConfirm,
+  });
+
+  final _BookingCardData card;
+  final _StageColors colors;
+  final bool enabled;
+  final void Function(String? transportKey, String? hotelKey) onConfirm;
+
+  @override
+  State<_BookingCard> createState() => _BookingCardState();
+}
+
+class _BookingCardState extends State<_BookingCard> {
+  /// 选中项（null=先不订）；恢复会话时用服务端回显的选择初始化。
+  String? _transportKey;
+  String? _hotelKey;
+  bool _inited = false;
+
+  void _ensureInit() {
+    if (_inited) return;
+    _inited = true;
+    _transportKey = widget.card.transportKey.isEmpty ? null : widget.card.transportKey;
+    _hotelKey = widget.card.hotelKey.isEmpty ? null : widget.card.hotelKey;
+  }
+
+  void _tapTransport(String key) {
+    if (!widget.enabled) return;
+    setState(() => _transportKey = _transportKey == key ? null : key);
+  }
+
+  void _tapHotel(String key) {
+    if (!widget.enabled) return;
+    setState(() => _hotelKey = _hotelKey == key ? null : key);
+  }
+
+  void _confirm() {
+    if (!widget.enabled) return;
+    _ensureInit();
+    widget.onConfirm(_transportKey, _hotelKey);
+  }
+
+  String _priceLabel(double? amount, {bool perNight = false}) {
+    if (amount == null) return "待核价";
+    final String n = amount == amount.roundToDouble()
+        ? amount.round().toString()
+        : amount.toStringAsFixed(2);
+    return "¥$n${perNight ? "/晚" : ""}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    _ensureInit();
+    final _StageColors c = widget.colors;
+    final _BookingCardData card = widget.card;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: <Widget>[
+        if (card.trial)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              "体验模式：部分价格被平台脱敏，标「待核价」的以下单页实价为准。",
+              style: TextStyle(fontSize: 10.5, height: 1.5, color: c.orange),
+            ),
+          ),
+        if (card.transports.isNotEmpty) ...<Widget>[
+          Text("大交通 · 往返", style: TextStyle(fontSize: 10.5, color: c.muted)),
+          const SizedBox(height: 6),
+          for (final _BookingTransportData t in card.transports)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: _BookingTransportRow(
+                data: t,
+                colors: c,
+                selected: _transportKey == t.key,
+                enabled: widget.enabled,
+                priceLabel: _priceLabel(t.amount),
+                onTap: () => _tapTransport(t.key),
+              ),
+            ),
+        ],
+        if (card.hotels.isNotEmpty) ...<Widget>[
+          const SizedBox(height: 8),
+          Text(
+            card.nights > 0 ? "住宿 · ${card.nights} 晚" : "住宿",
+            style: TextStyle(fontSize: 10.5, color: c.muted),
+          ),
+          const SizedBox(height: 6),
+          for (final _BookingHotelData h in card.hotels)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 6),
+              child: _BookingHotelRow(
+                data: h,
+                colors: c,
+                selected: _hotelKey == h.key,
+                enabled: widget.enabled,
+                priceLabel: _priceLabel(h.amount, perNight: true),
+                onTap: () => _tapHotel(h.key),
+              ),
+            ),
+        ],
+        if (card.transports.isEmpty && card.hotels.isEmpty)
+          Text("这趟暂时没查到可选的班次和酒店，先按参考价排。",
+              style: TextStyle(fontSize: 11.5, color: c.muted)),
+        const SizedBox(height: 10),
+        Row(
+          children: <Widget>[
+            _KitPrimaryButton(
+              label: (_transportKey != null || _hotelKey != null)
+                  ? "就按这个安排，去挑景点"
+                  : "先不订，直接去挑景点",
+              colors: c,
+              enabled: widget.enabled,
+              onTap: _confirm,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                _transportKey == null && _hotelKey == null
+                    ? "两段都不选也行，选中的会算进预算和行程。"
+                    : "再点一下已选项可取消。",
+                maxLines: 2,
+                style: TextStyle(fontSize: 10.5, height: 1.4, color: c.muted),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+}
+
+/// 大交通选项行：班次号 + 去返程时刻 + 实价/待核价，选中亮 accent。
+class _BookingTransportRow extends StatelessWidget {
+  const _BookingTransportRow({
+    required this.data,
+    required this.colors,
+    required this.selected,
+    required this.enabled,
+    required this.priceLabel,
+    required this.onTap,
+  });
+
+  final _BookingTransportData data;
+  final _StageColors colors;
+  final bool selected;
+  final bool enabled;
+  final String priceLabel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    final _BookingTransportData t = data;
+    final String head = t.no.isEmpty
+        ? (t.isTrain ? "火车" : "航班")
+        : "${t.no}${t.carrier.isEmpty ? "" : " · ${t.carrier}"}";
+    final List<String> lines = <String>[
+      if (t.outbound != null) "去程 ${t.outbound!.summary}",
+      if (t.inbound != null) "返程 ${t.inbound!.summary}",
+      if (t.viaHub.isNotEmpty) "经${t.viaHub}转机",
+    ];
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? c.accentSoft : c.card2,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: selected ? c.accentBorder : c.borderSoft),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Icon(
+              t.isTrain ? Icons.train_rounded : Icons.flight_takeoff_rounded,
+              size: 15,
+              color: selected ? c.accent : c.text2,
+            ),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Flexible(
+                        child: Text(
+                          head,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: selected ? c.accent : c.text,
+                          ),
+                        ),
+                      ),
+                      if (t.recommended) ...<Widget>[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: c.accent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text("推荐",
+                              style: TextStyle(
+                                  fontSize: 9.5, color: c.accent)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (lines.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 3),
+                    Text(
+                      lines.join("\n"),
+                      style: TextStyle(
+                          fontSize: 10.5, height: 1.45, color: c.text2),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              priceLabel,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: priceLabel == "待核价" ? c.muted : (selected ? c.accent : c.text),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 酒店选项行：名称 + 评分/档次/位置 + 每晚价，选中亮 accent。
+class _BookingHotelRow extends StatelessWidget {
+  const _BookingHotelRow({
+    required this.data,
+    required this.colors,
+    required this.selected,
+    required this.enabled,
+    required this.priceLabel,
+    required this.onTap,
+  });
+
+  final _BookingHotelData data;
+  final _StageColors colors;
+  final bool selected;
+  final bool enabled;
+  final String priceLabel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final _StageColors c = colors;
+    final _BookingHotelData h = data;
+    final List<String> meta = <String>[
+      if (h.rating != null) "${h.rating}分",
+      if (h.star.isNotEmpty) h.star,
+      if (h.near.isNotEmpty) h.near,
+    ];
+    return GestureDetector(
+      onTap: enabled ? onTap : null,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 120),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: selected ? c.accentSoft : c.card2,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: selected ? c.accentBorder : c.borderSoft),
+        ),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Icon(Icons.hotel_outlined, size: 15, color: selected ? c.accent : c.text2),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  Row(
+                    children: <Widget>[
+                      Flexible(
+                        child: Text(
+                          h.name,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12.5,
+                            fontWeight: FontWeight.w700,
+                            color: selected ? c.accent : c.text,
+                          ),
+                        ),
+                      ),
+                      if (h.fromPicks) ...<Widget>[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: c.accent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text("你选过",
+                              style: TextStyle(
+                                  fontSize: 9.5, color: c.accent)),
+                        ),
+                      ] else if (h.recommended) ...<Widget>[
+                        const SizedBox(width: 6),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 6, vertical: 1.5),
+                          decoration: BoxDecoration(
+                            color: c.accent.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text("推荐",
+                              style: TextStyle(
+                                  fontSize: 9.5, color: c.accent)),
+                        ),
+                      ],
+                    ],
+                  ),
+                  if (meta.isNotEmpty) ...<Widget>[
+                    const SizedBox(height: 3),
+                    Text(
+                      meta.join(" · "),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                          fontSize: 10.5, height: 1.45, color: c.text2),
+                    ),
+                  ],
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Text(
+              priceLabel,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: priceLabel == "待核价" ? c.muted : (selected ? c.accent : c.text),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 /// 筛选后的自选补充卡：景点/酒店/餐厅各一行自由输入，也可直接跳过。
 class _WishlistAddCard extends StatefulWidget {
   const _WishlistAddCard({
@@ -6108,6 +6785,53 @@ class _BudgetCard extends StatelessWidget {
             ],
           ),
       ],
+    );
+  }
+}
+
+/// 最终方案明细卡：待核实提醒 + 逐日逐站的时刻、交通与开放/预约。
+/// 与行程主卡（海报 + 价格 + 入口按钮）拆开，独立成块。
+class _DraftDetailCard extends StatelessWidget {
+  const _DraftDetailCard({required this.draft, required this.colors});
+
+  final _DraftData draft;
+  final _StageColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return Container(
+      constraints: const BoxConstraints(maxWidth: _kCardWidth),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(_kCardRadius),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
+      ),
+      padding: const EdgeInsets.all(_kCardPad),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          _DraftPlanSection(draft: draft, colors: colors),
+          const SizedBox(height: 12),
+          Divider(height: 1, color: cs.outline.withValues(alpha: 0.14)),
+          const SizedBox(height: 6),
+          TextButton.icon(
+            onPressed: () =>
+                unawaited(_showTravelPlanTextSheet(context, draft: draft)),
+            style: TextButton.styleFrom(
+              foregroundColor: colors.text2,
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+              minimumSize: Size.zero,
+              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+            ),
+            icon: const Icon(Icons.ios_share, size: 13.5),
+            label: const Text("文字版 · 存图分享",
+                style:
+                    TextStyle(fontSize: 11.5, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
     );
   }
 }
@@ -6672,16 +7396,6 @@ class _DraftCardState extends State<_DraftCard> {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                Text(
-                    draft.days.isEmpty
-                        ? "逐日安排、门票和报价都在完整行程里"
-                        : "下面是照着能走的整体安排；点开完整行程可编辑、看地图",
-                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
-                if (draft.days.isNotEmpty) ...<Widget>[
-                  const SizedBox(height: 10),
-                  _DraftPlanSection(draft: draft, colors: c),
-                ],
               ],
             ),
           ),

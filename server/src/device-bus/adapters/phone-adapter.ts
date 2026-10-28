@@ -65,7 +65,6 @@ const PHONE_DEFAULT_CAPABILITIES = [
   {
     id: "agent.listen",
     actions: ["start_listen", "stop_listen"],
-    streams: ["asr"],
   },
   {
     id: "phone.call",

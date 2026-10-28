@@ -46,6 +46,7 @@ import { INTERNET_INTELLIGENCE_CHAT_TOOLS } from "../tools/internet-intelligence
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
 import { LIFE_MANAGE_CHAT_TOOLS } from "../tools/life-manage-tools.js";
 import { AGENT_TASKS_CHAT_TOOLS } from "../tools/agent-tasks-tools.js";
+import { INTEL_PANEL_CHAT_TOOLS } from "../tools/intel-panel-tools.js";
 import { RHYTHM_REMINDER_CHAT_TOOLS } from "../tools/rhythm-reminder-tools.js";
 import {
   PROACTIVITY_CONFIRM_CHAT_TOOLS,
@@ -506,7 +507,6 @@ function resolveBaseToolExecutionTimeoutMs(registryToolName: string): number {
     "info.search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
     "voice.speak": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "voice.send_message": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
-    "voice.transcribe": Number.parseInt(process.env.TOOL_TIMEOUT_VOICE_MS ?? "20000", 10),
     "image.generate": Number.parseInt(process.env.TOOL_TIMEOUT_IMAGE_GEN_MS ?? "60000", 10),
   };
   const classMs = classTimeouts[registryToolName];
@@ -1170,6 +1170,7 @@ export function getBuiltinAgentChatTools(): ChatCompletionTool[] {
     ...INTEREST_WATCH_CHAT_TOOLS,
     ...LIFE_MANAGE_CHAT_TOOLS,
     ...AGENT_TASKS_CHAT_TOOLS,
+    ...INTEL_PANEL_CHAT_TOOLS,
     ...RHYTHM_REMINDER_CHAT_TOOLS,
     ...PROACTIVITY_FEEDBACK_CHAT_TOOLS,
     ...AGENT_ACTIVITY_CHAT_TOOLS,
@@ -1287,8 +1288,8 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     category: 'voice',
-    keywords: ['语音', 'voice', '说话', 'speak', '播报', '朗读', '读出来', '说出来', '听', 'listen', '转写', 'transcribe', '识别语音', 'asr', 'tts', '发声', '开口', '说一声', '念', '朗读', '录音', 'audio'],
-    toolNames: ['voice.speak', 'voice.send_message', 'voice.transcribe']
+    keywords: ['语音', 'voice', '说话', 'speak', '播报', '朗读', '读出来', '说出来', '发语音', 'tts', '发声', '开口', '说一声', '念', '录音', 'audio'],
+    toolNames: ['voice.speak', 'voice.send_message']
   },
   {
     category: 'clock',

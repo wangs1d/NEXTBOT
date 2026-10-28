@@ -110,7 +110,7 @@ function buildToolSearchConfig() {
      *   - openai：跳过 sidecar，维持 OpenAI API 路径（回滚开关）。
      */
     embeddingProvider: parseEmbeddingProvider(process.env.AGENT_TOOL_EMBEDDING_PROVIDER),
-    /** 神经 sidecar 基地址（FastAPI 常驻，同 FunASR 模式） */
+    /** 神经 sidecar 基地址（FastAPI 常驻） */
     neuralSidecarUrl:
       (process.env.AGENT_NEURAL_SIDECAR_URL?.trim() || "http://127.0.0.1:8790").replace(/\/+$/, ""),
     /** 本地 embedding 模型名（缓存键用；以 sidecar /embed 返回为准，此值仅作首查前提示） */

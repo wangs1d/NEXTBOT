@@ -152,22 +152,20 @@ class UpdateResultCard {
   }
 
   /// 浮卡内进入下载流程：操作区就地换成进度条 → 「重启完成更新」。
-  /// 不跳浏览器、不关卡；用户取消/关卡时中断下载并清理。
+  /// 不跳浏览器、不关卡；下载流为全局共享单飞（2026-10-28 主流式）——
+  /// 若后台已在预下载（左下角胶囊），这里直接并入同一条流的进度展示。
   static void startFlow({
     required String downloadUrl,
     required String latestVersion,
   }) {
-    _disposeFlow();
-    _cardFlowController.value = ClientUpdateFlowController(
-      downloadUrl: downloadUrl,
-      version: latestVersion,
-    )..begin();
+    sharedUpdateFlow(downloadUrl: downloadUrl, version: latestVersion);
+    ensureSharedUpdateDownloading();
+    _cardFlowController.value = activeSharedUpdateFlow;
   }
 
+  /// 只解绑不取消：共享流归全局所有，浮卡关闭后后台预下载继续
+  /// （左下角胶囊仍在反映进度）；重试等入口可重新挂回。
   static void _disposeFlow() {
-    final ClientUpdateFlowController? flow = _cardFlowController.value;
-    flow?.cancel();
-    flow?.dispose();
     _cardFlowController.value = null;
   }
 
@@ -542,10 +540,8 @@ class _UpdateResultCardState extends State<_UpdateResultCard>
     );
   }
 
-  /// 收起浮卡内的下载流程、还原静态卡（仅在 idle/failed 态可达，无在途下载）
+  /// 收起浮卡内的下载流程、还原静态卡（共享流只解绑不取消，后台继续）
   void _closeCardFlow() {
-    final ClientUpdateFlowController? flow = _cardFlowController.value;
-    flow?.dispose();
     _cardFlowController.value = null;
   }
 

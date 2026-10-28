@@ -5,12 +5,13 @@ import "package:flutter/scheduler.dart" show Ticker;
 import "package:webview_windows/webview_windows.dart";
 
 import "../../core/services/shared_browser_host.dart";
+import "../chat/composer_skill.dart";
 
 /// 浏览器页（用户与 Agent 共用）。
 ///
 /// 颜色全部取自 [Theme.of] —— 深色/暖色两套主题自动跟随：
 ///   - 主页态：工具栏整条收起，只留居中标识 + 单层搜索框 + 「试试让 Agent」
-///     任务建议 chips（点击直接把任务发进对话）
+///     技能引导 chips（点击把技能挂到对话输入框，参数由用户补）
 ///   - 浏览态：顶部一条细工具栏（后退/前进/刷新 + omnibox + 主页），
 ///     工具栏底边贴 2px 加载进度线；omnibox 获得焦点即全选，输入直接替换
 ///   - Agent 正在操作时工具栏下浮出细状态条（操作可见、可接管）；
@@ -19,12 +20,12 @@ import "../../core/services/shared_browser_host.dart";
 /// 嵌入模式（embedded=true）：渲染在右侧 Dock 面板里，不自带关闭按钮
 /// （面板顶栏已有）；false 时为整页（预留全屏打开形态）。
 class BrowserPage extends StatefulWidget {
-  const BrowserPage({super.key, this.embedded = false, this.onAgentTask});
+  const BrowserPage({super.key, this.embedded = false, this.onUseSkill});
 
   final bool embedded;
 
-  /// 主页「试试让 Agent」chips 的回调：把任务文本作为用户消息发给 Agent。
-  final ValueChanged<String>? onAgentTask;
+  /// 主页「试试让 Agent」chips 的回调：把技能挂到对话输入框（不发消息）。
+  final ValueChanged<ComposerSkill>? onUseSkill;
 
   @override
   State<BrowserPage> createState() => _BrowserPageState();
@@ -36,15 +37,8 @@ class _BrowserPageState extends State<BrowserPage> {
   final FocusNode _omniboxFocus = FocusNode();
   bool _starting = false;
 
-  /// 「试试让 Agent」任务建议（点击即作为用户消息发给 Agent）。
-  static const List<String> _agentSuggestions = <String>[
-    "比较目的地酒店价格",
-    "附近美食推荐",
-    "查一下今天的重要新闻",
-    "整理邮箱中的广告邮件",
-    "帮我比价一个商品",
-    "看看快递到哪了",
-  ];
+  /// 主页「试试让 Agent」技能引导（点击把技能挂到对话输入框）。
+  static const List<ComposerSkill> _agentSkills = kComposerSkills;
 
   @override
   void initState() {
@@ -121,9 +115,9 @@ class _BrowserPageState extends State<BrowserPage> {
     );
   }
 
-  void _sendAgentTask(String task) {
+  void _useSkill(ComposerSkill skill) {
     _omniboxFocus.unfocus();
-    widget.onAgentTask?.call(task);
+    widget.onUseSkill?.call(skill);
   }
 
   @override
@@ -161,6 +155,7 @@ class _BrowserPageState extends State<BrowserPage> {
                     action: pending > 0
                         ? host.lastAgentAction.value
                         : "页面任务",
+                    onStop: host.stopAgentBrowserTask,
                   ),
                 ),
               ),
@@ -363,8 +358,8 @@ class _BrowserPageState extends State<BrowserPage> {
             // 滚动展示栏：通栏铺满面板宽，chips 在两侧边缘裁切，横向滚动
             _AgentSuggestionsRow(
               cs: cs,
-              suggestions: _agentSuggestions,
-              onTap: _sendAgentTask,
+              skills: _agentSkills,
+              onTap: _useSkill,
             ),
           ],
         ),
@@ -503,13 +498,13 @@ class _HomeSearchBoxState extends State<_HomeSearchBox> {
 class _AgentSuggestionsRow extends StatefulWidget {
   const _AgentSuggestionsRow({
     required this.cs,
-    required this.suggestions,
+    required this.skills,
     required this.onTap,
   });
 
   final ColorScheme cs;
-  final List<String> suggestions;
-  final ValueChanged<String> onTap;
+  final List<ComposerSkill> skills;
+  final ValueChanged<ComposerSkill> onTap;
 
   @override
   State<_AgentSuggestionsRow> createState() => _AgentSuggestionsRowState();
@@ -578,13 +573,13 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
   @override
   Widget build(BuildContext context) {
     final List<Widget> chips = <Widget>[
-      for (final String text in widget.suggestions)
+      for (final ComposerSkill skill in widget.skills)
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 5),
           child: _AgentSuggestionChip(
             cs: widget.cs,
-            label: text,
-            onTap: () => widget.onTap(text),
+            label: skill.label,
+            onTap: () => widget.onTap(skill),
           ),
         ),
     ];
@@ -702,17 +697,23 @@ class _AnimatedBar extends StatelessWidget {
   }
 }
 
-/// 「Agent 正在操作」状态条：细、低饱和，不抢注意力。
+/// 「Agent 正在操作」状态条：细、低饱和，不抢注意力；右侧带「停止」按钮，
+/// 点击通知服务端中断当前轮次（2026-10-28 用户要求：操作可随时叫停）。
 class _AgentStatusBar extends StatelessWidget {
-  const _AgentStatusBar({required this.cs, required this.action});
+  const _AgentStatusBar({
+    required this.cs,
+    required this.action,
+    required this.onStop,
+  });
 
   final ColorScheme cs;
   final String action;
+  final VoidCallback onStop;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+      padding: const EdgeInsets.only(left: 12, right: 4, top: 4, bottom: 4),
       color: cs.surfaceContainerHigh.withValues(alpha: 0.8),
       child: Row(
         children: <Widget>[
@@ -725,9 +726,39 @@ class _AgentStatusBar extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 8),
-          Text(
-            "Agent 正在操作浏览器（$action）· 你随时可以手动接管",
-            style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+          Expanded(
+            child: Text(
+              "Agent 正在操作浏览器（$action）· 你随时可以手动接管",
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+            ),
+          ),
+          const SizedBox(width: 4),
+          Tooltip(
+            message: "停止 Agent 的浏览器操作",
+            waitDuration: const Duration(milliseconds: 500),
+            child: InkWell(
+              onTap: onStop,
+              borderRadius: BorderRadius.circular(10),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: 8, vertical: 4),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: <Widget>[
+                    Icon(Icons.stop_rounded,
+                        size: 14, color: cs.onSurface),
+                    const SizedBox(width: 3),
+                    Text(
+                      "停止",
+                      style:
+                          TextStyle(fontSize: 11, color: cs.onSurface),
+                    ),
+                  ],
+                ),
+              ),
+            ),
           ),
         ],
       ),

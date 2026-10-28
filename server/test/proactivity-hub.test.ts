@@ -235,7 +235,7 @@ test("顺嘴搭车：未注入队列时 low 照旧即时推送（回退兼容）
 // 合并进旁注，并"取走即说出"地结算（预留转消费），于是同一发现不会被
 // 两个出口（管道 / 旁注）各说一遍。
 
-test("顺嘴搭车取货也走同一开口闸：合并他人同主题发现并结算消费", async () => {
+test("顺嘴搭车取货也走同一开口闸：读走预留并结算消费，正文不拼旁注", async () => {
   const now = () => 1_700_000_400_000;
   const dir = mkdtempSync(join(tmpdir(), "pa-hub-aside-"));
   try {
@@ -268,7 +268,8 @@ test("顺嘴搭车取货也走同一开口闸：合并他人同主题发现并�
 
     const aside = hub.takeTurnAsideForTurn(ACTOR);
     assert.ok(aside, "下一轮对话取到顺嘴块");
-    assert.match(aside, /房东邮件：搬家要提前一周预约电梯/, "第二条出口也把他人同主题发现合并进旁注");
+    assert.match(aside, /搬家还有一步没走完/, "顺嘴块仍是自己的那句话");
+    assert.doesNotMatch(aside, /房东邮件/, "他人同主题发现只被读走预留，不拼进旁注");
     assert.equal(
       discovery.findingsFor("g_搬家").length,
       0,

@@ -3,6 +3,7 @@
  */
 import { execSync, spawn } from "node:child_process";
 import { config } from "dotenv";
+import { watch as fsWatch } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isTcpPortInUse } from "./port-in-use.mjs";
@@ -217,8 +218,57 @@ function startPortWatchdog() {
   }, 5_000).unref();
 }
 
+// ─── 端口未监听期间的源码变更即时重拉 ───
+// 入口在模块解析期崩溃后 tsx watch 不再随保存重载：端口持续缺席超过一次冷启动预算
+// 且有源码变更时立即重拉，宽限期用于避开正常热重载/冷启动的短暂不监听窗口。
+const SOURCE_CHANGE_DEBOUNCE_MS = 800;
+const SOURCE_CHANGE_MIN_DOWN_MS = 45_000;
+let sourceChangeTimer = null;
+let sourceWatcher = null;
+
+async function onSourceWhileDown() {
+  if (!child || child.exitCode !== null || respawning) return;
+  if (!portDownSince || Date.now() - portDownSince < SOURCE_CHANGE_MIN_DOWN_MS) return;
+  const targetPort = isRemoteEntry ? runtimeHttpPort : port;
+  if (await isTcpPortInUse(targetPort)) {
+    portDownSince = null;
+    watchdogKills = 0;
+    return;
+  }
+  // 源码是新信息，重拉预算重新计：连续 3 次的上限只用于约束「同一份代码反复起不来」
+  watchdogKills = 0;
+  portDownSince = null;
+  console.warn(
+    `[dev-server] 端口 ${targetPort} 已持续 ${SOURCE_CHANGE_MIN_DOWN_MS / 1000}s 未监听且源码已变更，立即重拉 tsx watch`,
+  );
+  respawnWatchChild();
+}
+
+function startSourceWatcher() {
+  if (sourceWatcher) return;
+  try {
+    sourceWatcher = fsWatch(join(serverDir, "src"), { recursive: true }, (_event, filename) => {
+      if (!filename || !/\.[cm]?[jt]sx?$/.test(filename)) return;
+      if (sourceChangeTimer) clearTimeout(sourceChangeTimer);
+      sourceChangeTimer = setTimeout(() => {
+        sourceChangeTimer = null;
+        void onSourceWhileDown();
+      }, SOURCE_CHANGE_DEBOUNCE_MS);
+      sourceChangeTimer.unref();
+    });
+    sourceWatcher.on("error", (err) => {
+      console.warn(`[dev-server] 源码变更监听已停用: ${err instanceof Error ? err.message : String(err)}`);
+      sourceWatcher?.close();
+      sourceWatcher = null;
+    });
+  } catch {
+    /* 平台不支持 recursive watch：退回 120s 端口看门狗 */
+  }
+}
+
 spawnWatchChild();
 startPortWatchdog();
+startSourceWatcher();
 
 // remote 拓扑：runtime 之外加挂 gateway watch（对外端口 3000；被占用则跳过）
 let gatewayWatchChild = null;
@@ -257,24 +307,8 @@ function stopAll() {
   }
 }
 
-child.on("error", (err) => {
-  console.error("[dev-server] 子进程启动失败:", err instanceof Error ? err.message : String(err));
-  stopAll();
-  process.exit(1);
-});
-
-child.on("exit", (code, signal) => {
-  if (signal === "SIGTERM" || signal === "SIGINT") {
-    // 父进程主动关闭，正常退出
-    stopAll();
-    process.exit(0);
-    return;
-  }
-  console.error(`[dev-server] 子进程异常退出: code=${code ?? "?"}, signal=${signal ?? "none"}`);
-  stopAll();
-  // 延迟退出，给日志时间输出
-  setTimeout(() => process.exit(code ?? 1), 500).unref();
-});
+// 子进程 error/exit 只在 spawnWatchChild 里注册（带 respawning 守卫）：在此重复注册
+// 会把看门狗主动 taskkill 误判成异常退出，监督进程自杀后交给 autostart 退避。
 process.once("SIGINT", () => {
   stopAll();
   process.exit(0);

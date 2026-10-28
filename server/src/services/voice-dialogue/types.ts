@@ -5,13 +5,6 @@ export interface AudioBuffer {
   channels?: number;
 }
 
-export interface ASRResult {
-  text: string;
-  confidence: number;
-  language?: string;
-  isFinal: boolean;
-}
-
 export interface LLMMessage {
   role: "system" | "user" | "assistant";
   content: string;
@@ -22,22 +15,6 @@ export interface DialogueContext {
   userId: string;
   conversationHistory: LLMMessage[];
   metadata: Record<string, unknown>;
-}
-
-export interface ASRProvider {
-  name: string;
-
-  transcribe(audio: AudioBuffer, options?: {
-    language?: string;
-    enablePunctuation?: boolean;
-  }): Promise<ASRResult>;
-
-  startStreamingTranscribe?(options?: {
-    language?: string;
-    onPartialResult?: (result: ASRResult) => void;
-    onFinalResult?: (result: ASRResult) => void;
-    onError?: (error: Error) => void;
-  }): Promise<() => void>;
 }
 
 export interface TTSProvider {
@@ -76,7 +53,6 @@ export interface LLMProvider {
 }
 
 export interface VoiceDialogueProvider {
-  asr: ASRProvider;
   tts: TTSProvider;
   llm: LLMProvider;
 }

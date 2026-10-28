@@ -1,7 +1,7 @@
 /**
  * 图像生成 provider 抽象 + 具体实现。
  *
- * 与 TTS / ASR 体系同模式：抽象接口 + 多个 provider，按优先级链路回退。
+ * 与 TTS 体系同模式：抽象接口 + 多个 provider，按优先级链路回退。
  * 当前实现：
  *   - {@link OpenAICompatibleImageProvider}：OpenAI 兼容 images/generations 端点
  *     （key 复用对话 OPENAI_API_KEY；端点不支持 images 接口时优雅报错；仅文生图）

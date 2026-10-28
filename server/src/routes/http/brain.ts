@@ -2,7 +2,6 @@
 import type { FastifyInstance } from "fastify";
 import type { HttpRouteDeps } from "./types.js";
 import type {
-  AudioBufferRef,
   BrainSignalInput,
   MemoryDomainKind,
   MemoryItem,
@@ -38,7 +37,6 @@ function buildSignal(body: Record<string, unknown>): BrainSignalInput {
  * - GET  /brain/capabilities      程序化能力清单
  * - GET  /brain/state             大脑状态快照
  * - POST /brain/proactive/test    注入测试信号走完整决策流水线
- * - POST /brain/sensory/listen    感官「听」：base64 音频 → ASR
  * - POST /brain/sensory/look      感官「看」：截屏 + VLM 描述
  * - POST /brain/sensory/speak     感官「说」：TTS 合成 + 投递
  * - POST /brain/memory/remember   记忆写入
@@ -107,40 +105,6 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
   // ============ 神经解剖分区路由（SensoryCortex / MemoryCortex / SynapseBus / LimbicCortex / PlannerCortex） ============
 
   // ---- 感官皮层（SensoryCortex）----
-
-  // 感官「听」：将 base64 音频转为 Buffer 后调用 SensoryCortex.listen
-  app.post("/brain/sensory/listen", async (request, reply) => {
-    try {
-      if (!deps.brainCenter) {
-        return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
-      }
-      const body = (request.body ?? {}) as Record<string, unknown>;
-      const audio = body.audio as
-        | { data?: string; format?: string; sampleRate?: number; channels?: number }
-        | undefined;
-      if (!audio || !audio.data) {
-        throw new Error("audio.data is required");
-      }
-      const audioBufferRef: AudioBufferRef = {
-        data: Buffer.from(audio.data, "base64"),
-        format: (audio.format ?? "wav") as AudioBufferRef["format"],
-        sampleRate: audio.sampleRate,
-        channels: audio.channels,
-      };
-      const language = body.language != null ? String(body.language) : undefined;
-      const result = await deps.brainCenter.listen(
-        audioBufferRef,
-        language ? { language } : undefined,
-      );
-      if (result.error) {
-        return reply.code(503).send({ ok: false, error: result.error });
-      }
-      return reply.send({ ok: true, result });
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(500).send({ ok: false, error: message });
-    }
-  });
 
   // 感官「看」：调用 SensoryCortex.look 截屏并生成视觉描述
   app.post("/brain/sensory/look", async (request, reply) => {

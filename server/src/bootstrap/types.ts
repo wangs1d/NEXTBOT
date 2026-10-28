@@ -100,7 +100,7 @@ export type AppServices = {
   weatherService: WeatherService;
   weatherPrefsService: WeatherPrefsService;
   ttsService: TtsService;
-  /** Agent 底层语音能力中枢（TTS + ASR + WS 推送，Agent 自调度入口） */
+  /** Agent 底层语音能力中枢（TTS + WS 推送，Agent 自调度入口） */
   voiceCapabilityService: VoiceCapabilityService;
   /** 语音消息落盘服务（voice.send_message 工具 + 用户上传录音共用） */
   voiceMessageService: VoiceMessageService;

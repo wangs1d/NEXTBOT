@@ -8,7 +8,7 @@
 // 数据源从"信号缓冲窗口"换成"状态板字段"）：
 //   away_return / meeting_soon / work_marathon / unread_burst / digest_beat /
 //   goal_ready / sleep_boundary / morning_brief
-import { renderDigestCard, renderProactiveText } from "./voice-templates.js";
+import { renderDigestCard } from "./voice-templates.js";
 import type { BoardRule, RuleServices } from "./mapping-executor.js";
 
 type BoardView = Parameters<BoardRule["eval"]>[0]["board"];
@@ -73,9 +73,10 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "low",
             title: `用户离开了 ${awayLabel} 后回归`,
-            // 事件背景：喂给 LLM 话术层的离开时长（away_return 走 polish 通道）
+            // 事件背景：喂给 LLM 话术层的离开时长（body 留空 → 提案无 directText
+            // → 管道 speak 兜底，LLM 基于素材开口；模板层 2026-10-27 已删）
             summary: awayLabel,
-            body: renderProactiveText("away_return", { dedupKey: `away:${presence.since}`, now: ctx.now, awayLabel }),
+            body: "",
             dedupKey: `away_return:${new Date(presence.since).toISOString().slice(0, 10)}`,
             salience: "medium",
           });
@@ -108,13 +109,6 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
         if (min <= briefMin && !announced.has(`brief:${next.runAt}`)) {
           announced.set(`brief:${next.runAt}`, Date.now());
           const memoryLines = services.recallMemory ? await services.recallMemory(title, 2) : [];
-          const body = renderProactiveText("meeting_soon", {
-            dedupKey: `meeting:${next.runAt}`,
-            now: ctx.now,
-            title,
-            minutes: min,
-            body: memoryLines.length ? `相关记忆：${memoryLines.join("；")}` : "",
-          });
           out.push({
             kind: "meeting_soon",
             urgency: "alert",
@@ -123,7 +117,9 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "must",
             importance: "high",
             title: `「${title}」${min} 分钟后开始`,
-            body,
+            // 相关记忆作为素材喂 LLM 话术层（body 留空 → 管道 speak 兜底）
+            summary: memoryLines.length ? `相关记忆：${memoryLines.join("；")}` : "",
+            body: "",
             dedupKey: `meeting_brief:${next.runAt}`,
             salience: "high",
             expiresAt: next.runAt,
@@ -139,12 +135,8 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "low",
             title: `「${title}」1 小时内开始`,
-            body: renderProactiveText("meeting_soon", {
-              dedupKey: `meeting_early:${next.runAt}`,
-              now: ctx.now,
-              title,
-              minutes: min,
-            }),
+            // body 留空 → 提案无 directText → 管道 speak 兜底（LLM 话术）
+            body: "",
             dedupKey: `meeting_early:${next.runAt}`,
             salience: "low",
           });
@@ -179,11 +171,6 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
           // （"你还在推进「学英语」，下一步是「背 20 个词」"）——从"碎片化场景提醒"
           // 升级为"带目标上下文"，对齐 Muse 的目标驱动。无活跃目标时行为不变。
           const goalLine = services.activeGoalLine?.(ctx.actorId) ?? null;
-          const body = renderProactiveText("work_marathon", {
-            dedupKey: `marathon:${new Date(ctx.nowMs).toISOString().slice(0, 10)}`,
-            now: ctx.now,
-            hours: Math.round(workMin / 60),
-          });
           out.push({
             kind: "work_marathon",
             urgency: "alert",
@@ -191,7 +178,9 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "medium",
             title: `连续工作 ${Math.round(workMin / 60)} 小时`,
-            body: goalLine ? `${body}\n（顺便：${goalLine}）` : body,
+            // 目标上下文作为素材喂 LLM 话术层（body 留空 → 管道 speak 兜底）
+            ...(goalLine ? { summary: goalLine } : {}),
+            body: "",
             dedupKey: `work_marathon:${new Date(ctx.nowMs).toISOString().slice(0, 10)}`,
             salience: "medium",
           });
@@ -288,7 +277,8 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "medium",
             title: g.title || "有结果了",
-            body: g.body || renderProactiveText("goal_ready", { now: ctx.now }),
+            // 生产者成稿优先；无成稿 body 留空 → 管道 speak 兜底（LLM 话术）
+            body: g.body || "",
             dedupKey: `goal_ready:${g.goalId}`,
             salience: "medium",
           });
@@ -319,7 +309,8 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
             tier: "social",
             importance: "low",
             title: "深夜还在屏幕前",
-            body: renderProactiveText("sleep_boundary", { dedupKey: `sleep:${dayKey}`, now: ctx.now }),
+            // body 留空 → 提案无 directText → 管道 speak 兜底（LLM 话术）
+            body: "",
             dedupKey: `sleep_boundary:${dayKey}`,
             salience: "low",
             // 过了当晚就失去意义：早晨说「昨晚该睡了」是噪音，最多保留到凌晨 1 点

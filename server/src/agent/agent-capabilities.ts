@@ -58,8 +58,8 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   desktop: "桌面自动化（VLM视觉操控电脑）",
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
-  voice: "语音能力（TTS播报/ASR识别，Agent底层语音能力，可自调度）",
-  phone: "语音触达（语音提醒/闹钟式TTS播报 + 电话通话/TTS-only来电，未来ASR+LLM+TTS全双工）",
+  voice: "语音能力（TTS播报，Agent底层语音能力，可自调度）",
+  phone: "语音触达（语音提醒/闹钟式TTS播报 + 电话通话/TTS-only来电）",
   entertainment: "娱乐互动",
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
   self_programming: "自我编程（创建/更新/删除/生成Skill）",
@@ -198,7 +198,6 @@ function buildStaticSections(): CapabilitySection[] {
         "     · 适用场景：用户说「发语音」「发条语音消息」「用语音回复」，或长回复用语音更自然",
         "   - 与 phone.call_user 区别：voice.* 是底层语音能力（无来电 UI/振铃），phone.call_user 是完整电话触达体验",
         "   - TTS 提供商：优先 MiniMax（中文），回退 OpenAI；均未配置时客户端用本地 TTS 兜底",
-        "   - 未来扩展：ASR 识别（voice.transcribe）+ 全双工对话（voice.dialogue）将在此领域扩展",
       ],
     },
     {
@@ -483,7 +482,7 @@ function buildStaticSections(): CapabilitySection[] {
 const PHONE_MODEL_LINES = [
   "【语音触达 · 静默触达】通过 phone.call_user 工具实现，调用时直接执行，不在回复中提及。",
   "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」—— 单向 TTS 播报，无来电 UI。spokenMessage 填内容，ringStyle=\"reminder\"。",
-  "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式；未来将升级为 ASR→LLM→TTS 全双工交互。",
+  "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式。",
   "【号码归属】6 位站内号登记在本 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；接收来电不要求对方有号。",
   "【Agent↔Agent 联络】Agent 之间不打电话，用 world.link.send_message 文本通道联系（仅限好友）。",
   "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone.call_user。",

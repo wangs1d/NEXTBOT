@@ -14,8 +14,9 @@ import { MappingExecutor, type AttentionEvent } from "../src/proactivity/mapping
 import { buildBoardRules } from "../src/proactivity/mapping-rules.js";
 import { ArbiterV2, interruptCost } from "../src/proactivity/arbiter-v2.js";
 import { GoalBoard } from "../src/proactivity/goal-board.js";
-import { renderProactiveText, renderDigestCard } from "../src/proactivity/voice-templates.js";
+import { renderDigestCard } from "../src/proactivity/voice-templates.js";
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
+import type { SpeechHub } from "../src/proactivity/speech-express.js";
 import { FrequencyGovernor } from "../src/proactivity/frequency-governor.js";
 import type { Signal } from "../src/proactivity/sensors/types.js";
 
@@ -143,7 +144,10 @@ test("映射规则: away_return —— 离开4h后回归才问候", async () => 
   await tick();
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, "away_return");
-  assert.ok(events[0].body.length > 0, "模板正文非空");
+  // 2026-10-27 模板删除：body 留空（话术由 SpeechHub light 在投递出口生成），
+  // 素材走 title/summary
+  assert.equal(events[0].body, "", "话术模板已删，body 留空走 LLM");
+  assert.ok(events[0].title.length > 0);
 });
 
 test("映射规则: work_marathon —— 连续编码3h 触发休息干预", async () => {
@@ -157,7 +161,9 @@ test("映射规则: work_marathon —— 连续编码3h 触发休息干预", asy
   await tick();
   assert.equal(events.length, 1);
   assert.equal(events[0].kind, "work_marathon");
-  assert.ok(events[0].body.includes("小时"), `正文含时长: ${events[0].body}`);
+  // 2026-10-27 模板删除：body 留空（话术由 SpeechHub light 生成），时长在 title
+  assert.equal(events[0].body, "", "话术模板已删，body 留空走 LLM");
+  assert.ok(events[0].title.includes("小时"), `标题含时长: ${events[0].title}`);
 });
 
 test("映射规则: work_marathon 陈旧快照不计时长（防休眠唤醒误报）", async () => {
@@ -414,13 +420,7 @@ test("GoalBoard: 会前准备包预执行 → ready 进托盘 → goal 信号", 
 
 // ─── L5 表达层 ───
 
-test("模板: 各 kind 渲染非空且带上下文", () => {
-  const now = new Date(MockClock.localAt(8, 0));
-  assert.ok(renderProactiveText("away_return", { now }).length > 0);
-  assert.ok(renderProactiveText("interest_alert", { name: "刘浩存", excerpt: "新电影开机" }).includes("刘浩存"));
-  assert.ok(renderProactiveText("overwork_care", { hours: 4 }).includes("4"));
-  assert.ok(renderProactiveText("unknown_kind_xyz", { title: "测试" }).length > 0, "未知 kind 有兜底");
-  assert.ok(renderProactiveText("anything", { body: "自定义正文" }) === "自定义正文");
+test("模板: 简报卡片渲染（话术模板 2026-10-27 已删，正文统一走 SpeechHub light）", () => {
   const card = renderDigestCard({ slot: "morning", tasks: ["站会"], weather: "晴" });
   assert.ok(card.includes("站会") && card.includes("晴"));
   assert.ok(renderDigestCard({ slot: "evening" }).length > 0, "空数据也非空");
@@ -465,18 +465,26 @@ test("映射规则状态持久化: 去重指纹跨实例恢复（重启不重发
   rmSync(dir, { recursive: true, force: true });
 });
 
-// ─── 直达车道（hub → 管道，全程零 LLM）────
+// ─── 直达车道（hub → SpeechHub light 话术 → 管道）────
 
-test("直达车道: hub.submitIntent → 模板直投管道（带 directText，不触 LLM）", async () => {
+test("直达车道: hub.submitIntent → SpeechHub light 话术 → 管道（统一 LLM 话术）", async () => {
   const delivered: Array<{ kind: string; text: string; hasDeliveryId: boolean }> = [];
+  const phrased: Array<{ kind: string; title: string; summary: string }> = [];
   const hub = new ProactivityHub({
     publishSignal: () => assert.fail("直达车道开启时 speak 不应再走 LifeSignal 路径"),
     executeTool: async () => ({ ok: true, result: {} }),
     // 测试确定性：禁用静默时段（否则 23-7 点 importance<high 全被频控拦截）
     frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    // 统一话术层（2026-10-27 模板删除）：stub speechHub 返回 LLM 话术
+    speechHub: {
+      speak: async (req) => {
+        phrased.push({ kind: req.kind, title: req.title ?? "", summary: req.summary ?? "" });
+        return "刘浩存有新动态啦，新电影刚开机。";
+      },
+    } as unknown as SpeechHub,
   });
   hub.setDirectLane((p) => {
-    assert.ok(p.directText && p.directText.length > 0, "提案带模板文案");
+    assert.ok(p.directText && p.directText.length > 0, "提案带 LLM 话术");
     // 模拟管道投递（真实 ProactiveDeliveryService 的 payload 契约）
     delivered.push({ kind: p.kind, text: p.directText ?? "", hasDeliveryId: true });
   });
@@ -493,7 +501,33 @@ test("直达车道: hub.submitIntent → 模板直投管道（带 directText，�
   await new Promise((r) => setTimeout(r, 20));
   assert.equal(delivered.length, 1);
   assert.ok(delivered[0].text.includes("刘浩存"));
+  assert.equal(phrased.length, 1);
+  assert.ok(phrased[0].title.includes("刘浩存"), "信号素材（title）必须进话术层");
   assert.equal(hub.isDirectLaneEnabled(), true);
+});
+
+test("直达车道: 话术层返回空 → 沉默留痕（绝不吐系统态原句）", async () => {
+  const hub = new ProactivityHub({
+    publishSignal: () => assert.fail("话术为空时应沉默，而不是回退 LifeSignal"),
+    executeTool: async () => ({ ok: true, result: {} }),
+    frequencyGovernor: new FrequencyGovernor({ disableQuietHours: true, ignoreEnv: true }),
+    speechHub: { speak: async () => "" } as unknown as SpeechHub,
+  });
+  let delivered = 0;
+  hub.setDirectLane(() => {
+    delivered++;
+  });
+  hub.submitIntent({
+    actorId: "user-1",
+    kind: "life_reminder",
+    importance: "medium",
+    title: "[内部通报] 定时任务 08:00 错过",
+    summary: "提醒任务错过，待补发确认",
+    mode: "speak",
+    source: "lifecycle",
+  });
+  await new Promise((r) => setTimeout(r, 20));
+  assert.equal(delivered, 0, "空话术不得投递");
 });
 
 test("直达车道关闭时回退 LifeSignal 路径（向后兼容）", async () => {

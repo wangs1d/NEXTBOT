@@ -444,7 +444,6 @@ export class BodyGateway {
       camera: "eye",
       // 听觉类工具前缀 → ear 域
       ear: "ear",
-      asr: "ear",
       auditory: "ear",
       // 体感类工具前缀 → skin 域
       skin: "skin",

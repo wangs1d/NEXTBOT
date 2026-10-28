@@ -33,17 +33,6 @@ function spawnNpm(args, opts = {}) {
   });
 }
 
-function runAndWait(childFactory) {
-  return new Promise((resolve, reject) => {
-    const child = childFactory();
-    child.on("exit", (code) => {
-      if (code === 0) resolve();
-      else reject(new Error(`process exited with ${code}`));
-    });
-    child.on("error", reject);
-  });
-}
-
 async function filterAvailable(services) {
   const available = [];
   for (const svc of services) {
@@ -58,13 +47,8 @@ if (toStart.length === 0) {
   process.exit(0);
 }
 
-await runAndWait(() => spawnNpm(["run", "build", "-w", "@nextbot/agent-world"]));
-
-toStart = await filterAvailable(toStart);
-
-if (toStart.length === 0) {
-  process.exit(0);
-}
+// 依赖包构建由 predev:server（scripts/fast-prebuild.mjs）负责：mtime 没变就跳过，
+// 有变化才并行重建 —— 这里不再串行预构建一遍 agent-world（原实现重复构建两次）。
 
 const children = [];
 for (const svc of toStart) {

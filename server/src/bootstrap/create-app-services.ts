@@ -223,7 +223,6 @@ import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts
 import { MiniMaxTTSAdapter } from "../services/voice-dialogue/adapters/minimax-tts-adapter.js";
 import { MiniMaxRealtimeService } from "../services/voice-dialogue/minimax-realtime-service.js";
 import { OpenAILLMAdapter } from "../services/voice-dialogue/adapters/openai-llm-adapter.js";
-import { FunAsrAdapter } from "../services/voice-dialogue/adapters/funasr-asr-adapter.js";
 import { createIntelligentReminderSystem } from "../services/intelligent-reminder/index.js";
 import { UpstreamSearchService } from "../services/upstream-search-service.js";
 import { VideoGrabService, setVideoGrabServiceRef, setVideoGrabMcpClientRef } from "../services/video-grab-service.js";
@@ -586,6 +585,10 @@ import { AssertionConflictWatcher } from "../proactivity/branches/assertion-conf
 import { BranchRegistry } from "../proactivity/branches/branch-registry.js";
 import { BranchCondenser } from "../proactivity/branches/branch-condenser.js";
 import { WatchTaskStore, WatchTaskWatcher } from "../proactivity/branches/watch-tasks.js";
+import { IntelService } from "../proactivity/intel/intel-service.js";
+import { createIntelJudge } from "../proactivity/intel/intel-judge.js";
+import { createIntelComposer } from "../proactivity/intel/intel-compose.js";
+import { registerIntelPanelTools } from "../tools/intel-panel-tools.js";
 import { registerWatchTaskTools } from "../tools/watch-task-tools.js";
 import { WatchBoard } from "../services/watch-board.js";
 import { UserRhythmStore, parsePrepMinutesFromFact } from "../services/user-rhythm-store.js";
@@ -601,7 +604,7 @@ import {
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
-import { ProactivePipeline } from "../proactivity/proactive-pipeline.js";
+import { ProactivePipeline, IN_CONVERSATION_WINDOW_MS } from "../proactivity/proactive-pipeline.js";
 import { SilenceLog } from "../proactivity/silence-log.js";
 import { PendingConfirmationStore } from "../proactivity/pending-confirmation-store.js";
 import { PreferenceChangeTrigger } from "../proactivity/triggers/preference-change-trigger.js";
@@ -816,7 +819,7 @@ export async function createAppServices(): Promise<AppServices> {
     const brief = await weatherService.getBrief(
       loc.latitude,
       loc.longitude,
-      loc.timezone || task.timezone,
+      loc.timezone || task.timezone || "auto",
       loc.label,
     );
     const message = `${brief.summaryLine} 穿衣建议：${brief.clothingAdvice}`;
@@ -839,16 +842,12 @@ export async function createAppServices(): Promise<AppServices> {
   const ttsService = new TtsService();
   const virtualPhoneService = new VirtualPhoneService(ttsService, wsConnectionRegistry);
 
-  // 初始化语音对话服务（ASR + LLM + TTS 抽象层）
+  // 初始化语音对话服务（LLM + TTS 抽象层）
   const voiceDialogueService = new VoiceDialogueService();
-
-  // ASR Adapter：FunASR 自托管（中文最佳）
-  const funasrAdapter = new FunAsrAdapter();
 
   // 注册 OpenAI provider（默认）
   const openaiLLMAdapter = new OpenAILLMAdapter();
   voiceDialogueService.registerProvider("openai", {
-    asr: funasrAdapter,
     tts: new OpenAITTSAdapter(ttsService),
     llm: openaiLLMAdapter,
   });
@@ -865,14 +864,11 @@ export async function createAppServices(): Promise<AppServices> {
   const minimaxTTS = new MiniMaxTTSAdapter();
   if (minimaxTTS.isEnabled()) {
     voiceDialogueService.registerProvider("minimax", {
-      asr: funasrAdapter, // ASR 走 FunASR
       tts: minimaxTTS,
       llm: new OpenAILLMAdapter(),
     });
     voiceDialogueService.setDefaultProvider("minimax");
-    app.log.info(
-      `[VoiceDialogue] MiniMax TTS 已启用，设为默认提供商（ASR：${funasrAdapter.name}）`,
-    );
+    app.log.info("[VoiceDialogue] MiniMax TTS 已启用，设为默认提供商");
   }
 
   if (!minimaxTTS.isEnabled()) {
@@ -880,14 +876,7 @@ export async function createAppServices(): Promise<AppServices> {
     voiceDialogueService.setDefaultProvider("openai");
   }
 
-  // FunASR 自托管 ASR 优先（中文识别效果优于 whisper）
-  if (funasrAdapter.isEnabled()) {
-    app.log.info(
-      `[VoiceDialogue] FunASR 已启用（${process.env.FUNASR_BASE_URL}），中文 ASR 走 FunASR`,
-    );
-  }
-
-  // 初始化 Agent 底层语音能力中枢（TTS + ASR + WS 推送）。
+  // 初始化 Agent 底层语音能力中枢（TTS + WS 推送）。
   // 作为 Agent 的底层能力，被 voice.speak 工具、智能提醒、主动消息等场景统一调度。
   const voiceMessageService = new VoiceMessageService();
   voiceMessageService.setTtsService(ttsService);
@@ -1260,7 +1249,7 @@ export async function createAppServices(): Promise<AppServices> {
     );
     registerAgentPhoneTools(toolRegistry, virtualPhoneService);
   }
-  registerAgentVoiceTools(toolRegistry, voiceCapabilityService, voiceMessageService);
+  registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
   // Surface-on-Demand：surface.dismiss（收起媒体页等浮层）。surface.show 已于
   // 2026-10-22 删除——召唤面板不由 LLM 工具实现。
   registerSurfaceTools(toolRegistry, {
@@ -3355,14 +3344,13 @@ export async function createAppServices(): Promise<AppServices> {
   // ── 全双工实时语音（WS /ws/voice-duplex）──
   // 引擎装配：云端 MiniMax 只是「实时语音引擎端口」的一个实现。接入本地引擎或
   // 换其它云端时，只需往 realtimeEngines 里加一个 RealtimeVoiceEngine 实现；
-  // 会话层、协议层、客户端均不动。无可用引擎时自动回退 pipeline（ASR+LLM+TTS）。
+  // 会话层、协议层、客户端均不动。识别（ASR）由 realtime 引擎在云端自带。
   const minimaxRealtimeService = new MiniMaxRealtimeService();
   const minimaxEngine = new MiniMaxRealtimeEngine(minimaxRealtimeService);
   // 电话通话同步切 realtime：开启后通话对话由 duplex 引擎按 callId 上下文接管，
   // phone.call_reply 打字回复与接通首问 LLM 链路停用。
   virtualPhoneService.setRealtimeVoiceEnabled(minimaxEngine.isEnabled());
   const voiceDuplexService = new VoiceDuplexService({
-    voiceDialogueService,
     realtimeEngines: [minimaxEngine],
     // 通话上下文注入：session.start 带 sessionId=callId 时，把通话场景并进 realtime 人设
     callVoiceContext: (callId) => virtualPhoneService.getCallVoiceContext(callId),
@@ -3371,11 +3359,9 @@ export async function createAppServices(): Promise<AppServices> {
   });
   registerVoiceDuplexWsRoute(app, voiceDuplexService);
   app.log.info(
-    `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，引擎=${
-      minimaxEngine.isEnabled()
-        ? minimaxEngine.descriptor.name
-        : `pipeline（ASR=${process.env.FUNASR_BASE_URL ? "FunASR流式" : "回退整句"}）`
-    }）`,
+    minimaxEngine.isEnabled()
+      ? `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，引擎=${minimaxEngine.descriptor.name}）`
+      : "[VoiceDuplex] 未装配可用实时语音引擎，/ws/voice-duplex 会话将被拒绝（需 MINIMAX_API_KEY）",
   );
 
   // ── Task 16 消费管家：工具执行成功事件（tool.executed）发布 ──
@@ -3758,8 +3744,6 @@ export async function createAppServices(): Promise<AppServices> {
 
     const ear = new Ear({
       bodyBus,
-      voiceDialogue: voiceDialogueService,
-      funasrAdapter,
     });
 
     // SmartHomeService 目前未提供状态变化订阅（无 onStateChange），
@@ -4670,6 +4654,9 @@ export async function createAppServices(): Promise<AppServices> {
     frequencyGovernor: proactivityGovernor,
     silenceLog: proactivitySilenceLog,
     pendingConfirmations: proactivityConfirmations,
+    // 统一话术层（2026-10-27 模板层删除）：直达车道 speak 一律经 SpeechHub
+    // light 由 LLM 组织语言，内部素材不再被模板/原句直投给用户
+    speechHub,
     // 顺嘴搭车队列：low 级 speak 挂起等下一轮对话；agent-core 经
     // takeTurnAsideForTurn 取走织入（与主动外发执行器共享同一实例）。
     // medium 过期升级（2026-10-01 扩面）：6h 没搭上车就重投正常通道——
@@ -4932,12 +4919,16 @@ export async function createAppServices(): Promise<AppServices> {
   interestWatcher.start();
   proactivityHub.start();
   console.log("[Bootstrap] ProactivityHub 已装配（多元触发 + 频控 + speak/act/advise）");
-  // 定时任务死信通知：连续失败进入死信（停止重试）时主动告知一次，不再无人知晓地空烧
+  // 定时任务死信通知：连续失败进入死信（停止重试）时通报一次。aside-only（2026-10-27）：
+  // title/summary 是给 agent 看的内部通报，只能经顺嘴搭车织入下一轮对话由 agent 转述，
+  // 绝不直投为独立气泡（直达车道模板兜底曾把「定时任务「X」已暂停」原句弹出）。
+  // importance 压 low：搭车 2h 无人接话就作废（medium 过期会升级直投，漏回同一个洞）。
   scheduleTaskService.setTaskDeadLetterHandler((task) => {
     proactivityHub.submitIntent({
       actorId: task.sessionId,
       kind: "life_reminder",
-      importance: "medium",
+      importance: "low",
+      asideOnly: true,
       title: `定时任务「${task.title ?? task.description.slice(0, 30)}」已暂停`,
       summary:
         `这个任务连续 ${task.consecutiveFailures ?? 0} 次执行失败（${task.lastError ?? "原因未知"}），` +
@@ -4946,13 +4937,15 @@ export async function createAppServices(): Promise<AppServices> {
       source: "time",
     });
   });
-  // 定时任务迟跑未执行通知：runtime 离线跨过触发点且迟到超阈时，不再静默执行
-  // 也不再静默丢弃——告知一次"这个任务错过了，没补"，要补由用户决定。
+  // 定时任务迟跑未执行通报：runtime 离线跨过触发点且迟到超阈时不再静默执行、
+  // 也不再无人知晓——aside-only 顺嘴通报一次（2026-10-27 定性：这是给 agent 看
+  // 的事件素材，由 agent 下一轮对话顺嘴转述并问要不要补，不是独立弹出的提醒）。
   scheduleTaskService.setTaskMissedHandler((task, plannedAt) => {
     proactivityHub.submitIntent({
       actorId: task.sessionId,
       kind: "life_reminder",
       importance: "low",
+      asideOnly: true,
       title: `定时任务「${task.title ?? task.description.slice(0, 30)}」错过了，已跳过`,
       summary:
         `原定 ${plannedAt} 的这个任务在 runtime 未运行期间错过了，我没有补跑。` +
@@ -5058,7 +5051,9 @@ export async function createAppServices(): Promise<AppServices> {
       const brief = await weatherService.getBrief(
         loc.latitude,
         loc.longitude,
-        loc.timezone || (process.env.TZ ?? "Asia/Shanghai"),
+        // 时区只认定位带回来的值，没有就让接口按坐标推导（auto）；
+        // 绝不能用服务器 process.env.TZ 冒充用户所在时区。
+        loc.timezone || "auto",
         loc.label,
       );
       weatherLineCache =
@@ -5560,10 +5555,119 @@ export async function createAppServices(): Promise<AppServices> {
   shoppingCompareService.start();
   console.log("[Bootstrap] 购物降价监控已装配（shopping.compare.watch）");
 
-  // ─── 用户邮箱盯梢（MailWatch，2026-09-18"Agent 帮用户盯消息"地基）───
-  // IMAP 轮询 → 重要性分级（VIP 白名单/确定性关键词规则）：
-  //   critical/high → ProactivityHub 主动提醒（life_reminder kind 走频控，speak 闭环）；
-  //   全部邮件     → message-hub 落库（platform=email，进消息中心统计）。
+  // ─── 情报链路（统一入口闸 → 面板 → 判断 → 成稿 → 开口）───
+  // 所有信源只交原文；入口闸挡一次性口令/营销/账号流水（安全告警与交易放行），
+  // 提炼成「目录行 + 详情」进面板；模型只看目录行决定 now/later/never，判定要说的
+  // 才懒加载详情、带人格写成一句话。说出后条目从面板删除，留历史与墓碑。
+  // 没有每日配额、最小间隔、关键词分类：频率由判断本身与投递回执调控。
+  // 模型不可用时条目留在面板（attempts/lastError 可见），恢复后重判，不生造话术。
+  const intelStyleBrief = createUserStyleBrief({
+    readProfile: async (actorId) =>
+      (await userProfileAggregatorRef.current?.readProfile(actorId)) ?? "",
+  });
+  const intelService = new IntelService({
+    dataPath: proactivityFabricPath,
+    presence: proactivityPresence,
+    inConversation: (actorId) => {
+      const last = proactivityHub.lastInteractionAtOf(actorId);
+      return (
+        proactivityPresence.getPresence(actorId, Date.now()) === "active" &&
+        last !== null &&
+        Date.now() - last <= IN_CONVERSATION_WINDOW_MS
+      );
+    },
+    actors: () => {
+      const ids = new Set(proactivityHub.exportActors().map((a) => a.actorId));
+      const primary = primaryActor();
+      if (primary) ids.add(primary);
+      return [...ids];
+    },
+    judge: createIntelJudge({
+      chat: () => (externalChat?.isEnabled() ? externalChat : null),
+    }),
+    // agent 风格指纹（few-shot 语感）：判断写草稿时就用同一副嗓子，读取失败不阻塞
+    voiceCard: () => {
+      try {
+        return formatAgentStylePrompt(loadAgentStyleProfile(agentMemorySyncService));
+      } catch {
+        return null;
+      }
+    },
+    compose: createIntelComposer({
+      chat: () => (externalChat?.isEnabled() ? externalChat : null),
+      personaPrompt: (actorId) => personaSoulProviderRef.current?.(actorId) ?? null,
+    }),
+    // 白名单与邮箱盯梢共用同一份配置：用户钦点的发件人永远绕过入口闸
+    vipSenders: (process.env.MAIL_WATCH_VIP_SENDERS ?? "")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    styleBrief: (actorId) => intelStyleBrief(actorId),
+    feedback: () =>
+      (proactivePipelineRef.current?.diagnostics().recentOutcomes ?? []).map((o) => ({
+        at: o.at,
+        kind: o.kind,
+        outcome: o.outcome,
+      })),
+    onMemoryCandidate: (actorId, candidate, meta) => {
+      if (isEphemeralActorId(actorId)) return;
+      void humanLikeMemory
+        .ingest(actorId, candidate, "intel:panel", {
+          context: "main",
+          metadata: { entryId: meta.entryId, eventKey: meta.eventKey },
+        })
+        .catch((e) => {
+          app.log.warn(`[intel] 记忆沉淀失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
+        });
+    },
+    deliver: async ({ entry, message }) => {
+      const pipeline = proactivePipelineRef.current;
+      if (!pipeline) return "retry";
+      // 正文直接用成稿模型写的这句话：不再过润色层，也不机器拼接类别前缀
+      const decision = pipeline.submitProposal({
+        proposalId: `intel_${entry.id}`,
+        actorId: entry.actorId,
+        kind: "intel",
+        tier: "must", // 判断为值得说的事不跟社交预算排队
+        importance: "high",
+        dedupKey: `intel:${entry.id}`,
+        title: entry.brief.slice(0, 120),
+        summary: message.slice(0, 200),
+        evidence: [
+          entry.source,
+          ...(entry.judgment?.reason ? [entry.judgment.reason] : []),
+          ...entry.refs,
+        ]
+          .filter(Boolean)
+          .slice(0, 6),
+        directText: message,
+        createdAt: Date.now(),
+        ...(entry.judgment?.expiresAt !== undefined || entry.expiresAt !== undefined
+          ? { expiresAt: entry.expiresAt ?? entry.judgment?.expiresAt }
+          : {}),
+        source: "intel_service",
+      });
+      if (
+        decision.verdict === "delivered" ||
+        decision.verdict === "merged" ||
+        decision.verdict === "deferred"
+      ) {
+        return "delivered";
+      }
+      if (decision.verdict === "suppressed" || decision.verdict === "silenced" || decision.verdict === "expired") {
+        return "dropped";
+      }
+      return "retry";
+    },
+  });
+  intelService.start();
+  registerIntelPanelTools(toolRegistry, intelService);
+  console.log("[Bootstrap] 情报链路已装配（统一闸口 + 面板 + 判断/成稿两段模型；巡检 60s）");
+
+  // ─── 用户邮箱盯梢（MailWatch）───
+  // IMAP 轮询（自适应节奏）→ 营销过滤 → 原文入池（说不说交给模型判断）：
+  //   非营销邮件 → 情报链路（模型判断 now/later/never，见上）；票务邮件另交日程桥。
+  //   全部邮件   → message-hub 落库（platform=email，进消息中心统计）。
   // 财务实时通道（2026-09-18）：账单/支付类新邮件 → isBillRelatedMail 粗筛 →
   //   ingestText（LLM 抽取 + 指纹去重 + 入账，入账后经 setOnIngested 轻提醒）。
   //   这是"后台自动获取财务数据"里延迟最低的通道（邮件到达即入账，秒~分钟级）；
@@ -5591,7 +5695,7 @@ export async function createAppServices(): Promise<AppServices> {
     // 邮件链即使填了授权码也会「running=true 但空转」（2026-10-01 补接线）。
     // cfg 由 service 每轮传入（含运行时 applyPass 设置的授权码）。
     clientFactory: (cfg) => createImapflowClient(cfg),
-    onNewMessage: (mail, classification) => {
+    onNewMessage: (mail) => {
       // 财务实时入账：账单/支付类邮件直接喂给财务抽取链路（fire-and-forget，
       // 失败只记日志不打断盯梢；是否真有交易由 ingestText 的 LLM 抽取如实判断）
       if (isBillRelatedMail({ from: mail.from, subject: mail.subject, text: mail.textSnippet ?? "" })) {
@@ -5625,25 +5729,18 @@ export async function createAppServices(): Promise<AppServices> {
         } catch (e) {
           app.log.warn(`[mail-watch] 票务邮件日程提取失败（忽略）: ${e instanceof Error ? e.message : String(e)}`);
         }
-        // 提醒闸门：只有 critical/high 当场提醒（promotional 在 MailWatch 内已被
-        // 过滤不会到这里；normal 静默落库）。此处白名单式判断，新增分级默认不推送。
-        if (classification.importance !== "critical" && classification.importance !== "high") return;
+        // 非营销邮件统一交情报链路：模型自己判断这件邮件值不值得说、什么时候说。
+        // 票务已由日程桥接管时跳过当场提醒（按事件时间排），邮件本身仍进 message-hub。
         if (suppressMailInterrupt(ticketReport)) return;
-        proactivityHub.submitIntent({
+        intelService.ingestMail({
           actorId: mail.actorId,
-          kind: "life_reminder",
-          // high/critical → high：验证码/传票/逾期这类邮件时效以分钟计（验证码
-          // 10 分钟作废），降档会被静默时段吞到明早——时效即价值，必须当场提醒。
-          // （governor 静默规则本就给 high 开了豁免通道；medium 留给普通关注件。）
-          importance: classification.importance === "critical" || classification.importance === "high" ? "high" : "medium",
-          title: `邮件：${mail.subject || "（无主题）"}`,
-          summary:
-            `收到来自 ${mail.from} 的${classification.importance === "critical" ? "重要" : "需要关注"}邮件` +
-            `「${mail.subject || "（无主题）"}」` +
-            `${mail.textSnippet ? `，开头内容：${mail.textSnippet.slice(0, 120)}` : ""}。` +
-            `像助手汇报要事一样自然提起，问用户要不要现在处理；不要复述成资讯播报。`,
-          mode: "speak",
-          source: "email",
+          subject: mail.subject,
+          textSnippet: mail.textSnippet,
+          from: mail.from,
+          date: mail.date,
+          ...(mail.messageId || mail.uid !== undefined
+            ? { messageId: mail.messageId ?? `uid:${mail.uid}` }
+            : {}),
         });
       })();
     },
@@ -5774,7 +5871,7 @@ export async function createAppServices(): Promise<AppServices> {
   });
   discoveryRef.current = discovery;
   // 顺嘴搭车出口接入共享发现层（2026-10-19 二期）：取货织入时也走同一道 composeBeforeOpen
-  // （把同主题他人发现合并进旁注）+ 取走即说出地结算预留。晚绑定：hub 早于 discovery 构造。
+  // （读走同主题他人发现并预留，不拼旁注）+ 取走即说出地结算预留。晚绑定：hub 早于 discovery 构造。
   proactivityHub.setDiscovery(discovery);
   const sensorFabricDisabled = (name: string) => process.env[`SENSOR_FABRIC_${name}`] === "0";
   if (!sensorFabricDisabled("MAIL")) {
@@ -6599,10 +6696,12 @@ export async function createAppServices(): Promise<AppServices> {
       tier: event.tier,
       label: event.title,
       deliver: () => {
-        // 内容型评估器事件（消息来临/临会提醒）→ LLM 话术润色后再投递；
-        // 其余 kind 保持模板直投。polish 失败自动回退 event.body。
-        // （社交开口类 away_return 已在 onEvent 顶部分流进统一主动出口。）
-        const phraseKinds = ["unread_burst", "meeting_soon"];
+        // 话术统一走 SpeechHub light（2026-10-27 模板层删除）：评估器事件正文
+        // 一律 LLM 基于素材（title/body/summary）组织语言，生产者成稿仅作兜底。
+        // 例外：morning_brief 是多行数据卡片（不是话术），保持直投；
+        // viaCall 走真实来电汇报（caller 内部自带话术）。
+        // LLM 失败且无成稿（body 为空）→ 沉默，绝不吐系统态素材。
+        const cardKinds = ["morning_brief"];
         // 呼叫路由：PROACTIVE_CALL_KINDS 白名单（默认行程变化）+
         // 任意 critical 事件——遇到事情打电话汇报，通话内可对话
         const callKinds = (process.env.PROACTIVE_CALL_KINDS ?? "schedule_change")
@@ -6622,8 +6721,8 @@ export async function createAppServices(): Promise<AppServices> {
           importance: event.importance,
           dedupKey: event.dedupKey,
           title: event.title,
-          summary: event.body.slice(0, 120),
-          directText: event.body,
+          summary: (event.summary || event.body).slice(0, 120),
+          directText: bodyText || undefined,
           evidence: [`evaluator:${event.kind}`],
           createdAt: Date.now(),
           source: `evaluator:${event.kind}`,
@@ -6656,25 +6755,35 @@ export async function createAppServices(): Promise<AppServices> {
               // → 文本兜底）；到这里的外层异常只记日志，防止兜底后二次投递
               console.log(`[ArbiterV2] 通话异常（忽略）kind=${event.kind}: ${err}`);
             });
-        } else if (phraseKinds.includes(event.kind)) {
+        } else if (cardKinds.includes(event.kind)) {
+          // 结构化数据卡片：不是话术，直投
+          submit(event.body);
+        } else {
           void (async () => {
             const polished = await speechHub.speak({
               kind: event.kind,
               sessionId: actorId,
-              facts: { title: event.title, body: event.body },
+              facts: {
+                title: event.title,
+                ...(event.body ? { body: event.body } : {}),
+                ...(event.summary ? { 背景: event.summary } : {}),
+              },
+              // 生产者成稿兜底（可为空 → 话术失败时沉默）
               fallback: event.body,
               tier: "light",
-              // 重要性分配：低于门槛（默认 high）的提醒直接模板直投，不花润色调用
-              importance: event.importance,
+              // 统一话术（2026-10-27）：不传 importance——润色不设重要度门槛
             });
+            // 话术为空且无成稿 → 沉默（材料是系统态的，绝不原样投递）
+            if (!polished.trim()) {
+              console.log(`[ArbiterV2] 话术为空，沉默 kind=${event.kind}`);
+              return;
+            }
             submit(polished);
           })().catch((err) => {
-            // 仅话术生成可失败（回退模板正文）；这里不再二次 submit，防双发
-            console.log(`[ArbiterV2] 话术生成失败，用模板直投 kind=${event.kind}: ${err}`);
-            submit(event.body);
+            // 话术异常：有成稿用成稿兜底，否则沉默；不二次 submit 防双发
+            console.log(`[ArbiterV2] 话术生成失败 kind=${event.kind}: ${err}`);
+            if (event.body.trim()) submit(event.body);
           });
-        } else {
-          submit(event.body);
         }
       },
     });
@@ -7021,6 +7130,10 @@ export async function createAppServices(): Promise<AppServices> {
       goalRunnerStatus: () => goalRunner.status(),
       // 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模
       sourceStats: () => sourceStore.stats(),
+      // 情报链路（未判断/待开口/最近判断）：状态面板如实展示池内情况与错误
+      intel: () => intelService.status(),
+      intelReview: (actorId?: string) =>
+        intelService.evaluate(actorId ?? primaryActor() ?? "local_user"),
       // 票务邮件规则漏检埋点（2026-10-11）：预筛命中却零产出 → 计数 + 最近样本。
       // 这是"要不要换 LLM 兜底"的决策数据面（当前 total 恒为 0 表示规则没漏）。
       mailTicketMissStats: () => mailScheduleBridge.missStats(),
@@ -7215,8 +7328,6 @@ export async function createAppServices(): Promise<AppServices> {
     approvalInboxService,
     attentionStore,
     reachRouter,
-    // /agent/voice/transcribe 端点依赖（ASR 专用走 voiceCapabilityService）
-    voiceCapabilityService,
     brainCenter,
     bodyCenter,
     reflexArc,
@@ -7247,8 +7358,6 @@ export async function createAppServices(): Promise<AppServices> {
     devicePairingService,
     userPersonalizationService,
     deviceRegistry,
-    voiceCapabilityService,
-    voiceMessageService,
     morningBriefingScheduler,
     eveningDigestScheduler,
     accessAuthService,
@@ -7281,6 +7390,7 @@ export async function createAppServices(): Promise<AppServices> {
     mappingExecutor.stop();
     worldBoard.flush();
     sensorKernel.stop();
+    intelService.stop();
     // 女性关怀：停经期提醒调度 + 加密数据落盘
     periodCareService.stop();
     void periodCareService.flush();

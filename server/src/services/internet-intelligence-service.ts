@@ -103,7 +103,8 @@ type Budget = {
   queryCount: number;
 };
 
-const DEFAULT_TIMEZONE = "Asia/Shanghai";
+// 天气时区：定位没带时区时由坐标推导（auto），不用服务端本机时区兜底
+const DEFAULT_TIMEZONE = "auto";
 const MAX_RESULT_TOKENS = 1800;
 
 export class InternetIntelligenceService {

@@ -12,7 +12,7 @@
  *   - data_brief    数据快报（≥3 个 KPI 数据点 + 字数适中，数字密集短文）
  *   - result_card   小汇报场景（≤300 字 + 列表；媒体搜索/天气工具有场景加成）
  *   - brief         简报增强（≤300 字 + 引导行 + 列表的晨报/资讯结构）
- *   - summary_card  长内容（≥400 字 + 结构化：板块/表格/列表+段落 → 折叠摘要）
+ *   - summary_card  长内容（≥800 字 + 结构化：板块/表格/列表+段落 → 折叠摘要）
  *   - long_text     其余长内容（≥300 字 / 意图 / 表格 → 结构化富文本）
  *   - plain         低于门槛的回落（闲聊、无结构短文、能力 dump）
  *
@@ -67,8 +67,9 @@ const RESULT_CARD_MAX_CHARS = 300;
 const IMAGE_URL_RE = /https?:\/\/\S+\.(?:jpg|jpeg|png|webp|gif|bmp)(?:[?#]\S*)?/i;
 /** 结构化富文本字数下限：>300 字符倾向输出 Markdown 富文本 */
 const STRUCTURED_TEXT_MIN_CHARS = 300;
-/** summary_card 字数下限：≥400 字的长内容才考虑折叠 */
-const SUMMARY_MIN_CHARS = 400;
+/** summary_card 字数下限：≥800 字的长内容才考虑折叠（2026-10-28 定版，
+ *  与 content-summary-service 同值；400 门槛过低导致短回复也出折叠卡） */
+const SUMMARY_MIN_CHARS = 800;
 /** data_brief 字数下限：短到一句话带数字的闲聊不触发 */
 const DATA_BRIEF_MIN_CHARS = 60;
 /** data_brief KPI 数据点下限：≥3 个数字/百分比/指标才算「数据快报」 */
@@ -158,7 +159,7 @@ interface HintScoringContext {
   kpiCount: number;
   hasTable: boolean;
   hasIntent: boolean;
-  /** 长结构化文档：有板块/表格且 ≥400 字（数据快报让位给折叠摘要）。 */
+  /** 长结构化文档：有板块/表格且 ≥800 字（数据快报让位给折叠摘要）。 */
   isLongDoc: boolean;
   isImageTool: boolean;
   isSearchTool: boolean;
@@ -196,7 +197,7 @@ function buildHintScoringContext(text: string, ctx?: RenderHintContext): HintSco
  *   2. search_result 搜索工具 + 3-10 条列表，且无意图/表格让位
  *   3. data_brief    ≥3 个 KPI 数据点 + 60~800 字 + 非长文档
  *   4. result_card   短文本（≤300 字）+ 3-12 条列表（markdown 列表切卡）
- *   5. summary_card  ≥400 字 + 结构化（板块/表格/列表混排）→ 折叠摘要
+ *   5. summary_card  ≥800 字 + 结构化（板块/表格/列表混排）→ 折叠摘要
  *   6. long_text     意图/表格触发，或 ≥300 字长文（结构化富文本）
  *   7. plain         无硬信号 → 纯文本（不硬塞形态）
  *
@@ -275,7 +276,7 @@ export function classifyRenderHint(
     }
   }
 
-  // 5. 长文档折叠：≥400 字 + 结构化（板块/表格/列表混排）
+  // 5. 长文档折叠：≥800 字 + 结构化（板块/表格/列表混排）
   if (sc.len >= SUMMARY_MIN_CHARS && sc.structural.structured) {
     return hit("summary_card", "long-structured-doc");
   }

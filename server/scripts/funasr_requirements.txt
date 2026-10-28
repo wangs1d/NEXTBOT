@@ -1,9 +1,0 @@
-funasr>=1.1.16
-modelscope>=1.18.0
-torch>=2.0.0
-torchaudio>=2.0.0
-numpy>=1.24.0
-soundfile>=0.12.0
-fastapi>=0.110.0
-uvicorn[standard]>=0.27.0
-python-multipart>=0.0.9

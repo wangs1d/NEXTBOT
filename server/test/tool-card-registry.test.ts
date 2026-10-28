@@ -133,6 +133,7 @@ test("attachWeatherFromExecuted: tool-loop 天气回执 → weather 卡", () => 
           todayRangeC: "19–25",
           humidityPct: 88,
           peakRainPct: 92,
+          todayRainPeriod: "上午 9–12 点最明显",
           clothingAdvice: "出门带把伞，薄外套够了",
           locationLabel: "贵州 · 兴义",
         },
@@ -142,7 +143,19 @@ test("attachWeatherFromExecuted: tool-loop 天气回执 → weather 卡", () => 
   assert.ok(out.startsWith("王哥，明天有毛毛雨，出门带把伞。"));
   assert.ok(out.includes("[AGENT_RESULT_CARD_START]"));
   assert.ok(out.includes('"cardType":"weather"'));
-  assert.ok(out.includes("峰值降水概率 92%"));
+  // 整天概率 + 具体钟点段：只写「92%」用户不知道该几点躲雨
+  assert.ok(out.includes("今天降水 92%（上午 9–12 点最明显）"), out);
+});
+
+test("天气卡：回执没有时段时退回整天口径，不编时间窗", () => {
+  const out = attachWeatherResultCardFromExecuted("看过了。", [
+    {
+      toolName: "weather.get_local",
+      result: { weatherText: "多云", todayRangeC: "18–24", peakRainPct: 35 },
+    },
+  ]);
+  assert.ok(out.includes("今天降水 35%"), out);
+  assert.ok(!out.includes("今天降水 35%（"), "没测出的时段不能凭空补一个");
 });
 
 test("attachWeatherFromExecuted: 多地调用 → 合并为一张多地卡", () => {

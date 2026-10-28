@@ -20,8 +20,6 @@ import { normalizeDeviceClass } from "../services/ws-connection-registry.js";
 import { declareClientCapabilities } from "../services/client-capability-registry.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
-import type { VoiceCapabilityService } from "../services/voice-capability-service.js";
-import type { VoiceMessageService } from "../services/voice-message-service.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
 import type { ActorModelBindingStore } from "../external-model/actor-model-bindings.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
@@ -35,6 +33,7 @@ import {
   type PetReactionChatLike,
 } from "./handlers/pet-reaction.js";
 import {
+  abortActiveTurn,
   handleChatAgentProcessingUiEvent,
   handleChatUserMessageEvent,
   messageBatchProcessor,
@@ -211,10 +210,6 @@ export type WsRouteDeps = {
   userPersonalizationService: UserPersonalizationService;
   deviceRegistry: DeviceRegistry;
   devicePairingService: DevicePairingService;
-  /** Agent 底层语音能力中枢（用于 chat.user_message 的 ASR 链路） */
-  voiceCapabilityService?: VoiceCapabilityService;
-  /** 语音消息落盘服务（用于解析 audio 消息的本地文件路径） */
-  voiceMessageService?: VoiceMessageService;
   /** 早间简报调度器：WS 连接建立时 subscribe，断开时 unsubscribe */
   morningBriefingScheduler?: MorningBriefingScheduler;
   /** 晚间 digest 调度器（Task 15 生活节律）：WS 连接建立时 subscribe，断开时 unsubscribe */
@@ -266,8 +261,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     userPersonalizationService,
     deviceRegistry,
     devicePairingService,
-    voiceCapabilityService,
-    voiceMessageService,
     morningBriefingScheduler,
     eveningDigestScheduler,
     accessAuthService,
@@ -1407,8 +1400,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             {
               runtime,
               auditService,
-              voiceCapabilityService,
-              voiceMessageService,
               phoneCallCoordinator,
             },
           );
@@ -1430,8 +1421,6 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             {
               runtime,
               auditService,
-              voiceCapabilityService,
-              voiceMessageService,
               phoneCallCoordinator,
             },
           );
@@ -1472,6 +1461,20 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             { actorId: boundActorId, taskId: cancelTaskId, cancelled },
             "chat.task_cancel",
           );
+          return;
+        }
+
+        if (event.type === ClientEventType.ChatTurnStop) {
+          // 用户中断当前前台轮次（2026-10-28 内置浏览器面板「停止」按钮）：
+          // abort 该 actor 进行中的 turn（中断 LLM 流式请求），轮次走异常收尾，
+          // 客户端会收到 error/assistant_done 解除「处理中」。与后台任务的
+          // chat.task_cancel 语义分离。
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          abortActiveTurn(boundActorId);
+          app.log.debug({ actorId: boundActorId }, "chat.turn.stop");
           return;
         }
 

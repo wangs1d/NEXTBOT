@@ -20,8 +20,7 @@ ChatMessage _agent(String id, String text) => ChatMessage(
     );
 
 List<ChatMessage> _history(int count) => <ChatMessage>[
-      for (int i = 0; i < count; i++)
-        _agent("m-$i", "第 $i 条历史消息内容。" * 6),
+      for (int i = 0; i < count; i++) _agent("m-$i", "第 $i 条历史消息内容。" * 6),
     ];
 
 Widget _host(List<ChatMessage> messages, {required bool processing}) {
@@ -61,14 +60,27 @@ List<ChatMessage> _grown(List<ChatMessage> base, int round) {
 List<ChatMessage> _appended(List<ChatMessage> base) =>
     <ChatMessage>[...base, _agent("m-new", "Agent 的新一条发言。")];
 
+/// 按滚动条绘制公式复算滑块长度与上沿位置（reverse 垂直轴）。
+double _thumbLength(ScrollPosition p) {
+  final double range = p.maxScrollExtent - p.minScrollExtent;
+  final double track = p.viewportDimension;
+  final double natural = track * track / (range + track);
+  return natural.clamp(18.0, track).toDouble();
+}
+
+double _thumbTop(ScrollPosition p) {
+  final double track = p.viewportDimension;
+  return (1 - p.pixels / (p.maxScrollExtent - p.minScrollExtent)) *
+      (track - _thumbLength(p));
+}
+
 Future<void> _settle(WidgetTester tester) async {
   await tester.pump();
   await tester.pump(const Duration(milliseconds: 260));
 }
 
 void main() {
-  testWidgets("触控板上滑到 24–100px 窗口后，流式分片不抢滚动",
-      (WidgetTester tester) async {
+  testWidgets("触控板上滑到 24–100px 窗口后，流式分片不抢滚动", (WidgetTester tester) async {
     final List<ChatMessage> base = _history(30);
     await tester.pumpWidget(_host(base, processing: true));
     await tester.pump();
@@ -92,8 +104,7 @@ void main() {
     }
   });
 
-  testWidgets("滚动条滑块跳到 24–100px 后，流式分片不抢滚动",
-      (WidgetTester tester) async {
+  testWidgets("滚动条滑块跳到 24–100px 后，流式分片不抢滚动", (WidgetTester tester) async {
     final List<ChatMessage> base = _history(30);
     await tester.pumpWidget(_host(base, processing: true));
     await tester.pump();
@@ -123,8 +134,7 @@ void main() {
     expect(_listPosition(tester).pixels, closeTo(60, 2));
   });
 
-  testWidgets("贴底且未接管时仍然自动跟底（不被新逻辑误伤）",
-      (WidgetTester tester) async {
+  testWidgets("贴底且未接管时仍然自动跟底（不被新逻辑误伤）", (WidgetTester tester) async {
     final List<ChatMessage> base = _history(30);
     await tester.pumpWidget(_host(base, processing: true));
     await tester.pump();
@@ -157,8 +167,7 @@ void main() {
     expect(_listPosition(tester).pixels, lessThanOrEqualTo(1));
   });
 
-  testWidgets("拖动滑块途中布局变化（计划卡出现），内容位移仍按指针走",
-      (WidgetTester tester) async {
+  testWidgets("拖动滑块途中布局变化（计划卡出现），滑块仍跟住指针", (WidgetTester tester) async {
     // 桌面端滚动条由 MaterialScrollBehavior 自动加，需切到 Windows 平台
     debugDefaultTargetPlatformOverride = TargetPlatform.windows;
     try {
@@ -198,39 +207,139 @@ void main() {
       final Rect listRect =
           tester.getRect(find.byWidgetPredicate((Widget w) => w is ListView));
       final double viewportBefore = p.viewportDimension;
+      final double pressThumbTop = _thumbTop(p);
       final TestGesture gesture = await tester.startGesture(
-        Offset(listRect.right - 6, listRect.center.dy),
+        Offset(listRect.right - 6, listRect.top + pressThumbTop + 20),
         kind: PointerDeviceKind.mouse,
       );
       await tester.pump(const Duration(milliseconds: 20));
 
-      double last = p.pixels;
-      final List<double> steps = <double>[];
       for (int i = 1; i <= 6; i++) {
         if (i == 3) {
-          // 拖动进行中：状态条 + 计划卡出现，列表视口被压矮、总高估算同步变大
+          // 拖动进行中：状态条 + 计划卡出现，列表视口被压矮
           await tester.pumpWidget(host(busy: true));
           await tester.pump();
-          last = _listPosition(tester).pixels;
         }
         await gesture.moveBy(const Offset(0, -20));
         await tester.pump(const Duration(milliseconds: 16));
-        final ScrollPosition q = _listPosition(tester);
-        steps.add(q.pixels - last);
-        last = q.pixels;
+        // 指针累计上移 20×i，滑块顶端也应停在同一个位置（可以整体回贴一次）
+        expect(_thumbTop(_listPosition(tester)),
+            closeTo(pressThumbTop - 20.0 * i, 3),
+            reason: "第 $i 步滑块没有跟住指针的 20px");
       }
       await gesture.up();
       await tester.pump(const Duration(milliseconds: 100));
 
-      // 确认场景有效：视口真的在拖动途中变了，否则测不到映射重算
+      // 确认场景有效：视口真的在拖动途中变了，否则测不到几何重算
       expect(_listPosition(tester).viewportDimension,
           lessThan(viewportBefore - 50));
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
 
-      final double first = steps.first;
-      for (int i = 0; i < steps.length; i++) {
-        expect(steps[i], closeTo(first, first * 0.15),
-            reason: "第 ${i + 1} 步位移偏离首步，滑块映射在拖动中被重算了");
+  testWidgets("拖动滑块时滑块与指针 1:1 跟随，总高估算不摇摆", (WidgetTester tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      // 高度参差的长消息流（夹杂很高的卡片），懒加载估算最容易抖的场景
+      final List<ChatMessage> base = <ChatMessage>[
+        for (int i = 0; i < 120; i++)
+          _agent(
+            "m-$i",
+            i % 17 == 0
+                ? "一张很高的卡片。\n" * 40
+                : i % 5 == 0
+                    ? "短句 $i"
+                    : "长段落内容。" * (5 + i % 11),
+          ),
+      ];
+      await tester.pumpWidget(_host(base, processing: false));
+      await tester.pump();
+      final ScrollPosition p = _listPosition(tester);
+      p.jumpTo(p.maxScrollExtent * 0.15);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final Rect listRect =
+          tester.getRect(find.byWidgetPredicate((Widget w) => w is ListView));
+      final double startExtent = p.maxScrollExtent;
+      final double pressY = listRect.top + _thumbTop(p) + 20;
+      final TestGesture gesture = await tester.startGesture(
+        Offset(listRect.right - 6, pressY),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+      // 首步吃掉手势识别阈值，之后逐步校验「滑块位移 = 指针位移」
+      await gesture.moveBy(const Offset(0, -16));
+      await tester.pump(const Duration(milliseconds: 16));
+
+      final double startThumb = _thumbTop(p);
+      double pointerTravel = 0;
+      double previousPixels = p.pixels;
+      for (int i = 0; i < 8; i++) {
+        await gesture.moveBy(const Offset(0, -16));
+        pointerTravel += 16;
+        await tester.pump(const Duration(milliseconds: 16));
+        final double thumbTravel = startThumb - _thumbTop(p);
+        expect(thumbTravel, closeTo(pointerTravel, 3),
+            reason:
+                "第 ${i + 1} 步滑块累计位移 ${thumbTravel.toStringAsFixed(1)}px，指针 ${pointerTravel}px，滑块没有跟住指针");
+        expect((p.pixels - previousPixels).abs(), greaterThan(1),
+            reason: "第 ${i + 1} 步内容没有跟着滑块移动");
+        previousPixels = p.pixels;
+        expect(p.maxScrollExtent, closeTo(startExtent, startExtent * 0.1),
+            reason:
+                "第 ${i + 1} 步总高估算从 ${startExtent.toStringAsFixed(0)} 跳到 ${p.maxScrollExtent.toStringAsFixed(0)}");
       }
+      await gesture.up();
+    } finally {
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  testWidgets("拖到轨道顶端能看到最旧消息，再拖回底端", (WidgetTester tester) async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    try {
+      final List<ChatMessage> base = <ChatMessage>[
+        for (int i = 0; i < 120; i++)
+          _agent(
+            "m-$i",
+            i % 17 == 0
+                ? "一张很高的卡片。\n" * 40
+                : i % 5 == 0
+                    ? "短句 $i"
+                    : "长段落内容。" * (5 + i % 11),
+          ),
+      ];
+      await tester.pumpWidget(_host(base, processing: false));
+      await tester.pump();
+      final ScrollPosition p = _listPosition(tester);
+      final Rect listRect =
+          tester.getRect(find.byWidgetPredicate((Widget w) => w is ListView));
+      final TestGesture gesture = await tester.startGesture(
+        Offset(listRect.right - 6, listRect.top + _thumbTop(p) + 10),
+        kind: PointerDeviceKind.mouse,
+      );
+      await tester.pump(const Duration(milliseconds: 16));
+
+      for (int i = 0; i < 40; i++) {
+        await gesture.moveBy(const Offset(0, -30));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(_thumbTop(p), closeTo(0, 1));
+      expect(p.pixels, closeTo(p.maxScrollExtent, 1));
+      expect(find.byKey(const ValueKey<String>("msg-m-0")), findsOneWidget,
+          reason: "拖到顶了却看不到最旧消息，说明总高估算偏小");
+
+      for (int i = 0; i < 60; i++) {
+        await gesture.moveBy(const Offset(0, 30));
+        await tester.pump(const Duration(milliseconds: 16));
+      }
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(_thumbTop(p), closeTo(p.viewportDimension - _thumbLength(p), 1));
+      expect(p.pixels, lessThanOrEqualTo(1));
+      await gesture.up();
     } finally {
       debugDefaultTargetPlatformOverride = null;
     }

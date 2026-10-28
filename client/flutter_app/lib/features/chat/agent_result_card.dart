@@ -12,6 +12,7 @@ import "../../core/utils/agent_result_parser.dart";
 import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
 import "product_pick_card.dart";
+import "price_compare_card.dart";
 import "travel_plan_models.dart";
 import "travel_image_warmer.dart";
 import "travel_theme.dart";
@@ -126,6 +127,14 @@ class AgentResultCard extends StatelessWidget {
           // 立场化推荐卡（开源保留，同 product_compare 策略不闸）：
           // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。
           return ProductPickCard(data: data, cs: cs);
+        case "price_compare":
+          // 跨平台实时比价卡（shopping.compare.prices）：分组报价大图行 +
+          // 大号价格 + 平台 chip + 决策页 CTA；旧形态回执无结构化载荷时
+          // 回退通用专用卡渲染（服务端 items 仍随卡下发）。
+          if (data.priceCompare == null) {
+            return _SpecializedCard(data: data, cs: cs);
+          }
+          return PriceCompareCard(data: data, cs: cs);
         case "permission_request":
           return _PermissionRequestCard(data: data, cs: cs);
         case "morning_briefing":

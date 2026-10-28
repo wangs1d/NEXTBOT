@@ -13,7 +13,8 @@
 //  3. **"联系"由 findByEntity 自然产生**：findByEntity("搬家") 同时命中邮件里提到搬家和
 //     GoalRunner 说卡在第 3 步——不需要任何两两耦合。
 //  4. **单开口闸 = composeBeforeOpen**：任何出口在开口前读同 subject 的可读 finding +
-//     实体命中上下文，零 LLM 模板拼接进正文，并把读过的发现**预留**走。于是同一发现
+//     实体命中上下文，零 LLM，并把读过的发现**预留**走（旁注不拼进正文，用户看到的是
+//     出口自己那句话）。于是同一发现
 //     在开口瞬间就不会被两个出口各说一遍；但"预留 ≠ 消费"——真说出口（delivered）才
 //     结算成消费，被抑制/静默/丢弃则释放回总线（信息不蒸发）。"重复降档"从"另加一条
 //     规则"变成"发现已被读走"的副作用。
@@ -208,7 +209,7 @@ export class DiscoveryLayer {
    * 顺序很关键：调用方**先 write 自己的发现，再 compose**——这样别的源刚登记的发现
    * 会被这一次开口一并带走（读走即标记，下一个出口不会再说一遍）。
    *
-   * 合成是纯模板：正文 + "（另：邮件提到 X；日历提到 Y）"，不经过任何模型。
+   * 合成是纯模板：正文原样输出，零 LLM；读到的发现只做预留，不拼成旁注。
    */
   composeBeforeOpen<T extends ProactiveImportance>(input: ComposeOpenInput<T>): ComposeOpenResult<T> {
     const now = this.nowFn();
@@ -258,11 +259,10 @@ export class DiscoveryLayer {
       }
     }
 
-    const extras = [
-      ...merged.map((m) => `${STREAM_LABEL[labelOfSource(m.source)] ?? m.source}：${m.content}`),
-      ...linked,
-    ];
-    const body = extras.length ? `${base}\n（另：${extras.join("；")}）` : base;
+    // 合并进来的发现/实体联系只用于预留与诊断，**不拼进正文**：用户不该看到
+    // 「（另：消息提到「…」）」这类系统旁注。读走即预留仍然生效（同一发现在
+    // 开口瞬间对别的出口不可见），只是它不再以脚注形式出现在用户眼前。
+    const body = base;
 
     // 重复开口判定：该 subject 刚被说过 + 这次不是请用户拍板 → 降一档
     // （previewOpen 只读「是否重复」，必须在 markOpened 之前调用）
@@ -372,13 +372,6 @@ export class DiscoveryLayer {
   stats(): { subjects: number; pending: number; consumed: number; openedSubjects: number } {
     return { ...this.deps.store.findingStats(), openedSubjects: this.openedAt.size };
   }
-}
-
-/** 产出者标识 → 流名（`hub:email` → `email`；`sensor_bridge` → `sensor_bridge`） */
-function labelOfSource(source: string): string {
-  const s = String(source ?? "");
-  const idx = s.indexOf(":");
-  return idx >= 0 ? s.slice(idx + 1) : s;
 }
 
 /**

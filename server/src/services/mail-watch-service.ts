@@ -4,10 +4,13 @@
  * 为什么是轮询而非 IDLE 长连接：
  *   - 私人管家场景分钟级延迟足够；轮询每轮新建连接、用完即弃，没有长连接状态机，
  *     断线语义清晰（连不上就是连续失败 + 退避重试），对家用/企业邮箱的 IMAP 限制也最友好。
+ *   - 自适应节奏：收件箱安静时逐级拉长到 MAIL_WATCH_IDLE_MAX_SEC（默认 5min），
+ *     拉到新邮件后先快节奏跟进两轮（可能还有同批/补发），再回到基础间隔。
+ *     外部提示（手动刷新/重连/唤醒）调 wake() 立即拉一轮，不等退避走完。
  *   - 每轮 poll：连接 → 打开邮箱 → 取最新 N 封（uid/信封/正文摘要）→ 与落盘的
  *     已处理 UID 集合（data/mail-watch/processed-uids.json，原子写）做差量 →
- *     新邮件逐条 importance 分级（VIP 白名单 → 关键词规则 → normal）→
- *     onNewMessage 回调（ProactivityHub 主动提醒接线点）+ message-hub 落库。
+ *     新邮件逐条分级（VIP 白名单 → 关键词规则 → normal，仅用于营销过滤与
+ *     消息中心标注；说不说由情报链路的模型判断）→ onNewMessage 回调 + message-hub 落库。
  *
  * 诚实失败约定：未启用 / 未配置 / 连不上邮箱都如实反映在 status()（reason / lastError /
  * consecutiveFailures），绝不假装在盯；任何失败只退避重试，不 crash 主进程。
@@ -24,7 +27,8 @@
  *   MAIL_WATCH_USER        登录账号（启用时必填）
  *   MAIL_WATCH_PASS        登录密码/授权码（启用时必填）
  *   MAIL_WATCH_MAILBOX     默认 INBOX
- *   MAIL_WATCH_POLL_SEC    轮询间隔秒，默认 120，下限 30（防把服务器拉黑）
+ *   MAIL_WATCH_POLL_SEC    基础轮询间隔秒，默认 120，下限 30（防把服务器拉黑）
+ *   MAIL_WATCH_IDLE_MAX_SEC 收件箱安静时的间隔上限秒，默认 300（自适应退避封顶）
  *   MAIL_WATCH_MARK_SEEN   默认 0：不标已读，只在本地记录已处理 UID
  *   MAIL_WATCH_ACTOR_ID    消息归属用户；默认沿用消息桥的既有约定
  *                          MESSAGE_BRIDGE_DEFAULT_ACTOR_ID，再兜底 "default_user"
@@ -130,6 +134,8 @@ export interface MailWatchConfig {
   pass: string;
   mailbox: string;
   pollSec: number;
+  /** 安静时的间隔上限秒（自适应退避封顶） */
+  idleMaxSec: number;
   markSeen: boolean;
   actorId: string;
   vipSenders: string[];
@@ -150,6 +156,7 @@ export interface MailWatchStatus {
   user: string;
   mailbox: string;
   pollSec: number;
+  idleMaxSec: number;
   markSeen: boolean;
   actorId: string;
   vipSenderCount: number;
@@ -165,6 +172,10 @@ export interface MailWatchStatus {
   consecutiveFailures: number;
   /** 下一轮计划间隔秒（退避时大于 pollSec）；未运行时为 null */
   retryDelaySec: number | null;
+  /** 连续空轮数（自适应退避的当前档位） */
+  idleRounds: number;
+  /** 新邮件后的快节奏跟进剩余轮数 */
+  burstRounds: number;
   processedUidCount: number;
   uidValidity: string | null;
   newMessagesHandled: number;
@@ -184,11 +195,34 @@ function parseBooleanEnv(raw: string | undefined): boolean {
 const DEFAULT_POLL_SEC = 120;
 const MIN_POLL_SEC = 30;
 const MAX_POLL_SEC = 3600;
+/** 收件箱安静时的间隔上限（自适应退避封顶；再长就等于"不盯"了） */
+const DEFAULT_IDLE_MAX_SEC = 300;
+/** 新邮件后的快节奏跟进间隔（可能还有同批/补发邮件） */
+const BURST_INTERVAL_MS = 60_000;
+const BURST_ROUNDS = 2;
+/** 外部唤醒的最小间隔（防手动连点把邮箱拉黑） */
+const MIN_WAKE_INTERVAL_MS = 5_000;
 const DEFAULT_WINDOW_SIZE = 50;
+
+/**
+ * 自适应轮询间隔（ms）：新邮件后快节奏跟进，空轮逐级翻倍，封顶 idleMaxSec。
+ * 远程订阅类信源的通用节奏：省的是空转，不是该看的时刻。
+ */
+export function adaptiveMailDelayMs(pollSec: number, idleRounds: number, idleMaxSec: number, burstRounds: number): number {
+  const baseMs = pollSec * 1000;
+  if (burstRounds > 0) return Math.max(MIN_POLL_SEC * 1000, Math.min(baseMs, BURST_INTERVAL_MS));
+  if (idleRounds <= 0) return baseMs;
+  return Math.min(idleMaxSec * 1000, baseMs * 2 ** Math.min(idleRounds, 4));
+}
 
 export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailWatchConfig {
   const portRaw = Number(env.MAIL_WATCH_PORT ?? "");
   const pollRaw = Number(env.MAIL_WATCH_POLL_SEC ?? "");
+  const idleRaw = Number(env.MAIL_WATCH_IDLE_MAX_SEC ?? "");
+  const pollSec = Math.min(
+    MAX_POLL_SEC,
+    Math.max(MIN_POLL_SEC, Number.isFinite(pollRaw) && pollRaw > 0 ? Math.trunc(pollRaw) : DEFAULT_POLL_SEC),
+  );
   return {
     enabled: parseBooleanEnv(env.MAIL_WATCH_ENABLED),
     host: env.MAIL_WATCH_HOST?.trim() ?? "",
@@ -197,7 +231,9 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
     pass: env.MAIL_WATCH_PASS?.trim() ?? "",
     mailbox: env.MAIL_WATCH_MAILBOX?.trim() || "INBOX",
     // 下限 30s：太频繁的轮询容易被邮箱服务商判定滥用封号；上限 1h 防止配置成"永不盯"
-    pollSec: Math.min(MAX_POLL_SEC, Math.max(MIN_POLL_SEC, Number.isFinite(pollRaw) && pollRaw > 0 ? Math.trunc(pollRaw) : DEFAULT_POLL_SEC)),
+    pollSec,
+    // 安静上限不低于基础间隔、不超过 1h
+    idleMaxSec: Math.min(MAX_POLL_SEC, Math.max(pollSec, Number.isFinite(idleRaw) && idleRaw > 0 ? Math.trunc(idleRaw) : DEFAULT_IDLE_MAX_SEC)),
     markSeen: parseBooleanEnv(env.MAIL_WATCH_MARK_SEEN),
     // actorId 归属约定：优先显式 MAIL_WATCH_ACTOR_ID；否则沿用消息桥的默认用户 env；
     // 都没有时兜底 default_user（私人管家单用户场景的约定名）
@@ -774,9 +810,13 @@ export class MailWatchService {
   private timer: NodeJS.Timeout | null = null;
   private consecutiveFailures = 0;
   private lastPollAt: string | null = null;
+  private lastPollStartedMs = 0;
   private lastSuccessAt: string | null = null;
   private lastError: string | null = null;
   private retryDelaySec: number | null = null;
+  private idleRounds = 0;
+  private burstRounds = 0;
+  private pendingWake = false;
   private newMessagesHandled = 0;
   private promotionalFiltered = 0;
   /**
@@ -816,8 +856,32 @@ export class MailWatchService {
     }
     this.reason = null;
     this.running = true;
-    this.log("info", `邮箱盯梢已启动：${this.cfg.user}@${this.cfg.host}:${this.cfg.port}（${this.cfg.mailbox}，每 ${this.cfg.pollSec}s）`);
+    this.log(
+      "info",
+      `邮箱盯梢已启动：${this.cfg.user}@${this.cfg.host}:${this.cfg.port}（${this.cfg.mailbox}，${this.cfg.pollSec}s 起，安静时最慢 ${this.cfg.idleMaxSec}s）`,
+    );
     this.scheduleTick(0); // 启动即拉第一轮
+  }
+
+  /**
+   * 外部唤醒：立即拉一轮（手动刷新 / 手机重连 / 内核提示有新数据）。
+   * 退避省的是空转，不是该看的时刻——但 5s 内重复唤醒忽略，防连点把邮箱拉黑。
+   */
+  wake(reason = "manual"): void {
+    if (!this.running) return;
+    const now = Date.now();
+    if (this.polling) {
+      this.pendingWake = true;
+      return;
+    }
+    if (now - this.lastPollStartedMs < MIN_WAKE_INTERVAL_MS) return;
+    this.lastPollStartedMs = now; // 连点节流：这次唤醒已算一次拉取承诺
+    if (this.timer) {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    this.log("info", `外部唤醒（${reason}）：立即拉取`);
+    this.scheduleTick(0);
   }
 
   stop(): void {
@@ -887,6 +951,7 @@ export class MailWatchService {
       user: this.cfg.user,
       mailbox: this.cfg.mailbox,
       pollSec: this.cfg.pollSec,
+      idleMaxSec: this.cfg.idleMaxSec,
       markSeen: this.cfg.markSeen,
       actorId: this.cfg.actorId,
       vipSenderCount: this.cfg.vipSenders.length,
@@ -898,6 +963,8 @@ export class MailWatchService {
       lastError: this.lastError,
       consecutiveFailures: this.consecutiveFailures,
       retryDelaySec: this.retryDelaySec,
+      idleRounds: this.idleRounds,
+      burstRounds: this.burstRounds,
       processedUidCount: state.uids.length,
       uidValidity: state.uidValidity || null,
       newMessagesHandled: this.newMessagesHandled,
@@ -912,6 +979,7 @@ export class MailWatchService {
    * 无论从轮询循环还是外部直接调用，status() 都能看到真实状态。
    */
   async pollOnce(): Promise<{ ok: true; handled: number } | { ok: false; error: string }> {
+    this.lastPollStartedMs = Date.now();
     if (!this.deps.clientFactory) {
       const err = "clientFactory 未注入（未接生产 imapflow 工厂）";
       this.recordFailure(err);
@@ -1122,18 +1190,37 @@ export class MailWatchService {
   private async tick(): Promise<void> {
     if (!this.running) return;
     this.polling = true;
+    let result: Awaited<ReturnType<MailWatchService["pollOnce"]>>;
     try {
-      const result = await this.pollOnce();
+      result = await this.pollOnce();
       if (result.ok && result.handled > 0) {
         this.log("info", `本轮拉到 ${result.handled} 封新邮件`);
       }
     } catch (e) {
       // pollOnce 约定不抛错且自带失败记账；这里是防御性兜底
       this.recordFailure(errorMessage(e));
+      result = { ok: false, error: errorMessage(e) };
     } finally {
       this.polling = false;
     }
     if (!this.running) return;
+
+    // 自适应节奏的输入：有新邮件 → 快节奏跟进两轮（同批/补发）；空手而归 → 逐级拉长
+    if (result.ok && result.handled > 0) {
+      this.idleRounds = 0;
+      this.burstRounds = BURST_ROUNDS;
+    } else if (result.ok) {
+      this.idleRounds += 1;
+      if (this.burstRounds > 0) this.burstRounds -= 1;
+    }
+
+    // 唤醒请求在轮询期间到达：当前轮结束立刻接上
+    if (this.pendingWake) {
+      this.pendingWake = false;
+      this.retryDelaySec = 0;
+      this.scheduleTick(0);
+      return;
+    }
 
     // 失败退避：30s 起步指数翻倍、5min 封顶；连续失败计数在 status() 可见，绝不 crash
     let delayMs: number;
@@ -1141,10 +1228,15 @@ export class MailWatchService {
       delayMs = Math.min(POLL_BACKOFF_BASE_MS * 2 ** (this.consecutiveFailures - 1), POLL_BACKOFF_MAX_MS);
       this.log("warn", `轮询失败（连续第 ${this.consecutiveFailures} 次，${Math.round(delayMs / 1000)}s 后重试）：${this.lastError ?? ""}`);
     } else {
-      delayMs = this.cfg.pollSec * 1000;
+      delayMs = this.nextDelayMs();
     }
     this.retryDelaySec = Math.round(delayMs / 1000);
     this.scheduleTick(delayMs);
+  }
+
+  /** 自适应间隔：基础 → 空轮逐级翻倍（封顶 idleMaxSec）；新邮件后先 60s 快节奏跟进 */
+  private nextDelayMs(): number {
+    return adaptiveMailDelayMs(this.cfg.pollSec, this.idleRounds, this.cfg.idleMaxSec, this.burstRounds);
   }
 
   /** 失败记账（诚实失败：发生在哪记在哪，status() 直接可见）。 */

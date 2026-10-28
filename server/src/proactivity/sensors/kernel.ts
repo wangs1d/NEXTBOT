@@ -10,7 +10,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
-import type { ProactiveSensor, SensorHealth, Signal, SignalStream } from "./types.js";
+import type { ProactiveSensor, SensorHealth, SensorTransport, Signal, SignalStream } from "./types.js";
 
 /** 每 sensor 指纹去重窗口容量（LRU，防长期运行膨胀） */
 const FINGERPRINT_CACHE_MAX = 500;
@@ -24,12 +24,18 @@ const SIGNALS_LOG_MAX_BYTES = 5 * 1024 * 1024;
 
 type SensorRuntime = {
   sensor: ProactiveSensor;
+  transport: SensorTransport;
   watermark: number;
   fingerprints: Set<string>;
   fpOrder: string[]; // LRU 淘汰序
   health: SensorHealth;
   nextPollAt: number;
   breakerOpenUntil: number;
+  /** 连续空轮数（adaptive 退避输入） */
+  idleRounds: number;
+  lastSignalAt: number | null;
+  /** 单轮采集进行中（防 5s tick 在慢采集上重入） */
+  polling: boolean;
 };
 
 export type SensorKernelOptions = {
@@ -60,15 +66,18 @@ export class SensorKernel {
   /** 注册传感器（重复 id 覆盖） */
   register(sensor: ProactiveSensor): void {
     const existing = this.runtimes.get(sensor.id);
+    const transport: SensorTransport =
+      sensor.transport ?? (sensor.pollIntervalMs > 0 ? "poll" : "push");
     this.runtimes.set(sensor.id, {
       sensor,
+      transport,
       watermark: existing?.watermark ?? this.nowFn(),
       fingerprints: existing?.fingerprints ?? new Set(),
       fpOrder: existing?.fpOrder ?? [],
       health: {
         sensorId: sensor.id,
         stream: sensor.stream,
-        mode: sensor.pollIntervalMs > 0 ? "poll" : "feeder",
+        mode: transport === "push" ? "feeder" : transport,
         pollIntervalMs: sensor.pollIntervalMs,
         lastOkAt: existing?.health.lastOkAt ?? null,
         lastFailAt: existing?.health.lastFailAt ?? null,
@@ -78,6 +87,9 @@ export class SensorKernel {
       },
       nextPollAt: this.nowFn(),
       breakerOpenUntil: 0,
+      idleRounds: existing?.idleRounds ?? 0,
+      lastSignalAt: existing?.lastSignalAt ?? null,
+      polling: false,
     });
   }
 
@@ -99,6 +111,8 @@ export class SensorKernel {
     rt.health.lastOkAt = this.nowFn();
     rt.health.consecutiveFails = 0;
     rt.health.emitted += 1;
+    rt.idleRounds = 0;
+    rt.lastSignalAt = signal.at;
     rt.watermark = Math.max(rt.watermark, signal.at);
     this.dispatch(signal);
   }
@@ -128,10 +142,27 @@ export class SensorKernel {
   async pollOnce(): Promise<void> {
     const now = this.nowFn();
     for (const rt of this.runtimes.values()) {
-      if (rt.health.mode !== "poll") continue;
+      if (rt.transport === "push" || rt.polling) continue;
       if (rt.health.tripped && now < rt.breakerOpenUntil) continue;
       await this.poll(rt);
     }
+  }
+
+  /**
+   * 唤醒：下次 tick 立即采集（可指定 sensor）。
+   * 用途：外部事件提示"可能有新数据"（用户打开页面、手机重连、手动刷新），
+   * 不必等自适应退避走完——退避省的是空转，不是该看的时刻。
+   */
+  wake(sensorId?: string): number {
+    const now = this.nowFn();
+    let n = 0;
+    for (const rt of this.runtimes.values()) {
+      if (rt.transport === "push") continue;
+      if (sensorId !== undefined && rt.sensor.id !== sensorId) continue;
+      rt.nextPollAt = now;
+      n += 1;
+    }
+    return n;
   }
 
   /** 最近信号（诊断/评估器回放） */
@@ -149,15 +180,16 @@ export class SensorKernel {
   private tick(): void {
     const now = this.nowFn();
     for (const rt of this.runtimes.values()) {
-      if (rt.health.mode !== "poll") continue;
+      if (rt.transport === "push" || rt.polling) continue;
       if (rt.health.tripped && now < rt.breakerOpenUntil) continue;
       if (now < rt.nextPollAt) continue;
-      rt.nextPollAt = now + Math.max(rt.sensor.pollIntervalMs, KERNEL_TICK_MS);
+      rt.polling = true;
       void this.poll(rt);
     }
   }
 
   private async poll(rt: SensorRuntime): Promise<void> {
+    rt.polling = true;
     try {
       const signals = await rt.sensor.collect(rt.watermark);
       rt.health.lastOkAt = this.nowFn();
@@ -167,13 +199,18 @@ export class SensorKernel {
         rt.health.tripped = false;
         console.log(`[SensorKernel] 传感器恢复 ${rt.sensor.id}`);
       }
+      let fresh = 0;
       for (const signal of signals) {
         if (rt.fingerprints.has(signal.fingerprint)) continue;
         this.rememberFingerprint(rt, signal.fingerprint);
         rt.health.emitted += 1;
         rt.watermark = Math.max(rt.watermark, signal.at);
+        rt.lastSignalAt = signal.at;
+        fresh += 1;
         this.dispatch(signal);
       }
+      // 自适应退避的输入：连续空轮越多，下一轮越晚；有信号即回到快节奏
+      rt.idleRounds = fresh > 0 ? 0 : rt.idleRounds + 1;
     } catch (err) {
       rt.health.lastFailAt = this.nowFn();
       rt.health.consecutiveFails += 1;
@@ -185,6 +222,25 @@ export class SensorKernel {
           `[SensorKernel] 传感器熔断 ${rt.sensor.id}（${BREAKER_COOLDOWN_MS / 60000}min 后半开重试）: ${rt.health.lastError}`,
         );
       }
+    } finally {
+      rt.polling = false;
+      this.scheduleNext(rt, this.nowFn());
+    }
+  }
+
+  /** 计算并写入下一轮采集时刻（adaptive：空轮指数退避，封顶 5× 基础间隔） */
+  private scheduleNext(rt: SensorRuntime, now: number): void {
+    const base = Math.max(rt.sensor.pollIntervalMs, KERNEL_TICK_MS);
+    const state = { now, idleRounds: rt.idleRounds, lastSignalAt: rt.lastSignalAt };
+    let interval = base;
+    if (rt.sensor.nextIntervalMs) {
+      interval = rt.sensor.nextIntervalMs(state);
+    } else if (rt.transport === "adaptive") {
+      interval = Math.min(base * 2 ** Math.min(rt.idleRounds, 3), base * 5);
+    }
+    rt.nextPollAt = now + Math.max(interval, KERNEL_TICK_MS);
+    if (rt.health.mode === "adaptive") {
+      rt.health.pollIntervalMs = Math.round(rt.nextPollAt - now);
     }
   }
 

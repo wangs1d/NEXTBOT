@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "predev:server": "npm run build --prefix ../agent-world && npm run build --prefix ../packages/agent-protocol && npm run build --prefix ../packages/picture",
+    "predev:server": "node ../scripts/fast-prebuild.mjs",
     "dev:server:watch": "node ../scripts/dev-server-watch.mjs",
     "dev:server": "npm run predev:server && npm run dev:server:watch",
     "dev:stack": "npm run dev:all --prefix ..",
@@ -12,7 +12,7 @@
     "dev": "npm run dev:all --prefix ..",
     "dev:remote": "node ../scripts/dev-all.mjs --remote",
     "dev:ports:free": "npm run dev:ports:free --prefix ..",
-    "build": "npm run build --prefix ../agent-world && npm run build --prefix ../packages/agent-protocol && npm run build --prefix ../packages/picture && tsc -p tsconfig.json",
+    "build": "node ../scripts/fast-prebuild.mjs && tsc -p tsconfig.json",
     "start": "node scripts/start-with-gateway.mjs",
     "start:server": "node dist/index.js",
     "start:runtime": "node dist/runtime-main.js",

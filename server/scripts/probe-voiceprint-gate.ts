@@ -16,7 +16,6 @@ const PORT = 3992;
 const env: NodeJS.ProcessEnv = {
   ...process.env,
   PORT: String(PORT),
-  FUNASR_AUTO_START: "0",
   ACCESS_AUTH_REQUIRED: "0",
   AGENT_AGENTIC_MEMORY_DIR: join(tmp, "mem"),
   AGENT_AGENTIC_MEMORY_DB: join(tmp, "mem", "agentic-memory.db"),
@@ -34,7 +33,7 @@ child.stderr.on("data", (d) => log.push(d.toString()));
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const b64 = (p: string) => readFileSync(p).toString("base64");
-const CASE = "data/funasr_test_audio";
+const CASE = "data/voiceprint_test_audio";
 const ACTOR = "probe-vp-gate";
 
 let pass = 0, fail = 0;

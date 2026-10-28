@@ -61,6 +61,10 @@ export type ProactivityFabricDeps = {
   sensorHealth: () => unknown;
   /** 跨源统一采集库健康（2026-10-10）：窗口条数 / 各 stream 计数 / 实体索引规模 */
   sourceStats?: () => unknown;
+  /** 情报链路（提炼池 + 择时判定）：池状态、今日已开口、逐条"为什么说/为什么没说" */
+  intel?: () => unknown;
+  /** 立即评审某用户的情报池（诊断/手动唤醒） */
+  intelReview?: (actorId?: string) => Promise<unknown> | unknown;
   /** 跨源实体检索（"提到三亚的所有来源"）——Muse「汇聚」价值的查询面 */
   sourceFind?: (entity: string, opts?: { since?: number; streams?: string[]; limit?: number }) => unknown;
   /**
@@ -353,6 +357,8 @@ export function registerProactivityPipelineRoutes(
       goalRunner: deps.fabric.goalRunnerStatus?.() ?? null,
       // 跨源统一采集库（"自己的数据库"）：外线信源收编后与内线同池
       sources: deps.fabric.sourceStats?.() ?? null,
+      // 情报链路：池里还有什么、今天说了几条、每条为什么说/为什么先不说
+      intel: deps.fabric.intel?.() ?? null,
       // 票务邮件规则漏检埋点：预筛命中却零产出的计数与样本（0 表示规则没漏）
       mailTicketMiss: deps.fabric.mailTicketMissStats?.() ?? null,
       // 节律采样链健康（rhythm 未启用时为 null）：per-sensor 计数 + stalled 红点

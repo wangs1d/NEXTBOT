@@ -279,6 +279,75 @@ test("候补申请与批量审批：apply 排队幂等、通过入白名单并�
   assert.equal(direct.json().status, "approved");
 });
 
+test("候补删除：整行出队且不动白名单，队列外邮箱静默跳过，已删 pending 可重新申请", async () => {
+  const app = buildApp();
+
+  await app.inject({
+    method: "POST",
+    url: "/accounts/beta/apply",
+    payload: { email: "del-pending@example.com" },
+  });
+  await app.inject({
+    method: "POST",
+    url: "/accounts/beta/apply",
+    payload: { email: "del-passed@example.com" },
+  });
+  await app.inject({
+    method: "POST",
+    url: "/api/admin/beta-waitlist/approve",
+    headers: adminHeaders,
+    payload: { emails: ["del-passed@example.com"] },
+  });
+
+  // 大小写混写照旧命中；队列里没有的 ghost 不报错，只返回实际删除的两条
+  const del = await app.inject({
+    method: "POST",
+    url: "/api/admin/beta-waitlist/delete",
+    headers: adminHeaders,
+    payload: { emails: ["Del-Pending@Example.com", "del-passed@example.com", "ghost@example.com"] },
+  });
+  assert.equal(del.statusCode, 200);
+  assert.deepEqual(del.json().removed.sort(), ["del-passed@example.com", "del-pending@example.com"]);
+
+  const listed = await app.inject({ method: "GET", url: "/api/admin/beta-waitlist", headers: adminHeaders });
+  const queued = listed.json().requests.map((r: { email: string }) => r.email);
+  assert.equal(queued.includes("del-pending@example.com"), false);
+  assert.equal(queued.includes("del-passed@example.com"), false);
+
+  // 删除只清队列：审批时写入的白名单成员原样保留，该邮箱照常注册
+  const wl = await app.inject({ method: "GET", url: "/api/admin/beta-whitelist", headers: adminHeaders });
+  assert.equal(wl.json().emails.includes("del-passed@example.com"), true);
+  assert.equal((await register(app, "del-passed@example.com")).statusCode, 200);
+
+  // 被删的 pending 邮箱重新申请会以 pending 复现（删除不等于拉黑）
+  const re = await app.inject({
+    method: "POST",
+    url: "/accounts/beta/apply",
+    payload: { email: "del-pending@example.com" },
+  });
+  assert.equal(re.json().status, "pending");
+  await app.inject({
+    method: "POST",
+    url: "/api/admin/beta-waitlist/delete",
+    headers: adminHeaders,
+    payload: { emails: ["del-pending@example.com"] },
+  });
+
+  const noAuth = await app.inject({
+    method: "POST",
+    url: "/api/admin/beta-waitlist/delete",
+    payload: { emails: ["del-pending@example.com"] },
+  });
+  assert.equal(noAuth.statusCode, 401);
+  const empty = await app.inject({
+    method: "POST",
+    url: "/api/admin/beta-waitlist/delete",
+    headers: adminHeaders,
+    payload: { emails: [] },
+  });
+  assert.equal(empty.statusCode, 400);
+});
+
 test("进度查询端点：none → pending → approved（带下载地址）；白名单内直接 approved", async () => {
   const app = buildApp();
 

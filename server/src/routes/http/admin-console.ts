@@ -10,6 +10,7 @@ import { z } from "zod";
 import { renderAdminConsolePage } from "./admin-console-page.js";
 import { adminAudit, readAdminAudit, requireAdmin } from "./admin-auth.js";
 import { feedbackStatusCounts } from "./feedback.js";
+import { clientTelemetrySummary } from "./client-telemetry.js";
 import { renderInboxTemplate } from "../../services/inbox-templates.js";
 import { resolvePrimaryExternalModelBinding } from "../../external-model/resolve-provider.js";
 import { readClientManifest } from "./client-manifest.js";
@@ -201,6 +202,8 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
       const value = body[field];
       if (typeof value === "string") next[field] = value.trim();
     }
+    // 文件里缺 channel 时 readClientManifest 走内置兜底（byok），这里显式补齐保持等价
+    if (next.channel === undefined) next.channel = "byok";
     for (const field of ["latest", "minVersion"] as const) {
       const value = next[field];
       if (typeof value !== "string" || !/^\d+(\.\d+){1,3}$/.test(value)) {
@@ -212,6 +215,12 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     const url = next.url;
     if (typeof url !== "string" || (url !== "" && !/^https?:\/\//.test(url))) {
       return reply.code(400).send({ ok: false, message: "url 须以 http(s):// 开头（留空表示暂不推送）" });
+    }
+    // channel 是 runtime 收回总开关，只认两个值：写错的字符串客户端会按 byok 处理，
+    // 但后台不该出现一个「看起来生效其实没生效」的开关值。
+    const channel = next.channel;
+    if (channel !== undefined && channel !== "byok" && channel !== "platform") {
+      return reply.code(400).send({ ok: false, message: 'channel 只能是 "byok" 或 "platform"' });
     }
     await mkdir(dirname(manifestFilePath()), { recursive: true });
     await writeFile(manifestFilePath(), `${JSON.stringify(next, null, 2)}\n`, "utf8");
@@ -269,7 +278,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     },
   );
 
-  // ── 内测候补申请队列：登录页自助排队 → 后台批量「通过/拒绝」 ──
+  // ── 内测候补申请队列：登录页自助排队 → 后台批量「通过/拒绝/删除」 ──
   // 通过 = 逐个加入注册白名单 + 邮件通知（申请人多半还没装客户端，邮件是唯一可达通道）。
   const waitlistDecideSchema = z.object({ emails: z.array(z.string()).min(1).max(200) });
 
@@ -375,6 +384,21 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
     const decided = await deps.betaWaitlistService.decide(parsed.data.emails, "rejected");
     await adminAudit("beta_waitlist.reject", { emails: decided }, request);
     return { ok: true, rejected: decided };
+  });
+
+  // 删除 = 从队列里抹掉这一行（清冒烟测试数据），区别于拒绝：
+  // 拒绝保留记录且对方能查到状态，删除后队列里再无痕迹，邮箱也不会出白名单。
+  app.post("/api/admin/beta-waitlist/delete", { preHandler: requireAdmin }, async (request, reply) => {
+    if (!deps.betaWaitlistService) {
+      return reply.code(503).send({ ok: false, message: "候补通道未装配" });
+    }
+    const parsed = waitlistDecideSchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, message: "缺少 emails" });
+    }
+    const removed = await deps.betaWaitlistService.remove(parsed.data.emails);
+    await adminAudit("beta_waitlist.delete", { requested: parsed.data.emails.length, emails: removed }, request);
+    return { ok: true, removed };
   });
 
   // ── 内测邀请码：群里发码，用户登录页填码自助过闸；支持限次/停用 ──
@@ -513,6 +537,7 @@ export function registerAdminConsoleRoutes(app: FastifyInstance, deps: HttpRoute
       orders,
       messages,
       feedback,
+      clients: clientTelemetrySummary(),
     };
   });
 

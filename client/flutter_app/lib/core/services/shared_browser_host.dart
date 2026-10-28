@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart" show rootBundle;
@@ -106,6 +107,9 @@ class SharedBrowserHost {
 
   Completer<bool>? _confirmCompleter;
 
+  /// CDP 抓取期间的 URL 轮询定时器（见 _setCdpBusy）。
+  Timer? _cdpUrlPoll;
+
   /// 引擎控制器（仅供渲染层 Webview 组件挂载；动作逻辑禁止直接使用）。
   WebviewController? get controller =>
       _driver?.isReady == true ? _driver!.controller : null;
@@ -140,7 +144,7 @@ class SharedBrowserHost {
     if (type == "shared.browser.busy") {
       // 服务端 CDP 直接驱动面板页（不经 shared.browser.invoke）：点亮/熄灭
       // 「Agent 正在操作浏览器」状态条，用户知道页面为什么自己在动。
-      cdpBusy.value = payload["busy"] == true;
+      unawaited(_setCdpBusy(payload["busy"] == true));
       return;
     }
     if (type == "shared.browser.ask_save_login") {
@@ -216,6 +220,75 @@ class SharedBrowserHost {
       "siteId": ask.siteId,
       "allowed": allowed,
     });
+  }
+
+  /// 用户在面板状态条点「停止」：通知服务端中断当前前台轮次
+  /// （chat.turn.stop → 服务端 abort 该 actor 进行中的 turn），并立即熄灭
+  /// 本端「Agent 正在操作」状态；服务端任务收尾后还会补一条 busy=false。
+  void stopAgentBrowserTask() {
+    _sendEvent?.call("chat.turn.stop", <String, dynamic>{});
+    _teardownCdpUrlPoll();
+    cdpBusy.value = false;
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // CDP 抓取期的页面状态同步
+  // ═══════════════════════════════════════════════════════════
+
+  /// CDP 直连驱动时点亮/熄灭 busy 状态，并起停 URL 轮询。
+  ///
+  /// 为什么轮询：服务端经 Playwright CDP 在**同一个**可见 WebView2 页面上
+  /// goto/操作，webview_windows 插件的 url 流对 CDP 发起的导航不一定回调
+  /// （2026-10-28 用户实测：状态条亮着、面板却一直停在主页搜索框）。busy
+  /// 期间每 1.2s 从引擎里拉一次 location.href/document.title 补齐
+  /// currentUrl/currentTitle，面板才能从主页态切到真实页面。
+  Future<void> _setCdpBusy(bool busy) async {
+    if (cdpBusy.value == busy) return;
+    cdpBusy.value = busy;
+    if (busy) {
+      unawaited(_syncUrlFromEngine());
+      _cdpUrlPoll?.cancel();
+      _cdpUrlPoll = Timer.periodic(
+        const Duration(milliseconds: 1200),
+        (_) => unawaited(_syncUrlFromEngine()),
+      );
+    } else {
+      _teardownCdpUrlPoll();
+      // 收尾再同步一次：任务「留痕」页面留在面板里供用户回看
+      unawaited(_syncUrlFromEngine());
+    }
+  }
+
+  void _teardownCdpUrlPoll() {
+    _cdpUrlPoll?.cancel();
+    _cdpUrlPoll = null;
+  }
+
+  /// 从引擎读当前页 href/title 同步到 UI 状态（webview_windows 的
+  /// executeScript 返回 JSON 编码结果，字符串需再解一层）。
+  Future<void> _syncUrlFromEngine() async {
+    final WebviewWindowsDriver? driver = _driver;
+    if (driver == null || !driver.isReady) return;
+    try {
+      final dynamic raw = await driver.evaluateScript(
+        "JSON.stringify({href: location.href, title: document.title})",
+      );
+      if (raw is! String || raw.isEmpty) return;
+      final dynamic decoded = jsonDecode(raw);
+      if (decoded is! Map) return;
+      final String href = (decoded["href"] ?? "").toString();
+      final String title = (decoded["title"] ?? "").toString();
+      final String normalizedUrl =
+          (href.isEmpty || href == "about:blank") ? "" : href;
+      if (currentUrl.value != normalizedUrl) {
+        currentUrl.value = normalizedUrl;
+      }
+      if (title.isNotEmpty && currentTitle.value != title) {
+        currentTitle.value = title;
+      }
+    } catch (_) {
+      // 引擎忙碌/页面跳转中读取失败：下个轮询周期再试
+    }
   }
 
   Future<bool> _requestConfirmation(proto.SbConfirmRequest request) async {
@@ -338,6 +411,7 @@ class SharedBrowserHost {
 
   @mustCallSuper
   void dispose() {
+    _teardownCdpUrlPoll();
     _urlSub?.cancel();
     _titleSub?.cancel();
     _loadingSub?.cancel();

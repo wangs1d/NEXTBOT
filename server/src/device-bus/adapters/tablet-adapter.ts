@@ -56,7 +56,6 @@ const TABLET_DEFAULT_CAPABILITIES: CapabilityDeclaration[] = [
   {
     id: "agent.listen",
     actions: ["start_listen", "stop_listen"],
-    streams: ["asr"],
   },
   // 平板大屏特性：可作为投屏接收端
   {

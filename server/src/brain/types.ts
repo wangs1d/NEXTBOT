@@ -132,7 +132,7 @@ export interface BrainSnapshot {
   // 神经解剖扩展（可选）
   sensory?: {
     lastFrame?: SensoryFrame;
-    stats?: { totalListen?: number; totalLook?: number; totalSpeak?: number };
+    stats?: { totalLook?: number; totalSpeak?: number };
   };
   memory?: {
     recentItems?: MemoryItem[];
@@ -186,16 +186,6 @@ export interface BrainSignalInput {
 
 // ---------- 1. 感官类型（SensoryCortex 用） ----------
 
-// 感官输入（统一抽象 ASR / 视觉 / 情绪信号）
-export interface SensoryInput {
-  source: "audio" | "visual" | "text" | "multimodal";
-  audio?: AudioBufferRef;       // 音频引用
-  visual?: VisualInput;         // 视觉输入
-  text?: string;                // 文本输入
-  emotionHint?: EmotionVector;  // 情绪提示
-  occurredAt: string;
-}
-
 // 音频缓冲引用（不限定具体类型，避免与 voice-dialogue/types 强耦合）
 export interface AudioBufferRef {
   data: unknown;                // Buffer 或引用
@@ -210,16 +200,6 @@ export interface VisualInput {
   region?: { x: number; y: number; width: number; height: number };
   path?: string;                // 文件路径（file/url 时）
   capture?: boolean;            // 是否要触发截屏
-}
-
-// 感官「听」结果
-export interface SensoryListenResult {
-  text: string;
-  confidence: number;
-  language?: string;
-  isFinal: boolean;
-  processedAt: string;
-  error?: string;               // 子系统缺失或调用失败时的错误信息
 }
 
 // 感官「看」结果
@@ -239,7 +219,7 @@ export interface SensorySpeakResult {
   error?: string;               // 子系统缺失或调用失败时的错误信息
 }
 
-// 多模态融合帧：把 ASR + 视觉 + 情绪融合为统一感知帧
+// 多模态融合帧：把语音文本 + 视觉 + 情绪融合为统一感知帧
 export interface SensoryFrame {
   actorId: string;
   audioText?: string;
@@ -590,7 +570,6 @@ export interface SystemRouteDecision {
 export interface CognitiveInput {
   actorId: string;
   text?: string;               // 用户文本消息
-  audio?: AudioBufferRef;     // 语音输入（转写后填 text）
   visual?: VisualInput;       // 视觉输入
   signal?: BrainSignalInput;  // 主动信号（被动认知时为空）
   sessionId?: string;
@@ -612,7 +591,7 @@ export interface CognitiveContext {
   userActivity: UserActivityState | null;   // 用户活动状态（AwarenessCortex）
   capabilities: CapabilityDescriptor[];    // 当前能力（CapabilityCortex）
   recentDecisions: BrainDecision[];        // 最近主动决策（ProactionCortex）
-  audioText?: string;                       // 语音转写结果（SensoryCortex）
+  audioText?: string;                       // 语音通道文本载体（realtime 引擎/调用方供文本）
   visualDescription?: string;               // 视觉描述（SensoryCortex）
   sensoryFrame?: SensoryFrame;              // 多模态融合帧（SensoryCortex.buildSensoryFrame 产出）
   /**

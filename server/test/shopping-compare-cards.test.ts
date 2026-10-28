@@ -69,7 +69,7 @@ test("compare.prices 卡：行带缩略图与可点链接，疑似同款标注�
     decisionPageUrl: "/shopping/decision-page?id=abc123",
   });
   assert.ok(p);
-  assert.equal(p.cardType, "");
+  assert.equal(p.cardType, "price_compare");
   assert.ok(p.title.includes("比价结果"));
   // 两组报价 + 1 行决策页入口
   assert.equal(p.items.length, 3);
@@ -87,7 +87,19 @@ test("compare.prices 卡：行带缩略图与可点链接，疑似同款标注�
   const dpRow = p.items[2]!;
   assert.ok(dpRow.text.includes("决策页"));
   assert.equal(dpRow.url, "/shopping/decision-page?id=abc123");
-  assert.ok(p.footer!.includes("¥1869 来自 拼多多"));
+  // 专属卡结构化载荷：分组报价 + 决策页入口（专属卡客户端消费）
+  assert.ok(p.priceCompare);
+  assert.equal(p.priceCompare.groups.length, 2);
+  assert.equal(p.priceCompare.groups[0]!.priceCny, 1869);
+  assert.equal(p.priceCompare.groups[0]!.platform, "拼多多");
+  assert.equal(p.priceCompare.groups[0]!.url, "https://pdd.com/xm5");
+  assert.equal(p.priceCompare.groups[0]!.image, "https://img.example.com/xm5.jpg");
+  assert.equal(p.priceCompare.groups[0]!.offerCount, 2);
+  assert.equal(p.priceCompare.groups[1]!.similar, true);
+  assert.equal(p.priceCompare.decisionPageUrl, "/shopping/decision-page?id=abc123");
+  // footer 不回显「最低价 ¥X 来自 平台」搜索源内容（2026-10-28 移除，列表行已含价格与平台）
+  assert.ok(!p.footer!.includes("来自 拼多多"));
+  assert.ok(p.footer!.includes("以下单结算页为准"));
 });
 
 test("compare.prices 卡：无图无链接的旧形态回执仍出卡（向后兼容）", () => {

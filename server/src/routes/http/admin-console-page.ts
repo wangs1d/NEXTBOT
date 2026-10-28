@@ -410,12 +410,32 @@ export function renderAdminConsolePage(): string {
       <div class="sub" style="margin:0 0 8px">发版设置（客户端启动检查的版本清单，保存即生效，无需重启）</div>
       <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center">
         <label>latest <input id="mfLatest" size="9" placeholder="0.2.0"></label>
+        <label>minVersion <input id="mfMinVersion" size="9" placeholder="0.1.0"></label>
+        <label>channel
+          <select id="mfChannel">
+            <option value="byok">byok · 本机 runtime</option>
+            <option value="platform">platform · 统一 API 服务</option>
+          </select>
+        </label>
         <label>url <input id="mfUrl" size="58" placeholder="https://nextbot.top/downloads/Nextbot-Setup-x.y.z.exe"></label>
         <button class="btn primary" id="mfSaveBtn">保存清单</button>
         <span class="meta" id="mfHint"></span>
       </div>
       <div class="meta" id="mfMeta" style="margin-top:6px"></div>
       <div class="meta" id="mfHistory" style="margin-top:4px"></div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">装机台账（客户端启动埋点）</div>
+      <div class="stats" id="clStats" style="margin-bottom:8px"><div class="meta">加载中…</div></div>
+      <div class="meta" id="clMeta" style="margin-bottom:8px"></div>
+      <div class="toolbar" style="margin:0 0 6px">
+        <select id="clFilter">
+          <option value="">全部安装</option>
+          <option value="failing">只看启动失败过的</option>
+        </select>
+        <button class="btn" id="clRefresh">刷新</button>
+      </div>
+      <div id="clList"><div class="meta">暂无数据。</div></div>
     </div>
     <div class="toolbar">
       <input type="file" id="dlFile" style="display:none">
@@ -434,6 +454,7 @@ var allFeedback = [];
 var fbStatusFilter = "";
 var allUsers = [];
 var allDownloads = [];
+var mfChannelLoaded = "byok";
 var currentTab = "overview";
 
 function $(id) { return document.getElementById(id); }
@@ -526,7 +547,7 @@ function showTab(name) {
   else if (name === "payments") loadPayments();
   else if (name === "messages") { loadCompose(); loadMessages(); }
   else if (name === "feedback") loadFeedback();
-  else if (name === "downloads") { loadDownloads(); loadManifest(); }
+  else if (name === "downloads") { loadDownloads(); loadManifest(); loadClients(); }
 }
 
 /** 带 hash 的跳转（跨标签按钮统一走这里，保持地址栏可分享/可回退）。 */
@@ -603,6 +624,11 @@ function loadOverview() {
         (d.orders
           ? kpiCard("¥" + d.orders.paidAmount, "收入", d.orders.paid + " 笔已支付")
           : "") +
+        (d.clients
+          ? kpiCard(d.clients.total, "装机台数", "今日启动 " + d.clients.activeToday +
+            " · 7 日 " + d.clients.active7d +
+            (d.clients.failing ? " · 启动失败 " + d.clients.failing : ""))
+          : kpiCard("-", "装机台数", "埋点未启用")) +
         "</div>";
       html += '<div class="grid2" style="margin-bottom:12px">' +
         '<div class="card"><div class="card-title">注册趋势（近 14 天）</div>' + barChart(d.users.series, "#3b82f6") + "</div>" +
@@ -1087,19 +1113,20 @@ function renderBeta() {
     '<div style="display:flex;gap:8px;align-items:center;margin-bottom:8px">' +
     '<button class="btn primary small" data-act="wl-approve-checked">通过选中</button>' +
     '<button class="btn small danger" data-act="wl-reject-checked">拒绝选中</button>' +
+    '<button class="btn small danger" data-act="wl-delete-checked">删除选中</button>' +
     '<button class="btn small" data-act="wl-refresh">刷新</button>' +
-    '<span class="meta">通过 = 加入白名单并自动邮件通知对方（需已配置 SMTP）</span></div>';
+    '<span class="meta">通过 = 加入白名单并自动邮件通知对方（需已配置 SMTP）；删除只清队列记录，不动白名单和已注册账号</span></div>';
   if (!wlRequests.length) {
     html += '<div class="empty">还没有申请。用户在登录页被闸拦截后可自助提交。</div>';
   } else {
     var qrows = wlRequests.map(function (r) {
-      var check = r.status === "pending"
-        ? '<input type="checkbox" class="wl-apply-check" data-email="' + esc(r.email) + '">'
-        : "";
-      var ops = r.status === "pending"
+      var check = '<input type="checkbox" class="wl-apply-check" data-status="' + esc(r.status) +
+        '" data-email="' + esc(r.email) + '">';
+      var ops = (r.status === "pending"
         ? '<button class="btn small primary" data-act="wl-approve" data-email="' + esc(r.email) + '">通过</button> ' +
-          '<button class="btn small danger" data-act="wl-reject" data-email="' + esc(r.email) + '">拒绝</button>'
-        : "-";
+          '<button class="btn small danger" data-act="wl-reject" data-email="' + esc(r.email) + '">拒绝</button> '
+        : "") +
+        '<button class="btn small danger" data-act="wl-delete" data-email="' + esc(r.email) + '">删除</button>';
       return "<tr><td>" + check + "</td><td>" + esc(r.email) + "</td><td>" + esc(r.note || "-") + "</td><td>" +
         wlStatusChip(r) + "</td><td>" + fmtTime(r.requestedAt) + "</td><td>" + ops + "</td></tr>";
     }).join("");
@@ -1188,10 +1215,13 @@ function removeWhitelist(email) {
     .catch(function (e) { showErr("白名单移除失败：" + e.message); });
 }
 
-function checkedApplyEmails() {
+function checkedApplyEmails(onlyPending) {
   var boxes = document.querySelectorAll(".wl-apply-check:checked");
   var emails = [];
-  for (var i = 0; i < boxes.length; i++) emails.push(boxes[i].getAttribute("data-email"));
+  for (var i = 0; i < boxes.length; i++) {
+    if (onlyPending && boxes[i].getAttribute("data-status") !== "pending") continue;
+    emails.push(boxes[i].getAttribute("data-email"));
+  }
   return emails;
 }
 
@@ -1225,6 +1255,28 @@ function rejectWaitlist(emails) {
       loadWhitelist();
     })
     .catch(function (e) { showErr("候补拒绝失败：" + e.message); });
+}
+
+// 删除与拒绝的差别要在确认框里说清：拒绝留痕（对方能查状态、队列里看得到），
+// 删除是把整行从队列抹掉；两者可逆性不同，误删不可恢复。
+function deleteWaitlist(emails) {
+  if (!emails.length) { showErr("先勾选要删除的申请"); return; }
+  var tip = emails.length > 8
+    ? emails.slice(0, 8).join("\\n") + "\\n…等 " + emails.length + " 条"
+    : emails.join("\\n");
+  if (!confirm("从候补队列删除以下申请？此操作不可恢复：\\n\\n" + tip +
+    "\\n\\n（只清队列记录：白名单成员与已注册账号不受影响，对方之后仍可重新申请）")) return;
+  api("/api/admin/beta-waitlist/delete", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ emails: emails })
+  }).then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "操作失败");
+      loadWhitelist();
+    })
+    .catch(function (e) { showErr("候补删除失败：" + e.message); });
 }
 
 // ---------- 消息发送（站内信群发） ----------
@@ -1705,6 +1757,69 @@ function loadMessages() {
     });
 }
 
+// ---------- 装机台账（客户端启动埋点） ----------
+var CLIENT_STATUS_LABELS = {
+  bundledStarted: "本机后端已拉起",
+  bundledAlreadyRunning: "本机后端复用",
+  bundledSpawnFailed: "本机后端拉起失败",
+  bundledNotReady: "拉起后未就绪",
+  notBundled: "云端连接版",
+  skippedByChannel: "按 channel 未拉起"
+};
+
+function loadClients() {
+  var stats = $("clStats");
+  var list = $("clList");
+  var failing = $("clFilter").value === "failing" ? "&failing=true" : "";
+  stats.innerHTML = '<div class="meta">加载中…</div>';
+  api("/api/admin/clients?limit=100" + failing)
+    .then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
+    .then(function (res) {
+      if (res.code === 401) throw new Error("管理员会话已失效，请重新登录");
+      if (res.j.ok !== true) throw new Error(res.j.message || "台账接口异常");
+      var s = res.j.summary || {};
+      stats.innerHTML =
+        statCard(s.total || 0, "安装台数") +
+        statCard(s.activeToday || 0, "今日启动") +
+        statCard(s.active7d || 0, "7 日内启动过") +
+        statCard(s.failing || 0, "启动失败过");
+      var channels = Object.keys(s.byChannel || {}).map(function (c) { return c + " " + s.byChannel[c]; });
+      var versions = (s.byVersion || []).map(function (v) { return v.version + " ×" + v.count; });
+      $("clMeta").innerHTML = "channel：" + esc(channels.join(" · ") || "-") +
+        " · 版本：" + esc(versions.join(" · ") || "-") +
+        " · 本机后端就绪中位耗时：" + (s.medianBootMs == null ? "-" : s.medianBootMs + " ms") +
+        (s.failing ? ' · <a href="#downloads" style="color:var(--warn)">有安装从未成功起后端，收回 runtime 前先确认</a>' : "");
+      if (!res.j.items.length) {
+        list.innerHTML = '<div class="meta">' + (failing ? "没有启动失败过的安装。" : "还没有收到任何启动上报。") + "</div>";
+        return;
+      }
+      var rows = res.j.items.map(function (c) {
+        return "<tr>" +
+          '<td class="wrap">' + esc(c.installId) + "</td>" +
+          '<td class="wrap">' + esc(c.actorId || "-") + "</td>" +
+          "<td>" + esc(c.appVersion || "-") + "</td>" +
+          "<td>" + esc(c.channel || "-") + "</td>" +
+          "<td>" + esc(CLIENT_STATUS_LABELS[c.bootStatus] || c.bootStatus) + "</td>" +
+          "<td>" + (c.bootMs == null ? "-" : c.bootMs + " ms") + "</td>" +
+          "<td>" + c.boots + (c.failures ? ' <b style="color:var(--warn)">失败 ' + c.failures + "</b>" : "") + "</td>" +
+          "<td>" + esc(fmtTime(c.lastBootAt)) + "</td>" +
+          '<td class="wrap">' + esc(c.platform || "-") + "</td>" +
+          "</tr>";
+      }).join("");
+      list.innerHTML = '<div class="card"><table><tr>' +
+        "<th>安装 ID</th><th>身份</th><th>版本</th><th>channel</th><th>最近启动结果</th>" +
+        "<th>耗时</th><th>启动次数</th><th>最近启动</th><th>平台</th>" +
+        "</tr>" + rows + "</table>" +
+        (res.j.total > res.j.items.length ? '<div class="meta">共 ' + res.j.total + " 台，显示最近 " + res.j.items.length + " 台</div>" : "") +
+        "</div>";
+    })
+    .catch(function (e) {
+      stats.innerHTML = '<div class="meta">台账读取失败：' + esc(e.message) + "</div>";
+      $("clMeta").textContent = "";
+      list.innerHTML = "";
+    });
+}
+
 // ---------- 下载分发 ----------
 function loadManifest() {
   api("/api/admin/client-manifest").then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
@@ -1712,6 +1827,9 @@ function loadManifest() {
       if (res.code !== 200 || res.j.ok !== true) throw new Error("需要管理员 Token");
       var m = res.j.manifest || {};
       $("mfLatest").value = m.latest || "";
+      $("mfMinVersion").value = m.minVersion || "";
+      mfChannelLoaded = m.channel || "byok";
+      $("mfChannel").value = (m.channel === "platform") ? "platform" : "byok";
       $("mfUrl").value = m.url || "";
       $("mfMeta").textContent = "当前：minVersion=" + (m.minVersion || "(默认)") +
         " · channel=" + (m.channel || "byok") +
@@ -1741,10 +1859,24 @@ function loadManifest() {
 
 function saveManifest() {
   var hint = $("mfHint");
+  var channel = $("mfChannel").value;
+  if (channel !== mfChannelLoaded &&
+      !confirm(channel === "platform"
+        ? "切成 platform 后，所有客户端下次启动不再拉起本机 runtime，改用统一 API 服务。\n" +
+          "确认装机台账里本机后端都起得来、且云端已配好 key 再执行。确定要切换吗？"
+        : "切回 byok：客户端下次启动重新拉起本机 runtime。确定吗？")) {
+    hint.textContent = "";
+    return;
+  }
   api("/api/admin/client-manifest", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ latest: $("mfLatest").value, url: $("mfUrl").value })
+    body: JSON.stringify({
+      latest: $("mfLatest").value,
+      minVersion: $("mfMinVersion").value,
+      channel: channel,
+      url: $("mfUrl").value
+    })
   })
     .then(function (r) { return r.json().then(function (j) { return { code: r.status, j: j }; }); })
     .then(function (res) {
@@ -2012,8 +2144,10 @@ $("wlBody").addEventListener("click", function (ev) {
   if (act === "wl-remove") removeWhitelist(el.getAttribute("data-email"));
   else if (act === "wl-approve") approveWaitlist([el.getAttribute("data-email")]);
   else if (act === "wl-reject") rejectWaitlist([el.getAttribute("data-email")]);
-  else if (act === "wl-approve-checked") approveWaitlist(checkedApplyEmails());
-  else if (act === "wl-reject-checked") rejectWaitlist(checkedApplyEmails());
+  else if (act === "wl-approve-checked") approveWaitlist(checkedApplyEmails(true));
+  else if (act === "wl-reject-checked") rejectWaitlist(checkedApplyEmails(true));
+  else if (act === "wl-delete") deleteWaitlist([el.getAttribute("data-email")]);
+  else if (act === "wl-delete-checked") deleteWaitlist(checkedApplyEmails(false));
   else if (act === "wl-refresh") loadWhitelist();
 });
 
@@ -2025,6 +2159,8 @@ $("dlFile").addEventListener("change", function () {
 });
 $("dlRefresh").addEventListener("click", loadDownloads);
 $("mfSaveBtn").addEventListener("click", saveManifest);
+$("clRefresh").addEventListener("click", loadClients);
+$("clFilter").addEventListener("change", loadClients);
 
 var segOpts = [
   { v: "", l: "全部" }, { v: "open", l: "待处理" },

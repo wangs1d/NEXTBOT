@@ -22,7 +22,6 @@ import { createExternalChatProviderFromEnv } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
-import { startFunasrServer } from "./services/funasr-auto-starter.js";
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import { isWechatClawBridgeEnabled } from "./services/wechat-claw-bridge-service.js";
 import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
@@ -59,9 +58,6 @@ console.log(
     ? `[runtime] external model: ${externalChatProbe.displayLabel}`
     : "[runtime] external model 未启用（.env 配置 API_KEY 后生效）",
 );
-
-// FunASR 须在装配前自启动（BASE_URL 同步写入 env）
-const stopFunasrEarly = startFunasrServer({ log: (line) => console.log(line) });
 
 const services = await createAppServices();
 await initializeRuntimeState(services);
@@ -102,7 +98,6 @@ const performShutdown = (): void => {
   });
   services.webhookService.stop();
   stopDesktopBridge();
-  stopFunasrEarly();
   stopOpenClawModelSync();
   void linkServer.close().finally(() => {
     void services.app.close().finally(() => process.exit(0));

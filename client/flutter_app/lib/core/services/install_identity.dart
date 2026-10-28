@@ -7,7 +7,8 @@ import "package:path_provider/path_provider.dart";
 import "../config/api_config.dart";
 import "account_session_store.dart";
 
-/// 控制面身份：反馈、站内信等运营数据以此 actor 身份落库到管理后台。
+/// 控制面身份与启动状态：反馈、站内信、运行埋点等运营数据以此 actor 身份
+/// 落库到管理后台；`channel` 落盘供下次启动决定是否拉起本机 runtime。
 ///
 /// 优先级：登录邮箱（账号会话，已归一化，按账号隔离）>
 /// `USER_ID`（部署配置，显式指定）> 持久化安装 ID。
@@ -22,6 +23,7 @@ class InstallIdentity {
   static const String _fileName = "install_identity.json";
 
   String? _installId;
+  String? _channel;
   bool _loaded = false;
 
   Future<void> _ensureLoaded() async {
@@ -34,16 +36,19 @@ class InstallIdentity {
         final Map<String, dynamic> json =
             jsonDecode(await file.readAsString()) as Map<String, dynamic>;
         final String id = json["installId"]?.toString() ?? "";
-        if (id.isNotEmpty) {
-          _installId = id;
-          return;
-        }
+        if (id.isNotEmpty) _installId = id;
+        final String channel = json["channel"]?.toString() ?? "";
+        if (channel.isNotEmpty) _channel = channel;
+        if (_installId != null) return;
       }
       // 首次生成：inst_ + 毫秒时间戳(36进制) + 微秒尾数(36进制)，避免并发撞号
       final String id =
           "inst_${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}_${(DateTime.now().microsecondsSinceEpoch % 1679616).toRadixString(36)}";
       _installId = id;
-      await file.writeAsString(jsonEncode(<String, String>{"installId": id}));
+      await file.writeAsString(jsonEncode(<String, String>{
+        "installId": id,
+        if (_channel != null) "channel": _channel!,
+      }));
     } catch (e) {
       debugPrint("[InstallIdentity] 读写安装身份失败（用临时 id）: $e");
       _installId ??=
@@ -62,5 +67,40 @@ class InstallIdentity {
     if (u.isNotEmpty) return u;
     await _ensureLoaded();
     return _installId ?? "local-device";
+  }
+
+  /// 已加载的安装身份；`applyBootChannel()` 在 runApp 前跑过一次即可同步读，
+  /// 未加载时为 null（调用方自行兜底）。
+  String? get cachedInstallId => _installId;
+
+  /// 本机安装身份（`inst_…`）：运行埋点的主键，与 actorId 的未登录兜底同源。
+  Future<String> installId() async {
+    await _ensureLoaded();
+    return _installId ?? "local-device";
+  }
+
+  /// 启动早期（runApp 之前）调用：把上次落盘的 channel 灌进 ApiConfig，
+  /// 让首个网络请求就落在正确的运行通道上。
+  Future<void> applyBootChannel() async {
+    await _ensureLoaded();
+    ApiConfig.applyRuntimeChannel(_channel);
+  }
+
+  /// 落盘服务端清单的 channel，下次启动生效（会话中途不切通道）。
+  Future<void> saveChannel(String channel) async {
+    final String c = channel.trim();
+    if (c != "byok" && c != "platform") return;
+    await _ensureLoaded();
+    if (_channel == c) return;
+    _channel = c;
+    try {
+      final Directory dir = await getApplicationSupportDirectory();
+      await File("${dir.path}/$_fileName").writeAsString(jsonEncode(<String, String>{
+        if (_installId != null) "installId": _installId!,
+        "channel": c,
+      }));
+    } catch (e) {
+      debugPrint("[InstallIdentity] 落盘 channel 失败（下次启动仍用旧值）: $e");
+    }
   }
 }

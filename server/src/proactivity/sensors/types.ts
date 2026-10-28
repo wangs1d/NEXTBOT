@@ -65,15 +65,36 @@ export type Signal = {
 };
 
 /**
+ * 采集策略：
+ *  - poll：固定间隔拉取（本地廉价读取，如屏幕/剪贴板）
+ *  - adaptive：空闲时逐级拉长、拉到新信号后回到快节奏（远程订阅类）
+ *  - push：纯推送（外部事件源经 kernel.emit() 推入，collect 不被调用）
+ */
+export type SensorTransport = "poll" | "adaptive" | "push";
+
+/** 自适应间隔的入参（内核维护，传感器只读） */
+export type SensorPollState = {
+  now: number;
+  /** 内部计数：连续多少轮没有产出信号 */
+  idleRounds: number;
+  /** 最近一次产出信号的时刻（null=从未） */
+  lastSignalAt: number | null;
+};
+
+/**
  * 传感器接口。
  *  - pollIntervalMs > 0：内核按间隔轮询 collect()
  *  - pollIntervalMs = 0：纯推送型（feeder）——外部事件源经 kernel.emit() 推入，
  *    collect 不会被调用；注册 feeder 是为了健康面板与生命周期统一。
+ *  - transport 缺省由 pollIntervalMs 推断；adaptive 可由 nextIntervalMs 自定义间隔。
  */
 export interface ProactiveSensor {
   id: string;
   stream: SignalStream;
   pollIntervalMs: number;
+  transport?: SensorTransport;
+  /** 自适应型传感器可覆写下一轮间隔（缺省按空闲轮数指数退避，封顶 5×基础间隔） */
+  nextIntervalMs?(state: SensorPollState): number;
   /** 拉取自 since 以来的新信号（feeder 型返回 []） */
   collect(since: number): Promise<Signal[]> | Signal[];
 }
@@ -82,7 +103,7 @@ export interface ProactiveSensor {
 export type SensorHealth = {
   sensorId: string;
   stream: SignalStream;
-  mode: "poll" | "feeder";
+  mode: "poll" | "adaptive" | "feeder";
   pollIntervalMs: number;
   lastOkAt: number | null;
   lastFailAt: number | null;

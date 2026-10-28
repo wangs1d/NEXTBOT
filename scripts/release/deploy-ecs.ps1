@@ -97,6 +97,10 @@ ExecStart=`${NODE_BIN} dist/index.js
 Environment=FUNASR_AUTO_START=0
 Environment=NODE_ENV=production
 Environment=DOWNLOADS_DIR=$DeployDir/downloads
+# Pin the data root: this unit is rewritten wholesale on every deploy, and without an
+# explicit value the service silently falls back to platform-default root resolution.
+# Keep this ASCII -- non-ASCII here-string content arrives mojibake on the server.
+Environment=NEXTBOT_DATA_DIR=/root/.local/share/Nextbot/data
 Restart=always
 RestartSec=5
 User=root

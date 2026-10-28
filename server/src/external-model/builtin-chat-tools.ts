@@ -224,14 +224,17 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "获取当地天气与穿衣建议（Open-Meteo）。\n" +
         "⚠️ 不要猜测用户所在城市——如果用户未明确说城市名，不要传 city/latitude/longitude，工具会自动获取用户真实位置。\n" +
         "用户明确说了城市名时才传 city（如「上海天气」→ city:'上海'）。\n" +
-        "可选 timezone（IANA，默认 Asia/Shanghai）。\n" +
+        "timezone 一般不要传：缺省 auto 由用户坐标推导当地时区（服务器时区与出口 IP 都不参与）。\n" +
         "可选 days：预报天数 1-16。默认 2（今天+明天）；用户问后天/周末/未来一周等多日天气时传对应天数" +
         "（如「后天下雨吗」→ days:3，「周末天气」→ days:7），回执会带 dailyForecast 逐日数组（含 dayLabel 今天/明天/后天/周X）。\n" +
+        "⚠️ 回执含 todayRainPeriod / tomorrowRainPeriod（降水集中的钟点段，如「上午 9–12 点最明显」）时，" +
+        "正文必须把这段说出来，不能只讲「今天降水 99%」——用户要知道的是几点出门。\n" +
+        "⚠️ todayRainPeriod 写成「…已下过」时当天的雨已经过去，不要再催带伞。\n" +
         "⚠️ 回执里的当日天气数值（天气/气温/湿度/风速/降水概率）系统会自动渲染成结构化卡片，" +
         "你的文字回复里禁止再用 markdown 标题、表格或引用块复述这些数据（同屏会出现两份）；" +
         "⚠️ 例外：dailyForecast 逐日数据不在卡片里，用户问多日时正文直接口语化转述即可。" +
         "正文只写口语化的结论与建议（穿搭/出行提醒等）。\n" +
-        "示例（卡片已展示数值时）：「明天有小雨，早晚偏凉，长袖加薄外套足够，出门顺手带把伞。」",
+        "示例（卡片已展示数值时）：「明天上午 9–12 点有小雨，早晚偏凉，长袖加薄外套足够，出门顺手带把伞。」",
       parameters: {
         type: "object",
         properties: {
@@ -951,11 +954,11 @@ export const VISION_SANDBOX_RESTRICTED_CHAT_TOOLS: ChatCompletionTool[] = [
 export const VISION_CHAT_TOOLS: ChatCompletionTool[] = VISION_SANDBOX_RESTRICTED_CHAT_TOOLS;
 
 /**
- * Agent 底层语音能力 ChatCompletionTool schema（说 + 听）。
+ * Agent 底层语音能力 ChatCompletionTool schema（说）。
  *
  * 之前 voice.speak / voice.send_message 已在 ToolRegistry 注册 handler，
  * 但缺这份 schema，导致 LLM 看不到这两个工具——是个真正的盲点。
- * 本数组把它们正式暴露给 LLM，并新增 voice.transcribe（主动 ASR）。
+ * 本数组把它们正式暴露给 LLM。
  *
  * 与 phone.call_user 的区别：phone 走 `isExplicitPhoneCallRequest` 旁路注入，
  * voice 工具族走常规 tool-search 选择 + 关键词分类。
@@ -1035,29 +1038,6 @@ export const VOICE_CHAT_TOOLS: ChatCompletionTool[] = [
           },
         },
         required: ["text"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "voice.transcribe",
-      description:
-        "【ASR 主动识别】把已落地的语音消息文件转写为文本，让 Agent 能「听」用户发来的语音。mediaUrl 形如 /agent/voice/messages/{actorId}/{msgId}.mp3（用户上传或 voice.send_message 落地后产生）。适用于：用户引用了某条历史语音要求重新理解、多轮对话中需要复核语音内容、跨模态推理。注意：通常用户发来 voice 消息时 chat-user-message 已自动调 ASR 把 transcript 喂给模型，本工具主要用于「重听」或「主动检查」历史语音。",
-      parameters: {
-        type: "object",
-        properties: {
-          mediaUrl: {
-            type: "string",
-            description: "语音消息的访问 URL，形如 /agent/voice/messages/{actorId}/{msgId}.mp3",
-          },
-          language: {
-            type: "string",
-            description: "语言提示（如 zh、en），默认 zh",
-          },
-        },
-        required: ["mediaUrl"],
         additionalProperties: false,
       },
     },

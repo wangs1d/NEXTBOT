@@ -5,6 +5,38 @@ import "package:flutter/foundation.dart" show debugPrint;
 import "package:http/http.dart" as http;
 
 import "local_runtime_config.dart";
+import "../config/api_config.dart";
+
+/// 本机 runtime 的一次启动结果，取值与服务端 `/api/telemetry/client-boot`
+/// 的 bootStatus 白名单一一对应。
+enum RuntimeBootStatus {
+  /// 已有后端在跑，直接复用
+  bundledAlreadyRunning,
+
+  /// 本次拉起并轮询到就绪
+  bundledStarted,
+
+  /// 进程 spawn 抛异常
+  bundledSpawnFailed,
+
+  /// 进程起来了但超时未就绪
+  bundledNotReady,
+
+  /// exe 旁无捆绑 runtime（云端连接版/开发形态）
+  notBundled,
+
+  /// channel=platform（runtime 已收回云端），按要求不拉起
+  skippedByChannel,
+}
+
+class RuntimeBootResult {
+  const RuntimeBootResult(this.status, {this.elapsedMs});
+
+  final RuntimeBootStatus status;
+
+  /// 本次拉起耗时（毫秒）：只有真的 spawn 过进程才有值，复用/跳过为 null。
+  final int? elapsedMs;
+}
 
 /// byok 捆绑形态的本地 runtime 生命周期管理：
 /// 探测 health → 用捆绑的 runtime\node.exe 拉起 dist/index.js（注入用户
@@ -73,19 +105,28 @@ class LocalRuntimeManager {
     }
   }
 
-  /// 确保 runtime 在跑：已在 → 直接返回 true；否则拉起并轮询 health 就绪。
-  /// 超时返回 false（应用照常启动，WS 层会重试，不影响界面）。
-  static Future<bool> ensureRunning({
+  /// 确保 runtime 在跑：已在 → 直接返回；否则拉起并轮询 health 就绪。
+  /// 超时返回 bundledNotReady（应用照常启动，WS 层会重试，不影响界面）。
+  static Future<RuntimeBootResult> ensureRunning({
     // 实测：本机 SSD 冷启动 ~6s，零配置首启（无 config.env）~16.2s；
     // 低端机 + 冷磁盘 + onnxruntime/bge 装载很容易再翻倍。原 25s 太贴脸，
     // 超时后应用照常起来但后端还没监听，用户只看到「连不上」且无任何提示。
     Duration readyTimeout = const Duration(seconds: 45),
   }) async {
-    if (!isBundled) return true;
+    if (!isBundled) {
+      return const RuntimeBootResult(RuntimeBootStatus.notBundled);
+    }
+    // runtime 收回开关：服务端清单把 channel 改成 platform 后，本机后端不再
+    // 拉起（下次启动生效），请求全部改走烤入的控制面地址（见 ApiConfig.httpBase）。
+    if (ApiConfig.usesPlatformChannel) {
+      _log("skip spawn: channel=platform");
+      return const RuntimeBootResult(RuntimeBootStatus.skippedByChannel);
+    }
     if (await probeHealth()) {
       _lastHealthOk = true;
-      return true;
+      return const RuntimeBootResult(RuntimeBootStatus.bundledAlreadyRunning);
     }
+    final Stopwatch sw = Stopwatch()..start();
     final String dir = _exeDir!;
     final String runtimeDir =
         "$dir${Platform.pathSeparator}runtime";
@@ -98,7 +139,6 @@ class LocalRuntimeManager {
       final Map<String, String> env = <String, String>{
         ...Platform.environment,
         ...LocalRuntimeConfig.readSync(),
-        "FUNASR_AUTO_START": "0",
       };
       _process = await Process.start(
         node,
@@ -125,24 +165,29 @@ class LocalRuntimeManager {
     } catch (e) {
       debugPrint("[runtime] spawn failed: $e");
       _log("spawn failed: $e");
-      return false;
+      return RuntimeBootResult(RuntimeBootStatus.bundledSpawnFailed,
+          elapsedMs: sw.elapsedMilliseconds);
     }
     final Deadline deadline = Deadline(readyTimeout);
     while (!deadline.isPassed) {
       await Future<void>.delayed(const Duration(milliseconds: 500));
       if (await probeHealth()) {
         _lastHealthOk = true;
-        return true;
+        return RuntimeBootResult(RuntimeBootStatus.bundledStarted,
+            elapsedMs: sw.elapsedMilliseconds);
       }
     }
     debugPrint("[runtime] health not ready within $readyTimeout");
     _log("health not ready within $readyTimeout");
-    return false;
+    return RuntimeBootResult(RuntimeBootStatus.bundledNotReady,
+        elapsedMs: sw.elapsedMilliseconds);
   }
 
   /// 用户改了 config.env（如首启填 key）后重启 runtime 使其生效。
-  static Future<bool> restart() async {
-    if (!isBundled) return true;
+  static Future<RuntimeBootResult> restart() async {
+    if (!isBundled) {
+      return const RuntimeBootResult(RuntimeBootStatus.notBundled);
+    }
     try {
       _process?.kill();
     } catch (_) {}

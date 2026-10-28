@@ -227,7 +227,7 @@ test("order: 查订单 → order 卡", () => {
   assert.equal(card.cardType, "order");
 });
 
-test("compare prices: 比价 → 通用列表卡（cardType 空串）", () => {
+test("compare prices: 比价 → 专属 price_compare 卡", () => {
   const out = runLoopTurn("这款耳机哪里买便宜", "三个平台的价格我都比了一遍：", {
     registry: [
       {
@@ -252,7 +252,8 @@ test("compare prices: 比价 → 通用列表卡（cardType 空串）", () => {
   });
   const card = parseCardBlock(out);
   assert.ok(card, `应附上比价卡，实际文本: ${out}`);
-  assert.equal(card.cardType, "");
+  assert.equal(card.cardType, "price_compare");
+  assert.ok(Array.isArray(card.priceCompare?.groups));
   assert.ok(String(card.title).includes("比价结果"));
 });
 

@@ -1,8 +1,8 @@
 // 主动呼叫器（ProactiveCaller）—— "遇到事情打电话汇报"的真实闭环。
 //
 // 链路：评估器判定某事件值得打电话（重要/涉第三方/用户 opt-in）→ 本模块
-// 发起真实虚拟来电（振铃前摇 → 接通 TTS 播报）→ 通话中多轮对话（用户说话
-// 本地 ASR → phone.call_reply 上行 → LLM 口语回复 → TTS 推回）→ 结束后
+// 发起真实虚拟来电（振铃前摇 → 接通 TTS 播报）→ 通话中多轮对话（用户回复
+// 经 phone.call_reply 上行 → LLM 口语回复 → TTS 推回）→ 结束后
 // 结果分类回灌（replied / no_response / user_hangup / no_device）→ 事件审计。
 //
 // 用量纪律（零 LLM 判定 + LLM 只在对话轮）：

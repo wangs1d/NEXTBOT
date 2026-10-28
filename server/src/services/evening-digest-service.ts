@@ -385,7 +385,8 @@ export class EveningDigestService {
     const brief = await weatherService.getBrief(
       loc.latitude,
       loc.longitude,
-      loc.timezone || "Asia/Shanghai",
+      // 定位没带时区时按坐标推导（auto），不用服务端本机时区兜底
+      loc.timezone || "auto",
       loc.label,
     );
     const t = brief.daily?.find((d) => d.date === previewDateKey) ?? null;

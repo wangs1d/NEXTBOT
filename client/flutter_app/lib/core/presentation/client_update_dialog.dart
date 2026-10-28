@@ -11,11 +11,12 @@ import "client_update_flow_view.dart";
 ///   （点空白/Esc/系统返回均无效），唯一出口是升级到新版本。
 ///
 /// 点「立即升级」就地进入应用内下载流程（进度条 → 「重启完成更新」→
-/// 静默覆盖安装并自动拉起新版），全程不跳浏览器；用户暂离时（弹窗关闭/
-/// 取消）中断下载并清理 .part。侧栏「检查更新」按钮的手动检查不走弹窗
-/// ——已是最新走右上角玻璃通知卡、其余结果走更新按钮正上方浮卡
-/// （见 update_result_card.dart）；仅强锁场景经 showClientUpdateDialog
-/// 以不可关闭弹窗截停。
+/// 静默覆盖安装并自动拉起新版），全程不跳浏览器；下载流为全局共享单飞
+/// （2026-10-28），弹窗关闭不终止后台预下载。侧栏「检查更新」按钮的手动
+/// 检查不走弹窗——已是最新走右上角玻璃通知卡、其余结果走更新按钮正上方
+/// 浮卡（见 update_result_card.dart）；仅强锁场景经 showClientUpdateDialog
+/// 以不可关闭弹窗截停（可选升级启动时已改为后台预下载 + 左下角胶囊，
+/// 不再弹模态）。
 Future<void> showClientUpdateDialog({
   required BuildContext context,
   required ClientManifest manifest,
@@ -54,20 +55,21 @@ class _ClientUpdateDialogBodyState extends State<_ClientUpdateDialogBody> {
   ClientUpdateFlowController? _flow;
 
   void _startFlow() {
-    setState(() {
-      _flow = ClientUpdateFlowController(
-        downloadUrl: widget.manifest.url,
-        version: widget.manifest.latest,
-      )..begin();
-    });
+    // 下载流为全局共享单飞（2026-10-28 主流式）：若后台已在预下载
+    // （左下角胶囊），这里直接并入同一条流展示进度，不再另起下载
+    sharedUpdateFlow(
+      downloadUrl: widget.manifest.url,
+      version: widget.manifest.latest,
+    );
+    ensureSharedUpdateDownloading();
+    setState(() => _flow = activeSharedUpdateFlow);
   }
 
   @override
   void dispose() {
-    // 弹窗任何路径退出（含点空白/Esc）都停下载并清理 .part
-    final ClientUpdateFlowController? flow = _flow;
-    flow?.cancel();
-    flow?.dispose();
+    // 只解绑不取消（2026-10-28 起共享流归全局所有）：弹窗任何路径退出
+    // （含点空白/Esc）后台预下载继续，左下角胶囊继续反映进度
+    _flow = null;
     super.dispose();
   }
 

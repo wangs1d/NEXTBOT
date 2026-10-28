@@ -1,6 +1,6 @@
 import { config as loadEnv } from "dotenv";
 import { existsSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
@@ -67,6 +67,36 @@ export function loadServerEnv(): void {
     loadEnv({ path: localPath, override: true, quiet: true });
   }
 }
+
+// 捆绑布局随包带可执行文件：<runtime>\node.exe 与 <runtime>\bin\*（ffmpeg 等）。
+// code.shell / code.run 用 PATH 查找命令，装机机器 PATH 上没有这些工具，
+// 这里把它们前置进本进程 PATH，子进程继承后即可直接调用。
+function prependBundledToolsToPath(): void {
+  if (process.platform !== "win32") return;
+  const dirs = [
+    existsSync(join(serverRoot, "bin")) ? join(serverRoot, "bin") : null,
+    existsSync(join(serverRoot, "node.exe")) ? serverRoot : null,
+  ].filter((d): d is string => d !== null);
+  if (dirs.length === 0) return;
+  const current = process.env.PATH ?? "";
+  const entries = new Set(current.split(";").filter(Boolean));
+  const fresh = dirs.filter((d) => !entries.has(d));
+  if (fresh.length === 0) return;
+  process.env.PATH = current ? `${fresh.join(";")};${current}` : fresh.join(";");
+}
+
+prependBundledToolsToPath();
+
+// Playwright 浏览器目录：相对值按 Playwright 自身规则解析到进程 cwd，换 cwd 就找不到
+// 浏览器。这里统一锚定到 runtime 根，让首启与运行目录无关。
+function anchorPlaywrightBrowsersPath(): void {
+  const raw = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
+  if (!raw || isAbsolute(raw)) return;
+  const abs = resolve(serverRoot, raw);
+  if (existsSync(abs)) process.env.PLAYWRIGHT_BROWSERS_PATH = abs;
+}
+
+anchorPlaywrightBrowsersPath();
 
 // 模块加载时立即执行：确保在任何其他模块 import 之前环境变量已就绪。
 // 有些模块（如 chat-user-message.ts）在模块顶层调用 getAgentRuntimeConfig()，

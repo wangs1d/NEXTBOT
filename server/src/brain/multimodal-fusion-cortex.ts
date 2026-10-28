@@ -4,7 +4,7 @@
  * 设计原则：
  * - 不引入 embedding 级融合（token 成本高）
  * - 在 SensoryFrame 基础上做结构化冲突检测 + 优先级仲裁
- * - 冲突检测：ASR 说"很高兴"但 emotion 检测为 negative → 标记 conflict
+ * - 冲突检测：用户文本说"很高兴"但 emotion 检测为 negative → 标记 conflict
  * - 优先级：audio > visual > activity（人类对话中语音优先）
  * - 输出 FusedFrame（SensoryFrame 别名，向后兼容）
  *
@@ -94,7 +94,7 @@ export class MultimodalFusionCortex {
 
   /**
    * 检测语音与情绪的冲突
-   * 如 ASR 说"很开心"但 emotion.valence < -0.3
+   * 如用户文本说"很开心"但 emotion.valence < -0.3
    */
   private detectAudioEmotionConflict(
     audioText: string,

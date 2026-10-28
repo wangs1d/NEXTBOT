@@ -39,7 +39,7 @@ class WsChatService {
   /// 已写入 socket、尚未拿到服务端 ack 的 `chat.user_message`（messageId → 事件）。
   ///
   /// 半开连接上 `sink.add` 既不抛错也不阻塞，消息只是沉进内核发送缓冲区，客户端却
-  /// 认定「已发出」——直到 3 分钟看门狗报「抱歉，等待回复超时」。链路随后被判死时
+  /// 认定「已发出」。链路随后被判死时
   /// 这些消息回补进 [_pendingOutbound]，重连后原样重发。重发是安全的：服务端
   /// MessageBatchProcessor 按 `(sessionId, messageId)` 做 10 分钟 turn 级幂等，
   /// 重复投递只记日志「重复投递被拒」并静默丢弃，不会重复跑轮次/重复触发工具。
@@ -217,7 +217,7 @@ class WsChatService {
         in _chatInFlight.entries) {
       final int attempts = (_chatRedeliveryCount[entry.key] ?? 0) + 1;
       if (attempts > _maxChatRedeliveries) {
-        // 放弃重投：交给既有的 3 分钟回合看门狗报「等待回复超时」，不再造新事件。
+        // 放弃重投：交由服务端 turn 幂等/心跳判死兜底，不再造新事件。
         _chatRedeliveryCount.remove(entry.key);
         continue;
       }
@@ -332,8 +332,8 @@ class WsChatService {
   bool sendEvent(String type, Map<String, dynamic> payload) {
     if (_isConnected && _channel != null && _channel!.closeCode == null) {
       // 半开连接自检：链路已被中间设备静默掐断时 `sink.add` 不抛错，消息只会沉在
-      // 内核发送缓冲区里，客户端却当成「已发出」——用户随后必然等到看门狗报
-      // 「抱歉，等待回复超时」。服务端有稳定的周期性推送，入站静默超过心跳阈值
+      // 内核发送缓冲区里，客户端却当成「已发出」，回复永远不来。服务端有稳定的
+      // 周期性推送，入站静默超过心跳阈值
       // 即判死链：主动拆链入队、重连后再发，语义上仍算「已受理」。
       if (type == "chat.user_message" && _isInboundStale()) {
         _pendingOutbound.add(_PendingWsEvent(type: type, payload: payload));

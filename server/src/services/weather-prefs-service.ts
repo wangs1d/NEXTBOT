@@ -8,7 +8,7 @@ export type WeatherPrefsRecord = {
   longitude: number;
   /** 展示用，如「北京市」 */
   label?: string;
-  /** IANA，如 Asia/Shanghai */
+  /** IANA，如 Asia/Shanghai；空串 = 未指定，取数时按坐标推导（auto） */
   timezone: string;
   /** 是否启用每日早间简报（由日程任务触发） */
   morningReminderEnabled: boolean;
@@ -76,7 +76,7 @@ export class WeatherPrefsService {
     const now = new Date().toISOString();
     const rec: WeatherPrefsRecord = {
       ...input,
-      timezone: input.timezone?.trim() || "Asia/Shanghai",
+      timezone: input.timezone?.trim() ?? "",
       morningReminderEnabled: Boolean(input.morningReminderEnabled),
       updatedAt: input.updatedAt ?? now,
     };

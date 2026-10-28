@@ -96,7 +96,6 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   // voice
   "voice.speak": "voice",
   "voice.send_message": "voice",
-  "voice.transcribe": "voice",
   // clock
   "clock.get_current_time": "clock",
   "clock.get_user_location": "clock",

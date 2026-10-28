@@ -12,6 +12,10 @@ import { MorningBriefingService } from "../src/services/morning-briefing-service
 
 const SESSION = "actor-evening-digest-test";
 
+/** 与 EveningDigestService.localDateKey 同口径的本地日历日键 */
+const dayKey = (d: Date) =>
+  `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+
 // ── 1. 恶劣天气预警检测 ──────────────────────────────
 
 test("预警检测：暴雨/雷暴/冻雨/大雪按天气码与文本兜底", () => {
@@ -85,6 +89,11 @@ test("晚间 digest：明日行程 + 次日天气与穿衣确定性聚合与播�
       clothingAdvice: "",
       hourlyForecast: [],
       summaryLine: "",
+      // 明日速览按 daily 里「被预告那天」的日历日取数（不再用 tomorrow 字段）
+      daily: [
+        { date: dayKey(new Date()), weatherCode: 65, weatherText: "大雨", minC: 18, maxC: 24, rainPct: 90 },
+        { date: dayKey(tomorrow), weatherCode: 95, weatherText: "雷暴", minC: 17, maxC: 23, rainPct: 85 },
+      ],
       tomorrow: { weatherCode: 95, weatherText: "雷暴", minC: 17, maxC: 23, rainPct: 85 },
     }),
   };
@@ -231,6 +240,11 @@ test("晚间 digest：无天气位置偏好时按定位兜底取明日天气", a
         clothingAdvice: "",
         hourlyForecast: [],
         summaryLine: "",
+        // 明日速览按 daily 里「被预告那天」的日历日取数（不再用 tomorrow 字段）
+        daily: [
+          { date: dayKey(new Date()), weatherCode: 3, weatherText: "阴", minC: 16, maxC: 22, rainPct: 20 },
+          { date: dayKey(new Date(Date.now() + 86_400_000)), weatherCode: 61, weatherText: "小雨", minC: 15, maxC: 19, rainPct: 80 },
+        ],
         tomorrow: { weatherCode: 61, weatherText: "小雨", minC: 15, maxC: 19, rainPct: 80 },
       };
     },

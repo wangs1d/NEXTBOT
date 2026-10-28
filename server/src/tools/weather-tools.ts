@@ -1,5 +1,5 @@
 import type { ToolRegistry } from "./tool-registry.js";
-import { geocodeCity, WeatherService } from "../services/weather-service.js";
+import { geocodeCity, WeatherService, rainWindowSuffixText } from "../services/weather-service.js";
 import type { WeatherDailyForecastItem } from "../services/weather-service.js";
 import { resolveUserGeo } from "../services/user-location-service.js";
 import { reverseGeocodeCoordinates } from "../services/reverse-geocode-service.js";
@@ -17,7 +17,9 @@ function dedupLabel(parts: Array<string | undefined | null>): string {
 
 export function registerWeatherTools(registry: ToolRegistry, weather: WeatherService): void {
   registry.register("weather.get_local", async (input, context) => {
-    let timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
+    // 时区默认交给接口按坐标推导（auto）：服务端不用本机时区、不用出口 IP 的时区冒充
+    // 用户所在时区——只有用户/客户端明确说了时区才覆盖。
+    let timezone = String(input.timezone ?? "").trim() || "auto";
     let city = input.city != null ? String(input.city).trim() : "";
     let lat = input.latitude != null ? Number(input.latitude) : NaN;
     let lon = input.longitude != null ? Number(input.longitude) : NaN;
@@ -42,12 +44,11 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
         }
         // 客户端按需回包是纯坐标（省一次手机↔服务端逆地理往返，GPS 秒回）：
         // label 缺失时在服务端逆地理补齐城市名，否则卡片标题会退化成「31.23, 121.47」。
+        // 时区不从这里取：逆地理的时区源失败时会猜 Asia/Shanghai，而 getBrief 的
+        // auto 直接由同一组坐标推导，不需要这层可能出错的猜测。
         if (!label) {
           const rev = await reverseGeocodeCoordinates(lat, lon);
-          if (rev) {
-            label = rev.label;
-            if (rev.timezone) timezone = rev.timezone;
-          }
+          if (rev) label = rev.label;
         }
       }
 
@@ -104,7 +105,15 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       weatherText: brief.weatherText,
       humidityPct: brief.humidityPct,
       windKmh: brief.windKmh,
+      // 今天当日的降水概率上限（不是整段预报的最大值）
       peakRainPct: brief.peakRainPct,
+      // 降水集中的钟点段（卡片与正文都要带，整天概率不足以决定几点出门）
+      ...(brief.rainWindow ? { todayRainPeriod: rainWindowSuffixText(brief.rainWindow) } : {}),
+      // 明日降水概率：卡片分两行显示，避免「明天有雨」被读成「今天有雨」
+      ...(brief.tomorrow ? { tomorrowRainPct: brief.tomorrow.rainPct } : {}),
+      ...(brief.tomorrow?.rainWindow
+        ? { tomorrowRainPeriod: rainWindowSuffixText(brief.tomorrow.rainWindow) }
+        : {}),
       locationLabel: brief.locationLabel,
       // 多日逐日预报（index 0 = 今天；仅当请求 >2 天时携带，避免单日轮次撑大返回）
       ...(days > 2 && brief.daily && brief.daily.length > 0

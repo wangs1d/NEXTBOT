@@ -168,7 +168,8 @@ List<Widget> formatContentSummaryDetailLines(
       String? language;
       if (opener.length > 3) {
         final String rest = opener.substring(3).trim();
-        final List<String> parts = rest.split(RegExp(r"\s+")).toList()..removeWhere((e) => e.isEmpty);
+        final List<String> parts = rest.split(RegExp(r"\s+")).toList()
+          ..removeWhere((e) => e.isEmpty);
         language = parts.isEmpty ? null : parts.first;
       }
       final int start = index;
@@ -288,12 +289,9 @@ List<Widget> formatContentSummaryDetailLines(
               ? bulletMatch.group(2)!
               : orderedMatch!.group(3)!)
           .trim();
-      final String marker = bulletMatch != null
-          ? "•"
-          : orderedMatch!.group(2)!;
-      final int depth = (indentStr.replaceAll("\t", "  ").length / 2)
-          .round()
-          .clamp(0, 3);
+      final String marker = bulletMatch != null ? "•" : orderedMatch!.group(2)!;
+      final int depth =
+          (indentStr.replaceAll("\t", "  ").length / 2).round().clamp(0, 3);
       // 有序列表编号右对齐：1. 与 10. 的正文起点保持对齐，不随位数错位
       final TextAlign markerAlign =
           bulletMatch != null ? TextAlign.left : TextAlign.right;
@@ -486,12 +484,14 @@ Widget buildInlineMarkdownText(
   TextStyle baseStyle, {
   required ColorScheme cs,
   Widget? trailingInline,
+  int? maxLines,
 }) {
   return InlineMarkdownText(
     text: text,
     baseStyle: baseStyle,
     cs: cs,
     trailing: trailingInline,
+    maxLines: maxLines,
   );
 }
 
@@ -507,6 +507,7 @@ class InlineMarkdownText extends StatefulWidget {
     required this.baseStyle,
     required this.cs,
     this.trailing,
+    this.maxLines,
   });
 
   final String text;
@@ -515,6 +516,9 @@ class InlineMarkdownText extends StatefulWidget {
 
   /// 拼在末尾的行内组件（WidgetSpan），如打字机光标。
   final Widget? trailing;
+
+  /// 限定行数（超出省略），空值按自然换行
+  final int? maxLines;
 
   @override
   State<InlineMarkdownText> createState() => _InlineMarkdownTextState();
@@ -559,7 +563,14 @@ class _InlineMarkdownTextState extends State<InlineMarkdownText> {
       final TextSpan only = spans.first as TextSpan;
       if (only.style == widget.baseStyle && only.recognizer == null) {
         if (widget.trailing == null) {
-          return Text(only.text ?? "", style: widget.baseStyle);
+          return Text(
+            only.text ?? "",
+            style: widget.baseStyle,
+            maxLines: widget.maxLines,
+            overflow: widget.maxLines == null
+                ? TextOverflow.clip
+                : TextOverflow.ellipsis,
+          );
         }
         return Text.rich(
           TextSpan(
@@ -572,6 +583,10 @@ class _InlineMarkdownTextState extends State<InlineMarkdownText> {
               ),
             ],
           ),
+          maxLines: widget.maxLines,
+          overflow: widget.maxLines == null
+              ? TextOverflow.clip
+              : TextOverflow.ellipsis,
         );
       }
     }
@@ -583,7 +598,12 @@ class _InlineMarkdownTextState extends State<InlineMarkdownText> {
         ),
       );
     }
-    return Text.rich(TextSpan(style: widget.baseStyle, children: spans));
+    return Text.rich(
+      TextSpan(style: widget.baseStyle, children: spans),
+      maxLines: widget.maxLines,
+      overflow:
+          widget.maxLines == null ? TextOverflow.clip : TextOverflow.ellipsis,
+    );
   }
 }
 
@@ -644,7 +664,8 @@ List<InlineSpan> parseInlineMarkdownSpans(
             padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
             decoration: BoxDecoration(
               color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
-              borderRadius: BorderRadius.circular(AppTypography.inlineCodeRadius),
+              borderRadius:
+                  BorderRadius.circular(AppTypography.inlineCodeRadius),
             ),
             child: Text(
               token.substring(1, token.length - 1),
@@ -846,10 +867,9 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
 
   /// 复制成功反馈色按亮度取值：greenAccent 在浅色头部上对比度不足，
   /// 浅色主题改用深绿；不再硬编码主题外颜色。
-  Color _copiedColor(Brightness brightness) =>
-      brightness == Brightness.dark
-          ? const Color(0xFF7CE8B1)
-          : const Color(0xFF177A4C);
+  Color _copiedColor(Brightness brightness) => brightness == Brightness.dark
+      ? const Color(0xFF7CE8B1)
+      : const Color(0xFF177A4C);
 
   /// 按当前亮度选择深色 / 浅色高亮主题;代码区用固定底色,
   /// 保证高亮配色在桌面深色 / 暖色 / 移动端主题下都可读。
@@ -878,8 +898,7 @@ class _CodeBlockWidgetState extends State<_CodeBlockWidget> {
   Widget build(BuildContext context) {
     final ColorScheme cs = widget.cs;
     final TextTheme textTheme = widget.textTheme;
-    final bool hasLanguage =
-        (widget.language ?? "").isNotEmpty;
+    final bool hasLanguage = (widget.language ?? "").isNotEmpty;
     final Brightness brightness = Theme.of(context).brightness;
     final CodeHighlightTheme theme = _highlightTheme(brightness);
     final Color copiedColor = _copiedColor(brightness);

@@ -17,12 +17,14 @@ import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
 import "core/presentation/location_permission_dialog.dart";
 import "core/presentation/client_update_dialog.dart";
+import "core/presentation/config_error_page.dart";
 import "core/presentation/dynamic_island.dart";
 import "core/presentation/dynamic_island_stage_e2e.dart";
 import "core/presentation/dynamic_island_reminder_e2e.dart";
 import "core/presentation/health_reminder_feeds.dart";
 import "core/presentation/glass_notify.dart";
 import "core/presentation/update_result_card.dart";
+import "core/presentation/update_corner_toast.dart";
 import "core/presentation/voice_call_ui_labels.dart";
 import "core/presentation/boot_animation.dart";
 import "core/db/isar_local_history_store.dart";
@@ -40,6 +42,8 @@ import "core/services/client_update_checker.dart";
 import "package:package_info_plus/package_info_plus.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
+import "core/services/client_telemetry.dart";
+import "core/services/install_identity.dart";
 import "core/presentation/api_key_setup_dialog.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
@@ -82,6 +86,7 @@ import "features/onboarding/onboarding_flow.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
+import "features/chat/composer_skill.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
 import "features/chat/content_summary_detail_view.dart";
@@ -144,6 +149,9 @@ void main() async {
     // 会话……），否则新目录为空、老用户表现为「重新登录 + 聊天历史消失」。
     // 幂等 + 非 Windows no-op + 静默失败，见 AppSupportMigration。
     await AppSupportMigration.migrateIfNeeded();
+    // 运行通道（runtime 收回开关）：上次启动读到的 channel 必须先于任何网络
+    // 请求生效——platform 形态下本机 runtime 不拉起，地址要整体切到控制面。
+    await InstallIdentity.instance.applyBootChannel();
     // 行程规划独立窗口模式：主应用 spawn 本 exe 并经环境变量传递信箱目录，
     // 命中即只运行行程窗口，不 bootstrap 完整应用（见 travel_plan_window.dart）。
     // 窗口进程常驻：再次打开行程时主应用只写信箱指针，不再重复 spawn。
@@ -239,6 +247,15 @@ void main() async {
         await AppTrayService.instance.init();
       });
       _writeCrashLog("[BOOT]", "stage 6: after waitUntilReadyToShow, before runApp", StackTrace.current);
+    }
+    // 编译期烤入错误（HTTP_BASE 漏烤）在根 State 字段初始化时才抛，根 element
+    // 挂不上 → Release 下只剩无字灰屏，用户看到的只是白屏。这里提前探测一次，
+    // 把同一句原因换成可读界面。
+    final String? configError = detectBootConfigError();
+    if (configError != null) {
+      _writeCrashLog("[CONFIG]", configError, StackTrace.current);
+      runApp(ConfigErrorApp(message: configError));
+      return;
     }
     _writeCrashLog("[BOOT]", "stage 7: calling runApp", StackTrace.current);
     runApp(const PrivateAiApp());
@@ -354,6 +371,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<List<ScheduleEvent>>? _cachedScheduleFuture;
   final TextEditingController _inputController = TextEditingController();
   final FocusNode _inputFocusNode = FocusNode();
+
+  /// 挂在输入框上的技能（引导 chip 选中后落到输入框，等用户补参数）。
+  ComposerSkill? _composerSkill;
+
+  /// 把技能挂到输入框并聚焦，让用户接着补充参数（不直接发送）。
+  void _useComposerSkill(ComposerSkill skill) {
+    setState(() => _composerSkill = skill);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _inputFocusNode.requestFocus();
+    });
+  }
 
   /// `null` 尚未询问；`true` 随消息静默抓拍；`false` 仅文字模式
   // ignore: unused_field
@@ -1181,7 +1209,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // byok 捆绑形态：先确保本地 runtime 就绪再连 WS（非捆绑/开发形态此调用
     // 立即返回）。WS 自带退避重连，runtime 稍慢也无碍。
     if (!kIsWeb && Platform.isWindows) {
-      await LocalRuntimeManager.ensureRunning();
+      final RuntimeBootResult boot = await LocalRuntimeManager.ensureRunning();
+      unawaited(ClientTelemetry.reportBoot(boot));
     }
     // 闹钟引擎引导：装载本地闹钟库并全量重排本地精确闹钟（杀进程/重启恢复主路）
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
@@ -1290,6 +1319,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               <String, dynamic>{};
       try {
         _syncAgentSphereFromWs(type, payload);
+        // 服务端 CDP 直连共用浏览器干活（比价/下单页面任务）：面板若没开直接
+        // 打开，让用户看到真实页面操作，而不是只在主界面看状态卡片。
+        if (type == "shared.browser.busy" && payload["busy"] == true && mounted) {
+          _openBrowserPanel();
+        }
         // 共用浏览器桥：Agent 的 shared_browser.* 动作转发到内嵌浏览器执行，
         // 结果经 browser.bridge.result 回传（jobId 配对；未命中类型内部直接返回）
         unawaited(SharedBrowserHost.instance.handleServerEvent(type, payload));
@@ -1337,7 +1371,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (mounted) setState(() {});
           }
           if (hadPendingTurn) {
-            _handleAgentReplyTimeout(showSnackBar: false);
+            _handleAgentReplyTimeout();
           } else {
             ChatTurnController.instance.activeTraceId = null;
             if (_isAgentProcessing || _agentStatusLine != null) {
@@ -1364,7 +1398,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           _stopContinuousLocationTracking();
           if (_isAgentProcessing && ChatTurnController.instance.activeTraceId != null) {
             _disarmAgentReplyWatchdog();
-            _handleAgentReplyTimeout(showSnackBar: false);
+            _handleAgentReplyTimeout();
           }
           if (_queuedUserMessageIds.isNotEmpty) {
             _queuedUserMessageIds.clear();
@@ -1411,6 +1445,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "tool.call") {
           if (_isAgentProcessing) {
             final String toolName = payload["toolName"]?.toString() ?? "";
+            // 浏览器承载的工具（比价/下单/共用浏览器操作等）：主界面不再渲染
+            // 「我找找这件东西」这类进行时卡片，直接打开内置浏览器面板看真实
+            // 操作（2026-10-28 用户要求）。工具徽标也不置位——输入框状态条
+            // 退回普通处理中文案，不再复述工具族话术。
+            if (_isBrowserRenderedTool(toolName)) {
+              if (mounted) _openBrowserPanel();
+              return;
+            }
             // 输入框左上角「当前工具」徽标：记录正在调用的工具名
             if (toolName.isNotEmpty && _currentToolName != toolName) {
               setState(() => _currentToolName = toolName);
@@ -1521,72 +1563,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               debugPrint("[schedule] tool.result sync failed: $e\n$st");
             }
           }
-        }
-        if (type == "chat.audio_transcript") {
-          // 服务端 ASR 完成后回推转写结果（与 chat.user_message.contentType=audio 对应）。
-          // 把 transcript 写回对应 user 消息的 attachment，让语音气泡直接显示识别文本，
-          // 方便用户验证 ASR 准确率 + 留有可读副本。
-          final String? msgId = payload["messageId"]?.toString();
-          if (msgId == null || msgId.isEmpty) return;
-          final String transcript = payload["transcript"]?.toString() ?? "";
-          final bool ok = payload["ok"] == true;
-          if (!ok && transcript.isEmpty) {
-            // ASR 失败：用 snackbar 提示，不静默
-            if (mounted) {
-              ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-                SnackBar(
-                  content: Text(
-                    "ASR 识别失败：${payload["error"]?.toString() ?? "未知原因"}",
-                  ),
-                ),
-              );
-            }
-            return;
-          }
-          final int idx = _messages.indexWhere(
-            (ChatMessage m) => m.messageId == msgId,
-          );
-          if (idx < 0) return;
-          final ChatMessage prev = _messages[idx];
-          // 只更新 audio 类型的 attachment；text 字段不动（audio 消息 text 始终为空）
-          final List<MessageAttachment> newAttachments = <MessageAttachment>[];
-          for (final MessageAttachment a in prev.attachments) {
-            if (a.type == MessageAttachmentType.audio) {
-              newAttachments.add(MessageAttachment(
-                type: a.type,
-                url: a.url,
-                durationMs: a.durationMs,
-                waveform: a.waveform,
-                transcript: transcript,
-                mimeType: a.mimeType,
-              ));
-            } else {
-              newAttachments.add(a);
-            }
-          }
-          final ChatMessage updated = ChatMessage(
-            messageId: prev.messageId,
-            sessionId: prev.sessionId,
-            role: prev.role,
-            text: prev.text,
-            timestamp: prev.timestamp,
-            attachmentImageCount: prev.attachmentImageCount,
-            playUrl: prev.playUrl,
-            attachments: newAttachments,
-            contentType: prev.contentType,
-            durationMs: prev.durationMs,
-            waveform: prev.waveform,
-            mediaCards: prev.mediaCards,
-            renderBlocks: prev.renderBlocks,
-            pendingMediaCards: prev.pendingMediaCards,
-          );
-          setState(() {
-            _messages[idx] = updated;
-          });
-          // 异步持久化（失败也不阻塞 UI；saveMessage 内部按 messageId 覆盖）
-          unawaited(_store.saveMessage(updated).catchError((Object e) {
-            debugPrint("[chat.audio_transcript] saveMessage failed: $e");
-          }));
         }
         if (type == "schedule.tasks_changed") {
           await AmbientFeedsController.instance
@@ -1879,15 +1855,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   : "assistant-final");
           final String finalText = _sanitizeAssistantVisibleText(
               payload["finalText"]?.toString() ?? "");
-          final String fallbackText = "抱歉，我暂时无法生成回复，请稍后重试";
-          // 2026-09-11 根修兜底：bufferedText 是逐 chunk 净化后的流式累积，但
-          // 逐 chunk 正则天然抓不住跨 chunk 切开的标记（如 DSML 协议块）。
-          // 回退渲染前对整段缓冲再净化一次，防止服务端已把正文剥成空串、客户端
-          // 却把流式缓冲里的协议原文当正文定稿（2026-09-11 01:34 实测事故）。
+          // 整段缓冲再净化一次：逐 chunk 正则抓不住跨 chunk 切开的协议标记。
           final String sanitizedBuffered = _sanitizeAssistantVisibleText(bufferedText);
+          // 服务端没有正文就是没有正文：不编一句「抱歉，暂时无法生成」塞进气泡。
+          // 卡片轮（summaryCard / mediaCards / blocks）正文本就为空，由结构产出承载。
           final String resolvedText = finalText.trim().isNotEmpty
               ? finalText
-              : (sanitizedBuffered.trim().isNotEmpty ? sanitizedBuffered : fallbackText);
+              : sanitizedBuffered;
           final String traceKey = (doneTraceId?.isNotEmpty == true)
               ? doneTraceId!
               : (messageId.startsWith("assistant-")
@@ -1944,6 +1918,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   : null;
           final bool collapseToSingle =
               payload["finalTextReplacesStream"] == true;
+          // 结构化产出本身就是一轮的有效回复：正文可以为空，不必也不该补文案。
+          final bool hasStructuredReply = mediaCardsFromPayload != null ||
+              summaryCardFromPayload != null ||
+              renderBlocksFromPayload != null ||
+              replyBlocksFromPayload != null ||
+              followUpsFromPayload != null;
 
           // 真·分绿泡收口：出口重写/自检重跑让最终文本与已流文本分叉时
           // （finalTextReplacesStream），整轮塌缩——删本轮所有分泡，落一条
@@ -1981,49 +1961,74 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           } else {
           final int? idx = _messageIndexById(messageId);
           if (idx != null) {
-            // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
-            // 但如果 finalText 明显更“最终态”（例如带结构化卡片标记，或当前文本是原始 JSON），
-            // 则应覆盖中间态文本，否则会把工具原始返回错误地留在聊天气泡里。
-            setState(() {
-              final ChatMessage previous = _messages[idx];
-              final String currentText = previous.text;
-              // 服务端分歧裁决信号（2026-09-28 放流配套）：出口重写/自检重跑/
-              // 确定性收口让最终文本与已流文本分叉时，finalText 整段替换流式
-              // 气泡，避免新旧两版拼接（服务端已跳过残差补推）。
-              final bool serverSaysReplace =
-                  payload["finalTextReplacesStream"] == true;
-              final String nextText = (serverSaysReplace ||
-                      _shouldReplaceAssistantTextOnDone(currentText, resolvedText))
-                  ? resolvedText
-                  : currentText;
-              final String? existingPlayUrl = previous.playUrl;
-              final List<Map<String, dynamic>>? existingMediaCards =
-                  previous.mediaCards;
-              // 优先使用 WS 下发的 mediaCards，若没有则保留已有（流式阶段已注入的）
-              final List<Map<String, dynamic>>? resolvedMediaCards =
-                  mediaCardsFromPayload ?? existingMediaCards;
-              _messages[idx] = ChatMessage(
-                messageId: previous.messageId,
-                sessionId: previous.sessionId,
-                role: previous.role,
-                text: nextText,
-                timestamp: previous.timestamp,
-                attachmentImageCount: previous.attachmentImageCount,
-                playUrl: playUrl ?? existingPlayUrl,
-                attachments: previous.attachments,
-                contentType: previous.contentType,
-                durationMs: previous.durationMs,
-                waveform: previous.waveform,
-                mediaCards: resolvedMediaCards,
-                summaryCard: summaryCardFromPayload ?? previous.summaryCard,
-                renderBlocks: renderBlocksFromPayload,
-                replyBlocks: replyBlocksFromPayload,
-                followUpPrompts: followUpsFromPayload,
-              );
-            });
-            await _store.saveMessage(_messages[idx]);
+            final ChatMessage previous = _messages[idx];
+            // 整轮既无正文也无结构产出 → 撤掉流式阶段留下的空泡。
+            // 失败由 error.event 表达；这里既不落空白气泡，也不填假文案。
+            final bool nothingToShow = resolvedText.trim().isEmpty &&
+                previous.text.trim().isEmpty &&
+                !hasStructuredReply;
+            if (nothingToShow) {
+              setState(() {
+                _messages.removeAt(idx);
+                _rebuildAssistantIndex();
+              });
+              try {
+                await _store.deleteMessage(previous.messageId);
+              } catch (e) {
+                debugPrint("[chat] empty bubble deleteMessage failed: $e");
+              }
+            } else {
+              // 默认保留流式阶段已经显示出来的正文，避免 done 到来时整段闪烁替换；
+              // 但如果 finalText 明显更“最终态”（例如带结构化卡片标记，或当前文本是原始 JSON），
+              // 则应覆盖中间态文本，否则会把工具原始返回错误地留在聊天气泡里。
+              setState(() {
+                final String currentText = previous.text;
+                // 服务端分歧裁决信号（2026-09-28 放流配套）：出口重写/自检重跑/
+                // 确定性收口让最终文本与已流文本分叉时，finalText 整段替换流式
+                // 气泡，避免新旧两版拼接（服务端已跳过残差补推）。
+                final bool serverSaysReplace =
+                    payload["finalTextReplacesStream"] == true;
+                // 摘要卡轮：卡内已是全文，done 的 finalText 为空——此时流式阶段
+                // 显示过的长文若留在气泡里，就成了卡内卡外同一段话读两遍。
+                final bool cardReplacesStream =
+                    summaryCardFromPayload != null && resolvedText.trim().isEmpty;
+                final String nextText = (serverSaysReplace ||
+                        cardReplacesStream ||
+                        _shouldReplaceAssistantTextOnDone(currentText, resolvedText))
+                    ? resolvedText
+                    : currentText;
+                final String? existingPlayUrl = previous.playUrl;
+                final List<Map<String, dynamic>>? existingMediaCards =
+                    previous.mediaCards;
+                // 优先使用 WS 下发的 mediaCards，若没有则保留已有（流式阶段已注入的）
+                final List<Map<String, dynamic>>? resolvedMediaCards =
+                    mediaCardsFromPayload ?? existingMediaCards;
+                _messages[idx] = ChatMessage(
+                  messageId: previous.messageId,
+                  sessionId: previous.sessionId,
+                  role: previous.role,
+                  text: nextText,
+                  timestamp: previous.timestamp,
+                  attachmentImageCount: previous.attachmentImageCount,
+                  playUrl: playUrl ?? existingPlayUrl,
+                  attachments: previous.attachments,
+                  contentType: previous.contentType,
+                  durationMs: previous.durationMs,
+                  waveform: previous.waveform,
+                  mediaCards: resolvedMediaCards,
+                  summaryCard: summaryCardFromPayload ?? previous.summaryCard,
+                  renderBlocks: renderBlocksFromPayload,
+                  replyBlocks: replyBlocksFromPayload,
+                  followUpPrompts: followUpsFromPayload,
+                );
+              });
+              await _store.saveMessage(_messages[idx]);
+            }
+          } else if (resolvedText.trim().isEmpty && !hasStructuredReply) {
+            // 只收到 done、正文与结构产出都为空：不落气泡（服务端经 error.event 告知）
+            debugPrint("[chat] done with no text and no cards: nothing to render");
           } else {
-            // 极端边界：完全没收到任何 chunk（只收到 done），用 finalText 兜底
+            // 极端边界：完全没收到任何 chunk（只收到 done），按 done 载荷落消息
             final ChatMessage finalMessage = ChatMessage(
               messageId: messageId,
               sessionId: ApiConfig.effectiveActorId,
@@ -2979,7 +2984,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             messageId: previous.messageId,
             sessionId: previous.sessionId,
             role: previous.role,
-            text: serverText.isNotEmpty ? serverText : previous.text,
+            // 末泡挂摘要卡且服务端正文为空：卡内已是全文，气泡不再留流式长文
+            text: isLast && summaryCard != null && serverText.isEmpty
+                ? ""
+                : (serverText.isNotEmpty ? serverText : previous.text),
             timestamp: previous.timestamp,
             attachmentImageCount: previous.attachmentImageCount,
             playUrl: isLast ? (playUrl ?? previous.playUrl) : previous.playUrl,
@@ -3000,6 +3008,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           );
         });
         toSave.add(_messages[idx]);
+      } else if (serverText.isEmpty &&
+          !(isLast &&
+              (mediaCards != null ||
+                  summaryCard != null ||
+                  lastRenderBlocks != null ||
+                  lastReplyBlocks != null ||
+                  followUps != null))) {
+        // 空泡既无正文也无卡片：不补建（服务端对账数组里的占位泡）
+        continue;
       } else {
         // 客户端漏收该泡 chunk：按服务端对账补建（含卡片附着）
         final ChatMessage rebuilt = ChatMessage(
@@ -3062,6 +3079,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         debugPrint("[chat] bubble collapse deleteMessage failed: $e");
       }
     }
+    final bool hasCards = mediaCards != null ||
+        summaryCard != null ||
+        renderBlocks != null ||
+        replyBlocks != null ||
+        followUps != null;
+    // 整轮无正文也无卡片：分泡已撤、不再落空泡（不填假文案）
+    if (finalText.trim().isEmpty && !hasCards) return;
     final String collapsedId = traceId.isNotEmpty
         ? "assistant-$traceId"
         : "assistant-final-${DateTime.now().microsecondsSinceEpoch}";
@@ -3116,7 +3140,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 关键设计变更：流式阶段（agent 还在干活、思考气泡还在）期间，
     // **不要把 chunk 拼到消息列表**——避免用户看到「思考中」和「回复正文」同框。
     // 只清空缓冲，文本留到 chat.assistant_done 拿到 finalText 后再一次性入列表。
-    // 缓冲本身仍保留（被 _handleAgentReplyTimeout 用作超时兜底文本）。
     _assistantChunkFlushTimer?.cancel();
     _assistantChunkFlushTimer = null;
     _pendingAssistantChunkMessageId = null;
@@ -3419,84 +3442,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     ChatTurnController.instance.cancelTimer();
   }
 
-  void _handleAgentReplyTimeout({bool showSnackBar = true}) {
+  /// 前台轮次异常收尾（连接异常/断线时由调用方直接触发；2026-10-28 起
+  /// **不再有超时触发**——操作不设时间上限，watchdog 已移除）。
+  /// 只做确定性收尾：挂着的流式泡定稿、清「处理中」；已收到的真实内容
+  /// 保留，绝不插入任何「超时」兜底文案。
+  void _handleAgentReplyTimeout() {
     if (!mounted) return;
-    final bool wasProcessing = _isAgentProcessing;
-    final String buffered = _pendingAssistantChunkText.toString().trim();
-    // 关键：和 chat.assistant_done 一样，traceId 一定要先于 _clearAgentProcessingState
-    // 清掉，否则迟到的 chunk 会看到 _isAgentProcessing=false 但 traceId 还在，
-    // 重新把思考气泡点亮。
+    // 真·分绿泡：本轮已推出过分泡时，把挂着的 streaming 泡定稿，防打字机光标常亮。
     final String? userMessageId = ChatTurnController.instance.activeTraceId;
-    // 真·分绿泡：本轮已推出过分泡时，超时不另开"assistant-$traceId"单泡
-    // （分泡正文已实时入列），只把挂着的 streaming 泡定稿，防打字机光标常亮。
-    String? lastBubbleOfTrace;
     if (userMessageId != null) {
       for (final ChatMessage m in _messages.reversed) {
         if (_bubbleTraceOf(m.messageId) == userMessageId) {
-          lastBubbleOfTrace = m.messageId;
+          _finalizeStreamingBubblesOfTrace(userMessageId);
           break;
         }
-      }
-      if (lastBubbleOfTrace != null) {
-        _finalizeStreamingBubblesOfTrace(userMessageId);
       }
     }
     ChatTurnController.instance.activeTraceId = null;
     _flushAssistantChunks();
-    final String assistantMessageId = userMessageId != null
-        ? "assistant-$userMessageId"
-        : "assistant-timeout-${DateTime.now().microsecondsSinceEpoch}";
-    const String fallbackText = "抱歉，等待回复超时，请稍后重试";
-    final int? idx = lastBubbleOfTrace != null
-        ? _messageIndexById(lastBubbleOfTrace)
-        : _messageIndexById(assistantMessageId);
-    if (idx != null) {
-      setState(() {
-        final ChatMessage previous = _messages[idx];
-        if (previous.text.trim().isEmpty) {
-          _messages[idx] = ChatMessage(
-            messageId: previous.messageId,
-            sessionId: previous.sessionId,
-            role: previous.role,
-            text: fallbackText,
-            timestamp: previous.timestamp,
-            attachmentImageCount: previous.attachmentImageCount,
-            playUrl: previous.playUrl,
-            mediaCards: previous.mediaCards,
-            renderBlocks: previous.renderBlocks,
-            pendingMediaCards: previous.pendingMediaCards,
-            streaming: false,
-          );
-        }
-      });
-    } else if ((wasProcessing || userMessageId != null) &&
-        lastBubbleOfTrace == null) {
-      // 新语义：流式期间 chunk 没进列表，超时分支是 agent 文本能进列表的唯一入口。
-      // 优先用 _pendingAssistantChunkText 里已经缓冲到的部分流式片段作为兜底文
-      // 本；如果缓冲是空的（连一个 chunk 都没收到），才用纯兜底文案。
-      final String timeoutText =
-          buffered.isNotEmpty ? "$buffered\n\n⚠️ 后续内容超时未到，已截断。" : fallbackText;
-      final ChatMessage timeoutMessage = ChatMessage(
-        messageId: assistantMessageId,
-        sessionId: ApiConfig.effectiveActorId,
-        role: "assistant",
-        text: timeoutText,
-        timestamp: DateTime.now(),
-      );
-      setState(() {
-        _messages.add(timeoutMessage);
-        _assistantMessageIndexById[assistantMessageId] = _messages.length - 1;
-      });
-      unawaited(_store.saveMessage(timeoutMessage));
-    }
     _takePendingAssistantChunkText();
     _clearAgentProcessingState();
-    _disarmAgentReplyWatchdog();
-    if (showSnackBar && wasProcessing) {
-      ScaffoldMessenger.maybeOf(context)?.showSnackBar(
-        const SnackBar(content: Text("Agent 回复超时，请检查网络或稍后重试")),
-      );
-    }
   }
 
   void _updateAgentStatusLine(
@@ -3620,7 +3585,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void _sendSessionInit() {
     final Map<String, dynamic> sessionInit = <String, dynamic>{
       "sessionId": ApiConfig.sessionId,
-      "deviceId": "local-device",
+      "deviceId": InstallIdentity.instance.cachedInstallId ?? "local-device",
       "userAlias": "owner",
       // 共用浏览器桥：本连接即浏览器执行器（Agent 与用户共用 WebView2）
       "browserBridge": true,
@@ -3674,7 +3639,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       }
       return;
     }
-    final String effectiveText = text ?? _inputController.text.trim();
+    // 挂了技能时：输入框内容作为技能参数，拼上技能指令一起发；
+    // 需要补参数的技能空着就不发，焦点留在输入框。
+    final ComposerSkill? skill =
+        (text == null && !isRetry) ? _composerSkill : null;
+    if (skill != null &&
+        skill.detailRequired &&
+        _inputController.text.trim().isEmpty) {
+      _inputFocusNode.requestFocus();
+      return;
+    }
+    final String effectiveText = skill == null
+        ? (text ?? _inputController.text.trim())
+        : skill.compose(_inputController.text);
+    if (skill != null) setState(() => _composerSkill = null);
 
     List<VisionWireFrame>? attachmentFrames;
     if (_pendingGalleryFrames.isNotEmpty) {
@@ -4071,7 +4049,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 常用工具「浏览器」入口：打开用户与 Agent 共用的内嵌浏览器面板。
+  /// 幂等：面板已开时直接返回（避免重复保存 _previousSplitRatio，
+  /// 关面板时会恢复到错误的原始比例）。
   void _openBrowserPanel() {
+    if (_tabIndex == 0 && _rightPanel == RightPanelKind.browser) return;
     setState(() {
       _tabIndex = 0;
       _rightPanel = RightPanelKind.browser;
@@ -4081,6 +4062,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _previousRightPanelWidth = _rightPanelWidth;
       _splitRatio = RightPanelKind.browser.defaultSplitRatio;
     });
+  }
+
+  /// 浏览器承载的工具族：真实操作直接发生在共用内置浏览器里。
+  /// 2026-10-28 用户明确：这些工具调用**不在主界面渲染「进行时」卡片**，
+  /// 直接打开内置浏览器面板展示真实操作。
+  bool _isBrowserRenderedTool(String tool) {
+    const List<String> prefixes = <String>[
+      "shared_browser",
+      "agent_browser",
+      "browser.",
+      "browser_",
+      "shopping.compare",
+      "shopping.order",
+      "shopping.pay",
+    ];
+    for (final String p in prefixes) {
+      if (tool.startsWith(p)) return true;
+    }
+    return false;
   }
 
   /// Agent 主页入口：光球头像单击 / 右侧面板动态区 → 与日程/消息一致，
@@ -4665,11 +4665,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       );
     };
     c.sendContactFeedbackViaWs = sendContactFeedbackViaWsBridge;
-    // 前台轮次 watchdog：时序在 ChatTurnController，超时收尾动作留在本 State。
-    ChatTurnController.instance.onTimeout =
-        ({bool showSnackBar = true}) => _handleAgentReplyTimeout(
-              showSnackBar: showSnackBar,
-            );
+    // 前台轮次 watchdog 已移除（2026-10-28 用户明确：操作不设时间上限），
+    // 轮次收尾由 chat.assistant_done / error.event / 断线确定性驱动。
   }
 
   /// App 生命周期（手机后台时主动消息走系统通知，类微信常在线提醒）
@@ -5129,37 +5126,50 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 启动版本检查（Windows 桌面安装形态）：拉服务端 client manifest 与本地版本
   /// 比对。强制锁/软提醒均只在明确拿到清单时触发，接口失败静默放行（fail-open，
-  /// 服务器不可达不能把用户锁在门外）。顺带把 channel 持久化到本地偏好，为后期
-  /// 收回 runtime（byok → platform 统一 API 服务）留好状态位。
+  /// 服务器不可达不能把用户锁在门外）。清单里的 channel 同时落盘，下次启动据此
+  /// 决定是否拉起本机 runtime（byok → platform 即收回 runtime）。
+  ///
+  /// 2026-10-28 起对齐主流（VS Code/Chrome）：可选升级启动时不再弹模态，
+  /// 显示即后台静默预下载 + 左下角胶囊（下完一键「重启更新」）；仅低于
+  /// minVersion 的强锁仍走不可关闭弹窗截停。
   Future<void> _checkClientUpdateAtStartup() async {
     if (kIsWeb || !Platform.isWindows) return;
     final ClientUpdateCheckResult? result = await checkClientUpdate();
     if (result == null || !mounted) return;
-    unawaited(
-      _store.savePreference("client.channel", result.manifest.channel),
-    );
+    unawaited(InstallIdentity.instance.saveChannel(result.manifest.channel));
     if (result.status == ClientUpdateStatus.upToDate) return;
+    if (result.status == ClientUpdateStatus.optionalUpdate) {
+      // 主流式：后台预下载 + 左下角胶囊，不打断启动流程
+      _islandNotifiedVersions.add(result.manifest.latest);
+      UpdateCornerToast.showUpdate(
+        latestVersion: result.manifest.latest,
+        downloadUrl: result.manifest.url,
+      );
+      return;
+    }
     final BuildContext? ctx = _rootNavigatorKey.currentContext;
     if (ctx == null || !ctx.mounted) return;
     await showClientUpdateDialog(
       context: ctx,
       manifest: result.manifest,
       localVersion: result.localVersion,
-      forced: result.status == ClientUpdateStatus.forcedUpdate,
+      forced: true,
     );
   }
 
   /// 运行中更新感知（2026-10-21 起改为服务端推送，不再轮询）：服务端清单变化或
   /// 用户上线补推时沿 wss 下发 update.available，这里按启动检查同款语义分流——
-  /// 可选升级只上灵动岛简短提示（不抢焦点不打断对话，同版本进程内只提示一次）；
+  /// 可选升级上灵动岛简短提示 + 左下角更新胶囊（VS Code 式，含「立即更新/
+  /// 重启更新」应用内升级入口；不抢焦点不打断对话，同版本进程内只提示一次）；
   /// 强制升级（minVersion 之下）走启动同款弹窗；已最新则撤下岛上的可升级提示
-  /// （用户在别处完成升级后，下次任何推送都会把过期提示撤掉）。
+  /// 与左下角胶囊（用户在别处完成升级后，下次任何推送都会把过期提示撤掉）。
   final Set<String> _islandNotifiedVersions = <String>{};
 
   Future<void> _handleUpdateAvailablePush(Map<String, dynamic> manifestJson) async {
     if (kIsWeb || !Platform.isWindows || kDebugMode) return;
     if (manifestJson.isEmpty) return;
     final manifest = ClientManifest.fromJson(manifestJson);
+    unawaited(InstallIdentity.instance.saveChannel(manifest.channel));
     String local;
     try {
       local = (await PackageInfo.fromPlatform()).version;
@@ -5169,6 +5179,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final ClientUpdateStatus status = classifyUpdate(local, manifest);
     if (status == ClientUpdateStatus.upToDate) {
       DynamicIslandController.instance.dismiss('update.available');
+      UpdateCornerToast.dismiss();
       return;
     }
     if (status == ClientUpdateStatus.optionalUpdate) {
@@ -5177,9 +5188,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         id: 'update.available',
         title: '新版本 ${manifest.latest} 可升级',
         kind: IslandKind.update,
-        trailing: '侧栏可更新',
+        trailing: '左下角可更新',
         priority: 2,
       ));
+      UpdateCornerToast.showUpdate(
+        latestVersion: manifest.latest,
+        downloadUrl: manifest.url,
+      );
       return;
     }
     final BuildContext? ctx = _rootNavigatorKey.currentContext;
@@ -5596,9 +5611,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           // 玻璃态通知卡挂在 navigator 之上：任意路由上方均可弹出，
           // 关闭后及时移除 BackdropFilter 层避免常驻模糊开销。
           // 「检查更新」结果浮卡同层锚定在侧栏更新按钮正上方。
+          // 左下角更新胶囊（VS Code 式）同层锚定窗口左下角。
           // （灵动岛已移至桌面顶部原生窗口，不再挂在 builder 层。）
-          builder: (BuildContext context, Widget? child) =>
-              GlassNotifyHost(child: UpdateResultCardHost(child: child)),
+          builder: (BuildContext context, Widget? child) => GlassNotifyHost(
+            child: UpdateResultCardHost(
+              child: UpdateCornerToastHost(child: child),
+            ),
+          ),
           home: Builder(
             builder: (BuildContext context) {
               return Scaffold(
@@ -6441,10 +6460,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       case RightPanelKind.browser:
         // 用户与 Agent 共用的内嵌浏览器（WebView2 进程级单例，页面常驻）；
-        // 主页「试试让 Agent」chips 把任务文本直接发进对话
+        // 主页「试试让 Agent」chips 把技能挂到输入框，参数由用户补
         return BrowserPage(
           embedded: true,
-          onAgentTask: (String task) => _sendMessage(text: task),
+          onUseSkill: _useComposerSkill,
         );
       case RightPanelKind.catalog:
         // 能力面板：CatalogPage 自带 AppBar（页面自治，不依赖面板顶栏标题）
@@ -6541,6 +6560,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           (_currentToolName?.trim().isEmpty ?? true) &&
           _taskPlaneState.isEmpty,
       localStore: _store,
+      composerSkill: _composerSkill,
+      onClearComposerSkill: () => setState(() => _composerSkill = null),
     );
   }
 

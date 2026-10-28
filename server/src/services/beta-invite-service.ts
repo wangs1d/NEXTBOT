@@ -39,7 +39,7 @@ const CODE_PATTERN = /^[A-Z0-9-]{4,32}$/;
  * 内测自助通道（运营审批制，替代挨个收邮箱）：
  *
  * - BetaWaitlistService 候补队列：用户在登录页自己填邮箱排队，运营在后台
- *   看到队列后批量「通过/拒绝」；通过 = 加入注册白名单。
+ *   看到队列后批量「通过/拒绝/删除」；通过 = 加入注册白名单，删除 = 整行出队。
  * - BetaInviteService 邀请码：群里发一个码，用户在登录页填码自助过闸；
  *   支持每码限次与停用，码泄露即换。
  *
@@ -104,6 +104,24 @@ export class BetaWaitlistService {
     }
     if (decided.length) await this.persist(requests);
     return decided;
+  }
+
+  /**
+   * 批量删除队列行（清理冒烟测试数据用）；返回受影响的邮箱。
+   * 只动队列本身：白名单成员与已注册账号不受影响，被删的邮箱之后可重新申请。
+   */
+  async remove(emails: string[]): Promise<string[]> {
+    const targets = new Set(emails.map((e) => BetaWhitelistService.normalize(e)));
+    const requests = await this.list();
+    const removed: string[] = [];
+    const kept = requests.filter((r) => {
+      const key = BetaWhitelistService.normalize(r.email);
+      if (!targets.has(key)) return true;
+      removed.push(key);
+      return false;
+    });
+    if (removed.length) await this.persist(kept);
+    return removed;
   }
 
   private async persist(requests: BetaWaitlistRequest[]): Promise<void> {

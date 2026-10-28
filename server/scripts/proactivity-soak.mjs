@@ -80,7 +80,6 @@ const { FrequencyGovernor } = await import("../src/proactivity/frequency-governo
 const { ProactivityHub } = await import("../src/proactivity/proactivity-hub.js");
 const { CostCalibrator } = await import("../src/proactivity/cost-calibrator.js");
 const { ProposalStore } = await import("../src/proactivity/proposal-store.js");
-const { renderProactiveText } = await import("../src/proactivity/voice-templates.js");
 
 const ACTOR = "soak-user";
 const dataDir = mkdtempSync(join(tmpdir(), "proactivity-soak-"));
@@ -374,7 +373,8 @@ const hub = new ProactivityHub({
       dedupKey: `sig:${signal.kind}:${String(signal.summary).slice(0, 40)}`,
       title: signal.title,
       summary: signal.summary,
-      directText: renderProactiveText(signal.kind, { title: signal.title, summary: signal.summary }),
+      // 话术模板 2026-10-27 已删：soak 只压测管道吞吐，用占位正文（不落真实用户）
+      directText: "（soak 压测占位正文）",
       evidence: [`source=${signal.source}`, "hub-llm-speak"],
       createdAt: virtual.now,
       source: `hub:${signal.source}`,

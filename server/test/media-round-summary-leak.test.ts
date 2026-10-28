@@ -135,6 +135,10 @@ test("briefPoints 不再吃 markdown 图片/链接行（不产生 !alt(url) 垃�
     );
     assert.ok(!point.text.startsWith("http"), `要点不应是裸 URL: ${point.text}`);
   }
+  // 卡内是全文：标题行（导语）也算正文的一部分，不因与卡标题重复被删
+  assert.equal(summary!.detailContent, content.trim());
+  assert.ok(summary!.detailContent.startsWith("# 马尔代夫图集"));
+  assert.ok(summary!.detailContent.includes("第二条纯文字要点"));
 });
 
 test("extractContentSummaryCard: 块摘出为结构化卡，文本通道不再携带 JSON", () => {

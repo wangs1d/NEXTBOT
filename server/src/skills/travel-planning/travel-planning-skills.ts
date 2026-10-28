@@ -626,7 +626,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       version: "1.0.0",
       displayName: "目的地种草候选（规划前选择卡）",
       description:
-        "规划前给用户出「种草选择卡」：景点/住宿/美食三类候选按评分取前列，每条带实拍图（本地媒体库缓存，未命中自动抓取）与推荐度（评分换算）。" +
+        "规划前给用户出「种草选择卡」：景点/住宿/美食三类候选，条数按游玩天数动态（每天 2 条 + 4 条多元化冗余位，1~6 天及以上对应 6~16 条），景点段热门优先置顶、尾部只补 ≤4 条小众分散项（按商圈与位置错开的好玩但没那么热门的选项），住宿/美食按评分取前列，每条带实拍图（本地媒体库缓存，未命中自动抓取）与推荐度（评分换算）。" +
+        "候选已按用户画像个性化（收藏置顶、「不感兴趣」负反馈降权、出片/体验向加分），不同用户看到的不一样的榜单。" +
         "【规划前第一卡】用户表达开放出行意图（「我想去大理玩」「想去成都耍」这类没带具体清单的想法）时必须先调本工具，不要直接生成行程——把候选整理成可勾选的种草选择卡（系统自动附卡），用户确认后再调 travel.plan-itinerary。用户已点名具体清单（「去大理玩洱海和喜洲」）或明确要求直接出行程时才跳过本工具。" +
         "用户选定后：选中的景点传 travel.plan-itinerary 的 wishlist、餐厅传 foodWishlist、住宿传 stayWishlist，再生成正式行程。" +
         "用户不想挑就按返回数组的既有顺序代选并说明一句，不要反复追问。候选与实拍图来自真实地点库与图库抓取，不是榜单编造；每行的 metrics 只放真实取到的数（评分/报价/距离），拿不到就没有这条。",
@@ -635,7 +636,8 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       icon: "🌿",
       parameters: [
         { name: "destination", type: "string", required: true, description: "目的地名称（如 大理/成都）" },
-        { name: "perCategory", type: "number", required: false, description: "每类返回条数（默认 6，3~8）" },
+        { name: "days", type: "number", required: false, description: "游玩天数（用户说了几天就传几；没说就不传，按 3 天算）。决定候选条数：每天 2 条 + 4 条冗余" },
+        { name: "perCategory", type: "number", required: false, description: "每类条数显式覆盖（默认不传，按天数动态 6~16；用户明确要多挑/少挑时才传）" },
         {
           name: "hotelFocus",
           type: "string",
@@ -648,30 +650,42 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       outputSchema: {
         ok: "是否成功",
         destination: "目的地",
-        view: "景点候选 [{name,address,tags,latitude,longitude,photos[],intro,metrics[{kind,label,source}],pricePending,priceNote}]",
+        view: "景点候选（条数按天数动态：每天 2 条 + 4 条冗余；热门优先置顶，尾部 ≤4 条小众分散项） [{name,address,tags,latitude,longitude,photos[],intro,metrics[{kind,label,source}],pricePending,priceNote}]",
         stay: "住宿候选（metrics 含「离锚点多远」，锚点见 stayAnchor）",
         food: "美食候选",
         stayAnchor: "住宿落位参照点 {id,label,why,latitude,longitude}，没取到可信参照点则为 null",
-        sortNotes: "各段排序依据文案 {view,stay,food}（只描述实际参与排序的信号）",
+        sortNotes: "各段排序依据文案 {view,stay,food}（只描述实际参与排序的信号，view 含小众补位数）",
         fromCache: "POI 是否命中缓存",
       },
       permissions: ["network:external"],
       timeoutMs: 120_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
       const destination = typeof input.destination === "string" ? input.destination.trim() : "";
       if (!destination) {
         return { ok: false, error: "缺少必填参数 destination" };
       }
       try {
-        const per = Number(input.perCategory) || 6;
+        const per = Number(input.perCategory) || 0;
+        const days = Number(input.days) > 0 ? Number(input.days) : undefined;
         const focusRaw = typeof input.hotelFocus === "string" ? input.hotelFocus.trim() : "";
         const hotelFocus = (["seaside", "airport", "station", "attraction", "downtown"] as const)
           .find((f) => f === focusRaw);
+        // 画像静默注入（与 plan-itinerary 同源）：负反馈降权、出片/体验向加分，
+        // 让「选一选」按用户情况个性化；查不到画像就不传，卡面退回热门序。
+        const profileHints = getUserTravelProfile?.(execContext?.sessionId);
         const g = await travelPlanningService.buildDestinationGuide(destination, per, {
+          ...(days ? { days } : {}),
           ...(hotelFocus ? { hotelFocus } : {}),
           ...(hotelFocus && typeof input.hotelFocusRef === "string"
             ? { hotelFocusRef: input.hotelFocusRef.trim() }
+            : {}),
+          ...(profileHints &&
+          (profileHints.photoDriven ||
+            profileHints.experienceDriven ||
+            (profileHints.dislikeTags?.length ?? 0) > 0 ||
+            (profileHints.dislikeNames?.length ?? 0) > 0)
+            ? { profileHints }
             : {}),
         });
         return {
