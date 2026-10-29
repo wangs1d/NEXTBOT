@@ -211,9 +211,19 @@ export class SimulatedRestaurantProvider extends SimulatedLocalProviderBase impl
       if (keyword && !r.name.includes(keyword) && !r.cuisine.includes(keyword)) return false;
       return true;
     });
-    const pool = matched.length > 0 ? matched : SIMULATED_RESTAURANTS;
+    // 过滤不中就返回空：把全量样例当结果回吐，会让「自助餐」拿到四家非自助店
+    if (matched.length === 0) {
+      const wanted = [cuisine, keyword].filter(Boolean).join("「」「");
+      return {
+        ok: true,
+        options: [],
+        note:
+          `模拟库（BOOKING_MODE=mock，仅 ${SIMULATED_RESTAURANTS.length} 家样例）里没有匹配「${wanted}」的餐厅。` +
+          "这不是「附近没有」，是数据源本身没有——请如实告知用户当前未接真实门店数据。",
+      };
+    }
 
-    const options: BookingOption[] = pool.slice(0, 4).map((r) => ({
+    const options: BookingOption[] = matched.slice(0, 4).map((r) => ({
       id: r.id,
       provider: this.key,
       title: `${r.name} · ${r.cuisine} · 人均 ¥${r.perCapita}`,

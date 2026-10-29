@@ -11,6 +11,7 @@
  *   RIDE_AMAP_ENTERPRISE_BASE_URL   高德打车企业版 open API base（企业资质开通后
  *                                   配置；不配则仅支持估价，下单返回明确错误）
  *   RIDE_AMAP_ENTERPRISE_TOKEN      高德打车企业版鉴权 token
+ *   RESTAURANT_POI_CACHE_TTL_MS     餐厅真实 POI 检索缓存 TTL（默认 7 天）
  */
 
 export interface BookingConfig {
@@ -23,6 +24,10 @@ export interface BookingConfig {
   confirmationTtlMs: number;
   /** 高德 Web 服务 key（估价用；缺省回退 AMAP_WEB_KEY） */
   rideAmapWebKey: string;
+  /** 高德 Web 服务 key（餐厅真实 POI 检索用；与 ride 同源，独立命名便于分开授权） */
+  amapWebKey: string;
+  /** 餐厅 POI 检索缓存 TTL（毫秒） */
+  restaurantPoiCacheTtlMs: number;
   /** 高德打车企业版 base URL（空 = 未接入真实下单） */
   rideAmapEnterpriseBaseUrl: string;
   rideAmapEnterpriseToken: string;
@@ -50,6 +55,8 @@ export function getBookingConfig(env: NodeJS.ProcessEnv = process.env): BookingC
     dailyBudgetCny: parseNonNegativeInt(env.BOOKING_DAILY_BUDGET_CNY, 500),
     confirmationTtlMs: parsePositiveInt(env.BOOKING_CONFIRMATION_TTL_MS, 300_000),
     rideAmapWebKey: env.RIDE_AMAP_WEB_KEY?.trim() || env.AMAP_WEB_KEY?.trim() || "",
+    amapWebKey: env.AMAP_WEB_KEY?.trim() || env.RIDE_AMAP_WEB_KEY?.trim() || "",
+    restaurantPoiCacheTtlMs: parsePositiveInt(env.RESTAURANT_POI_CACHE_TTL_MS, 7 * 24 * 60 * 60 * 1000),
     rideAmapEnterpriseBaseUrl: env.RIDE_AMAP_ENTERPRISE_BASE_URL?.trim() || "",
     rideAmapEnterpriseToken: env.RIDE_AMAP_ENTERPRISE_TOKEN?.trim() || "",
   };

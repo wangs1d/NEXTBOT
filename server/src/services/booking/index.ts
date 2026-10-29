@@ -31,3 +31,4 @@ export {
   HOME_SERVICE_TYPES,
 } from "./providers/simulated-local-providers.js";
 export { AmapRideProvider } from "./providers/amap-ride-provider.js";
+export { AmapRestaurantProvider } from "./providers/amap-restaurant-provider.js";

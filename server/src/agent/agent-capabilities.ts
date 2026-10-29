@@ -420,12 +420,12 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "restaurant_booking",
       lines: [
         "🍽️ 餐厅预订（统一预订抽象层）：",
-        "   - restaurant.search（搜餐厅）：菜系/人均/时段；客户端定位时优先附近推荐；可结合用户饮食偏好过滤",
+        "   - restaurant.search（搜餐厅）：菜系/关键词/人数/时段；配了 AMAP_WEB_KEY 即走高德真实门店（有定位按距离升序，只有 city 走城市检索），结果含距离/评分/人均/地址/电话，平台没给的字段留空不要补",
         "   - restaurant.book（订座）：两阶段确认，摘要含餐厅/人数/时间/预估消费",
         "   - restaurant.status（状态）：订座状态查询；不传 orderId 返回最近订单",
         "   - restaurant.cancel（取消）：两阶段确认取消",
-        "   - Provider：BOOKING_MODE=mock（默认）为模拟餐厅（simulated=true，必须如实告知）；真实平台（大众点评/美团/OpenTable）实现 BookingProvider 接口后即可接入",
-        "   - 与 meituan.create_order（外卖跑腿）/ travel.search-poi（旅行 POI 探索）的区别：本工具为到店订座",
+        "   - Provider：restaurant.search 默认命中高德真实门店（provider=amap，simulated=false，无占座通道——把 extra.tel 给用户致电，别声称订到位）；模拟库（provider=simulated，simulated=true，仅 4 家样例）只有走它才支持 book/cancel 全流程演练",
+        "   - 与 meituan.create_order（外卖跑腿）/ travel.search-poi（旅行 POI 探索）的区别：本工具为到店用餐",
       ],
     },
     {

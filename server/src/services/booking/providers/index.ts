@@ -14,6 +14,7 @@ import type { QuoteAggregator } from "../quote/index.js";
 import type { McpClientService } from "../../mcp-client-service.js";
 import { SimulatedRideProvider } from "./simulated-ride-provider.js";
 import { SimulatedHomeServiceProvider, SimulatedRestaurantProvider } from "./simulated-local-providers.js";
+import { AmapRestaurantProvider } from "./amap-restaurant-provider.js";
 import { AmapRideProvider } from "./amap-ride-provider.js";
 import { DidiMcpRideProvider } from "./didi-mcp-ride-provider.js";
 import { TravelTicketProvider } from "./travel-ticket-provider.js";
@@ -29,11 +30,15 @@ export function buildDefaultBookingProviders(
     const didi = new DidiMcpRideProvider(deps.mcpClient);
     if (didi.availability().ok) ridePreferred.push(didi);
   }
+  // 餐厅读链路走真实门店（配了 AMAP_WEB_KEY 即生效，与 BOOKING_MODE 无关）：
+  // 「附近有什么好吃的」给假数据比给空结果更糟。占座仍只有模拟链路，排在它后面。
+  const amapRestaurant = new AmapRestaurantProvider(config);
   if (config.mode === "mock") {
     return [
       ...ridePreferred,
       new SimulatedRideProvider(),
       new SimulatedHomeServiceProvider(),
+      ...(amapRestaurant.availability().ok ? [amapRestaurant] : []),
       new SimulatedRestaurantProvider(),
       // travel 域在 mock 模式也注册：本 provider 的 book 只建「待支付」订单，
       // 真实扣款必须经用户本人支付宝钱包授权（booking.travel-pay），无静默扣款风险
@@ -42,6 +47,7 @@ export function buildDefaultBookingProviders(
   }
   const providers: BookingProvider[] = [
     ...ridePreferred,
+    ...(amapRestaurant.availability().ok ? [amapRestaurant] : []),
     new TravelTicketProvider({ quoteAggregator: deps.quoteAggregator ?? null }),
   ];
   if (config.rideAmapWebKey) {
@@ -51,3 +57,4 @@ export function buildDefaultBookingProviders(
 }
 
 export { TravelTicketProvider } from "./travel-ticket-provider.js";
+export { AmapRestaurantProvider } from "./amap-restaurant-provider.js";

@@ -10,9 +10,10 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - restaurant.cancel   两阶段确认取消
  *
  * 走统一预订抽象层 services/booking/（方案 A）。Provider 现状：
- *   - BOOKING_MODE=mock（默认）：模拟 Provider（simulated=true，须如实告知）
- *   - live：真实 Provider（大众点评/美团 API 国内、OpenTable 国际）尚未接入——
- *     实现 BookingProvider 接口后在 services/booking/providers/index.ts 注册即可
+ *   - amap：高德真实门店检索（配了 AMAP_WEB_KEY 即生效，与 BOOKING_MODE 无关），
+ *     只有读能力——高德侧没有占座通道，book 返回明确错误并给出门店电话
+ *   - simulated：BOOKING_MODE=mock 时注册的 4 家样例餐厅（simulated=true，须如实
+ *     告知），支持 search → book → status → cancel 全流程演练
  *
  * 与相近能力的边界：
  *   - meituan.create_order / shopping.order.place：外卖/生鲜购物，非到店订座
@@ -24,19 +25,21 @@ export const RESTAURANT_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "restaurant.search",
       description:
-        "搜索可预订餐厅（菜系/人均/时段），供订座选择。位置联动：客户端上报定位时优先推荐附近餐厅。\n" +
-        "适用场景：「帮我订今晚 7 点 4 个人的位子」「附近有什么好吃的江浙菜」。\n" +
+        "搜索餐厅（关键词/菜系/人数/时段），供选店。\n" +
+        "默认走高德真实门店检索：有定位时按距离升序返回附近门店，只给 city 则按城市检索；" +
+        "每条含距离/评分/人均/地址/电话，平台没给的字段就是空——留空转述，不要估算补齐。\n" +
+        "适用场景：「帮我订今晚 7 点 4 个人的位子」「附近有什么好吃的江浙菜」「推荐附近的美食：自助餐」。\n" +
         "偏好联动：可结合用户记忆中的饮食偏好（忌口/喜好菜系）在 query/cuisine 里过滤。\n" +
-        "BOOKING_MODE=mock（默认）返回模拟餐厅（simulated=true，须如实告知用户）。",
+        "provider=simulated 时返回模拟样例（simulated=true，须如实告知），且只有该 provider 支持 book。",
       parameters: {
         type: "object",
         properties: {
-          query: { type: "string", description: "餐厅名或关键词（可选），如「外婆家」「适合商务宴请」。" },
+          query: { type: "string", description: "餐厅名或品类关键词（可选），如「外婆家」「自助餐」「适合商务宴请」。" },
           cuisine: { type: "string", description: "菜系（可选），如「江浙菜」「火锅」「日料」。" },
           covers: { type: "integer", description: "用餐人数（可选，默认 2）。" },
           dineAt: { type: "string", description: "用餐时间（可选，ISO 时间），如「2026-09-05T19:00:00+08:00」。" },
-          city: { type: "string", description: "城市（可选）。" },
-          provider: { type: "string", description: "指定 provider key（可选）。" },
+          city: { type: "string", description: "城市（可选）：拿不到定位时按城市检索，如「兴义」。" },
+          provider: { type: "string", description: "指定 provider key（可选）：amap=真实门店，simulated=模拟样例。" },
         },
         additionalProperties: false,
       },
@@ -51,7 +54,9 @@ export const RESTAURANT_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
         "① confirm=false（默认）：按 optionId 校验，返回订单摘要（餐厅/人数/时间/预估消费）+ 确认 token。LLM 须向用户复述摘要。\n" +
         "② confirm=true + confirmationToken：执行订座，返回本地订单号。\n" +
         "餐厅多为到店消费（payAtStore），预估消费为参考值；Agent 不代付。\n" +
-        "mock 模式（默认）为模拟订座（simulated=true），必须如实告知用户。\n" +
+        "真实门店（optionId 以 amap- 开头）没有占座通道，本工具会返回明确错误——" +
+        "此时把该店 extra.tel 电话给用户致电订座（无电话就建议到店/导航），不要声称已订到位。\n" +
+        "provider=simulated 为模拟订座（simulated=true），必须如实告知用户。\n" +
         "订座前必须先返回确认摘要让用户确认，得到明确同意后再带 confirm=true+token 执行。",
       parameters: {
         type: "object",

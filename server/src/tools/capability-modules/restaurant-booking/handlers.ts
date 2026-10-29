@@ -34,7 +34,7 @@ function buildParams(input: Record<string, unknown>): Record<string, unknown> {
 /** restaurant.search —— 餐厅搜索（附近推荐 + 时段）。 */
 export function createRestaurantSearchHandler(service: BookingService): ToolHandler {
   return async (input: Record<string, unknown>, context: ToolContext) => {
-    // 仅在附近推荐场景（无关键词/菜系）才请求定位，避免带关键词的搜索白等一次客户端往返
+    // 「附近」语义（无关键词/菜系）先要定位；带关键词时交给 Provider 按需索取
     const params = buildParams(input);
     const needsNearbyHint = !params.query && !params.cuisine;
     const hasLocation = Boolean(context.clientLocation)
