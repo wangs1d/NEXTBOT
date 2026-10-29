@@ -54,6 +54,7 @@ import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
+import "core/services/desk_pet_session.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
@@ -5352,6 +5353,54 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return Text(title);
   }
 
+  /// 顶栏「召唤桌宠 / 收起桌宠」：Windows 下拉起 PySide6 独立桌宠窗口。
+  Widget _buildDeskPetAction() {
+    final ColorScheme cs = Theme.of(context).colorScheme;
+    return ListenableBuilder(
+      listenable: DeskPetSession.instance,
+      builder: (BuildContext context, Widget? _) {
+        final bool summoned = DeskPetSession.instance.isSummoned;
+        final bool bootstrapping = DeskPetSession.instance.isBootstrapping;
+        return IconButton(
+          tooltip: summoned ? "收起桌宠" : "召唤桌宠",
+          visualDensity: VisualDensity.compact,
+          icon: bootstrapping
+              ? SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    color: cs.primary,
+                  ),
+                )
+              : Icon(
+                  Icons.smart_toy_outlined,
+                  size: 20,
+                  color: summoned ? cs.primary : null,
+                ),
+          onPressed: bootstrapping
+              ? null
+              : () async {
+                  if (summoned) {
+                    await DeskPetSession.instance.dismiss();
+                    return;
+                  }
+                  final bool ok = await DeskPetSession.instance.summon();
+                  if (!ok && context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      SnackBar(
+                        content: Text(
+                          DeskPetSession.instance.error ?? "桌宠召唤失败",
+                        ),
+                      ),
+                    );
+                  }
+                },
+        );
+      },
+    );
+  }
+
   /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
   Timer? _surfaceAutoHideTimer;
 
@@ -5688,6 +5737,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   elevation: 0,
                                   scrolledUnderElevation: 0,
                                   title: _buildAppBarTitle(),
+                                  actions: <Widget>[
+                                    if (DeskPetSession.isSupported)
+                                      _buildDeskPetAction(),
+                                  ],
                                   ),
                                 ),
                                 Expanded(
@@ -6382,15 +6435,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               // （面板组件内部自带完整顶栏：图片大图区）
               if (_rightPanel != RightPanelKind.imagePreview) ...<Widget>[
                 Icon(Icons.drag_indicator, size: 16, color: fgMuted),
-                const SizedBox(width: 8),
-                Text(
-                  _rightPanel == null ? "" : _rightPanelTitleText(),
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: fg,
+                // 内容详情面板的标题由正文文档头承担，chrome 不再重复
+                if (_rightPanel != RightPanelKind.contentSummary) ...<Widget>[
+                  const SizedBox(width: 8),
+                  Text(
+                    _rightPanel == null ? "" : rightPanelTitle(_rightPanel!),
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: fg,
+                    ),
                   ),
-                ),
+                ],
               ],
               const Spacer(),
               IconButton(
@@ -6404,19 +6460,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       },
     );
-  }
-
-  /// 面板顶栏标题文案。内容详情面板不展示 LLM 导语式的卡片标题
-  /// （如「王哥，我扒了一圈……」），只展示任务主体标签（如「科技新闻」）。
-  String _rightPanelTitleText() {
-    final RightPanelKind kind = _rightPanel!;
-    if (kind == RightPanelKind.contentSummary) {
-      final ContentSummaryDataV2? summary = _contentSummary;
-      return summary != null
-          ? ContentSummaryParser.taskSubject(summary)
-          : "内容详情";
-    }
-    return rightPanelTitle(kind);
   }
 
   /// 右侧面板要渲染的具体内容
@@ -6475,7 +6518,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         // 主页页体不再渲染自带 AppBar（与 GalleryPage.embedded 同约定）
         return AgentHomePage(embedded: true);
       case RightPanelKind.contentSummary:
-        // 内容详情面板：标题栏显示主体标签（见 _rightPanelTitleText），
+        // 内容详情面板：标题由正文文档头承担（chrome 不重复），
         // 正文区与弹窗共用视图；按摘要 id 建 Key，切换详情时重置滚动/书签状态
         final ContentSummaryDataV2? summary = _contentSummary;
         if (summary == null) return const SizedBox.shrink();

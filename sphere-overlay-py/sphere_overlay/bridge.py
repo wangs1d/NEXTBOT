@@ -14,7 +14,6 @@ class SphereOverlayBridge(QObject):
       - setPosition(x, y)
       - getPosition() -> {x,y}
       - setIgnoreMouseEvents(ignore, forward=True)
-      - setMenuExpanded(expanded)
       - setScheduleCollapsed(collapsed)
       - onPatch(cb) / onRoam(cb)
     """
@@ -62,10 +61,6 @@ class SphereOverlayBridge(QObject):
         保持不变；宽度归零即恢复原窗口。窗口被拖动时面板随之移动，无需位置同步。
         """
         self._host.set_attach_panel(width)
-
-    @Slot(bool)
-    def setMenuExpanded(self, expanded: bool) -> None:
-        self._host.set_menu_expanded(expanded)
 
     @Slot(bool)
     def setScheduleCollapsed(self, collapsed: bool) -> None:

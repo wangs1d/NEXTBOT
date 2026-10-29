@@ -45,10 +45,6 @@ html.embed-root #root {
   overflow: hidden;
 }
 
-.mode-overlay.mode-overlay--menu-open {
-  height: 100%;
-}
-
 .mode-embed {
   background: transparent !important;
   overflow: hidden;
@@ -103,7 +99,7 @@ html.embed-root #root {
   display: flex;
   flex-direction: row;
   align-items: stretch;
-  /* 分层渲染：整个页面默认不响应鼠标，由下面的角色/面板/菜单单独开放 */
+  /* 分层渲染：整个页面默认不响应鼠标，由下面的角色/面板单独开放 */
   pointer-events: none;
 }
 
@@ -119,15 +115,6 @@ html.embed-root #root {
 /* 无内容的附加槽位不拦截 */
 .overlay-attach-slot:empty {
   pointer-events: none;
-}
-
-.mode-overlay--menu-open {
-  display: flex;
-  flex-direction: row;
-  align-items: stretch;
-  min-width: 0;
-  min-height: 0;
-  overflow: hidden;
 }
 
 .overlay-pet-pane {

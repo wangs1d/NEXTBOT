@@ -25,6 +25,14 @@ function isGlassMaterial(name: string): boolean {
   return name.includes("玻璃");
 }
 
+/** CAD 前面那层玻璃罩的中心在 y=-4，左右封盖在 y=0 —— 用几何中心区分 */
+function isFrontGlass(geometry: THREE.BufferGeometry): boolean {
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return false;
+  return (box.min.y + box.max.y) / 2 < -2;
+}
+
 /** DG2.obj 一比一还原 — 加载 CAD 网格并套用金属/玻璃材质 */
 export function DG2RobotModel({
   modelUrl = DEFAULT_MODEL_URL,
@@ -42,6 +50,19 @@ export function DG2RobotModel({
 
   const obj = useLoader(OBJLoader, modelUrl);
   const scale = dg2Scale();
+
+  const screenMaterial = useMemo(
+    () =>
+      new THREE.MeshBasicMaterial({
+        color: 0xffffff,
+        toneMapped: false,
+        transparent: true,
+        opacity: 1,
+        depthWrite: true,
+        side: THREE.FrontSide,
+      }),
+    [],
+  );
 
   const { shellMaterial, glassMaterial } = useMemo(() => {
     const shell = new THREE.MeshPhysicalMaterial({
@@ -87,6 +108,14 @@ export function DG2RobotModel({
           ? node.material[0]?.name
           : node.material?.name) ?? "";
 
+      if (isGlassMaterial(sourceName) && !isFrontGlass(node.geometry)) {
+        // 左右侧面封盖在 CAD 里借用了玻璃材质，套上去会变成两个黑圆片
+        const steel = shellMaterial.clone();
+        shellMatsRef.current.push(steel);
+        node.material = steel;
+        return;
+      }
+
       if (isGlassMaterial(sourceName)) {
         const geo = node.geometry.clone();
         applyGlassOledUv(geo);
@@ -110,29 +139,31 @@ export function DG2RobotModel({
     const gMat = glassMatRef.current;
     for (const mesh of glassMeshesRef.current) {
       mesh.visible = opacity > 0.001;
-      if (!gMat) continue;
-      if (oledMap) {
-        // OLED 激活时曲屏就是「屏」：不能有任何金属度/高光，
-        // 否则环境反射会在屏面上打出块状亮斑，把表情盖掉
-        gMat.color.set("#020306");
-        gMat.opacity = opacity;
-        gMat.transparent = true;
-        gMat.metalness = 0;
-        gMat.roughness = 1;
-        gMat.clearcoat = 0;
-        gMat.reflectivity = 0;
-        gMat.envMapIntensity = 0;
-        gMat.depthWrite = true;
-      } else {
-        gMat.color.set(MODEL.glassColor);
-        gMat.opacity = 0.82 * opacity;
-        gMat.transparent = true;
-        gMat.metalness = MODEL.glassMetalness;
-        gMat.roughness = MODEL.glassRoughness;
-        gMat.depthWrite = opacity > 0.9;
-      }
     }
-  }, [oledMap, opacity]);
+    if (!gMat) return;
+
+    if (oledMap) {
+      // 前罩本身就是屏幕：不叠加第二层，纹理直接铺在玻璃面上
+      screenMaterial.map = oledMap;
+      screenMaterial.opacity = opacity;
+      screenMaterial.transparent = opacity < 0.999;
+      screenMaterial.needsUpdate = true;
+      for (const mesh of glassMeshesRef.current) {
+        mesh.material = screenMaterial;
+      }
+      return;
+    }
+
+    gMat.color.set(MODEL.glassColor);
+    gMat.opacity = 0.82 * opacity;
+    gMat.transparent = true;
+    gMat.metalness = MODEL.glassMetalness;
+    gMat.roughness = MODEL.glassRoughness;
+    gMat.depthWrite = opacity > 0.9;
+    for (const mesh of glassMeshesRef.current) {
+      mesh.material = gMat;
+    }
+  }, [oledMap, opacity, screenMaterial]);
 
   useFrame(({ clock }) => {
     const t = clock.elapsedTime;

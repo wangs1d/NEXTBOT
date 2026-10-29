@@ -30,7 +30,6 @@ interface UseSphereUserDragOptions {
   registerBridge?: boolean;
   api?: PublicApi;
   onTouch?: (event: SphereTouchEvent) => void;
-  onExcite?: (strength: number) => void;
   onBodyHover?: (active: boolean) => void;
   onEyeClick?: () => void;
   /** 左键拖动平移（无桌面 overlay API 时回调） */
@@ -46,7 +45,6 @@ interface UseSphereUserDragOptions {
 
 type DragMode = "pan" | "rotate";
 
-const SPIN_EXCITE_THRESHOLD = 0.35;
 const HIT_RADIUS = MODEL.bodyRadius * 1.12;
 const EYE_HIT_RADIUS = MODEL.bodyRadius * Math.sin(MODEL.screenHitHalfAngle);
 const EYE_CLICK_DRAG_PX = 10;
@@ -67,7 +65,6 @@ export function useSphereUserDrag({
   registerBridge = false,
   api,
   onTouch,
-  onExcite,
   onBodyHover,
   onEyeClick,
   onPanDelta,
@@ -197,12 +194,9 @@ export function useSphereUserDrag({
         }
       }
 
-      const spin = Math.min(1, (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.18);
-      applyScreenSignals(1, spin);
-
-      // 实时反应：旋转累计强度跨越阈值就触发一次身体晃动（带冷却限流）
+      // 右键旋转只是观察模型，屏光/晃动/台词一概不触发
     },
-    [api, applyScreenSignals, onLiveReact, onPanDelta, onSpinDelta, onTouch, userRotRef],
+    [api, onPanDelta, onSpinDelta, onTouch, userRotRef],
   );
 
   /** 直接调用 applyDragDelta（移除 RAF 节流，消除与 R3F 渲染帧不同步导致的卡顿） */
@@ -242,13 +236,6 @@ export function useSphereUserDrag({
         );
         const totalRotationDeg = (totalYawRadRef.current * 180) / Math.PI;
         const totalPitchDeg = (totalPitchRadRef.current * 180) / Math.PI;
-
-        if (spinStrength > SPIN_EXCITE_THRESHOLD) {
-          onExcite?.(0.6 + spinStrength * 0.9);
-          applyScreenSignals(0.6, spinStrength);
-        } else if (totalRotRef.current > 8) {
-          applyScreenSignals(0.45, spinStrength * 0.5);
-        }
 
         onTouch?.({ phase: "end", spinStrength, totalRotationDeg });
         releaseInfo = {
@@ -311,7 +298,7 @@ export function useSphereUserDrag({
         }
       }
     },
-    [applyDragDelta, applyScreenSignals, camera, gl.domElement, onDragRelease, onExcite, onEyeClick, onPanEnd, onTouch, raycaster],
+    [applyDragDelta, camera, gl.domElement, onDragRelease, onEyeClick, onPanEnd, onTouch, raycaster],
   );
 
   const beginDrag = useCallback(

@@ -680,12 +680,22 @@ export function useAgentBodyMotion({
     }
     pos.current.addScaledVector(vel.current, dt);
 
-    if (pos.current.x < -b) resolveBoundary("x", "left", -b);
-    else if (pos.current.x > b) resolveBoundary("x", "right", b);
     if (pos.current.y < 1.05) resolveBoundary("y", "bottom", 1.05);
     else if (pos.current.y > 2.15) resolveBoundary("y", "top", 2.15);
-    if (pos.current.z < -b) resolveBoundary("z", "back", -b);
-    else if (pos.current.z > b) resolveBoundary("z", "front", b);
+
+    if (b === 0) {
+      // 固定机位（桌宠）：X/Z 锚定原点。拖拽晃动的冲量只保留旋转反应，
+      // 不做位移——否则冲量在 0 边界上来回反弹，球会朝镜头前冲/后缩。
+      pos.current.x = 0;
+      pos.current.z = 0;
+      vel.current.x = 0;
+      vel.current.z = 0;
+    } else {
+      if (pos.current.x < -b) resolveBoundary("x", "left", -b);
+      else if (pos.current.x > b) resolveBoundary("x", "right", b);
+      if (pos.current.z < -b) resolveBoundary("z", "back", -b);
+      else if (pos.current.z > b) resolveBoundary("z", "front", b);
+    }
 
     if (api) {
       api.position.set(pos.current.x, pos.current.y, pos.current.z);

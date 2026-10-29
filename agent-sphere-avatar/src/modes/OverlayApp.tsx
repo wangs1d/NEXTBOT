@@ -4,11 +4,9 @@ import { FocusTimerPanel } from "../components/FocusTimerPanel";
 import type { EllipseShape } from "../components/HitAreaReporter";
 import { MessageList } from "../components/MessageList";
 import { OffWorkPanel } from "../components/OffWorkPanel";
-import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { SphereAgentScene } from "../components/SphereAgentScene";
 import { TaskFeed } from "../components/TaskFeed";
 import { TaskNotificationCenter } from "../components/TaskNotificationCenter";
-import type { QuickCommand } from "../constants/quick-commands";
 import { useAgentState } from "../hooks/useAgentState";
 import { useAgentWebSocket } from "../hooks/useAgentWebSocket";
 import { useAttachPanel } from "../hooks/useAttachPanel";
@@ -21,7 +19,6 @@ import { useTaskEventAccumulator } from "../hooks/useTaskEventAccumulator";
 import { useTaskEventStream } from "../hooks/useTaskEventStream";
 import { useWidgetsAgent } from "../hooks/useWidgetsAgent";
 import type { AgentMood } from "../types/agent";
-import type { SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import "../index.css";
 import "../components/overlay-panels.css";
 import "./modes.css";
@@ -68,9 +65,7 @@ function resolveAttentionTargetFromDom(source?: string) {
         ? ".task-feed"
         : source === "pet_reaction"
           ? ".overlay-pet-pane"
-          : source === "menu"
-            ? ".overlay-quick-menu"
-            : ".task-toast, .task-feed";
+          : ".task-toast, .task-feed";
   const center = readAttentionElementCenter(selector);
   if (!center) return undefined;
   return {
@@ -90,8 +85,6 @@ export function OverlayApp() {
     pushMessage,
     appendToLastMessage,
   } = useAgentState({ mood: "idle", energy: 0.55 });
-  const [menuOpen, setMenuOpen] = useState(false);
-  const menuWasOpenOnPointerDown = useRef(false);
   // 球体命中椭圆（由 Canvas 内 HitAreaReporter 投影上报）
   const [sphereHit, setSphereHit] = useState<EllipseShape | null>(null);
   const wsUrl = readQuery("ws");
@@ -160,7 +153,7 @@ export function OverlayApp() {
 
   const stableApply = useCallback((patch: Parameters<typeof apply>[0]) => apply(patch), [apply]);
 
-  const { connected, sendWake, sendChat, sendPetReaction } = useAgentWebSocket(stableApply, {
+  const { connected, sendChat, sendPetReaction } = useAgentWebSocket(stableApply, {
     wsUrl: wsUrl ?? undefined,
     sessionId: sessionId ?? undefined,
   });
@@ -282,11 +275,8 @@ export function OverlayApp() {
   useTaskEventStream({ onTaskEvent });
   const taskEvents = useMemo(() => state.taskEvents ?? [], [state.taskEvents]);
 
-  const closeMenuRef = useRef<() => void>(() => {});
-
   const handleSpeechResult = useCallback(
     (text: string) => {
-      closeMenuRef.current();
       if (connected) {
         pushMessage("user", text);
         sendChat(text);
@@ -300,34 +290,7 @@ export function OverlayApp() {
     onError: (msg) => apply({ mood: "alert", energy: 0.75, caption: msg }),
   });
 
-  const menuVisible = menuOpen || speech.listening;
-
-  const closeMenu = useCallback(() => {
-    speech.stop();
-    setMenuOpen(false);
-    window.sphereOverlay?.setMenuExpanded?.(false);
-    // 菜单关闭：恢复按命中区域动态穿透
-    window.sphereOverlay?.setForceInteractive?.(false);
-  }, [speech]);
-
-  closeMenuRef.current = closeMenu;
-
-  const openMenu = useCallback(() => {
-    setMenuOpen(true);
-    window.sphereOverlay?.setMenuExpanded?.(true);
-    // 菜单打开：整个窗口可交互
-    window.sphereOverlay?.setForceInteractive?.(true);
-  }, []);
-
-  // 托盘「设置」入口：宿主 runJavaScript 调用以打开快捷菜单
-  useEffect(() => {
-    (window as unknown as { __paiOpenMenu?: () => void }).__paiOpenMenu = openMenu;
-    return () => {
-      delete (window as unknown as { __paiOpenMenu?: () => void }).__paiOpenMenu;
-    };
-  }, [openMenu]);
-
-  const { setMouseCapture } = useOverlayPointerCapture(menuVisible);
+  const { setMouseCapture } = useOverlayPointerCapture(speech.listening);
 
   /**
    * 处理桌宠上的拖动/旋转/松手事件
@@ -336,30 +299,14 @@ export function OverlayApp() {
    */
   const handleLiveReact = useCallback(
     (intensity: number, mode: "pan" | "rotate") => {
+      // 右键旋转只观察模型，不触发晃动/台词
+      if (mode !== "pan") return;
       const now = performance.now();
       if (now - lastLiveReactAtRef.current < 120) return;
       lastLiveReactAtRef.current = now;
-      const total =
-        mode === "pan"
-          ? interactionTotalsRef.current.pan
-          : interactionTotalsRef.current.spin;
-      if (mode === "pan") {
-        interactionTotalsRef.current.pan += intensity * 20;
-        return;
-      }
-      interactionTotalsRef.current.spin += intensity * 90;
-      // 同步触发身体晃动
-      triggerVerticalShake(0.18 + intensity * 0.28, 220);
-      // 触发动态台词（节流后由 useDynamicSpeech 控制）
-      safeSpeak({
-        trigger: "spin",
-        intensity: Math.min(1, intensity + 0.12),
-        totalMagnitude: total + intensity * 10,
-        region: resolveRegion(),
-        mood: state.mood,
-      });
+      interactionTotalsRef.current.pan += intensity * 20;
     },
-    [dynamicSpeech, resolveRegion, state.mood, triggerVerticalShake],
+    [],
   );
 
   const handleDragRelease = useCallback(
@@ -384,85 +331,12 @@ export function OverlayApp() {
     [dynamicSpeech, resolveRegion, state.mood, triggerVerticalShake],
   );
 
-  const handleSphereTouch = useCallback(
-    (event: SphereTouchEvent) => {
-      if (menuVisible && event.phase === "start") {
-        closeMenu();
-        return;
-      }
-
-      if (event.phase === "start") {
-        setMouseCapture(true);
-        dragStartAtRef.current = performance.now();
-        apply({ mood: "listening", energy: 0.62, focused: true });
-        safeSpeak({
-          trigger: "tap",
-          intensity: 0.35,
-          totalMagnitude: 1,
-          region: resolveRegion(),
-          mood: state.mood,
-        });
-      }
-      // 松手的反应统一由 onDragRelease 处理
-    },
-    [apply, closeMenu, dynamicSpeech, menuVisible, resolveRegion, setMouseCapture, state.mood],
-  );
-
   const handleEyeInteraction = useCallback(
     (active: boolean) => {
-      if (menuVisible) return;
       setMouseCapture(active);
       setFocused(active);
     },
-    [menuVisible, setFocused, setMouseCapture],
-  );
-
-  const handleEyeClick = useCallback(() => {
-    if (menuVisible) return;
-    openMenu();
-  }, [menuVisible, openMenu]);
-
-  const handlePetPanePointerDown = useCallback(() => {
-    menuWasOpenOnPointerDown.current = menuVisible;
-  }, [menuVisible]);
-
-  const handlePetPanePointerUp = useCallback(() => {
-    if (menuWasOpenOnPointerDown.current) {
-      closeMenu();
-    }
-  }, [closeMenu]);
-
-  const handleCommand = useCallback(
-    (cmd: QuickCommand) => {
-      switch (cmd.action) {
-        case "wake":
-          if (connected) sendWake();
-          closeMenu();
-          break;
-        case "chat":
-          if (connected && cmd.text) {
-            pushMessage("user", cmd.text);
-            sendChat(cmd.text);
-          }
-          closeMenu();
-          break;
-        case "roam":
-          roamNowRef.current?.();
-          break;
-        case "voice":
-          if (!speech.supported) {
-            apply({ mood: "alert", energy: 0.75, caption: "不支持语音识别" });
-            break;
-          }
-          speech.start();
-          apply({ mood: "listening", energy: 0.68, caption: "请说话…" });
-          break;
-
-        default:
-          break;
-      }
-    },
-    [apply, closeMenu, connected, sendChat, sendWake, speech, sessionId, pushMessage],
+    [setFocused, setMouseCapture],
   );
 
   useEffect(() => {
@@ -576,7 +450,7 @@ export function OverlayApp() {
   }, [state.mood, state.caption, apply]);
 
   return (
-    <div className={`mode-shell mode-overlay${menuVisible ? " mode-overlay--menu-open" : ""}`}>
+    <div className="mode-shell mode-overlay">
       <EntranceAnimation />
       <div className="overlay-attach-slot" style={{ width: attach.width }}>
         {attach.panel === "focus" && (
@@ -591,19 +465,14 @@ export function OverlayApp() {
           />
         )}
       </div>
-      <div className="overlay-pet-pane"
-        onPointerDown={handlePetPanePointerDown}
-        onPointerUp={handlePetPanePointerUp}
-      >
+      <div className="overlay-pet-pane">
         <SphereAgentScene
           state={state}
           mode="overlay"
           physics={false}
           autonomous={false}
           onEyeFocus={setFocused}
-          onEyeClick={handleEyeClick}
           onEyeInteractionChange={handleEyeInteraction}
-          onUserTouch={handleSphereTouch}
           onBodyHover={setMouseCapture}
           onLiveReact={handleLiveReact}
           onDragRelease={handleDragRelease}
@@ -615,16 +484,6 @@ export function OverlayApp() {
 
       <TaskFeed events={taskEvents} />
       <TaskNotificationCenter events={taskEvents} />
-
-      <OverlayQuickMenu
-        open={menuVisible}
-        layout="side"
-        connected={connected}
-        voiceListening={speech.listening}
-        voiceInterim={speech.interim}
-        onSelect={handleCommand}
-        onClose={closeMenu}
-      />
     </div>
   );
 }

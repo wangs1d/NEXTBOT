@@ -18,7 +18,6 @@ declare global {
       /** 调整宿主窗口包围盒（悬浮组件层按可见组件收缩窗口，避免遮挡桌面） */
       /** 附加面板宽度（px）：宿主向左扩窗，面板随桌宠移动 */
       setAttachPanel?: (width: number) => void;
-      setMenuExpanded?: (expanded: boolean) => void;
       setScheduleCollapsed?: (collapsed: boolean) => void;
       /** 上报命中形状（JSON 字符串） */
       setHitAreas?: (areasJson: string) => void;

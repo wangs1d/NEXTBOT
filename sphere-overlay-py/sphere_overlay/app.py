@@ -62,7 +62,6 @@ from .win32_utils import (
 # ===== 常量 =====
 PET_WIDTH = 372
 PET_HEIGHT = 464
-MENU_WIDTH = 204
 
 SCHEDULE_WIDTH = 280
 SCHEDULE_HEIGHT_COLLAPSED = 48
@@ -122,9 +121,6 @@ WEBCHANNEL_INIT = r"""
                     if (typeof bridge.setAttachPanel === 'function') {
                         bridge.setAttachPanel(Math.max(0, Math.round(width) || 0));
                     }
-                },
-                setMenuExpanded: function (expanded) {
-                    bridge.setMenuExpanded(!!expanded);
                 },
                 setScheduleCollapsed: function (collapsed) {
                     bridge.setScheduleCollapsed(!!collapsed);
@@ -261,7 +257,6 @@ class SphereMainWindow(QMainWindow):
     def __init__(self, cfg: SphereConfig) -> None:
         super().__init__()
         self.cfg = cfg
-        self._menu_expanded = False
         self._attach_w = 0
         self._move_anim: Optional[QPropertyAnimation] = None
         self._bridge = SphereOverlayBridge(self)
@@ -311,7 +306,8 @@ class SphereMainWindow(QMainWindow):
         qwc = _load_qwebchannel_js()
         if qwc:
             page.runJavaScript(qwc)
-        page.runJavaScript(WEBCHANNEL_INIT.replace("\n", " "))
+        # 脚本内有 // 注释，压成单行会把后半段全部吞掉，必须按原样注入
+        page.runJavaScript(WEBCHANNEL_INIT)
 
     def _build_overlay_url(self) -> str:
         base = self.cfg.dev_url
@@ -357,13 +353,6 @@ class SphereMainWindow(QMainWindow):
     def set_force_interactive(self, force: bool) -> None:
         self._click_controller.set_force_interactive(force)
 
-    def open_pet_menu(self) -> None:
-        """托盘「设置」：让前端打开桌宠快捷菜单。"""
-        if self._view is not None:
-            self._view.page().runJavaScript(
-                "window.__paiOpenMenu && window.__paiOpenMenu();"
-            )
-
     def move_window_to(self, x: int, y: int, animate_ms: int = 0) -> None:
         if animate_ms <= 0:
             self.move(x, y)
@@ -404,13 +393,8 @@ class SphereMainWindow(QMainWindow):
         self._apply_width()
 
     def _apply_width(self) -> None:
-        """窗口总宽 = 球体 + 附加面板 + 快捷菜单（菜单只向右扩）。"""
-        menu_w = MENU_WIDTH if self._menu_expanded else 0
-        self.resize(PET_WIDTH + self._attach_w + menu_w, PET_HEIGHT)
-
-    def set_menu_expanded(self, expanded: bool) -> None:
-        self._menu_expanded = expanded
-        self._apply_width()
+        """窗口总宽 = 球体 + 附加面板。"""
+        self.resize(PET_WIDTH + self._attach_w, PET_HEIGHT)
 
     def set_schedule_collapsed(self, collapsed: bool) -> None:
         self.schedule_toggle_requested.emit(collapsed)
@@ -586,11 +570,6 @@ class SphereOverlayApp(QApplication):
                 lambda checked=False, t=theme: self._main_win.emit_theme(t)
             )
             skin_menu.addAction(act)
-
-        # 设置（打开桌宠快捷菜单）
-        settings_action = QAction("设置", self)
-        settings_action.triggered.connect(lambda: self._main_win.open_pet_menu())
-        menu.addAction(settings_action)
 
         menu.addSeparator()
 

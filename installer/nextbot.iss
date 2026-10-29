@@ -130,7 +130,7 @@ begin
       '内置浏览器（网页抓取、比价、行程页预览）依赖 WebView2 运行时，本机未检测到。' #13#10 #13#10 +
       '「是」= 现在从微软官方服务器安装（需联网，装到当前用户，不需管理员权限）。' +
       '「否」= 稍后自行安装，期间浏览器功能不可用，其余功能不受影响。',
-      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, [], IDNO) <> IDYES then Exit;
+      mbConfirmation, MB_YESNO, [], 0) <> IDYES then Exit;
   Bootstrapper := ExpandConstant('{tmp}\ms-edge-webview2-setup.exe');
   // 用 PowerShell 走微软官方 fwlink 下载（Inno 自身不能下载文件）
   if Exec('powershell.exe',
@@ -144,7 +144,7 @@ begin
     TaskDialogMsgBox('WebView2 运行时未安装成功',
       '可能是不联网或下载被拦截。内置浏览器需要它。' #13#10 +
       '手动安装：搜索「下载 Microsoft Edge WebView2 运行时」，从微软官网安装后重启本应用。',
-      mbInformation, MB_OK, [], IDOK);
+      mbInformation, MB_OK, [], 0);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -168,7 +168,7 @@ begin
   if TaskDialogMsgBox('是否同时删除用户数据？',
       '选择「否」将保留登录状态与本地数据，下次安装后可直接登录使用。' #13#10 +
       '选择「是」将删除登录态、API Key 与聊天记录，且不可恢复。',
-      mbConfirmation, MB_YESNO or MB_DEFBUTTON2, [], IDNO) = IDYES then
+      mbConfirmation, MB_YESNO, [], 0) = IDYES then
   begin
     DelTree(ExpandConstant('{userappdata}\Nextbot'), True, True, True);
     DelTree(ExpandConstant('{userappdata}\PrivateAgent'), True, True, True);

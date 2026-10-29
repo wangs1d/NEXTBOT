@@ -48,7 +48,7 @@ import { RoomEnvironment } from "/RoomEnvironment.js";
 const canvas = document.getElementById("c");
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, preserveDrawingBuffer: true, powerPreference: "high-performance" });
 renderer.setSize(256, 256, false);
-renderer.setPixelRatio(2);
+renderer.setPixelRatio(1);
 renderer.setClearColor(0x000000, 0);
 renderer.outputColorSpace = THREE.SRGBColorSpace;
 renderer.toneMapping = THREE.ACESFilmicToneMapping;
