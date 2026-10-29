@@ -407,7 +407,7 @@ class AgentResultPriceGroup {
 
 /// price_compare 卡：整体结构化载荷（分组报价 + 决策页入口）。
 class AgentResultPriceCompare {
-  const AgentResultPriceCompare({required this.groups, this.decisionPageUrl});
+  const AgentResultPriceCompare({required this.groups, this.bestIndex, this.decisionPageUrl});
 
   factory AgentResultPriceCompare.fromJson(Map<String, dynamic> json) =>
       AgentResultPriceCompare(
@@ -415,10 +415,15 @@ class AgentResultPriceCompare {
             .whereType<Map<String, dynamic>>()
             .map(AgentResultPriceGroup.fromJson)
             .toList(growable: false),
+        bestIndex: (json["bestIndex"] as num?)?.toInt(),
         decisionPageUrl: json["decisionPageUrl"]?.toString(),
       );
 
   final List<AgentResultPriceGroup> groups;
+
+  /// 「最低价」组下标；null = 各组规格不一致，不构成同规格比价，不打最低价章。
+  final int? bestIndex;
+
   final String? decisionPageUrl;
 }
 
@@ -666,6 +671,7 @@ class AgentResultData {
                       "offerCount": g.offerCount,
                     })
                 .toList(),
+            if (priceCompare!.bestIndex != null) "bestIndex": priceCompare!.bestIndex,
             if (priceCompare!.decisionPageUrl != null)
               "decisionPageUrl": priceCompare!.decisionPageUrl,
           },

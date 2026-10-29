@@ -139,10 +139,14 @@ export class ShoppingBrowserExecutor {
     const endpoint = this.deps.coordinator.cdpEndpoint(actorId);
     const connected = await this.deps.gateway.connect(endpoint).catch(() => false);
     if (!connected) return null;
-    const page = await this.deps.gateway.openPage(targetUrl).catch(() => null);
-    if (!page) return null;
-    // 感知：CDP 抓取期间点亮客户端面板的「Agent 正在操作浏览器」状态条
+    // 先点亮「Agent 正在操作浏览器」→ 客户端据此打开内置浏览器面板并创建
+    // WebView2；openPage 会等面板页出现再导航（面板没开时开不了页）。
     this.deps.coordinator.notifyBrowserBusy?.(actorId, true, "页面任务");
+    const page = await this.deps.gateway.openPage(targetUrl).catch(() => null);
+    if (!page) {
+      this.deps.coordinator.notifyBrowserBusy?.(actorId, false, "");
+      return null;
+    }
     return {
       page,
       mode: "shared",

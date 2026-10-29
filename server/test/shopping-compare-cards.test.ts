@@ -205,6 +205,8 @@ function stubOrderService(
 ): ShoppingOrderService {
   return {
     listSupportedPlatforms: () => Object.keys(productsByPlatform),
+    // 测试环境没有可见浏览器：比价走无头并发路径
+    canUseVisibleBrowser: () => false,
     searchProduct: async (_ctx: unknown, platform: string) => ({
       ok: true,
       products: productsByPlatform[platform] ?? [],
@@ -278,6 +280,50 @@ test("comparePrices：onCompareResult 抛异常不影响比价回执", async () 
     const res = await service.comparePrices(makeCtx(), "Sony WH-1000XM5");
     assert.ok(res.ok);
     assert.equal((res as unknown as Record<string, unknown>).decisionPageUrl, undefined);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("comparePrices：规格冲突（2罐 vs 24瓶）→ bestIndex=null，summary 不宣称最低价", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: stubOrderService({
+        taobao: [{ title: "红牛维生素功能饮料250ml*2罐装 中国红牛", price: 21 }],
+        jd: [{ title: "红牛维生素功能饮料250ml*24瓶 整箱装", price: 118 }],
+      }),
+      dataDir,
+    });
+    const res = await service.comparePrices(makeCtx(), "红牛维生素功能饮料");
+    assert.ok(res.ok);
+    const typed = res as Extract<typeof res, { ok: true }>;
+    assert.equal(typed.groups.length, 2, "规格冲突应各自成组");
+    assert.equal(typed.bestIndex, null, "不同规格不构成同规格比价");
+    assert.ok(!typed.summary.includes("最低"), `summary 不得宣称最低价：${typed.summary}`);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("comparePrices：型号子集（写法繁简）、数量无冲突 → bestIndex=0 可比", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: stubOrderService({
+        jd: [{ title: "戴森吹风机 HD08 紫红色", price: 3199 }],
+        pdd: [{ title: "戴森吹风机 HD08 AMR07 磁吸支架", price: 3299 }],
+      }),
+      dataDir,
+    });
+    const res = await service.comparePrices(makeCtx(), "戴森吹风机 HD08");
+    assert.ok(res.ok);
+    const typed = res as Extract<typeof res, { ok: true }>;
+    assert.equal(typed.groups.length, 2, "规格集不等的写法各自成组");
+    assert.equal(typed.bestIndex, 0, "数量规格一致、型号互为子集 → 最低价可标");
+    assert.ok(typed.summary.includes("最低 ¥3199"), `summary：${typed.summary}`);
     await service.flush();
   } finally {
     await rm(dataDir, { recursive: true, force: true });

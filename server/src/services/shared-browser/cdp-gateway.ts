@@ -1,4 +1,4 @@
-import type { Browser, Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 /**
  * 共用浏览器可信输入网关（CDP 桥）。
@@ -79,6 +79,9 @@ export class SharedBrowserCdpGateway {
       await this.close();
       const { chromium } = await import("playwright");
       this.browser = await chromium.connectOverCDP(endpoint, { timeout: 5000 });
+      // 新浏览器 = 旧租约的页面已不存在，锁一并作废（重启客户端后不再白等）
+      this.panelToken = null;
+      this.panelHeldSince = 0;
       this.endpoint = endpoint;
       return true;
     } catch {
@@ -104,10 +107,37 @@ export class SharedBrowserCdpGateway {
   /** Agent 曾导航过的页面（closePage 后保留现场不关闭——「留痕」）。 */
   private readonly agentTouchedPages = new WeakSet<Page>();
 
-  /** 面板页占用队列：并发流程（多平台比价）串行使用同一个可见页，
+  /** 面板页占用锁：并发流程（多平台比价）串行使用同一个可见页，
    *  **绝不 newPage 兜底**——WebView2 下 CDP 新建 target 会生成独立原生
-   *  弹窗窗口（2026-10-25 用户实测「弹出独立浏览器界面」的根因）。 */
-  private panelChain: Promise<void> = Promise.resolve();
+   *  弹窗窗口（2026-10-25 用户实测「弹出独立浏览器界面」的根因）。
+   *  持有者死亡（工具被预算击杀、流程异常）时按 staleSince 强制接管，
+   *  否则一次丢失的租约会让后续每次开页白等 90s。 */
+  private panelToken: symbol | null = null;
+  private panelHeldSince = 0;
+  /** 租约 → 页面，closePage 据此精准释放自己那一把锁。 */
+  private readonly pageTokens = new WeakMap<Page, symbol>();
+
+  private async acquirePanelSlot(waitMs: number): Promise<symbol | null> {
+    const token = Symbol("panel-slot");
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const stale = this.panelToken !== null && Date.now() - this.panelHeldSince > 180_000;
+      if (this.panelToken === null || stale) {
+        this.panelToken = token;
+        this.panelHeldSince = Date.now();
+        return token;
+      }
+      if (Date.now() >= deadline) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  private releasePanelSlot(token: symbol | null): void {
+    if (token && this.panelToken === token) {
+      this.panelToken = null;
+      this.panelHeldSince = 0;
+    }
+  }
 
   /**
    * 在用户可见的内置浏览器里打开目标 URL。
@@ -118,32 +148,29 @@ export class SharedBrowserCdpGateway {
    * 任务结束后页面**留在现场**（不回主页不关闭——「留痕」），closePage
    * 只做队列释放。
    */
-  async openPage(url: string, opts: { timeoutMs?: number } = {}): Promise<Page | null> {
+  async openPage(
+    url: string,
+    opts: { timeoutMs?: number; waitPanelMs?: number } = {},
+  ): Promise<Page | null> {
     const timeout = opts.timeoutMs ?? 20_000;
+    // 面板就绪等待：服务端先发 shared.browser.busy，客户端收到后才创建/打开
+    // 内置浏览器面板（WebView2）。面板页出现前**不能**导航到其它 target——
+    // 光球等非面板页 URL 同样报 about:blank，导航过去用户看不见（2026-10-28
+    // 「Agent 在操作、面板停在主页」的第二根因）。
+    const waitPanelMs = opts.waitPanelMs ?? 8_000;
     // 排队：等上一个持有者释放（closePage），最多等 90s，超时放弃让调用方
     // 走 headless+Cookie 兜底（无 Cookie 时如实报不可用，不弹窗）。
-    const prev = this.panelChain;
-    let release!: () => void;
-    this.panelChain = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const gotSlot = await Promise.race([
-      prev.then(() => true),
-      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 90_000)),
-    ]);
-    if (!gotSlot) return null;
+    const token = await this.acquirePanelSlot(90_000);
+    if (!token) return null;
+    let handedOff = false;
     try {
       const browser = this.browser;
       if (!browser || !browser.isConnected()) return null;
       const context = browser.contexts()[0];
       if (!context) return null;
-      // 面板页 = 按注入标记锁定的控制器页（见 pickMarkedPanelPage 注释）；
-      // 标记不可得时才退回 URL 启发式（优先主页态，其次任意面板目标）
-      const allPages = context.pages().filter((p) => !p.isClosed());
-      const panelPage =
-        (await pickMarkedPanelPage(allPages)) ??
-        allPages.find((p) => p.url() === "about:blank") ??
-        allPages.find((p) => !p.url().includes("travel-map"));
+      // 面板页 = 按注入标记锁定的控制器页（见 pickMarkedPanelPage 注释）。
+      // 找不到就等面板出现；绝不退回未标记页——那会把导航打到用户看不见的 target。
+      const panelPage = await this.waitMarkedPanelPage(context, waitPanelMs);
       if (!panelPage) return null;
       // 弹窗拦截（每个页面只装一次）：window.open 与 target=_blank 一律改为
       // 当前页内导航，根除「独立浏览器窗口」。注意初始化函数体内不用任何
@@ -175,12 +202,32 @@ export class SharedBrowserCdpGateway {
         this.agentTouchedPages.add(panelPage);
       }
       await panelPage.goto(url, { waitUntil: "domcontentloaded", timeout });
+      this.pageTokens.set(panelPage, token);
+      handedOff = true;
       return panelPage;
     } catch {
-      release();
       return null;
+    } finally {
+      // 失败路径必须还槽位：否则锁永远被占，后续每次开页都要白等到超时
+      if (!handedOff) this.releasePanelSlot(token);
     }
     // 成功路径不 release——closePage（lease 释放时）负责；页面留痕不回主页。
+  }
+
+  /** 等面板页出现（客户端收到 busy 后才创建 WebView2），超时返回 null。 */
+  private async waitMarkedPanelPage(
+    context: BrowserContext,
+    waitMs: number,
+  ): Promise<Page | null> {
+    const deadline = Date.now() + waitMs;
+    for (;;) {
+      const marked = await pickMarkedPanelPage(
+        context.pages().filter((p) => !p.isClosed()),
+      );
+      if (marked) return marked;
+      if (Date.now() >= deadline) return null;
+      await new Promise<void>((resolve) => setTimeout(resolve, 250));
+    }
   }
 
   /**
@@ -188,8 +235,11 @@ export class SharedBrowserCdpGateway {
    * Agent 打开的页面留在面板里供用户回看；只释放面板占用队列。
    */
   async closePage(page: Page): Promise<void> {
-    void page;
-    this.panelChain = this.panelChain.then(() => {});
+    const token = this.pageTokens.get(page);
+    if (token) {
+      this.pageTokens.delete(page);
+      this.releasePanelSlot(token);
+    }
   }
 
   /** 可信点击（Playwright 定位引擎 + 真实输入事件）。 */

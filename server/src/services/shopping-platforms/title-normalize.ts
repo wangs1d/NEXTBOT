@@ -11,7 +11,7 @@ const MARKETING_WORDS_RE =
 
 /** 规格 token：容量/克重/数量/尺寸/型号（同款判定的硬依据） */
 const SPEC_TOKEN_RE =
-  /(\d+(?:\.\d+)?)\s*(ml|l|升|毫升|g|克|kg|千克|斤|两|瓦|w|英寸|寸|mah|ah|支|包|袋|瓶|箱|盒|片|粒|抽|卷|双|套)|([a-z]{1,5}\d{2,5}[a-z]?)(?=\b)/gi;
+  /(\d+(?:\.\d+)?)\s*(ml|l|升|毫升|g|克|kg|千克|斤|两|瓦|w|英寸|寸|mah|ah|支|包|袋|瓶|罐|听|箱|盒|片|粒|抽|卷|双|套)|([a-z]{1,5}\d{2,5}[a-z]?)(?=\b)/gi;
 
 /** 标题归一化：去营销噪音/符号/空白，小写 */
 export function normalizeTitle(raw: string): string {

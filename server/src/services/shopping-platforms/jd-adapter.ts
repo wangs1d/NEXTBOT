@@ -16,6 +16,8 @@ import {
  * 搜索页：https://search.jd.com/Search?keyword=<query>
  * 订单页：https://order.jd.com/center/list.action
  */
+const CARD_SELECTOR = ".gl-item, [class*='product-item'], [data-sku]";
+
 export class JdAdapter implements ShoppingPlatformAdapter {
   readonly platform = "jd";
 
@@ -34,35 +36,43 @@ export class JdAdapter implements ShoppingPlatformAdapter {
 
   async extractProducts(page: Page, limit: number): Promise<ProductSummary[]> {
     try {
-      await page.waitForSelector(".gl-item, .J_goodsList .gl-item, [class*='product-item']", {
-        timeout: 10_000,
-      }).catch(() => {});
+      await this.scrollSearchResults(page);
+      await page.waitForSelector(CARD_SELECTOR, { timeout: 10_000 }).catch(() => {});
 
-      const raw = await page.evaluate((maxLimit: number) => {
-        const seen = new Set<string>();
-        const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
-        const nodes = document.querySelectorAll(".gl-item, [class*='product-item']");
-        for (const node of Array.from(nodes)) {
-          if (out.length >= maxLimit) break;
-          const titleEl = node.querySelector(".p-name a, [class*='title'] a, .p-name") as HTMLElement | null;
-          const priceEl = node.querySelector(".p-price i, .p-price strong, [class*='price']") as HTMLElement | null;
-          const shopEl = node.querySelector(".p-shop a, [class*='shop']") as HTMLElement | null;
-          const linkEl = (node.querySelector(".p-name a, a[href*='item.jd.com']") as HTMLAnchorElement | null) ?? null;
-          const title = (titleEl?.innerText ?? titleEl?.getAttribute("title") ?? "").trim();
-          if (!title || seen.has(title)) continue;
-          seen.add(title);
-          const url = linkEl?.href ?? undefined;
-          const itemIdMatch = url?.match(/item\.jd\.com\/(\d+)/) ?? url?.match(/[?&]sku=(\d+)/);
-          out.push({
-            title,
-            price: (priceEl?.innerText ?? "").replace(/[^\d.]/g, "") || undefined,
-            url,
-            shop: (shopEl?.innerText ?? "").trim() || undefined,
-            itemId: itemIdMatch?.[1],
-          });
-        }
-        return out;
-      }, limit);
+      const raw = await page.evaluate(
+        ({ maxLimit, cardSelector }: { maxLimit: number; cardSelector: string }) => {
+          const seen = new Set<string>();
+          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
+          const nodes = document.querySelectorAll(cardSelector);
+          for (const node of Array.from(nodes)) {
+            if (out.length >= maxLimit) break;
+            const titleEl = node.querySelector(
+              "[class*='goods_title'], .p-name a, .p-name, [class*='p-name']",
+            ) as HTMLElement | null;
+            const title = (titleEl?.innerText ?? titleEl?.getAttribute("title") ?? "").trim();
+            if (!title || seen.has(title)) continue;
+            seen.add(title);
+
+            const priceEl = node.querySelector("[class*='price']") as HTMLElement | null;
+            const priceMatch = (priceEl?.innerText ?? "").match(/\d+(?:\.\d+)?/);
+
+            const sku = (node as HTMLElement).getAttribute("data-sku") ?? "";
+            const linkEl = node.querySelector("a[href*='item.jd.com']") as HTMLAnchorElement | null;
+            const url = linkEl?.href ?? (sku ? `https://item.jd.com/${sku}.html` : undefined);
+            const itemIdMatch = url?.match(/item\.jd\.com\/(\d+)/) ?? url?.match(/[?&]sku=(\d+)/);
+            const shopEl = node.querySelector("[class*='shop'], .p-shop a") as HTMLElement | null;
+            out.push({
+              title,
+              price: priceMatch?.[0],
+              url,
+              shop: (shopEl?.innerText ?? "").trim() || undefined,
+              itemId: itemIdMatch?.[1] ?? (sku || undefined),
+            });
+          }
+          return out;
+        },
+        { maxLimit: limit, cardSelector: CARD_SELECTOR },
+      );
 
       return raw.map((r) => ({
         title: r.title,
@@ -75,6 +85,12 @@ export class JdAdapter implements ShoppingPlatformAdapter {
     } catch {
       return [];
     }
+  }
+
+  private async scrollSearchResults(page: Page): Promise<void> {
+    await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight)).catch(() => {});
+    await page.waitForTimeout(600);
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
   }
 
   async navigateToCheckout(page: Page, product: ProductSummary, quantity: number): Promise<CheckoutSnapshot> {

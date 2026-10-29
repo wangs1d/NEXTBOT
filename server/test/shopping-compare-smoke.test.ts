@@ -126,6 +126,24 @@ test("groupSameProducts groups same product across platforms and separates diffe
   assert.equal(dyson!.offers[0]?.platform, "jd", "组内按价格升序，jd 3199 在前");
 });
 
+test("groupSameProducts：数量规格不一致不并组（2罐 vs 24瓶）", () => {
+  const items: TaggedProduct[] = [
+    tag("taobao", "红牛维生素功能饮料250ml*2罐装 中国红牛", 21),
+    tag("jd", "红牛维生素功能饮料250ml*24瓶 整箱装", 118),
+  ];
+  const groups = groupSameProducts(items);
+  assert.equal(groups.length, 2, `规格冲突不得归入同组：${JSON.stringify(groups.map((g) => g.specTokens))}`);
+});
+
+test("groupSameProducts：单边无规格不并组（无法验证同数量）", () => {
+  const items: TaggedProduct[] = [
+    tag("taobao", "红牛维生素功能饮料", 8),
+    tag("jd", "红牛维生素功能饮料250ml*2罐装", 21),
+  ];
+  const groups = groupSameProducts(items);
+  assert.equal(groups.length, 2, `规格无法验证宁可拆开：${JSON.stringify(groups.map((g) => g.specTokens))}`);
+});
+
 test("watch add/list/remove with platform validation and persistence", async () => {
   const dir = await mkdtemp(join(tmpdir(), "shopping-compare-"));
   try {

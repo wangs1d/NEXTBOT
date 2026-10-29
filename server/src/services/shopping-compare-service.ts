@@ -54,6 +54,8 @@ export interface CompareGroup {
   minPriceCny: number | null;
   /** 组代表图（组内首个带官方主图的报价；比价卡缩略图/决策页主图用） */
   imageUrl?: string;
+  /** 组规格 token（容量/数量/型号；跨组可比性判定用） */
+  specTokens: string[];
   offers: CompareOffer[];
 }
 
@@ -65,6 +67,11 @@ export interface CompareResult {
   searchedPlatforms: string[];
   groups: CompareGroup[];
   bestOffer: CompareOffer | null;
+  /**
+   * 「最低价」组的下标；null = 各组规格不一致（如 2 罐 vs 24 瓶），不构成同规格比价，
+   * 展示端不得打「最低价」章、文案不得宣称最低价。
+   */
+  bestIndex: number | null;
 }
 
 /** 一条降价监控 */
@@ -151,7 +158,7 @@ export interface TaggedProduct {
 
 /**
  * 把跨平台商品列表聚成同款分组。
- * 贪心：按价格升序遍历，与已有组代表比 Dice；规格 token 完全一致可加分直判 similar。
+ * 贪心：按价格升序遍历；规格 token 不一致或无法验证时不并组，其余比 Dice 达阈值并入。
  */
 export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
   const sorted = [...items].sort(
@@ -164,10 +171,17 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
     const specs = new Set(extractSpecTokens(p.title));
     let placed = false;
     for (const g of groups) {
-      let sim = diceSimilarity(g.repNorm, norm);
-      // 规格 token 一致 → 同款强信号；规格冲突 → 直接不同款
-      const specsMatch = g.repSpecs.size > 0 && specs.size > 0 && [...g.repSpecs].every((s) => specs.has(s)) && [...specs].every((s) => g.repSpecs.has(s));
-      if (specsMatch) sim = Math.max(sim, 0.7);
+      // 规格 token 必须可验证一致才可并组：两边都有但不一致 → 不同规格；
+      // 一边有一边没有 → 规格无法验证。都宁可拆开，不冒充同款比价。
+      const specsMatch =
+        g.repSpecs.size > 0 &&
+        specs.size > 0 &&
+        g.repSpecs.size === specs.size &&
+        [...g.repSpecs].every((s) => specs.has(s));
+      if (g.repSpecs.size > 0 || specs.size > 0) {
+        if (!specsMatch) continue;
+      }
+      const sim = specsMatch ? 0.7 : diceSimilarity(g.repNorm, norm);
       if (sim >= SAME_PRODUCT_DICE_THRESHOLD) {
         g.offers.push(toOffer(platform, p, fetchedAt));
         g.confidence = Math.max(g.confidence, sim);
@@ -197,6 +211,7 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
       confidence: Math.round(g.confidence * 100) / 100,
       minPriceCny: prices.length ? Math.min(...prices) : null,
       ...(repImage ? { imageUrl: repImage } : {}),
+      specTokens: [...g.repSpecs],
       offers: g.offers,
     };
   });
@@ -368,14 +383,21 @@ export class ShoppingCompareService {
   // ---- 跨平台比价（shopping.compare.prices 工具） ----
 
   /**
-   * 单平台取报价：Playwright + 已授权 Cookie 优先（无头并行），不可用时由
-   * browserExecutor 回落用户可见的内置浏览器。
+   * 单平台取报价：客户端在线时在**用户可见的内置浏览器**里真跑一遍
+   * （页面导航/翻页/读数全程可见，用户能看到 agent 在干什么），
+   * 内置浏览器不可用才回落 Playwright + 已授权 Cookie 的无头通道。
    */
   private async fetchPlatformQuotes(
     ctx: ToolContext,
     platform: string,
     query: string,
-    opts: { maxPrice?: number; sort?: "default" | "price_asc" | "price_desc" | "sales"; limit?: number } = {},
+    opts: {
+      maxPrice?: number;
+      sort?: "default" | "price_asc" | "price_desc" | "sales";
+      limit?: number;
+      /** 内置浏览器可用时占着唯一面板，必须串行取数 */
+      preferVisible?: boolean;
+    } = {},
   ): Promise<{ products: ProductSummary[]; error?: string }> {
     const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
     const res = await this.deps.shoppingOrderService.searchProduct(
@@ -387,12 +409,20 @@ export class ShoppingCompareService {
         sort: opts.sort ?? "price_asc",
         limit,
       },
-      { preferHeadless: true },
+      // 只读取数不占着工具预算等扫码：超时立刻交回登录 handoff，
+      // 用户登录后由长流程续跑。
+      { preferHeadless: opts.preferVisible !== true, loginWaitMs: 20_000 },
     );
     if (!res.ok) {
       return { products: [], error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")) };
     }
-    return { products: (res as { products?: ProductSummary[] }).products ?? [] };
+    const products = (res as { products?: ProductSummary[] }).products ?? [];
+    if (products.length === 0) {
+      // 空结果不算「查到了 0 个报价」：把原因（未登录/结构变更/无匹配）如实放进失败清单
+      const summary = String((res as { summary?: string }).summary ?? "").trim();
+      return { products: [], error: summary || "未解析到商品（页面结构可能变更）" };
+    }
+    return { products };
   }
 
   async comparePrices(
@@ -414,14 +444,32 @@ export class ShoppingCompareService {
       return { ok: false, error: `平台 ${unsupported.join("/")} 暂不支持。已实现：${supported.join("/")}` };
     }
 
-    // 并行取各平台报价（单平台失败不拖垮整体）。Playwright + 已授权 Cookie
-    // 走无头并行，不抢唯一的内置浏览器面板；无 Cookie/不可用时由执行器回落可见浏览器。
-    const settled = await Promise.allSettled(
-      requested.map(async (platform) => ({
-        platform,
-        quotes: await this.fetchPlatformQuotes(ctx, platform, q, opts),
-      })),
-    );
+    // 取各平台报价（单平台失败不拖垮整体）。
+    // 客户端在线 → 在用户可见的内置浏览器里串行跑（面板只有一个，全程可见）；
+    // 否则无头并行（Playwright + 已授权 Cookie，不抢面板）。
+    const visible = this.deps.shoppingOrderService.canUseVisibleBrowser(ctx);
+    const fetchOpts = { ...opts, preferVisible: visible };
+    const settled = visible
+      ? await (async () => {
+          const out: Array<PromiseSettledResult<{ platform: string; quotes: { products: ProductSummary[]; error?: string } }>> = [];
+          for (const platform of requested) {
+            try {
+              out.push({
+                status: "fulfilled",
+                value: { platform, quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts) },
+              });
+            } catch (reason) {
+              out.push({ status: "rejected", reason });
+            }
+          }
+          return out;
+        })()
+      : await Promise.allSettled(
+          requested.map(async (platform) => ({
+            platform,
+            quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts),
+          })),
+        );
 
     const tagged: TaggedProduct[] = [];
     const searchedPlatforms: string[] = [];
@@ -455,13 +503,33 @@ export class ShoppingCompareService {
     // 按组内最低价升序
     groups.sort((a, b) => (a.minPriceCny ?? Number.MAX_SAFE_INTEGER) - (b.minPriceCny ?? Number.MAX_SAFE_INTEGER));
 
+    // 跨组可比性：数字规格 token（数量/容量，如 2罐 vs 24瓶）必须各组完全一致，
+    // 型号 token 互为子集即可（写法繁简）；任一组无规格而他组有 → 无法验证同数量；
+    // 全部组都无规格时无从冲突，维持 Dice 归一原判。不可比只列报价，不宣称「最低价」。
+    const digitSpecs = (ts: string[]) => ts.filter((s) => /^\d/.test(s));
+    const letterSpecs = (ts: string[]) => ts.filter((s) => !/^\d/.test(s));
+    const pairComparable = (a: string[], b: string[]) =>
+      digitSpecs(a).join("|") === digitSpecs(b).join("|") &&
+      (letterSpecs(a).every((s) => letterSpecs(b).includes(s)) ||
+        letterSpecs(b).every((s) => letterSpecs(a).includes(s)));
+    const anySpec = groups.some((g) => g.specTokens.length > 0);
+    const comparable =
+      groups.length > 1 &&
+      (!anySpec ||
+        (groups.every((g) => g.specTokens.length > 0) &&
+          groups.every((g, i) =>
+            groups.every((h, j) => j >= i || pairComparable(g.specTokens, h.specTokens)),
+          )));
+    const bestIndex = comparable ? 0 : null;
+
     const bestOffer: CompareOffer | null = groups[0]?.offers[0] ?? null;
 
     // 价格历史（异步落盘，不阻塞返回）
     this.appendHistory(actorId, q, bestOffer?.platform ?? searchedPlatforms[0] ?? "", bestOffer?.priceCny ?? null);
 
     const platformSummary = searchedPlatforms.join("/");
-    const bestText = bestOffer?.priceCny != null ? `，最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
+    const bestText =
+      comparable && bestOffer?.priceCny != null ? `，同规格最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
 
     // 决策页存档（fire-and-forget：存储失败/未装配不影响比价回执）
     const fetchedAt = Date.now();
@@ -473,6 +541,7 @@ export class ShoppingCompareService {
         searchedPlatforms,
         groups,
         bestOffer,
+        bestIndex,
         fetchedAt,
       });
       if (pageId) decisionPageUrl = `/shopping/decision-page?id=${encodeURIComponent(pageId)}`;
@@ -488,6 +557,7 @@ export class ShoppingCompareService {
       searchedPlatforms,
       groups,
       bestOffer,
+      bestIndex,
       fetchedAt,
       ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };

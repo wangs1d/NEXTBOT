@@ -65,11 +65,12 @@ class PriceCompareCard extends StatelessWidget {
               ],
             ),
           ),
-          // 分组报价列表（服务端按价格升序，首组即最低价）
+          // 分组报价列表（服务端按价格升序）；仅当 bestIndex 指向该组才打
+          // 「最低价」章（各组规格不一致时 bestIndex 为 null，不冒充同规格比价）
           for (int i = 0; i < compare.groups.length; i++)
             _PriceGroupRow(
               group: compare.groups[i],
-              isBest: i == 0 && compare.groups.length > 1,
+              isBest: compare.bestIndex == i,
               cs: cs,
             ),
           // 决策页 CTA：大图 / 全部报价 / 走势一页看全

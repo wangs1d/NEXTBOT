@@ -448,10 +448,11 @@ function resolveBaseToolExecutionTimeoutMs(registryToolName: string): number {
     return Math.max(defaultMs, sandboxClamped + 2_000);
   }
   // shopping.order.* 走 Playwright 多步浏览器操作，耗时长，须独立超时不被 30s 默认截断
-  // shopping.compare.* 是「自动拆解的动态流程」：多平台并行（首位走可见面板、
-  // 其余 headless）+ 登录门可能在工具调用内等用户扫码（SHOPPING_LOGIN_WAIT_MS
-  // 默认 120s）——「停下等人」是流程的一部分，预算必须覆盖，绝不 30s 腰斩。
-  if (registryToolName === "shopping.compare.prices") return 180_000;
+  // shopping.compare.* 是「自动拆解的动态流程」：客户端在线时多平台在内置浏览器里
+  // 串行可视化操作（每平台一次完整搜索+提取），不在线时并行 headless；登录门还可能
+  // 在工具调用内等用户扫码（SHOPPING_LOGIN_WAIT_MS 默认 120s）——「停下等人」是流程
+  // 的一部分，预算必须覆盖，绝不 30s 腰斩。
+  if (registryToolName === "shopping.compare.prices") return 300_000;
   if (registryToolName === "shopping.compare.research") return 60_000;
   if (registryToolName === "shopping.compare.watch") return 60_000;
   if (registryToolName === "shopping.order.search") return 90_000;

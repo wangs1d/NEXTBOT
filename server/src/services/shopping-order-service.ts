@@ -123,7 +123,7 @@ export type ShoppingOrderResult =
       needManualPayment?: boolean;
       paymentUrl?: string;
       /** 登录等待超时/需要登录时携带二维码截图地址（供卡片渲染与 LLM 转述） */
-      loginRequired?: { platform: string; imageUrl: string };
+      loginRequired?: { platform: string; imageUrl?: string };
     };
 
 /**
@@ -145,6 +145,8 @@ export type ShoppingOrderResult =
  */
 export class ShoppingOrderService {
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
+  /** 已弹过「保存登录态」征询的站点（本进程内每站点只问一次） */
+  private readonly askedLoginConsent = new Set<string>();
   /** 定期清理过期 token + 关闭存活 Page */
   private cleanupTimer: NodeJS.Timeout | null = null;
   /** 页面获取器（内置浏览器优先 + 无头兜底）；未注入时以缺省依赖构造（单测兼容） */
@@ -171,6 +173,17 @@ export class ShoppingOrderService {
        * 未表态时经此向客户端弹征询条；缺省时跳过捕获（宁可不存）。
        */
       askSaveLoginConsent?: (actorId: string, siteId: string, siteLabel: string) => void;
+      /**
+       * 登录门超时：把「请用户登录」交给长流程 handoff（建等待步 + 页面留在登录页），
+       * 而不是把平台标成「没有数据」就收工。缺省时退回原来的纯报错。
+       */
+      onLoginRequired?: (info: {
+        actorId: string;
+        sessionId: string;
+        platform: string;
+        platformLabel: string;
+        loginUrl: string;
+      }) => void;
     },
   ) {
     this.browserExecutor =
@@ -205,6 +218,11 @@ export class ShoppingOrderService {
     return listSupportedPlatforms();
   }
 
+  /** 用户可见内置浏览器是否可用（客户端在线 + CDP 端点已上报）。 */
+  canUseVisibleBrowser(ctx: ToolContext): boolean {
+    return this.browserExecutor.canUseSharedBrowser(resolveActorId(ctx));
+  }
+
   // ============ 页面租约 + 登录门（内置浏览器优先 + 无头兜底） ============
 
   /** 平台显示名（京东/淘宝/…），未收录时回退 platform 标识。 */
@@ -225,14 +243,18 @@ export class ShoppingOrderService {
       interactiveLogin?: boolean;
       /** Playwright+Cookie 优先（比价/后台取数，防排队拖死工具预算）。 */
       preferHeadless?: boolean;
+      /** 扫码等待上限（只读取数用短等：超时立刻走登录交接，不占着工具预算干等）。 */
+      loginWaitMs?: number;
       /** 页面获取不可用时的自定义兜底（如 track 回退本地订单记录）。 */
       onUnavailable?: (err: ShoppingPageUnavailableError) => ShoppingOrderResult;
     } = {},
   ): Promise<ShoppingOrderResult> {
     const actorId = resolveActorId(ctx);
+    const tStart = Date.now();
     let cookies: ImportedBrowserCookie[] = [];
     const cookieResult = await this.getCookieAndSiteId(actorId, platform);
     if (cookieResult.ok) cookies = cookieResult.cookies;
+    const tCookies = Date.now();
 
     const interactiveLogin = opts.interactiveLogin ?? ctx.pushMediaCards != null;
     let lease: ShoppingPageLease;
@@ -250,13 +272,20 @@ export class ShoppingOrderService {
       }
       throw err;
     }
+    const tAcquire = Date.now();
 
     try {
       // 落页稳定后再过登录门（SPA/跳转需要时间）
       await lease.page.waitForTimeout(2_500).catch(() => {});
-      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl);
-      if (gate) return gate;
+      const tSettle = Date.now();
+      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl, opts.loginWaitMs);
+      const tGate = Date.now();
+      if (gate) {
+        console.log(`[shop-timing] ${platform} mode=${lease.mode} cookies=${tCookies - tStart} acquire=${tAcquire - tCookies} settle=${tSettle - tAcquire} gate=${tGate - tSettle} login=blocked`);
+        return gate;
+      }
       const result = await run(lease.page, lease.mode);
+      const tRun = Date.now();
       // 登录态捕获（一次登录一直使用）：shared=用户本人在内置浏览器的登录态（视为授权）；
       // headless=运行期平台刷新的 Cookie 回写更新（授权只升不降，不删除）。
       await this.persistLoginCookies(
@@ -266,6 +295,9 @@ export class ShoppingOrderService {
         targetUrl,
         lease.mode === "shared" ? "shared_login" : "headless_refresh",
         lease.mode === "shared" ? { agentAllowed: true } : {},
+      );
+      console.log(
+        `[shop-timing] ${platform} mode=${lease.mode} cookies=${tCookies - tStart} acquire=${tAcquire - tCookies} settle=${tSettle - tAcquire} gate=${tGate - tSettle} run=${tRun - tGate} persist=${Date.now() - tRun}`,
       );
       return result;
     } finally {
@@ -283,6 +315,7 @@ export class ShoppingOrderService {
     lease: ShoppingPageLease,
     platform: string,
     targetUrl: string,
+    loginWaitMs?: number,
   ): Promise<ShoppingOrderResult | null> {
     // 两次检测：部分平台（如京东）登录跳转由 JS 延迟触发，落页稳定后再补检一次
     let det = await detectLoginPage(platform, lease.page);
@@ -293,12 +326,13 @@ export class ShoppingOrderService {
     if (!det.isLogin) return null;
 
     const label = this.platformLabel(platform);
+    const waitMs = loginWaitMs ?? getLoginWaitMs();
     // 通用二维码推送：登录页截图 → 落盘 → 聊天卡片（best-effort）
     const imageUrl = await this.qrAssist.pushPageCard(
       ctx,
       {
         title: `请扫码登录${label}`,
-        caption: `扫码后自动继续，最长等待 ${Math.round(getLoginWaitMs() / 1000)} 秒`,
+        caption: `扫码后自动继续，最长等待 ${Math.round(waitMs / 1000)} 秒`,
       },
       lease.page,
     );
@@ -310,15 +344,28 @@ export class ShoppingOrderService {
       pushed: Boolean(imageUrl),
     });
 
-    const wait = await waitForLogin(platform, lease.page, targetUrl);
+    const wait = await waitForLogin(platform, lease.page, targetUrl, { timeoutMs: waitMs });
     if (!wait.ok) {
+      // 登录是用户本人的动作：交给长流程 handoff（页面留在登录页，等用户回执后续跑），
+      // 不再把平台就地标成「没有数据」。
+      try {
+        this.deps.onLoginRequired?.({
+          actorId: resolveActorId(ctx),
+          sessionId: ctx.sessionId,
+          platform,
+          platformLabel: label,
+          loginUrl: targetUrl,
+        });
+      } catch {
+        /* 交接是增强不是依赖：失败不影响下面的结构化失败返回 */
+      }
       return {
         ok: false,
         error:
-          `${wait.error}。请扫码登录${label}后重试` +
+          `${wait.error}。已在内置浏览器打开${label}登录页，登录完成后告诉我一声即可继续` +
           (lease.mode === "headless" && !imageUrl ? "（二维码无法呈现：客户端不在线且图片服务未装配）" : ""),
         retryable: true,
-        ...(imageUrl ? { loginRequired: { platform, imageUrl } } : {}),
+        loginRequired: { platform, imageUrl: imageUrl ?? undefined },
       };
     }
 
@@ -350,7 +397,12 @@ export class ShoppingOrderService {
     const consent = await this.deps.browserSessionService.getCaptureConsent(consentActor, platform);
     if (consent === "deny") return;
     if (consent === "ask") {
-      this.deps.askSaveLoginConsent?.(consentActor, platform, this.platformLabel(platform));
+      // 每站点每轮只弹一次征询条：重复弹出会挤掉浏览器状态条
+      const askKey = `${consentActor}|${platform}`;
+      if (!this.askedLoginConsent.has(askKey)) {
+        this.askedLoginConsent.add(askKey);
+        this.deps.askSaveLoginConsent?.(consentActor, platform, this.platformLabel(platform));
+      }
       return;
     }
     try {
@@ -374,7 +426,7 @@ export class ShoppingOrderService {
     platform: string,
     query: string,
     filters?: SearchFilters,
-    innerOpts?: { preferHeadless?: boolean },
+    innerOpts?: { preferHeadless?: boolean; loginWaitMs?: number },
   ): Promise<ShoppingOrderResult> {
     const adapter = this.requireAdapter(platform);
     if (!adapter) {
@@ -382,7 +434,11 @@ export class ShoppingOrderService {
     }
     const limit = Math.min(Math.max(filters?.limit ?? 5, 1), 10);
 
-    return this.withShoppingPage(ctx, platform, adapter.searchUrl(query, filters), async (page, mode) => {
+    return this.withShoppingPage(
+      ctx,
+      platform,
+      adapter.searchUrl(query, filters),
+      async (page, mode) => {
       try {
         const products = await adapter.extractProducts(page, limit);
 
@@ -424,7 +480,7 @@ export class ShoppingOrderService {
           retryable: /timeout|navigation/i.test(message),
         };
       }
-    }, { preferHeadless: innerOpts?.preferHeadless === true });
+    }, { preferHeadless: innerOpts?.preferHeadless === true, loginWaitMs: innerOpts?.loginWaitMs });
   }
 
   async placeOrder(
