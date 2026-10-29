@@ -50,6 +50,10 @@ export interface SummarizeOptions {
   maxLength?: number;
   briefPointCount?: number;
   forceSummary?: boolean;
+  /** 用户原话：卡面主体先按「你在问什么」推断，问句里没有才退回正文关键词 */
+  query?: string;
+  /** 决策层判定的主题：给了就用它当卡面标题，不再二次猜 */
+  subject?: string;
 }
 
 const CATEGORY_CONFIG: Record<ContentCategory, { 
@@ -377,11 +381,14 @@ function isMediaOnlyLine(line: string): boolean {
   return false;
 }
 
-/** 按内容关键词推断任务主体（如科技新闻、旅游计划） */
+/** 按内容关键词推断任务主体（如科技新闻、旅游计划）。
+ *  顺序即优先级：具体的商务/生活场景排在「科技/互联网」这类泛词之前，
+ *  否则店铺名里的「数码」会把比价结果判成科技新闻。 */
 const TASK_SUBJECT_RULES: ReadonlyArray<{ pattern: RegExp; subject: string }> = [
-  { pattern: /旅游|行程|景点|攻略|自驾|民宿|机票|签证|出境|酒店预订|自由行/, subject: "旅游计划" },
+  { pattern: /比价|报价|最低价|最便宜|多少钱|商品推荐|值得买|下单|种草|电商|购物/, subject: "购物推荐" },
+  { pattern: /旅游|旅行|游记|行程|景点|攻略|自驾|民宿|酒店|住宿|机票|签证|出境|自由行/, subject: "旅游计划" },
   { pattern: /菜谱|美食|餐厅|探店|小吃|餐饮/, subject: "美食推荐" },
-  { pattern: /科技|人工智能|AI\b|芯片|互联网|数码|发布会|大模型|机器人/, subject: "科技新闻" },
+  { pattern: /科技|人工智能|芯片|发布会|大模型|机器人/, subject: "科技新闻" },
   { pattern: /财经|股票|基金|股市|经济|央行|利率|理财/, subject: "财经资讯" },
   { pattern: /健康|医疗|养生|用药|体检/, subject: "健康资讯" },
   { pattern: /健身|运动|训练计划|减脂|增肌/, subject: "运动计划" },
@@ -389,7 +396,6 @@ const TASK_SUBJECT_RULES: ReadonlyArray<{ pattern: RegExp; subject: string }> = 
   { pattern: /育儿|亲子|宝宝|儿童/, subject: "育儿指南" },
   { pattern: /装修|家居|买房|租房|软装/, subject: "家居生活" },
   { pattern: /婚礼|婚庆|婚宴/, subject: "婚礼筹备" },
-  { pattern: /购物|商品|比价|电商|优惠|种草/, subject: "购物推荐" },
   { pattern: /日程|待办|会议|提醒|排期|周报|月报/, subject: "日程安排" },
   { pattern: /招聘|简历|面试|求职|offer/i, subject: "求职指导" },
   { pattern: /天气|气温|降水|预报|台风/, subject: "天气预报" },
@@ -403,24 +409,17 @@ const TASK_SUBJECT_RULES: ReadonlyArray<{ pattern: RegExp; subject: string }> = 
   { pattern: /新闻|头条|简报|早报|晚报|舆情|要闻/, subject: "新闻资讯" },
 ];
 
-const CATEGORY_SUBJECT_FALLBACK: Record<ContentCategory, string> = {
-  news: "新闻资讯",
-  article: "文章阅读",
-  search_result: "检索结果",
-  webpage: "网页摘录",
-  document: "文档资料",
-  code: "技术文档",
-  data: "调研报告",
-  list: "任务清单",
-  multi_section: "专题汇总",
-  table: "数据表格",
-  general: "内容详情",
-};
-
 export function inferTaskSubject(
   content: string,
-  category: ContentCategory,
+  query?: string,
 ): string {
+  const asked = query?.trim();
+  if (asked) {
+    for (const rule of TASK_SUBJECT_RULES) {
+      if (rule.pattern.test(asked)) return rule.subject;
+    }
+  }
+
   const sample = content.slice(0, 4000);
   for (const rule of TASK_SUBJECT_RULES) {
     if (rule.pattern.test(sample)) {
@@ -428,7 +427,8 @@ export function inferTaskSubject(
     }
   }
 
-  return CATEGORY_SUBJECT_FALLBACK[category];
+  // 判不出主题就不给主题：不再拿类目名（文章阅读/专题汇总…）兜底。
+  return "";
 }
 
 /** 精简区要点：直接从正文提取真实内容（实际条目/句子）作为简洁介绍——
@@ -521,6 +521,8 @@ export function createContentSummary(
     briefPointCount = 6,
     forceSummary = false,
     source,
+    query,
+    subject,
   } = options;
 
   if (!content || !content.trim()) {
@@ -547,7 +549,13 @@ export function createContentSummary(
   const config = CATEGORY_CONFIG[category];
   // 卡面标题就是内容主题（科技新闻/财经资讯…）：正文首行往往是模型的口语开场，
   // 拿来当标题只会把「王哥，我扒了一圈…」印在卡上，故不再从正文取标题。
-  const subjectLabel = inferTaskSubject(renderCleaned, category);
+  const subjectLabel = subject?.trim() || inferTaskSubject(renderCleaned, query);
+  // 主题判不出来就不出折叠卡：没有主题的折叠卡只能挂个类目名，
+  // 用户看到的是「专题汇总」这种包着一段正文的空壳。
+  if (!subjectLabel) {
+    console.log(`[ContentSummary] skipped: subject-unknown category=${category}`);
+    return null;
+  }
   const cardTitle = subjectLabel;
   // 卡内是全文：整段正文原样进面板，不在首行做标题去重（删掉的是导语本身）
   const detailContent = renderCleaned;
@@ -612,6 +620,7 @@ export function formatContentSummaryForChat(summary: ContentSummary): string {
     detailContent: summary.detailContent,
     sections: summary.sections,
     metadata: summary.metadata ?? {},
+    createdAt: summary.createdAt,
   });
 
   // 卡片自身已渲染 cardLabel + title，正文不再重复输出同一文案，

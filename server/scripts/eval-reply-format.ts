@@ -55,12 +55,13 @@ interface Golden {
   snapshots: Record<string, Snapshot>;
 }
 
-/** cardId/ts/summaryId 含时间戳或随机数，归一化后快照才稳定 */
+/** cardId/ts/summaryId/createdAt 含时间戳或随机数，归一化后快照才稳定 */
 function normalize(output: string): string {
   return output
     .replace(/card_\d+_[a-z0-9]+/g, "card_<id>")
     .replace(/"ts":\d+/g, '"ts":<ts>')
-    .replace(/sum-[a-z0-9]+-[a-z0-9]+/g, "sum_<id>");
+    .replace(/sum-[a-z0-9]+-[a-z0-9]+/g, "sum_<id>")
+    .replace(/"createdAt":"[^"]*"/g, '"createdAt":"<ts>"');
 }
 
 function runCase(c: ReplyFormatCase): Snapshot {

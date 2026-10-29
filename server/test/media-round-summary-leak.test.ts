@@ -98,7 +98,7 @@ test("路由禁入：媒体工具的长结构化文本不再生成 CONTENT_SUMMA
 
   // 同样的文本换非媒体工具：折叠路由仍然可用（不能误杀）
   const longNonMedia = Array.from(
-    { length: 6 },
+    { length: 12 },
     (_, i) =>
       `## 板块${i}\n马尔代夫的海上水屋坐落在碧蓝泻湖之上，木质栈道连接着一栋栋独立的房间，清晨推窗就是海平面升起的太阳，适合蜜月与度假，傍晚管家会把晚餐摆到露台上。`,
   ).join("\n");
@@ -126,7 +126,7 @@ test("briefPoints 不再吃 markdown 图片/链接行（不产生 !alt(url) 垃�
     "第二条纯文字要点，足够长可以被采纳为要点内容。",
   ].join("\n");
 
-  const summary = createContentSummary(content, { forceSummary: true });
+  const summary = createContentSummary(content, { forceSummary: true, subject: "旅游计划" });
   assert.ok(summary, "应能生成摘要");
   for (const point of summary!.briefPoints) {
     assert.ok(

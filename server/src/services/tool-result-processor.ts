@@ -1,19 +1,8 @@
-import {
-  createContentSummary,
-  formatContentSummaryForChat,
-  formatContentSummaryForPlainText,
-  shouldSummarizeContent,
-} from "../services/content-summary-service.js";
-import { routeRender } from "../gateway/index.js";
-import { extractDataBriefPayload } from "./render-hint-service.js";
-import {
-  formatAgentResultForChat,
-} from "./agent-result-formatter.js";
-import { hasBlockquote } from "./display-effect-router.js";
-import { tryAttachToolResultCard } from "./tool-card-registry.js";
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
+import { decideRender, applyBodyForm, applyCards } from "../render/index.js";
+import type { TurnEffect } from "../render/types.js";
 import {
   hasInternalFrameTag,
   isInternalFrameText,
@@ -31,11 +20,6 @@ function extractLlmRenderHint(text: string): { rawHint: string | null; cleanText
   const match = text.trimStart().match(/^\[RENDER_HINT:(\w+)\]\s*/);
   if (!match) return { rawHint: null, cleanText: text };
   return { rawHint: match[1], cleanText: text.slice(match[0].length).trim() };
-}
-
-/** 注入前端 [RENDER_AS:xxx] 标记 */
-function wrapRenderAs(name: string, text: string): string {
-  return `[RENDER_AS:${name}]\n${text}`;
 }
 
 /** 模型复述在正文里的展示形态声明（RENDER_AS / RENDER_HINT，任意位置）。
@@ -161,12 +145,6 @@ function normalizeModelCardJson(rawJson: string): string | null {
   });
 }
 
-/** 从单行文本中提取 URL */
-function extractUrlFromText(text: string): string | undefined {
-  const m = text.match(/https?:\/\/\S+/);
-  return m ? m[0].replace(/[)}\]。，,]+$/, "") : undefined;
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // 根因修复：检测 LLM 把 tool result 原始 JSON 直接吐到回复里的情况
 // ─────────────────────────────────────────────────────────────────────────────
@@ -261,7 +239,8 @@ function looksLikeDomain(s: string): boolean {
  *
  * 命中条件（严格，避免误伤普通 JSON 描述）：
  *   1. 文本中能找到完整的 JSON 对象（包络 `{...}`，跨行也支持）
- *   2. 解析后顶层有 `items` 数组，数组长度 ≥ 2
+ *   2. 解析后顶层有 `items` 数组（条数不设下限：结果压缩器预算紧张时会
+ *      把 items 递减到 1，单条回显同样是工具包络）
  *   3. items 内元素是对象，含 `title`(string) + `url`(http(s) 开头) 字段
  *   4. 至少 50% 的 items 命中 (3) — 避免把 "items 中夹 1 个搜索项" 的偶发 JSON 误判
  *
@@ -294,7 +273,7 @@ function detectRawSearchResultJson(
   if (candidates.length === 0) return null;
 
   // 2. 试解析每个候选，挑出最像「搜索结果 JSON」的那个
-  //    判定：含 items 数组 + 数组里至少 2 个对象、对象含 title+url
+  //    判定：含 items 数组、对象含 title+url（条数不设下限，见上方命中条件）
   for (const raw of candidates) {
     let parsed: unknown;
     try {
@@ -305,7 +284,7 @@ function detectRawSearchResultJson(
     if (!parsed || typeof parsed !== "object") continue;
     const obj = parsed as Record<string, unknown>;
     const itemsRaw = obj.items;
-    if (!Array.isArray(itemsRaw) || itemsRaw.length < 2) continue;
+    if (!Array.isArray(itemsRaw) || itemsRaw.length === 0) continue;
     const searchItems: InfoSearchItem[] = [];
     let validCount = 0;
     for (const it of itemsRaw) {
@@ -337,7 +316,7 @@ function detectRawSearchResultJson(
       });
       validCount++;
     }
-    if (validCount < 2) continue;
+    if (validCount === 0) continue;
     if (validCount / itemsRaw.length < 0.5) continue;
     // 3. 把 JSON 块从原文本中剥掉（含可能的前后引导句），得到 cleanText
     //    策略：先在 trimmed 里找到 raw 的位置，剥掉 raw 本身；
@@ -897,6 +876,12 @@ export class ToolResultProcessor {
       toolName?: string;
       /** 本轮工具结构化回执：注册工具（tool-card-registry）据此直出卡，不依赖 LLM 抄写列表 */
       toolResult?: Record<string, unknown>;
+      /** 本轮全部工具执行（loop 捕获 + 失败）；与 toolResult 合并成决策层输入 */
+      effects?: TurnEffect[];
+      /** 本轮已组装的媒体卡数量：>0 时照片是本轮主形态 */
+      mediaCardCount?: number;
+      /** 会话当前话题：fold 卡面主题的首选来源 */
+      activeTopic?: string;
     },
   ): string {
     if (!this.options.enabled) {
@@ -938,27 +923,13 @@ export class ToolResultProcessor {
       text = cleaned;
     }
 
-    // === 0. 检查 LLM 声明的 [RENDER_HINT:xxx]（优先级最高）===
+    // === 0. 模型自声明的形态（[RENDER_HINT:]）与卡片块 ===
+    // 形态声明只是决策层的输入之一（业务卡优先于它），不再在管线里直接 return；
+    // 卡片块先经校验/归一化（合法补默认值、非法整块丢弃），坏 JSON 不透出。
     const { rawHint: llmHint, cleanText: textAfterLlmHint } = extractLlmRenderHint(text);
-    // L2：模型自声明的卡片块先经校验/归一化（合法补默认值、非法整块丢弃），
-    // 后续所有分支与"已带标记直接放行"看到的都是干净的标准块。
     let workingText = stripResidualRenderDeclarations(
       sanitizeModelCardBlocks(textAfterLlmHint),
     );
-    if (llmHint) {
-      console.log(`[ToolResultProcessor] LLM declared render_hint: ${llmHint}`);
-      switch (llmHint) {
-        case "structured":
-          return wrapRenderAs("structured", workingText);
-        case "brief":
-          return wrapRenderAs("brief", workingText);
-        case "card":
-          return formatAgentResultForChat(workingText, opts?.toolName) ?? workingText;
-        case "plain":
-          return workingText;
-      }
-      // 未知 hint → fall through 走规则判断
-    }
 
     const trimmed = workingText.trim();
     // 空文本返回"消毒后"的 workingText（模型坏卡块已被丢弃），不能返回原文——
@@ -971,20 +942,6 @@ export class ToolResultProcessor {
       trimmed.includes("[AGENT_RESULT_CARD_START]")
     ) {
       return workingText;
-    }
-
-// === 优先级 -2：注册工具的结构化结果直出卡（B 阶段，tool-card-registry） ===
-    // 工具回执有 schema，卡由代码确定性构建，LLM 口头回复只作前导正文——
-    // 不依赖 LLM 把结果抄写成 markdown 列表（那正是大多数工具轮次漏卡的根因）。
-    // 未注册工具 / builder 建卡失败 / plainTextMode → 返回 null，回退下方文本路由。
-    if (!opts?.plainTextMode && opts?.toolName && opts?.toolResult) {
-      const marked = tryAttachToolResultCard(workingText, opts.toolName, opts.toolResult);
-      if (marked) {
-        console.log(
-          `[ToolResultProcessor] tool_card registry: ${opts.toolName} → structured card`,
-        );
-        return marked;
-      }
     }
 
 // === 优先级 -1：LLM 把 tool result 原始 JSON 直接吐到回复里 → 转结构化卡片 ===
@@ -1024,150 +981,36 @@ export class ToolResultProcessor {
       return buildTravelItineraryCardFromPlan(travelDetected.plan, travelDetected.cleanText);
     }
 
-    // === 渲染形态判断中心（经 gateway 统一路由，含 trace） ===
-    const hint = routeRender(workingText, {
-      toolName: opts?.toolName,
+    // === 渲染决策层（唯一决定者）===
+    // 卡与正文形态一次判完：业务卡来自真实回执，正文形态来自文本结构；
+    // 结构化面在场时正文只作前导，不会同时出现折叠卡。
+    const directEffects: TurnEffect[] =
+      !opts?.plainTextMode && opts?.toolName && opts?.toolResult
+        ? [{ tool: opts.toolName, status: "ok", result: opts.toolResult }]
+        : [];
+    const decision = decideRender({
+      text: workingText,
       userText: opts?.userText,
+      toolName: opts?.toolName,
+      effects: [...directEffects, ...(opts?.effects ?? [])],
+      modelHint: llmHint,
+      plainTextMode: opts?.plainTextMode,
+      mediaCardCount: opts?.mediaCardCount,
+      activeTopic: opts?.activeTopic,
     });
 
-    // 优先级 0：image_text 图片识别/OCR → 注入 [RENDER_AS:image_result]
-    if (hint.type === "image_text") {
-      console.log(`[ToolResultProcessor] image_text: ${hint.reason}`);
-      return wrapRenderAs("image_result", workingText);
+    let out = applyBodyForm(workingText, decision, {
+      userText: opts?.userText,
+      toolName: opts?.toolName,
+    });
+    if (!opts?.plainTextMode) {
+      out = applyCards(out, decision).text;
     }
-
-    // 优先级 1：search_result 搜索工具结果 → 专用搜索结果卡片（含 URL 提取）
-    if (hint.type === "search_result" && !opts?.plainTextMode) {
-      let marked = formatAgentResultForChat(workingText, opts?.toolName);
-      if (marked) {
-        // 从 item 文本中提取 URL 注入到 JSON
-        marked = injectItemUrls(marked);
-        console.log(`[ToolResultProcessor] search_result: ${hint.reason}`);
-        return marked;
-      }
-    }
-
-    // 优先级 1.5：data_brief 数据快报 → 注入 [RENDER_AS:data_brief] + [DATA_BRIEF_START] payload。
-    // 用原始文本提取（正文零改写，数值不被口语化），前端解析失败时回退纯文本。
-    if (hint.type === "data_brief") {
-      console.log(`[ToolResultProcessor] data_brief: ${hint.reason}`);
-      if (opts?.plainTextMode) return workingText;
-      const payload = extractDataBriefPayload(workingText);
-      return wrapRenderAs(
-        "data_brief",
-        `[DATA_BRIEF_START]${JSON.stringify(payload)}[DATA_BRIEF_END]`,
-      );
-    }
-
-    // 优先级 2：result_card 简短汇报
-    if (hint.type === "result_card" && !opts?.plainTextMode) {
-      let marked = formatAgentResultForChat(workingText, opts?.toolName);
-      if (marked) {
-        // 同样注入 item 级 url（媒体卡片依赖它渲染缩略图/跳转）
-        marked = injectItemUrls(marked);
-        console.log(`[ToolResultProcessor] result_card: ${hint.reason}`);
-        return marked;
-      }
-    }
-
-    // 优先级 2.5：markdown 引用块（> xxx）→ quote 引用强调卡。
-    // 纯程序路由（display-effect-router.hasBlockquote），无 LLM 参与；
-    // 引用块天然是一句话结论/强调场景，优先于 brief/structured。
-    if (!opts?.plainTextMode && hasBlockquote(workingText)) {
-      const marked = formatAgentResultForChat(workingText, opts?.toolName);
-      if (marked) {
-        console.log("[ToolResultProcessor] quote: markdown blockquote detected");
-        return marked;
-      }
-    }
-
-    // 优先级 3+：brief 简报形态（L2 模型声明 only；打分退役后不再从散文猜简报）
-    if (hint.type === "brief") {
-      console.log(`[ToolResultProcessor] brief: ${hint.reason}`);
-      return wrapRenderAs("brief", workingText);
-    }
-
-    // 优先级 3：summary_card 长内容折叠
-    // 媒体搜索轮禁入（不变量，与模型无关）：照片/视频卡是本轮唯一主形态，
-    // 摘要折叠卡若附进正文，媒体轮清洗（stripMediaEchoText 不认识该标记）
-    // 剥不掉，会以裸 JSON 透出到前端（2026-10-10 搜图轮 CONTENT_SUMMARY 泄漏）。
-    // 换模型只会改变「文本多长才触发折叠」的概率，不该改变路由契约。
-    if (hint.type === "summary_card" && !isMediaSearchTool(opts?.toolName)) {
-      console.log(
-        `[ToolResultProcessor] Processing text, length: ${workingText.length}, threshold: ${this.options.threshold}, plainTextMode: ${!!opts?.plainTextMode}`,
-      );
-
-      if (shouldSummarizeContent(workingText, this.options.threshold)) {
-        const summary = createContentSummary(workingText, {
-          maxLength: this.options.threshold,
-          forceSummary: false,
-        });
-
-        if (summary) {
-          console.log(
-            `[ToolResultProcessor] Created summary: ${summary.title}, points: ${summary.briefPoints.length}`,
-          );
-          const formatted = opts?.plainTextMode
-            ? formatContentSummaryForPlainText(summary)
-            : formatContentSummaryForChat(summary);
-          console.log(
-            `[ToolResultProcessor] Formatted output length: ${formatted.length}`,
-          );
-          return formatted;
-        }
-      }
-    }
-
-    // 优先级 4：long_text 长内容（非搜索工具）→ 意图触发走结构化富文本，否则纯文本
-    if (hint.type === "long_text") {
-      console.log(`[ToolResultProcessor] long_text: ${hint.reason}`);
-      if (hint.intent) {
-        return wrapRenderAs("structured", workingText);
-      }
-      return workingText;
-    }
-
-    // 优先级 5：plain 普通正文（无硬信号 → 纯文本，不硬塞形态）
-    return workingText;
+    console.log(
+      `[ToolResultProcessor] render: ${decision.reason} media=${opts?.mediaCardCount ?? 0}`,
+    );
+    return out;
   }
-}
-
-/**
- * 从 `[AGENT_RESULT_CARD_START]` 标记的 JSON 中，
- * 给每个 item 提取文本中的 URL 并注入 `url` 字段。
- */
-function injectItemUrls(marked: string): string {
-  const startTag = "[AGENT_RESULT_CARD_START]";
-  const endTag = "[AGENT_RESULT_CARD_END]";
-  const startIdx = marked.indexOf(startTag);
-  const endIdx = marked.indexOf(endTag);
-  if (startIdx < 0 || endIdx <= startIdx) return marked;
-
-  const jsonStr = marked.slice(startIdx + startTag.length, endIdx).trim();
-  let payload: Record<string, unknown>;
-  try {
-    payload = JSON.parse(jsonStr);
-  } catch {
-    return marked;
-  }
-
-  const items = payload.items as Array<Record<string, string>> | undefined;
-  if (!items) return marked;
-
-  for (const item of items) {
-    if (!item.url && item.text) {
-      const url = extractUrlFromText(item.text);
-      if (url) item.url = url;
-    }
-  }
-  payload.items = items;
-
-  // 保留标记外的前导对话与结尾追问：formatAgentResultForChat 的三段输出
-  // 设计（[前导][卡片][追问]）在重建时不能被截掉，否则「好的，耳机已下单…」
-  // 「需要调整吗？」这类上下文在主链路上全部丢失。
-  const prefix = marked.slice(0, startIdx);
-  const suffix = marked.slice(endIdx + endTag.length);
-  return `${prefix}${startTag}${JSON.stringify(payload, null, 2)}${endTag}${suffix}`;
 }
 
 let _instance: ToolResultProcessor | null = null;

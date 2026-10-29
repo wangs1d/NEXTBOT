@@ -60,13 +60,15 @@ import {
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
+import type { TurnEffect } from "../../render/types.js";
+import { collectCardPayloads } from "../../render/index.js";
 import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
 import {
   buildToolCard,
   lookupToolCardBuilder,
 } from "../../services/tool-card-registry.js";
 import {
-  attachDeterministicCards,
+  applyDeterministicCards,
   classifyTravelCardMissing,
   looksLikeHandwrittenItinerary,
   resolveTravelReceipt,
@@ -1118,6 +1120,8 @@ async function processBatchedMessage(
   // 视频抓取（video.grab）的真实结果聚合：媒体标记此前只接 reply.toolName
   // 直跑路径，loop 轮次解析到可播放视频也不会带 [RENDER_AS:video] 标记。
   const executedVideoToolResults: Array<ExecutedToolReceipt> = [];
+  // 执行失败的工具名：决策层据此出空态卡（真的跑过就不该悄悄降级成搜索卡）
+  const executedFailedToolNames: string[] = [];
   // 行程规划工具（tool-loop 路径）：LLM 末轮通常只输出正文不带工具声明，
   // reply.toolName/toolResult 均为空 → attachTravelItineraryCard 拿不到原始
   // 结果、行程卡永远附不上（右侧面板不自动展开）。这里从 onExternalToolExecuted
@@ -1228,6 +1232,9 @@ async function processBatchedMessage(
         );
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
+        if (!info.ok) {
+          executedFailedToolNames.push(info.toolName);
+        }
         // 确认轮标记（与 agent-core CALENDAR_CONFIRM_TOOLS 同源）：分泡轮
         // 说话算话裁决的确认轮例外——确认轮保留出口收口塌缩。
         if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
@@ -1637,16 +1644,66 @@ async function processBatchedMessage(
       if (toolResultText) finalText = toolResultText;
     }
 
+    // 决策层输入：本轮全部真实执行（直跑回执 + loop 捕获 + 失败），
+    // 卡的取舍与正文形态只由这一份列表驱动。
+    const turnEffects: TurnEffect[] = [];
+    for (const list of [
+      executedMediaToolResults,
+      executedSearchToolResults,
+      executedWeatherToolResults,
+      executedRegistryToolResults,
+      executedVideoToolResults,
+    ]) {
+      for (const mt of list) {
+        turnEffects.push({ tool: mt.toolName, status: "ok", result: mt.result });
+      }
+    }
+    if (
+      reply.toolName &&
+      toolResult?.ok &&
+      toolResult.result &&
+      !turnEffects.some((e) => e.tool === reply.toolName)
+    ) {
+      turnEffects.push({
+        tool: reply.toolName,
+        status: "ok",
+        result: toolResult.result as Record<string, unknown>,
+      });
+    }
+    if (
+      reply.toolName &&
+      toolResult &&
+      !toolResult.ok &&
+      !executedFailedToolNames.includes(reply.toolName)
+    ) {
+      turnEffects.push({ tool: reply.toolName, status: "error" });
+    }
+    for (const tool of executedFailedToolNames) {
+      if (!turnEffects.some((e) => e.tool === tool)) {
+        turnEffects.push({ tool, status: "error" });
+      }
+    }
+    const mediaCardCount = turnEffects.reduce((count, effect) => {
+      if (!effect.result) return count;
+      if (
+        !SEARCH_MEDIA_TOOL_NAMES.has(effect.tool) &&
+        effect.tool !== "image.generate"
+      ) {
+        return count;
+      }
+      return count + extractMediaCards(effect.tool, effect.result).length;
+    }, 0);
+
     const processor = getToolResultProcessor();
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
       toolName: reply.toolName,
-      // 注册工具（weather/wallet/calendar…）的结构化回执直出卡：不依赖 LLM
-      // 把结果抄写成 markdown 列表（tool-card-registry，B 阶段）
       toolResult:
         toolResult?.ok && toolResult.result
           ? (toolResult.result as Record<string, unknown>)
           : undefined,
+      effects: turnEffects,
+      mediaCardCount,
     });
     // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
     // 能被切卡的逐日列表，卡片由代码直接从行程原始数据生成（autoOpen=false，
@@ -1746,41 +1803,15 @@ async function processBatchedMessage(
     const nextUp = extractNextUpSuggestions(finalText);
     finalText = nextUp.text;
     const followups = nextUp.followups;
-    // done 阶段确定性附卡链（L1）：行程 → 天气 → 搜索 → 其余注册工具 → 视频，
-    // 顺序与优先级见 deterministic-card-chain.ts；各 attach 自带结构化标记
-    // guard，先附上的卡生效、后续自动让位。视频回执 loop 捕获优先、直跑兜底。
-    const videoReceipts: Array<ExecutedToolReceipt> =
-      executedVideoToolResults.length > 0
-        ? executedVideoToolResults
-        : (reply.toolName === "video.grab" || reply.toolName === "video.find") && toolResult?.result
-          ? [{ toolName: reply.toolName, result: toolResult.result as Record<string, unknown> }]
-          : [];
-    // 搜索卡让位仲裁：本轮搜索类媒体有真实产出（照片/视频卡已组装得出）→
-    // search_result 文字卡整卡不附，照片是唯一主形态；媒体 0 产出（搜图全挂）
-    // 时不让位，文字卡兜底保证本轮仍有结构化结果。直跑路径（loop 捕获为空、
-    // reply.toolName 命中媒体工具）与 loop 捕获同权裁决。
-    let searchMediaHasItems = executedMediaToolResults.some(
-      (mt) =>
-        SEARCH_MEDIA_TOOL_NAMES.has(mt.toolName) &&
-        extractMediaCards(mt.toolName, mt.result).length > 0,
-    );
-    if (
-      !searchMediaHasItems &&
-      reply.toolName &&
-      SEARCH_MEDIA_TOOL_NAMES.has(reply.toolName)
-    ) {
-      searchMediaHasItems = extractMediaCards(reply.toolName, toolResult?.result).length > 0;
-    }
-    finalText = attachDeterministicCards({
+    // 行程回执在这里才最终裁决（直跑 / loop 捕获 / 冷层近窗回捞），所以行程卡
+    // 在正文处理之后补附；其余卡已在 processAssistantText 里由决策层一并产出。
+    // 返回值同时带出本轮全部结构化卡载荷（与文本块同一份，供 cards 通道下发）。
+    const cardResult = applyDeterministicCards({
       text: finalText,
       travelToolName: travelReceiptResolution.toolName,
       travelResult: travelReceiptResolution.result,
-      weatherResults: executedWeatherToolResults,
-      searchResults: executedSearchToolResults,
-      searchMediaHasItems,
-      registryResults: executedRegistryToolResults,
-      videoResults: videoReceipts,
     });
+    finalText = cardResult.text;
     // 对话状态记账（2026-10-12 架构收敛）：intent + 本轮全部真实执行过的工具
     // 写入会话状态账本，下一轮路由的「上一轮对话状态」块由此渲染——分类器
     // 看得到执行者做过什么，是 media 误触发根治的输入半边。静默容错：
@@ -2051,6 +2082,10 @@ async function processBatchedMessage(
     // 文件头：v1 客户端静默跳过未知块，表现与升级前一致，无回归。
     const replyBlocks = buildReplyBlocks(finalText, renderBlocks);
 
+    // 结构化卡通道：与正文里的卡块同源（直接从最终文本解析），客户端可优先
+    // 按结构化字段渲染，旧客户端照旧解析文本标记——两条通道不会分叉。
+    const structuredCards = collectCardPayloads(finalText);
+
     ctx.socket.send(
       JSON.stringify({
         type: ServerEventType.ChatAssistantDone,
@@ -2098,6 +2133,9 @@ async function processBatchedMessage(
           // 交错渲染块：按正文顺序切好的「文字段+媒体组」，前端按序渲染
           // → 「一段文字介绍后放一组照片，再一段文字，再一组照片」。
           ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
+          // 结构化卡（业务卡/行程/天气/搜索…）：与文本卡块同源，
+          // 客户端可优先按该字段渲染；旧客户端继续解析文本标记。
+          ...(structuredCards.length > 0 ? { cards: structuredCards } : {}),
           // 回复信封块：text+card 的结构化序列，前端优先按 blocks 渲染
           ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
           // 「接下来你可以」接续建议：模型生成的下一步任务（可点击发送）

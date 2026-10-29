@@ -1,32 +1,19 @@
 /**
- * done 阶段确定性附卡链（单一事实源）。
+ * done 阶段确定性附卡入口（决策层之上的薄壳）。
  *
- * chat-user-message 在 assistant_done 前按固定顺序附加确定性卡片/媒体标记，
- * 此前该顺序内联在 handler 里，无法被测试覆盖——「单测全绿但真实轮次漏卡」
- * 的接线缺口（weather/wallet/calendar/shopping/video 只接了单工具直跑路径）
- * 正是在这里漏掉的。抽出为纯函数后，测试可用与 handler 完全相同的顺序与
- * 输入回放真实轮次（tool-loop 内执行、reply.toolName 为空）。
- *
- * 顺序即优先级（先附上的卡生效，后续 attach 各自含结构化标记 guard 让位）：
- *   1. travel_itinerary 行程卡（直跑 + loop 冷层回捞，handler 解析后传入）
- *      1b. travel_brief 简报卡（紧跟行程卡：这版怎么排的 + 一键补心愿点）
- *   2. weather 天气卡（loop 多次调用合并为一张多地卡）
- *   3. search_result 搜索卡（loop 多次调用按 url 去重合并；搜索类媒体有产出
- *      时整卡让位——照片是主形态，意图仲裁见 searchMediaHasItems）
- *   4. 其余注册工具卡（wallet/schedule/order/比价…，按执行顺序取第一张）
- *   5. video 媒体标记（[RENDER_AS:video]，loop 捕获优先、直跑回执兜底）
+ * 卡的取舍与顺序由 `render/decide.ts` 统一决定（媒体 → 行程/简报 → 天气 →
+ * 注册业务卡 → 视频 → 搜索兜底）。本文件只负责把 handler 的分散回执归一成
+ * 统一效果列表，再交给决策层；不再内联「先到先得 / break / 让位」。
  */
 
+import { containsTravelItineraryCard } from "./tool-result-processor.js";
 import {
-  attachSearchResultCardFromExecuted,
-  attachWeatherResultCardFromExecuted,
-  tryAttachToolResultCard,
-} from "./tool-card-registry.js";
-import {
-  attachTravelItineraryCard,
-  attachVideoMediaMarker,
-  containsTravelItineraryCard,
-} from "./tool-result-processor.js";
+  applyCards,
+  collectCardPayloads,
+  decideRender,
+  unfoldIfCardsPresent,
+} from "../render/index.js";
+import type { TurnEffect } from "../render/types.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { StoredTravelPlan } from "../skills/travel-planning/travel-plan-store.js";
 import {
@@ -291,27 +278,53 @@ export interface DeterministicCardChainInput {
   registryResults?: ReadonlyArray<ExecutedToolReceipt>;
   /** 视频抓取回执（loop 捕获在前、直跑兜底在后；取最后一条）。 */
   videoResults?: ReadonlyArray<ExecutedToolReceipt>;
+  /** 本轮执行失败的业务工具：出空态卡，不悄悄降级成搜索卡。 */
+  failedToolNames?: ReadonlyArray<string>;
 }
 
-/** 按 done 阶段真实顺序附加全部确定性卡片/媒体标记，返回最终文本。 */
-export function attachDeterministicCards(input: DeterministicCardChainInput): string {
-  let text = input.text;
-  text = attachTravelItineraryCard(text, input.travelToolName, input.travelResult);
-  text = attachTravelBriefCard(text, input.travelResult);
-  text = attachWeatherResultCardFromExecuted(text, input.weatherResults ?? []);
-  text = attachSearchResultCardFromExecuted(text, input.searchResults ?? [], {
-    yieldToSearchMedia: input.searchMediaHasItems === true,
-  });
-  for (const mt of input.registryResults ?? []) {
-    const marked = tryAttachToolResultCard(text, mt.toolName, mt.result);
-    if (marked) {
-      text = marked;
-      break;
+/** 把附卡链的输入归一成决策层认的统一效果列表。 */
+function chainEffects(input: DeterministicCardChainInput): TurnEffect[] {
+  const effects: TurnEffect[] = [];
+  if (input.travelToolName === "travel.plan-itinerary" && input.travelResult) {
+    effects.push({ tool: input.travelToolName, status: "ok", result: input.travelResult });
+  }
+  for (const list of [
+    input.weatherResults,
+    input.searchResults,
+    input.registryResults,
+    input.videoResults,
+  ]) {
+    for (const receipt of list ?? []) {
+      effects.push({ tool: receipt.toolName, status: "ok", result: receipt.result });
     }
   }
-  const video = input.videoResults?.[input.videoResults.length - 1];
-  if (video) {
-    text = attachVideoMediaMarker(text, video.toolName, video.result);
+  for (const tool of input.failedToolNames ?? []) {
+    effects.push({ tool, status: "error" });
   }
-  return text;
+  return effects;
+}
+
+/**
+ * 按渲染决策层的结果附加全部确定性卡片，返回最终文本与结构化卡载荷。
+ * 顺序/取舍由 `decideRender` 决定，这里不再有「先到先得 / 让位」。
+ */
+export function applyDeterministicCards(input: DeterministicCardChainInput): {
+  text: string;
+  cards: Array<Record<string, unknown>>;
+} {
+  const decision = decideRender({
+    text: input.text,
+    effects: chainEffects(input),
+    mediaCardCount: input.searchMediaHasItems === true ? 1 : 0,
+  });
+  // 结构化面在场时正文不能同时是折叠卡（会互相盖住）
+  let text = decision.cards.length > 0 ? unfoldIfCardsPresent(input.text) : input.text;
+  text = applyCards(text, decision).text;
+  text = attachTravelBriefCard(text, input.travelResult);
+  return { text, cards: collectCardPayloads(text) };
+}
+
+/** 兼容入口：只要最终文本的调用方。 */
+export function attachDeterministicCards(input: DeterministicCardChainInput): string {
+  return applyDeterministicCards(input).text;
 }

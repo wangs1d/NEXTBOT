@@ -8,6 +8,7 @@ import {
   sanitizeModelCardBlocks,
 } from "../src/services/tool-result-processor.js";
 import { attachSearchResultCardFromExecuted } from "../src/services/tool-card-registry.js";
+import { attachDeterministicCards } from "../src/services/deterministic-card-chain.js";
 import { stripMarkersToPlainText } from "../src/services/reply-envelope.js";
 
 /**
@@ -203,19 +204,26 @@ test("L3 progress：百分比 markdown 列表 → progress 进度卡", () => {
 });
 
 test("L3 summary_card：超长结构化文档 → CONTENT_SUMMARY_V2 折叠摘要", () => {
-  // 设计口径（render-hint-service 头注释）：summary_card = ≥400 字 + 结构化
-  // （板块/表格/列表混排）。纯叙事闲聊不折叠，属预期行为。
+  // 设计口径：summary_card = ≥800 字 + 结构化（板块/表格/列表混排）+ 主题可判
+  // （主题判不出来时退富文本，不挂类目名硬折叠）。
   const longDoc =
     "## 城郊花鸟市场半日游记\n\n昨天我去了一趟城郊的花鸟市场，本来只是想随便逛逛，结果一进门就被门口那排多肉摊位吸住了。\n\n" +
     "### 多肉区\n摊主是位六十多岁的大爷，跟我讲了半个多小时怎么配土、怎么控水，还送了我两小盆砍头苗。\n" +
-    "我最后买了三盆，加上送的一共五盆，总共花了四十块钱。\n\n" +
+    "我最后买了三盆，加上送的一共五盆，总共花了四十块钱。他还教我怎么看叶片的饱满度，说买回去先别急着换盆，" +
+    "放在散光的地方缓上一周，等根系稳住再动土，不然很容易黑腐。\n\n" +
     "### 水族区\n一整排鱼缸灯光打下来特别好看，我站在一个草缸前看了很久，缸里有一群红灯笼鱼游来游去。\n" +
-    "老板说这缸造景他做了三个月，水草泥用的进口的，沉木是自己去山里捡的。\n\n" +
-    "### 鸟区\n八哥会说话，鹦鹉会握手，最热闹的是一笼虎皮鹦鹉，叽叽喳喳吵得不行。\n\n" +
+    "老板说这缸造景他做了三个月，水草泥用的进口的，沉木是自己去山里捡的。他还提醒我，新手别一上来就养草缸，" +
+    "先从裸缸配几条皮实的鱼练手，等水质稳定了再考虑水草和造景，不然光是藻类就够折腾的。\n\n" +
+    "### 鸟区\n八哥会说话，鹦鹉会握手，最热闹的是一笼虎皮鹦鹉，叽叽喳喳吵得不行。老板说虎皮皮实好养，" +
+    "但真要养得亲人，得每天固定时间上手互动，喂食的时候叫它的名字，时间长了它自己会往你手上凑。\n\n" +
     "最后拎着一袋多肉、一袋鱼食和一包鸟粮回家，感觉一下子回到了小时候逛集市的快乐。回来的公交上我一直在想，" +
     "这种烟火气十足的地方在城市里越来越少了，趁它还在，多去几次。到家之后我把多肉摆在阳台上，把鱼食收进柜子里，" +
-    "又给家里那缸旧鱼换了水，忙完一抬头天都黑了。晚饭随便煮了碗面，吃的时候还在翻白天拍的照片，越看越觉得不虚此行。";
-  assert.ok(longDoc.length >= 400, `文本应≥400字，实际 ${longDoc.length}`);
+    "又给家里那缸旧鱼换了水，忙完一抬头天都黑了。晚饭随便煮了碗面，吃的时候还在翻白天拍的照片，越看越觉得不虚此行。" +
+    "下次打算早点去，赶在开市的时候看看新到的货，顺便问问老板有没有靠谱的养鱼社群可以一起交流。\n\n" +
+    "### 花市区\n花市那边反而清净些，摊位上摆的多是绿萝、龟背竹这类好养的绿植，老板说最近卖得最好的是小型观叶，" +
+    "年轻人租的房子不大，一盆放窗台就够了。我看中一盆琴叶榕，犹豫了半天没买，主要是怕自己出差多、照顾不过来，" +
+    "回来路上还惦记着，想着下次要是还在就直接搬回家，顺便再挑一个尺寸合适的陶盆，配起来应该挺好看。回来的路上顺带买了两斤橘子，酸酸甜甜，正好解渴。";
+  assert.ok(longDoc.length >= 800, `文本应≥800字，实际 ${longDoc.length}`);
   const out = processor.processAssistantText(longDoc, { userText: "讲讲你昨天去哪了" });
   assert.ok(
     out.includes("[CONTENT_SUMMARY_V2_START]"),
@@ -277,17 +285,17 @@ test("L1 search 聚合：tool-loop 多次搜索结果合并为一张卡", () => 
   assert.ok(out.startsWith("资料我都看完了"));
 });
 
-test("L1 search 让位：yieldToSearchMedia 时整卡不附（有图轮次文字列表冗余）", () => {
+test("L1 search 让位：本轮有媒体主形态时搜索卡不附（有图轮次文字列表冗余）", () => {
   const text = "照片都找出来了，近况在正文里说过了。";
-  const out = attachSearchResultCardFromExecuted(
+  const out = attachDeterministicCards({
     text,
-    [{
+    searchResults: [{
       toolName: "search_web",
       result: { items: [{ title: "不该出现的条目", url: "https://example.com/x", snippet: "s" }] },
     }],
-    { yieldToSearchMedia: true },
-  );
-  assert.equal(out, text, "让位时应原文返回，不附卡不改正文");
+    searchMediaHasItems: true,
+  });
+  assert.equal(out, text, "媒体主形态在场时应原文返回，不附搜索卡不改正文");
 });
 
 test("L1 search 附卡不被正文形态声明挡住（真实场景回归：攻略/对比类搜索词）", () => {
@@ -415,6 +423,22 @@ test("抢救：模型回显搜索原始 JSON → search_result 卡 + 净文本",
   const card = parseCard(out);
   assert.equal(card.cardType, "search_result");
   assert.ok(!out.includes('"provider"'), "原始 JSON 不应透出");
+});
+
+test("抢救：模型回显单条搜索包络也转卡（压缩器会把 items 砍到 1 条）", () => {
+  const out = processor.processAssistantText(
+    JSON.stringify({
+      items: [
+        { title: "唯一结果", url: "https://example.com/only", snippet: "s", source: "a" },
+      ],
+      provider: "tavily",
+    }),
+    { toolName: "search_web" },
+  );
+  const card = parseCard(out);
+  assert.equal(card.cardType, "search_result");
+  assert.equal(card.items.length, 1);
+  assert.ok(!out.includes('"provider"'), "原始包络不应透出到正文");
 });
 
 test("抢救：模型回显行程 JSON → travel_itinerary 双面板卡", () => {

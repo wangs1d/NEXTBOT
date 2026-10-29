@@ -633,6 +633,8 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
             priceCompare: {
               query: str(r.query),
               groups: priceGroups,
+              // 仅当各组同规格可比时才标最低价（bestIndex=null 客户端不打章）
+              bestIndex: typeof r.bestIndex === "number" ? r.bestIndex : null,
               ...(decisionPageUrl ? { decisionPageUrl } : {}),
             },
           }
@@ -902,7 +904,7 @@ function containsStructuredMarker(text: string): boolean {
 }
 
 /** 与 agent-result-formatter 的 cardId 规则一致（cardType 非空才生成） */
-function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
+export function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
   const cardId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const json = JSON.stringify({
     avatar: "NB",
@@ -956,20 +958,16 @@ export function tryAttachToolResultCard(
  *
  * tool-loop 内执行的 search_web/info.search 不经过 reply.toolName/toolResult
  * （与媒体/行程同理），必须从 onExternalToolExecuted 聚合的真实结果附卡。
- * 多次搜索的条目按 url 去重合并为一张 search_result 卡（上限 8 条），
- * 避免逐次附卡刷屏。正文已带结构化标记时不动（优先级让位给 L2/其他 L1 路径）。
+ * 多次搜索的条目按 url 去重合并为一张 search_result 卡（上限 12 条），
+ * 避免逐次附卡刷屏。正文已带结构化标记时不动。
  *
- * yieldToSearchMedia（意图仲裁，2026-09-22）：本轮搜索类媒体
- * （search_images/search_images_batch/search_videos）有真实产出时整卡让位——
- * 照片/视频已是本轮主形态，找图场景再附 8 条文字列表属冗余。媒体 0 产出时
- * 调用方不传该标志，文字卡照常附（兜底保证本轮仍有结构化结果）。
+ * 「本轮已有媒体主形态时搜索卡不附」由决策层（decideRender）判定，
+ * 这里不再自带让位开关。
  */
 export function attachSearchResultCardFromExecuted(
   text: string,
   executed: ReadonlyArray<{ toolName: string; result: Record<string, unknown> }>,
-  opts?: { yieldToSearchMedia?: boolean },
 ): string {
-  if (opts?.yieldToSearchMedia) return text;
   if (containsStructuredMarker(text)) return text;
   const searchResults = executed.filter((mt) =>
     mt.toolName === "search_web" || mt.toolName === "info.search",

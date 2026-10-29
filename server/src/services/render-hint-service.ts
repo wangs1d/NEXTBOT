@@ -70,6 +70,7 @@ const STRUCTURED_TEXT_MIN_CHARS = 300;
 /** summary_card 字数下限：≥800 字的长内容才考虑折叠（2026-10-28 定版，
  *  与 content-summary-service 同值；400 门槛过低导致短回复也出折叠卡） */
 const SUMMARY_MIN_CHARS = 800;
+
 /** data_brief 字数下限：短到一句话带数字的闲聊不触发 */
 const DATA_BRIEF_MIN_CHARS = 60;
 /** data_brief KPI 数据点下限：≥3 个数字/百分比/指标才算「数据快报」 */
@@ -277,6 +278,7 @@ export function classifyRenderHint(
   }
 
   // 5. 长文档折叠：≥800 字 + 结构化（板块/表格/列表混排）
+  //    「有没有专属卡」不在这里判断——决策层看到结构化面就不会走到这一步。
   if (sc.len >= SUMMARY_MIN_CHARS && sc.structural.structured) {
     return hit("summary_card", "long-structured-doc");
   }
