@@ -38,6 +38,7 @@ import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-fac
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
 import { buildActiveGoalsPromptBlock } from "../agent/active-goals-prompt.js";
 import { getTaskPlanStore, initTaskPlanStore } from "../agent/task-plan-store.js";
+import { requestPlatformLoginHandoff } from "../agent/platform-login-handoff.js";
 import { TaskPlanProbeRunner } from "../agent/task-plan-probe-runner.js";
 import { getToolResultProcessor } from "../services/tool-result-processor.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
@@ -911,6 +912,20 @@ export async function createAppServices(): Promise<AppServices> {
     browserSessionService,
     askSaveLoginConsent: (actorId, siteId, siteLabel) =>
       sharedBrowserCoordinator.askSaveLoginConsent(actorId, siteId, siteLabel),
+    // 平台登录超时 → 长流程 handoff（等待步 + 「我已完成」回执后由 Plan 续跑）；
+    // 浏览器页已留在登录页，用户看得见要登录哪个平台。
+    onLoginRequired: (info) => {
+      try {
+        requestPlatformLoginHandoff({
+          actorId: info.actorId,
+          sessionId: info.sessionId,
+          platformLabel: info.platformLabel,
+          goal: `登录${info.platformLabel}后继续（${info.loginUrl}）`,
+        });
+      } catch {
+        /* 交接失败只丢增强，工具结果里的指引照常返回 */
+      }
+    },
     audit: auditService,
     store: shoppingOrderStore,
     alipayBot: alipayBotService,
