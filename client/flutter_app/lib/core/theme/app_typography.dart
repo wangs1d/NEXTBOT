@@ -16,6 +16,9 @@ abstract final class AppTypography {
   /// 大标题 / 数字展示
   static const double display = 20;
 
+  /// 阅读态文档大标题(摘要详情等)
+  static const double docTitle = 24;
+
   /// 页面标题 / 一级标题
   static const double title = 17;
 

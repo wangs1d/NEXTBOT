@@ -99,6 +99,7 @@ List<Widget> formatContentSummaryDetailLines(
   TextTheme textTheme, {
   Map<int, GlobalKey>? sectionKeys,
   List<String>? sectionTitles,
+  Color? linkColor,
 }) {
   final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
   final RegExp markdownHeader = RegExp(r"^(#{1,6})\s+");
@@ -237,8 +238,8 @@ List<Widget> formatContentSummaryDetailLines(
             top: isFirstBlock
                 ? 0
                 : level == 1
-                    ? AppTypography.space4
-                    : AppTypography.space2,
+                    ? AppTypography.space5
+                    : AppTypography.space3,
             bottom: level == 1 ? AppTypography.space2 : AppTypography.space1,
           ),
           child: level == 1
@@ -299,7 +300,7 @@ List<Widget> formatContentSummaryDetailLines(
         Padding(
           padding: EdgeInsets.only(
             left: 4.0 + depth * 18,
-            bottom: AppTypography.space1,
+            bottom: AppTypography.space2,
           ),
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -309,11 +310,19 @@ List<Widget> formatContentSummaryDetailLines(
                 child: Text(
                   marker,
                   textAlign: markerAlign,
-                  style: TextStyle(color: cs.onSurfaceVariant),
+                  style: TextStyle(
+                    color: linkColor ?? cs.primary,
+                    fontWeight: FontWeight.w700,
+                  ),
                 ),
               ),
               Expanded(
-                child: buildInlineMarkdownText(itemText, bodyStyle, cs: cs),
+                child: buildInlineMarkdownText(
+                  itemText,
+                  bodyStyle,
+                  cs: cs,
+                  linkColor: linkColor,
+                ),
               ),
             ],
           ),
@@ -347,18 +356,31 @@ List<Widget> formatContentSummaryDetailLines(
     }
 
     // 普通段落：连续普通行合并为一段（Text 保留软换行），段间距统一 8。
+    // 文档首个段落是导语：字号大一档、灰度略降，与正文拉开层级。
     final int start = index;
     while (index < lines.length && isPlainLine(lines[index])) {
       index++;
     }
     final String paragraph = lines.sublist(start, index).join("\n").trim();
+    final bool isLead = widgets.isEmpty;
+    final TextStyle paragraphStyle = isLead
+        ? bodyStyle.copyWith(
+            fontSize: AppTypography.heading,
+            color: cs.onSurfaceVariant,
+          )
+        : bodyStyle;
     widgets.add(
       Padding(
         padding: EdgeInsets.only(
           top: lastWasList ? AppTypography.space1 : 0,
-          bottom: AppTypography.space2,
+          bottom: isLead ? AppTypography.space4 : AppTypography.space2,
         ),
-        child: buildInlineMarkdownText(paragraph, bodyStyle, cs: cs),
+        child: buildInlineMarkdownText(
+          paragraph,
+          paragraphStyle,
+          cs: cs,
+          linkColor: linkColor,
+        ),
       ),
     );
     lastWasList = false;
@@ -400,7 +422,7 @@ int _headingLevel(
   return 2;
 }
 
-/// 一级标题：左侧强调条 + 更大字重（对应「一、」「# / ##」）。
+/// 一级标题：文档式板块标题（对应「一、」「# / ##」）。
 class _Level1Heading extends StatelessWidget {
   const _Level1Heading({
     required this.title,
@@ -414,22 +436,16 @@ class _Level1Heading extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return AccentPanel(
-      cs: cs,
-      radius: 6,
-      accentAlpha: 0.55,
-      fillAlpha: 0.10,
-      padding: const EdgeInsets.only(left: 9, top: 3, bottom: 3),
-      child: buildInlineMarkdownText(
-        title,
-        textTheme.titleMedium!.copyWith(
-          color: cs.onSurface,
-          fontWeight: FontWeight.w800,
-          height: AppTypography.headingLineHeight,
-          letterSpacing: -0.2,
-        ),
-        cs: cs,
+    return buildInlineMarkdownText(
+      title,
+      textTheme.titleLarge!.copyWith(
+        fontSize: AppTypography.display,
+        color: cs.onSurface,
+        fontWeight: FontWeight.w700,
+        height: AppTypography.headingLineHeight,
+        letterSpacing: -0.2,
       ),
+      cs: cs,
     );
   }
 }
@@ -453,6 +469,7 @@ class _Level2Heading extends StatelessWidget {
     return buildInlineMarkdownText(
       title,
       textTheme.titleSmall!.copyWith(
+        fontSize: tertiary ? AppTypography.heading : AppTypography.title,
         color: tertiary ? cs.onSurfaceVariant : cs.onSurface,
         fontWeight: FontWeight.w700,
         height: AppTypography.headingLineHeight,
@@ -485,6 +502,7 @@ Widget buildInlineMarkdownText(
   required ColorScheme cs,
   Widget? trailingInline,
   int? maxLines,
+  Color? linkColor,
 }) {
   return InlineMarkdownText(
     text: text,
@@ -492,6 +510,7 @@ Widget buildInlineMarkdownText(
     cs: cs,
     trailing: trailingInline,
     maxLines: maxLines,
+    linkColor: linkColor,
   );
 }
 
@@ -508,6 +527,7 @@ class InlineMarkdownText extends StatefulWidget {
     required this.cs,
     this.trailing,
     this.maxLines,
+    this.linkColor,
   });
 
   final String text;
@@ -519,6 +539,9 @@ class InlineMarkdownText extends StatefulWidget {
 
   /// 限定行数（超出省略），空值按自然换行
   final int? maxLines;
+
+  /// 链接颜色（阅读态可单独指定），空则用主题 primary
+  final Color? linkColor;
 
   @override
   State<InlineMarkdownText> createState() => _InlineMarkdownTextState();
@@ -555,6 +578,7 @@ class _InlineMarkdownTextState extends State<InlineMarkdownText> {
       widget.baseStyle,
       widget.cs,
       recognizers: recognizers,
+      linkColor: widget.linkColor,
     );
     _stale = _active;
     _active = recognizers;
@@ -612,13 +636,21 @@ List<InlineSpan> parseInlineMarkdownSpans(
   TextStyle baseStyle,
   ColorScheme cs, {
   List<TapGestureRecognizer>? recognizers,
+  Color? linkColor,
 }) {
+  final Color resolvedLink = linkColor ?? cs.primary;
   final RegExp tokenPattern = RegExp(
     r"(!\[[^\]]*\]\([^)]+\)|\*\*.+?\*\*|~~.+?~~|`[^`]+`|\[[^\]]+\]\([^)]+\)|(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|_(.+?)_)",
   );
 
   if (!tokenPattern.hasMatch(text)) {
-    return _parsePlainLinks(text, baseStyle, cs, recognizers);
+    return _parsePlainLinks(
+      text,
+      baseStyle,
+      cs,
+      recognizers,
+      linkColor: resolvedLink,
+    );
   }
 
   final List<InlineSpan> spans = <InlineSpan>[];
@@ -632,6 +664,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
           baseStyle,
           cs,
           recognizers,
+          linkColor: resolvedLink,
         ),
       );
     }
@@ -703,7 +736,7 @@ List<InlineSpan> parseInlineMarkdownSpans(
           TextSpan(
             text: label,
             style: baseStyle.copyWith(
-              color: cs.primary,
+              color: resolvedLink,
               fontWeight: FontWeight.w700,
             ),
             recognizer: recognizer,
@@ -739,8 +772,10 @@ List<InlineSpan> _parsePlainLinks(
   String text,
   TextStyle baseStyle,
   ColorScheme cs,
-  List<TapGestureRecognizer>? recognizers,
-) {
+  List<TapGestureRecognizer>? recognizers, {
+  Color? linkColor,
+}) {
+  final Color resolvedLink = linkColor ?? cs.primary;
   final RegExp urlRe = RegExp(r'https?://[^\s]+');
   if (!urlRe.hasMatch(text)) {
     return <InlineSpan>[TextSpan(text: text)];
@@ -771,7 +806,7 @@ List<InlineSpan> _parsePlainLinks(
         TextSpan(
           text: _linkLabel(url),
           style: baseStyle.copyWith(
-            color: cs.primary,
+            color: resolvedLink,
             fontWeight: FontWeight.w700,
           ),
           recognizer: recognizer,

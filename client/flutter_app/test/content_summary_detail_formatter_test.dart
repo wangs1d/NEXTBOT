@@ -121,7 +121,7 @@ void main() {
     expect(tableRowWidth(tester), 600.0);
   });
 
-  testWidgets("表格宽度：列数多时行宽超出容器，保留横向滚动", (
+  testWidgets("表格宽度：列数多时也压回容器宽内平铺，横向滚动只作兜底", (
     WidgetTester tester,
   ) async {
     await pumpTableInWidth(
@@ -131,8 +131,8 @@ void main() {
           "| 1 | 2 | 3 | 4 | 5 | 6 |\n",
     );
 
-    // 6 列 × 140 = 840 > 600，超宽走横向滚动而非挤压。
-    expect(tableRowWidth(tester), 840.0);
+    // 单元格换行后表格恒与容器等宽（见 MarkdownTableWidget 的宽度契约）。
+    expect(tableRowWidth(tester), 600.0);
   });
 
 

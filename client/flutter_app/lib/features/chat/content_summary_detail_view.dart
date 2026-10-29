@@ -1,8 +1,9 @@
 import "package:flutter/material.dart";
 
+import "../../core/theme/app_theme.dart";
+import "../../core/theme/app_typography.dart";
 import "../../core/utils/content_summary_parser.dart";
 import "content_summary_detail_formatter.dart";
-import "content_summary_detail_modal.dart" show contentSummaryMetadataTags;
 import "content_summary_section_nav.dart";
 
 /// 内容详情正文视图：左侧板块书签栏 + 右侧滚动正文（markdown 分行渲染）
@@ -26,6 +27,7 @@ class _ContentSummaryDetailViewScreenState
   final ScrollController _scrollController = ScrollController();
   final Map<int, GlobalKey> _sectionKeys = <int, GlobalKey>{};
   int _activeSectionIndex = 0;
+  bool _railCollapsed = false;
 
   @override
   void initState() {
@@ -157,6 +159,9 @@ class _ContentSummaryDetailViewScreenState
             sections: sections,
             activeIndex: _activeSectionIndex,
             onSectionTap: _scrollToSection,
+            collapsed: _railCollapsed,
+            onToggleCollapsed: () =>
+                setState(() => _railCollapsed = !_railCollapsed),
           ),
         Expanded(
           child: Scrollbar(
@@ -164,10 +169,20 @@ class _ContentSummaryDetailViewScreenState
             thumbVisibility: true,
             child: SingleChildScrollView(
               controller: _scrollController,
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+              padding: const EdgeInsets.fromLTRB(
+                AppTypography.space5,
+                AppTypography.space4,
+                AppTypography.space5,
+                AppTypography.space5 + AppTypography.space4,
+              ),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
+                  _DocumentHeader(
+                    summary: summary,
+                    cs: cs,
+                    textTheme: Theme.of(context).textTheme,
+                  ),
                   ...formatContentSummaryDetailLines(
                     content,
                     cs,
@@ -176,22 +191,125 @@ class _ContentSummaryDetailViewScreenState
                     sectionTitles: sections
                         ?.map((ContentSummarySectionInfo s) => s.title)
                         .toList(),
+                    linkColor: AppPalette.readerLink,
                   ),
-                  if (contentSummaryMetadataTags(summary.metadata).isNotEmpty)
-                    ...<Widget>[
-                      const SizedBox(height: 16),
-                      Wrap(
-                        spacing: 10,
-                        runSpacing: 8,
-                        children: contentSummaryMetadataTags(summary.metadata),
-                      ),
-                    ],
                 ],
               ),
             ),
           ),
         ),
       ],
+    );
+  }
+}
+
+/// 阅读态文档头：大标题（主体｜日期）+ 作者/修改时间元信息行。
+class _DocumentHeader extends StatelessWidget {
+  const _DocumentHeader({
+    required this.summary,
+    required this.cs,
+    required this.textTheme,
+  });
+
+  final ContentSummaryDataV2 summary;
+  final ColorScheme cs;
+  final TextTheme textTheme;
+
+  String get _title {
+    final String subject = ContentSummaryParser.taskSubject(summary);
+    final DateTime? created = summary.createdAt?.toLocal();
+    if (created == null) return subject;
+    return "$subject｜${created.year}年${created.month}月${created.day}日";
+  }
+
+  String get _modifiedLabel {
+    final DateTime? created = summary.createdAt?.toLocal();
+    if (created == null) return "";
+    final DateTime now = DateTime.now();
+    final int dayDiff = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(created.year, created.month, created.day))
+        .inDays;
+    if (dayDiff <= 0) return "今天修改";
+    if (dayDiff == 1) return "昨天修改";
+    if (created.year == now.year) return "${created.month}月${created.day}日修改";
+    return "${created.year}年${created.month}月${created.day}日修改";
+  }
+
+  String get _author {
+    final Object? source = summary.metadata?["source"];
+    if (source == null || source.toString().trim().isEmpty) return "";
+    return "来源：${source.toString().trim()}";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String subject = ContentSummaryParser.taskSubject(summary);
+    final String avatarChar =
+        subject.isEmpty ? "·" : String.fromCharCode(subject.runes.first);
+    final String meta = <String>[
+      if (_author.isNotEmpty) _author,
+      if (_modifiedLabel.isNotEmpty) _modifiedLabel,
+    ].join(" · ");
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: AppTypography.space5),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            _title,
+            style: textTheme.titleLarge?.copyWith(
+              fontSize: AppTypography.docTitle,
+              fontWeight: FontWeight.w800,
+              height: AppTypography.headingLineHeight,
+              letterSpacing: -0.2,
+              color: cs.onSurface,
+            ),
+          ),
+          if (meta.isNotEmpty) ...<Widget>[
+            const SizedBox(height: AppTypography.space3),
+            Row(
+              children: <Widget>[
+                Container(
+                  width: 24,
+                  height: 24,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: cs.surfaceContainerHighest.withValues(alpha: 0.8),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    avatarChar,
+                    style: TextStyle(
+                      fontSize: AppTypography.micro,
+                      fontWeight: FontWeight.w600,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: AppTypography.space2),
+                Container(
+                  width: 1,
+                  height: 12,
+                  color: cs.outline.withValues(alpha: 0.4),
+                ),
+                const SizedBox(width: AppTypography.space2),
+                Flexible(
+                  child: Text(
+                    meta,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: AppTypography.secondary,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ],
+      ),
     );
   }
 }

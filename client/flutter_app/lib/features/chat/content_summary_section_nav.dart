@@ -1,26 +1,35 @@
-﻿import "package:flutter/material.dart";
+import "package:flutter/material.dart";
 
+import "../../core/theme/app_theme.dart";
 import "../../core/utils/content_summary_parser.dart";
 
-/// 弹窗左侧竖向书签导航，便于快速跳转到各板块。
+/// 弹窗左侧竖向目录：可展开/收起，便于快速跳转到各板块并给正文让出宽度。
 class ContentSummaryBookmarkRail extends StatefulWidget {
   const ContentSummaryBookmarkRail({
     super.key,
     required this.sections,
     required this.activeIndex,
     required this.onSectionTap,
+    this.collapsed = false,
+    this.onToggleCollapsed,
   });
 
   final List<ContentSummarySectionInfo> sections;
   final int activeIndex;
   final ValueChanged<int> onSectionTap;
+  final bool collapsed;
+  final VoidCallback? onToggleCollapsed;
+
+  static const double expandedWidth = 156;
+  static const double collapsedWidth = 44;
 
   @override
   State<ContentSummaryBookmarkRail> createState() =>
       _ContentSummaryBookmarkRailState();
 }
 
-class _ContentSummaryBookmarkRailState extends State<ContentSummaryBookmarkRail> {
+class _ContentSummaryBookmarkRailState
+    extends State<ContentSummaryBookmarkRail> {
   final ScrollController _scrollController = ScrollController();
   bool _canScrollUp = false;
   bool _canScrollDown = false;
@@ -73,82 +82,153 @@ class _ContentSummaryBookmarkRailState extends State<ContentSummaryBookmarkRail>
   @override
   Widget build(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
+    final bool collapsed = widget.collapsed;
 
     return Container(
-      width: 168,
+      width: collapsed
+          ? ContentSummaryBookmarkRail.collapsedWidth
+          : ContentSummaryBookmarkRail.expandedWidth,
       decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.35),
         border: Border(
           right: BorderSide(color: cs.outline.withValues(alpha: 0.12)),
         ),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 8),
-            child: Text(
-              "目录",
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: cs.onSurfaceVariant,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: 0.4,
-                  ),
-            ),
-          ),
-          Expanded(
-            child: Stack(
+      child: collapsed
+          ? _CollapsedRail(cs: cs, onExpand: widget.onToggleCollapsed)
+          : Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
-                Scrollbar(
-                  controller: _scrollController,
-                  thumbVisibility: true,
-                  child: ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.fromLTRB(10, 4, 10, 12),
-                    itemCount: widget.sections.length,
-                    itemBuilder: (BuildContext context, int index) {
-                      final ContentSummarySectionInfo section =
-                          widget.sections[index];
-                      final bool active = index == widget.activeIndex;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 8),
-                        child: _BookmarkItem(
-                          title: section.title,
-                          pointCount: section.pointCount,
-                          active: active,
-                          cs: cs,
-                          onTap: () => widget.onSectionTap(index),
+                _RailHeader(cs: cs, onCollapse: widget.onToggleCollapsed),
+                Expanded(
+                  child: Stack(
+                    children: <Widget>[
+                      ListView.builder(
+                        controller: _scrollController,
+                        padding: const EdgeInsets.fromLTRB(8, 2, 8, 16),
+                        itemCount: widget.sections.length,
+                        itemBuilder: (BuildContext context, int index) {
+                          final ContentSummarySectionInfo section =
+                              widget.sections[index];
+                          return _BookmarkItem(
+                            title: section.title,
+                            active: index == widget.activeIndex,
+                            cs: cs,
+                            onTap: () => widget.onSectionTap(index),
+                          );
+                        },
+                      ),
+                      if (_canScrollUp)
+                        Positioned(
+                          top: 0,
+                          left: 0,
+                          right: 0,
+                          child: _VerticalScrollHint(
+                            cs: cs,
+                            up: true,
+                            onTap: () => _scrollBy(-100),
+                          ),
                         ),
-                      );
-                    },
+                      if (_canScrollDown)
+                        Positioned(
+                          bottom: 0,
+                          left: 0,
+                          right: 0,
+                          child: _VerticalScrollHint(
+                            cs: cs,
+                            up: false,
+                            onTap: () => _scrollBy(100),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
-                if (_canScrollUp)
-                  Positioned(
-                    top: 0,
-                    left: 0,
-                    right: 0,
-                    child: _VerticalScrollHint(
-                      cs: cs,
-                      up: true,
-                      onTap: () => _scrollBy(-100),
-                    ),
-                  ),
-                if (_canScrollDown)
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: _VerticalScrollHint(
-                      cs: cs,
-                      up: false,
-                      onTap: () => _scrollBy(100),
-                    ),
-                  ),
               ],
             ),
+    );
+  }
+}
+
+/// 展开态顶栏：左侧收起按钮（与目录条目起点对齐）。
+class _RailHeader extends StatelessWidget {
+  const _RailHeader({required this.cs, required this.onCollapse});
+
+  final ColorScheme cs;
+  final VoidCallback? onCollapse;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      height: 40,
+      child: Row(
+        children: <Widget>[
+          const SizedBox(width: 8),
+          _RailIconButton(
+            icon: Icons.keyboard_double_arrow_left,
+            tooltip: "收起目录",
+            cs: cs,
+            onTap: onCollapse,
           ),
         ],
+      ),
+    );
+  }
+}
+
+class _CollapsedRail extends StatelessWidget {
+  const _CollapsedRail({required this.cs, required this.onExpand});
+
+  final ColorScheme cs;
+  final VoidCallback? onExpand;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: <Widget>[
+        const SizedBox(height: 8),
+        _RailIconButton(
+          icon: Icons.keyboard_double_arrow_right,
+          tooltip: "展开目录",
+          cs: cs,
+          onTap: onExpand,
+        ),
+      ],
+    );
+  }
+}
+
+class _RailIconButton extends StatelessWidget {
+  const _RailIconButton({
+    required this.icon,
+    required this.tooltip,
+    required this.cs,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final ColorScheme cs;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: tooltip,
+      waitDuration: const Duration(milliseconds: 500),
+      child: Material(
+        color: Colors.transparent,
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(6),
+          child: SizedBox(
+            width: 28,
+            height: 28,
+            child: Icon(
+              icon,
+              size: 18,
+              color: cs.onSurfaceVariant.withValues(alpha: 0.75),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -157,79 +237,44 @@ class _ContentSummaryBookmarkRailState extends State<ContentSummaryBookmarkRail>
 class _BookmarkItem extends StatelessWidget {
   const _BookmarkItem({
     required this.title,
-    required this.pointCount,
     required this.active,
     required this.cs,
     required this.onTap,
   });
 
   final String title;
-  final int pointCount;
   final bool active;
   final ColorScheme cs;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: Ink(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(10),
-            color: active
-                ? cs.primaryContainer.withValues(alpha: 0.55)
-                : cs.surface.withValues(alpha: 0.35),
-            border: Border.all(
-              color: active
-                  ? cs.primary.withValues(alpha: 0.42)
-                  : cs.outline.withValues(alpha: 0.14),
-            ),
-          ),
-          child: Stack(
-            children: <Widget>[
-              if (active)
-                Positioned(
-                  left: 0,
-                  top: 8,
-                  bottom: 8,
-                  child: Container(
-                    width: 3,
-                    decoration: BoxDecoration(
-                      color: cs.primary,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Text(
-                      title,
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: active ? cs.primary : cs.onSurface,
-                            fontWeight:
-                                active ? FontWeight.w700 : FontWeight.w500,
-                            height: 1.35,
-                          ),
-                    ),
-                    const SizedBox(height: 4),
-                    Text(
-                      "$pointCount 条",
-                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
-                    ),
-                  ],
-                ),
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 2),
+      child: Material(
+        color: active
+            ? cs.onSurface.withValues(alpha: 0.05)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(6),
+        child: InkWell(
+          onTap: onTap,
+          borderRadius: BorderRadius.circular(6),
+          hoverColor: cs.onSurface.withValues(alpha: 0.04),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 9),
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                fontSize: 13,
+                height: 1.3,
+                color: active
+                    ? AppPalette.readerLink
+                    : cs.onSurfaceVariant.withValues(alpha: 0.85),
+                fontWeight: active ? FontWeight.w600 : FontWeight.w400,
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -255,22 +300,22 @@ class _VerticalScrollHint extends StatelessWidget {
       child: InkWell(
         onTap: onTap,
         child: Container(
-          height: 28,
+          height: 24,
           alignment: Alignment.center,
           decoration: BoxDecoration(
             gradient: LinearGradient(
               begin: up ? Alignment.topCenter : Alignment.bottomCenter,
               end: up ? Alignment.bottomCenter : Alignment.topCenter,
               colors: <Color>[
-                cs.surfaceContainerHighest.withValues(alpha: 0.98),
+                cs.surfaceContainerHighest.withValues(alpha: 0.95),
                 cs.surfaceContainerHighest.withValues(alpha: 0),
               ],
             ),
           ),
           child: Icon(
             up ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
-            size: 18,
-            color: cs.onSurfaceVariant.withValues(alpha: 0.85),
+            size: 16,
+            color: cs.onSurfaceVariant.withValues(alpha: 0.7),
           ),
         ),
       ),

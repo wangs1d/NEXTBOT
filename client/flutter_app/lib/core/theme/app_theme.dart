@@ -42,6 +42,7 @@ abstract final class AppPalette {
   // 保留 4 级灰阶差,既能区分又能融为一体。
   // ═══════════════════════════════════════════════════════════
   static const Color mainPanel = Color(0xFF0F0F0F);
+
   /// 侧栏/顶栏:深一档的灰(#131313),比主背景略亮、与纯黑可识别
   static const Color sidebar = Color(0xFF131313);
   static const Color sidebarSeparator = Color(0xFF2A2A2A);
@@ -61,6 +62,10 @@ abstract final class AppPalette {
   static const Color locationDialogButtonBg = Color(0xFF2C2C2C);
   static const Color locationDialogButtonFg = Color(0xFFE8E8E8);
 
+  /// 阅读态文档(摘要详情)的链接/项目符号强调色。
+  /// 中性灰主题下主色与正文同灰度，来源链接会看不出可点，阅读面单独用蓝色。
+  static const Color readerLink = Color(0xFF378DFF);
+
   // ═══════════════════════════════════════════════════════════
   // 暖色 / 米色主题（新增）
   // 整体走「燕麦米白」：极浅暖灰底 + 略深的米色侧栏 + 近乎白的工作台卡片
@@ -71,6 +76,7 @@ abstract final class AppPalette {
   static const Color warmSidebarSeparator = Color(0xFFE5EAF1);
   static const Color warmAppBarForeground = Color(0xFF21242B);
   static const Color warmSidebarDivider = Color(0xFFE8EDF4);
+
   /// 仅左侧边栏区域使用的浅灰色底（不共享给顶栏/标题栏）
   static const Color warmSidebarPanel = Color(0xFFF0F1F3);
   static const Color warmSidebarIconDefault = Color(0xFF747C88);
@@ -371,8 +377,7 @@ abstract final class AppTheme {
         unselectedLabelStyle:
             const TextStyle(fontWeight: FontWeight.w400, fontSize: 14),
         indicator: UnderlineTabIndicator(
-          borderSide:
-              BorderSide(width: 2, color: AppPalette.warmOnSurface),
+          borderSide: BorderSide(width: 2, color: AppPalette.warmOnSurface),
           insets: const EdgeInsets.symmetric(horizontal: 12),
         ),
       ),

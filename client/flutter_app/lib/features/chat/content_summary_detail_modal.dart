@@ -1,12 +1,12 @@
-﻿import "package:flutter/material.dart";
+import "package:flutter/material.dart";
 
 import "../../core/utils/content_summary_parser.dart";
 import "content_summary_detail_view.dart";
 
 /// 豆包风格：点击详情卡后以独立弹窗展示完整内容。
-/// 宽屏下详情卡默认在右侧双面板展开（main.dart contentSummary 分支，
-/// 顶栏由面板 chrome 展示主体标签），弹窗保留给窄窗口/无面板宿主的场景，
-/// 内容区与面板共用 [ContentSummaryDetailView]。
+/// 宽屏下详情卡默认在右侧双面板展开（main.dart contentSummary 分支），
+/// 弹窗保留给窄窗口/无面板宿主的场景，
+/// 标题统一由 [ContentSummaryDetailView] 的文档头展示。
 class ContentSummaryDetailModal {
   ContentSummaryDetailModal._();
 
@@ -35,7 +35,8 @@ class ContentSummaryDetailModal {
       ) {
         final Size size = MediaQuery.sizeOf(context);
         final bool wide = size.width >= 720;
-        final Offset begin = wide ? const Offset(-0.08, 0) : const Offset(0, 0.06);
+        final Offset begin =
+            wide ? const Offset(-0.08, 0) : const Offset(0, 0.06);
         final CurvedAnimation curved = CurvedAnimation(
           parent: animation,
           curve: Curves.easeOutCubic,
@@ -44,7 +45,8 @@ class ContentSummaryDetailModal {
         return FadeTransition(
           opacity: curved,
           child: SlideTransition(
-            position: Tween<Offset>(begin: begin, end: Offset.zero).animate(curved),
+            position:
+                Tween<Offset>(begin: begin, end: Offset.zero).animate(curved),
             child: child,
           ),
         );
@@ -78,17 +80,10 @@ class _ContentSummaryDetailModalBodyState
     final List<ContentSummarySectionInfo>? sections = summary.sections;
     final bool showBookmarks = sections != null && sections.length > 1;
 
-    // 标题只展示任务主体标签（如「科技新闻」），不展示 LLM 导语式的卡片标题
-    // （如「王哥，我扒了一圈……」，与右侧双面板顶栏一致）；副标题仅板块数。
-    final String title = ContentSummaryParser.taskSubject(summary);
-    final String subtitle = showBookmarks ? "${sections.length} 个板块" : "";
-
     final double panelWidth = wide
         ? (size.width * (showBookmarks ? 0.62 : 0.52)).clamp(520.0, 860.0)
         : size.width * 0.94;
-    final double panelHeight = wide
-        ? size.height * 0.92
-        : size.height * 0.88;
+    final double panelHeight = wide ? size.height * 0.92 : size.height * 0.88;
 
     final Widget panel = Material(
       color: cs.surfaceContainerLow,
@@ -102,16 +97,15 @@ class _ContentSummaryDetailModalBodyState
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            _buildHeader(context, cs, summary.cardIcon, title, subtitle),
+            _buildHeader(cs),
             Expanded(child: ContentSummaryDetailView(summary: summary)),
           ],
         ),
       ),
     );
 
-    final Offset basePosition = wide
-        ? Offset(20 + _dragOffset.dx, _dragOffset.dy)
-        : _dragOffset;
+    final Offset basePosition =
+        wide ? Offset(20 + _dragOffset.dx, _dragOffset.dy) : _dragOffset;
 
     return SafeArea(
       child: Stack(
@@ -143,135 +137,36 @@ class _ContentSummaryDetailModalBodyState
     );
   }
 
-  Widget _buildHeader(
-    BuildContext context,
-    ColorScheme cs,
-    String cardIcon,
-    String title,
-    String subtitle,
-  ) {
+  /// 顶栏只保留拖拽柄与关闭：标题由正文文档头承担，避免同一标题重复出现。
+  Widget _buildHeader(ColorScheme cs) {
     return GestureDetector(
       onPanUpdate: (DragUpdateDetails details) {
         setState(() => _dragOffset += details.delta);
       },
       child: Container(
-        padding: const EdgeInsets.fromLTRB(16, 16, 12, 14),
+        height: 36,
+        padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
         decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest.withValues(alpha: 0.55),
           border: Border(
             bottom: BorderSide(color: cs.outline.withValues(alpha: 0.12)),
           ),
         ),
         child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
             MouseRegion(
               cursor: SystemMouseCursors.grab,
-              child: Container(
-                width: 28,
-                height: 40,
-                alignment: Alignment.center,
-                child: Icon(
-                  Icons.drag_indicator,
-                  size: 22,
-                  color: cs.onSurfaceVariant.withValues(alpha: 0.75),
-                ),
+              child: Icon(
+                Icons.drag_indicator,
+                size: 20,
+                color: cs.onSurfaceVariant.withValues(alpha: 0.7),
               ),
             ),
-            Container(
-              width: 40,
-              height: 40,
-              alignment: Alignment.center,
-              decoration: BoxDecoration(
-                color: cs.primaryContainer.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Text(cardIcon, style: const TextStyle(fontSize: 20)),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  Text(
-                    title,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                          fontWeight: FontWeight.w700,
-                          color: cs.onSurface,
-                          height: 1.35,
-                        ),
-                  ),
-                  if (subtitle.isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 4),
-                    Text(
-                      subtitle,
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: cs.onSurfaceVariant,
-                          ),
-                    ),
-                  ],
-                ],
-              ),
-            ),
+            const Spacer(),
             IconButton(
               onPressed: _close,
-              icon: Icon(Icons.close, size: 22, color: cs.onSurfaceVariant),
+              visualDensity: VisualDensity.compact,
+              icon: Icon(Icons.close, size: 20, color: cs.onSurfaceVariant),
               tooltip: "关闭",
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-List<Widget> contentSummaryMetadataTags(Map<String, dynamic>? metadata) {
-  if (metadata == null || metadata.isEmpty) {
-    return const <Widget>[];
-  }
-
-  // 仅保留「来源」：字数/板块数属于统计噪音（板块数已在标题栏副标题展示），
-  // 经用户反馈从详情底部移除。
-  final List<Widget> tags = <Widget>[];
-
-  final Object? source = metadata["source"];
-  if (source != null && source.toString().trim().isNotEmpty) {
-    tags.add(_ContentSummaryMetaTag(label: "来源", value: source.toString()));
-  }
-
-  return tags;
-}
-
-class _ContentSummaryMetaTag extends StatelessWidget {
-  const _ContentSummaryMetaTag({required this.label, required this.value});
-
-  final String label;
-  final String value;
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withValues(alpha: 0.65),
-        borderRadius: BorderRadius.circular(6),
-      ),
-      child: Text.rich(
-        TextSpan(
-          children: <InlineSpan>[
-            TextSpan(
-              text: "$label ",
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurfaceVariant,
-                  ),
-            ),
-            TextSpan(
-              text: value,
-              style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: cs.onSurface,
-                    fontWeight: FontWeight.w600,
-                  ),
             ),
           ],
         ),

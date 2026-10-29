@@ -23,6 +23,7 @@ import "package:nextbot/core/theme/app_theme.dart";
 import "package:nextbot/core/utils/content_summary_parser.dart";
 import "package:nextbot/features/chat/content_summary_card.dart";
 import "package:nextbot/features/chat/content_summary_detail_view.dart";
+import "package:nextbot/features/chat/content_summary_section_nav.dart";
 
 Future<void> _loadFonts() async {
   final FontLoader sans = FontLoader("MiSans");
@@ -47,8 +48,8 @@ Future<void> _loadFonts() async {
     await (FontLoader(
       "MaterialIcons",
     )..addFont(iconFont
-                .readAsBytes()
-                .then((Uint8List bytes) => ByteData.view(bytes.buffer))))
+            .readAsBytes()
+            .then((Uint8List bytes) => ByteData.view(bytes.buffer))))
         .load();
   } catch (_) {}
 
@@ -58,8 +59,8 @@ Future<void> _loadFonts() async {
     await (FontLoader(
       "SegoeEmoji",
     )..addFont(emoji
-                .readAsBytes()
-                .then((Uint8List bytes) => ByteData.view(bytes.buffer))))
+            .readAsBytes()
+            .then((Uint8List bytes) => ByteData.view(bytes.buffer))))
         .load();
   } catch (_) {}
 }
@@ -84,8 +85,7 @@ String _buildServerOutput() {
       },
       <String, String>{
         "icon": "💡",
-        "text":
-            "河北一位老妇被放入冰箱后停眠\"复活\"，移出冷藏两天后去世——这条在世界新闻网上了即时榜。",
+        "text": "河北一位老妇被放入冰箱后停眠\"复活\"，移出冷藏两天后去世——这条在世界新闻网上了即时榜。",
       },
       <String, String>{
         "icon": "⚡",
@@ -97,19 +97,20 @@ String _buildServerOutput() {
       },
       <String, String>{
         "icon": "✨",
-        "text":
-            "AI 监管成焦点：美众议院放话\"不能暂停 AI 发展\"；参议院正酝酿立法，要求 AI 公司证明已采取安全措施。",
+        "text": "AI 监管成焦点：美众议院放话\"不能暂停 AI 发展\"；参议院正酝酿立法，要求 AI 公司证明已采取安全措施。",
       },
       <String, String>{
         "icon": "📌",
         "text": "蒋万安妻子因说 \"Chinese Taipei\" 被出征，劳动部长回应\"名称就是如此\"。",
       },
     ],
-    // 当前服务端生成时已剥离标题回显首行与渲染标记，正文直接以板块开头
+    // 当前服务端生成时已剥离标题回显首行与渲染标记，正文直接以导语 + 板块开头
     "detailContent": """
+本期覆盖 10 月 27–28 日科技与财经要闻：太空武器、AI 监管、内存涨价。每条附来源链接，点击即可查看原文。
+
 ## 国际 · 最抢眼的
-- **美国首个认部署太空武器**：五角大楼首次证实已部署太空武器，中国随即警告"勿搞军事竞赛"（BBC中文 / 华尔街日报中文网）。
-- **AI 监管成焦点**：美众议院放话"不能暂停 AI 发展，否则会让中国取得竞争优势"；参议院正酝酿立法，要求 AI 公司证明已采取安全措施。
+- **美国首个认部署太空武器**：五角大楼首次证实已部署太空武器，中国随即警告"勿搞军事竞赛"（[BBC中文](https://www.bbc.com/zhongwen) / [华尔街日报中文网](https://cn.wsj.com)）。
+- **AI 监管成焦点**：美众议院放话"不能暂停 AI 发展，否则会让中国取得竞争优势"；参议院正酝酿立法，要求 AI 公司证明已采取安全措施（[路透社](https://www.reuters.com)）。
 - **美国方向**：美国施压墨西哥，要求封锁中国 AI 硬件出口。
 
 ## 国内/华语 · 值得留意的
@@ -138,6 +139,7 @@ String _buildServerOutput() {
       "hasTable": false,
       "hasList": true,
     },
+    "createdAt": "2026-10-28T09:30:00.000Z",
   };
 
   return "[CONTENT_SUMMARY_V2_START]\n${jsonEncode(payload)}\n[CONTENT_SUMMARY_V2_END]\n\n<details_card ref=\"sum-preview-news\" />";
@@ -208,7 +210,8 @@ Widget _panelHarness(ContentSummaryParseResult parsed) {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               Container(
-                padding: const EdgeInsets.fromLTRB(14, 10, 8, 10),
+                height: 36,
+                padding: const EdgeInsets.fromLTRB(12, 0, 8, 0),
                 decoration: BoxDecoration(
                   border: Border(
                     bottom: BorderSide(
@@ -222,15 +225,6 @@ Widget _panelHarness(ContentSummaryParseResult parsed) {
                       Icons.drag_indicator,
                       size: 16,
                       color: cs.onSurfaceVariant,
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      ContentSummaryParser.taskSubject(parsed.summary!),
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: cs.onSurface,
-                      ),
                     ),
                     const Spacer(),
                     Icon(Icons.close, size: 18, color: cs.onSurfaceVariant),
@@ -300,6 +294,72 @@ void main() {
       const Size(760 * 2, 980 * 2),
       "content_summary_panel_dark.png",
       find.byType(ContentSummaryDetailView),
+    );
+  });
+
+  testWidgets("预览：目录展开态（收起按钮 + 单行条目）", (WidgetTester tester) async {
+    await _pumpAndCapture(
+      tester,
+      () => _panelHarness(parsed),
+      const Size(760 * 2, 980 * 2),
+      "content_summary_rail_open_dark.png",
+      find.byType(ContentSummaryDetailView),
+    );
+  });
+
+  testWidgets("目录可收起：点收起按钮后侧栏压到窄条，正文让出宽度", (
+    WidgetTester tester,
+  ) async {
+    tester.view.physicalSize = const Size(760 * 2, 980 * 2);
+    tester.view.devicePixelRatio = 2.0;
+    addTearDown(tester.view.reset);
+    await tester.pumpWidget(_panelHarness(parsed));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+
+    expect(
+      tester
+          .widget<ContentSummaryBookmarkRail>(
+            find.byType(ContentSummaryBookmarkRail),
+          )
+          .collapsed,
+      isFalse,
+    );
+    expect(find.byTooltip("收起目录"), findsOneWidget);
+
+    await tester.tap(find.byTooltip("收起目录"));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<ContentSummaryBookmarkRail>(
+            find.byType(ContentSummaryBookmarkRail),
+          )
+          .collapsed,
+      isTrue,
+    );
+    expect(find.byTooltip("展开目录"), findsOneWidget);
+    expect(
+      tester.getSize(find.byType(ContentSummaryBookmarkRail)).width,
+      ContentSummaryBookmarkRail.collapsedWidth,
+    );
+
+    if (autoUpdateGoldenFiles) {
+      await expectLater(
+        find.byType(ContentSummaryDetailView),
+        matchesGoldenFile("goldens/content_summary_rail_collapsed_dark.png"),
+      );
+    }
+
+    await tester.tap(find.byTooltip("展开目录"));
+    await tester.pumpAndSettle();
+    expect(
+      tester
+          .widget<ContentSummaryBookmarkRail>(
+            find.byType(ContentSummaryBookmarkRail),
+          )
+          .collapsed,
+      isFalse,
     );
   });
 }

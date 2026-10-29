@@ -67,6 +67,7 @@ class ContentSummaryDataV2 {
     this.detailContent,
     this.sections,
     this.metadata,
+    this.createdAt,
   });
 
   final String id;
@@ -80,10 +81,12 @@ class ContentSummaryDataV2 {
   final List<ContentSummarySectionInfo>? sections;
   final Map<String, dynamic>? metadata;
 
+  /// 生成时间（服务端 payload；历史消息可能缺失）
+  final DateTime? createdAt;
+
   factory ContentSummaryDataV2.fromJson(Map<String, dynamic> json) {
     final List<dynamic>? rawSections = json["sections"] as List<dynamic>?;
-    final List<dynamic>? rawBriefPoints =
-        json["briefPoints"] as List<dynamic>?;
+    final List<dynamic>? rawBriefPoints = json["briefPoints"] as List<dynamic>?;
     return ContentSummaryDataV2(
       id: json["id"]?.toString() ?? "",
       category: json["category"]?.toString() ?? "general",
@@ -106,6 +109,7 @@ class ContentSummaryDataV2 {
           .map(ContentSummarySectionInfo.fromJson)
           .toList(),
       metadata: (json["metadata"] as Map?)?.cast<String, dynamic>(),
+      createdAt: DateTime.tryParse(json["createdAt"]?.toString() ?? ""),
     );
   }
 }
@@ -153,9 +157,7 @@ class ContentSummaryParser {
     final String noBlock = text.replaceAll(_summaryBlockRe, "");
     // 孤儿 details_card 占位行无条件清（与服务端 stripContentSummaryBlock 同语义）
     final String cleaned = noBlock.replaceAll(_orphanDetailsCardRe, "");
-    return cleaned
-        .replaceAll(RegExp(r"\n{3,}"), "\n\n")
-        .trim();
+    return cleaned.replaceAll(RegExp(r"\n{3,}"), "\n\n").trim();
   }
 
   /// 匹配「{ ... "items": [ ... ] ... }」形式的 JSON 块。
@@ -255,9 +257,8 @@ class ContentSummaryParser {
     }
 
     try {
-      final String jsonStr = text
-          .substring(startIndex + startMarker.length, endIndex)
-          .trim();
+      final String jsonStr =
+          text.substring(startIndex + startMarker.length, endIndex).trim();
       final Map<String, dynamic> data =
           jsonDecode(jsonStr) as Map<String, dynamic>;
       final ContentSummaryDataV2 summary = ContentSummaryDataV2.fromJson(data);
@@ -421,8 +422,9 @@ class ContentSummaryParser {
         if (raw is! Map) continue;
         final String title = raw["title"]?.toString() ?? "";
         final String? url = raw["url"]?.toString();
-        final String? snippet = (raw["snippet"] ?? raw["content"] ?? raw["description"])
-            ?.toString();
+        final String? snippet =
+            (raw["snippet"] ?? raw["content"] ?? raw["description"])
+                ?.toString();
         final String? source = raw["source"]?.toString();
         final String? publishedAt =
             (raw["publishedAt"] ?? raw["date"] ?? raw["published_at"])
@@ -432,8 +434,9 @@ class ContentSummaryParser {
           url: (url != null && url.isNotEmpty) ? url : null,
           snippet: (snippet != null && snippet.isNotEmpty) ? snippet : null,
           source: (source != null && source.isNotEmpty) ? source : null,
-          publishedAt:
-              (publishedAt != null && publishedAt.isNotEmpty) ? publishedAt : null,
+          publishedAt: (publishedAt != null && publishedAt.isNotEmpty)
+              ? publishedAt
+              : null,
         );
         if (item.hasContent) {
           result.add(item);
