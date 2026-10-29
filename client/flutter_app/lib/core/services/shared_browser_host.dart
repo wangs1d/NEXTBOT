@@ -149,8 +149,11 @@ class SharedBrowserHost {
     }
     if (type == "shared.browser.ask_save_login") {
       // 服务端捕获 Cookie 前的授权征询：弹条等用户表态，答复回传（问一次记住）。
+      // 同站点未答复时不重弹——一次任务里多个页面捕获会重复下发，条会来回跳。
+      final String siteId = payload["siteId"]?.toString() ?? "";
+      if (siteId.isNotEmpty && saveLoginAsk.value?.siteId == siteId) return;
       saveLoginAsk.value = SbSaveLoginAsk(
-        siteId: payload["siteId"]?.toString() ?? "",
+        siteId: siteId,
         siteLabel: payload["siteLabel"]?.toString() ?? "该网站",
       );
       return;

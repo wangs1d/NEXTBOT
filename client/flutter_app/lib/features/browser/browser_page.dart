@@ -496,9 +496,7 @@ class _HomeSearchBoxState extends State<_HomeSearchBox> {
 /// 「试试让 Agent」滚动展示栏：chips 从右往左循环滚动（跑马灯），
 /// 移到末尾无缝回到开头重复；两侧各 48px 渐隐遮罩（边缘裁切不生硬）。
 ///
-/// 滚动停止逻辑（2026-10-28 用户拍板）：鼠标悬停时暂停；一旦用户点击过
-/// 任意 chip，或悬停后把鼠标移开，跑马灯**永久停住**不再动——用户已经
-/// 注意到它了，继续滚只会打扰。
+/// 鼠标悬停暂停、移开继续滚动。
 class _AgentSuggestionsRow extends StatefulWidget {
   const _AgentSuggestionsRow({
     required this.cs,
@@ -529,11 +527,8 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
   double _setContentWidth = 0;
   int _copies = 2;
 
-  /// 鼠标悬停中（暂停滚动，不移开不恢复——移开即永久停）。
+  /// 鼠标悬停中（暂停滚动，移开恢复）。
   bool _hovering = false;
-
-  /// 永久停止：点击过任意 chip 或悬停后移开即置位，跑马灯不再前进。
-  bool _stopped = false;
 
   @override
   void initState() {
@@ -572,19 +567,12 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
     _ticker ??= createTicker(_onTick)..start();
   }
 
-  /// 永久停止：停掉 ticker（省电，也保证语义上「不再动」）。
-  void _stopForGood() {
-    if (_stopped) return;
-    _stopped = true;
-    _ticker?.stop();
-  }
-
   void _onTick(Duration elapsed) {
-    if (_stopped || _hovering) return;
     final double deltaSec =
         (elapsed - _lastTick).inMicroseconds / Duration.microsecondsPerSecond;
     _lastTick = elapsed;
-    if (_setContentWidth <= 0 || !_controller.hasClients) return;
+    // 悬停只推进时间基准、不推进位移，移开后才不会补跳一段
+    if (_hovering || _setContentWidth <= 0 || !_controller.hasClients) return;
     double next = _controller.offset + _speedPxPerSec * deltaSec;
     // 一组内容滚完即回跳一组宽度：内容成对复制，回跳点视觉无缝
     if (next >= _setContentWidth) next -= _setContentWidth;
@@ -600,11 +588,7 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
           child: _AgentSuggestionChip(
             cs: widget.cs,
             label: skill.label,
-            onTap: () {
-              // 点击即表示用户已注意到这排建议：跑马灯永久停住
-              _stopForGood();
-              widget.onTap(skill);
-            },
+            onTap: () => widget.onTap(skill),
           ),
         ),
     ];
@@ -647,12 +631,7 @@ class _AgentSuggestionsRowState extends State<_AgentSuggestionsRow>
       },
       child: MouseRegion(
         onEnter: (_) => setState(() => _hovering = true),
-        onExit: (_) {
-          // 悬停后移开：用户看过一眼了，永久停住
-          _hovering = false;
-          _stopForGood();
-          if (mounted) setState(() {});
-        },
+        onExit: (_) => setState(() => _hovering = false),
         child: ClipRect(
           child: SingleChildScrollView(
             controller: _controller,
@@ -848,8 +827,8 @@ class _SaveLoginAskBar extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                "允许 NextBot 保存你在${ask.siteLabel}的登录态吗？加密存本机，比价 / 下单免重复登录",
-                maxLines: 2,
+                "允许保存你在${ask.siteLabel}的 Cookie 吗？",
+                maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
                     fontSize: 12, color: cs.onSecondaryContainer),
