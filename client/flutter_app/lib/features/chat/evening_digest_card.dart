@@ -5,16 +5,20 @@ import "package:flutter/material.dart";
 ///
 /// 晚间 digest（evening.digest 事件）不再渲染纯文本气泡：本卡是每晚对
 /// 「明天要做的事」的简短汇报——narrationText（agent 口吻睡前文案）为
-/// 卡顶部的「agent 说的话」段落，下面接结构化的明日信息块（行程 / 天气
-/// 与穿衣 / 截止事项）。整卡恒展开，无折叠展开（2026-10-22 用户定稿：
+/// 卡顶部的「agent 说的话」段落，下面接结构化的明日信息块（截止事项 / 行程 /
+/// 天气）。整卡恒展开，无折叠展开（2026-10-22 用户定稿：
 /// 不做今日回顾，不做折叠）。
 ///
 /// 载荷与服务端 [EveningDigest] 同构（ws EveningDigest payload.digest）：
 ///   - narrationText: agent 口吻睡前文案
 ///   - date: 今日本地日期键（YYYY-MM-DD），明日标签由此推导
 ///   - tomorrowSchedule: [{ id, title, time?, advanceNotes?: string[] }]
-///   - tomorrowWeather: { text, minC, maxC, rainPct, alerts[] } | null
-///   - outfitTip: string | null
+///   - tomorrowWeather: { text, minC, maxC, rainWindowLabel?, alerts[] } | null
+///   - deadlineReminders: [{ title, dueAt, overdue, dayDiff, tier }]
+///
+/// 降雨时段与穿衣只走文字叙述（2026-10-29 用户定稿）：卡上的天气块留温度与
+/// 现象，「几点到几点下」「穿什么、带不带伞」由顶部 narration 说完；
+/// rainWindowLabel / outfitTip 因此不再上卡（仍是服务端文案的数据源）。
 class EveningDigestCard extends StatelessWidget {
   const EveningDigestCard({super.key, required this.digest});
 
@@ -61,7 +65,6 @@ class EveningDigestCard extends StatelessWidget {
     final Object? rawWeather = digest["tomorrowWeather"];
     final Map<String, dynamic> weather =
         rawWeather is Map ? rawWeather.cast<String, dynamic>() : const <String, dynamic>{};
-    final String outfitTip = (digest["outfitTip"]?.toString() ?? "").trim();
     final String? tomorrowLabel = _tomorrowLabel();
 
     return Card(
@@ -188,7 +191,7 @@ class EveningDigestCard extends StatelessWidget {
                   child: _ScheduleItem(item: s, theme: theme),
                 ),
             ],
-            // ── 明日天气 + 穿衣 ──
+            // ── 明日天气（温度 + 现象；雨时段与穿衣交给顶部文案）──
             if (weather.isNotEmpty) ...<Widget>[
               const SizedBox(height: 14),
               _SectionHeader(
@@ -209,7 +212,7 @@ class EveningDigestCard extends StatelessWidget {
                   const SizedBox(width: 10),
                   Expanded(
                     child: Text(
-                      _weatherLine(weather),
+                      weather["text"]?.toString() ?? "",
                       style: theme.textTheme.bodyMedium?.copyWith(
                         color: cs.onSurfaceVariant,
                       ),
@@ -241,26 +244,6 @@ class EveningDigestCard extends StatelessWidget {
                   ],
                 ),
               ],
-              if (outfitTip.isNotEmpty) ...<Widget>[
-                const SizedBox(height: 8),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Icon(Icons.checkroom_outlined,
-                        size: 15, color: cs.onSurfaceVariant),
-                    const SizedBox(width: 6),
-                    Expanded(
-                      child: Text(
-                        outfitTip,
-                        style: theme.textTheme.bodySmall?.copyWith(
-                          color: cs.onSurfaceVariant,
-                          height: 1.45,
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
             ],
           ],
         ),
@@ -286,15 +269,6 @@ class EveningDigestCard extends StatelessWidget {
     final String minStr = min is num ? min.toStringAsFixed(0) : "--";
     final String maxStr = max is num ? max.toStringAsFixed(0) : "--";
     return "$minStr~$maxStr°";
-  }
-
-  /// 天气副行：现象 + 降水概率（预警由独立 chip 呈现，不在此重复）
-  String _weatherLine(Map<String, dynamic> w) {
-    final String text = w["text"]?.toString() ?? "";
-    final Object? rain = w["rainPct"];
-    final String rainPart =
-        rain is num && rain >= 20 ? "，降水 ${rain.toStringAsFixed(0)}%" : "";
-    return "$text$rainPart";
   }
 }
 

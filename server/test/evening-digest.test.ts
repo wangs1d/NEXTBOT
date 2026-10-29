@@ -94,7 +94,14 @@ test("晚间 digest：明日行程 + 次日天气与穿衣确定性聚合与播�
         { date: dayKey(new Date()), weatherCode: 65, weatherText: "大雨", minC: 18, maxC: 24, rainPct: 90 },
         { date: dayKey(tomorrow), weatherCode: 95, weatherText: "雷暴", minC: 17, maxC: 23, rainPct: 85 },
       ],
-      tomorrow: { weatherCode: 95, weatherText: "雷暴", minC: 17, maxC: 23, rainPct: 85 },
+      tomorrow: {
+        weatherCode: 95,
+        weatherText: "雷暴",
+        minC: 17,
+        maxC: 23,
+        rainPct: 85,
+        rainWindow: { period: "下午", startHour: 14, endHour: 18, peakPct: 85, label: "下午 14–18 点", alreadyPassed: false },
+      },
     }),
   };
   const weatherPrefsService = {
@@ -117,6 +124,9 @@ test("晚间 digest：明日行程 + 次日天气与穿衣确定性聚合与播�
   assert.equal(digest.tomorrowSchedule[0]!.title, "项目周会");
   assert.equal(digest.tomorrowWeather?.text, "雷暴");
   assert.deepEqual(digest.tomorrowWeather?.alerts, ["雷暴"]);
+  // 雨时段（brief.tomorrow.rainWindow）随天气块下发，概率百分比不下发
+  assert.equal(digest.tomorrowWeather?.rainWindowLabel, "下午 14–18 点");
+  assert.equal("rainPct" in (digest.tomorrowWeather ?? {}), false);
   // 明日 17~23° 有雷暴雨 → 薄外套层 + 雨具（digest 数据块，全串口径）
   assert.equal(digest.outfitTip, "薄外套或长袖叠穿；携带雨具（伞或雨衣）");
 
@@ -125,8 +135,68 @@ test("晚间 digest：明日行程 + 次日天气与穿衣确定性聚合与播�
   assert.match(digest.narrationText, /明天就一件事/);
   assert.match(digest.narrationText, /项目周会/);
   assert.match(digest.narrationText, /到点我叫你/);
-  assert.match(digest.narrationText, /明天雷暴17~23度，长袖，记得带伞。/);
+  assert.match(digest.narrationText, /明天雷暴17~23度，雨集中在下午 14–18 点，长袖，记得带伞。/);
   assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔|薄外套或长袖叠穿/);
+});
+
+test("晚间 digest：雨时段进 prompt 数据段，概率百分比与贫嘴腔都禁", async () => {
+  const tomorrow = new Date();
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  let capturedPrompt = "";
+  const svc = new EveningDigestService({
+    weatherService: {
+      getBrief: async () => ({
+        source: "open-meteo" as const,
+        latitude: 39.9,
+        longitude: 116.4,
+        timezone: "Asia/Shanghai",
+        locationLabel: "北京市",
+        currentTempC: 20,
+        apparentTempC: 19,
+        humidityPct: 60,
+        windKmh: 10,
+        precipitationMm: 0,
+        weatherCode: 1,
+        weatherText: "晴",
+        todayMinC: 18,
+        todayMaxC: 24,
+        peakRainPct: 10,
+        clothingAdvice: "",
+        hourlyForecast: [],
+        summaryLine: "",
+        daily: [
+          { date: dayKey(new Date()), weatherCode: 1, weatherText: "晴", minC: 18, maxC: 24, rainPct: 10 },
+          { date: dayKey(tomorrow), weatherCode: 80, weatherText: "阵雨", minC: 16, maxC: 24, rainPct: 51 },
+        ],
+        tomorrow: {
+          weatherCode: 80,
+          weatherText: "阵雨",
+          minC: 16,
+          maxC: 24,
+          rainPct: 51,
+          rainWindow: { period: "下午", startHour: 14, endHour: 17, peakPct: 51, label: "下午 14–17 点", alreadyPassed: false },
+        },
+      }),
+    } as never,
+    weatherPrefsService: {
+      get: (sessionId: string) => {
+        assert.equal(sessionId, SESSION);
+        return { sessionId, latitude: 39.9, longitude: 116.4, timezone: "Asia/Shanghai", label: "北京市" };
+      },
+    } as never,
+    llmComplete: async (prompt) => {
+      capturedPrompt = prompt;
+      return "明天没安排，下午两点到五点可能有阵雨，伞放门口。早点睡。";
+    },
+  });
+  const digest = await svc.generateDigest(SESSION);
+  // 数据段：给时段，不给概率百分比（写法段里「别提降水概率」的禁令字样不算数）
+  const dataSection = capturedPrompt.split("\n写法：")[0] ?? "";
+  assert.match(dataSection, /雨大概集中在下午 14–17 点/);
+  assert.doesNotMatch(dataSection, /降水概率/);
+  // 写法段：贫嘴禁令在（治「就下雨这点事」式轻浮句）
+  assert.match(capturedPrompt, /贫嘴/);
+  assert.equal(digest.tomorrowWeather?.rainWindowLabel, "下午 14–17 点");
 });
 
 test("晚间 digest：依赖缺失/无数据时各块自然省略", async () => {

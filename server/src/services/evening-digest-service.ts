@@ -42,7 +42,12 @@ export interface EveningDigestTomorrowWeather {
   text: string;
   minC: number;
   maxC: number;
-  rainPct: number;
+  /**
+   * 明日降雨最集中的钟点段（如「下午 14–17 点」，达标线 40%），取自
+   * weather-service 的 brief.tomorrow.rainWindow；未达标/取不到时省略。
+   * 概率百分比不下发——用户口径：百分比无信息量，要的是「几点会下」。
+   */
+  rainWindowLabel?: string;
   /** 次日预警标签（暴雨/高温/大风/寒潮等；空数组 = 无预警） */
   alerts: string[];
 }
@@ -278,7 +283,8 @@ export class EveningDigestService {
         : "无";
     const w = d.tomorrowWeather;
     const weatherLine = w
-      ? `${w.text}，${w.minC.toFixed(0)}-${w.maxC.toFixed(0)}度，降水概率${w.rainPct}%` +
+      ? `${w.text}，${w.minC.toFixed(0)}-${w.maxC.toFixed(0)}度` +
+        (w.rainWindowLabel ? `，雨大概集中在${w.rainWindowLabel}` : "") +
         (w.alerts.length > 0 ? `，预警：${w.alerts.join("、")}` : "")
       : null;
 
@@ -303,11 +309,14 @@ export class EveningDigestService {
       "- 一到两句，短句。只挑最早或最要紧的那件事说，别把日程从头到尾念一遍。" +
         "时间要口语化，比如「九点半有个周会」，不要写成「9:30 项目周会」这种条目。",
       "- 明天天气和穿衣要说（这是明日速览的正经内容，不是可省项）：预警优先；" +
-        "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。",
+        "合起来最多一小句，像「明天22度，短袖就行」这样自然带过，别写成播报。" +
+        "数据里给了雨集中的时段就照着说「几点到几点可能下」，别提降水概率百分比。",
       "- 有截止事项的话必须提，这是睡前最该交代的一句：说明天/今天什么时候要交什么，" +
         "像「明天下午三点前那个数据结构的作业得交了」；超过两件只说最紧的那一件+一共几件，" +
         "别把清单念一遍，也别加「别忘了」「切记」这类催促腔。",
       "- 明天没安排就轻松带过一句，不许编事，也不许硬凑。",
+      "- 松弛不等于贫嘴：「就下雨这点事」「不就个XX」这种把正事说成玩笑的轻浮腔不许有，" +
+        "提醒要正经给，收尾可以随意。",
       "- 可以有自然的语气词或一句收尾（「记得定闹钟」「早点睡」），但别每次都一个套路。",
       "- 不要：敬语、「亲爱的」、「您好」、「温馨提示」、汇报腔、排比、书面语、emoji、标题、引号、换行、任何解释。",
       "只输出消息正文本身。",
@@ -389,13 +398,18 @@ export class EveningDigestService {
       loc.timezone || "auto",
       loc.label,
     );
-    const t = brief.daily?.find((d) => d.date === previewDateKey) ?? null;
+    const dailyItems = brief.daily ?? [];
+    const dayIndex = dailyItems.findIndex((d) => d.date === previewDateKey);
+    const t = dayIndex >= 0 ? dailyItems[dayIndex]! : null;
     if (!t) return { weather: null, outfitTip: null };
+    // brief.tomorrow 的雨时段指向 API 的真实明天（daily[1]）；跨零点补推
+    // （previewDate）时日期错位，时段不能张冠李戴，只在两者对齐时带上
+    const rainWindow = dayIndex === 1 ? brief.tomorrow?.rainWindow : undefined;
     const weather: EveningDigestTomorrowWeather = {
       text: t.weatherText,
       minC: t.minC,
       maxC: t.maxC,
-      rainPct: t.rainPct,
+      ...(rainWindow?.label ? { rainWindowLabel: rainWindow.label } : {}),
       alerts: detectSevereWeatherAlerts(t),
     };
     const outfitTip = buildClothingAdvice({
@@ -500,12 +514,13 @@ function weatherOutfitBit(d: EveningDigest): string {
     : w.maxC >= 12 ? "外套"
     : w.maxC >= 5 ? "厚外套"
     : "羽绒服";
-  const rainy = w.rainPct >= 40 || w.text.includes("雨");
+  const rainy = Boolean(w.rainWindowLabel) || w.text.includes("雨");
   const snowy = w.text.includes("雪");
   const action = snowy ? "注意防滑" : rainy ? "记得带伞" : "";
   // 预警标签与天气文本重复（如「雷暴」既是 text 又是 alert）时不二次播报
   const alerts = w.alerts.filter((a) => !w.text.includes(a));
   const alertPart = alerts.length > 0 ? `，${alerts.join("、")}预警` : "";
+  const rainWindowPart = w.rainWindowLabel ? `，雨集中在${w.rainWindowLabel}` : "";
   const actionPart = action ? `，${action}` : "";
-  return `明天${w.text}${w.minC.toFixed(0)}~${w.maxC.toFixed(0)}度${alertPart}，${layer}${actionPart}。`;
+  return `明天${w.text}${w.minC.toFixed(0)}~${w.maxC.toFixed(0)}度${alertPart}${rainWindowPart}，${layer}${actionPart}。`;
 }
