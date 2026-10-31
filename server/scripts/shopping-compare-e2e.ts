@@ -3,7 +3,7 @@
  *
  *   真实 BrowserSessionService（临时 Cookie 库）→ 真实 ShoppingOrderService
  *   （真实 Playwright chromium 开真实平台搜索页、DOM 抽取）→ 真实
- *   ShoppingCompareService（真实同款归一聚合 + 价格历史 + 降价监控）→
+ *   ShoppingCompareService（真实同款归一聚合 + 降价监控）→
  *   真实注册版 tool handler（ToolRegistry.execute 同主聊天通道）。
  *
  *   不注入任何 fake 数据源/假 LLM；Cookie 为匿名探针（非用户真实登录态），
@@ -17,7 +17,7 @@
  *   S3 降价监控：addWatch → 真实一轮 checkAllWatches tick → 到价 onPriceAlert
  *      推送 + 同价位去重（第二轮不重复推）
  */
-import { mkdtempSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -40,7 +40,6 @@ function record(name: string, pass: boolean, detail: string): void {
   results.push({ name, pass, detail });
   console.log(`  ${pass ? "✅" : "❌"} ${name}\n     ${detail}`);
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /** 匿名探针 Cookie：仅用于过"已导入+已授权"门禁，不携带任何真实登录态。 */
 const anonCookie = (domain: string) => [
@@ -174,14 +173,6 @@ async function main(): Promise<void> {
       "S3c 同价位不重复推送（lastNotifiedPrice 去重）",
       hits2 === 0 && !alertHit,
       `第二轮 hits=${hits2}，重复推送=${alertHit ? "是（BUG）" : "否"}`,
-    );
-
-    await sleep(1500); // 价格历史异步落盘
-    const historyFile = join(compareDataDir, "price-history.json");
-    record(
-      "S3d 价格历史落盘",
-      existsSync(historyFile),
-      existsSync(historyFile) ? readFileSync(historyFile, "utf8").slice(0, 200) : `${historyFile} 不存在`,
     );
 
     await execute("shopping.compare.watch", { action: "remove", target: QUERY }, TOOL_CTX);

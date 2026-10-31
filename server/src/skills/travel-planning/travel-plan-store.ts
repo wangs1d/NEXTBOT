@@ -40,7 +40,14 @@ export interface StoredDayItem {
   /** 3D 高斯溅射（3DGS）沉浸式实景素材 URL（.ply/.splat/.ksplat，无则省略） */
   splatUrl?: string;
   /** 从上一个条目出发的交通腿（首项无；编辑局部重排时按新坐标重算） */
-  transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
+  transportFromPrev?: {
+    mode: string;
+    durationMin: number;
+    distanceKm?: number;
+    note?: string;
+    /** 车程来源：amap/osrm=真实路网，estimate=直线推算（展示侧要标「约」） */
+    source?: 'amap' | 'osrm' | 'estimate';
+  };
   /** 建议游览/用餐时长（分钟；编辑局部重排用它保持原排时口径） */
   visitDuration?: number;
   /** 画像推荐理由（travel 双端②：「为什么推荐给你」，有画像信号才有） */

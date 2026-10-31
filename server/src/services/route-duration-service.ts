@@ -1,7 +1,7 @@
 /**
- * 驾车路程估时薄服务（无本地依赖）：
- *   目的地文本 × 起点（坐标或文本）→ 高德地理编码 → 高德驾车路径规划
- *   （含实时路况时长）→ { durationMin, distanceKm, source }；
+ * 路程估时薄服务（无本地依赖）：
+ *   目的地文本 × 起点（坐标或文本）→ 高德地理编码 → 高德路径规划（驾车含实时
+ *   路况时长 / 步行按真实步速）→ { durationMin, distanceKm, source }；
  *   无 Key / 失败自动降级 OSRM（调用方注入 computeRoute 形状的兜底函数）。
  *
  * 提取自 travel-commute-skills 的同名私有函数（travel.departure-advice 与本服务
@@ -15,6 +15,7 @@
 
 const AMAP_GEO_BASE = "https://restapi.amap.com/v3/geocode/geo";
 const AMAP_DRIVING_BASE = "https://restapi.amap.com/v3/direction/driving";
+const AMAP_WALKING_BASE = "https://restapi.amap.com/v3/direction/walking";
 const AMAP_TIMEOUT_MS = 8_000;
 
 export type RouteEstimateSource = "amap" | "osrm";
@@ -41,37 +42,49 @@ export async function amapGeocode(address: string, city?: string): Promise<strin
   return null;
 }
 
-/** 高德驾车路径规划：返回 {durationMin, distanceKm}（含实时路况时长估算） */
-export async function amapDrivingRoute(
+type AmapRouteMinutes = { durationMin: number; distanceKm: number } | null;
+
+async function amapDirection(
+  base: string,
   origin: string,
   destination: string,
-): Promise<{ durationMin: number; distanceKm: number } | null> {
+  extra?: Record<string, string>,
+): Promise<AmapRouteMinutes> {
   const key = process.env.AMAP_WEB_KEY || "";
   if (!key) return null;
-  const params = new URLSearchParams({
-    key,
-    origin,
-    destination,
-    extensions: "base",
-    strategy: "2",
-  });
+  const params = new URLSearchParams({ key, origin, destination, extensions: "base", ...extra });
   try {
-    const res = await fetch(`${AMAP_DRIVING_BASE}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
+    const res = await fetch(`${base}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
     const json = (await res.json()) as {
       status?: string;
       route?: { paths?: Array<{ duration?: string; distance?: string }> };
     };
     const path = json.route?.paths?.[0];
     if (json.status === "1" && path?.duration) {
-      return {
-        durationMin: Math.round(Number(path.duration) / 60),
-        distanceKm: Math.round(Number(path.distance ?? 0) / 100) / 10,
-      };
+      const durationMin = Math.round(Number(path.duration) / 60);
+      if (!Number.isFinite(durationMin)) return null;
+      return { durationMin, distanceKm: Math.round(Number(path.distance ?? 0) / 100) / 10 };
     }
   } catch {
     // 降级
   }
   return null;
+}
+
+/** 高德驾车路径规划：返回 {durationMin, distanceKm}（含实时路况时长估算） */
+export async function amapDrivingRoute(
+  origin: string,
+  destination: string,
+): Promise<AmapRouteMinutes> {
+  return amapDirection(AMAP_DRIVING_BASE, origin, destination, { strategy: "2" });
+}
+
+/** 高德步行路径规划：市内短驳用步行才不会被驾车估时压低（1km 开车 3 分、走路 15 分） */
+export async function amapWalkingRoute(
+  origin: string,
+  destination: string,
+): Promise<AmapRouteMinutes> {
+  return amapDirection(AMAP_WALKING_BASE, origin, destination);
 }
 
 export type DriveEstimateInput = {

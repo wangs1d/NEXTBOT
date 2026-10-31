@@ -524,7 +524,8 @@ function dayStart(){return DAY_START[state.day]||540;}
 /* 交通方式图标（icon/TICON）随「前往下一站」一并下线：桌面端不再做过程引导 */
 var TNAME={walk:'步行',bike:'骑行',boat:'游船',taxi:'打车',hike:'徒步'};
 function clamp(v,a,b){return Math.max(a,Math.min(b,v));}
-function t2s(m){m=Math.round(m);return (Math.floor(m/60)+'').padStart(2,'0')+':'+(m%60+'').padStart(2,'0');}
+/** 分钟 → HH:MM，24 小时制回绕（与 mobile.html 的 min2text 同口径）。 */
+function t2s(m){m=Math.round(m);var hh=((Math.floor(m/60)%24)+24)%24,mm=((m%60)+60)%60;return (hh+'').padStart(2,'0')+':'+(mm+'').padStart(2,'0');}
 
 /* ================= 状态 + Agent 实时重排 ================= */
 var state={day:1,pace:0,event:null,cur:2,prev:null,forceShow:{},view:'now'};
@@ -565,7 +566,7 @@ function replan(){
     else if(sp.anchor)dur=sp.base;
     else{dur=sp.base-ep*8;if(ev==='behind')dur*=0.85;dur=clamp(Math.round(dur),sp.base*0.5,sp.base*1.5);}
     var next=visible[i+1],edge=null;
-    if(next){var key=id+'->'+next;edge=EDGE[key]?EDGE[key].slice():['walk',8,'600m'];}
+    if(next){var key=id+'->'+next;edge=EDGE[key]?EDGE[key].slice():['walk',8,'600m',true];}
     items.push({id:id,sp:sp,start:cur,end:cur+dur,dur:dur,edge:edge,
       picked:sp.optional&&(ep>=1||ev==='rain'||state.forceShow[id]),rest:!!sp.rest});
     cur+=dur+(edge?edge[1]:0);
@@ -573,13 +574,13 @@ function replan(){
   finalize(items,dayStart());
   return {items:items,alts:alts};
 }
-function minDur(it){if(it.sp.k==='stay'||it.sp.anchor)return it.sp.base;if(it.sp.rest)return 15;return Math.round(it.sp.base*0.5);}
-function compressible(it){return !it.sp.anchor&&it.sp.k!=='stay'&&!it.sp.rest;}
+function minDur(it){if(it.sp.k==='stay'||it.sp.anchor!=null)return it.sp.base;if(it.sp.rest)return 15;return Math.round(it.sp.base*0.5);}
+function compressible(it){return it.sp.anchor==null&&it.sp.k!=='stay'&&!it.sp.rest;}
 function finalize(items,dayStartMin){
   var base=dayStartMin==null?540:dayStartMin;
   var lastEnd=base,segStart=0;
   for(var i=0;i<items.length;i++){var it=items[i];
-    if(it.sp.anchor){
+    if(it.sp.anchor!=null){
       var prev=items[segStart-1],lead=(prev&&prev.edge)?prev.edge[1]:0;
       var avail=it.sp.anchor-lastEnd-lead,seg=items.slice(segStart,i),need=0;
       seg.forEach(function(x){need+=x.dur+(x.edge?x.edge[1]:0);});
@@ -592,7 +593,14 @@ function finalize(items,dayStartMin){
     }
   }
   var cur=base;
-  items.forEach(function(it){it.start=it.sp.anchor?it.sp.anchor:cur;it.end=it.start+it.dur;cur=it.end+(it.edge?it.edge[1]:0);});
+  items.forEach(function(it){
+    // 载荷给过真实时刻的站一律按真实时刻落位（客户端不再重算全天时钟）；
+    // 只有缺时刻的站才从上一站终点顺推
+    var pin=it.sp.anchor!=null?it.sp.anchor:it.sp.realStart;
+    it.start=pin!=null?pin:cur;
+    it.end=it.sp.realEnd!=null&&it.sp.realEnd>it.start?it.sp.realEnd:it.start+it.dur;
+    cur=it.end+(it.edge?it.edge[1]:0);
+  });
 }
 /** 收起/加回的实际站点名（气泡文案用真实数据，不写死杭州地名）。 */
 function namesOf(plan,ids){return (ids||[]).map(function(id){var sp=S[id];return sp?sp.n:'';}).filter(Boolean);}
@@ -773,8 +781,11 @@ function render(){
     if(v){el.style.display='inline-flex';el.href=v.u;$('nowVideoTitle').textContent=v.t||'打卡视频';el.title=v.t||'打卡视频';}
     else{el.style.display='none';el.removeAttribute('href');$('nowVideoTitle').textContent='';}
   })();
-  $('stayText').textContent='建议停留 '+cur.dur+' 分钟';
+  /* 「建议停留」要载荷给了真实时长才出现：拿两站间隔冒充建议时长，等于替用户编一条排程事实 */
+  var stayReal=cur.sp.durReal!==false;
+  $('stayText').textContent=stayReal?'建议停留 '+cur.dur+' 分钟':'';
   $('stayFill').style.width=clamp(cur.dur/120*100,8,100)+'%';
+  $('stayText').closest('.stay-row').style.display=stayReal?'':'none';
   /* 就地编辑入口：只有落过盘的正式行程可改（演示数据/宿主没给 planId 时整行不出现），
      每次重绘解除上一次点击留下的置灰 */
   (function(){
@@ -788,6 +799,19 @@ function render(){
   renderStopNav(items);
   if(state.view==='map')renderMap(items);
 }
+/** 行内第二行只印载荷给的事实：停留时长没有真值就不印「停留」（两站间隔不是停留）；
+    车程按坐标估算要标「约」，估到封顶值说明这一腿根本不在市区口径里，宁可不印。 */
+function stopSub(it){
+  var p=[];
+  if(it.sp.durReal!==false&&it.dur>0)p.push('停留 '+it.dur+' 分');
+  if(it.edge){
+    var est=it.edge[3]===true;
+    if(!est)p.push(TNAME[it.edge[0]]+' '+it.edge[1]+' 分');
+    else if(it.edge[1]<EDGE_MAX_MIN)p.push('约 '+TNAME[it.edge[0]]+' '+it.edge[1]+' 分');
+  }
+  if(it.picked)p.push('刚加回');
+  return p.join(' · ');
+}
 function renderRight(items,alts){
   $('rbCnt').textContent=items.length+' 站';
   $('rbFabCnt').textContent=$('rbCnt').textContent;
@@ -799,7 +823,7 @@ function renderRight(items,alts){
       (thu?'<div class="rb-thumb" data-thumb="'+it.sp.id+'"><img src="'+escHtml(thu)+'" alt="" onerror="this.style.display=\'none\'"></div>'
           :'<div class="rb-thumb noimg" data-thumb="'+it.sp.id+'"><span>'+escHtml((it.sp.n||'·').slice(0,1))+'</span></div>')+
       '<div class="rb-main"><div class="rb-name">'+it.sp.n+'</div>'+
-      '<div class="rb-sub">停留 '+it.dur+' 分'+(it.edge?' · '+TNAME[it.edge[0]]+' '+it.edge[1]+' 分':'')+(it.picked?' · 刚加回':'')+'</div></div>'+
+      '<div class="rb-sub">'+stopSub(it)+'</div></div>'+
       '<div class="rb-tag">'+it.sp.tag.split(' ')[0]+'</div></div>';
   });
   if(alts.length){
@@ -914,7 +938,8 @@ function placeBubbleByIdx(items,idx){
   }).join('')+'</div>':'')+
     '<div class="pb-cap"><span>'+t2s(it.start)+' — '+t2s(it.end)+'</span><span class="pb-tag">'+escHtml(it.sp.tag)+'</span></div>'+
     '<div class="pb-meta"><div class="pb-name">'+escHtml(it.sp.n)+'</div>'+
-    '<div class="pb-sub">'+(it.sp.star>0?'★ '+it.sp.star.toFixed(1)+' · ':'')+'停留 '+it.dur+' 分</div></div>';
+    '<div class="pb-sub">'+(it.sp.star>0?'★ '+it.sp.star.toFixed(1):'')+
+    (it.sp.star>0&&it.sp.durReal!==false?' · ':'')+(it.sp.durReal!==false?'停留 '+it.dur+' 分':'')+'</div></div>';
   el.addEventListener('mouseenter',cancelHideBubble);
   el.addEventListener('mouseleave',function(){scheduleHideBubble(bubbleIdx);});
   el.addEventListener('click',function(e){e.stopPropagation();switchView('now');});
@@ -1561,7 +1586,10 @@ function normalizePlan(raw){
         entries:(d.items||[]).map(function(it){
           return{
             name:str(it.name),type:str(it.type),time:str(it.startTime),
+            endTime:str(it.endTime),
             duration:Number(it.visitDuration)||0,
+            leg:legOfStore(it.transportFromPrev),
+            anchor:it.anchor===true,
             description:str(it.description),priceInfo:str(it.priceInfo),
             tips:Array.isArray(it.tips)?it.tips:[],
             address:str(it.address),images:Array.isArray(it.images)?it.images:[],
@@ -1581,6 +1609,29 @@ var KIND_BY_TYPE={attraction:'sight',restaurant:'food',hotel:'stay',transport:'r
 var TAG_BY_TYPE={attraction:'景点',restaurant:'餐饮',hotel:'住宿',transport:'交通',shopping:'逛街',indoor:'室内',other:'安排'};
 var PERIOD_MIN={'凌晨':60,'清晨':360,'早上':420,'上午':540,'中午':720,'下午':840,'傍晚':1020,'晚上':1140,'夜里':1260};
 var LEG_SPEED={walk:75,bike:220,taxi:400};
+var EDGE_MAX_MIN=180;
+/** 服务端真实车程的方式串是中文（步行 / 包车·网约车 / 城际交通 / 打车·Grab），
+    归一到 TNAME 的图标口径。 */
+var MODE_ALIAS=[[/步行|walk/i,'walk'],[/骑行|单车|bike|cycle/i,'bike'],[/游船|渡船|坐船|船|boat|ferry/i,'boat'],[/徒步|hike|trek/i,'hike'],[/车|drive|taxi|grab|car|bus|城际|包车|网约/i,'taxi']];
+function normalizeMode(m){
+  var s=str(m);
+  for(var i=0;i<MODE_ALIAS.length;i++)if(MODE_ALIAS[i][0].test(s))return MODE_ALIAS[i][1];
+  return '';
+}
+/** 服务端 transportFromPrev → 与宿主载荷同形的 {mode,minutes,dist,estimated}；无真车程返回 null。 */
+function legOfStore(tp){
+  if(!tp||typeof tp!=='object')return null;
+  var minutes=Number(tp.durationMin)||0;
+  if(minutes<=0)return null;
+  return{mode:str(tp.mode),minutes:minutes,dist:tp.distanceKm==null?'':(Number(tp.distanceKm).toFixed(1)+'km'),estimated:tp.source==='estimate'};
+}
+/** 载荷自带的车程 → 边口径 [mode,分钟,距离,是否估算]；缺失返回 null（坐标估算属兜底，另走一路）。 */
+function legOfPayload(leg){
+  if(!leg||typeof leg!=='object')return null;
+  var mode=normalizeMode(leg.mode),minutes=Math.round(Number(leg.minutes)||0);
+  if(!mode||minutes<=0)return null;
+  return[mode,minutes,str(leg.dist)||'',leg.estimated===true];
+}
 var OUTDOOR_RE=/湖|山|海|滩|岛|公园|景区|古镇|街|堤|塔|桥|徒步|骑行|日落|日出|游船|缆车|村|谷|湾|礁|岛礁/;
 var HEAVY_RE=/徒步|登山|骑行|长堤|环湖|溯溪|漂流|攀/;
 
@@ -1607,16 +1658,17 @@ function haversineKm(a,b){
   var h=Math.sin(dLat/2)*Math.sin(dLat/2)+Math.cos(la1)*Math.cos(la2)*Math.sin(dLng/2)*Math.sin(dLng/2);
   return 2*R*Math.asin(Math.min(1,Math.sqrt(h)));
 }
+/** 坐标估算边（末位 true = 估算，不是服务端真值）：只用于补时间轴，不进「车程」文案。 */
 function estimateEdge(from,to){
-  if(!from||!to||!from.loc||!to.loc)return['walk',8,'600m'];
+  if(!from||!to||!from.loc||!to.loc)return['walk',8,'600m',true];
   var km=haversineKm(from.loc,to.loc);
-  if(km==null)return['walk',8,'600m'];
+  if(km==null)return['walk',8,'600m',true];
   var mode=km<1.2?'walk':(km<4?'bike':'taxi');
   var road=km*1.32;
   // 上限 180 分钟：跨岛/跨城这类长距离用「直线 × 系数 ÷ 市区车速」会算出十几小时，
   // 那是臆造的地理路径。缺口留给 Agent 侧回填 leg 字段，这里只给保守上限。
-  var minutes=clamp(Math.round(road*1000/LEG_SPEED[mode]),3,180);
-  return[mode,minutes,road<1?Math.round(road*1000)+'m':road.toFixed(1)+'km'];
+  var minutes=clamp(Math.round(road*1000/LEG_SPEED[mode]),3,EDGE_MAX_MIN);
+  return[mode,minutes,road<1?Math.round(road*1000)+'m':road.toFixed(1)+'km',true];
 }
 /** 有效经纬度判定：(0,0) 是服务端「未知中心」的哨兵值（`center: knownCenter ?? {0,0}`），
     当成真实坐标会把地图甩到几内亚湾；越界值同样丢弃。 */
@@ -1634,7 +1686,12 @@ function adaptStop(entry,dayKey,idx){
   var loc=validLatLng(entry.latitude,entry.longitude);
   var imgs=(entry.images||[]).filter(function(u){return u&&str(u).trim();});
   var range=parseTime(entry.time);
-  var dur=Number(entry.duration)>0?Number(entry.duration):(range&&range.end!=null?Math.max(15,range.end-range.start):0);
+  var realStart=range?range.start:null;
+  var endR=parseTime(entry.endTime);
+  var realEnd=endR?endR.start:(range&&range.end!=null?range.end:null);
+  var dur=Number(entry.duration)>0?Number(entry.duration)
+    :(realStart!=null&&realEnd!=null&&realEnd>realStart?realEnd-realStart:0);
+  var legReal=legOfPayload(entry.leg);
   var isRest=/咖啡|茶|歇脚|休息/.test(str(entry.name)+str(entry.type));
   var text=str(entry.name)+' '+str(entry.description)+' '+str(entry.tips);
   // 备注：描述 → 价格 → 贴士（顿号串）→ 地址，全空才真正留白
@@ -1651,16 +1708,22 @@ function adaptStop(entry,dayKey,idx){
     hours:str(entry.openingHours),star:Number(entry.rating)>0?Number(entry.rating):0,
     video:(entry.videos&&entry.videos[0]&&str(entry.videos[0].url))?{u:str(entry.videos[0].url),t:str(entry.videos[0].title)}:null,
     tips:Array.isArray(entry.tips)?entry.tips.map(str).filter(Boolean):[],
-    t:type,anchor:null,book:null,optional:!!entry.optional,rest:isRest&&k!=='stay',
-    startHint:range?range.start:null,text:text,ride:k==='ride',
+    t:type,anchor:entry.anchor===true?realStart:null,book:null,
+    legReal:legReal,durReal:dur>0,realStart:realStart,realEnd:realEnd,
+    optional:!!entry.optional,rest:isRest&&k!=='stay',
+    text:text,ride:k==='ride',
     outdoor:OUTDOOR_RE.test(text)&&k!=='indoor',heavy:HEAVY_RE.test(text)};
 }
-/** 停留时长补齐：有明确起止→用差值；否则用与下一站的时刻差；再否则 45 分兜底。 */
-function fillDurations(stops){
+/** 停留时长兜底推导（只撑时间轴，不当真值展示）：与下一站的真实时刻差里
+    要扣掉服务端真车程，否则车程算两遍，一天能累加到 27 点。 */
+function fillDurations(stops,legs){
   for(var i=0;i<stops.length;i++){
-    var s=stops[i],next=stops[i+1];
+    var s=stops[i],next=stops[i+1],leg=legs[i+1];
     if(s.base>0)continue;
-    if(next&&s.startHint!=null&&next.startHint!=null&&next.startHint>s.startHint){s.base=clamp(Math.round(next.startHint-s.startHint),15,240);continue;}
+    if(next&&s.realStart!=null&&next.realStart!=null&&next.realStart>s.realStart){
+      var travel=leg&&!leg[3]?leg[1]:0;   // 估算车程不可信，不拿来扣真值
+      s.base=clamp(Math.round(next.realStart-s.realStart-travel),15,240);continue;
+    }
     s.base=45;
   }
 }
@@ -1673,18 +1736,22 @@ function adaptPlan(raw){
   days.forEach(function(day,di){
     var key=di+1;
     var entries=day.entries||[];
-    var stops=[],prev=null,ids=[],minStart=null;
+    var stops=[],ids=[],minStart=null;
     entries.forEach(function(e,ei){
       var s=adaptStop(e,key,ei);
-      if(s.startHint!=null)minStart=minStart==null?s.startHint:Math.min(minStart,s.startHint);
+      if(s.realStart!=null)minStart=minStart==null?s.realStart:Math.min(minStart,s.realStart);
       stops.push(s);ids.push(s.id);
       S2[s.id]=s;
-      prev=s;
     });
-    fillDurations(stops);
-    for(var i=1;i<stops.length;i++){
-      EDGE2[stops[i-1].id+'->'+stops[i].id]=estimateEdge(stops[i-1],stops[i]);
+    // 边表先建（legs[i] = 上一站→本站）：服务端真车程优先，缺失才按坐标估——
+    // 估算值只撑时间轴，不冒充「打车 N 分」印到界面上
+    var legs=[];
+    for(var si=1;si<stops.length;si++){
+      var ed=stops[si].legReal||estimateEdge(stops[si-1],stops[si]);
+      legs[si]=ed;
+      EDGE2[stops[si-1].id+'->'+stops[si].id]=ed;
     }
+    fillDurations(stops,legs);
     ORDER2[key]=ids;
     // 天名：去掉「第 N 天」这类通用副标题（拿它当大标题等于复读天数），留空走
     // 顶栏回退链（目的地/行程名）；只有 Agent 侧给了真实线路名（如「西湖环湖线」）才显示

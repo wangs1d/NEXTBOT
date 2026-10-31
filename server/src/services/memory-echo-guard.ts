@@ -12,6 +12,7 @@
  * supersession/overwrite 决策正常处理。
  */
 import { contentTokenSet, tokenOverlapRatio } from "./memory-record-utils.js";
+import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 
 const ECHO_OVERLAP_THRESHOLD = 0.75;
 const ECHO_TTL_MS = 30 * 60_000;
@@ -22,7 +23,11 @@ type EchoEntry = {
   at: number;
 };
 
-const entriesByActor = new Map<string, EchoEntry[]>();
+/** 按 actor 登记并挂进资源池：空闲超过 ECHO_TTL_MS 由闸口心跳清扫，actor 数超上限按最近未用淘汰。 */
+const entriesByActor = new RetentionMap<EchoEntry[]>("memory-echo-guard", {
+  maxEntries: retentionMaxEntries(1000),
+  idleMs: ECHO_TTL_MS,
+});
 
 function prune(entries: EchoEntry[], now: number): EchoEntry[] {
   const kept = entries.filter((e) => now - e.at < ECHO_TTL_MS);

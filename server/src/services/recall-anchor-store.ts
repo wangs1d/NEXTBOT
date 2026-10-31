@@ -17,6 +17,7 @@
 
 import { STRENGTH_KV_KEY } from "../brain/memory-strength-model.js";
 import { EPITOME_KV_KEY } from "./session-epitome.js";
+import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 
 export interface RecallAnchorItem {
   /** 记忆正文摘要（前 80 字符） */
@@ -79,7 +80,11 @@ function parseRecord(value: unknown): RecallAnchorRecord | null {
  */
 export class RecallAnchorStore {
   private kv: AnchorKvLike | null;
-  private cache = new Map<string, RecallAnchorRecord[]>();
+  /** 有界缓存：actor 数超上限按最近未用淘汰，空闲 6h 由资源池心跳清扫；重建只多一次 KV 读。 */
+  private cache = new RetentionMap<RecallAnchorRecord[]>("recall-anchors", {
+    maxEntries: retentionMaxEntries(2000),
+    idleMs: 6 * 60 * 60_000,
+  });
 
   constructor(kv: AnchorKvLike | null = null) {
     this.kv = kv;

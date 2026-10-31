@@ -15,6 +15,7 @@ class SphereOverlayBridge(QObject):
       - getPosition() -> {x,y}
       - setIgnoreMouseEvents(ignore, forward=True)
       - setScheduleCollapsed(collapsed)
+      - notifyReady()
       - onPatch(cb) / onRoam(cb)
     """
 
@@ -22,6 +23,9 @@ class SphereOverlayBridge(QObject):
     patch_event = Signal(dict)
     roam_event = Signal()
     theme_event = Signal(str)
+
+    # 页面已画出首帧（Python 侧订阅，用于向宿主上报就绪）
+    ready_event = Signal()
 
     def __init__(self, host_window, parent: QObject | None = None) -> None:
         super().__init__(parent)
@@ -75,6 +79,11 @@ class SphereOverlayBridge(QObject):
     def setForceInteractive(self, force: bool) -> None:
         """强制整个窗口可交互（菜单/设置面板打开时）。"""
         self._host.set_force_interactive(force)
+
+    @Slot()
+    def notifyReady(self) -> None:
+        """页面画出机体首帧后调用一次；在此之前宿主看到的只是透明窗。"""
+        self.ready_event.emit()
 
     # ---- Python 侧触发 ----
     def emit_patch(self, payload: dict) -> None:

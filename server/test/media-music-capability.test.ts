@@ -4,6 +4,8 @@ import test from "node:test";
 import { MediaMusicService } from "../src/services/media-music-service.js";
 import {
   clearClientCapabilities,
+  clientSupportsCapability,
+  declaredClientCapabilities,
   declareClientCapabilities,
 } from "../src/services/client-capability-registry.js";
 
@@ -62,4 +64,36 @@ test("capability declaration expires / clears back to honest failure", async () 
   const { service } = createServiceWithRecorder();
   const result = await service.play("1", actorId);
   assert.equal(result.ok, false);
+});
+
+// 能力登记表：键名任意、只认严格 true；未声明键 fail-closed。
+test("capability registry stores arbitrary declared keys and fails closed", () => {
+  const actorId = `cap-test-reg-${Date.now()}`;
+  declareClientCapabilities(actorId, {
+    mediaPlayback: true,
+    sharedBrowserPanel: true,
+    someFutureThing: "yes",
+    brokenFlag: false,
+  });
+  try {
+    assert.equal(clientSupportsCapability(actorId, "mediaPlayback"), true);
+    assert.equal(clientSupportsCapability(actorId, "sharedBrowserPanel"), true);
+    assert.equal(clientSupportsCapability(actorId, "someFutureThing"), false, "非严格 true 不算声明");
+    assert.equal(clientSupportsCapability(actorId, "brokenFlag"), false);
+    assert.equal(clientSupportsCapability(actorId, "neverDeclared"), false);
+    assert.deepEqual(
+      declaredClientCapabilities(actorId).sort(),
+      ["mediaPlayback", "sharedBrowserPanel"],
+    );
+    // 重连整体覆盖：新声明里没有的键即撤销
+    declareClientCapabilities(actorId, { mediaPlayback: true });
+    assert.equal(clientSupportsCapability(actorId, "sharedBrowserPanel"), false);
+  } finally {
+    clearClientCapabilities(actorId);
+  }
+});
+
+test("undeclared actor has empty capability set", () => {
+  assert.deepEqual(declaredClientCapabilities(`cap-test-none-${Date.now()}`), []);
+  assert.equal(clientSupportsCapability(`cap-test-none-${Date.now()}`, "mediaPlayback"), false);
 });

@@ -1,6 +1,4 @@
-import sharp from "sharp";
-
-type SharpInstance = ReturnType<typeof sharp>;
+import { loadSharp, type SharpInstance } from "./sharp-lazy.js";
 
 import { randomBytes } from "node:crypto";
 
@@ -109,6 +107,7 @@ async function applyPosterTorn(
   meta: { width: number; height: number },
   opts: { title?: string; seed?: string },
 ): Promise<Buffer> {
+  const sharp = await loadSharp();
   const W = 900;
   const H = 1200;
   const rand = mulberry32(seedFrom(opts.seed));
@@ -191,6 +190,7 @@ async function applyPolaroid(
   meta: { width: number; height: number },
   opts: { title?: string; seed?: string },
 ): Promise<Buffer> {
+  const sharp = await loadSharp();
   const rand = mulberry32(seedFrom(opts.seed));
   void rand;
   const frameW = 720;
@@ -232,6 +232,7 @@ async function applyNoir(
   meta: { width: number; height: number },
   opts: { title?: string; seed?: string },
 ): Promise<Buffer> {
+  const sharp = await loadSharp();
   const W = meta.width;
   const H = meta.height;
   const rand = mulberry32(seedFrom(opts.seed));
@@ -283,6 +284,7 @@ async function applyPrintDuotone(
   meta: { width: number; height: number },
   opts: { title?: string; seed?: string },
 ): Promise<Buffer> {
+  const sharp = await loadSharp();
   const W = meta.width;
   const H = meta.height;
   const rand = mulberry32(seedFrom(opts.seed));
@@ -327,6 +329,7 @@ export async function applyPhotoStyle(
   style: PhotoStyleId,
   opts: { title?: string; seed?: string } = {},
 ): Promise<PhotoStyleResult> {
+  const sharp = await loadSharp();
   const spec = PHOTO_STYLES.find((s) => s.id === style);
   if (!spec) {
     throw new Error(`未知风格: ${style}（可选：${PHOTO_STYLES.map((s) => s.id).join(", ")}）`);

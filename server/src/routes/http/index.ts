@@ -83,7 +83,7 @@ import { registerImageFileRoutes } from "./image-files.js";
 import { registerPictureRoutes } from "./picture.js";
 import { registerGalleryWallRoutes } from "./gallery-wall.js";
 import { registerVideoProxyRoutes } from "./video-files.js";
-import { registerMediaStreamProxyRoutes } from "./media.js";
+import { registerMediaStreamProxyRoutes, registerMediaLyricRoutes } from "./media.js";
 import { registerUserFileRoutes } from "./user-files.js";
 import { registerTravelMediaRoutes } from "./travel-media.js";
 import { registerAgentActivityRoutes } from "./agent-activities.js";
@@ -190,6 +190,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerGalleryWallRoutes(app, { pictureKit: deps.pictureKit });
   registerVideoProxyRoutes(app);
   registerMediaStreamProxyRoutes(app);
+  registerMediaLyricRoutes(app);
   registerUserFileRoutes(app, { fileProcessingService: deps.fileProcessingService });
   registerWechatClawRoutes(app, deps);
   registerMessageBridgeRoutes(app, { messageBridgeService: deps.messageBridgeService });

@@ -61,7 +61,11 @@ export class QuoteAggregator {
     const outcomes = await Promise.all(
       applicable.map(async (source): Promise<QuoteSourceOutcome> => {
         try {
-          const result = await withTimeout(source.fetch(req, ctx), this.timeoutMs, source.label);
+          const result = await withTimeout(
+            source.fetch(req, ctx),
+            source.timeoutMs ?? this.timeoutMs,
+            source.label,
+          );
           if (result.ok) {
             return { source: source.id, label: source.label, ok: true, quotes: result.quotes };
           }

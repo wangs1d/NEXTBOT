@@ -15,6 +15,8 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - 飞猪 FlyAI CLI（酒店+机票实时 api 价；安装 flyai CLI 后自动挂载，
  *     报价选项 extra.bookingUrl 为飞猪预订链接，可直接作 book 的 cashierUrl）
  *   - 浏览器代查·携程机票（Playwright 可用时 scraped）
+ *   - 飞猪·内置浏览器代查（flyai 体验模式价格脱敏时，用用户登录过的可见
+ *     浏览器开飞猪酒店详情页读实价，scraped；未登录/面板不在线则如实报错）
  *
  * 下单后闭环（不在本模块，由内置 skill 接力）：
  *   booking.travel-pay（支付宝真实扣款）→ booking.travel-pay-check →

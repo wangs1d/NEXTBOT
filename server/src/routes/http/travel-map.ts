@@ -1,4 +1,5 @@
 import { getDataDir } from "../../config/data-dir.js";
+import { serverRoot } from "../../config/paths.js";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
@@ -42,7 +43,7 @@ import { travelMemoir } from "../../services/travel-memoir-service.js";
  * server 不可达时桌面侧自行降级到独立子进程窗口。
  */
 
-const webRoot = join(import.meta.dirname ?? ".", "../../../web/travel-map");
+const webRoot = join(serverRoot(), "web", "travel-map");
 
 /** 内存行程载荷：id → { payload, createdAt } */
 interface StoredPlan {

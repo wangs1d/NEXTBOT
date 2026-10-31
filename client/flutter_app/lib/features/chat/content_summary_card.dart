@@ -1,5 +1,4 @@
 import "package:flutter/material.dart";
-import "package:url_launcher/url_launcher.dart";
 
 import "../../core/theme/app_typography.dart";
 import "../../core/utils/content_summary_parser.dart";
@@ -542,85 +541,71 @@ class _StructuredItemRow extends StatelessWidget {
     final TextTheme textTheme = Theme.of(context).textTheme;
     final String? meta = _formatMeta();
 
-    return InkWell(
-      onTap: item.url == null ? null : () => _launch(item.url!),
-      borderRadius: BorderRadius.circular(6),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Container(
-              margin: const EdgeInsets.only(top: 6),
-              width: 5,
-              height: 5,
-              decoration: BoxDecoration(
-                color: cs.primary.withValues(alpha: 0.55),
-                shape: BoxShape.circle,
-              ),
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            width: 5,
+            height: 5,
+            decoration: BoxDecoration(
+              color: cs.primary.withValues(alpha: 0.55),
+              shape: BoxShape.circle,
             ),
-            const SizedBox(width: 8),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: <Widget>[
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  item.title.isNotEmpty ? item.title : "(无标题)",
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: textTheme.bodyMedium?.copyWith(
+                    color: cs.onSurface,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                if ((item.snippet ?? "").isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 2),
+                  buildInlineMarkdownText(
+                    item.snippet!,
+                    textTheme.bodySmall!.copyWith(
+                      color: cs.onSurfaceVariant,
+                      height: AppTypography.bodyLineHeight,
+                    ),
+                    cs: cs,
+                  ),
+                ],
+                if (meta != null) ...<Widget>[
+                  const SizedBox(height: 3),
                   Text(
-                    item.title.isNotEmpty ? item.title : "(无标题)",
-                    maxLines: 2,
+                    meta,
+                    maxLines: 1,
                     overflow: TextOverflow.ellipsis,
-                    style: textTheme.bodyMedium?.copyWith(
-                      color: item.url != null ? cs.primary : cs.onSurface,
-                      fontWeight: FontWeight.w600,
+                    style: textTheme.labelSmall?.copyWith(
+                      color: cs.onSurfaceVariant,
+                      fontSize: AppTypography.micro,
                     ),
                   ),
-                  if ((item.snippet ?? "").isNotEmpty) ...<Widget>[
-                    const SizedBox(height: 2),
-                    buildInlineMarkdownText(
-                      item.snippet!,
-                      textTheme.bodySmall!.copyWith(
-                        color: cs.onSurfaceVariant,
-                        height: AppTypography.bodyLineHeight,
-                      ),
-                      cs: cs,
-                    ),
-                  ],
-                  if (meta != null) ...<Widget>[
-                    const SizedBox(height: 3),
-                    Text(
-                      meta,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: textTheme.labelSmall?.copyWith(
-                        color: cs.onSurfaceVariant,
-                        fontSize: AppTypography.micro,
-                      ),
-                    ),
-                  ],
                 ],
-              ),
+              ],
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
+  /// 条目附注只给发布时间：来源站点与网页链接都不再展示。
   String? _formatMeta() {
-    final List<String> parts = <String>[];
-    if ((item.source ?? "").isNotEmpty) parts.add(item.source!);
-    if ((item.publishedAt ?? "").isNotEmpty) parts.add(item.publishedAt!);
-    if (parts.isEmpty) return null;
-    return parts.join(" · ");
-  }
-
-  Future<void> _launch(String url) async {
-    final Uri? uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (_) {
-      // 静默失败：避免打不开链接时阻塞聊天
-    }
+    final String? publishedAt = (item.publishedAt ?? "").trim().isEmpty
+        ? null
+        : item.publishedAt!.trim();
+    return publishedAt;
   }
 }

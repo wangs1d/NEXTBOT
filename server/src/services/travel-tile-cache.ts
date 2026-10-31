@@ -41,9 +41,9 @@ function isJsonManifestRef(url: string): boolean {
 
 /** 缓存条目新鲜期：瓦片基本不可变，30 天足够长 */
 const FRESH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-/** 清单类资源（样式 / TileJSON / sprite）随上游升级换内容或换路径
- *  （2026-10-25 实例：CARTO 开始强制 API key + 换版本化路径，旧样式静默失效）。
- *  这类资源用短新鲜期：过期回源一次，失败仍可用旧盘。 */
+/** 清单类资源（样式 / TileJSON / sprite）内容随上游升级会变（2026-10-25 实例：
+ *  CARTO 开始强制 API key + 换版本化路径，旧样式静默失效），所以只信 10 分钟：
+ *  过期后后台回源换新的，本次响应仍先发磁盘上的旧副本。 */
 const MANIFEST_FRESH_TTL_MS = 10 * 60 * 1000;
 function freshTtlOf(url: string): number {
   return isJsonManifestRef(url) ? MANIFEST_FRESH_TTL_MS : FRESH_TTL_MS;
@@ -136,32 +136,41 @@ class TravelTileCache {
       return { ok: false, status: 403, contentType: "text/plain", body: Buffer.from("upstream not allowed"), fromCache: false };
     }
     const key = this.keyOf(url);
+    const ttl = freshTtlOf(url);
 
     const mem = this.memory.get(key);
-    const ttl = freshTtlOf(url);
     if (mem && Date.now() - mem.createdAt < ttl) {
       this.touch(key, mem);
       return { ok: true, status: 200, contentType: mem.contentType, body: mem.body, fromCache: true };
     }
-
     const disk = this.readDisk(key);
-    if (disk && Date.now() - disk.createdAt < ttl) {
-      this.remember(key, disk);
-      return { ok: true, status: 200, contentType: disk.contentType, body: disk.body, fromCache: true };
+    const stale = mem ?? disk;
+    if (stale) {
+      // 过期也先把旧数据立刻发出去，回源放后台：清单 10 分钟就过期，而上游
+      // 抽风时一次回源要 27~42s（实测），同步等等于让整张底图黑屏。
+      if (disk && stale === disk) this.remember(key, disk);
+      this.revalidate(url, key);
+      return { ok: true, status: 200, contentType: stale.contentType, body: stale.body, fromCache: true };
     }
 
-    // 无缓存或已过期：并发去重后拉上游
+    // 冷启动（从未缓存过）：没有旧数据可发，只能同步回源
+    return this.fetchSingleFlight(url, key);
+  }
+
+  /** 后台补缓存：同一资源只挂一个在途任务，失败不动已有旧数据。 */
+  private revalidate(url: string, key: string): void {
+    if (this.inFlight.has(key)) return;
+    const task = this.fetchUpstream(url, key).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, task);
+    task.catch(() => {});
+  }
+
+  private fetchSingleFlight(url: string, key: string): Promise<ProxyFetchResult> {
     const existing = this.inFlight.get(key);
     if (existing) return existing;
     const task = this.fetchUpstream(url, key).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, task);
-
-    const fresh = await task;
-    // 拉取失败但有旧数据 → 先用旧的（SWR，后台已顺带刷新）
-    if (!fresh.ok && disk) {
-      return { ok: true, status: 200, contentType: disk.contentType, body: disk.body, fromCache: true };
-    }
-    return fresh;
+    return task;
   }
 
   private async fetchUpstream(url: string, key: string): Promise<ProxyFetchResult> {

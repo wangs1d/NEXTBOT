@@ -17,6 +17,10 @@ import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { getRuntimeTopologyConfig } from "./config/env.js";
 import { writeServerInstance } from "./config/server-instance.js";
 
+// tsc 会消除"只导入不引用"的 side-effect import：dist 产物里 .env / .env.local
+// 不会被加载。显式调用一次保证构建产物与 dev 一致（重复加载幂等）。
+loadServerEnv();
+
 setupGlobalHttpAgent();
 import Fastify from "fastify";
 import websocket from "@fastify/websocket";

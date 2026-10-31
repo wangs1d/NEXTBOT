@@ -3,7 +3,6 @@ import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
 import { MODEL } from "../constants/model-proportions";
-import type { ScreenSignals } from "../components/OledScreen";
 import { registerSphereDrag, type SphereDragApi } from "../bridge/sphere-drag-bridge";
 import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { pointerHitsSphere } from "../utils/sphere-hit";
@@ -20,7 +19,6 @@ interface UseSphereUserDragOptions {
   userRotRef: RefObject<THREE.Group | null>;
   /** 物理体/根 group — 用于 Canvas 级命中检测 */
   bodyRef?: RefObject<THREE.Object3D | null>;
-  faceSignalsRef?: RefObject<ScreenSignals>;
   enabled?: boolean;
   /** Canvas DOM 级拖拽 */
   canvasCapture?: boolean;
@@ -52,13 +50,17 @@ const EYE_CLICK_DRAG_PX = 10;
 const LIVE_REACT_THRESHOLD = 0.12;
 /** onLiveReact 冷却间隔（ms），防止快速拖动时频繁触发 shake 动画导致卡顿 */
 const LIVE_REACT_COOLDOWN_MS = 80;
-/** 旋转过冲衰减：在 useFrame 中用 decay 指数衰减 */
+/** 回正弹簧刚度，按临界阻尼收回正面（ω=√K≈7.5，180° 约 0.8s 收干） */
+const YAW_SETTLE_SPRING_K = 56;
+/** 松手瞬间 yaw 动量上限（rad/s），甩得再狠也只多带一小段，不会多转一圈 */
+const YAW_RELEASE_CLAMP_RAD_S = 7;
+/** 拖动中停手时旋转动量的指数衰减率 */
+const SPIN_DECAY_RATE = 3.2;
 
 /** 左键拖动平移、右键拖动旋转 */
 export function useSphereUserDrag({
   userRotRef,
   bodyRef,
-  faceSignalsRef,
   enabled = true,
   canvasCapture = true,
   canvasCaptureLenient = false,
@@ -81,10 +83,17 @@ export function useSphereUserDrag({
   const pointerIdRef = useRef<number | null>(null);
   const lastPointerRef = useRef({ x: 0, y: 0 });
   const spinVelRef = useRef({ x: 0, y: 0 });
+  /** 回正已完成、交还自主层（再次按下时重置） */
+  const settleDoneRef = useRef(false);
+  const worldQuatRef = useRef(new THREE.Quaternion());
+  const worldEulerRef = useRef(new THREE.Euler());
+  /** 上一帧的回正目标（用于判断自主层是否已停止转动） */
+  const prevTargetRef = useRef(0);
+  /** 最近一次旋转位移的时间戳（拖动中停手时据此收掉动量） */
+  const lastSpinAtRef = useRef(0);
   const totalRotRef = useRef(0);
   const totalYawRadRef = useRef(0);
   const totalPitchRadRef = useRef(0);
-  const touchPulseRef = useRef(0);
   const dragModeRef = useRef<DragMode>("pan");
   const activeButtonRef = useRef(0);
   const panMovedRef = useRef(0);
@@ -105,16 +114,6 @@ export function useSphereUserDrag({
   const lastUpCoordsRef = useRef({ clientX: 0, clientY: 0 });
   /** 防止同一轮拖拽重复触发 onEyeClick */
   const eyeClickFiredRef = useRef(false);
-
-  const applyScreenSignals = useCallback(
-    (touch: number, spin: number) => {
-      const signals = faceSignalsRef?.current;
-      if (!signals) return;
-      signals.userTouch = Math.max(signals.userTouch, touch);
-      signals.userSpin = Math.max(signals.userSpin, spin);
-    },
-    [faceSignalsRef],
-  );
 
   const readPointer = useCallback((clientX: number, clientY: number, screenX: number, screenY: number) => {
     if (panUseScreenSpaceRef.current) {
@@ -172,13 +171,14 @@ export function useSphereUserDrag({
 
       const group = userRotRef.current;
       if (group) {
-        // Y 轴自由 360° 旋转；X 轴跟随输入（惯性阶段由 useFrame lerp 回归）
+        // Y 轴自由 360° 旋转；X 轴跟随输入（松手后由 useFrame 滑行 + 回正）
         group.rotation.y += rotY;
         group.rotation.x += rotX;
         // 防止浮点溢出
         if (group.rotation.x > Math.PI * 2) group.rotation.x -= Math.PI * 2;
         else if (group.rotation.x < -Math.PI * 2) group.rotation.x += Math.PI * 2;
       }
+      lastSpinAtRef.current = performance.now();
 
       onSpinDelta?.(rotY, rotX);
 
@@ -230,6 +230,7 @@ export function useSphereUserDrag({
       let releaseInfo: { mode: DragMode; totalRotationDeg: number; panDistance: number; spinStrength: number };
 
       if (mode === "rotate") {
+        settleDoneRef.current = false;
         const spinStrength = Math.min(
           1,
           (Math.abs(spinVelRef.current.x) + Math.abs(spinVelRef.current.y)) * 0.22,
@@ -324,8 +325,6 @@ export function useSphereUserDrag({
       panMovedRef.current = 0;
       panRemainderRef.current = { x: 0, y: 0 };
       physicsSyncCounterRef.current = 0;
-      touchPulseRef.current = 1;
-      applyScreenSignals(1, 0);
       // 每轮拖拽开始时重置 eye-click 标记
       eyeClickFiredRef.current = false;
       if (mode === "rotate") {
@@ -333,7 +332,7 @@ export function useSphereUserDrag({
       }
       return true;
     },
-    [applyScreenSignals, onTouch, readPointer],
+    [onTouch, readPointer],
   );
 
   const resolveDragMode = (button: number): DragMode | null => {
@@ -391,42 +390,55 @@ export function useSphereUserDrag({
     if (!enabledRef.current) return;
 
     const dt = Math.min(delta, 0.032);
-    touchPulseRef.current = Math.max(0, touchPulseRef.current - dt * 2.8);
 
-    const signals = faceSignalsRef?.current;
-    if (signals) {
-      signals.userTouch = Math.max(touchPulseRef.current, signals.userTouch - dt * 2.5);
-      signals.userSpin = Math.max(0, signals.userSpin - dt * 1.8);
-    }
-
-    if (draggingRef.current) return;
-
-    const group = userRotRef.current;
-    if (!group) return;
-
-    const sv = spinVelRef.current;
-    if (Math.abs(sv.x) + Math.abs(sv.y) < 0.002) {
-      spinVelRef.current = { x: 0, y: 0 };
-      // X 轴软回归 0（保持竖直）
-      group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, dt * 2.2);
-      // 衰减后归一化 Y 轴到 (-PI, PI] 防止浮点漂移
-      const TAU = Math.PI * 2;
-      if (group.rotation.y > Math.PI) group.rotation.y -= TAU;
-      else if (group.rotation.y < -Math.PI) group.rotation.y += TAU;
+    if (draggingRef.current) {
+      // 停手不再有新增位移时收掉动量，避免停顿后松手凭空甩过头
+      if (dragModeRef.current === "rotate" && performance.now() - lastSpinAtRef.current > 40) {
+        const idleDecay = Math.exp(-SPIN_DECAY_RATE * dt);
+        spinVelRef.current = { x: spinVelRef.current.x * idleDecay, y: spinVelRef.current.y * idleDecay };
+      }
       return;
     }
 
-    // 360° 自由旋转：Y 轴不夹紧；X 轴不夹紧但在更高频的 lerp 回归中
-    group.rotation.y += sv.y * dt;
-    group.rotation.x += sv.x * dt;
-    group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, dt * 0.6);
+    const group = userRotRef.current;
+    if (!group) return;
+    if (settleDoneRef.current) return;
 
-    const decay = Math.exp(-3.2 * dt);
-    spinVelRef.current = { x: sv.x * decay, y: sv.y * decay };
+    const sv = spinVelRef.current;
+    const TAU = Math.PI * 2;
+    const wrapPi = (a: number) => THREE.MathUtils.euclideanModulo(a + Math.PI, TAU) - Math.PI;
+    // 归一化 yaw 到 [-PI, PI)，回正走最短弧
+    group.rotation.y = wrapPi(group.rotation.y);
 
-    if (api && (Math.abs(sv.x) + Math.abs(sv.y)) > 0.01) {
-      api.angularVelocity.set(sv.x * 1.8, sv.y * 2.8, sv.x * 0.3);
+    // 正面 = 屏幕正对镜头：逐帧抵消上层自主层的偏航，落到正面即收手把朝向交还给自主层
+    const parent = group.parent;
+    let target = 0;
+    if (parent) {
+      parent.getWorldQuaternion(worldQuatRef.current);
+      target = wrapPi(-worldEulerRef.current.setFromQuaternion(worldQuatRef.current, "YXZ").y);
     }
+    // 自主层还在转（注意力注视/东张西望）时不收手，否则刚锁定就被它带偏
+    const parentRate = Math.abs(wrapPi(target - prevTargetRef.current)) / dt;
+    prevTargetRef.current = target;
+    const err = wrapPi(group.rotation.y - target);
+
+    // 松手动量钳到上限：甩得再狠也只是回正起步快，不会多转一圈
+    sv.y = THREE.MathUtils.clamp(sv.y, -YAW_RELEASE_CLAMP_RAD_S, YAW_RELEASE_CLAMP_RAD_S);
+    const omega = Math.sqrt(YAW_SETTLE_SPRING_K);
+    sv.y += (-YAW_SETTLE_SPRING_K * err - 2 * omega * sv.y) * dt;
+    group.rotation.y += sv.y * dt;
+
+    // pitch 保留少量惯性后软回归 0（保持竖直）
+    sv.x *= Math.exp(-SPIN_DECAY_RATE * dt);
+    group.rotation.x += sv.x * dt;
+    group.rotation.x = THREE.MathUtils.lerp(group.rotation.x, 0, dt * 2.2);
+
+    if (Math.abs(err) < 0.02 && Math.abs(sv.y) < 0.2 && parentRate < 0.06) {
+      group.rotation.y = target;
+      sv.y = 0;
+      settleDoneRef.current = true;
+    }
+    if (api) api.angularVelocity.set(sv.x * 1.8, sv.y * 2.8, sv.x * 0.3);
   });
 
   useEffect(() => {

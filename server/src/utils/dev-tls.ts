@@ -9,14 +9,13 @@ import {
 } from "node:fs";
 import { hostname, networkInterfaces } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { serverRoot } from "../config/paths.js";
 import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-const routesDir = dirname(fileURLToPath(import.meta.url));
 /** 证书默认落位 server/certs/（与 cwd 无关） */
-export const defaultTlsCertDir = resolve(routesDir, "../../certs");
+export const defaultTlsCertDir = resolve(serverRoot(), "certs");
 
 export type LocalHosts = {
   dnsNames: string[];

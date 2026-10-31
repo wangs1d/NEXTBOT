@@ -6,7 +6,7 @@
   3. 与 PAI server WebSocket 连接，接收 agent.embodiment.patch 情绪事件
   4. 日程悬浮窗（独立窗口，加载 schedule-floating.html）
   5. 悬浮组件窗（独立全屏透明层，加载 widgets-floating.html：灵动岛 / 专注番茄钟 / 下班打卡）
-  6. 系统托盘 + 单实例锁
+  6. 系统托盘 + 单实例锁（main.py --quit 关停已在跑的实例）
 """
 from __future__ import annotations
 
@@ -32,6 +32,7 @@ from PySide6.QtCore import (
     QRect,
     Qt,
     QThread,
+    QTimer,
     QUrl,
     Signal,
 )
@@ -49,6 +50,7 @@ from PySide6.QtWidgets import (
 
 from .bridge import SphereOverlayBridge
 from .click_through import ClickThroughController
+from .instance_channel import INSTANCE_PIPE_NAME, send_instance_command
 from .qwebchannel_support import load_qwebchannel_js as _load_qwebchannel_js
 from .win32_utils import (
     apply_desk_pet_shell,
@@ -58,10 +60,20 @@ from .win32_utils import (
     set_window_pos,
 )
 
+# 桌宠是置顶透明小窗：Chromium 一旦把"被遮挡"当隐藏就会节流渲染，首帧和动画都会卡；
+# 其余几项是这套 248×309 界面用不到的启动期后台服务。
+_CHROMIUM_FLAGS = (
+    "--disable-features=CalculateNativeWinOcclusion,BackForwardCache,"
+    "MediaRouter,OptimizationHints,Translate,AcceptCHFrame,"
+    "InterestFeedContentSuggestions,PrivacySandboxSettings4"
+)
+_user_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "").strip()
+if "CalculateNativeWinOcclusion" not in _user_flags:
+    os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{_user_flags} {_CHROMIUM_FLAGS}".strip()
 
 # ===== 常量 =====
-PET_WIDTH = 372
-PET_HEIGHT = 464
+PET_WIDTH = 248
+PET_HEIGHT = 309
 
 SCHEDULE_WIDTH = 280
 SCHEDULE_HEIGHT_COLLAPSED = 48
@@ -79,6 +91,7 @@ class SphereConfig:
     dev_url: Optional[str] = None  # 开发模式前端 dev server URL
     avatar_dist: str = "../agent-sphere-avatar/dist"
     offwork_at: str = "18:30"  # 下班打卡时刻（HH:MM）
+    idle_exit_ms: int = 1_800_000  # 隐藏后多久自动退出，释放 Chromium 内存
 
 
 # 注入前端 WebChannel 初始化脚本 + window.sphereOverlay 包装。
@@ -131,6 +144,9 @@ WEBCHANNEL_INIT = r"""
                 setForceInteractive: function (force) {
                     bridge.setForceInteractive(!!force);
                 },
+                notifyReady: function () {
+                    bridge.notifyReady();
+                },
                 onPatch: function (cb) {
                     bridge.patch_event.connect(cb);
                     return function () {
@@ -153,6 +169,7 @@ WEBCHANNEL_INIT = r"""
             window.sphereOverlayBridge = bridge;
             console.log('[sphereOverlay] ready (PySide6)');
             // 触发就绪事件，兼容前端检测逻辑
+            // 宿主侧的"桌宠出现了"由页面在机体画完后调 notifyReady 上报
             window.dispatchEvent(new CustomEvent('sphere-overlay:ready'));
         });
     }
@@ -258,13 +275,22 @@ class SphereMainWindow(QMainWindow):
         super().__init__()
         self.cfg = cfg
         self._attach_w = 0
+        self._ready_reported = False
         self._move_anim: Optional[QPropertyAnimation] = None
         self._bridge = SphereOverlayBridge(self)
+        self._bridge.ready_event.connect(self._on_page_ready)
         self._setup_window()
         self._setup_webview()
         self._setup_position()
         # 穿透由控制器按命中区域动态切换（替代固定 set_click_through）
         self._click_controller = ClickThroughController(self, self)
+
+    def _on_page_ready(self) -> None:
+        """首帧已画出 —— 向 stdout 报一次就绪，宿主（Flutter）据此结束等待。"""
+        if self._ready_reported:
+            return
+        self._ready_reported = True
+        print("SPHERE_OVERLAY_READY", flush=True)
 
     def _setup_window(self) -> None:
         self.setWindowFlags(
@@ -480,6 +506,8 @@ class SphereOverlayApp(QApplication):
         self._ws = WsClient(self.cfg)
         self._tray: Optional[QSystemTrayIcon] = None
         self._single_server: Optional[QLocalServer] = None
+        self._instance_conn: Optional[QLocalSocket] = None
+        self._idle_timer: Optional[QTimer] = None
 
     def _parse_args(self, argv: list[str]) -> SphereConfig:
         parser = argparse.ArgumentParser(description="Sphere Overlay (PySide6)")
@@ -491,6 +519,11 @@ class SphereOverlayApp(QApplication):
         parser.add_argument("--dev-url", default=os.environ.get("PAI_OVERLAY_DEV_URL"))
         parser.add_argument("--avatar-dist", default=os.environ.get("PAI_AVATAR_DIST", "../agent-sphere-avatar/dist"))
         parser.add_argument("--offwork-at", default=os.environ.get("PAI_OFFWORK_AT", "18:30"))
+        parser.add_argument(
+            "--idle-exit-ms",
+            type=int,
+            default=int(os.environ.get("PAI_PET_IDLE_EXIT_MS", "1800000")),
+        )
         parser.add_argument("--single-instance", action="store_true", default=True)
         args = parser.parse_args(argv[1:])
         return SphereConfig(
@@ -502,59 +535,123 @@ class SphereOverlayApp(QApplication):
             dev_url=args.dev_url,
             avatar_dist=args.avatar_dist,
             offwork_at=args.offwork_at,
+            idle_exit_ms=args.idle_exit_ms,
         )
 
     def ensure_single_instance(self) -> bool:
         """尝试建立本地 server 实现单实例；若已存在则发送激活信号。"""
-        name = "com.nextbot.sphere-overlay-py"
-        socket = QLocalSocket()
-        socket.connectToServer(name)
-        if socket.waitForConnected(500):
-            socket.write(b"show")
-            socket.flush()
-            socket.waitForBytesWritten(500)
+        if send_instance_command(b"show"):
             return False
         self._single_server = QLocalServer()
-        self._single_server.listen(name)
-        self._single_server.newConnection.connect(self._on_single_instance_activate)
+        self._single_server.listen(INSTANCE_PIPE_NAME)
+        self._single_server.newConnection.connect(self._on_single_instance_command)
         return True
 
-    def _on_single_instance_activate(self) -> None:
+    def _on_single_instance_command(self) -> None:
+        """连上来的字节未必已到达，交给 readyRead/disconnected 再分发。"""
         conn = self._single_server.nextPendingConnection()
-        if conn:
-            conn.readAll()
-            conn.close()
-        if self._main_win:
-            self._main_win.show()
-            self._main_win.raise_()
+        if conn is None:
+            return
+        self._instance_conn = conn
+        conn.readyRead.connect(self._read_instance_command)
+        conn.disconnected.connect(self._read_instance_command)
+        self._read_instance_command()
+
+    def _read_instance_command(self) -> None:
+        conn = self._instance_conn
+        if conn is None:
+            return
+        command = bytes(conn.readAll().data()).strip()
+        if not command:
+            return
+        self._instance_conn = None
+        conn.close()
+        if command == b"quit":
+            self.shutdown_gracefully()
+            return
+        if command == b"hide":
+            self.hide_main()
+            return
+        self.show_main()
+
+    def show_main(self) -> None:
+        if self._main_win is None:
+            return
+        self._main_win.setWindowOpacity(1.0)
+        self._main_win.show()
+        self._main_win.raise_()
+        if self._idle_timer is not None:
+            self._idle_timer.stop()
+        if self._tray is None:
+            self._setup_tray()
+        else:
+            self._tray.show()
+
+    def hide_main(self) -> None:
+        if self._main_win is not None:
+            self._main_win.hide()
+        if self._tray is not None:
+            self._tray.hide()
+        if self._idle_timer is not None:
+            self._idle_timer.start(self.cfg.idle_exit_ms)
+
+    def shutdown_gracefully(self) -> None:
+        """宿主请求退出时走这里，而不是被 TerminateProcess：Qt 自己收尾，
+        Chromium 渲染子进程与 GPU 进程随之正常退出，不留孤儿。"""
+        if self._idle_timer is not None:
+            self._idle_timer.stop()
+        if self._single_server is not None:
+            self._single_server.close()
+            self._single_server = None
+        self._ws.stop()
+        self._ws.wait(1500)
+        for win in (self._schedule_win, self._main_win):
+            if win is not None:
+                win.close()
+        if self._tray is not None:
+            self._tray.hide()
+        self.quit()
 
     def build(self) -> bool:
         if not self.ensure_single_instance():
-            print("Another sphere-overlay instance is already running.")
+            # 唤起已有实例后本进程退场；宿主据此区分"已有桌宠在运行"与启动失败
+            print("SPHERE_OVERLAY_ALREADY_RUNNING", flush=True)
             return False
 
+        self._idle_timer = QTimer(self)
+        self._idle_timer.setSingleShot(True)
+        self._idle_timer.timeout.connect(self.shutdown_gracefully)
+
         self._main_win = SphereMainWindow(self.cfg)
-        self._schedule_win = ScheduleWindow(self.cfg)
-        self._schedule_win.hide()
+        # 日程窗按需创建：召唤关键路径上不再多起一个 Chromium 渲染进程
 
-        self._main_win.schedule_toggle_requested.connect(self._schedule_win.set_collapsed)
-        self._main_win.schedule_toggle_requested.connect(self._schedule_win.show)
+        self._main_win.schedule_toggle_requested.connect(self._on_schedule_toggle)
 
-        self._setup_tray()
         self._connect_ws()
         self._ws.start()
 
+        self._setup_tray()
         self._main_win.show()
         return True
+
+    def _ensure_schedule_window(self) -> ScheduleWindow:
+        if self._schedule_win is None:
+            self._schedule_win = ScheduleWindow(self.cfg)
+        return self._schedule_win
+
+    def _on_schedule_toggle(self, collapsed: bool) -> None:
+        win = self._ensure_schedule_window()
+        win.set_collapsed(collapsed)
+        win.show()
 
     def _setup_tray(self) -> None:
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         menu = QMenu()
         show_action = QAction("显示", self)
-        show_action.triggered.connect(lambda: self._main_win.show())
+        show_action.triggered.connect(self.show_main)
         hide_action = QAction("隐藏", self)
-        hide_action.triggered.connect(lambda: self._main_win.hide())
+        hide_action.triggered.connect(self.hide_main)
         menu.addAction(show_action)
         menu.addAction(hide_action)
 
@@ -579,7 +676,7 @@ class SphereOverlayApp(QApplication):
         menu.addAction(about_action)
 
         quit_action = QAction("退出", self)
-        quit_action.triggered.connect(self.quit)
+        quit_action.triggered.connect(self.shutdown_gracefully)
         menu.addAction(quit_action)
 
         self._tray = QSystemTrayIcon(self)
@@ -599,7 +696,7 @@ class SphereOverlayApp(QApplication):
 
     def _on_tray_activated(self, reason: QSystemTrayIcon.ActivationReason) -> None:
         if reason == QSystemTrayIcon.ActivationReason.DoubleClick:
-            self._main_win.show()
+            self.show_main()
 
     def _connect_ws(self) -> None:
         self._ws.patch.connect(self._main_win.emit_patch)

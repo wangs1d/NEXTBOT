@@ -3,10 +3,16 @@
 
 #include <windows.h>
 
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <string>
 #include <vector>
+
+namespace Gdiplus {
+class Bitmap;
+class Graphics;
+}  // namespace Gdiplus
 
 /// 桌面顶部灵动岛（同进程 HWND 自绘，GDI+ 逐像素透明分层窗口）。
 ///
@@ -81,6 +87,29 @@ class DynamicIslandWindow {
     std::string title;
   };
 
+  /// 一条歌词：t_sec 为相对曲目起点秒数（服务端 LRC 毫秒换算而来）。
+  struct LyricLine {
+    double t_sec = 0.0;
+    std::string text;         // utf8
+    std::string translation;  // utf8，空 = 无翻译
+  };
+
+  /// 本地播放器（SMTC）快照。歌词由 Dart 侧拉取后经 setMusicLyrics 喂入，
+  /// 播放进度由这里按采样点 + 墙钟插值推进。
+  struct MusicPlayback {
+    bool has_session = false;
+    std::string app_id;
+    std::string title;
+    std::string artist;
+    std::string album;
+    double duration_sec = 0.0;
+    double position_sec = 0.0;
+    bool playing = false;
+    int64_t sampled_at_epoch_ms = 0;
+    /// SMTC 封面原始字节（PNG/JPEG）；空 = 播放器没给封面。
+    std::string thumbnail;
+  };
+
   enum class EventType {
     kExpandedChanged,  // payload: "true"/"false"（进入展开 / 回到胶囊）
     kAction,           // 岛上动作出口，payload = 动作文案（如「打开日程」）
@@ -129,6 +158,15 @@ class DynamicIslandWindow {
   /// 钳位 [kAttentionCapsuleW, kAttentionMaxCapsuleW]（逻辑 px）。
   int MeasureAttentionCapsuleW(const std::wstring& title,
                                const std::wstring& trailing) const;
+  /// 喂入播放快照（has_session=false 等价于清空）。音乐是背景态：
+  /// 有更高优先级条目时胶囊仍显示条目，只有展开卡里保留歌词区。
+  void SetMediaPlayback(const MusicPlayback& playback);
+  /// 当前曲目的歌词（Dart 拉取后一次性喂入）。track_key 与当前播放键
+  /// 对不上（换歌竞态）直接丢弃并返回 false；reason 非空 = 如实说明
+  /// 没有歌词的原因。
+  bool SetMusicLyrics(const std::string& track_key,
+                      std::vector<LyricLine> lines,
+                      const std::string& reason);
   void SetDpiScale(double scale);
   /// Dart 看门狗兜底：直推一次全屏抑制检查（原生 WM_TIMER 心跳失效时，
   /// 退出全屏后岛卡在隐藏态的恢复全靠这条）。
@@ -139,7 +177,8 @@ class DynamicIslandWindow {
   static constexpr const wchar_t* kClassName = L"PAI_DynamicIsland_Window";
   // 窗口比岛大：给展开卡与呼吸光留余量；岛内容绘制在窗口顶部正中。
   static constexpr int kWindowW = 760;
-  static constexpr int kWindowH = 460;
+  // 高度给展开卡留余量：日程/任务动态/未读/歌词四节全满时约 700px。
+  static constexpr int kWindowH = 760;
   static constexpr int kCapsuleH = 38;       // compact 胶囊高
   static constexpr int kRestCapsuleW = 108;  // 待机胶囊宽（用户拍板：长度 2 倍、高度不变）
   static constexpr int kAttentionCapsuleW = 180;  // 提醒小胶囊最小宽（用户拍板：提醒改小形态，不带 1.6 放大）
@@ -156,6 +195,14 @@ class DynamicIslandWindow {
   static constexpr int kMaxSteps = 4;        // 任务动态最多行数
   static constexpr int kUnreadRowH = 26;     // 未读摘要行高
   static constexpr int kMaxUnreadRows = 3;   // 未读摘要最多行数
+  static constexpr int kMusicCapsuleW = 320;  // 音乐歌词胶囊宽（待机态专用档）
+  static constexpr int kMusicCapsuleH = 50;   // 音乐胶囊高：歌名歌手一行 + 当前歌词一行
+  static constexpr int kMusicExpandedW = 344;  // 音乐展开卡宽（比信息卡窄一档）
+  static constexpr int kMusicArtLarge = 44;   // 展开卡封面边长
+  static constexpr int kMusicArtSmall = 28;   // 胶囊封面边长
+  static constexpr int kLyricPitch = 32;      // 三行歌词的行距
+  static constexpr int kLyricViewportH = 96;  // 歌词窗口高（含上下遮影）
+  static constexpr int kLyricEmptyH = 64;     // 无歌词说明区高
   static constexpr int kHoverDotPitch = 20;  // hover 导航点间距（逻辑 px）
   static constexpr UINT kIslandWheelMsg = WM_APP + 0x49;  // 滚轮钩子 -> 窗口
   // 全屏抑制检查心跳（id=3，窗口存活期间常开）：与动画心跳（id=1）解耦。
@@ -182,8 +229,30 @@ class DynamicIslandWindow {
   void Render();             // 整体重绘（GDI+ -> UpdateLayeredWindow）
   int CompactWidthFor(Kind kind) const;  // 声明档：该内容态的标准胶囊宽
   int CompactWidth() const;              // 当前条目按档取宽（待机回待机档）
+  int CompactHeight() const;             // 音乐有词双行胶囊高一档，其余回常规胶囊高
   int ExpandedHeight() const;
   std::wstring BuildHoverLine() const;   // hover 态环境信息行（按当前标签页）
+
+  // ── 音乐歌词（背景态）──
+  bool MusicActive() const;
+  std::string MusicTrackKey() const;  // 与 Dart 端 trackKey 同构
+  double MusicPositionSec() const;    // 采样点 + 墙钟插值（暂停即冻结）
+  int MusicCurrentLine() const;       // -1 = 前奏或没有歌词
+  float MusicLineProgress(int index) const;  // 行内已唱比例 0..1，卡拉OK亮字用
+  int MusicSectionHeight() const;  // 展开卡歌词区高度（逻辑 px，无音乐 = 0）
+  std::wstring MusicHeaderLine() const;  // 胶囊首行：歌名 · 歌手
+  std::wstring MusicAppName() const;
+  /// 音乐独占展开卡：没有更高优先级条目时，展开即音乐卡（不带日程）。
+  bool MusicOnlyMode() const { return MusicActive() && !has_entry_; }
+  int ExpandedWidth() const;      // 展开目标宽（音乐卡窄一档）
+  int MusicCardHeight() const;    // 音乐独占卡高度（无音乐 = 0）
+  void UpdateMusicRoll();         // 换行滚动动画：行位置向当前行缓动
+  void UpdateMusicArt(const std::string& thumbnail);  // 封面字节 -> 位图缓存
+  void ApplyPendingLyrics();  // 播放状态到位后落挂起的歌词
+  // 三行歌词视口（音乐独占卡与日程卡歌词区共用）：当前行居中放大、上下遮影。
+  void DrawLyricViewport(Gdiplus::Graphics& g, HDC mem_dc, float text_x,
+                         float mask_x, float mask_w, float text_w, float top,
+                         BYTE fade) const;
   void StartAnimTimer();
   void StopAnimTimer();
   void UpdateFullscreenSuppression();
@@ -246,6 +315,24 @@ class DynamicIslandWindow {
   std::string agent_status_;  // utf8，hover「任务」页状态行
   std::vector<AgentStep> agent_steps_;   // 展开卡「任务动态」节
   std::vector<UnreadItem> unread_rows_;  // 展开卡「未读消息」节
+  // 音乐歌词（背景态）：music_ 来自 SMTC 采样，歌词按 lyric_track_key_ 归属，
+  // 换歌后旧词立即失效，等 Dart 拉回新词（期间只显示歌名）。
+  MusicPlayback music_;
+  std::string music_lyric_track_key_;
+  std::vector<LyricLine> music_lines_;
+  std::string music_lyric_reason_;
+  // 播放状态还没到位时挂起的歌词（按曲目键等落地，键不符即弃）。
+  std::string pending_track_key_;
+  std::vector<LyricLine> pending_lines_;
+  std::string pending_reason_;
+  // 封面按内容哈希缓存；换歌/封面补到才重新解码。
+  std::unique_ptr<Gdiplus::Bitmap> music_art_;
+  uint64_t music_art_hash_ = 0;
+  // 歌词滚动：行位置按 320ms 缓动追当前行（暂停时目标不变，自然停住）。
+  double music_roll_pos_ = -1.0;
+  double music_roll_from_ = -1.0;
+  double music_roll_start_s_ = -1.0;
+  int music_roll_target_ = -2;  // -2 = 尚未初始化
   bool voice_talk_mode_ = false;  // 纯语音模式：对话全语音（悬停自动 glance）
   std::vector<RECT> hover_dot_rects_;  // hover 导航点命中区（物理像素）
 

@@ -6,6 +6,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  * memory.forget：用户侧「定向遗忘」统一入口（对标 Muse forget 指令）。
  * 幂等、按关键词联动清除兴趣池/降价监控/承诺/计划/长期记忆五处可见台账。
  * activity.timeline：行为审计只读视图（对标 Muse 全量审计轨迹）。
+ * memory.recall：事件记忆（L0）检索口——按时间/对象/结果回忆真实做过的事。
  */
 export const MEMORY_GOVERNANCE_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -51,6 +52,61 @@ export const MEMORY_GOVERNANCE_CHAT_TOOLS: ChatCompletionTool[] = [
         type: "object",
         properties: {
           limit: { type: "number", description: "可选返回条数上限（默认 30，最大 60）" },
+        },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "memory.recall",
+      description:
+        "回忆你替用户真实做过的事：按时间、对象、结果查历史事件（比过什么价、查过什么天气、" +
+        "建过什么日程、办过什么任务、搜过什么）。\n" +
+        "适用：用户问「上次/之前/什么时候/那天/上个月」+ 做过什么、结果如何；" +
+        "或需要确认自己是否真的做过某件事时。\n" +
+        "不要凭印象编造经历——查不到就如实说没查到。回答时直接说结果，" +
+        "不要提及检索、数据库或任何内部查询过程。",
+      parameters: {
+        type: "object",
+        properties: {
+          query: {
+            type: "string",
+            description: "关键词（商品名/地点/主题，如「小米18 Pro」「兴义」「保险」）；可省略，纯按时间/类型过滤",
+          },
+          days: {
+            type: "number",
+            description: "回看天数（默认 30，最大 3650）；给了 from 时忽略",
+          },
+          from: { type: "string", description: "起始时间，YYYY-MM-DD 或 ISO 时间" },
+          to: { type: "string", description: "结束时间，YYYY-MM-DD 或 ISO 时间（默认现在）" },
+          kinds: {
+            type: "array",
+            items: {
+              type: "string",
+              enum: [
+                "price_compare",
+                "weather_query",
+                "schedule_write",
+                "schedule_query",
+                "travel_plan",
+                "travel_query",
+                "web_search",
+                "order",
+                "task_write",
+                "media",
+                "chat_turn",
+              ],
+            },
+            description: "事件类型过滤（可多选）；省略则所有类型",
+          },
+          status: {
+            type: "string",
+            enum: ["ok", "empty", "failed", "partial", "invalid"],
+            description: "结果状态过滤（如只查没办成的用 failed/empty）",
+          },
+          limit: { type: "number", description: "返回条数上限（默认 20，最大 50）" },
         },
         additionalProperties: false,
       },

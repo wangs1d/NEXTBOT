@@ -38,7 +38,7 @@
     },
     "pos-raw-search-json-rescue": {
       "hint": "plain",
-      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"搜索结果\",\"items\":[{\"type\":\"num\",\"text\":\"降噪耳机选购指南: 从降噪原理到佩戴舒适度的完整对比  \\n来源:搜索\",\"url\":\"https://example.com/headphone-guide\",\"source\":\"搜索\"},{\"type\":\"num\",\"text\":\"2026 年耳机评测汇总: 10 款主流降噪耳机实测  \\n来源:搜索\",\"url\":\"https://example.com/headphone-review\",\"source\":\"搜索\"}],\"footer\":\"共 2 条结果\",\"cardType\":\"search_result\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"搜索结果\",\"items\":[{\"type\":\"num\",\"text\":\"降噪耳机选购指南: 从降噪原理到佩戴舒适度的完整对比\"},{\"type\":\"num\",\"text\":\"2026 年耳机评测汇总: 10 款主流降噪耳机实测\"}],\"footer\":\"共 2 条结果\",\"cardType\":\"search_result\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": "search_result"
     },
     "pos-raw-travel-json-rescue": {
@@ -48,7 +48,7 @@
     },
     "pos-media-search-tool": {
       "hint": "result_card",
-      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"找到几张相关图片：\",\"items\":[{\"type\":\"num\",\"text\":\"日落海边 https://example.com/sunset.jpg\",\"depth\":0,\"url\":\"https://example.com/sunset.jpg\"},{\"type\":\"num\",\"text\":\"城市夜景 https://example.com/night.jpg\",\"depth\":0,\"url\":\"https://example.com/night.jpg\"},{\"type\":\"num\",\"text\":\"山间晨雾 https://example.com/mist.jpg\",\"depth\":0,\"url\":\"https://example.com/mist.jpg\"}],\"footer\":\"\",\"cardType\":\"carousel\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"找到几张相关图片：\",\"items\":[{\"type\":\"num\",\"text\":\"日落海边 https://example.com/sunset.jpg\",\"depth\":0},{\"type\":\"num\",\"text\":\"城市夜景 https://example.com/night.jpg\",\"depth\":0},{\"type\":\"num\",\"text\":\"山间晨雾 https://example.com/mist.jpg\",\"depth\":0}],\"footer\":\"\",\"cardType\":\"carousel\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": "carousel"
     },
     "tool-weather-prose-no-list": {

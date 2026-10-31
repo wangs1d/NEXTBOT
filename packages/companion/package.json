@@ -1,0 +1,24 @@
+{
+  "name": "@nextbot/companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "桌宠心智基层：驱力心智 + 契约 + 零预制动画的参数动力学解算层。未接入现有桌宠。",
+  "exports": {
+    "./protocol": "./src/protocol/index.ts",
+    "./mind": "./src/mind/index.ts",
+    "./body": "./src/body/index.ts"
+  },
+  "scripts": {
+    "test": "node --test \"src/**/*.test.ts\"",
+    "check": "tsc --noEmit -p tsconfig.json",
+    "trace": "node --experimental-strip-types harness/trace.ts"
+  },
+  "dependencies": {
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  }
+}

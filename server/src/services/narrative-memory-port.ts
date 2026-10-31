@@ -11,6 +11,16 @@ import type {
 
 export type NarrativeMemoryContext = "main" | "notes";
 
+/** 记忆条目的来源事件：LTM 结论可回溯到具体哪一轮、发生在何时（而非整理时间）。 */
+export type MemoryWriteProvenance = {
+  /** 来源事件 id（memory_events.id） */
+  sourceEventId?: string;
+  /** 批量整理时的多个来源事件 id（一夜事件压成一条结论时用） */
+  sourceEventIds?: string[];
+  /** 事件发生时刻（ISO，不是入库时间） */
+  eventTime?: string;
+};
+
 export type NarrativeMemoryPort = {
   ingest(
     actorId: string,
@@ -31,7 +41,7 @@ export type NarrativeMemoryPort = {
     actorId: string,
     text: string,
     source: string,
-    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
@@ -56,6 +66,15 @@ export type NarrativeMemoryPort = {
   selfCheck(actorId: string, query: string): Promise<{ exists: boolean; domainId: string | null; confidence: number }>;
   getTelemetrySnapshot(): Record<string, unknown>;
 };
+
+/** 只保留有值的来源字段，避免把 undefined 写进 Mem0 metadata。 */
+function pickProvenance(provenance: MemoryWriteProvenance): MemoryWriteProvenance {
+  return {
+    ...(provenance.sourceEventId ? { sourceEventId: provenance.sourceEventId } : {}),
+    ...(provenance.sourceEventIds?.length ? { sourceEventIds: provenance.sourceEventIds } : {}),
+    ...(provenance.eventTime ? { eventTime: provenance.eventTime } : {}),
+  };
+}
 
 async function unwrapRecall(
   recall: Promise<HumanLikeMemoryRecallResult>,
@@ -123,10 +142,11 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     actorId: string,
     text: string,
     source: string,
-    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void> {
     const context = opts.context as MemoryContextKind;
+    const provenance = pickProvenance(opts);
     if (this.bridge) {
       await this.bridge.writeUnified(
         actorId,
@@ -135,6 +155,7 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
         {
           context,
           highSignal: opts.highSignal,
+          ...provenance,
         },
         unified,
       );
@@ -144,7 +165,7 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     if (this.humanLikeMemory) {
       await this.humanLikeMemory.ingest(actorId, text, source, {
         context,
-        metadata: { highSignal: opts.highSignal },
+        metadata: { highSignal: opts.highSignal, ...provenance },
       });
     }
     if (this.agenticIngest) {
@@ -156,9 +177,17 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
           context,
           opts.highSignal,
           text,
+          provenance,
         );
       } else {
-        await this.agenticIngest.writeDecided(actorId, source, text, context, opts.highSignal);
+        await this.agenticIngest.writeDecided(
+          actorId,
+          source,
+          text,
+          context,
+          opts.highSignal,
+          provenance,
+        );
       }
     }
     this.fireOnWrite(actorId, text, source);
@@ -369,7 +398,7 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
     actorId: string,
     text: string,
     source: string,
-    opts: { context: NarrativeMemoryContext; highSignal: boolean },
+    opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
   ): Promise<void> {
     const skipVector = this.bridgeActive && text.trim().length < this.hybrid.chunkChars;

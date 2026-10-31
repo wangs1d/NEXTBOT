@@ -17,12 +17,10 @@
  * （前端 agent_result_parser.dart / AgentResultCard 直接消费，无需前端改动）。
  */
 
-/** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num */
+/** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
   type: "check" | "warn" | "num";
   text: string;
-  /** 搜索结果卡等场景的跳转链接（前端 _SearchResultCard 整条可点击） */
-  url?: string;
   source?: string;
   /** 行首缩略图（比价卡商品主图等；客户端通用卡渲染为 40x40 圆角图） */
   thumbnailUrl?: string;
@@ -51,8 +49,8 @@ export interface ToolCardPayload {
     dims: string[];
     rows: Array<{ label: string; values: string[] }>;
   };
-  /** product_compare 卡：评测/试色视频入口 */
-  videos?: Array<{ title: string; url?: string; source?: string }>;
+  /** product_compare 卡：评测/试色视频条目 */
+  videos?: Array<{ title: string; source?: string }>;
   /**
    * product_pick 卡（立场化推荐）：主推商品 + 备选定位。
    * sides/items/compare/videos 同时保留（兼容旧客户端 fallback 渲染）。
@@ -65,7 +63,7 @@ export interface ToolCardPayload {
     headline?: string;
     reasons: string[];
     cautions: string[];
-    channels?: Array<{ name: string; priceCny: number; url?: string }>;
+    channels?: Array<{ name: string; priceCny: number }>;
   };
   alternatives?: Array<{
     productId: string;
@@ -86,12 +84,11 @@ export interface ToolCardPayload {
       platform: string;
       title: string;
       shop?: string;
-      url?: string;
       image?: string;
       similar?: boolean;
       offerCount: number;
     }>;
-    decisionPageUrl?: string;
+    bestIndex?: number | null;
   };
   /**
    * 专用卡型的附加载荷（随卡 JSON 原样透传给前端，AgentResultData.extra 消费）：
@@ -104,7 +101,7 @@ export interface ToolCardPayload {
     mentions?: number;
     pros?: string[];
     cons?: string[];
-    posts?: Array<{ title: string; url?: string }>;
+    posts?: Array<{ title: string }>;
   };
   /**
    * 操作按钮（客户端渲染为 AgentActionChoiceCard，点击经 chat.user_action 回传，
@@ -342,13 +339,12 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const when = pid ? altWhen.get(pid) : undefined;
       if (when) items.push({ type: "num", text: `▸ 什么时候选它：${when}`, side, sideLabel: label });
       for (const v of (Array.isArray(c.videos) ? c.videos : []).filter(
-        (x): x is { title?: unknown; url?: unknown; source?: unknown } => typeof x === "object" && x !== null,
+        (x): x is { title?: unknown; source?: unknown } => typeof x === "object" && x !== null,
       )) {
         const title = str((v as { title?: unknown }).title);
         if (title) {
           videos.push({
             title,
-            url: str((v as { url?: unknown }).url) || undefined,
             source: str((v as { source?: unknown }).source) || undefined,
           });
         }
@@ -401,7 +397,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
                 .map((ch) => ({
                   name: str(ch.name),
                   priceCny: typeof ch.priceCny === "number" ? ch.priceCny : 0,
-                  ...(str(ch.url) ? { url: str(ch.url) } : {}),
                 }))
                 .filter((ch) => ch.name && ch.priceCny > 0)
             : undefined,
@@ -435,7 +430,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
               : undefined,
             posts: Array.isArray(rawUgc.posts)
               ? (rawUgc.posts as Array<Record<string, unknown>>)
-                  .map((p) => ({ title: str(p.title), ...(str(p.url) ? { url: str(p.url) } : {}) }))
+                  .map((p) => ({ title: str(p.title) }))
                   .filter((p) => p.title)
                   .slice(0, 4)
               : undefined,
@@ -520,7 +515,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   },
 
   // 单平台商品搜索（shopping.order.search）：与跨平台比价卡同一版式——
-  // 缩略图 + 可点行（链接直达商品页）+ 结算页免责。没有它，模型在比价超时
+  // 缩略图 + 报价行（卡内只展示，不跳页）+ 结算页免责。没有它，模型在比价超时
   // 后改调本工具的结果会退化成 LLM 手写价格列表（2026-10-25 小米 15 实测）。
   "shopping.order.search": (r) => {
     if (r.ok !== true) return null;
@@ -533,14 +528,12 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const price = num(p.price);
       const title = str(p.title);
       if (!title) continue;
-      const url = str(p.url);
       const image = str(p.imageUrl);
       const shop = str(p.shop);
       const priceText = price != null ? `¥${price}` : "价格待查";
       items.push({
         type: "num",
         text: [priceText, title.slice(0, 40), shop ? `（${shop.slice(0, 12)}）` : ""].filter(Boolean).join(" "),
-        ...(url ? { url } : {}),
         ...(image ? { thumbnailUrl: image } : {}),
       });
     }
@@ -555,16 +548,15 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       items,
       footer:
         best != null
-          ? `最低 ¥${best} · 行可点直达商品页 · 实时抓取，以下单结算页为准`
-          : "行可点直达商品页 · 实时抓取，以下单结算页为准",
+          ? `最低 ¥${best} · 实时抓取，以下单结算页为准`
+          : "实时抓取，以下单结算页为准",
       cardType: "",
     };
   },
 
   // 跨平台比价结果卡（2026-10-28 升级：专属 price_compare 卡型）。
   // 每组一行：缩略图 + 最低价 + 平台 + 商品名 + 店铺 + 疑似同款标注；
-  // 行带 offer.url 整行可点跳平台商品页；
-  // 服务端存档了决策页时追加「打开比价决策页」行（决策页 = 大图/报价/口碑一页看全）。
+  // 卡内只展示报价，不带平台跳转。
   // items 保留为通用回退（旧客户端），结构化分组走 priceCompare 由专属卡消费。
   "shopping.compare.prices": (r) => {
     const groups = Array.isArray(r.groups) ? r.groups : [];
@@ -582,7 +574,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const platform = str(best.platform);
       const title = str(best.title);
       const shop = str(best.shop);
-      const url = str(best.url);
       const image = str(best.imageUrl) || str(rec.imageUrl);
       const similar = rec.matchType === "similar";
       const priceText = price != null ? `¥${price}` : "价格待查";
@@ -597,7 +588,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       items.push({
         type: "num",
         text: parts.join(" "),
-        ...(url ? { url } : {}),
         ...(image ? { thumbnailUrl: image } : {}),
       });
       priceGroups.push({
@@ -605,7 +595,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         platform: platform || "未知平台",
         title: title.slice(0, 60),
         ...(shop ? { shop: shop.slice(0, 12) } : {}),
-        ...(url ? { url } : {}),
         ...(image ? { image } : {}),
         ...(similar ? { similar: true } : {}),
         offerCount: offers.length,
@@ -613,20 +602,12 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       shown += 1;
     }
     if (items.length === 0) return null;
-    const decisionPageUrl = str(r.decisionPageUrl);
-    if (decisionPageUrl) {
-      items.push({
-        type: "num",
-        text: "打开比价决策页（大图 / 全部报价 / 走势一页看全）",
-        url: decisionPageUrl,
-      });
-    }
     // footer 不再回显「最低价 ¥X 来自 平台」搜索源内容（与列表行重复，2026-10-28 移除），
-    // 仅保留操作提示与实时抓取免责说明。
+    // 仅保留实时抓取免责说明。
     return {
       title: `比价结果：${str(r.query)}`,
       items,
-      footer: "行可点直达平台商品页 · 信息为实时抓取，以下单结算页为准",
+      footer: "信息为实时抓取，以下单结算页为准",
       cardType: "price_compare",
       ...(priceGroups.length > 0
         ? {
@@ -635,7 +616,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
               groups: priceGroups,
               // 仅当各组同规格可比时才标最低价（bestIndex=null 客户端不打章）
               bestIndex: typeof r.bestIndex === "number" ? r.bestIndex : null,
-              ...(decisionPageUrl ? { decisionPageUrl } : {}),
             },
           }
         : {}),
@@ -669,9 +649,8 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     return { title, items, footer, cardType: "" };
   },
 
-  // 调研比价卡（保险/服务等无法结构化抓价的领域）：sources → 可点来源清单，
-  // 复用 search_result 卡型（客户端 _SearchResultCard 整行可点跳外部浏览器）；
-  // 对比表本体由 LLM 口头正文承载（disclaimer 已要求整理成表）。
+  // 调研比价卡（保险/服务等无法结构化抓价的领域）：sources → 结果条目清单，
+  // 复用 search_result 卡型；对比表本体由 LLM 口头正文承载（disclaimer 已要求整理成表）。
   "shopping.compare.research": (r) => {
     if (r.ok !== true) return null;
     const sources = Array.isArray(r.sources) ? r.sources : [];
@@ -684,18 +663,14 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const rec = raw as Record<string, unknown>;
       const title = str(rec.title);
       const url = str(rec.url);
-      if (!title && !url) continue;
-      if (url && seen.has(url)) continue;
-      if (url) seen.add(url);
+      if (!title) continue;
+      if (url) {
+        if (seen.has(url)) continue;
+        seen.add(url);
+      }
       const snippet = str(rec.snippet);
-      const source = str(rec.source);
-      const text = snippet ? `${title || url}：${snippet.slice(0, 90)}` : title || url;
-      items.push({
-        type: "num",
-        text,
-        url: url || undefined,
-        source: source || undefined,
-      });
+      const text = snippet ? `${title}：${snippet.slice(0, 90)}` : title;
+      items.push({ type: "num", text });
     }
     if (items.length === 0) return null;
     return {
@@ -791,14 +766,14 @@ function buildSearchCardFromItems(rawItems: unknown): ToolCardPayload | null {
     const rec = raw as Record<string, unknown>;
     const title = str(rec.title);
     const url = str(rec.url);
-    if (!title && !url) continue;
-    if (url && seen.has(url)) continue;
-    if (url) seen.add(url);
+    if (!title) continue;
+    if (url) {
+      if (seen.has(url)) continue;
+      seen.add(url);
+    }
     const snippet = str(rec.snippet);
-    const source = str(rec.source);
-    const desc = [snippet, source ? `来源:${source}` : ""].filter(Boolean).join("  ");
-    const text = desc ? `${title || url}: ${desc}` : title || url;
-    items.push({ type: "num", text, url: url || undefined, source: source || undefined });
+    const text = snippet ? `${title}：${snippet.slice(0, 90)}` : title;
+    items.push({ type: "num", text });
   }
   if (items.length === 0) return null;
   return {

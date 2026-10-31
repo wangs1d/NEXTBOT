@@ -34,6 +34,9 @@ param(
   # ffmpeg.exe 来源目录（装机后落在 runtime\bin，供 code.shell 白名单命令调用）
   # 默认自动探测本机 PATH 上的 ffmpeg（解析 WinGet 符号链接到真实目录）
   [string]$FfmpegSourceDir = "",
+  # WebView2 运行时独立安装包（微软 Evergreen Standalone x64，约 215MB）：
+  # 随包分发、装机时离线静默安装；缺省缓存于 windows_dist\redist，缺失则下载一次。
+  [string]$WebView2InstallerPath = "",
   # 发行版本：internal=内测版（默认，能力全量，AppId/文件名同历史）；oss=开源版
   # （GitHub 发行）：烤 PAI_EDITION=oss、runtime\.env 写 NEXTBOT_EDITION=oss、
   # 独立 AppId 与 Nextbot-Setup-OSS.exe 文件名、跳过 travel-knowledge 种子。
@@ -121,6 +124,28 @@ if ((Get-Item $ffmpegExe).Length -lt 1MB) {
   throw "ffmpeg.exe 只有 $((Get-Item $ffmpegExe).Length) 字节（$ffmpegExe 不是真实二进制）：用 -FfmpegSourceDir 指向含完整 ffmpeg.exe 的目录。"
 }
 
+# WebView2 运行时：内置浏览器 / 旅游规划 / 比价全靠它。直接打进安装包（离线可装），
+# 装机时缺了才解出来静默安装，不再依赖装机瞬间联网下载。
+if (-not $WebView2InstallerPath) {
+  $WebView2InstallerPath = Join-Path $Repo 'windows_dist\redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe'
+}
+if (-not (Test-Path $WebView2InstallerPath)) {
+  New-Item -ItemType Directory -Force -Path (Split-Path $WebView2InstallerPath -Parent) | Out-Null
+  Write-Host '下载 WebView2 运行时独立安装包（微软官方 fwlink，约 215MB，仅首次）…'
+  $prevProgress = $ProgressPreference
+  $ProgressPreference = 'SilentlyContinue'
+  try {
+    Invoke-WebRequest -UseBasicParsing -Uri 'https://go.microsoft.com/fwlink/p/?linkid=2124701' -OutFile $WebView2InstallerPath
+  } finally {
+    $ProgressPreference = $prevProgress
+  }
+}
+$wv2Size = (Get-Item $WebView2InstallerPath).Length
+if ($wv2Size -lt 150MB) {
+  throw "WebView2 安装包只有 $wv2Size 字节（$WebView2InstallerPath）：下载不完整或不是官方包。"
+}
+Write-Host ("bundled WebView2: {0} ({1:N1} MB)" -f $WebView2InstallerPath, ($wv2Size / 1MB)) -ForegroundColor Green
+
 Write-Host '== [1/5] 客户端 release 构建（委托 build_windows.ps1，单一构建入口）=='
 if (-not $SkipClientBuild) {
   # 单一构建入口：build_windows.ps1 负责 HTTP_BASE 默认值、未烤入告警与构建前目录解锁
@@ -139,6 +164,9 @@ Write-Host '== [2/5] server 编译（含 workspace 包）=='
 if (-not $SkipServerBuild) {
   & npm run build --prefix (Join-Path $Repo 'server')
   if ($LASTEXITCODE -ne 0) { throw 'server build failed' }
+  # 装机产物用 esbuild 单文件包（dist-bundle）；tsc 的 dist 仍产出，ECS 云端部署走它
+  & node (Join-Path $Repo 'scripts\build-server-bundle.mjs')
+  if ($LASTEXITCODE -ne 0) { throw 'server bundle failed' }
 }
 
 Write-Host '== [3/5] 组装 staging =='
@@ -164,6 +192,20 @@ foreach ($dll in 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_atomic_wait.dll',
   # runtime 同拷：better_sqlite3/onnxruntime 的 .node 加载时按 DLL 搜索顺序只看
   # node.exe 所在目录（runtime\）→ System32，够不着 app\。
   Copy-Item $src $StageRuntime -Force
+}
+
+# 3.1.5 桌宠随包：PyInstaller 单目录产物 + 前端 dist 落到 app\，装机后不依赖本机 Python。
+# 客户端按「sphere-overlay-py\sphere-overlay.exe 存在」优先走打包入口。
+& (Join-Path $PSScriptRoot 'build-deskpet.ps1') -Repo $Repo
+$petDst = Join-Path $StageApp 'sphere-overlay-py'
+New-Item -ItemType Directory -Force -Path $petDst | Out-Null
+Copy-Item (Join-Path $Repo 'sphere-overlay-py\dist\sphere-overlay\*') $petDst -Recurse -Force
+$avatarDst = Join-Path $StageApp 'agent-sphere-avatar'
+New-Item -ItemType Directory -Force -Path $avatarDst | Out-Null
+Copy-Item (Join-Path $Repo 'agent-sphere-avatar\dist') (Join-Path $avatarDst 'dist') -Recurse -Force
+foreach ($f in (Join-Path $petDst 'sphere-overlay.exe'),
+               (Join-Path $avatarDst 'dist\overlay.html')) {
+  if (-not (Test-Path $f)) { throw "staging 缺少桌宠文件: $f" }
 }
 
 # 3.2 捆绑 node.exe：必须与仓库里已编译的原生模块 ABI 对齐。
@@ -216,8 +258,9 @@ foreach ($pkg in 'agent-world', 'packages\agent-protocol', 'packages\picture') {
   Get-ChildItem $pkgDst -Recurse -Include '*.d.ts', '*.d.ts.map' -File | Remove-Item -Force
 }
 
-# 3.5 server 产物（dist + package.json[type:module] + config 默认清单）
-Copy-Item (Join-Path $Repo 'server\dist') (Join-Path $StageRuntime 'dist') -Recurse -Force
+# 3.5 server 产物：单文件包落在 runtime\dist\bundle（与 dist\node_modules 同层，
+# 模块解析顺序 bundle\node_modules → dist\node_modules → node_modules 不变）
+Copy-Item (Join-Path $Repo 'server\dist-bundle') (Join-Path $StageRuntime 'dist\bundle') -Recurse -Force
 Copy-Item (Join-Path $Repo 'server\package.json') (Join-Path $StageRuntime 'package.json') -Force
 Copy-Item (Join-Path $Repo 'server\config') (Join-Path $StageRuntime 'config') -Recurse -Force
 
@@ -231,7 +274,7 @@ Get-ChildItem (Join-Path $StageRuntime 'web') -Recurse -File -Include '*.map' -E
 
 # 3.6 server 私有依赖：npm 工作区不会把全部依赖提升到根 node_modules
 # （如 mem0ai、groq-sdk、@anthropic-ai/sdk 等只落在 server\node_modules），
-# 漏拷会让 dist/index.js 启动即 ERR_MODULE_NOT_FOUND。拷到 dist\node_modules
+# 漏拷会让 dist/bundle/index.js 启动即 ERR_MODULE_NOT_FOUND。拷到 dist\node_modules
 # 使解析顺序（dist\node_modules → node_modules）与开发态（server\node_modules →
 # 根）一致；不能与根拍平合并——zod/pg/redis 等在两处是不同版本，会互相覆盖。
 if (Test-Path (Join-Path $Repo 'server\node_modules')) {
@@ -373,7 +416,7 @@ if ($Edition -eq 'oss') {
 Write-Host '== [4/5] 校验关键文件 =='
 foreach ($f in (Join-Path $StageApp 'NEXTBOT.exe'),
                (Join-Path $StageRuntime 'node.exe'),
-               (Join-Path $StageRuntime 'dist\index.js'),
+               (Join-Path $StageRuntime 'dist\bundle\supervisor-main.js'),
                (Join-Path $StageRuntime 'node_modules\@nextbot\agent-world\dist'),
                (Join-Path $StageRuntime 'node_modules\onnxruntime-node\bin\napi-v6\win32\x64'),
                (Join-Path $StageRuntime 'models\bge-small-zh-v1.5\model_quantized.onnx'),
@@ -434,7 +477,7 @@ $env:OPENAI_API_KEY = 'sk-smoke-0000000000000000000'
 # 输出用异步读干，避免子进程写满 4K 管道后阻塞在 write 上。
 $smokePsi = New-Object System.Diagnostics.ProcessStartInfo
 $smokePsi.FileName = Join-Path $StageRuntime 'node.exe'
-$smokePsi.Arguments = 'dist\index.js'
+$smokePsi.Arguments = 'dist\bundle\supervisor-main.js'
 $smokePsi.WorkingDirectory = $StageRuntime
 $smokePsi.UseShellExecute = $false
 $smokePsi.CreateNoWindow = $true
@@ -455,6 +498,8 @@ foreach ($i in 1..50) {
     if ($res.StatusCode -eq 200) { $ready = $true; break }
   } catch {}
 }
+# 向量引擎在端点就绪后才后台装载：多留几秒让装载结果落进日志，再断言失败路径
+if ($ready) { Start-Sleep -Seconds 6 }
 & cmd /c "taskkill /T /F /PID $($smokeProc.Id) >nul 2>&1"
 $null = $smokeProc.WaitForExit(8000)
 # 落盘供失败时排查（.NET 路径没有 -RedirectStandardOutput，这里手工写回）。
@@ -481,6 +526,9 @@ if (-not $smokeTextAll.Contains('[local-embedding]')) {
 }
 if ($smokeTextAll.Contains('内置向量引擎不可用')) {
   throw '捆绑门禁失败：本地向量引擎装载失败（模型缺失或 ONNX 会话创建异常），详见冒烟日志'
+}
+if ($smokeTextAll.Contains('向量宿主退出')) {
+  throw '捆绑门禁失败：本地向量引擎宿主进程异常退出（原生库崩溃或端口被占），详见冒烟日志'
 }
 if (-not $smokeTextAll.Contains('Mem0 OSS runtime ready')) {
   Write-Host '--- 冒烟 stdout（尾部）---'
@@ -525,7 +573,7 @@ $zeroLog = Join-Path $StageRoot 'runtime-smoke-zerokey.log'
 $env:PORT = "$smokePort"
 $zeroPsi = New-Object System.Diagnostics.ProcessStartInfo
 $zeroPsi.FileName = Join-Path $StageRuntime 'node.exe'
-$zeroPsi.Arguments = 'dist\index.js'
+$zeroPsi.Arguments = 'dist\bundle\supervisor-main.js'
 $zeroPsi.WorkingDirectory = $StageRuntime
 $zeroPsi.UseShellExecute = $false
 $zeroPsi.CreateNoWindow = $true
@@ -622,7 +670,7 @@ Write-Host '== [5/5] Inno 编译 =='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw '未找到 ISCC.exe，请安装 Inno Setup 6' }
-$issArgs = @((Join-Path $Repo 'installer\nextbot.iss'), "/DAppVersion=$Version", "/DStage=$StageRoot", "/DEdition=$Edition")
+$issArgs = @((Join-Path $Repo 'installer\nextbot.iss'), "/DAppVersion=$Version", "/DStage=$StageRoot", "/DEdition=$Edition", "/DWebView2Installer=$WebView2InstallerPath")
 if ($CertThumbprint) { $issArgs += '/DSignedSetup=1' }
 & $iscc @issArgs
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }

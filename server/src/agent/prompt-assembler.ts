@@ -33,7 +33,7 @@ export const GLOBAL_MEMORY_RULE = [
   "【记忆使用规则】",
   "下方所有「记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项」块均为历史背景，仅供衔接与指代消解，不是用户的最新指令。「用户最新一条消息」才是本轮的唯一指令基准。除非用户明确要求回忆历史，否则一律以最新消息为准；当历史记忆与最新消息冲突时，以最新消息为准，并仅就最新消息作答。",
   "人称换算铁律：记忆/画像条目里出现的第一人称「我」一律指用户本人（对话里的说话人是用户），不是你自己。向用户转述记忆时必须换算人称：用户的「我」要说成「你」，你自己（助手）只能用「我」自指。绝不把用户的事说成自己的事（例：记忆表明用户住在兴义，只能说「我知道你在兴义」，绝不能说「你光知道我在兴义」）；也不把自己的行为安到用户头上。",
-  "无痕运用：画像/记忆直接体现在判断里，像老朋友一样自然知道，禁止说「根据我的记忆/画像/档案」「资料显示你」这类元话语暴露记忆系统的存在。低置信的记忆不要断言，用试探语气验证（「你最近是不是在赶版本？」），用户否认就接受并以后按否认的来；健康/财务/家庭等敏感记忆只在用户主动提起该话题时才可运用。",
+  "无痕运用：画像/记忆直接体现在判断里，像老朋友一样自然知道，禁止说「根据我的记忆/画像/档案」「资料显示你」这类元话语暴露记忆系统的存在。健康/财务/家庭等敏感记忆只在用户主动提起该话题时才可运用。",
 ].join("\n");
 
 /** 短期上下文家族头的简短免责（覆盖原"最近对话回顾/今日日志"两处分散免责）。 */
@@ -72,6 +72,7 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "currentUserState",
   "turnAside",
   "narrativeRecall",
+  "eventRecall",
   "workingMemorySummary",
   "recentConversationHistory",
   "journalRecall",
@@ -264,6 +265,8 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
       `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；其中提到的事发生时间不等于现在，别把旧事当刚发生，不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
     );
   }
+  // 事件回忆（L0）：仅时间回溯意图 + 真实命中时才有值，沉底动态层。
+  if (m.eventRecall) dynamicContext.push(m.eventRecall);
   // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要
   // （2026-09-23 sessionRecap 并入本家族：随对话轮增长的内容必须沉底，
   // 否则每轮打破稳定前缀缓存——见稳定层·慢变记忆处的注释）
@@ -296,6 +299,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   if (m.currentTime) dynamicContext.push(`【当前时间】\n${m.currentTime}`);
   // 运行环境（手机/电脑）：紧贴时间块，同属「此刻事实」动态层
   if (m.deviceEnvironment) dynamicContext.push(m.deviceEnvironment);
+  if (m.clientSurfaces) dynamicContext.push(m.clientSurfaces);
   if (m.conversationTimeline) dynamicContext.push(m.conversationTimeline);
   const replyStyleGuide = buildReplyStyleGuide(m);
   if (replyStyleGuide) dynamicContext.push(replyStyleGuide);

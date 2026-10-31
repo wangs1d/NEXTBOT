@@ -1,0 +1,844 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>桌宠心智 · 轨迹回放（求解器输出取证）</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#171a20; --panel2:#13161b; --border:#22262e;
+    --text:#d6dae0; --muted:#8b929c; --dim:#5c636d; --hi:#eef1f5;
+    --mono: ui-monospace, "Cascadia Mono", Consolas, "DejaVu Sans Mono", Menlo, monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%;background:var(--bg);color:var(--text)}
+  body{
+    font:12px/1.45 "Microsoft YaHei","PingFang SC","Noto Sans CJK SC",system-ui,sans-serif;
+    display:flex;flex-direction:column;overflow:hidden;
+  }
+  #cap{
+    padding:9px 14px 8px;border-bottom:1px solid var(--border);background:var(--panel2);
+    display:flex;gap:14px;align-items:baseline;flex-wrap:wrap;
+  }
+  #cap .lead{color:var(--text);letter-spacing:.01em}
+  #cap .lead b{color:var(--hi);font-weight:600}
+  #cap .stat{color:var(--muted);font-family:var(--mono);font-size:11px;white-space:nowrap}
+
+  #wrap{flex:1 1 auto;display:flex;min-height:0}
+  #stageBox{flex:1 1 auto;position:relative;min-width:0;background:var(--bg)}
+  #stage{display:block;width:100%}
+  #emptyHint{
+    position:absolute;right:12px;top:8px;color:var(--dim);font-size:10.5px;
+    font-family:var(--mono);pointer-events:none;text-align:right
+  }
+
+  #side{
+    flex:0 0 346px;width:346px;border-left:1px solid var(--border);background:var(--panel);
+    overflow:auto;padding:10px 11px 14px
+  }
+  .box{margin:0 0 9px;border:1px solid var(--border);background:var(--panel2)}
+  .box>h3{
+    margin:0;padding:5px 8px;font-size:11px;font-weight:600;color:var(--muted);
+    border-bottom:1px solid var(--border);letter-spacing:.06em;background:#14171c
+  }
+  .box>.in{padding:7px 8px}
+  .grid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:2px 7px;align-items:baseline}
+  .grid .k{color:var(--dim);font-size:11px}
+  .grid .v{font-family:var(--mono);color:var(--text);text-align:right;font-variant-numeric:tabular-nums}
+  .one{display:grid;grid-template-columns:auto 1fr;gap:2px 8px;align-items:baseline}
+  .one .k{color:var(--dim);font-size:11px;white-space:nowrap}
+  .one .v{font-family:var(--mono);text-align:right;font-variant-numeric:tabular-nums;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .big{font-size:19px;font-family:var(--mono);color:var(--hi);letter-spacing:.02em;line-height:1.1}
+  .sub{color:var(--muted);font-size:11px;font-family:var(--mono)}
+  .tag{
+    display:inline-block;font-family:var(--mono);font-size:10px;color:var(--muted);
+    border:1px solid var(--border);padding:0 4px
+  }
+  .tag.on{color:var(--hi);border-color:#3f454e;background:#1d2127}
+  .rule{height:1px;background:var(--border);margin:7px 0}
+  .note{color:var(--dim);font-size:10.5px;line-height:1.5}
+  .bar{height:4px;background:#20242b;border:1px solid var(--border);margin-top:3px;position:relative}
+  .bar>i{position:absolute;left:0;top:0;bottom:0;background:var(--text);opacity:.75}
+  #idx{max-height:190px;overflow:auto;padding:2px 0}
+  #idx .row{
+    display:grid;grid-template-columns:46px 8px 1fr;gap:6px;align-items:center;
+    padding:2px 8px;cursor:pointer;border-left:2px solid transparent
+  }
+  #idx .row:hover{background:#1c2027}
+  #idx .row.cur{background:#22262e;border-left-color:var(--hi)}
+  #idx .tm{font-family:var(--mono);color:var(--muted);font-size:10.5px;text-align:right}
+  #idx .dot{width:6px;height:6px;justify-self:center;border-radius:50%}
+  #idx .tx{font-size:11px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  #idx .tx i{font-style:normal;font-family:var(--mono);color:var(--dim)}
+
+  #transport{
+    flex:0 0 auto;border-top:1px solid var(--border);background:var(--panel);
+    padding:6px 10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap
+  }
+  button{
+    font:inherit;font-size:11px;color:var(--text);background:#1b1f26;border:1px solid var(--border);
+    padding:3px 9px;cursor:pointer;border-radius:2px
+  }
+  button:hover{background:#22262e;border-color:#2f343c}
+  button.on{background:#2b3038;color:var(--hi);border-color:#3f454e}
+  button:focus-visible{outline:1px solid #4a5058;outline-offset:1px}
+  #transport label{color:var(--muted);font-size:11px;display:flex;gap:4px;align-items:center;cursor:pointer;user-select:none}
+  #transport .sp{width:1px;height:18px;background:var(--border);margin:0 3px}
+  #clock{font-family:var(--mono);font-size:13px;color:var(--hi);font-variant-numeric:tabular-nums;min-width:132px}
+  #keys{color:var(--dim);font-size:10.5px;font-family:var(--mono);margin-left:auto}
+
+  #tlBox{flex:0 0 auto;position:relative;border-top:1px solid var(--border);background:var(--panel2)}
+  #tl{display:block;width:100%;cursor:crosshair}
+  #tip{
+    position:absolute;display:none;pointer-events:none;z-index:5;background:#1b1f26;
+    border:1px solid #2f343c;padding:4px 7px;font-size:11px;color:var(--text);max-width:320px;
+    box-shadow:0 3px 10px rgba(0,0,0,.5)
+  }
+  #tip .m{font-family:var(--mono);color:var(--muted);font-size:10.5px}
+  #err{padding:24px;color:var(--text);font-size:13px}
+  ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:#262b33}
+</style>
+</head>
+<body>
+
+<div id="cap">
+  <div class="lead">下面这条轨迹是<b>参数动力学求解器录制输出的回放</b>：管线里<b>不存在任何动画资产</b>——没有关键帧、没有序列帧、没有预制片段；每一帧的位置、倾角与挤压都是语义 Directive 交给物理积分现算的。本次录制里心智与解算跑在同一进程内，跨端拆分尚未做。像不像活的，只按这个渲染结果判断。</div>
+  <div class="stat" id="capstat"></div>
+</div>
+
+<div id="wrap">
+  <div id="stageBox">
+    <canvas id="stage"></canvas>
+    <div id="emptyHint">侧视 x 水平 / y 竖直 · 体积守恒 sy=1−d sx=1/√sy · 倾角 rz · 虚线十字=锚点 · 虚线竖导引=腾空</div>
+  </div>
+  <div id="side">
+    <div class="box"><h3>指针</h3><div class="in">
+      <div class="big" id="rTime">—</div>
+      <div class="sub" id="rFrame">—</div>
+      <div class="rule"></div>
+      <div class="one"><span class="k">驱动链 dr</span><span class="v" id="rDriver" style="color:var(--hi)">—</span></div>
+      <div class="one"><span class="k">离锚</span><span class="v" id="rOff">—</span></div>
+    </div></div>
+
+    <div class="box"><h3>当前 Directive</h3><div class="in" id="dirBox"></div></div>
+
+    <div class="box"><h3>Pose（录制原始帧）</h3><div class="in"><div class="grid" id="poseGrid"></div></div></div>
+
+    <div class="box"><h3>判据读数</h3><div class="in" id="metricBox"></div></div>
+
+    <div class="box"><h3>局部窗统计（±4s）</h3><div class="in"><div class="grid" id="winGrid"></div></div></div>
+
+    <div class="box"><h3>事件 / Directive 索引（点击跳转）</h3><div id="idx"></div></div>
+
+    <div class="box"><h3>数据契约</h3><div class="in" id="metaBox"></div></div>
+  </div>
+</div>
+
+<div id="transport">
+  <button id="btnPlay" title="空格">暂停</button>
+  <button id="btnPrev" title="←">−1帧</button>
+  <button id="btnNext" title="→">+1帧</button>
+  <span class="sp"></span>
+  <button data-rate="0.25">0.25×</button>
+  <button data-rate="1" class="on">1×</button>
+  <button data-rate="4">4×</button>
+  <span class="sp"></span>
+  <button id="btnPM">上一标记</button>
+  <button id="btnNM">下一标记</button>
+  <span class="sp"></span>
+  <label><input type="checkbox" id="cbLoop" checked>循环</label>
+  <label><input type="checkbox" id="cbSmooth" checked>平滑插值</label>
+  <label><input type="checkbox" id="cbTrail" checked>拖影</label>
+  <span class="sp"></span>
+  <div id="clock">—</div>
+  <div id="keys">空格 播放 · ←→ 逐帧 · Shift+←→ ±1s · PgUp/PgDn 标记 · Home/End</div>
+</div>
+
+<div id="tlBox">
+  <canvas id="tl"></canvas>
+  <div id="tip"></div>
+</div>
+
+<script src="out/day.trace.js"></script>
+<script>
+(function () {
+  'use strict';
+  var MONO = 'ui-monospace, Consolas, Menlo, monospace';
+  var SANS = '"Microsoft YaHei","PingFang SC",sans-serif';
+  var $ = function (id) { return document.getElementById(id); };
+
+  var TRACE = window.TRACE;
+  if (!TRACE || !TRACE.poses || !TRACE.poses.length) {
+    $('wrap').innerHTML = '<div id="err">读不到 window.TRACE。请确认本文件位于 harness/ 目录，' +
+      '且 harness/out/day.trace.js 存在（file:// 直接打开即可，无需服务器）。</div>';
+    return;
+  }
+
+  /* ══════════ 数据 ══════════ */
+  var CAP = TRACE.capability || {};
+  var ANCHOR_Y = (typeof CAP.anchorY === 'number') ? CAP.anchorY : 1.4;
+  var BX = (CAP.bounds && typeof CAP.bounds.x === 'number') ? CAP.bounds.x : 1;
+  var POSES = TRACE.poses, DIRS = TRACE.directives || [], SCRIPT = TRACE.script || [], SAMPLES = TRACE.samples || [];
+  var T0 = POSES[0].t, T1 = POSES[POSES.length - 1].t, SPAN = Math.max(1, T1 - T0);
+
+  var gMin = Infinity, gMax = -Infinity, dMin = Infinity, dMax = -Infinity;
+  var yMin = Infinity, yMax = -Infinity, axMax = 0, airN = 0, i, p;
+  for (i = 0; i < POSES.length; i++) {
+    p = POSES[i];
+    if (p.g < gMin) gMin = p.g; if (p.g > gMax) gMax = p.g;
+    if (p.d < dMin) dMin = p.d; if (p.d > dMax) dMax = p.d;
+    if (p.y < yMin) yMin = p.y; if (p.y > yMax) yMax = p.y;
+    if (Math.abs(p.x) > axMax) axMax = Math.abs(p.x);
+    if (p.a) airN++;
+  }
+  var gSpan = Math.max(1e-6, gMax - gMin);
+  var dAbs = Math.max(Math.abs(dMin), Math.abs(dMax), 0.2);
+
+  // 真实帧距（TRACE.frameMs 只是名义值，不能拿来步进）
+  var dtMed = (function () {
+    var n = Math.min(POSES.length - 1, 800), a = [], k;
+    for (k = 0; k < n; k++) a.push(POSES[k + 1].t - POSES[k].t);
+    a.sort(function (u, v) { return u - v; });
+    return a.length ? a[a.length >> 1] : 1000 / 60;
+  })();
+
+  function idxAt(t) {
+    var lo = 0, hi = POSES.length - 1, mid;
+    if (t <= POSES[0].t) return 0;
+    if (t >= POSES[hi].t) return hi;
+    while (lo < hi) { mid = (lo + hi + 1) >> 1; if (POSES[mid].t <= t) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function dirIdxAt(t) {
+    var lo = -1, hi = DIRS.length - 1, mid;
+    while (lo < hi) { mid = (lo + hi + 1) >> 1; if (DIRS[mid].atMs <= t) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+  function sampIdxAt(t) {
+    var lo = -1, hi = SAMPLES.length - 1, mid;
+    if (!SAMPLES.length) return -1;
+    while (lo < hi) { mid = (lo + hi + 1) >> 1; if (SAMPLES[mid].atMs <= t) lo = mid; else hi = mid - 1; }
+    return lo;
+  }
+
+  // 相邻录制帧之间做确定性线性混合（不引入任何随机源）
+  function sample(t) {
+    var a = idxAt(t), b = Math.min(POSES.length - 1, a + 1);
+    var pa = POSES[a], pb = POSES[b];
+    var f = (a === b || pb.t === pa.t) ? 0 : Math.max(0, Math.min(1, (t - pa.t) / (pb.t - pa.t)));
+    var use = state.smooth ? f : (f > 0.5 ? 1 : 0);
+    var near = f < 0.5 ? a : b;
+    var sel = use < 0.5 ? pa : pb;
+    function L(k) { return pa[k] + (pb[k] - pa[k]) * use; }
+    return {
+      x: L('x'), y: L('y'), z: L('z'), ry: L('ry'), rz: L('rz'), d: L('d'), g: L('g'),
+      a: sel.a, dr: sel.dr, raw: POSES[near], near: near, mix: use
+    };
+  }
+
+  /* ══════════ 画布 ══════════ */
+  var stage = $('stage'), sctx = stage.getContext('2d');
+  var tl = $('tl'), tctx = tl.getContext('2d');
+  var tlBuf = document.createElement('canvas'), tlBufCtx = tlBuf.getContext('2d');
+  var DPR = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+
+  // 时间轴车道几何（自上而下）
+  var LANE = { top: 2, head: 78, dir: 14, y: 52, d: 28, drive: 22, axis: 16, padL: 8, padR: 8 };
+  var TL_H = LANE.top + LANE.head + LANE.dir + LANE.y + LANE.d + LANE.drive + LANE.axis;
+  var G = (function () {
+    var y = LANE.top;
+    return { head0: y, y0: (y += LANE.head), y1: (y += LANE.dir), y2: (y += LANE.y), y3: (y += LANE.d), y4: (y += LANE.drive), y5: y };
+  })();
+  var tlW = 0, env = null;
+  function tlX(t) { return LANE.padL + (t - T0) / SPAN * (tlW - LANE.padL - LANE.padR); }
+  function tlT(px) { return T0 + (px - LANE.padL) / Math.max(1, tlW - LANE.padL - LANE.padR) * SPAN; }
+  function lane(y0, h, lo, hi) { return { y0: y0, h: h, lo: lo, hi: hi }; }
+  function lanes() {
+    return [
+      lane(G.y0, LANE.y, yMin - 0.05, yMax + 0.05),
+      lane(G.y1, LANE.d, -dAbs, dAbs),
+      lane(G.y2, LANE.drive, 0, 1)
+    ];
+  }
+  function vmap(L, v) { return L.y0 + L.h - (v - L.lo) / (L.hi - L.lo) * L.h; }
+
+  function sizeCanvas(c, w, h) {
+    w = Math.max(240, Math.floor(w)); h = Math.max(120, Math.floor(h));
+    if (c._w !== w || c._h !== h) {
+      c._w = w; c._h = h;
+      c.width = Math.round(w * DPR); c.height = Math.round(h * DPR);
+      c.style.width = w + 'px'; c.style.height = h + 'px';
+    }
+    return { w: w, h: h };
+  }
+
+  /* ══════════ 侧视舞台 ══════════ */
+  var R_WORLD = 0.17, D_CLAMP = 0.75, VPAD = 12;
+  var view = { S: 40, ox: 0, oy: 0, xHalf: 1, yTop: 2, yBot: 0 };
+  function computeView(w, h) {
+    var xHalf = Math.max(BX, axMax) + 0.14;
+    var yBot = -0.12, yTop = Math.max(ANCHOR_Y + 0.62, yMax + 0.32, 2.1);
+    var S = Math.min((w - 2 * VPAD) / (2 * xHalf), (h - 2 * VPAD) / (yTop - yBot));
+    view.S = S; view.xHalf = xHalf; view.yTop = yTop; view.yBot = yBot;
+    view.ox = w / 2;
+    view.oy = (h - (yTop - yBot) * S) / 2 + yTop * S;   // 世界 y=0 的屏幕 y
+  }
+  function SX(x) { return view.ox + x * view.S; }
+  function SY(y) { return view.oy - y * view.S; }
+
+  function drawStage() {
+    var sz = sizeCanvas(stage, stage.parentNode.clientWidth, stage.parentNode.clientHeight);
+    sctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    sctx.clearRect(0, 0, sz.w, sz.h);
+    computeView(sz.w, sz.h);
+    var S = view.S, R = R_WORLD * S;
+    var ps = sample(state.clock);
+    var ay = SY(ANCHOR_Y), acx = SX(0), fy = Math.round(SY(0)) + 0.5;
+
+    // 场景边界 ±BX
+    sctx.save();
+    sctx.strokeStyle = '#1b1f25'; sctx.lineWidth = 1; sctx.setLineDash([2, 5]);
+    [-BX, BX].forEach(function (bx) {
+      var gx = Math.round(SX(bx)) + 0.5;
+      sctx.beginPath(); sctx.moveTo(gx, SY(view.yTop)); sctx.lineTo(gx, SY(view.yBot)); sctx.stroke();
+    });
+    sctx.restore();
+
+    // 地面 + 下方剖面线
+    sctx.strokeStyle = '#2c313a'; sctx.lineWidth = 1;
+    sctx.beginPath(); sctx.moveTo(SX(-view.xHalf), fy); sctx.lineTo(SX(view.xHalf), fy); sctx.stroke();
+    sctx.save();
+    sctx.beginPath(); sctx.rect(SX(-view.xHalf), fy, view.xHalf * 2 * S, sz.h - fy); sctx.clip();
+    sctx.strokeStyle = '#1a1e24';
+    for (var hx = SX(-view.xHalf) - 30; hx < SX(view.xHalf) + 30; hx += 9) {
+      sctx.beginPath(); sctx.moveTo(hx, fy); sctx.lineTo(hx - 24, fy + 24); sctx.stroke();
+    }
+    sctx.restore();
+    sctx.fillStyle = '#4b525b'; sctx.font = '10px ' + MONO;
+    sctx.fillText('地面 y=0', SX(-view.xHalf) + 4, fy - 4);
+    sctx.fillStyle = '#39404a';
+    for (var tx = -1; tx <= 1.0001; tx += 0.5) sctx.fillRect(Math.round(SX(tx)) + 0.5, fy, 1, 4);
+    sctx.fillStyle = '#4b525b'; sctx.fillText('±' + BX + ' 边界', SX(BX) - 46, fy + 15);
+
+    // 锚点：虚线十字准星 + 静止参考圈
+    sctx.save();
+    sctx.strokeStyle = '#565e68'; sctx.lineWidth = 1; sctx.setLineDash([5, 4]);
+    sctx.beginPath(); sctx.moveTo(acx - 32, ay); sctx.lineTo(acx + 32, ay); sctx.stroke();
+    sctx.beginPath(); sctx.moveTo(acx, ay - 32); sctx.lineTo(acx, ay + 32); sctx.stroke();
+    sctx.strokeStyle = '#2f353d'; sctx.setLineDash([3, 4]);
+    sctx.beginPath(); sctx.arc(acx, ay, R, 0, Math.PI * 2); sctx.stroke();
+    sctx.restore();
+    sctx.fillStyle = '#6b7280'; sctx.font = '10px ' + MONO;
+    sctx.fillText('锚点 y=' + ANCHOR_Y, acx + 36, ay - 3);
+
+    // 拖影（最近 ~0.4s）
+    if (state.trail) {
+      var win = Math.max(1, Math.round(430 / dtMed));
+      for (var k = Math.max(0, ps.near - win); k < ps.near; k += 2) {
+        var q = POSES[k], age = (ps.near - k) / win;
+        sctx.fillStyle = 'rgba(160,168,178,' + (0.17 * (1 - age)).toFixed(3) + ')';
+        sctx.beginPath(); sctx.arc(SX(q.x), SY(q.y), Math.max(0.6, R * 0.11), 0, Math.PI * 2); sctx.fill();
+      }
+    }
+
+    // 腾空虚线导引：球心 → 锚点高度
+    var bx = SX(ps.x), by = SY(ps.y);
+    if (ps.a === 1) {
+      sctx.save();
+      sctx.strokeStyle = '#8b929c'; sctx.lineWidth = 1; sctx.setLineDash([3, 3]);
+      sctx.beginPath(); sctx.moveTo(bx, by); sctx.lineTo(bx, ay); sctx.stroke();
+      sctx.setLineDash([]);
+      sctx.beginPath(); sctx.moveTo(bx - 6, ay); sctx.lineTo(bx + 6, ay); sctx.stroke();
+      sctx.restore();
+      var dy = ps.y - ANCHOR_Y;
+      sctx.fillStyle = '#aeb5be'; sctx.font = '10px ' + MONO;
+      sctx.fillText('Δy ' + (dy >= 0 ? '+' : '') + dy.toFixed(3), bx + 8, (by + ay) / 2);
+    }
+
+    // 接地投影
+    var above = Math.max(0, ps.y) / (ANCHOR_Y + 0.7);
+    var shA = 0.26 * (1 - Math.min(1, above));
+    if (shA > 0.01) {
+      sctx.save(); sctx.globalAlpha = shA; sctx.fillStyle = '#000';
+      sctx.beginPath(); sctx.ellipse(bx, fy - 1, R * 0.85, R * 0.16, 0, 0, Math.PI * 2); sctx.fill();
+      sctx.restore();
+    }
+
+    // 球体：体积守恒形变 + rz 倾角 + glow 亮度
+    var d = Math.max(-D_CLAMP, Math.min(D_CLAMP, ps.d));
+    var sy = 1 - d;
+    var sx = 1 / Math.sqrt(Math.max(1e-4, sy));
+    var gn = (ps.g - gMin) / gSpan;
+    sctx.save();
+    sctx.translate(bx, by);
+    sctx.rotate(-ps.rz);
+    sctx.scale(sx, sy);
+    var hi = Math.min(255, Math.round(100 + 155 * gn));
+    var mid = Math.round(30 + 92 * gn), lo = Math.round(13 + 30 * gn);
+    var grd = sctx.createRadialGradient(-R * 0.32, -R * 0.34, R * 0.05, 0, 0, R);
+    grd.addColorStop(0, 'rgb(' + hi + ',' + hi + ',' + Math.min(255, hi + 4) + ')');
+    grd.addColorStop(0.55, 'rgb(' + mid + ',' + mid + ',' + (mid + 4) + ')');
+    grd.addColorStop(1, 'rgb(' + lo + ',' + lo + ',' + (lo + 3) + ')');
+    sctx.fillStyle = grd;
+    sctx.beginPath(); sctx.arc(0, 0, R, 0, Math.PI * 2); sctx.fill();
+    sctx.lineWidth = 1;
+    sctx.strokeStyle = 'rgba(214,218,224,' + (0.16 + 0.34 * gn).toFixed(3) + ')';
+    sctx.beginPath(); sctx.arc(0, 0, R, 0, Math.PI * 2); sctx.stroke();
+    // 赤道线：让形变与倾角可读
+    sctx.strokeStyle = 'rgba(150,158,168,.30)';
+    sctx.beginPath(); sctx.moveTo(-R * 0.9, 0); sctx.lineTo(R * 0.9, 0); sctx.stroke();
+    // 朝向记号（ry 投影）
+    sctx.fillStyle = 'rgba(228,232,238,' + (0.20 + 0.45 * gn).toFixed(3) + ')';
+    sctx.beginPath(); sctx.arc(Math.sin(ps.ry) * R * 0.62, -R * 0.1, R * 0.13, 0, Math.PI * 2); sctx.fill();
+    sctx.restore();
+
+    // glow 光晕
+    sctx.save(); sctx.globalCompositeOperation = 'lighter';
+    var halo = sctx.createRadialGradient(bx, by, R * 0.4, bx, by, R * 2.1);
+    halo.addColorStop(0, 'rgba(190,198,208,' + (0.04 + 0.16 * gn).toFixed(3) + ')');
+    halo.addColorStop(1, 'rgba(190,198,208,0)');
+    sctx.fillStyle = halo; sctx.beginPath(); sctx.arc(bx, by, R * 2.1, 0, Math.PI * 2); sctx.fill();
+    sctx.restore();
+
+    // 舞台读数
+    sctx.fillStyle = '#6b7280'; sctx.font = '10px ' + MONO;
+    sctx.fillText('sy=' + sy.toFixed(3) + '  sx=' + sx.toFixed(3) + '  (d=' + d.toFixed(3) + ')', 10, 15);
+    sctx.fillText('rz=' + (ps.rz * 57.2958).toFixed(1) + '°   ry=' + (ps.ry * 57.2958).toFixed(1) + '°', 10, 28);
+    sctx.fillText('glow ' + ps.g.toFixed(3) + ' → 归一亮度 ' + gn.toFixed(2), 10, 41);
+    sctx.fillStyle = '#8b929c'; sctx.font = '11px ' + SANS;
+    sctx.fillText((ps.a ? '腾空' : '贴锚/接地') + ' · ' + (ps.dr || '—'), 10, 57);
+    return ps;
+  }
+
+  /* ══════════ 时间轴：标记 + 全程图 ══════════ */
+  var MARKS = [];
+  // 竖排空间很小：把成组重复的长前缀（如「你连续逗它 第N下」）折掉，只留能区分的尾段
+  var TICKS = (function () {
+    var by = {};
+    SCRIPT.forEach(function (s) { var k = s.label.slice(0, 5); (by[k] || (by[k] = [])).push(s); });
+    var out = {};
+    Object.keys(by).forEach(function (k) {
+      var g = by[k];
+      g.forEach(function (s) {
+        var t = (g.length >= 2 && s.label.length > k.length + 1) ? s.label.slice(k.length).trim() : s.label;
+        out[s.atMs] = t || s.label;
+      });
+    });
+    return out;
+  })();
+  SCRIPT.forEach(function (s) { MARKS.push({ ms: s.atMs, kind: 's', label: s.label, tick: TICKS[s.atMs] || s.label, sub: s.percept }); });
+  DIRS.forEach(function (d) {
+    MARKS.push({ ms: d.atMs, kind: 'd', label: d.intent + '(' + d.intensity.toFixed(2) + ')', sub: (d.cause ? d.cause.id : '—') });
+  });
+  MARKS.sort(function (a, b) { return a.ms - b.ms || (a.kind < b.kind ? -1 : 1); });
+
+  function buildEnv(n) {
+    n = Math.max(32, n);
+    var out = { n: n, b: new Array(n), air: new Int32Array(n) };
+    for (var k = 0; k < n; k++) out.b[k] = { yMin: Infinity, yMax: -Infinity, dMin: Infinity, dMax: -Infinity, energy: null, caution: null };
+    var per = SPAN / n, idx;
+    for (k = 0; k < POSES.length; k++) {
+      idx = Math.min(n - 1, Math.max(0, Math.floor((POSES[k].t - T0) / per)));
+      var e = out.b[idx], q = POSES[k];
+      if (q.y < e.yMin) e.yMin = q.y; if (q.y > e.yMax) e.yMax = q.y;
+      if (q.d < e.dMin) e.dMin = q.d; if (q.d > e.dMax) e.dMax = q.d;
+      if (q.a) out.air[idx]++;
+    }
+    for (k = 0; k < SAMPLES.length; k++) {
+      var s = SAMPLES[k];
+      idx = Math.min(n - 1, Math.max(0, Math.floor((s.atMs - T0) / per)));
+      if (out.b[idx].energy === null) { out.b[idx].energy = s.energy; out.b[idx].caution = s.caution; }
+    }
+    for (k = 1; k < n; k++) if (out.b[k].energy === null && out.b[k - 1].energy !== null) { out.b[k].energy = out.b[k - 1].energy; out.b[k].caution = out.b[k - 1].caution; }
+    for (k = n - 2; k >= 0; k--) if (out.b[k].energy === null && out.b[k + 1].energy !== null) { out.b[k].energy = out.b[k + 1].energy; out.b[k].caution = out.b[k + 1].caution; }
+    for (k = 0; k < n; k++) if (out.b[k].yMin === Infinity) { out.b[k].yMin = ANCHOR_Y; out.b[k].yMax = ANCHOR_Y; out.b[k].dMin = 0; out.b[k].dMax = 0; }
+    return out;
+  }
+
+  function buildTL() {
+    sizeCanvas(tl, tl.parentNode.clientWidth, TL_H);
+    tlW = tl._w;
+    tlBuf.width = tl.width; tlBuf.height = tl.height;
+    env = buildEnv(tlW - LANE.padL - LANE.padR);
+    var c = tlBufCtx;
+    c.setTransform(DPR, 0, 0, DPR, 0, 0);
+    c.fillStyle = '#13161b'; c.fillRect(0, 0, tlW, TL_H);
+    var innerW = tlW - LANE.padL - LANE.padR;
+    var LS = lanes();
+
+    // 秒网格
+    c.font = '9px ' + MONO;
+    var stepS = (innerW / (SPAN / 1000)) < 3 ? 20000 : 10000;
+    for (var ts = 0; ts <= SPAN; ts += stepS) {
+      var gx = Math.round(tlX(T0 + ts)) + 0.5;
+      c.strokeStyle = '#1c2027'; c.lineWidth = 1;
+      c.beginPath(); c.moveTo(gx, G.head0); c.lineTo(gx, G.y5); c.stroke();
+      if (ts % (stepS * 2) === 0) { c.fillStyle = '#454b54'; c.fillText((ts / 1000) + 's', gx + 2, G.y5 + 11); }
+    }
+
+    // 叙事事件：浅色实线 + 竖排标签
+    c.strokeStyle = '#d6dae0'; c.lineWidth = 1;
+    MARKS.forEach(function (m) {
+      if (m.kind !== 's') return;
+      var mx = Math.round(tlX(m.ms)) + 0.5;
+      c.beginPath(); c.moveTo(mx, G.head0); c.lineTo(mx, G.y0); c.stroke();
+      c.save(); c.translate(mx - 2, G.y0 - 3); c.rotate(-Math.PI / 2);
+      c.fillStyle = '#aab1ba'; c.font = '10px ' + SANS;
+      c.fillText(fitV(c, m.tick || m.label, G.y0 - 6 - G.head0), 0, 0); c.restore();
+      c.fillStyle = '#d6dae0'; c.fillRect(mx - 1.5, G.y0 - 3, 3, 3);
+    });
+
+    // Directive：中灰三角
+    c.fillStyle = '#8b929c'; c.strokeStyle = '#8b929c'; c.lineWidth = 1;
+    DIRS.forEach(function (d) {
+      var mx = Math.round(tlX(d.atMs)) + 0.5;
+      c.beginPath(); c.moveTo(mx, G.y0); c.lineTo(mx, G.y1); c.stroke();
+      c.beginPath(); c.moveTo(mx - 3, G.y1 - 1); c.lineTo(mx + 3, G.y1 - 1); c.lineTo(mx, G.y1 - 8); c.closePath(); c.fill();
+    });
+    c.fillStyle = '#454b54'; c.font = '9px ' + MONO;
+    c.fillText('directive ×' + DIRS.length, LANE.padL + 2, G.y1 - 2);
+
+    // 车道外框
+    c.strokeStyle = '#22262e'; c.lineWidth = 1;
+    LS.forEach(function (L) { c.strokeRect(LANE.padL + 0.5, L.y0 + 0.5, innerW - 1, L.h - 1); });
+
+    // y 车道（含腾空灰带 + 锚点虚线 + min/max 包络）
+    var L0 = LS[0];
+    c.fillStyle = 'rgba(139,146,156,.15)';
+    for (var b = 0; b < env.n; b++) if (env.air[b] > 0) c.fillRect(LANE.padL + b, L0.y0, 1, L0.h);
+    var aY = vmap(L0, ANCHOR_Y);
+    c.save(); c.setLineDash([4, 4]); c.strokeStyle = '#3a4048';
+    c.beginPath(); c.moveTo(LANE.padL, aY); c.lineTo(LANE.padL + innerW, aY); c.stroke(); c.restore();
+    drawEnv(c, L0, function (e) { return e.yMax; }, function (e) { return e.yMin; }, '#c3c9d1', 'rgba(120,128,138,.55)');
+    c.fillStyle = '#454b54'; c.font = '9px ' + MONO;
+    c.fillText('y ' + L0.lo.toFixed(2) + '…' + L0.hi.toFixed(2) + ' · 锚 ' + ANCHOR_Y + ' · 灰带=腾空', LANE.padL + 2, L0.y0 + 9);
+
+    // d 车道
+    var L1 = LS[1], zY = L1.y0 + L1.h / 2;
+    c.save(); c.setLineDash([4, 4]); c.strokeStyle = '#333841';
+    c.beginPath(); c.moveTo(LANE.padL, zY); c.lineTo(LANE.padL + innerW, zY); c.stroke(); c.restore();
+    drawEnv(c, L1, function (e) { return e.dMax; }, function (e) { return e.dMin; }, '#d0d5dc', 'rgba(150,158,168,.62)');
+    c.fillStyle = '#454b54'; c.font = '9px ' + MONO;
+    c.fillText('d ' + dMin.toFixed(2) + '…' + dMax.toFixed(2) + '（上压扁 下拉长）', LANE.padL + 2, L1.y0 + 9);
+
+    // energy / caution 车道
+    var L2 = LS[2];
+    poly(c, L2, function (e) { return e.caution; }, '#7d848e');
+    poly(c, L2, function (e) { return e.energy; }, '#dfe3e8');
+    c.fillStyle = '#454b54'; c.font = '9px ' + MONO;
+    c.fillText('energy/caution 1Hz', LANE.padL + 2, L2.y0 + 9);
+    c.font = '9px ' + SANS;
+    c.fillStyle = '#dfe3e8'; c.fillRect(tlW - 124, L2.y0 + 5, 8, 2); c.fillStyle = '#5c636d'; c.fillText('精力', tlW - 114, L2.y0 + 9);
+    c.fillStyle = '#7d848e'; c.fillRect(tlW - 78, L2.y0 + 5, 8, 2); c.fillStyle = '#5c636d'; c.fillText('戒备', tlW - 68, L2.y0 + 9);
+  }
+  // 竖排标签按车道高度精确截断，避免被画布上沿切掉半个字
+  function fitV(c, s, maxPx) {
+    if (c.measureText(s).width <= maxPx) return s;
+    var lo = 0, hi = s.length;
+    while (lo < hi) {
+      var mid = (lo + hi + 1) >> 1;
+      if (c.measureText(s.slice(0, mid) + '…').width <= maxPx) lo = mid; else hi = mid - 1;
+    }
+    return lo > 0 ? s.slice(0, lo) + '…' : '';
+  }
+  function drawEnv(c, L, hiF, loF, stroke, fill) {
+    var b, n = env.n;
+    c.fillStyle = fill;
+    for (b = 0; b < n; b++) {
+      var a = vmap(L, hiF(env.b[b])), z = vmap(L, loF(env.b[b]));
+      if (z - a < 1) z = a + 1;
+      c.fillRect(LANE.padL + b, a, 1, z - a);
+    }
+    c.strokeStyle = stroke; c.lineWidth = 1; c.beginPath();
+    for (b = 0; b < n; b++) { var y = vmap(L, hiF(env.b[b])); if (b === 0) c.moveTo(LANE.padL + b, y); else c.lineTo(LANE.padL + b, y); }
+    c.stroke();
+  }
+  function poly(c, L, f, col) {
+    c.strokeStyle = col; c.lineWidth = 1; c.beginPath();
+    var started = false;
+    for (var b = 0; b < env.n; b++) {
+      var v = f(env.b[b]); if (v === null || v === undefined) continue;
+      var y = vmap(L, Math.max(L.lo, Math.min(L.hi, v)));
+      if (!started) { c.moveTo(LANE.padL + b, y); started = true; } else c.lineTo(LANE.padL + b, y);
+    }
+    c.stroke();
+  }
+
+  function drawTL(ps) {
+    tctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+    tctx.clearRect(0, 0, tlW, TL_H);
+    tctx.drawImage(tlBuf, 0, 0, tlW, TL_H);
+    var LS = lanes();
+
+    if (state.hover >= 0) {
+      var m = MARKS[state.hover], mx = Math.round(tlX(m.ms)) + 0.5;
+      tctx.strokeStyle = 'rgba(238,241,245,.7)'; tctx.lineWidth = 1; tctx.setLineDash([2, 2]);
+      tctx.beginPath(); tctx.moveTo(mx, G.head0); tctx.lineTo(mx, G.y5); tctx.stroke(); tctx.setLineDash([]);
+    }
+
+    var ph = Math.round(tlX(state.clock)) + 0.5;
+    tctx.strokeStyle = '#eef1f5'; tctx.lineWidth = 1;
+    tctx.beginPath(); tctx.moveTo(ph, G.head0); tctx.lineTo(ph, G.y5); tctx.stroke();
+    tctx.fillStyle = '#eef1f5';
+    tctx.beginPath(); tctx.moveTo(ph - 4, G.head0); tctx.lineTo(ph + 4, G.head0); tctx.lineTo(ph, G.head0 + 6); tctx.closePath(); tctx.fill();
+    tctx.fillRect(ph - 2, vmap(LS[0], ps.y) - 1.5, 4, 3);
+    tctx.fillRect(ph - 2, vmap(LS[1], ps.d) - 1.5, 4, 3);
+  }
+
+  /* ══════════ 读数面板 ══════════ */
+  var elRT = $('rTime'), elRF = $('rFrame'), elRD = $('rDriver'), elRO = $('rOff');
+  var elDir = $('dirBox'), elPose = $('poseGrid'), elMetric = $('metricBox'), elWin = $('winGrid'), elMeta = $('metaBox');
+  var elClock = $('clock'), elIdx = $('idx');
+
+  function kv(g, pairs) {
+    var h = '';
+    for (var k = 0; k < pairs.length; k++) h += '<span class="k">' + pairs[k][0] + '</span><span class="v">' + pairs[k][1] + '</span>';
+    g.innerHTML = h;
+  }
+  function f3(v) { return (v >= 0 ? ' ' : '') + v.toFixed(3); }
+  function s2(v) { return (v === null || v === undefined) ? '—' : v.toFixed(2); }
+  function esc(s) { return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;'); }
+
+  var idxRows = null;
+  function buildIdx() {
+    var h = '';
+    for (var k = 0; k < MARKS.length; k++) {
+      var m = MARKS[k];
+      h += '<div class="row" data-k="' + k + '" data-ms="' + m.ms + '">' +
+        '<span class="tm">' + (m.ms / 1000).toFixed(1) + 's</span>' +
+        '<span class="dot" style="background:' + (m.kind === 's' ? '#d6dae0' : '#8b929c') + '"></span>' +
+        '<span class="tx">' + esc(m.label) + ' <i>' + esc(m.sub) + '</i></span></div>';
+    }
+    elIdx.innerHTML = h;
+    idxRows = elIdx.querySelectorAll('.row');
+    elIdx.addEventListener('click', function (e) {
+      var row = e.target;
+      while (row && row !== elIdx && !row.getAttribute('data-ms')) row = row.parentNode;
+      if (row && row !== elIdx) seek(parseFloat(row.getAttribute('data-ms')), true);
+    });
+  }
+  function markIdxRow(di) {
+    if (!idxRows) return;
+    var curMs = di >= 0 ? DIRS[di].atMs : -1;
+    for (var k = 0; k < idxRows.length; k++) {
+      idxRows[k].classList.toggle('cur', MARKS[k].kind === 'd' && MARKS[k].ms === curMs);
+    }
+  }
+
+  function updatePanel(ps) {
+    var t = state.clock, sec = (t - T0) / 1000;
+    elRT.textContent = sec.toFixed(2) + ' s';
+    elRF.textContent = '帧 ' + ps.near + ' / ' + POSES.length + ' · 帧距 ' + dtMed.toFixed(1) + 'ms · 混帧 ' + ps.mix.toFixed(2);
+    elRD.textContent = ps.dr || '—';
+    elRO.textContent = 'Δy ' + (ps.y - ANCHOR_Y).toFixed(3) + ' · y=' + ps.y.toFixed(3);
+
+    var di = dirIdxAt(t), d = di >= 0 ? DIRS[di] : null;
+    if (!d) {
+      elDir.innerHTML = '<div class="sub">尚无 Directive（开局静置，只剩 reflex 微颤）</div>';
+    } else {
+      var age = t - d.atMs, hold = d.holdMs || 0, inHold = age <= hold, tn = d.tuning || {}, cs = d.cause || {};
+      elDir.innerHTML =
+        '<div class="one"><span class="k">intent</span><span class="v" style="color:var(--hi)">' + esc(d.intent) + '</span></div>' +
+        '<div class="one"><span class="k">intensity</span><span class="v">' + d.intensity.toFixed(4) + '</span></div>' +
+        '<div class="bar"><i style="width:' + (d.intensity * 100).toFixed(1) + '%"></i></div>' +
+        '<div class="one"><span class="k">cause.id</span><span class="v">' + esc(cs.id || '—') + '</span></div>' +
+        '<div class="one"><span class="k">kind · drive</span><span class="v">' + esc((cs.kind || '—') + ' · ' + (cs.driveKey || '—') + '=' + s2(cs.driveLevel)) + '</span></div>' +
+        '<div class="one"><span class="k">val/aro</span><span class="v">' + s2(d.valence) + ' / ' + s2(d.arousal) + '</span></div>' +
+        '<div class="one"><span class="k">attend</span><span class="v">' + esc(d.attend || '—') + '</span></div>' +
+        '<div class="rule"></div>' +
+        '<div class="one"><span class="k">springK/damping</span><span class="v">' + s2(tn.springK) + ' / ' + s2(tn.damping) + '</span></div>' +
+        '<div class="one"><span class="k">restitution</span><span class="v">' + s2(tn.restitution) + '</span></div>' +
+        '<div class="one"><span class="k">maxSpeed</span><span class="v">' + s2(tn.maxSpeed) + '</span></div>' +
+        '<div class="one"><span class="k">intensityCap</span><span class="v">' + s2(tn.intensityCap) + '</span></div>' +
+        '<div class="one"><span class="k">noiseAmp</span><span class="v">' + (tn.noiseAmp === undefined ? '—' : tn.noiseAmp.toFixed(3)) + '</span></div>' +
+        '<div class="rule"></div>' +
+        '<div class="one"><span class="k">发出 / 距今</span><span class="v">' + (d.atMs / 1000).toFixed(1) + 's / ' + (age / 1000).toFixed(2) + 's</span></div>' +
+        '<div class="one"><span class="k">hold ' + hold + 'ms</span><span class="v"><span class="tag' + (inHold ? ' on' : '') + '">' + (inHold ? '驱动中' : '惯性收尾') + '</span></span></div>';
+    }
+    markIdxRow(di);
+
+    var q = ps.raw;
+    kv(elPose, [
+      ['t', q.t.toFixed(1)], ['x', f3(q.x)],
+      ['y', f3(q.y)], ['z', f3(q.z)],
+      ['ry', f3(q.ry)], ['rz', f3(q.rz)],
+      ['d', f3(q.d)], ['g', q.g.toFixed(3)],
+      ['a', q.a ? '腾空' : '否'],
+      ['sy/sx', (1 - q.d).toFixed(3) + '/' + (1 / Math.sqrt(Math.max(1e-4, 1 - q.d))).toFixed(3)]
+    ]);
+
+    var si = sampIdxAt(t), s0 = si >= 0 ? SAMPLES[si] : null, s1 = s0 ? SAMPLES[Math.min(SAMPLES.length - 1, si + 1)] : null;
+    var en = null, ca = null;
+    if (s0) {
+      var sf = (s1 && s1.atMs !== s0.atMs) ? Math.max(0, Math.min(1, (t - s0.atMs) / (s1.atMs - s0.atMs))) : 0;
+      en = s0.energy + ((s1 ? s1.energy : s0.energy) - s0.energy) * sf;
+      ca = s0.caution + ((s1 ? s1.caution : s0.caution) - s0.caution) * sf;
+    }
+    elMetric.innerHTML =
+      '<div class="one"><span class="k">energy 精力</span><span class="v">' + s2(en) + '</span></div>' +
+      '<div class="bar"><i style="width:' + ((en || 0) * 100).toFixed(1) + '%"></i></div>' +
+      '<div class="one"><span class="k">caution 戒备</span><span class="v">' + s2(ca) + '</span></div>' +
+      '<div class="bar"><i style="width:' + ((ca || 0) * 100).toFixed(1) + '%;opacity:.45"></i></div>' +
+      '<div class="one"><span class="k">attention</span><span class="v">' + esc((s0 && s0.attention) || '—') + '</span></div>' +
+      '<div class="rule"></div>' +
+      '<div class="note">samples 是数组（' + SAMPLES.length + ' 点，1Hz），attention 是字符串不是数值。</div>';
+
+    // ±4s 局部窗统计
+    var w0 = t - 4000, w1 = t + 4000, a = idxAt(Math.max(T0, w0));
+    var contacts = 0, apex = -Infinity, sq = -Infinity, n = 0, airC = 0, dirN = 0, kk;
+    for (kk = a; kk < POSES.length && POSES[kk].t <= w1; kk++) {
+      var r = POSES[kk]; n++;
+      if (r.y > apex) apex = r.y;
+      if (r.d > sq) sq = r.d;
+      if (r.a) airC++;
+      if (kk > a && r.a && !POSES[kk - 1].a) contacts++;
+    }
+    for (kk = 0; kk < DIRS.length; kk++) if (DIRS[kk].atMs >= w0 && DIRS[kk].atMs < w1) dirN++;
+    kv(elWin, [
+      ['帧数', n], ['Directive', dirN],
+      ['最高点', (apex === -Infinity ? 0 : apex - ANCHOR_Y).toFixed(3)],
+      ['最大挤压', (sq === -Infinity ? 0 : sq).toFixed(3)],
+      ['起跳次数', contacts], ['腾空占比', n ? (airC / n).toFixed(3) : '0.000']
+    ]);
+
+    elClock.textContent = fmt(sec) + ' / ' + fmt(SPAN / 1000) + '  ' + state.rate + '×';
+  }
+  function fmt(sec) {
+    var m = Math.floor(sec / 60), r = sec - m * 60;
+    return (m < 10 ? '0' : '') + m + ':' + (r < 10 ? '0' : '') + r.toFixed(2);
+  }
+  function fillMeta() {
+    $('capstat').textContent = POSES.length + ' 帧 · ' + (SPAN / 1000).toFixed(0) + 's · 帧距 ' + dtMed.toFixed(1) +
+      'ms · Directive ' + DIRS.length + ' · 事件 ' + SCRIPT.length + ' · 采样 ' + SAMPLES.length;
+    elMeta.innerHTML =
+      '<div class="one"><span class="k">shell</span><span class="v">' + esc(CAP.shell || '—') + '</span></div>' +
+      '<div class="one"><span class="k">channels</span><span class="v">' + esc((CAP.channels || []).join(',')) + '</span></div>' +
+      '<div class="one"><span class="k">bounds/anchorY</span><span class="v">±' + BX + ' / ' + ANCHOR_Y + '</span></div>' +
+      '<div class="one"><span class="k">frameMs(名义)</span><span class="v">' + (TRACE.frameMs || 0).toFixed(2) + '</span></div>' +
+      '<div class="rule"></div>' +
+      '<div class="note">名义 frameMs=' + (TRACE.frameMs || 0).toFixed(2) + '，实测相邻帧约 ' + dtMed.toFixed(1) +
+      'ms，故播放按 p.t 二分查找而不是按 frameMs 步进。</div>' +
+      '<div class="note">glow 全域仅 ' + gMin.toFixed(3) + '…' + gMax.toFixed(3) + '（摆幅 ' + gSpan.toFixed(3) +
+      '），亮度按实测域归一化后才看得出，面板仍显示原始值。</div>' +
+      '<div class="note">d 实测 ' + dMin.toFixed(3) + '…' + dMax.toFixed(3) + '，未触及 ±0.75 上限；x 峰值 ' + axMax.toFixed(3) +
+      '（边界 ±' + BX + '）；腾空帧 ' + airN + '/' + POSES.length + '（' + (airN / POSES.length * 100).toFixed(1) + '%）。</div>' +
+      '<div class="note">纯 canvas 2D，无库、无网络、无构建；数据只来自 out/day.trace.js。</div>';
+  }
+
+  /* ══════════ 交互 ══════════ */
+  var state = { clock: T0, playing: true, rate: 1, smooth: true, trail: true, loop: true, hover: -1 };
+  function seek(t, pause) {
+    state.clock = Math.max(T0, Math.min(T1, t));
+    if (pause) { state.playing = false; syncPlayBtn(); }
+    render();
+  }
+  function step(frames) {
+    var k = Math.max(0, Math.min(POSES.length - 1, idxAt(state.clock) + frames));
+    state.playing = false; syncPlayBtn();
+    state.clock = POSES[k].t; render();
+  }
+  function nearestMark(dir) {
+    var best = -1, bd = Infinity;
+    for (var k = 0; k < MARKS.length; k++) {
+      var dd = dir > 0 ? MARKS[k].ms - state.clock : state.clock - MARKS[k].ms;
+      if (dd > 200 && dd < bd) { bd = dd; best = k; }
+    }
+    if (best >= 0) seek(MARKS[best].ms, true);
+  }
+
+  var btnPlay = $('btnPlay');
+  function syncPlayBtn() { btnPlay.textContent = state.playing ? '暂停' : '播放'; btnPlay.classList.toggle('on', state.playing); }
+  btnPlay.onclick = function () { state.playing = !state.playing; syncPlayBtn(); render(); };
+  $('btnPrev').onclick = function () { step(-1); };
+  $('btnNext').onclick = function () { step(1); };
+  $('btnPM').onclick = function () { nearestMark(-1); };
+  $('btnNM').onclick = function () { nearestMark(1); };
+  var rateBtns = document.querySelectorAll('#transport button[data-rate]');
+  Array.prototype.forEach.call(rateBtns, function (b) {
+    b.onclick = function () {
+      state.rate = parseFloat(b.getAttribute('data-rate'));
+      Array.prototype.forEach.call(rateBtns, function (x) { x.classList.toggle('on', x === b); });
+      render();
+    };
+  });
+  $('cbLoop').onchange = function (e) { state.loop = e.target.checked; };
+  $('cbSmooth').onchange = function (e) { state.smooth = e.target.checked; render(); };
+  $('cbTrail').onchange = function (e) { state.trail = e.target.checked; render(); };
+
+  document.addEventListener('keydown', function (e) {
+    if (e.target && /input|textarea/i.test(e.target.tagName)) return;
+    var k = e.key;
+    if (k === ' ') { state.playing = !state.playing; syncPlayBtn(); render(); e.preventDefault(); }
+    else if (k === 'ArrowLeft') { if (e.shiftKey) seek(state.clock - 1000, true); else step(-1); e.preventDefault(); }
+    else if (k === 'ArrowRight') { if (e.shiftKey) seek(state.clock + 1000, true); else step(1); e.preventDefault(); }
+    else if (k === 'PageUp') { nearestMark(-1); e.preventDefault(); }
+    else if (k === 'PageDown') { nearestMark(1); e.preventDefault(); }
+    else if (k === 'Home') { seek(T0, true); e.preventDefault(); }
+    else if (k === 'End') { seek(T1, true); e.preventDefault(); }
+  });
+
+  var tip = $('tip'), dragging = false, wasPlaying = false;
+  function hitMark(mx) {
+    var best = -1, bd = 6;
+    for (var k = 0; k < MARKS.length; k++) {
+      var dd = Math.abs(tlX(MARKS[k].ms) - mx);
+      if (dd < bd) { bd = dd; best = k; }
+    }
+    return best;
+  }
+  function tlPos(e) { var r = tl.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
+  tl.addEventListener('mousemove', function (e) {
+    var qq = tlPos(e), h = hitMark(qq.x);
+    state.hover = h;
+    if (h >= 0) {
+      var m = MARKS[h];
+      tip.style.display = 'block';
+      tip.innerHTML = (m.kind === 's' ? '事件 · ' : 'Directive · ') + esc(m.label) +
+        '<div class="m">' + (m.ms / 1000).toFixed(1) + 's · ' + esc(m.sub) + '</div>';
+      tip.style.left = Math.min(Math.max(4, qq.x + 10), Math.max(4, tlW - 320)) + 'px';
+      tip.style.top = Math.max(2, qq.y - 42) + 'px';
+      tl.style.cursor = 'pointer';
+    } else { tip.style.display = 'none'; tl.style.cursor = 'crosshair'; }
+    if (dragging) { state.clock = Math.max(T0, Math.min(T1, tlT(qq.x))); render(); } else renderTL();
+  });
+  tl.addEventListener('mouseleave', function () { state.hover = -1; tip.style.display = 'none'; renderTL(); });
+  tl.addEventListener('mousedown', function (e) {
+    dragging = true; wasPlaying = state.playing; state.playing = false; syncPlayBtn();
+    seek(tlT(tlPos(e).x)); e.preventDefault();
+  });
+  window.addEventListener('mouseup', function () {
+    if (!dragging) return;
+    dragging = false;
+    if (wasPlaying) { state.playing = true; syncPlayBtn(); }
+  });
+
+  /* ══════════ 主循环 ══════════ */
+  function render() {
+    var ps = drawStage();
+    drawTL(ps);
+    updatePanel(ps);
+  }
+  function renderTL() { drawTL(sample(state.clock)); }
+
+  var lastTs = 0;
+  function frame(ts) {
+    requestAnimationFrame(frame);
+    var dt = lastTs ? Math.min(120, ts - lastTs) : 0;
+    lastTs = ts;
+    if (!state.playing || !dt) return;
+    state.clock += dt * state.rate;
+    if (state.clock >= T1) {
+      if (state.loop) state.clock = T0 + (state.clock - T1);
+      else { state.clock = T1; state.playing = false; syncPlayBtn(); }
+    }
+    render();
+  }
+  function relayout() { buildTL(); render(); }
+  window.addEventListener('resize', relayout);
+
+  fillMeta(); buildIdx(); buildTL(); syncPlayBtn(); render();
+  requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>

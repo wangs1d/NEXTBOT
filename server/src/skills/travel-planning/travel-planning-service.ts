@@ -33,6 +33,7 @@ import { modelSupportsVision } from '../../external-model/vision-support.js';
 import OpenAI from 'openai';
 import fs from 'node:fs';
 import { WeatherService, type WeatherBrief } from '../../services/weather-service.js';
+import { amapDrivingRoute, amapWalkingRoute } from '../../services/route-duration-service.js';
 import { knowledgeBase } from './knowledge-base.js';
 import { extractDays, extractDestination, extractPreferences } from './intent-parser.js';
 import { addDaysISO, daysFromToday, isValidISODate, localTodayISO } from './travel-date.js';
@@ -49,7 +50,14 @@ import { gcj02ToWgs84 } from './coord-transform.js';
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
 
 /** 编排阶段的交通腿结果（OSRM 或 haversine 估算） */
-type TransportLeg = { mode: string; durationMin: number; distanceKm: number; note?: string };
+type TransportLeg = {
+  mode: string;
+  durationMin: number;
+  distanceKm: number;
+  note?: string;
+  /** 车程来源：amap/osrm 是真实路网，estimate 是直线推算（展示必须标「约」） */
+  source?: 'amap' | 'osrm' | 'estimate';
+};
 
 /**
  * 交通段正则抽取（travel-upgrade-plan P2，导出供测试与调度器复用）。
@@ -326,7 +334,13 @@ export interface ItineraryItem {
   startTime: string;
   endTime?: string;
   /** 从前一个item过来的交通方式+时长+距离（首项无） */
-  transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
+  transportFromPrev?: {
+    mode: string;
+    durationMin: number;
+    distanceKm?: number;
+    note?: string;
+    source?: 'amap' | 'osrm' | 'estimate';
+  };
   /** 建议游览时长（分钟） */
   visitDuration?: number;
   /** 当地小贴士（用户没问也补） */
@@ -853,26 +867,49 @@ export class PlanningService {
   ) {}
 
   /**
-   * 编排阶段的交通腿查询：OSRM 真实路网优先（带 24h 缓存），失败降级 haversine 估算。
-   * OSRM 一次失败即熔断 10 分钟（本批其余腿与后续规划直接走本地估算）。
+   * 高德真实路网：≤1.5km 走步行（驾车会把 1km 判成 3 分钟，实际是 15 分钟），
+   * 其余走驾车含实时路况。无 key / 超限 / 失败返回 null，交给下一级。
+   */
+  private async amapTransport(
+    fromLat: number, fromLon: number, toLat: number, toLon: number,
+  ): Promise<TransportLeg | null> {
+    if (!process.env.AMAP_WEB_KEY) return null;
+    const origin = `${fromLon.toFixed(6)},${fromLat.toFixed(6)}`;
+    const destination = `${toLon.toFixed(6)},${toLat.toFixed(6)}`;
+    const walk = this.haversineKm(fromLat, fromLon, toLat, toLon) <= 1.5;
+    const r = walk
+      ? await amapWalkingRoute(origin, destination)
+      : await amapDrivingRoute(origin, destination);
+    if (!r || !(r.durationMin > 0)) return null;
+    return {
+      mode: walk ? '步行' : '驾车',
+      durationMin: r.durationMin,
+      distanceKm: r.distanceKm,
+      source: 'amap',
+      ...(r.distanceKm > 30 ? { note: '距离较远，建议预留更多时间' } : {}),
+    };
+  }
+
+  /**
+   * 编排阶段的交通腿查询：高德路径规划 → OSRM → 直线推算（带 24h 缓存）。
+   * 前两级都拿不到才允许估算，估算腿标 source=estimate，展示侧要印「约」。
+   * OSRM 一次失败即熔断 10 分钟（只熔断 OSRM 这一级，不影响高德）。
    */
   private async transportLeg(fromLat: number, fromLon: number, toLat: number, toLon: number): Promise<TransportLeg> {
     const key = `${fromLat.toFixed(3)},${fromLon.toFixed(3)}|${toLat.toFixed(3)},${toLon.toFixed(3)}`;
     const hit = this.legCache.get(key);
     if (hit && Date.now() - hit.ts < 24 * 3600 * 1000) return hit.transport;
 
-    let transport: TransportLeg;
-    if (Date.now() < this.osrmDisabledUntil) {
-      transport = this.computeTransport(fromLat, fromLon, toLat, toLon);
-    } else {
+    let transport: TransportLeg | null = await this.amapTransport(fromLat, fromLon, toLat, toLon);
+    if (!transport && Date.now() >= this.osrmDisabledUntil) {
       const osrm = await this.osrmRoute(fromLat, fromLon, toLat, toLon);
       if (osrm) {
         transport = osrm;
       } else {
         this.osrmDisabledUntil = Date.now() + 10 * 60 * 1000;
-        transport = this.computeTransport(fromLat, fromLon, toLat, toLon);
       }
     }
+    transport ??= this.computeTransport(fromLat, fromLon, toLat, toLon);
 
     this.legCache.set(key, { transport, ts: Date.now() });
     // 简单容量上限：FIFO 淘汰
@@ -1873,7 +1910,13 @@ export class PlanningService {
       longitude: number;
       visitDuration?: number;
       anchor?: boolean;
-      transportFromPrev?: { mode: string; durationMin: number; distanceKm?: number; note?: string };
+      transportFromPrev?: {
+        mode: string;
+        durationMin: number;
+        distanceKm?: number;
+        note?: string;
+        source?: 'amap' | 'osrm' | 'estimate';
+      };
     },
   >(
     items: T[],
@@ -1907,6 +1950,7 @@ export class PlanningService {
         durationMin: leg.durationMin,
         ...(leg.distanceKm != null ? { distanceKm: leg.distanceKm } : {}),
         ...(leg.note ? { note: leg.note } : {}),
+        ...(leg.source ? { source: leg.source } : {}),
       };
     };
 
@@ -1956,11 +2000,13 @@ export class PlanningService {
       }
 
       if (it.type === 'restaurant') {
-        // 午/晚餐锚定（与编排期一致）：原 startTime 在 15 点前视为午餐
+        // 午/晚餐锚定（与编排期一致）：原 startTime 在 15 点前视为午餐。
+        // 窗口只往后推：到达时刻晚于窗口上限就按到达吃，不把人拽回 13:00。
+        const arrival = clock + (leg?.durationMin ?? 0);
         const lunch = parseMin(it.startTime) < 15 * 60;
         const mealTime = lunch
-          ? Math.max(11 * 60, Math.min(13 * 60, clock))
-          : Math.max(17.5 * 60, clock + 30);
+          ? Math.max(arrival, 11 * 60)
+          : Math.max(arrival, 17.5 * 60);
         it.startTime = formatTime(mealTime);
         setLeg(it, leg);
         clock = mealTime + 75;
@@ -2112,7 +2158,7 @@ export class PlanningService {
    */
   private async osrmRoute(
     fromLat: number, fromLon: number, toLat: number, toLon: number,
-  ): Promise<{ mode: string; durationMin: number; distanceKm: number; note?: string } | null> {
+  ): Promise<TransportLeg | null> {
     try {
       const base = (process.env.TRAVEL_ROUTE_API_BASE || 'https://router.project-osrm.org').replace(/\/+$/, '');
       const url =
@@ -2140,7 +2186,7 @@ export class PlanningService {
       const durationMin = Math.max(1, Math.round((route.duration ?? 0) / 60));
       // 按真实距离分档推断交通方式（与 haversine 估算的口径一致）
       const mode = km < 1 ? '步行' : km < 5 ? '打车/Grab' : km < 30 ? '包车/网约车' : '城际交通';
-      return { mode, durationMin, distanceKm: km, note: km < 1 ? '短距离' : undefined };
+      return { mode, durationMin, distanceKm: km, source: 'osrm' as const, note: km < 1 ? '短距离' : undefined };
     } catch {
       return null; // 网络/超时/解析失败 → 上层降级
     }
@@ -3404,18 +3450,18 @@ export class PlanningService {
   /**
    * 根据两点距离推算交通方式与时长
    */
-  private computeTransport(fromLat: number, fromLon: number, toLat: number, toLon: number): { mode: string; durationMin: number; distanceKm: number; note?: string } {
+  private computeTransport(fromLat: number, fromLon: number, toLat: number, toLon: number): { mode: string; durationMin: number; distanceKm: number; note?: string; source: 'estimate' } {
     const km = this.haversineKm(fromLat, fromLon, toLat, toLon);
     if (km < 1) {
-      return { mode: '步行', durationMin: Math.max(5, Math.round(km * 14)), distanceKm: km, note: '短距离' };
+      return { mode: '步行', durationMin: Math.max(5, Math.round(km * 14)), distanceKm: km, source: 'estimate', note: '短距离' };
     }
     if (km < 5) {
-      return { mode: '打车/Grab', durationMin: Math.round(km * 3 + 5), distanceKm: km };
+      return { mode: '打车/Grab', durationMin: Math.round(km * 3 + 5), distanceKm: km, source: 'estimate' };
     }
     if (km < 30) {
-      return { mode: '包车/网约车', durationMin: Math.round(km * 1.5 + 5), distanceKm: km };
+      return { mode: '包车/网约车', durationMin: Math.round(km * 1.5 + 5), distanceKm: km, source: 'estimate' };
     }
-    return { mode: '城际交通', durationMin: Math.round(km * 1.0 + 15), distanceKm: km, note: '距离较远，建议预留更多时间' };
+    return { mode: '城际交通', durationMin: Math.round(km * 1.0 + 15), distanceKm: km, source: 'estimate', note: '距离较远，建议预留更多时间' };
   }
 
   /**
@@ -4198,90 +4244,11 @@ export class PlanningService {
     }
 
     /**
-     * 第 1.5 步：容量预排（顺延而非丢弃）。
-     * 用 haversine 估算（×1.25 安全余量，OSRM 实际路网普遍更长）逐天试装：
-     * 当天装不下的景点顺延到下一天（保持 上午段→午餐前 / 晚餐后 的结构位），
-     * 末天装不下的进入 overflow 池，第四步补位时统一再分配。
-     * 修复「第一天排满、后面几天没内容」：景点不再因某天预算满而凭空消失。
-     */
-    const dayEndCap = (dayIdx: number, slot?: string) => {
-      if (slot === 'evening') return PlanningService.DAY_END_MIN + 90;
-      // 暴雨日提前收工（吃玩休息节奏 2026-10-15）：下午降水概率 ≥80% 且判雨时，
-      // 下午槽上限提前 90 分钟——装不下的景点走既有顺延/补位机制挪到其它天，
-      // 而不是冒雨硬排。
-      const wx = perDayWeather[dayIdx]?.ctx;
-      if (slot === 'afternoon' && wx?.afternoon.rainy && wx.afternoon.precipPct >= 80) {
-        return PlanningService.DAY_END_MIN - 90;
-      }
-      return PlanningService.DAY_END_MIN;
-    };
-    const estimateDay = (seq: DaySequence, dayIdx: number): DaySequence['entries'] => {
-      let t = 9 * 60;
-      let prev: { lat: number; lon: number } | null = seq.hotel
-        ? { lat: seq.hotel.latitude, lon: seq.hotel.longitude }
-        : null;
-      const overflow: DaySequence['entries'] = [];
-      for (const entry of seq.entries) {
-        if (entry.kind === 'attraction') {
-          const transportMin = prev
-            ? Math.round(this.computeTransport(prev.lat, prev.lon, entry.poi.latitude, entry.poi.longitude).durationMin * 1.25)
-            : 0;
-          const visitMin = this.inferVisitDuration('attraction', preferences);
-          if (prev && t + transportMin + visitMin > dayEndCap(dayIdx, entry.slot)) {
-            overflow.push(entry);
-            continue; // 顺延项不推进时钟、不更新锚点
-          }
-          t += transportMin + visitMin;
-        } else if (entry.kind === 'lunch') {
-          t = Math.max(11 * 60, Math.min(13 * 60, t)) + 75;
-        } else if (entry.kind === 'tea') {
-          // 茶歇 45 分钟：午餐结束（≤13:15）后落到 13:30 起排
-          t = Math.max(t, 13.5 * 60) + 45;
-        } else {
-          t = Math.max(17.5 * 60, t + 30) + 75;
-        }
-        prev = { lat: entry.poi.latitude, lon: entry.poi.longitude };
-      }
-      return overflow;
-    };
-    const overflowPool: DaySequence['entries'] = [];
-    const normName = (n: string) => (n || '').trim().toLowerCase();
-    for (let i = 0; i < dayCount; i++) {
-      const seq = sequences[i]!;
-      const overflow = estimateDay(seq, i);
-      if (overflow.length === 0) continue;
-      // 顺延项必须从当天序列真正移除：estimateDay（haversine×1.25 估时）与
-      // timeDay（OSRM 真实路网）时长口径不一致，旧实现只把副本插进下一天、
-      // 原件仍留在当天，两边都排得下时同一景点会重复出现（同天/跨天）。
-      const overflowSet = new Set(overflow);
-      seq.entries = seq.entries.filter(e => !overflowSet.has(e));
-      if (i + 1 < dayCount) {
-        // 顺延到下一天：常规景点插到午餐前（上午段），晚间景点插到晚餐后；
-        // 下一天已有同名景点时不再插入（聚类输入已按名去重，这里挡补位/顺延路径）
-        const next = sequences[i + 1]!;
-        const nextNames = new Set(next.entries.map(e => normName(e.poi.name)));
-        const morningLike = overflow
-          .filter(e => e.slot !== 'evening' && !nextNames.has(normName(e.poi.name)))
-          .map(e => ({ ...e, slot: 'morning' as const }));
-        const eveningLike = overflow.filter(e => e.slot === 'evening' && !nextNames.has(normName(e.poi.name)));
-        let insertAt = next.entries.findIndex(e => e.kind === 'lunch');
-        if (insertAt < 0) insertAt = next.entries.findIndex(e => e.kind === 'dinner');
-        if (insertAt < 0) insertAt = next.entries.length;
-        next.entries.splice(Math.max(0, insertAt), 0, ...morningLike);
-        if (eveningLike.length > 0) {
-          const dinIdx = next.entries.findIndex(e => e.kind === 'dinner');
-          next.entries.splice(dinIdx < 0 ? next.entries.length : dinIdx + 1, 0, ...eveningLike);
-        }
-        console.log(`[PlanningService] Day${i + 1} 装不下 ${overflow.length} 个景点，顺延到 Day${i + 2}`);
-      } else {
-        overflowPool.push(...overflow);
-      }
-    }
-
-    /**
-     * 第二步：并行计算所有交通腿（OSRM 真实路网优先 + 缓存，失败降级 haversine）。
+     * 第二步：先并行算完所有交通腿（高德真实路网 → OSRM → 估算，带缓存），
+     * 再进容量预排 —— 预排和正式排时读同一份 legMap，两边口径才可能一致
+     * （历史上分叉过：预排用 haversine×1.25、排时用真实路网，同一天两种结论）。
      * 腿按「起点POI→终点POI」配对缓存（替代旧的 天:序号 键）：补位/顺延改变条目
-     * 序号后腿仍然有效，试排与重排无需重算。先收集全部腿再一次并发发出。
+     * 序号后腿仍然有效，试排与重排无需重算。
      */
     const legKey = (fromId: string, toId: string) => `${fromId}->${toId}`;
     const legMap = new Map<string, TransportLeg>();
@@ -4307,35 +4274,144 @@ export class PlanningService {
       });
     });
     if (pendingLegs.length > 0) {
-      this.reportProgress(sessionId, 'route', `正在计算 ${pendingLegs.length} 段真实路网交通耗时（OSRM）…`);
+      this.reportProgress(sessionId, 'route', `正在计算 ${pendingLegs.length} 段真实路网交通耗时…`);
     }
-    await Promise.all(pendingLegs.map(async (leg) => {
+    // 高德个人 key 有 QPS 上限：限 4 并发发出，整批并发会被限流，然后静默退回直线估算
+    const forEachThrottled = async <T>(items: T[], fn: (item: T) => Promise<void>, concurrency = 4): Promise<void> => {
+      let cursor = 0;
+      await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+        while (cursor < items.length) await fn(items[cursor++]!);
+      }));
+    };
+    await forEachThrottled(pendingLegs, async (leg) => {
       legMap.set(leg.key, await this.transportLeg(leg.fromLat, leg.fromLon, leg.toLat, leg.toLon));
-    }));
+    });
+    /** 配对腿优先；顺延/补位新出现的配对没算过，才降级估算（source=estimate，展示标「约」） */
+    const legBetween = (
+      fromPoint: { lat: number; lon: number } | null, fromId: string, toId: string,
+      toLat: number, toLon: number,
+    ): TransportLeg | undefined => {
+      if (!fromPoint) return undefined;
+      return legMap.get(legKey(fromId, toId))
+        ?? this.computeTransport(fromPoint.lat, fromPoint.lon, toLat, toLon);
+    };
+
+    /**
+     * 第 1.5 步：容量预排（顺延而非丢弃）。
+     * 逐天试装：当天装不下的景点顺延到下一天（保持 上午段→午餐前 / 晚餐后 的结构位），
+     * 末天装不下的进入 overflow 池，第四步补位时统一再分配。
+     * 修复「第一天排满、后面几天没内容」：景点不再因某天预算满而凭空消失。
+     */
+    const dayEndCap = (dayIdx: number, slot?: string) => {
+      if (slot === 'evening') return PlanningService.DAY_END_MIN + 90;
+      // 暴雨日提前收工（吃玩休息节奏 2026-10-15）：下午降水概率 ≥80% 且判雨时，
+      // 下午槽上限提前 90 分钟——装不下的景点走既有顺延/补位机制挪到其它天，
+      // 而不是冒雨硬排。
+      const wx = perDayWeather[dayIdx]?.ctx;
+      if (slot === 'afternoon' && wx?.afternoon.rainy && wx.afternoon.precipPct >= 80) {
+        return PlanningService.DAY_END_MIN - 90;
+      }
+      return PlanningService.DAY_END_MIN;
+    };
+    /** 单站停留：景点按节奏推断，茶歇 45 分，午/晚餐 75 分（用餐本就是大概量级） */
+    const dwellMinOf = (entry: DaySequence['entries'][number]): number =>
+      entry.kind === 'attraction'
+        ? this.inferVisitDuration('attraction', preferences)
+        : entry.kind === 'tea' ? 45 : 75;
+
+    /**
+     * 单天时钟推进 —— 容量预排与正式排时共用这一份，两边不可能再出两种结论。
+     * 到达 = 上一站结束 + 本段真实车程；本站起点不早于到达（饭点窗口只往后推，
+     * 不把人往前拽到还没走到的地方）；超出当日预算的回给调用方处理。
+     */
+    const walkDayClock = (
+      seq: DaySequence, dayIdx: number,
+    ): {
+      placed: Array<{ entry: DaySequence['entries'][number]; start: number; dwell: number; leg?: TransportLeg }>;
+      overflow: DaySequence['entries'];
+      endMin: number;
+    } => {
+      const placed: Array<{ entry: DaySequence['entries'][number]; start: number; dwell: number; leg?: TransportLeg }> = [];
+      const overflow: DaySequence['entries'] = [];
+      let t = 9 * 60;
+      let prev: { lat: number; lon: number } | null = seq.hotel
+        ? { lat: seq.hotel.latitude, lon: seq.hotel.longitude }
+        : null;
+      let prevId = 'hotel';
+      for (const entry of seq.entries) {
+        const leg = legBetween(prev, prevId, entry.poi.id, entry.poi.latitude, entry.poi.longitude);
+        const arrival = t + (leg?.durationMin ?? 0);
+        const dwell = dwellMinOf(entry);
+        const start = entry.kind === 'attraction'
+          ? arrival
+          : entry.kind === 'lunch'
+            ? Math.max(arrival, 11 * 60)
+            : entry.kind === 'tea'
+              ? Math.max(arrival, 13.5 * 60)
+              : Math.max(arrival, 17.5 * 60);
+        // 预算闸只管景点：午/晚餐是结构位，挤掉它等于当天没饭吃，
+        // 晚到就晚吃（到达时刻已含真实车程），不删
+        if (prev && entry.kind === 'attraction' && start + dwell > dayEndCap(dayIdx, entry.slot)) {
+          overflow.push(entry);
+          continue; // 装不下：不推进时钟、不更新锚点
+        }
+        placed.push({ entry, start, dwell, leg });
+        prev = { lat: entry.poi.latitude, lon: entry.poi.longitude };
+        prevId = entry.poi.id;
+        t = start + dwell;
+      }
+      return { placed, overflow, endMin: t };
+    };
+    const overflowPool: DaySequence['entries'] = [];
+    const normName = (n: string) => (n || '').trim().toLowerCase();
+    for (let i = 0; i < dayCount; i++) {
+      const seq = sequences[i]!;
+      // 溢出的只有景点（预算闸不管餐饮）
+      const overflow = walkDayClock(seq, i).overflow;
+      if (overflow.length === 0) continue;
+      // 顺延项必须从当天序列真正移除：旧实现只把副本插进下一天、原件仍留在当天，
+      // 两边都排得下时同一景点会重复出现（同天/跨天）。
+      const overflowSet = new Set(overflow);
+      seq.entries = seq.entries.filter(e => !overflowSet.has(e));
+      if (i + 1 < dayCount) {
+        // 顺延到下一天：常规景点插到午餐前（上午段），晚间景点插到晚餐后；
+        // 下一天已有同名景点时不再插入（聚类输入已按名去重，这里挡补位/顺延路径）
+        const next = sequences[i + 1]!;
+        const nextNames = new Set(next.entries.map(e => normName(e.poi.name)));
+        const morningLike = overflow
+          .filter(e => e.slot !== 'evening' && !nextNames.has(normName(e.poi.name)))
+          .map(e => ({ ...e, slot: 'morning' as const }));
+        const eveningLike = overflow.filter(e => e.slot === 'evening' && !nextNames.has(normName(e.poi.name)));
+        let insertAt = next.entries.findIndex(e => e.kind === 'lunch');
+        if (insertAt < 0) insertAt = next.entries.findIndex(e => e.kind === 'dinner');
+        if (insertAt < 0) insertAt = next.entries.length;
+        next.entries.splice(Math.max(0, insertAt), 0, ...morningLike);
+        if (eveningLike.length > 0) {
+          const dinIdx = next.entries.findIndex(e => e.kind === 'dinner');
+          next.entries.splice(dinIdx < 0 ? next.entries.length : dinIdx + 1, 0, ...eveningLike);
+        }
+        console.log(`[PlanningService] Day${i + 1} 装不下 ${overflow.length} 个景点，顺延到 Day${i + 2}`);
+      } else {
+        overflowPool.push(...overflow);
+      }
+    }
 
     const formatTime = (min: number) =>
       `${String(Math.floor(min / 60) % 24).padStart(2, '0')}:${String(Math.round(min % 60)).padStart(2, '0')}`;
 
     /**
      * 第三步：排时间（单天纯函数，可重复执行供试排）。
-     * 景点受当天预算约束：装不下的进入 dropped（不再静默消失，第四步补位）；
-     * 午/晚餐固定时段锚定，永远保留。
+     * 时钟推进走 walkDayClock（与第 1.5 步容量预排同一份口径）：装不下的进
+     * dropped（不再静默消失，第四步补位）。
      */
     const timeDay = (dayIdx: number): { items: ItineraryItem[]; endMin: number; dropped: DaySequence['entries'] } => {
       const seq = sequences[dayIdx]!;
       const items: ItineraryItem[] = [];
-      let currentTimeMin = 9 * 60;
-      let lastPoint: { lat: number; lon: number } | null = seq.hotel
-        ? { lat: seq.hotel.latitude, lon: seq.hotel.longitude }
-        : null;
-      let lastPointId = 'hotel';
-      const dropped: DaySequence['entries'] = [];
 
       if (dayIdx === 0 && seq.hotel) {
         const checkin = this.convertToItemSync(seq.hotel, 'hotel', seq.date, '08:00', preferences, travelInfo, pricingCtx);
         checkin.tips = [...(checkin.tips || []), '第一天办理入住、寄存行李后出发；早餐建议在酒店或出发途中解决'];
         items.push(checkin);
-        currentTimeMin = 9 * 60;
       } else if (dayIdx > 0 && seq.hotel && seq.entries.length > 0) {
         // 后续每天以「从酒店出发」开篇：起点锚定住宿，时间线/地图上能看出每天从哪出发
         const depart = this.convertToItemSync(seq.hotel, 'hotel', seq.date, '08:30', preferences, travelInfo, pricingCtx);
@@ -4343,65 +4419,29 @@ export class PlanningService {
         items.push(depart);
       }
 
-      for (const entry of seq.entries) {
-        const legFor = (): TransportLeg | undefined => {
-          if (!lastPoint) return undefined;
-          // 配对腿优先（OSRM 真实路网）；新出现的配对（试排插入）降级 haversine 估算
-          return legMap.get(legKey(lastPointId, entry.poi.id))
-            ?? this.computeTransport(lastPoint.lat, lastPoint.lon, entry.poi.latitude, entry.poi.longitude);
-        };
+      const { placed, overflow, endMin } = walkDayClock(seq, dayIdx);
+      const dropped = overflow;
+      const currentTimeMin = endMin;
 
+      for (const { entry, start, dwell, leg } of placed) {
+        const item = this.convertToItemSync(
+          entry.poi,
+          entry.kind === 'attraction' ? 'attraction' : 'restaurant',
+          seq.date, formatTime(start), preferences, travelInfo, pricingCtx,
+        );
+        if (leg) item.transportFromPrev = leg;
         if (entry.kind === 'attraction') {
-          const leg = legFor();
-          const transportMin = lastPoint ? (leg?.durationMin ?? 0) : 0;
-          const visitMin = this.inferVisitDuration('attraction', preferences);
-          // 当天预算：装不下 → 记入 dropped 待补位（晚间槽上限放宽到 22:30）
-          if (lastPoint && currentTimeMin + transportMin + visitMin > dayEndCap(dayIdx, entry.slot)) {
-            dropped.push(entry);
-            continue;
-          }
-          const item = this.convertToItemSync(entry.poi, 'attraction', seq.date, formatTime(currentTimeMin), preferences, travelInfo, pricingCtx);
           // B5：追加"为何这样排"的天气/时段说明（逐日语境：用当天天气，不再全行程共用 Day1）
           const slotNoteText = this.slotNote({ slot: entry.slot, poi: entry.poi }, perDayWeather[dayIdx]?.ctx ?? null, entry.slot ?? 'morning');
           if (slotNoteText) item.tips = [...(item.tips || []), slotNoteText];
-          if (leg) item.transportFromPrev = leg;
-          items.push(item);
-          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
-          lastPointId = entry.poi.id;
-          currentTimeMin += transportMin + visitMin;
-        } else if (entry.kind === 'lunch') {
-          const lunchTime = Math.max(11 * 60, Math.min(13 * 60, currentTimeMin));
-          const item = this.convertToItemSync(entry.poi, 'restaurant', seq.date, formatTime(lunchTime), preferences, travelInfo, pricingCtx);
-          const leg = legFor();
-          if (leg) item.transportFromPrev = leg;
-          items.push(item);
-          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
-          lastPointId = entry.poi.id;
-          currentTimeMin = lunchTime + 75;
         } else if (entry.kind === 'tea') {
-          const teaTime = Math.max(13.5 * 60, currentTimeMin);
-          const item = this.convertToItemSync(entry.poi, 'restaurant', seq.date, formatTime(teaTime), preferences, travelInfo, pricingCtx);
-          const leg = legFor();
-          if (leg) item.transportFromPrev = leg;
           item.tips = [...(item.tips || []), entry.note || '午后茶歇，稍作休整'];
           // 茶歇在时间线上只占 45 分钟：条目时长/结束时刻跟着排程走，
           // 不能沿用餐厅默认 75 分钟，否则方案里会和下一站时间重叠。
-          item.visitDuration = 45;
-          item.endTime = `${seq.date}T${formatTime(teaTime + 45)}:00`;
-          items.push(item);
-          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
-          lastPointId = entry.poi.id;
-          currentTimeMin = teaTime + 45;
-        } else {
-          const dinnerTime = Math.max(17.5 * 60, currentTimeMin + 30);
-          const item = this.convertToItemSync(entry.poi, 'restaurant', seq.date, formatTime(dinnerTime), preferences, travelInfo, pricingCtx);
-          const leg = legFor();
-          if (leg) item.transportFromPrev = leg;
-          items.push(item);
-          lastPoint = { lat: entry.poi.latitude, lon: entry.poi.longitude };
-          lastPointId = entry.poi.id;
-          currentTimeMin = dinnerTime + 75;
+          item.visitDuration = dwell;
+          item.endTime = `${seq.date}T${formatTime(start + dwell)}:00`;
         }
+        items.push(item);
       }
 
       // 每天以酒店收尾（住宿锚点）：
@@ -4412,7 +4452,8 @@ export class PlanningService {
       if (seq.hotel) {
         const hasNonHotelItem = items.some(it => it.name !== seq.hotel!.name);
         if (hasNonHotelItem) {
-          const retTimeMin = Math.min(22 * 60, currentTimeMin + 30);
+          // 时刻必须单调：末站到晚就如实更晚，不为了「22 点前回酒店」把收尾排到末站之前
+          const retTimeMin = currentTimeMin + 30;
           const retItem = this.convertToItemSync(seq.hotel, 'hotel', seq.date, formatTime(retTimeMin), preferences, travelInfo, pricingCtx);
           retItem.tips = [...(retItem.tips || []), '今日行程结束，返回酒店休整'];
           // 次日早餐提示（末天收尾无「次日」，不加）
@@ -4497,6 +4538,38 @@ export class PlanningService {
         if (!placed) stillDropped.push(entry);
       }
       dayDropped[srcDay] = stillDropped;
+    }
+
+    /**
+     * 第五步：顺延/补位改变了邻接关系，最终序列里会冒出预取时还不存在的配对。
+     * 给这些配对补算真实路网再重排一次时刻，最终顺序里的腿就不再有「猜」的；
+     * 仍拿不到的（无 key / 两级都挂）才留在 estimate，展示侧标「约」。
+     */
+    const latePairs: Array<{ key: string; fromLat: number; fromLon: number; toLat: number; toLon: number }> = [];
+    const lateSeen = new Set<string>();
+    sequences.forEach((seq) => {
+      let prev: { id: string; lat: number; lon: number } | null = seq.hotel
+        ? { id: 'hotel', lat: seq.hotel.latitude, lon: seq.hotel.longitude }
+        : null;
+      seq.entries.forEach((entry) => {
+        if (prev) {
+          const key = legKey(prev.id, entry.poi.id);
+          if (!legMap.has(key) && !lateSeen.has(key)) {
+            lateSeen.add(key);
+            latePairs.push({ key, fromLat: prev.lat, fromLon: prev.lon, toLat: entry.poi.latitude, toLon: entry.poi.longitude });
+          }
+        }
+        prev = { id: entry.poi.id, lat: entry.poi.latitude, lon: entry.poi.longitude };
+      });
+    });
+    if (latePairs.length > 0) {
+      await forEachThrottled(latePairs, async (leg) => {
+        legMap.set(leg.key, await this.transportLeg(leg.fromLat, leg.fromLon, leg.toLat, leg.toLon));
+      });
+      for (let i = 0; i < dayCount; i++) {
+        const r = timeDay(i);
+        days[i] = { date: sequences[i]!.date, items: r.items, dayWeather: perDayWeather[i]?.summary };
+      }
     }
 
     const attractionTotal = days.reduce((n, d) => n + d.items.filter(it => it.type === 'attraction').length, 0);

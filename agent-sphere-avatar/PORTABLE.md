@@ -179,7 +179,8 @@ npm run build:chat    # base=/chat/assets/avatar/ + 复制到 server/web/chat/as
 可以。`package.json` 已配置 `exports` 与 `files` 字段，发布前将 `private` 改为 `false`。
 
 **Q: 模型资源可以换吗？**  
-替换 `public/models/DG2.obj` 并调整 `src/constants/model-proportions.ts`。
+CAD 源文件放 `source/DG2.fbx`（Fusion 导出，组件名见 `scripts/build-model.mjs` 里的 `PART_NAMES`），
+跑 `npm run model` 转出 `public/models/DG2.glb`；比例不对时再调 `src/constants/model-proportions.ts`。
 
 **Q: 不需要独立桌宠？**  
 只复制 `agent-sphere-avatar/`，忽略 `sphere-overlay-py/` 即可。

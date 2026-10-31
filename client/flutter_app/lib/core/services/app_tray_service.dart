@@ -1,3 +1,4 @@
+import "dart:async" show unawaited;
 import "dart:io" show Directory, File, Platform, exit;
 import "dart:typed_data" show ByteData;
 
@@ -6,6 +7,8 @@ import "package:flutter/services.dart"
     show MethodCall, MethodChannel, rootBundle;
 import "package:tray_manager/tray_manager.dart";
 import "package:window_manager/window_manager.dart";
+
+import "sphere_overlay_launcher.dart";
 
 /// 系统托盘 + 「点 X 后台驻留」：
 /// - setPreventClose(true) 拦截 WM_CLOSE（自绘标题栏 X / Alt+F4 都走这里），
@@ -188,6 +191,8 @@ class AppTrayService with WindowListener, TrayListener {
   Future<void> exitApp() async {
     if (_exiting) return;
     _exiting = true;
+    // 常驻桌宠是独立进程，主窗关闭不会带走它；先发退出指令（不阻塞关窗链路）
+    unawaited(SphereOverlayLauncher.destroy());
     // 先放手关闭拦截：close() 发的是 WM_CLOSE，preventClose 还挂着的话
     // 只会走 onWindowClose 隐藏窗口，进程根本不会退出。
     try {

@@ -1,7 +1,7 @@
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
-import { decideRender, applyBodyForm, applyCards } from "../render/index.js";
+import { decideRender, applyBodyForm, applyCards, effectStatusOf } from "../render/index.js";
 import type { TurnEffect } from "../render/types.js";
 import {
   hasInternalFrameTag,
@@ -350,7 +350,7 @@ function detectRawSearchResultJson(
  * 这是 detectRawSearchResultJson 的"修复器"——把脏 JSON 转换为结构化卡片。
  *
  * item.text 格式遵循 _SearchResultCard 的约定：用 `:` 把标题与摘要拆开，
- * 让前端组件把第一段当标题（加粗）、后续当描述；URL 走 item.url（可点击跳转）。
+ * 让前端组件把第一段当标题（加粗）、后续当描述。卡片不承载网页链接。
  */
 function buildSearchResultCardFromItems(
   items: InfoSearchItem[],
@@ -358,25 +358,18 @@ function buildSearchResultCardFromItems(
   toolName: string | undefined,
 ): string {
   const title = "搜索结果";
-  const cardItems = items.map((it) => {
-    const head = it.title || it.url;
-    const descParts: string[] = [];
-    if (it.snippet) descParts.push(it.snippet);
-    if (it.source) descParts.push(`来源:${it.source}`);
-    const text = descParts.length > 0 ? `${head}: ${descParts.join("  \n")}` : head;
-    return {
-      type: "num",
-      text,
-      url: it.url,
-      source: it.source || undefined,
-    };
-  });
+  const cardItems = items
+    .filter((it) => !!it.title)
+    .map((it) => {
+      const text = it.snippet ? `${it.title}: ${it.snippet}` : it.title;
+      return { type: "num" as const, text };
+    });
   const payload = {
     avatar: "NB",
     avatarStyle: "default",
     title,
     items: cardItems,
-    footer: `共 ${items.length} 条结果`,
+    footer: `共 ${cardItems.length} 条结果`,
     cardType: "search_result",
     cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
   };
@@ -986,7 +979,7 @@ export class ToolResultProcessor {
     // 结构化面在场时正文只作前导，不会同时出现折叠卡。
     const directEffects: TurnEffect[] =
       !opts?.plainTextMode && opts?.toolName && opts?.toolResult
-        ? [{ tool: opts.toolName, status: "ok", result: opts.toolResult }]
+        ? [{ tool: opts.toolName, status: effectStatusOf(opts.toolResult), result: opts.toolResult }]
         : [];
     const decision = decideRender({
       text: workingText,

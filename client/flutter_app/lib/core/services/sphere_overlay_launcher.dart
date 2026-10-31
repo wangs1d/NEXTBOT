@@ -16,6 +16,15 @@ class SphereOverlayLauncher {
   static const MethodChannel _channel =
       MethodChannel("pai/sphere_overlay");
 
+  /// sphere-overlay-py 画出首帧后往 stdout 打的一行，召唤路径以此判定"真的出现了"。
+  static const String _readyMarker = "SPHERE_OVERLAY_READY";
+
+  /// 桌宠单实例：已有另一份在跑时，新进程唤起它然后退场。
+  static const String _alreadyRunningMarker = "SPHERE_OVERLAY_ALREADY_RUNNING";
+
+  /// 上一次召唤失败的具体原因（成功或未尝试时为 null）。
+  static String? lastLaunchError;
+
   static const bool _useInProcessOverlay = bool.fromEnvironment(
     "IN_PROCESS_SPHERE_OVERLAY",
     defaultValue: false,
@@ -60,8 +69,9 @@ class SphereOverlayLauncher {
           "请从仓库根目录启动客户端，或设置环境变量 PAI_REPO_ROOT 指向项目根目录。";
     }
 
-    if (!File("${overlayDir.path}${Platform.pathSeparator}main.py").existsSync()) {
-      return "缺少 main.py，请确认 sphere-overlay-py 目录完整。";
+    if (!File("${overlayDir.path}${Platform.pathSeparator}main.py").existsSync() &&
+        _frozenOverlayExe(overlayDir) == null) {
+      return "缺少 main.py 或 sphere-overlay.exe，请确认 sphere-overlay-py 目录完整。";
     }
 
     final String? overlayHtml = _findAvatarOverlayHtml(overlayDir.parent.path);
@@ -69,7 +79,48 @@ class SphereOverlayLauncher {
       return "缺少 overlay.html。\n请执行：cd agent-sphere-avatar && npm run build";
     }
 
+    if (!_bundleReportsReady(overlayHtml)) {
+      return "overlay.html 是旧版本构建产物，不会上报桌宠就绪。\n"
+          "请执行：cd agent-sphere-avatar && npm run build";
+    }
+
     return null;
+  }
+
+  /// 构建产物是否带就绪上报（window.sphereOverlay.notifyReady）。
+  /// 不带的话召唤只能干等到超时，所以在判定层直接拦下。
+  /// notifyReady 落在共享 chunk 里，入口脚本要顺着 import 才能找到。
+  static bool _bundleReportsReady(String overlayHtmlPath) {
+    if (Platform.environment["PAI_OVERLAY_DEV_URL"]?.trim().isNotEmpty ?? false) {
+      return true; // 开发模式跑 dev server，与 dist 产物无关
+    }
+    try {
+      final File html = File(overlayHtmlPath);
+      final String markup = html.readAsStringSync();
+      final String assetPrefix = "${html.parent.path}${Platform.pathSeparator}";
+      final List<File> pending = RegExp(r'''src="\.?/?([^"]+\.js)"''')
+          .allMatches(markup)
+          .map((Match m) => File(
+              "$assetPrefix${m.group(1)!.replaceAll("/", Platform.pathSeparator)}"))
+          .toList();
+      final Set<String> visited = <String>{};
+      while (pending.isNotEmpty) {
+        final File script = pending.removeLast();
+        if (!script.existsSync() || !visited.add(script.path)) continue;
+        final String code = script.readAsStringSync();
+        if (code.contains("notifyReady")) return true;
+        for (final Match m in RegExp(
+                r'''(?:from|import)\s*\(?\s*["'](\.\/[^"']+\.js)["']''')
+            .allMatches(code)) {
+          pending.add(File(
+              "${script.parent.path}${Platform.pathSeparator}${m.group(1)!.substring(2)}"));
+        }
+      }
+    } catch (e) {
+      debugPrint("[SphereOverlay] 校验 overlay 产物失败: $e");
+      return true;
+    }
+    return false;
   }
 
   static String? _findAvatarOverlayHtml(String repoRoot) {
@@ -164,21 +215,64 @@ class SphereOverlayLauncher {
   static Future<bool> launchOverlay() async {
     if (kIsWeb || !Platform.isWindows) return false;
 
-    // 进程在即视为已就绪：PySide6 桌宠常驻可见，隐藏仅通过系统托盘手动操作。
-    if (_overlayProcess != null) {
-      _created = true;
-      _visible = true;
-      overlayActive.value = true;
-      useEmbeddedFallback.value = false;
-      return true;
-    }
-
-    if (overlayActive.value || _created) {
-      await destroy();
+    // 桌宠已在跑（本进程持有，或别处启动后经单实例管道接管）：唤到前台即可，
+    // 重开一遍要多付一次 Chromium 冷启动
+    if (_overlayProcess != null || overlayActive.value) {
+      if (await _raiseExistingOverlay()) {
+        _created = true;
+        _visible = true;
+        overlayActive.value = true;
+        useEmbeddedFallback.value = false;
+        return true;
+      }
+      // 标记还在但进程已经没了，清掉状态重新拉起
+      _overlayProcess = null;
       overlayActive.value = false;
       _created = false;
     }
+
+    if (_created) {
+      await destroy();
+      _created = false;
+    }
     return _launchPyOverlay();
+  }
+
+  /// 收起常驻桌宠：只隐藏窗口并开始空闲计时，下次召唤立即出现。
+  static Future<bool> hideOverlay() async {
+    if (kIsWeb || !Platform.isWindows) return false;
+    if (_overlayProcess == null && !overlayActive.value) return true;
+    final bool hidden = await _sendInstanceCommand("--hide");
+    if (!hidden) {
+      // 进程不认这条指令或已经退出：按老路径收掉，不能留个看得见的窗口
+      await destroy();
+      return false;
+    }
+    overlayActive.value = false;
+    _visible = false;
+    return true;
+  }
+
+  static Future<bool> _raiseExistingOverlay() => _sendInstanceCommand("--show");
+
+  /// 向已在跑的桌宠发一条单实例指令；返回 false 表示没有实例接住。
+  static Future<bool> _sendInstanceCommand(String flag) async {
+    final Directory? overlayDir = _findPyOverlayDir();
+    if (overlayDir == null) return false;
+    final ({String exe, List<String> args})? spec =
+        _overlayLaunchSpec(overlayDir);
+    if (spec == null) return false;
+    try {
+      final ProcessResult result = await Process.run(
+        spec.exe,
+        <String>[...spec.args, flag],
+        workingDirectory: overlayDir.path,
+      ).timeout(const Duration(seconds: 3));
+      return result.exitCode == 0;
+    } catch (e) {
+      debugPrint("[SphereOverlay] 单实例指令 $flag 失败: $e");
+      return false;
+    }
   }
 
   static Future<bool> _createInProcess({String? overlayUrl}) async {
@@ -204,15 +298,18 @@ class SphereOverlayLauncher {
   }
 
   static Future<bool> _launchPyOverlay() async {
+    lastLaunchError = null;
     final Directory? overlayDir = _findPyOverlayDir();
     if (overlayDir == null) {
       debugPrint("[SphereOverlay] sphere-overlay-py not found.");
       return false;
     }
 
-    if (!File("${overlayDir.path}${Platform.pathSeparator}main.py").existsSync()) {
+    final ({String exe, List<String> args})? spec =
+        _overlayLaunchSpec(overlayDir);
+    if (spec == null) {
       debugPrint(
-        "[SphereOverlay] missing main.py — run: "
+        "[SphereOverlay] missing main.py / sphere-overlay.exe — run: "
         "cd sphere-overlay-py && python -m pip install -r requirements.txt",
       );
       return false;
@@ -238,26 +335,45 @@ class SphereOverlayLauncher {
           "${overlayDir.parent.path}${Platform.pathSeparator}agent-sphere-avatar${Platform.pathSeparator}dist";
       env["PAI_REPO_ROOT"] = overlayDir.parent.path;
 
-      // 优先使用 sphere-overlay-py/.venv 的解释器（自带 PySide6 依赖），
-      // 找不到 venv 时才回退到 PATH 中的 python，避免 PATH 里无 PySide6 导致召唤失败。
-      final String pythonExe = _resolvePyOverlayPython(overlayDir);
-
-      debugPrint("[SphereOverlay] launching PySide6 overlay from ${overlayDir.path} (python=$pythonExe)");
+      debugPrint(
+          "[SphereOverlay] launching PySide6 overlay from ${overlayDir.path} (exe=${spec.exe})");
 
       final Process proc = await Process.start(
-        pythonExe,
-        <String>["main.py"],
+        spec.exe,
+        spec.args,
         workingDirectory: overlayDir.path,
         environment: env,
       );
       _overlayProcess = proc;
-      _created = true;
-      _visible = true;
-      overlayActive.value = true;
-      useEmbeddedFallback.value = false;
+
+      // 不读就会把管道写满，反过来卡住桌宠进程
+      proc.stderr
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .listen((String chunk) => debugPrint("[SphereOverlay] $chunk"));
+
+      final Completer<bool> ready = Completer<bool>();
+      bool alreadyRunning = false;
+      final StreamSubscription<String> outSub = proc.stdout
+          .transform(const Utf8Decoder(allowMalformed: true))
+          .transform(const LineSplitter())
+          .listen((String line) {
+        final String mark = line.trim();
+        if (mark == _readyMarker) {
+          if (!ready.isCompleted) ready.complete(true);
+        } else if (mark == _alreadyRunningMarker) {
+          // 单实例管道已经把已有桌宠唤到前台，这次召唤同样算成功
+          alreadyRunning = true;
+          if (!ready.isCompleted) ready.complete(true);
+        } else if (mark.isNotEmpty) {
+          debugPrint("[SphereOverlay] $mark");
+        }
+      });
+      // 进程退出可能早于管道读完：不等 stdout 收尾就会把刚发出的就绪标记抢掉
+      final Future<void> stdoutDrained =
+          outSub.asFuture<void>().whenComplete(outSub.cancel);
 
       // 保留进程句柄以便 destroy() 关闭；退出时清理状态。
-      unawaited(proc.exitCode.then((int code) {
+      unawaited(proc.exitCode.then((int code) async {
         debugPrint("[SphereOverlay] PySide6 overlay exited: $code");
         if (identical(_overlayProcess, proc)) {
           _overlayProcess = null;
@@ -265,11 +381,39 @@ class SphereOverlayLauncher {
           _visible = false;
           overlayActive.value = false;
         }
+        await stdoutDrained;
+        if (!ready.isCompleted) ready.complete(false);
       }));
+
+      // 拿到 PID 不等于桌宠出现了：等页面画出首帧再对外报成功。
+      final bool surfaced = await ready.future.timeout(
+        const Duration(seconds: 8),
+        onTimeout: () {
+          debugPrint("[SphereOverlay] 等待首帧就绪超时，桌宠进程仍在，按已启动处理");
+          return _overlayProcess != null;
+        },
+      );
+      if (!surfaced) {
+        lastLaunchError = null;
+        return false;
+      }
+
+      if (alreadyRunning && identical(_overlayProcess, proc)) {
+        // 这个 pid 只是唤起方，随即自己退场；桌宠本体不归我们持有，
+        // 后续关停走单实例管道
+        _overlayProcess = null;
+      }
+
+      lastLaunchError = null;
+      _created = true;
+      _visible = true;
+      overlayActive.value = true;
+      useEmbeddedFallback.value = false;
       return true;
     } catch (e) {
       debugPrint("[SphereOverlay] PySide6 overlay launch failed: $e");
       _overlayProcess = null;
+      lastLaunchError = null;
       return false;
     }
   }
@@ -315,6 +459,27 @@ class SphereOverlayLauncher {
     return "python";
   }
 
+  /// 安装包里的桌宠是 PyInstaller 单目录产物，直接跑 exe，不需要本机 Python。
+  static File? _frozenOverlayExe(Directory overlayDir) {
+    if (!Platform.isWindows) return null;
+    final File exe = File(
+        "${overlayDir.path}${Platform.pathSeparator}sphere-overlay.exe");
+    return exe.existsSync() ? exe : null;
+  }
+
+  /// 启动命令：有打包产物走 exe，否则走源码 + .venv。
+  static ({String exe, List<String> args})? _overlayLaunchSpec(
+      Directory overlayDir) {
+    final File? frozen = _frozenOverlayExe(overlayDir);
+    if (frozen != null) return (exe: frozen.path, args: const <String>[]);
+    final String mainPy = "${overlayDir.path}${Platform.pathSeparator}main.py";
+    if (!File(mainPy).existsSync()) return null;
+    return (
+      exe: _resolvePyOverlayPython(overlayDir),
+      args: const <String>["main.py"],
+    );
+  }
+
   static String _buildOverlayUrl() {
     final String wsUrl = ApiConfig.wsUrl;
     final String sessionId = ApiConfig.effectiveActorId;
@@ -358,20 +523,15 @@ class SphereOverlayLauncher {
   }
 
   static Future<void> destroy() async {
-    if (_overlayProcess != null) {
-      try {
-        _overlayProcess!.kill();
-      } catch (_) {}
+    if (_overlayProcess != null || overlayActive.value) {
+      final Process? proc = _overlayProcess;
       _overlayProcess = null;
       _created = false;
       _visible = false;
       overlayActive.value = false;
       useEmbeddedFallback.value = false;
+      await _shutdownPyOverlay(proc);
       return;
-    }
-    if (overlayActive.value) {
-      // 兜底清理：overlayActive 通常伴随 python 进程，此处仅用于状态对齐。
-      overlayActive.value = false;
     }
     if (!_created) return;
     try {
@@ -382,6 +542,24 @@ class SphereOverlayLauncher {
     _created = false;
     _visible = false;
     useEmbeddedFallback.value = false;
+  }
+
+  /// 关停已在跑的桌宠。先让它自己收尾（Qt 关窗、收 WS 线程），Chromium 子进程
+  /// 才不会作为孤儿留在系统里；只有旧版桌宠不认这条指令时才硬杀。
+  static Future<void> _shutdownPyOverlay(Process? proc) async {
+    final bool accepted = await _sendInstanceCommand("--quit");
+    if (!accepted && proc != null) {
+      debugPrint("[SphereOverlay] 桌宠未接受退出指令，改为强制结束");
+    }
+    if (proc == null) return;
+    try {
+      await proc.exitCode.timeout(const Duration(seconds: 2));
+    } on TimeoutException {
+      debugPrint("[SphereOverlay] 桌宠未在 2s 内退出，强制结束");
+      try {
+        proc.kill();
+      } catch (_) {}
+    }
   }
 
   static Future<void> moveTo(int x, int y, {int durationMs = 0}) async {

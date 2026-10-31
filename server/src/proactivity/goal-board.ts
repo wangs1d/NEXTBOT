@@ -10,10 +10,7 @@
 //    逐步派后台任务推进、随生活变化重排。步骤状态机在 GoalPlanner
 //    （proactivity/goal-planner.ts），本板只管台账与生命周期。
 //
-// 旗舰预执行场景：
-//  1. 晨间简报 —— 见 evaluators/morning_brief（数据全本地，即时拼接）
-//  2. 会前准备包 —— 本模块 maybeStartMeetingPrep：会议前 20-40min 后台
-//     召回相关记忆/待办，备好材料包（异步，完成后进托盘）
+// 旗舰预执行场景：晨间简报 —— 见 evaluators/morning_brief（数据全本地，即时拼接）
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
@@ -24,7 +21,7 @@ export type GoalRecord = {
   actorId: string;
   /** track=盯一件事；preexec=后台提前备一件事；plan=长期目标拆步推进 */
   kind: "track" | "preexec" | "plan";
-  /** 场景类型（morning_brief / meeting_prep / custom） */
+  /** 场景类型（morning_brief / custom） */
   type: string;
   title: string;
   status: GoalStatus;
@@ -97,8 +94,6 @@ export type GoalBoardDeps = {
   dataPath: string;
   /** goal 流 feeder（内核信号）：goal 状态变化 → 评估器感知 */
   emitGoal: (goal: GoalRecord) => void;
-  /** 记忆召回（会前准备包的数据源；可选） */
-  recallMemory?: (query: string, limit: number) => Promise<string[]> | string[];
   nowFn?: () => number;
 };
 
@@ -352,50 +347,6 @@ export class GoalBoard {
       else if (g.status === "done") done += 1;
     }
     return { total: this.goals.size, preparing, ready, done };
-  }
-
-  /**
-   * 旗舰场景 2：会前准备包。下一个会议在 20-40 分钟内且该会议尚未备过 →
-   * 建 preexec 目标，后台召回相关记忆/材料，完成后 markReady 进托盘。
-   * 窗口下限 20min（原 25）：日程传感器 5min 轮询粒度下，15min 宽的窗口
-   * 常因边界取整整轮错过（2026-09-24 E2E 实证 goal_ready 历史零触发），
-   * 20min 宽保证至少 4 个采样点命中。幂等：同一 runAt 只备一次。
-   */
-  maybeStartMeetingPrep(actorId: string, meeting: { title: string; runAtMin: number; runAt?: number }): GoalRecord | null {
-    if (meeting.runAtMin < 20 || meeting.runAtMin > 40) return null;
-    const prepKey = `meeting_prep:${meeting.runAt ?? meeting.title}`;
-    for (const g of this.goals.values()) {
-      if (g.type === "meeting_prep" && g.payload?.prepKey === prepKey) return null;
-    }
-    const goal = this.create({
-      actorId,
-      kind: "preexec",
-      type: "meeting_prep",
-      title: `会前准备：${meeting.title}`,
-      payload: { prepKey, meetingTitle: meeting.title },
-    });
-    void this.prepareMeetingMaterials(goal).catch(() => {
-      /* 准备失败静默：目标停在 preparing，超时自然过期 */
-    });
-    return goal;
-  }
-
-  private async prepareMeetingMaterials(goal: GoalRecord): Promise<void> {
-    const title = String(goal.payload?.meetingTitle ?? goal.title);
-    const lines: string[] = [];
-    if (this.deps.recallMemory) {
-      const items = await this.deps.recallMemory(title, 3);
-      for (const item of items) lines.push(item);
-    }
-    const body =
-      lines.length > 0
-        ? `关于「${title}」我翻到的上下文：${lines.join("；")}。材料都在手边，随时开工。`
-        : `「${title}」的相关背景我先过了一遍，没翻到历史交互。需要补充材料就说一声。`;
-    this.markReady(goal.goalId, {
-      body,
-      bodyKind: "meeting_prep",
-      dedupFields: { title: `会前准备：${title}` },
-    });
   }
 
   private load(): void {

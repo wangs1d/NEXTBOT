@@ -5,7 +5,7 @@ import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { join, resolve as resolvePath, sep } from "node:path";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type { Multipart } from "@fastify/multipart";
-import sharp from "sharp";
+import { loadSharp } from "../../services/sharp-lazy.js";
 
 import { resolveActorId, ANONYMOUS_ACTOR_ID } from "../../agent/actor-id.js";
 import { sanitizeActorKey } from "../../agentic-memory/actor-key.js";
@@ -95,6 +95,7 @@ export function registerUserAvatarRoutes(app: FastifyInstance, deps?: { rootDir?
     let webp: Buffer;
     try {
       // metadata 可解析即认为是图片（jpg/png/webp/gif/bmp 等统一放行，归一出口收敛为 webp）
+      const sharp = await loadSharp();
       const meta = await sharp(uploadBuf).metadata();
       if (!meta.width || !meta.height) throw new Error("无有效尺寸");
       webp = await sharp(uploadBuf)

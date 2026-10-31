@@ -18,7 +18,7 @@
  *      硬算成某天会让整学期提醒全错（见 ingest-types 的说明）。
  */
 
-import * as XLSX from "xlsx";
+import { loadXlsx, sheetToJson, type XlsxModule } from "./xlsx-lazy.js";
 
 import {
   parseIcsCalendar,
@@ -378,20 +378,8 @@ const HEADER_ALIASES = {
   category: ["类型", "分类", "类别", "category", "type"],
 } as const;
 
-type SheetLike = ReturnType<typeof XLSX.read>["Sheets"][string];
+type SheetLike = ReturnType<XlsxModule["read"]>["Sheets"][string];
 type CellRange = { s: { r: number; c: number }; e: { r: number; c: number } };
-
-/**
- * `xlsx@0.18.5` 的**运行时**只有 `XLSX.utils.sheet_to_json`，顶层没有这个函数
- * （但项目里的 .d.ts 把它声明在了顶层，写 `XLSX.sheet_to_json` 能过类型检查、
- * 运行时直接 "is not a function"）。所以这里显式走 utils，并用局部类型断言
- * 绕开不完整的类型声明。
- */
-const sheetToJson = (
-  XLSX.utils as unknown as {
-    sheet_to_json: (sheet: unknown, opts?: Record<string, unknown>) => unknown[][];
-  }
-).sheet_to_json;
 
 /**
  * 单个 sheet → 二维字符串数组。
@@ -399,8 +387,8 @@ const sheetToJson = (
  * 合并单元格必须展开：教务/自己画的课表极常用"一格跨两行"表示连堂课，
  * 展开前第二行是空的，抽取时会当成"没课"直接漏掉。
  */
-function sheetToAoa(sheet: SheetLike): string[][] {
-  const aoa = sheetToJson(sheet, {
+function sheetToAoa(xlsx: XlsxModule, sheet: SheetLike): string[][] {
+  const aoa = sheetToJson<unknown[]>(xlsx, sheet, {
     header: 1,
     blankrows: false,
     defval: "",
@@ -432,17 +420,18 @@ function sheetToAoa(sheet: SheetLike): string[][] {
  * 多 sheet 拼接：课表常见"总表 + 分学期"的做法，全部拼上再用表头探测兜住，
  * 比只取第一个 sheet 少丢数据。解不出来返回 null，由调用方如实报错。
  */
-export function xlsxBase64ToText(fileBase64: string): string | null {
+export async function xlsxBase64ToText(fileBase64: string): Promise<string | null> {
   if (!fileBase64) return null;
   try {
     const buf = Buffer.from(fileBase64, "base64");
     if (buf.length === 0) return null;
-    const wb = XLSX.read(buf, { type: "buffer" });
+    const xlsx = await loadXlsx();
+    const wb = xlsx.read(buf, { type: "buffer" });
     const parts: string[] = [];
     for (const name of wb.SheetNames) {
       const sheet = wb.Sheets[name];
       if (!sheet) continue;
-      const aoa = sheetToAoa(sheet);
+      const aoa = sheetToAoa(xlsx, sheet);
       // 只留含真实文字的行：损坏/伪造的文件会被 xlsx 解出一堆控制字符，
       // 那种"内容"进到表格抽取只会变成找不到表头，不如直接判为解不出
       const lines = aoa

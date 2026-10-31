@@ -1,7 +1,6 @@
 import "dart:async";
 
 import "package:flutter/material.dart";
-import "package:url_launcher/url_launcher.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/services/image_preview_launcher.dart";
@@ -64,8 +63,8 @@ class AgentResultCard extends StatelessWidget {
 
   /// 用户动作回调（与 AgentActionChoiceCard 同一链路）：透传给
   /// display_effects 中可交互的效果卡（如 chips 标签点击追问）。
-  final void Function(AgentResultAction action, {required AgentResultData cardData})?
-      onUserAction;
+  final void Function(AgentResultAction action,
+      {required AgentResultData cardData})? onUserAction;
 
   @override
   Widget build(BuildContext context) {
@@ -77,7 +76,8 @@ class AgentResultCard extends StatelessWidget {
       curve: Curves.easeOutCubic,
       builder: (BuildContext context, double t, Widget? child) => Opacity(
         opacity: t,
-        child: Transform.translate(offset: Offset(0, 8 * (1 - t)), child: child),
+        child:
+            Transform.translate(offset: Offset(0, 8 * (1 - t)), child: child),
       ),
       child: buildCard(context),
     );
@@ -198,15 +198,12 @@ class AgentResultCard extends StatelessWidget {
               ),
             if (data.items.isNotEmpty)
               ...data.items.map((AgentResultItem it) {
-                // 行级可点：url 非空整行可点（相对路径补服务端基址），
-                // 比价卡报价行跳平台商品页、决策页入口行跳决策页。
-                final String? itemUrl = (it.url != null && it.url!.isNotEmpty)
-                    ? LinkUtils.resolveMediaUrl(it.url!)
-                    : null;
                 // 行首缩略图（比价卡商品主图等）；无图回退 ✓/•/! 标记。
-                final String? thumb = (it.thumbnailUrl != null && it.thumbnailUrl!.isNotEmpty)
-                    ? LinkUtils.resolveMediaUrl(it.thumbnailUrl!)
-                    : null;
+                // 卡片不承载网页跳转：条目只展示结果。
+                final String? thumb =
+                    (it.thumbnailUrl != null && it.thumbnailUrl!.isNotEmpty)
+                        ? LinkUtils.resolveMediaUrl(it.thumbnailUrl!)
+                        : null;
                 final Widget row = Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: <Widget>[
@@ -231,7 +228,8 @@ class AgentResultCard extends StatelessWidget {
                                   color: cs.onSurfaceVariant,
                                 ),
                               ),
-                              loadingBuilder: (BuildContext context) => Container(
+                              loadingBuilder: (BuildContext context) =>
+                                  Container(
                                 color: cs.surfaceContainerHighest,
                               ),
                             ),
@@ -254,26 +252,11 @@ class AgentResultCard extends StatelessWidget {
                         colorScheme: cs,
                       ),
                     ),
-                    if (itemUrl != null)
-                      Padding(
-                        padding: const EdgeInsets.only(left: 2),
-                        child: Icon(
-                          Icons.chevron_right_rounded,
-                          size: 15,
-                          color: cs.onSurfaceVariant,
-                        ),
-                      ),
                   ],
                 );
                 return Padding(
                   padding: EdgeInsets.symmetric(vertical: listItemGap),
-                  child: itemUrl == null
-                      ? row
-                      : InkWell(
-                          onTap: () => LinkUtils.launchExternal(itemUrl),
-                          borderRadius: BorderRadius.circular(6),
-                          child: row,
-                        ),
+                  child: row,
                 );
               }),
             if (data.footer.isNotEmpty) ...<Widget>[
@@ -604,9 +587,9 @@ class _ProgressRow extends StatelessWidget {
 
   /// 提取形如 `75%`、`45 %`、`90/100`、`0.85` 的数值。percent>1 时按 x/max 归一。
   (String label, double? value, String? tail)? _parse() {
-    final RegExpMatch? m =
-        RegExp(r"^(.*?)\s*(?:[（(]?(\d+(?:\.\d+)?)\s*%[)）]?|(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?))\s*$")
-            .firstMatch(text);
+    final RegExpMatch? m = RegExp(
+            r"^(.*?)\s*(?:[（(]?(\d+(?:\.\d+)?)\s*%[)）]?|(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?))\s*$")
+        .firstMatch(text);
     if (m == null) return null;
     final String label = m.group(1)!.trim();
     double? v;
@@ -835,8 +818,9 @@ class _QuoteCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final String body = data.title.isNotEmpty ? data.title : data.footer;
-    final String source =
-        data.title.isNotEmpty ? data.footer : (data.items.isNotEmpty ? data.items.first.text : "");
+    final String source = data.title.isNotEmpty
+        ? data.footer
+        : (data.items.isNotEmpty ? data.items.first.text : "");
     return Container(
       constraints: const BoxConstraints(maxWidth: 390),
       padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
@@ -1071,7 +1055,8 @@ class _MediaCard extends StatelessWidget {
 
     // 收集照片（解析 thumbnail/media/pageUrl 任一可用地址并统一 resolve）
     // + 自然宽高比 + 对比侧 + 图片描述（服务端视觉模型生成）
-    final List<({String url, double? aspect, String side, String? caption})> photos =
+    final List<({String url, double? aspect, String side, String? caption})>
+        photos =
         <({String url, double? aspect, String side, String? caption})>[];
     final List<String> allPhotoUrls = <String>[];
     // 收集视频（缩略图可空：后端已保证不把播放页/搜索页 URL 当图下发；
@@ -1083,7 +1068,13 @@ class _MediaCard extends StatelessWidget {
           String? thumbnailUrl,
           String? openUrl,
           String? playableUrl,
-        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl, String? playableUrl})>[];
+        })> videos = <({
+      String title,
+      String? source,
+      String? thumbnailUrl,
+      String? openUrl,
+      String? playableUrl
+    })>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = LinkUtils.extractFirst(text);
@@ -1121,7 +1112,8 @@ class _MediaCard extends StatelessWidget {
           url: resolved,
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
-          caption: (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
+          caption:
+              (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
         ));
         allPhotoUrls.add(resolved);
       }
@@ -1130,18 +1122,18 @@ class _MediaCard extends StatelessWidget {
     if (photos.isEmpty && videos.isEmpty) return const SizedBox.shrink();
 
     // 分组/对比模式：左侧(A) + 右侧(B) 分栏；无侧的归入常规网格
-    final List<({String url, double? aspect, String side, String? caption})> leftPhotos =
-        photos.where((p) => p.side == "A").toList();
-    final List<({String url, double? aspect, String side, String? caption})> rightPhotos =
-        photos.where((p) => p.side == "B").toList();
-    final List<({String url, double? aspect, String side, String? caption})> plainPhotos =
+    final List<({String url, double? aspect, String side, String? caption})>
+        leftPhotos = photos.where((p) => p.side == "A").toList();
+    final List<({String url, double? aspect, String side, String? caption})>
+        rightPhotos = photos.where((p) => p.side == "B").toList();
+    final List<({String url, double? aspect, String side, String? caption})>
+        plainPhotos =
         photos.where((p) => p.side != "A" && p.side != "B").toList();
     final bool hasColumns =
         isGrouped && (leftPhotos.isNotEmpty || rightPhotos.isNotEmpty);
     // A/B 任一列有独立标签时，渲染对比列头；否则省略表头。
-    final bool hasColumnHeaders =
-        (data.sideA?.trim().isNotEmpty ?? false) ||
-            (data.sideB?.trim().isNotEmpty ?? false);
+    final bool hasColumnHeaders = (data.sideA?.trim().isNotEmpty ?? false) ||
+        (data.sideB?.trim().isNotEmpty ?? false);
 
     // A/B 对比逐行配对：A[i] 与 B[i] 同一行并排，便于肉眼逐张对比。
     // 顶部先渲染 A/B 列头，后续每行图片填满各自列宽（方形自适应），
@@ -1151,7 +1143,8 @@ class _MediaCard extends StatelessWidget {
       List<({String url, double? aspect, String side, String? caption})> bList,
     ) {
       final bool showHeader = hasColumnHeaders;
-      final int count = aList.length > bList.length ? aList.length : bList.length;
+      final int count =
+          aList.length > bList.length ? aList.length : bList.length;
       final List<Widget> rows = <Widget>[
         if (showHeader) ...<Widget>[
           Row(
@@ -1488,15 +1481,15 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
     final int dayCount = plan.isStructured
         ? plan.days.length
         : plan.days.where((TravelPlanDay d) => d.entries.isNotEmpty).length;
-    final bool hasPlan = plan.days.any((TravelPlanDay d) => d.entries.isNotEmpty);
+    final bool hasPlan =
+        plan.days.any((TravelPlanDay d) => d.entries.isNotEmpty);
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 460),
       decoration: BoxDecoration(
         color: widget.cs.surfaceContainerHigh,
         borderRadius: BorderRadius.circular(14),
-        border:
-            Border.all(color: widget.cs.outline.withValues(alpha: 0.22)),
+        border: Border.all(color: widget.cs.outline.withValues(alpha: 0.22)),
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(14),
@@ -1504,7 +1497,8 @@ class _TravelItineraryCardState extends State<_TravelItineraryCard> {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            _buildPoster(context, plan, gallery, posterUrl, posterCandidates, dayCount),
+            _buildPoster(
+                context, plan, gallery, posterUrl, posterCandidates, dayCount),
             Padding(
               padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
               child: Column(
@@ -1773,9 +1767,8 @@ class _PosterBackdropState extends State<_PosterBackdrop> {
 
   @override
   Widget build(BuildContext context) {
-    final String? url = widget.candidates
-        .where((String c) => !_failed.contains(c))
-        .firstOrNull;
+    final String? url =
+        widget.candidates.where((String c) => !_failed.contains(c)).firstOrNull;
     if (url == null) return _TravelItineraryCard.posterFallback;
     return Stack(
       fit: StackFit.expand,
@@ -1825,7 +1818,8 @@ class MediaInlineRow extends StatelessWidget {
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
     // 解析每张图的可用地址 + 自然宽高比 + 侧标签 + 图片描述；视频单独收集走视频面板
-    final List<({String url, double? aspect, String side, String? caption})> photos =
+    final List<({String url, double? aspect, String side, String? caption})>
+        photos =
         <({String url, double? aspect, String side, String? caption})>[];
     final List<String> allUrls = <String>[];
     final List<
@@ -1835,7 +1829,13 @@ class MediaInlineRow extends StatelessWidget {
           String? thumbnailUrl,
           String? openUrl,
           String? playableUrl,
-        })> videos = <({String title, String? source, String? thumbnailUrl, String? openUrl, String? playableUrl})>[];
+        })> videos = <({
+      String title,
+      String? source,
+      String? thumbnailUrl,
+      String? openUrl,
+      String? playableUrl
+    })>[];
     for (final AgentResultItem it in items) {
       final String text = it.text.trim();
       final String? textUrl = LinkUtils.extractFirst(text);
@@ -1872,7 +1872,8 @@ class MediaInlineRow extends StatelessWidget {
           url: resolved,
           aspect: it.naturalAspect,
           side: (it.side ?? "").trim(),
-          caption: (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
+          caption:
+              (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
         ));
         allUrls.add(resolved);
       }
@@ -2004,23 +2005,22 @@ class _VideoTile extends StatelessWidget {
                   size: 30,
                 ),
               ),
-            Center(
-              child: Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  color: Colors.black.withValues(alpha: 0.45),
-                  shape: BoxShape.circle,
-                ),
-                child: Icon(
-                  playable != null
-                      ? Icons.play_arrow_rounded
-                      : Icons.open_in_new_rounded,
-                  color: Colors.white,
-                  size: playable != null ? 26 : 18,
+            if (playable != null)
+              Center(
+                child: Container(
+                  width: 34,
+                  height: 34,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.45),
+                    shape: BoxShape.circle,
+                  ),
+                  child: const Icon(
+                    Icons.play_arrow_rounded,
+                    color: Colors.white,
+                    size: 26,
+                  ),
                 ),
               ),
-            ),
           ],
         ),
       ),
@@ -2049,33 +2049,25 @@ class _VideoTile extends StatelessWidget {
       ],
     );
 
-    // 有可播流 → 右侧双栏面板内联播放（不跳浏览器）；无流才降级打开播放页。
+    // 有可播流 → 右侧双栏面板内联播放；没有可播流时条目只展示缩略图与标题，
+    // 不再跳浏览器（卡片不承载网页跳转）。
     final String? openUrl = video.openUrl;
-    if (playable == null && openUrl == null) return body;
+    if (playable == null) return body;
     return InkWell(
-      onTap: () {
-        if (playable != null) {
-          VideoPreviewLauncher.open(url: playable, pageUrl: openUrl);
-          return;
-        }
-        _launchUrl(openUrl!);
-      },
+      onTap: () => VideoPreviewLauncher.open(url: playable, pageUrl: openUrl),
       borderRadius: BorderRadius.circular(8),
       child: body,
     );
   }
 }
 
-/// 顶层转发：卡片内多处 fire-and-forget 打开链接（媒体地址先拼绝对 URL）。
-Future<void> _launchUrl(String url) =>
-    LinkUtils.launchExternal(LinkUtils.resolveMediaUrl(url));
-
 /// 搜索结果卡片 —— 把搜索工具返回的列表项渲染为垂直排列的新闻条目。
 ///
 /// 每个 item 解析为「标题 —— 描述」格式，渲染为：
-///   - 标题（粗体，可点击跳转）
+///   - 标题（粗体）
 ///   - 摘要（灰色小字）
-///   - 来源/时间（更小文字）
+///
+/// 卡片不承载网页链接：条目不可点跳，也不展示来源地址。
 ///
 /// 适合搜索/资讯聚合场景，3~10 条垂直排列，清晰可读。
 class _SearchResultCard extends StatelessWidget {
@@ -2127,82 +2119,71 @@ class _SearchResultCard extends StatelessWidget {
           // 条目列表
           ...data.items.map((AgentResultItem it) {
             final (String t, String d) = _splitSearchItem(it.text);
-            final bool hasUrl = it.url != null && it.url!.isNotEmpty;
-            final String? detectedUrl = hasUrl ? it.url : LinkUtils.extractFirst(d);
             return Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: InkWell(
-                onTap: detectedUrl == null
-                    ? null
-                    : () => _launchUrl(detectedUrl),
-                borderRadius: BorderRadius.circular(6),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 2),
-                  child: Column(
+              padding: const EdgeInsets.fromLTRB(2, 2, 2, 12),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  // 标题行
+                  Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: <Widget>[
-                      // 标题行
-                      Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Container(
-                            margin: const EdgeInsets.only(top: 5),
-                            width: 5,
-                            height: 5,
-                            decoration: BoxDecoration(
-                              color: cs.primary.withValues(alpha: 0.55),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text.rich(
-                              TextSpan(
-                                style: textTheme.bodyMedium?.copyWith(
-                                  fontWeight: FontWeight.w700,
-                                  height: 1.35,
-                                ),
-                                children: parseInlineMarkdownSpans(
-                                  t,
-                                  textTheme.bodyMedium!.copyWith(
-                                    fontWeight: FontWeight.w700,
-                                    height: 1.35,
-                                  ),
-                                  cs,
-                                ),
-                              ),
-                            ),
-                          ),
-                        ],
+                      Container(
+                        margin: const EdgeInsets.only(top: 5),
+                        width: 5,
+                        height: 5,
+                        decoration: BoxDecoration(
+                          color: cs.primary.withValues(alpha: 0.55),
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                      // 摘要/描述
-                      if (d.isNotEmpty)
-                        Padding(
-                          padding: const EdgeInsets.only(left: 13, top: 3),
-                          child: Text.rich(
-                            TextSpan(
-                              style: textTheme.bodySmall?.copyWith(
-                                color: cs.onSurfaceVariant,
-                                height: 1.45,
-                                fontSize: 13,
-                              ),
-                              children: parseInlineMarkdownSpans(
-                                d,
-                                textTheme.bodySmall!.copyWith(
-                                  color: cs.onSurfaceVariant,
-                                  height: 1.45,
-                                  fontSize: 13,
-                                ),
-                                cs,
-                              ),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text.rich(
+                          TextSpan(
+                            style: textTheme.bodyMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                              height: 1.35,
                             ),
-                            maxLines: 3,
-                            overflow: TextOverflow.ellipsis,
+                            children: parseInlineMarkdownSpans(
+                              t,
+                              textTheme.bodyMedium!.copyWith(
+                                fontWeight: FontWeight.w700,
+                                height: 1.35,
+                              ),
+                              cs,
+                            ),
                           ),
                         ),
+                      ),
                     ],
                   ),
-                ),
+                  // 摘要/描述
+                  if (d.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 13, top: 3),
+                      child: Text.rich(
+                        TextSpan(
+                          style: textTheme.bodySmall?.copyWith(
+                            color: cs.onSurfaceVariant,
+                            height: 1.45,
+                            fontSize: 13,
+                          ),
+                          children: parseInlineMarkdownSpans(
+                            d,
+                            textTheme.bodySmall!.copyWith(
+                              color: cs.onSurfaceVariant,
+                              height: 1.45,
+                              fontSize: 13,
+                            ),
+                            cs,
+                          ),
+                        ),
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                ],
               ),
             );
           }),
@@ -2237,14 +2218,6 @@ class _SearchResultCard extends StatelessWidget {
     if (sep <= 0) return (raw, "");
     return (raw.substring(0, sep).trim(), raw.substring(sep).trim());
   }
-
-  Future<void> _launchUrl(String url) async {
-    final Uri? uri = Uri.tryParse(url);
-    if (uri == null) return;
-    try {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } catch (_) {}
-  }
 }
 
 /// 购物建议「二分化对比卡」（shopping.suggest → cardType=product_compare）。
@@ -2264,9 +2237,8 @@ class _ProductCompareCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final List<AgentResultCardSide> sides = data.sides.isEmpty
-        ? const <AgentResultCardSide>[]
-        : data.sides;
+    final List<AgentResultCardSide> sides =
+        data.sides.isEmpty ? const <AgentResultCardSide>[] : data.sides;
 
     return Container(
       constraints: const BoxConstraints(maxWidth: 390),
@@ -2283,8 +2255,7 @@ class _ProductCompareCard extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(13, 11, 13, 10),
             child: Row(
               children: <Widget>[
-                const Icon(Icons.compare_rounded,
-                    size: 15, color: _accent),
+                const Icon(Icons.compare_rounded, size: 15, color: _accent),
                 const SizedBox(width: 7),
                 Expanded(
                   child: Text(
@@ -2298,8 +2269,7 @@ class _ProductCompareCard extends StatelessWidget {
                 ),
                 Text(
                   "数据来自商品库",
-                  style: TextStyle(
-                      fontSize: 10, color: cs.onSurfaceVariant),
+                  style: TextStyle(fontSize: 10, color: cs.onSurfaceVariant),
                 ),
               ],
             ),
@@ -2311,7 +2281,9 @@ class _ProductCompareCard extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: <Widget>[
                         Expanded(child: _sidePane(sides.first)),
-                        Container(width: 1, color: cs.outline.withValues(alpha: 0.16)),
+                        Container(
+                            width: 1,
+                            color: cs.outline.withValues(alpha: 0.16)),
                         Expanded(child: _sidePane(sides.last)),
                       ],
                     ),
@@ -2332,8 +2304,7 @@ class _ProductCompareCard extends StatelessWidget {
               padding: const EdgeInsets.fromLTRB(13, 8, 13, 10),
               child: Text(
                 data.footer,
-                style: TextStyle(
-                    fontSize: 10.5, color: cs.onSurfaceVariant),
+                style: TextStyle(fontSize: 10.5, color: cs.onSurfaceVariant),
               ),
             ),
         ],
@@ -2367,8 +2338,8 @@ class _ProductCompareCard extends StatelessWidget {
                       loadingBuilder: (BuildContext context) => Container(
                         color: cs.surfaceContainerHighest,
                         alignment: Alignment.center,
-                        child: const CircularProgressIndicator(
-                            strokeWidth: 1.6),
+                        child:
+                            const CircularProgressIndicator(strokeWidth: 1.6),
                       ),
                     ),
                   ),
@@ -2451,8 +2422,7 @@ class _ProductCompareCard extends StatelessWidget {
   Widget _imageFallback() => Container(
         color: cs.surfaceContainerHighest,
         alignment: Alignment.center,
-        child: Icon(Icons.image_outlined,
-            size: 20, color: cs.onSurfaceVariant),
+        child: Icon(Icons.image_outlined, size: 20, color: cs.onSurfaceVariant),
       );
 
   Widget _compareSection() {
@@ -2578,43 +2548,25 @@ class _ProductCompareCard extends StatelessWidget {
               child: Material(
                 color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
                 borderRadius: BorderRadius.circular(9),
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(9),
-                  onTap: v.url == null
-                      ? null
-                      : () => launchUrl(
-                            Uri.parse(LinkUtils.resolveMediaUrl(v.url!)),
-                            mode: LaunchMode.externalApplication,
-                          ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(7),
-                    child: Row(
-                      children: <Widget>[
-                        Container(
-                          width: 26,
-                          height: 26,
-                          decoration: BoxDecoration(
-                            color: const Color(0xFF131D17),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: const Color(0xFF2C3A31)),
-                          ),
-                          child: const Icon(Icons.play_arrow_rounded,
-                              size: 16, color: _accent),
+                child: Padding(
+                  padding: const EdgeInsets.all(7),
+                  child: Row(
+                    children: <Widget>[
+                      Icon(Icons.smart_display_outlined,
+                          size: 16, color: _accent),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          v.title,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 11.5,
+                              height: 1.4,
+                              color: cs.onSurface.withValues(alpha: 0.88)),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text(
-                            v.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                                fontSize: 11.5,
-                                height: 1.4,
-                                color: cs.onSurface.withValues(alpha: 0.88)),
-                          ),
-                        ),
-                      ],
-                    ),
+                      ),
+                    ],
                   ),
                 ),
               ),

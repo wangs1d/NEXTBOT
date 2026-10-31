@@ -1,12 +1,12 @@
 /**
- * 把「曲屏实机」打包成**单文件自包含 HTML**：JS、CSS、两个 OBJ 模型全部内联。
+ * 把「曲屏实机」打包成**单文件自包含 HTML**：JS、CSS、模型全部内联。
  *
  * 为什么必须单文件：预览面板的静态代理只发 HTML 本身，同目录的
- * `assets/*.js` 与 `models/*.obj` 一律 403。页面拿到骨架、拿不到脚本和模型，
+ * `assets/*.js` 与 `models/*` 一律 403。页面拿到骨架、拿不到脚本和模型，
  * 表现就是「一片黑」。本地起 http.server 也不可靠（后台进程每轮会话被清掉）。
  * 单文件版本两条路都不依赖。
  *
- * 产品代码一行没改：模型靠入口里拦 fetch 内联。
+ * 产品代码一行没改：模型靠入口里拦 fetch 内联。GLB 是二进制，走 base64。
  */
 import { build } from "esbuild";
 import { readFile, writeFile } from "node:fs/promises";
@@ -16,10 +16,9 @@ const root = process.cwd();
 const entry = path.join(root, "src/screen-preview-main.tsx");
 const outFile = path.join(root, "dist/screen-preview.single.html");
 
-const [dg2, dg] = await Promise.all([
-  readFile(path.join(root, "public/models/DG2.obj"), "utf8"),
-  readFile(path.join(root, "public/models/DG.obj"), "utf8"),
-]);
+const dg2Glb = await readFile(path.join(root, "public/models/DG2.glb")).then((b) =>
+  b.toString("base64"),
+);
 
 const result = await build({
   entryPoints: [entry],
@@ -35,8 +34,7 @@ const result = await build({
   define: {
     "process.env.NODE_ENV": '"production"',
     "import.meta.env.BASE_URL": '"/"',
-    __DG2_OBJ__: JSON.stringify(dg2),
-    __DG_OBJ__: JSON.stringify(dg),
+    __DG2_GLB_B64__: JSON.stringify(dg2Glb),
   },
   loader: { ".tsx": "tsx", ".ts": "ts" },
   logLevel: "warning",
@@ -75,4 +73,4 @@ const html = `<!doctype html>
 
 await writeFile(outFile, html, "utf8");
 const mb = (Buffer.byteLength(html, "utf8") / 1024 / 1024).toFixed(2);
-console.log(`✓ ${path.relative(root, outFile)} (${mb} MB, 自包含：JS + CSS + DG2.obj + DG.obj)`);
+console.log(`✓ ${path.relative(root, outFile)} (${mb} MB, 自包含：JS + CSS + DG2.glb)`);

@@ -3,6 +3,9 @@ import type { AppServices } from "./types.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
 import { isAgentWorldSocialEnabled } from "../config/env.js";
 
+/** 身份种子并发度：磁盘读 + KV 写，4 路足够摊平等待又不至于压满磁盘队列。 */
+const SEED_CONCURRENCY = 4;
+
 export async function initializeRuntimeState(services: AppServices): Promise<void> {
   // 无相互依赖的持久化加载并行执行（文件读 + JSON.parse 均为异步 IO，
   // 串行等待会把各文件加载时间累加；并行后总耗时 ≈ 最慢的一个）。
@@ -24,14 +27,24 @@ export async function initializeRuntimeState(services: AppServices): Promise<voi
   // 身份/记忆 Markdown 文档种子：为所有已存在 actor 幂等写入 KV。
   // SOUL/USER/MEMORY.md 只在对应 KV 键为空时写入，跨重启不覆盖运行时学习到的
   // 人格内核 / 用户画像 / 长期事实；新建 actor 在 agent-core 每轮开头懒种子。
+  // 按小并发池跑（每个 actor 一次异步磁盘读 + KV 写）：串行会随 actor 数线性
+  // 拉长启动，全并发则在大账号量下把磁盘队列压满。
   try {
-    for (const actorId of services.agentMemorySyncService.listSessionIds()) {
-      try {
-        await seedIdentityMarkdown(services.agentMemorySyncService, actorId);
-      } catch (e) {
-        console.error(`[initialize-runtime-state] 身份/记忆种子失败(${actorId}):`, e);
+    const sessionIds = services.agentMemorySyncService.listSessionIds();
+    let cursor = 0;
+    const worker = async (): Promise<void> => {
+      while (cursor < sessionIds.length) {
+        const actorId = sessionIds[cursor++];
+        try {
+          await seedIdentityMarkdown(services.agentMemorySyncService, actorId);
+        } catch (e) {
+          console.error(`[initialize-runtime-state] 身份/记忆种子失败(${actorId}):`, e);
+        }
       }
-    }
+    };
+    await Promise.all(
+      Array.from({ length: Math.min(SEED_CONCURRENCY, sessionIds.length) }, worker),
+    );
   } catch (e) {
     console.error("[initialize-runtime-state] 身份/记忆种子遍历失败:", e);
   }
@@ -61,10 +74,10 @@ export async function initializeRuntimeState(services: AppServices): Promise<voi
       services.auditService,
     );
   }
-  services.skillManager.loadEnabledFromDisk();
+  await services.skillManager.loadEnabledFromDisk();
   // 跨重启恢复"越用越强"的技能：procedural（经验文档）+ 自我进化 code（handlerCode）
-  services.skillManager.loadProceduralSkillsFromDisk();
-  services.skillManager.loadEvolvedSkillsFromDisk();
+  await services.skillManager.loadProceduralSkillsFromDisk();
+  await services.skillManager.loadEvolvedSkillsFromDisk();
   await services.a2aOutsourcingService.load();
   if (worldSocialEnabled) {
     await reconcileWorldA2aEscrows(

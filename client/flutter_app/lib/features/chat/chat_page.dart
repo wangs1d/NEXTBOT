@@ -1573,42 +1573,16 @@ class _ChatPageState extends State<ChatPage>
 
   /// 获取与当前消息同属「一轮问答对」的全部消息 ID。
   ///
-  /// 一轮 = 一条 user 消息 + 其后所有非 user 气泡（正文、工具/思考过程、分泡、
-  /// 卡片回执、后台任务回执……），直到（不含）下一条 user 消息。
-  ///
-  /// 旧实现只取「紧随其后的第一条 agent 回复」就 break，Agent 一轮里推了多条
-  /// 气泡（分泡 `assistant-<traceId>-bN`、任务回执等）时，删完只剩孤零零的
-  /// 另一半。这里改为取整轮，删除按钮才是「删掉这一问一答」。
+  /// 归属按消息 id 里的轮次锚点判定（见 [turnAnchorOfMessage]）：一轮 = 该轮
+  /// user 消息 + id 内嵌同一锚点的回复气泡（含分泡、工具/思考过程、卡片回执）。
+  /// 夹在这一轮里的主动推送 / 睡前备忘 / 决策卡不带锚点，不属于任何一轮，
+  /// 不并入——此前按「user 到下一条 user」切窗口会把它们一起删掉。
+  /// 点在没有归属的消息上时，删除范围就是它自己。
   List<String> _getRelatedMessageIds(String messageId) {
     final int idx =
         widget.messages.indexWhere((ChatMessage m) => m.messageId == messageId);
     if (idx < 0) return <String>[messageId];
-
-    // 轮次锚点：agent 气泡先回溯到它所属的 user 消息
-    int start = idx;
-    if (widget.messages[idx].role != "user") {
-      start = -1;
-      for (int i = idx - 1; i >= 0; i--) {
-        if (widget.messages[i].role == "user") {
-          start = i;
-          break;
-        }
-      }
-      // 没有归属的 user 消息（异常历史数据）→ 退化为只删这一条
-      if (start < 0) return <String>[messageId];
-    }
-
-    // 轮次右边界：下一条 user 消息（不含）
-    int end = start + 1;
-    while (
-        end < widget.messages.length && widget.messages[end].role != "user") {
-      end++;
-    }
-
-    return widget.messages
-        .sublist(start, end)
-        .map((ChatMessage m) => m.messageId)
-        .toList();
+    return turnMessageIdsFor(widget.messages[idx], widget.messages);
   }
 
   /// 「为你推荐」悬停「填入输入框」小按钮路径：只把示例文案追加进输入框
@@ -2443,6 +2417,7 @@ class _HoverableMessageWidget extends StatelessWidget {
       onOpenAgentProfile: onOpenAgentProfile,
       onDeleteMessage: onDeleteMessage,
       onDeleteFromMessage: onDeleteFromMessage,
+      onGetRelatedMessageIds: onGetRelatedMessageIds,
       deleteSelectionMode: deleteSelectionMode,
       isSelected: isSelected,
       selectedCount: selectedCount,
@@ -2479,6 +2454,7 @@ class _HoverableMessageContent extends StatefulWidget {
     this.onOpenAgentProfile,
     this.onDeleteMessage,
     this.onDeleteFromMessage,
+    this.onGetRelatedMessageIds,
     required this.deleteSelectionMode,
     required this.isSelected,
     required this.selectedCount,
@@ -2518,6 +2494,7 @@ class _HoverableMessageContent extends StatefulWidget {
   final void Function(GlobalKey avatarKey)? onOpenAgentProfile;
   final void Function(String messageId)? onDeleteMessage;
   final void Function(String messageId)? onDeleteFromMessage;
+  final List<String> Function(String messageId)? onGetRelatedMessageIds;
   final bool deleteSelectionMode;
   final bool isSelected;
   final int selectedCount;
@@ -2838,7 +2815,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     );
   }
 
-  /// 删除入口按钮本体：小圆底 + 垃圾桶图标，点击进入该轮问答对的删除确认
+  /// 删除入口按钮本体：小圆底 + 垃圾桶图标，点击进入对应范围的删除确认
   /// （整轮预选、确认栏渲染都由 ChatPage 统一管理，这里只负责触发）。
   Widget _buildDeleteEntryButton(BuildContext context) {
     final ColorScheme cs = Theme.of(context).colorScheme;
@@ -2846,13 +2823,18 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     final bool visible = _hovering &&
         !widget.deleteSelectionMode &&
         widget.onDeleteMessage != null;
+    // 主动推送等无轮次归属的气泡只删自己，文案与整轮删除区分开
+    final int relatedCount =
+        widget.onGetRelatedMessageIds?.call(widget.mainMessage.messageId).length ??
+            1;
+    final String tooltip = relatedCount <= 1 ? "删除这条" : "删除这一轮";
     return AnimatedOpacity(
       opacity: visible ? 1.0 : 0.0,
       duration: const Duration(milliseconds: 120),
       child: IgnorePointer(
         ignoring: !visible,
         child: Tooltip(
-          message: "删除这一轮",
+          message: tooltip,
           child: Material(
             // 小圆底衬：按钮落在气泡外侧，底衬保证在任意页面底色上都可辨认
             color: cs.surfaceContainerHighest,
@@ -3364,7 +3346,7 @@ class _DeleteConfirmBar extends StatelessWidget {
         Padding(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
           child: Text(
-            "删除这一轮（$selectedCount 条）",
+            selectedCount <= 1 ? "删除这条" : "删除这一轮（$selectedCount 条）",
             style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
           ),
         ),

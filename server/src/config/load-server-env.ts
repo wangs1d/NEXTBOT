@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-const serverRoot = join(dirname(fileURLToPath(import.meta.url)), "../..");
+import { serverRoot } from "./paths.js";
 
 /**
  * 解析当前部署的区域版本。
@@ -48,8 +48,9 @@ export function resolveRegion(env: NodeJS.ProcessEnv = process.env): "domestic" 
  * 区域文件不存在时静默跳过，保持向后兼容。
  */
 export function loadServerEnv(): void {
-  const envPath = join(serverRoot, ".env");
-  const localPath = join(serverRoot, ".env.local");
+  const root = serverRoot();
+  const envPath = join(root, ".env");
+  const localPath = join(root, ".env.local");
 
   if (existsSync(envPath)) {
     loadEnv({ path: envPath, quiet: true });
@@ -57,7 +58,7 @@ export function loadServerEnv(): void {
 
   // 先读 .env 里的 REGION（若 .env.local 后续覆盖也无妨，区域只影响默认值）
   const region = resolveRegion(process.env);
-  const regionPath = join(serverRoot, `.env.${region}`);
+  const regionPath = join(root, `.env.${region}`);
   if (existsSync(regionPath)) {
     loadEnv({ path: regionPath, override: true, quiet: true });
   }
@@ -73,9 +74,10 @@ export function loadServerEnv(): void {
 // 这里把它们前置进本进程 PATH，子进程继承后即可直接调用。
 function prependBundledToolsToPath(): void {
   if (process.platform !== "win32") return;
+  const root = serverRoot();
   const dirs = [
-    existsSync(join(serverRoot, "bin")) ? join(serverRoot, "bin") : null,
-    existsSync(join(serverRoot, "node.exe")) ? serverRoot : null,
+    existsSync(join(root, "bin")) ? join(root, "bin") : null,
+    existsSync(join(root, "node.exe")) ? root : null,
   ].filter((d): d is string => d !== null);
   if (dirs.length === 0) return;
   const current = process.env.PATH ?? "";
@@ -92,7 +94,7 @@ prependBundledToolsToPath();
 function anchorPlaywrightBrowsersPath(): void {
   const raw = process.env.PLAYWRIGHT_BROWSERS_PATH?.trim();
   if (!raw || isAbsolute(raw)) return;
-  const abs = resolve(serverRoot, raw);
+  const abs = resolve(serverRoot(), raw);
   if (existsSync(abs)) process.env.PLAYWRIGHT_BROWSERS_PATH = abs;
 }
 

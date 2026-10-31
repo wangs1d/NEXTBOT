@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { createReadStream } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
-import sharp from "sharp";
+import { loadSharp } from "./sharp-lazy.js";
 
 import type { ImageGenerationProvider, ImageGenerationResult, ImageGenerateInput } from "./image-generation-providers.js";
 import { OpenAICompatibleImageProvider, GeminiImageProvider } from "./image-generation-providers.js";
@@ -168,6 +168,7 @@ export class ImageGenerationService {
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
     const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.png`;
+    const sharp = await loadSharp();
     const png = await sharp(buf, { animated: false }).rotate().png().toBuffer();
     await writeFile(join(dir, fileName), png);
     return `/agent/images/${safeActorId}/${fileName}`;
@@ -208,6 +209,7 @@ export class ImageGenerationService {
       throw new Error(`下载图像失败：HTTP ${res.status} ${res.statusText}`);
     }
     const buf = Buffer.from(await res.arrayBuffer());
+    const sharp = await loadSharp();
     const png = await sharp(buf, { animated: false })
       .rotate()
       .png()

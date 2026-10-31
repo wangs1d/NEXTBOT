@@ -1,0 +1,74 @@
+{
+  "jump": {
+    "hash": "d157b08f",
+    "frames": 482,
+    "peakApex": 0.5768,
+    "peakSquash": 0.1225
+  },
+  "retreat": {
+    "hash": "bbaaeb16",
+    "frames": 482,
+    "peakApex": 0.0221,
+    "peakSquash": 0.0264
+  },
+  "lean_in": {
+    "hash": "1b936186",
+    "frames": 482,
+    "peakApex": 0.0003,
+    "peakSquash": 0.0285
+  },
+  "cower": {
+    "hash": "33ae483f",
+    "frames": 482,
+    "peakApex": 0.0307,
+    "peakSquash": 0.3714
+  },
+  "bounce_gait": {
+    "hash": "6d4f0e74",
+    "frames": 482,
+    "peakApex": 0.1799,
+    "peakSquash": 0.0352
+  },
+  "sink": {
+    "hash": "05c42121",
+    "frames": 482,
+    "peakApex": 0.0232,
+    "peakSquash": 0.3181
+  },
+  "peek": {
+    "hash": "eafc9362",
+    "frames": 482,
+    "peakApex": 0.0699,
+    "peakSquash": 0.0154
+  },
+  "tremor": {
+    "hash": "d3c5976a",
+    "frames": 482,
+    "peakApex": 0,
+    "peakSquash": 0.0088
+  },
+  "nudge": {
+    "hash": "33bff07f",
+    "frames": 482,
+    "peakApex": 0.0003,
+    "peakSquash": 0.009
+  },
+  "doze": {
+    "hash": "4252b646",
+    "frames": 482,
+    "peakApex": 0,
+    "peakSquash": 0.1898
+  },
+  "perk": {
+    "hash": "2be0a097",
+    "frames": 482,
+    "peakApex": 0.3019,
+    "peakSquash": 0.0347
+  },
+  "sulk": {
+    "hash": "a4a74604",
+    "frames": 482,
+    "peakApex": 0,
+    "peakSquash": 0.2539
+  }
+}

@@ -14,6 +14,8 @@
 
 import { adaptiveConcurrency } from "./adaptive-concurrency.js";
 import { workerPool } from "./worker-pool.js";
+import { resourcePoolSnapshot, sweepRetained, toolBudget, turnBudget } from "./resource-pool.js";
+import { clusterSnapshot } from "./cluster-router.js";
 
 export class Semaphore {
   private active = 0;
@@ -146,8 +148,8 @@ const MAX_CONCURRENT_TURNS = envPosInt("MAX_CONCURRENT_TURNS", 8);
 /** turn 排队超时（毫秒），超时后返回 429 提示。 */
 const TURN_QUEUE_TIMEOUT_MS = envPosInt("TURN_QUEUE_TIMEOUT_MS", 30_000);
 
-/** 全局 LLM turn 信号量。 */
-export const globalTurnLimiter = new Semaphore(MAX_CONCURRENT_TURNS, "global-turn");
+/** 全局 LLM turn 信号量（上限随机器容量与内存水位收紧）。 */
+export const globalTurnLimiter = new Semaphore(turnBudget(MAX_CONCURRENT_TURNS), "global-turn");
 
 /** turn 排队超时。 */
 export const TURN_QUEUE_TIMEOUT = TURN_QUEUE_TIMEOUT_MS;
@@ -160,7 +162,7 @@ export const TURN_QUEUE_TIMEOUT = TURN_QUEUE_TIMEOUT_MS;
  * 这里的全局闸只管"同时执行的任务数"。
  */
 export const backgroundTaskLimiter = new Semaphore(
-  envPosInt("AGENT_BG_TASK_MAX_PARALLEL", 4),
+  toolBudget(envPosInt("AGENT_BG_TASK_MAX_PARALLEL", 4)),
   "bg-task",
 );
 
@@ -173,19 +175,25 @@ export const backgroundTaskLimiter = new Semaphore(
 let adaptiveTimer: ReturnType<typeof setInterval> | null = null;
 let adaptiveEnabled = envPosInt("ADAPTIVE_CONCURRENCY_ENABLED", 1) === 1;
 
+/**
+ * AIMD 的判决值与资源池的机器上限取交集后再下发给信号量：
+ * AIMD 只懂「LLM 健康不健康」，不懂「这台机器还剩多少」，
+ * 水位到 critical 时由池把闸压回去，而不是等 OOM。
+ */
+function syncTurnCeiling(): void {
+  const ceiling = adaptiveEnabled ? adaptiveConcurrency.limit : MAX_CONCURRENT_TURNS;
+  globalTurnLimiter.updateMax(turnBudget(ceiling));
+}
+
 export function startAdaptiveConcurrency(): void {
-  if (!adaptiveEnabled || adaptiveTimer) return;
-
-  // 初始同步
-  globalTurnLimiter.updateMax(adaptiveConcurrency.limit);
-
-  adaptiveTimer = setInterval(() => {
-    // 定期同步 currentLimit → Semaphore.max
-    globalTurnLimiter.updateMax(adaptiveConcurrency.limit);
-  }, 2000);
-
-  // 不阻止进程退出
-  if (adaptiveTimer.unref) adaptiveTimer.unref();
+  if (!adaptiveTimer) {
+    syncTurnCeiling();
+    adaptiveTimer = setInterval(() => {
+      syncTurnCeiling();
+      sweepRetained();
+    }, 2000);
+    if (adaptiveTimer.unref) adaptiveTimer.unref();
+  }
 }
 
 /**
@@ -200,7 +208,7 @@ export function recordTurnOutcome(success: boolean, durationMs: number, errorMes
     adaptiveConcurrency.recordFailure(errorMessage ?? "unknown");
   }
   // 立即同步（不等 2s 定时器）
-  globalTurnLimiter.updateMax(adaptiveConcurrency.limit);
+  syncTurnCeiling();
 }
 
 /**
@@ -236,7 +244,7 @@ function getToolLimiter(toolName: string): Semaphore | null {
 
   const exactMax = limits[toolName];
   if (exactMax) {
-    const exactLimiter = new Semaphore(exactMax, `tool:${toolName}`);
+    const exactLimiter = new Semaphore(toolBudget(exactMax), `tool:${toolName}`);
     toolLimiters.set(toolName, exactLimiter);
     return exactLimiter;
   }
@@ -309,6 +317,13 @@ export function getConcurrencyStats() {
       queued: backgroundTaskLimiter.queuedCount,
       max: backgroundTaskLimiter.max,
     },
+    // 资源池：机器容量 + 内存水位 + 常驻缓存淘汰
+    resourcePool: resourcePoolSnapshot(
+      MAX_CONCURRENT_TURNS,
+      envPosInt("AGENT_BG_TASK_MAX_PARALLEL", 4),
+    ),
+    // 集群：节点注册表与 sticky 归属（未设 NEXTBOT_NODES 时单节点）
+    cluster: clusterSnapshot(),
     adaptive,
     workers,
     tools,

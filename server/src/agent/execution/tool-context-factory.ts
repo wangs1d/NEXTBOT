@@ -6,7 +6,7 @@ import type {
 import type { AgentAccessMode } from "../agent-access-mode.js";
 import type { BrainCenter } from "../../brain/index.js";
 import type { ClientLocationWire } from "../../types/client-location.js";
-import type { ToolContext, ToolMediaCard, ToolRegistry } from "../../tools/tool-registry.js";
+import type { KnownLocation, ToolContext, ToolMediaCard, ToolRegistry } from "../../tools/tool-registry.js";
 import type { ToolCallGuard } from "../../services/tool-call-guard.js";
 import { recordToolUsageForPromotion } from "../../tools/tool-search/tool-promotion.js";
 import { recordPreloadExecution } from "../../tools/tool-search/preload-feedback.js";
@@ -17,6 +17,8 @@ export type ToolExecutionAccess = {
   phoneBridgeOnline?: boolean;
   /** 按需位置：位置类工具（weather.get_local 等）在缺少经纬度时可向客户端请求实时 GPS */
   requestLocation?: () => Promise<ClientLocationWire | null>;
+  /** 最近已知位置（内存缓存 → 本地位置历史），带 ageMs；实时 GPS 拿不到时的兜底 */
+  getLastKnownLocation?: () => KnownLocation | null;
   /** 中途推送媒体卡（购物登录/支付二维码等）：聊天主路径由 WS 层装配 */
   pushMediaCards?: (cards: ToolMediaCard[]) => void;
 };
@@ -139,6 +141,7 @@ export class ToolContextFactory {
       // 按需位置：透传 locationCoordinator 的 requestLocation，天气等位置类工具
       // 在缺少经纬度时才能向客户端下发 agent.location_request 请求实时 GPS。
       requestLocation: base.access?.requestLocation,
+      getLastKnownLocation: base.access?.getLastKnownLocation,
       // 中途推卡：购物等长工具执行中把二维码等即时呈现给用户（chat.media_ready）
       pushMediaCards: base.access?.pushMediaCards,
       // 单次调用取消信号（工具循环超时即 abort）：子进程/HTTP 类 handler 可消费

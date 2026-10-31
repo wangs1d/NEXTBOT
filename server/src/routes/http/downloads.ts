@@ -5,6 +5,7 @@ import { pipeline } from "node:stream/promises";
 import type { FastifyInstance } from "fastify";
 
 import { adminAudit, requireAdmin } from "./admin-auth.js";
+import { serverRoot } from "../../config/paths.js";
 
 /**
  * 下载文件存储目录。
@@ -14,7 +15,7 @@ function downloadsDir(): string {
   if (process.env.DOWNLOADS_DIR) return resolve(process.env.DOWNLOADS_DIR);
   // Docker 容器内默认路径
   if (process.env.NODE_ENV === "production") return resolve("/app/downloads");
-  return resolve(import.meta.dirname ?? __dirname, "../../../downloads");
+  return resolve(serverRoot(), "downloads");
 }
 
 /** 安全文件名 */

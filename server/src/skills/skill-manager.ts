@@ -3,7 +3,8 @@
  */
 
 import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, statSync, renameSync } from "fs";
-import { dirname, join, extname } from "path";
+import { readFile, readdir, stat } from "node:fs/promises";
+import { basename, dirname, join, extname } from "path";
 import type { ToolContext } from "../tools/tool-registry.js";
 import type {
   SkillDefinition,
@@ -93,10 +94,10 @@ export class SkillManager {
   /**
    * 在进程内全部 Skill 注册完成后调用：用磁盘中的启用状态覆盖内存（仅已存在的 name）。
    */
-  loadEnabledFromDisk(): void {
-    if (!this.enabledPersistPath || !existsSync(this.enabledPersistPath)) return;
+  async loadEnabledFromDisk(): Promise<void> {
+    if (!this.enabledPersistPath) return;
     try {
-      const raw = JSON.parse(readFileSync(this.enabledPersistPath, "utf-8")) as Record<string, unknown>;
+      const raw = JSON.parse(await readFile(this.enabledPersistPath, "utf-8")) as Record<string, unknown>;
       for (const [name, val] of Object.entries(raw)) {
         if (typeof val !== "boolean") continue;
         if (!this.skills.has(name)) continue;
@@ -105,7 +106,10 @@ export class SkillManager {
         this.configs.set(name, cfg);
       }
     } catch (error) {
-      console.warn("loadEnabledFromDisk failed:", error);
+      // 首次启动没有该文件属于正常情况，不刷告警
+      if ((error as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.warn("loadEnabledFromDisk failed:", error);
+      }
     }
   }
 
@@ -273,29 +277,28 @@ export class SkillManager {
    * 安全：恢复仍走 registerFromCode 的安全扫描 + new Function 隔离编译路径。
    * 恢复失败（如 handlerCode 已失效）仅跳过并计数，不影响其余技能。
    */
-  loadEvolvedSkillsFromDisk(): { loaded: number; skipped: number } {
-    if (!this.evolvedSkillsDir || !existsSync(this.evolvedSkillsDir)) {
-      return { loaded: 0, skipped: 0 };
-    }
+  async loadEvolvedSkillsFromDisk(): Promise<{ loaded: number; skipped: number }> {
+    if (!this.evolvedSkillsDir) return { loaded: 0, skipped: 0 };
     let loaded = 0;
     let skipped = 0;
     try {
-      const categories = readdirSync(this.evolvedSkillsDir);
-      for (const category of categories) {
-        if (category.startsWith(".")) continue;
+      const categories = await readdir(this.evolvedSkillsDir, { withFileTypes: true });
+      for (const categoryEntry of categories) {
+        if (!categoryEntry.isDirectory() || categoryEntry.name.startsWith(".")) continue;
+        const category = categoryEntry.name;
         const categoryDir = join(this.evolvedSkillsDir!, category);
-        if (!statSync(categoryDir).isDirectory()) continue;
-        const skillNames = readdirSync(categoryDir);
-        for (const skillName of skillNames) {
+        const skillNames = await readdir(categoryDir, { withFileTypes: true });
+        for (const skillEntry of skillNames) {
+          if (!skillEntry.isDirectory()) continue;
+          const skillName = skillEntry.name;
           const skillDir = join(categoryDir, skillName);
-          if (!statSync(skillDir).isDirectory()) continue;
           const skillPath = join(skillDir, "skill.json");
           if (!existsSync(skillPath)) {
             skipped++;
             continue;
           }
           try {
-            const raw = JSON.parse(readFileSync(skillPath, "utf8")) as {
+            const raw = JSON.parse(await readFile(skillPath, "utf8")) as {
               metadata: SkillMetadata;
               handlerCode: string;
             };
@@ -324,7 +327,9 @@ export class SkillManager {
         `[SkillManager] 从磁盘加载 ${loaded} 个自我进化 code 技能（跳过 ${skipped}）`,
       );
     } catch (err) {
-      console.warn("[SkillManager] 扫描自我进化技能目录失败:", err);
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.warn("[SkillManager] 扫描自我进化技能目录失败:", err);
+      }
     }
     return { loaded, skipped };
   }
@@ -499,22 +504,21 @@ export class SkillManager {
    * 扫描 proceduralSkillsDir 下的 `<category>/<name>/SKILL.md` + `skill.meta.json`。
    * 在 bootstrap 启动期调用一次，恢复跨重启的 procedural 技能。
    */
-  loadProceduralSkillsFromDisk(): { loaded: number; skipped: number } {
-    if (!this.proceduralSkillsDir || !existsSync(this.proceduralSkillsDir)) {
-      return { loaded: 0, skipped: 0 };
-    }
+  async loadProceduralSkillsFromDisk(): Promise<{ loaded: number; skipped: number }> {
+    if (!this.proceduralSkillsDir) return { loaded: 0, skipped: 0 };
     let loaded = 0;
     let skipped = 0;
     try {
-      const categories = readdirSync(this.proceduralSkillsDir);
-      for (const category of categories) {
-        if (category.startsWith(".")) continue;
+      const categories = await readdir(this.proceduralSkillsDir, { withFileTypes: true });
+      for (const categoryEntry of categories) {
+        if (!categoryEntry.isDirectory() || categoryEntry.name.startsWith(".")) continue;
+        const category = categoryEntry.name;
         const categoryDir = join(this.proceduralSkillsDir!, category);
-        if (!statSync(categoryDir).isDirectory()) continue;
-        const skillNames = readdirSync(categoryDir);
-        for (const skillName of skillNames) {
+        const skillNames = await readdir(categoryDir, { withFileTypes: true });
+        for (const skillEntry of skillNames) {
+          if (!skillEntry.isDirectory()) continue;
+          const skillName = skillEntry.name;
           const skillDir = join(categoryDir, skillName);
-          if (!statSync(skillDir).isDirectory()) continue;
           const docPath = join(skillDir, "SKILL.md");
           const metaPath = join(skillDir, "skill.meta.json");
           if (!existsSync(docPath) || !existsSync(metaPath)) {
@@ -522,12 +526,12 @@ export class SkillManager {
             continue;
           }
           try {
-            const meta = JSON.parse(readFileSync(metaPath, "utf8")) as SkillMetadata;
+            const meta = JSON.parse(await readFile(metaPath, "utf8")) as SkillMetadata;
             if (meta.skillType !== "procedural") {
               skipped++;
               continue;
             }
-            const doc = readFileSync(docPath, "utf8");
+            const doc = await readFile(docPath, "utf8");
             this.proceduralSkills.set(meta.name, { metadata: meta, docPath, doc });
             if (!this.configs.has(meta.name)) {
               this.configs.set(meta.name, { enabled: true });
@@ -541,7 +545,9 @@ export class SkillManager {
       }
       console.log(`[SkillManager] 从磁盘加载 ${loaded} 个 procedural 技能（跳过 ${skipped}）`);
     } catch (err) {
-      console.warn("[SkillManager] 扫描 procedural 技能目录失败:", err);
+      if ((err as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        console.warn("[SkillManager] 扫描 procedural 技能目录失败:", err);
+      }
     }
     return { loaded, skipped };
   }
@@ -682,7 +688,7 @@ export class SkillManager {
       throw new Error(`Skill 文件不存在: ${skillPath}`);
     }
 
-    const stat = require("fs").statSync(skillPath);
+    const stat = statSync(skillPath);
     
     if (stat.isDirectory()) {
       // 加载目录中的所有 Skill
@@ -727,8 +733,8 @@ export class SkillManager {
     const metadata = JSON.parse(content);
 
     // 这里需要找到对应的处理器文件
-    const dir = require("path").dirname(filePath);
-    const baseName = require("path").basename(filePath, ".json");
+    const dir = dirname(filePath);
+    const baseName = basename(filePath, ".json");
     const handlerPath = join(dir, `${baseName}.handler.js`);
 
     if (existsSync(handlerPath)) {

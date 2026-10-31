@@ -13,8 +13,11 @@ import {
 /**
  * 拼多多适配器。
  *
- * 搜索页：https://mobile.pinduoduo.com/search_goods.html?search_key=<query>
+ * 搜索页：https://mobile.yangkeduo.com/search_result.html?search_key=<query>
  * 订单页：https://mobile.pinduoduo.com/orders
+ *
+ * 搜索页必须带登录态：未登录会被 302 到 login.html?from=<搜索页>，登录后自动回跳。
+ * 旧路径 search_goods.html 已废弃（302 → portal.html?redirect_from=...，不出搜索结果）。
  *
  * 注意：拼多多 Web 端反爬强、常强制跳 App，页面结构变动频繁。
  * 本适配器为尽力而为：多组选择器兜底，全部失效时返回明确错误（不引入视觉兜底）。
@@ -24,7 +27,7 @@ export class PddAdapter implements ShoppingPlatformAdapter {
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);
-    return `https://mobile.pinduoduo.com/search_goods.html?search_key=${q}`;
+    return `https://mobile.yangkeduo.com/search_result.html?search_key=${q}`;
   }
 
   orderListUrl(): string {

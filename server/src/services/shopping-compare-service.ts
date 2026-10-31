@@ -10,7 +10,6 @@
  * 附带能力：
  *   - 降价监控（price watch）：add/remove/list + 后台 tick 定时复查，
  *     到价经 onPriceAlert 回调主动推送（装配层接 ProactivityHub.submitIntent）
- *   - 价格历史：data/shopping/price-history.json 追加记录（走势查询用）
  *
  * 安全性：全部只读（搜索/读价），不产生任何订单或支付副作用；
  * 平台访问复用 shopping-order 的 Cookie 门禁与审计。
@@ -24,10 +23,23 @@ import { basename, dirname, join } from "node:path";
 import { resolveActorId } from "../agent/actor-id.js";
 import { redactCredentials } from "../security/redact.js";
 import type { ToolContext } from "../tools/tool-registry.js";
+import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ShoppingOrderService } from "./shopping-order-service.js";
 import type { ProductSummary } from "./shopping-platforms/index.js";
 
 // ─────────────────────────── 类型 ───────────────────────────
+
+/** 单平台取数结果；loginRequired = 平台把页面拦到登录页（需用户本人登录） */
+interface PlatformQuotes {
+  products: ProductSummary[];
+  error?: string;
+  loginRequired?: boolean;
+}
+
+/** 平台显示名（京东/拼多多…），未收录时回退平台标识。 */
+function platformLabel(platform: string): string {
+  return BROWSER_SESSION_SITES[platform as BrowserSessionSiteId]?.label ?? platform;
+}
 
 /** 单平台一条报价 */
 export interface CompareOffer {
@@ -145,8 +157,6 @@ import { normalizeTitle, extractSpecTokens, diceSimilarity } from "./shopping-pl
 const SAME_PRODUCT_DICE_THRESHOLD = 0.55;
 /** 单用户监控条数上限 */
 const MAX_WATCHES_PER_ACTOR = 30;
-/** 价格历史上限（全局，防无限膨胀） */
-const PRICE_HISTORY_MAX = 2000;
 
 /** 带平台归属的商品（跨平台聚合的输入单元） */
 export interface TaggedProduct {
@@ -230,12 +240,9 @@ function toOffer(platform: string, p: ProductSummary, fetchedAt?: number): Compa
   };
 }
 
-// ─────────────────────────── 持久化（watch + 价格历史） ───────────────────────────
+// ─────────────────────────── 持久化（watch） ───────────────────────────
 
 interface WatchFileShape { watches?: PriceWatch[] }
-/** 一条价格历史记录 */
-interface PriceHistoryEntry { ts: string; actorId: string; query: string; platform: string; minPriceCny: number | null }
-interface HistoryFileShape { entries?: PriceHistoryEntry[] }
 
 /** 原子写 JSON（tmp + rename，串行化；与 booking-order-store 同策略） */
 class JsonFileWriter {
@@ -268,10 +275,8 @@ function readEnvInt(name: string, fallback: number): number {
 
 export class ShoppingCompareService {
   private readonly watches = new Map<string, PriceWatch>();
-  private readonly history: PriceHistoryEntry[] = [];
   private readonly dataDir: string;
   private readonly watchWriter: JsonFileWriter;
-  private readonly historyWriter: JsonFileWriter;
   private readonly clock: () => number;
   private onPriceAlert: ShoppingCompareServiceDeps["onPriceAlert"];
   private onCompareResult: ShoppingCompareServiceDeps["onCompareResult"];
@@ -286,7 +291,6 @@ export class ShoppingCompareService {
   constructor(private readonly deps: ShoppingCompareServiceDeps) {
     this.dataDir = deps.dataDir ?? join(getDataDir(), "shopping");
     this.watchWriter = new JsonFileWriter(join(this.dataDir, "price-watches.json"));
-    this.historyWriter = new JsonFileWriter(join(this.dataDir, "price-history.json"));
     this.clock = deps.now ?? Date.now;
     this.onPriceAlert = deps.onPriceAlert;
     this.onCompareResult = deps.onCompareResult;
@@ -398,7 +402,7 @@ export class ShoppingCompareService {
       /** 内置浏览器可用时占着唯一面板，必须串行取数 */
       preferVisible?: boolean;
     } = {},
-  ): Promise<{ products: ProductSummary[]; error?: string }> {
+  ): Promise<PlatformQuotes> {
     const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
     const res = await this.deps.shoppingOrderService.searchProduct(
       ctx,
@@ -414,7 +418,11 @@ export class ShoppingCompareService {
       { preferHeadless: opts.preferVisible !== true, loginWaitMs: 20_000 },
     );
     if (!res.ok) {
-      return { products: [], error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")) };
+      return {
+        products: [],
+        error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")),
+        ...((res as { loginRequired?: unknown }).loginRequired ? { loginRequired: true } : {}),
+      };
     }
     const products = (res as { products?: ProductSummary[] }).products ?? [];
     if (products.length === 0) {
@@ -449,34 +457,39 @@ export class ShoppingCompareService {
     // 否则无头并行（Playwright + 已授权 Cookie，不抢面板）。
     const visible = this.deps.shoppingOrderService.canUseVisibleBrowser(ctx);
     const fetchOpts = { ...opts, preferVisible: visible };
-    const settled = visible
-      ? await (async () => {
-          const out: Array<PromiseSettledResult<{ platform: string; quotes: { products: ProductSummary[]; error?: string } }>> = [];
-          for (const platform of requested) {
-            try {
-              out.push({
-                status: "fulfilled",
-                value: { platform, quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts) },
-              });
-            } catch (reason) {
-              out.push({ status: "rejected", reason });
-            }
-          }
-          return out;
-        })()
-      : await Promise.allSettled(
-          requested.map(async (platform) => ({
+    const outcomes: Array<{ platform: string; quotes: PlatformQuotes }> = [];
+    if (visible) {
+      for (const platform of requested) {
+        try {
+          outcomes.push({ platform, quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts) });
+        } catch (reason) {
+          outcomes.push({
             platform,
-            quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts),
-          })),
-        );
+            quotes: { products: [], error: reason instanceof Error ? reason.message : String(reason) },
+          });
+        }
+        // 平台把页面拦到登录页就停在这里：交接步已由登录门建好，可见浏览器必须
+        // 留在登录页等用户扫码；接着跑下一个平台会把面板导航走，用户就找不到登录页了。
+        if (outcomes[outcomes.length - 1].quotes.loginRequired) break;
+      }
+    } else {
+      const settled = await Promise.allSettled(
+        requested.map(async (platform) => ({
+          platform,
+          quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts),
+        })),
+      );
+      for (const s of settled) {
+        if (s.status === "fulfilled") outcomes.push(s.value);
+      }
+    }
 
     const tagged: TaggedProduct[] = [];
     const searchedPlatforms: string[] = [];
     const failedPlatforms: string[] = [];
-    for (const s of settled) {
-      if (s.status !== "fulfilled") continue;
-      const { platform, quotes } = s.value;
+    let loginPending: string | null = null;
+    for (const { platform, quotes } of outcomes) {
+      if (quotes.loginRequired) loginPending = platform;
       if (quotes.products.length > 0) {
         searchedPlatforms.push(platform);
         const fetchedAt = Date.now();
@@ -484,7 +497,7 @@ export class ShoppingCompareService {
           tagged.push({ platform, product: p, fetchedAt });
         }
       } else if (quotes.error) {
-        failedPlatforms.push(`${platform}：${quotes.error}`);
+        failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
       }
     }
 
@@ -524,12 +537,12 @@ export class ShoppingCompareService {
 
     const bestOffer: CompareOffer | null = groups[0]?.offers[0] ?? null;
 
-    // 价格历史（异步落盘，不阻塞返回）
-    this.appendHistory(actorId, q, bestOffer?.platform ?? searchedPlatforms[0] ?? "", bestOffer?.priceCny ?? null);
-
     const platformSummary = searchedPlatforms.join("/");
     const bestText =
       comparable && bestOffer?.priceCny != null ? `，同规格最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
+    const loginText = loginPending
+      ? `；${platformLabel(loginPending)}需要登录，登录完我接着把${platformLabel(loginPending)}的价补上`
+      : "";
 
     // 决策页存档（fire-and-forget：存储失败/未装配不影响比价回执）
     const fetchedAt = Date.now();
@@ -551,7 +564,7 @@ export class ShoppingCompareService {
 
     return {
       ok: true,
-      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}`,
+      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}`,
       query: q,
       platforms: requested,
       searchedPlatforms,
@@ -559,6 +572,7 @@ export class ShoppingCompareService {
       bestOffer,
       bestIndex,
       fetchedAt,
+      ...(loginPending ? { loginRequired: { platform: loginPending, label: platformLabel(loginPending) } } : {}),
       ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };
   }
@@ -683,24 +697,12 @@ export class ShoppingCompareService {
     return isBelowTarget && isNewLow;
   }
 
-  // ---- 价格历史 ----
-
-  /** 读取某 actor 某 keyword 的历史价格序列（时间升序）。 */
-  async getPriceHistory(actorId: string, query: string): Promise<Array<{ ts: string; minPriceCny: number | null; platform: string }>> {
-    await this.ensureLoaded();
-    const q = query.trim();
-    return this.history
-      .filter((e) => e.actorId === actorId && e.query === q)
-      .map((e) => ({ ts: e.ts, minPriceCny: e.minPriceCny, platform: e.platform }));
-  }
-
   // ---- 内部 ----
 
   private async ensureLoaded(): Promise<void> {
     if (this.loaded) return;
     this.loaded = true;
     const watchFile = join(this.dataDirOf(), "price-watches.json");
-    const historyFile = join(this.dataDirOf(), "price-history.json");
     try {
       if (existsSync(watchFile)) {
         const parsed = JSON.parse(await readFile(watchFile, "utf8")) as WatchFileShape;
@@ -711,14 +713,6 @@ export class ShoppingCompareService {
     } catch (err) {
       console.warn("[ShoppingCompare] 监控文件损坏，从空开始", err);
     }
-    try {
-      if (existsSync(historyFile)) {
-        const parsed = JSON.parse(await readFile(historyFile, "utf8")) as HistoryFileShape;
-        this.history.push(...(parsed.entries ?? []).slice(-PRICE_HISTORY_MAX));
-      }
-    } catch (err) {
-      console.warn("[ShoppingCompare] 价格历史文件损坏，从空开始", err);
-    }
   }
 
   private dataDirOf(): string {
@@ -727,12 +721,6 @@ export class ShoppingCompareService {
 
   private persistWatches(): void {
     this.watchWriter.write({ watches: Array.from(this.watches.values()) });
-  }
-
-  private appendHistory(actorId: string, query: string, platform: string, minPriceCny: number | null): void {
-    this.history.push({ ts: new Date().toISOString(), actorId, query, platform, minPriceCny });
-    if (this.history.length > PRICE_HISTORY_MAX) this.history.splice(0, this.history.length - PRICE_HISTORY_MAX);
-    this.historyWriter.write({ entries: this.history });
   }
 
   private findWatchId(actorId: string, target: string): string | null {
@@ -747,6 +735,6 @@ export class ShoppingCompareService {
 
   /** 测试/停机前：等待落盘完成 */
   async flush(): Promise<void> {
-    await Promise.all([this.watchWriter.flush(), this.historyWriter.flush()]);
+    await this.watchWriter.flush();
   }
 }

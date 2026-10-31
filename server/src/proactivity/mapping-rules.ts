@@ -85,7 +85,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
       },
     },
 
-    // 2. meeting_soon：临近日程双提前量（60min normal / 15min alert）+ 会前准备包
+    // 2. meeting_soon：临近日程双提前量（60min normal / 15min alert）
     {
       id: "meeting_soon",
       layers: ["obligations"],

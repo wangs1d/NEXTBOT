@@ -12,6 +12,7 @@ import {
   type AgentAccessMode,
 } from "../agent/agent-access-mode.js";
 import type { SkillManager } from "../skills/index.js";
+import { isBusinessFailurePayload } from "../render/types.js";
 
 import type { ClientLocationWire } from "../types/client-location.js";
 
@@ -24,6 +25,9 @@ export type ToolMediaCard = {
   /** 图下说明文字（如「请扫码登录京东」） */
   caption?: string;
 };
+
+/** 最近一次已知位置 + 距写入的毫秒龄期。 */
+export type KnownLocation = ClientLocationWire & { ageMs: number };
 
 export type ToolContext = {
   sessionId: string;
@@ -40,6 +44,11 @@ export type ToolContext = {
    * 由位置类工具（weather.get_local 等）在缺少经纬度时使用。
    */
   requestLocation?: (reason?: string) => Promise<ClientLocationWire | null>;
+  /**
+   * 最近一次已知位置（内存缓存 + 本地位置历史落盘样本），带 `ageMs` 标注龄期。
+   * 实时 GPS 拿不到时的兜底；调用方必须把 ageMs 如实透出，不得当实时位置用。
+   */
+  getLastKnownLocation?: () => KnownLocation | null;
   /**
    * 工具执行中途向聊天流推送媒体卡片（如购物登录/支付二维码），
    * 经 chat.media_ready 挂到当前流式回复上。聊天主路径装配；
@@ -324,6 +333,8 @@ export class ToolRegistry {
         const safeResult = jsonSafeResult(result);
         this.notifyToolExecuted(registryName, input, safeResult, context);
         const entry = { result: { ok: true, result: safeResult }, timestamp: Date.now() };
+        // 自报失败（{ok:false}）不进缓存：一次瞬时失败否则会把整个 TTL 钉死成「拿不到数据」。
+        if (isBusinessFailurePayload(safeResult)) return entry.result;
         // LRU 淘汰：超过最大容量时删除最旧的
         if (this.toolCache.size >= TOOL_CACHE_MAX_SIZE) {
           const oldestKey = this.toolCache.keys().next().value;

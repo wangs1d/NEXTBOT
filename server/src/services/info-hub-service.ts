@@ -330,7 +330,7 @@ export class InfoHubService {
       // 优先用 Readability 提取正文（质量更高），失败时降级到正则
       let content = "";
       try {
-        const readabilityResult = extractWithReadability(html, current.url);
+        const readabilityResult = await extractWithReadability(html, current.url);
         content = readabilityResult.text.length >= 100 ? readabilityResult.text : htmlToText(html);
       } catch {
         content = htmlToText(html);

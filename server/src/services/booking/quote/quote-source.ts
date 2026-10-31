@@ -8,7 +8,7 @@
  * `QuoteAggregator` 并行拉取、归一、比价。源分三类（诚实降级，不谎报）：
  *   - local：本地价格库（PricingService），priceSource=estimated/list
  *   - cli：官方/合作方 CLI 查询（如飞猪 flyai search-hotel/search-flight），priceSource=api
- *   - browser：无头浏览器代查商家站点，priceSource=scraped
+ *   - browser：浏览器代查商家站点（用户可见的内置浏览器 / 服务端无头），priceSource=scraped
  *
  * 设计约束：
  *   - 源失败/无数据返回 `{ ok: true, quotes: [] }`，不抛异常（聚合器兜底 catch）
@@ -113,6 +113,8 @@ export interface QuoteSource {
   readonly id: string;
   readonly label: string;
   supports(type: QuoteType): boolean;
+  /** 本源超时（缺省用聚合器 timeoutMs）；浏览器代查这类慢源自行报预算 */
+  readonly timeoutMs?: number;
   fetch(req: QuoteRequest, ctx: ToolContext): Promise<QuoteSourceResult>;
 }
 

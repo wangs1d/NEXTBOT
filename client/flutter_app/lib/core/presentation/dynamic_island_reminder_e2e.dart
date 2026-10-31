@@ -27,8 +27,9 @@ Future<void> runIslandReminderE2EBootstrap() async {
   if (fireFlag.existsSync()) fireFlag.deleteSync();
   if (doneFlag.existsSync()) doneFlag.deleteSync();
 
-  // main.dart 启动序列已调 initDynamicIsland()（其 VM 扩展注册非幂等，
-  // 这里二次调用会 UNCAUGHT 炸掉本引导）——只轮询就绪标志。
+  // E2E 不依赖登录门禁：先放行上屏（main.dart 启动序列已调 initDynamicIsland，
+  // 其 VM 扩展注册非幂等，这里二次调用会 UNCAUGHT 炸掉本引导——只轮询就绪标志。
+  await DynamicIslandLauncher.instance.setVisible(true);
   for (int i = 0;
       i < 60 && !DynamicIslandLauncher.instance.isNativeReady;
       i++) {

@@ -1,3 +1,4 @@
+import "dart:async" show unawaited;
 import "dart:math" show max;
 
 import "package:flutter/material.dart";
@@ -44,6 +45,7 @@ class _BrowserPageState extends State<BrowserPage> {
   void initState() {
     super.initState();
     _bootstrap();
+    unawaited(host.notifyPanelOpened());
     host.currentUrl.addListener(_syncOmnibox);
     _omniboxFocus.addListener(_onOmniboxFocusChanged);
     _syncOmnibox();
@@ -259,6 +261,7 @@ class _BrowserPageState extends State<BrowserPage> {
                 cs: cs,
                 onTap: host.atHome ? null : host.goHome,
               ),
+              _ZoomChip(cs: cs),
             ],
           ),
         ),
@@ -388,7 +391,7 @@ class _BrowserPageState extends State<BrowserPage> {
     if (controller == null) {
       return _buildErrorState(cs);
     }
-    return Webview(controller);
+    return Webview(controller, onCtrlWheelZoom: host.applyZoomStep);
   }
 
   /// 初始化失败空态：图标 + 一句话 + 重试（ensureStarted 失败会清空 _starting，
@@ -918,6 +921,53 @@ class _ConfirmBar extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+}
+
+/// 缩放百分比胶囊：Ctrl+滚轮调档后在这里可见，点击回 100%。
+/// 非 100% 时上淡主色底提示「当前不在原比例」。
+class _ZoomChip extends StatelessWidget {
+  const _ZoomChip({required this.cs});
+
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    final SharedBrowserHost host = SharedBrowserHost.instance;
+    return ValueListenableBuilder<double>(
+      valueListenable: host.zoomFactor,
+      builder: (BuildContext context, double zoom, _) {
+        final int pct = (zoom * 100).round();
+        final bool off = pct != 100;
+        return Tooltip(
+          message: "Ctrl+滚轮缩放，点击回到 100%",
+          child: GestureDetector(
+            onTap: off ? host.resetZoom : null,
+            child: Container(
+              height: 26,
+              constraints: const BoxConstraints(minWidth: 46),
+              alignment: Alignment.center,
+              padding: const EdgeInsets.symmetric(horizontal: 9),
+              decoration: BoxDecoration(
+                color: off
+                    ? cs.primary.withValues(alpha: 0.14)
+                    : cs.surfaceContainerHigh.withValues(alpha: 0.6),
+                borderRadius: BorderRadius.circular(13),
+              ),
+              child: Text(
+                "$pct%",
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFeatures: const <FontFeature>[FontFeature.tabularFigures()],
+                  color: off ? cs.primary : cs.onSurfaceVariant,
+                  fontWeight: off ? FontWeight.w600 : FontWeight.w500,
+                ),
+              ),
+            ),
+          ),
+        );
+      },
     );
   }
 }

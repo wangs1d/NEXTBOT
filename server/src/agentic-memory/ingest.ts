@@ -459,8 +459,9 @@ export class AgenticMemoryIngestService {
     body: string,
     context: "main" | "notes",
     highSignal: boolean,
+    extraMetadata?: Record<string, unknown>,
   ): Promise<void> {
-    await this.writeDecidedDetailed(actorId, sourceId, body, context, highSignal);
+    await this.writeDecidedDetailed(actorId, sourceId, body, context, highSignal, extraMetadata);
   }
 
   /**

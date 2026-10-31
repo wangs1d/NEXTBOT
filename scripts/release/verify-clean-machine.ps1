@@ -14,7 +14,7 @@ New-Item -ItemType Directory -Path $OutDir -Force | Out-Null
 $report = Join-Path $OutDir 'report.txt'
 
 function Say($text, $color) {
-  Write-Host $text -ForegroundColor $color
+  if ($color -and $color -ne 'None') { Write-Host $text -ForegroundColor $color } else { Write-Host $text }
   Add-Content -Path $report -Value $text -Encoding utf8
 }
 function Check($name, $ok, $detail) {
@@ -28,7 +28,7 @@ $os = Get-CimInstance Win32_OperatingSystem
 Say ("OS = " + $os.Caption.Trim() + ' ' + $os.Version + '.' + (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion').UBR) 'White'
 
 # ---------- [1] 装机前基线：这台机器本来没有这些，装完还能跑，才证明包是自足的 ----------
-Say '' None
+Say ''
 Say '--- [1/5] 装机前依赖基线 ---' 'White'
 foreach ($t in 'node', 'python', 'ffmpeg', 'ffprobe', 'npx', 'git') {
   $c = Get-Command $t -ErrorAction SilentlyContinue
@@ -51,7 +51,7 @@ $sysMsvcp = Test-Path (Join-Path $env:windir 'System32\msvcp140.dll')
 if ($sysMsvcp) { Info 'System32 已有 msvcp140.dll：下面用「模块加载来源」断言包内副本才是真被用的' } else { Info 'System32 无 msvcp140.dll：这台机器没装过 VC++ 运行库，包内副本是唯一来源' }
 
 # ---------- [2] 取包 + 静默安装 ----------
-Say '' None
+Say ''
 Say '--- [2/5] 安装 ---' 'White'
 $pkg = $null
 if ($PackageUrl) {
@@ -67,12 +67,28 @@ if ($PackageUrl) {
 }
 $hash = (Get-FileHash $pkg -Algorithm SHA256).Hash
 Say ("  安装包 = " + (Split-Path $pkg -Leaf) + '  ' + [math]::Round((Get-Item $pkg).Length / 1MB, 1) + ' MB  sha256=' + $hash) 'White'
+# 复跑时上一轮拉起过的 App / 随包 node 仍在运行会锁住 runtime 文件，
+# 静默覆盖会失败并留下残缺安装（exit!=0 之后所有检查跟着 chain fail）。
+Get-Process NEXTBOT -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
+Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.Path -match '\\Nextbot\\' } | Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
 $t0 = Get-Date
-$p = Start-Process -FilePath $pkg -ArgumentList '/VERYSILENT', '/NORESTART', '/SP-', '/SUPPRESSMSGBOXES' -Wait -PassThru
+$setupLog = Join-Path $OutDir 'setup-install.log'
+$p = Start-Process -FilePath $pkg -ArgumentList '/VERYSILENT', '/NORESTART', '/SP-', '/SUPPRESSMSGBOXES', "/LOG=$setupLog" -Wait -PassThru
 Check '安装器退出码为 0' ($p.ExitCode -eq 0) ("exit=" + $p.ExitCode + ' 用时 ' + [math]::Round(((Get-Date) - $t0).TotalSeconds, 1) + ' 秒')
 
+# 装机前缺 WebView2 的机器，静默安装必须由包内运行时自动补齐（不能靠弹窗/联网）
+$wv2After = $null
+foreach ($k in $wv2Key) {
+  $v = (Get-ItemProperty -Path $k -ErrorAction SilentlyContinue).pv
+  if ($v -and $v -ne '0.0.0.0') { $wv2After = $v; break }
+}
+if (-not $wv2) {
+  Check 'WebView2 已由安装器静默补齐' ($null -ne $wv2After) ("pv=" + $wv2After)
+}
+
 # ---------- [3] 包内容核验 ----------
-Say '' None
+Say ''
 Say '--- [3/5] 包内依赖核验 ---' 'White'
 $root = @((Join-Path $env:LOCALAPPDATA 'Programs\Nextbot'), (Join-Path $env:ProgramFiles 'Nextbot'), (Join-Path ${env:ProgramFiles(x86)} 'Nextbot')) |
   Where-Object { $_ -and (Test-Path (Join-Path $_ 'NEXTBOT.exe')) } | Select-Object -First 1
@@ -81,7 +97,7 @@ if (-not $root) { Say '=== 结论：FAIL ===' 'Red'; exit 1 }
 $runtime = Join-Path $root 'runtime'
 $node = Join-Path $runtime 'node.exe'
 
-Check 'NEXTBOT.exe 非零字节' ((Get-Item (Join-Path $root 'NEXTBOT.exe')).Length -gt 1MB) ((Get-Item (Join-Path $root 'NEXTBOT.exe')).Length.ToString() + ' bytes')
+Check 'NEXTBOT.exe 非零字节' ((Get-Item (Join-Path $root 'NEXTBOT.exe')).Length -gt 100KB) ((Get-Item (Join-Path $root 'NEXTBOT.exe')).Length.ToString() + ' bytes（Flutter runner 本身很小，真正的业务代码在 data\app.so）')
 Check '捆绑 node.exe 存在' (Test-Path $node) $node
 if (Test-Path $node) { Check '捆绑 node 可执行' ((& $node --version 2>&1 | Out-String).Trim().StartsWith('v')) ((& $node --version 2>&1) -join '') }
 Check 'runtime\dist\index.js 存在' (Test-Path (Join-Path $runtime 'dist\index.js')) (Join-Path $runtime 'dist\index.js')
@@ -151,7 +167,7 @@ if (Test-Path (Join-Path $runtime 'node_modules\playwright')) {
 }
 
 # ---------- [4] 零配置拉起本地后端 ----------
-Say '' None
+Say ''
 Say '--- [4/5] 零配置拉起本地 runtime ---' 'White'
 if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue) {
   Check '3000 端口空闲' $false '已被占用，无法判定是包内后端'
@@ -161,14 +177,18 @@ if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyCont
     -RedirectStandardOutput (Join-Path $OutDir 'runtime-out.log') -RedirectStandardError (Join-Path $OutDir 'runtime-err.log') -WindowStyle Hidden -PassThru
   $deadline = (Get-Date).AddSeconds($ReadyTimeoutSec)
   $code = 0
+  $exitNote = ''
   while ((Get-Date) -lt $deadline) {
     Start-Sleep -Seconds 2
+    # 崩溃会被误读成「初始化慢」：进程先没了就没有等的意义，退出码才是结论
+    $rp.Refresh()
+    if ($rp.HasExited) { $exitNote = "runtime 进程已退出 exit=$($rp.ExitCode)"; break }
     try {
       $r = Invoke-WebRequest -Uri 'http://127.0.0.1:3000/api/client/manifest' -UseBasicParsing -TimeoutSec 2
       $code = $r.StatusCode; if ($code -eq 200) { break }
     } catch { $code = 0 }
   }
-  Check "本地后端零配置就绪（$ReadyTimeoutSec 秒内 200）" ($code -eq 200) "HTTP $code"
+  Check "本地后端零配置就绪（$ReadyTimeoutSec 秒内 200）" ($code -eq 200) "HTTP $code $exitNote"
   if ($code -eq 200) {
     Info ('manifest: ' + ((Invoke-WebRequest 'http://127.0.0.1:3000/api/client/manifest' -UseBasicParsing).Content))
     try {
@@ -182,18 +202,27 @@ if (Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyCont
 }
 
 # ---------- [5] 真拉起 App：界面 + 模块来源 ----------
-Say '' None
+Say ''
 Say '--- [5/5] 拉起 App 并核对加载来源 ---' 'White'
 $app = Start-Process -FilePath (Join-Path $root 'NEXTBOT.exe') -PassThru
 Start-Sleep -Seconds 45
 $alive = $null -ne (Get-Process -Id $app.Id -ErrorAction SilentlyContinue)
 Check 'App 进程存活 45 秒' $alive $(if ($alive) { "pid=$($app.Id) 窗口标题=" + $app.MainWindowTitle } else { '已退出' })
 if ($alive) {
-  $mods = (Get-Process -Id $app.Id -Module -ErrorAction SilentlyContinue).Modules |
-    Where-Object { $_.ModuleName -match '^(msvcp140|vcruntime140)' }
+  # Flutter Windows runner 多半静态链接 C 运行时，加上 -Module 偶发枚举失败：
+  # 一个都没枚举到时不判 FAIL（否则是误报），只记录跳过。
+  $mods = @()
+  try {
+    $mods = @((Get-Process -Id $app.Id -Module -ErrorAction Stop).Modules |
+      Where-Object { $_.ModuleName -match '^(msvcp140|vcruntime140)' })
+  } catch { $mods = @() }
   $fromPackage = @($mods | Where-Object { $_.FileName.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) })
   $fromSystem = @($mods | Where-Object { -not $_.FileName.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) })
-  Check 'VC 运行库确实从包内加载' ($fromPackage.Count -gt 0) ("包内=$($fromPackage.Count) 系统=$($fromSystem.Count) " + (($fromPackage | ForEach-Object { $_.ModuleName }) -join ','))
+  if ($mods.Count -eq 0) {
+    Info 'App 进程未加载 msvcp140/vcruntime140（runner 静态链接或模块枚举失败），跳过来源断言'
+  } else {
+    Check 'VC 运行库确实从包内加载' ($fromPackage.Count -gt 0) ("包内=$($fromPackage.Count) 系统=$($fromSystem.Count) " + (($fromPackage | ForEach-Object { $_.ModuleName }) -join ','))
+  }
   if ($fromSystem.Count) { Info ("系统目录来源: " + (($fromSystem | ForEach-Object { $_.FileName }) -join ' | ')) }
   Get-Process node -ErrorAction SilentlyContinue | ForEach-Object {
     if ($_.Path -like "$root*") { Info "随包 runtime 进程 pid=$($_.Id) path=$($_.Path)" }
@@ -219,7 +248,7 @@ if (Test-Path $crash) { Copy-Item $crash (Join-Path $OutDir 'pai_app_crash.log')
 Stop-Process -Id $app.Id -Force -ErrorAction SilentlyContinue
 Get-Process node -ErrorAction SilentlyContinue | Where-Object { $_.Path -like "$root*" } | Stop-Process -Force -ErrorAction SilentlyContinue
 
-Say '' None
+Say ''
 if ($fails.Count) {
   Say ("=== 结论：FAIL（$($fails.Count) 项）===") 'Red'
   foreach ($f in $fails) { Say ('  - ' + $f) 'Red' }

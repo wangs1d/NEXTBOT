@@ -18,6 +18,7 @@ import type { WsConnectionRegistry } from "../services/ws-connection-registry.js
 import { notifySessionInit } from "../services/client-update-pusher.js";
 import { normalizeDeviceClass } from "../services/ws-connection-registry.js";
 import { declareClientCapabilities } from "../services/client-capability-registry.js";
+import { clusterEnabled, isOwner, routeActor } from "../services/cluster-router.js";
 import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import type { UserPersonalizationService } from "../services/user-personalization/user-personalization-service.js";
 import { createExternalChatProviderFromEnv } from "../external-model/resolve-provider.js";
@@ -669,6 +670,28 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             );
             return;
           }
+          // ─── 集群归属闸：多节点注册表下同一 actor 只在一个节点落地 ───
+          // 未设 NEXTBOT_NODES 时永远是自己，此处零开销直通。
+          if (clusterEnabled() && !isOwner(actorId)) {
+            const owner = routeActor(actorId);
+            socket.send(
+              JSON.stringify({
+                type: ServerEventType.ErrorEvent,
+                payload: {
+                  code: "NODE_REDIRECT",
+                  nodeId: owner.nodeId,
+                  endpoint: owner.endpoint,
+                  message: "当前 actor 归属其他节点，请重连 owner 端点",
+                },
+              }),
+            );
+            try {
+              ws.close(1008, "node_redirect");
+            } catch {
+              // Ignore close failures on broken sockets.
+            }
+            return;
+          }
           // ─── 云端连接版 BYOK（2026-10-20）：session.init 携带用户自有模型三元组 ───
           // 存在且字段齐全 → 按 actor 绑定（此后该 actor 的对话轮走用户 key，见
           // agent-core.chatProviderFor）；存在但字段不全 → 撤绑（用户在 UI 清空）；
@@ -716,9 +739,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             }
           }
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
-            declareClientCapabilities(actorId, {
-              mediaPlayback: declaredCapabilities?.mediaPlayback === true,
-            });
+            // 整表透传：任何 `true` 键即一项已声明能力，未声明的键在工具侧 fail-closed。
+            declareClientCapabilities(actorId, declaredCapabilities);
             // 更新推送（2026-10-21）：上线即补推当前版本清单（发布期间离线的用户
             // 连上就知道；发布时的在线用户由清单变化广播覆盖，见 client-update-pusher）
             notifySessionInit(socket);

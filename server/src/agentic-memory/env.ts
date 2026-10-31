@@ -355,6 +355,31 @@ export function isMemoryFtsEnabled(): boolean {
   return envBool("AGENT_MEMORY_FTS_ENABLED", true);
 }
 
+// ============================================================
+// 事件记忆层（L0 memory_events）：一层、一个写入口、一个检索口。
+// 写路径零 LLM、异步失败不影响回复；关掉写开关即回到旧行为。
+// ============================================================
+
+/** 事件写入开关（默认开）：每轮结束落一条可检索事件。 */
+export function isEventMemoryEnabled(): boolean {
+  return envBool("AGENT_EVENT_MEMORY", true);
+}
+
+/** 事件召回开关（默认开）：时间回溯意图自动召回 + memory.recall 工具。 */
+export function isEventMemoryRecallEnabled(): boolean {
+  return envBool("AGENT_EVENT_MEMORY_RECALL", true);
+}
+
+/** 事件原文摘要截断长度（字符）：够摘要、不够复读。 */
+export function getEventSummaryMaxChars(): number {
+  return envPositiveInt("AGENT_EVENT_MEMORY_SUMMARY_CHARS", 500);
+}
+
+/** 单轮事件最多保留的工具轨迹条数（防长会话把 payload 撑大）。 */
+export function getEventMaxToolTraces(): number {
+  return envPositiveInt("AGENT_EVENT_MEMORY_MAX_TRACES", 16);
+}
+
 /** FTS 路进入 bridge RRF 的候选条数（rank 列表长度，与 mem0/graph 路可比即可） */
 export function getMemoryFtsTopK(): number {
   return envPositiveInt("AGENT_MEMORY_FTS_TOP_K", 12);

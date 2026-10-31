@@ -16,8 +16,6 @@
  *       如在海外环境部署，设置 env JINA_READER_ENABLED=1 可启用。
  */
 
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
 import iconv from "iconv-lite";
 
 // PDF 解析：动态 import 避免非 PDF 场景的额外开销
@@ -130,7 +128,7 @@ export async function fetchWebPageEnhanced(
   // 第 1 级：Readability（主提取器）
   if (enableReadability) {
     try {
-      const readability = extractWithReadability(html, url);
+      const readability = await extractWithReadability(html, url);
       // 阈值 100：Readability 对非文章页可能返回空或极短内容，此时降级到正则
       if (readability.text && readability.text.trim().length >= 100) {
         return {
@@ -308,8 +306,15 @@ function extractTitleFromUrl(url: string): string {
 }
 
 /** 使用 @mozilla/readability 提取正文（导出，便于离线场景测试和复用） */
-export function extractWithReadability(html: string, url: string): { text: string; title: string } {
-  // jsdom 在 Node 中模拟 DOM
+export async function extractWithReadability(
+  html: string,
+  url: string,
+): Promise<{ text: string; title: string }> {
+  // jsdom（~11MB）与 readability 只在真正做正文提取时加载
+  const [{ JSDOM }, { Readability }] = await Promise.all([
+    import("jsdom"),
+    import("@mozilla/readability"),
+  ]);
   const dom = new JSDOM(html, { url });
   const reader = new Readability(dom.window.document);
   const article = reader.parse();

@@ -17,6 +17,28 @@ export interface TurnEffect {
 }
 
 /**
+ * 工具载荷自报业务失败（`{ ok: false }`）的判据。
+ * 全项目工具用返回 `{ok:false,error}` 表达「跑通了但没拿到数据」，
+ * 执行层只报「有没有抛异常」——效果表必须按载荷真话归类。
+ */
+export function isBusinessFailurePayload(result: unknown): boolean {
+  return (
+    !!result &&
+    typeof result === "object" &&
+    !Array.isArray(result) &&
+    (result as Record<string, unknown>).ok === false
+  );
+}
+
+/** 回执 → 效果状态：抛异常或载荷自报失败都算 error，其余 ok。 */
+export function effectStatusOf(
+  result: unknown,
+  threw = false,
+): EffectStatus {
+  return threw || isBusinessFailurePayload(result) ? "error" : "ok";
+}
+
+/**
  * 结构化卡规格。
  *   - card  业务卡（行程/天气/搜索/注册工具/视频），由 apply 建块
  *   - empty 本轮尝试过但没有可用数据：出空态卡，不悄悄降级成别的卡

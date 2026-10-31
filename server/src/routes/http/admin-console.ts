@@ -1,4 +1,5 @@
 import { getDataDir } from "../../config/data-dir.js";
+import { serverRoot } from "../../config/paths.js";
 import { mkdir, readFile, stat, readdir, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import net from "node:net";
@@ -118,7 +119,7 @@ async function dataDirBreakdown(): Promise<{
 function downloadsDirPath(): string {
   if (process.env.DOWNLOADS_DIR) return resolve(process.env.DOWNLOADS_DIR);
   if (process.env.NODE_ENV === "production") return resolve("/app/downloads");
-  return resolve(import.meta.dirname ?? __dirname, "../../../downloads");
+  return resolve(serverRoot(), "downloads");
 }
 
 /** Redis TCP 探活：连通即认为健康（不发 PING，避免协议兼容问题）。 */

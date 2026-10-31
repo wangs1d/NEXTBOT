@@ -101,7 +101,7 @@ const AgentResultData _mockPickCard = AgentResultData(
     ],
     cautions: <String>["取消了折叠结构，收纳比上一代略占地方"],
     channels: <AgentResultPickChannel>[
-      AgentResultPickChannel(name: "京东", priceCny: 1899, url: "https://item.jd.com/demo"),
+      AgentResultPickChannel(name: "京东", priceCny: 1899),
       AgentResultPickChannel(name: "淘宝", priceCny: 1949),
       AgentResultPickChannel(name: "拼多多", priceCny: 1869),
     ],
@@ -115,11 +115,9 @@ const AgentResultData _mockPickCard = AgentResultData(
     ],
     cons: <String>["触控容易误触，暂停歌要小心"],
     posts: <AgentResultUgcPost>[
-      AgentResultUgcPost(
-          title: "通勤半年体验：降噪天花板", url: "https://www.xiaohongshu.com/p1"),
-      AgentResultUgcPost(
-          title: "学生党闭眼入，性价比真的高", url: "https://www.xiaohongshu.com/p2"),
-      AgentResultUgcPost(title: "对比 QC Ultra 后我选了它", url: "https://www.xiaohongshu.com/p3"),
+      AgentResultUgcPost(title: "通勤半年体验：降噪天花板"),
+      AgentResultUgcPost(title: "学生党闭眼入，性价比真的高"),
+      AgentResultUgcPost(title: "对比 QC Ultra 后我选了它"),
     ],
   ),
   alternatives: <AgentResultPickAlt>[

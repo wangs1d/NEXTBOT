@@ -31,7 +31,7 @@ async function geoCtx(context: {
 }) {
 
   // 客户端已不随聊天消息携带 GPS（省电设计）：没有自带位置时改走按需实时定位
-  // （LocationCoordinator 60s 新鲜缓存优先，否则向客户端下发 agent.location_request），
+  // （LocationCoordinator 新鲜缓存优先，否则向客户端下发 agent.location_request），
   // 否则本工具对 clientLocation 的依赖在真实链路里永远落空。
   if (context.clientLocation) {
 

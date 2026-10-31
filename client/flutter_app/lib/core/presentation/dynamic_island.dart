@@ -5,6 +5,8 @@ import 'dart:developer' as developer;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../services/media_session_service.dart';
+
 /// 岛内容类别（与原生 Kind 枚举一一对应）。
 /// briefing 已退役：简报就绪不再上岛，触达交给各呈现形态（悬浮窗/系统通知/
 /// 对话流卡片），见 _handleMorningBriefingEvent。
@@ -293,6 +295,9 @@ class DynamicIslandLauncher {
   DynamicIslandController? _controller;
   bool _nativeReady = false;
   bool _syncingFromNative = false;
+  // 登录门禁：false = 登录/注册阶段整岛隐藏。原生 present/attention 遇到
+  // 隐藏窗口会自行 Show，所以上屏类调用必须在 Dart 侧先挡。
+  bool _visible = true;
   // create 失败退避重试（2026-09-28 根治）：此前一次失败 = 整进程无岛且零日志。
   Timer? _createRetryTimer;
   int _createAttempts = 0;
@@ -301,6 +306,24 @@ class DynamicIslandLauncher {
 
   /// 原生窗口是否就绪（E2E 断言用）。
   bool get isNativeReady => _nativeReady;
+
+  /// 登录门禁开关：false = 登录/注册阶段整岛不上屏（不建内容、不显示）。
+  /// 建窗前调用只置位，由 [attach] 建窗时落地。
+  Future<void> setVisible(bool visible) async {
+    final bool changed = _visible != visible;
+    _visible = visible;
+    if (!changed || !_nativeReady) return;
+    await _applyNativeVisibility();
+    if (visible) _syncToNative();
+  }
+
+  Future<void> _applyNativeVisibility() async {
+    if (!_nativeReady) return;
+    try {
+      await _channel.invokeMethod<bool>(
+          'setVisible', <String, Object?>{'visible': _visible});
+    } on PlatformException catch (_) {}
+  }
 
   /// 胶囊本体点击回调（payload="voice"=纯语音模式点击说话）。
   void Function(String payload)? onIslandTapped;
@@ -365,9 +388,13 @@ class DynamicIslandLauncher {
     if (_nativeReady) {
       _createRetryTimer?.cancel();
       _createRetryTimer = null;
+      // Create 即落屏：门禁关闭时创建完立刻收回，等登录后再补 Show。
+      await _applyNativeVisibility();
+      // 歌词请求通常早于岛窗口创建（启动即播放）：窗口就绪后补推一次。
+      unawaited(MediaSessionService.instance.repushIslandLyrics());
       if (_createAttempts > 1) {
         debugPrint('[dynamic-island] 原生窗口第 $_createAttempts 次尝试创建成功');
-        unawaited(_syncToNative());
+        _syncToNative();
       }
       return;
     }
@@ -426,7 +453,7 @@ class DynamicIslandLauncher {
     double holdSeconds = 0,
     bool urgent = false,
   }) async {
-    if (!_nativeReady) return;
+    if (!_nativeReady || !_visible) return;
     try {
       await _channel.invokeMethod<bool>('attention', <String, Object?>{
         'title': title,
@@ -448,7 +475,12 @@ class DynamicIslandLauncher {
   }
 
   Future<void> _syncToNative() async {
-    if (!_nativeReady || _controller == null || _syncingFromNative) return;
+    if (!_nativeReady ||
+        _controller == null ||
+        _syncingFromNative ||
+        !_visible) {
+      return;
+    }
     final IslandEntry? e = _controller!.entry;
     try {
       if (e == null) {

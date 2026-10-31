@@ -11,6 +11,8 @@
  *   5. 无 jobId 纯上报 → 只写缓存
  *   6. 连接断开 → 挂起请求立即按失败结算（不悬空）
  *   7. 无绑定 socket → requestLocation 立即 resolve null
+ *   8. getLastKnown 取最近一次已知位置：内存缓存优先，缺失时回退落盘历史，
+ *      超龄一律 null，返回值必带 ageMs（调用方据此如实标注龄期）
  */
 
 import assert from "node:assert/strict";
@@ -136,4 +138,53 @@ test("无绑定 socket → requestLocation 立即 resolve null", async () => {
   const coordinator = new LocationCoordinator();
   const resolved = await coordinator.requestLocation("actor-none", "tool:weather.get_local");
   assert.equal(resolved, null);
+});
+
+test("getLastKnown：内存缓存命中 → 不读落盘历史，龄期按写入时间", () => {
+  const coordinator = new LocationCoordinator();
+  let providerCalls = 0;
+  coordinator.setLastKnownProvider(() => {
+    providerCalls++;
+    return { payload: { latitude: 1, longitude: 1 }, at: Date.now() };
+  });
+
+  const socket = new FakeSocket();
+  coordinator.bindSocket("actor-8", socket);
+  coordinator.completeFromSocket(socket, "actor-8", { ...COORDS });
+
+  const known = coordinator.getLastKnown("actor-8");
+  assert.equal(known?.latitude, COORDS.latitude);
+  assert.ok(known && known.ageMs >= 0, "必须带 ageMs 供调用方标注龄期");
+  assert.equal(providerCalls, 0, "内存命中时不该去读历史库");
+});
+
+test("getLastKnown：内存为空 → 回退落盘历史（服务重启后仍能出天气）", () => {
+  const coordinator = new LocationCoordinator();
+  coordinator.setLastKnownProvider((actorId) =>
+    actorId === "actor-9"
+      ? { payload: { ...COORDS, city: "兴义市" }, at: Date.now() - 5 * 60_000 }
+      : null,
+  );
+
+  const known = coordinator.getLastKnown("actor-9");
+  assert.equal(known?.latitude, COORDS.latitude);
+  assert.equal(known?.city, "兴义市");
+  assert.ok(known && known.ageMs >= 5 * 60_000, "龄期应含历史样本距今时间");
+  assert.equal(coordinator.getLastKnown("actor-other"), null, "无样本 actor 应返回 null");
+});
+
+test("getLastKnown：超过 maxAgeMs → null（不把陈旧位置当实时）", () => {
+  const coordinator = new LocationCoordinator();
+  coordinator.setLastKnownProvider(() => ({
+    payload: { ...COORDS },
+    at: Date.now() - 3 * 60 * 60_000,
+  }));
+
+  assert.equal(coordinator.getLastKnown("actor-10", 2 * 60 * 60_000), null);
+  assert.ok(coordinator.getLastKnown("actor-10", 4 * 60 * 60_000));
+});
+
+test("getLastKnown：未注入历史读取器 → 只认内存缓存", () => {
+  const coordinator = new LocationCoordinator();
+  assert.equal(coordinator.getLastKnown("actor-11"), null);
 });

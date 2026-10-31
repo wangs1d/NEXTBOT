@@ -18,6 +18,7 @@ import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { getTurnWalService } from "../../services/turn-wal-service.js";
+import { updateEventAnswerSafely } from "../../agentic-memory/event-store.js";
 import { formatScheduleToolResultForUser } from "../../tools/schedule-user-reply.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
@@ -61,7 +62,7 @@ import {
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
 import type { TurnEffect } from "../../render/types.js";
-import { collectCardPayloads } from "../../render/index.js";
+import { collectCardPayloads, effectStatusOf } from "../../render/index.js";
 import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
 import {
   buildToolCard,
@@ -1655,7 +1656,11 @@ async function processBatchedMessage(
       executedVideoToolResults,
     ]) {
       for (const mt of list) {
-        turnEffects.push({ tool: mt.toolName, status: "ok", result: mt.result });
+        turnEffects.push({
+          tool: mt.toolName,
+          status: effectStatusOf(mt.result),
+          result: mt.result,
+        });
       }
     }
     if (
@@ -1666,7 +1671,7 @@ async function processBatchedMessage(
     ) {
       turnEffects.push({
         tool: reply.toolName,
-        status: "ok",
+        status: effectStatusOf(toolResult.result),
         result: toolResult.result as Record<string, unknown>,
       });
     }
@@ -2052,6 +2057,7 @@ async function processBatchedMessage(
         assistantText: finalText,
       })
       .catch(() => {});
+    updateEventAnswerSafely(msgActor, batched.originalMessageId, finalText);
 
     // 交错渲染块（renderBlocks）：把「清洗后的正文段落」与「媒体分组」按正文顺序交错，
     // 前端按块顺序渲染 → 「一段文字介绍后放一组照片，再一段文字，再一组照片」，

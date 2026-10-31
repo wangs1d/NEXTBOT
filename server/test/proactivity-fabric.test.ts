@@ -13,7 +13,6 @@ import { WorldBoard } from "../src/proactivity/world-board.js";
 import { MappingExecutor, type AttentionEvent } from "../src/proactivity/mapping-executor.js";
 import { buildBoardRules } from "../src/proactivity/mapping-rules.js";
 import { ArbiterV2, interruptCost } from "../src/proactivity/arbiter-v2.js";
-import { GoalBoard } from "../src/proactivity/goal-board.js";
 import { renderDigestCard } from "../src/proactivity/voice-templates.js";
 import { ProactivityHub } from "../src/proactivity/proactivity-hub.js";
 import type { SpeechHub } from "../src/proactivity/speech-express.js";
@@ -215,7 +214,7 @@ test("映射规则: 传感信号入板（桥接映射）——meeting/unread/goa
     payload,
   });
   board.ingestSignal(sig("schedule", { nextRunAt: clock.t + 10 * 60_000, nextTitle: "周会" }), "user-1");
-  board.ingestSignal(sig("goal", { goalId: "g1", title: "会前准备包", body: "已备好" }), "user-1");
+  board.ingestSignal(sig("goal", { goalId: "g1", title: "晨间简报", body: "已备好" }), "user-1");
   for (let i = 0; i < 3; i++) {
     board.ingestSignal(sig("message", { sender: `联系人${i}` }), "user-1");
   }
@@ -392,30 +391,6 @@ test("仲裁: 低成本直投 / 高成本挂起 / pause 后放行", () => {
   busy.forceTick();
   assert.equal(delivered.length, 2);
   assert.equal(busy.parkedEntries().length, 0);
-});
-
-// ─── L4 目标板 ───
-
-test("GoalBoard: 会前准备包预执行 → ready 进托盘 → goal 信号", async () => {
-  const clock = new MockClock();
-  const dir = tmpDir();
-  const goalSignals: string[] = [];
-  const board = new GoalBoard({
-    dataPath: dir,
-    nowFn: () => clock.t,
-    emitGoal: (g) => goalSignals.push(`${g.goalId}:${g.status}`),
-    recallMemory: () => ["上周和小王对过需求范围"],
-  });
-  const goal = board.maybeStartMeetingPrep("user-1", { title: "项目周会", runAtMin: 30 });
-  assert.ok(goal, "25-40min 窗口内启动");
-  await new Promise((r) => setTimeout(r, 20)); // 异步准备
-  assert.equal(goal.status, "ready");
-  assert.ok(String(goal.payload?.body).includes("小王"), "预执行材料含召回内容");
-  assert.equal(board.readyTray().length, 1);
-  assert.ok(goalSignals.includes(`${goal.goalId}:ready`));
-  // 幂等：同会议不重复备
-  assert.equal(board.maybeStartMeetingPrep("user-1", { title: "项目周会", runAtMin: 30 }), null);
-  rmSync(dir, { recursive: true, force: true });
 });
 
 // ─── L5 表达层 ───

@@ -66,6 +66,9 @@ class FakeDriver implements BrowserDriver {
   Future<void> stopLoading() async {}
 
   @override
+  Future<bool> setZoomFactor(double factor) async => true;
+
+  @override
   Future<bool> installDocumentBootstrap(String script) async {
     bootstraps.add(script);
     return capabilities.documentBootstrap;

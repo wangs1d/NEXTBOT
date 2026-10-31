@@ -15,10 +15,15 @@ import { loadServerEnv } from "./config/load-server-env.js";
 import { setupGlobalHttpAgent } from "./config/http-agent.js";
 import { getRuntimeTopologyConfig } from "./config/env.js";
 
+// tsc 会消除"只导入不引用"的 side-effect import：dist 产物里 .env / .env.local
+// 不会被加载。显式调用一次保证构建产物与 dev 一致（重复加载幂等）。
+loadServerEnv();
+
 setupGlobalHttpAgent();
 import { resolve, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createExternalChatProviderFromEnv } from "./external-model/index.js";
+import { serverRoot } from "./config/paths.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
@@ -30,8 +35,8 @@ import { startRuntimeLinkServer } from "./runtime/link/link-server.js";
 import { DirectRuntimeAdapter } from "./runtime/runtime-facade.js";
 
 // 数据目录锚定：持久化默认基于 cwd/data，守护进程无论从哪个目录启动都固定到 server/
-const serverRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-if (resolve(process.cwd()) !== serverRoot) process.chdir(serverRoot);
+const serverRootDir = serverRoot();
+if (resolve(process.cwd()) !== serverRootDir) process.chdir(serverRootDir);
 
 const topology = getRuntimeTopologyConfig();
 // 端口语义重定向：runtime 进程内一切「自己端口」的引用（桌面桥自连、日志）
@@ -60,10 +65,11 @@ console.log(
 );
 
 const services = await createAppServices();
-await initializeRuntimeState(services);
 
 // 内部 HTTP/WS 监听（gateway 隧道与反代的上游）
 await services.app.listen({ port: topology.runtimeHttpPort, host: "127.0.0.1" });
+
+await initializeRuntimeState(services);
 
 // runtime 链路：RuntimeFacade RPC（非隧道型网关/外壳用）
 const activeTurns = createActiveTurnRegistry();

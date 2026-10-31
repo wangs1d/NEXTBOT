@@ -10,6 +10,7 @@ import "../browser/browser_action_executor.dart";
 import "../browser/browser_driver.dart";
 import "../browser/shared_browser_protocol.dart" as proto;
 import "../browser/webview_windows_driver.dart";
+import "browser_panel_preference.dart";
 import "windows_webview_bootstrap.dart" show kSharedWebViewDebugPort;
 
 export "../browser/shared_browser_protocol.dart"
@@ -28,6 +29,9 @@ class SbSaveLoginAsk {
   final String siteId;
   final String siteLabel;
 }
+
+/// 当前页面的来源：决定面板关闭时是「回主页」还是「保留现场」。
+enum SbPageOrigin { none, user, agent }
 
 /// 用户与 Agent 共用的浏览器宿主（进程级单例）。
 ///
@@ -53,11 +57,15 @@ class SharedBrowserHost {
   static const String _runtimeAsset =
       "assets/shared_browser/shared_browser_runtime.js";
 
-  WebviewWindowsDriver? _driver;
+  BrowserDriver? _driver;
   BrowserActionExecutor? _executor;
   Future<void>? _starting;
   String? _error;
   String? _runtimeSource;
+
+  /// 测试注入点：替换引擎驱动构造（生产路径固定 WebviewWindowsDriver）。
+  @visibleForTesting
+  static BrowserDriver Function()? debugDriverFactory;
   StreamSubscription<String>? _urlSub;
   StreamSubscription<String>? _titleSub;
   StreamSubscription<DriverLoadingState>? _loadingSub;
@@ -101,6 +109,17 @@ class SharedBrowserHost {
   /// 服务端 CDP 桥正在驱动本浏览器（比价抓取等）——面板状态条感知用。
   final ValueNotifier<bool> cdpBusy = ValueNotifier<bool>(false);
 
+  /// 页面缩放（1.0 = 100%）。Ctrl+滚轮 / 工具栏胶囊共用；跨面板开关与
+  /// App 重启保留（落盘见 [BrowserPanelPreference]）。
+  final ValueNotifier<double> zoomFactor =
+      ValueNotifier<double>(BrowserPanelPreference.defaultZoom);
+
+  /// 当前页面来源（关闭面板时决定去留）。
+  SbPageOrigin _pageOrigin = SbPageOrigin.none;
+
+  /// 用户主动导航的最后页面（落盘；重开面板/App 时恢复）。
+  String _lastUserUrl = "";
+
   /// 动作轨迹（足迹回放，最新在前，环形上限 50 条）。
   final ValueNotifier<List<proto.SbActionTrace>> actionTrace =
       ValueNotifier<List<proto.SbActionTrace>>(<proto.SbActionTrace>[]);
@@ -111,8 +130,11 @@ class SharedBrowserHost {
   Timer? _cdpUrlPoll;
 
   /// 引擎控制器（仅供渲染层 Webview 组件挂载；动作逻辑禁止直接使用）。
-  WebviewController? get controller =>
-      _driver?.isReady == true ? _driver!.controller : null;
+  WebviewController? get controller {
+    final BrowserDriver? d = _driver;
+    if (d is! WebviewWindowsDriver || !d.isReady) return null;
+    return d.controller;
+  }
 
   bool get isReady => _driver?.isReady == true;
 
@@ -188,6 +210,11 @@ class SharedBrowserHost {
       }
     }
 
+    // Agent 经桥发起的导航：页面来源记为 agent（面板关闭时回主页）
+    if (action == proto.SbActions.navigate) {
+      _pageOrigin = SbPageOrigin.agent;
+    }
+
     pendingAgentActions.value += 1;
     lastAgentAction.value = action;
     SharedBrowserResult result;
@@ -247,6 +274,7 @@ class SharedBrowserHost {
   /// currentUrl/currentTitle，面板才能从主页态切到真实页面。
   Future<void> _setCdpBusy(bool busy) async {
     if (cdpBusy.value == busy) return;
+    if (busy) _pageOrigin = SbPageOrigin.agent;
     cdpBusy.value = busy;
     if (busy) {
       unawaited(_syncUrlFromEngine());
@@ -270,7 +298,7 @@ class SharedBrowserHost {
   /// 从引擎读当前页 href/title 同步到 UI 状态（webview_windows 的
   /// executeScript 返回 JSON 编码结果，字符串需再解一层）。
   Future<void> _syncUrlFromEngine() async {
-    final WebviewWindowsDriver? driver = _driver;
+    final BrowserDriver? driver = _driver;
     if (driver == null || !driver.isReady) return;
     try {
       final dynamic raw = await driver.evaluateScript(
@@ -318,9 +346,18 @@ class SharedBrowserHost {
   Future<void> submitQuery(String raw) async {
     final String url =
         proto.resolveInputToUrl(raw) ?? proto.searchUrlFor(raw);
+    _rememberUserPage(url);
     await ensureStarted();
     await performAction(proto.SbActions.navigate,
         <String, dynamic>{"url": url});
+  }
+
+  /// 记住用户主动导航的页面（Agent 打开的页面不写入）。
+  void _rememberUserPage(String url) {
+    if (url.isEmpty) return;
+    _pageOrigin = SbPageOrigin.user;
+    _lastUserUrl = url;
+    unawaited(BrowserPanelPreference.instance.save(lastUserUrl: url));
   }
 
   Future<void> goBack() async => _driver?.goBack();
@@ -329,8 +366,74 @@ class SharedBrowserHost {
   Future<void> stop() async => _driver?.stopLoading();
 
   Future<void> goHome() async {
+    _pageOrigin = SbPageOrigin.none;
+    _lastUserUrl = "";
+    unawaited(BrowserPanelPreference.instance.save(lastUserUrl: ""));
     await _driver?.loadUrl("about:blank");
     currentUrl.value = "";
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 面板开 / 关语义
+  //   关闭：Agent 留痕页 → 导航回主页并清掉记忆；用户自己的页面保留
+  //   打开：引擎页还在 → 原样显示；引擎页空了 → 按记住的用户页面重开
+  // ═══════════════════════════════════════════════════════════
+
+  /// 用户关掉浏览器面板（切换 tab 不算）。
+  Future<void> notifyPanelClosed() async {
+    if (_pageOrigin == SbPageOrigin.agent) {
+      _pageOrigin = SbPageOrigin.none;
+      _lastUserUrl = "";
+      unawaited(BrowserPanelPreference.instance.save(lastUserUrl: ""));
+      await goHome();
+    }
+  }
+
+  /// 浏览器面板（重新）挂载：面板打开、从其它 tab 切回都会走这里。
+  Future<void> notifyPanelOpened() async {
+    await ensureStarted();
+    // Agent 正要驱动页面（busy 自动开面板）：不抢导航权，页面归任务
+    if (cdpBusy.value || _pageOrigin == SbPageOrigin.agent) return;
+    await _syncUrlFromEngine();
+    if (!atHome) return;
+    final String saved = _lastUserUrl;
+    if (saved.isEmpty) return;
+    _pageOrigin = SbPageOrigin.user;
+    currentUrl.value = saved;
+    await performAction(
+        proto.SbActions.navigate, <String, dynamic>{"url": saved});
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 页面缩放（Ctrl+滚轮 / 工具栏百分比胶囊）
+  // ═══════════════════════════════════════════════════════════
+
+  /// Ctrl+滚轮一档：+1 上一档、-1 下一档（Chrome 阶梯，见
+  /// [BrowserPanelPreference.zoomSteps]）。
+  Future<void> applyZoomStep(int step) async {
+    final List<int> steps = BrowserPanelPreference.zoomSteps;
+    final double cur = zoomFactor.value * 100;
+    int idx = 0;
+    double best = double.infinity;
+    for (int i = 0; i < steps.length; i++) {
+      final double d = (steps[i] - cur).abs();
+      if (d < best) {
+        best = d;
+        idx = i;
+      }
+    }
+    final int next = (idx + step).clamp(0, steps.length - 1);
+    await setZoomFactor(steps[next] / 100);
+  }
+
+  /// 点百分比胶囊回 100%。
+  Future<void> resetZoom() => setZoomFactor(1.0);
+
+  Future<void> setZoomFactor(double factor) async {
+    final double clamped = factor.clamp(0.25, 5.0);
+    zoomFactor.value = clamped;
+    unawaited(BrowserPanelPreference.instance.save(zoom: clamped));
+    await _driver?.setZoomFactor(clamped);
   }
 
   // ── 协议纯函数转发（UI/测试沿用旧入口）────────────────────────────
@@ -373,7 +476,8 @@ class SharedBrowserHost {
   Future<void> _start() async {
     try {
       _runtimeSource ??= await rootBundle.loadString(_runtimeAsset);
-      final WebviewWindowsDriver driver = WebviewWindowsDriver();
+      final BrowserDriver driver =
+          debugDriverFactory?.call() ?? WebviewWindowsDriver();
       await driver.start(BrowserStartOptions(
         documentBootstrapScript: _runtimeSource,
         additionalArguments: remoteDebugPort == null
@@ -390,6 +494,10 @@ class SharedBrowserHost {
           .listen((DriverLoadingState s) => isLoading.value = s == DriverLoadingState.loading);
 
       _driver = driver;
+      // 恢复本地偏好：缩放档 + 用户最后浏览页；缩放要立刻推给引擎
+      zoomFactor.value = await BrowserPanelPreference.instance.loadZoom();
+      _lastUserUrl = await BrowserPanelPreference.instance.loadLastUserUrl();
+      await driver.setZoomFactor(zoomFactor.value);
       _executor = BrowserActionExecutor(
         driver: driver,
         runtimeSource: _runtimeSource!,

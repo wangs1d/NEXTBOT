@@ -6,17 +6,23 @@ import {
   UnifiedServerEventType,
 } from "@nextbot/agent-world";
 import { PROTOCOL_UNIFIED_TOOL_NAMES } from "../../tools/protocol-unified-tools.js";
+import { isBootPending } from "../../bootstrap/boot-readiness.js";
 import type { HttpRouteDeps } from "./types.js";
 import type { BrainCenter } from "../../brain/brain-center.js";
 
 /**
  * 系统级：健康检查（根路径，便于探针与旧文档链接）。
+ * ready=false 表示端口已开、运行状态仍在初始化；其余路由此时会在就绪闸后排队。
  */
 export function registerSystemRoutes(
   app: FastifyInstance,
   deps: Pick<HttpRouteDeps, "upstreamSearchService" | "brainCenter">,
 ): void {
-  app.get("/health", async () => ({ ok: true }));
+  app.get("/health", async () => ({
+    ok: true,
+    ready: !isBootPending(),
+    pid: process.pid,
+  }));
 
   /** AWP v0.1：无鉴权元数据，供外部 Agent 发现入口与事件名。 */
   app.get("/.well-known/agent-world", async () => ({

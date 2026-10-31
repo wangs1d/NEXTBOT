@@ -222,7 +222,7 @@ export class IngestService {
     // 解不出来必须报错——"上传成功但一条都没有"是最难排查的失败形态。
     let text = payload.text ?? "";
     if (!text && payload.fileBase64) {
-      const decoded = xlsxBase64ToText(payload.fileBase64);
+      const decoded = await xlsxBase64ToText(payload.fileBase64);
       if (!decoded) {
         return {
           draftId: "",

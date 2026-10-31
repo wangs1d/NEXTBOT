@@ -193,6 +193,20 @@ bool FlutterWindow::OnCreate() {
         HandlePcmPlayerMethodCall(call, std::move(result));
       });
 
+  // pai/media_session —— 本地正在播放的曲目（SMTC 采集 → Dart 拉歌词）
+  media_session_channel_ = std::make_unique<
+      flutter::MethodChannel<flutter::EncodableValue>>(
+      flutter_controller_->engine()->messenger(), "pai/media_session",
+      &flutter::StandardMethodCodec::GetInstance());
+
+  media_session_channel_->SetMethodCallHandler(
+      [this](const auto& call, auto result) {
+        HandleMediaSessionMethodCall(call, std::move(result));
+      });
+
+  media_session_watcher_ = std::make_unique<MediaSessionWatcher>();
+  media_session_watcher_->Start(GetHandle(), kMediaSessionUpdateMessage);
+
   // pai/single_instance —— 单实例激活：桌面再次启动本应用时，原生侧（新进程）
   // 定位到本实例的主窗口并 PostMessage 注册消息，本窗口处理消息后经此通道
   // 通知 Dart 恢复托盘中的主窗口。
@@ -326,6 +340,29 @@ double GetEncodableDouble(const flutter::EncodableMap* args,
   return fallback;
 }
 
+flutter::EncodableMap MediaSnapshotToMap(MediaSessionSnapshot const& snapshot) {
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("hasSession")] =
+      flutter::EncodableValue(snapshot.has_session);
+  map[flutter::EncodableValue("appId")] = flutter::EncodableValue(snapshot.app_id);
+  map[flutter::EncodableValue("title")] = flutter::EncodableValue(snapshot.title);
+  map[flutter::EncodableValue("artist")] = flutter::EncodableValue(snapshot.artist);
+  map[flutter::EncodableValue("album")] = flutter::EncodableValue(snapshot.album);
+  map[flutter::EncodableValue("durationSec")] =
+      flutter::EncodableValue(snapshot.duration_sec);
+  map[flutter::EncodableValue("positionSec")] =
+      flutter::EncodableValue(snapshot.position_sec);
+  map[flutter::EncodableValue("playing")] = flutter::EncodableValue(snapshot.playing);
+  map[flutter::EncodableValue("paused")] = flutter::EncodableValue(snapshot.paused);
+  map[flutter::EncodableValue("sampledAtMs")] =
+      flutter::EncodableValue(snapshot.sampled_at_epoch_ms);
+  map[flutter::EncodableValue("trackChanged")] =
+      flutter::EncodableValue(snapshot.track_changed);
+  map[flutter::EncodableValue("playbackChanged")] =
+      flutter::EncodableValue(snapshot.playback_changed);
+  return map;
+}
+
 }  // namespace
 
 void FlutterWindow::OnDestroy() {
@@ -348,6 +385,9 @@ void FlutterWindow::OnDestroy() {
   // 先关播放器（waveOutClose 会阻断后续音频线程回调），再释放 channel
   pcm_player_.reset();
   pcm_player_channel_.reset();
+  // 先停采样线程（避免它往即将销毁的窗口 PostMessage），再释放 channel
+  media_session_watcher_.reset();
+  media_session_channel_.reset();
   single_instance_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
@@ -398,6 +438,35 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
         pcm_player_channel_->InvokeMethod("onComplete", nullptr);
       }
       return 0;
+    case kMediaSessionUpdateMessage: {
+      // SMTC 采样线程投递的快照，所有权转移到本线程
+      std::unique_ptr<MediaSessionSnapshot> snapshot(
+          reinterpret_cast<MediaSessionSnapshot*>(lparam));
+      if (snapshot) {
+        if (media_session_channel_) {
+          media_session_channel_->InvokeMethod(
+              "onMediaSession",
+              std::make_unique<flutter::EncodableValue>(
+                  MediaSnapshotToMap(*snapshot)));
+        }
+        // 岛屿歌词的播放进度直接喂原生（不经 Dart 往返，500ms 采样 + 墙钟插值）。
+        if (dynamic_island_window_) {
+          DynamicIslandWindow::MusicPlayback playback;
+          playback.has_session = snapshot->has_session;
+          playback.app_id = snapshot->app_id;
+          playback.title = snapshot->title;
+          playback.artist = snapshot->artist;
+          playback.album = snapshot->album;
+          playback.duration_sec = snapshot->duration_sec;
+          playback.position_sec = snapshot->position_sec;
+          playback.playing = snapshot->playing;
+          playback.sampled_at_epoch_ms = snapshot->sampled_at_epoch_ms;
+          playback.thumbnail = snapshot->thumbnail;
+          dynamic_island_window_->SetMediaPlayback(playback);
+        }
+      }
+      return 0;
+    }
   }
 
   return Win32Window::MessageHandler(hwnd, message, wparam, lparam);
@@ -1008,6 +1077,37 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
     return;
   }
 
+  if (method == "setMusicLyrics") {
+    // 当前曲目歌词（Dart 拉服务端后一次性喂入）：trackKey 对不上播放键时
+    // 原生端直接丢弃，换歌竞态不会把上一首的词画在新歌上。
+    const std::string track_key = GetEncodableString(args, "trackKey", "");
+    const std::string reason = GetEncodableString(args, "reason", "");
+    std::vector<DynamicIslandWindow::LyricLine> lines;
+    if (args != nullptr) {
+      auto it = args->find(flutter::EncodableValue("lines"));
+      if (it != args->end()) {
+        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
+          for (const auto& elem : *list) {
+            if (const auto* m = std::get_if<flutter::EncodableMap>(&elem)) {
+              DynamicIslandWindow::LyricLine line;
+              line.t_sec = GetEncodableDouble(m, "t", 0.0);
+              line.text = GetEncodableString(m, "text", "");
+              line.translation = GetEncodableString(m, "tr", "");
+              if (!line.text.empty()) lines.push_back(std::move(line));
+            }
+          }
+        }
+      }
+    }
+    // 返回是否被采纳：岛窗口未建好 / 换歌竞态时 Dart 会记住并在窗口就绪后补推。
+    const bool accepted =
+        dynamic_island_window_ &&
+        dynamic_island_window_->SetMusicLyrics(track_key, std::move(lines),
+                                               reason);
+    result->Success(flutter::EncodableValue(accepted));
+    return;
+  }
+
   if (method == "suppressCheck") {
     // Dart 看门狗兜底：原生 WM_TIMER 心跳失效时由 Dart 直推抑制检查，
     // 保证退出全屏后岛必然恢复（不再依赖原生定时器存活）。
@@ -1486,6 +1586,23 @@ void FlutterWindow::HandleAppLifecycleMethodCall(
     }
     RegCloseKey(key);
     result->Success(flutter::EncodableValue(enabled));
+    return;
+  }
+
+  result->NotImplemented();
+}
+
+void FlutterWindow::HandleMediaSessionMethodCall(
+    const flutter::MethodCall<flutter::EncodableValue>& call,
+    std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result) {
+  const std::string& method = call.method_name();
+
+  if (method == "requestNow") {
+    MediaSessionSnapshot snapshot;
+    if (media_session_watcher_) {
+      media_session_watcher_->GetLastSnapshot(&snapshot);
+    }
+    result->Success(flutter::EncodableValue(MediaSnapshotToMap(snapshot)));
     return;
   }
 

@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:nextbot/core/presentation/dynamic_island.dart';
 
@@ -257,6 +258,62 @@ void main() {
       expect(IslandReminderPolicy.withinPreviewWindow(
           <String, Object?>{'title': '设计评审', 'trailing': '25 分钟后'}),
           isTrue);
+    });
+  });
+
+  group('DynamicIslandLauncher 登录门禁', () {
+    test('门禁关闭不上屏：建窗即隐藏，条目/提醒都不下发；放行后补同步', () async {
+      TestWidgetsFlutterBinding.ensureInitialized();
+      final List<MethodCall> calls = <MethodCall>[];
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(const MethodChannel('pai/dynamic_island'),
+              (MethodCall call) async {
+        calls.add(call);
+        return true;
+      });
+      addTearDown(() {
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+                const MethodChannel('pai/dynamic_island'), null);
+      });
+
+      final DynamicIslandLauncher launcher = DynamicIslandLauncher.instance;
+      final DynamicIslandController c = DynamicIslandController();
+      await launcher.setVisible(false);
+      await launcher.attach(c);
+      expect(
+        calls.any((MethodCall m) =>
+            m.method == 'setVisible' &&
+            (m.arguments as Map<Object?, Object?>)['visible'] == false),
+        isTrue,
+        reason: '门禁关闭时建窗后必须立即隐藏',
+      );
+
+      calls.clear();
+      c.present(const IslandEntry(
+          id: 'schedule.next',
+          title: '设计评审',
+          kind: IslandKind.schedule,
+          priority: 2));
+      await launcher.attention(title: '到点了');
+      await Future<void>.delayed(Duration.zero);
+      expect(calls, isEmpty, reason: '隐藏期间条目与提醒不得下发给原生');
+
+      await launcher.setVisible(true);
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+      expect(
+        calls.any((MethodCall m) =>
+            m.method == 'setVisible' &&
+            (m.arguments as Map<Object?, Object?>)['visible'] == true),
+        isTrue,
+      );
+      expect(
+        calls.any((MethodCall m) =>
+            m.method == 'present' &&
+            (m.arguments as Map<Object?, Object?>)['title'] == '设计评审'),
+        isTrue,
+        reason: '放行后补齐当前条目',
+      );
     });
   });
 }

@@ -4,7 +4,7 @@
 //   SensorKernel(screen/schedule/presence) → EvaluatorChain(内置评估器)
 //   → ArbiterV2(打断成本) → ProactivePipeline(真实仲裁/去重/频控/确认登记)
 //   → ProactiveDeliveryService(投递记录) → OutcomeStore(反馈回灌)
-//   + GoalBoard(会前预执行) + ProactivityHub(直达车道)
+//   + GoalBoard(预执行台账) + ProactivityHub(直达车道)
 //
 // 跑完输出每一次「agent 主动开口」的完整证据（时间/触发源/决策/全文）。
 // 运行：node --import tsx scripts/integration-proactivity.mjs
@@ -156,7 +156,6 @@ const goalBoard = new GoalBoard({
       payload: { goalId: goal.goalId, title: goal.title, body: String(goal.payload?.body ?? "") },
     });
   },
-  recallMemory: () => ["上周和小王对过 Q3 需求范围", "小王习惯会议前 10 分钟发材料"],
 });
 
 // 仲裁器（L3）
@@ -273,11 +272,6 @@ async function advance(minutes, label) {
   step += 1;
   console.log(`\n── +${minutes}min [${fmt(cur())}] ${label ?? ""}`);
   await kernel.pollOnce();
-  // 会前准备检查（同 bootstrap 60s 定时逻辑）
-  const next = scheduleSensor.latest();
-  if (next && next.min >= 25 && next.min <= 40) {
-    goalBoard.maybeStartMeetingPrep(ACTOR, { title: next.title, runAtMin: next.min });
-  }
   await evaluatorChain.flush();
   arbiter.forceTick();
   pipeline.flushDue(cur()); // 真实管道 30s flush 语义（deferred 到期的提案重仲裁）
@@ -299,8 +293,8 @@ foregroundWindow = { processName: "Code.exe", title: "main.ts - Visual Studio Co
 await advance(1, "切到 IDE");
 await advance(185, "连续编码 3 小时");
 
-// S4 会前准备 + S5 承诺守约：13:53 项目周会，25-40min 窗口后台备材料；承诺 75min 内到期
-record("🧭 场景S4+S5", "40 分钟后有项目周会 + 承诺即将到期，agent 应备材料/临会提醒/请示代催");
+// S4 临会提醒 + S5 承诺守约：40 分钟后有项目周会 → 临会提醒；承诺 90min 内到期 → 请示代催
+record("🧭 场景S4+S5", "40 分钟后有项目周会 + 承诺即将到期，agent 应临会提醒/请示代催");
 tasks = [{ title: "项目周会（和小王）", runAt: cur() + 40 * 60_000, status: "scheduled" }];
 dueCommitments = [{ id: "c1", title: "给小李发报价单", dueAt: cur() + 90 * 60_000 }];
 await advance(1, "日程快照更新");

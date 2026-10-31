@@ -259,20 +259,18 @@ class AgentResultPick {
   final List<AgentResultPickChannel> channels;
 }
 
-/// product_pick 卡：渠道实时价（「去比价/去购买」CTA 数据源）。
+/// product_pick 卡：渠道实时价（只展示渠道与价格）。
 class AgentResultPickChannel {
-  const AgentResultPickChannel({required this.name, required this.priceCny, this.url});
+  const AgentResultPickChannel({required this.name, required this.priceCny});
 
   factory AgentResultPickChannel.fromJson(Map<String, dynamic> json) =>
       AgentResultPickChannel(
         name: json["name"]?.toString() ?? "",
         priceCny: (json["priceCny"] as num?)?.toDouble() ?? 0,
-        url: json["url"]?.toString(),
       );
 
   final String name;
   final double priceCny;
-  final String? url;
 }
 
 /// product_pick 卡：备选商品（差异化定位「什么时候选它」）。
@@ -332,33 +330,29 @@ class AgentResultUgc {
   final List<AgentResultUgcPost> posts;
 }
 
-/// product_pick 卡：口碑来源帖（标题+链接，可点）。
+/// product_pick 卡：口碑来源帖（标题）。
 class AgentResultUgcPost {
-  const AgentResultUgcPost({required this.title, this.url});
+  const AgentResultUgcPost({required this.title});
 
   factory AgentResultUgcPost.fromJson(Map<String, dynamic> json) =>
       AgentResultUgcPost(
         title: json["title"]?.toString() ?? "",
-        url: json["url"]?.toString(),
       );
 
   final String title;
-  final String? url;
 }
 
-/// product_compare 卡：评测/试色视频入口
+/// product_compare 卡：评测/试色视频条目
 class AgentResultCardVideo {
-  const AgentResultCardVideo({required this.title, this.url, this.source});
+  const AgentResultCardVideo({required this.title, this.source});
 
   factory AgentResultCardVideo.fromJson(Map<String, dynamic> json) =>
       AgentResultCardVideo(
         title: json["title"]?.toString() ?? "",
-        url: json["url"]?.toString(),
         source: json["source"]?.toString(),
       );
 
   final String title;
-  final String? url;
   final String? source;
 }
 
@@ -370,7 +364,6 @@ class AgentResultPriceGroup {
     required this.title,
     this.priceCny,
     this.shop,
-    this.url,
     this.image,
     this.similar = false,
     this.offerCount = 1,
@@ -382,7 +375,6 @@ class AgentResultPriceGroup {
         platform: json["platform"]?.toString() ?? "",
         title: json["title"]?.toString() ?? "",
         shop: json["shop"]?.toString(),
-        url: json["url"]?.toString(),
         image: json["image"]?.toString(),
         similar: json["similar"] == true,
         offerCount: (json["offerCount"] as num?)?.toInt() ?? 1,
@@ -393,9 +385,6 @@ class AgentResultPriceGroup {
   final String platform;
   final String title;
   final String? shop;
-
-  /// 平台商品页链接（整行可点）。
-  final String? url;
   final String? image;
 
   /// 低置信同款标注。
@@ -405,9 +394,9 @@ class AgentResultPriceGroup {
   final int offerCount;
 }
 
-/// price_compare 卡：整体结构化载荷（分组报价 + 决策页入口）。
+/// price_compare 卡：整体结构化载荷（分组报价）。
 class AgentResultPriceCompare {
-  const AgentResultPriceCompare({required this.groups, this.bestIndex, this.decisionPageUrl});
+  const AgentResultPriceCompare({required this.groups, this.bestIndex});
 
   factory AgentResultPriceCompare.fromJson(Map<String, dynamic> json) =>
       AgentResultPriceCompare(
@@ -416,15 +405,12 @@ class AgentResultPriceCompare {
             .map(AgentResultPriceGroup.fromJson)
             .toList(growable: false),
         bestIndex: (json["bestIndex"] as num?)?.toInt(),
-        decisionPageUrl: json["decisionPageUrl"]?.toString(),
       );
 
   final List<AgentResultPriceGroup> groups;
 
   /// 「最低价」组下标；null = 各组规格不一致，不构成同规格比价，不打最低价章。
   final int? bestIndex;
-
-  final String? decisionPageUrl;
 }
 
 class AgentResultData {
@@ -615,7 +601,6 @@ class AgentResultData {
               },
         "videos": videos.map((AgentResultCardVideo e) => <String, dynamic>{
               "title": e.title,
-              if (e.url != null) "url": e.url,
               if (e.source != null) "source": e.source,
             }).toList(),
         if (pick != null)
@@ -631,7 +616,6 @@ class AgentResultData {
                 .map((AgentResultPickChannel c) => <String, dynamic>{
                       "name": c.name,
                       "priceCny": c.priceCny,
-                      if (c.url != null) "url": c.url,
                     })
                 .toList(),
           },
@@ -653,7 +637,6 @@ class AgentResultData {
             "posts": ugc!.posts
                 .map((AgentResultUgcPost p) => <String, dynamic>{
                       "title": p.title,
-                      if (p.url != null) "url": p.url,
                     })
                 .toList(),
           },
@@ -665,15 +648,12 @@ class AgentResultData {
                       "platform": g.platform,
                       "title": g.title,
                       if (g.shop != null) "shop": g.shop,
-                      if (g.url != null) "url": g.url,
                       if (g.image != null) "image": g.image,
                       if (g.similar) "similar": true,
                       "offerCount": g.offerCount,
                     })
                 .toList(),
             if (priceCompare!.bestIndex != null) "bestIndex": priceCompare!.bestIndex,
-            if (priceCompare!.decisionPageUrl != null)
-              "decisionPageUrl": priceCompare!.decisionPageUrl,
           },
         if (groupTitle != null) "groupTitle": groupTitle,
         if (sideA != null) "sideA": sideA,

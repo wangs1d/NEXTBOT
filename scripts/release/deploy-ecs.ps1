@@ -101,6 +101,24 @@ Environment=DOWNLOADS_DIR=$DeployDir/downloads
 # explicit value the service silently falls back to platform-default root resolution.
 # Keep this ASCII -- non-ASCII here-string content arrives mojibake on the server.
 Environment=NEXTBOT_DATA_DIR=/root/.local/share/Nextbot/data
+# Concurrency gates. Box is 2 vCPU / 1740 MB; measured service peak RSS was 1072 MB
+# with MemoryCurrent 334 MB. The resource pool reads MemoryMax below as its capacity,
+# so these env values are ceilings the pool may shrink further under RSS pressure
+# (elevated at 70%, critical at 88%) instead of waiting for an OOM kill.
+Environment=MAX_CONCURRENT_TURNS=6
+Environment=ADAPTIVE_CONCURRENCY_ENABLED=1
+Environment=ADAPTIVE_CONCURRENCY_MIN=2
+Environment=ADAPTIVE_CONCURRENCY_MAX=6
+Environment=AGENT_BG_TASK_MAX_PARALLEL=2
+# Design the crash boundary instead of V8's default (~894 MB heap on this box):
+# old-space cap 768 MB keeps headroom under MemoryHigh=1200M for native + children.
+Environment=NODE_OPTIONS=--max-old-space-size=768
+# Memory guardrails: MemoryHigh puts the cgroup into reclaim first; MemoryMax only
+# kills this service (Restart=always brings it back) so a leak cannot take nginx or
+# sshd down with it. 1200M throttle sits above the observed 1072M peak, 1450M kill
+# stays under the 1740M box total.
+MemoryHigh=1200M
+MemoryMax=1450M
 Restart=always
 RestartSec=5
 User=root

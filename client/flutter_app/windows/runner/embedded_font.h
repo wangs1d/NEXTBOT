@@ -124,25 +124,79 @@ inline void LoadIslandHarmonyosFonts() {
   }
 }
 
+inline bool g_misans_island_regular = false;
+inline bool g_misans_island_medium = false;
+inline bool g_misans_island_semibold = false;
+
+// 岛文字用与应用同一套 MiSans（4 个字重都在 assets 里）。与上两族一样必须
+// AddFontResourceExW 会话级注册，GDI+ 才认族名；GDI 下 Medium/Semibold
+// 是独立族名，需按字重显式点名。
+inline void LoadIslandMiSansFonts() {
+  static bool tried = false;
+  if (tried) return;
+  tried = true;
+  wchar_t exe_path[MAX_PATH]{};
+  if (GetModuleFileNameW(nullptr, exe_path, MAX_PATH) == 0) return;
+  std::wstring dir(exe_path);
+  const size_t slash = dir.find_last_of(L"\\/");
+  if (slash == std::wstring::npos) return;
+  dir.resize(slash + 1);
+  const wchar_t* kWeightFiles[] = {
+      L"MiSans-Regular.otf", L"MiSans-Medium.otf",
+      L"MiSans-Semibold.otf", L"MiSans-Bold.otf"};
+  for (const wchar_t* name : kWeightFiles) {
+    const std::wstring full =
+        dir + L"data\\flutter_assets\\assets\\fonts\\" + name;
+    if (AddFontResourceExW(full.c_str(), 0, nullptr) > 0) {
+      if (wcsstr(name, L"Regular") != nullptr) g_misans_island_regular = true;
+      else if (wcsstr(name, L"Medium") != nullptr) g_misans_island_medium = true;
+      else if (wcsstr(name, L"Semibold") != nullptr) g_misans_island_semibold = true;
+    }
+  }
+}
+
 inline const wchar_t* IslandFontFamily() {
+  LoadIslandMiSansFonts();
   LoadIslandHarmonyosFonts();
   LoadIslandNotoFonts();
   // 族名以字体文件 name 表为准（PrivateFontCollection 实测 2026-10-01）：
-  // HarmonyOS Bold TTF 基础族 = "HarmonyOS Sans SC"（单 Bold 面，GDI
-  // 任意字重请求都匹配到它）。
+  // MiSans Bold 归基础族（nameID1 = "MiSans"），Medium/Semibold 各自独立。
+  if (g_misans_island_regular) return L"MiSans";
   if (g_harmonyos_ready) return L"HarmonyOS Sans SC";
   if (g_noto_ready) return L"Noto Sans CJK SC";
   return UiFontFamily();  // 回退 MiSans → Microsoft YaHei
 }
 
-// Medium 在 GDI 的 RIBBI 规则下是独立族名（nameID1，实测
-// "HarmonyOS Sans SC Medium"）：基础族收到 <600 的字重请求不会选出
-// Medium。<550 的字重文字必须显式点名这个族。
-inline const wchar_t* IslandFontFamilyMedium() {
+// Regular 档（<450）：MiSans Regular；回退时用现有的 Medium 族代替。
+inline const wchar_t* IslandFontFamilyRegular() {
+  LoadIslandMiSansFonts();
   LoadIslandHarmonyosFonts();
   LoadIslandNotoFonts();
+  if (g_misans_island_regular) return L"MiSans";
   if (g_harmonyos_medium_ready) return L"HarmonyOS Sans SC Medium";
   if (g_noto_medium_ready) return L"Noto Sans CJK SC Medium";
+  return IslandFontFamily();
+}
+
+// Medium 在 GDI 的 RIBBI 规则下是独立族名（nameID1，实测
+// "HarmonyOS Sans SC Medium"）：基础族收到 <600 的字重请求不会选出
+// Medium。<600 的字重文字必须显式点名这个族。
+inline const wchar_t* IslandFontFamilyMedium() {
+  LoadIslandMiSansFonts();
+  LoadIslandHarmonyosFonts();
+  LoadIslandNotoFonts();
+  if (g_misans_island_medium) return L"MiSans Medium";
+  if (g_harmonyos_medium_ready) return L"HarmonyOS Sans SC Medium";
+  if (g_noto_medium_ready) return L"Noto Sans CJK SC Medium";
+  return IslandFontFamily();
+}
+
+inline const wchar_t* IslandFontFamilySemibold() {
+  LoadIslandMiSansFonts();
+  LoadIslandHarmonyosFonts();
+  LoadIslandNotoFonts();
+  if (g_misans_island_semibold) return L"MiSans Semibold";
+  // 旧字体族没有 Semibold 面：落到基础族（Bold）。
   return IslandFontFamily();
 }
 

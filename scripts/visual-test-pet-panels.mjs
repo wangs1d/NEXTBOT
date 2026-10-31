@@ -15,7 +15,8 @@ import { resolve } from "node:path";
 
 const BASE = process.env.PET_PANEL_BASE ?? "http://127.0.0.1:8778";
 const SHOT_DIR = resolve(".workbuddy/tmp/pet-panels");
-const PET_W = 372;
+const PET_W = 248;
+const PET_H = 309;
 const FOCUS_SLOT = 170;
 const OFFWORK_SLOT = 224;
 
@@ -35,7 +36,7 @@ const pageErrors = [];
 page.on("pageerror", (e) => pageErrors.push(String(e.message)));
 
 async function openPanel(panel, viewportWidth) {
-  await page.setViewportSize({ width: viewportWidth, height: 464 });
+  await page.setViewportSize({ width: viewportWidth, height: PET_H });
   await page.goto(`${BASE}/overlay.html?panel=${panel}`, { waitUntil: "load" });
   await page.waitForSelector(".pet-panel", { timeout: 20000 });
   await page.waitForTimeout(900);
@@ -130,7 +131,7 @@ const lineGone = await page.evaluate(() => {
 check("无评语时不占空白块", lineGone === "removed", String(lineGone));
 
 // ───────────────────────── 抽出动画中间帧 + 对外入口 ─────────────────────────
-await page.setViewportSize({ width: PET_W + FOCUS_SLOT, height: 464 });
+await page.setViewportSize({ width: PET_W + FOCUS_SLOT, height: PET_H });
 // 不带 panel 参数：先让入场动画走完，再通过对外入口触发，才截得到"掏出"的过程
 await page.goto(`${BASE}/overlay.html`, { waitUntil: "load" });
 await page.waitForTimeout(2600);

@@ -58,6 +58,19 @@ foreach ($dll in 'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll') {
   Copy-Item (Join-Path $env:windir "System32\$dll") $StageApp -Force
 }
 
+# 桌宠随包：PyInstaller 单目录产物 + 前端 dist，装机后不依赖本机 Python。
+& (Join-Path $PSScriptRoot 'build-deskpet.ps1') -Repo $Repo
+$petDst = Join-Path $StageApp 'sphere-overlay-py'
+New-Item -ItemType Directory -Force -Path $petDst | Out-Null
+Copy-Item (Join-Path $Repo 'sphere-overlay-py\dist\sphere-overlay\*') $petDst -Recurse -Force
+$avatarDst = Join-Path $StageApp 'agent-sphere-avatar'
+New-Item -ItemType Directory -Force -Path $avatarDst | Out-Null
+Copy-Item (Join-Path $Repo 'agent-sphere-avatar\dist') (Join-Path $avatarDst 'dist') -Recurse -Force
+foreach ($f in (Join-Path $petDst 'sphere-overlay.exe'),
+               (Join-Path $avatarDst 'dist\overlay.html')) {
+  if (-not (Test-Path $f)) { throw "staging 缺少桌宠文件: $f" }
+}
+
 Write-Host '== [2.5/3] 校验关键文件 =='
 foreach ($f in (Join-Path $StageApp 'NEXTBOT.exe'),
                (Join-Path $StageApp 'data\app.so')) {

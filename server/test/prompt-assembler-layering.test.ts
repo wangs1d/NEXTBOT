@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { assembleSystemPrompt } from "../src/agent/prompt-assembler.js";
+import { buildClientSurfacesBlock } from "../src/agent/prompt-context-builder.js";
 import type { AgentPromptMemoryContext } from "../src/external-model/types.js";
 
 function buildMemory(turn: number): AgentPromptMemoryContext {
@@ -26,6 +27,17 @@ test("sessionRecap 不进稳定层（随轮增长内容必须沉底）", () => {
   assert.ok(!stableSystemPrompt.includes("session-recap"), "稳定层不得包含 sessionRecap");
   assert.ok(stableSystemPrompt.includes("持久记忆"), "memorySummary 仍在稳定层");
   assert.ok(dynamicSystemPrompt?.includes("会话回顾"), "sessionRecap 在动态层短期上下文家族");
+});
+
+test("事件回忆只进动态层（每轮随话题变）", () => {
+  const memory = {
+    ...buildMemory(1),
+    eventRecall: "【事件回忆】\n- 2026/10/28 15:37 比价 小米15 → 最低 ¥1884（taobao） [完成]",
+  } as AgentPromptMemoryContext;
+  const { stableSystemPrompt, dynamicSystemPrompt } = assembleSystemPrompt("你是助理。", memory);
+  assert.ok(!stableSystemPrompt.includes("事件回忆"), "稳定层不得包含事件回忆");
+  assert.ok(dynamicSystemPrompt?.includes("事件回忆"), "事件回忆在动态层");
+  assert.ok(dynamicSystemPrompt?.includes("小米15"), "回忆行完整进入 prompt");
 });
 
 test("跨轮稳定层逐字节相等（prefix cache 前提）", () => {
@@ -56,4 +68,38 @@ test("includeRenderProtocol=false 时不注入展示形式协议（ephemeral 工
   // 默认（聊天面）行为不变：协议仍在
   const chatDefault = assembleSystemPrompt("写一段今早的简报播报稿。", undefined);
   assert.ok(chatDefault.fullSystemPrompt.includes("RENDER_HINT"), "默认仍注入协议");
+});
+
+// 内置浏览器当前页：客户端已上报、服务端已留存的界面事实。随上报变化 ⇒ 动态层。
+test("clientSurfaces 只进动态层（随上报变化）", () => {
+  const memory = {
+    ...buildMemory(1),
+    clientSurfaces: "【用户界面】内置浏览器面板当前页：www.fliggy.com/hotel/detail（最近一次上报 12 分钟前）",
+  } as AgentPromptMemoryContext;
+  const { stableSystemPrompt, dynamicSystemPrompt } = assembleSystemPrompt("你是助理。", memory);
+  assert.ok(!stableSystemPrompt.includes("用户界面"), "稳定层不得包含界面状态");
+  assert.ok(dynamicSystemPrompt?.includes("内置浏览器面板当前页"), "当前页进动态层");
+});
+
+test("buildClientSurfacesBlock：去 query/hash、带龄期、无上报不注入", () => {
+  const now = Date.parse("2026-10-31T12:00:00Z");
+  const block = buildClientSurfacesBlock(
+    "https://www.fliggy.com/hotel/detail?id=1&token=abc#reviews",
+    now - 42_000,
+    now,
+  );
+  assert.equal(
+    block,
+    "【用户界面】内置浏览器面板当前页：www.fliggy.com/hotel/detail（最近一次上报 42 秒前）",
+  );
+  assert.ok(!block?.includes("token"), "query/hash 不进 prompt");
+  assert.match(buildClientSurfacesBlock("https://example.com", now - 5 * 60_000, now) ?? "", /5 分钟前/);
+  assert.match(buildClientSurfacesBlock("https://example.com", now - 3 * 3600_000, now) ?? "", /3 小时前/);
+  assert.equal(buildClientSurfacesBlock("about:blank", now, now), undefined);
+  assert.equal(buildClientSurfacesBlock("", now, now), undefined);
+  // 汇报时刻未知：不写龄期，也不编一个「几万小时前」
+  assert.equal(
+    buildClientSurfacesBlock("https://example.com/", 0, now),
+    "【用户界面】内置浏览器面板当前页：example.com",
+  );
 });

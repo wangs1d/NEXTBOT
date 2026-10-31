@@ -3,6 +3,7 @@ import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
 import type { PictureKit } from "@nextbot/picture";
+import { serverRoot } from "../../config/paths.js";
 
 import { analyzePendingPhotos, countPendingAnalysis } from "../../services/photo-analysis-service.js";
 import type { PhotoAnalyzeFn } from "../../services/photo-analysis-service.js";
@@ -21,7 +22,7 @@ import { GalleryWallService } from "../../services/gallery-wall-service.js";
  * 经 chrome.webview.postMessage 回传 openGrid（切到 2D 管理视图）。
  */
 
-const webRoot = join(import.meta.dirname ?? ".", "../../../web/gallery-wall");
+const webRoot = join(serverRoot(), "web", "gallery-wall");
 
 function buildGalleryWallHtml(): string {
   const htmlPath = join(webRoot, "panel.html");

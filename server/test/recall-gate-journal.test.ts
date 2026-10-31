@@ -195,6 +195,48 @@ test("searchRange covers recent days window (跨天检索)", async () => {
   assert.ok(hits.length > 0, "近 3 天窗口应能命中今天写入的行");
 });
 
+test("appendEventLine: 事件结果与对话行同文件，可被当日检索与固化消费", async () => {
+  const journal = createJournal();
+  const actorId = "user-evt";
+  const now = new Date().toISOString();
+  journal.appendEventLine(actorId, now, {
+    token: "e-h17jobrt",
+    content: "[比价] 小米17 Pro 16+512 → 淘宝 ¥3749",
+  });
+  await new Promise((r) => setTimeout(r, 60));
+
+  const today = await journal.readTodayLines(actorId);
+  assert.equal(today.length, 1, "事件行应能被当日读取解析");
+  assert.equal(today[0]!.role, "fact");
+  assert.match(today[0]!.text, /淘宝 ¥3749/);
+
+  const unconsolidated = await journal.getUnconsolidatedLines(actorId);
+  assert.equal(unconsolidated.length, 1);
+  assert.match(unconsolidated[0]!.lines[0]!, /e-h17jobrt fact: \[比价\]/);
+});
+
+test("consolidated 日期再追加：重新成为未固化，不会重复固化旧内容", async () => {
+  const journal = createJournal();
+  const actorId = "user-reopen";
+  journal.appendTurn(actorId, "sess-1", "第一轮聊天", "收到。");
+  await new Promise((r) => setTimeout(r, 60));
+
+  const before = await journal.getUnconsolidatedLines(actorId);
+  assert.equal(before.length, 1);
+  await journal.markConsolidated(actorId, [before[0]!.dateKey]);
+
+  journal.appendEventLine(actorId, new Date().toISOString(), {
+    token: "e-h2hxdfv",
+    content: "[比价] 小米15 → 淘宝 ¥1884",
+  });
+  await new Promise((r) => setTimeout(r, 60));
+
+  const after = await journal.getUnconsolidatedLines(actorId);
+  assert.equal(after.length, 1, "固化后的新行应重新进入待固化");
+  assert.match(after[0]!.lines[0]!, /小米15/);
+  assert.equal(after[0]!.lines.length, 1, "重建文件只含固化后新行");
+});
+
 test("markConsolidated is idempotent", async () => {
   const journal = createJournal();
   const actorId = "user-d";

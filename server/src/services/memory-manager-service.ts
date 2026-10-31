@@ -4,6 +4,7 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import { getNightlyMemoryTaskService } from "./nightly-memory-task-service.js";
 import { getDailyJournalService, DailyJournalService } from "./daily-journal-service.js";
 import { join } from "node:path";
+import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -97,6 +98,15 @@ const DEFAULT_CONFIG: MemoryManagerConfig = {
   dayConsolidationEnabled: false,
 };
 
+/**
+ * 常驻条目上限：先取 env（MEMORY_RETAIN_*），再按本机容量收紧。
+ * 小机器上即便 env 写了很大的值也拿不到那么多常驻额度。
+ */
+function retainMax(envName: string, fallback: number): number {
+  const n = Number.parseInt(process.env[envName] ?? "", 10);
+  return retentionMaxEntries(Number.isFinite(n) && n > 0 ? n : fallback);
+}
+
 function loadConfig(): MemoryManagerConfig {
   const raw = process.env.MEMORY_MANAGER_ENABLED;
   const enabled = raw !== undefined ? !(raw === "0" || raw.toLowerCase() === "false") : true;
@@ -146,12 +156,34 @@ function stripTimestampPrefix(line: string): string {
 export class MemoryManagerService {
   private readonly config: MemoryManagerConfig;
   private readonly consolidationTimers = new Map<string, NodeJS.Timeout>();
-  private readonly turnCounters = new Map<string, number>();
-  private readonly pendingProfiles = new Map<string, UserProfileSnapshot>();
-  private readonly continuitySnapshots = new Map<string, MemoryContinuitySnapshot>();
-  private readonly relationshipSnapshots = new Map<string, RelationshipMemorySnapshot>();
-  private readonly lifeThemeSnapshots = new Map<string, LifeThemeMemorySnapshot>();
-  private readonly dreamSnapshots = new Map<string, DreamPhaseSnapshot>();
+  /** 「距上次整理已几轮」计数器：有界，淘汰只让在线固化阈值晚一点触发。 */
+  private readonly turnCounters = new RetentionMap<number>("turnCounters", {
+    maxEntries: retainMax("MEMORY_RETAIN_TURN_COUNTER_MAX", 2000),
+    idleMs: 24 * 60 * 60 * 1000,
+  });
+  // per-actor 常驻快照：原先是无上限 Map，历史打过的 actor 永远留在内存里；
+  // 2G 机器上会单调涨到 OOM。改挂资源池有界缓存：超时空闲淘汰 + LRU 上限，
+  // 淘汰只损失一次磁盘重读（快照本就持久化在 data 目录），不丢数据。
+  private readonly pendingProfiles = new RetentionMap<UserProfileSnapshot>("pendingProfiles", {
+    maxEntries: retainMax("MEMORY_RETAIN_PENDING_PROFILES_MAX", 64),
+    idleMs: 30 * 60 * 1000,
+  });
+  private readonly continuitySnapshots = new RetentionMap<MemoryContinuitySnapshot>("continuitySnapshots", {
+    maxEntries: retainMax("MEMORY_RETAIN_CONTINUITY_MAX", 64),
+    idleMs: 30 * 60 * 1000,
+  });
+  private readonly relationshipSnapshots = new RetentionMap<RelationshipMemorySnapshot>("relationshipSnapshots", {
+    maxEntries: retainMax("MEMORY_RETAIN_RELATIONSHIP_MAX", 64),
+    idleMs: 30 * 60 * 1000,
+  });
+  private readonly lifeThemeSnapshots = new RetentionMap<LifeThemeMemorySnapshot>("lifeThemeSnapshots", {
+    maxEntries: retainMax("MEMORY_RETAIN_LIFE_THEME_MAX", 64),
+    idleMs: 30 * 60 * 1000,
+  });
+  private readonly dreamSnapshots = new RetentionMap<DreamPhaseSnapshot>("dreamSnapshots", {
+    maxEntries: retainMax("MEMORY_RETAIN_DREAM_MAX", 64),
+    idleMs: 30 * 60 * 1000,
+  });
 
   constructor(
     private readonly narrativeMemory: NarrativeMemoryPort | null,
@@ -232,10 +264,22 @@ export class MemoryManagerService {
    * 原始轮次内容统一由 DailyJournal 落盘（TurnFinalizer 触发），整理时直接读
    * journal——不再在内存里重复存一份原始对话（原 dailyPendingQueues 已删除）。
    */
-  private dailyTurnCounters = new Map<string, { day: string; count: number }>();
+  private dailyTurnCounters = new RetentionMap<{ day: string; count: number }>(
+    "dailyTurnCounters",
+    {
+      maxEntries: retainMax("MEMORY_RETAIN_DAILY_TURN_MAX", 256),
+      idleMs: 24 * 60 * 60 * 1000,
+    },
+  );
 
   /** journal 行消费游标（actorId → { day, lines }）：记录本日已被 consolidateNow 消费的行数 */
-  private journalConsumeCursor = new Map<string, { day: string; lines: number }>();
+  private journalConsumeCursor = new RetentionMap<{ day: string; lines: number }>(
+    "journalConsumeCursor",
+    {
+      maxEntries: retainMax("MEMORY_RETAIN_JOURNAL_CURSOR_MAX", 256),
+      idleMs: 24 * 60 * 60 * 1000,
+    },
+  );
 
   /**
    * 获取今天的日 key（YYYY-MM-DD，基于 Asia/Shanghai 时区）。
@@ -305,7 +349,9 @@ export class MemoryManagerService {
       (await this.resolveJournal()?.readTodayLines(actorId).catch(() => [])) ?? [];
     this.journalConsumeCursor.set(actorId, { day: today, lines: Math.max(from, hits.length) });
 
-    const consumed = hits.slice(from);
+    // 事件行（工具结果）只走 LTM 固化，不进 KV 增量摘要：价格/天气这类
+    // 一次性结果留在 memory_summary 会常驻 prompt。
+    const consumed = hits.slice(from).filter((h) => h.source !== "event");
     if (consumed.length === 0) return { text: "", userText: "" };
 
     const formatRole = (role: string): string =>
@@ -480,7 +526,13 @@ export class MemoryManagerService {
    * forgotten 行 embedding 缓存：key = 行文本指纹，value = 向量。
    * 30 分钟过期，避免 forgotten 内容变化后用旧向量。
    */
-  private forgottenEmbeddingCache = new Map<string, { vector: number[]; ts: number }>();
+  private forgottenEmbeddingCache = new RetentionMap<{ vector: number[]; ts: number }>(
+    "forgottenEmbeddingCache",
+    {
+      maxEntries: retainMax("MEMORY_RETAIN_FORGOTTEN_EMBED_MAX", 512),
+      idleMs: 30 * 60 * 1000,
+    },
+  );
   private static readonly FORGOTTEN_EMBEDDING_TTL_MS = 30 * 60 * 1000;
   private static readonly FORGOTTEN_SEMANTIC_THRESHOLD = 0.7;
 

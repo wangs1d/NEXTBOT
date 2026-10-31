@@ -9,6 +9,7 @@ import {
 } from "../src/services/tool-result-processor.js";
 import { attachSearchResultCardFromExecuted } from "../src/services/tool-card-registry.js";
 import { attachDeterministicCards } from "../src/services/deterministic-card-chain.js";
+import { effectStatusOf } from "../src/render/index.js";
 import { stripMarkersToPlainText } from "../src/services/reply-envelope.js";
 
 /**
@@ -253,7 +254,8 @@ test("L1 search_web：工具回执直出 search_result 卡（正文作前导）"
   const card = parseCard(out);
   assert.equal(card.cardType, "search_result", `实际输出：${out.slice(0, 300)}`);
   assert.equal(card.items.length, 3);
-  assert.equal(card.items[0].url, "https://example.com/a");
+  assert.equal((card.items[0] as { url?: unknown }).url, undefined, "search_result 条目不承载网页链接");
+  assert.ok(!out.includes("马蜂窝"), "条目正文不出现来源站点");
   assert.ok(out.includes("帮你查了三篇"));
 });
 
@@ -335,6 +337,35 @@ test("L1 weather：weather.get_local 回执 → weather 专用卡", () => {
   const card = parseCard(out);
   assert.equal(card.cardType, "weather");
   assert.equal(card.items[0].text, "中雨 26°C");
+});
+
+test("不变量：载荷自报 ok:false 的天气回执出告警卡，不出空 weather 卡", () => {
+  const out = processor.processAssistantText("这次没拿到天气数据。", {
+    toolName: "weather.get_local",
+    toolResult: { ok: false, error: "没有拿到真实定位，也没有可解析的城市名。" },
+  });
+  const card = parseCard(out);
+  assert.notEqual(card.cardType, "weather");
+  assert.equal(card.title, "天气");
+  assert.equal(card.items[0].type, "warn");
+  assert.ok(!out.includes('"error"'), "工具载荷原文不应透出到正文");
+});
+
+test("不变量：effectStatusOf 按载荷真话归类", () => {
+  assert.equal(effectStatusOf({ ok: false, error: "x" }), "error");
+  assert.equal(effectStatusOf({ ok: true, temp: 1 }), "ok");
+  assert.equal(effectStatusOf({ temp: 1 }), "ok");
+  assert.equal(effectStatusOf(undefined), "ok");
+  assert.equal(effectStatusOf({ ok: false }, true), "error");
+});
+
+test("不变量：行程载荷自报失败不附行程卡", () => {
+  const out = attachDeterministicCards({
+    text: "这轮行程没排出来。",
+    travelToolName: "travel.plan-itinerary",
+    travelResult: { ok: false, error: "没有找到符合条件的航班" },
+  });
+  assert.ok(!out.includes("travel_itinerary"), "失败载荷不该建行程卡");
 });
 
 test("L1 wallet：wallet.get_balance 回执 → wallet 专用卡", () => {

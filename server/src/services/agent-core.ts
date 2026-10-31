@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 
+import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
+
 import {
   buildPersonaMoodBlock,
   buildPersonaStaticBlock,
@@ -29,7 +31,10 @@ import { isActorDisabled } from "./user-disable-gate.js";
  * 位置证据门去重表（2026-10-19）：同一 actor 在同一位置文本上只尝试一次计划确认，
  * 避免每轮都查一次计划表。位置变了（真的移动了）才会重新判定。
  */
-const planLocationLastAttempt = new Map<string, string>();
+const planLocationLastAttempt = new RetentionMap<string>("plan-location-dedupe", {
+  maxEntries: retentionMaxEntries(2000),
+  idleMs: 6 * 60 * 60_000,
+});
 
 /**
  * 本模式职责人格（chat/task 双面差异化 persona）。
@@ -1460,6 +1465,7 @@ if (route.plane === "task") {
       requestLocation: () =>
         this.locationCoordinator?.requestLocation(actorId, `tool:${reply.toolName}`) ??
         Promise.resolve(null),
+      getLastKnownLocation: () => this.locationCoordinator?.getLastKnown(actorId) ?? null,
       // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
       pushMediaCards: opts?.pushMediaCards,
     });
@@ -1947,6 +1953,8 @@ if (route.plane === "task") {
      * 工具真正执行前触发，含工具名 + 模型填写的参数；截断参数防长输入刷屏。
      */
     const attemptedToolCalls: string[] = [];
+    /** 本轮工具轨迹（事件记忆 L0 的 kind/status/payload 原料；只留最近 16 条）。 */
+    const toolTraces: ToolExecutedInfo[] = [];
     const toolCtx: ChatToolExecutionContext = this.toolContextFactory.create(
       {
         actorId,
@@ -1965,6 +1973,7 @@ if (route.plane === "task") {
           requestLocation: () =>
             this.locationCoordinator?.requestLocation(actorId, "tool:standard-llm-path") ??
             Promise.resolve(null),
+          getLastKnownLocation: () => this.locationCoordinator?.getLastKnown(actorId) ?? null,
           // 中途推卡：购物等长工具把二维码即时呈现给用户（聊天主路径装配）
           pushMediaCards: opts?.pushMediaCards,
         },
@@ -1992,6 +2001,7 @@ if (route.plane === "task") {
         // 自我学习/外部回执），而 backgroundOnToolExecuted 是派发方收集
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
+          if (toolTraces.length < 16) toolTraces.push(info);
           // 答案留存记账（2026-10-13 根修）：holdAnswer="after_tool_use" 时，
           // 实质工具执行 = 工具循环已对本轮答案关闸（与循环内 answerHeld()
           // 同一判定函数 isSubstantiveToolExecution，口径恒一致）。
@@ -2696,6 +2706,7 @@ if (route.plane === "task") {
       peExhausted,
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
+      toolTraces,
     }, opts?.onAssistantDelta);
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;

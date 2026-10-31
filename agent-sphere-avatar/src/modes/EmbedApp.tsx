@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { bindAgentBridge, dispatchEmbodimentCommand } from "../bridge/agent-bridge";
 import { mapUserMessageSent } from "../bridge/ws-agent-mapper";
-import { EntranceAnimation } from "../components/EntranceAnimation";
 import { OverlayQuickMenu } from "../components/OverlayQuickMenu";
 import { EmbedDragSurface } from "../components/EmbedDragSurface";
 import { SphereAgentScene } from "../components/SphereAgentScene";
@@ -175,7 +174,6 @@ export function EmbedApp() {
 
   return (
     <div className="mode-shell mode-embed">
-      <EntranceAnimation />
       <div
         ref={(el) => {
           livingMotion.setContainerRef(el);

@@ -15,6 +15,12 @@
 #define Stage "E:\NBStage"
 #endif
 
+; WebView2 运行时独立安装包（微软官方 Evergreen Standalone x64，约 215MB）。
+; 由打包脚本缓存并传入；缺文件时 ISCC 会直接报错，不允许退化成联网下载。
+#ifndef WebView2Installer
+#define WebView2Installer "..\windows_dist\redist\MicrosoftEdgeWebView2RuntimeInstallerX64.exe"
+#endif
+
 #ifndef Edition
 #define Edition "internal"
 #endif
@@ -72,6 +78,8 @@ Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: 
 [Files]
 Source: "{#Stage}\app\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion createallsubdirs
 Source: "{#Stage}\runtime\*"; DestDir: "{app}\runtime"; Flags: recursesubdirs ignoreversion createallsubdirs
+; 运行时缺失才解出（已装的机器省一次 215MB 解包）；安装结束自动删除。
+Source: "{#WebView2Installer}"; DestDir: "{tmp}"; DestName: "ms-edge-webview2-setup.exe"; Flags: deleteafterinstall; Check: NeedsWebView2
 
 [Icons]
 Name: "{autoprograms}\{#MyIconName}"; Filename: "{app}\NEXTBOT.exe"
@@ -120,29 +128,31 @@ begin
     Result := (Ver <> '') and (Ver <> '0.0.0.0');
 end;
 
+// [Files] 的 Check：已装就不要把这 215MB 解到临时目录。
+function NeedsWebView2: Boolean;
+begin
+  Result := not WebView2Installed;
+end;
+
 procedure EnsureWebView2;
 var
   ErrorCode: Integer;
-  Bootstrapper: String;
+  Installer: String;
 begin
   if WebView2Installed then Exit;
-  if TaskDialogMsgBox('需要安装 Microsoft Edge WebView2 运行时',
-      '内置浏览器（网页抓取、比价、行程页预览）依赖 WebView2 运行时，本机未检测到。' #13#10 #13#10 +
-      '「是」= 现在从微软官方服务器安装（需联网，装到当前用户，不需管理员权限）。' +
-      '「否」= 稍后自行安装，期间浏览器功能不可用，其余功能不受影响。',
-      mbConfirmation, MB_YESNO, [], 0) <> IDYES then Exit;
-  Bootstrapper := ExpandConstant('{tmp}\ms-edge-webview2-setup.exe');
-  // 用 PowerShell 走微软官方 fwlink 下载（Inno 自身不能下载文件）
-  if Exec('powershell.exe',
-      '-NoProfile -ExecutionPolicy Bypass -Command "$ProgressPreference=''SilentlyContinue''; Invoke-WebRequest -UseBasicParsing -Uri ''https://go.microsoft.com/fwlink/p/?linkid=2124701'' -OutFile ''' + Bootstrapper + '''"',
-      '', SW_HIDE, ewWaitUntilTerminated, ErrorCode) and
-      (ErrorCode = 0) and FileExists(Bootstrapper) then
-  begin
-    Exec(Bootstrapper, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
-  end;
+  // 静默安装（/SILENT、/VERYSILENT）不能弹窗：MSG 框会直接返回默认「否」= 跳过。
+  if not WizardSilent then
+    if TaskDialogMsgBox('需要安装 Microsoft Edge WebView2 运行时',
+        '内置浏览器（网页抓取、比价、行程页预览）依赖 WebView2 运行时，本机未检测到。' #13#10 #13#10 +
+        '「是」= 现在安装（安装包内已附带，约 1-2 分钟，装到当前用户，不需管理员权限）。' +
+        '「否」= 稍后自行安装，期间浏览器功能不可用，其余功能不受影响。',
+        mbConfirmation, MB_YESNO, [], 0) <> IDYES then Exit;
+  Installer := ExpandConstant('{tmp}\ms-edge-webview2-setup.exe');
+  if FileExists(Installer) then
+    Exec(Installer, '/silent /install', '', SW_HIDE, ewWaitUntilTerminated, ErrorCode);
   if not WebView2Installed then
     TaskDialogMsgBox('WebView2 运行时未安装成功',
-      '可能是不联网或下载被拦截。内置浏览器需要它。' #13#10 +
+      '安装包内的运行时未能装上（可能被杀软拦截）。内置浏览器需要它。' #13#10 +
       '手动安装：搜索「下载 Microsoft Edge WebView2 运行时」，从微软官网安装后重启本应用。',
       mbInformation, MB_OK, [], 0);
 end;

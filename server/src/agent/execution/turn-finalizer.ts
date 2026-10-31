@@ -7,6 +7,7 @@ import type { ExternalChatProvider } from "../../external-model/types.js";
 import type { ShortTermMemoryGatewayService } from "../../services/short-term-memory-gateway.js";
 import { getDailyJournalService } from "../../services/daily-journal-service.js";
 import { normalizeTraditionalToSimplified } from "../../utils/simplified-chinese.js";
+import type { EventToolTrace } from "../../agentic-memory/event-builder.js";
 
 export type FinishTurnMeta = {
   streamedChunks: boolean;
@@ -16,6 +17,8 @@ export type FinishTurnMeta = {
   peExhausted: boolean;
   messageId?: string;
   sessionId?: string;
+  /** 本轮工具轨迹：交给事件记忆层做 kind/status/payload 推导。 */
+  toolTraces?: EventToolTrace[];
 };
 
 export type TurnFinalizerDeps = {
@@ -95,6 +98,7 @@ export class TurnFinalizer {
       pePlan: meta.pePlan,
       peExhausted: meta.peExhausted,
       messageId: meta.messageId,
+      toolTraces: meta.toolTraces,
     });
 
     if (this.deps.shortTermMemoryGateway && meta.sessionId) {

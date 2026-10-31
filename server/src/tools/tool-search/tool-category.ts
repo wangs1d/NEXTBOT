@@ -162,13 +162,23 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "desktop",
     summary: "桌面自动化（开应用/截图/UIA操作/shell）",
-    prefixes: ["desktop", "agent_browser", "shared_browser", "screen"],
-    secondaryTools: ["browser.session.list"],
+    prefixes: ["desktop", "screen"],
+    secondaryTools: [],
+  },
+  {
+    name: "shared_browser",
+    summary:
+      "内置浏览器代查（用户可见，登录态即用户本人）：业务工具拿不到实价/需登录态时，" +
+      "用它开页读页面拿真数；navigate → read_page → click/type",
+    prefixes: ["shared_browser"],
+    secondaryTools: [],
   },
   {
     name: "browser",
-    summary: "浏览器会话/网页导航",
-    prefixes: ["browser."],
+    summary:
+      "服务端无头浏览器会话与网页读取（agent_browser.* 多步操作、browser.* 只读单页、" +
+      "fetch_web/search_web）：无需用户在场，但不带用户登录态",
+    prefixes: ["browser.", "agent_browser"],
     secondaryTools: ["fetch_web", "search_web"],
   },
   {
@@ -337,7 +347,7 @@ export const ROUTE_BEAM_DOMAINS: Record<string, string[]> = {
     "surface",
     "smart_home",
   ],
-  desktop: ["desktop"],
+  desktop: ["desktop", "browser", "shared_browser"],
   full: [],
 };
 

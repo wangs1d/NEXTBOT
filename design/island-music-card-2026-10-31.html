@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>灵动岛 · 音乐卡改版稿</title>
+<style>
+  @font-face {
+    font-family: "Harmony";
+    src: url("../client/flutter_app/assets/fonts/harmonyos/HarmonyOS_Sans_SC_Medium.ttf");
+    font-weight: 500;
+  }
+  @font-face {
+    font-family: "Harmony";
+    src: url("../client/flutter_app/assets/fonts/harmonyos/HarmonyOS_Sans_SC_Bold.ttf");
+    font-weight: 700;
+  }
+  @font-face {
+    font-family: "MiSans";
+    src: url("../client/flutter_app/assets/fonts/MiSans-Regular.otf");
+    font-weight: 400;
+  }
+  @font-face {
+    font-family: "MiSans";
+    src: url("../client/flutter_app/assets/fonts/MiSans-Medium.otf");
+    font-weight: 500;
+  }
+  @font-face {
+    font-family: "MiSans";
+    src: url("../client/flutter_app/assets/fonts/MiSans-Semibold.otf");
+    font-weight: 600;
+  }
+  @font-face {
+    font-family: "MiSans";
+    src: url("../client/flutter_app/assets/fonts/MiSans-Bold.otf");
+    font-weight: 700;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "MiSans", "Microsoft YaHei UI", sans-serif;
+    background:
+      radial-gradient(1200px 700px at 78% 12%, rgba(96, 116, 158, .35), transparent 60%),
+      radial-gradient(900px 600px at 18% 82%, rgba(64, 92, 84, .28), transparent 62%),
+      linear-gradient(150deg, #10131a 0%, #151a24 46%, #0c0f15 100%);
+    color: #fff;
+    display: flex;
+    justify-content: center;
+    padding: 40px 40px 36px;
+  }
+  .stage { width: 1180px; }
+  .caption {
+    font-size: 12px; letter-spacing: .08em;
+    color: rgba(255,255,255,.42);
+    margin: 0 0 12px 4px;
+  }
+  .caption b { color: rgba(255,255,255,.72); font-weight: 500; letter-spacing: 0; }
+  .caption span { color: rgba(255,255,255,.28); margin-left: 10px; letter-spacing: 0; }
+
+  .island {
+    background: #020202;
+    border: 1px solid rgba(255,255,255,.07);
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+    color: #fff;
+    overflow: hidden;
+    position: relative;
+  }
+
+  /* ── 胶囊态 ── */
+  .compact {
+    width: 320px; height: 38px; border-radius: 15px;
+    display: flex; align-items: center; gap: 10px;
+    padding: 0 14px 0 10px;
+    margin-bottom: 13px;
+  }
+  .art { flex: none; border-radius: 6px; overflow: hidden; }
+  .art.c { width: 24px; height: 24px; border-radius: 6px; }
+  .art.l { width: 44px; height: 44px; border-radius: 12px; }
+  .art svg { display: block; width: 100%; height: 100%; }
+  .compact .line {
+    flex: 1; min-width: 0;
+    font-size: 14px; font-weight: 600; letter-spacing: -.01em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.96);
+  }
+  .compact .tail {
+    font-size: 12px; font-weight: 500; font-variant-numeric: tabular-nums;
+    color: rgba(255,255,255,.42); flex: none;
+  }
+  .cap-progress {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: rgba(255,255,255,.12);
+  }
+  .cap-progress i { display: block; height: 100%; width: 56%; background: rgba(255,255,255,.55); }
+
+  /* ── 展开卡 ── */
+  .expanded { width: 344px; border-radius: 26px; padding: 16px 16px 14px; }
+  .row-head { display: flex; align-items: center; gap: 12px; }
+  .meta { flex: 1; min-width: 0; }
+  .title {
+    font-size: 15px; font-weight: 600; letter-spacing: -.01em; line-height: 1.25;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.96);
+  }
+  .subrow { display: flex; align-items: baseline; gap: 10px; margin-top: 3px; }
+  .sub {
+    flex: 1; min-width: 0;
+    font-size: 11.5px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.42);
+  }
+  .time {
+    font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums;
+    color: rgba(255,255,255,.38); flex: none;
+  }
+  .bar {
+    height: 2px; border-radius: 2px; background: rgba(255,255,255,.10);
+    margin: 12px 0 0; overflow: hidden;
+  }
+  .bar i { display: block; height: 100%; width: 56%; background: rgba(255,255,255,.55); border-radius: 2px; }
+
+  .lyrics {
+    position: relative; height: 96px; margin-top: 10px; overflow: hidden;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 21%, #000 79%, transparent 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 21%, #000 79%, transparent 100%);
+  }
+  .lyric {
+    position: absolute; left: 0; right: 0;
+    line-height: 32px; height: 32px;
+    font-size: 14px; font-weight: 500; letter-spacing: -.005em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.30);
+  }
+  .lyric.l0 { top: 0; }
+  .lyric.l1 { top: 32px; }
+  .lyric.l2 { top: 64px; }
+  .lyric.now {
+    font-size: 20px; font-weight: 700; letter-spacing: -.015em;
+    line-height: 32px; color: #fff;
+  }
+  .lyric.tr {
+    font-size: 11px; font-weight: 400; line-height: 16px; height: 16px;
+    color: rgba(255,255,255,.48); top: 76px;
+  }
+
+  /* 滚动中间帧：整摞上移 14px（约半行），当前行正在变大 */
+  .lyrics.rolling .lyric.l0 { top: -14px; color: rgba(255,255,255,.18); }
+  .lyrics.rolling .lyric.l1 { top: 18px; font-size: 17px; color: rgba(255,255,255,.9); }
+  .lyrics.rolling .lyric.l2 { top: 50px; color: rgba(255,255,255,.5); }
+  .lyrics.rolling .lyric.l3 { top: 82px; }
+
+  .empty {
+    height: 64px; margin-top: 10px;
+    display: flex; flex-direction: column; justify-content: center;
+    gap: 6px;
+  }
+  .empty b { font-size: 14px; font-weight: 600; color: rgba(255,255,255,.78); }
+  .empty span { font-size: 11.5px; font-weight: 400; color: rgba(255,255,255,.36); }
+
+  .grid { display: flex; gap: 44px; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; }
+
+  /* 字体对照 */
+  .fontbox { margin-top: 22px; }
+  .fontline {
+    display: flex; align-items: baseline; gap: 16px;
+    padding: 10px 0; border-bottom: 1px solid rgba(255,255,255,.06);
+  }
+  .fontline .tag {
+    width: 150px; flex: none; font-size: 11px; letter-spacing: .06em;
+    color: rgba(255,255,255,.36);
+  }
+  .fontline .sample { font-size: 20px; line-height: 28px; }
+  .fontline .sample.harmony { font-family: "Harmony"; font-weight: 700; }
+  .fontline .sample.misans { font-family: "MiSans"; font-weight: 700; }
+  .fontline .sample.misans600 { font-family: "MiSans"; font-weight: 600; }
+  .notes {
+    margin-top: 20px; font-size: 11.5px; line-height: 22px;
+    color: rgba(255,255,255,.34);
+  }
+  .notes b { color: rgba(255,255,255,.58); font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="grid">
+      <div class="col">
+        <div class="caption"><b>① 胶囊态</b> 320×38<span>封面小图 + 当前歌词 + 进度时间</span></div>
+        <div class="island compact">
+          <div class="art c">
+            <svg viewBox="0 0 24 24">
+              <defs>
+                <linearGradient id="cov1" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#8d9bb5"/><stop offset=".55" stop-color="#4c5a76"/><stop offset="1" stop-color="#232b3c"/>
+                </linearGradient>
+              </defs>
+              <rect width="24" height="24" fill="url(#cov1)"/>
+              <circle cx="15.5" cy="8.5" r="3.2" fill="#dfe5ef" opacity=".8"/>
+              <path d="M0 19 L9 13 L16 17 L24 12 L24 24 L0 24 Z" fill="#1a2231" opacity=".55"/>
+            </svg>
+          </div>
+          <div class="line">Guitar suitcase and a warm coat</div>
+          <div class="tail">1:59</div>
+          <div class="cap-progress"><i></i></div>
+        </div>
+
+        <div class="caption" style="margin-top:8px"><b>③ 无歌词 · 胶囊</b><span>只显示歌名，不拿翻唱顶替</span></div>
+        <div class="island compact">
+          <div class="art c">
+            <svg viewBox="0 0 24 24">
+              <defs>
+                <linearGradient id="cov2" x1="0" y1="0" x2="1" y2="1">
+                  <stop offset="0" stop-color="#5d6675"/><stop offset="1" stop-color="#22262e"/>
+                </linearGradient>
+              </defs>
+              <rect width="24" height="24" fill="url(#cov2)"/>
+              <path d="M11 8.5 v7.2 a1.9 1.9 0 1 0 1.4 -1.83 V10.4 l3.1 -.75 v4.05 a1.9 1.9 0 1 0 1.4 -1.83 V8.2 L11 9.4 Z" fill="#e5e8ee" opacity=".85"/>
+            </svg>
+          </div>
+          <div class="line" style="color:rgba(255,255,255,.82)">往事清零 爱恨两清（Inst）</div>
+          <div class="tail">无歌词</div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="caption"><b>② 展开卡 · 歌词</b> 344 宽<span>封面 + 歌名 + 三行歌词（上下遮影）</span></div>
+        <div class="island expanded">
+          <div class="row-head">
+            <div class="art l">
+              <svg viewBox="0 0 44 44">
+                <defs>
+                  <linearGradient id="cov3" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#8d9bb5"/><stop offset=".55" stop-color="#4c5a76"/><stop offset="1" stop-color="#232b3c"/>
+                  </linearGradient>
+                </defs>
+                <rect width="44" height="44" fill="url(#cov3)"/>
+                <circle cx="28" cy="15" r="6" fill="#dfe5ef" opacity=".8"/>
+                <path d="M0 35 L16 24 L30 31 L44 22 L44 44 L0 44 Z" fill="#1a2231" opacity=".55"/>
+              </svg>
+            </div>
+            <div class="meta">
+              <div class="title">Gotta Have You（氛围律动版）</div>
+              <div class="subrow"><div class="sub">Rorik · 汽水音乐</div><div class="time">1:59 / 3:34</div></div>
+            </div>
+          </div>
+          <div class="bar"><i></i></div>
+          <div class="lyrics">
+            <div class="lyric l0">No matter coffee no matter crime</div>
+            <div class="lyric l1 now">No no no nothing else will do</div>
+            <div class="lyric l2">Lying in the back of the blue boat</div>
+          </div>
+        </div>
+
+        <div class="caption" style="margin-top:22px"><b>④ 滚动中间帧</b><span>换行时整摞上移，当前行放大 + 提亮</span></div>
+        <div class="island expanded">
+          <div class="row-head">
+            <div class="art l">
+              <svg viewBox="0 0 44 44">
+                <defs>
+                  <linearGradient id="cov4" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#8d9bb5"/><stop offset=".55" stop-color="#4c5a76"/><stop offset="1" stop-color="#232b3c"/>
+                  </linearGradient>
+                </defs>
+                <rect width="44" height="44" fill="url(#cov4)"/>
+                <circle cx="28" cy="15" r="6" fill="#dfe5ef" opacity=".8"/>
+                <path d="M0 35 L16 24 L30 31 L44 22 L44 44 L0 44 Z" fill="#1a2231" opacity=".55"/>
+              </svg>
+            </div>
+            <div class="meta">
+              <div class="title">Gotta Have You（氛围律动版）</div>
+              <div class="subrow"><div class="sub">Rorik · 汽水音乐</div><div class="time">2:03 / 3:34</div></div>
+            </div>
+          </div>
+          <div class="bar"><i style="width:58%"></i></div>
+          <div class="lyrics rolling">
+            <div class="lyric l0">No no no nothing else will do</div>
+            <div class="lyric l1 now">Lying in the back of the blue boat</div>
+            <div class="lyric l2">No matter coffee no matter crime</div>
+            <div class="lyric l3">No matter whiskey no matter wine</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="caption"><b>⑤ 展开卡 · 无歌词</b><span>伴奏/未收录：如实说明</span></div>
+        <div class="island expanded">
+          <div class="row-head">
+            <div class="art l">
+              <svg viewBox="0 0 44 44">
+                <defs>
+                  <linearGradient id="cov5" x1="0" y1="0" x2="1" y2="1">
+                    <stop offset="0" stop-color="#5d6675"/><stop offset="1" stop-color="#22262e"/>
+                  </linearGradient>
+                </defs>
+                <rect width="44" height="44" fill="url(#cov5)"/>
+                <path d="M20 15 v13.2 a3.5 3.5 0 1 0 2.6 -3.38 V18.4 l5.7 -1.38 v7.5 a3.5 3.5 0 1 0 2.6 -3.38 V14.2 L20 16.4 Z" fill="#e5e8ee" opacity=".85"/>
+              </svg>
+            </div>
+            <div class="meta">
+              <div class="title">往事清零 爱恨两清（Inst）</div>
+              <div class="subrow"><div class="sub">低频序 · 汽水音乐</div><div class="time">0:12 / 2:39</div></div>
+            </div>
+          </div>
+          <div class="bar"><i style="width:8%"></i></div>
+          <div class="empty">
+            <b>伴奏版本，没有歌词</b>
+            <span>歌名带 Inst / 伴奏 标记时不匹配其他歌手的词</span>
+          </div>
+        </div>
+
+        <div class="fontbox">
+          <div class="caption" style="margin:0 0 4px 0"><b>字体对照</b> 同一句歌词 · 20px</div>
+          <div class="fontline">
+            <div class="tag">HarmonyOS Bold（现状）</div>
+            <div class="sample harmony">Guitar suitcase and a warm coat</div>
+          </div>
+          <div class="fontline">
+            <div class="tag">MiSans Semibold 600</div>
+            <div class="sample misans600">Guitar suitcase and a warm coat</div>
+          </div>
+          <div class="fontline">
+            <div class="tag">MiSans Bold 700</div>
+            <div class="sample misans">Guitar suitcase and a warm coat</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <b>改版口径：</b>音乐单独成卡——展开卡只放封面/歌名/进度/三行歌词，不再插「接下来」日程，也不写「网易云歌词 · N 行」；
+      平台名跟着实际播放器走（这里是「汽水音乐」）。当前行 20px 加粗居中，上下各一行 14px 弱化，卡上下缘用渐隐遮影。
+      换行时整摞歌词向上滚动 320ms，当前行同步放大，落位后停住；暂停时滚动也停。
+    </div>
+  </div>
+</body>
+</html>

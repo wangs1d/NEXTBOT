@@ -31,6 +31,8 @@ Future<void> runIslandStageE2EBootstrap() async {
   // 已置位但 create 尚未应答），轮询等待通道就绪，避免读早期 _nativeReady。
   // 冷启动首启（构建后首跑）通道就绪可远超 10s，预算给足 60s（2026-10-05
   // 实测：10s 预算下 bootstrap 静默退出，data_ready 永不写、三路 PS 全空等）。
+  // E2E 不依赖登录门禁：先放行上屏，再走幂等初始化。
+  await DynamicIslandLauncher.instance.setVisible(true);
   await initDynamicIsland();
   for (int i = 0;
       i < 120 && !DynamicIslandLauncher.instance.isNativeReady;

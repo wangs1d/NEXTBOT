@@ -51,6 +51,10 @@ export type MemoryCandidate = {
   createdAt: string;
   /** KV summary 行的话题提示（沿用 inferMemoryTopic 产物） */
   topicHint?: string;
+  /** 来源事件 id（LTM 派生条目回溯到具体一轮；缺省表示非对话事件来源） */
+  eventId?: string;
+  /** 来源事件发生时刻（ISO） */
+  eventTime?: string;
   /** 整合失败回灌次数（封顶后丢弃，防毒候选无限重跑） */
   attempts?: number;
 };
@@ -388,6 +392,10 @@ export class MemoryConsolidationService {
   /** 唯一落库出口：海马体 + Mem0（经 narrative port）+ KV summary 行。返回写失败需回灌的候选。 */
   private async egress(actorId: string, decided: DecidedCandidate[]): Promise<MemoryCandidate[]> {
     const egressFailed: MemoryCandidate[] = [];
+    const provenanceOf = (c: MemoryCandidate) => ({
+      ...(c.eventId ? { sourceEventId: c.eventId } : {}),
+      ...(c.eventTime ? { eventTime: c.eventTime } : {}),
+    });
     // Supersession：overwrite/mutable_fact 语义的候选先退役语义重合的旧记忆
     for (const d of decided) {
       if (d.decision.decision === "overwrite" || d.decision.semanticClass === "mutable_fact") {
@@ -412,7 +420,11 @@ export class MemoryConsolidationService {
           actorId,
           d.text,
           d.candidate.source,
-          { context: d.candidate.context, highSignal: d.candidate.highSignal },
+          {
+            context: d.candidate.context,
+            highSignal: d.candidate.highSignal,
+            ...provenanceOf(d.candidate),
+          },
           d.unified,
         );
       } catch (err) {
@@ -433,6 +445,7 @@ export class MemoryConsolidationService {
         await this.deps.narrative.writeDecided(actorId, body, legacy[0]!.candidate.source, {
           context,
           highSignal: true,
+          ...provenanceOf(legacy[0]!.candidate),
         });
       } catch (err) {
         egressFailed.push(...legacy.map((d) => d.candidate));

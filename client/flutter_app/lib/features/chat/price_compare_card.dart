@@ -6,7 +6,7 @@ import "media_thumbnail.dart";
 
 /// price_compare 卡（跨平台实时比价，shopping.compare.prices → 服务端
 /// tool-card-registry 确定性直出）：标题行 + 分组报价列表（大图 + 大号价格 +
-/// 平台 chip + 店铺/同款标注，整行可点跳平台商品页）+ 决策页 CTA 按钮。
+/// 平台 chip + 店铺/同款标注）。卡片只展示结果，不承载网页跳转。
 /// 数据字段见 [AgentResultPriceCompare] / [AgentResultPriceGroup]。
 ///
 /// 视觉语言与 ProductPickCard 同族（圆角 12 / surfaceContainerHigh /
@@ -73,31 +73,6 @@ class PriceCompareCard extends StatelessWidget {
               isBest: compare.bestIndex == i,
               cs: cs,
             ),
-          // 决策页 CTA：大图 / 全部报价 / 走势一页看全
-          if ((compare.decisionPageUrl ?? "").isNotEmpty) ...<Widget>[
-            Container(height: 1, color: cs.outline.withValues(alpha: 0.16)),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(13, 10, 13, 4),
-              child: OutlinedButton.icon(
-                onPressed: () => LinkUtils.launchExternal(
-                  LinkUtils.resolveMediaUrl(compare.decisionPageUrl!),
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: cs.onSurface,
-                  side: BorderSide(color: cs.outline.withValues(alpha: 0.4)),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  padding: const EdgeInsets.symmetric(vertical: 9),
-                ),
-                icon: const Icon(Icons.perm_media_outlined, size: 15),
-                label: const Text(
-                  "打开比价决策页 · 大图 / 全部报价 / 走势",
-                  style: TextStyle(fontSize: 12.5),
-                ),
-              ),
-            ),
-          ],
           // 免责说明 footer
           if (data.footer.isNotEmpty)
             Padding(
@@ -114,8 +89,7 @@ class PriceCompareCard extends StatelessWidget {
   }
 }
 
-/// 单个平台分组的报价行：52px 缩略图 + 价格/平台/同款标注 + 品名 + 店铺，
-/// 行带 url 时整行可点跳平台商品页。
+/// 单个平台分组的报价行：52px 缩略图 + 价格/平台/同款标注 + 品名 + 店铺。
 class _PriceGroupRow extends StatelessWidget {
   const _PriceGroupRow({
     required this.group,
@@ -132,8 +106,6 @@ class _PriceGroupRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final String? url =
-        (group.url ?? "").isNotEmpty ? LinkUtils.resolveMediaUrl(group.url!) : null;
     final String? image =
         (group.image ?? "").isNotEmpty ? LinkUtils.resolveMediaUrl(group.image!) : null;
     final String priceText =
@@ -220,22 +192,10 @@ class _PriceGroupRow extends StatelessWidget {
               ],
             ),
           ),
-          if (url != null)
-            Padding(
-              padding: const EdgeInsets.only(left: 2),
-              child: Icon(Icons.chevron_right_rounded,
-                  size: 15, color: cs.onSurfaceVariant),
-            ),
         ],
       ),
     );
-
-    if (url == null) return row;
-    return InkWell(
-      onTap: () => LinkUtils.launchExternal(url),
-      borderRadius: BorderRadius.circular(8),
-      child: row,
-    );
+    return row;
   }
 
   /// 价格千分位（整数部分），¥1884 → ¥1,884 不做（比价卡保持与报价一致的裸数字）。

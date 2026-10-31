@@ -80,8 +80,9 @@ export const CORE_TOOL_LIBRARY = {
     prefixes: ["desktop.visual."],
   },
   browser: {
-    label: "电商 Cookie 读价",
-    prefixes: ["browser."],
+    label: "内置浏览器与电商读价",
+    // 内置浏览器只读两件常驻（实数代查不等 discover）；写操作走 tool_discover({domain:"shared_browser"})
+    prefixes: ["browser.", "shared_browser.navigate", "shared_browser.read_page"],
   },
   mcp: {
     label: "MCP 外部工具（动态注册）",

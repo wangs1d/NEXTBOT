@@ -92,6 +92,8 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 运行环境（手机/电脑，2026-10-07）：剥离会让模型不知道用户在哪类设备上
   "deviceEnvironment",
   "narrativeRecall",
+  // 事件回忆（L0）：仅在时间回溯意图且真实命中时有值，剥离即丢掉「上次那事」的事实依据
+  "eventRecall",
   "scheduleSnapshot",
   "travelState",
   "webEvidence",
@@ -146,6 +148,7 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 人格·终极版动态块：mood 每轮变化，归动态层
   "personaMood",
   "narrativeRecall",
+  "eventRecall",
   "memorySummary",
   "memoryPreferences",
   "memoryFacts",

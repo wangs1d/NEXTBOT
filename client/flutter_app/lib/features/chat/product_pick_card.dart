@@ -1,12 +1,12 @@
 import "package:flutter/material.dart";
 
 import "../../core/utils/agent_result_parser.dart";
-import "../../core/utils/link_utils.dart";
 import "media_thumbnail.dart";
 
 /// product_pick 卡（立场化推荐，shopping.suggest → 服务端 tool-card-registry
-/// 确定性直出）：主推大图区（为什么是它 + 渠道实时价 CTA）+ 备选横滑区
-/// （什么时候选它）。数据字段见 [AgentResultPick]/[AgentResultPickAlt]。
+/// 确定性直出）：主推大图区（为什么是它 + 渠道实时价）+ 备选横滑区
+/// （什么时候选它）。卡片只展示结果，不承载网页跳转。
+/// 数据字段见 [AgentResultPick]/[AgentResultPickAlt]。
 ///
 /// 视觉语言与 _ProductCompareCard 同族（圆角 12 / surfaceContainerHigh /
 /// outline 细边 / 同一强调色），保持聊天流内商品卡的一致性。
@@ -85,7 +85,7 @@ class ProductPickCard extends StatelessWidget {
   }
 }
 
-/// 主推区：大图 + 为什么是它 + 依据/注意点 + 渠道实时价 CTA。
+/// 主推区：大图 + 为什么是它 + 依据/注意点 + 渠道实时价。
 class _PickHero extends StatelessWidget {
   const _PickHero({required this.pick, required this.cs});
 
@@ -94,9 +94,6 @@ class _PickHero extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final List<AgentResultPickChannel> buyable =
-        pick.channels.where((AgentResultPickChannel c) => (c.url ?? "").isNotEmpty).toList();
-
     return Padding(
       padding: const EdgeInsets.fromLTRB(13, 0, 13, 12),
       child: Column(
@@ -173,25 +170,6 @@ class _PickHero extends StatelessWidget {
               ],
             ),
           ],
-          if (buyable.isNotEmpty) ...<Widget>[
-            const SizedBox(height: 9),
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () => LinkUtils.launchExternal(buyable.first.url!),
-                icon: const Icon(Icons.open_in_new_rounded, size: 14),
-                label: Text(
-                  "去${buyable.first.name}比价购买",
-                  style: const TextStyle(fontSize: 12.5),
-                ),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: cs.primary,
-                  side: BorderSide(color: cs.outline.withValues(alpha: 0.3)),
-                  padding: const EdgeInsets.symmetric(vertical: 9),
-                ),
-              ),
-            ),
-          ],
         ],
       ),
     );
@@ -237,7 +215,7 @@ class _ReasonRow extends StatelessWidget {
   }
 }
 
-/// 渠道实时价 chip（带链接可点跳外部浏览器）。
+/// 渠道实时价 chip（只展示渠道与价格，不做跳转）。
 class _ChannelChip extends StatelessWidget {
   const _ChannelChip({required this.channel, required this.cs});
 
@@ -246,7 +224,6 @@ class _ChannelChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool hasUrl = (channel.url ?? "").isNotEmpty;
     final Widget label = Text.rich(
       TextSpan(
         children: <InlineSpan>[
@@ -255,7 +232,7 @@ class _ChannelChip extends StatelessWidget {
             style: TextStyle(
               fontSize: 11,
               fontWeight: FontWeight.w600,
-              color: hasUrl ? cs.primary : cs.onSurfaceVariant,
+              color: cs.onSurfaceVariant,
             ),
           ),
           const TextSpan(text: "  "),
@@ -270,34 +247,21 @@ class _ChannelChip extends StatelessWidget {
         ],
       ),
     );
-    return InkWell(
-      onTap: hasUrl ? () => LinkUtils.launchExternal(channel.url!) : null,
-      borderRadius: BorderRadius.circular(7),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            label,
-            if (hasUrl) ...<Widget>[
-              const SizedBox(width: 3),
-              Icon(Icons.chevron_right_rounded, size: 13, color: cs.primary),
-            ],
-          ],
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
       ),
+      child: label,
     );
   }
 }
 
-/// 真实口碑区：小红书 UGC 摘要（服务端聚合，好评/避雷 + 来源帖可点）。
-/// 数据来自真实帖子标题（服务端规则抽取，LLM 不生成内容），来源链接走
-/// 外部浏览器打开——与渠道 CTA 同链路。
+/// 真实口碑区：小红书 UGC 摘要（服务端聚合，好评/避雷 + 来源帖标题）。
+/// 数据来自真实帖子标题（服务端规则抽取，LLM 不生成内容）；卡内只展示，
+/// 不承载来源链接。
 class _UgcSection extends StatelessWidget {
   const _UgcSection({required this.ugc, required this.cs});
 
@@ -420,7 +384,7 @@ class _UgcLine extends StatelessWidget {
   }
 }
 
-/// 口碑来源帖 chip（带链接可点跳外部浏览器）。
+/// 口碑来源帖 chip（只展示帖子标题，不做跳转）。
 class _UgcSourceChip extends StatelessWidget {
   const _UgcSourceChip({required this.post, required this.cs});
 
@@ -429,36 +393,23 @@ class _UgcSourceChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool hasUrl = (post.url ?? "").isNotEmpty;
-    return InkWell(
-      onTap: hasUrl ? () => LinkUtils.launchExternal(post.url!) : null,
-      borderRadius: BorderRadius.circular(7),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
-          borderRadius: BorderRadius.circular(7),
-          border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            SizedBox(
-              width: 128,
-              child: Text(
-                post.title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 10,
-                  color: hasUrl ? cs.primary : cs.onSurfaceVariant,
-                  decoration: hasUrl ? TextDecoration.underline : null,
-                ),
-              ),
-            ),
-            if (hasUrl)
-              Icon(Icons.open_in_new_rounded, size: 10, color: cs.primary),
-          ],
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(7),
+        border: Border.all(color: cs.outline.withValues(alpha: 0.18)),
+      ),
+      child: SizedBox(
+        width: 128,
+        child: Text(
+          post.title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: TextStyle(
+            fontSize: 10,
+            color: cs.onSurfaceVariant,
+          ),
         ),
       ),
     );

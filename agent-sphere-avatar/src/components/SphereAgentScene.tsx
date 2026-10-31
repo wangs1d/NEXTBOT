@@ -10,6 +10,7 @@ import { HitAreaReporter, type EllipseShape } from "./HitAreaReporter";
 import { OverlayCameraRig } from "./OverlayCameraRig";
 import { OverlaySceneLights } from "./OverlaySceneLights";
 import { SphereAgent } from "./SphereAgent";
+import { reportOverlayPainted } from "../utils/overlay-ready";
 
 interface SphereAgentSceneProps {
   state: AgentState;
@@ -186,7 +187,7 @@ export function SphereAgentScene({
           onEyeClick={onEyeClick}
           physics={false}
           autonomous={autonomous && !isOverlay}
-          bodyPosition={isOverlay ? [...OVERLAY_SCENE.bodyPosition] : undefined}
+          bodyPosition={isOverlay ? OVERLAY_SCENE.bodyPosition : undefined}
           idleBodyMotion={!isOverlay}
           modelScale={isOverlay ? OVERLAY_SCENE.modelScale : (readEmbedModelScaleOverride() ?? EMBED_SCENE.modelScale)}
           motionBounds={isOverlay ? 0 : 1.15}
@@ -204,6 +205,7 @@ export function SphereAgentScene({
           onSpinDelta={onSpinDelta}
           onDragRelease={onDragRelease}
           onShakeRequest={onShakeRequest}
+          onModelPainted={isOverlay ? reportOverlayPainted : undefined}
         />
       </Physics>
     </Canvas>

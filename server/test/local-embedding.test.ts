@@ -75,6 +75,15 @@ test("回环端点：OpenAI 格式 + base64 编码格式（openai-node v6 默认
 
   const headers = { "Content-Type": "application/json", Authorization: `Bearer ${ep!.apiKey}` };
 
+  // 端点先绑、模型后台加载：装载完成前 /embeddings 回 503，等 /health ok 再断言
+  const readyDeadline = Date.now() + 30_000;
+  for (;;) {
+    const health = (await (await fetch(`${ep!.baseUrl}/health`)).json()) as { ok?: boolean };
+    if (health.ok) break;
+    if (Date.now() > readyDeadline) assert.fail("引擎在 30s 内未装载完成");
+    await new Promise((r) => setTimeout(r, 100));
+  }
+
   // float 格式（JSON 数组）
   const floatRes = await fetch(`${ep!.baseUrl}/embeddings`, {
     method: "POST",

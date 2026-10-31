@@ -3,7 +3,7 @@
  *
  * 思路：
  *   1. 起本地 HTTP 服务，用 import map 把 `three` 解析到 node_modules，
- *      页面用 three.js 加载 public/models/DG2.obj，套用与 DG2RobotModel 相同的
+ *      页面用 three.js 加载 public/models/DG2.glb，套用与 DG2RobotModel 相同的
  *      金属壳/深色玻璃材质 + RoomEnvironment 环境反射，渲染到固定画布；
  *   2. puppeteer-core 连接系统 Chrome（不下载浏览器）无头打开页面，
  *      等 WebGL 一帧渲染完成后截取画布尺寸区域存为 PNG。
@@ -42,7 +42,7 @@ canvas#c{position:absolute;inset:0}</style>
 <canvas id="c" width="256" height="256"></canvas>
 <script type="module">
 import * as THREE from "/three.module.js";
-import { OBJLoader } from "/OBJLoader.js";
+import { GLTFLoader } from "/GLTFLoader.js";
 import { RoomEnvironment } from "/RoomEnvironment.js";
 
 const canvas = document.getElementById("c");
@@ -77,11 +77,11 @@ group.scale.setScalar(SCALE);
 group.rotation.set(...ROTATION);
 group.position.set(0, -1, 0);       // MODEL.objOffset
 
-const obj = await new OBJLoader().loadAsync("/models/DG2.obj");
-obj.traverse((node) => {
+const gltf = await new GLTFLoader().loadAsync("/models/DG2.glb");
+gltf.scene.traverse((node) => {
   if (!node.isMesh) return;
-  const name = (Array.isArray(node.material) ? node.material[0]?.name : node.material?.name) ?? "";
-  if (name.includes("\u73bb\u7483")) { // 玻璃
+  const slot = (Array.isArray(node.material) ? node.material[0]?.name : node.material?.name) ?? "";
+  if (slot === "glass") {               // 前罩玻璃与顶部插座镜片
     node.material = new THREE.MeshPhysicalMaterial({
       color: new THREE.Color("#080a0e"),
       metalness: 0.85, roughness: 0.04,
@@ -101,7 +101,7 @@ obj.traverse((node) => {
     });
   }
 });
-group.add(obj);
+group.add(gltf.scene);
 scene.add(group);
 
 // 自适应取景：居中 + 视锥框定整个机器人
@@ -122,7 +122,7 @@ window.__sphereReady = true;
 
 const MIME = {
   ".js": "text/javascript",
-  ".obj": "text/plain",
+  ".glb": "model/gltf-binary",
 };
 
 function serveStatic(req, res, path) {
@@ -134,9 +134,10 @@ function serveStatic(req, res, path) {
 function startServer() {
   const threeModule = resolve(ROOT, "node_modules/three/build/three.module.js");
   const threeCore = resolve(ROOT, "node_modules/three/build/three.core.js");
-  const objLoader = resolve(ROOT, "node_modules/three/examples/jsm/loaders/OBJLoader.js");
+  const gltfLoader = resolve(ROOT, "node_modules/three/examples/jsm/loaders/GLTFLoader.js");
+  const geomUtils = resolve(ROOT, "node_modules/three/examples/jsm/utils/BufferGeometryUtils.js");
   const roomEnv = resolve(ROOT, "node_modules/three/examples/jsm/environments/RoomEnvironment.js");
-  const dg2 = resolve(ROOT, "public/models/DG2.obj");
+  const dg2 = resolve(ROOT, "public/models/DG2.glb");
 
   return createServer((req, res) => {
     const url = (req.url ?? "/").split("?")[0];
@@ -145,9 +146,10 @@ function startServer() {
       res.end(HTML);
     } else if (url === "/three.module.js") serveStatic(req, res, threeModule);
     else if (url === "/three.core.js") serveStatic(req, res, threeCore);
-    else if (url === "/OBJLoader.js") serveStatic(req, res, objLoader);
+    else if (url === "/GLTFLoader.js") serveStatic(req, res, gltfLoader);
+    else if (url === "/utils/BufferGeometryUtils.js") serveStatic(req, res, geomUtils);
     else if (url === "/RoomEnvironment.js") serveStatic(req, res, roomEnv);
-    else if (url === "/models/DG2.obj") serveStatic(req, res, dg2);
+    else if (url === "/models/DG2.glb") serveStatic(req, res, dg2);
     else { res.writeHead(404); res.end(); }
   });
 }

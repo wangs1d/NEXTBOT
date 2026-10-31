@@ -20,6 +20,9 @@ import { getMemoryConsolidationService } from "../services/memory-consolidation-
 import { getScheduleHabitStore } from "../services/schedule-habit-store.js";
 import { getPresenceFootprintStore } from "../rhythm/presence-footprint-store.js";
 import { isEphemeralActorId } from "./actor-id.js";
+import { recordTurnEventSafely, type EventToolTrace } from "../agentic-memory/event-store.js";
+import { buildEventJournalEntry } from "../agentic-memory/event-builder.js";
+import { getDailyJournalService } from "../services/daily-journal-service.js";
 
 export type FinalizeTurnInput = {
   actorId: string;
@@ -34,11 +37,16 @@ export type FinalizeTurnInput = {
   messageId?: string;
   /** 本轮语义理解标记（L1 路由产出）：memory_instruction 驱动写入候选的「用户要求记住」信号。 */
   understanding?: TurnUnderstanding;
+  /** 本轮工具轨迹（工具循环 onToolExecuted 汇总）：事件层的 kind/status/payload 来源。 */
+  toolTraces?: EventToolTrace[];
 };
 
 export type FinalizeTurnResult = {
   quotaSuffix?: string;
 };
+
+/** 本轮事件的来源标识：随记忆候选一路带到 LTM 条目 metadata（结论可追溯）。 */
+type TurnEventProvenance = { eventId: string; eventTime: string };
 
 /**
  * 每轮对话前后统一钩子：记忆召回、写入、配额。
@@ -90,6 +98,7 @@ export class TurnLifecycle {
     context: "main" | "notes" = "main",
     memoryInstruction = false,
     personalFact = false,
+    provenance?: TurnEventProvenance,
   ): void {
     // #3 写入精度：不再把整段 "Turn archive | user…| assistant…" 原文灌进长期记忆图
     // （那是噪声/串台源）。只抽取高价值原子片段（用户要求记住 / Agent 承诺/结论）；
@@ -110,6 +119,7 @@ export class TurnLifecycle {
         highSignal: signal.isHighSignal,
         createdAt: new Date().toISOString(),
         topicHint: inferMemoryTopic(userText),
+        ...(provenance ?? {}),
       });
       return;
     }
@@ -130,7 +140,13 @@ export class TurnLifecycle {
     })().catch(() => {});
   }
 
-  ingestFastPath(actorId: string, lines: string[], context: "main" | "notes" = "main", topicHint?: string): void {
+  ingestFastPath(
+    actorId: string,
+    lines: string[],
+    context: "main" | "notes" = "main",
+    topicHint?: string,
+    provenance?: TurnEventProvenance,
+  ): void {
     if (lines.length === 0) return;
 
     // 统一写入者：每条高信号原子行一个候选；KV summary 行由整合链路统一落
@@ -146,6 +162,7 @@ export class TurnLifecycle {
           highSignal: true,
           createdAt: now,
           topicHint,
+          ...(provenance ?? {}),
         });
       }
       return;
@@ -205,6 +222,30 @@ export class TurnLifecycle {
       })
       .catch(() => {});
 
+    // 事件记忆（L0）：与 WAL 同源、同一写点，失败静默；隐身/临时 actor 不写。
+    // 返回的事件 id 作为本轮记忆候选的来源标识（LTM 条目带 event_time/source_event_id）。
+    let provenance: TurnEventProvenance | undefined;
+    if (!incognito && !isEphemeralActorId(input.actorId)) {
+      const event = recordTurnEventSafely({
+        actorId: input.actorId,
+        userText: input.userText,
+        assistantText: full,
+        ts,
+        sessionId: input.sessionId,
+        messageId: input.messageId,
+        context: memContext,
+        toolTraces: input.toolTraces,
+      });
+      if (event) {
+        provenance = { eventId: event.id, eventTime: ts };
+        // 事件结果与对话流水共用当天 journal：夜间同一条固化链路进长期记忆
+        if (event.context === "main") {
+          const entry = buildEventJournalEntry(event);
+          if (entry) getDailyJournalService()?.appendEventLine(input.actorId, event.eventTime, entry);
+        }
+      }
+    }
+
     getDailyDigestService().observeTurn(input.actorId, input.userText, full, {
       priorityLines: signal.isHighSignal ? signal.extractLines : undefined,
     });
@@ -227,7 +268,13 @@ export class TurnLifecycle {
       // ISO 时间戳（appendMemorySummaryLine 统一盖）。行内容是干净原子事实，
       // 不带 [fast-path] 内部标记。承诺板已下线，回执不会再生成为待办，
       // 热路径无条件启用（无 kill switch）。
-      this.ingestFastPath(input.actorId, signal.extractLines, memContext, inferMemoryTopic(input.userText));
+      this.ingestFastPath(
+        input.actorId,
+        signal.extractLines,
+        memContext,
+        inferMemoryTopic(input.userText),
+        provenance,
+      );
       if (this.deps.agentMemorySyncService) {
         const hotFacts = selectHotPathMemoryLines(signal.extractLines);
         if (hotFacts.length > 0) {
@@ -263,6 +310,7 @@ export class TurnLifecycle {
         memContext,
         memoryInstruction,
         personalFact,
+        provenance,
       );
     }
 

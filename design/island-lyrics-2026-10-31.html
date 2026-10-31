@@ -1,0 +1,234 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>灵动岛 · 歌词展示稿</title>
+<style>
+  @font-face {
+    font-family: "NotoSC";
+    src: url("../client/flutter_app/assets/fonts/noto/NotoSansSC-Regular.otf");
+    font-weight: 400;
+  }
+  @font-face {
+    font-family: "NotoSC";
+    src: url("../client/flutter_app/assets/fonts/noto/NotoSansSC-Medium.otf");
+    font-weight: 500;
+  }
+  @font-face {
+    font-family: "NotoSC";
+    src: url("../client/flutter_app/assets/fonts/noto/NotoSansSC-Bold.otf");
+    font-weight: 700;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    font-family: "NotoSC", "Microsoft YaHei UI", sans-serif;
+    background:
+      radial-gradient(1200px 700px at 78% 12%, rgba(96, 116, 158, .35), transparent 60%),
+      radial-gradient(900px 600px at 18% 82%, rgba(64, 92, 84, .28), transparent 62%),
+      linear-gradient(150deg, #10131a 0%, #151a24 46%, #0c0f15 100%);
+    color: #fff;
+    display: flex;
+    justify-content: center;
+    padding: 46px 40px 40px;
+  }
+  .stage { width: 1100px; }
+  .caption {
+    font-size: 12px;
+    letter-spacing: .08em;
+    color: rgba(255,255,255,.42);
+    margin: 0 0 14px 6px;
+  }
+  .caption b { color: rgba(255,255,255,.72); font-weight: 500; letter-spacing: 0; }
+  .caption span { color: rgba(255,255,255,.28); margin-left: 10px; letter-spacing: 0; }
+
+  /* ── 岛壳 ── */
+  .island {
+    background: #020202;
+    border: 1px solid rgba(255,255,255,.07);
+    box-shadow: 0 18px 50px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.05);
+    color: #fff;
+    overflow: hidden;
+    position: relative;
+  }
+  .compact {
+    width: 320px; height: 38px; border-radius: 15px;
+    display: flex; align-items: center; gap: 9px;
+    padding: 0 14px;
+    margin-bottom: 44px;
+  }
+  .rest { width: 108px; margin-bottom: 44px; }
+  .note-mark {
+    width: 16px; height: 16px; flex: 0 0 16px;
+    display: grid; place-items: center;
+    font-size: 12px; color: rgba(255,255,255,.92);
+  }
+  .compact .line {
+    flex: 1; min-width: 0;
+    font-size: 12.5px; font-weight: 500;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.94);
+  }
+  .compact .tail { font-size: 11px; color: rgba(255,255,255,.38); flex: none; }
+  .cap-progress {
+    position: absolute; left: 0; right: 0; bottom: 0; height: 2px;
+    background: rgba(255,255,255,.12);
+  }
+  .cap-progress i { display: block; height: 100%; width: 56%; background: rgba(255,255,255,.55); }
+
+  /* ── 展开卡 ── */
+  .expanded { width: 380px; border-radius: 26px; padding: 16px 16px 12px; margin-bottom: 44px; }
+  .ex-header { display: flex; align-items: center; gap: 9px; }
+  .ex-header .note-mark {
+    width: 24px; height: 24px; flex: 0 0 24px; border-radius: 8px;
+    background: rgba(255,255,255,.08);
+    font-size: 12px;
+  }
+  .ex-meta { flex: 1; min-width: 0; }
+  .ex-title {
+    font-size: 13px; font-weight: 500; line-height: 1.25;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    color: rgba(255,255,255,.95);
+  }
+  .ex-sub { font-size: 10.5px; color: rgba(255,255,255,.38); margin-top: 2px; }
+  .ex-time {
+    font-size: 10.5px; font-variant-numeric: tabular-nums;
+    color: rgba(255,255,255,.42); flex: none;
+  }
+  .ex-bar {
+    height: 2px; border-radius: 2px; background: rgba(255,255,255,.1);
+    margin: 12px 0 14px; overflow: hidden;
+  }
+  .ex-bar i { display: block; height: 100%; width: 56%; background: rgba(255,255,255,.55); border-radius: 2px; }
+  .sec-label {
+    font-size: 10px; letter-spacing: .14em;
+    color: rgba(255,255,255,.3); margin-bottom: 8px;
+  }
+  .lyrics {
+    position: relative;
+    -webkit-mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 88%, transparent 100%);
+            mask-image: linear-gradient(180deg, transparent 0, #000 18%, #000 88%, transparent 100%);
+    padding: 2px 0 6px;
+  }
+  .lyric {
+    font-size: 13px; line-height: 26px; font-weight: 400;
+    color: rgba(255,255,255,.26);
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    transition: none;
+  }
+  .lyric.near { color: rgba(255,255,255,.4); }
+  .lyric.now {
+    font-size: 15px; font-weight: 700; line-height: 30px;
+    color: #fff;
+  }
+  .lyric.tr {
+    font-size: 11px; line-height: 18px;
+    color: rgba(255,255,255,.45); margin-top: -2px; margin-bottom: 2px;
+  }
+  .ex-foot {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 12px; padding-top: 10px;
+    border-top: 1px solid rgba(255,255,255,.06);
+    font-size: 10.5px; color: rgba(255,255,255,.32);
+  }
+  .ex-foot .dots { display: flex; gap: 6px; }
+  .ex-foot .dots i {
+    width: 5px; height: 5px; border-radius: 50%; background: rgba(255,255,255,.18);
+  }
+  .ex-foot .dots i.on { background: rgba(255,255,255,.72); }
+
+  /* 无歌词态 */
+  .muted { color: rgba(255,255,255,.5) !important; }
+  .empty-lyric {
+    font-size: 12.5px; line-height: 24px; color: rgba(255,255,255,.4);
+    padding: 6px 0 10px;
+  }
+  .empty-lyric b { display: block; font-weight: 500; color: rgba(255,255,255,.72); font-size: 13px; }
+  .empty-lyric span { font-size: 11px; color: rgba(255,255,255,.32); }
+
+  .row { display: flex; gap: 56px; align-items: flex-start; }
+  .col { display: flex; flex-direction: column; }
+  .notes {
+    margin-top: 8px; font-size: 11.5px; line-height: 22px;
+    color: rgba(255,255,255,.34);
+  }
+  .notes b { color: rgba(255,255,255,.58); font-weight: 500; }
+</style>
+</head>
+<body>
+  <div class="stage">
+    <div class="row">
+      <div class="col">
+        <div class="caption"><b>① 胶囊态</b> 320×38<span>播放中，无更高优先级条目时</span></div>
+        <div class="island compact">
+          <div class="note-mark">♪</div>
+          <div class="line">Guitar suitcase and a warm coat</div>
+          <div class="tail">1:59</div>
+          <div class="cap-progress"><i></i></div>
+        </div>
+
+        <div class="caption"><b>③ 无歌词 · 胶囊态</b><span>伴奏/未收录：只显示歌名</span></div>
+        <div class="island compact muted">
+          <div class="note-mark">♪</div>
+          <div class="line">往事清零 爱恨两清（Inst）</div>
+          <div class="tail">无歌词</div>
+        </div>
+      </div>
+
+      <div class="col">
+        <div class="caption"><b>② 展开卡 · 歌词</b> 380 宽<span>当前行高亮，上下各两行弱化</span></div>
+        <div class="island expanded">
+          <div class="ex-header">
+            <div class="note-mark">♪</div>
+            <div class="ex-meta">
+              <div class="ex-title">Gotta Have You（氛围律动版）</div>
+              <div class="ex-sub">Rorik · 汽水音乐</div>
+            </div>
+            <div class="ex-time">1:59 / 3:34</div>
+          </div>
+          <div class="ex-bar"><i></i></div>
+          <div class="sec-label">歌词</div>
+          <div class="lyrics">
+            <div class="lyric">She hit all through a telescope</div>
+            <div class="lyric near">No no no no no nothing else will do</div>
+            <div class="lyric now">Guitar suitcase and a warm coat</div>
+            <div class="lyric near">Lying in the back of the blue boat coming into</div>
+            <div class="lyric">No matter coffee no matter crime</div>
+          </div>
+          <div class="ex-foot">
+            <div>网易云歌词 · 34 行</div>
+            <div>汽水音乐</div>
+          </div>
+        </div>
+
+        <div class="caption"><b>④ 展开卡 · 无歌词</b><span>如实说明原因，不拿翻唱顶替</span></div>
+        <div class="island expanded">
+          <div class="ex-header">
+            <div class="note-mark">♪</div>
+            <div class="ex-meta">
+              <div class="ex-title">往事清零 爱恨两清（Inst）</div>
+              <div class="ex-sub">低频序 · 汽水音乐</div>
+            </div>
+            <div class="ex-time">0:12 / 2:39</div>
+          </div>
+          <div class="ex-bar"><i style="width:8%"></i></div>
+          <div class="sec-label">歌词</div>
+          <div class="empty-lyric">
+            <b>伴奏版本，没有歌词</b>
+            <span>歌名带 Inst/伴奏 标记时不匹配其他歌手的词</span>
+          </div>
+          <div class="ex-foot">
+            <div>网易云</div>
+            <div>汽水音乐</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="notes">
+      <b>行为口径：</b>音乐是背景态——有任务/日程/未读在提示时让位，不抢岛；展开卡里歌词区排在日程之后。
+      当前行按 500ms 采样 + 墙钟插值推进；暂停时停住。翻译行（英文歌）小一号灰字跟在当前行下方。
+    </div>
+  </div>
+</body>
+</html>

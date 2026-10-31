@@ -102,7 +102,7 @@ test("weather: 天气问答 → 口语前导 + weather 卡（真实回归场景�
   assert.equal(card.footer, "出门带把伞，薄外套够了");
 });
 
-test("search: 新闻搜索 → search_result 卡（条目带 url）", () => {
+test("search: 新闻搜索 → search_result 卡（条目不带网页链接）", () => {
   const out = runLoopTurn("最近有什么科技新闻", "帮你扫了眼今天科技圈的新鲜事：", {
     search: [
       {
@@ -121,9 +121,11 @@ test("search: 新闻搜索 → search_result 卡（条目带 url）", () => {
   const card = parseCardBlock(out);
   assert.ok(card, `应附上 search_result 卡，实际文本: ${out}`);
   assert.equal(card.cardType, "search_result");
-  const items = card.items as Array<{ url?: string }>;
+  const items = card.items as Array<{ text: string; url?: string; source?: string }>;
   assert.ok(items.length >= 3);
-  assert.ok(items.every((i) => !!i.url), "每个条目应带 url 供前端跳转");
+  assert.ok(items.every((i) => !i.url), "卡片条目不再承载网页链接");
+  assert.ok(items.every((i) => !i.source), "卡片条目不再承载来源站点");
+  assert.ok(items.every((i) => !i.text.includes("来源:")), "条目正文不出现「来源:」");
 });
 
 test("search×media 意图仲裁：搜照片轮次带 search_web 回执 → 文字卡整卡让位", () => {

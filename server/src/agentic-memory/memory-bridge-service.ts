@@ -237,20 +237,33 @@ export class MemoryBridgeService {
     actorId: string,
     sourceId: string,
     text: string,
-    opts: { context: "main" | "notes"; highSignal: boolean },
+    opts: {
+      context: "main" | "notes";
+      highSignal: boolean;
+      sourceEventId?: string;
+      sourceEventIds?: string[];
+      eventTime?: string;
+    },
     unified?: import("./unified-extractor.js").UnifiedExtraction,
   ): Promise<BridgeWriteResult> {
     const context = opts.context;
+    // 来源事件：认知图 metadata 与 Mem0 metadata 都带，结论可回溯到具体一轮
+    const provenance: Record<string, string> = {};
+    if (opts.sourceEventId) provenance.sourceEventId = opts.sourceEventId;
+    if (opts.sourceEventIds?.length) provenance.sourceEventIds = opts.sourceEventIds.join(",");
+    if (opts.eventTime) provenance.eventTime = opts.eventTime;
+    const baseMetadata = { highSignal: opts.highSignal, ...provenance };
     let graphNodeId: string | null = null;
     try {
       graphNodeId = await this.graph.ingest(actorId, text, sourceId, {
         context,
-        metadata: { highSignal: opts.highSignal },
+        metadata: baseMetadata,
       });
     } catch (err) {
       console.error("[memory-bridge] 认知图写入失败（继续 Mem0 侧）:", err);
     }
 
+    const extraMetadata = { ...(graphNodeId ? { graphNodeId } : {}), ...provenance };
     let mem0Items: Mem0WrittenItem[] = [];
     try {
       if (unified && typeof this.ingest.persistUnifiedExtraction === "function") {
@@ -261,7 +274,7 @@ export class MemoryBridgeService {
           context,
           opts.highSignal,
           text,
-          graphNodeId ? { graphNodeId } : undefined,
+          Object.keys(extraMetadata).length > 0 ? extraMetadata : undefined,
         );
       } else {
         mem0Items = await this.ingest.writeDecidedDetailed(
@@ -270,7 +283,7 @@ export class MemoryBridgeService {
           text,
           context,
           opts.highSignal,
-          graphNodeId ? { graphNodeId } : undefined,
+          Object.keys(extraMetadata).length > 0 ? extraMetadata : undefined,
         );
       }
     } catch (err) {

@@ -11,6 +11,7 @@ node_modules
 **/.venv/
 dist
 dist-ssr
+server/dist-bundle/
 *.local
 
 # Build outputs
@@ -107,3 +108,31 @@ scripts/autostart/autostart-launcher.vbs
 
 # docs 目录不入库（2026-10-21 定调）：设计稿、诊断文档、预览资源等只留本地，不再提交到 GitHub。
 /docs/
+
+# 测试脚本/测试产物/截图不入库（2026-10-31 定调）：做测试用的临时脚本、探针、测试产物与截屏照片全部拦截；
+# 正式单元测试（server/test/、client/flutter_app/test/ 的 .test.ts/.dart）及其 fixtures/goldens 不受影响。
+# 临时测试脚本与探针
+.scratch/
+.screenshots/
+.workbuddy_tmp_*
+server/tmp-*
+server/*scratch*/
+scripts/probe-*
+scripts/shot-*.ps1
+scripts/*_shot.py
+_screen-shot.mjs
+server/scripts/probe-*
+server/scripts/e2e-*
+server/scripts/*soak*
+# 测试产物 / 测试结果
+server/scripts/results/
+server/scripts/test-results/
+server/test/tmp-probe/
+client/flutter_app/test/failures/
+client/flutter_app/test/ui_compare_shots/
+# 截屏照片（操作/取证/对比截图；应用资源、图标、头像、goldens 等正常 PNG 不受限）
+desktop-visual/shot-*.png
+desktop-visual/shot-screen.ps1
+desktop-visual/evidence-*.png
+desktop-visual/loop/
+sphere-overlay-py/*shot*.png

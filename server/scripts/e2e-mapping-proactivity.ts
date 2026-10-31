@@ -7,9 +7,7 @@
  *   2. HTTP 创建一条 10 分钟后的真实日程任务（POST /schedule/tasks）
  *   3. 等真实链条自己跑完：ScheduleSensor → SensorKernel → WorldBoard 状态板
  *      → MappingExecutor(meeting_soon) → ArbiterV2 → ProactivePipeline → WS fan-out
- *   4. 同时断言「会前准备包」预执行链：GoalBoard ready → goal 信号入板
- *      → goal_ready 规则 → 第二条投递
- *   5. 完成率 = 实际送达（WS 收到 + outcome=delivered）/ 规则触发数；
+ *   4. 完成率 = 实际送达（WS 收到 + outcome=delivered）/ 规则触发数；
  *      并断言沙箱内 proactive 决策 LLM 调用 = 0（data/llm-token-audit.ndjson 无主动性记录）
  *
  * 零 LLM 依赖（不加载 .env，外部模型/推送 provider 全关，话术走模板直投）。
@@ -72,11 +70,7 @@ ws.send(JSON.stringify({ type: "session.init", payload: { sessionId: ACTOR } }))
 await new Promise((r) => setTimeout(r, 1_500));
 log(`WS 已连接（actor=${ACTOR}）`);
 
-// ── 3. 创建两个真实日程任务（并行验证两条规则链）──
-//   任务 A：+8min  → meeting_soon 的 15min alert 档（must 层，popup 直投）
-//   任务 B：+38min → A 过后成为最近事件，恰落入会前准备 25-40min 窗口 →
-//           GoalBoard 预执行 → ready 进托盘 → goal 信号入板 → goal_ready 规则 → 第二条投递
-//   （注意：prepare 只盯"最近"日程，B 必须在 A 结束后才进 25-40min 窗口）
+// ── 3. 创建真实日程任务：+8min → meeting_soon 的 15min alert 档（must 层，popup 直投）──
 const createTask = async (title: string, description: string, inMin: number) => {
   const runAt = new Date(Date.now() + inMin * 60_000).toISOString();
   const res = await fetch(`http://127.0.0.1:${PORT}/schedule/tasks`, {
@@ -94,19 +88,18 @@ const createTask = async (title: string, description: string, inMin: number) => 
   });
   return (await res.json()) as { ok: boolean; task?: { taskId: string } };
 };
-const createdA = await createTask("季度评审会", "与产品团队过季度 OKR", 8);
-const createdB = await createTask("产品发布会", "发布会材料终审", 38);
-if (!createdA.ok || !createdB.ok) {
-  log(`FAIL: 日程任务创建失败: ${JSON.stringify({ createdA, createdB }).slice(0, 300)}`);
+const created = await createTask("季度评审会", "与产品团队过季度 OKR", 8);
+if (!created.ok) {
+  log(`FAIL: 日程任务创建失败: ${JSON.stringify(created).slice(0, 300)}`);
   ws.close();
   process.exit(1);
 }
 log(
-  `日程任务已创建（A=${createdA.task?.taskId} +8min / B=${createdB.task?.taskId} +38min）` +
+  `日程任务已创建（taskId=${created.task?.taskId} +8min）` +
     `→ 等待 ScheduleSensor 轮询（≤5min）→ 状态板 → 映射规则 → 投递`,
 );
 
-// ── 4. 等真实链路把主动消息送到 WS 客户端（meeting_soon + goal_ready 各一条）──
+// ── 4. 等真实链路把主动消息送到 WS 客户端 ──
 const meetingHit = await waitFor(() => {
   return (
     received.find(
@@ -114,20 +107,12 @@ const meetingHit = await waitFor(() => {
     ) ?? null
   );
 }, 480_000, 3_000);
-const goalHit = await waitFor(() => {
-  return (
-    received.find(
-      (m) => m.type === "agent.proactive_message" && JSON.stringify(m).includes("会前准备"),
-    ) ?? null
-  );
-}, 900_000, 3_000);
 
 // ── 5. 完成率与 LLM 消耗证据 ──
 // 送达口径：WS 收到带 deliveryId 的 agent.proactive_message = 管道真实 fan-out
 // （只有管道投递成功才发该帧；离线/挂起场景不会出现在在线 WS 客户端上）
 const proactiveMsgs = received.filter((m) => m.type === "agent.proactive_message");
 const meetingMsg = proactiveMsgs.find((m) => JSON.stringify(m).includes("季度评审会"));
-const goalMsg = proactiveMsgs.find((m) => JSON.stringify(m).includes("会前准备"));
 
 // outcome 台账为辅助证据（退出时防抖可能未刷盘，best-effort）
 let outcomes: Array<{ kind?: string; outcome?: string; title?: string }> = [];
@@ -157,35 +142,13 @@ if (existsSync(auditPath)) {
   }
 }
 
-// 场景判定：
-//   场景 1（must 层）：必须 WS 真实送达（硬性）
-//   场景 2（social 层）：WS 送达 ✔；若被仲裁 wait_for_pause（用户专注时的正确
-//   分寸——挂起到空闲再投）也算规则链正确，以 events.ndjson 留痕为准
-let eventsLedger = "";
-try {
-  eventsLedger = readFileSync(join(sandbox, "data", "proactivity", "events.ndjson"), "utf8");
-} catch {
-  /* 无台账 */
-}
-const goalFiredInLedger = eventsLedger.includes('"kind":"goal_ready"') || eventsLedger.includes('"kind": "goal_ready"');
-const fired = 2;
-const deliveredCount = [meetingMsg, goalMsg].filter(Boolean).length;
-const scenario2Ok = Boolean(goalMsg || goalFiredInLedger);
-const rate = Math.round(((Number(Boolean(meetingMsg)) + Number(scenario2Ok)) / fired) * 100);
-
+// 场景判定：meeting_soon 走 must 层，必须 WS 真实送达（硬性）
 log("──── 端到端结果 ────");
-log(`场景 1 meeting_soon（临会提醒）: ${meetingHit ? "送达 ✔" : "未送达 ✘"}`);
-log(
-  `场景 2 goal_ready（会前准备包）: ${
-    goalMsg ? "送达 ✔" : goalFiredInLedger ? "规则触发 ✔（仲裁挂起 wait_for_pause，空闲后自动补投）" : "未触发 ✘"
-  }`,
-);
-log(`完成率: ${deliveredCount}/${fired} = ${rate}%（WS 真实收到 proactive_message 口径）`);
+log(`meeting_soon（临会提醒）: ${meetingHit ? "送达 ✔" : "未送达 ✘"}`);
 log(`决策 LLM 调用（intent/act_loop）: ${decisionLlmCalls} 次（预期 0）`);
 log(`话术润色 LLM 调用（phrase，仅投递时）: ${phraseLlmCalls} 次`);
 log(`outcomes.json 记录数: ${outcomes.length}`);
 log(`meeting 消息 payload: ${meetingMsg ? JSON.stringify(meetingMsg).slice(0, 300) : "（无）"}`);
-log(`goal 消息 payload: ${goalMsg ? JSON.stringify(goalMsg).slice(0, 300) : "（无）"}`);
 
 ws.close();
 try {
@@ -198,6 +161,6 @@ try {
 } catch {
   log(`沙箱保留（清理被占用）: ${sandbox}`);
 }
-const ok = Boolean(meetingMsg && scenario2Ok && decisionLlmCalls === 0);
+const ok = Boolean(meetingMsg && decisionLlmCalls === 0);
 log(ok ? "PASS: 状态板→映射规则→仲裁→管道→WS 送达 全链路真实跑通，决策零 LLM" : "FAIL");
 process.exit(ok ? 0 : 1);

@@ -6,6 +6,9 @@ import type { GoalBoard } from "../../../proactivity/goal-board.js";
 import type { ShoppingCompareService } from "../../../services/shopping-compare-service.js";
 import { getAgenticMemoryRuntime } from "../../../agentic-memory/index.js";
 import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
+import { getEventMemoryStore } from "../../../agentic-memory/event-store.js";
+import { formatEventLine } from "../../../agentic-memory/event-recall.js";
+import { isEventMemoryRecallEnabled } from "../../../agentic-memory/env.js";
 
 /**
  * memory.forget / activity.timeline handler + 注册入口。
@@ -62,7 +65,7 @@ export function createForgetHandler(deps: MemoryGovernanceModuleDeps): ToolHandl
       }
     }
 
-    // 4) 计划/盯梢目标（系统预执行目标 meeting_prep/morning_brief 不在遗忘范围）
+    // 4) 计划/盯梢目标（系统预执行目标 morning_brief 不在遗忘范围）
     if (hitScope("plan")) {
       const board = deps.goalBoard;
       if (!board) skipped.push("plan(目标板未装配)");
@@ -136,6 +139,66 @@ export function createTimelineHandler(deps: MemoryGovernanceModuleDeps): ToolHan
       entries,
       summary: service.summary(actorId) ?? "",
       hint: "以真实台账回答（办了什么/在忙什么/等确认什么），不要杜撰台账之外的行动",
+    };
+  };
+}
+
+/**
+ * memory.recall（事件记忆 L0 检索口）：按时间/对象/结果回忆真实做过的事。
+ * 只呈现结果行，不向用户暴露内部检索过程；查不到如实返回 0 条。
+ */
+export function createRecallHandler(_deps: MemoryGovernanceModuleDeps): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    if (!isEventMemoryRecallEnabled()) {
+      return { ok: false, error: "事件回忆未启用" };
+    }
+    const store = getEventMemoryStore();
+    if (!store) return { ok: false, error: "事件记忆未就绪" };
+    const actorId = resolveActorId(context);
+    const now = Date.now();
+    const limitRaw = typeof input.limit === "number" ? Math.floor(input.limit) : 20;
+    const limit = Math.min(Math.max(limitRaw, 1), 50);
+    const to = typeof input.to === "string" && input.to.trim() ? input.to.trim() : new Date(now).toISOString();
+    let from: string | undefined;
+    if (typeof input.from === "string" && input.from.trim()) {
+      from = input.from.trim();
+    } else {
+      const daysRaw = typeof input.days === "number" ? input.days : 30;
+      const days = Math.min(Math.max(daysRaw, 1), 3650);
+      from = new Date(now - days * 86_400_000).toISOString();
+    }
+    const kinds = Array.isArray(input.kinds)
+      ? input.kinds.filter((k): k is string => typeof k === "string" && k.trim().length > 0)
+      : undefined;
+    const statuses =
+      typeof input.status === "string" && input.status.trim() ? [input.status.trim()] : undefined;
+    const query = typeof input.query === "string" ? input.query.trim() : "";
+
+    const events = store.recallEvents({
+      actorId,
+      from,
+      to,
+      kinds: kinds?.length ? kinds : undefined,
+      statuses,
+      query: query || undefined,
+      limit,
+    });
+
+    const lines = events.map((event) => formatEventLine(event, now));
+    return {
+      ok: true,
+      count: events.length,
+      events: events.map((event, i) => ({
+        time: event.eventTime,
+        kind: event.kind,
+        status: event.status,
+        line: lines[i],
+      })),
+      summary: lines.join("\n"),
+      hint:
+        events.length > 0
+          ? "以上是真实发生过的记录。直接用结果回答；不要提及检索、数据库或任何内部查询过程。"
+          : "这个范围内没有查到相关记录，如实告诉用户没查到，不要猜测或编造当时的结果。",
     };
   };
 }
@@ -227,5 +290,6 @@ export function createProfileUpdateHandler(_deps: MemoryGovernanceModuleDeps): T
 export function registerMemoryGovernanceTools(registry: ToolRegistry, deps: MemoryGovernanceModuleDeps): void {
   registry.register("memory.forget", createForgetHandler(deps));
   registry.register("activity.timeline", createTimelineHandler(deps));
+  registry.register("memory.recall", createRecallHandler(deps));
   registry.register("profile.update", createProfileUpdateHandler(deps));
 }

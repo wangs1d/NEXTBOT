@@ -4,6 +4,7 @@ import type { FastifyInstance } from "fastify";
 
 import type { ToolContext } from "../../tools/tool-registry.js";
 import type { ShoppingCompareService } from "../../services/shopping-compare-service.js";
+import { serverRoot } from "../../config/paths.js";
 import {
   getShoppingDecisionPage,
   recordShoppingDecisionPage,
@@ -22,7 +23,7 @@ import {
  * 过期后页面显示「比价结果已过期，请在聊天里重新比价」的兜底。
  */
 
-const webRoot = join(import.meta.dirname ?? ".", "../../../web/shopping");
+const webRoot = join(serverRoot(), "web", "shopping");
 
 export function registerShoppingDecisionRoutes(
   app: FastifyInstance,

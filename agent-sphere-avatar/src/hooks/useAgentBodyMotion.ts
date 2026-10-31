@@ -2,8 +2,8 @@ import { useFrame } from "@react-three/fiber";
 import { useCallback, useEffect, useRef, type RefObject } from "react";
 import * as THREE from "three";
 import type { PublicApi } from "@react-three/cannon";
+import { EMBED_BODY_ANCHOR } from "../constants/model-proportions";
 import type { AgentMood } from "../types/agent";
-import type { ScreenSignals } from "../components/OledScreen";
 import type { TaskEvent } from "../types/agent";
 
 const MOOD_PROFILE: Record<
@@ -67,7 +67,6 @@ interface BehaviorMemoryEntry {
 interface UseAgentBodyMotionOptions {
   api?: PublicApi;
   visualRef: RefObject<THREE.Group | null>;
-  faceSignalsRef?: RefObject<ScreenSignals>;
   enabled?: boolean;
   bounds?: number;
   mood?: AgentMood;
@@ -87,13 +86,14 @@ interface UseAgentBodyMotionOptions {
   onBoundaryHit?: (edge: "left" | "right" | "top" | "bottom" | "front" | "back") => void;
   /** 固定机位模式：锁定 Y 轴，关闭持续呼吸/悬浮位移（桌宠防抖） */
   verticalStable?: boolean;
+  /** 运动初值 —— 必须与刚体创建位置同源，否则首帧会跳一下 */
+  seedPosition?: readonly [number, number, number];
 }
 
 /** 具身物理 — 持续有生命力，兴奋时更狂，说话时有节奏摆动感 */
 export function useAgentBodyMotion({
   api,
   visualRef,
-  faceSignalsRef,
   enabled = true,
   bounds = 1.15,
   mood = "idle",
@@ -106,10 +106,11 @@ export function useAgentBodyMotion({
   taskEvents,
   onBoundaryHit,
   verticalStable = false,
+  seedPosition = EMBED_BODY_ANCHOR,
 }: UseAgentBodyMotionOptions) {
-  const pos = useRef(new THREE.Vector3(0, 1.45, 0));
+  const pos = useRef(new THREE.Vector3(...seedPosition));
   const vel = useRef(new THREE.Vector3());
-  const target = useRef(new THREE.Vector3(0, 1.45, 0));
+  const target = useRef(new THREE.Vector3(...seedPosition));
   /** 固定机位 Y 轴锚点（取初始高度，保持当前构图不变） */
   const verticalAnchorRef = useRef(pos.current.y);
   const verticalStableRef = useRef(verticalStable);
@@ -466,7 +467,6 @@ export function useAgentBodyMotion({
       if (now - lastBoundaryAt.current < 140) return;
       lastBoundaryAt.current = now;
 
-      if (faceSignalsRef?.current) faceSignalsRef.current.boundaryBump = 1;
       onBoundaryHitRef.current?.(edge);
       intentRef.current.yawVelocity += (Math.random() - 0.5) * 1.8;
       intentRef.current.glanceYaw =
@@ -486,7 +486,7 @@ export function useAgentBodyMotion({
         vel.current.z += (Math.random() - 0.5) * 1.2;
       }
     },
-    [faceSignalsRef, setPhase],
+    [setPhase],
   );
 
   useEffect(() => {
@@ -703,11 +703,6 @@ export function useAgentBodyMotion({
     }
 
     const speed = vel.current.length();
-    if (faceSignalsRef?.current) {
-      faceSignalsRef.current.excitement = excitementRef.current;
-      faceSignalsRef.current.speed = speed;
-    }
-
     const group = visualRef.current;
     if (!group) return;
 

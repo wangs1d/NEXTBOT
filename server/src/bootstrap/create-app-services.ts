@@ -3,7 +3,9 @@ import cors from "@fastify/cors";
 import multipart from "@fastify/multipart";
 import websocket from "@fastify/websocket";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import Fastify from "fastify";
+import { awaitBoot } from "./boot-readiness.js";
 import {
   A2aOutsourcingService,
   loadPersistedCommunitySkills,
@@ -35,7 +37,7 @@ import { AgentMemorySyncService } from "../services/agent-memory-sync-service.js
 import { FriendService } from "../services/friend-service.js";
 import { createAgentCore } from "../agent/agent-runtime.js";
 import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-facade.js";
-import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
+import { PromptContextBuilder, buildClientSurfacesBlock } from "../agent/prompt-context-builder.js";
 import { buildActiveGoalsPromptBlock } from "../agent/active-goals-prompt.js";
 import { getTaskPlanStore, initTaskPlanStore } from "../agent/task-plan-store.js";
 import { requestPlatformLoginHandoff } from "../agent/platform-login-handoff.js";
@@ -53,7 +55,10 @@ import { createNarrativeHybridRetrievalDefault } from "../services/narrative-hyb
 import { initMemoryManagerService, getMemoryManagerService } from "../services/memory-manager-service.js";
 import { initHumanLikeMemoryService } from "../services/human-like-memory-service.js";
 import { getAgenticMemoryRuntime, registerMemoryComponents } from "../agentic-memory/index.js";
-import { ensureLocalEmbeddingEndpoint } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
+import {
+  embedViaLocalEndpoint,
+  ensureLocalEmbeddingEndpoint,
+} from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
 import { resolveEmbeddingEndpoint } from "../services/openai-embedding-client.js";
 import { createMemoryBridgeIfEnabled } from "../agentic-memory/memory-bridge-service.js";
 import { createAgenticLedgerIfEnabled } from "../agentic-memory/ledger.js";
@@ -218,7 +223,10 @@ import {
   buildDefaultBookingProviders,
   getBookingConfig,
 } from "../services/booking/index.js";
-import { buildQuoteAggregator } from "../services/booking/quote/index.js";
+import {
+  buildQuoteAggregator,
+  createSharedBrowserRunner,
+} from "../services/booking/quote/index.js";
 import { VoiceDialogueService } from "../services/voice-dialogue/voice-dialogue-service.js";
 import { OpenAITTSAdapter } from "../services/voice-dialogue/adapters/openai-tts-adapter.js";
 import { MiniMaxTTSAdapter } from "../services/voice-dialogue/adapters/minimax-tts-adapter.js";
@@ -537,6 +545,9 @@ import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
 import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
 
+/** 就绪闸单请求最长排队时间：到期放行，避免初始化卡死时请求无限挂起。 */
+const READY_GATE_TIMEOUT_MS = 120_000;
+
 /** 读 ndjson 尾部 N 行（P3 自诊断用；文件缺失/损坏返回空） */
 function readNdjsonTail(path: string, maxLines: number): unknown[] {
   try {
@@ -615,15 +626,89 @@ import { fetchHotRankings } from "../services/hot-rankings.js";
 import { RhythmCore } from "../body/rhythm-core.js";
 import { UserProfileStore } from "../services/user-personalization/user-profile-store.js";
 
-export async function createAppServices(): Promise<AppServices> {
-  const app = Fastify({ logger: true });
+/**
+ * MCP 工具发现放到后台：单 server 最长 15s，stdio initialize 卡死时吃满 30s，
+ * 不能让这段时间挡住服务监听。发现完成后再注册工具（注册表与聊天工具列表
+ * 都支持后置写入），失败只丢这一批外部工具。
+ */
+async function discoverMcpToolsInBackground(
+  mcpClientService: McpClientService,
+  toolRegistry: ToolRegistry,
+  log: (line: string) => void,
+): Promise<void> {
+  const startedAt = Date.now();
+  try {
+    await mcpClientService.discoverTools();
+  } catch (err) {
+    log(`[MCP] 工具发现失败: ${err instanceof Error ? err.message : String(err)}`);
+    return;
+  }
+  const tools = mcpClientService.listTools();
+  if (tools.length === 0) {
+    log("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
+    return;
+  }
+  registerMcpTools(toolRegistry, mcpClientService);
+  setMcpChatTools(buildMcpChatTools(mcpClientService));
+  log(
+    `[MCP] 已发现并注册 ${tools.length} 个 MCP 工具（${mcpClientService
+      .listServers()
+      .map((s) => s.alias)
+      .join(", ")}，耗时 ${Date.now() - startedAt}ms）`,
+  );
+}
+
+export async function createAppServices(
+  options: { socketMode?: boolean } = {},
+): Promise<AppServices> {
+  // socketMode：端口由监督进程持有，本进程只消费它递来的连接，因此不自建监听。
+  const app = Fastify(
+    options.socketMode
+      ? { logger: true, serverFactory: (handler) => createServer(handler) }
+      : { logger: true },
+  );
+  // 就绪闸：listen 先行时，运行状态初始化完成前只放行 /health，其余请求排队。
+  // 未走 listen 先行入口（单测等）时 awaitBoot() 返回 null，本钩子直接放行。
+  // 排队有上限：初始化意外卡住时到期放行（服务降级但不死等），只记一次告警。
+  let gateTimeoutLogged = false;
+  app.addHook("onRequest", async (request) => {
+    if (request.url === "/health" || request.url.startsWith("/health?")) return;
+    const gate = awaitBoot();
+    if (!gate) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = await Promise.race([
+      gate.then(() => false),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(true), READY_GATE_TIMEOUT_MS);
+      }),
+    ]);
+    if (timer) clearTimeout(timer);
+    if (timedOut && !gateTimeoutLogged) {
+      gateTimeoutLogged = true;
+      app.log.warn(
+        `[boot] 运行状态初始化超过 ${READY_GATE_TIMEOUT_MS / 1000}s 仍未完成，请求放行（可能读到未装载的数据）`,
+      );
+    }
+  });
   await app.register(cors, {
     origin: true,
     credentials: true,
     methods: ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With"],
   });
-  await registerHttpRateLimit(app, getHttpRateLimitRuntime());
+  // 限流按身份分键要用已验证 token，但 token 服务在下面才 new 出来 —— 这里留一个
+  // 后绑定引用：hook 每个请求实时读取，注册顺序（早于鉴权周界）保持不变。
+  let accessAuthServiceForLimit: AccessAuthService | null = null;
+  await registerHttpRateLimit(app, getHttpRateLimitRuntime(), {
+    resolveVerifiedActor(req) {
+      const token = AccessAuthService.extractToken({
+        authorization: req.headers.authorization,
+        queryToken: (req.query as { token?: string } | undefined)?.token,
+      });
+      if (!token) return null;
+      return accessAuthServiceForLimit?.verifyToken(token)?.userId ?? null;
+    },
+  });
   await app.register(websocket);
   await app.register(multipart, { limits: { fileSize: 500 * 1024 * 1024 } });
 
@@ -744,22 +829,16 @@ export async function createAppServices(): Promise<AppServices> {
 
   // ========== MCP 客户端服务 ==========
   const mcpClientService = new McpClientService();
-  // MCP 工具发现会 spawn 子进程 / 调 mcporter CLI，可能耗时（单 server 15s 超时），
-  // 与上面的持久化 load 并行启动，避免串行阻塞。
-  const mcpDiscoverTask = mcpClientService.listServers().length > 0
-    ? mcpClientService.discoverTools()
-    : Promise.resolve();
-  // 统一等待全部启动期异步任务（MCP 工具注册依赖 discover 结果）
-  await Promise.all([...bootLoads, mcpDiscoverTask]);
   // video.grab 的抖音/小红书适配器优先经 McpClientService 直连 yby6（mcporter CLI 生产机不可用）
   setVideoGrabMcpClientRef(mcpClientService);
-  const mcpToolCount = mcpClientService.listTools().length;
-  if (mcpToolCount > 0) {
-    registerMcpTools(toolRegistry, mcpClientService);
-    setMcpChatTools(buildMcpChatTools(mcpClientService));
-    app.log.info(`[MCP] 已发现并注册 ${mcpToolCount} 个 MCP 工具（${mcpClientService.listServers().map(s => s.alias).join(", ")}）`);
-  } else if (mcpClientService.listServers().length > 0) {
-    app.log.info("[MCP] 已配置 server 但未发现可用工具，请确认 mcporter 中已正确配置 server alias");
+  await Promise.all(bootLoads);
+  // MCP 工具发现不在启动关键路径上：它要 spawn 子进程 / 调 mcporter CLI，单 server
+  // 最长 15s，stdio initialize 卡死时吃满 30s 超时（实证 yby6-video 让首次就绪 +31s）。
+  // 发现完成后再补注册工具即可，期间服务照常监听，聊天工具列表随之刷新。
+  if (mcpClientService.listServers().length > 0) {
+    void discoverMcpToolsInBackground(mcpClientService, toolRegistry, (line) =>
+      app.log.info(line),
+    );
   } else {
     app.log.info("[MCP] 未配置 MCP Server（可通过 data/mcp-servers.json 或 MCP_SERVERS 环境变量配置）");
   }
@@ -958,6 +1037,9 @@ export async function createAppServices(): Promise<AppServices> {
   // 聚合器汇总，故这里无条件挂载。
   const quoteAggregator = buildQuoteAggregator({
     browserRunner: agentBrowserService,
+    // 内置浏览器补价通道：飞猪体验模式（无 API key）价格脱敏时，用用户自己
+    // 登录过的可见浏览器开详情页读实价；不可用时该源如实报错，不编价格。
+    sharedBrowserRunner: createSharedBrowserRunner(shoppingBrowserExecutor),
   });
   const bookingProviders = buildDefaultBookingProviders(bookingConfig, {
     quoteAggregator,
@@ -1495,16 +1577,9 @@ export async function createAppServices(): Promise<AppServices> {
   const featureCatalog = new FeatureCatalog(toolRegistry, skillManager, mcpClientService);
   registerCapabilityQueryTools(toolRegistry, { skillManager, virtualPhoneService });
 
-  // 本地内置向量引擎（零配置记忆底座）：没有任何远端 Embedding 端点时，
-  // 在记忆系统装配前预热回环 /v1/embeddings；远端显式配置时完全不启动。
-  if (!resolveEmbeddingEndpoint()) {
-    const localEndpoint = await ensureLocalEmbeddingEndpoint();
-    if (localEndpoint) {
-      console.log(
-        `[local-embedding] 零配置向量端点就绪 ${localEndpoint.baseUrl} (model=${localEndpoint.model}, dims=${localEndpoint.dims})`,
-      );
-    }
-  }
+  // 记忆装配要读嵌入端点：远端未配置时先把内置向量引擎拉起来（典型 ~150ms，
+  // 加载失败返回 null，记忆侧按既有降级路径继续）。listen 不依赖这一段。
+  if (!resolveEmbeddingEndpoint()) await ensureLocalEmbeddingEndpoint();
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
@@ -2689,6 +2764,8 @@ export async function createAppServices(): Promise<AppServices> {
   // 未开启时零行为变更。
   const accessAuthService = new AccessAuthService();
   await accessAuthService.load();
+  // 把同一份实例交给限流 hook（限流在 690 行附近先注册，此时还没 new 出来）
+  accessAuthServiceForLimit = accessAuthService;
   if (isAccessAuthRequired() && !accessAuthService.hasAnyTokens()) {
     // bootstrap：鉴权已开但一台设备都没绑过 → 控制台打印一枚引导绑定码，
     // 让首台设备免凭证完成绑定（此后 /api/auth/pairing-code 须持有效 token）。
@@ -3456,6 +3533,27 @@ export async function createAppServices(): Promise<AppServices> {
   const locationTrackingMode = locationCoordinator.getTrackingConfig().mode;
   const locationHistoryEnabled = isLocationHistoryEnabled(locationTrackingMode);
   const locationHistoryService = locationHistoryEnabled ? new LocationHistoryService() : null;
+  // 最近已知位置的第二级来源：内存缓存 miss（重启/热重载后必 miss）时回落到
+  // 本地位置历史，位置类工具因此不必每次都能现拉到 GPS。
+  locationCoordinator.setLastKnownProvider((actorId) => {
+    const sample = locationHistoryService?.latest(actorId);
+    if (!sample) return null;
+    const at = Date.parse(sample.recordedAt);
+    if (!Number.isFinite(at)) return null;
+    return {
+      payload: {
+        latitude: sample.latitude,
+        longitude: sample.longitude,
+        ...(sample.city ? { city: sample.city } : {}),
+        ...(sample.district ? { district: sample.district } : {}),
+        ...(sample.region ? { region: sample.region } : {}),
+        ...(sample.country ? { country: sample.country } : {}),
+        ...(sample.timezone ? { timezone: sample.timezone } : {}),
+        ...(sample.label ? { label: sample.label } : {}),
+      },
+      at,
+    };
+  });
   // 常去地点/移动信号注入 AgentCore：对话 prompt 的位置背景（实时位置 + 常去地点）。
   agentCore.setLocationHistory(locationHistoryService);
   // 方案 D 节律联动：位置历史（若有）作为 receptivity 的移动负信号喂入节律引擎
@@ -4535,6 +4633,14 @@ export async function createAppServices(): Promise<AppServices> {
   // personalityCore 字段不注入，降级到无人格内核模式。
   promptContextBuilder.setPersonalityProvider((actorId) => brainCenter?.getPersonalityCore(actorId) ?? null);
 
+  // 内置浏览器当前页进动态层：coordinator 已留存客户端回包里的 URL，这里只做带龄期的
+  // 一行事实注入；无上报返回 null（不注入、不占位）。
+  promptContextBuilder.setClientSurfacesProvider((actorId) => {
+    const snapshot = sharedBrowserCoordinator.lastUrlSnapshot(actorId);
+    if (!snapshot) return null;
+    return buildClientSurfacesBlock(snapshot.url, snapshot.at) ?? null;
+  });
+
   const wechatClawBindingService = new WechatClawBindingService();
   void wechatClawBindingService.load();
   // 微信接入聊天工具族：login_qr 经通用推卡通道把登录二维码实时推到聊天流
@@ -4867,12 +4973,7 @@ export async function createAppServices(): Promise<AppServices> {
     },
     embed: async (texts) => {
       try {
-        const { initLocalEmbeddingEngine } = await import(
-          "../agentic-memory/local-embedding/local-embedding-engine.js"
-        );
-        const engine = await initLocalEmbeddingEngine();
-        if (!engine) return null;
-        return await engine.embed(texts);
+        return await embedViaLocalEndpoint(texts);
       } catch (err) {
         console.log(`[InterestWatcher] 本地嵌入引擎不可用（退回字面匹配）: ${err}`);
         return null;
@@ -5046,7 +5147,7 @@ export async function createAppServices(): Promise<AppServices> {
   const weatherTimer = setInterval(() => void refreshWeatherLine(), 30 * 60_000);
   if (typeof weatherTimer.unref === "function") weatherTimer.unref();
 
-  // 目标板（L4 预执行）：会前准备包等后台预执行，就绪结果经 goal 流进评估器
+  // 目标板（L4 预执行）：后台预执行结果经 goal 流进评估器
   const goalBoard = new GoalBoard({
     dataPath: proactivityFabricPath,
     emitGoal: (goal) => {
@@ -5063,12 +5164,6 @@ export async function createAppServices(): Promise<AppServices> {
           body: String(goal.payload?.body ?? ""),
         },
       });
-    },
-    recallMemory: async (query, limit) => {
-      const actorId = primaryActor();
-      if (!brainCenter || !actorId) return [];
-      const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
-      return (result?.items ?? []).map((item) => item.content);
     },
   });
 
@@ -6762,23 +6857,6 @@ export async function createAppServices(): Promise<AppServices> {
     audit.cost = action.cost;
     appendEventAudit(join(getDataDir(), "proactivity", "events.ndjson"), audit);
   });
-  // 会前准备包触发：60s 检查下一个日程，20-40min 窗口内启动后台预执行（幂等）。
-  // actor 遍历状态板已知用户（与映射执行器同源），primaryActor 仅作兜底——
-  // hub 交互记录为空（新装/纯设备在线）时 prep 不能因此哑火（2026-09-24 E2E 实证）。
-  const meetingPrepTimer = setInterval(() => {
-    const next = scheduleSensor.latest();
-    if (!next || next.min <= 0) return;
-    const boardActors = worldBoard.knownActors();
-    const fallback = primaryActor();
-    const actorIds = boardActors.length > 0 ? boardActors : fallback ? [fallback] : [];
-    for (const actorId of actorIds) {
-      goalBoard.maybeStartMeetingPrep(actorId, {
-        title: next.title,
-        runAtMin: next.min,
-      });
-    }
-  }, 60_000);
-  if (typeof meetingPrepTimer.unref === "function") meetingPrepTimer.unref();
   mappingExecutor.start();
   arbiterV2.start();
   agentPulseService.start();

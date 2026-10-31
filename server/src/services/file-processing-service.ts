@@ -2,22 +2,10 @@ import { getDataDir } from "../config/data-dir.js";
 import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
+import { loadXlsx, sheetToJson } from "./xlsx-lazy.js";
 
-import pdfParse from "pdf-parse";
-import mammoth from "mammoth";
-import * as XLSX from "xlsx";
-
-/**
- * `xlsx@0.18.5` 的运行时**只有** `XLSX.utils.sheet_to_json`，顶层没有这个函数
- * （但类型声明把它挂在了顶层，写 `XLSX.sheet_to_json` 能过 tsc、运行时直接
- * "is not a function"）。这个坑曾让 `file.parse_office` 的 xlsx 分支 100% 失败
- * 并被 catch 成"xlsx 解析失败"，看起来像文件坏了。修于 2026-10-22。
- */
-const xlsxSheetToJson = (
-  XLSX.utils as unknown as {
-    sheet_to_json: <T>(sheet: unknown, opts?: Record<string, unknown>) => T[];
-  }
-).sheet_to_json;
+// pdf-parse / mammoth / xlsx（合计 ~40MB）只在真正解析文件时动态加载：
+// 它们占模块图加载时间与常驻内存的大头，而绝大多数进程生命周期里一个文件都不传。
 
 /**
  * 文件 / 文档处理能力服务。
@@ -210,6 +198,7 @@ export class FileProcessingService {
     const buffer = bufferResult.buffer;
 
     try {
+      const { default: pdfParse } = await import("pdf-parse");
       const result = await pdfParse(buffer);
       const fullText = result.text || "";
       // PDF 文本中 \f (form feed) 通常作为分页符
@@ -261,6 +250,7 @@ export class FileProcessingService {
 
     if (format === "docx") {
       try {
+        const { default: mammoth } = await import("mammoth");
         const result = await mammoth.convertToHtml({ buffer });
         const html = result.value || "";
         const totalBytes = Buffer.byteLength(html, "utf-8");
@@ -288,10 +278,11 @@ export class FileProcessingService {
 
     if (format === "xlsx") {
       try {
+        const XLSX = await loadXlsx();
         const wb = XLSX.read(buffer, { type: "buffer" });
         const sheets = wb.SheetNames.map((name) => {
           const ws = wb.Sheets[name];
-          const rows = xlsxSheetToJson<Record<string, unknown>>(ws);
+          const rows = sheetToJson<Record<string, unknown>>(XLSX, ws);
           return { name, rowCount: rows.length, rows: rows.slice(0, 200) };
         });
         return {
@@ -388,6 +379,7 @@ export class FileProcessingService {
           break;
         }
         case "xlsx": {
+          const XLSX = await loadXlsx();
           const wb = XLSX.utils.book_new();
           const rows = normalizeRows(content);
           const ws = XLSX.utils.json_to_sheet(rows);

@@ -15,6 +15,13 @@ function dedupLabel(parts: Array<string | undefined | null>): string {
     .join(" · ");
 }
 
+/** 位置龄期标注：仅回落到「最近已知位置」时出现，避免把旧定位当实时透出。 */
+function locationAgeNote(ageMs: number | null): string {
+  if (ageMs == null) return "";
+  const min = Math.max(1, Math.round(ageMs / 60_000));
+  return min < 60 ? `（约 ${min} 分钟前的定位）` : `（约 ${(min / 60).toFixed(1)} 小时前的定位）`;
+}
+
 export function registerWeatherTools(registry: ToolRegistry, weather: WeatherService): void {
   registry.register("weather.get_local", async (input, context) => {
     // 时区默认交给接口按坐标推导（auto）：服务端不用本机时区、不用出口 IP 的时区冒充
@@ -27,6 +34,8 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
     // 位置来源可观测（2026-10-08）：定位答错的排查日志——真机测试时看这行
     // 就知道 agent 为什么答这个城市（实时GPS/兜底解析/用户显式城市）。
     let locSource = city ? "explicit-city" : "unresolved";
+    /** 位置龄期（毫秒）：仅 last-known 一级有值，用于如实标注「N 分钟前的定位」 */
+    let locationAgeMs: number | null = null;
 
     if ((!Number.isFinite(lat) || !Number.isFinite(lon)) && !city) {
       // 用户未明确城市名：天气必须取「用户真实所在地」，禁止用训练数据臆测城市。
@@ -66,6 +75,25 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
           locSource = "resolved-geo-city";
           city = geo.city;
           if (!label) label = dedupLabel([geo.city, geo.region, geo.country]);
+        }
+      }
+
+      // 最后一级：最近一次已知位置（内存缓存 → 本地位置历史，跨重启仍可用）。
+      // 实时 GPS 拉不到不等于没有位置——旧坐标照样能出真实天气，但必须标龄期，
+      // 不能把 25 分钟前的定位当实时透出。
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+        const known = context.getLastKnownLocation?.();
+        if (known && Number.isFinite(known.latitude) && Number.isFinite(known.longitude)) {
+          locSource = "last-known";
+          lat = known.latitude;
+          lon = known.longitude;
+          locationAgeMs = known.ageMs;
+          if (!label) {
+            label =
+              dedupLabel([known.district, known.city, known.region, known.country]) ||
+              known.label ||
+              "";
+          }
         }
       }
     }
@@ -114,7 +142,9 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
       ...(brief.tomorrow?.rainWindow
         ? { tomorrowRainPeriod: rainWindowSuffixText(brief.tomorrow.rainWindow) }
         : {}),
-      locationLabel: brief.locationLabel,
+      locationLabel: [brief.locationLabel, locationAgeNote(locationAgeMs)]
+        .filter((s): s is string => !!s && String(s).trim().length > 0)
+        .join(" "),
       // 多日逐日预报（index 0 = 今天；仅当请求 >2 天时携带，避免单日轮次撑大返回）
       ...(days > 2 && brief.daily && brief.daily.length > 0
         ? { dailyForecast: brief.daily.map(withDayLabel) }

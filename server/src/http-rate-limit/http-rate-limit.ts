@@ -69,19 +69,27 @@ function tryConsumeComposite(state: ClientState, now: number, limits: PathRateLi
   return { ok: true };
 }
 
-function resolveClientKey(req: FastifyRequest, trustForwardedFor: boolean): string {
+function resolveClientKey(
+  req: FastifyRequest,
+  trustForwardedFor: boolean,
+  verifiedActor: string | null,
+): string {
+  // 已验证身份优先：移动端用户大量挂在运营商 NAT / 公司出口后面，按 IP 分桶会让
+  // 几十个人共用一个配额，硬件还空着就先 429。身份必须来自 token 验证，
+  // 不能取自报的 userId/query——那等于给攻击者无限开桶。
+  if (verifiedActor) return `actor:${verifiedActor}`;
   if (trustForwardedFor) {
     const raw = req.headers["x-forwarded-for"];
     if (typeof raw === "string") {
       const first = raw.split(",")[0]?.trim();
-      if (first) return first;
+      if (first) return `ip:${first}`;
     } else if (Array.isArray(raw) && raw[0]) {
       const first = raw[0].split(",")[0]?.trim();
-      if (first) return first;
+      if (first) return `ip:${first}`;
     }
   }
   const socketIp = req.socket.remoteAddress;
-  if (socketIp) return socketIp;
+  if (socketIp) return `ip:${socketIp}`;
   return "unknown";
 }
 
@@ -201,7 +209,19 @@ async function createRateLimitBackend(
   };
 }
 
-export async function registerHttpRateLimit(app: FastifyInstance, cfg: HttpRateLimitRuntime): Promise<void> {
+/**
+ * 身份解析钩子：返回「已验证」的 actor id（未验证必须返回 null —— body/query 里的
+ * userId 是调用方可伪造的，拿它分键等于给攻击者无限开桶）。
+ */
+export interface HttpRateLimitIdentityResolver {
+  resolveVerifiedActor(req: FastifyRequest): string | null;
+}
+
+export async function registerHttpRateLimit(
+  app: FastifyInstance,
+  cfg: HttpRateLimitRuntime,
+  identity: HttpRateLimitIdentityResolver = { resolveVerifiedActor: () => null },
+): Promise<void> {
   if (!cfg.enabled) return;
 
   const orderedRules = buildOrderedPathRateLimitRules({
@@ -217,7 +237,7 @@ export async function registerHttpRateLimit(app: FastifyInstance, cfg: HttpRateL
 
     const path = requestPath(req.url);
     const rule = resolvePathRateLimitRule(path, orderedRules);
-    const key = resolveClientKey(req, cfg.trustForwardedFor);
+    const key = resolveClientKey(req, cfg.trustForwardedFor, identity.resolveVerifiedActor(req));
     const result = await backend.tryConsume(key, rule);
     if (result.ok) return;
 

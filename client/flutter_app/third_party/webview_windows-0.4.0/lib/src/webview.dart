@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:ffi' as ffi;
 import 'dart:ui';
 
 import 'package:flutter/gestures.dart';
@@ -9,6 +10,35 @@ import 'package:flutter/widgets.dart';
 
 import 'enums.dart';
 import 'cursor.dart';
+
+typedef _GetAsyncKeyStateNative = ffi.Int16 Function(ffi.Int32);
+typedef _GetAsyncKeyStateDart = int Function(int);
+
+_GetAsyncKeyStateDart? _getAsyncKeyState;
+bool _getAsyncKeyStateFailed = false;
+
+/// VK_CONTROL (0x11); GetAsyncKeyState 高位 = 物理按下瞬间状态，
+/// 不依赖 Flutter 收没收到 keydown（WebView 抢焦点/前台切换会吞事件）。
+int? _queryVkControl() {
+  if (_getAsyncKeyStateFailed) return null;
+  try {
+    _getAsyncKeyState ??= ffi.DynamicLibrary.open('user32.dll')
+        .lookup<ffi.NativeFunction<_GetAsyncKeyStateNative>>(
+            'GetAsyncKeyState')
+        .asFunction();
+    return _getAsyncKeyState!(0x11) & 0x8000;
+  } catch (_) {
+    _getAsyncKeyStateFailed = true;
+    return null;
+  }
+}
+
+/// Ctrl 判定：优先 OS 物理键状态，FFI 不可用时退回 HardwareKeyboard。
+bool _isCtrlHeld() {
+  final int? vk = _queryVkControl();
+  if (vk == null) return HardwareKeyboard.instance.isControlPressed;
+  return vk != 0 || HardwareKeyboard.instance.isControlPressed;
+}
 
 class HistoryChanged {
   final bool canGoBack;
@@ -21,6 +51,10 @@ typedef PermissionRequestedDelegate
         String url, WebviewPermissionKind permissionKind, bool isUserInitiated);
 
 typedef ScriptID = String;
+
+/// Ctrl+滚轮缩放回调：按下一档传 +1，上一档传 -1。设置后 Ctrl+滚轮不再透传
+/// 页面滚动（WebView2 原生收不到键盘修饰键，缩放只能在宿主层驱动）。
+typedef ZoomStepDelegate = void Function(int step);
 
 /// Attempts to translate a button constant such as [kPrimaryMouseButton]
 /// to a [PointerButton]
@@ -93,6 +127,9 @@ class WebviewController extends ValueNotifier<WebviewValue> {
 
   late Completer<void> _creatingCompleter;
   int _textureId = 0;
+
+  /// 渲染纹理 id（初始化后有效；宿主层直接走 method channel 时需要）。
+  int get textureId => _textureId;
   bool _isDisposed = false;
 
   Future<void> get ready => _creatingCompleter.future;
@@ -370,6 +407,58 @@ class WebviewController extends ValueNotifier<WebviewValue> {
     return jsonDecode(data as String);
   }
 
+  /// 把滚轮投递到页面坐标 (dx, dy) 处的元素。
+  ///
+  /// 为什么不走 SendMouseInput(WHEEL)：实测本机 WebView2 Runtime（156.x）
+  /// 只投递 point=(0,0) 的滚轮事件，任何非零坐标一律静默丢弃（按住鼠标
+  /// 键也不行；点击不受影响）——滚轮在宿主层转发等于完全失效。改为在页面
+  /// 里向 elementFromPoint 命中的元素派发 WheelEvent：MapLibre 等监听
+  /// wheel 的组件照常工作；事件未被 preventDefault 时手动滚动最近的可
+  /// 滚动祖先，兜底页面默认滚动。
+  ///
+  /// [pos]/[delta] 是 Flutter 逻辑坐标；页面缩放（put_ZoomFactor）会改
+  /// 变 CSS 像素与逻辑像素的比值，由页面自己的 devicePixelRatio 换算。
+  Future<void> dispatchScrollAt(Offset pos, Offset delta, double devicePixelRatio) async {
+    if (_isDisposed) {
+      return;
+    }
+    assert(value.isInitialized);
+    final String js = """
+(function(){
+  var z = window.devicePixelRatio / __DPR__;
+  var x = __FX__ / z, y = __FY__ / z;
+  var sx = __DX__ / z, sy = __DY__ / z;
+  var el = document.elementFromPoint(x, y);
+  if (!el) { (document.scrollingElement || document.documentElement).scrollBy(sx, sy); return true; }
+  var ev = new WheelEvent('wheel', {deltaX: sx, deltaY: sy, clientX: x, clientY: y, bubbles: true, cancelable: true});
+  el.dispatchEvent(ev);
+  if (ev.defaultPrevented) return true;
+  var n = el;
+  while (n) {
+    if (n.nodeType === 1) {
+      var cs = getComputedStyle(n);
+      var canY = (cs.overflowY === 'auto' || cs.overflowY === 'scroll') && n.scrollHeight - n.clientHeight > 1;
+      var canX = (cs.overflowX === 'auto' || cs.overflowX === 'scroll') && n.scrollWidth - n.clientWidth > 1;
+      if ((canY && sy !== 0) || (canX && sx !== 0)) { n.scrollBy(sx, sy); return true; }
+    }
+    if (n === document.documentElement || n === document.body) break;
+    n = n.parentElement;
+  }
+  (document.scrollingElement || document.documentElement).scrollBy(sx, sy);
+  return true;
+})()"""
+        .replaceAll('__DPR__', '$devicePixelRatio')
+        .replaceAll('__FX__', '${pos.dx}')
+        .replaceAll('__FY__', '${pos.dy}')
+        .replaceAll('__DX__', '${delta.dx}')
+        .replaceAll('__DY__', '${delta.dy}');
+    try {
+      await executeScript(js);
+    } catch (_) {
+      // 页面跳转中执行失败：丢弃本次滚轮
+    }
+  }
+
   /// Posts the given JSON-formatted message to the current document.
   Future<void> postWebMessage(String message) async {
     if (_isDisposed) {
@@ -581,12 +670,16 @@ class Webview extends StatefulWidget {
   /// unless specifying a [scaleFactor].
   final FilterQuality filterQuality;
 
+  /// Ctrl+滚轮缩放回调（见 [ZoomStepDelegate]）。null 时 Ctrl+滚轮照旧透传滚动。
+  final ZoomStepDelegate? onCtrlWheelZoom;
+
   const Webview(this.controller,
       {this.width,
       this.height,
       this.permissionRequested,
       this.scaleFactor,
-      this.filterQuality = FilterQuality.none});
+      this.filterQuality = FilterQuality.none,
+      this.onCtrlWheelZoom});
 
   @override
   _WebviewState createState() => _WebviewState();
@@ -703,9 +796,22 @@ class _WebviewState extends State<Webview> {
                       }
                     },
                     onPointerSignal: (signal) {
+                      if (signal is PointerScrollEvent &&
+                          widget.onCtrlWheelZoom != null &&
+                          _isCtrlHeld()) {
+                        widget.onCtrlWheelZoom!(
+                            signal.scrollDelta.dy < 0 ? 1 : -1);
+                        return;
+                      }
                       if (signal is PointerScrollEvent) {
-                        _controller._setScrollDelta(
-                            -signal.scrollDelta.dx, -signal.scrollDelta.dy);
+                        _controller.dispatchScrollAt(
+                          signal.localPosition,
+                          signal.scrollDelta,
+                          widget.scaleFactor ??
+                              WidgetsBinding
+                                  .instance.platformDispatcher.views.first
+                                  .devicePixelRatio,
+                        );
                       }
                     },
                     onPointerPanZoomUpdate: (signal) {

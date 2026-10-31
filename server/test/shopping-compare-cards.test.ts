@@ -63,7 +63,7 @@ function compareResultFixture(): Record<string, unknown> {
   };
 }
 
-test("compare.prices 卡：行带缩略图与可点链接，疑似同款标注，决策页行", () => {
+test("compare.prices 卡：行带缩略图、疑似同款标注；卡内不承载网页链接与决策页入口行", () => {
   const p = buildToolCard("shopping.compare.prices", {
     ...compareResultFixture(),
     decisionPageUrl: "/shopping/decision-page?id=abc123",
@@ -71,34 +71,33 @@ test("compare.prices 卡：行带缩略图与可点链接，疑似同款标注�
   assert.ok(p);
   assert.equal(p.cardType, "price_compare");
   assert.ok(p.title.includes("比价结果"));
-  // 两组报价 + 1 行决策页入口
-  assert.equal(p.items.length, 3);
+  // 两组报价（决策页不再作为卡内入口行）
+  assert.equal(p.items.length, 2);
   const row0 = p.items[0]!;
   assert.ok(row0.text.includes("¥1869"), `实际：${row0.text}`);
   assert.ok(row0.text.includes("[拼多多]"));
   assert.ok(row0.text.includes("等2家"), `应标注组内报价数：${row0.text}`);
-  assert.equal(row0.url, "https://pdd.com/xm5");
+  assert.equal((row0 as { url?: unknown }).url, undefined);
   assert.equal(row0.thumbnailUrl, "https://img.example.com/xm5.jpg");
   const row1 = p.items[1]!;
   assert.ok(row1.text.includes("疑似同款"));
-  assert.equal(row1.url, "https://dy.com/x");
+  assert.equal((row1 as { url?: unknown }).url, undefined);
   // 无图的组不产出 thumbnailUrl 字段
   assert.equal(row1.thumbnailUrl, undefined);
-  const dpRow = p.items[2]!;
-  assert.ok(dpRow.text.includes("决策页"));
-  assert.equal(dpRow.url, "/shopping/decision-page?id=abc123");
-  // 专属卡结构化载荷：分组报价 + 决策页入口（专属卡客户端消费）
+  assert.ok(!p.items.some((i) => i.text.includes("决策页")), "卡内不再有决策页入口行");
+  // 专属卡结构化载荷：分组报价（客户端只展示，无跳转字段）
   assert.ok(p.priceCompare);
   assert.equal(p.priceCompare.groups.length, 2);
   assert.equal(p.priceCompare.groups[0]!.priceCny, 1869);
   assert.equal(p.priceCompare.groups[0]!.platform, "拼多多");
-  assert.equal(p.priceCompare.groups[0]!.url, "https://pdd.com/xm5");
+  assert.equal((p.priceCompare.groups[0] as { url?: unknown }).url, undefined);
   assert.equal(p.priceCompare.groups[0]!.image, "https://img.example.com/xm5.jpg");
   assert.equal(p.priceCompare.groups[0]!.offerCount, 2);
   assert.equal(p.priceCompare.groups[1]!.similar, true);
-  assert.equal(p.priceCompare.decisionPageUrl, "/shopping/decision-page?id=abc123");
+  assert.equal((p.priceCompare as { decisionPageUrl?: unknown }).decisionPageUrl, undefined);
   // footer 不回显「最低价 ¥X 来自 平台」搜索源内容（2026-10-28 移除，列表行已含价格与平台）
   assert.ok(!p.footer!.includes("来自 拼多多"));
+  assert.ok(!p.footer!.includes("行可点"), `footer 不应再宣称可点跳转：${p.footer}`);
   assert.ok(p.footer!.includes("以下单结算页为准"));
 });
 
@@ -114,13 +113,13 @@ test("compare.prices 卡：无图无链接的旧形态回执仍出卡（向后�
   });
   assert.ok(p);
   assert.equal(p.items.length, 1);
-  assert.equal(p.items[0]!.url, undefined);
+  assert.equal((p.items[0] as { url?: unknown }).url, undefined);
   assert.equal(p.items[0]!.thumbnailUrl, undefined);
   // 无决策页存档时不追加入口行
   assert.ok(!p.items[0]!.text.includes("决策页"));
 });
 
-test("order.search 卡：单平台搜索与比价卡同版式（缩略图+可点行+最低价 footer）", () => {
+test("order.search 卡：单平台搜索与比价卡同版式（缩略图+报价行+最低价 footer，条目不挂链接）", () => {
   const p = buildToolCard("shopping.order.search", {
     ok: true,
     query: "小米 15",
@@ -136,8 +135,9 @@ test("order.search 卡：单平台搜索与比价卡同版式（缩略图+可点
   assert.ok(p.title!.includes("搜索结果：小米 15 · taobao"));
   assert.equal(p.items.length, 2);
   assert.ok(p.items[0]!.text.includes("¥3799"));
-  assert.equal(p.items[0]!.url, "https://item.taobao.com/item.htm?id=1");
+  assert.equal((p.items[0] as { url?: unknown }).url, undefined);
   assert.ok(p.footer!.includes("最低 ¥3799"));
+  assert.ok(!p.footer!.includes("行可点"), `footer 不应再宣称可点跳转：${p.footer}`);
 });
 
 /* ─────────────── 2. compare.watch builder ─────────────── */
@@ -171,7 +171,7 @@ test("compare.watch 卡：空列表 / 失败回执 → null（回退文本路由
 
 /* ─────────────── 3. compare.research builder ─────────────── */
 
-test("compare.research 卡：来源清单可点 + disclaimer footer + search_result 卡型", () => {
+test("compare.research 卡：条目不承载网页链接 + disclaimer footer + search_result 卡型", () => {
   const p = buildToolCard("shopping.compare.research", {
     ok: true,
     topic: "好医保 vs 平安e生保",
@@ -193,7 +193,9 @@ test("compare.research 卡：来源清单可点 + disclaimer footer + search_res
   assert.equal(p.cardType, "search_result");
   assert.equal(p.title, "调研对比：好医保 vs 平安e生保");
   assert.equal(p.items.length, 2, "重复 url 与空条目应被过滤");
-  assert.equal(p.items[0]!.url, "https://example.com/review");
+  assert.equal((p.items[0] as { url?: unknown }).url, undefined, "条目不承载网页链接");
+  assert.equal(p.items[0]!.source, undefined, "条目不承载来源站点");
+  assert.ok(!p.items.some((i) => i.text.includes("来源")), "正文不出现「来源:」");
   assert.ok(p.items[0]!.text.includes("四个维度"));
   assert.ok(p.footer!.includes("仅供参考"));
 });
@@ -280,6 +282,39 @@ test("comparePrices：onCompareResult 抛异常不影响比价回执", async () 
     const res = await service.comparePrices(makeCtx(), "Sony WH-1000XM5");
     assert.ok(res.ok);
     assert.equal((res as unknown as Record<string, unknown>).decisionPageUrl, undefined);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("comparePrices：平台把页面拦到登录页 → 停在登录页交接，不再跑后续平台", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  const calls: string[] = [];
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["jd", "pdd", "taobao"],
+        canUseVisibleBrowser: () => true,
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          calls.push(platform);
+          if (platform === "pdd") {
+            return { ok: false, error: "等待扫码登录超时（20s）", retryable: true, loginRequired: { platform: "pdd" } };
+          }
+          return {
+            ok: true,
+            products: [{ title: "红牛维生素功能饮料250ml*24罐 整箱", price: platform === "jd" ? 129 : 135 }],
+          };
+        },
+      } as unknown as ShoppingOrderService,
+      dataDir,
+    });
+    const res = await service.comparePrices(makeCtx(), "红牛", { platforms: ["jd", "pdd", "taobao"] });
+    assert.ok(res.ok);
+    const typed = res as unknown as Record<string, unknown>;
+    assert.deepEqual(calls, ["jd", "pdd"], "登录交接后可见浏览器必须留在登录页，不再导航到下一个平台");
+    assert.deepEqual(typed.loginRequired, { platform: "pdd", label: "拼多多" });
+    assert.ok(String(typed.summary).includes("拼多多需要登录"), `summary 要说明哪个平台在等登录：${typed.summary}`);
     await service.flush();
   } finally {
     await rm(dataDir, { recursive: true, force: true });

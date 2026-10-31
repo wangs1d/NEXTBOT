@@ -20,7 +20,7 @@ import { createHash } from "node:crypto";
 import { promisify } from "node:util";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { serverRoot } from "../config/paths.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -67,12 +67,7 @@ function resolveCliRoot(): string {
   const fromEnv = process.env.ALIPAY_BOT_CLI_ROOT?.trim();
   if (fromEnv && existsSync(fromEnv)) return resolve(fromEnv);
 
-  const candidates: string[] = [];
-  const viaModule = dirname(fileURLToPath(import.meta.url));
-  candidates.push(
-    join(viaModule, "..", "..", "..", "alipay-bot-cli"), // src/services -> server/alipay-bot-cli
-    join(viaModule, "..", "..", "alipay-bot-cli"),       // dist/services -> server/alipay-bot-cli
-  );
+  const candidates: string[] = [join(serverRoot(), "alipay-bot-cli")];
   let dir = resolve(process.cwd());
   for (let i = 0; i < 6; i++) {
     candidates.push(join(dir, "alipay-bot-cli"));
@@ -90,11 +85,7 @@ function resolveStateHome(): string {
   const fromEnv = process.env.ALIPAY_BOT_STATE_HOME?.trim();
   if (fromEnv) return resolve(fromEnv);
 
-  const viaModule = dirname(fileURLToPath(import.meta.url));
-  const candidates = [
-    join(viaModule, "..", "..", "data", "alipay-bot-state"), // src/services -> server/data/alipay-bot-state
-    join(viaModule, "..", "..", "..", "data", "alipay-bot-state"), // 兼容 dist 上溯深度差异
-  ];
+  const candidates = [join(serverRoot(), "data", "alipay-bot-state")];
   let dir = resolve(process.cwd());
   for (let i = 0; i < 6; i++) {
     candidates.push(join(dir, "data", "alipay-bot-state"));

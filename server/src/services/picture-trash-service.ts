@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 
-import sharp from "sharp";
+import { loadSharp } from "./sharp-lazy.js";
 import type { ImageAsset, PictureKit } from "@nextbot/picture";
 
 /**
@@ -105,6 +105,7 @@ export class PictureTrashService {
     // 列表预览图（缩略图可能已被移走，从回收站内的原图生成）
     const previewPath = join(this.trashDir, `${trashId}_preview.webp`);
     try {
+      const sharp = await loadSharp();
       await sharp(originalTrashPath, { animated: false })
         .rotate()
         .resize({ width: PREVIEW_WIDTH, withoutEnlargement: true })

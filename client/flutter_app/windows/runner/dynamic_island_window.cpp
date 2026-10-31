@@ -12,8 +12,10 @@
 #include <thread>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <tuple>
@@ -206,18 +208,31 @@ HFONT CachedIslandFont(const wchar_t* family, int size, int weight,
   if (it != cache.end()) return it->second;
   HFONT font = CreateFontW(size, 0, 0, 0, weight, FALSE, strike ? TRUE : FALSE,
                            FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
-                           CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+                           CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY,
                            DEFAULT_PITCH | FF_SWISS, family);
   cache[key] = font;
   return font;
 }
 
 HFONT MakeIslandFont(int size, int weight, bool strike = false) {
-  // 字重路由：基础族只有 Regular/Bold 两面，<600 的请求会掉回 Regular；
-  // Medium 是独立族名，须显式点名（probe-island-fonts-final.ps1 实证）。
-  const wchar_t* family =
-      weight < 600 ? IslandFontFamilyMedium() : IslandFontFamily();
-  return CachedIslandFont(family, size, weight, strike);
+  // 分层选面：GDI 只在 RIBBI 范围内做字重匹配，Medium/Semibold 是独立
+  // 族名，必须按档点名；点名后 lfWeight 固定为该面本身，避免合成加粗。
+  const wchar_t* family = IslandFontFamilyRegular();
+  int face_weight = 400;
+  if (weight >= 700) {
+    family = IslandFontFamily();
+    face_weight = 700;
+  } else if (weight >= 600) {
+    family = IslandFontFamilySemibold();
+  } else if (weight >= 450) {
+    family = IslandFontFamilyMedium();
+  }
+  return CachedIslandFont(family, size, face_weight, strike);
+}
+
+// 字形必须落在整像素上：GDI+ 亚像素原点会把整行重采样，小字号直接糊掉。
+Gdiplus::PointF SnapText(float x, float y) {
+  return Gdiplus::PointF(std::floor(x + 0.5f), std::floor(y + 0.5f));
 }
 
 // 状态图标专用：Segoe MDL2 Assets 字形不在 MiSans 里，必须独立字族。
@@ -270,6 +285,42 @@ void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
   Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 130, 120), 1.7f);
   g.DrawLine(&pen, cx - 3.1f * s, cy - 3.1f * s, cx + 3.1f * s, cy + 3.1f * s);
   g.DrawLine(&pen, cx - 3.1f * s, cy + 3.1f * s, cx + 3.1f * s, cy - 3.1f * s);
+}
+
+// 音符图标（MDL2 没有稳定可用的音符字形，直接矢量画：符头 + 符干 + 旗）。
+void DrawMusicNote(Gdiplus::Graphics& g, float cx, float cy, float s,
+                   BYTE alpha) {
+  Gdiplus::SolidBrush brush(Gdiplus::Color(alpha, 255, 255, 255));
+  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 255, 255), 1.4f * s);
+  const float rx = 3.2f * s;
+  const float ry = 2.4f * s;
+  const float head_cy = cy + 3.0f * s;
+  g.FillEllipse(&brush, cx - rx, head_cy - ry, rx * 2, ry * 2);
+  const float stem_x = cx + rx - 0.4f * s;
+  g.DrawLine(&pen, stem_x, head_cy, stem_x, cy - 6.0f * s);
+  g.DrawLine(&pen, stem_x, cy - 6.0f * s, stem_x + 2.6f * s,
+             cy - 2.2f * s);
+}
+
+int64_t NowEpochMs() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(
+             std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
+
+// 播放进度显示（m:ss；一小时以上回退到 h:mm:ss 的 mm:ss 尾部）。
+std::wstring FormatClock(double seconds) {
+  if (seconds < 0 || !std::isfinite(seconds)) seconds = 0;
+  const int total = static_cast<int>(seconds + 0.5);
+  wchar_t buf[32];
+  if (total >= 3600) {
+    _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%d:%02d:%02d", total / 3600,
+                 (total / 60) % 60, total % 60);
+  } else {
+    _snwprintf_s(buf, _countof(buf), _TRUNCATE, L"%d:%02d", total / 60,
+                 total % 60);
+  }
+  return buf;
 }
 
 double EaseOutCubic(double t) { return 1.0 - std::pow(1.0 - t, 3.0); }
@@ -347,6 +398,78 @@ void RoundedPath(Gdiplus::GraphicsPath* path, const Gdiplus::RectF& r,
   path->AddArc(r.X + r.Width - d, r.Y + r.Height - d, d, d, 0, 90);
   path->AddArc(r.X, r.Y + r.Height - d, d, d, 90, 90);
   path->CloseFigure();
+}
+
+uint64_t Fnv1a64(const std::string& bytes) {
+  uint64_t hash = 1469598103934665603ull;
+  for (unsigned char c : bytes) {
+    hash ^= c;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+// SMTC 封面字节 -> GDI+ 位图。播放器给的多为 JPEG/PNG，走内存流解码，
+// 失败返回空（界面回落到占位音符，不编造封面）。
+std::unique_ptr<Gdiplus::Bitmap> DecodeImageBytes(const std::string& bytes) {
+  if (bytes.empty()) return nullptr;
+  HGLOBAL mem = GlobalAlloc(GMEM_MOVEABLE, bytes.size());
+  if (mem == nullptr) return nullptr;
+  void* dst = GlobalLock(mem);
+  if (dst == nullptr) {
+    GlobalFree(mem);
+    return nullptr;
+  }
+  memcpy(dst, bytes.data(), bytes.size());
+  GlobalUnlock(mem);
+  IStream* stream = nullptr;
+  if (FAILED(CreateStreamOnHGlobal(mem, TRUE, &stream)) || stream == nullptr) {
+    GlobalFree(mem);
+    return nullptr;
+  }
+  std::unique_ptr<Gdiplus::Bitmap> bitmap(
+      Gdiplus::Bitmap::FromStream(stream));
+  stream->Release();
+  if (!bitmap || bitmap->GetLastStatus() != Gdiplus::Ok) return nullptr;
+  if (bitmap->GetWidth() == 0 || bitmap->GetHeight() == 0) return nullptr;
+  return bitmap;
+}
+
+// 封面：圆角方形、等比裁中；没有封面时画占位底 + 音符。
+void DrawCoverArt(Gdiplus::Graphics& g, Gdiplus::Bitmap* art,
+                  const Gdiplus::RectF& rect, float radius, BYTE alpha,
+                  float s) {
+  Gdiplus::GraphicsPath path;
+  RoundedPath(&path, rect, radius);
+  Gdiplus::SolidBrush placeholder(
+      Gdiplus::Color(static_cast<BYTE>(alpha * 14 / 255), 255, 255, 255));
+  g.FillPath(&placeholder, &path);
+  if (art != nullptr && art->GetLastStatus() == Gdiplus::Ok) {
+    const float iw = static_cast<float>(art->GetWidth());
+    const float ih = static_cast<float>(art->GetHeight());
+    const float scale = std::max(rect.Width / iw, rect.Height / ih);
+    const float dw = iw * scale;
+    const float dh = ih * scale;
+    Gdiplus::GraphicsState state = g.Save();
+    g.SetClip(&path);
+    Gdiplus::ColorMatrix cm = {};
+    cm.m[0][0] = 1.0f;
+    cm.m[1][1] = 1.0f;
+    cm.m[2][2] = 1.0f;
+    cm.m[3][3] = static_cast<float>(alpha) / 255.0f;
+    cm.m[4][4] = 1.0f;
+    Gdiplus::ImageAttributes attrs;
+    attrs.SetColorMatrix(&cm);
+    g.DrawImage(art,
+                Gdiplus::RectF(rect.X + (rect.Width - dw) / 2.0f,
+                               rect.Y + (rect.Height - dh) / 2.0f, dw, dh),
+                0.0f, 0.0f, iw, ih, Gdiplus::UnitPixel, &attrs);
+    g.Restore(state);
+  } else {
+    DrawMusicNote(g, rect.X + rect.Width / 2.0f,
+                  rect.Y + rect.Height / 2.0f - 0.5f * s, s * 0.8f,
+                  static_cast<BYTE>(alpha * 80 / 100));
+  }
 }
 
 }  // namespace
@@ -532,6 +655,350 @@ void DynamicIslandWindow::SetVoiceTalkMode(bool enabled) {
   if (voice_talk_mode_ == enabled) return;
   voice_talk_mode_ = enabled;
   if (window_handle_ != nullptr) Render();
+}
+
+// ── 音乐歌词（背景态）──
+
+void DynamicIslandWindow::SetMediaPlayback(const MusicPlayback& playback) {
+  const std::string previous_key = MusicActive() ? MusicTrackKey() : "";
+  const bool had_track = MusicActive();
+  music_ = playback;
+  const bool track_changed = had_track && previous_key != MusicTrackKey();
+  if (track_changed || (MusicActive() && !had_track)) {
+    wchar_t probe[96] = {};
+    _snwprintf_s(probe, _countof(probe), _TRUNCATE,
+                 L"music-track dur=%.0f thumb=%d lines=%d",
+                 playback.duration_sec, playback.thumbnail.empty() ? 0 : 1,
+                 static_cast<int>(music_lines_.size()));
+    IslandLifecycleLog(window_handle_, probe);
+  }
+  if (!playback.has_session || playback.title.empty()) {
+    music_lines_.clear();
+    music_lyric_reason_.clear();
+    music_lyric_track_key_.clear();
+  } else if (!music_lyric_track_key_.empty() &&
+             music_lyric_track_key_ != MusicTrackKey()) {
+    // 换歌：旧歌词立即失效（期间只显示歌名），等 Dart 拉回新词。
+    music_lines_.clear();
+    music_lyric_reason_.clear();
+    music_lyric_track_key_.clear();
+  }
+  if (!playback.has_session || playback.title.empty() || track_changed ||
+      !had_track) {
+    // 换歌/收尾：歌词回到未初始化位置，封面按新曲目重新解码。
+    music_roll_target_ = -2;
+    music_roll_from_ = -1.0;
+    music_roll_pos_ = -1.0;
+    music_roll_start_s_ = -1.0;
+    music_art_.reset();
+    music_art_hash_ = 0;
+  }
+  UpdateMusicArt(playback.thumbnail);
+  ApplyPendingLyrics();
+  if (window_handle_ != nullptr) {
+    // 心跳可能已停（暂停/无词态）：恢复播放且有词时重新拉起，卡拉OK才能逐帧推进。
+    if (music_.playing && !music_lines_.empty()) StartAnimTimer();
+    Render();
+  }
+}
+
+// 歌词载荷可能早于播放状态到达（岛刚建好、首帧 SMTC 采样还没进来）：
+// 先按曲目键挂起，等播放状态到位且键对上再落；键对不上说明已是别的歌，丢弃。
+void DynamicIslandWindow::ApplyPendingLyrics() {
+  if (pending_track_key_.empty()) return;
+  if (!MusicActive()) return;
+  if (pending_track_key_ != MusicTrackKey()) {
+    pending_track_key_.clear();
+    pending_lines_.clear();
+    pending_reason_.clear();
+    return;
+  }
+  const bool had_lines = !music_lines_.empty();
+  music_lyric_track_key_ = pending_track_key_;
+  music_lines_ = std::move(pending_lines_);
+  music_lyric_reason_ = pending_reason_;
+  pending_track_key_.clear();
+  pending_lines_.clear();
+  pending_reason_.clear();
+  if (!had_lines && !music_lines_.empty()) music_roll_target_ = -2;
+}
+
+void DynamicIslandWindow::UpdateMusicArt(const std::string& thumbnail) {
+  const uint64_t hash = Fnv1a64(thumbnail);
+  if (hash == music_art_hash_) return;
+  music_art_hash_ = hash;
+  music_art_.reset();
+  if (thumbnail.empty()) return;
+  music_art_ = DecodeImageBytes(thumbnail);
+}
+
+// 唱到哪亮到哪：整句先画弱化底字，再按行内已唱比例裁剪出亮字部分。
+void DrawKaraokeText(Gdiplus::Graphics& g, const Gdiplus::Font& font,
+                     const std::wstring& text, float x, float y, float text_w,
+                     float text_h, BYTE fade, float progress) {
+  Gdiplus::SolidBrush base_brush(
+      Gdiplus::Color(static_cast<BYTE>(fade * 34 / 100), 255, 255, 255));
+  g.DrawString(text.c_str(), -1, &font, Gdiplus::PointF(x, y), &base_brush);
+  if (progress <= 0.0f) return;
+  Gdiplus::RectF lit_clip(x, y - 2.0f,
+                          text_w * std::min(progress, 1.0f), text_h + 4.0f);
+  g.SetClip(lit_clip);
+  Gdiplus::SolidBrush lit_brush(Gdiplus::Color(fade, 255, 255, 255));
+  g.DrawString(text.c_str(), -1, &font, Gdiplus::PointF(x, y), &lit_brush);
+  g.ResetClip();
+}
+
+// 歌词视口（音乐独占卡与日程卡的歌词区共用同一画法）：三行、当前行居中放大，
+// 上下 22px 渐隐遮影；行位置取 music_roll_pos_，换行时整体滚过去。
+void DynamicIslandWindow::DrawLyricViewport(Gdiplus::Graphics& g, HDC mem_dc,
+                                            float text_x, float mask_x,
+                                            float mask_w, float text_w,
+                                            float top, BYTE fade) const {
+  const float s = static_cast<float>(dpi_scale_);
+  if (music_lines_.empty()) {
+    // 没有歌词就如实写原因（伴奏 / 未收录 / 没找到同歌手版本），不拿翻唱顶替。
+    const std::wstring reason = music_lyric_reason_.empty()
+                                    ? L"正在找歌词"
+                                    : Utf8ToWide(music_lyric_reason_);
+    Gdiplus::Font reason_font(mem_dc, MakeIslandFont(S(13), 500));
+    const std::wstring fitted = FitText(g, reason, reason_font, text_w);
+    Gdiplus::RectF m;
+    g.MeasureString(fitted.c_str(), -1, &reason_font, Gdiplus::PointF(0, 0), &m);
+    Gdiplus::SolidBrush reason_brush(Gdiplus::Color(
+        static_cast<BYTE>(fade * 74 / 100), 255, 255, 255));
+    g.DrawString(fitted.c_str(), -1, &reason_font,
+                 SnapText(text_x,
+                          top + (static_cast<float>(kLyricEmptyH) * s - m.Height) /
+                                    2.0f),
+                 &reason_brush);
+    return;
+  }
+
+  const int total = static_cast<int>(music_lines_.size());
+  const double pos = music_roll_pos_;
+  const float center_y = top + static_cast<float>(kLyricViewportH) * s / 2.0f;
+  const int first = static_cast<int>(std::floor(pos)) - 1;
+  const int last = static_cast<int>(std::ceil(pos)) + 1;
+  auto drawLine = [&](int i, bool emphasized) {
+    if (i < 0 || i >= total) return;
+    const double d = static_cast<double>(i) - pos;
+    const double cur_t = std::max(0.0, 1.0 - std::abs(d));
+    if ((cur_t > 0.5) != emphasized) return;
+    const int weight = emphasized ? 600 : 500;
+    const int base_size = static_cast<int>(std::lround(15.0 + 5.0 * cur_t));
+    const std::wstring text = Utf8ToWide(music_lines_[i].text);
+    if (text.empty()) return;
+    // 当前行先降档再截断：长歌词宁可小一号也要整句可读。
+    std::wstring fitted;
+    int draw_size = base_size;
+    for (int sz = base_size; sz >= 14; --sz) {
+      Gdiplus::Font probe(mem_dc, MakeIslandFont(S(sz), weight));
+      fitted = FitText(g, text, probe, text_w);
+      draw_size = sz;
+      if (fitted == text) break;
+    }
+    Gdiplus::Font font(mem_dc, MakeIslandFont(S(draw_size), weight));
+    Gdiplus::RectF m;
+    g.MeasureString(fitted.c_str(), -1, &font, Gdiplus::PointF(0, 0), &m);
+    const float line_center = center_y + static_cast<float>(d * kLyricPitch) * s;
+    const float origin_y = line_center - m.Height / 2.0f;
+    if (emphasized) {
+      // 当前行卡拉OK：弱化底字 + 已唱部分亮字（唱到哪亮到哪）。
+      const Gdiplus::PointF origin = SnapText(text_x, origin_y);
+      DrawKaraokeText(g, font, fitted, origin.X, origin.Y, m.Width, m.Height,
+                      fade, MusicLineProgress(i));
+    } else {
+      Gdiplus::SolidBrush brush(Gdiplus::Color(
+          static_cast<BYTE>(fade * (0.34 + 0.66 * cur_t)), 255, 255, 255));
+      g.DrawString(fitted.c_str(), -1, &font, SnapText(text_x, origin_y),
+                   &brush);
+    }
+  };
+  // 先画弱化行再画当前行：滚动中两行交叠时当前行压在上面。
+  for (int i = first; i <= last; ++i) drawLine(i, false);
+  for (int i = first; i <= last; ++i) drawLine(i, true);
+
+  const float mask_h = 22.0f * s;
+  const float bottom_y = top + static_cast<float>(kLyricViewportH) * s - mask_h;
+  Gdiplus::LinearGradientBrush top_mask(
+      Gdiplus::RectF(mask_x, top, mask_w, mask_h), Gdiplus::Color(fade, 2, 2, 2),
+      Gdiplus::Color(0, 2, 2, 2), Gdiplus::LinearGradientModeVertical);
+  g.FillRectangle(&top_mask, mask_x, top, mask_w, mask_h);
+  Gdiplus::LinearGradientBrush bottom_mask(
+      Gdiplus::RectF(mask_x, bottom_y, mask_w, mask_h),
+      Gdiplus::Color(0, 2, 2, 2), Gdiplus::Color(fade, 2, 2, 2),
+      Gdiplus::LinearGradientModeVertical);
+  g.FillRectangle(&bottom_mask, mask_x, bottom_y, mask_w, mask_h);
+}
+
+bool DynamicIslandWindow::SetMusicLyrics(const std::string& track_key,
+                                         std::vector<LyricLine> lines,
+                                         const std::string& reason) {
+  // 换歌竞态防护：请求回来时已经在放下一首，这份词不属于当前曲目。
+  // 播放状态还没到位（启动竞态）时挂起，由 ApplyPendingLyrics 落地。
+  if (!MusicActive() || track_key != MusicTrackKey()) {
+    pending_track_key_ = track_key;
+    pending_lines_ = std::move(lines);
+    pending_reason_ = reason;
+    wchar_t hold[96] = {};
+    _snwprintf_s(hold, _countof(hold), _TRUNCATE, L"lyric-hold active=%d lines=%d",
+                 MusicActive() ? 1 : 0, static_cast<int>(pending_lines_.size()));
+    IslandLifecycleLog(window_handle_, hold);
+    return false;
+  }
+  const bool had_lines = !music_lines_.empty();
+  music_lyric_track_key_ = track_key;
+  music_lines_ = std::move(lines);
+  music_lyric_reason_ = reason;
+  // 从「没有歌词」到「有歌词」是首次出现，不跨行滚动，直接定位到当前行。
+  if (!had_lines && !music_lines_.empty()) music_roll_target_ = -2;
+  wchar_t ok[64] = {};
+  _snwprintf_s(ok, _countof(ok), _TRUNCATE, L"lyric-ok lines=%d reason=%d",
+               static_cast<int>(music_lines_.size()),
+               static_cast<int>(music_lyric_reason_.size()));
+  IslandLifecycleLog(window_handle_, ok);
+  if (window_handle_ != nullptr) {
+    if (music_.playing && !music_lines_.empty()) StartAnimTimer();
+    Render();
+  }
+  return true;
+}
+
+bool DynamicIslandWindow::MusicActive() const {
+  return music_.has_session && !music_.title.empty();
+}
+
+std::string DynamicIslandWindow::MusicTrackKey() const {
+  char duration[32] = {};
+  _snprintf_s(duration, sizeof(duration), _TRUNCATE, "%lld",
+              static_cast<long long>(std::llround(music_.duration_sec)));
+  return music_.app_id + "\x1f" + music_.title + "\x1f" + music_.artist + "\x1f" +
+         music_.album + "\x1f" + duration;
+}
+
+double DynamicIslandWindow::MusicPositionSec() const {
+  if (!MusicActive()) return 0.0;
+  double position = music_.position_sec;
+  if (music_.playing && music_.sampled_at_epoch_ms > 0) {
+    const int64_t elapsed_ms = NowEpochMs() - music_.sampled_at_epoch_ms;
+    if (elapsed_ms > 0) position += static_cast<double>(elapsed_ms) / 1000.0;
+  }
+  if (music_.duration_sec > 0) {
+    position = std::min(position, music_.duration_sec);
+  }
+  return std::max(0.0, position);
+}
+
+int DynamicIslandWindow::MusicCurrentLine() const {
+  if (music_lines_.empty()) return -1;
+  const double position = MusicPositionSec();
+  int index = -1;
+  for (size_t i = 0; i < music_lines_.size(); i++) {
+    if (music_lines_[i].t_sec <= position) {
+      index = static_cast<int>(i);
+    } else {
+      break;
+    }
+  }
+  return index;
+}
+
+// 行内已唱比例：本行时间戳起、下一行时间戳止；末行用曲目总长兜底。
+float DynamicIslandWindow::MusicLineProgress(int index) const {
+  if (index < 0 || index >= static_cast<int>(music_lines_.size())) return 0.0f;
+  const double start = music_lines_[index].t_sec;
+  double end = index + 1 < static_cast<int>(music_lines_.size())
+                   ? music_lines_[index + 1].t_sec
+                   : 0.0;
+  if (end <= start) {
+    end = music_.duration_sec > start ? music_.duration_sec : start + 8.0;
+  }
+  return static_cast<float>(
+      Clamp01((MusicPositionSec() - start) / (end - start)));
+}
+
+// 展开卡歌词区高度与 Render 的绘制序列一一对应（改一处必须改另一处）。
+int DynamicIslandWindow::MusicSectionHeight() const {
+  if (!MusicActive()) return 0;
+  int h = 6 + 1 + 8;   // 间距 + 分隔线 + 线后间距
+  h += 2 + 10;         // 进度条 + 间距
+  h += 20;             // 「歌词」+ 进度时间 标签行
+  h += music_lines_.empty() ? kLyricEmptyH : kLyricViewportH;
+  h += 8 + 1 + 8;  // 间距 + 页脚上边线 + 线后间距
+  h += 16;         // 页脚行
+  return h;
+}
+
+std::wstring DynamicIslandWindow::MusicHeaderLine() const {
+  if (!MusicActive()) return L"";
+  std::wstring line = Utf8ToWide(music_.title);
+  const std::wstring artist = Utf8ToWide(music_.artist);
+  if (!artist.empty()) {
+    if (!line.empty()) line += L" · ";
+    line += artist;
+  }
+  return line;
+}
+
+std::wstring DynamicIslandWindow::MusicAppName() const {
+  std::string name = music_.app_id;
+  // AUMID 形如 "Microsoft.ZuneMusic_8wekyb3d8bbwe!Microsoft.ZuneMusic"：取
+  // 感叹号后的真实应用名；可执行名去掉 .exe。
+  const size_t bang = name.find('!');
+  if (bang != std::string::npos) name = name.substr(bang + 1);
+  if (name.size() > 4) {
+    const std::string tail = name.substr(name.size() - 4);
+    if (_stricmp(tail.c_str(), ".exe") == 0) name.resize(name.size() - 4);
+  }
+  return Utf8ToWide(name);
+}
+
+int DynamicIslandWindow::ExpandedWidth() const {
+  return MusicOnlyMode() ? kMusicExpandedW : kExpandedW;
+}
+
+int DynamicIslandWindow::MusicCardHeight() const {
+  if (!MusicOnlyMode()) return 0;
+  const int lyric_h =
+      music_lines_.empty() ? kLyricEmptyH : kLyricViewportH;
+  return 16 + kMusicArtLarge + 12 + 2 + 10 + lyric_h + 14;
+}
+
+// 当前行变化时把行位置缓动到新行（320ms ease-out）；换歌由
+// SetMediaPlayback 复位成「直接就位」，不跨曲目滚动。
+void DynamicIslandWindow::UpdateMusicRoll() {
+  if (!MusicActive()) {
+    music_roll_target_ = -2;
+    music_roll_from_ = -1.0;
+    music_roll_pos_ = -1.0;
+    music_roll_start_s_ = -1.0;
+    return;
+  }
+  const int target = MusicCurrentLine();
+  if (music_roll_target_ == -2) {
+    music_roll_target_ = target;
+    music_roll_pos_ = target;
+    return;
+  }
+  if (target != music_roll_target_) {
+    if (anim_epoch_ms_ == 0) StartAnimTimer();
+    if (anim_epoch_ms_ != 0) {
+      now_s_ = static_cast<double>(GetTickCount64() - anim_epoch_ms_) / 1000.0;
+    }
+    music_roll_from_ = music_roll_pos_;
+    music_roll_target_ = target;
+    music_roll_start_s_ = now_s_;
+    StartAnimTimer();
+  }
+  if (music_roll_start_s_ >= 0) {
+    const double t = Clamp01((now_s_ - music_roll_start_s_) / 0.32);
+    music_roll_pos_ = music_roll_from_ + (target - music_roll_from_) *
+                                             EaseOutCubic(t);
+    if (t >= 1.0) {
+      music_roll_pos_ = target;
+      music_roll_start_s_ = -1.0;
+    }
+  }
 }
 
 // ── 三级形变（eisland islandTransition 思路）──
@@ -743,6 +1210,15 @@ void DynamicIslandWindow::UpdateAnimations() {
   morph_ = morph_from_ + (target - morph_from_) * EaseOutCubic(raw);
   if (raw >= 1.0) morph_active_ = false;
   if (window_handle_ != nullptr) Render();
+  // 音乐独占卡没有呼吸光/活点；但有词且播放中时卡拉OK亮字逐帧推进，
+  // 心跳必须常开，停了逐字高亮就只剩低频重绘（卡顿感即此）。
+  const bool karaoke_live =
+      MusicOnlyMode() && MusicActive() && music_.playing &&
+      !music_lines_.empty();
+  if (!morph_active_ && music_roll_start_s_ < 0 && attention_start_s_ < 0 &&
+      MusicOnlyMode() && !karaoke_live) {
+    StopAnimTimer();
+  }
 }
 
 // Dart 看门狗兜底入口：直推一次抑制检查。本机实证（2026-10-01）：岛在
@@ -1021,7 +1497,10 @@ int DynamicIslandWindow::CompactWidthFor(Kind kind) const {
 }
 
 int DynamicIslandWindow::CompactWidth() const {
-  if (!has_entry_) return kRestCapsuleW;
+  if (!has_entry_) {
+    // 待机态有本地播放时撑到歌词胶囊档；音乐让位给任何条目。
+    return MusicActive() ? kMusicCapsuleW : kRestCapsuleW;
+  }
   // attention 宽度自适应（2026-10-07 定调：预告内容全展示）：attention
   // 激活期间（含覆盖在常规条目上）以实测提醒文本宽为准，播完回落声明档。
   if (attention_capsule_w_ > 0 &&
@@ -1033,16 +1512,31 @@ int DynamicIslandWindow::CompactWidth() const {
   return CompactWidthFor(entry_.kind);
 }
 
+int DynamicIslandWindow::CompactHeight() const {
+  // 音乐有词才用双行高胶囊；无词只显示歌名，回常规胶囊高。
+  if (!MusicOnlyMode()) return kCapsuleH;
+  return MusicActive() && !music_lines_.empty() ? kMusicCapsuleH : kCapsuleH;
+}
+
+// 与 Render 展开区的绘制序列逐项对齐（头部 → 分隔线 → 各节）；
+// 少算会裁掉最后一行（歌词页脚曾整个掉出卡片）。
 int DynamicIslandWindow::ExpandedHeight() const {
+  if (MusicOnlyMode()) return MusicCardHeight();
   const int rows = std::clamp(static_cast<int>(agenda_.size()), 0, kMaxRows);
-  int h = 30 + 12 + 20 + rows * kRowH + (rows > 0 ? 6 : 0);
-  if (rows == 0) h += kRowH;  // 空态「今日无日程」占位行
+  int h = kCapsuleH + 6;  // 头部行 + 分隔线间距
+  h += 6 + 20;            // 分隔线后的间距 +「接下来」标签行
+  if (rows > 0) {
+    h += rows * kRowH + 6;
+  } else {
+    h += kRowH + 6;  // 空态「今日无日程」占位行
+  }
   const int step_rows =
       std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
   if (step_rows > 0) h += 6 + 20 + step_rows * kStepRowH + 4;
   const int unread_rows =
       std::min(static_cast<int>(unread_rows_.size()), kMaxUnreadRows);
   if (unread_rows > 0) h += 6 + 20 + unread_rows * kUnreadRowH + 4;
+  h += MusicSectionHeight();
   return h + 10;
 }
 
@@ -1051,12 +1545,12 @@ void DynamicIslandWindow::StageLerpSize(double level, double* w, double* h,
   const double lv = std::max(0.0, std::min(2.0, level));
   // 端点均为声明档：compact（按当前条目档）→ hover → expanded。
   const double cw = CompactWidth();
-  const double ch = static_cast<double>(kCapsuleH);
+  const double ch = static_cast<double>(CompactHeight());
   const double cr = 15.0;
   const double hw = static_cast<double>(kHoverW);
   const double hh = static_cast<double>(kHoverH);
   const double hr = static_cast<double>(kHoverH) / 2.0;  // 胶囊圆角
-  const double ew = static_cast<double>(kExpandedW);
+  const double ew = static_cast<double>(ExpandedWidth());
   const double eh = static_cast<double>(ExpandedHeight());
   const double er = 26.0;
   if (lv <= 1.0) {
@@ -1183,6 +1677,7 @@ std::wstring DynamicIslandWindow::BuildHoverLine() const {
 
 void DynamicIslandWindow::Render() {
   if (window_handle_ == nullptr) return;
+  UpdateMusicRoll();
 
   const int phys_w = S(kWindowW);
   const int phys_h = S(kWindowH);
@@ -1213,7 +1708,9 @@ void DynamicIslandWindow::Render() {
   {
     Gdiplus::Graphics g(mem_dc);
     g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+    // 胶囊内部是不透明黑底（alpha=255），合成时 RGB 原样输出到屏幕，
+    // 次像素渲染在分层窗口上成立；灰度 AA 在小字号上明显发虚。
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintClearTypeGridFit);
     g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
     // ── 胶囊几何：三级声明档之间连续变形（0 胶囊 / 1 hover / 2 展开）──
@@ -1302,9 +1799,9 @@ void DynamicIslandWindow::Render() {
       // 待机 4s/30-70；任务进行中 2.8s/60-130；更新下载 3.5s/45-100；
       // 日程/简报/未读静态。
       double period = 0.0, a0 = 0.0, a1 = 0.0;
-      if (!has_entry_) {
+      if (!has_entry_ && !MusicActive()) {
         period = 4.0; a0 = 30; a1 = 70;
-      } else if (entry_.spinning) {
+      } else if (has_entry_ && entry_.spinning) {
         period = 2.8; a0 = 60; a1 = 130;
       } else if (entry_.progress >= 0 && entry_.progress <= 1) {
         period = 3.5; a0 = 45; a1 = 100;
@@ -1333,11 +1830,107 @@ void DynamicIslandWindow::Render() {
     const BYTE ea = static_cast<BYTE>(entry_alpha * 255.0f + 0.5f);
 
     // ── 头部行（compact 内容 / 展开态保留为头部）──
-    const float header_h = static_cast<float>(kCapsuleH) * s;
+    const float header_h = static_cast<float>(CompactHeight()) * s;
     const float header_cy = cap_y + header_h / 2.0f;
 
     if (ea > 5) {
-      if (!has_entry_) {
+      if (!has_entry_ && MusicActive()) {
+        // 音乐胶囊：封面 +「歌名 · 歌手」+ 当前歌词（随 roll 位滑动）；
+        // 展开后内容交给独占卡（单独排版，见下）。
+        if (morph_ < 1.01) {
+          const float pad_x = 10.0f * s;
+          const float art_size = static_cast<float>(kMusicArtSmall) * s;
+          Gdiplus::RectF art_rect(
+              cap_x + pad_x, cap_y + (header_h - art_size) / 2.0f, art_size,
+              art_size);
+          DrawCoverArt(g, music_art_.get(), art_rect, 7.0f * s, ea, s);
+          const float text_x = art_rect.X + art_size + 10.0f * s;
+          const float text_max =
+              std::max(40.0f * s, cap_x + cur_w - 12.0f * s - text_x);
+
+          Gdiplus::Font head_font(mem_dc, MakeIslandFont(S(12), 500));
+
+          if (music_lines_.empty()) {
+            // 无词：不写任何无词文案，只显示歌名（高度已随 CompactHeight 回常规档）。
+            const std::wstring head =
+                FitText(g, Utf8ToWide(music_.title), head_font, text_max);
+            Gdiplus::RectF m_head;
+            g.MeasureString(head.c_str(), -1, &head_font, Gdiplus::PointF(0, 0),
+                            &m_head);
+            Gdiplus::SolidBrush head_brush(
+                Gdiplus::Color(static_cast<BYTE>(ea), 255, 255, 255));
+            g.DrawString(head.c_str(), -1, &head_font,
+                         SnapText(text_x,
+                                  cap_y + (header_h - m_head.Height) / 2.0f),
+                         &head_brush);
+          } else {
+            const std::wstring head =
+                FitText(g, MusicHeaderLine(), head_font, text_max);
+            Gdiplus::RectF m_head;
+            g.MeasureString(head.c_str(), -1, &head_font, Gdiplus::PointF(0, 0),
+                            &m_head);
+
+            Gdiplus::Font lyric_font(mem_dc, MakeIslandFont(S(15), 600));
+            const float lyric_h = lyric_font.GetHeight(&g);
+
+            const float gap = 1.0f * s;
+            const float block_y =
+                cap_y + (header_h - (m_head.Height + gap + lyric_h)) / 2.0f;
+            Gdiplus::SolidBrush head_brush(Gdiplus::Color(
+                static_cast<BYTE>(ea * 72 / 100), 255, 255, 255));
+            g.DrawString(head.c_str(), -1, &head_font,
+                         SnapText(text_x, block_y), &head_brush);
+
+            // 歌词行与展开卡共用 music_roll_pos_ 位相，整行滑动裁剪在行框内。
+            const float ly_y = block_y + m_head.Height + gap;
+            const int cur = MusicCurrentLine();
+            if (cur < 0) {
+              // 前奏：展示下一句（弱化），不亮。
+              const std::wstring t0 = FitText(
+                  g, Utf8ToWide(music_lines_.front().text), lyric_font,
+                  text_max);
+              Gdiplus::SolidBrush dim_brush(Gdiplus::Color(
+                  static_cast<BYTE>(ea * 50 / 100), 255, 255, 255));
+              g.DrawString(t0.c_str(), -1, &lyric_font, SnapText(text_x, ly_y),
+                           &dim_brush);
+            } else {
+              const float roll = static_cast<float>(
+                  music_roll_pos_ >= 0.0 ? music_roll_pos_ : cur);
+              int ia = static_cast<int>(std::floor(roll));
+              float f = roll - static_cast<float>(ia);
+              ia = std::max(0, std::min(ia,
+                  static_cast<int>(music_lines_.size()) - 1));
+              const int ib = std::min(ia + 1,
+                  static_cast<int>(music_lines_.size()) - 1);
+              Gdiplus::RectF clip_rect(text_x, ly_y - 2.0f * s,
+                  cap_x + cur_w - 12.0f * s - text_x, lyric_h + 4.0f * s);
+              g.SetClip(clip_rect);
+              if (ia >= 0 && ia < static_cast<int>(music_lines_.size())) {
+                const std::wstring ta = FitText(
+                    g, Utf8ToWide(music_lines_[ia].text), lyric_font, text_max);
+                Gdiplus::RectF ma;
+                g.MeasureString(ta.c_str(), -1, &lyric_font,
+                                Gdiplus::PointF(0, 0), &ma);
+                const Gdiplus::PointF oa = SnapText(text_x, ly_y - f * lyric_h);
+                DrawKaraokeText(g, lyric_font, ta, oa.X, oa.Y, ma.Width,
+                                ma.Height, ea, MusicLineProgress(ia));
+              }
+              if (ib != ia && f > 0.0f) {
+                const std::wstring tb = FitText(
+                    g, Utf8ToWide(music_lines_[ib].text), lyric_font, text_max);
+                Gdiplus::RectF mb;
+                g.MeasureString(tb.c_str(), -1, &lyric_font,
+                                Gdiplus::PointF(0, 0), &mb);
+                const Gdiplus::PointF ob =
+                    SnapText(text_x, ly_y + (1.0f - f) * lyric_h);
+                DrawKaraokeText(g, lyric_font, tb, ob.X, ob.Y, mb.Width,
+                                mb.Height, ea, MusicLineProgress(ib));
+              }
+              g.ResetClip();
+            }
+          }
+        }
+      } else if (!has_entry_) {
         // 待机：金属球镜头 + 呼吸光。
         const float r = 5.0f * s * (1.0f - 0.25f * mf);
         const float cx = phys_w / 2.0f;
@@ -1543,6 +2136,70 @@ void DynamicIslandWindow::Render() {
       const float pad = 18.0f * s;
       float y = cap_y + header_h + 6.0f * s;
 
+      if (MusicOnlyMode()) {
+        // 音乐独占卡：封面 + 歌名 + 进度 + 三行歌词（上下遮影）；
+        // 不插日程/未读，卡高与 MusicCardHeight() 对齐。
+        const float m_pad = 16.0f * s;
+        const float art_size = static_cast<float>(kMusicArtLarge) * s;
+        const float art_x = cap_x + m_pad;
+        const float art_y = cap_y + m_pad;
+        DrawCoverArt(g, music_art_.get(),
+                     Gdiplus::RectF(art_x, art_y, art_size, art_size),
+                     12.0f * s, fade, s);
+
+        const float meta_x = art_x + art_size + 12.0f * s;
+        const float meta_w = cap_x + cur_w - m_pad - meta_x;
+        Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(16), 600));
+        const std::wstring title =
+            FitText(g, Utf8ToWide(music_.title), title_font, meta_w);
+        Gdiplus::SolidBrush title_brush(Gdiplus::Color(
+            static_cast<BYTE>(fade * 100 / 100), 255, 255, 255));
+        g.DrawString(title.c_str(), -1, &title_font,
+                     SnapText(meta_x, art_y), &title_brush);
+
+        Gdiplus::Font sub_font(mem_dc, MakeIslandFont(S(13), 500));
+        const std::wstring clock = FormatClock(MusicPositionSec()) + L" / " +
+                                   FormatClock(music_.duration_sec);
+        Gdiplus::RectF m_clock;
+        g.MeasureString(clock.c_str(), -1, &sub_font, Gdiplus::PointF(0, 0),
+                        &m_clock);
+        Gdiplus::SolidBrush sub_brush(Gdiplus::Color(
+            static_cast<BYTE>(fade * 58 / 100), 255, 255, 255));
+        g.DrawString(clock.c_str(), -1, &sub_font,
+                     SnapText(cap_x + cur_w - m_pad - m_clock.Width,
+                              art_y + art_size - m_clock.Height),
+                     &sub_brush);
+        std::wstring sub = Utf8ToWide(music_.artist);
+        const std::wstring app = MusicAppName();
+        if (!sub.empty() && !app.empty()) sub += L" · ";
+        sub += app;
+        const float sub_max = meta_w - m_clock.Width - 10.0f * s;
+        const std::wstring sub_fit =
+            FitText(g, sub, sub_font, std::max(20.0f * s, sub_max));
+        g.DrawString(sub_fit.c_str(), -1, &sub_font,
+                     SnapText(meta_x, art_y + art_size - m_clock.Height),
+                     &sub_brush);
+
+        const float bar_y = art_y + art_size + 12.0f * s;
+        const float bar_w = cur_w - m_pad * 2;
+        Gdiplus::SolidBrush bar_track(Gdiplus::Color(
+            static_cast<BYTE>(fade * 10 / 100), 255, 255, 255));
+        g.FillRectangle(&bar_track, cap_x + m_pad, bar_y, bar_w, 2.0f * s);
+        const float frac =
+            music_.duration_sec > 0
+                ? static_cast<float>(
+                      Clamp01(MusicPositionSec() / music_.duration_sec))
+                : 0.0f;
+        Gdiplus::SolidBrush bar_fill(Gdiplus::Color(
+            static_cast<BYTE>(fade * 55 / 100), 255, 255, 255));
+        g.FillRectangle(&bar_fill, cap_x + m_pad, bar_y, bar_w * frac,
+                        2.0f * s);
+
+        const float lyric_top = bar_y + 2.0f * s + 10.0f * s;
+        DrawLyricViewport(g, mem_dc, cap_x + m_pad, cap_x, cur_w,
+                          cur_w - m_pad * 2, lyric_top, fade);
+      } else {
+
       Gdiplus::SolidBrush div_brush(
           Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
       g.FillRectangle(&div_brush, cap_x + pad, y, cur_w - pad * 2, 1.0f * s);
@@ -1685,6 +2342,77 @@ void DynamicIslandWindow::Render() {
         }
         y += 4.0f * s;
       }
+
+      // ── 歌词：本地播放器曲目（背景态，排在日程/任务/未读之后）──
+      // 与音乐独占卡同一视口画法；几何与 MusicSectionHeight() 一一对应。
+      if (MusicActive()) {
+        y += 6.0f * s;
+        Gdiplus::SolidBrush music_div_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
+        g.FillRectangle(&music_div_brush, cap_x + pad, y, cur_w - pad * 2,
+                        1.0f * s);
+        y += 1.0f * s + 8.0f * s;
+
+        const float bar_h = 2.0f * s;
+        const float bar_w = cur_w - pad * 2;
+        const float frac =
+            music_.duration_sec > 0
+                ? static_cast<float>(
+                      Clamp01(MusicPositionSec() / music_.duration_sec))
+                : 0.0f;
+        Gdiplus::SolidBrush bar_track(
+            Gdiplus::Color(static_cast<BYTE>(fade * 10 / 100), 255, 255, 255));
+        g.FillRectangle(&bar_track, cap_x + pad, y, bar_w, bar_h);
+        Gdiplus::SolidBrush bar_fill(
+            Gdiplus::Color(static_cast<BYTE>(fade * 55 / 100), 255, 255, 255));
+        g.FillRectangle(&bar_fill, cap_x + pad, y, bar_w * frac, bar_h);
+        y += bar_h + 10.0f * s;
+
+        Gdiplus::Font lyric_label_font(mem_dc, MakeIslandFont(S(14), 700));
+        Gdiplus::SolidBrush lyric_label_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
+        g.DrawString(L"歌词", -1, &lyric_label_font,
+                     Gdiplus::PointF(cap_x + pad, y), &lyric_label_brush);
+        Gdiplus::Font clock_font(mem_dc, MakeIslandFont(S(13), 650));
+        const std::wstring clock = FormatClock(MusicPositionSec()) + L" / " +
+                                   FormatClock(music_.duration_sec);
+        Gdiplus::RectF m_clock;
+        g.MeasureString(clock.c_str(), -1, &clock_font, Gdiplus::PointF(0, 0),
+                        &m_clock);
+        Gdiplus::SolidBrush clock_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 42 / 100), 255, 255, 255));
+        g.DrawString(clock.c_str(), -1, &clock_font,
+                     Gdiplus::PointF(cap_x + cur_w - pad - m_clock.Width,
+                                     y + 1.0f * s),
+                     &clock_brush);
+        y += 20.0f * s;
+
+        DrawLyricViewport(g, mem_dc, cap_x + pad, cap_x, cur_w,
+                          cur_w - pad * 2, y, fade);
+        y += static_cast<float>(music_lines_.empty() ? kLyricEmptyH
+                                                    : kLyricViewportH) *
+             s;
+
+        y += 8.0f * s;
+        Gdiplus::SolidBrush foot_div(
+            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
+        g.FillRectangle(&foot_div, cap_x + pad, y, cur_w - pad * 2, 1.0f * s);
+        y += 1.0f * s + 8.0f * s;
+        Gdiplus::Font foot_font(mem_dc, MakeIslandFont(S(11), 400));
+        Gdiplus::SolidBrush foot_brush(
+            Gdiplus::Color(static_cast<BYTE>(fade * 34 / 100), 255, 255, 255));
+        std::wstring right = Utf8ToWide(music_.artist);
+        const std::wstring app = MusicAppName();
+        if (!right.empty() && !app.empty()) right += L" · ";
+        right += app;
+        Gdiplus::RectF m_right;
+        g.MeasureString(right.c_str(), -1, &foot_font, Gdiplus::PointF(0, 0),
+                        &m_right);
+        g.DrawString(right.c_str(), -1, &foot_font,
+                     Gdiplus::PointF(cap_x + cur_w - pad - m_right.Width, y),
+                     &foot_brush);
+      }
+      }
     }
 
     g.ResetClip();
@@ -1771,9 +2499,15 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         if (!hovering_ && attention_start_s_ < 0) {
           // 分级自动收回：展开先退回 hover（环境信息），hover 再静默回胶囊。
           if (stage_target_ == Stage::kExpanded) {
-            SetStage(Stage::kHover);
-            // 鼠标仍不在岛上：续排 hover 段收回，否则会卡死在 hover 层。
-            SetTimer(hwnd, 2, 2500, nullptr);
+            if (MusicOnlyMode()) {
+              // 音乐独占卡没有 hover 层：直接回胶囊。
+              SetStage(Stage::kCompact);
+              FireEvent(EventType::kExpandedChanged, "false");
+            } else {
+              SetStage(Stage::kHover);
+              // 鼠标仍不在岛上：续排 hover 段收回，否则会卡死在 hover 层。
+              SetTimer(hwnd, 2, 2500, nullptr);
+            }
           } else if (stage_target_ == Stage::kHover) {
             SetStage(Stage::kCompact);
             FireEvent(EventType::kExpandedChanged, "false");
@@ -1798,6 +2532,17 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         FireEvent(EventType::kAction, "打开日程");
         // 提前收口后立即让位：全屏环境仍在时回抑制态，不等下一跳。
         UpdateFullscreenSuppression();
+        return 0;
+      }
+      // 音乐独占：单击直达展开卡，不再走 hover 中间层（收起也一步回胶囊）。
+      if (MusicOnlyMode()) {
+        if (stage_target_ == Stage::kExpanded) {
+          SetStage(Stage::kCompact);
+          FireEvent(EventType::kExpandedChanged, "false");
+        } else {
+          SetStage(Stage::kExpanded);
+          FireEvent(EventType::kExpandedChanged, "true");
+        }
         return 0;
       }
       // hover 导航点：今日/任务切页，「展开」点进展开卡。

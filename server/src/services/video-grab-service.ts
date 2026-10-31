@@ -14,13 +14,13 @@
 
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { serverRoot } from "../config/paths.js";
 import path from "node:path";
 
 const execFileAsync = promisify(execFile);
 
 /** 项目根目录（mcporter 需在此目录执行才能发现 config/mcporter.json 中的 MCP server） */
-const PROJECT_ROOT_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const PROJECT_ROOT_DIR = serverRoot();
 
 /** 标准化视频信息 */
 export type VideoInfo = {

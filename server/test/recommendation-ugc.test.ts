@@ -114,7 +114,7 @@ function execute(registry: ToolRegistry, input: Record<string, unknown>): Promis
   return exec("shopping.suggest", input, { sessionId: "test-user" });
 }
 
-test("shopping.suggest：口碑挂主推，卡 payload 携带 ugc 且帖子可点", async () => {
+test("shopping.suggest：口碑挂主推，卡 payload 携带 ugc 且帖子条目不挂链接", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "rec-ugc-"));
   try {
     const registry = new ToolRegistry();
@@ -147,9 +147,10 @@ test("shopping.suggest：口碑挂主推，卡 payload 携带 ugc 且帖子可�
     assert.ok(marked?.includes("[AGENT_RESULT_CARD_START]"));
     const payload = JSON.parse(
       marked!.slice(marked!.indexOf("{"), marked!.lastIndexOf("}") + 1),
-    ) as { ugc?: { posts?: Array<{ url?: string }>; pros?: string[] } };
+    ) as { ugc?: { posts?: Array<{ title?: string; url?: string }>; pros?: string[] } };
     assert.ok(payload.ugc, "卡 payload 应带 ugc");
-    assert.equal(payload.ugc!.posts?.[0]?.url, "https://xhslink.com/p1");
+    assert.equal(payload.ugc!.posts?.[0]?.title, "通勤半年体验：性价比天花板");
+    assert.equal(payload.ugc!.posts?.[0]?.url, undefined, "来源帖条目不承载网页链接");
     assert.ok((payload.ugc!.pros?.length ?? 0) > 0);
   } finally {
     await rm(dataDir, { recursive: true, force: true });

@@ -161,3 +161,31 @@ test("cdp endpoint set/get and cleared on unbind", async () => {
   c.unbindIfSocket("actor-1", socket);
   assert.equal(c.cdpEndpoint("actor-1"), "");
 });
+
+test("lastUrlSnapshot 带汇报时刻；about: 不记", () => {
+  const c = new SharedBrowserCoordinator();
+  const sent: object[] = [];
+  const socket = fakeSocket(sent);
+  c.bindExecutor("actor-1", socket);
+  assert.equal(c.lastUrlSnapshot("actor-1"), null, "无上报返回 null");
+
+  const before = Date.now();
+  const job = c.invoke("actor-1", "navigate", { url: "https://www.fliggy.com/hotel/detail?id=1" }, { timeoutMs: 5000 });
+  const frame = sent[0] as { payload: { jobId: string } };
+  c.completeFromSocket("actor-1", socket, frame.payload.jobId, {
+    ok: true,
+    url: "https://www.fliggy.com/hotel/detail?id=1",
+    title: "详情",
+  });
+  void job;
+  const snapshot = c.lastUrlSnapshot("actor-1");
+  assert.equal(snapshot?.url, "https://www.fliggy.com/hotel/detail?id=1");
+  assert.ok((snapshot?.at ?? 0) >= before, "汇报时刻已记录");
+
+  const job2 = c.invoke("actor-1", "navigate", { url: "about:blank" }, { timeoutMs: 5000 });
+  const frame2 = sent[1] as { payload: { jobId: string } };
+  c.completeFromSocket("actor-1", socket, frame2.payload.jobId, { ok: true, url: "about:blank" });
+  void job2;
+  assert.equal(c.lastUrl("actor-1"), "https://www.fliggy.com/hotel/detail?id=1", "about: 不覆盖真实页");
+  socket;
+});

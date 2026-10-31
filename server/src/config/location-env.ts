@@ -65,3 +65,21 @@ export function getLocationDbscanMinPoints(): number {
   const v = Number.parseInt(process.env.LOCATION_DBSCAN_MIN_POINTS ?? "", 10);
   return Number.isFinite(v) && v > 2 && v <= 2000 ? v : 20;
 }
+
+/**
+ * 已上报位置的可复用窗口（秒，缺省 15 分钟）：窗口内的位置直接给工具用，
+ * 不再向客户端下发一次按需 GPS。必须 ≥ 客户端主动上报间隔，否则位置类工具
+ * 每次都要现拉一次 GPS，拉不到就整轮没有数据。夹紧到 60s..6h。
+ */
+export function getLocationReuseWindowMs(): number {
+  const v = Number.parseInt(process.env.LOCATION_REUSE_WINDOW_SEC ?? "", 10);
+  const sec = Number.isFinite(v) && v > 0 ? v : 900;
+  return Math.min(Math.max(sec, 60), 21600) * 1000;
+}
+
+/** 最近已知位置的最大龄期（分钟，缺省 120）：超过即视为不可用，返回 null。 */
+export function getLocationLastKnownMaxAgeMs(): number {
+  const v = Number.parseInt(process.env.LOCATION_LAST_KNOWN_MAX_AGE_MIN ?? "", 10);
+  const min = Number.isFinite(v) && v > 0 ? v : 120;
+  return Math.min(min, 7 * 24 * 60) * 60_000;
+}

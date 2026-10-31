@@ -23,8 +23,8 @@ const targets = [
   },
   {
     platform: "pdd",
-    url: `https://mobile.pinduoduo.com/search_goods.html?search_key=${encodeURIComponent(QUERY)}`,
-    cookieDomain: ".pinduoduo.com",
+    url: `https://mobile.yangkeduo.com/search_result.html?search_key=${encodeURIComponent(QUERY)}`,
+    cookieDomain: ".yangkeduo.com",
     selectors: [".product-item", '[class*="goods"]', '[class*="search-result"]'],
   },
 ];

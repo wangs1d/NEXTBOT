@@ -229,7 +229,7 @@ export async function callFlyAi(
 }
 
 /** 体验模式（未配 FLYAI_API_KEY）：价格被脱敏（「¥2x」），必须如实说明而非当作实价。 */
-function isTrialMode(systemMessage: string): boolean {
+export function isTrialMode(systemMessage: string): boolean {
   return systemMessage.includes("体验模式");
 }
 

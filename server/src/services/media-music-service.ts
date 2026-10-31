@@ -1,7 +1,7 @@
 import { ServerEventType } from "../protocol.js";
 import type { AgentMediaPlayPayload } from "../protocol.js";
 import type { ClientPushPort } from "../ports/client-push-port.js";
-import { clientSupportsMediaPlayback } from "./client-capability-registry.js";
+import { clientSupportsCapability } from "./client-capability-registry.js";
 
 /**
  * 媒体音乐播放服务。
@@ -64,6 +64,68 @@ export interface MediaTrackInfo {
 
 const NETEASE_SEARCH_ENDPOINT = "https://music.163.com/api/search/get";
 const NETEASE_SONG_URL_ENDPOINT = "https://music.163.com/api/song/enhance/player/url";
+
+/** 网易云搜索上游（歌词匹配也复用同一条通道，避免两套 UA/异常处理）。 */
+export async function searchNeteaseSongs(
+  query: string,
+  limit = 10,
+  fetchImpl: typeof fetch = fetch,
+): Promise<{ ok: true; tracks: MediaTrack[] } | { ok: false; error: string }> {
+  const q = query.trim();
+  if (!q) return { ok: false, error: "搜索关键词不能为空" };
+
+  const safeLimit = Math.max(1, Math.min(20, Math.floor(limit || 10)));
+  const url = `${NETEASE_SEARCH_ENDPOINT}?s=${encodeURIComponent(q)}&type=1&offset=0&limit=${safeLimit}`;
+
+  try {
+    const res = await fetchImpl(url, {
+      method: "GET",
+      headers: {
+        // 网易云 API 对 UA 敏感，加常见浏览器 UA 兜底
+        "User-Agent": "Mozilla/5.0 (compatible; Nextbot/1.0)",
+        Accept: "application/json",
+      },
+    });
+    if (!res.ok) {
+      return { ok: false, error: `网易云搜索请求失败：HTTP ${res.status} ${res.statusText}` };
+    }
+    const data = (await res.json()) as {
+      code?: number;
+      result?: {
+        songCount?: number;
+        songs?: Array<{
+          id: number;
+          name: string;
+          artists?: Array<{ id: number; name: string }>;
+          artist?: { id: number; name: string };
+          album?: { id: number; name: string };
+          duration?: number;
+        }>;
+      };
+    };
+
+    if (data.code !== 200 || !data.result?.songs) {
+      return { ok: false, error: `网易云搜索返回异常：code=${data.code ?? "unknown"}` };
+    }
+
+    const tracks: MediaTrack[] = data.result.songs.map((s) => {
+      const artists = s.artists ?? (s.artist ? [s.artist] : []);
+      const artistName = artists.map((a) => a.name).join(" / ") || "未知艺术家";
+      return {
+        id: String(s.id),
+        name: s.name,
+        artist: artistName,
+        album: s.album?.name ?? "未知专辑",
+        durationSec: s.duration ? Math.round(s.duration / 1000) : 0,
+      };
+    });
+
+    return { ok: true, tracks };
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return { ok: false, error: `网易云搜索调用异常：${msg}` };
+  }
+}
 
 /** 播放 URL 解析结果（resolveTrackPlayUrl 的返回）。 */
 export type TrackUrlResolution =
@@ -294,60 +356,7 @@ export class MediaMusicService {
     query: string,
     limit = 10,
   ): Promise<{ ok: true; tracks: MediaTrack[] } | { ok: false; error: string }> {
-    const q = query.trim();
-    if (!q) return { ok: false, error: "搜索关键词不能为空" };
-
-    const safeLimit = Math.max(1, Math.min(20, Math.floor(limit || 10)));
-    const url = `${NETEASE_SEARCH_ENDPOINT}?s=${encodeURIComponent(q)}&type=1&offset=0&limit=${safeLimit}`;
-
-    try {
-      const res = await fetch(url, {
-        method: "GET",
-        headers: {
-          // 网易云 API 对 UA 敏感，加常见浏览器 UA 兜底
-          "User-Agent": "Mozilla/5.0 (compatible; Nextbot/1.0)",
-          Accept: "application/json",
-        },
-      });
-      if (!res.ok) {
-        return { ok: false, error: `网易云搜索请求失败：HTTP ${res.status} ${res.statusText}` };
-      }
-      const data = (await res.json()) as {
-        code?: number;
-        result?: {
-          songCount?: number;
-          songs?: Array<{
-            id: number;
-            name: string;
-            artists?: Array<{ id: number; name: string }>;
-            artist?: { id: number; name: string };
-            album?: { id: number; name: string };
-            duration?: number;
-          }>;
-        };
-      };
-
-      if (data.code !== 200 || !data.result?.songs) {
-        return { ok: false, error: `网易云搜索返回异常：code=${data.code ?? "unknown"}` };
-      }
-
-      const tracks: MediaTrack[] = data.result.songs.map((s) => {
-        const artists = s.artists ?? (s.artist ? [s.artist] : []);
-        const artistName = artists.map((a) => a.name).join(" / ") || "未知艺术家";
-        return {
-          id: String(s.id),
-          name: s.name,
-          artist: artistName,
-          album: s.album?.name ?? "未知专辑",
-          durationSec: s.duration ? Math.round(s.duration / 1000) : 0,
-        };
-      });
-
-      return { ok: true, tracks };
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: `网易云搜索调用异常：${msg}` };
-    }
+    return searchNeteaseSongs(query, limit, this.fetchImpl);
   }
 
   /**
@@ -371,10 +380,9 @@ export class MediaMusicService {
   ): Promise<MediaPlayOkResult | { ok: false; error: string }> {
     if (!trackId) return { ok: false, error: "trackId 不能为空" };
     if (!actorId) return { ok: false, error: "actorId 不能为空" };
-    // 能力门控（2026-09-12 诚实化）：客户端未声明 mediaPlayback 时不会消费
-    // agent.media.play 事件——历史上 push「成功」后模型向用户宣称「歌已经放上了」，
-    // 实际什么都没响。此处如实失败，让模型改走 desktop.open 等真实可达路径。
-    if (!clientSupportsMediaPlayback(actorId)) {
+    // 能力门控：客户端未声明 mediaPlayback 时不会消费 agent.media.play 事件，
+    // 此处如实失败，让模型改走 desktop.open 等真实可达路径。
+    if (!clientSupportsCapability(actorId, "mediaPlayback")) {
       return {
         ok: false,
         error:

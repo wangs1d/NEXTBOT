@@ -3,6 +3,7 @@ import { request as httpsRequest } from "node:https";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { IncomingMessage } from "node:http";
 
+import { resolveLyricByMeta } from "../../services/media-lyric-service.js";
 import { resolveTrackPlayUrl } from "../../services/media-music-service.js";
 
 /**
@@ -57,6 +58,40 @@ export function registerMediaStreamProxyRoutes(app: FastifyInstance): void {
     return proxyAudioStream(request, reply, target);
   });
 }
+
+/**
+ * 注册本地播放歌曲的歌词查询路由：
+ *
+ *   GET /api/media/lyric?title=&artist=&album=&duration=
+ *
+ * 客户端从系统 SMTC 拿到正在播放的曲目元数据后请求本接口。未命中/无歌词
+ * 以 200 + `matched:false` + `reason` 如实返回，让客户端展示原因而不是空卡；
+ * 只有标题缺失才是 400。
+ */
+export function registerMediaLyricRoutes(app: FastifyInstance): void {
+  app.get("/api/media/lyric", async (request, reply) => {
+    const query = (request.query ?? {}) as {
+      title?: string;
+      artist?: string;
+      album?: string;
+      duration?: string;
+    };
+    const title = String(query.title ?? "").trim();
+    if (!title) {
+      return reply.code(400).send({ ok: false, reason: "title 不能为空" });
+    }
+
+    const durationSec = Number(query.duration ?? 0);
+    const result = await resolveLyricByMeta({
+      title,
+      artist: String(query.artist ?? "").trim() || undefined,
+      album: String(query.album ?? "").trim() || undefined,
+      durationSec: Number.isFinite(durationSec) && durationSec > 0 ? durationSec : undefined,
+    });
+    return reply.send(result);
+  });
+}
+
 
 /** 透传代理：转发 Range 并回流上游音频流（精简自 video-files.ts 的 proxyStream）。 */
 function proxyAudioStream(

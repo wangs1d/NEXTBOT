@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/models/schedule_models.dart";
+import "../../core/services/desk_pet_session.dart";
 import "../../core/services/right_panel_tool_preference.dart";
 import "../../core/services/schedule_preference.dart";
 
@@ -27,6 +28,9 @@ const int _kMaxVisibleEvents = 5;
 /// 工具区起点 Y 钉死在本值 + 工具区顶距（132）= 512，不随窗口高度变化；
 /// 窗口矮到放不下时整列滚动兜底。调工具栏位置改本值或工具区顶距均可。
 const double _kUpperAreaFixedHeight = 380.0;
+
+/// 底部桌宠按钮页脚的高度（上下内边距 + 药丸），滚动区据此留白避免被压住。
+const double _kPetFooterHeight = 52.0;
 
 /// 今日安排标题简洁化：剥离「该X啦」提醒式包装、指令前缀、元描述前缀、
 /// 以及和左侧时间列重复的时间词，再清理冗余代词词头，只保留核心文案
@@ -193,35 +197,43 @@ class _RightSidePanelState extends State<RightSidePanel> {
       child: SafeArea(
         right: false,
         top: false,
-        child: SingleChildScrollView(
-          // 「常用工具」起点 Y = 上方固定区高度 + 工具区顶距，是恒定值
-          // （当前 380 + 132 = 512），不随窗口高度、日程内容增减变化；
-          // 窗口矮到一屏放不下时靠本层整列滚动兜底，位置依然钉死。
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              // 上方内容区：恒定高度 + 内部滚动。内容增减在这块区域内消化，
-              // 从而下方工具区的起点 Y 恒定（原位固定）。
-              SizedBox(
-                height: _kUpperAreaFixedHeight,
-                child: SingleChildScrollView(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: <Widget>[
-                      _buildScheduleSection(),
-                    ],
+        child: Stack(
+          children: <Widget>[
+            SingleChildScrollView(
+              // 底部让出页脚高度，短窗口滚动时内容不会被桌宠按钮压住。
+              padding: const EdgeInsets.only(bottom: _kPetFooterHeight),
+              // 「常用工具」起点 Y = 上方固定区高度 + 工具区顶距，是恒定值
+              // （当前 380 + 132 = 512），不随窗口高度、日程内容增减变化；
+              // 窗口矮到一屏放不下时靠本层整列滚动兜底，位置依然钉死。
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  // 上方内容区：恒定高度 + 内部滚动。内容增减在这块区域内消化，
+                  // 从而下方工具区的起点 Y 恒定（原位固定）。
+                  SizedBox(
+                    height: _kUpperAreaFixedHeight,
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: <Widget>[
+                          _buildScheduleSection(),
+                        ],
+                      ),
+                    ),
                   ),
-                ),
+                  // 「常用工具」：固定在上方恒高区域正下方，位置不随内容变化
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(14, 132, 14, 0),
+                    child: _buildToolsSection(cs),
+                  ),
+                ],
               ),
-              // 「常用工具」：固定在上方恒高区域正下方，位置不随内容变化
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 132, 14, 0),
-                child: _buildToolsSection(cs),
-              ),
-            ],
-          ),
+            ),
+            // 页脚钉在面板底部（界面右下角）：桌宠召唤/收起唯一入口。
+            Positioned(left: 0, right: 0, bottom: 0, child: _buildPetFooter(cs)),
+          ],
         ),
       ),
     );
@@ -1084,6 +1096,95 @@ class _RightSidePanelState extends State<RightSidePanel> {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // 页脚：召唤 / 收起桌宠（钉在面板底部，即界面右下角）
+  // ═══════════════════════════════════════════════════════════
+  Future<void> _onSummonPet() async {
+    final bool ok = await DeskPetSession.instance.summon();
+    if (!mounted || ok) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(DeskPetSession.instance.error ?? "桌宠召唤失败"),
+      ),
+    );
+  }
+
+  Widget _buildPetFooter(ColorScheme cs) {
+    return ListenableBuilder(
+      listenable: DeskPetSession.instance,
+      builder: (BuildContext context, Widget? _) {
+        final bool summoned = DeskPetSession.instance.isSummoned;
+        final bool busy = DeskPetSession.instance.isBootstrapping;
+        final bool supported = DeskPetSession.isSupported;
+        return Container(
+          decoration: BoxDecoration(
+            color: cs.surfaceContainer,
+            border: Border(
+              top: BorderSide(
+                color: cs.outline.withValues(alpha: 0.2),
+              ),
+            ),
+          ),
+          padding: const EdgeInsets.fromLTRB(14, 8, 14, 14),
+          child: Center(
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(999),
+                onTap: (!supported || busy)
+                    ? null
+                    : () {
+                        if (summoned) {
+                          unawaited(DeskPetSession.instance.dismiss());
+                        } else {
+                          unawaited(_onSummonPet());
+                        }
+                      },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+                    borderRadius: BorderRadius.circular(999),
+                    border: Border.all(
+                        color: cs.outline.withValues(alpha: 0.3)),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: <Widget>[
+                      busy
+                          ? SizedBox(
+                              width: 13,
+                              height: 13,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                color: cs.onSurfaceVariant,
+                              ),
+                            )
+                          : Icon(
+                              summoned
+                                  ? Icons.nightlight_round
+                                  : Icons.wb_sunny_outlined,
+                              size: 13,
+                              color: cs.onSurfaceVariant,
+                            ),
+                      const SizedBox(width: 5),
+                      Text(
+                        summoned ? "收起桌宠" : "召唤桌宠",
+                        style: TextStyle(
+                            fontSize: 11,
+                            color: cs.onSurfaceVariant,
+                            fontWeight: FontWeight.w500),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
 }
 
 /// 「今日安排」卡片的配色皮肤：深色 / 暖色两套，

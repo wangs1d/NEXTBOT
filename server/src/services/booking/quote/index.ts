@@ -33,6 +33,16 @@ export {
   parseCtripFlightText,
 } from "./site-adapters.js";
 export {
+  createFliggyHotelWebSource,
+  fliggyHotelDetailUrl,
+  parseFliggyHotelDetailPrice,
+  type FliggyHotelWebSourceDeps,
+} from "./hotel-web-price-source.js";
+export {
+  createSharedBrowserRunner,
+  type SharedPageOpener,
+} from "./shared-browser-runner.js";
+export {
   buildDefaultQuoteSources,
   buildQuoteAggregator,
   type BuildQuoteAggregatorDeps,

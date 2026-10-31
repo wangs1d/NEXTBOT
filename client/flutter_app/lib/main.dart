@@ -39,6 +39,7 @@ import "core/utils/content_summary_parser.dart";
 import "core/services/app_auto_start.dart";
 import "core/services/app_tray_service.dart";
 import "core/services/client_update_checker.dart";
+import "core/services/desk_pet_session.dart";
 import "package:package_info_plus/package_info_plus.dart";
 import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
@@ -54,7 +55,6 @@ import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
 import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
-import "core/services/desk_pet_session.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
 import "core/services/sphere_entity_controller.dart";
@@ -62,6 +62,7 @@ import "core/services/user_avatar_api.dart";
 import "core/services/user_preferences_api.dart";
 import "core/services/image_preview_launcher.dart";
 import "core/services/video_preview_launcher.dart";
+import "core/services/media_session_service.dart";
 import "core/services/content_summary_launcher.dart";
 import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
@@ -260,6 +261,11 @@ void main() async {
     }
     _writeCrashLog("[BOOT]", "stage 7: calling runApp", StackTrace.current);
     runApp(const PrivateAiApp());
+    // 上次会话桌宠开着 → 起稳后自动恢复；从没召唤过则保持不出现。
+    unawaited(Future<void>.delayed(
+      const Duration(seconds: 3),
+      DeskPetSession.instance.restoreIfSummonedLastSession,
+    ));
   }, (error, stack) {
     // 兜底所有未捕获的异步异常，防止 Flutter engine 断连崩溃
     _writeCrashLog("[UNCAUGHT-ZONE]", error, stack);
@@ -482,6 +488,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 关闭右侧面板
   void _closeRightPanel() {
     if (_rightPanel == null) return;
+    // 浏览器面板：Agent 留痕页按约定回主页，用户自己的页面保留
+    if (_rightPanel == RightPanelKind.browser) {
+      unawaited(SharedBrowserHost.instance.notifyPanelClosed());
+    }
     setState(() {
       _rightPanel = null;
       // 恢复打开面板前的 splitRatio
@@ -665,6 +675,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     WidgetsBinding.instance.addObserver(this);
     // 账号门禁读盘（毫秒级文件读）：未注册先亮注册页，重量级初始化照常并行
     unawaited(_loadAccountSession());
+    // 本地正在播放的曲目（Windows SMTC）→ 换歌时拉歌词，供灵动岛展示
+    unawaited(MediaSessionService.instance.start());
     // debug 构建注册 VM service 扩展：远程直调决策弹窗链路做真机验收
     // （WS 事件无法从脚本侧注入，须走 VM service websocket call extension）
     if (kDebugMode) {
@@ -1148,7 +1160,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       unawaited(windowManager.show());
       unawaited(windowManager.focus());
     });
-    unawaited(initDynamicIsland());
+    // 登录门禁：注册/登录/首启向导阶段整岛隐藏，进主壳后才建窗上屏。
+    _syncIslandGate();
     // 久坐提醒：复用既有灵动岛（无自建 UI、岛上无按钮），只产出功能文案
     // + 真实分钟数，自动收回。护眼、喝水均已删除（定时弹窗打扰价值低）；
     // 久坐节奏按用户身份从服务端档位拉取（/api/health/rhythm，认不出身份
@@ -1338,12 +1351,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String jobId = payload["jobId"]?.toString() ?? "";
           final ClientLocationPayload? loc =
               await ClientLocationService.getCurrentLocationForAgentReply();
-          if (loc != null) {
-            _ws.sendEvent("client.location_report", <String, dynamic>{
-              if (jobId.isNotEmpty) "jobId": jobId,
-              ...loc.toJson(),
-            });
-          }
+          // 拿不到坐标也回 jobId 空包：让服务端立即结算（resolve null），
+          // 不白等满 12s 超时（与手机端 _handleLocationRequest 同语义）。
+          _ws.sendEvent("client.location_report", <String, dynamic>{
+            if (jobId.isNotEmpty) "jobId": jobId,
+            ...?loc?.toJson(),
+          });
         }
         // 持续定位配置（服务端 LOCATION_TRACKING_MODE=continuous 时随 session 绑定下发）：
         // 客户端按 intervalSec 定时上报位置（source:"continuous"），供位置历史/
@@ -4247,52 +4260,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
   }
 
-  /// 删除「一整轮对话」：用户提问 + 该轮 Agent 的全部回复气泡（正文、工具/思考
-  /// 过程、分泡、卡片回执、后台任务回执……）。
+  /// 删除「一整轮对话」：本轮 user 提问 + 归属于本轮的回复气泡（正文、工具/
+  /// 思考过程、分泡、卡片回执、后台任务回执……）。
   ///
-  /// 替换原 `_deleteSingleMessage`，两处关键修正：
-  /// 1. 粒度：旧实现只删被点的那一条气泡，留下孤零零的另一半；现在按轮次摘除
-  ///    （user 消息 + 其后所有非 user 气泡，直到下一条 user 消息）。
-  /// 2. 服务端：旧实现发 `chat.clear_history`，服务端落到 `clearAllMemoryForActor`
-  ///    ——删一条消息等于把整个会话线程 + 全部 Agent 记忆清空。现在改调
-  ///    `/api/chat-data/delete-turn` 精准摘除这一轮，其余历史与记忆原样保留。
+  /// 归属按消息 id 里的轮次锚点判定（[turnAnchorOfMessage]），不再按「user 到
+  /// 下一条 user」的位置窗口切：主动推送 / 睡前备忘 / 决策卡夹在这一轮里时不带
+  /// 锚点、不属于任何一轮，之前会被整段扫掉，连带删掉用户没点的消息。
+  /// 点在没有归属的消息（主动推送本身）上时只摘这一条，服务端线程本就没有它。
+  ///
+  /// 服务端：旧实现发 `chat.clear_history`（= clearAllMemoryForActor，删一条
+  /// 等于清空整个会话线程 + 全部 Agent 记忆）；现在改调
+  /// `/api/chat-data/delete-turn` 精准摘除这一轮，其余历史与记忆原样保留。
   Future<void> _deleteTurn(String messageId) async {
-    final int anchor =
+    final int clickedIdx =
         _messages.indexWhere((ChatMessage m) => m.messageId == messageId);
-    if (anchor < 0) return;
+    if (clickedIdx < 0) return;
 
-    // 点在 Agent 气泡上 → 回溯到本轮的 user 消息（轮次锚点）；回溯不到时
-    // （呼叫失败通知等孤儿 assistant 气泡，前面没有 user 消息）以该气泡自身
-    // 为轮次起点，只删它到下一条 user 消息之间的内容。
-    int start = anchor;
-    bool anchoredToUser = _messages[anchor].role == "user";
-    if (!anchoredToUser) {
-      start = -1;
-      for (int i = anchor - 1; i >= 0; i--) {
-        if (_messages[i].role == "user") {
-          start = i;
-          anchoredToUser = true;
-          break;
-        }
-      }
-      if (start < 0) start = anchor;
-    }
-
-    // 轮次右边界：下一条 user 消息（不含）
-    int end = start + 1;
-    while (end < _messages.length && _messages[end].role != "user") {
-      end++;
-    }
-
-    final List<String> turnIds = _messages
-        .sublist(start, end)
-        .map((ChatMessage m) => m.messageId)
-        .toList();
+    // 轮次锚点：user 消息自身即锚；assistant 气泡从 id 内嵌的 trace 取锚。
+    final String? anchorId = turnAnchorOfMessage(_messages[clickedIdx]);
+    final List<String> turnIds =
+        turnMessageIdsFor(_messages[clickedIdx], _messages);
 
     // 删的是正在进行的这一轮 → 先掐断，否则迟到的 chunk / done 会把刚删掉的
     // 气泡重新插回列表（按 messageId 找不到就当新消息重建）。
     final String? activeTraceId = ChatTurnController.instance.activeTraceId;
-    if (activeTraceId != null && turnIds.contains(activeTraceId)) {
+    if (anchorId != null && activeTraceId == anchorId) {
       _cancelCurrentTurn();
     }
 
@@ -4301,24 +4293,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
 
     // 服务端精准删除这一轮（不清空整个会话上下文 / Agent 记忆）。
-    // 孤儿 assistant 气泡没有 user 锚点，服务端线程里本来就没有这一轮，
-    // 只删本地即可。
-    if (anchoredToUser) {
+    // 主动推送等无归属消息不在服务端对话线程里，不发请求。
+    if (anchorId != null) {
+      final int anchorIdx =
+          _messages.indexWhere((ChatMessage m) => m.messageId == anchorId);
       unawaited(_notifyServerDeleteTurn(
-        _messages[start].messageId,
-        _messages[start].text,
+        anchorId,
+        anchorIdx >= 0 ? _messages[anchorIdx].text : null,
       ));
     }
 
     if (!mounted) return;
+    final Set<String> removedIds = turnIds.toSet();
     setState(() {
-      _messages.removeRange(start, end);
+      _messages.removeWhere((ChatMessage m) => removedIds.contains(m.messageId));
       // 本轮可能挂着后台任务回执 / 排队中的追问，一并清索引，避免删完后
       // 回执按 messageId 找不到宿主消息、排队集合里残留已消失的 id。
       _taskReceiptMessageIdByTaskId
-          .removeWhere((String _, String mid) => turnIds.contains(mid));
-      _queuedUserMessageIds.removeAll(turnIds);
-      _failedUserMessageIds.removeAll(turnIds);
+          .removeWhere((String _, String mid) => removedIds.contains(mid));
+      _queuedUserMessageIds.removeAll(removedIds);
+      _failedUserMessageIds.removeAll(removedIds);
       // 重建索引：被删除位置之后的索引全部前移
       _rebuildAssistantIndex();
     });
@@ -4445,6 +4439,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           turns.add(<ChatMessage>[m]);
         } else {
           turns.last.add(m);
+        }
+      }
+
+      // 轮次归属：回填的回复行同样内嵌本轮锚点（assistant-<anchorId>-hist-N），
+      // 删除这一轮时按 id 归属才能精确摘除；无锚的孤儿轮保持自身临时 id。
+      for (final List<ChatMessage> turn in turns) {
+        if (turn.first.role != "user") continue;
+        final String anchorId = turn.first.messageId;
+        for (int i = 1; i < turn.length; i++) {
+          turn[i] = turn[i].copyWith(
+            messageId: "assistant-$anchorId-hist-${i - 1}",
+          );
         }
       }
 
@@ -5353,54 +5359,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     return Text(title);
   }
 
-  /// 顶栏「召唤桌宠 / 收起桌宠」：Windows 下拉起 PySide6 独立桌宠窗口。
-  Widget _buildDeskPetAction() {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    return ListenableBuilder(
-      listenable: DeskPetSession.instance,
-      builder: (BuildContext context, Widget? _) {
-        final bool summoned = DeskPetSession.instance.isSummoned;
-        final bool bootstrapping = DeskPetSession.instance.isBootstrapping;
-        return IconButton(
-          tooltip: summoned ? "收起桌宠" : "召唤桌宠",
-          visualDensity: VisualDensity.compact,
-          icon: bootstrapping
-              ? SizedBox(
-                  width: 16,
-                  height: 16,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: cs.primary,
-                  ),
-                )
-              : Icon(
-                  Icons.smart_toy_outlined,
-                  size: 20,
-                  color: summoned ? cs.primary : null,
-                ),
-          onPressed: bootstrapping
-              ? null
-              : () async {
-                  if (summoned) {
-                    await DeskPetSession.instance.dismiss();
-                    return;
-                  }
-                  final bool ok = await DeskPetSession.instance.summon();
-                  if (!ok && context.mounted) {
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(
-                        content: Text(
-                          DeskPetSession.instance.error ?? "桌宠召唤失败",
-                        ),
-                      ),
-                    );
-                  }
-                },
-        );
-      },
-    );
-  }
-
   /// 今日安排悬浮卡自动淡出计时器（surface.show 召唤时启动）
   Timer? _surfaceAutoHideTimer;
 
@@ -5737,10 +5695,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                                   elevation: 0,
                                   scrolledUnderElevation: 0,
                                   title: _buildAppBarTitle(),
-                                  actions: <Widget>[
-                                    if (DeskPetSession.isSupported)
-                                      _buildDeskPetAction(),
-                                  ],
                                   ),
                                 ),
                                 Expanded(
@@ -5822,6 +5776,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     FeedbackDialog.show(navCtx);
   }
 
+  /// 灵动岛登录门禁：已登录且过完首启向导（进入主壳）才建窗上屏；
+  /// 注册/登录/向导阶段默认隐藏，退出登录立即收回。
+  void _syncIslandGate() {
+    final bool show =
+        _accountEmail != null && !(_needsOnboarding && !_onboardingDone);
+    unawaited(DynamicIslandLauncher.instance.setVisible(show));
+    if (show) unawaited(initDynamicIsland());
+  }
+
   /// 读本机账号会话：已注册（冷启动）武装 N 开场动画后进主界面；
   /// 未注册直接亮注册页，不播开场动画。
   /// 冷启动一律直达主界面——首启向导只在「本次回连真正新建账号」那一刻
@@ -5837,6 +5800,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _sessionLoaded = true;
       _playBootAnimation = _accountEmail != null;
     });
+    _syncIslandGate();
     if (_accountEmail != null) {
       unawaited(_loadUserAvatar());
     }
@@ -5906,6 +5870,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _playBootAnimation = !freshCreated;
       _bootAnimDone = false;
     });
+    _syncIslandGate();
     unawaited(_loadUserAvatar());
   }
 
@@ -5918,6 +5883,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _playBootAnimation = false;
       _bootAnimDone = true;
     });
+    _syncIslandGate();
   }
 
   /// 用户菜单「我的设备」:与对话框构成双面板分栏
@@ -5974,6 +5940,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _accountEmail = null;
       _userAvatarPath = null;
     });
+    // 先关岛上屏门禁，再清残留条目（清空会触发一次同步，门禁已挡）。
+    _syncIslandGate();
+    DynamicIslandController.instance.dismissAll();
   }
 
   Future<void> _handleMorningBriefingEvent(

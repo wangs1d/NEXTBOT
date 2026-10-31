@@ -48,6 +48,22 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
   assert.equal(sanitized?.memorySummary, SAMPLE_MEMORY.memorySummary);
 });
 
+test("minimal mode keeps on-demand event recall block", () => {
+  const kernel = new RuntimeKernel();
+  kernel.update({ enabled: true, promptMode: "minimal" });
+
+  const memory: AgentPromptMemoryContext = {
+    ...SAMPLE_MEMORY,
+    eventRecall: "【事件回忆】\n- 2026/10/28 15:37 比价 小米15 → 最低 ¥1884（taobao） [完成]",
+  };
+  const plan = kernel.planTurn("上次比价那个怎么样了", memory);
+  const sanitized = kernel.sanitizePromptMemory(memory, plan);
+
+  assert.equal(plan.promptMode, "minimal");
+  assert.equal(sanitized?.eventRecall, memory.eventRecall);
+  assert.equal(sanitized?.narrativeRecall, memory.narrativeRecall);
+});
+
 test("conversation_only mode collapses prompt memory to a micro prompt", () => {
   const kernel = new RuntimeKernel();
   kernel.update({ enabled: true, promptMode: "conversation_only" });

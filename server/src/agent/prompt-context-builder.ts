@@ -7,6 +7,7 @@ import {
 } from "../brain/profile-router.js";
 import { getMemoryComponents } from "../agentic-memory/index.js";
 import { peekMemorySuppressionStore } from "../agentic-memory/memory-suppression.js";
+import { buildEventRecallBlock } from "../agentic-memory/event-auto-recall.js";
 import { buildTemporalFactAddressing } from "./memory-temporal-intent.js";
 import { CAPABILITY_DOMAINS, type CapabilityDomain } from "./agent-capabilities.js";
 import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
@@ -115,6 +116,45 @@ export function buildDeviceEnvironmentBlock(
     return "【运行环境】用户此刻在电脑桌面端和你对话，可以正常交付结构化内容与卡片。";
   }
   return undefined;
+}
+
+/**
+ * 内置浏览器当前页块：客户端回包附带的 URL（coordinator 已留存）注入动态层，
+ * 让模型知道用户屏幕上那一层现实，不必靠猜或额外调工具。带龄期，旧页不冒充实时。
+ */
+export function buildClientSurfacesBlock(
+  browserUrl: string,
+  reportedAt: number,
+  now = Date.now(),
+): string | undefined {
+  const target = compactUrlForPrompt(browserUrl);
+  if (!target) return undefined;
+  const age = reportedAt > 0 ? formatReportAge(now - reportedAt) : undefined;
+  return `【用户界面】内置浏览器面板当前页：${target}${age ? `（最近一次上报 ${age}）` : ""}`;
+}
+
+/** host+path，去 query/hash（token/参数留在 URL 里不进 prompt），超长截断。 */
+function compactUrlForPrompt(raw: string): string {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw.trim());
+  } catch {
+    return "";
+  }
+  if (!parsed.host) return "";
+  const path = parsed.pathname === "/" ? "" : parsed.pathname;
+  const compact = `${parsed.host}${path}`;
+  return compact.length > 96 ? `${compact.slice(0, 95)}…` : compact;
+}
+
+function formatReportAge(deltaMs: number): string | undefined {
+  if (!Number.isFinite(deltaMs) || deltaMs < 0) return undefined;
+  const seconds = Math.floor(deltaMs / 1000);
+  if (seconds <= 5) return "刚刚";
+  if (seconds < 60) return `${seconds} 秒前`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分钟前`;
+  return `${Math.floor(minutes / 60)} 小时前`;
 }
 
 /**
@@ -496,6 +536,13 @@ export class PromptContextBuilder {
 
   setTurnAsideProvider(fn: ((actorId: string) => string | null) | null): void {
     this.turnAsideProvider = fn;
+  }
+
+  /** 用户界面可见面（内置浏览器当前页等）；返回 null = 不注入。 */
+  private clientSurfacesProvider: ((actorId: string) => string | null) | null = null;
+
+  setClientSurfacesProvider(fn: ((actorId: string) => string | null) | null): void {
+    this.clientSurfacesProvider = fn;
   }
 
   /**
@@ -904,6 +951,27 @@ export class PromptContextBuilder {
       }
     }
 
+    // 事件回忆（L0）：只在对话面、用户出现时间回溯意图且命中真实事件时注入；
+    // 无命中零注入，失败静默（事件层不可用不影响本轮 prompt）。
+    let eventRecallBlock: string | undefined;
+    if (input.plane === "chat") {
+      try {
+        eventRecallBlock = buildEventRecallBlock(input.actorId, userText);
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 事件回忆注入失败（忽略）: ${err}`);
+      }
+    }
+
+    // 用户界面可见面：每轮取最近上报，空则不注入（不写占位、不推断）。
+    let clientSurfaces: string | undefined;
+    if (this.clientSurfacesProvider) {
+      try {
+        clientSurfaces = this.clientSurfacesProvider(input.actorId) ?? undefined;
+      } catch (err) {
+        console.log(`[PromptContextBuilder] 界面可见面注入失败（忽略）: ${err}`);
+      }
+    }
+
     const promptMemory: AgentPromptMemoryContext = {
       ...fromKv,
       // 【当前时间】每轮注入（2026-10-07 用户拍板，撤 10-06 按需闸对本块的控制）：
@@ -914,6 +982,7 @@ export class PromptContextBuilder {
       ...(buildDeviceEnvironmentBlock(input.deviceClass)
         ? { deviceEnvironment: buildDeviceEnvironmentBlock(input.deviceClass) }
         : {}),
+      ...(clientSurfaces ? { clientSurfaces } : {}),
       ...(personalityCore ? { personalityCore } : {}),
       ...(currentUserState ? { currentUserState } : {}),
       ...(turnAside ? { turnAside } : {}),
@@ -936,6 +1005,7 @@ export class PromptContextBuilder {
       ...(dedupedNarrativeRecall
         ? { narrativeRecall: dedupedNarrativeRecall }
         : {}),
+      ...(eventRecallBlock ? { eventRecall: eventRecallBlock } : {}),
       // 工作记忆 / 最近对话回顾：独立块，不参与跨字段语义去重（结构化上下文，非召回条目）
       ...(workingMemorySummary ? { workingMemorySummary } : {}),
       ...(recentConversationHistory ? { recentConversationHistory } : {}),
@@ -1232,6 +1302,7 @@ export class PromptContextBuilder {
       Boolean(memory.skillIndex) ||
       Boolean(memory.currentTime) ||
       Boolean(memory.deviceEnvironment) ||
+      Boolean(memory.clientSurfaces) ||
       Boolean(memory.workingMemorySummary) ||
       Boolean(memory.recentConversationHistory) ||
       Boolean(memory.semanticIntent)

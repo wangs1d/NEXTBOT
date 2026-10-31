@@ -58,10 +58,18 @@ abstract final class _T {
 // ═══════════════════════════════════════════════════════════════════
 
 class _Leg {
-  const _Leg({required this.mode, required this.minutes, required this.dist});
+  const _Leg(
+      {required this.mode,
+      required this.minutes,
+      required this.dist,
+      this.estimated = false});
   final String mode; // walk | bike | taxi | boat
   final int minutes;
   final String dist;
+
+  /// 直线推算（非真实路网）：时长前标「约」，与网页面板 legOfStore/legOfPayload 同口径。
+  final bool estimated;
+  String get approx => estimated ? "约 " : "";
 
   String get label => const <String, String>{
         "walk": "步行",
@@ -79,6 +87,7 @@ class _Stop {
     required this.tag,
     required this.start,
     required this.duration,
+    this.durationReal = false,
     required this.note,
     required this.desc,
     required this.tips,
@@ -96,6 +105,9 @@ class _Stop {
   final String tag;
   final int start; // 当日绝对分钟
   final int duration; // 建议停留分钟
+  /// duration 是否来自服务端真值（起止时刻或 visitDuration）。
+  /// false 时是「与下一站的间隔」推出来的，只能撑时间轴，不能当「停留」印出来。
+  final bool durationReal;
   final String note; // Agent 的安排理由
   final String desc;
   final List<String> tips;
@@ -108,7 +120,9 @@ class _Stop {
   final double? longitude;
 
   int get end => start + duration;
-  String get timeText => "${_t2s(start)} — ${_t2s(end)}";
+  /// 停留时长没有服务端真值时只报起点：终点是拿「到下一站的间隔」推的，报出来就是编。
+  String get timeText =>
+      durationReal ? "${_t2s(start)} — ${_t2s(end)}" : _t2s(start);
 }
 
 class _DayPlan {
@@ -125,10 +139,25 @@ String _t2s(int m) {
   return "$h:$mm";
 }
 
+/// 时间线行第二行：停留只在服务端给了真值时印——两站之间的间隔不是「建议停留」。
+String _stopSub(_Stop stop) {
+  final _Leg? leg = stop.leg;
+  return <String>[
+    if (stop.durationReal) "停留 ${stop.duration} 分",
+    if (leg != null && leg.minutes > 0)
+      "${leg.label} ${leg.approx}${leg.minutes} 分",
+  ].join(" · ");
+}
+
 /// 「09:00」→ 起点；「09:00-11:30」→ 起点+时长；解析失败返回 null
 ({int start, int? duration})? _parseClock(String raw) {
+  // ISO 时刻尾部的 "+08:00" 是时区，不是结束时刻：整段日期时间只取那一个 HH:MM
+  final RegExpMatch? iso =
+      RegExp(r'\d{4}-\d{1,2}-\d{1,2}[T\s](\d{1,2}\s*[:：]\s*\d{2})')
+          .firstMatch(raw);
+  final String clock = iso?.group(1) ?? raw;
   final RegExp re = RegExp(r'(\d{1,2})\s*[:：]\s*(\d{2})');
-  final List<RegExpMatch> hits = re.allMatches(raw).toList();
+  final List<RegExpMatch> hits = re.allMatches(clock).toList();
   if (hits.isEmpty) return null;
   int? toMin(RegExpMatch m) {
     final int h = int.parse(m.group(1)!);
@@ -157,28 +186,45 @@ double _haversineKm(double lat1, double lng1, double lat2, double lng2) {
   return 2 * k * math.asin(math.sqrt(s));
 }
 
+/// 服务端车程方式串（步行 / 包车·网约车 / 城际交通 / 打车·Grab）→ 图标口径。
+/// 认不出返回 null：宁可不显示这条车程，也不给一个错的图标和标签。
+String? _legModeOf(String raw) {
+  if (RegExp(r'步行|walk').hasMatch(raw)) return "walk";
+  if (RegExp(r'骑行|单车|bike|cycle').hasMatch(raw)) return "bike";
+  if (RegExp(r'游船|渡船|坐船|船|boat|ferry').hasMatch(raw)) return "boat";
+  if (RegExp(r'徒步|hike|trek').hasMatch(raw)) return "hike";
+  if (RegExp(r'车|drive|taxi|grab|car|bus|城际|包车|网约').hasMatch(raw)) {
+    return "taxi";
+  }
+  return null;
+}
+
 /// 站间交通估算（与 adaptPayload 同口径：<1.2km 步行 / <4km 骑行 / 其余打车）
+/// 拿不到坐标时不编数字：返回 minutes=0，展示侧一律不印车程。
 _Leg _estimateLeg(double? fromLat, double? fromLng, double? lat, double? lng) {
   if (fromLat == null || fromLng == null || lat == null || lng == null) {
-    return const _Leg(mode: "walk", minutes: 12, dist: "—");
+    return const _Leg(mode: "walk", minutes: 0, dist: "—", estimated: true);
   }
   final double km = _haversineKm(fromLat, fromLng, lat, lng);
   if (km < 1.2) {
     return _Leg(
         mode: "walk",
         minutes: math.max(3, (km / 4.5 * 60).ceil()),
-        dist: "${(km * 1000).round()}m");
+        dist: "${(km * 1000).round()}m",
+        estimated: true);
   }
   if (km < 4) {
     return _Leg(
         mode: "bike",
         minutes: math.max(5, (km / 12 * 60).ceil()),
-        dist: "${km.toStringAsFixed(1)}km");
+        dist: "${km.toStringAsFixed(1)}km",
+        estimated: true);
   }
   return _Leg(
       mode: "taxi",
       minutes: math.max(8, (km / 25 * 60).ceil() + 5),
-      dist: "${km.toStringAsFixed(1)}km");
+      dist: "${km.toStringAsFixed(1)}km",
+      estimated: true);
 }
 
 /// TravelPlanData → 设计稿视图模型（days[].stops[]）
@@ -186,14 +232,29 @@ List<_DayPlan> _adaptDays(TravelPlanData plan) {
   final List<_DayPlan> result = <_DayPlan>[];
   for (final TravelPlanDay day in plan.days) {
     final int n = day.entries.length;
-    // 第一遍：解析显式时间（HH:mm / HH:mm-HH:mm）
+    // 第一遍：服务端真值优先（显式起止 / visitDuration），再退回文本时刻
     final List<int?> starts = List<int?>.filled(n, null);
     final List<int?> durations = List<int?>.filled(n, null);
+    final List<bool> realDurations = List<bool>.filled(n, false);
     for (int i = 0; i < n; i++) {
       final parsed = _parseClock(day.entries[i].time);
       if (parsed != null) {
         starts[i] = parsed.start;
         durations[i] = parsed.duration;
+        realDurations[i] = parsed.duration != null;
+      }
+      final int? end = _parseClock(day.entries[i].endTime)?.start;
+      if (durations[i] == null &&
+          starts[i] != null &&
+          end != null &&
+          end > starts[i]!) {
+        durations[i] = end - starts[i]!;
+        realDurations[i] = true;
+      }
+      final int? real = day.entries[i].visitDuration;
+      if (durations[i] == null && real != null && real > 0) {
+        durations[i] = real;
+        realDurations[i] = true;
       }
     }
     // 第二遍：缺起点按上一站终点递推（首站默认 09:00）；缺时长按下一站
@@ -223,14 +284,22 @@ List<_DayPlan> _adaptDays(TravelPlanData plan) {
     final List<_Stop> stops = <_Stop>[];
     for (int i = 0; i < n; i++) {
       final TravelDayEntry e = day.entries[i];
+      final TravelStopLeg? real = e.leg;
+      final String? realMode = real == null ? null : _legModeOf(real.mode);
       final _Leg leg = i == 0
           ? const _Leg(mode: "walk", minutes: 0, dist: "—")
-          : _estimateLeg(
-              stops.lastOrNull?.latitude,
-              stops.lastOrNull?.longitude,
-              e.latitude,
-              e.longitude,
-            );
+          : (real != null && realMode != null && real.minutes > 0)
+              ? _Leg(
+                  mode: realMode,
+                  minutes: real.minutes,
+                  dist: real.dist,
+                  estimated: real.estimated)
+              : _estimateLeg(
+                  stops.lastOrNull?.latitude,
+                  stops.lastOrNull?.longitude,
+                  e.latitude,
+                  e.longitude,
+                );
       final String kind = switch (e.kind) {
         TravelEntryKind.attraction => "sight",
         TravelEntryKind.restaurant => "food",
@@ -251,6 +320,7 @@ List<_DayPlan> _adaptDays(TravelPlanData plan) {
         tag: tag,
         start: starts[i]!,
         duration: durations[i]!,
+        durationReal: realDurations[i],
         note: e.description.trim(),
         desc: e.description.trim(),
         tips: e.tips,
@@ -1114,28 +1184,33 @@ class _NowCard extends StatelessWidget {
                       overflow: TextOverflow.ellipsis,
                       style: const TextStyle(fontSize: 13, height: 1.6, color: _T.t2),
                     ),
-                  const SizedBox(height: 12),
-                  // 建议停留进度
-                  Row(
-                    children: <Widget>[
-                      const Icon(Icons.access_time_rounded, size: 15, color: _T.amber),
-                      const SizedBox(width: 8),
-                      Text("建议停留 ${stop.duration} 分钟",
-                          style: const TextStyle(fontSize: 12, color: _T.t2)),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(4),
-                          child: LinearProgressIndicator(
-                            value: (stop.duration / 120).clamp(0.08, 1.0),
-                            minHeight: 4,
-                            backgroundColor: const Color(0x14FFFFFF),
-                            valueColor: const AlwaysStoppedAnimation<Color>(_T.amber),
+                  // 建议停留进度：时长没有服务端真值时整行不出现（间隔不是停留）
+                  if (stop.durationReal) ...<Widget>[
+                    const SizedBox(height: 12),
+                    Row(
+                      children: <Widget>[
+                        const Icon(Icons.access_time_rounded,
+                            size: 15, color: _T.amber),
+                        const SizedBox(width: 8),
+                        Text("建议停留 ${stop.duration} 分钟",
+                            style:
+                                const TextStyle(fontSize: 12, color: _T.t2)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(4),
+                            child: LinearProgressIndicator(
+                              value: (stop.duration / 120).clamp(0.08, 1.0),
+                              minHeight: 4,
+                              backgroundColor: const Color(0x14FFFFFF),
+                              valueColor: const AlwaysStoppedAnimation<Color>(
+                                  _T.amber),
+                            ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
+                      ],
+                    ),
+                  ],
                   if (next != null) ...<Widget>[
                     const SizedBox(height: 13),
                     _NextRow(next: next!),
@@ -1223,7 +1298,7 @@ class _NextRow extends StatelessWidget {
                     if (leg != null && leg.minutes > 0) ...<Widget>[
                       const SizedBox(width: 7),
                       Text(
-                        "${leg.label} ${leg.minutes} 分钟 · ${leg.dist}",
+                        "${leg.label} ${leg.approx}${leg.minutes} 分钟 · ${leg.dist}",
                         style: const TextStyle(
                             fontSize: 12, color: _T.amber, fontWeight: FontWeight.w500),
                       ),
@@ -1380,7 +1455,7 @@ class _ThumbBar extends StatelessWidget {
     final _Leg? leg = next?.leg;
     final String goLabel = next == null
         ? "结束今日 · 回酒店"
-        : "前往 ${next!.name}${leg != null && leg.minutes > 0 ? " · ${leg.label} ${leg.minutes} 分钟" : ""}";
+        : "前往 ${next!.name}${leg != null && leg.minutes > 0 ? " · ${leg.label} ${leg.approx}${leg.minutes} 分钟" : ""}";
     return Padding(
       padding: EdgeInsets.fromLTRB(
           24, 10, 24, 20 + MediaQuery.paddingOf(context).bottom),
@@ -1731,7 +1806,7 @@ class _SheetRow extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    "停留 ${stop.duration} 分${stop.leg != null && stop.leg!.minutes > 0 ? " · ${stop.leg!.label} ${stop.leg!.minutes} 分" : ""}",
+                    _stopSub(stop),
                     style: const TextStyle(fontSize: 11, color: _T.t3),
                   ),
                 ],
@@ -2312,7 +2387,7 @@ class _StopDetailPage extends StatelessWidget {
                     spacing: 8,
                     runSpacing: 8,
                     children: <Widget>[
-                      _FactChip("建议停留 ${stop.duration} 分"),
+                      if (stop.durationReal) _FactChip("建议停留 ${stop.duration} 分"),
                       if (stop.price.isNotEmpty) _FactChip(stop.price),
                       if (stop.addr.isNotEmpty)
                         _FactChip(stop.addr, icon: Icons.place_outlined),
@@ -2591,7 +2666,8 @@ class _InfoCard extends StatelessWidget {
     final List<(IconData, String, String)> rows = <(IconData, String, String)>[
       if (stop.addr.isNotEmpty) (Icons.place_outlined, "地址", stop.addr),
       if (stop.price.isNotEmpty) (Icons.confirmation_number_outlined, "费用", stop.price),
-      (Icons.schedule_rounded, "时段", "${stop.timeText} · 建议 ${stop.duration} 分钟"),
+      (Icons.schedule_rounded, "时段",
+          stop.durationReal ? "${stop.timeText} · 建议 ${stop.duration} 分钟" : stop.timeText),
     ];
     return Container(
       padding: const EdgeInsets.all(15),
@@ -2704,7 +2780,7 @@ class _ArriveFlow extends StatelessWidget {
           if (leg != null && leg.minutes > 0) ...<Widget>[
             Icon(_modeIcon(leg.mode), size: 18, color: _T.amber),
             const SizedBox(width: 9),
-            Text("${leg.label} ${leg.minutes} 分钟 · ${leg.dist}",
+            Text("${leg.label} ${leg.approx}${leg.minutes} 分钟 · ${leg.dist}",
                 style: const TextStyle(fontSize: 12.5, color: _T.t2)),
             const SizedBox(width: 9),
             const Icon(Icons.arrow_forward_rounded, size: 14, color: _T.t3),

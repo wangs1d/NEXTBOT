@@ -237,7 +237,6 @@ const goalBoard = new GoalBoard({
       payload: { goalId: goal.goalId, title: goal.title, body: String(goal.payload?.body ?? "") },
     });
   },
-  recallMemory: () => ["上周和小王对过 Q3 需求范围"],
 });
 
 const arbiter = new ArbiterV2({
@@ -589,11 +588,6 @@ for (let step = 0; step < totalSteps; step++) {
   if (sim.connected && sim.window) presence.noteActivity(ACTOR, virtual.now);
   // 传感器轮询 → 信号
   await kernel.pollOnce();
-  // 会前准备（镜像 bootstrap 60s 定时：25-40min 窗口）
-  const next = scheduleSensor.latest();
-  if (next && next.min >= 25 && next.min <= 40) {
-    goalBoard.maybeStartMeetingPrep(ACTOR, { title: next.title, runAtMin: next.min });
-  }
   await evaluatorChain.flush();
   arbiter.forceTick();
   pipeline.flushDue(virtual.now);

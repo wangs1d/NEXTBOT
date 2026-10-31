@@ -354,3 +354,43 @@ class ChatMessage {
     return s == "done" || s == "failed" || s == "cancelled";
   }
 }
+
+/// 分泡 / 回填行消息 id 的轮次后缀：`assistant-<traceId>-b<N>`、
+/// `assistant-<traceId>-hist-<N>`。
+final RegExp _turnSuffixPattern = RegExp(r"^(.+?)(?:-b\d+|-hist-\d+)$");
+
+/// 消息所属轮次的锚点（该轮 user 消息的 messageId）；不属于任何一轮返回 null。
+///
+/// 一轮里的回复气泡由服务端按轮次定型 id：`assistant-<userMsgId>`、
+/// 分泡 `assistant-<userMsgId>-bN`（traceId 即 user 消息 id），跨端回填行同为
+/// `assistant-<userMsgId>-hist-N`——归属因此可精确判定，不必再按「user 到
+/// 下一条 user」的位置窗口推断。
+/// 主动推送（`assistant-proactive-*`）、睡前备忘、决策卡、后台任务结果不携带
+/// 锚点——它们不属于任何一轮，删除某一轮时不得连带。
+String? turnAnchorOfMessage(ChatMessage message) {
+  if (message.role == "user") return message.messageId;
+  if (message.role != "assistant") return null;
+  const String prefix = "assistant-";
+  if (!message.messageId.startsWith(prefix)) return null;
+  final String trace = message.messageId.substring(prefix.length);
+  return _turnSuffixPattern.firstMatch(trace)?.group(1) ?? trace;
+}
+
+/// 点某条消息时应当一并摘除的消息 id 集合（即 UI 的「删除这一轮」范围）。
+///
+/// 有轮次归属 → 同轮 user 消息 + 内嵌同一锚点的回复气泡；
+/// 无轮次归属（主动推送 / 睡前备忘 / 决策卡 / 后台任务结果）→ 只有它自己。
+/// 返回顺序与 [messages] 一致，便于 UI 直接高亮。
+List<String> turnMessageIdsFor(
+  ChatMessage target,
+  List<ChatMessage> messages,
+) {
+  final String? anchorId = turnAnchorOfMessage(target);
+  if (anchorId == null) return <String>[target.messageId];
+  final List<String> ids = messages
+      .where((ChatMessage m) => turnAnchorOfMessage(m) == anchorId)
+      .map((ChatMessage m) => m.messageId)
+      .toList();
+  if (ids.isEmpty) ids.add(target.messageId);
+  return ids;
+}

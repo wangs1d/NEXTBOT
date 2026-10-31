@@ -42,6 +42,8 @@ export type JournalHit = {
   time: string;
   role: "user" | "assistant" | "fact";
   text: string;
+  /** 来源标记：event = 工具结果事件行（只进 LTM，不进 KV 增量摘要） */
+  source?: "event";
 };
 
 function nowShanghai(): Date {
@@ -202,12 +204,56 @@ export class DailyJournalService {
     this.writeChain = this.writeChain
       .then(async () => {
         await mkdir(this.actorDir(actorId), { recursive: true });
+        await this.reopenIfConsolidated(actorId, dateKey);
         await appendFile(this.journalFile(actorId, dateKey), `${lines.join("\n")}\n`, "utf8");
         await this.cleanupOldJournals(actorId).catch(() => {});
       })
       .catch((err) => {
         console.log(`[DailyJournal] appendTurn 失败（忽略）: ${err}`);
       });
+  }
+
+  /**
+   * 实质事件行（工具结果等）：写进与对话流水同一个当日文件，夜间沿同一固化链路
+   * 进长期记忆。事件时间决定落在哪一天（跨零点不会记错日期）。
+   * token 仅用于固化时回溯来源事件 id，固化正文不含它。
+   */
+  appendEventLine(
+    actorId: string,
+    eventTime: string,
+    entry: { token?: string; content: string },
+  ): void {
+    if (!actorId) return;
+    const at = new Date(eventTime);
+    if (Number.isNaN(at.getTime())) return;
+    const body = normalizeLine(entry.content).slice(0, JOURNAL_MAX_LINE_CHARS);
+    if (!body) return;
+    const token = entry.token && /^[\w-]{1,10}$/.test(entry.token) ? `${entry.token} ` : "";
+    const line = `- [${toTimeLabel(at)}] ${token}fact: ${body}\n`;
+    const dateKey = toDateKey(at);
+
+    this.writeChain = this.writeChain
+      .then(async () => {
+        await mkdir(this.actorDir(actorId), { recursive: true });
+        await this.reopenIfConsolidated(actorId, dateKey);
+        await appendFile(this.journalFile(actorId, dateKey), line, "utf8");
+        await this.cleanupOldJournals(actorId).catch(() => {});
+      })
+      .catch((err) => {
+        console.log(`[DailyJournal] appendEventLine 失败（忽略）: ${err}`);
+      });
+  }
+
+  /**
+   * 已固化日期又被追加（固化后用户仍在活动）：把该日期重新置为未固化。
+   * 固化时原文件已删除，重建文件里只有固化后的新行，不会把旧内容再固化一遍。
+   */
+  private async reopenIfConsolidated(actorId: string, dateKey: string): Promise<void> {
+    const set = await this.loadConsolidated(actorId);
+    if (!set.has(dateKey)) return;
+    set.delete(dateKey);
+    this.consolidatedCache.set(actorId, set);
+    await writeFile(this.consolidatedFile(actorId), `${JSON.stringify([...set], null, 2)}\n`, "utf8");
   }
 
   /**
@@ -251,10 +297,16 @@ export class DailyJournalService {
     for (const line of raw.split("\n")) {
       const t = line.trim();
       if (!t.startsWith("- [")) continue;
-      const m = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:[\w-]{0,10}\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+      const m = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:([\w-]{0,10})\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
       if (!m) continue;
-      const role = m[2] === "U" ? "user" : m[2] === "A" ? "assistant" : "fact";
-      hits.push({ dateKey, time: m[1]!, role: role as JournalHit["role"], text: m[3]! });
+      const role = m[3] === "U" ? "user" : m[3] === "A" ? "assistant" : "fact";
+      hits.push({
+        dateKey,
+        time: m[1]!,
+        role: role as JournalHit["role"],
+        text: m[4]!,
+        ...(m[2]?.startsWith("e-") ? { source: "event" as const } : {}),
+      });
     }
     return hits;
   }
@@ -294,12 +346,21 @@ export class DailyJournalService {
       for (const line of raw.split("\n")) {
         const t = line.trim();
         if (!t.startsWith("- [")) continue;
-        const m = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:[\w-]{0,10}\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+        const m = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:([\w-]{0,10})\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
         if (!m) continue;
-        const role = m[2] === "U" ? "user" : m[2] === "A" ? "assistant" : "fact";
-        const score = overlapScore(m[3]!, q);
+        const role = m[3] === "U" ? "user" : m[3] === "A" ? "assistant" : "fact";
+        const score = overlapScore(m[4]!, q);
         if (score > 0) {
-          scored.push({ hit: { dateKey, time: m[1]!, role: role as JournalHit["role"], text: m[3]! }, score });
+          scored.push({
+            hit: {
+              dateKey,
+              time: m[1]!,
+              role: role as JournalHit["role"],
+              text: m[4]!,
+              ...(m[2]?.startsWith("e-") ? { source: "event" as const } : {}),
+            },
+            score,
+          });
         }
       }
     }

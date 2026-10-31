@@ -15,7 +15,7 @@ import {
   formatContentSummaryForChat,
 } from "../services/content-summary-service.js";
 import { extractDataBriefPayload } from "../services/render-hint-service.js";
-import { formatAgentResultForChat, injectItemUrls } from "../services/agent-result-formatter.js";
+import { formatAgentResultForChat } from "../services/agent-result-formatter.js";
 import type { RenderDecision } from "./types.js";
 
 export interface BodyFormOptions {
@@ -55,8 +55,7 @@ export function applyBodyForm(
     case "search_result":
     case "result_card":
     case "quote": {
-      const marked = formatAgentResultForChat(text, opts?.toolName);
-      return marked ? injectItemUrls(marked) : text;
+      return formatAgentResultForChat(text, opts?.toolName) ?? text;
     }
     default:
       return text;

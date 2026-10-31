@@ -23,8 +23,10 @@ declare global {
       setHitAreas?: (areasJson: string) => void;
       /** 强制整个窗口可交互（菜单打开时） */
       setForceInteractive?: (force: boolean) => void;
-      onPatch?: (cb: (patch: Record<string, unknown>) => void) => void;
-      onRoam?: (cb: () => void) => void;
+      /** 机体首帧已画出 —— 通知宿主可以结束召唤等待 */
+      notifyReady?: () => void;
+      onPatch?: (cb: (patch: Record<string, unknown>) => void) => () => void;
+      onRoam?: (cb: () => void) => () => void;
       onTheme?: (cb: (theme: string) => void) => () => void;
     };
     spherePetPos?: { x: number; y: number };

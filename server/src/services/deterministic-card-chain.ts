@@ -11,6 +11,7 @@ import {
   applyCards,
   collectCardPayloads,
   decideRender,
+  effectStatusOf,
   unfoldIfCardsPresent,
 } from "../render/index.js";
 import type { TurnEffect } from "../render/types.js";
@@ -286,7 +287,11 @@ export interface DeterministicCardChainInput {
 function chainEffects(input: DeterministicCardChainInput): TurnEffect[] {
   const effects: TurnEffect[] = [];
   if (input.travelToolName === "travel.plan-itinerary" && input.travelResult) {
-    effects.push({ tool: input.travelToolName, status: "ok", result: input.travelResult });
+    effects.push({
+      tool: input.travelToolName,
+      status: effectStatusOf(input.travelResult),
+      result: input.travelResult,
+    });
   }
   for (const list of [
     input.weatherResults,
@@ -295,7 +300,11 @@ function chainEffects(input: DeterministicCardChainInput): TurnEffect[] {
     input.videoResults,
   ]) {
     for (const receipt of list ?? []) {
-      effects.push({ tool: receipt.toolName, status: "ok", result: receipt.result });
+      effects.push({
+        tool: receipt.toolName,
+        status: effectStatusOf(receipt.result),
+        result: receipt.result,
+      });
     }
   }
   for (const tool of input.failedToolNames ?? []) {

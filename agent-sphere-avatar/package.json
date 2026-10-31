@@ -14,6 +14,7 @@
   "files": [
     "dist",
     "public",
+    "source",
     "src",
     "scripts",
     "*.html",
@@ -21,6 +22,7 @@
     "README.md"
   ],
   "scripts": {
+    "model": "node scripts/build-model.mjs",
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "build:electron": "npm run build",

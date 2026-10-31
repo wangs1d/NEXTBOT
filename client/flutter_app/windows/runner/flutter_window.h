@@ -18,6 +18,7 @@
 #include "connected_call_window.h"
 #include "outgoing_call_window.h"
 #include "dynamic_island_window.h"
+#include "media_session_watcher.h"
 #include "pcm_stream_player.h"
 
 // A window that does nothing but host a Flutter view.
@@ -168,6 +169,16 @@ class FlutterWindow : public Win32Window {
 
   // PCM 播放自然结束：音频线程 PostMessage 弹回平台线程后再通知 Dart
   static constexpr UINT kPcmPlayerDoneMsg = WM_APP + 0x7A;
+
+  // pai/media_session —— 本地正在播放的曲目（Windows SMTC 采集）。
+  // 采样线程按节拍 PostMessage，平台线程再经本通道推给 Dart。
+  std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>>
+      media_session_channel_;
+  std::unique_ptr<MediaSessionWatcher> media_session_watcher_;
+
+  void HandleMediaSessionMethodCall(
+      const flutter::MethodCall<flutter::EncodableValue>& call,
+      std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>> result);
 };
 
 #endif  // RUNNER_FLUTTER_WINDOW_H_

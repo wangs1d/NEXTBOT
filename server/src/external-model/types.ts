@@ -176,6 +176,11 @@ export type AgentPromptMemoryContext = {
    */
   deviceEnvironment?: string;
   /**
+   * 用户界面可见面（内置浏览器当前页等，带最近上报龄期）。
+   * 每轮随客户端上报变化，只进动态层；无上报不注入。
+   */
+  clientSurfaces?: string;
+  /**
    * 当前情绪状态摘要：LimbicCortex/EmotionModulator 的 VAD 值可读化输出。
    * 让 LLM 知道自己当前的情绪（如低落、兴奋、关注），影响回复语气。
    * 由 agent-core 从 brainCenter.limbicCortex.getEmotion() 拉取并格式化注入。
@@ -212,6 +217,11 @@ export type AgentPromptMemoryContext = {
    * 过往日期已固化进长期记忆图，不再走本条文件检索（跨天由图谱/KV 召回兜底）。
    */
   journalRecall?: string;
+  /**
+   * 事件回忆块（L0 memory_events）：用户出现时间回溯意图且命中真实事件时
+   * 注入的动态块，带发生时间与龄期，≤6 行。只作往事回答依据，不主动翻旧账。
+   */
+  eventRecall?: string;
   /**
    * 语义意图理解结果：LLM 对用户本轮句子的真实意图解析。
    * 作为独立块注入，让主 LLM 明确知道"用户想做什么"，避免答非所问。

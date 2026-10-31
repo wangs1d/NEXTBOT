@@ -16,11 +16,17 @@ import {
   type FlyAiRunner,
 } from "./flyai-quote-source.js";
 import { createCtripFlightSource } from "./site-adapters.js";
+import { createFliggyHotelWebSource } from "./hotel-web-price-source.js";
 
 export interface BuildQuoteAggregatorDeps {
   /** 飞猪 flyai CLI 执行器（测试注入桩）；缺省 = 调 PATH 里的真实 flyai */
   flyAiRunner?: FlyAiRunner | null;
   browserRunner?: BrowserRunner | null;
+  /**
+   * 用户可见内置浏览器执行器（API 给不出实价时的代查通道，如飞猪体验模式脱敏价）。
+   * 缺省 = 不挂载浏览器补价源。
+   */
+  sharedBrowserRunner?: BrowserRunner | null;
   /** 显式覆盖源集（测试用）；缺省 = local + 飞猪 FlyAI + 已配置的浏览器代查源 */
   sources?: QuoteSource[];
   options?: QuoteAggregatorOptions;
@@ -35,6 +41,9 @@ export function buildDefaultQuoteSources(deps: BuildQuoteAggregatorDeps): QuoteS
     createFlyAiFlightSource(flyai),
   ];
   if (deps.browserRunner) sources.push(createCtripFlightSource(deps.browserRunner));
+  if (deps.sharedBrowserRunner) {
+    sources.push(createFliggyHotelWebSource({ flyai, browser: deps.sharedBrowserRunner }));
+  }
   return sources;
 }
 

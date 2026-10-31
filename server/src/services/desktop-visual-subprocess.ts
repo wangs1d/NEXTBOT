@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { serverRoot } from "../config/paths.js";
 
 import type {
   DesktopVisualPort,
@@ -52,8 +52,7 @@ function packageDirExists(root: string): boolean {
 }
 
 function defaultPackageRoot(): string {
-  const here = dirname(fileURLToPath(import.meta.url));
-  return join(here, "..", "..", "..", "desktop-visual");
+  return join(serverRoot(), "desktop-visual");
 }
 
 function resolvePackageRoot(env: NodeJS.ProcessEnv = process.env): string {

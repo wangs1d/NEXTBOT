@@ -21,6 +21,9 @@ import { PERSISTED_CLIENT_ID_FIELD, readUserMessageClientId } from "../src/exter
 import {
   ChatThreadPersistence,
   isChatThreadPersistenceEnabled,
+  threadShardDirFor,
+  threadShardPathFor,
+  type PersistedSession,
 } from "../src/external-model/chat-thread-persist.js";
 import {
   buildTimestampFreeLlmView,
@@ -36,24 +39,35 @@ const skipReason = isChatThreadPersistenceEnabled()
   ? false
   : "AGENT_CHAT_THREAD_PERSIST 被显式关闭，持久化用例无意义";
 
-/** 轮询等待落盘文件出现期望内容（debounce 250ms + 原子写，固定 sleep 不稳）。 */
-async function waitForFile(
+/**
+ * 轮询等待该会话的分片落盘到期望状态（debounce 250ms + 原子写排队，固定 sleep 不稳）。
+ * 落盘是「每会话一个分片」，所以按 sessionId 定位文件；旧单文件只在首次迁移前兜底。
+ */
+async function waitForSessionRow(
   file: string,
-  predicate: (raw: string) => boolean,
-  timeoutMs = 5000,
-): Promise<string> {
+  predicate: (row: PersistedSession) => boolean,
+  timeoutMs = 8000,
+): Promise<PersistedSession> {
+  const shard = threadShardPathFor(threadShardDirFor(file), SESSION);
   const deadline = Date.now() + timeoutMs;
   let last = "";
   while (Date.now() < deadline) {
     try {
-      last = readFileSync(file, "utf8");
-      if (predicate(last)) return last;
+      last = readFileSync(shard, "utf8");
+      const row = JSON.parse(last) as PersistedSession;
+      if (predicate(row)) return row;
     } catch {
-      /* 文件还没生成 */
+      try {
+        last = readFileSync(file, "utf8");
+        const row = (JSON.parse(last).sessions ?? {})[SESSION] as PersistedSession | undefined;
+        if (row && predicate(row)) return row;
+      } catch {
+        /* 还没落盘 */
+      }
     }
     await delay(50);
   }
-  throw new Error(`等待落盘超时（${file}）。最后内容：${last.slice(0, 400)}`);
+  throw new Error(`等待落盘超时（${shard}）。最后内容：${last.slice(0, 400)}`);
 }
 
 function seedTurns(store: ChatThreadStore, turns: number): void {
@@ -81,12 +95,10 @@ test("重启后 deleteTurn 仍能按 clientMessageId 精准摘除该轮", { skip
   const storeA = new ChatThreadStore(persistA);
   seedTurns(storeA, 3);
 
-  const raw = await waitForFile(file, (t) => t.includes("user turn 3"));
-  const row = JSON.parse(raw).sessions[SESSION] as {
-    messages: Array<Record<string, unknown>>;
-  };
+  const row = await waitForSessionRow(file, (r) => JSON.stringify(r.messages).includes("user turn 3"));
+  const messages = row.messages as Array<Record<string, unknown>>;
   assert.ok(
-    row.messages.some((m) => typeof m[PERSISTED_CLIENT_ID_FIELD] === "string"),
+    messages.some((m) => typeof m[PERSISTED_CLIENT_ID_FIELD] === "string"),
     "clientMessageId 必须随线程落盘（否则重启后无法按 id 定位）",
   );
 
@@ -114,7 +126,11 @@ test("重启后 deleteTurn 仍能按 clientMessageId 精准摘除该轮", { skip
   assert.match(serialized, /user turn 3/, "更晚轮次必须保留");
 
   // 删除结果必须落回磁盘：否则再下一次重启（进程 C）会把删掉的一轮又读回来
-  const afterDelete = await waitForFile(file, (t) => !t.includes("user turn 2"));
+  const deletedRow = await waitForSessionRow(
+    file,
+    (r) => !JSON.stringify(r.messages).includes("user turn 2"),
+  );
+  const afterDelete = JSON.stringify(deletedRow.messages);
   assert.doesNotMatch(afterDelete, /user turn 2/, "磁盘上也不得残留被删轮次");
   assert.match(afterDelete, /user turn 3/, "磁盘上更晚轮次必须保留");
 
@@ -138,7 +154,7 @@ test("恢复后的线程对象不带落盘字段（内部元数据不驻留内�
   await persistA.load();
   const storeA = new ChatThreadStore(persistA);
   seedTurns(storeA, 2);
-  await waitForFile(file, (t) => t.includes("__clientMessageId"));
+  await waitForSessionRow(file, (r) => JSON.stringify(r).includes("__clientMessageId"));
 
   const persistB = new ChatThreadPersistence(file, notes);
   await persistB.load();

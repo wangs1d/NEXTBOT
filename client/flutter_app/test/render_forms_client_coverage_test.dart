@@ -236,7 +236,7 @@ void main() {
     expect(find.textContaining("种一棵树"), findsOneWidget);
   });
 
-  testWidgets("结果卡 search_result：可点击搜索结果列表", (tester) async {
+  testWidgets("结果卡 search_result：搜索结果列表（条目不承载网页链接）", (tester) async {
     await pumpBody(
       tester,
       "帮你查到了：\n"
@@ -250,6 +250,54 @@ void main() {
     expect(find.text("搜索结果"), findsOneWidget);
     expect(find.textContaining("鼓浪屿两日游攻略"), findsOneWidget);
     expect(find.textContaining("共 2 条结果"), findsOneWidget);
+    // 旧载荷里仍带 url，卡片也不再渲染跳转入口（无箭头、整行不可点）
+    expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
+    expect(find.byIcon(Icons.open_in_new), findsNothing);
+  });
+
+  testWidgets("专用卡 price_compare：分组报价只展示，行不跳平台、无决策页入口", (tester) async {
+    await pumpBody(
+      tester,
+      "帮你比好了。\n"
+          "[AGENT_RESULT_CARD_START]\n"
+          '{"cardType":"price_compare","title":"比价结果：降噪耳机","avatar":"NB","avatarStyle":"default",'
+          '"items":[{"type":"num","text":"¥1869 [拼多多] Sony WH-1000XM5"}],'
+          '"priceCompare":{"query":"降噪耳机","bestIndex":0,"decisionPageUrl":"/shopping/decision-page?id=x",'
+          '"groups":[{"platform":"拼多多","title":"Sony WH-1000XM5","priceCny":1869,'
+          '"url":"https://pdd.com/xm5","image":""},{"platform":"抖音","title":"索尼 WH-1000XM5",'
+          '"priceCny":1999,"url":"https://dy.com/x"}]},'
+          '"footer":"信息为实时抓取，以下单结算页为准","actions":[],"speak":"high","cardId":"card_t9b"}\n'
+          "[AGENT_RESULT_CARD_END]",
+    );
+    expect(find.text("¥1869"), findsOneWidget);
+    expect(find.textContaining("打开比价决策页"), findsNothing);
+    expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
+    expect(find.byIcon(Icons.perm_media_outlined), findsNothing);
+    expect(find.byIcon(Icons.open_in_new_rounded), findsNothing);
+  });
+
+  testWidgets("专用卡 product_pick：渠道价与来源帖只展示，无购买 CTA、无外链", (tester) async {
+    await pumpBody(
+      tester,
+      "给你选了它。\n"
+          "[AGENT_RESULT_CARD_START]\n"
+          '{"cardType":"product_pick","title":"主推 · Sony WH-1000XM5","avatar":"NB",'
+          '"avatarStyle":"default","items":[],"footer":"",'
+          '"pick":{"productId":"p1","label":"Sony WH-1000XM5","priceLabel":"¥1,869",'
+          '"headline":"降噪续航都够用","reasons":["30 小时续航"],"cautions":[],'
+          '"channels":[{"name":"京东","priceCny":1899,"url":"https://item.jd.com/x"},'
+          '{"name":"拼多多","priceCny":1869,"url":"https://pdd.com/x"}]},'
+          '"ugc":{"platformLabel":"小红书","mentions":3,"pros":["降噪顶"],"cons":[],'
+          '"posts":[{"title":"通勤半年体验","url":"https://xhslink.com/p1"}]},'
+          '"actions":[],"speak":"high","cardId":"card_t9c"}\n'
+          "[AGENT_RESULT_CARD_END]",
+    );
+    expect(find.textContaining("京东  ¥1899", findRichText: true), findsOneWidget);
+    expect(find.textContaining("拼多多  ¥1869", findRichText: true), findsOneWidget);
+    expect(find.text("通勤半年体验"), findsOneWidget);
+    expect(find.textContaining("比价购买"), findsNothing);
+    expect(find.byIcon(Icons.open_in_new_rounded), findsNothing);
+    expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
   });
 
   testWidgets("专用卡 weather：天气实况卡", (tester) async {

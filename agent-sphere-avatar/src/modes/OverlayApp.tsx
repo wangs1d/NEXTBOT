@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { EntranceAnimation } from "../components/EntranceAnimation";
 import { FocusTimerPanel } from "../components/FocusTimerPanel";
 import type { EllipseShape } from "../components/HitAreaReporter";
 import { MessageList } from "../components/MessageList";
@@ -341,53 +340,72 @@ export function OverlayApp() {
 
   useEffect(() => {
     document.body.classList.add("overlay-body");
+    const disposers: Array<() => void> = [];
+    let bound = false;
 
-    window.sphereOverlay?.onPatch?.((patch: {
-      mood?: AgentMood;
-      energy?: number;
-      caption?: string | null;
-      phase?: string;
-      subAgentType?: string;
-      subAgentDisplayName?: string;
-      source?: string;
-      screenX?: number;
-      screenY?: number;
-      attentionTarget?: Parameters<typeof rawApply>[0]["attentionTarget"];
-    }) => {
-      // LLM pet.reaction.ack 会以 caption 形式覆盖桌宠台词 — 不要再用 caption 自动清除
-      apply({
-        mood: patch.mood,
-        energy: patch.energy,
-        caption: patch.caption === null ? undefined : patch.caption,
-        phase: patch.phase,
-        subAgentType: patch.subAgentType,
-        subAgentDisplayName: patch.subAgentDisplayName,
-        source: patch.source,
-        attentionTarget:
-          patch.attentionTarget ??
-          (typeof patch.screenX === "number" && typeof patch.screenY === "number"
-            ? {
-                screenX: patch.screenX,
-                screenY: patch.screenY,
-                strength: 0.72,
-                source: patch.source,
-                expiresAt: Date.now() + 2400,
-              }
-            : undefined),
-      });
-    });
+    /** 原生桥在 loadFinished 之后才注入，可能晚于本 effect —— 没挂上就等 ready 事件补挂 */
+    const bindBridge = () => {
+      const bridge = window.sphereOverlay;
+      if (!bridge || bound) return;
+      bound = true;
+      const keep = (unlisten?: () => void) => {
+        if (unlisten) disposers.push(unlisten);
+      };
 
-    window.sphereOverlay?.onRoam?.(() => roamNowRef.current?.());
+      keep(bridge.onPatch?.((patch: {
+        mood?: AgentMood;
+        energy?: number;
+        caption?: string | null;
+        phase?: string;
+        subAgentType?: string;
+        subAgentDisplayName?: string;
+        source?: string;
+        screenX?: number;
+        screenY?: number;
+        attentionTarget?: Parameters<typeof rawApply>[0]["attentionTarget"];
+      }) => {
+        // LLM pet.reaction.ack 会以 caption 形式覆盖桌宠台词 — 不要再用 caption 自动清除
+        apply({
+          mood: patch.mood,
+          energy: patch.energy,
+          caption: patch.caption === null ? undefined : patch.caption,
+          phase: patch.phase,
+          subAgentType: patch.subAgentType,
+          subAgentDisplayName: patch.subAgentDisplayName,
+          source: patch.source,
+          attentionTarget:
+            patch.attentionTarget ??
+            (typeof patch.screenX === "number" && typeof patch.screenY === "number"
+              ? {
+                  screenX: patch.screenX,
+                  screenY: patch.screenY,
+                  strength: 0.72,
+                  source: patch.source,
+                  expiresAt: Date.now() + 2400,
+                }
+              : undefined),
+        });
+      }));
 
-    // 托盘换肤：data-theme 切换配色变量
-    const unlistenTheme = window.sphereOverlay?.onTheme?.((theme: string) => {
-      document.documentElement.setAttribute("data-theme", theme);
-      try {
-        localStorage.setItem("pai_theme", theme);
-      } catch {
-        /* ignore */
-      }
-    });
+      keep(bridge.onRoam?.(() => roamNowRef.current?.()));
+
+      // 托盘换肤：data-theme 切换配色变量
+      keep(bridge.onTheme?.((theme: string) => {
+        document.documentElement.setAttribute("data-theme", theme);
+        try {
+          localStorage.setItem("pai_theme", theme);
+        } catch {
+          /* ignore */
+        }
+      }));
+    };
+
+    bindBridge();
+    if (!bound) {
+      const onReady = () => bindBridge();
+      window.addEventListener("sphere-overlay:ready", onReady);
+      disposers.push(() => window.removeEventListener("sphere-overlay:ready", onReady));
+    }
 
     // 启动时恢复上次主题
     try {
@@ -399,7 +417,7 @@ export function OverlayApp() {
 
     return () => {
       document.body.classList.remove("overlay-body");
-      unlistenTheme?.();
+      for (const dispose of disposers) dispose();
     };
   }, [apply]);
 
@@ -451,7 +469,6 @@ export function OverlayApp() {
 
   return (
     <div className="mode-shell mode-overlay">
-      <EntranceAnimation />
       <div className="overlay-attach-slot" style={{ width: attach.width }}>
         {attach.panel === "focus" && (
           <FocusTimerPanel retracting={attach.retracting} onClose={attach.close} />

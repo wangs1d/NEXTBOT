@@ -83,7 +83,7 @@ type WriteDecidedCall = {
   actorId: string;
   text: string;
   source: string;
-  opts: { context: string; highSignal: boolean };
+  opts: { context: string; highSignal: boolean; sourceEventId?: string; eventTime?: string };
 };
 
 function makeFakeNarrativePort() {
@@ -187,6 +187,35 @@ test("统一写入者: 高信号候选 → 单次决策 → writeDecided + KV �
     // KV summary 行按旧格式落一行（含决策标签）
     assert.equal(kvLines.length, 1);
     assert.match(kvLines[0]!, /^\[fast-path\]\[(remember|overwrite|decay)\]/);
+  } finally {
+    await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
+  }
+});
+
+test("统一写入者: 来源事件随候选透传到 writeDecided（LTM 可追溯）", { timeout: 30_000 }, async () => {
+  resetMemoryConsolidationForTests();
+  resetMemoryEchoGuard();
+  const dir = await mkdtemp(join(tmpdir(), "consolidation-provenance-"));
+  try {
+    const { port, calls } = makeFakeNarrativePort();
+    const service = new MemoryConsolidationService({
+      narrative: port,
+      kvSync: null,
+      memory: null,
+      filePath: join(dir, "candidates.json"),
+    });
+
+    submitCandidate(service, {
+      text: "我对花生过敏，避免吃一切含花生的东西",
+      source: "chat:fast_path",
+      eventId: "evt:actor-x:m-1",
+      eventTime: "2026-10-30T10:00:00.000Z",
+    });
+    await service.flushAll();
+
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0]!.opts.sourceEventId, "evt:actor-x:m-1");
+    assert.equal(calls[0]!.opts.eventTime, "2026-10-30T10:00:00.000Z");
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }

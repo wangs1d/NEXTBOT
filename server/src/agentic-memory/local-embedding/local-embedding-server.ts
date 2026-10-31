@@ -11,6 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { AddressInfo } from "node:net";
 
 import type { LocalEmbeddingEngine } from "./local-embedding-engine.js";
+import { LOCAL_EMBEDDING_DIMS, LOCAL_EMBEDDING_MODEL_ID } from "./local-embedding-engine.js";
 
 export type LocalEmbeddingEndpoint = {
   /** 纯 base URL（如 http://127.0.0.1:53124/v1），消费方自行拼 /embeddings */
@@ -50,7 +51,10 @@ function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.end(body);
 }
 
-export async function startLocalEmbeddingServer(engine: LocalEmbeddingEngine): Promise<LocalEmbeddingEndpoint> {
+/** `getEngine` 在引擎装载完成前返回 null：端点先对外，请求按 503 降级 */
+export async function startLocalEmbeddingServer(
+  getEngine: () => LocalEmbeddingEngine | null,
+): Promise<LocalEmbeddingEndpoint> {
   const apiKey = `local-${randomBytes(12).toString("hex")}`;
 
   const server = createServer((req, res) => {
@@ -62,8 +66,9 @@ export async function startLocalEmbeddingServer(engine: LocalEmbeddingEngine): P
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = req.url ?? "";
+    const engine = getEngine();
     if (req.method === "GET" && (url === "/health" || url === "/v1/health")) {
-      sendJson(res, 200, { ok: true, model: engine.model, dims: engine.dims });
+      sendJson(res, 200, { ok: engine !== null, model: LOCAL_EMBEDDING_MODEL_ID, dims: LOCAL_EMBEDDING_DIMS });
       return;
     }
     if (req.method !== "POST" || !/^\/(v1\/)?embeddings$/.test(url)) {
@@ -72,6 +77,10 @@ export async function startLocalEmbeddingServer(engine: LocalEmbeddingEngine): P
     }
     if ((req.headers.authorization ?? "") !== `Bearer ${apiKey}`) {
       sendJson(res, 401, { error: { message: "unauthorized" } });
+      return;
+    }
+    if (!engine) {
+      sendJson(res, 503, { error: { message: "embedding engine warming up" } });
       return;
     }
 
@@ -93,7 +102,7 @@ export async function startLocalEmbeddingServer(engine: LocalEmbeddingEngine): P
     const asBase64 = parsed.encoding_format === "base64";
     sendJson(res, 200, {
       object: "list",
-      model: engine.model,
+      model: LOCAL_EMBEDDING_MODEL_ID,
       data: vectors.map((embedding, index) => ({
         object: "embedding",
         index,
@@ -114,5 +123,10 @@ export async function startLocalEmbeddingServer(engine: LocalEmbeddingEngine): P
   server.requestTimeout = REQUEST_TIMEOUT_MS;
 
   const { port } = server.address() as AddressInfo;
-  return { baseUrl: `http://127.0.0.1:${port}/v1`, apiKey, model: engine.model, dims: engine.dims };
+  return {
+    baseUrl: `http://127.0.0.1:${port}/v1`,
+    apiKey,
+    model: LOCAL_EMBEDDING_MODEL_ID,
+    dims: LOCAL_EMBEDDING_DIMS,
+  };
 }

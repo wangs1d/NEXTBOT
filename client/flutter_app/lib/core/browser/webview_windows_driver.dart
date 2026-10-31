@@ -124,6 +124,16 @@ class WebviewWindowsDriver implements BrowserDriver {
   Future<void> stopLoading() => _controller.stop();
 
   @override
+  Future<bool> setZoomFactor(double factor) async {
+    try {
+      await _controller.setZoomFactor(factor);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  @override
   Future<dynamic> evaluateScript(String script) =>
       _controller.executeScript(script);
 

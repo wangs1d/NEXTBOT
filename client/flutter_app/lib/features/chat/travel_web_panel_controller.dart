@@ -265,6 +265,11 @@ abstract final class TravelWebPanelPayload {
                   "name": e.title,
                   "type": e.type,
                   "time": e.time,
+                  // 排程真值三件套：面板拿不到就不印「停留/打车」，不自己估
+                  if (e.endTime.isNotEmpty) "endTime": e.endTime,
+                  if (e.visitDuration != null) "duration": e.visitDuration,
+                  if (e.leg != null) "leg": e.leg!.toJson(),
+                  if (e.anchor) "anchor": true,
                   "priceInfo": e.priceInfo,
                   "description": e.description,
                   "tips": e.tips,

@@ -1,7 +1,7 @@
 import { getDataDir } from "../config/data-dir.js";
-import { readFile } from "node:fs/promises";
+import { readFile, readdir, rename, unlink } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type { ChatCompletionMessageParam } from "openai/resources/chat/completions";
 
@@ -14,7 +14,7 @@ import { stripSystemReminderBlocks, SYSTEM_REMINDER_ANY_RE } from "./internal-fr
 
 const PE_SESSION_MARKER = "\u007fpe\u007f";
 
-type PersistedSession = {
+export type PersistedSession = {
   updatedAt: string;
   messages: ChatCompletionMessageParam[];
 };
@@ -130,9 +130,83 @@ function tailMessages(
  * 与主会话文件 `chat-threads.json` 物理隔离。两份数据通过不同的
  * 内存 store / file path 隔离，但共用同一份 schema。
  */
+/**
+ * 落盘布局的共用规则：实例与取证/修复脚本都走这三个函数，
+ * 免得出现第二条「哪里放着会话」的解释。
+ */
+
+/** `data/chat-threads.json` → `data/chat-threads.shards/`（与旧单文件同目录，便于原地迁移）。 */
+export function threadShardDirFor(filePath: string): string {
+  return join(dirname(filePath), `${basename(filePath, ".json")}.shards`);
+}
+
+/** sessionId 里带 `:` / 中文 / 路径符号，URI 编码后才是安全文件名。 */
+export function threadShardNameFor(sessionId: string): string {
+  return encodeURIComponent(sessionId).replace(/[^A-Za-z0-9%._-]/g, "_") + ".json";
+}
+
+export function threadShardPathFor(dir: string, sessionId: string): string {
+  return join(dir, threadShardNameFor(sessionId));
+}
+
+/** 读侧快照：legacy 单文件 + 分片目录合并（分片为准）。供不重启的取证/清洗脚本复用。 */
+export async function readThreadStoreRows(filePath: string): Promise<Record<string, PersistedSession>> {
+  const rows: Record<string, PersistedSession> = {};
+  const legacy = await readThreadFile(filePath);
+  for (const [sessionId, row] of Object.entries(legacy?.sessions ?? {})) {
+    if (row?.messages?.length) rows[sessionId] = row;
+  }
+  try {
+    const dir = threadShardDirFor(filePath);
+    for (const name of await readdir(dir)) {
+      if (!name.endsWith(".json")) continue;
+      const parsed = await readThreadFile(join(dir, name));
+      const sessionId =
+        typeof parsed?.sessionId === "string"
+          ? parsed.sessionId
+          : decodeURIComponent(name.slice(0, -".json".length));
+      const messages = parsed?.messages;
+      if (sessionId && Array.isArray(messages)) {
+        rows[sessionId] = { updatedAt: String(parsed?.updatedAt ?? ""), messages };
+      }
+    }
+  } catch {
+    /* 分片目录还不存在 */
+  }
+  return rows;
+}
+
+/** 写侧回灌：只写会话说得清的那一片，不动其他片（与实例写入口径一致）。 */
+export async function writeThreadStoreRow(
+  filePath: string,
+  sessionId: string,
+  row: PersistedSession,
+): Promise<void> {
+  await writeJsonAtomic(threadShardPathFor(threadShardDirFor(filePath), sessionId), { sessionId, ...row });
+}
+
+/** legacy 单文件是 `{sessions}`，分片文件是 `{sessionId,updatedAt,messages}`；坏 JSON 可能两者都缺字段。 */
+type ThreadFileJson = Partial<PersistedShape> & Partial<PersistedSession> & { sessionId?: string };
+
+async function readThreadFile(path: string): Promise<ThreadFileJson | null> {
+  try {
+    const parsed = JSON.parse(await readFile(path, "utf8")) as ThreadFileJson;
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 export class ChatThreadPersistence {
   private readonly filePath: string;
   private readonly notesFilePath: string;
+  /**
+   * 分片目录：每个会话一个文件。原先每次保存都把「全部用户的全部会话」
+   * stringify 后整份覆写单文件，单线程 event loop 里写成本随活跃用户数线性
+   * 增长（2G 机器上百人即成雪崩）；按 session 分片后单次写只有只含一个会话。
+   */
+  private readonly shardDir: string;
+  private readonly notesShardDir: string;
   private data: PersistedShape = { sessions: {} };
   private notesData: PersistedShape = { sessions: {} };
   private notesDataWasFlushedOnce = false;
@@ -164,6 +238,8 @@ export class ChatThreadPersistence {
       notesFilePath?.trim() ||
       process.env.AGENT_CHAT_THREAD_PERSIST_NOTES_FILE?.trim() ||
       join(defaultDir, "chat-threads-notes.json");
+    this.shardDir = threadShardDirFor(this.filePath);
+    this.notesShardDir = threadShardDirFor(this.notesFilePath);
   }
 
   /** 当前实例的物理落盘路径（仅用于单测 / 调试）。 */
@@ -184,7 +260,10 @@ export class ChatThreadPersistence {
     // 此后写入方走 whenLoaded() 的立即通过路径，零开销。
     if (this.loadGate) return this.loadGate;
     const gate = (async () => {
-      await Promise.all([this.loadOne(this.filePath, false), this.loadOne(this.notesFilePath, true)]);
+      await Promise.all([
+        this.loadOne(this.filePath, this.shardDir, false),
+        this.loadOne(this.notesFilePath, this.notesShardDir, true),
+      ]);
     })();
     this.loadGate = gate;
     void gate
@@ -202,21 +281,70 @@ export class ChatThreadPersistence {
     return this.loadGate ?? Promise.resolve();
   }
 
-  private async loadOne(path: string, isNotes: boolean): Promise<void> {
+  private async loadOne(path: string, dir: string, isNotes: boolean): Promise<void> {
+    const store = isNotes ? this.notesData : this.data;
+    // 1) 分片目录：正常运行后的唯一来源
+    await this.loadShards(dir, store);
+    // 2) 旧单文件（升级前的遗留）：只补分片里没有的会话，然后原地迁成分片
+    const legacy = await this.readLegacy(path);
+    if (!legacy) return;
+    let migrated = 0;
+    for (const [sessionId, row] of Object.entries(legacy.sessions)) {
+      if (store.sessions[sessionId] || !row?.messages?.length) continue;
+      store.sessions[sessionId] = row;
+      migrated++;
+    }
+    if (!isNotes) {
+      this.sanitizeAllPersistedSessions();
+      this.migrateSplitActorThreads();
+    }
+    if (migrated > 0) {
+      await this.writeAllShards(dir, store);
+      // 迁移成功后把旧文件改名留档，不删：出问题时还能整体回滚（数据根约定）
+      await rename(path, `${path}.migrated-${Date.now()}`).catch(() => {});
+      console.log(`[chat-thread-persist] 旧单文件已迁为分片：${migrated} 个会话 → ${dir}`);
+    }
+  }
+
+  private async loadShards(dir: string, store: PersistedShape): Promise<void> {
+    let names: string[] = [];
+    try {
+      names = await readdir(dir);
+    } catch {
+      return; // 目录还不存在（首次运行 / 尚未迁移）
+    }
+    for (const name of names) {
+      if (!name.endsWith(".json")) continue;
+      try {
+        const raw = await this.readFileImpl(join(dir, name));
+        const parsed = JSON.parse(raw) as PersistedSession & { sessionId?: string };
+        const sessionId = parsed.sessionId ?? decodeURIComponent(name.slice(0, -".json".length));
+        if (!sessionId || !Array.isArray(parsed.messages)) continue;
+        store.sessions[sessionId] = { updatedAt: parsed.updatedAt, messages: parsed.messages };
+      } catch (e: unknown) {
+        const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
+        if (code !== "ENOENT") throw e;
+      }
+    }
+  }
+
+  private async readLegacy(path: string): Promise<PersistedShape | null> {
     try {
       const raw = await this.readFileImpl(path);
       const parsed = JSON.parse(raw) as PersistedShape;
-      if (!parsed?.sessions || typeof parsed.sessions !== "object") return;
-      if (isNotes) {
-        this.notesData = parsed;
-      } else {
-        this.data = parsed;
-        this.sanitizeAllPersistedSessions();
-        this.migrateSplitActorThreads();
-      }
+      if (!parsed?.sessions || typeof parsed.sessions !== "object") return null;
+      return parsed;
     } catch (e: unknown) {
       const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
       if (code !== "ENOENT") throw e;
+      return null;
+    }
+  }
+
+  private async writeAllShards(dir: string, store: PersistedShape): Promise<void> {
+    for (const [sessionId, row] of Object.entries(store.sessions)) {
+      if (!row?.messages?.length) continue;
+      await writeJsonAtomic(threadShardPathFor(dir, sessionId), { sessionId, ...row });
     }
   }
 
@@ -423,7 +551,7 @@ export class ChatThreadPersistence {
       const store = this.pickStore(sessionId);
       delete store.sessions[sessionId];
       this.persistChain = this.persistChain
-        .then(() => this.flushToDisk())
+        .then(() => this.removeShard(sessionId))
         .catch((err) =>
           console.error(`[chat-thread-persist] 删除会话落盘失败（${this.filePath}）:`, err),
         );
@@ -437,11 +565,23 @@ export class ChatThreadPersistence {
     messages: ChatCompletionMessageParam[],
   ): Promise<void> {
     const store = this.pickStore(sessionId);
-    store.sessions[sessionId] = {
-      updatedAt: new Date().toISOString(),
-      messages,
-    };
-    await this.flushToDisk();
+    const row = { updatedAt: new Date().toISOString(), messages };
+    store.sessions[sessionId] = row;
+    // 只写这一个会话的分片文件：单次写成本与活跃用户数无关
+    await writeJsonAtomic(threadShardPathFor(this.pickDir(sessionId), sessionId), { sessionId, ...row });
+  }
+
+  private pickDir(sessionId: string): string {
+    return isNotesThreadSessionId(sessionId) ? this.notesShardDir : this.shardDir;
+  }
+
+  /** 删除会话：只 unlink 它那一个分片，不碰其他用户的文件。 */
+  private async removeShard(sessionId: string): Promise<void> {
+    await this.whenLoaded();
+    await unlink(threadShardPathFor(this.pickDir(sessionId), sessionId)).catch((e: unknown) => {
+      const code = e && typeof e === "object" && "code" in e ? String((e as NodeJS.ErrnoException).code) : "";
+      if (code !== "ENOENT") throw e;
+    });
   }
 
   /**
@@ -466,16 +606,19 @@ export class ChatThreadPersistence {
     if (pending) await pending;
   }
 
+  /**
+   * 修复路径的整体落盘（load 内 sanitize/migrate 改动了多个会话时才走）：
+   * 逐个会话写分片，不再整份覆写任何单文件。
+   */
   private async flushToDisk(): Promise<void> {
     // 启动竞态守卫（兜底）：load 内部的修复写盘（sanitize/migrate）会走到这里，
     // 等 gate 解析后写的是已加载完成的完整数据——gate 的解析不依赖 flush 本身，
     // 无死锁；外部写入路径已在 scheduleSave/deleteSession 先行等待。
     await this.whenLoaded();
-    await writeJsonAtomic(this.filePath, this.data);
-    // 仅在 notes 存储非空时落盘
+    await this.writeAllShards(this.shardDir, this.data);
     if (Object.keys(this.notesData.sessions).length > 0 || this.notesDataWasFlushedOnce) {
       this.notesDataWasFlushedOnce = true;
-      await writeJsonAtomic(this.notesFilePath, this.notesData);
+      await this.writeAllShards(this.notesShardDir, this.notesData);
     }
   }
 }

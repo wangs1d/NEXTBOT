@@ -39,7 +39,7 @@ class RuntimeBootResult {
 }
 
 /// byok 捆绑形态的本地 runtime 生命周期管理：
-/// 探测 health → 用捆绑的 runtime\node.exe 拉起 dist/index.js（注入用户
+/// 探测 health → 用捆绑的 runtime\node.exe 拉起 dist\bundle\supervisor-main.js（注入用户
 /// config.env）→ 轮询就绪。runtime 常驻复用（应用退出不杀，二次启动免等待；
 /// 升级时由安装器统一停进程）。
 ///
@@ -64,7 +64,8 @@ class LocalRuntimeManager {
     final String node = "$dir${Platform.pathSeparator}runtime"
         "${Platform.pathSeparator}node.exe";
     final String server = "$dir${Platform.pathSeparator}runtime"
-        "${Platform.pathSeparator}dist${Platform.pathSeparator}index.js";
+        "${Platform.pathSeparator}dist${Platform.pathSeparator}bundle"
+        "${Platform.pathSeparator}supervisor-main.js";
     return File(node).existsSync() && File(server).existsSync();
   }
 
@@ -131,8 +132,9 @@ class LocalRuntimeManager {
     final String runtimeDir =
         "$dir${Platform.pathSeparator}runtime";
     final String node = "$runtimeDir${Platform.pathSeparator}node.exe";
-    final String server =
-        "$runtimeDir${Platform.pathSeparator}dist${Platform.pathSeparator}index.js";
+    final String supervisor =
+        "$runtimeDir${Platform.pathSeparator}dist${Platform.pathSeparator}bundle"
+        "${Platform.pathSeparator}supervisor-main.js";
     try {
       // 用户 config.env 注入子进程环境；server 侧 dotenv 不覆盖已有变量，
       // 因此这里的值始终生效（server 零改动）。
@@ -142,12 +144,12 @@ class LocalRuntimeManager {
       };
       _process = await Process.start(
         node,
-        <String>[server],
+        <String>[supervisor],
         workingDirectory: runtimeDir,
         environment: env,
         mode: ProcessStartMode.detachedWithStdio,
       );
-      _log("spawn: $node $server");
+      _log("spawn: $node $supervisor");
       _process!.stdout
           .cast<List<int>>()
           .transform(systemEncoding.decoder)

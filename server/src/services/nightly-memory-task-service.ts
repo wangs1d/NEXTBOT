@@ -23,6 +23,16 @@ import {
 export type NightlySleepAgentReport = {
   runAt: string;
   actorIds: string[];
+  /**
+   * 当日 journal 固化计数（含工具结果事件行）：用于确认事件结果是否真的进了
+   * 长期记忆；本轮无固化内容时缺省。
+   */
+  journalFixation?: {
+    actors: number;
+    lines: number;
+    eventLines: number;
+    failed: number;
+  };
   reports: Array<{
     actorId: string;
     dailyCleanupCount: number;
@@ -118,6 +128,8 @@ export class NightlyMemoryTaskService {
     process.env.AGENT_MEMORY_SLEEP_REPORT_FILE?.trim() ??
     join(getDataDir(), "nightly-memory-reports.json");
   private latestReport: NightlySleepAgentReport | null = null;
+  /** 本轮 journal 固化计数（runNightTasks 开始时清零） */
+  private lastJournalFixation: NightlySleepAgentReport["journalFixation"] | null = null;
   private recentReports: NightlySleepAgentReport[] = [];
 
   constructor(config?: Partial<NightModeConfig>) {
@@ -208,6 +220,7 @@ export class NightlyMemoryTaskService {
       synced: false,
       error: undefined as string | undefined,
     };
+    this.lastJournalFixation = null;
 
     try {
       // 记忆架构收敛：原「DailyDigest 归档 → 长期图」已移除——与下方
@@ -217,6 +230,7 @@ export class NightlyMemoryTaskService {
 
       await this.extractFactsFromJournals();
       await this.consolidateUserProfiles();
+      await this.consolidateDailyJournals();
       await this.runDreamPhase();
       result.consolidated = true;
 
@@ -378,6 +392,7 @@ export class NightlyMemoryTaskService {
     const today = this.getTodayKey();
     if (this.lastProcessedDay === today) return;
     this.lastProcessedDay = today;
+    this.lastJournalFixation = null;
 
     console.log(`[NightlyMemory] Running night tasks for ${today}`);
 
@@ -457,7 +472,7 @@ export class NightlyMemoryTaskService {
    * 当日对话日志固化（记忆架构重构核心环节）：
    * - 消费 DailyJournal 未固化日志行（含跨天补跑——服务器隔夜未开机也能追上）；
    * - 写入 narrative 长期记忆（journal:consolidate 来源，偏好/事实行高信号）；
-   * - 固化完成后标记已处理（journal 文件归档保留，不删除——可重放可审计）。
+   * - 固化完成后标记已处理并删除对应 md（内容已入 LTM，文件只承载未固化当天记忆）。
    */
   private async consolidateDailyJournals(): Promise<void> {
     const journal = getDailyJournalService();
@@ -465,6 +480,9 @@ export class NightlyMemoryTaskService {
 
     const actorIds = this.getAllActorIds();
     let totalIngested = 0;
+    let totalEventLines = 0;
+    let totalFailed = 0;
+    let consolidatedActors = 0;
 
     for (const actorId of actorIds) {
       try {
@@ -472,6 +490,8 @@ export class NightlyMemoryTaskService {
         if (unconsolidated.length === 0) continue;
 
         const dateKeys: string[] = [];
+        let eventLines = 0;
+        let failed = 0;
         for (const { dateKey, lines } of unconsolidated) {
           let ingested = 0;
           for (const line of lines) {
@@ -484,9 +504,16 @@ export class NightlyMemoryTaskService {
             if (!roleMatch) continue;
             const role = roleMatch[2]!;
             const content = roleMatch[3]!;
+            // 事件行带 `e-<key>` 短标记：还原来源事件 id，LTM 条目保留可追溯性
+            const journalToken = roleMatch[1] ?? "";
+            const provenance =
+              role === "fact" && /^e-[\w-]+$/.test(journalToken)
+                ? { sourceEventIds: [`evt:${actorId}:${journalToken.slice(2)}`] }
+                : {};
             // P2-6：U/A 闲聊/语气填充行不固化（fact/prefer/commit 恒保留）
             if (isNoiseLogLine(role, content)) continue;
             const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
+            const isEventLine = provenance.sourceEventIds !== undefined;
             const highSignal = role === "prefer" || role === "fact" || role === "commit";
             // 2026-09-12 token 治理（P0-A）：固化行直存（infer:false），不再逐行二次抽取。
             // 同批对话内容白天已由统一写入者 extractUnified 抽取过并写入同一存储；夜间
@@ -502,25 +529,33 @@ export class NightlyMemoryTaskService {
               facts: [],
               forget: [],
               referents: [],
-              importance: highSignal ? 0.7 : 0.3,
+              // 工具结果事件跨情境价值低于用户陈述：低一档，按生命周期正常淡出
+              importance: isEventLine ? 0.5 : highSignal ? 0.7 : 0.3,
             };
-            await this.narrativeMemory!
-              .writeDecided(
+            try {
+              await this.narrativeMemory!.writeDecided(
                 actorId,
                 fixationText,
                 "journal:consolidate",
-                { context: "main", highSignal },
+                { context: "main", highSignal, ...provenance },
                 fixationExtraction,
-              )
-              .catch(() => {});
-            ingested += 1;
+              );
+              ingested += 1;
+              if (isEventLine) eventLines += 1;
+            } catch (err) {
+              failed += 1;
+              console.log(`[NightlyMemory] journal 行固化失败（跳过该行）: ${err}`);
+            }
           }
           if (ingested > 0) dateKeys.push(dateKey);
           totalIngested += ingested;
         }
+        totalEventLines += eventLines;
+        totalFailed += failed;
 
         if (dateKeys.length > 0) {
           await journal.markConsolidated(actorId, dateKeys);
+          consolidatedActors += 1;
           console.log(
             `[NightlyMemory] journal 固化: actor=${actorId} dates=${dateKeys.join(",")} 已入长期记忆`,
           );
@@ -531,7 +566,19 @@ export class NightlyMemoryTaskService {
     }
 
     if (totalIngested > 0) {
-      console.log(`[NightlyMemory] journal consolidation total ingested: ${totalIngested} lines`);
+      this.lastJournalFixation = {
+        actors: consolidatedActors,
+        lines: totalIngested,
+        eventLines: totalEventLines,
+        failed: totalFailed,
+      };
+      console.log(
+        `[NightlyMemory] journal consolidation total ingested: ${totalIngested} lines` +
+          (totalEventLines > 0 ? `（事件行 ${totalEventLines}）` : "") +
+          (totalFailed > 0 ? `，失败 ${totalFailed}` : ""),
+      );
+    } else {
+      this.lastJournalFixation = null;
     }
   }
 
@@ -841,14 +888,15 @@ export class NightlyMemoryTaskService {
       }
     }
 
-    if (this.narrativeMemory) {
-      const sleepReports = await this.narrativeMemory.runSleepConsolidation(actorIds).catch((err) => {
-        console.error("[NightlyMemory] Human-like sleep consolidation failed:", err);
-        return null;
-      });
-      if (Array.isArray(sleepReports) && sleepReports.length > 0) {
-        await this.recordSleepAgentReport(actorIds, sleepReports);
-      }
+    const sleepReports = this.narrativeMemory
+      ? await this.narrativeMemory.runSleepConsolidation(actorIds).catch((err) => {
+          console.error("[NightlyMemory] Human-like sleep consolidation failed:", err);
+          return null;
+        })
+      : null;
+    const hasSleepReports = Array.isArray(sleepReports) && sleepReports.length > 0;
+    if (hasSleepReports || this.lastJournalFixation) {
+      await this.recordSleepAgentReport(actorIds, hasSleepReports ? sleepReports : [], this.lastJournalFixation);
     }
   }
 
@@ -867,10 +915,12 @@ export class NightlyMemoryTaskService {
       executedActions: number;
       stageReports: Array<{ stage: string; changed: number; notes: string[] }>;
     }>,
+    journalFixation: NightlySleepAgentReport["journalFixation"] | null = null,
   ): Promise<void> {
     const payload: NightlySleepAgentReport = {
       runAt: new Date().toISOString(),
       actorIds,
+      ...(journalFixation ? { journalFixation } : {}),
       reports,
     };
     this.latestReport = payload;

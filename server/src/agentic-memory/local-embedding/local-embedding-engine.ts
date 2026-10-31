@@ -13,7 +13,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { serverRoot } from "../../config/paths.js";
 
 import type { InferenceSession, Tensor } from "onnxruntime-node";
 
@@ -42,10 +42,9 @@ export function isLocalEmbeddingDisabled(): boolean {
 /** 模型资产目录：显式 env → 模块相对（dev src / 打包 dist 同构）→ cwd 兜底 */
 export function resolveLocalEmbeddingModelDir(): string | null {
   const explicit = process.env.AGENT_LOCAL_EMBEDDING_DIR?.trim();
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [
     ...(explicit ? [explicit] : []),
-    join(moduleDir, "..", "..", "..", "models", LOCAL_EMBEDDING_MODEL_ID),
+    join(serverRoot(), "models", LOCAL_EMBEDDING_MODEL_ID),
     join(process.cwd(), "models", LOCAL_EMBEDDING_MODEL_ID),
   ];
   for (const dir of candidates) {

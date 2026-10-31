@@ -120,6 +120,41 @@ enum TravelEntryKind {
   other,
 }
 
+/// 从上一站到本站的真实车程（服务端 `transportFromPrev` 原样透传）。
+/// 拿不到真值时整条为 null——展示端不拿坐标估算冒充「打车 N 分」。
+class TravelStopLeg {
+  const TravelStopLeg({
+    required this.mode,
+    required this.minutes,
+    this.dist = "",
+    this.estimated = false,
+  });
+
+  factory TravelStopLeg.fromJson(Map<String, dynamic> json) {
+    final double? km = (json["distanceKm"] as num?)?.toDouble();
+    return TravelStopLeg(
+      mode: json["mode"]?.toString() ?? "",
+      minutes: (json["durationMin"] as num?)?.toInt() ?? 0,
+      dist: km == null ? "" : "${km.toStringAsFixed(1)}km",
+      estimated: json["source"]?.toString() == "estimate",
+    );
+  }
+
+  final String mode;
+  final int minutes;
+  final String dist;
+
+  /// 直线推算的车程（非真实路网）：网页面板据此在时长前标「约」。
+  final bool estimated;
+
+  Map<String, dynamic> toJson() => <String, dynamic>{
+        "mode": mode,
+        "minutes": minutes,
+        "dist": dist,
+        "estimated": estimated,
+      };
+}
+
 /// 单条行程条目（右栏时间线的一行 / 地图标记 / 预订与详情面板的数据源）。
 class TravelDayEntry {
   const TravelDayEntry({
@@ -143,6 +178,9 @@ class TravelDayEntry {
     this.bookingNote = "",
     this.openingHours = "",
     this.rating,
+    this.visitDuration,
+    this.endTime = "",
+    this.leg,
   });
 
   /// 条目唯一键（服务端 itemId，缺省用名称兜底；预订清单聚合用）。
@@ -188,6 +226,15 @@ class TravelDayEntry {
 
   /// 评分（真实点评聚合口径；无则 null，不显示星）。
   final double? rating;
+
+  /// 建议停留时长（分钟，服务端 `visitDuration`）；无则 null，不拿站间间隔冒充。
+  final int? visitDuration;
+
+  /// 结束时刻原文（服务端 `endTime`，与 [time] 同口径）。
+  final String endTime;
+
+  /// 到本站的真实车程（服务端 `transportFromPrev`）；无则 null。
+  final TravelStopLeg? leg;
 
   /// 兼容旧面板的拼接备注（价格 · 描述 · 贴士 · 地址）。
   String get note => <String>[
@@ -242,7 +289,17 @@ class TravelDayEntry {
       bookingNote: raw["bookingNote"]?.toString() ?? "",
       openingHours: raw["openingHours"]?.toString() ?? "",
       rating: (raw["rating"] as num?)?.toDouble(),
+      visitDuration: (raw["visitDuration"] as num?)?.toInt(),
+      endTime: raw["endTime"]?.toString() ?? "",
+      leg: _legFrom(raw["transportFromPrev"]),
     );
+  }
+
+  static TravelStopLeg? _legFrom(dynamic tp) {
+    if (tp is! Map) return null;
+    final TravelStopLeg leg =
+        TravelStopLeg.fromJson(Map<String, dynamic>.from(tp));
+    return leg.minutes > 0 ? leg : null;
   }
 
   static TravelEntryKind _kindFromType(String type) {

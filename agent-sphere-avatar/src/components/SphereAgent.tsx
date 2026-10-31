@@ -3,14 +3,13 @@ import { Suspense, useCallback, useEffect, useRef, type Ref, type RefObject } fr
 import * as THREE from "three";
 import { bindEmbodimentCommand } from "../bridge/agent-bridge";
 import { triggerOverlayRoam } from "../utils/overlay-roam-bridge";
-import { MODEL } from "../constants/model-proportions";
+import { EMBED_BODY_ANCHOR, MODEL } from "../constants/model-proportions";
 import { postToHost, SPHERE_MSG } from "../embed-protocol";
 import { useAgentBodyMotion } from "../hooks/useAgentBodyMotion";
 import { useAutonomousMotion } from "../hooks/useAutonomousMotion";
 import { useSphereUserDrag, type SphereTouchEvent } from "../hooks/useSphereUserDrag";
 import type { AgentState, EmbodimentCommand } from "../types/agent";
 import { DG2RobotModel } from "./DG2RobotModel";
-import { OledScreen, type ScreenSignals } from "./OledScreen";
 import { SphereBodyHandle } from "./SphereBodyHandle";
 
 interface SphereAgentProps {
@@ -46,11 +45,29 @@ interface SphereAgentProps {
   onShakeRequest?: (strength: number, durationMs: number) => void;
   /** 固定机位：锁定 Y 轴，关闭持续呼吸/悬浮位移（桌宠防抖） */
   verticalStable?: boolean;
+  /** DG2 模型首次画完回调（桌宠用它向宿主报就绪） */
+  onModelPainted?: () => void;
 }
 
 function relayBoundaryToParent(edge: string) {
   if (window.parent === window) return;
   postToHost({ type: SPHERE_MSG.boundary, edge: edge as "left" | "right" | "top" | "bottom" });
+}
+
+/** 挂在 Suspense 子树里 —— 只有模型真的解析完并画出两帧后才触发一次 */
+function ModelPaintedSignal({ onPainted }: { onPainted?: () => void }) {
+  useEffect(() => {
+    if (!onPainted) return;
+    let second = 0;
+    const first = requestAnimationFrame(() => {
+      second = requestAnimationFrame(() => onPainted());
+    });
+    return () => {
+      cancelAnimationFrame(first);
+      if (second) cancelAnimationFrame(second);
+    };
+  }, [onPainted]);
+  return null;
 }
 
 /** DG2 深灰金属球形机器人 — OBJ 一比一还原 */
@@ -78,22 +95,16 @@ export function SphereAgent({
   onDragRelease,
   onShakeRequest,
   verticalStable = false,
+  onModelPainted,
 }: SphereAgentProps) {
   const visualRef = useRef<THREE.Group>(null);
   const userRotRef = useRef<THREE.Group>(null);
-  const faceSignalsRef = useRef<ScreenSignals>({
-    boundaryBump: 0,
-    excitement: 0,
-    speed: 0,
-    speakPulse: 0,
-    userTouch: 0,
-    userSpin: 0,
-  });
+  const seedPosition = bodyPosition ?? EMBED_BODY_ANCHOR;
 
   const [ref, api] = useSphere(() => ({
     mass: physics ? 1.2 : 0,
     type: physics ? "Dynamic" : "Static",
-    position: bodyPosition ?? [0, 1.6, 0],
+    position: seedPosition,
     args: [MODEL.bodyRadius * 0.94],
     linearDamping: physics ? 0.82 : 0.95,
     angularDamping: 0.9,
@@ -108,7 +119,6 @@ export function SphereAgent({
   const bodyMotion = useAgentBodyMotion({
     api: kinematic ? api : undefined,
     visualRef,
-    faceSignalsRef,
     enabled: kinematic,
     bounds: motionBounds,
     mood: state.mood,
@@ -121,6 +131,7 @@ export function SphereAgent({
     taskEvents: state.taskEvents,
     onBoundaryHit: (edge) => relayBoundaryToParent(edge),
     verticalStable,
+    seedPosition,
   });
 
   const physicsMotion = useAutonomousMotion({
@@ -169,7 +180,6 @@ export function SphereAgent({
   const dragHandlers = useSphereUserDrag({
     userRotRef,
     bodyRef: ref as unknown as RefObject<THREE.Object3D | null>,
-    faceSignalsRef,
     enabled: userDragRotate,
     canvasCapture: false,
     canvasCaptureLenient,
@@ -263,37 +273,23 @@ export function SphereAgent({
     <group ref={ref as Ref<THREE.Group>}>
       <group ref={visualRef}>
         <group ref={userRotRef} scale={modelScale}>
-          <OledScreen
-            mood={state.mood}
-            energy={state.energy}
-            focused={state.focused}
-            signalsRef={faceSignalsRef}
-          >
-            <Suspense
-              fallback={
-                <mesh>
-                  <sphereGeometry args={[MODEL.bodyRadius * 0.7, 24, 24]} />
-                  <meshStandardMaterial color="#5a6a7a" wireframe />
-                </mesh>
-              }
-            >
-              <DG2RobotModel
-                energy={state.energy}
-                focused={state.focused}
-                idleMotion={idleBodyMotion}
-                standaloneLighting={modelScale !== 1}
-              />
-            </Suspense>
-            {userDragRotate ? (
-              <SphereBodyHandle
-                radius={dragHandlers.bodyRadius}
-                onPointerDown={dragHandlers.handlePointerDown}
-                onPointerMove={dragHandlers.handlePointerMove}
-                onPointerUp={dragHandlers.handlePointerUp}
-                onBodyHover={dragHandlers.handleBodyHover}
-              />
-            ) : null}
-          </OledScreen>
+          <Suspense fallback={null}>
+            <DG2RobotModel
+              energy={state.energy}
+              idleMotion={idleBodyMotion}
+              standaloneLighting={modelScale !== 1}
+            />
+            <ModelPaintedSignal onPainted={onModelPainted} />
+          </Suspense>
+          {userDragRotate ? (
+            <SphereBodyHandle
+              radius={dragHandlers.bodyRadius}
+              onPointerDown={dragHandlers.handlePointerDown}
+              onPointerMove={dragHandlers.handlePointerMove}
+              onPointerUp={dragHandlers.handlePointerUp}
+              onBodyHover={dragHandlers.handleBodyHover}
+            />
+          ) : null}
         </group>
       </group>
     </group>

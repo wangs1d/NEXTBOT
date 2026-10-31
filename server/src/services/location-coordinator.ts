@@ -18,7 +18,9 @@
 import { randomUUID } from "node:crypto";
 
 import {
+  getLocationLastKnownMaxAgeMs,
   getLocationReportIntervalSec,
+  getLocationReuseWindowMs,
   getLocationTrackingMode,
   type LocationTrackingMode,
 } from "../config/location-env.js";
@@ -47,10 +49,16 @@ type CachedLocation = {
   at: number;
 };
 
+/** {@link LocationCoordinator.getLastKnown} 的返回：位置 + 距写入的毫秒龄期。 */
+export type LastKnownLocation = ClientLocationWire & { ageMs: number };
+
 export class LocationCoordinator {
   private readonly sockets = new Map<string, WsSendLike>();
   private readonly pending = new Map<string, PendingRequest>();
   private readonly cache = new Map<string, CachedLocation>();
+  private lastKnownProvider:
+    | ((actorId: string) => { payload: ClientLocationWire; at: number } | null)
+    | null = null;
 
   /** 缓存新鲜度：此窗口内的位置直接复用，不重复请求客户端。 */
   private readonly cacheTtlMs: number;
@@ -60,7 +68,7 @@ export class LocationCoordinator {
   private readonly trackingConfig: LocationTrackingConfig;
 
   constructor(opts?: { cacheTtlMs?: number; requestTimeoutMs?: number }) {
-    this.cacheTtlMs = opts?.cacheTtlMs ?? 60_000;
+    this.cacheTtlMs = opts?.cacheTtlMs ?? getLocationReuseWindowMs();
     // 2026-10-08 定位修复：6s 等不到手机冷启动 GPS（geolocator timeLimit 20s），
     // 天气/时钟工具按需定位恒超时 → agent 退回旧缓存或记忆城市（「得不到真实定位」）。
     // 12s 覆盖绝大多数 GPS fix（客户端已改为纯坐标秒回，不再叠加 12s 逆地理 HTTP）。
@@ -145,6 +153,35 @@ export class LocationCoordinator {
     if (!hit) return null;
     if (Date.now() - hit.at > this.cacheTtlMs) return null;
     return hit.payload;
+  }
+
+  /**
+   * 注入落盘历史读取器（位置历史晚于协调器构造，引用必须包在闭包里惰性求值）。
+   * 未注入时 getLastKnown 只认内存缓存。
+   */
+  setLastKnownProvider(
+    provider: ((actorId: string) => { payload: ClientLocationWire; at: number } | null) | null,
+  ): void {
+    this.lastKnownProvider = provider;
+  }
+
+  /**
+   * 最近一次已知位置（不要求新鲜）：内存缓存 → 落盘历史，取较新的一份。
+   * 超过 `maxAgeMs` 一律 null。返回值必带 `ageMs`——调用方要如实标注龄期，
+   * 不得把旧位置当实时定位透出。
+   */
+  getLastKnown(
+    actorId: string,
+    maxAgeMs = getLocationLastKnownMaxAgeMs(),
+  ): LastKnownLocation | null {
+    const now = Date.now();
+    const mem = this.cache.get(actorId);
+    const disk = mem ? null : this.lastKnownProvider?.(actorId);
+    const hit = mem ?? disk;
+    if (!hit) return null;
+    const ageMs = now - hit.at;
+    if (ageMs > maxAgeMs) return null;
+    return { ...hit.payload, ageMs };
   }
 
   /**

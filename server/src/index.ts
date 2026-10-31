@@ -5,6 +5,9 @@ import { getRuntimeConfig, getRuntimeTopologyConfig, getServerEdition, getHttpsR
 import { writeServerInstance } from "./config/server-instance.js";
 import { startDevHttpsListener } from "./utils/dev-https.js";
 
+// 必须显式调用：tsc 会消除只 import 不引用的语句，构建产物靠这行才读 .env / .env.local（幂等）。
+loadServerEnv();
+
 // remote 拓扑下本入口（embedded 单进程形态）不再使用：改用 runtime-main + gateway-main，
 // 否则会出现双世界装配与 sidecar 端口冲突。
 if (getRuntimeTopologyConfig().mode === "remote") {
@@ -23,6 +26,7 @@ import {
   resolvePrimaryExternalModelBinding,
 } from "./external-model/index.js";
 import { createAppServices } from "./bootstrap/create-app-services.js";
+import { beginBoot, markBootDone } from "./bootstrap/boot-readiness.js";
 import { initializeRuntimeState } from "./bootstrap/initialize-runtime-state.js";
 import { logTravelSourceHealth } from "./skills/travel-planning/source-health-check.js";
 import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-starter.js";
@@ -34,6 +38,9 @@ import {
 import { isWechatClawFeatureEnabled } from "./services/openclaw-gateway-client.js";
 import { isTcpPortInUse } from "./utils/port-in-use.js";
 import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
+import { initResourcePool } from "./services/resource-pool.js";
+import { initClusterRouter } from "./services/cluster-router.js";
+import { resolveEmbeddingEndpoint } from "./services/openai-embedding-client.js";
 
 // server/.env + server/.env.local 已在 load-server-env.ts 模块加载时自动执行
 
@@ -83,7 +90,7 @@ process.on("unhandledRejection", (reason: unknown, promise: Promise<unknown>) =>
   // 不退出进程，仅记录警告；如果是严重错误会触发后续的 uncaughtException
 });
 
-await exitIfDevPortInUse(getRuntimeConfig().port);
+await (process.env.NEXTBOT_SOCKET_FROM_PARENT === "1" ? Promise.resolve() : exitIfDevPortInUse(getRuntimeConfig().port));
 
 const runtime = getRuntimeConfig();
 const externalChatProbe = createExternalChatProviderFromEnv();
@@ -104,19 +111,46 @@ if (externalChatProbe?.isEnabled()) {
     "[external-model] 未启用：请在 server/.env 配置 MOONSHOT_API_KEY / MINIMAX_API_KEY / DEEPSEEK_API_KEY 或 OPENAI_API_KEY 后重启服务",
   );
 }
-const services = await createAppServices();
-await initializeRuntimeState(services);
-try {
-  await services.app.listen({
-    port: runtime.port,
-    host: "0.0.0.0",
+const socketFromParent = process.env.NEXTBOT_SOCKET_FROM_PARENT === "1";
+const services = await createAppServices({ socketMode: socketFromParent });
+if (socketFromParent) {
+  // 端口由 supervisor 持有：把路由装好再通知它放连接，之后逐条喂 socket。
+  await services.app.ready();
+  process.send?.({ type: "ready" });
+  process.on("message", (msg: { type?: string } | null, socket: import("node:net").Socket | undefined) => {
+    if (msg?.type === "socket" && socket) services.app.server.emit("connection", socket);
   });
-} catch (err) {
-  if (isDevListenConflict(err)) process.exit(0);
-  throw err;
+  // supervisor 死了就跟着退，避免孤儿进程占着数据根
+  process.on("disconnect", () => {
+    shutdown?.();
+    setTimeout(() => process.exit(0), 1_000).unref();
+  });
+} else {
+  try {
+    await services.app.listen({
+      port: runtime.port,
+      host: "0.0.0.0",
+    });
+  } catch (err) {
+    if (isDevListenConflict(err)) process.exit(0);
+    throw err;
+  }
+  // 身份档案：端口被谁、用哪个数据根占着（启动器与 watchdog 据此做异数据根互斥）
+  writeServerInstance(runtime.port, "embedded");
 }
-// 身份档案：端口被谁、用哪个数据根占着（启动器与 watchdog 据此做异数据根互斥）
-writeServerInstance(runtime.port, "embedded");
+
+// 端口先开：/health 立即可答（带 ready 标记），其余路由在就绪闸后放行；初始化失败则退出进程。
+beginBoot();
+try {
+  await initializeRuntimeState(services);
+} catch (err) {
+  services.app.log.error(
+    `[boot] 运行状态初始化失败，进程退出：${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+  );
+  process.exit(1);
+} finally {
+  markBootDone();
+}
 
 // ─── 旅游数据源启动自检（2026-10-27）：把「静默降级」变启动期显式告警 ───
 // 10-15 至 10-27 事故链（FSQ key 从未配置 / Nominatim 不可达 / 高德冒充国际地名）
@@ -151,7 +185,11 @@ services.app.log.info(
   }`,
 );
 
-// Phase 2：启动自适应并发控制（AIMD 动态调整全局 turn 并发上限）
+// 先量一次机器真实容量（cgroup 优先），之后闸口与淘汰都是同步读
+void initResourcePool();
+// 集群节点注册表（NEXTBOT_NODES；未设时只有自己，路由直通）
+initClusterRouter();
+// 并发闸心跳：AIMD 判决与资源池机器上限取交集下发，同时清扫超时空闲的常驻缓存
 startAdaptiveConcurrency();
 
 const stopDesktopBridge = startDesktopBridgeAutoClient({

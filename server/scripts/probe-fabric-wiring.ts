@@ -55,7 +55,7 @@ if (legacy) board.ingest("probe_user", "current", "presence", { state: "unknown"
 
 const at = Date.now();
 scheduleFeeder({ at, fingerprint: `probe:schedule:${at}`, salience: "high", payload: { nextRunAt: at + 10 * 60_000, nextTitle: "周会" } });
-goalFeeder({ at, fingerprint: `probe:goal:${at}`, salience: "medium", payload: { goalId: "g1", title: "会前准备包", body: "已备好", status: "ready" } });
+goalFeeder({ at, fingerprint: `probe:goal:${at}`, salience: "medium", payload: { goalId: "g1", title: "晨间简报", body: "已备好", status: "ready" } });
 for (let i = 0; i < 3; i++) {
   messageFeeder({ at: at + i, fingerprint: `probe:msg:${at}:${i}`, salience: "low", payload: { sender: `联系人${i}` } });
 }

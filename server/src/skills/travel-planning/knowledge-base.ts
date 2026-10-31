@@ -14,7 +14,7 @@
 import { getDataDir } from "../../config/data-dir.js";
 import fs from 'fs';
 import path from 'path';
-import { fileURLToPath } from 'node:url';
+import { serverRoot } from '../../config/paths.js';
 import type { Coordinates } from './types.js';
 import type { RawPOI } from './poi-cache-manager.js';
 
@@ -27,8 +27,7 @@ import type { RawPOI } from './poi-cache-manager.js';
  */
 const BUNDLED_SEED_DIR = (() => {
   const candidates = [
-    // src/skills/travel-planning → 上溯三级 = server（tsx 跑 src 与 dist 跑编译产物同构）
-    path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', '..', 'data', 'travel-knowledge'),
+    path.join(serverRoot(), 'data', 'travel-knowledge'),
     path.join(process.cwd(), 'data', 'travel-knowledge'),
   ];
   return candidates.find((d) => fs.existsSync(d)) ?? null;

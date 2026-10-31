@@ -77,6 +77,9 @@ abstract class BrowserDriver {
 
   Future<void> stopLoading();
 
+  /// 设置页面缩放（1.0 = 100%）。引擎不支持时返回 false。
+  Future<bool> setZoomFactor(double factor);
+
   /// 在当前页面上下文执行 JS，返回 JSON 可序列化结果（异步引擎实现应等待求值完成）。
   Future<dynamic> evaluateScript(String script);
 

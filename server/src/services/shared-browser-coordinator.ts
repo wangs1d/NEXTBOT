@@ -68,6 +68,9 @@ export class SharedBrowserCoordinator {
   /** 各执行端最近上报的页面 URL（风险分级用；browser.bridge.result 附带）。 */
   private readonly lastUrls = new Map<string, string>();
 
+  /** 上表 URL 的汇报时刻（注入上下文时带龄期，旧页不冒充实时）。 */
+  private readonly lastUrlAt = new Map<string, number>();
+
   /** 各执行端上报的 CDP 调试端点（trusted 工具用；默认空 = CDP 桥未开启）。 */
   private readonly cdpEndpoints = new Map<string, string>();
 
@@ -101,6 +104,13 @@ export class SharedBrowserCoordinator {
   /** 执行端最近上报的页面 URL（无上报时为空串）。 */
   lastUrl(actorId: string): string {
     return this.lastUrls.get(actorId) ?? "";
+  }
+
+  /** 最近上报的页面 URL + 汇报时刻；无上报返回 null。 */
+  lastUrlSnapshot(actorId: string): { url: string; at: number } | null {
+    const url = this.lastUrls.get(actorId);
+    if (!url) return null;
+    return { url, at: this.lastUrlAt.get(actorId) ?? 0 };
   }
 
   /** 客户端经 browser.bridge.info 上报 CDP 端点（空串 = 清除）。 */
@@ -214,6 +224,7 @@ export class SharedBrowserCoordinator {
     const url = result.url;
     if (typeof url === "string" && url && !url.startsWith("about:")) {
       this.lastUrls.set(actorId, url);
+      this.lastUrlAt.set(actorId, Date.now());
     }
     if (!result.ok) {
       void this.audit?.record({

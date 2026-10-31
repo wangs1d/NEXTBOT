@@ -119,17 +119,17 @@ html.embed-root #root {
 
 .overlay-pet-pane {
   position: relative;
-  flex: 0 0 372px;
-  width: 372px;
+  flex: 0 0 248px;
+  width: 248px;
   height: 100%;
-  min-width: 372px;
+  min-width: 248px;
   /* 底部留白原本是给「内心独白气泡」的（120px），气泡删除后收回，只留消息列表的余地 */
-  padding: 16px 16px 88px;
+  padding: 11px 11px 59px;
   box-sizing: border-box;
 }
 
 .overlay-pet-pane canvas {
-  height: calc(100% - 88px) !important;
+  height: calc(100% - 59px) !important;
 }
 
 /* ── 对话消息列表（追加渲染，替代单字段 caption） ── */
@@ -698,85 +698,6 @@ html.embed-root #root {
 @keyframes inner-sub-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.4; }
-}
-
-/* ── 进场动画 ── */
-.entrance-animation {
-  position: fixed;
-  inset: 0;
-  z-index: 10000;
-  pointer-events: none;
-  overflow: hidden;
-}
-
-.entrance-black-screen {
-  position: absolute;
-  inset: 0;
-  background: #000;
-  animation: entrance-black-fade 2.5s ease-out forwards;
-}
-
-.entrance-light {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 2px;
-  height: 2px;
-  border-radius: 50%;
-  background: #fff;
-  transform: translate(-50%, -50%);
-  animation: entrance-light-emerge 1.8s ease-out forwards;
-}
-
-.entrance-halo {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: rgba(255, 255, 255, 0.5);
-  transform: translate(-50%, -50%);
-  box-shadow: 0 0 20px 5px rgba(255, 255, 255, 0.3), 0 0 60px 10px rgba(255, 255, 255, 0.1);
-  animation: entrance-halo-expand 1.5s ease-out forwards;
-}
-
-@keyframes entrance-black-fade {
-  0%, 20% { opacity: 1; }
-  60% { opacity: 0.5; }
-  100% { opacity: 0; }
-}
-
-@keyframes entrance-light-emerge {
-  0%, 10% { opacity: 0; width: 2px; height: 2px; }
-  20% { opacity: 1; width: 4px; height: 4px; box-shadow: 0 0 10px rgba(255, 255, 255, 0.8); }
-  40% { width: 6px; height: 6px; box-shadow: 0 0 20px rgba(255, 255, 255, 0.6); }
-  70% { width: 10px; height: 10px; opacity: 0.7; box-shadow: 0 0 30px rgba(255, 255, 255, 0.4); }
-  100% { width: 16px; height: 16px; opacity: 0; box-shadow: 0 0 40px rgba(255, 255, 255, 0); }
-}
-
-@keyframes entrance-halo-expand {
-  0%, 15% { opacity: 0; width: 4px; height: 4px; box-shadow: 0 0 0 rgba(255, 255, 255, 0); }
-  25% { opacity: 1; width: 8px; height: 8px; box-shadow: 0 0 20px 5px rgba(255, 255, 255, 0.4), 0 0 60px 10px rgba(255, 255, 255, 0.2); }
-  50% { width: 40px; height: 40px; box-shadow: 0 0 40px 10px rgba(255, 255, 255, 0.3), 0 0 100px 20px rgba(255, 255, 255, 0.15); }
-  80% { width: 120px; height: 120px; opacity: 0.6; box-shadow: 0 0 60px 15px rgba(255, 255, 255, 0.2), 0 0 150px 30px rgba(255, 255, 255, 0.1); }
-  100% { width: 200px; height: 200px; opacity: 0; box-shadow: 0 0 80px 20px rgba(255, 255, 255, 0), 0 0 200px 40px rgba(255, 255, 255, 0); }
-}
-
-.entrance-animation.fadeout {
-  animation: entrance-fadeout 0.5s ease-out forwards;
-}
-
-@keyframes entrance-fadeout {
-  from { opacity: 1; }
-  to { opacity: 0; }
-}
-
-.entrance-animation.fadeout .entrance-black-screen,
-.entrance-animation.fadeout .entrance-light,
-.entrance-animation.fadeout .entrance-halo {
-  animation: none;
-  opacity: 0;
 }
 
 /* ── 消息列表 ── */

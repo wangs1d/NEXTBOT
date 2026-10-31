@@ -46,6 +46,30 @@ export const MEMORY_GOVERNANCE_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
+    exact: "memory.recall",
+    metadata: {
+      aliases: [
+        "recall", "remember when", "history", "last time", "previous",
+        "上次", "之前", "上回", "那天", "哪天", "上个月", "上周",
+        "以前做过", "查过", "比过价", "回忆一下", "历史记录",
+      ],
+      negativeAliases: [
+        "记住我", "记一下", "别再提醒", "忘了它", "删除记忆",
+        "明天", "待会儿", "现在几点",
+      ],
+      examples: [
+        "上次比价小米18 Pro是什么时候？结果怎么样",
+        "我什么时候让你查过天气",
+        "这周你都帮我办过几件事？哪些没成",
+        "上个月我提过哪些旅行目的地",
+      ],
+      negativeExamples: [
+        "记住我喜欢喝美式（写入画像，非回忆）",
+        "明天下午三点提醒我开会",
+      ],
+    },
+  },
+  {
     prefix: "profile.update",
     metadata: {
       aliases: [
@@ -77,5 +101,6 @@ export const MEMORY_GOVERNANCE_CATEGORY_MAPPING: { name: string; keywords: strin
     "忘掉", "忘了它", "删除记忆", "别再关注", "取消关注", "别再盯",
     "你都干了什么", "你做了什么", "最近办了什么", "在忙什么", "等我确认", "行为记录",
     "记到档案", "我的档案", "用户画像", "记住我",
+    "上次", "之前", "上回", "回忆", "比过价", "查过", "历史记录",
   ],
 };
