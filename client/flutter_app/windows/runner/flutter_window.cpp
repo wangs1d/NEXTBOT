@@ -1017,37 +1017,12 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
   }
 
   if (method == "setAmbient") {
-    // hover 态环境信息数据源：未读数 + agent 运行状态行。
+    // hover 态环境信息数据源：站内信未读数。
+    // （2026-11-01 用户拍板：进行中任务不再上岛播报，agent 状态字段随
+    // 「任务」页一并退役。）
     const int unread = GetEncodableInt(args, "unread", 0);
-    const bool agent_active = GetEncodableBool(args, "agentActive", false);
-    const std::string status = GetEncodableString(args, "agentStatus", "");
     if (dynamic_island_window_) {
-      dynamic_island_window_->SetAmbient(unread, agent_active, status);
-    }
-    result->Success(flutter::EncodableValue(true));
-    return;
-  }
-
-  if (method == "setAgentSteps") {
-    // 展开卡「任务动态」节：agent 工具步骤流。
-    std::vector<DynamicIslandWindow::AgentStep> steps;
-    if (args != nullptr) {
-      auto it = args->find(flutter::EncodableValue("steps"));
-      if (it != args->end()) {
-        if (const auto* list = std::get_if<flutter::EncodableList>(&it->second)) {
-          for (const auto& elem : *list) {
-            if (const auto* m = std::get_if<flutter::EncodableMap>(&elem)) {
-              DynamicIslandWindow::AgentStep step;
-              step.label = GetEncodableString(m, "label", "");
-              step.state = GetEncodableInt(m, "state", 0);
-              steps.push_back(std::move(step));
-            }
-          }
-        }
-      }
-    }
-    if (dynamic_island_window_) {
-      dynamic_island_window_->SetAgentSteps(std::move(steps));
+      dynamic_island_window_->SetAmbient(unread);
     }
     result->Success(flutter::EncodableValue(true));
     return;

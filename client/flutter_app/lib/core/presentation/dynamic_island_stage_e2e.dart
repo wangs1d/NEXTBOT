@@ -5,8 +5,8 @@
 //
 // 职责（与 integration_test/dynamic_island_stage_capture.ps1 握手）：
 //   1. 延迟待启动稳定后，通过生产喂点（IslandRealFeeds / 控制器）注入
-//      今日日程、未读数、后台任务、agent 工具步骤流——数据链路与线上
-//      完全同一条（WS 事件 → 喂点 → MethodChannel → C++ 壳层）；
+//      今日日程、未读数——数据链路与线上完全同一条
+//      （WS 事件 → 喂点 → MethodChannel → C++ 壳层）；
 //   2. 写 data_ready.flag 通知 PS 脚本开始真实鼠标交互（三级展开 /
 //      hover 滚轮切页 / 形变保护连点 / 分级收回）并逐帧截图；
 //   3. 收到 driver_done.flag 后撤下注入条目并退出进程。
@@ -83,17 +83,7 @@ Future<void> runIslandStageE2EBootstrap() async {
     ],
   );
 
-  // 喂点 3：后台任务计数/状态行（hover「任务」页激活；胶囊无任务条目）。
-  IslandRealFeeds.setTaskActivity(activeCount: 1, statusLine: "正在搜索资料");
-
-  // 喂点 4：agent 工具步骤流（展开卡「任务动态」节：成功/失败/进行中三态）。
-  DynamicIslandController.instance
-    ..setForegroundAgent(active: true)
-    ..beginAgentStep("web_search", "搜索目的地攻略")
-    ..beginAgentStep("calendar_add_task", "创建日程 · 14:00 设计评审")
-    ..beginAgentStep("shopping_compare", "正在比价 · 3 个平台")
-    ..finishAgentStep("web_search", ok: true)
-    ..finishAgentStep("calendar_add_task", ok: false);
+  // 喂点 3 已退役：进行中任务不再上岛播报（2026-11-01 用户拍板）。
 
   readyFlag.writeAsStringSync(DateTime.now().toIso8601String());
 
@@ -110,10 +100,6 @@ Future<void> runIslandStageE2EBootstrap() async {
   File("${_stageDir.path}${Platform.pathSeparator}voice_ready.flag")
       .writeAsStringSync(DateTime.now().toIso8601String());
   DynamicIslandController.instance.collapse();
-  // 任务计数清零（hover「任务」页回空闲文案；胶囊本就无任务条目）。
-  // 前台轮次收尾：步骤流保留在展开卡供回看（新一轮开始才清空）。
-  DynamicIslandController.instance.setForegroundAgent(active: false);
-  IslandRealFeeds.setTaskActivity(activeCount: 0);
   Future<void> hold(int ms) async =>
       await Future<void>.delayed(Duration(milliseconds: ms));
   await hold(3500); // 原态帧（无任何语音条目）
@@ -127,7 +113,6 @@ Future<void> runIslandStageE2EBootstrap() async {
   await hold(2600);
 
   // 撤下注入的环境数据（hover 行回真实数据源）。
-  IslandRealFeeds.setTaskActivity(activeCount: 0);
   await Future<void>.delayed(const Duration(seconds: 1));
 
   // ── 提醒 attention 小形态走查（2026-10-05 提醒改小胶囊档）：供第三路 PS 连拍 ──

@@ -129,7 +129,13 @@ class SodaLyricCache {
               int.parse(m.group(2)!)) *
           1000 +
           int.parse(((m.group(3) ?? "0").padRight(3, "0")));
-      final String text = m.group(4)!.trim();
+      // 末行后面可能直接黏着二进制记录（无换行分隔）：在第一个控制字符或
+      // 非法 UTF-8 字节（解码成 U+FFFD）处截断。
+      String text = m.group(4)!;
+      final int cut =
+          text.indexOf(RegExp(r"[\x00-\x1f\x7f\uFFFD]"));
+      if (cut >= 0) text = text.substring(0, cut);
+      text = text.trim();
       if (text.isEmpty || seenT.contains(t) || creditRe.hasMatch(text)) continue;
       seenT.add(t);
       lines.add(MediaLyricLine(tMs: t, text: text));

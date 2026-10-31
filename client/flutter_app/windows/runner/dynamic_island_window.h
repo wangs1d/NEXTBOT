@@ -17,16 +17,18 @@ class Graphics;
 /// 桌面顶部灵动岛（同进程 HWND 自绘，GDI+ 逐像素透明分层窗口）。
 ///
 /// 设计（对齐 Apple 灵动岛语言，替代原 in-app Flutter 岛与今日安排悬浮窗）：
-///   - WS_POPUP + WS_EX_LAYERED + WS_EX_TOPMOST + WS_EX_TOOLWINDOW，
-///     钉在主屏工作区顶部正中；岛形以外 alpha=0 自动点击穿透
+///   - WS_POPUP + WS_EX_LAYERED + WS_EX_TOOLWINDOW，
+///     钉在主屏工作区顶部正中；岛形以外 alpha=0 自动点击穿透。
+///     常态 Z 序沉底（HWND_BOTTOM），不覆盖任何窗口；仅 urgent 提醒
+///     与顶边 peek 唤出临时置顶，结束落回沉底
 ///   - 三级渐进展开（借鉴 eisland）：胶囊 → hover（环境信息行 + 导航点）
 ///     → 展开卡；点击逐级下行，收起从展开先回 hover 而非一步缩回
 ///   - 待机态：小胶囊 + 中央金属球「镜头」（呼吸光）
 ///   - 内容态：胶囊横向撑开（图标 + 标题 + 尾注 / 呼吸活点 / 进度线）
 ///   - hover 态：360×58 环境胶囊（下一日程 · 未读数；导航点 +
-///     滚轮切换「今日/任务」，滚到「展开」进展开卡）
+///     「展开」点/滚轮进展开卡）
 ///   - 展开态：胶囊本体向下生长成信息总览卡（圆角连续变形），头部行保留，
-///     分节：接下来（日程）/ 任务动态（agent 步骤流）/ 未读消息（摘要）
+///     分节：接下来（日程）/ 未读消息（摘要）
 ///   - 形变保护：morphing 期间吞掉点击/滚轮，避免按出半截状态
 ///   - 岛这块像素被全屏应用盖住时自动隐藏（D3D 全屏 / 放映模式 / 忙碌 /
 ///     无边框全屏铺满显示器 / 最大化盖岛）：2026-10-09 拍板应用最大化同样
@@ -45,8 +47,7 @@ class Graphics;
 /// 通过 MethodChannel `pai/dynamic_island` 与 Dart 端通信：
 ///   - Dart -> C++：create / destroy / setVisible / present / dismiss /
 ///     dismissAll / setAgenda / expand / collapse / setDpi /
-///     setAmbient（未读数 + agent 状态行）/ setAgentSteps（步骤流）/
-///     setUnreadPreview（未读摘要行）
+///     setAmbient（未读数）/ setUnreadPreview（未读摘要行）
 ///   - C++ -> Dart：onNativeEvent（expandedChanged / action / tapped）
 class DynamicIslandWindow {
  public:
@@ -54,9 +55,6 @@ class DynamicIslandWindow {
 
   /// 壳层三级（eisland 式渐进展开）：morph 电平 0/1/2。
   enum class Stage { kCompact = 0, kHover = 1, kExpanded = 2 };
-
-  /// hover 态内容标签（导航点从左到右；滚轮逐个切换）。
-  enum class HoverTab { kToday = 0, kAgent = 1 };
 
   /// 岛上的一条信息（compact 胶囊内容）。
   struct Entry {
@@ -74,12 +72,6 @@ class DynamicIslandWindow {
     std::string title;
     std::string hint;  // 右侧提示（"25 分钟后" / "已完成" 等）
     bool completed = false;
-  };
-
-  /// 展开卡「任务动态」里的一行：agent 工具调用步骤流。
-  struct AgentStep {
-    std::string label;
-    int state = 0;  // 0=进行中 1=成功 2=失败
   };
 
   /// 展开卡「未读消息」摘要行（标题单行截断展示）。
@@ -139,10 +131,8 @@ class DynamicIslandWindow {
   void SetExpanded(bool expanded);
   /// 三级目标态（用户点击逐级下行：胶囊→hover→展开；收起逐级回退）。
   void SetStage(Stage stage);
-  void SetAmbient(int unread_count, bool agent_active,
-                  const std::string& agent_status);
-  /// 展开卡「任务动态」节：agent 工具步骤流（超出行数截断，Dart 侧滚动窗口）。
-  void SetAgentSteps(std::vector<AgentStep> steps);
+  /// hover 态环境行数据源：站内信未读数。
+  void SetAmbient(int unread_count);
   /// 展开卡「未读消息」节：最近未读标题摘要（空 = 无未读，节整体不画）。
   void SetUnreadPreview(std::vector<UnreadItem> rows);
   /// 纯语音模式标志（对话全语音免点击）：开启后胶囊态悬停自动 glance
@@ -177,7 +167,7 @@ class DynamicIslandWindow {
   static constexpr const wchar_t* kClassName = L"PAI_DynamicIsland_Window";
   // 窗口比岛大：给展开卡与呼吸光留余量；岛内容绘制在窗口顶部正中。
   static constexpr int kWindowW = 760;
-  // 高度给展开卡留余量：日程/任务动态/未读/歌词四节全满时约 700px。
+  // 高度给展开卡留余量：日程/未读/歌词三节全满时约 700px。
   static constexpr int kWindowH = 760;
   static constexpr int kCapsuleH = 38;       // compact 胶囊高
   static constexpr int kRestCapsuleW = 108;  // 待机胶囊宽（用户拍板：长度 2 倍、高度不变）
@@ -191,8 +181,6 @@ class DynamicIslandWindow {
   static constexpr int kTopMargin = 5;       // 胶囊顶边距
   static constexpr int kRowH = 30;           // 日程行高
   static constexpr int kMaxRows = 5;         // 最多展示行数
-  static constexpr int kStepRowH = 26;       // 任务动态行高
-  static constexpr int kMaxSteps = 4;        // 任务动态最多行数
   static constexpr int kUnreadRowH = 26;     // 未读摘要行高
   static constexpr int kMaxUnreadRows = 3;   // 未读摘要最多行数
   static constexpr int kMusicCapsuleW = 320;  // 音乐歌词胶囊宽（待机态专用档）
@@ -225,6 +213,7 @@ class DynamicIslandWindow {
   static void EnsureClassRegistered();
 
   void PositionAtTopCenter();
+  void RaiseTopmost();
   void UpdateAnimations();   // 定时器驱动：推进动画相位并重绘
   void Render();             // 整体重绘（GDI+ -> UpdateLayeredWindow）
   int CompactWidthFor(Kind kind) const;  // 声明档：该内容态的标准胶囊宽
@@ -311,9 +300,6 @@ class DynamicIslandWindow {
   bool has_entry_ = false;
   std::vector<AgendaItem> agenda_;
   int ambient_unread_ = 0;
-  bool agent_active_ = false;
-  std::string agent_status_;  // utf8，hover「任务」页状态行
-  std::vector<AgentStep> agent_steps_;   // 展开卡「任务动态」节
   std::vector<UnreadItem> unread_rows_;  // 展开卡「未读消息」节
   // 音乐歌词（背景态）：music_ 来自 SMTC 采样，歌词按 lyric_track_key_ 归属，
   // 换歌后旧词立即失效，等 Dart 拉回新词（期间只显示歌名）。
@@ -344,7 +330,6 @@ class DynamicIslandWindow {
   double morph_duration_s_ = 0.26;  // 本次形变时长（按档位距离查表）
   bool morph_active_ = false;   // 形变进行中：吞掉点击/滚轮（形变保护）
   Stage stage_target_ = Stage::kCompact;
-  HoverTab hover_tab_ = HoverTab::kToday;
   bool anim_timer_on_ = false;
   ULONGLONG anim_epoch_ms_ = 0;
 

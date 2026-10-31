@@ -41,23 +41,7 @@ class IslandEntry {
   final int priority;
 }
 
-/// 展开卡「任务动态」节的一行：agent 工具调用步骤。
-class IslandAgentStep {
-  const IslandAgentStep({
-    required this.key,
-    required this.label,
-    this.state = 0,
-  });
-
-  /// 工具名（幂等定位用，不上屏）。
-  final String key;
-
-  /// 展示文案（口语化状态行，无则友好工具名映射）。
-  final String label;
-
-  /// 0=进行中 1=成功 2=失败（与原生 AgentStep.state 对齐）。
-  final int state;
-}
+/// 展开卡「任务动态」节已退役（2026-11-01 用户拍板：进行中任务不再上岛播报）。
 
 /// 灵动岛状态控制器：单插槽 + 优先级抢占 + 有界队列。
 /// 纯状态大脑，不碰平台通道——渲染端是原生窗口，
@@ -83,16 +67,9 @@ class DynamicIslandController extends ChangeNotifier {
   final List<IslandEntry> _voiceParking = <IslandEntry>[];
 
   // 环境数据（不走条目优先级仲裁，直接进原生 hover 态）。
-  int _taskPlaneCount = 0;
-  bool _foregroundAgentActive = false;
   int _ambientUnread = 0;
-  String _agentStatusLine = '';
 
-  // 展开卡数据：任务动态（步骤流）+ 未读摘要（hover 只有数字，明细在展开层）。
-  static const int agentStepLimit = 4;  // 与原生 kMaxSteps 对齐
-  final List<IslandAgentStep> _agentSteps = <IslandAgentStep>[];
-  List<IslandAgentStep> get agentSteps =>
-      List<IslandAgentStep>.unmodifiable(_agentSteps);
+  // 展开卡数据：未读摘要（hover 只有数字，明细在展开层）。
   List<String> _unreadTitles = const <String>[];
   List<String> get unreadTitles => _unreadTitles;
 
@@ -100,65 +77,6 @@ class DynamicIslandController extends ChangeNotifier {
   bool get expanded => _expanded;
   /// hover 环境行未读数（站内信）。
   int get ambientUnread => _ambientUnread;
-  String get agentStatusLine => _agentStatusLine;
-
-  /// agent 是否在忙：后台任务面有活任务，或前台轮次处理中。
-  bool get agentActive => _taskPlaneCount > 0 || _foregroundAgentActive;
-
-  /// 更新后台任务面活跃任务数（chat.task_update 生命周期）。
-  void updateTaskPlaneCount(int count) {
-    if (_taskPlaneCount == count) return;
-    _taskPlaneCount = count;
-    notifyListeners();
-  }
-
-  /// 前台轮次 agent 处理状态（tool.call 开始 / 收尾清位）。
-  /// false→true = 新一轮开始，清上一轮步骤——上一轮结果保留到此刻，
-  /// 用户在轮次结束后仍可展开回看「刚才干了什么」。
-  void setForegroundAgent({required bool active}) {
-    if (_foregroundAgentActive == active) return;
-    _foregroundAgentActive = active;
-    if (active) _agentSteps.clear();
-    notifyListeners();
-  }
-
-  /// hover「任务」页状态行（最后一次工具调用的 userStatusLine）。
-  void updateAgentStatusLine(String line) {
-    final String trimmed = line.trim();
-    if (_agentStatusLine == trimmed) return;
-    _agentStatusLine = trimmed;
-    notifyListeners();
-  }
-
-  /// 步骤开始：同 key 且仍进行中 → 原地刷新文案；否则追加（滚动窗口）。
-  void beginAgentStep(String key, String label) {
-    if (key.isEmpty) return;
-    final int i = _lastInFlightIndex(key);
-    if (i >= 0) {
-      if (_agentSteps[i].label == label) return;
-      _agentSteps[i] = IslandAgentStep(key: key, label: label);
-    } else {
-      _agentSteps.add(IslandAgentStep(key: key, label: label));
-      if (_agentSteps.length > agentStepLimit) _agentSteps.removeAt(0);
-    }
-    notifyListeners();
-  }
-
-  /// 步骤收尾：标记最后一个该 key 的进行中步骤（同名工具重试各自成步）。
-  void finishAgentStep(String key, {required bool ok}) {
-    final int i = _lastInFlightIndex(key);
-    if (i < 0) return;
-    _agentSteps[i] = IslandAgentStep(
-        key: key, label: _agentSteps[i].label, state: ok ? 1 : 2);
-    notifyListeners();
-  }
-
-  int _lastInFlightIndex(String key) {
-    for (int i = _agentSteps.length - 1; i >= 0; i--) {
-      if (_agentSteps[i].key == key && _agentSteps[i].state == 0) return i;
-    }
-    return -1;
-  }
 
   /// 站内信未读数（hover 环境行数据源）。
   void setAmbientUnread(int count) {
@@ -497,21 +415,11 @@ class DynamicIslandLauncher {
       }
       await _channel.invokeMethod<bool>('setExpanded',
           <String, Object?>{'expanded': _controller!.expanded});
-      // hover 态环境行：轻量数据随状态同步直推。
+      // hover 态环境行：未读数随状态同步直推。
       await _channel.invokeMethod<bool>('setAmbient', <String, Object?>{
         'unread': _controller!.ambientUnread,
-        'agentActive': _controller!.agentActive,
-        'agentStatus': _controller!.agentStatusLine,
       });
-      // 展开卡总览节：任务动态步骤流 + 未读摘要（数据量小，随同步直推）。
-      await _channel.invokeMethod<bool>('setAgentSteps', <String, Object?>{
-        'steps': _controller!.agentSteps
-            .map((IslandAgentStep s) => <String, Object?>{
-                  'label': s.label,
-                  'state': s.state,
-                })
-            .toList(),
-      });
+      // 展开卡总览节：未读摘要（数据量小，随同步直推）。
       await _channel.invokeMethod<bool>('setUnreadPreview', <String, Object?>{
         'titles': _controller!.unreadTitles,
       });
@@ -694,14 +602,8 @@ class IslandRealFeeds {
   static final DynamicIslandController _c = DynamicIslandController.instance;
   static final DynamicIslandLauncher _l = DynamicIslandLauncher.instance;
 
-  /// 后台任务计数/状态行（chat.task_update 生命周期驱动）：只喂 hover「任务」页
-  /// （agentActive + 状态行），胶囊不再出「后台任务进行中」条目（2026-10-04 拍板）。
-  static void setTaskActivity({required int activeCount, String? statusLine}) {
-    _c.updateTaskPlaneCount(activeCount);
-    if (statusLine != null && statusLine.trim().isNotEmpty) {
-      _c.updateAgentStatusLine(statusLine);
-    }
-  }
+  /// 后台任务面（chat.task_update 生命周期）不再上岛播报
+  /// （2026-11-01 用户拍板，hover「任务」页一并退役）。
 
   /// 日程倒计时（今日日程同步驱动）+ 展开卡内容 + 提醒计划。
   /// [agenda] 为完整今日安排（含已完成，供展开卡）；[next] 为最近未完成项。

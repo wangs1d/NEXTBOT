@@ -272,21 +272,6 @@ void DrawMailIcon(Gdiplus::Graphics& g, float cx, float cy, float w,
   g.DrawLine(&pen, cx + w / 2, cy - h / 2, cx, cy + h * 0.08f);
 }
 
-// 步骤状态勾/叉（展开卡「任务动态」行首）：勾=成功，叉=失败。
-void DrawCheckMark(Gdiplus::Graphics& g, float cx, float cy, float s,
-                   BYTE alpha) {
-  Gdiplus::Pen pen(Gdiplus::Color(alpha, 150, 235, 165), 1.7f);
-  g.DrawLine(&pen, cx - 3.5f * s, cy + 0.4f * s, cx - 0.8f * s, cy + 3.1f * s);
-  g.DrawLine(&pen, cx - 0.8f * s, cy + 3.1f * s, cx + 4.2f * s, cy - 3.2f * s);
-}
-
-void DrawCrossMark(Gdiplus::Graphics& g, float cx, float cy, float s,
-                   BYTE alpha) {
-  Gdiplus::Pen pen(Gdiplus::Color(alpha, 255, 130, 120), 1.7f);
-  g.DrawLine(&pen, cx - 3.1f * s, cy - 3.1f * s, cx + 3.1f * s, cy + 3.1f * s);
-  g.DrawLine(&pen, cx - 3.1f * s, cy + 3.1f * s, cx + 3.1f * s, cy - 3.1f * s);
-}
-
 // 音符图标（MDL2 没有稳定可用的音符字形，直接矢量画：符头 + 符干 + 旗）。
 void DrawMusicNote(Gdiplus::Graphics& g, float cx, float cy, float s,
                    BYTE alpha) {
@@ -523,8 +508,8 @@ bool DynamicIslandWindow::Create() {
     window_handle_ = nullptr;
   }
   EnsureClassRegistered();
-  const DWORD ex_style =
-      WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+  // 常态沉底（HWND_BOTTOM，见 PositionAtTopCenter）：不盖任何窗口。
+  const DWORD ex_style = WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
   window_handle_ = CreateWindowExW(
       ex_style, kClassName, L"", WS_POPUP, 0, 0, S(kWindowW), S(kWindowH),
       nullptr, nullptr, GetModuleHandle(nullptr), this);
@@ -576,7 +561,15 @@ void DynamicIslandWindow::PositionAtTopCenter() {
   if (peek_active_ || (visible_ && !suppressed_by_fullscreen_)) {
     flags |= SWP_SHOWWINDOW;
   }
-  SetWindowPos(window_handle_, HWND_TOPMOST, x, y, w, h, flags);
+  // 常态沉底：任何普通窗口都盖在岛之上。仅 urgent 提醒与顶边 peek 走
+  // RaiseTopmost 临时置顶，结束/收回后经这里落回沉底。
+  SetWindowPos(window_handle_, HWND_BOTTOM, x, y, w, h, flags);
+}
+
+void DynamicIslandWindow::RaiseTopmost() {
+  if (window_handle_ == nullptr) return;
+  SetWindowPos(window_handle_, HWND_TOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
 void DynamicIslandWindow::Show() {
@@ -626,19 +619,8 @@ void DynamicIslandWindow::SetAgenda(std::vector<AgendaItem> items) {
   if (window_handle_ != nullptr) Render();
 }
 
-void DynamicIslandWindow::SetAmbient(int unread_count, bool agent_active,
-                                     const std::string& agent_status) {
+void DynamicIslandWindow::SetAmbient(int unread_count) {
   ambient_unread_ = unread_count;
-  agent_active_ = agent_active;
-  agent_status_ = agent_status;
-  if (window_handle_ != nullptr) Render();
-}
-
-void DynamicIslandWindow::SetAgentSteps(std::vector<AgentStep> steps) {
-  if (steps.size() > static_cast<size_t>(kMaxSteps)) {
-    steps.erase(steps.begin(), steps.end() - kMaxSteps);
-  }
-  agent_steps_ = std::move(steps);
   if (window_handle_ != nullptr) Render();
 }
 
@@ -1028,7 +1010,6 @@ void DynamicIslandWindow::SetStage(Stage stage) {
   morph_duration_s_ = MorphDurationFor(morph_from_, TargetLevel());
   morph_start_s_ = now_s_;
   morph_active_ = true;
-  if (stage == Stage::kHover) hover_tab_ = HoverTab::kToday;
   // 滚轮钩子的挂载条件含 stage——点击进 hover 后光标可能不再移动，
   // 不 here 补挂的话首次滚轮会丢失（WM_MOUSEMOVE 不会再来）。
   UpdateWheelHook();
@@ -1097,6 +1078,9 @@ void DynamicIslandWindow::StartAttention(const std::string& title,
   if (window_handle_ != nullptr) {
     if (!IsVisible()) Show();
     StartAnimTimer();
+    // urgent 是唯一破屏档（2026-10-13 白名单）：沉底常态下临时置顶，
+    // 结束/点击收口处落回沉底。
+    if (attention_urgent_) RaiseTopmost();
   }
 }
 
@@ -1465,6 +1449,8 @@ void DynamicIslandWindow::UpdateTopEdgePeek() {
     peek_active_ = true;
     PositionAtTopCenter();
     ShowWindow(window_handle_, SW_SHOWNOACTIVATE);
+    // 用户主动贴顶边唤出：沉底常态下唯一的手动唤出口，临时置顶才可见。
+    RaiseTopmost();
     StartAnimTimer();
     IslandLifecycleLog(window_handle_, L"peek-on");
     return;
@@ -1530,9 +1516,6 @@ int DynamicIslandWindow::ExpandedHeight() const {
   } else {
     h += kRowH + 6;  // 空态「今日无日程」占位行
   }
-  const int step_rows =
-      std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
-  if (step_rows > 0) h += 6 + 20 + step_rows * kStepRowH + 4;
   const int unread_rows =
       std::min(static_cast<int>(unread_rows_.size()), kMaxUnreadRows);
   if (unread_rows > 0) h += 6 + 20 + unread_rows * kUnreadRowH + 4;
@@ -1629,38 +1612,17 @@ bool DynamicIslandWindow::ConsumeWheelAt(const POINT& screen_pt, short delta) {
 void DynamicIslandWindow::OnWheelDelta(short delta) {
   if (IsMorphing() || stage_target_ != Stage::kHover) return;
   if (delta < 0) {
-    // 下滚 = 下一个；滚过「任务」页即进展开态（零点击成本）。
-    if (hover_tab_ == HoverTab::kToday) {
-      hover_tab_ = HoverTab::kAgent;
-      Render();
-      return;
-    }
+    // 下滚 = 进展开态（零点击成本）。
     SetStage(Stage::kExpanded);
     FireEvent(EventType::kExpandedChanged, "true");
-    return;
   }
-  // 上滚 = 上一个，「今日」是头档。
-  if (hover_tab_ == HoverTab::kAgent) {
-    hover_tab_ = HoverTab::kToday;
-    Render();
-  }
+  // 上滚在 hover 头档无上一页：忽略。
 }
 
-// hover 态环境信息行：今日页 = 下一日程 · 未读数；任务页 = agent 状态。
-// （日期已删，2026-10-26 用户拍板：任务栏右下角已有时钟，纯重复信息。）
+// hover 态环境信息行：下一日程 · 未读数。
+// （日期已删，2026-10-26 用户拍板：任务栏右下角已有时钟，纯重复信息。
+// 2026-11-01 用户拍板：进行中任务不再上岛播报，「任务」页整体退役。）
 std::wstring DynamicIslandWindow::BuildHoverLine() const {
-  if (hover_tab_ == HoverTab::kAgent) {
-    if (agent_active_) {
-      std::wstring line = L"Agent";
-      if (!agent_status_.empty()) line += L" · " + Utf8ToWide(agent_status_);
-      return line;
-    }
-    std::wstring line = L"暂无进行中任务";
-    if (ambient_unread_ > 0) {
-      line += L" · " + std::to_wstring(ambient_unread_) + L" 未读";
-    }
-    return line;
-  }
   std::wstring line;
   for (const AgendaItem& it : agenda_) {
     if (it.completed) continue;
@@ -1737,7 +1699,9 @@ void DynamicIslandWindow::Render() {
         entry_ = Entry{};
       }
       // 提醒结束立即让位：全屏环境仍在时回抑制态（幂等），不等下一跳。
+      // urgent 曾临时置顶，这里落回常态沉底（抑制时窗口已藏，落位幂等）。
       UpdateFullscreenSuppression();
+      if (attention_urgent_) PositionAtTopCenter();
     }
     // 基座几何（不含 attention）；attention 靠围绕胶囊中心的变换放大。
     const float cap_x = (phys_w - cur_w) / 2.0f;
@@ -1852,14 +1816,16 @@ void DynamicIslandWindow::Render() {
 
           if (music_lines_.empty()) {
             // 无词：不写任何无词文案，只显示歌名（高度已随 CompactHeight 回常规档）。
+            // 单行独占整条胶囊，字号提到与歌词行同级，避免 12px 头部小字看不清。
+            Gdiplus::Font title_font(mem_dc, MakeIslandFont(S(15), 600));
             const std::wstring head =
-                FitText(g, Utf8ToWide(music_.title), head_font, text_max);
+                FitText(g, Utf8ToWide(music_.title), title_font, text_max);
             Gdiplus::RectF m_head;
-            g.MeasureString(head.c_str(), -1, &head_font, Gdiplus::PointF(0, 0),
+            g.MeasureString(head.c_str(), -1, &title_font, Gdiplus::PointF(0, 0),
                             &m_head);
             Gdiplus::SolidBrush head_brush(
                 Gdiplus::Color(static_cast<BYTE>(ea), 255, 255, 255));
-            g.DrawString(head.c_str(), -1, &head_font,
+            g.DrawString(head.c_str(), -1, &title_font,
                          SnapText(text_x,
                                   cap_y + (header_h - m_head.Height) / 2.0f),
                          &head_brush);
@@ -2078,9 +2044,9 @@ void DynamicIslandWindow::Render() {
       const BYTE ha = static_cast<BYTE>(hover_alpha * 255.0f + 0.5f);
       const float dot_cy = cap_y + cur_h / 2.0f;
       float dx = cap_x + 22.0f * s;
-      for (int i = 0; i < 3; i++) {
-        const bool expand_pt = i == 2;
-        const bool active = !expand_pt && i == static_cast<int>(hover_tab_);
+      for (int i = 0; i < 2; i++) {
+        const bool expand_pt = i == 1;
+        const bool active = !expand_pt;  // 唯一环境页恒亮
         const bool hov = hovering_ && hover_dot_ == i;
         if (expand_pt) {
           // 「展开」点画下箭头（点击/滚进都进展开卡）。
@@ -2259,51 +2225,6 @@ void DynamicIslandWindow::Render() {
         g.DrawString(L"今日无日程", -1, &empty_font,
                      Gdiplus::PointF(cap_x + pad, y + 5.0f * s), &empty_brush);
         y += static_cast<float>(kRowH) * s + 6.0f * s;
-      }
-
-      // ── 任务动态：agent 工具步骤流（进行中转圈 / 成功勾 / 失败叉）──
-      const int step_rows =
-          std::min(static_cast<int>(agent_steps_.size()), kMaxSteps);
-      if (step_rows > 0) {
-        Gdiplus::SolidBrush step_div_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 6 / 100), 255, 255, 255));
-        g.FillRectangle(&step_div_brush, cap_x + pad, y, cur_w - pad * 2,
-                        1.0f * s);
-        y += 6.0f * s;
-
-        Gdiplus::Font step_label_font(mem_dc, MakeIslandFont(S(14), 700));
-        Gdiplus::SolidBrush step_label_brush(
-            Gdiplus::Color(static_cast<BYTE>(fade * 85 / 100), 255, 255, 255));
-        g.DrawString(L"任务动态", -1, &step_label_font,
-                     Gdiplus::PointF(cap_x + pad, y), &step_label_brush);
-        y += 20.0f * s;
-
-        Gdiplus::Font step_font(mem_dc, MakeIslandFont(S(15), 650));
-        for (int i = 0; i < step_rows; i++) {
-          const AgentStep& st = agent_steps_[i];
-          const float glyph_cx = cap_x + pad + 5.0f * s;
-          const float glyph_cy = y + 9.0f * s;
-          if (st.state == 0) {
-            DrawTaskIcon(g, glyph_cx, glyph_cy, 4.5f * s, now_s_,
-                         static_cast<BYTE>(fade * 80 / 100));
-          } else if (st.state == 1) {
-            DrawCheckMark(g, glyph_cx, glyph_cy, s,
-                          static_cast<BYTE>(fade * 70 / 100));
-          } else {
-            DrawCrossMark(g, glyph_cx, glyph_cy, s,
-                          static_cast<BYTE>(fade * 80 / 100));
-          }
-          const std::wstring step_text = FitText(
-              g, Utf8ToWide(st.label), step_font,
-              cur_w - pad * 2 - 16.0f * s);
-          Gdiplus::SolidBrush step_brush(
-              Gdiplus::Color(static_cast<BYTE>(fade), 255, 255, 255));
-          g.DrawString(step_text.c_str(), -1, &step_font,
-                       Gdiplus::PointF(cap_x + pad + 14.0f * s, y),
-                       &step_brush);
-          y += static_cast<float>(kStepRowH) * s;
-        }
-        y += 4.0f * s;
       }
 
       // ── 未读消息：最近未读标题摘要（行首未读圆点，点击出口暂无）──
@@ -2531,7 +2452,9 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         else Render();
         FireEvent(EventType::kAction, "打开日程");
         // 提前收口后立即让位：全屏环境仍在时回抑制态，不等下一跳。
+        // urgent 曾临时置顶，落回常态沉底。
         UpdateFullscreenSuppression();
+        if (attention_urgent_) PositionAtTopCenter();
         return 0;
       }
       // 音乐独占：单击直达展开卡，不再走 hover 中间层（收起也一步回胶囊）。
@@ -2545,17 +2468,15 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
         }
         return 0;
       }
-      // hover 导航点：今日/任务切页，「展开」点进展开卡。
+      // hover 导航点：「展开」点进展开卡（今日点为恒亮指示，点击无操作）。
       if (std::abs(morph_ - 1.0) < 0.45) {
         const int dot = HoverDotAt(cx, cy);
-        if (dot == 2) {
+        if (dot == 1) {
           SetStage(Stage::kExpanded);
           FireEvent(EventType::kExpandedChanged, "true");
           return 0;
         }
         if (dot >= 0) {
-          hover_tab_ = static_cast<HoverTab>(dot);
-          Render();
           return 0;
         }
       }

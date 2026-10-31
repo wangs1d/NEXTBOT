@@ -76,7 +76,6 @@ import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_theme.dart";
 import "core/utils/play_url_utils.dart";
-import "core/utils/tool_friendly_label.dart";
 import "features/catalog/catalog_page.dart";
 import "features/help/feedback_dialog.dart";
 import "features/browser/browser_page.dart";
@@ -1495,20 +1494,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             if (line.isNotEmpty) {
               _updateAgentStatusLine(line);
             }
-            // hover「任务」页：agent 状态行 + 展开卡「任务动态」步骤流上岛。
-            // 无口语化文案时不得把原始工具名亮到岛上；友好映射也没命中就不上岛。
-            final String? islandLabel = line.isNotEmpty
-                ? line
-                : (toolName.isNotEmpty ? friendlyToolLabel(toolName) : null);
-            final DynamicIslandController island =
-                DynamicIslandController.instance
-                  ..setForegroundAgent(active: true);
-            if (islandLabel != null && islandLabel.isNotEmpty) {
-              island.updateAgentStatusLine(islandLabel);
-              if (toolName.isNotEmpty) {
-                island.beginAgentStep(toolName, islandLabel);
-              }
-            }
           }
         }
         if (type == "tool.result") {
@@ -1528,9 +1513,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           }
           final String toolName = payload["toolName"]?.toString() ?? "";
           final bool toolOk = payload["ok"] == true;
-          // 展开卡「任务动态」：步骤收尾（进行中 → 成功/失败；无对应步骤则空过）。
-          DynamicIslandController.instance
-              .finishAgentStep(toolName, ok: toolOk);
           if (isMasterInvokeSubAgentTool(toolName) && result != null) {
             final bool delegateOk = result["ok"] != false;
             if (!toolOk || !delegateOk) {
@@ -3258,8 +3240,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _pendingLocalTurn = null;
     });
     _notifyAgentProcessingUi(false);
-    // 前台轮次收尾：hover「任务」页回落到空闲文案（后台任务面计数另算）。
-    DynamicIslandController.instance.setForegroundAgent(active: false);
   }
 
   /// v2：用户点 TurnPanel 顶栏「停止」按钮时的软取消。
@@ -4141,9 +4121,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     if (changed && mounted) {
       setState(() {});
     }
-    if (changed) {
-      IslandRealFeeds.setTaskActivity(activeCount: _taskPlaneState.activeCount);
-    }
   }
 
   /// 取消后台任务（回执 hover 取消入口）：与「发送新消息打断前台回复」
@@ -4249,8 +4226,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String taskId = resultMessageId.substring("assistant-task-".length);
     final String? receiptId = _taskReceiptMessageIdByTaskId.remove(taskId);
     _taskPlaneState.remove(taskId);
-    IslandRealFeeds.setTaskActivity(
-        activeCount: _taskPlaneState.activeCount);
     if (receiptId == null || !mounted) return;
     final int? idx = _messageIndexById(receiptId);
     if (idx == null || idx >= _messages.length) return;

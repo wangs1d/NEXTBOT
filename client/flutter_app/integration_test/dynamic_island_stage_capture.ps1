@@ -129,9 +129,9 @@ $cx = Get-CenterX
 $top = Get-WinTop
 $capCy = [int]($top + 24 * $dpi)     # 胶囊/hover 行中心/展开卡头部（三态均可命中）
 
-# 1. 待机：数据已注入（task 条目已 present → compact 显示「后台任务进行中」
-#    声明档胶囊）。
-Capture '00_compact_task_entry'
+# 1. 待机：数据已注入（日程倒计时条目在预告窗口内 → compact 显示「下一节」
+#    声明档胶囊；任务条目已退役不上岛）。
+Capture '00_compact_schedule_entry'
 
 # 2. 点击胶囊 → hover 态（环境行：下一节 · 未读；日期已删）
 Log-Marker 's2_click_compact'
@@ -139,31 +139,26 @@ Click $cx $capCy
 Start-Sleep -Milliseconds 1400
 Capture '01_hover_today'
 
-# 3. hover 滚轮下滚 → 任务页（Agent · 正在搜索资料）
-Log-Marker 's3_wheel_down'
-Wheel $cx $capCy 1
-Start-Sleep -Milliseconds 1200
-Capture '02_hover_agent_tab'
-
-# 4. 再下滚 → 滚过「任务」直接进展开卡（零点击展开）
-Log-Marker 's4_wheel_down_expand'
+# 3. hover 滚轮下滚 → 直接进展开卡（零点击展开；「任务」页已退役，
+#    2026-11-01 进行中任务不再上岛播报）
+Log-Marker 's3_wheel_down_expand'
 Wheel $cx $capCy 1
 Start-Sleep -Milliseconds 1600
-Capture '03_expanded_via_wheel'
+Capture '02_expanded_via_wheel'
 
-# 5. 点展开卡头部 → 逐级收起回 hover（不是一步缩回胶囊）
+# 4. 点展开卡头部 → 逐级收起回 hover（不是一步缩回胶囊）
 Log-Marker 's5_click_card_header'
 Click $cx $capCy
 Start-Sleep -Milliseconds 1400
 Capture '04_back_to_hover'
 
-# 6. 点 hover → 展开（点击路径）
+# 5. 点 hover → 展开（点击路径）
 Log-Marker 's6_click_hover_expand'
 Click $cx $capCy
 Start-Sleep -Milliseconds 1400
 Capture '05_expanded_via_click'
 
-# 7. 形变保护：点击后 80ms 内再点一次，第二次应被吞掉（终态 hover，
+# 6. 形变保护：点击后 80ms 内再点一次，第二次应被吞掉（终态 hover，
 #    不卡在中间尺寸）
 Log-Marker 's7_double_click_guard'
 Click $cx $capCy
@@ -172,12 +167,12 @@ Click $cx $capCy
 Start-Sleep -Milliseconds 1800
 Capture '06_after_double_click_guard'
 
-# 8. 鼠标移开 → hover 2.5s 后静默回胶囊（分级自动收回）
+# 7. 鼠标移开 → hover 2.5s 后静默回胶囊（分级自动收回）
 [PaiIslandStage]::SetCursorPos($cx, $top + [int](320 * $dpi)) | Out-Null
 Start-Sleep -Milliseconds 3600
 Capture '07_auto_collapsed_compact'
 
-# 9. 点击任务胶囊 → hover → 再点 → 展开（第二轮回归验证；两次点击间隔
+# 8. 点击任务胶囊 → hover → 再点 → 展开（第二轮回归验证；两次点击间隔
 #    拉开到 1.4s，避开形变保护窗口，让第二次点击走合法的 hover→展开路径）
 Log-Marker 's9_second_round'
 Click $cx $capCy

@@ -66,6 +66,13 @@ class EveningDigestCard extends StatelessWidget {
     final Map<String, dynamic> weather =
         rawWeather is Map ? rawWeather.cast<String, dynamic>() : const <String, dynamic>{};
     final String? tomorrowLabel = _tomorrowLabel();
+    // 现象文本已被预警徽章覆盖时（如「雷暴」既是 text 又是 alert）不再单写一行，
+    // 与服务端口播的去重口径一致
+    final String conditionText = weather["text"]?.toString() ?? "";
+    final List<Object?> alerts =
+        (weather["alerts"] as List?) ?? const <Object?>[];
+    final bool alertCoversText =
+        alerts.any((Object? a) => a?.toString().contains(conditionText) == true);
 
     return Card(
       clipBehavior: Clip.antiAlias,
@@ -209,15 +216,17 @@ class EveningDigestCard extends StatelessWidget {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Text(
-                      weather["text"]?.toString() ?? "",
-                      style: theme.textTheme.bodyMedium?.copyWith(
-                        color: cs.onSurfaceVariant,
+                  if (conditionText.isNotEmpty && !alertCoversText) ...<Widget>[
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        conditionText,
+                        style: theme.textTheme.bodyMedium?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
+                  ],
                 ],
               ),
               if ((weather["alerts"] as List?)?.isNotEmpty == true) ...<Widget>[

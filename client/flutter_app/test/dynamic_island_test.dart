@@ -83,86 +83,13 @@ void main() {
     });
   });
 
-  group('DynamicIslandController 环境数据（hover 行 + 任务动态）', () {
-    test('agentActive = 后台任务面 or 前台轮次，两者独立记账', () {
-      final DynamicIslandController c = DynamicIslandController();
-      expect(c.agentActive, isFalse);
-
-      c.updateTaskPlaneCount(2);
-      expect(c.agentActive, isTrue);
-      c.updateTaskPlaneCount(0);
-      expect(c.agentActive, isFalse);
-
-      c.setForegroundAgent(active: true);
-      expect(c.agentActive, isTrue);
-      // 前台收尾不影响后台计数。
-      c.updateTaskPlaneCount(1);
-      c.setForegroundAgent(active: false);
-      expect(c.agentActive, isTrue);
-    });
-
-    test('未读数与状态行刷新进环境数据', () {
+  group('DynamicIslandController 环境数据（hover 行）', () {
+    test('未读数刷新进环境数据', () {
       final DynamicIslandController c = DynamicIslandController();
       c.setAmbientUnread(3);
-      c.updateAgentStatusLine(' 正在搜索资料 ');
       expect(c.ambientUnread, 3);
-      expect(c.agentStatusLine, '正在搜索资料');
       c.setAmbientUnread(3); // 幂等
       expect(c.ambientUnread, 3);
-    });
-  });
-
-  group('DynamicIslandController 任务动态步骤流（展开卡总览节）', () {
-    test('begin 追加 / 同 key 进行中刷新文案，finish 标记成功/失败', () {
-      final DynamicIslandController c = DynamicIslandController();
-      c.setForegroundAgent(active: true);
-      c.beginAgentStep('web_search', '正在搜索资料');
-      c.beginAgentStep('calendar_add', '正在创建日程');
-      expect(c.agentSteps.map((IslandAgentStep s) => s.key).toList(),
-          <String>['web_search', 'calendar_add']);
-
-      // 同 key 仍进行中：原地刷新文案，不追加。
-      c.beginAgentStep('web_search', '正在搜索航班');
-      expect(c.agentSteps.length, 2);
-      expect(c.agentSteps.first.label, '正在搜索航班');
-
-      c.finishAgentStep('web_search', ok: true);
-      expect(c.agentSteps.first.state, 1);
-      c.finishAgentStep('calendar_add', ok: false);
-      expect(c.agentSteps[1].state, 2);
-
-      // 已收尾的同 key 再 begin：新一轮步骤（同名工具重试各自成步）。
-      c.beginAgentStep('web_search', '正在重新搜索');
-      expect(c.agentSteps.length, 3);
-      expect(c.agentSteps.last.state, 0);
-    });
-
-    test('滚动窗口只留最近 4 步（与原生 kMaxSteps 对齐）', () {
-      final DynamicIslandController c = DynamicIslandController();
-      c.setForegroundAgent(active: true);
-      for (int i = 0; i < 6; i++) {
-        c.beginAgentStep('tool_$i', '步骤 $i');
-      }
-      expect(c.agentSteps.map((IslandAgentStep s) => s.key).toList(),
-          <String>['tool_2', 'tool_3', 'tool_4', 'tool_5']);
-    });
-
-    test('轮次结束保留步骤供回看，新一轮开始才清空', () {
-      final DynamicIslandController c = DynamicIslandController();
-      c.setForegroundAgent(active: true);
-      c.beginAgentStep('web_search', '正在搜索资料');
-      c.finishAgentStep('web_search', ok: true);
-      c.setForegroundAgent(active: false);
-      expect(c.agentSteps.length, 1, reason: '轮次结束后保留供展开回看');
-
-      c.setForegroundAgent(active: true);
-      expect(c.agentSteps.isEmpty, isTrue, reason: '新一轮开始清上一轮');
-    });
-
-    test('finish 无对应进行中步骤时空过（sub-agent 结果兜底）', () {
-      final DynamicIslandController c = DynamicIslandController();
-      c.finishAgentStep('unknown_tool', ok: true);
-      expect(c.agentSteps.isEmpty, isTrue);
     });
   });
 

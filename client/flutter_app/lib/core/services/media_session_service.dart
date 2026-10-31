@@ -197,6 +197,25 @@ class MediaSessionService {
     _lyricReason = null;
     _lastLyricPayload = null;
 
+    // 检测到哪个软件在放，就用哪个软件自己的歌词：汽水在放优先读它本地
+    // 缓存（独家曲目只有它有），本地没有再问服务端；其他软件直接走服务端。
+    final bool sodaPlaying = track.appId.contains("汽水") ||
+        track.appId.toLowerCase().contains("sodamusic");
+    if (sodaPlaying) {
+      final List<MediaLyricLine>? local =
+          await SodaLyricCache.instance.resolve(track.title, track.artist);
+      if (requestSeq != _lyricRequestSeq) return;
+      if (local != null && local.isNotEmpty) {
+        _lyrics = local;
+        debugPrint(
+          "[media-session] lyric soda-cache: ${local.length} lines"
+          " | trackKey=$_lyricTrackKey",
+        );
+        await _pushIslandLyrics(track.trackKey, local);
+        return;
+      }
+    }
+
     final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/media/lyric").replace(
       queryParameters: <String, String>{
         "title": track.title,
@@ -214,20 +233,6 @@ class MediaSessionService {
       final Map<String, dynamic> data =
           jsonDecode(utf8.decode(response.bodyBytes)) as Map<String, dynamic>;
       if (data["matched"] != true) {
-        // 服务端词源没有时走汽水本地缓存兜底（汽水独家曲目的词只在本机）。
-        final List<MediaLyricLine>? local =
-            await SodaLyricCache.instance.resolve(track.title, track.artist);
-        if (requestSeq != _lyricRequestSeq) return;
-        if (local != null) {
-          _lyrics = local;
-          _lyricReason = null;
-          debugPrint(
-            "[media-session] lyric soda-cache: ${local.length} lines"
-            " | trackKey=$_lyricTrackKey",
-          );
-          await _pushIslandLyrics(track.trackKey, _lyrics);
-          return;
-        }
         _lyricReason = data["reason"]?.toString() ?? "未找到歌词";
         debugPrint("[media-session] lyric miss: $_lyricReason");
         await _pushIslandLyrics(track.trackKey, const <MediaLyricLine>[],
