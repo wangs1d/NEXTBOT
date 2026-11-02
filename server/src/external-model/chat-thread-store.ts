@@ -56,15 +56,16 @@ export { PERSISTED_CLIENT_ID_FIELD, tagUserMessageClientId };
  * done 载荷已剥但线程未剥，残块实测进历史）。卡片标记（AGENT_RESULT_CARD）不剥
  * ——历史渲染依赖正文标记还原行程卡。
  */
-// 2026-10-24：模型漏写下划线的变体 [NEXT_UPSTART]/[NEXT_UPEND] 同样要剥，
-// 否则协议块会随线程与历史回放漏到用户气泡（真机截图实证）。
+// 2026-11-02 根修：模型会自造前缀（`[NOEXTUP_END]`）或改用全角括号；不再枚举
+// 字面写法，按「方括号 token 内同时含 UP 与 START/END」统一剥除。
 const THREAD_NEXT_UP_BLOCK_RE =
-  /\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)/gi;
-const THREAD_NEXT_UP_ORPHAN_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
+  /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|$)/gi;
+const THREAD_NEXT_UP_ORPHAN_RE =
+  /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
 const THREAD_RENDER_DECL_RE = /^\s*\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?\s*$/gm;
 const THREAD_RENDER_DECL_INLINE_RE = /\[RENDER_(?:HINT|AS)\]?\s*[:：]\s*[A-Za-z_]+\]?/g;
 const THREAD_PROTOCOL_ANY_RE =
-  /\[NEXT[ _]?UP[ _]?(?:START|END)\]|\[RENDER_(?:HINT|AS)\]?\s*[:：]|<\s*\/?\s*system-reminder/i;
+  /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]|\[RENDER_(?:HINT|AS)\]?\s*[:：]|<\s*\/?\s*system-reminder/i;
 
 function stripProtocolMarkersForThread(text: string): string {
   // <system-reminder>（2026-10-08 事故根源）：上游 harness 注入块被模型复读后

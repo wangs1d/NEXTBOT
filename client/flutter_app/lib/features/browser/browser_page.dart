@@ -830,7 +830,9 @@ class _SaveLoginAskBar extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                "允许保存你在${ask.siteLabel}的 Cookie 吗？",
+                ask.allSites
+                    ? "允许统一保存这些购物平台的 Cookie 吗？"
+                    : "允许保存你在${ask.siteLabel}的 Cookie 吗？",
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(

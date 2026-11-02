@@ -39,6 +39,7 @@ type MailRow = {
   importance: string;
 };
 type IcsRow = {
+  actorId: string;
   feed: string;
   key: string;
   summary: string;
@@ -73,7 +74,7 @@ function makeHarness() {
   const txRows: TxRow[] = [];
   kernel.register(new MailSensor({ fetchNewSince: () => mailRows }));
   kernel.register(new IcsSensor({ fetchEventsSince: () => icsRows }));
-  kernel.register(new FinanceSensor({ getTransactions: () => txRows }, () => ACTOR));
+  kernel.register(new FinanceSensor({ getTransactions: () => txRows }, () => [ACTOR]));
 
   const presence = new PresenceService();
   presence.markConnected(ACTOR, clock.t - 60_000);
@@ -89,6 +90,8 @@ function makeHarness() {
   });
 
   const delivered: Array<{ actorId: string; json: string }> = [];
+  /** speak 车道：正文留空的提案（如临会提醒）由生产装配层转 hub 话术，不经 trySend */
+  const spoken: Array<{ kind: string; title: string }> = [];
   const pipeline = new ProactivePipeline({
     dataPath: dir,
     governor: new FrequencyGovernor({ ignoreEnv: true, disableQuietHours: true, dailyBudget: 20 }),
@@ -101,7 +104,9 @@ function makeHarness() {
       },
     }),
     outcomes: new OutcomeStore(join(dir, "outcomes.json")),
-    speak: () => {},
+    speak: (p) => {
+      spoken.push({ kind: p.kind, title: p.title });
+    },
     nowFn: () => clock.t,
     // 生产同样注入真实对话时刻；不注入会退回"设备活跃时刻"，把刚连上的设备当成
     // 「对话进行中」→ social 提案被延迟 90s（in_conversation_defer_90s）
@@ -148,7 +153,7 @@ function makeHarness() {
   };
   const tick = () => executor.tickActor(ACTOR, clock.t);
 
-  return { dir, clock, board, kernel, store, mailRows, icsRows, txRows, events, delivered, poll, tick };
+  return { dir, clock, board, kernel, store, mailRows, icsRows, txRows, events, delivered, spoken, poll, tick };
 }
 
 /** 造一封邮件（date 落在 now 附近，保证 30min 窗口内） */
@@ -171,6 +176,7 @@ test("E2E-1 外部信号扫进统一库：mail / schedule(ICS) / finance 三源�
   try {
     h.mailRows.push(mail(1, "张总 <zhang@corp.com>", "三亚合同 review", "high"));
     h.icsRows.push({
+      actorId: ACTOR,
       feed: "work",
       key: "ev-1",
       summary: "三亚出差",
@@ -197,6 +203,7 @@ test("E2E-2 跨源实体检索：一次查询同时命中邮件与日历（Muse�
   try {
     h.mailRows.push(mail(1, "张总 <zhang@corp.com>", "三亚合同 review", "high"));
     h.icsRows.push({
+      actorId: ACTOR,
       feed: "work",
       key: "ev-1",
       summary: "三亚出差",
@@ -242,6 +249,7 @@ test("E2E-4 日历订阅（ICS）→ 世界板 nextEvent → meeting_soon → �
   const h = makeHarness();
   try {
     h.icsRows.push({
+      actorId: ACTOR,
       feed: "work",
       key: "ev-2",
       summary: "周会",
@@ -253,8 +261,9 @@ test("E2E-4 日历订阅（ICS）→ 世界板 nextEvent → meeting_soon → �
 
     const kinds = h.events.map((e) => e.kind);
     assert.ok(kinds.includes("meeting_soon"), `ICS 日程应驱动 meeting_soon：${kinds}`);
-    assert.ok(h.delivered.length >= 1, "临会提醒应真正投递");
-    assert.match(h.delivered[0].json, /周会/, `投递内容应含日程名: ${h.delivered[0].json}`);
+    // 临会提醒按设计正文留空（话术层生成），因此走 speak 车道而非 trySend 直投
+    assert.ok(h.spoken.length >= 1, "临会提醒应交给 speak 车道开口");
+    assert.match(h.spoken[0].title, /周会/, `开口提案应含日程名: ${JSON.stringify(h.spoken[0])}`);
   } finally {
     rmSync(h.dir, { recursive: true, force: true });
   }

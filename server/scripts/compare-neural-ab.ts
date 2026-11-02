@@ -63,12 +63,12 @@ const GOLDEN: Array<{ query: string; expect: string[]; topK: number }> = [
   { query: "比特币现在什么价", expect: ["search_web", "internet.research", "deep_search", "internet.live_check"], topK: 3 },
   { query: "帮我搜一下刘浩存最近的消息", expect: ["search_web", "internet.research", "deep_search"], topK: 3 },
   { query: "读一下这个网页 https://example.com 说了什么", expect: ["fetch_web", "info.inspect_webpage"], topK: 3 },
-  { query: "明天早上九点提醒我开会", expect: ["reminder.plan", "calendar.create_from_text", "calendar.create_task"], topK: 3 },
+  { query: "明天早上九点提醒我开会", expect: ["calendar.create", "calendar.create", "calendar.create"], topK: 3 },
   { query: "我有哪些日程", expect: ["calendar.list_tasks"], topK: 3 },
   { query: "取消明天那个提醒", expect: ["calendar.delete_task", "calendar.list_tasks"], topK: 3 },
   { query: "记住我妈生日是5月20号", expect: ["care.set_important_date"], topK: 3 },
   { query: "到家的时候提醒我拿快递", expect: ["geofence.create"], topK: 3 },
-  { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "reminder.plan"], topK: 3 },
+  { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "calendar.create"], topK: 3 },
   { query: "看一下门口摄像头", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
   { query: "我答应过你什么", expect: ["commitment.list"], topK: 3 },
 ];
@@ -80,11 +80,11 @@ const PARAPHRASE: Array<{ query: string; expect: string[]; topK: number }> = [
   { query: "外头冷不冷", expect: ["weather.get_local"], topK: 3 },
   { query: "卡里还剩多少", expect: ["wallet.get_balance"], topK: 3 },
   { query: "我现在在哪儿", expect: ["clock.get_user_location"], topK: 3 },
-  { query: "帮我定个明早七点的闹钟", expect: ["reminder.plan", "calendar.create_task", "calendar.create_from_text"], topK: 3 },
+  { query: "帮我定个明早七点的闹钟", expect: ["calendar.create", "calendar.create", "calendar.create"], topK: 3 },
   { query: "家门口有人吗帮我瞅瞅", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
   { query: "客厅有点暗", expect: ["smart_home.control_device"], topK: 3 },
   { query: "帮我瞅瞅小区门口的监控", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
-  { query: "下午三点记得喊我去拿快递", expect: ["reminder.plan", "calendar.create_task", "calendar.create_from_text", "care.rhythm_reminder"], topK: 3 },
+  { query: "下午三点记得喊我去拿快递", expect: ["calendar.create", "calendar.create", "calendar.create", "care.rhythm_reminder"], topK: 3 },
 ];
 
 type Match = { name: string };

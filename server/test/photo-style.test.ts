@@ -22,6 +22,7 @@ const { applyPhotoStyle, PHOTO_STYLES } = await import("../src/services/photo-st
 const { createPictureStylizeHandler } = await import("../src/tools/capability-modules/photo/handlers.js");
 const { extractMediaCards } = await import("../src/services/tool-result-processor.js");
 const { createPictureKit } = await import("@nextbot/picture");
+const { fakePictureRegistry } = await import("./helpers/fake-picture-registry.js");
 
 type PictureKit = import("@nextbot/picture").PictureKit;
 
@@ -50,7 +51,7 @@ test("stylize handler：apply 真实入库（tags 带风格与源）+ styles 列
   const kit: PictureKit = await createPictureKit({ rootDir: path.join(tmpDir, `kit-${Date.now()}`) });
   try {
     const { asset: src } = await kit.store.ingest(await samplePhoto(2), { fileName: "src.png" });
-    const handler = createPictureStylizeHandler(kit);
+    const handler = createPictureStylizeHandler(fakePictureRegistry(kit));
 
     const unknown = await handler({ action: "apply", photoId: "missing", style: "noir" }, {} as never);
     assert.equal((unknown as Record<string, unknown>).ok, false);

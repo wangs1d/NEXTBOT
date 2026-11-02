@@ -3,6 +3,7 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "nb_http.dart";
 
 /// 「它眼里的你」画像管理数据模型（GET /api/profile/manage）。
 class ProfileLineData {
@@ -129,7 +130,9 @@ class ProfileManageApi {
     try {
       final Uri uri = Uri.parse("$_baseUrl/api/profile/manage")
           .replace(queryParameters: <String, String>{"actorId": ApiConfig.effectiveActorId});
-      final http.Response res = await _client.get(uri).timeout(const Duration(seconds: 8));
+      final http.Response res = await _client
+          .get(uri, headers: NbHttp.headersFor(uri))
+          .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;
       final Map<String, dynamic> json =
           jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
@@ -153,7 +156,10 @@ class ProfileManageApi {
       final http.Response res = await _client
           .post(
             uri,
-            headers: const <String, String>{"Content-Type": "application/json"},
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              ...NbHttp.headersFor(uri),
+            },
             body: jsonEncode(<String, dynamic>{
               "actorId": ApiConfig.effectiveActorId,
               "op": op,

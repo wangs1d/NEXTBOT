@@ -12,7 +12,7 @@ import { resolveActorId } from "../../../agent/actor-id.js";
 import type { ToolContext } from "../../../tools/tool-registry.js";
 import type { BrowserResultLike, BrowserRunner } from "./browser-quote-source.js";
 
-/** 可见浏览器开页器（ShoppingBrowserExecutor 的结构子集）。 */
+/** 可见浏览器开页器（通用 BrowserRuntime 的结构子集）。 */
 export interface SharedPageOpener {
   canUseSharedBrowser(actorId: string): boolean;
   tryOpenSharedPage(

@@ -8,6 +8,7 @@ import "core/config/api_config.dart";
 import "core/services/account_session_store.dart";
 import "core/services/app_support_migration.dart";
 import "core/services/access_auth_api.dart";
+import "core/services/cloud_model_binding_store.dart";
 import "core/services/local_notification_service.dart";
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_login_page.dart";
@@ -78,6 +79,8 @@ class _MobileAppState extends State<MobileApp> {
     await AccountSessionStore.instance.load();
     // 设备凭据顺手加载（服务端开访问鉴权时 HTTP/WS 自动附带 Bearer token）
     await AccessCredentialStore.instance.load();
+    // 本机自有模型配置（首个 session.init 就要带上）
+    await CloudModelBindingStore.instance.load();
     final String? email = AccountSessionStore.instance.email;
     if (!mounted) return;
     setState(() {

@@ -130,33 +130,38 @@ class TravelTicketStore {
     return withTs;
   }
 
-  /** 按 ticketId 读票：内存未命中时惰性读磁盘 */
-  get(ticketId: string): StoredTravelTicket | null {
-    const cached = this.mem.get(ticketId);
-    if (cached) return cached;
-    try {
-      const raw = fs.readFileSync(this.ticketPath(ticketId), "utf8");
-      const parsed = JSON.parse(raw) as StoredTravelTicket;
-      if (parsed?.ticketId) {
-        this.mem.set(parsed.ticketId, parsed);
-        return parsed;
+  /** 按 ticketId 读票：内存未命中时惰性读磁盘。actorId 给出时校验归属
+   *  （旧票没有 actorId 字段，视作未认领，仍可读——迁移命令会补归属）。 */
+  get(ticketId: string, actorId?: string): StoredTravelTicket | null {
+    let ticket = this.mem.get(ticketId) ?? null;
+    if (!ticket) {
+      try {
+        const raw = fs.readFileSync(this.ticketPath(ticketId), "utf8");
+        const parsed = JSON.parse(raw) as StoredTravelTicket;
+        if (parsed?.ticketId) {
+          this.mem.set(parsed.ticketId, parsed);
+          ticket = parsed;
+        }
+      } catch {
+        // 不存在/损坏 → null
       }
-    } catch {
-      // 不存在/损坏 → null
     }
-    return null;
+    if (!ticket) return null;
+    if (actorId && ticket.actorId && ticket.actorId !== actorId) return null;
+    return ticket;
   }
 
   /**
    * 去重匹配：同一类型 + 相同主码（航班号/车次/酒店确认号）+ 相同出发/入住时间
    * 视为同一张票（短信可能重复收到、邮件转发多次）。
    */
-  findByCode(type: TicketType, code: string, departTime?: string): StoredTravelTicket | null {
+  findByCode(type: TicketType, code: string, departTime?: string, actorId?: string): StoredTravelTicket | null {
     const key = code.trim().toUpperCase();
     if (!key) return null;
     const timeKey = (departTime ?? "").replace(/[^0-9]/g, "");
     let best: StoredTravelTicket | null = null;
     for (const t of this.listAll()) {
+      if (actorId && t.actorId && t.actorId !== actorId) continue;
       if (t.type !== type) continue;
       if ((t.code ?? "").trim().toUpperCase() !== key) continue;
       if (timeKey) {
@@ -172,7 +177,7 @@ class TravelTicketStore {
    * 未过期票务列表（出发/入住时间升序，最近的在前）。
    * 过期判定：机票/火车票按出发时间，酒店按退房日期；无时间的保留（人工确认）。
    */
-  listUpcoming(limit = 10): StoredTravelTicket[] {
+  listUpcoming(limit = 10, actorId?: string): StoredTravelTicket[] {
     const now = Date.now();
     const withTime = (t: StoredTravelTicket): number | null => {
       const raw = t.departTime ?? t.checkInDate ?? "";
@@ -181,6 +186,7 @@ class TravelTicketStore {
       return Number.isNaN(ts) ? null : ts;
     };
     return this.listAll()
+      .filter((t) => !actorId || !t.actorId || t.actorId === actorId)
       .map((t) => ({ t, ts: withTime(t) }))
       .filter(({ t, ts }) => {
         if (ts == null) return true; // 无时间 → 保留待人工确认
@@ -200,13 +206,14 @@ class TravelTicketStore {
    *   到达时间存在，且 到达 ≥ now-2h（落地后 2h 内仍可见），且
    *   出发时间（如有）≤ now+3h（3 小时内会出发/已出发）。
    */
-  listActiveTrips(now = Date.now(), limit = 20): StoredTravelTicket[] {
+  listActiveTrips(now = Date.now(), limit = 20, actorId?: string): StoredTravelTicket[] {
     const parseTs = (raw?: string): number | null => {
       if (!raw) return null;
       const ts = Date.parse(raw.replace(" ", "T"));
       return Number.isNaN(ts) ? null : ts;
     };
     return this.listAll()
+      .filter((t) => !actorId || !t.actorId || t.actorId === actorId)
       .filter((t) => t.type !== "hotel")
       .map((t) => ({ t, departTs: parseTs(t.departTime), arriveTs: parseTs(t.arriveTime) }))
       .filter(({ departTs, arriveTs }) => {

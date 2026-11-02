@@ -42,7 +42,10 @@ export interface TravelBudgetAlert {
 }
 
 export type TravelBudgetGuardDeps = {
-  travelPlanStore: { get: (planId: string) => StoredTravelPlan | null; listSummaries: (limit?: number) => Array<{ planId: string; sessionId?: string }> };
+  travelPlanStore: {
+    getForActor: (actorId: string, planId: string) => StoredTravelPlan | null;
+    listSummariesForActor: (actorId: string, limit?: number) => Array<{ planId: string }>;
+  };
   bookingOrderStore: Pick<BookingOrderStore, "listByActor">;
 };
 
@@ -51,17 +54,17 @@ export class TravelBudgetGuardService {
 
   /**
    * 检查用户今日是否旅行超支。无进行中行程 / 无预算档 / 未超支 → null。
-   * 供晚间摘要（EveningDigestDeps.travelBudgetProvider）按 sessionId 取数。
+   * 供晚间摘要（EveningDigestDeps.travelBudgetProvider）按 actorId 取数。
    */
-  async checkBudget(sessionId: string, now = new Date()): Promise<TravelBudgetAlert | null> {
-    if (!sessionId) return null;
+  async checkBudget(actorId: string, now = new Date()): Promise<TravelBudgetAlert | null> {
+    if (!actorId) return null;
     const todayKey = localDateKey(now);
-    const plan = this.findActivePlan(sessionId, todayKey);
+    const plan = this.findActivePlan(actorId, todayKey);
     if (!plan) return null;
     const tier = plan.budgetTier;
     if (!tier) return null;
     const dailyCap = BUDGET_DAILY_CAP_CNY[tier];
-    const spentToday = await this.sumTripSpendToday(sessionId, todayKey);
+    const spentToday = await this.sumTripSpendToday(actorId, todayKey);
     if (spentToday <= dailyCap) return null;
     return {
       destination: plan.destination,
@@ -73,12 +76,11 @@ export class TravelBudgetGuardService {
     };
   }
 
-  /** 今日进行中的行程：sessionId 匹配 + 日期落在行程区间内，取最新保存的一份 */
-  private findActivePlan(sessionId: string, todayKey: string): StoredTravelPlan | null {
+  /** 今日进行中的行程：本 actor 名下 + 日期落在行程区间内，取最新保存的一份 */
+  private findActivePlan(actorId: string, todayKey: string): StoredTravelPlan | null {
     let best: StoredTravelPlan | null = null;
-    for (const s of this.deps.travelPlanStore.listSummaries(50)) {
-      if (!s.sessionId || s.sessionId !== sessionId) continue;
-      const plan = this.deps.travelPlanStore.get(s.planId);
+    for (const s of this.deps.travelPlanStore.listSummariesForActor(actorId, 50)) {
+      const plan = this.deps.travelPlanStore.getForActor(actorId, s.planId);
       if (!plan?.startDate || !plan.endDate) continue;
       if (plan.startDate <= todayKey && todayKey <= plan.endDate) {
         if (!best || (plan.createdAt ?? 0) > (best.createdAt ?? 0)) best = plan;
@@ -88,9 +90,9 @@ export class TravelBudgetGuardService {
   }
 
   /** 当日旅行消费：逐单过滤旅行域再合计（sumAmountOnDate 不分域，这里自算） */
-  private async sumTripSpendToday(sessionId: string, todayKey: string): Promise<number> {
+  private async sumTripSpendToday(actorId: string, todayKey: string): Promise<number> {
     try {
-      const orders = await this.deps.bookingOrderStore.listByActor(sessionId, {
+      const orders = await this.deps.bookingOrderStore.listByActor(actorId, {
         includeFinished: true,
         limit: 200,
       });

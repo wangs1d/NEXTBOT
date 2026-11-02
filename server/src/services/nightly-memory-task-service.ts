@@ -654,9 +654,9 @@ export class NightlyMemoryTaskService {
     | null = null;
 
   /**
-   * 画像批抽取（每 actor 最多 1 次 LLM）：读 turn-wal 自 checkpoint 以来的
-   * profileCandidate 全文候选 → 批量 extractUnified → 确定性落位 → 推进
-   * checkpoint。仅 batch 调度模式生效；无候选 actor 零成本跳过。
+   * 画像批抽取（每 actor 每晚最多 1 次 LLM）：读 turn-wal 自 checkpoint 以来的
+   * 轮次（候选优先，预算内非候选补位）→ 批量 extractUnified → 确定性落位 →
+   * 推进 checkpoint。仅 batch 调度模式生效；自 checkpoint 起没有新轮次才零成本跳过。
    */
   private async consolidateUserProfiles(): Promise<void> {
     if (!isProfileWriteBatchMode()) return;
@@ -664,10 +664,11 @@ export class NightlyMemoryTaskService {
     for (const actorId of this.getAllActorIds()) {
       try {
         const s = await consolidate(actorId);
-        if (s.candidates > 0) {
+        if (s.processed > 0 || s.topUpProcessed > 0) {
           console.log(
             `[NightlyMemory] 画像批抽取: actor=${actorId} 候选=${s.candidates} 处理=${s.processed} ` +
-              `ops=${s.opsCount} applied=${s.applied} checkpoint=${s.checkpointAdvanced ? "已推进" : "未推进"}` +
+              `补位=${s.topUpProcessed} ops=${s.opsCount} 旁路产物=${s.sideChannels} ` +
+              `applied=${s.applied} checkpoint=${s.checkpointAdvanced ? "已推进" : "未推进"}` +
               (s.extractionFailed ? "（抽取失败，下晚重试）" : ""),
           );
         }

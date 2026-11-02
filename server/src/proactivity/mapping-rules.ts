@@ -108,7 +108,7 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
         const earlyMin = 60;
         if (min <= briefMin && !announced.has(`brief:${next.runAt}`)) {
           announced.set(`brief:${next.runAt}`, Date.now());
-          const memoryLines = services.recallMemory ? await services.recallMemory(title, 2) : [];
+          const memoryLines = services.recallMemory ? await services.recallMemory(ctx.actorId, title, 2) : [];
           out.push({
             kind: "meeting_soon",
             urgency: "alert",
@@ -342,10 +342,10 @@ export function buildBoardRules(services: RuleServices): BoardRule[] {
         const body = renderDigestCard({
           slot: "morning",
           tasks,
-          weather: services.weatherLine?.() ?? null,
-          unread: services.unreadSenders?.() ?? [],
-          interests: services.interestLines?.() ?? [],
-          goals: (services.readyGoals?.() ?? []).map((g) => g.title),
+          weather: services.weatherLine?.(ctx.actorId) ?? null,
+          unread: services.unreadSenders?.(ctx.actorId) ?? [],
+          interests: services.interestLines?.(ctx.actorId) ?? [],
+          goals: (services.readyGoals?.(ctx.actorId) ?? []).map((g) => g.title),
         });
         return [
           {

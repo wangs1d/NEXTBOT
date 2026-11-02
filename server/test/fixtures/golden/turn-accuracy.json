@@ -9,17 +9,17 @@
     { "id": "chat_fatigue", "category": "chat", "text": "今天有点累，不想干活", "expectToolGroups": [], "forbidTools": [] },
     { "id": "chat_identity", "category": "chat", "text": "你是谁啊", "expectToolGroups": [], "forbidTools": [] },
     { "id": "chat_knowledge", "category": "chat", "text": "为什么天空是蓝色的", "expectToolGroups": [], "forbidTools": [] },
-    { "id": "chat_confirm_reminder", "category": "chat", "text": "你会提醒我吗", "expectToolGroups": [], "forbidTools": ["reminder.plan", "calendar.create_from_text", "calendar.create_task"] },
-    { "id": "chat_negation", "category": "chat", "text": "以后别提醒我开会了", "expectToolGroups": [], "allowTools": ["calendar.list_tasks", "calendar.delete_task", "calendar.cancel_task", "reminder.cancel", "task.status"], "forbidTools": ["reminder.plan", "calendar.create_from_text", "calendar.create_task"] },
+    { "id": "chat_confirm_reminder", "category": "chat", "text": "你会提醒我吗", "expectToolGroups": [], "forbidTools": ["calendar.create"] },
+    { "id": "chat_negation", "category": "chat", "text": "以后别提醒我开会了", "expectToolGroups": [], "allowTools": ["calendar.list_tasks", "calendar.delete_task", "calendar.cancel_task", "reminder.cancel", "task.status"], "forbidTools": ["calendar.create"] },
     { "id": "clock_injected", "category": "chat", "text": "现在几点了", "expectToolGroups": [], "forbidTools": ["clock.get_current_time"] },
     { "id": "chat_after_weather", "category": "chat", "text": "好像去旅游啊", "preturns": ["兴义天气怎么样"], "expectToolGroups": [], "forbidTools": ["weather.get_local", "search_web"], "description": "跨轮污染：上一轮刚查过天气，本轮顺着话题感慨不查" },
     { "id": "chat_topic_switch_after_tool", "category": "chat", "text": "你说我是不是该养只猫", "preturns": ["明天会不会下雨"], "expectToolGroups": [], "forbidTools": ["weather.get_local", "search_web"], "description": "跨轮污染：上一轮工具主题（天气）不外溢到本轮新话题（观点闲聊）" },
 
     { "id": "weather_tomorrow", "category": "weather", "text": "明天天气怎么样", "expectToolGroups": [["weather.get_local"]], "allowTools": ["clock.get_user_location"], "forbidTools": ["search_web"] },
     { "id": "weather_rain", "category": "weather", "text": "帮我查一下明天会不会下雨", "expectToolGroups": [["weather.get_local"]], "allowTools": ["clock.get_user_location"], "forbidTools": ["search_web"] },
-    { "id": "reminder_meeting", "category": "reminder", "text": "明天早上9点提醒我开会", "expectToolGroups": [["reminder.plan", "calendar.create_from_text", "calendar.create_task"]], "forbidTools": ["search_web"] },
-    { "id": "reminder_alarm", "category": "reminder", "text": "帮我设个晚上8点的闹钟", "expectToolGroups": [["reminder.plan", "calendar.create_from_text", "calendar.create_task"]], "forbidTools": ["search_web"] },
-    { "id": "reminder_weekly", "category": "reminder", "text": "后天下午3点提醒我交周报", "expectToolGroups": [["reminder.plan", "calendar.create_from_text", "calendar.create_task"]], "forbidTools": ["search_web"] },
+    { "id": "reminder_meeting", "category": "reminder", "text": "明天早上9点提醒我开会", "expectToolGroups": [["calendar.create"]], "forbidTools": ["search_web"] },
+    { "id": "reminder_alarm", "category": "reminder", "text": "帮我设个晚上8点的闹钟", "expectToolGroups": [["calendar.create"]], "forbidTools": ["search_web"] },
+    { "id": "reminder_weekly", "category": "reminder", "text": "后天下午3点提醒我交周报", "expectToolGroups": [["calendar.create"]], "forbidTools": ["search_web"] },
 
     { "id": "photo_cheng", "category": "media", "text": "帮我搜索成龙最近的照片", "expectToolGroups": [["search_images", "search_images_batch"]], "forbidTools": ["search_web"] },
     { "id": "photo_liu", "category": "media", "text": "来几张刘亦菲的照片", "expectToolGroups": [["search_images", "search_images_batch"]], "forbidTools": ["search_web"] },
@@ -36,7 +36,7 @@
       "id": "multi_step_weather_reminder",
       "category": "multi_step",
       "text": "先帮我查一下明天兴义的天气，然后再提醒我晚上8点收衣服",
-      "expectToolGroups": [["weather.get_local"], ["reminder.plan", "calendar.create_from_text"]],
+      "expectToolGroups": [["weather.get_local"], ["calendar.create"]],
       "forbidTools": []
     }
   ]

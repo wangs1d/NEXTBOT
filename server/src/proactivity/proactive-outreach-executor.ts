@@ -16,14 +16,9 @@ import type { SynapseBus } from "../brain/synapse-bus.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import type { ChatToolExecutionContext, ExternalChatProvider } from "../external-model/types.js";
 import { StreamSegmenter } from "../agent/stream-segmenter.js";
-import {
-  loadAgentStyleProfile,
-  validateStyleConsistency,
-} from "../agent/agent-style-profile.js";
 import { resolvePrimaryChatSessionId } from "../agent/master-chat-session.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import type { ToolContext, ToolRegistry } from "../tools/tool-registry.js";
-import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { isTurnAsideEnabled } from "./turn-aside-queue.js";
 import type { SpeechHub } from "./speech-express.js";
 import {
@@ -124,7 +119,6 @@ export type ProactiveOutreachDeps = {
   brainCenter: () => BrainCenter | null;
   synapseBus: () => SynapseBus | null;
   proactiveOutbound: ProactiveOutboundMessageService;
-  agentMemorySyncService: AgentMemorySyncService;
   /**
    * 顺嘴搭车队列（2026-10-01 P1）：low 级主动消息挂起等用户下一轮对话织入
    * 回复末尾（rhythm 关怀候选等）。队列拒绝/关闭时走原即时推送路径。
@@ -136,8 +130,8 @@ export type ProactiveOutreachDeps = {
    */
   isActorOnline?: (actorId: string) => boolean;
   /**
-   * 统一开口出口（2026-10-26）：full 档 system 块装配（人格·静态 + 语感 + 通用
-   * 纪律 + 画像）与用量记账归 SpeechHub 单点——本执行器保留工具循环、择时与投递。
+   * 统一开口出口（2026-10-26）：full 档 system 块装配（人格正文 + 通用纪律 +
+   * 画像）与用量记账归 SpeechHub 单点——本执行器保留工具循环、择时与投递。
    */
   speech: SpeechHub;
 };
@@ -145,7 +139,7 @@ export type ProactiveOutreachDeps = {
 export function createProactiveOutreachExecutor(
   deps: ProactiveOutreachDeps,
 ): (decision: BrainDecision, signal: BrainSignalInput) => Promise<void> {
-  const { toolRegistry, proactiveOutbound, agentMemorySyncService } = deps;
+  const { toolRegistry, proactiveOutbound } = deps;
 
   /** C2: 构建主动话术 prompt，注入最近主动话术记忆 + 当前聊天话题摘要。 */
   async function buildProactivePrompt(
@@ -248,9 +242,6 @@ export function createProactiveOutreachExecutor(
 
     const brainCenter = deps.brainCenter();
     const externalChat = deps.externalChat();
-    // Task 5: 加载 Agent 自身风格指纹（仅用于话术风格一致性校验；system 块装配
-    // 已单点化到 SpeechHub——人格·静态/语感/纪律/画像由其统一注入）
-    const styleProfile = loadAgentStyleProfile(agentMemorySyncService);
 
     // 1. 调 LLM 生成话术（启用 function calling，LLM 可自主调工具做事）
     let message = "";
@@ -263,6 +254,7 @@ export function createProactiveOutreachExecutor(
           agentAccessMode: "full",
         };
         const toolExecCtx: ChatToolExecutionContext = {
+          actorId: signal.actorId,
           executeTool: (name, args) => toolRegistry.execute(name, args, toolContext),
         };
         await externalChat.streamCompletion(
@@ -289,15 +281,6 @@ export function createProactiveOutreachExecutor(
         );
         // full 档用量记账（与 light 档共享日熔断池）
         deps.speech.recordUsage();
-        // Task 5: LLM 话术生成后做风格一致性校验（非阻塞，仅记录警告日志，不修改输出内容）
-        if (message.trim()) {
-          const consistency = validateStyleConsistency(message, styleProfile);
-          if (!consistency.passed) {
-            console.log(
-              `[ProactiveOutreach] 话术风格偏离警告: ${consistency.reason}（偏离度=${consistency.deviation}）话术="${message.slice(0, 50)}..."`,
-            );
-          }
-        }
       } catch (err) {
         console.log(`[ProactiveOutreach] LLM 话术生成失败，使用模板兜底: ${err}`);
         message = buildFallbackMessage(signal);

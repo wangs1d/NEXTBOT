@@ -9,10 +9,12 @@
  *   热层  = prompt 状态快照（buildTravelStatePrompt，一行目的地/日期）
  *   冷层  = 本存储的完整明细（get-itinerary 按天粒度按需读取）
  *
- * 存储：data/travel-plans/{planId}.json 单文件单行程（planId 含时间戳唯一），
+ * 存储：data/travel-plans/{actorKey}/{planId}.json（按 actor 分区，单文件单行程），
  * 进程内 Map 索引 + 惰性磁盘读；写入同步刷盘（行程生成是低频事件）。
+ * actorKey = sanitizeActorKey(actorId)；actorId 缺省的行程归入 UNASSIGNED_BUCKET。
  */
 import { getDataDir } from "../../config/data-dir.js";
+import { sanitizeActorKey } from "../../agentic-memory/actor-key.js";
 import fs from "node:fs";
 import path from "node:path";
 
@@ -90,6 +92,8 @@ export interface StoredDayItem {
 export interface StoredTravelPlan {
   /** 行程 ID（travel-planning-service 生成，形如 plan-1788076649218） */
   planId: string;
+  /** 归属用户（actorId，真实值为裸邮箱）；磁盘按 actor 分区，跨 actor 访问被拒 */
+  actorId: string;
   /** 数据可信度（real/knowledge/synthetic），前端据此展示数据来源角标 */
   dataQuality?: string;
   destination: string;
@@ -234,6 +238,9 @@ export interface TravelTransferSegment {
 /** 行程摘要（内存索引条目，列表查询不再触达磁盘与全量 JSON.parse） */
 interface PlanSummaryEntry {
   planId: string;
+  /** 归属 actorId 与其目录净化键（列表按 actor 过滤、prune 按 actor 分组） */
+  actorId?: string;
+  actorKey: string;
   destination: string;
   title: string;
   startDate: string;
@@ -268,13 +275,23 @@ class TravelPlanStore {
     this.ensureDir(this.root);
   }
 
-  /** 保存/覆盖行程（同步落盘；planId 冲突时后写覆盖）。version 每次保存自增。 */
+  /** actor → 目录名（复用仓库统一净化规则；空 actorId 不落任何桶） */
+  private actorBucket(actorId?: string): string {
+    return sanitizeActorKey(actorId ?? "");
+  }
+
+  /** 保存/覆盖行程（同步落盘到本 actor 目录；planId 冲突时后写覆盖）。version 每次保存自增。 */
   save(plan: StoredTravelPlan): void {
     if (!plan.planId) return;
+    if (!this.actorBucket(plan.actorId)) {
+      console.error("[TravelPlanStore] 拒绝写入：行程缺少归属 actorId");
+      return;
+    }
     // 磁盘为权威源：内存未命中时惰性读盘，保证版本号跨重启连续
     const prev = this.get(plan.planId);
     const withTs: StoredTravelPlan = {
       ...plan,
+      actorId: plan.actorId ?? prev?.actorId,
       createdAt: plan.createdAt ?? Date.now(),
       version: (prev?.version ?? 0) + 1,
     };
@@ -283,11 +300,7 @@ class TravelPlanStore {
     plan.version = withTs.version;
     this.mem.set(plan.planId, withTs);
     try {
-      fs.writeFileSync(
-        this.planPath(plan.planId),
-        JSON.stringify(withTs),
-        "utf8",
-      );
+      this.writePlan(withTs);
     } catch (err) {
       console.error("[TravelPlanStore] save failed:", err);
     }
@@ -295,21 +308,19 @@ class TravelPlanStore {
     this.prune();
   }
 
-  /** 按 planId 读行程：内存未命中时惰性读磁盘 */
+  /** 按 planId 读行程（全局 planId 索引，供服务内部按 ID 回查） */
   get(planId: string): StoredTravelPlan | null {
     const cached = this.mem.get(planId);
     if (cached) return cached;
-    try {
-      const raw = fs.readFileSync(this.planPath(planId), "utf8");
-      const parsed = JSON.parse(raw) as StoredTravelPlan;
-      if (parsed?.planId) {
-        this.mem.set(parsed.planId, parsed);
-        return parsed;
-      }
-    } catch {
-      // 不存在/损坏 → null
-    }
-    return null;
+    this.ensureSummaryIndex();
+    return this.mem.get(planId) ?? null;
+  }
+
+  /** 按 actor 归属读行程：actorId 与记录不一致（含缺省桶）一律返回 null */
+  getForActor(actorId: string, planId: string): StoredTravelPlan | null {
+    const plan = this.get(planId);
+    if (!plan) return null;
+    return this.actorBucket(plan.actorId) === this.actorBucket(actorId) ? plan : null;
   }
 
   /**
@@ -326,20 +337,33 @@ class TravelPlanStore {
     this.mem.set(planId, plan);
     this.summaryIndex?.set(planId, this.buildSummary(plan));
     try {
-      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+      this.writePlan(plan);
     } catch (err) {
       console.error("[TravelPlanStore] updateProgress failed:", err);
     }
     return true;
   }
 
+  /** 按 actor 归属更新进度：非本 actor 返回 false（路由据此 404） */
+  updateProgressForActor(actorId: string, planId: string, day: number, stop: number): boolean {
+    if (!this.getForActor(actorId, planId)) return false;
+    return this.updateProgress(planId, day, stop);
+  }
+
   /** 按目的地名找最近一份行程（大小写/首尾空格不敏感，摘要索引上匹配后按 planId 取全量） */
   findByDestination(destination: string): StoredTravelPlan | null {
+    return this.findByDestinationForActor(null, destination);
+  }
+
+  /** 按 actor 归属 + 目的地名找最近一份行程；actorId 为空时退化为全局查询（内部服务用） */
+  findByDestinationForActor(actorId: string | null, destination: string): StoredTravelPlan | null {
     const key = destination.trim().toLowerCase();
     if (!key) return null;
+    const bucket = actorId == null ? null : this.actorBucket(actorId);
     let bestId: string | null = null;
     let bestTs = -1;
     for (const s of this.ensureSummaryIndex().values()) {
+      if (bucket != null && s.actorKey !== bucket) continue;
       if ((s.destination ?? "").trim().toLowerCase() === key && s.createdAt > bestTs) {
         bestTs = s.createdAt;
         bestId = s.planId;
@@ -361,7 +385,7 @@ class TravelPlanStore {
     plan.approvedAt = Date.now();
     this.mem.set(planId, plan);
     try {
-      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+      fs.writeFileSync(this.planPath(planId, plan.actorId), JSON.stringify(plan), "utf8");
     } catch {
       /* 落盘失败不影响本轮定稿判定 */
     }
@@ -374,7 +398,16 @@ class TravelPlanStore {
    * 拦住用户今天单独订酒店。
    */
   findRecentForDestination(destination: string, withinMs = 2 * 60 * 60 * 1000): StoredTravelPlan | null {
-    const plan = this.findByDestination(destination);
+    return this.findRecentForDestinationForActor(null, destination, withinMs);
+  }
+
+  /** 同 {@link findRecentForDestination}，但只在 actor 归属内查找 */
+  findRecentForDestinationForActor(
+    actorId: string | null,
+    destination: string,
+    withinMs = 2 * 60 * 60 * 1000,
+  ): StoredTravelPlan | null {
+    const plan = this.findByDestinationForActor(actorId, destination);
     if (!plan?.createdAt) return null;
     return Date.now() - plan.createdAt <= withinMs ? plan : null;
   }
@@ -410,7 +443,7 @@ class TravelPlanStore {
     }
     this.mem.set(planId, plan);
     try {
-      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+      fs.writeFileSync(this.planPath(planId, plan.actorId), JSON.stringify(plan), "utf8");
     } catch (err) {
       console.error("[TravelPlanStore] setTransferPickupState failed:", err);
     }
@@ -429,7 +462,7 @@ class TravelPlanStore {
     if (!dup) plan.visits.push(visit);
     this.mem.set(planId, plan);
     try {
-      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+      fs.writeFileSync(this.planPath(planId, plan.actorId), JSON.stringify(plan), "utf8");
     } catch (err) {
       console.error("[TravelPlanStore] recordVisit failed:", err);
     }
@@ -447,7 +480,7 @@ class TravelPlanStore {
     if (videos.length > 0) item.videos = videos.slice(0, 1); // 每站只留 1 条
     this.mem.set(planId, plan);
     try {
-      fs.writeFileSync(this.planPath(planId), JSON.stringify(plan), "utf8");
+      fs.writeFileSync(this.planPath(planId, plan.actorId), JSON.stringify(plan), "utf8");
     } catch (err) {
       console.error("[TravelPlanStore] setStopVideos failed:", err);
     }
@@ -459,58 +492,50 @@ class TravelPlanStore {
    * 归档页「删除行程」用；不存在返回 false。
    */
   remove(planId: string): boolean {
-    const existed = this.get(planId) != null;
+    const existed = this.get(planId);
+    if (!existed) return false;
     this.mem.delete(planId);
     this.summaryIndex?.delete(planId);
-    if (!existed) return false;
     try {
-      fs.unlinkSync(this.planPath(planId));
+      fs.unlinkSync(this.planPath(planId, existed.actorId));
     } catch {
       // 文件已在（prune 竞态等）→ 视为已删除
     }
     return true;
   }
 
+  /** 按 actor 归属删除行程：非本 actor 返回 false（路由据此 404） */
+  removeForActor(actorId: string, planId: string): boolean {
+    if (!this.getForActor(actorId, planId)) return false;
+    return this.remove(planId);
+  }
+
   /**
-   * 全部行程摘要（新→旧），供状态快照与列表查询。
+   * 全部行程摘要（新→旧），供状态快照与内部列表查询。
    * 只读内存摘要索引：save/prune 增量维护，启动后首次调用才扫一次磁盘建索引。
    */
-  listSummaries(limit = 5): Array<{
-    planId: string;
-    destination: string;
-    title: string;
-    startDate: string;
-    endDate: string;
-    dayCount: number;
-    stopCount: number;
-    progress?: { day: number; stop: number };
-    totalCost?: number;
-    coverImage?: string;
-    sessionId?: string;
-    createdAt: number;
-  }> {
+  listSummaries(limit = 5): ReturnType<typeof summaryDto>[] {
     return [...this.ensureSummaryIndex().values()]
       .sort((a, b) => b.createdAt - a.createdAt)
       .slice(0, Math.max(1, limit))
-      .map((s) => ({
-        planId: s.planId,
-        destination: s.destination,
-        title: s.title,
-        startDate: s.startDate,
-        endDate: s.endDate,
-        dayCount: s.dayCount,
-        stopCount: s.stopCount,
-        ...(s.progress ? { progress: { ...s.progress } } : {}),
-        ...(s.totalCost != null ? { totalCost: s.totalCost } : {}),
-        ...(s.coverImage ? { coverImage: s.coverImage } : {}),
-        ...(s.sessionId ? { sessionId: s.sessionId } : {}),
-        createdAt: s.createdAt,
-      }));
+      .map(summaryDto);
+  }
+
+  /** 本 actor 的行程摘要（新→旧）：只返回归属匹配的行程，跨 actor 不可见 */
+  listSummariesForActor(actorId: string, limit = 5): ReturnType<typeof summaryDto>[] {
+    const bucket = this.actorBucket(actorId);
+    return [...this.ensureSummaryIndex().values()]
+      .filter((s) => s.actorKey === bucket)
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .slice(0, Math.max(1, limit))
+      .map(summaryDto);
   }
 
   private buildSummary(plan: StoredTravelPlan): PlanSummaryEntry {
     return {
       planId: plan.planId,
+      actorId: plan.actorId,
+      actorKey: this.actorBucket(plan.actorId),
       destination: plan.destination ?? "",
       title: plan.title ?? "",
       startDate: plan.startDate ?? "",
@@ -528,15 +553,31 @@ class TravelPlanStore {
     };
   }
 
-  /** 摘要索引懒构建：磁盘文件逐个经 get() 读一次（并入 mem 缓存），此后不再触盘 */
+  /**
+   * 摘要索引懒构建：扫描各 actor 子目录读一次（并入 mem 缓存），此后不再触盘。
+   * 扁平 root 下的旧文件（迁移前遗留）不在扫描范围，既不读也不删。
+   */
   private ensureSummaryIndex(): Map<string, PlanSummaryEntry> {
     if (this.summaryIndex) return this.summaryIndex;
     const idx = new Map<string, PlanSummaryEntry>();
     try {
-      for (const f of fs.readdirSync(this.root)) {
-        if (!f.endsWith(".json")) continue;
-        const plan = this.get(f.replace(/\.json$/, ""));
-        if (plan) idx.set(plan.planId, this.buildSummary(plan));
+      for (const entry of fs.readdirSync(this.root, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const dirPath = path.join(this.root, entry.name);
+        let files: string[] = [];
+        try {
+          files = fs.readdirSync(dirPath);
+        } catch {
+          continue;
+        }
+        for (const f of files) {
+          if (!f.endsWith(".json")) continue;
+          const plan = this.readPlanFile(path.join(dirPath, f));
+          if (plan) {
+            this.mem.set(plan.planId, plan);
+            idx.set(plan.planId, this.buildSummary(plan));
+          }
+        }
       }
     } catch {
       // 目录不可读 → 只用内存
@@ -546,24 +587,48 @@ class TravelPlanStore {
     return idx;
   }
 
-  /** 超限清理：只删磁盘文件（保留最近 MAX_PLANS 份），同步维护摘要索引 */
+  private readPlanFile(file: string): StoredTravelPlan | null {
+    try {
+      const parsed = JSON.parse(fs.readFileSync(file, "utf8")) as StoredTravelPlan;
+      return parsed?.planId ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 超限清理：按 actor 各自计数，每个 actor 只保留最近 MAX_PLANS 份 */
   private prune(): void {
-    const all = [...this.ensureSummaryIndex().values()].sort((a, b) => b.createdAt - a.createdAt);
-    for (const s of all.slice(MAX_PLANS)) {
-      this.mem.delete(s.planId);
-      this.summaryIndex?.delete(s.planId);
-      try {
-        fs.unlinkSync(this.planPath(s.planId));
-      } catch {
-        // ignore
+    const byActor = new Map<string, PlanSummaryEntry[]>();
+    for (const s of this.ensureSummaryIndex().values()) {
+      const arr = byActor.get(s.actorKey) ?? [];
+      arr.push(s);
+      byActor.set(s.actorKey, arr);
+    }
+    for (const arr of byActor.values()) {
+      arr.sort((a, b) => b.createdAt - a.createdAt);
+      for (const s of arr.slice(MAX_PLANS)) {
+        this.mem.delete(s.planId);
+        this.summaryIndex?.delete(s.planId);
+        try {
+          fs.unlinkSync(this.planPath(s.planId, s.actorId));
+        } catch {
+          // ignore
+        }
       }
     }
   }
 
-  private planPath(planId: string): string {
+  private planPath(planId: string, actorId?: string): string {
     // planId 由服务生成（plan-<ts>），仍做一层文件名净化防路径注入
     const safe = planId.replace(/[^a-zA-Z0-9_-]/g, "").slice(0, 64);
-    return path.join(this.root, `${safe || "plan"}.json`);
+    return path.join(this.root, this.actorBucket(actorId), `${safe || "plan"}.json`);
+  }
+
+  /** 落盘到本 actor 子目录（写前确保目录存在） */
+  private writePlan(plan: StoredTravelPlan): void {
+    const file = this.planPath(plan.planId, plan.actorId);
+    this.ensureDir(path.dirname(file));
+    fs.writeFileSync(file, JSON.stringify(plan), "utf8");
   }
 
   private ensureDir(dir: string): void {
@@ -573,6 +638,24 @@ class TravelPlanStore {
       // ignore
     }
   }
+}
+
+/** 摘要索引条目 → 对外 DTO（列表端点/内部快照共用形状） */
+function summaryDto(s: PlanSummaryEntry) {
+  return {
+    planId: s.planId,
+    destination: s.destination,
+    title: s.title,
+    startDate: s.startDate,
+    endDate: s.endDate,
+    dayCount: s.dayCount,
+    stopCount: s.stopCount,
+    ...(s.progress ? { progress: { ...s.progress } } : {}),
+    ...(s.totalCost != null ? { totalCost: s.totalCost } : {}),
+    ...(s.coverImage ? { coverImage: s.coverImage } : {}),
+    ...(s.sessionId ? { sessionId: s.sessionId } : {}),
+    createdAt: s.createdAt,
+  };
 }
 
 export const travelPlanStore = new TravelPlanStore();

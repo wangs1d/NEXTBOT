@@ -7,16 +7,20 @@ import "package:url_launcher/url_launcher.dart";
 
 import "../core/config/api_config.dart";
 import "../core/services/access_auth_api.dart";
+import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/model_api_tester.dart";
+import "../features/settings/access_pairing_card.dart";
 import "mobile_theme.dart";
 
 /// 手机端「服务接入」页（内测 byok）。
 ///
-/// 服务端不代充模型/语音额度：用户在此自行填 API Key，经
-/// PUT /api/service-config 持久化到服务端 data/service-config.json 并
-/// 即时热生效（主对话 provider 热替换、TTS 客户端按密钥重建，无需重启）。
-/// 已接入的密钥/授权码由 GET 回显 keyValue 回填进输入框，默认打码显示
-/// （眼睛钮显隐）；状态角标仍只带尾号（如 ****ab12）。
+/// 服务端不代充模型/语音额度：用户在此自行填 API Key。单机形态经
+/// PUT /api/service-config 持久化到服务端（非密钥字段进 data/service-config.json，
+/// 密钥进加密仓）并即时热生效（主对话 provider 热替换、TTS 客户端按密钥重建，无需重启）；
+/// 云端多租户形态（GET 回 mode=session-byok）由本机保存三元组、随 WebSocket
+/// session.init 上送，服务端按用户加密落盘一份（离线期间的主动轮次要用用户自己的 key）。
+/// 服务端从不下发完整密钥：GET 只回脱敏尾号，输入框不回填旧值——留空即沿用已存密钥，
+/// 要换就重新填一次（状态角标带尾号，如 ****ab12）。
 ///
 /// - 模型服务：从 /api/model-providers 目录选服务商（自动带出网关/默认模型），
 ///   或选「自定义」手填 OpenAI 兼容网关地址 + 模型名 + API Key
@@ -50,13 +54,16 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   /// TTS 提供商（minimax=独立 Key / openai=复用模型服务 Key）。
   String _ttsProvider = "minimax";
 
-  /// 已配置状态（GET /api/service-config 回显；密钥只含尾号）。
+  /// 已配置状态（GET /api/service-config 回显；密钥只含尾号，授权码连尾号都不回）。
   bool _modelConfigured = false;
   String? _modelKeyTail;
   String? _ttsKeyTail;
   bool _ttsConfigured = false;
-  String? _mailKeyTail;
   bool _mailConfigured = false;
+
+  /// 云端多租户模式（mode=session-byok）：模型 Key 只存本机、随连接上送，
+  /// 服务端不接受全站写入（PUT 返回 409），表单以本机 CloudModelBindingStore 为准。
+  bool _sessionByok = false;
 
   bool _savingModel = false;
   bool _savingTts = false;
@@ -108,16 +115,26 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         ...AccessCredentialStore.instance.authHeaders,
       };
 
+  /// 带登录主体的服务配置地址：邮箱/密钥状态按 actor 隔离，未开周界鉴权（单机装机）
+  /// 时这个 query 就是服务端唯一的身份来源。
+  Uri _authed(String path) => Uri.parse("${ApiConfig.httpBase}$path")
+      .replace(queryParameters: ApiConfig.accountAuthQuery);
+
+  /// 脱敏尾号（与状态角标口径一致：**** + 末 4 位）。
+  static String _tailOf(String key) =>
+      "****${key.length > 4 ? key.substring(key.length - 4) : key}";
+
   Future<void> _load() async {
     setState(() {
       _loading = true;
       _error = null;
     });
     try {
+      await CloudModelBindingStore.instance.load();
       final http.Client client = http.Client();
       final List<http.Response> responses = await Future.wait(<Future<http.Response>>[
         client
-            .get(Uri.parse("${ApiConfig.httpBase}/api/service-config"),
+            .get(_authed("/api/service-config"),
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
         client
@@ -125,7 +142,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
         client
-            .get(Uri.parse("${ApiConfig.httpBase}/api/mail-watch/status"),
+            .get(_authed("/api/mail-watch/status"),
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
       ]);
@@ -160,18 +177,16 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       }
 
       if (!mounted) return;
-      // 已接入服务的密钥/授权码全文回显（keyValue），供回填进输入框（默认打码）
-      final String modelKeyFull = modelBlock["keyValue"]?.toString() ?? "";
-      final String ttsKeyFull = ttsBlock["keyValue"]?.toString() ?? "";
-      final String mailKeyFull = mailBlock["keyValue"]?.toString() ?? "";
+      final bool sessionByok = cfg["mode"] == "session-byok";
+      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
       setState(() {
         _providers = providers;
+        _sessionByok = sessionByok;
         _modelConfigured = modelBlock["configured"] == true;
         _modelKeyTail = modelBlock["keyTail"]?.toString();
         _ttsConfigured = ttsBlock["configured"] == true;
         _ttsKeyTail = ttsBlock["keyTail"]?.toString();
         _mailConfigured = mailBlock["configured"] == true;
-        _mailKeyTail = mailBlock["keyTail"]?.toString();
         _mailRunning = mailStatus["running"] == true;
         _mailUser = mailStatus["user"]?.toString() ?? "";
         _mailReason = mailStatus["reason"]?.toString() ?? "";
@@ -186,10 +201,17 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         if ((ttsBlock["provider"]?.toString() ?? "").isNotEmpty) {
           _ttsProvider = ttsBlock["provider"].toString();
         }
-        // 回填：已接入的服务把已存密钥/授权码带进输入框（默认打码，眼睛钮显隐）
-        if (_modelConfigured && modelKeyFull.isNotEmpty) _apiKey.text = modelKeyFull;
-        if (_ttsConfigured && ttsKeyFull.isNotEmpty) _ttsApiKey.text = ttsKeyFull;
-        if (_mailConfigured && mailKeyFull.isNotEmpty) _mailPass.text = mailKeyFull;
+        // 密钥不回传：输入框保持空，占位文案讲清「留空=沿用已存 ****尾号，填了才更换」
+        // 云端多租户：模型三元组的唯一副本在本机，表单与角标都以本机为准
+        if (sessionByok) {
+          _modelConfigured = binding.isConfigured;
+          _modelKeyTail = binding.isConfigured ? _tailOf(binding.apiKey!) : null;
+          if (binding.isConfigured) {
+            _baseUrl.text = binding.baseUrl ?? "";
+            _model.text = binding.model ?? "";
+            _apiKey.text = binding.apiKey ?? "";
+          }
+        }
         _loading = false;
       });
     } catch (e) {
@@ -217,12 +239,17 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       .where((Map<String, dynamic> e) => e["id"]?.toString() == _providerId)
       .firstOrNull;
 
-  /// 保存模型服务：PUT /api/service-config（apiKey 留空 = 沿用已存密钥）。
+  /// 保存模型服务：单机形态 PUT /api/service-config（服务端持久化并热生效）；
+  /// 云端多租户形态只写本机，随 session.init 上送（apiKey 留空 = 沿用已存密钥）。
   Future<void> _saveModel() async {
     final String baseUrl = _baseUrl.text.trim();
     final String model = _model.text.trim();
     if (!baseUrl.startsWith("http")) {
       _setModelMessage("网关地址必须是 http(s) 地址", error: true);
+      return;
+    }
+    if (_sessionByok && !baseUrl.startsWith("https://")) {
+      _setModelMessage("云端接入地址必须 https（服务器拒收明文来源的 Key）", error: true);
       return;
     }
     if (model.isEmpty) {
@@ -237,6 +264,27 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       _savingModel = true;
       _modelMessage = null;
     });
+    if (_sessionByok) {
+      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
+      final String key = _apiKey.text.trim().isNotEmpty
+          ? _apiKey.text.trim()
+          : (binding.apiKey ?? "");
+      String? err;
+      try {
+        await binding.save(baseUrl: baseUrl, apiKey: key, model: model);
+      } catch (e) {
+        err = "保存本机配置失败：$e";
+      }
+      if (!mounted) return;
+      setState(() {
+        _savingModel = false;
+        _modelConfigured = binding.isConfigured;
+        _modelKeyTail = binding.isConfigured ? _tailOf(key) : null;
+        _modelMessage = err ?? "已存本机，重连后生效（服务端按你的账号加密保存，离线提醒也用这把 key）";
+        _modelMessageError = err != null;
+      });
+      return;
+    }
     final String? err = await _putServiceConfig(<String, dynamic>{
       "model": <String, dynamic>{
         "providerId": _providerId,
@@ -246,10 +294,13 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       },
     });
     if (!mounted) return;
+    final String typedKey = _apiKey.text.trim();
     setState(() {
       _savingModel = false;
       if (err == null) {
         _modelConfigured = true;
+        // 填了新 key 就更新角标；留空沿用已存那份，尾号维持服务端报的
+        if (typedKey.isNotEmpty) _modelKeyTail = _tailOf(typedKey);
         _modelMessage = "已保存并即时生效，直接开聊即可";
         _modelMessageError = false;
       } else {
@@ -257,7 +308,6 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _modelMessageError = true;
       }
     });
-    if (err == null) await _refillSecrets();
   }
 
   /// 保存 TTS：PUT /api/service-config（minimax 留空 = 沿用已存密钥）。
@@ -279,10 +329,14 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       },
     });
     if (!mounted) return;
+    final String typedTtsKey = _ttsApiKey.text.trim();
     setState(() {
       _savingTts = false;
       if (err == null) {
         _ttsConfigured = true;
+        if (_ttsProvider == "minimax" && typedTtsKey.isNotEmpty) {
+          _ttsKeyTail = _tailOf(typedTtsKey);
+        }
         _ttsMessage = "已保存，语音回复即刻生效";
         _ttsMessageError = false;
       } else {
@@ -290,42 +344,45 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _ttsMessageError = true;
       }
     });
-    if (err == null) await _refillSecrets();
   }
 
-  /// 保存邮箱授权码：PUT /api/service-config（mail 块）→ 服务端落盘 + 即刻启动
-  /// IMAP 轮询（host/user 由登录邮箱域自动接入，无需手填服务器）。
+  /// 保存邮箱授权码：POST /api/mail-watch/pass（绑请求者自己那个账号）→ 服务端按人
+  /// 加密落盘 + 即刻启动这一个邮箱的轮询（host/user 由登录邮箱域自动接入，无需手填
+  /// 服务器）。授权码不再进 service-config.json，也不再写机器级 env：一份码只管一只邮箱。
   Future<void> _saveMail() async {
     final String pass = _mailPass.text.trim();
-    if (pass.isEmpty && !_mailConfigured) {
-      _setMailMessage("请填写 IMAP 授权码（邮箱网页版设置里生成，不是登录密码）",
-          error: true);
+    if (pass.isEmpty) {
+      _setMailMessage(
+          _mailConfigured
+              ? "已接入，没有改动；要换授权码请填新的"
+              : "请填写 IMAP 授权码（邮箱网页版设置里生成，不是登录密码）",
+          error: !_mailConfigured);
       return;
     }
     setState(() {
       _savingMail = true;
       _mailMessage = null;
     });
-    final String? err = await _putServiceConfig(<String, dynamic>{
-      "mail": <String, dynamic>{"pass": pass},
-    });
+    final Map<String, dynamic> saved = await MailWatchApi.savePass(pass);
     if (!mounted) return;
-    if (err != null) {
+    if (saved["ok"] != true) {
       setState(() {
         _savingMail = false;
-        _mailMessage = err;
+        _mailMessage = saved["error"]?.toString() ?? "保存失败";
         _mailMessageError = true;
       });
       return;
     }
     _mailConfigured = true;
     await _refreshMailStatus();
-    await _refillSecrets();
     if (!mounted) return;
+    final bool persisted = saved["persisted"] == true;
     setState(() {
       _savingMail = false;
       _mailMessage = _mailRunning
-          ? "已接通，Agent 开始盯你的邮箱"
+          ? (persisted
+              ? "已接通，Agent 开始盯你的邮箱"
+              : "已接通，但未持久化：服务端没配主密钥，授权码只在这次运行内有效，重启后需重填")
           : "已保存，但未启动：${_mailReason.isEmpty ? "未知原因" : _mailReason}";
       _mailMessageError = false;
     });
@@ -344,38 +401,6 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       final String user = st["user"]?.toString() ?? "";
       if (user.isNotEmpty) _mailUser = user;
     });
-  }
-
-  /// 保存成功后重拉服务端回显：把实际生效的密钥/授权码重新填回输入框
-  /// （清空后保存=沿用已存密钥时，也能看到当前真正在用的值）。
-  Future<void> _refillSecrets() async {
-    try {
-      final http.Client client = http.Client();
-      final http.Response res = await client
-          .get(Uri.parse("${ApiConfig.httpBase}/api/service-config"),
-              headers: AccessCredentialStore.instance.authHeaders)
-          .timeout(const Duration(seconds: 15));
-      client.close();
-      final Map<String, dynamic> cfg =
-          jsonDecode(res.body) as Map<String, dynamic>;
-      if (cfg["ok"] != true || !mounted) return;
-      final Map<String, dynamic> modelBlock =
-          (cfg["model"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
-      final Map<String, dynamic> ttsBlock =
-          (cfg["tts"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
-      final Map<String, dynamic> mailBlock =
-          (cfg["mail"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
-      final String modelKeyFull = modelBlock["keyValue"]?.toString() ?? "";
-      final String ttsKeyFull = ttsBlock["keyValue"]?.toString() ?? "";
-      final String mailKeyFull = mailBlock["keyValue"]?.toString() ?? "";
-      setState(() {
-        if (modelKeyFull.isNotEmpty) _apiKey.text = modelKeyFull;
-        if (ttsKeyFull.isNotEmpty) _ttsApiKey.text = ttsKeyFull;
-        if (mailKeyFull.isNotEmpty) _mailPass.text = mailKeyFull;
-      });
-    } catch (_) {
-      // 回填失败不打断保存流程：输入框里通常已有用户刚填的值
-    }
   }
 
   void _setMailMessage(String text, {required bool error}) {
@@ -508,6 +533,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _buildTtsCard(p),
         const SizedBox(height: 16),
         _buildMailCard(p),
+        const SizedBox(height: 16),
+        const AccessPairingCard(
+          margin: EdgeInsets.symmetric(horizontal: 16),
+        ),
         const SizedBox(height: 16),
         _buildBranchesCard(p),
         const SizedBox(height: 24),
@@ -840,7 +869,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           style: TextStyle(color: p.textPrimary, fontSize: 14),
           decoration: InputDecoration(
             hintText: _mailConfigured
-                ? "已存 ${_mailKeyTail ?? ""}，留空沿用"
+                ? "已接入，留空不改；要换请填新授权码"
                 : "邮箱设置里生成的授权码",
             hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
             filled: true,

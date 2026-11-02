@@ -149,17 +149,27 @@ describe("ObservationPack 存储与读回", () => {
     assert.ok(pack.recall({ id: "obs_1" }).ok, "既有条目不受影响");
   });
 
-  test("会话级复用：同 session 返回同一实例，无 session 返回独立实例", async () => {
+  test("会话级复用默认关闭：同 session 每轮独立实例；显式开启才复用", async () => {
     const mod = await import("../src/external-model/observation-pack.js");
     mod.resetObservationPacksForTest();
-    const a1 = mod.getObservationPack("sess-1");
-    const a2 = mod.getObservationPack("sess-1");
-    assert.equal(a1, a2);
-    const b = mod.getObservationPack("sess-2");
-    assert.notEqual(a1, b);
-    const anonymous = mod.getObservationPack();
-    assert.notEqual(anonymous, a1);
-    mod.resetObservationPacksForTest();
+    const prev = process.env.OBS_PACK_CROSS_TURN;
+    try {
+      delete process.env.OBS_PACK_CROSS_TURN;
+      const perTurnA = mod.getObservationPack("sess-1");
+      const perTurnB = mod.getObservationPack("sess-1");
+      assert.notEqual(perTurnA, perTurnB, "默认按轮丢弃：同 session 两次调用应是独立实例");
+
+      process.env.OBS_PACK_CROSS_TURN = "1";
+      const sharedA = mod.getObservationPack("sess-1");
+      const sharedB = mod.getObservationPack("sess-1");
+      assert.equal(sharedA, sharedB, "显式开启跨轮复用时同 session 返回同一实例");
+      mod.releaseObservationPack("sess-1");
+      assert.notEqual(mod.getObservationPack("sess-1"), sharedA, "释放后应生成新实例");
+    } finally {
+      if (prev === undefined) delete process.env.OBS_PACK_CROSS_TURN;
+      else process.env.OBS_PACK_CROSS_TURN = prev;
+      mod.resetObservationPacksForTest();
+    }
   });
 });
 

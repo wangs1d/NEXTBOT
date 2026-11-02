@@ -9,7 +9,6 @@ import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import { sanitizeMemoryLinesForPrompt } from "./memory-line-hygiene.js";
 import { dropExpiredCommitmentLines } from "../services/memory-record-utils.js";
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
-import type { PersonalityCore } from "../brain/types.js";
 import {
   extractMemoryTopicFromLine,
   inferMemoryTopic,
@@ -41,9 +40,8 @@ const TRUTHFULNESS_SYSTEM_SUFFIX = `
 const CLOCK_TOOL_SYSTEM_SUFFIX =
   "\n\n【时钟与位置】时间以每轮注入的【当前时间】块为准，直接推算，不必调用工具；用户询问所在城市/当前位置时必须调用 clock.get_user_location。禁止使用 IP 或训练数据臆测位置。";
 
-// 2026-09-24 收窄展开许可：「组织充分/按主题分节」只属于真的调了搜索的轮次。
-// 此前是无条件指令，办事/办妥确认轮把内容预告当交付来分节展开（真机：订阅
-// 科技早报的确认轮被教唆成五段导购），与【人格·静态】的简短基准打架。
+// 收窄展开许可：「组织充分/按主题分节」只属于真的调了搜索的轮次。
+// 此前是无条件指令，办事/办妥确认轮把内容预告当交付来分节展开，与【人格】的简短基准打架。
 const WEB_SEARCH_SYSTEM_SUFFIX =
   "\n\n【联网检索】涉及时事/新闻/股价/排片/票价/价格/公告等强时效信息，必须先调 search_web（query 由你按用户意图组织成完整、具体的搜索词，可含当前年月或「最新」，不要机械截成短词），优先用搜索结果作答并注明日期。「组织充分、按主题分节展开、不为简短丢细节」只属于搜索轮：本轮真的调了搜索并拿到结果才适用。没调搜索的轮次（办事、办妥确认、闲聊）照旧简短——办妥确认一两句说完（办成了什么、何时生效），不预告到点会交付什么、不解释怎么执行的。真正的单一事实判断（是/否、一个数据点）才收成「结论 + 1 句依据」，不补第二轮复述。\n\n【搜索失败】search_web 返回 0 条或异常时，可基于训练知识作答，但必须前置一句说明非实时。天气查 weather.* 工具，不走 search_web。";
 
@@ -259,11 +257,13 @@ export function appendAgentToolCallingSystemSuffix(systemContent: string): strin
   return out;
 }
 
-/** 未设置 `AGENT_PROMPT_MEMORY_KEYS` 时默认注入的 UAP 键（可用 env 覆盖或 `off` 关闭）。 */
+/**
+ * 未设置 `AGENT_PROMPT_MEMORY_KEYS` 时默认注入的 UAP 键（可用 env 覆盖或 `off` 关闭）。
+ * 这张表就是「哪些 KV 键进本轮 prompt」的唯一口径：列出的键与
+ * sliceMemoryEntriesToPromptContext 消费的键一致。persona 不在此列——
+ * 人格唯一来源是 soul-store，不走 KV。
+ */
 export const DEFAULT_AGENT_PROMPT_MEMORY_KEYS = [
-  "persona",
-  "values",
-  "abilities",
   "memory_summary",
   "memory_current_mission",
   "memory_preferences",
@@ -271,6 +271,7 @@ export const DEFAULT_AGENT_PROMPT_MEMORY_KEYS = [
   "memory_commitments",
   "memory_open_loops",
   "session_recap",
+  "user_profile",
 ] as const;
 
 /**
@@ -306,18 +307,6 @@ function promptMemorySummaryMaxLines(): number {
   const raw = process.env.AGENT_PROMPT_MEMORY_SUMMARY_MAX_LINES?.trim();
   const n = raw ? Number.parseInt(raw, 10) : 4;
   return Number.isFinite(n) && n > 3 ? n : 4;
-}
-
-function promptSubAgentMemorySummaryMaxLines(): number {
-  const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_LINES?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 3;
-  return Number.isFinite(n) && n > 2 ? n : 3;
-}
-
-function promptSubAgentMemorySummaryMaxChars(): number {
-  const raw = process.env.AGENT_SUBAGENT_MEMORY_SUMMARY_MAX_CHARS?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : 400;
-  return Number.isFinite(n) && n > 200 ? n : 400;
 }
 
 const TIMESTAMP_RE = /\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/;
@@ -376,66 +365,64 @@ function sortAndTruncateMemoryLines(
 }
 
 /**
- * #5 KV 摘要主题分桶：memory_summary 按「主题×时间」分桶召回，而非全量相关度排序。
+ * KV 摘要召回（命中制）：memory_summary 存储格式为 `[ISO时间] [topic:x] 内容`。
  *
- * 存储格式形如 `[ISO时间] [topic:tech] 内容`（见 agent-memory-sync-service）。
- * 召回策略（配合 recall-gate 门控，仅门控触发时才有 query）：
- *  - 有 query：先取「与 query 同主题」桶（按时间倒序），再补 `general` 全局事实，
- *    最后少量补「跨主题」最近记录防信息孤岛；配额偏向同主题，整体再硬上限 maxLines。
- *  - 无 query / 未知主题：仅按时间倒序取最近 maxLines 行（保新鲜、不引入旧话题噪声）。
- * minRelevance>0 且启用时，仅保留相关度达标行（不足则整桶降级为最近时间，保底可用）。
+ * 只有本轮问句真实命中的行才进 prompt；无命中返回空串——需要旧事时由模型自己调
+ * brain.recall / memory.recall 查。长期记忆是按需能力，不是每轮常驻素材：
+ * 原先「无命中回退全灌 + 跨主题补行」让每个话题都拿到同一批旧行，既不是召回也
+ * 造成跨话题串台。
+ * 不带 `[ISO]` 事件锚的行不是记忆条目（写入端一律带锚；无锚的是历史标记行或
+ * 逐字对话行），不参与召回。
  */
 function recallMemorySummaryByTopic(
   raw: string,
   maxChars: number,
   maxLines: number,
   userQuery?: string,
-  opts?: { minRelevance?: number; perBucket?: number },
+  opts?: { minRelevance?: number },
 ): string {
   const minRelevance = opts?.minRelevance ?? 0;
-  const perBucket = opts?.perBucket ?? maxLines;
 
-  const lines = raw.split("\n").filter((l) => l.trim().length > 0);
-  if (lines.length === 0) return "";
+  const anchored: { line: string; at: number }[] = [];
+  for (const line of raw.split("\n")) {
+    if (!line.trim()) continue;
+    const at = extractTimestamp(line);
+    if (at) anchored.push({ line, at: at.getTime() });
+  }
+  if (anchored.length === 0) return "";
 
-  const scored = lines.map((line) => ({
-    line,
-    timestamp: extractTimestamp(line)?.getTime() ?? 0,
-    topic: extractMemoryTopicFromLine(line),
-    relevance: userQuery ? calculateRelevanceScore(line, userQuery) : 0.5,
-  }));
+  const cap = (picked: string[]): string => {
+    const joined = picked.join("\n");
+    return joined.length > maxChars ? `…（较早记录已截断）\n${joined.slice(-maxChars)}` : joined;
+  };
 
-  const eligible = minRelevance > 0 && userQuery ? scored.filter((s) => s.relevance >= minRelevance) : scored;
-  const pool = eligible.length > 0 ? eligible : scored;
-  if (pool.length === 0) return "";
-
-  const byTimeDesc = (arr: typeof pool) =>
-    [...arr].sort((a, b) => b.timestamp - a.timestamp || b.relevance - a.relevance);
-
-  let selected: typeof pool;
   if (!userQuery) {
-    selected = byTimeDesc(pool).slice(0, maxLines);
-  } else {
-    const queryTopic = inferMemoryTopic(userQuery);
-    const sameTopic = pool.filter((s) => s.topic !== "general" && s.topic === queryTopic);
-    const general = pool.filter((s) => s.topic === "general");
-    const others = pool.filter((s) => s.topic !== "general" && s.topic !== queryTopic);
-    const ordered = [
-      ...byTimeDesc(sameTopic).slice(0, Math.max(1, Math.ceil(maxLines / 2))),
-      ...byTimeDesc(general).slice(0, perBucket),
-      ...byTimeDesc(others).slice(0, Math.max(1, Math.floor(maxLines / 2))),
-    ];
-    // 去重（同一行不会跨桶，仅防御）后硬上限
-    const seen = new Set<string>();
-    selected = ordered.filter((s) => (seen.has(s.line) ? false : (seen.add(s.line), true))).slice(0, maxLines);
+    return cap(
+      [...anchored].sort((a, b) => b.at - a.at).slice(0, maxLines).map((s) => s.line),
+    );
   }
 
-  const truncated = selected.map((s) => s.line);
-  let result = truncated.join("\n");
-  if (result.length > maxChars) {
-    result = `…（较早记录已截断）\n${result.slice(-maxChars)}`;
+  const hit = anchored
+    .map((s) => ({ ...s, relevance: calculateRelevanceScore(s.line, userQuery) }))
+    .filter((s) => s.relevance >= minRelevance)
+    .sort((a, b) => b.relevance - a.relevance || b.at - a.at)
+    .slice(0, maxLines)
+    .map((s) => s.line);
+
+  return cap(hit);
+}
+
+/**
+ * 中文按字符二元组切分（无分词器的确定性做法）。整串匹配对自然语句无效：
+ * 「我平时喝什么咖啡」作为一整串永远撞不上「用户喜欢喝手冲咖啡」这样的记忆行，
+ * 召回等于关闭。
+ */
+function chineseBigrams(text: string): string[] {
+  const grams = new Set<string>();
+  for (const run of text.match(/[\u4e00-\u9fff]{2,}/g) ?? []) {
+    for (let i = 0; i + 2 <= run.length; i++) grams.add(run.slice(i, i + 2));
   }
-  return result;
+  return [...grams];
 }
 
 function calculateRelevanceScore(line: string, query: string): number {
@@ -444,11 +431,16 @@ function calculateRelevanceScore(line: string, query: string): number {
 
   let score = 0;
 
-  const queryTerms = queryLower.match(/[\u4e00-\u9fff]{2,}|[a-zA-Z]{3,}/g) || [];
-  for (const term of queryTerms) {
-    if (lineLower.includes(term)) {
-      score += 0.3;
-    }
+  // 一个独特二元组命中即 +0.3（达到调用方 minRelevance 门槛），最多 +0.6
+  let chineseHits = 0;
+  for (const gram of chineseBigrams(query)) {
+    if (lineLower.includes(gram)) chineseHits += 1;
+  }
+  score += Math.min(0.6, chineseHits * 0.3);
+
+  // 拉丁词/数字整词命中 +0.3
+  for (const term of queryLower.match(/[a-z0-9]{3,}/g) ?? []) {
+    if (lineLower.includes(term)) score += 0.3;
   }
 
   const queryTopic = inferMemoryTopic(query);
@@ -462,10 +454,6 @@ function calculateRelevanceScore(line: string, query: string): number {
   if (/偏好|喜欢|讨厌|重要|记住|记得/.test(queryLower) &&
       /偏好|喜欢|讨厌|禁忌|生日|纪念日|重要/.test(lineLower)) {
     score += 0.3;
-  }
-
-  if (/之前|上次|说过|刚才|刚刚/.test(queryLower)) {
-    score += 0.1;
   }
 
   return Math.min(score, 1);
@@ -484,48 +472,8 @@ export function formatKvValueForPrompt(value: unknown): string {
 }
 
 /**
- * 将结构化人格内核格式化为可读文本，注入 system prompt 稳定前缀的【人格内核】块。
- * 防漂移：每轮从 MemoryCortex.getPersonalityCore 拉取最新值并格式化为稳定文本，
- * 避免单次对话导致人格漂移。各字段缺省时跳过对应行。
- */
-export function formatPersonalityCorePrompt(core: PersonalityCore): string {
-  const lines: string[] = [];
-  if (core.values.length > 0) {
-    lines.push(`价值观：${core.values.join("、")}`);
-  }
-  if (core.speech_style) {
-    const ss = core.speech_style;
-    lines.push(`说话风格：语气${ss.tone}｜正式程度${ss.formality}｜幽默${ss.humor}`);
-  }
-  if (core.beliefs.length > 0) {
-    lines.push(`信念：${core.beliefs.join("；")}`);
-  }
-  if (core.quirks.length > 0) {
-    lines.push(`口癖：${core.quirks.join("；")}`);
-  }
-  return lines.join("\n");
-}
-
-const SLICE_RESERVED_KEYS = new Set([
-  "persona",
-  "soul",
-  "values",
-  "values_profile",
-  "abilities",
-  "skill_tendencies",
-  "memory_summary",
-  "memory_current_mission",
-  "memory_preferences",
-  "memory_facts",
-  "memory_commitments",
-  "memory_open_loops",
-  "session_recap",
-  "user_profile",
-  "emotion_state",
-]);
-
-/**
- * 将 UAP 快照中的条目转为分层片段：人格 / 价值观 / 能力倾向 / 其余键合并为履历块。
+ * 将 UAP 快照中的条目转为分层片段：摘要 / 画像层（偏好·事实）/ 承诺 / 未完成事项 / 会话回顾。
+ * 人格文本不从 KV 取——唯一来源是 soul-store.buildPersonaPrompt（见 memory.persona）。
  */
 export function sliceMemoryEntriesToPromptContext(
   entries: Record<string, unknown>,
@@ -533,9 +481,6 @@ export function sliceMemoryEntriesToPromptContext(
 ): AgentPromptMemoryContext {
   const str = (v: unknown): string => formatKvValueForPrompt(v);
 
-  const persona = str(entries["persona"]) || str(entries["soul"]);
-  const values = str(entries["values"]) || str(entries["values_profile"]);
-  const abilities = str(entries["abilities"]) || str(entries["skill_tendencies"]);
   // user_profile KV：作为文件版用户画像的后备基底（见 assembleMemory 中 file 优先于 KV 的合并）
   const userProfileFromKv = str(entries["user_profile"]);
 
@@ -604,41 +549,13 @@ export function sliceMemoryEntriesToPromptContext(
   );
 
   const out: AgentPromptMemoryContext = {};
-  if (persona) out.persona = persona;
   if (userProfileFromKv) out.userProfile = userProfileFromKv;
-  if (values) out.values = values;
-  if (abilities) out.abilities = abilities;
   if (memorySummary) out.memorySummary = memorySummary;
   if (memoryPreferences) out.memoryPreferences = memoryPreferences;
   if (memoryFacts) out.memoryFacts = memoryFacts;
   if (memoryCommitments) out.memoryCommitments = memoryCommitments;
   if (memoryOpenLoops) out.memoryOpenLoops = memoryOpenLoops;
   if (sessionRecap) out.sessionRecap = sessionRecap;
-  return out;
-}
-
-/** 子 Agent：仅人格 + 与任务相关的 memory_summary 行（更小上限）。 */
-export function sliceSubAgentMemoryEntries(
-  entries: Record<string, unknown>,
-  taskQuery?: string,
-): AgentPromptMemoryContext {
-  const str = (v: unknown): string => formatKvValueForPrompt(v);
-  const out: AgentPromptMemoryContext = {};
-  const persona = str(entries["persona"]) || str(entries["soul"]);
-  if (persona) out.persona = persona;
-
-  const rawSummary = sanitizeMemoryLinesForPrompt(str(entries["memory_summary"])).text;
-  if (rawSummary) {
-    // #5 子 Agent 同样按主题分桶召回，避免无关旧摘要污染子任务上下文
-    const sorted = recallMemorySummaryByTopic(
-      rawSummary,
-      promptSubAgentMemorySummaryMaxChars(),
-      promptSubAgentMemorySummaryMaxLines(),
-      taskQuery,
-      { minRelevance: 0.25 },
-    );
-    if (sorted) out.memorySummary = sorted;
-  }
   return out;
 }
 

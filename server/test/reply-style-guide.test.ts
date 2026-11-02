@@ -7,7 +7,6 @@ import {
 } from "../src/agent/prompt-assembler.js";
 import {
   buildPersonaMoodBlock,
-  buildPersonaStaticBlock,
 } from "../src/agent/persona-core.js";
 import {
   buildToneGuidance,
@@ -29,19 +28,17 @@ function sectionsOf(memory: AgentPromptMemoryContext) {
   return assembleLayeredSections(memory);
 }
 
-test("chat 模式注入【人格·静态】稳定层（2026-09-22 人格·终极版重塑）", () => {
-  const { stablePrefix } = sectionsOf(
-    chatMemory({ personaStatic: buildPersonaStaticBlock({ tier: 1 }) }),
-  );
-  const persona = stablePrefix.find((b) => b.startsWith("【人格·静态】"));
-  assert.ok(persona, "人格静态块必须注入稳定层");
-  assert.equal(persona.includes("私人管家兼搭档"), true);
-  // 2026-10-06 活人感治理 B：正向重写后的声部锚点 + 网络梗用量铁律
-  assert.equal(persona.includes("说话像处了几年的朋友"), true);
-  assert.equal(persona.includes("一轮最多一个"), true);
-  assert.equal(persona.includes("R1（熟悉）"), true);
+test("chat 模式把唯一人格正文（memory.persona）注入稳定层", () => {
+  const persona = "【人格】\n我是 NEXTBOT，一个球形小机器人。\n有什么说什么。";
+  const { stablePrefix } = sectionsOf(chatMemory({ persona }));
+  const block = stablePrefix.find((b) => b.startsWith("【人格】"));
+  assert.ok(block, "人格正文必须注入稳定层");
+  assert.equal(block, persona);
+  // 人格只有这一份：旧的静态/灵魂分层块不得复现
+  assert.equal(stablePrefix.some((b) => b.startsWith("【人格·静态")), false);
+  assert.equal(stablePrefix.some((b) => b.startsWith("【灵魂")), false);
   // 旧【说话方式】两块（管家底色/伙伴面）整体废弃
-  assert.equal(stablePrefix.some((b) => b.startsWith("【说话方式")) , false);
+  assert.equal(stablePrefix.some((b) => b.startsWith("【说话方式")), false);
 });
 
 test("task 模式 mood 由 personaMood 承担（serious），适配块只剩模式行", () => {
@@ -106,13 +103,17 @@ test("minimal 模式保留 replyStyleMode，buildSessionSystem 不再携带风�
   assert.equal(sessionSystem.includes("personal butler and close friend"), true);
   assert.equal(sessionSystem.includes("Reply style follows"), false);
 
-  // 语感治理 C 防回退：minimal 模式不得剥离【语感基准】few-shot（剥离=示例层失效）
-  const voiceMemory = chatMemory({ voiceBaseline: "【语感基准】\n用户：在吗\n你：来了" });
-  const voiceSanitized = kernel.sanitizePromptMemory(
-    voiceMemory,
-    kernel.planTurn("在吗", voiceMemory),
+  // 单一人格出口防回退：minimal 模式不得剥离人格正文与 mood
+  const personaMemory = chatMemory({
+    persona: "【人格】\n有什么说什么。",
+    personaMood: "【人格·状态：日常调侃】\n默认带一点吐槽。",
+  });
+  const personaSanitized = kernel.sanitizePromptMemory(
+    personaMemory,
+    kernel.planTurn("在吗", personaMemory),
   );
-  assert.equal(voiceSanitized?.voiceBaseline, voiceMemory.voiceBaseline);
+  assert.equal(personaSanitized?.persona, personaMemory.persona);
+  assert.equal(personaSanitized?.personaMood, personaMemory.personaMood);
 });
 
 assert.ok(GLOBAL_MEMORY_RULE.length > 0);

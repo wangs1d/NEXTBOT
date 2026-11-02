@@ -11,10 +11,19 @@ import type { MediaTrack } from "./media-music-service.js";
  *   - 标题带 Inst/伴奏/纯音乐 等标记时直接判「无歌词」，不发搜索
  *
  * 上游通道与 media 搜索共用 {@link searchNeteaseSongs}，歌词接口走
- * /api/song/lyric（匿名可拿到绝大多数曲目歌词）。
+ * /api/song/lyric/v1（匿名可拿到绝大多数曲目的 LRC/TLYRIC/YRC 逐字歌词）。
  */
 
-const NETEASE_LYRIC_ENDPOINT = "https://music.163.com/api/song/lyric";
+const NETEASE_LYRIC_ENDPOINT = "https://music.163.com/api/song/lyric/v1";
+
+/** 逐字时间轴上的一个唱段（字/词/音节，取决于歌曲的逐字歌词粒度）。 */
+export interface LyricChar {
+  /** 相对曲目开始的毫秒数。 */
+  t: number;
+  /** 持续时长（毫秒），<=0 表示无时长信息。 */
+  d: number;
+  text: string;
+}
 
 /** 歌词行：t 为相对曲目开始的毫秒数。 */
 export interface LyricLine {
@@ -22,6 +31,8 @@ export interface LyricLine {
   text: string;
   /** 同时间轴的翻译（网易云 tlyric 存在时合并）。 */
   tr?: string;
+  /** 逐字时间轴；没有逐字歌词的歌不填，客户端按行内插值兜底。 */
+  chars?: LyricChar[];
 }
 
 export interface LyricLookupInput {
@@ -38,6 +49,8 @@ export interface LyricLookupResult {
   track?: MediaTrack;
   lines: LyricLine[];
   translated: boolean;
+  /** 命中且拿到了逐字时间轴（lines[].chars）时为 true。 */
+  wordTimed?: boolean;
   source: "netease";
 }
 
@@ -164,6 +177,95 @@ export function parseLrc(raw: string): LyricLine[] {
   return lines;
 }
 
+/**
+ * 解析网易云 YRC 逐字歌词。每行形如：
+ *   `[行起点ms,行长ms](字起点ms,字时长ms,0)字(字起点ms,字时长ms,0)字…`
+ * 字起点为绝对毫秒。文件里混在前面的「作词/作曲」JSON 行没有方括号时间戳，
+ * 自然跳过。
+ */
+export function parseYrc(raw: string): Array<{ t: number; chars: LyricChar[] }> {
+  if (!raw) return [];
+  const result: Array<{ t: number; chars: LyricChar[] }> = [];
+  const marker = /\((\d+),(\d+),\d+\)/g;
+
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const head = rawLine.match(/^\[(\d+),\d+\]/);
+    if (!head) continue;
+    const lineStart = Number(head[1]);
+    const body = rawLine.slice(head[0].length);
+
+    const chars: LyricChar[] = [];
+    let pending: { t: number; d: number } | null = null;
+    let textStart = 0;
+    marker.lastIndex = 0;
+    let match: RegExpExecArray | null;
+    while ((match = marker.exec(body)) !== null) {
+      if (pending) {
+        const text = body.slice(textStart, match.index);
+        if (text) chars.push({ t: pending.t, d: pending.d, text });
+      }
+      pending = { t: Number(match[1]), d: Number(match[2]) };
+      textStart = match.index + match[0].length;
+    }
+    if (pending) {
+      const text = body.slice(textStart);
+      if (text) chars.push({ t: pending.t, d: pending.d, text });
+    }
+
+    trimCharText(chars);
+    if (chars.length > 0) result.push({ t: lineStart, chars });
+  }
+
+  return result;
+}
+
+/** 去掉逐字时间轴首尾的空白唱段，避免整行测量宽度被空格撑大。 */
+function trimCharText(chars: LyricChar[]): void {
+  while (chars.length > 0 && chars[0]!.text.trim() === "") chars.shift();
+  while (chars.length > 0 && chars[chars.length - 1]!.text.trim() === "") chars.pop();
+  if (chars.length > 0) chars[0]!.text = chars[0]!.text.replace(/^\s+/, "");
+  if (chars.length > 0) {
+    const last = chars[chars.length - 1]!;
+    last.text = last.text.replace(/\s+$/, "");
+  }
+}
+
+/**
+ * 把逐字时间轴按行起点挂到 LRC 行上（网易云 LRC 与 YRC 的同一行起点常有
+ * 几十毫秒差，取 600ms 内最近的一行）。挂上后行文本改用逐字文本，保证
+ * 客户端按字测量宽度时与显示文本完全一致。
+ */
+function attachYrc(lines: LyricLine[], yrcRaw: string): boolean {
+  const yrcLines = parseYrc(yrcRaw);
+  if (yrcLines.length === 0) return false;
+
+  const used = new Set<number>();
+  let attached = 0;
+  for (const line of lines) {
+    let best = -1;
+    let bestDiff = 600;
+    for (let i = 0; i < yrcLines.length; i++) {
+      if (used.has(i)) continue;
+      const diff = Math.abs(yrcLines[i]!.t - line.t);
+      if (diff <= bestDiff) {
+        best = i;
+        bestDiff = diff;
+      }
+    }
+    if (best < 0) continue;
+
+    const yrc = yrcLines[best]!;
+    const joined = yrc.chars.map((c) => c.text).join("");
+    if (!joined) continue;
+
+    used.add(best);
+    line.chars = yrc.chars;
+    line.text = joined;
+    attached++;
+  }
+  return attached > 0;
+}
+
 function mergeTranslation(lines: LyricLine[], translationRaw: string): boolean {
   const translated = parseLrc(translationRaw);
   if (translated.length === 0) return false;
@@ -185,17 +287,22 @@ interface NeteaseLyricPayload {
   nolyric?: boolean;
   uncollected?: boolean;
   lrc?: { lyric?: string };
+  klyric?: { lyric?: string };
   tlyric?: { lyric?: string };
+  yrc?: { lyric?: string };
 }
+
+/** v1 接口参数：cp=true 返回富文本；lv/kv/tv/rv/yv/ytv/yrv 全 0 才带 yrc。 */
+const LYRIC_V1_QUERY = "cp=true&lv=0&kv=0&tv=0&rv=0&yv=0&ytv=0&yrv=0";
 
 async function fetchLyricById(
   id: string,
   fetchImpl: typeof fetch,
 ): Promise<
-  | { ok: true; lyric: string; translation: string }
+  | { ok: true; lyric: string; translation: string; yrc: string }
   | { ok: false; reason: string }
 > {
-  const url = `${NETEASE_LYRIC_ENDPOINT}?id=${encodeURIComponent(id)}&lv=-1&kv=-1&tv=-1`;
+  const url = `${NETEASE_LYRIC_ENDPOINT}?id=${encodeURIComponent(id)}&${LYRIC_V1_QUERY}`;
   try {
     const res = await fetchImpl(url, {
       method: "GET",
@@ -219,7 +326,12 @@ async function fetchLyricById(
     if (!lyric) {
       return { ok: false, reason: "这首歌没有收录歌词" };
     }
-    return { ok: true, lyric, translation: data.tlyric?.lyric?.trim() ?? "" };
+    return {
+      ok: true,
+      lyric,
+      translation: data.tlyric?.lyric?.trim() ?? "",
+      yrc: data.yrc?.lyric?.trim() ?? "",
+    };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     return { ok: false, reason: `歌词调用异常：${msg}` };
@@ -278,7 +390,20 @@ export async function resolveLyricByMeta(
   }
 
   const durationSec = Number(input.durationSec ?? 0);
-  const ranked = [...sameArtist].sort((a, b) => {
+  // 时长差太多说明是另一个版本（加速版/剪辑版/现场版），歌词时间轴套上去
+  // 只会全程错位；宁可如实报未命中，也不硬套（LRCLIB / NeriPlayer 同样做法）。
+  const MAX_MATCH_DURATION_DIFF_SEC = 10;
+  const eligible =
+    durationSec > 0
+      ? sameArtist.filter(
+          (track) =>
+            Math.abs(track.durationSec - durationSec) <= MAX_MATCH_DURATION_DIFF_SEC,
+        )
+      : sameArtist;
+  if (eligible.length === 0) {
+    return fail("未找到时长匹配的版本");
+  }
+  const ranked = [...eligible].sort((a, b) => {
     if (!durationSec) return a.durationSec - b.durationSec;
     return Math.abs(a.durationSec - durationSec) - Math.abs(b.durationSec - durationSec);
   });
@@ -294,12 +419,17 @@ export async function resolveLyricByMeta(
     return fail("这首的歌词没有逐句时间轴，无法同步滚动");
   }
 
+  // 有 YRC 逐字歌词就把词级时间轴挂到对应行上；没有的歌保持行级时间轴，
+  // 客户端回退到按行内插值，而不是拿别人的节奏硬套。
+  const wordTimed = attachYrc(lines, lyricRes.yrc);
+
   const translated = lyricRes.translation ? mergeTranslation(lines, lyricRes.translation) : false;
   const result: LyricLookupResult = {
     matched: true,
     track,
     lines,
     translated,
+    wordTimed,
     source: "netease",
   };
   setCachedLyrics(cacheKey, result);

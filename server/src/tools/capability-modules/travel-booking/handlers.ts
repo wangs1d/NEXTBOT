@@ -1,6 +1,7 @@
 import type { ToolHandler, ToolContext, ToolRegistry } from "../../tool-registry.js";
 import type { BookingService } from "../../../services/booking/booking-service.js";
 import { travelPlanStore } from "../../../skills/travel-planning/travel-plan-store.js";
+import { resolveActorId } from "../../../agent/actor-id.js";
 
 /**
  * travel_booking.* 工具 handler 工厂集合 + 注册入口。
@@ -55,12 +56,15 @@ function travelParams(input: Record<string, unknown>): Record<string, unknown> {
  *
  * @returns 需要用户先表态时返回阶段一拒绝回执；放行时返回 null。
  */
-export function satisfactionGate(input: Record<string, unknown>): Record<string, unknown> | null {
+export function satisfactionGate(
+  input: Record<string, unknown>,
+  context: { userId?: string | undefined; sessionId: string },
+): Record<string, unknown> | null {
   const type = str(input, "type");
   if (type !== "flight" && type !== "train" && type !== "hotel") return null;
   const city = str(input, "city") ?? (type === "hotel" ? str(input, "to") : undefined);
   if (!city) return null;
-  const plan = travelPlanStore.findRecentForDestination(city);
+  const plan = travelPlanStore.findRecentForDestinationForActor(resolveActorId(context), city);
   if (!plan || plan.status === "approved") return null;
   return {
     ok: false,
@@ -82,7 +86,7 @@ export function createTravelSearchHandler(service: BookingService): ToolHandler 
     if (type !== "flight" && type !== "train" && type !== "hotel") {
       return { ok: false, error: "type 必须是 flight / train / hotel" };
     }
-    const gate = satisfactionGate(input);
+    const gate = satisfactionGate(input, context);
     if (gate) return gate;
     const params = travelParams(input);
     const city = str(input, "city") ?? (type === "hotel" ? str(input, "to") : undefined);
@@ -105,7 +109,7 @@ export function createTravelBookHandler(service: BookingService): ToolHandler {
     if (type !== "flight" && type !== "train" && type !== "hotel") {
       return { ok: false, error: "type 必须是 flight / train / hotel" };
     }
-    const gate = satisfactionGate(input);
+    const gate = satisfactionGate(input, context);
     if (gate) return gate;
     const confirm = input.confirm === true;
     const confirmationToken = str(input, "confirmationToken");

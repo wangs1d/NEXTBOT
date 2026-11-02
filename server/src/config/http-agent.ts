@@ -27,14 +27,15 @@ export function setupGlobalHttpAgent(): void {
       ? Number.parseInt(process.env.HTTP_AGENT_MAX_CONNECTIONS, 10)
       : 64,
 
-    // 空闲连接保持时间（ms）。默认 4000。
-    // 设为 3000，略低于多数反向代理（nginx 默认 60s，但 Cloudflare/CDN 可能更短）的 idle timeout，
-    // 降低复用已被对端关闭的连接（stale connection）导致 parser 报错的概率。
-    keepAliveTimeout: 3_000,
+    // 空闲连接保持时间（ms）。2026-11-01 提速：原 3000 太短——一轮回复里
+    // 「主波 → 工具执行 5s → 第二波」的空档必然超过 3s，每个波次都要重新
+    // TCP+TLS 握手（国内到 api.deepseek.com 实测 0.2~1s）。调到 15s 覆盖
+    // 常规工具间隔；真正的 stale 连接仍由 keepAliveMaxTimeout 与请求失败重试兜底。
+    keepAliveTimeout: 15_000,
 
     // 空闲连接最大存活时间（ms）。默认 600_000（10min）。
-    // 设为 30_000，强制定期回收长连接，避免长期复用导致的连接退化。
-    keepAliveMaxTimeout: 30_000,
+    // 设为 60_000：既避免长连接退化，又不至于每轮都重建连接。
+    keepAliveMaxTimeout: 60_000,
 
     // TCP 连接超时（ms）。默认 10_000。
     connect: {

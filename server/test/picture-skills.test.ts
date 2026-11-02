@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { PictureKit } from "@nextbot/picture";
+import type { PictureKitRegistry } from "../src/services/picture-kit-registry.js";
 import { SkillValidator } from "../src/skills/skill-validator.js";
 import type { SkillDefinition } from "../src/skills/types.js";
 import { createPictureBuiltinSkills } from "../src/skills/builtin/picture-skills.js";
@@ -15,7 +16,14 @@ function fakeKit(
   } as unknown as PictureKit;
 }
 
-const skills = createPictureBuiltinSkills({ pictureKit: fakeKit(() => ({ success: true })) });
+/** 分区桩：skill handler 按执行上下文的 actor 取 kit，这里一律回同一个桩 kit。 */
+function fakeRegistry(kit: PictureKit): PictureKitRegistry {
+  return {
+    forContext: async () => ({ kit }),
+  } as unknown as PictureKitRegistry;
+}
+
+const skills = createPictureBuiltinSkills({ pictureKits: fakeRegistry(fakeKit(() => ({ success: true }))) });
 
 test("picture skill 家族：9 个定义全部通过元数据校验且名字唯一", () => {
   assert.equal(skills.length, 9);
@@ -63,7 +71,7 @@ test("invokeRaw 型 handler：成功响应映射为 ok:true 且字段平铺", as
     assert.equal(toolName, "image_generate");
     return { success: true, result: { images: [{ path: "a.webp" }], count: 1 } };
   });
-  const [generate] = createPictureBuiltinSkills({ pictureKit: kit }).filter(
+  const [generate] = createPictureBuiltinSkills({ pictureKits: fakeRegistry(kit) }).filter(
     (s) => s.metadata.name === "picture.generate",
   ) as SkillDefinition[];
   const result = await generate.handler({ prompt: "一只橘猫" }, {} as never);
@@ -73,7 +81,7 @@ test("invokeRaw 型 handler：成功响应映射为 ok:true 且字段平铺", as
 
 test("invokeRaw 型 handler：失败响应映射为 ok:false + error", async () => {
   const kit = fakeKit(() => ({ success: false, error: "缺少 OPENAI_API_KEY" }));
-  const [analyze] = createPictureBuiltinSkills({ pictureKit: kit }).filter(
+  const [analyze] = createPictureBuiltinSkills({ pictureKits: fakeRegistry(kit) }).filter(
     (s) => s.metadata.name === "picture.analyze",
   ) as SkillDefinition[];
   const result = await analyze.handler({ input: "a.jpg" }, {} as never);
@@ -92,7 +100,7 @@ test("picture.gallery handler：复用 capability handler，返回图库查询�
       }),
     },
   } as unknown as PictureKit;
-  const [gallery] = createPictureBuiltinSkills({ pictureKit: kit }).filter(
+  const [gallery] = createPictureBuiltinSkills({ pictureKits: fakeRegistry(kit) }).filter(
     (s) => s.metadata.name === "picture.gallery",
   ) as SkillDefinition[];
   const result = await gallery.handler({ action: "query" }, {} as never);

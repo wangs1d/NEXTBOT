@@ -695,9 +695,9 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           // ─── 云端连接版 BYOK（2026-10-20）：session.init 携带用户自有模型三元组 ───
           // 存在且字段齐全 → 按 actor 绑定（此后该 actor 的对话轮走用户 key，见
           // agent-core.chatProviderFor）；存在但字段不全 → 撤绑（用户在 UI 清空）；
-          // 缺失 → 不动（旧客户端/桥接通道零影响）。key 纯内存驻留（TTL 24h），
-          // 客户端每次连接重传自愈。安全门：仅聊天主通道接收；上送通道必须 TLS
-          // （wss，经 x-forwarded-proto / socket.encrypted 判定）；baseUrl 由
+          // 缺失 → 不动（旧客户端/桥接通道零影响）。绑定加密落盘一份，所以客户端
+          // 离线期间的主动轮次仍用用户自己的 key。安全门：仅聊天主通道接收；上送通道
+          // 必须 TLS（wss，经 x-forwarded-proto / socket.encrypted 判定）；baseUrl 由
           // 绑定仓做 https 公网校验（SSRF 门）。
           if (actorModelBindings && !isDesktopBridgeChannel && !isPhoneBridgeChannel) {
             const mpRaw = payload.modelProvider as Record<string, unknown> | undefined;

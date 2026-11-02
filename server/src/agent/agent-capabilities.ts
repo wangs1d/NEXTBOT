@@ -109,7 +109,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "calendar",
       lines: [
-        "3️⃣ 日程：calendar.create_from_text / create_task / list_tasks / reminder.plan",
+        "3️⃣ 日程：calendar.create（提醒/日程/定时任务统一入口）/ list_tasks / update_task / delete_task",
       ],
     },
     {
@@ -212,7 +212,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - notes.summarize（生成摘要，懒写回）",
         "   - notes.flashcards（生成记忆卡片 q/a）",
         "   - notes.quiz（生成自测题）",
-        "   - notes.schedule_review（创建复习提醒，调用 calendar.create_task 落地）",
+        "   - notes.schedule_review（创建复习提醒，调用 calendar.create 落地）",
         "适用：学习（看书/视频/课程）、会议纪要、读书摘录、灵感闪念、视频字幕沉淀等。",
         "状态连续性：写之前先 notes.search 查重；update/delete 必须基于返回的 id。",
       ],
@@ -358,8 +358,8 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "agent_browser",
       lines: [
-        "🌐 Agent 虚拟浏览器（服务端 Playwright 无头浏览器，通用网页多步操作）：",
-        "   - agent_browser.open（打开 URL）：启动浏览器打开 https URL，返回 sessionId；对已授权站点自动注入用户 Cookie",
+        "🌐 Agent 通用网页操作（内置浏览器优先，客户端不在线时回退无头浏览器；多步操作）：",
+        "   - agent_browser.open（打开 URL）：优先在用户可见的内置浏览器打开 https URL，返回 sessionId；对已授权站点自动注入用户 Cookie",
         "   - agent_browser.click（点击）：传 sessionId + selector 点击元素（支持 CSS / text= / xpath= 选择器）",
         "   - agent_browser.type（输入）：在输入框输入文本，默认替换模式，append=true 可追加并模拟打字延迟",
         "   - agent_browser.scroll（滚动）：三种模式 — selector 滚到元素 / deltaY 相对滚动 / x,y 绝对坐标",
@@ -368,7 +368,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - agent_browser.wait_for（等待）：等待元素出现并可见，默认超时 15s",
         "   - agent_browser.close（关闭）：完成操作后主动关闭会话释放资源",
         "   - 有状态会话：open 返回 sessionId 后，后续操作复用同一 Page，支持多步流程（open → extract_text → click → type → extract_text → close）",
-        "   - 安全：https 任意 URL / http 仅 localhost；沙箱下也可用；会话绑定 actorId 隔离；TTL 10 分钟 + LRU 上限 8 个自动清理；所有操作审计",
+        "   - 撞登录墙/验证码：回执带 humanRequired，页面留在内置浏览器，用户登录/验证后点「我已完成」继续（普通失败不交人）",
         "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）/ desktop.visual.run_task（操控桌面软件）的区别：本工具是通用多步浏览器操作",
         "   - 典型流程：open 打开页面 → extract_text 看页面结构和可点元素 → click/type 操作 → extract_text 确认结果 → close 关闭",
       ],

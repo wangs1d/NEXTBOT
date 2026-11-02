@@ -43,8 +43,6 @@ export type IntelServiceDeps = {
   /** 最近投递回执（用户接受/忽略/静音），喂给判断 */
   feedback?: () => IntelJudgeFeedback["recentOutcomes"];
   styleBrief?: (actorId: string) => Promise<string | null> | string | null;
-  /** 说话风格卡：进判断上下文，让一次调用就写出带本人语气的草稿 */
-  voiceCard?: () => string | null;
   gate?: IntelGate;
   vipSenders?: readonly string[];
   /** 说出后模型认为日后仍需记得的事（承诺/待办），交给记忆模块自行遗忘 */
@@ -458,16 +456,7 @@ export class IntelService {
       inConversation: this.deps.inConversation(actorId),
       feedback: this.feedback(actorId),
       styleBrief,
-      voiceCard: this.voiceCardOf(),
     };
-  }
-
-  private voiceCardOf(): string | null {
-    try {
-      return this.deps.voiceCard?.() ?? null;
-    } catch {
-      return null;
-    }
   }
 
   /** 第一遍只看目录行；模型点名 needDetail 的条目再带详情判一次（最多 2 条） */

@@ -124,14 +124,41 @@ export interface MailWatchDeps {
   persistPath?: string;
   /** 差量窗口大小（每轮取最新 N 封），默认 50 */
   windowSize?: number;
+  /**
+   * 本实例要盯的邮箱账号（凭据 + 归属）。不传时沿用 env 里的 MAIL_WATCH_*，
+   * 即"部署方自己的那一个邮箱"——云端多租户下由 MailWatchRegistry 逐账号注入。
+   */
+  account?: MailboxAccount;
+}
+
+/**
+ * 一个可轮询的邮箱账号。一台服务器服务多人时凭据必须带归属：
+ * 没有 actorId 的邮箱不知道该把新邮件交给谁，只配当部署方的自用邮箱。
+ */
+export interface MailboxAccount {
+  /** 归属用户（新邮件、日程、账单都落在这个账号名下） */
+  actorId: string;
+  host: string;
+  port: number;
+  /** 邮箱地址 = IMAP 登录名 */
+  user: string;
+  mailbox?: string;
+  /** IMAP 授权码（非邮箱登录密码）；缺省时 start() 如实报"等待授权码" */
+  pass?: string;
+  /** 账号级开关：false 时如实报已关闭，不静默空转 */
+  enabled?: boolean;
 }
 
 export interface MailWatchConfig {
   enabled: boolean;
+  /** MAIL_WATCH_ENABLED 被显式写成关（部署级硬闸）：接入账号也不点亮轮询 */
+  hardStop: boolean;
   host: string;
   port: number;
   user: string;
   pass: string;
+  /** 部署方声明那份 MAIL_WATCH_PASS 归谁（裸 userId/actorId）；空=无归属，走单机形态收编规则 */
+  passOwner: string;
   mailbox: string;
   pollSec: number;
   /** 安静时的间隔上限秒（自适应退避封顶） */
@@ -145,6 +172,8 @@ export interface MailWatchConfig {
 
 export interface MailWatchStatus {
   enabled: boolean;
+  /** 部署级硬闸（MAIL_WATCH_ENABLED 显式关）：为真时任何账号都不会去拉邮件 */
+  hardStop: boolean;
   configured: boolean;
   running: boolean;
   /** 是否有一轮拉取正在进行 */
@@ -225,10 +254,14 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
   );
   return {
     enabled: parseBooleanEnv(env.MAIL_WATCH_ENABLED),
+    // 显式写 0/false/off/no 才算部署级硬闸：这时任何账号（含自动接入、用户自助配的）
+    // 都不点亮轮询，一条 env 就能把整机邮箱盯梢停摆
+    hardStop: ["0", "false", "off", "no"].includes((env.MAIL_WATCH_ENABLED ?? "").trim().toLowerCase()),
     host: env.MAIL_WATCH_HOST?.trim() ?? "",
     port: Number.isFinite(portRaw) && portRaw > 0 ? Math.trunc(portRaw) : 993,
     user: env.MAIL_WATCH_USER?.trim() ?? "",
     pass: env.MAIL_WATCH_PASS?.trim() ?? "",
+    passOwner: env.MAIL_WATCH_PASS_OWNER?.trim() ?? "",
     mailbox: env.MAIL_WATCH_MAILBOX?.trim() || "INBOX",
     // 下限 30s：太频繁的轮询容易被邮箱服务商判定滥用封号；上限 1h 防止配置成"永不盯"
     pollSec,
@@ -829,6 +862,7 @@ export class MailWatchService {
   constructor(deps: MailWatchDeps = {}) {
     this.deps = deps;
     this.cfg = readMailWatchConfig(deps.env ?? process.env);
+    if (deps.account) this.applyAccount(deps.account);
     // 数据路径与其他服务一致：统一数据目录（config/data-dir）
     this.statePath = deps.persistPath ?? join(getDataDir(), "mail-watch", "processed-uids.json");
     this.windowSize = deps.windowSize ?? DEFAULT_WINDOW_SIZE;
@@ -843,13 +877,15 @@ export class MailWatchService {
   start(): void {
     if (this.running) return; // 幂等：重复 start 忽略
     if (!this.cfg.enabled) {
-      this.reason = "MAIL_WATCH_ENABLED=0：邮箱盯梢未启用";
+      this.reason = this.cfg.hardStop
+        ? "MAIL_WATCH_ENABLED=0：本机已停用邮箱盯梢（部署级硬闸，任何账号都不拉）"
+        : "邮箱盯梢未启用（MAIL_WATCH_ENABLED 未开）";
       this.log("info", `未启动：${this.reason}`);
       return;
     }
     if (!this.isConfigured()) {
       this.reason = this.cfg.host && this.cfg.user
-        ? "等待邮箱授权码：IMAP 需要授权码而非登录密码，请在设置页配置（MAIL_WATCH_PASS）"
+        ? "等待邮箱授权码：IMAP 需要授权码而非登录密码，请在设置页填入这个邮箱的授权码"
         : "邮箱盯梢未配置：需要 MAIL_WATCH_HOST / MAIL_WATCH_USER / MAIL_WATCH_PASS";
       this.log("info", `未启动：${this.reason}`);
       return;
@@ -902,39 +938,19 @@ export class MailWatchService {
   }
 
   /**
-   * 授权码提交（设置页）：配置后即刻尝试启动轮询。返回启动后状态供 UI 刷新。
-   * 本进程内生效；持久化由客户端写 config.env（重启后 runtime 环境注入回来）。
+   * 换绑/补全本实例盯的邮箱账号（host/user/mailbox/pass/归属一次给全）。
+   * 归属（actorId）跟账号一起走：新邮件、日程、账单只落这个账号名下。
+   * 接入即开盯（自动接入的语义），除非部署侧用 MAIL_WATCH_ENABLED=0 钉了硬闸。
    */
-  applyPass(pass: string): MailWatchStatus {
-    this.cfg.pass = pass.trim();
-    if (!this.cfg.enabled) this.cfg.enabled = true;
-    this.start();
-    return this.status();
-  }
-
-  /**
-   * 邮箱自动接入（P2 2026-10-01）：用户 env 未显式配 host/user 时，用注册表
-   * 解析出的账号自动补全（host 按域映射、user=email、actorId=账号 id）。
-   * 授权码（pass）服务端无从得知——缺时 start() 仍如实报 needs_pass，
-   * 用户在设置页/env 填一次即全链点亮。已显式配置时本方法不覆盖（env 优先）。
-   */
-  applyAutoAccount(acct: {
-    actorId: string;
-    email: string;
-    imapHost: string;
-    imapPort: number;
-  }): void {
-    if (process.env.MAIL_WATCH_HOST?.trim() || process.env.MAIL_WATCH_USER?.trim()) return;
-    this.cfg.host = acct.imapHost;
-    this.cfg.port = acct.imapPort;
-    this.cfg.user = acct.email;
-    this.cfg.actorId = acct.actorId;
-    // enabled 未显式开启时自动开启（自动接入的语义就是「登录即接入」）
-    if (!this.cfg.enabled) this.cfg.enabled = true;
-    this.log(
-      "info",
-      `邮箱自动接入：${acct.email} → ${acct.imapHost}（actor=${acct.actorId}）${this.cfg.pass ? "" : "；等待授权码（设置页 MAIL_WATCH_PASS）"}`,
-    );
+  applyAccount(acct: MailboxAccount): void {
+    this.cfg.host = acct.host.trim();
+    this.cfg.port = acct.port > 0 ? Math.trunc(acct.port) : 993;
+    this.cfg.user = acct.user.trim();
+    if (acct.mailbox?.trim()) this.cfg.mailbox = acct.mailbox.trim();
+    // 授权码以账号为准：没带就是没带。留空回落到 env 会把部署方那份码错发给别人的邮箱连接
+    this.cfg.pass = acct.pass?.trim() ?? "";
+    this.cfg.actorId = acct.actorId.trim();
+    if (!this.cfg.hardStop) this.cfg.enabled = true;
   }
 
   /** 当前快照（管理面/工具查询用；含诚实失败信息）。 */
@@ -942,6 +958,7 @@ export class MailWatchService {
     const state = this.loadState();
     return {
       enabled: this.cfg.enabled,
+      hardStop: this.cfg.hardStop,
       configured: this.isConfigured(),
       running: this.running,
       polling: this.polling,
@@ -1127,11 +1144,11 @@ export class MailWatchService {
    * 不发起新的 IMAP 连接——直接从处理环形缓冲取；内核仅做形状转换。
    * 供 `MailSensor.collect()` 调用；未启用邮箱时返回空数组（不抛错）。
    */
-  fetchNewSince(since: number): Array<{ uid: number; mail: IncomingMail; importance: string }> {
+  fetchNewSince(since: number): Array<{ uid: number; at: number; mail: IncomingMail; importance: string }> {
     return this.recentMails
       .filter((r) => r.at > since)
       .sort((a, b) => a.at - b.at)
-      .map((r) => ({ uid: r.uid, mail: r.mail, importance: r.importance }));
+      .map((r) => ({ uid: r.uid, at: r.at, mail: r.mail, importance: r.importance }));
   }
 
   /** 写入处理环形缓冲（容量封顶，防长期运行膨胀） */

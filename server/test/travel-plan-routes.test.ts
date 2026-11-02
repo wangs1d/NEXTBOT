@@ -18,6 +18,8 @@ import path from "node:path";
 
 // 环境变量须在模块导入前设置（travel-plan-store / travel-share-store 单例构造时读取）
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-plan-routes-test-"));
+/** 测试用户：路由按 userId/sessionId 解析 actorId，注入到每个请求 */
+const TEST_ACTOR = "tester@example.com";
 process.env.TRAVEL_PLAN_STORE_DIR = path.join(tmpDir, "plans");
 process.env.TRAVEL_SHARE_STORE_FILE = path.join(tmpDir, "share-codes.json");
 
@@ -48,6 +50,7 @@ function buildPlan(): StoredTravelPlan {
   });
   return {
     planId: "plan-routes-test-1",
+    actorId: TEST_ACTOR,
     destination: "马尔代夫",
     title: "马尔代夫2日游",
     startDate: "2026-08-30",
@@ -114,6 +117,12 @@ function makeStubService(options: { alternative?: typeof alternativePoi | null }
 
 function buildApp(service?: PlanningService) {
   const app = Fastify({ logger: false });
+  app.addHook("preValidation", async (req) => {
+    (req.query as Record<string, unknown>).userId = TEST_ACTOR;
+    if (req.body && typeof req.body === "object") {
+      (req.body as Record<string, unknown>).userId = TEST_ACTOR;
+    }
+  });
   registerTravelPlanRoutes(app, service ? { travelPlanningService: service } : {});
   return app;
 }

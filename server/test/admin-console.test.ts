@@ -146,6 +146,7 @@ test("支付：台账只记真实订单（模拟单不落库、历史 mock 行�
   // 直接落一笔真实（live）订单
   getPaymentOrderLedger().record({
     outTradeNo: "LIVE-TEST-0001",
+    actorId: "admin-console-test@local",
     provider: "alipay",
     method: "native",
     amount: 66,
@@ -176,6 +177,7 @@ test("支付：台账只记真实订单（模拟单不落库、历史 mock 行�
   // 历史 mock 行清理：新开台账连接（open 时清一次）后不可再见，真实订单保留
   new PaymentOrderLedger().record({
     outTradeNo: "MOCK-LEGACY-1",
+    actorId: "admin-console-test@local",
     provider: "wechat",
     method: "native",
     amount: 1,

@@ -54,6 +54,14 @@ if ($Edition -eq 'oss') {
   if (-not $PSBoundParameters.ContainsKey('UpdateManifestUrl')) { $UpdateManifestUrl = '' }
   if (-not $PSBoundParameters.ContainsKey('ControlPlaneUrl')) { $ControlPlaneUrl = '' }
 }
+# 签名证书：显式参数优先；没传时用本机那张 NextBot 自签证书（私钥在 CurrentUser\My，
+# 不在仓库里），避免下一次发版默默出回未签包。CA 证书到手后照旧传 -CertThumbprint。
+if (-not $CertThumbprint) {
+  $autoSign = Get-ChildItem Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+    Where-Object { $_.NotAfter -gt (Get-Date) -and $_.FriendlyName -eq 'NextBot code signing (self-signed)' } |
+    Select-Object -First 1
+  if ($autoSign) { $CertThumbprint = $autoSign.Thumbprint }
+}
 $Repo = Resolve-Path (Join-Path $PSScriptRoot '..\..')
 $StageRoot = $StageRootPath
 $FlutterApp = Join-Path $Repo 'client\flutter_app'
@@ -183,7 +191,11 @@ New-Item -ItemType Directory -Force -Path $StageApp, $StageRuntime | Out-Null
 # 集合按包内全部原生二进制的 import 表取全：onnxruntime.dll 除 msvcp140/vcruntime140(_1)
 # 外还要 msvcp140_1 与 msvcp140_atomic_wait，少一个是装机后本地向量引擎/声纹加载崩，
 # 而构建机 System32 常带完整 redist，本地冒烟看不出来。
-Copy-Item (Join-Path $FlutterApp 'build\windows\x64\runner\Release\*') $StageApp -Recurse -Force
+# 运行期日志不进包：App 在 Release 目录里就地跑过会写下 pai_app_stderr.log——它既会
+# 因被占用而拦下整次 staging 拷贝，也可能把上一台机器的运行痕迹发给所有用户。
+Get-ChildItem (Join-Path $FlutterApp 'build\windows\x64\runner\Release') -Force |
+  Where-Object { $_.Extension -ne '.log' } |
+  ForEach-Object { Copy-Item $_.FullName $StageApp -Recurse -Force }
 foreach ($dll in 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_atomic_wait.dll',
                  'vcruntime140.dll', 'vcruntime140_1.dll') {
   $src = Join-Path $env:windir "System32\$dll"
@@ -271,6 +283,11 @@ Copy-Item (Join-Path $Repo 'server\config') (Join-Path $StageRuntime 'config') -
 # （~4MB），装机包不带 sourcemap。
 Copy-Item (Join-Path $Repo 'server\web') (Join-Path $StageRuntime 'web') -Recurse -Force
 Get-ChildItem (Join-Path $StageRuntime 'web') -Recurse -File -Include '*.map' -ErrorAction SilentlyContinue | Remove-Item -Force
+
+# 3.5.2 人格冻结层：agent\SOUL.md 是唯一人格正文源，soul-store 按 serverRoot()
+# （= runtime 根）下的 agent\SOUL.md 解析。漏拷 → 装机版无人格（【人格】块整块缺席）。
+New-Item -ItemType Directory -Force -Path (Join-Path $StageRuntime 'agent') | Out-Null
+Copy-Item (Join-Path $Repo 'agent\SOUL.md') (Join-Path $StageRuntime 'agent\SOUL.md') -Force
 
 # 3.6 server 私有依赖：npm 工作区不会把全部依赖提升到根 node_modules
 # （如 mem0ai、groq-sdk、@anthropic-ai/sdk 等只落在 server\node_modules），
@@ -666,34 +683,74 @@ if (-not $pwSpawnExe.StartsWith($pwStagedBrowserDir, [System.StringComparison]::
 Write-Host "  包内浏览器实测可用：$pwSpawnExe" -ForegroundColor Green
 Write-Host ($pwProbeText.Trim()) -ForegroundColor Green
 
+Write-Host '== [4.8/5] 签名包内自有二进制（未传 -CertThumbprint 则整段跳过）=='
+# signtool 只查找一次：payload（本步）与 Setup.exe（[5/5] 之后）共用。
+$signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
+if (-not $signtool) {
+  $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
+    Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1 -ExpandProperty FullName
+}
+function Invoke-NBSign([string]$file) {
+  if (-not (Test-Path $file)) { throw "待签文件不存在: $file" }
+  if (-not $signtool) { throw "指定了 -CertThumbprint 但找不到 signtool.exe（需安装 Windows SDK）" }
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'   # signtool 的 stderr 在 EAP=Stop 下会变成终止错误
+  try {
+    $signOut = & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $CertThumbprint $file 2>&1
+    $signCode = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevEap }
+  if ($signCode -ne 0) { throw "签名失败（exit=$signCode）：$file`n$($signOut -join "`n")" }
+  Write-Host "  signed: $file"
+}
+if ($CertThumbprint) {
+  # 只签自有二进制：node.exe / ffmpeg.exe 是别人签过的官方件，覆上我们的签名只会让
+  # 杀软与人工核验更难对上原厂发布者。
+  foreach ($t in (Join-Path $StageApp 'NEXTBOT.exe'), (Join-Path $petDst 'sphere-overlay.exe')) {
+    Invoke-NBSign $t
+  }
+}
+
 Write-Host '== [5/5] Inno 编译 =='
 $iscc = @('C:\Program Files (x86)\Inno Setup 6\ISCC.exe', 'C:\Users\Administrator\AppData\Local\Programs\Inno Setup 6\ISCC.exe') |
   Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $iscc) { throw '未找到 ISCC.exe，请安装 Inno Setup 6' }
 $issArgs = @((Join-Path $Repo 'installer\nextbot.iss'), "/DAppVersion=$Version", "/DStage=$StageRoot", "/DEdition=$Edition", "/DWebView2Installer=$WebView2InstallerPath")
-if ($CertThumbprint) { $issArgs += '/DSignedSetup=1' }
+if ($CertThumbprint) {
+  # 卸载器与 Setup 本体的签名交给 ISCC（[Setup] SignTool=nextbot + /DSignedSetup=1）。
+  # /S 的命令串里不能再嵌引号——ISCC 会把那种整段当成脚本文件名（实测报
+  # "You may not specify more than one script filename"），所以落成两个包装脚本，
+  # 放 staging 根（本脚本刻意选的短路径，无空格）。
+  $signWrap = Join-Path $StageRoot 'iscc-sign.cmd'
+  $verifyWrap = Join-Path $StageRoot 'iscc-verify.cmd'
+  Set-Content -Path $signWrap -Value "@echo off`r`n`"$signtool`" sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $CertThumbprint %1" -Encoding ascii
+  Set-Content -Path $verifyWrap -Value "@echo off`r`n`"$signtool`" verify /pa /q %1" -Encoding ascii
+  $issArgs += '/DSignedSetup=1'
+  $issArgs += "/Snextbot=$signWrap `$f"
+  $issArgs += "/Snextbot-verifysig=$verifyWrap `$f"
+}
 & $iscc @issArgs
 if ($LASTEXITCODE -ne 0) { throw 'ISCC failed' }
 
 $setupName = if ($Edition -eq 'oss') { 'Nextbot-Setup-OSS.exe' } else { 'Nextbot-Setup.exe' }
 $out = Join-Path $Repo "windows_dist\installer\$setupName"
 
-# ---- 代码签名（预留位，无证书时跳过并如实警告）----
+# ---- 签名判定（无证书时跳过并如实警告）----
 # 之前所有包都是「无人签名」的：下载被浏览器拦（SmartScreen/信誉）、被杀软报，
-# 用户侧根本装不上。真正解法只有 OV/EV 证书（EV 直接免信誉期）。拿到证书后用
-# -CertThumbprint 走这条路径；届时也建议顺手签 app\NEXTBOT.exe 与 runtime\bin。
+# 用户侧根本装不上。真正解法只有 CA 签发的 OV/EV 证书（EV 直接免信誉期）。
+# [4.8] 签包内自有二进制，Setup 本体与卸载器由上面 ISCC 的 SignTool 同证书签好。
 if ($CertThumbprint) {
-  $signtool = (Get-Command signtool.exe -ErrorAction SilentlyContinue).Source
-  if (-not $signtool) {
-    $signtool = Get-ChildItem 'C:\Program Files (x86)\Windows Kits\10\bin' -Recurse -Filter signtool.exe -ErrorAction SilentlyContinue |
-      Where-Object { $_.FullName -match 'x64' } | Select-Object -First 1 -ExpandProperty FullName
+  $sig = Get-AuthenticodeSignature $out
+  if ($sig.Status -eq 'Valid') {
+    Write-Host "签名有效（链受信）：$($sig.SignerCertificate.Subject)" -ForegroundColor Green
+  } elseif ($sig.SignerCertificate -and $sig.SignerCertificate.Thumbprint -eq $CertThumbprint) {
+    # 自签证书到这一步必然如此：签名与时间戳都在，但链终止于不受信的自建根。
+    # 不能把它当"校验失败"炸掉，也不能把它说成"已受信"。
+    Write-Host "签名已写入且签名者指纹与 -$CertThumbprint 一致，但证书链不受信（Status=$($sig.Status)）。" -ForegroundColor Yellow
+    Write-Host '          自签证书的固有边界：SmartScreen「未知发布者」不会因此消失；要让目标机认它，须把公钥证书导入那台机器的受信任根+受信任发布者，' -ForegroundColor Yellow
+    Write-Host '          或直接换成 CA 签发的 OV/EV 证书重出包（本脚本流程不变）。' -ForegroundColor Yellow
+  } else {
+    throw "签名校验失败：Status=$($sig.Status)，签名者=$($sig.SignerCertificate.Thumbprint)（期望 $CertThumbprint）"
   }
-  if (-not $signtool) { throw "指定了 -CertThumbprint 但找不到 signtool.exe（需安装 Windows SDK）" }
-  & $signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /sha1 $CertThumbprint $out
-  if ($LASTEXITCODE -ne 0) { throw "signtool 签名失败（exit=$LASTEXITCODE）" }
-  & $signtool verify /pa /v $out
-  if ($LASTEXITCODE -ne 0) { throw '签名校验失败' }
-  Write-Host "已签名并校验：$CertThumbprint" -ForegroundColor Green
 } else {
   Write-Host '警告：本次未签名（无证书）。下载侧仍可能触发 SmartScreen「未知发布者」拦截；' -ForegroundColor Yellow
   Write-Host '      拿到代码签名证书后加 -CertThumbprint <SHA1> 重新出包即可。' -ForegroundColor Yellow

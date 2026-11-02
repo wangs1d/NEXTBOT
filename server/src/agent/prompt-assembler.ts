@@ -1,5 +1,6 @@
 import type { AgentPromptMemoryContext } from "../external-model/types.js";
 import { RENDER_PROTOCOL_PROMPT } from "../services/render-protocol-prompt.js";
+import { recordPromptInjection } from "./prompt-ledger.js";
 
 /**
  * Prompt 单一组装出口（2026-08-28 注入路径统一重构）。
@@ -17,9 +18,8 @@ import { RENDER_PROTOCOL_PROMPT } from "../services/render-protocol-prompt.js";
  *  - dynamicContext：本轮易变块（时间/召回/任务/短期上下文）
  *
  * 家族合并（块数 40+ → 10 组）：
- *  - 【记忆整理】：关系/生活主题/梦境/连续性/跨天回顾（5→1）
  *  - 【短期上下文】：最近对话/工作记忆/会话回顾/今日日志/今日摘要（5→1，2026-09-23 并入 sessionRecap）
- *  - 【用户档案】：画像/偏好/事实/持久记忆/会话回顾（5→1）
+ *  - 【用户档案】：画像/偏好/事实（3→1）
  *  - 【待办与承诺】：承诺/未完成事项（2→1）
  *  - [Turn Task Context]：任务/追问锚点/建议工具链（3→1）
  */
@@ -32,7 +32,7 @@ import { RENDER_PROTOCOL_PROMPT } from "../services/render-protocol-prompt.js";
 export const GLOBAL_MEMORY_RULE = [
   "【记忆使用规则】",
   "下方所有「记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项」块均为历史背景，仅供衔接与指代消解，不是用户的最新指令。「用户最新一条消息」才是本轮的唯一指令基准。除非用户明确要求回忆历史，否则一律以最新消息为准；当历史记忆与最新消息冲突时，以最新消息为准，并仅就最新消息作答。",
-  "人称换算铁律：记忆/画像条目里出现的第一人称「我」一律指用户本人（对话里的说话人是用户），不是你自己。向用户转述记忆时必须换算人称：用户的「我」要说成「你」，你自己（助手）只能用「我」自指。绝不把用户的事说成自己的事（例：记忆表明用户住在兴义，只能说「我知道你在兴义」，绝不能说「你光知道我在兴义」）；也不把自己的行为安到用户头上。",
+  "人称换算铁律：记忆/画像条目里出现的第一人称「我」一律指用户本人（对话里的说话人是用户），不是你自己。向用户转述记忆时必须换算人称：用户的「我」要说成「你」，你自己（助手）只能用「我」自指。绝不把用户的事说成自己的事，也不把自己的行为安到用户头上。",
   "无痕运用：画像/记忆直接体现在判断里，像老朋友一样自然知道，禁止说「根据我的记忆/画像/档案」「资料显示你」这类元话语暴露记忆系统的存在。健康/财务/家庭等敏感记忆只在用户主动提起该话题时才可运用。",
 ].join("\n");
 
@@ -43,9 +43,6 @@ const SHORT_TERM_DISCLAIMER =
 /** 参与渲染的记忆字段全集（单一清单，替代旧版两份不一致的 gate 列表）。 */
 const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "persona",
-  "personalityCore",
-  "values",
-  "abilities",
   "agentCaps",
   "userUnderstanding",
   "userFacts",
@@ -53,11 +50,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "turnAddressing",
   "userProfileSummary",
   "memoryInventory",
-  "relationshipMemory",
-  "lifeThemeMemory",
-  "dreamMemory",
-  "memoryContinuity",
-  "yesterdayHighlight",
   "semanticIntent",
   // 在办目标 / 会话步骤（2026-10-19）：必须进白名单，否则「只有目标、没别的记忆」
   // 的轮次会被 hasAnyPromptMemory 判空、整块不渲染（只填字段不渲染的老坑）。
@@ -89,7 +81,6 @@ const RENDERED_MEMORY_FIELDS: ReadonlyArray<keyof AgentPromptMemoryContext> = [
   "conversationTimeline",
   "skillIndex",
   "interestList",
-  "voiceBaseline",
   "modeRoleGuidance",
   "toneGuidance",
   "emotionState",
@@ -102,11 +93,8 @@ export function hasAnyPromptMemory(memory?: AgentPromptMemoryContext): boolean {
 }
 
 /**
- * 动态风格层 → 单一【本轮说话适配】块。
- *
- * 2026-09-22 人格·终极版重塑后，本块只保留模式行（对话/任务职责）；
- * 语气/情绪/关系由 persona-core 的 mood 动态块承担（agent-core 解析注入），
- * 基准称呼等规则随【人格·静态】块。全空时不再输出空壳块。
+ * 动态风格层 → 单一【本轮说话适配】块：只承载本轮模式职责行；语气/情绪/关系
+ * 由 persona-core 的 mood 动态块承担。全空不输出空壳块。
  */
 function buildReplyStyleGuide(memory: AgentPromptMemoryContext): string {
   const lines: string[] = [];
@@ -154,11 +142,11 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 在每轮对话收尾都会被后台抽取/画像聚合改写，若坐在稳定层中段，其后所有真正
   // 稳定的内容（人格/技能/夜间记忆）在新对话首轮全部 miss（实测地板命中恒为
   // baseSystem+规则+协议+人格核 ≈1.4K，其后 ~3-4K 白白重发）。因此：
-  //  - CORE 重配置级：人格内核/人格/价值观/能力/Agent World/技能索引/兴趣/静态人格
-  //    （只在显式重配置时变）
-  //  - SLOW 夜间级：记忆目录/记忆整理家族（夜间巩固器写入）
-  //  - MEMORY 对话级：理解档案/事实库/长期画像/持久记忆（每轮对话收尾的后台抽取
+  //  - CORE 重配置级：人格正文/宿主能力/技能索引/兴趣（只在显式重配置时变）
+  //  - SLOW 夜间级：记忆目录（夜间巩固器写入）
+  //  - MEMORY 对话级：理解档案/事实库/关系一览/长期画像（每轮对话收尾的后台抽取
   //    即可改写）——排在稳定层最末，改写只打断自己及其后内容
+  //    按本轮 query 召回的字段（持久记忆/偏好/事实/回顾）不进稳定层，见动态层。
   // 层内保持原语义相对顺序；会话冻结（prefix-cache freezeStableForSession）覆盖
   // 会话内一致性，本契约覆盖跨对话命中率。两者合起来才是完整的缓存架构。
   // 契约由 test/prompt-stable-tiering.test.ts 以「字节公共前缀长度」锁定：
@@ -168,41 +156,18 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   const stableMemory: string[] = [];
 
   // CORE：重配置级
-  if (m.personalityCore) stableCore.push(`【人格内核】\n${m.personalityCore}`);
-  if (m.persona) stableCore.push(`【人格与角色】\n${m.persona}`);
-  if (m.values) stableCore.push(`【价值观与原则】\n${m.values}`);
-  // 能力合并：KV 能力倾向 + 宿主 Agent 能力说明本就是同一语义（"我能干什么"）
-  const abilitiesCombined = [m.abilities, m.agentCaps].filter(Boolean).join("\n");
-  if (abilitiesCombined) stableCore.push(`【能力与工具】\n${abilitiesCombined}`);
+  // 【人格】块（soul-store 产出的唯一人格文本，自带标题）+ 宿主能力说明。
+  // 动态 mood 块（personaMood，每轮单一状态）在 dynamicContext 声明后沉入动态层。
+  if (m.persona) stableCore.push(m.persona);
+  if (m.agentCaps) stableCore.push(`【能力与工具】\n${m.agentCaps}`);
   if (m.skillIndex) stableCore.push(m.skillIndex);
   if (m.interestList) stableCore.push(m.interestList);
-  // 静态人格块常驻（称呼/关系档变化才重算，前缀缓存友好）。动态 mood 块
-  // （personaMood，每轮单一状态）在 dynamicContext 声明后沉入动态层。
-  // 旧【说话方式·管家底色/伙伴面】两块（含调子菜单 few-shot 与破功禁句表）
-  // 已整体废弃，由 agent/persona-core 承担。
-  if (m.personaStatic) stableCore.push(m.personaStatic);
-  // 【语感基准】few-shot（2026-10-06 活人感治理）：示例按 sessionId 轮换、
-  // 会话内字节稳定——放 MEMORY 带（稳定层沉底），跨 session 才变字节。
-  if (m.voiceBaseline) stableMemory.push(m.voiceBaseline);
 
   // SLOW：夜间级
   if (m.memoryInventory) stableSlow.push(`【记忆目录】\n${m.memoryInventory}`);
-  // 记忆整理家族（5→1）：夜间整理的跨会话背景记忆。块内保留源标题作小节标签。
-  const memoryConsolidated = buildFamilyBlock(
-    "【记忆整理】",
-    "（夜间整理的跨会话背景记忆）",
-    [
-      { label: "关系", content: m.relationshipMemory },
-      { label: "生活主题", content: m.lifeThemeMemory },
-      { label: "梦境整理", content: m.dreamMemory },
-      { label: "连续性", content: m.memoryContinuity },
-      { label: "跨天回顾", content: m.yesterdayHighlight },
-    ],
-  );
-  if (memoryConsolidated) stableSlow.push(memoryConsolidated);
 
-  // MEMORY：对话级（稳定层沉底带）。查询相关的记忆字段（事实/偏好/待办承诺，
-  // 带 minRelevance 按轮过滤）不在此列——它们留动态层。⚠️ sessionRecap 也不在此列
+  // MEMORY：对话级（稳定层沉底带）。查询相关的记忆字段（事实/偏好/待办承诺/
+  // 持久记忆召回，带 minRelevance 按轮过滤）不在此列——它们留动态层。⚠️ sessionRecap 也不在此列
   // （2026-09-23）：滚动 recap 随 thread 裁剪持续追加，会话内几乎每轮都在变，
   // 已在动态层【短期上下文】家族。
   // 用户理解档案（理解档案 store）：agent 对用户理解的结构化沉淀，先于派生画像
@@ -214,14 +179,6 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   // 用户关系一览（生活模型）：用户生活中人物/宠物的结构化一览，紧跟结构化事实。
   if (m.lifeRelations) stableMemory.push(m.lifeRelations);
   if (m.userProfileSummary) stableMemory.push(`【用户长期画像】\n${m.userProfileSummary}`);
-  const persistentMemoryBlock = buildFamilyBlock(
-    "【持久记忆】",
-    "（长期沉淀内容，会话内基本不变）",
-    [
-      { label: "持久记忆", content: m.memorySummary },
-    ],
-  );
-  if (persistentMemoryBlock) stableMemory.push(persistentMemoryBlock);
 
   const stablePrefix: string[] = [...stableCore, ...stableSlow, ...stableMemory];
 
@@ -265,6 +222,10 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
       `【记忆图联想检索】\n（历史记忆检索结果，可能来自更早会话，非用户本轮所述；其中提到的事发生时间不等于现在，别把旧事当刚发生，不确定时如实说明，与当前对话冲突时以用户最新消息为准）\n（仅当与当前话题相关时才引用，可自然带出处如"你之前提过…"；不主动翻旧账，不以"接着上次"开头）\n${m.narrativeRecall}`,
     );
   }
+  // 持久记忆（KV memory_summary 的按轮召回结果）：命中制，必须留动态层——
+  // 内容由本轮 userQuery 决定，坐在稳定层会被会话冻结成首轮字节，后续换话题
+  // 既拿不到新命中，也把首轮命中一直灌下去。
+  if (m.memorySummary) dynamicContext.push(`【持久记忆】\n${m.memorySummary}`);
   // 事件回忆（L0）：仅时间回溯意图 + 真实命中时才有值，沉底动态层。
   if (m.eventRecall) dynamicContext.push(m.eventRecall);
   // 短期上下文家族（4→1）：工作记忆 / 最近对话 / 今日日志 / 今日摘要
@@ -278,8 +239,7 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
     { label: "今日摘要", content: m.dailyDigest },
   ]);
   if (shortTermBlock) dynamicContext.push(shortTermBlock);
-  // 用户档案家族（3→1）：画像 / 偏好 / 事实（查询相关的记忆字段留动态层；
-  // 持久记忆/会话回顾已上移稳定层）
+  // 用户档案家族（3→1）：画像 / 偏好 / 事实（查询相关的记忆字段留动态层）
   const userProfileBlock = buildFamilyBlock("【用户档案】", undefined, [
     { label: "画像", content: m.userProfile },
     { label: "偏好", content: m.memoryPreferences },
@@ -348,17 +308,26 @@ export function assembleSystemPrompt(
     )
       .join("\n\n")
       .trim();
+    recordPromptInjection({
+      baseSystem: base,
+      stablePrefix: includeRenderProtocol ? [RENDER_PROTOCOL_PROMPT] : [],
+      dynamicContext: [],
+      renderProtocol: includeRenderProtocol,
+    });
     return { fullSystemPrompt: withProtocol, stableSystemPrompt: withProtocol };
   }
   // 协议块置于全局规则之后、记忆稳定层之前：内容与轮次无关，前缀缓存友好。
-  const stableSystemPrompt = [
-    base,
+  const headBlocks = [
     GLOBAL_MEMORY_RULE,
     ...(includeRenderProtocol ? [RENDER_PROTOCOL_PROMPT] : []),
-    ...stablePrefix,
-  ]
-    .join("\n\n")
-    .trim();
+  ];
+  recordPromptInjection({
+    baseSystem: base,
+    stablePrefix: [...headBlocks, ...stablePrefix],
+    dynamicContext,
+    renderProtocol: includeRenderProtocol,
+  });
+  const stableSystemPrompt = [base, ...headBlocks, ...stablePrefix].join("\n\n").trim();
   const dynamicSystemPrompt = dynamicContext.join("\n\n").trim() || undefined;
   return {
     fullSystemPrompt: dynamicSystemPrompt

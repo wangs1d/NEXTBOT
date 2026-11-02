@@ -27,8 +27,8 @@ const MARKER_TOKEN_RE =
  *  闭合，2026-10-11 实机探针实证透进气泡）。规范形由 MARKER_TOKEN_RE 覆盖。 */
 const RENDER_DECL_VARIANT_RE = /\[RENDER_(?:HINT|AS)\]\s*[:：]\s*[A-Za-z_]+\]?/g;
 
-/** 独占一行的全大写方括号标记（防御未来新增的服务端标记类型） */
-const MARKER_LINE_RE = /^[ \t]*\[[A-Z_]+(?::[A-Za-z_]+)?\][ \t]*$/;
+/** 独占一行的全大写方括号标记（半角/全角括号都算；防御未来新增的服务端标记类型） */
+const MARKER_LINE_RE = /^[ \t]*[\[【][A-Z0-9_ :\-]+[\]】][ \t]*$/;
 
 /** 结构化产出标记 token：命中即意味着本轮 done 会携带卡片/媒体/渲染块。
  *  注意不含 NEXT_UP（只产 followups 字段，不改变正文渲染形态）与
@@ -38,10 +38,12 @@ const STRUCTURAL_MARKER_TOKEN_RE =
 
 const CARD_START_LINE = "[AGENT_RESULT_CARD_START]";
 const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
-/** NEXT_UP 标记容错：模型实测会漏写下划线（[NEXT_UPSTART]，2026-10-24 真机）。 */
-const NEXT_UP_START_RE = /\[NEXT[ _]?UP[ _]?START\]/i;
-const NEXT_UP_END_RE = /\[NEXT[ _]?UP[ _]?END\]/i;
-const NEXT_UP_MARKER_TOKEN_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
+/** NEXT_UP 标记容错（2026-11-02 根修）：漏下划线、自造前缀（NOEXTUP）、全角括号
+ *  一律按「方括号 token 内同时含 UP 与 START/END」识别。 */
+const NEXT_UP_START_RE = /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】]/i;
+const NEXT_UP_END_RE = /[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]/i;
+const NEXT_UP_MARKER_TOKEN_RE =
+  /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
 
 /** 已知标记起始段：残段命中其前缀才继续扣留（普通方括号文本不受影响） */
 const MARKER_HEADS = [
@@ -55,6 +57,7 @@ const MARKER_HEADS = [
   "[IMAGE_RESULT_",
   "[NEXT_UP_",
   "[NEXTUP", "[NEXT ",
+  "[NOEXT", "【NEXT", "【NOEXT",
   "[RENDER_", "[AGENT_", "[DATA_", "[VIDEO_", "[CONTENT_", "[CHAT_", "[IMAGE_", "[NEXT_",
 ];
 

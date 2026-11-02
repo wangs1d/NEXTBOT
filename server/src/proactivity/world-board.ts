@@ -113,7 +113,10 @@ export class WorldBoard {
 
   /** 消费一条传感信号，按流映射到对应层（actorId 缺省落 defaultActorId） */
   ingestSignal(signal: Signal, defaultActorId?: string | null): void {
-    const actorId = signal.actorId ?? defaultActorId ?? "local_user";
+    // 无归属信号直接丢弃：多租户下"不知道是谁的"不能塞进某个幽灵 actor，
+    // 否则会被当成真实用户参与规则/展示。
+    const actorId = signal.actorId ?? defaultActorId ?? null;
+    if (!actorId) return;
     const at = signal.at;
     const payload = signal.payload ?? {};
     switch (signal.stream) {

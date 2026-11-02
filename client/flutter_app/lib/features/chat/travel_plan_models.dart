@@ -2,7 +2,7 @@ import "dart:convert";
 
 import "package:http/http.dart" as http;
 
-import "../../core/config/api_config.dart";
+import "../../core/config/media_url.dart";
 import "../../core/utils/agent_result_parser.dart";
 
 /// 行程链路远程图床域（Wikimedia 家族）：这些域在国内网络直连不可达
@@ -32,11 +32,11 @@ String resolveTravelMediaUrl(String url) {
   if (u.isEmpty) return u;
   if (u.startsWith("http")) {
     if (_isBlockedRemoteImageHost(u)) {
-      return "${ApiConfig.httpBase}/travel/media/remote?u=${Uri.encodeComponent(u)}";
+      return MediaUrl.resolve("/travel/media/remote", query: <String, String>{"u": u});
     }
     return u;
   }
-  return "${ApiConfig.httpBase}${_encodeNonAsciiPath(u)}";
+  return MediaUrl.resolve(_encodeNonAsciiPath(u));
 }
 
 /// 路径段含非 ASCII（如中文目录 `destcover贵阳-<sha>`）时逐段百分号编码。
@@ -98,8 +98,10 @@ class TravelLiveCover {
 
   static Future<String?> _fetchViaHttp(String destination) async {
     final Uri uri = Uri.parse(
-      "${ApiConfig.httpBase}/travel/media/destination-cover"
-      "?destination=${Uri.encodeComponent(destination)}",
+      MediaUrl.resolve(
+        "/travel/media/destination-cover",
+        query: <String, String>{"destination": destination},
+      ),
     );
     final http.Response resp =
         await http.get(uri).timeout(const Duration(seconds: 6));

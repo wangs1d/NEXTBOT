@@ -13,6 +13,8 @@ import {
 export interface PaymentOrderRequest {
   amount: number;
   description: string;
+  /** 订单归属用户（台账/护栏日预算按它隔离） */
+  actorId?: string;
   outTradeNo?: string;
   provider: "wechat" | "alipay";
   method: "native" | "h5";
@@ -80,10 +82,13 @@ function rsaSha256Verify(data: string, signature: string, publicKeyPem: string):
 export class PaymentService {
   private config: PaymentConfig;
   private mockOrders: Map<string, PaymentOrderResult>;
+  /** 模拟单归属（进程内）：查询时校验，避免按单号读到别人的订单 */
+  private mockOrderActor: Map<string, string>;
 
   constructor() {
     this.config = getPaymentConfig();
     this.mockOrders = new Map();
+    this.mockOrderActor = new Map();
   }
 
   private wechatMode(): "live" | "mock" {
@@ -118,10 +123,11 @@ export class PaymentService {
   }
 
   /** 仅真实（live）下单落台账；模拟订单留在进程内 Map，不产生后台可见的测试数据。 */
-  private recordLedger(result: PaymentOrderResult, mode: "mock" | "live"): void {
+  private recordLedger(result: PaymentOrderResult, mode: "mock" | "live", actorId: string): void {
     if (mode !== "live") return;
     getPaymentOrderLedger().record({
       outTradeNo: result.outTradeNo,
+      actorId,
       provider: result.provider,
       method: result.method,
       amount: result.amount,
@@ -159,7 +165,7 @@ export class PaymentService {
     if (guardrail.dailyBudgetCny > 0) {
       const dayStart = new Date();
       dayStart.setHours(0, 0, 0, 0);
-      const usedToday = getPaymentOrderLedger().sumAmountSince(dayStart.toISOString());
+      const usedToday = getPaymentOrderLedger().sumAmountSince(dayStart.toISOString(), req.actorId ?? "");
       if (usedToday + req.amount > guardrail.dailyBudgetCny) {
         return (
           `支付护栏：今日代付累计已达 ${usedToday.toFixed(2)} 元（日预算 ${guardrail.dailyBudgetCny} 元），` +
@@ -204,15 +210,22 @@ export class PaymentService {
     }
 
     const outTradeNo = req.outTradeNo || generateOutTradeNo();
+    const actorId = req.actorId?.trim() ?? "";
 
     if (req.provider === "wechat") {
       const result = await this.createWechatOrder(req, outTradeNo);
-      if (result.ok) this.recordLedger(result, this.modeFor("wechat"));
+      if (result.ok) {
+        this.mockOrderActor.set(outTradeNo, actorId);
+        this.recordLedger(result, this.modeFor("wechat"), actorId);
+      }
       return result;
     }
     if (req.provider === "alipay") {
       const result = await this.createAlipayOrder(req, outTradeNo);
-      if (result.ok) this.recordLedger(result, this.modeFor("alipay"));
+      if (result.ok) {
+        this.mockOrderActor.set(outTradeNo, actorId);
+        this.recordLedger(result, this.modeFor("alipay"), actorId);
+      }
       return result;
     }
 
@@ -464,9 +477,25 @@ export class PaymentService {
     return result;
   }
 
-  async queryOrder(outTradeNo: string, provider: "wechat" | "alipay"): Promise<PaymentQueryResult> {
+  async queryOrder(
+    outTradeNo: string,
+    provider: "wechat" | "alipay",
+    actorId?: string,
+  ): Promise<PaymentQueryResult> {
+    const owner = this.mockOrderActor.get(outTradeNo);
     const mockOrder = this.mockOrders.get(outTradeNo);
     if (mockOrder) {
+      if (owner != null && owner !== "" && actorId != null && owner !== actorId) {
+        return {
+          ok: false,
+          outTradeNo,
+          provider,
+          tradeState: "NOT_FOUND",
+          tradeStateDesc: "订单不存在",
+          amount: 0,
+          error: "订单不属于当前用户",
+        };
+      }
       if (mockOrder.status === "paid") {
         return {
           ok: true,
@@ -496,6 +525,22 @@ export class PaymentService {
         tradeStateDesc: "待支付",
         amount: mockOrder.amount,
       };
+    }
+
+    // 台账里有归属的单：只允许本人查（渠道单号可撞，但不能借此读到别人的金额/状态）
+    if (actorId) {
+      const owner = getPaymentOrderLedger().ownerOf(outTradeNo);
+      if (owner !== null && owner !== actorId) {
+        return {
+          ok: false,
+          outTradeNo,
+          provider,
+          tradeState: "NOT_FOUND",
+          tradeStateDesc: "订单不存在",
+          amount: 0,
+          error: "订单不属于当前用户",
+        };
+      }
     }
 
     if (provider === "wechat") {
@@ -698,16 +743,16 @@ export class PaymentService {
     return Array.from(this.mockOrders.values());
   }
 
-  /** 管理后台订单列表：从持久台账读（只含真实订单）。 */
-  listOrders(limit = 200): LedgerOrderRow[] {
-    return getPaymentOrderLedger().list(limit).filter((o) => o.mode === "live");
+  /** 订单列表：从持久台账读（只含真实订单）；actorId 给出时只返回该用户。 */
+  listOrders(limit = 200, actorId?: string): LedgerOrderRow[] {
+    return getPaymentOrderLedger().list(limit, actorId).filter((o) => o.mode === "live");
   }
 
   /**
    * 订单统计（管理概览/支付页）：真实订单口径 —— 已支付金额即收入。
    * 模拟订单不落台账、不计入统计；护栏日预算（sumAmountSince）也只累计真实下单。
    */
-  orderStats(): {
+  orderStats(actorId?: string): {
     total: number;
     pending: number;
     paid: number;
@@ -715,7 +760,7 @@ export class PaymentService {
     refunded: number;
     paidAmount: number;
   } {
-    const live = getPaymentOrderLedger().stats().live;
+    const live = getPaymentOrderLedger().stats(actorId).live;
     return {
       total: live.total,
       pending: live.pending,

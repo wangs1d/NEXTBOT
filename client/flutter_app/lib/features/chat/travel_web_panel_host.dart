@@ -5,6 +5,7 @@ import "dart:ui" show Color;
 import "package:webview_windows/webview_windows.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/access_auth_api.dart";
 import "travel_web_panel_controller.dart";
 
 /// 整页 WebView 行程面板的进程级共享宿主（单例）。
@@ -97,6 +98,9 @@ class TravelWebPanelHost {
         path: "${base.path}/travel-map/desktop".replaceAll("//", "/"),
         queryParameters: <String, String>{
           "host": "1",
+          // 页面打开这一次带 query token：服务端把它落成同站 Cookie，页内
+          // /travel-plans、/travel-route 等 fetch 才发得出凭证（发不了头）
+          ...AccessCredentialStore.instance.accessTokenQuery,
           "_cb": DateTime.now().millisecondsSinceEpoch.toString(),
         },
       );

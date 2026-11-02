@@ -2,6 +2,8 @@ import "dart:async";
 
 import "package:flutter/painting.dart";
 
+import "../../core/config/media_url.dart";
+
 /// 行程图预热器：行程数据到手即并发预取（封面优先、条目实拍跟随），
 /// 卡片海报/画廊/面板打开时全部命中内存缓存——打开即见，不闪渐变占位。
 ///
@@ -47,7 +49,10 @@ abstract final class TravelImageWarmer {
   /// 单图预取：首帧解码完成/失败都安静收场。
   static Future<void> _warmOne(ImageConfiguration config, String url) {
     final Completer<void> done = Completer<void>();
-    final ImageStream stream = NetworkImage(url).resolve(config);
+    final ImageStream stream = NetworkImage(
+      url,
+      headers: MediaUrl.headersFor(url),
+    ).resolve(config);
     late final ImageStreamListener listener;
     listener = ImageStreamListener(
       (ImageInfo _, bool __) {

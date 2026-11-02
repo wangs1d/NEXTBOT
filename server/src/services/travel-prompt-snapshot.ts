@@ -17,8 +17,8 @@ import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js"
  * 构建行程状态快照（≤5 行 + 使用提示）。
  * 无任何已存行程时返回 undefined（不注入空块）。
  */
-export function buildTravelStatePrompt(userText?: string): string | undefined {
-  const plans = travelPlanStore.listSummaries(5);
+export function buildTravelStatePrompt(actorId: string): string | undefined {
+  const plans = travelPlanStore.listSummariesForActor(actorId, 5);
   if (plans.length === 0) return undefined;
   const lines = plans.map((p) =>
     `${p.destination || p.title}｜${p.startDate && p.endDate ? `${p.startDate}~${p.endDate.slice(5)}` : p.startDate || "日期未定"}｜${p.dayCount}天${p.totalCost ? `｜预算约¥${Math.round(p.totalCost)}` : ""}｜${p.planId}`,

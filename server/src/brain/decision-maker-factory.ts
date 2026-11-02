@@ -1,15 +1,14 @@
 // Agent Brain Center — LLM 决策器工厂（可插拔决策器入口）
 //
-// 职责：把散落在 bootstrap 装配代码中的三个 LLM 决策器实现集中到此文件，
+// 职责：把散落在 bootstrap 装配代码中的 LLM 决策器实现集中到此文件，
 // 通过工厂函数创建，让"换大脑"时这些决策器也能同步替换或重新配置。
 //
-// 三个决策器：
+// 决策器：
 //   1. EndToEndDecisionMaker — 主动开口决策（ProactionCortex 注入）
 //   2. DelegateJudge — 任务委派判断（PlannerCortex 注入）
-//   3. TopicExtractor — 主题词提取（BrainCenter.setTopicExtractor 注入）
 //
 // 设计原则：
-//   - 工厂返回已有接口类型（EndToEndDecisionMaker / DelegateJudge / TopicExtractor）
+//   - 工厂返回已有接口类型（EndToEndDecisionMaker / DelegateJudge）
 //   - 默认实现与原 bootstrap 内联实现完全等价（向后兼容）
 //   - 未来换大脑时可整体替换为 AGI 驱动的决策器实现
 
@@ -20,20 +19,6 @@ import { createExternalChatProviderFromEnv } from "../external-model/index.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 
 // ============================================================
-// TopicExtractor 接口定义（原为内联函数类型，现抽出独立接口）
-// ============================================================
-
-/**
- * 主题词提取器接口。
- *
- * 从用户文本中提取 1-3 个业务领域关键词，写入工作记忆槽位。
- * 由 BrainCenter.setTopicExtractor 注入，cognize 每轮异步触发不阻塞。
- */
-export interface TopicExtractor {
-  extract(text: string): Promise<string[]>;
-}
-
-// ============================================================
 // EndToEndDecisionMaker 默认实现
 // ============================================================
 
@@ -42,7 +27,7 @@ export interface TopicExtractor {
  *
  * 行为与原 bootstrap 内联实现完全等价：
  *   - 一次 LLM 完成"要不要说+说什么+要不要顺手做事"
- *   - 支持环境控制动作输出（calendar.create_task / smart_home.scene）
+ *   - 支持环境控制动作输出（calendar.create / smart_home.scene）
  *   - LLM 失败 → speak=false 兜底
  */
 export function createDefaultEndToEndDecisionMaker(): EndToEndDecisionMaker {
@@ -67,7 +52,7 @@ export function createDefaultEndToEndDecisionMaker(): EndToEndDecisionMaker {
         `判断是否要主动开口告诉用户这个信号，如果要，给出自然的话术。\n` +
         `注意：如果用户当前正在聊的话题与信号无关，不要强行把话题扯回信号内容。\n` +
         `同时判断是否需要顺手执行环境控制动作（如出行→建日程、深夜→晚安场景）。\n` +
-        `可用工具：calendar.create_task(args:{title,description,dueTime?})、smart_home.scene(args:{action:"activate",scene_name})。\n` +
+        `可用工具：calendar.create(args:{title,description,runAt?})、smart_home.scene(args:{action:"activate",scene_name})。\n` +
         `只输出 JSON：{"speak": true/false, "message": "话术或空", "reason": "简短理由", "actions": [{"tool":"工具名","args":{...},"reason":"原因"}]}\n` +
         `actions 可为空数组。仅在信号明显匹配工具场景时才填。`;
       let raw = "";
@@ -184,86 +169,31 @@ export function createDefaultDelegateJudge(): DelegateJudge {
 }
 
 // ============================================================
-// TopicExtractor 默认实现
+// 决策器集合工厂（一次性创建全部决策器）
 // ============================================================
 
 /**
- * 创建默认的主题词提取器。
+ * 决策器集合：EndToEndDecisionMaker + DelegateJudge。
  *
- * 行为与原 bootstrap 内联实现完全等价：
- *   - 从用户文本提取 1-3 个业务领域关键词
- *   - LLM 失败 → 返回空数组（不阻塞 cognize 主流程）
- *
- * @param provider 外部聊天提供方（bootstrap 传入已初始化的 externalChat 实例）
- */
-export function createDefaultTopicExtractor(provider: ExternalChatProvider): TopicExtractor {
-  return {
-    async extract(text: string): Promise<string[]> {
-      try {
-        let fullContent = "";
-        await provider.streamCompletion(
-          "topic-extractor",
-          {
-            text: `从下面用户输入中提取 1-3 个业务领域关键词（主题词），用 JSON 数组返回，如 ["股票","行情"]。
-
-只返回 JSON 数组本身，不要其他文字。关键词应为 2-4 字的中文业务领域名词（如"股票/基金/天气/会议/翻译/区块链/比特币"），不要返回通用动词或实体（已由规则提取）。
-
-用户输入：${text}`,
-          },
-          (delta: string) => {
-            fullContent += delta;
-          },
-        );
-        const jsonMatch = fullContent.match(/\[[\s\S]*\]/);
-        if (!jsonMatch) return [];
-        const arr = JSON.parse(jsonMatch[0]) as unknown;
-        if (!Array.isArray(arr)) return [];
-        return arr
-          .filter((x): x is string => typeof x === "string" && x.trim().length > 0)
-          .map((s) => s.trim())
-          .slice(0, 3);
-      } catch {
-        return [];
-      }
-    },
-  };
-}
-
-// ============================================================
-// 决策器集合工厂（一次性创建全部三个决策器）
-// ============================================================
-
-/**
- * 决策器集合：EndToEndDecisionMaker + DelegateJudge + TopicExtractor。
- *
- * bootstrap 调用 createDecisionMakersFromEnv() 一次性获取全部三个决策器，
+ * bootstrap 调用 createDecisionMakersFromEnv() 一次性获取全部决策器，
  * 未来"换大脑"时可整体替换为 AGI 驱动的决策器实现。
  */
 export interface DecisionMakerSet {
   endToEndMaker: EndToEndDecisionMaker;
   delegateJudge: DelegateJudge;
-  topicExtractor: TopicExtractor | null; // null 表示不启用（externalChat 不可用时）
 }
 
 /**
  * 创建全部 LLM 决策器集合。
  *
- * @param externalChat 用于 TopicExtractor 的外部聊天提供方（不可用时 topicExtractor=null）
- *
- * bootstrap 装配处只需：
- *   const { endToEndMaker, delegateJudge, topicExtractor } = createDecisionMakersFromEnv(externalChat);
- *   proactionCortex.registerEndToEndMaker(endToEndMaker);
- *   plannerCortex.registerDelegateJudge(delegateJudge);
- *   if (topicExtractor) brainCenter.setTopicExtractor(topicExtractor.extract);
+ * 注：TopicExtractor 已于 2026-11-01 整段删除（主题词对回复无必要，
+ * 主模型/recap 从短期记忆上下文即可把握话题；实测每轮恒定 2s 超时且空输出）。
  */
 export function createDecisionMakersFromEnv(
-  externalChat?: ExternalChatProvider | null,
+  _externalChat?: ExternalChatProvider | null,
 ): DecisionMakerSet {
   return {
     endToEndMaker: createDefaultEndToEndDecisionMaker(),
     delegateJudge: createDefaultDelegateJudge(),
-    topicExtractor: externalChat?.isEnabled()
-      ? createDefaultTopicExtractor(externalChat)
-      : null,
   };
 }

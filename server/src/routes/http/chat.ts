@@ -18,6 +18,7 @@ import {
   extractNextUpSuggestions,
 } from "../../services/reply-envelope.js";
 import { stripResidualRenderDeclarations } from "../../services/tool-result-processor.js";
+import { createStreamMarkerGuard } from "../../utils/stream-marker-guard.js";
 
 function resolveActorKey(q: Record<string, unknown> | undefined): string | undefined {
   const userId = typeof q?.userId === "string" ? q.userId : undefined;
@@ -267,37 +268,48 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     const assistantMessageId = `edit:${messageId}:${Date.now()}`;
     const accessMode = parseAgentAccessMode(agentAccessMode);
     let chunkSeq = 0;
+    // 编辑重答的 delta 此前是裸推：模型回复末尾的 [NEXT_UP_START] 块会原样闪现
+    // 在气泡里（done 才替换）。与 WS 对话面同构挂流式标记 guard。
+    const editStreamGuard = createStreamMarkerGuard();
+    const sendEditChunk = (chunk: string): void => {
+      if (!chunk) return;
+      chunkSeq += 1;
+      wsConnectionRegistry.trySend(
+        actorKey,
+        JSON.stringify({
+          type: ServerEventType.ChatAssistantChunk,
+          payload: {
+            sessionId: actorKey,
+            messageId: assistantMessageId,
+            traceId: messageId,
+            chunk,
+            sequence: chunkSeq,
+            source: "chat.message_edit",
+          },
+        }),
+      );
+    };
     void (async () => {
       try {
         const reply0 = await runtime.handleUserMessage(actorKey, newText, {
           chatUserMessageId: messageId,
           agentAccessMode: accessMode,
           onAssistantDelta: (delta) => {
-            chunkSeq += 1;
-            wsConnectionRegistry.trySend(
-              actorKey,
-              JSON.stringify({
-                type: ServerEventType.ChatAssistantChunk,
-                payload: {
-                  sessionId: actorKey,
-                  messageId: assistantMessageId,
-                  traceId: messageId,
-                  chunk: delta,
-                  sequence: chunkSeq,
-                  source: "chat.message_edit",
-                },
-              }),
-            );
+            const safe = editStreamGuard.feed(delta);
+            if (safe) sendEditChunk(safe);
           },
         });
+        const guardTail = editStreamGuard.flush();
+        if (guardTail) sendEditChunk(guardTail);
         // 出口收口（与 WS 对话路径同构）：剥模型声明的 RENDER_HINT/RENDER_AS
         // 残留 + 卡片版式归一化 + NEXT_UP 接续建议块剥离（2026-09-24 补：此路径
         // 此前漏接 extractNextUpSuggestions，建议块会原样透出到用户屏幕）。
-        const replyFinalText = extractNextUpSuggestions(
+        const nextUp = extractNextUpSuggestions(
           normalizeReplyCardLayout(
             stripResidualRenderDeclarations(stripRenderHintDeclarations(reply0.text)),
           ),
-        ).text;
+        );
+        const replyFinalText = nextUp.text;
         wsConnectionRegistry.trySend(
           actorKey,
           JSON.stringify({
@@ -309,6 +321,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
               finalText: replyFinalText,
               toolCalls: reply0.toolName ? [reply0.toolName] : [],
               source: "chat.message_edit",
+              // 接续建议随 done 下发（此前只取 .text，编辑重答永远没有胶囊）。
+              ...(nextUp.followups.length > 0 ? { followups: nextUp.followups } : {}),
             },
           }),
         );

@@ -21,11 +21,19 @@ type Deps = {
   bookingService: BookingService;
 };
 
-/** 选票：显式 ticketId 优先，否则取最近一张未过期的机票/火车票。 */
-function resolveTicket(input: Record<string, unknown>): { ok: true; ticketId: string } | { ok: false; error: string } {
+/** 选票：显式 ticketId 优先（须属于本人），否则取本人最近一张未过期的机票/火车票。 */
+function resolveTicket(
+  input: Record<string, unknown>,
+  actorId: string,
+): { ok: true; ticketId: string } | { ok: false; error: string } {
   const explicit = typeof input.ticketId === "string" ? input.ticketId.trim() : "";
-  if (explicit) return { ok: true, ticketId: explicit };
-  const upcoming = travelTicketStore.listUpcoming(10).filter((t) => t.type !== "hotel");
+  if (explicit) {
+    const owned = travelTicketStore.get(explicit, actorId);
+    return owned
+      ? { ok: true, ticketId: explicit }
+      : { ok: false, error: "票不存在或不属于当前用户" };
+  }
+  const upcoming = travelTicketStore.listUpcoming(10, actorId).filter((t) => t.type !== "hotel");
   if (upcoming.length === 0) {
     return { ok: false, error: "票夹里没有进行中的机票/火车票。可把行程短信/邮件发给 agent（travel.parse-ticket 自动归档）" };
   }
@@ -57,13 +65,13 @@ export function createArrivalConciergeBuiltinSkills(deps: Deps): SkillDefinition
     },
     handler: async (input, context) => {
       const actorId = resolveActorId(context);
-      const ticket = resolveTicket(input);
+      const ticket = resolveTicket(input, actorId);
       if (!ticket.ok) return { ok: false, error: ticket.error, actorId };
       const action = input.action === "disable" ? "disable" : "enable";
       const result =
         action === "enable"
           ? arrivalMonitor.enable(ticket.ticketId, actorId)
-          : arrivalMonitor.disable(ticket.ticketId);
+          : arrivalMonitor.disable(ticket.ticketId, actorId);
       return { ok: result.ok, actorId, ticketId: ticket.ticketId, summary: result.summary };
     },
   };
@@ -88,9 +96,9 @@ export function createArrivalConciergeBuiltinSkills(deps: Deps): SkillDefinition
     },
     handler: async (input, context) => {
       const actorId = resolveActorId(context);
-      const ticket = resolveTicket(input);
+      const ticket = resolveTicket(input, actorId);
       if (!ticket.ok) return { ok: false, error: ticket.error, actorId };
-      const result = await arrivalMonitor.getSnapshot(ticket.ticketId);
+      const result = await arrivalMonitor.getSnapshot(ticket.ticketId, actorId);
       return { ok: result.ok, actorId, ticketId: ticket.ticketId, summary: result.summary, snapshot: result.snapshot };
     },
   };
@@ -120,7 +128,7 @@ export function createArrivalConciergeBuiltinSkills(deps: Deps): SkillDefinition
     },
     handler: async (input, context) => {
       const actorId = resolveActorId(context);
-      const ticket = resolveTicket(input);
+      const ticket = resolveTicket(input, actorId);
       if (!ticket.ok) return { ok: false, error: ticket.error, actorId };
       const result = arrivalMonitor.setPickupContact(ticket.ticketId, actorId, {
         name: typeof input.name === "string" ? input.name : "",
@@ -163,7 +171,7 @@ export function createArrivalConciergeBuiltinSkills(deps: Deps): SkillDefinition
         const result = await arrivalMonitor.sendPickupNow(draft.ticketId, actorId);
         return { ok: result.ok, actorId, ticketId: draft.ticketId, summary: result.summary };
       }
-      const ticket = resolveTicket(input);
+      const ticket = resolveTicket(input, actorId);
       if (!ticket.ok) return { ok: false, error: ticket.error, actorId };
       const result = await arrivalMonitor.sendPickupNow(ticket.ticketId, actorId);
       return { ok: result.ok, actorId, ticketId: ticket.ticketId, summary: result.summary };
@@ -195,9 +203,9 @@ export function createArrivalConciergeBuiltinSkills(deps: Deps): SkillDefinition
     },
     handler: async (input, context) => {
       const actorId = resolveActorId(context);
-      const ticket = resolveTicket(input);
+      const ticket = resolveTicket(input, actorId);
       if (!ticket.ok) return { ok: false, error: ticket.error, actorId };
-      const t = arrivalMonitor.getTicket(ticket.ticketId);
+      const t = arrivalMonitor.getTicket(ticket.ticketId, actorId);
       if (!t) return { ok: false, error: `票 ${ticket.ticketId} 不存在`, actorId };
       const dropoff = typeof input.dropoff === "string" ? input.dropoff.trim() : "";
       if (!dropoff) return { ok: false, error: "缺少 dropoff（目的地）；可结合常去地点建议「回家」或直接询问", actorId };

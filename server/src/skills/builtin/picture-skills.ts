@@ -1,4 +1,4 @@
-import type { PictureKit } from "@nextbot/picture";
+import type { PictureKitRegistry } from "../../services/picture-kit-registry.js";
 
 import type { ToolHandler } from "../../tools/tool-registry.js";
 import type { SkillDefinition, SkillHandler } from "../types.js";
@@ -30,16 +30,18 @@ import {
  */
 
 type Deps = {
-  pictureKit: PictureKit;
+  pictureKits: PictureKitRegistry;
 };
 
-/** 薄封装：走 kit 统一工具协议，把 ToolCallResponse 映射为 skill 结果约定（ok 布尔 + 字段平铺） */
+/** 薄封装：走本人分区的 kit 统一工具协议，把 ToolCallResponse 映射为 skill 结果约定（ok 布尔 + 字段平铺） */
 async function invokeKitTool(
-  pictureKit: PictureKit,
+  pictureKits: PictureKitRegistry,
+  context: { userId?: string; sessionId: string },
   toolName: string,
   input: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
-  const response = await pictureKit.invokeRaw(toolName, input);
+  const { kit } = await pictureKits.forContext(context);
+  const response = await kit.invokeRaw(toolName, input);
   if (!response.success) {
     return { ok: false, error: response.error ?? `${toolName} 执行失败` };
   }
@@ -52,7 +54,7 @@ function adaptPictureHandler(handler: ToolHandler): SkillHandler {
 }
 
 export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
-  const { pictureKit } = deps;
+  const { pictureKits } = deps;
 
   const gallery: SkillDefinition = {
     metadata: {
@@ -85,7 +87,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "filesystem:read"],
       timeoutMs: 10_000,
     },
-    handler: adaptPictureHandler(createPictureGalleryHandler(pictureKit)),
+    handler: adaptPictureHandler(createPictureGalleryHandler(pictureKits)),
   };
 
   const generate: SkillDefinition = {
@@ -110,7 +112,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:write", "filesystem:write", "network:external"],
       timeoutMs: 120_000,
     },
-    handler: async (input) => invokeKitTool(pictureKit, "image_generate", input),
+    handler: async (input, context) => invokeKitTool(pictureKits, context, "image_generate", input),
   };
 
   const process: SkillDefinition = {
@@ -147,7 +149,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "storage:write", "filesystem:read", "filesystem:write"],
       timeoutMs: 30_000,
     },
-    handler: async (input) => invokeKitTool(pictureKit, "image_process", input),
+    handler: async (input, context) => invokeKitTool(pictureKits, context, "image_process", input),
   };
 
   const analyze: SkillDefinition = {
@@ -167,7 +169,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "filesystem:read"],
       timeoutMs: 30_000,
     },
-    handler: async (input) => invokeKitTool(pictureKit, "image_analyze", input),
+    handler: async (input, context) => invokeKitTool(pictureKits, context, "image_analyze", input),
   };
 
   const evaluate: SkillDefinition = {
@@ -198,7 +200,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "filesystem:read"],
       timeoutMs: 60_000,
     },
-    handler: async (input) => invokeKitTool(pictureKit, "evaluation", input),
+    handler: async (input, context) => invokeKitTool(pictureKits, context, "evaluation", input),
   };
 
   const store: SkillDefinition = {
@@ -236,7 +238,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "storage:write", "filesystem:read", "filesystem:write"],
       timeoutMs: 30_000,
     },
-    handler: async (input) => invokeKitTool(pictureKit, "image_store", input),
+    handler: async (input, context) => invokeKitTool(pictureKits, context, "image_store", input),
   };
 
   const stylize: SkillDefinition = {
@@ -272,7 +274,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "storage:write", "filesystem:read"],
       timeoutMs: 60_000,
     },
-    handler: createPictureStylizeHandler(pictureKit) as SkillHandler,
+    handler: createPictureStylizeHandler(pictureKits) as SkillHandler,
   };
 
   const housekeeping: SkillDefinition = {
@@ -300,7 +302,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read", "storage:write", "filesystem:write"],
       timeoutMs: 60_000,
     },
-    handler: createPictureHousekeepingHandler(pictureKit) as SkillHandler,
+    handler: createPictureHousekeepingHandler(pictureKits) as SkillHandler,
   };
 
   const memories: SkillDefinition = {
@@ -321,7 +323,7 @@ export function createPictureBuiltinSkills(deps: Deps): SkillDefinition[] {
       permissions: ["storage:read"],
       timeoutMs: 10_000,
     },
-    handler: createPictureMemoriesHandler(pictureKit) as SkillHandler,
+    handler: createPictureMemoriesHandler(pictureKits) as SkillHandler,
   };
 
   return [gallery, generate, process, analyze, evaluate, store, stylize, housekeeping, memories];

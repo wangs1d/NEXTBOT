@@ -15,6 +15,9 @@ import path from "node:path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-approval-test-"));
 process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 
+const TEST_ACTOR = "tester@example.com";
+const CTX = { userId: TEST_ACTOR, sessionId: TEST_ACTOR } as never;
+
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
@@ -31,6 +34,7 @@ const { buildTravelBriefCardBlock } = await import(
 function savePlan(planId: string, destination: string, overrides: Record<string, unknown> = {}) {
   travelPlanStore.save({
     planId,
+    actorId: TEST_ACTOR,
     destination,
     title: `${destination}3日游`,
     startDate: "2026-11-02",
@@ -67,43 +71,46 @@ function approveSkill() {
 // ==================== 预订闸 ====================
 
 test("没规划过这个城市：预订照走，不拦（满意门不是无差别闸）", () => {
-  assert.equal(satisfactionGate({ type: "hotel", city: "拉萨" }), null);
+  assert.equal(satisfactionGate({ type: "hotel", city: "拉萨" }, CTX), null);
 });
 
 test("刚规划过且没定稿：报价与下单一起拦下，并点名定稿工具", () => {
   savePlan("plan-gate-1", "西昌");
-  const gate = satisfactionGate({ type: "hotel", city: "西昌", checkInDate: "2026-11-02" });
+  const gate = satisfactionGate({ type: "hotel", city: "西昌", checkInDate: "2026-11-02" }, CTX);
   assert.ok(gate);
   assert.equal(gate.needApproval, true);
   assert.equal(gate.planId, "plan-gate-1");
   assert.match(String(gate.summary), /travel\.approve-plan/);
   // 下单阶段同样拦（不能因为已经拿到报价就绕过）
-  const bookGate = satisfactionGate({
-    type: "hotel",
-    city: "西昌",
-    optionId: "opt-1",
-    confirm: true,
-    confirmationToken: "t",
-  });
+  const bookGate = satisfactionGate(
+    {
+      type: "hotel",
+      city: "西昌",
+      optionId: "opt-1",
+      confirm: true,
+      confirmationToken: "t",
+    },
+    CTX,
+  );
   assert.equal(bookGate?.needApproval, true);
 });
 
 test("酒店没填 city 时用 to 兜底判定（目的地就是 to）", () => {
   savePlan("plan-gate-2", "西昌");
-  assert.ok(satisfactionGate({ type: "hotel", to: "西昌" }));
+  assert.ok(satisfactionGate({ type: "hotel", to: "西昌" }, CTX));
 });
 
 test("定稿后放行；已定稿行程重复订也放行", async () => {
   savePlan("plan-gate-3", "眉山地方的城");
-  assert.ok(satisfactionGate({ type: "train", from: "成都", to: "眉山地方的城", city: "眉山地方的城" }));
-  const out = await approveSkill().handler!({ planId: "plan-gate-3" });
+  assert.ok(satisfactionGate({ type: "train", from: "成都", to: "眉山地方的城", city: "眉山地方的城" }, CTX));
+  const out = await approveSkill().handler!({ planId: "plan-gate-3" }, CTX);
   assert.equal(out.ok, true);
-  assert.equal(satisfactionGate({ type: "hotel", city: "眉山地方的城" }), null);
+  assert.equal(satisfactionGate({ type: "hotel", city: "眉山地方的城" }, CTX), null);
 });
 
 test("三天前排过的行程不拦住今天单独订酒店（窗口只认刚规划完的）", () => {
   savePlan("plan-gate-4", "凉山西昌市", { createdAt: Date.now() - 3 * 24 * 60 * 60 * 1000 });
-  assert.equal(satisfactionGate({ type: "hotel", city: "凉山西昌市" }), null);
+  assert.equal(satisfactionGate({ type: "hotel", city: "凉山西昌市" }, CTX), null);
 });
 
 // ==================== 定稿动作 ====================
@@ -112,22 +119,22 @@ test("travel.approve-plan：缺 planId 按目的地定位，再缺取最近一�
   savePlan("plan-ap-1", "都江堰", { createdAt: Date.now() - 60_000 });
   savePlan("plan-ap-2", "青城山", { createdAt: Date.now() });
 
-  const byDest = await approveSkill().handler!({ destination: "都江堰" });
+  const byDest = await approveSkill().handler!({ destination: "都江堰" }, CTX);
   assert.equal(byDest.planId, "plan-ap-1");
   assert.equal(travelPlanStore.get("plan-ap-1")?.status, "approved");
 
-  const latest = await approveSkill().handler!({});
+  const latest = await approveSkill().handler!({}, CTX);
   assert.equal(latest.planId, "plan-ap-2");
   assert.match(String(latest.next), /travel_booking\.search/);
 
-  const again = await approveSkill().handler!({ planId: "plan-ap-2" });
+  const again = await approveSkill().handler!({ planId: "plan-ap-2" }, CTX);
   assert.equal(again.ok, true);
   assert.match(String(again.summary), /此前已确认/);
 });
 
 test("指名的 planId 找不到就如实失败，不顺手定稿别的行程", async () => {
   savePlan("plan-ap-keep", "已定稿别城");
-  const out = await approveSkill().handler!({ planId: "plan-does-not-exist" });
+  const out = await approveSkill().handler!({ planId: "plan-does-not-exist" }, CTX);
   assert.equal(out.ok, false);
   assert.equal(travelPlanStore.get("plan-ap-keep")?.status, undefined);
 });

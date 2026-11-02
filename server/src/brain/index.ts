@@ -69,13 +69,11 @@ export {
   registerCognitiveEngineImpl,
 } from "./cognitive-engine-factory.js";
 
-// LLM 决策器工厂（可插拔决策器入口）：EndToEndDecisionMaker / DelegateJudge / TopicExtractor
+// LLM 决策器工厂（可插拔决策器入口）：EndToEndDecisionMaker / DelegateJudge
 export {
-  type TopicExtractor,
   type DecisionMakerSet,
   createDefaultEndToEndDecisionMaker,
   createDefaultDelegateJudge,
-  createDefaultTopicExtractor,
   createDecisionMakersFromEnv,
 } from "./decision-maker-factory.js";
 

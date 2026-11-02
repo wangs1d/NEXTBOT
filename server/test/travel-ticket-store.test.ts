@@ -99,6 +99,21 @@ test("markRideReminderCreated 幂等标记", () => {
   assert.equal(travelTicketStore.get(saved.ticketId)?.arrivalRideReminderCreated, true);
 });
 
+test("归属隔离：别人的票读不到，列表/去重只命中自己的票", () => {
+  const mine = travelTicketStore.save({
+    type: "flight",
+    source: "manual",
+    actorId: "alice@example.com",
+    carrier: "归属测试",
+    code: "MU9000",
+    departTime: futureDate(7),
+  });
+  assert.equal(travelTicketStore.get(mine.ticketId, "bob@example.com"), null);
+  assert.equal(travelTicketStore.get(mine.ticketId, "alice@example.com")?.ticketId, mine.ticketId);
+  assert.ok(!travelTicketStore.listUpcoming(50, "bob@example.com").some((t) => t.ticketId === mine.ticketId));
+  assert.equal(travelTicketStore.findByCode("flight", "MU9000", futureDate(7), "bob@example.com"), null);
+});
+
 test("按票 ID 保存更新不产生重复（parse-ticket 的去重路径）", () => {
   const first = travelTicketStore.save({
     type: "train",

@@ -372,7 +372,6 @@ export class AgentMemorySyncService {
     const slotLine = `[${new Date().toISOString()}] ${formatMemoryTopicTag(topicHint ?? inferMemoryTopic(line))} ${line}`;
     const patches: MemoryPatchOp[] = [];
     const text = `${line}`.trim();
-    const lower = text.toLowerCase();
     const preferenceMatch = /(喜欢|偏好|不喜欢|讨厌|习惯|不要|别|prefer|like|hate|dislike)/i.test(text);
     // 亲密关系陈述（老婆/对象/正主…）也是事实：旧词表漏掉关系类，导致
     // "我的老婆是刘浩存"进不了 memory_facts 槽位、槽位内新旧值也无法互相替换
@@ -405,12 +404,9 @@ export class AgentMemorySyncService {
     if (commitmentMatch) summaryAdd("memory_commitments", slotLine);
     if (loopMatch) summaryAdd("memory_open_loops", slotLine);
 
-    if (patches.length === 0 && lower.length > 0) {
-      summaryAdd("session_recap", slotLine, 6);
-    }
-    if (patches.length > 0) {
-      summaryAdd("session_recap", slotLine, 6);
-    }
+    // 不镜像进 session_recap：那是会话滚动摘要的短期槽（唯一合法写入者是
+    // appendSessionRecapLine）。此前每条长期行都同步写一份，等于把同一内容
+    // 同时挂到【持久记忆】和【短期上下文·会话回顾】两处，且短期槽被整理行占满。
     return patches;
   }
 

@@ -14,7 +14,6 @@ import { getAgentRuntimeConfig } from "./agent-runtime-config.js";
 import {
   buildCurrentTimePrompt,
   formatKvValueForPrompt,
-  formatPersonalityCorePrompt,
   sliceMemoryEntriesToPromptContext,
 } from "./prompt-builder.js";
 import { buildTaskContextPrompt } from "./task-context.js";
@@ -22,11 +21,6 @@ import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
-import {
-  AGENT_NAME_KV_KEY,
-  buildIdentityNameLine,
-  parseAgentIdentityKv,
-} from "../services/agent-identity.js";
 import {
   buildSchedulePromptSnapshot,
 } from "../services/schedule-prompt-snapshot.js";
@@ -41,7 +35,6 @@ import type { VirtualPhoneService } from "../services/virtual-phone-service.js";
 import { getMemoryManagerService } from "../services/memory-manager-service.js";
 import { getGlobalMemoryInventory } from "../brain/memory-inventory.js";
 import type { TurnUnderstanding } from "./task-router.js";
-import type { PersonalityCore } from "../brain/types.js";
 import type {
   AgentPromptMemoryContext,
   AgentStreamOptions,
@@ -169,7 +162,7 @@ function buildAgentBehaviorPrompt(): string {
   return [
     "【调度原则】简单问题直接回答；需要实时信息时先查再答；复杂或多步骤任务交给后台任务执行流程处理。",
     "【执行约束】涉及消费、转账、桌面高权限操作或状态敏感任务时，必须先读取对应工具返回的实时状态，不凭记忆假设。",
-    "【真人感·行动宣告】本轮要调信息型/动作型工具时，先用一句口语化的短话告诉用户你要去做什么（如「我先搜一下…」「我看下今天的日程…」），只说这一句就立刻调用工具——不要在调用工具之前展开思考、分析、列计划或自我讨论，那些内容一律不要写给用户；然后在同一回合基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用「我去查/稍后告诉你」这类空口承诺替代真实结果。档案/记忆类写入静默执行，不需要宣告，也不需要向用户交代写入过程。",
+    "【真人感·行动宣告】本轮要调信息型/动作型工具时，先用一句口语化的短话告诉用户你要去做什么，只说这一句就立刻调用工具——不要在调用前展开思考、分析、列计划或自我讨论，那些内容一律不写给用户；然后在同一回合基于真实返回回答，不要只宣告不行动。若声明要办某事却无法实际执行，务必明确告诉用户办不到，禁止用空口承诺替代真实结果。档案/记忆类写入静默执行，不需要宣告，也不需要向用户交代写入过程。",
     "【能力边界】本块不含完整工具清单；不确定自己有没有某能力时，先用工具目录检索确认，不要凭印象断言。",
   ].join("\n");
 }
@@ -182,8 +175,7 @@ function compactPromptBlock(
 ): string | undefined {
   const trimmed = text?.trim();
   if (!trimmed) return undefined;
-  // Phase 6.2：低重要性内容压缩更激进（取 70% 上限），高价值保持原值。
-  // 用于 lifeThemeMemory 等"背景性"上下文，不损失主对话能力。
+  // 低重要性内容压缩更激进（取 70% 上限），normal/high 保持原值。
   const effectiveLimit =
     importance === "low"
       ? Math.floor(maxChars * 0.7)
@@ -191,9 +183,8 @@ function compactPromptBlock(
         ? maxChars
         : maxChars;
   if (trimmed.length <= effectiveLimit) return trimmed;
-  // Phase 6.2 修正：支持首尾保留模式，避免单纯截断丢失末尾关键内容。
-  // dreamMemory 等跨会话整理结果用 "both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），
-  // 中间被省略号替换，保持记忆连续性。
+  // 首尾保留模式：避免单纯截断丢掉末尾关键内容。
+  // "both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），中间以省略号替换。
   if (preserve === "both") {
     const headLen = Math.floor(effectiveLimit * 0.6);
     const tailLen = Math.max(0, effectiveLimit - headLen - 6);
@@ -363,16 +354,10 @@ export type BuildPromptContextInput = {
   deviceClass?: "desktop" | "mobile";
   personalization?: PersonalizationPromptSlice;
   /**
-   * 当前 thread 非 system 消息数。用于长期快照注入门控（recall-gate）：
-   * 新会话开场（thread ≤ 2）才注入 memoryContinuity / relationshipMemory /
-   * lifeThemeMemory / dreamMemory / yesterdayHighlight 等长期快照块，
-   * 普通轮次跳过（避免"昨天/前天的对话"每轮污染当前上下文——串台根治）。
-   * 缺省 undefined 时快照门控退化为仅文本线索触发（保守，不误判新会话）。
+   * 当前 thread 非 system 消息数：供【初次见面】冷启动引导判定是否首轮。
+   * 缺省 undefined 按首轮处理（宁可少问一句，不误判成新会话反复破冰）。
    */
   threadMessageCount?: number;
-  // v3 门控字段（longTermRecallSuppressed / semanticRecallHit / recallGateTriggered）
-  // 已随 agent-core recallGate 管道拆除（2026-10-22）：KV 长期字段注入在 assembleMemory
-  // 内按 v3 常量语义（longTermEnabled=false）固化，长期检索统一走 brain.recall 工具。
   /**
    * 本轮语义理解标记（2026-10-10 词表判定退役）：L1 路由 LLM 产出的追问锚定/
    * 记忆召回/日程/旅行等语境标记。追问锚点、scheduleSnapshot、travelState、
@@ -443,9 +428,6 @@ function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContex
     if (!value) continue;
     if (
       key === "persona" ||
-      key === "personalityCore" ||
-      key === "values" ||
-      key === "abilities" ||
       key === "agentCaps"
     ) {
       stable[key] = value;
@@ -459,10 +441,6 @@ function pickPromptContextLayers(memory: AgentPromptMemoryContext): PromptContex
       key === "memoryOpenLoops" ||
       key === "sessionRecap" ||
       key === "relationshipGuidance" ||
-      key === "relationshipMemory" ||
-      key === "lifeThemeMemory" ||
-      key === "dreamMemory" ||
-      key === "memoryContinuity" ||
       key === "skillIndex"
     ) {
       context[key] = value;
@@ -496,8 +474,6 @@ export class PromptContextBuilder {
       shortTermMemoryGateway?: ShortTermMemoryGatewayService | null;
     },
   ) {}
-
-  private personalityProvider: ((actorId: string) => PersonalityCore | null) | null = null;
 
   /**
    * 用户兴趣关注列表拉取器（InterestWatcher.listForPrompt 的薄包装）。
@@ -559,15 +535,6 @@ export class PromptContextBuilder {
     this.activeGoalsProvider = fn;
   }
 
-  /**
-   * 注入人格内核拉取器（通常来自 BrainCenter.getPersonalityCore → MemoryCortex.getPersonalityCore）。
-   * assembleMemory 会调用它获取结构化人格内核，格式化后填入 memory.personalityCore，
-   * 由 buildLayeredSystemPrompt 注入 system prompt 稳定前缀的【人格内核】块，防止单次对话导致人格漂移。
-   */
-  setPersonalityProvider(fn: (actorId: string) => PersonalityCore | null): void {
-    this.personalityProvider = fn;
-  }
-
   build(input: BuildPromptContextInput): AgentStreamOptions | undefined {
     const layers = pickPromptContextLayers(this.assembleMemory(input));
     const memory = flattenPromptContextLayers(layers);
@@ -608,13 +575,10 @@ export class PromptContextBuilder {
     const digestService = getDailyDigestService();
     const memoryManager = getMemoryManagerService();
 
-    // 长期记忆注入门控（v3 常量语义，2026-10-22 固化）：memoryContinuity /
-    // relationshipMemory / lifeThemeMemory / dreamMemory / yesterdayHighlight /
-    // KV 长期字段这类"历史整理快照"不再随轮注入（v3 起 agent-core 透传的门控
-    // 三字段恒为 suppressed，本处将其折叠为常量 false，消除恒定死分支）。
-    // 长期记忆统一走两条有意路径：恒驻速览（结构化事实块）+ brain.recall 工具。
-    const longTermEnabled = false;
-
+    // KV 长期字段读路径：按轮召回（sliceMemoryEntriesToPromptContext 内做相关度
+    // 过滤，命中制、无命中零注入）。这里只决定"取哪些键"——取本轮真会渲染的键，
+    // 其余键（persona/values/abilities…）没人读，取回来只是空耗。
+    // AGENT_PROMPT_MEMORY_KEYS=off 仍整体关闭 KV 注入。
     let fromKv: AgentPromptMemoryContext = {};
     const memoryKeys = config.memoryPrompt.promptMemoryKeys;
     if (
@@ -622,44 +586,14 @@ export class PromptContextBuilder {
       memoryKeys &&
       memoryKeys.length > 0
     ) {
-      // 拆人设/动态记忆：persona/values/abilities 属稳定人设 L3 人格层，始终注入；
-      // 2026-10-06 治啰嗦 P1：v3 的「画像层常驻」收窄——memory_facts/preferences 与
-      // 情节层同走召回门控（它们与结构化事实块/长期画像高度重叠，常驻注入就是
-      // 「上下文里到处是可提及素材」的啰嗦来源）。恒驻速览由【用户档案·结构化事实】
-      // 块承担（确定性字段：称呼/身份/稳定偏好）。
-      const STABLE_MEMORY_KEYS = new Set(["persona", "values", "abilities"]);
-      const PROFILE_MEMORY_KEYS = new Set(["memory_facts", "memory_preferences"]);
-      const EPISODIC_MEMORY_KEYS = new Set([
-        "memory_summary",
-        "memory_current_mission",
-        "memory_commitments",
-        "memory_open_loops",
-        "session_recap",
-      ]);
-      const snapshotKeys = memoryKeys.filter(
-        (key) =>
-          STABLE_MEMORY_KEYS.has(key) ||
-          (longTermEnabled && (PROFILE_MEMORY_KEYS.has(key) || EPISODIC_MEMORY_KEYS.has(key))),
+      const { entries } = this.deps.agentMemorySyncService.getSnapshot(
+        input.actorId,
+        memoryKeys,
       );
-      const { entries } = this.deps.agentMemorySyncService.getSnapshot(input.actorId, snapshotKeys);
       fromKv = sliceMemoryEntriesToPromptContext(entries, userText || undefined);
       const kvCurrentMission = compactPromptBlock(formatKvValueForPrompt(entries["memory_current_mission"]), 240);
       if (kvCurrentMission) {
         fromKv.taskContext = [`current-mission-from-memory: ${kvCurrentMission}`].join("\n");
-      }
-    }
-
-    // 名字自我认知：agent.update_identity 写入的 agent.name KV 不在 memoryKeys 配置内，
-    // 这里定点拉取并拼进 persona 稳定前缀首行——让 Agent 每轮都知道自己叫什么、
-    // 名字是谁取的。名字极低频变化，放稳定层不会打爆 prefix cache。
-    if (this.deps.agentMemorySyncService) {
-      const identityRaw = this.deps.agentMemorySyncService
-        .getSnapshot(input.actorId, [AGENT_NAME_KV_KEY])
-        .entries[AGENT_NAME_KV_KEY];
-      const identity = parseAgentIdentityKv(identityRaw);
-      if (identity) {
-        const nameLine = buildIdentityNameLine(identity);
-        fromKv.persona = fromKv.persona ? `${nameLine}\n${fromKv.persona}` : nameLine;
       }
     }
 
@@ -672,9 +606,9 @@ export class PromptContextBuilder {
       ? `【上一轮被打断的旧回复残留，仅供背景；不要承接/提及/道歉，直接干净地回答用户新消息】\n${input.interruptedContext.trim()}`
       : undefined;
 
-    // 追问降权策略（记忆架构重构后简化）：长期记忆字段已由 longTermEnabled 单一门控，
-    // 门控未命中时直接为 undefined，不再需要追问压缩分支；追问场景仅保留
-    // 短期上下文（STM/recentHistory/followUpAnchor）的差异化长度，服务指代消解。
+    // 追问降权策略：长期字段按本轮相关度过滤（无命中即 undefined），追问轮不再
+    // 单独压缩长期块；追问场景只保留短期上下文（STM/recentHistory/followUpAnchor）
+    // 的差异化长度，服务指代消解。
     // dailyDigest 仍只在非追问场景注入（digest 与追问语义无关，省 token）
     const dailyDigest =
       followUpTurn || !userText
@@ -687,27 +621,7 @@ export class PromptContextBuilder {
       getGlobalMemoryInventory()?.getCachedSummary(input.actorId) ?? "",
       220,
     );
-    const memoryContinuity =
-      longTermEnabled
-        ? memoryManager?.getContinuityForPrompt(input.actorId) ?? undefined
-        : undefined;
-    const relationshipMemory =
-      longTermEnabled
-        ? memoryManager?.getRelationshipMemoryForPrompt(input.actorId) ?? undefined
-        : undefined;
-    const lifeThemeMemory =
-      longTermEnabled
-        ? memoryManager?.getLifeThemeMemoryForPrompt(input.actorId) ?? undefined
-        : undefined;
-    const dreamMemory =
-      longTermEnabled
-        ? memoryManager?.getDreamMemoryForPrompt(input.actorId) ?? undefined
-        : undefined;
-    // 优化 2：主动跨天 recall，注入昨天/前天的关键事件
-    const yesterdayHighlight =
-      longTermEnabled
-        ? memoryManager?.getYesterdayHighlightForPrompt(input.actorId) ?? undefined
-        : undefined;
+    // 长期记忆读路径 = 【持久记忆】按轮召回 + 结构化事实/画像恒驻 + brain.recall 按需查。
     // 追问锚点（2026-10-10 语义化重写）：原「FU|anchor=...」密文 + 词表判定退役。
     // 仅当模型判定本轮话头锚定上文（reference ≠ none）时注入，锚文本改用自然
     // 语言说清「承接对象」——只解决指代对齐，不催促推进旧任务（「你叫我什么？」
@@ -727,7 +641,7 @@ export class PromptContextBuilder {
     // 行程状态热层：仅模型判定本轮在问行程/旅行时注入一行回执列表（目的地/日期/planId），
     // 完整明细不进上下文，由 travel.get-itinerary 按需回查（见 travel-prompt-snapshot.ts）
     const travelState =
-      turnUnderstanding?.travelQuery === true ? buildTravelStatePrompt(userText) : undefined;
+      turnUnderstanding?.travelQuery === true ? buildTravelStatePrompt(input.actorId) : undefined;
     const taskContext =
       config.memoryPrompt.taskContextInPrompt && userText
         ? compactPromptBlock(buildTaskContextPrompt(userText, turnUnderstanding), 320)
@@ -743,9 +657,6 @@ export class PromptContextBuilder {
         : undefined;
     // 当日日志检索块已随 agent-core recallGate 管道拆除（2026-10-22）：
     // journal 搜索自 v3 起从未随门控运行（恒空），不再保留装配分支。
-    // 2026-09-06：聊天路径不再并入全局 Agent 风格指纹（agent-style-profile，
-    // 固定平均句长/语气词）——全局固定指纹与"语感跟着用户走"直接打架。
-    // 主动开口路径 2026-10-26 起经 SpeechHub 的 voiceProfile 块注入（统一出口）。
     const toneGuidance = compactPromptBlock(input.personalization?.toneGuidance, 480);
     const rawUserProfile = compactPromptBlock(input.personalization?.userProfile, 700);
     // 仿人记忆连续性：提升阈值让更多召回记忆能被 LLM 看到，避免关键上下文被截断
@@ -767,16 +678,7 @@ export class PromptContextBuilder {
     const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
     const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
     const compactTravelState = compactPromptBlock(travelState, 300);
-    // 长期记忆字段压缩（追问分支已随单一门控移除，只保留常规压缩策略）：
-    // - lifeThemeMemory：背景性上下文，用 low importance 压到 280*0.7≈196 字（保留前 N 个主题）
-    // - dreamMemory：跨会话整理结果，含「核心主题」高价值抽象，不能用 low 压缩会丢末尾主题。
-    //   改用 normal importance + preserve="both"：保留开场（最近在意的）+ 末尾（核心主题/淡忘），
-    //   中间被省略号替换，既省 token 又保住记忆连续性。
     const userProfileFromManagerCompact = userProfileFromManager;
-    const memoryContinuityCompact = memoryContinuity;
-    const relationshipMemoryCompact = compactPromptBlock(relationshipMemory, 480, "normal");
-    const lifeThemeMemoryCompact = compactPromptBlock(lifeThemeMemory, 280, "low");
-    const dreamMemoryCompact = compactPromptBlock(dreamMemory, 500, "normal", "both");
     // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
     // manager 派生摘要非重复行追加；原互斥（manager 存在即弃文件画像）导致画像被挤掉。
     const userProfileSummary = mergeUserProfilePromptSources(
@@ -896,12 +798,10 @@ export class PromptContextBuilder {
       ...(dedupedMemorySummary ? { memorySummary: dedupedMemorySummary } : { memorySummary: undefined }),
     };
 
-    // 用户理解档案块（2026-10-06 治啰嗦 P1）：改走召回门控——它是「agent 对用户的
-    // 理解记录」，属情节性素材，常驻注入会推高闲聊轮的「什么都想提」压力。
-    // 恒驻速览由【用户档案·结构化事实】承担（确定字段+称呼礼仪单一权威）。
-    const understanding = longTermEnabled
-      ? this.buildUserUnderstandingBlock(input.actorId, userText)
-      : { stableBlock: undefined, matchedTopics: [] as string[] };
+    // 用户理解档案块：agent 对用户理解的结构化沉淀（store 里的当前档案，不是历史
+    // 召回），内容不由本轮 query 决定 → 留稳定层 MEMORY 带；本轮命中的话题
+    // （matchedTopics）另走【本轮寻址】动态块，稳定层字节因此不被逐轮打断。
+    const understanding = this.buildUserUnderstandingBlock(input.actorId, userText);
     const userUnderstandingBlock = understanding.stableBlock;
 
     // 结构化事实块：用户档案字段的确定性记录（KV 式精确寻址，无条件注入=用户速览）；
@@ -921,13 +821,6 @@ export class PromptContextBuilder {
 
     // 互斥：shortTermTaskContext 非空时跳过 taskContext，避免语义重叠字段同时以完整长度注入
     const effectiveTaskContext = shortTermTaskContext ? undefined : taskContext;
-
-    // 人格内核（personality 域）：每轮从 MemoryCortex 拉取，格式化后注入 system prompt 稳定前缀防漂移。
-    // 注意：不受追问轮影响——人格内核是稳定身份层，非本轮上下文。
-    const rawPersonalityCore = this.personalityProvider?.(input.actorId) ?? null;
-    const personalityCore = rawPersonalityCore
-      ? compactPromptBlock(formatPersonalityCorePrompt(rawPersonalityCore), 400)
-      : undefined;
 
     // 当下状态（P0 2026-10-01「顺嘴要贴此刻」）：状态板 current 层格式化注入，
     // 陈旧信号 provider 内自判不注入。失败零阻塞。
@@ -983,7 +876,6 @@ export class PromptContextBuilder {
         ? { deviceEnvironment: buildDeviceEnvironmentBlock(input.deviceClass) }
         : {}),
       ...(clientSurfaces ? { clientSurfaces } : {}),
-      ...(personalityCore ? { personalityCore } : {}),
       ...(currentUserState ? { currentUserState } : {}),
       ...(turnAside ? { turnAside } : {}),
       ...(fromKv.taskContext || effectiveTaskContext || shortTermTaskContext
@@ -1012,14 +904,6 @@ export class PromptContextBuilder {
       ...(dedupedDailyDigest ? { dailyDigest: dedupedDailyDigest } : {}),
       ...(userProfileSummary ? { userProfileSummary } : {}),
       ...(onboardingHint ? { onboardingHint } : {}),
-      ...(memoryContinuityCompact ? { memoryContinuity: memoryContinuityCompact } : {}),
-      ...(relationshipMemoryCompact ? { relationshipMemory: relationshipMemoryCompact } : {}),
-      ...(lifeThemeMemoryCompact ? { lifeThemeMemory: lifeThemeMemoryCompact } : {}),
-      ...(dreamMemoryCompact ? { dreamMemory: dreamMemoryCompact } : {}),
-      // 优化 2：跨天事件回顾，压缩到 200 字（非追问场景）
-      ...(yesterdayHighlight && !followUpTurn
-        ? { yesterdayHighlight: compactPromptBlock(yesterdayHighlight, 200) }
-        : {}),
       ...(interruptedContext ? { interruptedContext: interruptedContext } : {}),
       ...(compactFollowUpAnchor ? { followUpAnchor: compactFollowUpAnchor } : {}),
       ...(compactScheduleSnapshot ? { scheduleSnapshot: compactScheduleSnapshot } : {}),
@@ -1067,11 +951,6 @@ export class PromptContextBuilder {
       markInjectedMemory(input.actorId, promptMemory.sessionRecap);
       markInjectedMemory(input.actorId, promptMemory.userProfile);
       markInjectedMemory(input.actorId, promptMemory.userProfileSummary);
-      markInjectedMemory(input.actorId, promptMemory.memoryContinuity);
-      markInjectedMemory(input.actorId, promptMemory.relationshipMemory);
-      markInjectedMemory(input.actorId, promptMemory.lifeThemeMemory);
-      markInjectedMemory(input.actorId, promptMemory.dreamMemory);
-      markInjectedMemory(input.actorId, promptMemory.yesterdayHighlight);
       markInjectedMemory(input.actorId, promptMemory.dailyDigest);
     } catch (err) {
       console.log(`[PromptContextBuilder] 注入记忆登记失败（忽略）: ${err}`);
@@ -1083,8 +962,7 @@ export class PromptContextBuilder {
 
   /**
    * 用户理解档案块：agent 对用户理解的结构化沉淀（topic + 理解句 + 性质标注
-   * + 演变历史）。无条件注入（当前理解档案，非历史召回，不受 longTermEnabled
-   * 门控）。
+   * + 演变历史）。无条件注入（当前理解档案，非历史召回）。
    *
    * 2026-09-29 P0-1 缓存优化：渲染不再带 per-turn 寻址标记——标记位置随用户
    * 措辞逐轮移动会让稳定层逐轮变字节，打断 DeepSeek 前缀缓存（实测改一行
@@ -1249,11 +1127,6 @@ export class PromptContextBuilder {
       memoryPreferences: redact(ctx.memoryPreferences),
       memoryCommitments: redact(ctx.memoryCommitments),
       memoryOpenLoops: redact(ctx.memoryOpenLoops),
-      memoryContinuity: redact(ctx.memoryContinuity),
-      relationshipMemory: redact(ctx.relationshipMemory),
-      lifeThemeMemory: redact(ctx.lifeThemeMemory),
-      dreamMemory: redact(ctx.dreamMemory),
-      yesterdayHighlight: redact(ctx.yesterdayHighlight),
       narrativeRecall: redact(ctx.narrativeRecall),
       dailyDigest: redact(ctx.dailyDigest),
       userProfileSummary: redact(ctx.userProfileSummary),
@@ -1270,9 +1143,6 @@ export class PromptContextBuilder {
   private hasMemoryContent(memory: AgentPromptMemoryContext): boolean {
     return (
       Boolean(memory.persona) ||
-      Boolean(memory.personalityCore) ||
-      Boolean(memory.values) ||
-      Boolean(memory.abilities) ||
       Boolean(memory.memorySummary) ||
       Boolean(memory.agentCaps) ||
       Boolean(memory.narrativeRecall) ||
@@ -1290,11 +1160,6 @@ export class PromptContextBuilder {
       Boolean(memory.toneGuidance) ||
       Boolean(memory.userProfileSummary) ||
       Boolean(memory.memoryInventory) ||
-      Boolean(memory.memoryContinuity) ||
-      Boolean(memory.relationshipMemory) ||
-      Boolean(memory.lifeThemeMemory) ||
-      Boolean(memory.dreamMemory) ||
-      Boolean(memory.yesterdayHighlight) ||
       Boolean(memory.followUpAnchor) ||
       Boolean(memory.scheduleSnapshot) ||
       Boolean(memory.travelState) ||

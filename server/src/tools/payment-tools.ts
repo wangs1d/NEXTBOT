@@ -53,6 +53,7 @@ export function registerPaymentTools(
     const result = await paymentService.createOrder({
       amount,
       description,
+      actorId,
       provider: provider as "wechat" | "alipay",
       method: method as "native" | "h5",
       outTradeNo: input.outTradeNo ? String(input.outTradeNo).trim() : undefined,
@@ -126,7 +127,7 @@ export function registerPaymentTools(
       throw new Error(`不支持的支付提供商：${provider}。支持：${PROVIDERS.join(", ")}`);
     }
 
-    const result = await paymentService.queryOrder(outTradeNo, provider as "wechat" | "alipay");
+    const result = await paymentService.queryOrder(outTradeNo, provider as "wechat" | "alipay", actorId);
 
     if (!result.ok) {
       throw new Error(result.error || "订单查询失败");

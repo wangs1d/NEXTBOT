@@ -79,11 +79,20 @@ class DynamicIslandWindow {
     std::string title;
   };
 
+  /// 逐字时间轴的一个唱段（字/词/音节）。
+  struct LyricChar {
+    double t_sec = 0.0;    // 相对曲目起点秒数
+    double dur_sec = 0.0;  // 持续时间，<=0 表示无时长信息
+    std::string text;      // utf8
+  };
+
   /// 一条歌词：t_sec 为相对曲目起点秒数（服务端 LRC 毫秒换算而来）。
   struct LyricLine {
     double t_sec = 0.0;
     std::string text;         // utf8
     std::string translation;  // utf8，空 = 无翻译
+    /// 逐字时间轴；空 = 没有逐字歌词，绘制时按行内插值兜底。
+    std::vector<LyricChar> chars;
   };
 
   /// 本地播放器（SMTC）快照。歌词由 Dart 侧拉取后经 setMusicLyrics 喂入，
@@ -227,7 +236,7 @@ class DynamicIslandWindow {
   std::string MusicTrackKey() const;  // 与 Dart 端 trackKey 同构
   double MusicPositionSec() const;    // 采样点 + 墙钟插值（暂停即冻结）
   int MusicCurrentLine() const;       // -1 = 前奏或没有歌词
-  float MusicLineProgress(int index) const;  // 行内已唱比例 0..1，卡拉OK亮字用
+  float MusicLineProgress(int index) const;  // 行内已唱比例 0..1（无词级数据时判定整行是否已唱到）
   int MusicSectionHeight() const;  // 展开卡歌词区高度（逻辑 px，无音乐 = 0）
   std::wstring MusicHeaderLine() const;  // 胶囊首行：歌名 · 歌手
   std::wstring MusicAppName() const;

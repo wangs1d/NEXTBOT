@@ -115,3 +115,16 @@ export function buildAgenticMemoryConfig(): Partial<MemoryConfig> | null {
     },
   };
 }
+
+/**
+ * 本地向量库 db 路径（仅 vectorStore=memory 时有效；Qdrant 返回 null）。
+ * 供「任务级隔离」的扫描 worker 与主进程直读共用同一份路径解析，避免两处口径。
+ */
+export function resolveAgenticVectorDbPath(): string | null {
+  const cfg = buildAgenticMemoryConfig();
+  const vs = cfg?.vectorStore as
+    | { provider?: string; config?: { dbPath?: string } }
+    | undefined;
+  if (!vs || vs.provider !== "memory") return null;
+  return vs.config?.dbPath ?? null;
+}

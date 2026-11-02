@@ -35,7 +35,8 @@ struct MediaSessionSnapshot {
 /// 采样通知：lparam 为 `new MediaSessionSnapshot`，由窗口线程接管并 delete。
 constexpr UINT kMediaSessionUpdateMessage = WM_APP + 0x7B;
 
-/// 轮询 SMTC 的当前媒体会话（Spotify / QQ 音乐 / 网易云 / 浏览器标签等）。
+/// 轮询 SMTC（系统媒体传输控件），只认音乐客户端的会话（汽水 / 网易云 /
+/// Spotify / QQ 音乐…），浏览器标签、直播间等「只有声音」的会话按无会话上报。
 ///
 /// 单独静态库编译：runner 全局 `_HAS_EXCEPTIONS=0`，而 C++/WinRT 依赖异常，
 /// 不能和 runner 同编译单元。使用方只依赖本头文件（纯标准库 + Win32）。

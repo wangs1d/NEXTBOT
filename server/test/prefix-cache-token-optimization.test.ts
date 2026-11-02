@@ -22,8 +22,7 @@ import type { AgentPromptMemoryContext } from "../src/external-model/types.js";
 
 function buildMemory(variant: number): AgentPromptMemoryContext {
   return {
-    personalityCore: `稳定人格内核 v${variant}。`,
-    persona: "对话自然。",
+    persona: `【人格】\n稳定人格 v${variant}。`,
     userUnderstanding: `【我对用户的理解】\n- 关于「老婆」：用户已婚（09/01 确认）`,
     userFacts: `【用户档案·结构化事实】\n- 职业：独立开发者（09/01 更新）`,
     turnAddressing: variant === 1 ? "【本轮寻址】\n- 理解话题：老婆" : "【本轮寻址】\n- 事实字段：职业",

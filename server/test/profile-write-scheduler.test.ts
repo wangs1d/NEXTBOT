@@ -260,7 +260,7 @@ test("T2 预算补齐：hint 漏标的画像陈述经非候选补位进入夜间
   assert.equal(ckpt.actors["u1"], "2026-10-22T03:00:00.000Z", "checkpoint 推进到含补位在内的最后一条");
 });
 
-test("T2 纯闲聊天（零候选）：零 LLM + checkpoint 推进越过闲聊段（防扫描窗口无限增长）", async () => {
+test("T2 零候选夜晚：预算补齐仍跑一次 LLM 并推进 checkpoint（候选只是排序依据）", async () => {
   const walDir = await mkdtemp(join(tmpdir(), "wal-chitchat-test-"));
   const ckptFile = join(walDir, "checkpoint.json");
   await mkdir(walDir, { recursive: true });
@@ -268,7 +268,7 @@ test("T2 纯闲聊天（零候选）：零 LLM + checkpoint 推进越过闲聊�
     join(walDir, "2026-10-22.jsonl"),
     [
       JSON.stringify({ ts: "2026-10-22T01:00:00.000Z", actorId: "u1", userText: "哈哈", profileCandidate: false }),
-      JSON.stringify({ ts: "2026-10-22T02:00:00.000Z", actorId: "u1", userText: "是的呢", profileCandidate: false }),
+      JSON.stringify({ ts: "2026-10-22T02:00:00.000Z", actorId: "u1", userText: "我最近迷上了攀岩", profileCandidate: false }),
     ].join("\n") + "\n",
     "utf8",
   );
@@ -279,19 +279,38 @@ test("T2 纯闲聊天（零候选）：零 LLM + checkpoint 推进越过闲聊�
     {
       readProfile: () => "",
       applyOps: async () => true,
-      extractFn: async () => {
+      extractFn: async (text) => {
         llmCalls++;
+        assert.ok(text.includes("我最近迷上了攀岩"), "hint 漏标的陈述必须进夜间输入");
         return fakeExtraction([]);
       },
     },
     { walDir, checkpointFile: ckptFile },
   );
   assert.equal(stats.candidates, 0);
-  assert.equal(llmCalls, 0, "零候选不得调 LLM");
-  assert.equal(stats.checkpointAdvanced, true, "checkpoint 应越过纯闲聊段");
+  assert.equal(llmCalls, 1, "零候选夜晚也要有一次批量抽取");
+  assert.equal(stats.topUpProcessed, 2, "两条非候选全部补位");
+  assert.equal(stats.checkpointAdvanced, true);
 
   const ckpt = await loadProfileCheckpoint(ckptFile);
   assert.equal(ckpt.actors["u1"], "2026-10-22T02:00:00.000Z");
+
+  // 当晚已处理完：自 checkpoint 起无新轮次 → 零调用
+  let secondCalls = 0;
+  const again = await consolidateProfileFromWal(
+    "u1",
+    {
+      readProfile: () => "",
+      applyOps: async () => true,
+      extractFn: async () => {
+        secondCalls++;
+        return fakeExtraction([]);
+      },
+    },
+    { walDir, checkpointFile: ckptFile },
+  );
+  assert.equal(secondCalls, 0, "没有新轮次不得重复计费");
+  assert.equal(again.checkpointAdvanced, false);
 
   // readWalTurns：全部条目含 candidate 标志
   const turns = await readWalTurns("u1", "", { walDir });

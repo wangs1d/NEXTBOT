@@ -52,11 +52,11 @@ export type RuleServices = {
    * 显示给了当前用户（实测 eval 账号的日程出现在真实用户的时间轴里）。
    */
   listTodayTasks?: (actorId: string) => Array<{ title: string; runAt?: number | string }>;
-  weatherLine?: () => string | null;
-  unreadSenders?: () => string[];
-  readyGoals?: () => Array<{ title: string; body: string }>;
-  interestLines?: () => string[];
-  recallMemory?: (query: string, limit: number) => Promise<string[]> | string[];
+  weatherLine?: (actorId: string) => string | null;
+  unreadSenders?: (actorId: string) => string[];
+  readyGoals?: (actorId: string) => Array<{ title: string; body: string }>;
+  interestLines?: (actorId: string) => string[];
+  recallMemory?: (actorId: string, query: string, limit: number) => Promise<string[]> | string[];
   /**
    * 感知 → 目标桥（2026-10-10）：某 actor 的"一句话目标上下文"（如
    * 「你还在推进「学英语」，下一步是「背 20 个词」」）。规则文案据此从

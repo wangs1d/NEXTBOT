@@ -1,16 +1,13 @@
 /**
- * 语感 A/B 真链探针（2026-10-06 活人感治理 E 验收，参照 probe-confirm-round.ts 骨架）。
+ * 语感 A/B 真链探针（参照 probe-confirm-round.ts 骨架）。
  *
- * 同一生产同源 system prompt（kernel 薄身份 + finalize 后缀 + 【人格·静态】 +
- * FOREGROUND_ROLE_GUIDANCE + mood），仅切换两个治理变量做前后对比：
- *  - before 臂：无【语感基准】few-shot、无 slang 语气词行、默认采样（旧地基形态）
- *  - after   臂：【语感基准】8 组轮换示例 + slang 语气词行 + chatLaneSampling
- *    （temperature 0.85 + frequency_penalty 0.4，即治理后 chat 车道形态）
+ * 同一生产同源 system prompt（kernel 薄身份 + finalize 后缀 + 【人格】 +
+ * 职责块 + mood），仅切换一个变量做前后对比：
+ *  - before 臂：不注入【人格】正文（soul 缺席的裸形态），带工具说明与办事职责块
+ *  - after   臂：注入 buildPersonaPrompt() 的唯一人格正文，纯闲聊零工具 +
+ *    CHAT_LEISURE 职责块 + chatLaneSampling
  *
- * 验收（方案 E）：after 臂闲聊像人话、梗适量（一轮最多一个）；正事轮（提醒）
- * 零梗（人格块铁律）；20 题语感集留档 results/。
- *
- * 用法：npx tsx scripts/probe-voice-ab.ts [--repeats=1] [--cases=核心20]
+ * 用法：npx tsx scripts/probe-voice-ab.ts [--repeats=1] [--arm=after|both] [--tags=称呼,闲聊] [--custom=p1|p2]
  */
 import "dotenv/config";
 import { loadServerEnv } from "../src/config/load-server-env.js";
@@ -23,11 +20,10 @@ loadServerEnv();
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const repeats = Number.parseInt(process.argv.find((a) => a.startsWith("--repeats="))?.slice(10) ?? "1", 10) || 1;
 // 定点回归：--arm=after|both（缺省 both）、--tags=tag1,tag2（只跑指定题）、
-// --seed=xxx（语感基准轮换种子）、--custom=p1|p2（临时题，不进冻结语感集）
+// --custom=p1|p2（临时题，不进冻结语感集）
 const armArg = (process.argv.find((a) => a.startsWith("--arm="))?.slice(6) ?? "both") as "both" | "after" | "before";
 const tagsArg = process.argv.find((a) => a.startsWith("--tags="))?.slice(7) ?? "";
 const tagFilter = new Set(tagsArg.split(",").map((t) => t.trim()).filter(Boolean));
-const seedArg = process.argv.find((a) => a.startsWith("--seed="))?.slice(7) ?? "";
 const customArg = process.argv.find((a) => a.startsWith("--custom="))?.slice(9) ?? "";
 // --provider=minimax|openai|moonshot-kimi：临时切外部模型（必须在 resolve-provider
 // import 之前赋值，dotenv 加载完后的最终值）
@@ -36,8 +32,8 @@ const providerArg = process.argv.find((a) => a.startsWith("--provider="))?.slice
 const { createExternalChatProviderFromEnv } = await import("../src/external-model/resolve-provider.js");
 const { getRuntimeKernel } = await import("../src/agent/runtime-kernel.js");
 const { FOREGROUND_ROLE_GUIDANCE, CHAT_LEISURE_ROLE_GUIDANCE } = await import("../src/agent/lane-role-guidance.js");
-const { buildPersonaStaticBlock, buildPersonaMoodBlock, resolvePersonaMood } = await import("../src/agent/persona-core.js");
-const { buildVoiceBaselineBlock } = await import("../src/agent/chat-voice-baseline.js");
+const { buildPersonaMoodBlock, resolvePersonaMood } = await import("../src/agent/persona-core.js");
+const { buildPersonaPrompt } = await import("../src/agent/soul-store.js");
 const { finalizeChatSystemPrompt } = await import("../src/agent/prompt-builder.js");
 const { buildLaneCoreTools } = await import("../src/external-model/lane-tool-sets.js");
 const { getBuiltinAgentChatTools } = await import("../src/external-model/openai-compatible-tool-loop.js");
@@ -79,7 +75,7 @@ function buildToolContext() {
   const registry = new ToolRegistry() as any;
   const stub = async (name: string) => ({ ok: false, result: { error: `probe: ${name} 未接执行器` } });
   for (const name of [
-    "reminder.plan", "calendar.create_from_text", "calendar.create_task",
+    "calendar.create", "calendar.create", "calendar.create",
     "clock.get_current_time", "clock.get_user_location", "search_web", "search_images",
     "calendar.list_tasks", "task.dispatch", "task.status", "task.cancel",
   ]) {
@@ -107,26 +103,21 @@ type Row = { arm: string; tag: string; user: string; reply: string; tools: strin
 async function runArm(
   provider: any,
   arm: "before" | "after",
-  seed: string,
 ): Promise<Row[]> {
   const kernel = getRuntimeKernel();
   const identity = kernel.buildSessionSystem() ?? "";
-  const personaStatic = buildPersonaStaticBlock({ userAlias: undefined, tier: 2 });
   const mood = buildPersonaMoodBlock(
     resolvePersonaMood({ tier: 2, isTaskPlane: false }),
   );
   // before 臂带工具说明（生产 tools:true 路径）；after 臂纯闲聊零工具（tools:false，
   // 与生产 chatLanePureChat 轮 provider 侧 finalizeOptions.tools=false 同源）。
   const baseSystem = finalizeChatSystemPrompt(identity, { tools: arm !== "after" });
-  const parts = [baseSystem, personaStatic];
+  const parts = [baseSystem];
+  // 唯一人格出口：after 臂注入 buildPersonaPrompt()，before 臂整块缺席
+  if (arm === "after") parts.push(buildPersonaPrompt({}));
   // 职责块（2026-10-06 补注入，此前探针漏带导致职责治理测不出）：
   // before 臂 = 生产 FOREGROUND 版（办事导向）；after 臂纯闲聊 = CHAT_LEISURE 版。
   parts.push(arm === "after" ? CHAT_LEISURE_ROLE_GUIDANCE : FOREGROUND_ROLE_GUIDANCE);
-  // after 臂才注入【语感基准】（含 slang 语气词行，读 data/slang-lexicon.json）
-  if (arm === "after") {
-    const voice = buildVoiceBaselineBlock(seed);
-    if (voice) parts.push(voice);
-  }
   const systemPrompt = parts.filter(Boolean).join("\n\n");
 
   const tools = buildLaneCoreTools("chat", getBuiltinAgentChatTools() as any, [
@@ -163,6 +154,8 @@ async function runArm(
         toolCtx as never,
         {
           turnIntent: "chat",
+          // 探针自带完整 system（身份+人格+职责+协议），绕过 provider 内记忆拼装
+          systemPromptOverride: systemPrompt,
           ...(pureChat
             ? {
                 toolExposureProfile: "none",
@@ -200,12 +193,11 @@ async function main(): Promise<void> {
     console.error("[voice-probe] 外部模型 provider 未启用，无法探针");
     process.exit(1);
   }
-  console.log(`[voice-probe] provider=${provider.id} repeats=${repeats} cases=${CASES.length} arms=${armArg}${seedArg ? ` seed=${seedArg}` : ""}`);
-  const seed = seedArg || `voice-probe-seed`; // 固定 seed：两臂取同一批示例，对比只剩治理变量
+  console.log(`[voice-probe] provider=${provider.id} repeats=${repeats} cases=${CASES.length} arms=${armArg}`);
   const runArms: Array<"before" | "after"> = armArg === "both" ? ["before", "after"] : [armArg];
   const allRows: Array<{ arm: string; rows: Row[] }> = [];
   for (const arm of runArms) {
-    allRows.push({ arm, rows: await runArm(provider, arm, seed) });
+    allRows.push({ arm, rows: await runArm(provider, arm) });
   }
   const before = allRows.find((r) => r.arm === "before")?.rows ?? [];
   const after = allRows.find((r) => r.arm === "after")?.rows ?? [];
@@ -213,7 +205,7 @@ async function main(): Promise<void> {
   const outDir = join(scriptDir, "results");
   mkdirSync(outDir, { recursive: true });
   const outPath = join(outDir, `voice-ab-${Date.now()}.json`);
-  writeFileSync(outPath, JSON.stringify({ seed, cases: CASES, before, after }, null, 2), "utf8");
+  writeFileSync(outPath, JSON.stringify({ cases: CASES, before, after }, null, 2), "utf8");
   console.log(`\n[voice-probe] 完成 before=${before.length} after=${after.length} 轮；明细 → ${outPath}`);
 }
 

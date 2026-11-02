@@ -33,7 +33,7 @@ registerTravelMapRoutes(app);
 // 行程 + POI 缓存夹具：宽窄巷子有出片字段，人民公园没有
 travelPlanStore.save({
   planId: "photo-tip-1",
-  sessionId: "actor-pt",
+  actorId: "actor-pt",
   destination: "成都",
   title: "成都一日",
   startDate: "2026-10-20",
@@ -110,7 +110,7 @@ test("arrive: 站点无出片字段 / 无目的地缓存 → 不带 photoTip", a
   // 目的地未缓存：另一行程
   travelPlanStore.save({
     planId: "photo-tip-2",
-    sessionId: "actor-pt2",
+    actorId: "actor-pt2",
     destination: "南极",
     title: "离谱行程",
     createdAt: Date.now(),

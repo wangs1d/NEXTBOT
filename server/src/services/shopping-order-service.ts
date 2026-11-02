@@ -9,6 +9,7 @@ import type { AlipayBotService } from "./alipay-bot-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
 import type { ImportedBrowserCookie } from "./browser-session-types.js";
+import { CAPTURE_CONSENT_ALL_SITES } from "./browser-session-types.js";
 import {
   localDateKey,
   mapPlatformStatusText,
@@ -17,11 +18,15 @@ import {
   type StoredShoppingOrder,
 } from "./shopping-order-store.js";
 import {
-  ShoppingBrowserExecutor,
-  ShoppingPageUnavailableError,
-  type ShoppingPageLease,
-} from "./shopping-platforms/browser-executor.js";
-import { detectLoginPage, getLoginWaitMs, waitForLogin } from "./shopping-platforms/login-gate.js";
+  BrowserPageUnavailableError,
+  BrowserRuntime,
+  detectHumanRequired,
+  detectLoginPage,
+  getLoginWaitMs,
+  waitForLogin,
+  type BrowserPageLease,
+  type HumanRequiredDetection,
+} from "./browser-runtime/index.js";
 import { QrAssistService } from "./qr-assist-service.js";
 import { getShoppingPlatformAdapter, listSupportedPlatforms } from "./shopping-platforms/index.js";
 import type {
@@ -124,6 +129,12 @@ export type ShoppingOrderResult =
       paymentUrl?: string;
       /** 登录等待超时/需要登录时携带二维码截图地址（供卡片渲染与 LLM 转述） */
       loginRequired?: { platform: string; imageUrl?: string };
+      /**
+       * 「只有用户本人能做」的硬信号（登录墙 / 验证码）。
+       * 搜索为空或超时**不会**自动置位——只有 detectHumanRequired 命中才置位，
+       * 避免把「没搜到商品」误当成需要登录。
+       */
+      humanRequired?: { platform: string; reason: "login" | "captcha"; evidence?: string };
     };
 
 /**
@@ -145,12 +156,12 @@ export type ShoppingOrderResult =
  */
 export class ShoppingOrderService {
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
-  /** 已弹过「保存登录态」征询的站点（本进程内每站点只问一次） */
+  /** 已弹过「保存登录态」统一征询的 actor（本进程内每人只问一次，不按平台重复问） */
   private readonly askedLoginConsent = new Set<string>();
   /** 定期清理过期 token + 关闭存活 Page */
   private cleanupTimer: NodeJS.Timeout | null = null;
   /** 页面获取器（内置浏览器优先 + 无头兜底）；未注入时以缺省依赖构造（单测兼容） */
-  private readonly browserExecutor: ShoppingBrowserExecutor;
+  private readonly browserExecutor: BrowserRuntime;
   /** 通用二维码/图片推送（登录页截图等）；未注入时按 imageStore 构造（单测兼容） */
   private readonly qrAssist: QrAssistService;
 
@@ -163,7 +174,7 @@ export class ShoppingOrderService {
       /** 支付宝钱包通道（shopping.pay.* 收银台代付）。未注入时 pay 工具返回明确错误。 */
       alipayBot?: AlipayBotService;
       /** 页面获取器。缺省用新建 coordinator/gateway（shared 不可用 → 直接走无头）。 */
-      browserExecutor?: ShoppingBrowserExecutor;
+      browserExecutor?: BrowserRuntime;
       /** 图片落盘（登录/支付二维码截图）。缺省时只推 URL 不可用，依赖浏览器可见性。 */
       imageStore?: { savePng(actorId: string, png: Buffer): Promise<string> };
       /** 通用二维码推送服务。缺省时按 imageStore 构造。 */
@@ -171,24 +182,28 @@ export class ShoppingOrderService {
       /**
        * 「保存登录态」征询通道（2026-10-25 用户拍板：存 Cookie 须用户同意）。
        * 未表态时经此向客户端弹征询条；缺省时跳过捕获（宁可不存）。
+       * siteId 传 "*" 表示统一征询：一次答复对所有平台生效（2026-11-02 用户要求
+       * 「不要换一个平台就问一次」）。
        */
       askSaveLoginConsent?: (actorId: string, siteId: string, siteLabel: string) => void;
       /**
-       * 登录门超时：把「请用户登录」交给长流程 handoff（建等待步 + 页面留在登录页），
-       * 而不是把平台标成「没有数据」就收工。缺省时退回原来的纯报错。
+       * 需要用户本人动手（扫码登录 / 完成验证码）时交给长流程 handoff（建等待步 +
+       * 页面留在可见浏览器），而不是把平台标成「没有数据」就收工。
+       * platforms 是同一轮里命中 human-required 的平台：上层统一一次交接，不逐平台弹。
+       * 普通「没搜到商品 / 网络超时」不触发本回调。缺省时退回原来的纯报错。
        */
-      onLoginRequired?: (info: {
+      onUserActionRequired?: (info: {
         actorId: string;
         sessionId: string;
-        platform: string;
-        platformLabel: string;
-        loginUrl: string;
+        platforms: string[];
+        platformLabels: string[];
+        reason: "login" | "captcha";
       }) => void;
     },
   ) {
     this.browserExecutor =
       deps.browserExecutor ??
-      new ShoppingBrowserExecutor({
+      new BrowserRuntime({
         coordinator: new SharedBrowserCoordinator(),
         gateway: new SharedBrowserCdpGateway(),
         browserSessionService: deps.browserSessionService,
@@ -231,6 +246,45 @@ export class ShoppingOrderService {
   }
 
   /**
+   * 把「需要用户本人动手」交给长流程 handoff。reason：
+   *   - login   ：页面被拦到登录页（要扫码登录）；
+   *   - captcha ：页面要求完成安全验证（滑块/验证码）。
+   * 只由 human-required 硬信号触发；普通空结果/超时不交人。
+   * 交接是增强不是依赖：失败不影响工具结果照常返回。
+   */
+  private notifyUserAction(
+    ctx: ToolContext,
+    platforms: string[],
+    reason: "login" | "captcha",
+  ): void {
+    const ids = Array.from(new Set(platforms.map((p) => String(p).trim()).filter(Boolean)));
+    if (ids.length === 0) return;
+    try {
+      this.deps.onUserActionRequired?.({
+        actorId: resolveActorId(ctx),
+        sessionId: ctx.sessionId,
+        platforms: ids,
+        platformLabels: ids.map((p) => this.platformLabel(p)),
+        reason,
+      });
+    } catch {
+      /* 交接失败只丢增强，工具结果里的指引照常返回 */
+    }
+  }
+
+  /**
+   * 上层（比价/推荐取数）把本轮命中 human-required（登录墙/验证码）的平台
+   * 统一交给用户一次：不逐平台弹交接条，也不各自建等待步。
+   */
+  requestUserHandoff(
+    ctx: ToolContext,
+    platforms: string[],
+    reason: "login" | "captcha" = "login",
+  ): void {
+    this.notifyUserAction(ctx, platforms, reason);
+  }
+
+  /**
    * 统一页面执行壳：获取租约（shared 优先/无头兜底）→ 稳定等待 → 登录门 → run → 释放。
    * Cookie 软获取：有则注入（headless 免扫码），未导入/未授权不再硬拒（内置浏览器路径不需要）。
    */
@@ -245,8 +299,13 @@ export class ShoppingOrderService {
       preferHeadless?: boolean;
       /** 扫码等待上限（只读取数用短等：超时立刻走登录交接，不占着工具预算干等）。 */
       loginWaitMs?: number;
+      /**
+       * 抑制本层自动交接：上层（比价）要把多个失败平台合成**一次**统一 handoff，
+       * 逐平台各建等待步会互相挤掉。
+       */
+      suppressHandoff?: boolean;
       /** 页面获取不可用时的自定义兜底（如 track 回退本地订单记录）。 */
-      onUnavailable?: (err: ShoppingPageUnavailableError) => ShoppingOrderResult;
+      onUnavailable?: (err: BrowserPageUnavailableError) => ShoppingOrderResult;
     } = {},
   ): Promise<ShoppingOrderResult> {
     const actorId = resolveActorId(ctx);
@@ -257,15 +316,16 @@ export class ShoppingOrderService {
     const tCookies = Date.now();
 
     const interactiveLogin = opts.interactiveLogin ?? ctx.pushMediaCards != null;
-    let lease: ShoppingPageLease;
+    let lease: BrowserPageLease;
     try {
-      lease = await this.browserExecutor.acquirePage(actorId, platform, targetUrl, {
+      lease = await this.browserExecutor.acquirePage(actorId, targetUrl, {
+        siteId: platform,
         cookies,
         interactiveLogin,
         preferHeadless: opts.preferHeadless === true,
       });
     } catch (err) {
-      if (err instanceof ShoppingPageUnavailableError) {
+      if (err instanceof BrowserPageUnavailableError) {
         return opts.onUnavailable
           ? opts.onUnavailable(err)
           : { ok: false, error: err.message, retryable: false };
@@ -278,7 +338,7 @@ export class ShoppingOrderService {
       // 落页稳定后再过登录门（SPA/跳转需要时间）
       await lease.page.waitForTimeout(2_500).catch(() => {});
       const tSettle = Date.now();
-      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl, opts.loginWaitMs);
+      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl, opts.loginWaitMs, opts.suppressHandoff === true);
       const tGate = Date.now();
       if (gate) {
         console.log(`[shop-timing] ${platform} mode=${lease.mode} cookies=${tCookies - tStart} acquire=${tAcquire - tCookies} settle=${tSettle - tAcquire} gate=${tGate - tSettle} login=blocked`);
@@ -312,10 +372,11 @@ export class ShoppingOrderService {
    */
   private async ensureLoggedIn(
     ctx: ToolContext,
-    lease: ShoppingPageLease,
+    lease: BrowserPageLease,
     platform: string,
     targetUrl: string,
     loginWaitMs?: number,
+    suppressHandoff = false,
   ): Promise<ShoppingOrderResult | null> {
     // 两次检测：部分平台（如京东）登录跳转由 JS 延迟触发，落页稳定后再补检一次
     let det = await detectLoginPage(platform, lease.page);
@@ -347,18 +408,8 @@ export class ShoppingOrderService {
     const wait = await waitForLogin(platform, lease.page, targetUrl, { timeoutMs: waitMs });
     if (!wait.ok) {
       // 登录是用户本人的动作：交给长流程 handoff（页面留在登录页，等用户回执后续跑），
-      // 不再把平台就地标成「没有数据」。
-      try {
-        this.deps.onLoginRequired?.({
-          actorId: resolveActorId(ctx),
-          sessionId: ctx.sessionId,
-          platform,
-          platformLabel: label,
-          loginUrl: targetUrl,
-        });
-      } catch {
-        /* 交接是增强不是依赖：失败不影响下面的结构化失败返回 */
-      }
+      // 不再把平台就地标成「没有数据」。上层要统一多个平台时可抑制本层自动交接。
+      if (!suppressHandoff) this.notifyUserAction(ctx, [platform], "login");
       return {
         ok: false,
         error:
@@ -391,17 +442,16 @@ export class ShoppingOrderService {
     source: "scan_login" | "shared_login" | "headless_refresh",
     opts: { agentAllowed?: boolean } = {},
   ): Promise<void> {
-    // 保存须用户同意（与主流做法一致）：deny=不存；未表态=弹征询条 + 本轮不存
-    //（同意后下一轮起静默保存）。捕获失败/被拒都不影响主流程。
+    // 保存须用户同意（与主流做法一致）：deny=不存；未表态=弹统一的征询条 + 本轮不存
+    //（同意后下一轮起静默保存）。2026-11-02：统一问一次覆盖所有平台，不换平台再问。
     const consentActor = resolveActorId(ctx);
     const consent = await this.deps.browserSessionService.getCaptureConsent(consentActor, platform);
     if (consent === "deny") return;
     if (consent === "ask") {
-      // 每站点每轮只弹一次征询条：重复弹出会挤掉浏览器状态条
-      const askKey = `${consentActor}|${platform}`;
-      if (!this.askedLoginConsent.has(askKey)) {
-        this.askedLoginConsent.add(askKey);
-        this.deps.askSaveLoginConsent?.(consentActor, platform, this.platformLabel(platform));
+      // 每人每轮只弹一次统一征询条：重复弹出会挤掉浏览器状态条
+      if (!this.askedLoginConsent.has(consentActor)) {
+        this.askedLoginConsent.add(consentActor);
+        this.deps.askSaveLoginConsent?.(consentActor, CAPTURE_CONSENT_ALL_SITES, "购物平台");
       }
       return;
     }
@@ -426,13 +476,14 @@ export class ShoppingOrderService {
     platform: string,
     query: string,
     filters?: SearchFilters,
-    innerOpts?: { preferHeadless?: boolean; loginWaitMs?: number },
+    innerOpts?: { preferHeadless?: boolean; loginWaitMs?: number; suppressHandoff?: boolean },
   ): Promise<ShoppingOrderResult> {
     const adapter = this.requireAdapter(platform);
     if (!adapter) {
       return { ok: false, error: `平台「${platform}」暂不支持。已实现：${listSupportedPlatforms().join("/")}` };
     }
     const limit = Math.min(Math.max(filters?.limit ?? 5, 1), 10);
+    const suppressHandoff = innerOpts?.suppressHandoff === true;
 
     return this.withShoppingPage(
       ctx,
@@ -455,13 +506,28 @@ export class ShoppingOrderService {
         });
 
         if (filtered.length === 0) {
+          // 「搜索不到」不等于「需要用户」：先看页面有没有登录墙/验证码这类硬信号。
+          // 只有命中才交人（对齐主流 Agent 的 human checkpoint）；普通无结果如实返回。
+          let human: HumanRequiredDetection = { required: false };
+          if (mode === "shared" && !suppressHandoff) {
+            human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
+          }
+          if (human.required && human.reason) {
+            this.notifyUserAction(ctx, [platform], human.reason);
+            return {
+              ok: false,
+              error: `在${platform}搜索「${query}」需要你本人完成${human.reason === "login" ? "登录" : "验证"}：已在内置浏览器打开页面`,
+              retryable: true,
+              humanRequired: { platform, reason: human.reason, ...(human.evidence ? { evidence: human.evidence } : {}) },
+            };
+          }
           return {
             ok: true,
-            summary: `在${platform}搜索「${query}」未找到商品（可能登录态失效或页面结构变更）`,
+            summary: `在${platform}搜索「${query}」未找到商品（可能无匹配或页面结构变更）`,
             products: [],
             platform,
             query,
-            hint: "若无结果，请在客户端内置浏览器登录该平台后重试，或确认 Cookie 未过期且已授权 agentAllowed=true",
+            hint: "若无结果，可换个关键词重试；或确认平台登录态未过期",
           };
         }
 
@@ -474,13 +540,25 @@ export class ShoppingOrderService {
         };
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
+        // 页面打不开/超时不自动交人：主流 Agent 只把登录墙/验证码交人。
+        // 先看页面是否其实停在验证页，命中才 handoff；否则如实报错（可重试）。
+        let human: HumanRequiredDetection = { required: false };
+        if (mode === "shared" && !suppressHandoff) {
+          human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
+        }
+        if (human.required && human.reason) {
+          this.notifyUserAction(ctx, [platform], human.reason);
+        }
         return {
           ok: false,
           error: redactCredentials(`搜索失败：${message}${message.includes("Executable doesn't exist") ? "（请在 server 目录执行: npx playwright install chromium）" : ""}`),
           retryable: /timeout|navigation/i.test(message),
+          ...(human.required && human.reason
+            ? { humanRequired: { platform, reason: human.reason, ...(human.evidence ? { evidence: human.evidence } : {}) } }
+            : {}),
         };
       }
-    }, { preferHeadless: innerOpts?.preferHeadless === true, loginWaitMs: innerOpts?.loginWaitMs });
+    }, { preferHeadless: innerOpts?.preferHeadless === true, loginWaitMs: innerOpts?.loginWaitMs, suppressHandoff });
   }
 
   async placeOrder(
@@ -540,14 +618,15 @@ export class ShoppingOrderService {
     if (cookieResult.ok) cookies = cookieResult.cookies;
 
     const firstUrl = product.url ?? adapter.searchUrl(item);
-    let lease: ShoppingPageLease;
+    let lease: BrowserPageLease;
     try {
-      lease = await this.browserExecutor.acquirePage(actorId, platform, firstUrl, {
+      lease = await this.browserExecutor.acquirePage(actorId, firstUrl, {
+        siteId: platform,
         cookies,
         interactiveLogin: ctx.pushMediaCards != null,
       });
     } catch (err) {
-      if (err instanceof ShoppingPageUnavailableError) {
+      if (err instanceof BrowserPageUnavailableError) {
         return { ok: false, error: err.message, retryable: false };
       }
       throw err;
@@ -716,14 +795,15 @@ export class ShoppingOrderService {
         url: pending.snapshot.checkoutUrl,
       };
       const firstUrl = product.url ?? adapter.searchUrl(pending.item);
-      let lease: ShoppingPageLease;
+      let lease: BrowserPageLease;
       try {
-        lease = await this.browserExecutor.acquirePage(pending.actorId, platform, firstUrl, {
+        lease = await this.browserExecutor.acquirePage(pending.actorId, firstUrl, {
+          siteId: platform,
           cookies,
           interactiveLogin: ctx.pushMediaCards != null,
         });
       } catch (err) {
-        if (err instanceof ShoppingPageUnavailableError) {
+        if (err instanceof BrowserPageUnavailableError) {
           this.pendingConfirmations.delete(confirmationToken!);
           return { ok: false, error: err.message, retryable: false };
         }

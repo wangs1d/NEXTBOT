@@ -24,14 +24,16 @@ export class FinanceSensor implements ProactiveSensor {
 
   constructor(
     private readonly port: FinanceReadPort,
-    private readonly actorId: () => string | null,
+    private readonly actorIds: () => string[],
   ) {}
 
   collect(since: number): Signal[] {
-    const actorId = this.actorId();
-    if (!actorId) return [];
     // since 往前放宽 1 天：入账时间与交易时间可能错位（补拉窗口）
     const fromIso = new Date(since - 86_400_000).toISOString();
+    return this.actorIds().flatMap((actorId) => this.collectFor(actorId, since, fromIso));
+  }
+
+  private collectFor(actorId: string, since: number, fromIso: string): Signal[] {
     const txs = this.port.getTransactions(actorId, fromIso, undefined, undefined, 200);
     return txs
       .map((t) => {

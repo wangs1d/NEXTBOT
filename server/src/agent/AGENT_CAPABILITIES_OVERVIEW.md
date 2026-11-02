@@ -91,8 +91,7 @@ import {
 
 2️⃣ 【日历与日程管理能力】
 可用工具：
-- calendar.create_from_text: 从自然语言创建日程（如"明天下午3点开会"）
-- calendar.create_task: 创建任务提醒
+- calendar.create: 创建提醒/日程/定时任务的唯一入口（text 自然语言优先，或结构化字段）
 - calendar.list_tasks: 查看待办事项列表
 提示：可帮助用户管理时间、设置提醒、安排会议
 
@@ -137,7 +136,7 @@ import {
 可用工具：
 - budget.calculate: 计算预算和收支
 - shopping.suggest: 提供购物建议
-- reminder.plan: 制定提醒计划
+- reminder.plan: 已并入 calendar.create（历史叫法）
 提示：可提供生活建议、财务管理
 
 🔟 【协议统一管理能力】
@@ -237,7 +236,7 @@ Agent 可以：
 用户："明天下午3点有个会议，帮我设置提醒，并且查一下那天的天气"
 
 预期 Agent 行为：
-1. 调用 calendar.create_from_text 创建日程
+1. 调用 calendar.create 创建日程
 2. 调用 weather.get_local 查询天气
 3. 综合两个结果回复用户
 

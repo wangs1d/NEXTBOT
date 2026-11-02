@@ -1,5 +1,6 @@
 #include "media_session_watcher.h"
 
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <vector>
@@ -16,6 +17,33 @@
 namespace {
 
 namespace wmc = winrt::Windows::Media::Control;
+
+/// 音乐客户端名单：只有这些应用的会话算「在放歌」。
+///
+/// 判据只能是来源应用——实测直播间（抖音）上报的 PlaybackType 同样是 Music、
+/// 还带 84s 假时长，任何「像不像一首歌」的属性判断都会漏。浏览器标签、直播间、
+/// 游戏语音只是「有声音」，命中不了名单就当没有会话：岛屿不出音乐卡，Dart 也不
+/// 会为它们打服务端拉歌词。新播放器要上岛，在这里加一条它 AUMID 里的稳定片段。
+bool IsMusicApp(const std::string& app_id) {
+  static constexpr const char* kTokens[] = {
+      "soda",     "汽水",      "cloudmusic", "网易云",   "netease", "qqmusic",
+      "qq音乐",   "spotify",   "itunes",     "apple music", "applemusic",
+      "kugou",    "酷狗",      "kuwo",       "酷我",     "migu",    "咪咕",
+      "musicbee", "foobar",    "波点",       "deezer",
+  };
+  if (app_id.empty()) return false;
+  std::string lowered;
+  lowered.reserve(app_id.size());
+  for (unsigned char c : app_id) {
+    lowered.push_back(
+        c < 0x80 ? static_cast<char>(std::tolower(static_cast<int>(c)))
+                 : static_cast<char>(c));
+  }
+  for (const char* token : kTokens) {
+    if (lowered.find(token) != std::string::npos) return true;
+  }
+  return false;
+}
 
 int64_t NowEpochMs() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -61,6 +89,14 @@ MediaSessionSnapshot Sample(
   try {
     snapshot.app_id = ToUtf8(session.SourceAppUserModelId());
   } catch (...) {
+  }
+  if (!IsMusicApp(snapshot.app_id)) {
+    // 非音乐客户端：这一拍当作系统里没有媒体会话。
+    snapshot = MediaSessionSnapshot{};
+    snapshot.sampled_at_epoch_ms = NowEpochMs();
+    snapshot.track_changed = previous.has_session;
+    snapshot.playback_changed = previous.has_session;
+    return snapshot;
   }
 
   // 同一首歌沿用上一次的封面；换歌才重新取。

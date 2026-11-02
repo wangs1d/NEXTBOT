@@ -19,11 +19,13 @@
  * （继续走各自的旧机制直至下次升级）。
  *
  * 未配置 UPDATE_MANIFEST_SOURCE_URL / UPDATE_MANIFEST_EVENT_TOKEN 时整体不启用：
- * ECS 本体（清单源自己）、开发环境、旧部署零影响。
+ * 开发环境、旧部署零影响。更新控制面自己配回环地址（http://127.0.0.1:<port>），
+ * 于是握着客户端 wss 的那台机器既是清单源也是广播方，不需要任何外部订阅端。
  * 服务启动首帧只入缓存不广播（重启不该打扰在线用户；用户升级与否由客户端
  * 启动检查兜底）。
  */
 
+import { MANIFEST_EVENT_TOKEN_HEADER } from "../routes/http/internal-manifest-events.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 
 const RECONNECT_DELAY_MS = 3_000;
@@ -45,11 +47,12 @@ let started = false;
 /** 订阅端自身关心的清单分发版（UPDATE_MANIFEST_EDITION，未配置 = 主清单事件） */
 const WANT_EDITION: string | null = process.env.UPDATE_MANIFEST_EDITION?.trim() || null;
 
-function subscribeUrl(): string | null {
+/** 订阅目标：清单不拼进 URL——query 串会整份落进对端 nginx access.log 与服务日志。 */
+export function subscribeTarget(): { url: string; token: string } | null {
   const source = process.env.UPDATE_MANIFEST_SOURCE_URL?.trim();
   const token = process.env.UPDATE_MANIFEST_EVENT_TOKEN?.trim();
   if (!source || !token) return null;
-  return `${source.replace(/\/+$/, "")}/api/internal/manifest-events?token=${encodeURIComponent(token)}`;
+  return { url: `${source.replace(/\/+$/, "")}/api/internal/manifest-events`, token };
 }
 
 function manifestKey(m: UpdatePushManifest): string {
@@ -106,8 +109,10 @@ function handleEventData(raw: string): void {
 }
 
 /** 消费一条 SSE 连接直到断开（断开由 connectLoop 捕获后重连） */
-async function consumeEventStream(url: string): Promise<void> {
-  const res = await fetch(url, { headers: { accept: "text/event-stream" } });
+async function consumeEventStream(target: { url: string; token: string }): Promise<void> {
+  const res = await fetch(target.url, {
+    headers: { accept: "text/event-stream", [MANIFEST_EVENT_TOKEN_HEADER]: target.token },
+  });
   if (!res.ok || !res.body) throw new Error(`event stream HTTP ${res.status}`);
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -131,10 +136,10 @@ async function consumeEventStream(url: string): Promise<void> {
   }
 }
 
-async function connectLoop(url: string): Promise<void> {
+async function connectLoop(target: { url: string; token: string }): Promise<void> {
   for (;;) {
     try {
-      await consumeEventStream(url);
+      await consumeEventStream(target);
     } catch {
       // 断线静默（fail-open）：重连后控制面全量重推，漏掉的变化自动校准
     }
@@ -144,11 +149,11 @@ async function connectLoop(url: string): Promise<void> {
 
 /** bootstrap 调用：订阅更新控制面的清单事件流（未配置 env 时不启用）。 */
 export function startClientUpdatePusher(registry: WsConnectionRegistry): void {
-  const url = subscribeUrl();
-  if (!url || started) return; // 幂等
+  const target = subscribeTarget();
+  if (!target || started) return; // 幂等
   started = true;
   registryRef = registry;
-  void connectLoop(url);
+  void connectLoop(target);
 }
 
 /**

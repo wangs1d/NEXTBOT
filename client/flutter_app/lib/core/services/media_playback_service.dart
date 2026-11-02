@@ -5,6 +5,8 @@ import "package:audioplayers/audioplayers.dart";
 import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
+import "../config/media_url.dart";
+
 /// session.init 上报给服务端的能力声明：本客户端已实现 agent.media.* 消费
 /// （MediaPlaybackService 挂入 WS 分发后置 true，服务端 media.play 工具因此放行）。
 /// 注意：只有在 main.dart 实际接线 handleMediaEvent 之后才允许声明，否则又回到
@@ -132,6 +134,10 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
       client.userAgent =
           "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
       final HttpClientRequest request = await client.getUrl(Uri.parse(url));
+      // 本服务地址要带设备凭证（周界鉴权开启后无 token 的音频拿不到）
+      MediaUrl.headersFor(url).forEach(
+        (String k, String v) => request.headers.set(k, v),
+      );
       final HttpClientResponse response = await request.close();
       if (response.statusCode != 200) {
         debugPrint(
@@ -158,9 +164,11 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
   Future<void> play(String url) async {
     final AudioPlayer player = _ensurePlayer();
     _cleanupTempFile();
+    // UrlSource 发不出请求头，本服务地址只能靠 query 带凭证
+    final String signed = MediaUrl.resolve(url);
     final bool useTempFile = _kWindowsDownloadToTempFile && Platform.isWindows;
     if (useTempFile) {
-      final String? path = await _downloadToTempFile(url);
+      final String? path = await _downloadToTempFile(signed);
       if (path == null) {
         throw StateError("音频下载失败（Windows 临时文件路径不可用）");
       }
@@ -168,7 +176,7 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
       return;
     }
     // 非 Windows：直接流式播放网络 URL
-    await player.play(UrlSource(url));
+    await player.play(UrlSource(signed));
   }
 
   @override

@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { resolveActorId } from "../../agent/actor-id.js";
 import {
   weatherCurrentQuerySchema,
   weatherLinkTaskBodySchema,
@@ -28,12 +29,13 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const { sessionId, taskId } = parsed.data;
+    const { sessionId, userId, taskId } = parsed.data;
+    const actorId = resolveActorId({ userId, sessionId });
     const task = scheduleTaskService.getTask(taskId);
-    if (!task || task.sessionId !== sessionId || task.kind !== "weather_brief") {
+    if (!task || task.sessionId !== actorId || task.kind !== "weather_brief") {
       return reply.code(400).send({ ok: false, message: "任务不存在或类型不是天气简报" });
     }
-    const prefs = weatherPrefsService.get(sessionId);
+    const prefs = weatherPrefsService.get(actorId);
     if (!prefs) {
       return { ok: true, linked: false, needLocation: true };
     }
@@ -88,7 +90,8 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const prefs = weatherPrefsService.get(parsed.data.sessionId);
+    const key = resolveActorId({ userId: parsed.data.userId, sessionId: parsed.data.sessionId });
+    const prefs = weatherPrefsService.get(key);
     return { ok: true, prefs: prefs ?? null };
   });
 
@@ -98,9 +101,11 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     const body = parsed.data;
+    // 存储键按用户（偏好属于人，不属于某个对话线程）
+    const ownerId = resolveActorId({ userId: body.userId, sessionId: body.sessionId });
     // 客户端没给时区就存空（取数时按坐标推导），不写死 Asia/Shanghai 冒充用户所在时区
     const tz = body.timezone?.trim() ?? "";
-    const prev = weatherPrefsService.get(body.sessionId);
+    const prev = weatherPrefsService.get(ownerId);
 
     const explicitMorning = body.morningReminderEnabled;
     const morningEnabled =
@@ -118,7 +123,7 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
           }
         }
         const saved = await weatherPrefsService.upsert({
-          sessionId: body.sessionId,
+          sessionId: ownerId,
           latitude: body.latitude,
           longitude: body.longitude,
           label: body.label,
@@ -162,7 +167,7 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
           }
           if (!taskId) {
             const task = await scheduleTaskService.createTask({
-              sessionId: body.sessionId,
+              sessionId: ownerId,
               title: "每日天气与穿衣提示",
               description: "基于已保存位置生成当日天气与穿衣建议（Open-Meteo）",
               kind: "weather_brief",
@@ -185,7 +190,7 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
         }
 
         const saved = await weatherPrefsService.upsert({
-          sessionId: body.sessionId,
+          sessionId: ownerId,
           latitude: body.latitude,
           longitude: body.longitude,
           label: body.label,
@@ -197,7 +202,7 @@ export function registerWeatherRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       }
 
       const saved = await weatherPrefsService.upsert({
-        sessionId: body.sessionId,
+        sessionId: ownerId,
         latitude: body.latitude,
         longitude: body.longitude,
         label: body.label,

@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import { z } from "zod";
+import { resolveActorId } from "../../agent/actor-id.js";
 import {
   travelPlanStore,
   type StoredTravelPlan,
@@ -169,6 +170,19 @@ const bookingSchema = z.object({
  *
  * travelPlanningService 未装配时所有端点返回 503（仿 not enabled 模式）。
  */
+/**
+ * 请求归属 actor：query 优先、body 兜底（身份钉死由 access-auth 钩子负责）。
+ * 皆空时 resolveActorId 归入 anonymous 桶——仍按 actor 分区，绝不回落到全局共享。
+ */
+function actorIdOf(request: { query: unknown; body: unknown }): string {
+  const q = (request.query ?? {}) as { userId?: string; sessionId?: string };
+  const b = (request.body ?? {}) as { userId?: string; sessionId?: string };
+  return resolveActorId({
+    userId: q.userId ?? b.userId,
+    sessionId: (q.sessionId ?? b.sessionId) ?? "",
+  });
+}
+
 export function registerTravelPlanRoutes(
   app: FastifyInstance,
   deps: {
@@ -188,9 +202,9 @@ export function registerTravelPlanRoutes(
     return true;
   };
 
-  /** 按 planId 取行程；不存在时发送 404 并返回 null */
-  const requirePlan = (reply: FastifyReply, planId: string): StoredTravelPlan | null => {
-    const plan = travelPlanStore.get(planId);
+  /** 按 (actorId, planId) 取归属本 actor 的行程；不存在或跨 actor 时发送 404 并返回 null */
+  const requirePlan = (reply: FastifyReply, actorId: string, planId: string): StoredTravelPlan | null => {
+    const plan = travelPlanStore.getForActor(actorId, planId);
     if (!plan) {
       void reply.code(404).send({ ok: false, error: `行程不存在：${planId}` });
       return null;
@@ -258,12 +272,12 @@ export function registerTravelPlanRoutes(
 
   // ======================== 行程读取 ========================
 
-  /** 行程摘要列表（新→旧，最多 20 份），供面板「我的行程」选择 */
-  app.get("/travel/plans", async (_request, reply) => {
+  /** 本 actor 行程摘要列表（新→旧，最多 20 份），供面板「我的行程」选择 */
+  app.get("/travel/plans", async (request, reply) => {
     if (!requireService(reply)) return;
     // 动态数据（规划/编辑/视频回填后即时变化）：禁中间层缓存，浏览器每次验证
     reply.header("Cache-Control", "no-cache");
-    return { ok: true, plans: travelPlanStore.listSummaries(20) };
+    return { ok: true, plans: travelPlanStore.listSummariesForActor(actorIdOf(request), 20) };
   });
 
   /** 端点自述清单（与其他路由域一致的自我描述） */
@@ -298,7 +312,7 @@ export function registerTravelPlanRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const plan = requirePlan(reply, parsed.data.planId);
+    const plan = requirePlan(reply, actorIdOf(request), parsed.data.planId);
     if (!plan) return;
     // 冷层权威数据源（视频回填/编辑后即时变化）：禁中间层缓存，浏览器每次验证
     reply.header("Cache-Control", "no-cache");
@@ -312,7 +326,7 @@ export function registerTravelPlanRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const removed = travelPlanStore.remove(parsed.data.planId);
+    const removed = travelPlanStore.removeForActor(actorIdOf(request), parsed.data.planId);
     if (!removed) {
       return reply.code(404).send({ ok: false, error: `行程不存在：${parsed.data.planId}` });
     }
@@ -335,7 +349,7 @@ export function registerTravelPlanRoutes(
       if (!patch.success) {
         return reply.code(400).send({ ok: false, error: patch.error.flatten() });
       }
-      const plan = requirePlan(reply, params.data.planId);
+      const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
       if (!plan) return;
       if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
@@ -365,7 +379,7 @@ export function registerTravelPlanRoutes(
       if (!params.success) {
         return reply.code(400).send({ ok: false, error: params.error.flatten() });
       }
-      const plan = requirePlan(reply, params.data.planId);
+      const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
       if (!plan) return;
       if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
@@ -397,7 +411,7 @@ export function registerTravelPlanRoutes(
       if (!body.success) {
         return reply.code(400).send({ ok: false, error: body.error.flatten() });
       }
-      const plan = requirePlan(reply, params.data.planId);
+      const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
       if (!plan) return;
       if (!checkVersion(reply, plan, request)) return;
       const day = plan.days[params.data.dayIndex];
@@ -470,7 +484,7 @@ export function registerTravelPlanRoutes(
       if (!body.success) {
         return reply.code(400).send({ ok: false, error: body.error.flatten() });
       }
-      const plan = requirePlan(reply, params.data.planId);
+      const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
       if (!plan) return;
       if (!checkVersion(reply, plan, request)) return;
       const item = requireItem(reply, plan, params.data.dayIndex, params.data.itemIndex);
@@ -546,7 +560,9 @@ export function registerTravelPlanRoutes(
       if (!body.success) {
         return reply.code(400).send({ ok: false, error: body.error.flatten() });
       }
-      const ok = travelPlanStore.updateProgress(
+      const actorId = actorIdOf(request);
+      const ok = travelPlanStore.updateProgressForActor(
+        actorId,
         parsed.data.planId,
         body.data.day,
         body.data.stop,
@@ -554,7 +570,7 @@ export function registerTravelPlanRoutes(
       if (!ok) {
         return reply.code(404).send({ ok: false, error: "plan not found" });
       }
-      const plan = travelPlanStore.get(parsed.data.planId);
+      const plan = travelPlanStore.getForActor(actorId, parsed.data.planId);
       return { ok: true, progress: plan?.progress ?? null };
     },
   );
@@ -568,7 +584,7 @@ export function registerTravelPlanRoutes(
       if (!parsed.success) {
         return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
       }
-      const plan = travelPlanStore.get(parsed.data.planId);
+      const plan = travelPlanStore.getForActor(actorIdOf(request), parsed.data.planId);
       if (!plan) {
         return reply.code(404).send({ ok: false, error: "plan not found" });
       }
@@ -600,7 +616,7 @@ export function registerTravelPlanRoutes(
       if (!parsed.success) {
         return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
       }
-      const plan = requirePlan(reply, parsed.data.planId);
+      const plan = requirePlan(reply, actorIdOf(request), parsed.data.planId);
       if (!plan) return;
 
       const now = new Date();
@@ -656,9 +672,9 @@ export function registerTravelPlanRoutes(
 
   /**
    * POST /travel/plans/:planId/poi-feedback — POI 负向反馈（travel 双端①）。
-   * 攻略页出片/漂亮饭卡「不感兴趣」→ 按行程归属（plan.sessionId）写 UserFact
-   * 负向偏好：标签进 travel.poi_dislike（同类衰减）、POI 名进
-   * travel.poi_dislike_name（下轮点名排除）。行程无归属会话时如实返回不写。
+   * 攻略页出片/漂亮饭卡「不感兴趣」→ 按请求归属 actor（query.userId / body.userId）
+   * 写 UserFact 负向偏好：标签进 travel.poi_dislike（同类衰减）、POI 名进
+   * travel.poi_dislike_name（下轮点名排除）。行程非本 actor 归属时 requirePlan 直接 404。
    */
   app.post<{ Params: { planId: string } }>(
     "/travel/plans/:planId/poi-feedback",
@@ -671,12 +687,9 @@ export function registerTravelPlanRoutes(
       if (!parsedBody.success) {
         return reply.code(400).send({ ok: false, error: parsedBody.error.flatten() });
       }
-      const plan = requirePlan(reply, parsedParams.data.planId);
+      const actorId = actorIdOf(request);
+      const plan = requirePlan(reply, actorId, parsedParams.data.planId);
       if (!plan) return;
-      const actorId = (plan as { sessionId?: string }).sessionId ?? "";
-      if (!actorId) {
-        return reply.code(409).send({ ok: false, error: "行程无归属会话，无法沉淀偏好" });
-      }
       if (!deps.userPersonalizationService) {
         return reply.code(503).send({ ok: false, error: "画像服务未装配，偏好反馈暂不可用" });
       }
@@ -725,7 +738,7 @@ export function registerTravelPlanRoutes(
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: body.error.flatten() });
     }
-    const plan = requirePlan(reply, params.data.planId);
+    const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
     if (!plan) return;
 
     const ctx: PricingContext = {
@@ -788,19 +801,19 @@ export function registerTravelPlanRoutes(
 
   // ======================== 收藏同步（C5） ========================
 
-  /** 收藏列表（key 为「type:name」，与客户端本地收藏同键格式） */
-  app.get("/travel/favorites", async () => ({
+  /** 收藏列表（本 actor，key 为「type:name」，与客户端本地收藏同键格式） */
+  app.get("/travel/favorites", async (request) => ({
     ok: true,
-    favorites: travelFavoritesStore.list(),
+    favorites: travelFavoritesStore.list(actorIdOf(request)),
   }));
 
-  /** 全量同步收藏（客户端 toggle 后 fire-and-forget 调用） */
+  /** 全量同步本 actor 收藏（客户端 toggle 后 fire-and-forget 调用） */
   app.post("/travel/favorites", async (request, reply) => {
     const body = favoritesSyncSchema.safeParse(request.body);
     if (!body.success) {
       return reply.code(400).send({ ok: false, error: body.error.flatten() });
     }
-    const favorites = travelFavoritesStore.replaceAll(body.data.favorites);
+    const favorites = travelFavoritesStore.replaceAll(actorIdOf(request), body.data.favorites);
     return { ok: true, favorites };
   });
 
@@ -813,12 +826,16 @@ export function registerTravelPlanRoutes(
     if (!params.success) {
       return reply.code(400).send({ ok: false, error: params.error.flatten() });
     }
-    const plan = requirePlan(reply, params.data.planId);
+    const plan = requirePlan(reply, actorIdOf(request), params.data.planId);
     if (!plan) return;
     return { ok: true, shareCode: travelShareStore.codeFor(plan.planId) };
   });
 
-  /** 按分享码读完整行程（只读分享视图；独立前缀避免与 :planId 参数段匹配歧义） */
+  /**
+   * 按分享码读完整行程（只读分享视图；独立前缀避免与 :planId 参数段匹配歧义）。
+   * 分享是公开传播通道：凭 8 位码即可读，不做 actor 归属校验（数据与归档列表隔离，
+   * 只有拿到分享码者能读；故此处按全局 planId 取，是本族唯一的公开读取口）。
+   */
   app.get<{ Params: { code: string } }>("/travel/share/:code", async (request, reply) => {
     if (!requireService(reply)) return;
     const code = request.params.code.trim();
@@ -829,8 +846,10 @@ export function registerTravelPlanRoutes(
     if (!planId) {
       return reply.code(404).send({ ok: false, error: `分享码无效：${code}` });
     }
-    const plan = requirePlan(reply, planId);
-    if (!plan) return;
+    const plan = travelPlanStore.get(planId);
+    if (!plan) {
+      return reply.code(404).send({ ok: false, error: `行程不存在：${planId}` });
+    }
     return { ok: true, plan };
   });
 

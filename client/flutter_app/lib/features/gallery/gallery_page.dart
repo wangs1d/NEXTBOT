@@ -5,6 +5,7 @@ import "dart:typed_data";
 import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
 import "../chat/media_disk_cache.dart";
@@ -84,9 +85,15 @@ class _GalleryPageState extends State<GalleryPage> {
     }
   }
 
+  /// 图库按 actor 分区，所有 /picture/* 请求都要带归属身份才落到本人相册；
+  /// 周界鉴权开启后还要带设备 token（否则整页 401）。
   Uri _uri(String path, [Map<String, String>? query]) {
-    return Uri.parse("${ApiConfig.httpBase}$path")
-        .replace(queryParameters: query);
+    return Uri.parse("${ApiConfig.httpBase}$path").replace(
+      queryParameters: <String, String>{
+        ...ApiConfig.accountAuthQuery,
+        ...?query,
+      },
+    );
   }
 
   Map<String, dynamic> _decodeBody(http.Response response) {
@@ -100,8 +107,7 @@ class _GalleryPageState extends State<GalleryPage> {
       _error = null;
     });
     try {
-      final http.Response response = await http
-          .get(_uri("/picture/assets", <String, String>{
+      final http.Response response = await NbHttp.get(_uri("/picture/assets", <String, String>{
         "page": "1",
         "pageSize": "30",
       }))
@@ -133,8 +139,7 @@ class _GalleryPageState extends State<GalleryPage> {
     if (_loadingMore || !_hasMore) return;
     setState(() => _loadingMore = true);
     try {
-      final http.Response response = await http
-          .get(_uri("/picture/assets", <String, String>{
+      final http.Response response = await NbHttp.get(_uri("/picture/assets", <String, String>{
         "page": "${_page + 1}",
         "pageSize": "30",
       }))
@@ -226,8 +231,7 @@ class _GalleryPageState extends State<GalleryPage> {
     );
     if (confirmed != true) return;
     try {
-      final http.Response response = await http
-          .delete(_uri("/picture/assets/${photo.id}"))
+      final http.Response response = await NbHttp.delete(_uri("/picture/assets/${photo.id}"))
           .timeout(const Duration(seconds: 15));
       final Map<String, dynamic> body = _decodeBody(response);
       if (response.statusCode == 200 && body["ok"] == true) {
@@ -279,8 +283,7 @@ class _GalleryPageState extends State<GalleryPage> {
   Future<void> _restoreTrash(List<String> trashIds) async {
     final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
     try {
-      final http.Response response = await http
-          .post(
+      final http.Response response = await NbHttp.post(
             _uri("/picture/trash/restore"),
             headers: const <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{"ids": trashIds}),
@@ -342,8 +345,7 @@ class _GalleryPageState extends State<GalleryPage> {
     setState(() => _batchBusy = true);
     final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
     try {
-      await http
-          .post(
+      await NbHttp.post(
             _uri("/picture/assets/batch-tag"),
             headers: const <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{"ids": _selectedIds.toList(), "tag": "收藏"}),
@@ -396,8 +398,7 @@ class _GalleryPageState extends State<GalleryPage> {
     if (confirmed != true) return;
     setState(() => _batchBusy = true);
     try {
-      final http.Response response = await http
-          .post(
+      final http.Response response = await NbHttp.post(
             _uri("/picture/assets/batch-delete"),
             headers: const <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{"ids": _selectedIds.toList()}),

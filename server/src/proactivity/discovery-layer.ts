@@ -196,9 +196,9 @@ export class DiscoveryLayer {
   }
 
   /** 跨源实体联系：给定实体词，一次拿到**所有来源**里提到它的条目 */
-  linksFor(entity: string, limit = 3): Array<{ stream: string; text: string }> {
+  linksFor(entity: string, limit = 3, actorId?: string): Array<{ stream: string; text: string }> {
     return this.deps.store
-      .findByEntity(entity, { limit })
+      .findByEntity(entity, { limit, ...(actorId ? { actorId } : {}) })
       .filter((h) => h.stream !== "finding")
       .map((h) => ({ stream: h.stream, text: (h.delta ?? h.entity).slice(0, 60) }));
   }
@@ -227,7 +227,10 @@ export class DiscoveryLayer {
       }
     }
     for (const entity of entities.slice(0, 4)) {
-      for (const f of this.deps.store.findingsByEntity(entity, { limit: 3 })) {
+      for (const f of this.deps.store.findingsByEntity(entity, {
+        limit: 3,
+        ...(input.actorId ? { actorId: input.actorId } : {}),
+      })) {
         // 可读 = 既没被消费、也没被别的开口预留（"读走等裁决"期间对第二个口不可见）
         if (!this.deps.store.isFindingAvailable(f.fingerprint)) continue;
         if (f.at + f.ttlMs <= now) continue;
@@ -251,7 +254,7 @@ export class DiscoveryLayer {
     const limit = input.linkLimit ?? 2;
     for (const entity of (input.entities?.length ? input.entities : entitiesOf(base)).slice(0, 4)) {
       if (linked.length >= limit) break;
-      for (const hit of this.linksFor(entity, 2)) {
+      for (const hit of this.linksFor(entity, 2, input.actorId)) {
         const line = `${STREAM_LABEL[hit.stream] ?? hit.stream}提到「${hit.text}」`;
         if (base.includes(line) || linked.includes(line) || merged.some((m) => m.content.includes(hit.text))) continue;
         linked.push(line);

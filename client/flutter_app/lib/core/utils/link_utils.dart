@@ -1,6 +1,6 @@
 import "package:url_launcher/url_launcher.dart";
 
-import "../config/api_config.dart";
+import "../config/media_url.dart";
 
 /// 聊天正文/卡片里的 URL 处理工具。
 ///
@@ -34,15 +34,10 @@ class LinkUtils {
     return urls;
   }
 
-  /// 相对路径 → 服务端绝对 URL；已是绝对地址原样返回。
+  /// 相对路径 → 服务端绝对 URL（带本机设备凭证）；外部绝对地址原样返回。
   /// （原 agent_result_card 顶层 `_resolveMediaUrl` 语义：不带斜杠的相对
   /// 路径补一根斜杠，否则拼出来的地址无法加载。）
-  static String resolveMediaUrl(String url) {
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    final String base = ApiConfig.httpBase;
-    if (url.startsWith("/")) return "$base$url";
-    return "$base/$url";
-  }
+  static String resolveMediaUrl(String url) => MediaUrl.resolve(url);
 
   /// URL → 简短可读标签：取域名并去掉 www，不展示路径与协议。
   static String shortLabel(String url) {

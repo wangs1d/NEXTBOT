@@ -2,6 +2,7 @@ import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
+import "nb_http.dart";
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
@@ -27,8 +28,7 @@ class BriefingTtsApi {
         ...AccessCredentialStore.instance.authHeaders,
       };
       debugPrint("[BriefingTtsApi] tts request -> ${ApiConfig.httpBase}");
-      final http.Response res = await http
-          .post(
+      final http.Response res = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/morning-briefing/tts"),
             headers: headers,
             body: jsonEncode(<String, dynamic>{"text": text}),

@@ -3,6 +3,7 @@ import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
+import "../core/services/nb_http.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../app/ambient_feeds_controller.dart";
@@ -13,6 +14,7 @@ import "../core/models/chat_models.dart";
 import "../core/services/access_auth_api.dart";
 import "../core/services/attention_api.dart";
 import "../core/services/client_location_service.dart";
+import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/services/ws_chat_service.dart";
 import "../core/utils/agent_result_parser.dart";
@@ -196,8 +198,7 @@ class MobileChatController extends ChangeNotifier {
         "limit": "200",
         "full": "1",
       });
-      final http.Response res = await http
-          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+      final http.Response res = await NbHttp.get(uri, headers: AccessCredentialStore.instance.authHeaders)
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> body =
@@ -324,7 +325,22 @@ class MobileChatController extends ChangeNotifier {
       "userAlias": "owner",
       // 登录邮箱覆盖（未登录回落 USER_ID/sessionId），服务端按 userId 绑定 actor
       "userId": ApiConfig.effectiveActorId,
+      // 访问鉴权开启时服务端校验此 token；未绑定/未开启时为 null
+      if (AccessCredentialStore.instance.token != null)
+        "token": AccessCredentialStore.instance.token,
     };
+    // 用户自有模型三元组随连接上送：key 只存本机，服务端按 actor 纯内存驻留。
+    // 明文 ws 绝不送 key（服务端同样拒绝非 TLS 上送）。
+    if (ApiConfig.wsUrl.startsWith("wss://")) {
+      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
+      if (binding.isConfigured) {
+        init["modelProvider"] = <String, dynamic>{
+          "baseUrl": binding.baseUrl,
+          "apiKey": binding.apiKey,
+          "model": binding.model,
+        };
+      }
+    }
     _service.sendEvent("session.init", init);
   }
 
@@ -859,7 +875,7 @@ class MobileChatController extends ChangeNotifier {
       final Uri req = Uri.parse("${ApiConfig.httpBase}/travel-map/nav/transfer-link")
           .replace(queryParameters: <String, String>{"name": station.trim()});
       final http.Response res =
-          await http.get(req).timeout(const Duration(seconds: 8));
+          await NbHttp.get(req).timeout(const Duration(seconds: 8));
       final dynamic url =
           jsonDecode(utf8.decode(res.bodyBytes))["url"];
       if (res.statusCode == 200 && url is String && url.startsWith("https://")) {
@@ -1084,6 +1100,17 @@ class MobileChatController extends ChangeNotifier {
     return out.isEmpty ? null : out;
   }
 
+  /// 「接下来你可以」接续建议（done 载荷 followups，瞬态不持久化）。
+  List<String>? _parseFollowUps(Map<String, dynamic> payload) {
+    final Object? raw = payload["followups"];
+    if (raw is! List) return null;
+    final List<String> list = raw
+        .map((Object? e) => e?.toString().trim() ?? "")
+        .where((String e) => e.isNotEmpty)
+        .toList();
+    return list.isEmpty ? null : list;
+  }
+
   void _finalizeReply(Map<String, dynamic> payload) {
     // 真·分绿泡：带 bubbles 对账数组的轮次按泡收口（不走单泡 finalText 替换）
     final List<Map<String, dynamic>>? bubbles =
@@ -1120,6 +1147,7 @@ class MobileChatController extends ChangeNotifier {
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
+    final List<String>? followUps = _parseFollowUps(payload);
     if (idx < 0) {
       // 没有流式占位:直接落一条最终消息（整轮只剩内部帧 → 不落空白泡）
       if (finalText.trim().isEmpty &&
@@ -1143,6 +1171,7 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        followUpPrompts: followUps,
       ));
       _persist(messages.last);
     } else {
@@ -1177,6 +1206,7 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard ?? prev.summaryCard,
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
+        followUpPrompts: followUps,
       );
       _persist(messages[idx]);
     }
@@ -1208,6 +1238,7 @@ class MobileChatController extends ChangeNotifier {
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
+    final List<String>? followUps = _parseFollowUps(payload);
     if (payload["finalTextReplacesStream"] == true) {
       // 塌缩：删除本轮所有分泡（含 id 对账与同 trace 兜底），落单泡 finalText
       messages.removeWhere((m) {
@@ -1239,6 +1270,7 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        followUpPrompts: followUps,
       ));
       _persist(messages.last);
       _streamingMessageId = null;
@@ -1288,6 +1320,7 @@ class MobileChatController extends ChangeNotifier {
           summaryCard: isLast ? summaryCard : null,
           renderBlocks: isLast ? renderBlocksForLast : null,
           replyBlocks: isLast ? replyBlocksForLast : null,
+          followUpPrompts: isLast ? followUps : null,
         ));
         _persist(messages.last);
       } else {
@@ -1312,6 +1345,7 @@ class MobileChatController extends ChangeNotifier {
               isLast ? (renderBlocksForLast ?? prev.renderBlocks) : prev.renderBlocks,
           replyBlocks:
               isLast ? (replyBlocksForLast ?? prev.replyBlocks) : prev.replyBlocks,
+          followUpPrompts: isLast ? followUps : null,
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
           // streaming 不带 → false：定稿
         );

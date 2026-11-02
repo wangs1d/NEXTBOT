@@ -4,6 +4,8 @@ import "dart:convert";
 import "package:camera/camera.dart";
 import "package:http/http.dart" as http;
 
+import "nb_http.dart";
+
 import "../config/api_config.dart";
 
 /// 开机简报在座检测（摄像头门禁）。
@@ -43,8 +45,7 @@ class PresenceGateService {
       await controller.initialize();
       final XFile file = await controller.takePicture();
       final List<int> bytes = await file.readAsBytes();
-      final http.Response res = await http
-          .post(
+      final http.Response res = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/presence/detect"),
             headers: const <String, String>{
               "Content-Type": "application/json",

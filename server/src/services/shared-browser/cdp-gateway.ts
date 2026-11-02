@@ -150,7 +150,7 @@ export class SharedBrowserCdpGateway {
    */
   async openPage(
     url: string,
-    opts: { timeoutMs?: number; waitPanelMs?: number } = {},
+    opts: { timeoutMs?: number; waitPanelMs?: number; waitSlotMs?: number } = {},
   ): Promise<Page | null> {
     const timeout = opts.timeoutMs ?? 20_000;
     // 面板就绪等待：服务端先发 shared.browser.busy，客户端收到后才创建/打开
@@ -158,9 +158,9 @@ export class SharedBrowserCdpGateway {
     // 光球等非面板页 URL 同样报 about:blank，导航过去用户看不见（2026-10-28
     // 「Agent 在操作、面板停在主页」的第二根因）。
     const waitPanelMs = opts.waitPanelMs ?? 8_000;
-    // 排队：等上一个持有者释放（closePage），最多等 90s，超时放弃让调用方
-    // 走 headless+Cookie 兜底（无 Cookie 时如实报不可用，不弹窗）。
-    const token = await this.acquirePanelSlot(90_000);
+    // 排队：等上一个持有者释放（closePage）。批量/后台流程可用更短的等锁上限，
+    // 超时直接让调用方走 headless 兜底，不把工具调用拖死在唯一面板上。
+    const token = await this.acquirePanelSlot(opts.waitSlotMs ?? 90_000);
     if (!token) return null;
     let handedOff = false;
     try {

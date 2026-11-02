@@ -5,6 +5,7 @@ import "package:flutter/foundation.dart" show debugPrint;
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "../config/media_url.dart";
 import "access_auth_api.dart";
 
 /// 用户头像 API 客户端（服务端实现：server/src/routes/http/user-avatar.ts）。
@@ -25,12 +26,11 @@ class UserAvatarApi {
 
   static const Duration _timeout = Duration(seconds: 15);
 
-  /// 相对路径 → 本端绝对 URL；已是绝对地址（http/https）原样返回。
+  /// 相对路径 → 本端绝对 URL（带设备凭证）；外部绝对地址原样返回。
   static String? resolveUrl(String? avatarPath) {
     final String p = avatarPath?.trim() ?? "";
     if (p.isEmpty) return null;
-    if (p.startsWith("http://") || p.startsWith("https://")) return p;
-    return "${ApiConfig.httpBase}$p";
+    return MediaUrl.resolve(p);
   }
 
   Map<String, String> get _authHeaders => AccessCredentialStore.instance.authHeaders;

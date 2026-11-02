@@ -714,18 +714,61 @@ void DynamicIslandWindow::UpdateMusicArt(const std::string& thumbnail) {
   music_art_ = DecodeImageBytes(thumbnail);
 }
 
-// 唱到哪亮到哪：整句先画弱化底字，再按行内已唱比例裁剪出亮字部分。
-void DrawKaraokeText(Gdiplus::Graphics& g, const Gdiplus::Font& font,
-                     const std::wstring& text, float x, float y, float text_w,
-                     float text_h, BYTE fade, float progress) {
+// 文件级辅助：DrawKaraokeText 是自由函数，不能调用类成员 Utf8ToWide。
+std::wstring KaraokeUtf8ToWide(const std::string& s) {
+  if (s.empty()) return L"";
+  const int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(),
+                                      static_cast<int>(s.size()), nullptr, 0);
+  std::wstring out(len, L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()),
+                      out.data(), len);
+  return out;
+}
+
+// 唱到哪亮到哪：整句先画弱化底字，再截出亮字部分。
+// 只有拿到逐字时间轴（chars）才做卡拉OK推进；没有词级数据的 LRC 不做假填充，
+// 唱到这一行就整行高亮（AMLL / Lyricify 等开源实现的通行做法）。
+void DrawKaraokeText(
+    Gdiplus::Graphics& g, const Gdiplus::Font& font, const std::wstring& text,
+    const std::vector<DynamicIslandWindow::LyricChar>* chars, float x, float y,
+    float text_w, float text_h, BYTE fade, double position_sec,
+    float progress) {
   Gdiplus::SolidBrush base_brush(
       Gdiplus::Color(static_cast<BYTE>(fade * 34 / 100), 255, 255, 255));
   g.DrawString(text.c_str(), -1, &font, Gdiplus::PointF(x, y), &base_brush);
-  if (progress <= 0.0f) return;
-  Gdiplus::RectF lit_clip(x, y - 2.0f,
-                          text_w * std::min(progress, 1.0f), text_h + 4.0f);
-  g.SetClip(lit_clip);
+
   Gdiplus::SolidBrush lit_brush(Gdiplus::Color(fade, 255, 255, 255));
+  if (chars == nullptr || chars->empty()) {
+    // 没唱到这一行（滚动中滑入的下一行）保持弱化底字；唱到了就整行亮。
+    if (progress <= 0.0f) return;
+    g.DrawString(text.c_str(), -1, &font, Gdiplus::PointF(x, y), &lit_brush);
+    return;
+  }
+
+  // 用前缀测量得到每个唱段的横向区间，再由唱段自己的起止时间决定亮到哪。
+  std::wstring prefix;
+  float prev_w = 0.0f;
+  float lit = 0.0f;
+  bool started = false;
+  for (const DynamicIslandWindow::LyricChar& ch : *chars) {
+    prefix += KaraokeUtf8ToWide(ch.text);
+    Gdiplus::RectF m;
+    g.MeasureString(prefix.c_str(), -1, &font, Gdiplus::PointF(0, 0), &m);
+    const float span = m.Width - prev_w;
+    if (position_sec >= ch.t_sec) {
+      double frac = 1.0;
+      if (ch.dur_sec > 0.0 && position_sec < ch.t_sec + ch.dur_sec) {
+        frac = (position_sec - ch.t_sec) / ch.dur_sec;
+      }
+      lit = prev_w + span * static_cast<float>(Clamp01(frac));
+      started = true;
+    }
+    prev_w = m.Width;
+  }
+  const float lit_w = std::min(started ? lit : 0.0f, text_w);
+  if (lit_w <= 0.0f) return;
+  Gdiplus::RectF lit_clip(x, y - 2.0f, lit_w, text_h + 4.0f);
+  g.SetClip(lit_clip);
   g.DrawString(text.c_str(), -1, &font, Gdiplus::PointF(x, y), &lit_brush);
   g.ResetClip();
 }
@@ -758,6 +801,7 @@ void DynamicIslandWindow::DrawLyricViewport(Gdiplus::Graphics& g, HDC mem_dc,
 
   const int total = static_cast<int>(music_lines_.size());
   const double pos = music_roll_pos_;
+  const double sung_sec = MusicPositionSec();
   const float center_y = top + static_cast<float>(kLyricViewportH) * s / 2.0f;
   const int first = static_cast<int>(std::floor(pos)) - 1;
   const int last = static_cast<int>(std::ceil(pos)) + 1;
@@ -786,9 +830,14 @@ void DynamicIslandWindow::DrawLyricViewport(Gdiplus::Graphics& g, HDC mem_dc,
     const float origin_y = line_center - m.Height / 2.0f;
     if (emphasized) {
       // 当前行卡拉OK：弱化底字 + 已唱部分亮字（唱到哪亮到哪）。
+      // 长句被 FitText 截断后逐字时间轴与显示文本不再对应，退回行内线性裁剪。
       const Gdiplus::PointF origin = SnapText(text_x, origin_y);
-      DrawKaraokeText(g, font, fitted, origin.X, origin.Y, m.Width, m.Height,
-                      fade, MusicLineProgress(i));
+      const std::vector<LyricChar>* chars =
+          fitted == text && !music_lines_[i].chars.empty()
+              ? &music_lines_[i].chars
+              : nullptr;
+      DrawKaraokeText(g, font, fitted, chars, origin.X, origin.Y, m.Width,
+                      m.Height, fade, sung_sec, MusicLineProgress(i));
     } else {
       Gdiplus::SolidBrush brush(Gdiplus::Color(
           static_cast<BYTE>(fade * (0.34 + 0.66 * cur_t)), 255, 255, 255));
@@ -1850,6 +1899,7 @@ void DynamicIslandWindow::Render() {
             // 歌词行与展开卡共用 music_roll_pos_ 位相，整行滑动裁剪在行框内。
             const float ly_y = block_y + m_head.Height + gap;
             const int cur = MusicCurrentLine();
+            const double sung_sec = MusicPositionSec();
             if (cur < 0) {
               // 前奏：展示下一句（弱化），不亮。
               const std::wstring t0 = FitText(
@@ -1872,25 +1922,37 @@ void DynamicIslandWindow::Render() {
                   cap_x + cur_w - 12.0f * s - text_x, lyric_h + 4.0f * s);
               g.SetClip(clip_rect);
               if (ia >= 0 && ia < static_cast<int>(music_lines_.size())) {
-                const std::wstring ta = FitText(
-                    g, Utf8ToWide(music_lines_[ia].text), lyric_font, text_max);
+                const std::wstring full_a = Utf8ToWide(music_lines_[ia].text);
+                const std::wstring ta =
+                    FitText(g, full_a, lyric_font, text_max);
                 Gdiplus::RectF ma;
                 g.MeasureString(ta.c_str(), -1, &lyric_font,
                                 Gdiplus::PointF(0, 0), &ma);
                 const Gdiplus::PointF oa = SnapText(text_x, ly_y - f * lyric_h);
-                DrawKaraokeText(g, lyric_font, ta, oa.X, oa.Y, ma.Width,
-                                ma.Height, ea, MusicLineProgress(ia));
+                const std::vector<LyricChar>* chars_a =
+                    ta == full_a && !music_lines_[ia].chars.empty()
+                        ? &music_lines_[ia].chars
+                        : nullptr;
+                DrawKaraokeText(g, lyric_font, ta, chars_a, oa.X, oa.Y,
+                                ma.Width, ma.Height, ea, sung_sec,
+                                MusicLineProgress(ia));
               }
               if (ib != ia && f > 0.0f) {
-                const std::wstring tb = FitText(
-                    g, Utf8ToWide(music_lines_[ib].text), lyric_font, text_max);
+                const std::wstring full_b = Utf8ToWide(music_lines_[ib].text);
+                const std::wstring tb =
+                    FitText(g, full_b, lyric_font, text_max);
                 Gdiplus::RectF mb;
                 g.MeasureString(tb.c_str(), -1, &lyric_font,
                                 Gdiplus::PointF(0, 0), &mb);
                 const Gdiplus::PointF ob =
                     SnapText(text_x, ly_y + (1.0f - f) * lyric_h);
-                DrawKaraokeText(g, lyric_font, tb, ob.X, ob.Y, mb.Width,
-                                mb.Height, ea, MusicLineProgress(ib));
+                const std::vector<LyricChar>* chars_b =
+                    tb == full_b && !music_lines_[ib].chars.empty()
+                        ? &music_lines_[ib].chars
+                        : nullptr;
+                DrawKaraokeText(g, lyric_font, tb, chars_b, ob.X, ob.Y,
+                                mb.Width, mb.Height, ea, sung_sec,
+                                MusicLineProgress(ib));
               }
               g.ResetClip();
             }

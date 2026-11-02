@@ -1,20 +1,26 @@
 // 内部事件流：客户端版本清单变化推送（2026-10-21，webhook 语义）
 //
-// GET /api/internal/manifest-events?token=<MANIFEST_EVENT_TOKEN>
+// GET /api/internal/manifest-events  （头 x-manifest-event-token: <MANIFEST_EVENT_TOKEN>）
 //   —— text/event-stream 长连接。运行「更新控制面」的机器（ECS）上：
 //   ① 订阅建立即全量推送当前所有清单（主/cloud/oss，订阅端按自身 edition 过滤）；
 //   ② fs.watch 监听 config/ 下 client-manifest*.json，文件被改（发版 = 改文件）
-//      防抖 300ms 后立即推送变化清单——发布方改完文件，下游（腾讯机云端网关、
-//      byok 本地 runtime）秒级收到并广播 update.available 给在线客户端。
+//      防抖 300ms 后立即推送变化清单——发布方改完文件，订阅进程秒级收到并广播
+//      update.available 给在线客户端。
 //   ③ 30s 注释行心跳保活（防 nginx proxy_read_timeout 默认 60s 掐链）。
 //
-// 安全：MANIFEST_EVENT_TOKEN 未配置时端点整体禁用（403）——只在控制面机器上配置；
-// token 经 query 传递（SSE 客户端不方便带自定义头，与 ws token 同模式）。
+// 安全：MANIFEST_EVENT_TOKEN 未配置时端点整体禁用（403）；口令只走
+// x-manifest-event-token 请求头——query 串会原样落进 nginx access.log 与进程请求
+// 日志，等于控制面凭证常驻写盘。
+//
+// 可达范围：控制面内部端点，不对公网开放。订阅方必须是同机进程（nginx 侧
+// allow 127.0.0.1 / deny all，进程又只监听 LISTEN_HOST=127.0.0.1）；控制面自己
+// 回环订阅，这样握着客户端 wss 的那台机器就是广播方。装机客户端不订阅这里，
+// 它们走公开 GET /api/client/manifest——口令绝不进安装包。
 // nginx 侧无需改配置：X-Accel-Buffering: no 响应头即关闭响应缓冲。
 //
-// 部署拓扑：ECS = 源（配 MANIFEST_EVENT_TOKEN）；腾讯机/本地 runtime = 订阅方
-// （配 UPDATE_MANIFEST_SOURCE_URL + UPDATE_MANIFEST_EVENT_TOKEN，见
-// services/client-update-pusher.ts）。
+// 部署拓扑：控制面 = 源 + 自订阅方（MANIFEST_EVENT_TOKEN 与
+// UPDATE_MANIFEST_SOURCE_URL=http://127.0.0.1:<port> + UPDATE_MANIFEST_EVENT_TOKEN
+// 同机配置，订阅侧见 services/client-update-pusher.ts）。
 
 import { watch, type FSWatcher } from "node:fs";
 import { join } from "node:path";
@@ -22,6 +28,8 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import { readClientManifest } from "./client-manifest.js";
 
 const CONFIG_DIR = join(process.cwd(), "config");
+/** 订阅端传口令的头（与 services/client-update-pusher.ts 同一常量）。 */
+export const MANIFEST_EVENT_TOKEN_HEADER = "x-manifest-event-token";
 const MANIFEST_FILE_RE = /^client-manifest(?:\.([a-z0-9-]+))?\.json$/;
 /** 订阅建立时全量推送的清单集合：主清单（edition=null）+ 已知分发版 */
 const KNOWN_EDITIONS: (string | null)[] = [null, "cloud", "oss"];
@@ -30,12 +38,24 @@ const PING_INTERVAL_MS = 30_000;
 
 type StreamState = { timer: ReturnType<typeof setTimeout> | null };
 
+/**
+ * 订阅口令核对：未配置 MANIFEST_EVENT_TOKEN 即端点禁用（非控制面机器/未部署该机制时
+ * 对外不可见）；口令只认请求头，query 里的 token 一律忽略。
+ */
+export function manifestEventAuthorized(
+  headers: Record<string, unknown>,
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const expected = env.MANIFEST_EVENT_TOKEN?.trim();
+  if (!expected) return false;
+  const rawHeader = headers[MANIFEST_EVENT_TOKEN_HEADER];
+  const headerToken = typeof rawHeader === "string" ? rawHeader.trim() : "";
+  return headerToken === expected;
+}
+
 export function registerInternalManifestEventRoutes(app: FastifyInstance): void {
   app.get("/api/internal/manifest-events", async (request, reply) => {
-    const expected = process.env.MANIFEST_EVENT_TOKEN?.trim();
-    const query = (request.query ?? {}) as { token?: string };
-    // 未配置 token = 端点禁用（非控制面机器/未部署该机制时对外不可见）
-    if (!expected || String(query.token ?? "") !== expected) {
+    if (!manifestEventAuthorized(request.headers)) {
       return reply.code(403).send({ ok: false, error: "forbidden" });
     }
 

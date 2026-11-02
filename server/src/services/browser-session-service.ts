@@ -15,6 +15,7 @@ import type {
   ImportedBrowserCookie,
   PersistedBrowserSiteSession,
 } from "./browser-session-types.js";
+import { CAPTURE_CONSENT_ALL_SITES } from "./browser-session-types.js";
 
 export type BrowserSiteStatus = {
   siteId: BrowserSessionSiteId;
@@ -122,14 +123,21 @@ export class BrowserSessionService {
    * 登录态保存授权（2026-10-25 用户拍板：保存 Cookie 须用户同意，与主流做法
    * 一致）。allow=已同意（可静默捕获）；deny=已拒绝（不再问也不保存）；
    * ask=未表态（每次捕获前先向客户端征询，本轮不保存）。
+   *
+   * 2026-11-02 统一征询：先看该站点自己的答复，没有再回落到全局答复
+   * （{@link CAPTURE_CONSENT_ALL_SITES}）——用户答一次即对所有平台生效。
    */
   async getCaptureConsent(actorId: string, siteId: string): Promise<"allow" | "deny" | "ask"> {
     const file = await this.loadActor(actorId);
-    const c = file.captureConsents?.[siteId];
+    const c = file.captureConsents?.[siteId] ?? file.captureConsents?.[CAPTURE_CONSENT_ALL_SITES];
     if (!c) return "ask";
     return c.allowed ? "allow" : "deny";
   }
 
+  /**
+   * 记录授权。siteId 传 {@link CAPTURE_CONSENT_ALL_SITES} 表示「统一答复」，
+   * 对所有平台生效（单个站点的显式答复仍优先）。
+   */
   async setCaptureConsent(actorId: string, siteId: string, allowed: boolean): Promise<void> {
     const file = await this.loadActor(actorId);
     file.captureConsents = {

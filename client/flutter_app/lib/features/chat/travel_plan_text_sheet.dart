@@ -78,8 +78,7 @@ class _TextSheetDialogState extends State<_TextSheetDialog> {
       if (widget.draft.planId.isEmpty) {
         throw Exception("行程尚未落盘，稍后再试");
       }
-      final http.Response resp = await http
-          .get(Uri.parse(
+      final http.Response resp = await NbHttp.get(Uri.parse(
               "${ApiConfig.httpBase}/travel/plans/${widget.draft.planId}"))
           .timeout(const Duration(seconds: 20));
       if (resp.statusCode != 200) {
@@ -117,7 +116,10 @@ class _TextSheetDialogState extends State<_TextSheetDialog> {
     ];
     Future<void> preload(String url) async {
       try {
-        await precacheImage(Image.network(url).image, context);
+        // 先落盘再解码：截图是同步抓 layer，字节没到位就会缺图。
+        final File? file = await MediaDiskCache.instance.fileFor(url);
+        if (file == null || !mounted) return;
+        await precacheImage(FileImage(file), context);
         _loadedImages.add(url);
       } catch (_) {
         // 单图失败只缺这一张，不挡整版。
@@ -493,7 +495,7 @@ class _TextPlanSheet extends StatelessWidget {
         children: <Widget>[
           const ColoredBox(color: Color(0xFF2C2C2C)),
           if (cover.isNotEmpty && loadedImages.contains(cover))
-            Image.network(cover, fit: BoxFit.cover),
+            CachedMediaImage(url: cover, fit: BoxFit.cover),
           const DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -789,7 +791,7 @@ class _TextPlanSheet extends StatelessWidget {
               child: SizedBox(
                 width: double.infinity,
                 height: 176,
-                child: Image.network(image, fit: BoxFit.cover),
+                child: CachedMediaImage(url: image, fit: BoxFit.cover),
               ),
             ),
             const SizedBox(height: 11),

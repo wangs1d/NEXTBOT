@@ -13,8 +13,12 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - agent_browser.wait_for      等待元素出现
  *   - agent_browser.close         关闭会话
  *
- * 核心定位：在服务端后台启动 Playwright 无头浏览器，维持有状态会话（sessionId），
- * 让 Agent 能在浏览器中完成多步操作流程（如查信息、填表单、点按钮、提取结果）。
+ * 核心定位：通用浏览器层（客户端在线时优先在**用户可见的内置浏览器**里操作，
+ * 登录态即用户本人、全程可见可接管；不在线时回退服务端无头浏览器），维持有状态
+ * 会话（sessionId），让 Agent 能完成多步操作流程（如查信息、填表单、点按钮、提取结果）。
+ *
+ * 人工接管对齐主流 Browser Agent：只有撞到登录墙/验证码（human-required）才停下
+ * 交给用户，页面留在可见浏览器里，用户点「我已完成」后继续；普通失败不交人。
  *
  * 与现有能力的边界：
  *   - browser.fetch_page：只读抓单页 + 价格正则，无状态；本工具支持多步交互
@@ -36,9 +40,10 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "agent_browser.open",
       description:
-        "在服务端后台启动 Playwright 无头浏览器并打开指定 URL，返回 sessionId。\n" +
+        "优先在用户可见的内置浏览器（WebView2）里打开，登录态即用户本人；客户端不在线时回退服务端无头浏览器。\n" +
         "后续所有操作（click/type/scroll/screenshot/extract_text/wait_for/close）都须传此 sessionId。\n" +
         "适用场景：用户说「帮我打开某网站」「去这个链接看看」「帮我在网页上操作」等。\n" +
+        "**撞到登录墙/验证码时**：回执带 humanRequired，页面已留在内置浏览器，告诉用户去登录/验证并点「我已完成」，别把失败当成普通报错。\n" +
         "安全：https 任意 URL 允许；http 仅限 localhost。对已授权站点（淘宝/京东/携程等）自动注入用户 Cookie。\n" +
         "沙箱模式下也可用。会话空闲 10 分钟自动过期。\n" +
         "与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作。",

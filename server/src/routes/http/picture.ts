@@ -1,8 +1,12 @@
 import type { FastifyInstance } from "fastify";
 import { createReadStream, existsSync } from "node:fs";
-import type { PictureKit, ImageAsset, ThumbnailSize } from "@nextbot/picture";
+import type { ImageAsset, ThumbnailSize } from "@nextbot/picture";
 
-import { PictureTrashService } from "../../services/picture-trash-service.js";
+import type {
+  PictureKitRegistry,
+  PicturePartition,
+} from "../../services/picture-kit-registry.js";
+import { pictureAssetUrl } from "../../services/picture-url.js";
 
 /**
  * 图片图库 HTTP 路由(供客户端图库页使用):
@@ -18,6 +22,8 @@ import { PictureTrashService } from "../../services/picture-trash-service.js";
  *   - GET    /picture/trash/:id/preview           回收站条目预览图
  *   - POST   /picture/trash/restore               批量恢复
  *
+ * 每个请求按归属 actor 取自己的图库分区(query.userId 优先、body 兜底,
+ * 皆空归 anonymous 桶),照片 id 只在本人分区里解析——别人的 id 一律 404。
  * 资产路径均来自索引内存值,不存在路径穿越风险;缩略图命中即走长缓存。
  */
 const MIME_BY_EXT: Record<string, string> = {
@@ -36,7 +42,7 @@ const TRASH_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 /** 单次批量上限 */
 const BATCH_MAX = 200;
 
-function assetSummary(asset: ImageAsset): Record<string, unknown> {
+function assetSummary(asset: ImageAsset, actorId: string): Record<string, unknown> {
   return {
     id: asset.id,
     fileName: asset.fileName,
@@ -51,9 +57,9 @@ function assetSummary(asset: ImageAsset): Record<string, unknown> {
     createdAt: asset.createdAt,
     caption: asset.analysis?.caption ?? null,
     place: asset.analysis?.place ?? null,
-    thumbnailUrl: `/picture/assets/${asset.id}/thumbnail/small`,
-    previewUrl: `/picture/assets/${asset.id}/thumbnail/medium`,
-    imageUrl: `/picture/assets/${asset.id}/file`,
+    thumbnailUrl: pictureAssetUrl(`/picture/assets/${asset.id}/thumbnail/small`, actorId),
+    previewUrl: pictureAssetUrl(`/picture/assets/${asset.id}/thumbnail/medium`, actorId),
+    imageUrl: pictureAssetUrl(`/picture/assets/${asset.id}/file`, actorId),
   };
 }
 
@@ -65,23 +71,26 @@ function parseIds(body: unknown): string[] | null {
   return clean.length > 0 && clean.length <= BATCH_MAX ? clean : null;
 }
 
-export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: PictureKit }): void {
-  const { pictureKit } = deps;
-  const trash = new PictureTrashService(`${pictureKit.store.rootDir}/trash`, pictureKit);
+export function registerPictureRoutes(
+  app: FastifyInstance,
+  deps: { pictureKits: PictureKitRegistry },
+): void {
+  const { pictureKits } = deps;
 
-  /** 统一删除：文件移入回收站，索引移除 */
-  const trashAsset = async (asset: ImageAsset): Promise<string> => {
-    const trashId = await trash.moveIn(asset);
-    await pictureKit.store.remove(asset.id, { deleteFiles: false });
+  /** 统一删除：文件移入本人回收站，索引移除 */
+  const trashAsset = async (partition: PicturePartition, asset: ImageAsset): Promise<string> => {
+    const trashId = await partition.trash.moveIn(asset);
+    await partition.kit.store.remove(asset.id, { deleteFiles: false });
     return trashId;
   };
 
   app.get("/picture/assets", async (request) => {
+    const { kit, actorId } = await pictureKits.forRequest(request);
     const query = request.query as Record<string, unknown>;
     const page = Math.max(1, Number(query.page ?? 1) || 1);
     const pageSize = Math.min(60, Math.max(1, Number(query.pageSize ?? 30) || 30));
     const tag = typeof query.tag === "string" && query.tag ? query.tag : undefined;
-    const result = await pictureKit.store.query({
+    const result = await kit.store.query({
       filters: tag ? { tags: [tag] } : undefined,
       page,
       pageSize,
@@ -91,7 +100,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
       total: result.total,
       page: result.page,
       pageSize: result.pageSize,
-      photos: result.items.map(assetSummary),
+      photos: result.items.map((asset) => assetSummary(asset, actorId)),
     };
   });
 
@@ -102,11 +111,12 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
       if (size !== "small" && size !== "medium" && size !== "large") {
         return reply.code(400).send({ ok: false, reason: "INVALID_SIZE" });
       }
-      const asset = pictureKit.store.get(id);
+      const { kit } = await pictureKits.forRequest(request);
+      const asset = kit.store.get(id);
       if (!asset) {
         return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
       }
-      const thumbPath = pictureKit.thumbnails.get(id, size as ThumbnailSize);
+      const thumbPath = kit.thumbnails.get(id, size as ThumbnailSize);
       if (!thumbPath) {
         return reply.code(404).send({ ok: false, reason: "NO_THUMBNAIL" });
       }
@@ -118,7 +128,8 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   app.get<{ Params: { id: string } }>("/picture/assets/:id/file", async (request, reply) => {
     const { id } = request.params;
-    const asset = pictureKit.store.get(id);
+    const { kit } = await pictureKits.forRequest(request);
+    const asset = kit.store.get(id);
     if (!asset) {
       return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
     }
@@ -137,11 +148,12 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
     if (buffer.length === 0) {
       return reply.code(400).send({ ok: false, error: "文件为空" });
     }
+    const { kit, actorId } = await pictureKits.forRequest(request);
     try {
-      const { asset, deduplicated } = await pictureKit.store.ingest(buffer, {
+      const { asset, deduplicated } = await kit.store.ingest(buffer, {
         fileName: file.filename || undefined,
       });
-      return { ok: true, deduplicated, photo: assetSummary(asset) };
+      return { ok: true, deduplicated, photo: assetSummary(asset, actorId) };
     } catch (error) {
       return reply.code(400).send({
         ok: false,
@@ -152,16 +164,17 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   app.delete<{ Params: { id: string } }>("/picture/assets/:id", async (request, reply) => {
     const { id } = request.params;
-    const asset = pictureKit.store.get(id);
+    const partition = await pictureKits.forRequest(request);
+    const asset = partition.kit.store.get(id);
     if (!asset) {
       return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
     }
     try {
-      const trashId = await trashAsset(asset);
+      const trashId = await trashAsset(partition, asset);
       return { ok: true, id, trashId };
     } catch {
       // 移入回收站失败（磁盘异常等）→ 回退原硬删路径，保证删除一定能完成
-      const removed = await pictureKit.store.remove(id, { deleteFiles: true });
+      const removed = await partition.kit.store.remove(id, { deleteFiles: true });
       if (!removed) {
         return reply.code(500).send({ ok: false, reason: "REMOVE_FAILED" });
       }
@@ -171,6 +184,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   /** GET /picture/assets/random — 盲盒清理抽样：排除收藏/新入库/指定 id，均匀随机 */
   app.get("/picture/assets/random", async (request) => {
+    const { kit, trash, actorId } = await pictureKits.forRequest(request);
     const query = request.query as Record<string, unknown>;
     const count = Math.min(50, Math.max(1, Number(query.count ?? 15) || 15));
     const excludeTag = typeof query.excludeTag === "string" && query.excludeTag ? query.excludeTag : FAVORITE_TAG;
@@ -179,7 +193,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
       String(query.excludeIds ?? "").split(",").map((s) => s.trim()).filter(Boolean),
     );
     const cutoff = Date.now() - recentDays * 86_400_000;
-    const pool = pictureKit.store.listAll().filter((asset) => {
+    const pool = kit.store.listAll().filter((asset) => {
       if (excludeTag && asset.tags.includes(excludeTag)) return false;
       if (recentDays > 0 && Date.parse(asset.createdAt) > cutoff) return false;
       if (excludeIds.has(asset.id)) return false;
@@ -195,12 +209,14 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
     return {
       ok: true,
       pool: pool.length,
-      photos: picked.slice(0, count).map(assetSummary),
+      photos: picked.slice(0, count).map((asset) => assetSummary(asset, actorId)),
     };
   });
 
   /** POST /picture/assets/batch-delete — 批量删除（入回收站），返回 trashIds 供撤销 */
   app.post("/picture/assets/batch-delete", async (request, reply) => {
+    const partition = await pictureKits.forRequest(request);
+    const { kit, trash } = partition;
     const ids = parseIds(request.body);
     if (!ids) {
       return reply.code(400).send({ ok: false, error: `ids 须为 1-${BATCH_MAX} 个照片 id 的数组` });
@@ -210,15 +226,15 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
     const trashIds: string[] = [];
     let freedBytes = 0;
     for (const id of ids) {
-      const asset = pictureKit.store.get(id);
+      const asset = kit.store.get(id);
       if (!asset) {
         missing.push(id);
         continue;
       }
       try {
-        trashIds.push(await trashAsset(asset));
+        trashIds.push(await trashAsset(partition, asset));
       } catch {
-        await pictureKit.store.remove(id, { deleteFiles: true });
+        await kit.store.remove(id, { deleteFiles: true });
         trashIds.push("");
       }
       removed.push(id);
@@ -230,6 +246,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   /** POST /picture/assets/batch-tag — 批量打/去标签（收藏等） */
   app.post("/picture/assets/batch-tag", async (request, reply) => {
+    const { kit } = await pictureKits.forRequest(request);
     const ids = parseIds(request.body);
     const tag = String((request.body as { tag?: unknown } | null)?.tag ?? "").trim();
     const remove = (request.body as { remove?: unknown } | null)?.remove === true;
@@ -241,10 +258,10 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
     }
     let updated = 0;
     for (const id of ids) {
-      if (!pictureKit.store.get(id)) continue;
+      if (!kit.store.get(id)) continue;
       try {
-        if (remove) await pictureKit.store.removeTag(id, tag);
-        else await pictureKit.store.addTag(id, tag);
+        if (remove) await kit.store.removeTag(id, tag);
+        else await kit.store.addTag(id, tag);
         updated++;
       } catch {
         // 单张失败不影响其余
@@ -254,13 +271,15 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
   });
 
   /** GET /picture/trash — 回收站列表（顺带 30 天惰性清理） */
-  app.get("/picture/trash", async () => {
+  app.get("/picture/trash", async (request) => {
+    const { trash } = await pictureKits.forRequest(request);
     const { items, totalBytes } = await trash.list();
     return { ok: true, items, totalBytes, ttlDays: Math.round(TRASH_TTL_MS / 86_400_000) };
   });
 
   /** GET /picture/trash/:id/preview — 回收站条目预览图 */
   app.get<{ Params: { id: string } }>("/picture/trash/:id/preview", async (request, reply) => {
+    const { trash } = await pictureKits.forRequest(request);
     const previewPath = await trash.getPreviewPath(request.params.id);
     if (!previewPath || !existsSync(previewPath)) {
       return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });
@@ -272,6 +291,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   /** POST /picture/trash/restore — 批量恢复（文件移回 + 索引重建） */
   app.post("/picture/trash/restore", async (request, reply) => {
+    const { trash } = await pictureKits.forRequest(request);
     const ids = parseIds(request.body);
     if (!ids) {
       return reply.code(400).send({ ok: false, error: `ids 须为 1-${BATCH_MAX} 个回收站 id 的数组` });
@@ -287,6 +307,7 @@ export function registerPictureRoutes(app: FastifyInstance, deps: { pictureKit: 
 
   /** DELETE /picture/trash/:id — 彻底删除（跳过 30 天 TTL 提前真删） */
   app.delete<{ Params: { id: string } }>("/picture/trash/:id", async (request, reply) => {
+    const { trash } = await pictureKits.forRequest(request);
     const deleted = await trash.hardDelete(request.params.id);
     if (!deleted) {
       return reply.code(404).send({ ok: false, reason: "NOT_FOUND" });

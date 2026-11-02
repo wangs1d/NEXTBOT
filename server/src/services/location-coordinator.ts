@@ -185,39 +185,10 @@ export class LocationCoordinator {
   }
 
   /**
-   * 跨 actor 取最近一次定位（单用户个人 agent 语义：手机/桌面多端在线时取最新上报）。
-   * 供没有 actorId 的 HTTP 会话（如旅游规划 plan-session）被动读位置用——
-   * 只读缓存，绝不向客户端要 GPS。超过 maxAgeMs 视为过期返回 null。
-   */
-  getLatest(
-    maxAgeMs = 48 * 60 * 60 * 1000,
-  ): { actorId: string; payload: ClientLocationWire; at: number } | null {
-    let best: { actorId: string; payload: ClientLocationWire; at: number } | null = null;
-    for (const [actorId, hit] of this.cache) {
-      if (Date.now() - hit.at > maxAgeMs) continue;
-      if (!best || hit.at > best.at) best = { actorId, payload: hit.payload, at: hit.at };
-    }
-    return best;
-  }
-
-  /**
-   * 跨端按需定位（单用户个人 agent 语义，2026-10-27）：没有 actorId 的 HTTP 会话
-   * （旅游规划 plan-session）缓存为空时不再只能反问用户——挑最近上报过的端（或
-   * 任一在线连接）主动下发一次 location_request。无在线客户端立即返回 null，
-   * 上层维持反问兜底。
-   */
-  requestAnyLocation(reason?: string): Promise<ClientLocationWire | null> {
-    const latest = this.getLatest();
-    if (latest) return this.requestLocation(latest.actorId, reason);
-    for (const actorId of this.sockets.keys()) {
-      return this.requestLocation(actorId, reason);
-    }
-    return Promise.resolve(null);
-  }
-
-  /**
-   * 按需请求实时位置。优先复用新鲜缓存；缓存过期或缺失时向客户端下发
-   * `agent.location_request` 并等待回包，超时返回 null。
+   * 按需请求实时位置。优先复用该 actor 的新鲜缓存；缓存过期或缺失时，只向
+   * 该 actor 自己的在线设备下发 `agent.location_request` 并等待回包。
+   * 该 actor 无在线连接立即返回 null——绝不回落到「任一在线客户端」。
+   * 超时返回 null（工具可回退到 city 参数）。
    */
   requestLocation(actorId: string, reason?: string): Promise<ClientLocationWire | null> {
     const fresh = this.getFreshCached(actorId);

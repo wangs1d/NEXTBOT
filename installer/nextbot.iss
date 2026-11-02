@@ -25,13 +25,9 @@
 #define Edition "internal"
 #endif
 
-; 签名预留位（当前无证书）：打包脚本带 /DSignedSetup=1 时启用卸载器签名，
-; Setup.exe 本体的签名在 ISCC 之后由 signtool 完成（见 build-installer.ps1 的
-; -CertThumbprint）。未签名时浏览器/邮件的下载拦截与 SmartScreen 告警无法根除，
-; 下面这些元数据只是降噪：真实发布者信息 + 官方站点 + 版本号可追溯。
-#ifdef SignedSetup
-SignedUninstaller=yes
-#endif
+; 签名：build-installer.ps1 带 -CertThumbprint 时传 /DSignedSetup=1 并注册 SignTool=nextbot，
+; Setup 本体与卸载器由 ISCC 签，包内自有二进制在打包脚本里签。未签名时下载侧的
+; SmartScreen「未知发布者」拦不住，下面这些元数据只是降噪：发布者 + 官方站点 + 版本号。
 
 #if Edition == "oss"
 #define MyAppId "{{C11EB7C6-FACF-4AF9-A5F7-CF91B8B65F94}}"
@@ -50,6 +46,12 @@ SignedUninstaller=yes
 #endif
 
 [Setup]
+; 签名开关只能落在 [Setup] 段内：段外的裸文本会让 ISCC 报 "Text is not inside a section"。
+; SignTool 名对应 build-installer.ps1 传给 ISCC 的 /Snextbot=。
+#ifdef SignedSetup
+SignTool=nextbot
+SignedUninstaller=yes
+#endif
 AppId={#MyAppId}
 AppName={#MyAppName}
 AppVersion={#AppVersion}

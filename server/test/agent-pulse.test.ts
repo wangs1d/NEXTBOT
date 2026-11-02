@@ -49,7 +49,7 @@ function mkHarness(opts: { statePath?: string; now?: Date; polish?: boolean } = 
   let polishOut: string | null = "你下午的项目周会，我看了下材料，要不要提前过一眼？";
   let now = opts.now ?? new Date("2026-10-25T14:00:00");
   const svc = new AgentPulseService({
-    actorId: () => "u1",
+    actors: () => ["u1"],
     aggregate: () => aggregate,
     llmComplete: async (prompt) => {
       llmCalls.push(prompt);
@@ -108,6 +108,20 @@ test("agent pulse: LLM 判断值得说 → 产出无标题普通消息（无「�
   assert.ok(h.llmCalls[0].includes("14:00 项目周会"), "日程进 prompt");
   assert.ok(h.llmCalls[0].includes("妈妈"), "未读进 prompt");
   assert.ok(!h.llmCalls[0].includes("天气"), "天气不进 prompt（归明日预告）");
+});
+
+test("agent pulse: 日程行去重，且提示词禁止从对话摘录编造冲突/取整时间", () => {
+  const prompt = buildPulsePrompt(
+    new Date("2026-11-01T17:35:00"),
+    mkAggregate({
+      tasks: ["18:00 去游泳", "18:00 去游泳", "18:00 ", "17:30 去健身"],
+      recentTurns: ["一分钟后提醒我去健身"],
+    }),
+  );
+  assert.equal(prompt.split("- 18:00 去游泳").length - 1, 1, "重复安排只保留一行");
+  assert.ok(!prompt.includes("- 18:00 \n"), "空事项行不进材料");
+  assert.ok(prompt.includes("两个不同事项同一时刻才算冲突"), "禁止无中生有冲突");
+  assert.ok(prompt.includes("不要取整"), "时间必须照抄 HH:mm");
 });
 
 test("agent pulse: 统一语气层——初稿经 polish 出终稿，提交与留痕都是终稿", async () => {

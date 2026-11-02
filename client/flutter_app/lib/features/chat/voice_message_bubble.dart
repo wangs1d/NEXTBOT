@@ -1,6 +1,6 @@
 import "package:flutter/material.dart";
 
-import "../../core/config/api_config.dart";
+import "../../core/config/media_url.dart";
 import "../../core/services/tts_player.dart";
 
 /// 微信式可重播语音消息气泡。
@@ -104,13 +104,9 @@ class _VoiceMessageBubbleState extends State<VoiceMessageBubble>
   }
 
   String _resolveFullUrl(String mediaUrl) {
-    // mediaUrl 形如 /agent/voice/messages/.../xxx.mp3
-    if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
-      return mediaUrl;
-    }
-    final base = ApiConfig.httpBase;
-    if (mediaUrl.startsWith("/")) return "$base$mediaUrl";
-    return "$base/$mediaUrl";
+    // mediaUrl 形如 /agent/voice/messages/.../xxx.mp3；播放器只能吃 URL，
+    // 凭证走 query（UrlSource 发不出请求头）
+    return MediaUrl.resolve(mediaUrl);
   }
 
   @override

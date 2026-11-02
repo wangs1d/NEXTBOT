@@ -1,5 +1,5 @@
-/**
- * 工具注册层端到端：calendar.create_task 冲突拦截 / forceCreate 放行、
+﻿/**
+ * 工具注册层端到端：calendar.create 冲突拦截 / forceCreate 放行、
  * calendar.update_task 改期、calendar.find_free_slots 空闲时段。
  */
 import assert from "node:assert/strict";
@@ -33,10 +33,10 @@ async function withRegistry<T>(fn: (registry: ToolRegistry, tasks: ScheduleTaskS
   }
 }
 
-test("calendar.create_task: conflict blocks creation, forceCreate passes, no-duration skips check", async () => {
+test("calendar.create: conflict blocks creation, forceCreate passes, no-duration skips check", async () => {
   await withRegistry(async (registry) => {
     const first = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "项目评审",
         title: "项目评审",
@@ -52,7 +52,7 @@ test("calendar.create_task: conflict blocks creation, forceCreate passes, no-dur
 
     // 与 10:00–11:30 重叠 → 拦截
     const second = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "客户见面",
         title: "客户见面",
@@ -71,7 +71,7 @@ test("calendar.create_task: conflict blocks creation, forceCreate passes, no-dur
 
     // 用户坚持 → forceCreate 放行
     const forced = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "客户见面",
         title: "客户见面",
@@ -88,7 +88,7 @@ test("calendar.create_task: conflict blocks creation, forceCreate passes, no-dur
 
     // 零时长时间点提醒 → 不做冲突检测，直接创建
     const point = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "取快递",
         title: "取快递",
@@ -105,7 +105,7 @@ test("calendar.create_task: conflict blocks creation, forceCreate passes, no-dur
 test("calendar.update_task: reschedules with conflict re-check and self-exclusion", async () => {
   await withRegistry(async (registry, tasks) => {
     const created = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "牙医",
         title: "牙医",
@@ -132,7 +132,7 @@ test("calendar.update_task: reschedules with conflict re-check and self-exclusio
 
     // 制造冲突源后再改期 → 拦截
     await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "周会",
         title: "周会",
@@ -163,7 +163,7 @@ test("calendar.update_task: reschedules with conflict re-check and self-exclusio
 test("calendar.find_free_slots: returns slots around busy events", async () => {
   await withRegistry(async (registry) => {
     await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "占用",
         title: "占用",
@@ -201,7 +201,7 @@ test("calendar tools without conflict service: create/update still work, free_sl
     const registry = new ToolRegistry();
     registerCalendarTools(registry, tasks, null as never);
     const created = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       {
         description: "无冲突服务",
         title: "无冲突服务",

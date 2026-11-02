@@ -3,7 +3,7 @@ import "dart:convert";
 import "dart:io";
 
 import "package:flutter/foundation.dart";
-import "package:http/http.dart" as http;
+import "../core/services/nb_http.dart";
 
 import "../core/config/api_config.dart";
 import "../core/models/agent_relay_models.dart";
@@ -220,8 +220,7 @@ class AmbientFeedsController {
   /// outcome 反馈回传（viewed/accepted/dismissed/ignored）。
   void sendProactiveOutcome(String deliveryId, String outcome) {
     unawaited(
-      http
-          .post(
+      NbHttp.post(
             Uri.parse(
                 "${ApiConfig.httpBase}/api/proactivity/outcome"),
             headers: const {"Content-Type": "application/json"},
@@ -241,8 +240,7 @@ class AmbientFeedsController {
   void sendProactiveFeedback(String deliveryId, String action,
       {String? kind}) {
     unawaited(
-      http
-          .post(
+      NbHttp.post(
             Uri.parse(
                 "${ApiConfig.httpBase}/api/proactivity/feedback"),
             headers: const {"Content-Type": "application/json"},

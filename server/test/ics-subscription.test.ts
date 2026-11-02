@@ -7,6 +7,7 @@
  * 测试封闭：临时 SCHEDULE_TASKS_FILE + 临时状态文件 + 注入时钟与 fetch。
  */
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -319,4 +320,170 @@ test("自助订阅：用户能删自己加的源，但删不掉部署方配置�
     assert.equal(denied.ok, false);
     assert.match(denied.error ?? "", /环境变量/);
   });
+});
+
+// ---------------------------------------------------------------------- //
+// 多租户分区（2026-11-01）：订阅源、物化状态、导入的日程都必须认人
+// ---------------------------------------------------------------------- //
+
+test("多账号：同一条公开链接各订各的，日程只落在订阅者自己名下", async () => {
+  const oneEventIcs = (uid: string, summary: string, day: string) =>
+    [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "BEGIN:VEVENT",
+      `UID:${uid}@x`,
+      "DTSTAMP:20260924T000000Z",
+      `SUMMARY:${summary}`,
+      `DTSTART:${day}T090000Z`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+  const byUrl = new Map<string, string>([
+    ["http://example.com/cal.ics", oneEventIcs("env-1", "部署方日程", "20261003")],
+    ["https://calendar.example.com/public.ics", oneEventIcs("pub-1", "团活动", "20261004")],
+  ]);
+  const fetchImpl = (async (input: RequestInfo | URL) =>
+    new Response(byUrl.get(String(input)) ?? "", { status: 200 })) as unknown as typeof fetch;
+
+  await withIcsService(
+    async ({ service, tasks }) => {
+      const url = "https://calendar.example.com/public.ics";
+      const a = await service.addFeed({ name: "团日历", url, actorId: "alice" });
+      const b = await service.addFeed({ name: "团日历", url, actorId: "bob" });
+      assert.equal(a.ok, true, `alice 添加失败：${a.error ?? ""}`);
+      assert.equal(b.ok, true, "同一链接对另一个账号是新订阅，不是重复");
+
+      assert.deepEqual(service.status("alice").feeds.map((f) => f.name), ["团日历"]);
+      assert.deepEqual(service.status("bob").feeds.map((f) => f.name), ["团日历"]);
+
+      const ownersOfTeam = [
+        ...new Set(
+          tasks
+            .listAllTasks()
+            .filter((t) => t.source === "ics" && t.title!.includes("团活动"))
+            .map((t) => t.sessionId),
+        ),
+      ].sort();
+      assert.deepEqual(ownersOfTeam, ["alice", "bob"], "订的人各自有，没订的人不该有");
+    },
+    { fetchImpl },
+  );
+});
+
+test("多账号：列表与删除只认自己，别人的同名源看不见也删不掉", async () => {
+  await withIcsService(async ({ service }) => {
+    await service.addFeed({ name: "私密日程", url: "https://calendar.example.com/p.ics", actorId: "alice" });
+
+    const bobSees = service.status("bob").feeds;
+    assert.equal(bobSees.length, 0, "bob 看不到 alice 的订阅（链接带只读 token，属私有数据）");
+
+    const denied = service.removeFeed("私密日程", "bob");
+    assert.equal(denied.ok, false);
+    assert.match(denied.error ?? "", /没有这个订阅源/);
+    assert.equal(service.status("alice").feeds.length, 1, "越权删除不能动到别人的源");
+
+    const mine = service.removeFeed("私密日程", "alice");
+    assert.equal(mine.ok, true);
+    assert.equal(service.status("alice").feeds.length, 0);
+
+    // env 源的"删不掉"话术也只对它的归属（默认账号）说
+    const outsider = service.removeFeed("测试日历", "alice");
+    assert.match(outsider.error ?? "", /没有这个订阅源/);
+  });
+});
+
+test("同账号两个同名源：状态各存各的，不会撞键互相取消对方的日程", async () => {
+  const icsWith = (uid: string, summary: string, day: string) =>
+    [
+      "BEGIN:VCALENDAR",
+      "VERSION:2.0",
+      "BEGIN:VEVENT",
+      `UID:${uid}@x`,
+      "DTSTAMP:20260924T000000Z",
+      `SUMMARY:${summary}`,
+      `DTSTART:${day}T090000Z`,
+      "END:VEVENT",
+      "END:VCALENDAR",
+    ].join("\r\n");
+  const byUrl = new Map<string, string>([
+    ["https://a.example.com/one.ics", icsWith("one", "周会", "20261001")],
+    ["https://a.example.com/two.ics", icsWith("two", "体检", "20261002")],
+  ]);
+  const fetchImpl = (async (input: RequestInfo | URL) =>
+    new Response(byUrl.get(String(input)) ?? "", { status: 200 })) as unknown as typeof fetch;
+
+  await withIcsService(
+    async ({ service, tasks }) => {
+      const one = await service.addFeed({ name: "日历", url: "https://a.example.com/one.ics", actorId: "alice" });
+      const two = await service.addFeed({ name: "日历", url: "https://a.example.com/two.ics", actorId: "alice" });
+      assert.equal(one.feed?.name, "日历");
+      assert.equal(two.feed?.name, "日历 (2)", "源名参与状态键，同账号内必须唯一");
+      assert.equal(service.status("alice").feeds.length, 2);
+
+      const changed = await service.pollAll();
+      assert.equal(changed, false, "重拉零变更：撞键时第二轮会把第一轮的日程当成「源里消失」而取消");
+      const active = tasks
+        .listAllTasks()
+        .filter((t) => t.source === "ics" && t.status === "active" && t.sessionId === "alice");
+      assert.equal(active.length, 2, "两个源的日程都还在");
+    },
+    { fetchImpl },
+  );
+});
+
+test("收编读口的每条事件带归属（IcsSensor 据此切分信号，不进共享桶）", async () => {
+  await withIcsService(async ({ service }) => {
+    await service.addFeed({ name: "团日历", url: "https://calendar.example.com/public.ics", actorId: "alice" });
+    const rows = service.fetchEventsSince(0);
+    assert.ok(rows.length > 0, "解析出的窗口内事件应可读");
+    assert.ok(rows.every((r) => r.actorId === "alice"), "每条都要带订阅者是谁");
+  });
+});
+
+test("旧 state.json（裸源名）加载时挂到默认账号：迁移后重拉不重复建日程", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "ics-legacy-"));
+  const prev = process.env.SCHEDULE_TASKS_FILE;
+  process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
+  const statePath = join(dir, "state.json");
+  const feedsPath = join(dir, "feeds.json");
+  const tasks = new ScheduleTaskService({ now: () => new Date(NOW) });
+  const make = () =>
+    new IcsSubscriptionService({
+      config: {
+        enabled: true,
+        feeds: [{ name: "测试日历", url: "http://example.com/cal.ics" }],
+        pollSec: 900,
+        actorId: "user1",
+        lookaheadDays: 35,
+      },
+      tasks,
+      statePath,
+      feedsPath,
+      fetchImpl: (async () => new Response(SAMPLE_ICS, { status: 200 })) as unknown as typeof fetch,
+      now: () => new Date(NOW),
+    });
+  try {
+    await make().pollAll();
+    const seeded = JSON.parse(readFileSync(statePath, "utf8")) as {
+      feeds: Record<string, { materialized: Record<string, string> }>;
+    };
+    const partitionedKey = Object.keys(seeded.feeds).find((k) => k.includes("::"));
+    assert.ok(partitionedKey, "现行落盘键应带归属前缀");
+    // 还原成历史形态：键是裸源名（那时全站只有一个归属）
+    seeded.feeds["测试日历"] = seeded.feeds[partitionedKey]!;
+    delete seeded.feeds[partitionedKey];
+    writeFileSync(statePath, JSON.stringify(seeded));
+
+    const changed = await make().pollAll();
+    assert.equal(changed, false, "存量映射迁移到新键后仍认得到，不能把 7 条重建成 14 条");
+    assert.equal(tasks.listAllTasks().filter((t) => t.source === "ics").length, 7);
+
+    const after = JSON.parse(readFileSync(statePath, "utf8")) as typeof seeded;
+    assert.deepEqual(Object.keys(after.feeds), ["user1::测试日历"]);
+  } finally {
+    if (prev == null) delete process.env.SCHEDULE_TASKS_FILE;
+    else process.env.SCHEDULE_TASKS_FILE = prev;
+    await rm(dir, { recursive: true, force: true, maxRetries: 6, retryDelay: 100 });
+  }
 });

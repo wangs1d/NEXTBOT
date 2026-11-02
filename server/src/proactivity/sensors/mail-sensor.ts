@@ -33,8 +33,9 @@ export class MailSensor implements ProactiveSensor {
         stream: "mail" as const,
         actorId: mail.actorId,
         at: Number.isFinite(at) ? at : Date.now(),
-        // 有 uid 用 uid（稳定）；否则退 from+subject+date 指纹
-        fingerprint: `mail:${uid >= 0 ? uid : `${mail.from}|${mail.subject}|${mail.date ?? ""}`}`,
+        // 有 uid 用 uid（稳定）；否则退 from+subject+date 指纹。UID 是"一个邮箱里"的编号，
+        // 两个账号各自的第 1234 封不是同一封信——指纹必须带上归属，否则互相把对方的信号去重掉
+        fingerprint: `mail:${mail.actorId}:${uid >= 0 ? uid : `${mail.from}|${mail.subject}|${mail.date ?? ""}`}`,
         salience: importance === "critical" || importance === "high" ? "high" : importance === "promotional" ? "low" : "medium",
         delta: `新邮件：${mail.subject || "(无主题)"}`,
         payload: {

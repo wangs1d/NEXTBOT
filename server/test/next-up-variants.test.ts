@@ -41,3 +41,38 @@ test("无建议块：正文原样返回", () => {
   assert.equal(text, input);
   assert.deepEqual(followups, []);
 });
+
+test("自造前缀（NOEXTUP_END）不得被当成建议条目（真机截图回归）", () => {
+  const input =
+    "价格我查了三家的底价。\n[NEXT_UP_START]\n补查京东和拼多多的价格\n问问4653那家的配置和保修\n[NOEXTUP_END]";
+  const { text, followups } = extractNextUpSuggestions(input);
+  assert.deepEqual(followups, [
+    "补查京东和拼多多的价格",
+    "问问4653那家的配置和保修",
+  ]);
+  assert.equal(text, "价格我查了三家的底价。");
+  assert.ok(!text.includes("NOEXTUP"));
+});
+
+test("全角括号变体同样提取并剥除", () => {
+  const input =
+    "提醒建好了。\n【NEXT_UP_START】\n帮我把提醒提前一天\n【NOEXTUP_END】";
+  const { text, followups } = extractNextUpSuggestions(input);
+  assert.deepEqual(followups, ["帮我把提醒提前一天"]);
+  assert.equal(text, "提醒建好了。");
+});
+
+test("配对 END 之后的正文保留（与流式 guard 语义一致）", () => {
+  const input =
+    "行程排好了。\n[NEXT_UP_START]\n把行程改成3天\n[NEXT_UP_END]\n需要我发到邮箱吗？";
+  const { text, followups } = extractNextUpSuggestions(input);
+  assert.deepEqual(followups, ["把行程改成3天"]);
+  assert.equal(text, "行程排好了。\n需要我发到邮箱吗？");
+});
+
+test("孤立错写 END（无 START）也要从正文剥掉", () => {
+  const input = "提醒建好了。\n[NOEXTUP_END]";
+  const { text, followups } = extractNextUpSuggestions(input);
+  assert.equal(text, "提醒建好了。");
+  assert.deepEqual(followups, []);
+});

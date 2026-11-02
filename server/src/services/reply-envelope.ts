@@ -247,18 +247,36 @@ function scanCardSegments(text: string): ReplyBlock[] | null {
  * 旧建议即失效，落历史反成噪音）；纯文本渠道拿到的正文也已无此块。
  *
  * 规则：块内逐行一条，剥掉行首列表符；1-3 条、每条 >40 字丢弃；无配对 END
- * 不提取（残缺块只按孤立标记兜底剥离，宁可不给不给脏的）。
+ * 时按同样规则打捞 START 之后的内容（宁可给建议也不让原始标记漏进正文）。
  */
 /**
- * NEXT_UP 标记容错（2026-10-24 真机实证）：模型偶尔把 `[NEXT_UP_START]` 写成
- * `[NEXT_UPSTART]`（漏下划线），旧正则只认标准写法 → 整块建议原样漏进气泡，
- * 用户看到一串 `[NEXT_UPSTART] 按两个人重算…`。放宽为「下划线/空格可缺省」。
+ * NEXT_UP 标记容错（2026-10-24 / 2026-11-02 真机实证）：
+ * - 模型会把 `[NEXT_UP_START]` 写成 `[NEXT_UPSTART]`（漏下划线）；
+ * - 也会自造前缀写成 `[NOEXTUP_END]`（真机截图：错标被当成第三条建议渲染）；
+ * - 中文模型偶尔用全角括号 `【NEXT_UP_START】`。
+ * 因此不再枚举字面写法，统一按「方括号 token 内同时含 UP 与 START/END」识别，
+ * 括号半角/全角、下划线/空格一律可缺省。
  */
-const NEXT_UP_MARKER_GLOBAL_RE = /\[NEXT[ _]?UP[ _]?(?:START|END)\]/gi;
+const NEXT_UP_START_RE = /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】]/i;
+const NEXT_UP_END_RE = /[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]/i;
+const NEXT_UP_TOKEN_RE = /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/i;
+const NEXT_UP_TOKEN_GLOBAL_RE = /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
 const NEXT_UP_BLOCK_GLOBAL_RE =
-  /\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)/gi;
-const NEXT_UP_OPEN_RE = /\[NEXT[ _]?UP[ _]?START\]/i;
-const NEXT_UP_BLOCK_RE = /\[NEXT[ _]?UP[ _]?START\]\s*([\s\S]*?)\[NEXT[ _]?UP[ _]?END\]/i;
+  /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|$)/gi;
+/** 整行只有 NEXT_UP 协议 token：永远不该被捞成建议条目（不误删 [1]/[NOTE] 等正文）。 */
+const PROTOCOL_TOKEN_LINE_RE =
+  /^[ \t]*[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】][ \t]*$/i;
+
+/** 剥掉正文里的孤立/错写协议 token 与纯 token 行（含 END 后残留的尾巴）。 */
+function stripProtocolTokenLines(text: string): string {
+  const kept = text.split("\n").filter((line) => !PROTOCOL_TOKEN_LINE_RE.test(line));
+  return kept
+    .join("\n")
+    .replace(NEXT_UP_TOKEN_GLOBAL_RE, "")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
 
 /**
  * 块外复读兜底（2026-09-22）：模型偶尔会把建议在正文里再写一遍——跟在正文
@@ -297,33 +315,52 @@ function stripTrailingFollowupEcho(text: string, followups: string[]): string {
 export function extractNextUpSuggestions(
   text: string,
 ): { text: string; followups: string[] } {
-  if (!text || !NEXT_UP_OPEN_RE.test(text)) {
+  if (!text) {
     return { text, followups: <string[]>[] };
   }
-  let followups: string[] = [];
-  let out = text;
-  const match = NEXT_UP_BLOCK_RE.exec(text);
-  // 残缺块打捞（2026-09-22 真机实证）：模型偶尔漏发 END——旧逻辑只剥孤立标记，
-  // 块内建议文案原样漏进正文（用户在回复尾部看到第二人称任务句）。
-  // 现在无配对 END 时按同样过滤规则打捞 START 之后的内容。
-  const malformedTail = match ? null : text.split(NEXT_UP_OPEN_RE)[1];
-  const rawBlock = match?.[1] ?? malformedTail;
-  if (rawBlock) {
-    followups = rawBlock
-      .split("\n")
-      .map((line) => line.replace(/^[-*•\d.、\s]+/, "").trim())
-      .filter((line) => line.length > 0 && line.length <= 40)
-      .slice(0, 3);
-    const cutFrom = match
-      ? text.indexOf(match[0])
-      : text.search(NEXT_UP_OPEN_RE);
-    out = (cutFrom > 0 ? text.slice(0, cutFrom) : "").trim();
-    if (followups.length > 0) {
-      out = stripTrailingFollowupEcho(out, followups);
-    }
+  const start = NEXT_UP_START_RE.exec(text);
+  if (!start) {
+    // 无 START 也要清理错写/孤立的 END（`[NOEXTUP_END]` 曾原样透出）。
+    return { text: stripProtocolTokenLines(text), followups: <string[]>[] };
   }
-  out = out.replace(NEXT_UP_MARKER_GLOBAL_RE, "");
-  return { text: out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(), followups };
+  const startIndex = start.index;
+  const tail = text.slice(startIndex + start[0].length);
+  const end = NEXT_UP_END_RE.exec(tail);
+  // 配对 END 时保留 END 之后的正文（与流式 guard 的语义一致）；残缺块则截到流尾。
+  const rawBlock = end ? tail.slice(0, end.index) : tail;
+  let out: string;
+  if (end) {
+    const before = text.slice(0, startIndex).replace(/[ \t]+$/, "");
+    const after = tail.slice(end.index + end[0].length).replace(/^[ \t]+/, "");
+    // 块通常独占一行：两侧都带换行时并成一个，避免正文出现空行。
+    out =
+      before.endsWith("\n") && after.startsWith("\n")
+        ? before + after.slice(1)
+        : before + after;
+  } else {
+    out = text.slice(0, startIndex);
+  }
+  // 错写的 END（如 `[NOEXTUP_END]`）曾被切行后当成第 3 条建议：纯 token 行与
+  // 含协议 token 的行一律排除，只保留真正的用户口吻任务句。
+  const followups = rawBlock
+    .split("\n")
+    .map((line) => line.replace(/^[-*•\d.、\s]+/, "").trim())
+    .filter(
+      (line) =>
+        line.length > 0 &&
+        line.length <= 40 &&
+        !PROTOCOL_TOKEN_LINE_RE.test(line) &&
+        !NEXT_UP_TOKEN_RE.test(line),
+    )
+    .slice(0, 3);
+  out = stripProtocolTokenLines(out);
+  if (followups.length > 0) {
+    out = stripTrailingFollowupEcho(out, followups);
+  }
+  return {
+    text: out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim(),
+    followups,
+  };
 }
 
 /**
@@ -379,7 +416,7 @@ export function stripMarkersToPlainText(text: string): string {
     /\[(?:RENDER_HINT:[A-Za-z_]+|RENDER_AS:[A-Za-z_]+|AGENT_RESULT_CARD_START|AGENT_RESULT_CARD_END|DATA_BRIEF_START|DATA_BRIEF_END|VIDEO_MEDIA_START|VIDEO_MEDIA_END|CHAT_MEDIA_START|CHAT_MEDIA_END|CONTENT_SUMMARY_V2_START|CONTENT_SUMMARY_V2_END|IMAGE_RESULT_START|IMAGE_RESULT_END)\]/g,
     "",
   );
-  out = out.replace(NEXT_UP_MARKER_GLOBAL_RE, "");
+  out = out.replace(NEXT_UP_TOKEN_GLOBAL_RE, "");
 
   return out.replace(/[ \t]+\n/g, "\n").replace(/\n{3,}/g, "\n\n").trim();
 }

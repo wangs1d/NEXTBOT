@@ -7,6 +7,7 @@ import "dart:ui" show lerpDouble;
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/presentation/boot_animation.dart";
@@ -129,8 +130,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       (() async {
         tick(0.3, "正在读取能力清单…");
         try {
-          final http.Response res = await http
-              .get(Uri.parse("${ApiConfig.httpBase}/api/capabilities"))
+          final http.Response res = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/api/capabilities"))
               .timeout(const Duration(seconds: 4));
           if (res.statusCode == 200) {
             final dynamic parsed = jsonDecode(res.body);
@@ -141,8 +141,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
       (() async {
         // 现有 agent 名（重进向导时回显）
         try {
-          final http.Response res = await http
-              .get(Uri.parse(
+          final http.Response res = await NbHttp.get(Uri.parse(
                   "${ApiConfig.httpBase}/api/user-preferences?userId=${Uri.encodeComponent(ApiConfig.effectiveActorId)}"))
               .timeout(const Duration(seconds: 4));
           if (res.statusCode == 200) {
@@ -188,8 +187,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
 
   Future<bool> _saveAppellation(String value) async {
     try {
-      final http.Response res = await http
-          .post(
+      final http.Response res = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/profile/manage/fact"),
             headers: <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{
@@ -211,8 +209,7 @@ class _OnboardingFlowState extends State<OnboardingFlow> {
 
   Future<bool> _saveAgentName(String name) async {
     try {
-      final http.Response res = await http
-          .post(
+      final http.Response res = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/agent-identity/rename"),
             headers: <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{

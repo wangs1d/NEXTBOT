@@ -59,7 +59,7 @@ export type IntentRoutePlan = {
  * 意图 → 执行契约路由表（唯一权威）。
  * 对话面（chat/knowledge_qa/meta_capability/action_write）：直答或前台工具直办，
  * 时间/位置走上下文注入。action_write（2026-09-08）归位对话面：提醒/日程是
- * 单工具秒级动作，前台直调 reminder.plan/calendar 当场办成并一句话回复——
+ * 单工具秒级动作，前台直调 calendar.create 当场办成并一句话回复——
  * 不派后台、不出任务回执、不产生「派发提示 + 结果」两段消息；重写动作
  * （下单/支付/发消息/设备操作）仍由前台模型经 task.dispatch 派后台。
  * 任务面：realtime_lookup/media_retrieval 轻预算单点执行（tier fast）；

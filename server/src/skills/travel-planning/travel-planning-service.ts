@@ -156,6 +156,8 @@ export interface PlanningRequest {
   boundPlatforms?: BoundPlatform[];
   /** 会话 ID（可选）：传入时通过 travel-progress-bus 向聊天侧流式汇报规划进度 */
   sessionId?: string;
+  /** 归属用户 actorId（可选）：收藏加权等按 actor 取数；缺省不跨用户加权 */
+  actorId?: string;
   /** 用户画像提示（UserFact travel 类别；原文未说的 style 用它兜底；含 POI 负向偏好与人格分型，travel 双端②③） */
   profileHints?: {
     photoDriven?: boolean;
@@ -940,10 +942,10 @@ export class PlanningService {
     emitTravelProgress(sessionId, stage, message);
   }
 
-  /** 用户收藏键集合（C5 收藏加权，「type:name」精确匹配；读取失败为空集） */
-  private get favoriteKeys(): Set<string> {
+  /** 本 actor 的收藏键集合（C5 收藏加权；无 actorId 时为空集，不跨用户加权） */
+  private favoriteKeysForActor(actorId?: string): Set<string> {
     try {
-      return travelFavoritesStore.favoriteKeys();
+      return travelFavoritesStore.favoriteKeys(actorId);
     } catch {
       return new Set();
     }
@@ -1145,7 +1147,8 @@ export class PlanningService {
       [...cacheEntry.data.restaurants, ...wishSupplement.restaurants],
       preferences,
       rankedWeatherCtx,
-      { dislikeTags: request.profileHints?.dislikeTags, dislikeNames: request.profileHints?.dislikeNames }
+      { dislikeTags: request.profileHints?.dislikeTags, dislikeNames: request.profileHints?.dislikeNames },
+      request.actorId
     );
     // 住宿落位参照点（F0：住哪儿跟着「为什么住这儿」走——靠机场/车站/某景点）
     const hotelAnchor = await this.resolveHotelFocusAnchor(preferences, ranked.attractions, cacheEntry.center, destName);
@@ -1390,6 +1393,8 @@ export class PlanningService {
       hotelFocusRef?: string;
       /** 游玩天数：条数按天动态（每天 2 条 + 4 条多元化冗余位），per 显式传入时优先生效 */
       days?: number;
+      /** 归属用户 actorId：收藏加权按本 actor 取数；缺省不跨用户加权 */
+      actorId?: string;
       /** 用户画像（getUserTravelProfile 产物）：负反馈降权 + 出片/体验向加分，
        *  让「选一选」卡按用户情况个性化，而不是全用户同一份热门榜 */
       profileHints?: {
@@ -1417,7 +1422,7 @@ export class PlanningService {
     const dayBasedPer = Math.min(16, Math.max(6, dayN * 2 + 4));
     const perCat = Math.min(16, Math.max(6, Math.floor(per) || dayBasedPer));
     const dest = await this.searchDestination(destination);
-    const favKeys = this.favoriteKeys;
+    const favKeys = this.favoriteKeysForActor(opts.actorId);
     // 排序键只用真实信号，缺失一律沉底，末位用原始搜索序（同输入必同序，不抖）。
     const favRank = (p: RawPOI, type: 'attraction' | 'hotel' | 'restaurant') =>
       favKeys.has(`${type}:${p.name}`) ? 1 : 0;
@@ -3544,15 +3549,17 @@ export class PlanningService {
     restaurants: RawPOI[],
     prefs: TripPreferences,
     weather?: TripWeatherCtx | null,
-    hints?: { dislikeTags?: string[]; dislikeNames?: string[] }
+    hints?: { dislikeTags?: string[]; dislikeNames?: string[] },
+    actorId?: string
   ): { attractions: RawPOI[]; hotels: RawPOI[]; restaurants: RawPOI[] } {
     const dislikeNames = new Set(hints?.dislikeNames ?? []);
     const dislikeTags = hints?.dislikeTags ?? [];
+    const favKeys = this.favoriteKeysForActor(actorId);
     const score = (poi: RawPOI, type: 'attraction' | 'hotel' | 'restaurant'): number => {
       const hay = `${poi.name} ${(poi.tags || []).join(' ')}`.toLowerCase();
       let s = this.effectiveRating(poi, type); // 本地评论聚合分混合（媒体库优先）
-      // C5 收藏加权：用户收藏过的地点（type:name 精确匹配，餐厅与景点同名互不污染）
-      if (this.favoriteKeys.has(`${type}:${poi.name}`)) s += SCORING.favoriteBoost;
+      // C5 收藏加权：本 actor 收藏过的地点（type:name 精确匹配，餐厅与景点同名互不污染）
+      if (favKeys.has(`${type}:${poi.name}`)) s += SCORING.favoriteBoost;
       // 规划主线 F0：用户点名的景点/餐厅直接置顶（压过评级量纲）
       const wished = type === 'attraction' ? prefs.wishlist : type === 'restaurant' ? prefs.foodWishlist : type === 'hotel' ? prefs.stayWishlist : undefined;
       if (wished?.some((w) => wishNameMatch(poi.name, w))) s += SCORING.wishlistBoost;

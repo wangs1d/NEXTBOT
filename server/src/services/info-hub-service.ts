@@ -45,6 +45,8 @@ export type SiteNavigateHop = {
 export type TrackedTopic = {
   topicId: string;
   sessionId: string;
+  /** 归属用户（多租户隔离；旧话题缺省时按 sessionId 归属兜底） */
+  actorId?: string;
   name: string;
   keywords: string[];
   createdAt: string;
@@ -112,14 +114,22 @@ export class InfoHubService {
     );
   }
 
-  listTopicsBySession(sessionId: string): TrackedTopic[] {
+  listTopicsBySession(sessionId: string, actorId?: string): TrackedTopic[] {
     return Array.from(this.topics.values())
-      .filter((t) => t.sessionId === sessionId)
+      .filter((t) => this.ownedBy(t, actorId ?? sessionId))
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  }
+
+  /** 归属判定：显式 actorId 优先；旧话题没有 actorId 时按创建会话归属。 */
+  private ownedBy(topic: TrackedTopic, actorId?: string): boolean {
+    if (!actorId) return true;
+    if (topic.actorId) return topic.actorId === actorId;
+    return topic.sessionId === actorId;
   }
 
   async createTopic(input: {
     sessionId: string;
+    actorId?: string;
     name: string;
     keywords: string[];
     scheduleTaskId?: string;
@@ -128,6 +138,7 @@ export class InfoHubService {
     const topic: TrackedTopic = {
       topicId: randomUUID(),
       sessionId: input.sessionId,
+      ...(input.actorId?.trim() ? { actorId: input.actorId.trim() } : {}),
       name: input.name.trim(),
       keywords: input.keywords.map((k) => k.trim()).filter(Boolean),
       createdAt: now,
@@ -140,9 +151,9 @@ export class InfoHubService {
     return topic;
   }
 
-  async setEnabled(topicId: string, enabled: boolean): Promise<TrackedTopic> {
+  async setEnabled(topicId: string, enabled: boolean, actorId?: string): Promise<TrackedTopic> {
     const topic = this.topics.get(topicId);
-    if (!topic) {
+    if (!topic || !this.ownedBy(topic, actorId)) {
       throw new Error("追踪话题不存在");
     }
     topic.enabled = enabled;
@@ -152,9 +163,9 @@ export class InfoHubService {
     return topic;
   }
 
-  async runTopic(topicId: string): Promise<{ topic: TrackedTopic; items: InfoSearchItem[] }> {
+  async runTopic(topicId: string, actorId?: string): Promise<{ topic: TrackedTopic; items: InfoSearchItem[] }> {
     const topic = this.topics.get(topicId);
-    if (!topic) throw new Error("追踪话题不存在");
+    if (!topic || !this.ownedBy(topic, actorId)) throw new Error("追踪话题不存在");
     const query = topic.keywords.join(" ");
     const [news, docs] = await Promise.all([
       this.fetchNews(query, 6),

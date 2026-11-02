@@ -136,6 +136,17 @@ export class AgenticMemoryIngestService {
     this.writeHooks.push(hook);
   }
 
+  /**
+   * 旁路结构化产物直投钩子（记忆正文另有落库路径时用）：让批量抽取已经产出的
+   * understandings / facts / corrections / referents / forget 仍由同一批钩子
+   * 消费者落位，而不是在调用方另写一套落库逻辑。results 传空＝账本与溯源不动作。
+   */
+  publishUnifiedSideChannels(
+    event: Omit<Mem0WriteEvent, "results" | "context"> & { context?: "main" | "notes" },
+  ): void {
+    this.fireWriteHooks({ context: "main", ...event, results: [] });
+  }
+
   private fireWriteHooks(event: Mem0WriteEvent): void {
     for (const hook of this.writeHooks) {
       try {

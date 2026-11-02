@@ -1537,6 +1537,12 @@ export class HumanLikeMemoryService {
       clearTimeout(this.reloadTimer);
       this.reloadTimer = null;
     }
+    // 冲刷未到期的合并写再关库，避免最后一批记忆停留在内存
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+      this.persistNow();
+    }
     if (this.policyWatcher) {
       try {
         this.policyWatcher.close();
@@ -1555,7 +1561,24 @@ export class HumanLikeMemoryService {
     await writeJsonAtomic(this.policyFilePath, this.policy);
   }
 
+  /**
+   * 持久化合并窗口（ms）：一次记忆写入会触发多次 schedulePersist，而每次落盘都要
+   * 对整图做 JSON.stringify + crypto hash（实测单次约 200ms 主线程）。500ms 窗口内
+   * 的连续写只落一次；shutdown 时强制冲刷，不丢数据。
+   */
+  private persistTimer: NodeJS.Timeout | null = null;
+
   private schedulePersist(): void {
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistNow();
+    }, 500);
+    this.persistTimer.unref?.();
+  }
+
+  /** 立即落盘（合并窗口到期或关闭时调用）。 */
+  private persistNow(): void {
     if (this.graphPersist) {
       // SQLite 行级持久化：hash-diff 只写脏行（P1-9）
       const snapshot = {

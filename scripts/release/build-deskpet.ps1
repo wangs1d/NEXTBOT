@@ -90,7 +90,9 @@ try {
   # 单实例会抢走"本进程"身份：先清掉可能残留的桌宠，冒烟才有意义
   & $OutExe --quit *> $null
   Start-Sleep -Milliseconds 300
-  $petProc = Start-Process -FilePath $OutExe -ArgumentList '--warm' -WorkingDirectory $OutDir `
+  # 冒烟必须按宿主真实调用方式来：客户端起打包产物时不带任何参数，
+  # 这里多传一个只有本脚本认识的 flag，测到的就不是装机后真正会跑的那条路径。
+  $petProc = Start-Process -FilePath $OutExe -WorkingDirectory $OutDir `
     -PassThru -NoNewWindow -RedirectStandardOutput $smokeLog
   $deadline = (Get-Date).AddSeconds(30)
   $ready = $false

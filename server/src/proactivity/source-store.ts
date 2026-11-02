@@ -287,12 +287,20 @@ export class SourceStore {
    * 一次返回**所有来源**里提到它的条目 —— 邮件/日历/购物/消息可拼成完整图景。
    * 走启动加载重建的常驻索引，重启后仍可查历史。
    */
-  findByEntity(entity: string, opts: { since?: number; streams?: SignalStream[]; limit?: number } = {}): SourceHit[] {
+  findByEntity(
+    entity: string,
+    opts: { since?: number; streams?: SignalStream[]; limit?: number; actorId?: string } = {},
+  ): SourceHit[] {
     const key = entity.trim().toLowerCase();
     if (!key) return [];
     const since = opts.since ?? 0;
     const allow = opts.streams ? new Set(opts.streams) : null;
-    const hits = (this.entityIndex.get(key) ?? []).filter((h) => h.at >= since && (!allow || allow.has(h.stream)));
+    const hits = (this.entityIndex.get(key) ?? []).filter(
+      (h) =>
+        h.at >= since &&
+        (!allow || allow.has(h.stream)) &&
+        (opts.actorId === undefined || h.actorId === opts.actorId),
+    );
     return opts.limit !== undefined ? hits.slice(-opts.limit) : hits;
   }
 
@@ -444,7 +452,10 @@ export class SourceStore {
    * subject 是 goalId，光靠 subject 永远碰不到面；倒排让它们因「搬家」而相遇）。
    * 走 findByEntity 的常驻索引，重启后仍可查。
    */
-  findingsByEntity(entity: string, opts: { since?: number; limit?: number } = {}): DiscoveryFinding[] {
+  findingsByEntity(
+    entity: string,
+    opts: { since?: number; limit?: number; actorId?: string } = {},
+  ): DiscoveryFinding[] {
     const out: DiscoveryFinding[] = [];
     for (const hit of this.findByEntity(entity, opts)) {
       if (hit.stream !== "finding") continue;

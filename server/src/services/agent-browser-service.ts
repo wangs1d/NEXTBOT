@@ -1,13 +1,17 @@
 /**
- * Agent 专用虚拟浏览器服务（有状态会话池）。
+ * Agent 通用网页操作服务（有状态会话池）。
  *
- * 在服务端后台启动 Playwright 无头浏览器，维持有状态会话（sessionId → Page），
- * 支持 open / click / type / scroll / screenshot / extract_text / wait_for / close
- * 八个原子操作，让 Agent 能在浏览器中完成多步操作流程。
+ * 执行层已上收到通用浏览器层：客户端在线时**优先在用户可见的内置浏览器**
+ * （WebView2 over CDP）里操作（登录态即用户本人、全程可见可接管），不可用时
+ * 回退服务端无头 Chromium + 已授权 Cookie。会话（sessionId → Page）绑定 actorId，
+ * 支持 open / click / type / scroll / screenshot / extract_text / wait_for / close。
+ *
+ * 人工接管对齐主流 Browser Agent：只在 human-required（登录墙 / 验证码）时停一次，
+ * 页面留在可见浏览器里，用户回执后由 Plan 续跑；普通失败/空结果不交人。
  *
  * 安全护栏（不依赖 agentAccessMode，沙箱下也可用）：
  *   1. 任意 https URL 允许 open（http 仅限 localhost），所有操作走审计日志
- *   2. 对 browser-session-sites 白名单内站点，自动注入用户已授权的 Cookie
+ *   2. 对 browser-session-sites 白名单内站点，自动注入用户已授权的 Cookie（无头路径）
  *   3. 会话绑定 actorId，跨用户隔离；sessionId 不可预测（randomUUID）
  *   4. 会话 TTL（默认 10 分钟）+ LRU 上限（默认 8 个），超时/超量自动清理
  *   5. Playwright 动态加载，未安装时优雅降级并返回明确错误
@@ -19,9 +23,18 @@ import type { Browser, BrowserContext, Page } from "playwright";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { AuditService } from "./audit-service.js";
 import type { BrowserSessionService } from "./browser-session-service.js";
-import { resolveSiteIdFromUrl } from "./browser-session-sites.js";
-import type { ImportedBrowserCookie } from "./browser-session-types.js";
-import { detectLoginPage } from "./shopping-platforms/login-gate.js";
+import { BROWSER_SESSION_SITES, resolveSiteIdFromUrl, type BrowserSessionSiteId } from "./browser-session-sites.js";
+import {
+  BrowserRuntime,
+  loadPlaywright,
+  toPlaywrightCookies,
+  type BrowserPageLease,
+} from "./browser-runtime/browser-runtime.js";
+import {
+  detectHumanRequired,
+  type HumanRequiredDetection,
+  type HumanRequirementReason,
+} from "./browser-runtime/human-gate.js";
 import type { QrAssistService } from "./qr-assist-service.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 
@@ -78,70 +91,25 @@ export type AgentBrowserResult =
 interface AgentBrowserSession {
   sessionId: string;
   actorId: string;
-  browser: Browser;
-  context: BrowserContext;
+  /** 无头路径的浏览器/上下文；shared 路径为空（页面来自内置浏览器租约）。 */
+  browser?: Browser;
+  context?: BrowserContext;
   page: Page;
+  /** shared 路径的面板租约（close 时释放；页面留痕不关闭）。 */
+  lease?: BrowserPageLease;
+  mode: "shared" | "headless";
+  /** 命中的站点（登录页启发式 / 交接文案用）。 */
+  siteId?: string;
+  siteLabel?: string;
+  /** 本会话已就哪个理由弹过交接（同一会话不重复打扰）。 */
+  humanNotified?: HumanRequirementReason;
+  /** 正在等用户本人处理（登录/验证）：TTL 清理跳过，避免用户还没登录会话就过期。 */
+  awaitingHuman?: boolean;
   currentUrl: string;
   createdAt: number;
   lastActivityAt: number;
   closed: boolean;
 }
-
-// ─── Playwright 动态加载 ───────────────────────────────────────────────────
-
-async function loadPlaywright(): Promise<typeof import("playwright") | null> {
-  try {
-    return await import("playwright");
-  } catch {
-    return null;
-  }
-}
-
-// ─── Cookie 转换（参照 browser-page-fetch.ts / shopping-order-service.ts）───
-
-function toPlaywrightCookies(
-  pageUrl: string,
-  cookies: ImportedBrowserCookie[],
-): Array<{
-  name: string;
-  value: string;
-  domain: string;
-  path: string;
-  expires?: number;
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: "Strict" | "Lax" | "None";
-}> {
-  let defaultHost = "";
-  try {
-    defaultHost = new URL(pageUrl).hostname;
-  } catch {
-    /* ignore */
-  }
-  return cookies.map((c) => {
-    const domain = (c.domain ?? defaultHost).replace(/^\./, "");
-    return {
-      name: c.name,
-      value: c.value,
-      domain: domain.startsWith(".") ? domain : `.${domain}`,
-      path: c.path ?? "/",
-      expires: c.expires,
-      httpOnly: c.httpOnly,
-      secure: c.secure,
-      sameSite: normalizeSameSite(c.sameSite),
-    };
-  });
-}
-
-function normalizeSameSite(raw?: string): "Strict" | "Lax" | "None" | undefined {
-  if (!raw) return undefined;
-  const s = raw.toLowerCase();
-  if (s === "strict") return "Strict";
-  if (s === "lax") return "Lax";
-  if (s === "none") return "None";
-  return undefined;
-}
-
 // ─── URL 安全校验 ──────────────────────────────────────────────────────────
 
 /**
@@ -167,6 +135,13 @@ function isUrlAllowed(rawUrl: string): { ok: boolean; error?: string } {
   return { ok: false, error: `不支持的协议: ${parsed.protocol}（仅 http/https）` };
 }
 
+/** human-required 时给模型的固定指引（避免模型把登录/验证写成普通失败）。 */
+function humanHandoffHint(reason: HumanRequirementReason): string {
+  return reason === "login"
+    ? "该站点需要你本人登录：页面已在内置浏览器打开，登录后点「我已完成」我继续。"
+    : "该站点需要你本人完成安全验证（滑块/验证码）：页面已停在内置浏览器里，验证后点「我已完成」我继续。";
+}
+
 // ─── 服务主体 ──────────────────────────────────────────────────────────────
 
 /**
@@ -183,8 +158,18 @@ export class AgentBrowserService {
     private readonly deps: {
       browserSessionService: BrowserSessionService;
       audit?: AuditService;
-      /** 通用二维码推送：打开站点撞登录页时自动推二维码到聊天（best-effort）。 */
+      /** 通用二维码推送：撞登录页时自动推二维码到聊天（best-effort）。 */
       qrAssist?: QrAssistService;
+      /** 通用浏览器层：内置浏览器优先 / 无头兜底（缺省时仅走无头）。 */
+      runtime?: BrowserRuntime;
+      /** human-required（登录墙/验证码）→ 长流程交接（装配层接通用 handoff）。 */
+      onHumanRequired?: (info: {
+        actorId: string;
+        /** 聊天/任务会话 id（task-plan key 用，不是浏览器 sessionId） */
+        sessionId: string;
+        siteLabels: string[];
+        reason: HumanRequirementReason;
+      }) => void;
     },
   ) {
     this.cleanupTimer = setInterval(() => this.cleanupExpired(), 60_000);
@@ -205,7 +190,7 @@ export class AgentBrowserService {
 
   // ─── 8 个原子操作 ────────────────────────────────────────────────────────
 
-  /** 打开 URL，返回 sessionId。 */
+  /** 打开 URL，返回 sessionId。内置浏览器在线时优先在用户可见面板里打开。 */
   async open(
     ctx: ToolContext,
     url: string,
@@ -222,135 +207,176 @@ export class AgentBrowserService {
     const urlCheck = isUrlAllowed(trimmedUrl);
     if (!urlCheck.ok) return { ok: false, error: urlCheck.error! };
 
-    const pw = await loadPlaywright();
-    if (!pw) {
-      return {
-        ok: false,
-        error: "Playwright 未安装。请在 server 目录执行: npm install playwright && npx playwright install chromium",
-        retryable: false,
-      };
+    const siteId = resolveSiteIdFromUrl(trimmedUrl);
+    const siteLabel = siteId
+      ? (BROWSER_SESSION_SITES[siteId as BrowserSessionSiteId]?.label ?? siteId)
+      : (() => {
+          try {
+            return new URL(trimmedUrl).hostname;
+          } catch {
+            return "该站点";
+          }
+        })();
+
+    // 1) 通用层：内置浏览器优先（登录态即用户本人，全程可见可接管）
+    let lease: BrowserPageLease | null = null;
+    if (this.deps.runtime?.canUseSharedBrowser(actorId)) {
+      lease = await this.deps.runtime
+        .tryOpenSharedPage(actorId, trimmedUrl, { waitSlotMs: 15_000 })
+        .catch(() => null);
     }
 
-    const { chromium } = pw;
-    const browser = await chromium.launch({
-      headless: true,
-      args: ["--disable-blink-features=AutomationControlled"],
+    let browser: Browser | undefined;
+    let context: BrowserContext | undefined;
+    let page: Page | undefined;
+    let cookieInjected = false;
+
+    if (lease) {
+      page = lease.page;
+      page.setDefaultTimeout(getActionTimeoutMs());
+    } else {
+      // 2) 无头兜底：Playwright + 已授权 Cookie
+      const pw = await loadPlaywright();
+      if (!pw) {
+        return {
+          ok: false,
+          error: "Playwright 未安装。请在 server 目录执行: npm install playwright && npx playwright install chromium",
+          retryable: false,
+        };
+      }
+      const { chromium } = pw;
+      browser = await chromium.launch({
+        headless: true,
+        args: ["--disable-blink-features=AutomationControlled"],
+      });
+      try {
+        const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
+        context = await browser.newContext({
+          userAgent: USER_AGENT,
+          locale: "zh-CN",
+          viewport: { width: viewport.width, height: viewport.height },
+        });
+
+        // 对白名单站点，尝试注入用户已授权的 Cookie
+        if (siteId) {
+          try {
+            const cookies = await this.deps.browserSessionService.getCookiesForAgent(actorId, siteId);
+            if (cookies && cookies.length > 0) {
+              await context.addCookies(toPlaywrightCookies(trimmedUrl, cookies));
+              cookieInjected = true;
+            }
+          } catch {
+            // 未授权 / 未导入 Cookie —— 以未登录状态访问，不报错
+          }
+        }
+
+        page = await context.newPage();
+        page.setDefaultTimeout(getActionTimeoutMs());
+        const timeout = opts?.timeout ?? getNavTimeoutMs();
+        const waitUntil = opts?.waitUntil ?? "domcontentloaded";
+
+        await page.goto(trimmedUrl, { waitUntil, timeout });
+      } catch (e) {
+        await browser.close().catch(() => {});
+        const message = e instanceof Error ? e.message : String(e);
+        return {
+          ok: false,
+          error: message.includes("Executable doesn't exist")
+            ? `${message} — 请执行: npx playwright install chromium`
+            : message,
+          retryable: true,
+        };
+      }
+    }
+
+    if (!page) return { ok: false, error: "页面打开失败", retryable: true };
+
+    const sessionId = randomUUID();
+    const now = Date.now();
+    const session: AgentBrowserSession = {
+      sessionId,
+      actorId,
+      browser,
+      context,
+      page,
+      ...(lease ? { lease } : {}),
+      mode: lease ? "shared" : "headless",
+      ...(siteId ? { siteId } : {}),
+      siteLabel,
+      currentUrl: page.url(),
+      createdAt: now,
+      lastActivityAt: now,
+      closed: false,
+    };
+
+    // LRU 上限保护：超量时关闭最老会话
+    this.enforceMaxSessions();
+
+    this.sessions.set(sessionId, session);
+
+    // 新标签页跟随（仅无头路径有 context；内置浏览器走同一面板页，不新开 target）
+    context?.on("page", (popup) => {
+      popup.setDefaultTimeout(getActionTimeoutMs());
+      session.page = popup;
+      session.currentUrl = popup.url();
     });
 
-    try {
-      const viewport = opts?.viewport ?? DEFAULT_VIEWPORT;
-      const context = await browser.newContext({
-        userAgent: USER_AGENT,
-        locale: "zh-CN",
-        viewport: { width: viewport.width, height: viewport.height },
-      });
+    const title = await page.title().catch(() => "");
 
-      // 对白名单站点，尝试注入用户已授权的 Cookie
-      const siteId = resolveSiteIdFromUrl(trimmedUrl);
-      let cookieInjected = false;
-      if (siteId) {
-        try {
-          const cookies = await this.deps.browserSessionService.getCookiesForAgent(actorId, siteId);
-          if (cookies && cookies.length > 0) {
-            await context.addCookies(toPlaywrightCookies(trimmedUrl, cookies));
-            cookieInjected = true;
-          }
-        } catch {
-          // 未授权 / 未导入 Cookie —— 以未登录状态访问，不报错
-        }
-      }
+    // 通用 human-required：登录页自动推二维码（best-effort）；可见浏览器里命中时
+    // 再交一次 handoff（在同一面板里让用户本人登录/过验证）。
+    const human: HumanRequiredDetection = await detectHumanRequired(siteId ?? "", page).catch(
+      () => ({ required: false }),
+    );
+    let loginQrImageUrl: string | undefined;
+    if (human.required && human.reason === "login" && this.deps.qrAssist) {
+      loginQrImageUrl =
+        (await this.deps.qrAssist
+          .pushPageCard(
+            ctx,
+            {
+              title: "打开网页需要登录",
+              caption: "登录页二维码已推给你，扫码后继续",
+            },
+            page,
+          )
+          .catch(() => undefined)) ?? undefined;
+    }
+    const humanRequired =
+      human.required && human.reason && session.mode === "shared"
+        ? this.notifyHuman(ctx, session, human.reason, human.evidence)
+        : undefined;
 
-      const page = await context.newPage();
-      page.setDefaultTimeout(getActionTimeoutMs());
-      const timeout = opts?.timeout ?? getNavTimeoutMs();
-      const waitUntil = opts?.waitUntil ?? "domcontentloaded";
+    await this.audit(ctx, "open", sessionId, {
+      url: trimmedUrl,
+      siteId: siteId ?? undefined,
+      browserMode: session.mode,
+      cookieInjected,
+      title,
+      loginQrPushed: Boolean(loginQrImageUrl),
+      humanRequired: humanRequired?.reason,
+    });
 
-      await page.goto(trimmedUrl, { waitUntil, timeout });
-
-      const sessionId = randomUUID();
-      const now = Date.now();
-      const session: AgentBrowserSession = {
-        sessionId,
-        actorId,
-        browser,
-        context,
-        page,
-        currentUrl: page.url(),
-        createdAt: now,
-        lastActivityAt: now,
-        closed: false,
-      };
-
-      // LRU 上限保护：超量时关闭最老会话
-      this.enforceMaxSessions();
-
-      this.sessions.set(sessionId, session);
-
-      // 新标签页跟随：购物/商品链接普遍 target=_blank 开新 tab，
-      // 下单等多步任务必须让会话操作跟随进入新 tab（session.page 切到最新活动页）。
-      context.on("page", (popup) => {
-        popup.setDefaultTimeout(getActionTimeoutMs());
-        session.page = popup;
-        session.currentUrl = popup.url();
-      });
-
-      const title = await page.title().catch(() => "");
-
-      // 通用「需要扫码自动推」：白名单站点撞登录页时，登录二维码自动推到聊天
-      // （不阻塞会话——Agent 可继续描述页面或等用户扫码后重试）
-      let loginQrImageUrl: string | undefined;
-      if (siteId && this.deps.qrAssist) {
-        const login = await detectLoginPage(siteId, page).catch(() => ({ isLogin: false }));
-        if (login.isLogin) {
-          loginQrImageUrl =
-            (await this.deps.qrAssist
-              .pushPageCard(
-                ctx,
-                {
-                  title: "打开网页需要登录",
-                  caption: "登录页二维码已推给你，扫码后让我重新打开即可带上登录态",
-                },
-                page,
-              )
-              .catch(() => undefined)) ?? undefined;
-        }
-      }
-
-      await this.audit(ctx, "open", sessionId, {
-        url: trimmedUrl,
-        siteId: siteId ?? undefined,
-        cookieInjected,
-        title,
-        loginQrPushed: Boolean(loginQrImageUrl),
-      });
-
-      return {
-        ok: true,
-        sessionId,
-        url: page.url(),
-        title,
-        cookieInjected,
-        siteId: siteId ?? undefined,
-        ...(loginQrImageUrl ? { loginQrImageUrl } : {}),
-        hint: loginQrImageUrl
+    return {
+      ok: true,
+      sessionId,
+      url: page.url(),
+      title,
+      browserMode: session.mode,
+      cookieInjected,
+      siteId: siteId ?? undefined,
+      ...(loginQrImageUrl ? { loginQrImageUrl } : {}),
+      ...(humanRequired ? { humanRequired } : {}),
+      hint: humanRequired
+        ? `该站点需要你本人${humanRequired.reason === "login" ? "登录" : "完成安全验证"}：页面已在内置浏览器打开，完成后点「我已完成」我继续。`
+        : loginQrImageUrl
           ? "该站点需要登录，已把登录二维码推送到聊天；用户扫码后重新执行操作即可。"
           : cookieInjected
             ? undefined
             : siteId
               ? `检测到 ${siteId} 站点但用户未导入/授权 Cookie，以未登录状态访问。如需登录态操作，引导用户在设置中导入 Cookie 并开启 agentAllowed。`
               : undefined,
-      };
-    } catch (e) {
-      await browser.close().catch(() => {});
-      const message = e instanceof Error ? e.message : String(e);
-      return {
-        ok: false,
-        error: message.includes("Executable doesn't exist")
-          ? `${message} — 请执行: npx playwright install chromium`
-          : message,
-        retryable: true,
-      };
-    }
+    };
   }
 
   /** 点击元素。 */
@@ -375,7 +401,14 @@ export class AgentBrowserService {
       });
       this.touch(session);
       await this.audit(ctx, "click", sessionId, { selector: sel, url: session.currentUrl });
-      return { ok: true, url: session.page.url(), selector: sel };
+      // 动作后检查页面是否落到登录墙/验证码（主流 Agent 的动作后 checkpoint）
+      const human = await this.checkHumanAfterAction(ctx, session);
+      return {
+        ok: true,
+        url: session.page.url(),
+        selector: sel,
+        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason) } : {}),
+      };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
     }
@@ -419,7 +452,13 @@ export class AgentBrowserService {
         textLength: value.length,
         append,
       });
-      return { ok: true, selector: sel, textLength: value.length };
+      const human = await this.checkHumanAfterAction(ctx, session);
+      return {
+        ok: true,
+        selector: sel,
+        textLength: value.length,
+        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason) } : {}),
+      };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
     }
@@ -648,6 +687,46 @@ export class AgentBrowserService {
 
   // ─── 内部方法 ────────────────────────────────────────────────────────────
 
+  /**
+   * 命中 human-required：同一会话同一理由只弹一次（不重复打扰），
+   * 经装配层建一个 task-plan 等待步（页面留在可见浏览器），用户回执后续跑。
+   */
+  private notifyHuman(
+    ctx: ToolContext,
+    session: AgentBrowserSession,
+    reason: HumanRequirementReason,
+    evidence?: string,
+  ): { reason: HumanRequirementReason; evidence?: string } | undefined {
+    if (session.mode !== "shared") return undefined;
+    if (session.humanNotified === reason) return undefined;
+    session.humanNotified = reason;
+    session.awaitingHuman = true;
+    try {
+      this.deps.onHumanRequired?.({
+        actorId: session.actorId,
+        sessionId: ctx.sessionId,
+        siteLabels: [session.siteLabel ?? "该站点"],
+        reason,
+      });
+    } catch {
+      /* 交接失败只丢增强，工具回执里的 hint 照常返回 */
+    }
+    return { reason, ...(evidence ? { evidence } : {}) };
+  }
+
+  /** 动作后检查（主流 Browser Agent 在每个动作后过 human checkpoint）。 */
+  private async checkHumanAfterAction(
+    ctx: ToolContext,
+    session: AgentBrowserSession,
+  ): Promise<{ reason: HumanRequirementReason; evidence?: string } | undefined> {
+    if (session.mode !== "shared") return undefined;
+    const human: HumanRequiredDetection = await detectHumanRequired(session.siteId ?? "", session.page).catch(
+      () => ({ required: false }),
+    );
+    if (!human.required || !human.reason) return undefined;
+    return this.notifyHuman(ctx, session, human.reason, human.evidence);
+  }
+
   /** 获取会话并校验 actorId 归属。 */
   private getSessionForActor(ctx: ToolContext, sessionId: string): AgentBrowserSession | undefined {
     const actorId = resolveActorId(ctx);
@@ -660,6 +739,7 @@ export class AgentBrowserService {
   /** 更新会话最后活动时间（LRU 排序：delete + set 移到末尾）。 */
   private touch(session: AgentBrowserSession): void {
     session.lastActivityAt = Date.now();
+    session.awaitingHuman = false;
     session.currentUrl = session.page.url();
     this.sessions.delete(session.sessionId);
     this.sessions.set(session.sessionId, session);
@@ -669,13 +749,12 @@ export class AgentBrowserService {
   private enforceMaxSessions(): void {
     const max = getMaxSessions();
     while (this.sessions.size >= max) {
-      const oldest = this.sessions.keys().next().value;
-      if (!oldest) break;
-      const session = this.sessions.get(oldest);
-      if (session) {
-        this.closeSession(session).catch(() => {});
-      }
-      this.sessions.delete(oldest);
+      // 优先淘汰不在等用户处理的会话（正等登录/验证的会话尽量保住）
+      const entries = [...this.sessions.values()];
+      const victim = entries.find((s) => !s.awaitingHuman) ?? entries[0];
+      if (!victim) break;
+      this.closeSession(victim).catch(() => {});
+      this.sessions.delete(victim.sessionId);
     }
   }
 
@@ -685,6 +764,8 @@ export class AgentBrowserService {
     const now = Date.now();
     const expired: string[] = [];
     for (const [id, session] of this.sessions) {
+      // 等用户登录/验证的会话不按空闲过期（主流 Agent 的 handback 会话保持）
+      if (session.awaitingHuman) continue;
       if (now - session.lastActivityAt > ttl) {
         expired.push(id);
       }
@@ -702,13 +783,17 @@ export class AgentBrowserService {
   private async closeSession(session: AgentBrowserSession): Promise<void> {
     if (session.closed) return;
     session.closed = true;
+    // 内置浏览器：只释放面板队列（页面留痕不关闭，用户还能回看）
+    if (session.lease) {
+      await session.lease.release().catch(() => {});
+    }
     try {
-      await session.context.close();
+      await session.context?.close();
     } catch {
       /* ignore */
     }
     try {
-      await session.browser.close();
+      await session.browser?.close();
     } catch {
       /* ignore */
     }

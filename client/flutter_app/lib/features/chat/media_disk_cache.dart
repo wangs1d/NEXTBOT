@@ -8,6 +8,8 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 import "package:path_provider/path_provider.dart";
 
+import "../../core/config/media_url.dart";
+
 /// 聊天媒体磁盘缓存（2026-10-12 预缓存根治）。
 ///
 /// 根因：服务端早已把搜图落盘为 `/agent/images/*.png` 并随 `chat.assistant_done`
@@ -95,7 +97,7 @@ class MediaDiskCache {
     await _acquireSlot();
     try {
       final http.Response resp = await http
-          .get(Uri.parse(url))
+          .get(Uri.parse(url), headers: MediaUrl.headersFor(url))
           .timeout(_downloadTimeout);
       if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) return null;
       final File tmp = File("${target.path}.part");
@@ -244,6 +246,8 @@ class _CachedMediaImageState extends State<CachedMediaImage> {
   Image _networkImage({required bool withLoading}) {
     return Image.network(
       widget.url,
+      // 直连回退同样要带凭证：周界鉴权开启后无 token 的图片只会拿到 401
+      headers: MediaUrl.headersFor(widget.url),
       fit: widget.fit,
       width: widget.width,
       height: widget.height,

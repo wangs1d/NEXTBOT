@@ -132,13 +132,14 @@ async function main(): Promise<void> {
   }
 
   // ── 真链腿：真实 LLM 闲聊轮（截图同场景：国庆出游闲聊） ──
-  const { buildPersonaStaticBlock, buildPersonaMoodBlock } = await import("../src/agent/persona-core.js");
+  const { buildPersonaPrompt } = await import("../src/agent/soul-store.js");
+  const { buildPersonaMoodBlock } = await import("../src/agent/persona-core.js");
   const { finalizeChatSystemPrompt } = await import("../src/agent/prompt-builder.js");
   const { getRuntimeKernel } = await import("../src/agent/runtime-kernel.js");
   const kernel = getRuntimeKernel();
-  const personaStatic = buildPersonaStaticBlock({ userAlias: "王哥", tier: 1 });
+  const persona = buildPersonaPrompt({ userAlias: "王哥" });
   const mood = buildPersonaMoodBlock("casual_wit");
-  const systemPrompt = [finalizeChatSystemPrompt(kernel.buildSessionSystem() ?? "", { tools: true }), personaStatic]
+  const systemPrompt = [finalizeChatSystemPrompt(kernel.buildSessionSystem() ?? "", { tools: true }), persona]
     .filter(Boolean)
     .join("\n\n");
 
@@ -171,6 +172,7 @@ async function main(): Promise<void> {
             toolLoop: { maxRounds: 2 },
             turnIntent: "chat",
             ephemeralTurn: true,
+            systemPromptOverride: systemPrompt,
           } as never,
         );
       } catch (err) {

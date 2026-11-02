@@ -7,9 +7,10 @@
  *   T1（当轮，零额外调用）：仅 personalFact / 明确「记住」的高信号轮由统一
  *       抽取捎带 profileOps（ingest.ts 侧按 isProfileWriteBatchMode 收窄）。
  *   T2（夜间，每 actor 每天最多 1 次 LLM）：本模块 consolidateProfileFromWal
- *       读 turn-wal 自 checkpoint 以来的候选轮全文（user 侧 only），一次批量
- *       extractUnified（带当前画像上下文）产出 profileOps，交调用方注入的
- *       落位口（UserProfileAggregator.applyProfileOpsFromUnified）确定性写入。
+ *       读 turn-wal 自 checkpoint 以来的轮次全文（user 侧 only，候选优先、
+ *       预算内非候选补位），一次批量 extractUnified（带当前画像上下文）
+ *       产出 profileOps，交调用方注入的落位口
+ *       （UserProfileAggregator.applyProfileOpsFromUnified）确定性写入。
  *
  * 完整性保证：画像管线只读 WAL 原文，从不读 recap/压缩视图；checkpoint
  * at-least-once（抽取失败不推进，下晚重试；applyOps 幂等吸收重复）；输入
@@ -165,6 +166,8 @@ export interface ProfileConsolidationStats {
   topUpProcessed: number;
   /** LLM 产出的 profileOps 条数 */
   opsCount: number;
+  /** 同一次抽取的旁路产物条数（理解/事实/纠正/指代/遗忘），已交落位口 */
+  sideChannels: number;
   /** 落位是否成功 */
   applied: boolean;
   checkpointAdvanced: boolean;
@@ -177,6 +180,11 @@ export interface ProfileBatchDeps {
   readProfile: () => Promise<string> | string;
   /** 确定性落位口（生产传 UserProfileAggregator.applyProfileOpsFromUnified） */
   applyOps: (ops: UnifiedProfileOp[]) => Promise<boolean> | boolean;
+  /**
+   * 同一次抽取的旁路产物落位口（理解档案 / 结构化事实 / 纠正 / 指代 / 遗忘）。
+   * 缺省不消费——但那次 LLM 已经把结构化理解抽出来了，丢弃等于白付 token。
+   */
+  applySideChannels?: (extraction: UnifiedExtraction) => void;
   /** 抽取口（测试注入 fake；生产默认 extractUnified） */
   extractFn?: (
     text: string,
@@ -185,8 +193,8 @@ export interface ProfileBatchDeps {
 }
 
 /**
- * 对单个 actor 跑一次画像批抽取。无候选 → 零 LLM 直接返回。
- * checkpoint 只在「抽取成功且落位成功」时推进到最后一条已处理候选的 ts。
+ * 对单个 actor 跑一次画像批抽取。自 checkpoint 起没有新轮次 → 零 LLM 直接返回。
+ * checkpoint 只在「抽取成功且落位成功」时推进到最后一条已处理轮次的 ts。
  */
 export async function consolidateProfileFromWal(
   actorId: string,
@@ -205,6 +213,7 @@ export async function consolidateProfileFromWal(
     processed: 0,
     topUpProcessed: 0,
     opsCount: 0,
+    sideChannels: 0,
     applied: false,
     checkpointAdvanced: false,
   };
@@ -212,23 +221,9 @@ export async function consolidateProfileFromWal(
   const renderTurn = (t: WalProfileCandidate): string =>
     `[${t.ts.slice(5, 16).replace("T", " ")}] 用户: ${t.userText.slice(0, PER_TURN_CAP_CHARS)}`;
 
-  // 纯闲聊天（零候选）：不调 LLM，但推进 checkpoint 越过该段——否则扫描窗口
-  // 随闲聊无限增长。漏标损失由「highSignal 恒候选 + memory.recall_history
-  // 当轮回查」双兜底，可接受。
-  if (candidates.length === 0) {
-    const lastTs = turns.length > 0 ? turns[turns.length - 1]!.ts : "";
-    if (lastTs) {
-      const next = await loadProfileCheckpoint(checkpointFile);
-      next.actors[actorId] = lastTs;
-      await saveProfileCheckpoint(next, checkpointFile);
-      stats.checkpointAdvanced = true;
-    }
-    return stats;
-  }
-
-  // 预算补齐（2026-10-22，取代「每周全量兜底扫描」提案）：候选优先装满预算，
-  // 剩余空间按 ts 序用非候选轮补位——hint 正则漏标的陈述由此获得第二次进
-  // LLM 的机会，召回上限拉到预算内 100%，且不新增任务/状态/LLM 调用。
+  // 候选优先装满预算，剩余空间按 ts 序用非候选轮补位——hint 正则漏标的陈述
+  // 由此获得第二次进 LLM 的机会。零候选夜晚同样补位：候选门槛只是排序依据，
+  // 不是调用闸；否则「没有一条命中」就等于整晚的陈述全部丢弃。
   const included: WalProfileCandidate[] = [];
   let used = 0;
   for (const c of candidates) {
@@ -238,15 +233,13 @@ export async function consolidateProfileFromWal(
     included.push(c);
   }
   stats.processed = included.length;
-  if (included.length > 0) {
-    for (const t of turns) {
-      if (t.candidate) continue;
-      const text = renderTurn(t);
-      if (used + text.length > TRANSCRIPT_BUDGET_CHARS) break;
-      used += text.length;
-      included.push(t);
-      stats.topUpProcessed += 1;
-    }
+  for (const t of turns) {
+    if (t.candidate) continue;
+    const text = renderTurn(t);
+    if (used + text.length > TRANSCRIPT_BUDGET_CHARS) break;
+    used += text.length;
+    included.push(t);
+    stats.topUpProcessed += 1;
   }
   if (included.length === 0) return stats;
   included.sort((a, b) => a.ts.localeCompare(b.ts));
@@ -281,6 +274,17 @@ export async function consolidateProfileFromWal(
     if (!stats.applied) return stats; // 落位失败不推进
   }
 
+  // 旁路产物落位：理解档案 / 结构化事实 / 纠正 / 指代 / 遗忘都是这一次调用的
+  // 产出，走记忆写入钩子的既有落位口（不在这里另写一套 upsert）。
+  const sideChannelCount =
+    extraction.understandings.length +
+    extraction.facts.length +
+    extraction.corrections.length +
+    (extraction.referents?.length ?? 0) +
+    (extraction.forget?.length ?? 0);
+  stats.sideChannels = sideChannelCount;
+  if (sideChannelCount > 0) deps.applySideChannels?.(extraction);
+
   const next = await loadProfileCheckpoint(checkpointFile);
   next.actors[actorId] = lastTs;
   await saveProfileCheckpoint(next, checkpointFile);
@@ -301,10 +305,28 @@ export function getDefaultProfileConsolidator(): (
   if (!defaultConsolidator) {
     defaultConsolidator = async (actorId) => {
       const { createUserProfileAggregator } = await import("../brain/user-profile-aggregator.js");
+      const { getAgenticMemoryRuntime } = await import("../agentic-memory/index.js");
       const agg = createUserProfileAggregator();
+      const ingest = getAgenticMemoryRuntime()?.ingest ?? null;
       return consolidateProfileFromWal(actorId, {
         readProfile: () => agg.readProfile(actorId),
         applyOps: (ops) => agg.applyProfileOpsFromUnified(actorId, ops),
+        applySideChannels: (extraction) => {
+          ingest?.publishUnifiedSideChannels({
+            actorId,
+            sourceId: "profile:nightly_batch",
+            highSignal: false,
+            corrections: extraction.corrections.length > 0 ? extraction.corrections : undefined,
+            understandings:
+              extraction.understandings.length > 0 ? extraction.understandings : undefined,
+            facts: extraction.facts.length > 0 ? extraction.facts : undefined,
+            forget: extraction.forget.length > 0 ? extraction.forget : undefined,
+            referents:
+              extraction.referents && extraction.referents.length > 0
+                ? extraction.referents
+                : undefined,
+          });
+        },
       });
     };
   }

@@ -7,6 +7,7 @@ import type { ProactiveSensor, Signal } from "./types.js";
 /** IcsSubscriptionService 的只读取数口 */
 export interface IcsReadPort {
   fetchEventsSince(since: number): Array<{
+    actorId: string;
     feed: string;
     key: string;
     summary: string;
@@ -29,9 +30,11 @@ export class IcsSensor implements ProactiveSensor {
     const events = this.port.fetchEventsSince(since);
     return events.map((e) => ({
       stream: "schedule" as const,
+      actorId: e.actorId,
       at: e.startMs,
-      // 事件键天然唯一（feed + occurrence key）→ 稳定指纹
-      fingerprint: `ics:${e.feed}:${e.key}`,
+      // 事件键天然唯一（feed + occurrence key）→ 稳定指纹；带上归属，
+      // 两个账号订同一个公开日历时不会互相把对方的信号去重掉
+      fingerprint: `ics:${e.actorId}:${e.feed}:${e.key}`,
       salience: e.startMs - Date.now() <= 60 * 60_000 ? "high" : "low",
       delta: `日历事件：${e.summary}${e.location ? `（${e.location}）` : ""}`,
       payload: {

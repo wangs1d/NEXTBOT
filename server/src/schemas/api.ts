@@ -192,6 +192,7 @@ export const NOTE_CATEGORIES = [
 
 export const notesCreateBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
   title: z.string().min(1).max(200),
   content: z.string().min(1).max(20000),
   category: z.enum(NOTE_CATEGORIES).default("other"),
@@ -201,6 +202,7 @@ export const notesCreateBodySchema = z.object({
 
 export const notesUpdateBodySchema = z
   .object({
+    userId: z.string().optional(),
     title: z.string().min(1).max(200).optional(),
     content: z.string().min(1).max(20000).optional(),
     category: z.enum(NOTE_CATEGORIES).optional(),
@@ -208,10 +210,14 @@ export const notesUpdateBodySchema = z
     source: z.string().max(120).nullable().optional(),
     summary: z.string().max(2000).nullable().optional(),
   })
-  .refine((v) => Object.keys(v).length > 0, { message: "至少传入一个可更新字段" });
+  .refine(
+    (v) => Object.keys(v).filter((k) => k !== "userId").length > 0,
+    { message: "至少传入一个可更新字段" },
+  );
 
 export const notesListQuerySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
   category: z.enum(NOTE_CATEGORIES).optional(),
   tag: z.string().min(1).max(40).optional(),
   from: z.string().datetime().optional(),
@@ -221,6 +227,7 @@ export const notesListQuerySchema = z.object({
 
 export const notesSearchBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
   query: z.string().min(1).max(200),
   topK: z.coerce.number().int().min(1).max(50).default(10),
   category: z.enum(NOTE_CATEGORIES).optional(),
@@ -228,6 +235,7 @@ export const notesSearchBodySchema = z.object({
 
 export const notesScheduleReviewBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
   /** ISO 时间字符串（必填；review 必须有明确的执行时刻） */
   runAt: z.string().min(1),
   timezone: z.string().min(1).optional(),
@@ -353,12 +361,16 @@ export const weatherCurrentQuerySchema = z.object({
   label: z.string().max(120).optional(),
 });
 
+// 存储键按用户（actorId = userId，缺省退回 sessionId）：同一会话 id 在不同用户
+// 之间复用时会读到别人的位置偏好。
 export const weatherPrefsGetQuerySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
 });
 
 export const weatherPrefsPutBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
   latitude: z.number().gte(-90).lte(90),
   longitude: z.number().gte(-180).lte(180),
   label: z.string().max(120).optional(),
@@ -371,6 +383,7 @@ export const weatherPrefsPutBodySchema = z.object({
 /** 将已创建的 weather_brief 日程任务 id 写入天气偏好（需已保存过经纬度） */
 export const weatherLinkTaskBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().min(1).optional(),
   taskId: z.string().uuid(),
 });
 
@@ -515,6 +528,7 @@ export const infoReadBodySchema = z.object({
 
 export const infoTrackCreateBodySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
   name: z.string().min(1).max(120),
   keywords: z.array(z.string().min(1)).min(1),
   runAt: z.string().optional(),
@@ -523,12 +537,15 @@ export const infoTrackCreateBodySchema = z.object({
 
 export const infoTrackListQuerySchema = z.object({
   sessionId: z.string().min(1),
+  userId: z.string().optional(),
 });
 
 export const infoTrackRunBodySchema = z
   .object({
     topicId: z.string().uuid().optional(),
     sessionId: z.string().min(1).optional(),
+    userId: z.string().optional(),
+    actorId: z.string().optional(),
     name: z.string().optional(),
     mode: z.enum(["topic", "keywords"]).optional(),
     keywords: z.array(z.string()).optional(),

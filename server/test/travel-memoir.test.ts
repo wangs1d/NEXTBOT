@@ -45,7 +45,7 @@ let planSeq = 0;
 function savePlan(over: Partial<StoredTravelPlan> = {}): StoredTravelPlan {
   const plan = {
     planId: `memoir-${++planSeq}`,
-    sessionId: "actor-a",
+    actorId: "actor-a",
     destination: "成都",
     title: "成都3日游",
     startDate: d(-2),

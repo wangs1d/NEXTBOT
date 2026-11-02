@@ -1,4 +1,4 @@
-/**
+﻿/**
  * calendar.batch_create 批量创建工具：
  *   多条一次创建 / 坏条目不拖垮整批 / 冲突跳过回传详情 / 幂等（同批重发同 taskId）。
  */
@@ -63,7 +63,7 @@ test("batch_create：冲突条目跳过并回传冲突详情（不强制）", as
   await withRegistry(async (registry) => {
     // 先占住 10:00-11:30
     await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       { description: "项目评审", runAt: "2099-03-05T10:00:00", timezone: "Asia/Shanghai", durationMinutes: 90 },
       ctx,
     );

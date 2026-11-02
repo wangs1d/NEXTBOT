@@ -1,6 +1,6 @@
 // 日程感知传感器（schedule_sensor）—— 持续追踪"下一个要发生的事"。
 //
-// 轮询 ScheduleTaskService 全量任务 → 计算今日/下一个待运行任务 →
+// 轮询 ScheduleTaskService 任务 → 按归属用户分组计算今日/下一个待运行任务 →
 // 与上次快照比对，变化才产出 Signal（payload.nextEventMin 供仲裁层直读）。
 // 零 LLM；临近日程的分档事件由评估器链（meeting_soon）承接，这里只管状态追踪。
 import type { ScheduleTaskRecord } from "../../services/schedule-task-service.js";
@@ -14,12 +14,15 @@ export type ScheduleSensorOptions = {
   nowFn?: () => number;
 };
 
+type NextEvent = { min: number; title: string };
+
 export class ScheduleSensor implements ProactiveSensor {
   readonly id = "schedule_upcoming";
   readonly stream = "schedule" as const;
   readonly pollIntervalMs: number;
-  private lastFp = "";
-  private lastNext: { min: number; title: string } | null = null;
+  /** 每个用户的指纹与"下一个日程"：日程是个人数据，不能共用一份快照 */
+  private readonly lastFpByActor = new Map<string, string>();
+  private readonly lastNextByActor = new Map<string, NextEvent>();
   private readonly nowFn: () => number;
 
   constructor(private readonly opts: ScheduleSensorOptions) {
@@ -28,15 +31,41 @@ export class ScheduleSensor implements ProactiveSensor {
   }
 
   /** 距下一个任务的分钟数（仲裁层 ContextSnapshot 直读；null = 今天没有日程） */
-  latest(): { min: number; title: string } | null {
-    return this.lastNext;
+  latest(actorId?: string): NextEvent | null {
+    if (actorId) return this.lastNextByActor.get(actorId) ?? null;
+    return this.lastNextByActor.values().next().value ?? null;
   }
 
   collect(_since: number): Signal[] {
     const now = this.nowFn();
     // 只看还在跑的：completed 的 nextRunAt 已为 null，paused 是用户主动停的，
     // 拿它们算"下一个日程"会给出一个不会发生的事。
-    const tasks = this.opts.listTasks().filter((t) => t.status === "active");
+    const groups = new Map<string, ScheduleTaskRecord[]>();
+    for (const task of this.opts.listTasks()) {
+      if (task.status !== "active") continue;
+      // sessionId 即 actorId（调度器按用户订阅）；无归属的任务只在单用户装机下有意义
+      const key = task.sessionId?.trim() ?? "";
+      const bucket = groups.get(key);
+      if (bucket) bucket.push(task);
+      else groups.set(key, [task]);
+    }
+    // 本次没有任何活跃任务也要清掉旧快照，否则用户删完日程后 latest() 仍报旧事件
+    for (const old of [...this.lastNextByActor.keys()]) {
+      if (!groups.has(old)) this.lastNextByActor.delete(old);
+    }
+    for (const old of [...this.lastFpByActor.keys()]) {
+      if (!groups.has(old)) this.lastFpByActor.delete(old);
+    }
+
+    const out: Signal[] = [];
+    for (const [actorId, tasks] of groups) {
+      const signal = this.collectGroup(actorId, tasks, now);
+      if (signal) out.push(signal);
+    }
+    return out;
+  }
+
+  private collectGroup(actorId: string, tasks: ScheduleTaskRecord[], now: number): Signal | null {
     const upcoming = tasks
       .map((t) => {
         // **重复任务（weekly/daily）必须读 nextRunAt**：runAt 是首次触发时刻，
@@ -52,7 +81,8 @@ export class ScheduleSensor implements ProactiveSensor {
 
     const next = upcoming[0] ?? null;
     const min = next ? Math.round((next.runAt - now) / 60_000) : -1;
-    this.lastNext = next ? { min, title: next.title } : null;
+    if (next) this.lastNextByActor.set(actorId, { min, title: next.title });
+    else this.lastNextByActor.delete(actorId);
 
     // 指纹：未来 24h 内任务集合（含时间），变化才产出
     const horizon = now + 24 * 3600_000;
@@ -61,22 +91,21 @@ export class ScheduleSensor implements ProactiveSensor {
       .map((v) => `${v.title}@${v.runAt}`)
       .sort()
       .join("|");
-    if (fpSource === this.lastFp) return [];
-    const changed = this.lastFp !== "";
-    this.lastFp = fpSource;
-    return [
-      {
-        stream: this.stream,
-        at: now,
-        fingerprint: `schedule:${fpSource}`,
-        salience: changed ? "medium" : "low",
-        delta: next
-          ? changed
-            ? `日程有变：最近的是「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
-            : `下一个日程：「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
-          : "未来 24 小时没有日程",
-        payload: { nextEventMin: next ? min : null, nextTitle: next?.title ?? "", nextRunAt: next?.runAt ?? null },
-      },
-    ];
+    if (this.lastFpByActor.get(actorId) === fpSource) return null;
+    const changed = (this.lastFpByActor.get(actorId) ?? "") !== "";
+    this.lastFpByActor.set(actorId, fpSource);
+    return {
+      stream: this.stream,
+      ...(actorId ? { actorId } : {}),
+      at: now,
+      fingerprint: `schedule:${actorId}:${fpSource}`,
+      salience: changed ? "medium" : "low",
+      delta: next
+        ? changed
+          ? `日程有变：最近的是「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
+          : `下一个日程：「${next.title}」（${min <= 0 ? "马上" : `${min} 分钟后`}）`
+        : "未来 24 小时没有日程",
+      payload: { nextEventMin: next ? min : null, nextTitle: next?.title ?? "", nextRunAt: next?.runAt ?? null },
+    };
   }
 }

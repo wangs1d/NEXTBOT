@@ -52,6 +52,8 @@ const DEFAULT_TRAVEL_FALLBACK_WINDOW_MS = 60 * 1000;
  *      目的地全名）。窗口默认 60s，任务面可放宽（执行可能排队）。
  */
 export function resolveTravelReceipt(input: {
+  /** 本轮所属用户：冷层回捞只在本 actor 的行程里找（无身份不回捞） */
+  actorId: string;
   replyToolName?: string;
   replyToolResult?: Record<string, unknown>;
   executedReceipt?: Record<string, unknown>;
@@ -78,8 +80,9 @@ export function resolveTravelReceipt(input: {
 
   // 2. 冷层近窗回捞（捕获漏拍兜底）
   const window = input.fallbackWindowMs ?? DEFAULT_TRAVEL_FALLBACK_WINDOW_MS;
+  if (!input.actorId) return {};
   const candidates = travelPlanStore
-    .listSummaries(5)
+    .listSummariesForActor(input.actorId, 5)
     .filter((s) => now - s.createdAt < window);
   if (candidates.length === 0) return {};
   const haystack = `${input.goal ?? ""}\n${input.finalText ?? ""}`;
@@ -87,7 +90,7 @@ export function resolveTravelReceipt(input: {
     candidates.find(
       (s) => s.destination && haystack.includes(s.destination),
     ) ?? candidates[0];
-  const plan = travelPlanStore.get(picked.planId);
+  const plan = travelPlanStore.getForActor(input.actorId, picked.planId);
   if (!plan || plan.days.length === 0) return {};
   return {
     toolName: "travel.plan-itinerary",
@@ -187,11 +190,13 @@ export function containsTravelBriefCard(text: string): boolean {
 }
 
 /** 行程回执 → 冷层存档（回执只有 planId 时直读；冷层回捞路径已是全量 plan）。 */
-function resolveBriefPlan(result?: Record<string, unknown>): StoredTravelPlan | null {
+function resolveBriefPlan(result?: Record<string, unknown>, actorId?: string): StoredTravelPlan | null {
   if (!result) return null;
   const planId = typeof result.planId === "string" ? result.planId : "";
   if (planId) {
-    const stored = travelPlanStore.get(planId);
+    const stored = actorId
+      ? travelPlanStore.getForActor(actorId, planId)
+      : travelPlanStore.get(planId);
     if (stored) return stored;
   }
   const asPlan = result as unknown as StoredTravelPlan;
@@ -249,9 +254,10 @@ export function buildTravelBriefCardBlock(plan: StoredTravelPlan): string | null
 export function attachTravelBriefCard(
   text: string,
   travelResult?: Record<string, unknown>,
+  actorId?: string,
 ): string {
   if (!containsTravelItineraryCard(text) || containsTravelBriefCard(text)) return text;
-  const plan = resolveBriefPlan(travelResult);
+  const plan = resolveBriefPlan(travelResult, actorId ?? (typeof travelResult?.actorId === "string" ? travelResult.actorId : undefined));
   if (!plan) return text;
   const block = buildTravelBriefCardBlock(plan);
   if (!block) return text;
@@ -259,6 +265,8 @@ export function attachTravelBriefCard(
 }
 
 export interface DeterministicCardChainInput {
+  /** 本轮所属用户（行程冷层回捞按 actor 限定） */
+  actorId: string;
   /** processAssistantText 之后的正文（LLM 口语回复，可能已含 L2 卡块）。 */
   text: string;
   /** 行程：toolName + 已解析出完整 days 的回执（冷层回捞由 handler 完成后传入）。 */
@@ -329,7 +337,7 @@ export function applyDeterministicCards(input: DeterministicCardChainInput): {
   // 结构化面在场时正文不能同时是折叠卡（会互相盖住）
   let text = decision.cards.length > 0 ? unfoldIfCardsPresent(input.text) : input.text;
   text = applyCards(text, decision).text;
-  text = attachTravelBriefCard(text, input.travelResult);
+  text = attachTravelBriefCard(text, input.travelResult, input.actorId);
   return { text, cards: collectCardPayloads(text) };
 }
 

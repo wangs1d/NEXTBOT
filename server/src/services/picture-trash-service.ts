@@ -4,6 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, extname, join } from "node:path";
 
 import { loadSharp } from "./sharp-lazy.js";
+import { pictureAssetUrl } from "./picture-url.js";
 import type { ImageAsset, PictureKit } from "@nextbot/picture";
 
 /**
@@ -55,6 +56,8 @@ export class PictureTrashService {
   constructor(
     private readonly trashDir: string,
     private readonly pictureKit: PictureKit,
+    /** 分区归属身份，仅用于拼预览 URL（回收站文件按 actor 分区存放） */
+    private readonly actorId = "anonymous",
   ) {}
 
   private get indexPath(): string {
@@ -186,7 +189,7 @@ export class PictureTrashService {
         fileSize: entry.asset.fileSize ?? null,
         takenAt: entry.asset.takenAt ?? entry.asset.createdAt,
         deletedAt: entry.deletedAt,
-        previewUrl: `/picture/trash/${entry.trashId}/preview`,
+        previewUrl: pictureAssetUrl(`/picture/trash/${entry.trashId}/preview`, this.actorId),
       }));
     return {
       items,

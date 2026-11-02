@@ -1,9 +1,5 @@
 /** 会写入 ScheduleTaskService 的日程/提醒工具（注册名，带点号）。 */
-export const SCHEDULE_CREATE_TOOL_NAMES = new Set([
-  "reminder.plan",
-  "calendar.create_from_text",
-  "calendar.create_task",
-]);
+export const SCHEDULE_CREATE_TOOL_NAMES = new Set(["calendar.create"]);
 
 export const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
   ...SCHEDULE_CREATE_TOOL_NAMES,

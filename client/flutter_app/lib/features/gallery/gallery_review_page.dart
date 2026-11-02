@@ -4,6 +4,7 @@ import "dart:convert" show jsonDecode, jsonEncode;
 import "package:flutter/material.dart";
 import "package:flutter/services.dart" show KeyEvent, LogicalKeyboardKey;
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
 import "../chat/media_disk_cache.dart";
@@ -76,18 +77,23 @@ class _GalleryReviewPageState extends State<GalleryReviewPage> {
     _drawRound();
   }
 
-  Uri _uri(String path, [Map<String, String>? query]) =>
-      Uri.parse("${ApiConfig.httpBase}$path").replace(queryParameters: query);
+  /// 图库按 actor 分区，所有 /picture/* 请求都要带归属身份才落到本人相册；
+  /// 周界鉴权开启后还要带设备 token。
+  Uri _uri(String path, [Map<String, String>? query]) => Uri
+      .parse("${ApiConfig.httpBase}$path")
+      .replace(queryParameters: <String, String>{
+        ...ApiConfig.accountAuthQuery,
+        ...?query,
+      });
 
   Future<Map<String, dynamic>> _get(String path, [Map<String, String>? query]) async {
     final http.Response response =
-        await http.get(_uri(path, query)).timeout(const Duration(seconds: 15));
+        await NbHttp.get(_uri(path, query)).timeout(const Duration(seconds: 15));
     return jsonDecode(response.body) as Map<String, dynamic>;
   }
 
   Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body) async {
-    final http.Response response = await http
-        .post(
+    final http.Response response = await NbHttp.post(
           _uri(path),
           headers: const <String, String>{"Content-Type": "application/json"},
           body: jsonEncode(body),
@@ -720,10 +726,16 @@ class _MemoryPlaybackDialogState extends State<_MemoryPlaybackDialog>
     super.dispose();
   }
 
+  /// 图库按 actor 分区，请求要带归属身份才落到本人相册。
+  Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path").replace(
+    queryParameters: <String, String>{
+      ...ApiConfig.accountAuthQuery,
+    },
+  );
+
   Future<void> _load() async {
     try {
-      final http.Response response = await http
-          .get(Uri.parse("${ApiConfig.httpBase}/gallery-wall/layout"))
+      final http.Response response = await NbHttp.get(_uri("/gallery-wall/layout"))
           .timeout(const Duration(seconds: 15));
       final Map<String, dynamic> layout = jsonDecode(response.body) as Map<String, dynamic>;
       final List<dynamic> events = (layout["events"] as List<dynamic>?) ?? const <dynamic>[];
@@ -788,9 +800,8 @@ class _MemoryPlaybackDialogState extends State<_MemoryPlaybackDialog>
     // messenger 要在 pop 前取（pop 后 dialog context 已失效）
     final ScaffoldMessengerState? messenger = ScaffoldMessenger.maybeOf(context);
     try {
-      await http
-          .post(
-            Uri.parse("${ApiConfig.httpBase}/picture/assets/batch-tag"),
+      await NbHttp.post(
+            _uri("/picture/assets/batch-tag"),
             headers: const <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{
               "ids": _slideIds.toList(),

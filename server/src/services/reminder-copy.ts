@@ -2,8 +2,8 @@
  * 提醒展示文案的确定性规整：subject 抽取、到点文案生成、回声判定。
  *
  * 被 schedule-intent-service（规则路径解析）与 schedule-task-service
- * （createTask 落库闸口）共用——后者是所有写入方（reminder.plan /
- * calendar.create_* / HTTP 直写）的唯一落库点，模型自己填的
+ * （createTask 落库闸口）共用——后者是所有写入方（calendar.create /
+ * HTTP 直写）的唯一落库点，模型自己填的
  * shortTitle/reminderMessage 在这里统一过契约（2026-10-21 根修
  * 「的11点03分提醒我吃饭」类原句回声）。
  */

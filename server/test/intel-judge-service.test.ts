@@ -95,7 +95,6 @@ function makeHarness(opts: {
   compose?: IntelComposer;
   deliver?: (call: number) => "delivered" | "retry" | "dropped";
   dataPath?: string;
-  voiceCard?: () => string | null;
 } = {}): Harness {
   let now = T0;
   let deliverCalls = 0;
@@ -136,7 +135,6 @@ function makeHarness(opts: {
     onMemoryCandidate: (_actorId, candidate) => {
       memories.push(candidate);
     },
-    ...(opts.voiceCard ? { voiceCard: opts.voiceCard } : {}),
     batchDelayMs: 60_000,
     autoTicker: false,
   });
@@ -603,17 +601,6 @@ test("svc：跨天草稿含相对日期 → 升级成稿重写", async () => {
     await h.service.evaluate("u1");
     assert.equal(h.composeInputs.length, 1, "「明早」到第二天已失真，必须重写");
     assert.equal(h.deliveries.length, 1);
-  } finally {
-    h.dispose();
-  }
-});
-
-test("svc：风格卡进判断上下文，只影响草稿措辞", async () => {
-  const h = makeHarness({ voiceCard: () => "说话风格：短句，少客套。" });
-  try {
-    h.service.ingest(mail("1", { subject: "会议", text: "提前到九点。" }));
-    await h.service.evaluate("u1");
-    assert.equal(h.judgeInputs[0].voiceCard, "说话风格：短句，少客套。");
   } finally {
     h.dispose();
   }

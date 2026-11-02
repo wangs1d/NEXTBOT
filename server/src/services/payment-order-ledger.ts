@@ -21,6 +21,8 @@ export type PaymentOrderStatus = "pending" | "paid" | "closed" | "refunded" | "e
 
 export type LedgerOrderRow = {
   outTradeNo: string;
+  /** 订单归属用户（多租户：列表/统计/日预算都按它过滤） */
+  actorId: string;
   provider: string;
   method: string;
   amount: number;
@@ -61,6 +63,7 @@ export class PaymentOrderLedger {
       db.exec(`
         CREATE TABLE IF NOT EXISTS orders (
           out_trade_no TEXT PRIMARY KEY,
+          actor_id     TEXT NOT NULL DEFAULT '',
           provider     TEXT NOT NULL,
           method       TEXT NOT NULL,
           amount       REAL NOT NULL,
@@ -73,6 +76,16 @@ export class PaymentOrderLedger {
         );
         CREATE INDEX IF NOT EXISTS idx_orders_created ON orders(created_at DESC);
       `);
+      // 旧库补 actor_id 列；历史订单归属未知（空串），只有迁移命令能认领
+      try {
+        const cols = db.prepare(`PRAGMA table_info(orders)`).all() as Array<{ name: string }>;
+        if (!cols.some((c) => c.name === "actor_id")) {
+          db.exec(`ALTER TABLE orders ADD COLUMN actor_id TEXT NOT NULL DEFAULT ''`);
+        }
+        db.exec(`CREATE INDEX IF NOT EXISTS idx_orders_actor_created ON orders(actor_id, created_at DESC)`);
+      } catch (err) {
+        console.error("[payment-ledger] migrate actor_id failed:", err);
+      }
       this.db = db;
       // 真实通道上线后台账只放真实交易：历史 mock 测试单一次性清掉（幂等）。
       try {
@@ -92,8 +105,8 @@ export class PaymentOrderLedger {
     if (!db) return;
     try {
       db.prepare(`
-        INSERT INTO orders (out_trade_no, provider, method, amount, description, mode, status, created_at, updated_at, paid_at)
-        VALUES (@outTradeNo, @provider, @method, @amount, @description, @mode, @status, @createdAt, @updatedAt, @paidAt)
+        INSERT INTO orders (out_trade_no, actor_id, provider, method, amount, description, mode, status, created_at, updated_at, paid_at)
+        VALUES (@outTradeNo, @actorId, @provider, @method, @amount, @description, @mode, @status, @createdAt, @updatedAt, @paidAt)
         ON CONFLICT(out_trade_no) DO NOTHING
       `).run(row);
     } catch (err) {
@@ -119,29 +132,66 @@ export class PaymentOrderLedger {
     }
   }
 
-  list(limit = 200): LedgerOrderRow[] {
+  /** 订单列表；actorId 给出时只返回该用户的订单（管理台不传 = 全量） */
+  list(limit = 200, actorId?: string): LedgerOrderRow[] {
     const db = this.open();
     if (!db) return [];
+    const n = Math.min(Math.max(limit, 1), 1000);
     try {
-      return db.prepare(
-        `SELECT out_trade_no AS outTradeNo, provider, method, amount, description,
-                mode, status, created_at AS createdAt, updated_at AS updatedAt, paid_at AS paidAt
-         FROM orders ORDER BY created_at DESC LIMIT ?`,
-      ).all(Math.min(Math.max(limit, 1), 1000)) as unknown as LedgerOrderRow[];
+      const cols = `SELECT out_trade_no AS outTradeNo, actor_id AS actorId, provider, method, amount,
+                description, mode, status, created_at AS createdAt, updated_at AS updatedAt, paid_at AS paidAt
+         FROM orders`;
+      return (actorId
+        ? db.prepare(`${cols} WHERE actor_id = ? ORDER BY created_at DESC LIMIT ?`).all(actorId, n)
+        : db.prepare(`${cols} ORDER BY created_at DESC LIMIT ?`).all(n)) as unknown as LedgerOrderRow[];
     } catch (err) {
       console.error("[payment-ledger] list failed:", err);
       return [];
     }
   }
 
-  /** 某时刻以来真实下单累计金额（含未支付，排除 error 单）——支付护栏日预算用 */
-  sumAmountSince(startIso: string): number {
+  /** 按单号取归属用户（不存在返回 null） */
+  ownerOf(outTradeNo: string): string | null {
+    const db = this.open();
+    if (!db) return null;
+    try {
+      const row = db.prepare(`SELECT actor_id AS actorId FROM orders WHERE out_trade_no = ?`).get(
+        outTradeNo,
+      ) as { actorId?: string } | undefined;
+      return row?.actorId ?? null;
+    } catch (err) {
+      console.error("[payment-ledger] ownerOf failed:", err);
+      return null;
+    }
+  }
+
+  /** 按单号取一行（归属校验用；不存在返回 null） */
+  get(outTradeNo: string, actorId: string): LedgerOrderRow | null {
+    const db = this.open();
+    if (!db) return null;
+    try {
+      const row = db.prepare(
+        `SELECT out_trade_no AS outTradeNo, actor_id AS actorId, provider, method, amount,
+                description, mode, status, created_at AS createdAt, updated_at AS updatedAt, paid_at AS paidAt
+         FROM orders WHERE out_trade_no = ? AND actor_id = ?`,
+      ).get(outTradeNo, actorId) as LedgerOrderRow | undefined;
+      return row ?? null;
+    } catch (err) {
+      console.error("[payment-ledger] get failed:", err);
+      return null;
+    }
+  }
+
+  /** 某时刻以来真实下单累计金额（含未支付，排除 error 单）——支付护栏日预算用，
+   *  必须按 actor 算：否则 A 的消费会吃掉 B 的日额度。 */
+  sumAmountSince(startIso: string, actorId: string): number {
     const db = this.open();
     if (!db) return 0;
     try {
       const row = db.prepare(
-        `SELECT COALESCE(SUM(amount), 0) AS total FROM orders WHERE created_at >= ? AND status != 'error'`,
-      ).get(startIso) as { total: number } | undefined;
+        `SELECT COALESCE(SUM(amount), 0) AS total FROM orders
+         WHERE actor_id = ? AND created_at >= ? AND status != 'error'`,
+      ).get(actorId, startIso) as { total: number } | undefined;
       return Number(row?.total ?? 0);
     } catch (err) {
       console.error("[payment-ledger] sumAmountSince failed:", err);
@@ -149,7 +199,8 @@ export class PaymentOrderLedger {
     }
   }
 
-  stats(): { total: LedgerModeStats; mock: LedgerModeStats; live: LedgerModeStats } {
+  /** 订单统计；actorId 给出时只统计该用户（不传 = 全量，管理台用） */
+  stats(actorId?: string): { total: LedgerModeStats; mock: LedgerModeStats; live: LedgerModeStats } {
     const empty = (): LedgerModeStats => ({
       total: 0, pending: 0, paid: 0, closed: 0, refunded: 0, paidAmount: 0,
     });
@@ -157,9 +208,16 @@ export class PaymentOrderLedger {
     const db = this.open();
     if (!db) return out;
     try {
-      const rows = db.prepare(
-        `SELECT mode, status, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amountSum FROM orders GROUP BY mode, status`,
-      ).all() as Array<{ mode: string; status: string; count: number; amountSum: number }>;
+      const sql = `SELECT mode, status, COUNT(*) AS count, COALESCE(SUM(amount), 0) AS amountSum
+                   FROM orders`;
+      const rows = (actorId
+        ? db.prepare(`${sql} WHERE actor_id = ? GROUP BY mode, status`).all(actorId)
+        : db.prepare(`${sql} GROUP BY mode, status`).all()) as Array<{
+        mode: string;
+        status: string;
+        count: number;
+        amountSum: number;
+      }>;
       for (const row of rows) {
         const bucket =
           row.mode === "mock" ? out.mock : row.mode === "live" ? out.live : null;

@@ -42,11 +42,9 @@ export const CORE_TOOL_LIBRARY = {
   dialogue: {
     label: "主对话高频",
     names: [
-      "calendar.create_from_text",
-      "calendar.create_task",
+      "calendar.create",
       "calendar.list_tasks",
       "calendar.delete_task",
-      "reminder.plan",
       // 用户画像自编辑（2026-09-29）：「越来越了解用户」是每轮对话的基本动作，
       // 进延迟目录模型会忘记搜、直接嘴硬说记了（真机实证），必须常驻可见。
       "profile.update",

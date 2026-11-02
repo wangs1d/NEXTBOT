@@ -2,6 +2,8 @@ import "dart:convert";
 
 import "package:http/http.dart" as http;
 
+import "nb_http.dart";
+
 class BriefingDeliveryApi {
   BriefingDeliveryApi({required this.baseUrl, http.Client? client})
       : _client = client ?? http.Client();
@@ -14,7 +16,9 @@ class BriefingDeliveryApi {
   Future<Map<String, dynamic>> getStatus(String sessionId) async {
     final Uri uri =
         Uri.parse("$baseUrl/api/briefing-delivery?sessionId=$sessionId");
-    final http.Response res = await _client.get(uri).timeout(_timeout);
+    final http.Response res = await _client
+        .get(uri, headers: NbHttp.headersFor(uri))
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw Exception("获取简报投放状态失败: ${res.statusCode}");
     }
@@ -29,7 +33,10 @@ class BriefingDeliveryApi {
     final http.Response res = await _client
         .post(
           uri,
-          headers: const <String, String>{"Content-Type": "application/json"},
+          headers: <String, String>{
+            "Content-Type": "application/json",
+            ...NbHttp.headersFor(uri),
+          },
           body: jsonEncode(<String, dynamic>{
             "sessionId": sessionId,
             "channel": channel,

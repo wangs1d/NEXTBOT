@@ -99,17 +99,16 @@ export type EveningDigestDeps = {
    * 传入结构化的明日信息，agent 动态产出睡前文案；未注入/失败/空输出
    * 回退确定性模板（composeNarration），不阻塞 digest 主链路。
    * 与晨报同款模式（ephemeralTurn 单次小调用，克制调用）。
-   * 第二参 opts.systemPrompt = agent 自身 soul（人格·静态块）——文案受
-   * agent 本人性格影响，换人设产出味道跟着变（2026-10-13 定调）。
+   * 第二参 opts.systemPrompt = agent 自身 soul（【人格】块）——文案受
+   * agent 本人性格影响，换人设产出味道跟着变。
    */
   llmComplete?: (
     prompt: string,
     opts?: { systemPrompt?: string },
   ) => Promise<string>;
   /**
-   * agent soul 取用口（2026-10-26 单点化：走 SpeechHub.buildSystemPrompt 装配——
-   * 人格·静态 + 语感基准 + 通用纪律 + 画像浅层，主对话同源）。未注入 = 不带
-   * system，文案只受睡前 prompt 自身约束。异步签名兼容块装配的画像读取。
+   * agent soul 取用口：走 SpeechHub.buildSystemPrompt 装配（人格 + 通用纪律 +
+   * 画像浅层，与主对话同源）。未注入 = 不带 system，文案只受睡前 prompt 自身约束。
    */
   soulProvider?: (sessionId: string) => string | null | Promise<string | null>;
   /**

@@ -4,6 +4,7 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "access_auth_api.dart";
 
 /// 设备 API 通用结果包装。
 class DeviceApiResult<T> {
@@ -121,6 +122,10 @@ class DeviceApiClient {
     };
   }
 
+  /// 设备链路同样要过云端周界鉴权（未绑定时为空 map，行为与现状一致）。
+  Map<String, String> get _authHeaders =>
+      AccessCredentialStore.instance.authHeaders;
+
   static Map<String, dynamic>? _tryDecodeBody(http.Response r) {
     if (r.body.isEmpty) return null;
     try {
@@ -145,7 +150,7 @@ class DeviceApiClient {
   Future<DeviceApiResult<List<DeviceInfo>>> listDevices() async {
     try {
       final http.Response r = await _client
-          .get(_uri("/device/list", _sessionQuery()))
+          .get(_uri("/device/list", _sessionQuery()), headers: _authHeaders)
           .timeout(_timeout);
       final body = _tryDecodeBody(r);
       if (r.statusCode >= 200 && r.statusCode < 300 && body != null) {
@@ -177,7 +182,10 @@ class DeviceApiClient {
       final http.Response r = await _client
           .post(
             _uri("/device/pairing/code"),
-            headers: <String, String>{"Content-Type": "application/json"},
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              ..._authHeaders,
+            },
             body: jsonEncode(body),
           )
           .timeout(_timeout);
@@ -200,7 +208,10 @@ class DeviceApiClient {
   Future<DeviceApiResult<PairingCodeStatus>> getPendingCode() async {
     try {
       final http.Response r = await _client
-          .get(_uri("/device/pairing/code/status", _sessionQuery()))
+          .get(
+            _uri("/device/pairing/code/status", _sessionQuery()),
+            headers: _authHeaders,
+          )
           .timeout(_timeout);
       final body = _tryDecodeBody(r);
       if (r.statusCode >= 200 && r.statusCode < 300 && body != null) {
@@ -222,6 +233,7 @@ class DeviceApiClient {
       final http.Response r = await _client
           .delete(
             _uri("/device/$deviceId", _sessionQuery()),
+            headers: _authHeaders,
           )
           .timeout(_timeout);
       final body = _tryDecodeBody(r);

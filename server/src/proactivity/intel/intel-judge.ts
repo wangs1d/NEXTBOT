@@ -94,11 +94,6 @@ export function buildJudgeUserPrompt(input: IntelJudgeInput): string {
   lines.push("");
   lines.push(`面板目录（${input.lines.length} 条）：`);
   for (const line of input.lines) lines.push(lineOf(line, input.now));
-  const voice = input.voiceCard?.trim();
-  if (voice) {
-    lines.push("");
-    lines.push(`说话风格（只影响 draft，不影响取舍）：${voice}`);
-  }
   lines.push("");
   lines.push(
     "提醒：只输出 JSON 数组；needDetail 只给真正需要的条目标 true，其余省略或 false。",

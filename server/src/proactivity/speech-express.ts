@@ -6,8 +6,7 @@
 // 被打回）与 ProactiveOutreachExecutor 的硬编码 system prompt。
 //
 // 块装配（对齐 prompt-assembler 的按需加载契约：字段空=块不渲染，稳定在前）：
-//   system = 【人格·静态】(agent/SOUL.md → soul-store，主对话同源)
-//          + 【语感基准】few-shot（与聊天同一副嗓子，sessionId 轮换）
+//   system = 【人格】(agent/SOUL.md → soul-store.buildPersonaPrompt，与主对话同字节)
 //          + 单一通用【主动开口】指令块（禁 per-kind：kind 只决定 facts 材料
 //            与触达约束，不生成指令文本）
 //          + 画像浅层（称呼/偏好）
@@ -52,12 +51,9 @@ export type SpeechHubDeps = {
   chat: () => ExternalChatProvider | null;
   dataPath: string;
   /**
-   * 人格·静态（专门提示文件）：agent/SOUL.md → soul-store（identity 冻结层 +
-   * disposition 演化层）→ buildPersonaStaticBlock，与主对话同字节。晚绑定。
+   * 人格正文（agent/SOUL.md → soul-store.buildPersonaPrompt），与主对话同字节。晚绑定。
    */
   personaPrompt?: (sessionId: string) => string | null;
-  /** agent 风格指纹（few-shot 语感基准，与聊天同一副嗓子） */
-  voiceProfile?: (sessionId: string) => string | null;
   /** 用户画像浅层（称呼/沟通偏好/所在地） */
   styleBrief?: (sessionId: string) => Promise<string | null> | string | null;
   nowFn?: () => number;
@@ -118,7 +114,6 @@ export class SpeechHub {
   private readonly timeoutMs: number;
   private readonly cap: number;
   private readonly personaPrompt?: SpeechHubDeps["personaPrompt"];
-  private readonly voiceProfile?: SpeechHubDeps["voiceProfile"];
   private readonly styleBrief?: SpeechHubDeps["styleBrief"];
   private callsDate = "";
   private callsToday = 0;
@@ -126,7 +121,6 @@ export class SpeechHub {
 
   constructor(private readonly deps: SpeechHubDeps) {
     this.personaPrompt = deps.personaPrompt;
-    this.voiceProfile = deps.voiceProfile;
     this.styleBrief = deps.styleBrief;
     this.nowFn = deps.nowFn ?? Date.now;
     this.timeoutMs = deps.timeoutMs ?? 8_000;
@@ -152,7 +146,7 @@ export class SpeechHub {
   }
 
   /**
-   * system 块装配（唯一人格注入点）：人格·静态 → 语感基准 → 通用指令 → 画像浅层。
+   * system 块装配（唯一人格注入点）：人格正文 → 通用指令 → 画像浅层。
    * 全块可选——缺失即不渲染，回退纯指令块（老行为）。
    */
   async buildSystemPrompt(opts: {
@@ -165,16 +159,10 @@ export class SpeechHub {
   }): Promise<string> {
     const blocks: string[] = [];
     try {
-      const soul = this.personaPrompt?.(opts.sessionId);
-      if (soul) blocks.push(soul);
+      const persona = this.personaPrompt?.(opts.sessionId);
+      if (persona) blocks.push(persona);
     } catch {
-      /* soul 读取失败不阻塞 */
-    }
-    try {
-      const voice = this.voiceProfile?.(opts.sessionId);
-      if (voice) blocks.push(voice);
-    } catch {
-      /* 语感基准读取失败不阻塞 */
+      /* 人格正文读取失败不阻塞 */
     }
     blocks.push(taskInstruction(opts.tier, opts.maxChars ?? 40, opts.multiline ?? false));
     try {
@@ -244,7 +232,7 @@ export class SpeechHub {
             ephemeralTurn: true,
             disableThinking: true,
             maxThreadMessages: 0,
-            // 块装配结果（人格·静态 + 语感 + 通用纪律 + 画像）由此注入 system
+            // 块装配结果（人格 + 通用纪律 + 画像）由此注入 system
             systemPromptOverride: systemPrompt,
             auditStage: "proactive_phrase",
             ...(process.env.PROACTIVITY_PHRASE_MODEL

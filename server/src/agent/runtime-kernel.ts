@@ -4,7 +4,7 @@ import { HIGH_RISK_TOOL_REASON, isHighRiskToolName } from "../services/agent-tas
 /**
  * RuntimeKernel prompt 模式：
  * - legacy              保持旧式完整 prompt（包括身份/工具说明/记忆等全部字段）
- * - dynamic             剥离 stable 字段（persona/values/abilities/agentCaps/personalityCore 等），保留动态上下文（taskContext/memorySummary/currentTime 等）
+ * - dynamic             剥离非白名单字段（长期记忆块/画像/语气等），保留动态上下文（taskContext/memorySummary/currentTime 等）与人格正文
  * - conversation_only   仅保留 microPrompt + taskContext，其余全部剥离；同时 maxThreadMessages 收紧
  * - minimal             真正"层 A 不进 prompt"模式：只保留本轮对话必需的最小动态字段（taskContext/memorySummary/currentTime/narrativeRecall/scheduleSnapshot/interruptedContext），
  *                       身份/价值观/能力/工具说明/风格/时间戳说明全部下沉到 state 不发；身份由 buildSessionSystem 在会话首条 system 一次性注入
@@ -106,9 +106,6 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   // 跨会话/跨日衔接：recap 让 Agent 知道本会话已发生什么、dailyDigest 提供当日上下文
   "sessionRecap",
   "dailyDigest",
-  // 跨天时间感知：temporalHighlights 含具体日期，剥离会导致 Agent 把昨天的事当成今天
-  "yesterdayHighlight",
-  "memoryContinuity",
   // 动态用户适配：剥离会导致 LLM 失去对用户画像/语气/关系/位置的感知
   "userProfile",
   "userProfileSummary",
@@ -126,12 +123,9 @@ const MINIMAL_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "modeRoleGuidance",
   // 回复风格模式（chat/task）：车道标记，供审计与车道相关逻辑使用
   "replyStyleMode",
-  // 人格·终极版：静态人格块常驻稳定层；动态 mood 块每轮单一状态
-  "personaStatic",
+  // 人格正文（agent/SOUL.md → soul-store）常驻稳定层；mood 每轮单一状态
+  "persona",
   "personaMood",
-  // 【语感基准】few-shot（2026-10-06 活人感治理 C）：缺此行会被本函数剥离，
-  // 示例层整层失效（规则层教不会的语气全靠它）
-  "voiceBaseline",
 ];
 
 const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
@@ -145,7 +139,7 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "currentUserState",
   "turnAside",
   "dailyDigest",
-  // 人格·终极版动态块：mood 每轮变化，归动态层
+  // 人格：正文（唯一出口）与每轮 mood 都不剥离
   "personaMood",
   "narrativeRecall",
   "eventRecall",
@@ -159,13 +153,10 @@ const DYNAMIC_PROMPT_FIELDS: Array<keyof AgentPromptMemoryContext> = [
   "currentTime",
   // 运行环境（手机/电脑，2026-10-07）：同 minimal，剥离即失联
   "deviceEnvironment",
-  "yesterdayHighlight",
-  "memoryContinuity",
   // 本模式职责人格（fast/complex 差异化）：模式级人格必须常驻，否则差异化失效
   "modeRoleGuidance",
   "replyStyleMode",
-  // 【语感基准】few-shot（2026-10-06）：同 minimal，缺此行会被剥离
-  "voiceBaseline",
+  "persona",
 ];
 
 const KEYWORDS = {
@@ -510,7 +501,7 @@ export class RuntimeKernel {
       pins.push("phone.call_user", "voice.speak", "voice.send_message");
     }
     if (hasAnyKeyword(text, KEYWORDS.calendar)) {
-      pins.push("calendar.list_tasks", "calendar.create_task", "calendar.create_from_text");
+      pins.push("calendar.list_tasks", "calendar.create");
     }
     if (hasAnyKeyword(text, KEYWORDS.search)) {
       pins.push("search_web", "search_images", "search_videos", "fetch_web");
@@ -579,13 +570,8 @@ export class RuntimeKernel {
     const style = identity.style.join(", ");
     const values = identity.values.slice(0, 3).join(", ");
 
-    // 只给方向，不堆 prompt——让模型基于方向自己发挥"活人感"。
-    // 2026-10-06 活人感治理 B：整块从 ~450tok 压到 ~150tok——
-    // - 删 "Memory:" 段（块名清单已过时：KV 档案块改门控后多数轮不注入；语义与
-    //   GLOBAL_MEMORY_RULE 重复，以中文规则为唯一权威）；
-    // - 删工具宣告行（中文【真人感·行动宣告】为唯一权威，且此处旧口径缺信息型豁免）；
-    // - Time/TopicSwitch 两段压缩成单行，防编造关系/身份的 grounding 保留一行。
-    // 语感的具体示范由【语感基准】承担，此处不再定义 tone 细节（声部合一）。
+    // 只给方向，不堆 prompt——活人感靠模型自己发挥，语感唯一出口是【人格】。
+    // 身份/时间/话题切换在此各压成一行；具体规则由 postValidate 在程序层强制。
     const styleExtra = style ? ` (${style})` : "";
     return [
       `You are ${persona}${styleExtra} — the user's personal butler and close friend, not a customer-service bot. Reply in the user's language (usually Chinese).`,

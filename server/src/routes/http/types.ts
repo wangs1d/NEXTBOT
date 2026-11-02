@@ -32,7 +32,7 @@ import type { WeatherService } from "../../services/weather-service.js";
 import type { TtsService } from "../../services/tts-service.js";
 import type { VoiceMessageService } from "../../services/voice-message-service.js";
 import type { ImageGenerationService } from "../../services/image-generation-service.js";
-import type { PictureKit } from "@nextbot/picture";
+import type { PictureKitRegistry } from "../../services/picture-kit-registry.js";
 import type { FileProcessingService } from "../../services/file-processing-service.js";
 import type { VirtualPhoneService } from "../../services/virtual-phone-service.js";
 import type { DesktopBridgeCoordinator } from "../../services/desktop-bridge-coordinator.js";
@@ -116,8 +116,8 @@ export type HttpRouteDeps = {
   voiceMessageService: VoiceMessageService;
   /** 图像生成服务（image.generate 工具 + 静态拉流共用） */
   imageGenerationService: ImageGenerationService;
-  /** 图片能力套件(图库) */
-  pictureKit: PictureKit;
+  /** 图片能力套件(图库)，按 actor 分区 */
+  pictureKits: PictureKitRegistry;
   /** 文件/文档处理服务（file.read_text 等工具 + 静态拉流共用） */
   fileProcessingService: FileProcessingService;
   desktopBridgeCoordinator: DesktopBridgeCoordinator;
@@ -138,7 +138,7 @@ export type HttpRouteDeps = {
   /** 明日速览服务：仅供 /api/test/trigger-evening-digest 手动触发；未注入时该路由不挂载 */
   eveningDigestService?: import("../../services/evening-digest-service.js").EveningDigestService;
   /**
-   * agent pulse 手动触发（Muse 式聚合评审）：仅供 /api/test/trigger-agent-pulse，
+   * agent pulse 手动触发（主动性聚合评审）：仅供 /api/test/trigger-agent-pulse，
    * 返回聚合材料/prompt/LLM 原始输出/最终文案/是否提交/管道 verdict 的完整留痕；
    * force 绕过 delta 指纹强制重评，fixture 注入替代材料走真实投递链路（测试用，
    * 不写指纹）。未注入时该路由不挂载。
@@ -183,8 +183,10 @@ export type HttpRouteDeps = {
   webhookService?: WebhookService;
   notesService?: NotesService;
   externalChat?: ExternalChatProvider | null;
-  /** 服务接入热替换：PUT /api/service-config 保存后装入新主对话 provider（未注入时保存仅落盘+写 env） */
+  /** 服务接入热替换：PUT /api/service-config 保存后装入新主对话 provider（未注入时保存仅落盘+写 env；单机形态专用） */
   externalChatSwapper?: (next: ExternalChatProvider | null) => void;
+  /** 该 actor 的 BYOK 绑定状态（只回模型/网关，密钥永不外出） */
+  actorByokStatus?: (actorId: string) => { configured: boolean; model: string; baseUrl: string } | null;
   moodInferenceService?: MoodInferenceService;
   /** 终端互连平台：设备配对服务 */
   devicePairingService?: DevicePairingService;

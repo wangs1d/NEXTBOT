@@ -1,10 +1,9 @@
-// 记忆连续性集成测试：验证 5 项优化对记忆连续性的实际效果
+// 记忆连续性集成测试
 // 覆盖场景：
 //   1. recap 时间线前缀（[昨天]/[2天前]）
-//   2. yesterdayHighlight 主动跨天 recall
-//   3. forgotten 自动恢复
-//   4. 高频话题加分
-//   5. dreamMemory 跨主题关联
+//   2. forgotten 自动恢复
+//   3. 高频话题加分
+//   4. 语义化 forgotten 召回（关键词降级）
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
@@ -250,104 +249,6 @@ describe("记忆连续性集成测试", { concurrency: false }, () => {
         1,
         `已存在的行不应重复添加，实际 summary 行数: ${summaryLines.length}`
       );
-    });
-  });
-
-  describe("优化4: dreamMemory 跨主题关联", () => {
-    it("多个主题时应生成 X ↔ Y 关联，而非简单复述", async () => {
-      const MemoryManagerModule = await import(MEMORY_MODULE);
-      const MemoryManagerService = MemoryManagerModule.MemoryManagerService;
-      const mockMemorySync = {
-        getSnapshot: () => ({ revision: 0, entries: {} }),
-        applyPatch: async () => ({ ok: true }),
-      };
-
-      const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      const genDream = (svc as any).generateDreamNarrative.bind(svc);
-      const narrative = genDream({
-        replayLines: ["[2026-07-20] 用户聊了股票", "[2026-07-20] 用户提到加班"],
-        reinforcedLines: ["股票"],
-        mergedThemes: ["股票", "加班", "健康"],
-        fadedNoise: ["闲聊"],
-        lastUpdatedAt: new Date().toISOString(),
-      });
-
-      assert.ok(narrative.includes("↔"), `应生成跨主题关联（↔），实际: ${narrative}`);
-      assert.ok(
-        narrative.includes("股票 ↔ 加班") || narrative.includes("股票 ↔ 健康"),
-        `应包含具体的主题配对，实际: ${narrative}`
-      );
-    });
-
-    it("单个主题时应退化为核心主题输出，不报错", async () => {
-      const MemoryManagerModule = await import(MEMORY_MODULE);
-      const MemoryManagerService = MemoryManagerModule.MemoryManagerService;
-      const mockMemorySync = {
-        getSnapshot: () => ({ revision: 0, entries: {} }),
-        applyPatch: async () => ({ ok: true }),
-      };
-
-      const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      const genDream = (svc as any).generateDreamNarrative.bind(svc);
-      const narrative = genDream({
-        replayLines: [],
-        reinforcedLines: [],
-        mergedThemes: ["股票"],
-        fadedNoise: [],
-        lastUpdatedAt: new Date().toISOString(),
-      });
-
-      assert.ok(
-        narrative.includes("核心主题"),
-        `单主题应退化为"核心主题"输出，实际: ${narrative}`
-      );
-    });
-  });
-
-  describe("优化2: yesterdayHighlight 跨天事件回顾", () => {
-    it("getYesterdayHighlightForPrompt 应筛选 1-3 天前的 temporalHighlights", async () => {
-      const MemoryManagerModule = await import(MEMORY_MODULE);
-      const MemoryManagerService = MemoryManagerModule.MemoryManagerService;
-      const mockMemorySync = {
-        getSnapshot: () => ({ revision: 0, entries: {} }),
-        applyPatch: async () => ({ ok: true }),
-      };
-
-      const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      const snapshots = (svc as any).continuitySnapshots;
-      snapshots.set("user1", {
-        stableLines: [],
-        fadingLines: [],
-        forgottenLines: [],
-        temporalHighlights: [
-          "1天前: 用户说要出差",
-          "2天前: 用户买了机票",
-          "5天前: 用户聊了天气",
-          "今天: 用户吃火锅",
-        ],
-        lastSleepAt: new Date().toISOString(),
-        lastUpdatedAt: new Date().toISOString(),
-      });
-
-      const result = svc.getYesterdayHighlightForPrompt("user1");
-      assert.ok(result, "应返回非空结果");
-      assert.ok(result!.includes("出差"), `应包含昨天的"出差"，实际: ${result}`);
-      assert.ok(result!.includes("机票"), `应包含前天的"机票"，实际: ${result}`);
-      assert.ok(!result!.includes("天气"), `不应包含 5 天前的"天气"，实际: ${result}`);
-      assert.ok(!result!.includes("火锅"), `不应包含今天的"火锅"，实际: ${result}`);
-    });
-
-    it("无 temporalHighlights 时应返回 null", async () => {
-      const MemoryManagerModule = await import(MEMORY_MODULE);
-      const MemoryManagerService = MemoryManagerModule.MemoryManagerService;
-      const mockMemorySync = {
-        getSnapshot: () => ({ revision: 0, entries: {} }),
-        applyPatch: async () => ({ ok: true }),
-      };
-
-      const svc = new MemoryManagerService(null, mockMemorySync as any, { enabled: true });
-      const result = svc.getYesterdayHighlightForPrompt("user1");
-      assert.equal(result, null, "无 snapshot 时应返回 null");
     });
   });
 

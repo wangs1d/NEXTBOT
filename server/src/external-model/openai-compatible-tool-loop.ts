@@ -110,6 +110,7 @@ import {
 import { modelSupportsVision } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
+import { buildDeterministicReceiptText } from "../services/deterministic-receipt.js";
 import {
   executeBridge,
   isToolSearchBridgeName,
@@ -281,7 +282,7 @@ const TOOL_RESULT_STRIP_KEYS: Record<string, string[]> = {
  *
  * 这些工具的结果只作为 tool message 回填给 LLM 供其理解，绝不能作为面向用户的
  * 回复文本透出（历史教训：兜底逻辑曾把工具 JSON 原样拼成回复推给前端，用户看到
- * 「reminder.plan 参数 schema」「availableDomains 数组」这类内部数据）。
+ * 「calendar.create 参数 schema」「availableDomains 数组」这类内部数据）。
  */
 const META_TOOL_NAMES = new Set<string>([
   "tool_discover",
@@ -818,12 +819,25 @@ function registryNameToApiToolName(name: string): string {
 }
 
 /**
- * 压缩 schema 文本中的冗余空白（换行/缩进→单空格）。无损：description 是给 LLM 看的
- * 自然语言，压缩空白不改变语义，但 JSON 序列化后每轮重复发送的字符数显著下降。
+ * 压缩 schema 文本中的冗余：换行/缩进→单空格；完全重复的句子只保留一次。
+ * 无损：description 是给 LLM 看的自然语言，压缩空白/去重不改变语义；name/type/
+ * required/enum 等语义键一律不动（见 compactSchemaDescriptions 只碰 description）。
  */
 function compactSchemaText(text: string | undefined): string | undefined {
   if (!text) return text;
-  return text.replace(/\s+/g, " ").trim();
+  const flat = text.replace(/\s+/g, " ").trim();
+  // 去重：按句末标点切句，完全重复的句子（常见于工具描述里前后重复的引导语）
+  // 只保留首次。只删“完全重复”，不做改写、不截断，避免丢信息。
+  const sentences = flat.split(/(?<=[。！？!?])\s*/).filter(Boolean);
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const sentence of sentences) {
+    const key = sentence.trim();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(key);
+  }
+  return kept.length > 0 ? kept.join(" ") : flat;
 }
 
 /**
@@ -1241,10 +1255,10 @@ const TOOL_CATEGORY_MAPPINGS: ToolCategoryMapping[] = [
   },
   {
     // 2026-08-29 C 端生活管家强化：补齐提醒类口语关键词（提醒我/别忘了/到点叫我/
-    // 定个闹钟），让对话面轻量档下 reminder.plan / calendar.* 能被可靠召回。
+    // 定个闹钟），让对话面轻量档下 calendar.create 能被可靠召回。
     category: 'calendar',
     keywords: ['提醒', '提醒我', '别忘了', '到点叫我', '定个闹钟', 'reminder', '日程', 'schedule', '日历', 'calendar', '任务', 'task', '定时', 'timer', '闹钟', 'alarm', '计划', 'plan', '会议', 'meeting', '预约', 'appointment', '有空', '空闲', '改期', '冲突'],
-    toolNames: ['reminder.plan', 'calendar.create_from_text', 'calendar.create_task', 'calendar.list_tasks', 'calendar.update_task', 'calendar.find_free_slots']
+    toolNames: ['calendar.create', 'calendar.list_tasks', 'calendar.update_task', 'calendar.find_free_slots']
   },
   {
     // 2026-08-29 C 端生活管家强化：补齐支付/记账口语关键词（付钱/买单/代付/缴费/
@@ -2204,7 +2218,7 @@ export async function streamCompletionWithTools(
   // 静态 Core − 桥）——离线对账「预载转化率 / 晋升转化率」的基准集合。
   // 2026-10-10 ③：task 车道口径补上 router-first 轻量常驻（TASK_LANE_ROUTER_
   // FIRST_LIGHT_NAMES）——它们是确定性常驻设施，不是召回链注入，混进基准集合
-  // 会稀释预载/晋升转化率（reminder.plan 等常驻工具恒"注入恒不调"，假阴性）。
+  // 会稀释预载/晋升转化率（calendar.create 等常驻工具恒"注入恒不调"，假阴性）。
   const laneCoreSet = new Set(
     (options?.audit?.stage ?? "").startsWith("task_plane")
       ? [...TASK_LANE_CORE_NAMES, ...TASK_LANE_ROUTER_FIRST_LIGHT_NAMES]
@@ -4117,6 +4131,21 @@ export async function streamCompletionWithTools(
   async function runSchemaLessSummary(
     escapeAllowed: boolean,
   ): Promise<{ text: string; needMore: boolean }> {
+    // 确定性回执收口（2026-11-01 提速）：本轮工具结果全部可自证完成（天气实况/提醒
+    // 回执等，由工具通过 registerDeterministicReceipt 自报能力）时，直接由代码生成
+    // 回执，跳过第二波 LLM 汇总（实测每轮省 1.6–4.4s）。仅聊天面（holdAnswer 轮）生效，
+    // 任务面/子 Agent/语音轮保持原 LLM 汇总行为。任一结果失败/未注册 → 自动回退。
+    if (options?.holdAnswer === "after_tool_use") {
+      const receiptText = buildDeterministicReceiptText(allToolExecResults);
+      if (receiptText) {
+        console.info(
+          `[receipt] 确定性回执收口，跳过第二波 LLM（tools=${allToolExecResults
+            .map((r) => r.toolName)
+            .join(",")}）`,
+        );
+        return { text: receiptText, needMore: false };
+      }
+    }
     // summary 输出预算：跟随调用方的 maxOutputTokens；未配置时**不封顶**。
     // 历史上未配置时兜底 2000，多来源汇总/长攻略被 finish_reason=length 硬截半句
     // （该 finish_reason 全链路无人检查，属静默截断），已删除兜底上限。

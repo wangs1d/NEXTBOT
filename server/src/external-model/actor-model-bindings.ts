@@ -9,8 +9,10 @@
  * 运营方 provider（旁路 LLM 一律不受影响）。
  *
  * 安全设计：
- * - key 纯内存驻留（Map），不落盘、不进日志；TTL 24h 由惰性 + 定时双路清理，
- *   客户端每次连接 session.init 重传自愈。
+ * - key 经 AES-256-GCM 加密落盘（model-key-vault），内存驻留一份 provider；
+ *   主密钥缺失时不写盘，退回"每次连接重传"。不进日志、不经任何接口回显。
+ * - 绑定不过期：客户端离线期间的主动轮次（提醒/后台整理）要用**用户自己的** key，
+ *   用不了就跳过并记因，不静默回落运营方 provider。
  * - baseUrl 仅接受 https 公网地址（SSRF 门：拒明文协议、localhost/私网段/
  *   metadata 网段/IPv6 字面量）；上送通道本身要求 wss（connection.ts 校验
  *   x-forwarded-proto / socket.encrypted）。
@@ -20,6 +22,14 @@
 
 import { UserByokProvider } from "./providers/user-byok-provider.js";
 import type { ExternalChatProvider } from "./types.js";
+import {
+  deleteModelKey,
+  hasModelKey,
+  loadModelKeys,
+  modelKeyCount,
+  modelKeyVaultEnabled,
+  saveModelKey,
+} from "../services/model-key-vault.js";
 
 /** session.init 上送的用户自有模型三元组 */
 export type ActorModelBinding = {
@@ -31,11 +41,91 @@ export type ActorModelBinding = {
 type BindingEntry = {
   binding: ActorModelBinding;
   provider: UserByokProvider;
-  expiresAt: number;
 };
 
-const BINDING_TTL_MS = 24 * 60 * 60 * 1000;
-const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+export class ActorModelBindingStore {
+  private readonly entries = new Map<string, BindingEntry>();
+  private vaultLoaded = false;
+  /** 主密钥轮换后解不开的份数：状态口报数，不外传内容 */
+  private vaultUndecryptable = 0;
+
+  /**
+   * 设置/更新 actor 的绑定。baseUrl 非法（SSRF 门拒绝）返回 false 且不改动
+   * 现有绑定；合法时写入并落盘（客户端离线期间的主动轮次要用它）。
+   * 绑定内容未变则不重建 provider（thread 历史挂在 provider 实例上）。
+   */
+  set(actorId: string, binding: ActorModelBinding): boolean {
+    const baseUrl = validateByokBaseUrl(binding.baseUrl);
+    if (!baseUrl) return false;
+    const normalized: ActorModelBinding = { baseUrl, apiKey: binding.apiKey, model: binding.model };
+    const existing = this.entries.get(actorId);
+    if (existing && bindingKey(existing.binding) === bindingKey(normalized)) {
+      return true;
+    }
+    this.entries.set(actorId, {
+      binding: normalized,
+      provider: new UserByokProvider(normalized),
+    });
+    saveModelKey(actorId, normalized);
+    return true;
+  }
+
+  /** 撤销绑定（客户端上送空 modelProvider = 用户在 UI 清空了配置）：内存与落盘一起清。 */
+  clear(actorId: string): void {
+    this.entries.delete(actorId);
+    deleteModelKey(actorId);
+  }
+
+  /** 取该 actor 的 BYOK provider；未配置过返回 null（调用方回落运营方 provider）。 */
+  get(actorId: string): ExternalChatProvider | null {
+    this.ensureVaultLoaded();
+    return this.entries.get(actorId)?.provider ?? null;
+  }
+
+  /** 绑定状态（客户端状态角标用）：只回网关与模型，密钥永不外出。 */
+  status(actorId: string): { configured: boolean; model: string; baseUrl: string } | null {
+    this.ensureVaultLoaded();
+    const entry = this.entries.get(actorId);
+    if (!entry) return null;
+    return { configured: true, model: entry.binding.model, baseUrl: entry.binding.baseUrl };
+  }
+
+  /** 当前有效绑定数（观测/日志用）。 */
+  get size(): number {
+    this.ensureVaultLoaded();
+    return this.entries.size;
+  }
+
+  /** 落盘绑定数 + 主密钥轮换后解不开的份数（诊断用，不含密钥）。 */
+  persistence(): { vaultEnabled: boolean; stored: number; undecryptable: number } {
+    this.ensureVaultLoaded();
+    return {
+      vaultEnabled: modelKeyVaultEnabled(),
+      stored: modelKeyCount(),
+      undecryptable: this.vaultUndecryptable,
+    };
+  }
+
+  /** 落盘里有这个 actor 的 key（用于区分"从没配过"和"配了但解不开"）。 */
+  hasStoredKey(actorId: string): boolean {
+    return hasModelKey(actorId);
+  }
+
+  /** 首次取用时把落盘绑定读回内存（同步、只读一次；主密钥缺失时是空操作）。 */
+  private ensureVaultLoaded(): void {
+    if (this.vaultLoaded) return;
+    this.vaultLoaded = true;
+    const { entries, undecryptable } = loadModelKeys();
+    this.vaultUndecryptable = undecryptable;
+    for (const stored of entries) {
+      if (this.entries.has(stored.actorId)) continue;
+      const baseUrl = validateByokBaseUrl(stored.baseUrl);
+      if (!baseUrl) continue;
+      const binding: ActorModelBinding = { baseUrl, apiKey: stored.apiKey, model: stored.model };
+      this.entries.set(stored.actorId, { binding, provider: new UserByokProvider(binding) });
+    }
+  }
+}
 
 /**
  * SSRF 门：校验并规范化 baseUrl，非法返回 null。
@@ -84,65 +174,3 @@ function bindingKey(b: ActorModelBinding): string {
   return `${b.baseUrl}|${b.model}|${b.apiKey}`;
 }
 
-export class ActorModelBindingStore {
-  private readonly entries = new Map<string, BindingEntry>();
-  private cleanupTimer: ReturnType<typeof setInterval> | null = null;
-
-  /**
-   * 设置/更新 actor 的绑定。baseUrl 非法（SSRF 门拒绝）返回 false 且不改动
-   * 现有绑定；合法时写入/续期，绑定内容未变仅续期（provider 实例不动）。
-   */
-  set(actorId: string, binding: ActorModelBinding): boolean {
-    const baseUrl = validateByokBaseUrl(binding.baseUrl);
-    if (!baseUrl) return false;
-    const normalized: ActorModelBinding = { baseUrl, apiKey: binding.apiKey, model: binding.model };
-    const existing = this.entries.get(actorId);
-    if (existing && bindingKey(existing.binding) === bindingKey(normalized)) {
-      existing.expiresAt = Date.now() + BINDING_TTL_MS;
-      return true;
-    }
-    this.entries.set(actorId, {
-      binding: normalized,
-      provider: new UserByokProvider(normalized),
-      expiresAt: Date.now() + BINDING_TTL_MS,
-    });
-    this.ensureCleanupTimer();
-    return true;
-  }
-
-  /** 撤销绑定（客户端上送空 modelProvider = 用户在 UI 清空了配置）。 */
-  clear(actorId: string): void {
-    this.entries.delete(actorId);
-  }
-
-  /** 取该 actor 的 BYOK provider；无绑定/已过期返回 null（调用方回落运营方 provider）。 */
-  get(actorId: string): ExternalChatProvider | null {
-    const entry = this.entries.get(actorId);
-    if (!entry) return null;
-    if (Date.now() >= entry.expiresAt) {
-      this.entries.delete(actorId);
-      return null;
-    }
-    return entry.provider;
-  }
-
-  /** 当前有效绑定数（观测/日志用）。 */
-  get size(): number {
-    return this.entries.size;
-  }
-
-  private ensureCleanupTimer(): void {
-    if (this.cleanupTimer) return;
-    this.cleanupTimer = setInterval(() => {
-      const now = Date.now();
-      for (const [actorId, entry] of this.entries) {
-        if (now >= entry.expiresAt) this.entries.delete(actorId);
-      }
-      if (this.entries.size === 0 && this.cleanupTimer) {
-        clearInterval(this.cleanupTimer);
-        this.cleanupTimer = null;
-      }
-    }, CLEANUP_INTERVAL_MS);
-    this.cleanupTimer.unref?.();
-  }
-}

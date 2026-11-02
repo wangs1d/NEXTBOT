@@ -204,7 +204,7 @@ server.on("error", (err: NodeJS.ErrnoException) => {
   process.exit(1);
 });
 
-server.listen({ port: runtime.port, host: "0.0.0.0" }, () => {
+server.listen({ port: runtime.port, host: runtime.host }, () => {
   log(`已接管端口 ${runtime.port}，启动 worker`);
   writeServerInstance(runtime.port, "embedded-supervisor");
   spawnWorker();

@@ -4,14 +4,13 @@
  * 覆盖三环：
  *   1. prompt-assembler 渲染：【当下状态】/【顺嘴机会】块出现在分层 system prompt
  *   2. runtime-kernel 白名单：minimal/dynamic 模式不剥新字段（剥离=顺嘴失明）
- *   3. persona-core 静态块：顺嘴有据纪律行存在（P0.5）
+ *   3. 顺嘴纪律：落在【当下状态】块内，不在人格正文里
  */
 import assert from "node:assert/strict";
 import test from "node:test";
 
 import { buildLayeredSystemPrompt } from "../src/agent/prompt-builder.js";
 import { RuntimeKernel } from "../src/agent/runtime-kernel.js";
-import { buildPersonaStaticBlock } from "../src/agent/persona-core.js";
 
 const BASE_SYSTEM = "你是用户的私人 Agent。";
 
@@ -61,10 +60,15 @@ test("runtime-kernel minimal 模式保留 currentUserState/turnAside", () => {
   assert.ok(sanitized?.turnAside, "minimal 模式不剥顺嘴机会");
 });
 
-test("persona 静态块：顺嘴有据 + 诚实底线（2026-10-06 活人感治理 B 正向重写后锚点）", () => {
-  const block = buildPersonaStaticBlock({ tier: 2 });
-  assert.ok(block.includes("顺嘴关心贴此刻"), "顺嘴关心正向声部（原「顺嘴有据」纪律行）");
-  assert.ok(block.includes("【当下状态】"), "关心依据锚定真实信号");
-  assert.ok(block.includes("作息类建议憋回去"), "只凭旧记忆不发作息建议");
-  assert.ok(block.includes("拿不准"), "拿不准就直说/收着说");
+test("顺嘴纪律随【当下状态】块进 prompt（人格正文不带规则清单）", () => {
+  const prompt = buildLayeredSystemPrompt(BASE_SYSTEM, {
+    persona: "【人格】\n有什么说什么。",
+    // formatCurrentStatePrompt 的产出（生产同形）：状态行 + 一行纪律
+    currentUserState:
+      "用户此刻：屏幕焦点=打游戏（已40分钟）；在线状态=活跃在线。\n（顺嘴要贴此刻状态；他在专注或娱乐中时不给作息/休息类建议）",
+  });
+  assert.ok(prompt.includes("顺嘴要贴此刻状态"), "此刻状态的顺嘴纪律");
+  assert.ok(prompt.includes("不给作息/休息类建议"), "专注/娱乐中不给作息建议");
+  // 人格正文只剩 soul 措辞，不再承担纪律条目
+  assert.equal(prompt.includes("顺嘴关心贴此刻"), false);
 });

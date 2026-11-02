@@ -23,6 +23,7 @@ const {
   createPictureMemoriesHandler,
 } = await import("../src/tools/capability-modules/photo/handlers.js");
 const { extractMediaCards } = await import("../src/services/tool-result-processor.js");
+const { fakePictureRegistry } = await import("./helpers/fake-picture-registry.js");
 
 type PictureKit = import("@nextbot/picture").PictureKit;
 
@@ -60,7 +61,7 @@ test("housekeeping：连拍簇与迷你图进建议；remove 需确认后才真�
       ingested.push({ id: asset.id, filePath: asset.filePath });
     }
 
-    const handler = createPictureHousekeepingHandler(kit);
+    const handler = createPictureHousekeepingHandler(fakePictureRegistry(kit));
 
     const suggest = (await handler({ action: "suggest" }, {} as never)) as {
       ok: boolean;
@@ -105,7 +106,7 @@ test("memories：近 30 天事件聚合并给出代表照片与汇总文案", as
     await kit.store.ingest(await uniquePng(11), { fileName: "m1.png" });
     await kit.store.ingest(await uniquePng(12), { fileName: "m2.png" });
 
-    const handler = createPictureMemoriesHandler(kit);
+    const handler = createPictureMemoriesHandler(fakePictureRegistry(kit));
     const result = (await handler({ days: 30, count: 3 }, {} as never)) as {
       ok: boolean;
       memories: Array<{ title: string; photoCount: number; photos: Array<{ thumbnailUrl: string; caption: string | null }> }>;
@@ -121,7 +122,7 @@ test("memories：近 30 天事件聚合并给出代表照片与汇总文案", as
     // 空图库
     const emptyKit = await makeKit("mem-empty");
     try {
-      const empty = (await createPictureMemoriesHandler(emptyKit)({ days: 30 }, {} as never)) as { ok: boolean; memories: unknown[] };
+      const empty = (await createPictureMemoriesHandler(fakePictureRegistry(emptyKit))({ days: 30 }, {} as never)) as { ok: boolean; memories: unknown[] };
       assert.equal(empty.ok, true);
       assert.equal(empty.memories.length, 0);
     } finally {

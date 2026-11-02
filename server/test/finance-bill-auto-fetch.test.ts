@@ -10,7 +10,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { FinanceBillAutoFetchService } from "../src/services/finance-bill-auto-fetch-service.js";
+import {
+  FinanceBillAutoFetchService,
+  readFinanceBillAutoFetchConfig,
+} from "../src/services/finance-bill-auto-fetch-service.js";
 import type { BillTransaction } from "../src/services/finance-bill-file-parser.js";
 
 function tx(id: string, amount = 10, dayOffset = 0): BillTransaction {
@@ -293,4 +296,124 @@ test("跨通道签名去重：通知通道已入账的交易（同日同额同�
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------- //
+// 账号级开关（2026-11-01）：后台拉的是用户自己的支付宝登录态，开不开由于他本人决定
+// ---------------------------------------------------------------------- //
+
+function makeScheduled(dir: string, opts?: { env?: Record<string, string> }) {
+  let fetchCount = 0;
+  const svc = new FinanceBillAutoFetchService({
+    browserSessions: cookieOk,
+    financeDeepService: makeLedger(),
+    fetcher: async () => {
+      fetchCount += 1;
+      return { ok: true, transactions: [tx(`alipay:auto-${fetchCount}`)] };
+    },
+    env: { FINANCE_BILL_AUTO_FETCH_ENABLED: "1", ...(opts?.env ?? {}) },
+    persistPath: join(dir, "state.json"),
+  });
+  return { svc, count: () => fetchCount };
+}
+
+test("没开启的账号不会被后台拉：enroll 后才进调度，跨实例仍生效", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "finfetch-"));
+  try {
+    const { svc, count } = makeScheduled(dir, { env: { FINANCE_BILL_AUTO_FETCH_HOUR: "21" } });
+    await svc.runDue(new Date(2026, 8, 18, 21, 0));
+    assert.equal(count(), 0, "没人开启 → 到点也不该动用户的登录态");
+
+    const r = svc.enroll("alice");
+    assert.equal(r.ok, true);
+    assert.equal(svc.status("alice").actors.length, 1);
+    assert.equal(svc.status("alice").actors[0]!.enrolled, true);
+    await svc.runDue(new Date(2026, 8, 18, 21, 1));
+    assert.equal(count(), 1);
+    assert.equal(svc.listEnrolled().join(), "alice");
+
+    // 重启（新实例读同一状态文件）：开启状态不丢
+    const after = makeScheduled(dir, { env: { FINANCE_BILL_AUTO_FETCH_HOUR: "21" } });
+    assert.equal(after.svc.isEnrolled("alice"), true);
+    assert.equal(after.svc.isEnrolled("bob"), false);
+    // 别人的开关看不见：status(bob) 不返回 alice 的行
+    assert.equal(after.svc.status("bob").actors.length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("关掉之后不再跑，且显式关闭压过部署方 env 种子", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "finfetch-"));
+  try {
+    const { svc, count } = makeScheduled(dir, {
+      env: { FINANCE_BILL_AUTO_FETCH_HOUR: "21", FINANCE_BILL_AUTO_FETCH_ACTORS: "user-seed" },
+    });
+    await svc.runDue(new Date(2026, 8, 18, 21, 0));
+    assert.equal(count(), 1, "env 点名的账号等价于已开启（老配置语义不变）");
+
+    assert.equal(svc.unenroll("user-seed").ok, true);
+    await svc.runDue(new Date(2026, 8, 19, 21, 0));
+    assert.equal(count(), 1, "用户自己关了，env 种子也拦不住他");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("个人节奏各自生效：全局 21 点的人与准实时 30 分钟的人互不影响", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "finfetch-"));
+  try {
+    const { svc } = makeScheduled(dir, { env: { FINANCE_BILL_AUTO_FETCH_HOUR: "21" } });
+    svc.enroll("alice"); // 跟全局：每天 21 点
+    svc.enroll("bob", { intervalMin: 30 }); // 自己：每 30 分钟
+
+    const t0 = new Date(2026, 8, 18, 10, 0);
+    await svc.runDue(t0);
+    // 10:00 只有准实时模式的 bob 该跑（alice 的定点是 21 点）
+    const st = svc.status();
+    assert.equal(st.actors.find((a) => a.actorId === "bob")?.intervalMin, 30);
+    assert.equal(st.actors.find((a) => a.actorId === "alice")?.intervalMin, 0);
+    assert.equal(st.actors.find((a) => a.actorId === "alice")?.hour, 21);
+    assert.equal(st.actors.find((a) => a.actorId === "bob")?.lastOk, true, "bob 到点即拉基线");
+    assert.equal(st.actors.find((a) => a.actorId === "alice")?.lastRunAt, undefined);
+
+    await svc.runDue(new Date(2026, 8, 18, 21, 0));
+    const after = svc.status();
+    assert.equal(after.actors.find((a) => a.actorId === "alice")?.lastOk, true, "21 点 alice 也跑了");
+    assert.equal(after.actors.find((a) => a.actorId === "alice")?.enrolled, true, "落运行结果不能擦掉开关");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("部署级 =0 是一键停摆：账号开着也不会动", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "finfetch-"));
+  try {
+    const { svc, count } = makeScheduled(dir, {
+      env: { FINANCE_BILL_AUTO_FETCH_ENABLED: "0", FINANCE_BILL_AUTO_FETCH_HOUR: "21" },
+    });
+    assert.equal(svc.enroll("alice").ok, true);
+    await svc.runDue(new Date(2026, 8, 18, 21, 0));
+    assert.equal(count(), 0);
+    assert.equal(svc.status().enabled, false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("没带身份的请求不能替别人开关；env 默认值不再是占位账号", () => {
+  const dir = mkdtempSync(join(tmpdir(), "finfetch-"));
+  try {
+    const { svc } = makeScheduled(dir);
+    assert.equal(svc.enroll("anonymous").ok, false);
+    assert.equal(svc.enroll("  ").ok, false);
+    assert.equal(svc.unenroll("anonymous").ok, false);
+    assert.equal(svc.listEnrolled().length, 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+  const cfg = readFinanceBillAutoFetchConfig({} as NodeJS.ProcessEnv);
+  assert.deepEqual(cfg.actors, [], "默认不再把占位账号当成部署方点名的人");
+  assert.equal(cfg.enabled, true, "默认开：进不进调度由账号级开关决定");
+  assert.equal(readFinanceBillAutoFetchConfig({ FINANCE_BILL_AUTO_FETCH_ENABLED: "0" } as NodeJS.ProcessEnv).enabled, false);
 });

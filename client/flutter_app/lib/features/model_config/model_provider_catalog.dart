@@ -11,6 +11,8 @@ import "dart:convert";
 
 import "package:http/http.dart" as http;
 
+import "../../core/services/nb_http.dart";
+
 import "../../core/config/api_config.dart";
 
 /// 单个可选模型。
@@ -141,8 +143,7 @@ class ModelProviderCatalog {
   /// 服务端目录（失败回落 [baked]）。
   static Future<List<ModelProviderOption>> load() async {
     try {
-      final http.Response res = await http
-          .get(Uri.parse("${ApiConfig.httpBase}/api/model-providers"))
+      final http.Response res = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/api/model-providers"))
           .timeout(const Duration(seconds: 3));
       if (res.statusCode == 200) {
         final dynamic parsed = jsonDecode(utf8.decode(res.bodyBytes));

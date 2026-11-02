@@ -9,7 +9,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { resolveActorId } from "../agent/actor-id.js";
-import type { ToolRegistry, ToolContext } from "./tool-registry.js";
+import type { ToolRegistry } from "./tool-registry.js";
 import type { BodyCenter } from "../body/body-center.js";
 import type { BodyModuleKind } from "../body/types.js";
 
@@ -24,9 +24,7 @@ export const BODY_WHERE_AM_I_TOOL: ChatCompletionTool = {
       "查询自己当前在哪台设备渲染、3D 位置、mood、caption。当你需要知道自己身体当前在哪里显示、什么姿态时调用。",
     parameters: {
       type: "object",
-      properties: {
-        actorId: { type: "string", description: "用户/会话标识" },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -41,9 +39,7 @@ export const BODY_STATE_TOOL: ChatCompletionTool = {
       "查询身体内部状态（电量/位置/算力配额/负载/疲劳度）。当你需要知道用户设备电量、当前是否负载过高、当前地理位置时调用。",
     parameters: {
       type: "object",
-      properties: {
-        actorId: { type: "string", description: "用户/会话标识" },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -96,8 +92,6 @@ export const BODY_CHAT_TOOLS: ChatCompletionTool[] = [
 
 // ---- 内部辅助 --------------------------------------------------------
 
-const DEFAULT_ACTOR_ID = "default";
-
 /** body.calibrate 工具允许的模块名（不含 reflex，反射弧不需要校准） */
 const VALID_CALIBRATE_MODULES: ReadonlySet<BodyModuleKind> = new Set<BodyModuleKind>([
   "eye",
@@ -106,17 +100,6 @@ const VALID_CALIBRATE_MODULES: ReadonlySet<BodyModuleKind> = new Set<BodyModuleK
   "vestibular",
   "homeostasis",
 ]);
-
-/** 解析 actorId：优先使用入参，其次从 context 解析，最后回退 "default" */
-function pickActorId(
-  raw: unknown,
-  context: ToolContext,
-  fallback: string = DEFAULT_ACTOR_ID,
-): string {
-  if (typeof raw === "string" && raw.trim()) return raw.trim();
-  const resolved = resolveActorId(context);
-  return resolved || fallback;
-}
 
 // ---- 工具 handler 注册 ------------------------------------------------
 
@@ -138,7 +121,7 @@ export function registerBodyTools(
   // ---- body.where_am_i ----
   registry.register("body.where_am_i", async (input, context) => {
     try {
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const result = await bodyCenter.sense({ kind: "where_am_i", actorId });
       return {
         ok: result.ok,
@@ -157,7 +140,7 @@ export function registerBodyTools(
   // ---- body.state ----
   registry.register("body.state", async (input, context) => {
     try {
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const state = bodyCenter.state(actorId);
       return {
         ok: true,

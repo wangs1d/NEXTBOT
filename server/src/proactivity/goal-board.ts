@@ -322,11 +322,13 @@ export class GoalBoard {
     return true;
   }
 
-  /** ReadyTray：status=ready 且未过期的目标（晨间简报/agent pulse 聚合拼接展示） */
-  readyTray(): GoalRecord[] {
+  /** ReadyTray：status=ready 且未过期的目标（晨间简报/agent pulse 聚合拼接展示）；
+   *  actorId 给出时只返回该用户的目标 */
+  readyTray(actorId?: string): GoalRecord[] {
     const now = this.nowFn();
     const ready: GoalRecord[] = [];
     for (const goal of this.goals.values()) {
+      if (actorId && goal.actorId !== actorId) continue;
       if (goal.status === "ready" && (!goal.expiresAt || goal.expiresAt > now)) ready.push(goal);
     }
     return ready;

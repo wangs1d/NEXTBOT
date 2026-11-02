@@ -699,6 +699,60 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+// NEXT_UP 接续建议协议标记（与 server/services/reply-envelope.ts 同规则）：
+// 半角/全角括号、漏下划线、自造前缀（NOEXTUP）都按「token 内同时含 UP 与
+// START/END」识别。浏览器端此前没有任何清洗，标记会直接出现在气泡里。
+const NEXT_UP_START_RE = /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】]/i;
+const NEXT_UP_END_RE = /[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]/i;
+const NEXT_UP_ORPHAN_RE = /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
+const NEXT_UP_BLOCK_RE = /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|$)/gi;
+
+function sanitizeAssistantProtocolText(text) {
+  return String(text ?? "")
+    .replace(NEXT_UP_BLOCK_RE, "")
+    .replace(NEXT_UP_ORPHAN_RE, "");
+}
+
+/** 流式逐块追加：块内建议在 END 之前一律不出口（done 会整段替换）。 */
+function appendAssistantChunkText(row, chunk) {
+  let text = String(chunk ?? "");
+  if (!text) return;
+  if (row.inNextUp) {
+    const end = text.match(NEXT_UP_END_RE);
+    if (!end) return;
+    row.inNextUp = false;
+    text = text.slice(end.index + end[0].length);
+  } else {
+    const start = text.match(NEXT_UP_START_RE);
+    if (start) {
+      const before = text.slice(0, start.index);
+      const end = text.match(NEXT_UP_END_RE);
+      if (end && end.index > start.index) {
+        text = before + text.slice(end.index + end[0].length);
+      } else {
+        row.inNextUp = true;
+        text = before;
+      }
+    }
+  }
+  row.text += text.replace(NEXT_UP_ORPHAN_RE, "");
+}
+
+/** 「接下来你可以」建议胶囊（点击即作为新消息发送）。 */
+function renderFollowupsHtml(list) {
+  if (!Array.isArray(list) || list.length === 0) return "";
+  const chips = list
+    .map((item) => String(item ?? "").trim())
+    .filter(Boolean)
+    .map(
+      (prompt) =>
+        `<button type="button" class="followup-chip" data-followup="${escapeHtml(prompt)}">${escapeHtml(prompt)}</button>`,
+    )
+    .join("");
+  if (!chips) return "";
+  return `<div class="followup-row"><div class="followup-label">接下来你可以</div><div class="followup-chips">${chips}</div></div>`;
+}
+
 /**
  * 把 agent 回复文本渲染为 HTML。
  * 优先用 marked + DOMPurify 渲染 Markdown（独立排版 2：Markdown 排版）；
@@ -758,13 +812,22 @@ function paintAssistant(id) {
     // 独立排版 2：Markdown 排版，包一层「回复卡」容器（边框/圆角/阴影，与其它元素区分）
     row.el.innerHTML = renderMessageHtml(row.text);
   }
+  // 「接下来你可以」接续建议（瞬态，仅随本轮 done 下发，不落历史）。
+  row.el.innerHTML += renderFollowupsHtml(row.followups);
 }
 
 function ensureAssistant(id) {
   let row = assistants.get(id);
   if (row) return row;
   const el = appendBubble("assistant", "", id);
-  row = { el, text: "" };
+  row = { el, text: "", inNextUp: false, followups: [] };
+  // 建议胶囊点击即作为新消息发送（监听挂在气泡元素上，重绘 innerHTML 不丢）。
+  el.addEventListener("click", (e) => {
+    const chip = e.target.closest("[data-followup]");
+    if (!chip) return;
+    const prompt = chip.getAttribute("data-followup") || "";
+    if (prompt.trim()) sendUserMessageDirect(prompt.trim());
+  });
   assistants.set(id, row);
   return row;
 }
@@ -997,7 +1060,7 @@ function handleWs(msg) {
   if (type === "chat.assistant_chunk") {
     const id = String(p.messageId ?? "assistant-chunk");
     const row = ensureAssistant(id);
-    row.text += String(p.chunk ?? "");
+    appendAssistantChunkText(row, String(p.chunk ?? ""));
     paintAssistant(id);
     scrollToLatest();
     avatarSpeakingEnergy = Math.min(1, avatarSpeakingEnergy + 0.025);
@@ -1020,8 +1083,17 @@ function handleWs(msg) {
     setTimeout(() => patchAvatar({ mood: "idle", energy: 0.5, caption: undefined }), 1800);
     const id = String(p.messageId ?? "assistant-final");
     const row = ensureAssistant(id);
-    const finalText = String(p.finalText ?? "").trim();
-    if (finalText) row.text = finalText;
+    // 服务端已剥离 NEXT_UP 块；这里再兜一层，防旧服务端/错写变体把标记漏进气泡。
+    const finalText = sanitizeAssistantProtocolText(String(p.finalText ?? "")).trim();
+    if (finalText) {
+      row.text = finalText;
+    } else {
+      row.text = sanitizeAssistantProtocolText(row.text);
+    }
+    row.inNextUp = false;
+    row.followups = Array.isArray(p.followups)
+      ? p.followups.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
     paintAssistant(id);
     dailyChatStorage.saveMessage('assistant', row.text, id);
     scrollToLatest();

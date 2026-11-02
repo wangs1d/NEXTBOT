@@ -24,6 +24,8 @@ function parsePositiveNumber(raw: string | undefined, fallback: number): number 
 
 export type RuntimeConfig = {
   port: number;
+  /** 监听地址：默认全接口（本机开发/装机 runtime 要给局域网设备用）；反代部署设 LISTEN_HOST=127.0.0.1 只留回环 */
+  host: string;
   allowWorldHttpMutations: boolean;
   agentRelayRequirePair: boolean;
   worldPlaceholderRegister: boolean;
@@ -37,6 +39,7 @@ export function getRuntimeConfig(env: NodeJS.ProcessEnv = process.env): RuntimeC
   const currency = env.REAL_FUNDS_DEFAULT_CURRENCY?.trim() || "CNY";
   return {
     port,
+    host: env.LISTEN_HOST?.trim() || "0.0.0.0",
     allowWorldHttpMutations: parseBoolean(env.ALLOW_WORLD_HTTP_MUTATIONS, false),
     agentRelayRequirePair: parseBoolean(env.AGENT_RELAY_REQUIRE_PAIR, false),
     worldPlaceholderRegister: parseBoolean(env.AGENT_WORLD_PLACEHOLDER_REGISTER, false),

@@ -57,9 +57,8 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   // 每轮常驻约 850 字符并不划算。search_web/fetch_web 仍是对话刚需，常驻。
   "search_web",
   "fetch_web",
-  // 日程/提醒（轻动作）
-  "reminder.plan",
-  "calendar.create_from_text",
+  // 日程/提醒（轻动作，唯一创建工具 calendar.create）
+  "calendar.create",
   "calendar.list_tasks",
   // 通讯（轻动作）
   // phone.ensure_my_number 保留常驻（2026-10-21 实测）：「我的手机号」这类口语
@@ -111,8 +110,7 @@ export const TASK_LANE_CORE_NAMES: readonly string[] = [
   "clock.get_user_location",
   "weather.get_local",
   // 日程/提醒
-  "reminder.plan",
-  "calendar.create_from_text",
+  "calendar.create",
   "calendar.list_tasks",
   // 通讯
   "messages.overview",
@@ -429,8 +427,7 @@ function toolNameOfPreload(tool: ChatCompletionTool): string {
  */
 export const TASK_LANE_ROUTER_FIRST_LIGHT_NAMES: readonly string[] = [
   "clock.get_current_time",
-  "reminder.plan",
-  "calendar.create_from_text",
+  "calendar.create",
   "calendar.list_tasks",
   "messages.overview",
   "messages.reply",

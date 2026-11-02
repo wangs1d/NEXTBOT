@@ -124,6 +124,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     ttsService: deps.ttsService,
     externalChatSwapper: deps.externalChatSwapper,
     mailWatchApplyPass: deps.proactivityFabric?.mailWatchApplyPass,
+    mailWatchStatus: deps.proactivityFabric?.mailWatchStatus,
+    actorByokStatus: deps.actorByokStatus,
   });
   registerUnifiedProtocolRoutes(app, deps);
   registerInfoRoutes(app, deps);
@@ -185,9 +187,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     voiceMessageService: deps.voiceMessageService,
   });
   registerImageFileRoutes(app, { imageGenerationService: deps.imageGenerationService });
-  registerPictureRoutes(app, { pictureKit: deps.pictureKit });
+  registerPictureRoutes(app, { pictureKits: deps.pictureKits });
   // 3D 照片墙（自包含页面 + 贴墙布局 + 视觉分析触发；见 gallery-wall.ts）
-  registerGalleryWallRoutes(app, { pictureKit: deps.pictureKit });
+  registerGalleryWallRoutes(app, { pictureKits: deps.pictureKits });
   registerVideoProxyRoutes(app);
   registerMediaStreamProxyRoutes(app);
   registerMediaLyricRoutes(app);
@@ -330,7 +332,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     wsConnectionRegistry: deps.wsConnectionRegistry,
     eveningDigestService: deps.eveningDigestService,
   });
-  // agent pulse 手动触发（Muse 式聚合评审）：返回聚合/prompt/LLM 原始输出/最终
+  // agent pulse 手动触发（主动性聚合评审）：返回聚合/prompt/LLM 原始输出/最终
   // 文案/是否提交的完整留痕，用于验证触发链路与内容口径——走的就是服务本体
   // check()，闸门语义与定时路径完全一致
   if (deps.agentPulseCheck) {
@@ -385,7 +387,10 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   }
   // 设备自绑定鉴权路由（accessAuthService 未注入时不挂载）
   if (deps.accessAuthService) {
-    registerAuthRoutes(app, { accessAuthService: deps.accessAuthService });
+    registerAuthRoutes(app, {
+      accessAuthService: deps.accessAuthService,
+      emailOtpService: deps.emailOtpService,
+    });
   }
   // 待确认收件箱路由（approvalInboxService 未注入时不挂载）
   if (deps.approvalInboxService) {

@@ -155,10 +155,12 @@ export class ScheduleIntentService {
    * 提醒展示文案的生成权在模型，正则只做兜底（2026-10-21 根修）：
    * 规则路径没有语言判断力，extractReminderSubject 一旦失手（括号时间、口语变体）
    * 会把回声原句当「干净事项」放行——「4分钟后（17:40）提醒我去游泳」的文案
-   * 就这样原样落库。模型在场时到点文案一律由模型转写（agent 口吻是语言任务，
-   * 模板写不出「到点了，快去游泳吧」）；模型不可用/失败才落到
-   * extractReminderSubject + formatReminderMessage 的正则兜底。唯一免调用通道：
-   * 整句解析的模型草稿已在同一次调用里写好干净文案（fromModel 且非回声）。
+   * 就这样原样落库。模型不可用/失败才落到
+   * extractReminderSubject + formatReminderMessage 的正则兜底。
+   *
+   * 2026-11-01 提速：LLM 转写改为「按需」——文案已干净（非回声、短标题齐全）
+   * 就直接用，不再为规则路径的提醒额外打一次 schedule_copy LLM（每轮约 1s）。
+   * fromModel 参数保留仅作调用点兼容，不再参与免调用判定。
    */
   private async ensureReminderCopy(
     sessionId: string,
@@ -171,7 +173,10 @@ export class ScheduleIntentService {
     if (!this.externalChat?.isEnabled()) {
       return copyClean ? draft : this.fallbackReminderCopy(draft, userText);
     }
-    if (copyClean && fromModel) return draft;
+    // 按需调用（2026-11-01 提速）：文案已是干净结果时不再额外打一次 LLM。
+    // 原实现只在「模型草稿」路径免调用，规则解析出的干净文案也会再调一次
+    // schedule_copy——提醒轮因此稳定多付约 1s 的同 key LLM 延迟。
+    if (copyClean) return draft;
     const rewritten = await this.rewriteCopyByModel(sessionId, userText);
     if (rewritten) {
       return {
@@ -181,7 +186,7 @@ export class ScheduleIntentService {
       };
     }
     // 模型调用失败：有干净文案就保留（模板/模型草稿），否则正则兜底重推导
-    return copyClean ? draft : this.fallbackReminderCopy(draft, userText);
+    return this.fallbackReminderCopy(draft, userText);
   }
 
   private isCleanReminderCopy(draft: ScheduleDraft): boolean {

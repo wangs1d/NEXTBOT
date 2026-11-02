@@ -13,6 +13,7 @@ import { appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 
 import { resolveActorId } from "../../agent/actor-id.js";
+import type { MailboxAccountInput } from "../../services/mail-watch-registry.js";
 import type { ProactivePipeline } from "../../proactivity/proactive-pipeline.js";
 import type { MobilePushService } from "../../proactivity/mobile-push-service.js";
 import type { ProactivitySuppressionStore } from "../../proactivity/suppression-store.js";
@@ -103,10 +104,10 @@ export type ProactivityFabricDeps = {
     uid?: number;
     source?: Buffer;
   }) => Promise<{ importance: string; reasons: string[] }>;
-  /** 邮箱接入状态（设置页；诚实反映自动接入/授权码/轮询态） */
-  mailWatchStatus?: () => unknown;
-  /** 授权码提交（设置页）：即刻配置并尝试启动轮询，返回启动后状态 */
-  mailWatchApplyPass?: (pass: string) => unknown;
+  /** 邮箱接入状态（设置页；只看这一个账号——别人的授权码状态与邮箱地址不是可读项） */
+  mailWatchStatus?: (actorId: string) => unknown;
+  /** 邮箱账号+授权码提交（设置页）：凭据绑给提交者本人，即刻起盯这一个邮箱 */
+  mailWatchApplyPass?: (input: MailboxAccountInput) => unknown;
   /** 成本校准快照（接受率 → alert 阈值） */
   calibration?: () => unknown;
   /** 评估器探针（L2：id/订阅流/状态键） */
@@ -200,6 +201,49 @@ export function registerProactivityPipelineRoutes(
     if (action === "pause") return deps.fabric.watchTaskSetActive(actorId, id, false);
     if (action === "resume") return deps.fabric.watchTaskSetActive(actorId, id, true);
     return reply.code(400).send({ ok: false, error: "action 可选：remove / pause / resume" });
+  });
+
+  // 邮箱接入状态（设置页「邮箱盯梢」块数据源）：只回请求者自己那个邮箱账号的状态。
+  // 一台服务器服务多人时，别人的邮箱地址、授权码有没有配、轮询成败都不是可读项。
+  // 这两个路由只依赖 fabric 与注册表，故放在 pipeline 守卫之前：主动管道没装时，
+  // 用户也得能把授权码填进来（邮箱接入不该被主动提醒开关联动掉）。
+  app.get("/api/mail-watch/status", async (request) => {
+    const status = deps.fabric?.mailWatchStatus;
+    if (!status) return { ok: false, error: "mailWatchStatus not wired" };
+    const q = request.query as { userId?: string; sessionId?: string; actorId?: string };
+    // 身份优先取请求主体（开启鉴权时已被周界钉死），显式 actorId 只作开发期诊断兜底
+    const fromRequest = resolveActorId({ userId: q.userId, sessionId: q.sessionId ?? "" });
+    const actorId = fromRequest !== "anonymous" ? fromRequest : (q.actorId?.trim() ?? "");
+    if (!actorId) return { ok: false, error: "缺少账号身份：邮箱盯梢状态按用户隔离，不接受无身份的查询" };
+    return { ok: true, actorId, status: status(actorId) };
+  });
+
+  // 授权码提交（设置页填 IMAP 授权码）：绑到提交者自己名下并即刻起盯这一个邮箱。
+  // 常见邮箱域按地址自动推断 IMAP 服务器；企业邮箱一并上送 host。
+  // 留存：授权码加密落盘（主密钥缺失时拒写盘，返回 persisted:false 如实说明）——
+  // 服务端不落明文，也不再靠客户端写 config.env。
+  app.post("/api/mail-watch/pass", async (request, reply) => {
+    const saveAccount = deps.fabric?.mailWatchApplyPass;
+    if (!saveAccount) return reply.code(503).send({ ok: false, error: "mailWatchApplyPass not wired" });
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const pass = String(body.pass ?? "").trim();
+    if (!pass) return reply.code(400).send({ ok: false, error: "pass required" });
+    const fromRequest = resolveActorId({
+      userId: typeof body.userId === "string" ? body.userId : undefined,
+      sessionId: typeof body.sessionId === "string" ? body.sessionId : "",
+    });
+    const actorId = fromRequest !== "anonymous" ? fromRequest : String(body.actorId ?? "").trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "缺少账号身份：授权码要绑到具体用户" });
+    const result = saveAccount({
+      actorId,
+      pass,
+      ...(body.email ? { email: String(body.email) } : {}),
+      ...(body.host ? { host: String(body.host) } : {}),
+      ...(body.mailbox ? { mailbox: String(body.mailbox) } : {}),
+      ...(Number.isFinite(Number(body.port)) && Number(body.port) > 0 ? { port: Number(body.port) } : {}),
+    }) as { ok: boolean; error?: string };
+    if (!result.ok) return reply.code(400).send({ ok: false, error: result.error ?? "邮箱账号保存失败" });
+    return { actorId, ...result };
   });
 
   // ─── Goal 成本-产出 / 夜间内省（2026-10-19）───
@@ -390,10 +434,13 @@ export function registerProactivityPipelineRoutes(
   // 按 actor 输出活跃判定、状态板当下层、事件/提案/投递计数与最近痕迹。
   app.get("/api/proactivity/why-silent", async (request) => {
     if (!deps.fabric?.whySilent) return { ok: false, error: "whySilent not wired" };
-    const q = request.query as { actorId?: string };
+    const q = request.query as { actorId?: string; userId?: string; sessionId?: string };
+    // 身份优先取请求主体（开启鉴权时已被周界钉死），显式 actorId 只作开发期诊断兜底
+    const fromRequest = resolveActorId({ userId: q.userId, sessionId: q.sessionId ?? "" });
+    const actorId = fromRequest !== "anonymous" ? fromRequest : (q.actorId?.trim() || undefined);
     return {
       ok: true,
-      ...(deps.fabric.whySilent(q.actorId?.trim() || undefined) as Record<string, unknown>),
+      ...(deps.fabric.whySilent(actorId) as Record<string, unknown>),
     };
   });
 
@@ -410,6 +457,8 @@ export function registerProactivityPipelineRoutes(
       subject?: string;
       text?: string;
       actorId?: string;
+      userId?: string;
+      sessionId?: string;
     };
     if (!body.from || !body.subject) {
       return reply.code(400).send({ ok: false, error: "from / subject required" });
@@ -428,8 +477,11 @@ export function registerProactivityPipelineRoutes(
       ].join("\r\n"),
       "utf8",
     );
+    const fromRequest = resolveActorId({ userId: body.userId, sessionId: body.sessionId ?? "" });
     const classification = await inject({
-      actorId: body.actorId?.trim() || undefined,
+      // 有请求主体就用主体（鉴权开启时已钉死），否则退回显式 actorId（开发期诊断）
+      actorId:
+        fromRequest !== "anonymous" ? fromRequest : (body.actorId?.trim() || undefined),
       from: body.from,
       subject: body.subject,
       text: body.text ?? "",
@@ -439,25 +491,6 @@ export function registerProactivityPipelineRoutes(
     return { ok: true, classification };
   });
 
-  // 邮箱接入状态（设置页「邮箱盯梢」块数据源）：诚实反映自动接入/授权码/轮询态
-  app.get("/api/mail-watch/status", async () => {
-    const status = deps.fabric?.mailWatchStatus;
-    if (!status) return { ok: false, error: "mailWatchStatus not wired" };
-    return { ok: true, status: status() };
-  });
-
-  // 授权码提交（设置页填 IMAP 授权码）：写进 MailWatchService 即刻尝试启动轮询。
-  // 注意：本进程内生效；持久化由客户端写 config.env（MAIL_WATCH_PASS），重启后
-  // 由 runtime 环境注入回来——服务端不落盘明文授权码。
-  app.post("/api/mail-watch/pass", async (request, reply) => {
-    const applyPass = deps.fabric?.mailWatchApplyPass;
-    if (!applyPass) return reply.code(503).send({ ok: false, error: "mailWatchApplyPass not wired" });
-    const body = (request.body ?? {}) as { pass?: string };
-    const pass = String(body.pass ?? "").trim();
-    if (!pass) return reply.code(400).send({ ok: false, error: "pass required" });
-    const result = applyPass(pass);
-    return { ok: true, ...(result as Record<string, unknown>) };
-  });
 
   // GET /api/proactivity/selftest —— 一键链路自检：上下文快照 + 打断成本 + 裁决预览。
   //   ?fire=1 实际投递一条测试消息（验证直达车道端到端可用）

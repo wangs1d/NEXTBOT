@@ -83,15 +83,12 @@ export const WEATHER_CARD_INSTRUCTION =
   `直接用两三句口语给结论和建议（穿什么/要不要带伞/出行提醒），像朋友聊天一样自然收束。`;
 
 /**
- * 办妥确认轮专用指令（2026-10-25）：提醒/日程创建回执是「已写入」状态，不是
- * 可供组织成回复的外部信息。此前无豁免，low 档 honest_sparse 会把它教成
- * 「已确定（复述用户原话）/目前未知/一句提醒」三段式盘点卡（真机：牙医提醒轮，
- * 「目前未知」四字即 prompt 原词）。用户拍板：已确定的不必说；没说清的提醒要留，
- * 但一句话就够。与记账轮同理由短路，不走数据质量分档。
+ * 办妥确认轮专用指令：提醒/日程创建回执是「已写入」状态，不是可组织成回复的外部
+ * 信息——一两句话收尾，不复述原话、不列「已确定」清单、不解释执行机制。
  */
 export const CONFIRM_RECEIPT_INSTRUCTION =
   `提醒/日程已写入成功，这是一次办妥确认，一两句话收尾：办成了什么、何时生效（用回执的 nextRunAtLocal）。` +
-  `回执带 remindPlan 分级计划时，用一句话把已排好的预告段转告用户（如「明早9点会喊你出发」），不要自己另建议提前量。` +
+  `回执带 remindPlan 分级计划时，用一句话把已排好的预告段转告用户，不要自己另建议提前量。` +
   `严禁复述用户原话，严禁罗列「已确定」类信息清单；用户没说清且确实影响这件事的信息（如地点、诊所要求）最多问一句，问完就收。` +
   `不预告到点会交付什么内容，不解释执行机制。`;
 
@@ -139,11 +136,7 @@ export function isBookkeepingOnlyToolSet(toolNames: readonly string[]): boolean 
  * 提醒/日程创建类，本轮任一成功返回即按「办妥确认轮」收口）。此处不复用该
  * 导出——services→agent 的反向依赖不进策略层，两侧各自维护并以注释互指。
  */
-const CALENDAR_CONFIRM_TOOL_NAMES = new Set([
-  "reminder.plan",
-  "calendar.create_from_text",
-  "calendar.create_task",
-]);
+const CALENDAR_CONFIRM_TOOL_NAMES = new Set(["calendar.create"]);
 
 /**
  * 过程话（工具执行前的过渡话）许可：

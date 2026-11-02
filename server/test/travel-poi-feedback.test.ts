@@ -20,6 +20,8 @@ import path from "node:path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-poi-feedback-test-"));
 process.env.TRAVEL_PLAN_STORE_DIR = path.join(tmpDir, "plans");
 
+const TEST_ACTOR = "tester@example.com";
+
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
@@ -31,7 +33,7 @@ import type { PlanningService } from "../src/skills/travel-planning/travel-plann
 /** 桩 PlanningService（本路由域不触达，仅满足必填依赖） */
 const stubService = {} as PlanningService;
 
-function buildPlan(planId: string, sessionId?: string): StoredTravelPlan {
+function buildPlan(planId: string, actorId = TEST_ACTOR): StoredTravelPlan {
   const item = (over: Partial<StoredTravelPlan["days"][number]["items"][number]> = {}) => ({
     type: "attraction",
     name: "默认景点",
@@ -44,7 +46,7 @@ function buildPlan(planId: string, sessionId?: string): StoredTravelPlan {
   });
   return {
     planId,
-    ...(sessionId ? { sessionId } : {}),
+    actorId,
     destination: "成都",
     title: "成都2日游",
     startDate: "2026-08-30",
@@ -69,8 +71,19 @@ function makeProfilerStub() {
   };
 }
 
-function makeApp(profiler?: ReturnType<typeof makeProfilerStub>["service"]) {
+function makeApp(
+  profiler?: ReturnType<typeof makeProfilerStub>["service"],
+  withActor = true,
+) {
   const app = Fastify();
+  if (withActor) {
+    app.addHook("preValidation", async (req) => {
+      (req.query as Record<string, unknown>).userId = TEST_ACTOR;
+      if (req.body && typeof req.body === "object") {
+        (req.body as Record<string, unknown>).userId = TEST_ACTOR;
+      }
+    });
+  }
   registerTravelPlanRoutes(app, {
     travelPlanningService: stubService,
     ...(profiler ? { userPersonalizationService: profiler } : {}),
@@ -79,7 +92,7 @@ function makeApp(profiler?: ReturnType<typeof makeProfilerStub>["service"]) {
 }
 
 test("poi-feedback: 反馈透传画像写入口（actorId=行程 sessionId，标签+点名都进）", async () => {
-  travelPlanStore.save(buildPlan("pf-1", "actor-a1"));
+  travelPlanStore.save(buildPlan("pf-1"));
   const prof = makeProfilerStub();
   const app = makeApp(prof.service);
   const res = await app.inject({
@@ -90,14 +103,14 @@ test("poi-feedback: 反馈透传画像写入口（actorId=行程 sessionId，标
   assert.equal(res.statusCode, 200);
   assert.deepEqual(res.json(), { ok: true, recorded: "宽窄巷子" });
   assert.equal(prof.calls.length, 1);
-  assert.equal(prof.calls[0].actorId, "actor-a1");
+  assert.equal(prof.calls[0].actorId, TEST_ACTOR);
   assert.equal(prof.calls[0].name, "宽窄巷子");
   assert.deepEqual(prof.calls[0].tags, ["古镇", "文化"]);
   await app.close();
 });
 
 test("poi-feedback: kind 映射 fallbackKind（photo→attraction / food→restaurant）", async () => {
-  travelPlanStore.save(buildPlan("pf-2", "actor-a2"));
+  travelPlanStore.save(buildPlan("pf-2"));
   const prof = makeProfilerStub();
   const app = makeApp(prof.service);
   await app.inject({
@@ -117,22 +130,22 @@ test("poi-feedback: kind 映射 fallbackKind（photo→attraction / food→resta
   await app.close();
 });
 
-test("poi-feedback: 无归属会话 409，不落画像", async () => {
+test("poi-feedback: 无身份请求看不到他人行程 → 404，不落画像", async () => {
   travelPlanStore.save(buildPlan("pf-3"));
   const prof = makeProfilerStub();
-  const app = makeApp(prof.service);
+  const app = makeApp(prof.service, false);
   const res = await app.inject({
     method: "POST",
     url: "/travel/plans/pf-3/poi-feedback",
     payload: { name: "宽窄巷子" },
   });
-  assert.equal(res.statusCode, 409);
+  assert.equal(res.statusCode, 404);
   assert.equal(prof.calls.length, 0);
   await app.close();
 });
 
 test("poi-feedback: 校验失败 400（名称超长）/ 画像服务未装配 503", async () => {
-  travelPlanStore.save(buildPlan("pf-4", "actor-a4"));
+  travelPlanStore.save(buildPlan("pf-4"));
   const app1 = makeApp(makeProfilerStub().service);
   const bad = await app1.inject({
     method: "POST",

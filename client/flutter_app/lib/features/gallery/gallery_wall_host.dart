@@ -6,6 +6,7 @@ import "dart:ui" show Color;
 import "package:webview_windows/webview_windows.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/access_auth_api.dart";
 
 /// 3D 照片墙 WebView 宿主（进程级单例），模式与 [TravelWebPanelHost] 相同：
 /// webview_windows Composition 模式，渲染纹理可被不同挂载点复用；
@@ -70,6 +71,11 @@ class GalleryWallHost {
         path: "${base.path}/gallery-wall".replaceAll("//", "/"),
         queryParameters: <String, String>{
           "host": "1",
+          // 页面透传查询串给 /gallery-wall/layout，分区后的墙只认这个身份
+          ...ApiConfig.accountAuthQuery,
+          // 周界鉴权开启后 WebView 的页面与图都要凭证：query token 会换成
+          // 同站 Cookie，页内 fetch/<img> 自动继承（服务端 auth.ts）
+          ...AccessCredentialStore.instance.accessTokenQuery,
           "_cb": DateTime.now().millisecondsSinceEpoch.toString(),
         },
       );

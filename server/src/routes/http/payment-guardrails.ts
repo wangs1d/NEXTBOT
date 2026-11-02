@@ -8,22 +8,26 @@
 // 返回给 Agent，由 Agent 向用户解释。
 import type { FastifyInstance } from "fastify";
 
+import { resolveActorId } from "../../agent/actor-id.js";
 import { getPaymentGuardrailConfig } from "../../config/payment-config.js";
 import { getPaymentOrderLedger } from "../../services/payment-order-ledger.js";
 
 export function registerPaymentGuardrailRoutes(app: FastifyInstance): void {
-  app.get("/api/payment/guardrails", async () => {
+  app.get("/api/payment/guardrails", async (request) => {
+    const q = request.query as { userId?: string; sessionId?: string };
+    const actorId = resolveActorId({ userId: q.userId, sessionId: q.sessionId ?? "" });
     const guardrails = getPaymentGuardrailConfig();
     const dayStart = new Date();
     dayStart.setHours(0, 0, 0, 0);
-    const todayUsed = getPaymentOrderLedger().sumAmountSince(dayStart.toISOString());
+    const todayUsed = getPaymentOrderLedger().sumAmountSince(dayStart.toISOString(), actorId);
     return { ok: true, guardrails, todayUsedCny: Math.round(todayUsed * 100) / 100 };
   });
 
   app.get("/api/payment/orders", async (request) => {
-    const query = request.query as { limit?: string };
+    const query = request.query as { limit?: string; userId?: string; sessionId?: string };
     const limit = Math.min(Math.max(Number(query.limit) > 0 ? Number(query.limit) : 50, 1), 200);
-    const orders = getPaymentOrderLedger().list(limit);
+    const actorId = resolveActorId({ userId: query.userId, sessionId: query.sessionId ?? "" });
+    const orders = getPaymentOrderLedger().list(limit, actorId);
     return { ok: true, count: orders.length, orders };
   });
 }

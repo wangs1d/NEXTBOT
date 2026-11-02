@@ -6,7 +6,7 @@ import "package:flutter/material.dart";
 import "package:url_launcher/url_launcher.dart";
 import "package:video_player/video_player.dart";
 
-import "../../core/config/api_config.dart";
+import "../../core/config/media_url.dart";
 import "../../core/services/video_preview_launcher.dart";
 import "media_disk_cache.dart";
 
@@ -609,15 +609,8 @@ class _FullscreenVideoPageState extends State<_FullscreenVideoPage> {
   }
 }
 
-/// 解析媒体 URL：相对地址（/agent/...）拼上后端 base。
-String _resolveMediaUrl(String url) {
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return url;
-  }
-  final String base = ApiConfig.httpBase;
-  if (url.startsWith("/")) return "$base$url";
-  return "$base/$url";
-}
+/// 解析媒体 URL：相对地址（/agent/...）拼上后端 base，并带设备凭证。
+String _resolveMediaUrl(String url) => MediaUrl.resolve(url);
 
 Future<void> _launchUrl(String url) async {
   final Uri? uri = Uri.tryParse(url);

@@ -21,12 +21,22 @@
  * 注意：真正秒~分钟级的"实时"主力是交易提醒邮件通道（邮件盯梢 → 财务 LLM 抽取，
  * 见装配层接线）——浏览器轮询受风控约束做不到秒级，如实分工而不是硬凑。
  *
+ * 谁能被拉（2026-11-01 改按账号）：云端一台服务器服务多个用户，后台拉账单是
+ * 「拿用户的支付宝登录态去访问用户的账」，必须由账号自己开启，不能由部署方一刀切。
+ *   - 部署级硬闸：FINANCE_BILL_AUTO_FETCH_ENABLED=0 时全都不跑（运维一键停摆）；
+ *   - 账号级开关：state.json 里 enrolled=true 的账号才进调度，可带个人节奏
+ *     （intervalMin / hour 覆盖全局）；开与关走 enroll()/unenroll()，客户端和
+ *     finance.bills.auto_fetch 工具都调这两个口子；
+ *   - env 种子：FINANCE_BILL_AUTO_FETCH_ACTORS 点名的账号等价于已开启（老配置不改语义），
+ *     用户显式关掉（enrolled=false）压过种子。
+ *
  * 诚实失败约定：Cookie 未导入 / 未授权 agentAllowed / 登录态失效 / 接口改版
  * 解析不出数据，都如实返回错误并记录在 status()，绝不编造"已同步"。
  */
 import { getDataDir } from "../config/data-dir.js";
 import { join } from "node:path";
 
+import { isEphemeralActorId } from "../agent/actor-id.js";
 import { readJson, writeJson } from "../proactivity/persist-file.js";
 import type { BillTransaction } from "./finance-bill-file-parser.js";
 
@@ -59,6 +69,7 @@ export type BillLedger = {
 };
 
 export interface FinanceBillAutoFetchConfig {
+  /** 部署级硬闸：=0 时后台调度一律不跑（账号开没开都不跑）。 */
   enabled: boolean;
   /**
    * 轮询间隔（分钟）。> 0 时进入准实时模式（每 N 分钟拉一次增量，下限 10——
@@ -69,7 +80,10 @@ export interface FinanceBillAutoFetchConfig {
   hour: number;
   /** 拉取窗口天数：覆盖跨天边界与失败补拉，默认 3。 */
   days: number;
-  /** 目标 actor 列表（私人管家单主人场景，通常一个）。 */
+  /**
+   * 部署方在 env 里点名的账号（等价于已开启）。不是"给谁开"的唯一入口——
+   * 云端多用户各自用 enroll() 自助开启，这里只保留老配置的语义。
+   */
   actors: string[];
 }
 
@@ -89,19 +103,24 @@ export interface FinanceBillAutoFetchDeps {
   persistPath?: string;
 }
 
+interface ActorFetchRow {
+  /** 账号级开关：true=已开启后台自动拉取；false=显式关掉（压过 env 种子） */
+  enrolled?: boolean;
+  /** 个人节奏覆盖：缺省用全局 intervalMin / hour */
+  intervalMin?: number;
+  hour?: number;
+  /** 运行结果：开启但还没跑过时应是「没有」，不落空字符串冒充跑过 */
+  lastRunDateKey?: string;
+  lastRunAt?: string;
+  lastOk?: boolean;
+  lastError?: string;
+  lastAdded?: number;
+}
+
 interface FetchStateFile {
   version: 1;
-  /** actorId → { dateKey: "YYYY-MM-DD", lastResult } */
-  actors: Record<
-    string,
-    {
-      lastRunDateKey: string;
-      lastRunAt: string;
-      lastOk: boolean;
-      lastError?: string;
-      lastAdded?: number;
-    }
-  >;
+  /** actorId → 该账号的开关、节奏与最近一次运行结果 */
+  actors: Record<string, ActorFetchRow>;
 }
 
 function dateKeyOf(d: Date): string {
@@ -111,21 +130,30 @@ function dateKeyOf(d: Date): string {
   return `${y}-${m}-${day}`;
 }
 
+/** 准实时间隔的合法区间：下限 10 分钟（支付宝风控），上限一天。 */
+function clampIntervalMin(raw: unknown, fallback: number): number {
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? Math.max(10, Math.min(1440, Math.floor(n))) : fallback;
+}
+
+function clampHour(raw: unknown, fallback: number): number {
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 23 ? n : fallback;
+}
+
 export function readFinanceBillAutoFetchConfig(
   env: NodeJS.ProcessEnv = process.env,
 ): FinanceBillAutoFetchConfig {
   const actorsRaw = env.FINANCE_BILL_AUTO_FETCH_ACTORS?.trim() ?? "";
   const actors = actorsRaw
     ? actorsRaw.split(",").map((s) => s.trim()).filter(Boolean)
-    : [env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || "default_user"];
-  const intervalRaw = Number(env.FINANCE_BILL_AUTO_FETCH_INTERVAL_MIN ?? 0);
-  // 准实时下限 10 分钟：个人支付宝登录态被高频无头浏览器访问容易触发风控，
-  // 得不偿失——更实时的场景应走交易提醒邮件通道（秒~分钟级，见装配层邮件接线）
-  const intervalMin = intervalRaw > 0 ? Math.max(10, Math.min(1440, Math.floor(intervalRaw))) : 0;
+    : [];
+  // 默认开：真正决定「跑不跑」的是账号有没有开启（enrolled），部署方只留一键停摆的权力
+  const intervalRaw = clampIntervalMin(env.FINANCE_BILL_AUTO_FETCH_INTERVAL_MIN ?? 0, 0);
   return {
-    enabled: env.FINANCE_BILL_AUTO_FETCH_ENABLED === "1",
-    intervalMin,
-    hour: Math.max(0, Math.min(23, Number(env.FINANCE_BILL_AUTO_FETCH_HOUR ?? 21) || 21)),
+    enabled: env.FINANCE_BILL_AUTO_FETCH_ENABLED?.trim() !== "0",
+    intervalMin: intervalRaw,
+    hour: clampHour(env.FINANCE_BILL_AUTO_FETCH_HOUR ?? 21, 21),
     days: Math.max(1, Math.min(31, Number(env.FINANCE_BILL_AUTO_FETCH_DAYS ?? 3) || 3)),
     actors,
   };
@@ -143,7 +171,7 @@ export class FinanceBillAutoFetchService {
       deps.persistPath ?? join(getDataDir(), "finance-bill-auto-fetch", "state.json");
   }
 
-  /** 启动调度（每分钟 tick 检查到点）。未启用时 no-op（status 可查原因）。 */
+  /** 启动调度（每分钟 tick 检查到点）。部署级 =0 时 no-op（status 可查原因）。 */
   start(): void {
     if (this.timer || !this.cfg.enabled) return;
     this.timer = setInterval(() => {
@@ -154,7 +182,11 @@ export class FinanceBillAutoFetchService {
       this.cfg.intervalMin > 0
         ? `准实时轮询（每 ${this.cfg.intervalMin} 分钟）`
         : `每日定点（${this.cfg.hour} 点）`;
-    this.deps.logger?.("info", `财务账单自动拉取已启动：${modeLabel}，actors=${this.cfg.actors.join(",")}`);
+    const enrolled = this.listEnrolled();
+    this.deps.logger?.(
+      "info",
+      `财务账单自动拉取已启动：${modeLabel}；已开启账号 ${enrolled.length > 0 ? enrolled.join(",") : "（暂无，用户可用 finance.bills.auto_fetch 开启）"}`,
+    );
   }
 
   stop(): void {
@@ -164,8 +196,81 @@ export class FinanceBillAutoFetchService {
     }
   }
 
+  /** 该账号是否已开启后台自动拉取（env 种子等价于已开启，除非显式关掉）。 */
+  isEnrolled(actorId: string): boolean {
+    return this.enrolledOf(this.loadState()).includes(actorId);
+  }
+
+  /** 当前已开启的账号列表（env 种子 + 自助开启，去掉显式关闭的）。 */
+  listEnrolled(): string[] {
+    return this.enrolledOf(this.loadState());
+  }
+
   /**
-   * 到点检查（每分钟 tick 调用）：
+   * 为某个账号开启后台自动拉取（可覆盖节奏）。
+   *
+   * 这里不校验 Cookie：开启是意图，导入登录态是另一件事——调度到点时会如实
+   * 把「Cookie 不可用」记进状态并回错误码，用户先开後补登录态也能在下一次自动接上。
+   */
+  enroll(
+    actorId: string,
+    opts?: { intervalMin?: number; hour?: number },
+  ): { ok: boolean; enrolled: boolean; error?: string; intervalMin?: number; hour?: number } {
+    const id = actorId?.trim() ?? "";
+    if (!id || isEphemeralActorId(id)) {
+      return {
+        ok: false,
+        enrolled: false,
+        error: "这条请求没带账号身份，不能为它开启账单自动拉取",
+      };
+    }
+    const state = this.loadState();
+    const row: ActorFetchRow = { ...(state.actors[id] ?? {}), enrolled: true };
+    if (opts?.intervalMin != null) row.intervalMin = clampIntervalMin(opts.intervalMin, row.intervalMin ?? 0);
+    if (opts?.hour != null) row.hour = clampHour(opts.hour, row.hour ?? this.cfg.hour);
+    state.actors[id] = row;
+    writeJson(this.statePath, state);
+    return {
+      ok: true,
+      enrolled: true,
+      intervalMin: row.intervalMin ?? this.cfg.intervalMin,
+      hour: row.hour ?? this.cfg.hour,
+    };
+  }
+
+  /** 关掉某个账号的后台自动拉取；运行历史保留，显式关闭压过 env 种子。 */
+  unenroll(actorId: string): { ok: boolean; enrolled: boolean; error?: string } {
+    const id = actorId?.trim() ?? "";
+    if (!id || isEphemeralActorId(id)) {
+      return { ok: false, enrolled: false, error: "这条请求没带账号身份" };
+    }
+    const state = this.loadState();
+    state.actors[id] = { ...(state.actors[id] ?? {}), enrolled: false };
+    writeJson(this.statePath, state);
+    return { ok: true, enrolled: false };
+  }
+
+  private enrolledOf(state: FetchStateFile): string[] {
+    const ids = new Set<string>(Object.keys(state.actors));
+    for (const id of this.cfg.actors) ids.add(id);
+    return [...ids].filter((id) => {
+      const row = state.actors[id];
+      if (row?.enrolled === false) return false;
+      if (row?.enrolled === true) return true;
+      return this.cfg.actors.includes(id);
+    });
+  }
+
+  /** 该账号实际生效的节奏：个人覆盖优先，缺省跟全局。 */
+  private rhythmOf(row?: ActorFetchRow): { intervalMin: number; hour: number } {
+    return {
+      intervalMin: row?.intervalMin ?? this.cfg.intervalMin,
+      hour: row?.hour ?? this.cfg.hour,
+    };
+  }
+
+  /**
+   * 到点检查（每分钟 tick 调用），只轮已开启的账号：
    *   - 准实时模式（intervalMin>0）：距上次运行 ≥ 间隔分钟即拉增量；
    *   - 定点模式（intervalMin=0）：命中 hour 且当日未跑过才执行。
    * 返回本次实际执行的 actor 数。
@@ -173,15 +278,16 @@ export class FinanceBillAutoFetchService {
   async runDue(now = new Date()): Promise<number> {
     if (!this.cfg.enabled || this.running) return 0;
     const state = this.loadState();
-    const due = this.cfg.actors.filter((actorId) => {
+    const due = this.enrolledOf(state).filter((actorId) => {
       const row = state.actors[actorId];
-      if (this.cfg.intervalMin > 0) {
+      const rhythm = this.rhythmOf(row);
+      if (rhythm.intervalMin > 0) {
         // 间隔模式：从未跑过 → 立即拉基线；跑过 → 距上次 ≥ 间隔才拉
         if (!row?.lastRunAt) return true;
-        return now.getTime() - Date.parse(row.lastRunAt) >= this.cfg.intervalMin * 60_000;
+        return now.getTime() - Date.parse(row.lastRunAt) >= rhythm.intervalMin * 60_000;
       }
       // 定点模式：命中小时 且 当日未跑过
-      if (now.getHours() !== this.cfg.hour) return false;
+      if (now.getHours() !== rhythm.hour) return false;
       const today = dateKeyOf(now);
       return row?.lastRunDateKey !== today;
     });
@@ -263,25 +369,47 @@ export class FinanceBillAutoFetchService {
     return { ok: true, added, duplicates, note: outcome.note };
   }
 
-  status(): {
+  /**
+   * @param actorId 传了就只回这个账号的开关与状态（对外口径）；不传是运维全景视图。
+   */
+  status(actorId?: string): {
     enabled: boolean;
     mode: "interval" | "daily";
     intervalMin: number;
     hour: number;
     days: number;
-    actors: Array<{ actorId: string; lastRunAt?: string; lastOk?: boolean; lastError?: string; lastAdded?: number }>;
+    actors: Array<{
+      actorId: string;
+      enrolled: boolean;
+      intervalMin: number;
+      hour: number;
+      lastRunAt?: string;
+      lastOk?: boolean;
+      lastError?: string;
+      lastAdded?: number;
+    }>;
   } {
     const state = this.loadState();
+    const known = new Set<string>([...Object.keys(state.actors), ...this.cfg.actors]);
+    if (actorId) {
+      known.clear();
+      if (state.actors[actorId] || this.cfg.actors.includes(actorId)) known.add(actorId);
+    }
+    const enrolledSet = new Set(this.enrolledOf(state));
     return {
       enabled: this.cfg.enabled,
       mode: this.cfg.intervalMin > 0 ? "interval" : "daily",
       intervalMin: this.cfg.intervalMin,
       hour: this.cfg.hour,
       days: this.cfg.days,
-      actors: this.cfg.actors.map((actorId) => {
-        const row = state.actors[actorId];
+      actors: [...known].map((id) => {
+        const row = state.actors[id];
+        const rhythm = this.rhythmOf(row);
         return {
-          actorId,
+          actorId: id,
+          enrolled: enrolledSet.has(id),
+          intervalMin: rhythm.intervalMin,
+          hour: rhythm.hour,
           lastRunAt: row?.lastRunAt,
           lastOk: row?.lastOk,
           lastError: row?.lastError,
@@ -299,13 +427,17 @@ export class FinanceBillAutoFetchService {
     added?: number,
   ): void {
     const state = this.loadState();
-    state.actors[actorId] = {
+    // 只覆盖运行结果字段：开关与个人节奏（enrolled/intervalMin/hour）必须留着
+    const row: ActorFetchRow = {
+      ...(state.actors[actorId] ?? {}),
       lastRunDateKey: dateKeyOf(at),
       lastRunAt: at.toISOString(),
       lastOk: ok,
-      ...(error ? { lastError: error } : {}),
-      ...(added != null ? { lastAdded: added } : {}),
     };
+    if (error) row.lastError = error;
+    else delete row.lastError;
+    if (added != null) row.lastAdded = added;
+    state.actors[actorId] = row;
     writeJson(this.statePath, state);
   }
 

@@ -2,8 +2,9 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
-import type { PictureKit } from "@nextbot/picture";
 import { serverRoot } from "../../config/paths.js";
+
+import type { PictureKitRegistry } from "../../services/picture-kit-registry.js";
 
 import { analyzePendingPhotos, countPendingAnalysis } from "../../services/photo-analysis-service.js";
 import type { PhotoAnalyzeFn } from "../../services/photo-analysis-service.js";
@@ -35,9 +36,16 @@ function buildGalleryWallHtml(): string {
 
 export function registerGalleryWallRoutes(
   app: FastifyInstance,
-  deps: { pictureKit: PictureKit; analyzeFn?: PhotoAnalyzeFn },
+  deps: { pictureKits: PictureKitRegistry; analyzeFn?: PhotoAnalyzeFn },
 ): void {
-  const wallService = new GalleryWallService(deps.pictureKit, deps.pictureKit.store.rootDir);
+  /** 一面墙一个服务实例：布局与墙主台账都落在该 actor 自己的分区目录里 */
+  const wallFor = async (request: { query: unknown; body: unknown }) => {
+    const partition = await deps.pictureKits.forRequest(request);
+    return {
+      partition,
+      service: new GalleryWallService(partition.kit, partition.kit.store.rootDir, partition.actorId),
+    };
+  };
 
   app.get("/gallery-wall", async (_req, reply) => {
     reply.header("Cache-Control", "public, max-age=600");
@@ -55,22 +63,24 @@ export function registerGalleryWallRoutes(
     return reply.send(readFileSync(vendorPath));
   });
 
-  app.get("/gallery-wall/layout", async (_req, reply) => {
-    const layout = await wallService.layout();
+  app.get("/gallery-wall/layout", async (request, reply) => {
+    const { service } = await wallFor(request);
+    const layout = await service.layout();
     reply.header("Cache-Control", "no-store");
     return layout;
   });
 
   /** POST /gallery-wall/wall-owner — 「设为墙主」：photoId 所在墙的墙主覆盖为它 */
   app.post("/gallery-wall/wall-owner", async (request, reply) => {
+    const { partition, service } = await wallFor(request);
     const photoId = String((request.body as { photoId?: unknown } | null)?.photoId ?? "").trim();
     if (!photoId) {
       return reply.code(400).send({ ok: false, error: "photoId 不能为空" });
     }
-    if (!deps.pictureKit.store.get(photoId)) {
+    if (!partition.kit.store.get(photoId)) {
       return reply.code(404).send({ ok: false, error: `照片不存在: ${photoId}` });
     }
-    const eventId = await wallService.setOwnerForPhoto(photoId);
+    const eventId = await service.setOwnerForPhoto(photoId);
     if (!eventId) {
       return reply.code(404).send({ ok: false, error: "该照片不在任何一面照片墙上" });
     }
@@ -78,10 +88,11 @@ export function registerGalleryWallRoutes(
   });
 
   app.post("/gallery-wall/analyze", async (request, reply) => {
+    const { partition } = await wallFor(request);
     const body = (request.body ?? {}) as { limit?: unknown };
     const limit = Number(body.limit);
     try {
-      const result = await analyzePendingPhotos(deps.pictureKit, {
+      const result = await analyzePendingPhotos(partition.kit, {
         limit: Number.isFinite(limit) ? limit : undefined,
         analyzeFn: deps.analyzeFn,
       });
@@ -94,8 +105,11 @@ export function registerGalleryWallRoutes(
     }
   });
 
-  app.get("/gallery-wall/pending", async () => ({
-    ok: true,
-    pending: countPendingAnalysis(deps.pictureKit),
-  }));
+  app.get("/gallery-wall/pending", async (request) => {
+    const { partition } = await wallFor(request);
+    return {
+      ok: true,
+      pending: countPendingAnalysis(partition.kit),
+    };
+  });
 }

@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { FastifyInstance } from "fastify";
 
+import { resolveActorId } from "../../agent/actor-id.js";
 import { writeJsonAtomic } from "../../storage/atomic-json.js";
 import { isWithinBriefingWindow } from "../../services/morning-briefing-service.js";
 import { AGENT_NAME_SUGGESTIONS } from "../../services/agent-identity.js";
@@ -297,9 +298,10 @@ export function resetMorningBriefingDeliveryIfNeeded(
 
 export function registerUserPreferencesRoutes(app: FastifyInstance): void {
   app.get("/api/user-preferences", async (request) => {
-    const sessionId = (request.query as { sessionId?: string }).sessionId;
+    const q = (request.query ?? {}) as { sessionId?: string; userId?: string };
+    const key = resolveActorId({ userId: q.userId, sessionId: q.sessionId ?? "" });
     await ensurePrefsLoaded();
-    return { ok: true, preferences: getOrCreatePrefs(sessionId ?? "anonymous") };
+    return { ok: true, preferences: getOrCreatePrefs(key) };
   });
 
   // 建议名池：命名仪式 / 主页改名入口的候选来源（docs/onboarding-opening-animation-design.md §5）
@@ -310,13 +312,15 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
   app.put("/api/user-preferences", async (request, reply) => {
     const body = request.body as {
       sessionId?: string;
+      userId?: string;
       preferences?: Partial<UserPreferences>;
     };
-    if (!body.sessionId) {
+    if (!body.sessionId && !body.userId) {
       return reply.code(400).send({ ok: false, error: "sessionId required" });
     }
+    const key = resolveActorId({ userId: body.userId, sessionId: body.sessionId ?? "" });
     await ensurePrefsLoaded();
-    const prefs = getOrCreatePrefs(body.sessionId);
+    const prefs = getOrCreatePrefs(key);
     if (body.preferences?.morningBriefing) {
       const mb = body.preferences.morningBriefing;
       if (typeof mb.enabled === "boolean") prefs.morningBriefing.enabled = mb.enabled;
@@ -353,7 +357,7 @@ export function registerUserPreferencesRoutes(app: FastifyInstance): void {
       }
       applyAgentProfilePatch(prefs.agentProfile, incoming);
     }
-    mirrorPersist(body.sessionId, prefs);
+    mirrorPersist(key, prefs);
     return { ok: true, preferences: prefs };
   });
 }

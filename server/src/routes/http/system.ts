@@ -70,10 +70,11 @@ export function registerSystemRoutes(
     return { ok: true, ...health };
   });
 
-  /** 并发控制实时指标：全局 turn + 按工具类别的 active/queued/max。 */
+  /** 并发控制实时指标：全局 turn + 按 actor 名额 + 按工具类别的 active/queued/max。 */
   app.get("/system/concurrency", async () => {
     const { getConcurrencyStats } = await import("../../services/concurrency-limiter.js");
-    return { ok: true, ...getConcurrencyStats() };
+    const { actorQuotaSnapshot } = await import("../../services/actor-quota.js");
+    return { ok: true, actorQuota: actorQuotaSnapshot(), ...getConcurrencyStats() };
   });
 
   /** Brain 模块健康状态（仅 brain 启用时有效）。 */

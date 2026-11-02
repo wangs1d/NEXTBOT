@@ -1,5 +1,7 @@
 import type { ToolHandler } from "../../tool-registry.js";
 import type { PictureKit } from "@nextbot/picture";
+import type { PictureKitRegistry } from "../../../services/picture-kit-registry.js";
+import { pictureAssetUrl } from "../../../services/picture-url.js";
 import { PHOTO_STYLES, applyPhotoStyle, type PhotoStyleId } from "../../../services/photo-style-service.js";
 
 /**
@@ -25,7 +27,7 @@ function photoRef(pictureKit: PictureKit, photoId: string): Record<string, unkno
   };
 }
 
-function assetSummary(pictureKit: PictureKit, assetId: string): Record<string, unknown> | null {
+function assetSummary(pictureKit: PictureKit, assetId: string, actorId: string): Record<string, unknown> | null {
   const asset = pictureKit.store.get(assetId);
   if (!asset) return null;
   return {
@@ -38,15 +40,16 @@ function assetSummary(pictureKit: PictureKit, assetId: string): Record<string, u
     tags: asset.tags,
     takenAt: asset.takenAt ?? asset.createdAt,
     createdAt: asset.createdAt,
-    thumbnailUrl: `/picture/assets/${asset.id}/thumbnail/small`,
-    imageUrl: `/picture/assets/${asset.id}/file`,
+    thumbnailUrl: pictureAssetUrl(`/picture/assets/${asset.id}/thumbnail/small`, actorId),
+    imageUrl: pictureAssetUrl(`/picture/assets/${asset.id}/file`, actorId),
   };
 }
 
 // ──────────────────────────── picture.stylize ────────────────────────────
 
-export function createPictureStylizeHandler(pictureKit: PictureKit): ToolHandler {
-  return async (input) => {
+export function createPictureStylizeHandler(pictureKits: PictureKitRegistry): ToolHandler {
+  return async (input, context) => {
+    const { kit: pictureKit, actorId } = await pictureKits.forContext(context);
     const action = String(input.action ?? "apply");
 
     if (action === "styles") {
@@ -82,7 +85,7 @@ export function createPictureStylizeHandler(pictureKit: PictureKit): ToolHandler
         });
         return {
           ok: true,
-          photo: assetSummary(pictureKit, created.id),
+          photo: assetSummary(pictureKit, created.id, actorId),
           sourcePhotoId: asset.id,
           style: spec.id,
           styleLabel: spec.label,
@@ -104,8 +107,9 @@ const BURST_MIN_SIZE = 4;
 const TINY_FILE_BYTES = 30 * 1024;
 const SCREENSHOT_NAME_RE = /screenshot|screen[\s_-]?shot|截图|截屏/i;
 
-export function createPictureHousekeepingHandler(pictureKit: PictureKit): ToolHandler {
-  return async (input) => {
+export function createPictureHousekeepingHandler(pictureKits: PictureKitRegistry): ToolHandler {
+  return async (input, context) => {
+    const { kit: pictureKit } = await pictureKits.forContext(context);
     const action = String(input.action ?? "suggest");
 
     if (action === "suggest") {
@@ -209,8 +213,9 @@ export interface MemoryPhoto {
   caption: string | null;
 }
 
-export function createPictureMemoriesHandler(pictureKit: PictureKit): ToolHandler {
-  return async (input) => {
+export function createPictureMemoriesHandler(pictureKits: PictureKitRegistry): ToolHandler {
+  return async (input, context) => {
+    const { kit: pictureKit, actorId } = await pictureKits.forContext(context);
     const days = Math.max(1, Math.min(365, Number(input.days ?? 30) || 30));
     const count = Math.max(1, Math.min(5, Number(input.count ?? 3) || 3));
     const assets = pictureKit.store.listAll();
@@ -238,8 +243,8 @@ export function createPictureMemoriesHandler(pictureKit: PictureKit): ToolHandle
       );
       const photos: MemoryPhoto[] = withCaption.slice(0, 3).map((a) => ({
         id: a.id,
-        thumbnailUrl: `/picture/assets/${a.id}/thumbnail/medium`,
-        imageUrl: `/picture/assets/${a.id}/file`,
+        thumbnailUrl: pictureAssetUrl(`/picture/assets/${a.id}/thumbnail/medium`, actorId),
+        imageUrl: pictureAssetUrl(`/picture/assets/${a.id}/file`, actorId),
         caption: a.analysis?.caption ?? null,
       }));
       return {

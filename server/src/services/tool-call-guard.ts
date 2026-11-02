@@ -35,7 +35,8 @@ export type ToolCallGuardOptions = {
 };
 
 /** 参数键名命中即脱敏（值替换为 ***） */
-const REDACT_ARG_KEY_RE = /password|passwd|secret|token|otp|验证码|authorization|credential|pin|cvv/i;
+const REDACT_ARG_KEY_RE =
+  /password|passwd|secret|token|otp|验证码|authorization|credential|pin|cvv|api[_-]?key|access[_-]?key|byok/i;
 
 export class ToolCallGuard {
   private readonly idempotency = new Map<string, IdempotencyEntry>();
@@ -93,7 +94,7 @@ export class ToolCallGuard {
   ): void {
     if (!isSensitiveTool(tool)) return;
     const at = this.nowFn();
-    this.appendAudit({ at, actorId, tool, risk: classifyToolRisk(tool), ok, args: redactArgs(args), result });
+    this.appendAudit({ at, actorId, tool, risk: classifyToolRisk(tool), ok, args: redactArgs(args), result: redactArgs(result) });
     if (!ok) return;
     this.idempotency.set(this.key(actorId, tool, args), { expiresAt: at + this.ttlMs, result: snapshot(result) });
     while (this.idempotency.size > MAX_IDEMPOTENCY_ENTRIES) {
@@ -129,15 +130,16 @@ export class ToolCallGuard {
 export function redactArgs(args: Record<string, unknown>): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(args ?? {})) {
-    if (REDACT_ARG_KEY_RE.test(k)) {
-      out[k] = "***";
-    } else if (v && typeof v === "object" && !Array.isArray(v)) {
-      out[k] = redactArgs(v as Record<string, unknown>);
-    } else {
-      out[k] = typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}…` : v;
-    }
+    out[k] = REDACT_ARG_KEY_RE.test(k) ? "***" : redactValue(v);
   }
   return out;
+}
+
+/** 嵌套结构（含数组）递归按键名脱敏；字符串截断防超大 */
+function redactValue(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(redactValue);
+  if (v && typeof v === "object") return redactArgs(v as Record<string, unknown>);
+  return typeof v === "string" && v.length > 300 ? `${v.slice(0, 300)}…` : v;
 }
 
 /** 稳定序列化：键递归排序，同参数同键（跨轮/跨进程一致） */

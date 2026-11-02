@@ -30,7 +30,8 @@ test("appendMemorySummaryLine populates structured memory slots", async () => {
   assert.match(String(entries.memory_preferences ?? ""), /concise answers/);
   assert.match(String(entries.memory_commitments ?? ""), /continue following up/);
   assert.match(String(entries.memory_facts ?? ""), /Flutter chat context repair/);
-  assert.match(String(entries.session_recap ?? ""), /concise answers|continue following up|Flutter chat context repair/);
+  // 长期记忆行不镜像进 session_recap（短期槽唯一写入者是 appendSessionRecapLine）
+  assert.doesNotMatch(String(entries.session_recap ?? ""), /concise answers|continue following up|Flutter/);
 });
 
 test("sliceMemoryEntriesToPromptContext exposes structured slots to prompt builder", () => {

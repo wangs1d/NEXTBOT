@@ -1068,6 +1068,24 @@ void FlutterWindow::HandleDynamicIslandMethodCall(
               line.t_sec = GetEncodableDouble(m, "t", 0.0);
               line.text = GetEncodableString(m, "text", "");
               line.translation = GetEncodableString(m, "tr", "");
+              auto chars_it = m->find(flutter::EncodableValue("chars"));
+              if (chars_it != m->end()) {
+                if (const auto* chars =
+                        std::get_if<flutter::EncodableList>(&chars_it->second)) {
+                  for (const auto& c : *chars) {
+                    if (const auto* cm =
+                            std::get_if<flutter::EncodableMap>(&c)) {
+                      DynamicIslandWindow::LyricChar lyric_char;
+                      lyric_char.t_sec = GetEncodableDouble(cm, "t", 0.0);
+                      lyric_char.dur_sec = GetEncodableDouble(cm, "d", 0.0);
+                      lyric_char.text = GetEncodableString(cm, "c", "");
+                      if (!lyric_char.text.empty()) {
+                        line.chars.push_back(std::move(lyric_char));
+                      }
+                    }
+                  }
+                }
+              }
               if (!line.text.empty()) lines.push_back(std::move(line));
             }
           }

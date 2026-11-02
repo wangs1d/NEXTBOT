@@ -3,6 +3,7 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "nb_http.dart";
 
 /// 健康节奏档位（GET /api/health/rhythm 下发，2026-10-23 第二版）。
 ///
@@ -65,8 +66,9 @@ class HealthRhythmApi {
       final Uri uri = Uri.parse("$_baseUrl/api/health/rhythm").replace(
         queryParameters: <String, String>{"actorId": ApiConfig.effectiveActorId},
       );
-      final http.Response res =
-          await _client.get(uri).timeout(const Duration(seconds: 8));
+      final http.Response res = await _client
+          .get(uri, headers: NbHttp.headersFor(uri))
+          .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;
       final Map<String, dynamic> json =
           jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;

@@ -142,9 +142,9 @@ export class TravelMemoirService {
   /** 行程区间内的真实订单（travel+ride 域；取消/失败不算） */
   private async fetchOrders(plan: StoredTravelPlan, now: Date): Promise<MemoirOrder[]> {
     const store = this.deps.bookingOrderStore;
-    const sessionId = plan.sessionId;
-    if (!store || !sessionId || !plan.startDate || !plan.endDate) return [];
-    const orders = await store.listByActor(sessionId, { includeFinished: true, limit: 200 });
+    const actorId = plan.actorId;
+    if (!store || !actorId || !plan.startDate || !plan.endDate) return [];
+    const orders = await store.listByActor(actorId, { includeFinished: true, limit: 200 });
     const todayKey = localDateKey(now);
     const endKey = plan.endDate < todayKey ? plan.endDate : todayKey; // 进行中行程只统计已发生的日期
     return orders
@@ -167,10 +167,10 @@ export class TravelMemoirService {
   /** 行程区间内的账本支出（FinanceDeep 交易流水；无数据返回 null 整节隐藏） */
   private async fetchLedger(plan: StoredTravelPlan): Promise<MemoirLedger | null> {
     const finance = this.deps.financeDeepService;
-    const sessionId = plan.sessionId;
-    if (!finance || !sessionId || !plan.startDate || !plan.endDate) return null;
+    const actorId = plan.actorId;
+    if (!finance || !actorId || !plan.startDate || !plan.endDate) return null;
     const txs = finance.getTransactions(
-      sessionId,
+      actorId,
       `${plan.startDate}T00:00:00`,
       `${plan.endDate}T23:59:59`,
     );

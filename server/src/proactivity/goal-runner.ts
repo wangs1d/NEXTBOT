@@ -62,7 +62,7 @@ export type GoalRunnerDeps = {
    * （装配层接 realtime search / SourceStore 查询）。返回检索结果摘要时会被
    * 记入步骤 note 供后续步骤参考；未注入 = 不主动检索（行为回退）。
    */
-  retrieveForStep?: (req: { goalId: string; stepId: string; query: string; channel: "realtime" | "source" }) =>
+  retrieveForStep?: (req: { goalId: string; stepId: string; actorId: string; query: string; channel: "realtime" | "source" }) =>
     | { summary: string }
     | null
     | Promise<{ summary: string } | null>;
@@ -271,7 +271,9 @@ export class GoalRunner {
     const req = planRetrieval(goal, next);
     if (!req) return;
     const { goalId } = goal;
-    void Promise.resolve(retrieveForStep({ goalId, stepId: next.id, query: req.query, channel: req.channel }))
+    void Promise.resolve(
+      retrieveForStep({ goalId, stepId: next.id, actorId, query: req.query, channel: req.channel }),
+    )
       .then((res) => {
         const summary = res?.summary?.trim();
         if (!summary) return;

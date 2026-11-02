@@ -1,4 +1,4 @@
-import "../../../core/config/api_config.dart";
+import "../../../core/config/media_url.dart";
 import "../../../core/utils/agent_result_parser.dart";
 
 /// display_effects 模块自用的媒体地址工具。
@@ -14,14 +14,8 @@ String? extractUrlFromText(String text) {
   return m.group(0)!.replaceAll(RegExp(r'[),.;，。！？、]+$'), '');
 }
 
-String resolveMediaUrl(String url) {
-  if (url.startsWith("http://") || url.startsWith("https://")) {
-    return url;
-  }
-  final String base = ApiConfig.httpBase;
-  if (url.startsWith("/")) return "$base$url";
-  return "$base/$url";
-}
+/// 相对地址补全为完整代理地址（含设备凭证：音视频/图片标签发不出请求头）。
+String resolveMediaUrl(String url) => MediaUrl.resolve(url);
 
 String? resolveItemPreviewUrl(AgentResultItem it) {
   final String? textUrl = extractUrlFromText(it.text);

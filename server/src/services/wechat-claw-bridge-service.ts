@@ -38,12 +38,38 @@ export function readWechatClawBridgeConfig(env: NodeJS.ProcessEnv = process.env)
   return {
     enabled: isWechatClawBridgeEnabled(env),
     token: env.WECHAT_CLAW_BRIDGE_TOKEN?.trim() || null,
-    defaultActorId:
-      env.WECHAT_CLAW_BRIDGE_ACTOR_ID?.trim() ||
-      env.DESKTOP_BRIDGE_USER_ID?.trim() ||
-      "session-mvp-001",
+    defaultActorId: explicitBridgeActorId(env) ?? "session-mvp-001",
     serverPort: Number.isFinite(port) ? port : 3000,
   };
+}
+
+/** 运维显式配置的默认归属；没配就是 null，调用方不许拿占位账号冒充真人。 */
+function explicitBridgeActorId(env: NodeJS.ProcessEnv): string | null {
+  return env.WECHAT_CLAW_BRIDGE_ACTOR_ID?.trim() || env.DESKTOP_BRIDGE_USER_ID?.trim() || null;
+}
+
+/**
+ * 从绑定表定位这条入站的归属：拿扫码时记录的微信账号（或绑定键）反查。
+ * 对不上又有多条绑定时返回 null —— 挑「排在第一个」的人回消息就是串号。
+ * 只有全机唯一一条绑定时才允许免身份命中：那时没有第二个候选人，不算猜。
+ */
+export function resolveActorFromBindings(
+  bindings: Record<string, { actorId?: string; accountId?: string }> | undefined,
+  originAccountId?: string,
+): string | null {
+  const entries = Object.entries(bindings ?? {});
+  if (entries.length === 0) return null;
+  const needle = originAccountId?.trim().toLowerCase();
+  const matched = needle
+    ? entries.find(
+        ([key, rec]) =>
+          rec?.accountId?.trim().toLowerCase() === needle ||
+          key.trim().toLowerCase() === needle,
+      )
+    : undefined;
+  if (!matched && entries.length !== 1) return null;
+  const [key, rec] = matched ?? entries[0]!;
+  return rec?.actorId?.trim() || key.trim() || null;
 }
 
 function isLoopbackIp(ip: string | undefined): boolean {
@@ -105,45 +131,42 @@ export class WechatClawBridgeService {
     return isWechatClawBridgeEnabled(this.env) && isWechatClawFeatureEnabled(this.env);
   }
 
-  resolveActorId(body: WechatClawBridgeChatBody): string {
-    const explicit = resolveActorId({
-      userId: body.userId,
-      sessionId: body.sessionId ?? "",
-    });
+  /** 入站带身份用之；没带身份时，只有运维显式配了默认账号才谈「默认归属」。 */
+  resolveActorId(body: WechatClawBridgeChatBody): string | null {
     if (body.userId?.trim() || body.sessionId?.trim()) {
-      return explicit;
+      return resolveActorId({
+        userId: body.userId,
+        sessionId: body.sessionId ?? "",
+      });
     }
-    return readWechatClawBridgeConfig(this.env).defaultActorId;
+    return explicitBridgeActorId(this.env);
   }
 
-  /** App 绑定文件中的 actorId，与 Flutter USER_ID 对齐。 */
-  private async resolveBoundActorId(): Promise<string | null> {
+  /**
+   * 绑定文件里的 actorId：按扫码时记录的微信账号反查。
+   * 对不上又存在多条绑定时返回 null——把消息交给「碰巧排在第一个」的人等于串号。
+   */
+  private async resolveBoundActorId(originAccountId?: string): Promise<string | null> {
     const path =
       this.env.WECHAT_CLAW_BINDING_FILE?.trim() ||
       join(getDataDir(), "wechat-claw-bindings.json");
     try {
       const raw = await readFile(path, "utf8");
       const data = JSON.parse(raw) as {
-        bindings?: Record<string, { actorId?: string }>;
+        bindings?: Record<string, { actorId?: string; accountId?: string }>;
       };
-      const bindings = data.bindings ?? {};
-      const keys = Object.keys(bindings);
-      if (keys.length === 0) return null;
-      const first = bindings[keys[0]!];
-      const actor = first?.actorId?.trim() || keys[0]!.trim();
-      return actor || null;
+      return resolveActorFromBindings(data.bindings, originAccountId);
     } catch {
       return null;
     }
   }
 
-  private async resolveActorIdForTurn(body: WechatClawBridgeChatBody): Promise<string> {
-    if (body.userId?.trim() || body.sessionId?.trim()) {
-      return this.resolveActorId(body);
-    }
-    const bound = await this.resolveBoundActorId();
-    if (bound) return bound;
-    return readWechatClawBridgeConfig(this.env).defaultActorId;
+  private async resolveActorIdForTurn(
+    body: WechatClawBridgeChatBody,
+  ): Promise<string | null> {
+    const explicit = this.resolveActorId(body);
+    if (explicit) return explicit;
+    return this.resolveBoundActorId(body.accountId);
   }
 
   async handleChat(body: WechatClawBridgeChatBody): Promise<
@@ -169,6 +192,13 @@ export class WechatClawBridgeService {
     }
 
     const actorId = await this.resolveActorIdForTurn(body);
+    if (!actorId) {
+      return {
+        ok: false,
+        message:
+          "这条微信消息没带归属身份，本机又有多条微信绑定，无法确定回给谁；请在插件里带上 userId",
+      };
+    }
     await this.deps.messageHubService?.ingestInbound({
       actorId,
       platform: "wechat",

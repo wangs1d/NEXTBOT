@@ -365,6 +365,123 @@ test("comparePrices：型号子集（写法繁简）、数量无冲突 → bestI
   }
 });
 
+test("comparePrices：普通空结果/读取失败不交人（只如实标注，不误判成需要登录）", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  const handoffs: Array<Record<string, unknown>> = [];
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["jd", "pdd", "taobao"],
+        canUseVisibleBrowser: () => true,
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          if (platform === "taobao") {
+            return { ok: true, products: [{ title: "Sony WH-1000XM5 降噪耳机", price: 1869 }] };
+          }
+          // 页面正常落页、但没有解析到匹配商品（无 human-required 信号）
+          return {
+            ok: true,
+            products: [],
+            summary: `在${platform}搜索「Sony WH-1000XM5」未找到商品（可能无匹配或页面结构变更）`,
+          };
+        },
+      } as unknown as ShoppingOrderService,
+      onUserActionRequired: (info) => handoffs.push(info as unknown as Record<string, unknown>),
+      dataDir,
+    });
+    const res = await service.comparePrices(makeCtx(), "Sony WH-1000XM5", { platforms: ["jd", "pdd", "taobao"] });
+    assert.ok(res.ok);
+    const typed = res as unknown as Record<string, unknown>;
+    assert.equal(handoffs.length, 0, "普通空结果不触发交接（主流 Agent 只在 human-required 时交人）");
+    assert.equal(typed.handoff, undefined);
+    const unavailable = typed.unavailablePlatforms as Array<{ platform: string; reason: string; humanRequired: boolean }> | undefined;
+    assert.equal(unavailable?.length, 2);
+    assert.ok(unavailable!.every((u) => u.reason === "no_data" && u.humanRequired === false));
+    assert.ok(String(typed.summary).includes("这次没取到报价"), `summary 如实说明：${typed.summary}`);
+    assert.ok(!String(typed.summary).includes("需要登录"), `不得把普通失败写成需要登录：${typed.summary}`);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("comparePrices：登录墙 + 普通空结果 → 只有需要登录的平台进入一次 handoff", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  const handoffs: Array<Record<string, unknown>> = [];
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["jd", "pdd"],
+        canUseVisibleBrowser: () => true,
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          if (platform === "pdd") {
+            return { ok: false, error: "等待扫码登录超时（20s）", retryable: true, loginRequired: { platform: "pdd" } };
+          }
+          return { ok: true, products: [] };
+        },
+      } as unknown as ShoppingOrderService,
+      onUserActionRequired: (info) => handoffs.push(info as unknown as Record<string, unknown>),
+      dataDir,
+    });
+    const res = await service.comparePrices(makeCtx(), "红牛", { platforms: ["jd", "pdd"] });
+    assert.equal(res.ok, false, "全部平台失败时如实返回失败");
+    const typed = res as unknown as Record<string, unknown>;
+    assert.equal(handoffs.length, 1);
+    const info = handoffs[0]!;
+    assert.equal(info.reason, "login");
+    assert.deepEqual(info.platforms, ["pdd"], "普通空结果的京东不并入交接");
+    assert.deepEqual(info.platformLabels, ["拼多多"]);
+    assert.ok(String(typed.error).includes("我已完成"), `失败回执要带交接指引：${typed.error}`);
+    assert.ok((typed.handoff as { instruction?: string }).instruction!.includes("扫码登录"));
+    const unavailable = typed.unavailablePlatforms as Array<{ platform: string; humanRequired: boolean }> | undefined;
+    assert.equal(unavailable?.length, 2);
+    assert.equal(unavailable!.find((u) => u.platform === "jd")!.humanRequired, false);
+    assert.equal(unavailable!.find((u) => u.platform === "pdd")!.humanRequired, true);
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("comparePrices：验证码拦截 → captcha handoff（原因与文案对准安全验证）", async () => {
+  const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
+  const handoffs: Array<Record<string, unknown>> = [];
+  try {
+    const service = new ShoppingCompareService({
+      shoppingOrderService: {
+        listSupportedPlatforms: () => ["jd", "taobao"],
+        canUseVisibleBrowser: () => true,
+        searchProduct: async (_ctx: unknown, platform: string) => {
+          if (platform === "jd") {
+            return {
+              ok: false,
+              error: "搜索失败：需要完成安全验证",
+              retryable: true,
+              humanRequired: { platform: "jd", reason: "captcha", evidence: "正文命中「安全验证」" },
+            };
+          }
+          return { ok: true, products: [{ title: "Sony WH-1000XM5", price: 1869 }] };
+        },
+      } as unknown as ShoppingOrderService,
+      onUserActionRequired: (info) => handoffs.push(info as unknown as Record<string, unknown>),
+      dataDir,
+    });
+    // taobao 先成功；jd 撞验证页后停止（浏览器留在验证页，不再导航走）
+    const res = await service.comparePrices(makeCtx(), "Sony WH-1000XM5", { platforms: ["taobao", "jd"] });
+    assert.ok(res.ok);
+    const typed = res as unknown as Record<string, unknown>;
+    assert.equal(handoffs.length, 1);
+    assert.equal(handoffs[0]!.reason, "captcha");
+    assert.deepEqual(handoffs[0]!.platformLabels, ["京东"]);
+    const handoff = typed.handoff as { reason?: string; instruction?: string } | undefined;
+    assert.equal(handoff?.reason, "captcha");
+    assert.ok(handoff!.instruction!.includes("安全验证"));
+    assert.ok(String(typed.summary).includes("需要完成安全验证"));
+    await service.flush();
+  } finally {
+    await rm(dataDir, { recursive: true, force: true });
+  }
+});
+
 /* ─────────────── 5. 决策页存储 + 路由 ─────────────── */
 
 function decisionPayload(): Record<string, unknown> {

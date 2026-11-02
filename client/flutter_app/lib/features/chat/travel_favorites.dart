@@ -2,6 +2,7 @@ import "dart:convert";
 import "dart:io";
 
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 import "package:path_provider/path_provider.dart";
 
 import "../../core/config/api_config.dart";
@@ -67,8 +68,7 @@ class TravelFavorites {
   /// 全量同步到服务端（fire-and-forget，失败静默）。
   void _syncToServer() {
     final List<String> snapshot = _keys.toList();
-    http
-        .post(
+    NbHttp.post(
           Uri.parse("${ApiConfig.httpBase}/travel/favorites"),
           headers: const <String, String>{"content-type": "application/json"},
           body: jsonEncode(<String, dynamic>{"favorites": snapshot}),

@@ -90,7 +90,8 @@ import {
   stripLeadingTimestampFrames,
 } from "../../utils/timestamp-frame.js";
 import { stripInternalFrames } from "../../external-model/internal-frames.js";
-import { globalTurnLimiter, TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
+import { TURN_QUEUE_TIMEOUT, recordTurnOutcome } from "../../services/concurrency-limiter.js";
+import { acquireTurnSlots } from "../../services/actor-quota.js";
 import { FALLBACK_TEXT_BUSY } from "../../external-model/fallback-texts.js";
 
 const messageBatchProcessor = new MessageBatchProcessor(
@@ -658,6 +659,11 @@ async function processBatchedMessage(
   // 剥离容忍残缺帧（[ts 后断行/丢冒号），杜绝"严格正则匹配不上所以漏网"。
   // 流式标记防泄漏 guard（L2 配套，见 stream-marker-guard.ts 文件头）
   const streamMarkerGuard = createStreamMarkerGuard();
+  // 后台/子代理气泡是独立 messageId 的另一路流，需各自一份 guard 状态。
+  const backgroundStreamGuards = new Map<
+    string,
+    ReturnType<typeof createStreamMarkerGuard>
+  >();
   const sendAssistantChunk = (
     chunk: string,
     phase: "interim" | "stream" = "stream",
@@ -1046,11 +1052,11 @@ async function processBatchedMessage(
     toolHeartbeatTimers.clear();
   }
 
-  // 获取全局 turn 并发许可（防止高并发时事件循环饱和 + LLM API 限流耗尽）
+  // 获取本轮 turn 名额：先本 actor 的名额（防止一个人的多会话占满全局闸），再全局名额
   const turnStartedAt = Date.now();
   let releaseTurn: (() => void) | null = null;
   try {
-    releaseTurn = await globalTurnLimiter.acquire(TURN_QUEUE_TIMEOUT);
+    releaseTurn = await acquireTurnSlots(msgActor, TURN_QUEUE_TIMEOUT);
   } catch {
     // 排队超时 → 返回 429 风格提示，避免客户端无限等待
     ctx.socket.send(
@@ -1350,6 +1356,13 @@ async function processBatchedMessage(
       },
       onBackgroundAssistantDelta: (info) => {
         if (isStale()) return;
+        let guard = backgroundStreamGuards.get(info.messageId);
+        if (!guard) {
+          guard = createStreamMarkerGuard();
+          backgroundStreamGuards.set(info.messageId, guard);
+        }
+        const safe = guard.feed(info.delta);
+        if (!safe) return;
         chunkSeq += 1;
         ctx.socket.send(
           JSON.stringify({
@@ -1358,7 +1371,7 @@ async function processBatchedMessage(
               sessionId: msgActor,
               messageId: info.messageId,
               traceId: batched.originalMessageId,
-              chunk: info.delta,
+              chunk: safe,
               sequence: chunkSeq,
               phase: "stream",
               source: info.source,
@@ -1368,6 +1381,28 @@ async function processBatchedMessage(
       },
       onBackgroundAssistantDone: (info) => {
         if (isStale()) return;
+        const guard = backgroundStreamGuards.get(info.messageId);
+        backgroundStreamGuards.delete(info.messageId);
+        const guardTail = guard?.flush();
+        if (guardTail) {
+          chunkSeq += 1;
+          ctx.socket.send(
+            JSON.stringify({
+              type: ServerEventType.ChatAssistantChunk,
+              payload: {
+                sessionId: msgActor,
+                messageId: info.messageId,
+                traceId: batched.originalMessageId,
+                chunk: guardTail,
+                sequence: chunkSeq,
+                phase: "stream",
+                source: info.source,
+              },
+            }),
+          );
+        }
+        // 后台气泡同样从正文剥离 NEXT_UP 块；建议仍随 done 下发成可点胶囊。
+        const nextUp = extractNextUpSuggestions(info.finalText ?? "");
         ctx.socket.send(
           JSON.stringify({
             type: ServerEventType.ChatAssistantDone,
@@ -1375,9 +1410,10 @@ async function processBatchedMessage(
               sessionId: msgActor,
               messageId: info.messageId,
               traceId: batched.originalMessageId,
-              finalText: info.finalText,
+              finalText: nextUp.text,
               toolCalls: [],
               source: info.source,
+              ...(nextUp.followups.length > 0 ? { followups: nextUp.followups } : {}),
             },
           }),
         );
@@ -1719,6 +1755,7 @@ async function processBatchedMessage(
     // travel.destination-info）会短路掉冷层回捞，行程卡整轮漏发；
     // planId 补全量数据由 attachTravelItineraryCard 内部完成。
     let travelReceiptResolution = resolveTravelReceipt({
+      actorId: msgActor,
       replyToolName: reply.toolName,
       replyToolResult:
         toolResult?.ok && toolResult.result
@@ -1812,6 +1849,7 @@ async function processBatchedMessage(
     // 在正文处理之后补附；其余卡已在 processAssistantText 里由决策层一并产出。
     // 返回值同时带出本轮全部结构化卡载荷（与文本块同一份，供 cards 通道下发）。
     const cardResult = applyDeterministicCards({
+      actorId: msgActor,
       text: finalText,
       travelToolName: travelReceiptResolution.toolName,
       travelResult: travelReceiptResolution.result,

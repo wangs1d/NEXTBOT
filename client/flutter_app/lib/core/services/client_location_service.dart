@@ -5,6 +5,7 @@ import "package:flutter/foundation.dart";
 import "package:flutter_timezone/flutter_timezone.dart";
 import "package:geolocator/geolocator.dart";
 import "package:http/http.dart" as http;
+import "nb_http.dart";
 
 import "../config/api_config.dart";
 
@@ -395,8 +396,7 @@ class ClientLocationService {
         "longitude": lon.toString(),
       },
     );
-    final http.Response res = await http
-        .get(uri, headers: const <String, String>{"Accept": "application/json"})
+    final http.Response res = await NbHttp.get(uri, headers: const <String, String>{"Accept": "application/json"})
         .timeout(const Duration(seconds: 12));
     if (res.statusCode != 200) {
       debugPrint("[ClientLocationService] 逆地理失败 HTTP ${res.statusCode}");

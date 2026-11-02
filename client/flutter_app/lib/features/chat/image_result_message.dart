@@ -2,7 +2,7 @@ import "dart:convert";
 
 import "package:flutter/material.dart";
 
-import "../../core/config/api_config.dart";
+import "../../core/config/media_url.dart";
 import "../../core/services/image_preview_launcher.dart";
 import "content_summary_detail_formatter.dart";
 import "media_disk_cache.dart";
@@ -136,12 +136,7 @@ class ImageResultMessage extends StatelessWidget {
     return isIntrolike ? first : null;
   }
 
-  static String _resolveMediaUrl(String url) {
-    if (url.startsWith("http://") || url.startsWith("https://")) return url;
-    final String base = ApiConfig.httpBase;
-    if (url.startsWith("/")) return "$base$url";
-    return "$base/$url";
-  }
+  static String _resolveMediaUrl(String url) => MediaUrl.resolve(url);
 
   @override
   Widget build(BuildContext context) {

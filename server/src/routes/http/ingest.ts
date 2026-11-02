@@ -59,12 +59,21 @@ const itemsQuerySchema = z.object({
 });
 
 const subscribeBodySchema = z.object({
+  userId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
   name: z.string().max(60).optional(),
   url: z.string().min(8).max(2000),
 });
 
 const unsubscribeBodySchema = z.object({
+  userId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
   name: z.string().min(1).max(2000),
+});
+
+const subscriptionsQuerySchema = z.object({
+  userId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
 });
 
 export function registerIngestRoutes(
@@ -182,12 +191,21 @@ export function registerIngestRoutes(
   // 这条路径之前只能靠环境变量 ICS_SUB_URLS 配置，等于"必须由部署方动手"，
   // 现在改成用户自己能加能删。
 
-  app.get("/ingest/subscriptions", async (_request, reply) => {
+  app.get("/ingest/subscriptions", async (request, reply) => {
     const ics = deps.icsSubscriptionService;
     if (!ics) {
       return reply.code(503).send({ ok: false, message: "日历订阅未启用" });
     }
-    return { ok: true, ...ics.status() };
+    const parsed = subscriptionsQuerySchema.safeParse(request.query ?? {});
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
+    }
+    const actorId = resolveActorId({
+      userId: parsed.data.userId,
+      sessionId: parsed.data.sessionId ?? "",
+    });
+    // 订阅链接常带只读 token，属于账号私有数据：只列本账号名下的源
+    return { ok: true, actorId, ...ics.status(actorId) };
   });
 
   app.post("/ingest/subscriptions", async (request, reply) => {
@@ -199,11 +217,19 @@ export function registerIngestRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const result = await ics.addFeed({ name: parsed.data.name, url: parsed.data.url });
+    const actorId = resolveActorId({
+      userId: parsed.data.userId,
+      sessionId: parsed.data.sessionId ?? "",
+    });
+    const result = await ics.addFeed({
+      name: parsed.data.name,
+      url: parsed.data.url,
+      actorId,
+    });
     if (!result.ok) {
       return reply.code(400).send({ ok: false, message: result.error });
     }
-    return { ...result, status: ics.status() };
+    return { ...result, status: ics.status(actorId) };
   });
 
   app.post("/ingest/subscriptions/remove", async (request, reply) => {
@@ -215,10 +241,14 @@ export function registerIngestRoutes(
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const result = ics.removeFeed(parsed.data.name);
+    const actorId = resolveActorId({
+      userId: parsed.data.userId,
+      sessionId: parsed.data.sessionId ?? "",
+    });
+    const result = ics.removeFeed(parsed.data.name, actorId);
     if (!result.ok) {
       return reply.code(400).send({ ok: false, message: result.error });
     }
-    return { ...result, status: ics.status() };
+    return { ...result, status: ics.status(actorId) };
   });
 }

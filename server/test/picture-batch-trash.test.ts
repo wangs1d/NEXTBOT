@@ -18,11 +18,9 @@ import path from "node:path";
 
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "picture-batch-test-"));
 
-const { createPictureKit } = await import("@nextbot/picture");
+const { PictureKitRegistry } = await import("../src/services/picture-kit-registry.js");
 const { registerPictureRoutes } = await import("../src/routes/http/picture.js");
 const { default: Fastify } = await import("fastify");
-
-type PictureKit = import("@nextbot/picture").PictureKit;
 
 /** 内容互异的测试图（同内容会被 sha256 去重） */
 async function uniquePng(seed: number): Promise<Buffer> {
@@ -40,11 +38,13 @@ async function uniquePng(seed: number): Promise<Buffer> {
 }
 
 async function buildApp() {
-  const rootDir = path.join(tmpDir, `kit-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-  const kit = await createPictureKit({ rootDir });
+  const rootDir = path.join(tmpDir, `kits-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+  const kits = new PictureKitRegistry({ rootDir, batchOutputDir: path.join(rootDir, "batch") });
   const app = Fastify();
-  registerPictureRoutes(app, { pictureKit: kit });
-  return { app, kit, rootDir };
+  registerPictureRoutes(app, { pictureKits: kits });
+  // 本文件只测批量/回收站语义，请求一律不带身份 → 全部落在 anonymous 分区
+  const partition = await kits.forActor("anonymous");
+  return { app, kits, kit: partition.kit, rootDir: partition.kit.store.rootDir, kitsRoot: rootDir };
 }
 
 test("random 抽样：排除收藏/新入库/指定 id", async () => {
@@ -80,7 +80,7 @@ test("random 抽样：排除收藏/新入库/指定 id", async () => {
 });
 
 test("batch-delete + trash：入回收站、恢复、TTL 清理", async () => {
-  const { app, kit } = await buildApp();
+  const { app, kit, kitsRoot } = await buildApp();
   try {
     const ids: string[] = [];
     let bytes = 0;
@@ -131,8 +131,11 @@ test("batch-delete + trash：入回收站、恢复、TTL 清理", async () => {
     const remainId = Object.keys(trashIndex.entries)[0]!;
     trashIndex.entries[remainId].deletedAt = new Date(Date.now() - 31 * 86_400_000).toISOString();
     fs.writeFileSync(trashIndexPath, JSON.stringify(trashIndex));
+    // 新分区注册表 + 新 app（等价重启，kit 内存态全清）惰性清理真删
     const app2 = Fastify();
-    registerPictureRoutes(app2, { pictureKit: kit });
+    registerPictureRoutes(app2, {
+      pictureKits: new PictureKitRegistry({ rootDir: kitsRoot, batchOutputDir: path.join(kitsRoot, "batch") }),
+    });
     try {
       const afterList = await app2.inject({ method: "GET", url: "/picture/trash" });
       assert.equal(afterList.json().items.length, 0, "过期条目应被惰性清理");

@@ -15,7 +15,7 @@ export class BubbleTracker {
   private currentId = "";
   private readonly bubbles: Array<{ id: string; text: string }> = [];
 
-  /** 本轮是否命中确认轮工具（reminder.plan / calendar.create_*，与 agent-core
+  /** 本轮是否命中确认轮工具（calendar.create，与 agent-core
    *  CALENDAR_CONFIRM_TOOLS 同源）。确认轮保留出口收口塌缩（用户 2026-09-24
    *  拍板的确认轮废话收口），其余分泡轮"说话算话"不改口。 */
   confirmationAnchored = false;

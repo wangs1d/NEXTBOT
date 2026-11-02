@@ -589,7 +589,7 @@ export class MorningBriefingService {
     // → 当天第一站 + 天气叮嘱（行前主动提醒）。在途行程只给手机端，
     // 电脑端晨报默认不取（includeInProgressTravel 显式开启才取）。
     const travel = options.includeInProgressTravel
-      ? await this.fetchTravelToday().catch(() => null)
+      ? await this.fetchTravelToday(sessionId).catch(() => null)
       : null;
 
     // 第七源：DDL（确定性扫描，无 LLM）——今天截止置顶、这周还要交的只汇总一行。
@@ -628,16 +628,16 @@ export class MorningBriefingService {
     }
   }
 
-  /** 行程段取数：今天 ∈ [startDate, endDate] 的最近一份行程 → 当天第一站 */
-  private async fetchTravelToday(): Promise<MorningBriefingTravel | null> {
+  /** 行程段取数：今天 ∈ [startDate, endDate] 的本 actor 最近一份行程 → 当天第一站 */
+  private async fetchTravelToday(actorId: string): Promise<MorningBriefingTravel | null> {
     const two = (v: number): string => v.toString().padStart(2, "0");
     const now = new Date();
     const today =
       `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
-    const summaries = travelPlanStore.listSummaries(20);
+    const summaries = travelPlanStore.listSummariesForActor(actorId, 20);
     for (const s of summaries) {
       if (s.startDate > today || s.endDate < today) continue;
-      const plan = travelPlanStore.get(s.planId);
+      const plan = travelPlanStore.getForActor(actorId, s.planId);
       if (!plan) continue;
       const day =
         plan.days.find((d) => d.date === today) ?? plan.days[0] ?? null;
@@ -779,7 +779,7 @@ export class MorningBriefingService {
     const { notesService } = this.deps;
     if (!notesService) return [];
     try {
-      const notes = notesService.listNotes({ sessionId, limit: 10 });
+      const notes = notesService.listNotes({ sessionId, actorId: sessionId, limit: 10 });
       return notes
         .filter((n) => (n.reviewCount ?? 0) === 0)
         .slice(0, 5)

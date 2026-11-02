@@ -5,6 +5,7 @@ import "dart:io" show Platform;
 import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
+import "nb_http.dart";
 
 import "../config/api_config.dart";
 
@@ -59,7 +60,7 @@ class MobilePushRegistrar {
         final String token = raw["token"]?.toString() ?? "";
         lastErr = raw["err"]?.toString() ?? "";
         if (token.isNotEmpty) {
-          final http.Response response = await http.post(
+          final http.Response response = await NbHttp.post(
             Uri.parse("${ApiConfig.httpBase}/api/proactivity/push/register"),
             headers: const {"Content-Type": "application/json"},
             body: jsonEncode(<String, String>{
@@ -90,7 +91,7 @@ class MobilePushRegistrar {
     // 重试耗尽 / 无配置：把设备侧真实报错上报服务端落日志（远程诊断用）
     if (lastErr.isNotEmpty) {
       try {
-        await http.post(
+        await NbHttp.post(
           Uri.parse("${ApiConfig.httpBase}/api/proactivity/push/register"),
           headers: const {"Content-Type": "application/json"},
           body: jsonEncode(<String, String>{

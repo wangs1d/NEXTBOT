@@ -1,6 +1,8 @@
-import type { FastifyInstance, FastifyReply } from "fastify";
+import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import OpenAI from "openai";
+
+import { resolveActorId } from "../../agent/actor-id.js";
 
 import {
   resolvePrimaryLlmClientConfig,
@@ -32,6 +34,7 @@ import {
 import { findReservationRule } from "./travel-poi-dossier.js";
 import { resolveOriginFromLocation } from "./travel-origin.js";
 import { getDataDir } from "../../config/data-dir.js";
+import { sanitizeActorKey } from "../../agentic-memory/actor-key.js";
 import type { LocationCoordinator } from "../../services/location-coordinator.js";
 import fs from "node:fs";
 import path from "node:path";
@@ -59,9 +62,10 @@ function bindPlanSessionLocationCoordinator(coordinator: LocationCoordinator | n
 // 明细（门票/房价/餐饮人均/往返大交通均来自实时报价，取不到的标「待核价」
 // 且不计入合计），用户 approve 之后才下发最终草案 + planId。
 //
-// 会话持久化（2026-10-26）：内存 Map + 磁盘双层（data/travel-plan-sessions/{id}.json，
-// 单文件单会话，惰性读盘）。内存 2h TTL 清出后磁盘仍在，客户端可凭 sessionId
-// 恢复对话；GET /travel/plan-sessions 列历史会话，磁盘 30 天过期随清扫删除。
+// 会话持久化：内存 Map + 磁盘双层（data/travel-plan-sessions/<actorKey>/{id}.json，
+// 按 actor 分区、单文件单会话、惰性读盘）。内存 2h TTL 清出后磁盘仍在，客户端可凭
+// sessionId + 身份恢复对话；GET /travel/plan-sessions 只列本 actor 的历史会话，磁盘
+// 30 天过期随清扫删除。跨 actor 的会话 id 读不到（天然 404）。
 // 生成的行程本体仍由 travelPlanStore 冷层承担，这里只保对话流本身。
 // ═══════════════════════════════════════════════════════════════════
 
@@ -407,6 +411,8 @@ type NextQuestion = {
 
 export type PlanSession = {
   id: string;
+  /** 归属用户 actorId：会话按 actor 分区落盘，续聊/列表只限本 actor */
+  actorId: string;
   createdAt: number;
   updatedAt: number;
   destination?: string;
@@ -468,36 +474,44 @@ const SESSIONS_DIR = path.resolve(
   process.env.TRAVEL_PLAN_SESSIONS_DIR || path.join(getDataDir(), "travel-plan-sessions"),
 );
 const sessions = new Map<string, PlanSession>();
-let sessionsDirReady = false;
 
-function ensureSessionsDir(): void {
-  if (sessionsDirReady) return;
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  sessionsDirReady = true;
+/** actor → 目录名（与行程库同一净化规则）；缺省归入 _unassigned */
+function actorBucket(actorId: string | undefined): string {
+  return (actorId && sanitizeActorKey(actorId)) || "_unassigned";
 }
 
-function sessionPath(id: string): string {
-  return path.join(SESSIONS_DIR, `${path.basename(id)}.json`);
+function actorSessionsDir(actorId: string): string {
+  return path.join(SESSIONS_DIR, actorBucket(actorId));
+}
+
+function sessionPath(actorId: string, id: string): string {
+  return path.join(actorSessionsDir(actorId), `${path.basename(id)}.json`);
 }
 
 /** 每轮变更后落盘（同步写：规划是低频交互，与 travelPlanStore 同一口径）。 */
 function saveSession(session: PlanSession): void {
   sessions.set(session.id, session);
   try {
-    ensureSessionsDir();
-    fs.writeFileSync(sessionPath(session.id), JSON.stringify(session), "utf8");
+    const dir = actorSessionsDir(session.actorId);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(sessionPath(session.actorId, session.id), JSON.stringify(session), "utf8");
   } catch (err) {
     console.error("[travel-plan-session] save failed:", err);
   }
 }
 
-/** 内存未命中 → 惰性读盘：服务重启 / 内存被 TTL 清出后凭 sessionId 仍可续聊。 */
-function getSession(id: string): PlanSession | null {
+/**
+ * 内存未命中 → 惰性读本 actor 目录：服务重启 / 内存被 TTL 清出后凭 sessionId 仍可续聊。
+ * 只读本 actor 目录，别的 actor 的同 id 会话读不到（天然 404）。
+ */
+function getSession(actorId: string, id: string): PlanSession | null {
   const cached = sessions.get(id);
-  if (cached) return cached;
+  if (cached) return actorBucket(cached.actorId) === actorBucket(actorId) ? cached : null;
   if (!id || id.includes("/") || id.includes("\\") || id.includes("..")) return null;
   try {
-    const parsed = JSON.parse(fs.readFileSync(sessionPath(id), "utf8")) as PlanSession;
+    const parsed = JSON.parse(
+      fs.readFileSync(sessionPath(actorId, id), "utf8"),
+    ) as PlanSession;
     if (parsed?.id && Array.isArray(parsed.history)) {
       sessions.set(parsed.id, parsed);
       return parsed;
@@ -508,7 +522,7 @@ function getSession(id: string): PlanSession | null {
   return null;
 }
 
-/** 双层清扫：内存 2h 清出（磁盘保留可恢复）；磁盘 30 天过期删除。 */
+/** 双层清扫：内存 2h 清出（磁盘保留可恢复）；磁盘按 actor 子目录 30 天过期删除。 */
 function pruneSessions(): void {
   const now = Date.now();
   for (const [id, s] of sessions) {
@@ -516,13 +530,17 @@ function pruneSessions(): void {
   }
   try {
     if (!fs.existsSync(SESSIONS_DIR)) return;
-    for (const f of fs.readdirSync(SESSIONS_DIR)) {
-      if (!f.endsWith(".json")) continue;
-      const p = path.join(SESSIONS_DIR, f);
-      try {
-        if (now - fs.statSync(p).mtimeMs > SESSION_DISK_TTL_MS) fs.rmSync(p, { force: true });
-      } catch {
-        // 单个文件失败不影响其余
+    for (const entry of fs.readdirSync(SESSIONS_DIR, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const dir = path.join(SESSIONS_DIR, entry.name);
+      for (const f of fs.readdirSync(dir)) {
+        if (!f.endsWith(".json")) continue;
+        const p = path.join(dir, f);
+        try {
+          if (now - fs.statSync(p).mtimeMs > SESSION_DISK_TTL_MS) fs.rmSync(p, { force: true });
+        } catch {
+          // 单个文件失败不影响其余
+        }
       }
     }
   } catch (err) {
@@ -830,13 +848,11 @@ function applyOriginAnswer(session: PlanSession): void {
 }
 
 /**
- * 出发地按定位兜底（2026-10-26，2026-10-27 增主动定位）：编排器/正则都没拿到
- * 出发地时用用户定位城市当默认出发地（标 located，简报/预算如实标注）。
- * 两级定位来源：
- *   1. 会话创建时被动读到的 LocationCoordinator 缓存（locatedOrigin）；
- *   2. 缓存为空时主动向在线客户端要一次 GPS（requestAnyLocation，每会话至多
- *      一次——防每轮都等 12s 超时）。用户反问「怎么又要我问从哪出发」事故的
- *      根因就是只有①：客户端 48h 内没上报过，被动缓存永远为空。
+ * 出发地按定位兜底：编排器/正则都没拿到出发地时，用本 actor 的定位城市当默认出发地
+ * （标 located，简报/预算如实标注）。两级来源都限定 session.actorId：
+ *   1. 会话创建时被动读到的本 actor 最近定位缓存（locatedOrigin）；
+ *   2. 缓存为空时向本 actor 自己的在线设备要一次 GPS（requestLocation，每会话至多
+ *      一次——防每轮都等 12s 超时）。该 actor 无在线设备返回 null，维持反问兜底。
  * say 没提及时补一句说明。回填后 filterQuestion 自然拦掉 origin 卡。
  */
 export async function backfillOriginFromLocation(session: PlanSession, say: string): Promise<string> {
@@ -845,7 +861,7 @@ export async function backfillOriginFromLocation(session: PlanSession, say: stri
     session.originLocateAttempted = true;
     const coordinator = planSessionLocationCoordinator;
     if (coordinator) {
-      const loc = await coordinator.requestAnyLocation("travel.origin").catch(() => null);
+      const loc = await coordinator.requestLocation(session.actorId, "travel.origin").catch(() => null);
       if (loc) {
         const resolved = await resolveOriginFromLocation(loc).catch(() => null);
         if (resolved) {
@@ -1486,6 +1502,7 @@ async function buildGuideCandidates(
     // 落位诉求从用户原话里抽（「住得离兵马俑近点」）：抽到才按距离重排住宿段。
     const focus = extractHotelFocus(composePlanningInput(session));
     const g = await service.buildDestinationGuide(session.destination, 6, {
+      actorId: session.actorId,
       ...(focus ? { hotelFocus: focus.focus, hotelFocusRef: focus.ref } : {}),
     });
     const toItems = (list: GuideCandidate[]): PlanSessionGuideItem[] =>
@@ -2277,6 +2294,7 @@ async function generateDraft(
         })()
       : undefined;
   const result = await service.generateItinerary({
+    actorId: session.actorId,
     input,
     destination: session.destination,
     days: effectiveDays(session) ?? undefined,
@@ -2298,6 +2316,7 @@ async function generateDraft(
   if (planId) {
     travelPlanStore.save({
       planId,
+      actorId: session.actorId,
       dataQuality: typeof result.dataQuality === "string" ? result.dataQuality : "real",
       destination: result.destination,
       title: result.title,
@@ -2441,6 +2460,16 @@ function requireService(
   return true;
 }
 
+/** 请求归属 actor：query 优先、body 兜底；两者皆空时 resolveActorId 归入 anonymous 桶（绝不全局）。 */
+function actorIdOf(request: FastifyRequest): string {
+  const q = (request.query ?? {}) as { userId?: string; sessionId?: string };
+  const b = (request.body ?? {}) as { userId?: string; sessionId?: string };
+  return resolveActorId({
+    userId: q.userId ?? b.userId,
+    sessionId: (q.sessionId ?? b.sessionId) ?? "",
+  });
+}
+
 /**
  * 规划会话路由域（v3 旅游界面规划流专用）：
  *   POST /travel/plan-session           {message} 一句话发起
@@ -2466,15 +2495,16 @@ export function registerTravelPlanSessionRoutes(
       "POST   /travel/plan-session/:id/booking {transportKey?,hotelKey?} 提交预订选择卡（实时机票/高铁/酒店，可全不选=先不订）",
       "POST   /travel/plan-session/:id/generate   信息齐后真实生成并返回预算明细（待确认）",
       "POST   /travel/plan-session/:id/approve    用户确认预算后下发最终草案",
-      "GET    /travel/plan-session/:id        会话状态 + history + dossier + resumeCard（刷新恢复 / 继续上次规划）",
-      "GET    /travel/plan-sessions?limit=30  历史规划会话列表（按最近更新排序，供客户端「历史对话」入口）",
+      "GET    /travel/plan-session/:id        会话状态 + history + dossier + resumeCard（刷新恢复 / 继续上次规划；限本 actor）",
+      "GET    /travel/plan-sessions?userId=&limit=30  本 actor 历史规划会话列表（按最近更新排序）",
     ],
-    note: "会话落盘 data/travel-plan-sessions/{id}.json：内存 2h 清出可恢复，磁盘 30 天过期；行程本体由 travelPlanStore 冷层承担",
+    note: "会话按 actor 分区落盘 data/travel-plan-sessions/<actorKey>/{id}.json：内存 2h 清出可恢复，磁盘 30 天过期；列表与续聊只限本 actor，跨 actor 会话 id 一律 404；行程本体由 travelPlanStore 冷层承担",
   }));
 
-  // 历史规划会话列表（旅游界面「规划」tab 的历史对话入口）
+  // 历史规划会话列表（旅游界面「规划」tab 的历史对话入口）：只列本 actor 目录
   app.get("/travel/plan-sessions", async (request) => {
     const query = (request.query ?? {}) as { limit?: string };
+    const actorId = actorIdOf(request);
     const limit = Math.min(Math.max(Number(query.limit) || 30, 1), 100);
     pruneSessions();
     const list: Array<{
@@ -2490,15 +2520,17 @@ export function registerTravelPlanSessionRoutes(
       turnCount: number;
       lastUserMessage: string;
     }> = [];
+    const actorDir = actorSessionsDir(actorId);
     try {
-      if (fs.existsSync(SESSIONS_DIR)) {
-        for (const f of fs.readdirSync(SESSIONS_DIR)) {
+      if (fs.existsSync(actorDir)) {
+        for (const f of fs.readdirSync(actorDir)) {
           if (!f.endsWith(".json")) continue;
           try {
             const parsed = JSON.parse(
-              fs.readFileSync(path.join(SESSIONS_DIR, f), "utf8"),
+              fs.readFileSync(path.join(actorDir, f), "utf8"),
             ) as PlanSession;
             if (!parsed?.id || !Array.isArray(parsed.history)) continue;
+            if (actorBucket(parsed.actorId) !== actorBucket(actorId)) continue;
             const lastUser = [...parsed.history].reverse().find((h) => h.role === "user");
             list.push({
               id: parsed.id,
@@ -2533,27 +2565,28 @@ export function registerTravelPlanSessionRoutes(
       return reply.code(400).send({ ok: false, error: body.error.flatten() });
     }
     pruneSessions();
+    const actorId = actorIdOf(request);
     const message = body.data.message.trim();
-    // 出发地按定位兜底（2026-10-26）：plan-session 是独立 HTTP 会话、没有 actorId，
-    // 这里被动读 LocationCoordinator 最近一次定位缓存（个人 agent 单用户语义，
-    // 多端在线取最新上报），逆地理出城市存会话——编排器与回填都据此用定位
-    // 出发地，不再反问「从哪个城市出发」。只读缓存，绝不向客户端要 GPS。
+    // 出发地被动兜底：只读本 actor 的最近定位缓存（getLastKnown），逆地理出城市
+    // 存会话——编排器与回填据此用定位出发地，不再反问「从哪个城市出发」。
+    // 只读本 actor 缓存，绝不跨 actor、也绝不在创建时向客户端要 GPS。
     let locatedOrigin: PlanSession["locatedOrigin"];
     if (deps.locationCoordinator) {
-      const latest = deps.locationCoordinator.getLatest();
+      const latest = deps.locationCoordinator.getLastKnown(actorId);
       if (latest) {
-        const resolved = await resolveOriginFromLocation(latest.payload).catch(() => null);
+        const resolved = await resolveOriginFromLocation(latest).catch(() => null);
         if (resolved) {
-          locatedOrigin = { ...resolved, locatedAt: latest.at };
+          locatedOrigin = { ...resolved, locatedAt: Date.now() - latest.ageMs };
           console.log(
             `[travel-plan-session] 出发地按定位兜底：${resolved.city}（${resolved.region || "未知省份"}，` +
-              `定位于 ${Math.round((Date.now() - latest.at) / 60_000)} 分钟前）`,
+              `定位于 ${Math.round(latest.ageMs / 60_000)} 分钟前）`,
           );
         }
       }
     }
     const session: PlanSession = {
       id: newSessionId(),
+      actorId,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       originalMessage: message,
@@ -2579,7 +2612,7 @@ export function registerTravelPlanSessionRoutes(
   // 继续对话 / 点选回传
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/turn", async (request, reply) => {
     if (!requireService(deps, reply)) return;
-    const session = getSession(request.params.id);
+    const session = getSession(actorIdOf(request), request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2641,7 +2674,7 @@ export function registerTravelPlanSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/guide",
     async (request, reply) => {
-      const session = getSession(request.params.id);
+      const session = getSession(actorIdOf(request), request.params.id);
       if (!session) {
         return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
       }
@@ -2720,7 +2753,7 @@ export function registerTravelPlanSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/extras",
     async (request, reply) => {
-      const session = getSession(request.params.id);
+      const session = getSession(actorIdOf(request), request.params.id);
       if (!session) {
         return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
       }
@@ -2775,7 +2808,7 @@ export function registerTravelPlanSessionRoutes(
   app.post<{ Params: { id: string } }>(
     "/travel/plan-session/:id/booking",
     async (request, reply) => {
-      const session = getSession(request.params.id);
+      const session = getSession(actorIdOf(request), request.params.id);
       if (!session) {
         return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
       }
@@ -2864,7 +2897,7 @@ export function registerTravelPlanSessionRoutes(
   // 真实生成（与聊天 travel.plan-itinerary 同一引擎与冷层）
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/generate", async (request, reply) => {
     if (!requireService(deps, reply)) return;
-    const session = getSession(request.params.id);
+    const session = getSession(actorIdOf(request), request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2915,7 +2948,7 @@ export function registerTravelPlanSessionRoutes(
 
   // 预算确认：用户看过明细并同意后才下发最终草案
   app.post<{ Params: { id: string } }>("/travel/plan-session/:id/approve", async (request, reply) => {
-    const session = getSession(request.params.id);
+    const session = getSession(actorIdOf(request), request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期，请重新发起" });
     }
@@ -2942,7 +2975,7 @@ export function registerTravelPlanSessionRoutes(
   // 会话状态（客户端刷新恢复 / 继续上次规划）：带 history 让客户端重建对话流，
   // dossier 整份快照、resumeCard 是当前挂起卡（choice 卡选项不落盘、重建不了时为 null）
   app.get<{ Params: { id: string } }>("/travel/plan-session/:id", async (request, reply) => {
-    const session = getSession(request.params.id);
+    const session = getSession(actorIdOf(request), request.params.id);
     if (!session) {
       return reply.code(404).send({ ok: false, error: "会话不存在或已过期" });
     }

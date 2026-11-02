@@ -6,6 +6,7 @@ import "dart:ui" show PathMetric;
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
 import "media_disk_cache.dart";
@@ -480,8 +481,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
     _progressDebounce?.cancel();
     _progressDebounce = Timer(const Duration(milliseconds: 800), () async {
       try {
-        await http
-            .patch(
+        await NbHttp.patch(
           Uri.parse("${ApiConfig.httpBase}/travel/plans/${_plan.planId}/progress"),
           headers: const <String, String>{"content-type": "application/json"},
           body: jsonEncode(<String, int>{"day": _day, "stop": _safeCur}),
@@ -495,8 +495,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
 
   Future<void> _restoreProgress() async {
     try {
-      final http.Response resp = await http
-          .get(Uri.parse(
+      final http.Response resp = await NbHttp.get(Uri.parse(
               "${ApiConfig.httpBase}/travel/plans/${_plan.planId}/progress"))
           .timeout(_httpTimeout);
       if (resp.statusCode != 200 || !mounted) return;
@@ -534,8 +533,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
 
   Future<void> _refreshFromStore() async {
     try {
-      final http.Response resp = await http
-          .get(Uri.parse("${ApiConfig.httpBase}/travel/plans/${_plan.planId}"))
+      final http.Response resp = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/travel/plans/${_plan.planId}"))
           .timeout(_httpTimeout);
       if (resp.statusCode != 200 || !mounted) return;
       final Object? decoded = jsonDecode(resp.body);
@@ -554,8 +552,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
     if (!mounted || _signalInFlight) return;
     _signalInFlight = true;
     try {
-      final http.Response resp = await http
-          .get(Uri.parse(
+      final http.Response resp = await NbHttp.get(Uri.parse(
               "${ApiConfig.httpBase}/travel/plans/${_plan.planId}/signal"))
           .timeout(_httpTimeout);
       if (resp.statusCode != 200 || !mounted) return;
@@ -584,8 +581,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
       return;
     }
     try {
-      final http.Response resp = await http
-          .post(
+      final http.Response resp = await NbHttp.post(
         Uri.parse(
             "${ApiConfig.httpBase}/travel/plans/${_plan.planId}/days/$_day/items"),
         headers: <String, String>{
@@ -624,8 +620,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
     final String? comment = await _showCommentDialog(stop.name);
     if (comment == null || comment.trim().isEmpty || !mounted) return;
     try {
-      final http.Response resp = await http
-          .post(
+      final http.Response resp = await NbHttp.post(
         Uri.parse(
             "${ApiConfig.httpBase}/travel/plans/${_plan.planId}/days/$_day/items/$_safeCur/comment"),
         headers: <String, String>{

@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 
 import { evaluateAndSelectStrategy } from "../src/agent/synthesis-strategy.js";
@@ -9,11 +9,11 @@ import { evaluateAndSelectStrategy } from "../src/agent/synthesis-strategy.js";
 // 「目前未知」四字即 prompt 原词）。用户拍板：已确定的不必说；没说清的提醒
 // 保留但一句话就够。短路后注入 CONFIRM_RECEIPT_INSTRUCTION 专用收口指令。
 
-test("reminder.plan 成功轮短路为 confirm_receipt，不再注入已知/未知盘点策略", () => {
+test("calendar.create 成功轮短路为 confirm_receipt，不再注入已知/未知盘点策略", () => {
   const directive = evaluateAndSelectStrategy(
     [
       {
-        toolName: "reminder.plan",
+        toolName: "calendar.create",
         ok: true,
         result: {
           ok: true,
@@ -36,9 +36,9 @@ test("reminder.plan 成功轮短路为 confirm_receipt，不再注入已知/未�
   assert.equal(directive.preamblePolicy, "suppress");
 });
 
-test("calendar.create_from_text 成功轮同样短路", () => {
+test("calendar.create 成功轮同样短路", () => {
   const directive = evaluateAndSelectStrategy(
-    [{ toolName: "calendar.create_from_text", ok: true, result: { ok: true, matched: true } }],
+    [{ toolName: "calendar.create", ok: true, result: { ok: true, matched: true } }],
     "帮我记一下周三下午3点开会",
   );
   assert.equal(directive.strategy, "confirm_receipt");
@@ -46,7 +46,7 @@ test("calendar.create_from_text 成功轮同样短路", () => {
 
 test("确认工具失败轮不短路：失败要向用户解释原因", () => {
   const directive = evaluateAndSelectStrategy(
-    [{ toolName: "reminder.plan", ok: false, result: { ok: false, error: "时间解析失败" } }],
+    [{ toolName: "calendar.create", ok: false, result: { ok: false, error: "时间解析失败" } }],
     "明天早上我10点我要去看牙医",
   );
   assert.notEqual(directive.strategy, "confirm_receipt");
@@ -55,7 +55,7 @@ test("确认工具失败轮不短路：失败要向用户解释原因", () => {
 test("确认轮混检索轮不短路：真实数据仍按质量分档组织", () => {
   const mixed = evaluateAndSelectStrategy(
     [
-      { toolName: "reminder.plan", ok: true, result: { ok: true, summary: "提醒已写入日程" } },
+      { toolName: "calendar.create", ok: true, result: { ok: true, summary: "提醒已写入日程" } },
       { toolName: "search_web", ok: true, result: { items: [{ title: "t", snippet: "s" }] } },
     ],
     "查一下协和牙科再帮我约明天10点",

@@ -54,7 +54,7 @@ registry.register("search_web", async (input: any) => ({
 registry.register("smart_home.control_device", async (input: any) => ({
   ok: true, deviceId: "livingroom_ac", temperature: input?.temperature ?? 26,
 }));
-registry.register("reminder.plan", async (input: any) => ({
+registry.register("calendar.create", async (input: any) => ({
   ok: true, nextRunAtLocal: "2026-09-20T09:00:00+08:00", echo: input ?? {},
 }));
 registry.register("weather.get_local", async () => ({ city: "上海", condition: "多云", tempC: 24 }));
@@ -73,7 +73,7 @@ const { FOREGROUND_ROLE_GUIDANCE } = await import("../src/services/agent-core.js
 // AGENT_TOOL_ARCH=legacy 时跑旧暴露链路（4 工具白名单 + 零延迟目录 / delegate 能力束裁剪），
 // 与静态架构同条件对照。
 const ARCH = (process.env.AGENT_TOOL_ARCH ?? "static") === "legacy" ? "legacy" : "static";
-const LEGACY_CHAT_WHITELIST_NAMES = ["reminder.plan", "calendar.create_from_text", "task.dispatch", "search_web"];
+const LEGACY_CHAT_WHITELIST_NAMES = ["calendar.create", "calendar.create", "task.dispatch", "search_web"];
 
 function chatPlanLegacy(userText?: string) {
   const base = corpus.filter(
@@ -142,7 +142,7 @@ const SCENARIOS: Array<{
   expectAny: string[]; caps?: string[]; turnIntent?: string;
 }> = [
   { name: "core直调-时钟", lane: "chat", userText: "现在几点了？", expectAny: ["clock.get_current_time"], turnIntent: undefined },
-  { name: "core直调-提醒", lane: "chat", userText: "明天早上九点提醒我开会", expectAny: ["reminder.plan"], turnIntent: "action_write" },
+  { name: "core直调-提醒", lane: "chat", userText: "明天早上九点提醒我开会", expectAny: ["calendar.create"], turnIntent: "action_write" },
   { name: "预召回+请求卡-智能家居", lane: "chat", userText: "把客厅空调调到26度", expectAny: ["smart_home.control_device"], turnIntent: "action_write" },
   { name: "task-天气/搜索", lane: "task", userText: "上海今天会下雨吗", expectAny: ["search_web", "weather.get_local"], caps: ["search"] },
 ];

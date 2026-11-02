@@ -1,4 +1,4 @@
-/**
+﻿/**
  * tool_discover 召回黄金回归（2026-09-06）。
  *
  * 背景：前后台架构下，后台快速通道的可见工具只有桥工具（tool_discover/tool_call），
@@ -50,7 +50,7 @@ type GoldenCase = {
 /**
  * 黄金集分两档：
  *   - top1：单点快查，模型拿 matches[0] 直接 tool_call，错了就是 2 波预算白烧；
- *   - topK：同义工具并存（reminder.plan vs calendar.create_from_text）或表达偏口语，
+ *   - topK：表达偏口语（同族多工具并存），
  *     允许在前 3 内——模型会看 matches 列表的描述再选。
  */
 const GOLDEN: GoldenCase[] = [
@@ -72,12 +72,12 @@ const GOLDEN: GoldenCase[] = [
   { query: "帮我搜一下刘浩存最近的消息", expect: ["search_web", "internet.research", "deep_search"], topK: 3 },
   { query: "读一下这个网页 https://example.com 说了什么", expect: ["fetch_web", "info.inspect_webpage"], topK: 3 },
   // ── 写动作（完整通道也先经快速通道召回）──
-  { query: "明天早上九点提醒我开会", expect: ["reminder.plan", "calendar.create_from_text", "calendar.create_task"], topK: 3 },
+  { query: "明天早上九点提醒我开会", expect: ["calendar.create"], topK: 3 },
   { query: "我有哪些日程", expect: ["calendar.list_tasks"], topK: 3 },
   { query: "取消明天那个提醒", expect: ["calendar.delete_task", "calendar.list_tasks"], topK: 3 },
   { query: "记住我妈生日是5月20号", expect: ["care.set_important_date"], topK: 3 },
   { query: "到家的时候提醒我拿快递", expect: ["geofence.create"], topK: 3 },
-  { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "reminder.plan"], topK: 3 },
+  { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "calendar.create"], topK: 3 },
   { query: "看一下门口摄像头", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
   { query: "帮我盯着这款耳机降价", expect: ["watch.track"], topK: 3 },
   // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 world.link.send_message

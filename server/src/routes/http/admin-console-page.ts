@@ -1862,7 +1862,7 @@ function saveManifest() {
   var channel = $("mfChannel").value;
   if (channel !== mfChannelLoaded &&
       !confirm(channel === "platform"
-        ? "切成 platform 后，所有客户端下次启动不再拉起本机 runtime，改用统一 API 服务。\n" +
+        ? "切成 platform 后，所有客户端下次启动不再拉起本机 runtime，改用统一 API 服务。\\n" +
           "确认装机台账里本机后端都起得来、且云端已配好 key 再执行。确定要切换吗？"
         : "切回 byok：客户端下次启动重新拉起本机 runtime。确定吗？")) {
     hint.textContent = "";

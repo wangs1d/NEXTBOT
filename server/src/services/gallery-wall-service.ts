@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
 import type { ImageAsset, PictureKit } from "@nextbot/picture";
+import { pictureAssetUrl } from "./picture-url.js";
 
 /**
  * 3D 照片墙「贴墙」服务（B 面数据管线）——沙龙照片墙版。
@@ -253,9 +254,12 @@ export function clusterAssetsByTime(assets: ImageAsset[]): ImageAsset[][] {
  */
 export function computeWallLayout(
   assets: ImageAsset[],
-  opts: { pictureUrlPrefix?: string; ownerOverrides?: Record<string, string> } = {},
+  opts: { pictureUrlPrefix?: string; ownerOverrides?: Record<string, string>; actorId?: string } = {},
 ): WallLayout {
   const prefix = opts.pictureUrlPrefix ?? "";
+  // 分区后墙上的图要带归属身份才取到文件；未传身份保持裸路径（纯函数单测口径）
+  const wallAssetUrl = (path: string) =>
+    opts.actorId ? pictureAssetUrl(path, opts.actorId) : path;
   const overrides = opts.ownerOverrides ?? {};
   const clusters = clusterAssetsByTime(assets);
   const events: WallEvent[] = [];
@@ -311,8 +315,8 @@ export function computeWallLayout(
       const y = item.isOwner ? OWNER_Y : BASE_Y + (hashUnit("salon" + item.asset.id) - 0.5) * 2 * SALON_JITTER;
       return {
         id: item.asset.id,
-        thumbUrl: `${prefix}/picture/assets/${item.asset.id}/thumbnail/medium`,
-        fileUrl: `${prefix}/picture/assets/${item.asset.id}/file`,
+        thumbUrl: wallAssetUrl(`${prefix}/picture/assets/${item.asset.id}/thumbnail/medium`),
+        fileUrl: wallAssetUrl(`${prefix}/picture/assets/${item.asset.id}/file`),
         width: item.asset.width,
         height: item.asset.height,
         hangWidth: item.w,
@@ -355,8 +359,8 @@ export function computeWallLayout(
     const size = hangSize(pick.asset.width, pick.asset.height, true);
     todayPhoto = {
       id: pick.asset.id,
-      thumbUrl: `${prefix}/picture/assets/${pick.asset.id}/thumbnail/medium`,
-      fileUrl: `${prefix}/picture/assets/${pick.asset.id}/file`,
+      thumbUrl: wallAssetUrl(`${prefix}/picture/assets/${pick.asset.id}/thumbnail/medium`),
+      fileUrl: wallAssetUrl(`${prefix}/picture/assets/${pick.asset.id}/file`),
       width: pick.asset.width,
       height: pick.asset.height,
       hangWidth: size.w,
@@ -405,6 +409,8 @@ export class GalleryWallService {
   constructor(
     private readonly pictureKit: PictureKit,
     private readonly pictureRoot: string,
+    /** 墙的归属 actor：墙上的图 URL 要带它才能在分区里取到文件 */
+    private readonly actorId?: string,
   ) {}
 
   private get overridesPath(): string {
@@ -427,7 +433,7 @@ export class GalleryWallService {
   /** 全量贴墙布局（每次现算） */
   async layout(): Promise<WallLayout> {
     const map = await this.loadOverrides();
-    return computeWallLayout(this.pictureKit.store.listAll(), { ownerOverrides: map });
+    return computeWallLayout(this.pictureKit.store.listAll(), { ownerOverrides: map, actorId: this.actorId });
   }
 
   /**

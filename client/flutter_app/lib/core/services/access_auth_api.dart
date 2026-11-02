@@ -67,6 +67,28 @@ class AccessDeviceBinding {
   }
 }
 
+/// 服务端返回的一台已绑定设备（GET /api/auth/devices，不含凭据）。
+class AccessDevice {
+  const AccessDevice({
+    required this.tokenId,
+    required this.deviceId,
+    required this.deviceLabel,
+    required this.lastSeenAt,
+  });
+
+  final String tokenId;
+  final String deviceId;
+  final String deviceLabel;
+  final double lastSeenAt;
+
+  factory AccessDevice.fromJson(Map<String, dynamic> json) => AccessDevice(
+        tokenId: json["tokenId"]?.toString() ?? "",
+        deviceId: json["deviceId"]?.toString() ?? "",
+        deviceLabel: json["deviceLabel"]?.toString() ?? "",
+        lastSeenAt: (json["lastSeenAt"] as num?)?.toDouble() ?? 0,
+      );
+}
+
 /// 本机设备凭据的本地持久化。
 ///
 /// 与 WindowBoundsPreference 同思路：落在应用支持目录下的单个 JSON 文件。
@@ -94,12 +116,17 @@ class AccessCredentialStore {
 
   /// 是否已有可用凭据。
   bool get hasCredentials =>
-      _token != null && _token!.isNotEmpty && _userId!.isNotEmpty;
+      _token != null && _token!.isNotEmpty && _userId?.isNotEmpty == true;
 
   /// 请求头：已绑定时附带 Bearer token，否则为空 map。
   Map<String, String> get authHeaders => hasCredentials
       ? <String, String>{"Authorization": "Bearer $_token"}
       : const <String, String>{};
+
+  /// URL 查询串形态的凭证：`<img>` 之外的音视频标签、WebView 页面地址发不出
+  /// 请求头，云端开周界鉴权后只能靠 `?token=`（服务端 extractToken 两个通道都认）。
+  Map<String, String> get accessTokenQuery =>
+      hasCredentials ? <String, String>{"token": _token!} : const <String, String>{};
 
   /// 启动时加载一次；文件缺失/损坏视为未绑定。
   Future<void> load() async {
@@ -206,16 +233,55 @@ class AccessAuthApi {
     }
   }
 
+  /// POST /accounts/email/otp/start：向自己的邮箱发 6 位所有权验证码。
+  /// 服务端未配置出站邮件通道时返回 503，这里如实报错、不假装成功。
+  Future<AccessAuthResult<void>> startEmailOtp({required String email}) async {
+    try {
+      final http.Response res = await _client
+          .post(
+            Uri.parse("$_baseUrl/accounts/email/otp/start"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{"email": email.trim()}),
+          )
+          .timeout(_timeout);
+      final Map<String, dynamic> data = res.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode != 200 || data["ok"] != true) {
+        return AccessAuthResult.failure(
+          data["message"]?.toString() ??
+              data["error"]?.toString() ??
+              "验证码发送失败: ${res.statusCode}",
+        );
+      }
+      return AccessAuthResult.success(null);
+    } catch (e) {
+      return AccessAuthResult.failure("网络错误: $e");
+    }
+  }
+
   /// POST /api/auth/pairing-code：生成 6 位配对码（供其他设备绑定）。
-  Future<AccessAuthResult<String>> issuePairingCode() async {
+  ///
+  /// 本机已有 token → 直接签；本机还没 token 但服务端已有别的绑定设备 →
+  /// 必须带 [emailCode]（先向 /accounts/email/otp/start 发码）证明邮箱归属，
+  /// 否则新装设备永远签不出码、也就永远绑不上。
+  Future<AccessAuthResult<String>> issuePairingCode({
+    String? emailCode,
+    String? userId,
+  }) async {
     try {
       final http.Response res = await _client
           .post(
             Uri.parse("$_baseUrl/api/auth/pairing-code"),
             headers: _headers,
             body: jsonEncode(<String, dynamic>{
-              "userId": AccessCredentialStore.instance.userId ?? ApiConfig.effectiveActorId,
+              "userId":
+                  userId ??
+                  AccessCredentialStore.instance.userId ??
+                  ApiConfig.effectiveActorId,
               "deviceId": AccessCredentialStore.instance.deviceId,
+              if (emailCode != null && emailCode.trim().isNotEmpty)
+                "emailCode": emailCode.trim(),
             }),
           )
           .timeout(_timeout);
@@ -260,6 +326,36 @@ class AccessAuthApi {
       }
       return AccessAuthResult.success(
         AccessDeviceBinding.fromJson(data),
+      );
+    } catch (e) {
+      return AccessAuthResult.failure("网络错误: $e");
+    }
+  }
+
+  /// GET /api/auth/devices：本人名下已绑定设备列表（含本机，不含任何凭据）。
+  Future<AccessAuthResult<List<AccessDevice>>> listDevices() async {
+    try {
+      final http.Response res = await _client
+          .get(
+            Uri.parse("$_baseUrl/api/auth/devices"),
+            headers: _headers,
+          )
+          .timeout(_timeout);
+      if (res.statusCode != 200) {
+        final Map<String, dynamic> data =
+            jsonDecode(res.body) as Map<String, dynamic>;
+        return AccessAuthResult.failure(
+          data["error"]?.toString() ?? "获取设备列表失败: ${res.statusCode}",
+        );
+      }
+      final Map<String, dynamic> data =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      final List<dynamic> raw = data["devices"] as List<dynamic>? ?? const [];
+      return AccessAuthResult.success(
+        raw
+            .whereType<Map<String, dynamic>>()
+            .map(AccessDevice.fromJson)
+            .toList(growable: false),
       );
     } catch (e) {
       return AccessAuthResult.failure("网络错误: $e");

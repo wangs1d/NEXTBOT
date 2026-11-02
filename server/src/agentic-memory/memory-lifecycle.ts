@@ -1,6 +1,10 @@
 import type { Memory } from "mem0ai/oss";
 import OpenAI from "openai";
+import Database from "better-sqlite3";
+import { existsSync } from "node:fs";
 import { actorIdVariants } from "./actor-key.js";
+import { buildAgenticMemoryConfig, resolveAgenticVectorDbPath } from "./config.js";
+import { isMemoryScanWorkerEnabled, scanVectorDbInWorker } from "../services/memory-scan-worker-host.js";
 
 import {
   getMemoryTTLDays,
@@ -284,6 +288,29 @@ export class AgenticMemoryLifecycleService {
       ? [...new Set(this.reinforcement.listActorIds().flatMap((a) => actorIdVariants(a)))]
       : [];
     if (actorCandidates.length === 0) return null;
+
+    // 快路径（2026-11-01 主线程阻塞根治）：直读本地向量库 SQLite 的 id/payload。
+    // mem0 的 `list()` 是 `SELECT * FROM vectors` —— 把每一行的向量 BLOB 也读出来、
+    // JSON.parse 再转 Float32Array，然后才按 user_id 过滤；且它是**按 actor 调用**的，
+    // N 个 actor 就是把整张表解码 N 遍（实测单次扫描阻塞主线程 1s~7.9s）。
+    //
+    // 任务级隔离（C 方案）：能拿到本地库路径时优先交给 worker 只读扫描（主线程只等
+    // IPC，不解析 JSON）；worker 不可用/超时则回退主进程直读。写操作始终留在主进程。
+    const dbPath = resolveAgenticVectorDbPath();
+    if (dbPath && isMemoryScanWorkerEnabled()) {
+      try {
+        const rows = await scanVectorDbInWorker(dbPath, actorCandidates);
+        return rows as Mem0MemoryItem[];
+      } catch (err) {
+        console.warn(
+          "[memory-lifecycle] worker 扫描失败（回退主进程直读）:",
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+    const fast = await this.fetchAllViaVectorDb(actorCandidates);
+    if (fast) return fast;
+
     try {
       const allMemories: Mem0MemoryItem[] = [];
       for (const variant of actorCandidates) {
@@ -292,6 +319,8 @@ export class AgenticMemoryLifecycleService {
           filters: { user_id: variant },
         })) as unknown as Mem0GetAllResult;
         allMemories.push(...(allResult.results ?? []));
+        // 回退路径同样让出事件循环，避免连续 actor 叠成一段长阻塞
+        await new Promise<void>((resolve) => setImmediate(resolve));
       }
       if (allMemories.length >= GET_ALL_TOP_K) {
         console.warn(
@@ -303,6 +332,107 @@ export class AgenticMemoryLifecycleService {
     } catch (err) {
       console.warn(
         "[memory-lifecycle] getAll 失败（本轮跳过）:",
+        err instanceof Error ? err.message : err,
+      );
+      return null;
+    }
+  }
+
+  /**
+   * 直读 mem0 本地向量库（`vectors` 表的 id/payload），形状与 mem0 getAll 的
+   * 返回项对齐（memory=payload.data、metadata=payload 去掉保留键）。
+   * 仅当 vectorStore 为本地 memory（SQLite）时可用；Qdrant / 读失败返回 null，
+   * 调用方回退 mem0 getAll 路径（行为不变，只是慢）。
+   */
+  private async fetchAllViaVectorDb(
+    actorVariants: string[],
+  ): Promise<Mem0MemoryItem[] | null> {
+    try {
+      const cfg = buildAgenticMemoryConfig();
+      const vs = cfg?.vectorStore as
+        | { provider?: string; config?: { dbPath?: string } }
+        | undefined;
+      if (!vs || vs.provider !== "memory") return null;
+      const dbPath = vs.config?.dbPath;
+      if (!dbPath || !existsSync(dbPath)) return null;
+
+      const allowed = new Set(actorVariants);
+      const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+      let rows: Array<{ id: string; payload: string }>;
+      try {
+        rows = db.prepare("SELECT id, payload FROM vectors").all() as Array<{
+          id: string;
+          payload: string;
+        }>;
+      } finally {
+        db.close();
+      }
+
+      const EXCLUDED = new Set([
+        "user_id",
+        "agent_id",
+        "run_id",
+        "hash",
+        "data",
+        "createdAt",
+        "updatedAt",
+        "textLemmatized",
+        "attributedTo",
+      ]);
+      const out: Mem0MemoryItem[] = [];
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i]!;
+        let payload: Record<string, unknown>;
+        try {
+          payload = JSON.parse(row.payload) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        // 与 mem0 normalizePayload 一致：camel → snake（仅三个实体键）
+        if ("userId" in payload && !("user_id" in payload)) {
+          payload.user_id = payload.userId;
+          delete payload.userId;
+        }
+        if ("agentId" in payload && !("agent_id" in payload)) {
+          payload.agent_id = payload.agentId;
+          delete payload.agentId;
+        }
+        if ("runId" in payload && !("run_id" in payload)) {
+          payload.run_id = payload.runId;
+          delete payload.runId;
+        }
+        const uid = typeof payload.user_id === "string" ? payload.user_id : "";
+        if (!uid || !allowed.has(uid)) continue;
+        const metadata: Record<string, unknown> = {};
+        for (const [key, value] of Object.entries(payload)) {
+          if (!EXCLUDED.has(key)) metadata[key] = value;
+        }
+        out.push({
+          id: row.id,
+          memory: typeof payload.data === "string" ? payload.data : "",
+          createdAt:
+            typeof payload.createdAt === "string"
+              ? payload.createdAt
+              : typeof payload.created_at === "string"
+                ? payload.created_at
+                : undefined,
+          updatedAt:
+            typeof payload.updatedAt === "string"
+              ? payload.updatedAt
+              : typeof payload.updated_at === "string"
+                ? payload.updated_at
+                : undefined,
+          metadata,
+        });
+        // 每 200 行让出一次事件循环：即使表很大也不会把主线程一次性焊住
+        if (i > 0 && i % 200 === 0) {
+          await new Promise<void>((resolve) => setImmediate(resolve));
+        }
+      }
+      return out;
+    } catch (err) {
+      console.warn(
+        "[memory-lifecycle] 向量库快速扫描失败（回退 mem0 getAll）:",
         err instanceof Error ? err.message : err,
       );
       return null;

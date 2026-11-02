@@ -9,6 +9,9 @@ const idPattern = /(?<![\d.])\d{17}[\dXx](?![\d.])/g;
 const bankPattern = /(?<![\d.])\d{16,19}(?![\d.])/g;
 const emailPattern = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g;
 const ipPattern = /(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])/g;
+/** 模型服务密钥形态（sk-/pk-/rk- 前缀串、Google AIza 串）：用户把 key 粘进正文也不落盘 */
+const apiKeyPattern =
+  /(?<![\w-])(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}(?![\w-])|(?<![\w-])AIza[0-9A-Za-z_-]{30,}(?![\w-])/g;
 
 export function redactSensitiveText(input: string): string {
   return input
@@ -16,5 +19,6 @@ export function redactSensitiveText(input: string): string {
     .replace(ipPattern, "***IP***")
     .replace(phonePattern, "***PHONE***")
     .replace(idPattern, "***ID***")
-    .replace(bankPattern, "***BANK***");
+    .replace(bankPattern, "***BANK***")
+    .replace(apiKeyPattern, "***APIKEY***");
 }

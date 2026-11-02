@@ -23,11 +23,17 @@ typedef SharedBrowserResult = Map<String, dynamic>;
 typedef WsEventSender = void Function(String type, Map<String, dynamic> payload);
 
 /// 「允许保存登录态」征询（服务端捕获 Cookie 前必问，问一次记住）。
+/// [allSites]：统一征询——一次答复对所有平台生效，不换平台重复问。
 class SbSaveLoginAsk {
-  const SbSaveLoginAsk({required this.siteId, required this.siteLabel});
+  const SbSaveLoginAsk({
+    required this.siteId,
+    required this.siteLabel,
+    this.allSites = false,
+  });
 
   final String siteId;
   final String siteLabel;
+  final bool allSites;
 }
 
 /// 当前页面的来源：决定面板关闭时是「回主页」还是「保留现场」。
@@ -177,6 +183,7 @@ class SharedBrowserHost {
       saveLoginAsk.value = SbSaveLoginAsk(
         siteId: siteId,
         siteLabel: payload["siteLabel"]?.toString() ?? "该网站",
+        allSites: payload["allSites"] == true,
       );
       return;
     }

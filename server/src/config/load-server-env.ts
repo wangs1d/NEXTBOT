@@ -104,3 +104,15 @@ anchorPlaywrightBrowsersPath();
 // 有些模块（如 chat-user-message.ts）在模块顶层调用 getAgentRuntimeConfig()，
 // 如果 loadServerEnv() 被推迟到 index.ts 显式调用，那个缓存就已经写死了。
 loadServerEnv();
+
+/**
+ * mem0ai 遥测默认关闭（2026-11-01 提速）：mem0 的每次 getAll/search 都会
+ * `await` 一次 PostHog 遥测 POST，网络不可达时按 10s 连接超时阻塞调用方——
+ * 实测把一次记忆库扫描拖到 7.9s，且发生在主线程。这里在 mem0 模块加载前
+ * 把开关置 false（用户显式设 MEM0_TELEMETRY=true 时尊重用户配置）。
+ * 必须在 load-server-env 模块内执行：所有入口（index/runtime-main）都先 import 它，
+ * 早于 agentic-memory 对 mem0ai 的静态导入。
+ */
+if (process.env.MEM0_TELEMETRY === undefined) {
+  process.env.MEM0_TELEMETRY = "false";
+}

@@ -9,17 +9,34 @@ import "package:http/http.dart" as http;
 import "../config/api_config.dart";
 import "soda_lyric_cache.dart";
 
+/// 逐字时间轴上的一个唱段（字/词/音节，取决于歌曲的逐字歌词粒度）。
+class MediaLyricChar {
+  const MediaLyricChar({
+    required this.tMs,
+    required this.dMs,
+    required this.text,
+  });
+
+  final int tMs;
+  final int dMs;
+  final String text;
+}
+
 /// 一条歌词行（时间轴来自网易云 LRC，t 为相对曲目开始的毫秒）。
 class MediaLyricLine {
   const MediaLyricLine({
     required this.tMs,
     required this.text,
     this.translation,
+    this.chars,
   });
 
   final int tMs;
   final String text;
   final String? translation;
+
+  /// 逐字时间轴；null/空表示只有行级时间轴，原生按行内插值兜底。
+  final List<MediaLyricChar>? chars;
 }
 
 /// 本地播放器（Windows SMTC）上报的当前曲目快照。
@@ -243,11 +260,27 @@ class MediaSessionService {
       final List<dynamic> rawLines = data["lines"] as List<dynamic>? ?? const [];
       _lyrics = rawLines
           .whereType<Map<dynamic, dynamic>>()
-          .map((line) => MediaLyricLine(
-                tMs: (line["t"] as num?)?.toInt() ?? 0,
-                text: line["text"]?.toString() ?? "",
-                translation: line["tr"]?.toString(),
-              ))
+          .map((line) {
+            final dynamic rawChars = line["chars"];
+            List<MediaLyricChar>? chars;
+            if (rawChars is List) {
+              final List<MediaLyricChar> parsed = rawChars
+                  .whereType<Map<dynamic, dynamic>>()
+                  .map((c) => MediaLyricChar(
+                        tMs: (c["t"] as num?)?.toInt() ?? 0,
+                        dMs: (c["d"] as num?)?.toInt() ?? 0,
+                        text: c["text"]?.toString() ?? "",
+                      ))
+                  .toList(growable: false);
+              if (parsed.isNotEmpty) chars = parsed;
+            }
+            return MediaLyricLine(
+              tMs: (line["t"] as num?)?.toInt() ?? 0,
+              text: line["text"]?.toString() ?? "",
+              translation: line["tr"]?.toString(),
+              chars: chars,
+            );
+          })
           .toList(growable: false);
 
       final Map<dynamic, dynamic>? matchedTrack =
@@ -256,6 +289,7 @@ class MediaSessionService {
         "[media-session] lyric matched: ${matchedTrack?["name"]}"
         " / ${matchedTrack?["artist"]}"
         " | ${_lyrics.length} lines | translated=${data["translated"] == true}"
+        " | wordTimed=${data["wordTimed"] == true}"
         " | trackKey=$_lyricTrackKey",
       );
       await _pushIslandLyrics(track.trackKey, _lyrics);
@@ -281,6 +315,15 @@ class MediaSessionService {
             "t": line.tMs / 1000.0,
             "text": line.text,
             "tr": line.translation ?? "",
+            if (line.chars != null)
+              "chars": <Map<String, Object?>>[
+                for (final MediaLyricChar c in line.chars!)
+                  <String, Object?>{
+                    "t": c.tMs / 1000.0,
+                    "d": c.dMs / 1000.0,
+                    "c": c.text,
+                  },
+              ],
           },
       ],
     };

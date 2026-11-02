@@ -26,6 +26,7 @@ const {
 } = await import("../src/services/gallery-wall-service.js");
 const { parseExifGps } = await import("../src/services/photo-analysis-service.js");
 const { registerGalleryWallRoutes } = await import("../src/routes/http/gallery-wall.js");
+const { fakePictureRegistry } = await import("./helpers/fake-picture-registry.js");
 const { default: Fastify } = await import("fastify");
 
 type PictureKit = import("@nextbot/picture").PictureKit;
@@ -145,7 +146,7 @@ test("沙龙照片墙：设为墙主覆盖自动选择", async () => {
   const root = path.join(tmpDir, "layout-root-owner");
   const kit = await createPictureKit({ rootDir: root });
   const app = Fastify();
-  registerGalleryWallRoutes(app, { pictureKit: kit });
+  registerGalleryWallRoutes(app, { pictureKits: fakePictureRegistry(kit) });
   try {
     const { asset: a1 } = await kit.store.ingest(await (await import("sharp")).default({
       create: { width: 200, height: 200, channels: 3, background: { r: 10, g: 20, b: 30 } },
@@ -205,7 +206,7 @@ test("gallery-wall 路由：页面桥探针 / vendor / layout / analyze", async 
   const app = Fastify();
   // 注入桩分析器：单测不依赖真实视觉模型凭据
   registerGalleryWallRoutes(app, {
-    pictureKit: kit,
+    pictureKits: fakePictureRegistry(kit),
     analyzeFn: async (images) =>
       images.map(() => ({ scene: "室内", place: "大理古城", caption: "光线很软，时间慢下来" })),
   });

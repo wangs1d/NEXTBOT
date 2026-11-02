@@ -295,9 +295,17 @@ export async function geocodeCity(name: string): Promise<GeocodeHit | null> {
 
 export class WeatherService {
   /**
-   * @param timezone IANA 时区；传 "auto"（缺省）让接口按经纬度推导——日历日和逐小时
-   *   时刻都以「那个坐标所在的时区」为准，绝不掺入服务器本地时区或出口 IP 的时区。
+   * 短时结果缓存（2026-11-01）：天气是慢工具（Open-Meteo 实测 5s+），而同一轮
+   * 对话里「确认/追问/再问一次」以及同一城市的卡片渲染会重复打同一个请求。
+   * 命中缓存直接返回，不再重复付上游延迟。默认 TTL 5 分钟（WEATHER_CACHE_TTL_MS 可调，
+   * 0 关闭），key = 坐标/时区/天数/城市名。
    */
+  private readonly briefCache = new Map<string, { at: number; brief: WeatherBrief }>();
+  private readonly briefCacheTtlMs = (() => {
+    const n = Number.parseInt(process.env.WEATHER_CACHE_TTL_MS ?? "", 10);
+    return Number.isFinite(n) && n >= 0 ? n : 300_000;
+  })();
+
   async getBrief(
     latitude: number,
     longitude: number,
@@ -308,6 +316,13 @@ export class WeatherService {
   ): Promise<WeatherBrief> {
     const forecastDays = Math.max(1, Math.min(Math.trunc(days) || 2, 16));
     const tzParam = (timezone || "").trim() || "auto";
+    const cacheKey = `${latitude.toFixed(3)}|${longitude.toFixed(3)}|${tzParam}|${forecastDays}|${locationLabel ?? ""}`;
+    if (this.briefCacheTtlMs > 0) {
+      const hit = this.briefCache.get(cacheKey);
+      if (hit && Date.now() - hit.at <= this.briefCacheTtlMs) {
+        return structuredClone(hit.brief);
+      }
+    }
     const params = new URLSearchParams({
       latitude: String(latitude),
       longitude: String(longitude),
@@ -473,6 +488,14 @@ time?: (string | null)[];
     brief.summaryLine = `${brief.locationLabel ? `${brief.locationLabel} ` : ""}当前约 ${currentTempC.toFixed(0)}°C（体感 ${brief.apparentTempC.toFixed(0)}°C），${brief.weatherText}；今日约 ${tMin.toFixed(0)}–${tMax.toFixed(0)}°C${
       rainWindow ? `，降水${rainWindow.alreadyPassed ? "主要落在" : "集中在"} ${rainWindow.label}` : ""
     }。${tomorrowSummary}`.trim();
+    if (this.briefCacheTtlMs > 0) {
+      // 缓存副本，调用方修改返回值不会污染缓存；容量封顶防长跑进程无界增长
+      if (this.briefCache.size >= 64) {
+        const oldestKey = this.briefCache.keys().next().value as string | undefined;
+        if (oldestKey !== undefined) this.briefCache.delete(oldestKey);
+      }
+      this.briefCache.set(cacheKey, { at: Date.now(), brief: structuredClone(brief) });
+    }
     return brief;
   }
 

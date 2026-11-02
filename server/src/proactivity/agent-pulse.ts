@@ -1,4 +1,4 @@
-// AgentPulseService —— Muse 式「消息聚合 → agent 审阅 → 主动开口」（2026-10-25）。
+// AgentPulseService —— 主动性模块的「消息聚合 → agent 审阅 → 主动开口」（2026-10-25）。
 //
 // 取代 mapping-rules 的 digest_beat 固定节拍（原「心跳回顾」，10/16/21 点零 LLM
 // 模板播报）。用户定稿的差异：
@@ -30,7 +30,7 @@ export type PulseAggregate = {
   interests: string[];
   /** 进行中目标的一句话上下文（感知 → 目标桥） */
   goalLine?: string | null;
-  /** 共享发现层里还没被任何出口说过的发现（"来源：内容"行；Muse 式聚合的主体） */
+  /** 共享发现层里还没被任何出口说过的发现（"来源：内容"行；主动性聚合的主体） */
   findings?: string[];
   /** 用户此刻在线状态（含持续时长，如 "active（已持续 8 分钟）"）；世界板 current.presence */
   presence?: string | null;
@@ -41,8 +41,8 @@ export type PulseAggregate = {
 };
 
 export type AgentPulseDeps = {
-  /** 当前用户（单用户机装；null = 不评审） */
-  actorId: () => string | null;
+  /** 本轮评审的用户（多租户：一次 tick 覆盖所有活跃 actor；空数组 = 不评审） */
+  actors: () => string[];
   /** 聚合当前材料；null/全空 = 无材料（不评审，重置指纹） */
   aggregate: (actorId: string) => PulseAggregate | null;
   /** agent 审阅（单次小 LLM 调用；未注入 = 功能关闭） */
@@ -114,6 +114,8 @@ export type PulseCheckResult = {
   verdict?: string;
   /** 本次材料来自测试端点 fixture（不写指纹，不污染真实评审状态） */
   fixture?: boolean;
+  /** 多用户 tick 时逐用户的完整结果（单用户不填） */
+  results?: PulseCheckResult[];
 };
 
 /** 材料指纹：稳定 stringify 后 FNV-1a（内容变一点 → 指纹全变） */
@@ -168,7 +170,10 @@ export function buildPulsePrompt(now: Date, a: PulseAggregate): string {
     if (a.screenFocus) state.push(`屏幕：${a.screenFocus}`);
     material.push(`【用户此刻状态】${state.join("；")}`);
   }
-  if (a.tasks.length) material.push(`【今日与未来 24h 安排】\n${a.tasks.map((t) => `- ${t}`).join("\n")}`);
+  // 同一条安排可能被多条写入路径重复落库（去重收敛在 createTask，这里再兜一层：
+  // 重复行会让审阅把「同一件事」误判成「两件事撞车」）。
+  const tasks = [...new Set(a.tasks.map((t) => t.trim()).filter((t) => t.length > 0))];
+  if (tasks.length) material.push(`【今日与未来 24h 安排】\n${tasks.map((t) => `- ${t}`).join("\n")}`);
   if (a.unread.length) material.push(`【未读消息】${a.unread.join("、")}`);
   if (a.goals.length) material.push(`【已备好的结果（答应过用户的事）】\n${a.goals.map((t) => `- ${t}`).join("\n")}`);
   if (a.interests.length) material.push(`【用户关注的话题】${a.interests.join("；")}`);
@@ -182,6 +187,7 @@ export function buildPulsePrompt(now: Date, a: PulseAggregate): string {
     "",
     "判断标准：",
     "- 只在确实有值得现在说的事时才开口：日程有冲突或马上要到期的安排、重要的人发来未读、答应过用户的事有了结果、用户关心的动态有了新进展。",
+    "- 只有【今日与未来 24h 安排】里的两个不同事项同一时刻才算冲突；时间照抄材料里的 HH:mm，不要取整成「六点整」，不要拿最近对话或记忆内容推断、编造冲突和事项。",
     "- 例行汇报、凑数、没有信息量的话一律不开口。宁可沉默，不可打扰。",
     "- 开口时机参考用户此刻状态：专注工作/离线时非必要不打断，刚回到电脑前、空闲时更适合说话。",
     "- 用户已知的事（最近对话里提过的、之前已经说过的）不要重复。",
@@ -199,7 +205,8 @@ export class AgentPulseService {
   private readonly state: PulseState = {};
   private timer: ReturnType<typeof setInterval> | null = null;
   private bootTimer: ReturnType<typeof setTimeout> | null = null;
-  private inFlight = false;
+  /** 每个 actor 独立的进行中标记：一个人评审中不耽误别人 */
+  private readonly inFlight = new Set<string>();
   private readonly nowFn: () => number;
 
   constructor(private readonly deps: AgentPulseDeps) {
@@ -224,7 +231,7 @@ export class AgentPulseService {
       void this.check();
     }, CHECK_INTERVAL_MS);
     if (typeof this.timer.unref === "function") this.timer.unref();
-    console.log("[AgentPulse] 已启动（Muse 式聚合评审；打扰控制=agent 自律 NOP + 管道 social 仲裁）");
+    console.log("[AgentPulse] 已启动（主动性聚合评审；打扰控制=agent 自律 NOP + 管道 social 仲裁）");
   }
 
   stop(): void {
@@ -240,20 +247,42 @@ export class AgentPulseService {
   async check(opts?: {
     force?: boolean;
     fixture?: Partial<PulseAggregate>;
+    /** 只评审指定用户（测试端点用）；缺省 = 本轮所有活跃用户 */
+    actorId?: string;
   }): Promise<PulseCheckResult> {
     const enabled = isPulseEnabled() && !!this.deps.llmComplete;
-    const actorId = this.deps.actorId();
-    if (!enabled) return { enabled: false, actorId, ran: false, reason: "disabled" };
-    if (!actorId) return { enabled, actorId, ran: false, reason: "no_actor" };
-    if (this.inFlight) return { enabled, actorId, ran: false, reason: "in_flight" };
-    this.inFlight = true;
+    const targets = opts?.actorId ? [opts.actorId] : this.deps.actors();
+    if (!enabled) {
+      return { enabled: false, actorId: targets[0] ?? null, ran: false, reason: "disabled" };
+    }
+    if (targets.length === 0) {
+      return { enabled, actorId: null, ran: false, reason: "no_actor" };
+    }
+    const results: PulseCheckResult[] = [];
+    for (const actorId of targets) {
+      results.push(await this.checkOne(actorId, enabled, opts));
+    }
+    // 单用户（定时路径的常见形态 / 测试端点指定）直接返回本体；多用户时
+    // 返回首个真正跑过 LLM 的结果并附全量 results，便于排查。
+    if (results.length === 1) return results[0]!;
+    const primary = results.find((r) => r.ran) ?? results[0]!;
+    return { ...primary, results };
+  }
+
+  private async checkOne(
+    actorId: string,
+    enabled: boolean,
+    opts?: { force?: boolean; fixture?: Partial<PulseAggregate> },
+  ): Promise<PulseCheckResult> {
+    if (this.inFlight.has(actorId)) return { enabled, actorId, ran: false, reason: "in_flight" };
+    this.inFlight.add(actorId);
     try {
       return await this.reviewOnce(actorId, opts?.force === true, opts?.fixture);
     } catch (err) {
-      console.log(`[AgentPulse] 评审失败（忽略）: ${err}`);
+      console.log(`[AgentPulse] 评审失败（忽略）actor=${actorId}: ${err}`);
       return { enabled, actorId, ran: false, reason: `error:${String(err).slice(0, 60)}` };
     } finally {
-      this.inFlight = false;
+      this.inFlight.delete(actorId);
     }
   }
 
@@ -361,7 +390,7 @@ export class AgentPulseService {
         `sig=${signature}`,
         ...(fixture ? ["fixture"] : []),
         ...(priceNews ? ["price_news_must"] : []),
-        "muse_review",
+        "proactivity_review",
       ],
       createdAt: this.nowFn(),
       source: "initiative",

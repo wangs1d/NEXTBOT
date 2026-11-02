@@ -32,16 +32,29 @@ test("MailSensor: 新邮件 → mail 流 Signal（含跨源实体候选）", () 
   assert.equal(signals.length, 1, "只取 since 之后的");
   const s = signals[0];
   assert.equal(s.stream, "mail");
+  assert.equal(s.actorId, "u1", "信号必须带上归属，否则进共享桶串台");
   assert.equal(s.salience, "high", "high 分级 → high 显著度");
-  assert.equal(s.fingerprint, "mail:101", "uid 稳定指纹");
-  assert.equal(s.actorId, "u1");
+  assert.equal(s.fingerprint, "mail:u1:101", "uid 稳定指纹（按归属切分）");
   assert.match(s.delta ?? "", /合同确认/);
   const entities = s.payload?.entities as string[];
   assert.ok(entities.includes("张总"), `发件人入实体候选: ${entities}`);
   assert.ok(entities.some((e) => e.includes("corp")), `域名入实体候选: ${entities}`);
 });
 
-test("MailSensor: 无 uid 时退 from|subject|date 指纹（不撞键）", () => {
+test("MailSensor: UID 是一只邮箱内的编号——同一 uid 在两个账号下不得互相去重", () => {
+  const sensor = new MailSensor({
+    fetchNewSince: () => [
+      { uid: 101, importance: "normal", mail: { actorId: "a@qq.com", from: "code@x.com", subject: "A 的验证码", date: "2026-10-01T00:00:00.000Z" } },
+      { uid: 101, importance: "normal", mail: { actorId: "b@qq.com", from: "code@x.com", subject: "B 的验证码", date: "2026-10-01T00:00:00.000Z" } },
+    ],
+  });
+  const signals = sensor.collect(0);
+  assert.equal(signals.length, 2, "两个邮箱各自的第 101 封是两封不同的信，都得采");
+  assert.equal(signals[0].fingerprint, "mail:a@qq.com:101");
+  assert.notEqual(signals[0].fingerprint, signals[1].fingerprint, "按归属切分指纹，不互相顶掉");
+});
+
+test("MailSensor: 无 uid 时退 actor|from|subject|date 指纹（不撞键）", () => {
   const sensor = new MailSensor({
     fetchNewSince: () => [
       { uid: -1, importance: "medium", mail: { actorId: "u1", from: "a@b.com", subject: "S", date: "2026-10-01T00:00:00.000Z" } },
@@ -49,23 +62,25 @@ test("MailSensor: 无 uid 时退 from|subject|date 指纹（不撞键）", () =>
   });
   const s = sensor.collect(0)[0];
   assert.equal(s.salience, "medium");
-  assert.match(s.fingerprint, /^mail:a@b\.com\|S\|/);
+  assert.match(s.fingerprint, /^mail:u1:a@b\.com\|S\|/);
 });
 
-test("IcsSensor: 事件 → schedule 流 Signal（地点入实体，临会显著度升高）", () => {
+test("IcsSensor: 事件 → schedule 流 Signal（地点入实体，临会显著度升高，按归属切分指纹）", () => {
   const soon = Date.now() + 30 * 60_000;
   const sensor = new IcsSensor({
     fetchEventsSince: () => [
-      { feed: "work", key: "e1", summary: "三亚出差", location: "三亚", startMs: soon, allDay: false },
-      { feed: "work", key: "e2", summary: "周会", startMs: soon + 10 * 86_400_000, allDay: false },
+      { actorId: "u1", feed: "work", key: "e1", summary: "三亚出差", location: "三亚", startMs: soon, allDay: false },
+      { actorId: "u2", feed: "work", key: "e2", summary: "周会", startMs: soon + 10 * 86_400_000, allDay: false },
     ],
   });
   const signals = sensor.collect(0);
   assert.equal(signals.length, 2);
   assert.equal(signals[0].stream, "schedule");
+  assert.equal(signals[0].actorId, "u1", "信号必须带上归属，否则进共享桶串台");
   assert.equal(signals[0].salience, "high", "1h 内 → high");
   assert.equal(signals[1].salience, "low", "远期 → low");
-  assert.equal(signals[0].fingerprint, "ics:work:e1");
+  assert.equal(signals[0].fingerprint, "ics:u1:work:e1");
+  assert.notEqual(signals[0].fingerprint, "ics:u2:work:e1", "同名事件在两个账号下不能互相去重");
   assert.deepEqual(signals[0].payload?.entities, ["三亚", "三亚出差"]);
 });
 
@@ -78,7 +93,7 @@ test("FinanceSensor: 账本条目 → finance 流 Signal（商户入实体）", 
         { id: "tx2", date: new Date(t - 5 * 86_400_000).toISOString(), amount: 5, type: "expense" },
       ],
     },
-    () => "u1",
+    () => ["u1"],
   );
   const signals = sensor.collect(t - 86_400_000);
   // 512*... 只取 at > since 的；tx1 在窗口内
@@ -91,7 +106,7 @@ test("FinanceSensor: 账本条目 → finance 流 Signal（商户入实体）", 
 });
 
 test("FinanceSensor: 无 actor 时返回空（不误采）", () => {
-  const sensor = new FinanceSensor({ getTransactions: () => [{ id: "x", date: "", amount: 1, type: "expense" }] }, () => null);
+  const sensor = new FinanceSensor({ getTransactions: () => [{ id: "x", date: "", amount: 1, type: "expense" }] }, () => []);
   assert.deepEqual(sensor.collect(0), []);
 });
 
@@ -154,7 +169,11 @@ test("内核: 外部信源连续失败 → 熔断（与内线同一套退避）"
 test("SourceStore: 信号按天分区落盘（streams/<stream>/<YYYY-MM-DD>.ndjson）", () => {
   const dir = tmpDir();
   try {
-    const store = new SourceStore({ dataPath: dir });
+    // 固定保留/加载窗口，避免用例里的固定日期随真实时间滑出保留期
+    const store = new SourceStore({
+      dataPath: dir,
+      env: { SENSOR_SOURCE_RETENTION_DAYS: "3650", SENSOR_SOURCE_LOAD_DAYS: "3650" },
+    });
     const atMail = Date.parse("2026-10-05T09:00:00");
     const atSched = Date.parse("2026-10-05T10:00:00");
     store.feed({ stream: "mail", at: atMail, fingerprint: "m1", salience: "high", delta: "新邮件：三亚机票" });
@@ -293,7 +312,11 @@ test("SourceStore: 端到端——内核 emit 的信号自动汇聚进库（onSi
 test("SourceStore: 跨天信号落到不同日分区（按天切分，不再单代轮转）", () => {
   const dir = tmpDir();
   try {
-    const store = new SourceStore({ dataPath: dir });
+    // 固定保留/加载窗口，避免用例里的固定日期随真实时间滑出保留期
+    const store = new SourceStore({
+      dataPath: dir,
+      env: { SENSOR_SOURCE_RETENTION_DAYS: "3650", SENSOR_SOURCE_LOAD_DAYS: "3650" },
+    });
     const d1 = Date.parse("2026-10-01T12:00:00");
     const d2 = Date.parse("2026-10-02T12:00:00");
     store.feed({ stream: "mail", at: d1, fingerprint: "a", salience: "low", delta: "三亚" });

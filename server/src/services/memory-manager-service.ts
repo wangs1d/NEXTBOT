@@ -55,34 +55,6 @@ export type UserProfileSnapshot = {
   version: number;
 };
 
-export type MemoryContinuitySnapshot = {
-  stableLines: string[];
-  fadingLines: string[];
-  forgottenLines: string[];
-  forgottenArchiveLines?: string[];
-  temporalHighlights: string[];
-  lastSleepAt: string;
-  lastUpdatedAt: string;
-};
-
-export type RelationshipMemorySnapshot = {
-  lines: string[];
-  lastUpdatedAt: string;
-};
-
-export type LifeThemeMemorySnapshot = {
-  themes: string[];
-  lastUpdatedAt: string;
-};
-
-export type DreamPhaseSnapshot = {
-  replayLines: string[];
-  reinforcedLines: string[];
-  mergedThemes: string[];
-  fadedNoise: string[];
-  lastUpdatedAt: string;
-};
-
 const DEFAULT_CONFIG: MemoryManagerConfig = {
   enabled: true,
   consolidationIntervalMs: 10 * 60 * 1000,
@@ -136,22 +108,12 @@ function formatRelativeAgeLabel(ageHours: number): string {
   return `${Math.floor(ageHours / (24 * 30))}mo ago`;
 }
 
-/**
- * 中文相对时间标签，供 temporalHighlights 使用。
- * 跨天时输出「N天前」格式，与 getYesterdayHighlightForPrompt 的正则 ^(\d+)天前[:：] 对齐。
- */
-function formatRelativeAgeLabelCn(ageHours: number): string {
-  if (ageHours < 1) return "刚刚";
-  if (ageHours < 24) return `今天${Math.floor(ageHours)}h前`;
-  const days = Math.floor(ageHours / 24);
-  if (days < 7) return `${days}天前`;
-  if (days < 30) return `${Math.floor(days / 7)}周前`;
-  return `${Math.floor(days / 30)}月前`;
-}
-
 function stripTimestampPrefix(line: string): string {
   return line.replace(/^\[[^\]]+\]\s*/, "").trim();
 }
+
+/** 整理器注入用的「当日待整理」包裹标记行：提示结构，不是记忆内容，不许落进 KV。 */
+const PENDING_MARKER_LINE_RE = /^\[\s*\/?\s*当日待整理[^\]]*\]\s*$/;
 
 export class MemoryManagerService {
   private readonly config: MemoryManagerConfig;
@@ -166,22 +128,6 @@ export class MemoryManagerService {
   // 淘汰只损失一次磁盘重读（快照本就持久化在 data 目录），不丢数据。
   private readonly pendingProfiles = new RetentionMap<UserProfileSnapshot>("pendingProfiles", {
     maxEntries: retainMax("MEMORY_RETAIN_PENDING_PROFILES_MAX", 64),
-    idleMs: 30 * 60 * 1000,
-  });
-  private readonly continuitySnapshots = new RetentionMap<MemoryContinuitySnapshot>("continuitySnapshots", {
-    maxEntries: retainMax("MEMORY_RETAIN_CONTINUITY_MAX", 64),
-    idleMs: 30 * 60 * 1000,
-  });
-  private readonly relationshipSnapshots = new RetentionMap<RelationshipMemorySnapshot>("relationshipSnapshots", {
-    maxEntries: retainMax("MEMORY_RETAIN_RELATIONSHIP_MAX", 64),
-    idleMs: 30 * 60 * 1000,
-  });
-  private readonly lifeThemeSnapshots = new RetentionMap<LifeThemeMemorySnapshot>("lifeThemeSnapshots", {
-    maxEntries: retainMax("MEMORY_RETAIN_LIFE_THEME_MAX", 64),
-    idleMs: 30 * 60 * 1000,
-  });
-  private readonly dreamSnapshots = new RetentionMap<DreamPhaseSnapshot>("dreamSnapshots", {
-    maxEntries: retainMax("MEMORY_RETAIN_DREAM_MAX", 64),
     idleMs: 30 * 60 * 1000,
   });
 
@@ -407,14 +353,13 @@ export class MemoryManagerService {
       let raw = typeof entries.memory_summary === "string" ? entries.memory_summary : "";
 
       // 缺口 2 修复 → journal 统一来源：当天待整理内容直接读当日 journal 行
-      // （自上次消费游标起），追加到 raw 顶部，确保 dreaming/在线固化优先整理当天内容。
+      // （自上次消费游标起），前置到语料顶部，确保 dreaming/在线固化优先整理当天内容。
       // 原实现自建 RAM 队列存一份原始轮次，与 DailyJournal 双写同批数据，已删除。
       const dailyPending = await this.consumeTodayJournalLines(actorId);
-      if (dailyPending.text) {
-        const todayKey = this.getTodayDayKey();
-        const dailyBlock = `\n[当日待整理 ${todayKey}]\n${dailyPending.text}\n[/当日待整理]\n`;
-        raw = dailyBlock + raw;
-        console.log(`[MemoryManager] consolidateNow: 注入当日 journal 行 ${dailyPending.text.split("\n").length} 条到 ${actorId}`);
+      const pendingLines = dailyPending.text.split("\n").filter((line) => line.trim().length > 0);
+      if (pendingLines.length > 0) {
+        raw = `${pendingLines.join("\n")}\n${raw}`;
+        console.log(`[MemoryManager] consolidateNow: 并入当日 journal 行 ${pendingLines.length} 条到 ${actorId}`);
       }
 
       if (!raw || raw.length < 50) return result;
@@ -423,11 +368,15 @@ export class MemoryManagerService {
           ? entries.memory_summary_forgotten
           : "";
 
-      const lines = raw.split("\n").filter((line) => line.trim().length > 0);
-      if (lines.length <= 2) return result;
+      const storedLines = raw.split("\n").filter((line) => line.trim().length > 0);
+      // 待整理标记行是整理器的提示结构，不是记忆内容：历史上曾随语料写回 KV，
+      // 这里连存量一起清除（清掉的行计入 entriesMerged，触发写回把存储洗干净）。
+      const lines = storedLines.filter((line) => !PENDING_MARKER_LINE_RE.test(line));
+      const droppedMarkerLines = storedLines.length - lines.length;
+      if (lines.length <= 2 && droppedMarkerLines === 0) return result;
 
       const consolidated = this.deduplicateLines(lines);
-      result.entriesMerged = lines.length - consolidated.length;
+      result.entriesMerged = storedLines.length - consolidated.length;
 
       // 建议 3：取当天高频话题词，传给评分函数给"用户重复问过的话题"加分
       const topTopics = this.getTopDailyTopics(dailyPending.userText);
@@ -464,14 +413,8 @@ export class MemoryManagerService {
     }
 
     await this.synthesizeProfile(actorId);
-    if (lastRetention) {
-      this.updateContinuitySnapshot(actorId, lastRetention);
-      this.updateRelationshipSnapshot(actorId, lastRetention.remembered);
-      this.updateLifeThemeSnapshot(actorId, lastRetention.remembered);
-      this.updateDreamSnapshot(actorId, lastRetention);
-      if (this.narrativeMemory) {
-        await this.performDreamRehearsal(actorId, lastRetention);
-      }
+    if (lastRetention && this.narrativeMemory) {
+      await this.performDreamRehearsal(actorId, lastRetention);
     }
     // 画像维护不放这里：画像由对话内统一抽取（LLM 一次调用捎带 profileOps）
     // 确定性落位写入；mem0/扣子等主流做法同样不在记忆整理阶段整文重写画像，
@@ -661,126 +604,6 @@ export class MemoryManagerService {
     return parts.join("\n");
   }
 
-  getContinuityForPrompt(actorId: string): string | null {
-    const snapshot = this.continuitySnapshots.get(actorId);
-    if (!snapshot) return null;
-
-    const parts = [
-      "【记忆连续性】系统会在夜间整理、压缩并逐渐遗忘低价值内容，高价值内容会保留更久。",
-      snapshot.stableLines.length > 0 ? `长期保留: ${snapshot.stableLines.slice(0, 6).join("；")}` : "",
-      snapshot.fadingLines.length > 0 ? `正在淡化: ${snapshot.fadingLines.slice(0, 4).join("；")}` : "",
-      snapshot.forgottenLines.length > 0 ? `最近淡忘: ${snapshot.forgottenLines.slice(0, 4).join("；")}` : "",
-      snapshot.temporalHighlights.length > 0
-        ? `时间节律: ${snapshot.temporalHighlights.slice(0, 4).join("；")}`
-        : "",
-      `最近整理: ${snapshot.lastSleepAt}`,
-    ].filter(Boolean);
-    return parts.join("\n");
-  }
-
-  /**
-   * 主动跨天 recall（优化 2）：从 temporalHighlights 中提取"昨天/前天"的关键事件。
-   *
-   * 场景：用户前天说"后天要去玩"，今天提及时 agent 能关联记忆。
-   * temporalHighlights 格式为"N天前: 内容片段"，筛 1-3 天前的行注入 prompt，
-   * 让 LLM 不依赖当前 query 也能看到最近跨天事件。
-   */
-  getYesterdayHighlightForPrompt(actorId: string): string | null {
-    const snapshot = this.continuitySnapshots.get(actorId);
-    if (!snapshot || snapshot.temporalHighlights.length === 0) return null;
-
-    // 筛"昨天"/"前天"/"2-3 天前"的行（格式如 "1天前: xxx" / "2天前: xxx"）
-    const recentDays = snapshot.temporalHighlights.filter((line) => {
-      const m = line.match(/^(\d+)天前[:：]/);
-      return m && Number.parseInt(m[1], 10) >= 1 && Number.parseInt(m[1], 10) <= 3;
-    });
-
-    if (recentDays.length === 0) return null;
-    return `【跨天事件回顾】${recentDays.slice(0, 4).join("；")}`;
-  }
-
-  getRelationshipMemoryForPrompt(actorId: string): string | null {
-    const snapshot = this.relationshipSnapshots.get(actorId);
-    if (!snapshot || snapshot.lines.length === 0) return null;
-    // Phase 6.2 修正：保留 6 行。关系记忆是用户与 Agent 关系的连续性核心，
-    // 行数减少会丢失较早的关系节点（如"首次信任建立"、"共同经历 X"），
-    // 这些是长期关系记忆不可丢失的部分。压缩交给 compactPromptBlock 的 char 上限处理。
-    return `【关系记忆】${snapshot.lines.slice(0, 6).join("；")}`;
-  }
-
-  getLifeThemeMemoryForPrompt(actorId: string): string | null {
-    const snapshot = this.lifeThemeSnapshots.get(actorId);
-    if (!snapshot || snapshot.themes.length === 0) return null;
-    // Phase 6.2：6 → 4 行。生活主题是背景性上下文，4 个最相关主题已足够。
-    return `【生活主题】${snapshot.themes.slice(0, 4).join("；")}`;
-  }
-
-  getDreamMemoryForPrompt(actorId: string): string | null {
-    const snapshot = this.dreamSnapshots.get(actorId);
-    if (!snapshot) return null;
-
-    // 缺口 5 修复：dreamMemory 从"整理元信息"重构为"昨夜梦境叙事"
-    // 原格式："重放: X；强化: Y；主题合并: Z"（机械式，LLM 难以利用）
-    // 新格式：叙事化文本，如"昨夜你聊到 X、Y，已合并为 Z；橘猫话题反复出现，已强化"
-    // 让 LLM 能像人类回忆梦境一样引用整理结果
-    const narrative = this.generateDreamNarrative(snapshot);
-    return narrative;
-  }
-
-  /**
-   * 生成梦境叙事文本（优化 4：职责收窄为跨主题关联）。
-   *
-   * 原 generateDreamNarrative 只是"复述要点"，和 memory_summary 高度重叠。
-   * 新版强调"跨主题关联"：从 remembered/faded 中找不同主题的交叉点，
-   * 生成"X 和 Y 似乎有关联"式的洞察，让 LLM 能像人类梦境一样做创造性关联。
-   */
-  private generateDreamNarrative(snapshot: { replayLines: string[]; reinforcedLines: string[]; mergedThemes: string[]; fadedNoise: string[]; lastUpdatedAt: string }): string {
-    const date = new Date(snapshot.lastUpdatedAt);
-    const dateStr = `${date.getMonth() + 1}月${date.getDate()}日`;
-
-    const parts: string[] = [];
-    parts.push(`【昨夜梦境叙事 ${dateStr}】`);
-
-    // 跨主题关联：从 mergedThemes 中两两配对，生成"X 与 Y 可能有关联"
-    // 这是 dreaming 区别于 memory_summary 的核心价值——做创造性关联而非复述
-    if (snapshot.mergedThemes.length >= 2) {
-      const themes = snapshot.mergedThemes.slice(0, 4).filter((t) => t.trim().length > 0);
-      const associations: string[] = [];
-      for (let i = 0; i < themes.length - 1; i++) {
-        for (let j = i + 1; j < themes.length; j++) {
-          if (themes[i] !== themes[j]) {
-            associations.push(`${themes[i]} ↔ ${themes[j]}`);
-          }
-        }
-      }
-      if (associations.length > 0) {
-        parts.push(`梦境浮现的关联：${associations.slice(0, 3).join("；")}`);
-      }
-    } else if (snapshot.mergedThemes.length > 0) {
-      // 退化：只有一个主题时，仍输出但不做关联
-      const themes = snapshot.mergedThemes.slice(0, 2).filter((t) => t.trim().length > 0);
-      parts.push(`核心主题：${themes.join("、")}`);
-    }
-
-    // 强化：反复出现的记忆（像"总是想起的事情"），只保留与 memory_summary 不重叠的
-    if (snapshot.reinforcedLines.length > 0) {
-      const reinforcedItems = snapshot.reinforcedLines.slice(0, 3).map((line) => {
-        return line.replace(/^\[[^\]]+\]\s*/, "").slice(0, 60);
-      });
-      parts.push(`反复出现、已深化的记忆：${reinforcedItems.join("、")}`);
-    }
-
-    // 消散噪音：已淡化的低价值内容（像"想不起来的梦的碎片"）
-    if (snapshot.fadedNoise.length > 0) {
-      const noiseItems = snapshot.fadedNoise.slice(0, 2).map((line) => {
-        return line.replace(/^\[[^\]]+\]\s*/, "").slice(0, 40);
-      });
-      parts.push(`已逐渐淡忘的：${noiseItems.join("、")}`);
-    }
-
-    return parts.join("\n");
-  }
-
   async shutdown(): Promise<void> {
     for (const [actorId, timer] of this.consolidationTimers) {
       clearTimeout(timer);
@@ -917,88 +740,6 @@ export class MemoryManagerService {
     if (ageHours > 168) score -= this.isHighValueEntry(line) ? 0.06 : 0.22;
 
     return { score, ts: safeTs };
-  }
-
-  private buildTemporalHighlights(lines: string[]): string[] {
-    const now = Date.now();
-    return lines
-      .slice(0, 12)
-      .map((line) => {
-        const match = line.match(/\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z?)\]/);
-        const ts = match?.[1] ? Date.parse(match[1]) : Number.NaN;
-        if (!Number.isFinite(ts)) return null;
-        const ageHours = Math.max(0, (now - ts) / 3_600_000);
-        const date = new Date(ts);
-        const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-        const label = formatRelativeAgeLabelCn(ageHours);
-        return `${label}: ${dateStr} | ${stripTimestampPrefix(line).slice(0, 64)}`;
-      })
-      .filter((line): line is string => Boolean(line));
-  }
-
-  private updateContinuitySnapshot(
-    actorId: string,
-    retention: {
-      remembered: string[];
-      faded: string[];
-      forgotten: string[];
-      forgottenArchive: string[];
-    },
-  ): void {
-    this.continuitySnapshots.set(actorId, {
-      stableLines: retention.remembered,
-      fadingLines: retention.faded,
-      forgottenLines: retention.forgotten,
-      forgottenArchiveLines: retention.forgottenArchive.slice(-8),
-      temporalHighlights: this.buildTemporalHighlights([
-        ...retention.remembered,
-        ...retention.faded,
-      ]),
-      lastSleepAt: new Date().toISOString(),
-      lastUpdatedAt: new Date().toISOString(),
-    });
-  }
-
-  private updateRelationshipSnapshot(actorId: string, remembered: string[]): void {
-    const relationshipLines = remembered.filter((line) => {
-      return /陪|关心|鼓励|调侃|默契|信任|支持|晚安|辛苦|安慰/i.test(line);
-    });
-    this.relationshipSnapshots.set(actorId, {
-      lines: relationshipLines.slice(0, 8),
-      lastUpdatedAt: new Date().toISOString(),
-    });
-  }
-
-  private updateLifeThemeSnapshot(actorId: string, remembered: string[]): void {
-    const themes = remembered
-      .map((line) => this.extractTopic(line))
-      .filter((topic) => topic && topic.length >= 2);
-    this.lifeThemeSnapshots.set(actorId, {
-      themes: [...new Set(themes)].slice(0, 10),
-      lastUpdatedAt: new Date().toISOString(),
-    });
-  }
-
-  private updateDreamSnapshot(
-    actorId: string,
-    retention: {
-      remembered: string[];
-      faded: string[];
-      forgotten: string[];
-      forgottenArchive: string[];
-    },
-  ): void {
-    const replayLines = [...retention.remembered.slice(0, 6), ...retention.faded.slice(0, 4)];
-    const reinforcedLines = this.pickReinforcedLines(replayLines, retention.faded);
-    const mergedThemes = [...new Set(replayLines.map((line) => this.extractTopic(line)).filter(Boolean))].slice(0, 8);
-    const fadedNoise = retention.forgotten.slice(0, 6);
-    this.dreamSnapshots.set(actorId, {
-      replayLines,
-      reinforcedLines,
-      mergedThemes,
-      fadedNoise,
-      lastUpdatedAt: new Date().toISOString(),
-    });
   }
 
   private pickReinforcedLines(primary: string[], secondary: string[]): string[] {

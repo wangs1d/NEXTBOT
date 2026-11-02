@@ -2,6 +2,7 @@ import "dart:convert";
 import "dart:typed_data";
 
 import "package:http/http.dart" as http;
+import "nb_http.dart";
 
 import "../config/api_config.dart";
 
@@ -63,8 +64,7 @@ class ModelApiTester {
     final String url = base.endsWith("/models") ? base : "$base/models";
     final Stopwatch sw = Stopwatch()..start();
     try {
-      final http.Response res = await http
-          .get(
+      final http.Response res = await NbHttp.get(
             Uri.parse(url),
             headers: <String, String>{"Authorization": "Bearer ${apiKey.trim()}"},
           )
@@ -133,8 +133,7 @@ class ModelApiTester {
     Future<ModelApiTestResult> call(int maxTokens) async {
       final Stopwatch sw = Stopwatch()..start();
       try {
-        final http.Response res = await http
-            .post(
+        final http.Response res = await NbHttp.post(
               Uri.parse("$base/chat/completions"),
               headers: <String, String>{
                 "Authorization": "Bearer $apiKey",
@@ -225,8 +224,7 @@ class VoiceprintApi {
 
   static Future<Map<String, dynamic>> status() async {
     try {
-      final http.Response res = await http
-          .get(
+      final http.Response res = await NbHttp.get(
             _uri("/api/voice/voiceprint/status?userId=${Uri.encodeComponent(_userId)}"),
           )
           .timeout(const Duration(seconds: 5));
@@ -238,8 +236,7 @@ class VoiceprintApi {
 
   /// [samples]：PCM16 单声道 16k 字节（每段 ≥0.5s，建议 3-4s）。
   static Future<Map<String, dynamic>> register(List<Uint8List> samples) async {
-    final http.Response res = await http
-        .post(
+    final http.Response res = await NbHttp.post(
           _uri("/api/voice/voiceprint/register"),
           headers: _headers,
           body: jsonEncode(<String, dynamic>{
@@ -253,8 +250,7 @@ class VoiceprintApi {
 
   /// 验证一段音频是否为已录入用户本人；命中返回 speakerToken。
   static Future<Map<String, dynamic>> verify(Uint8List audio) async {
-    final http.Response res = await http
-        .post(
+    final http.Response res = await NbHttp.post(
           _uri("/api/voice/voiceprint/verify"),
           headers: _headers,
           body: jsonEncode(<String, dynamic>{
@@ -268,8 +264,7 @@ class VoiceprintApi {
 
   static Future<bool> unregister() async {
     try {
-      final http.Response res = await http
-          .delete(
+      final http.Response res = await NbHttp.delete(
             _uri("/api/voice/voiceprint?userId=${Uri.encodeComponent(_userId)}"),
           )
           .timeout(const Duration(seconds: 5));
@@ -282,15 +277,21 @@ class VoiceprintApi {
 }
 
 /// 邮箱接入（邮箱盯梢）API：状态查询 + IMAP 授权码提交（「服务接入」页邮箱胶囊）。
-/// 授权码经 PUT /api/service-config（mail 块）落盘到服务端 data/service-config.json 并
-/// 即刻启动轮询；已接入的授权码经 GET 回显 keyValue，供输入框回填（客户端默认打码）。
+/// 一台服务器服务多人，邮箱账号按登录主体隔离：状态与授权码都带上
+/// [ApiConfig.accountAuthQuery]，服务端只认这一份身份，取到的就是自己那个邮箱。
+/// 授权码经 POST /api/mail-watch/pass 绑到本人名下并即刻起盯（服务端加密留存，
+/// 主密钥缺失时返回 persisted:false——只在本次运行内生效，重启要重填）。
 class MailWatchApi {
   static Uri _uri(String path) => Uri.parse("${ApiConfig.httpBase}$path");
 
+  /// 带登录主体的地址：开周界鉴权时服务端会把身份钉成 token 归属，这里的
+  /// userId 是未开鉴权（单机装机）时唯一的归属来源。
+  static Uri _authedUri(String path) =>
+      _uri(path).replace(queryParameters: ApiConfig.accountAuthQuery);
+
   static Future<Map<String, dynamic>> status() async {
     try {
-      final http.Response res = await http
-          .get(_uri("/api/mail-watch/status"))
+      final http.Response res = await NbHttp.get(_authedUri("/api/mail-watch/status"))
           .timeout(const Duration(seconds: 5));
       return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
     } catch (_) {
@@ -298,28 +299,16 @@ class MailWatchApi {
     }
   }
 
-  /// 服务接入回显（GET /api/service-config）：mail.keyValue 为已存授权码全文，
-  /// 供「已接入 → 回填输入框（默认打码）」；读取失败返回 ok:false。
-  static Future<Map<String, dynamic>> serviceConfig() async {
-    try {
-      final http.Response res = await http
-          .get(_uri("/api/service-config"))
-          .timeout(const Duration(seconds: 5));
-      return jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
-    } catch (_) {
-      return <String, dynamic>{"ok": false};
-    }
-  }
-
-  /// 保存 IMAP 授权码（即刻生效 + 服务端持久化）。返回服务端响应（ok/error）。
+  /// 提交本人邮箱的 IMAP 授权码（即刻起盯 + 服务端加密留存）。
+  /// 返回服务端响应（ok / persisted / status / error）。
   static Future<Map<String, dynamic>> savePass(String pass) async {
     try {
-      final http.Response res = await http
-          .put(
-            _uri("/api/service-config"),
+      final http.Response res = await NbHttp.post(
+            _uri("/api/mail-watch/pass"),
             headers: <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{
-              "mail": <String, dynamic>{"pass": pass},
+              "pass": pass,
+              ...ApiConfig.accountAuthQuery,
             }),
           )
           .timeout(const Duration(seconds: 10));

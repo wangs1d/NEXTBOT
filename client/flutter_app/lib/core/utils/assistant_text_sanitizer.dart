@@ -365,19 +365,20 @@ bool isInternalFrameText(String text) {
 
 /// NEXT_UP 接续建议协议块（服务端 render-protocol-prompt 第三节）：
 /// 本应由服务端提取成 chips 后剥掉；历史回放/模型漏剥时会带进气泡。
-/// 2026-10-24 真机实证：模型把 `[NEXT_UP_START]` 写成 `[NEXT_UPSTART]`
-/// （漏下划线），故下划线/空格一律可缺省。
+/// 2026-11-02 根修：模型会自造前缀（`[NOEXTUP_END]`）或改用全角括号，
+/// 不再枚举字面写法，统一按「方括号 token 内同时含 UP 与 START/END」识别。
 final RegExp _nextUpBlockRe = RegExp(
-  r"\[NEXT[ _]?UP[ _]?START\][\s\S]*?(?:\[NEXT[ _]?UP[ _]?END\]|$)",
+  r"[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|$)",
   caseSensitive: false,
 );
 final RegExp _nextUpOrphanRe = RegExp(
-  r"\[NEXT[ _]?UP[ _]?(?:START|END)\]",
+  r"[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]",
   caseSensitive: false,
 );
 
 String _stripNextUpProtocolBlocks(String text) {
-  if (!text.contains("NEXT")) return text;
+  // 错写变体（NOEXTUP）不含 NEXT 子串，按 UP 判定才能拦住。
+  if (!text.toLowerCase().contains("up")) return text;
   final String out = text
       .replaceAll(_nextUpBlockRe, "")
       .replaceAll(_nextUpOrphanRe, "");

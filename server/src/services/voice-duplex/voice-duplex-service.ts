@@ -71,8 +71,12 @@ export class VoiceDuplexService {
     return this.sessions.size;
   }
 
-  /** 接入一条 WS 连接（/ws/voice-duplex 路由回调里调用）。 */
-  attach(socket: DuplexSocketLike): void {
+  /**
+   * 接入一条 WS 连接（/ws/voice-duplex 路由回调里调用）。
+   * `pinnedActorId` = 周界 token 归属；给了就不许客户端再自报身份（声纹闸
+   * 靠 actorId 查是否注册，随便换一个「没录音纹的邮箱」就能绕过那道闸）。
+   */
+  attach(socket: DuplexSocketLike, pinnedActorId?: string): void {
     const max = this.deps.maxSessions ?? 16;
     if (this.sessions.size >= max) {
       socket.send(JSON.stringify({ type: "error", message: "语音会话数已达上限", recoverable: false } satisfies DuplexServerMessage));
@@ -117,7 +121,7 @@ export class VoiceDuplexService {
         }
         session = created;
         this.sessions.set(socket, session);
-        const actorId = msg.actorId?.trim();
+        const actorId = (pinnedActorId ?? msg.actorId)?.trim();
         speaker =
           actorId && getVoiceprintService().status(actorId).registered
             ? { actorId, needsVerification: true, verified: false }

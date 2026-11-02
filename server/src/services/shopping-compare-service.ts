@@ -34,6 +34,8 @@ interface PlatformQuotes {
   products: ProductSummary[];
   error?: string;
   loginRequired?: boolean;
+  /** 浏览器层给出的 human-required 硬信号（登录墙 / 验证码） */
+  humanRequired?: { reason: "login" | "captcha"; evidence?: string };
 }
 
 /** 平台显示名（京东/拼多多…），未收录时回退平台标识。 */
@@ -127,6 +129,18 @@ export interface ShoppingCompareServiceDeps {
   dataDir?: string;
   /** 到价回调（装配层接 ProactivityHub.submitIntent 主动推送） */
   onPriceAlert?: (actorId: string, watch: PriceWatch, hit: PriceWatchHit) => void;
+  /**
+   * 本轮有平台命中 human-required（登录墙/验证码）且可见浏览器可用：把这些平台
+   * **一次**交给用户（长流程 handoff，建等待步 + 页面留在可见浏览器）。
+   * 普通空结果/超时不会触发。回调异常/未注入不影响比价主流程，只在回执里如实标注。
+   */
+  onUserActionRequired?: (info: {
+    actorId: string;
+    sessionId: string;
+    platforms: string[];
+    platformLabels: string[];
+    reason: "login" | "captcha";
+  }) => void;
   /**
    * 比价完成回调（装配层接决策页内存存储，模式同 travel-plans）。
    * 回调返回页面 id 时，工具回执携带 decisionPageUrl 供比价卡「打开决策页」。
@@ -414,21 +428,29 @@ export class ShoppingCompareService {
         limit,
       },
       // 只读取数不占着工具预算等扫码：超时立刻交回登录 handoff，
-      // 用户登录后由长流程续跑。
-      { preferHeadless: opts.preferVisible !== true, loginWaitMs: 20_000 },
+      // 用户登录后由长流程续跑。逐平台的交接先抑制，等本轮汇总后统一交一次。
+      { preferHeadless: opts.preferVisible !== true, loginWaitMs: 20_000, suppressHandoff: true },
     );
     if (!res.ok) {
+      const human = (res as { humanRequired?: { reason: "login" | "captcha"; evidence?: string } }).humanRequired;
       return {
         products: [],
         error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")),
         ...((res as { loginRequired?: unknown }).loginRequired ? { loginRequired: true } : {}),
+        ...(human ? { humanRequired: human } : {}),
       };
     }
     const products = (res as { products?: ProductSummary[] }).products ?? [];
     if (products.length === 0) {
-      // 空结果不算「查到了 0 个报价」：把原因（未登录/结构变更/无匹配）如实放进失败清单
+      // 空结果不算「查到了 0 个报价」：把原因（未登录/结构变更/无匹配）如实放进失败清单；
+      // 浏览器层若已判到 human-required（登录墙/验证码），一并透传，供上层统一交接。
       const summary = String((res as { summary?: string }).summary ?? "").trim();
-      return { products: [], error: summary || "未解析到商品（页面结构可能变更）" };
+      const human = (res as { humanRequired?: { reason: "login" | "captcha"; evidence?: string } }).humanRequired;
+      return {
+        products: [],
+        error: summary || "未解析到商品（页面结构可能变更）",
+        ...(human ? { humanRequired: human } : {}),
+      };
     }
     return { products };
   }
@@ -468,9 +490,10 @@ export class ShoppingCompareService {
             quotes: { products: [], error: reason instanceof Error ? reason.message : String(reason) },
           });
         }
-        // 平台把页面拦到登录页就停在这里：交接步已由登录门建好，可见浏览器必须
-        // 留在登录页等用户扫码；接着跑下一个平台会把面板导航走，用户就找不到登录页了。
-        if (outcomes[outcomes.length - 1].quotes.loginRequired) break;
+        // 平台把页面拦到登录页/验证页就停在这里：交接步由本轮汇总后统一建好，
+        // 可见浏览器必须留在该页面等用户操作；接着跑下一个平台会把面板导航走。
+        const last = outcomes[outcomes.length - 1]?.quotes;
+        if (last?.loginRequired || last?.humanRequired) break;
       }
     } else {
       const settled = await Promise.allSettled(
@@ -487,18 +510,79 @@ export class ShoppingCompareService {
     const tagged: TaggedProduct[] = [];
     const searchedPlatforms: string[] = [];
     const failedPlatforms: string[] = [];
+    /**
+     * 没取到数的平台。只有 humanRequired=true 的才交人（登录墙/验证码）；
+     * 普通空结果/读取失败只如实说明，不触发 handoff（主流 Agent 的约定）。
+     */
+    const unavailable: Array<{
+      platform: string;
+      label: string;
+      reason: "login" | "captcha" | "no_data";
+      humanRequired: boolean;
+      detail?: string;
+    }> = [];
     let loginPending: string | null = null;
     for (const { platform, quotes } of outcomes) {
-      if (quotes.loginRequired) loginPending = platform;
       if (quotes.products.length > 0) {
         searchedPlatforms.push(platform);
         const fetchedAt = Date.now();
         for (const p of quotes.products) {
           tagged.push({ platform, product: p, fetchedAt });
         }
-      } else if (quotes.error) {
-        failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
+        continue;
       }
+      const reason: "login" | "captcha" | "no_data" = quotes.loginRequired
+        ? "login"
+        : quotes.humanRequired?.reason ?? "no_data";
+      unavailable.push({
+        platform,
+        label: platformLabel(platform),
+        reason,
+        humanRequired: reason !== "no_data",
+        ...(quotes.error ? { detail: quotes.error } : {}),
+      });
+      if (quotes.loginRequired) loginPending = platform;
+      if (quotes.error) failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
+    }
+
+    // 只有浏览器层判到 human-required（登录墙/验证码）才把执行权交给用户；
+    // 一轮里有多个这样的平台时合并成**一次**交接。普通失败不打扰用户。
+    const needHuman = unavailable.filter((u) => u.humanRequired);
+    const needUserReason: "login" | "captcha" =
+      needHuman.some((u) => u.reason === "login") ? "login" : "captcha";
+    const needUserLabels = needHuman.map((u) => u.label);
+    let handoff:
+      | {
+          platforms: string[];
+          labels: string[];
+          reason: "login" | "captcha";
+          instruction: string;
+          doneAction: string;
+        }
+      | undefined;
+    if (visible && needHuman.length > 0) {
+      const instruction =
+        needUserReason === "login"
+          ? `已在内置浏览器打开${needUserLabels.join("、")}的页面：需要扫码登录的平台请先登录，完成后点「我已完成」，我接着把价补上。`
+          : `${needUserLabels.join("、")}需要完成安全验证（滑块/验证码）：页面已停在浏览器里，验证完点「我已完成」，我接着把价补上。`;
+      try {
+        this.deps.onUserActionRequired?.({
+          actorId,
+          sessionId: ctx.sessionId,
+          platforms: needHuman.map((u) => u.platform),
+          platformLabels: needUserLabels,
+          reason: needUserReason,
+        });
+      } catch (err) {
+        console.log(`[ShoppingCompare] 用户交接失败（忽略）: ${err}`);
+      }
+      handoff = {
+        platforms: needHuman.map((u) => u.platform),
+        labels: needUserLabels,
+        reason: needUserReason,
+        instruction,
+        doneAction: "我已完成",
+      };
     }
 
     if (tagged.length === 0) {
@@ -506,8 +590,14 @@ export class ShoppingCompareService {
         ok: false,
         error:
           `所有平台均未返回「${q}」的结果。` +
-          (failedPlatforms.length ? `失败详情：${failedPlatforms.join("；")}` : "可能登录态失效，请检查 Cookie 导入与授权"),
+          (handoff
+            ? handoff.instruction
+            : failedPlatforms.length
+              ? `失败详情：${failedPlatforms.join("；")}`
+              : "可能登录态失效，请检查 Cookie 导入与授权"),
         retryable: true,
+        ...(unavailable.length > 0 ? { unavailablePlatforms: unavailable } : {}),
+        ...(handoff ? { handoff } : {}),
       };
     }
 
@@ -543,6 +633,15 @@ export class ShoppingCompareService {
     const loginText = loginPending
       ? `；${platformLabel(loginPending)}需要登录，登录完我接着把${platformLabel(loginPending)}的价补上`
       : "";
+    // 没取到数的平台分两类文案：需要用户登录/验证的（交人），与普通无匹配/读取失败的（如实说明）
+    const noDataLabels = unavailable.filter((u) => !u.humanRequired).map((u) => u.label);
+    const noDataText = noDataLabels.length
+      ? `；${noDataLabels.join("、")}这次没取到报价（无匹配或读取失败）`
+      : "";
+    const verifyLabels = needHuman.filter((u) => u.reason === "captcha").map((u) => u.label);
+    const verifyText = verifyLabels.length
+      ? `；${verifyLabels.join("、")}需要完成安全验证，验证完我接着补价`
+      : "";
 
     // 决策页存档（fire-and-forget：存储失败/未装配不影响比价回执）
     const fetchedAt = Date.now();
@@ -564,7 +663,7 @@ export class ShoppingCompareService {
 
     return {
       ok: true,
-      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}`,
+      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${verifyText}${noDataText}`,
       query: q,
       platforms: requested,
       searchedPlatforms,
@@ -573,6 +672,8 @@ export class ShoppingCompareService {
       bestIndex,
       fetchedAt,
       ...(loginPending ? { loginRequired: { platform: loginPending, label: platformLabel(loginPending) } } : {}),
+      ...(unavailable.length > 0 ? { unavailablePlatforms: unavailable } : {}),
+      ...(handoff ? { handoff } : {}),
       ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };
   }

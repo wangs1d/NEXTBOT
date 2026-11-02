@@ -19,6 +19,8 @@ import path from "node:path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-receipt-test-"));
 process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 
+const TEST_ACTOR = "tester@example.com";
+
 // 环境变量须在模块导入前设置（travelPlanStore 单例构造时读取）
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
@@ -39,6 +41,7 @@ function savePlan(
 ): void {
   travelPlanStore.save({
     planId,
+    actorId: TEST_ACTOR,
     destination,
     title: `${destination}3日游`,
     startDate: "2026-10-01",
@@ -74,6 +77,7 @@ const SLIM_RECEIPT = {
 
 test("回执裁决：直跑瘦身回执（只有 id）→ 交给 attach 按 planId 冷层补全", () => {
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     replyToolName: "travel.plan-itinerary",
     replyToolResult: SLIM_RECEIPT,
     nowMs: NOW,
@@ -84,6 +88,7 @@ test("回执裁决：直跑瘦身回执（只有 id）→ 交给 attach 按 plan
 
 test("回执裁决：reply.toolName 是其他工具（destination-info）不短路——捕获的行程回执仍生效", () => {
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     replyToolName: "travel.destination-info",
     replyToolResult: { ok: true, destination: "厦门", visa: "免签" },
     executedReceipt: SLIM_RECEIPT,
@@ -98,6 +103,7 @@ test("回执裁决：捕获漏拍 → 冷层近窗回捞，正文点名目的地
   savePlan("plan-fresh-xian", "西安", -5 * 1000);
   savePlan("plan-fresh-xiamen", "厦门", -3 * 1000);
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     goal: "帮我规划去厦门的行程",
     finalText: "你的行程已经排好了，重点帮你列一下。",
     nowMs: NOW,
@@ -108,6 +114,7 @@ test("回执裁决：捕获漏拍 → 冷层近窗回捞，正文点名目的地
 
 test("回执裁决：正文不含目的地 → 取窗口内最新一份", () => {
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     goal: "帮我规划一下",
     finalText: "行程排好了。",
     nowMs: NOW,
@@ -118,6 +125,7 @@ test("回执裁决：正文不含目的地 → 取窗口内最新一份", () => 
 
 test("回执裁决：窗口内无行程 → 不附卡", () => {
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     goal: "今天天气怎么样",
     finalText: "今天晴。",
     nowMs: NOW + 60 * 60 * 1000, // 全部超出窗口
@@ -128,6 +136,7 @@ test("回执裁决：窗口内无行程 → 不附卡", () => {
 
 test("回执裁决：规划执行失败 → 不回捞旧行程误挂到失败轮", () => {
   const r = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     replyToolName: "travel.plan-itinerary",
     replyToolResult: { ok: false, error: "规划失败" },
     nowMs: NOW,
@@ -141,6 +150,7 @@ test("全链产物：attach → 版式归一 → blocks，行程卡必须是最�
   // 瘦身回执的 id 必须能在冷层命中（与真实链路一致：skill 先落盘再返回回执）
   const slimReceiptForTail = { ...SLIM_RECEIPT, id: "plan-tail-1", title: "厦门3日游" };
   const resolved = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     executedReceipt: slimReceiptForTail,
     goal: "去厦门玩3天",
     finalText: "厦门的行程帮你排好了。",
@@ -152,6 +162,7 @@ test("全链产物：attach → 版式归一 → blocks，行程卡必须是最�
   let text =
     "[AGENT_RESULT_CARD_START]{\"title\":\"厦门行程概览\",\"items\":[{\"type\":\"num\",\"text\":\"Day 1 集美学村\"}],\"footer\":\"\"}[AGENT_RESULT_CARD_END]\n\n厦门的行程帮你排好了。";
   text = attachDeterministicCards({
+      actorId: TEST_ACTOR,
     text,
     travelToolName: resolved.toolName,
     travelResult: resolved.result,
@@ -249,12 +260,14 @@ test("天数嗅探：两日/三天/一日 → 对应天数，说不清 → 缺�
 function textWithTravelCard(destination: string): string {
   savePlan(`plan-gap-${destination}`, destination, 0);
   const resolved = resolveTravelReceipt({
+    actorId: TEST_ACTOR,
     executedReceipt: { ...SLIM_RECEIPT, id: `plan-gap-${destination}`, title: `${destination}3日游` },
     goal: `去${destination}玩3天`,
     finalText: `${destination}的行程帮你排好了。`,
     nowMs: NOW,
   });
   const text = attachDeterministicCards({
+      actorId: TEST_ACTOR,
     text: `${destination}的行程帮你排好了。`,
     travelToolName: resolved.toolName,
     travelResult: resolved.result,

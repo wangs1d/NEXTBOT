@@ -41,7 +41,6 @@ function makeService(sent: Array<Record<string, unknown>>, getLocation: ((actorI
     emailSms: null,
     platformGateway: null,
     getLocation,
-    defaultActorId: "u1",
     now: () => NOW,
   });
 }
@@ -71,11 +70,11 @@ test("到站阶段推导：到达前 30 分钟 → approaching；票面已过 30
     arrivalRideOptIn: false,
   });
 
-  const approaching = await service.getSnapshot(approachingTicket.ticketId);
+  const approaching = await service.getSnapshot(approachingTicket.ticketId, "u1");
   assert.equal(approaching.ok, true);
   assert.equal(approaching.snapshot?.stage, "approaching");
 
-  const landed = await service.getSnapshot(landedTicket.ticketId);
+  const landed = await service.getSnapshot(landedTicket.ticketId, "u1");
   assert.equal(landed.ok, true);
   assert.equal(landed.snapshot?.stage, "landed");
 });

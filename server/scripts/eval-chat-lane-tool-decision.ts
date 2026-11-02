@@ -30,9 +30,9 @@ const scriptDir = dirname(fileURLToPath(import.meta.url));
 const guidanceMode = process.argv.find((a) => a.startsWith("--guidance="))?.slice(11) ?? "new";
 
 /* ── 冻结的旧版 FOREGROUND_ROLE_GUIDANCE（2026-09-23 改造前逐字快照，仅供基线） ── */
-const OLD_FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里有一组常用动作，以本轮工具列表为准（2026-09-19 静态双车道后为固定清单，不随话题变化）：创建提醒/日程（reminder.plan、calendar.create_from_text：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（涉及实时事实的问题系统已先检索并把结果放在【实时检索结果】块里，你需要更多细节时可对条目继续搜索核实）；查时间/位置/钱包余额/消息、搜图搜视频、看热搜等只读动作直接调用；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。如果工具列表不足以完成用户要的事，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会检索并加载对应工具供你下一步直接调用；拿到工具后继续完成任务，不要只输出请求标记就停。
+const OLD_FOREGROUND_ROLE_GUIDANCE = `你现在是对话里那个"人"本人。你手里有一组常用动作，以本轮工具列表为准（2026-09-19 静态双车道后为固定清单，不随话题变化）：创建提醒/日程（calendar.create、calendar.create：直接调用当场办成，成功返回 nextRunAtLocal 后才算办妥）；search_web（涉及实时事实的问题系统已先检索并把结果放在【实时检索结果】块里，你需要更多细节时可对条目继续搜索核实）；查时间/位置/钱包余额/消息、搜图搜视频、看热搜等只读动作直接调用；task.dispatch（把耗时的事派给后台：找照片视频、看位置/周边、发消息、下单支付、操作软件/设备、多步任务等，立即返回不阻塞对话，办完后结果会自动回到对话里）。如果工具列表不足以完成用户要的事，在回复中输出 <tool_request>一句话描述你需要的能力</tool_request>（如 <tool_request>把客厅空调调到26度</tool_request>），系统会检索并加载对应工具供你下一步直接调用；拿到工具后继续完成任务，不要只输出请求标记就停。
 - 先接住话头：回应对方真正说的那件事，再给你自己真实的反应——有印象讲印象，有偏好讲偏好，有立场就亮立场。
-- 用户想设提醒/日程（含「明天8点叫我起床」这类带时间点的请求）就当场调 reminder.plan 真实创建（含糊时间用 calendar.create_from_text），工具返回 nextRunAtLocal 后才算办妥、才能向用户确认；未说明是否重复时先自然问一句再创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
+- 用户想设提醒/日程（含「明天8点叫我起床」这类带时间点的请求）就当场调 calendar.create 真实创建（含糊时间用 calendar.create），工具返回 nextRunAtLocal 后才算办妥、才能向用户确认；未说明是否重复时先自然问一句再创建。绝不在没创建成功时说"到点叫你/已设置/晚安"这类收场话。要重写的其他事（下单/支付/发消息/操作设备）用 task.dispatch 派出去：派发前先自然应一声（像"好嘞，在办了"这种分量），goal 用一句完整、自包含的话说清要办成什么。
 - 涉及现实世界当前事实（谁在哪、近况、活动、新闻、价格、天气）的回答，一律以【实时检索结果】块为准：那是系统刚真实搜索到的数据，与此前的对话内容、记忆、你的印象冲突时以它为准，并主动纠正之前说过的话；块内条目不够细节时可自己再调 search_web 深挖，条目没覆盖的部分就照实说「没查到」，不用旧对话或想象补事实。
 - 凭常识或对方刚说的话就能答的（寒暄、情绪交流、观点）直接答，不要调工具。
 - 诚实底线：没真查过就不说"已查到/我搜了下"，查不到就明说查不到。
@@ -114,7 +114,7 @@ function buildToolContext() {
   }));
   // 其余 Core 工具（钱包/消息/日程/派发等）本台架不接执行器：明确报错而非静默假成功
   const stub = async (name: string) => ({ ok: false, result: { error: `eval-harness: ${name} 未接执行器` } });
-  for (const name of ["wallet.get_balance", "wallet.get_transactions", "messages.overview", "calendar.list_tasks", "brain.recall", "agent.query_capabilities", "self.list_custom_skills", "task.dispatch", "task.status", "task.cancel", "reminder.plan", "calendar.create_from_text", "phone.ensure_my_number", "phone.virtual_call", "messages.reply", "world.link.send_message", "fetch_web", "deep_search", "search_videos"]) {
+  for (const name of ["wallet.get_balance", "wallet.get_transactions", "messages.overview", "calendar.list_tasks", "brain.recall", "agent.query_capabilities", "self.list_custom_skills", "task.dispatch", "task.status", "task.cancel", "calendar.create", "calendar.create", "phone.ensure_my_number", "phone.virtual_call", "messages.reply", "world.link.send_message", "fetch_web", "deep_search", "search_videos"]) {
     registry.register(name, stub.bind(null, name));
   }
   const calls: Array<{ name: string; ok: boolean }> = [];

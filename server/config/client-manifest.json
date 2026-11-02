@@ -1,7 +1,7 @@
 {
-  "latest": "0.1.6",
+  "latest": "0.2.0",
   "minVersion": "0.1.0",
   "url": "https://login.nextbot.top/downloads/Nextbot-Setup.exe",
-  "notes": "修复部分机器后端拉不起（runtime 补齐 VC 运行库）；修复弱网/长连接半开时消息投递丢失；工具调用与检索链路优化",
+  "notes": "灵动岛音乐卡歌词高亮优化、桌宠召唤更稳；云端按账号隔离数据，模型 key 加密保存（离线主动提醒用你自己的额度）；信息卡片与检索链路优化；修复弱网/长连接半开时消息投递丢失",
   "channel": "byok"
 }

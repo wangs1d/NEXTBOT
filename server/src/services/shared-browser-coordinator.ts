@@ -136,7 +136,8 @@ export class SharedBrowserCoordinator {
     if (!socket) return;
     safeSend(socket, {
       type: "shared.browser.ask_save_login",
-      payload: { siteId, siteLabel },
+      // allSites=true：统一征询（一次答复对所有平台生效，不再逐平台弹条）
+      payload: { siteId, siteLabel, allSites: siteId === "*" },
     });
   }
 

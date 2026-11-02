@@ -33,22 +33,16 @@ function longestCommonPrefix(a: string, b: string): number {
 function buildMemory(turn: number): AgentPromptMemoryContext {
   const rep = (s: string, n: number) => Array(n).fill(s).join("");
   return {
-    personalityCore: rep("你是一个可靠的私人管家。", 20),
-    persona: rep("对话自然、先结论后解释。", 20),
-    values: rep("诚实、克制、办事优先。", 15),
-    abilities: rep("联网检索、日程管理、代码沙箱。", 15),
+    persona: `【人格】\n${rep("我是 NEXTBOT，球形小机器人。有什么说什么，把话说完就停。", 20)}`,
     userUnderstanding: `【用户理解档案】\n${rep("用户偏好简洁直接的回复。", 25)}`,
     userFacts: `【用户事实库】\n所在城市：杭州；作息：晚睡；${rep("事实条目。", 40)}`,
     userProfileSummary: rep("用户是开发者，常调研 AI 产品。", 20),
     memoryInventory: rep("记忆条目索引。", 60),
-    relationshipMemory: rep("关系背景。", 30),
-    lifeThemeMemory: rep("生活主题。", 20),
     memorySummary: rep("持久记忆：用户在做 NextBot 项目。", 30),
     // sessionRecap 随轮增长（模拟滚动 recap 追加行）
     sessionRecap: `[ts:09:00] 早上讨论了构建问题。[ts:10:30] 优化了工具路由。`.repeat(turn),
     skillIndex: rep("- skill_demo：演示技能。", 12),
     interestList: "刘浩存、AI 产品、Flutter。",
-    personaStatic: `【人格·静态】\n你是用户的私人管家兼搭档。能干、嘴欠、但绝对靠得住。`,
     personaMood: `【人格·状态：日常调侃】\n默认带一点吐槽，一句到位不堆砌。`,
     semanticIntent: "查询/检索类",
     scheduleSnapshot: "今日 14:00 例会；19:00 健身。",

@@ -26,6 +26,7 @@ import {
   ShoppingPageUnavailableError,
 } from "../src/services/shopping-platforms/browser-executor.js";
 import {
+  detectHumanRequired,
   detectLoginPage,
   waitForLogin,
 } from "../src/services/shopping-platforms/login-gate.js";
@@ -121,7 +122,7 @@ test("acquirePage throws no_cookie before launching browser when no cookie and n
     (err: unknown) => {
       assert.ok(err instanceof ShoppingPageUnavailableError);
       assert.equal((err as ShoppingPageUnavailableError).kind, "no_cookie");
-      assert.match(err.message, /未导入 jd 的 Cookie/);
+      assert.match(err.message, /未导入 京东 的 Cookie/);
       assert.match(err.message, /内置浏览器/);
       return true;
     },
@@ -166,6 +167,35 @@ test("detectLoginPage URL heuristics (jd login page vs order page) + body keywor
   assert.match(det3.reason ?? "", /扫码登录/);
 });
 
+test("detectHumanRequired: 登录墙/验证码才算 human-required，普通空页不算", async () => {
+  // 登录墙
+  const loginPage = {
+    url: () => "https://passport.jd.com/new/login.aspx",
+    evaluate: async () => "",
+  } as unknown as Page;
+  const login = await detectHumanRequired("jd", loginPage);
+  assert.equal(login.required, true);
+  assert.equal(login.reason, "login");
+
+  // 验证码/滑块（正文强信号）
+  const captchaPage = {
+    url: () => "https://search.jd.com/Search?keyword=x",
+    evaluate: async () => "请完成安全验证 拖动滑块完成拼图",
+  } as unknown as Page;
+  const captcha = await detectHumanRequired("jd", captchaPage);
+  assert.equal(captcha.required, true);
+  assert.equal(captcha.reason, "captcha");
+  assert.match(captcha.evidence ?? "", /安全验证|滑块/);
+
+  // 普通搜索结果页（没有匹配商品只是空列表，不是 human-required）
+  const normalPage = {
+    url: () => "https://search.jd.com/Search?keyword=罕见商品",
+    evaluate: async (_fn: unknown, arg?: unknown) => (arg ? null : "搜索结果 很抱歉没有找到相关商品"),
+  } as unknown as Page;
+  const normal = await detectHumanRequired("jd", normalPage);
+  assert.equal(normal.required, false);
+});
+
 test("waitForLogin resumes to target url after user scans (url leaves login domain)", async () => {
   let polls = 0;
   let target = "";
@@ -197,6 +227,29 @@ test("waitForLogin times out with readable error", async () => {
   const res = await waitForLogin("jd", page, "https://order.jd.com", { timeoutMs: 120, intervalMs: 30 });
   assert.equal(res.ok, false);
   assert.match(res.error ?? "", /等待扫码登录超时/);
+});
+
+test("captureConsent: 统一答复一次覆盖所有平台（不再逐平台问）", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "browser-session-consent-"));
+  const prev = process.env.BROWSER_SESSION_DATA_DIR;
+  process.env.BROWSER_SESSION_DATA_DIR = dir;
+  try {
+    const service = new BrowserSessionService();
+    // 未表态：任意平台都是 ask
+    assert.equal(await service.getCaptureConsent("u-consent", "jd"), "ask");
+    // 统一允许 → 其他平台直接 allow，不再问
+    await service.setCaptureConsent("u-consent", "*", true);
+    assert.equal(await service.getCaptureConsent("u-consent", "jd"), "allow");
+    assert.equal(await service.getCaptureConsent("u-consent", "pdd"), "allow");
+    // 单站点显式拒绝仍优先于统一答复
+    await service.setCaptureConsent("u-consent", "pdd", false);
+    assert.equal(await service.getCaptureConsent("u-consent", "pdd"), "deny");
+    assert.equal(await service.getCaptureConsent("u-consent", "jd"), "allow");
+  } finally {
+    if (prev == null) delete process.env.BROWSER_SESSION_DATA_DIR;
+    else process.env.BROWSER_SESSION_DATA_DIR = prev;
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("importCookies rejects invalid cookie value chars with readable error", async () => {

@@ -149,8 +149,6 @@ export type IntelJudgeInput = {
   feedback: IntelJudgeFeedback;
   /** 用户画像浅层（称呼/偏好）；null=无 */
   styleBrief?: string | null;
-  /** 说话风格卡（只影响草稿措辞，不影响取舍） */
-  voiceCard?: string | null;
 };
 
 export type IntelJudgeResult = {

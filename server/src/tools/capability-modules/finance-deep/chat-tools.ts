@@ -578,4 +578,38 @@ export const FINANCE_DEEP_CHAT_TOOLS: ChatCompletionTool[] = [
       },
     },
   },
+  // finance.bills.auto_fetch — 账单后台自动拉取的账号级开关（handler 同上，
+  // 闭包持有 FinanceBillAutoFetchService；调度只轮已开启的账号）
+  {
+    type: "function",
+    function: {
+      name: "finance.bills.auto_fetch",
+      description:
+        "为当前用户开启/关闭「后台每天自动拉支付宝账单并入账」，或查看当前状态。\n" +
+        "适用场景：用户说「以后自动帮我把账单同步进来」「别再自动拉了」「账单自动同步是开着的吗」。\n" +
+        "这是账号级开关：只影响用户自己，别人的节奏互不影响；关掉后调度立刻不再拉他。\n" +
+        "前置条件同 sync_now（需已导入支付宝 Cookie 并授权），未导入时开启不会报错，\n" +
+        "到点会如实把「Cookie 不可用」记进状态，用户补登录后自动接上。",
+      parameters: {
+        type: "object",
+        properties: {
+          action: {
+            type: "string",
+            enum: ["on", "off", "status"],
+            description: "on=开启 / off=关闭 / status=查看当前开关与最近一次同步结果。",
+          },
+          intervalMin: {
+            type: "number",
+            description: "可选：准实时轮询间隔（分钟，10-1440）。给了它=按间隔模式；不给=每日定点模式。",
+          },
+          hour: {
+            type: "number",
+            description: "可选：每日执行时刻（0-23），仅未给 intervalMin 时生效。默认 21 点。",
+          },
+        },
+        required: ["action"],
+        additionalProperties: false,
+      },
+    },
+  },
 ];

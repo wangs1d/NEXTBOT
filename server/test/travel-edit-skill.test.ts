@@ -12,6 +12,9 @@ import path from "node:path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-edit-skill-test-"));
 process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 
+/** 行程归属用户（真实 actorId 为裸邮箱），HTTP 侧用 userId 传入 */
+const TEST_ACTOR = "tester@example.com";
+
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
@@ -22,6 +25,7 @@ const { createTravelPlanningBuiltinSkills } = await import(
 function buildPlan(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     planId: "plan-edit-1",
+    actorId: TEST_ACTOR,
     destination: "三亚",
     title: "三亚2日游",
     startDate: "2026-09-06",
@@ -67,7 +71,10 @@ function getEditHandler(): (input: Record<string, unknown>) => Promise<Record<st
   });
   const edit = skills.find((s) => s.metadata.name === "travel.edit-itinerary");
   assert.ok(edit, "edit-itinerary skill 应已注册");
-  return edit.handler as unknown as (input: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  const ctx = { userId: TEST_ACTOR, sessionId: TEST_ACTOR } as never;
+  return ((input: Record<string, unknown>) => edit.handler(input, ctx)) as (
+    input: Record<string, unknown>,
+  ) => Promise<Record<string, unknown>>;
 }
 
 test("edit-itinerary: update 修改字段并保存，version 自增", async () => {
@@ -173,7 +180,7 @@ test("HTTP POST items: 新增条目追加并触发局部重排", async () => {
   const app = buildHttpApp();
   const res = await app.inject({
     method: "POST",
-    url: "/travel/plans/plan-http-add/days/1/items",
+    url: `/travel/plans/plan-http-add/days/1/items?userId=${encodeURIComponent(TEST_ACTOR)}`,
     payload: { type: "attraction", name: "亚特兰蒂斯" },
   });
   assert.equal(res.statusCode, 200);
@@ -189,7 +196,7 @@ test("HTTP POST items: 乐观锁 If-Match 版本不符返回 409", async () => {
   const app = buildHttpApp();
   const res = await app.inject({
     method: "POST",
-    url: "/travel/plans/plan-http-add/days/1/items",
+    url: `/travel/plans/plan-http-add/days/1/items?userId=${encodeURIComponent(TEST_ACTOR)}`,
     payload: { type: "restaurant", name: "随便" },
     headers: { "if-match": "999" },
   });
@@ -202,7 +209,7 @@ test("HTTP comment 换一换: 替换后触发局部重排", async () => {
   const app = buildHttpApp();
   const res = await app.inject({
     method: "POST",
-    url: "/travel/plans/plan-http-comment/days/0/items/1/comment",
+    url: `/travel/plans/plan-http-comment/days/0/items/1/comment?userId=${encodeURIComponent(TEST_ACTOR)}`,
     payload: { comment: "太远了换一个" },
   });
   assert.equal(res.statusCode, 200);

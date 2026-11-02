@@ -15,12 +15,13 @@ import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
 import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
+import "access_pairing_card.dart";
 import "../model_config/model_provider_card.dart";
 import "../model_config/model_provider_catalog.dart";
 import "../../widgets/app_window_titlebar.dart";
 
 /// 设置分区（左侧侧栏一项对应右侧一块内容）。
-enum _SettingsSection { general, model, serviceAccess, phoneBridge }
+enum _SettingsSection { general, model, serviceAccess, pairing, phoneBridge }
 
 /// 「设置」页 —— 全屏独立页（类似扣子的设置布局）：
 /// 左侧分区侧栏 + 右侧内容区，顶部铺自绘标题栏保证窗口可拖拽/可关闭。
@@ -91,7 +92,6 @@ class _SettingsPageState extends State<SettingsPage>
     _loadCloudModelConfig();
     _refreshVoiceprintStatus();
     _refreshMailStatus();
-    _loadMailPassPrefill();
   }
 
   @override
@@ -190,6 +190,8 @@ class _SettingsPageState extends State<SettingsPage>
         (_SettingsSection.model, Icons.graphic_eq_outlined, "模型与声纹"),
       if (_isWindows)
         (_SettingsSection.serviceAccess, Icons.hub_outlined, "服务接入"),
+      if (_isWindows)
+        (_SettingsSection.pairing, Icons.key_outlined, "设备配对"),
       if (showPhoneBridge)
         (_SettingsSection.phoneBridge, Icons.smartphone_outlined, "手机桥接"),
     ];
@@ -293,12 +295,14 @@ class _SettingsPageState extends State<SettingsPage>
       _SettingsSection.general => "通用",
       _SettingsSection.model => "模型与声纹",
       _SettingsSection.serviceAccess => "服务接入",
+      _SettingsSection.pairing => "设备配对",
       _SettingsSection.phoneBridge => "手机桥接",
     };
     final Widget card = switch (_section) {
       _SettingsSection.general => _buildGeneralCard(),
       _SettingsSection.model => _buildModelSection(),
       _SettingsSection.serviceAccess => _buildServiceAccessSection(),
+      _SettingsSection.pairing => const AccessPairingCard(),
       _SettingsSection.phoneBridge => _buildPhoneBridgeCard(),
     };
     return SingleChildScrollView(
@@ -435,19 +439,9 @@ class _SettingsPageState extends State<SettingsPage>
     );
   }
 
-  /// 已接入时把服务端存着的授权码回填进输入框（默认打码，眼睛钮显隐）。
-  Future<void> _loadMailPassPrefill() async {
-    final Map<String, dynamic> cfg = await MailWatchApi.serviceConfig();
-    if (!mounted) return;
-    final Map<String, dynamic> mail = cfg["mail"] is Map
-        ? cfg["mail"] as Map<String, dynamic>
-        : const <String, dynamic>{};
-    final String key = mail["keyValue"]?.toString() ?? "";
-    if (key.isNotEmpty) setState(() => _mailPassCtrl.text = key);
-  }
-
-  /// 授权码保存：PUT /api/service-config（mail 块）——服务端落盘 data/service-config.json
-  /// 并即刻启动 IMAP 轮询（无需重启 runtime；重启后由服务端重放配置继续生效）。
+  /// 授权码保存：POST /api/mail-watch/pass（绑本机登录主体）——服务端加密留存并
+  /// 即刻启动 IMAP 轮询（无需重启 runtime）。主机没配主密钥时服务端拒写盘，
+  /// 如实回 persisted:false，这里照实说，不含糊成"已保存"。
   Future<void> _saveMailPass() async {
     if (_mailSaving) return;
     final String pass = _mailPassCtrl.text.trim();
@@ -470,15 +464,16 @@ class _SettingsPageState extends State<SettingsPage>
       final Map<String, dynamic> res = await MailWatchApi.status();
       final Map<String, dynamic> st =
           res["status"] is Map ? res["status"] as Map<String, dynamic> : <String, dynamic>{};
+      final bool persisted = saved["persisted"] == true;
       if (!mounted) return;
       setState(() {
         _mailStatus = st;
         _mailSaveMsg = st["running"] == true
-            ? "已接通，正在盯邮箱"
+            ? (persisted
+                ? "已接通，正在盯邮箱"
+                : "已接通，但未持久化：服务端没配主密钥，授权码只在这次运行内有效，重启后需重填")
             : "已保存，但未启动：${st["reason"] ?? "未知原因"}";
       });
-      // 回填服务端实际生效的授权码（输入框与已存值保持一致，默认打码）
-      await _loadMailPassPrefill();
     } catch (e) {
       if (!mounted) return;
       setState(() => _mailSaveMsg = "保存失败：$e");

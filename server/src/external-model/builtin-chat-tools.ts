@@ -530,115 +530,54 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "reminder.plan",
-      // 2026-09-05 与 calendar.create_from_text/create_task 的重复行为规则互相去重：
-      // 每个 tool 只保留自身必需的最小说明（delegate 全量注入时 schema 按轮计费）。
+      name: "calendar.create",
+      // 2026-11-01 用户拍板：提醒/日程创建收口到唯一模型可见工具。
+      // 此前 reminder.plan / calendar.create_from_text / calendar.create_task 三件
+      // 套并存，同一句话在两轮里各挑一个工具，会落成两条到点提醒。
       description:
-        "【生活助手】按用户原句创建定时提醒并写入服务端日程。带明确时间点的单次提醒（「明天 9:00 提醒我开会」「晚上10点叫我吃药」）必须直接调用本工具，不要追问、不要只口头答应。仅当返回 needsRecurrenceConfirm=true 时，按 suggestedQuestion 向用户追问一次后再次调用。成功返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示给用户必须用此字段）、recurrence。单次正事提醒未指定提前量时，系统会按事项时间/重要程度/地点自动生成分级提醒（前晚备忘/起床闹钟/出发预留），结果在 remindPlan 字段——转述时把各段计划一并告知用户，不要自己另建议提前量。\n提醒方式默认弹窗（popup）；仅用户明确要求（「打电话提醒我」「语音喊我」）才用 TTS/电话，不要主动升级。",
+        "【内置 Calendar】创建提醒/日程/定时任务的唯一入口。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 nextRunAtLocal（展示必须用它）与 remindPlan（睡前备忘/起床闹钟/出发预留，转述时一并告知，不要自己另建议提前量）。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。",
       parameters: {
         type: "object",
         properties: {
-          text: { type: "string", description: "用户原句，须含时间与提醒事项" },
-          subject: { type: "string", description: "可选，与 date 组合解析（无 text 时）" },
-          date: { type: "string", description: "可选，如「明天 09:00」（无 text 时）" },
-          runAt: { type: "string", description: "可选 ISO-8601，与 subject 结构化创建" },
-          recurrence: {
-            type: "string",
-            enum: ["none", "daily", "weekly", "yearly"],
-            description: "默认 none；仅用户明确要每天/每周/每年重复时才填 daily/weekly/yearly",
-          },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；用户对助手的称呼（如「小弟」「老哥」）也要去掉。缺省时服务端自动生成。" },
-          category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
-          reminderMessage: { type: "string", description: "到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；只说事本身——禁止复述用户原句、禁止带时间表述（时刻会单独展示）；不要把用户对助手的称呼（如「小弟」）写进文案" },
-          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
-        },
-        required: ["text"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "calendar.create_from_text",
-      description:
-        "【内置 Calendar】按用户原句一句话创建日程/提醒。带明确时间点的单次日程/提醒必须直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 才按 suggestedQuestion 追问一次后重调。解析失败返回 matched=false；展示时间用返回的 nextRunAtLocal。",
-      parameters: {
-        type: "object",
-        properties: {
-          text: { type: "string", description: "用户原句，含时间与事项" },
-          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
-          forceCreate: {
-            type: "boolean",
-            description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）",
-          },
-        },
-        required: ["text"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "calendar.create_task",
-      description:
-        "【内置 Calendar】按结构化字段创建定时任务：reminder（提醒）/action（HTTP 动作）/weather_brief（天气简报，需用户已在天气页保存定位）/agent_task（到点让 Agent 执行 prompt）。runAt 须为 ISO-8601 未来时间；时间/类型已明确时优先用本工具，含糊时用 calendar.create_from_text。返回 taskId、nextRunAt（UTC）、nextRunAtLocal（展示用）。单次正事提醒未指定提前量时，系统会按事项时间/重要程度/地点自动生成分级提醒（前晚备忘/起床闹钟/出发预留），结果在 remindPlan 字段——转述时把各段计划一并告知用户。",
-      parameters: {
-        type: "object",
-        properties: {
-          title: { type: "string", description: "完整任务标题（用于日程页完整列表；reminder 类型可选，由 reminderMessage 兜底）" },
-          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；用户对助手的称呼（如「小弟」「老哥」）也要去掉。reminder 类型必填；其他类型缺省用 title 兜底。" },
-          description: { type: "string" },
+          text: { type: "string", description: "用户原句，须含时间与提醒事项；优先使用本字段" },
           kind: {
             type: "string",
             enum: ["reminder", "action", "weather_brief", "agent_task"],
-            description: "weather_brief 需用户已在天气页保存定位；agent_task 会在到点后让 Agent 执行 prompt",
+            description: "无 text 时必填；缺省 reminder。weather_brief 需用户已保存定位；agent_task 到点让 Agent 执行 prompt",
           },
-          category: {
-            type: "string",
-            enum: ["itinerary", "trivia"],
-            description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。",
-          },
-          runAt: { type: "string", description: "ISO-8601" },
+          description: { type: "string", description: "无 text 时必填：事项/日程内容" },
+          runAt: { type: "string", description: "无 text 时必填：ISO-8601" },
+          title: { type: "string", description: "完整标题（日程页用；reminder 可选，由 reminderMessage 兜底；非提醒类型必填）" },
+          shortTitle: { type: "string", description: "简洁展示标题（「今日安排」紧凑列表用）：去掉指令词与时间词只留核心事项，如「明天9点提醒我吃药」→\"吃药\"；必须是干净事项词，禁止复述原句、禁止含时间词/「提醒我」/悬空的「的」开头；缺省时服务端自动生成。" },
+          category: { type: "string", enum: ["itinerary", "trivia"], description: "trivia=喝水/睡觉/锻炼等生活琐事(照常提醒,不进「今日安排」)；行程正事填 itinerary；缺省 itinerary。" },
           recurrence: {
             type: "string",
             enum: ["none", "daily", "weekly", "yearly"],
-            description: "默认 none；勿在用户未要求时填 daily",
+            description: "默认 none；仅用户明确要每天/每周/每年重复时才填",
           },
-          timezone: { type: "string" },
-          durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填（用于冲突检测与区间展示）；纯时间点提醒不填。" },
-          location: { type: "string", description: "事件地点（可选），如「协和医院」「首都机场T3」。用户说了具体地点就填：系统据此估算路程并动态安排分级提醒（前晚备忘/起床闹钟/出发预留）。" },
+          timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
+          durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填；纯时间点提醒不填。" },
+          location: { type: "string", description: "事件地点（可选）。说了具体地点就填：系统据此估算路程并安排分级提醒。" },
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "提前量提醒（分钟数组，如 [15,5]）。仅当用户明确说出提前量（如「提前15分钟提醒我」）时填写；用户没说就省略——系统会按事项时间/重要程度/地点自动安排分级提醒，不要替用户默认填 [15]。",
+            description: "提前量提醒（分钟数组）。仅当用户明确说出提前量时填；没说就省略——系统自动分级。",
           },
-          forceCreate: {
-            type: "boolean",
-            description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）",
-          },
-          reminderMessage: { type: "string", description: "仅 kind=reminder。到点时展示给用户的友好提醒文案，如「该睡觉啦！」而非「喊我睡觉」；只说事本身——禁止复述用户原句、禁止带时间表述（时刻会单独展示）" },
+          reminderMessage: { type: "string", description: "仅 kind=reminder。到点展示文案，如「该睡觉啦！」；禁止复述原句、禁止带时间表述、不要写称呼。" },
+          forceCreate: { type: "boolean", description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）" },
           action: {
             type: "object",
             description: "仅 kind=action",
-            properties: {
-              url: { type: "string" },
-              method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
-            },
+            properties: { url: { type: "string" }, method: { type: "string", enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] } },
           },
           actionUrl: { type: "string", description: "与 action.url 二选一" },
           agentTask: {
             type: "object",
             description: "仅 kind=agent_task",
-            properties: {
-              prompt: { type: "string", description: "到点后交给 Agent 执行的自然语言任务" },
-              accessMode: { type: "string", enum: ["sandbox", "full"], description: "已废弃，Agent 始终以 full 运行；保留字段仅为协议兼容" },
-            },
+            properties: { prompt: { type: "string" }, accessMode: { type: "string", enum: ["sandbox", "full"] } },
           },
           prompt: { type: "string", description: "agent_task 的快捷 prompt 字段" },
         },
-        required: ["description", "kind", "runAt"],
         additionalProperties: true,
       },
     },

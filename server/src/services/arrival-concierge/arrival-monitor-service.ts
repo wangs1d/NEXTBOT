@@ -44,8 +44,6 @@ export interface ArrivalMonitorDeps {
   platformGateway: MessagePlatformGateway | null;
   /** 可选：给定位兜底用（未接动态 API 时，用户手机到达车站附近 → landed） */
   getLocation?: ((actorId: string) => { latitude: number; longitude: number; label?: string } | null) | null;
-  /** 默认 actor（票夹未记录 actorId 时使用，如桥接场景） */
-  defaultActorId?: string;
   pollIntervalMs?: number;
   tickMs?: number;
   now?: () => Date;
@@ -61,7 +59,7 @@ interface PendingPickupDraft {
 }
 
 export class ArrivalMonitorService {
-  private readonly deps: Required<Pick<ArrivalMonitorDeps, "defaultActorId" | "pollIntervalMs" | "tickMs">> & ArrivalMonitorDeps;
+  private readonly deps: Required<Pick<ArrivalMonitorDeps, "pollIntervalMs" | "tickMs">> & ArrivalMonitorDeps;
   private readonly pickupSender: PickupSender;
   private readonly pendingPickups = new Map<string, PendingPickupDraft>();
   private readonly stageCache = new Map<string, TripStage>();
@@ -71,8 +69,6 @@ export class ArrivalMonitorService {
   constructor(deps: ArrivalMonitorDeps) {
     this.deps = {
       ...deps,
-      defaultActorId:
-        deps.defaultActorId ?? (process.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || "session-mvp-001"),
       pollIntervalMs: deps.pollIntervalMs ?? DEFAULT_TICKET_POLL_MS,
       tickMs: deps.tickMs ?? 60_000,
     };
@@ -102,7 +98,7 @@ export class ArrivalMonitorService {
 
   /** 开启某张票的到站监控（显式 opt-in）。 */
   enable(ticketId: string, actorId: string): { ok: boolean; summary: string } {
-    const t = travelTicketStore.get(ticketId);
+    const t = travelTicketStore.get(ticketId, actorId);
     if (!t) return { ok: false, summary: `票 ${ticketId} 不存在` };
     if (t.type === "hotel") return { ok: false, summary: "酒店订单没有到站监控，只有入住提醒" };
     if (!t.arriveTime && !t.departTime) return { ok: false, summary: "该票缺少出发/到达时间，无法建立监控" };
@@ -126,8 +122,8 @@ export class ArrivalMonitorService {
     };
   }
 
-  disable(ticketId: string): { ok: boolean; summary: string } {
-    const t = travelTicketStore.get(ticketId);
+  disable(ticketId: string, actorId?: string): { ok: boolean; summary: string } {
+    const t = travelTicketStore.get(ticketId, actorId);
     if (!t) return { ok: false, summary: `票 ${ticketId} 不存在` };
     travelTicketStore.save({
       ...t,
@@ -137,8 +133,11 @@ export class ArrivalMonitorService {
   }
 
   /** 当前快照（工具查询用；不落 notifiedStages）。 */
-  async getSnapshot(ticketId: string): Promise<{ ok: boolean; summary: string; snapshot?: TripStatusSnapshot }> {
-    const t = travelTicketStore.get(ticketId);
+  async getSnapshot(
+    ticketId: string,
+    actorId?: string,
+  ): Promise<{ ok: boolean; summary: string; snapshot?: TripStatusSnapshot }> {
+    const t = travelTicketStore.get(ticketId, actorId);
     if (!t) return { ok: false, summary: `票 ${ticketId} 不存在` };
     if (t.type === "hotel") return { ok: false, summary: "酒店订单没有行程动态" };
     const snapshot = await this.queryStatus(t);
@@ -156,7 +155,7 @@ export class ArrivalMonitorService {
     actorId: string,
     contact: { name: string; phone?: string; channel?: "sms" | "wechat" | "qq" | "feishu"; channelTarget?: string; autoSend: boolean },
   ): { ok: boolean; summary: string } {
-    const t = travelTicketStore.get(ticketId);
+    const t = travelTicketStore.get(ticketId, actorId);
     if (!t) return { ok: false, summary: `票 ${ticketId} 不存在` };
     if (!contact.name?.trim()) return { ok: false, summary: "缺少接站人姓名" };
     if (!contact.phone && !contact.channelTarget) {
@@ -184,7 +183,7 @@ export class ArrivalMonitorService {
     ticketId: string,
     actorId: string,
   ): Promise<{ ok: boolean; summary: string }> {
-    const t = travelTicketStore.get(ticketId);
+    const t = travelTicketStore.get(ticketId, actorId);
     if (!t) return { ok: false, summary: `票 ${ticketId} 不存在` };
     if (!t.pickupContact) return { ok: false, summary: "先设置接站人（travel.pickup-set）" };
     const snapshot = await this.queryStatus(t);
@@ -204,9 +203,9 @@ export class ArrivalMonitorService {
     return draft;
   }
 
-  /** 供 travel.arrival-ride 工具取行程目的描述。 */
-  getTicket(ticketId: string): StoredTravelTicket | null {
-    return travelTicketStore.get(ticketId);
+  /** 供 travel.arrival-ride 工具取行程目的描述（须属于本人）。 */
+  getTicket(ticketId: string, actorId?: string): StoredTravelTicket | null {
+    return travelTicketStore.get(ticketId, actorId);
   }
 
   // ------------------------------------------------------------------ //
@@ -223,6 +222,8 @@ export class ArrivalMonitorService {
       const candidates = travelTicketStore.listActiveTrips(now.getTime());
       for (const ticket of candidates) {
         if (ticket.type === "hotel") continue;
+        // 无归属的票无法通知到正确的人（旧版遗留），跳过而不是猜一个用户
+        if (!ticket.actorId) continue;
         const monitoring = ticket.arrivalMonitoring;
         // 未显式开启的票不做主动监控（避免误通知）；出票流程默认开启
         if (!monitoring?.enabled) continue;
@@ -352,11 +353,13 @@ export class ArrivalMonitorService {
   private locationSaysArrived(ticket: StoredTravelTicket): boolean {
     const getLoc = this.deps.getLocation;
     if (!getLoc) return false;
+    const actorId = ticket.actorId;
+    if (!actorId) return false;
     const station = ticket.toStation?.trim();
     if (!station) return false;
     let loc: { latitude: number; longitude: number; label?: string } | null = null;
     try {
-      loc = getLoc(ticket.actorId ?? this.deps.defaultActorId);
+      loc = getLoc(actorId);
     } catch {
       return false;
     }
@@ -380,7 +383,8 @@ export class ArrivalMonitorService {
   // ------------------------------------------------------------------ //
 
   private async runStageActions(ticket: StoredTravelTicket, snapshot: TripStatusSnapshot): Promise<void> {
-    const actorId = ticket.actorId ?? this.deps.defaultActorId;
+    const actorId = ticket.actorId;
+    if (!actorId) return;
     const notified = ticket.arrivalMonitoring?.notifiedStages ?? [];
 
     if (snapshot.stage === "approaching" && !notified.includes("approaching")) {
@@ -464,7 +468,7 @@ export class ArrivalMonitorService {
 
   private markStageNotified(ticket: StoredTravelTicket, _stage: TripStage, tag: string): void {
     // 重读票面最新状态，避免覆盖 tick 刚写入的 lastCheckedAt/lastStage
-    const fresh = travelTicketStore.get(ticket.ticketId) ?? ticket;
+    const fresh = travelTicketStore.get(ticket.ticketId, ticket.actorId) ?? ticket;
     const monitoring = fresh.arrivalMonitoring ?? { enabled: true };
     const notified = monitoring.notifiedStages ?? [];
     if (!notified.includes(tag)) notified.push(tag);
@@ -485,7 +489,8 @@ function normalizePlace(raw: string): string {
 }
 
 /** 接站消息文案（发给接站人的短信/消息原文）。 */
-export function composePickupMessage(ticket: StoredTravelTicket, snapshot: TripStatusSnapshot | null): string {  const who = ticket.passenger ? `${ticket.passenger} ` : "";
+export function composePickupMessage(ticket: StoredTravelTicket, snapshot: TripStatusSnapshot | null): string {
+  const who = ticket.passenger ? `${ticket.passenger} ` : "";
   const trip = `${ticket.carrier}${ticket.code ? ` ${ticket.code}` : ""}`;
   const eta = snapshot
     ? snapshot.actualArriveTime ?? snapshot.estimatedArriveTime ?? snapshot.scheduledArriveTime ?? ticket.arriveTime ?? "稍后"

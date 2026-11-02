@@ -129,7 +129,7 @@ if (socketFromParent) {
   try {
     await services.app.listen({
       port: runtime.port,
-      host: "0.0.0.0",
+      host: runtime.host,
     });
   } catch (err) {
     if (isDevListenConflict(err)) process.exit(0);

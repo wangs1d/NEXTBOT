@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
+import "../../core/services/nb_http.dart";
 
 /// 能力面板（Feature Catalog 客户端视图）。
 ///
@@ -20,9 +21,11 @@ class CatalogApiClient {
 
   Future<Map<String, dynamic>?> _getJson(String path) async {
     try {
-      final res = await _client.get(
-        Uri.parse("$baseUrl$path").replace(scheme: baseUrl.startsWith("https") ? "https" : Uri.parse(baseUrl).scheme),
-      ).timeout(const Duration(seconds: 8));
+      final Uri uri = Uri.parse("$baseUrl$path")
+          .replace(scheme: baseUrl.startsWith("https") ? "https" : Uri.parse(baseUrl).scheme);
+      final res = await _client
+          .get(uri, headers: NbHttp.headersFor(uri))
+          .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;
       final decoded = jsonDecode(utf8.decode(res.bodyBytes));
       return decoded is Map<String, dynamic> ? decoded : null;

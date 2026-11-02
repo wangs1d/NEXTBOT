@@ -85,7 +85,7 @@ let planSeq = 0;
 function savePlan(): StoredTravelPlan {
   const plan = {
     planId: `vid-${++planSeq}`,
-    sessionId: "actor-a",
+    actorId: "actor-a",
     destination: "成都",
     title: "成都3日游",
     startDate: "2026-10-17",

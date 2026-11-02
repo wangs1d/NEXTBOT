@@ -17,6 +17,7 @@ import "package:flutter/services.dart"
         KeyRepeatEvent,
         LogicalKeyboardKey;
 import "package:http/http.dart" as http;
+import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
 import "../../core/theme/app_theme.dart";
@@ -415,8 +416,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   Future<void> _loadPlanSessions() async {
     List<_PlanSessionSummary> list;
     try {
-      final http.Response resp = await http
-          .get(Uri.parse("${ApiConfig.httpBase}/travel/plan-sessions?limit=30"))
+      final http.Response resp = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/travel/plan-sessions?limit=30"))
           .timeout(_timeout);
       if (resp.statusCode != 200) {
         throw Exception("HTTP ${resp.statusCode}");
@@ -450,8 +450,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   }
 
   Future<List<_PlanSummary>> _fetchSummaries() async {
-    final http.Response resp = await http
-        .get(Uri.parse("${ApiConfig.httpBase}/travel/plans"))
+    final http.Response resp = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/travel/plans"))
         .timeout(_timeout);
     if (resp.statusCode != 200) {
       throw Exception("HTTP ${resp.statusCode}");
@@ -494,8 +493,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
     required bool silent,
   }) async {
     try {
-      final http.Response resp = await http
-          .get(Uri.parse("${ApiConfig.httpBase}/travel/plans/$planId"))
+      final http.Response resp = await NbHttp.get(Uri.parse("${ApiConfig.httpBase}/travel/plans/$planId"))
           .timeout(const Duration(seconds: 20));
       if (resp.statusCode != 200) {
         throw Exception("HTTP ${resp.statusCode}");
@@ -562,8 +560,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
   /// 生成 / 复用分享码并复制到剪贴板。
   Future<void> _copyShareCode(_PlanSummary summary) async {
     try {
-      final http.Response resp = await http
-          .post(Uri.parse("${ApiConfig.httpBase}/travel/plans/${summary.planId}/share"))
+      final http.Response resp = await NbHttp.post(Uri.parse("${ApiConfig.httpBase}/travel/plans/${summary.planId}/share"))
           .timeout(_timeout);
       if (resp.statusCode != 200) {
         throw Exception("HTTP ${resp.statusCode}");
@@ -622,8 +619,7 @@ class _TravelPlanArchivePageState extends State<TravelPlanArchivePage> {
     if (confirmed != true) return;
     bool verifiedGone = false;
     try {
-      final http.Response resp = await http
-          .delete(Uri.parse("${ApiConfig.httpBase}/travel/plans/${summary.planId}"))
+      final http.Response resp = await NbHttp.delete(Uri.parse("${ApiConfig.httpBase}/travel/plans/${summary.planId}"))
           .timeout(_timeout);
       if (resp.statusCode != 200) {
         throw Exception("HTTP ${resp.statusCode}");
@@ -2952,8 +2948,7 @@ class _PlanningStageState extends State<_PlanningStage> {
     Map<String, dynamic> body,
     Duration timeout,
   ) async {
-    final http.Response resp = await http
-        .post(
+    final http.Response resp = await NbHttp.post(
           Uri.parse("${ApiConfig.httpBase}$path"),
           headers: const <String, String>{"Content-Type": "application/json"},
           body: jsonEncode(body),
@@ -2973,7 +2968,7 @@ class _PlanningStageState extends State<_PlanningStage> {
 
   Future<Map<String, dynamic>?> _get(String path, Duration timeout) async {
     final http.Response resp =
-        await http.get(Uri.parse("${ApiConfig.httpBase}$path")).timeout(timeout);
+        await NbHttp.get(Uri.parse("${ApiConfig.httpBase}$path")).timeout(timeout);
     final Object? decoded = jsonDecode(resp.body);
     if (decoded is! Map<String, dynamic>) {
       throw Exception("HTTP ${resp.statusCode}");

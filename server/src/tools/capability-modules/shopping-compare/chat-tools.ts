@@ -24,6 +24,9 @@ export const SHOPPING_COMPARE_CHAT_TOOLS: ChatCompletionTool[] = [
         "同款归一聚合后按价格升序返回分组报价（平台/标题/价格/店铺/链接）。\n" +
         "适用场景：用户说「帮我比价 XX」「XX 哪个平台便宜」「买之前帮我看看价格」等。\n" +
         "前置条件：用户须先导入目标平台 Cookie 并授权 agentAllowed=true（与 shopping.order.search 相同）。\n" +
+        "**交接只在 human-required 时发生**：回执带 handoff / loginRequired / humanRequired 表示该平台被登录墙或验证码拦住，" +
+        "用户需要在内置浏览器里自己扫码登录/过验证（页面上点「我已完成」后你接着补价），回复里要明确写出这句交接指引；" +
+        "unavailablePlatforms 里的普通「无匹配 / 读取失败」如实说明即可，不要写成需要登录，也不要把「价格未知」当成结论收工。\n" +
         "本工具只读零副作用，不下单；比完价用户确认后用 shopping.order.place 下单。\n" +
         "同款判定基于标题归一化 + 规格匹配，低置信分组会标注「疑似同款」，展示时须向用户说明。",
       parameters: {

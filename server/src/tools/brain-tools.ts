@@ -11,7 +11,6 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import { resolveActorId } from "../agent/actor-id.js";
 import type { RuntimeKernelPromptMode, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import type { ToolRegistry } from "./tool-registry.js";
-import type { ToolContext } from "./tool-registry.js";
 import type { BrainCenter } from "../brain/brain-center.js";
 import type {
   AudioBufferRef,
@@ -34,12 +33,7 @@ export const BRAIN_OBSERVE_USER_TOOL: ChatCompletionTool = {
       "查询当前用户的活动状态推断（刚下班 / 准备出行 / 忙碌 / 空闲 / 休息 / 未知）。当你需要判断用户当前是否在忙、是否下班、是否在出行时调用，用于决定是否主动打扰、用什么口吻回应。",
     parameters: {
       type: "object",
-      properties: {
-        actorId: {
-          type: "string",
-          description: "用户/会话标识；不传则使用当前上下文 actor。",
-        },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -95,7 +89,6 @@ export const BRAIN_REMEMBER_TOOL: ChatCompletionTool = {
     parameters: {
       type: "object",
       properties: {
-        actorId: { type: "string", description: "用户/会话标识；不传则使用当前上下文 actor。" },
         content: { type: "string", description: "记忆内容，自然语言。" },
         kind: {
           type: "string",
@@ -138,7 +131,6 @@ export const BRAIN_RECALL_TOOL: ChatCompletionTool = {
     parameters: {
       type: "object",
       properties: {
-        actorId: { type: "string", description: "用户/会话标识；不传则使用当前上下文 actor。" },
         query: { type: "string", description: "检索查询，自然语言。" },
         domain: {
           type: "string",
@@ -184,7 +176,6 @@ export const BRAIN_PLAN_TOOL: ChatCompletionTool = {
       type: "object",
       properties: {
         goal: { type: "string", description: "目标描述，自然语言。" },
-        actorId: { type: "string", description: "用户/会话标识；不传则使用当前上下文 actor。" },
         maxSteps: { type: "number", description: "最大步骤数上限。" },
       },
       required: ["goal"],
@@ -204,7 +195,6 @@ export const BRAIN_ROUTE_SYSTEM_TOOL: ChatCompletionTool = {
       type: "object",
       properties: {
         userMessage: { type: "string", description: "用户消息原文。" },
-        actorId: { type: "string", description: "用户/会话标识；不传则使用当前上下文 actor。" },
       },
       required: ["userMessage"],
       additionalProperties: false,
@@ -234,10 +224,6 @@ export const BRAIN_DELEGATE_TOOL: ChatCompletionTool = {
           type: "string",
           description: "可选的前置上下文或输入数据，传给子 Agent 作为先验信息。",
         },
-        actorId: {
-          type: "string",
-          description: "用户/会话标识；不传则使用当前上下文 actor。",
-        },
       },
       required: ["subAgentType", "goal"],
       additionalProperties: false,
@@ -254,12 +240,7 @@ export const BRAIN_RUNTIME_KERNEL_GET_TOOL: ChatCompletionTool = {
       "读取当前 Agent 的独立运行时内核状态。用于查看当前是否启用运行时内核、prompt 裁剪模式、身份风格、安全规则与全局配置，而不是从对话 prompt 里猜测。",
     parameters: {
       type: "object",
-      properties: {
-        actorId: {
-          type: "string",
-          description: "可选：指定目标 actor（多用户场景下隔离）。不传则使用当前调用 actor。",
-        },
-      },
+      properties: {},
       additionalProperties: false,
     },
   },
@@ -275,10 +256,6 @@ export const BRAIN_RUNTIME_KERNEL_UPDATE_TOOL: ChatCompletionTool = {
     parameters: {
       type: "object",
       properties: {
-        actorId: {
-          type: "string",
-          description: "可选：指定目标 actor（多用户场景下隔离）。不传则使用当前调用 actor。",
-        },
         enabled: {
           type: "boolean",
           description: "是否启用运行时内核。",
@@ -346,8 +323,6 @@ export const BRAIN_TOOLS: ChatCompletionTool[] = [
 ];
 
 // ---- 内部常量与辅助 ----------------------------------------------------
-
-const DEFAULT_ACTOR_ID = "default";
 
 const VALID_RUNTIME_KERNEL_PROMPT_MODES: ReadonlySet<RuntimeKernelPromptMode> = new Set([
   "legacy",
@@ -420,17 +395,6 @@ const ACTIVITY_LABELS: Record<UserActivityKind, string> = {
   unknown: "未知",
 };
 
-/** 解析 actorId：优先使用入参，其次从 context 解析，最后回退 "default" */
-function pickActorId(
-  raw: unknown,
-  context: ToolContext,
-  fallback: string = DEFAULT_ACTOR_ID,
-): string {
-  if (typeof raw === "string" && raw.trim()) return raw.trim();
-  const resolved = resolveActorId(context);
-  return resolved || fallback;
-}
-
 /** 把能力清单格式化为紧凑文本：每行 `{domain} - {label} - tools: [...]` */
 /** 把 UserActivityState 格式化为面向 LLM 的紧凑文本 */
 function formatUserActivity(state: UserActivityState | null): string {
@@ -466,7 +430,7 @@ export function registerBrainTools(
   // ---- brain.observe_user ----
   registry.register("brain.observe_user", async (input, context) => {
     try {
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const state = brainCenter.observe(actorId);
       const summary = formatUserActivity(state);
       return {
@@ -555,7 +519,7 @@ export function registerBrainTools(
       if (!content) {
         return { ok: false, error: "缺少必填字段：content（记忆内容）" };
       }
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const kind = typeof input.kind === "string" ? input.kind.trim() : "";
       const domain =
         typeof input.domain === "string" && input.domain.trim() ? input.domain.trim() : undefined;
@@ -596,7 +560,7 @@ export function registerBrainTools(
       if (!query) {
         return { ok: false, error: "缺少必填字段：query（检索查询）" };
       }
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const domain =
         typeof input.domain === "string" && input.domain.trim() ? input.domain.trim() : undefined;
       const limit = typeof input.limit === "number" ? input.limit : undefined;
@@ -665,7 +629,7 @@ export function registerBrainTools(
       if (!goal) {
         return { ok: false, error: "缺少必填字段：goal（目标描述）" };
       }
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const maxSteps = typeof input.maxSteps === "number" ? input.maxSteps : undefined;
 
       const result = await brainCenter.plan(goal, { actorId, maxSteps });
@@ -691,7 +655,7 @@ export function registerBrainTools(
       if (!userMessage) {
         return { ok: false, error: "缺少必填字段：userMessage（用户消息）" };
       }
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
 
       const result = brainCenter.routeSystem(userMessage, { actorId });
       return {
@@ -721,7 +685,7 @@ export function registerBrainTools(
       if (!goal) {
         return { ok: false, error: "缺少必填字段：goal（任务目标）" };
       }
-      const actorId = pickActorId(input.actorId, context);
+      const actorId = resolveActorId(context);
       const taskInput = input.input != null ? String(input.input) : undefined;
 
       const result = await brainCenter.delegate(
@@ -746,12 +710,7 @@ export function registerBrainTools(
   // ---- brain.runtime_kernel_get ----
   registry.register("brain.runtime_kernel_get", async (input, context) => {
     try {
-      const actorId = pickActorId(
-        typeof input === "object" && input !== null && !Array.isArray(input)
-          ? (input as Record<string, unknown>).actorId
-          : undefined,
-        context,
-      );
+      const actorId = resolveActorId(context);
       const kernel = brainCenter.getRuntimeKernelSnapshot(actorId);
       if (!kernel) {
         return {
@@ -778,7 +737,7 @@ export function registerBrainTools(
         typeof input === "object" && input !== null && !Array.isArray(input)
           ? (input as Record<string, unknown>)
           : {};
-      const actorId = pickActorId(rawInput.actorId, context);
+      const actorId = resolveActorId(context);
       const patch = buildRuntimeKernelPatch(rawInput);
       if (Object.keys(patch).length === 0) {
         return {

@@ -32,12 +32,12 @@ export type ContextSnapshot = {
 
 export type ArbiterV2Deps = {
   presence: PresenceService;
-  /** 最近一次对话轮时刻（ms）；null = 从未对话 */
-  lastConversationAt: () => number | null;
-  /** 当前屏幕专注分类（screen_sensor.latest()；不可用返回 null） */
-  screenFocus: () => ScreenFocusKind | null;
-  /** 距下一个日程分钟数（schedule_sensor.latest()） */
-  nextEventMin: () => number | null;
+  /** 该 actor 最近一次对话轮时刻（ms）；null = 从未对话 */
+  lastConversationAt: (actorId: string) => number | null;
+  /** 该 actor 当前屏幕专注分类（不可用返回 null） */
+  screenFocus: (actorId: string) => ScreenFocusKind | null;
+  /** 该 actor 距下一个日程分钟数 */
+  nextEventMin: (actorId: string) => number | null;
   /** 接受度读取（rhythm receptivity；缺省 0.5） */
   receptivity?: (actorId: string) => number;
   /** pause 轮询的目标用户（缺省取当前在线列表首位） */
@@ -206,7 +206,7 @@ export class ArbiterV2 {
   /** 当前上下文快照（诊断接口展示"为什么现在打扰/不打扰"） */
   snapshot(actorId: string, now: Date = new Date()): ContextSnapshot {
     const hour = now.getHours();
-    const lastConv = this.deps.lastConversationAt();
+    const lastConv = this.deps.lastConversationAt(actorId);
     return {
       now,
       presence: this.deps.presence.getPresence(actorId, now.getTime()),
@@ -214,8 +214,8 @@ export class ArbiterV2 {
         this.deps.presence.getPresence(actorId, now.getTime()) === "active" &&
         lastConv !== null &&
         now.getTime() - lastConv <= 90_000,
-      screenFocus: this.deps.screenFocus(),
-      nextEventMin: this.deps.nextEventMin(),
+      screenFocus: this.deps.screenFocus(actorId),
+      nextEventMin: this.deps.nextEventMin(actorId),
       // 静默时段统一走 quiet-hours.ts（env 可配，原 23-7 硬编码已收敛）
       quietHours: isQuietHour(hour),
       receptivity: this.deps.receptivity?.(actorId) ?? 0.5,

@@ -77,6 +77,7 @@ test("支付护栏 - 日预算累计拦截（台账只累计真实订单，第�
     const now = new Date().toISOString();
     getPaymentOrderLedger().record({
       outTradeNo: "BUDGET-SEED-1",
+      actorId: "budget-actor@test.local",
       provider: "alipay",
       method: "native",
       amount: 60,
@@ -93,6 +94,7 @@ test("支付护栏 - 日预算累计拦截（台账只累计真实订单，第�
       description: "日预算第二笔（预置 60 + 本次 60 > 100）",
       provider: "wechat",
       method: "native",
+      actorId: "budget-actor@test.local",
     });
     assert.equal(blocked.ok, false);
     assert.match(blocked.error ?? "", /日预算|当日/);

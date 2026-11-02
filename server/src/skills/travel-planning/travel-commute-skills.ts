@@ -16,6 +16,7 @@
  * 返回 rideReminder 建议（到站前 25 分钟），由 agent 用 calendar 工具创建提醒；
  * 到点后 agent 主动触达用户并协助约车（本项目无网约车直连 API，提醒+协助是 v1 形态）。
  */
+import { resolveActorId } from "../../agent/actor-id.js";
 import type { SkillDefinition } from "../types.js";
 import type { PlanningService } from "./travel-planning-service.js";
 import {
@@ -264,7 +265,8 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
       permissions: [],
       timeoutMs: 5_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
+      const actorId = resolveActorId(execContext);
       const type = String(input.type ?? "") as TicketType;
       if (!["flight", "train", "hotel"].includes(type)) {
         return { ok: false, error: "type 须为 flight / train / hotel 之一" };
@@ -283,9 +285,9 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
 
       // 去重合并：同类型+同主码+同出发/入住日期视为同一张票
       const existing = input.ticketId
-        ? travelTicketStore.get(String(input.ticketId))
+        ? travelTicketStore.get(String(input.ticketId), actorId)
         : code
-          ? travelTicketStore.findByCode(type, code, departTime ?? checkInDate)
+          ? travelTicketStore.findByCode(type, code, departTime ?? checkInDate, actorId)
           : null;
 
       const optIn = input.arrivalRideOptIn === true || existing?.arrivalRideOptIn === true;
@@ -293,6 +295,7 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
         type,
         source,
         carrier,
+        actorId,
         code,
         passenger: str("passenger"),
         fromCity: str("fromCity"),
@@ -334,7 +337,7 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
             arriveTime: base.arriveTime,
             remindAt: formatLocal(remindAt),
             note:
-              "请用 calendar.create_from_text 创建一条 reminder：" +
+              "请用 calendar.create 创建一条 reminder：" +
               `「${base.arriveTime} ${carrier}${code ? ` ${code}` : ""} 即将到站${base.toStation ?? base.toCity ?? ""}，用户已预约到站约车协助」，` +
               "创建成功后再调一次本工具（带 ticketId 与 markRideReminderCreated=true）防止重复提醒。",
           };
@@ -379,9 +382,9 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
       permissions: [],
       timeoutMs: 5_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
       const limit = typeof input.limit === "number" && input.limit > 0 ? Math.min(Math.floor(input.limit), 50) : 10;
-      const tickets = travelTicketStore.listUpcoming(limit);
+      const tickets = travelTicketStore.listUpcoming(limit, resolveActorId(execContext));
       return {
         ok: true,
         count: tickets.length,

@@ -20,8 +20,8 @@ import {
   type WorldRevisionEvent,
 } from "@nextbot/agent-world";
 import { createExternalChatProviderFromEnv, MutableExternalChatProvider, ActorModelBindingStore } from "../external-model/index.js";
-import { applyPersistedServiceConfig } from "../config/service-config-store.js";
-import { createPictureKit } from "@nextbot/picture";
+import { applyPersistedServiceConfig, serviceSecretsEncryptedAtRest } from "../config/service-config-store.js";
+import { PictureKitRegistry } from "../services/picture-kit-registry.js";
 import { getChatThreadPersistence } from "../external-model/chat-thread-persist.js";
 import { createRecommendationCatalog } from "../recommendation/index.js";
 import { aggregateXiaohongshuUgc } from "../recommendation/ugc-aggregator.js";
@@ -40,9 +40,11 @@ import { DirectRuntimeAdapter, type RuntimeFacade } from "../runtime/runtime-fac
 import { PromptContextBuilder, buildClientSurfacesBlock } from "../agent/prompt-context-builder.js";
 import { buildActiveGoalsPromptBlock } from "../agent/active-goals-prompt.js";
 import { getTaskPlanStore, initTaskPlanStore } from "../agent/task-plan-store.js";
-import { requestPlatformLoginHandoff } from "../agent/platform-login-handoff.js";
+import { BrowserRuntime, requestBrowserHumanHandoff } from "../services/browser-runtime/index.js";
 import { TaskPlanProbeRunner } from "../agent/task-plan-probe-runner.js";
 import { getToolResultProcessor } from "../services/tool-result-processor.js";
+import { extractNextUpSuggestions } from "../services/reply-envelope.js";
+import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import {
   formatAgentRuntimeConfigSummary,
@@ -197,7 +199,8 @@ import { FileProcessingService } from "../services/file-processing-service.js";
 import { EmailSmsService } from "../services/email-sms-service.js";
 import { EmailOtpService } from "../services/email-otp-service.js";
 import { MediaMusicService } from "../services/media-music-service.js";
-import { MailWatchService, createImapflowClient } from "../services/mail-watch-service.js";
+import { createImapflowClient } from "../services/mail-watch-service.js";
+import { MailWatchRegistry } from "../services/mail-watch-registry.js";
 import {
   FinanceBillAutoFetchService,
   createPlaywrightAlipayBillFetcher,
@@ -262,15 +265,10 @@ import type { SkillMetadata } from "../skills/types.js";
 import { registerAgentIdentityTools } from "../tools/agent-identity-tools.js";
 import {
   AGENT_NAME_KV_KEY,
+  buildIdentityNameLine,
   parseAgentIdentityKv,
 } from "../services/agent-identity.js";
-import {
-  buildPersonaStaticBlock,
-  resolveRelationshipTier,
-  type RelationshipTier,
-  type UserAdaptationProfile,
-} from "../agent/persona-core.js";
-import { getSoulOverlay } from "../agent/soul-store.js";
+import { buildPersonaPrompt } from "../agent/soul-store.js";
 import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
@@ -321,7 +319,6 @@ import type { ToolContext } from "../tools/tool-registry.js";
 import { resolveActorId, isEphemeralActorId } from "../agent/actor-id.js";
 import { DesktopBridgeCoordinator } from "../services/desktop-bridge-coordinator.js";
 import { SharedBrowserCoordinator } from "../services/shared-browser-coordinator.js";
-import { ShoppingBrowserExecutor } from "../services/shopping-platforms/browser-executor.js";
 import { SharedBrowserCdpGateway } from "../services/shared-browser/cdp-gateway.js";
 import {
   DesktopSceneWatcherService,
@@ -444,7 +441,6 @@ import {
   createCognitiveEngineFromEnv,
   createDefaultEndToEndDecisionMaker,
   createDefaultDelegateJudge,
-  createDefaultTopicExtractor,
   createWorldModelFromEnv,
   getTransitionStore,
   // 记忆认知架构升级（Phase 4）：7 个子模块
@@ -519,7 +515,7 @@ import { AgentPulseService } from "../proactivity/agent-pulse.js";
 import { TopicDismissTracker } from "../proactivity/topic-dismiss-tracker.js";
 // ─── 五层主动性架构（传感→评估→仲裁→目标→表达）───
 import { SensorKernel, registerFeeder } from "../proactivity/sensors/kernel.js";
-import type { Signal } from "../proactivity/sensors/types.js";
+import type { ScreenFocusKind, Signal } from "../proactivity/sensors/types.js";
 import { ScreenFocusSensor } from "../rhythm/sensors/screen-focus-sensor.js";
 import { ScreenSensor } from "../proactivity/sensors/screen-sensor.js";
 import { FileWatcherSensor } from "../proactivity/sensors/file-watcher.js";
@@ -543,7 +539,7 @@ import { deriveOrderSignal } from "../proactivity/shopping-signal.js";
 import { registerOrderStatusTools } from "../tools/shopping-tools.js";
 import { TurnAsideQueue } from "../proactivity/turn-aside-queue.js";
 import { formatCurrentStatePrompt } from "../agent/current-state-prompt.js";
-import { resolveAutoMailAccount } from "../proactivity/auto-mail-account.js";
+import { resolveAutoMailAccounts } from "../proactivity/auto-mail-account.js";
 
 /** 就绪闸单请求最长排队时间：到期放行，避免初始化卡死时请求无限挂起。 */
 const READY_GATE_TIMEOUT_MS = 120_000;
@@ -598,10 +594,6 @@ import { ProfileRouter, setProfileRouter } from "../brain/profile-router.js";
 import { registerProfileQueryTool } from "../tools/profile-query-tool.js";
 import { registerWatchBoardTools } from "../tools/watch-board-tools.js";
 import { SpeechHub } from "../proactivity/speech-express.js";
-import {
-  formatAgentStylePrompt,
-  loadAgentStyleProfile,
-} from "../agent/agent-style-profile.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
@@ -658,14 +650,29 @@ async function discoverMcpToolsInBackground(
   );
 }
 
+/** 日志字段抹除路径：请求头/体里的凭据即使被序列化进日志也只留 ***（不落密钥） */
+const LOGGER_OPTIONS = {
+  redact: {
+    paths: [
+      "req.headers.authorization",
+      "req.headers.x-api-key",
+      "req.body.apiKey",
+      "req.body.modelProvider.apiKey",
+      "req.body.tts.apiKey",
+      "req.body.mail.pass",
+    ],
+    censor: "***",
+  },
+};
+
 export async function createAppServices(
   options: { socketMode?: boolean } = {},
 ): Promise<AppServices> {
   // socketMode：端口由监督进程持有，本进程只消费它递来的连接，因此不自建监听。
   const app = Fastify(
     options.socketMode
-      ? { logger: true, serverFactory: (handler) => createServer(handler) }
-      : { logger: true },
+      ? { logger: LOGGER_OPTIONS, serverFactory: (handler) => createServer(handler) }
+      : { logger: LOGGER_OPTIONS },
   );
   // 就绪闸：listen 先行时，运行状态初始化完成前只放行 /health，其余请求排队。
   // 未走 listen 先行入口（单测等）时 awaitBoot() 返回 null，本钩子直接放行。
@@ -975,9 +982,9 @@ export async function createAppServices(
   // 可信输入网关（CDP 桥）：总开关 SHARED_BROWSER_CDP_ENABLED（默认关）；
   // 客户端显式开启调试端口并上报端点后，trusted 工具用 Playwright 直连用户浏览器。
   const sharedBrowserCdpGateway = new SharedBrowserCdpGateway();
-  // 购物页面获取器：客户端在线且开启调试端口时优先在用户可见内置浏览器执行
-  // （登录态即用户自身，免 Cookie 导入）；否则回退无头 + Cookie；支持扫码登录门。
-  const shoppingBrowserExecutor = new ShoppingBrowserExecutor({
+  // 通用浏览器层（内置浏览器优先 + 无头+Cookie 兜底）：购物、通用网页操作
+  // （agent_browser）、预订报价共用同一套面板租约与登录门。
+  const browserRuntime = new BrowserRuntime({
     coordinator: sharedBrowserCoordinator,
     gateway: sharedBrowserCdpGateway,
     browserSessionService,
@@ -987,28 +994,53 @@ export async function createAppServices(
   sharedBrowserCoordinator.onSaveLoginDecision = (actorId, siteId, allowed) => {
     void browserSessionService.setCaptureConsent(actorId, siteId, allowed);
   };
+  // 浏览器层判到 human-required（登录墙 / 验证码）→ 长流程 handoff：
+  // 一轮里多个站点需要用户时合并成一次等待步，浏览器页留在可见面板。
+  const requestBrowserHandoff = (info: {
+    actorId: string;
+    sessionId: string;
+    siteLabels: string[];
+    reason: "login" | "captcha";
+    goal?: string;
+    continueStep?: string;
+  }) => {
+    try {
+      requestBrowserHumanHandoff(info);
+    } catch {
+      /* 交接失败只丢增强，工具结果里的指引照常返回 */
+    }
+  };
+  // 购物语义的薄包装（续跑步骤固定「继续抓取报价」）
+  const requestShoppingUserHandoff = (info: {
+    actorId: string;
+    sessionId: string;
+    platforms: string[];
+    platformLabels: string[];
+    reason: "login" | "captcha";
+  }) => {
+    requestBrowserHandoff({
+      actorId: info.actorId,
+      sessionId: info.sessionId,
+      siteLabels: info.platformLabels,
+      reason: info.reason,
+      goal:
+        info.reason === "login"
+          ? `登录${info.platformLabels.join("、")}后继续抓取报价`
+          : `完成${info.platformLabels.join("、")}的安全验证后继续抓取报价`,
+      continueStep: "继续抓取报价",
+    });
+  };
   const shoppingOrderService = new ShoppingOrderService({
     browserSessionService,
     askSaveLoginConsent: (actorId, siteId, siteLabel) =>
       sharedBrowserCoordinator.askSaveLoginConsent(actorId, siteId, siteLabel),
-    // 平台登录超时 → 长流程 handoff（等待步 + 「我已完成」回执后由 Plan 续跑）；
-    // 浏览器页已留在登录页，用户看得见要登录哪个平台。
-    onLoginRequired: (info) => {
-      try {
-        requestPlatformLoginHandoff({
-          actorId: info.actorId,
-          sessionId: info.sessionId,
-          platformLabel: info.platformLabel,
-          goal: `登录${info.platformLabel}后继续（${info.loginUrl}）`,
-        });
-      } catch {
-        /* 交接失败只丢增强，工具结果里的指引照常返回 */
-      }
-    },
+    // 登录墙 / 验证码这类只有用户本人能过的环节 → 长流程 handoff
+    // （等待步 + 「我已完成」回执后由 Plan 续跑）；浏览器页留在该页面。
+    onUserActionRequired: requestShoppingUserHandoff,
     audit: auditService,
     store: shoppingOrderStore,
     alipayBot: alipayBotService,
-    browserExecutor: shoppingBrowserExecutor,
+    browserExecutor: browserRuntime,
     imageStore: imageGenerationService,
   });
   // 初始化购物比价服务（跨平台同款比价 + 降价监控 + 保险/服务调研对比，只读零副作用）。
@@ -1017,14 +1049,28 @@ export async function createAppServices(
   const shoppingCompareService = new ShoppingCompareService({
     shoppingOrderService,
     upstreamSearchService,
+    onUserActionRequired: requestShoppingUserHandoff,
     dataDir: join(getDataDir(), "shopping"),
   });
-  // 初始化 Agent 虚拟浏览器服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
-  // open 撞白名单站点登录页时，经 QrAssistService 自动把登录二维码推到聊天。
+  // 初始化 Agent 通用网页操作服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
+  // 执行层复用通用浏览器层：内置浏览器优先；撞登录墙/验证码时走通用 human handoff。
   const agentBrowserService = new AgentBrowserService({
     browserSessionService,
     audit: auditService,
     qrAssist: new QrAssistService({ imageStore: imageGenerationService }),
+    runtime: browserRuntime,
+    onHumanRequired: (info) =>
+      requestBrowserHandoff({
+        actorId: info.actorId,
+        sessionId: info.sessionId,
+        siteLabels: info.siteLabels,
+        reason: info.reason,
+        goal:
+          info.reason === "login"
+            ? `登录${info.siteLabels.join("、")}后继续网页任务`
+            : `完成${info.siteLabels.join("、")}的安全验证后继续网页任务`,
+        continueStep: "继续原来的网页任务",
+      }),
   });
   // 共用浏览器桥（sharedBrowserCoordinator / sharedBrowserCdpGateway）已提前到
   // shopping-order 装配段创建：购物页面获取器（内置浏览器优先）复用同一实例。
@@ -1039,7 +1085,7 @@ export async function createAppServices(
     browserRunner: agentBrowserService,
     // 内置浏览器补价通道：飞猪体验模式（无 API key）价格脱敏时，用用户自己
     // 登录过的可见浏览器开详情页读实价；不可用时该源如实报错，不编价格。
-    sharedBrowserRunner: createSharedBrowserRunner(shoppingBrowserExecutor),
+    sharedBrowserRunner: createSharedBrowserRunner(browserRuntime),
   });
   const bookingProviders = buildDefaultBookingProviders(bookingConfig, {
     quoteAggregator,
@@ -1350,8 +1396,8 @@ export async function createAppServices(
   // 通过 setCapabilityModuleDeps 让 getBuiltinAgentChatTools 自动合并 ChatCompletionTool；
   // 通过 setExtraIntentRules 把模块意图元数据合并到 BM25 调权；
   // registerAllCapabilityModules 把 handler 注册到 ToolRegistry。
-  // 图片能力套件(图库/解析/缩略图/存储管理),存储根 data/pictures
-  const pictureKit = await createPictureKit({
+  // 图片能力套件(图库/解析/缩略图/存储管理)，按 actor 分区在 data/pictures/<actorKey>
+  const pictureKits = new PictureKitRegistry({
     rootDir: join(getDataDir(), "pictures"),
     batchOutputDir: join(getDataDir(), "pictures", "batch"),
   });
@@ -1394,7 +1440,7 @@ export async function createAppServices(
   const capabilityModuleDeps: CapabilityModuleDeps = {
     imageGenerationService,
     fileProcessingService,
-    pictureKit,
+    pictureKits,
     emailSmsService,
     mediaMusicService,
     wsConnectionRegistry,
@@ -1877,13 +1923,19 @@ export async function createAppServices(
       /* FTS 摘除失败静默（残留行会被下次 upsert/清理回收） */
     }
   });
-  if (memoryBridge && process.env.AGENT_MEMORY_BRIDGE_BACKFILL?.trim() !== "0") {
+  // 存量回填默认关闭（2026-11-01 提速）：两条回填都会调用 mem0
+  // `getAll({topK:10000})` 全量拉取（实测单次阻塞事件循环 7.9s、空闲期也有
+  // 0.5~2s 抖动），把整个进程的流式输出/工具回执一起拖慢。长期记忆的正确
+  // 读路径是「按需召回」（cognize 的 recallGate + brain.recall 工具），而不是
+  // 启动期全量重建索引；新写入的记忆仍会在写点实时建索引/linkage。
+  // 需要为历史数据重建时显式设 AGENT_MEMORY_FTS_BACKFILL=1 / AGENT_MEMORY_BRIDGE_BACKFILL=1。
+  if (memoryBridge && process.env.AGENT_MEMORY_BRIDGE_BACKFILL?.trim() === "1") {
     const backfillTimer = setTimeout(() => {
       void memoryBridge.backfillLinks().catch(() => {});
     }, 30_000);
     backfillTimer.unref();
   }
-  if (memoryFtsStore && process.env.AGENT_MEMORY_FTS_BACKFILL?.trim() !== "0") {
+  if (memoryFtsStore && process.env.AGENT_MEMORY_FTS_BACKFILL?.trim() === "1") {
     const ftsBackfillTimer = setTimeout(() => {
       // 候选 actor：session 登记 ∪ journal 目录（mem0ai v3 getAll 须按 user_id 过滤）
       const actorCandidates = new Set<string>(agentMemorySyncService.listSessionIds());
@@ -2105,16 +2157,40 @@ export async function createAppServices(
     },
   });
 
-  // 服务接入（内测 byok）：先重放用户自配密钥（data/service-config.json → env），
+  // 服务接入（内测 byok）：先重放自配密钥（service-config.json + 加密仓 → env），
   // 再解析 provider 装入可热替换代理——用户在客户端「服务接入」页保存密钥后，
   // PUT /api/service-config 经 externalChatSwapper 热生效，无需重启
   // （见 routes/http/service-config.ts 与 config/service-config-store.ts）。
-  await applyPersistedServiceConfig();
+  // 多租户云端不重放：那份文件是「一个用户的 key 全站生效」的单用户形态；云端一律
+  // 按 actor 加密落盘（模型 key 走 session.init 上送 → model-keys/<actor>.enc，
+  // 邮箱授权码走 POST /api/mail-watch/pass → mail-watch/pass/<actor>.enc），
+  // 离线期间的主动轮次用的就是用户自己那份凭据。
+  if (!isAccessAuthRequired()) {
+    const replayed = await applyPersistedServiceConfig();
+    if (replayed?.model?.apiKey && !serviceSecretsEncryptedAtRest()) {
+      console.warn(
+        "[ServiceConfig] 未配置 MODEL_KEY_SECRET：自配密钥明文留在 data/service-config.json 里（配上主密钥后下次启动会自动挪进 service-secrets/machine.enc）",
+      );
+    }
+  }
   const externalChatHost = new MutableExternalChatProvider(createExternalChatProviderFromEnv());
   const externalChat = externalChatHost;
-  // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：key 纯内存（TTL 24h），
-  // session.init 上送时由 ws 层写入，agent-core 用户轮经 chatProviderFor 取用。
+  // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：session.init 上送时由 ws 层写入，
+  // 加密落盘一份（离线期间的主动轮次要用用户自己的 key），agent-core 经 chatProviderFor 取用。
   const actorModelBindings = new ActorModelBindingStore();
+  {
+    const p = actorModelBindings.persistence();
+    if (p.undecryptable > 0) {
+      console.warn(
+        `[ModelKey] ${p.undecryptable} 份用户模型 key 解不开（主密钥轮换过？）：这些用户的轮次会跑不了，需客户端重新上送`,
+      );
+    }
+    if (!p.vaultEnabled && p.stored === 0) {
+      console.warn(
+        "[ModelKey] 未配置 MODEL_KEY_SECRET：用户模型 key 只驻留内存，重启到重连之间的主动轮次会跳过",
+      );
+    }
+  }
   // 主动话术生成器（内容型场景：行程变化/消息来临 → LLM 主动回复；模板兜底）。
   // 用量纪律：每日熔断 PROACTIVITY_MAX_PHRASE_PER_DAY（默认 30），PROACTIVITY_PHRASE_LLM=0 关闭。
   // 用户画像浅层摘要（画像架构优化）：所有 agent 主动开口的话术都携带用户的
@@ -2122,8 +2198,8 @@ export async function createAppServices(
   const userProfileAggregatorRef: {
     current: import("../brain/user-profile-aggregator.js").UserProfileAggregator | null;
   } = { current: null };
-  // 人格·静态提供者晚绑定（2026-10-26）：主动开口的 LLM 层（SpeechHub 统一
-  // 出口）与主对话共用同源的专门人格提示文件（agent/SOUL.md → soul-store）。
+  // 人格提供者晚绑定：主动开口的 LLM 层（SpeechHub 统一出口）与主对话共用
+  // 同源的专门人格提示文件（agent/SOUL.md → soul-store）。
   const personaSoulProviderRef: {
     current: ((sessionId: string) => string | null) | null;
   } = { current: null };
@@ -2131,21 +2207,13 @@ export async function createAppServices(
     chat: () => (externalChat?.isEnabled() ? externalChat : null),
     dataPath: join(getDataDir(), "proactivity"),
     personaPrompt: (sessionId) => personaSoulProviderRef.current?.(sessionId) ?? null,
-    // agent 风格指纹（few-shot 语感）：与聊天同一副嗓子，读取失败不阻塞
-    voiceProfile: () => {
-      try {
-        return formatAgentStylePrompt(loadAgentStyleProfile(agentMemorySyncService));
-      } catch {
-        return null;
-      }
-    },
     styleBrief: createUserStyleBrief({
       readProfile: async (actorId) =>
         (await userProfileAggregatorRef.current?.readProfile(actorId)) ?? "",
     }),
   });
   // 日程分级预告段回填统一语气层（上方 reminderHandler 处晚绑定声明）：
-  // SpeechHub light 档（人格·静态 + 语感 + 画像浅层，必达不否决），
+  // SpeechHub light 档（人格 + 画像浅层，必达不否决），
   // 模板兜底不受熔断影响。
   preReminderPolish = (input) =>
     speechHub.speak({
@@ -2360,20 +2428,21 @@ export async function createAppServices(
   // ─── Task 15 生活节律：晚间 digest「今日回顾 + 明日预告」（场景A）───
   // 数据源全确定性（journal 当日要点 / 当日账本新增 / 明日日程 / 次日天气预警）；
   // 文案交给 agent（2026-10-13 定调）：需要提前提醒的信息 → LLM 动态产出，
-  // system 注入 agent 自身 soul（buildPersonaStaticBlock 与主对话同源，文案
+  // system 注入 agent 人格正文（buildPersonaPrompt，与主对话同源，文案
   // 受 agent 人格影响），失败/未启用回退确定性模板；送达链路参考晨报
   // （WS 推送 EveningDigest 事件），调度模式参考 MorningBriefingScheduler。
   const personaSoulProvider = (sessionId: string): string | null => {
     try {
-      // agent 名（与聊天面同源：记忆同步 KV 的 agent.name）
-      let agentName: string | undefined;
+      // 名字自我认知（与聊天面同源：记忆同步 KV 的 agent.name）
+      let identityLine: string | undefined;
       try {
         const identityRaw = agentMemorySyncService
           .getSnapshot(sessionId, [AGENT_NAME_KV_KEY])
           .entries[AGENT_NAME_KV_KEY];
-        agentName = parseAgentIdentityKv(identityRaw)?.displayName ?? undefined;
+        const identity = parseAgentIdentityKv(identityRaw);
+        identityLine = identity ? buildIdentityNameLine(identity) : undefined;
       } catch {
-        /* 名字缺失不阻塞 soul */
+        /* 名字缺失不阻塞人格正文 */
       }
       // 用户称呼（agent 叫用户的称呼；与晨报同源，不回退 displayName）
       let userAlias: string | undefined;
@@ -2382,26 +2451,14 @@ export async function createAppServices(
           structuredFactStore?.getFact(sessionId, "称呼")?.value?.trim() ||
           undefined;
       } catch {
-        /* 称呼缺失不阻塞 soul */
+        /* 称呼缺失不阻塞人格正文 */
       }
-      // 关系档 + 学到的适配（与人格模块同口径换算；preferredTone 在异步
-      // getPromptSlice 里，睡前 soul 保持同步取用 → 只带同步可得信号）
-      let tier: RelationshipTier = 1;
-      let adaptation: UserAdaptationProfile | undefined;
-      try {
-        const rel = userPersonalizationService.getRelationshipState(sessionId);
-        tier = resolveRelationshipTier(rel?.rapport);
-        adaptation = { humorTolerance: rel?.humorTolerance };
-      } catch {
-        /* 关系态缺失走默认档 */
-      }
-      return buildPersonaStaticBlock({ userAlias, agentName, tier, adaptation, soulOverlay: getSoulOverlay() ?? undefined });
+      return buildPersonaPrompt({ userAlias, identityLine }) || null;
     } catch {
       return null;
     }
   };
-  // 人格·静态单点回填（2026-10-26）：SpeechHub 统一出口与睡前备忘共用同一份
-  // 人格块（主对话同源）。
+  // 人格正文单点回填：SpeechHub 统一出口、情报成稿与睡前备忘共用同一份【人格】块。
   personaSoulProviderRef.current = personaSoulProvider;
   const eveningDigestService = new EveningDigestService({
     scheduleTaskService,
@@ -2409,8 +2466,8 @@ export async function createAppServices(
     weatherPrefsService,
     // 天气位置偏好从未被客户端写入 → 明日天气兜底取位置历史的最新定位
     locationProvider: weatherLocationProvider,
-    // system 块装配单点化（2026-10-26）：narration 的 system 走 SpeechHub
-    // （人格·静态 + 语感 + 通用纪律），任务数据段仍由 digest 自己的 user prompt 承担
+    // system 块装配单点化：narration 的 system 走 SpeechHub（人格 + 通用纪律），
+    // 任务数据段仍由 digest 自己的 user prompt 承担
     soulProvider: (sessionId) =>
       speechHub.buildSystemPrompt({
         sessionId,
@@ -2859,11 +2916,9 @@ export async function createAppServices(
     virtualPhoneService,
     scheduleTaskService,
     shortTermMemoryGateway,
-    moodInferenceService,
     lifeSignalHubService,
   });
   agentCore.setPhoneBridgeCoordinator(phoneBridgeCoordinator);
-  agentCore.setMoodInferenceService(moodInferenceService);
   agentCore.setLifeSignalHubService(lifeSignalHubService);
   agentCore.setWsRegistry(wsConnectionRegistry);
   agentCore.setActorModelBindings(actorModelBindings);
@@ -2930,23 +2985,34 @@ export async function createAppServices(
       task.title || "自动化任务执行中",
       { phase: "agent_task", source: "schedule.agent_task_fired" },
     );
+    // 定时任务结果同样是 LLM 产物：回复末尾的 NEXT_UP 协议块不能在流式/定稿
+    // 通道漏给用户（此前这条路径是裸 delta + 裸 reply.text）。
+    const taskStreamGuard = createStreamMarkerGuard();
+    const sendTaskChunk = (chunk: string): void => {
+      if (!chunk) return;
+      wsConnectionRegistry.trySend(
+        task.sessionId,
+        JSON.stringify({
+          type: ServerEventType.ChatAssistantChunk,
+          payload: {
+            messageId: task.taskId,
+            delta: chunk,
+            source: "schedule.agent_task",
+          },
+        }),
+      );
+    };
     const reply = await runtime.handleUserMessage(task.sessionId, prompt, {
       chatUserMessageId: `schedule:${task.taskId}:${Date.now()}`,
       agentAccessMode: accessMode,
       onAssistantDelta: (delta) => {
-        wsConnectionRegistry.trySend(
-          task.sessionId,
-          JSON.stringify({
-            type: ServerEventType.ChatAssistantChunk,
-            payload: {
-              messageId: task.taskId,
-              delta,
-              source: "schedule.agent_task",
-            },
-          }),
-        );
+        const safe = taskStreamGuard.feed(delta);
+        if (safe) sendTaskChunk(safe);
       },
     });
+    const taskGuardTail = taskStreamGuard.flush();
+    if (taskGuardTail) sendTaskChunk(taskGuardTail);
+    const displayText = extractNextUpSuggestions(reply.text ?? "").text;
     const toolRun = await runtime.runToolIfNeeded(task.sessionId, reply, {
       chatUserMessageId: `schedule:${task.taskId}:tool`,
       agentAccessMode: accessMode,
@@ -2956,7 +3022,7 @@ export async function createAppServices(
       ok: toolRun.ok,
       title: task.title,
       prompt,
-      text: reply.text,
+      text: displayText,
       toolName: reply.toolName,
       toolResult: toolRun.result,
     };
@@ -2975,10 +3041,10 @@ export async function createAppServices(
         },
       }),
     );
-    if (!completionDelivered && reply.text.trim()) {
+    if (!completionDelivered && displayText.trim()) {
       getTaskOutbox().enqueue(task.sessionId, {
         messageId: task.taskId,
-        finalText: reply.text,
+        finalText: displayText,
       });
     }
     return result;
@@ -3097,7 +3163,7 @@ export async function createAppServices(
     // AwarenessCortex：注册生命信号子系统
     awarenessCortex.registerLifeSignalHub(lifeSignalHubService);
     awarenessCortex.registerDesktopPresence(desktopPresenceSignalService);
-    awarenessCortex.registerMoodInference(moodInferenceService);
+    // 注：MoodInferenceService 已不再注册（2026-11-01 提速，情绪交给主模型看上下文）。
     awarenessCortex.registerAnticipation(anticipationEngineService);
     // Stage 3 Task 4：注入 schedule-task-service，用于 meeting 状态识别
     awarenessCortex.registerScheduleTask(scheduleTaskService);
@@ -3234,12 +3300,11 @@ export async function createAppServices(
       brainCenter: () => brainCenter,
       synapseBus: () => synapseBus,
       proactiveOutbound,
-      agentMemorySyncService,
       // 顺嘴搭车：low 级主动消息挂起等下一轮对话织入（与 hub 共享同一队列实例）
       turnAsideQueue,
       // 死信闸：全设备离线时放弃话术生成（省 LLM 调用，不产生假台账）
       isActorOnline: (actorId) => proactivityPresence.isOnline(actorId),
-      // 统一开口出口：full 档 system 块装配（人格·静态/语感/纪律/画像）与用量记账
+      // 统一开口出口：full 档 system 块装配（人格正文/纪律/画像）与用量记账
       speech: speechHub,
     });
 
@@ -3355,10 +3420,10 @@ export async function createAppServices(
     };
   });
 
-  // ── 图片能力套件 skill 化（PictureKit 在上方 data/pictures 根目录创建）──
+  // ── 图片能力套件 skill 化（图库按 actor 分区，见上方 PictureKitRegistry）──
   // picture.gallery 与 capability-module 工具同名接管执行；
   // 注册后经工具目录导出以 resource_type="skill" 同步进 tool-router skill 库。
-  registerPictureBuiltinSkills((skill) => skillManager.register(skill), { pictureKit });
+  registerPictureBuiltinSkills((skill) => skillManager.register(skill), { pictureKits });
 
   // ── 到站管家（接站 / 接机 / 到站打车）──
   // 状态 provider 链：航旅纵横（航班实时）→ 聚合数据（车次时刻表）→
@@ -3377,7 +3442,6 @@ export async function createAppServices(
         ? { latitude: sample.latitude, longitude: sample.longitude, label: sample.label ?? undefined }
         : null;
     },
-    defaultActorId: process.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || undefined,
   });
   arrivalMonitorService.start();
   // 到站管家技能（版本闸：开源版剔除；监控服务生命周期保持启停对称）
@@ -3420,7 +3484,7 @@ export async function createAppServices(
     systemPrompt: process.env.VOICE_DUPLEX_SYSTEM_PROMPT?.trim() || undefined,
     maxSessions: 16,
   });
-  registerVoiceDuplexWsRoute(app, voiceDuplexService);
+  registerVoiceDuplexWsRoute(app, voiceDuplexService, { accessAuthService });
   app.log.info(
     minimaxEngine.isEnabled()
       ? `[VoiceDuplex] 全双工语音已启用（/ws/voice-duplex，引擎=${minimaxEngine.descriptor.name}）`
@@ -4019,7 +4083,8 @@ export async function createAppServices(
     // LimbicCortex（边缘皮层 / 杏仁核 + 情感）
     limbicCortex = new LimbicCortex();
     limbicCortex.registerTaskSafety(getAgentTaskSafety());
-    limbicCortex.registerMoodInference(moodInferenceService);
+    // 注：不再注册 MoodInferenceService（2026-11-01 提速）：LimbicCortex 的 inferEmotion
+    // 会委托它每轮打一次 LLM；不注册时退化为 EmotionModulator（纯规则、零延迟）。
 
     // 包装 assistant-tone-policy 函数为 TonePolicyLike 对象
     // services/assistant-tone-policy.ts 导出的是函数而非类，此处适配 decide 入口。
@@ -4540,19 +4605,8 @@ export async function createAppServices(
       }
     }
 
-    // 深度优化：注入 TopicExtractor（LLM 驱动）—— 替代 working-memory-cortex.ts 硬编码主题词列表
-    // 让 BrainCenter.cognize 每轮异步调一次轻量 LLM 提取 1-3 个业务领域关键词，
-    // 写入工作记忆槽位，使 toSummary 真正反映"在聊什么"。
-    // 决策器实现已抽到 brain/decision-maker-factory.ts，支持未来"换大脑"时同步替换。
-    // 每轮 LLM 调用削减：情绪推断（阶段 1）的同一次调用顺带产出 topics，
-    // cognize 阶段 3.4.1 优先读 mood 缓存，仅未命中时才回退独立 TopicExtractor 调用。
-    if (externalChat?.isEnabled()) {
-      const topicExtractor = createDefaultTopicExtractor(externalChat);
-      brainCenter.setTopicExtractor(topicExtractor.extract.bind(topicExtractor));
-      brainCenter.setMoodTopicProvider((sessionId, text) =>
-        moodInferenceService.getTopicsFromCache(sessionId, text) ?? [],
-      );
-    }
+    // 深度优化：TopicExtractor（LLM 驱动）已下线（2026-11-01 提速）：
+    // 每轮额外一次 LLM 实测恒定 2s 超时且输出为空，工作记忆主题词改为纯规则路径。
 
     // 注入到 DecisionHub（让 decidePassive 调用新模块）
     decisionHub.registerWorkingMemory(workingMemoryCortex);
@@ -4625,13 +4679,6 @@ export async function createAppServices(
   // 把 brainCenter 注入 agentCore：可用时 handleUserMessage 走 cognize() 端到端认知入口，
   // BRAIN_CENTER_ENABLED=0 时 brainCenter 为 null，agentCore 降级到原切片路径。
   agentCore.setBrainCenter(brainCenter);
-
-  // 注入人格内核拉取器：PromptContextBuilder.assembleMemory 每轮拉取 PersonalityCore
-  // （BrainCenter.getPersonalityCore → MemoryCortex.getPersonalityCore，KV 持久化 + 默认人格兜底），
-  // 格式化后填入 memory.personalityCore，由 buildLayeredSystemPrompt 注入 system prompt 稳定前缀
-  // 的【人格内核】块，防止单次对话导致人格漂移。brainCenter 为 null（brain 未启用）时返回 null，
-  // personalityCore 字段不注入，降级到无人格内核模式。
-  promptContextBuilder.setPersonalityProvider((actorId) => brainCenter?.getPersonalityCore(actorId) ?? null);
 
   // 内置浏览器当前页进动态层：coordinator 已留存客户端回包里的 URL，这里只做带龄期的
   // 一行事实注入；无上报返回 null（不注入、不占位）。
@@ -4864,7 +4911,7 @@ export async function createAppServices(
       const note = String(fence.actionConfig.note ?? "").trim();
       void toolRegistry
         .execute(
-          "calendar.create_task",
+          "calendar.create",
           {
             kind: "reminder",
             title,
@@ -5093,41 +5140,49 @@ export async function createAppServices(
     const actors = proactivityHub.exportActors();
     return actors.sort((a, b) => b.lastInteractionAt - a.lastInteractionAt)[0]?.actorId ?? null;
   };
-  // presence 追踪传感器：轮询在场状态，变化才产出信号（away_return 的数据源）
-  let lastPresenceState = "";
+  // presence 追踪传感器：轮询每个活跃用户的在场状态，变化才产出信号
+  // （away_return 的数据源）。按 actor 记录上次状态，不能共用一个变量。
+  const lastPresenceByActor = new Map<string, string>();
   sensorKernel.register({
     id: "presence_tracker",
     stream: "presence",
     pollIntervalMs: 60_000,
     collect: () => {
-      const actorId = primaryActor();
-      if (!actorId) return [];
-      const state = proactivityPresence.getPresence(actorId, Date.now());
-      if (state === lastPresenceState) return [];
-      lastPresenceState = state;
-      return [
-        {
-          stream: "presence",
-          at: Date.now(),
-          fingerprint: `presence:${state}:${Math.floor(Date.now() / 60_000)}`,
-          salience: "low",
+      const now = Date.now();
+      const cutoff = now - 24 * 3600_000;
+      const out = [];
+      for (const { actorId, lastInteractionAt } of proactivityHub.exportActors()) {
+        if (lastInteractionAt < cutoff) continue;
+        const state = proactivityPresence.getPresence(actorId, now);
+        if (lastPresenceByActor.get(actorId) === state) continue;
+        lastPresenceByActor.set(actorId, state);
+        out.push({
+          stream: "presence" as const,
+          actorId,
+          at: now,
+          fingerprint: `presence:${actorId}:${state}:${Math.floor(now / 60_000)}`,
+          salience: "low" as const,
           delta: `用户当前状态：${state}`,
           payload: { state },
-        },
-      ];
+        });
+      }
+      return out;
     },
   });
   sensorKernel.start();
 
-  // 天气一行话缓存（30min 刷新；定位取显式天气位置偏好，缺省兜底最新定位，都没有则跳过）
-  let weatherLineCache: string | null = null;
-  const refreshWeatherLine = async (): Promise<void> => {
+  // 天气一行话缓存（30min 刷新，按 actor 分桶）：规则 tick 按用户读自己的那一行，
+  // 多租户下不能共用"最近交互用户"的天气。只刷新 24h 内有交互的用户，避免云端
+  // 为全量历史账号发天气请求。
+  const weatherLineByActor = new Map<string, string | null>();
+  const refreshWeatherLineFor = async (actorId: string): Promise<void> => {
     try {
-      const actorId = primaryActor();
-      const prefs = actorId ? weatherPrefsService.get(actorId) : undefined;
-      const loc =
-        prefs ?? (actorId ? await weatherLocationProvider(actorId) : null);
-      if (!loc?.latitude || !loc?.longitude) return;
+      const prefs = weatherPrefsService.get(actorId);
+      const loc = prefs ?? (await weatherLocationProvider(actorId));
+      if (!loc?.latitude || !loc?.longitude) {
+        weatherLineByActor.set(actorId, null);
+        return;
+      }
       const brief = await weatherService.getBrief(
         loc.latitude,
         loc.longitude,
@@ -5136,12 +5191,27 @@ export async function createAppServices(
         loc.timezone || "auto",
         loc.label,
       );
-      weatherLineCache =
+      weatherLineByActor.set(
+        actorId,
         brief.summaryLine ||
-        `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C${brief.peakRainPct >= 50 ? "，有雨记得带伞" : ""}`;
+          `${brief.weatherText}，${Math.round(brief.todayMinC)}-${Math.round(brief.todayMaxC)}°C${brief.peakRainPct >= 50 ? "，有雨记得带伞" : ""}`,
+      );
     } catch {
-      weatherLineCache = null;
+      weatherLineByActor.set(actorId, null);
     }
+  };
+  const refreshWeatherLine = async (): Promise<void> => {
+    const cutoff = Date.now() - 24 * 3600_000;
+    const active = new Set(
+      proactivityHub
+        .exportActors()
+        .filter((a) => a.lastInteractionAt >= cutoff)
+        .map((a) => a.actorId),
+    );
+    for (const id of weatherLineByActor.keys()) {
+      if (!active.has(id)) weatherLineByActor.delete(id);
+    }
+    await Promise.all([...active].map((id) => refreshWeatherLineFor(id)));
   };
   void refreshWeatherLine();
   const weatherTimer = setInterval(() => void refreshWeatherLine(), 30 * 60_000);
@@ -5242,12 +5312,19 @@ export async function createAppServices(
   // 注意力仲裁器（L3）：打断成本 = 屏幕上下文 × 对话占用 × 日程临近 × 接受度
   const arbiterV2 = new ArbiterV2({
     presence: proactivityPresence,
-    lastConversationAt: () => {
-      const actorId = primaryActor();
-      return actorId ? proactivityHub.lastInteractionAtOf(actorId) : null;
+    // 打断成本必须按被投递的那个人算：全局"最近说的那句话/最近看到的屏幕"
+    // 会把 A 的专注状态套到 B 的投递决策上。
+    lastConversationAt: (actorId) => proactivityHub.lastInteractionAtOf(actorId) ?? null,
+    screenFocus: (actorId) =>
+      (worldBoardRef.current?.read<{ kind?: string }>(actorId, "current", "screenFocus")
+        ?.kind as ScreenFocusKind | undefined) ?? screenSensor.latest(),
+    nextEventMin: (actorId) => {
+      const runAt = worldBoardRef.current?.read<{ runAt?: number }>(actorId, "obligations", "nextEvent")
+        ?.runAt;
+      return typeof runAt === "number"
+        ? Math.round((runAt - Date.now()) / 60_000)
+        : (scheduleSensor.latest(actorId)?.min ?? null);
     },
-    screenFocus: () => screenSensor.latest(),
-    nextEventMin: () => scheduleSensor.latest()?.min ?? null,
     receptivity: (actorId) => {
       try {
         const hour = new Date().getHours();
@@ -5301,7 +5378,13 @@ export async function createAppServices(
         return scheduleTaskService
           .listTasksBySession(actorId)
           .filter((t) => t.status !== "cancelled")
-          .map((t) => ({ title: t.title ?? "", runAt: t.runAt }))
+          // 展示名回退：提醒类任务多由工具建，只有 shortTitle/description（title 为空）。
+          // 此前只取 title，主动性审阅拿到的是「18:00 」这种无事项的空行，只能从最近
+          // 对话里猜事项，于是编出了「六点整健身和游泳撞一块了」（2026-11-01）。
+          .map((t) => ({
+            title: (t.title ?? t.shortTitle ?? t.description ?? "").trim(),
+            runAt: t.nextRunAt ?? t.runAt,
+          }))
         .filter((t) => {
           const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
           return Number.isFinite(at) && at > now && at <= horizon;
@@ -5313,12 +5396,10 @@ export async function createAppServices(
         })
         .slice(0, 6);
     },
-    // 同上：listAllTasks() 是全库，规则按 actor 查，否则别的账号的日程会被
-    // 写进当前用户的晨报与时间轴（截图事故的直接来源）。
-    weatherLine: () => weatherLineCache,
-    // 未读发件人（digest/晨报拼接）：MessageHub 会话表中 unreadCount>0 的对端
-    unreadSenders: () => {
-      const actorId = primaryActor();
+    // 天气一行话：按 tick 的 actor 读自己的缓存（全局单值会把 A 的天气说给 B）
+    weatherLine: (actorId: string) => weatherLineByActor.get(actorId) ?? null,
+    // 未读发件人（digest/晨报拼接）：MessageHub 会话表中该 actor unreadCount>0 的对端
+    unreadSenders: (actorId: string) => {
       if (!actorId) return [];
       try {
         return messageHubService
@@ -5330,14 +5411,11 @@ export async function createAppServices(
         return [];
       }
     },
-    readyGoals: () =>
-      goalBoard.readyTray().map((g) => ({ title: g.title, body: String(g.payload?.body ?? g.title) })),
-    interestLines: () => {
-      const actorId = primaryActor();
-      return actorId ? [interestWatcher.listForPrompt(actorId, 3) ?? ""] : [];
-    },
-    recallMemory: async (query: string, limit: number) => {
-      const actorId = primaryActor();
+    readyGoals: (actorId: string) =>
+      goalBoard.readyTray(actorId).map((g) => ({ title: g.title, body: String(g.payload?.body ?? g.title) })),
+    interestLines: (actorId: string) =>
+      actorId ? [interestWatcher.listForPrompt(actorId, 3) ?? ""] : [],
+    recallMemory: async (actorId: string, query: string, limit: number) => {
       if (!brainCenter || !actorId) return [];
       const result = await brainCenter.recall(actorId, query, { domain: "episodic", limit });
       return (result?.items ?? []).map((item) => item.content);
@@ -5358,7 +5436,13 @@ export async function createAppServices(
   // 世界状态板：传感信号分层整理成"专属给规则看的现在"（程序采集+整理，零判断零 LLM）
   const worldBoard = new WorldBoard({ dataPath: proactivityFabricPath });
   worldBoardRef.current = worldBoard;
-  bridgeSensorKernelToBoard(sensorKernel, worldBoard, primaryActor);
+  // 无 actorId 的传感信号（本机屏幕/剪贴板/文件等）只在"单活跃用户"装机下才归到那个人；
+  // 云端多租户里这些信号不知道属于谁，宁可丢，也不能记到最近交互的那个账号头上。
+  bridgeSensorKernelToBoard(sensorKernel, worldBoard, () => {
+    const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+    const active = proactivityHub.exportActors().filter((a) => a.lastInteractionAt >= cutoff);
+    return active.length === 1 ? active[0]!.actorId : null;
+  });
   // P0 清板（2026-10-01）：板上 actor 坟场一次性清理——7 天无交互的测试/
   // 历史账号（E2E/bench/profile 全家 143 个）不再常驻每 tick 全量评估；
   // 幽灵键（历史接线 bug 把函数源码当 actorId）一并移除。
@@ -5416,14 +5500,20 @@ export async function createAppServices(
   });
   console.log("[Bootstrap] 主动性已装配（传感→状态板→映射规则→仲裁→目标，零 LLM）");
 
-  // Muse 式消息聚合主动开口（2026-10-25 取代 digest_beat 固定节拍「心跳回顾」）：
+  // 主动性模块的消息聚合开口（2026-10-25 取代 digest_beat 固定节拍「心跳回顾」）：
   // 聚合同一批程序数据（日程/课表/未读/就绪目标/关注话题/活动目标，**不含天气**——
   // 天气归晚间 digest 的明日预告），材料有新增且过了打扰闸（静默时段/最小间隔/
   // 每日上限/负反馈抑制）才调一次 LLM 审阅；agent 判断值得说才产出一条无标题的
   // 普通主动消息（NOP = 沉默）。确定性闸门在前省 token，投递继承统一管道全部语义
   // （去重/静默择时/离线挂起重连补投/频控记账）。
   const agentPulseService = new AgentPulseService({
-    actorId: primaryActor,
+    // 与映射规则同一活跃口径（7 天内有交互）；多租户下逐用户评审，
+    // 不再只服务"最近交互的那一个"
+    actors: () =>
+      proactivityHub
+        .exportActors()
+        .filter((a) => Date.now() - a.lastInteractionAt < 7 * 24 * 60 * 60_000)
+        .map((a) => a.actorId),
     aggregate: (actorId) => {
       const tasks = (builtinServices.listTodayTasks?.(actorId) ?? []).map((t) => {
         const at = typeof t.runAt === "number" ? t.runAt : Date.parse(String(t.runAt));
@@ -5433,15 +5523,15 @@ export async function createAppServices(
         return hhmm ? `${hhmm} ${t.title}` : t.title;
       });
       const unread = [
-        ...new Set(builtinServices.unreadSenders?.() ?? []),
+        ...new Set(builtinServices.unreadSenders?.(actorId) ?? []),
       ];
-      const goals = (builtinServices.readyGoals?.() ?? []).map((g) => g.title);
-      const interests = (builtinServices.interestLines?.() ?? []).filter(
+      const goals = (builtinServices.readyGoals?.(actorId) ?? []).map((g) => g.title);
+      const interests = (builtinServices.interestLines?.(actorId) ?? []).filter(
         (line) => line.trim().length > 0,
       );
       const goalLine = builtinServices.activeGoalLine?.(actorId) ?? null;
       // 共享发现层未消费发现（邮件/日历/目标/承诺等攒下还没说出口的事）：
-      // Muse 式聚合的主体——agent 审阅后开口时经 openMouth 按主题/实体合并消费
+      // 主动性聚合的主体——agent 审阅后开口时经 openMouth 按主题/实体合并消费
       const findings = (discoveryRef.current?.allUnconsumed(actorId, 5) ?? []).map(
         (f) => `${f.source}：${f.content.slice(0, 80)}`,
       );
@@ -5535,8 +5625,8 @@ export async function createAppServices(
           return run(false);
         }
       : undefined,
-    // 统一主动语气层：初稿过 SpeechHub light 档（人格·静态 + 语感 + 用户画像
-    // 语气 + 模型钉位 + 每日熔断），与其它主动消息同一副嗓子；失败回退初稿不阻塞
+    // 统一主动语气层：初稿过 SpeechHub light 档（人格 + 用户画像语气 + 模型钉位 +
+    // 每日熔断），与其它主动消息同一副嗓子；失败回退初稿不阻塞
     polish: (input) =>
       speechHub.speak({
         kind: input.kind,
@@ -5659,14 +5749,6 @@ export async function createAppServices(
     judge: createIntelJudge({
       chat: () => (externalChat?.isEnabled() ? externalChat : null),
     }),
-    // agent 风格指纹（few-shot 语感）：判断写草稿时就用同一副嗓子，读取失败不阻塞
-    voiceCard: () => {
-      try {
-        return formatAgentStylePrompt(loadAgentStyleProfile(agentMemorySyncService));
-      } catch {
-        return null;
-      }
-    },
     compose: createIntelComposer({
       chat: () => (externalChat?.isEnabled() ? externalChat : null),
       personaPrompt: (actorId) => personaSoulProviderRef.current?.(actorId) ?? null,
@@ -5746,7 +5828,7 @@ export async function createAppServices(
   //   ingestText（LLM 抽取 + 指纹去重 + 入账，入账后经 setOnIngested 轻提醒）。
   //   这是"后台自动获取财务数据"里延迟最低的通道（邮件到达即入账，秒~分钟级）；
   //   浏览器拉取通道（FinanceBillAutoFetchService）负责兜底对账，两者靠幂等键互补。
-  // MAIL_WATCH_ENABLED=0 或配置不齐时 start() 如实 no-op，状态查 mailWatchService.status()。
+  // MAIL_WATCH_ENABLED=0 或配置不齐时 start() 如实 no-op，状态查 mailWatch.statusFor(actorId)。
   // 票务/日历邮件 → 日程物化桥（2026-09-25）：粗筛命中才解 MIME（ICS 附件直取 +
   // 12306/出票/酒店模板规则），静默落 source=email 日程，一轮汇总一条轻提醒。
   const mailScheduleBridge = new MailScheduleBridge({
@@ -5762,8 +5844,11 @@ export async function createAppServices(
       );
     },
   });
-  const mailWatchService = new MailWatchService({
+  const mailWatch = new MailWatchRegistry({
     env: process.env,
+    // 单机装机（未开周界鉴权）允许"没带身份"的授权码提交认给本机唯一账号；
+    // 云端多租户必须带身份，否则凭据不知道绑给谁
+    allowAnonymousFallback: !isAccessAuthRequired(),
     messageHub: messageHubService,
     // 生产 IMAP 客户端（imapflow，每轮 poll 新建连接用完即弃）。此前从未注入——
     // 邮件链即使填了授权码也会「running=true 但空转」（2026-10-01 补接线）。
@@ -5819,23 +5904,19 @@ export async function createAppServices(
       })();
     },
   });
-  mailWatchService.start();
-  // P2 邮箱自动接入（2026-10-01）：注册登录留下的邮箱自动接线（host 按域映射、
-  // actorId=账号）。env 显式配置优先不覆盖；IMAP 授权码仍需用户填一次（服务端
-  // 无从得知，status() 如实报等待授权码）。
+  // P2 邮箱自动接入（2026-10-01，2026-11-02 改逐账号）：注册登录留下的邮箱逐个接线
+  // （host 按域映射、actorId=该账号）。env 显式配置的部署方邮箱优先不覆盖；IMAP 授权码
+  // 仍需每个用户自己填一次（服务端无从得知，状态如实报等待授权码）。
   try {
-    const autoMail = resolveAutoMailAccount(agentAccountService);
-    if (autoMail) {
-      mailWatchService.applyAutoAccount(autoMail);
-      if (!mailWatchService.status().running && mailWatchService.isConfigured()) {
-        mailWatchService.start();
-      }
-    }
+    mailWatch.attachAutoAccounts(resolveAutoMailAccounts(agentAccountService));
   } catch (err) {
     console.log(`[Bootstrap] 邮箱自动接入失败（忽略）: ${err}`);
   }
+  mailWatch.start();
+  const mailAccounts = mailWatch.list();
   console.log(
-    `[Bootstrap] 邮箱盯梢 ${mailWatchService.status().running ? "已启动" : "未启用（MAIL_WATCH_ENABLED/MAIL_WATCH_HOST/USER/PASS）"}`,
+    `[Bootstrap] 邮箱盯梢：已挂 ${mailAccounts.length} 个账号，起盯 ${mailWatch.runningCount()} 个` +
+      (mailAccounts.length > mailWatch.runningCount() ? "（其余等待用户在设置页填授权码）" : ""),
   );
 
   // ─── ICS 日历订阅轮询（2026-09-24，「日程零手工」外部信源）───
@@ -5860,8 +5941,9 @@ export async function createAppServices(
   // 下限 10 分钟防支付宝风控）或 每日定点（默认 21 点）。用用户支付宝登录态
   // （Cookie 双门禁同购物域）拉交易明细 → 确定性 id 幂等去重 → 仅新增入账 →
   // 有新增时轻提醒。秒~分钟级的"实时"主力是上面的账单邮件通道（邮件到达即入账），
-  // 本服务负责登录态全量兜底对账。FINANCE_BILL_AUTO_FETCH_ENABLED=0 时调度 no-op；
-  // finance.bills.sync_now 可手动触发。
+  // 本服务负责登录态全量兜底对账。开关按账号：只有用户自己开启（finance.bills.auto_fetch
+  // =on，或部署方用 FINANCE_BILL_AUTO_FETCH_ACTORS 点名）才进调度，
+  // FINANCE_BILL_AUTO_FETCH_ENABLED=0 是部署级一键停摆；finance.bills.sync_now 仍可手动拉一次。
   const financeBillAutoFetch = new FinanceBillAutoFetchService({
     browserSessions: browserSessionService,
     financeDeepService,
@@ -5913,12 +5995,67 @@ export async function createAppServices(
   const financeAutoFetchStatus = financeBillAutoFetch.status();
   console.log(
     `[Bootstrap] 财务账单自动拉取 ${
-      financeAutoFetchStatus.enabled
-        ? financeAutoFetchStatus.mode === "interval"
-          ? `已启动（准实时：每 ${financeAutoFetchStatus.intervalMin} 分钟）`
-          : `已启动（每日 ${financeAutoFetchStatus.hour} 点）`
-        : "未启用（FINANCE_BILL_AUTO_FETCH_ENABLED=1 开启；需导入支付宝 Cookie；实时场景建议叠加账单邮件通道）"
-    }`,
+      !financeAutoFetchStatus.enabled
+        ? "已被部署级开关关掉（FINANCE_BILL_AUTO_FETCH_ENABLED=0）"
+        : financeAutoFetchStatus.mode === "interval"
+          ? `调度就绪（准实时：每 ${financeAutoFetchStatus.intervalMin} 分钟），已开启账号 ${
+              financeBillAutoFetch.listEnrolled().length
+            } 个`
+          : `调度就绪（每日 ${financeAutoFetchStatus.hour} 点），已开启账号 ${
+              financeBillAutoFetch.listEnrolled().length
+            } 个`
+    }；用户可用 finance.bills.auto_fetch 自助开关（需已导入支付宝 Cookie）`,
+  );
+  // 账号级开关：后台拉账单用的是用户自己的支付宝登录态，开不开由于他本人决定，
+  // 部署方只留 env 硬闸。status/on/off 三个动作都只作用于当前请求的 actor。
+  toolRegistry.register(
+    "finance.bills.auto_fetch",
+    async (input: Record<string, unknown>, context: ToolContext) => {
+      const actorId = resolveActorId(context);
+      const action = String(input.action ?? "status").trim().toLowerCase();
+      const num = (v: unknown): number | undefined =>
+        v == null || !Number.isFinite(Number(v)) ? undefined : Number(v);
+      if (action === "on" || action === "off") {
+        const r =
+          action === "on"
+            ? financeBillAutoFetch.enroll(actorId, { intervalMin: num(input.intervalMin), hour: num(input.hour) })
+            : financeBillAutoFetch.unenroll(actorId);
+        if (!r.ok) return { ok: false, error: r.error };
+        if (action === "off") {
+          return { ok: true, enrolled: false, summary: "账单后台自动同步已关闭，之后不会再定时拉你的支付宝明细。" };
+        }
+        const st = financeBillAutoFetch.status(actorId);
+        const me = st.actors.find((a) => a.actorId === actorId);
+        const rhythm =
+          (me?.intervalMin ?? st.intervalMin) > 0
+            ? `每 ${(me?.intervalMin ?? st.intervalMin)} 分钟拉一次增量`
+            : `每天 ${(me?.hour ?? st.hour)} 点拉一次`;
+        return {
+          ok: true,
+          enrolled: true,
+          summary:
+            `账单后台自动同步已开启：${rhythm}。` +
+            (st.enabled ? "" : "注意：部署侧的总开关当前是关的，到点不会执行。"),
+        };
+      }
+      const st = financeBillAutoFetch.status(actorId);
+      const me = st.actors.find((a) => a.actorId === actorId);
+      if (!me?.enrolled) {
+        return { ok: true, enrolled: false, summary: "账单后台自动同步当前是关闭状态。" };
+      }
+      const last = !me.lastRunAt
+        ? "还没跑过"
+        : me.lastOk
+          ? `上次 ${me.lastRunAt} 成功，入账 ${me.lastAdded ?? 0} 笔`
+          : `上次 ${me.lastRunAt} 失败：${me.lastError ?? "原因未记录"}`;
+      const rhythm =
+        me.intervalMin && me.intervalMin > 0 ? `每 ${me.intervalMin} 分钟` : `每天 ${me.hour} 点`;
+      return {
+        ok: true,
+        enrolled: true,
+        summary: `账单后台自动同步已开启（${rhythm}）；${last}。`,
+      };
+    },
   );
 
   // ─── 外部信源收编 × 跨源统一采集库（2026-10-10 扫描架构 P0）───
@@ -5949,7 +6086,7 @@ export async function createAppServices(
   proactivityHub.setDiscovery(discovery);
   const sensorFabricDisabled = (name: string) => process.env[`SENSOR_FABRIC_${name}`] === "0";
   if (!sensorFabricDisabled("MAIL")) {
-    sensorKernel.register(new MailSensor({ fetchNewSince: (since) => mailWatchService.fetchNewSince(since) }));
+    sensorKernel.register(new MailSensor({ fetchNewSince: (since) => mailWatch.fetchNewSince(since) }));
   }
   if (!sensorFabricDisabled("ICS")) {
     sensorKernel.register(new IcsSensor({ fetchEventsSince: (since) => icsSubscriptionService.fetchEventsSince(since) }));
@@ -5958,7 +6095,13 @@ export async function createAppServices(
     sensorKernel.register(
       new FinanceSensor(
         { getTransactions: (...args) => financeDeepService.getTransactions(...args) },
-        () => primaryActor(),
+        () => {
+          const cutoff = Date.now() - 7 * 24 * 60 * 60_000;
+          return proactivityHub
+            .exportActors()
+            .filter((a) => a.lastInteractionAt >= cutoff)
+            .map((a) => a.actorId);
+        },
       ),
     );
   }
@@ -6258,30 +6401,33 @@ export async function createAppServices(
             : `（计划续跑：第「${step.title}」步已确认完成，计划全部完成，向用户简单收尾说结果。）`;
           const messageId = `plan-probe-${Date.now()}`;
           const assistantMsgId = `${messageId}-a`;
+          // 续跑结果同样是 LLM 产物：NEXT_UP 协议块不得漏进流式气泡/定稿文本。
+          const probeGuard = createStreamMarkerGuard();
+          const sendProbeChunk = (chunk: string): void => {
+            if (!chunk) return;
+            wsConnectionRegistry.trySend(
+              actorId,
+              JSON.stringify({
+                type: ServerEventType.ChatAssistantChunk,
+                payload: { sessionId: actorId, messageId: assistantMsgId, chunk },
+              }),
+            );
+          };
           void runtime
             .handleUserMessage(actorId, prompt, {
               chatUserMessageId: messageId,
               sessionId,
               onAssistantDelta: (delta) => {
-                wsConnectionRegistry.trySend(
-                  actorId,
-                  JSON.stringify({
-                    type: ServerEventType.ChatAssistantChunk,
-                    payload: { sessionId: actorId, messageId: assistantMsgId, chunk: delta },
-                  }),
-                );
+                const safe = probeGuard.feed(delta);
+                if (safe) sendProbeChunk(safe);
               },
             })
             .then((reply) => {
-              const text = (reply.text ?? "").trim();
+              const probeTail = probeGuard.flush();
+              if (probeTail) sendProbeChunk(probeTail);
+              const text = extractNextUpSuggestions((reply.text ?? "").trim()).text;
               if (!reply.streamedChunks && text) {
-                wsConnectionRegistry.trySend(
-                  actorId,
-                  JSON.stringify({
-                    type: ServerEventType.ChatAssistantChunk,
-                    payload: { sessionId: actorId, messageId: assistantMsgId, chunk: text },
-                  }),
-                );
+                sendProbeChunk(text);
               }
               wsConnectionRegistry.trySend(
                 actorId,
@@ -6343,10 +6489,10 @@ export async function createAppServices(
     // - source 通道：跨源采集库按实体检索（"提到三亚的所有来源"），进程内零成本可查。
     // - realtime 通道：进程内没有直接的联网检索入口（检索能力在任务面工具里），
     //   不假装已查到——只把"要查什么"落到步骤上，由派发出去的那一步带工具查证。
-    retrieveForStep: ({ query, channel }) => {
+    retrieveForStep: ({ actorId, query, channel }) => {
       try {
         if (channel === "source") {
-          const hits = sourceStore.findByEntity(query, { limit: 3 });
+          const hits = sourceStore.findByEntity(query, { limit: 3, actorId });
           if (hits.length === 0) return null;
           return {
             summary: hits.map((h) => `${h.stream}：${(h.delta ?? h.entity).slice(0, 60)}`).join("；"),
@@ -7132,7 +7278,7 @@ export async function createAppServices(
   app.addHook("onClose", async () => alarmClockService.stop());
 
   registerHttpRoutes(app, {
-    pictureKit,
+    pictureKits,
     toolRegistry,
     skillManager,
     featureCatalog,
@@ -7192,25 +7338,33 @@ export async function createAppServices(
       // 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察）
       rhythmHealth: () => rhythmEngine?.health() ?? null,
       // 邮件反应链测试注入（2026-10-01）：模拟邮件走真实 handleIncoming 链，
-      // actorId 缺省取邮箱配置的归属用户（自动接入后=注册邮箱账号）
-      mailTestInject: async (mail) =>
-        mailWatchService.handleIncoming({
-          actorId: mail.actorId ?? mailWatchService.status().actorId ?? primaryActor() ?? "local_user",
+      // 走的是这个账号自己那个邮箱的引擎；多账号时不带身份不敢猜归属。
+      mailTestInject: async (mail) => {
+        // 无显式身份时只认邮件账号归属，不再猜"最近交互用户"或塞幽灵账号
+        const actorId = mail.actorId ?? mailWatch.defaultActorId();
+        if (!actorId) throw new Error("缺少 actorId：无显式身份且本机邮箱账号不唯一");
+        const engine = mailWatch.engineOf(actorId);
+        if (!engine) throw new Error(`账号 ${actorId} 还没绑定邮箱，模拟邮件无处可投`);
+        return engine.handleIncoming({
+          actorId,
           from: mail.from,
-          to: mailWatchService.status().user ?? "",
+          to: mailWatch.mailboxOf(actorId)?.user ?? "",
           subject: mail.subject,
           textSnippet: mail.text,
           date: new Date().toISOString(),
           uid: mail.uid,
           ...(mail.source ? { source: mail.source } : {}),
-        }),
-      // 设置页邮箱接入块：状态查询 + 授权码提交（即刻生效，持久化在客户端 config.env）
-      mailWatchStatus: () => mailWatchService.status(),
-      mailWatchApplyPass: (pass: string) => mailWatchService.applyPass(pass),
+        });
+      },
+      // 设置页邮箱接入块：只看这一个账号的状态；授权码绑给提交者本人，
+      // 加密落盘后重启续效（主密钥缺失时如实回 persisted:false）
+      mailWatchStatus: (actorId: string) => mailWatch.statusFor(actorId),
+      mailWatchApplyPass: (input) => mailWatch.saveAccount(input),
       // P3 自诊断（2026-10-01）：「主动性为什么没说话」按 actor 分层快照。
-      // 缺省 actor 取最近活跃用户。全部读内存/落盘文件，零 LLM 零副作用。
+      // 不给 actor 时用最近活跃用户（仅单用户装机有意义）。零 LLM 零副作用。
       whySilent: (actorId?: string) => {
-        const id = actorId ?? primaryActor() ?? "local_user";
+        const id = actorId ?? primaryActor();
+        if (!id) return { actorId: null, note: "无指定用户且无活跃用户" };
         const nowMs = Date.now();
         const known = proactivityHub
           .exportActors()
@@ -7370,6 +7524,7 @@ export async function createAppServices(
     externalChat,
     // 服务接入热替换：PUT /api/service-config 保存后装入新 provider（见 service-config.ts）
     externalChatSwapper: (next) => externalChatHost.swap(next),
+    actorByokStatus: (actorId) => actorModelBindings.status(actorId),
     moodInferenceService,
     devicePairingService,
     deviceRegistry,

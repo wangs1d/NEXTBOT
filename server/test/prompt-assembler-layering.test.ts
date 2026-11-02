@@ -12,7 +12,7 @@ import type { AgentPromptMemoryContext } from "../src/external-model/types.js";
 
 function buildMemory(turn: number): AgentPromptMemoryContext {
   return {
-    personalityCore: "你是可靠的私人管家。",
+    persona: "【人格】\n你是可靠的私人管家。",
     userFacts: "【用户事实库】\n所在城市：杭州",
     memorySummary: "持久记忆：用户在做 NextBot 项目。",
     // 滚动 recap：随轮追加（模拟 thread 裁剪后 recap 增行）
@@ -25,7 +25,8 @@ function buildMemory(turn: number): AgentPromptMemoryContext {
 test("sessionRecap 不进稳定层（随轮增长内容必须沉底）", () => {
   const { stableSystemPrompt, dynamicSystemPrompt } = assembleSystemPrompt("你是助理。", buildMemory(1));
   assert.ok(!stableSystemPrompt.includes("session-recap"), "稳定层不得包含 sessionRecap");
-  assert.ok(stableSystemPrompt.includes("持久记忆"), "memorySummary 仍在稳定层");
+  assert.ok(!stableSystemPrompt.includes("持久记忆"), "【持久记忆】是按轮召回，不得进稳定层");
+  assert.ok(dynamicSystemPrompt?.includes("持久记忆"), "【持久记忆】在动态层");
   assert.ok(dynamicSystemPrompt?.includes("会话回顾"), "sessionRecap 在动态层短期上下文家族");
 });
 

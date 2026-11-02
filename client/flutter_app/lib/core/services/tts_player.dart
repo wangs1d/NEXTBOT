@@ -6,6 +6,8 @@ import "package:audioplayers/audioplayers.dart";
 import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
+import "../config/media_url.dart";
+
 /// Windows 上 audioplayers_windows_plugin 的 BytesSource 会触发 native
 /// 层 0xc0000005 access violation，Dart try-catch 无法捕获。
 /// 统一走临时文件 + DeviceFileSource 绕过。
@@ -219,7 +221,7 @@ class TtsPlayer {
     _attachProgressListeners(player);
 
     try {
-      await player.play(UrlSource(fullUrl));
+      await player.play(UrlSource(MediaUrl.resolve(fullUrl)));
       _fireStart();
       return true;
     } catch (e) {

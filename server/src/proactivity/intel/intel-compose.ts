@@ -12,7 +12,7 @@ import { formatDistance, formatRelativeClock } from "./intel-time.js";
 
 export type IntelComposerDeps = {
   chat: () => ExternalChatProvider | null;
-  /** 人格·静态（agent/SOUL.md）：说出口的话与主对话同一副嗓子 */
+  /** 人格（agent/SOUL.md）：说出口的话与主对话同一副嗓子 */
   personaPrompt?: (actorId: string) => string | null;
   timeoutMs?: number;
 };

@@ -79,7 +79,7 @@ description: >-
 ```
 1) notes.list 找到目标笔记 id
 2) notes.schedule_review({ id, runAt: ISO时间串, timezone, recurrence })
-   - 内部走 calendar.create_task(kind=reminder) + notesService.markReviewed
+   - 内部走 calendar.create(kind=reminder) + notesService.markReviewed
 3) 返回 taskId + nextRunAtLocal 给用户
 ```
 

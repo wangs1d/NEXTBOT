@@ -55,7 +55,7 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     name: "calendar",
     summary: "日程/会议/待办的创建与查询",
     prefixes: ["calendar."],
-    secondaryTools: ["reminder.plan"],
+    secondaryTools: [],
   },
   {
     name: "watch",

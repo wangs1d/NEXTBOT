@@ -1,6 +1,10 @@
 /**
- * 内置 Calendar 工具：在对话中把「定时提醒 / 日程」落到服务端 `ScheduleTaskService`，
- * 与 Web 聊天里用自然语言建日程、`/chat/schedule-draft` 同源解析（`calendar.create_from_text`）。
+ * 内置 Calendar 工具：在对话中把「定时提醒 / 日程」落到服务端 `ScheduleTaskService`。
+ *
+ * 单一写入入口（2026-11-01 用户拍板）：模型侧只有 `calendar.create` 一个创建工具。
+ * text 优先走确定性解析（`ScheduleIntentService.parseForCreate`），无 text 时走结构化
+ * 字段；提醒/日程/天气/agent_task 都落同一条「冲突预检 → 补闹钟 → createTask」路径，
+ * 不再出现同一句话经两个工具各建一条提醒的情况（见 schedule-task-service 幂等判重）。
  */
 import { resolveActorId } from "../agent/actor-id.js";
 import { primarySubjectOf } from "../proactivity/discovery-layer.js";
@@ -11,7 +15,11 @@ import type { ScheduleConflictService } from "../services/schedule-conflict-serv
 import { buildConflictToolResult, precheckCreateConflict } from "../services/schedule-conflict-service.js";
 import type { ScheduleIntentService } from "../services/schedule-intent-service.js";
 import type { ScheduleDraft } from "../services/schedule-intent-service.js";
-import type { CreateScheduleTaskInput, ScheduleTaskService } from "../services/schedule-task-service.js";
+import type {
+  CreateScheduleTaskInput,
+  ScheduleTaskRecord,
+  ScheduleTaskService,
+} from "../services/schedule-task-service.js";
 import { describeRemindPlan } from "../services/schedule-reminder-policy.js";
 import {
   normalizeDurationMinutes,
@@ -19,7 +27,7 @@ import {
   parseScheduleTaskCategory,
 } from "../services/schedule-task-service.js";
 import { toolResultFromScheduleParse } from "./schedule-create-guard.js";
-import type { ToolRegistry } from "./tool-registry.js";
+import type { ToolContext, ToolRegistry } from "./tool-registry.js";
 
 /** 将 ISO UTC 时间字符串格式化为用户可读的本地时间描述 */
 export function formatNextRunAtLocal(iso: string | null | undefined, timezone: string): string {
@@ -163,28 +171,55 @@ export function registerCalendarTools(
   /** 上传树枝日程主张库（可选）：批量导入课表/行程表时落版本链（缺省跳过） */
   assertionStore?: ScheduleAssertionStore,
 ): void {
-  registry.register("calendar.create_from_text", async (input, context) => {
-    const text = String(input.text ?? "").trim();
-    if (!text) return { ok: false, error: "text 不能为空" };
+  /**
+   * 统一创建回执（所有 kind 同一形状）：模型只读 nextRunAtLocal / remindPlan /
+   * reminderMessage 即可转述，不再按入口工具记不同字段。
+   */
+  const buildCreateResponse = (
+    task: ScheduleTaskRecord,
+    timezone: string,
+    summary: string,
+    linkedAlarm: ReturnType<typeof createLinkedAlarmIfAlarmLike> = null,
+  ): Record<string, unknown> => ({
+    ok: true,
+    matched: true,
+    summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : summary,
+    taskId: task.taskId,
+    ...(linkedAlarm
+      ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt }
+      : {}),
+    title: task.reminderMessage || task.title,
+    shortTitle: task.shortTitle,
+    kind: task.kind,
+    category: task.category,
+    nextRunAt: task.nextRunAt,
+    nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+    durationMinutes: task.durationMinutes,
+    location: task.location,
+    remindBeforeMinutes: task.remindBeforeMinutes,
+    remindPlan: describeRemindPlan(task),
+    recurrence: task.recurrence,
+    reminderMessage: task.reminderMessage,
+  });
+
+  /** 自然语言分支：text → 确定性解析 → 冲突预检 → 补闹钟 → createTask。 */
+  const createFromText = async (
+    text: string,
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<Record<string, unknown>> => {
     const sessionId = resolveActorId(context);
     const tz = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
     const forceCreate = input.forceCreate === true;
-
-    // 重复创建由 ScheduleTaskService.createTask 幂等兜底（同会话同内容同时间签名
+    // 重复创建由 ScheduleTaskService.createTask 幂等兜底（同会话同事项同时间签名
     // 返回已有任务），工具侧不再维护独立的去重缓存。
-
-    const parsed = await scheduleIntentService.parseForCreate(
-      sessionId,
-      text,
-      { userTimezone: context.clientLocation?.timezone?.trim() || tz },
-    );
+    const parsed = await scheduleIntentService.parseForCreate(sessionId, text, {
+      userTimezone: context.clientLocation?.timezone?.trim() || tz,
+    });
     const guarded = toolResultFromScheduleParse(parsed);
-    if (!guarded.proceed) {
-      return guarded.result;
-    }
+    if (!guarded.proceed) return guarded.result;
     const draft = guarded.draft;
     try {
-      // 冲突预检（程序层确定性检测）：有冲突且未 forceCreate → 不创建，回冲突详情
       if (conflictService) {
         const conflictResult = precheckCreateConflict(conflictService, {
           sessionId,
@@ -198,52 +233,47 @@ export function registerCalendarTools(
       }
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
-      // 闹钟类提醒补建真闹钟（本地精确响铃主路）；日程任务照常，双链并存
       const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
         text: `${text} ${draft.description}`,
-        label: draft.shortTitle?.trim() || draft.title?.trim() || draft.reminderMessage?.trim() || draft.description,
+        label:
+          draft.shortTitle?.trim() ||
+          draft.title?.trim() ||
+          draft.reminderMessage?.trim() ||
+          draft.description,
         runAt: draft.runAt,
         recurrence: draft.recurrence,
         actorId: sessionId,
       });
-      const response = {
-        ok: true,
-        matched: true,
-        summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : "日程已写入",
-        taskId: task.taskId,
-        ...(linkedAlarm ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt } : {}),
-        title: task.reminderMessage || task.title,
-        shortTitle: task.shortTitle,
-        kind: task.kind,
-        category: task.category,
-        nextRunAt: task.nextRunAt,
-        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
-        durationMinutes: task.durationMinutes,
-        location: task.location,
-        remindBeforeMinutes: task.remindBeforeMinutes,
-        remindPlan: describeRemindPlan(task),
-        recurrence: task.recurrence,
-        reminderMessage: task.reminderMessage,
-      };
-      return response;
+      return buildCreateResponse(
+        task,
+        tz,
+        draft.kind === "reminder" ? "提醒已写入日程" : "日程已写入",
+        linkedAlarm,
+      );
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
-  });
+  };
 
-  registry.register("calendar.create_task", async (input, context) => {
+  /** 结构化分支：text 缺省时按字段创建（提醒/天气/agent_task/HTTP 动作）。 */
+  const createFromStructured = async (
+    input: Record<string, unknown>,
+    context: ToolContext,
+  ): Promise<Record<string, unknown>> => {
     const sessionId = resolveActorId(context);
     const title = String(input.title ?? "").trim();
     const shortTitle = String(input.shortTitle ?? "").trim() || undefined;
-    const description = String(input.description ?? "").trim();
+    const description = String(input.description ?? input.subject ?? "").trim();
     const runAt = String(input.runAt ?? "").trim();
     const kindRaw = String(input.kind ?? "reminder").trim();
     const recurrenceRaw = String(input.recurrence ?? "none").trim();
     const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
     const category = parseScheduleTaskCategory(input.category);
     if (!description || !runAt) {
-      return { ok: false, error: "description、runAt（ISO 时间字符串）必填" };
+      return {
+        ok: false,
+        error: "需要 text（自然语言），或同时提供 description（事项）与 runAt（ISO 时间）",
+      };
     }
     if (
       kindRaw !== "reminder" &&
@@ -265,7 +295,6 @@ export function registerCalendarTools(
     const forceCreate = input.forceCreate === true;
 
     try {
-      // 冲突预检（程序层确定性检测）：有冲突且未 forceCreate → 不创建，回冲突详情
       if (conflictService) {
         const conflictResult = precheckCreateConflict(conflictService, {
           sessionId,
@@ -295,7 +324,6 @@ export function registerCalendarTools(
           location,
           remindBeforeMinutes,
         });
-        // 闹钟类提醒补建真闹钟（本地精确响铃主路）；日程任务照常，双链并存
         const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
           text: `${title} ${description} ${reminderMessage}`,
           label: shortTitle || task.shortTitle || task.reminderMessage || task.title || description,
@@ -303,26 +331,7 @@ export function registerCalendarTools(
           recurrence,
           actorId: sessionId,
         });
-        const response = {
-          ok: true,
-          matched: true,
-          summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : "提醒已写入日程",
-          taskId: task.taskId,
-          ...(linkedAlarm ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt } : {}),
-          title: task.reminderMessage || task.title,
-          shortTitle: task.shortTitle,
-          kind: task.kind,
-          category: task.category,
-          nextRunAt: task.nextRunAt,
-          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
-          durationMinutes: task.durationMinutes,
-          location: task.location,
-          remindBeforeMinutes: task.remindBeforeMinutes,
-          remindPlan: describeRemindPlan(task),
-          recurrence: task.recurrence,
-          reminderMessage: task.reminderMessage,
-        };
-        return response;
+        return buildCreateResponse(task, timezone, "提醒已写入日程", linkedAlarm);
       }
       if (kindRaw === "weather_brief") {
         const task = await scheduleTaskService.createTask({
@@ -336,25 +345,14 @@ export function registerCalendarTools(
           recurrence,
           timezone,
         });
-        const response = {
-          ok: true,
-          matched: true,
-          summary: "日程已写入",
-          taskId: task.taskId,
-          title: task.title,
-          shortTitle: task.shortTitle,
-          kind: task.kind,
-          category: task.category,
-          nextRunAt: task.nextRunAt,
-          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
-          recurrence: task.recurrence,
-        };
-        return response;
+        return buildCreateResponse(task, timezone, "日程已写入");
       }
       if (kindRaw === "agent_task") {
         const agentTaskIn = input.agentTask as Record<string, unknown> | undefined;
         const prompt = String(input.prompt ?? agentTaskIn?.prompt ?? description).trim();
-        if (!prompt) return { ok: false, error: "agent_task 任务需要提供 prompt 或 agentTask.prompt" };
+        if (!prompt) {
+          return { ok: false, error: "agent_task 任务需要提供 prompt 或 agentTask.prompt" };
+        }
         const accessModeRaw = String(agentTaskIn?.accessMode ?? input.accessMode ?? "sandbox").trim();
         const accessMode = accessModeRaw === "full" ? "full" : "sandbox";
         const task = await scheduleTaskService.createTask({
@@ -369,20 +367,7 @@ export function registerCalendarTools(
           timezone,
           agentTask: { prompt, accessMode },
         });
-        const response = {
-          ok: true,
-          matched: true,
-          summary: "Agent 自动化任务已写入日程",
-          taskId: task.taskId,
-          title: task.title,
-          shortTitle: task.shortTitle,
-          kind: task.kind,
-          category: task.category,
-          nextRunAt: task.nextRunAt,
-          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
-          recurrence: task.recurrence,
-        };
-        return response;
+        return buildCreateResponse(task, timezone, "Agent 自动化任务已写入日程");
       }
       const actionIn = input.action as Record<string, unknown> | undefined;
       const url = String(actionIn?.url ?? input.actionUrl ?? "").trim();
@@ -403,24 +388,17 @@ export function registerCalendarTools(
         timezone,
         action: { url, method, body: actionIn?.body },
       });
-      const response = {
-        ok: true,
-        matched: true,
-        summary: "日程已写入",
-        taskId: task.taskId,
-        title: task.title,
-        shortTitle: task.shortTitle,
-        kind: task.kind,
-        category: task.category,
-        nextRunAt: task.nextRunAt,
-        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
-        recurrence: task.recurrence,
-      };
-      return response;
+      return buildCreateResponse(task, timezone, "日程已写入");
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      return { ok: false, error: msg };
+      return { ok: false, error: e instanceof Error ? e.message : String(e) };
     }
+  };
+
+  // 模型侧唯一创建入口：text 优先走确定性解析，无 text 时走结构化字段。
+  registry.register("calendar.create", async (input, context) => {
+    const text = String(input.text ?? "").trim();
+    if (text) return createFromText(text, input, context);
+    return createFromStructured(input, context);
   });
 
   registry.register("calendar.list_tasks", async (input, context) => {

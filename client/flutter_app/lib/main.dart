@@ -4309,7 +4309,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final http.Response res = await http
           .post(
             Uri.parse("${ApiConfig.httpBase}/api/chat-data/delete-turn"),
-            headers: const <String, String>{"Content-Type": "application/json"},
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              ...AccessCredentialStore.instance.authHeaders,
+            },
             body: jsonEncode(<String, dynamic>{
               "sessionId": ApiConfig.effectiveActorId,
               "messageId": userMessageId,
@@ -6084,8 +6087,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final Uri uri = Uri.parse(
         "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
       );
-      final http.Response res =
-          await http.get(uri).timeout(const Duration(seconds: 10));
+      final http.Response res = await http
+          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> data =
           jsonDecode(res.body) as Map<String, dynamic>;
@@ -6122,8 +6126,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final Uri uri = Uri.parse(
         "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
       );
-      final http.Response res =
-          await http.get(uri).timeout(const Duration(seconds: 10));
+      final http.Response res = await http
+          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+          .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> data =
           jsonDecode(res.body) as Map<String, dynamic>;

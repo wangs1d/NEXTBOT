@@ -1,8 +1,8 @@
-/**
+﻿/**
  * 幂等创建：设置提醒只落一条任务。
  *
- * 提醒创建的写入方是模型前台工具调用（reminder.plan / calendar.create_from_text /
- * calendar.create_task → createTask），叠加客户端断线重发、HTTP 直写，同一次创建
+ * 提醒创建的写入方是模型前台工具调用（calendar.create → createTask），
+ * 叠加客户端断线重发、HTTP 直写，同一次创建
  * 意图可能从多条路径先后到达。根修：幂等收口在存储层 createTask（同会话 + 同类型 +
  * 同归一化内容 + 同时间签名 → 返回已有任务），所有路径天然只建一次；
  * 本文件从服务层与工具层两端验证。
@@ -93,6 +93,48 @@ test("内容不同（描述或提醒语）不算重复", async () => {
   });
 });
 
+test("同一事项不同表述：规则路径带时间的原句 vs 工具路径干净事项，只落一条提醒", async () => {
+  await withService(async (service) => {
+    // 实证 2026-11-01：同一句「6点提醒我去游泳」先经 calendar.create 落库原句
+    // （description=今天18:00提醒我去游泳），23 秒后又经 calendar.create
+    // 落库干净事项（description=去游泳）——两条 18:00 到点提醒。
+    const first = await service.createTask({
+      sessionId: "session-1",
+      description: "今天18:00提醒我去游泳",
+      kind: "reminder",
+      runAt: "2099-03-05T10:00:00",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      reminderMessage: "到点了，快去游泳吧",
+    });
+    const second = await service.createTask({
+      sessionId: "session-1",
+      description: "去游泳",
+      shortTitle: "游泳",
+      kind: "reminder",
+      runAt: "2099-03-05T10:00:00",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      reminderMessage: "该去游泳了，收拾东西出门",
+    });
+
+    assert.equal(second.taskId, first.taskId);
+    assert.equal(service.listAllTasks().filter((t) => t.kind === "reminder").length, 1);
+
+    // 同一时刻的不同事项仍是两次独立创建，不能被事项判重误吞
+    const other = await service.createTask({
+      sessionId: "session-1",
+      description: "去健身房",
+      kind: "reminder",
+      runAt: "2099-03-05T10:00:00",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      reminderMessage: "该去健身房了",
+    });
+    assert.notEqual(other.taskId, first.taskId);
+  });
+});
+
 test("已结束的任务不参与判定：取消后可重设同名同刻提醒", async () => {
   await withService(async (service) => {
     const first = await service.createTask(reminderInput());
@@ -134,7 +176,7 @@ test("周期任务：同重复规则同锚点判重，cron 签名按表达式比
   });
 });
 
-test("工具层端到端：模型重复调用 calendar.create_task / reminder.plan 只落一条任务", async () => {
+test("工具层端到端：模型重复调用 calendar.create 只落一条任务", async () => {
   const dir = await mkdtemp(join(tmpdir(), "schedule-idempotency-tools-"));
   const prev = process.env.SCHEDULE_TASKS_FILE;
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
@@ -157,9 +199,9 @@ test("工具层端到端：模型重复调用 calendar.create_task / reminder.pl
       reminderMessage: "2点提醒我睡觉",
     });
 
-    // 第二击：同一轮模型又调用了 calendar.create_task（同内容同时间）
+    // 第二击：同一轮模型又调用了 calendar.create（同内容同时间）
     const byTool = await registry.execute(
-      "calendar.create_task",
+      "calendar.create",
       { description: "2点提醒我睡觉", title: "2点提醒我睡觉", runAt: "2099-03-05T14:00:00", timezone: "Asia/Shanghai" },
       ctx,
     );

@@ -2,6 +2,8 @@ import "dart:convert";
 
 import "package:http/http.dart" as http;
 
+import "nb_http.dart";
+
 /// 用户偏好设置 API 客户端。
 ///
 /// 服务端实现位于 `server/src/routes/http/user-preferences.ts`，
@@ -38,7 +40,9 @@ class UserPreferencesApi {
   /// 拉取指定会话的偏好。
   Future<Map<String, dynamic>> getPreferences(String sessionId) async {
     final Uri uri = Uri.parse("$baseUrl/api/user-preferences?sessionId=$sessionId");
-    final http.Response res = await _client.get(uri).timeout(_timeout);
+    final http.Response res = await _client
+        .get(uri, headers: NbHttp.headersFor(uri))
+        .timeout(_timeout);
     if (res.statusCode != 200) {
       throw Exception("获取偏好失败: ${res.statusCode}");
     }
@@ -81,7 +85,10 @@ class UserPreferencesApi {
     final http.Response res = await _client
         .put(
           uri,
-          headers: const <String, String>{"Content-Type": "application/json"},
+          headers: <String, String>{
+            "Content-Type": "application/json",
+            ...NbHttp.headersFor(uri),
+          },
           body: jsonEncode(body),
         )
         .timeout(_timeout);

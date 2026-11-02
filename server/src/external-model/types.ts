@@ -38,18 +38,9 @@ export type ChatUserTurn = {
 
 /**
  * 注入外部模型 system 的 UAP 记忆片段（SOUL / USER / MEMORY 分层）。
- * `values` / `abilities` 对应长期演化中的慢变量：价值观与能力倾向（见 ARCHITECTURE 长期演化节）。
+ * 人格文本不从 KV 来：唯一的【人格】块由 soul-store.buildPersonaPrompt 产出，写入 persona 字段。
  */
 export type AgentPromptMemoryContext = {
-  persona?: string;
-  /**
-   * 结构化人格内核（personality 域）的可读文本，注入 system prompt 稳定前缀。
-   * 由 PromptContextBuilder 从 MemoryCortex.getPersonalityCore 拉取并格式化，
-   * 防止单次对话导致人格漂移。
-   */
-  personalityCore?: string;
-  values?: string;
-  abilities?: string;
   /** 宿主 Agent 内置能力说明（钱包、日程、虚拟电话、子 Agent 委派等，非 UAP KV） */
   agentCaps?: string;
   /** BM25+Qdrant+RRF 融合后的履历/叙事摘录，供本轮推理引用 */
@@ -126,16 +117,6 @@ export type AgentPromptMemoryContext = {
    * 由 PromptContextBuilder 同步读 MemoryInventory 缓存注入（cognize 阶段刷新）。
    */
   memoryInventory?: string;
-  memoryContinuity?: string;
-  relationshipMemory?: string;
-  lifeThemeMemory?: string;
-  dreamMemory?: string;
-  /**
-   * 主动跨天 recall：用「昨天的 userText」作为 query 跑一次 narrative recall，
-   * 让 LLM 即使当前话题与昨天无关也能看到昨天的关键事件。
-   * 解决「前天说后天要去玩，今天提及时 agent 能关联记忆」的连续性问题。
-   */
-  yesterdayHighlight?: string;
   /** 短句追问时锚定上一轮对话，避免跨话题串台 */
   followUpAnchor?: string;
   /** 服务端 ScheduleTaskService 实时日程快照（每轮刷新） */
@@ -245,28 +226,16 @@ export type AgentPromptMemoryContext = {
    */
   conversationTimeline?: string;
   modeRoleGuidance?: string;
-  /**
-   * 回复风格模式（2026-09-06）：chat/task 车道标记，供审计与车道相关逻辑使用。
-   * 2026-09-22 人格·终极版重塑后，风格由 personaStatic（稳定层）/ personaMood
-   * （动态层）承担，本字段不再控制任何块注入。
-   */
   replyStyleMode?: "chat" | "task";
   /**
-   * 人格·终极版·静态块（2026-09-22，agent/persona-core 产出）：身份/关系档位/
-   * 反谄媚/情绪诚实/硬边界/简短。常驻 system 稳定层。
+   * 人格正文块（唯一人格出口，soul-store.buildPersonaPrompt 产出）：常驻稳定层。
    */
-  personaStatic?: string;
+  persona?: string;
   /**
-   * 人格·终极版·动态块：每轮按 resolvePersonaMood 只注入一个 mood 段
-   * （base/casual_wit/roasting/playful/empathy/serious）。沉到动态层。
+   * 动态 mood 块：每轮按 resolvePersonaMood 只注入一个（base/casual_wit/roasting/
+   * playful/empathy/serious）。沉到动态层。
    */
   personaMood?: string;
-  /**
-   * 【语感基准】few-shot 块（2026-10-06 活人感治理）：真实口吻对话对照 +
-   * 助手腔反例，对抗主模型的中性助手腔训练分布。按 sessionId 轮换、
-   * 会话内字节稳定（稳定层 MEMORY 带注入，见 chat-voice-baseline.ts）。
-   */
-  voiceBaseline?: string;
 };
 
 /** 工具环单轮内所有 tool 消息已写入 `messages` 之后触发（可观测 / 评估 / 审计）。 */
@@ -467,6 +436,8 @@ export type ToolExecutedInfo = {
 
 /** 外部模型 function calling 与本地 ToolRegistry 之间的桥接。 */
 export type ChatToolExecutionContext = {
+  /** 本轮归属的 actor，缺省 = 未认领身份（与匿名请求共用名额桶） */
+  actorId?: string;
   executeTool: (
     name: string,
     args: Record<string, unknown>,

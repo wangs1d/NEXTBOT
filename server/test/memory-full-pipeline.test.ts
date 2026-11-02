@@ -30,6 +30,7 @@ import { NarrativeMemoryFacade } from "../src/services/narrative-memory-port.js"
 import { MemorySalienceFilter } from "../src/brain/memory-cognitive/memory-salience-filter.js";
 import { WorkingMemoryCortex } from "../src/brain/working-memory-cortex.js";
 import { ChatThreadStore } from "../src/external-model/chat-thread-store.js";
+import { sliceMemoryEntriesToPromptContext } from "../src/agent/prompt-builder.js";
 import type { MemoryItem } from "../src/brain/types.js";
 
 // ---- 测试环境 ----
@@ -280,8 +281,8 @@ describe("记忆模块全流程", () => {
     });
   });
 
-  describe("4. Dreaming 全流程", () => {
-    it("onTurnCompleted → consolidateNow → dream snapshot 更新", async () => {
+  describe("4. 夜间整理全流程", () => {
+    it("onTurnCompleted → consolidateNow → KV 不留整理器标记行", async () => {
       // 模拟白天对话累积
       manager.onTurnCompleted(ACTOR, "今天美联储加息了", "收到，美联储加息 25 个基点");
       manager.onTurnCompleted(ACTOR, "我的猫橘子今天不肯吃猫粮", "可能是不舒服，建议观察一下");
@@ -299,27 +300,16 @@ describe("记忆模块全流程", () => {
 
       assert.ok(result.timestamp, "consolidateNow 应返回 timestamp");
 
-      // 检查 dream snapshot（反射访问 private 字段）
-      const dreamSnapshots = (manager as unknown as {
-        dreamSnapshots: Map<string, { replayLines?: string[]; reinforcedLines?: string[]; mergedThemes?: string[]; lastUpdatedAt?: string }>;
-      }).dreamSnapshots;
-      const snapshot = dreamSnapshots.get(ACTOR);
-
-      // dream snapshot 可能存在也可能不存在（取决于 LLM 整理结果），不强制要求
-      if (snapshot) {
-        console.log(`[test] dream snapshot: replay=${snapshot.replayLines?.length ?? 0}, reinforced=${snapshot.reinforcedLines?.length ?? 0}, themes=${snapshot.mergedThemes?.length ?? 0}`);
-      }
-    });
-
-    it("getDreamMemoryForPrompt 返回梦境叙事文本", async () => {
-      const dreamText = manager.getDreamMemoryForPrompt(ACTOR);
-      // dreamText 可能为 null（如果 dream snapshot 为空），不强制要求
-      if (dreamText) {
+      // 整理器注入用的「当日待整理」包裹标记是提示结构，不是记忆内容：
+      // 一旦落进 KV，召回读到的就是零信息标签行（实测旧存量 18 行里 16 行是空标签）。
+      const summary = String(
+        memorySync.getSnapshot(ACTOR, ["memory_summary"]).entries["memory_summary"] ?? "",
+      );
+      for (const line of summary.split("\n")) {
         assert.ok(
-          typeof dreamText === "string",
-          "dream memory 应为字符串",
+          !/^\[\s*\/?\s*当日待整理/.test(line.trim()),
+          `KV memory_summary 不应残留整理器标记行：${line}`,
         );
-        console.log(`[test] dream narrative 预览: ${dreamText.slice(0, 100)}...`);
       }
     });
 
@@ -333,8 +323,61 @@ describe("记忆模块全流程", () => {
     });
   });
 
-  describe("5. 元记忆（recallWithProvenance）", () => {
-    it("recallWithProvenance 返回带 source/score 的记忆", async () => {
+  describe("4b. 读写契约（KV 槽位归属 + 按轮召回）", () => {
+    it("长期行只进 memory_summary，不再镜像进 session_recap", async () => {
+      const before = memorySync.getSnapshot(ACTOR, ["session_recap", "memory_summary"]).entries;
+      const recapBefore = String(before["session_recap"] ?? "");
+      memorySync.appendMemorySummaryLine(ACTOR, "用户喜欢喝手冲咖啡，不加糖");
+      await memorySync.flush();
+      const after = memorySync.getSnapshot(ACTOR, ["session_recap", "memory_summary"]).entries;
+      assert.equal(
+        String(after["session_recap"] ?? ""),
+        recapBefore,
+        "session_recap 是短期滚动槽，长期行不得镜像进来",
+      );
+      assert.match(String(after["memory_summary"] ?? ""), /手冲咖啡/);
+    });
+
+    it("存量整理器标记行在下次整理时被清掉，真实承诺行保留", async () => {
+      const legacy = [
+        "[当日待整理 2026-10-30]",
+        "[/当日待整理]",
+        "[2026-10-30T10:00:00.000Z] [topic:consolidate] 承诺：周六去游泳",
+        "[当日待整理 2026-10-30]",
+      ].join("\n");
+      await memorySync.setEntryAndWait(ACTOR, "memory_summary", legacy);
+      await manager.consolidateNow(ACTOR);
+      await memorySync.flush();
+      const after = String(
+        memorySync.getSnapshot(ACTOR, ["memory_summary"]).entries["memory_summary"] ?? "",
+      );
+      assert.doesNotMatch(after, /当日待整理/, `标记行应被清掉，实际：${after}`);
+      assert.match(after, /周六去游泳/, `真实承诺行必须保留，实际：${after}`);
+    });
+
+    it("同一 store 不同 query：命中才有内容，无关 query 零注入", async () => {
+      await memorySync.setEntryAndWait(
+        ACTOR,
+        "memory_summary",
+        [
+          "[2026-10-30T10:00:00.000Z] [topic:general] 用户喜欢喝手冲咖啡，不加糖",
+          "[2026-10-30T10:05:00.000Z] [topic:general] 用户的猫叫橘子，是橘猫",
+        ].join("\n"),
+      );
+      const { entries } = memorySync.getSnapshot(ACTOR, ["memory_summary"]);
+      const hit = sliceMemoryEntriesToPromptContext(entries, "我平时喝什么咖啡？");
+      assert.ok(hit.memorySummary, "相关提问应有召回");
+      assert.match(hit.memorySummary!, /咖啡/);
+      const miss = sliceMemoryEntriesToPromptContext(entries, "怎么配置 SSH 隧道转发？");
+      assert.equal(
+        miss.memorySummary,
+        undefined,
+        "无关提问必须零注入——整段兜底全灌就是把长期记忆变噪音的根因",
+      );
+    });
+  });
+
+  describe("5. 元记忆（recallWithProvenance）", () => {    it("recallWithProvenance 返回带 source/score 的记忆", async () => {
       const result = await cortex.recallWithProvenance(ACTOR, "咖啡", {
         limit: 5,
       });

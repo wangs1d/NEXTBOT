@@ -295,7 +295,7 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   // ── calendar 族内区分（2026-09-08 新增 update_task/find_free_slots 后黄金回归防挤占）──
   // 前缀别名让所有 calendar.* 共享「日程/提醒/待办」，族内排名靠各自专属词。
   {
-    exact: "reminder.plan",
+    exact: "calendar.create",
     metadata: {
       aliases: ["提醒我", "定时提醒", "定个提醒", "设个提醒", "到点提醒"],
       examples: ["明天早上九点提醒我开会", "十分钟后提醒我", "提醒我交周报"],

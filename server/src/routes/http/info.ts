@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import { resolveActorId } from "../../agent/actor-id.js";
 import {
   infoNewsQuerySchema,
   infoReadBodySchema,
@@ -54,7 +55,11 @@ export function registerInfoRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     if (!parsed.success) {
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
-    const topics = infoHubService.listTopicsBySession(parsed.data.sessionId);
+    const actorId = resolveActorId({
+      userId: parsed.data.userId,
+      sessionId: parsed.data.sessionId,
+    });
+    const topics = infoHubService.listTopicsBySession(parsed.data.sessionId, actorId);
     return { ok: true, topics };
   });
 
@@ -64,6 +69,10 @@ export function registerInfoRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       return reply.code(400).send({ ok: false, error: parsed.error.flatten() });
     }
     try {
+      const actorId = resolveActorId({
+        userId: parsed.data.userId,
+        sessionId: parsed.data.sessionId,
+      });
       const runAt = parsed.data.runAt
         ? new Date(parsed.data.runAt).toISOString()
         : new Date(Date.now() + 15 * 60_000).toISOString();
@@ -80,6 +89,7 @@ export function registerInfoRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
           method: "POST",
           body: {
             sessionId: parsed.data.sessionId,
+            actorId,
             mode: "keywords",
             keywords: parsed.data.keywords,
             name: parsed.data.name,
@@ -88,6 +98,7 @@ export function registerInfoRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       });
       const topic = await infoHubService.createTopic({
         sessionId: parsed.data.sessionId,
+        actorId,
         name: parsed.data.name,
         keywords: parsed.data.keywords,
         scheduleTaskId: scheduleTask.taskId,
@@ -106,7 +117,12 @@ export function registerInfoRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     }
     try {
       if (parsed.data.topicId) {
-        const result = await infoHubService.runTopic(parsed.data.topicId);
+        // 定时任务自调用时带 actorId（创建时写入 action.body），普通请求按鉴权身份解析
+        const actorId = resolveActorId({
+          userId: parsed.data.userId ?? parsed.data.actorId,
+          sessionId: parsed.data.sessionId ?? "",
+        });
+        const result = await infoHubService.runTopic(parsed.data.topicId, actorId);
         return { ok: true, ...result };
       }
       const keywords = (parsed.data.keywords ?? []).map((k) => k.trim()).filter(Boolean);

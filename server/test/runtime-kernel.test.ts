@@ -1,4 +1,4 @@
-import test from "node:test";
+﻿import test from "node:test";
 import assert from "node:assert/strict";
 
 import { RuntimeKernel } from "../src/agent/runtime-kernel.js";
@@ -6,9 +6,7 @@ import { resolveChatToolPlanForStream } from "../src/external-model/resolve-chat
 import type { AgentPromptMemoryContext } from "../src/external-model/types.js";
 
 const SAMPLE_MEMORY: AgentPromptMemoryContext = {
-  persona: "private butler",
-  values: "safe and helpful",
-  abilities: "search and scheduling",
+  persona: "【人格】\nprivate butler",
   toneGuidance: "brief",
   relationshipGuidance: "warm",
   taskContext: "Handle the current user request only.",
@@ -30,8 +28,7 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
   assert.equal(plan.toolExposureProfile, "scoped");
   assert.deepEqual(plan.pinnedToolNames, [
     "calendar.list_tasks",
-    "calendar.create_task",
-    "calendar.create_from_text",
+    "calendar.create",
     "search_web",
     "search_images",
     "search_videos",
@@ -39,10 +36,10 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
     "video.grab",
     "video.find",
   ]);
-  assert.equal(sanitized?.persona, undefined);
-  assert.equal(sanitized?.values, undefined);
-  assert.equal(sanitized?.abilities, undefined);
+  // 人格正文是唯一人格出口，任何模式都不剥离；其余稳定字段照旧
+  assert.equal(sanitized?.persona, SAMPLE_MEMORY.persona);
   assert.equal(sanitized?.toneGuidance, undefined);
+  assert.equal(sanitized?.relationshipGuidance, undefined);
   assert.equal(sanitized?.taskContext?.includes("Handle the current user request only."), true);
   assert.equal(sanitized?.narrativeRecall, SAMPLE_MEMORY.narrativeRecall);
   assert.equal(sanitized?.memorySummary, SAMPLE_MEMORY.memorySummary);
@@ -94,8 +91,7 @@ test("scoped tool exposure keeps only the pinned tool suite", () => {
     .sort();
 
   assert.deepEqual(names, [
-    "calendar.create_from_text",
-    "calendar.create_task",
+    "calendar.create",
     "calendar.list_tasks",
     "fetch_web",
     "search_images",

@@ -426,12 +426,20 @@ export async function embedObsQuery(query: string): Promise<Float32Array | null>
   }
 }
 
-// ── 会话级复用：同一 session 的后续对话轮可读回此前轮次归档的结果 ──
-// （只读回、不跨轮重建上下文；容量上限防长会话内存膨胀。）
+// ── 会话级复用（2026-11-01 默认关闭）：同一 session 的后续对话轮可读回此前轮次归档的结果 ──
+// 代价是原文在内存里常驻（最多 32 个会话 × 40 万字符），且进程重启即丢——它并不是
+// 持久化存储，只是「本轮压缩掉的长结果暂时留个读回入口」。默认改为按轮丢弃：
+// 模型回复完这一轮就不再需要读回，下一轮缺细节让它重跑工具（幂等工具）或直接问用户。
+// 需要跨轮读回时显式 OBS_PACK_CROSS_TURN=1。
 const sessionPacks = new Map<string, ObservationPack>();
 
+function crossTurnReuseEnabled(): boolean {
+  const raw = process.env.OBS_PACK_CROSS_TURN?.trim().toLowerCase();
+  return raw === "1" || raw === "true" || raw === "on" || raw === "yes";
+}
+
 export function getObservationPack(sessionId?: string): ObservationPack {
-  if (!sessionId) return new ObservationPack();
+  if (!sessionId || !crossTurnReuseEnabled()) return new ObservationPack();
   const existing = sessionPacks.get(sessionId);
   if (existing) return existing;
   const pack = new ObservationPack();
@@ -441,6 +449,11 @@ export function getObservationPack(sessionId?: string): ObservationPack {
     if (oldest !== undefined) sessionPacks.delete(oldest);
   }
   return pack;
+}
+
+/** 轮次结束主动释放（跨轮复用开启时才有实际数据；未开启时是空操作）。 */
+export function releaseObservationPack(sessionId?: string): void {
+  if (sessionId) sessionPacks.delete(sessionId);
 }
 
 /** 测试专用：清空会话 pack 缓存。 */

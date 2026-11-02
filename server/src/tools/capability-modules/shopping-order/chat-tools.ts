@@ -55,6 +55,8 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         "适用场景：用户说「在淘宝搜 iPhone 15」「帮我在京东找一下卫生纸」「美团搜肯德基」等。\n" +
         "前置条件：用户须先导入目标平台 Cookie 并授权 agentAllowed=true" +
         "（POST /integrations/browser-sessions/import + /consent）。沙箱模式下也可用。\n" +
+        "**空结果不等于需要登录**：只有回执带 humanRequired / loginRequired 时才是需要用户本人扫码登录或过验证" +
+        "（已在内置浏览器打开页面，告诉用户去登录/验证并点「我已完成」）；普通没搜到或超时如实说明、可换关键词重试。\n" +
         "与 browser.fetch_page（只读读价）/ shopping.suggest（仅比价建议）的区别：" +
         "本工具为后续下单做准备，返回的商品列表可直接传给 shopping.order.place。\n" +
         "已实现 adapter 的平台：taobao/tmall/jd/meituan/pdd/douyin/damai/maoyan；" +

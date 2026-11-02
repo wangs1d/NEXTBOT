@@ -345,6 +345,7 @@ export class AgentTaskOrchestrator {
           options.onAssistantDelta?.(delta);
         },
         {
+          actorId: task.actorId,
           executeTool: async (name, args) => {
             const startTime = Date.now();
             const callId = `call-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;

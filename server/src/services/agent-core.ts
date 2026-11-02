@@ -4,12 +4,11 @@ import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 
 import {
   buildPersonaMoodBlock,
-  buildPersonaStaticBlock,
   resolvePersonaMood,
   resolveRelationshipTier,
 } from "../agent/persona-core.js";
-import { getSoulOverlay } from "../agent/soul-store.js";
-import { buildVoiceBaselineBlock } from "../agent/chat-voice-baseline.js";
+import { buildPersonaPrompt } from "../agent/soul-store.js";
+import { AGENT_NAME_KV_KEY, buildIdentityNameLine, parseAgentIdentityKv } from "./agent-identity.js";
 import { TurnBudget } from "../agent/turn-budget.js";
 import { normalizeSentence, sentenceSet, stripSentencesAlreadySaid } from "../utils/text.js";
 import type { WorldService } from "@nextbot/agent-world";
@@ -54,7 +53,7 @@ import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUI
 /**
  * 前台小工具集白名单（2026-09-06 P0 修复，原生 function calling）。
  *
- * 契约：前台可见工具为提醒/日程直写（reminder.plan + calendar.create_from_text，
+ * 契约：前台可见工具为提醒/日程直写（calendar.create，
  * 2026-09-08：简单写操作对话面当场办成，不派后台、不出任务回执）+
  * task.dispatch（派后台）+ search_web（快查），以 explicit profile 注入
  * （chatToolsBuiltin 即最终可见集，无延迟目录、无 contextual 筛选）。
@@ -63,20 +62,13 @@ import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUI
  * 注册表侧 task.dispatch 的 launch 回调由 bootstrap 晚绑定（create-app-services）。
  */
 let _foregroundToolWhitelist: ChatCompletionTool[] | null = null;
-const FOREGROUND_INLINE_TOOL_NAMES = new Set([
-  "reminder.plan",
-  "calendar.create_from_text",
-]);
+const FOREGROUND_INLINE_TOOL_NAMES = new Set(["calendar.create"]);
 /**
  * 日历/提醒创建类工具（2026-09-24）：本轮任一成功返回 → 该轮按「办妥确认轮」
  * 执法回复风格闸（不吃结构豁免），堵"订阅确认写成五段导购"的废话出口。
  */
 /** 确认轮工具集（WS 层同源消费：分泡轮说话算话裁决的确认轮例外，见 bubble-tracker.ts） */
-export const CALENDAR_CONFIRM_TOOLS = new Set([
-  "reminder.plan",
-  "calendar.create_from_text",
-  "calendar.create_task",
-]);
+export const CALENDAR_CONFIRM_TOOLS = new Set(["calendar.create"]);
 function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[] {
   const base = (() => {
     if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
@@ -237,6 +229,7 @@ import {
 } from "./tool-result-processor.js";
 import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-service.js";
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
+import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import { attachTravelBriefCard, resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
@@ -272,7 +265,7 @@ import { getRuntimeKernel } from "../agent/runtime-kernel.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { broadcastTaskUpdate } from "../task-plane/task-events.js";
-import { backgroundTaskLimiter } from "./concurrency-limiter.js";
+import { acquireBgTaskSlots } from "./actor-quota.js";
 import { ToolContextFactory } from "../agent/execution/tool-context-factory.js";
 import { getToolCallGuard } from "./tool-call-guard.js";
 import { TurnFinalizer } from "../agent/execution/turn-finalizer.js";
@@ -458,6 +451,9 @@ export class AgentCore {
   private chatProviderFor(actorId: string): ExternalChatProvider | null {
     const byok = this.actorModelBindings?.get(actorId) ?? null;
     if (byok && byok.isEnabled()) return byok;
+    // 落盘里存着他的 key 却取不出 provider（主密钥轮换/密文损坏）= 配置坏了：
+    // 这种情况不用运营方 provider 顶上去，钱是他的额度，宁可这一轮明确跑不了
+    if (byok || this.actorModelBindings?.hasStoredKey(actorId)) return null;
     return this.externalChat;
   }
 
@@ -823,26 +819,9 @@ export class AgentCore {
         });
       turnRouteDone = Date.now();
 
-      // 异步情绪推断（不阻塞主流程/工具执行）：路由层退役后不再有随行
-      // auxAnalysis，直接走 ingestRouteAux 内部的独立 analyzeMessage 回退。
-      if (this.moodInferenceService) {
-        const inferenceService = this.moodInferenceService;
-        void inferenceService
-          .ingestRouteAux(sessionId, text, undefined)
-          .then((inference) => {
-            if (!inference) return;
-            this.emitMoodInferred(sessionId, {
-              sentimentScore: inference.sentimentScore,
-              confidence: inference.confidence,
-              emotionTags: inference.emotionTags,
-              agentNote: inference.agentNote ?? "对话情感分析",
-              timestamp: inference.timestamp,
-            });
-          })
-          .catch(() => {
-            // 静默失败，不影响主流程
-          });
-      }
+      // 情绪推断已下线（2026-11-01 提速）：不再每轮额外打一次 LLM（mood-inference）。
+      // 情绪基调由主模型直接从上下文判断（system 的【人格·状态】/最近对话即上下文），
+      // 少一次同 key 并发调用，主回复首字节平均提前 0.9~3s。
 
       // 去路由化后 rule/brain 分类仅保留为诊断日志，不再参与门控。
       const light = this.brainCenter.routeLight(text);
@@ -856,17 +835,23 @@ export class AgentCore {
         const n = Number.parseInt(process.env.AGENT_COGNIZE_TIMEOUT_MS ?? "", 10);
         return Number.isFinite(n) && n > 0 ? n : 1200;
       })();
+      // 护栏定时器在 cognize 先返回时必须清掉：原实现不清，cognize 0.6s 就返回了
+      // 也会在 1.2s 后照常打「超时」日志，排查时极易误判成每轮都被护栏卡住。
+      let cognizeGuardTimer: NodeJS.Timeout | undefined;
       brainCognition = await Promise.race([
-        cognizePromise,
-        new Promise<null>((resolve) =>
-          setTimeout(() => {
+        cognizePromise.finally(() => {
+          if (cognizeGuardTimer) clearTimeout(cognizeGuardTimer);
+        }),
+        new Promise<null>((resolve) => {
+          cognizeGuardTimer = setTimeout(() => {
             // eslint-disable-next-line no-console
             console.warn(
               `[turn-timing] cognize 护栏超时（${cognizeGuardMs}ms），主回复降级先行`,
             );
             resolve(null);
-          }, cognizeGuardMs),
-        ),
+          }, cognizeGuardMs);
+          cognizeGuardTimer.unref?.();
+        }),
       ]);
       turnCognizeDone = Date.now();
 
@@ -894,22 +879,7 @@ export class AgentCore {
       cognitiveToolPlan = brainCognition?.toolPlan;
     } else {
       // === 降级：原切片路径（BRAIN_CENTER_ENABLED=0 时）===
-      // 异步情绪推断（不阻塞主流程）+ WS 推送 MoodInferred + lifeSignalHub.publish
-      if (this.moodInferenceService && text?.trim()) {
-        const inferenceService = this.moodInferenceService;
-        void inferenceService.analyzeMessage(sessionId, text).then((inference) => {
-          if (!inference) return;
-          this.emitMoodInferred(sessionId, {
-            sentimentScore: inference.sentimentScore,
-            confidence: inference.confidence,
-            emotionTags: inference.emotionTags,
-            agentNote: inference.agentNote ?? "对话情感分析",
-            timestamp: inference.timestamp,
-          });
-        }).catch(() => {
-          // 静默失败，不影响主流程
-        });
-      }
+      // 情绪推断已下线（2026-11-01 提速）：理由同上，主模型看上下文即可。
       route = opts?.routeDecision
         ? await opts.routeDecision
         : buildUnifiedLaneDecision();
@@ -944,11 +914,10 @@ export class AgentCore {
       !isApologyStyleFallback(cognitiveResponse) &&
       (route.plane === "chat")
     ) {
-      // 2026-10-13 根修：prose 改写全部退役——模型文本即权威，人格风格由
-      // system 的【人格·静态】+【人格·状态】+【语感基准】承担（与本路径
-      // 消费的 thread 同源），出口不再做任何润色。此分支当前为死代码
-      // （cognitiveNeedsToolLoop 恒 true，默认引擎 response 恒空），保留
-      // 结构供未来产出 response 的认知引擎使用。
+      // prose 改写全部退役——模型文本即权威，人格风格由 system 的【人格】+
+      // 【人格·状态】承担（与本路径消费的 thread 同源），出口不再做任何润色。
+      // 此分支当前为死代码（cognitiveNeedsToolLoop 恒 true，默认引擎 response 恒空），
+      // 保留结构供未来产出 response 的认知引擎使用。
       this.turnLifecycle.finalizeTurn({
         actorId,
         userText: text,
@@ -2240,32 +2209,24 @@ if (route.plane === "task") {
     // 中性情绪 → 跳过（避免噪声污染 prompt）
     const memoryBeforeSanitize = baseStreamOpts.promptContext?.memory;
     const cogEmo = ctx.cognitiveEmotion;
-    // 人格·终极版（2026-09-22）：静态人格块 + 单一 mood 动态块，取代旧
-    // 【说话方式·管家底色/伙伴面】。tier 由个性化 rapport 换算；mood 由
-    // 关系档 + 情绪向量 + 车道解析（任务面恒 serious）。
+    // 人格：正文块（soul-store 唯一出口）常驻稳定层，mood 动态块每轮只出一个。
     if (memoryBeforeSanitize) {
       const personaTier = resolveRelationshipTier(ctx.personalization?.rapport);
-      // 称呼从结构化事实块取（unified-extractor facts.称呼），缺省回退"用户"
+      // 称呼从结构化事实块取（unified-extractor facts.称呼）
       const aliasMatch = /称呼[：:]\s*([^\s，。；、|]{1,10})/.exec(
         memoryBeforeSanitize.userFacts ?? "",
       );
-      // 每用户适配：个性化系统学到的调侃容忍/语气/长度倾向，静态块一行 + mood gate
-      const adaptation = {
-        humorTolerance: ctx.personalization?.humorTolerance,
-        preferredTone: ctx.personalization?.preferredTone,
-        lengthPreference: ctx.personalization?.lengthPreference,
-      };
-      memoryBeforeSanitize.personaStatic = buildPersonaStaticBlock({
-        tier: personaTier,
+      // 名字自我认知：agent.update_identity 写入的 agent.name KV 不在 memoryKeys 配置内，定点拉取
+      const identity = parseAgentIdentityKv(
+        this.agentMemorySyncService?.getSnapshot(actorId, [AGENT_NAME_KV_KEY]).entries[
+          AGENT_NAME_KV_KEY
+        ],
+      );
+      const persona = buildPersonaPrompt({
         userAlias: aliasMatch?.[1],
-        adaptation,
-        soulOverlay: getSoulOverlay() ?? undefined,
+        identityLine: identity ? buildIdentityNameLine(identity) : undefined,
       });
-      // 【语感基准】few-shot（2026-10-06 活人感治理）：seed=sessionId 会话内字节稳定。
-      // 仅 chat 车道注入——任务面交付（结论先行/充分展开）与闲聊 few-shot 相克。
-      memoryBeforeSanitize.voiceBaseline = this.isChatLane(mode)
-        ? buildVoiceBaselineBlock(opts?.sessionId ?? actorId)
-        : undefined;
+      if (persona) memoryBeforeSanitize.persona = persona;
       memoryBeforeSanitize.personaMood = buildPersonaMoodBlock(
         resolvePersonaMood({
           tier: personaTier,
@@ -2936,8 +2897,12 @@ if (route.plane === "task") {
     const isCancelled = (): boolean =>
       getTaskHub().get(taskId)?.state === "cancelled";
     let seq = 0;
-    const pushDelta = (delta: string): void => {
-      if (!delta || isCancelled()) return;
+    // 任务面流式出口此前是裸 delta：模型按 render 协议写在回复末尾的
+    // [NEXT_UP_START] 块（以及错写变体）会原样推给用户，done 再替换才消失。
+    // 与 WS 对话面同构挂上流式标记 guard，块内容全程不出口。
+    const streamGuard = createStreamMarkerGuard();
+    const sendChunk = (text: string): void => {
+      if (!text || isCancelled()) return;
       seq += 1;
       try {
         registry?.trySend(
@@ -2947,7 +2912,7 @@ if (route.plane === "task") {
             payload: {
               sessionId,
               messageId,
-              chunk: delta,
+              chunk: text,
               sequence: seq,
               phase: "stream",
               source: "task_plane",
@@ -2958,11 +2923,24 @@ if (route.plane === "task") {
         /* 投递失败不影响任务执行 */
       }
     };
+    const pushDelta = (delta: string): void => {
+      if (!delta || isCancelled()) return;
+      const safe = streamGuard.feed(delta);
+      if (!safe) return;
+      sendChunk(safe);
+    };
+    /** 收尾前放行被误扣的普通残段；未闭合的标记块一律丢弃。 */
+    const flushStream = (): void => {
+      const tail = streamGuard.flush();
+      if (tail) sendChunk(tail);
+    };
     const pushDone = (
       finalText: string,
       mediaCards: MediaCardItem[] = [],
       followups: string[] = [],
     ): void => {
+      // 定稿前放行流式 guard 扣留的普通残段（未闭合的标记块直接丢弃）。
+      flushStream();
       try {
         // 投递失败（用户离线：trySend false / registry 缺失）→ TaskOutbox 暂存，
         // 客户端重连（session.init）时重放——离线完成的任务结果不再静默丢失。
@@ -3029,11 +3007,11 @@ if (route.plane === "task") {
     };
 
     void (async () => {
-      // A3 后台任务全局并发闸（2026-09-08）：超出的任务在此 FIFO 排队（acquire 无超时），
-      // 防止无限并行同时打满 LLM provider 限流。排队期间 TaskHub 仍为 running，
-      // 进度行注明等待槽位。
+      // A3 后台任务并发闸：先等本 actor 的名额（一个人的几个任务不能排空整条 bg
+      // 通道，云端多用户时别人只能干等），再等全局槽位；超出的任务在此 FIFO 排队
+      // （acquire 无超时）。排队期间 TaskHub 仍为 running，进度行注明等待槽位。
       getTaskHub().setProgress(taskId, "等待并行执行槽位");
-      const releaseTaskSlot = await backgroundTaskLimiter.acquire(0);
+      const releaseTaskSlot = await acquireBgTaskSlots(actorId, 0);
       // 排队期间被取消：出列即短路，不再执行（已广播 cancelled 回执）
       if (isCancelled()) {
         releaseTaskSlot();
@@ -3219,6 +3197,7 @@ if (route.plane === "task") {
           // 并发闸排队，窗口放宽到 10 分钟，目标/正文点名目的地优先。
           const travelReceipt = capturedTravel[capturedTravel.length - 1];
           const resolvedTravel = resolveTravelReceipt({
+            actorId,
             executedReceipt: travelReceipt?.result,
             goal: input.goal,
             finalText,
@@ -3234,7 +3213,7 @@ if (route.plane === "task") {
               resolvedTravel.result,
             );
             // 简报卡与对话面同构：把「这版按哪些假设排的」摊开 + 一键补心愿点
-            finalText = attachTravelBriefCard(finalText, resolvedTravel.result);
+            finalText = attachTravelBriefCard(finalText, resolvedTravel.result, actorId);
           }
           // 视频媒体卡（2026-10-02）：video.grab/video.find 回执带可播放流时附
           // [RENDER_AS:video] 媒体标记，与 WS 对话面 attachDeterministicCards 的

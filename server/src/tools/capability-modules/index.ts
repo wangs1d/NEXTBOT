@@ -144,7 +144,7 @@ import {
   PICTURE_INTENT_RULES,
   registerPictureModuleTools,
 } from "./picture/index.js";
-import type { PictureKit } from "@nextbot/picture";
+import type { PictureKitRegistry } from "../../services/picture-kit-registry.js";
 import { buildGoalPlanningModule } from "./goal-planning/index.js";
 import { buildTaskPlanModule } from "./task-plan/index.js";
 import { buildMemoryGovernanceModule } from "./memory-governance/index.js";
@@ -220,8 +220,8 @@ export interface CapabilityModuleDeps {
   periodCareService: PeriodCareService;
   /** 安全守护（safety.*：紧急联系人/一键SOS/借口来电） */
   safetyGuardService: SafetyGuardService;
-  /** 图片能力套件(图库/美颜批图),存储根 data/pictures */
-  pictureKit: PictureKit;
+  /** 图片能力套件(图库/美颜批图)，按 actor 分区在 data/pictures/<actorKey> */
+  pictureKits: PictureKitRegistry;
   /**
    * 计划推进服务（goal.plan.*，2026-09-24）：装配层晚绑定——本对象在
    * GoalBoard/AgentCore 之前构造，字段在服务建成后再赋值（handler 调用时读取）。
@@ -484,7 +484,7 @@ export function buildCapabilityModules(deps: CapabilityModuleDeps): CapabilityMo
       // intentRules（BM25 调权按名字命中 skill 名）与 ToolRegistry 兜底执行器保留。
       chatTools: [],
       intentRules: PICTURE_INTENT_RULES,
-      register: (registry) => registerPictureModuleTools(registry, { pictureKit: deps.pictureKit }),
+      register: (registry) => registerPictureModuleTools(registry, { pictureKits: deps.pictureKits }),
       category: {
         name: "picture",
         keywords: [

@@ -21,6 +21,7 @@ import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
 import { composeTravelPlanRequest } from "../../agent/realtime-search-query.js";
 import { extractOrigin, looksLikeDestinationName } from "./intent-parser.js";
+import { resolveActorId } from "../../agent/actor-id.js";
 import { resolveOriginFromContext } from "./travel-origin.js";
 import {
   pricingService,
@@ -217,11 +218,12 @@ function refreshItinerarySnapshot(plan: StoredTravelPlan): void {
  * 查不到返回空数组，不阻塞规划主流程。
  */
 function recallSameDestinationPreferenceLabels(
+  actorId: string,
   destOrInput: string,
   currentPrefs: string[],
 ): string[] {
   try {
-    const summaries = travelPlanStore.listSummaries(8);
+    const summaries = travelPlanStore.listSummariesForActor(actorId, 8);
     const text = destOrInput.toLowerCase();
     const matched: string[] = [];
     for (const s of summaries) {
@@ -409,7 +411,11 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       const userPrefs = Array.isArray(input.preferences)
         ? input.preferences.filter((p): p is string => typeof p === "string")
         : undefined;
-      const memoryPrefs = recallSameDestinationPreferenceLabels(destName ?? rawInput, userPrefs ?? []);
+      const memoryPrefs = recallSameDestinationPreferenceLabels(
+        resolveActorId(execContext),
+        destName ?? rawInput,
+        userPrefs ?? [],
+      );
       const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
       try {
         // 出发地按定位兜底（2026-10-26）：模型没传、原话也没说时，用用户实时定位
@@ -491,6 +497,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         // 按需回查；LLM 上下文只留 summarizeItinerary 的极简回执
         const storedPlan: StoredTravelPlan = {
           planId: String(result.id ?? ""),
+          actorId: resolveActorId(execContext),
           dataQuality: quality,
           destination: result.destination,
           title: result.title,
@@ -822,15 +829,16 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       permissions: [],
       timeoutMs: 5_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
+      const actorId = resolveActorId(execContext);
       const planId = typeof input.planId === "string" ? input.planId.trim() : "";
       const destination = typeof input.destination === "string" ? input.destination.trim() : "";
       const day = typeof input.day === "number" && input.day > 0 ? Math.floor(input.day) : 0;
 
-      let plan = planId ? travelPlanStore.get(planId) : null;
-      if (!plan && destination) plan = travelPlanStore.findByDestination(destination);
+      let plan = planId ? travelPlanStore.getForActor(actorId, planId) : null;
+      if (!plan && destination) plan = travelPlanStore.findByDestinationForActor(actorId, destination);
       if (!plan) {
-        const recent = travelPlanStore.listSummaries(5);
+        const recent = travelPlanStore.listSummariesForActor(actorId, 5);
         if (recent.length === 0) {
           return { ok: false, error: "还没有已保存的行程", hint: "可先用 travel.plan-itinerary 生成行程" };
         }
@@ -975,7 +983,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       permissions: ["network:external"],
       timeoutMs: 60_000,
     },
-    handler: async (input) => {
+    handler: async (input, execContext) => {
       const planId = typeof input.planId === "string" ? input.planId.trim() : "";
       const action = typeof input.action === "string" ? input.action.trim() : "";
       const dayIdx = typeof input.day === "number" && input.day > 0 ? Math.floor(input.day) - 1 : -1;
@@ -986,7 +994,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       if (!["add", "remove", "replace", "update"].includes(action)) {
         return { ok: false, error: `未知动作：${action}（支持 add/remove/replace/update）` };
       }
-      const plan = travelPlanStore.get(planId);
+      const plan = travelPlanStore.getForActor(resolveActorId(execContext), planId);
       if (!plan) {
         return { ok: false, error: `行程不存在：${planId}`, hint: "可用 travel.get-itinerary 不带参数列出最近行程" };
       }
@@ -1197,16 +1205,17 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       permissions: [],
       timeoutMs: 5_000,
     },
-    handler: async (input: Record<string, unknown>) => {
+    handler: async (input: Record<string, unknown>, execContext) => {
+      const actorId = resolveActorId(execContext);
       const planId = typeof input.planId === "string" ? input.planId.trim() : "";
       const destination = typeof input.destination === "string" ? input.destination.trim() : "";
       // 指名了就只认那一份：定稿是有后果的动作（打开预订闸），不能找不到就
       // 顺手把最近一份别的行程定了
       const plan = planId
-        ? travelPlanStore.get(planId)
+        ? travelPlanStore.getForActor(actorId, planId)
         : destination
-          ? travelPlanStore.findRecentForDestination(destination)
-          : travelPlanStore.get(travelPlanStore.listSummaries(1)[0]?.planId ?? "");
+          ? travelPlanStore.findRecentForDestinationForActor(actorId, destination)
+          : travelPlanStore.getForActor(actorId, travelPlanStore.listSummariesForActor(actorId, 1)[0]?.planId ?? "");
       if (!plan) {
         return { ok: false, error: "没找到对应行程（这轮还没规划过行程？）" };
       }

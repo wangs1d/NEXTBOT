@@ -15,6 +15,7 @@ import { travelMediaStore, type PoiMediaType } from "../../skills/travel-plannin
 import { poiCache as poiCacheStore } from "../../skills/travel-planning/poi-cache-manager.js";
 import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { travelMemoir } from "../../services/travel-memoir-service.js";
+import { resolveActorId } from "../../agent/actor-id.js";
 
 /**
  * 行程规划浏览器页面路由（「行程卡 → 进入界面」链路）。

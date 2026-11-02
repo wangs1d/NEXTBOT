@@ -1,3 +1,4 @@
+import "dart:async";
 import "dart:typed_data";
 
 import "package:flutter/material.dart";
@@ -757,6 +758,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 // 卡片动作：支付确认卡按钮 / chips 追问等经控制器走
                 // chat.user_action（与桌面端 _handleCardAction 同协议）。
                 onUserAction: _controller.sendCardAction,
+                // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
+                onFollowupTap: (String prompt) =>
+                    unawaited(_controller.send(prompt)),
               ),
       ),
     );
@@ -928,6 +932,7 @@ class _TypewriterAssistantBody extends StatefulWidget {
     required this.message,
     required this.cs,
     this.onUserAction,
+    this.onFollowupTap,
   });
 
   final ChatMessage message;
@@ -937,6 +942,9 @@ class _TypewriterAssistantBody extends StatefulWidget {
   /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
   final void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction;
+
+  /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）。
+  final void Function(String prompt)? onFollowupTap;
 
   @override
   State<_TypewriterAssistantBody> createState() =>
@@ -987,6 +995,8 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           isUser: false,
           // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
           onUserAction: widget.onUserAction,
+          // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
+          onFollowupTap: widget.onFollowupTap,
           // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
           typewriterRawText: _typewriter.isPartial ? _typewriter.revealed : null,
           typewriterCursor: _typewriter.isRevealing,

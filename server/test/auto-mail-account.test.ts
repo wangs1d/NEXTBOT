@@ -1,13 +1,30 @@
 /**
- * 邮箱自动接入单测（2026-10-01 P2）：注册邮箱 → IMAP host 推断 + actorId 归属。
- * 诚实边界：授权码永远不猜，缺了如实报 needs_pass。
+ * 邮箱自动接入单测：注册邮箱 → IMAP host 推断 + 逐账号 actorId 归属。
+ * 诚实边界：授权码永远不猜，缺了如实报等待授权码。
+ * （多租户的挂账号/凭据留存/硬闸契约在 test/mail-watch-registry.test.ts 里锁）
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { join, resolve } from "node:path";
+import { rmSync } from "node:fs";
 
-import { resolveAutoMailAccount } from "../src/proactivity/auto-mail-account.js";
+const SCRATCH = join(
+  process.env.TMPDIR || process.env.TEMP || "/tmp",
+  `nextbot-automail-test-${process.pid}`,
+);
+rmSync(SCRATCH, { recursive: true, force: true });
+// 服务构造时按数据根解析 processed-uids.json：直接跑本文件时 npm_lifecycle_event 为空，
+// 不设这个就会指向真实数据目录（getDataDir 懒解析，模块体顶部赋值即赶在构造之前）
+process.env.NEXTBOT_DATA_DIR = SCRATCH;
+
+import { resolveAutoMailAccount, resolveAutoMailAccounts } from "../src/proactivity/auto-mail-account.js";
 import { MailWatchService } from "../src/services/mail-watch-service.js";
 import { AgentAccountService } from "../src/services/agent-account-service.js";
+import { getDataDir } from "../src/config/data-dir.js";
+
+if (resolve(getDataDir()) !== resolve(SCRATCH)) {
+  throw new Error(`测试数据根不是临时目录（实际 ${getDataDir()}），拒绝落盘`);
+}
 
 function makeAccountService(rows: Array<Partial<{ userId: string; email: string; setupComplete: boolean; lastActiveAt: string; createdAt: string }>>): AgentAccountService {
   const svc = new AgentAccountService();
@@ -48,33 +65,55 @@ test("resolveAutoMailAccount：未收录域/无邮箱返回 null（不猜）", (
   assert.equal(resolveAutoMailAccount(makeAccountService([{ userId: "noemail" }])), null);
 });
 
-test("applyAutoAccount：自动补 host/user/actorId + enabled，缺 pass 如实报等待授权码", () => {
+test("resolveAutoMailAccounts：一台机器服务多人时逐个给，各自 actorId 归属", () => {
+  const list = resolveAutoMailAccounts(
+    makeAccountService([
+      { userId: "u1@qq.com", email: "u1@qq.com", lastActiveAt: "2026-10-01T00:00:00Z" },
+      { userId: "u2@163.com", email: "u2@163.com", lastActiveAt: "2026-10-03T00:00:00Z" },
+      { userId: "u3@some-corp.cn", email: "u3@some-corp.cn", lastActiveAt: "2026-10-04T00:00:00Z" },
+      { userId: "u4@qq.com", email: "u4@qq.com", setupComplete: false },
+    ]),
+  );
+  assert.deepEqual(
+    list.map((a) => [a.actorId, a.imapHost]),
+    [
+      ["u2@163.com", "imap.163.com"],
+      ["u1@qq.com", "imap.qq.com"],
+    ],
+    "可映射的都进来（按最近活跃排序）；未收录域与未完成注册的账号不进",
+  );
+  assert.equal(resolveAutoMailAccount(makeAccountService([{ userId: "u1@qq.com", email: "u1@qq.com" }]))?.actorId, "u1@qq.com");
+});
+
+test("applyAccount：账号注入即定 host/user/归属，缺授权码如实报等待授权码", () => {
   const svc = new MailWatchService({ env: { MAIL_WATCH_ENABLED: "0" } });
-  svc.applyAutoAccount({ actorId: "u@qq.com", email: "u@qq.com", imapHost: "imap.qq.com", imapPort: 993 });
+  svc.applyAccount({ actorId: "u@qq.com", host: "imap.qq.com", port: 993, user: "u@qq.com" });
   svc.start();
   const st = svc.status();
-  assert.equal(st.running, false, "无授权码不假装运行");
-  assert.match(st.reason ?? "", /授权码/);
-  assert.ok(svc.isConfigured() === false, "pass 缺失时 configured=false");
+  assert.equal(st.enabled, false, "部署级硬闸（MAIL_WATCH_ENABLED=0）优先于接入账号");
+  assert.equal(st.hardStop, true);
+  assert.equal(st.running, false, "硬闸下不假装运行");
+  assert.match(st.reason ?? "", /硬闸/);
+  assert.equal(st.actorId, "u@qq.com", "新邮件归属跟着账号走");
 });
 
-test("applyAutoAccount：有 pass 即全链 configured，可启动", () => {
-  const svc = new MailWatchService({
-    env: { MAIL_WATCH_ENABLED: "0", MAIL_WATCH_PASS: "dummy-auth-code" },
+test("applyAccount：账号自带授权码才 configured；没带不得回落到 env 里那份", () => {
+  const withPass = new MailWatchService({
+    env: { MAIL_WATCH_ENABLED: "1", MAIL_WATCH_PASS: "deploy-own-auth-code" },
   });
-  svc.applyAutoAccount({ actorId: "u@qq.com", email: "u@qq.com", imapHost: "imap.qq.com", imapPort: 993 });
-  assert.equal(svc.isConfigured(), true);
-  svc.start();
-  assert.equal(svc.status().running, true, "自动接入 + 授权码齐备 → 运行");
-  svc.stop();
-});
+  withPass.applyAccount({ actorId: "u@qq.com", host: "imap.qq.com", port: 993, user: "u@qq.com", pass: "my-code" });
+  assert.equal(withPass.isConfigured(), true);
+  withPass.start();
+  assert.equal(withPass.status().running, true);
+  withPass.stop();
 
-test("applyAutoAccount：env 显式配置时不覆盖", () => {
-  const svc = new MailWatchService({
-    env: { MAIL_WATCH_ENABLED: "1", MAIL_WATCH_HOST: "imap.custom.com", MAIL_WATCH_USER: "me@custom.com", MAIL_WATCH_PASS: "p" },
+  // 拿部署方的码去连别人的邮箱 = 用别人的凭据冒名登录，绝对不允许
+  const noPass = new MailWatchService({
+    env: { MAIL_WATCH_ENABLED: "1", MAIL_WATCH_PASS: "deploy-own-auth-code" },
   });
-  svc.applyAutoAccount({ actorId: "u@qq.com", email: "u@qq.com", imapHost: "imap.qq.com", imapPort: 993 });
-  svc.start();
-  assert.equal(svc.status().running, true);
-  svc.stop();
+  noPass.applyAccount({ actorId: "v@qq.com", host: "imap.qq.com", port: 993, user: "v@qq.com" });
+  assert.equal(noPass.isConfigured(), false, "账号没带授权码就是没带");
+  noPass.start();
+  assert.equal(noPass.status().running, false);
+  assert.match(noPass.status().reason ?? "", /授权码/);
 });

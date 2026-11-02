@@ -15,6 +15,8 @@ import path from "node:path";
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "travel-brief-card-test-"));
 process.env.TRAVEL_PLAN_STORE_DIR = tmpDir;
 
+const TEST_ACTOR = "tester@example.com";
+
 const { travelPlanStore } = await import(
   "../src/skills/travel-planning/travel-plan-store.js"
 );
@@ -36,6 +38,7 @@ const ITINERARY_CARD =
 function plan(overrides: Record<string, unknown> = {}) {
   return {
     planId: "plan-brief-1",
+    actorId: TEST_ACTOR,
     destination: "成都",
     title: "成都3日游",
     startDate: "2026-11-02",
@@ -82,17 +85,19 @@ test("没有行程卡就不附简报卡（没版本可摊开）", () => {
 
 test("有行程卡才附简报卡，且落在正文末尾", () => {
   travelPlanStore.save(plan() as never);
-  const out = attachTravelBriefCard("行程排好了。\n\n" + ITINERARY_CARD, {
-    planId: "plan-brief-1",
-  });
+  const out = attachTravelBriefCard(
+    "行程排好了。\n\n" + ITINERARY_CARD,
+    { planId: "plan-brief-1" },
+    TEST_ACTOR,
+  );
   assert.ok(containsTravelBriefCard(out), "简报卡应已附上");
   assert.ok(out.indexOf(ITINERARY_CARD) < out.lastIndexOf("[AGENT_RESULT_CARD_START]"));
 });
 
 test("同一轮只附一张简报卡", () => {
   travelPlanStore.save(plan({ planId: "plan-brief-dup" }) as never);
-  const once = attachTravelBriefCard(ITINERARY_CARD, { planId: "plan-brief-dup" });
-  const twice = attachTravelBriefCard(once, { planId: "plan-brief-dup" });
+  const once = attachTravelBriefCard(ITINERARY_CARD, { planId: "plan-brief-dup" }, TEST_ACTOR);
+  const twice = attachTravelBriefCard(once, { planId: "plan-brief-dup" }, TEST_ACTOR);
   assert.equal(twice.match(/"cardKind":"travel_brief"/g)?.length, 1);
 });
 
@@ -161,9 +166,11 @@ test("按钮文案下一轮能被同一套槽位抽取认出来（点了要真�
 
 test("版式收口：散文在前 → 行程卡 → 简报卡", () => {
   travelPlanStore.save(plan({ planId: "plan-brief-layout" }) as never);
-  const raw = attachTravelBriefCard("行程排好了。\n\n" + ITINERARY_CARD, {
-    planId: "plan-brief-layout",
-  });
+  const raw = attachTravelBriefCard(
+    "行程排好了。\n\n" + ITINERARY_CARD,
+    { planId: "plan-brief-layout" },
+    TEST_ACTOR,
+  );
   const laid = normalizeReplyCardLayout(raw);
   const travelIdx = laid.indexOf('"cardType":"travel_itinerary"');
   const briefIdx = laid.indexOf('"cardKind":"travel_brief"');

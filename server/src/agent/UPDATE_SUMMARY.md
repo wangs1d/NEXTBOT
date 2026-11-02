@@ -90,8 +90,7 @@ buildAgentCapabilityPromptSection()
 
 2️⃣ 【日历与日程管理能力】
 可用工具：
-- calendar.create_from_text: 从自然语言创建日程
-- calendar.create_task: 创建任务提醒
+- calendar.create: 创建提醒/日程/定时任务的唯一入口
 - calendar.list_tasks: 查看待办事项列表
 提示：可帮助用户管理时间、设置提醒、安排会议
 

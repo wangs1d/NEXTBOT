@@ -4,6 +4,8 @@ import { randomUUID } from "node:crypto";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { DesktopVisualPort } from "../services/desktop-visual-port.js";
 import { getToolResultProcessor } from "../services/tool-result-processor.js";
+import { extractNextUpSuggestions } from "../services/reply-envelope.js";
+import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import type { WsConnectionRegistry } from "../services/ws-connection-registry.js";
 import { ServerEventType } from "../protocol.js";
 import { chunkText, dedupeAdjacentLines } from "../utils/text.js";
@@ -193,10 +195,14 @@ export class VisionPeriodicScheduler {
       }
 
       let chunkSeq = 0;
+      // 视觉任务回复同样受 render 协议约束：NEXT_UP 块不能在流式阶段漏给用户。
+      const visionStreamGuard = createStreamMarkerGuard();
       const reply = await this.deps.runtime.handleUserMessage(job.actorId, job.prompt, {
         chatUserMessageId: messageId,
         visionFrames: [frame],
         onAssistantDelta: (delta) => {
+          const safe = visionStreamGuard.feed(delta);
+          if (!safe) return;
           this.deps.wsRegistry.trySend(
             job.actorId,
             JSON.stringify({
@@ -204,7 +210,7 @@ export class VisionPeriodicScheduler {
               payload: {
                 sessionId: job.actorId,
                 messageId: assistantMsgId,
-                chunk: delta,
+                chunk: safe,
                 sequence: chunkSeq++,
               },
             }),
@@ -239,8 +245,28 @@ export class VisionPeriodicScheduler {
         },
       });
 
+      const visionTail = visionStreamGuard.flush();
+      if (visionTail) {
+        this.deps.wsRegistry.trySend(
+          job.actorId,
+          JSON.stringify({
+            type: ServerEventType.ChatAssistantChunk,
+            payload: {
+              sessionId: job.actorId,
+              messageId: assistantMsgId,
+              chunk: visionTail,
+              sequence: chunkSeq++,
+            },
+          }),
+        );
+      }
+      // 定稿文本剥离 NEXT_UP 协议块（视觉任务不出胶囊，透出即噪音）。
+      const displayText = extractNextUpSuggestions(
+        dedupeAdjacentLines((reply.text ?? "").trim()),
+      ).text;
+
       if (!reply.streamedChunks) {
-        const chunks = chunkText(reply.text, 12);
+        const chunks = chunkText(displayText, 12);
         chunks.forEach((chunk, index) => {
           this.deps.wsRegistry.trySend(
             job.actorId,
@@ -264,10 +290,9 @@ export class VisionPeriodicScheduler {
           payload: {
             sessionId: job.actorId,
             messageId: assistantMsgId,
-            finalText: getToolResultProcessor().processAssistantText(
-              dedupeAdjacentLines((reply.text ?? "").trim()),
-              { userText: job.prompt },
-            ),
+            finalText: getToolResultProcessor().processAssistantText(displayText, {
+              userText: job.prompt,
+            }),
             toolCalls: reply.toolName ? [reply.toolName] : [],
             visionPeriodicJobId: job.jobId,
           },

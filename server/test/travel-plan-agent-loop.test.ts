@@ -34,6 +34,8 @@ const two = (v: number): string => v.toString().padStart(2, "0");
 const now = new Date();
 const today = `${now.getFullYear()}-${two(now.getMonth() + 1)}-${two(now.getDate())}`;
 
+const TEST_ACTOR = "tester@example.com";
+
 function buildPlan(): StoredTravelPlan {
   const item = (over: Partial<StoredTravelPlan["days"][number]["items"][number]> = {}) => ({
     type: "attraction",
@@ -48,6 +50,7 @@ function buildPlan(): StoredTravelPlan {
   });
   return {
     planId: "plan-agent-loop-1",
+    actorId: TEST_ACTOR,
     destination: "兴义",
     title: "万峰林2日游",
     startDate: today,
@@ -90,6 +93,12 @@ function makeStubService(): PlanningService {
 }
 
 const app = Fastify({ logger: false });
+app.addHook("preValidation", async (req) => {
+  (req.query as Record<string, unknown>).userId = TEST_ACTOR;
+  if (req.body && typeof req.body === "object") {
+    (req.body as Record<string, unknown>).userId = TEST_ACTOR;
+  }
+});
 registerTravelPlanRoutes(app, { travelPlanningService: makeStubService() });
 
 // ────────────────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * 工具召回链五层根修单测（2026-10-09 L1/L3/L4/L5）。
  *
  * L1 感知增强：buildDomainPreloadTools 多域注入 + BM25 top-K 弱信号兜底。
@@ -333,7 +333,7 @@ test("② 三条实证 miss 补齐：提醒/回复/记一下 在 router-first �
   // 三条 query 的期望工具均由轻量常驻兜底，不再赌词面
   const light = new Set(laneSets.buildTaskLaneRouterFirstLightTools(corpus).map(toolName));
   const CASES: Array<[string, string]> = [
-    ["明早八点提醒我交周报", "reminder.plan"],
+    ["明早八点提醒我交周报", "calendar.create"],
     ["回复妈妈微信说我马上到家", "messages.reply"],
     ["帮我记一下，我女儿叫小雨今年三岁", "profile.update"],
   ];

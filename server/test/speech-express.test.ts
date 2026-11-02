@@ -1,5 +1,5 @@
 // SpeechHub（统一开口出口）单测：light 档 LLM 话术 + 模板兜底 + 用量熔断
-// + 块装配（人格·静态/语感/画像浅层按需注入）+ speakRaw（调用方自有任务文本）。
+// + 块装配（人格/画像浅层按需注入）+ speakRaw（调用方自有任务文本）。
 // 全部用 mock chat provider（零外网、零真实 LLM）。
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -160,22 +160,20 @@ test("speak: 重要性分配——低于门槛直接模板不花调用，高优�
   assert.notEqual(med, FALLBACK);
 });
 
-test("块装配：soul/语感/画像按需注入，字段空=块不渲染", async () => {
+test("块装配：人格/画像按需注入，字段空=块不渲染", async () => {
   const chat = mockChat("好的短句");
   const hub = makeHub(chat, {
     extra: {
-      personaPrompt: () => "# 人格·静态\n你是 NEXTBOT。",
-      voiceProfile: () => "【语感基准】\n短句、平调。",
+      personaPrompt: () => "【人格】\n你是 NEXTBOT。",
       styleBrief: async () => "称呼：老铁",
     },
   });
   await hub.speak({ kind: "message_watch", sessionId: "u1", facts: {}, fallback: FALLBACK, tier: "light" });
   const sys = chat.captures[0]!.systemPrompt ?? "";
-  assert.ok(sys.includes("人格·静态"), "soul 块在最前");
-  assert.ok(sys.includes("语感基准"), "语感块其次");
+  assert.ok(sys.includes("【人格】"), "人格块在最前");
   assert.ok(sys.includes("【主动开口】"), "通用指令块");
   assert.ok(sys.includes("一句话"), "light 档单句约束");
-  assert.ok(sys.indexOf("人格·静态") < sys.indexOf("【主动开口】"), "稳定块在指令块之前");
+  assert.ok(sys.indexOf("【人格】") < sys.indexOf("【主动开口】"), "稳定块在指令块之前");
   assert.ok(sys.includes("称呼：老铁"), "画像浅层沉底");
 
   // 全缺 → 回退纯指令块（老行为）
@@ -184,12 +182,11 @@ test("块装配：soul/语感/画像按需注入，字段空=块不渲染", asyn
   await plain.speak({ kind: "message_watch", sessionId: "u1", facts: {}, fallback: FALLBACK, tier: "light" });
   const sys2 = chat2.captures[0]!.systemPrompt ?? "";
   assert.ok(sys2.includes("【主动开口】"));
-  assert.ok(!sys2.includes("人格·静态"), "无人格块");
+  assert.ok(!sys2.includes("【人格】"), "无人格块");
 });
 
 test("按需加载矩阵：任一块单独缺失不渲染，其余块不受影响", async () => {
-  const SOUL = "SOUL-MARK 人格·静态";
-  const VOICE = "VOICE-MARK 语感基准";
+  const SOUL = "SOUL-MARK 【人格】";
   const BRIEF = "BRIEF-MARK 称呼：老铁";
   const mk = (extra: Record<string, unknown>) => {
     const chat = mockChat("好的短句");
@@ -201,26 +198,23 @@ test("按需加载矩阵：任一块单独缺失不渲染，其余块不受影�
     await hub.speak({ kind: "message_watch", sessionId: "u1", facts: {}, fallback: FALLBACK, tier: "light" });
     return chat.captures[0]!.systemPrompt ?? "";
   };
-  // 只给 soul → 语感/画像缺席，其余照常
+  // 只给人格 → 画像缺席，其余照常
   const onlySoul = await probe({ personaPrompt: () => SOUL });
-  assert.ok(onlySoul.includes(SOUL) && !onlySoul.includes(VOICE) && !onlySoul.includes(BRIEF), "单 soul");
-  // 只给语感 → soul/画像缺席
-  const onlyVoice = await probe({ voiceProfile: () => VOICE });
-  assert.ok(onlyVoice.includes(VOICE) && !onlyVoice.includes(SOUL) && !onlyVoice.includes(BRIEF), "单语感");
-  // 只给画像 → soul/语感缺席，且画像沉底指令块之后
+  assert.ok(onlySoul.includes(SOUL) && !onlySoul.includes(BRIEF), "单人格");
+  // 只给画像 → 人格缺席，且画像沉底指令块之后
   const onlyBrief = await probe({ styleBrief: async () => BRIEF });
-  assert.ok(onlyBrief.includes(BRIEF) && !onlyBrief.includes(SOUL) && !onlyBrief.includes(VOICE), "单画像");
+  assert.ok(onlyBrief.includes(BRIEF) && !onlyBrief.includes(SOUL), "单画像");
   assert.ok(onlyBrief.indexOf("【主动开口】") < onlyBrief.indexOf(BRIEF), "画像仍在指令块之后");
-  // soul 抛错 = 块缺失，不拖垮装配（对齐「读取失败不阻塞」契约）
-  const brokenSoul = await probe({ personaPrompt: () => { throw new Error("boom"); }, voiceProfile: () => VOICE });
-  assert.ok(brokenSoul.includes(VOICE) && !brokenSoul.includes("SOUL-MARK"), "异常提供者按缺失处理");
+  // 人格抛错 = 块缺失，不拖垮装配（对齐「读取失败不阻塞」契约）
+  const brokenSoul = await probe({ personaPrompt: () => { throw new Error("boom"); }, styleBrief: async () => BRIEF });
+  assert.ok(brokenSoul.includes(BRIEF) && !brokenSoul.includes("SOUL-MARK"), "异常提供者按缺失处理");
 });
 
 test("装配确定性：同输入同字节（prefix cache 友好），档位只变指令行", async () => {
   const chat = mockChat("好的短句");
   const hub = makeHub(chat, {
     extra: {
-      personaPrompt: () => "# 人格·静态\n你是 NEXTBOT。",
+      personaPrompt: () => "# 人格\n你是 NEXTBOT。",
       styleBrief: async () => "称呼：老铁",
     },
   });

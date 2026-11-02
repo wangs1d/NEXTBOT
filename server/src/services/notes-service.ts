@@ -42,6 +42,8 @@ export type NoteQuiz = { question: string; answer: string };
 export type Note = {
   id: string;
   sessionId: string;
+  /** 归属用户（多租户隔离；旧笔记缺省视为未认领） */
+  actorId?: string;
   title: string;
   content: string;
   category: NoteCategory;
@@ -58,6 +60,7 @@ export type Note = {
 
 export type CreateNoteInput = {
   sessionId: string;
+  actorId?: string;
   title: string;
   content: string;
   category?: NoteCategory;
@@ -78,6 +81,7 @@ export type UpdateNoteInput = Partial<{
 
 export type ListNotesFilter = {
   sessionId: string;
+  actorId?: string;
   category?: NoteCategory;
   tag?: string;
   from?: string;
@@ -94,6 +98,16 @@ export type SearchResult = {
 };
 
 const SAFE_ID_REGEX = /^[a-zA-Z0-9_-]{1,64}$/;
+
+/**
+ * 归属过滤。未带归属的旧笔记只在该会话本身就是调用者身份时可见
+ * （本地单用户：actorId 由 sessionId 派生），迁移命令负责补归属。
+ */
+function ownedBy(note: Note, actorId?: string): boolean {
+  if (!actorId) return true;
+  if (note.actorId) return note.actorId === actorId;
+  return note.sessionId === actorId;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -199,6 +213,7 @@ export class NotesService {
     const note: Note = {
       id: `n_${randomUUID().replace(/-/g, "").slice(0, 20)}`,
       sessionId,
+      ...(input.actorId?.trim() ? { actorId: input.actorId.trim() } : {}),
       title,
       content,
       category,
@@ -220,7 +235,7 @@ export class NotesService {
     return note;
   }
 
-  getNote(id: string): Note | null {
+  getNote(id: string, actorId?: string): Note | null {
     if (!SAFE_ID_REGEX.test(id) && !id.startsWith("n_")) {
       // 容错：接受合法 n_ 前缀或宽松 ID；非法字符直接拒
       if (!/^n_[a-zA-Z0-9]{8,40}$/.test(id)) return null;
@@ -228,12 +243,13 @@ export class NotesService {
     const sessionId = this.sessionByNoteId.get(id);
     if (!sessionId) return null;
     const list = this.bySession.get(sessionId);
-    return list?.find((n) => n.id === id) ?? null;
+    const note = list?.find((n) => n.id === id) ?? null;
+    return note && ownedBy(note, actorId) ? note : null;
   }
 
-  async updateNote(id: string, patch: UpdateNoteInput): Promise<Note> {
+  async updateNote(id: string, patch: UpdateNoteInput, actorId?: string): Promise<Note> {
     await this.load();
-    const existing = this.getNote(id);
+    const existing = this.getNote(id, actorId);
     if (!existing) throw new Error("笔记不存在");
     if (patch.title !== undefined) {
       const t = patch.title.trim();
@@ -275,9 +291,9 @@ export class NotesService {
     return existing;
   }
 
-  async deleteNote(id: string): Promise<{ id: string; deleted: true }> {
+  async deleteNote(id: string, actorId?: string): Promise<{ id: string; deleted: true }> {
     await this.load();
-    const existing = this.getNote(id);
+    const existing = this.getNote(id, actorId);
     if (!existing) throw new Error("笔记不存在");
     const list = this.bySession.get(existing.sessionId) ?? [];
     const idx = list.findIndex((n) => n.id === id);
@@ -296,6 +312,7 @@ export class NotesService {
     const toMs = filter.to ? new Date(filter.to).getTime() : Number.POSITIVE_INFINITY;
     const limit = Math.max(1, Math.min(200, filter.limit ?? 50));
     return all
+      .filter((n) => ownedBy(n, filter.actorId))
       .filter((n) => !filter.category || n.category === filter.category)
       .filter((n) => !filter.tag || n.tags.includes(filter.tag))
       .filter((n) => {
@@ -315,12 +332,14 @@ export class NotesService {
     query: string,
     topK = 10,
     category?: NoteCategory,
+    actorId?: string,
   ): SearchResult[] {
-    const all = this.bySession.get(sessionId) ?? [];
+    const scoped = this.bySession.get(sessionId) ?? [];
+    const all = scoped.filter((n) => ownedBy(n, actorId));
     if (all.length === 0 || !query.trim()) return [];
     const idx = this.getIndex(sessionId);
-    // 确保索引与最新内容一致（兜底重建）
-    if (idx.size !== all.length) this.rebuildIndex(sessionId, all);
+    // 索引按整个会话重建（含其他用户的笔记），命中结果再按归属过滤
+    if (idx.size !== scoped.length) this.rebuildIndex(sessionId, scoped);
     const bm = idx.search(query, Math.max(topK * 3, 10));
     const qTokens = new Set(tokenizeForBm25(query));
     const candidates = new Map<string, number>();
@@ -370,9 +389,9 @@ export class NotesService {
    * 标记一次复习：更新 `lastReviewedAt` 与 `reviewCount`。
    * 不抛错（找不到 id 时返回 null）。
    */
-  async markReviewed(id: string): Promise<Note | null> {
+  async markReviewed(id: string, actorId?: string): Promise<Note | null> {
     await this.load();
-    const existing = this.getNote(id);
+    const existing = this.getNote(id, actorId);
     if (!existing) return null;
     existing.lastReviewedAt = nowIso();
     existing.reviewCount = (existing.reviewCount ?? 0) + 1;

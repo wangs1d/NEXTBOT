@@ -73,9 +73,7 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "info.search": "web",
   "weather.get_local": "web",
   // calendar
-  "reminder.plan": "calendar",
-  "calendar.create_from_text": "calendar",
-  "calendar.create_task": "calendar",
+  "calendar.create": "calendar",
   "calendar.list_tasks": "calendar",
   // wallet
   "wallet.get_balance": "wallet",
@@ -203,9 +201,7 @@ const HONEST_FAILURE_TOOLS = new Set<string>([
   // 提醒/日程创建（2026-10-12）：matched=false（时间解析不出/周期需确认）时
   // 严禁转述成「已设置」——用户据此以为到点会提醒，实际什么都没创建
   //（真实事故：提醒轮无落库、日程页无数据、到点无通知）。
-  "reminder.plan",
-  "calendar.create_from_text",
-  "calendar.create_task",
+  "calendar.create",
   // 统一预订层（方案 A）：下单工具禁止假成功（模拟模式必须如实标注 simulated）
   "ride_hailing.book",
   "home_service.book",

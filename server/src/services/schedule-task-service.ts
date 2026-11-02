@@ -253,6 +253,19 @@ function normalizeScheduleContent(value: string | undefined): string {
 }
 
 /**
+ * 提醒事项签名：同一次创建在不同写入方落库的 description 形态不同——规则路径存
+ * 带时间的原句（「今天18:00提醒我去游泳」），模型工具路径存干净事项（「去游泳」），
+ * reminderMessage 也各由不同模型写一套。按字面比对会让同一次意图落成两条到点提醒
+ * （2026-11-01 实证：同一句「6点提醒我去游泳」先后经两个创建工具，建出两条
+ * 18:00 任务；当天已把这些工具收口为唯一 calendar.create）。这里统一剥成「事项」再比。
+ */
+function reminderSubjectKey(description: string, shortTitle?: string): string {
+  const subject = extractReminderSubject(description);
+  const key = subject !== "到点提醒" ? subject : shortTitle?.trim() || subject;
+  return normalizeScheduleContent(key);
+}
+
+/**
  * 出发段升档容忍带（分钟）：出发段本就设计在「剩余时间≈路程」的时刻触发，
  * 升档只针对「实时路程显著恶化或触发已迟到」——实时路程超过 剩余时间+容忍带
  * 才升档到点弹窗，准点触发（剩余≈路程）永远走轻触达。容忍带吸收 tick 间隔
@@ -286,7 +299,7 @@ export type ScheduleTaskServiceOptions = {
 /**
  * 提醒展示文案契约（落库闸口，2026-10-21 根修「的11点03分提醒我吃饭」类回声）：
  * shortTitle/reminderMessage 是展示文案，不是原句回声。模型自己填的字段
- * （reminder.plan 的 structured 分支、calendar.create_task 直填、HTTP 直写）
+ * （calendar.create 的结构化分支、HTTP 直写）
  * 不经解析服务，全在此统一过检——含时间词/「提醒我」类指令词/悬空助词开头/
  * 超长短标题即视为解析污染，从 description 重推导干净文案。
  */
@@ -588,9 +601,12 @@ export class ScheduleTaskService {
    * 活动任务重复检测（幂等创建的判定核心）：同会话 + 同类型 + 同归一化内容 +
    * 同时间签名（时区/重复规则/cron/runAt 锚点）的 active/paused 任务已存在时，
    * 判定为同一次创建意图的多路径重放——程序层确定性创建、模型工具调用
-   * （reminder.plan / calendar.create_*）、客户端断线重发、HTTP 直写都从这里落库，
+   * （calendar.create）、客户端断线重发、HTTP 直写都从这里落库，
    * 只有第一次真实创建，后续一律返回已有任务。已结束（completed/cancelled）的
    * 任务不参与判定：用户稍后重设同名同刻的提醒必须能成功。
+   *
+   * 提醒的「内容」按事项签名比较（reminderSubjectKey），不按 description /
+   * reminderMessage 字面——不同写入方会把同一件事写成不同句子（见该函数注释）。
    */
   private findActiveDuplicate(
     input: CreateScheduleTaskInput,
@@ -602,25 +618,36 @@ export class ScheduleTaskService {
     const reminderMessage = normalizeScheduleContent(
       incomingCopy.reminderMessage ?? input.description,
     );
+    const incomingSubjectKey =
+      input.kind === "reminder"
+        ? reminderSubjectKey(input.description, incomingCopy.shortTitle)
+        : description;
     const runAtMs = Date.parse(schedule.runAt);
     for (const task of this.byTaskId.values()) {
       if (task.sessionId !== input.sessionId || task.kind !== input.kind) continue;
       if (task.status !== "active" && task.status !== "paused") continue;
-      if (normalizeScheduleContent(task.description) !== description) continue;
-      // 存量任务按同一文案契约规整后参与比较：签名必须与落库值同源，
-      // 否则闸口改写（回声文案重推导）会让同内容重放在签名上错位。
-      const taskCopy = normalizeReminderDisplayCopy(
-        task.kind,
-        task.description,
-        task.shortTitle,
-        task.reminderMessage,
-        task.source,
-      );
-      if (
-        normalizeScheduleContent(taskCopy.reminderMessage ?? task.description) !==
-        reminderMessage
-      ) {
-        continue;
+      if (input.kind === "reminder") {
+        // 提醒：只比事项（跨写入方的原句/文案差异不算两件事）。
+        if (reminderSubjectKey(task.description, task.shortTitle) !== incomingSubjectKey) {
+          continue;
+        }
+      } else {
+        if (normalizeScheduleContent(task.description) !== description) continue;
+        // 存量任务按同一文案契约规整后参与比较：签名必须与落库值同源，
+        // 否则闸口改写（回声文案重推导）会让同内容重放在签名上错位。
+        const taskCopy = normalizeReminderDisplayCopy(
+          task.kind,
+          task.description,
+          task.shortTitle,
+          task.reminderMessage,
+          task.source,
+        );
+        if (
+          normalizeScheduleContent(taskCopy.reminderMessage ?? task.description) !==
+          reminderMessage
+        ) {
+          continue;
+        }
       }
       if (task.timezone !== timezone || task.recurrence !== schedule.recurrence) continue;
       if (schedule.recurrence === "cron") {

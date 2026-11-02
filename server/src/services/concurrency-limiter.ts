@@ -212,6 +212,29 @@ export function recordTurnOutcome(success: boolean, durationMs: number, errorMes
 }
 
 /**
+ * 显式重型工具清单（按名全局限流的那些）。
+ *
+ * 具身分域（desktop./browser./phone.）不算在这里：那是同设备互斥（全局 1），
+ * 不是可分享的容量，再加一层 actor 配额只会把「排队」变「更长的排队」。
+ */
+function heavyToolLimits(): Record<string, number> {
+  return {
+    "code.run": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
+    "code.write_file": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
+    "code.read_file": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
+    "code.list_files": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
+    "image.generate": envPosInt("MAX_CONCURRENT_IMAGE_GEN", 2),
+    "voice.speak": envPosInt("MAX_CONCURRENT_VOICE", 3),
+    "voice.send_message": envPosInt("MAX_CONCURRENT_VOICE", 3),
+  };
+}
+
+/** 该工具是否占重型容量（供按 actor 的硬上限判断要不要取名额）。 */
+export function isHeavyTool(toolName: string): boolean {
+  return heavyToolLimits()[toolName] !== undefined;
+}
+
+/**
  * 按工具名获取对应的并发限制器。
  * 重型工具单独限流，防止资源耗尽；其他工具不限流。
  */
@@ -231,16 +254,7 @@ function getToolLimiter(toolName: string): Semaphore | null {
   const cached = toolLimiters.get(toolName);
   if (cached !== undefined) return cached;
 
-  // 重型工具的并发上限配置
-  const limits: Record<string, number> = {
-    "code.run": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
-    "code.write_file": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
-    "code.read_file": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
-    "code.list_files": envPosInt("MAX_CONCURRENT_CODE_RUN", 2),
-    "image.generate": envPosInt("MAX_CONCURRENT_IMAGE_GEN", 2),
-    "voice.speak": envPosInt("MAX_CONCURRENT_VOICE", 3),
-    "voice.send_message": envPosInt("MAX_CONCURRENT_VOICE", 3),
-  };
+  const limits = heavyToolLimits();
 
   const exactMax = limits[toolName];
   if (exactMax) {

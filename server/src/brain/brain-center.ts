@@ -419,14 +419,6 @@ export class BrainCenter {
   private anticipationEngine: import("./decision-hub.js").AnticipationEngineLike | null = null;
   /** 情绪调节器（深度优化：情绪影响路由） */
   private emotionModulator: import("./emotion-modulator.js").EmotionModulator | null = null;
-  /**
-   * 主题词提取器（深度优化：让工作记忆真正"记住在聊什么"）。
-   *
-   * 由 create-app-services.ts 注入：内部走一次轻量 LLM 调用，从用户文本中
-   * 提取 1-3 个业务领域关键词。替代了 working-memory-cortex.ts 原硬编码主题词列表。
-   * 未注入时降级为不提取（保持纯规则驱动）。
-   */
-  private topicExtractor: ((text: string) => Promise<string[]>) | null = null;
 
   /**
    * 跨会话开放环路提取轮次门控（记忆链路 LLM 调用收敛 / 降频改造）：
@@ -452,28 +444,6 @@ export class BrainCenter {
   registerProaction(c: ProactionCortexLike): void {
     this.proaction = c;
     console.log("[BrainCenter] 已注册 ProactionCortex");
-  }
-
-  /**
-   * 注入主题词提取器（LLM 驱动）。
-   *
-   * 替代 working-memory-cortex.ts 中原硬编码主题词列表。提取器由调用方实现，
-   * 通常是一次轻量 LLM 调用。BrainCenter.cognize 在 extractAndSetSlots 之后异步触发，
-   * 不阻塞主流程。
-   */
-  setTopicExtractor(extractor: ((text: string) => Promise<string[]>) | null): void {
-    this.topicExtractor = extractor;
-    console.log("[BrainCenter] 已注入 TopicExtractor（LLM 驱动）");
-  }
-
-  private moodTopicProvider: ((sessionId: string, text: string) => string[]) | null = null;
-
-  /**
-   * 注入 mood 话题提供器（每轮 LLM 调用削减）：读取 MoodInferenceService 缓存中
-   * 与情绪推断同一次调用产出的 topics。返回空数组表示未命中（回退独立 TopicExtractor）。
-   */
-  setMoodTopicProvider(provider: ((sessionId: string, text: string) => string[]) | null): void {
-    this.moodTopicProvider = provider;
   }
 
   registerSensory(c: SensoryCortexLike): void {
@@ -1510,46 +1480,10 @@ export class BrainCenter {
       }
     }
 
-    // === 深度优化（工作记忆主题词）：阶段 3.4.1 提取主题词 ===
-    // 每轮 LLM 调用削减：优先消费情绪推断（MoodInferenceService，阶段 1 已跑）
-    // 同一次调用顺带产出的 topics（缓存读取，零额外 LLM）；未覆盖时才回退
-    // 独立 TopicExtractor LLM 调用。仍是 fire-and-forget：
-    // 主题词用于下一轮 working-memory 关联，本轮不读它，因此无需阻塞 cognize。
-    if (this.workingMemoryCortex && query) {
-      const applyTopics = (topics: string[]): boolean => {
-        if (topics && topics.length > 0) {
-          this.workingMemoryCortex!.setTopicSlots(actorId, topics);
-          return true;
-        }
-        return false;
-      };
-
-      // 快路径：mood 缓存命中（阶段 1 情绪推断已完成且产出 topics）
-      let applied = false;
-      try {
-        applied = applyTopics(this.moodTopicProvider?.(actorId, query) ?? []);
-      } catch {
-        /* provider 失败静默，走 LLM 回退 */
-      }
-
-      if (!applied && this.topicExtractor) {
-        void Promise.race([
-          this.topicExtractor(query),
-          new Promise<string[]>((_, reject) =>
-            setTimeout(() => reject(new Error("topic_extract_timeout")), 2000),
-          ),
-        ])
-          .then((topics) => {
-            applyTopics(topics);
-          })
-          .catch((err) => {
-            if (String(err).includes("timeout")) {
-              console.log(`[BrainCenter] topicExtractor 超时(2s)，跳过本轮主题词更新`);
-            }
-            // 其他失败静默：主题词是增强项，不影响本轮回复正确性
-          });
-      }
-    }
+    // === 阶段 3.4.1 主题词（已下线，2026-11-01 提速）===
+    // 原来每轮额外发一次 topic-extractor LLM（实测每轮都 2s 超时、输出 0 字符）；
+    // 主题词只是下一轮工作记忆的增强项，主模型从最近对话上下文已能把握话题。
+    // 工作记忆槽位仍由上方 extractAndSetSlots（纯规则、零 LLM）维护。
 
     // === Step 7 扩展：阶段 3.6 — 在线学习观察 ===
     // 每轮 cognize 完成后流式更新用户画像。每轮都调用，不受 observeCount 守卫限制

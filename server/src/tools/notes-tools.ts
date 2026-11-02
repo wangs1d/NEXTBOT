@@ -54,17 +54,17 @@ export function registerNotesTools(
     const source = input.source ? String(input.source).trim() : undefined;
 
     // 状态连续性：先 search 查重，避免重复落库
-    const topHits = notesService.searchNotes(sessionId, title, 3);
+    const topHits = notesService.searchNotes(sessionId, title, 3, undefined, sessionId);
     const dup = topHits.find((h) => h.title.trim() === title);
     if (dup) {
-      const existing = notesService.getNote(dup.id);
+      const existing = notesService.getNote(dup.id, sessionId);
       if (existing) {
         const mergedContent = `${existing.content}\n\n---\n补充：\n${content}`;
         const updated = await notesService.updateNote(existing.id, {
           content: mergedContent,
           tags: Array.from(new Set([...existing.tags, ...tags])),
           source: source ?? existing.source ?? null,
-        });
+        }, sessionId);
         return {
           ok: true,
           duplicateHandled: true,
@@ -77,6 +77,7 @@ export function registerNotesTools(
     try {
       const note = await notesService.createNote({
         sessionId,
+        actorId: sessionId,
         title,
         content,
         category,
@@ -98,7 +99,7 @@ export function registerNotesTools(
     const category = isCategory(input.category) ? input.category : undefined;
     const tag = input.tag ? String(input.tag).trim() : undefined;
     const limit = Math.max(1, Math.min(200, Number(input.limit ?? 30)));
-    const notes = notesService.listNotes({ sessionId, category, tag, limit });
+    const notes = notesService.listNotes({ sessionId, actorId: sessionId, category, tag, limit });
     return {
       ok: true,
       count: notes.length,
@@ -109,10 +110,11 @@ export function registerNotesTools(
   /* -----------------------------------------------------------------
    * notes.get
    * ----------------------------------------------------------------- */
-  registry.register("notes.get", async (input, _context) => {
+  registry.register("notes.get", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
-    const note = notesService.getNote(id);
+    const note = notesService.getNote(id, actorId);
     if (!note) return { ok: false, error: "笔记不存在" };
     return { ok: true, note };
   });
@@ -120,7 +122,8 @@ export function registerNotesTools(
   /* -----------------------------------------------------------------
    * notes.update
    * ----------------------------------------------------------------- */
-  registry.register("notes.update", async (input, _context) => {
+  registry.register("notes.update", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填（必须先 notes.list/notes.search 拿到真实 id）" };
     const patch: Parameters<NotesService["updateNote"]>[1] = {};
@@ -137,7 +140,7 @@ export function registerNotesTools(
       return { ok: false, error: "至少传入一个可更新字段" };
     }
     try {
-      const note = await notesService.updateNote(id, patch);
+      const note = await notesService.updateNote(id, patch, actorId);
       return { ok: true, note, summary: "笔记已更新" };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -148,11 +151,12 @@ export function registerNotesTools(
   /* -----------------------------------------------------------------
    * notes.delete
    * ----------------------------------------------------------------- */
-  registry.register("notes.delete", async (input, _context) => {
+  registry.register("notes.delete", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
     try {
-      const result = await notesService.deleteNote(id);
+      const result = await notesService.deleteNote(id, actorId);
       return { ok: true, ...result, summary: "笔记已删除" };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -169,17 +173,18 @@ export function registerNotesTools(
     if (!query) return { ok: false, error: "query 必填" };
     const topK = Math.max(1, Math.min(50, Number(input.topK ?? 5)));
     const category = isCategory(input.category) ? input.category : undefined;
-    const results = notesService.searchNotes(sessionId, query, topK, category);
+    const results = notesService.searchNotes(sessionId, query, topK, category, sessionId);
     return { ok: true, query, count: results.length, results };
   });
 
   /* -----------------------------------------------------------------
    * notes.summarize
    * ----------------------------------------------------------------- */
-  registry.register("notes.summarize", async (input, _context) => {
+  registry.register("notes.summarize", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
-    const note = notesService.getNote(id);
+    const note = notesService.getNote(id, actorId);
     if (!note) return { ok: false, error: "笔记不存在" };
     const force = input.force === true;
     if (note.summary && !force) {
@@ -192,7 +197,7 @@ export function registerNotesTools(
         note.title,
         note.content,
       );
-      const updated = await notesService.updateNote(id, { summary });
+      const updated = await notesService.updateNote(id, { summary }, actorId);
       return { ok: true, summary, note: updated, cached: false };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
@@ -203,10 +208,11 @@ export function registerNotesTools(
   /* -----------------------------------------------------------------
    * notes.flashcards
    * ----------------------------------------------------------------- */
-  registry.register("notes.flashcards", async (input, _context) => {
+  registry.register("notes.flashcards", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
-    const note = notesService.getNote(id);
+    const note = notesService.getNote(id, actorId);
     if (!note) return { ok: false, error: "笔记不存在" };
     const count = Math.max(1, Math.min(20, Number(input.count ?? 5)));
     const persist = input.persist !== false;
@@ -219,7 +225,7 @@ export function registerNotesTools(
         count,
       );
       const updated = persist
-        ? await notesService.updateNote(id, { flashcards: cards })
+        ? await notesService.updateNote(id, { flashcards: cards }, actorId)
         : note;
       return { ok: true, flashcards: cards, note: updated };
     } catch (e) {
@@ -231,10 +237,11 @@ export function registerNotesTools(
   /* -----------------------------------------------------------------
    * notes.quiz
    * ----------------------------------------------------------------- */
-  registry.register("notes.quiz", async (input, _context) => {
+  registry.register("notes.quiz", async (input, context) => {
+    const actorId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
-    const note = notesService.getNote(id);
+    const note = notesService.getNote(id, actorId);
     if (!note) return { ok: false, error: "笔记不存在" };
     const count = Math.max(1, Math.min(20, Number(input.count ?? 3)));
     const persist = input.persist !== false;
@@ -247,7 +254,7 @@ export function registerNotesTools(
         count,
       );
       const updated = persist
-        ? await notesService.updateNote(id, { quiz })
+        ? await notesService.updateNote(id, { quiz }, actorId)
         : note;
       return { ok: true, quiz, note: updated };
     } catch (e) {
@@ -263,7 +270,7 @@ export function registerNotesTools(
     const sessionId = resolveActorId(context);
     const id = String(input.id ?? "").trim();
     if (!id) return { ok: false, error: "id 必填" };
-    const note = notesService.getNote(id);
+    const note = notesService.getNote(id, sessionId);
     if (!note) return { ok: false, error: "笔记不存在" };
     const runAt = String(input.runAt ?? "").trim();
     if (!runAt) return { ok: false, error: "runAt（ISO 时间）必填" };
@@ -286,7 +293,7 @@ export function registerNotesTools(
         timezone: tz,
         reminderMessage,
       });
-      const reviewed = await notesService.markReviewed(id);
+      const reviewed = await notesService.markReviewed(id, sessionId);
       return {
         ok: true,
         taskId: task.taskId,

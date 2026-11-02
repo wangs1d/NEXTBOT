@@ -33,6 +33,7 @@
 import { getDataDir } from "../config/data-dir.js";
 import { join } from "node:path";
 
+import { sanitizeActorKey } from "../agentic-memory/actor-key.js";
 import { readJson, writeJson } from "../proactivity/persist-file.js";
 import type { ProactiveIntent } from "../proactivity/proactivity-types.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
@@ -41,7 +42,12 @@ import type { ScheduleTaskService } from "./schedule-task-service.js";
 // 配置
 // ---------------------------------------------------------------------- //
 
-export type IcsFeedConfig = { name: string; url: string };
+/**
+ * 订阅源。
+ * `actorId` 缺省 = 部署方在 ICS_SUB_URLS 里配的那个源，归属落到 ICS_SUB_ACTOR_ID；
+ * 用户自助添加的源必须记下添加者，否则一台服务器服务多人时 A 的日历会长进 B 的日程表。
+ */
+export type IcsFeedConfig = { name: string; url: string; actorId?: string };
 
 export type IcsWatchConfig = {
   enabled: boolean;
@@ -93,6 +99,11 @@ export function readIcsWatchConfig(env: NodeJS.ProcessEnv): IcsWatchConfig {
 function isTruthyEnv(raw: string | undefined): boolean {
   if (!raw) return false;
   return ["1", "true", "yes", "on"].includes(raw.trim().toLowerCase());
+}
+
+/** 状态键的分隔符是 "::"，源名里的冒号一律换掉，免得自己冒充分隔符。 */
+function colonFree(name: string): string {
+  return name.replace(/:/g, "_");
 }
 
 /**
@@ -517,6 +528,7 @@ export function resolveIcsOccurrences(
 // 轮询服务
 // ---------------------------------------------------------------------- //
 
+/** `feeds` 的键是「归属::源名」（旧数据是裸源名，加载时挂到默认账号下） */
 type IcsFeedState = { materialized: Record<string, string> };
 type IcsWatchPersistedState = { version: 1; feeds: Record<string, IcsFeedState> };
 
@@ -563,6 +575,7 @@ export class IcsSubscriptionService {
   private feedStatus = new Map<string, { lastSyncAt: string | null; lastError: string | null; eventCount: number }>();
   /** 最近解析出的窗口内事件（外部信源收编读取口用） */
   private readonly recentEvents: Array<{
+    actorId: string;
     feed: string;
     key: string;
     summary: string;
@@ -590,22 +603,70 @@ export class IcsSubscriptionService {
     this.fetchImpl = deps.fetchImpl ?? fetch;
     this.now = deps.now ?? (() => new Date());
     this.state = readJson<IcsWatchPersistedState>(this.statePath, { version: 1, feeds: {} });
+    this.migrateLegacyStateKeys();
     this.userFeeds = readJson<{ version: 1; feeds: IcsFeedConfig[] }>(this.feedsPath, {
       version: 1,
       feeds: [],
     }).feeds.filter((f) => f && typeof f.url === "string" && typeof f.name === "string");
   }
 
-  /** 生效的订阅源 = 环境变量配置 + 用户自助添加（按 URL 去重，env 优先）。 */
+  /** 订阅源归属：自助添加时记下的是添加者，环境变量配置的落到部署方默认账号。 */
+  private actorOf(feed: IcsFeedConfig): string {
+    return feed.actorId?.trim() || this.config.actorId;
+  }
+
+  /**
+   * 运行时与落盘状态的复合键 =「归属::源名」。
+   *
+   * 源名只在单个账号内唯一（两个日历同用 outlook.com 域名会同名），跨账号必须
+   * 再切一刀：否则 A 的物化映射会被 B 的 diff 当成自己的，一轮「源里消失」就把
+   * 对方刚建的日程全软取消掉。归属段过 sanitizeActorKey（落盘键的现行净化规则），
+   * 源名只把冒号换成下划线——中文名要留着可读，也别让 "a::b" 这种名字冒充分隔符。
+   */
+  private keyOf(feed: IcsFeedConfig): string {
+    return `${sanitizeActorKey(this.actorOf(feed))}::${colonFree(feed.name)}`;
+  }
+
+  /** 旧 state.json 的键是裸源名（那时全站只有一个归属）：加载时一次性挂到默认账号下。 */
+  private migrateLegacyStateKeys(): void {
+    const legacyOwner = `${sanitizeActorKey(this.config.actorId)}::`;
+    let moved = 0;
+    for (const name of Object.keys(this.state.feeds)) {
+      if (name.includes("::")) continue;
+      const legacy = this.state.feeds[name]!;
+      delete this.state.feeds[name];
+      const target = `${legacyOwner}${colonFree(name)}`;
+      if (!this.state.feeds[target]) this.state.feeds[target] = legacy;
+      moved += 1;
+    }
+    if (moved > 0) writeJson(this.statePath, this.state);
+  }
+
+  /** 生效的订阅源 = 环境变量配置 + 用户自助添加（同一归属下按 URL 去重，env 优先）。 */
   private allFeeds(): IcsFeedConfig[] {
     const seen = new Set<string>();
     const out: IcsFeedConfig[] = [];
     for (const feed of [...this.config.feeds, ...this.userFeeds]) {
-      if (seen.has(feed.url)) continue;
-      seen.add(feed.url);
+      const id = `${sanitizeActorKey(this.actorOf(feed))}::${feed.url}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
       out.push(feed);
     }
     return out;
+  }
+
+  /** 某个账号生效的订阅源——跨账号既看不到也改不动。 */
+  private feedsOf(actorId: string): IcsFeedConfig[] {
+    return this.allFeeds().filter((f) => this.actorOf(f) === actorId);
+  }
+
+  /** 源名是状态键的一部分：同一账号内重名会让两个源的物化映射互相覆盖。 */
+  private uniqueFeedName(actorId: string, wanted: string): string {
+    const taken = new Set(this.feedsOf(actorId).map((f) => f.name));
+    if (!taken.has(wanted)) return wanted;
+    let n = 2;
+    while (taken.has(`${wanted} (${n})`)) n += 1;
+    return `${wanted} (${n})`;
   }
 
   /** 是否有源在生效（env 开启且有源，或用户自助加了源）。 */
@@ -620,7 +681,7 @@ export class IcsSubscriptionService {
       );
       return;
     }
-    for (const feed of this.allFeeds()) this.ensureFeedState(feed.name);
+    for (const feed of this.allFeeds()) this.ensureFeedState(this.keyOf(feed));
     // 启动即拉第一轮（日历订阅首接就该看到存量），之后按间隔轮询
     void this.pollAll().catch(() => {}).finally(() => this.scheduleNext());
   }
@@ -632,13 +693,18 @@ export class IcsSubscriptionService {
     }
   }
 
-  status(): IcsWatchStatus {
+  /**
+   * @param actorId 传了就只列这个账号的订阅源（对外口径）；不传是给启动日志/运维
+   *                看全站，不对客户端暴露。
+   */
+  status(actorId?: string): IcsWatchStatus {
+    const feeds = actorId ? this.feedsOf(actorId) : this.allFeeds();
     return {
       enabled: this.isActive(),
       pollSec: this.config.pollSec,
       lookaheadDays: this.config.lookaheadDays,
-      feeds: this.allFeeds().map((feed) => {
-        const st = this.feedStatus.get(feed.name);
+      feeds: feeds.map((feed) => {
+        const st = this.feedStatus.get(this.keyOf(feed));
         return {
           name: feed.name,
           url: feed.url,
@@ -661,16 +727,21 @@ export class IcsSubscriptionService {
    *   - 拉取失败（404/超时/内容不是日历）→ 也返回 error，但不落盘，
    *     免得用户留一个永远失败的源在系统里
    */
-  async addFeed(input: { name?: string; url: string }): Promise<{
+  async addFeed(input: {
+    name?: string;
+    url: string;
+    actorId?: string;
+  }): Promise<{
     ok: boolean;
     feed?: IcsFeedConfig;
     imported?: number;
     error?: string;
   }> {
+    const actorId = input.actorId?.trim() || this.config.actorId;
     const checked = validateIcsFeedUrl(input.url);
     if (!checked.ok) return { ok: false, error: checked.error };
 
-    const existing = this.allFeeds().find((f) => f.url === checked.url);
+    const existing = this.feedsOf(actorId).find((f) => f.url === checked.url);
     if (existing) {
       // 已经在（env 或用户）里：不重复加，但顺手拉一次，让用户看到当前状态
       const imported = await this.pollFeed(existing).catch(() => 0);
@@ -678,8 +749,9 @@ export class IcsSubscriptionService {
     }
 
     const feed: IcsFeedConfig = {
-      name: (input.name ?? "").trim() || safeFeedName(checked.url),
+      name: this.uniqueFeedName(actorId, (input.name ?? "").trim() || safeFeedName(checked.url)),
       url: checked.url,
+      actorId,
     };
 
     let imported: number;
@@ -694,18 +766,29 @@ export class IcsSubscriptionService {
 
     this.userFeeds = [...this.userFeeds, feed];
     this.persistUserFeeds();
-    this.ensureFeedState(feed.name);
+    this.ensureFeedState(this.keyOf(feed));
     // 之前可能因为"没有源"而没启动轮询，加完要接上
     if (!this.timer) void this.pollAll().catch(() => {}).finally(() => this.scheduleNext());
     return { ok: true, feed, imported };
   }
 
-  /** 删订阅源。只删用户自助加的那些；环境变量配置的删不掉（那是部署方的）。 */
-  removeFeed(nameOrUrl: string): { ok: boolean; removed: boolean; error?: string } {
+  /**
+   * 删订阅源。只删「这个账号自己加的」那些：环境变量配置的删不掉（那是部署方的），
+   * 别人加的按「没有这个订阅源」处理——名字对得上不代表有权删。
+   */
+  removeFeed(
+    nameOrUrl: string,
+    actorId?: string,
+  ): { ok: boolean; removed: boolean; error?: string } {
     const target = nameOrUrl.trim();
-    const idx = this.userFeeds.findIndex((f) => f.name === target || f.url === target);
+    const owner = actorId?.trim() || this.config.actorId;
+    const idx = this.userFeeds.findIndex(
+      (f) => this.actorOf(f) === owner && (f.name === target || f.url === target),
+    );
     if (idx < 0) {
-      const fromEnv = this.config.feeds.some((f) => f.name === target || f.url === target);
+      const fromEnv = this.config.feeds.some(
+        (f) => this.actorOf(f) === owner && (f.name === target || f.url === target),
+      );
       return {
         ok: false,
         removed: false,
@@ -716,7 +799,7 @@ export class IcsSubscriptionService {
     }
     const [removedFeed] = this.userFeeds.splice(idx, 1);
     this.persistUserFeeds();
-    this.feedStatus.delete(removedFeed.name);
+    this.feedStatus.delete(this.keyOf(removedFeed));
     return { ok: true, removed: true };
   }
 
@@ -724,11 +807,11 @@ export class IcsSubscriptionService {
     writeJson(this.feedsPath, { version: 1, feeds: this.userFeeds });
   }
 
-  private ensureFeedState(name: string): IcsFeedState {
-    const existing = this.state.feeds[name];
+  private ensureFeedState(key: string): IcsFeedState {
+    const existing = this.state.feeds[key];
     if (existing) return existing;
     const fresh: IcsFeedState = { materialized: {} };
-    this.state.feeds[name] = fresh;
+    this.state.feeds[key] = fresh;
     return fresh;
   }
 
@@ -737,6 +820,7 @@ export class IcsSubscriptionService {
    * 供 IcsSensor 转成 Signal 进统一采集层。不发起新的网络请求。
    */
   fetchEventsSince(since: number): Array<{
+    actorId: string;
     feed: string;
     key: string;
     summary: string;
@@ -750,6 +834,7 @@ export class IcsSubscriptionService {
 
   /** 记录最近解析事件（容量封顶防膨胀） */
   private rememberRecent(
+    actorId: string,
     feed: string,
     occurrences: Array<{ key: string; summary: string; location?: string | null; startMs: number; allDay: boolean; durationMinutes?: number | null }>,
     windowStartMs: number,
@@ -757,6 +842,7 @@ export class IcsSubscriptionService {
     for (const occ of occurrences) {
       if (occ.startMs < windowStartMs) continue;
       this.recentEvents.push({
+        actorId,
         feed,
         key: occ.key,
         summary: occ.summary,
@@ -790,7 +876,7 @@ export class IcsSubscriptionService {
           changed = changed || diff > 0;
         } catch (err) {
           const message = err instanceof Error ? err.message : String(err);
-          const st = this.ensureFeedStatus(feed.name);
+          const st = this.ensureFeedStatus(this.keyOf(feed));
           st.lastError = message;
           console.warn(`[ics-sub] 订阅「${feed.name}」拉取失败（下轮重试）:`, message);
         }
@@ -801,11 +887,11 @@ export class IcsSubscriptionService {
     }
   }
 
-  private ensureFeedStatus(name: string) {
-    let st = this.feedStatus.get(name);
+  private ensureFeedStatus(key: string) {
+    let st = this.feedStatus.get(key);
     if (!st) {
       st = { lastSyncAt: null, lastError: null, eventCount: 0 };
-      this.feedStatus.set(name, st);
+      this.feedStatus.set(key, st);
     }
     return st;
   }
@@ -829,7 +915,7 @@ export class IcsSubscriptionService {
     const events = parseIcsCalendar(text);
     const occurrences = resolveIcsOccurrences(events, windowStartMs, windowEndMs);
 
-    const feedState = this.ensureFeedState(feed.name);
+    const feedState = this.ensureFeedState(this.keyOf(feed));
     const materialized = feedState.materialized;
     const seen = new Set(occurrences.map((o) => o.key));
     let created = 0;
@@ -857,7 +943,7 @@ export class IcsSubscriptionService {
         continue;
       }
       const task = await this.tasks.createTask({
-        sessionId: this.config.actorId,
+        sessionId: this.actorOf(feed),
         title: `【日历·${feed.name}】${occ.summary}`,
         shortTitle: occ.summary.slice(0, 12),
         description: `日历订阅「${feed.name}」自动导入${occ.location ? ` · ${occ.location}` : ""}`,
@@ -893,14 +979,14 @@ export class IcsSubscriptionService {
     }
     writeJson(this.statePath, this.state);
 
-    const st = this.ensureFeedStatus(feed.name);
+    const st = this.ensureFeedStatus(this.keyOf(feed));
     st.lastSyncAt = this.now().toISOString();
     st.lastError = null;
     st.eventCount = occurrences.length;
 
     // 收编读取口（2026-10-10）：把本轮解析出的窗口内事件留在环形缓冲，
     // 供 SensorKernel 的 IcsSensor 拉取（跨源汇聚用），不重复拉网络。
-    this.rememberRecent(feed.name, occurrences, windowStartMs);
+    this.rememberRecent(this.actorOf(feed), feed.name, occurrences, windowStartMs);
 
     const changed = created + updated + cancelled;
     if (changed > 0 && this.notify) {
@@ -909,7 +995,7 @@ export class IcsSubscriptionService {
       if (updated > 0) parts.push(`改期 ${updated} 条`);
       if (cancelled > 0) parts.push(`取消 ${cancelled} 条`);
       this.notify({
-        actorId: this.config.actorId,
+        actorId: this.actorOf(feed),
         kind: "life_reminder",
         importance: "medium",
         title: `日历「${feed.name}」${created > 0 && Object.keys(materialized).length === created ? "已接入" : "有更新"}`,
