@@ -43,6 +43,10 @@ let registryRef: WsConnectionRegistry | null = null;
 let currentManifest: UpdatePushManifest | null = null;
 let currentKey = "";
 let started = false;
+/** 停机用：置真后不再重连，并 abort 在途的 SSE 读——否则本进程握着自家事件流的
+ *  长连接，Fastify 的 app.close() 永远等不到这个请求结束，停服拖到 SIGKILL。 */
+let stopping = false;
+let subscription: AbortController | null = null;
 
 /** 订阅端自身关心的清单分发版（UPDATE_MANIFEST_EDITION，未配置 = 主清单事件） */
 const WANT_EDITION: string | null = process.env.UPDATE_MANIFEST_EDITION?.trim() || null;
@@ -94,6 +98,9 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** 控制面按口令拒绝：重连不会自愈，别再每 3 秒敲一次门（公网订阅方曾这样一天刷出上万条 403）。 */
+class ManifestSubscriptionRejected extends Error {}
+
 /** 解析一帧 SSE data（JSON {edition, manifest}），edition 不匹配自身配置则忽略 */
 function handleEventData(raw: string): void {
   let parsed: { edition?: string | null; manifest?: UpdatePushManifest };
@@ -112,7 +119,11 @@ function handleEventData(raw: string): void {
 async function consumeEventStream(target: { url: string; token: string }): Promise<void> {
   const res = await fetch(target.url, {
     headers: { accept: "text/event-stream", [MANIFEST_EVENT_TOKEN_HEADER]: target.token },
+    signal: subscription?.signal,
   });
+  if (res.status === 401 || res.status === 403) {
+    throw new ManifestSubscriptionRejected(`清单事件流被拒绝（HTTP ${res.status}）`);
+  }
   if (!res.ok || !res.body) throw new Error(`event stream HTTP ${res.status}`);
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -137,11 +148,18 @@ async function consumeEventStream(target: { url: string; token: string }): Promi
 }
 
 async function connectLoop(target: { url: string; token: string }): Promise<void> {
-  for (;;) {
+  while (!stopping) {
     try {
       await consumeEventStream(target);
-    } catch {
-      // 断线静默（fail-open）：重连后控制面全量重推，漏掉的变化自动校准
+    } catch (err) {
+      if (stopping) break; // 停机 abort 打断在途读，属正常收尾
+      if (err instanceof ManifestSubscriptionRejected) {
+        console.warn(
+          `[update-pusher] ${err.message}，订阅终止——核对 MANIFEST_EVENT_TOKEN 与 UPDATE_MANIFEST_EVENT_TOKEN 是否同值、源地址是否为控制面`,
+        );
+        break;
+      }
+      // 其余断线静默（fail-open）：重连后控制面全量重推，漏掉的变化自动校准
     }
     await sleep(RECONNECT_DELAY_MS);
   }
@@ -150,10 +168,23 @@ async function connectLoop(target: { url: string; token: string }): Promise<void
 /** bootstrap 调用：订阅更新控制面的清单事件流（未配置 env 时不启用）。 */
 export function startClientUpdatePusher(registry: WsConnectionRegistry): void {
   const target = subscribeTarget();
-  if (!target || started) return; // 幂等
+  if (!target || (started && !stopping)) return; // 幂等
   started = true;
+  stopping = false;
   registryRef = registry;
+  subscription = new AbortController();
   void connectLoop(target);
+}
+
+/**
+ * 停机调用：终止订阅循环并 abort 在途的 SSE 读。缺这一步时，本进程既是事件流的
+ * 服务端又是客户端，app.close() 会一直等自己那条永不结束的请求，停服拖满
+ * TimeoutStopSec 后被 SIGKILL。
+ */
+export function stopClientUpdatePusher(): void {
+  stopping = true;
+  subscription?.abort();
+  subscription = null;
 }
 
 /**

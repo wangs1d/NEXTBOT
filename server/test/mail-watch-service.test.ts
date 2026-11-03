@@ -418,6 +418,131 @@ test("MAIL_WATCH_FILTER_PROMO=0 关闭过滤：营销邮件恢复落库与回调
 });
 
 // ---------------------------------------------------------------------- //
+// 系统通知过滤（noise）：机器发件人默认不进消息中心，"关于用户的"照常放行
+// ---------------------------------------------------------------------- //
+
+test("系统通知识别：GitHub/Autodesk 等机器发件人未命中重要规则 → noise", () => {
+  // GitHub 通知（用户截图里的噪音来源）
+  const github = classifyMailImportance({
+    from: "GitHub <notifications@github.com>",
+    subject: "[GitHub] Your pull request #42 was approved",
+    textSnippet: "CI passed. View it on GitHub or unsubscribe.",
+  });
+  assert.equal(github.importance, "noise");
+  assert.match(github.reasons[0]!, /machine_sender/);
+
+  // Autodesk 授权通知
+  const autodesk = classifyMailImportance({
+    from: "no-reply@autodesk.com",
+    subject: "Your license will expire in 30 days",
+    textSnippet: "",
+  });
+  assert.equal(autodesk.importance, "noise");
+
+  // alerts@/updates@ 等角色地址同样拦
+  assert.equal(classifyMailImportance({ from: "alerts@monitor.io", subject: "Uptime report", textSnippet: "" }).importance, "noise");
+
+  // 真人账号（词边界保护）：noreply123@ / wang.ge@ 不是机器角色，不拦
+  assert.equal(classifyMailImportance({ from: "noreply123@example.com", subject: "嗨", textSnippet: "" }).importance, "normal");
+  assert.equal(classifyMailImportance({ from: "wang.ge@example.com", subject: "嗨", textSnippet: "" }).importance, "normal");
+});
+
+test("误杀保护：机器发件人的出票/账单/验证码邮件先被重要规则救回 → high 而非 noise", () => {
+  // 携程出票（no-reply 发件人 + 主题命中机票规则）
+  const ctrip = classifyMailImportance({
+    from: "携程旅行 <no-reply@ctrip.com>",
+    subject: "出票成功：您的机票已出票",
+    textSnippet: "航班信息与票面详情见附件。",
+  });
+  assert.equal(ctrip.importance, "high");
+  assert.match(ctrip.reasons[0]!, /机票/);
+
+  // 酒店预订确认（预订/出票规则，2026-11-02 新增）
+  const hotel = classifyMailImportance({
+    from: "booking <noreply@hotel.cn>",
+    subject: "预订成功：亚朵酒店 11 月 5 日大床房",
+    textSnippet: "",
+  });
+  assert.equal(hotel.importance, "high");
+
+  // 电影票/演出票
+  const cinema = classifyMailImportance({
+    from: "maoyan <no-reply@maoyan.com>",
+    subject: "订单确认：电影票 2 张，今晚 20:30 场次",
+    textSnippet: "",
+  });
+  assert.equal(cinema.importance, "high");
+});
+
+test("服务级过滤：noise 邮件不回调 onNewMessage、不进 message-hub，UID 照常记录", async () => {
+  const persistPath = await tmpStatePath();
+  const mailbox = new FakeMailbox();
+  const received: Received[] = [];
+  const ingested: string[] = [];
+  const service = new MailWatchService({
+    clientFactory: () => mailbox.client,
+    onNewMessage: async (mail, c) => { received.push({ mail, classification: c }); },
+    messageHub: {
+      ingestInbound: async (input) => { ingested.push(input.externalMessageId ?? ""); },
+    },
+    env: {
+      MAIL_WATCH_ENABLED: "1",
+      MAIL_WATCH_HOST: "imap.example.com",
+      MAIL_WATCH_USER: "me@example.com",
+      MAIL_WATCH_PASS: "secret",
+    },
+    persistPath,
+  });
+  await service.pollOnce(); // 基线
+
+  mailbox.add(801, "GitHub <notifications@github.com>", "[GitHub] Build completed");
+  mailbox.add(802, "Autodesk <no-reply@autodesk.com>", "Your subscription receipt");
+  mailbox.add(803, "friend@example.com", "周末聚餐呀", "周六晚上老地方见？");
+  const result = await service.pollOnce();
+  assert.ok(result.ok && result.handled === 3, "系统通知也计入 handled（UID 消费掉不重判）");
+
+  assert.equal(received.length, 1, "只有真人来信触发 onNewMessage");
+  assert.equal(received[0]!.mail.uid, 803);
+  assert.equal(ingested.length, 1, "系统通知不进消息中心（不制造未读）");
+  assert.equal(service.status().noiseFiltered, 2);
+
+  // 下一轮不再重判（UID 已记入已处理集合）
+  const again = await service.pollOnce();
+  assert.ok(again.ok && again.handled === 0);
+  assert.equal(service.status().noiseFiltered, 2);
+});
+
+test("MAIL_WATCH_FILTER_NOISE=0 关闭过滤：系统通知回退为 normal，恢复落库与回调", async () => {
+  const persistPath = await tmpStatePath();
+  const mailbox = new FakeMailbox();
+  const received: Received[] = [];
+  const ingested: string[] = [];
+  const service = new MailWatchService({
+    clientFactory: () => mailbox.client,
+    onNewMessage: async (mail, c) => { received.push({ mail, classification: c }); },
+    messageHub: {
+      ingestInbound: async (input) => { ingested.push(input.externalMessageId ?? ""); },
+    },
+    env: {
+      MAIL_WATCH_ENABLED: "1",
+      MAIL_WATCH_HOST: "imap.example.com",
+      MAIL_WATCH_USER: "me@example.com",
+      MAIL_WATCH_PASS: "secret",
+      MAIL_WATCH_FILTER_NOISE: "0",
+    },
+    persistPath,
+  });
+  await service.pollOnce(); // 基线
+  mailbox.add(901, "GitHub <notifications@github.com>", "[GitHub] Build completed");
+  const result = await service.pollOnce();
+  assert.ok(result.ok && result.handled === 1);
+  assert.equal(received.length, 1);
+  assert.equal(received[0]!.classification.importance, "normal", "关闭过滤后回退为 normal（无关键词命中）");
+  assert.equal(ingested.length, 1);
+  assert.equal(service.status().noiseFiltered, 0);
+});
+
+// ---------------------------------------------------------------------- //
 // 标记已读 / 生命周期 / 诚实失败
 // ---------------------------------------------------------------------- //
 

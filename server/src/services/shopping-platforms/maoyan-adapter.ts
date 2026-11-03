@@ -21,6 +21,7 @@ import {
  */
 export class MaoyanAdapter implements ShoppingPlatformAdapter {
   readonly platform = "maoyan";
+  readonly category = "ticketing" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

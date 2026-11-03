@@ -20,6 +20,14 @@ export interface BrowserHumanHandoffInput {
   goal?: string;
   /** 第二步文案（默认「继续原来的任务」；购物等可传「继续抓取报价」） */
   continueStep?: string;
+  /**
+   * 自动检测配置（2026-11-02 用户拍板：handoff 不要求用户点按钮）。
+   * 传入后 checkMode=probe：TaskPlanProbeRunner 按 probeGapMs 轮询探测工具，
+   * 探测到「墙已清除」（expect 命中）即自动置 done 并起受控续跑——用户在
+   * 前台完成登录/验证就行，不用回聊天里点任何东西。`我已完成` 按钮保留
+   * 作兜底（自动检测漏网时用户仍可手动收回）。
+   */
+  probe?: { tool: string; args?: Record<string, unknown>; expect?: string; gapMs?: number };
 }
 
 export type BrowserHumanHandoffResult =
@@ -64,17 +72,30 @@ export function requestBrowserHumanHandoff(
   if (!written.ok) return { ok: false, error: written.error };
 
   const step = written.plan.steps[0];
-  const instruction =
-    reason === "login"
+  const autoDetect = input.probe != null;
+  const instruction = autoDetect
+    ? reason === "login"
+      ? `已在内置浏览器打开${label}的页面并弹出登录框：请你在前台页面完成扫码或账号登录（我不会接触你的账号密码）。我会自动检测登录状态——检测到登录成功就自动继续：${continueStep}，你不需要回来点任何按钮。若等久了也可点「我已完成」提醒我。`
+      : `${label}需要完成安全验证（滑块/验证码），页面已停在前台：请你在页面上完成验证。我会自动检测——验证通过就自动继续：${continueStep}，你不需要回来点任何按钮。若等久了也可点「我已完成」提醒我。`
+    : reason === "login"
       ? `在内置浏览器里登录${label}（页面已经打开），登录完点「我已完成」（或回我一句“好了”），我接着继续：${continueStep}。`
       : `${label}需要你本人完成安全验证（滑块/验证码），页面已经停在那里，` +
         `验证完点「我已完成」（或回我一句“好了”），我接着继续：${continueStep}。`;
+  const probe = input.probe
+    ? {
+        tool: input.probe.tool,
+        ...(input.probe.args ? { args: input.probe.args } : {}),
+        ...(input.probe.expect ? { expect: input.probe.expect } : {}),
+      }
+    : undefined;
   const set = store.setStatus(written.plan.sessionId, step.id, "awaiting_confirm", undefined, {
     by: "agent",
     handoff: {
       instruction,
       actions: [{ id: "done", label: "我已完成" }],
-      checkMode: "user_confirm",
+      checkMode: autoDetect ? "probe" : "user_confirm",
+      ...(probe ? { probe } : {}),
+      ...(input.probe?.gapMs ? { probeGapMs: input.probe.gapMs } : {}),
     },
   });
   if (!set.ok) return { ok: false, error: set.error };

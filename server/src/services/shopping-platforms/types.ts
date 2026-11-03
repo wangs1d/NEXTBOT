@@ -71,6 +71,9 @@ export interface CancelResult {
   retryable?: boolean;
 }
 
+/** 平台类目：商品比价的缺省平台只取 general（综合电商）。 */
+export type ShoppingPlatformCategory = "general" | "local-life" | "ticketing";
+
 /**
  * 购物平台适配器接口。
  *
@@ -83,6 +86,14 @@ export interface CancelResult {
 export interface ShoppingPlatformAdapter {
   /** 平台标识，与 `BROWSER_SESSION_SITES` 的 siteId 对齐 */
   platform: string;
+
+  /**
+   * 平台类目（必填）：比价缺省平台列表由此派生（listDefaultComparePlatforms），
+   * 不再维护独立的手写平台数组——新增 adapter 时漏标类目会直接编译失败。
+   * general=综合电商（淘宝/京东/拼多多…）；local-life=外卖闪购/到店（美团/点评）；
+   * ticketing=演出票务（大麦/猫眼）。
+   */
+  category: ShoppingPlatformCategory;
 
   /**
    * 生成搜索 URL。

@@ -102,7 +102,9 @@ export class TaskPlanProbeRunner {
 
       const throttleKey = `${plan.planId}:${blocking.id}`;
       const last = this.lastProbeAt.get(throttleKey) ?? 0;
-      if (now - last < this.minProbeGapMs) continue;
+      // 步级 gap 优先（登录墙这类「用户几十秒做完」的场景要跟得上人），缺省用全局 5min
+      const gapMs = Math.max(5_000, handoff.probeGapMs ?? this.minProbeGapMs);
+      if (now - last < gapMs) continue;
       this.lastProbeAt.set(throttleKey, now);
 
       let outcome: ProbeExecResult;

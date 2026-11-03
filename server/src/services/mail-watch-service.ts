@@ -34,6 +34,8 @@
  *                          MESSAGE_BRIDGE_DEFAULT_ACTOR_ID，再兜底 "default_user"
  *   MAIL_WATCH_VIP_SENDERS 逗号分隔的发件人白名单（命中即 critical），支持 @domain 整域
  *   MAIL_WATCH_FILTER_PROMO 默认 1：营销/广告邮件自动过滤（不推送、不进消息中心）；置 0 关闭
+ *   MAIL_WATCH_FILTER_NOISE  默认 1：系统通知邮件（no-reply/notifications 等机器发件人，
+ *                            且未命中重要规则）自动过滤（不推送、不进消息中心）；置 0 关闭
  */
 import { getDataDir } from "../config/data-dir.js";
 import { createHash } from "node:crypto";
@@ -48,8 +50,8 @@ import type { MessageHubService } from "./message-hub-service.js";
 // 类型
 // ---------------------------------------------------------------------- //
 
-/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal / promotional（营销邮件，过滤不推送）。 */
-export type MailImportance = "critical" | "high" | "normal" | "promotional";
+/** 邮件重要性：critical（VIP 直接置顶提醒）/ high（命中确定性重要场景）/ normal / promotional（营销邮件，过滤不推送）/ noise（系统通知，过滤不推送）。 */
+export type MailImportance = "critical" | "high" | "normal" | "promotional" | "noise";
 
 export interface MailWatchClassification {
   importance: MailImportance;
@@ -168,6 +170,8 @@ export interface MailWatchConfig {
   vipSenders: string[];
   /** 营销邮件过滤开关（默认开；MAIL_WATCH_FILTER_PROMO=0 显式关闭） */
   filterPromotional: boolean;
+  /** 系统通知邮件过滤开关（默认开；MAIL_WATCH_FILTER_NOISE=0 显式关闭） */
+  filterNoise: boolean;
 }
 
 export interface MailWatchStatus {
@@ -193,6 +197,10 @@ export interface MailWatchStatus {
   filterPromotional: boolean;
   /** 已累计过滤的营销邮件数（观测过滤是否生效） */
   promotionalFiltered: number;
+  /** 系统通知过滤开关状态（与 cfg.filterNoise 一致，供设置页展示） */
+  filterNoise: boolean;
+  /** 已累计过滤的系统通知邮件数（观测过滤是否生效） */
+  noiseFiltered: number;
   windowSize: number;
   lastPollAt: string | null;
   lastSuccessAt: string | null;
@@ -277,6 +285,8 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
       .filter(Boolean),
     // 营销过滤默认开启；仅显式 MAIL_WATCH_FILTER_PROMO=0/false 才关闭（误杀兜底阀门）
     filterPromotional: !["0", "false", "off", "no"].includes(env.MAIL_WATCH_FILTER_PROMO?.trim().toLowerCase() ?? ""),
+    // 系统通知过滤默认开启；仅显式 MAIL_WATCH_FILTER_NOISE=0/false 才关闭（误杀兜底阀门）
+    filterNoise: !["0", "false", "off", "no"].includes(env.MAIL_WATCH_FILTER_NOISE?.trim().toLowerCase() ?? ""),
   };
 }
 
@@ -307,6 +317,9 @@ const IMPORTANCE_RULES: ReadonlyArray<{
   // —— 出行类 ——
   { label: "机票/航班", pattern: /(机票|航班|登机牌|值机|出票|flight|boarding\s*pass)/i },
   { label: "火车票/车票", pattern: /(火车票|高铁|动车|车票|列车时刻|train\s*ticket)/i },
+  // —— 票务/预订类（2026-11-02 用户定稿：预订出票是"关于用户的"核心场景；
+  //     出票通知多由 no-reply 机器发件人发出，必须先于 noise 判定命中，防误拦）——
+  { label: "预订/出票确认", pattern: /(预订(?:成功|确认)|酒店订单|酒店确认|电影票|门票|演出票|景区票|票面信息|booking\s*(?:confirmed|confirmation)|reservation\s*(?:confirmed|confirmation)|e-?ticket)/i },
   // —— 生活服务类（国内快递驿站取件是高频重要事项）——
   { label: "快递/驿站取件", pattern: /(快递|包裹|取件码|驿站|parcel|pickup\s*code)/i },
   // —— 日程/预约类 ——
@@ -410,18 +423,46 @@ export function detectPromotionalMail(
 }
 
 /**
+ * 系统通知发件人角色特征（local part）：机器身份，不是真人（2026-11-02 用户定稿）。
+ * 国内邮箱的日常进信绝大多数是这类机器通知（GitHub/Autodesk/SaaS 状态信、云服务
+ * 回执……）——它们与营销邮件同样"与用户无关"，默认不进消息中心、不制造未读。
+ * 只认 local part 的完整词（词边界锚定）：noreply123 这类真人账号不会误伤。
+ * 注意：机器发件人 ≠ 一定不重要——12306/携程/银行的出票、账单通知也常走
+ * no-reply，所以 noise 判定必须在 IMPORTANCE_RULES 全部未命中**之后**兜底。
+ */
+const NOISE_FROM_LOCAL_PATTERN =
+  /^(?:no[-_.]?reply|donotreply|do[-_.]?not[-_.]?reply|notifications?|notify|alerts?|updates?|auto[-_.]?reply|mailer-daemon|mdaemon|postmaster|bounce|newsletter|edm)(?:[._+-]|$)/i;
+
+/**
+ * 系统通知邮件识别（确定性规则）：发件人是机器角色地址即判 noise。
+ * 真人来信（个人邮箱、客服人工席位）不在此列，照常进入消息中心。
+ */
+export function detectNoiseMail(
+  mail: Pick<IncomingMail, "from">,
+): { noise: boolean; reason: string } {
+  const addr = extractEmailAddress(mail.from);
+  const local = addr.split("@")[0] ?? "";
+  if (NOISE_FROM_LOCAL_PATTERN.test(local)) {
+    return { noise: true, reason: "noise:machine_sender" };
+  }
+  return { noise: false, reason: "" };
+}
+
+/**
  * 邮件重要性分级：
  *   a) VIP 白名单命中 → "critical"（用户钦点的发件人，永远最高优先级，
  *      即便发的是营销邮件也照常提醒——白名单是用户的显式意志）；
  *   b) 营销/广告邮件识别命中且过滤开关开启 → "promotional"（不推送不落库）；
  *   c) 确定性关键词规则命中 → "high"（按 IMPORTANCE_RULES 顺序，命中第一条即返回）；
- *   d) 其余 → "normal"。
+ *   d) 系统通知发件人（no-reply/notifications 等机器身份）且过滤开关开启 →
+ *      "noise"（不推送不落库）。放在 high 之后：出票/账单类机器通知先被规则救回；
+ *   e) 其余（即真人来信）→ "normal"。
  * 返回 { importance, reasons[] }，reasons 记录命中来源便于解释与排障。
  */
 export function classifyMailImportance(
   mail: Pick<IncomingMail, "from" | "subject" | "textSnippet" | "source">,
   vipSenders: readonly string[] = [],
-  opts: { filterPromotional?: boolean } = {},
+  opts: { filterPromotional?: boolean; filterNoise?: boolean } = {},
 ): MailWatchClassification {
   const vipHit = matchesVipSender(mail.from ?? "", vipSenders);
   if (vipHit) {
@@ -442,6 +483,12 @@ export function classifyMailImportance(
     }
     if (fields.includes("text") && rule.pattern.test(text)) {
       return { importance: "high", reasons: [`rule:${rule.label}`, "field:text"] };
+    }
+  }
+  if (opts.filterNoise !== false) {
+    const noise = detectNoiseMail(mail);
+    if (noise.noise) {
+      return { importance: "noise", reasons: [noise.reason] };
     }
   }
   return { importance: "normal", reasons: [] };
@@ -852,6 +899,7 @@ export class MailWatchService {
   private pendingWake = false;
   private newMessagesHandled = 0;
   private promotionalFiltered = 0;
+  private noiseFiltered = 0;
   /**
    * 最近处理过的邮件环形缓冲（2026-10-10，供 SensorKernel 收编读取）：
    * `fetchNewSince(since)` 从这里取，不重连 IMAP。内核轮询内核水位，
@@ -974,6 +1022,8 @@ export class MailWatchService {
       vipSenderCount: this.cfg.vipSenders.length,
       filterPromotional: this.cfg.filterPromotional,
       promotionalFiltered: this.promotionalFiltered,
+      filterNoise: this.cfg.filterNoise,
+      noiseFiltered: this.noiseFiltered,
       windowSize: this.windowSize,
       lastPollAt: this.lastPollAt,
       lastSuccessAt: this.lastSuccessAt,
@@ -1101,21 +1151,25 @@ export class MailWatchService {
    * 可选 ingest 进 message-hub。回调/落库异常均吞掉记日志（监控链路故障不能
    * 反过来打断轮询主循环）；返回分级结果供调用方与测试断言。
    *
-   * 营销邮件（promotional）在此短路：不回调、不进消息中心——广告与用户无关，
-   * 自动过滤不推送（UID 照常记入已处理集合，不会反复重判）。VIP 白名单发的
-   * 营销邮件不受影响（classify 里 VIP 先于营销判定）。
+   * 营销（promotional）与系统通知（noise）在此短路：不回调、不进消息中心、
+   * 不进传感环形缓冲——两者都与用户无关，不制造未读、不触发主动链路
+   * （UID 照常记入已处理集合，不会反复重判）。VIP 白名单发的邮件不受影响
+   * （classify 里 VIP 先于一切判定）。
    */
   async handleIncoming(mail: IncomingMail): Promise<MailWatchClassification> {
     const classification = classifyMailImportance(mail, this.cfg.vipSenders, {
       filterPromotional: this.cfg.filterPromotional,
+      filterNoise: this.cfg.filterNoise,
     });
     this.newMessagesHandled += 1;
 
-    if (classification.importance === "promotional") {
-      this.promotionalFiltered += 1;
+    if (classification.importance === "promotional" || classification.importance === "noise") {
+      const isPromo = classification.importance === "promotional";
+      if (isPromo) this.promotionalFiltered += 1;
+      else this.noiseFiltered += 1;
       this.log(
         "info",
-        `营销邮件已过滤（${classification.reasons[0] ?? "promo"}，不推送不落库）：${extractEmailAddress(mail.from)}「${mail.subject}」`,
+        `${isPromo ? "营销邮件" : "系统通知"}已过滤（${classification.reasons[0] ?? "unknown"}，不推送不落库）：${extractEmailAddress(mail.from)}「${mail.subject}」`,
       );
       return classification;
     }

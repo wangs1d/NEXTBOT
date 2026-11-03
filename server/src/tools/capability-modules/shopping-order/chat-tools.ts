@@ -1,5 +1,8 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { listSupportedPlatforms } from "../../../services/shopping-platforms/index.js";
+import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "../../../services/browser-session-sites.js";
+
 /**
  * 购物/下单能力 —— ChatCompletionTool schema。
  *
@@ -42,7 +45,19 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - place / cancel 两阶段确认（5 分钟 TTL token）
  *   - 平台白名单 + 审计日志 + 本地订单落库
  */
-export const SHOPPING_PLATFORM_ENUM = ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"] as const;
+/**
+ * 平台能力清单从 adapter 注册表**派生**（单一事实源）：新增/删除 adapter 时
+ * 工具 schema 的 enum 自动跟随；没有 adapter 的平台（如 dianping）不会出现在
+ * enum 里——从 schema 层杜绝「模型调了必返回暂不支持」的幻觉调用。
+ */
+export const SHOPPING_PLATFORM_ENUM: string[] = listSupportedPlatforms();
+
+/** 平台语义对照（id=中文名）：label 取自 browser-session-sites，未收录回退 id。 */
+export function shoppingPlatformGlossary(): string {
+  return SHOPPING_PLATFORM_ENUM.map(
+    (p) => `${p}=${BROWSER_SESSION_SITES[p as BrowserSessionSiteId]?.label ?? p}`,
+  ).join(", ");
+}
 
 export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
   {
@@ -59,8 +74,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         "（已在内置浏览器打开页面，告诉用户去登录/验证并点「我已完成」）；普通没搜到或超时如实说明、可换关键词重试。\n" +
         "与 browser.fetch_page（只读读价）/ shopping.suggest（仅比价建议）的区别：" +
         "本工具为后续下单做准备，返回的商品列表可直接传给 shopping.order.place。\n" +
-        "已实现 adapter 的平台：taobao/tmall/jd/meituan/pdd/douyin/damai/maoyan；" +
-        "dianping 暂未实现 adapter，调用会返回「暂不支持」。\n" +
+        `已实现 adapter 的平台：${SHOPPING_PLATFORM_ENUM.join("/")}；枚举外的平台没有实现，调用会返回「暂不支持」。\n` +
         "品类建议：杂货/日用品/外卖用 meituan（或 jd 超市）；演唱会/话剧/演出票用 damai 或 maoyan" +
         "（实名制演出须用户先在其账号内添加观演人）。",
       parameters: {
@@ -68,10 +82,8 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
-            description:
-              "目标购物平台。taobao=淘宝, tmall=天猫, jd=京东, meituan=美团(外卖/闪购), " +
-              "pdd=拼多多, douyin=抖音商城, damai=大麦(演出票), maoyan=猫眼(演出票), dianping=大众点评。",
+            enum: SHOPPING_PLATFORM_ENUM,
+            description: `目标购物平台。${shoppingPlatformGlossary()}。`,
           },
           query: {
             type: "string",
@@ -124,7 +136,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
+            enum: SHOPPING_PLATFORM_ENUM,
             description: "目标购物平台。",
           },
           item: {
@@ -167,7 +179,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
+            enum: SHOPPING_PLATFORM_ENUM,
             description: "目标购物平台。",
           },
           orderId: {
@@ -195,7 +207,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
+            enum: SHOPPING_PLATFORM_ENUM,
             description: "目标购物平台。",
           },
           orderId: {
@@ -232,7 +244,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         properties: {
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "damai", "maoyan", "dianping"],
+            enum: SHOPPING_PLATFORM_ENUM,
             description: "按平台过滤（可选）。",
           },
           includeFinished: {

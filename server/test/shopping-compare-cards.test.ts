@@ -288,16 +288,24 @@ test("comparePrices：onCompareResult 抛异常不影响比价回执", async () 
   }
 });
 
-test("comparePrices：平台把页面拦到登录页 → 停在登录页交接，不再跑后续平台", async () => {
+test("comparePrices：平台把页面拦到登录页 → 面板留在登录页，其余平台改走无头继续取数", async () => {
   const dataDir = await mkdtemp(join(tmpdir(), "npc-"));
   const calls: string[] = [];
+  const visibleCalls: string[] = [];
   try {
     const service = new ShoppingCompareService({
       shoppingOrderService: {
         listSupportedPlatforms: () => ["jd", "pdd", "taobao"],
         canUseVisibleBrowser: () => true,
-        searchProduct: async (_ctx: unknown, platform: string) => {
+        searchProduct: async (
+          _ctx: unknown,
+          platform: string,
+          _query: unknown,
+          _opts: unknown,
+          gate: { preferHeadless?: boolean } = {},
+        ) => {
           calls.push(platform);
+          if (!gate.preferHeadless) visibleCalls.push(platform);
           if (platform === "pdd") {
             return { ok: false, error: "等待扫码登录超时（20s）", retryable: true, loginRequired: { platform: "pdd" } };
           }
@@ -312,9 +320,25 @@ test("comparePrices：平台把页面拦到登录页 → 停在登录页交接�
     const res = await service.comparePrices(makeCtx(), "红牛", { platforms: ["jd", "pdd", "taobao"] });
     assert.ok(res.ok);
     const typed = res as unknown as Record<string, unknown>;
-    assert.deepEqual(calls, ["jd", "pdd"], "登录交接后可见浏览器必须留在登录页，不再导航到下一个平台");
+    // 登录墙不再中断取数：后续平台回落无头通道继续跑（2026-11-02 行为变更，
+    // 修复「比价只拿到一家」的代码层根因），可见面板只停在登录页等交接。
+    assert.deepEqual(calls, ["jd", "pdd", "taobao"], "被墙平台之后其余平台仍要继续取数");
+    // jd 正常、pdd 首次尝试仍走可见通道（面板尚未被占用）；pdd 被墙后 taobao 必须走无头
+    assert.deepEqual(visibleCalls, ["jd", "pdd"], "登录墙后的平台必须走无头通道，不得把可见面板从登录页导航走");
     assert.deepEqual(typed.loginRequired, { platform: "pdd", label: "拼多多" });
     assert.ok(String(typed.summary).includes("拼多多需要登录"), `summary 要说明哪个平台在等登录：${typed.summary}`);
+    // handoff 链路必须保留：登录墙平台进一次交接（建等待步 + 回执带 instruction/doneAction）
+    const handoff = typed.handoff as { platforms: string[]; labels: string[]; reason: string; instruction: string; doneAction: string };
+    assert.ok(handoff, "登录墙必须产出 handoff（交人补价），不能静默放弃");
+    assert.deepEqual(handoff.platforms, ["pdd"]);
+    assert.deepEqual(handoff.labels, ["拼多多"]);
+    assert.equal(handoff.reason, "login");
+    assert.ok(handoff.instruction.includes("登录") && handoff.instruction.includes("我已完成"), `交接指引要可执行：${handoff.instruction}`);
+    assert.equal(handoff.doneAction, "我已完成");
+    // 被墙平台之后的平台照常出报价（淘宝走无头取到数）
+    const groups = typed.groups as Array<{ offers: Array<{ platform: string }> }>;
+    const groupPlatforms = groups.flatMap((g) => g.offers.map((o) => o.platform));
+    assert.ok(groupPlatforms.includes("taobao"), `淘宝报价不应因拼多多登录墙丢失：${JSON.stringify(groupPlatforms)}`);
     await service.flush();
   } finally {
     await rm(dataDir, { recursive: true, force: true });

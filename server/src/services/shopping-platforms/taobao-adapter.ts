@@ -21,6 +21,7 @@ import {
  */
 export class TaobaoAdapter implements ShoppingPlatformAdapter {
   readonly platform: string = "taobao";
+  readonly category = "general" as const;
 
   searchUrl(query: string, filters?: SearchFilters): string {
     const q = encodeURIComponent(query);
@@ -57,7 +58,7 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
             '[data-spm="dlist"]',
           ];
           const seen = new Set<string>();
-          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
+          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string; image?: string }> = [];
           for (const sel of selectors) {
             const nodes = document.querySelectorAll(sel);
             if (nodes.length === 0) continue;
@@ -82,12 +83,27 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
               const priceMatch = /\d[\d,]*(?:\.\d+)?/.exec(
                 String((priceEl as HTMLElement | null)?.innerText ?? ""),
               );
+              // 主图：卡内首个 http(s) 真图（跳过 svg/占位），懒加载属性兜底
+              let image: string | undefined;
+              const imgs = node.querySelectorAll("img");
+              for (const imgEl of Array.from(imgs)) {
+                const u =
+                  imgEl.getAttribute("src") ||
+                  imgEl.getAttribute("data-src") ||
+                  imgEl.getAttribute("data-lazy-img") ||
+                  "";
+                if (/^https?:\/\//.test(u) && !/\.svg(\?|$)/i.test(u)) {
+                  image = u;
+                  break;
+                }
+              }
               out.push({
                 title,
                 price: priceMatch ? priceMatch[0].replace(/,/g, "") : undefined,
                 url,
                 shop: String((shopEl as HTMLElement | null)?.innerText ?? "").trim() || undefined,
                 itemId: itemIdMatch?.[1],
+                image,
               });
             }
             if (out.length >= maxLimit) break;
@@ -140,12 +156,26 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
               const priceMatch2 = /\d[\d,]*(?:\.\d+)?/.exec(
                 String(priceEl2?.innerText ?? priceEl2?.textContent ?? ""),
               );
+              let image2: string | undefined;
+              const imgs2 = scope.querySelectorAll("img");
+              for (const imgEl2 of Array.from(imgs2)) {
+                const u2 =
+                  imgEl2.getAttribute("src") ||
+                  imgEl2.getAttribute("data-src") ||
+                  imgEl2.getAttribute("data-lazy-img") ||
+                  "";
+                if (/^https?:\/\//.test(u2) && !/\.svg(\?|$)/i.test(u2)) {
+                  image2 = u2;
+                  break;
+                }
+              }
               out.push({
                 title: title2,
                 price: priceMatch2 ? priceMatch2[0].replace(/,/g, "") : undefined,
                 url: (link as HTMLAnchorElement).href,
                 shop: String(shopEl2?.innerText ?? "").trim() || undefined,
                 itemId: itemIdMatch2?.[1],
+                image: image2,
               });
             }
           }
@@ -161,6 +191,7 @@ export class TaobaoAdapter implements ShoppingPlatformAdapter {
         url: r.url,
         shop: r.shop,
         itemId: r.itemId,
+        ...(r.image ? { imageUrl: r.image } : {}),
       }));
     } catch (err) {
       console.log("[TaobaoAdapter] extractProducts 异常:", err instanceof Error ? err.message : err);

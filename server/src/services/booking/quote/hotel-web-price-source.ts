@@ -14,7 +14,7 @@
  */
 
 import type { ToolContext } from "../../../tools/tool-registry.js";
-import { callFlyAi, strOf, isTrialMode, type FlyAiRunner } from "./flyai-quote-source.js";
+import { callFlyAi, flyAiHotelSearchArgs, isTrialMode, strOf, type FlyAiRunner } from "./flyai-quote-source.js";
 import type { BrowserRunner } from "./browser-quote-source.js";
 import type { QuoteRequest, QuoteSource, QuoteSourceResult, TravelQuote } from "./quote-source.js";
 
@@ -75,9 +75,11 @@ export function parseFliggyHotelDetailPrice(text: string, hotelName: string): Pa
 }
 
 function sleep(ms: number): Promise<void> {
+  // 不 unref：本定时器永远被 await，必须持有事件循环直到兑现——
+  // unref 会让「sleep 是唯一挂起工作时」事件循环提前排空，await 永远悬空
+  // （Node 22 测试环境确定性复现：进程收摊、用例被取消）。
   return new Promise((r) => {
-    const t = setTimeout(r, ms);
-    t.unref?.();
+    setTimeout(r, ms);
   });
 }
 
@@ -94,10 +96,9 @@ export function createFliggyHotelWebSource(deps: FliggyHotelWebSourceDeps): Quot
       const city = (req.city || req.to || "").trim();
       if (!city) return { ok: true, quotes: [], note: `${SOURCE_LABEL} 不处理该查询（缺 city）` };
 
-      const args = ["search-hotel", "--dest-name", city, "--sort", "price_asc"];
-      if (req.checkInDate) args.push("--check-in-date", req.checkInDate.slice(0, 10));
-      if (req.checkOutDate) args.push("--check-out-date", req.checkOutDate.slice(0, 10));
-      if (req.hotelName) args.push("--key-words", req.hotelName);
+      // 与 API 源共用动态拼参：用户要的筛选（靠海/价格区间/星级…）原样透传，
+      // 名单按同一筛选条件取——补价补的就是用户要的那批酒店
+      const args = flyAiHotelSearchArgs(req);
 
       const res = await callFlyAi(deps.flyai, args);
       if ("error" in res) return { ok: false, error: `${SOURCE_LABEL}：${res.error}` };

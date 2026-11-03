@@ -31,6 +31,30 @@ export type QuoteType = "flight" | "train" | "hotel";
  */
 export type QuotePriceSource = "api" | "database" | "list" | "estimated" | "scraped";
 
+/**
+ * 酒店搜索筛选（全部来自用户当次表达，由 LLM 从原话动态提取——
+ * 用户没提的字段必须留空，源侧不做任何写死假设）。
+ * 字段口径与 flyai search-hotel CLI 参数一一对应。
+ */
+export interface HotelSearchFilters {
+  /** 位置/特色关键词（用户原话，如「靠海」「海景」「近地铁」） */
+  keywords?: string;
+  /** 商圈/地标（如「大东海」「亚龙湾」） */
+  poiName?: string;
+  /** 星级，1-5 逗号分隔（如「4,5」） */
+  hotelStars?: string;
+  /** 住宿类型：hotel / homestay / inn（逗号分隔） */
+  hotelTypes?: string;
+  /** 每晚最高价（CNY） */
+  maxPrice?: number;
+  /**
+   * 排序：price_asc / price_desc / rate_desc / distance_asc / no_rank。
+   * 用户表达出偏好（「便宜点」→ price_asc、「评分高」→ rate_desc）才填；
+   * 缺省 = no_rank（平台相关度），绝不默认按价格升序——那会把青旅顶到最前。
+   */
+  sort?: "price_asc" | "price_desc" | "rate_desc" | "distance_asc" | "no_rank";
+}
+
 /** 比价请求（聚合器入参，provider 从 BookingSearchQuery.params 组装）。 */
 export interface QuoteRequest {
   type: QuoteType;
@@ -50,8 +74,10 @@ export interface QuoteRequest {
   checkOutDate?: string;
   /** 酒店名（可选，有则定向） */
   hotelName?: string;
-  /** 酒店档次 */
+  /** 酒店档次（可选；仅用户明确表达档次时才填，缺省不假设） */
   tier?: "budget" | "mid" | "luxury";
+  /** 酒店动态筛选（来自用户当次表达；缺省=无筛选，源侧不写死任何条件） */
+  filters?: HotelSearchFilters;
   /** 座位/舱位偏好 */
   seat?: string;
   /** 用户提供的基准价（flight/train 兜底估算用） */

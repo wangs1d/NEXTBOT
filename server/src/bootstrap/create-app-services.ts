@@ -1003,6 +1003,8 @@ export async function createAppServices(
     reason: "login" | "captcha";
     goal?: string;
     continueStep?: string;
+    /** 自动检测配置（透传 requestBrowserHumanHandoff；见 browser-human-handoff.ts） */
+    probe?: { tool: string; args?: Record<string, unknown>; expect?: string; gapMs?: number };
   }) => {
     try {
       requestBrowserHumanHandoff(info);
@@ -1010,7 +1012,10 @@ export async function createAppServices(
       /* 交接失败只丢增强，工具结果里的指引照常返回 */
     }
   };
-  // 购物语义的薄包装（续跑步骤固定「继续抓取报价」）
+  // 购物语义的薄包装（续跑步骤固定「继续抓取报价」）。
+  // 2026-11-02 用户拍板：handoff 不要求用户点按钮——带 probe 配置走自动检测，
+  // TaskPlanProbeRunner 每 12s 窥视一次面板页（只读不导航），登录/验证一完成
+  // 就自动收回执行权续跑；「我已完成」按钮仅作兜底。
   const requestShoppingUserHandoff = (info: {
     actorId: string;
     sessionId: string;
@@ -1028,6 +1033,13 @@ export async function createAppServices(
           ? `登录${info.platformLabels.join("、")}后继续抓取报价`
           : `完成${info.platformLabels.join("、")}的安全验证后继续抓取报价`,
       continueStep: "继续抓取报价",
+      probe: {
+        tool: "shared_browser.panel_state",
+        args: { siteId: info.platforms[0] ?? "" },
+        // matches() 做序列化包含匹配：面板页不再被登录墙/验证码拦住 → blocked:false
+        expect: '"blocked":false',
+        gapMs: 12_000,
+      },
     });
   };
   const shoppingOrderService = new ShoppingOrderService({
@@ -6388,6 +6400,9 @@ export async function createAppServices(
     if (planStore) {
       const planProbeRunner = new TaskPlanProbeRunner({
         store: planStore,
+        // tick 15s：登录墙探测（步级 gap 12s）要跟得上用户扫码的速度；
+        // 其它 probe 步仍受 5min 步级 gap 约束，tick 提频只是扫描，不增外部调用。
+        intervalMs: 15_000,
         executeProbe: async ({ actorId, sessionId, tool, args }) => {
           const res = await toolRegistry.execute(tool, args ?? {}, {
             sessionId,

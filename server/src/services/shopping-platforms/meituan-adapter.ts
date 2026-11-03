@@ -21,6 +21,7 @@ import {
  */
 export class MeituanAdapter implements ShoppingPlatformAdapter {
   readonly platform = "meituan";
+  readonly category = "local-life" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);
@@ -39,7 +40,7 @@ export class MeituanAdapter implements ShoppingPlatformAdapter {
 
       const raw = await page.evaluate((maxLimit: number) => {
         const seen = new Set<string>();
-        const out: Array<{ title: string; price?: string; url?: string; shop?: string }> = [];
+        const out: Array<{ title: string; price?: string; url?: string; shop?: string; image?: string }> = [];
         const nodes = document.querySelectorAll("[class*='search-result'] a, .poi-item, [class*='product-item'], .item-card");
         for (const node of Array.from(nodes)) {
           if (out.length >= maxLimit) break;
@@ -49,10 +50,24 @@ export class MeituanAdapter implements ShoppingPlatformAdapter {
           const title = (titleEl?.innerText ?? "").trim();
           if (!title || seen.has(title)) continue;
           seen.add(title);
+          let image: string | undefined;
+          const imgs = node.querySelectorAll("img");
+          for (const imgEl of Array.from(imgs)) {
+            const u =
+              imgEl.getAttribute("src") ||
+              imgEl.getAttribute("data-src") ||
+              imgEl.getAttribute("data-lazy-img") ||
+              "";
+            if (/^https?:\/\//.test(u) && !/\.svg(\?|$)/i.test(u)) {
+              image = u;
+              break;
+            }
+          }
           out.push({
             title,
             price: (priceEl?.innerText ?? "").replace(/[^\d.]/g, "") || undefined,
             url: linkEl?.href ?? undefined,
+            image,
           });
         }
         return out;
@@ -64,6 +79,7 @@ export class MeituanAdapter implements ShoppingPlatformAdapter {
         currency: r.price ? "CNY" : undefined,
         url: r.url,
         shop: r.shop,
+        ...(r.image ? { imageUrl: r.image } : {}),
       }));
     } catch {
       return [];

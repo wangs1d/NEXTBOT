@@ -4,6 +4,8 @@ import * as THREE from "three";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { MODEL, dg2Scale } from "../constants/model-proportions";
 import { disableMeshRaycast } from "../utils/mesh-raycast";
+import { Dg2FaceScreen } from "./Dg2FaceScreen";
+import type { FaceExpression } from "./dg2-face/face-rig";
 
 const DEFAULT_MODEL_URL = `${import.meta.env.BASE_URL}models/DG2.glb`;
 const GLASS_RENDER_ORDER = 2;
@@ -16,6 +18,10 @@ interface DG2RobotModelProps {
   /** 无 Environment 贴图（桌宠本地灯光） */
   standaloneLighting?: boolean;
   opacity?: number;
+  /** 脸部表情（曲屏电子脸，默认开启） */
+  face?: boolean;
+  /** 当前表情，切换时由面部弹簧平滑过渡 */
+  expression?: FaceExpression;
 }
 
 function slotName(material: THREE.Material | THREE.Material[]): string {
@@ -30,6 +36,8 @@ export function DG2RobotModel({
   idleMotion = true,
   standaloneLighting = false,
   opacity = 1,
+  face = true,
+  expression,
 }: DG2RobotModelProps) {
   const groupRef = useRef<THREE.Group>(null);
   const shellMatsRef = useRef<THREE.MeshPhysicalMaterial[]>([]);
@@ -58,7 +66,7 @@ export function DG2RobotModel({
       side: THREE.FrontSide,
     });
     return { shellMaterial: shell, glassMaterial: glass };
-  }, []);
+  }, [standaloneLighting]);
 
   const model = useMemo(() => {
     const root = gltf.scene.clone(true);
@@ -70,15 +78,15 @@ export function DG2RobotModel({
       node.castShadow = true;
       node.receiveShadow = true;
 
-      if (slotName(node.material) !== "glass") {
-        const steel = shellMaterial.clone();
-        shellMatsRef.current.push(steel);
-        node.material = steel;
+      if (slotName(node.material) === "glass") {
+        node.material = glassMaterial;
+        node.renderOrder = GLASS_RENDER_ORDER;
         return;
       }
 
-      node.material = glassMaterial;
-      node.renderOrder = GLASS_RENDER_ORDER;
+      const steel = shellMaterial.clone();
+      shellMatsRef.current.push(steel);
+      node.material = steel;
     });
 
     disableMeshRaycast(root);
@@ -122,6 +130,7 @@ export function DG2RobotModel({
       position={[...MODEL.objOffset]}
     >
       <primitive object={model} />
+      {face ? <Dg2FaceScreen expression={expression ?? "focused"} /> : null}
     </group>
   );
 }

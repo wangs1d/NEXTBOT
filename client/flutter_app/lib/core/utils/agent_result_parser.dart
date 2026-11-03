@@ -363,9 +363,11 @@ class AgentResultPriceGroup {
     required this.platform,
     required this.title,
     this.priceCny,
+    this.platformLabel,
     this.shop,
     this.image,
     this.similar = false,
+    this.specTokens = const <String>[],
     this.offerCount = 1,
   });
 
@@ -373,16 +375,23 @@ class AgentResultPriceGroup {
       AgentResultPriceGroup(
         priceCny: (json["priceCny"] as num?)?.toDouble(),
         platform: json["platform"]?.toString() ?? "",
+        platformLabel: json["platformLabel"]?.toString(),
         title: json["title"]?.toString() ?? "",
         shop: json["shop"]?.toString(),
         image: json["image"]?.toString(),
         similar: json["similar"] == true,
+        specTokens: (json["specTokens"] as List<dynamic>? ?? const <dynamic>[])
+            .map((s) => s.toString())
+            .toList(growable: false),
         offerCount: (json["offerCount"] as num?)?.toInt() ?? 1,
       );
 
   /// 最低价（元）；抓取失败为 null（渲染「价格待查」）。
   final double? priceCny;
   final String platform;
+
+  /// 平台中文来源名（京东/淘宝/拼多多…）；缺省回退 [platform]。
+  final String? platformLabel;
   final String title;
   final String? shop;
   final String? image;
@@ -390,8 +399,15 @@ class AgentResultPriceGroup {
   /// 低置信同款标注。
   final bool similar;
 
+  /// 组规格 token（如 ["256g"]），渲染规格 chip（同规格可比性可视化）。
+  final List<String> specTokens;
+
   /// 组内报价数（>1 时渲染「等N家」）。
   final int offerCount;
+
+  /// 展示用来源名：中文平台名优先，回退 platform id。
+  String get sourceLabel =>
+      (platformLabel ?? "").isNotEmpty ? platformLabel! : platform;
 }
 
 /// price_compare 卡：整体结构化载荷（分组报价）。
@@ -646,10 +662,12 @@ class AgentResultData {
                 .map((AgentResultPriceGroup g) => <String, dynamic>{
                       if (g.priceCny != null) "priceCny": g.priceCny,
                       "platform": g.platform,
+                      if (g.platformLabel != null) "platformLabel": g.platformLabel,
                       "title": g.title,
                       if (g.shop != null) "shop": g.shop,
                       if (g.image != null) "image": g.image,
                       if (g.similar) "similar": true,
+                      if (g.specTokens.isNotEmpty) "specTokens": g.specTokens,
                       "offerCount": g.offerCount,
                     })
                 .toList(),

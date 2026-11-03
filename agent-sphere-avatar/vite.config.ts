@@ -28,6 +28,7 @@ export default defineConfig(({ mode }) => {
       rollupOptions: {
         input: {
           embed: resolve(__dirname, "embed.html"),
+          "face-debug": resolve(__dirname, "face-debug.html"),
           overlay: resolve(__dirname, "overlay.html"),
           "schedule-floating": resolve(__dirname, "schedule-floating.html"),
         },

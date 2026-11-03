@@ -41,6 +41,7 @@ import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
 import { initResourcePool } from "./services/resource-pool.js";
 import { initClusterRouter } from "./services/cluster-router.js";
 import { resolveEmbeddingEndpoint } from "./services/openai-embedding-client.js";
+import { stopClientUpdatePusher } from "./services/client-update-pusher.js";
 
 // server/.env + server/.env.local 已在 load-server-env.ts 模块加载时自动执行
 
@@ -232,6 +233,7 @@ const performShutdown = (): void => {
     },
   );
   services.webhookService.stop();
+  stopClientUpdatePusher();
   stopDesktopBridge();
   stopOpenClawModelSync();
   void devHttpsHandle?.close();

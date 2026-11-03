@@ -6,6 +6,7 @@ export type {
   QuoteType,
   QuotePriceSource,
   QuoteRequest,
+  HotelSearchFilters,
   TravelQuote,
   QuoteSourceResult,
   QuoteSource,
@@ -25,6 +26,7 @@ export {
   createFlyAiHotelSource,
   createFlyAiFlightSource,
   createDefaultFlyAiRunner,
+  flyAiHotelSearchArgs,
   type FlyAiRunner,
   type FlyAiRunResult,
 } from "./flyai-quote-source.js";

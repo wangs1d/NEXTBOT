@@ -25,6 +25,7 @@ import {
  */
 export class DamaiAdapter implements ShoppingPlatformAdapter {
   readonly platform = "damai";
+  readonly category = "ticketing" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

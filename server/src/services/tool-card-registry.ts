@@ -16,6 +16,7 @@
  * 卡 payload 与 AgentResultFormatter 的 AgentResultPayload 同构
  * （前端 agent_result_parser.dart / AgentResultCard 直接消费，无需前端改动）。
  */
+import { BROWSER_SESSION_SITES } from "./browser-session-sites.js";
 
 /** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
@@ -82,10 +83,14 @@ export interface ToolCardPayload {
     groups: Array<{
       priceCny: number | null;
       platform: string;
+      /** 平台中文来源名（京东/淘宝/拼多多…），缺省回退 platform id */
+      platformLabel?: string;
       title: string;
       shop?: string;
       image?: string;
       similar?: boolean;
+      /** 组规格 token（如 ["256g"]），卡片展示规格 chip 用 */
+      specTokens?: string[];
       offerCount: number;
     }>;
     bestIndex?: number | null;
@@ -561,6 +566,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   "shopping.compare.prices": (r) => {
     const groups = Array.isArray(r.groups) ? r.groups : [];
     if (groups.length === 0) return null;
+    // 平台中文来源名（注明来源要求）：BROWSER_SESSION_SITES 的 label，未收录回退 id
+    const labelOf = (p: string) =>
+      (BROWSER_SESSION_SITES as Record<string, { label: string } | undefined>)[p]?.label ?? p;
     const items: ToolCardItem[] = [];
     const priceGroups: NonNullable<ToolCardPayload["priceCompare"]>["groups"] = [];
     let shown = 0;
@@ -572,14 +580,18 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       const best = (offers[0] ?? {}) as Record<string, unknown>;
       const price = num(best.priceCny);
       const platform = str(best.platform);
+      const label = labelOf(platform);
       const title = str(best.title);
       const shop = str(best.shop);
       const image = str(best.imageUrl) || str(rec.imageUrl);
       const similar = rec.matchType === "similar";
+      const specTokens = Array.isArray(rec.specTokens)
+        ? rec.specTokens.filter((s): s is string => typeof s === "string" && !!s.trim()).slice(0, 3)
+        : [];
       const priceText = price != null ? `¥${price}` : "价格待查";
       const parts = [
         priceText,
-        `[${platform || "未知平台"}]`,
+        `[${label}]`,
         title.slice(0, 40),
         shop ? `（${shop.slice(0, 12)}）` : "",
         similar ? "（疑似同款）" : "",
@@ -593,21 +605,28 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       priceGroups.push({
         priceCny: price,
         platform: platform || "未知平台",
+        ...(label !== platform ? { platformLabel: label } : {}),
         title: title.slice(0, 60),
         ...(shop ? { shop: shop.slice(0, 12) } : {}),
         ...(image ? { image } : {}),
         ...(similar ? { similar: true } : {}),
+        ...(specTokens.length > 0 ? { specTokens } : {}),
         offerCount: offers.length,
       });
       shown += 1;
     }
     if (items.length === 0) return null;
     // footer 不再回显「最低价 ¥X 来自 平台」搜索源内容（与列表行重复，2026-10-28 移除），
-    // 仅保留实时抓取免责说明。
+    // 仅保留实时抓取免责说明；各组规格不一致（bestIndex=null）时补充说明，避免
+    // 用户把 256GB 与 512GB 的报价误读成同一规格的最低价比。
+    const bestIndex = typeof r.bestIndex === "number" ? r.bestIndex : null;
+    const footer = bestIndex == null && priceGroups.length > 1
+      ? "各组规格不一致（如容量/数量不同），仅列报价不作最低价结论 · 信息为实时抓取，以下单结算页为准"
+      : "信息为实时抓取，以下单结算页为准";
     return {
       title: `比价结果：${str(r.query)}`,
       items,
-      footer: "信息为实时抓取，以下单结算页为准",
+      footer,
       cardType: "price_compare",
       ...(priceGroups.length > 0
         ? {
@@ -615,7 +634,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
               query: str(r.query),
               groups: priceGroups,
               // 仅当各组同规格可比时才标最低价（bestIndex=null 客户端不打章）
-              bestIndex: typeof r.bestIndex === "number" ? r.bestIndex : null,
+              bestIndex,
             },
           }
         : {}),

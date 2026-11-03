@@ -145,6 +145,28 @@ export function registerSharedBrowserTools(
     createInvokeHandler(coordinator, "export_state", () => ({})),
   );
 
+  // 只读探测（handoff 自动检测专用，2026-11-02）：窥视当前面板页是否仍被
+  // 登录墙/验证码拦着——不导航、不抢面板槽位、不注入任何脚本。TaskPlanProbeRunner
+  // 按步级 gap 轮询它，命中「墙已清除」即自动收回执行权续跑（用户不用点按钮）。
+  registry.register("shared_browser.panel_state", async (input, context) => {
+    const gateway = deps.sharedBrowserCdpGateway;
+    if (!gateway) return { ok: false, error: "CDP 网关未装配", blocked: true };
+    const actorId = resolveActorId(context);
+    if (!coordinator.hasExecutor(actorId)) {
+      return { ok: false, error: "共用浏览器未连接", blocked: true };
+    }
+    const siteId = typeof input.siteId === "string" ? input.siteId.trim() : "";
+    const state = await gateway.peekPanelState(siteId);
+    if (!state.ok) return { ...state, blocked: true };
+    return {
+      ok: true,
+      url: state.url,
+      blocked: state.blocked === true,
+      ...(state.reason ? { reason: state.reason } : {}),
+      ...(state.evidence ? { evidence: state.evidence } : {}),
+    };
+  });
+
   registry.register(
     "shared_browser.trusted",
     // 可信输入（CDP 桥）：客户端开启调试端口且服务端总开关打开时，

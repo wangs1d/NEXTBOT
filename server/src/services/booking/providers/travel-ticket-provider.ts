@@ -139,6 +139,11 @@ export class TravelTicketProvider implements BookingProvider {
   ): QuoteRequest {
     if (type === "hotel") {
       const tierRaw = str(params, "tier");
+      const sortRaw = str(params, "sort");
+      const sort =
+        sortRaw === "price_asc" || sortRaw === "price_desc" || sortRaw === "rate_desc" || sortRaw === "distance_asc"
+          ? sortRaw
+          : undefined;
       return {
         type: "hotel",
         city: str(params, "city") || query.city || "",
@@ -146,7 +151,17 @@ export class TravelTicketProvider implements BookingProvider {
         hotelName: str(params, "hotelName") || str(params, "hotel") || undefined,
         checkInDate: str(params, "checkInDate") || str(params, "checkIn") || query.scheduleAt || "",
         checkOutDate: str(params, "checkOutDate") || str(params, "checkOut") || "",
-        tier: tierRaw === "budget" || tierRaw === "luxury" ? tierRaw : "mid",
+        // 档次只在用户明确表达时生效——通用查询不默认按 mid 收窄结果
+        ...(tierRaw === "budget" || tierRaw === "mid" || tierRaw === "luxury" ? { tier: tierRaw } : {}),
+        // 用户当次表达的筛选原样透传（靠海/商圈/星级/民宿/价格上限/排序），没提就是 undefined
+        filters: {
+          keywords: str(params, "keywords") || undefined,
+          poiName: str(params, "poiName") || undefined,
+          hotelStars: str(params, "hotelStars") || undefined,
+          hotelTypes: str(params, "hotelTypes") || undefined,
+          maxPrice: numOrNull(params, "maxPrice") ?? undefined,
+          ...(sort ? { sort } : {}),
+        },
       };
     }
     return {

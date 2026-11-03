@@ -36,3 +36,17 @@ export function getShoppingPlatformAdapter(platform: string): ShoppingPlatformAd
 export function listSupportedPlatforms(): string[] {
   return Object.keys(adapters);
 }
+
+/**
+ * 商品比价的缺省平台：按各 adapter 自报的 category 派生（general=综合电商），
+ * 保持注册顺序。本地生活（meituan 外卖闪购 / dianping 到店）与演出票务
+ * （damai / maoyan）不卖标准商品，不参与商品比价缺省——用户明确指定平台时
+ * 仍可传入任意已实现平台。
+ *
+ * 设计约定（单一事实源）：这里**不维护**手写平台数组——缺省列表由注册表 +
+ * adapter.category 推导；新增/删除 adapter 时只要类目标对，缺省列表自动跟随，
+ * 漏标类目直接编译失败（category 为必填字段）。
+ */
+export function listDefaultComparePlatforms(): string[] {
+  return Object.keys(adapters).filter((p) => adapters[p]!.category === "general");
+}

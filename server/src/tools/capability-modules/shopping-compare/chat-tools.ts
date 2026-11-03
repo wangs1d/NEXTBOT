@@ -1,5 +1,15 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
+import { listDefaultComparePlatforms, listSupportedPlatforms } from "../../../services/shopping-platforms/index.js";
+
+/**
+ * 平台 enum 从 adapter 注册表**派生**（单一事实源）：新增/删除 adapter 自动跟随，
+ * 没有 adapter 的平台不进 enum。缺省比价平台（general 类目）也由注册表派生，
+ * 此处仅用于 description 文案。
+ */
+const SUPPORTED_PLATFORMS: string[] = listSupportedPlatforms();
+const DEFAULT_COMPARE_TEXT = listDefaultComparePlatforms().join("/");
+
 /**
  * 购物比价能力 —— ChatCompletionTool schema。
  *
@@ -40,9 +50,14 @@ export const SHOPPING_COMPARE_CHAT_TOOLS: ChatCompletionTool[] = [
             type: "array",
             items: {
               type: "string",
-              enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "dianping"],
+              enum: SUPPORTED_PLATFORMS,
             },
-            description: "要参与比价的平台列表。缺省时自动选已实现 adapter 的前 4 个平台。",
+            description:
+              "要参与比价的平台列表。**按商品类目显式决策**（agent 按类目选平台，不依赖缺省）：\n" +
+              "- 标准商品（数码/家电/日百/美妆等）→ 综合电商 taobao/tmall/jd/pdd/douyin；\n" +
+              "- 外卖/闪购/到店券类 → meituan；演出票务 → damai/maoyan。\n" +
+              `留空时服务端按综合电商兜底（${DEFAULT_COMPARE_TEXT}）——它们不卖标准商品，缺省不含美团/点评，` +
+              "非商品类比价请务必显式传平台。",
           },
           maxPrice: {
             type: "number",
@@ -113,7 +128,7 @@ export const SHOPPING_COMPARE_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           platform: {
             type: "string",
-            enum: ["taobao", "tmall", "jd", "meituan", "pdd", "douyin", "dianping"],
+            enum: SUPPORTED_PLATFORMS,
             description: "监控平台（action=add 必填）。",
           },
           targetPrice: {

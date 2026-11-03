@@ -278,6 +278,7 @@ export function SphereAgent({
               energy={state.energy}
               idleMotion={idleBodyMotion}
               standaloneLighting={modelScale !== 1}
+              expression={state.mood}
             />
             <ModelPaintedSignal onPainted={onModelPainted} />
           </Suspense>

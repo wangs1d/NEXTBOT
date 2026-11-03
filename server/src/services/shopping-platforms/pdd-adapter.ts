@@ -24,6 +24,7 @@ import {
  */
 export class PddAdapter implements ShoppingPlatformAdapter {
   readonly platform = "pdd";
+  readonly category = "general" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);
@@ -42,7 +43,7 @@ export class PddAdapter implements ShoppingPlatformAdapter {
 
       const raw = await page.evaluate((maxLimit: number) => {
         const seen = new Set<string>();
-        const out: Array<{ title: string; price?: string; url?: string; shop?: string }> = [];
+        const out: Array<{ title: string; price?: string; url?: string; shop?: string; image?: string }> = [];
         const nodes = document.querySelectorAll("[class*='goods-item'], [class*='product-item'], [class*='search-item'], .item");
         for (const node of Array.from(nodes)) {
           if (out.length >= maxLimit) break;
@@ -53,11 +54,25 @@ export class PddAdapter implements ShoppingPlatformAdapter {
           const title = (titleEl?.innerText ?? "").trim();
           if (!title || seen.has(title)) continue;
           seen.add(title);
+          let image: string | undefined;
+          const imgs = node.querySelectorAll("img");
+          for (const imgEl of Array.from(imgs)) {
+            const u =
+              imgEl.getAttribute("src") ||
+              imgEl.getAttribute("data-src") ||
+              imgEl.getAttribute("data-lazy-img") ||
+              "";
+            if (/^https?:\/\//.test(u) && !/\.svg(\?|$)/i.test(u)) {
+              image = u;
+              break;
+            }
+          }
           out.push({
             title,
             price: (priceEl?.innerText ?? "").replace(/[^\d.]/g, "") || undefined,
             url: linkEl?.href ?? undefined,
             shop: (shopEl?.innerText ?? "").trim() || undefined,
+            image,
           });
         }
         return out;
@@ -69,6 +84,7 @@ export class PddAdapter implements ShoppingPlatformAdapter {
         currency: r.price ? "CNY" : undefined,
         url: r.url,
         shop: r.shop,
+        ...(r.image ? { imageUrl: r.image } : {}),
       }));
     } catch {
       return [];

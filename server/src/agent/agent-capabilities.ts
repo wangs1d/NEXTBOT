@@ -432,7 +432,7 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "travel_booking",
       lines: [
         "✈️ 机票/火车票/酒店预订（统一预订抽象层 + 多源报价比价）：",
-        "   - travel_booking.search（报价比价）：多源聚合实时报价，每条带 priceSource（api=实时接口 / scraped=页面代查 / database|list=本地价格库 / estimated=估算）。机票/火车票需 from/to（+departTime 更准），酒店需 city",
+        "   - travel_booking.search（报价比价）：多源聚合实时报价，每条带 priceSource（api=实时接口 / scraped=页面代查 / database|list=本地价格库 / estimated=估算）。机票/火车票需 from/to（+departTime 更准），酒店需 city。酒店筛选参数（keywords 靠海/poiName 商圈/hotelStars 星级/hotelTypes 民宿/maxPrice 价格上限/sort 便宜→price_asc）必须从用户本次原话动态提取，没提的不填——不要替用户假设档次或价格区间",
         "   - travel_booking.book（下单）：两阶段确认。confirm=false 返回订单摘要+token；confirm=true+token 创建「待支付」订单（bkg_*）",
         "   - 商家真实下单拿收银台链接：travel_booking.book 拿到待支付订单后，用 agent_browser.open/click/type/extract_text 在商家站点（携程/飞猪/12306 等）走完下单流程，从支付页提取收银台链接/订单串；把链接经 cashierUrl 传给 travel_booking.book（或 booking.travel-pay 的 paymentLink）即可发起真实支付。登录态失效/需验证码时把页面情况如实告知用户并请其手动完成该步",
         "   - 支付闭环（下单后接力，非本模块工具）：booking.travel-pay（用户本人支付宝真实扣款）→ booking.travel-pay-check（查支付结果）→ booking.travel-issue（出票入票夹）→ travel.arrival-monitor（到站管家）",

@@ -11,7 +11,8 @@ import { resolveActorId } from "../../../agent/actor-id.js";
  *   - 失败：`{ ok: false, error, retryable? }`
  *
  * search 的 params 口径与 TravelTicketProvider.buildQuoteRequest 对齐
- * （type/from/to/city/code/departTime/checkInDate/checkOutDate/hotelName/tier/seat/basePriceCny）。
+ * （type/from/to/city/code/departTime/checkInDate/checkOutDate/hotelName/tier/seat/basePriceCny +
+ *  酒店动态筛选 keywords/poiName/hotelStars/hotelTypes/maxPrice/sort——全部来自用户当次表达，没提不填）。
  */
 
 export interface TravelBookingModuleDeps {
@@ -37,12 +38,14 @@ function travelParams(input: Record<string, unknown>): Record<string, unknown> {
   const params: Record<string, unknown> = {};
   const type = str(input, "type");
   if (type) params.type = type;
-  for (const key of ["from", "to", "city", "code", "departTime", "checkInDate", "checkOutDate", "hotelName", "tier", "seat", "cashierUrl"]) {
+  for (const key of ["from", "to", "city", "code", "departTime", "checkInDate", "checkOutDate", "hotelName", "tier", "seat", "cashierUrl", "keywords", "poiName", "hotelStars", "hotelTypes", "sort"]) {
     const v = str(input, key);
     if (v) params[key] = v;
   }
   const base = num(input, "basePriceCny");
   if (base != null) params.basePriceCny = base;
+  const maxPrice = num(input, "maxPrice");
+  if (maxPrice != null && maxPrice > 0) params.maxPrice = maxPrice;
   return params;
 }
 

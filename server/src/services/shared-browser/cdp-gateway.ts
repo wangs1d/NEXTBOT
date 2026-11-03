@@ -1,5 +1,7 @@
 import type { Browser, BrowserContext, Page } from "playwright";
 
+import { detectHumanRequired } from "../browser-runtime/human-gate.js";
+
 /**
  * 共用浏览器可信输入网关（CDP 桥）。
  *
@@ -285,6 +287,40 @@ export class SharedBrowserCdpGateway {
       return { ok: true };
     } catch (e) {
       return { ok: false, error: `可信输入失败：${String(e).slice(0, 200)}` };
+    }
+  }
+
+  /**
+   * 只读窥视面板页状态（handoff 自动检测用）：不导航、不抢面板槽位、不注入。
+   * 返回当前面板 URL + 登录墙/验证码判定——探测「用户是否已在别的前台页面
+   * 完成登录/验证」。连接失败返回 ok:false（探测是增强，失败只记日志）。
+   */
+  async peekPanelState(
+    siteId: string,
+  ): Promise<{
+    ok: boolean;
+    url?: string;
+    blocked?: boolean;
+    reason?: string;
+    evidence?: string;
+    error?: string;
+  }> {
+    try {
+      const page = await this.activePage();
+      if (!page) return { ok: false, error: "CDP 桥未连接或无活动页面" };
+      const url = page.url();
+      const det = await detectHumanRequired(siteId, page).catch(
+        (): { required: boolean; reason?: string; evidence?: string } => ({ required: false }),
+      );
+      return {
+        ok: true,
+        url,
+        blocked: det.required,
+        ...(det.reason ? { reason: det.reason } : {}),
+        ...(det.evidence ? { evidence: det.evidence } : {}),
+      };
+    } catch (err) {
+      return { ok: false, error: `窥视面板状态失败：${String(err).slice(0, 120)}` };
     }
   }
 

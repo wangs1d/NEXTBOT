@@ -24,6 +24,7 @@ import { resolveActorId } from "../agent/actor-id.js";
 import { redactCredentials } from "../security/redact.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
+import { listDefaultComparePlatforms } from "./shopping-platforms/index.js";
 import type { ShoppingOrderService } from "./shopping-order-service.js";
 import type { ProductSummary } from "./shopping-platforms/index.js";
 
@@ -464,7 +465,12 @@ export class ShoppingCompareService {
     const q = query.trim();
     if (!q) return { ok: false, error: "缺少 query（比价关键词）" };
     const supported = this.deps.shoppingOrderService.listSupportedPlatforms();
-    const requested = (opts.platforms?.length ? opts.platforms : supported.slice(0, this.maxPlatforms))
+    // 缺省平台：综合电商（淘宝/天猫/京东/拼多多/抖音）∩ 已实现 adapter。
+    // 列表由 adapter.category 派生（见 listDefaultComparePlatforms），非手写数组。
+    // 本地生活（美团/大众点评）与演出票务不参与商品比价缺省——它们不卖标准
+    // 商品，混进来只会白搜一轮还挤掉拼多多等真正可比的平台。
+    const defaultPlatforms = listDefaultComparePlatforms().filter((p) => supported.includes(p));
+    const requested = (opts.platforms?.length ? opts.platforms : defaultPlatforms)
       .map((p) => p.trim())
       .filter(Boolean)
       .slice(0, this.maxPlatforms);
@@ -481,19 +487,29 @@ export class ShoppingCompareService {
     const fetchOpts = { ...opts, preferVisible: visible };
     const outcomes: Array<{ platform: string; quotes: PlatformQuotes }> = [];
     if (visible) {
+      // 可见面板只有一个：某平台被登录墙/验证码拦住后，面板必须留在该页面等
+      // 用户操作（最后统一 handoff）。此前直接 break，排在被墙平台之后的平台
+      // 连尝试都没有——这是「比价只拿到一家」的主要代码层根因。
+      // 现改为：被墙平台记入 pendingHandoff，其余平台回落**无头**通道继续取数
+      // （无头不抢面板，登录页得以保留），最后仍合并成一次交接。
+      let handoffPending = false;
       for (const platform of requested) {
         try {
-          outcomes.push({ platform, quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts) });
+          outcomes.push({
+            platform,
+            quotes: await this.fetchPlatformQuotes(ctx, platform, q, {
+              ...fetchOpts,
+              preferVisible: !handoffPending,
+            }),
+          });
         } catch (reason) {
           outcomes.push({
             platform,
             quotes: { products: [], error: reason instanceof Error ? reason.message : String(reason) },
           });
         }
-        // 平台把页面拦到登录页/验证页就停在这里：交接步由本轮汇总后统一建好，
-        // 可见浏览器必须留在该页面等用户操作；接着跑下一个平台会把面板导航走。
         const last = outcomes[outcomes.length - 1]?.quotes;
-        if (last?.loginRequired || last?.humanRequired) break;
+        if (last?.loginRequired || last?.humanRequired) handoffPending = true;
       }
     } else {
       const settled = await Promise.allSettled(
@@ -560,21 +576,27 @@ export class ShoppingCompareService {
           doneAction: string;
         }
       | undefined;
-    if (visible && needHuman.length > 0) {
-      const instruction =
-        needUserReason === "login"
-          ? `已在内置浏览器打开${needUserLabels.join("、")}的页面：需要扫码登录的平台请先登录，完成后点「我已完成」，我接着把价补上。`
-          : `${needUserLabels.join("、")}需要完成安全验证（滑块/验证码）：页面已停在浏览器里，验证完点「我已完成」，我接着把价补上。`;
-      try {
-        this.deps.onUserActionRequired?.({
-          actorId,
-          sessionId: ctx.sessionId,
-          platforms: needHuman.map((u) => u.platform),
-          platformLabels: needUserLabels,
-          reason: needUserReason,
-        });
-      } catch (err) {
-        console.log(`[ShoppingCompare] 用户交接失败（忽略）: ${err}`);
+    if (needHuman.length > 0) {
+      // 可见浏览器在线：页面留在登录/验证页，交用户现场操作（长流程等待步）。
+      // 无头通道（客户端离线/面板不可用）：没有可扫码的页面，如实告知需登录
+      // 后重试——不得静默丢掉「拼多多需要登录」这个事实（2026-11-02）。
+      const instruction = visible
+        ? (needUserReason === "login"
+            ? `已在内置浏览器打开${needUserLabels.join("、")}的页面：需要扫码登录的平台请先登录，完成后点「我已完成」，我接着把价补上。`
+            : `${needUserLabels.join("、")}需要完成安全验证（滑块/验证码）：页面已停在浏览器里，验证完点「我已完成」，我接着把价补上。`)
+        : `${needUserLabels.join("、")}需要你本人登录才能取价：本轮走的是后台无头通道，没有可扫码的页面。请让内置浏览器上线后叫我重试比价，我会把页面交给你扫码。`;
+      if (visible) {
+        try {
+          this.deps.onUserActionRequired?.({
+            actorId,
+            sessionId: ctx.sessionId,
+            platforms: needHuman.map((u) => u.platform),
+            platformLabels: needUserLabels,
+            reason: needUserReason,
+          });
+        } catch (err) {
+          console.log(`[ShoppingCompare] 用户交接失败（忽略）: ${err}`);
+        }
       }
       handoff = {
         platforms: needHuman.map((u) => u.platform),

@@ -38,7 +38,11 @@ export const TRAVEL_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
         "返回选项列表（optionId 供 travel_booking.book 使用；实时来源选项的 extra.bookingUrl 为商家预订链接，可直接作 book 的 cashierUrl；飞猪酒店选项另带 extra.mainPicUrl 平台真实主图与 extra.rating 平台评分，可在回复中自然引用，未带就是不造假的留空），每条带 priceSource：\n" +
         "  api=实时接口 / scraped=页面代查 / database|list=本地价格库 / estimated=估算。\n" +
         "必须向用户如实转述价格来源与「以平台实价为准」提示；估算价不得当作实价汇报。\n" +
-        "酒店必填 city（或 hotelName+city）；机票/火车票必填 from/to（城市），有 departTime 更准。",
+        "酒店必填 city（或 hotelName+city）；机票/火车票必填 from/to（城市），有 departTime 更准。\n" +
+        "酒店筛选参数（keywords/poiName/hotelStars/hotelTypes/maxPrice/sort）必须从用户本次原话动态提取：" +
+        "「靠海的」→ keywords=靠海，「大东海那边」→ poiName=大东海，「四五星」→ hotelStars=4,5，「民宿」→ hotelTypes=homestay，" +
+        "「300 以内」→ maxPrice=300，「便宜点」→ sort=price_asc，「评分高的」→ sort=rate_desc。" +
+        "用户没提的条件一律不填（不要替用户假设档次或价格），什么都不提就是无筛选的自然搜索。",
       parameters: {
         type: "object",
         properties: {
@@ -51,7 +55,13 @@ export const TRAVEL_BOOKING_CHAT_TOOLS: ChatCompletionTool[] = [
           checkInDate: { type: "string", description: "入住日期（酒店），YYYY-MM-DD。" },
           checkOutDate: { type: "string", description: "退房日期（酒店），YYYY-MM-DD。" },
           hotelName: { type: "string", description: "酒店名（可选，有则定向查询）。" },
-          tier: { type: "string", description: "酒店档次（可选）：budget / mid / luxury。" },
+          tier: { type: "string", description: "酒店档次（可选）：budget / mid / luxury。仅用户明确表达档次时填。" },
+          keywords: { type: "string", description: "酒店位置/特色关键词（可选）：用户原话里的要求原样提取，如「靠海」「海景」「近地铁」。" },
+          poiName: { type: "string", description: "酒店商圈/地标（可选）：用户指定具体区域时填，如「大东海」「亚龙湾」「凤凰岛」。" },
+          hotelStars: { type: "string", description: "酒店星级（可选）：1-5 逗号分隔，如「4,5」。用户提星级/高档时填。" },
+          hotelTypes: { type: "string", description: "住宿类型（可选）：hotel / homestay（民宿）/ inn（客栈），逗号分隔。用户点名民宿/客栈时填。" },
+          maxPrice: { type: "number", description: "每晚最高价（可选，CNY）。用户给预算上限/价格区间时填。" },
+          sort: { type: "string", description: "酒店排序（可选）：price_asc（要便宜）/ price_desc / rate_desc（要好评分）/ distance_asc / no_rank（默认）。仅在用户表达出偏好时填。" },
           seat: { type: "string", description: "舱位/席别偏好（可选），如「经济舱」「二等座」。" },
           basePriceCny: { type: "number", description: "基准价（可选，仅当用户主动提供价格时用于兜底估算；有实时源时忽略）。" },
         },

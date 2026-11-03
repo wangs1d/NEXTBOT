@@ -58,6 +58,11 @@ export interface TaskPlanHandoff {
   checkMode: TaskPlanHandoffCheckMode;
   /** checkMode=probe 时的确定性探测（工具名 + 参数），由续跑 tick 轮询 */
   probe?: { tool: string; args?: Record<string, unknown>; expect?: string };
+  /**
+   * probe 专用：本步两次探测的最小间隔（ms）。缺省用 runner 全局值（5min）。
+   * 登录墙这类「用户几十秒就能做完」的场景传小值（如 12000），探测要跟得上人。
+   */
+  probeGapMs?: number;
   /** 幂等键：同一外部动作续跑时不允许第二次真实执行 */
   idempotencyKey?: string;
   /** 进入等待的时刻（超时收敛用） */

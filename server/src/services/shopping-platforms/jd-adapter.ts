@@ -20,6 +20,7 @@ const CARD_SELECTOR = ".gl-item, [class*='product-item'], [data-sku]";
 
 export class JdAdapter implements ShoppingPlatformAdapter {
   readonly platform = "jd";
+  readonly category = "general" as const;
 
   searchUrl(query: string, filters?: SearchFilters): string {
     const q = encodeURIComponent(query);
@@ -42,7 +43,7 @@ export class JdAdapter implements ShoppingPlatformAdapter {
       const raw = await page.evaluate(
         ({ maxLimit, cardSelector }: { maxLimit: number; cardSelector: string }) => {
           const seen = new Set<string>();
-          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string }> = [];
+          const out: Array<{ title: string; price?: string; url?: string; shop?: string; itemId?: string; image?: string }> = [];
           const nodes = document.querySelectorAll(cardSelector);
           for (const node of Array.from(nodes)) {
             if (out.length >= maxLimit) break;
@@ -61,12 +62,27 @@ export class JdAdapter implements ShoppingPlatformAdapter {
             const url = linkEl?.href ?? (sku ? `https://item.jd.com/${sku}.html` : undefined);
             const itemIdMatch = url?.match(/item\.jd\.com\/(\d+)/) ?? url?.match(/[?&]sku=(\d+)/);
             const shopEl = node.querySelector("[class*='shop'], .p-shop a") as HTMLElement | null;
+            // 主图：.p-img 优先，卡内首个 http(s) 真图兜底（懒加载 data-lazy-img）
+            let image: string | undefined;
+            const imgs = node.querySelectorAll(".p-img img, img");
+            for (const imgEl of Array.from(imgs)) {
+              const u =
+                imgEl.getAttribute("src") ||
+                imgEl.getAttribute("data-lazy-img") ||
+                imgEl.getAttribute("data-src") ||
+                "";
+              if (/^https?:\/\//.test(u) && !/\.svg(\?|$)/i.test(u)) {
+                image = u;
+                break;
+              }
+            }
             out.push({
               title,
               price: priceMatch?.[0],
               url,
               shop: (shopEl?.innerText ?? "").trim() || undefined,
               itemId: itemIdMatch?.[1] ?? (sku || undefined),
+              image,
             });
           }
           return out;
@@ -81,6 +97,7 @@ export class JdAdapter implements ShoppingPlatformAdapter {
         url: r.url,
         shop: r.shop,
         itemId: r.itemId,
+        ...(r.image ? { imageUrl: r.image } : {}),
       }));
     } catch {
       return [];

@@ -235,6 +235,45 @@ export function isTrialMode(systemMessage: string): boolean {
 
 // ── 酒店：flyai search-hotel ──
 
+/** 飞猪 search-hotel 合法排序值（--help 实测口径）。 */
+const FLYAI_HOTEL_SORTS = new Set(["price_asc", "price_desc", "rate_desc", "distance_asc", "no_rank"]);
+
+/** 档次 → 星级段（与 travel-live-pricing 的 HOTEL_TIER_STARS 同口径）；仅在用户明确表达档次时使用。 */
+function tierStars(tier: string | undefined): string | null {
+  if (tier === "budget") return "1,2";
+  if (tier === "mid") return "3,4";
+  if (tier === "luxury") return "5";
+  return null;
+}
+
+/**
+ * QuoteRequest → flyai search-hotel CLI 参数（酒店两个报价源共用）。
+ *
+ * 动态原则：所有筛选都来自 req.filters / req.tier / req.hotelName——用户没提的
+ * 条件一律不进参数，绝不写死排序或星级。排序缺省 no_rank（平台相关度），
+ * 由飞猪按查询相关度混排；按价格升序只有在用户要「便宜」时才出现。
+ */
+export function flyAiHotelSearchArgs(req: QuoteRequest): string[] {
+  const city = (req.city || req.to || "").trim();
+  const args = ["search-hotel", "--dest-name", city];
+  const f = req.filters ?? {};
+  // 定向酒店名与特色关键词合并进 key-words（如「亚特兰蒂斯」+「海景房」）
+  const keywords = [req.hotelName?.trim(), f.keywords?.trim()].filter(Boolean).join(" ");
+  if (keywords) args.push("--key-words", keywords);
+  if (f.poiName?.trim()) args.push("--poi-name", f.poiName.trim());
+  const stars = f.hotelStars?.trim() || tierStars(req.tier);
+  if (stars) args.push("--hotel-stars", stars);
+  if (f.hotelTypes?.trim()) args.push("--hotel-types", f.hotelTypes.trim());
+  if (typeof f.maxPrice === "number" && Number.isFinite(f.maxPrice) && f.maxPrice > 0) {
+    args.push("--max-price", String(Math.round(f.maxPrice)));
+  }
+  const sort = f.sort && FLYAI_HOTEL_SORTS.has(f.sort) ? f.sort : "no_rank";
+  args.push("--sort", sort);
+  if (req.checkInDate) args.push("--check-in-date", req.checkInDate.slice(0, 10));
+  if (req.checkOutDate) args.push("--check-out-date", req.checkOutDate.slice(0, 10));
+  return args;
+}
+
 export function createFlyAiHotelSource(runner: FlyAiRunner): QuoteSource {
   const id = "flyai.hotel";
   return {
@@ -244,10 +283,7 @@ export function createFlyAiHotelSource(runner: FlyAiRunner): QuoteSource {
     async fetch(req: QuoteRequest): Promise<QuoteSourceResult> {
       const city = (req.city || req.to || "").trim();
       if (!city) return { ok: true, quotes: [], note: `${SOURCE_LABEL} 不处理该查询（缺 city）` };
-      const args = ["search-hotel", "--dest-name", city, "--sort", "price_asc"];
-      if (req.checkInDate) args.push("--check-in-date", req.checkInDate.slice(0, 10));
-      if (req.checkOutDate) args.push("--check-out-date", req.checkOutDate.slice(0, 10));
-      if (req.hotelName) args.push("--key-words", req.hotelName);
+      const args = flyAiHotelSearchArgs(req);
 
       const res = await callFlyAi(runner, args);
       if ("error" in res) return { ok: false, error: `${SOURCE_LABEL}：${res.error}` };

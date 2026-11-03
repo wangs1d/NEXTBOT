@@ -38,6 +38,7 @@ import type {
 } from "./shopping-platforms/index.js";
 import { SharedBrowserCdpGateway } from "./shared-browser/cdp-gateway.js";
 import { SharedBrowserCoordinator } from "./shared-browser-coordinator.js";
+import { extractWithSelfHeal, parseVisionProducts, semanticExtractProducts } from "./shopping-platforms/self-heal.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 
 /** 单笔金额上限（CNY）。可用 SHOPPING_ORDER_MAX_AMOUNT_<平台大写>_CNY 按平台覆盖（演出票等高价类目调高）。 */
@@ -199,6 +200,19 @@ export class ShoppingOrderService {
         platformLabels: string[];
         reason: "login" | "captcha";
       }) => void;
+      /**
+       * 视觉兜底抽取（可插拔，2026-11-02 自愈管线第三层）：CSS 与语义锚点都
+       * 抓空时，把搜索页截图交给视觉模型抽结构化商品 JSON（原始文本，
+       * 由 parseVisionProducts 宽容解析）。须同时满足
+       * SHOPPING_VISION_HEALING=1 才生效；未注入则管线止于语义层。
+       * 回执为模型原文（可能带围栏/说明文字），解析失败按空结果处理。
+       */
+      visionExtract?: (input: {
+        screenshotBase64: string;
+        platform: string;
+        query: string;
+        limit: number;
+      }) => Promise<string | null>;
     },
   ) {
     this.browserExecutor =
@@ -491,7 +505,29 @@ export class ShoppingOrderService {
       adapter.searchUrl(query, filters),
       async (page, mode) => {
       try {
-        const products = await adapter.extractProducts(page, limit);
+        // 自愈取数：CSS → 滚动重试 → 语义锚点 → 视觉兜底（可插拔，env 门控）。
+        // 对齐主流 agentic browser 的错误恢复模式：抓空不放弃，换策略再来。
+        const visionEnabled = this.deps.visionExtract != null && process.env.SHOPPING_VISION_HEALING === "1";
+        const heal = await extractWithSelfHeal(page, {
+          cssExtract: () => adapter.extractProducts(page, limit),
+          semanticExtract: () => semanticExtractProducts(page, platform, limit),
+          ...(visionEnabled && this.deps.visionExtract
+            ? {
+                visionExtract: async () => {
+                  const shot = await page.screenshot({ type: "png", fullPage: false }).catch(() => null);
+                  if (!shot) return [];
+                  const raw = await this.deps.visionExtract!({
+                    screenshotBase64: shot.toString("base64"),
+                    platform,
+                    query,
+                    limit,
+                  });
+                  return parseVisionProducts(raw ?? "", limit);
+                },
+              }
+            : {}),
+        });
+        const products = heal.products;
 
         // 二次过滤：maxPrice
         const filtered = filters?.maxPrice
@@ -503,17 +539,21 @@ export class ShoppingOrderService {
           limit,
           resultCount: filtered.length,
           browserMode: mode,
+          healAttempts: heal.attempts.join(">"),
         });
 
         if (filtered.length === 0) {
           // 「搜索不到」不等于「需要用户」：先看页面有没有登录墙/验证码这类硬信号。
           // 只有命中才交人（对齐主流 Agent 的 human checkpoint）；普通无结果如实返回。
+          // 注意：suppressHandoff 只抑制本层逐平台通知，**不抑制检测**——比价层要靠
+          // 这里的 humanRequired 把多个被墙平台合成一次统一交接（2026-11-02 修复：
+          // 旧逻辑把检测一并禁掉，比价时空结果路径上的登录墙/验证码永远交不到人）。
           let human: HumanRequiredDetection = { required: false };
-          if (mode === "shared" && !suppressHandoff) {
+          if (mode === "shared") {
             human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
           }
           if (human.required && human.reason) {
-            this.notifyUserAction(ctx, [platform], human.reason);
+            if (!suppressHandoff) this.notifyUserAction(ctx, [platform], human.reason);
             return {
               ok: false,
               error: `在${platform}搜索「${query}」需要你本人完成${human.reason === "login" ? "登录" : "验证"}：已在内置浏览器打开页面`,
@@ -542,11 +582,12 @@ export class ShoppingOrderService {
         const message = err instanceof Error ? err.message : String(err);
         // 页面打不开/超时不自动交人：主流 Agent 只把登录墙/验证码交人。
         // 先看页面是否其实停在验证页，命中才 handoff；否则如实报错（可重试）。
+        // 同上：suppressHandoff 只抑制通知，不抑制检测（比价层统一交接依赖它）。
         let human: HumanRequiredDetection = { required: false };
-        if (mode === "shared" && !suppressHandoff) {
+        if (mode === "shared") {
           human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
         }
-        if (human.required && human.reason) {
+        if (human.required && human.reason && !suppressHandoff) {
           this.notifyUserAction(ctx, [platform], human.reason);
         }
         return {

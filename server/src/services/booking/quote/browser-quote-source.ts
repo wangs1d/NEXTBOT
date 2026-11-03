@@ -53,9 +53,11 @@ export interface BrowserQuoteSourceConfig {
 }
 
 function sleep(ms: number): Promise<void> {
+  // 不 unref：本定时器永远被 await，必须持有事件循环直到兑现——
+  // unref 会让「sleep 是唯一挂起工作时」事件循环提前排空，await 永远悬空
+  // （Node 22 测试环境确定性复现：进程收摊、用例被取消）。
   return new Promise((r) => {
-    const t = setTimeout(r, ms);
-    t.unref?.();
+    setTimeout(r, ms);
   });
 }
 

@@ -22,6 +22,7 @@ import {
  */
 export class DouyinAdapter implements ShoppingPlatformAdapter {
   readonly platform = "douyin";
+  readonly category = "general" as const;
 
   searchUrl(query: string, filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

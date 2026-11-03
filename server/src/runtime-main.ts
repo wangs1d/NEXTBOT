@@ -30,6 +30,7 @@ import { startDesktopBridgeAutoClient } from "./services/desktop-bridge-auto-sta
 import { startOpenClawModelSyncWatcher } from "./services/openclaw-config-sync.js";
 import { isWechatClawBridgeEnabled } from "./services/wechat-claw-bridge-service.js";
 import { startAdaptiveConcurrency } from "./services/concurrency-limiter.js";
+import { stopClientUpdatePusher } from "./services/client-update-pusher.js";
 import { createActiveTurnRegistry } from "./runtime/link/link-protocol.js";
 import { startRuntimeLinkServer } from "./runtime/link/link-server.js";
 import { DirectRuntimeAdapter } from "./runtime/runtime-facade.js";
@@ -103,6 +104,7 @@ const performShutdown = (): void => {
     timestamp: new Date().toISOString(),
   });
   services.webhookService.stop();
+  stopClientUpdatePusher();
   stopDesktopBridge();
   stopOpenClawModelSync();
   void linkServer.close().finally(() => {
