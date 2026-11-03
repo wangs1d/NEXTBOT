@@ -1,0 +1,648 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>DG2 桌宠 · 曲屏面部设计（1:1 还原）</title>
+<style>
+  :root{
+    --bg:#07080b; --panel:#0d0f14; --line:rgba(255,255,255,.075);
+    --ink:#eceef3; --dim:#8b93a2; --faint:#5b6373;
+    --accent:#7fb2ff;
+    --mono:"SFMono-Regular",ui-monospace,"Cascadia Code",Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:"Inter","Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased}
+  .wrap{max-width:1240px;margin:0 auto;padding:54px 30px 90px}
+  header{display:flex;align-items:flex-end;justify-content:space-between;gap:24px;flex-wrap:wrap;margin-bottom:34px}
+  .eyebrow{font:600 11px/1.6 var(--mono);letter-spacing:.22em;color:var(--accent);text-transform:uppercase}
+  h1{font-size:30px;line-height:1.22;letter-spacing:-.01em;margin:12px 0 8px;font-weight:650}
+  h1 span{color:var(--faint);font-weight:400}
+  .lede{max-width:620px;color:var(--dim);font-size:13.5px;line-height:1.75;margin:0}
+  .meta{font:500 11.5px/1.9 var(--mono);color:var(--faint);text-align:right}
+  .meta b{color:var(--dim);font-weight:500}
+  .grid{display:grid;grid-template-columns:1.02fr 1.02fr;gap:18px}
+  .grid-2{display:grid;grid-template-columns:1.25fr .75fr;gap:18px;margin-top:18px}
+  .card{background:linear-gradient(180deg,rgba(255,255,255,.018),rgba(255,255,255,0) 40%),var(--panel);
+    border:1px solid var(--line);border-radius:18px;padding:18px 18px 16px;min-width:0}
+  .card h2{font-size:12px;font-weight:600;letter-spacing:.12em;color:var(--dim);text-transform:uppercase;margin:0 0 14px;
+    display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .card h2 em{font:500 10.5px/1.4 var(--mono);letter-spacing:.02em;color:var(--faint);font-style:normal;text-transform:none}
+  .art{position:relative;border-radius:12px;overflow:hidden;background:#040508;aspect-ratio:1/1}
+  .art canvas,.art img{display:block;width:100%;height:100%}
+  .art img{object-fit:cover;border-radius:50%}
+  .art img{box-shadow:0 0 0 1px rgba(160,175,200,.12)}
+  .badge{position:absolute;left:10px;top:10px;font:500 10px/1 var(--mono);letter-spacing:.08em;
+    color:rgba(255,255,255,.62);background:rgba(6,8,12,.72);border:1px solid rgba(255,255,255,.09);
+    padding:6px 8px;border-radius:6px;backdrop-filter:blur(6px)}
+  .hint{color:var(--faint);font-size:11.5px;line-height:1.7;margin:12px 1px 0}
+  .compare{position:relative;border-radius:12px;overflow:hidden;background:#040508;aspect-ratio:1/1;cursor:ew-resize;
+    touch-action:none;user-select:none}
+  .compare img,.compare canvas{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;display:block}
+  .compare img{border-radius:50%}
+  .compare .design{clip-path:inset(0 50% 0 0)}
+  .compare .divider{position:absolute;top:0;bottom:0;left:50%;width:1px;background:rgba(160,190,235,.6);
+    box-shadow:0 0 12px rgba(120,160,220,.35);pointer-events:none}
+  .compare .knob{position:absolute;top:50%;left:50%;width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;
+    border:1px solid rgba(190,215,255,.65);background:rgba(12,18,28,.8);color:#cfe0ff;
+    font:500 10px/24px var(--mono);text-align:center;pointer-events:none;backdrop-filter:blur(6px)}
+  .screen-stage{position:relative;border-radius:14px;overflow:hidden;aspect-ratio:1/1;
+    background:radial-gradient(120% 90% at 30% 20%,#151922 0%,#0a0c11 55%,#050609 100%)}
+  .screen-stage canvas{display:block;width:100%;height:100%}
+  .controls{display:flex;align-items:center;gap:12px;margin-top:14px}
+  .controls label{font:500 10.5px/1 var(--mono);letter-spacing:.08em;color:var(--faint);white-space:nowrap}
+  input[type=range]{-webkit-appearance:none;appearance:none;flex:1;height:22px;background:transparent;margin:0}
+  input[type=range]::-webkit-slider-runnable-track{height:3px;border-radius:2px;
+    background:linear-gradient(90deg,rgba(127,178,255,.55),rgba(127,178,255,.12))}
+  input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:13px;height:13px;margin-top:-5px;border-radius:50%;
+    background:#cfe0ff;border:1px solid #6f9fe0;box-shadow:0 0 10px rgba(127,178,255,.5)}
+  .readout{font:500 10.5px/1 var(--mono);color:var(--dim);min-width:48px;text-align:right}
+  .specs{margin:0;padding:0;list-style:none;display:grid;gap:0}
+  .specs li{display:flex;justify-content:space-between;align-items:baseline;gap:14px;
+    padding:9px 0;border-bottom:1px solid rgba(255,255,255,.055);font-size:12.5px;color:var(--dim)}
+  .specs li:last-child{border-bottom:0}
+  .specs b{font:500 11.5px/1.4 var(--mono);color:#dbe2ee;text-align:right;font-weight:500}
+  .note{margin-top:16px;border:1px solid rgba(127,178,255,.18);border-radius:12px;padding:13px 14px;
+    background:rgba(70,110,170,.07);color:#aebdd4;font-size:11.8px;line-height:1.8}
+  .note b{color:#dce7f8;font-weight:600}
+  .expressions{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-top:18px}
+  .expression{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:10px 10px 12px}
+  .expression canvas{display:block;width:100%;aspect-ratio:1/1;border-radius:9px;background:#05070b}
+  .expression h3{font-size:11px;font-weight:600;letter-spacing:.08em;color:var(--dim);margin:10px 2px 0;
+    display:flex;justify-content:space-between;gap:8px}
+  .expression h3 span{font:500 9.5px/1.4 var(--mono);color:var(--faint);letter-spacing:.02em}
+  .tagrow{display:flex;gap:8px;flex-wrap:wrap;margin-top:16px}
+  .tag{font:500 10px/1 var(--mono);letter-spacing:.06em;color:#9dabbd;border:1px solid rgba(255,255,255,.08);
+    background:rgba(255,255,255,.02);padding:7px 9px;border-radius:999px}
+  footer{margin-top:40px;display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap;
+    color:var(--faint);font:500 10.5px/1.8 var(--mono)}
+  @media (max-width:980px){
+    .grid,.grid-2{grid-template-columns:1fr}
+    .expressions{grid-template-columns:repeat(2,1fr)}
+    h1{font-size:24px}
+    .meta{text-align:left}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div>
+      <div class="eyebrow">Desktop Pet · Curved OLED Face</div>
+      <h1>曲屏面部设计 <span>/ 参考图 1:1 还原</span></h1>
+      <p class="lede">
+        以实拍正脸为基准，逐像素量出形状与位置：眼睛外轮廓、竖瞳、玻璃眼窝、面罩带，
+        以及屏幕前后的明暗与反光。屏面纹理按 1024² 制作，经 53° 球冠正交投影贴到曲屏，
+        正面所见即本稿画面。
+      </p>
+    </div>
+    <div class="meta">
+      <div><b>屏幕纹理</b> 1024 × 1024</div>
+      <div><b>曲屏半角</b> 53.0° · 正交 UV</div>
+      <div><b>基准</b> image-6480.png · 2048²</div>
+    </div>
+  </header>
+
+  <div class="grid">
+    <section class="card">
+      <h2>参考图 <em>screen crop · 1:1</em></h2>
+      <div class="art">
+        <img src="desktop-pet-face-ref-screen.jpg" alt="参考图屏幕裁切" />
+        <div class="badge">REFERENCE</div>
+      </div>
+      <p class="hint">原图按屏幕可视圆裁切并归一化到 1024²，作为唯一的对位基准。</p>
+    </section>
+
+    <section class="card">
+      <h2>设计主稿 <em>face texture · 1024²</em></h2>
+      <div class="art">
+        <canvas id="master" width="1024" height="1024"></canvas>
+        <div class="badge">MASTER</div>
+      </div>
+      <p class="hint">可直接作为曲屏纹理：眼白、竖瞳、眼窝、面罩带、反光、嘴线均在此层。</p>
+    </section>
+  </div>
+
+  <div class="grid-2">
+    <section class="card">
+      <h2>叠加对位 <em>drag to compare</em></h2>
+      <div class="compare" id="compare">
+        <img src="desktop-pet-face-ref-screen.jpg" alt="参考图" />
+        <canvas id="compareDesign" width="1024" height="1024" class="design"></canvas>
+        <div class="divider"></div>
+        <div class="knob">↔</div>
+      </div>
+      <p class="hint">左侧为设计稿，右侧为参考图。拖动分界线检查轮廓与位置偏差。</p>
+    </section>
+
+    <section class="card">
+      <h2>曲屏贴合 <em>sphere cap · drag to tilt</em></h2>
+      <div class="screen-stage">
+        <canvas id="sphere" width="760" height="760"></canvas>
+      </div>
+      <div class="controls">
+        <label>TILT</label>
+        <input id="tilt" type="range" min="-35" max="35" value="0" step="0.5" />
+        <div class="readout" id="tiltOut">0.0°</div>
+      </div>
+      <p class="hint">同一张纹理贴到 53° 球冠上：正面为零畸变，转动时边缘自然前缩。</p>
+    </section>
+  </div>
+
+  <section class="card" style="margin-top:18px">
+    <h2>屏上参数 <em>measured from reference</em></h2>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:0 36px">
+      <ul class="specs">
+        <li><span>眼心（相对屏心）</span><b>±230 · Y 465</b></li>
+        <li><span>眼白外轮廓</span><b>245 × 195 · 内倾 15.5°</b></li>
+        <li><span>眼窝玻璃边</span><b>11 · 上暗下亮</b></li>
+        <li><span>竖瞳</span><b>78 × 135 · 内偏 54</b></li>
+      </ul>
+      <ul class="specs">
+        <li><span>面罩带</span><b>904 × 378 · 圆角收敛</b></li>
+        <li><span>嘴线</span><b>410 × 56 · 极低对比</b></li>
+        <li><span>瞳孔高光/边缘</span><b>无高光 · 1px 冷边</b></li>
+        <li><span>屏幕底色</span><b>#15181F → #101218</b></li>
+      </ul>
+    </div>
+    <div class="tagrow">
+      <div class="tag">连续参数：睁眼 / 眯眼 / 视线 / 瞳孔缩放 / 倾斜 / 辉光</div>
+      <div class="tag">眨眼 240ms · 弹簧过渡</div>
+      <div class="tag">纹理可直接映射 CanvasTexture</div>
+    </div>
+    <div class="note">
+      <b>关于「一比一」：</b>参考图里的屏幕是一只圆角方屏，而现有 DG2 壳体开窗是 53° 圆窗。
+      主稿按参考图的横向基准（±629px → 1024）等比换算，因此眼距、眼白宽、竖瞳宽高与原图一致；
+      圆窗只裁掉四角外壳，不裁五官。下方贴合预览即真实裁切结果。
+    </div>
+  </section>
+
+  <div class="expressions" id="expressions"></div>
+
+  <footer>
+    <div>DG2 · curved face master · 2026-11-03</div>
+    <div>reference: image-6480.png · 2048² · screen crop (407,437,1258²)</div>
+  </footer>
+</div>
+
+<script>
+/* ------------------------------------------------------------------ *
+ * 面部主稿绘制（设计坐标 1024²，与纹理一一对应）
+ * ------------------------------------------------------------------ */
+const D = 1024, CX = 512;
+const FACE = {
+  eyeDX: 230,
+  eyeCY: 465,
+  eyeA: 124,
+  eyeB: 96,
+  eyeRot: 0.27,
+  bevel: 11,
+  pupilDX: 54,
+  pupilDY: 2,
+  pupilHW: 39,
+  pupilTop: -72,
+  pupilBot: 63,
+  band: { cx: 512, cy: 489, rx: 452, ry: 189, n: 4.4 },
+  mouth: { cx: 530, cy: 952, rx: 205, ry: 30 },
+};
+
+const BASE_POSE = {
+  openL: 1, openR: 1, squintL: 0, squintR: 0,
+  gazeX: 0, gazeY: 0, pupilScale: 1, tiltL: 0, tiltR: 0,
+};
+
+function pose(patch) { return Object.assign({}, BASE_POSE, patch || {}); }
+
+function circlePath(ctx) {
+  ctx.beginPath();
+  ctx.arc(CX, CX, CX, 0, Math.PI * 2);
+  ctx.closePath();
+}
+
+function eyeOutline(ctx, cx, cy, rx, ryTop, ryBot, rot, N = 128) {
+  const cos = Math.cos(rot), sin = Math.sin(rot);
+  ctx.beginPath();
+  for (let i = 0; i <= N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    const cs = Math.cos(t), sn = Math.sin(t);
+    const lx = cs * rx;
+    const ly = sn * (sn >= 0 ? ryBot : ryTop);
+    const x = cx + lx * cos - ly * sin;
+    const y = cy + lx * sin + ly * cos;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function pupilPath(ctx, px, py, hw, top, bot, rot) {
+  const cos = Math.cos(rot), sin = Math.sin(rot);
+  const T = (x, y) => [px + x * cos - y * sin, py + x * sin + y * cos];
+  const h = bot - top;
+  const p = [
+    [0, top],
+    [hw * 0.64, top + h * 0.004], [hw, top + h * 0.20], [hw, top + h * 0.46],
+    [hw, top + h * 0.68], [hw * 0.68, top + h * 0.87], [0, bot],
+    [-hw * 0.68, top + h * 0.87], [-hw, top + h * 0.68], [-hw, top + h * 0.46],
+    [-hw, top + h * 0.20], [-hw * 0.64, top + h * 0.004], [0, top],
+  ];
+  ctx.beginPath();
+  ctx.moveTo(...T(p[0][0], p[0][1]));
+  for (let s = 0; s < 4; s++) {
+    const i = 1 + s * 3;
+    const c1 = T(p[i][0], p[i][1]);
+    const c2 = T(p[i + 1][0], p[i + 1][1]);
+    const e = T(p[i + 2][0], p[i + 2][1]);
+    ctx.bezierCurveTo(c1[0], c1[1], c2[0], c2[1], e[0], e[1]);
+  }
+  ctx.closePath();
+}
+
+function superellipsePath(ctx, cx, cy, rx, ry, n) {
+  ctx.beginPath();
+  const N = 160;
+  for (let i = 0; i <= N; i++) {
+    const t = (i / N) * Math.PI * 2;
+    const cs = Math.cos(t), sn = Math.sin(t);
+    const x = cx + Math.sign(cs) * Math.pow(Math.abs(cs), 2 / n) * rx;
+    const y = cy + Math.sign(sn) * Math.pow(Math.abs(sn), 2 / n) * ry;
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  }
+  ctx.closePath();
+}
+
+function drawScreenBase(ctx) {
+  ctx.clearRect(0, 0, D, D);
+  ctx.save();
+  circlePath(ctx);
+  ctx.clip();
+
+  const base = ctx.createRadialGradient(512, 500, 240, 512, 500, 660);
+  base.addColorStop(0.00, "rgb(21,24,32)");
+  base.addColorStop(0.55, "rgb(21,24,31)");
+  base.addColorStop(0.80, "rgb(20,22,28)");
+  base.addColorStop(1.00, "rgb(16,18,24)");
+  ctx.fillStyle = base;
+  ctx.fillRect(0, 0, D, D);
+
+  const glowTop = ctx.createRadialGradient(430, 210, 20, 430, 210, 560);
+  glowTop.addColorStop(0, "rgba(126,151,190,.02)");
+  glowTop.addColorStop(0.5, "rgba(112,136,175,.008)");
+  glowTop.addColorStop(1, "rgba(112,136,175,0)");
+  ctx.fillStyle = glowTop;
+  ctx.fillRect(0, 0, D, D);
+
+  const rightStreak = ctx.createLinearGradient(824, 0, 962, 0);
+  rightStreak.addColorStop(0, "rgba(120,145,185,0)");
+  rightStreak.addColorStop(0.72, "rgba(120,145,185,.03)");
+  rightStreak.addColorStop(1, "rgba(120,145,185,0)");
+  ctx.fillStyle = rightStreak;
+  ctx.fillRect(760, 120, 264, 840);
+
+  ctx.save();
+  ctx.filter = "blur(2.5px)";
+  superellipsePath(ctx, FACE.band.cx, FACE.band.cy, FACE.band.rx, FACE.band.ry, FACE.band.n);
+  const bandGrad = ctx.createLinearGradient(0, FACE.band.cy - FACE.band.ry, 0, FACE.band.cy + FACE.band.ry);
+  bandGrad.addColorStop(0, "rgba(3,7,20,.56)");
+  bandGrad.addColorStop(0.25, "rgba(3,8,21,.50)");
+  bandGrad.addColorStop(0.62, "rgba(3,8,21,.50)");
+  bandGrad.addColorStop(1, "rgba(3,7,20,.56)");
+  ctx.fillStyle = bandGrad;
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.filter = "blur(3px)";
+  superellipsePath(ctx, FACE.band.cx, FACE.band.cy - 14, FACE.band.rx - 26, FACE.band.ry - 6, FACE.band.n);
+  ctx.strokeStyle = "rgba(132,152,182,.055)";
+  ctx.lineWidth = 2.4;
+  ctx.stroke();
+  ctx.restore();
+
+  drawMouth(ctx);
+
+  const vig = ctx.createRadialGradient(CX, CX, 340, CX, CX, 512);
+  vig.addColorStop(0, "rgba(0,0,0,0)");
+  vig.addColorStop(0.62, "rgba(0,0,0,.06)");
+  vig.addColorStop(0.90, "rgba(0,0,0,.14)");
+  vig.addColorStop(1, "rgba(0,0,0,.22)");
+  ctx.fillStyle = vig;
+  ctx.fillRect(0, 0, D, D);
+
+  ctx.strokeStyle = "rgba(146,166,198,.10)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(CX, CX, 508, Math.PI * 1.03, Math.PI * 1.62);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function drawMouth(ctx) {
+  const { cx, cy, rx, ry } = FACE.mouth;
+  ctx.save();
+  ctx.filter = "blur(2.4px)";
+  ctx.beginPath();
+  ctx.moveTo(cx - rx, cy + 8);
+  ctx.quadraticCurveTo(cx - rx * 0.45, cy - ry, cx, cy - ry * 0.55);
+  ctx.quadraticCurveTo(cx + rx * 0.45, cy - ry, cx + rx, cy + 8);
+  ctx.quadraticCurveTo(cx, cy + ry * 0.9, cx - rx, cy + 8);
+  ctx.closePath();
+  ctx.fillStyle = "rgba(0,0,0,.10)";
+  ctx.fill();
+  ctx.strokeStyle = "rgba(120,140,172,.022)";
+  ctx.lineWidth = 1.6;
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawEye(ctx, dir, p, blink) {
+  const cx = CX + dir * FACE.eyeDX;
+  const cy = FACE.eyeCY;
+  const open = Math.max(0.03, (dir > 0 ? p.openR : p.openL) * blink);
+  const squint = dir > 0 ? p.squintR : p.squintL;
+  const extraTilt = dir > 0 ? p.tiltR : p.tiltL;
+  const rot = -dir * FACE.eyeRot + extraTilt;
+
+  const rx = FACE.eyeA;
+  const ryTop = FACE.eyeB * open;
+  const ryBot = FACE.eyeB * open * (1 - squint * 0.80);
+  const rxB = rx + FACE.bevel;
+  const ryTopB = (FACE.eyeB + FACE.bevel) * open;
+  const ryBotB = (FACE.eyeB + FACE.bevel) * open * (1 - squint * 0.78);
+
+  ctx.save();
+  ctx.filter = "blur(14px)";
+  eyeOutline(ctx, cx, cy, rxB + 8, ryTopB + 8, ryBotB + 8, rot);
+  ctx.fillStyle = "rgba(190,200,220,.07)";
+  ctx.fill();
+  ctx.restore();
+
+  ctx.save();
+  ctx.filter = "blur(10px)";
+  eyeOutline(ctx, cx, cy, rxB + 3, ryTopB + 3, ryBotB + 3, rot);
+  ctx.fillStyle = "rgba(0,0,0,.22)";
+  ctx.fill();
+  ctx.restore();
+
+  eyeOutline(ctx, cx, cy, rxB, ryTopB, ryBotB, rot);
+  const bezel = ctx.createLinearGradient(0, cy - FACE.eyeB, 0, cy + FACE.eyeB);
+  bezel.addColorStop(0.00, "#1a1c21");
+  bezel.addColorStop(0.30, "#2c2f35");
+  bezel.addColorStop(0.62, "#3d4047");
+  bezel.addColorStop(0.86, "#4a4e56");
+  bezel.addColorStop(1.00, "#545861");
+  ctx.fillStyle = bezel;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(3,4,7,.5)";
+  ctx.lineWidth = 2.5;
+  ctx.stroke();
+
+  eyeOutline(ctx, cx, cy, rxB, ryTopB, ryBotB, rot);
+  const rim = ctx.createLinearGradient(cx + dir * rxB, cy - ryTopB, cx - dir * rxB, cy + ryBotB);
+  rim.addColorStop(0.00, "rgba(255,255,255,.30)");
+  rim.addColorStop(0.40, "rgba(255,255,255,.07)");
+  rim.addColorStop(0.70, "rgba(255,255,255,.015)");
+  rim.addColorStop(1.00, "rgba(255,255,255,.10)");
+  ctx.strokeStyle = rim;
+  ctx.lineWidth = 3.4;
+  ctx.stroke();
+
+  eyeOutline(ctx, cx, cy, rx, ryTop, ryBot, rot);
+  const sclera = ctx.createLinearGradient(0, cy - FACE.eyeB, 0, cy + FACE.eyeB);
+  sclera.addColorStop(0.00, "#c9cbd1");
+  sclera.addColorStop(0.10, "#dfe0e4");
+  sclera.addColorStop(0.34, "#ededef");
+  sclera.addColorStop(0.62, "#f1f1f3");
+  sclera.addColorStop(0.86, "#e5e6e9");
+  sclera.addColorStop(1.00, "#ced0d4");
+  ctx.fillStyle = sclera;
+  ctx.fill();
+
+  ctx.save();
+  eyeOutline(ctx, cx, cy, rx, ryTop, ryBot, rot);
+  ctx.clip();
+
+  const side = ctx.createLinearGradient(cx + dir * rx, cy, cx - dir * rx, cy);
+  side.addColorStop(0.00, "rgba(0,0,0,.07)");
+  side.addColorStop(0.55, "rgba(0,0,0,0)");
+  side.addColorStop(1.00, "rgba(0,0,0,.02)");
+  ctx.fillStyle = side;
+  ctx.fillRect(cx - rx, cy - FACE.eyeB, rx * 2, FACE.eyeB * 2);
+
+  const shade = ctx.createRadialGradient(cx + dir * rx * 0.85, cy - ryTop, 0, cx + dir * rx * 0.85, cy - ryTop, 170);
+  shade.addColorStop(0.00, "rgba(70,76,90,.20)");
+  shade.addColorStop(0.45, "rgba(70,76,90,.05)");
+  shade.addColorStop(1.00, "rgba(70,76,90,0)");
+  ctx.fillStyle = shade;
+  ctx.fillRect(cx - rx, cy - FACE.eyeB, rx * 2, FACE.eyeB * 2);
+
+  const lid = ctx.createLinearGradient(0, cy - FACE.eyeB * open, 0, cy - FACE.eyeB * open * 0.50);
+  lid.addColorStop(0, "rgba(78,84,98,.42)");
+  lid.addColorStop(1, "rgba(78,84,98,0)");
+  ctx.fillStyle = lid;
+  ctx.fillRect(cx - rx, cy - FACE.eyeB, rx * 2, FACE.eyeB * 1.5);
+
+  const core = ctx.createRadialGradient(cx - dir * 22, cy - 10, 8, cx - dir * 22, cy - 10, 165);
+  core.addColorStop(0, "rgba(255,255,255,.16)");
+  core.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = core;
+  ctx.fillRect(cx - rx, cy - FACE.eyeB, rx * 2, FACE.eyeB * 2);
+
+  const gx = p.gazeX * 34;
+  const gy = p.gazeY * 26;
+  const px = cx - dir * FACE.pupilDX + gx;
+  const py = cy + FACE.pupilDY + gy;
+  const sc = Math.max(0.4, p.pupilScale * (0.82 + 0.18 * open));
+  const vf = 0.48 + 0.52 * open;
+  pupilPath(ctx, px, py, FACE.pupilHW * sc, FACE.pupilTop * sc * vf, FACE.pupilBot * sc * vf, 0);
+  const drop = ctx.createLinearGradient(px - 40, py - 80, px + 30, py + 80);
+  drop.addColorStop(0, "#191d27");
+  drop.addColorStop(0.42, "#121620");
+  drop.addColorStop(1, "#0c1017");
+  ctx.fillStyle = drop;
+  ctx.fill();
+  ctx.strokeStyle = "rgba(150,168,196,.07)";
+  ctx.lineWidth = 1.4;
+  ctx.stroke();
+
+  ctx.restore();
+
+  eyeOutline(ctx, cx, cy, rx, ryTop, ryBot, rot);
+  const innerLine = ctx.createLinearGradient(0, cy - FACE.eyeB * open, 0, cy + FACE.eyeB * open);
+  innerLine.addColorStop(0, "rgba(255,255,255,.02)");
+  innerLine.addColorStop(0.6, "rgba(255,255,255,.16)");
+  innerLine.addColorStop(1, "rgba(255,255,255,.55)");
+  ctx.strokeStyle = innerLine;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+}
+
+function drawEyes(ctx, p, blink) {
+  drawEye(ctx, -1, p, blink);
+  drawEye(ctx, 1, p, blink);
+}
+
+function renderFace(canvas, p = pose(), blink = 1) {
+  const ctx = canvas.getContext("2d");
+  const s = canvas.width / D;
+  ctx.setTransform(s, 0, 0, s, 0, 0);
+  drawScreenBase(ctx);
+  drawEyes(ctx, p, blink);
+  return ctx;
+}
+
+const masterCanvas = document.getElementById("master");
+renderFace(masterCanvas);
+
+const compareCanvas = document.getElementById("compareDesign");
+renderFace(compareCanvas);
+
+const compare = document.getElementById("compare");
+const divider = compare.querySelector(".divider");
+const knob = compare.querySelector(".knob");
+let split = 50;
+function setSplit(v) {
+  split = Math.max(0, Math.min(100, v));
+  compareCanvas.style.clipPath = `inset(0 ${100 - split}% 0 0)`;
+  divider.style.left = split + "%";
+  knob.style.left = split + "%";
+}
+setSplit(50);
+let dragging = false;
+function pointerX(e) {
+  const r = compare.getBoundingClientRect();
+  return ((e.clientX - r.left) / r.width) * 100;
+}
+compare.addEventListener("pointerdown", (e) => { dragging = true; setSplit(pointerX(e)); compare.setPointerCapture(e.pointerId); });
+compare.addEventListener("pointermove", (e) => { if (dragging) setSplit(pointerX(e)); });
+compare.addEventListener("pointerup", () => { dragging = false; });
+compare.addEventListener("pointercancel", () => { dragging = false; });
+
+const EXP = [
+  { key: "idle", name: "平静", sub: "IDLE", p: { openL: .985, openR: .985, squintL: .06, squintR: .06, gazeX: .02, pupilScale: .98 } },
+  { key: "focused", name: "专注 · 参考帧", sub: "FOCUSED", p: {} },
+  { key: "happy", name: "开心", sub: "HAPPY", p: { openL: .82, openR: .82, squintL: .42, squintR: .42, gazeY: .05, pupilScale: 1.02, tiltL: -.05, tiltR: -.05 } },
+  { key: "sleepy", name: "困倦", sub: "SLEEPY", p: { openL: .60, openR: .60, squintL: .20, squintR: .20, gazeY: -.22, pupilScale: .95, tiltL: -.22, tiltR: .22 } },
+];
+const expHost = document.getElementById("expressions");
+EXP.forEach((e) => {
+  const wrap = document.createElement("div");
+  wrap.className = "expression";
+  const c = document.createElement("canvas");
+  c.width = 512; c.height = 512;
+  wrap.appendChild(c);
+  const h = document.createElement("h3");
+  h.innerHTML = `${e.name}<span>${e.sub}</span>`;
+  wrap.appendChild(h);
+  expHost.appendChild(wrap);
+  renderFace(c, pose(e.p));
+});
+
+const sphereCanvas = document.getElementById("sphere");
+const tiltInput = document.getElementById("tilt");
+const tiltOut = document.getElementById("tiltOut");
+
+const texture = document.createElement("canvas");
+texture.width = texture.height = 1024;
+renderFace(texture);
+
+const TEX = texture.getContext("2d").getImageData(0, 0, 1024, 1024).data;
+const CAP_COS = Math.cos(53 * Math.PI / 180);
+const SIN = Math.sin(53 * Math.PI / 180);
+
+function sampleBilinear(x, y, out) {
+  const fx = Math.max(0, Math.min(1023, x));
+  const fy = Math.max(0, Math.min(1023, y));
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const x1 = Math.min(1023, x0 + 1), y1 = Math.min(1023, y0 + 1);
+  const tx = fx - x0, ty = fy - y0;
+  const i00 = (y0 * 1024 + x0) * 4, i10 = (y0 * 1024 + x1) * 4;
+  const i01 = (y1 * 1024 + x0) * 4, i11 = (y1 * 1024 + x1) * 4;
+  for (let c = 0; c < 3; c++) {
+    out[c] =
+      TEX[i00 + c] * (1 - tx) * (1 - ty) +
+      TEX[i10 + c] * tx * (1 - ty) +
+      TEX[i01 + c] * (1 - tx) * ty +
+      TEX[i11 + c] * tx * ty;
+  }
+}
+
+function renderSphere(yawDeg) {
+  const w = sphereCanvas.width, h = sphereCanvas.height;
+  const ctx = sphereCanvas.getContext("2d");
+  const yaw = yawDeg * Math.PI / 180;
+  const cyw = Math.cos(yaw), syw = Math.sin(yaw);
+  const cx = w / 2, cy = h / 2;
+  const Rh = h * 0.40;
+  const img = ctx.createImageData(w, h);
+  const px = img.data;
+  const rgb = [0, 0, 0];
+
+  const L = [-0.42, 0.52, 0.74];
+  const Ln = Math.hypot(L[0], L[1], L[2]);
+  const lx = L[0] / Ln, ly = L[1] / Ln, lz = L[2] / Ln;
+
+  for (let y = 0; y < h; y++) {
+    const ny = (cy - y) / Rh;
+    for (let x = 0; x < w; x++) {
+      const nx = (x - cx) / Rh;
+      const r2 = nx * nx + ny * ny;
+      if (r2 > 1) continue;
+      const nz = Math.sqrt(1 - r2);
+      const bx = nx * cyw - nz * syw;
+      const bz = nx * syw + nz * cyw;
+      const diff = Math.max(0, nx * lx + ny * ly + nz * lz);
+      const rim = Math.pow(1 - nz, 3) * 0.55;
+      const i = (y * w + x) * 4;
+
+      if (bz > CAP_COS) {
+        const u = 512 + (bx / SIN) * 512;
+        const v = 512 - (ny / SIN) * 512;
+        sampleBilinear(u, v, rgb);
+        const shade = 0.90 + 0.16 * diff;
+        px[i] = Math.min(255, rgb[0] * shade + rim * 26);
+        px[i + 1] = Math.min(255, rgb[1] * shade + rim * 30);
+        px[i + 2] = Math.min(255, rgb[2] * shade + rim * 38);
+      } else {
+        const base = 0.20 + 0.95 * diff + rim * 0.70;
+        px[i] = Math.min(255, 34 * base);
+        px[i + 1] = Math.min(255, 37 * base);
+        px[i + 2] = Math.min(255, 43 * base);
+      }
+      px[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  ctx.save();
+  const hi = ctx.createRadialGradient(cx - Rh * 0.18, cy - Rh * 0.82, 2, cx - Rh * 0.18, cy - Rh * 0.82, Rh * 0.34);
+  hi.addColorStop(0, "rgba(180,192,210,.16)");
+  hi.addColorStop(.5, "rgba(150,162,182,.05)");
+  hi.addColorStop(1, "rgba(150,162,182,0)");
+  ctx.fillStyle = hi;
+  ctx.fillRect(0, 0, w, h);
+
+  const shadow = ctx.createRadialGradient(cx, cy + Rh * 0.92, 4, cx, cy + Rh * 0.92, Rh * 0.85);
+  shadow.addColorStop(0, "rgba(0,0,0,.42)");
+  shadow.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = shadow;
+  ctx.fillRect(0, 0, w, h);
+  ctx.restore();
+}
+
+let pending = 0;
+function scheduleSphere() {
+  if (pending) return;
+  pending = requestAnimationFrame(() => {
+    pending = 0;
+    renderSphere(parseFloat(tiltInput.value));
+    tiltOut.textContent = parseFloat(tiltInput.value).toFixed(1) + "°";
+  });
+}
+tiltInput.addEventListener("input", scheduleSphere);
+scheduleSphere();
+</script>
+</body>
+</html>

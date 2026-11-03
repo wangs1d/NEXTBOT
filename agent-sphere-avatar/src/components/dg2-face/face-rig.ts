@@ -39,25 +39,25 @@ export interface FacePose {
 const BASE: FacePose = {
   openL: 1,
   openR: 1,
-  squintL: 0.1,
-  squintR: 0.1,
+  squintL: 0,
+  squintR: 0,
   gazeX: 0,
   gazeY: 0,
   pupilScale: 1,
-  tiltL: 0.15,
-  tiltR: 0.15,
+  tiltL: 0.27,
+  tiltR: 0.27,
   glow: 0.35,
 };
 
 /** 表情预设 —— focused 就是参考图那一张 */
 export const FACE_EXPRESSIONS: Record<FaceExpression, Partial<FacePose>> = {
   focused: {},
-  idle: { openL: 0.99, openR: 0.99, squintL: 0.06, squintR: 0.06, gazeX: 0, gazeY: 0, tiltL: 0.12, tiltR: 0.12 },
-  listening: { openL: 1.04, openR: 1.04, squintL: 0, squintR: 0, gazeX: 0, gazeY: -0.05, pupilScale: 1.04, tiltL: 0, tiltR: 0 },
-  thinking: { openL: 0.9, openR: 0.86, squintL: 0.32, squintR: 0.26, gazeX: 0.12, gazeY: 0.6, tiltL: 0.1, tiltR: 0.06 },
-  happy: { openL: 0.74, openR: 0.74, squintL: 0.44, squintR: 0.44, gazeX: 0, gazeY: 0.04, pupilScale: 1.05, tiltL: 0.12, tiltR: 0.12 },
-  alert: { openL: 1.12, openR: 1.12, squintL: 0, squintR: 0, gazeX: 0, gazeY: 0.05, pupilScale: 0.78, tiltL: 0, tiltR: 0, glow: 0.6 },
-  sleepy: { openL: 0.4, openR: 0.4, squintL: 0.3, squintR: 0.3, gazeX: 0, gazeY: -0.3, pupilScale: 1.1, glow: 0.2 },
+  idle: { openL: 0.99, openR: 0.99, squintL: 0.06, squintR: 0.06, gazeX: 0, gazeY: 0, tiltL: 0.27, tiltR: 0.27 },
+  listening: { openL: 1.04, openR: 1.04, squintL: 0, squintR: 0, gazeX: 0, gazeY: -0.05, pupilScale: 1.04, tiltL: 0.2, tiltR: 0.2 },
+  thinking: { openL: 0.9, openR: 0.86, squintL: 0.32, squintR: 0.26, gazeX: 0.12, gazeY: 0.6, tiltL: 0.22, tiltR: 0.16 },
+  happy: { openL: 0.74, openR: 0.74, squintL: 0.44, squintR: 0.44, gazeX: 0, gazeY: 0.04, pupilScale: 1.05, tiltL: 0.24, tiltR: 0.24 },
+  alert: { openL: 1.12, openR: 1.12, squintL: 0, squintR: 0, gazeX: 0, gazeY: 0.05, pupilScale: 0.78, tiltL: 0.18, tiltR: 0.18, glow: 0.6 },
+  sleepy: { openL: 0.4, openR: 0.4, squintL: 0.3, squintR: 0.3, gazeX: 0, gazeY: -0.3, pupilScale: 1.1, tiltL: 0.05, tiltR: 0.05, glow: 0.2 },
 };
 
 export function poseFor(expression: FaceExpression): FacePose {
