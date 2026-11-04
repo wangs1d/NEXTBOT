@@ -557,18 +557,28 @@ void DynamicIslandWindow::PositionAtTopCenter() {
   // 抑制期间（或 Dart 已把岛藏起时）绝不借定位露头：显示模式切换 / DPI 变化
   // 都会走到这里，SWP_SHOWWINDOW 曾把已让位的岛重新弹到全屏游戏画面之上，
   // 而抑制标志没变、下一跳直接早退，岛就再也收不回去（2026-10-25 根因）。
-  // peek 唤出是唯一例外（用户主动贴顶边要岛）。
-  if (peek_active_ || (visible_ && !suppressed_by_fullscreen_)) {
+  // peek 唤出只在「没有几何证据」时算例外（2026-11-04：全屏应用压住岛形时
+  // peek 一律不得借定位露头）。
+  if ((peek_active_ && !suppress_by_geometry_) ||
+      (visible_ && !suppressed_by_fullscreen_)) {
     flags |= SWP_SHOWWINDOW;
   }
-  // 常态沉底：任何普通窗口都盖在岛之上。仅 urgent 提醒与顶边 peek 走
-  // RaiseTopmost 临时置顶，结束/收回后经这里落回沉底。
+  // 常态沉底：任何普通窗口都盖在岛之上。仅 urgent 提醒临时置顶，
+  // 结束/收回后经这里（LowerToBottom）落回沉底。
   SetWindowPos(window_handle_, HWND_BOTTOM, x, y, w, h, flags);
 }
 
 void DynamicIslandWindow::RaiseTopmost() {
   if (window_handle_ == nullptr) return;
   SetWindowPos(window_handle_, HWND_TOPMOST, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+}
+
+// 落回常态沉底（不改位置/尺寸）。urgent 提醒或 peek 曾临时置顶，隐藏时必须
+// 一并落底——否则「隐藏 + 顶层」的窗口经任意 Show 路径复活都会骑在全屏应用之上。
+void DynamicIslandWindow::LowerToBottom() {
+  if (window_handle_ == nullptr) return;
+  SetWindowPos(window_handle_, HWND_BOTTOM, 0, 0, 0, 0,
                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 }
 
@@ -591,6 +601,7 @@ void DynamicIslandWindow::Hide() {
   UpdateWheelHook();
   if (window_handle_ != nullptr) {
     ShowWindow(window_handle_, SW_HIDE);
+    LowerToBottom();
   }
   StopAnimTimer();
 }
@@ -1339,19 +1350,26 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {
   const bool quns_busy =
       state_ok && (state == QUNS_RUNNING_D3D_FULL_SCREEN ||
                    state == QUNS_PRESENTATION_MODE || state == QUNS_BUSY);
+  // 2026-11-04：把「几何证据」（真实应用铺满/最大化盖住岛形）与「启发式忙碌」
+  // 拆开。几何证据在时，岛这块像素后面就是别人的全屏画面，任何二次唤出
+  // （顶边 peek）都属于「除提醒外破屏」——peek 以本标志为硬闸（见
+  // UpdateTopEdgePeek）。
+  const bool geometry_covered = covered || fg_fullscreen;
   const bool busy = !recording && !attention_active &&
-                    (covered || fg_fullscreen || quns_busy);
+                    (geometry_covered || quns_busy);
+  suppress_by_geometry_ = busy && geometry_covered;
   // 取证日志：每 ~150s 一次心跳证明本心跳活着；转向时必记（含 visible_ 快照）。
   static int tick_count = 0;
   const bool heartbeat = (++tick_count % 75) == 1;
   if (heartbeat) {
-    wchar_t hb[200];
+    wchar_t hb[220];
     _snwprintf_s(
         hb, _countof(hb), _TRUNCATE,
-        L"suppress-tick busy=%d rec=%d cov=%d fill=%d quns=%d suppressed=%d "
-        L"visible=%d winvis=%d",
+        L"suppress-tick busy=%d rec=%d cov=%d fill=%d quns=%d geom=%d "
+        L"suppressed=%d visible=%d winvis=%d",
         busy ? 1 : 0, recording ? 1 : 0, covered ? 1 : 0,
         fg_fullscreen ? 1 : 0, quns_busy ? 1 : 0,
+        suppress_by_geometry_ ? 1 : 0,
         suppressed_by_fullscreen_ ? 1 : 0, visible_ ? 1 : 0,
         (window_handle_ != nullptr && IsWindowVisible(window_handle_)) ? 1 : 0);
     IslandLifecycleLog(window_handle_, hb);
@@ -1360,12 +1378,23 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {
     // 标志没变不代表窗口没被露出来：定位（显示模式/DPI 切换）、重建、
     // 外部 ShowWindow 都可能在抑制期间把岛重新弹回全屏画面之上，而旧代码
     // 到这里直接早退，永远收不回去（2026-10-25 独占全屏游戏根因）。
-    // 每跳强制兜底隐藏；peek 是用户主动唤出，免收。
-    if (busy && window_handle_ != nullptr && !peek_active_) {
+    // 每跳强制兜底隐藏；peek 是用户主动唤出，仅在「没有几何证据」时免收
+    // （几何证据 = 真实全屏应用压在岛这块像素上，唤出必破屏，见 2026-11-04）。
+    if (busy && window_handle_ != nullptr &&
+        (!peek_active_ || suppress_by_geometry_)) {
+      if (peek_active_ && suppress_by_geometry_) {
+        // 唤出态被全屏应用接管：收回 peek，避免它带着顶层态继续挂在画面上。
+        peek_active_ = false;
+        hovering_ = false;
+        UpdateWheelHook();
+      }
       if (IsWindowVisible(window_handle_)) {
         IslandLifecycleLog(window_handle_, L"suppress-enforce-hide");
         ShowWindow(window_handle_, SW_HIDE);
       }
+      // 抑制期间不保留任何顶层态：urgent 提醒/peek 遗留的置顶在这里落回沉底，
+      // 后续任何 Show 路径都不会再骑到全屏应用之上。
+      LowerToBottom();
       StopAnimTimer();
     }
     return;
@@ -1380,6 +1409,7 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {
   if (busy) {
     peek_active_ = false;  // 抑制开始：顶边唤出态一并收回
     ShowWindow(window_handle_, SW_HIDE);
+    LowerToBottom();
     StopAnimTimer();
   } else if (visible_) {
     peek_active_ = false;  // 抑制解除：回到常驻显示，探针退位
@@ -1478,6 +1508,14 @@ bool DynamicIslandWindow::IsForegroundFullscreenApp() const {
 // suppressed_by_fullscreen_ 标志——peek 只是视觉临时放行，收回零成本；
 // attention 不走 peek：它有自己的豁免与唤回链路（StartAttention）。
 // 收回条件：离开顶边且不在岛上（0.5s 宽限，容忍顶边→岛的移动间隙）。
+//
+// 2026-11-04 漏出根修：peek 曾无条件「Show + RaiseTopmost」，而全屏游戏里
+// 鼠标贴顶边（FPS 抬枪、菜单、Alt+Tab 手势）是常态动作——一贴边岛就置顶
+// 冒到游戏画面上，成为「除 urgent 提醒外唯一破屏口」。现在两道闸：
+//   1) suppress_by_geometry_（真实全屏/最大化应用压住岛形）在时一律不唤；
+//      此时岛下面是人家的画面，任何唤出都是遮挡。
+//   2) peek 只 Show 不置顶：岛仍按常态沉底，没有窗口盖住时照常可见，
+//      盖住时不至于骑到别人窗口之上。
 void DynamicIslandWindow::UpdateTopEdgePeek() {
   if (window_handle_ == nullptr) return;
   if (!suppressed_by_fullscreen_) {
@@ -1485,6 +1523,20 @@ void DynamicIslandWindow::UpdateTopEdgePeek() {
     return;
   }
   if (attention_start_s_ >= 0) return;
+  if (suppress_by_geometry_) {
+    if (peek_active_) {
+      // 全屏应用接管了岛这块像素：唤出态立即收回。
+      peek_active_ = false;
+      if (stage_target_ != Stage::kCompact) SetStage(Stage::kCompact);
+      ShowWindow(window_handle_, SW_HIDE);
+      StopAnimTimer();
+      hovering_ = false;
+      UpdateWheelHook();
+      LowerToBottom();
+      IslandLifecycleLog(window_handle_, L"peek-off-geometry");
+    }
+    return;
+  }
   RECT wa = {};
   if (!SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) return;
   POINT p = {};
@@ -1498,8 +1550,7 @@ void DynamicIslandWindow::UpdateTopEdgePeek() {
     peek_active_ = true;
     PositionAtTopCenter();
     ShowWindow(window_handle_, SW_SHOWNOACTIVATE);
-    // 用户主动贴顶边唤出：沉底常态下唯一的手动唤出口，临时置顶才可见。
-    RaiseTopmost();
+    // 不置顶（2026-11-04）：沉底即可见，置顶会把岛骑到盖住它的窗口之上。
     StartAnimTimer();
     IslandLifecycleLog(window_handle_, L"peek-on");
     return;

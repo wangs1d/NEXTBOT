@@ -34,11 +34,13 @@ class Graphics;
 ///     无边框全屏铺满显示器 / 最大化盖岛）：2026-10-09 拍板应用最大化同样
 ///     让位，2026-10-14 根修补上无边框全屏缺口，2026-10-23 根修把判定对象
 ///     从「前台窗口」换成「Z 序压在岛上面的那个窗口」——底部全屏页之上再
-///     开一个非全屏小应用，岛不再跟着复活；让位期间鼠标贴屏幕顶边可临时
-///     唤出（peek）。录屏豁免 2026-10-24 收紧：除 Game Bar 服务外，
-///     名单进程须有可见、未最小化的顶层窗口才豁免（剪映等常驻/残留
-///     进程不再把豁免永久焊死）。2026-10-25 根修：抑制期间定位不再带
-///     SWP_SHOWWINDOW（显示模式切换曾把岛重新弹到独占全屏游戏之上），
+///     开一个非全屏小应用，岛不再跟着复活。2026-11-04 收敛顶边 peek 漏口：
+///     几何证据（真实全屏/最大化应用压住岛形）在时 peek 一律不唤出，且
+///     peek 不再置顶、所有隐藏路径强制落回沉底——全屏游戏/放映/视频里
+///     除 urgent 提醒外再无任何破屏路径。录屏豁免 2026-10-24 收紧：除
+///     Game Bar 服务外，名单进程须有可见、未最小化的顶层窗口才豁免（剪映
+///     等常驻/残留进程不再把豁免永久焊死）。2026-10-25 根修：抑制期间定位
+///     不再带 SWP_SHOWWINDOW（显示模式切换曾把岛重新弹到独占全屏游戏之上），
 ///     且抑制心跳每跳强制兜底隐藏；全屏判定补「前台全屏」与「跨浮层扫描」
 ///
 /// 尺寸即声明（islandTransition 思路）：壳层只在「声明尺寸档」之间插值，
@@ -223,6 +225,7 @@ class DynamicIslandWindow {
 
   void PositionAtTopCenter();
   void RaiseTopmost();
+  void LowerToBottom();      // 落回常态沉底（隐藏时清掉临时置顶，防复活骑屏）
   void UpdateAnimations();   // 定时器驱动：推进动画相位并重绘
   void Render();             // 整体重绘（GDI+ -> UpdateLayeredWindow）
   int CompactWidthFor(Kind kind) const;  // 声明档：该内容态的标准胶囊宽
@@ -301,6 +304,9 @@ class DynamicIslandWindow {
   HWND window_handle_ = nullptr;
   bool visible_ = false;
   bool suppressed_by_fullscreen_ = false;
+  // 本轮抑制是否由几何证据触发（真实全屏/最大化应用压住岛形，而不只是
+  // QUNS 启发式忙碌）。顶边 peek 的硬闸：几何证据在时一律不唤出。
+  bool suppress_by_geometry_ = false;
   bool peek_active_ = false;        // 抑制中的顶边唤出临时显示
   ULONGLONG peek_last_in_zone_ms_ = 0;  // 鼠标最近一次位于顶边区/岛上的时刻
   double dpi_scale_ = 1.0;
