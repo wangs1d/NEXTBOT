@@ -86,7 +86,7 @@ test("确定性兜底文案带上要交的事（LLM 未注入时也不会漏）"
 
 // ───────────────────────── 晨间简报（L3 + L1） ─────────────────────────
 
-test("晨报带上今天截止与这周还要交，且 L2（明天）不重复出现", async () => {
+test("晨报把今天截止并进今日日程，这周还要交只带一句件数", async () => {
   const todayItem = item({
     id: "commitment:today",
     title: "交英语作业",
@@ -107,19 +107,26 @@ test("晨报带上今天截止与这周还要交，且 L2（明天）不重复�
   });
   const briefing = await svc.generateBriefing("s1");
 
-  assert.equal(briefing.deadlines?.today.length, 1);
-  assert.equal(briefing.deadlines?.soon.length, 1);
+  // 2026-11-04 合并：今天截止的 DDL 是今日日程里的一条（kind=deadline），
+  // 不再有独立 deadlines 块；soon（2~3 天后）只留件数给播报稿。
+  const ddlItems = briefing.todaySchedule.filter((i) => i.kind === "deadline");
+  assert.equal(ddlItems.length, 1);
+  assert.equal(ddlItems[0]!.title, "交英语作业");
+  assert.equal(ddlItems[0]!.time, "23:00");
+  assert.equal(briefing.deadlineSoonCount, 1);
+  assert.equal("deadlines" in briefing, false);
 
   // 无 llmComplete → 播报稿走确定性模板，验证兜底文案也带上了 DDL
   const { narrationText } = await svc.narrateBriefing("s1");
-  assert.match(narrationText, /今天 .* 前要交/);
-  assert.match(narrationText, /这周还有 1 项要交/);
+  assert.match(narrationText, /23:00 前要交《交英语作业》/);
+  assert.match(narrationText, /这两三天内还有 1 项要交/);
 });
 
-test("晨报 DDL 两档皆空时整块省略", async () => {
+test("晨报 DDL 两档皆空时既无截止条目也无 soon 件数", async () => {
   const svc = new MorningBriefingService({
     ddlRadar: { forMorning: () => ({ today: [], soon: [] }) },
   });
   const briefing = await svc.generateBriefing("s1");
-  assert.equal(briefing.deadlines, undefined);
+  assert.equal(briefing.todaySchedule.length, 0);
+  assert.equal(briefing.deadlineSoonCount, undefined);
 });

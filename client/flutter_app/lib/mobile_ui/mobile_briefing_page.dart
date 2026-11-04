@@ -10,8 +10,11 @@ import "mobile_theme.dart";
 /// 手机端「每日简报」页。
 ///
 /// 与桌面端简报同源:GET /api/morning-briefing?sessionId=<账号 id>,
-/// 服务端实时生成(天气/今日日程/待看笔记/待办跟进/近期重要日子/穿搭建议)。
-/// 在途行程段只给手机端：带 includeInProgressTravel=1 才取，桌面端不传。
+/// 服务端实时生成(今日日程 + 待办跟进)。
+/// 2026-11-04 收敛：待复习笔记/兴趣热搜/近期重要日子撤出晨报——热搜归话题追踪
+/// （后台轮询后主动在对话里说），重要日子归明日速览；DDL 与在途行程并进
+/// 「今日日程」同一栏（服务端已按 kind 标记，条目标题带「截止／行程」前缀）。
+/// 在途行程只给手机端：带 includeInProgressTravel=1 才取，桌面端不传。
 class MobileBriefingPage extends StatefulWidget {
   const MobileBriefingPage({super.key, this.client});
 
@@ -145,18 +148,23 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
           title: "今日日程",
           child: _buildScheduleItems(b, p),
         ),
-        _Section(
-          p: p,
-          icon: Icons.sticky_note_2_outlined,
-          title: "没看过的笔记",
-          child: _buildNoteItems(b, p),
-        ),
         _buildTodoSection(b, p),
-        _buildImportantDaysSection(b, p),
-        _buildTravelSection(b, p),
         const SizedBox(height: 24),
       ],
     );
+  }
+
+  /// 日程条目标题：三源合并后按 kind 加前缀（截止 / 行程），普通日程原样
+  String _scheduleTitle(dynamic item) {
+    final String title = (item as Map<String, dynamic>)["title"]?.toString() ?? "";
+    final String kind = item["kind"]?.toString() ?? "schedule";
+    final String note = item["note"]?.toString() ?? "";
+    final String prefix = kind == "deadline"
+        ? "截止："
+        : kind == "travel"
+            ? "行程："
+            : "";
+    return note.isEmpty ? "$prefix$title" : "$prefix$title（$note）";
   }
 
   Widget _buildScheduleItems(Map<String, dynamic> b, MobilePalette p) {
@@ -181,36 +189,7 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
                 ),
                 Expanded(
                   child: Text(
-                    item["title"]?.toString() ?? "",
-                    style: TextStyle(color: p.textPrimary, fontSize: 15),
-                  ),
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildNoteItems(Map<String, dynamic> b, MobilePalette p) {
-    final List<dynamic> items = (b["pendingNotes"] as List<dynamic>?) ?? const <dynamic>[];
-    if (items.isEmpty) {
-      return _EmptyHint(p: p, text: "笔记都看过了");
-    }
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        for (final dynamic item in items)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: Row(
-              children: [
-                const SizedBox(width: 4),
-                Container(width: 4, height: 4, decoration: BoxDecoration(color: p.textMuted, shape: BoxShape.circle)),
-                const SizedBox(width: 10),
-                Expanded(
-                  child: Text(
-                    (item as Map<String, dynamic>)["title"]?.toString() ?? "",
+                    _scheduleTitle(item),
                     style: TextStyle(color: p.textPrimary, fontSize: 15),
                   ),
                 ),
@@ -258,77 +237,6 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
     );
   }
 
-  /// 行程段：今天落在行程区间内 → 目的地 + 第一站 + 随身叮嘱（第六源）
-  Widget _buildTravelSection(Map<String, dynamic> b, MobilePalette p) {
-    final Map<String, dynamic>? travel = b["travel"] as Map<String, dynamic>?;
-    if (travel == null) return const SizedBox.shrink();
-    final Map<String, dynamic>? firstStop =
-        travel["firstStop"] as Map<String, dynamic>?;
-    final List<dynamic> packing =
-        (travel["packing"] as List<dynamic>?) ?? const <dynamic>[];
-    final String destination = travel["destination"]?.toString() ?? "";
-    final String title = travel["title"]?.toString() ?? "";
-    return _Section(
-      p: p,
-      icon: Icons.luggage_outlined,
-      title: "今日行程",
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(
-            firstStop != null
-                ? "$destination · 「$title」\n第一站 ${firstStop["startTime"] ?? ""} ${firstStop["name"] ?? ""}"
-                : "$destination · 「$title」",
-            style: TextStyle(color: p.textPrimary, fontSize: 15, height: 1.5),
-          ),
-          if (packing.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 8),
-              child: Text(
-                "记得带：${packing.join("、")}",
-                style: TextStyle(color: p.textSecondary, fontSize: 13.5),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildImportantDaysSection(Map<String, dynamic> b, MobilePalette p) {
-    final List<dynamic> days = (b["upcomingImportantDays"] as List<dynamic>?) ?? const <dynamic>[];
-    if (days.isEmpty) return const SizedBox.shrink();
-    return _Section(
-      p: p,
-      icon: Icons.celebration_outlined,
-      title: "近期重要日子",
-      child: Column(
-        children: [
-          for (final dynamic d in days)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 8),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SizedBox(
-                    width: 76,
-                    child: Text(
-                      (d as Map<String, dynamic>)["date"]?.toString() ?? "",
-                      style: TextStyle(color: p.textMuted, fontSize: 13),
-                    ),
-                  ),
-                  Expanded(
-                    child: Text(
-                      d["title"]?.toString() ?? "",
-                      style: TextStyle(color: p.textPrimary, fontSize: 15),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
 }
 
 class _Section extends StatelessWidget {

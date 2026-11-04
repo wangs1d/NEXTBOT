@@ -7,6 +7,8 @@
  *   - 次日天气与预警（WeatherService.getBrief().tomorrow + 预警检测）
  *   - 明日穿衣（buildClothingAdvice 同源）
  *   - 截止事项 DDL L2 档（DdlRadarService.forEvening）
+ *   - 近期重要日子（7 天窗口，2026-11-04 从晨报迁来：生日/纪念日属于
+ *     「提前准备」的信息，跟睡前这段对话更搭，晨报只留下当日祝福提醒）
  *
  * 送达链路参考晨报：调度器（EveningDigestScheduler）到点触发 → 装配层
  * onDigestTriggered → WS 推送（ServerEventType.EveningDigest）。
@@ -23,6 +25,12 @@ import type { DdlItem } from "./ddl-radar-service.js";
 import { buildClothingAdvice, detectSevereWeatherAlerts } from "./weather-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherLocation, WeatherPrefsService } from "./weather-prefs-service.js";
+import {
+  importantDayTypeLabel,
+  readUpcomingImportantDays,
+  type ImportantDay,
+  type ImportantDaysStoreLike,
+} from "./important-days-shared.js";
 
 export interface EveningDigestScheduleItem {
   id: string;
@@ -73,6 +81,11 @@ export interface EveningDigest {
    * L1（2~3 天后）与 L3（当天早晨）走晨报；这里只承担"明晚要交"。
    */
   deadlineReminders?: DdlItem[];
+  /**
+   * 近期重要日子（2026-11-04 从晨报迁来）：7 天窗口内的生日/纪念日，
+   * 按剩余天数升序。无记录时整块省略。
+   */
+  importantDays?: ImportantDay[];
 }
 
 /** DDL 雷达最小结构接口（避免与扫描器实现耦合） */
@@ -117,6 +130,11 @@ export type EveningDigestDeps = {
    * 分钟级梯度提醒撞车。
    */
   ddlRadar?: DdlRadarLike | null;
+  /**
+   * 重要日子存储（2026-11-04 迁入）：读 care.set_important_date 写入的
+   * important_dates KV。未注入 = 不做该块。
+   */
+  importantDaysStore?: ImportantDaysStoreLike;
 };
 
 function localDateKey(d: Date): string {
@@ -214,6 +232,13 @@ export class EveningDigestService {
       const ddl = this.fetchDeadlineReminders(sessionId);
       if (ddl.length > 0) digest.deadlineReminders = ddl;
     }
+    // 近期重要日子（7 天窗口，确定性读取，零 LLM）：生日/纪念日要提前备一句，
+    // 睡前这段对话比清晨更合适（2026-11-04 从晨报迁来）。
+    // 补推口径用虚拟"今天"计算剩余天数，与 date 标签保持一致。
+    const importantDays = readUpcomingImportantDays(this.deps.importantDaysStore, sessionId, {
+      now,
+    });
+    if (importantDays.length > 0) digest.importantDays = importantDays;
     digest.narrationText = await this.composeNarrationText(sessionId, digest);
     return digest;
   }
@@ -295,6 +320,22 @@ export class EveningDigestService {
     if (d.deadlineReminders && d.deadlineReminders.length > 0) {
       dataLines.push(`- 截止事项（必须提）：${formatDeadlineFacts(d.deadlineReminders)}`);
     }
+    if (d.importantDays && d.importantDays.length > 0) {
+      dataLines.push(
+        `- 近期重要日子：${d.importantDays
+          .slice(0, 3)
+          .map(
+            (i) =>
+              `${i.name}的${importantDayTypeLabel(i.type)}` +
+              (i.daysUntil === 0
+                ? "（今天）"
+                : i.daysUntil === 1
+                  ? "（明天）"
+                  : `（${i.daysUntil} 天后）`),
+          )
+          .join("；")}`,
+      );
+    }
 
     return [
       "你是用户最熟的那个朋友，晚上临睡前顺口提一嘴明天的事。" +
@@ -313,6 +354,8 @@ export class EveningDigestService {
       "- 有截止事项的话必须提，这是睡前最该交代的一句：说明天/今天什么时候要交什么，" +
         "像「明天下午三点前那个数据结构的作业得交了」；超过两件只说最紧的那一件+一共几件，" +
         "别把清单念一遍，也别加「别忘了」「切记」这类催促腔。",
+      "- 有近期重要日子（生日/纪念日）的话顺口带一句，像「后天妈生日，别忘了」；" +
+        "只提最近的那一个，别把名单念一遍。",
       "- 明天没安排就轻松带过一句，不许编事，也不许硬凑。",
       "- 松弛不等于贫嘴：「就下雨这点事」「不就个XX」这种把正事说成玩笑的轻浮腔不许有，" +
         "提醒要正经给，收尾可以随意。",
@@ -451,13 +494,14 @@ export class EveningDigestService {
     const n = items.length;
     const bit = weatherOutfitBit(d);
     const ddlBit = deadlineBit(d.deadlineReminders);
+    const dayBit = importantDaysBit(d.importantDays);
 
     // 明天没安排：天气穿衣照说，没数据才干脆的不打扰（bit 去掉「明天」主语避免重复）
     if (n === 0) {
       if (bit) {
-        return `明天没安排，${bit.replace(/^明天/, "")}${ddlBit}`;
+        return `明天没安排，${bit.replace(/^明天/, "")}${ddlBit}${dayBit}`;
       }
-      return `明天没安排，想睡就多睡会儿。${ddlBit}`;
+      return `明天没安排，想睡就多睡会儿。${ddlBit}${dayBit}`;
     }
 
     const first = items[0]!;
@@ -480,6 +524,8 @@ export class EveningDigestService {
     }
     // DDL L2 档：明天要交的（兜底模板也要交代，不能只有 LLM 版本才有）
     if (ddlBit) line += ddlBit;
+    // 近期重要日子：只提最近的那一个
+    if (dayBit) line += dayBit;
     return line;
   }
 }
@@ -497,6 +543,23 @@ function deadlineBit(items: DdlItem[] | undefined): string {
       : `今天 ${hm} 前`;
   const rest = items.length > 1 ? `，另外还有 ${items.length - 1} 项要交` : "";
   return ` ${when}要交「${first.title}」${rest}。`;
+}
+
+/**
+ * 近期重要日子一句（兜底模板用）：只提最近的那一个，不念名单。
+ * 生日/纪念日是「提前准备」信息，睡前带一句比早上才说更有用。
+ */
+function importantDaysBit(items: ImportantDay[] | undefined): string {
+  if (!items || items.length === 0) return "";
+  const first = items[0]!;
+  const label = importantDayTypeLabel(first.type);
+  const when =
+    first.daysUntil === 0
+      ? "就是今天"
+      : first.daysUntil === 1
+        ? "就是明天"
+        : `还有 ${first.daysUntil} 天`;
+  return `另外${first.name}的${label}${when}。`;
 }
 
 /**

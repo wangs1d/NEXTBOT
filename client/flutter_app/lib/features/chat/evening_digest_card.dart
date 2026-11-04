@@ -15,6 +15,8 @@ import "package:flutter/material.dart";
 ///   - tomorrowSchedule: [{ id, title, time?, advanceNotes?: string[] }]
 ///   - tomorrowWeather: { text, minC, maxC, rainWindowLabel?, alerts[] } | null
 ///   - deadlineReminders: [{ title, dueAt, overdue, dayDiff, tier }]
+///   - importantDays: [{ id, name, date, type, daysUntil, relationship?, notes? }]
+///     （2026-11-04 从晨报迁来：生日/纪念日属于「提前准备」的信息）
 ///
 /// 降雨时段与穿衣只走文字叙述（2026-10-29 用户定稿）：卡上的天气块留温度与
 /// 现象，「几点到几点下」「穿什么、带不带伞」由顶部 narration 说完；
@@ -65,6 +67,9 @@ class EveningDigestCard extends StatelessWidget {
     final Object? rawWeather = digest["tomorrowWeather"];
     final Map<String, dynamic> weather =
         rawWeather is Map ? rawWeather.cast<String, dynamic>() : const <String, dynamic>{};
+    // 近期重要日子（2026-11-04 从晨报迁来）：7 天窗口，服务端已按剩余天数升序
+    final List<Map<String, dynamic>> importantDays =
+        _readMapList("importantDays");
     final String? tomorrowLabel = _tomorrowLabel();
     // 现象文本已被预警徽章覆盖时（如「雷暴」既是 text 又是 alert）不再单写一行，
     // 与服务端口播的去重口径一致
@@ -254,10 +259,69 @@ class EveningDigestCard extends StatelessWidget {
                 ),
               ],
             ],
+            // ── 近期重要日子（生日/纪念日）：整卡唯一暖色，拉注意力 ──
+            if (importantDays.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 14),
+              _SectionHeader(
+                icon: Icons.celebration_outlined,
+                text: "近期重要日子",
+                theme: theme,
+              ),
+              const SizedBox(height: 6),
+              for (final Map<String, dynamic> d in importantDays)
+                Padding(
+                  padding: const EdgeInsets.only(top: 7),
+                  child: Row(
+                    crossAxisAlignment: CrossAxisAlignment.center,
+                    children: <Widget>[
+                      Icon(
+                        Icons.cake_outlined,
+                        size: 15,
+                        color: _moonColor,
+                      ),
+                      const SizedBox(width: 7),
+                      Expanded(
+                        child: Text(
+                          _importantDayName(d),
+                          style: theme.textTheme.bodyMedium?.copyWith(
+                            height: 1.35,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      Text(
+                        _importantDayWhen(d),
+                        style: theme.textTheme.labelMedium?.copyWith(
+                          color: cs.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ],
         ),
       ),
     );
+  }
+
+  /// 重要日子名称行：「妈妈的生日」/「结婚纪念日的纪念日」
+  String _importantDayName(Map<String, dynamic> d) {
+    final String name = d["name"]?.toString() ?? "";
+    final String type = d["type"]?.toString() ?? "";
+    final String label =
+        type == "anniversary" ? "纪念日" : type == "custom" ? "特殊日子" : "生日";
+    return "$name的$label";
+  }
+
+  /// 重要日子时间标签：就是今天 / 明天 / 还有 N 天
+  String _importantDayWhen(Map<String, dynamic> d) {
+    final Object? raw = d["daysUntil"];
+    if (raw is! num) return d["date"]?.toString() ?? "";
+    final int days = raw.toInt();
+    if (days == 0) return "就是今天";
+    if (days == 1) return "明天";
+    return "还有 $days 天";
   }
 
   /// DDL 时间标签：过期 → 「已过点」；明天 → 「明天 HH:mm」；今天 → 「今天 HH:mm」

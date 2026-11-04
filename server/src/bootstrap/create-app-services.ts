@@ -2341,7 +2341,6 @@ export async function createAppServices(
     weatherService,
     weatherPrefsService,
     scheduleTaskService,
-    notesService,
     getSessionPrefs: (sessionId) => getUserPreferences(sessionId),
     // 天气定位兜底：客户端 GPS（配置城市 > GPS > IP）
     requestClientLocation: briefingClientLocation,
@@ -2393,10 +2392,11 @@ export async function createAppServices(
             briefing: p.briefing,
           },
         });
-      // 在途行程段只投手机端：手机收完整版，电脑收不含行程段的那份；
-      // 无在途行程时两端是同一份，一次全端广播即可。
+      // 在途行程条目只投手机端（2026-11-04 行程并入今日日程，用 kind 判定）：
+      // 手机收完整版，电脑收不含行程条目的那份；无行程时两端同一份，一次全端广播。
+      const hasTravelItem = payload.briefing.todaySchedule.some((i) => i.kind === "travel");
       let sent = false;
-      if (payload.briefing.travel) {
+      if (hasTravelItem) {
         sent = wsConnectionRegistry.trySendToDeviceClasses(
           sessionId,
           frame(payload),
@@ -2490,6 +2490,8 @@ export async function createAppServices(
       }),
     // DDL 三级梯度 L2 档：明天要交的 + 今天已过期的（睡前最该交代的一句）
     ddlRadar: ddlRadarService,
+    // 近期重要日子（2026-11-04 从晨报迁来）：7 天窗口，确定性读 important_dates KV
+    importantDaysStore: agentMemorySyncService,
     llmComplete: externalChat?.isEnabled()
       ? async (prompt, opts) => {
           let full = "";

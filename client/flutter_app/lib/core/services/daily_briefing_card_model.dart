@@ -91,13 +91,10 @@ DailyBriefingCardContent buildDailyBriefingCard({
   }
 
   final List<DailyBriefingStat> stats = <DailyBriefingStat>[
+    // 2026-11-04 收敛：笔记/热搜/纪念日撤出晨报（热搜归话题追踪、纪念日归明日速览），
+    // 抬头只剩「日程（含今日截止与行程）/ 待办」两项。
     DailyBriefingStat(count: listLen("todaySchedule"), label: "日程"),
     DailyBriefingStat(count: todoPendingCount(), label: "待办"),
-    DailyBriefingStat(count: listLen("pendingNotes"), label: "笔记"),
-    if (listLen("interestHits") > 0)
-      DailyBriefingStat(count: listLen("interestHits"), label: "热搜"),
-    if (listLen("upcomingImportantDays") > 0)
-      DailyBriefingStat(count: listLen("upcomingImportantDays"), label: "纪念日"),
   ].where((DailyBriefingStat s) => s.count > 0).toList();
 
   final String script = (narrationText ?? "").trim();

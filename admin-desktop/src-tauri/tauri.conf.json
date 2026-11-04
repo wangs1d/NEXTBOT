@@ -10,7 +10,7 @@
     "windows": [
       {
         "title": "NEXTBOT后台",
-        "url": "http://47.98.122.29:3000/admin#feedback",
+        "url": "https://nextbot.top/admin#feedback",
         "width": 1360,
         "height": 900,
         "minWidth": 1000,

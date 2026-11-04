@@ -80,12 +80,12 @@ test("今日日程：按本日区间查询 + 时间格式化为本地 HH:mm", as
   assert.equal(from.getMinutes(), 0);
   assert.equal(Math.round((to.getTime() - from.getTime()) / 86_400_000), 1);
 
-  // 时间为本地 HH:mm，不再是原始 ISO 串
+  // 时间为本地 HH:mm，不再是原始 ISO 串；2026-11-04 起今日日程三源合并后按时刻升序
   assert.deepEqual(
     briefing.todaySchedule.map((s) => [s.title, s.time]),
     [
-      ["产品评审会", "09:30"],
       ["晨跑打卡", "07:05"],
+      ["产品评审会", "09:30"],
     ],
   );
 
@@ -261,7 +261,6 @@ test("buildNarrationPrompt：事实材料只含真实数据且带口语化指令
   const briefing = {
     date: "2026-09-13",
     todaySchedule: [{ id: "m1", title: "周会", time: "10:00" }],
-    pendingNotes: [],
     agentGreeting: "",
   };
   const facts = buildNarrationFacts(briefing as never);
@@ -272,4 +271,50 @@ test("buildNarrationPrompt：事实材料只含真实数据且带口语化指令
   // 2026-09-24 定调：润色 prompt 必须带禁空话/禁客套收尾规则
   assert.match(prompt, /想起来喊我一声/);
   assert.match(prompt, /宁短勿凑/);
+});
+
+// ── 待办跟进（2026-11-04 老账治理） ─────────────────────────
+
+function makeOpenLoopService(openLoops: string, doneTasks: TaskLike[] = []) {
+  return new MorningBriefingService({
+    scheduleTaskService: {
+      listTasksBySession: () => doneTasks,
+      listAllTasks: () => doneTasks,
+    } as never,
+    agentMemorySyncService: {
+      getSnapshot: (_sessionId: string, keys?: string[]) => ({
+        revision: 1,
+        entries: keys?.includes("memory_open_loops")
+          ? { memory_open_loops: openLoops }
+          : { important_dates: [] },
+      }),
+    },
+  });
+}
+
+const isoHoursAgo = (h: number) => new Date(Date.now() - h * 3_600_000).toISOString();
+
+test("待办跟进：超 72h 的僵尸待办不再上早报（与 chat 注入同口径）", async () => {
+  const openLoops = [
+    `[${isoHoursAgo(24 * 6)}] [topic:比价] 承诺：待办：用户需提供三个平台的价格和对应版本，以便计算最划算的那个。`,
+    `[${isoHoursAgo(2)}] [topic:机票] 待办：确认下周去上海的机票`,
+  ].join("\n");
+
+  const briefing = await makeOpenLoopService(openLoops).generateBriefing(SESSION);
+  const pending = briefing.todoFollowups?.pending ?? [];
+  // 6 天前那条被 TTL 过滤，只剩 2 小时前那条
+  assert.equal(pending.length, 1);
+  assert.match(pending[0]!, /确认下周去上海的机票/);
+  assert.doesNotMatch(pending[0]!, /三个平台/);
+});
+
+test("待办跟进：剥掉「承诺：/待办：」内部口径前缀，不再硬截半句", async () => {
+  const long = "用户需提供三个平台的价格和对应版本，以便计算最划算的那个再决定下单";
+  const openLoops = `[${isoHoursAgo(1)}] [topic:比价] 承诺：待办：${long}`;
+  const briefing = await makeOpenLoopService(openLoops).generateBriefing(SESSION);
+  const pending = briefing.todoFollowups?.pending ?? [];
+  assert.equal(pending.length, 1);
+  // 前缀剥净，正文完整（不超过 60 字时不该出现省略号）
+  assert.equal(pending[0], long);
+  assert.doesNotMatch(pending[0]!, /^承诺|^待办/);
 });

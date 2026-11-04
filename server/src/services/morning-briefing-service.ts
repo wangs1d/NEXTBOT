@@ -1,5 +1,5 @@
 /**
- * 早间简报聚合服务：将日程、笔记、兴趣热搜命中等合并为一份「早间简报」。
+ * 早间简报聚合服务：**只回答「今天怎么安排」**，把今天的所有硬信息合并成一栏。
  *
  * 依赖为可选 —— 当宿主未注入对应服务时返回占位数据，
  * 保证该服务可独立实例化与调用。
@@ -7,27 +7,39 @@
  * 2026-10-16：天气与穿衣建议移出早间简报（迁往睡前提醒 EveningDigest）；
  * 本服务仅保留内部天气抓取供恶劣天气预警检测（onSevereWeatherAlert 联动）。
  *
- * 第四源「兴趣热搜命中」（2026-08-29）：读 data/interest-watch.json 中该 actor 的
- * 兴趣列表（字段结构见 proactivity/interest-watcher.ts），结合 hot-rankings.ts 的
- * 实时热搜聚合做简单 includes 匹配，最多取 3 条；无命中则整体省略该块。
+ * 2026-11-04 用户拍板的信息分层（本文件据此收敛，只剩两个内容块）：
+ *  - 「今日日程」= 普通日程 + 今天截止的 DDL + 在途行程当天第一站，**三源合并**
+ *    成一栏按时间排序（此前 DDL/行程只进播报稿、卡面上看不见）；
+ *  - 「待办跟进」= 之前交代还没办的事；
+ *  - 兴趣热搜 → 归话题追踪模块（proactivity/interest-watcher.ts 后台轮询 +
+ *    ProactivityHub 主动在对话里说出来），晨报不再重复播；
+ *  - 待复习笔记 → 删除（没人看的复习队列，纯占版面）；
+ *  - 近期重要日子 → 迁往「明日速览」（evening-digest-service.ts）；本服务只保留
+ *    「当天命中 → 祝福草稿 + life_reminder」的副作用，不再展示。
  */
-import { getDataDir } from "../config/data-dir.js";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
-
 import { isTriviaTask } from "./schedule-task-service.js";
 import type { ScheduleTaskService } from "./schedule-task-service.js";
 import type { WeatherService } from "./weather-service.js";
 import type { WeatherPrefsService } from "./weather-prefs-service.js";
-import type { NotesService } from "./notes-service.js";
 import { detectSevereWeatherAlerts } from "./weather-service.js";
-import { fetchHotRankings } from "./hot-rankings.js";
-import { normalizeFp } from "../proactivity/interest-watcher.js";
 import { resolvePoliteAppellation } from "./user-personalization/appellation.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import { stripProtocolMarkersForDirectOut } from "./reply-envelope.js";
+import { dropExpiredCommitmentLines } from "./memory-record-utils.js";
+import {
+  importantDayTypeLabel,
+  daysUntilMMdd,
+  readUpcomingImportantDays,
+  type ImportantDay,
+  type ImportantDaysStoreLike,
+} from "./important-days-shared.js";
 import type { UserPreferences } from "../routes/http/user-preferences.js";
 import type { DdlItem } from "./ddl-radar-service.js";
+
+// 兼容存量导入方（测试/装配层沿用晨报命名），口径统一由 important-days-shared 提供
+export type MorningBriefingImportantDay = ImportantDay;
+export { importantDayTypeLabel, daysUntilMMdd };
+export type { ImportantDaysStoreLike };
 
 /**
  * 内部天气快照：仅供生成期恶劣天气预警检测（onSevereWeatherAlert 联动），
@@ -50,17 +62,21 @@ export interface MorningBriefingScheduleItem {
   id: string;
   title: string;
   time?: string;
-}
-
-export interface MorningBriefingPendingNote {
-  id: string;
-  title: string;
+  /**
+   * 条目来源（2026-11-04 三源合并进「今日日程」一栏）：
+   *  - schedule：普通日程（默认，存量数据不带该字段按此处理）
+   *  - deadline：今天到期 / 已过点的 DDL（比日程更硬，标题由展示端加「截止：」前缀）
+   *  - travel：在途行程的当天第一站（仅手机端，标题由展示端加「行程：」前缀）
+   */
+  kind?: "schedule" | "deadline" | "travel";
+  /** 附加说明（如截止项「已过点」），无则不出现 */
+  note?: string;
 }
 
 /**
  * 待办跟进（可选块）：今日简报不只播新闻，还要回报"之前交代的事"。
  *  - pending：记忆 KV memory_open_loops（待办/承诺槽位）里还没完成的事，
- *    最新在前，最多 3 条（已剥掉时间戳/话题前缀）；
+ *    最新在前，最多 3 条（已剥掉时间戳/话题前缀与内部口径前缀）；
  *  - doneTodayCount：今天已办结的日程/提醒数。
  * 全空 → 省略该字段。
  */
@@ -70,54 +86,9 @@ export interface MorningBriefingTodoFollowups {
 }
 
 /**
- * 兴趣热搜命中条目（第四源）：用户关注的话题撞上当日热搜。
- * interest 是命中的兴趣名，title/platform/url/hot 来自热搜聚合条目。
- */
-export interface MorningBriefingInterestHit {
-  interest: string;
-  title: string;
-  platform: string;
-  url?: string;
-  hot?: string;
-}
-
-/**
- * 近期重要日子条目（第五源）：用户经 care.set_important_date 录入的
- * 生日/纪念日（KV key: important_dates），7 天窗口内按剩余天数升序。
- * 字段结构与 care-reminder-tools.ts 的 ImportantDateRecord 对齐。
- */
-export interface MorningBriefingImportantDay {
-  id: string;
-  /** 人物或事件名称，如"妈妈"、"结婚纪念日" */
-  name: string;
-  /** MM-DD 格式（年度周期） */
-  date: string;
-  type: "birthday" | "anniversary" | "custom";
-  /** 关系标签，如"母亲"、"配偶" */
-  relationship?: string;
-  /** 备注（交往摘要，供祝福草稿参考） */
-  notes?: string;
-  /** 距今天数：0=今天，1=明天…… */
-  daysUntil: number;
-}
-
-/** 晨报行程段：今天落在行程区间内 → 第一站提醒（确定性读行程仓库，无 LLM） */
-export interface MorningBriefingTravel {
-  planId: string;
-  title: string;
-  destination: string;
-  /** 当天第一站（无排程天为 null） */
-  firstStop: { name: string; startTime: string } | null;
-  /** 出发日天气一句话摘要（规划时取，可能为空） */
-  weather: string | null;
-  /** 随身叮嘱（packing 前 3 条） */
-  packing: string[];
-}
-
-/**
  * 晨报生成选项。
  * in-progress 行程（今天落在行程区间内）的消息与提醒只投手机端，
- * 电脑端每日简报不带行程段——默认 false，仅手机端 / 手机启动简报显式开启。
+ * 电脑端每日简报不带行程条目——默认 false，仅手机端 / 手机启动简报显式开启。
  */
 export interface MorningBriefingOptions {
   includeInProgressTravel?: boolean;
@@ -125,35 +96,21 @@ export interface MorningBriefingOptions {
 
 export interface MorningBriefing {
   date: string;
-  todaySchedule: MorningBriefingScheduleItem[];
-  pendingNotes: MorningBriefingPendingNote[];
   /**
-   * 行程段（可选块，第六源）：今天落在某份行程区间内（startDate ≤ 今天 ≤ endDate）
-   * → 当天第一站 + 目的地/天气 + 随身叮嘱。在途行程的消息与提醒只投手机端，
-   * 电脑端晨报默认不带该段（generateBriefing 的 includeInProgressTravel 开启才取）。
+   * 今日日程（2026-11-04 三源合并）：普通日程 + 今天截止的 DDL + 在途行程第一站，
+   * 按时刻升序（无时刻的排最后）。DDL 与行程不再有独立块，也不再只活在播报稿里。
    */
-  travel?: MorningBriefingTravel;
-  /** 兴趣热搜命中（可选块）：无命中时省略该字段，三源结构不受影响 */
-  interestHits?: MorningBriefingInterestHit[];
+  todaySchedule: MorningBriefingScheduleItem[];
   /** 待办跟进（可选块）：之前交代的未完成事项 + 今日已办结数；全空时省略 */
   todoFollowups?: MorningBriefingTodoFollowups;
-  /** 近期重要日子（可选块，7 天窗口）：无记录时省略该字段 */
-  upcomingImportantDays?: MorningBriefingImportantDay[];
+  /**
+   * 2~3 天内到期的 DDL 件数（可选）：只在播报稿里带一句「这周还有 N 项要交」，
+   * 不上卡（卡面「今日日程」只收今天的事）。0 / 缺省 → 不提。
+   */
+  deadlineSoonCount?: number;
   /** 用户称呼（可选）：记忆「称呼」行的得体称呼（用户指定优先，大名→「王先生」式）；问候语用 */
   appellation?: string;
-  /**
-   * DDL 三级提醒梯度的 L3 + L1 档（2026-10-22 大学生线）：
-   * today = 今天到期或已过期（置顶，比日程更紧）；soon = 2~3 天后到期（一行汇总）。
-   * 由 DdlRadarService 确定性扫描；未注入 radar 或两档皆空时整块省略。
-   * L2（明天到期）走明日速览卡，不在晨报重复。
-   */
-  deadlines?: MorningBriefingDeadlines;
   agentGreeting: string;
-}
-
-export interface MorningBriefingDeadlines {
-  today: DdlItem[];
-  soon: DdlItem[];
 }
 
 export interface MorningBriefingNarration {
@@ -161,14 +118,6 @@ export interface MorningBriefingNarration {
   narrationText: string;
   /** 结构化简报 */
   briefing: MorningBriefing;
-}
-
-/** AgentMemorySyncService 的最小依赖接口（读 important_dates KV，避免重类型耦合） */
-export interface ImportantDaysStoreLike {
-  getSnapshot(sessionId: string, keys?: string[]): {
-    revision: number;
-    entries: Record<string, unknown>;
-  };
 }
 
 /** 结构化事实库的最小依赖接口（读「称呼」字段，避免重类型耦合） */
@@ -184,7 +133,6 @@ export type MorningBriefingDeps = {
   weatherService?: WeatherService;
   weatherPrefsService?: WeatherPrefsService;
   scheduleTaskService?: ScheduleTaskService;
-  notesService?: NotesService;
   getSessionPrefs?: (sessionId: string) => UserPreferences;
   /**
    * 客户端定位（GPS，比 IP 准）：用户未配置天气城市时的优先兜底。
@@ -203,9 +151,7 @@ export type MorningBriefingDeps = {
       }
     | null
   >;
-  /** 兴趣池文件路径（第四源；默认 data/interest-watch.json，与 InterestWatcher 一致） */
-  interestWatchPath?: string;
-  /** 重要日子存储（第五源；读 care.set_important_date 写入的 important_dates KV） */
+  /** 重要日子存储（读 care.set_important_date 写入的 important_dates KV；仅供当日命中祝福回调） */
   agentMemorySyncService?: ImportantDaysStoreLike;
   /**
    * 结构化事实库（用户称呼源）：与首启向导/聊天面同走 factStore 的「称呼」
@@ -281,39 +227,24 @@ function formatHhmm(iso: string | null | undefined): string {
 }
 
 /**
- * DDL 一句（晨报确定性兜底文案）：今天截止置顶，只报最近一件 + 件数，
- * 再加一句"这周还有 N 项"。过期的显式说过点，避免误读成"还没到"。
+ * 条目的口语化说法（播报稿用）：截止/行程各有自己的说法，
+ * 普通日程走「时刻的标题」——三源合进一栏后不能都套一个句式。
  */
-function formatDeadlinesBit(d: MorningBriefingDeadlines | undefined): string {
-  if (!d) return "";
-  const { today, soon } = d;
-  const parts: string[] = [];
-  if (today.length > 0) {
-    const first = today[0]!;
-    const due = new Date(first.dueAt);
-    const hm = `${String(due.getHours()).padStart(2, "0")}:${String(due.getMinutes()).padStart(2, "0")}`;
-    if (first.overdue) {
-      parts.push(`《${first.title}》已经过点了`);
-    } else {
-      parts.push(`今天 ${hm} 前要交《${first.title}》`);
-    }
-    if (today.length > 1) parts.push(`今天一共 ${today.length} 项截止`);
+function narrationItemLabel(item: MorningBriefingScheduleItem): string {
+  if (item.kind === "deadline") {
+    if (item.note === "已过点") return `《${item.title}》已经过点`;
+    return item.time ? `${item.time} 前要交《${item.title}》` : `今天要交《${item.title}》`;
   }
-  if (soon.length > 0) {
-    parts.push(`这周还有 ${soon.length} 项要交`);
+  if (item.kind === "travel") {
+    return item.time ? `${item.time} 出发去${item.title}` : `今天的行程是${item.title}`;
   }
-  return parts.length > 0 ? `${parts.join("，")}。` : "";
+  return item.time ? `${item.time}的${item.title}` : item.title;
 }
 
 function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
   const top = items.slice(0, 3);
   const rest = items.length - top.length;
-  const bits = top.map((item) => {
-    if (item.time) {
-      return `${item.time}的${item.title}`;
-    }
-    return item.title;
-  });
+  const bits = top.map(narrationItemLabel);
   let sentence = `今天有${top.length}个安排：${bits.join("、")}。`;
   if (rest > 0) {
     sentence = `${sentence}另外还有${rest}项可以晚点再看。`;
@@ -321,64 +252,30 @@ function formatScheduleBit(items: MorningBriefingScheduleItem[]): string {
   return sentence;
 }
 
-function formatNotesBit(items: MorningBriefingPendingNote[]): string {
-  const titles = items.slice(0, 3).map((n) => n.title);
-  return `还有${items.length}条笔记没看过：${titles.join("、")}，有空可以翻翻。`;
+/** 「这周还有 N 项要交」一句（DDL soon 档只在播报稿带一句，不上卡） */
+function formatDeadlineSoonBit(count: number | undefined): string {
+  if (!count || count <= 0) return "";
+  return `这两三天内还有 ${count} 项要交。`;
 }
 
-/** 兴趣热搜块最多呈现条数（无命中则整块省略） */
-const INTEREST_HITS_MAX = 3;
-/** 兴趣匹配的热搜抓取条数（与 InterestWatcher 的 HOT_FETCH_LIMIT 对齐，覆盖各平台榜单头部） */
-const INTEREST_HITS_FETCH_LIMIT = 50;
-
-function formatInterestHitsBit(items: MorningBriefingInterestHit[]): string {
-  const titles = items.map((h) => h.title);
-  return `你关注的话题上热搜了：${titles.join("、")}。`;
-}
-
-/** 重要日子扫描窗口（天）：晨报只呈现 7 天内的近期日子 */
-const UPCOMING_DAYS_WINDOW = 7;
-/** 晨报"近期重要日子"块最多呈现条数 */
-const UPCOMING_DAYS_MAX = 5;
-
-/** 重要日子类型中文标签 */
-export function importantDayTypeLabel(type: MorningBriefingImportantDay["type"]): string {
-  switch (type) {
-    case "birthday":
-      return "生日";
-    case "anniversary":
-      return "纪念日";
-    default:
-      return "特殊日子";
-  }
-}
+/** 合并后的今日条目上限（截止+行程+日程一起算，防一屏刷不完） */
+const TODAY_SCHEDULE_MAX = 12;
 
 /**
- * 计算 MM-DD 距今天数（0=今天；今年的日期已过则按明年计，年度周期日子永不为负）。
- * 格式非法返回 -1（调用方过滤）。
+ * 三源合并排序：按时刻升序（无时刻的排最后），并钳总量。
+ * 「HH:mm」定长字符串可直接字典序比较，无需解析成时间。
  */
-export function daysUntilMMdd(mmdd: string, now: Date = new Date()): number {
-  const m = mmdd.match(/^(\d{1,2})-(\d{1,2})$/);
-  if (!m) return -1;
-  const month = Number(m[1]);
-  const day = Number(m[2]);
-  if (month < 1 || month > 12 || day < 1 || day > 31) return -1;
-  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  let target = new Date(now.getFullYear(), month - 1, day);
-  if (target.getTime() < todayStart.getTime()) {
-    target = new Date(now.getFullYear() + 1, month - 1, day);
-  }
-  return Math.round((target.getTime() - todayStart.getTime()) / 86_400_000);
-}
-
-function formatImportantDaysBit(items: MorningBriefingImportantDay[]): string {
-  const bits = items.slice(0, 3).map((d) => {
-    const label = importantDayTypeLabel(d.type);
-    if (d.daysUntil === 0) return `今天就是${d.name}的${label}`;
-    if (d.daysUntil === 1) return `明天是${d.name}的${label}`;
-    return `${d.name}的${label}（${d.date}）还有${d.daysUntil}天`;
-  });
-  return `近期重要日子：${bits.join("、")}。`;
+function sortScheduleItems(items: MorningBriefingScheduleItem[]): MorningBriefingScheduleItem[] {
+  return [...items]
+    .sort((a, b) => {
+      const ta = a.time ?? "";
+      const tb = b.time ?? "";
+      if (ta === tb) return 0;
+      if (!ta) return 1;
+      if (!tb) return -1;
+      return ta.localeCompare(tb);
+    })
+    .slice(0, TODAY_SCHEDULE_MAX);
 }
 
 function countChineseChars(text: string): number {
@@ -387,8 +284,13 @@ function countChineseChars(text: string): number {
 }
 
 /** 待办跟进块上限：未完成事项最多播报条数 */
-const TODO_FOLLOWUPS_MAX = 3;/** 单条未完成事项的展示截断长度 */
-const TODO_FOLLOWUPS_ITEM_MAX_CHARS = 30;
+const TODO_FOLLOWUPS_MAX = 3;
+/**
+ * 单条未完成事项的展示上限（字）。
+ * 2026-11-04：原为 30 字硬截，恰好把「…以便计算最划」切在半句上；放宽到 60 字
+ * 并在有截断时补省略号——卡面本来就有两行 clamp，硬截只会制造断句。
+ */
+const TODO_FOLLOWUPS_ITEM_MAX_CHARS = 60;
 
 /**
  * 剥掉记忆槽位行头部连续的内部标签（[时间戳][topic:…][fast-path][decay]
@@ -400,6 +302,20 @@ function stripMemoryLineMeta(line: string): string {
     text = text.replace(/^\[[^\]]*\]\s*/, "");
   }
   return text.trim();
+}
+
+/** 内部记账前缀（夜间提炼写的「承诺：」、抽取文本自带的「待办：」）不面向用户 */
+const INTERNAL_PREFIX_RE = /^(?:(?:承诺|待办|计划|后续|未完成|待办事项)\s*[：:]\s*)+/;
+
+/**
+ * 记忆行 → 可读的一条待办：剥标签、剥内部口径前缀、超长补省略号。
+ * 反面教材（2026-11-04 用户截图）：卡面直出「承诺: 待办：用户需提供三个平台的
+ * 价格和对应版本，以便计算最划」——前缀是内部记账、结尾断在半句。
+ */
+export function cleanOpenLoopText(line: string): string {
+  const body = stripMemoryLineMeta(line).replace(INTERNAL_PREFIX_RE, "").trim();
+  if (body.length <= TODO_FOLLOWUPS_ITEM_MAX_CHARS) return body;
+  return `${body.slice(0, TODO_FOLLOWUPS_ITEM_MAX_CHARS - 1).trimEnd()}…`;
 }
 
 function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
@@ -420,30 +336,28 @@ function formatTodoFollowupsBit(todo: MorningBriefingTodoFollowups): string {
 export function buildNarrationFacts(briefing: MorningBriefing): string {
   const lines: string[] = [];
   // DDL 放在最前：今天截止比日程更硬，模型看到的第一条应是最紧的事
-  const ddl = briefing.deadlines;
-  if (ddl && ddl.today.length > 0) {
+  const ddlToday = briefing.todaySchedule.filter((i) => i.kind === "deadline");
+  if (ddlToday.length > 0) {
     lines.push(
-      `今天截止（必须说）：${ddl.today
-        .map((i) => {
-          const d = new Date(i.dueAt);
-          const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-          return `${hm} ${i.title}${i.overdue ? "（已过点）" : ""}`;
-        })
+      `今天截止（必须说）：${ddlToday
+        .map((i) => `${i.time ?? ""} ${i.title}${i.note ? `（${i.note}）` : ""}`.trim())
         .join("；")}`,
     );
   }
-  if (ddl && ddl.soon.length > 0) {
+  if (briefing.deadlineSoonCount && briefing.deadlineSoonCount > 0) {
     lines.push(
-      `这两三天内还要交（只需提一句件数，不逐条念）：${ddl.soon
-        .map((i) => i.title)
-        .join("、")}`,
+      `这两三天内还要交（只需提一句件数，不逐条念）：${briefing.deadlineSoonCount} 项`,
     );
   }
-  if (briefing.todaySchedule.length > 0) {
+  const planItems = briefing.todaySchedule.filter((i) => i.kind !== "deadline");
+  if (planItems.length > 0) {
     lines.push(
-      `今日日程：${briefing.todaySchedule
+      `今日日程：${planItems
         .slice(0, 5)
-        .map((s) => (s.time ? `${s.time} ${s.title}` : s.title))
+        .map((s) => {
+          if (s.kind === "travel") return `${s.time ?? ""} 在途行程 ${s.title}`.trim();
+          return s.time ? `${s.time} ${s.title}` : s.title;
+        })
         .join("；")}`,
     );
   }
@@ -453,40 +367,6 @@ export function buildNarrationFacts(briefing: MorningBriefing): string {
       lines.push(`之前交代还没办的事：${todo.pending.join("；")}`);
     }
     if (todo.doneTodayCount > 0) lines.push(`今天已完成安排：${todo.doneTodayCount}件`);
-  }
-  if (briefing.pendingNotes.length > 0) {
-    lines.push(
-      `未复习笔记：${briefing.pendingNotes.length}条（${briefing.pendingNotes
-        .slice(0, 3)
-        .map((n) => n.title)
-        .join("、")}）`,
-    );
-  }
-  const hits = briefing.interestHits ?? [];
-  if (hits.length > 0) {
-    lines.push(`关注话题上热搜：${hits.map((h) => h.title).join("、")}`);
-  }
-  const travel = briefing.travel;
-  if (travel) {
-    const first = travel.firstStop;
-    lines.push(
-      `今天在${travel.destination}的行程「${travel.title}」里` +
-        (first ? `，第一站 ${first.startTime} ${first.name}` : "") +
-        (travel.packing.length > 0 ? `；记得带${travel.packing.join("、")}` : ""),
-    );
-  }
-  const days = briefing.upcomingImportantDays ?? [];
-  if (days.length > 0) {
-    lines.push(
-      `近期重要日子：${days
-        .slice(0, 3)
-        .map(
-          (d) =>
-            `${d.name}的${importantDayTypeLabel(d.type)}` +
-            (d.daysUntil === 0 ? "（就是今天）" : d.daysUntil === 1 ? "（明天）" : `（还剩${d.daysUntil}天）`),
-        )
-        .join("；")}`,
-    );
   }
   if (briefing.appellation) lines.push(`对用户的称呼：${briefing.appellation}`);
   return lines.length > 0 ? lines.join("\n") : "（今天没有任何日程、待办或资讯）";
@@ -540,18 +420,27 @@ export class MorningBriefingService {
     options: MorningBriefingOptions = {},
   ): Promise<MorningBriefing> {
     const prefs = this.deps.getSessionPrefs?.(sessionId);
-    const sections = prefs?.morningBriefing.sections ?? {
-      schedule: true,
-      notes: true,
-    };
+    // sections.notes 已废弃（待复习笔记整块删除，2026-11-04），只保留日程开关
+    const sections = prefs?.morningBriefing.sections ?? { schedule: true, notes: false };
 
     // 天气抓取仅供恶劣天气预警检测（结果不再进简报内容，2026-10-16 迁往睡前提醒）
-    const [weather, todaySchedule, pendingNotes, interestHits] = await Promise.all([
+    const [weather, scheduleItems, ddlToday, ddlSoonCount, travelItem] = await Promise.all([
       this.fetchWeather(sessionId).catch(() => null),
       sections.schedule ? this.fetchTodaySchedule(sessionId) : Promise.resolve([]),
-      sections.notes ? this.fetchPendingNotes(sessionId) : Promise.resolve([]),
-      // 第四源：兴趣热搜命中（可选块；失败/无命中 → 空数组 → 省略该块）
-      this.fetchInterestHits(sessionId).catch(() => [] as MorningBriefingInterestHit[]),
+      // DDL 今天截止档：直接并进「今日日程」，不再单独成块
+      Promise.resolve(this.fetchDeadlineToday(sessionId)),
+      Promise.resolve(this.fetchDeadlineSoonCount(sessionId)),
+      // 在途行程当天第一站：也是日程条目（仅手机端）
+      options.includeInProgressTravel
+        ? this.fetchTravelItem(sessionId).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+
+    // 三源合并：截止置前 → 行程 → 日程，整体按时刻升序（无时刻排最后）
+    const todaySchedule = sortScheduleItems([
+      ...ddlToday,
+      ...(travelItem ? [travelItem] : []),
+      ...scheduleItems,
     ]);
 
     // 恶劣天气预警联动（Task 15 生活节律）：晨报生成时检测当日预警
@@ -566,16 +455,15 @@ export class MorningBriefingService {
         minC: weather.minC,
         windKmh: weather.windKmh,
       });
-      if (alerts.length > 0 && todaySchedule.length > 0) {
-        this.fireSevereWeatherAlert(sessionId, alerts, todaySchedule.length);
+      if (alerts.length > 0 && scheduleItems.length > 0) {
+        this.fireSevereWeatherAlert(sessionId, alerts, scheduleItems.length);
       }
     }
 
-    // 第五源：近期重要日子（7 天窗口，确定性读取 KV，无 LLM）。
-    // 当天命中（daysUntil=0）→ onImportantDayToday 回调（装配层接祝福草稿 +
-    // ProactivityHub life_reminder），内部按日去重保证每日至多触发一次。
-    const upcomingImportantDays = this.fetchUpcomingImportantDays(sessionId);
-    for (const day of upcomingImportantDays) {
+    // 近期重要日子：展示位已迁往「明日速览」（2026-11-04），晨报只保留
+    // 「当天命中 → 祝福草稿 + life_reminder」的副作用——祝福要在当天早上发出，
+    // 挪到夜里就晚了。内部按日去重保证每日至多触发一次。
+    for (const day of readUpcomingImportantDays(this.deps.agentMemorySyncService, sessionId)) {
       if (day.daysUntil === 0) this.fireImportantDayToday(sessionId, day);
     }
 
@@ -585,51 +473,61 @@ export class MorningBriefingService {
     // 待办跟进（确定性读取，无 LLM）：之前交代未完成 + 今日已办结
     const todoFollowups = this.fetchTodoFollowups(sessionId);
 
-    // 第六源：行程段（确定性读行程仓库，无 LLM）——今天落在某份行程区间内
-    // → 当天第一站 + 天气叮嘱（行前主动提醒）。在途行程只给手机端，
-    // 电脑端晨报默认不取（includeInProgressTravel 显式开启才取）。
-    const travel = options.includeInProgressTravel
-      ? await this.fetchTravelToday(sessionId).catch(() => null)
-      : null;
-
-    // 第七源：DDL（确定性扫描，无 LLM）——今天截止置顶、这周还要交的只汇总一行。
-    // 大学生线三级梯度的 L3/L1 档（L2 在明日速览卡，不在晨报重复）。
-    const deadlines = this.fetchDeadlines(sessionId);
-
     return {
       date: todayIsoDate(),
       todaySchedule,
-      pendingNotes,
-      // 无命中时省略该字段（可选块）
-      ...(interestHits.length > 0 ? { interestHits } : {}),
       // 待办跟进（可选块）：全空时省略
       ...(todoFollowups ? { todoFollowups } : {}),
-      // 无近期日子时省略该字段（可选块）
-      ...(upcomingImportantDays.length > 0 ? { upcomingImportantDays } : {}),
-      // 行程段（可选块）：无进行中行程时省略
-      ...(travel ? { travel } : {}),
-      // DDL（可选块）：两档皆空时省略
-      ...(deadlines ? { deadlines } : {}),
+      // 2~3 天内到期的件数：只在播报稿里带一句，不上卡
+      ...(ddlSoonCount > 0 ? { deadlineSoonCount: ddlSoonCount } : {}),
       // 用户称呼（可选）：无称呼时省略该字段
       ...(appellation ? { appellation } : {}),
       agentGreeting: MORNING_GREETING,
     };
   }
 
-  /** DDL 取数：radar 未注入 / 抛错 / 两档皆空 → null（整块省略） */
-  private fetchDeadlines(sessionId: string): MorningBriefingDeadlines | null {
-    if (!this.deps.ddlRadar) return null;
+  /**
+   * DDL 今天档 → 日程条目（今天到期 / 已过点）。
+   * 2026-11-04 合并：DDL 以前只活在播报稿里、卡面看不到；现在归进「今日日程」。
+   */
+  private fetchDeadlineToday(sessionId: string): MorningBriefingScheduleItem[] {
+    if (!this.deps.ddlRadar) return [];
     try {
-      const { today, soon } = this.deps.ddlRadar.forMorning(sessionId);
-      if (today.length === 0 && soon.length === 0) return null;
-      return { today, soon };
+      const { today } = this.deps.ddlRadar.forMorning(sessionId);
+      return today.map((item) => {
+        const due = new Date(item.dueAt);
+        const hm = Number.isFinite(due.getTime())
+          ? `${String(due.getHours()).padStart(2, "0")}:${String(due.getMinutes()).padStart(2, "0")}`
+          : "";
+        return {
+          id: item.id,
+          title: item.title,
+          kind: "deadline" as const,
+          ...(hm ? { time: hm } : {}),
+          ...(item.overdue ? { note: "已过点" } : {}),
+        };
+      });
     } catch {
-      return null;
+      return [];
     }
   }
 
-  /** 行程段取数：今天 ∈ [startDate, endDate] 的本 actor 最近一份行程 → 当天第一站 */
-  private async fetchTravelToday(actorId: string): Promise<MorningBriefingTravel | null> {
+  /** DDL soon 档件数（2~3 天后到期）：只喂播报稿一句汇总 */
+  private fetchDeadlineSoonCount(sessionId: string): number {
+    if (!this.deps.ddlRadar) return 0;
+    try {
+      return this.deps.ddlRadar.forMorning(sessionId).soon.length;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * 在途行程 → 今日日程条目（2026-11-04 合并）：今天 ∈ [startDate, endDate] 的
+   * 本 actor 最近一份行程，取当天第一站。只给手机端（电脑端不响），因此由
+   * includeInProgressTravel 控制是否取。
+   */
+  private async fetchTravelItem(actorId: string): Promise<MorningBriefingScheduleItem | null> {
     const two = (v: number): string => v.toString().padStart(2, "0");
     const now = new Date();
     const today =
@@ -645,15 +543,15 @@ export class MorningBriefingService {
       // startTime 可能是 "HH:mm" 或 "YYYY-MM-DDTHH:mm:00"，统一抽出 HH:mm
       const raw = first?.startTime ?? "";
       const m = /(\d{1,2}:\d{2})/.exec(raw);
+      const title = first
+        ? `${plan.destination} · ${first.name}`
+        : `${plan.destination} · ${plan.title}`;
       return {
-        planId: plan.planId,
-        title: plan.title,
-        destination: plan.destination,
-        firstStop: first
-          ? { name: first.name, startTime: m ? m[1]! : raw }
-          : null,
-        weather: plan.weather ?? null,
-        packing: (plan.packing ?? []).slice(0, 3),
+        id: `travel:${plan.planId}`,
+        title,
+        kind: "travel",
+        ...(m ? { time: m[1]! } : {}),
+        ...(first ? {} : { note: "行程日" }),
       };
     }
     return null;
@@ -775,20 +673,6 @@ export class MorningBriefingService {
     }
   }
 
-  private async fetchPendingNotes(sessionId: string): Promise<MorningBriefingPendingNote[]> {
-    const { notesService } = this.deps;
-    if (!notesService) return [];
-    try {
-      const notes = notesService.listNotes({ sessionId, actorId: sessionId, limit: 10 });
-      return notes
-        .filter((n) => (n.reviewCount ?? 0) === 0)
-        .slice(0, 5)
-        .map((n) => ({ id: n.id, title: n.title }));
-    } catch {
-      return [];
-    }
-  }
-
   /**
    * 待办跟进（确定性读取，无 LLM）：
    *  - pending：记忆 KV memory_open_loops（待办/承诺槽位，行格式
@@ -812,16 +696,20 @@ export class MorningBriefingService {
         "memory_open_loops",
       ]);
       const raw = typeof entries.memory_open_loops === "string" ? entries.memory_open_loops : "";
-      return raw
+      const lines = raw
         .split("\n")
         .filter(Boolean)
         // fast-path 写入时决策为 decay 的行 = 判定为临时/易衰减内容，
         // 不作为「待办」呈给用户（2026-09-24：此前剥不净标签还截断成乱码，
         // 正是播报稿含糊提「之前交代的事」的诱因）。
-        .filter((line) => !line.includes("[fast-path][decay]"))
+        .filter((line) => !line.includes("[fast-path][decay]"));
+      // 2026-11-04 老账不消失的根因修补：聊天 prompt 注入侧一直过 72h 保鲜期
+      // （prompt-builder → dropExpiredCommitmentLines），早报这条读路径漏了，
+      // 于是同一件「比价」的事能连播好几天。这里与 chat 同口径。
+      return dropExpiredCommitmentLines(lines)
         .slice(-TODO_FOLLOWUPS_MAX)
         .reverse()
-        .map((line) => stripMemoryLineMeta(line).slice(0, TODO_FOLLOWUPS_ITEM_MAX_CHARS))
+        .map(cleanOpenLoopText)
         .filter(Boolean);
     } catch {
       return [];
@@ -852,51 +740,6 @@ export class MorningBriefingService {
         .length;
     } catch {
       return 0;
-    }
-  }
-
-  /**
-   * 第五源：近期重要日子（确定性，无 LLM）。
-   * 读 KV important_dates（care.set_important_date 写入），过滤 7 天窗口内
-   * 的年度周期日子，按剩余天数升序取前 5 条。存储缺失/格式异常 → 空数组（省略该块）。
-   */
-  private fetchUpcomingImportantDays(sessionId: string): MorningBriefingImportantDay[] {
-    const { agentMemorySyncService } = this.deps;
-    if (!agentMemorySyncService) return [];
-    try {
-      const { entries } = agentMemorySyncService.getSnapshot(sessionId, ["important_dates"]);
-      const records = Array.isArray(entries.important_dates) ? entries.important_dates : [];
-      const now = new Date();
-      const days: MorningBriefingImportantDay[] = [];
-      for (const r of records) {
-        const rec = r as {
-          id?: unknown;
-          name?: unknown;
-          date?: unknown;
-          type?: unknown;
-          relationship?: unknown;
-          notes?: unknown;
-        };
-        if (typeof rec.name !== "string" || !rec.name.trim()) continue;
-        if (typeof rec.date !== "string") continue;
-        const daysUntil = daysUntilMMdd(rec.date, now);
-        if (daysUntil < 0 || daysUntil > UPCOMING_DAYS_WINDOW) continue;
-        days.push({
-          id: typeof rec.id === "string" && rec.id ? rec.id : `${rec.name}|${rec.date}`,
-          name: rec.name.trim(),
-          date: rec.date,
-          type:
-            rec.type === "anniversary" || rec.type === "custom" ? rec.type : "birthday",
-          ...(typeof rec.relationship === "string" && rec.relationship.trim()
-            ? { relationship: rec.relationship.trim() }
-            : {}),
-          ...(typeof rec.notes === "string" && rec.notes.trim() ? { notes: rec.notes.trim() } : {}),
-          daysUntil,
-        });
-      }
-      return days.sort((a, b) => a.daysUntil - b.daysUntil).slice(0, UPCOMING_DAYS_MAX);
-    } catch {
-      return [];
     }
   }
 
@@ -961,98 +804,20 @@ export class MorningBriefingService {
     }
   }
 
-  /**
-   * 第四源：当日兴趣热搜命中。
-   * 读 data/interest-watch.json 中该 actor 的兴趣列表（字段结构同
-   * proactivity/interest-watcher.ts 的 WatchInterest；actorId 缺省时与 sessionId
-   * 同值，见 agent/actor-id.ts 的回退规则），拉一次实时热搜聚合后做简单
-   * includes 匹配（归一化后 title 包含兴趣名），按榜单顺序最多取 3 条。
-   * 用户要求：不要今日热搜兜底——未配置兴趣/当日无命中/拉取失败 →
-   * 空数组（省略该块）。
-   */
-  private async fetchInterestHits(sessionId: string): Promise<MorningBriefingInterestHit[]> {
-    const path =
-      this.deps.interestWatchPath ??
-      process.env.INTEREST_WATCH_FILE ??
-      join(getDataDir(), "interest-watch.json");
-
-    // 兴趣池文件不存在（用户从未设置兴趣）→ 直接省略，不触发网络请求
-    let raw: string;
-    try {
-      raw = await readFile(path, "utf8");
-    } catch {
-      return [];
-    }
-
-    const interests = this.readInterestNames(raw, sessionId);
-    if (interests.length === 0) return [];
-
-    const { items } = await fetchHotRankings(INTEREST_HITS_FETCH_LIMIT);
-    if (items.length === 0) return [];
-
-    const hits: MorningBriefingInterestHit[] = [];
-    const seenTitles = new Set<string>();
-    for (const item of items) {
-      if (hits.length >= INTEREST_HITS_MAX) break;
-      const titleFp = normalizeFp(item.title);
-      if (!titleFp || seenTitles.has(titleFp)) continue;
-      const matched = interests.find((name) => {
-        const fp = normalizeFp(name);
-        return fp.length >= 2 && titleFp.includes(fp);
-      });
-      if (!matched) continue;
-      seenTitles.add(titleFp);
-      hits.push({
-        interest: matched,
-        title: item.title,
-        platform: item.platform,
-        ...(item.url ? { url: item.url } : {}),
-        ...(item.hot ? { hot: item.hot } : {}),
-      });
-    }
-    return hits;
-  }
-
-  /** 解析兴趣池文件，取该 actor 启用中的兴趣名（列表按 lastSeenAt 倒序，近期兴趣优先命中） */
-  private readInterestNames(rawJson: string, actorId: string): string[] {
-    try {
-      const data = JSON.parse(rawJson) as {
-        interests?: Array<{
-          actorId?: string;
-          name?: unknown;
-          enabled?: boolean;
-          lastSeenAt?: number;
-        }>;
-      };
-      return (data.interests ?? [])
-        .filter(
-          (i) =>
-            i &&
-            i.actorId === actorId &&
-            i.enabled !== false &&
-            typeof i.name === "string" &&
-            i.name.trim().length >= 2,
-        )
-        .sort((a, b) => (b.lastSeenAt ?? 0) - (a.lastSeenAt ?? 0))
-        .map((i) => (i.name as string).trim());
-    } catch {
-      return [];
-    }
-  }
-
   private composeNarration(briefing: MorningBriefing): string {
     const parts: string[] = [];
     // 播报稿对齐设计稿（design/daily-briefing-floating.html）：问候与日期由
     // 卡片头（greeting/meta 行）展示，正文直接从内容开始，不再重复
     // 「下午好，今天9月10日周四」。天气/穿衣已迁往睡前提醒，不再进播报稿。
 
-    // DDL（第七源）：今天截止要置顶——比日程更硬，先说要交什么
-    const ddlBit = formatDeadlinesBit(briefing.deadlines);
-    if (ddlBit) parts.push(ddlBit);
-
+    // 今日日程（三源合并：截止 / 行程 / 普通日程）按时刻排好，逐条念最紧的前三条
     if (briefing.todaySchedule.length > 0) {
       parts.push(formatScheduleBit(briefing.todaySchedule));
     }
+
+    // 2~3 天内到期的件数：一句话带过，不逐条念
+    const soonBit = formatDeadlineSoonBit(briefing.deadlineSoonCount);
+    if (soonBit) parts.push(soonBit);
 
     // 待办跟进（可选块）：之前交代未完成 + 今日已办结——简报不只播新闻，
     // 还要回报用户交办事宜的进展
@@ -1060,33 +825,6 @@ export class MorningBriefingService {
     if (todo) {
       const todoBit = formatTodoFollowupsBit(todo);
       if (todoBit) parts.push(todoBit);
-    }
-
-    if (briefing.pendingNotes.length > 0) {
-      parts.push(formatNotesBit(briefing.pendingNotes));
-    }
-
-    // 第四源：兴趣热搜命中（可选块，无命中时整体省略）
-    const interestHits = briefing.interestHits ?? [];
-    if (interestHits.length > 0) {
-      parts.push(formatInterestHitsBit(interestHits));
-    }
-
-    // 第五源：近期重要日子（可选块，无记录时整体省略）
-    const upcomingDays = briefing.upcomingImportantDays ?? [];
-    if (upcomingDays.length > 0) {
-      parts.push(formatImportantDaysBit(upcomingDays));
-    }
-
-    // 第六源：行程段（可选块）——今天在行程中 → 第一站提醒
-    const travel = briefing.travel;
-    if (travel) {
-      const first = travel.firstStop;
-      parts.push(
-        `今天在${travel.destination}的行程继续` +
-          (first ? `，第一站 ${first.startTime} 是${first.name}` : "") +
-          (travel.packing.length > 0 ? `，记得带${travel.packing.join("、")}` : ""),
-      );
     }
 
     // 全空（个人数据源都没配置/没命中）→ 明确说明，不输出空荡荡的纯问候

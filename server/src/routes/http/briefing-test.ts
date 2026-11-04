@@ -54,7 +54,6 @@ export function registerBriefingTestRoutes(
       weatherService: deps.weatherService,
       weatherPrefsService: deps.weatherPrefsService,
       scheduleTaskService: deps.scheduleTaskService,
-      notesService: deps.notesService,
       requestClientLocation: deps.requestClientLocation,
       llmComplete: deps.llmComplete,
     };

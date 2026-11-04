@@ -39,9 +39,6 @@ double briefingWindowHeight({
     if (data.schedule.isNotEmpty) (data.schedule.length, false),
     if (data.todoPending.isNotEmpty)
       (data.todoPending.length, data.doneTodayCount > 0),
-    if (data.notes.isNotEmpty) (data.notes.length, false),
-    if (data.hits.isNotEmpty) (data.hits.length, false),
-    if (data.days.isNotEmpty) (data.days.length, false),
   ];
   for (int i = 0; i < panels.length; i++) {
     final (int rows, bool foot) = panels[i];
@@ -60,17 +57,13 @@ class _BriefingData {
     required this.schedule,
     required this.todoPending,
     required this.doneTodayCount,
-    required this.notes,
-    required this.hits,
-    required this.days,
   });
 
+  /// 今日日程（服务端已把「今天截止的 DDL」「在途行程第一站」并进同一栏，
+  /// 靠 kind 字段区分，2026-11-04）
   final List<Map<String, dynamic>> schedule;
   final List<String> todoPending;
   final int doneTodayCount;
-  final List<Map<String, dynamic>> notes;
-  final List<Map<String, dynamic>> hits;
-  final List<Map<String, dynamic>> days;
 
   static _BriefingData of(Map<String, dynamic>? briefing) {
     List<Map<String, dynamic>> listOf(String key) {
@@ -100,9 +93,6 @@ class _BriefingData {
       schedule: listOf("todaySchedule"),
       todoPending: pending,
       doneTodayCount: doneCount,
-      notes: listOf("pendingNotes"),
-      hits: listOf("interestHits"),
-      days: listOf("upcomingImportantDays"),
     );
   }
 }
@@ -150,24 +140,17 @@ String _panel({
       '${_esc(label)}$cnt</div>$inner$footHtml</section>';
 }
 
-/// 兴趣热搜行文案：「标题 · 平台」。
-String _interestHitText(Map<String, dynamic> item) {
+/// 今日日程行文案：三源合并后按 kind 加前缀（服务端只给原始标题，展示口径在前端）。
+String _scheduleTitle(Map<String, dynamic> item) {
   final String title = item["title"]?.toString() ?? "";
-  final String platform = item["platform"]?.toString() ?? "";
-  return platform.isEmpty ? title : "$title · $platform";
-}
-
-/// 重要日子行文案：「妈妈的生日 · 还有 3 天」。
-String _importantDayText(Map<String, dynamic> item) {
-  final String name = item["name"]?.toString() ?? "";
-  final String type = item["type"]?.toString() ?? "";
-  final String typeLabel =
-      type == "anniversary" ? "纪念日" : type == "custom" ? "特殊日子" : "生日";
-  final Object? rawDays = item["daysUntil"];
-  final String when = rawDays is int
-      ? (rawDays == 0 ? "就是今天" : rawDays == 1 ? "明天" : "还有 $rawDays 天")
-      : "";
-  return "$name的$typeLabel${when.isEmpty ? "" : " · $when"}";
+  final String kind = item["kind"]?.toString() ?? "schedule";
+  final String note = item["note"]?.toString() ?? "";
+  final String prefix = kind == "deadline"
+      ? "截止："
+      : kind == "travel"
+          ? "行程："
+          : "";
+  return note.isEmpty ? "$prefix$title" : "$prefix$title（$note）";
 }
 
 /// 卡面内容层：摘要带（置顶）+ 各数据板块的分组面板。
@@ -205,12 +188,12 @@ String _composeBriefingBody(_BriefingData d, String narration) {
     return html;
   }
 
-  // 今日日程
+  // 今日日程（三源合并：普通日程 + 今天截止的 DDL + 在途行程第一站）
   if (d.schedule.isNotEmpty) {
     final StringBuffer rows = StringBuffer();
     for (final Map<String, dynamic> s in d.schedule) {
-      final String title = s["title"]?.toString() ?? "";
-      if (title.trim().isEmpty) continue;
+      final String title = _scheduleTitle(s);
+      if (title.replaceAll(RegExp(r"^(截止|行程)："), "").trim().isEmpty) continue;
       rows.write(_itTime(s["time"]?.toString() ?? "", title));
     }
     if (rows.isNotEmpty) {
@@ -231,41 +214,6 @@ String _composeBriefingBody(_BriefingData d, String narration) {
     ));
   }
 
-  // 待复习笔记
-  if (d.notes.isNotEmpty) {
-    final StringBuffer rows = StringBuffer();
-    for (final Map<String, dynamic> n in d.notes) {
-      final String title = n["title"]?.toString() ?? "";
-      if (title.trim().isEmpty) continue;
-      rows.write(_itBullet(title));
-    }
-    if (rows.isNotEmpty) {
-      buf.write(panel("📝 待复习笔记", rows.toString(), count: "${d.notes.length}"));
-    }
-  }
-
-  // 兴趣热搜
-  if (d.hits.isNotEmpty) {
-    final StringBuffer rows = StringBuffer();
-    for (final Map<String, dynamic> h in d.hits) {
-      final String text = _interestHitText(h);
-      if (text.trim().isEmpty) continue;
-      rows.write(_itBullet(text));
-    }
-    if (rows.isNotEmpty) {
-      buf.write(panel("🔥 兴趣热搜", rows.toString(), count: "${d.hits.length}"));
-    }
-  }
-
-  // 近期重要日子（琥珀色：唯一暖色，拉注意力）
-  if (d.days.isNotEmpty) {
-    final StringBuffer rows = StringBuffer();
-    for (final Map<String, dynamic> day in d.days) {
-      rows.write(_itBullet(_importantDayText(day), amber: true));
-    }
-    buf.write(panel("🎉 近期重要日子", rows.toString(), amber: true));
-  }
-
   return buf.toString();
 }
 
@@ -280,9 +228,6 @@ String _buildChips(_BriefingData d) {
 
   add("日程", d.schedule.length);
   add("待办", d.todoPending.length);
-  add("笔记", d.notes.length);
-  add("热搜", d.hits.length);
-  add("纪念日", d.days.length);
   return chips.isEmpty ? "" : '<div class="chips">${chips.join()}</div>';
 }
 

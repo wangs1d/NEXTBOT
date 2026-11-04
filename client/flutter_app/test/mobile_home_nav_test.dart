@@ -27,9 +27,12 @@ class _MockHttpClient extends http.BaseClient {
           "agentGreeting": "早上好",
           "todaySchedule": <Map<String, dynamic>>[
             <String, dynamic>{"id": "s1", "title": "写周报", "time": "10:00"},
-          ],
-          "pendingNotes": <Map<String, dynamic>>[
-            <String, dynamic>{"id": "n1", "title": "采购清单"},
+            <String, dynamic>{
+              "id": "d1",
+              "title": "数据结构作业",
+              "time": "17:00",
+              "kind": "deadline",
+            },
           ],
           "todoFollowups": <String, dynamic>{
             "pending": <String>["查一下机票"],
@@ -107,8 +110,10 @@ void main() {
     expect(find.text("王哥，早上好"), findsOneWidget);
     expect(find.text("今日日程"), findsOneWidget);
     expect(find.text("写周报"), findsOneWidget);
-    expect(find.text("没看过的笔记"), findsOneWidget);
-    expect(find.text("采购清单"), findsOneWidget);
+    // 2026-11-04 收敛：笔记/热搜/纪念日不再进晨报；DDL 并入日程并带「截止：」前缀
+    expect(find.text("没看过的笔记"), findsNothing);
+    expect(find.text("近期重要日子"), findsNothing);
+    expect(find.text("截止：数据结构作业"), findsOneWidget);
     expect(find.text("之前交代的事"), findsOneWidget);
     // 2026-10-16 天气/穿衣迁出简报（搬往睡前提醒），页面不再渲染这两块
     expect(find.text("多云 18°C"), findsNothing);

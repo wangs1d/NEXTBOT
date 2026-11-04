@@ -40,7 +40,6 @@ function makeScheduler() {
         briefing: {
           date: "2026-09-13",
           todaySchedule: [],
-          pendingNotes: [],
           agentGreeting: "早上好",
         },
         // eslint-disable-next-line

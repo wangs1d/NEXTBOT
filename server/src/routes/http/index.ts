@@ -278,7 +278,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     weatherService: deps.weatherService,
     weatherPrefsService: deps.weatherPrefsService,
     scheduleTaskService: deps.scheduleTaskService,
-    notesService: deps.notesService,
     // 用户称呼第一事实源：结构化事实库「称呼」字段（与首启向导/聊天面同源；
     // 绝不回退账号 displayName——那是 agent 的网络名，方向会反）
     factStore: deps.factStore,

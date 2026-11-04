@@ -88,7 +88,9 @@ export class MorningBriefingScheduler {
           sessionId,
           { includeInProgressTravel: true },
         );
-        const desktopPayload = payload.briefing.travel
+        // 行程条目并入今日日程后，用它判定是否需要另生成一份电脑版（不含行程）
+        const hasTravelItem = payload.briefing.todaySchedule.some((i) => i.kind === "travel");
+        const desktopPayload = hasTravelItem
           ? await this.deps.briefingService.narrateBriefing(sessionId)
           : payload;
         const mode = prefs.morningBriefing.mode;

@@ -12,12 +12,10 @@ void main() {
       <String, dynamic>{"id": "s2", "title": "1:1", "time": "14:00"},
       <String, dynamic>{"id": "s3", "title": "周迭代演示", "time": "16:30"},
     ],
-    "pendingNotes": <dynamic>[
-      <String, dynamic>{"id": "n1", "title": "评审材料终稿"},
-    ],
-    "interestHits": <dynamic>[
-      <String, dynamic>{"interest": "AI", "title": "xxx", "platform": "weibo"},
-    ],
+    "todoFollowups": <String, dynamic>{
+      "pending": <dynamic>["三个平台的价格对比"],
+      "doneTodayCount": 1,
+    },
     "agentGreeting": "早上好！",
   };
 
@@ -32,7 +30,7 @@ void main() {
     expect(dailyBriefingDateLabel(morning), "9月10日 周四");
   });
 
-  test("组装：问候/元信息/口播稿/统计，0 值统计省略，超过 3 项截断在窗口侧", () {
+  test("组装：问候/元信息/口播稿/统计，0 值统计省略", () {
     final DailyBriefingCardContent card = buildDailyBriefingCard(
       briefing: fullBriefing,
       narrationText: "今天有三个会。",
@@ -43,13 +41,12 @@ void main() {
     expect(card.meta, "9月10日 周四");
     expect(card.script, "今天有三个会。");
 
-    expect(card.stats.length, 3);
+    // 2026-11-04 收敛：抬头只剩「日程 / 待办」（笔记、热搜、纪念日撤出晨报）
+    expect(card.stats.length, 2);
     expect(card.stats[0].label, "日程");
     expect(card.stats[0].count, 3);
-    expect(card.stats[1].label, "笔记");
+    expect(card.stats[1].label, "待办");
     expect(card.stats[1].count, 1);
-    expect(card.stats[2].label, "热搜");
-    expect(card.stats[2].count, 1);
   });
 
   test("称呼：非空时问候带称呼，空白串退化为无称呼", () {
