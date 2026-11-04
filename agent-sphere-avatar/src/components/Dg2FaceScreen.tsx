@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef } from "react";
 import { useFrame } from "@react-three/fiber";
 import * as THREE from "three";
-import { FaceRig, type FaceExpression } from "./dg2-face/face-rig";
+import { FaceRig, poseFor, type FaceExpression } from "./dg2-face/face-rig";
 import { FACE_TEX_SIZE, drawFaceBackground, drawFaceEyes } from "./dg2-face/face-draw";
 
 /** 模型空间球半径 */
@@ -78,10 +78,10 @@ export function Dg2FaceScreen({ expression = "focused", rigRef }: Dg2FaceScreenP
     bgCanvas.width = FACE_TEX_SIZE;
     bgCanvas.height = FACE_TEX_SIZE;
     const bctx = bgCanvas.getContext("2d")!;
-    drawFaceBackground(bctx, 0.35);
+    drawFaceBackground(bctx, poseFor("focused").glow);
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.drawImage(bgCanvas, 0, 0);
-    drawFaceEyes(c, { openL: 1, openR: 1, squintL: 0.22, squintR: 0.22, gazeX: 0.42, gazeY: 0, pupilScale: 1, tiltL: 0.05, tiltR: 0.05, glow: 0.35 }, 1);
+    drawFaceEyes(c, poseFor("focused"), 1);
 
     const tex = new THREE.CanvasTexture(canvas);
     tex.colorSpace = THREE.SRGBColorSpace;
