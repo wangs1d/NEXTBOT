@@ -132,7 +132,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     try {
       await CloudModelBindingStore.instance.load();
       final http.Client client = http.Client();
-      final List<http.Response> responses = await Future.wait(<Future<http.Response>>[
+      final List<http.Response> responses =
+          await Future.wait(<Future<http.Response>>[
         client
             .get(_authed("/api/service-config"),
                 headers: AccessCredentialStore.instance.authHeaders)
@@ -171,9 +172,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       if (responses[1].statusCode == 200) {
         final Map<String, dynamic> catalog =
             jsonDecode(responses[1].body) as Map<String, dynamic>;
-        providers = ((catalog["providers"] as List<dynamic>?) ?? const <dynamic>[])
-            .whereType<Map<String, dynamic>>()
-            .toList();
+        providers =
+            ((catalog["providers"] as List<dynamic>?) ?? const <dynamic>[])
+                .whereType<Map<String, dynamic>>()
+                .toList();
       }
 
       if (!mounted) return;
@@ -196,7 +198,9 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           _model.text = modelBlock["model"]?.toString() ?? "";
           _providerId = modelBlock["providerId"]?.toString() ?? "custom";
         } else {
-          _applyProvider(providers.isNotEmpty ? providers.first["id"].toString() : "custom");
+          _applyProvider(providers.isNotEmpty
+              ? providers.first["id"].toString()
+              : "custom");
         }
         if ((ttsBlock["provider"]?.toString() ?? "").isNotEmpty) {
           _ttsProvider = ttsBlock["provider"].toString();
@@ -205,7 +209,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         // 云端多租户：模型三元组的唯一副本在本机，表单与角标都以本机为准
         if (sessionByok) {
           _modelConfigured = binding.isConfigured;
-          _modelKeyTail = binding.isConfigured ? _tailOf(binding.apiKey!) : null;
+          _modelKeyTail =
+              binding.isConfigured ? _tailOf(binding.apiKey!) : null;
           if (binding.isConfigured) {
             _baseUrl.text = binding.baseUrl ?? "";
             _model.text = binding.model ?? "";
@@ -592,14 +597,17 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _fieldLabel(p, "模型名"),
         _buildField(p, controller: _model, hint: "deepseek-flash"),
         // 目录模型的快捷选择
-        if (provider != null && (provider["models"] as List<dynamic>? ?? const <dynamic>[]).isNotEmpty) ...<Widget>[
+        if (provider != null &&
+            (provider["models"] as List<dynamic>? ?? const <dynamic>[])
+                .isNotEmpty) ...<Widget>[
           const SizedBox(height: 8),
           Wrap(
             spacing: 8,
             runSpacing: 8,
             children: <Widget>[
               for (final dynamic m in provider["models"] as List<dynamic>)
-                _modelSuggestionChip(p, (m as Map<String, dynamic>)["id"].toString()),
+                _modelSuggestionChip(
+                    p, (m as Map<String, dynamic>)["id"].toString()),
             ],
           ),
         ],
@@ -711,8 +719,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
                 size: 18,
                 color: p.textMuted,
               ),
-              onPressed: () =>
-                  setState(() => _obscureTtsKey = !_obscureTtsKey),
+              onPressed: () => setState(() => _obscureTtsKey = !_obscureTtsKey),
             ),
           ),
         ],
@@ -784,9 +791,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
                   width: 7,
                   height: 7,
                   decoration: BoxDecoration(
-                    color: _mailRunning
-                        ? const Color(0xFF34C759)
-                        : p.textMuted,
+                    color: _mailRunning ? const Color(0xFF34C759) : p.textMuted,
                     shape: BoxShape.circle,
                   ),
                 ),
@@ -859,8 +864,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           ),
         ),
         const SizedBox(height: 12),
-        _fieldLabel(
-            p, "IMAP 授权码${_mailConfigured ? "（已保存，可改）" : ""}"),
+        _fieldLabel(p, "IMAP 授权码${_mailConfigured ? "（已保存，可改）" : ""}"),
         TextField(
           controller: _mailPass,
           obscureText: _obscureMailPass,
@@ -868,9 +872,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           enableSuggestions: false,
           style: TextStyle(color: p.textPrimary, fontSize: 14),
           decoration: InputDecoration(
-            hintText: _mailConfigured
-                ? "已接入，留空不改；要换请填新授权码"
-                : "邮箱设置里生成的授权码",
+            hintText: _mailConfigured ? "已接入，留空不改；要换请填新授权码" : "邮箱设置里生成的授权码",
             hintStyle: TextStyle(color: p.textMuted, fontSize: 14),
             filled: true,
             fillColor: p.background,
@@ -948,8 +950,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       if (parsed["ok"] != true) {
         throw Exception(parsed["error"]?.toString() ?? "读取树枝配置失败");
       }
-      List<Map<String, dynamic>> watchTasks =
-          const <Map<String, dynamic>>[];
+      List<Map<String, dynamic>> watchTasks = const <Map<String, dynamic>>[];
       try {
         final http.Response wt = await http
             .get(Uri.parse("${ApiConfig.httpBase}/api/proactivity/watch-tasks"),
@@ -969,9 +970,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       }
       if (!mounted) return;
       setState(() {
-        _branches = ((parsed["branches"] as List<dynamic>?) ?? const <dynamic>[])
-            .map((e) => (e as Map<String, dynamic>))
-            .toList();
+        _branches =
+            ((parsed["branches"] as List<dynamic>?) ?? const <dynamic>[])
+                .map((e) => (e as Map<String, dynamic>))
+                .toList();
         _watchTasks = watchTasks;
         _branchMessage = null;
         _branchMessageError = false;
@@ -1022,7 +1024,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     try {
       final http.Response resp = await http
           .post(
-            Uri.parse("${ApiConfig.httpBase}/api/proactivity/watch-tasks/config"),
+            Uri.parse(
+                "${ApiConfig.httpBase}/api/proactivity/watch-tasks/config"),
             headers: AccessCredentialStore.instance.authHeaders,
             body: jsonEncode(<String, dynamic>{
               "id": id,
@@ -1068,9 +1071,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         ),
         const SizedBox(height: 6),
         Text(
-          "每根树枝是一个信息源：停用后该来源不再进主动提醒管道；"
-          "「AI 精简」打开后由模型对过闸内容做摘要上报（每日有预算，失败自动回退原文摘要）。",
-          style: TextStyle(color: p.textSecondary, fontSize: 12.5, height: 1.45)),
+            "每根树枝是一个信息源：停用后该来源不再进主动提醒管道；"
+            "「AI 精简」打开后由模型对过闸内容做摘要上报（每日有预算，失败自动回退原文摘要）。",
+            style: TextStyle(
+                color: p.textSecondary, fontSize: 12.5, height: 1.45)),
         const SizedBox(height: 12),
         for (final Map<String, dynamic> b in _branches) ...<Widget>[
           _branchRow(p, b),
@@ -1095,8 +1099,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
             ],
           ),
           const SizedBox(height: 8),
-          for (final Map<String, dynamic> t in _watchTasks)
-            _watchTaskRow(p, t),
+          for (final Map<String, dynamic> t in _watchTasks) _watchTaskRow(p, t),
         ],
         if (_branches.isEmpty && !_branchesLoading) ...<Widget>[
           const SizedBox(height: 8),
@@ -1141,8 +1144,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
             ],
           ),
         ),
-        Text("AI 精简",
-            style: TextStyle(color: p.textSecondary, fontSize: 12)),
+        Text("AI 精简", style: TextStyle(color: p.textSecondary, fontSize: 12)),
         SizedBox(
           width: 40,
           height: 28,
@@ -1199,12 +1201,14 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           ),
         ),
         GestureDetector(
-          onTap: () => unawaited(_patchWatchTask(actorId, id, active ? "pause" : "resume")),
+          onTap: () => unawaited(
+              _patchWatchTask(actorId, id, active ? "pause" : "resume")),
           child: Padding(
             padding: const EdgeInsets.all(6),
             child: Text(active ? "暂停" : "恢复",
                 style: TextStyle(
-                    color: Theme.of(context).colorScheme.primary, fontSize: 12.5)),
+                    color: Theme.of(context).colorScheme.primary,
+                    fontSize: 12.5)),
           ),
         ),
         GestureDetector(
@@ -1212,7 +1216,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           child: Padding(
             padding: const EdgeInsets.all(6),
             child: Text("删除",
-                style: TextStyle(color: const Color(0xFFE5484D), fontSize: 12.5)),
+                style:
+                    TextStyle(color: const Color(0xFFE5484D), fontSize: 12.5)),
           ),
         ),
       ],
@@ -1261,8 +1266,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         decoration: BoxDecoration(
           color: selected ? p.accent : p.background,
           borderRadius: BorderRadius.circular(18),
-          border: Border.all(
-              color: selected ? p.accent : p.divider),
+          border: Border.all(color: selected ? p.accent : p.divider),
         ),
         child: Text(
           label,
@@ -1406,8 +1410,8 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         ? SizedBox(
             width: 18,
             height: 18,
-            child: CircularProgressIndicator(
-                strokeWidth: 2, color: spinnerColor),
+            child:
+                CircularProgressIndicator(strokeWidth: 2, color: spinnerColor),
           )
         : Text(label,
             style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600));

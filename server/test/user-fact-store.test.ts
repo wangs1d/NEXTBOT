@@ -15,7 +15,16 @@ import { AgentMemorySyncService } from "../src/services/agent-memory-sync-servic
 import {
   UserFactStore,
   extractFactSubject,
+  isHabitClaim,
 } from "../src/services/user-fact-store.js";
+
+/** 本地日历日（YYYY-MM-DD），offsetDays 负数=过去 */
+function dayStr(offsetDays: number): string {
+  const d = new Date(Date.now() - offsetDays * 86_400_000);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(
+    d.getDate(),
+  ).padStart(2, "0")}`;
+}
 
 async function makeTempDir(): Promise<string> {
   return mkdtemp(join(tmpdir(), "user-fact-store-"));
@@ -146,6 +155,165 @@ test("syncDerivedSlots: 事实行替换同 subject 旧行，未冲突的近期�
     assert.match(slot, /我住在杭州/, "事实行的最新值应进入槽位");
     assert.doesNotMatch(slot, /我住在北京/, "同 subject 的旧行应被事实替换");
     assert.match(slot, /Flutter chat app/, "未冲突的近期捕获行应保留");
+  } finally {
+    await cleanup(dir, store, actorId, 60);
+  }
+});
+
+test("习惯画像门槛：单日观察不进槽位，第二观察日晋级并带 as-of", async () => {
+  const dir = await makeTempDir();
+  const store = new UserFactStore(join(dir, "facts"));
+  const actorId = "actor-habit";
+  try {
+    const memorySync = new AgentMemorySyncService(join(dir, "memory-sync.json"));
+    await memorySync.load();
+
+    // 第一晚观察：入库但不进派生槽位（2026-11-07 定稿：单日观察不得固化为习惯）
+    const first = await store.upsertFact(actorId, {
+      kind: "preference",
+      value: "用户习惯在凌晨0:40左右睡觉",
+      source: "nightly-extract",
+      observedOn: dayStr(1),
+    });
+    assert.ok(first);
+    assert.deepEqual(first.evidenceDays, [dayStr(1)]);
+
+    const sync1 = await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(sync1.preferences, 0, "单日观察的习惯不得进入槽位");
+    const { entries: e1 } = memorySync.getSnapshot(actorId, ["memory_preferences"]);
+    assert.doesNotMatch(String(e1.memory_preferences ?? ""), /凌晨0:40/);
+
+    // 第二晚不同观察日：晋级进槽位，行尾带证据锚（截至 MM-DD，N 天观察）
+    const second = await store.upsertFact(actorId, {
+      kind: "preference",
+      value: "用户习惯在凌晨0:40左右睡觉",
+      source: "nightly-extract",
+      observedOn: dayStr(0),
+    });
+    assert.ok(second);
+    assert.deepEqual(second.evidenceDays, [dayStr(1), dayStr(0)]);
+
+    const sync2 = await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(sync2.preferences, 1, "两个观察日后习惯应晋级进槽位");
+    const { entries: e2 } = memorySync.getSnapshot(actorId, ["memory_preferences"]);
+    const slot = String(e2.memory_preferences ?? "");
+    assert.match(slot, /凌晨0:40/);
+    assert.match(
+      slot,
+      new RegExp(`（截至${dayStr(0).slice(5)}，2天观察）`),
+      "习惯行必须带 as-of 与观察天数",
+    );
+  } finally {
+    await cleanup(dir, store, actorId, 60);
+  }
+});
+
+test("习惯画像动态更新：新观察替换旧值，过保鲜期退出画像", async () => {
+  const dir = await makeTempDir();
+  const store = new UserFactStore(join(dir, "facts"));
+  const actorId = "actor-habit-fresh";
+  try {
+    const memorySync = new AgentMemorySyncService(join(dir, "memory-sync.json"));
+    await memorySync.load();
+
+    // 两个观察日都在 15 天前：证据够但过保鲜期 → 不进槽位
+    // （同一 subject：normalizeSubject 取前 12 字「用户习惯晚睡常到凌晨一点」）
+    await store.upsertFact(actorId, {
+      kind: "fact",
+      value: "用户习惯晚睡常到凌晨一点",
+      source: "nightly-extract",
+      observedOn: dayStr(16),
+    });
+    await store.upsertFact(actorId, {
+      kind: "fact",
+      value: "用户习惯晚睡常到凌晨一点",
+      source: "nightly-extract",
+      observedOn: dayStr(15),
+    });
+    const sync = await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(sync.facts, 0, "超过保鲜期的习惯不得进入槽位");
+
+    // 最近重新观察到（动态更新）：值刷新 + 进槽位
+    const fresh = await store.upsertFact(actorId, {
+      kind: "fact",
+      value: "用户习惯晚睡常到凌晨一点半",
+      source: "nightly-extract",
+      observedOn: dayStr(0),
+    });
+    assert.ok(fresh);
+    await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const { entries } = memorySync.getSnapshot(actorId, ["memory_facts"]);
+    const slot = String(entries.memory_facts ?? "");
+    assert.match(slot, /凌晨一点半/, "新观察应刷新画像值");
+    assert.doesNotMatch(slot, /凌晨一点（/, "旧值的渲染行应被替换");
+  } finally {
+    await cleanup(dir, store, actorId, 60);
+  }
+});
+
+test("习惯画像压制：旧数据（无观察日）与单日捕获的残行应被清除", async () => {
+  const dir = await makeTempDir();
+  const store = new UserFactStore(join(dir, "facts"));
+  const actorId = "actor-habit-legacy";
+  try {
+    const memorySync = new AgentMemorySyncService(join(dir, "memory-sync.json"));
+    await memorySync.load();
+    // 模拟历史上单日提取固化进槽位的残行
+    memorySync.appendMemorySummaryLine(actorId, "用户习惯在凌晨0:40左右睡觉");
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // 旧数据：夜间提取落库但无 observedOn（无证据日）→ 被压制
+    await store.upsertFact(actorId, {
+      kind: "fact",
+      value: "用户习惯在凌晨0:40左右睡觉",
+      source: "nightly-extract",
+    });
+    const sync = await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(sync.facts, 0, "无观察日证据的习惯不得进槽位");
+    const { entries } = memorySync.getSnapshot(actorId, ["memory_facts"]);
+    assert.doesNotMatch(
+      String(entries.memory_facts ?? ""),
+      /凌晨0:40/,
+      "被压制习惯的旧槽位残行必须清除",
+    );
+  } finally {
+    await cleanup(dir, store, actorId, 60);
+  }
+});
+
+test("称呼类偏好与普通事实不受习惯门槛影响", async () => {
+  const dir = await makeTempDir();
+  const store = new UserFactStore(join(dir, "facts"));
+  const actorId = "actor-naming";
+  try {
+    const memorySync = new AgentMemorySyncService(join(dir, "memory-sync.json"));
+    await memorySync.load();
+    // 用户明说的称呼偏好：虽含「习惯」字样但不是行为观察，单日即可进画像
+    assert.equal(isHabitClaim({ kind: "fact", value: "用户真名王铭川，习惯被称呼为川哥" }), false);
+    assert.equal(isHabitClaim({ kind: "fact", value: "用户习惯用「小弟」称呼助手" }), false);
+    assert.equal(isHabitClaim({ kind: "fact", value: "用户习惯在凌晨0:40左右睡觉" }), true);
+    assert.equal(isHabitClaim({ kind: "fact", value: "用户有游泳的习惯" }), true);
+    assert.equal(isHabitClaim({ kind: "fact", value: "用户住在杭州" }), false);
+
+    await store.upsertFact(actorId, {
+      kind: "fact",
+      value: "用户真名王铭川，习惯被称呼为川哥",
+      source: "nightly-extract",
+      observedOn: dayStr(0),
+    });
+    await store.syncDerivedSlots(actorId, memorySync);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const { entries } = memorySync.getSnapshot(actorId, ["memory_facts"]);
+    assert.match(
+      String(entries.memory_facts ?? ""),
+      /川哥/,
+      "称呼类偏好单日即可进画像（不受多日门槛约束）",
+    );
   } finally {
     await cleanup(dir, store, actorId, 60);
   }

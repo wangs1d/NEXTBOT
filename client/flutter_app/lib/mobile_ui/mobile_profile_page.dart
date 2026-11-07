@@ -124,19 +124,33 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   }
 
   void _toast(String message) {
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
   /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(服务接入)
   /// 直接 push,避免出现双层顶栏+双返回按钮。
+  ///
+  /// 边缘横滑返回由系统手势导航（左/右边缘）直接作用于路由栈，无需重复拦截。
   Future<void> _push(Widget page, String title, {bool wrapped = true}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (BuildContext ctx) => wrapped
             ? Scaffold(
                 backgroundColor: MobileTheme.of(ctx).background,
-                appBar: AppBar(title: Text(title)),
+                appBar: AppBar(
+                  title: Text(title),
+                  centerTitle: true,
+                  leading: IconButton(
+                    tooltip: "返回",
+                    icon: const Icon(
+                      Icons.arrow_back_ios_new_rounded,
+                      size: 20,
+                    ),
+                    onPressed: () => unawaited(Navigator.of(ctx).maybePop()),
+                  ),
+                ),
                 body: page,
               )
             : page,
@@ -152,7 +166,13 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
       backgroundColor: p.background,
       appBar: AppBar(
         title: const Text("我的"),
-        automaticallyImplyLeading: false,
+        centerTitle: true,
+        // 设置页从抽屉齿轮 push 进入：必须留显式返回键。
+        leading: IconButton(
+          tooltip: "返回",
+          icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20),
+          onPressed: () => unawaited(Navigator.of(context).maybePop()),
+        ),
       ),
       body: ListView(
         padding: const EdgeInsets.symmetric(vertical: 8),
@@ -168,11 +188,13 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _SectionCard(
             children: [
               _ListRow(
-                leading: Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
+                leading:
+                    Icon(Icons.tune_outlined, color: p.textSecondary, size: 22),
                 title: "服务接入",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(
-                    const MobileServiceAccessPage(), "服务接入", wrapped: false),
+                trailing:
+                    Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                onTap: () => _push(const MobileServiceAccessPage(), "服务接入",
+                    wrapped: false),
               ),
             ],
           ),
@@ -180,9 +202,11 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _GroupLabel(label: "设置"),
           _SectionCard(
             children: [
-              if (widget.themeMode != null && widget.onThemeModeChanged != null) ...<Widget>[
+              if (widget.themeMode != null &&
+                  widget.onThemeModeChanged != null) ...<Widget>[
                 _ListRow(
-                  leading: Icon(Icons.contrast, color: p.textSecondary, size: 22),
+                  leading:
+                      Icon(Icons.contrast, color: p.textSecondary, size: 22),
                   title: "外观",
                   trailing: Text(
                     _themeModeLabel(widget.themeMode!),
@@ -199,9 +223,11 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                 _divider(context),
               ],
               _ListRow(
-                leading: Icon(Icons.help_outline, color: p.textSecondary, size: 22),
+                leading:
+                    Icon(Icons.help_outline, color: p.textSecondary, size: 22),
                 title: "帮助与反馈",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
+                trailing:
+                    Icon(Icons.chevron_right, color: p.textMuted, size: 20),
                 onTap: _showFeedback,
               ),
             ],
@@ -211,7 +237,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _SectionCard(
             children: [
               _ListRow(
-                leading: Icon(Icons.info_outline, color: p.textSecondary, size: 22),
+                leading:
+                    Icon(Icons.info_outline, color: p.textSecondary, size: 22),
                 title: "版本",
                 trailing: Text(
                   "1.0.0",
@@ -222,7 +249,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
               if (widget.onLogout != null) ...<Widget>[
                 _divider(context),
                 _ListRow(
-                  leading: Icon(Icons.logout, color: Theme.of(context).colorScheme.error, size: 22),
+                  leading: Icon(Icons.logout,
+                      color: Theme.of(context).colorScheme.error, size: 22),
                   title: "退出登录",
                   titleColor: Theme.of(context).colorScheme.error,
                   onTap: () => _confirmLogout(context),
@@ -243,7 +271,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   }
 
   Widget _divider(BuildContext context) {
-    return Divider(height: 1, indent: 52, color: MobileTheme.of(context).divider);
+    return Divider(
+        height: 1, indent: 52, color: MobileTheme.of(context).divider);
   }
 
   /// 主题模式的展示名（「外观」行 trailing 摘要）。
@@ -346,7 +375,8 @@ class _AccountCard extends StatelessWidget {
             onTap: onChangeAvatar,
             child: Tooltip(
               message: "点击设置头像",
-              child: UserAvatar(url: avatarUrl, size: 52, fallback: avatarFallback),
+              child: UserAvatar(
+                  url: avatarUrl, size: 52, fallback: avatarFallback),
             ),
           );
     final Color statusColor = connected ? const Color(0xFF34C759) : p.textMuted;
@@ -381,7 +411,8 @@ class _AccountCard extends StatelessWidget {
                     Container(
                       width: 7,
                       height: 7,
-                      decoration: BoxDecoration(color: statusColor, shape: BoxShape.circle),
+                      decoration: BoxDecoration(
+                          color: statusColor, shape: BoxShape.circle),
                     ),
                     const SizedBox(width: 6),
                     Text(
@@ -607,8 +638,7 @@ class _ThemeModeOption extends StatelessWidget {
                 ),
               ),
             ),
-            if (selected)
-              Icon(Icons.check, size: 20, color: cs.primary),
+            if (selected) Icon(Icons.check, size: 20, color: cs.primary),
           ],
         ),
       ),

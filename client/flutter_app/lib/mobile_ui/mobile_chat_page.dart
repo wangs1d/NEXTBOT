@@ -1,9 +1,11 @@
-﻿import "dart:async";
+import "dart:async";
 import "dart:typed_data";
 
 import "package:flutter/material.dart";
 
+import "../core/config/api_config.dart";
 import "../core/models/chat_models.dart";
+import "../core/services/side_chat_api.dart";
 import "../core/theme/app_typography.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../core/vision/pick_gallery_vision.dart";
@@ -20,6 +22,9 @@ import "mobile_theme.dart";
 /// 同一条竖线。
 const double kAgentStatusOrbInset = 16;
 
+/// 顶栏文字字体：与侧边栏统一使用 HarmonyOS Sans SC。
+const String _kTopBarFontFamily = "HarmonyOS Sans SC";
+
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
 /// - 顶栏：居中标题 + 在线状态点
@@ -28,13 +33,21 @@ const double kAgentStatusOrbInset = 16;
 ///
 /// [controller] 可选：由外部(根组件)注入以共享连接；不传时自建。
 class MobileChatPage extends StatefulWidget {
-  const MobileChatPage({super.key, this.controller, this.agentName});
+  const MobileChatPage({
+    super.key,
+    this.controller,
+    this.agentName,
+    this.onOpenSidebar,
+  });
 
   final MobileChatController? controller;
 
   /// 用户给 agent 取的名称（服务端 agentProfile.displayName）；
   /// 空/null 时顶栏不显示文字标题，只留在线状态点。
   final String? agentName;
+
+  /// 左上角玻璃按钮：打开左侧边栏（旁聊列表）。
+  final VoidCallback? onOpenSidebar;
 
   @override
   State<MobileChatPage> createState() => _MobileChatPageState();
@@ -94,10 +107,17 @@ class _MobileChatPageState extends State<MobileChatPage> {
   @override
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
+    // 深色下背景由 main 壳的渐变辉光统一承接（设计稿 01 屏背景），
+    // 本页只做透明承载；浅色主题仍用纯色，避免辉光透出。
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
     return Scaffold(
-      backgroundColor: p.background,
-      appBar: AppBar(
-        title: _buildTitle(context, p),
+      backgroundColor: dark ? Colors.transparent : p.background,
+      appBar: PreferredSize(
+        preferredSize: const Size.fromHeight(52),
+        child: ListenableBuilder(
+          listenable: _controller,
+          builder: (context, _) => _buildTopBar(context, p),
+        ),
       ),
       body: Column(
         children: [
@@ -112,7 +132,10 @@ class _MobileChatPageState extends State<MobileChatPage> {
           ),
           // 独立组件：思考链状态带长在消息区与输入栏之间，不进输入栏容器。
           _buildAgentStatusOrb(p),
-          _buildInputBar(context, p),
+          ListenableBuilder(
+            listenable: _controller,
+            builder: (context, _) => _buildInputBar(context, p),
+          ),
         ],
       ),
     );
@@ -127,10 +150,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
   /// 与惰性布局赛跑的竞态逻辑（正向列表下该估计值追不上回填,落点半山腰）。
   void _maybeScrollToBottom() {
     final int count = _controller.messages.length;
-    final bool needScroll =
-        count != _lastMessageCount ||
-        (_lastMessageCount > 0 &&
-            _controller.isProcessing);
+    final bool needScroll = count != _lastMessageCount ||
+        (_lastMessageCount > 0 && _controller.isProcessing);
     _lastMessageCount = count;
     if (!needScroll) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -188,17 +209,338 @@ class _MobileChatPageState extends State<MobileChatPage> {
       });
     }
     _maybeScrollToBottom();
+    if (_controller.isSideChatActive) {
+      unawaited(_autoTitleSideChat());
+    }
+  }
+
+  /// 旁聊标题按内容再定：用户开口后，用首条用户消息生成标题，
+  /// 不再固定显示「新旁聊」（用户已手动重命名过的不动）。
+  Future<void> _autoTitleSideChat() async {
+    final String current = (_controller.activeSideTitle ?? "").trim();
+    if (current.isNotEmpty && current != "新旁聊") return;
+    final String? fullId = _controller.activeSideSessionId;
+    if (fullId == null) return;
+    String seed = "";
+    for (final ChatMessage m in _controller.messages) {
+      if (m.role != "user") continue;
+      final String text = m.text.trim();
+      // 纯图消息落库文案是「（见图）」，不能当标题；等有文字再说。
+      if (text.isNotEmpty && text != "（见图）") {
+        seed = text;
+        break;
+      }
+    }
+    if (seed.isEmpty) return;
+    final String compact = seed.replaceAll(RegExp(r"\s+"), " ").trim();
+    final List<int> runes = compact.runes.toList();
+    final String title = runes.length > 16
+        ? String.fromCharCodes(runes.take(16))
+        : compact;
+    _controller.setActiveSideTitle(title);
+    final String shortId = fullId.contains(":")
+        ? fullId.substring(fullId.lastIndexOf(":") + 1)
+        : fullId;
+    final SideChatSummary? updated =
+        await SideChatApi(baseUrl: ApiConfig.httpBase).rename(shortId, title);
+    if (updated == null || !mounted) return;
+    if (_controller.activeSideSessionId != fullId) return;
+    _controller.setActiveSideTitle(updated.title);
+  }
+
+  Widget _buildTopBar(BuildContext context, MobilePalette p) {
+    final bool side = _controller.isSideChatActive;
+    return AppBar(
+      backgroundColor: Colors.transparent,
+      elevation: 0,
+      scrolledUnderElevation: 0,
+      toolbarHeight: 52,
+      centerTitle: true,
+      titleSpacing: 0,
+      leadingWidth: side ? 100 : 60,
+      leading: Padding(
+        padding: EdgeInsets.only(left: side ? 6 : 14, top: 7, bottom: 7),
+        child: side
+            ? _buildBackToMain(p)
+            : _buildGlassButton(
+                icon: Icons.menu_rounded,
+                tooltip: "打开侧边栏",
+                onTap: widget.onOpenSidebar,
+                p: p,
+              ),
+      ),
+      title: side ? _buildSideChatTitle(p) : _buildTitle(context, p),
+      actions: side
+          ? <Widget>[
+              Padding(
+                padding: const EdgeInsets.only(right: 14),
+                child: _buildGlassButton(
+                  icon: Icons.more_horiz_rounded,
+                  tooltip: "旁聊菜单",
+                  onTap: _showSideChatMenu,
+                  p: p,
+                  size: 34,
+                ),
+              ),
+            ]
+          : null,
+    );
+  }
+
+  /// 左上角 38px 玻璃圆按钮（设计稿 01 屏汉堡键）。
+  Widget _buildGlassButton({
+    required IconData icon,
+    required String tooltip,
+    required MobilePalette p,
+    VoidCallback? onTap,
+    double size = 38,
+  }) {
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onTap: onTap,
+        child: Container(
+          width: size,
+          height: size,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: dark
+                ? Colors.white.withValues(alpha: 0.07)
+                : p.surface.withValues(alpha: 0.55),
+            border: Border.all(
+              color: dark
+                  ? Colors.white.withValues(alpha: 0.10)
+                  : p.divider.withValues(alpha: 0.8),
+            ),
+          ),
+          child: Icon(
+            icon,
+            size: 18,
+            color: dark ? const Color(0xFFE9EAEF) : p.textPrimary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 旁聊顶栏「← 主会话」。
+  Widget _buildBackToMain(MobilePalette p) {
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () {
+        if (!_controller.canSwitchSession) {
+          _toast("正在回复，稍后再返回主会话");
+          return;
+        }
+        unawaited(_controller.returnToMain());
+      },
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.arrow_back_ios_new_rounded,
+              size: 16, color: p.textPrimary),
+          const SizedBox(width: 2),
+          Text(
+            "主会话",
+            style: TextStyle(
+              fontFamily: _kTopBarFontFamily,
+              fontSize: 13,
+              color: p.textPrimary,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 旁聊顶栏标题：标题 + 「旁聊」标签 + 独立上下文副行。
+  Widget _buildSideChatTitle(MobilePalette p) {
+    final String title = (_controller.activeSideTitle ?? "").trim();
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: <Widget>[
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 160),
+              child: Text(
+                title.isEmpty ? "旁聊" : title,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontFamily: _kTopBarFontFamily,
+                  color: p.textPrimary,
+                  fontSize: 17,
+                  fontWeight: FontWeight.w600,
+                  letterSpacing: 0.2,
+                ),
+              ),
+            ),
+            const SizedBox(width: 6),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
+              decoration: BoxDecoration(
+                color: Theme.of(context).brightness == Brightness.dark
+                    ? Colors.white.withValues(alpha: 0.05)
+                    : p.surface.withValues(alpha: 0.5),
+                borderRadius: BorderRadius.circular(999),
+                border: Border.all(
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? Colors.white.withValues(alpha: 0.12)
+                      : p.divider.withValues(alpha: 0.8),
+                ),
+              ),
+              child: Text(
+                "旁聊",
+                style: TextStyle(
+                  fontFamily: _kTopBarFontFamily,
+                  fontSize: 10.5,
+                  letterSpacing: 0.5,
+                  color: Theme.of(context).brightness == Brightness.dark
+                      ? const Color(0xFFA9ADBA)
+                      : p.textSecondary,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 2),
+        Text(
+          "独立上下文 · 不影响主会话",
+          style: TextStyle(
+            fontFamily: _kTopBarFontFamily,
+            fontSize: 11.5,
+            letterSpacing: 0.2,
+            color: Theme.of(context).brightness == Brightness.dark
+                ? const Color(0xFF8A8E99)
+                : p.textMuted,
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// 旁聊右上角菜单：长按列表同款的「重命名 / 删除」入口（真实后端接口）。
+  Future<void> _showSideChatMenu() async {
+    final String? fullId = _controller.activeSideSessionId;
+    if (fullId == null) return;
+    final String shortId = fullId.contains(":")
+        ? fullId.substring(fullId.lastIndexOf(":") + 1)
+        : fullId;
+    final SideChatApi api = SideChatApi(baseUrl: ApiConfig.httpBase);
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: MobileTheme.of(context).surface,
+      showDragHandle: true,
+      builder: (BuildContext sheetContext) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text("重命名旁聊"),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  unawaited(_renameActiveSideChat(api, shortId));
+                },
+              ),
+              ListTile(
+                leading: const Icon(Icons.delete_outline_rounded),
+                title: const Text("删除旁聊"),
+                onTap: () {
+                  Navigator.of(sheetContext).pop();
+                  unawaited(_deleteActiveSideChat(api, shortId));
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Future<void> _renameActiveSideChat(SideChatApi api, String shortId) async {
+    final TextEditingController name =
+        TextEditingController(text: _controller.activeSideTitle ?? "");
+    final String? next = await showDialog<String>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text("重命名旁聊"),
+        content: TextField(
+          controller: name,
+          autofocus: true,
+          maxLength: 40,
+          decoration: const InputDecoration(hintText: "给这个旁聊起个名字"),
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text("取消"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(name.text.trim()),
+            child: const Text("保存"),
+          ),
+        ],
+      ),
+    );
+    name.dispose();
+    if (next == null || next.isEmpty) return;
+    final SideChatSummary? updated = await api.rename(shortId, next);
+    if (!mounted) return;
+    if (updated == null) {
+      _toast("重命名失败，请稍后再试");
+      return;
+    }
+    _controller.setActiveSideTitle(updated.title);
+  }
+
+  Future<void> _deleteActiveSideChat(SideChatApi api, String shortId) async {
+    final bool? confirmed = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text("删除旁聊"),
+        content: const Text("删除后该旁聊的独立历史会被清空，主会话不受影响。"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("取消"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true) return;
+    final bool ok = await api.delete(shortId);
+    if (!mounted) return;
+    if (!ok) {
+      _toast("删除失败，请稍后再试");
+      return;
+    }
+    await _controller.returnToMain();
+  }
+
+  void _toast(String message) {
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text(message)));
   }
 
   Widget _buildTitle(BuildContext context, MobilePalette p) {
-    // 标题 = 用户给 agent 取的名称；没取名就只留状态点，不显示空胶囊。
-    final String title = (widget.agentName ?? "").trim();
+    // 2026-11-07 反馈：顶栏不再展示 agent 名字（小蛇），只保留在线状态点。
     final Widget statusDot = ListenableBuilder(
       listenable: _controller,
       builder: (context, _) {
         return Container(
-          width: 8,
-          height: 8,
+          width: 6,
+          height: 6,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: _controller.isConnected ? p.online : p.textMuted,
@@ -206,38 +548,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
         );
       },
     );
-    if (title.isEmpty) return statusDot;
-    // 名字用椭圆胶囊包住（2026-11-07 定稿）：与状态点同处一枚名牌，
-    // 长名字单行省略，避免撑破顶栏。
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      decoration: BoxDecoration(
-        color: p.innerFieldBackground,
-        borderRadius: BorderRadius.circular(999),
-        border: Border.all(color: p.divider),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 180),
-            child: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: p.textPrimary,
-                fontSize: 14,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.2,
-              ),
-            ),
-          ),
-          const SizedBox(width: 6),
-          statusDot,
-        ],
-      ),
-    );
+    return statusDot;
   }
 
   Widget _buildMessageList(BuildContext context, MobilePalette p) {
@@ -251,7 +562,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
       child: ListView.builder(
         controller: _scroll,
         reverse: true,
-        padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+        padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
         itemCount: _controller.messages.length,
         itemBuilder: (context, index) {
           final ChatMessage m =
@@ -299,8 +610,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 children: <Widget>[
                   if (hasBubbleText) _buildBubble(context, m, isUser, p),
                   Padding(
-                    padding:
-                        EdgeInsets.only(top: hasBubbleText ? AppTypography.space2 : 0),
+                    padding: EdgeInsets.only(
+                        top: hasBubbleText ? AppTypography.space2 : 0),
                     child: Align(
                       alignment: Alignment.centerLeft,
                       child: AgentResultCard(data: standaloneCard),
@@ -325,10 +636,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
       BuildContext context, ChatMessage m, MobilePalette p) {
     final Map<String, dynamic> card =
         m.transferReminder ?? const <String, dynamic>{};
-    final Map<String, dynamic> segment =
-        card["segment"] is Map<String, dynamic>
-            ? card["segment"] as Map<String, dynamic>
-            : const <String, dynamic>{};
+    final Map<String, dynamic> segment = card["segment"] is Map<String, dynamic>
+        ? card["segment"] as Map<String, dynamic>
+        : const <String, dynamic>{};
     final String message = (card["message"]?.toString() ?? m.text).trim();
     final String from = segment["from"]?.toString() ?? "";
     final String to = segment["to"]?.toString() ?? "";
@@ -385,7 +695,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
               Row(
                 children: <Widget>[
                   Icon(
-                    settled ? Icons.check_circle_outline : Icons.local_taxi_outlined,
+                    settled
+                        ? Icons.check_circle_outline
+                        : Icons.local_taxi_outlined,
                     size: 15,
                     color: state == "accepted" ? p.online : p.textSecondary,
                   ),
@@ -466,8 +778,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
                         foregroundColor: p.background,
                         padding: const EdgeInsets.symmetric(horizontal: 16),
                       ),
-                      onPressed: () =>
-                          _controller.respondTransferReminder(m.messageId, true),
+                      onPressed: () => _controller.respondTransferReminder(
+                          m.messageId, true),
                       child: const Text("帮我叫车"),
                     ),
                     const SizedBox(width: 8),
@@ -491,8 +803,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
                         visualDensity: VisualDensity.compact,
                         foregroundColor: p.textSecondary,
                       ),
-                      onPressed: () =>
-                          _controller.respondTransferReminder(m.messageId, false),
+                      onPressed: () => _controller.respondTransferReminder(
+                          m.messageId, false),
                       child: const Text("不用了"),
                     ),
                   ],
@@ -505,7 +817,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildEmpty(MobilePalette p) {    return Center(
+  Widget _buildEmpty(MobilePalette p) {
+    return Center(
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -600,16 +913,18 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildBubble(BuildContext context, ChatMessage m, bool isUser, MobilePalette p) {
+  Widget _buildBubble(
+      BuildContext context, ChatMessage m, bool isUser, MobilePalette p) {
     final Color bubble = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
         constraints: BoxConstraints(
-          maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+          // 设计稿气泡最大宽 236 / 320 ≈ 73.8%，按屏宽等比。
+          maxWidth: MediaQuery.sizeOf(context).width * 0.738,
         ),
-        margin: const EdgeInsets.symmetric(vertical: 6),
+        margin: const EdgeInsets.symmetric(vertical: 5),
         padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
         decoration: BoxDecoration(
           color: bubble,
@@ -627,7 +942,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 children: [
                   // 随消息发出的照片缩略图（发送时记下的内存字节）
                   Builder(builder: (BuildContext ctx) {
-                    final List<Uint8List>? images = _sentImageBytes[m.messageId];
+                    final List<Uint8List>? images =
+                        _sentImageBytes[m.messageId];
                     if (images == null || images.isEmpty) {
                       return const SizedBox.shrink();
                     }
@@ -705,16 +1021,19 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 输入卡（2026-11-07 B 方案定稿）：与底部 tab 卡分离的独立白卡胶囊，
-  /// 左「+」附件入口、中间无占位文案的多行输入、右侧发送；横向边距 4px 通栏感。
+  /// 输入卡（2026-11-07 定稿·放大版）：通栏 52px 玻璃胶囊，左右各 10px 边距，
+  /// 停在玻璃底栏上方；左「+」选图，右侧发送。
   Widget _buildInputBar(BuildContext context, MobilePalette p) {
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
     return Container(
       color: Colors.transparent,
       padding: EdgeInsets.fromLTRB(
-        4,
         10,
-        4,
-        MediaQuery.of(context).padding.bottom + 10,
+        8,
+        10,
+        // home Scaffold（extendBody）已把底栏高度并入 body 的 padding.bottom，
+        // 这里只需再让胶囊停在玻璃 tab 栏上方（与设计稿间距一致）。
+        MediaQuery.of(context).padding.bottom + 13,
       ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -725,7 +1044,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
           if ((_controller.errorMessage ?? "").isNotEmpty)
             Container(
               width: double.infinity,
-              margin: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              margin: const EdgeInsets.fromLTRB(6, 0, 6, 8),
               padding: const EdgeInsets.fromLTRB(11, 8, 11, 8),
               decoration: BoxDecoration(
                 color: p.innerFieldBackground,
@@ -744,21 +1063,35 @@ class _MobileChatPageState extends State<MobileChatPage> {
             ),
           if (_pendingFrames.isNotEmpty)
             Padding(
-              padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
+              padding: const EdgeInsets.fromLTRB(4, 0, 4, 0),
               child: _buildPendingStrip(p),
             ),
           Container(
-            clipBehavior: Clip.antiAlias,
+            constraints: const BoxConstraints(minHeight: 52),
+            padding: const EdgeInsets.only(left: 6, right: 6),
             decoration: BoxDecoration(
-              color: p.surface,
-              borderRadius: BorderRadius.circular(22),
+              // 输入胶囊：与主题背景同一灰色系（比页面略亮的中性灰），
+              // 不再是贴黑的容器。
+              color: dark ? const Color(0xFF232323) : p.surface,
+              borderRadius: BorderRadius.circular(26),
               border: Border.all(
-                color: p.divider.withValues(alpha: 0.6),
-                width: 0.8,
+                color: dark
+                    ? Colors.white.withValues(alpha: 0.07)
+                    : p.divider.withValues(alpha: 0.7),
+                width: 0.9,
               ),
+              boxShadow: dark
+                  ? <BoxShadow>[
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.24),
+                        offset: const Offset(0, 8),
+                        blurRadius: 20,
+                      ),
+                    ]
+                  : null,
             ),
             child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
+              crossAxisAlignment: CrossAxisAlignment.center,
               children: <Widget>[
                 _buildAttachButton(p),
                 Expanded(
@@ -766,18 +1099,26 @@ class _MobileChatPageState extends State<MobileChatPage> {
                     controller: _input,
                     textInputAction: TextInputAction.send,
                     minLines: 1,
-                    maxLines: 5,
+                    maxLines: 4,
                     onSubmitted: (_) => _send(),
                     style: TextStyle(
                       color: p.textPrimary,
-                      fontSize: AppTypography.bodyLarge,
+                      fontSize: 14,
                       height: AppTypography.uiLineHeight,
                     ),
                     decoration: InputDecoration(
                       border: InputBorder.none,
                       isCollapsed: true,
-                      contentPadding:
-                          const EdgeInsets.symmetric(vertical: 12),
+                      hintText:
+                          _controller.isSideChatActive ? "在这个旁聊里继续说…" : "发消息…",
+                      hintStyle: TextStyle(
+                        color: Theme.of(context).brightness == Brightness.dark
+                            ? const Color(0xFF8C8C8C)
+                            : p.textMuted,
+                        fontSize: 13.5,
+                      ),
+                      // 文案整体右移一点，和左侧「+」按钮留出呼吸距离。
+                      contentPadding: const EdgeInsets.fromLTRB(10, 13, 4, 13),
                     ),
                   ),
                 ),
@@ -792,13 +1133,31 @@ class _MobileChatPageState extends State<MobileChatPage> {
 
   /// 输入卡左侧「+」按钮：选相册照片随消息发出(与桌面端同 visionFrames 协议)。
   Widget _buildAttachButton(MobilePalette p) {
-    return IconButton(
-      tooltip: "发送照片",
-      onPressed: _pickImages,
-      icon: Icon(Icons.add, size: 26, color: p.textSecondary),
-      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
-      padding: EdgeInsets.zero,
-      splashRadius: 20,
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: _pickImages,
+      child: Container(
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          color: Theme.of(context).brightness == Brightness.dark
+              ? Colors.white.withValues(alpha: 0.07)
+              : p.surface.withValues(alpha: 0.55),
+          border: Border.all(
+            color: Theme.of(context).brightness == Brightness.dark
+                ? Colors.white.withValues(alpha: 0.07)
+                : p.divider.withValues(alpha: 0.6),
+          ),
+        ),
+        child: Icon(
+          Icons.add_rounded,
+          size: 19,
+          color: Theme.of(context).brightness == Brightness.dark
+              ? const Color(0xFFB9BCC5)
+              : p.textSecondary,
+        ),
+      ),
     );
   }
 
@@ -851,20 +1210,23 @@ class _MobileChatPageState extends State<MobileChatPage> {
 
   Widget _buildSendButton(MobilePalette p) {
     final bool enabled = _canSend;
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    // 参考图 02：深色下发送键恒定「白底黑箭头」（空输入时也保持白钮，
+    // 仅点击不生效），不再退成灰色块，保证输入胶囊的视觉重心一致。
+    final Color bg = dark ? Colors.white : (enabled ? p.accent : p.divider);
+    final Color fg =
+        dark ? Colors.black : (enabled ? p.onAccent : p.textSecondary);
     return GestureDetector(
       onTap: enabled ? _send : null,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 160),
-        width: 44,
-        height: 44,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          color: enabled ? p.accent : p.divider,
-        ),
+        width: 40,
+        height: 40,
+        decoration: BoxDecoration(shape: BoxShape.circle, color: bg),
         child: Icon(
           Icons.arrow_upward_rounded,
-          color: enabled ? p.onAccent : p.textSecondary,
-          size: 22,
+          color: fg,
+          size: 19,
         ),
       ),
     );
@@ -902,7 +1264,8 @@ AgentResultData? _reminderConfirmCardOf(ChatMessage m) {
   if (m.role == "user") return null;
   final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
   if (parsed != null && parsed.cardType == "reminder_confirm") return parsed;
-  for (final List<Map<String, dynamic>>? blocks in <List<Map<String, dynamic>>?>[
+  for (final List<Map<String, dynamic>>? blocks
+      in <List<Map<String, dynamic>>?>[
     m.envelopeBlocks,
     m.replyBlocks,
   ]) {
@@ -927,7 +1290,8 @@ bool _assistantBubbleHasVisibleText(ChatMessage m) {
     "",
   );
   if (stripped.trim().isNotEmpty) return true;
-  for (final List<Map<String, dynamic>>? blocks in <List<Map<String, dynamic>>?>[
+  for (final List<Map<String, dynamic>>? blocks
+      in <List<Map<String, dynamic>>?>[
     m.envelopeBlocks,
     m.replyBlocks,
   ]) {
@@ -955,8 +1319,8 @@ class _TypewriterAssistantBody extends StatefulWidget {
 
   /// 卡片动作回调（与桌面端 chat_page 同链路）：选择型卡按钮 / chips
   /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
-  final void Function(AgentResultAction action, {required AgentResultData cardData})?
-      onUserAction;
+  final void Function(AgentResultAction action,
+      {required AgentResultData cardData})? onUserAction;
 
   /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）。
   final void Function(String prompt)? onFollowupTap;
@@ -1013,7 +1377,8 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
           onFollowupTap: widget.onFollowupTap,
           // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
-          typewriterRawText: _typewriter.isPartial ? _typewriter.revealed : null,
+          typewriterRawText:
+              _typewriter.isPartial ? _typewriter.revealed : null,
           typewriterCursor: _typewriter.isRevealing,
           // 行程卡由消息行在气泡外独立渲染（与桌面端同款第二条消息形态）,
           // body 内不再重复,避免双份。

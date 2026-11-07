@@ -26,7 +26,8 @@ import "../core/utils/assistant_text_sanitizer.dart";
 import "../core/utils/link_utils.dart";
 import "../core/vision/vision_wire_frame.dart";
 import "../features/chat/media_disk_cache.dart";
-import "../features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
+import "../features/chat/render_envelope_dispatcher.dart"
+    show extractEnvelopeBlocks;
 import "../features/chat/travel_plan_launcher.dart";
 
 // ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
@@ -63,11 +64,106 @@ class MobileChatController extends ChangeNotifier {
   /// 本地历史存储（聊天气泡落盘，重启后恢复；测试可注入内存实现）。
   late final LocalHistoryStore _store;
 
-  /// 服务端线程历史拉取去重闸（每次控制器生命周期只拉一次）。
-  bool _serverHistoryPulled = false;
+  /// 服务端线程历史拉取去重闸（每个线程只拉一次）。
+  final Set<String> _serverHistoryPulled = <String>{};
 
   /// 对话历史(含正在流式生成的助手消息)。
-  final List<ChatMessage> messages = <ChatMessage>[];
+  ///
+  /// 2026-11-07 旁聊：每个线程（主会话 / 各个旁聊）各自一份消息列表，
+  /// [messages] 永远指向当前激活线程，切换会话只切指针、不搬消息。
+  final Map<String, List<ChatMessage>> _sessionMessages =
+      <String, List<ChatMessage>>{};
+
+  /// 主会话本地线程键（服务端主线程 = 裸 actorId）。
+  String get _mainSessionKey => ApiConfig.effectiveActorId;
+
+  List<ChatMessage> get messages => _sessionMessages.putIfAbsent(
+        _activeSessionKey,
+        () => <ChatMessage>[],
+      );
+
+  /// 当前激活会话的本地线程键（主会话 = actorId；旁聊 = `side:<actor>:<id>`）。
+  String _activeSessionKey = ApiConfig.effectiveActorId;
+
+  /// 当前激活会话发给服务端的 sessionId（主会话用连接级 sessionId）。
+  String _activeServerSessionId = ApiConfig.sessionId;
+
+  /// 当前旁聊 id（null = 主会话）。
+  String? _activeSideSessionId;
+
+  /// 当前旁聊标题（顶栏展示）。
+  String? _activeSideTitle;
+
+  /// 当前是否处于旁聊（独立上下文）。
+  bool get isSideChatActive => _activeSideSessionId != null;
+
+  /// 当前旁聊线程键（null = 主会话）。
+  String? get activeSideSessionId => _activeSideSessionId;
+
+  /// 当前旁聊标题（null = 主会话）。
+  String? get activeSideTitle => _activeSideTitle;
+
+  /// 是否允许切换会话：正在生成时切换会让流式事件落错线程，直接拒绝。
+  bool get canSwitchSession => !isProcessing;
+
+  /// 进入旁聊（独立线程）：切到该线程的消息桶 → 恢复本地历史 → 拉服务端线程历史。
+  Future<bool> enterSideChat({required String sessionId}) async {
+    if (!canSwitchSession) return false;
+    if (sessionId.trim().isEmpty || sessionId == _activeSessionKey) return true;
+    _activateSession(
+      sessionId.trim(),
+      serverSessionId: sessionId.trim(),
+      sideSessionId: sessionId.trim(),
+    );
+    notifyListeners();
+    await _loadSessionHistory(sessionId.trim());
+    return true;
+  }
+
+  /// 删除旁聊后清本地痕迹：服务端线程已由 DELETE 清空，本地 store / 内存桶
+  /// 也要同步移除；若删的是当前旁聊则先退回主会话。
+  Future<void> forgetSideChat(String sessionId) async {
+    if (sessionId.trim().isEmpty) return;
+    if (_activeSessionKey == sessionId) {
+      await returnToMain();
+    }
+    _sessionMessages.remove(sessionId);
+    _serverHistoryPulled.remove(sessionId);
+    try {
+      await _store.deleteMessagesForSession(sessionId);
+    } catch (e) {
+      debugPrint("[MobileChatController] 删除旁聊本地历史失败: $e");
+    }
+    notifyListeners();
+  }
+
+  /// 旁聊标题变化（列表重命名后同步顶栏）。
+  void setActiveSideTitle(String? title) {
+    _activeSideTitle = (title ?? "").trim().isEmpty ? null : title!.trim();
+    notifyListeners();
+  }
+
+  /// 回到主会话（主线程消息原样保留）。
+  Future<void> returnToMain() async {
+    if (!canSwitchSession) return;
+    if (_activeSessionKey == _mainSessionKey) return;
+    _activateSession(_mainSessionKey, serverSessionId: ApiConfig.sessionId);
+    notifyListeners();
+    await _loadSessionHistory(_mainSessionKey);
+  }
+
+  void _activateSession(
+    String key, {
+    required String serverSessionId,
+    String? sideSessionId,
+  }) {
+    _activeSessionKey = key;
+    _activeServerSessionId = serverSessionId;
+    _activeSideSessionId = sideSessionId;
+    _activeSideTitle = null;
+    _streamingMessageId = null;
+    _resetActivityState();
+  }
 
   /// Agent 是否正在思考 / 生成中。
   bool isProcessing = false;
@@ -163,7 +259,7 @@ class MobileChatController extends ChangeNotifier {
       await _store.init();
       try {
         await _store.saveSession(ChatSession(
-          sessionId: ApiConfig.effectiveActorId,
+          sessionId: _activeSessionKey,
           title: "默认会话",
           createdAt: DateTime.now(),
         ));
@@ -175,7 +271,8 @@ class MobileChatController extends ChangeNotifier {
       // recap 回显过滤（2026-10-12）：本地库已落盘的「摘要整块复述」气泡在加载层
       // 剔除（非破坏性——store 数据不动，仅不再显示）。与服务端 isRecapEchoText 同判据。
       final List<ChatMessage> visible = loaded
-          .where((m) => m.role != "assistant" ||
+          .where((m) =>
+              m.role != "assistant" ||
               stripRecapEchoBlocks(m.text).trim().isNotEmpty)
           .toList();
       if (visible.isNotEmpty) {
@@ -192,18 +289,54 @@ class MobileChatController extends ChangeNotifier {
     unawaited(_pullServerHistory());
   }
 
+  /// 当前会话历史加载（本地 store → 服务端线程回填）；已加载过的线程直接跳过。
+  Future<void> _loadSessionHistory(String key) async {
+    final List<ChatMessage> bucket = _sessionMessages.putIfAbsent(
+      key,
+      () => <ChatMessage>[],
+    );
+    if (bucket.isEmpty) {
+      try {
+        final List<ChatMessage> loaded = await _store.listMessages(key);
+        final List<ChatMessage> visible = loaded
+            .where((m) =>
+                m.role != "assistant" ||
+                stripRecapEchoBlocks(m.text).trim().isNotEmpty)
+            .toList();
+        if (visible.isNotEmpty) {
+          if (bucket.isEmpty) {
+            bucket.addAll(visible);
+          } else {
+            final Set<String> memoryIds =
+                bucket.map((m) => m.messageId).toSet();
+            bucket.insertAll(
+              0,
+              visible.where((m) => !memoryIds.contains(m.messageId)).toList(),
+            );
+          }
+          if (_activeSessionKey == key) notifyListeners();
+          _warmHistoryMedia(visible);
+        }
+      } catch (e) {
+        debugPrint("[MobileChatController] 线程本地历史加载失败: $e");
+      }
+    }
+    await _pullServerHistoryFor(key);
+  }
+
   /// 把本地加载的历史并入内存：无内存消息直接铺入；已有消息（加载期间
   /// 用户已发消息的竞态窗口）按 messageId 去重后前置旧消息，保序不覆盖。
   void _mergeLoadedMessages(List<ChatMessage> loaded) {
-    if (messages.isEmpty) {
-      messages.addAll(loaded);
+    final List<ChatMessage> target = messages;
+    if (target.isEmpty) {
+      target.addAll(loaded);
       return;
     }
-    final Set<String> memoryIds = messages.map((m) => m.messageId).toSet();
+    final Set<String> memoryIds = target.map((m) => m.messageId).toSet();
     final List<ChatMessage> older =
         loaded.where((m) => !memoryIds.contains(m.messageId)).toList();
     if (older.isEmpty) return;
-    messages.insertAll(0, older);
+    target.insertAll(0, older);
   }
 
   /// 冷启动媒体预热：收集历史消息里全部媒体卡地址（mediaCards / renderBlocks
@@ -225,9 +358,7 @@ class MobileChatController extends ChangeNotifier {
       for (final Map<String, dynamic> block in blocks) {
         if ((block["type"]?.toString() ?? "") != "media") continue;
         final List<dynamic>? cards = block["cards"] as List<dynamic>?;
-        cards
-            ?.whereType<Map<String, dynamic>>()
-            .forEach(collectCard);
+        cards?.whereType<Map<String, dynamic>>().forEach(collectCard);
       }
     }
   }
@@ -301,27 +432,29 @@ class MobileChatController extends ChangeNotifier {
   }
 
   /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
-  void _persist(ChatMessage message) {    unawaited(
+  void _persist(ChatMessage message) {
+    unawaited(
       _store.saveMessage(message).catchError((Object e) {
         debugPrint("[MobileChatController] 消息落盘失败: $e");
       }),
     );
   }
 
-  /// 服务端全量转史拉取（GET /api/chat-data/history?full=1）：从服务端 turn WAL
-  /// 反解完整聊天转史（2026-10-12 P1）——线程口径只有滑动窗口十几条，清数据/
-  /// 换机后旧对话回不来；WAL 是聊天记录的权威源。按 user 锚去重后落本地。
-  Future<void> _pullServerHistory() async {
-    if (_serverHistoryPulled) return;
-    _serverHistoryPulled = true;
+  /// 服务端线程历史拉取：主会话走 WAL 全量（`full=1`），旁聊走 `sessionId=`
+  /// 指定的独立线程（服务端只读该线程最近一段）。按 user 锚去重后落本地。
+  Future<void> _pullServerHistoryFor(String key) async {
+    if (_serverHistoryPulled.contains(key)) return;
+    _serverHistoryPulled.add(key);
+    final bool isSide = key.startsWith("side:");
     try {
       final Uri uri = Uri.parse("${ApiConfig.httpBase}/api/chat-data/history")
           .replace(queryParameters: <String, String>{
         "userId": ApiConfig.effectiveActorId,
         "limit": "200",
-        "full": "1",
+        if (isSide) "sessionId": key else "full": "1",
       });
-      final http.Response res = await NbHttp.get(uri, headers: AccessCredentialStore.instance.authHeaders)
+      final http.Response res = await NbHttp.get(uri,
+              headers: AccessCredentialStore.instance.authHeaders)
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> body =
@@ -337,26 +470,31 @@ class MobileChatController extends ChangeNotifier {
         ).trim();
         if ((role != "user" && role != "assistant") || text.isEmpty) continue;
         final int? tsMs = item["ts"] is int ? item["ts"] as int : null;
-        final DateTime ts =
-            tsMs != null ? DateTime.fromMillisecondsSinceEpoch(tsMs) : DateTime.now();
+        final DateTime ts = tsMs != null
+            ? DateTime.fromMillisecondsSinceEpoch(tsMs)
+            : DateTime.now();
         final String? clientMessageId = item["clientMessageId"]?.toString();
-        final String messageId = role == "user" && (clientMessageId?.isNotEmpty ?? false)
-            ? clientMessageId!
-            : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+        final String messageId =
+            role == "user" && (clientMessageId?.isNotEmpty ?? false)
+                ? clientMessageId!
+                : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
         incoming.add(ChatMessage(
           messageId: messageId,
-          sessionId: ApiConfig.effectiveActorId,
+          sessionId: key,
           role: role,
           text: text,
           timestamp: ts,
         ));
       }
       if (incoming.isEmpty) return;
-      _mergeServerTurns(incoming);
+      _mergeServerTurnsFor(key, incoming);
     } catch (e) {
       debugPrint("[MobileChatController] 服务端历史拉取失败(跳过回填): $e");
     }
   }
+
+  /// 兼容入口：主会话首次启动加载。
+  Future<void> _pullServerHistory() => _pullServerHistoryFor(_mainSessionKey);
 
   /// 跨端回填合并（turn 级锚定去重）：
   /// - 锚 = 用户消息。服务端轮与本机重复的判定：clientMessageId 命中本地 id、
@@ -364,7 +502,11 @@ class MobileChatController extends ChangeNotifier {
   /// - 助手消息随锚走：锚轮已存在 → 整轮跳过（分泡/塌缩形态差异不再制造双份）；
   ///   无锚的孤儿助手消息按正文包含关系去重后插入。
   /// - 插入位置按时间戳落位，回填后逐条写进本地 store（下次启动直接命中）。
-  void _mergeServerTurns(List<ChatMessage> incoming) {
+  void _mergeServerTurnsFor(String key, List<ChatMessage> incoming) {
+    final List<ChatMessage> target = _sessionMessages.putIfAbsent(
+      key,
+      () => <ChatMessage>[],
+    );
     // 按 user 锚切轮（开头没有锚的孤儿助手消息自成一轮）
     final List<List<ChatMessage>> turns = <List<ChatMessage>>[];
     for (final ChatMessage m in incoming) {
@@ -378,7 +520,7 @@ class MobileChatController extends ChangeNotifier {
     final Set<String> localUserIds = <String>{};
     final Set<String> localUserTexts = <String>{};
     final List<ChatMessage> localAssistants = <ChatMessage>[];
-    for (final ChatMessage m in messages) {
+    for (final ChatMessage m in target) {
       if (m.role == "user") {
         localUserIds.add(m.messageId);
         localUserTexts.add(m.text.trim());
@@ -395,8 +537,7 @@ class MobileChatController extends ChangeNotifier {
       if (localUserIds.contains(anchor.messageId)) return true;
       if (localUserTexts.contains(anchorText)) return true;
       // 纯图轮：本地气泡文案与服务端视觉占位文案不同，视为同一轮
-      if (anchorText == "（见图）" &&
-          localUserTexts.any((t) => t == "（见图）")) {
+      if (anchorText == "（见图）" && localUserTexts.any((t) => t == "（见图）")) {
         return true;
       }
       return false;
@@ -416,9 +557,10 @@ class MobileChatController extends ChangeNotifier {
     }
 
     void insertByTimestamp(ChatMessage m) {
-      int idx = messages.indexWhere((local) => local.timestamp.isAfter(m.timestamp));
-      if (idx < 0) idx = messages.length;
-      messages.insert(idx, m);
+      int idx =
+          target.indexWhere((local) => local.timestamp.isAfter(m.timestamp));
+      if (idx < 0) idx = target.length;
+      target.insert(idx, m);
       _persist(m);
     }
 
@@ -438,7 +580,7 @@ class MobileChatController extends ChangeNotifier {
         }
       }
     }
-    if (mutated) notifyListeners();
+    if (mutated && _activeSessionKey == key) notifyListeners();
   }
 
   void _sendSessionInit() {
@@ -482,14 +624,15 @@ class MobileChatController extends ChangeNotifier {
   /// `chat.user_message` 载荷存进本地待发队列；联网后由
   /// [_flushPendingUserMessages] 按序补发。服务端按 messageId 幂等去重，
   /// 补发重复无害。
-  Future<String?> send(String raw, {List<VisionWireFrame>? visionFrames}) async {
+  Future<String?> send(String raw,
+      {List<VisionWireFrame>? visionFrames}) async {
     final String text = raw.trim();
     final bool hasFrames = visionFrames != null && visionFrames.isNotEmpty;
     if (text.isEmpty && !hasFrames) return null;
     final bool offline = !_service.isConnected;
     final ChatMessage userMsg = ChatMessage(
       messageId: "msg-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
+      sessionId: _activeSessionKey,
       role: "user",
       // 纯图无文字时气泡显示「（见图）」,与桌面端一致
       text: text.isEmpty && hasFrames ? "（见图）" : text,
@@ -498,7 +641,8 @@ class MobileChatController extends ChangeNotifier {
       pendingDelivery: offline,
     );
     final Map<String, dynamic> payload = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
+      // 主会话用连接级 sessionId；旁聊透传 `side:<actor>:<id>`（服务端按归属校验）
+      "sessionId": _activeServerSessionId,
       "messageId": userMsg.messageId,
       // 纯图轮 text 置空(服务端按 visionFrames 走视觉分档),与桌面端一致
       "text": text,
@@ -573,7 +717,7 @@ class MobileChatController extends ChangeNotifier {
           if (e.key != "cardAction") e.key: e.value,
       };
       return _service.sendCardActionEvent(
-        sessionId: ApiConfig.sessionId,
+        sessionId: _activeServerSessionId,
         messageId: boundId,
         actionId: cardAction,
         cardId: cardData.cardId,
@@ -584,7 +728,7 @@ class MobileChatController extends ChangeNotifier {
       );
     }
     final bool sent = _service.sendCardAction(
-      sessionId: ApiConfig.sessionId,
+      sessionId: _activeServerSessionId,
       messageId: "action-${DateTime.now().microsecondsSinceEpoch}",
       actionId: action.id,
       label: label,
@@ -623,8 +767,7 @@ class MobileChatController extends ChangeNotifier {
         if (messageId.isEmpty) continue;
         if (!_send("chat.user_message", payload)) return;
         await _store.dequeuePendingUserMessage(messageId);
-        final int idx =
-            messages.indexWhere((m) => m.messageId == messageId);
+        final int idx = messages.indexWhere((m) => m.messageId == messageId);
         if (idx >= 0 && messages[idx].pendingDelivery) {
           final ChatMessage settled =
               messages[idx].copyWith(pendingDelivery: false);
@@ -662,7 +805,8 @@ class MobileChatController extends ChangeNotifier {
   /// 出站统一入口：生产直发；测试开启 [debugCaptureSentEvents] 时留观测记录。
   bool _send(String type, Map<String, dynamic> payload) {
     if (debugCaptureSentEvents) {
-      debugSentEvents.add(MapEntry<String, Map<String, dynamic>>(type, payload));
+      debugSentEvents
+          .add(MapEntry<String, Map<String, dynamic>>(type, payload));
     }
     return _service.sendEvent(type, payload);
   }
@@ -775,8 +919,9 @@ class MobileChatController extends ChangeNotifier {
 
   void _onWsEvent(Map<String, dynamic> event) {
     final String type = event["type"]?.toString() ?? "";
-    final Map<String, dynamic> payload =
-        event["payload"] is Map ? event["payload"] as Map<String, dynamic> : const {};
+    final Map<String, dynamic> payload = event["payload"] is Map
+        ? event["payload"] as Map<String, dynamic>
+        : const {};
     switch (type) {
       case "ws_connected":
         isConnected = true;
@@ -810,10 +955,12 @@ class MobileChatController extends ChangeNotifier {
       case "schedule.reminder_fired":
         // 到点提醒（2026-10-12 接通）：编排层按前后台分流——后台系统通知，
         // 前台应用内横幅。此前手机端不监听本事件，到点无任何触达。
-        unawaited(AmbientFeedsController.instance.onScheduleReminderFired(payload));
+        unawaited(
+            AmbientFeedsController.instance.onScheduleReminderFired(payload));
       case "schedule.tasks_changed":
         // 日程变更同步（创建/更新/删除）→ 编排层刷新日程页本地镜像。
-        unawaited(AmbientFeedsController.instance.onScheduleTasksChanged(payload));
+        unawaited(
+            AmbientFeedsController.instance.onScheduleTasksChanged(payload));
       case "reminder_popup":
         // 提醒升级链 popup 级（2026-10-14 与桌面端对齐）：决策卡落对话流。
         // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
@@ -959,11 +1106,12 @@ class MobileChatController extends ChangeNotifier {
         }
       }());
     }
-    final String body = message.trim().isNotEmpty ? message.trim() : title.trim();
+    final String body =
+        message.trim().isNotEmpty ? message.trim() : title.trim();
     if (body.isEmpty) return;
     final ChatMessage reminder = ChatMessage(
       messageId: "assistant-reminder-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
+      sessionId: _activeSessionKey,
       role: "assistant",
       text: body,
       timestamp: DateTime.now(),
@@ -989,14 +1137,17 @@ class MobileChatController extends ChangeNotifier {
     if (text.trim().isEmpty) return;
     // 睡前提醒同为「真实消息」（2026-10-21）：落本地历史，重启后仍在。
     final ChatMessage digest = ChatMessage(
-      messageId: "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
+      messageId:
+          "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: _activeSessionKey,
       role: "assistant",
       text: text.trim(),
       timestamp: DateTime.now(),
-      contentType:
-          (digestMap != null && digestMap.isNotEmpty) ? "evening_digest" : "text",
-      eveningDigest: (digestMap != null && digestMap.isNotEmpty) ? digestMap : null,
+      contentType: (digestMap != null && digestMap.isNotEmpty)
+          ? "evening_digest"
+          : "text",
+      eveningDigest:
+          (digestMap != null && digestMap.isNotEmpty) ? digestMap : null,
     );
     messages.add(digest);
     _persist(digest);
@@ -1014,12 +1165,13 @@ class MobileChatController extends ChangeNotifier {
     final String deliveryId = payload["deliveryId"]?.toString() ?? "";
     final bool important = importance == "high" || importance == "critical";
     if (deliveryId.isNotEmpty) {
-      AmbientFeedsController.instance.sendProactiveOutcome(
-          deliveryId, "viewed");
+      AmbientFeedsController.instance
+          .sendProactiveOutcome(deliveryId, "viewed");
     }
     if (important && _appBackgrounded) {
       // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
-      unawaited(LocalNotificationService.show(title: title, body: text, deliveryId: deliveryId));
+      unawaited(LocalNotificationService.show(
+          title: title, body: text, deliveryId: deliveryId));
     }
     if (text.trim().isEmpty) return;
     // 应用内顶部弹窗已删除（2026-11-04 定调）：告知类只落对话流气泡，
@@ -1030,7 +1182,7 @@ class MobileChatController extends ChangeNotifier {
     // 横幅/系统通知；离开时长等缘由由服务端写进正文。
     final ChatMessage proactive = ChatMessage(
       messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
+      sessionId: _activeSessionKey,
       role: "assistant",
       text: text,
       timestamp: DateTime.now(),
@@ -1064,7 +1216,7 @@ class MobileChatController extends ChangeNotifier {
     }
     messages.add(ChatMessage(
       messageId: "transfer-reminder-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
+      sessionId: _activeSessionKey,
       role: "assistant",
       text: message,
       timestamp: DateTime.now(),
@@ -1093,16 +1245,14 @@ class MobileChatController extends ChangeNotifier {
     if (idx < 0) return;
     final Map<String, dynamic>? card = messages[idx].transferReminder;
     if (card == null || card["state"]?.toString() != "pending") return;
-    final Map<String, dynamic> segment =
-        card["segment"] is Map<String, dynamic>
-            ? card["segment"] as Map<String, dynamic>
-            : const <String, dynamic>{};
+    final Map<String, dynamic> segment = card["segment"] is Map<String, dynamic>
+        ? card["segment"] as Map<String, dynamic>
+        : const <String, dynamic>{};
     final String from = segment["from"]?.toString() ?? "";
     final String to = segment["to"]?.toString() ?? "";
     final bool isFlight = segment["type"]?.toString() == "flight";
-    final String text = accept
-        ? "帮我预约从$from到$to的${isFlight ? "接机" : "接站"}车"
-        : "不用了,我自己安排";
+    final String text =
+        accept ? "帮我预约从$from到$to的${isFlight ? "接机" : "接站"}车" : "不用了,我自己安排";
     messages[idx] = messages[idx].copyWith(
       transferReminder: Map<String, dynamic>.of(card)
         ..["state"] = accept ? "accepted" : "declined",
@@ -1120,20 +1270,22 @@ class MobileChatController extends ChangeNotifier {
     if (idx < 0) return;
     final Map<String, dynamic>? card = messages[idx].transferReminder;
     if (card == null) return;
-    final Map<String, dynamic> segment =
-        card["segment"] is Map<String, dynamic>
-            ? card["segment"] as Map<String, dynamic>
-            : const <String, dynamic>{};
+    final Map<String, dynamic> segment = card["segment"] is Map<String, dynamic>
+        ? card["segment"] as Map<String, dynamic>
+        : const <String, dynamic>{};
     final String station = segment["from"]?.toString() ?? "";
     if (station.trim().isEmpty) return;
     try {
-      final Uri req = Uri.parse("${ApiConfig.httpBase}/travel-map/nav/transfer-link")
-          .replace(queryParameters: <String, String>{"name": station.trim()});
+      final Uri req =
+          Uri.parse("${ApiConfig.httpBase}/travel-map/nav/transfer-link")
+              .replace(
+                  queryParameters: <String, String>{"name": station.trim()});
       final http.Response res =
           await NbHttp.get(req).timeout(const Duration(seconds: 8));
-      final dynamic url =
-          jsonDecode(utf8.decode(res.bodyBytes))["url"];
-      if (res.statusCode == 200 && url is String && url.startsWith("https://")) {
+      final dynamic url = jsonDecode(utf8.decode(res.bodyBytes))["url"];
+      if (res.statusCode == 200 &&
+          url is String &&
+          url.startsWith("https://")) {
         await launchUrl(Uri.parse(url), mode: LaunchMode.externalApplication);
         return;
       }
@@ -1146,12 +1298,13 @@ class MobileChatController extends ChangeNotifier {
   void _openStreamingMessage(Map<String, dynamic> payload) {
     if (_streamingMessageId != null) return;
     final String? traceId = payload["traceId"]?.toString();
-    final String id =
-        payload["messageId"]?.toString() ??
-        (traceId != null && traceId.isNotEmpty ? "assistant-$traceId" : "assistant-streaming");
+    final String id = payload["messageId"]?.toString() ??
+        (traceId != null && traceId.isNotEmpty
+            ? "assistant-$traceId"
+            : "assistant-streaming");
     messages.add(ChatMessage(
       messageId: id,
-      sessionId: ApiConfig.effectiveActorId,
+      sessionId: _activeSessionKey,
       role: "assistant",
       text: "",
       timestamp: DateTime.now(),
@@ -1217,7 +1370,9 @@ class MobileChatController extends ChangeNotifier {
         final ChatMessage m = messages[i];
         if (!m.streaming || m.messageId == id) continue;
         if (!_isBubbleId(m.messageId)) continue;
-        if (traceId != null && traceId.isNotEmpty && _bubbleTraceOf(m.messageId) != traceId) {
+        if (traceId != null &&
+            traceId.isNotEmpty &&
+            _bubbleTraceOf(m.messageId) != traceId) {
           continue;
         }
         messages[i] = ChatMessage(
@@ -1234,7 +1389,7 @@ class MobileChatController extends ChangeNotifier {
       if (idx < 0) {
         messages.add(ChatMessage(
           messageId: id,
-          sessionId: ApiConfig.effectiveActorId,
+          sessionId: _activeSessionKey,
           role: "assistant",
           text: chunk,
           timestamp: DateTime.now(),
@@ -1274,7 +1429,9 @@ class MobileChatController extends ChangeNotifier {
       final ChatMessage m = messages[i];
       if (!m.streaming || m.text.isEmpty) continue;
       final bool sameTrace = (m.messageId == mainId) ||
-          (traceId != null && traceId.isNotEmpty && _bubbleTraceOf(m.messageId) == traceId);
+          (traceId != null &&
+              traceId.isNotEmpty &&
+              _bubbleTraceOf(m.messageId) == traceId);
       if (!sameTrace) continue;
       messages[i] = ChatMessage(
         messageId: m.messageId,
@@ -1299,9 +1456,8 @@ class MobileChatController extends ChangeNotifier {
   void _handleMediaReady(Map<String, dynamic> payload) {
     final List<dynamic>? rawCards = payload["cards"] as List<dynamic>?;
     if (rawCards == null || rawCards.isEmpty) return;
-    final List<Map<String, dynamic>> cards = rawCards
-        .whereType<Map<String, dynamic>>()
-        .toList(growable: false);
+    final List<Map<String, dynamic>> cards =
+        rawCards.whereType<Map<String, dynamic>>().toList(growable: false);
     if (cards.isEmpty) return;
     // 真·分绿泡：分泡轮次媒体照片挂到当前流式泡上（media_ready 的 messageId
     // 恒为 assistant-$traceId 基础 id，不能据此开占位消息，防幻影空泡）
@@ -1381,10 +1537,13 @@ class MobileChatController extends ChangeNotifier {
     if (_streamingMessageId != null) {
       idx = messages.indexWhere((m) => m.messageId == _streamingMessageId);
     } else {
-      final String traceKey =
-          traceId != null && traceId.isNotEmpty ? "assistant-$traceId" : "assistant-final";
+      final String traceKey = traceId != null && traceId.isNotEmpty
+          ? "assistant-$traceId"
+          : "assistant-final";
       idx = messages.indexWhere(
-        (m) => m.messageId == traceKey || (messageId != null && m.messageId == messageId),
+        (m) =>
+            m.messageId == traceKey ||
+            (messageId != null && m.messageId == messageId),
       );
     }
     final String finalText =
@@ -1422,7 +1581,7 @@ class MobileChatController extends ChangeNotifier {
       }
       messages.add(ChatMessage(
         messageId: messageId ?? "assistant-final",
-        sessionId: ApiConfig.effectiveActorId,
+        sessionId: _activeSessionKey,
         role: "assistant",
         text: finalText,
         timestamp: DateTime.now(),
@@ -1506,10 +1665,11 @@ class MobileChatController extends ChangeNotifier {
     if (payload["finalTextReplacesStream"] == true) {
       // 塌缩：删除本轮所有分泡（含 id 对账与同 trace 兜底），落单泡 finalText
       messages.removeWhere((m) {
-        final bool hit = bubbles.any((b) => b["id"]?.toString() == m.messageId) ||
-            (traceId != null &&
-                traceId.isNotEmpty &&
-                _bubbleTraceOf(m.messageId) == traceId);
+        final bool hit =
+            bubbles.any((b) => b["id"]?.toString() == m.messageId) ||
+                (traceId != null &&
+                    traceId.isNotEmpty &&
+                    _bubbleTraceOf(m.messageId) == traceId);
         return hit;
       });
       if (finalText.trim().isEmpty &&
@@ -1526,7 +1686,7 @@ class MobileChatController extends ChangeNotifier {
       }
       messages.add(ChatMessage(
         messageId: traceKey,
-        sessionId: ApiConfig.effectiveActorId,
+        sessionId: _activeSessionKey,
         role: "assistant",
         text: finalText,
         timestamp: DateTime.now(),
@@ -1605,7 +1765,7 @@ class MobileChatController extends ChangeNotifier {
         if (text.trim().isEmpty) continue;
         messages.add(ChatMessage(
           messageId: id,
-          sessionId: ApiConfig.effectiveActorId,
+          sessionId: _activeSessionKey,
           role: "assistant",
           text: text,
           timestamp: DateTime.now(),
@@ -1633,14 +1793,19 @@ class MobileChatController extends ChangeNotifier {
               ? ""
               : (text.isNotEmpty ? text : prev.text),
           timestamp: prev.timestamp,
-          mediaCards: isLast ? (mediaCards ?? prev.mediaCards) : prev.mediaCards,
-          summaryCard: isLast ? (summaryCard ?? prev.summaryCard) : prev.summaryCard,
-          renderBlocks:
-              isLast ? (renderBlocksForLast ?? prev.renderBlocks) : prev.renderBlocks,
-          replyBlocks:
-              isLast ? (replyBlocksForLast ?? prev.replyBlocks) : prev.replyBlocks,
-          envelopeBlocks:
-              isLast ? (envelopeBlocksForLast ?? prev.envelopeBlocks) : prev.envelopeBlocks,
+          mediaCards:
+              isLast ? (mediaCards ?? prev.mediaCards) : prev.mediaCards,
+          summaryCard:
+              isLast ? (summaryCard ?? prev.summaryCard) : prev.summaryCard,
+          renderBlocks: isLast
+              ? (renderBlocksForLast ?? prev.renderBlocks)
+              : prev.renderBlocks,
+          replyBlocks: isLast
+              ? (replyBlocksForLast ?? prev.replyBlocks)
+              : prev.replyBlocks,
+          envelopeBlocks: isLast
+              ? (envelopeBlocksForLast ?? prev.envelopeBlocks)
+              : prev.envelopeBlocks,
           followUpPrompts: isLast ? followUps : null,
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
           // streaming 不带 → false：定稿
@@ -1662,9 +1827,7 @@ class MobileChatController extends ChangeNotifier {
     final String finalText =
         stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "");
     final AgentResultData? card = AgentResultParser.parse(finalText).data;
-    if (card != null &&
-        card.cardType == "travel_itinerary" &&
-        card.autoOpen) {
+    if (card != null && card.cardType == "travel_itinerary" && card.autoOpen) {
       TravelPlanLauncher.open(card);
     }
   }

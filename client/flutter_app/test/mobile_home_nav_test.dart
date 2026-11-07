@@ -66,10 +66,11 @@ void main() {
     expect(find.byType(MobileHomePage), findsOneWidget);
     // 自绘 tab 卡无文字标签：按图标断言（2026-11-07 5 tab 定稿）
     // 对话 tab 默认选中 → 填充图标；其余 4 个未选中 → 线性图标
+    // 2026-11-07 图标对齐参考图：日程=book、目标=check_box
     expect(find.byIcon(Icons.chat_bubble_rounded), findsOneWidget);
     expect(find.byIcon(Icons.chat_bubble_outline_rounded), findsNothing);
-    expect(find.byIcon(Icons.event_outlined), findsOneWidget);
-    expect(find.byIcon(Icons.flag_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.book_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.check_box_outlined), findsOneWidget);
     expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
     expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
     // 图库 tab 已收掉,不应再出现

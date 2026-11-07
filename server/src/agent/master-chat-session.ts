@@ -40,6 +40,58 @@ export function isNotesChatSessionId(sessionId: string | undefined | null): bool
   return typeof sessionId === "string" && sessionId.startsWith(NOTES_CHAT_SESSION_PREFIX);
 }
 
+/** 旁聊会话前缀（2026-11-07）：`side:` 开头的 session 是独立上下文的旁聊线程。 */
+export const SIDE_CHAT_SESSION_PREFIX = "side:";
+
+/**
+ * 旁聊会话 id：`side:<actorId>:<id>`。
+ *
+ * 带上 actorId 是为了让 WS 层可以校验归属——payload 里的 sessionId 只有
+ * 「属于当前绑定身份的旁聊」才允许透传到独立线程，杜绝跨账号串台。
+ */
+export function sideChatSessionId(actorId: string, id: string): string {
+  return `${SIDE_CHAT_SESSION_PREFIX}${actorId}:${id}`;
+}
+
+/** 判定是否为旁聊 session。 */
+export function isSideChatSessionId(sessionId: string | undefined | null): boolean {
+  return typeof sessionId === "string" && sessionId.startsWith(SIDE_CHAT_SESSION_PREFIX);
+}
+
+/** 判定 session 是否为该 actor 的旁聊（前缀精确匹配，含冒号边界）。 */
+export function isSideChatSessionIdForActor(
+  sessionId: string | undefined | null,
+  actorId: string,
+): boolean {
+  return (
+    typeof sessionId === "string" &&
+    !!actorId &&
+    sessionId.startsWith(`${SIDE_CHAT_SESSION_PREFIX}${actorId}:`)
+  );
+}
+
+/**
+ * 本轮对话线程键（chat.user_message 的 sessionId 透传规则）。
+ *
+ * 主通道会话一律钉死为连接绑定身份（防串台）；以下前缀是合法例外：
+ * - `incognito:` 隐身会话
+ * - `notes:` 笔记专用会话
+ * - `side:<actorId>:` 本账号的旁聊会话
+ * 其余一律回退 fallback（通常是绑定身份）。
+ */
+export function resolveTurnSessionId(
+  sessionId: string | undefined | null,
+  actorId: string,
+  fallback: string,
+): string {
+  if (typeof sessionId === "string") {
+    if (isIncognitoChatSessionId(sessionId)) return sessionId;
+    if (isNotesChatSessionId(sessionId)) return sessionId;
+    if (isSideChatSessionIdForActor(sessionId, actorId)) return sessionId;
+  }
+  return fallback;
+}
+
 /** 隐身会话前缀（2026-09-29）：`incognito:` 开头的 session 不进用户画像观察。 */
 export const INCOGNITO_CHAT_SESSION_PREFIX = "incognito:";
 

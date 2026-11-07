@@ -81,6 +81,11 @@ export type ProactivityFabricDeps = {
   goalIntrospect?: (actorId: string) => unknown;
   /** 在办事项统一视图（goal + 承诺只读合并）：前端「在办目标」面板的数据面 */
   goalView?: (actorId: string, opts?: { includeCompleted?: boolean }) => unknown;
+  /**
+   * 目标彻底删除（2026-11-07 手机端左滑删除）：goals.json 同步落盘。
+   * 归属校验在 GoalBoard.remove 内做（actorId 不符返回 false），删不了别人的目标。
+   */
+  goalRemove?: (actorId: string, goalId: string) => boolean;
   /** 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察） */
   rhythmHealth?: () => unknown;
   /** 当前仲裁快照 + 预览裁决（L3） */
@@ -275,6 +280,21 @@ export function registerProactivityPipelineRoutes(
       actorId,
       view: deps.fabric.goalView(actorId, { includeCompleted: q.includeDone === "1" }),
     };
+  });
+
+  // 目标彻底删除（2026-11-07 手机端左滑删除）：确认后走这里，remove 内做
+  // actorId 归属校验 + goals.json 落盘；不存在/非本人 → 404。
+  app.delete("/api/proactivity/goals/:goalId", async (request, reply) => {
+    const { goalId } = request.params as { goalId: string };
+    const q = request.query as { actorId?: string };
+    const actorId = q.actorId?.trim();
+    if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
+    if (!deps.fabric?.goalRemove) return { ok: false, error: "目标删除未装配" };
+    const removed = deps.fabric.goalRemove(actorId, goalId);
+    if (!removed) {
+      return reply.code(404).send({ ok: false, error: "目标不存在或不属于当前账号" });
+    }
+    return { ok: true, goalId };
   });
 
   if (!pipeline) return;

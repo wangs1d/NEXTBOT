@@ -102,9 +102,8 @@ class _MobileAgentStatusOrbState extends State<MobileAgentStatusOrb>
   Widget _buildOrb(BuildContext context) {
     final String tool = widget.toolName?.trim() ?? "";
     return MoodDrivenEmotionBall(
-      fallback: tool.isNotEmpty
-          ? EmotionBallIds.retrieving
-          : EmotionBallIds.thinking,
+      fallback:
+          tool.isNotEmpty ? EmotionBallIds.retrieving : EmotionBallIds.thinking,
       toolOverride: tool.isNotEmpty ? EmotionBallIds.retrieving : null,
       size: 28,
       bodyColor: Theme.of(context).colorScheme.primary,

@@ -188,3 +188,100 @@ test("flow: 抽不到答案保持阶段，不误把任务句当成名字", async
   assert.equal(d.facts.length, 0);
   assert.equal(d.renames.length, 0);
 });
+
+/**
+ * 端到端（全真实件）：新用户首次在手机端登录是否触发引导。
+ * 唯一假件是 WS socket（收帧探针）；KV / 账号 / prefs / sqlite 事实库 /
+ * 连接注册表全部是生产实现，文件与库都落在临时目录。
+ */
+test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发引导并两端共享落库", async () => {
+  const {
+    AgentMemorySyncService,
+  } = await import("../src/services/agent-memory-sync-service.js");
+  const { AgentAccountService } = await import("../src/services/agent-account-service.js");
+  const { WsConnectionRegistry } = await import("../src/services/ws-connection-registry.js");
+  const { StructuredFactStore } = await import("../src/agentic-memory/structured-fact-store.js");
+  const { openAgenticSqlite } = await import("../src/agentic-memory/sqlite-store.js");
+  const { getUserPreferences, patchAgentProfile } = await import(
+    "../src/routes/http/user-preferences.js"
+  );
+  const { AGENT_NAME_KV_KEY, parseAgentIdentityKv } = await import(
+    "../src/services/agent-identity.js"
+  );
+
+  const actor = "fresh-user@example.com";
+  const kvFile = join(testTmp, "kv-e2e.json");
+  const memorySync = new AgentMemorySyncService(kvFile);
+  const accounts = new AgentAccountService();
+  const factStore = new StructuredFactStore(openAgenticSqlite(join(testTmp, "facts-e2e.db")));
+  registerMemoryComponents({ factStore: factStore as never });
+
+  // 真实连接注册表 + 假手机 socket（只当收帧探针）
+  const phoneFrames: string[] = [];
+  const registry = new WsConnectionRegistry();
+  registry.register(
+    actor,
+    { readyState: 1, send: (data: string) => phoneFrames.push(data) } as never,
+    { deviceClass: "mobile" },
+  );
+
+  const service = new OnboardingIntroService({
+    accounts,
+    memorySync: memorySync as never,
+    wsRegistry: registry,
+    speech: null, // 不依赖 LLM：走 INTRO_FALLBACK，行为确定
+    now: () => 1_762_000_000_000,
+    secondBubbleDelayMs: 0,
+  });
+
+  // 1) 新用户手机端首次 session.init → 触发：两泡推到手机 socket，状态落真实 KV
+  await service.maybeStart(actor, "mobile");
+  const introFrames = phoneFrames.filter((f) => f.includes("first_meeting_intro"));
+  assert.equal(introFrames.length, 2, "问候 + 介绍提问两泡都送达手机端");
+  assert.equal(readOnboardingStage(memorySync as never, actor), "awaiting_alias");
+
+  // 2) 重连（真实注册表再登记一次）不重复打扰
+  await service.maybeStart(actor, "mobile");
+  assert.equal(
+    phoneFrames.filter((f) => f.includes("first_meeting_intro")).length,
+    2,
+    "重连后不再发开场白",
+  );
+
+  // 3) 答称呼 → 落真实 sqlite structured_facts
+  await service.onUserText(actor, "叫我阿哲就行");
+  assert.equal(factStore.getFact(actor, "称呼")?.value, "阿哲");
+  assert.equal(readOnboardingStage(memorySync as never, actor), "awaiting_agent_name");
+
+  // 4) 答名字 → 走真实统一改名管道：KV + 账号 + prefs + identity_renamed 广播
+  await service.onUserText(actor, "叫你小来包吧");
+  const identity = parseAgentIdentityKv(
+    memorySync.getSnapshot(actor, [AGENT_NAME_KV_KEY]).entries[AGENT_NAME_KV_KEY],
+  );
+  assert.equal(identity?.displayName, "小来包", "prompt 自我认知 KV 已更新");
+  assert.equal(
+    getUserPreferences(actor).agentProfile?.displayName,
+    "小来包",
+    "prefs 显示名已更新（手机顶栏/桌面端同源）",
+  );
+  assert.ok(
+    phoneFrames.some((f) => f.includes("identity_renamed")),
+    "改名广播已发到手机端",
+  );
+  assert.equal(readOnboardingStage(memorySync as never, actor), "done");
+
+  // 5) 重启级持久化：用同一 KV 文件新开实例（生产启动由 bootstrap 显式 load）
+  const reloaded = new AgentMemorySyncService(kvFile);
+  await reloaded.load();
+  assert.equal(readOnboardingStage(reloaded as never, actor), "done", "重启后不重复引导");
+
+  // 6) 桌面端老账号（已有名字）手机端登录只标完成、不打扰
+  const veteran = "veteran@example.com";
+  patchAgentProfile(veteran, { displayName: "老伙计" }, { allowIdentity: true });
+  await service.maybeStart(veteran, "mobile");
+  assert.equal(readOnboardingStage(memorySync as never, veteran), "done");
+  assert.ok(
+    !phoneFrames.some((f) => f.includes(veteran)),
+    "老账号没有收到任何引导帧",
+  );
+});

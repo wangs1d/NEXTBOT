@@ -364,6 +364,53 @@ class TravelPoi {
   final String address;
 }
 
+/// 沿线高分餐厅 POI（GET /travel-map/restaurants）。
+///
+/// 只含服务端真实检索到的门店：评分缺失/检索失败的不会出现在这里；
+/// [distanceM] 是到最近站点的直线距离（沿线路程的近似口径）。
+class RouteRestaurantPoi {
+  const RouteRestaurantPoi({
+    required this.id,
+    required this.name,
+    required this.rating,
+    required this.cost,
+    required this.distanceM,
+    required this.lat,
+    required this.lng,
+    required this.address,
+    required this.stopIndex,
+  });
+
+  factory RouteRestaurantPoi.fromJson(Map<String, dynamic> json) {
+    return RouteRestaurantPoi(
+      id: json["id"]?.toString() ?? "",
+      name: json["name"]?.toString() ?? "",
+      rating: (json["rating"] as num?)?.toDouble() ?? 0,
+      cost: (json["cost"] as num?)?.toInt(),
+      distanceM: (json["distanceM"] as num?)?.toInt() ?? 0,
+      lat: (json["lat"] as num?)?.toDouble() ?? 0,
+      lng: (json["lng"] as num?)?.toDouble() ?? 0,
+      address: json["address"]?.toString() ?? "",
+      stopIndex: (json["stopIndex"] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  final String id;
+  final String name;
+  final double rating;
+
+  /// 人均（元）；平台没给就是 null，不估算。
+  final int? cost;
+
+  final int distanceM;
+  final double lat;
+  final double lng;
+  final String address;
+
+  /// 最近站点在当天 points 里的下标。
+  final int stopIndex;
+}
+
 /// 行程规划界面数据（优先来自服务端结构化 travelPlan，兜底从卡 items 文本启发式解析）。
 class TravelPlanData {
   const TravelPlanData({

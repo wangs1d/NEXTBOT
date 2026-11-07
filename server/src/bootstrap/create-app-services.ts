@@ -7530,6 +7530,19 @@ export async function createAppServices(
           // 共享发现层读点：该目标尚未开口的发现条数（与开口闸读同一份台账）
           pendingFindingsOf: (goalId: string) => discovery.findingsFor(goalId).length,
         }),
+      // 目标彻底删除（2026-11-07 手机端左滑删除）：归属校验在 remove 内，
+      // goals.json 同步落盘；连带把共享发现层里该目标的未消费发现 settle 成
+      // dropped，避免留下指向已删目标的悬空发现
+      goalRemove: (actorId: string, goalId: string) => {
+        const removed = goalBoard.remove(goalId, actorId);
+        if (removed) {
+          const fps = discovery
+            .findingsFor(goalId, { actorId })
+            .map((f) => f.fingerprint);
+          if (fps.length > 0) discovery.settle(fps, "dropped");
+        }
+        return removed;
+      },
       calibration: () => costCalibrator.snapshot(),
       evaluatorProbes: () => mappingExecutor.probes(),
       observeOutcome: (outcome) => costCalibrator.observe(outcome),

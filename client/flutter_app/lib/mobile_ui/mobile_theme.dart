@@ -185,12 +185,14 @@ abstract final class MobileTheme {
       ),
       textSelectionTheme: TextSelectionThemeData(
         cursorColor: p.accent,
-        selectionColor: (isLight ? const Color(0x22000000) : const Color(0x33FFFFFF)),
+        selectionColor:
+            (isLight ? const Color(0x22000000) : const Color(0x33FFFFFF)),
         selectionHandleColor: p.accent,
       ),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
-        backgroundColor: isLight ? const Color(0xFF1A1A1C) : const Color(0xFFE9E9EC),
+        backgroundColor:
+            isLight ? const Color(0xFF1A1A1C) : const Color(0xFFE9E9EC),
         contentTextStyle: TextStyle(
           color: isLight ? Colors.white : const Color(0xFF000000),
           fontSize: 14,
@@ -207,7 +209,8 @@ abstract final class MobileTheme {
       // 手机端关闭全部水波纹 / focus ring 的高亮过渡,更克制
       focusColor: Colors.transparent,
       hoverColor: Colors.transparent,
-      highlightColor: isLight ? const Color(0x0D000000) : const Color(0x14FFFFFF),
+      highlightColor:
+          isLight ? const Color(0x0D000000) : const Color(0x14FFFFFF),
     );
     // 统一排版:与桌面端共用同一套行高 token
     return theme.copyWith(

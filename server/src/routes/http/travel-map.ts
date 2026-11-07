@@ -16,6 +16,8 @@ import { poiCache as poiCacheStore } from "../../skills/travel-planning/poi-cach
 import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.js";
 import { travelMemoir } from "../../services/travel-memoir-service.js";
 import { resolveActorId } from "../../agent/actor-id.js";
+import { getBookingConfig } from "../../services/booking/booking-config.js";
+import { AmapRestaurantProvider } from "../../services/booking/providers/amap-restaurant-provider.js";
 
 /**
  * 行程规划浏览器页面路由（「行程卡 → 进入界面」链路）。
@@ -416,6 +418,103 @@ async function routeMapLimit<T, R>(
   return out;
 }
 
+// ═══════════════════════════════════════════════════════════════════
+// 沿线高分餐厅（只看不排：不进行程、不占预算，路过想吃时点开参考）
+//
+// 数据源复用 booking 域的高德餐厅 Provider（真实门店 + 真实评分/人均/地址），
+// 对当天每个站点做周边检索（关键词「美食」，半径 max(radius,1000) 保住候选），
+// 合并去重后只留 rating ≥ 4.5 的店；评分缺失直接丢弃，宁缺毋滥。
+// 「沿线路程」用「到最近站点的直线距离」近似（不编造路网里程）。
+// 任何一步失败都返回空列表，绝不 500。
+// ═══════════════════════════════════════════════════════════════════
+
+interface RouteRestaurantPoi {
+  id: string;
+  name: string;
+  rating: number;
+  /** 人均（元）；平台没给就是 null */
+  cost: number | null;
+  /** 到最近站点的直线距离（米），沿线距离的近似口径 */
+  distanceM: number;
+  lat: number;
+  lng: number;
+  address: string;
+  /** 最近站点在 points 里的下标 */
+  stopIndex: number;
+}
+
+const ROUTE_RESTAURANT_CACHE_TTL_MS = 30 * 60 * 1000;
+const routeRestaurantCache = new Map<
+  string,
+  { at: number; pois: RouteRestaurantPoi[] }
+>();
+const routeRestaurantProvider = new AmapRestaurantProvider(getBookingConfig());
+
+async function searchRouteRestaurants(
+  stops: RouteLatLng[],
+  radius: number,
+  limit: number,
+): Promise<RouteRestaurantPoi[]> {
+  if (!routeRestaurantProvider.availability().ok) return [];
+  const searchRadius = Math.max(radius, 1000);
+
+  const batches = await routeMapLimit(stops, 3, async (stop) => {
+    const res = await routeRestaurantProvider.search(
+      {
+        domain: "restaurant",
+        location: { latitude: stop.lat, longitude: stop.lng },
+        params: { query: "美食", covers: 2, radiusM: searchRadius },
+      },
+      { actorId: "travel-map" },
+    );
+    return res.ok ? res.options : [];
+  });
+
+  const merged = new Map<string, RouteRestaurantPoi>();
+  for (const option of batches.flat()) {
+    const extra = option.extra ?? {};
+    const id = typeof extra.amapPoiId === "string" ? extra.amapPoiId.trim() : "";
+    const name = typeof extra.name === "string" ? extra.name.trim() : "";
+    const rating = extra.rating;
+    const lat = extra.latitude;
+    const lng = extra.longitude;
+    if (!id || !name || merged.has(id)) continue;
+    if (typeof rating !== "number" || !Number.isFinite(rating) || rating < 4.5) continue;
+    if (typeof lat !== "number" || typeof lng !== "number") continue;
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+
+    let nearestIndex = -1;
+    let nearestM = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < stops.length; i++) {
+      const d = routeHaversineKm(stops[i]!, { lat, lng }) * 1000;
+      if (d < nearestM) {
+        nearestM = d;
+        nearestIndex = i;
+      }
+    }
+    if (nearestIndex < 0 || !Number.isFinite(nearestM) || nearestM > radius) continue;
+
+    merged.set(id, {
+      id,
+      name,
+      rating: Math.round(rating * 10) / 10,
+      cost:
+        typeof extra.perCapita === "number" && extra.perCapita > 0
+          ? Math.round(extra.perCapita)
+          : null,
+      distanceM: Math.round(nearestM),
+      lat,
+      lng,
+      address: typeof extra.address === "string" ? extra.address.trim() : "",
+      stopIndex: nearestIndex,
+    });
+  }
+
+  return [...merged.values()]
+    .sort((a, b) => b.rating - a.rating || a.distanceM - b.distanceM)
+    .slice(0, limit);
+}
+
 export function registerTravelMapRoutes(app: FastifyInstance): void {
   /** GET /travel-map — 行程规划页面（自包含 HTML；按 UA 分流手机竖屏版/桌面双栏版） */
   app.get("/travel-map", async (req, reply) => {
@@ -646,6 +745,56 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
       resolved: resolved.length,
       legs: resolved,
     });
+  });
+
+  /**
+   * GET /travel-map/restaurants?points=lat,lng;...&radius=800&limit=6
+   * — 当天路线沿线的高分餐厅参考（不进行程、不占预算）。
+   *
+   * 只返回真实评分 ≥ 4.5 的门店；评分缺失/检索失败一律不给。
+   * `distanceM` 是到最近站点的直线距离（沿线路程的近似口径）。
+   */
+  app.get("/travel-map/restaurants", async (req, reply) => {
+    reply.header("Cache-Control", "private, max-age=300");
+    const q = req.query as { points?: string; radius?: string; limit?: string };
+    try {
+      const points = parseRouteStops(String(q.points ?? ""));
+      if (points.length === 0) {
+        return reply.code(400).send({ error: "need points (lat,lng;lat,lng;...)" });
+      }
+      const radiusRaw = Number(q.radius);
+      const radius =
+        Number.isFinite(radiusRaw) && radiusRaw > 0
+          ? Math.min(Math.round(radiusRaw), 2000)
+          : 800;
+      const limitRaw = Number(q.limit);
+      const limit =
+        Number.isFinite(limitRaw) && limitRaw > 0
+          ? Math.min(Math.round(limitRaw), 12)
+          : 6;
+
+      const cacheKey =
+        points
+          .map((p) => `${p.lat.toFixed(4)},${p.lng.toFixed(4)}`)
+          .sort()
+          .join(";") + `|${radius}|${limit}`;
+      const now = Date.now();
+      const hit = routeRestaurantCache.get(cacheKey);
+      if (hit && now - hit.at < ROUTE_RESTAURANT_CACHE_TTL_MS) {
+        return reply.send({ pois: hit.pois });
+      }
+
+      const pois = await searchRouteRestaurants(points, radius, limit);
+      routeRestaurantCache.set(cacheKey, { at: now, pois });
+      if (routeRestaurantCache.size > 64) {
+        const oldest = routeRestaurantCache.keys().next().value;
+        if (oldest != null) routeRestaurantCache.delete(oldest);
+      }
+      return reply.send({ pois });
+    } catch {
+      // 任何一步失败都静默空列表：地图上少一行参考，不影响行程主链路
+      return reply.send({ pois: [] });
+    }
   });
 
   /** POST /travel-plans — 桌面应用下发行程载荷，返回取数 id；顺带预热目的地瓦片 */

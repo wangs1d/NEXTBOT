@@ -72,7 +72,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         throw Exception(body["error"]?.toString() ?? "未知错误");
       }
       final Map<String, dynamic> sections =
-          (body["sections"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+          (body["sections"] as Map<String, dynamic>?) ??
+              const <String, dynamic>{};
       final List<_LibItem> items = <_LibItem>[
         for (final Map<String, dynamic> f in _asList(sections["files"]))
           _LibItem.fromFile(f),
@@ -151,7 +152,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
               style: TextStyle(color: p.textSecondary, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            OutlinedButton(onPressed: () => unawaited(_load()), child: const Text("重试")),
+            OutlinedButton(
+                onPressed: () => unawaited(_load()), child: const Text("重试")),
           ],
         ),
       ),
@@ -200,7 +202,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             children: [
               _chip(p, "全部", null, _items.length),
               for (final _LibType t in _LibType.values)
-                _chip(p, _typeLabel(t), t, _items.where((i) => i.type == t).length),
+                _chip(p, _typeLabel(t), t,
+                    _items.where((i) => i.type == t).length),
             ],
           ),
         ),
@@ -216,7 +219,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
                       ? "还没有产出物\n对话里生成的文件、笔记、行程规划\n都会自动归档到这里"
                       : "没有匹配的资料",
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: p.textMuted, fontSize: 14, height: 1.5),
+                  style:
+                      TextStyle(color: p.textMuted, fontSize: 14, height: 1.5),
                 ),
               ],
             ),
@@ -267,8 +271,9 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
           decoration: BoxDecoration(
             color: selected ? p.textPrimary : p.surface,
             borderRadius: BorderRadius.circular(999),
-            border:
-                selected ? null : Border.all(color: p.divider.withValues(alpha: 0.7)),
+            border: selected
+                ? null
+                : Border.all(color: p.divider.withValues(alpha: 0.7)),
           ),
           child: Row(
             mainAxisSize: MainAxisSize.min,
@@ -440,7 +445,8 @@ class _LibCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bool isImage = item.type == _LibType.image && item.fileName.isNotEmpty;
+    final bool isImage =
+        item.type == _LibType.image && item.fileName.isNotEmpty;
     return InkWell(
       borderRadius: BorderRadius.circular(14),
       onTap: item.fileName.isEmpty
@@ -491,8 +497,8 @@ class _LibCard extends StatelessWidget {
                   Row(
                     children: [
                       Container(
-                        padding:
-                            const EdgeInsets.symmetric(horizontal: 6, vertical: 1),
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 1),
                         decoration: BoxDecoration(
                           color: _tileColor.withValues(alpha: 0.12),
                           borderRadius: BorderRadius.circular(999),

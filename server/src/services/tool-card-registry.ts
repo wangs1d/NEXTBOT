@@ -169,18 +169,19 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   /**
    * travel.destination-guide → travel_guide_select 卡（规划前种草选择卡）。
    *
-   * 数据源：buildDestinationGuide 的 {view[],stay[],food[]}（真实信号排序、带实拍图）。
+   * 数据源：buildDestinationGuide 的 {view[],stay[]}（真实信号排序、带实拍图）。
+   * 2026-11-07 食物改为用户自行决定，不进规划：种草卡不再下发 food 分类。
    * - extra.guide 携带分类候选（多图+真数指标+排序依据），前端专用卡渲染可勾选网格；
    * - items 平铺兜底（旧客户端通用卡仍可渲染文字清单）；
    * - actions 走 AgentActionChoiceCard 同一回传链：确认按钮 label 由前端拼
-   *   「就按这些去规划：必玩 A、B；住宿 C；美食 D」，服务端把 user_action
-   *   转写为用户消息，LLM 按语义把选中项填 wishlist/foodWishlist/stayWishlist。
+   *   「就按这些去规划：必玩 A、B；住宿 C」，服务端把 user_action
+   *   转写为用户消息，LLM 按语义把选中项填 wishlist/stayWishlist。
    * 勾选口径：一律 picked=false——选谁全部由用户定，服务端不替用户预选。
    */
   "travel.destination-guide": (r) => {
     if (r.ok !== true) return null;
     const dest = str(r.destination) || "目的地";
-    const pickCat = (key: "view" | "stay" | "food"): Array<Record<string, unknown>> => {
+    const pickCat = (key: "view" | "stay"): Array<Record<string, unknown>> => {
       const list = r[key];
       return Array.isArray(list)
         ? list.filter((x): x is Record<string, unknown> => !!x && typeof x === "object")
@@ -188,8 +189,7 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
     const view = pickCat("view");
     const stay = pickCat("stay");
-    const food = pickCat("food");
-    if (!view.length && !stay.length && !food.length) return null;
+    if (!view.length && !stay.length) return null;
     // 指标胶囊由服务端算好（label 是成品文案、source 是这条数的出处），这里只透传不加工
     const guideMetrics = (x: Record<string, unknown>) =>
       (Array.isArray(x.metrics) ? x.metrics : [])
@@ -228,15 +228,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
             }
           : {}),
       },
-      {
-        key: "food",
-        label: "美食推荐",
-        items: food.map(guideItem),
-        sortNote: str(sortNotes.food),
-      },
     ].filter((c) => c.items.length > 0);
     // 平铺兜底 items：旧客户端通用卡按文字清单渲染
-    const catOf: Record<string, string> = { view: "必玩", stay: "住宿", food: "美食" };
+    const catOf: Record<string, string> = { view: "必玩", stay: "住宿" };
     const items: ToolCardItem[] = [];
     for (const c of cats) {
       for (const it of c.items as Array<ReturnType<typeof guideItem>>) {

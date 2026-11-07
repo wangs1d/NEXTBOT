@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手机端旅游规划 · 实际效果还原（对齐 2026-11-07）</title>
+<style>
+  :root {
+    --screen: #0B0C0E;
+    --card: #17191F;
+    --card2: #1F222A;
+    --line: rgba(255,255,255,0.08);
+    --line2: rgba(255,255,255,0.16);
+    --txt: #F5F3EE;
+    --t2: #9A9FA9;
+    --t3: #626873;
+    --amber: #F5A552;
+    --amber-soft: rgba(245,165,82,0.14);
+    --amber-line: rgba(245,165,82,0.40);
+    --r: 22px;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#101216; color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    padding:36px 28px 64px;
+  }
+  .head { max-width:1480px; margin:0 auto 26px; }
+  .head h1 { font-size:22px; font-weight:700; letter-spacing:.5px; }
+  .head .sub { font-size:13px; color:var(--t2); margin-top:8px; line-height:1.7; }
+  .badge { display:inline-block; font-size:11px; padding:3px 10px; border-radius:999px; margin-right:8px; vertical-align:2px; }
+  .badge.ok  { color:#8FD6A2; border:1px solid rgba(143,214,162,.35); background:rgba(143,214,162,.08); }
+  .badge.gap { color:var(--amber); border:1px solid var(--amber-line); background:var(--amber-soft); }
+  .grid { max-width:1480px; margin:0 auto; display:flex; flex-wrap:wrap; gap:34px; justify-content:center; }
+  .col { display:flex; flex-direction:column; gap:10px; }
+  .cap { font-size:12.5px; color:var(--t2); text-align:center; letter-spacing:1px; }
+  .cap b { color:var(--txt); font-weight:600; }
+
+  /* ═══ 手机壳 ═══ */
+  .phone {
+    width:360px; height:780px; background:var(--screen);
+    border:1px solid rgba(255,255,255,.09); border-radius:44px;
+    padding:14px 12px; position:relative; overflow:hidden;
+    box-shadow:0 30px 70px rgba(0,0,0,.55);
+  }
+  .notch { position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    width:110px; height:26px; background:#000; border-radius:999px; z-index:60; }
+  .view { position:absolute; inset:14px 12px; border-radius:32px; overflow:hidden; background:var(--screen); }
+  .statusrow { display:flex; justify-content:space-between; padding:10px 22px 0; font-size:12px; font-weight:600; color:var(--txt); position:relative; z-index:50; }
+
+  /* ═══ 顶栏 ═══ */
+  .topbar { display:flex; align-items:flex-start; padding:14px 22px 0; }
+  .eyebrow { font-size:11px; letter-spacing:2.4px; color:var(--t3); }
+  .dayname { font-size:21px; font-weight:600; letter-spacing:.5px; margin-top:2px; }
+  .livepill { margin-left:auto; display:flex; align-items:center; gap:8px;
+    background:var(--card); border:1px solid var(--line); border-radius:999px; padding:7px 12px;
+    font-size:11px; color:var(--t2); white-space:nowrap; }
+  .livedot { width:7px; height:7px; border-radius:50%; background:var(--amber);
+    animation:pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  /* ═══ 弹性旅程带 ═══ */
+  .band { padding:18px 22px 0; }
+  .bandrow { display:flex; align-items:baseline; font-size:12.5px; color:var(--t2); }
+  .bandrow .mood { color:var(--amber); font-weight:600; margin-left:4px; }
+  .bandrow .end { margin-left:auto; font-size:11px; color:var(--t3); }
+  .bandbar { display:flex; height:7px; margin-top:9px; }
+  .seg { flex:1; margin:0 1.5px; border-radius:99px; }
+  .seg.done { background:rgba(255,255,255,.22); }
+  .seg.now  { background:var(--amber); flex:1.3; box-shadow:0 0 10px rgba(245,165,82,.6); }
+  .seg.todo { background:rgba(255,255,255,.10); }
+  .seg.alt  { flex:0 0 9px; height:6px; align-self:center; background:transparent;
+              border:1px solid rgba(255,255,255,.22); }
+  .bandtimes { display:flex; justify-content:space-between; margin-top:7px; font-size:10px; color:var(--t3); }
+
+  /* ═══ Now 主卡 ═══ */
+  .body-scroll { position:absolute; top:196px; bottom:150px; left:0; right:0; overflow:hidden; padding:18px 22px 0; }
+  .nowcard { background:var(--card); border-radius:var(--r); overflow:hidden; }
+  .photo { height:212px; position:relative; }
+  .photo img { width:100%; height:100%; object-fit:cover; display:block; }
+  .photo .shade { position:absolute; inset:0;
+    background:linear-gradient(180deg, transparent 30%, rgba(11,12,14,.88) 100%); }
+  .photag { position:absolute; top:14px; left:14px; font-size:10.5px; letter-spacing:1px;
+    background:rgba(11,12,14,.55); border:1px solid rgba(255,255,255,.14);
+    border-radius:999px; padding:5px 11px; color:var(--txt); }
+  .phtitle { position:absolute; left:18px; right:18px; bottom:14px; }
+  .phtime { font-size:12px; font-weight:600; letter-spacing:1px; color:var(--amber); }
+  .phname { font-size:25px; font-weight:700; letter-spacing:.5px; margin-top:3px; }
+  .cardbody { padding:16px 18px 18px; }
+  .note { font-size:13px; line-height:1.6; color:var(--t2);
+    display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+  .stayrow { display:flex; align-items:center; gap:8px; margin-top:12px; font-size:12px; color:var(--t2); }
+  .staybar { flex:1; height:4px; border-radius:4px; background:rgba(255,255,255,.08); overflow:hidden; }
+  .staybar i { display:block; height:100%; width:88%; background:var(--amber); border-radius:4px; }
+  .nextrow { display:flex; align-items:center; gap:13px; margin-top:13px;
+    background:var(--card2); border:1px solid var(--line); border-radius:16px; padding:13px 15px; }
+  .nexticon { width:38px; height:38px; border-radius:12px; background:var(--amber-soft);
+    display:flex; align-items:center; justify-content:center; font-size:18px; }
+  .nextlbl { font-size:11px; color:var(--t3); }
+  .nextname { font-size:14px; font-weight:600; margin-top:1px; }
+  .nextleg { font-size:12px; color:var(--amber); font-weight:500; margin-left:7px; }
+  .chev { margin-left:auto; color:var(--t3); font-size:18px; }
+
+  .dots { display:flex; justify-content:center; margin-top:14px; }
+  .dot { width:7px; height:7px; border-radius:99px; background:rgba(255,255,255,.16); margin:0 4px; }
+  .dot.cur { width:20px; background:var(--amber); }
+
+  .hint { position:absolute; bottom:128px; left:0; right:0; display:flex; justify-content:center;
+    align-items:center; gap:6px; font-size:10.5px; letter-spacing:.6px; color:var(--t3); }
+  .hint::before { content:""; width:5px; height:5px; border-radius:50%; background:var(--amber); }
+
+  /* ═══ 底部拇指区 ═══ */
+  .thumb { position:absolute; bottom:0; left:0; right:0; padding:10px 22px 22px; }
+  .gobtn { width:100%; height:54px; background:var(--amber); color:#201407;
+    border:none; border-radius:18px; font-size:15.5px; font-weight:700; letter-spacing:.5px; }
+  .ghosts { display:flex; justify-content:center; gap:10px; margin-top:12px; }
+  .ghost { display:flex; align-items:center; gap:6px; border:1px solid var(--line);
+    border-radius:999px; padding:9px 14px; font-size:12.5px; color:var(--t2); }
+
+  /* ═══ 地图视图 ═══ */
+  .mapbg { position:absolute; inset:0; background:#0D0F12; overflow:hidden; }
+  .street { position:absolute; background:rgba(255,255,255,.045); border-radius:2px; }
+  .maproute { position:absolute; inset:0; }
+  .maphead { position:absolute; top:0; left:0; right:0; padding:14px 18px; display:flex; align-items:center;
+    background:linear-gradient(180deg, rgba(11,12,14,.92), transparent); z-index:40; }
+  .mapback { width:36px; height:36px; border-radius:50%; background:var(--card); border:1px solid var(--line);
+    display:flex; align-items:center; justify-content:center; font-size:16px; color:var(--txt); }
+  .mapday { margin-left:12px; font-size:14px; font-weight:600; }
+  .mapday small { display:block; font-size:10.5px; color:var(--t3); font-weight:400; letter-spacing:1.6px; margin-top:1px; }
+  .stopmk { position:absolute; width:30px; height:30px; border-radius:50% 50% 50% 4px; transform:rotate(-45deg);
+    display:flex; align-items:center; justify-content:center; z-index:30; }
+  .stopmk span { transform:rotate(45deg); font-size:12px; font-weight:700; }
+  .stopmk.done { background:rgba(255,255,255,.20); color:#C9CDD4; }
+  .stopmk.now  { background:var(--amber); color:#201407; box-shadow:0 0 18px rgba(245,165,82,.55); }
+  .stopmk.todo { background:var(--card2); border:1px solid var(--line2); color:var(--t2); }
+  .puck { position:absolute; width:18px; height:18px; border-radius:50%; background:#4EA1FF;
+    border:3px solid #fff; box-shadow:0 0 0 8px rgba(78,161,255,.22); z-index:35; }
+  .mapfoot { position:absolute; bottom:20px; left:22px; right:22px; display:flex; gap:10px; z-index:40; }
+  .mapfoot .ghost { flex:1; justify-content:center; background:rgba(23,25,31,.9); }
+
+  /* ═══ 全程抽屉 / 站点详情 ═══ */
+  .sheet { position:absolute; left:0; right:0; bottom:0; height:78%; background:var(--card);
+    border-radius:26px 26px 0 0; padding:10px 20px 0; z-index:45; }
+  .grab { width:38px; height:4px; border-radius:99px; background:rgba(255,255,255,.22); margin:0 auto 14px; }
+  .shead { display:flex; align-items:baseline; }
+  .shead .t { font-size:17px; font-weight:700; }
+  .shead .s { margin-left:auto; font-size:11px; color:var(--t3); }
+  .daytabs { display:flex; gap:8px; margin-top:14px; }
+  .daytab { font-size:12px; padding:7px 14px; border-radius:999px; border:1px solid var(--line); color:var(--t2); }
+  .daytab.on { background:var(--amber-soft); border-color:var(--amber-line); color:var(--amber); font-weight:600; }
+  .tl { margin-top:16px; overflow:hidden; }
+  .tlrow { display:flex; gap:14px; }
+  .tltime { width:44px; font-size:11.5px; color:var(--t3); padding-top:3px; font-variant-numeric:tabular-nums; }
+  .tlaxis { display:flex; flex-direction:column; align-items:center; }
+  .tldot { width:9px; height:9px; border-radius:50%; background:rgba(255,255,255,.25); }
+  .tldot.done { background:rgba(255,255,255,.4); }
+  .tldot.now  { background:var(--amber); box-shadow:0 0 0 4px rgba(245,165,82,.18); }
+  .tlline { flex:1; width:2px; background:rgba(255,255,255,.08); min-height:18px; }
+  .tlline.done { background:rgba(245,165,82,.4); }
+  .tlcard { flex:1; background:var(--card2); border:1px solid var(--line); border-radius:14px;
+    padding:11px 13px; margin-bottom:10px; }
+  .tlcard.now { border-color:var(--amber-line); background:rgba(245,165,82,.06); }
+  .tlname { font-size:13.5px; font-weight:600; }
+  .tlsub { font-size:11.5px; color:var(--t3); margin-top:3px; }
+  .tlsub em { color:var(--amber); font-style:normal; }
+
+  /* 详情页 */
+  .dethero { height:230px; position:relative; }
+  .dethero img { width:100%; height:100%; object-fit:cover; display:block; }
+  .dethero .shade { position:absolute; inset:0; background:linear-gradient(180deg, rgba(11,12,14,.5), transparent 40%, rgba(23,25,31,1) 100%); }
+  .detback { position:absolute; top:12px; left:14px; width:34px; height:34px; border-radius:50%;
+    background:rgba(11,12,14,.55); border:1px solid rgba(255,255,255,.14); display:flex; align-items:center;
+    justify-content:center; z-index:10; font-size:15px; }
+  .dettags { position:absolute; left:20px; right:20px; bottom:12px; }
+  .detname { font-size:23px; font-weight:700; margin-top:3px; }
+  .dettime { font-size:12px; font-weight:600; letter-spacing:1px; color:var(--amber); }
+  .detbody { padding:0 20px 20px; overflow:hidden; }
+  .chips { display:flex; flex-wrap:wrap; gap:8px; margin-top:12px; }
+  .chip { font-size:11.5px; color:var(--t2); border:1px solid var(--line2); border-radius:999px; padding:5px 12px; }
+  .sec { font-size:12px; letter-spacing:2px; color:var(--t3); margin-top:18px; }
+  .sectext { font-size:13px; line-height:1.7; color:var(--t2); margin-top:8px; }
+  .flow { margin-top:16px; background:var(--card2); border:1px solid var(--line); border-radius:16px; padding:13px 15px;
+    display:flex; align-items:center; gap:13px; }
+  .flowicon { width:38px; height:38px; border-radius:12px; background:var(--amber-soft); display:flex;
+    align-items:center; justify-content:center; font-size:18px; }
+  .detdots { display:flex; gap:7px; margin-top:16px; }
+  .detdot { height:5px; flex:1; border-radius:99px; background:rgba(255,255,255,.12); }
+  .detdot.on { background:var(--amber); }
+
+  .gapnote { max-width:1480px; margin:34px auto 0; background:var(--card); border:1px solid var(--amber-line);
+    border-radius:16px; padding:18px 22px; font-size:13px; color:var(--t2); line-height:1.8; }
+  .gapnote b { color:var(--amber); }
+  .gapnote code { background:rgba(255,255,255,.06); padding:1px 6px; border-radius:6px; font-size:12px; color:#C9CDD4; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>手机端旅游规划 · 实际效果还原</h1>
+  <div class="sub">
+    <span class="badge ok">已对齐</span>一屏一站主视图 / 弹性旅程带 / Now 主卡 / 按需全屏地图 / 全程抽屉 / 站点详情 / 往期归档 / Agent 驱动规划流程（选择卡）
+    <br><span class="badge gap">未对齐</span>页内连续导航会话（导航按钮 / 真实路网导航线 / GPS 蓝点 / 到达·出发·跳过流转）——仍留在已被替代的 mobile.html 网页路径，Flutter 原生行程页未接入
+    <div style="margin-top:6px;color:var(--t3)">还原自 <code style="font-size:11px">travel_plan_mobile_page.dart</code> 真实实现 · 视觉令牌与代码一致（底 #0B0C0E / 卡 #17191F / 琥珀 #F5A552 / 圆角 22）</div>
+  </div>
+</div>
+
+<div class="grid">
+
+  <!-- ═══ ① 一屏一站主视图 ═══ -->
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="statusrow"><span>17:42</span><span>▲ ● ▂</span></div>
+        <div class="topbar">
+          <div>
+            <div class="eyebrow">HANGZHOU · DAY 2</div>
+            <div class="dayname">西湖深度 · 第二日</div>
+          </div>
+          <div class="livepill"><span class="livedot"></span>Agent 跟随中</div>
+        </div>
+        <div class="band">
+          <div class="bandrow">今日节奏 ·<span class="mood">慢游</span><span class="end">预计 18:30 结束</span></div>
+          <div class="bandbar">
+            <div class="seg done" style="flex:.7"></div>
+            <div class="seg done" style="flex:1.1"></div>
+            <div class="seg now"></div>
+            <div class="seg todo" style="flex:.8"></div>
+            <div class="seg todo" style="flex:1"></div>
+            <div class="seg alt"></div>
+          </div>
+          <div class="bandtimes"><span>09:00</span><span>18:30</span></div>
+        </div>
+        <div class="body-scroll">
+          <div class="nowcard">
+            <div class="photo">
+              <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Hefang%20Street%20Hangzhou%20China%2C%20traditional%20Qing%20dynasty%20commercial%20street%20at%20golden%20dusk%2C%20red%20lanterns%2C%20stone%20paved%20road%2C%20travel%20photography%2C%20warm%20cinematic%20light&image_size=landscape_4_3" alt="">
+              <div class="shade"></div>
+              <div class="photag">历史街区</div>
+              <div class="phtitle">
+                <div class="phtime">14:00 — 16:00</div>
+                <div class="phname">清河坊 · 河坊街</div>
+              </div>
+            </div>
+            <div class="cardbody">
+              <div class="note">午后人流稍退，先从鼓楼口进街，把定胜糕、油纸伞两条巷子串起来走，最后在胡庆余堂中药博物馆收尾。</div>
+              <div class="stayrow">🕐 建议停留 120 分钟<div class="staybar"><i></i></div></div>
+              <div class="nextrow">
+                <div class="nexticon">🚶</div>
+                <div>
+                  <div class="nextlbl">下一站</div>
+                  <div><span class="nextname">吴山天风</span><span class="nextleg">步行 约8 分钟 · 550 米</span></div>
+                </div>
+                <div class="chev">›</div>
+              </div>
+            </div>
+          </div>
+          <div class="dots"><span class="dot"></span><span class="dot"></span><span class="dot cur"></span><span class="dot"></span><span class="dot"></span></div>
+        </div>
+        <div class="hint">已感知你在街口停留 · 安排不变</div>
+        <div class="thumb">
+          <button class="gobtn">前往 吴山天风 · 步行 约8 分钟</button>
+          <div class="ghosts">
+            <div class="ghost">🗺 路线地图</div>
+            <div class="ghost">☰ 看全程</div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>① 一屏一站主视图</b> · 旅程带宽窄=时长占比 · Now 主卡</div>
+  </div>
+
+  <!-- ═══ ② 按需全屏地图 ═══ -->
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="mapbg">
+          <div class="street" style="top:22%;left:-10%;width:130%;height:10px;transform:rotate(-8deg)"></div>
+          <div class="street" style="top:44%;left:-10%;width:130%;height:14px;transform:rotate(4deg)"></div>
+          <div class="street" style="top:66%;left:-10%;width:130%;height:8px;transform:rotate(-3deg)"></div>
+          <div class="street" style="left:24%;top:10%;width:9px;height:90%;transform:rotate(7deg)"></div>
+          <div class="street" style="left:58%;top:6%;width:12px;height:96%;transform:rotate(-5deg)"></div>
+          <div class="street" style="left:78%;top:0;width:7px;height:100%;transform:rotate(9deg)"></div>
+          <svg class="maproute" viewBox="0 0 340 760" preserveAspectRatio="none">
+            <path d="M60 620 C 110 590, 90 520, 150 500 C 200 485, 210 430, 190 380" fill="none"
+              stroke="#F5A552" stroke-width="5" stroke-linecap="round"/>
+            <path d="M60 620 C 110 590, 90 520, 150 500" fill="none"
+              stroke="#FFE0B8" stroke-width="2.5" stroke-linecap="round" stroke-dasharray="2 10" opacity=".9">
+              <animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/>
+            </path>
+            <path d="M190 380 C 170 320, 230 280, 250 230 C 268 185, 240 150, 210 110" fill="none"
+              stroke="#9A9FA9" stroke-width="3.5" stroke-linecap="round" stroke-dasharray="3 9"/>
+          </svg>
+          <div class="stopmk done" style="left:46px;top:606px"><span>1</span></div>
+          <div class="stopmk done" style="left:136px;top:486px"><span>2</span></div>
+          <div class="stopmk now"  style="left:176px;top:366px"><span>3</span></div>
+          <div class="stopmk todo" style="left:236px;top:216px"><span>4</span></div>
+          <div class="stopmk todo" style="left:196px;top:96px"><span>5</span></div>
+          <div class="puck" style="left:168px;top:392px"></div>
+        </div>
+        <div class="statusrow"><span>17:42</span><span>▲ ● ▂</span></div>
+        <div class="maphead">
+          <div class="mapback">‹</div>
+          <div class="mapday">今日路线<small>DAY 2 · 5 站 · 已走 2 站</small></div>
+        </div>
+        <div class="mapfoot">
+          <div class="ghost">☰ 看全程</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>② 按需全屏地图</b> · 已走实线流动光效 + 未走虚线 · 站点标记</div>
+  </div>
+
+  <!-- ═══ ③ 全程抽屉 ═══ -->
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view" style="background:linear-gradient(180deg,#1A1D24,#0B0C0E)">
+        <div class="statusrow"><span>17:42</span><span>▲ ● ▂</span></div>
+        <div style="position:absolute;top:60px;left:0;right:0;text-align:center;color:var(--t3);font-size:12px;letter-spacing:2px">主视图（78% 上滑遮罩之下）</div>
+        <div class="sheet">
+          <div class="grab"></div>
+          <div class="shead"><span class="t">全程安排</span><span class="s">3 天 · 共 13 站</span></div>
+          <div class="daytabs">
+            <div class="daytab">Day 1</div>
+            <div class="daytab on">Day 2</div>
+            <div class="daytab">Day 3</div>
+          </div>
+          <div class="tl">
+            <div class="tlrow">
+              <div class="tltime">09:00</div>
+              <div class="tlaxis"><div class="tldot done"></div><div class="tlline done"></div></div>
+              <div class="tlcard">
+                <div class="tlname">柳浪闻莺</div>
+                <div class="tlsub">停留 90 分 · 步行 6 分</div>
+              </div>
+            </div>
+            <div class="tlrow">
+              <div class="tltime">11:30</div>
+              <div class="tlaxis"><div class="tldot done"></div><div class="tlline done"></div></div>
+              <div class="tlcard">
+                <div class="tlname">河坊街 · 午餐</div>
+                <div class="tlsub">停留 120 分 · 打车 15 分</div>
+              </div>
+            </div>
+            <div class="tlrow">
+              <div class="tltime">14:00</div>
+              <div class="tlaxis"><div class="tldot now"></div><div class="tlline"></div></div>
+              <div class="tlcard now">
+                <div class="tlname">清河坊 · 河坊街</div>
+                <div class="tlsub"><em>当前一站</em> · 步行 约8 分</div>
+              </div>
+            </div>
+            <div class="tlrow">
+              <div class="tltime">16:20</div>
+              <div class="tlaxis"><div class="tldot"></div><div class="tlline"></div></div>
+              <div class="tlcard">
+                <div class="tlname">吴山天风（城隍阁）</div>
+                <div class="tlsub">停留 80 分</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>③ 全程抽屉</b> · 78% 上滑 · Day 切换 + 时间轴列表</div>
+  </div>
+
+  <!-- ═══ ④ 站点详情 ═══ -->
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view" style="overflow-y:auto">
+        <div class="dethero">
+          <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Qinghefang%20ancient%20street%20Hangzhou%20at%20afternoon%2C%20traditional%20Chinese%20architecture%20facade%2C%20white%20walls%20dark%20tiles%2C%20shops%20and%20snacks%2C%20soft%20travel%20photography&image_size=landscape_4_3" alt="">
+          <div class="shade"></div>
+          <div class="detback">‹</div>
+          <div class="dettags">
+            <div class="dettime">14:00 — 16:00 · 历史街区</div>
+            <div class="detname">清河坊 · 河坊街</div>
+          </div>
+        </div>
+        <div class="detbody">
+          <div class="chips">
+            <span class="chip">免费进入</span>
+            <span class="chip">全天开放</span>
+            <span class="chip">无需预约</span>
+            <span class="chip">评分 4.5</span>
+          </div>
+          <div class="sec">安排理由</div>
+          <div class="sectext">午后人流稍退，先从鼓楼口进街，把定胜糕、油纸伞两条巷子串起来走，最后在胡庆余堂中药博物馆收尾。</div>
+          <div class="sec">贴士</div>
+          <div class="sectext">· 定胜糕在街中段老店排队最快，先买边走<br>· 胡庆余堂 16:30 停止入场，注意收尾时间</div>
+          <div class="sec">实用信息</div>
+          <div class="sectext">上城区河坊街 · 地铁 1 号线安定路站 D 口步行 600 米</div>
+          <div class="flow">
+            <div class="flowicon">🚶</div>
+            <div>
+              <div class="nextlbl">到达 · 下一站动线</div>
+              <div><span class="nextname">吴山天风</span><span class="nextleg">步行 约8 分钟 · 550 米</span></div>
+            </div>
+            <div class="chev">›</div>
+          </div>
+          <div class="detdots">
+            <span class="detdot"></span><span class="detdot"></span><span class="detdot on"></span><span class="detdot"></span><span class="detdot"></span>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>④ 站点详情</b> · 大图头图 + 事实 chip + 贴士 + 动线</div>
+  </div>
+
+</div>
+
+<div class="gapnote">
+  <b>对齐结论：</b>电脑端 desktop.html 已有的旅游规划展示能力（旅程带 / Now 卡 / 地图 / 时间轴 / 详情），手机端 Flutter 原生行程页已 1:1 落地，数据同走 <code style="font-size:12px">/travel-plans</code> 与行程卡载荷，口径一致。<br>
+  <b>唯一缺口：</b>2026-10-18 上线的「页内连续导航会话」(<code style="font-size:12px">/travel-map/nav/session</code> + <code style="font-size:12px">/travel-route</code> 真实路网 + GPS 蓝点 + 到达/出发/跳过按钮) 只接在 server 网页版 desktop.html / mobile.html；Flutter 原生行程页的主按钮目前只是「翻到下一站」，没有接导航会话。手机端用户实际已无法走到 mobile.html（原生页替代了应用内浏览器路径）——按项目「新旧真实替换」铁律，这块能力需要接线到 Flutter，或确认砍掉。
+</div>
+
+</body>
+</html>

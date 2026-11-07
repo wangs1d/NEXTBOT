@@ -1333,7 +1333,8 @@ export class PlanningService {
    * 走缓存优先 → 网络实时搜索 → 内置知识库真实POI兜底（无合成占位），返回扁平 POI 摘要列表。
    */
   /**
-   * 规划前种草候选（选择卡数据源）：三类 POI 按真实信号排前列并带实拍图。
+   * 规划前种草候选（选择卡数据源）：景点/住宿两类 POI 按真实信号排前列并带实拍图。
+   * 2026-11-07 食物改为用户自行决定，不进规划：不再产美食候选段。
    * 图源：媒体库已有 → 直接用；未命中 → 必应抓取（并发 6）→ 本地化落盘。
    * 单点失败不带图，宁缺毋假。卡面数字只有两条来路：真实评分（高德/飞猪）与
    * 本店实时报价；取不到就是没有这条指标，价格显示「待核价」——绝不拿同城同档
@@ -1349,8 +1350,8 @@ export class PlanningService {
     return 'budget';
   }
 
-  /** 无官方简介时，用真实属性（等级/商圈/评分/菜系）拼一句介绍，不编造卖点。 */
-  private _guideIntro(poi: RawPOI, type: 'view' | 'stay' | 'food'): string {
+  /** 无官方简介时，用真实属性（等级/商圈/评分）拼一句介绍，不编造卖点。 */
+  private _guideIntro(poi: RawPOI, type: 'view' | 'stay'): string {
     const raw = (poi.raw ?? {}) as Record<string, unknown>;
     const keytag = typeof raw.keytag === 'string' ? raw.keytag.trim() : '';
     const area =
@@ -1372,16 +1373,10 @@ export class PlanningService {
       if (hint) parts.push(hint);
       return parts.join(' · ');
     }
-    if (type === 'stay') {
-      const kind = keytag ? `${keytag}酒店` : '酒店';
-      const parts = [kind + (area ? `，位于${area}` : '')];
-      if (rating > 0) parts.push(`住客评分 ${rating.toFixed(1)}`);
-      return parts.join(' · ');
-    }
-    const cuisine = this.inferCuisine(poi.tags || [], poi.name);
-    const parts = [`${cuisine}${area ? `，位于${area}` : ''}`];
-    if (rating > 0) parts.push(`评分 ${rating.toFixed(1)}`);
-    return parts.join(' · ');
+    const kind = keytag ? `${keytag}酒店` : '酒店';
+    const stayParts = [kind + (area ? `，位于${area}` : '')];
+    if (rating > 0) stayParts.push(`住客评分 ${rating.toFixed(1)}`);
+    return stayParts.join(' · ');
   }
 
   async buildDestinationGuide(
@@ -1409,11 +1404,10 @@ export class PlanningService {
     center: Coordinates;
     view: GuideCandidate[];
     stay: GuideCandidate[];
-    food: GuideCandidate[];
     /** 住宿段的落位参照点；坐标不可用时为 null，整段就不出距离理由 */
     stayAnchor: GuideAnchor | null;
     /** 每段「这几条是按什么排出来的」——由实际参与排序的信号拼出 */
-    sortNotes: Record<'view' | 'stay' | 'food', string>;
+    sortNotes: Record<'view' | 'stay', string>;
     fromCache: boolean;
   }> {
     // 条数动态（2026-10-27）：按游玩天数取「每天 2 条 + 4 条多元化冗余位」，
@@ -1506,13 +1500,12 @@ export class PlanningService {
       return { list: [...picked, ...niche].map((x) => x.p), nicheCount: niche.length };
     };
     const viewTake = takeDiverseView();
-    const cats: Array<{ key: 'view' | 'stay' | 'food'; type: PoiMediaType; list: RawPOI[] }> = [
+    const cats: Array<{ key: 'view' | 'stay'; type: PoiMediaType; list: RawPOI[] }> = [
       { key: 'view', type: 'attraction', list: viewTake.list },
       { key: 'stay', type: 'hotel', list: take(dest.hotels, 'hotel') },
-      { key: 'food', type: 'restaurant', list: take(dest.restaurants, 'restaurant') },
     ];
     const jobs: Array<{
-      cat: 'view' | 'stay' | 'food';
+      cat: 'view' | 'stay';
       type: PoiMediaType;
       poi: RawPOI;
       cand: GuideCandidate;
@@ -1570,7 +1563,7 @@ export class PlanningService {
     });
     await Promise.all(workers);
 
-    // 实时价 + 官方简介：景点走飞猪门票、酒店走飞猪房价、餐饮走高德人均。
+    // 实时价 + 官方简介：景点走飞猪门票、酒店走飞猪房价。
     // 与补图并发（4 路），单点失败只让该项「待核价」，不影响整卡。
     let priceCursor = 0;
     const priceWorkers = Array.from({ length: Math.min(4, jobs.length) }, async () => {
@@ -1584,7 +1577,7 @@ export class PlanningService {
             cand.pricePending = live.amount == null;
             cand.priceNote = live.note;
             if (live.description) cand.intro = live.description.slice(0, 180);
-          } else if (type === 'hotel') {
+          } else {
             const live = await lookupHotelPrice(poi.name, dest.destination, {
               tier: this._hotelTierOfPoi(poi),
             });
@@ -1603,11 +1596,6 @@ export class PlanningService {
                   ? `未取到本店报价（同城同档 ${live.sampleSize} 家中位数只作预算参考，不当作它家价）`
                   : '未取到本店报价，待核价';
             }
-          } else {
-            const cost = restaurantCostOf(poi.raw);
-            cand.price = cost;
-            cand.pricePending = cost == null;
-            cand.priceNote = cost == null ? '未公布人均，待核价' : '高德人均消费';
           }
         } catch {
           cand.price = null;
@@ -1618,7 +1606,7 @@ export class PlanningService {
     });
     await Promise.all(priceWorkers);
 
-    const out: Record<'view' | 'stay' | 'food', GuideCandidate[]> = { view: [], stay: [], food: [] };
+    const out: Record<'view' | 'stay', GuideCandidate[]> = { view: [], stay: [] };
     for (const j of jobs) out[j.cat].push(j.cand);
 
     // 住宿落位锚点：用户原话 → 本屏首选景点 → 目的地中心 → 不下发。
@@ -1646,12 +1634,10 @@ export class PlanningService {
       center: dest.center,
       view: out.view,
       stay: out.stay,
-      food: out.food,
       stayAnchor,
       sortNotes: {
         view: this._guideSortNote(out.view, null, false, viewTake.nicheCount),
         stay: this._guideSortNote(out.stay, stayAnchor, stayDistanceLed),
-        food: this._guideSortNote(out.food, null, false),
       },
       fromCache: dest.fromCache,
     };
@@ -1722,11 +1708,11 @@ export class PlanningService {
    * 客户端拿到数组原样渲染，不再做任何换算。
    */
   private _assembleGuideMetrics(
-    out: Record<'view' | 'stay' | 'food', GuideCandidate[]>,
+    out: Record<'view' | 'stay', GuideCandidate[]>,
     anchor: GuideAnchor | null,
   ): void {
     for (const [catKey, list] of Object.entries(out) as Array<
-      ['view' | 'stay' | 'food', GuideCandidate[]]
+      ['view' | 'stay', GuideCandidate[]]
     >) {
       const withDistance = catKey === 'stay' && !!anchor;
       for (const cand of list) {
@@ -1757,7 +1743,7 @@ export class PlanningService {
             label:
               cand.price === 0
                 ? '免费'
-                : `¥${Math.round(cand.price)}${catKey === 'stay' ? '/晚' : catKey === 'food' ? '/人' : ' 起'}`,
+                : `¥${Math.round(cand.price)}${catKey === 'stay' ? '/晚' : ' 起'}`,
             source: cand.priceNote || '实时报价',
           });
         } else {

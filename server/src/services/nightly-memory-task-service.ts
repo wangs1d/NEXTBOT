@@ -212,12 +212,16 @@ export class NightlyMemoryTaskService {
     consolidated: boolean;
     archived: boolean;
     synced: boolean;
+    slotResync?: Record<string, { facts: number; preferences: number; keptRecent: number }>;
     error?: string;
   }> {
     const result = {
       consolidated: false,
       archived: false,
       synced: false,
+      slotResync: undefined as
+        | Record<string, { facts: number; preferences: number; keptRecent: number }>
+        | undefined,
       error: undefined as string | undefined,
     };
     this.lastJournalFixation = null;
@@ -227,6 +231,11 @@ export class NightlyMemoryTaskService {
       // consolidateDailyJournals（journal → 长期图）对同批当天对话双写长期记忆，
       // 白天只写 journal 一份原始流水，夜间固化单一入口。
       result.archived = true;
+
+      // 派生视图强制重同步（确定性，零 LLM）：让事实主库的习惯门槛/保鲜规则
+      // 立即作用于 KV 槽位（2026-11-07 习惯画像定稿）。放在最前——即使后续
+      // LLM 巩固阶段缓慢/失败，槽位也已与主库收敛；数据手术后的立即收敛口。
+      result.slotResync = await this.resyncDerivedSlotsForAllActors();
 
       await this.extractFactsFromJournals();
       await this.consolidateUserProfiles();
@@ -430,9 +439,9 @@ export class NightlyMemoryTaskService {
     if (!journal) return;
     try {
       for (const actorId of this.getAllActorIds()) {
-        const transcript = await this.buildNightlyTranscript(journal, actorId);
-        if (!transcript) continue;
-        const soul = await maybeRunSoulReflection({ transcript });
+        const built = await this.buildNightlyTranscript(journal, actorId);
+        if (!built) continue;
+        const soul = await maybeRunSoulReflection({ transcript: built.transcript });
         if (soul.applied) {
           console.log(`[NightlyMemory] Soul reflection applied (${soul.reason})`);
         }
@@ -447,12 +456,19 @@ export class NightlyMemoryTaskService {
   private async buildNightlyTranscript(
     journal: NonNullable<ReturnType<typeof getDailyJournalService>>,
     actorId: string,
-  ): Promise<string | null> {
+  ): Promise<{ transcript: string; observedOn: string } | null> {
     const unconsolidated = await journal.getUnconsolidatedLines(actorId);
     if (unconsolidated.length === 0) return null;
 
     const transcriptLines: string[] = [];
+    let observedOn: string | null = null;
     for (const { dateKey, lines } of unconsolidated) {
+      // 观察日 = 本批日志覆盖的最大日历日（跨天补跑时一次调用只记 1 天证据，
+      // 保守口径：习惯多日门槛靠不同「运行日」累积，不因一次补跑灌水）
+      if (/^\d{4}-\d{2}-\d{2}/.test(dateKey)) {
+        const day = dateKey.slice(0, 10);
+        if (!observedOn || day > observedOn) observedOn = day;
+      }
       for (const line of lines) {
         const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
         if (!m) continue;
@@ -465,7 +481,10 @@ export class NightlyMemoryTaskService {
       }
     }
     if (transcriptLines.length < 4) return null;
-    return transcriptLines.slice(-120).join("\n");
+    return {
+      transcript: transcriptLines.slice(-120).join("\n"),
+      observedOn: observedOn ?? new Date().toISOString().slice(0, 10),
+    };
   }
 
   /**
@@ -704,12 +723,16 @@ export class NightlyMemoryTaskService {
     const actorIds = this.getAllActorIds();
     for (const actorId of actorIds) {
       try {
-        const transcript = await this.buildNightlyTranscript(journal, actorId);
-        if (!transcript) continue;
-        const facts = await this.extractDurableFacts(llm, transcript);
+        const built = await this.buildNightlyTranscript(journal, actorId);
+        if (!built) continue;
+        const facts = await this.extractDurableFacts(llm, built.transcript);
         if (!facts || facts.length === 0) continue;
 
-        const { canonical, kvWritten } = await this.applyNightlyFacts(actorId, facts);
+        const { canonical, kvWritten } = await this.applyNightlyFacts(
+          actorId,
+          facts,
+          built.observedOn,
+        );
         appliedCounts.set(actorId, canonical + kvWritten);
       } catch (err) {
         console.error(`[NightlyMemory] fact extraction failed for ${actorId}:`, err);
@@ -722,6 +745,7 @@ export class NightlyMemoryTaskService {
   private async applyNightlyFacts(
     actorId: string,
     facts: Array<{ kind: "preference" | "fact" | "commitment"; text: string }>,
+    observedOn?: string,
   ): Promise<{ canonical: number; kvWritten: number }> {
     let canonical = 0;
     let kvWritten = 0;
@@ -729,12 +753,15 @@ export class NightlyMemoryTaskService {
       const text = fact.text.trim().slice(0, 200);
       if (!text) continue;
       if (fact.kind === "preference" || fact.kind === "fact") {
-        // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）
+        // 稳定偏好/事实 → 事实主库（subject 归一 + provenance，冲突即替换）。
+        // observedOn 是习惯画像多日门槛的证据依据（2026-11-07）：单日观察的
+        // 习惯断言入库但不进派生槽位，直到累计 ≥2 个不同观察日。
         await this.getFactStore().upsertFact(actorId, {
           kind: fact.kind,
           value: text,
           source: "nightly-extract",
           confidence: 0.7,
+          observedOn,
         });
         canonical += 1;
       } else {
@@ -761,6 +788,26 @@ export class NightlyMemoryTaskService {
       console.log(`[NightlyMemory] 事实提炼: actor=${actorId} 承诺 ${kvWritten} 条走 KV 槽位`);
     }
     return { canonical, kvWritten };
+  }
+
+  /**
+   * 派生视图强制重同步（确定性，零 LLM）：把事实主库（含习惯门槛/保鲜规则）
+   * 重新归并进所有 actor 的 KV 槽位，并清除被压制习惯的旧残行。
+   * forceRunNightTasks 每次收尾调用——即使提取被跳过，槽位也与主库一致。
+   */
+  private async resyncDerivedSlotsForAllActors(): Promise<
+    Record<string, { facts: number; preferences: number; keptRecent: number }>
+  > {
+    const out: Record<string, { facts: number; preferences: number; keptRecent: number }> = {};
+    if (!this.memorySync) return out;
+    for (const actorId of this.getAllActorIds()) {
+      try {
+        out[actorId] = await this.getFactStore().syncDerivedSlots(actorId, this.memorySync);
+      } catch (err) {
+        console.error(`[NightlyMemory] slot resync failed for ${actorId}:`, err);
+      }
+    }
+    return out;
   }
 
   /**
@@ -818,6 +865,10 @@ export class NightlyMemoryTaskService {
         "规则：preference=稳定偏好/习惯（text 需含「喜欢/偏好/讨厌/习惯」等词）；" +
         "fact=稳定身份/背景事实（text 以「用户」开头或用无主语短语，如「用户住在兴义」「职业：后端开发」）；" +
         "commitment=需要后续跟进的承诺或待办（text 需含「我会/我将/计划/待办」等词）。" +
+        "习惯纪律：单日/单次观察到的行为不得写成 preference 或带「习惯/总是/每天」字样的 fact——" +
+        "习惯断言需要多日重复的证据（系统侧按观察日计数，单日条目不会进入用户画像）；" +
+        "设提醒/定闹钟≠事件已发生：「用户定了9点闹钟」不能推出「用户9点起床」，更不能推出作息习惯；" +
+        "一次性事务（比价、下单、当次安排）不提取为 fact/preference。" +
         "text 用第三人称中文短句（以「用户」开头或无主语短语），禁止以「我/我的」开头——" +
         "这些条目会注入对话 prompt，第一人称会让模型分不清「我」指谁（人称视角铁律）。没有可提取内容时返回 {\"facts\":[]}。";
       const response = await openai.chat.completions.create({

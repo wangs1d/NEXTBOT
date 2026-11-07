@@ -566,17 +566,23 @@ class MobileSchedulePageState extends State<MobileSchedulePage> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: <Widget>[
                 SizedBox(
-                  width: 46,
+                  width: 56,
                   child: Column(
                     mainAxisAlignment: MainAxisAlignment.center,
                     children: <Widget>[
-                      Text(
-                        _formatTime(e.at),
-                        style: TextStyle(
-                          color: titleColor,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: 0.3,
+                      // 时间固定单行展示：宽度不够时等比缩小，绝不折成两行。
+                      FittedBox(
+                        fit: BoxFit.scaleDown,
+                        child: Text(
+                          _formatTime(e.at),
+                          maxLines: 1,
+                          softWrap: false,
+                          style: TextStyle(
+                            color: titleColor,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w700,
+                            letterSpacing: 0.3,
+                          ),
                         ),
                       ),
                       const SizedBox(height: 2),

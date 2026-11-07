@@ -1,0 +1,858 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>旅游规划 · 单绿泡玻璃流 设计稿（2026-11-07）</title>
+<style>
+  :root{
+    --bg:#0E1013;
+    --panel:#17191E;
+    --txt:#EDEFF2;
+    --t2:#9AA1AB;
+    --t3:#6B7280;
+    --mint:#D4D4D8;
+    --mint-dim:rgba(212,212,216,.12);
+    --mint-line:rgba(212,212,216,.28);
+    --glass:rgba(255,255,255,.055);
+    --glass-line:rgba(255,255,255,.12);
+    --amber:#F5A552;
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-font-smoothing:antialiased;}
+  body{
+    background:#0B0D10;color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    padding:34px 26px 70px;
+  }
+  .doc{max-width:1560px;margin:0 auto;}
+  .doc h1{font-size:23px;font-weight:700;letter-spacing:.3px;}
+  .doc .lead{font-size:13px;color:var(--t2);line-height:1.85;margin-top:10px;max-width:1080px;}
+  .doc .lead b{color:var(--txt);}
+  .reqs{display:flex;gap:10px;flex-wrap:wrap;margin-top:16px;}
+  .req{flex:1 1 280px;background:#14171B;border:1px solid #232830;border-radius:14px;padding:13px 15px;font-size:12.5px;line-height:1.7;color:var(--t2);}
+  .req b{display:block;color:var(--txt);font-size:13px;margin-bottom:4px;}
+  .req i{font-style:normal;color:var(--mint);}
+
+  h2.sec{font-size:15px;font-weight:700;letter-spacing:1.6px;color:#C9CFD8;margin:44px 0 18px;
+    padding-left:11px;border-left:3px solid var(--mint);}
+  h2.sec small{font-size:11.5px;font-weight:400;color:var(--t3);letter-spacing:.6px;margin-left:10px;}
+
+  .row{display:flex;gap:34px;flex-wrap:wrap;align-items:flex-start;}
+  .col{display:flex;flex-direction:column;gap:10px;}
+  .cap{font-size:12.5px;color:var(--t2);text-align:center;letter-spacing:.4px;}
+  .cap b{color:var(--txt);}
+
+  /* ══════ 手机壳 ══════ */
+  .phone{width:372px;height:800px;background:var(--bg);border:1px solid rgba(255,255,255,.09);
+    border-radius:46px;padding:13px 11px;position:relative;overflow:hidden;
+    box-shadow:0 34px 80px rgba(0,0,0,.6);flex-shrink:0;}
+  .notch{position:absolute;top:13px;left:50%;transform:translateX(-50%);width:112px;height:25px;
+    background:#000;border-radius:999px;z-index:80;}
+  .view{position:absolute;inset:13px 11px;border-radius:34px;overflow:hidden;background:var(--bg);
+    display:flex;flex-direction:column;}
+  .status{display:flex;justify-content:space-between;padding:9px 22px 0;font-size:11.5px;
+    font-weight:600;color:#D6DAE0;position:relative;z-index:70;}
+  .appbar{display:flex;align-items:center;gap:10px;padding:12px 16px 10px;position:relative;z-index:70;}
+  .appbar .bk{font-size:17px;color:var(--t2);}
+  .avt{width:26px;height:26px;border-radius:50%;background:linear-gradient(150deg,#6CF0C2,#2FAE85);
+    box-shadow:0 0 0 1px rgba(255,255,255,.18);}
+  .appbar .nm{font-size:14.5px;font-weight:600;}
+  .appbar .st{font-size:10.5px;color:var(--t3);margin-top:1px;}
+  .appbar .dots{margin-left:auto;color:var(--t2);letter-spacing:2px;font-size:15px;}
+
+  /* 背景氛围（让玻璃有可折射的内容） */
+  .chat{flex:1;position:relative;padding:10px 8px 0;display:flex;flex-direction:column;gap:9px;overflow:hidden;}
+  .blob{position:absolute;border-radius:50%;filter:blur(46px);opacity:.5;pointer-events:none;}
+  .b1{width:210px;height:210px;background:#1E6E5A;left:-60px;top:120px;}
+  .b2{width:180px;height:180px;background:#3B2E5E;right:-50px;top:320px;}
+  .b3{width:160px;height:160px;background:#274A6B;left:120px;bottom:60px;}
+
+  .msg{display:flex;position:relative;z-index:2;}
+  .msg.u{justify-content:flex-end;}
+  .bub{max-width:80%;background:#000;color:#fff;border-radius:17px;border-bottom-right-radius:6px;
+    padding:9px 13px;font-size:13.5px;line-height:1.55;}
+  .msg.b .bub{background:transparent;color:#C6CCD4;padding:2px 4px;}
+
+  /* ══════ 核心：单绿泡（玻璃） ══════ */
+  .flow{
+    position:relative;z-index:2;flex:1;display:flex;flex-direction:column;overflow:hidden;
+    border-radius:26px;
+    background:
+      linear-gradient(158deg, rgba(212,212,216,.13) 0%, rgba(255,255,255,.055) 32%, rgba(255,255,255,.028) 72%, rgba(212,212,216,.05) 100%);
+    border:1px solid rgba(212,212,216,.20);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.14), inset 0 -1px 0 rgba(255,255,255,.04),
+                0 22px 48px rgba(0,0,0,.5), 0 0 0 1px rgba(0,0,0,.25);
+    backdrop-filter: blur(28px) saturate(150%);
+  }
+  .flow::after{
+    content:"";position:absolute;inset:0;border-radius:26px;pointer-events:none;
+    background:radial-gradient(120% 60% at 0% 0%, rgba(212,212,216,.10), transparent 58%);
+  }
+  .fh{padding:13px 15px 11px;border-bottom:1px solid rgba(255,255,255,.07);position:relative;z-index:2;}
+  .fh .top{display:flex;align-items:center;gap:8px;}
+  .fh .ttl{font-size:12px;letter-spacing:2.2px;color:#C9CBD0;font-weight:600;}
+  .fh .idx{margin-left:auto;font-size:10.5px;color:var(--t3);letter-spacing:.6px;}
+  .prog{display:flex;gap:5px;margin-top:9px;}
+  .prog i{flex:1;height:3px;border-radius:99px;background:rgba(255,255,255,.11);}
+  .prog i.done{background:var(--mint);}
+  .prog i.now{background:linear-gradient(90deg,var(--mint),rgba(212,212,216,.3));}
+  .chips{display:flex;gap:6px;flex-wrap:wrap;margin-top:10px;}
+  .schip{font-size:10.5px;padding:4px 9px;border-radius:8px;background:rgba(212,212,216,.10);
+    border:1px solid rgba(212,212,216,.22);color:#C9CBD0;letter-spacing:.2px;}
+  .schip em{font-style:normal;color:#6FAF98;margin-right:3px;}
+
+  .fb{flex:1;overflow:hidden;padding:15px 15px 0;position:relative;z-index:2;}
+
+  .qtitle{font-size:17px;font-weight:700;line-height:1.45;letter-spacing:.2px;}
+  .qsub{font-size:12px;color:var(--t2);line-height:1.65;margin-top:6px;}
+
+  .field{margin-top:15px;}
+  .flabel{font-size:11px;letter-spacing:1.2px;color:#7D848E;}
+  .fopts{display:flex;gap:7px;flex-wrap:wrap;margin-top:7px;}
+  .fopt{font-size:12.5px;padding:8px 13px;border-radius:11px;
+    background:rgba(255,255,255,.05);border:1px solid rgba(255,255,255,.10);color:#D6DBE1;}
+  .fopt.on{background:rgba(212,212,216,.14);border-color:rgba(212,212,216,.5);color:#EEF0F3;
+    box-shadow:0 0 0 3px rgba(212,212,216,.08);}
+  .finput{display:flex;align-items:center;gap:8px;margin-top:7px;background:rgba(255,255,255,.05);
+    border:1px solid rgba(255,255,255,.10);border-radius:12px;padding:10px 12px;}
+  .finput .val{font-size:14px;font-variant-numeric:tabular-nums;letter-spacing:.4px;}
+  .finput .cur{width:1.5px;height:15px;background:var(--mint);border-radius:2px;}
+  .finput .sfx{margin-left:auto;font-size:11px;color:#777E88;}
+  .fhint{font-size:10.5px;color:#6F7680;margin-top:7px;line-height:1.5;}
+  .fhint em{font-style:normal;color:#C9CBD0;}
+
+  .ff{padding:12px 15px 14px;border-top:1px solid rgba(255,255,255,.07);position:relative;z-index:2;
+    background:linear-gradient(180deg,rgba(14,16,19,0),rgba(14,16,19,.35));}
+  .cta{width:100%;height:46px;border-radius:14px;background:linear-gradient(180deg,#E8E8EA,#B9BAC0);
+    color:#1A1A1C;font-size:14.5px;font-weight:800;letter-spacing:.4px;
+    display:flex;align-items:center;justify-content:center;gap:7px;
+    box-shadow:0 8px 22px rgba(212,212,216,.22), inset 0 1px 0 rgba(255,255,255,.35);}
+  .cta.ghost{background:transparent;border:1px solid rgba(255,255,255,.14);color:#B9C0C9;
+    box-shadow:none;font-weight:600;font-size:13px;height:42px;}
+  .footrow{display:flex;gap:9px;margin-top:9px;}
+  .footrow .cta{flex:1;}
+
+  /* ══════ 景点 / 酒店 列表（1:1 参考图） ══════ */
+  .cat{display:flex;align-items:center;gap:7px;font-size:16.5px;font-weight:800;letter-spacing:.3px;}
+  .cat .sub{margin-left:auto;font-size:10.5px;font-weight:400;color:var(--t3);letter-spacing:.4px;}
+
+  .poi{margin-top:17px;}
+  .porow{display:flex;align-items:center;gap:8px;}
+  .podot{width:6px;height:6px;border-radius:50%;background:#767D87;flex-shrink:0;}
+  .poi.on .podot{background:var(--mint);box-shadow:0 0 0 4px rgba(212,212,216,.15);}
+  .poname{font-size:16px;font-weight:700;letter-spacing:.2px;}
+  .poi.on .poname{color:#F2F3F5;}
+  .sup{width:12px;height:12px;border-radius:50%;border:1px solid #4E555F;color:#6E7680;
+    font-size:8.5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;}
+  .rec{margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11px;letter-spacing:.2px;
+    color:#C9CBD0;background:rgba(212,212,216,.10);border:1px solid rgba(212,212,216,.26);
+    border-radius:8px;padding:5px 9px;white-space:nowrap;}
+  .rec .cv{color:#8A8D93;font-size:12px;}
+  .rec.done{color:#1A1A1C;background:linear-gradient(180deg,#E8E8EA,#B9BAC0);border-color:transparent;font-weight:800;}
+
+  .hint{font-size:13px;line-height:1.7;color:#B7BDC6;margin-top:9px;letter-spacing:.15px;}
+
+  .strip{display:flex;gap:8px;margin-top:11px;align-items:flex-start;}
+  .shot{border-radius:14px;overflow:hidden;flex-shrink:0;border:1px solid rgba(255,255,255,.09);
+    background:#1A1F24;position:relative;}
+  .shot img{width:100%;height:100%;object-fit:cover;display:block;}
+  .shot.s1{width:31.5%;height:104px;margin-top:9px;}
+  .shot.s2{width:31%;height:114px;margin-top:-3px;}
+  .shot.s3{width:30%;height:92px;margin-top:16px;}
+  .shot.pick{border-color:rgba(212,212,216,.7);box-shadow:0 0 0 2px rgba(212,212,216,.22),0 8px 20px rgba(0,0,0,.4);}
+  .shot .ck{position:absolute;top:6px;right:6px;width:17px;height:17px;border-radius:50%;
+    background:var(--mint);color:#1A1A1C;font-size:10px;font-weight:900;display:flex;
+    align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(0,0,0,.4);}
+  .shot .tagp{position:absolute;left:6px;bottom:6px;font-size:9px;padding:2px 6px;border-radius:6px;
+    background:rgba(0,0,0,.5);color:#EDEFF2;backdrop-filter:blur(6px);}
+
+  .metrics{display:flex;gap:6px;flex-wrap:wrap;margin-top:9px;}
+  .met{font-size:10.5px;padding:3px 8px;border-radius:7px;background:rgba(255,255,255,.055);
+    border:1px solid rgba(255,255,255,.08);color:#A9B0B9;letter-spacing:.2px;}
+  .met b{color:#E3E7EC;font-weight:700;}
+  .met.price b{color:var(--amber);}
+  .met.good b{color:var(--mint);}
+
+  .selbar{display:flex;align-items:center;gap:10px;}
+  .selbar .cnt{font-size:11.5px;color:#C9CBD0;letter-spacing:.3px;}
+  .selbar .cnt i{font-style:normal;color:var(--t3);}
+  .selbar .cta{width:auto;flex:1;}
+
+  /* ══════ 地图帧 ══════ */
+  .mapwrap{position:absolute;inset:0;background:#0C0F13;overflow:hidden;}
+  .street{position:absolute;background:rgba(255,255,255,.045);border-radius:2px;}
+  .water{position:absolute;background:rgba(59,110,150,.20);border-radius:40px;}
+  .maphead{position:absolute;top:0;left:0;right:0;padding:44px 16px 18px;z-index:10;
+    background:linear-gradient(180deg,rgba(10,12,15,.94),rgba(10,12,15,0));}
+  .maphead .h1{font-size:16px;font-weight:700;display:flex;align-items:center;gap:8px;}
+  .maphead .h1 .mintdot{width:7px;height:7px;border-radius:50%;background:var(--mint);
+    box-shadow:0 0 0 4px rgba(212,212,216,.14);}
+  .maphead .h2{font-size:10.5px;color:var(--t3);letter-spacing:1.6px;margin-top:5px;}
+  .rmk{position:absolute;display:flex;align-items:center;gap:5px;padding:4px 8px 4px 6px;
+    border-radius:999px;background:rgba(20,24,29,.82);border:1px solid rgba(255,255,255,.14);
+    backdrop-filter:blur(12px);font-size:9.5px;color:#DCE1E7;z-index:12;white-space:nowrap;
+    box-shadow:0 6px 16px rgba(0,0,0,.45);}
+  .rmk .s{color:var(--mint);font-weight:800;}
+  .rmk .d{color:#7D848E;font-size:8.5px;}
+  .stopmk{position:absolute;width:27px;height:27px;border-radius:50% 50% 50% 4px;transform:rotate(-45deg);
+    display:flex;align-items:center;justify-content:center;z-index:11;}
+  .stopmk span{transform:rotate(45deg);font-size:11px;font-weight:800;}
+  .stopmk.done{background:rgba(255,255,255,.22);color:#D3D8DE;}
+  .stopmk.now{background:var(--amber);color:#2A1A08;box-shadow:0 0 18px rgba(245,165,82,.55);}
+  .stopmk.todo{background:#22272E;border:1px solid rgba(255,255,255,.18);color:#9AA1AB;}
+  .maplegend{position:absolute;left:16px;right:16px;bottom:18px;z-index:14;border-radius:18px;
+    padding:13px 14px;background:rgba(23,25,30,.72);border:1px solid rgba(255,255,255,.12);
+    backdrop-filter:blur(24px) saturate(140%);
+    box-shadow:0 18px 40px rgba(0,0,0,.5), inset 0 1px 0 rgba(255,255,255,.12);}
+  .maplegend .lt{font-size:12px;font-weight:700;display:flex;align-items:center;gap:7px;}
+  .maplegend .lt small{margin-left:auto;font-size:10px;color:var(--t3);font-weight:400;}
+  .rrow{display:flex;align-items:center;gap:9px;margin-top:9px;}
+  .rthumb{width:34px;height:34px;border-radius:9px;object-fit:cover;flex-shrink:0;}
+  .rname{font-size:12.5px;font-weight:600;}
+  .rmeta{font-size:10.5px;color:var(--t3);margin-top:2px;}
+  .rmeta em{font-style:normal;color:var(--mint);}
+  .arrow{margin-left:auto;color:#5C636D;font-size:14px;}
+  .mapnote{font-size:10px;color:#6F7680;margin-top:10px;line-height:1.5;}
+
+  /* ══════ 过渡示意 ══════ */
+  .motion{display:flex;gap:14px;align-items:center;flex-wrap:wrap;}
+  .mstep{width:216px;height:170px;border-radius:18px;background:#14171C;border:1px solid #232A33;
+    padding:12px;display:flex;flex-direction:column;gap:8px;position:relative;overflow:hidden;}
+  .mstep .lab{font-size:10.5px;color:#7D848E;letter-spacing:1px;}
+  .mstep .t{font-size:20px;font-weight:800;letter-spacing:.2px;}
+  .mstep .bar{height:4px;border-radius:99px;background:rgba(255,255,255,.12);}
+  .mstep .bar.m{background:var(--mint);}
+  .mline{display:flex;flex-direction:column;gap:6px;margin-top:4px;}
+  .mline i{display:block;height:5px;border-radius:99px;background:rgba(255,255,255,.10);}
+  .mline i.short{width:56%;}
+  .mpill{display:flex;gap:6px;margin-top:auto;}
+  .mpill b{flex:1;height:20px;border-radius:7px;background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.10);}
+  .mpill b.on{background:rgba(212,212,216,.22);border-color:rgba(212,212,216,.5);}
+  .mstep .ghostc{position:absolute;inset:0;background:#14171C;opacity:0;}
+  .mstep.out{opacity:.55;}
+  .mstep.out .t{transform:translateX(-26px);opacity:.35;filter:blur(2px);}
+  .mstep.in .t{transform:translateX(0);}
+  .marrow{font-size:22px;color:#3E4750;}
+
+  /* ══════ 桌面帧 ══════ */
+  .desktop{width:960px;height:640px;background:#0D0F12;border:1px solid rgba(255,255,255,.09);
+    border-radius:16px;overflow:hidden;box-shadow:0 30px 70px rgba(0,0,0,.6);display:flex;flex-direction:column;}
+  .dtop{height:34px;display:flex;align-items:center;gap:7px;padding:0 13px;background:#141619;
+    border-bottom:1px solid #1E2228;}
+  .dtop .dot{width:9px;height:9px;border-radius:50%;background:#33383F;}
+  .dtop .dot.r{background:#5A3333;}.dtop .dot.y{background:#5A5433;}.dtop .dot.g{background:#33543F;}
+  .dtop .ti{margin-left:12px;font-size:11px;color:#7D848E;letter-spacing:.6px;}
+  .dbody{flex:1;display:flex;overflow:hidden;position:relative;}
+  .dside{width:186px;border-right:1px solid #1B1F24;padding:12px 10px;display:flex;flex-direction:column;gap:8px;background:#0F1114;}
+  .dside .sd{height:26px;border-radius:8px;background:rgba(255,255,255,.04);}
+  .dside .sd.on{background:rgba(212,212,216,.10);border:1px solid rgba(212,212,216,.24);}
+  .dmain{flex:1;position:relative;padding:18px 24px;display:flex;flex-direction:column;gap:12px;
+    overflow:hidden;background:#0E1013;}
+  .dmain .blob{opacity:.35;}
+  .flowdesk{max-width:720px;width:100%;align-self:center;border-radius:24px;overflow:hidden;
+    display:flex;flex-direction:column;flex:1;position:relative;z-index:2;
+    background:linear-gradient(158deg,rgba(212,212,216,.12),rgba(255,255,255,.05) 34%,rgba(255,255,255,.025));
+    border:1px solid rgba(212,212,216,.20);backdrop-filter:blur(26px) saturate(150%);
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.13),0 18px 44px rgba(0,0,0,.5);}
+  .dgrid{display:grid;grid-template-columns:1fr 1fr;gap:22px;padding:4px 2px 0;}
+  .dgrid .poi{margin-top:0;}
+  .dgrid .shot.s1{width:30.5%;height:96px;margin-top:8px;}
+  .dgrid .shot.s2{width:29.5%;height:106px;margin-top:-4px;}
+  .dgrid .shot.s3{width:29%;height:86px;margin-top:14px;}
+  .dgrid .hint{font-size:12px;}
+
+  /* ══════ 规格表 ══════ */
+  .spec{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:14px;margin-top:10px;}
+  .scard{background:#14171C;border:1px solid #232A33;border-radius:15px;padding:16px 18px;}
+  .scard h3{font-size:13.5px;font-weight:700;letter-spacing:.6px;margin-bottom:10px;color:#EDEFF2;}
+  .scard h3 span{font-size:10.5px;color:var(--mint);margin-left:8px;letter-spacing:.5px;font-weight:500;}
+  .scard ul{list-style:none;display:flex;flex-direction:column;gap:7px;}
+  .scard li{font-size:12.3px;line-height:1.65;color:#A6ADB6;padding-left:13px;position:relative;}
+  .scard li::before{content:"";position:absolute;left:0;top:7px;width:5px;height:5px;border-radius:50%;
+    background:rgba(212,212,216,.6);}
+  .scard code{background:#1E2229;padding:1px 6px;border-radius:5px;font-size:11.5px;color:#C9D3DE;
+    font-family:ui-monospace,Consolas,monospace;}
+  .scard b{color:#E7EBF0;}
+</style>
+</head>
+<body>
+<div class="doc">
+  <h1>旅游规划 · 单绿泡玻璃流（设计稿 v1）</h1>
+  <div class="lead">
+    按你提的三点重构：<b>① 全部信息在卡片内完成</b>（选择 / 填写，不用回主界面打字）；<b>② 一次绿泡跑完整流程</b>（玻璃质感 + 当前卡滑出、下一卡滑入）；<b>③ 景点/酒店卡 1:1 还原参考图</b>（错落照片、推荐率胶囊、绿泡接近满屏），同时<b>删除吃饭地点选择</b>，改为在地图路线上展示沿线高分餐厅 POI。
+  </div>
+  <div class="reqs">
+    <div class="req"><b>① 卡片内闭环</b>问题、选项、自由输入全部在绿泡里；选项点选即生效，<i>不再要求用户去主界面回一句</i>。</div>
+    <div class="req"><b>② 一次绿泡</b>同一条消息内原地换卡：选中 → 当前卡滑出 → 下一卡滑入；顶部常驻<i>已定摘要</i>，进度轨推到下一步。</div>
+    <div class="req"><b>③ 玻璃 + 错落照片</b>绿泡占满对话区宽度（≈ 屏宽 − 16）；照片三张不等高不等顶，<i>错落排布</i>，不套整齐网格。</div>
+  </div>
+</div>
+
+<!-- ═══════════ 一、规划流 · 第 1 步 ═══════════ -->
+<h2 class="sec">一、规划流 · 第 1 步（一次绿泡的起点）<small>卡片内选择 + 填写，全部不用回主界面</small></h2>
+<div class="row">
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="status"><span>20:14</span><span>▲ ● ▂</span></div>
+        <div class="appbar">
+          <span class="bk">‹</span>
+          <div class="avt"></div>
+          <div>
+            <div class="nm">小私</div>
+            <div class="st">正在帮你规划 · 大理</div>
+          </div>
+          <div class="dots">···</div>
+        </div>
+        <div class="chat">
+          <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+          <div class="msg u"><div class="bub">十一想去大理，5 天，预算一万以内，帮我规划下</div></div>
+          <div class="msg b"><div class="bub">行，先把框架定了，都在这张卡里选。</div></div>
+
+          <div class="flow">
+            <div class="fh">
+              <div class="top"><span class="ttl">行程规划</span><span class="idx">1 / 4 · 框架</span></div>
+              <div class="prog"><i class="now"></i><i></i><i></i><i></i></div>
+              <div class="chips">
+                <span class="schip"><em>目的地</em>大理</span>
+              </div>
+            </div>
+            <div class="fb">
+              <div class="qtitle">先定一下出行框架</div>
+              <div class="qsub">点一下就算确认，不用再回消息；有要补充的直接在下面填。</div>
+
+              <div class="field">
+                <div class="flabel">出发日</div>
+                <div class="fopts">
+                  <div class="fopt on">10-01 周四</div>
+                  <div class="fopt">10-02 周五</div>
+                  <div class="fopt">10-03 周六</div>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="flabel">玩几天</div>
+                <div class="fopts">
+                  <div class="fopt">3 天</div>
+                  <div class="fopt on">5 天</div>
+                  <div class="fopt">7 天</div>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="flabel">同行</div>
+                <div class="fopts">
+                  <div class="fopt">一个人</div>
+                  <div class="fopt on">两个人</div>
+                  <div class="fopt">带娃</div>
+                </div>
+              </div>
+
+              <div class="field">
+                <div class="flabel">预算（含机酒）</div>
+                <div class="finput">
+                  <span class="val">10,000</span><span class="cur"></span>
+                  <span class="sfx">元 · 两人合计</span>
+                </div>
+                <div class="fhint">按上次你选 <em>「1 万以内」</em> 的习惯先填好，直接改数字就行。</div>
+              </div>
+            </div>
+            <div class="ff">
+              <div class="cta">下一步 · 挑景点 →</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>① 框架问题</b> · 选项胶囊 + 卡内输入；实际按「出发日→天数→同行→预算」4 小步逐张推进</div>
+  </div>
+
+  <!-- 过渡示意 -->
+  <div class="col" style="flex:1;min-width:520px;">
+    <div class="cap" style="text-align:left;margin-bottom:2px"><b>② 过渡：同一条绿泡内原地换卡</b>（不是往流里追加新卡）</div>
+    <div class="motion">
+      <div class="mstep">
+        <div class="lab">T+0ms · 点选</div>
+        <div class="t">节奏</div>
+        <div class="pillrow"><div class="mpill"><b></b><b class="on"></b><b></b></div></div>
+        <div class="mline"><i></i><i class="short"></i></div>
+        <div class="mpill"><b class="on"></b><b></b></div>
+        <div style="font-size:10px;color:#6F7680;margin-top:6px">缩放 0.98→1 · 触觉 selectionClick</div>
+      </div>
+      <div class="marrow">→</div>
+      <div class="mstep out">
+        <div class="lab">T+60ms · 当前卡滑出</div>
+        <div class="t">节奏</div>
+        <div class="pillrow"><div class="mpill"><b></b><b class="on"></b><b></b></div></div>
+        <div class="mline"><i></i><i class="short"></i></div>
+        <div class="mpill"><b class="on"></b><b></b></div>
+        <div style="font-size:10px;color:#6F7680;margin-top:6px">左移 12px + 淡出 + 轻微模糊 · 160ms</div>
+      </div>
+      <div class="marrow">→</div>
+      <div class="mstep in">
+        <div class="lab">T+220ms · 下一卡滑入</div>
+        <div class="t">🔥 必玩景点</div>
+        <div class="mline"><i></i><i></i><i class="short"></i></div>
+        <div class="mpill"><b class="on"></b><b></b></div>
+        <div style="font-size:10px;color:#6F7680;margin-top:6px">右入 40px→0 · 淡入 · easeOutCubic 320ms</div>
+      </div>
+    </div>
+    <div class="spec" style="grid-template-columns:1fr;margin-top:4px">
+      <div class="scard">
+        <h3>关键规则<span>用户硬要求</span></h3>
+        <ul>
+          <li>整个规划只有<b>一条绿泡消息</b>：步骤卡切换走消息内 <code>card.update</code> 或本地状态机，<b>不追加新气泡</b>，聊天流不随步骤增长。</li>
+          <li>已确认的事实上移到绿泡顶部 <b>已定摘要 chips</b>，切步骤时不消失，用户随时能看到「已定：大理 · 10-1 · 5 天 · 2 人 · ¥10,000」。</li>
+          <li>气泡高度随内容 <code>AnimatedSize</code> 自适应；内容超出时气泡内滚动，<b>气泡本身始终占满对话区</b>。</li>
+          <li>选完最后一格自动推进，无需再点「下一步」；回退可点顶部已定 chip 改。</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 二、景点选择（1:1 参考图） ═══════════ -->
+<h2 class="sec">二、景点选择卡<small>1:1 还原参考图：红点分类标题 · 推荐率胶囊 · 三张错落照片 · 绿泡近满屏</small></h2>
+<div class="row">
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="status"><span>20:16</span><span>▲ ● ▂</span></div>
+        <div class="appbar">
+          <span class="bk">‹</span>
+          <div class="avt"></div>
+          <div>
+            <div class="nm">小私</div>
+            <div class="st">正在帮你规划 · 大理</div>
+          </div>
+          <div class="dots">···</div>
+        </div>
+        <div class="chat">
+          <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+
+          <div class="flow">
+            <div class="fh">
+              <div class="top"><span class="ttl">行程规划</span><span class="idx">2 / 4 · 景点</span></div>
+              <div class="prog"><i class="done"></i><i class="now"></i><i></i><i></i></div>
+              <div class="chips">
+                <span class="schip"><em>大理</em></span>
+                <span class="schip"><em>10-01</em>5 天</span>
+                <span class="schip"><em>2 人</em></span>
+                <span class="schip"><em>¥10,000</em></span>
+              </div>
+            </div>
+            <div class="fb">
+              <div class="cat">🔥 必玩景点<span class="sub">按评分 · 顺路加权</span></div>
+
+              <div class="poi">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">喜洲古镇</span>
+                  <span class="sup">i</span>
+                  <span class="rec">50% 人推荐 <span class="cv">›</span></span>
+                </div>
+                <div class="hint">麦田稻田治愈出片，古建精致，可体验扎染。</div>
+                <div class="strip">
+                  <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Xizhou%20ancient%20town%20Dali%20China%2C%20golden%20rice%20paddies%20in%20front%20of%20traditional%20Bai%20architecture%2C%20Cangshan%20mountain%20behind%2C%20sunny%20day%2C%20travel%20photography&image_size=square" alt=""></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Erhai%20lake%20Dali%20China%2C%20small%20island%20with%20pavilion%20in%20blue%20calm%20water%2C%20mountains%20on%20horizon%2C%20clear%20sky%2C%20travel%20photo&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bai%20ethnic%20tie%20dye%20blue%20and%20white%20textiles%20hanging%20in%20old%20town%20shop%20Yunnan%2C%20colorful%20craft%20market%2C%20travel%20photography&image_size=square" alt=""></div>
+                </div>
+              </div>
+
+              <div class="poi on">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">大理古城</span>
+                  <span class="sup">i</span>
+                  <span class="rec done">已选 ✓</span>
+                </div>
+                <div class="hint">傍晚登五华楼俯瞰全景，小巷里藏着文艺小店。</div>
+                <div class="strip">
+                  <div class="shot s1 pick"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Dali%20ancient%20city%20China%2C%20traditional%20Chinese%20gate%20tower%20at%20dusk%2C%20warm%20lantern%20light%2C%20stone%20pavement%2C%20travel%20photography&image_size=square" alt=""><span class="ck">✓</span></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Dali%20ancient%20town%20alley%20China%2C%20white%20walls%20dark%20tiles%2C%20small%20shops%20with%20plants%2C%20sunlight%20and%20shadow%2C%20travel%20photo&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Wuhua%20tower%20Dali%20ancient%20city%2C%20night%20view%20from%20above%20over%20old%20town%20roofs%2C%20blue%20hour%2C%20travel%20photography&image_size=square" alt=""></div>
+                </div>
+              </div>
+
+              <div class="poi">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">双廊古镇</span>
+                  <span class="sup">i</span>
+                  <span class="rec">32% 人推荐 <span class="cv">›</span></span>
+                </div>
+                <div class="hint">临海咖啡馆看苍洱日落，白族小巷光影出片。</div>
+                <div class="strip">
+                  <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Shuanglang%20town%20Dali%20China%2C%20seaside%20cafe%20terrace%20overlooking%20Erhai%20lake%20at%20sunset%2C%20golden%20light%2C%20travel%20photography&image_size=square" alt=""></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Erhai%20lake%20view%20from%20Shuanglang%20balcony%2C%20blue%20water%20and%20dramatic%20clouds%2C%20Cangshan%20mountain%2C%20travel%20photo&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bai%20ethnic%20alley%20in%20Yunnan%20village%2C%20white%20walls%20and%20stone%20path%2C%20warm%20afternoon%20sunlight%20shadows%2C%20travel%20photography&image_size=square" alt=""></div>
+                </div>
+              </div>
+            </div>
+            <div class="ff">
+              <div class="selbar">
+                <span class="cnt">已选 1 处 <i>· 可多选</i></span>
+                <div class="cta">下一步 · 选住宿 →</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>③ 必玩景点</b> · 分类标题 + 推荐率 + 三图错落 + 已选态</div>
+  </div>
+
+  <div class="col" style="flex:1;min-width:430px;">
+    <div class="scard">
+      <h3>1:1 还原要点<span>照片中的元素</span></h3>
+      <ul>
+        <li><b>分类标题</b>：<code>🔥 必玩景点</code> 16.5px / 800 字重，右侧弱化排序说明。</li>
+        <li><b>条目标题行</b>：6px 圆点 + 名称 + 右上角 <code>i</code> 圆标 + 右侧<b>推荐率胶囊</b>（<code>50% 人推荐 ›</code>，底 主题色 10%、描边 26%、字 11px；选中整颗变主题色「已选 ✓」）。</li>
+        <li><b>描述</b>：13px / 行高 1.7 / #B7BDC6，最多两行，与参考图同为「一句人话」。</li>
+        <li><b>照片错落</b>：三张一行，宽度 31.5% / 31% / 30%，高度 <code>104 / 114 / 92</code>，顶部偏移 <code>+9 / −3 / +16</code> —— <b>不齐顶不等高</b>，视觉上自然错落，而不是网格。</li>
+        <li><b>圆角</b>14px，1px 白 9% 描边；选中照片加主题色描边 + 右上角 ✓ 角标。</li>
+        <li><b>绿泡</b>占满对话区（屏宽 − 16），圆角 26px；玻璃 = 24px 模糊 + 主题表面渐变 + 1px 主题描边 + 顶部内高光。</li>
+        <li><b>底部操作条</b>固定在气泡内，不随列表滚动：已选计数 + 主按钮。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 三、住宿选择 ═══════════ -->
+<h2 class="sec">三、住宿选择卡<small>同一套版式；住宿段带「离哪儿近」的落位参照，价格/评分走真数指标</small></h2>
+<div class="row">
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="status"><span>20:19</span><span>▲ ● ▂</span></div>
+        <div class="appbar">
+          <span class="bk">‹</span>
+          <div class="avt"></div>
+          <div>
+            <div class="nm">小私</div>
+            <div class="st">正在帮你规划 · 大理</div>
+          </div>
+          <div class="dots">···</div>
+        </div>
+        <div class="chat">
+          <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+          <div class="flow">
+            <div class="fh">
+              <div class="top"><span class="ttl">行程规划</span><span class="idx">3 / 4 · 住宿</span></div>
+              <div class="prog"><i class="done"></i><i class="done"></i><i class="now"></i><i></i></div>
+              <div class="chips">
+                <span class="schip"><em>大理</em></span>
+                <span class="schip"><em>10-01</em>5 天</span>
+                <span class="schip"><em>已选</em>大理古城</span>
+              </div>
+            </div>
+            <div class="fb">
+              <div class="cat">🏨 住宿 · 古城区附近<span class="sub">离你选的古城 1.2km 内</span></div>
+
+              <div class="poi on">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">古城·隐仙庭院</span>
+                  <span class="sup">i</span>
+                  <span class="rec done">已选 ✓</span>
+                </div>
+                <div class="hint">步行 5 分钟到人民路，天井小院能看苍山，含双早。</div>
+                <div class="metrics">
+                  <span class="met price">¥<b>468</b>/晚</span>
+                  <span class="met good">评分 <b>4.8</b></span>
+                  <span class="met">距古城南门 <b>320m</b></span>
+                  <span class="met">4 晚</span>
+                </div>
+                <div class="strip">
+                  <div class="shot s1 pick"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Boutique%20guesthouse%20courtyard%20in%20Dali%20ancient%20town%20China%2C%20traditional%20wooden%20architecture%2C%20plants%20and%20stone%20path%2C%20warm%20evening%20light&image_size=square" alt=""><span class="ck">✓</span></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Cozy%20hotel%20room%20with%20wooden%20furniture%2C%20soft%20white%20bed%2C%20large%20window%20with%20mountain%20view%2C%20warm%20lamp%20light%2C%20interior%20photography&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Chinese%20breakfast%20set%20on%20wooden%20table%20in%20guesthouse%20courtyard%2C%20steaming%20rice%20noodles%20and%20tea%2C%20morning%20light&image_size=square" alt=""></div>
+                </div>
+              </div>
+
+              <div class="poi">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">洱海·听风海景</span>
+                  <span class="sup">i</span>
+                  <span class="rec">76% 人推荐 <span class="cv">›</span></span>
+                </div>
+                <div class="hint">一线海景阳台看日出，含双早与接站，离古城 6.4km。</div>
+                <div class="metrics">
+                  <span class="met price">¥<b>688</b>/晚</span>
+                  <span class="met good">评分 <b>4.6</b></span>
+                  <span class="met">距古城 <b>6.4km</b></span>
+                </div>
+                <div class="strip">
+                  <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Seaview%20hotel%20room%20balcony%20overlooking%20Erhai%20lake%20at%20sunrise%2C%20white%20linens%2C%20minimal%20interior%2C%20morning%20light%2C%20travel%20photography&image_size=square" alt=""></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Lake%20view%20terrace%20of%20boutique%20hotel%20in%20Yunnan%2C%20lounge%20chairs%20facing%20blue%20water%20and%20mountains%2C%20clear%20sky&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Hotel%20lobby%20with%20wood%20and%20rattan%20furniture%2C%20warm%20lights%2C%20plants%2C%20boutique%20resort%20interior%20Yunnan%20China&image_size=square" alt=""></div>
+                </div>
+              </div>
+
+              <div class="poi">
+                <div class="porow">
+                  <span class="podot"></span>
+                  <span class="poname">才村·稻田小院</span>
+                  <span class="sup">i</span>
+                  <span class="rec">41% 人推荐 <span class="cv">›</span></span>
+                </div>
+                <div class="hint">稻田边的独立院子，安静，适合慢住，早起有雾。</div>
+                <div class="metrics">
+                  <span class="met price">¥<b>328</b>/晚</span>
+                  <span class="met good">评分 <b>4.5</b></span>
+                  <span class="met">距洱海 <b>900m</b></span>
+                </div>
+                <div class="strip">
+                  <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Small%20courtyard%20house%20next%20to%20rice%20paddies%20in%20Dali%20China%2C%20morning%20mist%2C%20mountains%20in%20background%2C%20travel%20photography&image_size=square" alt=""></div>
+                  <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Rustic%20guesthouse%20room%20in%20Yunnan%20countryside%2C%20wooden%20beams%2C%20white%20bedding%2C%20open%20window%20to%20rice%20fields&image_size=square" alt=""></div>
+                  <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bicycle%20on%20a%20path%20between%20golden%20rice%20paddies%20in%20Dali%20China%2C%20afternoon%20sun%2C%20travel%20photo&image_size=square" alt=""></div>
+                </div>
+              </div>
+            </div>
+            <div class="ff">
+              <div class="selbar">
+                <span class="cnt">已选 1 家 <i>· 单晚价，4 晚合计 ¥1,872</i></span>
+                <div class="cta">下一步 · 预算 →</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>④ 住宿选择</b> · 同版式 + 真数指标（价/评分/距离）</div>
+  </div>
+
+  <div class="col" style="flex:1;min-width:430px;">
+    <div class="scard">
+      <h3>改动说明<span>美食选择已删除</span></h3>
+      <ul>
+        <li><b>删除「美食」分类</b>：<code>TravelGuideSelectCard</code> 的 <code>'美食'</code> 标签、<code>food</code> 分组与 <code>selectedFood</code> 回传一并移除；服务端 <code>travel.destination-guide</code> 的 <code>cats</code> 只下发 <code>view / stay</code>。</li>
+        <li><b>桌面端同步</b>：<code>AgentResultCard</code> 是手机与桌面共用组件，删一次两端同时生效；<code>plan-session</code> 的 <code>foodWishlist</code> 追问文案一并下线。</li>
+        <li><b>吃饭交给用户</b>：不进规划编排、不进预算强制项；地图上按「评分 ≥ 4.5 且距路线 ≤ 800m」展示餐厅 POI，最多 6 个。</li>
+        <li><b>推荐率</b>用真实信号生成（如：该 POI 在同目的地被选中的比例 / 收藏加权），取不到就不显示胶囊，<b>不编数</b>。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 四、地图：沿线高分餐厅 ═══════════ -->
+<h2 class="sec">四、地图视图 · 沿线高分餐厅 POI<small>不排行程、不占预算，只做「路过想吃时点开」</small></h2>
+<div class="row">
+  <div class="col">
+    <div class="phone">
+      <div class="notch"></div>
+      <div class="view">
+        <div class="mapwrap">
+          <div class="water" style="width:420px;height:220px;left:-90px;top:330px;transform:rotate(-8deg)"></div>
+          <div class="street" style="top:24%;left:-10%;width:130%;height:9px;transform:rotate(-7deg)"></div>
+          <div class="street" style="top:46%;left:-10%;width:130%;height:13px;transform:rotate(4deg)"></div>
+          <div class="street" style="top:68%;left:-10%;width:130%;height:8px;transform:rotate(-3deg)"></div>
+          <div class="street" style="left:26%;top:6%;width:9px;height:96%;transform:rotate(6deg)"></div>
+          <div class="street" style="left:62%;top:2%;width:11px;height:100%;transform:rotate(-6deg)"></div>
+
+          <svg style="position:absolute;inset:0" viewBox="0 0 350 800" preserveAspectRatio="none">
+            <path d="M62 640 C 108 606, 96 540, 152 518 C 206 498, 214 442, 196 392"
+              fill="none" stroke="#F5A552" stroke-width="5" stroke-linecap="round"/>
+            <path d="M62 640 C 108 606, 96 540, 152 518" fill="none" stroke="#FFE0B8" stroke-width="2.4"
+              stroke-linecap="round" stroke-dasharray="2 10" opacity=".9">
+              <animate attributeName="stroke-dashoffset" from="24" to="0" dur="1.2s" repeatCount="indefinite"/>
+            </path>
+            <path d="M196 392 C 176 330, 236 292, 254 240 C 272 192, 244 158, 214 116"
+              fill="none" stroke="#8E959E" stroke-width="3.4" stroke-linecap="round" stroke-dasharray="3 9"/>
+          </svg>
+
+          <div class="stopmk done" style="left:48px;top:626px"><span>1</span></div>
+          <div class="stopmk done" style="left:138px;top:502px"><span>2</span></div>
+          <div class="stopmk now" style="left:182px;top:378px"><span>3</span></div>
+          <div class="stopmk todo" style="left:240px;top:226px"><span>4</span></div>
+          <div class="stopmk todo" style="left:200px;top:102px"><span>5</span></div>
+
+          <!-- 沿线高分餐厅 POI -->
+          <div class="rmk" style="left:96px;top:566px">🍜 <span class="s">4.8</span> 再回首凉鸡米线 <span class="d">320m</span></div>
+          <div class="rmk" style="left:222px;top:452px">☕ <span class="s">4.7</span> 田咖啡 <span class="d">180m</span></div>
+          <div class="rmk" style="left:64px;top:340px">🥘 <span class="s">4.6</span> 段公子私房菜 <span class="d">540m</span></div>
+        </div>
+        <div class="status"><span>17:42</span><span>▲ ● ▂</span></div>
+        <div class="maphead">
+          <div class="h1"><span class="mintdot"></span>今日路线</div>
+          <div class="h2">DAY 2 · 5 站 · 已走 2 站</div>
+        </div>
+        <div class="maplegend">
+          <div class="lt">🍽 沿线高分餐厅 <small>评分 ≥ 4.5 · 距路线 ≤ 800m</small></div>
+          <div class="rrow">
+            <img class="rthumb" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bowl%20of%20Yunnan%20rice%20noodles%20with%20chicken%20and%20herbs%2C%20close%20up%20food%20photography%2C%20warm%20light&image_size=square" alt="">
+            <div>
+              <div class="rname">再回首凉鸡米线</div>
+              <div class="rmeta"><em>4.8</em> · 人均 ¥28 · 距路线 320m · 你前方 200m</div>
+            </div>
+            <span class="arrow">›</span>
+          </div>
+          <div class="rrow">
+            <img class="rthumb" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Specialty%20coffee%20shop%20in%20Yunnan%20old%20town%2C%20pour%20over%20coffee%20on%20wooden%20table%2C%20plants%2C%20warm%20afternoon%20light&image_size=square" alt="">
+            <div>
+              <div class="rname">田咖啡</div>
+              <div class="rmeta"><em>4.7</em> · 人均 ¥36 · 距路线 180m · 路过即到</div>
+            </div>
+            <span class="arrow">›</span>
+          </div>
+          <div class="rrow">
+            <img class="rthumb" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Yunnan%20home%20style%20dishes%20on%20wooden%20table%2C%20colorful%20vegetables%20and%20clay%20pot%2C%20rustic%20restaurant%2C%20food%20photography&image_size=square" alt="">
+            <div>
+              <div class="rname">段公子私房菜</div>
+              <div class="rmeta"><em>4.6</em> · 人均 ¥62 · 距路线 540m</div>
+            </div>
+            <span class="arrow">›</span>
+          </div>
+          <div class="mapnote">不排进时间轴、不占预算；想吃了点开直接导航，行程时间我自己让。</div>
+        </div>
+      </div>
+    </div>
+    <div class="cap"><b>⑤ 地图 + 沿线餐厅</b> · 玻璃卡片下沿浮层，不打断路线</div>
+  </div>
+
+  <div class="col" style="flex:1;min-width:430px;">
+    <div class="scard">
+      <h3>餐厅 POI 规则<span>宁缺毋滥</span></h3>
+      <ul>
+        <li><b>筛选</b>：真实评分 ≥ 4.5、距当前路线 ≤ 800m、营业中；按「评分 + 顺路度」排序，最多 6 个。</li>
+        <li><b>展示</b>：地图上小胶囊（图标 + 评分 + 店名 + 距离），点击展开底卡 → 详情 / 导航；不进时间轴、不计预算。</li>
+        <li><b>无真数就不出</b>：评分或坐标缺一，该店不展示；不猜、不补默认值。</li>
+        <li><b>与规划解耦</b>：餐厅不在 <code>PlanSessionCard</code> 的选项里，Agent 也不再追问「想吃什么」。</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════ 五、桌面端 ═══════════ -->
+<h2 class="sec">五、桌面端 · 同一绿泡（宽版）<small>共用 AgentResultCard：绿泡 maxWidth 720，照片放大、条目两列，错落逻辑不变</small></h2>
+<div class="desktop">
+  <div class="dtop">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span class="ti">Private Agent · 对话</span>
+  </div>
+  <div class="dbody">
+    <div class="dside">
+      <div class="sd on"></div><div class="sd"></div><div class="sd"></div><div class="sd"></div><div class="sd"></div>
+    </div>
+    <div class="dmain">
+      <div class="blob b1"></div><div class="blob b2"></div><div class="blob b3"></div>
+      <div class="msg u" style="max-width:100%"><div class="bub">十一想去大理，5 天，预算一万以内</div></div>
+      <div class="flowdesk">
+        <div class="fh">
+          <div class="top"><span class="ttl">行程规划</span><span class="idx">2 / 4 · 景点</span></div>
+          <div class="prog"><i class="done"></i><i class="now"></i><i></i><i></i></div>
+          <div class="chips">
+            <span class="schip"><em>大理</em></span><span class="schip"><em>10-01</em>5 天</span>
+            <span class="schip"><em>2 人</em></span><span class="schip"><em>¥10,000</em></span>
+          </div>
+        </div>
+        <div class="fb">
+          <div class="cat">🔥 必玩景点<span class="sub">按评分 · 顺路加权</span></div>
+          <div class="dgrid">
+            <div class="poi">
+              <div class="porow"><span class="podot"></span><span class="poname">喜洲古镇</span><span class="sup">i</span><span class="rec">50% 人推荐 <span class="cv">›</span></span></div>
+              <div class="hint">麦田稻田治愈出片，古建精致，可体验扎染。</div>
+              <div class="strip">
+                <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Xizhou%20ancient%20town%20Dali%20China%2C%20golden%20rice%20paddies%20in%20front%20of%20traditional%20Bai%20architecture%2C%20sunny%20day%2C%20travel%20photography&image_size=square" alt=""></div>
+                <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Erhai%20lake%20Dali%20China%2C%20small%20island%20with%20pavilion%20in%20blue%20calm%20water%2C%20clear%20sky%2C%20travel%20photo&image_size=square" alt=""></div>
+                <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bai%20ethnic%20tie%20dye%20blue%20and%20white%20textiles%20hanging%20in%20old%20town%20shop%20Yunnan%2C%20craft%20market%2C%20travel%20photography&image_size=square" alt=""></div>
+              </div>
+            </div>
+            <div class="poi on">
+              <div class="porow"><span class="podot"></span><span class="poname">大理古城</span><span class="sup">i</span><span class="rec done">已选 ✓</span></div>
+              <div class="hint">傍晚登五华楼俯瞰全景，小巷里藏着文艺小店。</div>
+              <div class="strip">
+                <div class="shot s1 pick"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Dali%20ancient%20city%20China%2C%20traditional%20Chinese%20gate%20tower%20at%20dusk%2C%20warm%20lantern%20light%2C%20travel%20photography&image_size=square" alt=""><span class="ck">✓</span></div>
+                <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Dali%20ancient%20town%20alley%20China%2C%20white%20walls%20dark%20tiles%2C%20small%20shops%2C%20sunlight%20and%20shadow%2C%20travel%20photo&image_size=square" alt=""></div>
+                <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Wuhua%20tower%20night%20view%20over%20Dali%20old%20town%20roofs%2C%20blue%20hour%2C%20travel%20photography&image_size=square" alt=""></div>
+              </div>
+            </div>
+            <div class="poi">
+              <div class="porow"><span class="podot"></span><span class="poname">双廊古镇</span><span class="sup">i</span><span class="rec">32% 人推荐 <span class="cv">›</span></span></div>
+              <div class="hint">临海咖啡馆看苍洱日落，白族小巷光影出片。</div>
+              <div class="strip">
+                <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Shuanglang%20town%20Dali%20China%2C%20seaside%20cafe%20terrace%20overlooking%20Erhai%20lake%20at%20sunset%2C%20golden%20light&image_size=square" alt=""></div>
+                <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Erhai%20lake%20view%20from%20Shuanglang%20balcony%2C%20dramatic%20clouds%2C%20Cangshan%20mountain%2C%20travel%20photo&image_size=square" alt=""></div>
+                <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Bai%20ethnic%20alley%20in%20Yunnan%20village%2C%20white%20walls%20stone%20path%2C%20warm%20afternoon%20light%2C%20travel%20photography&image_size=square" alt=""></div>
+              </div>
+            </div>
+            <div class="poi">
+              <div class="porow"><span class="podot"></span><span class="poname">苍山感通索道</span><span class="sup">i</span><span class="rec">28% 人推荐 <span class="cv">›</span></span></div>
+              <div class="hint">上山半小时，云雾上的洱海全景，山顶风大带外套。</div>
+              <div class="strip">
+                <div class="shot s1"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Cable%20car%20over%20green%20mountains%20in%20Yunnan%20China%2C%20sea%20of%20clouds%2C%20travel%20photography&image_size=square" alt=""></div>
+                <div class="shot s2"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Panoramic%20view%20of%20Erhai%20lake%20from%20Cangshan%20mountain%20above%20clouds%2C%20blue%20sky%2C%20travel%20photo&image_size=square" alt=""></div>
+                <div class="shot s3"><img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Stone%20path%20through%20pine%20forest%20on%20Cangshan%20mountain%20Yunnan%2C%20misty%2C%20travel%20photography&image_size=square" alt=""></div>
+              </div>
+            </div>
+          </div>
+        </div>
+        <div class="ff">
+          <div class="selbar">
+            <span class="cnt">已选 1 处 <i>· 可多选</i></span>
+            <div class="cta" style="max-width:280px;margin-left:auto">下一步 · 选住宿 →</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="cap" style="margin-top:10px"><b>⑥ 桌面端</b> · 同组件宽版：绿泡 720，条目两列，照片错落逻辑与手机一致</div>
+
+<!-- ═══════════ 六、实现规格 ═══════════ -->
+<h2 class="sec">六、Flutter 实现规格<small>供后续编码直接对照</small></h2>
+<div class="spec">
+  <div class="scard">
+    <h3>玻璃质感<span>BackdropFilter</span></h3>
+    <ul>
+      <li>结构：<code>ClipRRect(26)</code> → <code>BackdropFilter(ImageFilter.blur(28, 28))</code> → <code>Container</code>（渐变 + 描边 + 内阴影）。</li>
+      <li>填充：<code>LinearGradient(158°)</code>：mint 13% → 白 5.5% → 白 2.8% → mint 5%。</li>
+      <li>描边 <code>1px rgba(212,212,216,.20)</code>；顶部内高光 <code>inset 0 1px 0 rgba(255,255,255,.14)</code>。</li>
+      <li>性能：气泡外<code>RepaintBoundary</code>，气泡内列表滚动区域单独裁切；blur sigma ≤ 28，避免中低端机掉帧。</li>
+    </ul>
+  </div>
+  <div class="scard">
+    <h3>一次绿泡 · 换卡动效<span>AnimatedSwitcher + AnimatedSize</span></h3>
+    <ul>
+      <li>容器：<code>AnimatedSize(duration: 340ms, curve: Curves.easeOutCubic)</code>，外层 <code>ClipRect</code>。</li>
+      <li>切换：<code>AnimatedSwitcher(320ms)</code>，入 <code>SlideTransition(Offset(0.12,0)→0)</code> + <code>FadeTransition</code>，出左移 12px + 淡出（160ms）+ <code>ImageFiltered</code> 轻微模糊。</li>
+      <li>点选反馈：<code>ScaleTransition</code> 0.98→1（60ms，easeOutBack）+ <code>HapticFeedback.selectionClick()</code>；选中后 220ms 再触发换卡。</li>
+      <li>进度轨：4 段 3px，完成 mint 实色，当前段 mint→35% 渐变，切换时 300ms 补间。</li>
+    </ul>
+  </div>
+  <div class="scard">
+    <h3>尺寸与错落<span>照片条</span></h3>
+    <ul>
+      <li>绿泡宽：手机 = 对话区宽 − 16（≈ 屏宽 − 16，接近满屏）；桌面 <code>maxWidth 720</code>。</li>
+      <li>照片条：<code>Row</code> + 固定宽度百分比 31.5 / 31 / 30，高度 104 / 114 / 92，顶部偏移 +9 / −3 / +16，间距 8，圆角 14。</li>
+      <li>不用 <code>GridView</code> / 等宽等高，避免「整齐网格」；图片 <code>BoxFit.cover</code> + 本地 <code>MediaDiskCache</code> 预热。</li>
+      <li>无图走渐变兜底，不放假图；选中照片 1px mint 描边 + 2px 外发光 + ✓ 角标。</li>
+    </ul>
+  </div>
+  <div class="scard">
+    <h3>数据与改动清单<span>两端同步</span></h3>
+    <ul>
+      <li><b>删美食</b>：<code>TravelGuideSelectCard</code> 去掉 <code>food</code> 分组、<code>'美食'</code>标签与 <code>selectedFood</code>；服务端 <code>travel.destination-guide</code> 的 <code>cats</code> 只发 <code>view/stay</code>。</li>
+      <li><b>删追问</b>：<code>travel-plan-session.ts</code> 的 <code>foodWishlist</code> 追问与文案下线；预算卡「美食」改为「自行安排 · 不计入」或直接隐藏。</li>
+      <li><b>推荐率</b>：用真实信号（同目的地被选比例 / 收藏加权）生成，取不到不下发胶囊；字段建议 <code>metrics[{kind:'recommend', label:'50% 人推荐', source}]</code>。</li>
+      <li><b>餐厅 POI</b>：地图新增图层，评分 ≥4.5、距路线 ≤800m、营业中，最多 6 个；不参与编排与预算。</li>
+      <li><b>两端共用</b>：<code>AgentResultCard</code> 同时服务桌面 <code>chat_page.dart</code> 与手机 <code>mobile_chat_page.dart</code>，改一次即对齐。</li>
+    </ul>
+  </div>
+</div>
+
+<div class="scard" style="margin-top:14px;border-color:rgba(212,212,216,.28)">
+  <h3>已确认并落地<span>2026-11-07 实施记录</span></h3>
+  <ul>
+    <li><b>强调色</b>：跟随主题，不引入新色——深色主题 <code>#D4D4D8</code>、暖色主题 <code>#0055B8</code>；价格仍用原有暖色 <code>#F5A552</code>。</li>
+    <li><b>提问粒度</b>：第 1 步拆成「出发日 → 天数 → 同行 → 预算」4 小步，每步一张卡在同一气泡内推进（服务端本就按单维度出题，无需改问法）。</li>
+    <li><b>已改代码</b>：<code>travel_plan_archive.dart</code>（单气泡 + 顺序换卡 + 新景点/住宿版式）、<code>travel_guide_select_card.dart</code>（玻璃卡 + 新版权式）、服务端 <code>travel-plan-session.ts</code> / <code>travel-planning-service.ts</code> / <code>travel-brief.ts</code>（删除美食段与「想吃什么」追问）。</li>
+    <li><b>下一步</b>：地图上「沿线高分餐厅 POI」图层（评分 ≥4.5、距路线 ≤800m）尚未接入，需先确认 POI 数据源。</li>
+  </ul>
+</div>
+</body>
+</html>

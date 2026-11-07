@@ -367,7 +367,7 @@ export function briefAssumptions(brief: TravelBrief): AssumptionRow[] {
 }
 
 export interface BriefQuestion {
-  id: "wishlist" | "foodWishlist" | "origin" | "startDate";
+  id: "wishlist" | "origin" | "startDate";
   title: string;
   hint: string;
 }
@@ -378,9 +378,7 @@ export function briefOpenQuestions(brief: TravelBrief, max = 2): BriefQuestion[]
   if (brief.wishlist.length === 0) {
     qs.push({ id: "wishlist", title: "有你一定要去的景点吗？", hint: "报名字，我把它钉进日程" });
   }
-  if (brief.foodWishlist.length === 0) {
-    qs.push({ id: "foodWishlist", title: "有想吃的餐厅吗？", hint: "没说就按本地＋网红搭配选店" });
-  }
+  // 2026-11-07 吃饭改为用户自行决定，不再追问想吃的餐厅。
   if (!brief.origin) qs.push({ id: "origin", title: "从哪个城市出发？", hint: "决定自驾/高铁/飞机怎么排" });
   if (!brief.startDate) qs.push({ id: "startDate", title: "哪天走？", hint: "影响逐日天气与需预约场馆的放票日" });
   return qs.slice(0, max);
@@ -502,14 +500,6 @@ export function buildBriefCardPayload(input: BriefCardInput): BriefCardPayload |
       label: "我有想去的景点，报几个名字",
       variant: "ghost",
       payload: { slot: "wishlist" },
-    });
-  }
-  if (questions.some((q) => q.id === "foodWishlist")) {
-    actions.push({
-      id: "food:ask",
-      label: "我有想吃的餐厅，报几个名字",
-      variant: "ghost",
-      payload: { slot: "foodWishlist" },
     });
   }
   if (!input.brief.origin || !input.brief.startDate) {

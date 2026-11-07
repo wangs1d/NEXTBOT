@@ -39,6 +39,7 @@ import { registerWechatClawRoutes } from "./wechat-claw.js";
 import { registerMessageHubRoutes } from "./messages.js";
 import { registerMessageBridgeRoutes } from "./message-bridge.js";
 import { registerChatDataRoutes } from "./chat-data.js";
+import { registerSideChatRoutes } from "./side-chats.js";
 import { registerBrowserSessionRoutes } from "./browser-sessions.js";
 import { registerPhoneBridgeRoutes } from "./phone-bridge.js";
 import { registerPhoneBridgeCaptureRoutes } from "./phone-bridge-captures.js";
@@ -206,6 +207,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     externalChat: deps.externalChat ?? null,
     agentMemorySyncService: deps.agentMemorySyncService,
   });
+  // 旁聊（手机端侧边栏独立会话列表；线程与主会话物理隔离）
+  registerSideChatRoutes(app);
   registerBrowserSessionRoutes(app, deps);
   // 手机桥接（拨真实手机/短信/定位捕捉；内测独占，开源版剔除）
   if (!isOssEdition()) {

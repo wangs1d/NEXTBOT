@@ -6,6 +6,7 @@ import "dart:ui" show PathMetric;
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 import "package:http/http.dart" as http;
+import "package:url_launcher/url_launcher.dart";
 import "../../core/services/nb_http.dart";
 
 import "../../core/config/api_config.dart";
@@ -185,6 +186,47 @@ double _haversineKm(double lat1, double lng1, double lat2, double lng2) {
           math.cos(lat2 * math.pi / 180) *
           math.pow(math.sin(dLng / 2), 2);
   return 2 * k * math.asin(math.sqrt(s));
+}
+
+/// GET /travel-map/restaurants — 当天路线沿线的高分餐厅（参考用）。
+///
+/// 失败一律返回空列表：地图上少一行推荐，不能弹错打断行程主链路。
+Future<List<RouteRestaurantPoi>> fetchRouteRestaurants(
+  List<({double lat, double lng})> points, {
+  int radius = 800,
+  int limit = 6,
+}) async {
+  if (points.isEmpty) return const <RouteRestaurantPoi>[];
+  final String stops = points
+      .map((({double lat, double lng}) p) =>
+          "${p.lat.toStringAsFixed(6)},${p.lng.toStringAsFixed(6)}")
+      .join(";");
+  try {
+    final Uri uri =
+        Uri.parse("${ApiConfig.httpBase}/travel-map/restaurants").replace(
+      queryParameters: <String, String>{
+        "points": stops,
+        "radius": "$radius",
+        "limit": "$limit",
+      },
+    );
+    final http.Response resp =
+        await NbHttp.get(uri).timeout(const Duration(seconds: 8));
+    if (resp.statusCode != 200) return const <RouteRestaurantPoi>[];
+    final Object? decoded = jsonDecode(resp.body);
+    final Object? raw = decoded is Map<String, dynamic> ? decoded["pois"] : null;
+    if (raw is! List) return const <RouteRestaurantPoi>[];
+    final List<RouteRestaurantPoi> out = <RouteRestaurantPoi>[];
+    for (final Object? item in raw) {
+      if (item is! Map<String, dynamic>) continue;
+      final RouteRestaurantPoi poi = RouteRestaurantPoi.fromJson(item);
+      if (poi.id.isEmpty || poi.name.isEmpty) continue;
+      out.add(poi);
+    }
+    return out;
+  } catch (_) {
+    return const <RouteRestaurantPoi>[];
+  }
 }
 
 /// 服务端车程方式串（步行 / 包车·网约车 / 城际交通 / 打车·Grab）→ 图标口径。
@@ -871,6 +913,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
                           : widget.plan.title,
                       stops: _curDay.stops,
                       cur: _safeCur,
+                      active: _mapOpen,
                       onClose: () => setState(() => _mapOpen = false),
                       onPick: (int i) => _setStop(_day, i),
                       onSheet: _openSheet,
@@ -1832,6 +1875,7 @@ class _RouteMapOverlay extends StatefulWidget {
     required this.dayName,
     required this.stops,
     required this.cur,
+    required this.active,
     required this.onClose,
     required this.onPick,
     required this.onSheet,
@@ -1840,6 +1884,10 @@ class _RouteMapOverlay extends StatefulWidget {
   final String dayName;
   final List<_Stop> stops;
   final int cur;
+
+  /// 地图是否已展开：展开时才拉沿线餐厅（关闭状态不白打接口）。
+  final bool active;
+
   final VoidCallback onClose;
   final ValueChanged<int> onPick;
   final VoidCallback onSheet;
@@ -1856,6 +1904,74 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
   late final AnimationController _ping =
       AnimationController(vsync: this, duration: const Duration(milliseconds: 1800))
         ..repeat();
+
+  /// 沿线高分餐厅（只作地图参考，不进行程/预算；失败静默空列表）
+  List<RouteRestaurantPoi> _restaurants = const <RouteRestaurantPoi>[];
+  String _restaurantKey = "";
+  bool _restaurantInFlight = false;
+  int? _selectedRestaurant;
+
+  /// 当天站点坐标集合（同集合只拉一次；顺序也计入，保证 stopIndex 对齐）
+  static String _stopsKey(List<_Stop> stops) => stops
+      .where((_Stop s) => s.latitude != null && s.longitude != null)
+      .map((_Stop s) =>
+          "${s.latitude!.toStringAsFixed(5)},${s.longitude!.toStringAsFixed(5)}")
+      .join(";");
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.active) unawaited(_loadRestaurants());
+  }
+
+  @override
+  void didUpdateWidget(_RouteMapOverlay oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!widget.active) return;
+    if (!oldWidget.active ||
+        _stopsKey(widget.stops) != _stopsKey(oldWidget.stops)) {
+      unawaited(_loadRestaurants());
+    }
+  }
+
+  Future<void> _loadRestaurants() async {
+    final String key = _stopsKey(widget.stops);
+    if (key.isEmpty || key == _restaurantKey || _restaurantInFlight) return;
+    _restaurantInFlight = true;
+    _restaurantKey = key;
+    final List<({double lat, double lng})> points =
+        <({double lat, double lng})>[
+      for (final _Stop s in widget.stops)
+        if (s.latitude != null && s.longitude != null)
+          (lat: s.latitude!, lng: s.longitude!),
+    ];
+    final List<RouteRestaurantPoi> pois = await fetchRouteRestaurants(points);
+    _restaurantInFlight = false;
+    if (!mounted) return;
+    // 拉取期间切了天/站点变了就丢弃旧结果，并按新坐标补拉一次
+    if (_stopsKey(widget.stops) != key) {
+      unawaited(_loadRestaurants());
+      return;
+    }
+    setState(() {
+      _restaurants = pois;
+      _selectedRestaurant = null;
+    });
+  }
+
+  Future<void> _openRestaurantNavigation(RouteRestaurantPoi poi) async {
+    // 高德 Web 导航：POI 坐标是 WGS-84，直接塞给高德会偏火星坐标；
+    // 用店名让高德自行匹配（与 server /travel-map/nav/transfer-link 同口径）。
+    final Uri uri = Uri.parse(
+      "https://uri.amap.com/navigation?to=${Uri.encodeComponent(poi.name)}"
+      "&mode=walk&policy=&src=Nextbot&coordinate=gaode&callnative=0",
+    );
+    try {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    } catch (_) {
+      // 没有可跳转的地图/浏览器时保持静默，不假装已跳转
+    }
+  }
 
   @override
   void dispose() {
@@ -1914,10 +2030,32 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
                   cur: widget.cur,
                   flow: _flow,
                   ping: _ping,
+                  restaurants: _restaurants,
+                  selectedRestaurant: _selectedRestaurant,
                   onPick: widget.onPick,
+                  onPickRestaurant: (int? index) =>
+                      setState(() => _selectedRestaurant = index),
                 ),
               ),
             ),
+            if (_restaurants.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(24, 6, 24, 0),
+                child: Text(
+                  "沿线高分餐厅 · ${_restaurants.length} 家（评分≥4.5）",
+                  style: const TextStyle(fontSize: 11, color: _T.t3),
+                ),
+              ),
+            if (_selectedRestaurant != null &&
+                _selectedRestaurant! >= 0 &&
+                _selectedRestaurant! < _restaurants.length)
+              _RestaurantTipCard(
+                poi: _restaurants[_selectedRestaurant!],
+                onNavigate: () =>
+                    unawaited(_openRestaurantNavigation(
+                        _restaurants[_selectedRestaurant!])),
+                onClose: () => setState(() => _selectedRestaurant = null),
+              ),
             Padding(
               padding: EdgeInsets.fromLTRB(
                   22, 8, 22, 22 + MediaQuery.paddingOf(context).bottom),
@@ -1986,40 +2124,86 @@ class _RouteCanvas extends StatelessWidget {
     required this.cur,
     required this.flow,
     required this.ping,
+    required this.restaurants,
+    required this.selectedRestaurant,
     required this.onPick,
+    required this.onPickRestaurant,
   });
 
   final List<_Stop> stops;
   final int cur;
   final Animation<double> flow;
   final Animation<double> ping;
+  final List<RouteRestaurantPoi> restaurants;
+  final int? selectedRestaurant;
   final ValueChanged<int> onPick;
+  final ValueChanged<int?> onPickRestaurant;
 
-  /// 布点：≥2 个真实坐标 → 经纬度归一化；否则环形布点（设计稿 autoXY）
-  static List<Offset> routePoints(Size size, List<_Stop> stops) {
-    final List<Offset> pts = <Offset>[];
+  /// 站点/餐厅共用的经纬度范围（仅 ≥2 个真实坐标时有；否则走环形兜底）
+  static ({double minLat, double maxLat, double minLng, double maxLng})?
+      _geoBounds(List<_Stop> stops) {
     final List<_Stop> withCoord = <_Stop>[
       for (final _Stop s in stops)
         if (s.latitude != null && s.longitude != null) s,
     ];
-    if (withCoord.length >= 2) {
-      double minLat = withCoord.map((_Stop s) => s.latitude!).reduce(math.min);
-      double maxLat = withCoord.map((_Stop s) => s.latitude!).reduce(math.max);
-      double minLng = withCoord.map((_Stop s) => s.longitude!).reduce(math.min);
-      double maxLng = withCoord.map((_Stop s) => s.longitude!).reduce(math.max);
-      if (maxLat - minLat < 1e-6) maxLat = minLat + 1e-3;
-      if (maxLng - minLng < 1e-6) maxLng = minLng + 1e-3;
-      const double padH = 70, padT = 60, padB = 60;
+    if (withCoord.length < 2) return null;
+    final double minLat = withCoord.map((_Stop s) => s.latitude!).reduce(math.min);
+    final double maxLat = withCoord.map((_Stop s) => s.latitude!).reduce(math.max);
+    final double minLng = withCoord.map((_Stop s) => s.longitude!).reduce(math.min);
+    final double maxLng = withCoord.map((_Stop s) => s.longitude!).reduce(math.max);
+    return (
+      minLat: minLat,
+      maxLat: maxLat - minLat < 1e-6 ? minLat + 1e-3 : maxLat,
+      minLng: minLng,
+      maxLng: maxLng - minLng < 1e-6 ? minLng + 1e-3 : maxLng,
+    );
+  }
+
+  /// 经纬度 → 画布坐标（与站点布局同一套归一化 + 内边距）
+  static Offset _project(
+    Size size,
+    ({double minLat, double maxLat, double minLng, double maxLng}) b,
+    double lat,
+    double lng,
+  ) {
+    const double padH = 70, padT = 60, padB = 60;
+    return Offset(
+      padH +
+          (lng - b.minLng) /
+              (b.maxLng - b.minLng) *
+              (size.width - padH * 2),
+      padT +
+          (1 - (lat - b.minLat) / (b.maxLat - b.minLat)) *
+              (size.height - padT - padB),
+    );
+  }
+
+  static const Size _restaurantChipSize = Size(46, 19);
+
+  static Rect _restaurantChipRect(Offset center) => Rect.fromCenter(
+        center: center,
+        width: _restaurantChipSize.width,
+        height: _restaurantChipSize.height,
+      );
+
+  /// 画布边缘的餐厅标记向内收，避免画到标题/底部卡片上
+  static Offset _clampAnchor(Size size, Offset p) {
+    final double minX = _restaurantChipSize.width / 2 + 2;
+    final double maxX = math.max(minX, size.width - minX);
+    final double minY = _restaurantChipSize.height / 2 + 2;
+    final double maxY = math.max(minY, size.height - minY);
+    return Offset(p.dx.clamp(minX, maxX), p.dy.clamp(minY, maxY));
+  }
+
+  /// 布点：≥2 个真实坐标 → 经纬度归一化；否则环形布点（设计稿 autoXY）
+  static List<Offset> routePoints(Size size, List<_Stop> stops) {
+    final List<Offset> pts = <Offset>[];
+    final ({double minLat, double maxLat, double minLng, double maxLng})?
+        bounds = _geoBounds(stops);
+    if (bounds != null) {
       for (final _Stop s in stops) {
         if (s.latitude != null && s.longitude != null) {
-          pts.add(Offset(
-            padH +
-                (s.longitude! - minLng) / (maxLng - minLng) *
-                    (size.width - padH * 2),
-            padT +
-                (1 - (s.latitude! - minLat) / (maxLat - minLat)) *
-                    (size.height - padT - padB),
-          ));
+          pts.add(_project(size, bounds, s.latitude!, s.longitude!));
         } else {
           pts.add(const Offset(-100, -100)); // 无坐标站不参与连线
         }
@@ -2065,6 +2249,14 @@ class _RouteCanvas extends StatelessWidget {
         // 参与连线的点 = 有坐标（或环形兜底全体）
         final List<Offset> linked =
             pts.where((Offset p) => p.dx >= 0).toList();
+        final ({double minLat, double maxLat, double minLng, double maxLng})?
+            bounds = _geoBounds(stops);
+        final List<Offset?> poiPts = <Offset?>[
+          for (final RouteRestaurantPoi r in restaurants)
+            bounds == null
+                ? null
+                : _clampAnchor(size, _project(size, bounds, r.lat, r.lng)),
+        ];
 
         return GestureDetector(
           behavior: HitTestBehavior.opaque,
@@ -2075,6 +2267,15 @@ class _RouteCanvas extends StatelessWidget {
                 return;
               }
             }
+            for (int i = 0; i < poiPts.length; i++) {
+              final Offset? p = poiPts[i];
+              if (p != null &&
+                  _restaurantChipRect(p).inflate(4).contains(d.localPosition)) {
+                onPickRestaurant(i);
+                return;
+              }
+            }
+            onPickRestaurant(null);
           },
           child: AnimatedBuilder(
             animation: Listenable.merge(<Listenable>[flow, ping]),
@@ -2086,7 +2287,14 @@ class _RouteCanvas extends StatelessWidget {
                 flowPhase: flow.value,
                 pingPhase: ping.value,
               ),
-              foregroundPainter: _MarkerPainter(pts: pts, stops: stops, cur: cur),
+              foregroundPainter: _MarkerPainter(
+                pts: pts,
+                stops: stops,
+                cur: cur,
+                restaurantPts: poiPts,
+                restaurants: restaurants,
+                selectedRestaurant: selectedRestaurant,
+              ),
             ),
           ),
         );
@@ -2190,14 +2398,61 @@ class _RoutePainter extends CustomPainter {
 }
 
 class _MarkerPainter extends CustomPainter {
-  _MarkerPainter({required this.pts, required this.stops, required this.cur});
+  _MarkerPainter({
+    required this.pts,
+    required this.stops,
+    required this.cur,
+    required this.restaurantPts,
+    required this.restaurants,
+    required this.selectedRestaurant,
+  });
 
   final List<Offset> pts;
   final List<_Stop> stops;
   final int cur;
+  final List<Offset?> restaurantPts;
+  final List<RouteRestaurantPoi> restaurants;
+  final int? selectedRestaurant;
+
+  /// 沿线餐厅小胶囊（比站点圆点小，先画、让站点标记压在上层）
+  void _paintRestaurants(Canvas canvas) {
+    for (int i = 0; i < restaurantPts.length; i++) {
+      final Offset? p = restaurantPts[i];
+      if (p == null || i >= restaurants.length) continue;
+      final RouteRestaurantPoi poi = restaurants[i];
+      final Rect rect = _RouteCanvas._restaurantChipRect(p);
+      final bool selected = i == selectedRestaurant;
+      final RRect rr =
+          RRect.fromRectAndRadius(rect, const Radius.circular(999));
+      canvas.drawRRect(
+        rr,
+        Paint()..color = _T.card.withValues(alpha: 0.92),
+      );
+      canvas.drawRRect(
+        rr,
+        Paint()
+          ..style = PaintingStyle.stroke
+          ..strokeWidth = 1
+          ..color = selected ? _T.amberLine : _T.line,
+      );
+      final TextPainter tp = TextPainter(
+        text: TextSpan(
+          text: "★ ${poi.rating.toStringAsFixed(1)}",
+          style: TextStyle(
+            fontSize: 9.5,
+            color: selected ? _T.amber : _T.t2,
+          ),
+        ),
+        textDirection: TextDirection.ltr,
+        maxLines: 1,
+      )..layout(maxWidth: rect.width - 4);
+      tp.paint(canvas, Offset(p.dx - tp.width / 2, p.dy - tp.height / 2));
+    }
+  }
 
   @override
   void paint(Canvas canvas, Size size) {
+    _paintRestaurants(canvas);
     int num = 0;
     final TextPainter tp = TextPainter(textDirection: TextDirection.ltr);
     for (int i = 0; i < pts.length; i++) {
@@ -2251,7 +2506,101 @@ class _MarkerPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_MarkerPainter old) => old.cur != cur;
+  bool shouldRepaint(_MarkerPainter old) =>
+      old.cur != cur ||
+      old.selectedRestaurant != selectedRestaurant ||
+      old.restaurants.length != restaurants.length ||
+      old.restaurantPts.length != restaurantPts.length;
+}
+
+/// 点开沿线餐厅标记后的小参考卡（不进行程，仅「路过想吃」时查看）
+class _RestaurantTipCard extends StatelessWidget {
+  const _RestaurantTipCard({
+    required this.poi,
+    required this.onNavigate,
+    required this.onClose,
+  });
+
+  final RouteRestaurantPoi poi;
+  final VoidCallback onNavigate;
+  final VoidCallback onClose;
+
+  String get _distanceText {
+    final int m = poi.distanceM;
+    return m >= 1000 ? "距路线 ${(m / 1000).toStringAsFixed(1)}km" : "距路线 ${m}m";
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final String costText = poi.cost == null ? "" : " · 人均 ¥${poi.cost}";
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(22, 8, 22, 0),
+      child: Container(
+        padding: const EdgeInsets.fromLTRB(16, 12, 12, 10),
+        decoration: BoxDecoration(
+          color: _T.card,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: _T.line),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Row(
+              children: <Widget>[
+                Expanded(
+                  child: Text(
+                    poi.name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w600,
+                        color: _T.txt),
+                  ),
+                ),
+                GestureDetector(
+                  onTap: onClose,
+                  behavior: HitTestBehavior.opaque,
+                  child: const Padding(
+                    padding: EdgeInsets.all(4),
+                    child: Icon(Icons.close_rounded, size: 16, color: _T.t3),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              "★ ${poi.rating.toStringAsFixed(1)}$costText · $_distanceText",
+              style: const TextStyle(fontSize: 12, color: _T.t2),
+            ),
+            if (poi.address.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 3),
+              Text(
+                poi.address,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(fontSize: 11.5, color: _T.t3),
+              ),
+            ],
+            const SizedBox(height: 4),
+            Align(
+              alignment: Alignment.centerRight,
+              child: GestureDetector(
+                onTap: onNavigate,
+                behavior: HitTestBehavior.opaque,
+                child: const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 2, vertical: 4),
+                  child: Text("导航",
+                      style: TextStyle(fontSize: 12.5, color: _T.amber)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════

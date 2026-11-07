@@ -158,7 +158,14 @@ export function buildCurrentTimePrompt(at: Date = new Date(), timezone?: string)
     weekday = WEEKDAY_CN_FOR_PROMPT[at.getDay()] ?? "";
   }
 
-  return `当前时间：${local} ${weekday}（${tz}）`;
+  // 引用纪律（2026-11-07「五点二十」僵尸时间事故）：模型历史正文里的时间点可能
+  // 是错误时钟/错误算术的遗留物（当晚模拟器 GMT 钟算出的「五点二十」留在了历史
+  // 里，02:50 轮被复读进「两点五十才睡，五点二十睡」的同句矛盾）。没有这行，
+  // 模型会同时持有「本轮注入的正确时间」与「历史散文里的错时间」两套信念而不自知。
+  return (
+    `当前时间：${local} ${weekday}（${tz}）` +
+    "（历史对话中出现的时间点若与本块矛盾，以本块为准，勿复述历史里的旧时间）"
+  );
 }
 
 export type FinalizeChatSystemPromptOpts = {

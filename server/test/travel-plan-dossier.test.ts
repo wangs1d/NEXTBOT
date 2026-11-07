@@ -114,14 +114,13 @@ test("「先不选/随便」不算已定，选问维度不占位", () => {
   assert.equal(fact(d, "budget"), undefined);
 });
 
-test("筛选勾选后：想去/住/吃进档案，步骤轨推进到补心愿", () => {
+test("筛选勾选后：想去/住进档案，步骤轨推进到补心愿", () => {
   const picked = session({
     ready: true,
     guideSent: true,
     guideSelections: {
       view: ["宽窄巷子", "大熊猫基地", "都江堰", "人民公园"],
       stay: ["春熙路亚朵"],
-      food: ["陈麻婆豆腐", "小龙坎"],
     },
   });
   const d = buildDossier(picked, "wishlist_ready");
@@ -131,7 +130,6 @@ test("筛选勾选后：想去/住/吃进档案，步骤轨推进到补心愿", 
   );
   assert.equal(fact(d, "picks")!.value, "宽窄巷子、大熊猫基地、都江堰 等 4 处");
   assert.equal(fact(d, "stay")!.value, "春熙路亚朵");
-  assert.equal(fact(d, "food")!.value, "陈麻婆豆腐、小龙坎");
 });
 
 test("state → 进度轨：ready 在核预算、budget_ready 仍停核预算、generated 全走完", () => {

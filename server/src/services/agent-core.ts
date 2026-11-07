@@ -261,7 +261,11 @@ import type { BrainCenter } from "../brain/index.js";
 import type { EmotionVector, MemoryRecallItem } from "../brain/types.js";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import { TurnLifecycle } from "../agent/turn-lifecycle.js";
-import { resolvePrimaryChatSessionId, isNotesChatSessionId } from "../agent/master-chat-session.js";
+import {
+  resolvePrimaryChatSessionId,
+  resolveTurnSessionId,
+  isNotesChatSessionId,
+} from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
 import { stripInternalControlTags, ToolIntentWithoutToolsError } from "../external-model/stream-chat-helpers.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
@@ -647,10 +651,14 @@ export class AgentCore {
     currentText: string,
   ): string[] | undefined {
     try {
-      const chatSessionId =
-        sessionId && isNotesChatSessionId(sessionId)
-          ? sessionId
-          : resolvePrimaryChatSessionId(actorId, getAgentRuntimeConfig().masterDelegation.enabled);
+      const chatSessionId = resolveTurnSessionId(
+        sessionId,
+        actorId,
+        resolvePrimaryChatSessionId(
+          actorId,
+          getAgentRuntimeConfig().masterDelegation.enabled,
+        ),
+      );
       const current = currentText.trim();
       return getChatThreadStore()
         .thread(chatSessionId, "")
@@ -2611,9 +2619,13 @@ if (route.plane === "task") {
       ...(opts?.chatUserMessageId ? { clientMessageId: opts.chatUserMessageId } : {}),
     };
 
-    const chatSessionId = resolvePrimaryChatSessionId(
+    const chatSessionId = resolveTurnSessionId(
+      opts?.sessionId,
       actorId,
-      getAgentRuntimeConfig().masterDelegation.enabled,
+      resolvePrimaryChatSessionId(
+        actorId,
+        getAgentRuntimeConfig().masterDelegation.enabled,
+      ),
     );
 
     if (useExplicitPlanner) {

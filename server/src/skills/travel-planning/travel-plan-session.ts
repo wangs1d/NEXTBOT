@@ -25,7 +25,6 @@ import {
 import { auditChatCompletion } from "../../services/llm-token-audit.js";
 import {
   extractWishlist,
-  extractFoodWishlist,
   extractParty,
   paceForParty,
   extractPreferences,
@@ -54,13 +53,14 @@ function bindPlanSessionLocationCoordinator(coordinator: LocationCoordinator | n
 // 选项（贴合用户已说过的内容，如「5、6天」→ 5天/6天）全部由编排器按
 // 上下文真实生成；已给出（含模糊表达、「随便」类回答）的信息一律不再
 // 追问。服务端只做硬护栏：没拿到目的地不出卡、已答过的维度不再出卡、
-// 追问轮数封顶，防连环查户口。全部对齐后先出「必玩/住宿/美食」图文筛选
+// 追问轮数封顶，防连环查户口。全部对齐后先出「必玩/住宿」图文筛选
 // 卡（文字介绍 + 实拍图 + 实时价）；勾选后再给一张自选补充卡（用户自己写
-// 非去不可的景点/酒店/餐厅，可跳过），两处心愿合并后客户端调 generate → 复用
+// 非去不可的景点/酒店，可跳过），两处心愿合并后客户端调 generate → 复用
 // PlanningService.generateItinerary 真实生成并经 travelPlanStore 落盘（与聊天
 // travel.plan-itinerary 同一冷层，归档页列表自然沉淀）。生成后先只回预算
 // 明细（门票/房价/餐饮人均/往返大交通均来自实时报价，取不到的标「待核价」
 // 且不计入合计），用户 approve 之后才下发最终草案 + planId。
+// 2026-11-07 食物改为用户自行决定，不进规划（不再有美食选择段）。
 //
 // 会话持久化：内存 Map + 磁盘双层（data/travel-plan-sessions/<actorKey>/{id}.json，
 // 按 actor 分区、单文件单会话、惰性读盘）。内存 2h TTL 清出后磁盘仍在，客户端可凭
@@ -147,7 +147,8 @@ export type PlanSessionGuideItem = {
 };
 
 export type PlanSessionGuideCat = {
-  key: "view" | "stay" | "food";
+  // 2026-11-07 食物改为用户自行决定，不进规划：候选只剩景点/住宿两段
+  key: "view" | "stay";
   label: string;
   items: PlanSessionGuideItem[];
   /** 这一段的排序依据，由实际参与排序的信号拼出来 */
@@ -247,14 +248,15 @@ export type PlanSessionCard =
       trial?: boolean;
     }
   | {
-      /** 筛选卡之后的自选补充：直写非去不可的地方/酒店/餐厅（可全部留空）。 */
+      /** 筛选卡之后的自选补充：直写非去不可的地方/酒店（可全部留空）。 */
       type: "wishlist";
       stage: string;
       title: string;
       sub: string;
       /** 筛选卡已勾选（展示用，用户可对照着补） */
-      selected: { view: string[]; stay: string[]; food: string[] };
-      placeholders: { view: string; stay: string; food: string };
+      selected: { view: string[]; stay: string[] };
+      /** 2026-11-07 食物改为用户自行决定，不进规划：不再有 food 输入位 */
+      placeholders: { view: string; stay: string };
     }
   | {
       type: "choice";
@@ -448,10 +450,10 @@ export type PlanSession = {
   /** 种草筛选候选（首次信息齐时生成；目的地变化后重生成） */
   guide?: { destination: string; cats: PlanSessionGuideCat[] };
   guideSent: boolean;
-  /** 用户在筛选卡上勾选的条目（景点/住宿/餐厅） */
-  guideSelections?: { view: string[]; stay: string[]; food: string[] };
-  /** 筛选后用户自己补的地点/酒店/餐厅（自由输入，与勾选合并后进入规划） */
-  extras?: { view: string[]; stay: string[]; food: string[]; note?: string };
+  /** 用户在筛选卡上勾选的条目（景点/住宿） */
+  guideSelections?: { view: string[]; stay: string[] };
+  /** 筛选后用户自己补的地点/酒店（自由输入，与勾选合并后进入规划） */
+  extras?: { view: string[]; stay: string[]; note?: string };
   /** 已发出补充卡、还在等用户回（自由文本也当补充处理） */
   awaitingExtras?: boolean;
   /** 补完心愿后的预订选择（大交通/酒店真实班次与房价；用户选完才生成） */
@@ -501,6 +503,20 @@ function saveSession(session: PlanSession): void {
 }
 
 /**
+ * 旧会话兼容（2026-11-07 食物改为用户自行决定，不进规划）：
+ * 历史落盘的 guide / 勾选 / 补充里可能还留着 food 段，读回时直接剥掉，
+ * 保证恢复出来的卡与档案不再下发 food 分类。
+ */
+function dropLegacyFood(session: PlanSession): void {
+  if (session.guide) {
+    session.guide.cats = session.guide.cats.filter((c) => (c.key as string) !== "food");
+  }
+  for (const holder of [session.guideSelections, session.extras]) {
+    if (holder) delete (holder as { food?: string[] }).food;
+  }
+}
+
+/**
  * 内存未命中 → 惰性读本 actor 目录：服务重启 / 内存被 TTL 清出后凭 sessionId 仍可续聊。
  * 只读本 actor 目录，别的 actor 的同 id 会话读不到（天然 404）。
  */
@@ -513,6 +529,7 @@ function getSession(actorId: string, id: string): PlanSession | null {
       fs.readFileSync(sessionPath(actorId, id), "utf8"),
     ) as PlanSession;
     if (parsed?.id && Array.isArray(parsed.history)) {
+      dropLegacyFood(parsed);
       sessions.set(parsed.id, parsed);
       return parsed;
     }
@@ -1334,11 +1351,6 @@ function dossierFactsOf(session: PlanSession): PlanSessionDossierFact[] {
     "住",
     briefNames([...(session.guideSelections?.stay ?? []), ...(session.extras?.stay ?? [])]),
   );
-  optional(
-    "food",
-    "吃",
-    briefNames([...(session.guideSelections?.food ?? []), ...(session.extras?.food ?? [])]),
-  );
   return facts.slice(0, 9);
 }
 
@@ -1397,40 +1409,37 @@ export function filterQuestion(
   return q;
 }
 
-/** 三类候选的展示名（与主对话种草卡一致）。 */
-const GUIDE_LABELS: Record<"view" | "stay" | "food", string> = {
+/** 两类候选的展示名（与主对话种草卡一致）。 */
+// 2026-11-07 食物改为用户自行决定，不进规划：候选只剩景点/住宿两段
+const GUIDE_LABELS: Record<"view" | "stay", string> = {
   view: "必玩景点",
   stay: "住宿推荐",
-  food: "美食推荐",
 };
 
-/** 三段筛选的先后顺序：先景点、再住宿、最后吃的，每段一张独立卡。 */
-const GUIDE_ORDER: Array<"view" | "stay" | "food"> = ["view", "stay", "food"];
+/** 两段筛选的先后顺序：先景点、再住宿，每段一张独立卡。 */
+const GUIDE_ORDER: Array<"view" | "stay"> = ["view", "stay"];
 
-const GUIDE_SHORT_LABELS: Record<"view" | "stay" | "food", string> = {
+const GUIDE_SHORT_LABELS: Record<"view" | "stay", string> = {
   view: "景点",
   stay: "住宿",
-  food: "美食",
 };
 
-const GUIDE_STAGE_TITLES: Record<"view" | "stay" | "food", (dest: string) => string> = {
+const GUIDE_STAGE_TITLES: Record<"view" | "stay", (dest: string) => string> = {
   view: (d) => `${d} · 先挑想去的景点`,
   stay: (d) => `${d} · 再挑住的地方`,
-  food: (d) => `${d} · 最后挑吃的`,
 };
 
 /** 每段卡出场时的引导语（段间过渡与打字岔开的召回都用它）。 */
-const GUIDE_STAGE_INVITE: Record<"view" | "stay" | "food", string> = {
+const GUIDE_STAGE_INVITE: Record<"view" | "stay", string> = {
   view: "先挑想去的景点，勾掉不想要的——",
   stay: "接着挑住的地方——",
-  food: "最后一轮，挑几家想吃的馆子——",
 };
 
 /**
  * 分段筛选进行到哪段：有候选但还没勾定的一段；全部勾完返回 null。
  * 「勾定」= guideSelections 里该段有勾选（每段至少勾一处或交给代选）。
  */
-function pendingGuideStage(session: PlanSession): "view" | "stay" | "food" | null {
+function pendingGuideStage(session: PlanSession): "view" | "stay" | null {
   if (!session.guideSent || !session.guide) return null;
   for (const key of GUIDE_ORDER) {
     const cat = session.guide.cats.find((c) => c.key === key);
@@ -1443,7 +1452,7 @@ function pendingGuideStage(session: PlanSession): "view" | "stay" | "food" | nul
 /** 当前段的筛选卡：只带这一段的候选，标题与口播都按段走。 */
 function guideCardForStage(
   session: PlanSession,
-  stage: "view" | "stay" | "food",
+  stage: "view" | "stay",
 ): PlanSessionCard | null {
   const cat = session.guide?.cats.find((c) => c.key === stage);
   if (!session.guide || !cat) return null;
@@ -1478,7 +1487,7 @@ function sessionStateLabel(session: PlanSession): PlanSessionTurn["state"] {
 function resumeCardFor(session: PlanSession): PlanSessionCard | null {
   if (session.budgetApproved) return null;
   if (session.awaitingExtras) {
-    return buildWishlistCard(session.guideSelections ?? { view: [], stay: [], food: [] });
+    return buildWishlistCard(session.guideSelections ?? { view: [], stay: [] });
   }
   if (session.awaitingBooking && session.booking) return bookingCardFor(session);
   if (session.ready) {
@@ -1536,12 +1545,6 @@ async function buildGuideCandidates(
             }
           : {}),
       },
-      {
-        key: "food",
-        label: GUIDE_LABELS.food,
-        items: toItems(g.food),
-        sortNote: g.sortNotes.food,
-      },
     ];
     const cats = allCats.filter((c) => c.items.length > 0);
     if (cats.length === 0) return false;
@@ -1558,18 +1561,17 @@ async function buildGuideCandidates(
 
 /** 筛选卡之后的自选补充卡：写名字即可，留空表示没有。 */
 function buildWishlistCard(
-  selections: { view: string[]; stay: string[]; food: string[] },
+  selections: { view: string[]; stay: string[] },
 ): PlanSessionCard {
   return {
     type: "wishlist",
     stage: "再补一句",
     title: "还有非去不可的地方吗？",
-    sub: "勾选已记下。想加景点、酒店或餐厅，直接写名字（多个用顿号/逗号分隔）；没有就点跳过。",
+    sub: "勾选已记下。想加景点或酒店，直接写名字（多个用顿号/逗号分隔）；没有就点跳过。",
     selected: selections,
     placeholders: {
       view: "例如：都江堰、熊猫基地",
       stay: "例如：太古里附近的酒店",
-      food: "例如：陈麻婆豆腐",
     },
   };
 }
@@ -1751,10 +1753,10 @@ async function bookingTurnOrNull(session: PlanSession): Promise<PlanSessionTurn 
   };
 }
 
-/** 三段筛选全部勾完：记账 + 进补心愿（endpoint 内使用，抽出来复用代选路径）。 */
+/** 两段筛选全部勾完：记账 + 进补心愿（endpoint 内使用，抽出来复用代选路径）。 */
 function finalizeGuideTurn(
   session: PlanSession,
-  selections: { view: string[]; stay: string[]; food: string[] },
+  selections: { view: string[]; stay: string[] },
   persist = false,
 ): PlanSessionTurn {
   session.guideSelections = selections;
@@ -1765,7 +1767,6 @@ function finalizeGuideTurn(
   const parts: string[] = [];
   if (selections.view.length) parts.push(`必玩 ${selections.view.join("、")}`);
   if (selections.stay.length) parts.push(`住宿 ${selections.stay.join("、")}`);
-  if (selections.food.length) parts.push(`美食 ${selections.food.join("、")}`);
   const say = `就按这几处来排：${parts.join("；")}。还有非去不可、但不在列表里的地方吗？没有就直接算预算。`;
   session.history.push({ role: "user", content: `（筛选）${parts.join("；")}` });
   session.history.push({ role: "assistant", content: say });
@@ -1801,14 +1802,13 @@ function uniqNames(list: Array<string | undefined>): string[] {
  */
 function recordExtras(
   session: PlanSession,
-  input: { view?: string[]; stay?: string[]; food?: string[]; note?: string },
+  input: { view?: string[]; stay?: string[]; note?: string },
 ): string[] {
-  const cur = session.extras ?? { view: [], stay: [], food: [] };
-  const before = new Set([...cur.view, ...cur.stay, ...cur.food].map((n) => n.toLowerCase()));
+  const cur = session.extras ?? { view: [], stay: [] };
+  const before = new Set([...cur.view, ...cur.stay].map((n) => n.toLowerCase()));
   const merged = {
     view: uniqNames([...cur.view, ...(input.view ?? [])]),
     stay: uniqNames([...cur.stay, ...(input.stay ?? [])]),
-    food: uniqNames([...cur.food, ...(input.food ?? [])]),
     ...(input.note?.trim()
       ? { note: input.note.trim().slice(0, 200) }
       : cur.note
@@ -1816,7 +1816,7 @@ function recordExtras(
         : {}),
   };
   session.extras = merged;
-  return [...merged.view, ...merged.stay, ...merged.food].filter(
+  return [...merged.view, ...merged.stay].filter(
     (n) => !before.has(n.toLowerCase()),
   );
 }
@@ -1825,14 +1825,12 @@ function recordExtras(
 function mergedWishlists(session: PlanSession): {
   view: string[];
   stay: string[];
-  food: string[];
 } {
   const sel = session.guideSelections;
   const ext = session.extras;
   return {
     view: uniqNames([...(sel?.view ?? []), ...(ext?.view ?? [])]),
     stay: uniqNames([...(sel?.stay ?? []), ...(ext?.stay ?? [])]),
-    food: uniqNames([...(sel?.food ?? []), ...(ext?.food ?? [])]),
   };
 }
 
@@ -1946,7 +1944,7 @@ async function runTurn(
       const stage = pendingGuideStage(session);
       const guideCard = stage ? guideCardForStage(session, stage) : null;
       if (guideCard && stage) {
-        const guideSay = `${session.destination}的候选整理好了，住宿和美食后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
+        const guideSay = `${session.destination}的候选整理好了，住宿后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
         session.history.push({ role: "assistant", content: guideSay });
         return {
           ok: true,
@@ -1962,14 +1960,13 @@ async function runTurn(
     }
   }
 
-  // 分段筛选进行中、用户却先打了字：说的景点/餐厅照收进补充心愿，再续发当前段的卡。
+  // 分段筛选进行中、用户却先打了字：说的景点照收进补充心愿，再续发当前段的卡。
   const stage = pendingGuideStage(session);
   if (ready && service && stage && session.guide) {
     const lastUser =
       [...session.history].reverse().find((h) => h.role === "user")?.content ?? "";
     const added = recordExtras(session, {
       view: extractWishlist(lastUser, session.destination),
-      food: extractFoodWishlist(lastUser),
       note: lastUser,
     });
     const say = added.length
@@ -2302,7 +2299,6 @@ async function generateDraft(
     // 结构化槽位：勾选 + 自选补充都真正进入规划（wishlist 会定向补搜并置顶）
     ...(wish.view.length ? { wishlist: wish.view } : {}),
     ...(stayWish.length ? { stayWishlist: stayWish } : {}),
-    ...(wish.food.length ? { foodWishlist: wish.food } : {}),
     ...(party ? { party } : {}),
     ...(session.origin ? { origin: session.origin } : {}),
     ...(session.origin && session.originSource === "located" && session.locatedOrigin
@@ -2356,7 +2352,6 @@ async function generateDraft(
           ? { hotelFocusRef: result.preferences.hotelFocusRef }
           : {}),
         ...(wish.view.length ? { wishlist: wish.view } : {}),
-        ...(wish.food.length ? { foodWishlist: wish.food } : {}),
       },
       days: result.days.map((day) => ({
         date: day.date ?? "",
@@ -2426,10 +2421,11 @@ const choiceTurnSchema = z.object({
   note: z.string().max(80).optional(),
 });
 
+// 2026-11-07 食物改为用户自行决定，不进规划：不再接收 food；旧客户端多传的
+// food 由 zod 默认剥掉（不是 strict，静默忽略，不报错）。
 const guideSelectSchema = z.object({
   view: z.array(z.string().min(1).max(40)).max(20).optional(),
   stay: z.array(z.string().min(1).max(40)).max(20).optional(),
-  food: z.array(z.string().min(1).max(40)).max(20).optional(),
   /** 「全部交给你」：按推荐度代选 */
   delegate: z.boolean().optional(),
 });
@@ -2438,7 +2434,6 @@ const guideSelectSchema = z.object({
 const extrasSchema = z.object({
   view: z.array(z.string().min(1).max(40)).max(12).optional(),
   stay: z.array(z.string().min(1).max(40)).max(12).optional(),
-  food: z.array(z.string().min(1).max(40)).max(12).optional(),
   note: z.string().max(200).optional(),
 });
 
@@ -2533,7 +2528,7 @@ export function listPlanSessionSummaries(actorId: string, limit = 30): PlanSessi
  * 规划会话路由域（v3 旅游界面规划流专用）：
  *   POST /travel/plan-session           {message} 一句话发起
  *   POST /travel/plan-session/:id/turn  {message} 继续说 / {cardId,values,note} 点选回传
- *   POST /travel/plan-session/:id/guide {view?,stay?,food?,delegate?} 提交筛选卡勾选
+ *   POST /travel/plan-session/:id/guide {view?,stay?,delegate?} 提交筛选卡勾选
  *   POST /travel/plan-session/:id/generate   真实生成（10~120s，客户端显示 typing）
  *   GET   /travel/plan-sessions        历史会话列表（规划界面的历史对话入口）
  *   GET   /travel/plan-session/:id      会话状态 + history（刷新恢复 / 继续上次规划）
@@ -2549,8 +2544,8 @@ export function registerTravelPlanSessionRoutes(
     endpoints: [
       "POST   /travel/plan-session            {message} 一句话发起规划会话",
       "POST   /travel/plan-session/:id/turn   {message} 或 {cardId,values,note?} 追加一轮（每轮至多一张问题卡，题目与选项由 LLM 编排器生成）",
-      "POST   /travel/plan-session/:id/guide  {view?,stay?,food?,delegate?} 提交筛选卡勾选（景点→住宿→美食三段依次勾选）",
-      "POST   /travel/plan-session/:id/extras {view?,stay?,food?,note?} 提交筛选后的自选补充（可空）",
+      "POST   /travel/plan-session/:id/guide  {view?,stay?,delegate?} 提交筛选卡勾选（景点→住宿两段依次勾选）",
+      "POST   /travel/plan-session/:id/extras {view?,stay?,note?} 提交筛选后的自选补充（可空）",
       "POST   /travel/plan-session/:id/booking {transportKey?,hotelKey?} 提交预订选择卡（实时机票/高铁/酒店，可全不选=先不订）",
       "POST   /travel/plan-session/:id/generate   信息齐后真实生成并返回预算明细（待确认）",
       "POST   /travel/plan-session/:id/approve    用户确认预算后下发最终草案",
@@ -2650,7 +2645,6 @@ export function registerTravelPlanSessionRoutes(
           ? []
           : recordExtras(session, {
               view: extractWishlist(message, session.destination),
-              food: extractFoodWishlist(message),
               note: message,
             });
         session.awaitingExtras = false;
@@ -2701,19 +2695,18 @@ export function registerTravelPlanSessionRoutes(
         return reply.code(409).send({ ok: false, error: "筛选已完成，继续后面的步骤即可" });
       }
       session.updatedAt = Date.now();
-      const allowed = (key: "view" | "stay" | "food"): Set<string> =>
+      const allowed = (key: "view" | "stay"): Set<string> =>
         new Set(session.guide!.cats.find((c) => c.key === key)?.items.map((i) => i.name) ?? []);
-      const pick = (key: "view" | "stay" | "food", list?: string[]): string[] =>
+      const pick = (key: "view" | "stay", list?: string[]): string[] =>
         (list ?? []).filter((n) => allowed(key).has(n)).slice(0, 20);
-      const merged = (): { view: string[]; stay: string[]; food: string[] } => ({
+      const merged = (): { view: string[]; stay: string[] } => ({
         view: session.guideSelections?.view ?? [],
         stay: session.guideSelections?.stay ?? [],
-        food: session.guideSelections?.food ?? [],
       });
 
       if (body.data.delegate) {
-        // 「全部交给你」：剩余各段按推荐序代选（景点3/住宿2/美食2），直接进补心愿。
-        const topN: Record<"view" | "stay" | "food", number> = { view: 3, stay: 2, food: 2 };
+        // 「全部交给你」：剩余各段按推荐序代选（景点3/住宿2），直接进补心愿。
+        const topN: Record<"view" | "stay", number> = { view: 3, stay: 2 };
         const selections = merged();
         for (const key of GUIDE_ORDER) {
           if (selections[key].length > 0) continue;
@@ -2758,7 +2751,7 @@ export function registerTravelPlanSessionRoutes(
   );
 
   /**
-   * 筛选后的自选补充：{view?,stay?,food?,note?}，全部可空。
+   * 筛选后的自选补充：{view?,stay?,note?}，全部可空。
    * 名字并入心愿清单，note 进入规划输入（可由 extractPreferences 识别附近/落位等诉求）。
    */
   app.post<{ Params: { id: string } }>(
@@ -2771,7 +2764,7 @@ export function registerTravelPlanSessionRoutes(
       if (!session.guideSelections) {
         return reply
           .code(409)
-          .send({ ok: false, error: "还没完成筛选，先勾选必玩/住宿/美食" });
+          .send({ ok: false, error: "还没完成筛选，先勾选必玩/住宿" });
       }
       const body = extrasSchema.safeParse(request.body);
       if (!body.success) {
@@ -2782,7 +2775,6 @@ export function registerTravelPlanSessionRoutes(
       const added = recordExtras(session, {
         view: body.data.view,
         stay: body.data.stay,
-        food: body.data.food,
         note: note || undefined,
       });
       session.awaitingExtras = false;
@@ -2858,7 +2850,7 @@ export function registerTravelPlanSessionRoutes(
       const say = bookingSayOf(session);
       session.history.push({ role: "assistant", content: say });
       saveSession(session);
-      // 预订选择落定 → 进「选一选」：现做景点/住宿/美食候选，下发第一段筛选卡。
+      // 预订选择落定 → 进「选一选」：现做景点/住宿候选，下发第一段筛选卡。
       // 候选构建失败/服务缺失时回 ready 兜底，流程不卡死。
       const service = deps.travelPlanningService;
       if (service) {
@@ -2868,7 +2860,7 @@ export function registerTravelPlanSessionRoutes(
           const guideCard = stage ? guideCardForStage(session, stage) : null;
           if (guideCard && stage) {
             session.guideSent = true;
-            const guideSay = `班次和住宿记下了。${session.destination}的候选整理好了，住宿和美食后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
+            const guideSay = `班次和住宿记下了。${session.destination}的候选整理好了，住宿后面接着挑。${GUIDE_STAGE_INVITE[stage]}`;
             session.history.push({ role: "assistant", content: guideSay });
             session.updatedAt = Date.now();
             saveSession(session);

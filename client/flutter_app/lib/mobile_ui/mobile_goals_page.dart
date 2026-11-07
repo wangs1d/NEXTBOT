@@ -36,6 +36,9 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
   List<Map<String, dynamic>> _items = const <Map<String, dynamic>>[];
   _GoalFilter _filter = _GoalFilter.all;
 
+  /// 当前处于「滑开露出删除钮」状态的卡片 id（同时只允许一张，滑开另一张自动收起）。
+  String? _openSwipeId;
+
   @override
   void initState() {
     super.initState();
@@ -72,9 +75,8 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
           (view["items"] as List<dynamic>?) ?? const <dynamic>[];
       if (!mounted) return;
       setState(() {
-        _items = rawItems
-            .whereType<Map<String, dynamic>>()
-            .toList(growable: false);
+        _items =
+            rawItems.whereType<Map<String, dynamic>>().toList(growable: false);
         _loading = false;
       });
     } catch (e) {
@@ -84,6 +86,70 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
         _loading = false;
       });
     }
+  }
+
+  /// 左滑删除：确认后调服务端彻底删除（goals.json 同步落盘）。
+  /// 返回 false 时 Dismissible 不收起卡片（删除失败要留在原地可见）。
+  Future<bool> _deleteGoal(Map<String, dynamic> item) async {
+    final String id = item["id"]?.toString() ?? "";
+    if (id.isEmpty) return false;
+    try {
+      final Uri uri = Uri.parse(
+          "${ApiConfig.httpBase}/api/proactivity/goals/${Uri.encodeQueryComponent(id)}?actorId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}");
+      final http.Response res = await (widget.client ?? http.Client())
+          .delete(uri)
+          .timeout(const Duration(seconds: 20));
+      final Map<String, dynamic> body =
+          jsonDecode(res.body) as Map<String, dynamic>;
+      if (res.statusCode == 200 && body["ok"] == true) {
+        if (!mounted) return true;
+        setState(() {
+          _items = _items
+              .where((i) => i["id"]?.toString() != id)
+              .toList(growable: false);
+        });
+        return true;
+      }
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(body["error"]?.toString() ?? "删除失败(${res.statusCode})"),
+        ));
+      }
+      return false;
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text("删除失败：$e")));
+      }
+      return false;
+    }
+  }
+
+  /// 左滑露出删除钮 → 点删除 → 确认弹窗 → 服务端删除。
+  /// 返回 true 表示已删（卡片从列表移除）；false 表示未删（滑动态收起）。
+  Future<bool> _confirmDelete(Map<String, dynamic> item) async {
+    final String title = item["title"]?.toString() ?? "该目标";
+    final bool? ok = await showDialog<bool>(
+      context: context,
+      builder: (BuildContext dialogContext) => AlertDialog(
+        title: const Text("删除目标"),
+        content: Text("「$title」将被彻底删除，不可恢复。"),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text("取消"),
+          ),
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            style:
+                TextButton.styleFrom(foregroundColor: const Color(0xFFE5484D)),
+            child: const Text("删除"),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return false;
+    return _deleteGoal(item);
   }
 
   static bool _isActive(Map<String, dynamic> item) {
@@ -96,7 +162,9 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
       case _GoalFilter.all:
         return _items;
       case _GoalFilter.active:
-        return _items.where((i) => _isActive(i) && i["needsUser"] != true).toList();
+        return _items
+            .where((i) => _isActive(i) && i["needsUser"] != true)
+            .toList();
       case _GoalFilter.needsUser:
         return _items.where((i) => i["needsUser"] == true).toList();
       case _GoalFilter.done:
@@ -109,7 +177,9 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
       case _GoalFilter.all:
         return _items.length;
       case _GoalFilter.active:
-        return _items.where((i) => _isActive(i) && i["needsUser"] != true).length;
+        return _items
+            .where((i) => _isActive(i) && i["needsUser"] != true)
+            .length;
       case _GoalFilter.needsUser:
         return _items.where((i) => i["needsUser"] == true).length;
       case _GoalFilter.done:
@@ -163,7 +233,8 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
               style: TextStyle(color: p.textSecondary, fontSize: 14),
             ),
             const SizedBox(height: 16),
-            OutlinedButton(onPressed: () => unawaited(_load()), child: const Text("重试")),
+            OutlinedButton(
+                onPressed: () => unawaited(_load()), child: const Text("重试")),
           ],
         ),
       ),
@@ -215,14 +286,165 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
                       ? "还没有在办目标\n在对话里交代的事，会自动出现在这里"
                       : "这个筛选下没有目标",
                   textAlign: TextAlign.center,
-                  style: TextStyle(color: p.textMuted, fontSize: 14, height: 1.5),
+                  style:
+                      TextStyle(color: p.textMuted, fontSize: 14, height: 1.5),
                 ),
               ],
             ),
           )
         else
           for (final Map<String, dynamic> item in shown)
-            _GoalCard(p: p, item: item),
+            _SwipeToDeleteCard(
+              p: p,
+              item: item,
+              open: _openSwipeId == item["id"]?.toString(),
+              onOpen: () =>
+                  setState(() => _openSwipeId = item["id"]?.toString()),
+              onClose: () {
+                if (_openSwipeId == item["id"]?.toString()) {
+                  setState(() => _openSwipeId = null);
+                }
+              },
+              onDelete: () => _confirmDelete(item),
+            ),
+      ],
+    );
+  }
+}
+
+/// 受限左滑删除卡（2026-11-07 用户拍板）：卡片本体基本不动，左滑只露出右侧
+/// 一小块红色删除钮（[actionWidth] 宽），点按钮才走确认弹窗 + 服务端删除。
+/// 不再是 Dismissible 整卡滑走式——卡片不消失，松手停在「露钮」或「复位」。
+class _SwipeToDeleteCard extends StatefulWidget {
+  const _SwipeToDeleteCard({
+    required this.p,
+    required this.item,
+    required this.open,
+    required this.onOpen,
+    required this.onClose,
+    required this.onDelete,
+  });
+
+  final MobilePalette p;
+  final Map<String, dynamic> item;
+  final bool open;
+  final VoidCallback onOpen;
+  final VoidCallback onClose;
+  final Future<bool> Function() onDelete;
+
+  /// 露出的删除钮宽度（卡片左移上限）。
+  static const double actionWidth = 76;
+
+  @override
+  State<_SwipeToDeleteCard> createState() => _SwipeToDeleteCardState();
+}
+
+class _SwipeToDeleteCardState extends State<_SwipeToDeleteCard>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 180),
+    value: widget.open ? 1.0 : 0.0,
+  );
+  bool _dragging = false;
+
+  /// 当前位移：value 1 = 完全滑开（-actionWidth）。
+  double get _dx => -_SwipeToDeleteCard.actionWidth * _ctrl.value;
+
+  @override
+  void didUpdateWidget(covariant _SwipeToDeleteCard oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 页级单开：另一张卡被滑开时本卡收到 open=false，动画收回。
+    if (!widget.open && oldWidget.open && !_dragging) {
+      _ctrl.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _onDragUpdate(DragUpdateDetails d) {
+    _dragging = true;
+    // 手指左移（delta.dx<0）→ 露钮 → value 增大。
+    _ctrl.value = (_ctrl.value - d.delta.dx / _SwipeToDeleteCard.actionWidth)
+        .clamp(0.0, 1.0);
+  }
+
+  void _onDragEnd(DragEndDetails d) {
+    _dragging = false;
+    final bool fastOpen = d.velocity.pixelsPerSecond.dx < -400;
+    final bool open = _ctrl.value > 0.45 || fastOpen;
+    if (open) {
+      widget.onOpen();
+      _ctrl.forward();
+    } else {
+      widget.onClose();
+      _ctrl.reverse();
+    }
+  }
+
+  Future<void> _handleDeleteTap() async {
+    final bool deleted = await widget.onDelete();
+    if (!mounted) return;
+    // 未删（取消确认 / 接口失败）：收起滑动态；已删则卡片随列表项移除。
+    if (!deleted) _ctrl.reverse();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Stack(
+      children: [
+        // 底层：右侧红色删除钮（与卡片同外边距 right 16 / top 10）。
+        Positioned(
+          right: 16,
+          top: 10,
+          bottom: 0,
+          width: _SwipeToDeleteCard.actionWidth,
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _handleDeleteTap,
+            child: Container(
+              decoration: BoxDecoration(
+                color: const Color(0xFFE5484D),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              alignment: Alignment.center,
+              child: const Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: <Widget>[
+                  Icon(Icons.delete_outline_rounded,
+                      color: Colors.white, size: 22),
+                  SizedBox(height: 2),
+                  Text(
+                    "删除",
+                    style: TextStyle(color: Colors.white, fontSize: 11),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+        // 顶层：卡片本体，跟随手势水平位移（上限 = 钮宽）。
+        AnimatedBuilder(
+          animation: _ctrl,
+          builder: (BuildContext context, Widget? child) => Transform.translate(
+            offset: Offset(_dx, 0),
+            child: child,
+          ),
+          child: GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onHorizontalDragUpdate: _onDragUpdate,
+            onHorizontalDragEnd: _onDragEnd,
+            onTap: () {
+              // 滑开态下点卡片本体 = 收起。
+              if (_ctrl.value > 0) widget.onClose();
+            },
+            child: _GoalCard(p: widget.p, item: widget.item),
+          ),
+        ),
       ],
     );
   }
@@ -253,7 +475,9 @@ class _FilterChip extends StatelessWidget {
         decoration: BoxDecoration(
           color: selected ? p.textPrimary : p.surface,
           borderRadius: BorderRadius.circular(999),
-          border: selected ? null : Border.all(color: p.divider.withValues(alpha: 0.7)),
+          border: selected
+              ? null
+              : Border.all(color: p.divider.withValues(alpha: 0.7)),
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
@@ -339,8 +563,7 @@ class _GoalCard extends StatelessWidget {
     final bool needsUser = item["needsUser"] == true;
     final bool done = !_isActiveStatus(status);
     final String? criteria = item["successCriteria"]?.toString();
-    final int pendingFindings =
-        (item["pendingFindings"] as num?)?.toInt() ?? 0;
+    final int pendingFindings = (item["pendingFindings"] as num?)?.toInt() ?? 0;
     final (int, int)? fraction = _parseFraction(progress);
     final String? step = _currentStep(progress);
 
@@ -362,7 +585,8 @@ class _GoalCard extends StatelessWidget {
               if (_kindLabels[kind] != null)
                 Container(
                   margin: const EdgeInsets.only(right: 8),
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
                     color: p.innerFieldBackground,
                     borderRadius: BorderRadius.circular(999),
@@ -388,7 +612,8 @@ class _GoalCard extends StatelessWidget {
               const Spacer(),
               if (needsUser)
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
                   decoration: BoxDecoration(
                     color: p.accent.withValues(alpha: 0.12),
                     borderRadius: BorderRadius.circular(999),
@@ -429,8 +654,12 @@ class _GoalCard extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: <Widget>[
                     if (fraction.$1 > 0)
-                      Expanded(flex: fraction.$1, child: ColoredBox(color: p.accent)),
-                    Expanded(flex: fraction.$2 - fraction.$1, child: ColoredBox(color: p.innerFieldBackground)),
+                      Expanded(
+                          flex: fraction.$1,
+                          child: ColoredBox(color: p.accent)),
+                    Expanded(
+                        flex: fraction.$2 - fraction.$1,
+                        child: ColoredBox(color: p.innerFieldBackground)),
                   ],
                 ),
               ),

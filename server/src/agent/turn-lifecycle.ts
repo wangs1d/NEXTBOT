@@ -14,7 +14,11 @@ import { inferMemoryTopic } from "./memory-topic.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 
 import { getConversationTimelineService } from "../services/conversation-timeline.js";
-import { isNotesChatSessionId, isIncognitoChatSessionId } from "./master-chat-session.js";
+import {
+  isNotesChatSessionId,
+  isIncognitoChatSessionId,
+  isSideChatSessionId,
+} from "./master-chat-session.js";
 import type { ShortTermMemoryGatewayService } from "../services/short-term-memory-gateway.js";
 import { getMemoryConsolidationService } from "../services/memory-consolidation-service.js";
 import { getScheduleHabitStore } from "../services/schedule-habit-store.js";
@@ -209,18 +213,23 @@ export class TurnLifecycle {
     const ts = new Date().toISOString();
     const memContext: "main" | "notes" = isNotesChatSessionId(input.sessionId) ? "notes" : "main";
 
-    void getTurnWalService()
-      .append({
-        ts,
-        actorId: input.actorId,
-        userText: input.userText,
-        assistantText: full,
-        highSignal: signal.isHighSignal,
-        messageId: input.messageId,
-        planExecuteUsed: input.planExecuteUsed,
-        context: memContext,
-      })
-      .catch(() => {});
+    // 旁聊是独立线程（2026-11-07）：不写主会话 WAL——否则 `full=1` 历史回填
+    // 会把旁聊内容合并进主会话气泡，直接破坏「主会话不被覆盖」的承诺。
+    // 旁聊正文仍由 chat-thread-store 的 `side:<actor>:<id>` 线程持久化。
+    if (!isSideChatSessionId(input.sessionId)) {
+      void getTurnWalService()
+        .append({
+          ts,
+          actorId: input.actorId,
+          userText: input.userText,
+          assistantText: full,
+          highSignal: signal.isHighSignal,
+          messageId: input.messageId,
+          planExecuteUsed: input.planExecuteUsed,
+          context: memContext,
+        })
+        .catch(() => {});
+    }
 
     // 事件记忆（L0）：与 WAL 同源、同一写点，失败静默；隐身/临时 actor 不写。
     // 返回的事件 id 作为本轮记忆候选的来源标识（LTM 条目带 event_time/source_event_id）。

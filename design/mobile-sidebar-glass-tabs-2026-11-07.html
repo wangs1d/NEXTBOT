@@ -1,0 +1,696 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>手机端 · 侧边栏 + 旁聊 + 玻璃底栏 · 设计稿</title>
+<style>
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Regular.otf"); font-weight: 400; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Medium.otf"); font-weight: 500; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Semibold.otf"); font-weight: 600; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Bold.otf"); font-weight: 700; }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 78% -6%, rgba(72, 92, 128, .16), transparent 62%),
+      radial-gradient(700px 500px at 6% 108%, rgba(82, 104, 96, .12), transparent 60%),
+      #08090b;
+    color: #e9eaef;
+    font-family: "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 42px 46px 76px;
+    min-height: 100vh;
+  }
+  .page { max-width: 1240px; margin: 0 auto; }
+
+  /* ── 页头 ── */
+  .hd { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .hd h1 { font-size: 21px; font-weight: 600; letter-spacing: .2px; }
+  .hd .sub { font-size: 12px; line-height: 18px; color: #6f727c; padding-bottom: 2px; }
+  .hd .v { margin-left: auto; font-size: 11px; letter-spacing: .8px; color: #8d8998;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 999px; padding: 4px 11px; }
+  .lead { margin-top: 12px; max-width: 940px; font-size: 12.5px; line-height: 21px; color: #878b96; }
+  .lead b { color: #c6cad4; font-weight: 500; }
+
+  /* ── 三屏 ── */
+  .screens { display: flex; gap: 38px; flex-wrap: wrap; margin-top: 36px; align-items: flex-start; }
+  .slot { width: 320px; }
+  .sc-cap { margin-bottom: 12px; display: flex; align-items: baseline; gap: 8px; }
+  .sc-cap .no { font-size: 11px; font-weight: 600; color: #7f8492; letter-spacing: 1px; }
+  .sc-cap b { font-size: 13.5px; font-weight: 600; }
+  .sc-cap span { font-size: 11.5px; color: #6f727c; }
+  .notes { margin-top: 14px; font-size: 11.5px; line-height: 18px; color: #82868f; }
+  .notes li { list-style: none; padding-left: 13px; position: relative; margin-top: 5px; }
+  .notes li::before { content: ""; position: absolute; left: 0; top: 6px; width: 5px; height: 5px;
+    border-radius: 1px; background: #4b5564; }
+  .notes li b { color: #c2c6d0; font-weight: 500; }
+
+  /* ── 手机壳 ── */
+  .phone {
+    position: relative; width: 320px; height: 690px; border-radius: 38px; overflow: hidden;
+    background: #101114;
+    border: 1px solid rgba(255,255,255,.10);
+    box-shadow: 0 34px 90px rgba(0,0,0,.62), inset 0 1px 0 rgba(255,255,255,.06);
+  }
+  .statusbar {
+    position: relative; z-index: 3; height: 30px; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 20px; font-size: 10.5px; color: rgba(255,255,255,.72);
+    letter-spacing: .3px;
+  }
+  .statusbar .notch { position: absolute; left: 50%; top: 6px; transform: translateX(-50%);
+    width: 72px; height: 20px; border-radius: 12px; background: #000; }
+  .statusbar .sig { display: flex; align-items: center; gap: 5px; }
+  .statusbar .bars { display: flex; align-items: flex-end; gap: 2px; }
+  .statusbar .bars i { width: 2px; background: rgba(255,255,255,.65); border-radius: 1px; }
+  .statusbar .bars i:nth-child(1) { height: 4px; }
+  .statusbar .bars i:nth-child(2) { height: 6px; }
+  .statusbar .bars i:nth-child(3) { height: 8px; }
+  .statusbar .batt { width: 18px; height: 8px; border: 1px solid rgba(255,255,255,.45);
+    border-radius: 2px; position: relative; }
+  .statusbar .batt::after { content: ""; position: absolute; inset: 1px; right: 3px;
+    background: rgba(255,255,255,.72); border-radius: 1px; }
+
+  .app { position: relative; height: 660px; display: flex; flex-direction: column;
+    background:
+      radial-gradient(240px 200px at 12% 96%, rgba(62, 112, 126, .20), transparent 70%),
+      radial-gradient(220px 190px at 92% 92%, rgba(122, 84, 96, .16), transparent 70%),
+      linear-gradient(180deg, #17181c 0%, #111216 62%, #0e0f12 100%);
+  }
+
+  /* ── 顶栏 ── */
+  .topbar { position: relative; height: 52px; display: flex; align-items: center; gap: 10px;
+    padding: 0 14px; flex-shrink: 0; }
+  .round-btn { width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; color: #e9eaef; background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.10); backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.10), 0 6px 16px rgba(0,0,0,.28); }
+  .round-btn svg { width: 18px; height: 18px; }
+  .top-title { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: flex; align-items: center; gap: 6px; font-size: 15px; font-weight: 600;
+    letter-spacing: .2px; white-space: nowrap; }
+  .dot-on { width: 6px; height: 6px; border-radius: 50%; background: #22C55E;
+    box-shadow: 0 0 6px rgba(34,197,94,.55); }
+
+  /* ── 消息区 ── */
+  .msgs { flex: 1; min-height: 0; display: flex; flex-direction: column; gap: 10px;
+    padding: 2px 14px 0; overflow: hidden; }
+  .time-div { align-self: center; font-size: 10px; color: #6c6c75; letter-spacing: .3px; }
+  .bubble { max-width: 236px; padding: 9px 13px; font-size: 12px; line-height: 18.5px; }
+  .bubble.ai { align-self: flex-start; background: #26262B; color: #E9E9EC;
+    border-radius: 18px 18px 18px 6px; }
+  .bubble.me { align-self: flex-end; background: #fff; color: #000;
+    border-radius: 18px 18px 6px 18px; }
+  .bubble .tip { display: block; font-size: 10px; color: #8b8f99; margin-top: 3px; }
+
+  .plan-card { align-self: flex-start; width: 248px; border-radius: 16px; overflow: hidden;
+    background: #232327; border: 1px solid rgba(255,255,255,.07);
+    box-shadow: 0 10px 26px rgba(0,0,0,.3); }
+  .plan-hero { position: relative; height: 72px; padding: 9px 11px; display: flex;
+    align-items: flex-end;
+    background:
+      radial-gradient(90px 52px at 20% 26%, rgba(255,214,170,.55), transparent 70%),
+      radial-gradient(120px 64px at 74% 82%, rgba(98,164,196,.55), transparent 70%),
+      linear-gradient(135deg, #33566e 0%, #7d5a63 56%, #cfa87a 100%); }
+  .plan-hero span { font-size: 10px; color: #fff; letter-spacing: .3px; padding: 3px 8px;
+    border-radius: 10px; background: rgba(0,0,0,.30); border: 1px solid rgba(255,255,255,.16);
+    backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+  .plan-body { padding: 9px 12px 11px; }
+  .plan-h { font-size: 11px; color: #e9eaec; font-weight: 500; margin-bottom: 2px; }
+  .plan-row { display: flex; gap: 8px; font-size: 10.5px; line-height: 16px; color: #989ca6; margin-top: 4px; }
+  .plan-row b { width: 24px; flex-shrink: 0; color: #e9eaec; font-weight: 500; }
+  .plan-row span { margin-left: auto; color: #7d828c; }
+
+  /* ── 输入栏 ── */
+  .composer { flex-shrink: 0; margin: 8px 8px 67px; height: 46px; display: flex; align-items: center;
+    gap: 7px; padding: 0 5px 0 6px; border-radius: 23px; background: #1b1b1e;
+    border: 1px solid rgba(255,255,255,.07); box-shadow: 0 10px 26px rgba(0,0,0,.28); }
+  .comp-plus { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; color: #b9bcc5; background: rgba(255,255,255,.07);
+    border: 1px solid rgba(255,255,255,.07); }
+  .comp-plus svg { width: 15px; height: 15px; }
+  .comp-input { flex: 1; min-width: 0; font-size: 11.5px; color: #8b8f99; }
+  .comp-send { width: 32px; height: 32px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; background: #fff; color: #000; }
+  .comp-send svg { width: 15px; height: 15px; }
+
+  /* ── 玻璃底栏（核心） ── */
+  .tabbar {
+    position: absolute; left: 8px; right: 8px; bottom: 7px; z-index: 5; height: 54px;
+    display: flex; align-items: center; padding: 0 2px; border-radius: 27px;
+    background: linear-gradient(180deg, rgba(46,48,56,.62) 0%, rgba(24,25,30,.66) 100%);
+    border: 1px solid rgba(255,255,255,.12);
+    backdrop-filter: blur(24px) saturate(165%); -webkit-backdrop-filter: blur(24px) saturate(165%);
+    box-shadow:
+      0 14px 34px rgba(0,0,0,.42),
+      0 2px 6px rgba(0,0,0,.22),
+      inset 0 1px 0 rgba(255,255,255,.14),
+      inset 0 -1px 0 rgba(0,0,0,.28);
+  }
+  .tab { flex: 1; height: 54px; display: flex; align-items: center; justify-content: center;
+    color: rgba(255,255,255,.44); }
+  .tab .ring { width: 34px; height: 34px; border-radius: 50%; display: flex; align-items: center;
+    justify-content: center; position: relative; }
+  .tab .ring svg { width: 19px; height: 19px; }
+  .tab.on { color: #ffffff; }
+  .tab.on .ring { background: rgba(255,255,255,.13); border: 1px solid rgba(255,255,255,.16);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.20), 0 5px 12px rgba(0,0,0,.26);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px); }
+  .tab .badge { position: absolute; top: 2px; right: 1px; width: 5px; height: 5px;
+    border-radius: 50%; background: #22C55E; box-shadow: 0 0 5px rgba(34,197,94,.6); }
+
+  /* ── 侧边栏（第二屏） ── */
+  .behind { position: absolute; inset: 0; overflow: hidden; background: #0b0c0f; }
+  .behind-page { position: absolute; top: 0; bottom: 0; left: 0; width: 320px;
+    display: flex; flex-direction: column;
+    transform: translateX(288px);
+    border-radius: 22px 0 0 22px; overflow: hidden; opacity: .90;
+    filter: blur(2.5px);
+    border-left: 1px solid rgba(255,255,255,.10);
+    box-shadow: -22px 0 48px rgba(0,0,0,.55); }
+  .scrim { position: absolute; inset: 0; z-index: 2;
+    background: linear-gradient(90deg, rgba(4,4,6,.74) 0%, rgba(4,4,6,.56) 62%, rgba(4,4,6,.40) 100%); }
+  .drawer { position: absolute; top: 0; bottom: 0; left: 0; width: 288px; z-index: 8;
+    display: flex; flex-direction: column; padding-bottom: 12px;
+    background: linear-gradient(180deg, rgba(21,22,26,.84) 0%, rgba(16,17,20,.80) 100%);
+    border-right: 1px solid rgba(255,255,255,.08);
+    backdrop-filter: blur(30px) saturate(150%); -webkit-backdrop-filter: blur(30px) saturate(150%);
+    box-shadow: 22px 0 60px rgba(0,0,0,.42), inset -1px 0 0 rgba(255,255,255,.04); }
+  .d-head { display: flex; align-items: flex-start; padding: 20px 18px 4px; }
+  .d-head .name { font-size: 22px; font-weight: 600; letter-spacing: .4px; line-height: 30px; }
+  .d-head .sub { margin-top: 2px; font-size: 10.5px; color: #787c86; letter-spacing: .3px; }
+  .d-close { margin-left: auto; width: 32px; height: 32px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; color: #9a9ea8;
+    background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.06); }
+  .d-close svg { width: 15px; height: 15px; }
+
+  .d-label { display: flex; align-items: baseline; gap: 8px; padding: 16px 18px 6px; }
+  .d-label .t { font-size: 10px; letter-spacing: 1.6px; color: #7c808b; font-weight: 500; }
+  .d-label .hint { font-size: 10.5px; color: #5f636c; }
+  .d-label .cnt { margin-left: auto; font-size: 10px; color: #5f636c; letter-spacing: .4px; }
+
+  .chat-list { padding: 0 8px; }
+  .chat-item { display: flex; gap: 9px; padding: 9px 10px; border-radius: 12px;
+    border: 1px solid transparent; margin-top: 2px; }
+  .chat-item.on { background: rgba(255,255,255,.075); border-color: rgba(255,255,255,.08);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  .chat-item .ic { width: 22px; height: 22px; flex-shrink: 0; margin-top: 1px;
+    color: #9a9ea8; display: flex; align-items: center; justify-content: center; }
+  .chat-item.on .ic { color: #e9eaef; }
+  .chat-item .ic svg { width: 17px; height: 17px; }
+  .chat-item .body { flex: 1; min-width: 0; }
+  .chat-item .row1 { display: flex; align-items: center; gap: 6px; }
+  .chat-item .title { font-size: 13px; font-weight: 500; color: #e6e7ec; letter-spacing: .2px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-item .live { width: 5px; height: 5px; border-radius: 50%; background: #22C55E; flex-shrink: 0; }
+  .chat-item .prev { margin-top: 2px; font-size: 10.5px; line-height: 15px; color: #7d818b;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .chat-item .meta { font-size: 9.5px; color: #5f636c; flex-shrink: 0; margin-top: 1px; }
+
+  .new-chat { display: flex; align-items: center; gap: 9px; margin: 8px 8px 0; padding: 9px 10px;
+    border-radius: 12px; border: 1px dashed rgba(255,255,255,.13); background: rgba(255,255,255,.025); }
+  .new-chat .plus { width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; color: #b7bbc5;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.08); }
+  .new-chat .plus svg { width: 12px; height: 12px; }
+  .new-chat .tx { font-size: 12px; color: #cfd2da; font-weight: 500; }
+  .new-chat .hint { margin-top: 1px; font-size: 10px; color: #6a6e78; }
+
+  .d-spacer { flex: 1; }
+
+  .d-dock { display: flex; align-items: center; gap: 8px; padding: 0 12px; }
+  .dock-btn { width: 42px; height: 42px; border-radius: 50%; flex-shrink: 0; display: flex;
+    align-items: center; justify-content: center; color: #d7dae2;
+    background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.10);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.09); }
+  .dock-btn svg { width: 18px; height: 18px; }
+  .dock-search { flex: 1; height: 40px; display: flex; align-items: center; gap: 7px;
+    padding: 0 13px; border-radius: 20px; color: #8b8f99; font-size: 11.5px;
+    background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.05); }
+  .dock-search svg { width: 15px; height: 15px; }
+
+  /* ── 旁聊进行中（第三屏） ── */
+  .back-btn { display: flex; align-items: center; gap: 3px; height: 36px; padding: 0 8px 0 4px;
+    border-radius: 18px; color: #cfd2da; font-size: 10.5px; background: transparent; }
+  .back-btn svg { width: 16px; height: 16px; }
+  .title-stack { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+    display: flex; flex-direction: column; align-items: center; gap: 1px; }
+  .title-stack .t { display: flex; align-items: center; gap: 6px; font-size: 14.5px;
+    font-weight: 600; white-space: nowrap; }
+  .title-stack .tag { font-size: 9px; letter-spacing: .6px; color: #a9adba;
+    border: 1px solid rgba(255,255,255,.12); background: rgba(255,255,255,.05);
+    border-radius: 999px; padding: 1px 6px; }
+  .title-stack .s { font-size: 9.5px; color: #6f737d; letter-spacing: .2px; }
+  .session-note { margin: 0 14px 8px; height: 26px; flex-shrink: 0; display: flex; align-items: center;
+    gap: 6px; padding: 0 10px; border-radius: 13px; font-size: 10px; color: #8b8f99;
+    background: rgba(255,255,255,.045); border: 1px solid rgba(255,255,255,.06); }
+  .session-note svg { width: 12px; height: 12px; flex-shrink: 0; }
+  .session-note .right { margin-left: auto; color: #6f737d; }
+
+  .plain-card { align-self: flex-start; width: 248px; border-radius: 14px; overflow: hidden;
+    background: #232327; border: 1px solid rgba(255,255,255,.07); padding: 9px 12px 10px;
+    box-shadow: 0 8px 22px rgba(0,0,0,.26); }
+  .plain-card .h { display: flex; align-items: center; font-size: 11px; font-weight: 500;
+    color: #e9eaec; margin-bottom: 3px; }
+  .plain-card .h span { margin-left: auto; font-size: 9.5px; color: #7d828c; font-weight: 400; }
+  .plain-row { display: flex; gap: 8px; font-size: 10.5px; line-height: 16px; color: #989ca6;
+    padding-top: 5px; margin-top: 4px; border-top: 1px solid rgba(255,255,255,.05); }
+  .plain-row b { width: 24px; flex-shrink: 0; color: #e9eaec; font-weight: 500; }
+  .plain-row span { margin-left: auto; color: #7d828c; }
+
+  /* ── 规格区 ── */
+  .specs { margin-top: 60px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+  @media (max-width: 1180px) { .specs { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 820px) { .specs { grid-template-columns: 1fr; } .screens { gap: 28px; } }
+  .spec { background: #101114; border: 1px solid rgba(255,255,255,.07); border-radius: 14px;
+    padding: 18px 20px 20px; box-shadow: inset 0 1px 0 rgba(255,255,255,.04); }
+  .spec .k { font-size: 10px; letter-spacing: 1.4px; color: #6f737d; margin-bottom: 9px; }
+  .spec h3 { font-size: 13px; font-weight: 600; letter-spacing: .2px; }
+  .spec .desc { margin-top: 6px; font-size: 11.5px; line-height: 18px; color: #82868f; }
+  .spec ul { margin-top: 11px; }
+  .spec li { list-style: none; position: relative; padding-left: 12px; margin-top: 6px;
+    font-size: 11.5px; line-height: 17.5px; color: #969aa4; }
+  .spec li::before { content: ""; position: absolute; left: 0; top: 6px; width: 4px; height: 4px;
+    border-radius: 1px; background: #4b5564; }
+  .spec li b { color: #d0d4dd; font-weight: 500; }
+  .spec code { font-family: "Consolas", monospace; font-size: 10.5px; color: #b9bec9;
+    background: rgba(255,255,255,.05); border-radius: 4px; padding: 1px 4px; }
+
+  .glass-row { display: flex; gap: 10px; margin-top: 12px; }
+  .mini { flex: 1; height: 64px; border-radius: 10px; position: relative; overflow: hidden;
+    border: 1px solid rgba(255,255,255,.06); }
+  .mini.light { background: linear-gradient(160deg, #f2f4f9 0%, #e3e7ef 100%); }
+  .mini.dark { background: linear-gradient(160deg, #1d1f26 0%, #101115 100%); }
+  .mini .cap { position: absolute; left: 8px; top: 6px; font-size: 8.5px; letter-spacing: .6px; }
+  .mini.light .cap { color: #7a7f8c; }
+  .mini.dark .cap { color: #737883; }
+  .mini .bar { position: absolute; left: 8px; right: 8px; bottom: 8px; height: 24px;
+    border-radius: 12px; display: flex; align-items: center; justify-content: space-around; }
+  .mini.light .bar { background: rgba(255,255,255,.62); border: 1px solid rgba(255,255,255,.86);
+    box-shadow: 0 4px 10px rgba(0,0,0,.10), inset 0 1px 0 #fff; backdrop-filter: blur(10px); }
+  .mini.dark .bar { background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.14);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.12); backdrop-filter: blur(10px); }
+  .mini .bar i { width: 14px; height: 14px; border-radius: 50%; display: block; }
+  .mini.light .bar i { background: rgba(17,17,18,.18); }
+  .mini.light .bar i.on { background: #111112; }
+  .mini.dark .bar i { background: rgba(255,255,255,.22); }
+  .mini.dark .bar i.on { background: #fff; }
+
+  .foot { margin-top: 34px; font-size: 11px; line-height: 18px; color: #5e626b; }
+  .foot b { color: #8d919c; font-weight: 500; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="hd">
+    <h1>手机端 · 侧边栏 / 旁聊 / 玻璃底栏</h1>
+    <div class="sub">设计稿 v1 · 2026-11-07 · 仅视觉预览，未改动代码</div>
+    <div class="v">MOBILE · DARK</div>
+  </header>
+  <p class="lead">
+    三处改动：<b>① 主界面左上角新增侧边栏按钮</b>，抽屉只保留「旁聊」列表（去掉参考图里的「选项卡」分组）；
+    <b>② 设置从底栏迁到侧边栏左下角</b>；<b>③ 底部剩 4 个 tab</b>，整条底栏改为玻璃胶囊。
+    旁聊即独立「新会话」：单独上下文、可各自规划行程，主会话消息不受影响。
+  </p>
+
+  <div class="screens">
+
+    <!-- ═══════════ 01 主界面 ═══════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">01</span><b>主界面 · 对话</b><span>侧边栏入口 + 4 tab 玻璃栏</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="notch"></span>
+          <span class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </span>
+        </div>
+        <div class="app">
+          <div class="topbar">
+            <div class="round-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+            </div>
+            <div class="top-title"><span>小蛇</span><span class="dot-on"></span></div>
+          </div>
+
+          <div class="msgs">
+            <div class="time-div">今天 19:26</div>
+            <div class="bubble ai">周末想去洱海，帮我排个 4 天行程吧。节奏慢一点，别天天换酒店。</div>
+            <div class="bubble me">11/14 出发，住洱海边就行。</div>
+            <div class="plan-card">
+              <div class="plan-hero"><span>洱海 · 才村码头</span></div>
+              <div class="plan-body">
+                <div class="plan-h">大理 4 日 · 慢节奏</div>
+                <div class="plan-row"><b>D1</b>才村入住 · 洱海日落<span>11/14</span></div>
+                <div class="plan-row"><b>D2</b>环海骑行 · 喜洲古镇<span>11/15</span></div>
+                <div class="plan-row"><b>D3</b>双廊 · 南诏风情岛<span>11/16</span></div>
+                <div class="plan-row"><b>D4</b>大理古城 · 返程<span>11/17</span></div>
+              </div>
+            </div>
+            <div class="bubble ai">方案先放这里了。要改哪一天，直接跟我说。</div>
+            <div class="bubble ai">要顺手把才村的民宿也订了吗？</div>
+          </div>
+
+          <div class="composer">
+            <div class="comp-plus">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </div>
+            <div class="comp-input">发消息…</div>
+            <div class="comp-send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+            </div>
+          </div>
+
+          <!-- 玻璃底栏 · 4 tab -->
+          <div class="tabbar">
+            <div class="tab on">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2.4"/><path d="M9 4v17M12 9h4M12 13h4"/></svg>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.2 12 2.6 2.6L16 9.4"/></svg>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h3.6l1.8 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li>左上角 <b>38px 玻璃圆钮</b>：点按从左滑出侧边栏（240ms）。</li>
+        <li>「小蛇」= 用户给 agent 取的名字（agentName），<b>不再放邀请按钮</b>。</li>
+        <li>输入框压到 <b>46px 高、左右 8px</b> 近满宽；底栏 5 → 4 tab，高 <b>54px</b>。</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════ 02 侧边栏 ═══════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">02</span><b>侧边栏</b><span>只有「旁聊」· 设置落在左下角</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="notch"></span>
+          <span class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </span>
+        </div>
+        <div class="app">
+          <!-- 背后主界面（整体右移，只露出左侧一小条） -->
+          <div class="behind">
+            <div class="behind-page">
+              <div class="topbar">
+              <div class="round-btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+              </div>
+              <div class="top-title"><span>小蛇</span><span class="dot-on"></span></div>
+
+            </div>
+            <div class="msgs">
+              <div class="time-div">今天 19:26</div>
+              <div class="bubble ai">周末想去洱海，帮我排个 4 天行程吧。</div>
+              <div class="bubble me">11/14 出发，住洱海边就行。</div>
+              <div class="plan-card">
+                <div class="plan-hero"><span>洱海 · 才村码头</span></div>
+                <div class="plan-body">
+                  <div class="plan-h">大理 4 日 · 慢节奏</div>
+                  <div class="plan-row"><b>D1</b>才村入住 · 洱海日落<span>11/14</span></div>
+                  <div class="plan-row"><b>D2</b>环海骑行 · 喜洲古镇<span>11/15</span></div>
+                </div>
+              </div>
+            </div>
+            <div class="composer">
+              <div class="comp-plus">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+              </div>
+              <div class="comp-input">发消息…</div>
+              <div class="comp-send">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+              </div>
+            </div>
+            <div class="tabbar">
+              <div class="tab on"><div class="ring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg></div></div>
+              <div class="tab"><div class="ring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="5" y="4" width="14" height="17" rx="2.4"/><path d="M9 4v17"/></svg></div></div>
+              <div class="tab"><div class="ring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.2 12 2.6 2.6L16 9.4"/></svg></div></div>
+              <div class="tab"><div class="ring"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><path d="M4 8a2 2 0 0 1 2-2h3.6l1.8 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"/></svg></div></div>
+              </div>
+            </div>
+          </div>
+          <div class="scrim"></div>
+
+          <!-- 抽屉 -->
+          <div class="drawer">
+            <div class="d-head">
+              <div>
+                <div class="name">小蛇</div>
+                <div class="sub">主会话在后台运行</div>
+              </div>
+              <div class="d-close">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+              </div>
+            </div>
+
+            <div class="d-label">
+              <span class="t">旁聊</span>
+              <span class="hint">长按可重命名</span>
+              <span class="cnt">3 个</span>
+            </div>
+
+            <div class="chat-list">
+              <div class="chat-item on">
+                <div class="ic">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg>
+                </div>
+                <div class="body">
+                  <div class="row1"><span class="title">大理 4 日游</span><span class="live"></span></div>
+                  <div class="prev">D2 洱海环湖 → 喜洲古镇，才村住 3 晚</div>
+                </div>
+                <div class="meta">刚刚</div>
+              </div>
+
+              <div class="chat-item">
+                <div class="ic">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg>
+                </div>
+                <div class="body">
+                  <div class="row1"><span class="title">京都赏枫 5 日</span></div>
+                  <div class="prev">11/18 出发，祇园住 2 晚，岚山排在 D3</div>
+                </div>
+                <div class="meta">昨天</div>
+              </div>
+
+              <div class="chat-item">
+                <div class="ic">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg>
+                </div>
+                <div class="body">
+                  <div class="row1"><span class="title">周末露营清单</span></div>
+                  <div class="prev">天幕、气罐、折叠椅……还差一盏营灯</div>
+                </div>
+                <div class="meta">10/30</div>
+              </div>
+
+              <div class="new-chat">
+                <div class="plus">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+                </div>
+                <div>
+                  <div class="tx">新建旁聊</div>
+                  <div class="hint">独立上下文，不打断主会话</div>
+                </div>
+              </div>
+            </div>
+
+            <div class="d-spacer"></div>
+
+            <!-- 底部 dock：设置 · 搜索 · 新建 -->
+            <div class="d-dock">
+              <div class="dock-btn" title="设置">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15.2a3.2 3.2 0 1 0 0-6.4 3.2 3.2 0 0 0 0 6.4Z"/><path d="M19.4 15a1.7 1.7 0 0 0 .34 1.87l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.7 1.7 0 0 0-1.87-.34 1.7 1.7 0 0 0-1 1.55V21a2 2 0 1 1-4 0v-.09a1.7 1.7 0 0 0-1.11-1.55 1.7 1.7 0 0 0-1.87.34l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.7 1.7 0 0 0 .34-1.87 1.7 1.7 0 0 0-1.55-1H3a2 2 0 1 1 0-4h.09a1.7 1.7 0 0 0 1.55-1.11 1.7 1.7 0 0 0-.34-1.87l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.7 1.7 0 0 0 1.87.34H9a1.7 1.7 0 0 0 1-1.55V3a2 2 0 1 1 4 0v.09a1.7 1.7 0 0 0 1 1.55 1.7 1.7 0 0 0 1.87-.34l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.7 1.7 0 0 0-.34 1.87V9a1.7 1.7 0 0 0 1.55 1H21a2 2 0 1 1 0 4h-.09a1.7 1.7 0 0 0-1.55 1Z"/></svg>
+              </div>
+              <div class="dock-search">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.4"/><path d="m15.8 15.8 4.2 4.2"/></svg>
+                <span>搜索旁聊</span>
+              </div>
+              <div class="dock-btn" title="新建旁聊">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4l11-11a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="M13.5 6.5 17.5 10.5"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li>去掉参考图里的「选项卡」分组，<b>只保留旁聊列表</b>。</li>
+        <li>打开时主界面整体右移，<b>右侧留 32px 缝隙</b>，只露主界面左侧一小条。</li>
+        <li>设置齿轮固定在 <b>左下角</b>，接替原第 5 个 tab。</li>
+        <li>中间搜索旁聊，右下铅笔 = <b>新建旁聊（新会话）</b>。</li>
+      </ul>
+    </div>
+
+    <!-- ═══════════ 03 旁聊 ═══════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">03</span><b>旁聊进行中</b><span>独立上下文 · 主会话原样保留</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <span class="notch"></span>
+          <span class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </span>
+        </div>
+        <div class="app">
+          <div class="topbar">
+            <div class="back-btn">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M15 5 8 12l7 7"/></svg>
+              <span>主会话</span>
+            </div>
+            <div class="title-stack">
+              <div class="t"><span>大理 4 日游</span><span class="tag">旁聊</span></div>
+              <div class="s">独立上下文 · 2 条未读已同步</div>
+            </div>
+            <div class="round-btn" style="margin-left:auto;width:34px;height:34px;">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="6" cy="12" r="1.2"/><circle cx="12" cy="12" r="1.2"/><circle cx="18" cy="12" r="1.2"/></svg>
+            </div>
+          </div>
+
+          <div class="session-note">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><rect x="5" y="10" width="14" height="10" rx="3"/><path d="M8.5 10V7.8a3.5 3.5 0 0 1 7 0V10"/></svg>
+            <span>旁聊独立运行，主会话消息不会被覆盖</span>
+            <span class="right">主会话 12 条</span>
+          </div>
+
+          <div class="msgs">
+            <div class="time-div">旁聊 · 今天 20:02</div>
+            <div class="bubble ai">已按 11/14–11/17 排好 4 天，酒店选在才村码头，不换店。</div>
+            <div class="plain-card">
+              <div class="h">大理 4 日 · 慢节奏<span>可继续改</span></div>
+              <div class="plain-row"><b>D1</b>才村入住 · 洱海日落<span>11/14</span></div>
+              <div class="plain-row"><b>D2</b>环海骑行 · 喜洲古镇<span>11/15</span></div>
+              <div class="plain-row"><b>D3</b>双廊 · 南诏风情岛<span>11/16</span></div>
+              <div class="plain-row"><b>D4</b>大理古城 · 返程<span>11/17</span></div>
+            </div>
+            <div class="bubble me">D2 换成环海骑行可以吗？</div>
+            <div class="bubble ai">可以。D2 已换成骑行 + 喜洲午餐，其余不变。<span class="tip">主会话里的安排没有改动</span></div>
+          </div>
+
+          <div class="composer">
+            <div class="comp-plus">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>
+            </div>
+            <div class="comp-input">在这个旁聊里继续说…</div>
+            <div class="comp-send">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></svg>
+            </div>
+          </div>
+
+          <div class="tabbar">
+            <div class="tab on">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/></svg>
+                <span class="badge"></span>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2.4"/><path d="M9 4v17M12 9h4M12 13h4"/></svg>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="4"/><path d="m8.2 12 2.6 2.6L16 9.4"/></svg>
+              </div>
+            </div>
+            <div class="tab">
+              <div class="ring">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8a2 2 0 0 1 2-2h3.6l1.8 2H18a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8Z"/></svg>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li>顶部 <b>← 主会话</b> 一键回去，回来时消息原样保留。</li>
+        <li>旁聊是 <b>独立会话</b>：行程、搜索、文件都各算各的。</li>
+        <li>旁聊中仍可切 4 个 tab；底栏对话图标带绿点提示「旁聊在跑」。</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- ═══════════ 规格 ═══════════ -->
+  <div class="specs">
+
+    <div class="spec">
+      <div class="k">GLASS TAB BAR</div>
+      <h3>底部玻璃胶囊</h3>
+      <div class="desc">4 等分热区，选中态用内层玻璃圆环，整条胶囊浮在内容之上。</div>
+      <ul>
+        <li>高度 <b>54px</b>，左右/底部外边距 <b>8 / 7px</b>，圆角 <b>27px</b></li>
+        <li>填充 <code>rgba(32,33,39,.64)</code>，<b>blur 24px + saturate 165%</b></li>
+        <li>描边 <b>1px rgba(255,255,255,.12)</b>，顶内高光 + 底部内阴影</li>
+        <li>选中圆环 <b>34px</b>、图标 <b>19px</b>：白色 13% 底 + 白 16% 描边</li>
+        <li>未选中图标白色 44%，选中纯白</li>
+      </ul>
+      <div class="glass-row">
+        <div class="mini light">
+          <span class="cap">LIGHT</span>
+          <div class="bar"><i class="on"></i><i></i><i></i><i></i></div>
+        </div>
+        <div class="mini dark">
+          <span class="cap">DARK</span>
+          <div class="bar"><i class="on"></i><i class="on"></i><i></i><i></i></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="spec">
+      <div class="k">SIDEBAR</div>
+      <h3>侧边栏结构</h3>
+      <div class="desc">从左侧滑出，宽 288 / 320（90%）；主界面整体右移，右侧留 32px 缝隙。</div>
+      <ul>
+        <li>顶部：<b>Agent 名</b>（用户自定义）+ 一句话状态，右上关闭</li>
+        <li>分区：<b>旁聊</b>（标题 + 长按重命名 + 数量），无「选项卡」</li>
+        <li>行内容：会话名 / 最近一句 / 时间；进行中带绿点</li>
+        <li>列表末尾固定 <b>＋ 新建旁聊</b>（虚线卡）</li>
+        <li>底部 dock：<b>设置齿轮</b> · 搜索旁聊 · 新建旁聊</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <div class="k">BEHAVIOR</div>
+      <h3>迁移与交互</h3>
+      <div class="desc">设置不再占底栏一格；旁聊与主会话完全解耦。</div>
+      <ul>
+        <li>底栏 <b>对话 / 日程 / 目标 / 资料库</b>，设置 → 侧边栏左下角</li>
+        <li>输入框 <b>46px 高</b>、左右 8px 近满宽；右上邀请按钮移除</li>
+        <li>抽屉滑入 <b>240ms</b> <code>cubic-bezier(.22,.61,.36,1)</code>，遮罩 200ms</li>
+        <li>未读旁聊在列表绿点 + 列表右侧时间，不做红点轰炸</li>
+        <li>新建旁聊默认命名「未命名旁聊」，首条消息后自动改标题</li>
+        <li>旁聊上限、删除/归档放在长按菜单（设计稿不展开）</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <p class="foot">
+    <b>说明：</b>本页为静态设计稿，用 MiSans / 手机壳 320×690 还原；玻璃参数与尺寸可直接映射到 Flutter（<code>BackdropFilter</code> + <code>ClipRRect</code>）。
+    旁聊数据归属与主会话同级，仅多一个 <code>thread</code> 维度，互不覆盖历史。
+  </p>
+
+</div>
+</body>
+</html>

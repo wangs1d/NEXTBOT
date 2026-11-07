@@ -19,7 +19,8 @@ import "../core/services/email_login_api.dart";
 /// 登录成功后邮箱作为 userId 落到 [ApiConfig.runtimeUserId]，与桌面端
 /// 「登录邮箱=运行时身份覆盖」同源：聊天/记忆/画像等数据按同一账号共享。
 class MobileLoginPage extends StatefulWidget {
-  const MobileLoginPage({super.key, required this.onLoggedIn, this.onDebugSkip});
+  const MobileLoginPage(
+      {super.key, required this.onLoggedIn, this.onDebugSkip});
 
   /// 登录成功回调（参数=已归一化邮箱）。
   final ValueChanged<String> onLoggedIn;
@@ -109,8 +110,8 @@ class _MobileLoginPageState extends State<MobileLoginPage>
                   ),
                   const SizedBox(height: 8),
                   FadeTransition(
-                    opacity: Tween<double>(begin: 0.35, end: 0.9)
-                        .animate(_breath),
+                    opacity:
+                        Tween<double>(begin: 0.35, end: 0.9).animate(_breath),
                     child: Container(
                       width: 22,
                       height: 2,
@@ -309,8 +310,8 @@ class _LoginCardState extends State<_LoginCard> {
       _busy = true;
       _message = null;
     });
-    final EmailLoginResult r =
-        await widget.api.registerOrLogin(email, code: code.isEmpty ? null : code);
+    final EmailLoginResult r = await widget.api
+        .registerOrLogin(email, code: code.isEmpty ? null : code);
     if (!mounted) return;
     if (r.ok) {
       // 先关卡片再落登录态（根组件负责 runtimeUserId 覆盖与进主壳）
@@ -431,7 +432,9 @@ class _LoginCardState extends State<_LoginCard> {
                       child: Text(
                         _message!,
                         style: TextStyle(
-                          color: _messageError ? _errorRed : const Color(0xFFD6D6D6),
+                          color: _messageError
+                              ? _errorRed
+                              : const Color(0xFFD6D6D6),
                           fontSize: 13,
                           height: 1.5,
                         ),
@@ -462,8 +465,8 @@ class _LoginCardState extends State<_LoginCard> {
                           height: 20,
                           child: CircularProgressIndicator(
                             strokeWidth: 2.2,
-                            valueColor:
-                                AlwaysStoppedAnimation<Color>(Color(0xFF0A0A0A)),
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                                Color(0xFF0A0A0A)),
                           ),
                         )
                       : const Text(
@@ -543,7 +546,8 @@ class _LoginCardState extends State<_LoginCard> {
           side: BorderSide(
             color: cooling ? const Color(0xFF3A3A3A) : const Color(0xFF5A5A5A),
           ),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(999)),
           minimumSize: const Size(0, 28),
           padding: const EdgeInsets.symmetric(horizontal: 10),
           textStyle: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),

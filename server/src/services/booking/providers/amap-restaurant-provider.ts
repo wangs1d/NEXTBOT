@@ -129,7 +129,12 @@ export class AmapRestaurantProvider implements BookingProvider {
       };
     }
 
-    const radius = NEARBY_RADIUS_M;
+    // 可选半径覆盖（沿线餐厅检索按当天路线半径取数；缺省仍是周边 5km）
+    const requestedRadius = Number(params.radiusM);
+    const radius =
+      Number.isFinite(requestedRadius) && requestedRadius > 0
+        ? Math.min(Math.max(Math.round(requestedRadius), 100), NEARBY_RADIUS_M)
+        : NEARBY_RADIUS_M;
     const cacheKey = center
       ? `${gridOf(center.latitude, center.longitude)}|${city}|${keywords}|${radius}`
       : `city:${city}|${keywords}`;

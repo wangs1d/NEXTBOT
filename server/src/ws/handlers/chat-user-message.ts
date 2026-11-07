@@ -44,6 +44,7 @@ import {
   isNotesChatSessionId,
   isIncognitoChatSessionId,
   resolvePrimaryChatSessionId,
+  resolveTurnSessionId,
 } from "../../agent/master-chat-session.js";
 import { shouldUsePhasedAsyncConversation } from "../../agent/interim-ack.js";
 import { StreamSegmenter, type StreamSegmentEmitMeta } from "../../agent/stream-segmenter.js";
@@ -503,11 +504,9 @@ export async function handleChatUserMessageEvent(
   // （与确认卡点击同效；正则严格短语匹配，避免误伤无关场景的「确认」）。fire-and-forget。
   deps.phoneCallCoordinator?.observeUserText(msgActor, effectiveText);
 
-  // 本轮使用的会话键（与 chat.user_message 提交时一致；隐身会话是唯一例外）
-  const turnSessionId =
-    typeof data.sessionId === "string" && isIncognitoChatSessionId(data.sessionId)
-      ? data.sessionId
-      : ctx.sessionId;
+  // 本轮使用的会话键（与 chat.user_message 提交时一致）。
+  // 主通道钉死绑定身份；隐身 / 笔记 / 本账号旁聊是合法透传例外（2026-11-07 旁聊）。
+  const turnSessionId = resolveTurnSessionId(data.sessionId, msgActor, ctx.sessionId);
   // 计划交接的文字回执（2026-10-19 handoff）：用户在等一步外部操作，直接打字说
   // 「点好了 / 付了 / 已完成」。**只有存在唯一等待步时才消费**——歧义就不猜，
   // 让用户去点胶囊/卡片。这一步在路由之前完成，跟点击回执走同一条续跑通道。
@@ -560,12 +559,9 @@ export async function handleChatUserMessageEvent(
     interruptedContext: (data as { interruptedContext?: string }).interruptedContext,
     originalMessageId: data.messageId,
     userId: data.userId ?? msgActor,
-    // 隐身会话（incognito: 前缀）是唯一放行的 payload sessionId——主通道会话
-    // 一律钉死为绑定身份（防串台），但隐身标记必须流到 finalizeTurn 才能生效。
-    sessionId:
-      typeof data.sessionId === "string" && isIncognitoChatSessionId(data.sessionId)
-        ? data.sessionId
-        : ctx.sessionId,
+    // 隐身 / 笔记 / 本账号旁聊是合法放行的 payload sessionId——主通道会话
+    // 一律钉死为绑定身份（防串台），但独立线程标记必须流到 finalizeTurn 才能生效。
+    sessionId: resolveTurnSessionId(data.sessionId, msgActor, ctx.sessionId),
     contentType: typeof data.contentType === "string" ? data.contentType : undefined,
     // 计划交接回执（2026-10-19 handoff）：等待步已置 done，本轮是续跑。
     ...(planContinuation ? { planContinuation } : {}),
@@ -889,10 +885,11 @@ async function processBatchedMessage(
   let entityContextLines: string[] = [];
   let dialogStateLines: string[] = [];
   try {
-    const chatSessionId =
-      batched.sessionId && typeof batched.sessionId === "string" && isNotesChatSessionId(batched.sessionId)
-        ? batched.sessionId
-        : resolvePrimaryChatSessionId(msgActor, cfg.masterDelegation.enabled);
+    const chatSessionId = resolveTurnSessionId(
+      batched.sessionId,
+      msgActor,
+      resolvePrimaryChatSessionId(msgActor, cfg.masterDelegation.enabled),
+    );
     const current = batched.text.trim();
     // 结构化对话状态（2026-10-12 架构收敛）：上一轮的意图 + 真实执行过的工具
     // 进路由 prompt——分类器看得到执行者做过的事（「照片已交付」），不再从

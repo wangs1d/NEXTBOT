@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>手机端旅游规划 · 对话流实际效果还原（2026-11-07）</title>
+<style>
+  :root {
+    --bg: #0F0F0F;          /* AppPalette.mainPanel */
+    --card: #1C1C1C;        /* surfaceContainer */
+    --card-hi: #232323;     /* surfaceContainerHigh（结果卡容器） */
+    --card-max: #2A2A2A;    /* surfaceContainerHighest */
+    --btn: #2C2C2C;         /* 实底按钮 */
+    --on-btn: #E8E8E8;
+    --line: #2A2A2A;
+    --txt: #E8E8E8;
+    --t2: #A1A1AA;
+    --t3: #6B6B72;
+    --green: #1ED7A6;       /* 酒店/正向 */
+    --orange: #D7B85A;      /* 餐厅/价格 */
+    --purple: #8B5CF6;      /* 交通/信息 */
+    --user-bubble: #000000;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body {
+    background:#101216; color:var(--txt);
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    padding:36px 28px 64px;
+  }
+  .head { max-width:1180px; margin:0 auto 26px; }
+  .head h1 { font-size:22px; font-weight:700; }
+  .head .sub { font-size:13px; color:var(--t2); margin-top:8px; line-height:1.75; }
+  .badge { display:inline-block; font-size:11px; padding:3px 10px; border-radius:999px; margin-right:8px; }
+  .badge.src { color:var(--t2); border:1px solid var(--line); background:#161616; }
+  .wrap { display:flex; gap:40px; justify-content:center; flex-wrap:wrap; }
+
+  .phone {
+    width:392px; background:var(--bg);
+    border:1px solid rgba(255,255,255,.09); border-radius:44px;
+    padding:14px 12px; position:relative; overflow:hidden;
+    box-shadow:0 30px 70px rgba(0,0,0,.55);
+  }
+  .notch { position:absolute; top:14px; left:50%; transform:translateX(-50%);
+    width:110px; height:26px; background:#000; border-radius:999px; z-index:60; }
+  .view { position:absolute; inset:14px 12px; border-radius:32px; overflow:hidden; background:var(--bg); display:flex; flex-direction:column; }
+  .statusrow { display:flex; justify-content:space-between; padding:10px 22px 0; font-size:12px; font-weight:600; }
+  .appbar { display:flex; align-items:center; gap:10px; padding:12px 18px 10px; border-bottom:1px solid #1C1C1C; }
+  .appbar .back { font-size:18px; color:var(--t2); }
+  .appbar .name { font-size:15px; font-weight:600; }
+  .appbar .sub2 { font-size:11px; color:var(--t3); margin-top:1px; }
+  .chat { flex:1; overflow:hidden; padding:14px 14px 6px; display:flex; flex-direction:column; gap:10px; }
+  .inputbar { display:flex; align-items:center; gap:10px; padding:10px 14px 16px; }
+  .inputpill { flex:1; display:flex; align-items:center; gap:8px; background:var(--card); border:1px solid var(--line);
+    border-radius:999px; padding:11px 16px; font-size:13px; color:var(--t3); }
+  .send { width:38px; height:38px; border-radius:50%; background:var(--btn); display:flex; align-items:center;
+    justify-content:center; color:var(--on-btn); font-size:16px; }
+
+  /* 气泡 */
+  .msg { display:flex; }
+  .msg.user { justify-content:flex-end; }
+  .bubble { max-width:82%; border-radius:18px; padding:10px 14px; font-size:14px; line-height:1.6; }
+  .msg.user .bubble { background:var(--user-bubble); color:#FFF; border-bottom-right-radius:6px; }
+  .msg.bot .bubble { background:transparent; color:#D4D4D8; padding:2px 4px; }
+  .time-sep { text-align:center; font-size:10.5px; color:var(--t3); margin:6px 0; }
+
+  /* ═══ 结果卡容器（surfaceContainerHigh + outline 22%） ═══ */
+  .rcard { background:var(--card-hi); border:1px solid rgba(255,255,255,.14); border-radius:14px; overflow:hidden; max-width:100%; }
+  .rcard-pad { padding:12px; }
+
+  /* choice 问题卡 */
+  .stage { display:flex; align-items:center; gap:8px; font-size:11px; letter-spacing:1.6px; color:var(--t3); }
+  .stage i { width:5px; height:5px; border-radius:50%; background:var(--purple); }
+  .stage .prog { margin-left:auto; letter-spacing:.4px; }
+  .ctitle { font-size:15px; font-weight:600; margin-top:8px; line-height:1.45; }
+  .opts { display:flex; flex-wrap:wrap; gap:8px; margin-top:11px; }
+  .opt { font-size:13px; padding:8px 15px; border-radius:999px; border:1px solid var(--line); color:var(--txt); background:#1A1A1A; }
+  .opt.hl { border-color:rgba(139,92,246,.55); background:rgba(139,92,246,.10); }
+  .prefill { margin-top:10px; font-size:11.5px; color:var(--t3); line-height:1.5; }
+  .prefill em { color:var(--orange); font-style:normal; }
+
+  /* 天气卡 */
+  .whead { display:flex; align-items:baseline; }
+  .wtitle { font-size:14.5px; font-weight:600; }
+  .wsub { margin-left:auto; font-size:11px; color:var(--t3); }
+  .wrow { display:flex; gap:8px; margin-top:11px; }
+  .wday { flex:1; background:#1A1A1A; border:1px solid #262626; border-radius:12px; padding:9px 6px; text-align:center; }
+  .wday .d { font-size:10.5px; color:var(--t3); }
+  .wday .i { font-size:17px; margin:5px 0 3px; }
+  .wday .hi { font-size:13px; font-weight:600; }
+  .wday .lo { font-size:11px; color:var(--t3); margin-top:1px; }
+  .wtip { margin-top:11px; font-size:11.5px; line-height:1.6; color:var(--t2);
+    background:rgba(215,184,90,.08); border:1px solid rgba(215,184,90,.25); border-radius:10px; padding:8px 11px; }
+
+  /* 种草选择卡 */
+  .gtabs { display:flex; gap:8px; margin-top:11px; }
+  .gtab { font-size:12.5px; padding:7px 15px; border-radius:999px; border:1px solid var(--line); color:var(--t2); }
+  .gtab.on { background:#2A2A2A; color:var(--txt); font-weight:600; border-color:#3A3A3A; }
+  .gitem { display:flex; gap:11px; margin-top:11px; background:#1A1A1A; border:1px solid #262626; border-radius:14px; padding:10px; }
+  .gitem.picked { border-color:rgba(30,215,166,.4); background:rgba(30,215,166,.05); }
+  .gimg { width:74px; height:74px; border-radius:11px; object-fit:cover; flex-shrink:0; }
+  .gname { font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:6px; }
+  .gname .ck { margin-left:auto; width:18px; height:18px; border-radius:6px; border:1.5px solid #3E3E3E; flex-shrink:0; }
+  .gitem.picked .ck { background:var(--green); border-color:var(--green); position:relative; }
+  .gitem.picked .ck::after { content:"✓"; position:absolute; inset:0; display:flex; align-items:center;
+    justify-content:center; color:#0A0A0A; font-size:12px; font-weight:800; }
+  .gmetrics { display:flex; flex-wrap:wrap; gap:6px; margin-top:6px; }
+  .gmetric { font-size:10.5px; padding:3px 8px; border-radius:999px; background:#222; color:var(--t2); }
+  .gmetric b { font-weight:600; }
+  .gmetric.rating b { color:var(--orange); }
+  .gmetric.heat b { color:#E58BB6; }
+  .gintro { font-size:11.5px; color:var(--t3); line-height:1.55; margin-top:6px;
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+  .gnote { font-size:10.5px; color:var(--t3); margin-top:10px; }
+  .cbtns { display:flex; gap:9px; margin-top:12px; }
+  .cbtn { flex:1; height:40px; border-radius:12px; display:flex; align-items:center; justify-content:center;
+    font-size:13.5px; font-weight:600; }
+  .cbtn.main { background:var(--btn); color:var(--on-btn); }
+  .cbtn.ghost { border:1px solid var(--line); color:var(--t2); }
+
+  /* booking 卡 */
+  .brow { display:flex; gap:11px; margin-top:11px; background:#1A1A1A; border:1px solid #262626; border-radius:14px; padding:11px; }
+  .brow.sel { border-color:rgba(139,92,246,.5); background:rgba(139,92,246,.06); }
+  .bicon { width:36px; height:36px; border-radius:10px; background:rgba(139,92,246,.14); display:flex;
+    align-items:center; justify-content:center; font-size:16px; flex-shrink:0; }
+  .bname { font-size:13.5px; font-weight:600; display:flex; align-items:center; gap:7px; flex-wrap:wrap; }
+  .rec { font-size:9.5px; padding:2px 7px; border-radius:999px; background:rgba(30,215,166,.14);
+    color:var(--green); font-weight:600; letter-spacing:.5px; }
+  .bmeta { font-size:11px; color:var(--t3); margin-top:4px; }
+  .bprice { margin-left:auto; text-align:right; flex-shrink:0; }
+  .bprice .p { font-size:15px; font-weight:700; color:var(--orange); }
+  .bprice .pending { font-size:11px; color:var(--t3); }
+  .bprice .u { font-size:10px; color:var(--t3); }
+  .trial { margin-top:10px; font-size:10.5px; color:var(--t3); }
+
+  /* 预算卡 */
+  .bi { display:flex; align-items:center; padding:9px 0; border-bottom:1px solid #232323; font-size:13px; }
+  .bi:last-of-type { border-bottom:none; }
+  .bi .lbl { color:var(--t2); }
+  .bi .note { font-size:10.5px; color:var(--t3); margin-left:8px; }
+  .bi .amt { margin-left:auto; font-weight:600; font-variant-numeric:tabular-nums; }
+  .bi .amt.pend { color:var(--t3); font-weight:400; font-size:12px; }
+  .btotal { display:flex; align-items:baseline; margin-top:10px; background:#1A1A1A; border-radius:12px; padding:12px 14px; }
+  .btotal .t { font-size:12px; color:var(--t2); }
+  .btotal .v { margin-left:auto; font-size:22px; font-weight:800; color:var(--orange); }
+  .btotal .s { font-size:11px; color:var(--t3); margin-left:6px; }
+  .bwarn { margin-top:10px; display:flex; gap:8px; font-size:11.5px; line-height:1.6; color:var(--t2);
+    background:rgba(215,184,90,.08); border:1px solid rgba(215,184,90,.25); border-radius:10px; padding:8px 11px; }
+
+  /* 行程卡 */
+  .poster { height:200px; position:relative; }
+  .poster img { width:100%; height:100%; object-fit:cover; display:block; }
+  .poster .shade { position:absolute; inset:0;
+    background:linear-gradient(180deg, rgba(0,0,0,.40) 0%, rgba(0,0,0,.08) 42%, rgba(0,0,0,.90) 100%); }
+  .pbadges { position:absolute; top:12px; left:14px; right:14px; display:flex; align-items:center; }
+  .pdest { font-size:11px; font-weight:700; letter-spacing:1.5px; background:rgba(0,0,0,.45);
+    border:1px solid rgba(255,255,255,.25); border-radius:999px; padding:4px 11px; color:#FFF; }
+  .pdays { font-size:11.5px; color:rgba(255,255,255,.85); margin-left:9px; }
+  .pdate { margin-left:auto; font-size:10.5px; color:rgba(255,255,255,.6); }
+  .ptitle { position:absolute; left:14px; right:14px; bottom:12px; color:#FFF; }
+  .ptitle .t { font-size:19px; font-weight:800; letter-spacing:.3px; }
+  .ptitle .s { font-size:11.5px; color:rgba(255,255,255,.72); margin-top:3px; }
+  .openbtn { width:100%; height:40px; border-radius:11px; background:var(--btn); color:var(--on-btn);
+    display:flex; align-items:center; justify-content:center; gap:7px; font-size:13.5px; font-weight:700; }
+  .foot { font-size:11px; color:var(--t3); margin-top:8px; line-height:1.5; }
+  .foot em { color:var(--green); font-style:normal; }
+
+  .cap { max-width:1180px; margin:30px auto 0; background:#161616; border:1px solid var(--line);
+    border-radius:16px; padding:16px 22px; font-size:13px; color:var(--t2); line-height:1.85; }
+  .cap b { color:var(--txt); }
+  .cap code { background:#222; padding:1px 6px; border-radius:6px; font-size:11.5px; color:#C9CDD4; }
+</style>
+</head>
+<body>
+
+<div class="head">
+  <h1>手机端旅游规划 · 对话流实际效果还原</h1>
+  <div class="sub">
+    <span class="badge src">还原自</span>
+    <code style="font-size:11.5px">mobile_chat_page.dart</code>（黑气泡对话）+
+    <code style="font-size:11.5px">agent_result_card.dart</code>（travel_guide_select / travel_itinerary / choice / 预算 / booking 卡）+
+    <code style="font-size:11.5px">travel_theme.dart</code>（dark 调色板：#D4D4D8 强调 / #2C2C2C 实底按钮 / 绿#1ED7A6 橙#D7B85A 紫#8B5CF6）<br>
+    规划流程完全由 Agent 驱动：缺什么问什么，缺省信息动态回对应选择卡，不预先铺满全部选项；卡片内真数指标由服务端算好下发，取不到的条目不下发（宁缺毋滥）。
+  </div>
+</div>
+
+<div class="wrap">
+  <div class="phone">
+    <div class="notch"></div>
+    <div class="view">
+      <div class="statusrow"><span>20:14</span><span>▲ ● ▂</span></div>
+      <div class="appbar">
+        <span class="back">‹</span>
+        <div>
+          <div class="name">小私</div>
+          <div class="sub2">正在帮你规划 · 已确认 4/6 项</div>
+        </div>
+      </div>
+
+      <div class="chat">
+        <div class="time-sep">今天 20:02</div>
+
+        <div class="msg user"><div class="bubble">十一想出去走走，人多的地方就别去了，预算一万以内，帮我规划下</div></div>
+
+        <div class="msg bot"><div class="bubble">成，那往人少的方向挑。</div></div>
+        <div class="msg bot"><div class="bubble">按你的偏好先锁了成都方向，避开热门 TOP3 那几个。</div></div>
+
+        <!-- choice 问题卡 -->
+        <div class="rcard rcard-pad">
+          <div class="stage"><i></i>行程框架<span class="prog">4/6</span></div>
+          <div class="ctitle">玩几天？大概哪天出发？</div>
+          <div class="opts">
+            <div class="opt">10-1 出发 · 4 天</div>
+            <div class="opt">10-2 出发 · 5 天</div>
+            <div class="opt">时间还在定</div>
+          </div>
+          <div class="prefill">按你上次节后请 2 天休 5 天的习惯，<em>先按「10-1 · 4 天」备着</em>，不对随时改。</div>
+        </div>
+
+        <div class="msg user"><div class="bubble">10-1 出发，4 天</div></div>
+        <div class="msg bot"><div class="bubble">行，那我先看那几天的天气。</div></div>
+
+        <!-- 天气卡 -->
+        <div class="rcard rcard-pad">
+          <div class="whead"><span class="wtitle">成都 · 出行窗口天气</span><span class="wsub">10-01 → 10-04</span></div>
+          <div class="wrow">
+            <div class="wday"><div class="d">10-01 周四</div><div class="i">🌦</div><div class="hi">23°</div><div class="lo">17°</div></div>
+            <div class="wday"><div class="d">10-02 周五</div><div class="i">☁️</div><div class="hi">21°</div><div class="lo">16°</div></div>
+            <div class="wday"><div class="d">10-03 周六</div><div class="i">🌧</div><div class="hi">19°</div><div class="lo">15°</div></div>
+            <div class="wday"><div class="d">10-04 周日</div><div class="i">⛅</div><div class="hi">22°</div><div class="lo">16°</div></div>
+          </div>
+          <div class="wtip">10-3 有雨，我把那天排了室内动线（博物馆 + 美食），户外往 10-1 / 10-2 挪。</div>
+        </div>
+
+        <div class="msg bot"><div class="bubble">接下来你勾一勾想去哪儿，我按这个出方案。</div></div>
+
+        <!-- 种草选择卡 -->
+        <div class="rcard rcard-pad">
+          <div class="stage"><i style="background:var(--green)"></i>挑想去 · 成都<span class="prog">勾完这步</span></div>
+          <div class="ctitle">必玩候选（按评分 + 你的收藏加权）</div>
+          <div class="gtabs"><div class="gtab on">必玩</div><div class="gtab">美食</div><div class="gtab">住宿</div></div>
+
+          <div class="gitem picked">
+            <img class="gimg" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Giant%20panda%20eating%20bamboo%20at%20Chengdu%20panda%20base%2C%20close%20up%2C%20soft%20morning%20light%2C%20travel%20photography&image_size=square" alt="">
+            <div style="flex:1;min-width:0">
+              <div class="gname">大熊猫繁育研究基地<span class="ck"></span></div>
+              <div class="gmetrics">
+                <span class="gmetric rating">评分 <b>4.7</b></span>
+                <span class="gmetric">门票 <b>¥55</b></span>
+                <span class="gmetric heat">热度 <b>92</b></span>
+              </div>
+              <div class="gintro">早上 7:30 进园看最活跃的进食场，南门进省一半路。</div>
+            </div>
+          </div>
+
+          <div class="gitem">
+            <img class="gimg" src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Kuanzhai%20alley%20Chengdu%20China%2C%20traditional%20Sichuan%20street%2C%20grey%20brick%20walls%2C%20red%20lanterns%2C%20evening%20ambience%2C%20travel%20photography&image_size=square" alt="">
+            <div style="flex:1;min-width:0">
+              <div class="gname">宽窄巷子<span class="ck"></span></div>
+              <div class="gmetrics">
+                <span class="gmetric rating">评分 <b>4.3</b></span>
+                <span class="gmetric">免费</span>
+                <span class="gmetric">距住处 <b>2.4km</b></span>
+              </div>
+              <div class="gintro">傍晚去合适，盖碗茶 + 掏耳朵，人多但逛得开。</div>
+            </div>
+          </div>
+
+          <div class="gnote">排序信号：高德/OSM 评分 · 热度 · 你的收藏加权 · 距离。没取到真数指标的条目不出。</div>
+          <div class="cbtns">
+            <div class="cbtn main">确认选择（1）</div>
+            <div class="cbtn ghost">交给 Agent 代选</div>
+          </div>
+        </div>
+
+        <div class="msg user"><div class="bubble">熊猫基地必去，吃的你安排</div></div>
+        <div class="msg bot"><div class="bubble">好，大交通和住宿给你挑了两个，都有实价。</div></div>
+
+        <!-- booking 卡 -->
+        <div class="rcard rcard-pad">
+          <div class="stage"><i style="background:var(--purple)"></i>大交通 · 住宿</div>
+          <div class="brow sel">
+            <div class="bicon">✈️</div>
+            <div style="flex:1;min-width:0">
+              <div class="bname">CA4115 北京→成都<span class="rec">推荐</span></div>
+              <div class="bmeta">10-1 07:55 起飞 · 3h05m · 飞猪在售</div>
+            </div>
+            <div class="bprice"><div class="p">¥820</div><div class="u">/人 单程</div></div>
+          </div>
+          <div class="brow">
+            <div class="bicon">🚄</div>
+            <div style="flex:1;min-width:0">
+              <div class="bname">G89 北京西→成都东</div>
+              <div class="bmeta">10-1 06:53 发车 · 7h27m</div>
+            </div>
+            <div class="bprice"><div class="pending">待核价</div></div>
+          </div>
+          <div class="brow sel">
+            <div class="bicon">🏨</div>
+            <div style="flex:1;min-width:0">
+              <div class="bname">青城山下·山隐民宿<span class="rec">推荐</span></div>
+              <div class="bmeta">4.6 分 · 距离春熙路 3.1km · 3 晚</div>
+            </div>
+            <div class="bprice"><div class="p">¥488</div><div class="u">/晚</div></div>
+          </div>
+          <div class="cbtns"><div class="cbtn main">确认预订选择</div></div>
+          <div class="trial">部分价格为飞猪体验模式脱敏价，下单前会再核实。</div>
+        </div>
+
+        <div class="msg bot"><div class="bubble">信息齐了，这是预算，你核一眼。</div></div>
+
+        <!-- 预算卡 -->
+        <div class="rcard rcard-pad">
+          <div class="stage"><i style="background:var(--orange)"></i>预算确认</div>
+          <div style="margin-top:4px">
+            <div class="bi"><span class="lbl">大交通</span><span class="note">往返机票</span><span class="amt">¥1,640</span></div>
+            <div class="bi"><span class="lbl">住宿</span><span class="note">3 晚</span><span class="amt">¥1,464</span></div>
+            <div class="bi"><span class="lbl">门票</span><span class="note">5 处</span><span class="amt">¥396</span></div>
+            <div class="bi"><span class="lbl">美食</span><span class="note">按 4 天估</span><span class="amt pend">待核价 · 不计入合计</span></div>
+          </div>
+          <div class="btotal"><span class="t">合计（2 人）</span><span class="v">¥3,500</span><span class="s">原 ¥3,680 · 优惠 -¥180</span></div>
+          <div class="bwarn">⚠ 熊猫基地 10-2 门票需提前 3 天实名预约，出方案后我会提醒你锁票。</div>
+          <div class="cbtns"><div class="cbtn main">确认 · 生成最终方案</div></div>
+        </div>
+
+        <div class="msg bot"><div class="bubble">方案出来了 👇</div></div>
+
+        <!-- travel_itinerary 行程卡 -->
+        <div class="rcard">
+          <div class="poster">
+            <img src="https://trae-api-cn.mchost.guru/api/ide/v1/text_to_image?prompt=Chengdu%20city%20skyline%20at%20dusk%2C%20Anshun%20bridge%20river%20reflection%2C%20warm%20lights%2C%20cinematic%20travel%20photography%2C%20purple%20blue%20sky&image_size=landscape_4_3" alt="">
+            <div class="shade"></div>
+            <div class="pbadges">
+              <span class="pdest">成都</span><span class="pdays">4 天行程</span><span class="pdate">10-01 → 10-04</span>
+            </div>
+            <div class="ptitle">
+              <div class="t">成都 · 人少慢游 4 日</div>
+              <div class="s">熊猫基地 · 青城山 · 市井美食动线 · 逐站已核实</div>
+            </div>
+          </div>
+          <div class="rcard-pad">
+            <div class="openbtn">🧭 打开行程规划</div>
+            <div class="foot">核实：<em>0 项风险</em> · 已避开 10-3 降雨排室内动线 · 你点名的 3 处全部排入</div>
+          </div>
+        </div>
+
+        <div class="msg bot"><div class="bubble">出发前 30 分钟我会按当天的天气和路况提醒你。</div></div>
+      </div>
+
+      <div class="inputbar">
+        <div class="inputpill">想调整哪天的安排，直接说…</div>
+        <div class="send">↑</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="cap">
+  <b>流程口径（与电脑端一致）：</b>主聊天 travel.plan-itinerary 链路全流程对话驱动——框架问题卡（choice，含偏好回填 prefill 与节奏推断）→ 出行窗口天气卡 → 种草筛选卡（travel_guide_select：必玩/美食/住宿三段勾选，服务端真数指标，不预选）→ 预订选择卡（booking：飞猪实价 / 待核价如实标注）→ 预算卡（真实报价合计，未接入计价的类目标「待核价」不计入，风险 warnings 随卡）→ travel_itinerary 行程卡（海报 + 「打开行程规划」进 [行迹页](computer://d:\ws-project\Private-Agent\design\mobile-travel-plan-live-2026-11-07.html) 一屏一站视图）。<br>
+  <b>数据铁律：</b>卡片只展示服务端算好的成品文案与来源；取不到的指标整条不下发；价格脱敏时卡面如实说明——禁止编造。
+</div>
+
+</body>
+</html>

@@ -1,7 +1,11 @@
 import type { FastifyInstance } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
-import { resolvePrimaryChatSessionId } from "../../agent/master-chat-session.js";
+import {
+  isSideChatSessionId,
+  isSideChatSessionIdForActor,
+  resolvePrimaryChatSessionId,
+} from "../../agent/master-chat-session.js";
 import {
   getChatThreadStore,
   parseMessageTimestamp,
@@ -133,7 +137,19 @@ export function registerChatDataRoutes(
       const limitRaw = Number.parseInt(query.limit ?? "", 10);
       const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(limitRaw, 200) : 50;
 
-      if (query.full === "1") {
+      // 旁聊线程历史（2026-11-07）：sessionId 必须属于当前 actor 的 `side:` 会话。
+      // 旁聊是独立线程，没有 WAL 全量转录——只读该线程最近一段即可（full 忽略）。
+      const requestedSessionId = String(query.sessionId ?? "").trim();
+      const sideThread = isSideChatSessionId(requestedSessionId)
+        ? isSideChatSessionIdForActor(requestedSessionId, actorId)
+          ? requestedSessionId
+          : null
+        : undefined;
+      if (sideThread === null) {
+        return reply.code(403).send({ ok: false, message: "side chat session mismatch" });
+      }
+
+      if (query.full === "1" && !sideThread) {
         const turns = await readActorTranscript(actorId);
         const messages: Array<{
           role: "user" | "assistant";
@@ -173,7 +189,8 @@ export function registerChatDataRoutes(
       }
 
       const masterOn = getAgentRuntimeConfig().masterDelegation.enabled;
-      const threadKey = resolvePrimaryChatSessionId(actorId, masterOn);
+      const threadKey =
+        sideThread || resolvePrimaryChatSessionId(actorId, masterOn);
       const msgs = getChatThreadStore().peekThread(threadKey) ?? [];
 
       const messages: Array<{

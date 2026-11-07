@@ -108,7 +108,8 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
                 style: TextStyle(color: p.textSecondary, fontSize: 14),
               ),
               const SizedBox(height: 16),
-              OutlinedButton(onPressed: () => unawaited(_load()), child: const Text("重试")),
+              OutlinedButton(
+                  onPressed: () => unawaited(_load()), child: const Text("重试")),
             ],
           ),
         ),
@@ -131,7 +132,11 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
               ),
               const SizedBox(height: 6),
               Text(
-                greeting.isEmpty ? "早上好" : (appellation.isEmpty ? greeting : "$appellation，$greeting"),
+                greeting.isEmpty
+                    ? "早上好"
+                    : (appellation.isEmpty
+                        ? greeting
+                        : "$appellation，$greeting"),
                 style: TextStyle(
                   color: p.textPrimary,
                   fontSize: 22,
@@ -156,7 +161,8 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
 
   /// 日程条目标题：三源合并后按 kind 加前缀（截止 / 行程），普通日程原样
   String _scheduleTitle(dynamic item) {
-    final String title = (item as Map<String, dynamic>)["title"]?.toString() ?? "";
+    final String title =
+        (item as Map<String, dynamic>)["title"]?.toString() ?? "";
     final String kind = item["kind"]?.toString() ?? "schedule";
     final String note = item["note"]?.toString() ?? "";
     final String prefix = kind == "deadline"
@@ -168,7 +174,8 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
   }
 
   Widget _buildScheduleItems(Map<String, dynamic> b, MobilePalette p) {
-    final List<dynamic> items = (b["todaySchedule"] as List<dynamic>?) ?? const <dynamic>[];
+    final List<dynamic> items =
+        (b["todaySchedule"] as List<dynamic>?) ?? const <dynamic>[];
     if (items.isEmpty) {
       return _EmptyHint(p: p, text: "今天没有安排,好好休息");
     }
@@ -201,9 +208,11 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
   }
 
   Widget _buildTodoSection(Map<String, dynamic> b, MobilePalette p) {
-    final Map<String, dynamic>? todo = b["todoFollowups"] as Map<String, dynamic>?;
+    final Map<String, dynamic>? todo =
+        b["todoFollowups"] as Map<String, dynamic>?;
     if (todo == null) return const SizedBox.shrink();
-    final List<dynamic> pending = (todo["pending"] as List<dynamic>?) ?? const <dynamic>[];
+    final List<dynamic> pending =
+        (todo["pending"] as List<dynamic>?) ?? const <dynamic>[];
     final Object? done = todo["doneTodayCount"];
     if (pending.isEmpty && (done == null || (done is int && done == 0))) {
       return const SizedBox.shrink();
@@ -218,7 +227,8 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
           if (done is int && done > 0)
             Padding(
               padding: const EdgeInsets.only(bottom: 8),
-              child: Text("今天已办结 $done 件", style: TextStyle(color: p.textSecondary, fontSize: 14)),
+              child: Text("今天已办结 $done 件",
+                  style: TextStyle(color: p.textSecondary, fontSize: 14)),
             ),
           for (final dynamic s in pending)
             Padding(
@@ -226,9 +236,16 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
               child: Row(
                 children: [
                   const SizedBox(width: 4),
-                  Container(width: 4, height: 4, decoration: BoxDecoration(color: p.textMuted, shape: BoxShape.circle)),
+                  Container(
+                      width: 4,
+                      height: 4,
+                      decoration: BoxDecoration(
+                          color: p.textMuted, shape: BoxShape.circle)),
                   const SizedBox(width: 10),
-                  Expanded(child: Text(s.toString(), style: TextStyle(color: p.textPrimary, fontSize: 15))),
+                  Expanded(
+                      child: Text(s.toString(),
+                          style:
+                              TextStyle(color: p.textPrimary, fontSize: 15))),
                 ],
               ),
             ),
@@ -236,11 +253,14 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
       ),
     );
   }
-
 }
 
 class _Section extends StatelessWidget {
-  const _Section({required this.p, required this.icon, required this.title, required this.child});
+  const _Section(
+      {required this.p,
+      required this.icon,
+      required this.title,
+      required this.child});
 
   final MobilePalette p;
   final IconData icon;

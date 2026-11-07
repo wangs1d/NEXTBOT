@@ -46,6 +46,13 @@ export interface UserFact {
   confidence: number;
   /** 被观察到的次数（同 subject 重复出现说明稳定） */
   seenCount: number;
+  /**
+   * 习惯类断言的观察日集合（YYYY-MM-DD 去重升序，cap 30）。
+   * 2026-11-07 定稿：习惯画像必须动态更新且需多日证据——单日观察不得固化为
+   * 习惯断言进派生槽位；新观察刷新值并追加观察日；长期无新观察自动退出画像。
+   * 非习惯断言可缺省（无证据门槛）。
+   */
+  evidenceDays?: string[];
   /** 来源链路（最多保留 3 条） */
   sources: string[];
   createdAt: string;
@@ -57,6 +64,8 @@ export interface UserFactUpsertInput {
   value: string;
   source?: string;
   confidence?: number;
+  /** 本次观察落在哪一天（YYYY-MM-DD，本地日历日）；习惯类断言的证据计数依据 */
+  observedOn?: string;
 }
 
 interface FactFileShape {
@@ -77,6 +86,58 @@ export interface DerivedSlotSyncResult {
 const MAX_FACTS = 200;
 const SLOT_MAX_CHARS = 6000;
 const SLOT_MAX_LINES = 8;
+
+/**
+ * 习惯画像准入门槛：同一习惯断言需要 ≥ N 个不同观察日才进入派生槽位
+ * （2026-11-07 用户定稿：不能只有一天的观察就写进习惯画像——实测单晚提取
+ * 直接产出「习惯在凌晨0:40左右睡觉」并被模型当事实引用）。
+ */
+export const HABIT_MIN_OBSERVED_DAYS = 2;
+/**
+ * 习惯画像保鲜期：超过 N 天无新观察即退出派生槽位。
+ * 习惯是动态的——作息变了旧画像必须让位，不再出现的行为不再断言。
+ */
+export const HABIT_STALE_DAYS = 14;
+
+/** 习惯类断言语义判定：按文本而非 kind——夜间提取器会把习惯错标成 fact
+ * （实测「用户习惯在凌晨0:40左右睡觉」同句两份：一条 preference 一条 fact）。 */
+const HABIT_CLAIM_RE = /(习惯|总是|经常|每晚|每天|通常|一贯|熬夜|作息)/;
+/** 称呼类例外：「习惯被称呼为川哥」「习惯用小弟称呼助手」是用户明说的称呼偏好，
+ * 不是行为观察推断，不受多日证据门槛约束。 */
+const NAMING_PREFERENCE_RE = /习惯(?:被)?(?:称呼|叫)|习惯用.{0,8}称呼/;
+
+export function isHabitClaim(fact: Pick<UserFact, "kind" | "value">): boolean {
+  return HABIT_CLAIM_RE.test(fact.value) && !NAMING_PREFERENCE_RE.test(fact.value);
+}
+
+function distinctDays(days: readonly string[] | undefined): string[] {
+  return [...new Set((days ?? []).filter((d) => /^\d{4}-\d{2}-\d{2}$/.test(d)))].sort();
+}
+
+/**
+ * 习惯断言的证据天数。旧数据（无 evidenceDays）全部由单次夜间运行生成、
+ * 无观察日期可考——一律按 1 天计（证据不足），待后续夜间重新观察时凭
+ * observedOn 重新积累。非习惯断言返回 Infinity（无门槛）。
+ */
+export function habitEvidenceDays(fact: UserFact): number {
+  if (!isHabitClaim(fact)) return Number.POSITIVE_INFINITY;
+  return distinctDays(fact.evidenceDays).length || 1;
+}
+
+/**
+ * 习惯断言是否已「定型」可进派生槽位：
+ * - 非习惯断言恒 true；
+ * - 习惯断言需 ≥ HABIT_MIN_OBSERVED_DAYS 个不同观察日；
+ * - 且最近一次观察距今 ≤ HABIT_STALE_DAYS 天（保鲜：不再出现的行为退出画像）。
+ */
+export function isHabitSettled(fact: UserFact, nowMs: number): boolean {
+  if (!isHabitClaim(fact)) return true;
+  const days = distinctDays(fact.evidenceDays);
+  if (days.length === 0) return false; // 旧数据/无证据：视为单日观察，不予固化
+  if (days.length < HABIT_MIN_OBSERVED_DAYS) return false;
+  const lastMs = Date.parse(`${days[days.length - 1]}T00:00:00+08:00`);
+  return Number.isFinite(lastMs) && nowMs - lastMs <= HABIT_STALE_DAYS * 86_400_000;
+}
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -137,9 +198,19 @@ function sanitizeSegment(actorId: string): string {
   return actorId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64) || "anonymous";
 }
 
-/** 把事实渲染为 KV 槽位行（与 appendMemorySummaryLine 的行格式一致） */
+/** 把事实渲染为 KV 槽位行（与 appendMemorySummaryLine 的行格式一致）。
+ * 习惯断言（已定型）行尾带证据锚：模型可据此判断画像新鲜度，也能和
+ * 「昨晚」这类临时表述对照——没有 as-of 的习惯曾被当成昨晚事实引用。 */
 function renderFactLine(fact: UserFact): string {
-  return `[${fact.updatedAt}] ${formatMemoryTopicTag("profile")} ${fact.value}`;
+  let line = `[${fact.updatedAt}] ${formatMemoryTopicTag("profile")} ${fact.value}`;
+  if (isHabitClaim(fact)) {
+    const days = distinctDays(fact.evidenceDays);
+    if (days.length > 0) {
+      const last = days[days.length - 1]!;
+      line += `（截至${last.slice(5, 7)}-${last.slice(8, 10)}，${days.length}天观察）`;
+    }
+  }
+  return line;
 }
 
 export class UserFactStore {
@@ -224,6 +295,11 @@ export class UserFactStore {
       existing.confidence = Math.max(existing.confidence, input.confidence ?? 0.7);
       existing.seenCount += 1;
       existing.updatedAt = now;
+      if (input.observedOn) {
+        // 证据动态累积：不同观察日去重追加（习惯画像的多日门槛依据），cap 30
+        const days = distinctDays([...(existing.evidenceDays ?? []), input.observedOn]);
+        if (days.length > 0) existing.evidenceDays = days.slice(-30);
+      }
       if (input.source && !existing.sources.includes(input.source)) {
         existing.sources.push(input.source);
         if (existing.sources.length > 3) existing.sources = existing.sources.slice(-3);
@@ -239,6 +315,9 @@ export class UserFactStore {
       value,
       confidence: Math.max(0, Math.min(1, input.confidence ?? 0.7)),
       seenCount: 1,
+      ...(input.observedOn
+        ? { evidenceDays: distinctDays([input.observedOn]).slice(0, 30) }
+        : {}),
       sources: input.source ? [input.source] : [],
       createdAt: now,
       updatedAt: now,
@@ -285,8 +364,17 @@ export class UserFactStore {
     memorySync: Pick<AgentMemorySyncService, "getSnapshot" | "setEntry">,
   ): Promise<DerivedSlotSyncResult> {
     const facts = await this.getFacts(actorId);
-    const prefFacts = facts.filter((f) => f.kind === "preference");
-    const otherFacts = facts.filter((f) => f.kind !== "preference");
+    // 习惯画像门槛（2026-11-07）：证据不足/过保鲜期的习惯断言不进槽位，
+    // 且其此前渲染过的旧槽位行一并清除（否则过滤新渲染、留旧残影，画像照旧污染）。
+    const nowMs = Date.parse(nowIso());
+    const settled = (f: UserFact): boolean => isHabitSettled(f, nowMs);
+    const prefFacts = facts.filter((f) => f.kind === "preference" && settled(f));
+    const otherFacts = facts.filter((f) => f.kind !== "preference" && settled(f));
+    const suppressedSubjects = new Set(
+      facts
+        .filter((f) => !settled(f))
+        .map((f) => f.subject || extractFactSubject(f.kind, f.value)),
+    );
 
     let keptRecent = 0;
     const plan: Array<{ key: string; factLines: string[]; factSubjects: Set<string> }> = [
@@ -320,14 +408,17 @@ export class UserFactStore {
         .map((l) => l.trim())
         .filter(Boolean);
 
-      // 保留"与事实库无冲突"的近期捕获行（同 subject 的旧行由事实行替换）
+      // 保留"与事实库无冲突"的近期捕获行（同 subject 的旧行由事实行替换；
+      // 被压制的习惯断言的旧行清除——单日观察/过保鲜期的习惯不得残留在画像里）
       const factFingerprints = new Set(factLines.map((l) => semanticFingerprint(l) || l));
       const kept = existingLines.filter((line) => {
         if (factFingerprints.has(semanticFingerprint(line) || line)) return false;
         // 行格式 [ts] [topic:x] text → 取 text 部分提取 subject 对比
         const text = line.replace(/^\[[^\]]+\]\s*\[[^\]]+\]\s*/, "");
         for (const kind of ["preference", "identity", "constraint", "fact"] as const) {
-          if (factSubjects.has(extractFactSubject(kind, text))) return false;
+          const subject = extractFactSubject(kind, text);
+          if (suppressedSubjects.has(subject)) return false;
+          if (factSubjects.has(subject)) return false;
         }
         return true;
       });
