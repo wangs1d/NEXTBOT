@@ -104,3 +104,32 @@ test("stripMetaSentences 对无元句的正常回复逐字不变（零接触）"
   assert.equal(stripMetaSentences(clean), clean);
   assert.equal(stripMetaSentences("在呢，几点啦？"), "在呢，几点啦？");
 });
+
+test("后台旁白：把内部编排念给用户的整句必须丢弃（2026-11-05）", () => {
+  // 真机原句：用户只问「明天早上11点预约了牙医」，回复却汇报后台配了几个提醒
+  assert.equal(
+    stripMetaSentences(
+      "系统自己配了三级提醒：今晚 21:00 睡前备忘、明早 9:00 起床闹钟、10:00 提醒你该出门了。",
+    ),
+    "",
+    "「系统 + 配了 + 提醒」属于机制旁白，整句删",
+  );
+  assert.equal(
+    stripMetaSentences(
+      "牙医那事排好了。系统自己配了三级提醒：今晚 21:00 睡前备忘、明早 9:00 起床闹钟、10:00 提醒你该出门了。诊所地址你还没跟我说。",
+    ),
+    "牙医那事排好了。诊所地址你还没跟我说。",
+    "只删旁白句，前后正常正文逐字保留",
+  );
+  assert.equal(stripMetaSentences("后台已经安排了两级提醒。"), "");
+});
+
+test("后台旁白：agent 正常口吻的确认句不受影响", () => {
+  for (const s of [
+    "我已经帮你把提醒设好了。明天 11 点叫你。",
+    "行，排上了，明早十一点我喊你。",
+    "诊所地址你还没跟我说，离得远的话我早点叫你。",
+  ]) {
+    assert.equal(stripMetaSentences(s), s);
+  }
+});

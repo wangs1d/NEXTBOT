@@ -56,7 +56,6 @@ function getSections(id) {
 const CATEGORY_LABELS = {
   news: "\u65B0\u95FB\u8D44\u8BAF",
   article: "\u6587\u7AE0\u9605\u8BFB",
-  search_result: "\u68C0\u7D22\u7ED3\u679C",
   webpage: "\u7F51\u9875\u6458\u5F55",
   document: "\u6587\u6863\u8D44\u6599",
   data: "\u8C03\u7814\u62A5\u544A",

@@ -550,12 +550,16 @@ export class DecisionHub {
       });
     }
 
-    // 通用：写入对话上下文记忆（所有路由都写）
+    // 通用：写入对话上下文记忆（所有路由都写）。
+    // 2026-11-04 修正：正文只放用户原话。此前拼的 `（路由：xxx）` 协议后缀会被
+    // ltm-write-gate 的 TASK_STATE_RE（`（路由` 模式）整条拒掉——用户当轮陈述的
+    // 持久事实（"我领养了只猫叫煤球"）从未到达 Mem0/叙事抽取器，长期记忆
+    // "聊过但没存下"的总病根。路由信息已在 metadata.tags，无需进正文。
     writes.push({
       actorId: input.actorId,
       kind: "event",
       domain: "episodic",
-      content: `用户问：${userText.slice(0, 200)}（路由：${route.mode}）`,
+      content: userText.slice(0, 200),
       importance: "medium",
       metadata: { tags: ["conversation", route.mode] },
       source: "chat",

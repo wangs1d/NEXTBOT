@@ -1,4 +1,4 @@
-import type { Page } from "playwright";
+import type { Browser, BrowserContext, Page } from "playwright";
 
 import type { BrowserSessionService } from "../browser-session-service.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "../browser-session-sites.js";
@@ -107,6 +107,11 @@ export type AcquireBrowserPageOptions = {
   interactiveLogin?: boolean;
   /** 无头优先（批量取数）：内置浏览器兜底。 */
   preferHeadless?: boolean;
+  /**
+   * 允许「无 Cookie 也开浏览器」（匿名可读的站点，如苏宁/什么值得买搜索页）。
+   * 缺省 false：无 Cookie 且不能交互登录时直接抛 no_cookie，不白起浏览器。
+   */
+  allowAnonymous?: boolean;
 };
 
 export type BrowserRuntimeDeps = {
@@ -117,6 +122,114 @@ export type BrowserRuntimeDeps = {
 
 export class BrowserRuntime {
   constructor(private readonly deps: BrowserRuntimeDeps) {}
+
+  /**
+   * 云端常驻匿名浏览器（手机端/后台取数用的「内置浏览器」）。
+   *
+   * 为什么不能每次都 chromium.launch：一是慢（每次 1s 冷启动），二是**平台风控**——
+   * 每次全新无痕实例、每次零 Cookie 访问，苏宁/什么值得买这类站点会当成爬虫弹
+   * 安全验证（实测：第二次搜索就被要求验证）。真机上是「一个浏览器开着一直用」，
+   * 这里就复刻这个形态：浏览器常驻、按站点复用 context（Cookie 自然累积），
+   * 页面用完只关 page，空闲 90s 才整体回收。
+   *
+   * 安全边界：只用于**无登录态**（cookies 为空）的匿名站点；带用户 Cookie 的
+   * 取价仍走独立实例，避免跨用户串号。
+   */
+  private anonBrowser: Browser | null = null;
+  private anonLaunching: Promise<Browser> | null = null;
+  private readonly anonContexts = new Map<string, BrowserContext>();
+  private anonIdleTimer: ReturnType<typeof setTimeout> | null = null;
+  private static readonly ANON_IDLE_MS = 90_000;
+
+  /** 空闲回收：没有在跑的页面就关掉整个浏览器，别长期占内存。 */
+  private touchAnonIdle(): void {
+    if (this.anonIdleTimer) clearTimeout(this.anonIdleTimer);
+    this.anonIdleTimer = setTimeout(() => {
+      void this.closeAnonBrowser();
+    }, BrowserRuntime.ANON_IDLE_MS);
+    // 定时器不应该吊住进程
+    this.anonIdleTimer.unref?.();
+  }
+
+  private async closeAnonBrowser(): Promise<void> {
+    this.anonIdleTimer = null;
+    for (const ctx of this.anonContexts.values()) {
+      await ctx.close().catch(() => {});
+    }
+    this.anonContexts.clear();
+    const b = this.anonBrowser;
+    this.anonBrowser = null;
+    await b?.close().catch(() => {});
+  }
+
+  private async getAnonBrowser(pw: typeof import("playwright")): Promise<Browser> {
+    if (this.anonBrowser?.isConnected()) return this.anonBrowser;
+    if (!this.anonLaunching) {
+      this.anonLaunching = pw.chromium
+        .launch({ headless: true, args: ["--disable-blink-features=AutomationControlled"] })
+        .then((b) => {
+          this.anonBrowser = b;
+          this.anonLaunching = null;
+          return b;
+        })
+        .catch((err) => {
+          this.anonLaunching = null;
+          throw err;
+        });
+    }
+    return this.anonLaunching;
+  }
+
+  /** 匿名站点的页面租约：复用常驻浏览器 + 站点级 context。 */
+  private async acquireAnonPage(siteId: string | undefined, targetUrl: string): Promise<BrowserPageLease> {
+    const pw = await loadPlaywright();
+    if (!pw) {
+      throw new BrowserPageUnavailableError("no_playwright", "Playwright 未安装。请在 server 目录执行: npx playwright install chromium");
+    }
+    const key = siteId ?? "default";
+    const browser = await this.getAnonBrowser(pw);
+    let ctx = this.anonContexts.get(key);
+    let created = false;
+    if (!ctx || ctx.isClosed()) {
+      ctx = await browser.newContext({
+        userAgent: USER_AGENT,
+        locale: "zh-CN",
+        viewport: { width: 1280, height: 900 },
+      });
+      this.anonContexts.set(key, ctx);
+      created = true;
+    }
+    // 新 context 先"暖站"再敲搜索页：冷启动直接打搜索接口是风控最爱拦的形态
+    // （什么值得买第二次冷搜就弹「安全验证」）。先开首页拿站点 Cookie，
+    // 再进搜索页，行为接近真人。
+    if (created) {
+      const home = siteId
+        ? BROWSER_SESSION_SITES[siteId as BrowserSessionSiteId]?.homeUrl
+        : undefined;
+      if (home) {
+        const warm = await ctx.newPage();
+        await warm.goto(home, { waitUntil: "domcontentloaded", timeout: 12_000 }).catch(() => {});
+        await warm.waitForTimeout(900).catch(() => {});
+        await warm.close().catch(() => {});
+      }
+    }
+    const page = await ctx.newPage();
+    try {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15_000 });
+    } catch (err) {
+      await page.close().catch(() => {});
+      throw err;
+    }
+    this.touchAnonIdle();
+    return {
+      page,
+      mode: "headless",
+      release: async () => {
+        await page.close().catch(() => {});
+        this.touchAnonIdle();
+      },
+    };
+  }
 
   /** 内置浏览器路径是否可用（客户端在线 + CDP 总开关 + 端点已上报）。 */
   canUseSharedBrowser(actorId: string): boolean {
@@ -173,7 +286,13 @@ export class BrowserRuntime {
     // 1) 批量取数：Playwright+Cookie 主通道（无头并行，不抢面板）。
     if (opts.preferHeadless === true) {
       try {
-        return await this.acquireHeadlessPage(opts.siteId, targetUrl, opts.cookies ?? [], opts.interactiveLogin === true);
+        return await this.acquireHeadlessPage(
+          opts.siteId,
+          targetUrl,
+          opts.cookies ?? [],
+          opts.interactiveLogin === true,
+          opts.allowAnonymous === true,
+        );
       } catch (err) {
         const shared = await this.tryOpenSharedPage(actorId, targetUrl).catch(() => null);
         if (shared) return shared;
@@ -186,7 +305,13 @@ export class BrowserRuntime {
     if (shared) return shared;
 
     // 3) 无头兜底（CDP 连接/开页失败 → 静默降级，客户端可能刚断开/端口失效）
-    return this.acquireHeadlessPage(opts.siteId, targetUrl, opts.cookies ?? [], opts.interactiveLogin === true);
+    return this.acquireHeadlessPage(
+      opts.siteId,
+      targetUrl,
+      opts.cookies ?? [],
+      opts.interactiveLogin === true,
+      opts.allowAnonymous === true,
+    );
   }
 
   /** 服务端无头 Chromium + 已授权 Cookie。 */
@@ -195,11 +320,18 @@ export class BrowserRuntime {
     targetUrl: string,
     cookies: ImportedBrowserCookie[],
     interactiveLogin: boolean,
+    allowAnonymous = false,
   ): Promise<BrowserPageLease> {
+    // 匿名站点 + 无 Cookie → 走常驻浏览器（复用 context，压低风控与冷启动）。
+    // 不看 interactiveLogin：匿名站点本来就该匿名访问，真弹登录也能在同一个
+    // context 里截图推码，没有必须冷启动的理由。
+    if (allowAnonymous && cookies.length === 0) {
+      return this.acquireAnonPage(siteId, targetUrl);
+    }
     const siteLabel = siteId
       ? (BROWSER_SESSION_SITES[siteId as BrowserSessionSiteId]?.label ?? siteId)
       : "该站点";
-    if (cookies.length === 0 && !interactiveLogin) {
+    if (cookies.length === 0 && !interactiveLogin && !allowAnonymous) {
       throw new BrowserPageUnavailableError(
         "no_cookie",
         `未导入 ${siteLabel} 的 Cookie，且无法交互式登录（客户端内置浏览器不在线）。` +

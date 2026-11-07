@@ -68,14 +68,23 @@ export function resolveEmbeddingModel(): string {
 
 /**
  * 解析当前可用的 Embedding 端点（OpenAI 兼容 /v1/embeddings）。
- * 远端只认显式配置：AGENT_EMBEDDING_BASE_URL → OPENAI_EMBEDDINGS_URL；
- * 否则落到本地内置向量引擎（零配置底座，bootstrap 无远端配置时预热）。
+ *
+ * 本地内置向量引擎【优先】（2026-11-04 调整）：手机端部署在云端，远端 Embedding
+ * 供应商依赖外部账户状态（SiliconFlow 余额耗尽 402 曾让长期记忆召回全链路瘫痪，
+ * 且免费额度说停就停），不再作为首选。本地引擎零外部依赖、随进程常驻；向量集合
+ * 按模型打标（resolveAgenticMemoryCollectionName），本地/远端各占各的向量空间，
+ * 切换互不污染。远端（AGENT_EMBEDDING_BASE_URL → OPENAI_EMBEDDINGS_URL）仅在
+ * 本地引擎不可用（未就绪/被 AGENT_LOCAL_EMBEDDING_DISABLED 关闭/宿主崩溃）时兜底。
  *
  * 刻意【不】拿 OPENAI_BASE_URL 兜底：对话网关未必提供 /embeddings（真链踩过：
  * 通用网关/embeddings 连接失败），误信会产出运行期才炸的假端点；确有嵌入能力
  * 的端点请显式配 OPENAI_EMBEDDINGS_URL。
  */
 export function resolveEmbeddingEndpoint(): EmbeddingEndpoint | null {
+  // 本地内置引擎优先：模型/维度/鉴权自成一体，与远端配置解耦
+  const local = getLocalEmbeddingEndpoint();
+  if (local) return { baseUrl: local.baseUrl, apiKey: local.apiKey, model: local.model };
+
   const apiKey =
     process.env.AGENT_EMBEDDING_API_KEY?.trim() ||
     process.env.OPENAI_API_KEY?.trim() ||
@@ -93,9 +102,6 @@ export function resolveEmbeddingEndpoint(): EmbeddingEndpoint | null {
     return { baseUrl: embeddingsUrl.replace(/\/+$/, ""), apiKey, model };
   }
 
-  // 本地内置引擎兜底：模型/维度/鉴权自成一体，与远端配置解耦
-  const local = getLocalEmbeddingEndpoint();
-  if (local) return { baseUrl: local.baseUrl, apiKey: local.apiKey, model: local.model };
   return null;
 }
 

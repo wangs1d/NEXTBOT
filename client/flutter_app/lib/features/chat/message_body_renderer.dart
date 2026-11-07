@@ -1,3 +1,5 @@
+import "dart:convert";
+
 import "package:flutter/material.dart";
 
 import "../../core/theme/app_typography.dart";
@@ -12,7 +14,6 @@ import "assistant_brief_message.dart";
 import "content_summary_card.dart";
 import "content_summary_detail_formatter.dart";
 import "content_summary_detail_modal.dart";
-import "data_brief_message.dart";
 import "image_result_message.dart";
 import "inline_video_player.dart";
 import "structured_assistant_message_body.dart";
@@ -25,7 +26,7 @@ import "structured_assistant_message_body.dart";
 /// - `renderBlocks` 交错渲染块（一段文字 → 一组照片 → 再一段文字）
 /// - `mediaCards` 结构化媒体卡片
 /// - `[RENDER_AS:xxx]` 显式展示形式路由（brief / structured / image_result /
-///   data_brief / video）
+///   video；data_brief 已退役 2026-11-06）
 /// - 内容摘要卡与 markdown 内联文本
 /// - `followUpPrompts`「接下来你可以」接续建议胶囊（仅回调接线方展示）
 Widget buildMessageBody(
@@ -53,6 +54,11 @@ Widget buildMessageBody(
   /// 独立第二条消息形态渲染，见 chat_page 消息行拆分）；调用方自行在气泡外
   /// 渲染卡片。缺省 false=卡片照旧在 body 内（手机端/其他调用方行为不变）。
   bool excludeTravelCard = false,
+
+  /// 需要从 body 里排除、由调用方在气泡外独立渲染的卡型清单（2026-11-07
+  /// 用户拍板：reminder_confirm 提醒确认卡同 travel_itinerary 改气泡外独立
+  /// 元素）。只影响 body 内渲染，不影响消息行拆分逻辑（拆分由调用方自读）。
+  List<String> excludeCardTypes = const <String>[],
 }) {
   final Widget body = _buildAssistantBodyInner(
     context,
@@ -64,6 +70,7 @@ Widget buildMessageBody(
     typewriterRawText: typewriterRawText,
     typewriterCursor: typewriterCursor,
     excludeTravelCard: excludeTravelCard,
+    excludeCardTypes: excludeCardTypes,
   );
   if (isUser || onFollowupTap == null) return body;
   final List<String> followUps = message.followUpPrompts ?? const <String>[];
@@ -172,6 +179,7 @@ Widget _buildAssistantBodyInner(
   String? typewriterRawText,
   bool typewriterCursor = false,
   bool excludeTravelCard = false,
+  List<String> excludeCardTypes = const <String>[],
 }) {
   if (isUser) {
     return Text(
@@ -180,6 +188,22 @@ Widget _buildAssistantBodyInner(
             color: cs.onPrimaryContainer,
           ),
     );
+  }
+
+  // v2 统一渲染信封（P4 双端归一，2026-11-07）：服务端渲染出口的唯一权威
+  // 序列，信封优先直读。含客户端不能独立渲染的块（form 声明 / data_brief 等
+  // structured 形态）时整体回退旧 7 层字段链——旧链读 finalText + legacy
+  // 字段，语义与升级前逐字节一致，零回归。
+  if (!isUser && (message.envelopeBlocks?.isNotEmpty ?? false)) {
+    final Widget? body = _buildEnvelopeBlocksBody(
+      context,
+      cs,
+      message,
+      onUserAction: onUserAction,
+      excludeTravelCard: excludeTravelCard,
+      excludeCardTypes: excludeCardTypes,
+    );
+    if (body != null) return body;
   }
 
   // 回复信封块（reply blocks）：服务端已把卡片标记确定性拆成结构化块序列，
@@ -203,6 +227,7 @@ Widget _buildAssistantBodyInner(
         replyBlocks,
         onUserAction: onUserAction,
         excludeTravelCard: excludeTravelCard,
+        excludeCardTypes: excludeCardTypes,
       );
       if (body != null) return body;
     }
@@ -222,6 +247,7 @@ Widget _buildAssistantBodyInner(
       message,
       onUserAction: onUserAction,
       excludeTravelCard: excludeTravelCard,
+      excludeCardTypes: excludeCardTypes,
     );
     if (body != null) return body;
   }
@@ -351,24 +377,16 @@ Widget _buildAssistantBodyInner(
             textTheme: Theme.of(context).textTheme,
             showCursor: typewriterCursor,
           );
-        case "data_brief": {
-          final DataBriefPayload? payload = DataBriefMessage.tryParse(cleanText);
-          if (payload == null) {
-            // payload 缺失/损坏：回退结构化正文（保留 DATA_BRIEF 块原文）
-            return StructuredAssistantMessageBody(
-              text: cleanText,
-              cs: cs,
-              textTheme: Theme.of(context).textTheme,
-              showCursor: typewriterCursor,
-            );
-          }
-          return DataBriefMessage(
-            payload: payload,
+        case "data_brief":
+          // data_brief 已退役（2026-11-06）：服务端不再下发。历史消息残留的
+          // payload 块在这里转写成正常正文（JSON 解码 + 剥机器标记），
+          // 不再裸奔 [DATA_BRIEF_START]{...} 原文。
+          return StructuredAssistantMessageBody(
+            text: _legacyDataBriefToProse(cleanText),
             cs: cs,
             textTheme: Theme.of(context).textTheme,
             showCursor: typewriterCursor,
           );
-        }
         case "video": {
           // 视频抓取：解析 [VIDEO_MEDIA_START] 媒体块，内联渲染可播放视频
           final ({VideoMediaData? media, String cleaned}) parsed =
@@ -460,6 +478,129 @@ typedef _UserActionHandler = void Function(
   required AgentResultData cardData,
 });
 
+/// v2 信封块序列（ChatMessage.envelopeBlocks）→ 正文 Widget。
+///
+/// 支持的块：text / card / media / media_segments / summary /
+/// structured(content_summary)；form 与其余 structured 形态（data_brief /
+/// video_media / chat_media / image_result）返回 null——旧链对它们有完整的
+/// 正文标记解析路径（RENDER_AS 路由 + mediaCards 图廊），不做半吊子渲染。
+///
+/// 文本去重规则：序列里有 text 块时正文只按块渲染（message.text 是同一份
+/// 内容的投影）；没有 text 块（分泡轮只挂非 text 块）时先渲染气泡正文、
+/// 再接卡/媒体块。
+Widget? _buildEnvelopeBlocksBody(
+  BuildContext context,
+  ColorScheme cs,
+  ChatMessage message, {
+  _UserActionHandler? onUserAction,
+  bool excludeTravelCard = false,
+  List<String> excludeCardTypes = const <String>[],
+}) {
+  final List<Map<String, dynamic>> blocks = message.envelopeBlocks!;
+  // 兼容闸门：有不认识的块 → 整体回退旧链，绝不半渲染
+  for (final Map<String, dynamic> block in blocks) {
+    final String type = block["type"]?.toString() ?? "text";
+    if (type == "form") return null;
+    if (type == "structured" &&
+        block["kind"]?.toString() != "content_summary") {
+      return null;
+    }
+  }
+
+  final List<Widget> blockWidgets = <Widget>[];
+  bool hasTextBlock = false;
+  Widget? appendStructured(
+    Map<String, dynamic> card,
+  ) {
+    try {
+      final ContentSummaryDataV2 structuredSummary =
+          ContentSummaryDataV2.fromJson(card);
+      blockWidgets.add(
+        ContentSummaryMessageBody(
+          summary: structuredSummary,
+          briefText: "",
+          extraText: ContentSummaryParser.stripSummaryBlocks(message.text),
+          onCardTap: () {
+            if (!ContentSummaryLauncher.open(structuredSummary)) {
+              ContentSummaryDetailModal.show(context, structuredSummary);
+            }
+          },
+        ),
+      );
+      return null;
+    } catch (_) {
+      // 载荷损坏：整体回退旧链（服务端保证坏块整块剥离，正文是干净的）
+      return null;
+    }
+  }
+
+  void appendBlock(Map<String, dynamic> block) {
+    final String type = block["type"]?.toString() ?? "text";
+    if (type == "card") {
+      final Map<String, dynamic> cardJson =
+          block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
+      final AgentResultData data = AgentResultData.fromJson(cardJson);
+      _appendCardWidget(blockWidgets, cs, data, onUserAction,
+          excludeTravelCard: excludeTravelCard,
+          excludeCardTypes: excludeCardTypes);
+    } else if (type == "media") {
+      final Widget? media = _mediaBlockWidget(context, cs, block);
+      if (media != null) blockWidgets.add(media);
+    } else if (type == "media_segments") {
+      // 交错段：text/media 段按序展开（与 renderBlocks 同构）
+      final Object? segs = block["segments"];
+      if (segs is List) {
+        for (final Object? seg in segs) {
+          if (seg is! Map) continue;
+          appendBlock(Map<String, dynamic>.from(seg));
+        }
+      }
+    } else if (type == "summary") {
+      final Map<String, dynamic> card =
+          block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
+      appendStructured(card);
+    } else if (type == "structured") {
+      final Map<String, dynamic> card =
+          block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
+      appendStructured(card);
+    } else if (type == "followups") {
+      // 接续建议由 buildMessageBody 的 followUpPrompts 行承担，块里跳过
+    } else {
+      hasTextBlock = true;
+      final String text = block["text"]?.toString() ?? "";
+      if (text.trim().isEmpty) return;
+      blockWidgets.add(
+        StructuredAssistantMessageBody(
+          text: text,
+          cs: cs,
+          textTheme: Theme.of(context).textTheme,
+        ),
+      );
+    }
+  }
+
+  for (final Map<String, dynamic> block in blocks) {
+    appendBlock(block);
+  }
+  // 无 text 块的分泡轮：正文（气泡文本）在最前，卡/媒体块随后
+  if (!hasTextBlock && message.text.trim().isNotEmpty) {
+    blockWidgets.insert(
+      0,
+      StructuredAssistantMessageBody(
+        text: message.text,
+        cs: cs,
+        textTheme: Theme.of(context).textTheme,
+      ),
+    );
+  }
+  if (blockWidgets.isEmpty) return null;
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    mainAxisSize: MainAxisSize.min,
+    children: blockWidgets,
+  );
+}
+
 /// blocks 序列（v2：text/card/media）→ 正文 Widget。
 /// 媒体块与卡片/正文同一条序列渲染；无任何可渲染块返回 null（调用方回退
 /// 统一路径），保持「空 blocks 不拦截后续分支」的旧行为。
@@ -469,6 +610,7 @@ Widget? _buildReplyBlocksBody(
   List<Map<String, dynamic>> replyBlocks, {
   _UserActionHandler? onUserAction,
   bool excludeTravelCard = false,
+  List<String> excludeCardTypes = const <String>[],
 }) {
   final List<Widget> blockWidgets = <Widget>[];
   for (final Map<String, dynamic> block in replyBlocks) {
@@ -478,7 +620,8 @@ Widget? _buildReplyBlocksBody(
           block["card"] as Map<String, dynamic>? ?? const <String, dynamic>{};
       final AgentResultData data = AgentResultData.fromJson(cardJson);
       _appendCardWidget(blockWidgets, cs, data, onUserAction,
-          excludeTravelCard: excludeTravelCard);
+          excludeTravelCard: excludeTravelCard,
+          excludeCardTypes: excludeCardTypes);
     } else if (type == "media") {
       final Widget? media = _mediaBlockWidget(context, cs, block);
       if (media != null) blockWidgets.add(media);
@@ -518,6 +661,7 @@ Widget? _buildUnifiedMediaCardBody(
   ChatMessage message, {
   _UserActionHandler? onUserAction,
   bool excludeTravelCard = false,
+  List<String> excludeCardTypes = const <String>[],
 }) {
   final List<Map<String, dynamic>>? renderBlocks = message.renderBlocks;
   final bool hasRenderBlocks = renderBlocks != null && renderBlocks.isNotEmpty;
@@ -544,7 +688,8 @@ Widget? _buildUnifiedMediaCardBody(
       for (final AgentResultBlock seg in AgentResultParser.parseBlocks(text)) {
         if (seg.isCard) {
           _appendCardWidget(blockWidgets, cs, seg.data!, onUserAction,
-              excludeTravelCard: excludeTravelCard);
+              excludeTravelCard: excludeTravelCard,
+              excludeCardTypes: excludeCardTypes);
           continue;
         }
         // 剥模型自带的展示形态声明行（[RENDER_AS:xxx]/[RENDER_HINT:xxx]）：
@@ -594,6 +739,20 @@ Widget? _buildUnifiedMediaCardBody(
   );
 }
 
+/// 卡片是否自绘全部版面（含按钮），不再套「通用按钮卡」外壳。
+///
+/// 手机端购物卡族（支付/确认/物流）把服务端 actions 画在自己版面里：金额、
+/// 订单号、倒计时、时间轴都是卡片的一部分。旧逻辑见到 actions 非空就直接
+/// 换成 AgentActionChoiceCard，整张卡被降级成一串按钮 + 列表（真机实证：
+/// 支付卡只剩「💳 支付确认 + 订单/平台 + 两个按钮」，金额和订单号全丢）。
+bool _cardOwnsChrome(AgentResultData data) {
+  final Object? shopping = data.extra?["shopping"];
+  if (shopping is! Map) return false;
+  final String stage = (shopping["stage"] ?? "").toString();
+  return data.cardType.startsWith("shopping_") ||
+      (data.cardType == "price_compare" && stage == "candidates");
+}
+
 /// 卡片块 → Widget（actions 非空渲染为带按钮的选择型卡片）；首位卡不加顶距。
 void _appendCardWidget(
   List<Widget> blockWidgets,
@@ -601,15 +760,19 @@ void _appendCardWidget(
   AgentResultData data,
   _UserActionHandler? onUserAction, {
   bool excludeTravelCard = false,
+  List<String> excludeCardTypes = const <String>[],
 }) {
   // 行程卡外移（2026-09-25 用户定稿）：调用方声明 excludeTravelCard 时，卡由
   // 消息行在气泡外独立渲染（第二条消息形态），body 不再重复渲染。
   if (excludeTravelCard && data.cardType == "travel_itinerary") return;
+  // 通用外移清单（2026-11-07 拍板）：reminder_confirm 等卡型由调用方在气泡外
+  // 独立渲染，body 内跳过，避免双份。
+  if (excludeCardTypes.contains(data.cardType)) return;
   final int idx = blockWidgets.length;
   // 行程卡单独分段（2026-09-25 用户定稿）：travel_itinerary 是独立规划卡，
   // 与介绍文字之间用「大间距 + 细分隔线」显式切开成新的一段（其余小卡维持
   // 紧凑贴排）。
-  final Widget card = data.actions.isNotEmpty
+  final Widget card = data.actions.isNotEmpty && !_cardOwnsChrome(data)
       ? AgentActionChoiceCard(
           data: data,
           onAction: onUserAction == null
@@ -772,6 +935,55 @@ String _stripRenderAsMarker(String text) {
     cleanedLines.add(stripped);
   }
   return cleanedLines.join('\n').trim();
+}
+
+/// data_brief 退役后的历史消息转写：把 `[DATA_BRIEF_START]{json}[DATA_BRIEF_END]`
+/// payload 解码成正常正文（结论 + 详情 prose），剥掉全部机器标记。
+///
+/// 只取 conclusion/restText，不重建 KPI 网格——旧提取器的标签本就是截断
+/// 碎片（「昨晚（」「道指涨超」），网格正是被退役的原因；详情 prose 里
+/// 自带完整数据叙述。JSON 损坏时剥掉整个块，宁可少一段也不裸奔 JSON。
+String _legacyDataBriefToProse(String text) {
+  final RegExp blockRe = RegExp(
+    r'\[DATA_BRIEF_START\]\s*([\s\S]*?)\s*\[DATA_BRIEF_END\]',
+  );
+  final RegExpMatch? match = blockRe.firstMatch(text);
+  if (match == null) {
+    // 不完整块（流式截断/落库残缺）：剥掉残标记，剩余正文照常展示
+    return text
+        .replaceAll('[DATA_BRIEF_START]', '')
+        .replaceAll('[DATA_BRIEF_END]', '')
+        .trim();
+  }
+  String payloadPart = '';
+  final Object? decoded = tryParseDataBriefPayloadJson(match.group(1) ?? '');
+  if (decoded is Map) {
+    final String conclusion =
+        (decoded['conclusion'] as String?)?.trim() ?? '';
+    final String restText = (decoded['restText'] as String?)?.trim() ?? '';
+    payloadPart = <String>[if (conclusion.isNotEmpty) conclusion, restText]
+        .where((String part) => part.isNotEmpty)
+        .join('\n\n');
+  }
+  // JSON 损坏或字段为空 → payloadPart 为空串，整块被静默移除
+  final String before = text.substring(0, match.start).trim();
+  final String after = text.substring(match.end).trim();
+  return <String>[
+    if (before.isNotEmpty) before,
+    if (payloadPart.isNotEmpty) payloadPart,
+    if (after.isNotEmpty) after,
+  ].join('\n\n').trim();
+}
+
+/// 解析 data_brief payload JSON；空串/非法返回 null。
+Object? tryParseDataBriefPayloadJson(String raw) {
+  final String trimmed = raw.trim();
+  if (trimmed.isEmpty) return null;
+  try {
+    return jsonDecode(trimmed);
+  } catch (_) {
+    return null;
+  }
 }
 
 // 旧数据恢复用：识别正文里内嵌的图片链接（markdown 图 / /agent/images/ 路径 / http 图片）。

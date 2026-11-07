@@ -25,6 +25,7 @@ import {
 export class PddAdapter implements ShoppingPlatformAdapter {
   readonly platform = "pdd";
   readonly category = "general" as const;
+  readonly authMode = "login" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

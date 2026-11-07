@@ -178,7 +178,7 @@ export class WechatClawBridgeService {
         /** TTS 音频数据（微信语音推送用） */
         ttsAudio?: { format: string; base64: string } | null;
         /** 提醒类型标记（供 OpenClaw 插件决定渲染方式） */
-        reminderType?: "popup" | "tts_alarm" | "phone_call" | null;
+        reminderType?: "popup" | "phone_call" | null;
       }
     | { ok: false; message: string }
   > {
@@ -280,7 +280,7 @@ export class WechatClawBridgeService {
    * 1. ChatTurnResult 自带 reminderType 字段（Agent 工具调用时主动设置）
    * 2. 文本内容启发式检测（关键词匹配）
    */
-  private detectReminderType(text: string): "popup" | "tts_alarm" | "phone_call" | null {
+  private detectReminderType(text: string): "popup" | "phone_call" | null {
     // 优先使用 runChatTurn 返回的标记（如果有的话）
     // 这里做文本启发式检测作为兜底
 
@@ -289,11 +289,6 @@ export class WechatClawBridgeService {
     // 电话来电标记
     if (lower.includes("[phone_call]") || lower.includes("📞") || lower.includes("电话提醒")) {
       return "phone_call";
-    }
-
-    // TTS 语音闹铃标记
-    if (lower.includes("[tts_alarm]") || lower.includes("🔔") || lower.includes("语音提醒") || lower.includes("语音闹钟")) {
-      return "tts_alarm";
     }
 
     // 弹窗提醒标记

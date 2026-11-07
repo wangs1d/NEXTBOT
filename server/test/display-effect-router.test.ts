@@ -41,7 +41,8 @@ test("tool signals win when no confident content signal", () => {
   assert.equal(route("订单", ["已发货"], "order.query"), "order");
   assert.equal(route("文件", ["a.pdf"], "file.read"), "file");
   assert.equal(route("图片", ["结果"], "search_images"), "media");
-  assert.equal(route("搜索", ["条目"], "search_web"), "search_result");
+  // 网页搜索不再映射任何展示效果（2026-11-05 定稿）：无内容信号 → 不选形态
+  assert.equal(route("搜索", ["条目"], "search_web"), "");
   // 文本 A/B（无图）→ comparison_table 双栏卡；compare 双图滑杆只接带图对比
   assert.equal(route("对比", ["A", "B"], "compare_products"), "comparison_table");
   assert.equal(route("行程", ["day1"], "plan_trip"), "timeline");
@@ -454,22 +455,22 @@ test("metric: dual-representation scoring keeps form score despite prose noise",
   assert.equal(routeDisplayEffect(input), "metric");
 });
 
-test("generic containers (fold_list/chips) yield to strong tool scene", () => {
+test("web search no longer claims a display effect (2026-11-05)", () => {
   const nineItems = Array.from({ length: 9 }, (_, i) => ({ text: `搜索结果条目${i + 1}` }));
   const fullText = "搜索结果：\n" + Array.from({ length: 9 }, (_, i) => `- 搜索结果条目${i + 1}`).join("\n");
-  // 修复前：fold_list 内容分 0.65 → 0.507，抢走 search_result 的 0.45
+  // 搜索工具不再给 search_result 倾向：9 条长清单按内容形态本身走折叠列表
   assert.equal(
     routeDisplayEffect({ toolName: "search_web", title: "搜索结果", items: nineItems, fullText }),
-    "search_result",
+    "fold_list",
   );
-  // chips 同理让位（强工具在场）；无工具时不受折减、照常命中
+  // 短标签同理按 chips 命中
   const tags = [{ text: "健身" }, { text: "摄影" }, { text: "烘焙" }, { text: "旅行" }];
   assert.equal(
     routeDisplayEffect({ toolName: "search_web", title: "热门标签", items: tags }),
-    "search_result",
+    "chips",
   );
   assert.equal(routeDisplayEffect({ title: "你的兴趣标签", items: tags }), "chips");
-  // 无工具时 9 条长清单仍折叠（折减只作用于强工具场景）
+  // 无工具时 9 条长清单仍折叠
   assert.equal(
     routeDisplayEffect({ title: "购物清单", items: nineItems, fullText }),
     "fold_list",

@@ -7,7 +7,6 @@ import {
   attachMediaSearchMarker,
   sanitizeModelCardBlocks,
 } from "../src/services/tool-result-processor.js";
-import { attachSearchResultCardFromExecuted } from "../src/services/tool-card-registry.js";
 import { attachDeterministicCards } from "../src/services/deterministic-card-chain.js";
 import { effectStatusOf } from "../src/render/index.js";
 import { stripMarkersToPlainText } from "../src/services/reply-envelope.js";
@@ -236,60 +235,30 @@ test("L3 summary_card：超长结构化文档 → CONTENT_SUMMARY_V2 折叠摘�
 // L1 工具绑定：注册工具结构化回执直出卡
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("L1 search_web：工具回执直出 search_result 卡（正文作前导）", () => {
-  const out = processor.processAssistantText(
-    "帮你查了三篇口碑最高的攻略，要点我放在下面了。",
-    {
-      toolName: "search_web",
-      toolResult: {
-        provider: "tavily",
-        items: [
-          { title: "鼓浪屿两日游攻略", url: "https://example.com/a", snippet: "经典路线", source: "马蜂窝" },
-          { title: "厦门美食地图", url: "https://example.com/b", snippet: "八市全收录", source: "知乎" },
-          { title: "环岛路骑行指南", url: "https://example.com/c", snippet: "日落时段推荐", source: "小红书" },
-        ],
-      },
+test("L1 search_web：不回搜索卡，正文原样（2026-11-05 定稿：搜索只喂模型）", () => {
+  const text = "帮你查了三篇口碑最高的攻略，要点我放在下面了。";
+  const out = processor.processAssistantText(text, {
+    toolName: "search_web",
+    toolResult: {
+      provider: "tavily",
+      items: [
+        { title: "鼓浪屿两日游攻略", url: "https://example.com/a", snippet: "经典路线", source: "马蜂窝" },
+        { title: "厦门美食地图", url: "https://example.com/b", snippet: "八市全收录", source: "知乎" },
+        { title: "环岛路骑行指南", url: "https://example.com/c", snippet: "日落时段推荐", source: "小红书" },
+      ],
     },
-  );
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result", `实际输出：${out.slice(0, 300)}`);
-  assert.equal(card.items.length, 3);
-  assert.equal((card.items[0] as { url?: unknown }).url, undefined, "search_result 条目不承载网页链接");
-  assert.ok(!out.includes("马蜂窝"), "条目正文不出现来源站点");
-  assert.ok(out.includes("帮你查了三篇"));
+  });
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), `不应出搜索卡：${out.slice(0, 300)}`);
+  assert.ok(out.includes("帮你查了三篇"), "模型正文应完整保留");
+  // 搜索条目/来源/链接一律不上屏
+  assert.ok(!out.includes("example.com"), "不应透出网址");
+  assert.ok(!out.includes("马蜂窝"), "不应透出来源站点");
+  assert.ok(!out.includes("鼓浪屿两日游攻略"), "不应逐条复述搜索条目");
 });
 
-test("L1 search 聚合：tool-loop 多次搜索结果合并为一张卡", () => {
-  const text = "资料我都看完了，综合下来建议避开周末高峰。";
-  const out = attachSearchResultCardFromExecuted(text, [
-    {
-      toolName: "search_web",
-      result: {
-        items: [
-          { title: "攻略一", url: "https://example.com/1", snippet: "s1", source: "a" },
-          { title: "攻略二", url: "https://example.com/2", snippet: "s2", source: "b" },
-        ],
-      },
-    },
-    {
-      toolName: "info.search",
-      result: {
-        items: [
-          { title: "攻略二重复", url: "https://example.com/2", snippet: "dup", source: "b" },
-          { title: "攻略三", url: "https://example.com/3", snippet: "s3", source: "c" },
-        ],
-      },
-    },
-  ]);
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result");
-  assert.equal(card.items.length, 3, "跨工具 url 去重后应为 3 条");
-  assert.ok(out.startsWith("资料我都看完了"));
-});
-
-test("L1 search 让位：本轮有媒体主形态时搜索卡不附（有图轮次文字列表冗余）", () => {
+test("L1 search 无卡：有图轮次与零图轮次都不附搜索卡", () => {
   const text = "照片都找出来了，近况在正文里说过了。";
-  const out = attachDeterministicCards({
+  const withMedia = attachDeterministicCards({
     text,
     searchResults: [{
       toolName: "search_web",
@@ -297,28 +266,15 @@ test("L1 search 让位：本轮有媒体主形态时搜索卡不附（有图轮�
     }],
     searchMediaHasItems: true,
   });
-  assert.equal(out, text, "媒体主形态在场时应原文返回，不附搜索卡不改正文");
-});
-
-test("L1 search 附卡不被正文形态声明挡住（真实场景回归：攻略/对比类搜索词）", () => {
-  // 真实场景：用户问句带意图词（攻略/对比/怎么选）→ 规则链注入 [RENDER_AS:structured]，
-  // 旧的宽守卫会因该标记放弃附卡 → 常见搜索轮次永远丢卡。
-  // 修复后：只有卡片/摘要类标记才拦截，富文本正文 + 尾部来源卡并存。
-  const marked = processor.processAssistantText(
-    "翻了三篇评价最高的攻略，核心结论是两天刚好。",
-    { userText: "鼓浪屿两日游攻略" },
-  );
-  assert.ok(marked.includes("[RENDER_AS:structured]"), `意图词应触发结构化：${marked.slice(0, 120)}`);
-  const out = attachSearchResultCardFromExecuted(marked, [{
-    toolName: "search_web",
-    result: { items: [
-      { title: "鼓浪屿两日游最佳路线", url: "https://example.com/1", snippet: "s", source: "a" },
-      { title: "岛上民宿推荐清单", url: "https://example.com/2", snippet: "s", source: "b" },
-    ] },
-  }]);
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result", "structured 正文不应挡住搜索来源卡");
-  assert.ok(out.includes("[RENDER_AS:structured]"), "正文形态声明保留");
+  assert.equal(withMedia, text, "有媒体主形态时原文返回");
+  const noMedia = attachDeterministicCards({
+    text,
+    searchResults: [{
+      toolName: "search_web",
+      result: { items: [{ title: "不该出现的条目", url: "https://example.com/x", snippet: "s" }] },
+    }],
+  });
+  assert.equal(noMedia, text, "零图兜底也不再附搜索卡");
 });
 
 test("L1 weather：weather.get_local 回执 → weather 专用卡", () => {
@@ -339,15 +295,12 @@ test("L1 weather：weather.get_local 回执 → weather 专用卡", () => {
   assert.equal(card.items[0].text, "中雨 26°C");
 });
 
-test("不变量：载荷自报 ok:false 的天气回执出告警卡，不出空 weather 卡", () => {
+test("不变量：载荷自报 ok:false 的天气回执不出卡（空态警示卡已退役），失败由正文承担", () => {
   const out = processor.processAssistantText("这次没拿到天气数据。", {
     toolName: "weather.get_local",
     toolResult: { ok: false, error: "没有拿到真实定位，也没有可解析的城市名。" },
   });
-  const card = parseCard(out);
-  assert.notEqual(card.cardType, "weather");
-  assert.equal(card.title, "天气");
-  assert.equal(card.items[0].type, "warn");
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), `失败轮不应出任何卡：${out.slice(0, 200)}`);
   assert.ok(!out.includes('"error"'), "工具载荷原文不应透出到正文");
 });
 
@@ -439,7 +392,7 @@ test("L1 订单：shopping.order.list 回执 → order 专用卡", () => {
 // 确定性抢救：模型脏 JSON 不透出，直接转卡
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("抢救：模型回显搜索原始 JSON → search_result 卡 + 净文本", () => {
+test("抢救：模型回显搜索原始 JSON → 剥掉 JSON，不转卡", () => {
   const out = processor.processAssistantText(
     "查到了：\n" +
       JSON.stringify({
@@ -451,25 +404,26 @@ test("抢救：模型回显搜索原始 JSON → search_result 卡 + 净文本",
       }),
     { toolName: "search_web" },
   );
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result");
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), "不再把搜索 JSON 转成卡");
   assert.ok(!out.includes('"provider"'), "原始 JSON 不应透出");
+  assert.ok(!out.includes("example.com"), "来源链接不应透出");
+  assert.equal(out.trim(), "", "整条只有公告句 + JSON 时不下发任何内容");
 });
 
-test("抢救：模型回显单条搜索包络也转卡（压缩器会把 items 砍到 1 条）", () => {
+test("抢救：模型回显搜索 JSON 后还有正文 → 只留正文", () => {
   const out = processor.processAssistantText(
-    JSON.stringify({
-      items: [
-        { title: "唯一结果", url: "https://example.com/only", snippet: "s", source: "a" },
-      ],
-      provider: "tavily",
-    }),
+    "以下是搜索结果：\n" +
+      JSON.stringify({
+        items: [{ title: "唯一结果", url: "https://example.com/only", snippet: "s", source: "a" }],
+        provider: "tavily",
+      }) +
+      "\n\n想了解哪条我再细讲。",
     { toolName: "search_web" },
   );
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result");
-  assert.equal(card.items.length, 1);
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"));
   assert.ok(!out.includes('"provider"'), "原始包络不应透出到正文");
+  assert.ok(!out.includes("以下是搜索结果"), "公告句丢弃");
+  assert.equal(out.trim(), "想了解哪条我再细讲。", "模型自己写的收尾句保留");
 });
 
 test("抢救：模型回显行程 JSON → travel_itinerary 双面板卡", () => {
@@ -495,16 +449,17 @@ test("抢救：模型回显行程 JSON → travel_itinerary 双面板卡", () =>
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 专项形态：data_brief / image_result / video / media
+// 专项形态：image_result / video / media（data_brief 已退役 2026-11-06）
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("形态 data_brief：KPI 富集短报 → [RENDER_AS:data_brief] + payload", () => {
+test("形态 data_brief 退役：KPI 富集短报不再切快报卡，正文原样", () => {
   const out = processor.processAssistantText(
     "今日A股收盘：上证指数 3245.6 点，深证成指 10567.8 点，创业板指 2112.3 点。两市成交额 9800 亿元，北向资金净流入 45.2 亿元。",
     { userText: "今天股市怎么样" },
   );
-  assert.ok(out.includes("[RENDER_AS:data_brief]"), `实际输出：${out.slice(0, 200)}`);
-  assert.ok(out.includes("[DATA_BRIEF_START]"));
+  assert.ok(!out.includes("[RENDER_AS:data_brief]"), `实际输出：${out.slice(0, 200)}`);
+  assert.ok(!out.includes("[DATA_BRIEF_START]"));
+  assert.ok(out.includes("上证指数"), "正文应原样保留");
 });
 
 test("形态 image_result：识图工具 → [RENDER_AS:image_result]", () => {
@@ -569,13 +524,13 @@ test("plain 编码：卡片块/标记还原为可读纯文本，JSON 绝不透�
     "帮你查好了：\n[AGENT_RESULT_CARD_START]\n" +
     JSON.stringify({
       avatar: "NB",
-      title: "搜索结果",
+      title: "要点",
       items: [
         { type: "num", text: "攻略一: 要点", url: "https://example.com/a" },
         { type: "num", text: "攻略二: 要点", url: "https://example.com/b" },
       ],
-      footer: "共 2 条结果",
-      cardType: "search_result",
+      footer: "共 2 条",
+      cardType: "",
       cardId: "card_x",
     }) +
     "\n[AGENT_RESULT_CARD_END]\n\n[RENDER_HINT:brief]\n需要我深入哪一篇？";
@@ -583,9 +538,9 @@ test("plain 编码：卡片块/标记还原为可读纯文本，JSON 绝不透�
   assert.ok(!plain.includes("AGENT_RESULT_CARD"), plain);
   assert.ok(!plain.includes("RENDER_HINT"), plain);
   assert.ok(!plain.includes('{"avatar"'), "JSON 不应透出");
-  assert.ok(plain.includes("搜索结果"));
+  assert.ok(plain.includes("要点"));
   assert.ok(plain.includes("· 攻略一: 要点"));
-  assert.ok(plain.includes("共 2 条结果"));
+  assert.ok(plain.includes("共 2 条"));
   assert.ok(plain.includes("帮你查好了"));
   assert.ok(plain.includes("需要我深入哪一篇？"));
 });

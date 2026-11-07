@@ -24,6 +24,16 @@ export type ToolMediaCard = {
   mediaUrl?: string;
   /** 图下说明文字（如「请扫码登录京东」） */
   caption?: string;
+  /**
+   * 媒体子类型（2026-11-06）：`qr` = 扫码用二维码截图。客户端据此改用
+   * 「完整露出」版式（contain + 白底 + 全宽）——二维码被 cover 裁掉一角
+   * 用户就得点开大图才能扫，等于白推。
+   */
+  mediaType?: "image" | "video" | "qr";
+  /** 原图像素宽（给客户端算自然宽高比，避免按 3:4 兜底裁剪方图） */
+  width?: number;
+  /** 原图像素高 */
+  height?: number;
 };
 
 /** 最近一次已知位置 + 距写入的毫秒龄期。 */

@@ -33,7 +33,7 @@ test("mood 解析互斥：任务面 > 情绪低落 > R0 > 被打趣 > R2 起劲 
   assert.equal(resolvePersonaMood({ tier: 1 }), "casual_wit");
 });
 
-test("mood 动态块：每个 mood 都有内容且含状态标题", () => {
+test("mood 动态块：只报语境事实，不含行为指令（2026-11-05 去模板化）", () => {
   for (const mood of [
     "base",
     "casual_wit",
@@ -43,11 +43,14 @@ test("mood 动态块：每个 mood 都有内容且含状态标题", () => {
     "serious",
   ] as const) {
     const block = buildPersonaMoodBlock(mood);
-    assert.ok(block.startsWith("【人格·状态"), `${mood} 块缺标题`);
-    assert.ok(block.length > 10, `${mood} 块为空`);
+    assert.ok(block.startsWith("【状态】"), `${mood} 块缺状态标题`);
+    assert.ok(block.length < 60, `${mood} 块应为一句事实（当前 ${block.length} 字）`);
+    // 旧版是写作指令（「默认带一点吐槽」「零调侃，直接办」）——那就是模板腔的源头，
+    // 与 SOUL.md 打架。现在只能是事实描述，不得出现祈使句。
+    for (const banned of ["回复", "语气", "直接办", "先回应", "少梗", "多行动"]) {
+      assert.ok(!block.includes(banned), `${mood} 块不得含行为指令：${banned}`);
+    }
   }
-  assert.ok(buildPersonaMoodBlock("casual_wit").includes("接正事"));
-  assert.ok(buildPersonaMoodBlock("serious").includes("零调侃"));
 });
 
 test("装配：persona（唯一人格正文）进稳定层，personaMood 沉动态层", () => {

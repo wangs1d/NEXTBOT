@@ -9,7 +9,8 @@
  * 与既有确定性路径的分工：
  *   - travel.plan-itinerary → attachTravelItineraryCard（双面板卡，含冷层回捞）
  *   - 媒体搜索 → mediaCards 结构化字段（chat.assistant_done 独立下发）
- *   - search 原始 JSON 回显 → detectRawSearchResultJson 抢救（未注册工具的兜底）
+ *   - 网页搜索（search_web / info.search）**不出卡**：搜索回执只喂给模型做整合，
+ *     由模型自己总结成正文（2026-11-05 用户定稿，两端一致，禁止搜索结果卡/来源列表）
  * 新工具按需在 BUILDERS 注册即可，builder 返回 null（结构异常/空数据）时
  * 自动回退既有文本路由，零破坏。
  *
@@ -17,6 +18,7 @@
  * （前端 agent_result_parser.dart / AgentResultCard 直接消费，无需前端改动）。
  */
 import { BROWSER_SESSION_SITES } from "./browser-session-sites.js";
+import { platformSupportsCheckout } from "./shopping-platforms/index.js";
 
 /** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
@@ -131,9 +133,21 @@ function num(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-/** 降水一行：概率 + 具体钟点段；无时段数据时只给整天口径 */
-function rainText(dayPrefix: string, pct: number, period: string): string {
-  return period ? `${dayPrefix}降水 ${pct}%（${period}）` : `${dayPrefix}降水 ${pct}%`;
+/**
+ * 降水一行（2026-11-04 用户定稿）：不报概率百分比，只说清「什么时候有雨」。
+ * 有可信钟点段（rainWindow 达标 ≥40% 才会带）→「今天 下午 14–18 点有雨」；
+ * 已下过 →「今天 下午 14–18 点的雨已下过」；无时段但概率确实高（≥60%）→
+ * 退整天口径「今天有雨」；低概率又不给行（「降水 2%」是噪音）。
+ */
+function rainText(dayPrefix: string, pct: number, period: string): string | null {
+  if (period) {
+    // rainWindowSuffixText 两种尾巴：「下午 14–18 点最明显」/「下午 14–18 点已下过」
+    if (period.endsWith("已下过")) {
+      return `${dayPrefix} ${period.slice(0, -"已下过".length)}的雨已下过`;
+    }
+    return `${dayPrefix} ${period.replace(/最明显$/, "")}有雨`;
+  }
+  return pct >= 60 ? `${dayPrefix}有雨` : null;
 }
 
 /** ISO 时间「2026-09-10T08:00:00」→「09-10 08:00」；纯字符串截取，不经 Date，跨时区稳定 */
@@ -146,15 +160,11 @@ function shortTime(value: unknown): string {
 
 const BUILDERS: Record<string, ToolCardBuilder> = {
   /**
-   * search_web / info.search → search_result 卡（L1 确定性绑定）。
-   *
-   * 搜索是最高频的结构化工具，此前依赖 routeRender 的 search_result hint 从
-   * LLM 修正文里切卡（模型写成散文就漏）；现在直接从工具回执 items 构建，
-   * 模型口头回复只作前导。items 形态与 detectRawSearchResultJson 的抢救
-   * 目标一致（title/url/snippet/source），前端 _SearchResultCard 直接消费。
+   * 注意（2026-11-05 用户定稿）：search_web / info.search **不再注册 builder**。
+   * 搜索回执只作为模型上下文，正文由模型自己总结；不允许出现「搜索结果」卡、
+   * 来源清单或原始条目（桌面端与手机端一致）。历史上这里曾直接从 items 建
+   * search_result 卡，已整体退役——不要再加回来。
    */
-  "search_web": (r) => buildSearchCardFromItems(r.items),
-  "info.search": (r) => buildSearchCardFromItems(r.items),
 
   /**
    * travel.destination-guide → travel_guide_select 卡（规划前种草选择卡）。
@@ -467,6 +477,27 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     const weatherText = str(r.weatherText);
     const summary = str(r.summary);
     if (!weatherText && !summary) return null;
+
+    // 明日聚焦回执（2026-11-05，focusDay="tomorrow"）：只构建明天的行——
+    // 现象/气温区间/明天降雨，不掺今天与当前实况；字段名是 tomorrow* 专属命名。
+    if (str(r.focusDay) === "tomorrow") {
+      const itemsT: ToolCardItem[] = [];
+      if (weatherText) itemsT.push({ type: "num", text: weatherText });
+      const rangeT = str(r.tomorrowRangeC);
+      if (rangeT) itemsT.push({ type: "num", text: `气温 ${rangeT}` });
+      const rainTomorrowT = num(r.tomorrowRainPct);
+      const rainLineT =
+        rainTomorrowT != null
+          ? rainText("明天", rainTomorrowT, str(r.tomorrowRainPeriod))
+          : null;
+      if (rainLineT) itemsT.push({ type: "num", text: rainLineT });
+      return {
+        title: summary || `${str(r.locationLabel) ? str(r.locationLabel) + " " : ""}明日天气`,
+        items: itemsT,
+        cardType: "weather",
+      };
+    }
+
     const items: ToolCardItem[] = [];
     if (weatherText) items.push({ type: "num", text: weatherText });
     const range = str(r.todayRangeC);
@@ -476,15 +507,17 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     const wind = num(r.windKmh);
     if (wind != null) items.push({ type: "num", text: `风速 ${wind} km/h` });
     const rain = num(r.peakRainPct);
-    if (rain != null) items.push({ type: "num", text: rainText("今天", rain, str(r.todayRainPeriod)) });
+    const rainToday = rain != null ? rainText("今天", rain, str(r.todayRainPeriod)) : null;
+    if (rainToday) items.push({ type: "num", text: rainToday });
     const rainTomorrow = num(r.tomorrowRainPct);
-    if (rainTomorrow != null)
-      items.push({ type: "num", text: rainText("明天", rainTomorrow, str(r.tomorrowRainPeriod)) });
+    const rainTomorrowLine =
+      rainTomorrow != null ? rainText("明天", rainTomorrow, str(r.tomorrowRainPeriod)) : null;
+    if (rainTomorrowLine) items.push({ type: "num", text: rainTomorrowLine });
     const location = str(r.locationLabel);
     return {
       title: summary || `${location ? location + " " : ""}天气实况`,
       items,
-      footer: str(r.clothingAdvice) || undefined,
+      // 2026-11-04 用户定稿：着装不放卡片，留给 LLM 正文最后一句自然带出
       cardType: "weather",
     };
   },
@@ -571,6 +604,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       (BROWSER_SESSION_SITES as Record<string, { label: string } | undefined>)[p]?.label ?? p;
     const items: ToolCardItem[] = [];
     const priceGroups: NonNullable<ToolCardPayload["priceCompare"]>["groups"] = [];
+    // 手机端候选轮播卡自己的条目数组（含商品链接）：卡内点「就这家」时客户端
+    // 要把 url 原样回传给 card.action，服务端才能直接去结算页，不必再问模型。
+    const shopItems: Array<Record<string, unknown>> = [];
     let shown = 0;
     for (const g of groups) {
       if (shown >= 6) break;
@@ -613,6 +649,22 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         ...(specTokens.length > 0 ? { specTokens } : {}),
         offerCount: offers.length,
       });
+      shopItems.push({
+        title: title.slice(0, 60),
+        ...(price != null ? { price } : {}),
+        platform: platform || "",
+        ...(label !== platform ? { platformLabel: label } : {}),
+        ...(shop ? { shop: shop.slice(0, 12) } : {}),
+        ...(image ? { image } : {}),
+        ...(similar ? { badge: "疑似同款" } : {}),
+        // 商品直达链接：卡内下单的唯一凭据（客户端回传，不展示）
+        ...(str(best.url) ? { url: str(best.url) } : {}),
+        // 这家能不能真的下单（2026-11-06 改判据）：看 adapter 的 supportsCheckout
+        // ——只有情报站（什么值得买）不可下单。苏宁这类「搜索免登录、结算要登录」
+        // 的平台依然 true：登录在卡内扫码完成，不再一票否决（否则免登录源全被
+        // 禁用，整张卡永远走不到「下单→扫码」那一步）。
+        orderable: platformSupportsCheckout(platform),
+      });
       shown += 1;
     }
     if (items.length === 0) return null;
@@ -620,14 +672,41 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     // 仅保留实时抓取免责说明；各组规格不一致（bestIndex=null）时补充说明，避免
     // 用户把 256GB 与 512GB 的报价误读成同一规格的最低价比。
     const bestIndex = typeof r.bestIndex === "number" ? r.bestIndex : null;
-    const footer = bestIndex == null && priceGroups.length > 1
-      ? "各组规格不一致（如容量/数量不同），仅列报价不作最低价结论 · 信息为实时抓取，以下单结算页为准"
-      : "信息为实时抓取，以下单结算页为准";
+    // 什么值得买是「好价爆料」情报站，价格不等于结算页实时价——必须标出来，
+    // 否则用户会把爆料价当成官方现价（苏宁等实时价源不需要这句）。
+    const hasAggregatedPrice = priceGroups.some((g) => g.platform === "smzdm");
+    const footer = [
+      bestIndex == null && priceGroups.length > 1
+        ? "各组规格不一致（如容量/数量不同），仅列报价不作最低价结论"
+        : "",
+      hasAggregatedPrice ? "含什么值得买爆料价（历史好价参考，非结算实时价）" : "",
+      "信息为实时抓取，以下单结算页为准",
+    ]
+      .filter(Boolean)
+      .join(" · ");
     return {
       title: `比价结果：${str(r.query)}`,
       items,
       footer,
+      // cardType 保持 price_compare：手机端见到 extra.shopping 会渲染新轮播卡，
+      // 旧客户端/历史消息继续走 price_compare 专用卡，契约不破。
       cardType: "price_compare",
+      // 手机端候选轮播卡载荷（2026-11-06 设计稿）：一屏露出 2.5 张、逐卡吸附。
+      // priceCompare 同时保留——历史消息与旧客户端仍按 price_compare 卡渲染。
+      extra: {
+        shopping: {
+          stage: "candidates",
+          title:
+            priceGroups.length > 1 && priceGroups.length <= 4
+              ? `${str(r.query)} · ${priceGroups.length}选一`
+              : `比价结果：${str(r.query)}`,
+          sortLabel: "按到手价",
+          bestIndex,
+          ...(bestIndex == null ? {} : { bestLabel: "最合适" }),
+          items: shopItems,
+          footer,
+        },
+      },
       ...(priceGroups.length > 0
         ? {
             priceCompare: {
@@ -668,37 +747,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     return { title, items, footer, cardType: "" };
   },
 
-  // 调研比价卡（保险/服务等无法结构化抓价的领域）：sources → 结果条目清单，
-  // 复用 search_result 卡型；对比表本体由 LLM 口头正文承载（disclaimer 已要求整理成表）。
-  "shopping.compare.research": (r) => {
-    if (r.ok !== true) return null;
-    const sources = Array.isArray(r.sources) ? r.sources : [];
-    if (sources.length === 0) return null;
-    const items: ToolCardItem[] = [];
-    const seen = new Set<string>();
-    for (const raw of sources) {
-      if (items.length >= 8) break;
-      if (!raw || typeof raw !== "object") continue;
-      const rec = raw as Record<string, unknown>;
-      const title = str(rec.title);
-      const url = str(rec.url);
-      if (!title) continue;
-      if (url) {
-        if (seen.has(url)) continue;
-        seen.add(url);
-      }
-      const snippet = str(rec.snippet);
-      const text = snippet ? `${title}：${snippet.slice(0, 90)}` : title;
-      items.push({ type: "num", text });
-    }
-    if (items.length === 0) return null;
-    return {
-      title: `调研对比：${str(r.topic)}`,
-      items,
-      footer: str(r.disclaimer) || undefined,
-      cardType: "search_result",
-    };
-  },
+  // 调研比价（shopping.compare.research）不再出卡（2026-11-05）：
+  // 它的载荷是 web 调研的资料清单（标题 + 摘要），与搜索结果卡同形——
+  // 资料只作模型素材，对比表由 LLM 正文承载（disclaimer 已要求整理成表）。
 
   // 本地订单列表：so_* 单号 + 状态 + 金额
   "shopping.order.list": (r) => {
@@ -733,7 +784,133 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
   },
 
   /**
-   * shopping.pay.submit → 支付确认按钮卡（L1 确定性附卡，不依赖 LLM 转发）。
+   * shopping.order.place（阶段一 needsConfirmation）→ 确认下单卡。
+   *
+   * 这是购物链路唯一的硬闸：卡上摊开商品/数量/单价/收货/合计 + 令牌倒计时，
+   * 并明说「确认后只提交订单、不扣款」。阶段二（已提交）不出本卡。
+   * 载荷里的 expiresAt 由服务端注入（禁止前端拿渲染时刻起算，否则历史消息
+   * 回看时倒计时会重新跑）。
+   */
+  "shopping.order.place": (r) => {
+    if (r.ok !== true || r.needsConfirmation !== true) return null;
+    const platform = str(r.platform);
+    const platformLabel =
+      (BROWSER_SESSION_SITES as Record<string, { label: string } | undefined>)[platform]?.label ??
+      platform;
+    const itemTitle = str(r.itemTitle);
+    const qty = num(r.quantity) ?? 1;
+    const unit = num(r.unitPrice);
+    const total = num(r.totalPrice);
+    const address = str(r.addressSummary);
+    const expiresAt = num(r.expiresAt);
+
+    const rows: Array<{ k: string; v: string }> = [];
+    if (itemTitle) rows.push({ k: "商品", v: itemTitle });
+    rows.push({ k: "数量", v: `${qty} 件` });
+    if (unit != null) rows.push({ k: "单价", v: `¥${unit}` });
+    if (address) rows.push({ k: "收货", v: address });
+    if (platformLabel) rows.push({ k: "渠道", v: platformLabel });
+
+    return {
+      title: "待你确认",
+      items: rows.map((row) => ({ type: "num" as const, text: `${row.k}：${row.v}` })),
+      footer: "确认后只提交订单，不会自动扣款",
+      cardType: "shopping_confirm",
+      extra: {
+        shopping: {
+          stage: "confirm",
+          title: "待你确认",
+          ...(expiresAt != null
+            ? { expiresAt: new Date(expiresAt).toISOString() }
+            : {}),
+          rows,
+          ...(total != null ? { total: `¥${total}`, totalLabel: "合计" } : {}),
+          note: "确认令牌有时效，过期需重新生成 · 确认后只提交订单，扣款在支付环节由你确认",
+          // cardAction 是卡内动作的**唯一**触发凭据（2026-11-06）：客户端点击后
+          // 经 card.action 送回，服务端只换这张卡，不再转写成用户消息。
+          // 没有 cardAction 的按钮仍走老路（chat.user_action → 一轮问答）。
+          buttons: [
+            { label: "确认下单", variant: "primary", cardAction: "shopping.place.confirm" },
+            { label: "先不下", variant: "secondary", cardAction: "local.dismiss" },
+          ],
+          actions: {
+            platform,
+            ...(str(r.item) ? { item: str(r.item) } : {}),
+            ...(str(r.confirmationToken) ? { confirmationToken: str(r.confirmationToken) } : {}),
+          },
+        },
+      },
+    };
+  },
+
+  /**
+   * shopping.order.status → 物流/订单状态卡。
+   *
+   * 节点按平台订单状态机推进（待支付→已支付→已发货→已签收），只渲染
+   * 回执里真有的时间与物流摘要：平台没给承运商/运单号就不显示，
+   * 不编造「顺丰 SF…」这种查不到的细节。
+   */
+  "shopping.order.status": (r) => {
+    if (r.ok !== true) return null;
+    const orders = Array.isArray(r.orders) ? r.orders : [];
+    const first = (orders[0] ?? null) as Record<string, unknown> | null;
+    if (!first) return null;
+
+    const status = str(first.status);
+    const rank: Record<string, number> = {
+      pending_payment: 0,
+      paid: 1,
+      shipped: 2,
+      completed: 3,
+    };
+    const current = rank[status] ?? 0;
+    const labels = ["已下单", "已支付", "已发货", "已签收"];
+    const createdAt = str(first.createdAt).replace("T", " ").slice(0, 16);
+    const logistics = str(first.logisticsSummary);
+    const nodes = labels.map((label, i) => ({
+      label,
+      state: i < current ? "done" : i === current ? "now" : "todo",
+      ...(i === 0 && createdAt ? { detail: createdAt } : {}),
+      ...(i === current && logistics ? { detail: logistics } : {}),
+    }));
+    const statusLabel =
+      status === "pending_payment"
+        ? "待支付"
+        : status === "paid"
+          ? "已支付"
+          : status === "shipped"
+            ? "运输中"
+            : status === "completed"
+              ? "已签收"
+              : status === "cancelled"
+                ? "已取消"
+                : status === "failed"
+                  ? "下单失败"
+                  : "处理中";
+    const title = str(first.itemTitle) || "订单物流";
+
+    return {
+      title,
+      items: nodes.map((n) => ({
+        type: (n.state === "todo" ? "num" : "check") as "num" | "check",
+        text: `${n.label}${n.detail ? ` · ${n.detail}` : ""}`,
+      })),
+      footer: "状态取自平台订单页 · 平台未提供物流细节时不展示",
+      cardType: "shopping_shipment",
+      extra: {
+        shopping: {
+          stage: "shipment",
+          title,
+          statusLabel,
+          nodes,
+        },
+      },
+    };
+  },
+
+  /**
+   * shopping.pay.submit → 支付卡（金额 + 收银台 + 已完成支付按钮）。
+   *
    * 收银台已拉起（内置浏览器打开或 alipay-bot 代付）后，给用户
    * 「我已完成支付」/「稍后再说」按钮；点击经 chat.user_action 转为等价
    * user_message，由 LLM 调 shopping.pay.check 同步状态。按钮不直接触发
@@ -760,12 +937,27 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
       title: "💳 支付确认",
       items,
       footer: "完成支付后点击确认，我会同步订单状态",
-      cardType: "order",
+      cardType: "shopping_pay",
+      // 手机端支付卡载荷：金额 + 订单号 + 收银台提示。二维码只在服务端
+      // 真拿到平台码图时才下发（data URI），没有就不画假码。
+      extra: {
+        shopping: {
+          stage: "pay",
+          title: "订单已提交 · 待支付",
+          amount: amount != null ? `${amount}` : "",
+          amountLabel: "应付金额",
+          orderNo: str(r.platformOrderId) || localOrderId,
+          platformLabel: platform,
+          note: "我不保存你的支付信息，也不代你扣款 · 支付完成后点下面确认",
+        },
+      },
       actions: [
         {
           id: "shopping_pay_done",
           label: "我已完成支付，帮我确认",
           variant: "primary",
+          // 卡内动作：服务端直接查支付态并把这张卡推进到物流/订单态
+          cardAction: "shopping.pay.check",
           payload: { localOrderId, platform },
         },
         { id: "shopping_pay_later", label: "稍后再说", variant: "secondary" },
@@ -773,35 +965,6 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 };
-
-/** 搜索回执 items → search_result 卡 payload；空结果返回 null（回退文本路由） */
-function buildSearchCardFromItems(rawItems: unknown): ToolCardPayload | null {
-  if (!Array.isArray(rawItems) || rawItems.length === 0) return null;
-  const items: ToolCardItem[] = [];
-  const seen = new Set<string>();
-  for (const raw of rawItems) {
-    if (items.length >= 8) break;
-    if (!raw || typeof raw !== "object") continue;
-    const rec = raw as Record<string, unknown>;
-    const title = str(rec.title);
-    const url = str(rec.url);
-    if (!title) continue;
-    if (url) {
-      if (seen.has(url)) continue;
-      seen.add(url);
-    }
-    const snippet = str(rec.snippet);
-    const text = snippet ? `${title}：${snippet.slice(0, 90)}` : title;
-    items.push({ type: "num", text });
-  }
-  if (items.length === 0) return null;
-  return {
-    title: "搜索结果",
-    items,
-    footer: `共 ${items.length} 条结果`,
-    cardType: "search_result",
-  };
-}
 
 /** 查注册 builder；未注册返回 null */
 export function lookupToolCardBuilder(toolName: string): ToolCardBuilder | null {
@@ -825,12 +988,11 @@ export function buildToolCard(
 /**
  * 工具循环路径的天气结果确定性附卡（L1）。
  *
- * 与 attachSearchResultCardFromExecuted 同理：weather.get_local 已并入进程内
- * 延迟目录检索（不强制路由），常规对话轮 LLM 在 tool-loop 内自主调用天气工具，
- * 末轮只输出口语正文、reply.toolName 为空 → 单工具直跑路径的
- * processAssistantText({toolName,toolResult}) 拿不到回执，天气卡恒附不上
- * （真实回归：天气回答恒为纯文本）。这里从 onExternalToolExecuted 聚合的
- * 真实结果建 weather 卡；多次调用（多地对比）合并为一张多地卡，每个城市一行。
+ * weather.get_local 已并入进程内延迟目录检索（不强制路由），常规对话轮 LLM
+ * 在 tool-loop 内自主调用天气工具，末轮只输出口语正文、reply.toolName 为空 →
+ * 单工具直跑路径的 processAssistantText({toolName,toolResult}) 拿不到回执，
+ * 天气卡恒附不上（真实回归：天气回答恒为纯文本）。这里从 onExternalToolExecuted
+ * 聚合的真实结果建 weather 卡；多次调用（多地对比）合并为一张多地卡，每个城市一行。
  * 正文已带结构化标记时不动（单工具直跑路径已附卡，防双重包裹）。
  */
 export function attachWeatherResultCardFromExecuted(
@@ -856,27 +1018,26 @@ function buildMergedWeatherCard(
 ): ToolCardPayload | null {
   const items: ToolCardItem[] = [];
   let title = "";
-  let footer = "";
   for (const r of results) {
     const location = str(r.locationLabel);
     const weatherText = str(r.weatherText) || str(r.summary);
     const range = str(r.todayRangeC);
-    const rain = num(r.peakRainPct);
     if (!weatherText && !range) continue;
     const parts = [weatherText, range ? `气温 ${range}` : ""].filter(Boolean);
-    if (rain != null) parts.push(rainText("今天", rain, str(r.todayRainPeriod)));
+    const rain = num(r.peakRainPct);
+    const rainLine = rain != null ? rainText("今天", rain, str(r.todayRainPeriod)) : null;
+    if (rainLine) parts.push(rainLine);
     items.push({
       type: "num",
       text: `${location ? location + " " : ""}${parts.join("，")}`,
     });
     if (!title) title = str(r.summary) || (location ? `${location} 天气实况` : "天气实况");
-    footer = str(r.clothingAdvice) || footer;
   }
   if (items.length === 0) return null;
   return {
     title: results.length > 1 ? "多地天气" : title,
     items,
-    footer: footer || undefined,
+    // 2026-11-04 用户定稿：着装不放卡片，留给 LLM 正文最后一句自然带出
     cardType: "weather",
   };
 }
@@ -944,42 +1105,5 @@ export function tryAttachToolResultCard(
   if (containsStructuredMarker(text)) return null;
   const payload = buildToolCard(toolName, toolResult);
   if (!payload || payload.items.length === 0) return null;
-  return buildCardMarker(payload, text);
-}
-
-/**
- * 工具循环路径的搜索结果确定性附卡（L1）。
- *
- * tool-loop 内执行的 search_web/info.search 不经过 reply.toolName/toolResult
- * （与媒体/行程同理），必须从 onExternalToolExecuted 聚合的真实结果附卡。
- * 多次搜索的条目按 url 去重合并为一张 search_result 卡（上限 12 条），
- * 避免逐次附卡刷屏。正文已带结构化标记时不动。
- *
- * 「本轮已有媒体主形态时搜索卡不附」由决策层（decideRender）判定，
- * 这里不再自带让位开关。
- */
-export function attachSearchResultCardFromExecuted(
-  text: string,
-  executed: ReadonlyArray<{ toolName: string; result: Record<string, unknown> }>,
-): string {
-  if (containsStructuredMarker(text)) return text;
-  const searchResults = executed.filter((mt) =>
-    mt.toolName === "search_web" || mt.toolName === "info.search",
-  );
-  if (searchResults.length === 0) return text;
-  const merged: unknown[] = [];
-  const seen = new Set<string>();
-  for (const mt of searchResults) {
-    const items = Array.isArray(mt.result.items) ? mt.result.items : [];
-    for (const it of items) {
-      if (merged.length >= 12) break;
-      const url = it && typeof it === "object" ? str((it as Record<string, unknown>).url) : "";
-      if (url && seen.has(url)) continue;
-      if (url) seen.add(url);
-      merged.push(it);
-    }
-  }
-  const payload = buildSearchCardFromItems(merged);
-  if (!payload || payload.items.length === 0) return text;
   return buildCardMarker(payload, text);
 }

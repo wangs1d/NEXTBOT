@@ -38,8 +38,11 @@ test("天气卡轮命中 weather_card 策略，注入卡片专用指令", () => 
   );
   assert.equal(directive.strategy, "weather_card");
   assert.equal(directive.instruction, WEATHER_CARD_INSTRUCTION);
-  assert.match(directive.instruction, /严禁用 markdown 标题、表格或引用块/);
-  assert.match(directive.instruction, /只写|直接用/);
+  // 2026-11-05 用户拍板：天气轮的回复引导保留——三条硬边界（数值上卡不重复、
+  // 坐标不给用户、口语建议收束）都是有用的结构化引导。
+  assert.match(directive.instruction, /正文里不要再出现/);
+  assert.match(directive.instruction, /经纬度坐标/);
+  assert.match(directive.instruction, /口语给结论和建议/);
 });
 
 test("天气+搜索混合轮不走 weather_card，仍按常规分档", () => {

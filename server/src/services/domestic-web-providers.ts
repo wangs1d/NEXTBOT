@@ -332,7 +332,20 @@ export async function searchWebMultiEngine(
   const apiItems = apiResults
     ? applySearchFreshness(apiResults, { query: keyword }).items.slice(0, boundedLimit)
     : [];
-  if (apiItems.length > 0) return apiItems;
+  if (apiItems.length > 0) {
+    // 零相关守卫（2026-11-06 实测新增）：引擎对多词中文 query 偶发整页跑偏——
+    // 「美股 收盘 纳斯达克 标普 道指」8/8 返回「热流道/有道/泪道阻塞」（单字
+    // 「道」命中）。整页与 query 片段零命中时视同 API 失败，回落爬虫链：垃圾
+    // 结果模型会当真复述（行情事故链第一环），比空结果危险得多。部分命中
+    // （≥1 条）不动——API 结果少比结果脏好，避免误杀改写型标题。
+    if (filterByQueryFragments(apiItems, keyword).length === 0) {
+      console.warn(
+        `[Search] API ${apiItems.length} 条与 query 零相关（整页跑偏），丢弃并回落爬虫 -> query="${keyword.slice(0, 30)}"`,
+      );
+    } else {
+      return apiItems;
+    }
+  }
 
   // 应急兜底：仅当 API 未配置/失败/空结果时才走国内引擎爬虫。每条必须过
   // 相关性闸门，全部不相关时返回空——宁可爱模型如实说「没查到」，也不要

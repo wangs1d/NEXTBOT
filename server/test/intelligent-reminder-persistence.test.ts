@@ -1,6 +1,7 @@
 // IntelligentReminderService 持久化 + 设备分级离线闸门单测：
-// 1) 提醒实例/升级状态落盘，重启（新实例 load）后恢复；
-// 2) 错过升级时刻的提醒在恢复时立即补升级；
+// 1) 提醒实例落盘，重启（新实例 load）后恢复；
+// 2) 升级链已斩断（2026-11-05 定调）：新建/恢复均不挂升级计时，
+//    旧落盘数据里的 escalationRules 在 load 时被剥离，升级链无法复活；
 // 3) 用户全部设备离线时，popup 级不再假装 WS 弹窗成功，直达离线推送通道；
 // 4) 任一端在线时保持原 WS 链路。
 import assert from "node:assert/strict";
@@ -23,38 +24,28 @@ function baseConfig(overrides: Record<string, unknown> = {}) {
     initialLevel: "popup" as const,
     scheduledAt: new Date(),
     metadata: { userId: "user-a", actorId: "user-a" },
-    escalationRules: [
-      { fromLevel: "popup", toLevel: "tts_alarm", triggerCondition: "timeout", timeoutMs: 60_000 },
-      { fromLevel: "tts_alarm", toLevel: "phone_call", triggerCondition: "timeout", timeoutMs: 60_000 },
-    ],
     ...overrides,
   };
 }
 
 function makeService(statePath: string | undefined, handlers: {
   popup?: (i: ReminderInstance) => Promise<void>;
-  tts?: (i: ReminderInstance) => Promise<void>;
   phone?: (i: ReminderInstance) => Promise<void>;
 }) {
   return new IntelligentReminderService({
     onPopupReminder: handlers.popup ?? (async () => {}),
-    onTTSAlarmReminder: handlers.tts ?? (async () => {}),
     onPhoneCallReminder: handlers.phone ?? (async () => {}),
     persistPath: statePath,
   });
 }
 
-test("提醒实例与升级状态持久化：新实例 load 后可恢复", async () => {
+test("提醒实例持久化：新实例 load 后可恢复", async () => {
   const dir = mkdtempSync(join(tmpdir(), "reminder-"));
   const statePath = join(dir, "active-reminders.json");
   try {
     const svc = makeService(statePath, {});
     await svc.createReminder(baseConfig());
     await svc.triggerReminder("r_test_1");
-    const escalated = await svc.escalateReminder("r_test_1", "测试升级");
-    assert.ok(escalated);
-    assert.equal(escalated!.currentLevel, "tts_alarm");
-    assert.equal(svc.getReminder("r_test_1")!.escalationCount, 1);
 
     // 模拟服务重启：全新实例从同一文件恢复
     const svc2 = makeService(statePath, {});
@@ -62,44 +53,57 @@ test("提醒实例与升级状态持久化：新实例 load 后可恢复", async
     assert.equal(restored, 1);
     const inst = svc2.getReminder("r_test_1");
     assert.ok(inst);
-    assert.equal(inst!.currentLevel, "tts_alarm");
-    assert.equal(inst!.escalationCount, 1);
+    assert.equal(inst!.currentLevel, "popup");
     assert.ok(inst!.startedAt instanceof Date);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 });
 
-test("重启后错过升级时刻 → 立即补升级", async () => {
+test("升级链已斩断：传入/落盘的 escalationRules 一律剥离，无自动升级", async () => {
   const dir = mkdtempSync(join(tmpdir(), "reminder-"));
   const statePath = join(dir, "active-reminders.json");
   try {
-    const svc = makeService(statePath, {});
-    // 只配 1 秒升级规则，触发后等落盘，再手动把文件里的时间戳改到过去
-    await svc.createReminder(baseConfig({
+    let phoneCalled = 0;
+    const svc = makeService(statePath, {
+      phone: async () => {
+        phoneCalled += 1;
+      },
+    });
+
+    // ① 传入升级规则：createReminder 必须置空，popup 级触发后永不升级到电话
+    const instance = await svc.createReminder(baseConfig({
       escalationRules: [
-        { fromLevel: "popup", toLevel: "tts_alarm", triggerCondition: "timeout", timeoutMs: 1_000 },
+        { fromLevel: "popup", toLevel: "phone_call", triggerCondition: "timeout", timeoutMs: 50 },
       ],
     }));
+    assert.deepEqual(instance.config.escalationRules, []);
     await svc.triggerReminder("r_test_1");
 
+    // 等待超过原规则的升级窗口，确认没有任何自动升级发生
+    await new Promise((r) => setTimeout(r, 150));
+    const live = svc.getReminder("r_test_1");
+    assert.ok(live);
+    assert.equal(live!.currentLevel, "popup");
+    assert.equal(live!.escalationCount, 0);
+    assert.equal(phoneCalled, 0, "升级链斩断后不应有任何电话升级");
+
+    // ② 旧落盘数据带 escalationRules：load 时剥离，升级链无法复活
     const raw = JSON.parse(readFileSync(statePath, "utf8"));
-    const inst = raw.instances.find((i: { config: { id: string } }) => i.config.id === "r_test_1");
-    inst.startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
-    // 改完写回磁盘（load 读的是文件，不是这里的内存对象）
+    const persisted = raw.instances.find(
+      (i: { config: { id: string } }) => i.config.id === "r_test_1",
+    );
+    assert.ok(persisted);
+    persisted.config.escalationRules = [
+      { fromLevel: "popup", toLevel: "phone_call", triggerCondition: "timeout", timeoutMs: 50 },
+    ];
     writeFileSync(statePath, JSON.stringify(raw));
 
     const svc2 = makeService(statePath, {});
     await svc2.load();
-    const restoredInst = svc2.getReminder("r_test_1");
-    assert.ok(restoredInst);
-    // 错过升级时刻：恢复时立即从 popup 补升到 tts_alarm，而不是再等 1 秒后蒸发
-    assert.equal(restoredInst!.currentLevel, "tts_alarm");
-    assert.equal(restoredInst!.escalationCount, 1);
-    assert.match(
-      restoredInst!.escalationHistory[0].reason,
-      /重启后错过升级时刻/,
-    );
+    const restored = svc2.getReminder("r_test_1");
+    assert.ok(restored);
+    assert.deepEqual(restored!.config.escalationRules, [], "恢复时应剥离旧升级规则");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -61,7 +61,6 @@ import {
   embedViaLocalEndpoint,
   ensureLocalEmbeddingEndpoint,
 } from "../agentic-memory/local-embedding/local-embedding-endpoint.js";
-import { resolveEmbeddingEndpoint } from "../services/openai-embedding-client.js";
 import { createMemoryBridgeIfEnabled } from "../agentic-memory/memory-bridge-service.js";
 import { createAgenticLedgerIfEnabled } from "../agentic-memory/ledger.js";
 import { createProvenanceIfEnabled } from "../agentic-memory/provenance.js";
@@ -92,6 +91,8 @@ import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { scheduleInterruptedTaskRecovery } from "../task-plane/restart-recovery.js";
 import { AutonomySettingsStore } from "../services/autonomy-settings-store.js";
 import { registerGeofenceTools } from "../tools/geofence-tools.js";
+import { ActorContextService } from "../services/actor-context-service.js";
+import { AbstractChatProvider } from "../external-model/abstract-chat-provider.js";
 import { GeofenceService, isPublicHttpUrl } from "../services/geofence-service.js";
 import { LocationHistoryService } from "../services/location-history-service.js";
 import { LocationIngestPipeline } from "../services/location-ingest-pipeline.js";
@@ -112,6 +113,7 @@ import { DdlRadarService } from "../services/ddl-radar-service.js";
 import { IngestService } from "../services/ingest-service.js";
 import { createIngestVisionExtract } from "../services/ingest-vision.js";
 import { EveningDigestScheduler } from "../services/evening-digest-scheduler.js";
+import { registerPreviewDigestSource } from "../services/tomorrow-preview-bridge.js";
 import { LifeRhythmEngine } from "../rhythm/engine.js";
 import { RhythmProfileStore } from "../rhythm/profile-store.js";
 import { UserTimingService } from "../proactivity/user-timing-service.js";
@@ -292,7 +294,7 @@ import {
 import { setCapabilityModuleDeps, getBuiltinAgentChatTools, invalidateBuiltinToolsCache, selectRelevantTools, setDeclaredSkillTimeoutResolver, declaredSkillTimeoutFromManager } from "../external-model/openai-compatible-tool-loop.js";
 import { registerAgentLinkTools, registerWorldStatusTools } from "../tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
-import { registerCalendarTools } from "../tools/calendar-tools.js";
+import { formatNextRunAtLocal, registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
 import { registerAgentActivityTools } from "../tools/agent-activity-tools.js";
 import { registerLifeTools } from "../tools/life-tools.js";
@@ -344,6 +346,7 @@ import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js"
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
 import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
+import { registerMarketQuoteTools } from "../tools/market-quote-tools.js";
 import { registerVideoTools } from "../tools/video-tools.js";
 import { registerInternetIntelligenceTools } from "../tools/internet-intelligence-tools.js";
 import { registerHttpTools } from "../tools/http-tools.js";
@@ -594,6 +597,8 @@ import { ProfileRouter, setProfileRouter } from "../brain/profile-router.js";
 import { registerProfileQueryTool } from "../tools/profile-query-tool.js";
 import { registerWatchBoardTools } from "../tools/watch-board-tools.js";
 import { SpeechHub } from "../proactivity/speech-express.js";
+import { OnboardingIntroService } from "../services/onboarding-intro-service.js";
+import { setOnboardingHintRuntime } from "../services/onboarding-state.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
 import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
@@ -853,6 +858,7 @@ export async function createAppServices(
   registerBrowserTools(toolRegistry, browserSessionService);
   registerClockTools(toolRegistry);
   registerWeatherTools(toolRegistry, weatherService);
+  registerMarketQuoteTools(toolRegistry);
   registerCareReminderTools(toolRegistry, {
     agentMemorySyncService,
     scheduleTaskService,
@@ -1063,6 +1069,8 @@ export async function createAppServices(
     upstreamSearchService,
     onUserActionRequired: requestShoppingUserHandoff,
     dataDir: join(getDataDir(), "shopping"),
+    // 云端浏览器取回的真实主图落本机（手机端只跟自己的服务端取图）
+    imageStore: imageGenerationService,
   });
   // 初始化 Agent 通用网页操作服务（有状态会话池，通用网页多步操作：open/click/type/scroll/screenshot/extract_text/wait_for/close）。
   // 执行层复用通用浏览器层：内置浏览器优先；撞登录墙/验证码时走通用 human handoff。
@@ -1203,12 +1211,7 @@ export async function createAppServices(
     // 升级链持久化：提醒实例与升级计时落盘，重启后恢复并补升级（此前重启即蒸发）
     statePath: join(getDataDir(), "intelligent-reminder", "active-reminders.json"),
     onContactOutcome: (params) => {
-      const channel =
-        params.channel === "popup"
-          ? "websocket"
-          : params.channel === "tts_alarm"
-            ? "voice"
-            : "phone_call";
+      const channel = params.channel === "popup" ? "websocket" : "phone_call";
       userPersonalizationService.observeContactOutcome(params.userId, {
         channel,
         responded: params.responded,
@@ -1236,7 +1239,8 @@ export async function createAppServices(
   });
 
   // 统一主动性管道（docs/proactivity-architecture.md）：到点提醒的离线必达晚绑定回调。
-  // 管道在下方装配段创建后注入；在线时 ScheduleReminderFired 原生弹窗即唯一触达
+  // 管道在下方装配段创建后注入；在线时 ScheduleReminderFired 原生弹窗 + 手机端
+  // 对话气泡（agent.proactive_message 定向手机，见下方 handler）双触达
   // （不再叠加 LLM 话术第二条消息——省一次 LLM 调用且不重复打扰）。
   let onReminderOfflineToPipeline:
     | ((
@@ -1248,11 +1252,17 @@ export async function createAppServices(
         preReminder: boolean,
       ) => void)
     | undefined;
-  // 分级预告段（睡前备忘/起床闹钟/出发预留）的统一语气层（晚绑定）：
-  // speechPolisher 在下方 brain 段才构造，运行期回调触发时已就绪；
-  // 失败/未装配回退模板原文，提醒永不因润色失败而中断。
+  // 分级预告段的表达层（晚绑定）：**只给事实，不给成文草案**。
+  // 2026-11-05 用户定调「预告与定时提醒都该由 agent 动态控制」：此前这里传的是
+  // 模板原文 draft（`【睡前备忘】明天11:00有「看牙」…`），模型只能照着润色语气，
+  // 段名与报数结构天然留在话里。现在 facts 只带事项/开始时间/地点，让 agent 自己
+  // 组织表达；draft 退化为 fallback（LLM 不可用/失败时才会原样出现）。
   let preReminderPolish:
-    | ((input: { sessionId: string; draft: string }) => Promise<string>)
+    | ((input: {
+        sessionId: string;
+        draft: string;
+        facts: Record<string, unknown>;
+      }) => Promise<string>)
     | undefined;
   scheduleTaskService.setReminderHandler(async (task, message, options) => {
     const displayMessage = formatReminderDisplayMessage(message);
@@ -1265,9 +1275,17 @@ export async function createAppServices(
     // （主提醒创建时已是模型手笔，升档要快、要确定性）。
     const outboundMessage =
       preReminder && preReminderPolish
-        ? await preReminderPolish({ sessionId: task.sessionId, draft: displayMessage }).catch(
-            () => displayMessage,
-          )
+        ? await preReminderPolish({
+            sessionId: task.sessionId,
+            draft: displayMessage,
+            // 只给 agent 事实：说得出口就行，内部段名/分级结构一律不进去
+            facts: {
+              事项: task.shortTitle || task.title || task.description || "",
+              开始时间: formatNextRunAtLocal(task.nextRunAt ?? task.runAt, task.timezone || "Asia/Shanghai"),
+              ...(task.location?.trim() ? { 地点: task.location.trim() } : {}),
+              提醒性质: "比开始时间提前的一次预告，不是到点提醒",
+            },
+          }).catch(() => displayMessage)
         : displayMessage;
     const wsDelivered = wsConnectionRegistry.trySend(
       task.sessionId,
@@ -1308,16 +1326,39 @@ export async function createAppServices(
         task.nextRunAt ?? task.runAt,
         preReminder,
       );
-    } else if (!wsDelivered) {
-      // 手机在线但 fan-out 竞态失败：维持原离线管道兜底
-      onReminderOfflineToPipeline?.(
-        task.taskId,
-        task.sessionId,
-        task.title ?? "",
-        outboundMessage,
-        task.nextRunAt ?? task.runAt,
-        preReminder,
-      );
+    } else {
+      if (!wsDelivered) {
+        // 手机在线但 fan-out 竞态失败：维持原离线管道兜底
+        onReminderOfflineToPipeline?.(
+          task.taskId,
+          task.sessionId,
+          task.title ?? "",
+          outboundMessage,
+          task.nextRunAt ?? task.runAt,
+          preReminder,
+        );
+      }
+      // 手机在线的到点主提醒：补一条定向手机的主动消息（2026-11-04）——
+      // reminder_fired 横幅是瞬时浮层，对话流里没痕迹；用户要 agent 在
+      // 对话里「主动说一句」，且只有手机端需要（桌面走灵动岛原路不受影响）。
+      // importance=normal → 告知类，客户端落文字气泡不弹决策卡；
+      // kind=schedule_reminder 供客户端跳过重复横幅（reminder_fired 已弹过）。
+      if (preReminder !== true) {
+        wsConnectionRegistry.trySendToDeviceClasses(
+          task.sessionId,
+          JSON.stringify({
+            type: "agent.proactive_message",
+            payload: {
+              deliveryId: `d_rm${task.taskId.slice(-6)}_${Date.now().toString(36)}`,
+              title: task.shortTitle || task.title || "",
+              text: outboundMessage,
+              importance: "normal",
+              kind: "schedule_reminder",
+            },
+          }),
+          ["mobile"],
+        );
+      }
     }
     // 不再根据"起床/叫醒"等关键词自动拨打电话
     // 日程提醒应仅通过 WebSocket 推送 + embodimentAlert 通知用户
@@ -1635,9 +1676,11 @@ export async function createAppServices(
   const featureCatalog = new FeatureCatalog(toolRegistry, skillManager, mcpClientService);
   registerCapabilityQueryTools(toolRegistry, { skillManager, virtualPhoneService });
 
-  // 记忆装配要读嵌入端点：远端未配置时先把内置向量引擎拉起来（典型 ~150ms，
-  // 加载失败返回 null，记忆侧按既有降级路径继续）。listen 不依赖这一段。
-  if (!resolveEmbeddingEndpoint()) await ensureLocalEmbeddingEndpoint();
+  // 记忆装配要读嵌入端点：本地内置引擎已升为首选（手机云端部署形态不能依赖
+  // 远端供应商账户状态），无论远端是否配置都要先拉起（典型 ~150ms，加载失败
+  // 返回 null 时按 AGENT_EMBEDDING_BASE_URL 远端兜底，再不行走既有降级路径）。
+  // 确实只想用远端可设 AGENT_LOCAL_EMBEDDING_DISABLED=1。listen 不依赖这一段。
+  await ensureLocalEmbeddingEndpoint();
 
   const agenticMemoryRuntime = getAgenticMemoryRuntime();
   // 两个内存服务初始化相互独立（narrative 装配只依赖 humanLikeMemory），并行加载。
@@ -2227,11 +2270,13 @@ export async function createAppServices(
   // 日程分级预告段回填统一语气层（上方 reminderHandler 处晚绑定声明）：
   // SpeechHub light 档（人格 + 画像浅层，必达不否决），
   // 模板兜底不受熔断影响。
+  // 日程预告段交给 SpeechHub：facts 是事实材料，模板只作兜底。
+  // 禁 per-kind 提示词（记忆铁律）——kind 只决定 facts，不改指令块。
   preReminderPolish = (input) =>
     speechHub.speak({
       kind: "schedule_pre_reminder",
       sessionId: input.sessionId,
-      facts: { draft: input.draft },
+      facts: input.facts,
       fallback: input.draft,
       tier: "light",
       importance: "high",
@@ -2553,6 +2598,38 @@ export async function createAppServices(
   });
   eveningDigestScheduler.start();
   app.log.info("[EveningDigest] 晚间 digest 调度器已启动");
+
+  // ─── 明日预览接生产投递（2026-11-05）────────────────────────────────────
+  // 聊天里问「明天什么安排」时，把当日 digest 作为场景数据面注入渲染出口，
+  // 由 render/scenes/tomorrow-preview.scene 确定性排版（版式不再靠 prompt）。
+  // 取数优先级：今晚已推过的缓存 → 轻量现生成（跳过 LLM 文案，只要数据）。
+  // 现生成失败/超时由桥的 2.5s 上限兜住，回复照常走常规链路。
+  {
+    const inflight = new Map<string, Promise<Record<string, unknown> | undefined>>();
+    const failedAt = new Map<string, number>();
+    const FAIL_COOLDOWN_MS = 5 * 60_000;
+    registerPreviewDigestSource(async (sessionId) => {
+      const cached = eveningDigestScheduler.latestDigest(sessionId);
+      if (cached) return cached as unknown as Record<string, unknown>;
+      const lastFail = failedAt.get(sessionId);
+      if (lastFail && Date.now() - lastFail < FAIL_COOLDOWN_MS) return undefined;
+      const running = inflight.get(sessionId);
+      if (running) return running;
+      const job = eveningDigestService
+        .generateDigest(sessionId, { skipNarration: true })
+        .then((digest) => {
+          eveningDigestScheduler.rememberDigest(sessionId, digest);
+          return digest as unknown as Record<string, unknown>;
+        })
+        .catch(() => {
+          failedAt.set(sessionId, Date.now());
+          return undefined;
+        })
+        .finally(() => inflight.delete(sessionId));
+      inflight.set(sessionId, job);
+      return job;
+    });
+  }
 
   // ─── 旅游接驳提醒（travel-upgrade-plan P2）：行程交通大段（高铁/航班）到点 ───
   // 询问是否预约滴滴（确认后 Agent 走 ride_hailing.quote/book 真实下单）。调度
@@ -3001,31 +3078,13 @@ export async function createAppServices(
     );
     // 定时任务结果同样是 LLM 产物：回复末尾的 NEXT_UP 协议块不能在流式/定稿
     // 通道漏给用户（此前这条路径是裸 delta + 裸 reply.text）。
-    const taskStreamGuard = createStreamMarkerGuard();
-    const sendTaskChunk = (chunk: string): void => {
-      if (!chunk) return;
-      wsConnectionRegistry.trySend(
-        task.sessionId,
-        JSON.stringify({
-          type: ServerEventType.ChatAssistantChunk,
-          payload: {
-            messageId: task.taskId,
-            delta: chunk,
-            source: "schedule.agent_task",
-          },
-        }),
-      );
-    };
+    // 2026-11-05 文字打字机退役（模型仍流式生成）：定时任务结果只由一次 ChatAssistantDone 下发。
+    // ScheduleAgentTaskFired 是状态事件（客户端形象层消费），不负责把正文落进聊天流，
+    // 所以这里必须补一条终态，否则删掉 chunk 后在线用户看不到任务回复。
     const reply = await runtime.handleUserMessage(task.sessionId, prompt, {
       chatUserMessageId: `schedule:${task.taskId}:${Date.now()}`,
       agentAccessMode: accessMode,
-      onAssistantDelta: (delta) => {
-        const safe = taskStreamGuard.feed(delta);
-        if (safe) sendTaskChunk(safe);
-      },
     });
-    const taskGuardTail = taskStreamGuard.flush();
-    if (taskGuardTail) sendTaskChunk(taskGuardTail);
     const displayText = extractNextUpSuggestions(reply.text ?? "").text;
     const toolRun = await runtime.runToolIfNeeded(task.sessionId, reply, {
       chatUserMessageId: `schedule:${task.taskId}:tool`,
@@ -3055,6 +3114,23 @@ export async function createAppServices(
         },
       }),
     );
+    // 一次性终态：正文全文随 done 落进聊天流（替代原逐字 chunk）。
+    if (displayText.trim()) {
+      wsConnectionRegistry.trySend(
+        task.sessionId,
+        JSON.stringify({
+          type: ServerEventType.ChatAssistantDone,
+          payload: {
+            sessionId: task.sessionId,
+            messageId: `schedule:${task.taskId}:a`,
+            finalText: getToolResultProcessor().processAssistantText(displayText, {
+              userText: prompt,
+            }),
+            source: "schedule.agent_task",
+          },
+        }),
+      );
+    }
     if (!completionDelivered && displayText.trim()) {
       getTaskOutbox().enqueue(task.sessionId, {
         messageId: task.taskId,
@@ -3605,7 +3681,47 @@ export async function createAppServices(
   // ─── 位置能力（方案 A-D）：默认全部关闭（隐私优先），LOCATION_TRACKING_MODE=continuous 显式开启 ───
   // 方案 C 地理围栏：用户显式创建围栏才存在位置触发，独立于持续模式常驻装配。
   const locationGeofenceService = new GeofenceService();
-  registerGeofenceTools(toolRegistry, { service: locationGeofenceService, audit: auditService });
+  registerGeofenceTools(toolRegistry, { service: locationGeofenceService, audit: auditService });  // ─── 情境快照（持续感知 State 层，2026-11-05）───
+  // 时区与位置的唯一权威快照：WS 层（session.init / chat / location_report）写入，
+  // prompt 装配与时钟工具同步读取。定位失败、权限被拒、室内无 fix 都不影响时区。
+  // 落盘 data/location/actor-context.json（与位置历史同目录，本地不上云）。
+  const actorContext = new ActorContextService();
+  agentCore.setActorContext(actorContext);
+  // 线程时间轴 / [ts:] 帧与【当前时间】块同源：provider 侧按 sessionId 反查快照。
+  // 会话 id 可能带 master:/notes: 前缀（与 actorId 不同），两种键都试一次；
+  // 都查不到就返回 undefined，退回服务器时区（旧行为，不会更差）。
+  AbstractChatProvider.setTimezoneResolver((sessionId) => {
+    const direct = actorContext.resolveClock(sessionId);
+    if (direct.source !== "server") return direct.timezone;
+    const stripped = sessionId.replace(/^(master|notes|incognito):/, "");
+    if (!stripped || stripped === sessionId) return undefined;
+    const alt = actorContext.resolveClock(stripped);
+    return alt.source === "server" ? undefined : alt.timezone;
+  });
+  // 围栏配置变更 → 立即向在线客户端重新下发（否则用户新建围栏后要等下次重连
+  // 才会注册成系统围栏，表现为「明明设了却一直不触发」）。
+  locationGeofenceService.setOnChanged((actorId) => {
+    try {
+      const fences = locationGeofenceService
+        .list(actorId)
+        .filter((f) => f.enabled)
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          latitude: f.latitude,
+          longitude: f.longitude,
+          radiusMeters: f.radiusMeters,
+          event: f.event,
+        }));
+      locationCoordinator.sendEventToActor(actorId, "agent.geofence_sync", {
+        fences,
+        syncedAt: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.log(`[Location] 围栏变更下发失败（忽略）: ${err}`);
+    }
+  });
+
   // 方案 B 位置历史：默认开启（2026-09-05，本地 SQLite 不上云，LOCATION_HISTORY_ENABLED=0 关闭）。
   // 常去地点挖掘（对话 prompt 的【常去地点】块，零 LLM）依赖历史样本。
   const locationTrackingMode = locationCoordinator.getTrackingConfig().mode;
@@ -4901,7 +5017,12 @@ export async function createAppServices(
     submitIntent: (intent) => proactivityHub.submitIntent(intent),
   });
   // 用户清除位置历史时同步失效到达触发器的缓存：已删数据不再驱动主动行为
-  locationHistoryService?.setOnCleared((actorId) => locationTrigger.invalidate(actorId));
+  locationHistoryService?.setOnCleared((actorId) => {
+    locationTrigger.invalidate(actorId);
+    // 快照里的位置也必须同步消失：否则「已删除」的坐标仍会经 prompt 注入泄漏。
+    // 时钟保留——用户清的是位置，不是时区。
+    actorContext.clearLocation(actorId);
+  });
   // ── 位置方案 C 出口：围栏事件 → 全量审计 + 按 actionType 分发动作 ──
   locationGeofenceService.setNotifier((event) => {
     void auditService
@@ -5005,6 +5126,8 @@ export async function createAppServices(
   const locationIngest = new LocationIngestPipeline({
     history: locationHistoryService,
     geofence: locationGeofenceService,
+    // 快照与事件流同源：每次上报（含被历史频控丢弃的）都刷新 Actor 当前状态
+    context: actorContext,
     onLocationReported: (actorId, loc) => locationTrigger.handleLocationReport(actorId, loc),
   });
   // 接线 2：session-epitome 待办闭环（完成检测 → hub.onUserLoopCompleted 恭喜）
@@ -6421,14 +6544,9 @@ export async function createAppServices(
           // 续跑结果同样是 LLM 产物：NEXT_UP 协议块不得漏进流式气泡/定稿文本。
           const probeGuard = createStreamMarkerGuard();
           const sendProbeChunk = (chunk: string): void => {
-            if (!chunk) return;
-            wsConnectionRegistry.trySend(
-              actorId,
-              JSON.stringify({
-                type: ServerEventType.ChatAssistantChunk,
-                payload: { sessionId: actorId, messageId: assistantMsgId, chunk },
-              }),
-            );
+            // 2026-11-05 文字打字机退役（模型仍流式生成）：续跑结果只由下方 ChatAssistantDone 下发。
+            void chunk;
+            return;
           };
           void runtime
             .handleUserMessage(actorId, prompt, {
@@ -6790,34 +6908,8 @@ export async function createAppServices(
     // 移动端推送通道（离线必达升级）：两端都不在线时，必达/critical 提案改走手机系统推送
     // （JPUSH_APP_KEY/JPUSH_MASTER_SECRET 或 BARK_URL / MOBILE_PUSH_WEBHOOK_URL 任一配置即启用）
     mobilePush: proactivePushService,
-    // critical 提案升级链接线（Phase 3 待办落地）：送达 ≠ 被看到——critical 直投成功后
-    // 挂起 intelligent-reminder 的 popup→tts_alarm→phone_call 三级升级链（未确认按默认
-    // 规则 10/12 分钟逐级升级），用户确认（reminder.acknowledge）即停链。
-    escalate: (p, deliveryId) => {
-      void (async () => {
-        const service = intelligentReminder.reminderService;
-        const instance = await service.createReminder({
-          id: `pipeline_critical_${deliveryId}`,
-          title: p.title,
-          message: p.directText ?? p.summary,
-          priority: "urgent",
-          initialLevel: "popup",
-          scheduledAt: new Date(),
-          metadata: {
-            userId: p.actorId,
-            actorId: p.actorId,
-            deliveryId,
-            source: "pipeline-critical-escalation",
-          },
-        });
-        await service.triggerReminder(instance.config.id);
-        console.log(
-          `[ProactivePipeline] critical 提案已挂起升级链 kind=${p.kind} reminderId=${instance.config.id}`,
-        );
-      })().catch((err) => {
-        console.log(`[ProactivePipeline] critical 升级链挂起失败（忽略）kind=${p.kind}: ${err}`);
-      });
-    },
+    // 升级链已斩断（2026-11-05 定调）：不再给 critical 提案挂 escalate 钩子——
+    // 送达 ≠ 被看到 的兜底改由送达确认与重连补投承担，电话仅保留为显式触达级别。
   });
   proactivePipeline.start();
   // 晚绑定回填（降价监控命中在管道构造前装配）：到价提案经此进统一管道
@@ -7428,10 +7520,12 @@ export async function createAppServices(
       // 夜间内省（确定性）：闲置/显著度/partial 验收 → 需要开口的 finding
       goalIntrospect: (actorId: string) => goalIntrospector.actionable(actorId),
       // 在办事项统一视图（2026-10-19）：goal 只读视图，供前端「在办目标」面板
-      goalView: (actorId: string) =>
+      // 2026-11-07：支持 includeCompleted（手机端「已完成」筛选），缺省口径不变
+      goalView: (actorId: string, opts?: { includeCompleted?: boolean }) =>
         buildUnifiedGoalView({
           goalBoard,
           actorId,
+          includeCompleted: opts?.includeCompleted === true,
           progressOf: (g) => goalPlanner.progressLine(g),
           // 共享发现层读点：该目标尚未开口的发现条数（与开口闸读同一份台账）
           pendingFindingsOf: (goalId: string) => discovery.findingsFor(goalId).length,
@@ -7531,6 +7625,7 @@ export async function createAppServices(
     runtime,
     wsConnectionRegistry,
     eveningDigestService,
+    eveningDigestScheduler,
     agentPulseCheck: (opts) => agentPulseService.check(opts),
     lifeSignalHubService,
     marketSignalService,
@@ -7554,6 +7649,18 @@ export async function createAppServices(
     reflexArc,
   });
 
+  // 手机端对话式首启引导（2026-11-07）：唯一编排点，装配在 WS 层之前。
+  // 开场白走 SpeechHub 现有人格 prompt；称呼/名字由服务端确定性落库，
+  // 不依赖 LLM 自觉调工具（agent.update_identity 默认不在常驻工具集）。
+  const onboardingIntroService = new OnboardingIntroService({
+    accounts: agentAccountService,
+    memorySync: agentMemorySyncService,
+    wsRegistry: wsConnectionRegistry,
+    speech: speechHub,
+    now: () => Date.now(),
+  });
+  setOnboardingHintRuntime(onboardingIntroService);
+
   registerWebSocketRoute(app, {
     sessionService,
     realFundsWallet,
@@ -7575,6 +7682,19 @@ export async function createAppServices(
     friendMessageService,
     locationCoordinator,
     locationIngest,
+    actorContext,
+    geofenceProvider: (actorId: string) =>
+      locationGeofenceService
+        .list(actorId)
+        .filter((f) => f.enabled)
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          latitude: f.latitude,
+          longitude: f.longitude,
+          radiusMeters: f.radiusMeters,
+          event: f.event,
+        })),
     virtualPhoneService,
     devicePairingService,
     userPersonalizationService,
@@ -7583,9 +7703,12 @@ export async function createAppServices(
     eveningDigestScheduler,
     accessAuthService,
     phoneCallCoordinator,
+    // 卡片内动作通道（card.action）：卡内下单/支付/物流直接执行，不发消息
+    shoppingOrderService,
     agentAccountService,
     actorModelBindings,
     petReactionChat: externalChat,
+    onboardingIntroService,
   });
 
   // MCP 工具异步加载，onReady 时已就绪：二次刷新目录（幂等）

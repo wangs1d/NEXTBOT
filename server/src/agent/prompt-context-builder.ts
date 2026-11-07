@@ -21,6 +21,7 @@ import { buildSessionSkillChatTools } from "../skills/skill-openai-bridge.js";
 import { SKILL_MANAGE_CHAT_TOOLS } from "../tools/skill-manage-tools.js";
 import type { SkillManager } from "../skills/index.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
+import { peekOnboardingHintRuntime } from "../services/onboarding-state.js";
 import {
   buildSchedulePromptSnapshot,
 } from "../services/schedule-prompt-snapshot.js";
@@ -71,15 +72,11 @@ function buildFollowUpAnchorFromUnderstanding(
 
 /**
  * STM 会话情景记忆注入由 shortTermMemoryGateway.buildPromptContext 承担。
- *//**
- * 从 `userLocation` 注入串（如「…，时区 Asia/Shanghai。…」）提取用户 IANA 时区。
- * 抽不出则返回 undefined，调用方回退到服务器进程时区。
  */
-function extractUserTimezoneFromLocation(userLocation?: string): string | undefined {
-  if (!userLocation) return undefined;
-  const m = userLocation.match(/时区\s+([A-Za-z]+(?:\/[A-Za-z0-9_+.-]+)*)/);
-  return m?.[1]?.trim() || undefined;
-}
+// 2026-11-05：`extractUserTimezoneFromLocation` 已删除。把时区序列化进中文
+// prompt 串、再用正则从里面抠回来，是结构性缺陷——文案一改、串被龄期后缀
+// 拼接、或多段注入并存，就会静默退回服务器时区。时区现在由
+// `PromptContextBuilder.setTimezoneProvider` 从 Actor 情境快照结构化读取。
 
 /**
  * 【运行环境】块（2026-10-07）：用户此刻从哪类设备发消息（WS 连接自报 platform）。
@@ -96,7 +93,14 @@ export function buildDeviceEnvironmentBlock(
   if (deviceClass === "mobile") {
     return (
       "【运行环境】用户此刻在手机 App 上和你对话（小屏、可能不在电脑前）。" +
-      "回复保持口语短句，不写长文/表格/多级列表。" +
+      "回复保持口语短句，不写长文/多级列表；但数据类内容（行情、指标、多对象对比）" +
+      "仍用紧凑的 markdown 表格交付——小屏读表格比读段落清楚，这条不随端收窄。" +
+      "手机端没有可视内置浏览器，但浏览器能力与桌面端一致：" +
+      "购物比价/找最低价一律用 shopping.compare.prices（服务端浏览器执行，已导入 Cookie 自动注入；" +
+      "撞到登录墙会把二维码推到聊天，用户扫码后继续），不要用 search_web 凑答案；" +
+      "通用网页浏览用 agent_browser.*（同样在服务端远端浏览器执行，结果与截图会回到聊天）；" +
+      "用户给了链接或要求打开某网站时，直接调用 agent_browser.open，不要只查工具描述就放弃。" +
+      "不要调用 shared_browser.*，也不要让用户去打开客户端「常用工具 → 浏览器」。" +
       "涉及电脑才能做的事，别让用户自己去电脑上点——你具备电脑远控能力，可直接调用 " +
       "desktop.* 工具（如 desktop.visual.screenshot 截图、desktop.open 打开程序/网页/文件、" +
       "desktop.uia_query 看界面元素、desktop.run_input 键鼠操作、desktop.run_automation 控件操作、" +
@@ -504,6 +508,30 @@ export class PromptContextBuilder {
   }
 
   /**
+   * 用户时区拉取器（Actor 情境快照的 `resolveClock().timezone`）。
+   *
+   * 【当前时间】块必须与用户屏幕上的钟一致：这个 provider 是唯一来源，不再
+   * 从位置串里反解。未注入时 buildCurrentTimePrompt 回退服务器时区（旧行为，
+   * 仅用于程序化调用/测试）。
+   */
+  private timezoneProvider: ((actorId: string) => string | undefined) | null = null;
+
+  setTimezoneProvider(fn: ((actorId: string) => string | undefined) | null): void {
+    this.timezoneProvider = fn;
+  }
+
+  /** 读用户时区（provider 异常绝不影响 prompt 装配）。 */
+  private resolveUserTimezone(actorId: string): string | undefined {
+    if (!this.timezoneProvider) return undefined;
+    try {
+      const tz = this.timezoneProvider(actorId)?.trim();
+      return tz || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
    * 顺嘴机会拉取器（主动性搭车通道，agent-core 经 proactivityHub 转发注入）。
    * 返回即交付——每轮至多一条挂起意图；仅对话面调用（plane=chat 门控在
    * assembleMemory 内做）。provider 内部自带频控/TTL。
@@ -627,16 +655,18 @@ export class PromptContextBuilder {
     // 语言说清「承接对象」——只解决指代对齐，不催促推进旧任务（「你叫我什么？」
     // 被硬编码判成追问轮、锚到上一条旅游回复导致答非所问的教训）。
     const followUpAnchor = buildFollowUpAnchorFromUnderstanding(turnUnderstanding);
-    // scheduleSnapshot 注入：模型判定的日程语义（schedule_query）或追问轮注入
-    // ——追问轮 agent 回头确认「正事」，权威日程快照能纠正 recap/挂起栈的记忆偏差。
+    // 【时间感知·日程态】（2026-11-05 二轮泛化，数据驱动、无场景开关）：
+    // 只要有待触发的日程/提醒就每轮注入权威快照（绝对触发时间+实时剩余时间），
+    // 没有则零注入。不再按 schedule_query/追问轮/临近提醒逐场景开闸——打补丁式
+    // 条件换个场景就漏（真实事故：00:39 闲聊轮复读「七分钟后那觉」实际只剩 1 分钟）。
+    // schedule_query 明确查询时切换 7 天视野（extended），由快照函数内部裁决空态。
     const scheduleSnapshot =
-      this.deps.scheduleTaskService != null &&
-      (turnUnderstanding?.scheduleQuery === true || followUpTurn)
+      this.deps.scheduleTaskService != null
         ? buildSchedulePromptSnapshot(
             this.deps.scheduleTaskService,
             input.actorId,
             turnUnderstanding?.scheduleQuery === true,
-          )
+          ) || undefined
         : undefined;
     // 行程状态热层：仅模型判定本轮在问行程/旅行时注入一行回执列表（目的地/日期/planId），
     // 完整明细不进上下文，由 travel.get-itinerary 按需回查（见 travel-prompt-snapshot.ts）
@@ -676,7 +706,11 @@ export class PromptContextBuilder {
     // followUpAnchor 追问场景扩容：180 → 400 字，增加指代消解线索
     const followUpAnchorLimit = followUpTurn ? 400 : 180;
     const compactFollowUpAnchor = compactPromptBlock(followUpAnchor, followUpAnchorLimit);
-    const compactScheduleSnapshot = compactPromptBlock(scheduleSnapshot, 360);
+    // extended（schedule_query 7 天视野 5 条 + 引用纪律脚注）行更长，预算放宽，防截断
+    const compactScheduleSnapshot = compactPromptBlock(
+      scheduleSnapshot,
+      turnUnderstanding?.scheduleQuery === true ? 700 : 400,
+    );
     const compactTravelState = compactPromptBlock(travelState, 300);
     const userProfileFromManagerCompact = userProfileFromManager;
     // 2026-09-29 互斥改合并：文件画像（LLM 抽取的当前事实）升稳定层【用户长期画像】主位，
@@ -685,15 +719,17 @@ export class PromptContextBuilder {
       rawUserProfile,
       userProfileFromManagerCompact,
     );
-    // 冷启动引导（P2）：画像还没有任何真实事实（模板/空）且是会话首轮时，
-    // 给一句自然破冰提示——新用户第一周画像未成形，agent 主动了解而不是干等。
-    // 画像成形或非首轮后自动消失（模板闸双重门控，零常驻成本）。
+    // 手机端对话式首启引导（2026-11-07）优先：账号级状态机给出「该接哪一步」
+    // 的意图（只给状态，不教措辞），跑完自动消失。引导未激活时回退到原来的
+    // 冷启动破冰提示（画像空 + 会话首轮，双重门控，零常驻成本）。
+    const introHint = peekOnboardingHintRuntime()?.hintForTurn(input.actorId);
     const onboardingHint =
-      !userProfileSummary &&
+      introHint ??
+      (!userProfileSummary &&
       userText &&
       (input.threadMessageCount == null || input.threadMessageCount <= 1)
         ? "【初次见面】\n你还不认识这位用户。可以自然地了解一个称呼或对方最近在忙什么——问一句就好，别连环盘问，下轮也别重复问。"
-        : undefined;
+        : undefined);
 
     // 深度优化：用户画像注入（来自 OnlineLearningCortex）
     let userPatternBlock: string | undefined;
@@ -871,7 +907,7 @@ export class PromptContextBuilder {
       // 一行动态文本，走动态层不伤 prefix cache；缺它模型会拿「没有注入时间」当
       // 借口拒绝办事（真机实证：「明天天气」轮自称无时间无天气权限）。
       // 【对话时间轴】同样改为每轮注入（2026-10-23 删除按需闸，见 abstract-chat-provider）。
-      currentTime: buildCurrentTimePrompt(new Date(), extractUserTimezoneFromLocation(input.userLocation)),
+      currentTime: buildCurrentTimePrompt(new Date(), this.resolveUserTimezone(input.actorId)),
       ...(buildDeviceEnvironmentBlock(input.deviceClass)
         ? { deviceEnvironment: buildDeviceEnvironmentBlock(input.deviceClass) }
         : {}),

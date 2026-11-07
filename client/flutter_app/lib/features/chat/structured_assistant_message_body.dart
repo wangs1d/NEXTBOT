@@ -104,6 +104,9 @@ class StructuredAssistantMessageBody extends StatelessWidget {
             parts.body,
             cs,
             textTheme,
+            // 聊天正文的表格带「表格」卡头（标题 + 一键复制），数据交付
+            // 是一张明确的卡，不是散在正文里的线条（2026-11-06）。
+            tableCardHeader: true,
           ),
         if (showCursor)
           SizedBox(

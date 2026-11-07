@@ -24,7 +24,8 @@ import { resolveActorId } from "../agent/actor-id.js";
 import { redactCredentials } from "../security/redact.js";
 import type { ToolContext } from "../tools/tool-registry.js";
 import { BROWSER_SESSION_SITES, type BrowserSessionSiteId } from "./browser-session-sites.js";
-import { listDefaultComparePlatforms } from "./shopping-platforms/index.js";
+import { getLoginWaitMs } from "./browser-runtime/human-gate.js";
+import { listDefaultComparePlatforms, listLoginRequiredL1Platforms } from "./shopping-platforms/index.js";
 import type { ShoppingOrderService } from "./shopping-order-service.js";
 import type { ProductSummary } from "./shopping-platforms/index.js";
 
@@ -35,6 +36,8 @@ interface PlatformQuotes {
   products: ProductSummary[];
   error?: string;
   loginRequired?: boolean;
+  /** 登录二维码真的落盘并推到聊天时的图片地址（推失败则无此字段）。 */
+  loginQrImage?: string;
   /** 浏览器层给出的 human-required 硬信号（登录墙 / 验证码） */
   humanRequired?: { reason: "login" | "captcha"; evidence?: string };
 }
@@ -42,6 +45,18 @@ interface PlatformQuotes {
 /** 平台显示名（京东/拼多多…），未收录时回退平台标识。 */
 function platformLabel(platform: string): string {
   return BROWSER_SESSION_SITES[platform as BrowserSessionSiteId]?.label ?? platform;
+}
+
+/**
+ * 登录二维码「真的推出去了」的地址。
+ * 只有工具回执带回 imageUrl 才算推送成功——不能拿「客户端在线」当已推送，
+ * 否则会出现「服务端说二维码已推到聊天、用户一张也没收到」的空口承诺。
+ */
+function loginQrOf(res: unknown): string | undefined {
+  const lr = (res as { loginRequired?: unknown } | null)?.loginRequired;
+  if (!lr || typeof lr !== "object") return undefined;
+  const url = (lr as { imageUrl?: unknown }).imageUrl;
+  return typeof url === "string" && url.trim() ? url.trim() : undefined;
 }
 
 /** 单平台一条报价 */
@@ -153,6 +168,15 @@ export interface ShoppingCompareServiceDeps {
   ) => string | null | void;
   /** 测试注入时钟 */
   now?: () => number;
+  /**
+   * 商品主图落地（下载外部图 → 本服务静态路径 `/agent/images/...`）。
+   * 必需性说明：手机端是**云端浏览器取价、聊天里看图**，外部平台图源普遍带
+   * 防盗链/协议相对地址/WebP，客户端直连会大面积加载失败；这里统一转成本机
+   * PNG 再给卡片，客户端只跟自己的服务端打交道。未注入时保留原始 URL（降级）。
+   */
+  imageStore?: {
+    downloadAndStorePng(remoteUrl: string, actorId: string, timeoutMs?: number): Promise<string>;
+  };
 }
 
 // ─────────────────────────── 标题归一化 / 同款判定 ───────────────────────────
@@ -239,6 +263,81 @@ export function groupSameProducts(items: TaggedProduct[]): CompareGroup[] {
       specTokens: [...g.repSpecs],
       offers: g.offers,
     };
+  });
+}
+
+/**
+ * 从查询里提「拉丁主词」（英文/型号），用于丢弃平台搜索页里的无关推荐。
+ * 搜「AirPods Pro 2」时苏宁会回漫步者/HUAWEI 耳机——那是相关推荐，不是同款。
+ */
+export function latinCoreToken(query: string): string {
+  const lowered = query.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5]+/g, " ").trim();
+  const latin = lowered
+    .split(/\s+/)
+    .filter((t) => /[a-z0-9]/.test(t) && t.length >= 2)
+    .sort((a, b) => b.length - a.length);
+  return latin[0] ?? "";
+}
+
+/**
+ * 从查询里提「中文主词」（品牌/品名首段），用于挡掉同类不同牌的结果。
+ * 搜「蒙牛纯牛奶」时苏宁会回伊利——规格一样、牌子不同，不能当同款比价。
+ */
+const GENERIC_CN_WORDS = new Set([
+  "女生", "男生", "适合", "推荐", "便宜", "好用", "新款", "正品",
+  "官方", "旗舰", "包邮", "特价", "家用", "大容量", "学生", "儿童",
+]);
+
+export function cnCoreToken(query: string): string {
+  const cn = query.replace(/[a-zA-Z0-9\s]+/g, " ").replace(/[^\u4e00-\u9fa5\s]/g, " ").trim();
+  const first = (cn.split(/\s+/)[0] ?? "").trim();
+  if (first.length < 2) return "";
+  const core = first.slice(0, 2);
+  return GENERIC_CN_WORDS.has(core) ? "" : core;
+}
+
+/**
+ * 配件词：查询说的是主体（AirPods），搜索页会把保护套/贴膜一起返回。
+ * 配件不是同款商品，价格差一个数量级，混进来会被标成「最合适」——
+ * 真机事故：搜 AirPods 比价卡第一张是「磁吸式耳机套 ¥76.4 · 最合适」。
+ * 只在**查询本身没提配件**时才拦（用户搜「AirPods 保护套」时要的正是它）。
+ */
+const ACCESSORY_WORDS = [
+  "保护套", "保护壳", "耳机套", "保护膜", "贴膜", "钢化膜", "收纳盒", "收纳包",
+  "防尘", "挂绳", "手机壳", "表带", "数据线", "充电线", "充电器", "转接头", "支架",
+  "耳机帽", "耳塞套", "替换套",
+];
+
+function isAccessoryTitle(title: string, query: string): boolean {
+  const q = query.toLowerCase();
+  return ACCESSORY_WORDS.some((w) => title.includes(w) && !q.includes(w));
+}
+
+/**
+ * 同款相关性闸：平台搜索页返回的「相关推荐」不是同款，进比价卡只会污染结果
+ * （实测：搜 AirPods 出漫步者耳机、搜蒙牛出伊利、值得买出耳机推荐文章）。
+ *
+ * 丢弃规则：
+ *   1) 没有价格 —— 连价都读不到，列出来会让用户以为有货；
+ *   2) 配件（保护套/贴膜…）而当次查询没要配件；
+ *   3) 查询里有品牌主词（拉丁/中文）时，标题必须全部命中；
+ *   4) 都没有主词时，退回归一化标题 Dice ≥ 0.3（中文长查询不能靠包含式匹配）。
+ */
+export function filterSameProduct(query: string, products: ProductSummary[]): ProductSummary[] {
+  const latin = latinCoreToken(query);
+  const cn = cnCoreToken(query);
+  const normQuery = normalizeTitle(query);
+  return products.filter((p) => {
+    if (p.price == null) return false;
+    if (isAccessoryTitle(p.title, query)) return false;
+    const title = p.title.toLowerCase();
+    // 有主词就全部要命中：搜「蒙牛纯牛奶 250ml」时，伊利虽然也含 250ml，
+    // 但没有「蒙牛」，是另一个牌子的同规格商品，不能混进同款比价。
+    const checks: boolean[] = [];
+    if (latin.length >= 2) checks.push(title.includes(latin));
+    if (cn.length >= 2) checks.push(p.title.includes(cn));
+    if (checks.length > 0) return checks.every(Boolean);
+    return diceSimilarity(normQuery, normalizeTitle(p.title)) >= 0.3;
   });
 }
 
@@ -402,6 +501,51 @@ export class ShoppingCompareService {
   // ---- 跨平台比价（shopping.compare.prices 工具） ----
 
   /**
+   * 把比价结果里的外部主图落成本机静态图（`/agent/images/...`）。
+   *
+   * 为什么必须做：手机端没有可视浏览器，卡片里那张「真实照片」只能由服务端
+   * 取回来再发给客户端。外部图源普遍有防盗链/协议相对地址/WebP，客户端直连
+   * 会大面积空白——用户看到的就是「有价格没图」。
+   *
+   * 边界：限 12 张、并发 3、单张 8s；任何失败保留原始 URL，绝不因为图挂了
+   * 让整轮比价失败（图是增强，不是结果）。
+   */
+  private async localizeGroupImages(actorId: string, groups: CompareGroup[]): Promise<void> {
+    const store = this.deps.imageStore;
+    if (!store) return;
+    const cache = new Map<string, string>();
+    const tasks: Array<() => Promise<void>> = [];
+    for (const g of groups) {
+      for (const o of g.offers) {
+        const remote = o.imageUrl;
+        if (!remote || !/^https?:\/\//.test(remote)) continue;
+        tasks.push(async () => {
+          let local = cache.get(remote);
+          if (!local) {
+            try {
+              local = await store.downloadAndStorePng(remote, actorId, 8_000);
+              cache.set(remote, local);
+            } catch {
+              return; // 落地失败：保留原 URL
+            }
+          }
+          o.imageUrl = local;
+        });
+      }
+    }
+    if (tasks.length === 0) return;
+    const capped = tasks.slice(0, 12);
+    for (let i = 0; i < capped.length; i += 3) {
+      await Promise.allSettled(capped.slice(i, i + 3).map((run) => run()));
+    }
+    // 组代表图是 groupSameProducts 时的快照，offer 换成本地图后要重算
+    for (const g of groups) {
+      const rep = g.offers.find((o) => o.imageUrl)?.imageUrl;
+      if (rep) g.imageUrl = rep;
+    }
+  }
+
+  /**
    * 单平台取报价：客户端在线时在**用户可见的内置浏览器**里真跑一遍
    * （页面导航/翻页/读数全程可见，用户能看到 agent 在干什么），
    * 内置浏览器不可用才回落 Playwright + 已授权 Cookie 的无头通道。
@@ -419,6 +563,12 @@ export class ShoppingCompareService {
     } = {},
   ): Promise<PlatformQuotes> {
     const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
+    // 无头通道下二维码是用户登录的唯一入口：能推聊天时给足扫码时间，
+    // 否则二维码刚推出去页面就被释放，手机端等于没有登录能力。
+    const canReceiveQr = ctx.pushMediaCards != null;
+    const loginWaitMs = opts.preferVisible === true || !canReceiveQr
+      ? 20_000
+      : Math.max(20_000, getLoginWaitMs());
     const res = await this.deps.shoppingOrderService.searchProduct(
       ctx,
       platform,
@@ -430,14 +580,16 @@ export class ShoppingCompareService {
       },
       // 只读取数不占着工具预算等扫码：超时立刻交回登录 handoff，
       // 用户登录后由长流程续跑。逐平台的交接先抑制，等本轮汇总后统一交一次。
-      { preferHeadless: opts.preferVisible !== true, loginWaitMs: 20_000, suppressHandoff: true },
+      { preferHeadless: opts.preferVisible !== true, loginWaitMs, suppressHandoff: true },
     );
     if (!res.ok) {
       const human = (res as { humanRequired?: { reason: "login" | "captcha"; evidence?: string } }).humanRequired;
+      const qr = loginQrOf(res);
       return {
         products: [],
         error: redactCredentials(String((res as { error?: string }).error ?? "未知错误")),
         ...((res as { loginRequired?: unknown }).loginRequired ? { loginRequired: true } : {}),
+        ...(qr ? { loginQrImage: qr } : {}),
         ...(human ? { humanRequired: human } : {}),
       };
     }
@@ -447,9 +599,11 @@ export class ShoppingCompareService {
       // 浏览器层若已判到 human-required（登录墙/验证码），一并透传，供上层统一交接。
       const summary = String((res as { summary?: string }).summary ?? "").trim();
       const human = (res as { humanRequired?: { reason: "login" | "captcha"; evidence?: string } }).humanRequired;
+      const qr = loginQrOf(res);
       return {
         products: [],
         error: summary || "未解析到商品（页面结构可能变更）",
+        ...(qr ? { loginQrImage: qr } : {}),
         ...(human ? { humanRequired: human } : {}),
       };
     }
@@ -470,7 +624,18 @@ export class ShoppingCompareService {
     // 本地生活（美团/大众点评）与演出票务不参与商品比价缺省——它们不卖标准
     // 商品，混进来只会白搜一轮还挤掉拼多多等真正可比的平台。
     const defaultPlatforms = listDefaultComparePlatforms().filter((p) => supported.includes(p));
-    const requested = (opts.platforms?.length ? opts.platforms : defaultPlatforms)
+    // 缺省集合 = 匿名可读真实价的平台（苏宁/什么值得买）+ 该用户**已有授权 Cookie**
+    // 的登录类平台（淘宝/京东/拼多多…）。没登录态的平台不塞进缺省：手机端没有可视
+    // 浏览器，塞进去只会整轮变成登录交接、一个价也拿不到。
+    // 用户显式指定平台时按用户说的来（哪怕要登录）。
+    let platformPool = opts.platforms?.length ? opts.platforms : defaultPlatforms;
+    if (!opts.platforms?.length) {
+      const loggedIn = await this.deps.shoppingOrderService
+        .listPlatformsWithCookies(actorId, listLoginRequiredL1Platforms().filter((p) => supported.includes(p)))
+        .catch(() => [] as string[]);
+      platformPool = [...defaultPlatforms, ...loggedIn];
+    }
+    let requested = platformPool
       .map((p) => p.trim())
       .filter(Boolean)
       .slice(0, this.maxPlatforms);
@@ -478,6 +643,28 @@ export class ShoppingCompareService {
     const unsupported = requested.filter((p) => !supported.includes(p));
     if (unsupported.length === requested.length) {
       return { ok: false, error: `平台 ${unsupported.join("/")} 暂不支持。已实现：${supported.join("/")}` };
+    }
+
+    // 显式指定的平台**全是需要登录态**而且该用户一个都没登录时，这一轮注定
+    // 只能出登录二维码（手机端尤其显著：模型自己填了 jd/pdd，用户等半天只等到
+    // 一个扫码页）。这里先按免登录平台给出一轮真实报价，并在回执里说清楚
+    // 「你要的那几家需要登录，这轮先用能读的平台比」——有价总比全是码有用，
+    // 登录后下一轮自然覆盖到那几家。
+    let loginFallbackNote = "";
+    const loginPlatforms = new Set(listLoginRequiredL1Platforms());
+    if (
+      requested.length > 0 &&
+      requested.every((p) => loginPlatforms.has(p)) &&
+      defaultPlatforms.length > 0
+    ) {
+      const withCookies = await this.deps.shoppingOrderService
+        .listPlatformsWithCookies(actorId, requested)
+        .catch(() => [] as string[]);
+      if (withCookies.length === 0) {
+        loginFallbackNote =
+          `${requested.map(platformLabel).join("、")}要登录才能读价，这轮先用免登录平台给你比：`;
+        requested = defaultPlatforms.slice(0, this.maxPlatforms);
+      }
     }
 
     // 取各平台报价（单平台失败不拖垮整体）。
@@ -538,11 +725,16 @@ export class ShoppingCompareService {
       detail?: string;
     }> = [];
     let loginPending: string | null = null;
+    /** 登录二维码确实推到了聊天的平台（按真实推送结果记账，不按「在线」猜）。 */
+    const qrPushedLabels: string[] = [];
     for (const { platform, quotes } of outcomes) {
-      if (quotes.products.length > 0) {
+      // 同款相关性闸：搜索页的「相关推荐」不是同款（搜 AirPods 出漫步者），
+      // 直接进卡只会让用户以为我们比错了东西。过滤后为空 = 这家没有同款。
+      const relevant = quotes.products.length > 0 ? filterSameProduct(q, quotes.products) : [];
+      if (relevant.length > 0) {
         searchedPlatforms.push(platform);
         const fetchedAt = Date.now();
-        for (const p of quotes.products) {
+        for (const p of relevant) {
           tagged.push({ platform, product: p, fetchedAt });
         }
         continue;
@@ -558,6 +750,7 @@ export class ShoppingCompareService {
         ...(quotes.error ? { detail: quotes.error } : {}),
       });
       if (quotes.loginRequired) loginPending = platform;
+      if (quotes.loginQrImage) qrPushedLabels.push(platformLabel(platform));
       if (quotes.error) failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
     }
 
@@ -578,13 +771,20 @@ export class ShoppingCompareService {
       | undefined;
     if (needHuman.length > 0) {
       // 可见浏览器在线：页面留在登录/验证页，交用户现场操作（长流程等待步）。
-      // 无头通道（客户端离线/面板不可用）：没有可扫码的页面，如实告知需登录
-      // 后重试——不得静默丢掉「拼多多需要登录」这个事实（2026-11-02）。
+      // 无头通道（手机端/面板不可用）：二维码是唯一登录入口，能推聊天时已推到聊天，
+      // 等待窗口也按 SHOPPING_LOGIN_WAIT_MS 留足；只有推不了图时才引导用户开浏览器。
+      const canReceiveQr = qrPushedLabels.length > 0;
+      const waitSeconds = Math.round(Math.max(20_000, getLoginWaitMs()) / 1000);
+      const qrTargets = qrPushedLabels.length > 0 ? `${qrPushedLabels.join("、")}的登录二维码已推到聊天` : "";
       const instruction = visible
         ? (needUserReason === "login"
             ? `已在内置浏览器打开${needUserLabels.join("、")}的页面：需要扫码登录的平台请先登录，完成后点「我已完成」，我接着把价补上。`
             : `${needUserLabels.join("、")}需要完成安全验证（滑块/验证码）：页面已停在浏览器里，验证完点「我已完成」，我接着把价补上。`)
-        : `${needUserLabels.join("、")}需要你本人登录才能取价：本轮走的是后台无头通道，没有可扫码的页面。请让内置浏览器上线后叫我重试比价，我会把页面交给你扫码。`;
+        : canReceiveQr
+          ? (needUserReason === "login"
+              ? `${qrTargets}（最长等待约 ${waitSeconds} 秒），请在手机上扫码登录，完成后回复「我已完成」，我接着把价补上；若二维码已失效，回复后我会重新发起并再推一次。`
+              : `${qrTargets}，请按提示完成验证后回复「我已完成」，我接着把价补上。`)
+          : `${needUserLabels.join("、")}需要你本人登录才能取价，但这轮二维码没能推到聊天（客户端不在线或图片服务未装配）。请稍后重试比价，我会重新发起并再推一次。`;
       if (visible) {
         try {
           this.deps.onUserActionRequired?.({
@@ -611,7 +811,7 @@ export class ShoppingCompareService {
       return {
         ok: false,
         error:
-          `所有平台均未返回「${q}」的结果。` +
+          `${loginFallbackNote}所有平台均未返回「${q}」的结果。` +
           (handoff
             ? handoff.instruction
             : failedPlatforms.length
@@ -625,6 +825,10 @@ export class ShoppingCompareService {
 
     // 跨平台同款归一聚合（组内 offers 已按价格升序）
     const groups = groupSameProducts(tagged);
+    // 主图落地：外部图源（防盗链/协议相对/WebP）→ 本机 PNG 静态路径。
+    // 手机端是「云端浏览器取价、聊天里看图」，客户端只跟自己服务端取图，
+    // 不去直连京东/苏宁/值得买的图床。失败保留原 URL（卡片仍有可视图）。
+    await this.localizeGroupImages(actorId, groups);
     // 按组内最低价升序
     groups.sort((a, b) => (a.minPriceCny ?? Number.MAX_SAFE_INTEGER) - (b.minPriceCny ?? Number.MAX_SAFE_INTEGER));
 
@@ -685,7 +889,7 @@ export class ShoppingCompareService {
 
     return {
       ok: true,
-      summary: `「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${verifyText}${noDataText}`,
+      summary: `${loginFallbackNote}「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${verifyText}${noDataText}`,
       query: q,
       platforms: requested,
       searchedPlatforms,

@@ -41,7 +41,7 @@ function stageLabels(plan: ReturnType<typeof buildReminderPolicy>): string[] {
   return plan?.preReminders.map((p) => p.label) ?? [];
 }
 
-test("牙医（high/mid）提前3天创建 → 前晚备忘+起床闹钟+出发预留 三段", () => {
+test("牙医（high/mid）提前3天创建 → 前晚备忘+出发预留 两段", () => {
   const plan = buildReminderPolicy({
     runAt: DENTIST_RUN_AT,
     timezone: "Asia/Shanghai",
@@ -51,25 +51,24 @@ test("牙医（high/mid）提前3天创建 → 前晚备忘+起床闹钟+出发�
   });
   assert.ok(plan);
   assert.equal(plan.policyName, "high/mid");
-  // 前晚 21:00 = 13h；闹钟 = 路程60+准备60 = 2h；出发 = 路程60 = 1h
-  assert.deepEqual(plan.remindBeforeMinutes, [780, 120, 60]);
-  assert.deepEqual(stageLabels(plan), ["睡前备忘", "起床闹钟", "该出门了"]);
+  // 前晚 21:00 = 13h；出发 = 路程60 = 1h（起床闹钟段 2026-11-05 停用）
+  assert.deepEqual(plan.remindBeforeMinutes, [780, 60]);
+  assert.deepEqual(stageLabels(plan), ["睡前备忘", "该出门了"]);
   assert.match(plan.preReminders[0]!.message, /【睡前备忘】明天10:00有「该去看牙医啦/);
-  assert.match(plan.preReminders[1]!.message, /【起床闹钟】今天10:00/);
   // 2026-10-25 口吻改版：出发段=回指原话的出发指令，估算路程不再写进文案
-  assert.match(plan.preReminders[2]!.message, /你说的今天10:00有「.*牙医.*」，现在可以出发了/);
-  assert.match(plan.summary, /睡前备忘 → .*起床闹钟 → .*该出门了/);
+  assert.match(plan.preReminders[1]!.message, /你说的今天10:00有「.*牙医.*」，现在可以出发了/);
+  assert.match(plan.summary, /睡前备忘 → .*该出门了/);
 });
 
-test("截图场景：当天凌晨创建当天上午牙医 → 前晚备忘已过点裁掉，闹钟与出发保留", () => {
+test("截图场景：当天凌晨创建当天上午牙医 → 前晚备忘已过点裁掉，只剩出发", () => {
   const plan = buildReminderPolicy({
     runAt: DENTIST_RUN_AT,
     timezone: "Asia/Shanghai",
     description: "上午十点去看牙医",
     now: new Date("2099-01-09T17:37:00.000Z"), // 01-10 01:37 北京时间
   });  assert.ok(plan);
-  assert.deepEqual(stageLabels(plan), ["起床闹钟", "该出门了"]);
-  assert.deepEqual(plan.remindBeforeMinutes, [120, 60]);
+  assert.deepEqual(stageLabels(plan), ["该出门了"]);
+  assert.deepEqual(plan.remindBeforeMinutes, [60]);
 });
 
 test("无任何信号的普通提醒 → 仅出发段 15 分钟保底（历史模型默认观感不变）", () => {
@@ -120,10 +119,13 @@ test("清晨 6 点的航班：行程预算优先于起床下限（不得只提�
   });
   assert.ok(plan);
   assert.equal(plan.factors.venue, "far");
-  // 闹钟 = 06:00 - (150路程+60准备)min = 02:50；06:00 下限不得压掉行程预算
-  const wake = plan.preReminders.find((p) => p.stage === "wake_alarm");
-  assert.ok(wake);
-  assert.equal(wake.offsetMinutes, 210);
+  // 2026-11-05 起床闹钟段停用：早班机不再产叫醒段，但出发预留仍按路程估时
+  assert.equal(
+    plan.preReminders.find((p) => p.stage === "wake_alarm"),
+    undefined,
+    "起床闹钟段已停用",
+  );
+  assert.ok(plan.preReminders.some((p) => p.stage === "depart"), "出发预留不受影响");
   assert.equal(plan.factors.travelMinutes, 150);
 });
 
@@ -137,7 +139,7 @@ test("临开始 10 分钟才建牙医日程 → 所有段已过点，不生成�
   assert.equal(plan, null);
 });
 
-test("十几天后的手术：三段齐全（偏移是相对事件锚点的量，事件再远偏移也不超上限）", () => {
+test("十几天后的手术：两段齐全（偏移是相对事件锚点的量，事件再远偏移也不超上限）", () => {
   const plan = buildReminderPolicy({
     runAt: "2099-01-20T01:00:00.000Z", // 01-20 09:00 北京时间
     timezone: "Asia/Shanghai",
@@ -145,7 +147,7 @@ test("十几天后的手术：三段齐全（偏移是相对事件锚点的量�
     now: new Date(CREATED_DAYS_AHEAD),
   });
   assert.ok(plan);
-  assert.deepEqual(stageLabels(plan), ["睡前备忘", "起床闹钟", "该出门了"]);
+  assert.deepEqual(stageLabels(plan), ["睡前备忘", "该出门了"]);
 });
 
 test("因子评估：预订/票务来源按 high，地点词优先级 线上>长途>市内>近处", () => {
@@ -161,7 +163,7 @@ test("因子评估：预订/票务来源按 high，地点词优先级 线上>长
   assert.equal(assessScheduleEventFactors({ description: "办手续", location: "协和医院" }).venue, "mid");
 });
 
-test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia/周期不走策略", async () => {
+test("createTask：牙医提醒自动生成两段计划；显式提前量/trivia/周期不走策略", async () => {
   await withTempScheduleFile(async (service) => {
     const base = {
       sessionId: "policy-session",
@@ -176,12 +178,12 @@ test("createTask：牙医提醒自动生成三段计划；显式提前量/trivia
       runAt: DENTIST_RUN_AT,
     });
     assert.equal(task.reminderPolicy, "high/mid");
-    assert.deepEqual(task.remindBeforeMinutes, [780, 120, 60]);
-    assert.equal(task.preReminders?.length, 3);
+    assert.deepEqual(task.remindBeforeMinutes, [780, 60]);
+    assert.equal(task.preReminders?.length, 2);
     const described = describeRemindPlan(task);
     assert.ok(described);
     assert.match(described.summary, /睡前备忘/);
-    assert.equal(described.stages.length, 3);
+    assert.equal(described.stages.length, 2);
 
     // 显式提前量优先，不生成计划
     const explicit = await service.createTask({
@@ -248,7 +250,7 @@ test("firePreReminders：到期的策略段按各自脚本文案推送（一次 
       reminderMessage: "该去看牙医啦",
       runAt: DENTIST_RUN_AT,
     });
-    // 把 nextRunAt 回拨到只剩 50 分钟：三段（780/120/60）触发窗全部命中 now
+    // 把 nextRunAt 回拨到只剩 50 分钟：两段（780/60）触发窗全部命中 now
     const store = (service as unknown as { byTaskId: Map<string, ScheduleTaskRecord> }).byTaskId;
     const stored = store.get(task.taskId);
     assert.ok(stored);
@@ -256,15 +258,14 @@ test("firePreReminders：到期的策略段按各自脚本文案推送（一次 
 
     await service.runSchedulerTick();
     await new Promise((resolve) => setTimeout(resolve, 50));
-    assert.equal(delivered.length, 3);
+    assert.equal(delivered.length, 2);
     assert.match(delivered[0]!, /【睡前备忘】明天10:00/);
-    assert.match(delivered[1]!, /【起床闹钟】今天10:00/);
-    assert.match(delivered[2]!, /你说的今天10:00有「.*」/);
+    assert.match(delivered[1]!, /你说的今天10:00有「.*」/);
     // 触发记录落库，不重复推送
     const after = store.get(task.taskId);
-    assert.deepEqual((after?.firedPreReminderOffsets ?? []).sort((a, b) => b - a), [780, 120, 60]);
+    assert.deepEqual((after?.firedPreReminderOffsets ?? []).sort((a, b) => b - a), [780, 60]);
     await service.runSchedulerTick();
-    assert.equal(delivered.length, 3);
+    assert.equal(delivered.length, 2);
   });
 });
 
@@ -279,9 +280,9 @@ test("updateTask：改期重算分段计划；显式给提前量即接管并清�
       reminderMessage: "该去看牙医啦",
       runAt: DENTIST_RUN_AT,
     });
-    assert.equal(task.preReminders?.length, 3);
+    assert.equal(task.preReminders?.length, 2);
 
-    // 改期到下午 → 起床闹钟段应消失，偏移重算
+    // 改期到下午 → 出发段重算（起床闹钟段已停用，不再参与）
     const moved = await service.updateTask(task.taskId, {
       runAt: "2099-01-10T07:00:00.000Z", // 15:00 北京时间
     });
@@ -317,7 +318,7 @@ test("解析器回归：显式提前量 30/90 分钟可解析；「提前X分钟
   assert.equal(parseScheduleTimeFromPrompt("提前30分钟提醒我开会"), null);
 });
 
-test("作息画像-夜猫子（1:30睡/9:30起）：睡前备忘贴入睡点前1小时，并如实告知睡眠预算", () => {
+test("作息画像-夜猫子（1:30睡/9:30起）：睡前备忘贴入睡点前1小时", () => {
   const plan = buildReminderPolicy({
     runAt: DENTIST_RUN_AT, // 10:00
     timezone: "Asia/Shanghai",
@@ -330,14 +331,16 @@ test("作息画像-夜猫子（1:30睡/9:30起）：睡前备忘贴入睡点前1
   const night = plan.preReminders.find((p) => p.stage === "night_before");
   assert.ok(night);
   assert.equal(night.offsetMinutes, 570);
-  // 睡眠预算 = 入睡 1:30 → 闹钟 8:00 = 6.5h < 7 → 如实劝早睡
-  assert.match(night.message, /按你平时约1:30入睡，到闹钟只睡得约6个半小时，今晚尽量早点睡/);
-  // 闹钟下限 = max(6, 9.5-1.5) = 8:00，闹钟本来就在 8:00 → 不变
-  const wake = plan.preReminders.find((p) => p.stage === "wake_alarm");
-  assert.equal(wake?.offsetMinutes, 120);
+  // 2026-11-05 闹钟段停用：收尾不再引用闹钟时刻，也不再用睡眠预算劝早睡
+  assert.match(night.message, /今晚先记着，到点会再提醒你。/);
+  assert.equal(
+    plan.preReminders.find((p) => p.stage === "wake_alarm"),
+    undefined,
+    "起床闹钟段已停用，不应再产出",
+  );
 });
 
-test("作息画像-夜猫子赶早场：预算不足7小时 → 睡前备忘明确劝早睡", () => {
+test("作息画像-早场（07:00）：闹钟段不再产出，出发预留仍在", () => {
   const plan = buildReminderPolicy({
     runAt: "2099-01-09T23:00:00.000Z", // 01-10 07:00
     timezone: "Asia/Shanghai",
@@ -348,14 +351,13 @@ test("作息画像-夜猫子赶早场：预算不足7小时 → 睡前备忘明�
   assert.ok(plan);
   const night = plan.preReminders.find((p) => p.stage === "night_before");
   assert.ok(night);
-  // 闹钟 = 07:00-(60+60)min = 05:00；睡眠预算 1:30→05:00 = 3.5h < 7
-  assert.match(night.message, /按你平时约1:30入睡，到闹钟只睡得约3个半小时，今晚尽量早点睡/);
-  // 闹钟下限 8:00 吃不进行程预算（05:00 已是预算点）→ 行程保证优先，闹钟 05:00
-  const wake = plan.preReminders.find((p) => p.stage === "wake_alarm");
-  assert.equal(wake?.offsetMinutes, 120);
+  // 2026-11-05 停用闹钟：不再有「到闹钟只睡得约X」的劝睡话术
+  assert.match(night.message, /今晚先记着，到点会再提醒你。/);
+  assert.equal(plan.preReminders.find((p) => p.stage === "wake_alarm"), undefined);
+  assert.ok(plan.preReminders.some((p) => p.stage === "depart"), "出发预留不受影响");
 });
 
-test("作息画像-早鸟（22:30睡/6:30起）：睡前备忘 21:30，闹钟照常不越界", () => {
+test("作息画像-早鸟（22:30睡/6:30起）：睡前备忘 21:30", () => {
   const plan = buildReminderPolicy({
     runAt: DENTIST_RUN_AT,
     timezone: "Asia/Shanghai",
@@ -368,8 +370,8 @@ test("作息画像-早鸟（22:30睡/6:30起）：睡前备忘 21:30，闹钟照
   assert.ok(night);
   // 睡前备忘 = 前晚 21:30（入睡 22:30 前 1 小时）→ 距次日 10:00 = 12.5h = 750min
   assert.equal(night.offsetMinutes, 750);
-  // 预算充足且闹钟晚于平时起床 → 默认收尾话术
-  assert.match(night.message, /今晚先记着，明早会叫你起床。/);
+  // 闹钟段停用后收尾统一：「到点会再提醒你」
+  assert.match(night.message, /今晚先记着，到点会再提醒你。/);
 });
 
 test("作息样本不足（<3条）→ 与无画像完全一致（宁缺勿错）", () => {
@@ -414,8 +416,8 @@ test("travelMinutesOverride 有效值替代 venue 静态表，policyName 带 rou
   });
   assert.ok(plan);
   assert.equal(plan.policyName, "high/mid/route:amap");
-  // 闹钟 = 真实路程90+准备60 = 150；出发 = 真实路程 90（静态表 mid/high=60 被替代）
-  assert.deepEqual(plan.remindBeforeMinutes, [780, 150, 90]);
+  // 出发 = 真实路程 90（静态表 mid/high=60 被替代）；闹钟段停用后不再有 150
+  assert.deepEqual(plan.remindBeforeMinutes, [780, 90]);
   const depart = plan.preReminders.find((p) => p.stage === "depart");
   assert.ok(depart);
   // 路程改由偏移量表达（上面 remindBeforeMinutes 已断言 90），文案只留出发指令
@@ -450,8 +452,8 @@ test("createTask 注入路程估算器 → 策略按真实路程生成出发段"
       location: "协和医院",
       runAt: DENTIST_RUN_AT,
     });
-    // 闹钟 = 70+60 = 130；出发 = 70（静态表 mid/high=60 被真实路程替代）
-    assert.deepEqual(task.remindBeforeMinutes, [780, 130, 70]);
+    // 出发 = 70（静态表 mid/high=60 被真实路程替代）；闹钟段停用后不再有 130
+    assert.deepEqual(task.remindBeforeMinutes, [780, 70]);
     assert.equal(task.reminderPolicy, "high/mid/route:amap");
   });
 });
@@ -522,5 +524,39 @@ test("出发段实时恶化：实时路程超过剩余+容忍带 → 升档到�
     assert.equal(escalate.pre, false);
     assert.match(escalate.message, /车程约 120 分钟/);
     assert.match(escalate.message, /只剩 69 分钟/);
+  });
+});
+
+test("存量任务仍带起床闹钟段 → 投递时跳过，其他段照常（2026-11-05 停用后的兼容）", async () => {
+  await withTempScheduleFile(async (service) => {
+    const delivered: string[] = [];
+    service.setReminderHandler(async (_task, message) => {
+      delivered.push(message);
+    });
+    const task = await service.createTask({
+      sessionId: "legacy-session",
+      kind: "reminder",
+      recurrence: "none",
+      timezone: "Asia/Shanghai",
+      description: "周六上午十点去看牙医",
+      reminderMessage: "该去看牙医啦",
+      runAt: DENTIST_RUN_AT,
+    });
+    // 模拟停用前落库的老任务：两段里有一段是已退役的「起床闹钟」
+    const store = (service as unknown as { byTaskId: Map<string, ScheduleTaskRecord> }).byTaskId;
+    const stored = store.get(task.taskId);
+    assert.ok(stored);
+    stored.nextRunAt = new Date(Date.now() + 50 * 60_000).toISOString();
+    stored.remindBeforeMinutes = [120, 60];
+    stored.preReminders = [
+      { offsetMinutes: 120, stage: "wake_alarm", label: "起床闹钟", message: "【起床闹钟】旧脚本" },
+      { offsetMinutes: 60, stage: "depart", label: "该出门了", message: "【该出门了】旧脚本" },
+    ];
+    stored.firedPreReminderOffsets = [];
+
+    await service.runSchedulerTick();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(delivered.length, 1, "只该投递出发段");
+    assert.match(delivered[0]!, /【该出门了】/);
   });
 });

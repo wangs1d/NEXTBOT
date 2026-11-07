@@ -3,7 +3,6 @@ import type { ToolRegistry } from "../../tools/tool-registry.js";
 import { resolveActorId } from "../../agent/actor-id.js";
 import { IntelligentReminderService } from "./intelligent-reminder-service.js";
 import { PopupReminderHandler } from "./popup-reminder-handler.js";
-import { TTSAlarmHandler } from "./tts-alarm-handler.js";
 import { PhoneCallHandler } from "./phone-call-handler.js";
 import { UserResponsePersistenceService } from "./user-response-persistence.js";
 import type {
@@ -11,7 +10,6 @@ import type {
   ReminderInstance,
   ReminderLevel,
   PopupReminderConfig,
-  TTSAlarmConfig,
   PhoneCallConfig,
 } from "./types.js";
 import type { VirtualPhoneService } from "../virtual-phone-service.js";
@@ -25,7 +23,7 @@ export interface IntelligentReminderSystemDeps {
   virtualPhoneService: VirtualPhoneService;
   phoneBridgeCoordinator?: PhoneBridgeCoordinator;
   voiceDialogueService: VoiceDialogueService;
-  /** Agent 底层语音能力中枢（用于 TTS 闹钟音频合成 + 推送，替代反射访问） */
+  /** Agent 底层语音能力中枢（用于电话级微信兜底的 TTS 音频合成） */
   voiceCapabilityService?: VoiceCapabilityService;
   sendToClient: (userId: string, payload: Record<string, unknown>) => Promise<void>;
   /**
@@ -187,13 +185,6 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
     logger: deps.logger,
   });
 
-  const ttsHandler = new TTSAlarmHandler({
-    voiceDialogueService: deps.voiceDialogueService,
-    voiceCapabilityService: deps.voiceCapabilityService,
-    sendToClient: deps.sendToClient,
-    logger: deps.logger,
-  });
-
   const phoneHandler = new PhoneCallHandler({
     virtualPhoneService: deps.virtualPhoneService,
     voiceDialogueService: deps.voiceDialogueService,
@@ -242,48 +233,6 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
         deps.onContactOutcome?.({
           userId,
           channel: "popup",
-          responded: false,
-          quietHours: isQuietHours(),
-        });
-      },
-      onTTSAlarmReminder: async (instance) => {
-        const userId = instance.config.metadata?.userId as string ?? "unknown";
-        // 全设备离线 → TTS 没有耳朵听，直达推送/短信/微信离线通道
-        if (await deliverOfflineAnywhere(userId, instance, "tts_alarm")) {
-          recordOfflineDelivery(userId, instance, "tts_alarm");
-          return;
-        }
-        try {
-          await ttsHandler.handle(instance);
-        } catch (wsErr) {
-          // WS 推送失败时，尝试微信语音推送
-          if (deps.sendWechatProactive && deps.voiceCapabilityService) {
-            // 通过 VoiceCapabilityService 合成音频（统一入口，不再反射访问 VirtualPhoneService）
-            let ttsAudio = null;
-            try {
-              const ttsResult = await deps.voiceCapabilityService.synthesize(instance.config.message);
-              if (ttsResult.ok) {
-                ttsAudio = { format: ttsResult.format, base64: ttsResult.base64 };
-              }
-            } catch (_) { /* TTS 生成失败则纯文本推送 */ }
-
-            const sent = await deps.sendWechatProactive(userId, "tts_alarm", instance.config.title, instance.config.message, { ttsAudio });
-            if (sent) {
-              deps.logger?.info?.(`[reminder] tts_alarm 已通过微信主动推送(含${ttsAudio ? '语音' : '文本'}): ${instance.config.title}`);
-            } else {
-              deps.logger?.error?.(`[reminder] tts_alarm WS 和微信推送均失败: ${instance.config.title}`);
-            }
-          }
-        }
-        await userResponsePersistence.recordResponse({
-          userId,
-          instance,
-          responded: false,
-          responseTimeMs: 0,
-        });
-        deps.onContactOutcome?.({
-          userId,
-          channel: "tts_alarm",
           responded: false,
           quietHours: isQuietHours(),
         });
@@ -358,7 +307,6 @@ export function createIntelligentReminderSystem(deps: IntelligentReminderSystemD
   return {
     reminderService,
     popupHandler,
-    ttsHandler,
     phoneHandler,
     userResponsePersistence,
   };
@@ -388,15 +336,14 @@ function registerIntelligentReminderTools(
       return { ok: false, error: "优先级必须是 low、medium、high 或 urgent" };
     }
 
-    if (requestedInitialLevel && !["popup", "tts_alarm", "phone_call"].includes(requestedInitialLevel)) {
-      return { ok: false, error: "初始级别必须是 popup、tts_alarm 或 phone_call" };
+    if (requestedInitialLevel && !["popup", "phone_call"].includes(requestedInitialLevel)) {
+      return { ok: false, error: "初始级别必须是 popup 或 phone_call" };
     }
 
     const recommendedLevel = await service.getRecommendedLevel(actorId, priority);
 
     let config: ReminderConfig & {
       popupConfig?: PopupReminderConfig;
-      ttsConfig?: TTSAlarmConfig;
       phoneConfig?: PhoneCallConfig;
     } = {
       id: randomUUID(),
@@ -419,10 +366,6 @@ function registerIntelligentReminderTools(
 
     if (input.popupConfig) {
       config.popupConfig = input.popupConfig as PopupReminderConfig;
-    }
-
-    if (input.ttsConfig) {
-      config.ttsConfig = input.ttsConfig as TTSAlarmConfig;
     }
 
     if (input.phoneConfig) {
@@ -568,29 +511,8 @@ function registerIntelligentReminderTools(
     };
   });
 
-  registry.register("reminder.escalate", async (input: Record<string, unknown>, _context: ToolContext) => {
-    const reminderId = String(input.reminderId ?? "").trim();
-    const reason = String(input.reason ?? "手动升级").trim();
-
-    if (!reminderId) {
-      return { ok: false, error: "请提供提醒 ID（reminderId）" };
-    }
-
-    const instance = await service.escalateReminder(reminderId, reason);
-    if (!instance) {
-      return { ok: false, error: "无法升级该提醒" };
-    }
-
-    return {
-      ok: true,
-      reminderId: instance.config.id,
-      previousLevel:
-        instance.escalationHistory[instance.escalationHistory.length - 1]?.fromLevel,
-      newLevel: instance.currentLevel,
-      escalationCount: instance.escalationCount,
-      message: `已从${getLevelLabel(instance.escalationHistory[instance.escalationHistory.length - 1]?.fromLevel ?? instance.currentLevel)}升级到${getLevelLabel(instance.currentLevel)}`,
-    };
-  });
+  // reminder.escalate 已随升级链斩断一并移除（2026-11-05 定调）：
+  // 电话触达仅保留 reminder.create 的 initialLevel="phone_call" 显式指定。
 
   registry.register("reminder.get_user_stats", async (input: Record<string, unknown>, context: ToolContext) => {
     const actorId = resolveActorId(context);
@@ -655,8 +577,6 @@ function getLevelLabel(level: ReminderLevel): string {
   switch (level) {
     case "popup":
       return "弹窗文字";
-    case "tts_alarm":
-      return "闹钟TTS语音";
     case "phone_call":
       return "电话呼叫";
     default:

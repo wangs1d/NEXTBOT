@@ -1,4 +1,9 @@
 import { getDataDir } from "../config/data-dir.js";
+// P3 时序归一：生成前跑一次场景 pre-plan，让场景持有的内容边界真正进 prompt
+import {
+  planPreRenderScene,
+  buildSceneBoundaryBlock,
+} from "../render/scenes/index.js";
 import type OpenAI from "openai";
 import { appendFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -110,7 +115,6 @@ import {
 import { modelSupportsVision } from "./vision-support.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { compactToolOutputForLlm } from "../tokenjuice/compactor.js";
-import { buildDeterministicReceiptText } from "../services/deterministic-receipt.js";
 import {
   executeBridge,
   isToolSearchBridgeName,
@@ -170,7 +174,6 @@ import {
   evaluateAndSelectStrategy,
   isPhotoDeliveryRound,
 } from "../agent/synthesis-strategy.js";
-import { isDirectFactQuery } from "../agent/direct-fact-query.js";
 import {
   CHAT_LANE_CORE_NAMES,
   TASK_LANE_CORE_NAMES,
@@ -2040,6 +2043,13 @@ export async function streamCompletionWithTools(
      * 2026-09-23 扩面：realtime_lookup / media_retrieval 同样纳入（详见出口检查处）。
      */
     turnIntent?: string;
+    /**
+     * 生成前的渲染场景数据面（P3）：由数据持有方（如 evening-digest 服务）
+     * 在模型生成之前解析并传入，供 planPreRenderScene 判定 pre 场景。
+     * 允许传未决 Promise：综合阶段（工具波结束后）才 await，不阻塞流式开场。
+     * 不传 = 只按回执 + 用户文本判定，明日预览等数据面场景不命中（保持原行为）。
+     */
+    renderPayloads?: Record<string, unknown> | Promise<Record<string, unknown> | undefined>;
     /**
      * 本轮是否已注入前置检索证据块（【实时检索结果】）。realtime_lookup 轮
      * 证据已注入时模型零工具直答是**正确行为**（答的就是刚检索的事实），
@@ -4131,21 +4141,6 @@ export async function streamCompletionWithTools(
   async function runSchemaLessSummary(
     escapeAllowed: boolean,
   ): Promise<{ text: string; needMore: boolean }> {
-    // 确定性回执收口（2026-11-01 提速）：本轮工具结果全部可自证完成（天气实况/提醒
-    // 回执等，由工具通过 registerDeterministicReceipt 自报能力）时，直接由代码生成
-    // 回执，跳过第二波 LLM 汇总（实测每轮省 1.6–4.4s）。仅聊天面（holdAnswer 轮）生效，
-    // 任务面/子 Agent/语音轮保持原 LLM 汇总行为。任一结果失败/未注册 → 自动回退。
-    if (options?.holdAnswer === "after_tool_use") {
-      const receiptText = buildDeterministicReceiptText(allToolExecResults);
-      if (receiptText) {
-        console.info(
-          `[receipt] 确定性回执收口，跳过第二波 LLM（tools=${allToolExecResults
-            .map((r) => r.toolName)
-            .join(",")}）`,
-        );
-        return { text: receiptText, needMore: false };
-      }
-    }
     // summary 输出预算：跟随调用方的 maxOutputTokens；未配置时**不封顶**。
     // 历史上未配置时兜底 2000，多来源汇总/长攻略被 finish_reason=length 硬截半句
     // （该 finish_reason 全链路无人检查，属静默截断），已删除兜底上限。
@@ -4177,11 +4172,34 @@ export async function streamCompletionWithTools(
       // 质量保护：当前用户文本命中指代早期对话的措辞（刚才/上面/继续等）时跳过裁剪。
       const trimmedMessages = trimHistoryForSummary(summaryBaseMessages, SUMMARY_KEEP_USER_TURNS, userText);
 
-      // 数据驱动策略评估：根据工具收集到的真实数据质量选择回复策略
+      // 数据驱动策略评估：只产出「本轮数据事实」（几个来源/够不够），
+      // 不再产出任何版式或组织方式——结构归 render/scenes，措辞归人格。
       const strategyDirective = evaluateAndSelectStrategy(allToolExecResults, userText, options?.turnIntent);
       const strategyBlock = strategyDirective.instruction
-        ? `\n\n【回复策略】${strategyDirective.instruction}`
+        ? `\n\n【本轮数据】${strategyDirective.instruction}`
         : "";
+      // P3 时序归一（2026-11-07）：在**模型生成之前**跑一次场景 pre-plan。
+      // 此前 scenes 里的 promptFragment 在出口阶段才产生，依赖 ctx.text 的
+      // 场景更不可能前移——边界从来没送到模型。现在由 phase=pre 场景的
+      // produces.promptBoundary 统一提供，与 strategy 已注入的指令去重；
+      // 出口阶段复用同一批 scene id 渲染，两处不再各猜一次场景。
+      // 数据面允许是未决 Promise：此刻工具波已结束，取数（2.5s 内部超时）早已
+      // settle，这里 await 不产生额外等待；失败按 undefined 降级走常规链路。
+      const renderPayloads = await Promise.resolve(options?.renderPayloads).catch(
+        () => undefined,
+      );
+      const scenePrePlan = planPreRenderScene({
+        userText,
+        toolResults: allToolExecResults,
+        ...(renderPayloads ? { payloads: renderPayloads } : {}),
+      });
+      const sceneBoundaryBlock = buildSceneBoundaryBlock(
+        scenePrePlan,
+        strategyDirective.instruction,
+      );
+      if (scenePrePlan.failures.length > 0) {
+        console.warn(`[render-scenes] 生成前预决策降级：${scenePrePlan.reason}`);
+      }
       console.log(
         `[synthesis] 策略=${strategyDirective.strategy} 等级=${strategyDirective.quality.level} ` +
           `来源=${strategyDirective.quality.sourceCount} 成功=${strategyDirective.quality.successCount} ` +
@@ -4211,24 +4229,20 @@ export async function streamCompletionWithTools(
             `（包括"翻了一圈""公开渠道没查到""据我了解最新消息"等说法）；` +
             `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
           : "";
-      // 求简指令只对真正的单一事实求证生效；其余一律要求把信息组织充分（2026-09-03：
-      // 检索/任务型回复不再受「口语求简」约束，需按主题分节、可用 Markdown 排版）
-      // 纯图轮例外（2026-10-06）：search_images 拿到照片且无文字检索结果时，
-      // 交付就是图本身，「按主题分节、信息用足」会教出「已确认的/能说的/没查到的」
-      // 盘点正文（真机事故形态）；展开要求由 strategyBlock 的照片轮指令承担。
+      // 求简指令与「组织充分/按主题分节」结构模板已删（2026-11-05 架构收敛：把主动权
+      // 还给 agent——主流工具环在 tool result 回填后直接让模型续跑，不加修辞导演词；
+      // 组织方式由 system 一层管，这里只剩「结果已返回，回答」这个事实）。
       const photoDeliveryRound = isPhotoDeliveryRound(allToolExecResults, options?.turnIntent);
-      const singleFactClause = isDirectFactQuery(userText)
-        ? `这是单一事实求证（是/否、一个数据点）：给「结论 + 1 句依据」即可，最多保留一个简短追问。`
-        : `把检索到的信息组织充分：按主题分节，用 Markdown 小标题/加粗/表格排版，保留日期、数字、来源等细节，不要为了简短丢掉用户想看的内容。`;
       const baseDirective =
         (photoDeliveryRound
-          ? `刚才的照片搜索已完成，请把图片直接交给用户，回复方式按【回复策略】执行。`
+          ? `照片已就绪，直接交给用户。`
+          : strategyDirective.strategy === "confirm_receipt"
+          ? `提醒/日程已办好。`
           : substantiveToolResults.length > 0
-          ? `刚才调用工具拿到了以下结果，请基于这些结果回答用户的问题：语气自然像朋友，但内容要充分、结构清晰。` +
-            `不要重复工具调用过程，直接给出结论。如果结果不完整，就给出能确定的部分。` +
-            `同一事实不要换个说法再总结第二遍；${singleFactClause}`
-          : `请基于本轮对话上下文，用自然、像朋友一样的语气回答用户的问题。`) +
+          ? `工具结果已返回，直接回答用户的问题。`
+          : `请基于本轮对话上下文回答用户的问题。`) +
         strategyBlock +
+        sceneBoundaryBlock +
         zeroToolGuard +
         metaOnlyGuard;
       const escapeDirective = escapeAllowed

@@ -1,4 +1,4 @@
-import "package:flutter/foundation.dart"
+﻿import "package:flutter/foundation.dart"
     show defaultTargetPlatform, kIsWeb, TargetPlatform;
 import "package:flutter/material.dart";
 import "package:flutter/rendering.dart" show ScrollCacheExtent;
@@ -34,6 +34,7 @@ import "../../core/services/account_profile_api.dart";
 import "../../core/presentation/emotion_ball_ids.dart";
 import "../../core/utils/chat_time_label.dart";
 import "../../core/utils/tool_friendly_label.dart";
+import "../../core/utils/agent_activity_label.dart";
 
 /// 输入框内图标按钮的视觉强度
 /// - muted：默认（onSurfaceVariant 色），用于次要功能
@@ -102,10 +103,6 @@ class ChatPage extends StatefulWidget {
     /// 取消后台任务回调（回执 hover 取消按钮；null 时仅展示无取消入口）
     this.onCancelBackgroundTask,
 
-    /// 对话流决策卡「确认/忽略」回调（传入 messageId；main.dart 据卡内
-    /// kind 回传 attention ack / proactive outcome 并原地翻转卡片状态）
-    this.onConfirmDecisionCard,
-
     /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合。
     /// 命中的用户气泡在时间行显示「排队中」徽标，服务端开始处理该条
     /// （chat.turn_started 晋级）后由父组件移出集合，徽标随之消失。
@@ -143,8 +140,10 @@ class ChatPage extends StatefulWidget {
   /// 传 null 时,卡片按钮点击仅在 UI 上锁定,不会触发任何副作用(调试用)。
   /// 回调会携带触发该按钮的卡片 [cardData](含 cardId/title/items),
   /// 供后端做精准审计/埋点,并让 Agent 理解上下文主动衔接。
+  /// [messageId]：宿主消息 id。有 cardAction 的按钮需要它做锚点，
+  /// 服务端 card.update 才能原位换卡；由 ChatPage 内部逐消息注入。
   final void Function(AgentResultAction action,
-      {required AgentResultData cardData})? onUserAction;
+      {required AgentResultData cardData, String? messageId})? onUserAction;
 
   /// 用户给agent起的名字
   final String? agentName;
@@ -217,9 +216,6 @@ class ChatPage extends StatefulWidget {
 
   /// 取消后台任务回调（回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
-
-  /// 对话流决策卡「确认/忽略」回调（传入 messageId）
-  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 当前仍在排队、等待 Agent 依次处理的用户消息 id 集合（父组件维护）
   final Set<String> queuedMessageIds;
@@ -1113,7 +1109,9 @@ class _ChatPageState extends State<ChatPage>
 
   /// 处理中气泡文案：`agent_status` > 即时确认应答（interim ack）> 历史流程提示 > 默认
   String _processingStatusText([ChatMessage? progressMessage]) {
-    final String? live = widget.agentStatusLine?.trim();
+    // 净化：服务端心跳兜底串是「正在执行 shopping.order.place…」，
+    // 未入表工具直出等于把内部工具名摆到用户脸上——含内部标识就整句丢弃。
+    final String? live = sanitizeAgentStatusLine(widget.agentStatusLine);
     if (live != null && live.isNotEmpty) {
       // 兜底：如果「实时进度」文本和消息列表里最新一条 assistant 回复撞车
       // （模型违反 prompt 把进度句复读进了最终回复），不要把同一行字再渲一份，
@@ -1418,8 +1416,13 @@ class _ChatPageState extends State<ChatPage>
       return const SizedBox.shrink();
     }
 
+    // 服务端下发的这一句最具体（确定性模板会带上工具入参里的名词，如
+    // 「我在查「明天天气」」）；没有才退回工具族文案，最后才是默认口径。
+    final String? live =
+        foregroundActive ? sanitizeAgentStatusLine(widget.agentStatusLine) : null;
     final String? toolLabel = tool.isNotEmpty ? friendlyToolLabel(tool) : null;
-    final String text = toolLabel ??
+    final String text = live ??
+        toolLabel ??
         (foregroundActive ? _processingStatusText() : "$bgCount 个任务后台进行中");
     final int? percent = widget.agentStatusPercent;
 
@@ -1564,10 +1567,20 @@ class _ChatPageState extends State<ChatPage>
       onEnterDeleteMode: _enterDeleteMode,
       onDeleteConfirm: _confirmDeleteSelection,
       onDeleteCancel: _cancelDeleteMode,
-      onUserAction: widget.onUserAction,
+      // 卡片动作：在这里逐消息注入 messageId——有 cardAction 的按钮要拿它
+      // 当锚点走 card.action（服务端原位换卡、不产生消息）；其余按钮仍走
+      // chat.user_action（与手机端同协议）。
+      onUserAction: widget.onUserAction == null
+          ? null
+          : (AgentResultAction action,
+                  {required AgentResultData cardData}) =>
+              widget.onUserAction!(
+                action,
+                cardData: cardData,
+                messageId: mainMessage.messageId,
+              ),
       onFollowupTap: _sendSuggestion,
       onCancelBackgroundTask: widget.onCancelBackgroundTask,
-      onConfirmDecisionCard: widget.onConfirmDecisionCard,
     );
   }
 
@@ -1575,7 +1588,7 @@ class _ChatPageState extends State<ChatPage>
   ///
   /// 归属按消息 id 里的轮次锚点判定（见 [turnAnchorOfMessage]）：一轮 = 该轮
   /// user 消息 + id 内嵌同一锚点的回复气泡（含分泡、工具/思考过程、卡片回执）。
-  /// 夹在这一轮里的主动推送 / 睡前备忘 / 决策卡不带锚点，不属于任何一轮，
+  /// 夹在这一轮里的主动推送 / 睡前备忘不带锚点，不属于任何一轮，
   /// 不并入——此前按「user 到下一条 user」切窗口会把它们一起删掉。
   /// 点在没有归属的消息上时，删除范围就是它自己。
   List<String> _getRelatedMessageIds(String messageId) {
@@ -2323,9 +2336,6 @@ class _HoverableMessageWidget extends StatelessWidget {
     /// 取消后台任务回调（任务回执 hover 取消按钮）
     this.onCancelBackgroundTask,
 
-    /// 对话流决策卡「确认/忽略」回调（透传至条目渲染）
-    this.onConfirmDecisionCard,
-
     /// 是否为同一条发言（utterance）的后续分段（续泡）：不重复头像/名字/时间头
     this.isUtteranceContinuation = false,
   });
@@ -2363,9 +2373,6 @@ class _HoverableMessageWidget extends StatelessWidget {
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
-
-  /// 对话流决策卡「确认/忽略」回调（传入 messageId；区分确认与忽略）
-  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 全局删除选择模式是否激活
   final bool deleteSelectionMode;
@@ -2429,7 +2436,6 @@ class _HoverableMessageWidget extends StatelessWidget {
       onUserAction: onUserAction,
       onFollowupTap: onFollowupTap,
       onCancelBackgroundTask: onCancelBackgroundTask,
-      onConfirmDecisionCard: onConfirmDecisionCard,
       isUtteranceContinuation: isUtteranceContinuation,
     );
   }
@@ -2466,7 +2472,6 @@ class _HoverableMessageContent extends StatefulWidget {
     this.onUserAction,
     this.onFollowupTap,
     this.onCancelBackgroundTask,
-    this.onConfirmDecisionCard,
     this.isUtteranceContinuation = false,
   });
 
@@ -2513,9 +2518,6 @@ class _HoverableMessageContent extends StatefulWidget {
 
   /// 取消后台任务回调（任务回执 hover 取消按钮）
   final void Function(String taskId)? onCancelBackgroundTask;
-
-  /// 对话流决策卡「确认/忽略」回调（传入 messageId）
-  final void Function(String messageId, bool confirmed)? onConfirmDecisionCard;
 
   /// 是否为同一条发言（utterance）的后续分段（续泡）：
   /// 续泡不带头像、名字与时间头 —— 同一条消息继续说下一句，不是新的一条回复。
@@ -2672,8 +2674,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
     // 给气泡加个最大宽度限制（屏宽 72%），避免长文本横向铺满整行。
     // 用 LayoutBuilder 拿父级可用宽度，比硬编码 MediaQuery 更稳。
     final bool isTaskReceipt = widget.mainMessage.contentType == "task_receipt";
-    final bool isDecisionCard =
-        widget.mainMessage.contentType == "decision_card";
     final bool isEveningDigest =
         widget.mainMessage.contentType == "evening_digest" &&
             widget.mainMessage.eveningDigest != null;
@@ -2687,13 +2687,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       bubble = _TaskReceiptBubble(
         message: widget.mainMessage,
         onCancel: widget.onCancelBackgroundTask,
-      );
-    } else if (isDecisionCard) {
-      // 决策卡（2026-10-14 定稿）：决策类通知不再飘弹窗/玻璃卡，
-      // 直接落对话流一张卡，确认/忽略在卡上完成并回传 ack/outcome。
-      bubble = _DecisionCardBubble(
-        message: widget.mainMessage,
-        onAction: widget.onConfirmDecisionCard,
       );
     } else if (isEveningDigest) {
       // 睡前备忘卡（2026-10-22 定调）：结构化块专属渲染，不框进气泡外壳
@@ -3607,172 +3600,6 @@ class _TaskReceiptBubbleState extends State<_TaskReceiptBubble> {
                   ),
                 ),
               ],
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// 对话流决策卡（contentType="decision_card"，2026-10-14 定稿）。
-///
-/// 决策类通知（提醒升级链 popup 级 / 高重要度主动性消息）的统一承载面：
-/// 不再飘独立弹窗或玻璃卡，直接落进对话流一张卡，与对话阅读流同源——
-/// 上下文不丢（弹窗顶掉弹窗的问题不复存在），确认动作留在卡片本体上。
-///
-/// 视觉（黑白极简，与 task_receipt 同族但更醒目）：低对比深底 + 细描边 +
-/// 优先级强调条（urgent 红 / high 琥珀 / normal 灰），标题加粗、正文常规；
-/// pending 态给「确认」主按钮 +「忽略」次入口，操作后原地翻转为
-/// 「已确认 / 已忽略」终态（透明度降低，作为对话记录保留）。
-///
-/// 回传由 main.dart 的 onConfirmDecisionCard 处理：attention → AttentionApi
-/// ack（确认与忽略都算已知晓，升级链收敛）；proactive → outcome
-/// accepted / dismissed。
-class _DecisionCardBubble extends StatelessWidget {
-  const _DecisionCardBubble({required this.message, this.onAction});
-
-  final ChatMessage message;
-
-  /// 确认/忽略回调（confirmed 区分两颗按钮；null 时按钮仅展示锁定态）
-  final void Function(String messageId, bool confirmed)? onAction;
-
-  Color _accent(ColorScheme cs) {
-    final String priority =
-        message.decisionCard?["priority"]?.toString() ?? "normal";
-    return switch (priority) {
-      "urgent" => cs.error,
-      "high" => const Color(0xFFFFB020), // 琥珀（原右下角弹窗 high 档色）
-      _ => cs.outline,
-    };
-  }
-
-  String _priorityLabel() {
-    final String priority =
-        message.decisionCard?["priority"]?.toString() ?? "normal";
-    return switch (priority) {
-      "urgent" => "紧急",
-      "high" => "重要",
-      _ => "提醒",
-    };
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ColorScheme cs = Theme.of(context).colorScheme;
-    final Map<String, dynamic> card =
-        message.decisionCard ?? const <String, dynamic>{};
-    final String title = card["title"]?.toString() ?? message.text;
-    final String body = card["message"]?.toString() ?? "";
-    final bool confirmed = card["state"]?.toString() == "confirmed";
-    final Color accent = _accent(cs);
-
-    return Opacity(
-      opacity: confirmed ? 0.6 : 1.0,
-      child: Container(
-        constraints: const BoxConstraints(maxWidth: 380),
-        decoration: BoxDecoration(
-          color: cs.onSurface.withValues(alpha: 0.05),
-          borderRadius: BorderRadius.circular(14),
-          border: Border.all(color: cs.outline.withValues(alpha: 0.35)),
-        ),
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(13),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              // 优先级强调条
-              Container(height: 3, color: accent),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    // 头行：图标 + 「紧急/重要/提醒 · 需要你确认」
-                    Row(
-                      children: <Widget>[
-                        Icon(
-                          confirmed
-                              ? Icons.check_circle_outline
-                              : Icons.notifications_active_outlined,
-                          size: 15,
-                          color: confirmed ? cs.primary : accent,
-                        ),
-                        const SizedBox(width: 6),
-                        Text(
-                          confirmed
-                              ? "${_priorityLabel()} · 已确认"
-                              : "${_priorityLabel()} · 需要你确认",
-                          style:
-                              Theme.of(context).textTheme.labelSmall?.copyWith(
-                                    color: cs.onSurfaceVariant,
-                                    fontWeight: FontWeight.w600,
-                                    letterSpacing: 0.3,
-                                  ),
-                        ),
-                      ],
-                    ),
-                    if (title.isNotEmpty) ...<Widget>[
-                      const SizedBox(height: 8),
-                      Text(
-                        title,
-                        style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                              color: cs.onSurface.withValues(alpha: 0.92),
-                              fontWeight: FontWeight.w600,
-                              height: 1.3,
-                            ),
-                      ),
-                    ],
-                    if (body.isNotEmpty && body != title) ...<Widget>[
-                      const SizedBox(height: 4),
-                      Text(
-                        body,
-                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                              color: cs.onSurface.withValues(alpha: 0.72),
-                              height: 1.4,
-                            ),
-                      ),
-                    ],
-                    // 动作区：pending 态给确认主按钮 + 忽略次入口；
-                    // 确认/忽略都算已知晓（升级链 / outcome 语义均收敛）
-                    if (!confirmed) ...<Widget>[
-                      const SizedBox(height: 10),
-                      Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: <Widget>[
-                          FilledButton(
-                            style: FilledButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                              backgroundColor:
-                                  cs.onSurface.withValues(alpha: 0.9),
-                              foregroundColor: cs.surface,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 16),
-                            ),
-                            onPressed: onAction == null
-                                ? null
-                                : () => onAction!(message.messageId, true),
-                            child: const Text("我知道了"),
-                          ),
-                          const SizedBox(width: 8),
-                          TextButton(
-                            style: TextButton.styleFrom(
-                              visualDensity: VisualDensity.compact,
-                              foregroundColor: cs.onSurfaceVariant,
-                            ),
-                            onPressed: onAction == null
-                                ? null
-                                : () => onAction!(message.messageId, false),
-                            child: const Text("忽略"),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
             ],
           ),
         ),

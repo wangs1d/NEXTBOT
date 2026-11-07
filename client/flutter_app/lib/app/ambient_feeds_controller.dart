@@ -7,7 +7,6 @@ import "../core/services/nb_http.dart";
 
 import "../core/config/api_config.dart";
 import "../core/models/agent_relay_models.dart";
-import "../core/presentation/foreground_banner.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/presentation/dynamic_island.dart";
 
@@ -36,10 +35,9 @@ class AmbientFeedsController {
   /// 是否处于手机后台（类微信常在线分流：后台走系统通知）。
   bool Function()? isAppBackgrounded;
 
-  /// 手机端前台提醒呈现端口（横幅抽象接口 ForegroundBanner，2026-10-21 定调）。
-  /// 桌面端不注入走灵动岛；手机端未注入此端口时到点提醒在前台会静默丢失
-  /// （2026-10-12 修复，2026-10-21 由裸函数端口升级为抽象接口）。
-  ForegroundBanner? foregroundBanner;
+  /// 用户是否正停留在对话页（2026-11-04 微信同款定调：正在会话里就不发
+  /// 系统通知——气泡即将落进对话流，视内可见；不在对话页才走 Android 通知）。
+  bool Function()? isChatTabActive;
 
   /// 站内信未读角标 +1 并喂岛（State 持 _inboxUnread 镜像供侧栏 widget）。
   void Function()? bumpInboxUnread;
@@ -94,7 +92,8 @@ class AmbientFeedsController {
   ///     走灵动岛 attention 默认档（约 6s 收回）——「灵动岛 = 预告」；
   ///   - 到点提醒（preReminder != true）：灵动岛长驻留档（约 30s，点击胶囊
   ///     提前收口并打开日程页），提示音由 attention 档自带；
-  ///   - 移动端后台一律走系统通知（前台仍回落灵动岛）。
+  ///   - 移动端一律走 Android 系统通知（2026-11-04 定调：应用内顶部弹窗
+  ///     已删除；正停在对话页时跳过——气泡落流视内可见）。
   Future<void> onScheduleReminderFired(Map<String, dynamic> payload) async {
     try {
       // 2026-10-19 定调：提醒只说事本身，全通道不再带「标题 · 说明」前缀
@@ -110,15 +109,15 @@ class AmbientFeedsController {
       }
       final bool isPreReminder = payload["preReminder"] == true;
 
-      if (isMobile && _backgrounded) {
+      if (isMobile) {
+        // 应用内顶部弹窗已删除（2026-11-04 定调）：到点触达统一走 Android
+        // 系统通知（微信同款——前台也发，横幅呈现交给系统）。正停在对话页
+        // 时跳过：到点气泡经 schedule_reminder 主动消息即刻落进对话流，
+        // 视内可见无需再通知。
         // 单文案制：标题即全部内容，body 留空避免系统通知里自我重复。
-        unawaited(LocalNotificationService.show(title: text, body: ""));
-      } else if (foregroundBanner != null) {
-        // 应用内横幅（ForegroundBanner 接口注入即生效）：手机端前台主路；
-        // Windows 桌面调试手机 UI（main_mobile.dart -d windows）同样注入，
-        // 横幅可见可验。桌面端主壳不注入此端口，走下方灵动岛原路。
-        // message 留空 = 横幅只出加粗主行（实现方空串即收起副行）。
-        unawaited(foregroundBanner!.show(text, ""));
+        if (!(isChatTabActive?.call() ?? false)) {
+          unawaited(LocalNotificationService.show(title: text, body: ""));
+        }
       } else {
         // 岛上只出提醒文案本身（2026-10-19 修订，取代 2026-10-07「标题+说明
         // 全展示」）：胶囊单句，宽度原生端自适应伸缩。

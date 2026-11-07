@@ -330,6 +330,12 @@ export type AgentStreamOptions = {
    */
   turnIntent?: string;
   /**
+   * 生成前的渲染场景数据面（P3 前移，2026-11-07）：允许传未决 Promise，provider
+   * 必须原样透传进 streamCompletionWithTools——白名单漏掉它会导致 pre 场景
+   * （明日预览）判定不到数据面、边界恒不注入，退回「出口单向注入」的旧路径。
+   */
+  renderPayloads?: Record<string, unknown> | Promise<Record<string, unknown> | undefined>;
+  /**
    * 确定性媒体预执行调用（2026-10-10）：media_retrieval 轮由代码在工具循环
    * 开场先真搜一次（查询词来自路由层 composeMediaSearchQuery），模型只叙述。
    * provider 必须把本字段透传进 streamCompletionWithTools——白名单漏掉它

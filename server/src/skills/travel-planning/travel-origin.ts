@@ -115,6 +115,41 @@ export async function resolveOriginFromContext(
   return resolveOriginFromLocation(loc);
 }
 
+/** 可作为路线起点的坐标（含展示标签，label 可空） */
+export type LocatedPoint = {
+  latitude: number;
+  longitude: number;
+  /** 地址标签（如「贵州省 · 遵义市」），仅用于回执文案 */
+  label?: string;
+  city?: string;
+};
+
+/**
+ * 工具上下文 → 起点坐标（2026-11-05）：
+ *   路线类工具（travel.compute-route / travel.departure-advice）的起点缺省时用。
+ *   与 resolveOriginFromContext 的区别：这里要的是**精确坐标**（算距离/耗时），
+ *   而城市名只够查机票。取数顺序与定位类工具一致：消息自带定位 → 按需实时 GPS
+ *   （12s 超时，拿不到返回 null，由上层引导用户说起点，绝不编造）。
+ */
+export async function resolveOriginPointFromContext(
+  ctx?: Pick<ToolContext, "clientLocation" | "requestLocation">,
+): Promise<LocatedPoint | null> {
+  if (!ctx) return null;
+  let loc = ctx.clientLocation;
+  if (!loc && ctx.requestLocation) {
+    loc = (await ctx.requestLocation("travel.origin").catch(() => null)) ?? undefined;
+  }
+  if (!loc) return null;
+  const { latitude, longitude } = loc;
+  if (!Number.isFinite(latitude) || !Number.isFinite(longitude)) return null;
+  return {
+    latitude,
+    longitude,
+    ...(loc.label ? { label: loc.label } : {}),
+    ...(loc.city ? { city: loc.city } : {}),
+  };
+}
+
 /** 转机枢纽候选：省会优先，再补通用枢纽；去 origin 本身，截前 max 个 */
 export function transferHubCandidates(origin: string, originRegion?: string, max = 3): string[] {
   const originName = origin.trim();

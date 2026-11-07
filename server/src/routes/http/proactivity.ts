@@ -80,7 +80,7 @@ export type ProactivityFabricDeps = {
   /** Goal 夜间内省（确定性）：闲置/显著度/partial 验收 → 需要开口的 finding */
   goalIntrospect?: (actorId: string) => unknown;
   /** 在办事项统一视图（goal + 承诺只读合并）：前端「在办目标」面板的数据面 */
-  goalView?: (actorId: string) => unknown;
+  goalView?: (actorId: string, opts?: { includeCompleted?: boolean }) => unknown;
   /** 节律采样链健康（睡眠/桌面/屏幕条件化传感器是否还在产出观察） */
   rhythmHealth?: () => unknown;
   /** 当前仲裁快照 + 预览裁决（L3） */
@@ -266,11 +266,15 @@ export function registerProactivityPipelineRoutes(
   // 在办事项统一视图（2026-10-19）：goal（goals.json）+ 承诺（SQLite）只读合并，
   // 前端「在办目标」面板与干预入口共用一个口子。
   app.get("/api/proactivity/goals/view", async (request, reply) => {
-    const q = request.query as { actorId?: string };
+    const q = request.query as { actorId?: string; includeDone?: string };
     const actorId = q.actorId?.trim();
     if (!actorId) return reply.code(400).send({ ok: false, error: "actorId required" });
     if (!deps.fabric?.goalView) return { ok: false, error: "在办视图未装配" };
-    return { ok: true, actorId, view: deps.fabric.goalView(actorId) };
+    return {
+      ok: true,
+      actorId,
+      view: deps.fabric.goalView(actorId, { includeCompleted: q.includeDone === "1" }),
+    };
   });
 
   if (!pipeline) return;

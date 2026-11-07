@@ -1,10 +1,10 @@
 /**
- * 本地嵌入端点编排：无远端 Embedding 配置时的零配置底座。
+ * 本地嵌入端点编排：Embedding 首选端点（零外部依赖，云端/离线形态都不吃供应商账户状态）。
  *
- * - bootstrap 在装配记忆系统前调用 ensureLocalEmbeddingEndpoint()（仅当
- *   resolveEmbeddingEndpoint() 为空，即没有任何远端端点时）；
- * - openai-embedding-client.resolveEmbeddingEndpoint() 末位读取
- *   getLocalEmbeddingEndpoint() 作兜底——显式远端永远优先；
+ * - bootstrap 在装配记忆系统前调用 ensureLocalEmbeddingEndpoint()（本地引擎是
+ *   嵌入端点首选，无论远端是否配置都拉起；AGENT_LOCAL_EMBEDDING_DISABLED=1 关闭）；
+ * - openai-embedding-client.resolveEmbeddingEndpoint() 首位读取
+ *   getLocalEmbeddingEndpoint()——本地就绪即首选，远端仅作不可用时的兜底；
  * - 引擎跑在独立子进程（local-embedding-host），父进程只拿 baseUrl/token：
  *   ONNX 原生崩溃只影响本能力，不会带走后端；
  * - 任何失败（模型缺失 / AGENT_LOCAL_EMBEDDING_DISABLED=1 / 宿主崩溃）一律

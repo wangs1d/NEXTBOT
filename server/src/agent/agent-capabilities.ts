@@ -9,6 +9,7 @@ export const CAPABILITY_DOMAINS = [
   "agent_link",
   "calendar",
   "weather",
+  "market",
   "sub_agent",
   "aip",
   "vision",
@@ -50,6 +51,7 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   agent_link: "Agent Link 好友（列表/请求/中继消息）",
   calendar: "日程与提醒（创建/查询）",
   weather: "天气查询",
+  market: "行情报价（股票/指数实时报价）",
   sub_agent: "任务执行（后台 plan-and-execute 统一执行）",
   aip: "AIP协议（dispatch/状态/提案）",
   vision: "视觉能力（HTTP抓帧/定时巡检）",
@@ -116,6 +118,12 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "weather",
       lines: [
         "4️⃣ 天气：weather.get_local",
+      ],
+    },
+    {
+      domain: "market",
+      lines: [
+        "4️⃣½ 行情：market.quote（股票/指数实时报价，A股/港股/美股）",
       ],
     },
     {
@@ -350,8 +358,9 @@ function buildStaticSections(): CapabilitySection[] {
       lines: [
         "🏷️ 购物比价（只读零副作用：比价/降价监控/调研对比，不下单）：",
         "   - shopping.compare.prices（跨平台比价）：并行搜多平台，同款归一聚合，按价格升序返回分组报价；低置信组标注「疑似同款」",
-        "   - shopping.compare.research（保险/服务调研比价）：保险/宽带/会员等无法抓价的领域，web 检索权威来源，由 LLM 汇总成对比表（附来源，注明以官方条款为准）",
+        "   - shopping.compare.research（保险/服务调研比价）：保险/宽带/会员等无法抓价的领域，web 检索权威来源，由 LLM 汇总成对比表（资料清单只作素材，不复述标题/链接，注明以官方条款为准）",
         "   - shopping.compare.watch（降价监控）：关注某平台某商品的目标价，后台定时复查（默认 60min），到价且为新低价时主动提醒",
+        "   - 手机端没有可视浏览器但能力与桌面端一致：直接走服务端浏览器通道（已导入 Cookie 自动注入；登录墙/验证码会把二维码推到聊天，扫码后继续），不要改用 search_web 凑价格",
         "   - 与 shopping.order.*（真实下单）的边界：比完价用户确认后再下单；本模块不产生订单或支付",
       ],
     },

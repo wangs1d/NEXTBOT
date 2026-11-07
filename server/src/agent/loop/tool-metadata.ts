@@ -72,6 +72,7 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "info.navigate_site": "web",
   "info.search": "web",
   "weather.get_local": "web",
+  "market.quote": "web",
   // calendar
   "calendar.create": "calendar",
   "calendar.list_tasks": "calendar",

@@ -169,9 +169,9 @@ test("compare.watch 卡：空列表 / 失败回执 → null（回退文本路由
   );
 });
 
-/* ─────────────── 3. compare.research builder ─────────────── */
+/* ─────────────── 3. compare.research 不再出卡 ─────────────── */
 
-test("compare.research 卡：条目不承载网页链接 + disclaimer footer + search_result 卡型", () => {
+test("compare.research 不出卡：调研资料清单只作模型素材（与搜索结果卡同形，已退役）", () => {
   const p = buildToolCard("shopping.compare.research", {
     ok: true,
     topic: "好医保 vs 平安e生保",
@@ -184,20 +184,14 @@ test("compare.research 卡：条目不承载网页链接 + disclaimer footer + s
         source: "测评站",
       },
       { title: "好医保长期医疗条款摘要", url: "https://example.com/t1", source: "官方" },
-      { title: "重复来源应去重", url: "https://example.com/review", source: "测评站" },
-      { title: "", url: "", source: "" },
     ],
     disclaimer: "以上为网页调研结果，仅供参考。",
   });
-  assert.ok(p);
-  assert.equal(p.cardType, "search_result");
-  assert.equal(p.title, "调研对比：好医保 vs 平安e生保");
-  assert.equal(p.items.length, 2, "重复 url 与空条目应被过滤");
-  assert.equal((p.items[0] as { url?: unknown }).url, undefined, "条目不承载网页链接");
-  assert.equal(p.items[0]!.source, undefined, "条目不承载来源站点");
-  assert.ok(!p.items.some((i) => i.text.includes("来源")), "正文不出现「来源:」");
-  assert.ok(p.items[0]!.text.includes("四个维度"));
-  assert.ok(p.footer!.includes("仅供参考"));
+  assert.equal(
+    p,
+    null,
+    "调研比价的 sources 是网页资料清单，不再以卡片形式铺给用户（对比表由正文承载）",
+  );
 });
 
 /* ─────────────── 4. Service：代表图 + 决策页回填 ─────────────── */

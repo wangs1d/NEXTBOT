@@ -36,6 +36,7 @@ import { ServerEventType } from "../protocol.js";
 import { embodimentThinking } from "../services/agent-embodiment.js";
 import { isScheduleMutationToolName } from "../tools/schedule-tool-names.js";
 import { formatStatusForDisplay } from "../utils/text.js";
+import { renderToolStatusLine } from "./tool-status-template.js";
 
 export type ChatToolWireContext = {
   sessionId: string;
@@ -147,7 +148,12 @@ function sendAgentStatus(ctx: ChatToolWireContext, status: DelegateStatusPayload
 }
 
 export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecuteStartInfo): void {
-  const userStatusLine = pickToolUserStatusLine(info.input, info.assistantPreamble);
+  // 文案两条来源：模型自述（工具入参里的可选 userStatusLine）> 服务端确定性模板
+  // （工具名 + 入参拼装，不依赖模型配合）。都没有就返回 null —— 客户端会退回
+  // 自己的工具族映射表，不在协议层塞通用话术。
+  const userStatusLine =
+    pickToolUserStatusLine(info.input, info.assistantPreamble) ??
+    renderToolStatusLine(info.toolName, info.input);
   if (userStatusLine) {
     embodimentThinking(ctx.sessionId, ctx.send, userStatusLine, {
       phase: "tool_start",

@@ -247,7 +247,13 @@ export class UpstreamSearchService {
           : providerUsed.startsWith("api:")
             ? `搜索 API(${providerUsed}) 直出（API 结果不与爬虫混排）`
             : `搜索 API(${providerUsed}) + 国内引擎兜底（相关性过滤）`,
-        formatSearchFreshnessNote({ anchor, droppedStale: fresh.droppedStale, maxAgeDays }),
+        formatSearchFreshnessNote({
+          anchor,
+          droppedStale: fresh.droppedStale,
+          maxAgeDays,
+          datedCount: fresh.datedCount,
+          total: fresh.items.length,
+        }),
       ],
     };
     this.webQueryCache.set(cacheKey, result);

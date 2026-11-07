@@ -1,4 +1,5 @@
-import { isDirectFactQuery, isDigestRoundupQuery } from "./direct-fact-query.js";
+import { isDigestRoundupQuery } from "./direct-fact-query.js";
+import { WEATHER_CARD_BOUNDARY } from "../render/scenes/prompts.js";
 
 /**
  * 数据驱动回复策略评估器
@@ -45,16 +46,19 @@ export interface DataQualityAssessment {
   reason: string;
 }
 
-/** 回复策略 */
+/**
+ * 回复策略标识 —— 现在只是**观测与场景路由信号**（日志 / 看板 / 渲染场景挑选用），
+ * 不再对应任何注入到 prompt 的组织方式。版式归 render/scenes：
+ * 清单型走 digest_roundup 槽位场景，回执型走卡片场景，散文型本来不需要版式。
+ */
 export type SynthesisStrategy =
-  | "framework_attribution" // 高质量数据：结论先行 + 2-4 维度归因
-  | "digest_roundup"        // 动态/近况盘点：按主题分组汇总，信息用足
-  | "layered_progressive"   // 中等数据：先事实后推断，分层递进
-  | "honest_sparse"          // 低质量数据：坦诚说明已知+未知
-  | "multi_perspective"      // 矛盾数据：多视角对比
-  | "direct_answer"         // 无工具数据：直接回答（纯知识）
+  | "framework_attribution" // 归因分析类轮次（散文，无需版式）
+  | "digest_roundup"        // 动态/近况盘点（对应 digest_roundup 槽位场景）
+  | "layered_progressive"   // 一般检索轮（散文，无需版式）
+  | "multi_perspective"     // 来源矛盾（散文，无需版式）
+  | "direct_answer"         // 无工具数据 / 数据稀少
   | "photo_delivery"        // 纯图轮：交图即交付，正文一两句话收束
-  | "weather_card"          // 天气卡轮：数值由系统卡片展示，正文只给口语建议
+  | "weather_card"          // 天气卡轮：数值由系统卡片展示，正文只给建议
   | "confirm_receipt";      // 办妥确认轮：提醒/日程写入回执，一两句收口
 
 /**
@@ -71,26 +75,28 @@ export const PHOTO_DELIVERY_INSTRUCTION =
 /**
  * 天气卡轮专用指令（2026-10-08）：天气数值已由 tool-card-registry 从工具回执
  * 确定性构建成结构化天气卡（城市·日期 / 天气 / 气温 / 降水 / 着装），同屏正文
- * 再复述数据就是双份。真机事故形态：medium 档 layered_progressive 的
- * 「先给出已确认的事实（有数据支撑的部分）」把模型教成
- * 「## 标题 + > 引用 + |项目|数值| 表格」（复述数据当事实层）+ 穿搭建议（推断层）。
- * 与纯图轮同理短路：天气轮不走数据质量分档，正文只保留口语建议。
+ * 再复述数据就是双份。
+ *
+ * 2026-11-05 收敛：文本唯一源迁到 render/scenes/prompts.ts（天气场景持有），
+ * 这里只做再导出，防止同一段边界在 prompt 与场景两处各写一份而漂移。
  */
-export const WEATHER_CARD_INSTRUCTION =
-  `天气轮：天气/气温/湿度/风速/降水概率这些数值已由系统专用天气卡片展示给用户，正文里不要再出现。` +
-  `严禁用 markdown 标题、表格或引用块罗列天气数据，严禁把工具回执的数值抄写成清单。` +
-  `严禁向用户展示经纬度坐标数字（如 35.68, 139.77）——坐标仅供工具入参，位置只说城市/区域名，解析不出就不提位置。` +
-  `直接用两三句口语给结论和建议（穿什么/要不要带伞/出行提醒），像朋友聊天一样自然收束。`;
+export const WEATHER_CARD_INSTRUCTION = WEATHER_CARD_BOUNDARY;
 
 /**
- * 办妥确认轮专用指令：提醒/日程创建回执是「已写入」状态，不是可组织成回复的外部
- * 信息——一两句话收尾，不复述原话、不列「已确定」清单、不解释执行机制。
+ * 办妥确认轮专用指令（2026-11-05 五轮收敛后的最终形态：一句话，只划底线）。
+ *
+ * 演进史（都是真机取证出的教训）：
+ * ① 播报分级计划 → ② 口语时间但复述时刻 → ③ 完全不提时间 → ④ 删示例台词
+ * → ⑤ 压成一句。教训一致：**凡是服务端描写"该怎么说话"的地方，最后都会变成模板**；
+ * 底线之外的措辞权必须归模型。
+ *
+ * 作用域仅限办妥确认轮。天气/照片两轮的边界同样只划产品边界（别跟卡片重复），
+ * 不描述版式；新闻盘点等清单型内容的版式由 render/scenes 的槽位场景负责。
  */
 export const CONFIRM_RECEIPT_INSTRUCTION =
-  `提醒/日程已写入成功，这是一次办妥确认，一两句话收尾：办成了什么、何时生效（用回执的 nextRunAtLocal）。` +
-  `回执带 remindPlan 分级计划时，用一句话把已排好的预告段转告用户，不要自己另建议提前量。` +
-  `严禁复述用户原话，严禁罗列「已确定」类信息清单；用户没说清且确实影响这件事的信息（如地点、诊所要求）最多问一句，问完就收。` +
-  `不预告到点会交付什么内容，不解释执行机制。`;
+  `提醒/日程已写入，这是背景事实不用播报。怎么接这句话你自己定，` +
+  `只有三条底线：别重复时间（他刚说过；除非时间不是他说的，那才用 whenSpoken 交代）、` +
+  `别提内部编排（系统/后台/分级/生效/多个时间点；advanceReminderKinds 是你知道的事实，要不要提你自己定）、别复述他的原话。`;
 
 /** 有文字检索/抓取结果的工具：出现它们说明本轮是图文混合研究，不按纯图轮处理 */
 const TEXT_SEARCH_TOOL_NAMES = new Set([
@@ -316,18 +322,23 @@ export function assessDataQuality(toolData: CollectedToolData[]): DataQualityAss
 
 /** 根据数据质量选择回复策略 */
 export function selectStrategy(quality: DataQualityAssessment, userMessage: string): StrategyDirective {
-  const isAnalysisQuestion = /为什么|分析|怎么回事|原因|导致|影响|怎么回事|怎么回事|背后|逻辑/i.test(userMessage);
-  const directFactQuery = isDirectFactQuery(userMessage);
+  const isAnalysisQuestion = /为什么|分析|怎么回事|原因|导致|影响|背后|逻辑/i.test(userMessage);
   const digestRoundup = isDigestRoundupQuery(userMessage);
 
-  /** 动态/近况盘点类：按主题分组、信息用足——对齐「用户要的是一份汇总」的预期 */
-  const digestInstruction = (label: string): string =>
-    `你${label}检索结果，用户要的是「动态/近况盘点」类汇总。请组织一份信息充分的回答：\n` +
-    `1. 开头一两句给出总体印象（如"最近主要围绕X和Y两件事"）\n` +
-    `2. 按主题分组展开（如：事件进展 / 新作品 / 日常动态），每组用小标题或自然分段\n` +
-    `3. 保留具体细节：日期、数字、人名、作品名、原话——这些是用户最想看的\n` +
-    `4. 多条结果讲同一件事时合并为一个条目；不同事件不要遗漏\n` +
-    `5. 结尾一句话自然收束；篇幅与信息量匹配，信息多就写充分，不要人为压缩成几句话`;
+  // 2026-11-05 架构收敛（用户拍板第二次）：**版式全部下沉到 render/scenes**。
+  // 上一轮曾恢复编号结构模板，本轮的结论是——结构不该由 prompt 教：
+  //   · 清单型内容（盘点/近况）→ digest_roundup 场景做槽位契约，
+  //     模型只填 {summary, groups[]}，服务端确定性渲染成固定版式；
+  //   · 回执型内容（提醒/日程/天气/照片）→ 卡片由 tool-card-registry / 场景建；
+  //   · 散文型内容（归因分析/矛盾对比/闲聊）→ 本来就不需要版式，人格管语气即可。
+  // 所以此处只给**数据事实**（几个来源、缺不缺），不写任何编号步骤、不写
+  // 「按主题分组」「结论先行」这类版式措辞。strategy 名保留作观测与场景路由信号。
+
+  /** 数据事实：够不够、有几个来源、缺多少。只陈述事实，不教组织方式。 */
+  const dataFact =
+    `（工具结果：${quality.successCount}个成功` +
+    (quality.failureCount > 0 ? `，${quality.failureCount}个失败` : "") +
+    `，共${quality.totalContentLength}字符）`;
 
   let strategy: SynthesisStrategy;
   let instruction: string;
@@ -340,87 +351,30 @@ export function selectStrategy(quality: DataQualityAssessment, userMessage: stri
       break;
 
     case "high":
-      // 高质量数据 + 盘点类问题 → 按主题分组汇总
-      if (digestRoundup) {
-        strategy = "digest_roundup";
-        instruction = digestInstruction(
-          `已拿到多来源检索结果（${quality.successCount}个来源，共${quality.totalContentLength}字符），`,
-        );
-        break;
-      }
-      // 高质量数据 + 分析类问题 → 框架归因
-      if (isAnalysisQuestion) {
-        strategy = "framework_attribution";
-        instruction =
-          `你已通过工具收集到充分的数据（${quality.successCount}个来源，${quality.toolDiversity}种工具）。` +
-          `请按以下策略组织回复：\n` +
-          `1. 结论先行：第一句话给出核心判断（如"N个因素叠加导致X"），不要先铺事实\n` +
-          `2. 归因展开：拆出2-4个原因维度，每个维度用「原因→机制→数据」结构展开\n` +
-          `3. 综合改写：用自己的话整合多源信息，不要直接转发任何单一来源的原文\n` +
-          `4. 信息密度：合并冗余，只保留最有价值的证据\n` +
-          `5. 如果信息有缺口，明确说"已知X未知Y"，不要退缩道歉\n` +
-          `6. 禁止把同一结论再换个说法复述一遍`;
-      } else {
-        // 高质量数据 + 非分析类 → 分层递进
-        strategy = "layered_progressive";
-        instruction =
-          `你已通过工具收集到充分的数据（${quality.successCount}个来源）。` +
-          `请按以下策略组织回复：\n` +
-          `1. 直接给出核心信息，不要铺垫\n` +
-          `2. 如有必要，补充关键细节（数据/时间/来源）\n` +
-          `3. 合并多源冗余信息，只保留最有价值的部分\n` +
-          `4. 用自然的口语表述，不要罗列工具调用过程\n` +
-          `5. ${directFactQuery ? "用户求证的是单一事实：先给明确结论，再给支撑依据，不必展开无关面，也不要做总结性复述" : "信息用足、组织充分（可按主题分节），同一事实不要换句话重复第二遍"}`;
-      }
+      // strategy 名保留作观测/场景路由；不再附带任何组织方式（版式在 scenes）
+      strategy = digestRoundup
+        ? "digest_roundup"
+        : isAnalysisQuestion
+          ? "framework_attribution"
+          : "layered_progressive";
+      instruction = `${dataFact}数据够了，直接答。`;
       break;
 
     case "medium":
-      // 中等数据 + 盘点类 → 仍按分组汇总组织，能确认多少整理多少，
-      // 不用「推断/待验证」框架把答案写虚
-      if (digestRoundup) {
-        strategy = "digest_roundup";
-        instruction =
-          digestInstruction(
-            `拿到了部分检索结果（${quality.successCount}个来源，共${quality.totalContentLength}字符），`,
-          ) +
-          `\n6. 只整理检索结果里能确认的内容，信息不足的部分结尾一句话带过，不要虚构细节填充`;
-        break;
-      }
-      // 中等数据 → 分层递进（先事实后推断）
-      strategy = "layered_progressive";
-      instruction =
-        `你通过工具收集到了部分数据（${quality.successCount}个来源，${quality.totalContentLength}字符）。` +
-        `请按以下策略组织回复：\n` +
-        `1. 先给出已确认的事实（有数据支撑的部分）\n` +
-        `2. 再给出合理推断（基于已有信息的推测，标注是推断）\n` +
-        `3. 最后说明待验证点（信息缺口在哪）\n` +
-        `4. 不要道歉说"信息不完整"，用"已知X未知Y"替代\n` +
-        `5. ${directFactQuery ? "用户求证的是单一事实：先给明确结论，再补关键依据与缺口，不要重复总结" : "禁止把事实层和推断层重复表述两次"}`;
+      strategy = digestRoundup ? "digest_roundup" : "layered_progressive";
+      instruction = `${dataFact}部分结果可用：能确定的直接答，补不上的照实说。`;
       break;
 
     case "contradictory":
-      // 矛盾数据 → 多视角对比
       strategy = "multi_perspective";
-      instruction =
-        `你收集到的数据存在矛盾信号（${quality.successCount}个来源）。` +
-        `请按以下策略组织回复：\n` +
-        `1. 先说明存在哪些不同说法\n` +
-        `2. 对比不同来源的观点差异（A说X，B说Y）\n` +
-        `3. 分析分歧原因（数据源不同？时间不同？立场不同？）\n` +
-        `4. 给出你的判断倾向（如果有足够线索）或标注需要进一步确认`;
+      instruction = `${dataFact}几个来源的说法不一致，照实取舍。`;
       break;
 
     case "low":
-      // 低质量数据 → 坦诚直说
-      strategy = "honest_sparse";
-      instruction =
-        `工具收集到的数据有限（${quality.successCount}个成功，${quality.failureCount}个失败，${quality.totalContentLength}字符）。` +
-        `请按以下策略组织回复：\n` +
-        `1. 明确说明目前能确定的信息\n` +
-        `2. 明确说明未知的信息（用"目前未知X"而非"抱歉搜不到"）\n` +
-        `3. 如果能从已有知识给出方向性判断，简述并标注"基于已有知识推断"\n` +
-        `4. 不要道歉，不要退缩，不要说"换个角度"\n` +
-        `5. 不要为了显得完整而重复同一判断；缺口说明一次就够`; 
+      // 低质量数据（2026-11-05 删除 honest_sparse）：数据少时同样不给结构，
+      // 只留一条事实底线——怎么说交还模型。
+      strategy = "direct_answer";
+      instruction = `${dataFact}结果有限：能确定什么就答什么，补不上来的照实说，不要编。`;
       break;
   }
 
@@ -473,28 +427,38 @@ export function evaluateAndSelectStrategy(
     };
   }
   // 办妥确认轮短路（2026-10-25）：提醒/日程创建回执是「已写入」状态，与记账轮
-  // 同理不走数据质量分档——否则 low 档 honest_sparse 教出「已确定/目前未知」
-  // 三段式盘点卡（真机：牙医提醒轮）。仅当本轮全部是确认工具且有成功返回时生效；
-  // 失败轮与混检索轮照常评估（失败要解释原因、混合轮要组织真实数据）。
-  if (substantiveResults.length > 0 && substantiveResults.every((r) => CALENDAR_CONFIRM_TOOL_NAMES.has(r.toolName))) {
-    if (substantiveResults.some((r) => r.ok)) {
-      return {
-        strategy: "confirm_receipt",
-        instruction: CONFIRM_RECEIPT_INSTRUCTION,
-        quality: {
-          sourceCount: toolResults.length,
-          searchCount: 0,
-          fetchCount: 0,
-          successCount: substantiveResults.filter((r) => r.ok).length,
-          failureCount: toolResults.filter((r) => !r.ok).length,
-          totalContentLength: 0,
-          toolDiversity: substantiveResults.length,
-          level: "high",
-          reason: "办妥确认轮：提醒/日程创建成功回执，一两句收口",
-        },
-        preamblePolicy: "suppress",
-      };
-    }
+  // 同理不走数据质量分档——否则 low 档编号模板（honest_sparse，已删）会教出
+  // 「已确定/目前未知」
+  // 三段式盘点卡（真机：牙医提醒轮）。仅当本轮全部是确认工具且**确实写入成功**
+  // 时生效；失败轮与混检索轮照常评估（失败要解释原因、混合轮要组织真实数据）。
+  //
+  // 2026-11-05 实测补洞：calendar.create 解析失败时返回 ok:true + matched:false
+  // （带 hint「未能解析时间或事项」），旧判据只看 ok → 照样短路成 confirm_receipt，
+  // 指令让模型说「提醒已写入成功」，实际什么都没写。matched:false 必须排除。
+  const confirmWritten = substantiveResults.filter(
+    (r) => r.ok && (r.result as { matched?: unknown } | undefined)?.matched !== false,
+  );
+  if (
+    substantiveResults.length > 0 &&
+    substantiveResults.every((r) => CALENDAR_CONFIRM_TOOL_NAMES.has(r.toolName)) &&
+    confirmWritten.length === substantiveResults.length
+  ) {
+    return {
+      strategy: "confirm_receipt",
+      instruction: CONFIRM_RECEIPT_INSTRUCTION,
+      quality: {
+        sourceCount: toolResults.length,
+        searchCount: 0,
+        fetchCount: 0,
+        successCount: substantiveResults.filter((r) => r.ok).length,
+        failureCount: toolResults.filter((r) => !r.ok).length,
+        totalContentLength: 0,
+        toolDiversity: substantiveResults.length,
+        level: "high",
+        reason: "办妥确认轮：提醒/日程创建成功回执，一两句收口",
+      },
+      preamblePolicy: "suppress",
+    };
   }
   // 纯图轮短路（2026-10-06）：搜照片轮的交付是图本身，不走数据质量分档——
   // 否则 medium 档的「先已确认事实/再合理推断/最后待验证点」三段式会教出

@@ -48,7 +48,7 @@ class IslandEntry {
 /// 由 [DynamicIslandLauncher] 监听本控制器并同步过去。
 ///
 /// 与通知分流定调一致：岛上只走「不需要决策的被动信息」，
-/// 需要决策的通知落对话流决策卡（contentType=decision_card），不进岛。
+/// 需要决策的通知直接落对话流文本气泡，不进岛。
 class DynamicIslandController extends ChangeNotifier {
   /// 运行态统一用 [instance] 单例；测试需要干净实例时直接新建。
   DynamicIslandController();

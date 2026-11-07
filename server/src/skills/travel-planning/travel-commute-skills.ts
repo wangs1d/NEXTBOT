@@ -26,7 +26,8 @@ import {
   type TicketType,
 } from "./travel-ticket-store.js";
 import { geocodeCity, WeatherService } from "../../services/weather-service.js";
-import { amapDrivingRoute, amapGeocode } from "../../services/route-duration-service.js";
+import { estimateTravelTime, type TravelModeHint } from "../../services/route-duration-service.js";
+import { resolveOriginPointFromContext } from "./travel-origin.js";
 
 type Deps = {
   travelPlanningService: PlanningService;
@@ -62,29 +63,45 @@ function formatLocal(d: Date): string {
 export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] {
   const { travelPlanningService, weatherService } = deps;
 
-  /** 1. 实时路况 + 天气 → 建议出发时间 */
+  /** 1. 实时路况 + 天气 → 建议出发时间（起点可缺省取用户实时定位，2026-11-05） */
   const departure_advice: SkillDefinition = {
     metadata: {
       name: "travel.departure-advice",
-      version: "1.0.0",
+      version: "1.1.0",
       displayName: "出发时间建议（路况+天气）",
       description:
-        "结合实时路况与天气，为一次市内/跨城出行建议出发时间。输入出发地、目的地与期望到达时间（可选），" +
-        "返回：驾车耗时估算（含实时路况）、沿途/目的地天气、是否下雨、缓冲建议与「最晚几点出门」。" +
-        "当用户问「明天几点出门」「现在走来得及吗」「去机场/高铁站怎么安排出发」等通勤出发问题时调用。",
+        "结合实时路况与天气建议几点出发（返回耗时、天气、缓冲与最晚出发时刻；起点可省略=按用户实时定位，用户没说从哪出发时别反问，直接调用）。" +
+        "给了期望到达时间就按它倒推「最晚几点出门」，没给则给「现在出发几点到」；短距自动步行，用户说开车/走路用 mode 指定。" +
+        "适用表达：「明天几点出门」「现在走来得及吗」「去机场/高铁站怎么安排出发」「X点前要到Y，几点走」「下雨要不要早出门」。" +
+        "边界：只问两点距离/耗时、不需要天气与出发时刻倒推时用 travel.compute-route；叫车报价或下单用 ride_hailing.*。",
       kind: "builtin",
-      tags: ["travel", "通勤", "路况", "天气", "出发时间", "commute"],
+      tags: ["travel", "通勤", "路况", "天气", "出发时间", "commute", "当前位置", "几点出门"],
       icon: "🚦",
       parameters: [
-        { name: "from", type: "string", required: true, description: "出发地（如「家」「公司·望京」「北京南站」）" },
-        { name: "to", type: "string", required: true, description: "目的地（如「首都机场 T3」「虹桥火车站」）" },
+        {
+          name: "from",
+          type: "string",
+          required: false,
+          description:
+            "出发地（如「家」「公司·望京」「北京南站」）或坐标串「经度,纬度」。省略=用用户当前实时定位（推荐：用户没说从哪出发时直接省略）。",
+        },
+        { name: "to", type: "string", required: true, description: "目的地（如「首都机场 T3」「虹桥火车站」）；尽量带城市或航站楼/广场等落到具体点位" },
         { name: "arriveBy", type: "string", required: false, description: "期望到达时间（YYYY-MM-DD HH:mm 或 HH:mm；只传 HH:mm 早于当前则视为明天）" },
+        {
+          name: "mode",
+          type: "string",
+          required: false,
+          enum: ["auto", "walking", "driving"],
+          description: "交通方式；缺省 auto=按距离自动选（≤1.5km 步行，其余驾车含实时路况）。用户说要开车/走路时传对应值。",
+        },
       ],
       outputSchema: {
         ok: "是否成功",
-        from: "出发地",
+        from: "出发地（省略时回填定位标签或「当前位置」）",
+        originSource: "起点来源：given=给定；current-location=用户实时定位",
         to: "目的地",
-        durationMin: "驾车耗时（分钟，含实时路况估算）",
+        mode: "交通方式（walking/driving）",
+        durationMin: "耗时（分钟；amap 驾车含实时路况）",
         distanceKm: "距离（公里）",
         routeSource: "路线数据来源（amap=含实时路况 / osrm=无路况兜底）",
         weather: "目的地天气 {weatherText,tempC,rainPct,summary}",
@@ -92,60 +109,68 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
         arriveBy: "期望到达时间",
         bufferMin: "预留缓冲（分钟：找车/安检/天气）",
         advice: "给用户看的建议文案（直接复述即可）",
+        error: "失败原因（ok=false 时）",
       },
       permissions: ["network:external"],
       timeoutMs: 30_000,
     },
-    handler: async (input) => {
-      const from = typeof input.from === "string" ? input.from.trim() : "";
+    handler: async (input, execContext) => {
+      const fromRaw = typeof input.from === "string" ? input.from.trim() : "";
       const to = typeof input.to === "string" ? input.to.trim() : "";
-      if (!from || !to) return { ok: false, error: "缺少必填参数 from / to" };
+      if (!to) return { ok: false, error: "缺少必填参数 to（目的地）" };
       const arriveByRaw = typeof input.arriveBy === "string" ? input.arriveBy.trim() : "";
       const arriveByDate = arriveByRaw ? parseFlexibleTime(arriveByRaw) : null;
       if (arriveByRaw && !arriveByDate) {
         return { ok: false, error: `arriveBy 无法解析：${arriveByRaw}（示例：2026-09-10 08:30 或 08:30）` };
       }
+      const modeRaw = typeof input.mode === "string" ? input.mode.trim() : "";
+      const mode: TravelModeHint =
+        modeRaw === "walking" || modeRaw === "driving" ? modeRaw : "auto";
 
-      // 1) 路线：高德实时（优先）→ OSRM 兜底（无路况）
-      let durationMin = 0;
-      let distanceKm = 0;
-      let routeSource = "";
-      const origin = await amapGeocode(from);
-      const dest = await amapGeocode(to);
-      if (origin && dest) {
-        const r = await amapDrivingRoute(origin, dest);
-        if (r) {
-          durationMin = r.durationMin;
-          distanceKm = r.distanceKm;
-          routeSource = "amap";
+      // 1) 起点：给定优先，缺省取用户实时定位（拿不到才请用户说明）
+      let origin: string | { latitude: number; longitude: number };
+      let fromLabel: string;
+      let originSource: "given" | "current-location";
+      if (fromRaw) {
+        origin = fromRaw;
+        fromLabel = fromRaw;
+        originSource = "given";
+      } else {
+        const point = await resolveOriginPointFromContext(execContext);
+        if (!point) {
+          return {
+            ok: false,
+            needOrigin: true,
+            error:
+              "没拿到你的实时定位，算不了「从你这儿出发」的路程。请在 App/浏览器里允许定位，或者告诉我从哪出发（如「从家出发」）。",
+          };
         }
+        origin = { latitude: point.latitude, longitude: point.longitude };
+        fromLabel = point.label || point.city || "当前位置";
+        originSource = "current-location";
       }
-      if (!routeSource) {
-        try {
-          const r = await travelPlanningService.computeRoute(from, to);
-          if (r && typeof r.durationMin === "number" && r.durationMin > 0) {
-            durationMin = Math.round(r.durationMin);
-            distanceKm = Math.round((Number(r.distanceKm) || 0) * 10) / 10;
-            routeSource = "osrm";
-          }
-        } catch {
-          // 继续走失败分支
-        }
-      }
-      if (!routeSource || durationMin <= 0) {
+
+      // 2) 路线：高德实时（优先）→ OSRM 兜底（无路况）；auto 模式短距走步行
+      const est = await estimateTravelTime({
+        origin,
+        destination: to,
+        mode,
+        osrmFallback: (from, dest) => travelPlanningService.computeRoute(from, dest),
+      });
+      if (!est) {
         return { ok: false, error: "路线计算失败（高德与兜底均不可用），请稍后重试或换更具体的地名" };
       }
+      const { durationMin, distanceKm, source: routeSource } = est;
 
-      // 2) 天气：目的地坐标（高德编码成功时直接用坐标，否则城市名地理编码）
+      // 3) 天气：目的地坐标（高德编码成功时直接用坐标，否则城市名地理编码）
       let weather: { weatherText: string; tempC: number; rainPct: number; summary: string } | null = null;
       let hourly: Array<{ hour: string; weatherText: string; rainPct: number; tempC: number }> = [];
       try {
         let lat = NaN;
         let lon = NaN;
-        if (dest) {
-          const [lng, ltd] = dest.split(",").map(Number);
-          lon = lng;
-          lat = ltd;
+        if (est.destinationPoint) {
+          lat = est.destinationPoint.latitude;
+          lon = est.destinationPoint.longitude;
         }
         let brief = null;
         if (Number.isFinite(lat) && Number.isFinite(lon)) {
@@ -193,7 +218,15 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
       if (arriveByDate) {
         parts.push(`${arriveByDate.getMonth() + 1}月${arriveByDate.getDate()}日 ${formatHM(arriveByDate)} 前到达 ${to}`);
       }
-      parts.push(`车程约 ${durationMin} 分钟${distanceKm ? `（约 ${distanceKm} km）` : ""}${routeSource === "amap" ? "，已含实时路况" : "（无实时路况，估算值）"}`);
+      const modeWord = est.mode === "walking" ? "步行" : "车程";
+      const routeNote =
+        routeSource !== "amap"
+          ? "（无实时路况，估算值）"
+          : est.mode === "walking"
+            ? "，按高德步行路线"
+            : "，已含实时路况";
+      parts.push(`${modeWord}约 ${durationMin} 分钟${distanceKm ? `（约 ${distanceKm} km）` : ""}${routeNote}`);
+      if (originSource === "current-location") parts.push("已按你的当前位置计算");
       if (weather) parts.push(`目的地天气：${weather.weatherText} ${weather.tempC}°C，降水概率 ${weather.rainPct}%`);
       if (rainAhead) parts.push("有降雨可能，建议多留缓冲并带伞");
       if (suggestedDeparture) {
@@ -204,8 +237,10 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
 
       return {
         ok: true,
-        from,
+        from: fromLabel,
+        originSource,
         to,
+        mode: est.mode,
         durationMin,
         distanceKm,
         routeSource,

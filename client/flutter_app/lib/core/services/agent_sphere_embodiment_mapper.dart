@@ -52,7 +52,10 @@ class AgentSphereEmbodimentMapper {
           caption: line.isEmpty ? "工具执行中" : line,
           source: "tool",
         );
+      // 语音数据帧与旧的显示帧共用「说话中」形象：打字机退役后，
+      // 模型仍在流式生成，球体呼吸/字幕不该跟着一起停。
       case "chat.assistant_chunk":
+      case "chat.assistant_speech":
         final String chunk =
             _chunkSanitizer.ingest(payload["chunk"]?.toString() ?? "");
         if (chunk.isEmpty) return null;

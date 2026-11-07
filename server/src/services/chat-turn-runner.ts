@@ -3,7 +3,6 @@ import { randomUUID } from "node:crypto";
 import { parseAgentAccessMode, type AgentAccessMode } from "../agent/agent-access-mode.js";
 import type { ClientLocationWire } from "../types/client-location.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
-import { formatScheduleToolResultForUser } from "../tools/schedule-user-reply.js";
 import { getToolResultProcessor } from "./tool-result-processor.js";
 import { stripMarkersToPlainText } from "./reply-envelope.js";
 import { dedupeAdjacentLines, normalizeDashTypos } from "../utils/text.js";
@@ -31,7 +30,7 @@ export type ChatTurnResult = {
   /** 可选：TTS 合成的音频数据（用于微信桥接等需要推送语音的场景） */
   ttsAudio?: { format: string; base64: string } | null;
   /** 可选：标记此回复是否为提醒类（用于微信端特殊渲染） */
-  reminderType?: "popup" | "tts_alarm" | "phone_call" | null;
+  reminderType?: "popup" | "phone_call" | null;
 };
 
 export type ChatTurnError = {
@@ -113,15 +112,10 @@ export async function runChatTurnForActor(
           });
     }
 
-    const scheduleOutcome =
-      reply.toolName && toolResult?.result
-        ? formatScheduleToolResultForUser(reply.toolName, toolResult.result)
-        : null;
-
     /** 非调度类工具的结果文本：当 Provider 不支持内联 tool loop 时，
      *  LLM 仅输出过程描述（如"正在搜索…"），实际内容在 toolResult 中 */
     const rawToolResultText =
-      reply.toolName && toolResult?.ok && toolResult.result && !scheduleOutcome
+      reply.toolName && toolResult?.ok && toolResult.result
         ? stringifyToolResult(toolResult.result)
         : "";
 
@@ -143,10 +137,7 @@ export async function runChatTurnForActor(
     } else {
       // 不再用 apology 兜底文案：空回复时返回空串，让 UI 不显示虚假内容。
       // agent-core 已在 finishLlmTurn 中尝试过 emergencyRegenerate。
-      finalText =
-        scheduleOutcome?.trim() ||
-        reply.text.trim() ||
-        "";
+      finalText = reply.text.trim();
     }
 
     // 折叠相邻的重复行（同 WS 路径）：避免 LLM 把工具前导与最终回复写成同一句。

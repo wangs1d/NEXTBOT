@@ -18,7 +18,7 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "search_web",
       description:
-        "联网搜索公开网页信息（按发布时间从新到旧）。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息，或任何人物的近况、行程、所在城市/地区、公开活动时，必须先调用本工具，禁止仅凭训练数据作答——本轮 prompt 里没有【实时检索结果】块时也不例外，没有块 ≠ 不用查，更要主动调用本工具自己查证；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。动态/新闻/盘点/对比类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用 Markdown 小标题/加粗/表格组织成结构清晰的充分回答；只有真正的单一事实判断（是/否、单个数据点）才用「结论 + 1句依据」收尾。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。搜索结果与问题无关或为空时，如实说没查到，禁止编造。",
+        "联网搜索公开网页信息。query 由你按用户意图组织成完整、具体、语义清晰的搜索词（可含主体+特征+限定词），不要机械截成 2-6 字短词；时效话题请加当前年月或「最新」。\n如果有多个独立的查询维度（例如对比多个商品 / 多个主题），请在同一轮内并行发起多个 search_web 调用，每个 tool_call 用不同的 query，避免串行等待。\n【强制调用规则】涉及时事、新闻、股价、排片、票价、天气、价格、公告等时效信息，或任何人物的近况、行程、所在城市/地区、公开活动时，必须先调用本工具，禁止仅凭训练数据作答——本轮 prompt 里没有【实时检索结果】块时也不例外，没有块 ≠ 不用查，更要主动调用本工具自己查证；本地消费（电影票、外卖等）同样须先搜索再试。整合结果时优先引用发布时间最新的条目并注明日期。搜索条目常缺失发布日期且不保证按时间排序：行情/新闻等时效敏感问题不许把无日期条目直接当最新数据引用——换带具体日期的查询词再搜一次，或用 fetch_web 进原文核对日期；给出的数字必须说清是哪一天的（如收盘日/数据截止点），核不出日期就明说「数据截止到哪、哪一场还没出结果」，不许静默把旧数据当今天。动态/新闻/盘点/对比类问题要把多来源信息按主题整理充分（保留日期、数字、人名、作品名等细节），用 Markdown 小标题/加粗/表格组织成结构清晰的充分回答；只有真正的单一事实判断（是/否、单个数据点）才用「结论 + 1句依据」收尾。搜索回执只做素材：正文给整合后的答案，不要罗列来源、不要贴网址链接、不要逐条复述搜索条目。若摘要不足以覆盖用户要的细节（事件经过、正文内容），继续用 fetch_web / deep_search 深读相关链接后再回答。搜索结果与问题无关或为空时，如实说没查到，禁止编造。",
       parameters: {
         type: "object",
         properties: {
@@ -205,7 +205,9 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
       name: "hot_rankings",
       description:
         "实时热点榜单：聚合微博/百度/知乎/B站 当前热门话题，每条含平台、排名、话题与热度。\n" +
-        "适用场景：用户问「今天有什么热点/大家都在看什么/热搜」「最近关注什么」等要掌握当下时事话题，或需要补充实时热点素材时调用；可指定 platforms（weibo/baidu/zhihu/bilibili）只看特定平台。",
+        "适用场景：用户问「今天有什么热点/大家都在看什么/热搜」「最近关注什么」等要掌握当下时事话题，或需要补充实时热点素材时调用；可指定 platforms（weibo/baidu/zhihu/bilibili）只看特定平台。\n" +
+        "榜单是全平台通用结果，不是给这个人挑的：讲给他听之前，先按你已知的他的关注点挑重点；" +
+        "他关心的方向榜上没有，就按那个方向补一次检索。",
       parameters: {
         type: "object",
         properties: {
@@ -227,6 +229,9 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
         "timezone 一般不要传：缺省 auto 由用户坐标推导当地时区（服务器时区与出口 IP 都不参与）。\n" +
         "可选 days：预报天数 1-16。默认 2（今天+明天）；用户问后天/周末/未来一周等多日天气时传对应天数" +
         "（如「后天下雨吗」→ days:3，「周末天气」→ days:7），回执会带 dailyForecast 逐日数组（含 dayLabel 今天/明天/后天/周X）。\n" +
+        "可选 focus：用户明确只问某一天时传，回执只含那天的数据（问明天就不掺今天的实况和气温）。" +
+        "「明天天气怎么样」→ focus:'tomorrow'；「今天热不热」→ focus:'today'；" +
+        "两天都提或泛泛问天气（「这两天冷吗」「天气如何」）不传，缺省回执含今天+明天。\n" +
         "⚠️ 回执含 todayRainPeriod / tomorrowRainPeriod（降水集中的钟点段，如「上午 9–12 点最明显」）时，" +
         "正文必须把这段说出来，不能只讲「今天降水 99%」——用户要知道的是几点出门。\n" +
         "⚠️ todayRainPeriod 写成「…已下过」时当天的雨已经过去，不要再催带伞。\n" +
@@ -244,7 +249,39 @@ export const INFO_WEB_CHAT_TOOLS: ChatCompletionTool[] = [
           timezone: { type: "string" },
           locationLabel: { type: "string", description: "展示用地点名" },
           days: { type: "integer", description: "预报天数 1-16，默认 2（今天+明天）；问多日时传" },
+          focus: {
+            type: "string",
+            enum: ["today", "tomorrow"],
+            description: "用户明确只问某一天时传：today=只回今天（无明日段），tomorrow=只回明天（无当前实况/今日数据）；不传=今天+明天",
+          },
         },
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "market.quote",
+      description:
+        "查询股票/指数/ETF 的实时与最近成交报价（腾讯行情，A股/港股/美股）。\n" +
+        "适用场景：用户问「现在/今天 XX 多少点、多少钱、涨跌多少」类行情事实时必须优先调用本工具；" +
+        "新闻搜索（search_web）返回的报价是文章快照，无日期、新旧混杂，禁止当作最新行情引用——搜索只负责回答「为什么涨跌」。\n" +
+        "参数 symbols 每项一个标的：支持常用别名（上证指数/大盘/创业板指/沪深300/恒生指数/道指/纳斯达克/标普500/罗素2000/特斯拉/英伟达/苹果/微软/亚马逊/谷歌/Meta）" +
+        "或交易所代码（sh000001、sz399006、sh000300、hkHSI、hk00700、usDJI、usIXIC、usINX、usAAPL）；一次最多 8 个。\n" +
+        "回执契约：quotes[] 含 name/market/price/prevClose/change/changePct/quoteTime（报价时间，北京时间）。" +
+        "⚠️ 报价是交易所最近成交快照：回复中必须说明数据是 quoteTime 那一刻的；quoteTime 不是今天 = 最近收盘数据，照实说是哪天的收盘，禁止说成「现在/今天」。" +
+        "missing 里列出的标的没查到，如实告知，禁止编造报价。",
+      parameters: {
+        type: "object",
+        properties: {
+          symbols: {
+            type: "array",
+            items: { type: "string" },
+            description: "标的列表，别名或交易所代码，最多 8 个",
+          },
+        },
+        required: ["symbols"],
         additionalProperties: false,
       },
     },
@@ -535,7 +572,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 此前 reminder.plan / calendar.create_from_text / calendar.create_task 三件
       // 套并存，同一句话在两轮里各挑一个工具，会落成两条到点提醒。
       description:
-        "【内置 Calendar】创建提醒/日程/定时任务的唯一入口。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 nextRunAtLocal（展示必须用它）与 remindPlan（睡前备忘/起床闹钟/出发预留，转述时一并告知，不要自己另建议提前量）。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。",
+        "【内置 Calendar】创建提醒/日程/定时任务的唯一入口。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。",
       parameters: {
         type: "object",
         properties: {
@@ -557,11 +594,11 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           timezone: { type: "string", description: "IANA 时区，默认 Asia/Shanghai" },
           durationMinutes: { type: "number", description: "事件时长（分钟）。会议/就诊/课程等有时长的安排必填；纯时间点提醒不填。" },
-          location: { type: "string", description: "事件地点（可选）。说了具体地点就填：系统据此估算路程并安排分级提醒。" },
+          location: { type: "string", description: "事件地点（可选）。说了具体地点就填：据此估算路程并安排提前提醒。" },
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "提前量提醒（分钟数组）。仅当用户明确说出提前量时填；没说就省略——系统自动分级。",
+            description: "提前量提醒（分钟数组）。仅当用户明确说出提前量时填；没说就省略——提前量由服务端决定，不要向用户解释规则。",
           },
           reminderMessage: { type: "string", description: "仅 kind=reminder。到点展示文案，如「该睡觉啦！」；禁止复述原句、禁止带时间表述、不要写称呼。" },
           forceCreate: { type: "boolean", description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）" },
@@ -674,7 +711,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           remindBeforeMinutes: {
             type: "array",
             items: { type: "number" },
-            description: "新提前量提醒数组（分钟）。填写即代表接管提前量（覆盖系统自动分级）；仅在用户明确要求时填。",
+            description: "新提前量提醒数组（分钟）。填写即代表接管提前量（覆盖服务端默认提前量）；仅在用户明确要求时填。",
           },
           status: {
             type: "string",

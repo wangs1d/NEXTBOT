@@ -20,7 +20,6 @@ import type {
   ScheduleTaskRecord,
   ScheduleTaskService,
 } from "../services/schedule-task-service.js";
-import { describeRemindPlan } from "../services/schedule-reminder-policy.js";
 import {
   normalizeDurationMinutes,
   normalizeRemindBeforeMinutes,
@@ -59,13 +58,118 @@ export function formatNextRunAtLocal(iso: string | null | undefined, timezone: s
       nowLocal.getDate() === targetLocal.getDate()
     );
   })();
-  if (today) return `今天${timeStr}`;
+  if (today) return `今天 ${timeStr}`;
   const dateStr = d.toLocaleDateString("zh-CN", {
     timeZone: timezone,
     month: "numeric",
     day: "numeric",
   });
-  return `${dateStr}${timeStr}`;
+  // 日期与时刻之间要有分隔：此前直连拼成「11/611:00」，模型会照抄给用户
+  return `${dateStr} ${timeStr}`;
+}
+
+/** 0–59 的中文读法：11→十一、20→二十、45→四十五 */
+function cnNum(n: number): string {
+  const d = ["零", "一", "二", "三", "四", "五", "六", "七", "八", "九"];
+  if (n < 10) return d[n];
+  if (n < 20) return `十${n % 10 === 0 ? "" : d[n % 10]}`;
+  return `${d[Math.floor(n / 10)]}十${n % 10 === 0 ? "" : d[n % 10]}`;
+}
+
+/** 按用户时区取出年月日时分（不依赖服务器本地时区） */
+function localPartsOf(iso: string, timezone: string) {
+  const d = new Date(iso);
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: timezone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value]),
+  );
+  const rawHour = Number(parts.hour);
+  return {
+    y: Number(parts.year),
+    m: Number(parts.month),
+    d: Number(parts.day),
+    hour: rawHour === 24 ? 0 : rawHour,
+    minute: Number(parts.minute),
+  };
+}
+
+/**
+ * 口语化时间（2026-11-05）：回执给模型的是「明天上午十一点」这种能直接说出口的
+ * 说法，而不是 `11/6 11:00`。前一种模型能自然嵌进句子，后一种只能照抄成
+ * 「明天 11:00 会提醒你」——像系统播报，没有活人感。
+ *
+ * 只用于**对话转述**；客户端展示仍用 `formatNextRunAtLocal`（结构化、不随口语变）。
+ */
+export function formatNextRunAtSpoken(
+  iso: string | null | undefined,
+  timezone: string,
+): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const t = localPartsOf(iso, timezone);
+  const now = localPartsOf(new Date().toISOString(), timezone);
+  const dayIndex = (p: { y: number; m: number; d: number }) =>
+    Math.floor(Date.UTC(p.y, p.m - 1, p.d) / 86_400_000);
+  const diff = dayIndex(t) - dayIndex(now);
+
+  const evening = t.hour >= 18;
+  let dayWord: string;
+  if (diff === 0) dayWord = evening ? "今晚" : "今天";
+  else if (diff === 1) dayWord = evening ? "明晚" : "明天";
+  else if (diff === 2) dayWord = evening ? "后天晚上" : "后天";
+  else if (diff === 3) dayWord = "大后天";
+  else dayWord = `${t.m}月${t.d}日`;
+
+  let prefix = dayWord;
+  // 「今晚/明晚」已自带时段，不再叠加；其余按钟点补时段词
+  if (!dayWord.endsWith("晚")) {
+    const session =
+      t.hour < 5 ? "凌晨" : t.hour < 8 ? "早上" : t.hour < 12 ? "上午" : t.hour === 12 ? "中午" : t.hour < 18 ? "下午" : "晚上";
+    prefix = dayWord + session;
+    // 「今天早上」→「今早」、「明天早上」→「明早」更像人话
+    if (session === "早上" && diff === 0) prefix = "今早";
+    else if (session === "早上" && diff === 1) prefix = "明早";
+  }
+
+  const hourWord = t.hour === 0 ? "零" : cnNum(t.hour % 12 === 0 ? 12 : t.hour % 12);
+  // 「零点三十分」而不是「零点半」：凌晨说「半」听着别扭
+  const minuteWord =
+    t.minute === 0
+      ? "点"
+      : t.minute === 30 && t.hour !== 0
+        ? "点半"
+        : `点${t.minute < 10 ? "零" : ""}${cnNum(t.minute)}分`;
+  return `${prefix}${hourWord}${minuteWord}`;
+}
+
+/**
+ * 提前提醒的**性质清单**（2026-11-05 用户二次定调：不要任何成句台词）。
+ *
+ * 上一版这里返回的是 `advanceHint: "到点前还会再提醒你一次"`——一句成文的话。
+ * 用户明确否掉：「不需要你硬编码，让 agent 自己知道就行，它结合上下文会说」。
+ * 所以这里只暴露枚举事实（departure=出发前、evening_before=前一晚），
+ * 不给句子、不给时刻、不给段数；要不要提、怎么提，全交给模型。
+ */
+function advanceReminderKindsOf(task: {
+  preReminders?: Array<{ stage: string }>;
+}): Record<string, string[]> {
+  const kinds = new Set<string>();
+  for (const p of task.preReminders ?? []) {
+    if (p.stage === "depart") kinds.add("departure");
+    else if (p.stage === "night_before") kinds.add("evening_before");
+  }
+  // 已退役的 wake_alarm 等不出现在清单里
+  return kinds.size > 0 ? { advanceReminderKinds: [...kinds] } : {};
 }
 
 export function buildScheduleCreateInput(
@@ -172,8 +276,15 @@ export function registerCalendarTools(
   assertionStore?: ScheduleAssertionStore,
 ): void {
   /**
-   * 统一创建回执（所有 kind 同一形状）：模型只读 nextRunAtLocal / remindPlan /
-   * reminderMessage 即可转述，不再按入口工具记不同字段。
+   * 统一创建回执（所有 kind 同一形状）：模型只读 whenSpoken / reminderMessage
+   * 即可转述，不再按入口工具记不同字段。
+   *
+   * 2026-11-05 用户定调（根治「系统自己配了三级提醒」旁白）：分级预告计划是**内部
+   * 编排**，一律不进模型可见回执——此前透出 remindPlan（stages 含 label / fireAtLocal），
+   * 确认轮又要求「把预告段转告用户」，模型只能逐条念 21:00 睡前备忘 / 9:00 起床闹钟 /
+   * 10:00 该出门了，并借 schema 里的「系统自动分级」把自己说成后台。
+   * 只保留 hasAdvanceReminder（是否有提前提醒）——唯一用途是防止模型说「只响一次」
+   * （2026-10-25 事故），该标记内部使用，禁止向用户解释。
    */
   const buildCreateResponse = (
     task: ScheduleTaskRecord,
@@ -185,6 +296,12 @@ export function registerCalendarTools(
     matched: true,
     summary: linkedAlarm ? "闹钟已设置（手机端到点响铃）" : summary,
     taskId: task.taskId,
+    // 提醒确认卡的唯一事实源（2026-11-07）：时区来自设备属性/工具入参，
+    // 渲染层据此把 ISO 时刻折算成「明早 07:00」，绝不猜时区；status 由
+    // 状态机推进（created → updated / cancelled / fired），模型不参与排版。
+    timezone,
+    runAt: task.nextRunAt,
+    status: "created",
     ...(linkedAlarm
       ? { alarmId: linkedAlarm.alarmId, alarmNextFireAt: linkedAlarm.nextFireAt }
       : {}),
@@ -193,11 +310,16 @@ export function registerCalendarTools(
     kind: task.kind,
     category: task.category,
     nextRunAt: task.nextRunAt,
-    nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+    // 给模型的是能直接说出口的说法（「明天上午十一点」），不是 `11/6 11:00`：
+    // 机器格式会被原样抄进气泡（真机：「明天 11:00 会提醒你看牙医」）。
+    whenSpoken: formatNextRunAtSpoken(task.nextRunAt, timezone),
     durationMinutes: task.durationMinutes,
     location: task.location,
-    remindBeforeMinutes: task.remindBeforeMinutes,
-    remindPlan: describeRemindPlan(task),
+    // remindBeforeMinutes 不回显（2026-11-05）：自动分级的偏移数组 [840,120,60]
+    // 就是分级计划的数值形态，模型能据此算出三个时间点照念。用户显式要求的
+    // 提前量模型自己传过参、本来就知道，无需回读。
+    hasAdvanceReminder: (task.preReminders?.length ?? 0) > 0,
+    ...advanceReminderKindsOf(task),
     recurrence: task.recurrence,
     reminderMessage: task.reminderMessage,
   });
@@ -438,7 +560,9 @@ export function registerCalendarTools(
     }
     try {
       await scheduleTaskService.deleteTask(taskId);
-      return { ok: true, summary: "日程已删除", taskId };
+      // 状态回执供提醒确认卡原地刷新（不追加新卡）；日程页条目已由
+      // deleteTask 从数据层移除，手机端下次 refresh() 自然不再出现。
+      return { ok: true, summary: "日程已删除", taskId, status: "cancelled" };
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
@@ -512,11 +636,13 @@ export function registerCalendarTools(
         category: task.category,
         status: task.status,
         nextRunAt: task.nextRunAt,
-        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+        timezone,
+        runAt: task.nextRunAt,
+        whenSpoken: formatNextRunAtSpoken(task.nextRunAt, timezone),
         durationMinutes: task.durationMinutes,
         location: task.location,
-        remindBeforeMinutes: task.remindBeforeMinutes,
-        remindPlan: describeRemindPlan(task),
+        hasAdvanceReminder: (task.preReminders?.length ?? 0) > 0,
+        ...advanceReminderKindsOf(task),
         recurrence: task.recurrence,
         reminderMessage: task.reminderMessage,
       };
@@ -653,9 +779,10 @@ export function registerCalendarTools(
           ok: true,
           taskId: task.taskId,
           nextRunAt: task.nextRunAt,
-          nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, timezone),
+          whenSpoken: formatNextRunAtSpoken(task.nextRunAt, timezone),
           durationMinutes: task.durationMinutes,
-          remindPlan: describeRemindPlan(task),
+          hasAdvanceReminder: (task.preReminders?.length ?? 0) > 0,
+          ...advanceReminderKindsOf(task),
         });
         created += 1;
       } catch (e) {
@@ -702,7 +829,7 @@ export function registerCalendarTools(
 
     return {
       ok: failed === 0,
-      summary: `批量创建完成：成功 ${created} 条${skipped > 0 ? `，冲突跳过 ${skipped} 条` : ""}${failed > 0 ? `，失败 ${failed} 条` : ""}。请逐条转述（用 nextRunAtLocal 展示时间），冲突与失败条目如实说明，不要声称全部成功。`,
+      summary: `批量创建完成：成功 ${created} 条${skipped > 0 ? `，冲突跳过 ${skipped} 条` : ""}${failed > 0 ? `，失败 ${failed} 条` : ""}。请逐条转述（时间照 whenSpoken 的口语说法讲，别念钟点数字），冲突与失败条目如实说明，不要声称全部成功。`,
       created,
       skipped,
       failed,

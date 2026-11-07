@@ -1,4 +1,4 @@
-// 手机端主壳 widget 测试：3 tab 导航、我的页菜单、简报页渲染。
+// 手机端主壳 widget 测试：5 tab 自绘导航卡、设置页菜单、简报页渲染。
 // 网络依赖通过注入 http.Client mock 解决；本地存储走临时目录。
 library;
 
@@ -60,13 +60,18 @@ void main() {
     PathProviderPlatform.instance = TempPathProviderPlatform();
   });
 
-  testWidgets("主壳渲染 3 个底部导航,默认落在对话页", (WidgetTester tester) async {
+  testWidgets("主壳渲染 5 个 tab 图标热区,默认落在对话页", (WidgetTester tester) async {
     await tester.pumpWidget(const MaterialApp(home: MobileHomePage()));
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.byType(MobileHomePage), findsOneWidget);
-    expect(find.text("对话"), findsOneWidget);
-    expect(find.text("日程"), findsOneWidget);
-    expect(find.text("我的"), findsOneWidget);
+    // 自绘 tab 卡无文字标签：按图标断言（2026-11-07 5 tab 定稿）
+    // 对话 tab 默认选中 → 填充图标；其余 4 个未选中 → 线性图标
+    expect(find.byIcon(Icons.chat_bubble_rounded), findsOneWidget);
+    expect(find.byIcon(Icons.chat_bubble_outline_rounded), findsNothing);
+    expect(find.byIcon(Icons.event_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.flag_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.folder_outlined), findsOneWidget);
+    expect(find.byIcon(Icons.settings_outlined), findsOneWidget);
     // 图库 tab 已收掉,不应再出现
     expect(find.text("图库"), findsNothing);
   });
@@ -77,12 +82,16 @@ void main() {
     tester.view.devicePixelRatio = 1.0;
     addTearDown(tester.view.reset);
     await tester.pumpWidget(
-      // onLogout 必传：null 时「我的」页隐藏退出登录项（登录门禁在根组件）
-      MaterialApp(home: MobileHomePage(initialTabIndex: 2, onLogout: () {})),
+      // onLogout 必传：null 时「设置」页隐藏退出登录项（登录门禁在根组件）
+      // 2026-11-07 5 tab：index 4 = 设置（原「我的」页整体后移）
+      MaterialApp(home: MobileHomePage(initialTabIndex: 4, onLogout: () {})),
     );
     await tester.pump(const Duration(milliseconds: 100));
     await tester.pump(const Duration(milliseconds: 100));
-    // 已裁撤项不再出现（每日简报/设备/审批为内测裁撤，模型服务更名模型目录）
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 100));
+    // 已裁撤项不再出现（每日简报/设备/审批为内测裁撤）
     expect(find.text("每日简报"), findsNothing);
     // 邮箱/消息中心入口已删除（2026-10-14）：消息统一后台扫描按价值主动推送
     expect(find.text("邮箱"), findsNothing);
@@ -90,8 +99,9 @@ void main() {
     expect(find.text("设备"), findsNothing);
     expect(find.text("审批"), findsNothing);
     expect(find.text("模型服务"), findsNothing);
+    // 模型目录入口已删除（2026-11-04）：模型配置统一走服务接入页
+    expect(find.text("模型目录"), findsNothing);
     expect(find.text("服务接入"), findsOneWidget);
-    expect(find.text("模型目录"), findsOneWidget);
     expect(find.text("帮助与反馈"), findsOneWidget);
     expect(find.text("退出登录"), findsOneWidget);
     // 连接状态行(测试环境 WS 连不上 → 未连接)

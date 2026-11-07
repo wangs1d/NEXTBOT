@@ -22,6 +22,7 @@ import {
 export class MeituanAdapter implements ShoppingPlatformAdapter {
   readonly platform = "meituan";
   readonly category = "local-life" as const;
+  readonly authMode = "login" as const;
 
   searchUrl(query: string, _filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

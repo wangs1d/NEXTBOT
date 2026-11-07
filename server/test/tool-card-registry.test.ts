@@ -26,8 +26,10 @@ test("weather: full fields → weather card payload", () => {
   assert.ok(p);
   assert.equal(p.cardType, "weather");
   assert.equal(p.title, "明天晴转多云");
-  assert.equal(p.items.length, 5);
-  assert.equal(p.footer, "带薄外套");
+  // 2026-11-04 定稿：低概率（10%）不进降水行，只留 天气/气温/湿度/风速 四项
+  assert.equal(p.items.length, 4);
+  // 2026-11-04 定稿：着装不放卡片（footer 不再承载 clothingAdvice），由 LLM 正文带出
+  assert.equal(p.footer, undefined);
 });
 
 test("weather: missing weather fields → null（回退文本路由）", () => {
@@ -143,19 +145,56 @@ test("attachWeatherFromExecuted: tool-loop 天气回执 → weather 卡", () => 
   assert.ok(out.startsWith("王哥，明天有毛毛雨，出门带把伞。"));
   assert.ok(out.includes("[AGENT_RESULT_CARD_START]"));
   assert.ok(out.includes('"cardType":"weather"'));
-  // 整天概率 + 具体钟点段：只写「92%」用户不知道该几点躲雨
-  assert.ok(out.includes("今天降水 92%（上午 9–12 点最明显）"), out);
+  // 用户定稿（2026-11-04）：不报概率百分比，只说清什么时候有雨
+  assert.ok(out.includes("今天 上午 9–12 点有雨"), out);
+  assert.ok(!out.includes("降水"), "降水行不再用「降水 N%」口径");
 });
 
-test("天气卡：回执没有时段时退回整天口径，不编时间窗", () => {
-  const out = attachWeatherResultCardFromExecuted("看过了。", [
+test("天气卡：低概率且无时段 → 不给降水行；高概率无时段 → 退整天口径", () => {
+  const low = attachWeatherResultCardFromExecuted("看过了。", [
     {
       toolName: "weather.get_local",
       result: { weatherText: "多云", todayRangeC: "18–24", peakRainPct: 35 },
     },
   ]);
-  assert.ok(out.includes("今天降水 35%"), out);
-  assert.ok(!out.includes("今天降水 35%（"), "没测出的时段不能凭空补一个");
+  assert.ok(!low.includes("有雨"), "35% 无时段不值得承诺下雨，降水行整行省略");
+  const high = attachWeatherResultCardFromExecuted("看过了。", [
+    {
+      toolName: "weather.get_local",
+      result: { weatherText: "阴", todayRangeC: "18–24", peakRainPct: 75 },
+    },
+  ]);
+  assert.ok(high.includes("今天有雨"), high);
+  assert.ok(!high.includes("降水"), "整天口径也不报百分号");
+});
+
+test("天气卡：focusDay=tomorrow 明日聚焦回执 → 只构建明天的行，不掺今天与实况", () => {
+  const out = attachWeatherResultCardFromExecuted("明天有雨，记得带伞。", [
+    {
+      toolName: "weather.get_local",
+      result: {
+        ok: true,
+        focusDay: "tomorrow",
+        summary: "兴义 明日小雨，15–19°C，降水概率 100%（凌晨到深夜 0–24 点）。",
+        weatherText: "小雨",
+        tomorrowRangeC: "15°–19°",
+        tomorrowRainPct: 100,
+        tomorrowRainPeriod: "凌晨到深夜 0–24 点最明显",
+        clothingAdvice: "薄外套；携带雨具（凌晨到深夜 0–24 点最明显）",
+        locationLabel: "兴义",
+      },
+    },
+  ]);
+  assert.ok(out.includes("[AGENT_RESULT_CARD_START]"));
+  assert.ok(out.includes('"cardType":"weather"'));
+  // 明日聚焦：只有现象/气温区间/明天降雨行
+  assert.ok(out.includes("小雨"), out);
+  assert.ok(out.includes("气温 15°–19°"), out);
+  assert.ok(out.includes("明天 凌晨到深夜 0–24 点有雨"), out);
+  // 不掺今天的字段：无湿度/风速/今日区间/「今天」前缀行
+  assert.ok(!out.includes("湿度"), out);
+  assert.ok(!out.includes("风速"), out);
+  assert.ok(!out.includes("今天"), "明日聚焦卡不应再出现今天的行");
 });
 
 test("attachWeatherFromExecuted: 多地调用 → 合并为一张多地卡", () => {
@@ -179,7 +218,9 @@ test("attachWeatherFromExecuted: 多地调用 → 合并为一张多地卡", () 
   assert.ok(out.includes('"cardType":"weather"'));
   assert.ok(out.includes("上海 晴"));
   assert.ok(out.includes("杭州 小雨"));
-  assert.ok(out.includes("带伞"));
+  assert.ok(out.includes("今天有雨"), "高概率无时段退整天口径");
+  // 2026-11-04 定稿：clothingAdvice 不再进卡 footer（留给 LLM 正文），footer 串化为空
+  assert.ok(out.includes('"footer":""'));
 });
 
 test("attachWeatherFromExecuted: 无天气回执/正文已带标记 → 原文返回", () => {

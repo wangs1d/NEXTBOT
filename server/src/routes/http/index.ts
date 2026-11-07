@@ -73,6 +73,7 @@ import { registerToolSearchAdminRoutes } from "./tool-search-admin.js";
 import { registerGatewayAdminRoutes } from "./gateway-admin.js";
 import { registerToolRegistryRoutes } from "./tool-registry-routes.js";
 import { registerNotesRoutes } from "./notes.js";
+import { registerLibraryRoutes } from "./library.js";
 import { registerDeviceRoutes } from "./device.js";
 import { registerAuthRoutes } from "./auth.js";
 import { registerApprovalRoutes } from "./approvals.js";
@@ -232,6 +233,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       externalChat: deps.externalChat ?? null,
     });
   }
+  // 资料库聚合（手机端「资料库」tab）：产出文件 + 笔记 + 行程规划会话一次取齐
+  registerLibraryRoutes(app, {
+    fileProcessingService: deps.fileProcessingService,
+    notesService: deps.notesService ?? null,
+  });
   if (deps.webhookService && deps.hookBus) {
     registerWebhookRoutes(app, deps.webhookService, deps.hookBus);
   }
@@ -330,6 +336,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerEveningDigestTestRoutes(app, {
     wsConnectionRegistry: deps.wsConnectionRegistry,
     eveningDigestService: deps.eveningDigestService,
+    eveningDigestScheduler: deps.eveningDigestScheduler,
   });
   // agent pulse 手动触发（主动性聚合评审）：返回聚合/prompt/LLM 原始输出/最终
   // 文案/是否提交的完整留痕，用于验证触发链路与内容口径——走的就是服务本体

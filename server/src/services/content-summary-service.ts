@@ -1,7 +1,6 @@
 export type ContentCategory =
   | "news"
   | "article"
-  | "search_result"
   | "webpage"
   | "document"
   | "code"
@@ -73,12 +72,6 @@ const CATEGORY_CONFIG: Record<ContentCategory, {
     label: "文章",
     cardIcon: "☰",
     briefIcons: ["📝", "📖", "🔍", "💭", "⭐", "🎨"]
-  },
-  search_result: { 
-    icon: "🔍", 
-    label: "搜索结果",
-    cardIcon: "☰",
-    briefIcons: ["🔎", "📊", "🌐", "💡", "📋"]
   },
   webpage: { 
     icon: "🌐", 
@@ -277,9 +270,9 @@ function detectContentType(content: string): {
     category = "data";
   } else if (content.includes("新闻") || content.includes("最新") || content.includes("日报")) {
     category = "news";
-  } else if (content.includes("搜索") || content.includes("结果")) {
-    category = "search_result";
   }
+  // 「搜索/结果」不再单独成类（2026-11-05）：搜索信息只作模型素材，
+  // 摘要卡不该出现「搜索结果」这个口径，落回 general/其它内容形态。
 
   return {
     category,
@@ -299,7 +292,7 @@ function detectCategory(content: string, source?: string): ContentCategory {
   const lowerSource = (source ?? "").toLowerCase();
 
   if (lowerSource.includes("news")) return "news";
-  if (lowerSource.includes("search")) return "search_result";
+  // source 带 search 不再归「搜索结果」：搜索只是取素材的手段，不是内容品类。
   if (
     lowerSource.includes("report") ||
     lowerSource.includes("research") ||

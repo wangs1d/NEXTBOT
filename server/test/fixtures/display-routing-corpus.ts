@@ -83,9 +83,9 @@ export const CARD_CORPUS: CardCase[] = [
     expected: "media",
   },
   {
-    name: "tool: search_web strong",
+    name: "tool: search_web 不再映射展示效果（2026-11-05 定稿）",
     input: { title: "搜索", items: items(["条目"]), toolName: "search_web" },
-    expected: "search_result",
+    expected: "",
   },
   {
     name: "tool: plan_trip weak → timeline",
@@ -370,22 +370,22 @@ export const HINT_CORPUS: HintCase[] = [
     expected: "image_text",
   },
   {
-    name: "search tool + 3-10 list items → search_result",
+    name: "search tool + 3-10 list items → long_text（不出搜索卡）",
     text: "- Node.js 官方文档\n- MDN 教程\n- 掘金社区文章",
     toolName: "search_web",
-    expected: "search_result",
+    expected: "long_text",
   },
   {
-    name: "search tool + intent short list → result_card (intent only blocks search card)",
+    name: "search tool + intent short list → long_text（搜索轮统一富文本）",
     text: "- 方案A 便宜\n- 方案B 灵活\n- 方案C 折中",
     toolName: "search_web",
     userText: "帮我对比一下这几个方案的区别",
-    expected: "result_card",
+    expected: "long_text",
   },
   {
-    name: "numeric brief (≥3 KPI, 60-800 chars) → data_brief",
+    name: "numeric brief (KPI dense, no list) → plain（data_brief 已退役，数字密集正文不出卡）",
     text: "今日A股收盘：上证指数 3567.89 点，涨幅 +1.23%；创业板指 2876.54 点，涨幅 +2.01%；两市成交额 1.2万亿元，北向资金净流入 56 亿元。",
-    expected: "data_brief",
+    expected: "plain",
   },
   {
     name: "weather tool prose (no list/kpi) → plain（打分层退役，天气卡由 L1 工具绑定承接）",
@@ -415,7 +415,7 @@ export const HINT_CORPUS: HintCase[] = [
     expected: "plain",
   },
   {
-    name: "long structured (≥400) → summary_card (isLongDoc beats data_brief)",
+    name: "long structured (≥800) → summary_card",
     text:
       "一、市场概况\n" +
       "本周A股市场整体呈现震荡上行格局，上证指数累计上涨 2.3%，深证成指上涨 1.8%，市场情绪整体偏暖，" +
@@ -430,7 +430,17 @@ export const HINT_CORPUS: HintCase[] = [
       "建议保持均衡配置，逢低关注科技成长方向，控制整体仓位在六成以内，避免追高单一热门赛道，对高位股" +
       "保持谨慎，耐心等待缩量回踩后的低吸机会。\n" +
       "五、风险提示\n" +
-      "以上内容仅为个人观察与梳理，不构成任何投资建议，市场有风险，决策需独立判断。",
+      "以上内容仅为个人观察与梳理，不构成任何投资建议，市场有风险，决策需独立判断。\n" +
+      "六、附注与口径说明\n" +
+      "文中提到的涨跌幅均为本周收盘口径，成交额为沪深两市合并统计，北向资金数据来自交易所公开披露，" +
+      "因统计时点差异可能与第三方平台存在小幅出入；板块涨跌以申万一级行业分类为准，个股表现以区间" +
+      "涨跌幅度排序，剔除新股与停牌标的；文中引用的宏观数据均来自官方已发布的公开信息，涉及预期的" +
+      "部分已明确标注为市场一致预期而非确定结果，读者在参考时需结合自身持仓结构与风险承受能力判断，" +
+      "不宜将文中任何单一指标作为买卖依据。此外，文中涉及的行业景气度判断属于中期视角的定性描述，" +
+      "与短期交易节奏并不等价；对于仓位较重或使用杠杆的读者，更应关注回撤控制与流动性安排，避免在" +
+      "情绪波动较大的时段集中调仓；文中列举的历史区间表现仅用于说明波动特征，不代表未来收益的任何" +
+      "承诺，若后续公开数据出现修订，相关结论需要同步更新，届时以最新披露口径为准；" +
+      "本文所引用的历史区间数据仅供说明波动特征，读者如需据此操作，应自行完成交叉验证。",
     expected: "summary_card",
   },
   {

@@ -58,18 +58,20 @@ export function resolvePersonaMood(input: PersonaMoodInput): PersonaMood {
   return "casual_wit";
 }
 
-/** 动态 mood 块：每轮只注入一个，口吻由模型自己带。 */
+/**
+ * 动态状态块（2026-11-05 用户定调：只给事实，不给行为规则）。
+ *
+ * 旧版每档都是一条写作指令（「默认带一点吐槽」「零调侃，直接办」）——与 SOUL.md
+ * 的说话风格直接打架，且任务面强制 serious 把所有工具轮压成机器人腔。
+ * 现在只报**语境事实**（车道/对方情绪/是否被调侃），怎么回应由 soul + 模型自己定。
+ */
 const MOOD_BLOCKS: Record<PersonaMood, string> = {
-  base: "【人格·状态】\n自然利落，短句口语，先回应人再回应事。",
-  casual_wit:
-    "【人格·状态：日常调侃】\n默认带一点吐槽，一句到位，调侃完接正事。",
-  roasting:
-    "【人格·状态：敢怼】\n损行为不损人，强度不超过对方。",
-  playful:
-    "【人格·状态：接梗】\n对方先开你玩笑就回敬一句，然后继续干活。",
-  empathy:
-    "【人格·状态：关怀】\n先共情后办事，语气放软，少梗多行动。",
-  serious: "【人格·状态：严肃】\n零调侃，直接办，先结果后过程。",
+  base: "【状态】这轮是普通闲聊。",
+  casual_wit: "【状态】这轮是日常闲聊，气氛轻松。",
+  roasting: "【状态】气氛热络，对方话里带调侃空间，你们关系熟到可以互损。",
+  playful: "【状态】对方在拿你打趣。",
+  empathy: "【状态】对方情绪明显偏低。",
+  serious: "【状态】这轮是办事/交付语境。",
 };
 
 export function buildPersonaMoodBlock(mood: PersonaMood): string {

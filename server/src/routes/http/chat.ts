@@ -268,23 +268,28 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     const assistantMessageId = `edit:${messageId}:${Date.now()}`;
     const accessMode = parseAgentAccessMode(agentAccessMode);
     let chunkSeq = 0;
+    let editSpeechSent = false;
     // 编辑重答的 delta 此前是裸推：模型回复末尾的 [NEXT_UP_START] 块会原样闪现
     // 在气泡里（done 才替换）。与 WS 对话面同构挂流式标记 guard。
+    // 2026-11-05 二轮定稿：模型仍流式生成，净化后的增量走语音数据帧；文字
+    // 回复仍只由下方 ChatAssistantDone 一次性落屏（不打打字机）。
     const editStreamGuard = createStreamMarkerGuard();
-    const sendEditChunk = (chunk: string): void => {
-      if (!chunk) return;
+    const sendEditSpeechFrame = (chunk: string, final: boolean, finalText?: string): void => {
       chunkSeq += 1;
+      if (!final && chunk) editSpeechSent = true;
       wsConnectionRegistry.trySend(
         actorKey,
         JSON.stringify({
-          type: ServerEventType.ChatAssistantChunk,
+          type: ServerEventType.ChatAssistantSpeech,
           payload: {
             sessionId: actorKey,
             messageId: assistantMessageId,
             traceId: messageId,
             chunk,
             sequence: chunkSeq,
-            source: "chat.message_edit",
+            phase: "stream",
+            final,
+            ...(final ? { finalText: finalText ?? "", hasIncrements: editSpeechSent } : {}),
           },
         }),
       );
@@ -296,11 +301,15 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
           agentAccessMode: accessMode,
           onAssistantDelta: (delta) => {
             const safe = editStreamGuard.feed(delta);
-            if (safe) sendEditChunk(safe);
+            if (safe && !editStreamGuard.sawStructuredBlock) {
+              sendEditSpeechFrame(safe, false);
+            }
           },
         });
         const guardTail = editStreamGuard.flush();
-        if (guardTail) sendEditChunk(guardTail);
+        if (guardTail && !editStreamGuard.sawStructuredBlock) {
+          sendEditSpeechFrame(guardTail, false);
+        }
         // 出口收口（与 WS 对话路径同构）：剥模型声明的 RENDER_HINT/RENDER_AS
         // 残留 + 卡片版式归一化 + NEXT_UP 接续建议块剥离（2026-09-24 补：此路径
         // 此前漏接 extractNextUpSuggestions，建议块会原样透出到用户屏幕）。
@@ -310,6 +319,8 @@ export function registerChatRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
           ),
         );
         const replyFinalText = nextUp.text;
+        // 语音流式收口：final 帧恒在 done 之前，无增量帧时用定稿全文兜底播报。
+        sendEditSpeechFrame("", true, replyFinalText);
         wsConnectionRegistry.trySend(
           actorKey,
           JSON.stringify({

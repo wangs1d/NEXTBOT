@@ -18,13 +18,13 @@ import "package:flutter/material.dart";
 ///   - importantDays: [{ id, name, date, type, daysUntil, relationship?, notes? }]
 ///     （2026-11-04 从晨报迁来：生日/纪念日属于「提前准备」的信息）
 ///
-/// 降雨时段与穿衣只走文字叙述（2026-10-29 用户定稿）：卡上的天气块留温度与
-/// 现象，「几点到几点下」「穿什么、带不带伞」由顶部 narration 说完；
-/// rainWindowLabel / outfitTip 因此不再上卡（仍是服务端文案的数据源）。
+/// 天气上卡、文案不重复（2026-11-06 用户定稿）：narration 不再说天气；
+/// 卡上的「明天天气」块只留温度、现象与预警（穿衣信息整块移除）。
 class EveningDigestCard extends StatelessWidget {
   const EveningDigestCard({super.key, required this.digest});
 
-  /// 月黄：实心月亮与其底盘同色系，明暗主题下都不依赖主题色（否则夜里会变成冷紫）
+  /// 暖黄点缀色（原月亮图标遗留，现用于近期重要日子的蛋糕图标）：
+  /// 明暗主题下都不依赖主题色（否则夜里会变成冷紫）
   static const Color _moonColor = Color(0xFFF6C445);
 
   final Map<String, dynamic> digest;
@@ -92,23 +92,9 @@ class EveningDigestCard extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           mainAxisSize: MainAxisSize.min,
           children: <Widget>[
-            // ── 头部：月亮图标 + 「明日速览」+ 明日日期 ──
+            // ── 头部：「明日速览」+ 明日日期 ──
             Row(
               children: <Widget>[
-                Container(
-                  width: 30,
-                  height: 30,
-                  decoration: BoxDecoration(
-                    color: _moonColor.withValues(alpha: 0.16),
-                    shape: BoxShape.circle,
-                  ),
-                  child: Icon(
-                    Icons.bedtime,
-                    size: 17,
-                    color: _moonColor,
-                  ),
-                ),
-                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     "明日速览",

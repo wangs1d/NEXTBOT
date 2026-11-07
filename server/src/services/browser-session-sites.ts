@@ -60,6 +60,19 @@ export const BROWSER_SESSION_SITES = {
     hosts: ["maoyan.com", "www.maoyan.com"],
     homeUrl: "https://www.maoyan.com",
   },
+  // ── 2026-11-06 免登录取价源（手机端比价缺省走这两家） ──
+  suning: {
+    // 匿名可读实时价 + 主图；登录态非必需（有登录态可看会员价，但取价不依赖）
+    label: "苏宁易购",
+    hosts: ["suning.com", "www.suning.com", "search.suning.com", "product.suning.com", "m.suning.com"],
+    homeUrl: "https://www.suning.com",
+  },
+  smzdm: {
+    // 什么值得买：好价爆料聚合（含京东/拼多多百亿补贴），是情报站不是商城
+    label: "什么值得买",
+    hosts: ["smzdm.com", "www.smzdm.com", "search.smzdm.com"],
+    homeUrl: "https://www.smzdm.com",
+  },
   // ── 2026-09-18 新增两类非购物用途的站点 ──
   alipay: {
     // 财务后台自动拉账：用用户登录态查交易明细（Cookie 双门禁同购物站点）

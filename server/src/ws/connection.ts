@@ -7,7 +7,7 @@ import {
   type EventEnvelope,
   type WalletAction,
 } from "../protocol.js";
-import { parseClientLocation } from "../types/client-location.js";
+import { parseClientClock, parseClientLocation } from "../types/client-location.js";
 import type { RuntimeFacade } from "../runtime/runtime-facade.js";
 import type { AuditService } from "../services/audit-service.js";
 import type { SessionService } from "../services/session-service.js";
@@ -39,6 +39,7 @@ import {
   handleChatUserMessageEvent,
   messageBatchProcessor,
 } from "./handlers/chat-user-message.js";
+import { handleCardActionEvent } from "./handlers/card-action.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import {
@@ -205,6 +206,16 @@ export type WsRouteDeps = {
   locationCoordinator: LocationCoordinator;
   /** 位置上报管线（方案 A-D）：历史落库 / 围栏判定 / 到达触发；null=未装配 */
   locationIngest?: LocationIngestPipeline | null;
+  /**
+   * 情境快照（持续感知 State 层）：session.init / chat.user_message 携带的
+   * 设备时钟在此落库，位置经 locationIngest 同步更新。null=未装配（旧行为）。
+   */
+  actorContext?: import("../services/actor-context-service.js").ActorContextService | null;
+  /**
+   * 围栏下发器（可选）：连接建立时把该 actor 的围栏推给客户端注册为系统围栏。
+   * 返回空数组＝没有围栏，客户端会清空本地注册。
+   */
+  geofenceProvider?: (actorId: string) => import("@nextbot/agent-protocol").GeofenceWire[];
   virtualPhoneService: VirtualPhoneService;
   userPersonalizationService: UserPersonalizationService;
   deviceRegistry: DeviceRegistry;
@@ -220,6 +231,12 @@ export type WsRouteDeps = {
    * 作为 phone_call.start 确认门的权威证据源（LLM 无法伪造）。
    */
   phoneCallCoordinator?: PhoneCallCoordinator;
+  /**
+   * 购物下单服务（可选）：card.action 通道专用。
+   * 卡内「就在这家下单 / 确认下单 / 查物流」由它直接执行并把结果写回**同一张卡**，
+   * 全程不产生用户消息、不跑模型——与 chat.user_action 的多轮路径刻意分离。
+   */
+  shoppingOrderService?: import("../services/shopping-order-service.js").ShoppingOrderService | null;
   /** 账号服务（可选）：session.init 记录最近活跃（管理后台「最近活跃」指标） */
   agentAccountService?: { touchLastActive(actorId: string): void } | null;
   /**
@@ -232,6 +249,8 @@ export type WsRouteDeps = {
    * 可选：未装配时台词请求降级为 ok:false（桌宠不说话，不影响其他功能）。
    */
   petReactionChat?: PetReactionChatLike | null;
+  /** 手机端对话式首启引导（可选）：session.init 时按账号级一次性闸门主动开口。 */
+  onboardingIntroService?: import("../services/onboarding-intro-service.js").OnboardingIntroService | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -256,6 +275,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     friendMessageService,
     locationCoordinator,
     locationIngest,
+    actorContext,
+    geofenceProvider,
     virtualPhoneService,
     userPersonalizationService,
     deviceRegistry,
@@ -264,9 +285,11 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     eveningDigestScheduler,
     accessAuthService,
     phoneCallCoordinator,
+    shoppingOrderService,
     agentAccountService,
     actorModelBindings,
     petReactionChat,
+    onboardingIntroService,
   } = deps;
 
   // device-bus 处理器依赖（device.* 事件路由）
@@ -672,8 +695,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           }
           // ─── 集群归属闸：多节点注册表下同一 actor 只在一个节点落地 ───
           // 未设 NEXTBOT_NODES 时永远是自己，此处零开销直通。
-          if (clusterEnabled() && !isOwner(actorId)) {
-            const owner = routeActor(actorId);
+          if (clusterEnabled() && !isOwner(actorId)) {            const owner = routeActor(actorId);
             socket.send(
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
@@ -692,6 +714,19 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             }
             return;
           }
+          // 设备时钟快照：连接建立即落库，首条消息之前 prompt 就有正确时区。
+          // 与定位解耦：不申请权限、不等 GPS、不看逆地理成败。
+          if (actorContext) {
+            const clockInit = parseClientClock(payload.clientClock);
+            if (clockInit) {
+              try {
+                actorContext.updateClock(actorId, clockInit);
+              } catch (err) {
+                console.log(`[WS] session.init 时钟快照失败（忽略）: ${err}`);
+              }
+            }
+          }
+
           // ─── 云端连接版 BYOK（2026-10-20）：session.init 携带用户自有模型三元组 ───
           // 存在且字段齐全 → 按 actor 绑定（此后该 actor 的对话轮走用户 key，见
           // agent-core.chatProviderFor）；存在但字段不全 → 撤绑（用户在 UI 清空）；
@@ -821,11 +856,19 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           // 活跃打点：session.init = 应用启动/重连，是「最近活跃」最可靠的信号
           agentAccountService?.touchLastActive(actorId);
           if (!isDesktopBridgeChannel && !isPhoneBridgeChannel) {
+            const deviceClass = normalizeDeviceClass(payload.platform ?? payload.deviceClass);
             // 设备类别随连接登记（2026-09-18）：session.init 自报 platform，
             // critical 升级链据此区分电脑端/移动端触达；旧客户端缺省按桌面端处理
             wsConnectionRegistry.register(actorId, socket, {
-              deviceClass: normalizeDeviceClass(payload.platform ?? payload.deviceClass),
+              deviceClass,
             });
+            // 手机端对话式首启引导（2026-11-07）：账号级一次性闸门，仅手机端、
+            // 且从未引导过、没名字没称呼的账号才主动开口。异步不阻塞 session.init。
+            if (deviceClass === "mobile" && onboardingIntroService) {
+              void onboardingIntroService.maybeStart(actorId, deviceClass).catch((err) => {
+                console.log(`[WS] 首启引导开场失败（忽略）: ${err}`);
+              });
+            }
             // 离线结果重放（2026-09-08 outbox）：用户离线期间完成的任务面结果
             // 暂存于 TaskOutbox，重连时按 FIFO 原样重推，闭合「离线=结果丢失」缺口。
             getTaskOutbox().replayFor(actorId, socket);
@@ -861,6 +904,24 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // 持续模式（方案 A）：下发定时上报配置，客户端按 intervalSec 回传
             // client.location_report(source:"continuous")；ondemand 不发，客户端无定时器
             locationCoordinator.sendTrackingConfig(socket);
+            // 地理围栏同步（持续感知 Sense 层）：把用户围栏推给客户端注册**系统**
+            // 围栏。这是「到达/离开」在后台唯一可靠的触发方式——Android 8+ 后台
+            // 非前台服务定位被限成每小时几次，靠上报流在服务端判围栏判不出来。
+            if (geofenceProvider) {
+              try {
+                socket.send(
+                  JSON.stringify({
+                    type: ServerEventType.GeofenceSync,
+                    payload: {
+                      fences: geofenceProvider(actorId),
+                      syncedAt: new Date().toISOString(),
+                    },
+                  }),
+                );
+              } catch (err) {
+                console.log(`[WS] 围栏下发失败（忽略）: ${err}`);
+              }
+            }
             // 共用浏览器桥：客户端声明 browserBridge 时把本连接绑为浏览器执行器
             //（用户与 Agent 共用同一个 WebView2 浏览器；重连后随 session.init 重绑）
             if (payload.browserBridge === true) {
@@ -1271,6 +1332,21 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        if (event.type === ClientEventType.ClockReport) {
+          // 设备时钟补报：常驻连接期间跨时区（飞行/高铁落地）时客户端主动推一次。
+          // 与位置无关，无 boundActorId 时不落库（未认证连接不得写状态）。
+          if (!boundActorId) return;
+          const clock = parseClientClock(event.payload);
+          if (clock) {
+            try {
+              actorContext?.updateClock(boundActorId, { ...clock, source: "event" });
+            } catch (err) {
+              console.log(`[WS] 时钟补报写入失败（忽略）: ${err}`);
+            }
+          }
+          return;
+        }
+
         if (event.type === ClientEventType.LocationReport) {
           // 客户端回传实时位置：响应 agent.location_request（携带 jobId）或天气面板主动上报。
           if (!boundActorId) {
@@ -1419,7 +1495,26 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               runtime,
               auditService,
               phoneCallCoordinator,
+              actorContext,
+              onboardingIntroService,
             },
+          );
+          return;
+        }
+
+        if (event.type === ClientEventType.CardAction) {
+          // 卡片内动作（2026-11-06）：点一步只换这张卡，绝不产生消息。
+          // 与上面的 ChatUserAction 是两条**互不替代**的路：
+          //   ChatUserAction → 转写 user_message → 模型回一轮（问答型按钮）
+          //   CardAction     → 服务端取数 → card.update 原地换卡（流程型按钮）
+          if (!boundActorId) {
+            sendUnifiedError("SESSION_REQUIRED", "请先发送 session.init");
+            return;
+          }
+          await handleCardActionEvent(
+            { socket, boundActorId, sendUnifiedError },
+            event.payload,
+            { shoppingOrderService },
           );
           return;
         }
@@ -1440,6 +1535,8 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               runtime,
               auditService,
               phoneCallCoordinator,
+              actorContext,
+              onboardingIntroService,
             },
           );
           return;

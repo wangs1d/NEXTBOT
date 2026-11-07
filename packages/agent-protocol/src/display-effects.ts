@@ -16,7 +16,6 @@ export type DisplayEffectType =
   | "wallet" // 钱包卡（工具：wallet.*）
   | "order" // 订单卡（工具：order/payment/alipay）
   | "file" // 文件卡（工具：file）
-  | "search_result" // 搜索结果卡（工具：search_web/info.*）
   | "media" // 媒体图廊卡（工具：search_images/search_videos 等）
   | "compare" // A/B 双图对比滑杆（工具：compare/pk；或内容含对比词 + 图片）
   | "comparison_table" // 文本 A/B 对比双栏卡（内容：A/B 标签条目成对出现）
@@ -29,6 +28,7 @@ export type DisplayEffectType =
   | "fold_list" // 折叠列表卡（内容：≥8 条长清单）
   | "quote" // 引用强调卡（markdown 引用块 / 引用式单句结论）
   | "travel_itinerary" // 旅游行程卡（工具：travel.*；前端以独立界面打开）
+  | "reminder_confirm" // 提醒确认卡（工具：calendar.create；只读、卡内多行）
   | "";
 
 /** 展示效果类型的运行时清单（与 DisplayEffectType 逐一对应，供漂移测试）。 */
@@ -38,7 +38,6 @@ export const DISPLAY_EFFECT_TYPES = [
   "wallet",
   "order",
   "file",
-  "search_result",
   "media",
   "compare",
   "comparison_table",
@@ -51,5 +50,6 @@ export const DISPLAY_EFFECT_TYPES = [
   "fold_list",
   "quote",
   "travel_itinerary",
+  "reminder_confirm",
   "",
 ] as const satisfies readonly DisplayEffectType[];

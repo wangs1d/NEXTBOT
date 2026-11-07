@@ -40,6 +40,12 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
+    name: "market",
+    summary: "股票/指数/行情实时报价",
+    prefixes: ["market."],
+    secondaryTools: [],
+  },
+  {
     name: "clock",
     summary: "时间/日期/位置",
     prefixes: ["clock."],

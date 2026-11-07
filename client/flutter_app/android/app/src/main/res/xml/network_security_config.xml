@@ -20,6 +20,8 @@
         <domain includeSubdomains="false">159.75.52.2</domain>
         <!-- 真实后端：当前电脑的局域网 IP（构建时 dart-define 传 HTTP_BASE=http://192.168.10.2:3000） -->
         <domain includeSubdomains="false">192.168.10.2</domain>
+        <!-- 当前开发机 WLAN IP（2026-11-05 探测） -->
+        <domain includeSubdomains="false">192.168.10.12</domain>
         <!-- 旧部署机 IP 兼容 -->
         <domain includeSubdomains="false">192.168.10.3</domain>
         <!-- Android 模拟器访问宿主机的地址 -->

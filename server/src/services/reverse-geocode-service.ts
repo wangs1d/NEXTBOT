@@ -93,12 +93,20 @@ function transformLon(x: number, y: number): number {
   return ret;
 }
 
+/**
+ * 用 open-meteo 的 `timezone=auto` 由坐标推断时区。
+ *
+ * 2026-11-05 修复：失败返回**空串**，不再猜 `Asia/Shanghai`。
+ * 旧实现把「外网抖动」直接变成「你在北京时间」——用户在美国、欧洲、日韩时
+ * 整轮时间全错，而且错值会进 30 分钟 GEO_CACHE 反复污染。失败就该是「不知道」，
+ * 由上层（设备直报时区 → 用户档案 → 服务器时区）决定用哪个，而不是在这里编。
+ */
 async function fetchTimezone(latitude: number, longitude: number): Promise<string> {
   const tzUrl = `https://api.open-meteo.com/v1/forecast?latitude=${latitude}&longitude=${longitude}&current=temperature_2m&timezone=auto&forecast_days=1`;
   const tzData = (await fetchJson(tzUrl, { headers: { Accept: "application/json" } })) as {
     timezone?: string;
   } | null;
-  return tzData?.timezone?.trim() || "Asia/Shanghai";
+  return tzData?.timezone?.trim() || "";
 }
 
 function buildLabel(parts: { district?: string; city?: string; region?: string; country?: string }): string {

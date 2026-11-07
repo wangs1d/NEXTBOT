@@ -1,4 +1,4 @@
-export type ReminderLevel = "popup" | "tts_alarm" | "phone_call";
+export type ReminderLevel = "popup" | "phone_call";
 
 export type ReminderStatus = 
   | "pending"
@@ -28,15 +28,6 @@ export interface PopupReminderConfig {
   confirmText?: string;
   autoCloseAfterMs?: number;
   position?: "center" | "top-right" | "top-left";
-}
-
-export interface TTSAlarmConfig {
-  volumeStart?: number;
-  volumeEnd?: number;
-  rampUpDurationMs?: number;
-  repeatIntervalMs?: number;
-  voiceId?: string;
-  speed?: number;
 }
 
 export interface PhoneCallConfig {
@@ -89,6 +80,5 @@ export interface ReminderInstance {
     reason: string;
   }>;
   popupConfig?: PopupReminderConfig;
-  ttsConfig?: TTSAlarmConfig;
   phoneConfig?: PhoneCallConfig;
 }

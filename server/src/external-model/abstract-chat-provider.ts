@@ -113,6 +113,28 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
   /** 共享的 thread store 单例（所有 provider 共用同一份会话历史）。 */
   protected readonly threads: ChatThreadStore = getChatThreadStore();
 
+  /**
+   * 用户时区解析器（装配层注入 ActorContextService）。
+   *
+   * 【对话时间轴】与 `[ts:]` 帧必须与 system 的【当前时间】块同一时区口径，
+   * 否则境外用户的 prompt 里会同时存在两个相差数小时的钟。返回 undefined
+   * 时退回服务器时区（旧行为），不影响主链路。
+   */
+  private static timezoneResolver: ((sessionId: string) => string | undefined) | null = null;
+
+  static setTimezoneResolver(fn: ((sessionId: string) => string | undefined) | null): void {
+    AbstractChatProvider.timezoneResolver = fn;
+  }
+
+  /** 当前会话的用户时区（非法/未知一律 undefined）。 */
+  protected resolveSessionTimezone(sessionId: string): string | undefined {
+    try {
+      return AbstractChatProvider.timezoneResolver?.(sessionId)?.trim() || undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   isEnabled(): boolean {
     return this.client !== null;
   }
@@ -406,7 +428,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     //   2026-10-23（用户拍板）**删除按需时间闸**：【对话时间轴】不再看本轮有没有时间词，
     //   有 ≥2 条带时间的消息就每轮注入（按自然日分组 + 今天/昨天/N天前）。
     //   旧闸的代价是"普通续聊轮历史零时间锚"，模型只能把昨天当今天。
-    const llmView = buildTimestampFreeLlmView(msgs).messages;
+    const llmView = buildTimestampFreeLlmView(msgs, {
+      timezone: this.resolveSessionTimezone(sessionId),
+    }).messages;
     // 线程原有消息的对象身份集合：工具循环只应往线程回写「视图新增」的消息。
     const llmViewLiveObjects = new Set<ChatCompletionMessageParam>(msgs);
     /**
@@ -467,6 +491,9 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
               : {}),
             // 路由意图标签：出口检查用它确定性拦截"声明要动手但零工具尝试"的轮次
             turnIntent: effectiveStreamOpts.turnIntent,
+            // 生成前渲染场景数据面（P3 前移）：Promise 原样透传，工具循环综合阶段
+            // 才 await——漏掉 = pre 场景判定不到数据面，明日预览边界恒不注入
+            renderPayloads: effectiveStreamOpts.renderPayloads,
             // 证据注入豁免 + 路由置信度（2026-09-23 扩面配套，见工具循环出口检查处）
             turnEvidenceInjected: effectiveStreamOpts.turnEvidenceInjected,
             turnRouteConfidence: effectiveStreamOpts.turnRouteConfidence,

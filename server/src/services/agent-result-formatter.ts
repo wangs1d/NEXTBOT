@@ -128,7 +128,7 @@ interface AgentResultPayload {
   footer: string;
   /**
    * 展示效果类型（由 display-effect-router.ts 纯程序路由决定，无 LLM 参与）：
-   * weather / schedule / wallet / order / file / search_result / media /
+   * weather / schedule / wallet / order / file / media /
    * compare / timeline / progress / steps / metric / carousel / chips /
    * fold_list / quote；空串=通用列表卡。
    */

@@ -14,16 +14,16 @@
  *            near=家/公司附近；online=线上；unknown=未识别。
  *   - travelMinutes / prepMinutes：路程与起床准备估时。
  *
- * 产出三段式计划（按因子动态裁剪，哪些段进计划全由因子决定）：
+ * 产出两段式计划（按因子动态裁剪，哪些段进计划全由因子决定）：
  *   night_before：前晚 21:00 睡前备忘（仅 high——普通安排睡前不值得打扰）。
  *                 有作息画像时改为用户实际入睡点前 1 小时（夜猫子的 21:00 备忘
- *                 说了等于没说），并按「入睡点→闹钟」的睡眠预算决定是否劝早睡。
- *   wake_alarm：  早晨开始（本地 05:00–13:00）且 high 或需要出行时才有起床闹钟，
- *                 = 开始前 路程+准备 分钟；下限默认本地 06:00，有作息画像时改为
- *                 平时起床点前 1.5 小时——且下限只在吃满行程预算仍可行时生效
- *                 （早班机必须比平时早很多时，行程保证优先）。
+ *                 说了等于没说）。
  *   depart：      出发预留：线上=提前10分钟候场；未识别=15分钟（与历史模型
  *                 默认 [15] 一致，保底不倒退）；识别出地点按路程估时。
+ *
+ * 起床闹钟段已停用（2026-11-05）：倒推叫醒时刻强依赖路程估时与个人起床习惯，
+ * 误差直接落在用户身上，且与手机自带闹钟职责重叠。`ReminderStage` 仍保留
+ * "wake_alarm" 仅为兼容既有落库数据，策略层不再产出新段。
  *
  * 边界：已过点的段直接裁掉（凌晨建当天上午的日程，前晚备忘不可能补发）；
  * 偏移是相对事件锚点的量（前晚备忘最大 ~27h，路程段最大 150min），恒在
@@ -134,10 +134,7 @@ const HABIT_NIGHT_BEFORE_LEAD_HOURS = 1;
 const HABIT_NIGHT_BEFORE_MIN_LEAD_HOURS = 0.25;
 /** 个性化睡前备忘的下限（再晚就不算「睡前」而是「半夜突击」了的不合理面，见 clamp 逻辑） */
 const HABIT_NIGHT_FLOOR_HOUR = 19.5;
-/** 起床闹钟下限 = 平时起床点前 1.5 小时（再早的叫醒只在该事件确实需要时出现） */
-const HABIT_WAKE_FLOOR_LEAD_HOURS = 1.5;
-/** 睡眠预算低于该小时数时，睡前备忘改为「今晚尽量早点睡」的明确提示 */
-const HABIT_TIGHT_SLEEP_HOURS = 7;
+// 起床闹钟停用后（2026-11-05），「闹钟下限」「睡眠预算」两组常量已无消费方，一并删除。
 
 /**
  * 从逐日睡眠样本推导作息提示（与 SleepDimensionModel 同一算法口径：
@@ -168,14 +165,9 @@ function median(values: number[]): number {
 }
 
 const NIGHT_BEFORE_LOCAL_HOUR = 21;
-const WAKE_ALARM_EARLIEST_LOCAL_HOUR = 6;
-/** 起床闹钟至少领先开始 30 分钟，否则没有「预留准备」的意义 */
-const WAKE_ALARM_MIN_LEAD_MINUTES = 30;
 const DEPART_ONLINE_LEAD_MINUTES = 10;
 /** 与 normalizeRemindBeforeMinutes 的 7 天偏移上限一致 */
 const MAX_OFFSET_MINUTES = 7 * 24 * 60;
-/** 起床闹钟事件开始时段（本地）：05:00–13:00 之间开始才算「早晨的事件」 */
-const WAKE_ALARM_START_HOUR_RANGE: [number, number] = [5, 13];
 
 /** 高代价错过事项：就医/考试面试/乘运出行/证件办理/婚礼开庭等 */
 const HIGH_IMPORTANCE_PATTERN =
@@ -247,7 +239,6 @@ export function buildReminderPolicy(input: ReminderPolicyInput): ReminderPolicyP
 
   type Stage = { offsetMinutes: number; stage: ReminderStage; label: string; message: string };
   const stages: Stage[] = [];
-  let wakeAlarmMs: number | null = null;
 
   // 作息画像：证据达阈值才启用个性化（宁缺勿错），否则全走默认值。
   // 用户自述（explicit/chat）是显式意愿，1 条即启用，不受样本数门槛限制；
@@ -261,63 +252,10 @@ export function buildReminderPolicy(input: ReminderPolicyInput): ReminderPolicyP
       habits.sampleCount >= HABIT_MIN_SAMPLES);
   const habitOn = habitTrusted && habits.sleepStartHour != null;
 
-  // 起床闹钟：早晨开始且（high 或 需要出行）才值得叫醒；先算它，前晚备忘的收尾话术要引用。
-  const morningStart =
-    eventLocal.hour >= WAKE_ALARM_START_HOUR_RANGE[0] &&
-    eventLocal.hour < WAKE_ALARM_START_HOUR_RANGE[1];
-  const needsWake = factors.importance === "high" || factors.venue === "far" || factors.venue === "mid";
-  let hasWake = false;
-  let alarmBedtimeHours: number | null = null; // 有作息画像时：闹钟时刻相对入睡点的睡眠预算（小时）
-  if (morningStart && needsWake) {
-    const neededLeadMinutes = factors.travelMinutes + factors.prepMinutes;
-    let alarmMs = runAtMs - neededLeadMinutes * 60_000;
-    alarmMs = Math.min(alarmMs, runAtMs - WAKE_ALARM_MIN_LEAD_MINUTES * 60_000);
-    // 下限（默认 06:00；有作息=平时起床点前 1.5h）：只在吃满行程预算仍可行时生效——
-    // 早班机这类必须比平时早很多的场合，行程保证优先，不得用下限压掉准备时间。
-    const floorHour =
-      habitOn && habits.wakeHour != null
-        ? Math.max(WAKE_ALARM_EARLIEST_LOCAL_HOUR, habits.wakeHour - HABIT_WAKE_FLOOR_LEAD_HOURS)
-        : WAKE_ALARM_EARLIEST_LOCAL_HOUR;
-    const floorMs = wallToUtcMs(
-      {
-        year: eventLocal.year,
-        month: eventLocal.month,
-        day: eventLocal.day,
-        hour: Math.floor(floorHour),
-        minute: Math.round((floorHour % 1) * 60),
-      },
-      tz,
-    );
-    alarmMs = Math.max(alarmMs, Math.min(floorMs, runAtMs - neededLeadMinutes * 60_000));
-    const offset = Math.round((runAtMs - alarmMs) / 60_000);
-    if (alarmMs > nowMs && offset >= 5 && offset <= MAX_OFFSET_MINUTES) {
-      hasWake = true;
-      wakeAlarmMs = alarmMs;
-      if (habitOn) {
-        // 入睡点在事件当天凌晨（<12 点）= 事件日当天睡的最后一觉；否则是前晚
-        const bedtimeMs = wallToUtcMs(
-          {
-            year: eventLocal.year,
-            month: eventLocal.month,
-            day: eventLocal.day - (habits.sleepStartHour! < 12 ? 0 : 1),
-            hour: Math.floor(habits.sleepStartHour!),
-            minute: Math.round((habits.sleepStartHour! % 1) * 60),
-          },
-          tz,
-        );
-        if (bedtimeMs < alarmMs) {
-          alarmBedtimeHours = (alarmMs - bedtimeMs) / 3_600_000;
-        }
-      }
-      const commute = factors.travelMinutes > 0 ? "洗漱和路上" : "洗漱准备";
-      stages.push({
-        offsetMinutes: offset,
-        stage: "wake_alarm",
-        label: "起床闹钟",
-        message: `【起床闹钟】今天${eventHm}有「${subject}」，已预留${commute}时间，现在起床刚刚好。`,
-      });
-    }
-  }
+  // 起床闹钟段已停用（2026-11-05 用户定调：「闹钟这个先不需要了，现在不好把控」）。
+  // 原实现按「开始时间 −(路程+准备)」倒推一个叫醒时刻，但叫醒时机强依赖路程估时
+  // 与个人起床习惯，误差直接落到用户身上，且与手机自带闹钟职责重叠。
+  // 保留 ReminderStage 里的 "wake_alarm" 仅为兼容既有落库数据，不再生成新段。
 
   // 前晚睡前备忘：仅 high；事件当天才建的日程 fire 时间已过 → 自然裁掉。
   // 有作息画像时贴着用户实际入睡点前移 1 小时（夜猫子不是 21:00 睡，21:00 的
@@ -361,18 +299,9 @@ export function buildReminderPolicy(input: ReminderPolicyInput): ReminderPolicyP
     }
     const offset = Math.round((runAtMs - fireMs) / 60_000);
     if (fireMs > nowMs && offset > 0 && offset <= MAX_OFFSET_MINUTES) {
-      let tail = hasWake ? "明早会叫你起床" : "到点会再提醒你";
-      if (alarmBedtimeHours != null) {
-        if (alarmBedtimeHours < HABIT_TIGHT_SLEEP_HOURS) {
-          tail = `按你平时约${formatHour(habits!.sleepStartHour!)}入睡，到闹钟只睡得约${formatDurationHours(alarmBedtimeHours)}，今晚尽量早点睡`;
-        } else if (habits!.wakeHour != null && wakeAlarmMs != null) {
-          const alarmWall = localParts(wakeAlarmMs, tz);
-          const earlierMin = Math.round((habits!.wakeHour - (alarmWall.hour + alarmWall.minute / 60)) * 60);
-          if (earlierMin >= 45) {
-            tail = `闹钟比你平时起床早约${earlierMin}分钟，今晚记得早点睡`;
-          }
-        }
-      }
+      // 起床闹钟段停用后，收尾统一为「到点会再提醒你」；原先「明早会叫你起床」
+      // 与睡眠预算劝早睡都锚在闹钟时刻，闹钟不存在时这些话术没有依据。
+      const tail = "到点会再提醒你";
       stages.push({
         offsetMinutes: offset,
         stage: "night_before",
@@ -480,18 +409,8 @@ function pad2(n: number): string {
   return String(n).padStart(2, "0");
 }
 
-/** 十进制小时 → 「H:MM」（如 1.5 → 1:30，23.75 → 23:45）；入睡时刻转述用 */
-function formatHour(h: number): string {
-  const norm = ((h % 24) + 24) % 24;
-  return `${Math.floor(norm)}:${pad2(Math.round((norm % 1) * 60) % 60)}`;
-}
-
-/** 小时数 → 「约X个半小时 / X小时」（睡眠预算转述用，向下取整到半小时） */
-function formatDurationHours(hours: number): string {
-  const halfHours = Math.max(1, Math.floor(hours * 2) / 2);
-  const whole = Math.floor(halfHours);
-  return halfHours % 1 === 0 ? `${whole}小时` : `${whole}个半小时`;
-}
+// formatHour / formatDurationHours 随起床闹钟段一并停用（2026-11-05）：两者的
+// 输出只出现在「按你平时约X入睡，到闹钟只睡得约Y」这类摇钟锚定的劝睡话术里。
 
 /** 段触发时刻的本地描述：「M月D日 HH:mm」统一格式（摘要/转述用，不做相对化）。 */
 function describeFireLocal(utcMs: number, timezone: string): string {

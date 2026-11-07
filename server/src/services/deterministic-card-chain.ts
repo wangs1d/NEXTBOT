@@ -8,11 +8,9 @@
 
 import { containsTravelItineraryCard } from "./tool-result-processor.js";
 import {
-  applyCards,
   collectCardPayloads,
-  decideRender,
   effectStatusOf,
-  unfoldIfCardsPresent,
+  renderTurn,
 } from "../render/index.js";
 import type { TurnEffect } from "../render/types.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
@@ -274,12 +272,12 @@ export interface DeterministicCardChainInput {
   travelResult?: Record<string, unknown>;
   /** tool-loop 聚合的天气回执（按执行顺序）。 */
   weatherResults?: ReadonlyArray<ExecutedToolReceipt>;
-  /** tool-loop 聚合的搜索回执（按执行顺序）。 */
+  /** tool-loop 聚合的搜索回执（按执行顺序）。搜索不再出卡（2026-11-05 退役），
+   *  仅作为轮内 effect 记账保留，供决策层/埋点统计用。 */
   searchResults?: ReadonlyArray<ExecutedToolReceipt>;
   /**
    * 本轮搜索类媒体（search_images/search_images_batch/search_videos）是否有
-   * 真实产出（extractMediaCards 组装出卡）。true 时 search_result 文字卡整卡
-   * 让位——照片是主形态，文字列表冗余；false/缺省时搜索卡照常附（零图兜底）。
+   * 真实产出（extractMediaCards 组装出卡）。用于判定本轮主形态是否为媒体。
    * image.generate 生图不算搜索证据，不计入。
    */
   searchMediaHasItems?: boolean;
@@ -287,7 +285,7 @@ export interface DeterministicCardChainInput {
   registryResults?: ReadonlyArray<ExecutedToolReceipt>;
   /** 视频抓取回执（loop 捕获在前、直跑兜底在后；取最后一条）。 */
   videoResults?: ReadonlyArray<ExecutedToolReceipt>;
-  /** 本轮执行失败的业务工具：出空态卡，不悄悄降级成搜索卡。 */
+  /** 本轮执行失败的业务工具：只作效果记账/统计，失败不再出空态卡（2026-11-06 退役）。 */
   failedToolNames?: ReadonlyArray<string>;
 }
 
@@ -329,15 +327,17 @@ export function applyDeterministicCards(input: DeterministicCardChainInput): {
   text: string;
   cards: Array<Record<string, unknown>>;
 } {
-  const decision = decideRender({
-    text: input.text,
-    effects: chainEffects(input),
-    mediaCardCount: input.searchMediaHasItems === true ? 1 : 0,
-  });
-  // 结构化面在场时正文不能同时是折叠卡（会互相盖住）
-  let text = decision.cards.length > 0 ? unfoldIfCardsPresent(input.text) : input.text;
-  text = applyCards(text, decision).text;
-  text = attachTravelBriefCard(text, input.travelResult, input.actorId);
+  // P2 出口归一：与主链路共用 renderTurn 的 cards-only 模式（正文已定稿，
+  // 绝不重跑 applyBodyForm / decision.text）。决策只算一次、口径一致。
+  const rendered = renderTurn(
+    {
+      text: input.text,
+      effects: chainEffects(input),
+      mediaCardCount: input.searchMediaHasItems === true ? 1 : 0,
+    },
+    "cards-only",
+  );
+  let text = attachTravelBriefCard(rendered.text, input.travelResult, input.actorId);
   return { text, cards: collectCardPayloads(text) };
 }
 

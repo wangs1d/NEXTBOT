@@ -41,26 +41,25 @@ export function effectStatusOf(
 /**
  * 结构化卡规格。
  *   - card  业务卡（行程/天气/搜索/注册工具/视频），由 apply 建块
- *   - empty 本轮尝试过但没有可用数据：出空态卡，不悄悄降级成别的卡
  *   - media 照片/视频流（mediaCards 字段承载，文本通道不出块）
+ *
+ * empty（失败空态警示卡）已整体退役（2026-11-06 用户定稿）：工具失败不再
+ * 出「没拿到数据」的孤立警示卡，失败说明一律由正文承担。
  */
 export type CardSpec =
   | { kind: "card"; topic: string; payload?: Record<string, unknown> }
-  | { kind: "empty"; topic: string; title: string; message: string }
   | { kind: "media"; topic: "media" };
 
 /**
  * 正文形态。fold 是唯一的「文档缩略」形态；markdown 即 [RENDER_AS:structured]。
- * 其余为文本派生的结构化形态（数据快报/列表切卡/引用等）。
+ * 其余为文本派生的结构化形态（列表切卡/引用等）。data_brief 已退役（2026-11-06）。
  */
 export type TextForm =
   | "plain"
   | "markdown"
   | "fold"
   | "brief"
-  | "data_brief"
   | "result_card"
-  | "search_result"
   | "image_text"
   | "quote";
 
@@ -75,6 +74,15 @@ export interface RenderDecision {
   cards: CardSpec[];
   body: BodyDecision;
   reason: string;
+  /**
+   * 场景对正文的确定性改写（明日预览渲染结果 / 结构卡坏块剥离）。
+   * 缺省 = 正文原样；出口必须优先使用它，否则场景改写等于白算。
+   */
+  text?: string;
+  /** 命中的主场景（观测口径：日志/测试断言用） */
+  scene?: { id: string; label: string; reason: string };
+  /** 场景 detect/plan 故障隔离清单（P1：进出口信封 meta，供恒返回门与告警用） */
+  failures?: string[];
 }
 
 export interface RenderInput {
@@ -92,4 +100,6 @@ export interface RenderInput {
   mediaCardCount?: number;
   /** 会话当前话题；fold 主题的首选来源 */
   activeTopic?: string;
+  /** 场景数据面（如 eveningDigest）：由持有数据的服务注入，场景不自己去找 */
+  payloads?: Record<string, unknown>;
 }

@@ -2,7 +2,7 @@
 //
 // 覆盖：
 // - 本轮 user + 回复气泡（单泡 / 分泡 / 跨端回填行）都在范围内
-// - 夹在一轮里的主动推送 / 睡前备忘 / 决策卡不带锚点，不得被连带删除
+// - 夹在一轮里的主动推送 / 睡前备忘不带锚点，不得被连带删除
 // - 点主动推送本身 → 只删它自己
 import "package:flutter_test/flutter_test.dart";
 
@@ -38,7 +38,6 @@ void main() {
       for (final String id in <String>[
         "assistant-proactive-1700000000000000",
         "assistant-evening-digest-1700000000000000",
-        "decision-1700000000000000",
         "assistant-task-1700000000000000",
       ]) {
         final ChatMessage m = _msg(id, "assistant");

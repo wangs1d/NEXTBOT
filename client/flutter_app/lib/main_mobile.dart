@@ -6,10 +6,13 @@ import "package:flutter/material.dart";
 import "app/ambient_feeds_controller.dart";
 import "core/config/api_config.dart";
 import "core/services/account_session_store.dart";
+import "core/services/agent_name_store.dart";
 import "core/services/app_support_migration.dart";
 import "core/services/access_auth_api.dart";
 import "core/services/cloud_model_binding_store.dart";
 import "core/services/local_notification_service.dart";
+import "core/services/user_preferences_api.dart";
+import "features/chat/agent_profile_page.dart" show AgentProfileData;
 import "mobile_ui/mobile_home.dart";
 import "mobile_ui/mobile_login_page.dart";
 import "mobile_ui/mobile_theme.dart";
@@ -34,8 +37,8 @@ import "mobile_ui/mobile_theme.dart";
 /// 全链按该 userId 落库，与桌面端登录同一账号即共享全部数据。已登录会话
 /// 读盘恢复（account_session.json），退出登录回到登录页。
 ///
-/// 底部导航：「对话」 / 「日程」 / 「我的」(服务接入、模型目录、帮助反馈、
-/// 主题、退出登录；邮箱/消息中心入口已删除——消息统一后台扫描按价值主动推送)。
+/// 底部导航：「对话」 / 「日程」 / 「我的」(服务接入、帮助反馈、
+/// 主题、退出登录；模型目录入口已删除——模型配置统一走服务接入页)。
 /// 功能与桌面端同源同数据,详见 mobile_home.dart。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -59,6 +62,12 @@ class _MobileAppState extends State<MobileApp> {
 
   /// 已登录（本机有会话或本次登录成功）。
   bool _loggedIn = false;
+
+  /// 用户给 agent 取的名称由 [AgentNameStore] 统一持有：登录时灌初值，
+  /// 对话中取名后服务端广播 identity_renamed 即时刷新（顶栏胶囊随之浮现）。
+  final UserPreferencesApi _preferencesApi = UserPreferencesApi(
+    baseUrl: ApiConfig.httpBase,
+  );
 
   @override
   void initState() {
@@ -87,9 +96,28 @@ class _MobileAppState extends State<MobileApp> {
       if (email != null && email.isNotEmpty) {
         ApiConfig.runtimeUserId = email;
         _loggedIn = true;
+        // 会话恢复后补拉 agent 名称（失败静默，顶栏回退默认文案）
+        unawaited(_loadAgentName());
       }
       _booting = false;
     });
+  }
+
+  /// 拉取用户给 agent 取的名称（agentProfile.displayName，与桌面端
+  /// main.dart._loadAgentProfile 同源同接口）；未取名时保持 null。
+  Future<void> _loadAgentName() async {
+    try {
+      final Map<String, dynamic> prefs = await _preferencesApi.getPreferences(
+        ApiConfig.effectiveActorId,
+      );
+      final String name = AgentProfileData.fromPreferences(
+        prefs,
+      ).displayName.trim();
+      if (!mounted) return;
+      AgentNameStore.instance.set(name.isEmpty ? null : name);
+    } catch (_) {
+      // 拉取失败保持未取名态（顶栏只留状态点）
+    }
   }
 
   /// 登录页回调：落盘会话 → 写运行时身份覆盖 → 切入主壳。
@@ -99,6 +127,7 @@ class _MobileAppState extends State<MobileApp> {
     ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
     if (!mounted) return;
     setState(() => _loggedIn = true);
+    unawaited(_loadAgentName());
   }
 
   /// 退出登录：清本机会话与运行时身份覆盖，回登录页。
@@ -106,6 +135,7 @@ class _MobileAppState extends State<MobileApp> {
   Future<void> _onLogout() async {
     await AccountSessionStore.instance.clear();
     ApiConfig.runtimeUserId = null;
+    AgentNameStore.instance.clear();
     if (!mounted) return;
     setState(() => _loggedIn = false);
   }
@@ -114,6 +144,7 @@ class _MobileAppState extends State<MobileApp> {
   /// 不落盘会话——重启仍回登录页，正式登录不受影响。
   void _onDebugSkipLogin() {
     ApiConfig.runtimeUserId = "debug@preview.local";
+    AgentNameStore.instance.clear();
     if (!mounted) return;
     setState(() => _loggedIn = true);
   }
@@ -154,10 +185,16 @@ class _MobileAppState extends State<MobileApp> {
         onDebugSkip: kDebugMode ? _onDebugSkipLogin : null,
       );
     }
-    return MobileHomePage(
-      themeMode: mode,
-      onThemeModeChanged: (ThemeMode m) => _themeMode.value = m,
-      onLogout: _onLogout,
+    return ValueListenableBuilder<String?>(
+      valueListenable: AgentNameStore.instance.name,
+      builder: (BuildContext context, String? agentName, _) {
+        return MobileHomePage(
+          themeMode: mode,
+          onThemeModeChanged: (ThemeMode m) => _themeMode.value = m,
+          onLogout: _onLogout,
+          agentName: agentName,
+        );
+      },
     );
   }
 }

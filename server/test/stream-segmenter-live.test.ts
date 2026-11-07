@@ -293,6 +293,27 @@ test("分泡：enableBubbleMode 运行时置位（WS 门禁路径）", async () 
   assert.equal(bubbles[2].bubble, "new");
 });
 
+test("分泡：disableBubbleMode 流中途关泡（信息域工具轮），后续段不带泡标记", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("第一句切泡正常。第二句也足够长足够过线了。");
+  await seg.chain;
+  const newCount = bubbles.filter((b) => b.bubble === "new").length;
+  assert.ok(newCount >= 1, `关泡前应已切出新泡（实际 ${newCount}）`);
+  // 模拟信息类工具（search/weather/market/clock 域）开始执行：WS 层关泡
+  seg.disableBubbleMode();
+  seg.feed("关泡后这段照常成段发出，但绝不再开新泡。资料一次展示完。");
+  await seg.chain;
+  await seg.flushFinal();
+  const after = bubbles.slice(newCount);
+  assert.ok(after.length >= 1, "关泡后内容仍要发出（不丢正文）");
+  assert.ok(
+    after.every((b) => b.bubble === undefined),
+    `关泡后不得再带 new/continue 标记（实际 ${JSON.stringify(after.map((b) => b.bubble))}）`,
+  );
+  // WS 层 BubbleTracker 把无 meta 段并回当前泡 → 信息类轮整轮一个绿泡
+});
+
 test("分泡：discard 后不再推送任何泡", async () => {
   const { seg, bubbles, enable } = createBubbleRecorder();
   enable();
@@ -301,4 +322,71 @@ test("分泡：discard 后不再推送任何泡", async () => {
   await seg.chain;
   await seg.flushFinal();
   assert.equal(bubbles.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// 表格原子性（2026-11-06）：markdown 表格永不逐行撕泡，整表独立成泡
+// ---------------------------------------------------------------------------
+
+const MARKET_TABLE = [
+  "| 指数 | 收盘点位 | 涨跌 |",
+  "|---|---|---|",
+  "| 道琼斯 | 51,523.06 | -3.44% |",
+  "| 纳斯达克 | 24,315.00 | -5.52% |",
+  "| 标普500 | 7,353.73 | -4.36% |",
+].join("\n");
+
+test("分泡：表格原子性——整表成单泡，不逐行撕碎", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed(`昨晚美股收盘情况如下：\n${MARKET_TABLE}\n整体跌得比较重。`);
+  await seg.chain;
+  await seg.flushFinal();
+  // 没有任何一泡只含表格的一部分：含表头的泡必须含末行
+  const tableBubbles = bubbles.filter((b) => b.text.includes("|---|"));
+  assert.equal(tableBubbles.length, 1, "表格恰好出现在一个泡里");
+  assert.ok(
+    tableBubbles[0].text.includes("标普500"),
+    "该泡包含表格末行（整表完整）",
+  );
+  // 表格行不会单独成泡（孤行渲染不出表）
+  for (const b of bubbles) {
+    const rowLines = b.text.split("\n").filter((l) => l.trimStart().startsWith("|"));
+    assert.ok(
+      rowLines.length === 0 || rowLines.length >= 3,
+      `泡内表格行要么为 0 要么整表（≥3 行），实际 ${rowLines.length}：${b.text.slice(0, 60)}`,
+    );
+  }
+});
+
+test("分泡：表格单元格里的句末标点不切泡", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  const table = [
+    "| 板块 | 备注 |",
+    "|---|---|",
+    "| 半导体 | 跌超8%。恐慌蔓延。 |",
+    "| 银行 | 相对抗跌。 |",
+  ].join("\n");
+  seg.feed(`今日板块：\n${table}`);
+  await seg.chain;
+  await seg.flushFinal();
+  const tableBubble = bubbles.find((b) => b.text.includes("|---|"));
+  assert.ok(tableBubble, "表格成泡");
+  assert.ok(
+    tableBubble!.text.includes("银行"),
+    "单元格内的「。」未把表格拦腰切断（末行仍在同泡）",
+  );
+});
+
+test("分泡：表格前的引子独立成泡，表格不被并进散文", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed(`刚查了下，收盘数据都在这张表里：\n${MARKET_TABLE}`);
+  await seg.chain;
+  await seg.flushFinal();
+  assert.ok(bubbles.length >= 2, `引子与表格分开成泡，实际 ${bubbles.length} 泡`);
+  assert.ok(!bubbles[0].text.includes("|"), "首泡是引子散文，不含表格行");
+  const tableBubble = bubbles.find((b) => b.text.includes("|---|"));
+  assert.ok(tableBubble, "表格在自己的泡里");
 });

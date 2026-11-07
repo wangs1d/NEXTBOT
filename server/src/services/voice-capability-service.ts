@@ -20,8 +20,7 @@ import type { ClientPushPort } from "../ports/client-push-port.js";
  *   - `TtsService`：保留，纯合成（mp3 base64），不感知 WS。
  *   - `VoiceDialogueService`：保留，Provider 注册表（多 TTS/LLM 提供商切换）。
  *   - `VirtualPhoneService`：保留，电话触达专用（带前摇振铃 + 来电 UI）；其 TTS 合成
- *     仍直接调 `TtsService`，但 `agent.proactive_voice` / `tts_alarm_play` 等非电话
- *     场景统一改走本服务。
+ *     仍直接调 `TtsService`，但 `agent.proactive_voice` 等非电话场景统一改走本服务。
  */
 
 /** 语音播报模式。 */

@@ -1,6 +1,11 @@
 import type { ToolRegistry } from "./tool-registry.js";
-import { geocodeCity, WeatherService, rainWindowSuffixText } from "../services/weather-service.js";
-import type { WeatherDailyForecastItem } from "../services/weather-service.js";
+import {
+  buildClothingAdvice,
+  geocodeCity,
+  WeatherService,
+  rainWindowSuffixText,
+} from "../services/weather-service.js";
+import type { WeatherDailyForecastItem, WeatherTomorrow } from "../services/weather-service.js";
 import { resolveUserGeo } from "../services/user-location-service.js";
 import { reverseGeocodeCoordinates } from "../services/reverse-geocode-service.js";
 
@@ -121,15 +126,34 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
     );
     // days：用户问多日（"这周""后天""去玩三天"）时由模型传 1–16；缺省 2 = 今天+明天。
     const daysInput = Number(input.days);
-    const days = Number.isFinite(daysInput) ? Math.max(1, Math.min(Math.trunc(daysInput), 16)) : 2;
+    let days = Number.isFinite(daysInput) ? Math.max(1, Math.min(Math.trunc(daysInput), 16)) : 2;
+    // focus（2026-11-05）：用户明确只问某一天时收窄回执，别把「明天天气」答成今天+明天两套。
+    //   today    → days=1，回执只有当前实况+今天，无明日段；
+    //   tomorrow → days≥2，回执只有明天数据（无当前实况/今日气温湿度），卡片与正文都只围绕明天。
+    // 模型没传（泛泛问天气/两天都提）保持旧行为：今天+明天。
+    const focusInput = String(input.focus ?? "").trim();
+    const focus = focusInput === "today" || focusInput === "tomorrow" ? focusInput : "";
+    if (focus === "today") days = 1;
+    if (focus === "tomorrow") days = Math.max(2, days);
     const brief = await weather.getBrief(lat, lon, timezone, label || undefined, days);
+
+    if (focus === "tomorrow" && brief.tomorrow) {
+      return buildTomorrowFocusResult(brief.tomorrow, {
+        locationLabel: [brief.locationLabel, locationAgeNote(locationAgeMs)]
+          .filter((s): s is string => !!s && String(s).trim().length > 0)
+          .join(" "),
+        windKmh: brief.windKmh,
+      });
+    }
+
     return {
       ok: true,
       summary: brief.summaryLine,
       clothingAdvice: brief.clothingAdvice,
       currentTempC: brief.currentTempC,
       apparentTempC: brief.apparentTempC,
-      todayRangeC: `${brief.todayMinC.toFixed(0)}–${brief.todayMaxC.toFixed(0)}`,
+      // 用户定稿（2026-11-04）：区间数字必须带 ° 符号（手机/电脑同一张卡）
+      todayRangeC: `${brief.todayMinC.toFixed(0)}°–${brief.todayMaxC.toFixed(0)}°`,
       weatherText: brief.weatherText,
       humidityPct: brief.humidityPct,
       windKmh: brief.windKmh,
@@ -154,6 +178,45 @@ export function registerWeatherTools(registry: ToolRegistry, weather: WeatherSer
 }
 
 const WEEKDAY_LABELS = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"];
+
+/**
+ * 明日聚焦回执（2026-11-05）：用户只问「明天天气」时，回执里只放明天的数据——
+ * 不带当前实况/今日区间/湿度风速。正文与卡片都从回执来，今天的信息自然不会再说。
+ * 字段用 tomorrow* 专属命名而非复用 today 语义字段，避免模型把明天的数读成今天的。
+ */
+function buildTomorrowFocusResult(
+  t: WeatherTomorrow,
+  ctx: { locationLabel: string; windKmh: number },
+) {
+  return {
+    ok: true,
+    focusDay: "tomorrow",
+    summary: tomorrowFocusSummary(ctx.locationLabel, t),
+    weatherText: t.weatherText,
+    tomorrowRangeC: `${t.minC.toFixed(0)}°–${t.maxC.toFixed(0)}°`,
+    ...(t.rainPct > 0 ? { tomorrowRainPct: t.rainPct } : {}),
+    ...(t.rainWindow ? { tomorrowRainPeriod: rainWindowSuffixText(t.rainWindow) } : {}),
+    clothingAdvice: buildClothingAdvice({
+      currentTempC: (t.minC + t.maxC) / 2,
+      todayMinC: t.minC,
+      todayMaxC: t.maxC,
+      peakRainPct: t.rainPct,
+      weatherCode: t.weatherCode,
+      windKmh: ctx.windKmh,
+      ...(t.rainWindow ? { rainWindow: t.rainWindow } : {}),
+    }),
+    locationLabel: ctx.locationLabel,
+  };
+}
+
+/** 明日聚焦一句话摘要（口径与 getBrief 的 tomorrowSummary 段一致，前置地点） */
+function tomorrowFocusSummary(locationLabel: string, t: WeatherTomorrow): string {
+  const rainInfo =
+    t.rainPct > 0
+      ? `，降水概率 ${t.rainPct}%${t.rainWindow ? `（${t.rainWindow.label}）` : ""}`
+      : "";
+  return `${locationLabel ? `${locationLabel} ` : ""}明日${t.weatherText}，${t.minC.toFixed(0)}–${t.maxC.toFixed(0)}°C${rainInfo}。`;
+}
 
 /** 给逐日条目加人类可读标签：前 3 天固定今天/明天/后天，其余标周几（确定性 UTC 计算，无 Date.now） */
 function withDayLabel(item: WeatherDailyForecastItem, index: number): WeatherDailyForecastItem & { dayLabel: string } {

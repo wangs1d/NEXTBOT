@@ -6,6 +6,7 @@ import type { ClientGeoContext, ClientLocationWire } from "../types/client-locat
 import { reverseGeocodeCoordinates } from "./reverse-geocode-service.js";
 
 export type UserGeoInfo = {
+  /** 时区（可能为空串＝未知）。不得硬编码猜测，时钟解析见 actor-context-service。 */
   timezone: string;
   country: string;
   region: string;
@@ -35,7 +36,7 @@ async function geoFromClientLocation(loc: ClientLocationWire): Promise<UserGeoIn
   );
   if (hasResolvedParts) {
     return {
-      timezone: loc.timezone?.trim() || "Asia/Shanghai",
+      timezone: loc.timezone?.trim() || "",
       country: loc.country?.trim() ?? "",
       region: loc.region?.trim() ?? "",
       district: loc.district?.trim() ?? "",
@@ -52,7 +53,7 @@ async function geoFromClientLocation(loc: ClientLocationWire): Promise<UserGeoIn
     const fallbackLabel = loc.label?.trim() || buildLabel(loc);
     if (!fallbackLabel) return null;
     return {
-      timezone: loc.timezone?.trim() || "Asia/Shanghai",
+      timezone: loc.timezone?.trim() || "",
       country: loc.country?.trim() ?? "",
       region: loc.region?.trim() ?? "",
       district: loc.district?.trim() ?? "",
@@ -101,8 +102,10 @@ export async function resolveUserLocationPrompt(ctx?: ClientGeoContext): Promise
     info.latitude != null && info.longitude != null
       ? `（GPS ${info.latitude.toFixed(4)}, ${info.longitude.toFixed(4)}）`
       : "";
-  const tzNote = info.timezone ? `，时区 ${info.timezone}` : "";
+  // 时区不在这里表达（2026-11-05）：本块只负责「人在哪」，时间由【当前时间】块
+  // 统一给出用户时区。两处都写时区会自相矛盾——逆地理是城市级推断，设备时区
+  // 才是用户屏幕上的钟，位置块声称的时区一旦与时钟块不同，模型就会选错。
   // 「禁止反问」约束（2026-07-29 反问 bug 的根治位）：位置是系统后台注入的背景，
   // 措辞必须压制 LLM 把它当话题向用户确认（"你是不是在 XX"）。
-  return `用户当前所在地${coordNote}：${label}${tzNote}。此为系统后台注入的定位背景（前端 GPS + 逆地理编码），回答位置/天气/时间类问题时必须直接以此为准，禁止向用户反问或确认所在位置，也不要主动提及本条来源。`;
+  return `用户当前所在地${coordNote}：${label}。此为系统后台注入的定位背景（前端 GPS + 逆地理编码），回答位置/天气类问题时必须直接以此为准，禁止向用户反问或确认所在位置，也不要主动提及本条来源。`;
 }

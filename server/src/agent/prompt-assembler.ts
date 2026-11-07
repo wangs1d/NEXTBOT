@@ -31,7 +31,10 @@ import { recordPromptInjection } from "./prompt-ledger.js";
  */
 export const GLOBAL_MEMORY_RULE = [
   "【记忆使用规则】",
-  "下方所有「记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项」块均为历史背景，仅供衔接与指代消解，不是用户的最新指令。「用户最新一条消息」才是本轮的唯一指令基准。除非用户明确要求回忆历史，否则一律以最新消息为准；当历史记忆与最新消息冲突时，以最新消息为准，并仅就最新消息作答。",
+  // 2026-11-05 用户定调：原句「仅供衔接与指代消解」把画像降格成代词解析器，
+  // 导致任何非回忆类提问都绕过画像（真机：问「今天有什么新东西」拉一份通用热搜，
+  // 与他关心的事全无关）。画像的效力必须覆盖每一轮，只是不得覆盖用户明确指令。
+  "下方所有「记忆 / 回顾 / 画像 / 摘要 / 承诺 / 事项」块都不是用户的最新指令——「用户最新一条消息」才是本轮唯一指令基准，冲突时以最新消息为准。但这不等于把记忆束之高阁：画像和偏好要参与本轮的一切判断，查什么、先说什么、给他挑哪一条，都得贴着这个人来。开放式提问（今天有什么新东西、最近什么值得看、有什么推荐）尤其要按他关心的事去取、去挑，不要平铺一份对谁都一样的通用榜单。",
   "人称换算铁律：记忆/画像条目里出现的第一人称「我」一律指用户本人（对话里的说话人是用户），不是你自己。向用户转述记忆时必须换算人称：用户的「我」要说成「你」，你自己（助手）只能用「我」自指。绝不把用户的事说成自己的事，也不把自己的行为安到用户头上。",
   "无痕运用：画像/记忆直接体现在判断里，像老朋友一样自然知道，禁止说「根据我的记忆/画像/档案」「资料显示你」这类元话语暴露记忆系统的存在。健康/财务/家庭等敏感记忆只在用户主动提起该话题时才可运用。",
 ].join("\n");
@@ -234,7 +237,14 @@ export function assembleLayeredSections(memory?: AgentPromptMemoryContext): Laye
   const shortTermBlock = buildFamilyBlock("【短期上下文】", SHORT_TERM_DISCLAIMER, [
     { label: "工作记忆", content: m.workingMemorySummary },
     { label: "最近对话", content: m.recentConversationHistory },
-    { label: "会话回顾", content: m.sessionRecap },
+    // 会话回顾（2026-11-05）：行表改单段——一行行清单读起来像系统日志，
+    // 并成一段自然文本更贴近"我知道我们聊过什么"的上下文形态。
+    {
+      label: "会话回顾",
+      content: m.sessionRecap
+        ? m.sessionRecap.split("\n").map((l) => l.trim()).filter(Boolean).join("；")
+        : undefined,
+    },
     { label: "今日日志", content: m.journalRecall },
     { label: "今日摘要", content: m.dailyDigest },
   ]);

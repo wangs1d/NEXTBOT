@@ -2,10 +2,10 @@ import "dart:async";
 import "dart:convert" show jsonDecode, jsonEncode;
 import "dart:typed_data";
 
-import "package:file_picker/file_picker.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 import "../../core/services/nb_http.dart";
+import "../../core/vision/pick_gallery_vision.dart";
 
 import "../../core/config/api_config.dart";
 import "../chat/media_disk_cache.dart";
@@ -161,30 +161,27 @@ class _GalleryPageState extends State<GalleryPage> {
 
   Future<void> _uploadImages() async {
     final ScaffoldMessengerState messenger = ScaffoldMessenger.of(context);
-    final FilePickerResult? result = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      allowMultiple: true,
-      withData: true,
-    );
-    if (result == null || result.files.isEmpty) return;
+    final List<PickedImage> result = await pickGalleryImages();
+    if (result.isEmpty) return;
     int success = 0;
-    for (final PlatformFile file in result.files) {
+    for (final PickedImage file in result) {
       try {
         final http.MultipartRequest request = http.MultipartRequest(
           "POST",
           _uri("/picture/assets"),
         );
-        final Uint8List? bytes = file.bytes;
-        if (bytes != null) {
-          request.files.add(
-            http.MultipartFile.fromBytes("file", bytes, filename: file.name),
-          );
-        } else if (file.path != null) {
+        if (file.path != null) {
           request.files.add(
             await http.MultipartFile.fromPath("file", file.path!, filename: file.name),
           );
         } else {
-          continue;
+          request.files.add(
+            http.MultipartFile.fromBytes(
+              "file",
+              Uint8List.fromList(file.bytes),
+              filename: file.name,
+            ),
+          );
         }
         final http.StreamedResponse streamed =
             await request.send().timeout(const Duration(seconds: 60));
@@ -198,7 +195,7 @@ class _GalleryPageState extends State<GalleryPage> {
     messenger.showSnackBar(
       SnackBar(
         duration: const Duration(seconds: 4),
-        content: Text("已上传 $success/${result.files.length} 张"),
+        content: Text("已上传 $success/${result.length} 张"),
       ),
     );
     await _refresh();

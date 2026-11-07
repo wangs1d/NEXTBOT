@@ -263,17 +263,94 @@ function pad2(n: number): string {
   return n < 10 ? `0${n}` : String(n);
 }
 
-function formatLocalDateTime(date: Date): string {
-  return (
-    `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())} ` +
-    `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`
-  );
+/**
+ * 时区视角下的墙钟分量（2026-11-05 时间感知统一）。
+ *
+ * 为什么需要它：`[ts:]` 帧与【对话时间轴】此前全部用 `date.getHours()` 等
+ * **服务器进程时区**渲染，而 system 的【当前时间】块用的是用户时区。用户
+ * 在纽约时同一份 prompt 里两个钟差 12 小时，模型算「昨天/刚才」「你昨晚说的」
+ * 必然出错。
+ *
+ * `timezone` 缺省时走本地 Date getter：零 Intl 开销，且与旧实现**逐字节一致**
+ * ——保护既有线程的历史渲染与 prefix cache。传了才走 IANA 规则（DST 由 Intl
+ * 处理，绝不手算偏移）。
+ */
+export type WallClock = {
+  year: number;
+  /** 1-12（与 getMonth()+1 对齐，避免调用方混淆两套月份口径） */
+  month: number;
+  day: number;
+  hour: number;
+  minute: number;
+  second: number;
+  /** 0=周日 .. 6=周六 */
+  weekday: number;
+};
+
+const WEEKDAY_SHORT = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"] as const;
+const WALL_CLOCK_FMT = new Map<string, Intl.DateTimeFormat>();
+
+function wallClockFormatter(timezone: string): Intl.DateTimeFormat {
+  let fmt = WALL_CLOCK_FMT.get(timezone);
+  if (!fmt) {
+    fmt = new Intl.DateTimeFormat("en-US", {
+      timeZone: timezone,
+      hour12: false,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      weekday: "short",
+    });
+    if (WALL_CLOCK_FMT.size > 32) WALL_CLOCK_FMT.clear();
+    WALL_CLOCK_FMT.set(timezone, fmt);
+  }
+  return fmt;
+}
+
+export function wallClock(date: Date, timezone?: string): WallClock {
+  const local: WallClock = {
+    year: date.getFullYear(),
+    month: date.getMonth() + 1,
+    day: date.getDate(),
+    hour: date.getHours(),
+    minute: date.getMinutes(),
+    second: date.getSeconds(),
+    weekday: date.getDay(),
+  };
+  const tz = timezone?.trim();
+  if (!tz) return local;
+  try {
+    const parts = wallClockFormatter(tz).formatToParts(date);
+    const num = (type: string): number => Number(parts.find((p) => p.type === type)?.value ?? 0);
+    const weekdayRaw = (parts.find((p) => p.type === "weekday")?.value ?? "").slice(0, 3);
+    const weekday = WEEKDAY_SHORT.indexOf(weekdayRaw as (typeof WEEKDAY_SHORT)[number]);
+    return {
+      year: num("year"),
+      month: num("month"),
+      day: num("day"),
+      hour: num("hour") % 24,
+      minute: num("minute"),
+      second: num("second"),
+      weekday: weekday >= 0 ? weekday : local.weekday,
+    };
+  } catch {
+    // 非法时区（历史脏值）不得让 prompt 装配崩：退回本地口径
+    return local;
+  }
+}
+
+function formatLocalDateTime(date: Date, timezone?: string): string {
+  const w = wallClock(date, timezone);
+  return `${w.year}-${pad2(w.month)}-${pad2(w.day)} ${pad2(w.hour)}:${pad2(w.minute)}:${pad2(w.second)}`;
 }
 
 const WEEKDAY_CN = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"] as const;
 
-function weekdayCn(date: Date): string {
-  return WEEKDAY_CN[date.getDay()] ?? "";
+function weekdayCn(date: Date, timezone?: string): string {
+  return WEEKDAY_CN[wallClock(date, timezone).weekday] ?? "";
 }
 
 /**
@@ -326,8 +403,8 @@ function weekdayName(date: Date): string {
   return ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][date.getDay()] ?? "Unknown";
 }
 
-function timeOfDayLabel(date: Date): string {
-  const hour = date.getHours();
+function timeOfDayLabel(date: Date, timezone?: string): string {
+  const hour = wallClock(date, timezone).hour;
   if (hour < 5) return "deep night";
   if (hour < 8) return "early morning";
   if (hour < 12) return "morning";
@@ -337,32 +414,32 @@ function timeOfDayLabel(date: Date): string {
   return "late night";
 }
 
-function sameLocalDay(left: Date, right: Date): boolean {
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
+function sameLocalDay(left: Date, right: Date, timezone?: string): boolean {
+  const a = wallClock(left, timezone);
+  const b = wallClock(right, timezone);
+  return a.year === b.year && a.month === b.month && a.day === b.day;
 }
 
-function dayDiff(from: Date, to: Date): number {
-  const fromDay = new Date(from.getFullYear(), from.getMonth(), from.getDate()).getTime();
-  const toDay = new Date(to.getFullYear(), to.getMonth(), to.getDate()).getTime();
+function dayDiff(from: Date, to: Date, timezone?: string): number {
+  const a = wallClock(from, timezone);
+  const b = wallClock(to, timezone);
+  const fromDay = Date.UTC(a.year, a.month - 1, a.day);
+  const toDay = Date.UTC(b.year, b.month - 1, b.day);
   return Math.round((toDay - fromDay) / 86_400_000);
 }
 
-function describeRelativeTime(at: Date, now = new Date()): string {
+function describeRelativeTime(at: Date, now = new Date(), timezone?: string): string {
   const diffMs = now.getTime() - at.getTime();
   if (diffMs < 0) return "in the future";
 
   const diffMinutes = Math.floor(diffMs / 60_000);
   const diffHours = Math.floor(diffMs / 3_600_000);
-  const diffDays = dayDiff(at, now);
+  const diffDays = dayDiff(at, now, timezone);
 
   if (diffMinutes <= 1) return "just now";
   if (diffMinutes < 60) return `${diffMinutes}m ago`;
-  if (sameLocalDay(at, now)) return `${diffHours}h ago`;
-  if (diffDays === 1) return `yesterday ${timeOfDayLabel(at)}`;
+  if (sameLocalDay(at, now, timezone)) return `${diffHours}h ago`;
+  if (diffDays === 1) return `yesterday ${timeOfDayLabel(at, timezone)}`;
   if (diffDays < 7) return `${diffDays}d ago`;
   if (diffDays < 14) return "last week";
   if (diffDays < 31) return `${Math.floor(diffDays / 7)}w ago`;
@@ -371,8 +448,12 @@ function describeRelativeTime(at: Date, now = new Date()): string {
 }
 
 /** 构造 LLM 可见的时间戳前缀：`[ts:YYYY-MM-DD HH:MM:SS|周X|relative]`。 */
-export function buildMessageTimestampPrefix(at: Date, now: Date = new Date()): string {
-  return `${TS_FRAME_PREFIX}${formatLocalDateTime(at)}|${weekdayCn(at)}|${describeRelativeTime(at, now)}]`;
+export function buildMessageTimestampPrefix(
+  at: Date,
+  now: Date = new Date(),
+  timezone?: string,
+): string {
+  return `${TS_FRAME_PREFIX}${formatLocalDateTime(at, timezone)}|${weekdayCn(at, timezone)}|${describeRelativeTime(at, now, timezone)}]`;
 }
 
 /** 提取消息首行的时间戳前缀；返回 null 表示无前缀。 */
@@ -448,9 +529,10 @@ const TIMELINE_HEADER =
 /** 分日行前缀：`- —— 2026-10-22 周四（昨天）——`（2026-10-23 时间锚修复）。 */
 const TIMELINE_DAY_HEADER = "- —— ";
 
-/** 自然日键（本地时区，YYYY-MM-DD）：分组用。 */
-function dayKeyOf(date: Date): string {
-  return `${date.getFullYear()}-${pad2(date.getMonth() + 1)}-${pad2(date.getDate())}`;
+/** 自然日键（用户时区，YYYY-MM-DD）：分组用。 */
+function dayKeyOf(date: Date, timezone?: string): string {
+  const w = wallClock(date, timezone);
+  return `${w.year}-${pad2(w.month)}-${pad2(w.day)}`;
 }
 
 /**
@@ -459,10 +541,12 @@ function dayKeyOf(date: Date): string {
  * 绝对日期负责"可定位"，相对日负责"可叙述"——模型不必每轮自己做减法就能
  * 说出"昨天你说的"而不是"刚才你说"。跨天不变、同一天内字节恒定（护 prefix cache）。
  */
-function relativeDayLabel(date: Date, now: Date): string {
-  const a = new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime();
-  const b = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
-  const diffDays = Math.round((b - a) / 86_400_000);
+function relativeDayLabel(date: Date, now: Date, timezone?: string): string {
+  const a = wallClock(date, timezone);
+  const b = wallClock(now, timezone);
+  const aDay = Date.UTC(a.year, a.month - 1, a.day);
+  const bDay = Date.UTC(b.year, b.month - 1, b.day);
+  const diffDays = Math.round((bDay - aDay) / 86_400_000);
   if (diffDays <= 0) return "（今天）";
   if (diffDays === 1) return "（昨天）";
   if (diffDays === 2) return "（前天）";
@@ -475,12 +559,12 @@ function relativeDayLabel(date: Date, now: Date): string {
  * 也只剩最近几小时。改为**按天扩展**：先取最近 N 条，再把起点前移到该自然日
  * 的第一条（最多再向前扩 N 条做上界保护），让最后两个自然日至少各有一天完整锚点。
  */
-function selectTimelineWindow(timeline: TimelineEntry[]): TimelineEntry[] {
+function selectTimelineWindow(timeline: TimelineEntry[], timezone?: string): TimelineEntry[] {
   if (timeline.length <= TIMELINE_MAX_ENTRIES) return timeline;
   const hardStart = Math.max(0, timeline.length - TIMELINE_MAX_ENTRIES * 2);
   let from = timeline.length - TIMELINE_MAX_ENTRIES;
-  const edgeDay = dayKeyOf(timeline[from]!.date);
-  while (from > hardStart && dayKeyOf(timeline[from - 1]!.date) === edgeDay) from--;
+  const edgeDay = dayKeyOf(timeline[from]!.date, timezone);
+  while (from > hardStart && dayKeyOf(timeline[from - 1]!.date, timezone) === edgeDay) from--;
   return timeline.slice(from);
 }
 
@@ -539,6 +623,11 @@ export type TimestampFreeLlmViewOptions = {
    * 「今天/昨天」用。默认取当前时间；测试可注入固定时刻。仅影响视图克隆，存储不动。
    */
   now?: Date;
+  /**
+   * 用户 IANA 时区（2026-11-05）：时间轴与 `[ts:]` 帧必须与【当前时间】块同源。
+   * 缺省＝服务器进程时区（旧行为，逐字节兼容）；非法值自动退回本地口径。
+   */
+  timezone?: string;
 };
 
 /**
@@ -567,6 +656,7 @@ export function buildTimestampFreeLlmView(
   options: TimestampFreeLlmViewOptions = {},
 ): TimestampFreeLlmView {
   const now = options.now ?? new Date();
+  const tz = options.timezone?.trim() || undefined;
   const timeline: TimelineEntry[] = [];
   const view = msgs.map((raw) => {
     // 内部元数据先剥掉：它既不参与时间轴，也不该出现在发往 LLM 的正文里。
@@ -642,25 +732,25 @@ export function buildTimestampFreeLlmView(
     const last = timeline[timeline.length - 1]!;
     const rows: string[] = [];
     let currentDay = "";
-    for (const entry of selectTimelineWindow(timeline)) {
+    for (const entry of selectTimelineWindow(timeline, tz)) {
       // 分日行：硬 slice 的窗口里「今天 14:30 / 今天 09:10 / 昨天 23:40」混排时，
       // 模型只能逐行比较绝对时间；插一条 `—— 2026-10-22 周四（昨天）——` 把
       // 「哪几条属于同一天、距现在几天」变成结构而非推理。
-      const dayKey = dayKeyOf(entry.date);
+      const dayKey = dayKeyOf(entry.date, tz);
       if (dayKey !== currentDay) {
         currentDay = dayKey;
         rows.push(
-          `${TIMELINE_DAY_HEADER}${dayKey} ${weekdayCn(entry.date)}${relativeDayLabel(entry.date, now)} ——`,
+          `${TIMELINE_DAY_HEADER}${dayKey} ${weekdayCn(entry.date, tz)}${relativeDayLabel(entry.date, now, tz)} ——`,
         );
       }
       // 不再拼相对时间段（「3m ago」每轮重算会让整个块字节每轮变化）：
       // 绝对时间 + 分日相对标签 + system 当前时间，已足够精确到分钟。
-      rows.push(`- ${formatLocalDateTime(entry.date)} ${weekdayCn(entry.date)} ${entry.roleLabel}`);
+      rows.push(`- ${formatLocalDateTime(entry.date, tz)} ${weekdayCn(entry.date, tz)} ${entry.roleLabel}`);
     }
     // 会话跨度：时间轴会被窗口截断，截断后模型只看得到最近若干条，容易把
     // "这段对话就是今天开始的"当成事实。首行给出完整跨度（含窗口外的首条）。
     rows.unshift(
-      `- 本段对话跨度：${formatLocalDateTime(first.date)} → ${formatLocalDateTime(last.date)}` +
+      `- 本段对话跨度：${formatLocalDateTime(first.date, tz)} → ${formatLocalDateTime(last.date, tz)}` +
         `（共 ${timeline.length} 条有时间的消息）`,
     );
     const timelineMsg: ChatCompletionMessageParam = markTurnScaffold({

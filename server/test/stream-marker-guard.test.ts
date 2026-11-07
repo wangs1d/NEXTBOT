@@ -188,3 +188,4 @@ test("漏下划线变体单行完整块：块外两段拼接", () => {
   const out = g.feed("前文[NEXT_UPSTART]建议[NEXT_UPEND]后文\n");
   assert.equal(out, "前文后文\n");
 });
+

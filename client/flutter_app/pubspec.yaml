@@ -17,6 +17,10 @@ dependencies:
   audioplayers: ^6.1.0
   url_launcher: ^6.3.0
   webview_windows: ^0.4.0
+  # Android/iOS 端 emotion-ball 表情球：与桌面 WebView2 同一份自包含宿主页
+  # （assets/emotion_ball/host.html），经 loadHtmlString 内嵌，见
+  # features/chat/emotion_ball_view_mobile.dart
+  webview_flutter: ^4.10.0
   speech_to_text: ^7.0.0
   permission_handler: ^11.3.1
   geolocator: ^13.0.2

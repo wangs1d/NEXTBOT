@@ -51,9 +51,10 @@ test("task 模式 mood 由 personaMood 承担（serious），适配块只剩模�
   assert.equal(
     stablePrefix.some((b) => b.startsWith("【说话方式")), false,
   );
-  const mood = dynamicContext.find((b) => b.startsWith("【人格·状态"));
+  const mood = dynamicContext.find((b) => b.startsWith("【状态】"));
   assert.ok(mood, "serious mood 应沉动态层");
-  assert.ok(mood.includes("零调侃"));
+  // 2026-11-05：mood 块只报事实（「这轮是办事/交付语境」），不再有「零调侃」类行为指令
+  assert.ok(mood.includes("办事") || mood.includes("交付"));
   // 语气/情绪/关系行不再进【本轮说话适配】（mood 块已承担）
   const guide = dynamicContext.find((b) => b.startsWith("【本轮说话适配】"));
   assert.ok(guide);

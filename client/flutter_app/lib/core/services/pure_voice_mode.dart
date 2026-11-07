@@ -1,4 +1,5 @@
 import "dart:async";
+import "dart:math" as math;
 
 import "package:flutter/foundation.dart";
 import "package:window_manager/window_manager.dart";
@@ -55,6 +56,17 @@ class PureVoiceModeController {
   Timer? _submitSafetyTimer;
   Timer? _transientEntryTimer;
   bool _duplexActive = false;
+
+  // ── 常规聊天链路的流式语音（ChatAssistantSpeech 数据帧）──────────────
+  // 模型 delta 边生成边到，按句末标点切句后串行送 TTS：首句不必等整段生成完。
+  // 这些帧**只进语音通道**，不进聊天消息列表（文字仍由 done 一次性落屏）。
+  String _speechBuffer = "";
+  bool _speechStreamedThisTurn = false;
+  bool _speechFinalReceived = false;
+  Future<void> _ttsChain = Future<void>.value();
+  static final RegExp _sentenceBoundary = RegExp(r"[。！？!?；;\n]");
+  static const int _speechMaxChunkChars = 80;
+
   static const List<String> _exitPhrases = <String>[
     "打开界面",
     "打开主界面",
@@ -129,6 +141,8 @@ class PureVoiceModeController {
     _submitSafetyTimer?.cancel();
     _transientEntryTimer?.cancel();
     _duplexActive = false;
+    _resetSpeechTurn();
+    unawaited(TtsPlayer.instance.stop());
     VoiceDuplexService.instance.onTurnCompleted = null;
     VoiceDuplexService.instance.onError = null;
     VoiceDuplexService.instance.onConnectionLost = null;
@@ -155,15 +169,129 @@ class PureVoiceModeController {
   /// 回复收尾钩子（main.dart chat.assistant_done 落聊天流后调用）。
   /// TTS 播报，播完开 10 秒追问窗口；不弹文字卡（2026-10-19 用户定调：
   /// 纯语音模式只留语音回复，不单独展示文字）。
+  ///
+  /// 2026-11-05：若本轮已由 `onSpeechFrame` 逐句流式播报，这里绝不整段重播
+  /// （同一句话听两遍）；只有旧服务端 / 完全没收到语音数据帧时才走整段兜底。
   Future<void> notifyReply(String replyText) async {
     if (!isActive.value) return;
     _submitSafetyTimer?.cancel();
+    if (_speechFinalReceived || _speechStreamedThisTurn) {
+      if (!_speechFinalReceived) {
+        // final 帧丢失（WS 抖动）：把尾部半句补上并按现有队列收尾。
+        _drainSpeechBuffer(flush: true);
+        unawaited(_finishSpeechStream());
+      }
+      return;
+    }
     final String snippet =
         replyText.trim().isEmpty ? "（本轮无文字回复）" : replyText.trim();
     _phase = PureVoicePhase.speaking;
     IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "回复已落聊天流");
     await _speak(_speakableText(snippet));
     _startFollowUpWindow();
+  }
+
+  // ── 常规聊天链路的流式语音（打字机退役后保留流式 TTS）──────────────
+
+  /// 消费服务端 `chat.assistant_speech` 数据帧。
+  ///
+  /// - 增量帧：攒到句末标点（或 80 字上限）就切一句进串行播报队列；
+  /// - final 帧：flush 尾部半句、等待队列播完、开追问窗口；
+  /// - 本轮 0 增量（卡片轮 / 结构化标记轮被服务端静默）：用 finalText 退化成
+  ///   一次整段合成，等价打字机退役前的播报行为，不会「有回复没声音」。
+  void onSpeechFrame({
+    required String chunk,
+    required bool isFinal,
+    bool hasIncrements = false,
+    String finalText = "",
+  }) {
+    // 实时语音通道有自己的 tts.chunk 裸 PCM 流，两条通路不混用。
+    if (!isActive.value || _duplexActive) return;
+    if (chunk.isNotEmpty) {
+      _speechStreamedThisTurn = true;
+      _submitSafetyTimer?.cancel();
+      _phase = PureVoicePhase.speaking;
+      IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "流式语音");
+      _speechBuffer += chunk;
+      _drainSpeechBuffer(flush: false);
+    }
+    if (!isFinal) return;
+    _speechFinalReceived = true;
+    _drainSpeechBuffer(flush: true);
+    if (!hasIncrements &&
+        !_speechStreamedThisTurn &&
+        finalText.trim().isNotEmpty) {
+      _enqueueSpeak(finalText);
+    }
+    unawaited(_finishSpeechStream());
+  }
+
+  /// 切句：优先句末标点，长句按字符上限切，避免首句一直等不到标点才出声。
+  void _drainSpeechBuffer({required bool flush}) {
+    while (_speechBuffer.isNotEmpty) {
+      final Match? boundary = _sentenceBoundary.firstMatch(_speechBuffer);
+      final int cutAt = boundary != null
+          ? math.min(boundary.end, _speechMaxChunkChars)
+          : (flush || _speechBuffer.length >= _speechMaxChunkChars
+              ? math.min(_speechBuffer.length, _speechMaxChunkChars)
+              : -1);
+      if (cutAt < 0) break;
+      final String piece = _speechBuffer.substring(0, cutAt).trim();
+      _speechBuffer = _speechBuffer.substring(cutAt);
+      if (piece.isNotEmpty) _enqueueSpeak(piece);
+    }
+  }
+
+  /// TTS 是单例播放器（开播会停掉上一段），必须串行：合成 → 播完 → 下一段。
+  void _enqueueSpeak(String text) {
+    final String speakable = _speakableText(text).trim();
+    if (speakable.isEmpty) return;
+    _ttsChain = _ttsChain
+        .then<void>((_) => _speakOne(speakable))
+        .catchError((Object e) {
+      debugPrint("[PureVoice] streaming tts segment failed: $e");
+    });
+  }
+
+  Future<void> _speakOne(String text) async {
+    final String? audio = await BriefingTtsApi.fetchSpeech(
+      text,
+      timeout: const Duration(seconds: 20),
+    );
+    if (audio == null) return;
+    final Completer<void> finished = Completer<void>();
+    void onFinished() {
+      if (!finished.isCompleted) finished.complete();
+    }
+
+    TtsPlayer.instance.addOnCompleted(onFinished);
+    try {
+      final bool started = await TtsPlayer.instance.playFromBase64(audio);
+      if (!started) return;
+      await finished.future.timeout(
+        const Duration(seconds: 30),
+        onTimeout: () {},
+      );
+    } finally {
+      TtsPlayer.instance.removeOnCompleted(onFinished);
+    }
+  }
+
+  Future<void> _finishSpeechStream() async {
+    _phase = PureVoicePhase.speaking;
+    IslandRealFeeds.setVoiceEntry(title: "播报中", trailing: "流式语音");
+    await _ttsChain;
+    if (!isActive.value) return;
+    _startFollowUpWindow();
+  }
+
+  /// 新一轮用户开口时清空上一轮的流式语音记账（不打断正在播的音频：用户
+  /// 主动插话时由 TtsPlayer 单例开播新段自然顶掉旧段）。
+  void _resetSpeechTurn() {
+    _speechBuffer = "";
+    _speechStreamedThisTurn = false;
+    _speechFinalReceived = false;
+    _ttsChain = Future<void>.value();
   }
 
   // ── 实时语音通路 ──
@@ -228,6 +356,7 @@ class PureVoiceModeController {
   /// 识别文本接管（声纹验证通过才会回调）：退出指令截胡；其余置「思考中」
   /// 并转交原回调（填输入框 + 发送，对话记录照常落聊天流）。
   void _onVoiceText(String text) {
+    _resetSpeechTurn();
     final String t = text.trim();
     final String normalized = t.replaceAll("。", "").replaceAll("，", "");
     for (final String phrase in _exitPhrases) {
@@ -348,10 +477,17 @@ class PureVoiceModeController {
     await TtsPlayer.instance.playFromBase64(base64Audio);
   }
 
-  /// TTS 喂给朗读端的口语化清洗：剥代码块/表格/常见 markdown 标记。
+  /// TTS 喂给朗读端的口语化清洗：剥代码块/结构化协议块/表格/markdown 标记。
+  /// 流式帧已经过服务端出口净化，这里再挡一次卡片 JSON 与形态声明，
+  /// 避免「模型回复是流式」把机器可读结构念出声。
   String _speakableText(String text) {
     String t = text;
     t = t.replaceAll(RegExp(r"```[\s\S]*?```"), " 代码略。 ");
+    t = t.replaceAll(
+      RegExp(r"\[[A-Z_]+_START\][\s\S]*?\[[A-Z_]+_END\]"),
+      " ",
+    );
+    t = t.replaceAll(RegExp(r"\[[A-Z_:]+\][^\n]*"), " ");
     t = t.replaceAll(RegExp(r"\|"), "，");
     t = t.replaceAll(RegExp(r"[*#>`_~\[\]]"), "");
     t = t.replaceAll(RegExp(r"\n{2,}"), "。");

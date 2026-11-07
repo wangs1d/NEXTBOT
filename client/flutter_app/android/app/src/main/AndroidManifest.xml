@@ -164,6 +164,12 @@
             android:name=".AlarmClockReceiver"
             android:exported="false"/>
 
+        <!-- 系统围栏触发（LocationManager.addProximityAlert 的 PendingIntent 落点）：
+             App 被杀也能收到，是「到达某地」在后台唯一可靠的触发方式 -->
+        <receiver
+            android:name=".GeofenceReceiver"
+            android:exported="false"/>
+
         <!-- 闹钟通知动作（贪睡/关闭）：转回 Dart AlarmEngine 或 REST 兜底 -->
         <receiver
             android:name=".AlarmRingActionsReceiver"

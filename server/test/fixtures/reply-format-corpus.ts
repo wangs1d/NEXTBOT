@@ -110,7 +110,7 @@ const POSITIVE: ReplyFormatCase[] = [
   },
   {
     name: "pos-raw-search-json-rescue",
-    note: "LLM 把搜索工具原始 JSON 吐进正文——detectRawSearchResultJson 确定性转 search_result 卡，脏 JSON 不透出",
+    note: "LLM 把搜索工具原始 JSON 吐进正文——detectRawSearchResultJson 剥掉 JSON（不再转搜索卡），脏 JSON 与来源链接都不透出",
     text: JSON.stringify({
       items: [
         {
@@ -283,7 +283,7 @@ const NEGATIVE: ReplyFormatCase[] = [
   },
   {
     name: "neg-kpi-list-suppressed-by-data-brief",
-    note: "列表 + KPI 密集（DATA_TOKEN_RE 可识别的单位 ≥3 个、全文 ≥60 字）——data_brief 让位规则（result_card ×0.5）的历史语义：数字清单应上数据快报而非通用卡",
+    note: "列表 + KPI 密集（全文 ≥60 字）——data_brief 已退役（2026-11-06），数字清单回归 result_card 列表切卡的历史语义",
     text: [
       "本周进度小结：",
       "- 专注时长 320 分钟",

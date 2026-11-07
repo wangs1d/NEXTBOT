@@ -34,10 +34,29 @@ export function resetAnySearchImageProbeForTests(): void {
   anysearchImageProbe = null;
 }
 
-/** AnySearch 请求头：无 key（云端代理形态）时不带 authorization 头。 */
-function anysearchHeaders(cfg: SearchApiConfig): Record<string, string> {
+/**
+ * 失效 key 自愈（2026-11-05 真机事故）：SEARCH_API_KEY 过期后，每个请求都被上游
+ * 401 打回 → 空结果 → 调用方降级爬虫，表现为「搜索能力整块消失」，而官方端点
+ * 匿名访问本来是通的。一个脏配置不该让整条联网链路判死，故：遇到 401 时把该 key
+ * 在进程内判死一段时间，改匿名直连并当场重试一次。换回有效 key 时只影响首个
+ * 请求（先带 key 后 401 再匿名），其余路径不变。
+ */
+const API_KEY_REJECT_COOLDOWN_MS = 10 * 60 * 1000;
+let apiKeyRejectedUntil = 0;
+
+function isApiKeyRejected(now = Date.now()): boolean {
+  return apiKeyRejectedUntil > now;
+}
+
+/** 仅供测试：清除失效 key 判死窗口。 */
+export function resetAnySearchKeyRejectionForTests(): void {
+  apiKeyRejectedUntil = 0;
+}
+
+/** AnySearch 请求头：无 key（云端代理形态）或 key 已判死时不带 authorization 头。 */
+function anysearchHeaders(cfg: SearchApiConfig, opts: { anonymous?: boolean } = {}): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
+  if (cfg.apiKey && !opts.anonymous && !isApiKeyRejected()) headers.authorization = `Bearer ${cfg.apiKey}`;
   return headers;
 }
 
@@ -81,18 +100,29 @@ async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | 
 async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): Promise<InfoSearchItem[]> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
-  try {
-    const response = await fetch(ANYSEARCH_ENDPOINT, {
+  const body = JSON.stringify({
+    query: keyword,
+    max_results: Math.max(limit, 5),
+    zone: cfg.anysearchZone === "intl" ? "intl" : "cn",
+    language: cfg.anysearchLang,
+  });
+  const send = (anonymous: boolean) =>
+    fetch(ANYSEARCH_ENDPOINT, {
       method: "POST",
-      headers: anysearchHeaders(cfg),
-      body: JSON.stringify({
-        query: keyword,
-        max_results: Math.max(limit, 5),
-        zone: cfg.anysearchZone === "intl" ? "intl" : "cn",
-        language: cfg.anysearchLang,
-      }),
+      headers: anysearchHeaders(cfg, { anonymous }),
+      body,
       signal: controller.signal,
     });
+  try {
+    let response = await send(false);
+    // 401 + 确实带了 key → key 失效，判死并当场匿名重试（见 isApiKeyRejected 注释）
+    if (response.status === 401 && cfg.apiKey && !isApiKeyRejected()) {
+      apiKeyRejectedUntil = Date.now() + API_KEY_REJECT_COOLDOWN_MS;
+      console.warn(
+        `[SearchApi] AnySearch 401：SEARCH_API_KEY 已失效，${Math.round(API_KEY_REJECT_COOLDOWN_MS / 60_000)} 分钟内改匿名直连（检查 server/.env.local）`,
+      );
+      response = await send(true);
+    }
     if (!response.ok) {
       console.warn(
         `[SearchApi] AnySearch HTTP ${response.status} ${response.statusText} -> query="${keyword.slice(0, 40)}"`,

@@ -26,8 +26,29 @@ export interface ProductSummary {
   imageUrl?: string;
 }
 
-/** 结算页快照（阶段一返回）。 */
-export interface CheckoutSnapshot {
+/**
+ * 商品详情页的一个规格维度（如「颜色」「存储容量」）及其全部可选项。
+ *
+ * 2026-11-06 用户要求：「把商家提供的所有组合、能够选择的都呈现给用户」。
+ * 所以这里返回的是**维度 + 全部选项**（含无货项），而不是替用户挑好的结果——
+ * 哪些能点、哪些已售罄由页面自己标（disabled），不做服务端裁剪。
+ */
+export interface ProductSpecGroup {
+  /** 维度名（页面原文，如「颜色」「版本」「尺码」） */
+  key: string;
+  options: ProductSpecOption[];
+}
+
+export interface ProductSpecOption {
+  /** 选项文案（页面原文） */
+  label: string;
+  /** 页面标了无货/不可选 */
+  disabled?: boolean;
+  /** 页面默认选中 */
+  selected?: boolean;
+}
+
+/** 结算页快照（阶段一返回）。 */export interface CheckoutSnapshot {
   ok: boolean;
   /** 商品名 */
   itemTitle?: string;
@@ -75,6 +96,17 @@ export interface CancelResult {
 export type ShoppingPlatformCategory = "general" | "local-life" | "ticketing";
 
 /**
+ * 取价所需登录态（必填，同 category 一样是编译期约束）：
+ *   - anonymous：无需登录即可读到真实价格（苏宁/什么值得买）；
+ *   - login    ：无登录态会被拦到登录页（淘宝/京东/拼多多…）。
+ *
+ * 手机端没有可视浏览器，比价缺省集合只放 anonymous 平台——否则一开跑就
+ * 全是登录交接、一个价也拿不到（2026-11-06 无头实测）。带登录能力的平台
+ * 在用户已有授权 Cookie 时仍会补进缺省集合。
+ */
+export type ShoppingAuthMode = "anonymous" | "login";
+
+/**
  * 购物平台适配器接口。
  *
  * 每个平台（taobao/jd/meituan/...）实现此接口，封装该平台的 URL 模板与 Playwright 选择器。
@@ -94,6 +126,19 @@ export interface ShoppingPlatformAdapter {
    * ticketing=演出票务（大麦/猫眼）。
    */
   category: ShoppingPlatformCategory;
+
+  /**
+   * 取价所需登录态（必填）：anonymous=匿名可读真实价；login=必须登录。
+   * 比价缺省集合据此收窄（见 listDefaultComparePlatforms）。
+   */
+  authMode: ShoppingAuthMode;
+
+  /**
+   * 有没有真实结算流程（默认 true）。情报站（什么值得买）只报价、没有
+   * 自己的购物车/结算页，置 false——候选卡据此把主按钮换成「只报价」，
+   * 其余平台（含需扫码登录的）都能在卡内走完 登录→结算。
+   */
+  supportsCheckout?: boolean;
 
   /**
    * 生成搜索 URL。
@@ -136,6 +181,21 @@ export interface ShoppingPlatformAdapter {
 
   /** 取消指定订单。调用前页面应已处于订单详情或订单列表页。 */
   cancelOrder(page: Page, orderId: string): Promise<CancelResult>;
+
+  /**
+   * 可选：在商品详情页读出**全部**规格维度与选项（不裁剪、不替用户挑）。
+   *
+   * 返回空数组表示「这个商品没有可拆的规格」或「这个平台页面读不出来」——
+   * 调用方据此直接去结算，不给用户一个空的规格页。读不到就如实说读不到，
+   * 不编造「颜色：黑/白」这种页面里没有的选项。
+   */
+  extractSpecs?(page: Page): Promise<ProductSpecGroup[]>;
+
+  /**
+   * 可选：按用户选中的规格在详情页点选一遍（key→label），再进结算。
+   * 失败时调用方退回默认 SKU 并在卡面说明「按默认规格结算」。
+   */
+  applySpecs?(page: Page, picked: Record<string, string>): Promise<{ ok: boolean; error?: string }>;
 }
 
 /** adapter 内部通用错误归一化。 */

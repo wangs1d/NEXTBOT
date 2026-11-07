@@ -12,6 +12,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - agent_browser.extract_text  提取页面文本 + 可交互元素列表
  *   - agent_browser.wait_for      等待元素出现
  *   - agent_browser.close         关闭会话
+ *   - agent_browser.handoff       通用人工交接（页面截图+指引推给用户）
  *
  * 核心定位：通用浏览器层（客户端在线时优先在**用户可见的内置浏览器**里操作，
  * 登录态即用户本人、全程可见可接管；不在线时回退服务端无头浏览器），维持有状态
@@ -40,10 +41,11 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
     function: {
       name: "agent_browser.open",
       description:
-        "优先在用户可见的内置浏览器（WebView2）里打开，登录态即用户本人；客户端不在线时回退服务端无头浏览器。\n" +
+        "优先在用户可见的内置浏览器（WebView2）里打开，登录态即用户本人；手机端没有可视浏览器，" +
+        "或客户端不在线时自动回退服务端无头浏览器（远端执行，结果与截图会回到聊天）。\n" +
         "后续所有操作（click/type/scroll/screenshot/extract_text/wait_for/close）都须传此 sessionId。\n" +
         "适用场景：用户说「帮我打开某网站」「去这个链接看看」「帮我在网页上操作」等。\n" +
-        "**撞到登录墙/验证码时**：回执带 humanRequired，页面已留在内置浏览器，告诉用户去登录/验证并点「我已完成」，别把失败当成普通报错。\n" +
+        "**撞到登录墙/验证码时**：回执带 humanRequired，页面会保留等待；可视浏览器里由用户直接登录，无头模式会把登录二维码推到聊天，用户完成后回复即可继续，别把失败当成普通报错。\n" +
         "安全：https 任意 URL 允许；http 仅限 localhost。对已授权站点（淘宝/京东/携程等）自动注入用户 Cookie。\n" +
         "沙箱模式下也可用。会话空闲 10 分钟自动过期。\n" +
         "与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作。",
@@ -297,6 +299,35 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
           sessionId: { type: "string", description: "要关闭的会话 ID。" },
         },
         required: ["sessionId"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent_browser.handoff",
+      description:
+        "通用人工交接：把当前页面截图和你写的操作指引实时推送到用户聊天流（手机端也会收到图片卡），然后等待用户完成。\n" +
+        "**何时必须用**：任务推进到只有用户本人能做的步骤时——扫码登录、输入短信验证码、支付/付款确认、选择商品规格或选项、点击「同意授权」、人脸/实名核验等。\n" +
+        "用法：先截到该步骤所在的页面状态（必要时先 click/scroll 让页面停在待操作处），再调用本工具，instruction 写清楚「这一步要做什么」。\n" +
+        "推送成功后回执 cardPushed=true：正文只需口头提示用户完成哪一步，**不要**在正文贴图片链接或 URL；用户完成后会回复你，届时继续任务（会话在等待期间不会过期）。\n" +
+        "同一条指引不会重复推送（防刷屏）；普通报错/加载失败不是交接理由，不要用本工具。\n" +
+        "注：撞到登录墙/验证码时 open/click 回执会自动带 humanRequired 并自动推图，那种情况不必再手动调用本工具。",
+      parameters: {
+        type: "object",
+        properties: {
+          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
+          instruction: {
+            type: "string",
+            description: "告诉用户这一步具体要做什么（必填）。例如：「请用微信扫描二维码登录，完成后回复我」。",
+          },
+          title: {
+            type: "string",
+            description: "卡片标题（可选）。缺省为「需要你操作」；例如「扫码支付」「选择房型」。",
+          },
+        },
+        required: ["sessionId", "instruction"],
         additionalProperties: false,
       },
     },

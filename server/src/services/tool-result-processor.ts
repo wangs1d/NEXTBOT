@@ -1,7 +1,7 @@
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
-import { decideRender, applyBodyForm, applyCards, effectStatusOf } from "../render/index.js";
+import { effectStatusOf, renderTurn } from "../render/index.js";
 import type { TurnEffect } from "../render/types.js";
 import {
   hasInternalFrameTag,
@@ -325,57 +325,18 @@ function detectRawSearchResultJson(
     if (jsonStart < 0) continue;
     const before = trimmed.slice(0, jsonStart).trim();
     const after = trimmed.slice(jsonStart + raw.length).trim();
-    // 「搜索结果公告句」：LLM 在 JSON 前写的「以下是搜索结果：」「下面是相关搜索：」等
-    // 引导句。卡片本身已带 "搜索结果" 标题，重复公告无价值，识别后丢弃避免冗余。
-    // 匹配规则：长度 ≤ 60 且命中公告关键词，标点结尾视为完整公告。
+    // 2026-11-05 用户定稿：搜索结果不再转卡，去卡后正文只剩模型自己写的话，
+    // 因此 JSON 后面的收尾句一律保留（此前无卡可托时会当噪声丢掉）；
+    // JSON 前面的「以下是搜索结果：」这类公告句仍丢弃——去卡后它后面没有内容。
     const announceRe = /(搜索结果|搜到的|搜索到的|相关搜索|检索结果|以下是|下面是|查到了|查询到)/;
     const beforeIsAnnounce = before.length > 0 && before.length <= 60 && announceRe.test(before);
-    const afterIsAnnounce = after.length > 0 && after.length <= 60 && announceRe.test(after);
-    // after 若超出公告范围（带新结论/追问）则保留，否则视为"希望对您有帮助"等收尾短句丢弃
-    const afterLooksLikeTrailer = after.length > 0 && after.length > 60;
-    const cleanText = [
-      beforeIsAnnounce ? "" : before,
-      afterLooksLikeTrailer ? after : "",
-    ]
+    const cleanText = [beforeIsAnnounce ? "" : before, after]
       .filter(Boolean)
       .join("\n\n")
       .trim();
     return { items: searchItems, cleanText };
   }
   return null;
-}
-
-/**
- * 把搜索结果 items 数组拼成自然段 + AGENT_RESULT_CARD 卡片，让前端走搜索结果组件渲染。
- * 这是 detectRawSearchResultJson 的"修复器"——把脏 JSON 转换为结构化卡片。
- *
- * item.text 格式遵循 _SearchResultCard 的约定：用 `:` 把标题与摘要拆开，
- * 让前端组件把第一段当标题（加粗）、后续当描述。卡片不承载网页链接。
- */
-function buildSearchResultCardFromItems(
-  items: InfoSearchItem[],
-  leadText: string,
-  toolName: string | undefined,
-): string {
-  const title = "搜索结果";
-  const cardItems = items
-    .filter((it) => !!it.title)
-    .map((it) => {
-      const text = it.snippet ? `${it.title}: ${it.snippet}` : it.title;
-      return { type: "num" as const, text };
-    });
-  const payload = {
-    avatar: "NB",
-    avatarStyle: "default",
-    title,
-    items: cardItems,
-    footer: `共 ${cardItems.length} 条结果`,
-    cardType: "search_result",
-    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
-  };
-  const card = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
-  if (!leadText) return card;
-  return `${leadText}\n\n${card}`;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -701,7 +662,7 @@ function buildTravelItineraryCardFromPlan(
  * 展示价值，不能一刀切拦截）：
  *   - travel_itinerary 行程卡：携带 autoOpen 与结构化行程数据，剥掉会丢右侧
  *     双面板的自动展开和面板数据；
- *   - search_result / 通用列表卡：正文场景的搜索结果、结论列表，与 mediaCards
+ *   - 通用列表卡：正文场景的结论列表，与 mediaCards
  *     内容不同源，剥掉等于把有价值的信息一起扔掉；
  *   - 解析失败的卡片块：按可剥处理（防止 LLM 抄坏的 JSON 透出到前端）。
  */
@@ -875,90 +836,117 @@ export class ToolResultProcessor {
       mediaCardCount?: number;
       /** 会话当前话题：fold 卡面主题的首选来源 */
       activeTopic?: string;
+      /** 场景数据面（如 eveningDigest）：由持有数据的调用方注入 */
+      renderPayloads?: Record<string, unknown>;
+      /**
+       * rewritesText 场景（明日预览/盘点）在出口整体接管正文时回调。调用方
+       * （chat done 装配）据此把分泡活轮收口成整段替换——分泡里还是模型原稿、
+       * finalText 已是确定性版式，不收口 = 版式永远不落屏（气泡与正文不同源）。
+       */
+      onSceneRewrite?: (info: { sceneId: string }) => void;
     },
   ): string {
     if (!this.options.enabled) {
       return text;
     }
 
-    // 人化改稿闸已删除（2026-10-13 根修）：本管线处理的是**已流式送达用户**的
-    // 最终文本，prose 层再改写（humanizeAssistantText 的客服腔清洗/口头禅清理）
-    // 就是「先流式输出一段、done 落库另一段」的根源之一。模型文本即权威，
-    // 这里只做结构化（卡片/标记/渲染路由）。人化约束归 prompt 层；
-    // 认知快路径（agent-core）在流式**前**的人化保持不变（流=落库一致）。
+    // P2 出口归一（2026-11-07）：此前本方法有 8 个「不做渲染决策就 return」
+    // 的早退分支，新增场景永远命不中它们；现在收敛成 preClean() 三阶段，
+    // 决策/形态/卡/信封只在 renderTurn 一处产出，全项目单一出口。
+    const pre = this.preClean(text, opts);
+    if (pre.kind === "bail") return pre.text;
+    const workingText = pre.text;
+    const llmHint = pre.hint;
 
-    // === -1. 系统内部帧守卫：线程存档里的非用户可见文本既不做形态判定，也不下发 ===
-    // 真实数据回放发现：[session-recap] 记忆回顾、[后台任务记录]、[上一轮回复中断]
-    // 这类系统帧若流入本管线，会被列表/时间戳特征误判上卡（回放案例：recap 带
-    // 日期列表被判成 progress 卡）。
-    //
-    // 2026-10-08 升级：此前这里 return humanize(text) —— 语义只是「跳过渲染路由」，
-    // 文本原样交回，照样进 finalText → chat.assistant_done → 气泡（手机端事故气泡
-    // 就是这么来的：模型把线程里的占位帧当「自己上一轮说过的话」复读，本守卫放行了）。
-    // 现在按内部帧契约判定：整条是内部帧 → 直接不下发；混有内部帧 → 剥帧留正文。
+    const directEffects: TurnEffect[] =
+      !opts?.plainTextMode && opts?.toolName && opts?.toolResult
+        ? [{ tool: opts.toolName, status: effectStatusOf(opts.toolResult), result: opts.toolResult }]
+        : [];
+    const result = renderTurn(
+      {
+        text: workingText,
+        userText: opts?.userText,
+        toolName: opts?.toolName,
+        effects: [...directEffects, ...(opts?.effects ?? [])],
+        modelHint: llmHint,
+        plainTextMode: opts?.plainTextMode,
+        mediaCardCount: opts?.mediaCardCount,
+        activeTopic: opts?.activeTopic,
+        // 场景数据面（明日预览等）：调用方注入，场景不自己去读
+        payloads: opts?.renderPayloads,
+      },
+      "full",
+    );
+    console.log(
+      `[ToolResultProcessor] render: ${result.decision.reason} media=${opts?.mediaCardCount ?? 0}` +
+        ` scene=${result.envelope.meta.sceneId} failures=${result.envelope.meta.failures.length}`,
+    );
+    if (result.envelope.meta.rewritesText) {
+      opts?.onSceneRewrite?.({ sceneId: result.envelope.meta.sceneId ?? "" });
+    }
+    return result.text;
+  }
+
+  /**
+   * 出口前的确定性清洗三阶段（P2）。bail = 本轮不进渲染决策，直接返回清洗结果；
+   * continue = 交给 renderTurn 做唯一一次决策。任何阶段抛异常都不允许发生——
+   * 每个判定都是纯函数，失败一律退化成 continue，保证恒有落点。
+   *
+   *  ① 内部帧 / 系统帧 / 空文本：不下发或只剥帧；
+   *  ② 模型自声明与已有结构化块：合法卡块归一化，已有标记整轮放行（避免二次处理）；
+   *  ③ 原始 JSON 直吐：搜索结果剥 JSON、行程 JSON 转成确定性行程卡。
+   */
+  private preClean(
+    text: string,
+    opts?: Parameters<ToolResultProcessor["processAssistantText"]>[1],
+  ):
+    | { kind: "bail"; text: string }
+    | { kind: "continue"; text: string; hint: string | null } {
+    // ① 系统内部帧守卫：线程存档里的非用户可见文本既不做形态判定，也不下发。
     if (isInternalFrameText(text)) {
       console.log("[ToolResultProcessor] system_frame: hidden from user");
-      return "";
+      return { kind: "bail", text: "" };
     }
-    // 2026-10-11 升级：XML 形态的 `<system>` control frame（上游 harness 轨迹切分帧）
-    // 整条就是它时同样不下发。实测事故：旅行规划轮 finalText 61 字全是
-    // `<system>[trajectory-slicing]…`，此前只有 `[…]` 形态判定，整条漏网直穿气泡。
     if (isSystemFrameText(text)) {
       console.log("[ToolResultProcessor] system_frame(system): hidden from user");
-      return "";
+      return { kind: "bail", text: "" };
     }
+    let cleanedText = text;
     if (hasInternalFrameTag(text)) {
       const cleaned = stripInternalFrames(text);
       if (!cleaned.trim()) {
         console.log("[ToolResultProcessor] system_frame: stripped to empty");
-        return "";
+        return { kind: "bail", text: "" };
       }
-      text = cleaned;
+      cleanedText = cleaned;
     }
 
-    // === 0. 模型自声明的形态（[RENDER_HINT:]）与卡片块 ===
-    // 形态声明只是决策层的输入之一（业务卡优先于它），不再在管线里直接 return；
-    // 卡片块先经校验/归一化（合法补默认值、非法整块丢弃），坏 JSON 不透出。
-    const { rawHint: llmHint, cleanText: textAfterLlmHint } = extractLlmRenderHint(text);
-    let workingText = stripResidualRenderDeclarations(
+    // ② 模型自声明的形态（[RENDER_HINT:]）与卡片块：只是决策层输入之一。
+    const { rawHint: llmHint, cleanText: textAfterLlmHint } =
+      extractLlmRenderHint(cleanedText);
+    const workingText = stripResidualRenderDeclarations(
       sanitizeModelCardBlocks(textAfterLlmHint),
     );
-
     const trimmed = workingText.trim();
-    // 空文本返回"消毒后"的 workingText（模型坏卡块已被丢弃），不能返回原文——
-    // 否则被 sanitize 丢弃的损坏 JSON 会从早退分支漏回前端。
-    if (!trimmed) return workingText;
-
+    // 空文本返回"消毒后"的 workingText（模型坏卡块已被丢弃），不能返回原文。
+    if (!trimmed) return { kind: "bail", text: workingText };
     // 已带标记的直接放行（避免二次处理）
     if (
       trimmed.includes("[CONTENT_SUMMARY_V2_START]") ||
       trimmed.includes("[AGENT_RESULT_CARD_START]")
     ) {
-      return workingText;
+      return { kind: "bail", text: workingText };
     }
 
-// === 优先级 -1：LLM 把 tool result 原始 JSON 直接吐到回复里 → 转结构化卡片 ===
-    // 在所有 hint 路由之前优先检测，确保脏 JSON 不泄漏到前端。
+    // ③ 原始 JSON 直吐：在所有形态路由之前优先检测，确保脏 JSON 不泄漏到前端。
     const detected = detectRawSearchResultJson(trimmed);
     if (detected) {
       console.log(
-        `[ToolResultProcessor] raw_search_result_json: items=${detected.items.length} ` +
+        `[ToolResultProcessor] raw_search_result_json: stripped items=${detected.items.length} ` +
           `tool=${opts?.toolName ?? "unknown"}`,
       );
-      const cardText = buildSearchResultCardFromItems(
-        detected.items,
-        detected.cleanText,
-        opts?.toolName,
-      );
-      if (opts?.plainTextMode) {
-        return detected.cleanText;
-      }
-      return cardText;
+      return { kind: "bail", text: detected.cleanText };
     }
-
-    // === 优先级 -1.5：LLM 把 travel 行程 JSON 直接吐到回复里 → 转 travel_itinerary 双面板卡 ===
-    // 与上方搜索 JSON 检测同构（两者签名互斥：items+title+url vs days+name+startTime），
-    // 在 routeRender 之前拦截，确保行程 JSON 不以脏文本透出、直接上双面板卡。
     const travelDetected = detectRawTravelItineraryJson(trimmed);
     if (travelDetected) {
       const dayCount = Array.isArray(travelDetected.plan.days)
@@ -968,41 +956,15 @@ export class ToolResultProcessor {
         `[ToolResultProcessor] raw_travel_itinerary_json: days=${dayCount} ` +
           `tool=${opts?.toolName ?? "unknown"}`,
       );
-      if (opts?.plainTextMode) {
-        return buildTravelPlainTextSummary(travelDetected.plan, travelDetected.cleanText);
-      }
-      return buildTravelItineraryCardFromPlan(travelDetected.plan, travelDetected.cleanText);
+      return {
+        kind: "bail",
+        text: opts?.plainTextMode
+          ? buildTravelPlainTextSummary(travelDetected.plan, travelDetected.cleanText)
+          : buildTravelItineraryCardFromPlan(travelDetected.plan, travelDetected.cleanText),
+      };
     }
 
-    // === 渲染决策层（唯一决定者）===
-    // 卡与正文形态一次判完：业务卡来自真实回执，正文形态来自文本结构；
-    // 结构化面在场时正文只作前导，不会同时出现折叠卡。
-    const directEffects: TurnEffect[] =
-      !opts?.plainTextMode && opts?.toolName && opts?.toolResult
-        ? [{ tool: opts.toolName, status: effectStatusOf(opts.toolResult), result: opts.toolResult }]
-        : [];
-    const decision = decideRender({
-      text: workingText,
-      userText: opts?.userText,
-      toolName: opts?.toolName,
-      effects: [...directEffects, ...(opts?.effects ?? [])],
-      modelHint: llmHint,
-      plainTextMode: opts?.plainTextMode,
-      mediaCardCount: opts?.mediaCardCount,
-      activeTopic: opts?.activeTopic,
-    });
-
-    let out = applyBodyForm(workingText, decision, {
-      userText: opts?.userText,
-      toolName: opts?.toolName,
-    });
-    if (!opts?.plainTextMode) {
-      out = applyCards(out, decision).text;
-    }
-    console.log(
-      `[ToolResultProcessor] render: ${decision.reason} media=${opts?.mediaCardCount ?? 0}`,
-    );
-    return out;
+    return { kind: "continue", text: workingText, hint: llmHint };
   }
 }
 

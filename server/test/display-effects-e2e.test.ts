@@ -98,12 +98,13 @@ test("weather: 天气问答 → 口语前导 + weather 卡（真实回归场景�
   assert.equal(card.cardType, "weather");
   assert.ok(out.startsWith("王哥，明天兴义有毛毛雨"), "LLM 口语前导正文应保留在卡前");
   const items = card.items as Array<{ text: string }>;
-  assert.ok(items.some((i) => i.text.includes("92%")), "降水概率应进卡条目");
-  assert.equal(card.footer, "出门带把伞，薄外套够了");
+  assert.ok(items.some((i) => i.text.includes("今天有雨")), "92% 无时段退整天口径，不报百分号");
+  assert.equal(card.footer, "");
 });
 
-test("search: 新闻搜索 → search_result 卡（条目不带网页链接）", () => {
-  const out = runLoopTurn("最近有什么科技新闻", "帮你扫了眼今天科技圈的新鲜事：", {
+test("search: 新闻搜索 → 不出搜索卡，正文原样（2026-11-05 定稿）", () => {
+  const text = "帮你扫了眼今天科技圈的新鲜事：芯片、开源模型和卫星互联网都有新进展。";
+  const out = runLoopTurn("最近有什么科技新闻", text, {
     search: [
       {
         toolName: "search_web",
@@ -118,17 +119,13 @@ test("search: 新闻搜索 → search_result 卡（条目不带网页链接）",
       },
     ],
   });
-  const card = parseCardBlock(out);
-  assert.ok(card, `应附上 search_result 卡，实际文本: ${out}`);
-  assert.equal(card.cardType, "search_result");
-  const items = card.items as Array<{ text: string; url?: string; source?: string }>;
-  assert.ok(items.length >= 3);
-  assert.ok(items.every((i) => !i.url), "卡片条目不再承载网页链接");
-  assert.ok(items.every((i) => !i.source), "卡片条目不再承载来源站点");
-  assert.ok(items.every((i) => !i.text.includes("来源:")), "条目正文不出现「来源:」");
+  assert.equal(parseCardBlock(out), null, `搜索轮不应附任何卡，实际: ${out.slice(0, 300)}`);
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), "不应残留卡片标记");
+  assert.equal(out, text, "模型正文原样送达，不拼搜索条目/来源/链接");
+  assert.ok(!out.includes("example.com"), "不应透出网址");
 });
 
-test("search×media 意图仲裁：搜照片轮次带 search_web 回执 → 文字卡整卡让位", () => {
+test("search×media 意图仲裁：搜照片轮次带 search_web 回执 → 仍不出文字卡", () => {
   // 真实场景（2026-09-22 17:26 轮）：规划波次并行派 search_images + search_web，
   // 照片经 mediaCards 渲染后，8 条文字搜索列表再叠一张卡属冗余（用户定调）。
   const out = runLoopTurn(
@@ -155,7 +152,8 @@ test("search×media 意图仲裁：搜照片轮次带 search_web 回执 → 文�
   assert.ok(out.startsWith("她的近况照片帮你看了一圈"), "口语正文应完整保留");
 });
 
-test("search×media 零图兜底：搜图全挂时文字卡照常附", () => {
+test("search×media 零图兜底：搜图全挂时也不出文字搜索卡", () => {
+  const text = "照片源这轮没拿到，先把查到的资料放这里。";
   const searchReceipts: ReadonlyArray<ExecutedToolReceipt> = [
     {
       toolName: "search_web",
@@ -165,13 +163,12 @@ test("search×media 零图兜底：搜图全挂时文字卡照常附", () => {
       },
     },
   ];
-  // searchMediaHasItems 缺省（= 媒体 0 产出）→ 不让位，文字卡兜底
-  const out = runLoopTurn("搜索她的照片", "照片源这轮没拿到，先把查到的资料放这里。", {
+  // searchMediaHasItems 缺省（= 媒体 0 产出）→ 同样不附卡
+  const out = runLoopTurn("搜索她的照片", text, {
     search: searchReceipts,
   });
-  const card = parseCardBlock(out);
-  assert.ok(card, `零图轮应兜底附文字卡，实际: ${out.slice(0, 300)}`);
-  assert.equal(card.cardType, "search_result");
+  assert.equal(parseCardBlock(out), null, `零图轮也不应附搜索卡，实际: ${out.slice(0, 300)}`);
+  assert.equal(out, text, "正文原样");
 });
 
 test("wallet: 查余额 → wallet 卡", () => {
@@ -416,13 +413,14 @@ test("quote: markdown 引用块 → quote 卡", () => {
   assert.ok(String(card.title).includes("睡眠"), "引用正文应作为卡标题");
 });
 
-test("data_brief: 数字密集快报 → [RENDER_AS:data_brief] + KPI payload", () => {
+test("data_brief 退役: 数字密集快报不再切卡，正文按 markdown 原样输出", () => {
   const out = runLoopTurn(
     "今天行情怎么样",
     "今天A股收盘，创业板指报 2876.54 点（+2.01%），两市全天成交额 1.2万亿，北向资金净流入 85.6亿，半导体板块领涨，涨幅达到 3.2%。",
   );
-  assert.ok(out.includes("[RENDER_AS:data_brief]"), `应带 data_brief 渲染标记，实际文本: ${out}`);
-  assert.ok(out.includes("[DATA_BRIEF_START]"), "应带 KPI payload 块");
+  assert.ok(!out.includes("[RENDER_AS:data_brief]"), `不应再出数据快报卡，实际文本: ${out}`);
+  assert.ok(!out.includes("[DATA_BRIEF_START]"), "不应再出 KPI payload 块");
+  assert.ok(out.includes("创业板指"), "数字密集正文应原样保留在回复中");
 });
 
 test("summary_card: 800 字以上结构化长文 → 折叠摘要卡", () => {

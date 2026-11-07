@@ -28,7 +28,9 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Root     = 'E:\ws-project\NextBot'
+# Repo root derived from this script's location (scripts\..) so the repo can live
+# anywhere (it used to be hardcoded to E:\ws-project\NextBot and silently broke).
+$Root     = Split-Path -Parent $PSScriptRoot
 $App      = Join-Path $Root 'client\flutter_app'
 $Cache    = 'D:\Flutter\bin\cache'
 $Package  = 'nextbot'

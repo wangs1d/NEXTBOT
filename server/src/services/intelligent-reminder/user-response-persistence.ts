@@ -199,7 +199,6 @@ export class UserResponsePersistenceService {
       preferredLevel: "popup",
       levelDistribution: {
         popup: { count: 0, responses: 0, avgResponseTimeMs: 0 },
-        tts_alarm: { count: 0, responses: 0, avgResponseTimeMs: 0 },
         phone_call: { count: 0, responses: 0, avgResponseTimeMs: 0 },
       },
       hourlyResponsePattern: {},
@@ -213,15 +212,7 @@ export class UserResponsePersistenceService {
       return "phone_call";
     }
 
-    if (
-      analytics.ignoreRate > 0.3 ||
-      analytics.escalationRate > 0.4 ||
-      analytics.averageResponseTimeMs > 300_000
-    ) {
-      return "tts_alarm";
-    }
-
-    const levels: ReminderLevel[] = ["popup", "tts_alarm", "phone_call"];
+    const levels: ReminderLevel[] = ["popup", "phone_call"];
     let bestLevel: ReminderLevel = "popup";
     let bestScore = -1;
 
@@ -261,11 +252,6 @@ export class UserResponsePersistenceService {
           shown: analytics.levelDistribution.popup.count,
           responded: analytics.levelDistribution.popup.responses,
           avgResponseTimeMs: analytics.levelDistribution.popup.avgResponseTimeMs,
-        },
-        tts_alarm: {
-          shown: analytics.levelDistribution.tts_alarm.count,
-          responded: analytics.levelDistribution.tts_alarm.responses,
-          avgResponseTimeMs: analytics.levelDistribution.tts_alarm.avgResponseTimeMs,
         },
         phone_call: {
           shown: analytics.levelDistribution.phone_call.count,

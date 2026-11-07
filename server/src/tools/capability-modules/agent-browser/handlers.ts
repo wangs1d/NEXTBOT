@@ -172,6 +172,22 @@ export function createAgentBrowserCloseHandler(
   };
 }
 
+/** agent_browser.handoff —— 通用人工交接：当前页面截图 + 操作指引推给用户。 */
+export function createAgentBrowserHandoffHandler(
+  service: AgentBrowserService,
+): ToolHandler {
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const sessionId = typeof input.sessionId === "string" ? input.sessionId.trim() : "";
+    if (!sessionId) return { ok: false, error: "缺少 sessionId" };
+
+    const instruction = typeof input.instruction === "string" ? input.instruction.trim() : "";
+    if (!instruction) return { ok: false, error: "缺少 instruction（必须告诉用户这一步要做什么）" };
+
+    const title = typeof input.title === "string" && input.title.trim() ? input.title.trim() : undefined;
+    return service.handoff(context, sessionId, { instruction, title });
+  };
+}
+
 /**
  * 注册 agent-browser 全部工具到 ToolRegistry。
  *
@@ -191,4 +207,5 @@ export function registerAgentBrowserTools(
   registry.register("agent_browser.extract_text", createAgentBrowserExtractTextHandler(agentBrowserService));
   registry.register("agent_browser.wait_for", createAgentBrowserWaitForHandler(agentBrowserService));
   registry.register("agent_browser.close", createAgentBrowserCloseHandler(agentBrowserService));
+  registry.register("agent_browser.handoff", createAgentBrowserHandoffHandler(agentBrowserService));
 }

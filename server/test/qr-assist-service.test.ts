@@ -136,7 +136,8 @@ test("shopping.pay.submit builder produces confirm action card", () => {
   });
   assert.ok(payload);
   assert.equal(payload!.title, "💳 支付确认");
-  assert.equal(payload!.cardType, "order");
+  // 2026-11 购物卡族满版化：支付确认卡随族改为 shopping_pay（自绘版面）
+  assert.equal(payload!.cardType, "shopping_pay");
   assert.ok(payload!.actions && payload!.actions.length === 2, "两个按钮");
   assert.equal(payload!.actions![0].id, "shopping_pay_done");
   assert.equal(payload!.actions![0].variant, "primary");

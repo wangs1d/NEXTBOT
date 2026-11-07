@@ -12,7 +12,7 @@ import {
 import type { Note, NotesService } from "../services/notes-service.js";
 import type { ScheduleTaskService } from "../services/schedule-task-service.js";
 import type { NarrativeMemoryPort } from "../services/narrative-memory-port.js";
-import { formatNextRunAtLocal } from "./calendar-tools.js";
+import { formatNextRunAtSpoken } from "./calendar-tools.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
 const VALID_CATEGORIES = [
@@ -298,7 +298,7 @@ export function registerNotesTools(
         ok: true,
         taskId: task.taskId,
         nextRunAt: task.nextRunAt,
-        nextRunAtLocal: formatNextRunAtLocal(task.nextRunAt, tz),
+        whenSpoken: formatNextRunAtSpoken(task.nextRunAt, tz),
         note: reviewed,
         summary: "复习提醒已加入日程",
       };

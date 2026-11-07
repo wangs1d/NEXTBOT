@@ -951,9 +951,17 @@ export class ScheduleTaskService {
       const offsets = task.remindBeforeMinutes;
       if (!offsets?.length) continue;
       const runMs = new Date(task.nextRunAt).getTime();
+      // 起床闹钟段已停用（2026-11-05）：存量任务里可能还带着该段的偏移与脚本，
+      // 投递时一并跳过，避免旧日程继续按闹钟叫醒人。同偏移若还有别的活段
+      // （如 depart 恰好撞上），按活段处理，不能连坐。
+      const isRetiredOffset = (o: number) => {
+        const segs = (task.preReminders ?? []).filter((p) => p.offsetMinutes === o);
+        return segs.length > 0 && segs.every((p) => p.stage === "wake_alarm");
+      };
       // 全部到期偏移一次触发（tick 间隔大于偏移间隔时不漏提醒）
       const dueOffsets = offsets.filter(
         (o) =>
+          !isRetiredOffset(o) &&
           !(task.firedPreReminderOffsets ?? []).includes(o) &&
           now >= runMs - o * 60_000 &&
           now < runMs,

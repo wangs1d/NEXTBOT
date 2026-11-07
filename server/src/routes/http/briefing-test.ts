@@ -92,16 +92,22 @@ export function registerBriefingTestRoutes(
  * 测试专用：手动触发一次明日速览（晚间 digest）WS 事件。
  *
  * 调用方式：POST /api/test/trigger-evening-digest，body { sessionId?: string,
- * previewDate?: string }——previewDate（YYYY-MM-DD，被预告的那天）为跨零点
- * 补推用：昨晚的卡没送达、过了零点才补时传昨晚口径的「明天」，行程/天气/
- * 日期标签都会按那天对齐（DDL 块因实时扫描时点错位而省略）；不传 = 实时生成。
- * 走的是调度器同款路径（同一个 EveningDigestService 实例 + 同一种 WS 事件），
- * 所以预览出来的卡片内容、文案口径与到点自动推送一致；不等 next tick、
- * 也不写 lastSentDay，当天到点仍会正常再推一次。
+ * previewDate?: string, markSent?: boolean }——previewDate（YYYY-MM-DD，被预告
+ * 的那天）为跨零点补推用：昨晚的卡没送达、过了零点才补时传昨晚口径的「明天」，
+ * 行程/天气/日期标签都会按那天对齐（DDL 块因实时扫描时点错位而省略）；不传 =
+ * 实时生成。走的是调度器同款路径（同一个 EveningDigestService 实例 + 同一种
+ * WS 事件），所以预览出来的卡片内容、文案口径与到点自动推送一致；不等
+ * next tick、也不写 lastSentDay，当天到点仍会正常再推一次。
+ * markSent=true（2026-11-05）反过来：补发即正式送达——占用推送额度
+ * （调度器 lastSentDay 落盘），到点不再重复推，用于「昨晚漏推今晚补」场景；
+ * 凌晨（<6 点）调用时额度落到昨天而非今天（2026-11-06 修复，否则吞掉当晚推送）。
  */
 export function registerEveningDigestTestRoutes(
   app: FastifyInstance,
-  deps: Pick<HttpRouteDeps, "wsConnectionRegistry" | "eveningDigestService">,
+  deps: Pick<
+    HttpRouteDeps,
+    "wsConnectionRegistry" | "eveningDigestService" | "eveningDigestScheduler"
+  >,
 ): void {
   const service = deps.eveningDigestService;
   if (!service) return;
@@ -110,12 +116,32 @@ export function registerEveningDigestTestRoutes(
     if (!wsRegistry) {
       return reply.code(503).send({ ok: false, error: "wsConnectionRegistry 未注入" });
     }
-    const body = (request.body ?? {}) as { sessionId?: string; previewDate?: string };
+    const body = (request.body ?? {}) as {
+      sessionId?: string;
+      previewDate?: string;
+      markSent?: boolean;
+    };
     const online = wsRegistry.connectedSessionIds();
     // 不传 sessionId 时取当前在线的第一个 session（明日速览只认在线的那一位）
     const sessionId = body.sessionId?.trim() || online[0] || "";
     if (!sessionId) {
       return reply.code(400).send({ ok: false, error: "无在线 session，且未指定 sessionId" });
+    }
+    if (body.markSent) {
+      if (!deps.eveningDigestScheduler) {
+        return reply.code(503).send({ ok: false, error: "eveningDigestScheduler 未注入" });
+      }
+      // 跨零点语义（2026-11-06 修复）：凌晨（<6 点）补推的是「昨晚的卡」，
+      // 额度必须落到昨天——落今天会把今晚的到点推送一并吞掉
+      //（2026-11-05 凌晨 01:43 的补发标记吞掉了当晚 21:00 推送，实证）。
+      const now = new Date();
+      const dayKey = (d: Date): string =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+      const markDay =
+        now.getHours() < 6
+          ? dayKey(new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1))
+          : dayKey(now);
+      deps.eveningDigestScheduler.markSentDay(sessionId, markDay);
     }
 
     const digest = await service.generateDigest(sessionId, { previewDate: body.previewDate });
@@ -130,6 +156,7 @@ export function registerEveningDigestTestRoutes(
     return {
       ok: true,
       delivered: sent,
+      markSent: body.markSent === true,
       sessionId,
       onlineSessions: online,
       narrationText: digest.narrationText,

@@ -1,4 +1,4 @@
-import "dart:async";
+﻿import "dart:async";
 import "dart:typed_data";
 
 import "package:flutter/material.dart";
@@ -12,8 +12,13 @@ import "../features/chat/agent_result_card.dart";
 import "../features/chat/evening_digest_card.dart";
 import "../features/chat/message_body_renderer.dart";
 import "../features/chat/typewriter_reveal.dart";
+import "mobile_agent_status_orb.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
+
+/// 状态球左缘距屏幕左缘的缩进：与消息气泡左缘（列表 padding 16）左对齐，
+/// 同一条竖线。
+const double kAgentStatusOrbInset = 16;
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
@@ -23,9 +28,13 @@ import "mobile_theme.dart";
 ///
 /// [controller] 可选：由外部(根组件)注入以共享连接；不传时自建。
 class MobileChatPage extends StatefulWidget {
-  const MobileChatPage({super.key, this.controller});
+  const MobileChatPage({super.key, this.controller, this.agentName});
 
   final MobileChatController? controller;
+
+  /// 用户给 agent 取的名称（服务端 agentProfile.displayName）；
+  /// 空/null 时顶栏不显示文字标题，只留在线状态点。
+  final String? agentName;
 
   @override
   State<MobileChatPage> createState() => _MobileChatPageState();
@@ -101,6 +110,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
               },
             ),
           ),
+          // 独立组件：思考链状态带长在消息区与输入栏之间，不进输入栏容器。
+          _buildAgentStatusOrb(p),
           _buildInputBar(context, p),
         ],
       ),
@@ -180,36 +191,52 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 
   Widget _buildTitle(BuildContext context, MobilePalette p) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Text(
-          "智能助手",
-          style: TextStyle(
-            color: p.textPrimary,
-            fontSize: 17,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.2,
+    // 标题 = 用户给 agent 取的名称；没取名就只留状态点，不显示空胶囊。
+    final String title = (widget.agentName ?? "").trim();
+    final Widget statusDot = ListenableBuilder(
+      listenable: _controller,
+      builder: (context, _) {
+        return Container(
+          width: 8,
+          height: 8,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: _controller.isConnected ? p.online : p.textMuted,
           ),
-        ),
-        const SizedBox(width: 6),
-        // 在线状态点：跟随后端连接状态
-        ListenableBuilder(
-          listenable: _controller,
-          builder: (context, _) {
-            return Container(
-              width: 8,
-              height: 8,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _controller.isConnected
-                    ? p.online
-                    : p.textMuted,
+        );
+      },
+    );
+    if (title.isEmpty) return statusDot;
+    // 名字用椭圆胶囊包住（2026-11-07 定稿）：与状态点同处一枚名牌，
+    // 长名字单行省略，避免撑破顶栏。
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+      decoration: BoxDecoration(
+        color: p.innerFieldBackground,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(color: p.divider),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 180),
+            child: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: p.textPrimary,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.2,
               ),
-            );
-          },
-        ),
-      ],
+            ),
+          ),
+          const SizedBox(width: 6),
+          statusDot,
+        ],
+      ),
     );
   }
 
@@ -231,12 +258,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
               _controller.messages[_controller.messages.length - 1 - index];
           final bool isUser = m.role == "user";
           if (m.streaming && m.text.isEmpty) {
-            return _buildThinking(p);
-          }
-          if (m.contentType == "decision_card") {
-            // 决策卡（2026-10-14 与桌面端对齐）：决策类通知直接落对话流，
-            // 确认/忽略在卡上完成并回传 ack/outcome。
-            return _buildDecisionCard(context, m, p);
+            // 处理状态由输入框上方的状态条承载（对齐桌面端：占位不进消息流），
+            // 这里只留空位，避免多出一个空气泡。
+            return const SizedBox.shrink();
           }
           if (m.contentType == "transfer_reminder") {
             // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
@@ -258,22 +282,28 @@ class _MobileChatPageState extends State<MobileChatPage> {
             );
           }
           if (!isUser) {
-            // 行程卡独立第二条消息形态（2026-10-12 与桌面端对齐）：气泡只装
-            // 文字，travel_itinerary 大卡不框进气泡外壳，作为独立消息元素
-            // 跟在下方（卡自带完整外观与 460 限宽）。桌面端同款做法见
-            // chat_page._buildMessageColumn。
+            // 气泡外独立卡（2026-11-07 拍板扩展）：travel_itinerary 大卡与
+            // reminder_confirm 提醒确认卡都不框进气泡外壳——气泡只装文字，
+            // 卡自带完整外观跟在下方作为独立消息元素（与桌面端同款做法见
+            // chat_page._buildMessageColumn）。卡从信封块/正文标记原位读出，
+            // card.update 原地换卡后这里同样实时生效。
             final AgentResultData? travelCard = _travelItineraryCardOf(m);
-            if (travelCard != null) {
+            final AgentResultData? reminderCard =
+                travelCard == null ? _reminderConfirmCardOf(m) : null;
+            final AgentResultData? standaloneCard = travelCard ?? reminderCard;
+            if (standaloneCard != null) {
+              final bool hasBubbleText = _assistantBubbleHasVisibleText(m);
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  _buildBubble(context, m, isUser, p),
+                  if (hasBubbleText) _buildBubble(context, m, isUser, p),
                   Padding(
-                    padding: const EdgeInsets.only(top: AppTypography.space2),
+                    padding:
+                        EdgeInsets.only(top: hasBubbleText ? AppTypography.space2 : 0),
                     child: Align(
                       alignment: Alignment.centerLeft,
-                      child: AgentResultCard(data: travelCard),
+                      child: AgentResultCard(data: standaloneCard),
                     ),
                   ),
                 ],
@@ -286,143 +316,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 对话流决策卡（2026-10-14 与桌面端同构）：低对比底 + 优先级强调条
-  /// （urgent 红 / high 琥珀 / normal 灰），pending 给「我知道了/忽略」，
-  /// 点击后经控制器回传 ack/outcome 并原地翻转为「已确认」终态。
-  Widget _buildDecisionCard(BuildContext context, ChatMessage m, MobilePalette p) {
-    final Map<String, dynamic> card = m.decisionCard ?? const <String, dynamic>{};
-    final String title = card["title"]?.toString() ?? m.text;
-    final String body = card["message"]?.toString() ?? "";
-    final String priority = card["priority"]?.toString() ?? "normal";
-    final bool confirmed = card["state"]?.toString() == "confirmed";
-    final Color accent = switch (priority) {
-      "urgent" => const Color(0xFFFF5C5C),
-      "high" => const Color(0xFFFFB020),
-      _ => p.divider,
-    };
-    final String priorityLabel = switch (priority) {
-      "urgent" => "紧急",
-      "high" => "重要",
-      _ => "提醒",
-    };
-
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Opacity(
-        opacity: confirmed ? 0.6 : 1.0,
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          constraints: const BoxConstraints(maxWidth: 300),
-          decoration: BoxDecoration(
-            color: p.surface,
-            borderRadius: BorderRadius.circular(14),
-            border: Border.all(color: p.divider),
-          ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(13),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                Container(height: 3, color: accent),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Row(
-                        children: <Widget>[
-                          Icon(
-                            confirmed
-                                ? Icons.check_circle_outline
-                                : Icons.notifications_active_outlined,
-                            size: 15,
-                            color: confirmed ? p.online : accent,
-                          ),
-                          const SizedBox(width: 6),
-                          Text(
-                            confirmed
-                                ? "$priorityLabel · 已确认"
-                                : "$priorityLabel · 需要你确认",
-                            style: TextStyle(
-                              color: p.textSecondary,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                              letterSpacing: 0.3,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (title.isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 8),
-                        Text(
-                          title,
-                          style: TextStyle(
-                            color: p.textPrimary,
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            height: 1.3,
-                          ),
-                        ),
-                      ],
-                      if (body.isNotEmpty && body != title) ...<Widget>[
-                        const SizedBox(height: 4),
-                        Text(
-                          body,
-                          style: TextStyle(
-                            color: p.textSecondary,
-                            fontSize: 13,
-                            height: 1.4,
-                          ),
-                        ),
-                      ],
-                      if (!confirmed) ...<Widget>[
-                        const SizedBox(height: 10),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: <Widget>[
-                            FilledButton(
-                              style: FilledButton.styleFrom(
-                                visualDensity: VisualDensity.compact,
-                                backgroundColor: p.textPrimary,
-                                foregroundColor: p.background,
-                                padding:
-                                    const EdgeInsets.symmetric(horizontal: 16),
-                              ),
-                              onPressed: () => _controller
-                                  .confirmDecisionCard(m.messageId, true),
-                              child: const Text("我知道了"),
-                            ),
-                            const SizedBox(width: 8),
-                            TextButton(
-                              style: TextButton.styleFrom(
-                                visualDensity: VisualDensity.compact,
-                                foregroundColor: p.textSecondary,
-                              ),
-                              onPressed: () => _controller
-                                  .confirmDecisionCard(m.messageId, false),
-                              child: const Text("忽略"),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
   /// 接驳确认卡（agent.transfer_reminder，2026-10-18）：行程段临近到达时
   /// 服务端推送。卡面 = 提醒文案 + 出发地→目的地 + 到达时刻 + 车次/航班号，
   /// pending 给「帮我叫车/不用了」两个一键回复；点击经控制器走现有发消息
   /// 链路以用户身份发出固定文本，卡原地收起（隐藏按钮并翻转终态）。
-  /// 卡片外壳（surface 底 + 14 圆角 + divider 描边）与决策卡同风格。
+  /// 卡片外壳（surface 底 + 14 圆角 + divider 描边）。
   Widget _buildTransferReminderCard(
       BuildContext context, ChatMessage m, MobilePalette p) {
     final Map<String, dynamic> card =
@@ -648,23 +546,57 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  Widget _buildThinking(MobilePalette p) {
-    return Align(
-      alignment: Alignment.centerLeft,
-      child: Container(
-        margin: const EdgeInsets.symmetric(vertical: 6),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: p.assistantBubble,
-          borderRadius: BorderRadius.only(
-            topLeft: const Radius.circular(6),
-            topRight: Radius.circular(MobileTheme.bubbleRadius),
-            bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
-            bottomRight: Radius.circular(MobileTheme.bubbleRadius),
+  /// Agent 状态组件（思考链浮标）：**独立组件**，长在消息区与输入栏之间，
+  /// 不嵌进输入栏容器、不与输入框连体。
+  ///
+  /// 文案裁决在控制器（`activityLabel`），这里只管「什么时候出现 / 淡入淡出」：
+  /// 空闲时高度收回到 0（不留空白），干活时撑开一条状态带、淡入；文案变化原地
+  /// 更新，不重建整块（避免闪）。
+  ///
+  /// 水平位置：球左缘 = [kAgentStatusOrbInset]，与消息气泡左缘左对齐。
+  Widget _buildAgentStatusOrb(MobilePalette p) {
+    return ListenableBuilder(
+      listenable: _controller,
+      builder: (BuildContext context, Widget? _) {
+        final String? label = _controller.activityLabel;
+        final bool live = label != null;
+        return AnimatedSize(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeOut,
+          // 底对齐 + 不裁剪：收起/展开时球底部始终贴住输入框上边、整块向上
+          // 长出来或沉回去，中途不会被剪掉半个球。
+          alignment: Alignment.bottomLeft,
+          clipBehavior: Clip.none,
+          // 底部间距也随状态归零：空闲时这条带子的高度必须是 0，
+          // 否则输入框上会常驻一道空隙。
+          child: Padding(
+            padding: EdgeInsets.only(
+              left: kAgentStatusOrbInset,
+              bottom: live ? 10 : 0,
+            ),
+            // 靠左钉住：Column 交叉轴默认居中，不套 Align 会把球推到屏幕中间。
+            child: Align(
+              alignment: Alignment.centerLeft,
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                switchInCurve: Curves.easeOut,
+                switchOutCurve: Curves.easeIn,
+                transitionBuilder:
+                    (Widget child, Animation<double> animation) =>
+                        FadeTransition(opacity: animation, child: child),
+                child: live
+                    ? MobileAgentStatusOrb(
+                        key: const ValueKey<String>("orb-live"),
+                        label: label,
+                        percent: _controller.agentStatusPercent,
+                        toolName: _controller.currentToolName,
+                      )
+                    : const SizedBox.shrink(key: ValueKey<String>("orb-idle")),
+              ),
+            ),
           ),
-        ),
-        child: const _ThinkingDots(),
-      ),
+        );
+      },
     );
   }
 
@@ -755,9 +687,16 @@ class _MobileChatPageState extends State<MobileChatPage> {
             : _TypewriterAssistantBody(
                 message: m,
                 cs: Theme.of(context).colorScheme,
-                // 卡片动作：支付确认卡按钮 / chips 追问等经控制器走
+                // 卡片动作：带 messageId 交给控制器——有 cardAction 的按钮走
+                // card.action（只换这张卡，不产生消息），其余仍走
                 // chat.user_action（与桌面端 _handleCardAction 同协议）。
-                onUserAction: _controller.sendCardAction,
+                onUserAction: (AgentResultAction action,
+                        {required AgentResultData cardData}) =>
+                    _controller.sendCardAction(
+                  action,
+                  cardData: cardData,
+                  messageId: m.messageId,
+                ),
                 // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
                 onFollowupTap: (String prompt) =>
                     unawaited(_controller.send(prompt)),
@@ -766,70 +705,98 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
+  /// 输入卡（2026-11-07 B 方案定稿）：与底部 tab 卡分离的独立白卡胶囊，
+  /// 左「+」附件入口、中间无占位文案的多行输入、右侧发送；横向边距 4px 通栏感。
   Widget _buildInputBar(BuildContext context, MobilePalette p) {
     return Container(
-      color: p.surface,
-      padding: EdgeInsets.fromLTRB(12, 10, 12, MediaQuery.of(context).padding.bottom + 10),
+      color: Colors.transparent,
+      padding: EdgeInsets.fromLTRB(
+        4,
+        10,
+        4,
+        MediaQuery.of(context).padding.bottom + 10,
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: <Widget>[
-          if (_pendingFrames.isNotEmpty) _buildPendingStrip(p),
-          Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Expanded(
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(14, 0, 4, 0),
-              clipBehavior: Clip.antiAlias,
+          // 动作失败要当场可见（2026-11-06）：卡内按钮的报错（例如「这个平台
+          // 需要登录才能下单」）原来只写进 controller，手机端从没渲染过，
+          // 用户看到的就是「点了没反应」。这里补一条贴输入框的提示。
+          if ((_controller.errorMessage ?? "").isNotEmpty)
+            Container(
+              width: double.infinity,
+              margin: const EdgeInsets.fromLTRB(10, 0, 10, 8),
+              padding: const EdgeInsets.fromLTRB(11, 8, 11, 8),
               decoration: BoxDecoration(
                 color: p.innerFieldBackground,
-                borderRadius: BorderRadius.circular(MobileTheme.inputRadius),
+                borderRadius: BorderRadius.circular(9),
               ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _input,
-                      textInputAction: TextInputAction.send,
-                      minLines: 1,
-                      maxLines: 5,
-                      onSubmitted: (_) => _send(),
-                      style: TextStyle(
-                        color: p.textPrimary,
-                        fontSize: AppTypography.bodyLarge,
-                        height: AppTypography.uiLineHeight,
-                      ),
-                      decoration: InputDecoration(
-                        hintText: "输入消息…",
-                        hintStyle: TextStyle(color: p.textMuted, fontSize: 16),
-                        border: InputBorder.none,
-                        isCollapsed: true,
-                        contentPadding: const EdgeInsets.symmetric(vertical: 12),
-                      ),
-                    ),
-                  ),
-                  _buildAttachButton(p),
-                ],
+              child: Text(
+                _controller.errorMessage!,
+                maxLines: 3,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.45,
+                  color: p.textSecondary,
+                ),
               ),
             ),
+          if (_pendingFrames.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(10, 0, 10, 0),
+              child: _buildPendingStrip(p),
+            ),
+          Container(
+            clipBehavior: Clip.antiAlias,
+            decoration: BoxDecoration(
+              color: p.surface,
+              borderRadius: BorderRadius.circular(22),
+              border: Border.all(
+                color: p.divider.withValues(alpha: 0.6),
+                width: 0.8,
+              ),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: <Widget>[
+                _buildAttachButton(p),
+                Expanded(
+                  child: TextField(
+                    controller: _input,
+                    textInputAction: TextInputAction.send,
+                    minLines: 1,
+                    maxLines: 5,
+                    onSubmitted: (_) => _send(),
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: AppTypography.bodyLarge,
+                      height: AppTypography.uiLineHeight,
+                    ),
+                    decoration: InputDecoration(
+                      border: InputBorder.none,
+                      isCollapsed: true,
+                      contentPadding:
+                          const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
+                _buildSendButton(p),
+              ],
+            ),
           ),
-          const SizedBox(width: 8),
-          _buildSendButton(p),
         ],
       ),
-      ],
-    ),
     );
   }
 
-  /// 输入框右侧「+」按钮：选相册照片随消息发出(与桌面端同 visionFrames 协议)。
+  /// 输入卡左侧「+」按钮：选相册照片随消息发出(与桌面端同 visionFrames 协议)。
   Widget _buildAttachButton(MobilePalette p) {
     return IconButton(
       tooltip: "发送照片",
       onPressed: _pickImages,
       icon: Icon(Icons.add, size: 26, color: p.textSecondary),
-      constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+      constraints: const BoxConstraints(minWidth: 44, minHeight: 44),
       padding: EdgeInsets.zero,
       splashRadius: 20,
     );
@@ -925,6 +892,54 @@ AgentResultData? _travelItineraryCardOf(ChatMessage m) {
   return null;
 }
 
+/// 提取助手消息携带的 reminder_confirm 提醒确认卡（无则 null）。
+///
+/// 与 [_travelItineraryCardOf] 同口径，但多一条信封块通道：分泡活轮的卡片
+/// 标记不会写进气泡文本（finalText 才有标记，气泡只装各自的分段正文），
+/// 卡只挂在末泡的 envelopeBlocks 里——信封通道是分泡轮的唯一活水，
+/// 正文标记解析兜底历史消息与塌缩轮。
+AgentResultData? _reminderConfirmCardOf(ChatMessage m) {
+  if (m.role == "user") return null;
+  final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
+  if (parsed != null && parsed.cardType == "reminder_confirm") return parsed;
+  for (final List<Map<String, dynamic>>? blocks in <List<Map<String, dynamic>>?>[
+    m.envelopeBlocks,
+    m.replyBlocks,
+  ]) {
+    if (blocks == null) continue;
+    for (final Map<String, dynamic> b in blocks) {
+      if ((b["type"]?.toString() ?? "") != "card") continue;
+      final Object? cardJson = b["card"];
+      if (cardJson is! Map<String, dynamic>) continue;
+      final AgentResultData data = AgentResultData.fromJson(cardJson);
+      if (data.cardType == "reminder_confirm") return data;
+    }
+  }
+  return null;
+}
+
+/// 气泡里还有没有可见正文：卡外置后，若消息只剩卡（正文全被剥掉的历史形态），
+/// 不再渲染空气泡壳。判定 = 正文剥卡标记后非空，或信封/回复块序列里有
+/// 非 text 空的 text 块。
+bool _assistantBubbleHasVisibleText(ChatMessage m) {
+  final String stripped = m.text.replaceAll(
+    RegExp(r"\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END]"),
+    "",
+  );
+  if (stripped.trim().isNotEmpty) return true;
+  for (final List<Map<String, dynamic>>? blocks in <List<Map<String, dynamic>>?>[
+    m.envelopeBlocks,
+    m.replyBlocks,
+  ]) {
+    if (blocks == null) continue;
+    for (final Map<String, dynamic> b in blocks) {
+      if ((b["type"]?.toString() ?? "text") != "text") continue;
+      if ((b["text"]?.toString() ?? "").trim().isNotEmpty) return true;
+    }
+  }
+  return false;
+}
+
 /// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器与
 /// [TypewriterReveal] 打字机控制器,保证两端结构与流式节奏一致。
 class _TypewriterAssistantBody extends StatefulWidget {
@@ -1003,6 +1018,9 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           // 行程卡由消息行在气泡外独立渲染（与桌面端同款第二条消息形态）,
           // body 内不再重复,避免双份。
           excludeTravelCard: true,
+          // reminder_confirm 提醒确认卡同款外移（2026-11-07 拍板）：卡由
+          // 消息行在气泡外独立渲染，body 内跳过。
+          excludeCardTypes: const <String>["reminder_confirm"],
         ),
         // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
         // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后
@@ -1014,73 +1032,5 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           ),
       ],
     );
-  }
-}
-
-/// 三颗跳动省略号,表示 Agent 正在思考。
-class _ThinkingDots extends StatefulWidget {
-  const _ThinkingDots();
-
-  @override
-  State<_ThinkingDots> createState() => _ThinkingDotsState();
-}
-
-class _ThinkingDotsState extends State<_ThinkingDots>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-  late final Animation<double> _fade;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 900),
-    )..repeat();
-    _fade = Tween<double>(begin: 0.3, end: 1).animate(
-      CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
-    );
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final MobilePalette p = MobileTheme.of(context);
-    return AnimatedBuilder(
-      animation: _controller,
-      builder: (context, _) {
-        final double t = _controller.value;
-        return Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (int i = 0; i < 3; i++)
-              Padding(
-                padding: const EdgeInsets.only(right: 4),
-                child: Opacity(
-                  opacity: _fade.value.clamp(0, 1) * _dotPhase(t, i),
-                  child: Container(
-                    width: 7,
-                    height: 7,
-                    decoration: BoxDecoration(
-                      color: p.assistantBubbleText,
-                      shape: BoxShape.circle,
-                    ),
-                  ),
-                ),
-              ),
-          ],
-        );
-      },
-    );
-  }
-
-  double _dotPhase(double t, int i) {
-    final double p = (t - i * 0.2) % 1;
-    return p < 0 ? 0 : (0.3 + 0.7 * p);
   }
 }

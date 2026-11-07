@@ -6,6 +6,7 @@ import "package:flutter/material.dart";
 import "package:flutter/services.dart" show rootBundle;
 import "package:webview_windows/webview_windows.dart";
 
+import "emotion_ball_view_mobile.dart" as mobile;
 import "emotion_ball_view_stub.dart" as fallback;
 
 /// EmotionBallView —— Windows WebView2 内嵌 emotion-ball 小球表情动画。
@@ -153,6 +154,19 @@ class _EmotionBallViewState extends State<EmotionBallView> {
 
   @override
   Widget build(BuildContext context) {
+    // Android/iOS：webview_flutter 内嵌同一份 emotion-ball 宿主页，
+    // 与桌面 WebView2 同引擎同视觉（2026-11-05 手机端思考链接入）。
+    if (Platform.isAndroid || Platform.isIOS) {
+      return mobile.EmotionBallViewMobile(
+        emotion: widget.emotion,
+        size: widget.size,
+        bodyColor: widget.bodyColor,
+        eyeColor: widget.eyeColor,
+        showEffects: widget.showEffects,
+        eyeScale: widget.eyeScale,
+        fitBounce: widget.fitBounce,
+      );
+    }
     if (!Platform.isWindows) {
       return fallback.EmotionBallView(
         emotion: widget.emotion,

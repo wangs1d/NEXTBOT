@@ -370,8 +370,6 @@ IconData _cardIconFor(String category) {
       return Icons.table_chart_outlined;
     case "list":
       return Icons.checklist;
-    case "search_result":
-      return Icons.travel_explore_outlined;
     default:
       return Icons.article_outlined;
   }

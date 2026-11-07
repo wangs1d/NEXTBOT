@@ -21,6 +21,7 @@ import type { DesktopBridgeCoordinator } from "./desktop-bridge-coordinator.js";
 import { isLocalDesktopVisualEnabledFromEnv } from "./desktop-visual-subprocess.js";
 import type { PhoneBridgeCoordinator } from "./phone-bridge-coordinator.js";
 import type { LocationCoordinator } from "./location-coordinator.js";
+import type { ActorContextService } from "./actor-context-service.js";
 import type { LocationHistoryService } from "./location-history-service.js";
 import { getAgentRuntimeConfig } from "../agent/agent-runtime-config.js";
 import { seedIdentityMarkdown } from "../agent/identity-markdown-seeder.js";
@@ -229,11 +230,16 @@ import {
 } from "./tool-result-processor.js";
 import { captionMediaCards, isImageCaptionEnabled } from "./image-caption-service.js";
 import { normalizeReplyCardLayout, buildReplyBlocks, extractNextUpSuggestions } from "./reply-envelope.js";
+import {
+  buildRenderEnvelope,
+  expandEnvelopeToDoneFields,
+  compactEnvelopeForWire,
+} from "../render/protocol.js";
 import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import { attachTravelBriefCard, resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
-import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, type TravelPlanRequest } from "../agent/realtime-search-query.js";
+import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, mediaToolNameForText, type TravelPlanRequest } from "../agent/realtime-search-query.js";
 import { needsToolChoiceRequired } from "../gateway/forced-tool.js";
 import { buildCurrentTimePrompt } from "../agent/prompt-builder.js";
 import {
@@ -329,6 +335,13 @@ export type HandleUserMessageOptions = {
    */
   routeDecision?: RouteDecision | Promise<RouteDecision>;
   /**
+   * 生成前的渲染场景数据面（P3 前移，2026-11-07）：允许传未决 Promise——聊天出口
+   * 在生成前就发起取数（不阻塞流式开场），工具循环在综合阶段（工具波结束后）
+   * 才 await 判定 pre 场景；出口阶段复用同一份已决值，全程只取一次数。
+   * 不传 = 只按回执 + 用户文本判定，数据面场景（明日预览）不命中（保持原行为）。
+   */
+  renderPayloads?: Record<string, unknown> | Promise<Record<string, unknown> | undefined>;
+  /**
    * 任务面异步收尾（2026-09-08，仅 WS 对话路径开启）：plane=task 时派发后台任务后
    * 本轮立即结束（reply.taskDispatched=true、text 为空），对话窗马上回到空闲态——
    * 发送按钮不再在任务整个执行期间停在「工作态」；任务结果由后台完成后以
@@ -359,6 +372,7 @@ export class AgentCore {
   private phoneBridgeCoordinator: PhoneBridgeCoordinator | null = null;
   private locationCoordinator: LocationCoordinator | null = null;
   private locationHistory: LocationHistoryService | null = null;
+  private actorContext: ActorContextService | null = null;
   /** prompt 按要 GPS 的上次尝试时间（失败冷却用，per-actor）。 */
   private promptLocationLastAttemptAt = new Map<string, number>();
   /** 常去地点文本的进程内缓存（DBSCAN 全量扫 7 天样本，不必每轮重算）。 */
@@ -470,6 +484,19 @@ export class AgentCore {
   /** 在 bootstrap 注册位置历史后注入：常去地点背景由 DBSCAN 纯算法挖掘（零 LLM）。 */
   setLocationHistory(service: LocationHistoryService | null): void {
     this.locationHistory = service;
+  }
+
+  /**
+   * 注入 Actor 情境快照（持续感知 State 层）。
+   *
+   * 同时把时区读取接到 PromptContextBuilder：【当前时间】块从此只认快照，
+   * 不再从位置串里正则反解。定位链路整体失效时，时间仍然是对的。
+   */
+  setActorContext(service: ActorContextService | null): void {
+    this.actorContext = service;
+    this.promptContextBuilder.setTimezoneProvider(
+      service ? (actorId: string) => service.resolveClock(actorId).timezone : null,
+    );
   }
 
   /** 在 bootstrap 注册情绪感知后注入，用于按轮分析用户消息情绪。 */
@@ -1298,16 +1325,17 @@ if (route.plane === "task") {
         } catch {
           // 静默失败
         }
-        // 后台任务失败时推送 fallback 文案，让用户知道任务没成功
+        // 2026-11-05 文字打字机退役（模型仍流式生成）：失败提示改为一次性终态下发，不再推 delta。
         if (event.type === "task_failed") {
           try {
             registry.trySend(
               event.sessionId,
               JSON.stringify({
-                type: ServerEventType.ChatAssistantChunk,
+                type: ServerEventType.ChatAssistantDone,
                 payload: {
+                  sessionId: event.sessionId,
                   messageId: event.taskId,
-                  delta: FALLBACK_TEXT_BACKGROUND_FAILED(),
+                  finalText: FALLBACK_TEXT_BACKGROUND_FAILED(),
                   source: "task_resume",
                 },
               }),
@@ -1482,52 +1510,58 @@ if (route.plane === "task") {
   private static readonly FREQUENT_PLACES_TTL_MS = 10 * 60 * 1000;
 
   /**
-   * Prompt 阶段的位置注入（全链路零 LLM）：
-   * 消息自带位置 → 新鲜缓存 →（客户端在线且未在冷却期）按需拉一次实时 GPS
-   * （纯 WS RPC，6s 超时）→ 仍无则退回旧缓存并标注「定位于 N 前」。
-   * 旧策略"只读缓存不请求"导致缓存一空 LLM 就反问位置，2026-09-05 改为按需补拉。
+   * Prompt 阶段的位置注入（全链路零 LLM、**零阻塞**）。
+   *
+   * 2026-11-05 架构修正：本方法只读「情境快照」，不再向客户端发起按需定位。
+   * 位置是 Actor 的持续属性，不是一次 RPC——旧实现每轮先查缓存、缺失就
+   * `requestLocation`（12s RPC）并靠「只发起不等待」打补丁避免阻塞，本质是
+   * 在错误架构上叠补丁。现在：
+   *   1. 本轮显式带入（少数程序化调用方）优先；
+   *   2. 其次读快照（WS 每次上报都会刷新，含被历史频控丢弃的那部分）；
+   *   3. 快照空（进程刚重启）才落魄盘历史的最近一条；
+   *   4. 都没有 → 不注入（位置可缺席，时间不受影响）。
+   * 龄期一律如实标注，绝不把旧位置说成实时。
    */
   private async resolveUserLocationForPrompt(
     actorId: string,
     opts?: { clientIp?: string; clientLocation?: ClientLocationWire },
   ): Promise<string | undefined> {
-    const coordinator = this.locationCoordinator;
     let location: ClientLocationWire | undefined = opts?.clientLocation;
     let observedAt = location ? Date.now() : undefined;
 
-    if (!location && coordinator) {
-      const cached = coordinator.getCachedWithTime(actorId);
-      if (cached && Date.now() - cached.at <= AgentCore.PROMPT_LOCATION_FRESH_MS) {
-        location = cached.payload;
-        observedAt = cached.at;
+    const snapshot = this.actorContext?.get(actorId)?.location;
+    if (snapshot && (observedAt == null || snapshot.observedAt >= observedAt)) {
+      location = {
+        latitude: snapshot.latitude,
+        longitude: snapshot.longitude,
+        ...(snapshot.city ? { city: snapshot.city } : {}),
+        ...(snapshot.district ? { district: snapshot.district } : {}),
+        ...(snapshot.region ? { region: snapshot.region } : {}),
+        ...(snapshot.country ? { country: snapshot.country } : {}),
+        ...(snapshot.label ? { label: snapshot.label } : {}),
+        // 时区不从位置带：它在【当前时间】块里由快照的 clock 字段独立表达
+      };
+      observedAt = snapshot.observedAt;
+    }
+
+    if (!location && this.locationHistory) {
+      const sample = this.locationHistory.latest(actorId);
+      const at = sample ? Date.parse(sample.recordedAt) : NaN;
+      if (sample && Number.isFinite(at)) {
+        location = {
+          latitude: sample.latitude,
+          longitude: sample.longitude,
+          ...(sample.city ? { city: sample.city } : {}),
+          ...(sample.district ? { district: sample.district } : {}),
+          ...(sample.region ? { region: sample.region } : {}),
+          ...(sample.country ? { country: sample.country } : {}),
+          ...(sample.label ? { label: sample.label } : {}),
+        };
+        observedAt = at;
       }
     }
 
-    if (!location && coordinator?.hasSocket(actorId)) {
-      const lastAttempt = this.promptLocationLastAttemptAt.get(actorId) ?? 0;
-      if (Date.now() - lastAttempt >= AgentCore.PROMPT_LOCATION_RETRY_MS) {
-        this.promptLocationLastAttemptAt.set(actorId, Date.now());
-        // 后台补位（2026-09-28 根修）：位置只是 prompt 背景注入，绝不阻塞主回复。
-        // 此前 await requestLocation——客户端不回位置包时干等满 6s requestTimeout
-        //（新会话首轮必中，实测把 pre-main 拖到 7s+）。改为只发起不等待：回包
-        // 由 completeFromSocket 写缓存，供下一轮注入；本轮用旧缓存或无位置。
-        // 实时等待语义保留给工具路径（weather.get_local 等经 tool-context 的
-        // requestLocation），那里拿不到位置可以明确兜底。
-        void coordinator
-          .requestLocation(actorId, "prompt:chat-context")
-          .catch(() => {
-            /* 超时/失败静默：缓存未更新，下一窗口重试 */
-          });
-      }
-    }
-
-    if (!location && coordinator) {
-      const stale = coordinator.getCachedWithTime(actorId);
-      if (stale) {
-        location = stale.payload;
-        observedAt = stale.at;
-      }
-    }
+    if (!location) return undefined;
 
     const prompt = await resolveUserLocationPrompt({
       clientIp: opts?.clientIp,
@@ -2016,6 +2050,17 @@ if (route.plane === "task") {
         .filter((name) => !excludeNames.has(name) && byName.has(name))
         .map((name) => byName.get(name) as ChatCompletionTool);
     };
+    // 手机端没有可视内置浏览器（shared_browser.* 依赖客户端 WebView2）：
+    // 整族从可见集与延迟目录剥离，浏览器任务统一由服务端远端浏览器承担
+    // （agent_browser.* / 购物比价的 headless 兜底）。
+    const isSharedBrowserTool = (tool: ChatCompletionTool): boolean =>
+      tool.type === "function" && (tool.function?.name ?? "").startsWith("shared_browser.");
+    const filterDeviceUnavailableTools = (
+      tools: ChatCompletionTool[],
+    ): ChatCompletionTool[] =>
+      opts?.deviceClass === "mobile"
+        ? tools.filter((tool) => !isSharedBrowserTool(tool))
+        : tools;
     const buildChatLaneExplicitOpts = () => {
       const webForbidden = ctx.webSearchForbidden === true;
       // 2026-10-10 P0-1 修复（技能族在对话面集体失踪）：本函数返回的
@@ -2028,10 +2073,10 @@ if (route.plane === "task") {
       // 任务面语料 [...chatToolsBuiltin, ...chatToolsExtra] 不受影响，故只有
       // 对话面复现。修复：语料并集 = builtin ∪ sessionSkillTools，按名去重。
       const chatSkillTools = this.promptContextBuilder.getChatSkillTools(actorId);
-      const corpusMerged = dedupeToolsByName([
+      const corpusMerged = filterDeviceUnavailableTools(dedupeToolsByName([
         ...getBuiltinAgentChatTools(),
         ...chatSkillTools,
-      ]);
+      ]));
       const corpusSafe = webForbidden
         ? filterWebSearchTools(corpusMerged)
         : corpusMerged;
@@ -2054,26 +2099,62 @@ if (route.plane === "task") {
           .filter(Boolean),
       );
       const promotedTools = buildPromotedChatTools(corpusLane, coreNames);
+      // 纯媒体轮：模态工具**确定性常驻**（2026-11-05 根修，真机事故）。
+      //
+      // 事故链：用户「搜索几张刘亦菲的照片」→ 可见集 17 个工具里没有 search_images
+      // → 模型答「图像这块我这边没接上，没有能拿到图的路子」。
+      // 三个成因叠加，缺一不可修：
+      //   1. search_images 2026-10-21 起不在 chat 常驻（第 46 行注释：移入延迟目录，
+      //      指望 BM25 域预载兜底）；
+      //   2. 会话工具面 lock 冻结（stabilizeToolOrderForSession）把「本轮新召回」
+      //      整批丢弃——首轮若是闲聊，基准里就没有它，之后再也进不来；
+      //   3. 域预载对中文口语词面不稳（该轮实测召回的是 period.* 经期族，
+      //      media 域一个没中），而 neural 检索同时熔断（embed fetch failed）。
+      // 结论：媒体意图的模态**不能靠概率召回**。模态由用户原话确定性决定，
+      // 与 filterMediaModalityTools 的收敛口径同源——既然已把另一模态整族剥掉，
+      // 就必须保证留下的这一个真的在手上。
+      const mediaPinnedTools = (() => {
+        if (!isMediaOnlyRequest(text)) return [] as ChatCompletionTool[];
+        const wanted = mediaToolNameForText(text) === "search_videos"
+          ? ["search_videos", "video.find"]
+          : ["search_images", "search_images_batch"];
+        const byName = new Map<string, ChatCompletionTool>();
+        for (const tool of corpusLane) {
+          const name = tool.type === "function" ? tool.function?.name ?? "" : "";
+          if (name && !coreNames.has(name) && !byName.has(name)) byName.set(name, tool);
+        }
+        return wanted
+          .map((name) => byName.get(name))
+          .filter((tool): tool is ChatCompletionTool => Boolean(tool));
+      })();
+      const preloadTools = buildDomainPreloadTools(text, corpusLane, coreNames);
       return {
         toolExposureProfile: "explicit" as const,
-        chatToolsBuiltin: [
+        chatToolsBuiltin: dedupeToolsByName([
           ...coreFiltered,
-          ...buildDomainPreloadTools(text, corpusLane, coreNames),
+          ...mediaPinnedTools,
+          // 域预载（2026-10-09 L1）
+          ...preloadTools,
           // 晋升常驻（2026-10-09 L4）：该 actor 近窗真实成功调用 ≥3 次的延迟工具
           // 直接常驻可见集——预载/top-K/两波 discover 都不需要，晋升工具已是主力。
           ...promotedTools,
-        ],
+        ]),
         chatToolsExtra: corpusLane,
-        // 会话工具面冻结（2026-10-22）：晋升阈值可能在本会话中途被跨过，而冻结
-        // 之后可见集不再吸收新工具——显式声明「晋升是可增长项」，下轮进基准。
-        // 不做这件事，用户刚用熟的工具会在本会话内一直隐身，只能靠请求卡转正。
-        ...(promotedTools.length > 0
-          ? {
-              toolFaceGrowNames: promotedTools
+        // 会话工具面冻结（2026-10-22）：首轮冻结后可见集不再吸收新工具，故凡是
+        // 「本轮才被召回到」的工具都必须显式声明为可增长项，否则冻结会把它们
+        // 静默吃掉（事故现场：预载注入的 4 个工具全部未进可见集，turn-trace 里
+        // recallInjectedNames 却仍记为「已注入」，转化率统计一并失真）。
+        // 三类都算：确定性模态 pin / 域预载 / 晋升。
+        ...((): { toolFaceGrowNames?: string[] } => {
+          const growNames = [
+            ...new Set(
+              [...mediaPinnedTools, ...preloadTools, ...promotedTools]
                 .map((t) => (t.type === "function" ? t.function?.name ?? "" : ""))
                 .filter(Boolean),
-            }
-          : {}),
+            ),
+          ];
+          return growNames.length > 0 ? { toolFaceGrowNames: growNames } : {};
+        })(),
         toolLoop: { maxRounds: chatLaneMaxRounds() },
       };
     };
@@ -2164,7 +2245,7 @@ if (route.plane === "task") {
     // （时间是确定性事实，绝不入搜索引擎）。网页与媒体检索全部交给模型按需调用
     // search_* 工具，媒体轮的证据源只有 search_images 的真实结果。
     if (!ctx.webSearchForbidden && directClockQuestion) {
-      const evidence = this.buildClockEvidence(baseStreamOpts.promptContext?.memory?.currentTime);
+      const evidence = this.buildClockEvidence(actorId, baseStreamOpts.promptContext?.memory?.currentTime);
       if (evidence) {
         const memory = (baseStreamOpts.promptContext ??= {}).memory;
         if (memory) {
@@ -2242,17 +2323,11 @@ if (route.plane === "task") {
       const v = cogEmo.valence;
       const a = cogEmo.arousal;
       if (v < -0.3 || v > 0.5 || a > 0.7) {
-        const tone = v < -0.5
-          ? "回复应简短温和"
-          : v < -0.3
-            ? "回复宜温和"
-            : v > 0.5
-              ? "回复可活泼些"
-              : a > 0.7
-                ? "回复别端着"
-                : "";
+        // 2026-11-05：只报事实不给行为指令（「回复宜温和」这类写法在替 soul 说话，
+        // 叠多了就是把模型压回模板腔）。情绪怎么接，soul + 模型自己判断。
+        const shade = v < -0.5 ? "（很低）" : v < -0.3 ? "（偏低）" : v > 0.5 ? "（很高涨）" : a > 0.7 ? "（很激动）" : "";
         memoryBeforeSanitize.emotionState =
-          `情绪：${cogEmo.label}${tone ? ` — ${tone}` : ""}`;
+          `对方情绪：${cogEmo.label}${shade}`;
       }
     }
     const runtimePlan = runtimeKernel.planTurn(text, baseStreamOpts.promptContext?.memory);
@@ -2322,6 +2397,10 @@ if (route.plane === "task") {
       // frequency_penalty 0.4，env 可调）；任务面不置位保持默认采样。
       ...(this.isChatLane(mode) ? { chatLaneSampling: true } : {}),
       turnEvidenceInjected: evidenceInjected,
+      // 生成前渲染场景数据面（P3 前移）：Promise 原样透传（工具循环综合阶段才
+      // await，不阻塞流式开场），provider 白名单转发，漏掉 = pre 场景判定不到
+      // 数据面、明日预览边界恒不注入。
+      ...(opts?.renderPayloads !== undefined ? { renderPayloads: opts.renderPayloads } : {}),
       pinnedToolNames: runtimePlan.enabled
         ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
         : baseStreamOpts.pinnedToolNames,
@@ -2387,10 +2466,10 @@ if (route.plane === "task") {
     // 转正进执行轮可见集）。此前编排器路径绕过整个可见集组装，可见集退化成
     // 「全量 builtin 直塞」，router-first/预载/晋升在编排器轮全部失活。
     if (this.isTaskLane(mode)) {
-      const corpus = [
+      const corpus = filterDeviceUnavailableTools([
         ...(streamOpts.chatToolsBuiltin ?? getBuiltinAgentChatTools()),
         ...(streamOpts.chatToolsExtra ?? []),
-      ];
+      ]);
       if (isStaticToolArchEnabled() && isTaskLaneRouterFirst()) {
         // 显式禁网轮（2026-09-23）：束与目录语料一并剥联网检索族，防 tool_discover
         // 把搜索工具召回回来绕过开关。
@@ -2700,8 +2779,12 @@ if (route.plane === "task") {
    * ——网页快照里的时间是爬取时刻的旧值（实盘实证：差 5 个月）。证据块非空
    * 还保证 realtime 出口闸的「已有证据块零工具直答」豁免照常成立。
    */
-  private buildClockEvidence(currentTimeBlock?: string): string {
-    const line = currentTimeBlock?.trim() || buildCurrentTimePrompt(new Date());
+  private buildClockEvidence(actorId: string, currentTimeBlock?: string): string {
+    // 兜底路径同样必须带用户时区——此前这里 `buildCurrentTimePrompt(new Date())`
+    // 裸调，直接用服务器时区，与 system 的【当前时间】块可能差 8-13 小时。
+    const line =
+      currentTimeBlock?.trim() ||
+      buildCurrentTimePrompt(new Date(), this.actorContext?.resolveClock(actorId).timezone);
     return [
       "【实时证据｜本地时钟（刚刚生成，权威）】",
       /^当前时间/.test(line) ? line : `当前时间：${line}`,
@@ -2902,26 +2985,9 @@ if (route.plane === "task") {
     // 与 WS 对话面同构挂上流式标记 guard，块内容全程不出口。
     const streamGuard = createStreamMarkerGuard();
     const sendChunk = (text: string): void => {
-      if (!text || isCancelled()) return;
-      seq += 1;
-      try {
-        registry?.trySend(
-          sessionId,
-          JSON.stringify({
-            type: ServerEventType.ChatAssistantChunk,
-            payload: {
-              sessionId,
-              messageId,
-              chunk: text,
-              sequence: seq,
-              phase: "stream",
-              source: "task_plane",
-            },
-          }),
-        );
-      } catch {
-        /* 投递失败不影响任务执行 */
-      }
+      // 2026-11-05 文字打字机退役（模型仍流式生成）：任务面结果只由下方 ChatAssistantDone 下发。
+      void text;
+      return;
     };
     const pushDelta = (delta: string): void => {
       if (!delta || isCancelled()) return;
@@ -2966,7 +3032,15 @@ if (route.plane === "task") {
               ? buildCaptionedRenderBlocks(finalText, mediaCards)
               : buildInterleavedRenderBlocks(finalText, mediaCards)
             : [];
-        const replyBlocks = buildReplyBlocks(finalText, renderBlocks);
+        // P1 统一出口：任务面与 WS 对话面共用同一个信封投影，字段不再分叉。
+        const taskEnvelope = buildRenderEnvelope({
+          finalText,
+          mediaCards,
+          renderBlocks,
+          ...(summaryCard ? { summaryCard } : {}),
+          followups,
+          legacyBlocks: buildReplyBlocks(finalText, renderBlocks),
+        });
         const delivered = registry?.trySend(
           sessionId,
           JSON.stringify({
@@ -2974,16 +3048,10 @@ if (route.plane === "task") {
             payload: {
               sessionId,
               messageId,
-              finalText,
               toolCalls: [],
               source: "task_plane",
-              ...(mediaCards.length > 0 ? { mediaCards } : {}),
-              ...(summaryCard ? { summaryCard } : {}),
-              ...(renderBlocks.length > 0 ? { renderBlocks } : {}),
-              ...(replyBlocks && replyBlocks.length > 0 ? { blocks: replyBlocks } : {}),
-              // 「接下来你可以」接续建议：任务轮与对话面同权随 done 下发成
-              // 可点胶囊（客户端 done 处理不区分 source，同样解析 followups）。
-              ...(followups.length > 0 ? { followups } : {}),
+              ...expandEnvelopeToDoneFields(taskEnvelope),
+              renderEnvelope: compactEnvelopeForWire(taskEnvelope),
             },
           }),
         );

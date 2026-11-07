@@ -63,9 +63,9 @@ export type ProactivePipelineDeps = {
   /** 分级触达钩子：提案级 ask_first 登记后回调（装配层经 ReachRouter 投递+升级） */
   onPendingConfirmation?: (entry: PendingConfirmation) => void;
   /**
-   * critical 提案升级钩子（接线 intelligent-reminder 的 popup→tts_alarm→phone_call
-   * 三级升级链）：送达 ≠ 被看到——critical 直投成功后调此钩子挂起「未确认即升级」
-   * 监听，用户确认（reminder.acknowledge）即停链。未注入 = 无升级链（仅投递）。
+   * critical 提案升级钩子（已闲置，2026-11-05 升级链斩断：装配层不再注入）。
+   * 保留可选接口位仅作兼容，当前无任何调用方注入；电话仅保留为
+   * intelligent-reminder 的显式 initialLevel。
    */
   escalate?: (p: ProactiveProposal, deliveryId: string) => void;
   /**

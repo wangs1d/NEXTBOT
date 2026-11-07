@@ -12,6 +12,7 @@ import "../../core/utils/link_utils.dart";
 import "travel_plan_launcher.dart";
 import "product_pick_card.dart";
 import "price_compare_card.dart";
+import "shopping/shopping_shipment_card.dart";
 import "travel_plan_models.dart";
 import "travel_image_warmer.dart";
 import "travel_theme.dart";
@@ -21,6 +22,7 @@ import "display_effects/display_effects.dart";
 import "display_effects/soft_icon_chip.dart";
 import "media_gallery.dart";
 import "morning_briefing_card.dart";
+import "reminder_confirm_card.dart";
 import "travel_guide_select_card.dart";
 import "media_thumbnail.dart";
 
@@ -96,8 +98,31 @@ class AgentResultCard extends StatelessWidget {
           displayEffectsCard(data: data, cs: cs, onUserAction: onUserAction);
       if (effect != null) return effect;
       switch (data.cardType) {
+        case "shopping_candidates":
+        case "shopping_spec":
+        case "shopping_confirm":
+        case "shopping_pay":
+        case "shopping_shipment":
+        case "shopping_login":
+          // 手机端购物卡族（2026-11-06 设计稿定稿）：候选轮播 / 规格 /
+          // 确认下单 / 支付 / 物流。载荷在 extra.shopping，按 stage 分发；
+          // 载荷缺失（旧服务端或历史消息）时回退既有卡，不炸也不空。
+          final Widget? shoppingCard = buildShoppingCard(
+            data: data,
+            cs: cs,
+            onUserAction: onUserAction,
+          );
+          if (shoppingCard != null) return shoppingCard;
+          if (data.priceCompare != null) {
+            return PriceCompareCard(data: data, cs: cs);
+          }
+          return _SpecializedCard(data: data, cs: cs);
         case "search_result":
-          return _SearchResultCard(data: data, cs: cs);
+          // 搜索结果卡已整体退役（2026-11-05）：搜索到的条目只作为模型素材，
+          // 由 agent 自己总结成正文，不再在聊天流里铺网页标题/摘要。
+          // 服务端已无任何产出点，这里保底吞掉——历史消息里落库的旧卡
+          // 回看时也不渲染，避免"僵尸卡"重新冒出来。
+          return const SizedBox.shrink();
         case "timeline":
           return _TimelineCard(data: data, cs: cs);
         case "progress":
@@ -128,13 +153,23 @@ class AgentResultCard extends StatelessWidget {
           // 主推大图 +「为什么是它」+ 渠道实时价 CTA + 备选横滑。
           return ProductPickCard(data: data, cs: cs);
         case "price_compare":
-          // 跨平台实时比价卡（shopping.compare.prices）：分组报价大图行 +
-          // 大号价格 + 平台 chip + 决策页 CTA；旧形态回执无结构化载荷时
-          // 回退通用专用卡渲染（服务端 items 仍随卡下发）。
+          // 跨平台实时比价卡（shopping.compare.prices）：新版优先读
+          // extra.shopping 载荷走手机端候选轮播（一屏 2.5 张、逐卡吸附）；
+          // 载荷缺失（历史消息/旧服务端）回退分组报价专用卡。
+          final Widget? shoppingCompare = buildShoppingCard(
+            data: data,
+            cs: cs,
+            onUserAction: onUserAction,
+          );
+          if (shoppingCompare != null) return shoppingCompare;
           if (data.priceCompare == null) {
             return _SpecializedCard(data: data, cs: cs);
           }
           return PriceCompareCard(data: data, cs: cs);
+        case "reminder_confirm":
+          // 手机端提醒确认卡（2026-11-07 拍板方案 A）：只读、一轮一张、
+          // 卡内多行；修改/取消由 card.update 原地换卡，不追加新卡。
+          return ReminderConfirmCard(data: data, cs: cs);
         case "permission_request":
           return _PermissionRequestCard(data: data, cs: cs);
         case "morning_briefing":
@@ -873,15 +908,6 @@ class _QuoteCard extends StatelessWidget {
       ),
     );
   }
-}
-
-/// 在「标题：描述」/「标题 —— 描述」/「标题 — 描述」/「标题 - 描述」中找分隔位置。
-int _findTitleSep(String raw) {
-  final RegExp sepRe = RegExp(r"[:：]|——|—|\s-\s|｜|\|");
-  final RegExpMatch? m = sepRe.firstMatch(raw);
-  if (m == null) return -1;
-  final int sep = m.start;
-  return sep > 0 ? sep : -1;
 }
 
 /// 时间轴卡：把每个 item 渲染为时间轴上的一个节点（点 + 时间 + 描述）。
@@ -1817,10 +1843,10 @@ class MediaInlineRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
-    // 解析每张图的可用地址 + 自然宽高比 + 侧标签 + 图片描述；视频单独收集走视频面板
-    final List<({String url, double? aspect, String side, String? caption})>
+    // 解析每张图的可用地址 + 自然宽高比 + 侧标签 + 图片描述 + 是否扫码码；视频单独收集走视频面板
+    final List<({String url, double? aspect, String side, String? caption, bool qr})>
         photos =
-        <({String url, double? aspect, String side, String? caption})>[];
+        <({String url, double? aspect, String side, String? caption, bool qr})>[];
     final List<String> allUrls = <String>[];
     final List<
         ({
@@ -1874,6 +1900,9 @@ class MediaInlineRow extends StatelessWidget {
           side: (it.side ?? "").trim(),
           caption:
               (it.caption ?? "").trim().isEmpty ? null : it.caption!.trim(),
+          // mediaType=qr（服务端 QrAssistService 下发）：扫码二维码，
+          // 走完整露出版式，绝不能被 cover 裁掉一角
+          qr: (it.mediaType ?? "").toLowerCase() == "qr",
         ));
         allUrls.add(resolved);
       }
@@ -1891,6 +1920,7 @@ class MediaInlineRow extends StatelessWidget {
             urls: allUrls,
             aspects: photos.map((p) => p.aspect).toList(),
             captions: photos.map((p) => p.caption).toList(),
+            qrFlags: photos.map((p) => p.qr).toList(),
             previewGallery: allUrls,
             cs: cs,
           ),
@@ -2058,165 +2088,6 @@ class _VideoTile extends StatelessWidget {
       borderRadius: BorderRadius.circular(8),
       child: body,
     );
-  }
-}
-
-/// 搜索结果卡片 —— 把搜索工具返回的列表项渲染为垂直排列的新闻条目。
-///
-/// 每个 item 解析为「标题 —— 描述」格式，渲染为：
-///   - 标题（粗体）
-///   - 摘要（灰色小字）
-///
-/// 卡片不承载网页链接：条目不可点跳，也不展示来源地址。
-///
-/// 适合搜索/资讯聚合场景，3~10 条垂直排列，清晰可读。
-class _SearchResultCard extends StatelessWidget {
-  const _SearchResultCard({required this.data, required this.cs});
-
-  final AgentResultData data;
-  final ColorScheme cs;
-
-  @override
-  Widget build(BuildContext context) {
-    final TextTheme textTheme = Theme.of(context).textTheme;
-
-    return Container(
-      constraints: const BoxConstraints(maxWidth: 390),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHigh,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outline.withValues(alpha: 0.22)),
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          // 标题头
-          if (data.title.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Row(
-                children: <Widget>[
-                  SoftIconChip(
-                    icon: Icons.travel_explore_outlined,
-                    color: cs.primary,
-                  ),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      data.title,
-                      style: textTheme.bodyMedium?.copyWith(
-                        fontWeight: FontWeight.w700,
-                        color: cs.onSurface,
-                        height: 1.4,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          // 条目列表
-          ...data.items.map((AgentResultItem it) {
-            final (String t, String d) = _splitSearchItem(it.text);
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(2, 2, 2, 12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  // 标题行
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Container(
-                        margin: const EdgeInsets.only(top: 5),
-                        width: 5,
-                        height: 5,
-                        decoration: BoxDecoration(
-                          color: cs.primary.withValues(alpha: 0.55),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Text.rich(
-                          TextSpan(
-                            style: textTheme.bodyMedium?.copyWith(
-                              fontWeight: FontWeight.w700,
-                              height: 1.35,
-                            ),
-                            children: parseInlineMarkdownSpans(
-                              t,
-                              textTheme.bodyMedium!.copyWith(
-                                fontWeight: FontWeight.w700,
-                                height: 1.35,
-                              ),
-                              cs,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ],
-                  ),
-                  // 摘要/描述
-                  if (d.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 13, top: 3),
-                      child: Text.rich(
-                        TextSpan(
-                          style: textTheme.bodySmall?.copyWith(
-                            color: cs.onSurfaceVariant,
-                            height: 1.45,
-                            fontSize: 13,
-                          ),
-                          children: parseInlineMarkdownSpans(
-                            d,
-                            textTheme.bodySmall!.copyWith(
-                              color: cs.onSurfaceVariant,
-                              height: 1.45,
-                              fontSize: 13,
-                            ),
-                            cs,
-                          ),
-                        ),
-                        maxLines: 3,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                ],
-              ),
-            );
-          }),
-          if (data.footer.isNotEmpty)
-            Container(
-              padding: const EdgeInsets.only(top: 6),
-              decoration: BoxDecoration(
-                border: Border(
-                  top: BorderSide(
-                    color: cs.outline.withValues(alpha: 0.28),
-                    width: 1,
-                  ),
-                ),
-              ),
-              child: buildInlineMarkdownText(
-                data.footer,
-                textTheme.bodySmall!.copyWith(
-                  color: cs.onSurfaceVariant,
-                  height: 1.5,
-                ),
-                cs: cs,
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  /// 把 item 文本拆成「标题 —— 描述」。
-  (String, String) _splitSearchItem(String raw) {
-    final int sep = _findTitleSep(raw);
-    if (sep <= 0) return (raw, "");
-    return (raw.substring(0, sep).trim(), raw.substring(sep).trim());
   }
 }
 

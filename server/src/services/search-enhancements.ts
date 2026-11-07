@@ -410,6 +410,7 @@ export function parsePublishedAtMs(raw?: string): number | undefined {
 }
 
 export function inferPublishedAtMsFromUrl(url: string): number | undefined {
+  // /20261105/ 或 /2026-11-05/ 目录式（原有）
   const slash = url.match(/\/(20\d{2})(\d{2})(\d{2})\//);
   if (slash) {
     const d = new Date(Number(slash[1]), Number(slash[2]) - 1, Number(slash[3]));
@@ -420,30 +421,111 @@ export function inferPublishedAtMsFromUrl(url: string): number | undefined {
     const d = new Date(Number(dashed[1]), Number(dashed[2]) - 1, Number(dashed[3]));
     if (Number.isFinite(d.getTime())) return d.getTime();
   }
-  return undefined;
-}
-
-export function inferPublishedAtMsFromText(text: string): number | undefined {
-  const iso = text.match(/(20\d{2})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
-  if (iso) {
-    const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+  // /2026/11/5/ 斜杠分段式（门户 CMS 常见）
+  const seg = url.match(/\/(20\d{2})\/(\d{1,2})\/(\d{1,2})(?:\/|\b)/);
+  if (seg) {
+    const month = Number(seg[2]);
+    const day = Number(seg[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      const d = new Date(Number(seg[1]), month - 1, day);
+      if (Number.isFinite(d.getTime())) return d.getTime();
+    }
+  }
+  // URL 任意位置的连续 8 位日期（如 date=20261105、news20261105001.html）。
+  // 月份/日期带合法域校验，避免把订单号、ID 当日期。
+  const flat = url.match(/(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])/);
+  if (flat) {
+    const d = new Date(Number(flat[1]), Number(flat[2]) - 1, Number(flat[3]));
     if (Number.isFinite(d.getTime())) return d.getTime();
   }
   return undefined;
 }
 
-export function resolveItemPublishedAtMs(item: InfoSearchItem): number | undefined {
+/**
+ * 从标题/摘要正文推断发布时间（2026-11-06 大幅扩展）。
+ *
+ * 此前只认「完整年月日」，而中文资讯最常见的时间形态是**无年份日期**
+ * （「11月5日收盘」）与**相对时间**（「3小时前」「昨天」）——AnySearch
+ * 条目日期字段全空时，这两类正是唯一的推断来源，漏掉它们等于整个
+ * 时效排序空转（实测 24 条结果 0 条有日期、排序为原样透传）。
+ *
+ * 优先级：显式完整日期 > 相对时间 > 无年份日期（年份由 now 推断，
+ * 未来月份归上一年）。`nowMs` 缺省取当前时间（调用方可注入以保证可测）。
+ */
+export function inferPublishedAtMsFromText(text: string, nowMs?: number): number | undefined {
+  const now = nowMs ?? Date.now();
+
+  // 1. 完整年月日（最高置信，年份 1000-2999）：2026-11-05 / 2026.11.5 / 2026年11月5日 /
+  //    1949年10月1日（历史年份必须整体识别，否则「10月1日」会被无年份推断误判成今年）
+  const iso = text.match(/([12]\d{3})[-/.年](\d{1,2})[-/.月](\d{1,2})/);
+  if (iso) {
+    const d = new Date(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+    if (Number.isFinite(d.getTime())) return d.getTime();
+  }
+
+  // 2. 相对时间（资讯客户端发布行的标准形态，置信度高）
+  const MIN = 60_000;
+  const HOUR = 3_600_000;
+  const DAY = 86_400_000;
+  const startOfToday = new Date(now).setHours(0, 0, 0, 0);
+  const relMins = text.match(/(\d{1,3})\s*分钟前/);
+  if (relMins) return now - Number(relMins[1]) * MIN;
+  const relHours = text.match(/(\d{1,2})\s*小时前/);
+  if (relHours) return now - Number(relHours[1]) * HOUR;
+  const relDays = text.match(/(\d{1,2})\s*天前/);
+  if (relDays) return now - Number(relDays[1]) * DAY;
+  if (/刚刚|刚刚发布|几分钟前/.test(text)) return now - 5 * MIN;
+  if (/今天|今日|今晨|今早|刚刚过去的/.test(text)) return startOfToday + 12 * HOUR;
+  if (/昨晚|昨夜|昨日|昨天/.test(text)) return startOfToday + 12 * HOUR - DAY;
+  if (/前天|前日/.test(text)) return startOfToday + 12 * HOUR - 2 * DAY;
+  const relWeeks = text.match(/(\d{1,2})\s*周前/);
+  if (relWeeks) return now - Number(relWeeks[1]) * 7 * DAY;
+
+  // 3. 无年份日期：11月5日 / 11-05 / 11/05（不含年份时才走到这）。
+  //    年份推断：月份比当前月「晚」→ 是去年的（今年还没到那个月）。
+  const nowD = new Date(now);
+  const md =
+    text.match(/(\d{1,2})月(\d{1,2})日/) ??
+    text.match(/\b(\d{1,2})-(\d{1,2})\b/) ??
+    text.match(/\b(\d{1,2})\/(\d{1,2})\b/);
+  if (md) {
+    const month = Number(md[1]);
+    const day = Number(md[2]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+      let year = nowD.getFullYear();
+      if (month > nowD.getMonth() + 1) year -= 1;
+      const d = new Date(year, month - 1, day);
+      if (Number.isFinite(d.getTime())) return d.getTime();
+    }
+  }
+
+  return undefined;
+}
+
+export function resolveItemPublishedAtMs(
+  item: InfoSearchItem,
+  nowMs?: number,
+): number | undefined {
   return (
     parsePublishedAtMs(item.publishedAt) ??
     inferPublishedAtMsFromUrl(item.url) ??
-    inferPublishedAtMsFromText(`${item.title}\n${item.snippet}`)
+    inferPublishedAtMsFromText(`${item.title}\n${item.snippet}`, nowMs)
   );
+}
+
+/** 把毫秒时间戳格式化成本地日期串（YYYY-MM-DD），写入条目 publishedAt 用。 */
+function formatLocalDate(ms: number): string {
+  const d = new Date(ms);
+  const pad = (v: number): string => String(v).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 export type ApplySearchFreshnessResult = {
   items: InfoSearchItem[];
   droppedStale: number;
   sortedBy: "publishedAtDesc";
+  /** 成功解析出发布时间的条目数（0 = 排序为原样透传，时效说明必须如实降级） */
+  datedCount: number;
 };
 
 export function applySearchFreshness(
@@ -460,18 +542,29 @@ export function applySearchFreshness(
 
   const enriched = items.map((item) => ({
     item,
-    publishedMs: resolveItemPublishedAtMs(item),
+    publishedMs: resolveItemPublishedAtMs(item, nowMs),
   }));
+  const datedCount = enriched.filter((x) => x.publishedMs != null).length;
+
+  // 2026-11-06：把推断出的日期写回条目（无显式日期时）——下游回执模型可见，
+  // 「数字必须说清哪天的」纪律才有核对依据；此前推断结果只用于排序即丢，
+  // 模型看到的仍是 24 条无日期结果。
+  const dated = enriched.map(({ item, publishedMs }) =>
+    publishedMs != null && !item.publishedAt
+      ? { ...item, publishedAt: formatLocalDate(publishedMs) }
+      : item,
+  );
 
   let droppedStale = 0;
-  const kept = dropStale
-    ? enriched.filter(({ publishedMs }) => {
-        if (publishedMs == null) return true;
-        if (nowMs - publishedMs <= maxAgeMs) return true;
-        droppedStale += 1;
-        return false;
-      })
-    : enriched;
+  const kept = dated
+    .map((item, i) => ({ item, publishedMs: enriched[i].publishedMs }))
+    .filter(({ publishedMs }) => {
+      if (!dropStale) return true;
+      if (publishedMs == null) return true;
+      if (nowMs - publishedMs <= maxAgeMs) return true;
+      droppedStale += 1;
+      return false;
+    });
 
   kept.sort((a, b) => {
     const aMs = a.publishedMs;
@@ -486,6 +579,7 @@ export function applySearchFreshness(
     items: kept.map((x) => x.item),
     droppedStale,
     sortedBy: "publishedAtDesc",
+    datedCount,
   };
 }
 
@@ -493,11 +587,21 @@ export function formatSearchFreshnessNote(input: {
   anchor: SearchAnchorNow;
   droppedStale: number;
   maxAgeDays: number;
+  datedCount?: number;
+  total?: number;
 }): string {
-  const parts = [
-    `检索基准时间：${input.anchor.label}（${DEFAULT_TIMEZONE}）`,
-    "结果已按发布时间从新到旧排序",
-  ];
+  // 2026-11-06：时效声明按「实际解析到日期的比例」如实降级——此前无条件声明
+  // 「已按发布时间从新到旧排序」，上游无日期时是假话，还给了模型错误安全感。
+  const dated = input.datedCount ?? 0;
+  const total = input.total ?? 0;
+  const parts: string[] = [`检索基准时间：${input.anchor.label}（${DEFAULT_TIMEZONE}）`];
+  if (total > 0 && dated === 0) {
+    parts.push(
+      "结果均未标注发布时间，条目顺序为引擎原始排序（非时间序）；引用任何数字前必须核对它是哪天的，无日期条目不得当作最新数据",
+    );
+  } else {
+    parts.push("结果已按发布时间从新到旧排序");
+  }
   if (input.droppedStale > 0) {
     parts.push(`已剔除 ${input.droppedStale} 条超过 ${input.maxAgeDays} 天的旧结果`);
   }

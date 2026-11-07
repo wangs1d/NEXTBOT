@@ -12,22 +12,27 @@ import "../core/db/isar_local_history_store.dart";
 import "../core/db/local_history_store.dart";
 import "../core/models/chat_models.dart";
 import "../core/services/access_auth_api.dart";
+import "../core/services/agent_name_store.dart";
 import "../core/services/attention_api.dart";
+import "../core/services/client_clock_service.dart";
+import "../core/services/client_geofence_service.dart";
 import "../core/services/client_location_service.dart";
 import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/local_notification_service.dart";
 import "../core/services/ws_chat_service.dart";
+import "../core/utils/agent_activity_label.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../core/utils/assistant_text_sanitizer.dart";
 import "../core/utils/link_utils.dart";
 import "../core/vision/vision_wire_frame.dart";
 import "../features/chat/media_disk_cache.dart";
+import "../features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
 import "../features/chat/travel_plan_launcher.dart";
 
 // ===== 真·分绿泡（2026-09-28）：气泡拆分消息 id 工具（与桌面端 main.dart 同构）=====
 final RegExp _bubbleIdPattern = RegExp(r"^assistant-(.+)-b(\d+)$");
 
-/// 是否为分泡消息 id（assistant-<traceId>-bN，服务端 BubbleTracker 分配）。
+/// 是否为分泡消息 id（`assistant-<traceId>-bN`，服务端 BubbleTracker 分配）。
 bool _isBubbleId(String messageId) => _bubbleIdPattern.hasMatch(messageId);
 
 /// 从分泡消息 id 提取轮次 traceId；非分泡 id 返回 null。
@@ -83,18 +88,69 @@ class MobileChatController extends ChangeNotifier {
   String? _streamingMessageId;
 
   /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
-  /// 输入框左上角据此展示「球形图标 + 正在调用:xxx」。
+  /// 输入框上方的状态条据此查「工具族 → 进行时文案」映射表。
   String? currentToolName;
+
+  /// 服务端 `chat.agent_status` 的口语化进度（对齐桌面端 main.dart）。
+  /// 未入表的工具靠它补位；入表工具优先用映射表文案（确定性优先）。
+  String? agentStatusLine;
+
+  /// 长工具心跳推进的百分比（0-100，服务端封顶 90）。
+  int? agentStatusPercent;
+
+  /// 本轮已进入「拆解计划」阶段（v2 `chat.intent_detected` 且带 plan）。
+  /// v2 默认关闭时恒 false，文案退到通用兜底，不影响展示。
+  bool _planPhase = false;
+
+  /// 本轮已派出子 Agent（v2 且带 subAgents / agent_status delegate_start）。
+  bool _delegatePhase = false;
+
+  /// 本轮首个正文 chunk 是否已到（决定「快说完了」文案）。
+  bool _sawChunk = false;
+
+  /// 输入框上方状态条要显示的文案；`null` = 当前没在干活，条不显示。
+  ///
+  /// 裁决逻辑见 `core/utils/agent_activity_label.dart`：工具族映射优先，
+  /// 服务端口语化进度补位，最后按阶段兜底——保证任何任务都有话可说。
+  String? get activityLabel {
+    final String tool = currentToolName?.trim() ?? "";
+    final bool hasLive = (agentStatusLine?.trim().isNotEmpty ?? false);
+    if (!isProcessing && tool.isEmpty && !hasLive) return null;
+    return resolveAgentActivityLabel(
+      toolName: tool,
+      liveLine: agentStatusLine,
+      planning: _planPhase,
+      delegating: _delegatePhase,
+      streaming: _sawChunk,
+    );
+  }
+
+  /// 清空「正在干什么」的全部状态（工具名 / 口语化进度 / 百分比 / 阶段）。
+  void _resetActivityState() {
+    currentToolName = null;
+    agentStatusLine = null;
+    agentStatusPercent = null;
+    _planPhase = false;
+    _delegatePhase = false;
+    _sawChunk = false;
+    isProcessing = false;
+  }
 
   /// 离线补发进行中闸（防 ws_connected 风暴期间并发 flush 乱序重复发送）。
   bool _flushingPending = false;
+
+  /// 时区变化侦测定时器（15 分钟）。
+  ///
+  /// 只是一次内存比对（读系统时区 + `DateTime.timeZoneOffset`），不触发定位、
+  /// 不联网，耗电可忽略。真正兜底的是「每条消息随行带 clientClock」，这个
+  /// 定时器只覆盖「用户长时间不发消息但 Agent 会主动说话」的场景。
+  Timer? _clockWatchTimer;
 
   /// 打开一个新会话：仅清空本地内存，仍连接同一后端。
   void reset() {
     messages.clear();
     _streamingMessageId = null;
-    currentToolName = null;
-    isProcessing = false;
+    _resetActivityState();
     notifyListeners();
   }
 
@@ -176,9 +232,76 @@ class MobileChatController extends ChangeNotifier {
     }
   }
 
+  /// 卡片就地更新（card.update）——把服务端回传的新卡写回**同一条消息**。
+  ///
+  /// 为什么改 text 标记而不是另存一份卡片对象：客户端的历史回放、复制、落盘
+  /// 都以 text 里的 [AGENT_RESULT_CARD_START] 块为唯一真相源。只替换标记块，
+  /// 当轮显示、重启后回放、复制出的文本三处同时一致，不需要第四份状态。
+  void _applyCardUpdate(Map<String, dynamic> payload) {
+    final String messageId = (payload["messageId"] ?? "").toString();
+    if (messageId.isEmpty) return;
+    final int idx =
+        messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final ChatMessage msg = messages[idx];
+    final Object? card = payload["card"];
+    if (card is! Map) {
+      // 服务端明确报错：卡片停在原态，只用一条提示告知，不伪造新卡
+      final String err = (payload["error"] ?? "").toString().trim();
+      if (err.isNotEmpty) {
+        errorMessage = err;
+        notifyListeners();
+      }
+      return;
+    }
+    final Map<String, dynamic> cardMap = Map<String, dynamic>.from(card);
+    final String block =
+        "[AGENT_RESULT_CARD_START]\n${jsonEncode(cardMap)}\n[AGENT_RESULT_CARD_END]";
+    final RegExp marker =
+        RegExp(r"\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]");
+    final String nextText = marker.hasMatch(msg.text)
+        ? msg.text.replaceFirst(marker, block)
+        : "${msg.text}\n$block";
+    final ChatMessage replaced = msg.copyWith(
+      text: nextText,
+      renderBlocks: msg.renderBlocks == null
+          ? null
+          : _swapCardBlock(msg.renderBlocks!, cardMap),
+      replyBlocks: msg.replyBlocks == null
+          ? null
+          : _swapCardBlock(msg.replyBlocks!, cardMap),
+      // v2 信封块（P4）：同一张卡的三条视图同步换新，渲染层信封优先才不会
+      // 把旧态卡再画回来。
+      envelopeBlocks: msg.envelopeBlocks == null
+          ? null
+          : _swapCardBlock(msg.envelopeBlocks!, cardMap),
+    );
+    messages[idx] = replaced;
+    _persist(replaced);
+    notifyListeners();
+  }
+
+  /// 把块序列里的第一张卡换成新卡；没有卡块就补在末尾（保序，不动文字/媒体）。
+  List<Map<String, dynamic>> _swapCardBlock(
+    List<Map<String, dynamic>> blocks,
+    Map<String, dynamic> card,
+  ) {
+    final List<Map<String, dynamic>> next = <Map<String, dynamic>>[];
+    bool swapped = false;
+    for (final Map<String, dynamic> b in blocks) {
+      if (!swapped && (b["type"]?.toString() ?? "") == "card") {
+        next.add(<String, dynamic>{"type": "card", "card": card});
+        swapped = true;
+      } else {
+        next.add(b);
+      }
+    }
+    if (!swapped) next.add(<String, dynamic>{"type": "card", "card": card});
+    return next;
+  }
+
   /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
-  void _persist(ChatMessage message) {
-    unawaited(
+  void _persist(ChatMessage message) {    unawaited(
       _store.saveMessage(message).catchError((Object e) {
         debugPrint("[MobileChatController] 消息落盘失败: $e");
       }),
@@ -323,11 +446,18 @@ class MobileChatController extends ChangeNotifier {
       "sessionId": ApiConfig.sessionId,
       "deviceId": "mobile-${defaultTargetPlatform.name}",
       "userAlias": "owner",
+      // 设备类别自报（与桌面端 main.dart 同源）：服务端 normalizeDeviceClass 归一后
+      // 随连接登记，供【运行环境】块与 critical 升级链区分电脑端/移动端。
+      // 缺省会按 desktop 处理——手机聊天会被注入"用户在电脑桌面端"的错误环境块。
+      "platform": "mobile",
       // 登录邮箱覆盖（未登录回落 USER_ID/sessionId），服务端按 userId 绑定 actor
       "userId": ApiConfig.effectiveActorId,
       // 访问鉴权开启时服务端校验此 token；未绑定/未开启时为 null
       if (AccessCredentialStore.instance.token != null)
         "token": AccessCredentialStore.instance.token,
+      // 设备时钟快照（时区与定位解耦）：连接即落库，首条消息之前服务端的
+      // 【当前时间】块就已经是用户本地时区——不依赖定位权限/GPS/逆地理。
+      "clientClock": ClientClockService.snapshotSync(),
     };
     // 用户自有模型三元组随连接上送：key 只存本机，服务端按 actor 纯内存驻留。
     // 明文 ws 绝不送 key（服务端同样拒绝非 TLS 上送）。
@@ -372,7 +502,10 @@ class MobileChatController extends ChangeNotifier {
       "messageId": userMsg.messageId,
       // 纯图轮 text 置空(服务端按 visionFrames 走视觉分档),与桌面端一致
       "text": text,
-      "timestamp": DateTime.now().toIso8601String(),
+      // 绝对时刻（带 Z）：裸本地时间在服务端会被按服务器时区解析，跨时区错数小时
+      "timestamp": DateTime.now().toUtc().toIso8601String(),
+      // 每条消息随行上报设备时区：跨时区飞行落地后立刻生效，不靠常驻侦测
+      "clientClock": await ClientClockService.snapshot(),
       "agentAccessMode": "full",
       // 与 session.init 同源：登录邮箱优先，保证消息落在本账号车道
       "userId": ApiConfig.effectiveActorId,
@@ -412,6 +545,7 @@ class MobileChatController extends ChangeNotifier {
   bool sendCardAction(
     AgentResultAction action, {
     required AgentResultData cardData,
+    String? messageId,
   }) {
     final String label = action.label.trim();
     if (label.isEmpty) return false;
@@ -420,6 +554,34 @@ class MobileChatController extends ChangeNotifier {
       errorMessage = "正在连接服务器，请稍后再试";
       notifyListeners();
       return false;
+    }
+    // 卡内动作分流（2026-11-06 定稿）：payload.cardAction 存在 = 走「只换这张卡」
+    // 的通道，不产生任何消息；否则维持老路（chat.user_action → 一轮问答）。
+    // 判据放在数据里而不是客户端硬编码按钮名，服务端换动作只需改卡面。
+    final String cardAction =
+        (action.payload["cardAction"] ?? "").toString().trim();
+    if (cardAction.isNotEmpty) {
+      final String boundId = (messageId ?? "").trim();
+      if (boundId.isEmpty) {
+        // 没有消息锚点就无法回写这张卡：宁可什么都不做，也不要错改别的卡
+        errorMessage = "这张卡已经不在对话里了";
+        notifyListeners();
+        return false;
+      }
+      final Map<String, dynamic> data = <String, dynamic>{
+        for (final MapEntry<String, dynamic> e in action.payload.entries)
+          if (e.key != "cardAction") e.key: e.value,
+      };
+      return _service.sendCardActionEvent(
+        sessionId: ApiConfig.sessionId,
+        messageId: boundId,
+        actionId: cardAction,
+        cardId: cardData.cardId,
+        stage: (cardData.extra?["shopping"] is Map)
+            ? ((cardData.extra!["shopping"] as Map)["stage"] ?? "").toString()
+            : "",
+        payload: data,
+      );
     }
     final bool sent = _service.sendCardAction(
       sessionId: ApiConfig.sessionId,
@@ -548,6 +710,63 @@ class MobileChatController extends ChangeNotifier {
     }
   }
 
+  /// 时区变化时主动补报（常驻连接期间跨时区：飞行/高铁落地系统切时区）。
+  ///
+  /// 只比对内存里的 IANA 时区与 UTC 偏移，**不定位、不联网、不申请权限**——
+  /// 即使定位权限被拒或室内无 fix，时间感知也照常工作。
+  Future<void> _reportClockIfChanged() async {
+    try {
+      if (!await ClientClockService.hasTimezoneChanged()) return;
+      final Map<String, dynamic> clock =
+          await ClientClockService.snapshot(source: "event");
+      _send("client.clock_report", clock);
+      debugPrint("[MobileChatController] 时区变化已补报: ${clock["timezone"]}");
+    } catch (e) {
+      debugPrint("[MobileChatController] 时钟补报失败(忽略): $e");
+    }
+  }
+
+  /// 系统围栏触发（App 存活时的实时通道）：立刻上报一次位置。
+  ///
+  /// 服务端拿到真实坐标后，软围栏状态机自然收敛（此前 outside → 现在 inside
+  /// 就产生 enter 事件），不需要端上执行任何业务动作。
+  void _handleGeofenceEvent(Map<String, dynamic> event) {
+    unawaited(_reportGeofencePosition(event));
+  }
+
+  /// 补报 App 未运行期间积压的围栏事件（原生队列 → 取走 → 逐条上报）。
+  Future<void> _flushPendingGeofenceEvents() async {
+    try {
+      final List<Map<String, dynamic>> pending =
+          await ClientGeofenceService.drainPending();
+      for (final Map<String, dynamic> event in pending) {
+        await _reportGeofencePosition(event);
+      }
+      if (pending.isNotEmpty) {
+        debugPrint("[MobileChatController] 补报积压围栏事件 ${pending.length} 条");
+      }
+    } catch (e) {
+      debugPrint("[MobileChatController] 围栏事件补报失败(忽略): $e");
+    }
+  }
+
+  Future<void> _reportGeofencePosition(Map<String, dynamic> event) async {
+    try {
+      final ClientLocationPayload? loc =
+          await ClientLocationService.getCurrentLocationForAgentReply();
+      if (loc == null) return;
+      _send("client.location_report", <String, dynamic>{
+        ...loc.toJson(),
+        "source": "report",
+        "trigger": "geofence",
+        if (event["fenceId"] != null) "fenceId": event["fenceId"],
+        if (event["at"] != null) "triggeredAt": event["at"],
+      });
+    } catch (e) {
+      debugPrint("[MobileChatController] 围栏位置上报失败(忽略): $e");
+    }
+  }
+
   Future<ClientLocationPayload?> _resolveLocation() {
     final resolver = debugLocationResolver;
     if (resolver != null) return resolver();
@@ -566,10 +785,28 @@ class MobileChatController extends ChangeNotifier {
         // 连接就绪即静默上报一次定位（无 jobId）：填充服务端位置缓存，
         // 首条消息的 prompt 注入才有位置背景。与桌面端启动上报同语义。
         unawaited(_reportStartupLocation());
+        // 时钟补报：连接时才区可能已与上次不同（重连前跨了时区）
+        unawaited(_reportClockIfChanged());
+        // 围栏事件流 + 积压补报（App 被杀期间系统围栏触发的事件在这里补交）
+        ClientGeofenceService.listen(_handleGeofenceEvent);
+        unawaited(_flushPendingGeofenceEvents());
+        _clockWatchTimer ??= Timer.periodic(
+          const Duration(minutes: 15),
+          (_) => unawaited(_reportClockIfChanged()),
+        );
         // 离线待发消息补发（session.init 已由 onConnected 同步先行发出）
         unawaited(_flushPendingUserMessages());
       case "agent.location_request":
         unawaited(_handleLocationRequest(payload));
+      case "agent.geofence_sync":
+        // 服务端下发围栏 → 注册为系统围栏（App 被杀也能触发到达/离开）
+        final List<Map<String, dynamic>> fences = payload["fences"] is List
+            ? (payload["fences"] as List)
+                .whereType<Map>()
+                .map((Map e) => e.cast<String, dynamic>())
+                .toList(growable: false)
+            : const <Map<String, dynamic>>[];
+        unawaited(ClientGeofenceService.sync(fences));
       case "schedule.reminder_fired":
         // 到点提醒（2026-10-12 接通）：编排层按前后台分流——后台系统通知，
         // 前台应用内横幅。此前手机端不监听本事件，到点无任何触达。
@@ -582,8 +819,13 @@ class MobileChatController extends ChangeNotifier {
         // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
         _handleReminderPopupEvent(payload);
       case "agent.proactive_message":
-        // 主动性消息（2026-10-14 与桌面端对齐）：决策类落卡，告知类落文字气泡。
+        // 主动性消息（2026-11-07）：引导开场白等告知类文本落文字气泡，
+        // 服务端按分泡节奏连推两条即两泡。
         _handleProactiveMessageEvent(payload);
+      case "identity_renamed":
+        // 对话中用户给 agent 取名：服务端统一改名管道（账号 + agent.name KV
+        // + prefs 三处同写）成功后广播，顶栏胶囊当场更新，无需重进应用。
+        AgentNameStore.instance.set(payload["displayName"]?.toString());
       case "evening.digest":
         // 睡前提醒（2026-10-16 接线）：narrationText 是唯一文案源，落文字气泡。
         // 后台不发系统通知（离线兜底已由服务端 proactivePipeline 承担）。
@@ -596,19 +838,42 @@ class MobileChatController extends ChangeNotifier {
         isConnected = false;
         connection.value = false;
         notifyListeners();
+      case "card.update":
+        // 卡片就地更新（2026-11-06）：服务端把这条消息里的卡换掉，客户端只重建
+        // 这张卡、不追加消息。判据是 messageId 命中——找不到（消息被删/被滚出
+        // 窗口）就静默丢弃，绝不新建气泡。
+        _applyCardUpdate(payload);
       case "chat.turn_started":
       case "chat.assistant_interim":
         _openStreamingMessage(payload);
-        isProcessing = true;
+        _beginTurnActivity();
+        notifyListeners();
+      case "chat.intent_detected":
+        // v2 阶段 1（默认关闭）：只取「拆解 / 派活」两个事实来换文案，
+        // 结构化面板手机端不做，避免为灰度协议背一套 UI。
+        _handleIntentDetected(payload);
+        notifyListeners();
+      case "chat.agent_status":
+        _handleAgentStatus(payload);
         notifyListeners();
       case "chat.assistant_chunk":
         _appendChunk(payload);
+        if (!_sawChunk) {
+          _sawChunk = true;
+          notifyListeners();
+        }
       case "chat.stream_reset":
         _handleStreamReset(payload);
       case "chat.media_ready":
         _handleMediaReady(payload);
       case "tool.call":
         currentToolName = payload["toolName"]?.toString().trim() ?? "";
+        // 上一把工具的口语化进度不能挂到新工具头上：先清空，等服务端为
+        // 新工具下发参数化文案（没有就退回工具族映射表）。
+        agentStatusLine = null;
+        agentStatusPercent = null;
+        // 有具体工具在跑，「拆解/派活」的阶段话术让位给工具族文案。
+        _planPhase = false;
         isProcessing = true;
         notifyListeners();
       case "tool.result":
@@ -619,20 +884,61 @@ class MobileChatController extends ChangeNotifier {
         _finalizeReply(payload);
         _maybeAutoOpenTravelCard(payload);
       case "chat.error":
-        isProcessing = false;
         errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
+        _resetActivityState();
         notifyListeners();
     }
   }
 
-  // ===== 对话流决策卡（2026-10-14 与桌面端对齐）=====
+  /// 新一轮开始：清掉上一轮残留的工具名 / 进度句，只保留「处理中」。
+  void _beginTurnActivity() {
+    currentToolName = null;
+    agentStatusLine = null;
+    agentStatusPercent = null;
+    _planPhase = false;
+    _delegatePhase = false;
+    _sawChunk = false;
+    isProcessing = true;
+  }
+
+  /// `chat.agent_status`：服务端口语化进度（含长工具心跳百分比）。
+  ///
+  /// 迟到的状态事件必须丢掉：收尾后再点亮状态条，会出现「状态条说在干活、
+  /// 正文已经答完」的同框矛盾（桌面端同判据，只是那边按 traceId 过滤）。
+  void _handleAgentStatus(Map<String, dynamic> payload) {
+    if (!isProcessing) return;
+    final String line = payload["line"]?.toString().trim() ?? "";
+    final String phase = payload["phase"]?.toString() ?? "";
+    if (line.isNotEmpty) agentStatusLine = line;
+    final Object? rawPercent = payload["percent"];
+    if (rawPercent is num) {
+      agentStatusPercent = rawPercent.toInt().clamp(0, 100);
+    }
+    if (phase == "delegate_start") {
+      _delegatePhase = true;
+    } else if (phase == "delegate_done") {
+      _delegatePhase = false;
+    }
+  }
+
+  /// `chat.intent_detected`：只提取阶段事实，不建结构化面板。
+  void _handleIntentDetected(Map<String, dynamic> payload) {
+    if (!isProcessing) return;
+    final Object? plan = payload["plan"];
+    final Object? subAgents = payload["subAgents"];
+    _planPhase = plan is List && plan.isNotEmpty;
+    _delegatePhase = subAgents is List && subAgents.isNotEmpty;
+  }
+
+  // ===== 主动性消息触达（决策卡已删除，2026-11-04 定调：一律落文本气泡）=====
 
   /// 是否处于后台（MobileHomePage 装配进 AmbientFeedsController 端口）。
   bool get _appBackgrounded =>
       AmbientFeedsController.instance.isAppBackgrounded?.call() ?? false;
 
-  /// 提醒升级链 popup 级（reminder_popup）→ 对话流决策卡。
-  /// 后台时补系统通知触达（前台卡在流里直接可见，无需通知）。
+  /// 提醒升级链 popup 级（reminder_popup）→ 对话流文本气泡（真实消息持久化）。
+  /// 后台时补系统通知触达；落流即已触达，自动回传 attention ack 让服务端
+  /// 升级链收敛——升级链此后只在投递失败（离线/杀进程）时逐级升级。
   void _handleReminderPopupEvent(Map<String, dynamic> payload) {
     final String title = payload["title"]?.toString() ?? "提醒";
     final String message = payload["message"]?.toString() ?? "";
@@ -644,14 +950,27 @@ class MobileChatController extends ChangeNotifier {
         body: message,
       ));
     }
-    _appendDecisionCard(<String, dynamic>{
-      "kind": "attention",
-      "title": title,
-      "message": message,
-      "priority": priority,
-      "state": "pending",
-      "attentionId": attentionId,
-    });
+    if (attentionId.isNotEmpty) {
+      unawaited(() async {
+        try {
+          await AttentionApi().ack(attentionId, via: "chat_stream");
+        } catch (e) {
+          debugPrint("[mobile reminder-popup] attention ack failed: $e");
+        }
+      }());
+    }
+    final String body = message.trim().isNotEmpty ? message.trim() : title.trim();
+    if (body.isEmpty) return;
+    final ChatMessage reminder = ChatMessage(
+      messageId: "assistant-reminder-${DateTime.now().microsecondsSinceEpoch}",
+      sessionId: ApiConfig.effectiveActorId,
+      role: "assistant",
+      text: body,
+      timestamp: DateTime.now(),
+    );
+    messages.add(reminder);
+    _persist(reminder);
+    notifyListeners();
   }
 
   /// 睡前提醒（evening.digest）→ 对话流专属卡片。
@@ -684,104 +1003,40 @@ class MobileChatController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 主动性消息（agent.proactive_message）→ 决策类落对话流决策卡，
-  /// 告知类落普通文字气泡（同样进对话流，不弹 SnackBar）。
+  /// 主动性消息（agent.proactive_message）→ 一律落对话流文本气泡。
+  /// 决策卡已删除（2026-11-04 定调）：重要度只用于触达分级——后台的重要
+  /// 消息补系统通知，其余靠落流 + 重连补投；展示即 impression（viewed，
+  /// 不进接受率分母，应用内已无独立确认动作）。
   void _handleProactiveMessageEvent(Map<String, dynamic> payload) {
     final String title = payload["title"]?.toString() ?? "Agent 主动联系";
     final String text = payload["text"]?.toString() ?? "";
     final String importance = payload["importance"]?.toString() ?? "";
     final String deliveryId = payload["deliveryId"]?.toString() ?? "";
     final bool important = importance == "high" || importance == "critical";
-    if (!important || deliveryId.isEmpty) {
-      // 告知类：落对话流即 impression（viewed，不进接受率分母）
-      if (deliveryId.isNotEmpty) {
-        AmbientFeedsController.instance.sendProactiveOutcome(
-            deliveryId, "viewed");
-      }
-      if (text.trim().isEmpty) return;
-      // 前台横幅（2026-10-20）：告知类是社交货币/情绪价值的主载体，只落流
-      // 用户大概率无感——前台经 AmbientFeeds 横幅通道并行触达（与
-      // schedule.reminder_fired 同源）；后台仍只落流，触达靠重连补投。
-      if (!_appBackgrounded) {
-        unawaited(AmbientFeedsController.instance.foregroundBanner
-            ?.show(title, text.trim()));
-      }
-      // 手机端定调（2026-10-21）：主动消息是「真实消息」——与正常对话回复
-      // 同等地位落本地历史（重启后仍在），而非一次性浮层。
-      // 2026-10-26 定调：气泡只放正文（与正常对话格式一致），title 留给
-      // 横幅/系统通知；离开时长等缘由由服务端写进正文。
-      final ChatMessage proactive = ChatMessage(
-        messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
-        sessionId: ApiConfig.effectiveActorId,
-        role: "assistant",
-        text: text,
-        timestamp: DateTime.now(),
-      );
-      messages.add(proactive);
-      _persist(proactive);
-      notifyListeners();
-      return;
+    if (deliveryId.isNotEmpty) {
+      AmbientFeedsController.instance.sendProactiveOutcome(
+          deliveryId, "viewed");
     }
-    if (_appBackgrounded) {
-      // 手机后台（类微信常在线）：系统通知触达，点开回前台，卡在流里承接确认
+    if (important && _appBackgrounded) {
+      // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
       unawaited(LocalNotificationService.show(title: title, body: text, deliveryId: deliveryId));
     }
-    _appendDecisionCard(<String, dynamic>{
-      "kind": "proactive",
-      "title": title,
-      "message": text,
-      "priority": "high",
-      "state": "pending",
-      "deliveryId": deliveryId,
-    });
-  }
-
-  /// 往对话流追加一张决策卡（contentType="decision_card"，内存态不持久化，
-  /// 与桌面端同语义：重启后消失，服务端升级链自行收敛）。
-  void _appendDecisionCard(Map<String, dynamic> card) {
-    final String title = card["title"]?.toString() ?? "";
-    final String body = card["message"]?.toString() ?? "";
-    messages.add(ChatMessage(
-      messageId: "decision-${DateTime.now().microsecondsSinceEpoch}",
+    if (text.trim().isEmpty) return;
+    // 应用内顶部弹窗已删除（2026-11-04 定调）：告知类只落对话流气泡，
+    // 不再叠加应用内横幅/系统通知；后台触达靠落流 + 重连补投。
+    // 手机端定调（2026-10-21）：主动消息是「真实消息」——与正常对话回复
+    // 同等地位落本地历史（重启后仍在），而非一次性浮层。
+    // 2026-10-26 定调：气泡只放正文（与正常对话格式一致），title 留给
+    // 横幅/系统通知；离开时长等缘由由服务端写进正文。
+    final ChatMessage proactive = ChatMessage(
+      messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: ApiConfig.effectiveActorId,
       role: "assistant",
-      text: body.isNotEmpty ? body : title,
+      text: text,
       timestamp: DateTime.now(),
-      contentType: "decision_card",
-      decisionCard: card,
-    ));
-    notifyListeners();
-  }
-
-  /// 决策卡按钮回调（MobileChatPage 调用）：回传 ack/outcome + 原地翻转终态。
-  /// attention：确认/忽略都 ack（via=chat_card，升级链收敛）；
-  /// proactive：确认 accepted / 忽略 dismissed。
-  void confirmDecisionCard(String messageId, bool confirmed) {
-    final int idx = messages.indexWhere((m) => m.messageId == messageId);
-    if (idx < 0) return;
-    final Map<String, dynamic>? card = messages[idx].decisionCard;
-    if (card == null || card["state"]?.toString() == "confirmed") return;
-
-    final String kind = card["kind"]?.toString() ?? "";
-    final String attentionId = card["attentionId"]?.toString() ?? "";
-    final String deliveryId = card["deliveryId"]?.toString() ?? "";
-    if (kind == "attention" && attentionId.isNotEmpty) {
-      unawaited(() async {
-        try {
-          await AttentionApi().ack(attentionId, via: "chat_card");
-        } catch (e) {
-          // ack 失败不影响本地卡片（升级链会随截止时间自然收敛）
-          debugPrint("[mobile decision-card] attention ack failed: $e");
-        }
-      }());
-    } else if (kind == "proactive" && deliveryId.isNotEmpty) {
-      AmbientFeedsController.instance
-          .sendProactiveOutcome(deliveryId, confirmed ? "accepted" : "dismissed");
-    }
-
-    messages[idx] = messages[idx].copyWith(
-      decisionCard: Map<String, dynamic>.of(card)..["state"] = "confirmed",
     );
+    messages.add(proactive);
+    _persist(proactive);
     notifyListeners();
   }
 
@@ -1147,6 +1402,10 @@ class MobileChatController extends ChangeNotifier {
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
+    // v2 统一信封块（P4）：唯一权威序列，渲染层信封优先；非 v2 帧为 null，
+    // 渲染回退旧字段链（零回归）。
+    final List<Map<String, dynamic>>? envelopeBlocks =
+        extractEnvelopeBlocks(payload);
     final List<String>? followUps = _parseFollowUps(payload);
     if (idx < 0) {
       // 没有流式占位:直接落一条最终消息（整轮只剩内部帧 → 不落空白泡）
@@ -1154,10 +1413,10 @@ class MobileChatController extends ChangeNotifier {
           mediaCards == null &&
           summaryCard == null &&
           renderBlocks == null &&
-          replyBlocks == null) {
+          replyBlocks == null &&
+          envelopeBlocks == null) {
         _streamingMessageId = null;
-        currentToolName = null;
-        isProcessing = false;
+        _resetActivityState();
         notifyListeners();
         return;
       }
@@ -1171,6 +1430,7 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        envelopeBlocks: envelopeBlocks,
         followUpPrompts: followUps,
       ));
       _persist(messages.last);
@@ -1183,12 +1443,12 @@ class MobileChatController extends ChangeNotifier {
           mediaCards == null &&
           summaryCard == null &&
           renderBlocks == null &&
-          replyBlocks == null;
+          replyBlocks == null &&
+          envelopeBlocks == null;
       if (nothingToShow) {
         messages.removeAt(idx);
         _streamingMessageId = null;
-        currentToolName = null;
-        isProcessing = false;
+        _resetActivityState();
         notifyListeners();
         return;
       }
@@ -1206,13 +1466,13 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard ?? prev.summaryCard,
         renderBlocks: renderBlocks ?? prev.renderBlocks,
         replyBlocks: replyBlocks ?? prev.replyBlocks,
+        envelopeBlocks: envelopeBlocks ?? prev.envelopeBlocks,
         followUpPrompts: followUps,
       );
       _persist(messages[idx]);
     }
     _streamingMessageId = null;
-    currentToolName = null;
-    isProcessing = false;
+    _resetActivityState();
     notifyListeners();
   }
 
@@ -1238,6 +1498,10 @@ class MobileChatController extends ChangeNotifier {
         _parseStructuredList(payload, "renderBlocks");
     final List<Map<String, dynamic>>? replyBlocks =
         _parseStructuredList(payload, "blocks");
+    // v2 统一信封块（P4）：唯一权威序列。塌缩轮挂完整序列（正文=finalText，
+    // 渲染层按块直读不重复）；正常分泡轮只挂非 text 块（正文已在各气泡里）。
+    final List<Map<String, dynamic>>? envelopeBlocksAll =
+        extractEnvelopeBlocks(payload);
     final List<String>? followUps = _parseFollowUps(payload);
     if (payload["finalTextReplacesStream"] == true) {
       // 塌缩：删除本轮所有分泡（含 id 对账与同 trace 兜底），落单泡 finalText
@@ -1252,11 +1516,11 @@ class MobileChatController extends ChangeNotifier {
           mediaCards == null &&
           summaryCard == null &&
           renderBlocks == null &&
-          replyBlocks == null) {
+          replyBlocks == null &&
+          envelopeBlocksAll == null) {
         // 整轮只剩系统内部帧 → 塌缩后也不留空白泡
         _streamingMessageId = null;
-        currentToolName = null;
-        isProcessing = false;
+        _resetActivityState();
         notifyListeners();
         return;
       }
@@ -1270,12 +1534,12 @@ class MobileChatController extends ChangeNotifier {
         summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        envelopeBlocks: envelopeBlocksAll,
         followUpPrompts: followUps,
       ));
       _persist(messages.last);
       _streamingMessageId = null;
-      currentToolName = null;
-      isProcessing = false;
+      _resetActivityState();
       notifyListeners();
       return;
     }
@@ -1285,6 +1549,10 @@ class MobileChatController extends ChangeNotifier {
         m.streaming && m.text.trim().isEmpty && !_isBubbleId(m.messageId));
     List<Map<String, dynamic>>? replyBlocksForLast = replyBlocks;
     List<Map<String, dynamic>>? renderBlocksForLast = renderBlocks;
+    // v2 信封块（P4）：多泡时正文已在各气泡里，只留非 text 块挂末泡；
+    // media_segments 里夹的文字段同理剥掉（只保 media 段）。单泡轮保留完整
+    // 序列（text 块与泡文本同源，渲染层按块直读不重复）。
+    List<Map<String, dynamic>>? envelopeBlocksForLast = envelopeBlocksAll;
     if (bubbles.length > 1) {
       if (replyBlocks != null) {
         final List<Map<String, dynamic>> cardOnly = replyBlocks
@@ -1297,6 +1565,31 @@ class MobileChatController extends ChangeNotifier {
             .where((b) => b["type"]?.toString() != "text")
             .toList(growable: false);
         renderBlocksForLast = mediaOnly.isEmpty ? null : mediaOnly;
+      }
+      if (envelopeBlocksAll != null) {
+        final List<Map<String, dynamic>> noText = <Map<String, dynamic>>[];
+        for (final Map<String, dynamic> b in envelopeBlocksAll) {
+          final String type = b["type"]?.toString() ?? "text";
+          if (type == "text" || type == "followups") continue;
+          if (type == "media_segments") {
+            final Object? segs = b["segments"];
+            if (segs is! List) continue;
+            final List<Map<String, dynamic>> mediaOnlySegs = segs
+                .whereType<Map>()
+                .map((Map m) => Map<String, dynamic>.from(m))
+                .where((Map<String, dynamic> s) =>
+                    s["type"]?.toString() == "media")
+                .toList(growable: false);
+            if (mediaOnlySegs.isEmpty) continue;
+            noText.add(<String, dynamic>{
+              "type": "media_segments",
+              "segments": mediaOnlySegs,
+            });
+            continue;
+          }
+          noText.add(b);
+        }
+        envelopeBlocksForLast = noText.isEmpty ? null : noText;
       }
     }
     for (int i = 0; i < bubbles.length; i++) {
@@ -1320,6 +1613,7 @@ class MobileChatController extends ChangeNotifier {
           summaryCard: isLast ? summaryCard : null,
           renderBlocks: isLast ? renderBlocksForLast : null,
           replyBlocks: isLast ? replyBlocksForLast : null,
+          envelopeBlocks: isLast ? envelopeBlocksForLast : null,
           followUpPrompts: isLast ? followUps : null,
         ));
         _persist(messages.last);
@@ -1345,6 +1639,8 @@ class MobileChatController extends ChangeNotifier {
               isLast ? (renderBlocksForLast ?? prev.renderBlocks) : prev.renderBlocks,
           replyBlocks:
               isLast ? (replyBlocksForLast ?? prev.replyBlocks) : prev.replyBlocks,
+          envelopeBlocks:
+              isLast ? (envelopeBlocksForLast ?? prev.envelopeBlocks) : prev.envelopeBlocks,
           followUpPrompts: isLast ? followUps : null,
           pendingMediaCards: isLast ? null : prev.pendingMediaCards,
           // streaming 不带 → false：定稿
@@ -1353,8 +1649,7 @@ class MobileChatController extends ChangeNotifier {
       }
     }
     _streamingMessageId = null;
-    currentToolName = null;
-    isProcessing = false;
+    _resetActivityState();
     notifyListeners();
   }
 
@@ -1376,6 +1671,7 @@ class MobileChatController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _clockWatchTimer?.cancel();
     unawaited(_subscription?.cancel());
     _service.close();
     connection.dispose();

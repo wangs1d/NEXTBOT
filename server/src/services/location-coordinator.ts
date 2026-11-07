@@ -115,6 +115,22 @@ export class LocationCoordinator {
     this.sockets.set(actorId, socket);
   }
 
+  /**
+   * 向该 actor 的在线连接推送一条事件（围栏同步等非位置事件复用本协调器
+   * 持有的 actor→socket 绑定，避免再造一份连接表）。
+   * 无在线连接/发送失败返回 false，调用方静默即可（下次连接会重新下发）。
+   */
+  sendEventToActor(actorId: string, type: string, payload: unknown): boolean {
+    const socket = this.sockets.get(actorId);
+    if (!socket || !this.hasSocket(actorId)) return false;
+    try {
+      socket.send(JSON.stringify({ type, payload }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   unbindSocket(socket: WsSendLike): void {
     const removed: string[] = [];
     for (const [actorId, s] of this.sockets) {

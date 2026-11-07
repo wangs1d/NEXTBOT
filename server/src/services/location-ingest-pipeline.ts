@@ -16,6 +16,7 @@
 
 import type { ClientLocationWire } from "@nextbot/agent-protocol";
 
+import type { ActorContextService, ActorPlaceKind } from "./actor-context-service.js";
 import type { GeofenceService } from "./geofence-service.js";
 import type { LocationHistoryService, LocationSampleSource } from "./location-history-service.js";
 
@@ -24,6 +25,14 @@ export type LocationIngestDeps = {
   history: LocationHistoryService | null;
   /** 地理围栏引擎；null=未装配 */
   geofence: GeofenceService | null;
+  /**
+   * 情境快照（State 层）：每次上报同步更新当前位置与 placeKind。
+   *
+   * 这是「持续感知」的落点——消费方（prompt / 工具）只读快照，不再向客户端
+   * 发按需请求。频控丢弃的上报也要更新快照（见 ingest 注释）：状态是「最新
+   * 事实」，事件流才是「按频率采样」。
+   */
+  context?: ActorContextService | null;
   /** 上报后的后续消费（如方案 D 到达触发器） */
   onLocationReported?: (actorId: string, loc: ClientLocationWire, source: LocationSampleSource) => void;
   /** 同一 actor 两次入库的最小间隔（毫秒），0=关闭频控；缺省 10s */
@@ -44,6 +53,10 @@ export class LocationIngestPipeline {
 
   /** 处理一次上报。返回 false 表示被频控丢弃（未落历史、未判围栏、未触发后续）。 */
   ingest(actorId: string, loc: ClientLocationWire, source: LocationSampleSource): boolean {
+    // 快照先更新：频控只该限制「样本入库密度」，不该让 Agent 看到过期状态。
+    // 用户刚到家正好卡在 10s 窗口内，prompt 仍必须知道他在家。
+    this.updateContext(actorId, loc, source);
+
     if (this.minIntervalMs > 0) {
       const nowMs = this.now();
       const last = this.lastIngestAt.get(actorId) ?? 0;
@@ -69,5 +82,27 @@ export class LocationIngestPipeline {
       console.log(`[LocationIngest] 上报消费回调失败（忽略）: ${err}`);
     }
     return true;
+  }
+
+  /** 更新情境快照（含 placeKind）；任何失败都不影响主链路。 */
+  private updateContext(
+    actorId: string,
+    loc: ClientLocationWire,
+    source: LocationSampleSource,
+  ): void {
+    const context = this.deps.context;
+    if (!context) return;
+    try {
+      let place: { kind: ActorPlaceKind; label?: string } | undefined;
+      try {
+        const hit = this.deps.geofence?.matchPlace(actorId, loc);
+        if (hit) place = { kind: hit.kind, label: hit.fence.name };
+      } catch {
+        /* 围栏查询失败：placeKind 保持 unknown，不影响坐标快照 */
+      }
+      context.updateLocation(actorId, loc, source, place);
+    } catch (err) {
+      console.log(`[LocationIngest] 快照更新失败（忽略）: ${err}`);
+    }
   }
 }

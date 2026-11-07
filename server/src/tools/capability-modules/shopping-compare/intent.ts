@@ -19,6 +19,7 @@ export const SHOPPING_COMPARE_INTENT_RULES: ToolIntentRule[] = [
         "compare price", "price compare", "price comparison", "best price", "cheapest",
         "compare insurance", "quote comparison", "price drop alert", "price watch",
         "比价", "价格对比", "对比价格", "哪家便宜", "哪个平台便宜", "最低价", " cheapest",
+        "哪买便宜", "哪里买便宜", "在哪买便宜", "哪儿买便宜", "哪买划算", "哪里便宜", "哪个最便宜", "哪家最便宜",
         "降价", "降价提醒", "到价提醒", "便宜的", "货比三家", "保险对比", "服务对比",
       ],
       negativeAliases: [
@@ -46,6 +47,7 @@ export const SHOPPING_COMPARE_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: [
         "跨平台比价", "多平台比价", "同款比价", "比价", "价格对比", "哪个便宜", "哪家便宜", "最低价",
+        "哪买便宜", "哪里买便宜", "在哪买便宜", "哪儿买便宜", "哪买划算", "哪里便宜",
       ],
       examples: [
         "帮我比价一下戴森吹风机",
@@ -101,6 +103,7 @@ export const SHOPPING_COMPARE_CATEGORY_MAPPING: { name: string; keywords: string
   keywords: [
     "compare", "comparison", "price compare", "cheapest", "best price", "price drop", "price watch",
     "比价", "价格对比", "对比价格", "哪家便宜", "哪个便宜", "哪个平台便宜", "最低价",
+    "哪买便宜", "哪里买便宜", "在哪买便宜", "哪儿买便宜", "哪买划算", "哪里便宜", "哪个最便宜", "哪家最便宜",
     "降价", "降价提醒", "到价提醒", "货比三家",
     "保险对比", "保险比价", "套餐对比", "服务对比", "条款对比", "医疗险对比", "宽带对比",
     "盯着价格", "降了告诉我",

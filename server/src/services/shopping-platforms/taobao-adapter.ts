@@ -22,6 +22,7 @@ import {
 export class TaobaoAdapter implements ShoppingPlatformAdapter {
   readonly platform: string = "taobao";
   readonly category = "general" as const;
+  readonly authMode = "login" as const;
 
   searchUrl(query: string, filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

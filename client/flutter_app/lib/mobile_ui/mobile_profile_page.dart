@@ -9,15 +9,15 @@ import "../core/presentation/user_avatar.dart";
 import "../core/services/user_avatar_api.dart";
 import "../features/help/feedback_dialog.dart";
 import "mobile_chat_controller.dart";
-import "mobile_model_catalog_page.dart";
 import "mobile_service_access_page.dart";
 import "mobile_theme.dart";
 
 /// 手机端「我的」页:全功能二级菜单聚合。
 ///
 /// - 顶部账号卡片：头像(点击可设置) + 名称(与桌面端同源：邮箱前缀) + 实时连接状态
-/// - 功能：模型目录(只读) / 服务接入(内测 byok:模型+TTS 密钥)
-/// - 设置：主题(亮 / 暗 / 跟随系统)、帮助与反馈
+/// - 功能：服务接入(内测 byok:模型+TTS 密钥)
+/// （模型目录入口已删除（2026-11-04）：模型配置统一走服务接入页）
+/// - 设置：外观(二级页:亮 / 暗 / 跟随系统)、帮助与反馈
 /// - 账号：退出登录
 /// （邮箱/消息中心入口已删除（2026-10-14）：消息统一后台扫描，agent 判定
 ///   有价值后才主动推送，不再提供前端陈列入口）
@@ -128,8 +128,8 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
   }
 
   /// 二级页统一包装:顶栏带返回键(被复用的桌面面板页自身无返回出口,
-  /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(模型目录/
-  /// 服务接入)直接 push,避免出现双层顶栏+双返回按钮。
+  /// 手机端依赖系统返回手势不够直观)。自带 AppBar 的页面(服务接入)
+  /// 直接 push,避免出现双层顶栏+双返回按钮。
   Future<void> _push(Widget page, String title, {bool wrapped = true}) async {
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
@@ -174,13 +174,6 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
                 onTap: () => _push(
                     const MobileServiceAccessPage(), "服务接入", wrapped: false),
               ),
-              _divider(context),
-              _ListRow(
-                leading: Icon(Icons.memory_outlined, color: p.textSecondary, size: 22),
-                title: "模型目录",
-                trailing: Icon(Icons.chevron_right, color: p.textMuted, size: 20),
-                onTap: () => _push(const MobileModelCatalogPage(), "模型目录", wrapped: false),
-              ),
             ],
           ),
           const SizedBox(height: 16),
@@ -188,9 +181,20 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
           _SectionCard(
             children: [
               if (widget.themeMode != null && widget.onThemeModeChanged != null) ...<Widget>[
-                _ThemeModeRow(
-                  themeMode: widget.themeMode!,
-                  onChanged: widget.onThemeModeChanged!,
+                _ListRow(
+                  leading: Icon(Icons.contrast, color: p.textSecondary, size: 22),
+                  title: "外观",
+                  trailing: Text(
+                    _themeModeLabel(widget.themeMode!),
+                    style: TextStyle(color: p.textMuted, fontSize: 14),
+                  ),
+                  onTap: () => _push(
+                    _ThemeSettingsPage(
+                      themeMode: widget.themeMode!,
+                      onChanged: widget.onThemeModeChanged!,
+                    ),
+                    "外观",
+                  ),
                 ),
                 _divider(context),
               ],
@@ -240,6 +244,18 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
 
   Widget _divider(BuildContext context) {
     return Divider(height: 1, indent: 52, color: MobileTheme.of(context).divider);
+  }
+
+  /// 主题模式的展示名（「外观」行 trailing 摘要）。
+  static String _themeModeLabel(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.light:
+        return "亮色";
+      case ThemeMode.dark:
+        return "暗色";
+      case ThemeMode.system:
+        return "跟随系统";
+    }
   }
 
   void _showFeedback() {
@@ -466,6 +482,56 @@ class _ListRow extends StatelessWidget {
             if (trailing != null) trailing!,
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// 「外观」二级页：三选一设置屏幕主题（亮 / 暗 / 跟随系统）。
+///
+/// 由 [_MobileProfilePageState._push] 统一包装顶栏，本体只渲染选项卡片；
+/// 选中即生效并回写根组件的主题状态，返回后「外观」行的 trailing 摘要同步刷新。
+class _ThemeSettingsPage extends StatefulWidget {
+  const _ThemeSettingsPage({required this.themeMode, required this.onChanged});
+
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onChanged;
+
+  @override
+  State<_ThemeSettingsPage> createState() => _ThemeSettingsPageState();
+}
+
+class _ThemeSettingsPageState extends State<_ThemeSettingsPage> {
+  late ThemeMode _mode = widget.themeMode;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          _GroupLabel(label: "屏幕主题"),
+          _SectionCard(
+            children: [
+              _ThemeModeRow(
+                themeMode: _mode,
+                onChanged: (ThemeMode mode) {
+                  setState(() => _mode = mode);
+                  widget.onChanged(mode);
+                },
+              ),
+            ],
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 12, 20, 0),
+            child: Text(
+              "暗色主题下界面自动切换为深色配色",
+              style: TextStyle(color: p.textMuted, fontSize: 12),
+            ),
+          ),
+        ],
       ),
     );
   }

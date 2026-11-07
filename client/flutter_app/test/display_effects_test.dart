@@ -11,6 +11,7 @@ import "package:nextbot/features/chat/display_effects/display_effects.dart";
 import "package:nextbot/features/chat/display_effects/fold_list_effect_card.dart";
 import "package:nextbot/features/chat/display_effects/metric_effect_card.dart";
 import "package:nextbot/features/chat/display_effects/steps_effect_card.dart";
+import "package:nextbot/features/chat/display_effects/weather_effect_card.dart";
 
 Widget wrap(Widget child) => MaterialApp(home: Scaffold(body: child));
 
@@ -39,9 +40,10 @@ void main() {
     expect(route("carousel").runtimeType, CarouselEffectCard);
     expect(route("chips").runtimeType, ChipsEffectCard);
     expect(route("fold_list").runtimeType, FoldListEffectCard);
+    // weather → 天气内联卡（2026-11-06 参考稿版式：标题行 + 大字气温区间）
+    expect(route("weather").runtimeType, WeatherInlineText);
     // 未知/既有类型 → null（回退 AgentResultCard 默认渲染）
     expect(route(""), isNull);
-    expect(route("weather"), isNull);
     expect(route("timeline"), isNull);
     expect(route("progress"), isNull);
     expect(route("quote"), isNull);
@@ -107,6 +109,44 @@ void main() {
     expect(find.text("3"), findsOneWidget);
     expect(find.text("有问题随时问我"), findsOneWidget);
     expect(find.text("第1步 下载安装包"), findsNothing);
+  });
+
+  // ───────────────────────────────────────────────────────────────────
+  // weather 天气内联卡（2026-11-06 参考稿版式：标题行 + 16~20° 大字 + 现象词）
+  // ───────────────────────────────────────────────────────────────────
+
+  testWidgets("weather card: title row, big temp range, condition only",
+      (WidgetTester tester) async {
+    await tester.pumpWidget(wrap(AgentResultCard(
+      data: AgentResultData(
+        cardType: "weather",
+        title: "上海 天气实况",
+        items: <AgentResultItem>[
+          item("大部晴朗"),
+          item("气温 11°–19°"),
+          item("湿度 87%"),
+          item("风速 5.5 km/h"),
+          item("今天 下午 14–18 点有雨"),
+          item("明天 上午 9–12 点的雨已下过"),
+        ],
+      ),
+    )));
+    await tester.pump();
+
+    expect(find.byType(WeatherInlineText), findsOneWidget);
+    // 标题行照常出现（图标 + 标题小字）
+    expect(find.text("上海 天气实况"), findsOneWidget);
+    // 气温区间转参考稿格式：~ 连接、° 只落末位，26 号大字
+    expect(find.text("11~19°"), findsOneWidget);
+    // 现象词在次行
+    expect(find.text("大部晴朗"), findsOneWidget);
+    // 2026-11-06 定稿：湿度/风速/降雨时段一律不出现
+    expect(find.text("87%"), findsNothing);
+    expect(find.textContaining("km/h"), findsNothing);
+    expect(find.textContaining("有雨"), findsNothing);
+    expect(find.textContaining("已下过"), findsNothing);
+    // 着装不放卡片，由 LLM 正文带出
+    expect(find.text("着装"), findsNothing);
   });
 
   // ───────────────────────────────────────────────────────────────────

@@ -415,8 +415,32 @@ class WsChatService {
     });
   }
 
-  bool _sendNow(String type, Map<String, dynamic> payload) {
-    if (_channel == null || _channel!.closeCode != null) {
+  /// 卡片内动作（2026-11-06 定稿）：与 [sendCardAction] 是两条路。
+  ///
+  /// [sendCardAction] 会走 `chat.user_action`，服务端把它转写成 user_message，
+  /// 于是必然多一条用户气泡 + 一轮模型生成 + 一条助手回复；
+  /// 本方法走 `card.action`，服务端只回 `card.update` 把这张卡**原地**换掉，
+  /// 消息列表长度不变。用于购物流程里「就这家 / 确认下单 / 查物流」这类
+  /// 一步到下一步的动作。
+  bool sendCardActionEvent({
+    required String sessionId,
+    required String messageId,
+    required String actionId,
+    String cardId = "",
+    String stage = "",
+    Map<String, dynamic>? payload,
+  }) {
+    return sendEvent("card.action", <String, dynamic>{
+      "sessionId": sessionId,
+      "messageId": messageId,
+      "cardId": cardId,
+      "actionId": actionId,
+      if (stage.isNotEmpty) "stage": stage,
+      if (payload != null && payload.isNotEmpty) "payload": payload,
+    });
+  }
+
+  bool _sendNow(String type, Map<String, dynamic> payload) {    if (_channel == null || _channel!.closeCode != null) {
       return false;
     }
     try {

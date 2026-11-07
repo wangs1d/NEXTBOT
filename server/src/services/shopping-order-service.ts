@@ -23,6 +23,7 @@ import {
   detectHumanRequired,
   detectLoginPage,
   getLoginWaitMs,
+  isPlatformLoggedIn,
   waitForLogin,
   type BrowserPageLease,
   type HumanRequiredDetection,
@@ -106,6 +107,22 @@ interface ActiveSession {
   expiresAt: number;
 }
 
+/**
+ * 卡内扫码登录会话：二维码推进那张卡里，页面 lease 必须留着等用户扫。
+ *
+ * 不能像原来那样「截图 → 关页面 → 让用户说一句我扫了」：扫码后的登录态是
+ * 浏览器页面自己轮询拿到的，页面一关 Cookie 就丢，用户白扫。
+ */
+interface PendingLogin {
+  token: string;
+  actorId: string;
+  platform: string;
+  targetUrl: string;
+  lease: BrowserPageLease;
+  expiresAt: number;
+  closed: boolean;
+}
+
 /** 两阶段确认的待确认记录。 */
 interface PendingConfirmation {
   token: string;
@@ -155,8 +172,25 @@ export type ShoppingOrderResult =
  * - 两阶段确认 token 5 分钟 TTL
  * - 审计日志（每次操作落 AuditService，含 browserMode）
  */
+
+/** 各平台登录页直连地址：force 登录交接时绕过商品页直接截码用。 */
+const PLATFORM_LOGIN_URLS: Record<string, string> = {
+  jd: "https://passport.jd.com/new/login.aspx",
+  taobao: "https://login.taobao.com/member/login.jhtml",
+  tmall: "https://login.tmall.com/",
+  suning: "https://passport.suning.com/ids/login",
+  pdd: "https://mobile.yangkeduo.com/login.html",
+  douyin: "https://www.douyin.com/login",
+};
+
 export class ShoppingOrderService {
   private readonly pendingConfirmations = new Map<string, PendingConfirmation>();
+  /**
+   * 卡内扫码登录会话（2026-11-06）：二维码在**那张卡里**展示，页面必须留在
+   * 这里不释放——扫码成功是浏览器页面自己轮询出来的登录态，页面一关 Cookie
+   * 就没了。所以会话持有 lease，check 时读 Cookie 落库后才释放。
+   */
+  private readonly pendingLogins = new Map<string, PendingLogin>();
   /** 已弹过「保存登录态」统一征询的 actor（本进程内每人只问一次，不按平台重复问） */
   private readonly askedLoginConsent = new Set<string>();
   /** 定期清理过期 token + 关闭存活 Page */
@@ -252,6 +286,53 @@ export class ShoppingOrderService {
     return this.browserExecutor.canUseSharedBrowser(resolveActorId(ctx));
   }
 
+  /**
+   * 这批平台里，哪些该用户**已有可用授权 Cookie**（即能免扫码取价）。
+   *
+   * 用途：比价缺省集合收窄——手机端没有可视浏览器，把没登录态的平台塞进
+   * 缺省只会整轮变成登录交接。登录过的平台仍值得带上（能读到真价）。
+   * 逐平台查 Cookie，任何异常都当「没有」处理（只影响是否纳入缺省，不报错）。
+   */
+  async listPlatformsWithCookies(actorId: string, platforms: string[]): Promise<string[]> {
+    const out: string[] = [];
+    for (const platform of platforms) {
+      try {
+        const cookies = await this.deps.browserSessionService.getCookiesForAgent(
+          actorId,
+          platform as BrowserSessionSiteId,
+        );
+        if (cookies.length > 0) out.push(platform);
+      } catch {
+        /* 未授权/未导入 = 没登录态 */
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 交接图片统一推送：登录二维码 / 验证页截图都推到聊天（手机端没有可视浏览器），
+   * 无头与可见浏览器都走这里。失败只丢增强，不影响工具结果。
+   */
+  private async pushHumanCard(
+    ctx: ToolContext,
+    page: Page,
+    platform: string,
+    reason: "login" | "captcha",
+  ): Promise<string | undefined> {
+    const label = this.platformLabel(platform);
+    return (
+      (await this.qrAssist
+        .pushPageCard(
+          ctx,
+          reason === "login"
+            ? { title: `请扫码登录${label}`, caption: "扫码后自动继续；若二维码失效，回复后我会重新发起" }
+            : { title: `请完成安全验证${label}`, caption: "验证页截图已推给你，完成后回复我继续" },
+          page,
+        )
+        .catch(() => undefined)) ?? undefined
+    );
+  }
+
   // ============ 页面租约 + 登录门（内置浏览器优先 + 无头兜底） ============
 
   /** 平台显示名（京东/淘宝/…），未收录时回退 platform 标识。 */
@@ -318,11 +399,29 @@ export class ShoppingOrderService {
        * 逐平台各建等待步会互相挤掉。
        */
       suppressHandoff?: boolean;
+      /**
+       * 匿名站点允许「无 Cookie 也开浏览器」。由 adapter.authMode 派生：
+       * 苏宁/什么值得买这类页面对匿名访客直接返回真实价格，没有 Cookie 不是
+       * 缺点，不该被 no_cookie 门禁挡住（否则手机端离线/无 Cookie 时
+       * 一条报价也拿不到）。
+       */
+      allowAnonymous?: boolean;
       /** 页面获取不可用时的自定义兜底（如 track 回退本地订单记录）。 */
       onUnavailable?: (err: BrowserPageUnavailableError) => ShoppingOrderResult;
+      /**
+       * 跳过登录门（只读且不需要登录态的取数用）。
+       *
+       * 京东详情页对匿名访客会弹登录浮层——"能看商品、但 detectLoginPage 判为登录"。
+       * 读规格这种只读动作如果走登录门，会白等 120 秒扫码，什么也没读到。
+       * 跳过后读不到就返回空，由调用方直接去结算（那一步才真正需要登录）。
+       */
+      skipLoginGate?: boolean;
     } = {},
   ): Promise<ShoppingOrderResult> {
     const actorId = resolveActorId(ctx);
+    // 先收割上一轮遗留的扫码登录会话（超时后用户才扫码的场景）：
+    // 已登录 → Cookie 落库，下面 getCookieAndSiteId 当轮就能取到。
+    await this.harvestPendingLogins(ctx, actorId, platform);
     const tStart = Date.now();
     let cookies: ImportedBrowserCookie[] = [];
     const cookieResult = await this.getCookieAndSiteId(actorId, platform);
@@ -337,6 +436,7 @@ export class ShoppingOrderService {
         cookies,
         interactiveLogin,
         preferHeadless: opts.preferHeadless === true,
+        allowAnonymous: opts.allowAnonymous === true,
       });
     } catch (err) {
       if (err instanceof BrowserPageUnavailableError) {
@@ -347,12 +447,19 @@ export class ShoppingOrderService {
       throw err;
     }
     const tAcquire = Date.now();
+    // 登录门超时会把 lease 转入 pendingLogins（二维码继续存活），此时
+    // finally 不能再 release——页面归 pendingLogins 会话管。
+    let leaseTransferred = false;
 
     try {
       // 落页稳定后再过登录门（SPA/跳转需要时间）
       await lease.page.waitForTimeout(2_500).catch(() => {});
       const tSettle = Date.now();
-      const gate = await this.ensureLoggedIn(ctx, lease, platform, targetUrl, opts.loginWaitMs, opts.suppressHandoff === true);
+      const gate = opts.skipLoginGate
+        ? null
+        : await this.ensureLoggedIn(ctx, lease, platform, targetUrl, opts.loginWaitMs, opts.suppressHandoff === true, () => {
+            leaseTransferred = true;
+          });
       const tGate = Date.now();
       if (gate) {
         console.log(`[shop-timing] ${platform} mode=${lease.mode} cookies=${tCookies - tStart} acquire=${tAcquire - tCookies} settle=${tSettle - tAcquire} gate=${tGate - tSettle} login=blocked`);
@@ -375,7 +482,7 @@ export class ShoppingOrderService {
       );
       return result;
     } finally {
-      await lease.release();
+      if (!leaseTransferred) await lease.release();
     }
   }
 
@@ -391,6 +498,8 @@ export class ShoppingOrderService {
     targetUrl: string,
     loginWaitMs?: number,
     suppressHandoff = false,
+    /** 超时后 lease 转入 pendingLogins 时回调（调用方据此跳过 finally release）。 */
+    onLeaseTransferred?: () => void,
   ): Promise<ShoppingOrderResult | null> {
     // 两次检测：部分平台（如京东）登录跳转由 JS 延迟触发，落页稳定后再补检一次
     let det = await detectLoginPage(platform, lease.page);
@@ -421,14 +530,35 @@ export class ShoppingOrderService {
 
     const wait = await waitForLogin(platform, lease.page, targetUrl, { timeoutMs: waitMs });
     if (!wait.ok) {
-      // 登录是用户本人的动作：交给长流程 handoff（页面留在登录页，等用户回执后续跑），
-      // 不再把平台就地标成「没有数据」。上层要统一多个平台时可抑制本层自动交接。
-      if (!suppressHandoff) this.notifyUserAction(ctx, [platform], "login");
+      // 2026-11-06 修「超时后用户才扫码，扫了没人接」：超时不再释放页面——
+      // lease 转入 pendingLogins 续命 5 分钟，聊天里那张二维码仍然有效。
+      // 用户随后回复任意一句，下一次工具执行先经 harvestPendingLogins 把
+      // 登录态收下来接着跑原任务，不用重新扫码。
+      const actorId = resolveActorId(ctx);
+      if (onLeaseTransferred) {
+        const token = randomUUID();
+        this.pendingLogins.set(token, {
+          token,
+          actorId,
+          platform,
+          targetUrl,
+          lease,
+          expiresAt: Date.now() + 5 * 60_000,
+          closed: false,
+        });
+        onLeaseTransferred();
+      }
+      // 登录是用户本人的动作：可见浏览器交给长流程 handoff（页面留在登录页）；
+      // 无头通道（手机端）没有面板，二维码/截图已推到聊天，等用户回复后重试即可。
+      if (!suppressHandoff && lease.mode === "shared") this.notifyUserAction(ctx, [platform], "login");
       return {
         ok: false,
         error:
-          `${wait.error}。已在内置浏览器打开${label}登录页，登录完成后告诉我一声即可继续` +
-          (lease.mode === "headless" && !imageUrl ? "（二维码无法呈现：客户端不在线且图片服务未装配）" : ""),
+          lease.mode === "shared"
+            ? `${wait.error}。已在内置浏览器打开${label}登录页，登录完成后告诉我一声即可继续`
+            : imageUrl
+              ? `${wait.error}。已把${label}登录二维码推送到聊天。如果用户说已经扫码确认了，直接继续原任务（服务端会自动接上已登录的会话），不要重新出码；用户说没扫才重新发起`
+              : `${wait.error}。登录二维码无法推送到聊天（客户端不在线或图片服务未装配），请稍后重试`,
         retryable: true,
         loginRequired: { platform, imageUrl: imageUrl ?? undefined },
       };
@@ -545,18 +675,25 @@ export class ShoppingOrderService {
         if (filtered.length === 0) {
           // 「搜索不到」不等于「需要用户」：先看页面有没有登录墙/验证码这类硬信号。
           // 只有命中才交人（对齐主流 Agent 的 human checkpoint）；普通无结果如实返回。
-          // 注意：suppressHandoff 只抑制本层逐平台通知，**不抑制检测**——比价层要靠
-          // 这里的 humanRequired 把多个被墙平台合成一次统一交接（2026-11-02 修复：
-          // 旧逻辑把检测一并禁掉，比价时空结果路径上的登录墙/验证码永远交不到人）。
-          let human: HumanRequiredDetection = { required: false };
-          if (mode === "shared") {
-            human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
-          }
+          // 无头通道也要检测：手机端没有可视浏览器，命中后把登录二维码/验证页截图
+          // 推到聊天，用户处理完回复继续（与可见浏览器能力对齐）。
+          // 注意：suppressHandoff 只抑制本层逐平台通知（比价层要合成一次统一交接），
+          // 不抑制检测。
+          const human: HumanRequiredDetection = await detectHumanRequired(platform, page).catch(
+            () => ({ required: false }),
+          );
           if (human.required && human.reason) {
-            if (!suppressHandoff) this.notifyUserAction(ctx, [platform], human.reason);
+            const imageUrl = await this.pushHumanCard(ctx, page, platform, human.reason);
+            if (!suppressHandoff && mode === "shared") this.notifyUserAction(ctx, [platform], human.reason);
+            const action = human.reason === "login" ? "登录" : "验证";
             return {
               ok: false,
-              error: `在${platform}搜索「${query}」需要你本人完成${human.reason === "login" ? "登录" : "验证"}：已在内置浏览器打开页面`,
+              error:
+                mode === "shared"
+                  ? `在${platform}搜索「${query}」需要你本人完成${action}：已在内置浏览器打开页面`
+                  : imageUrl
+                    ? `在${platform}搜索「${query}」需要你本人完成${action}：登录二维码/验证页截图已推送到聊天，处理完回复我继续`
+                    : `在${platform}搜索「${query}」需要你本人完成${action}：交接图无法推送，请稍后重试`,
               retryable: true,
               humanRequired: { platform, reason: human.reason, ...(human.evidence ? { evidence: human.evidence } : {}) },
             };
@@ -582,13 +719,13 @@ export class ShoppingOrderService {
         const message = err instanceof Error ? err.message : String(err);
         // 页面打不开/超时不自动交人：主流 Agent 只把登录墙/验证码交人。
         // 先看页面是否其实停在验证页，命中才 handoff；否则如实报错（可重试）。
-        // 同上：suppressHandoff 只抑制通知，不抑制检测（比价层统一交接依赖它）。
-        let human: HumanRequiredDetection = { required: false };
-        if (mode === "shared") {
-          human = await detectHumanRequired(platform, page).catch(() => ({ required: false }));
-        }
-        if (human.required && human.reason && !suppressHandoff) {
-          this.notifyUserAction(ctx, [platform], human.reason);
+        // 同上：无头通道也检测并推送交接图，suppressHandoff 只抑制逐平台通知。
+        const human: HumanRequiredDetection = await detectHumanRequired(platform, page).catch(
+          () => ({ required: false }),
+        );
+        if (human.required && human.reason) {
+          await this.pushHumanCard(ctx, page, platform, human.reason);
+          if (!suppressHandoff && mode === "shared") this.notifyUserAction(ctx, [platform], human.reason);
         }
         return {
           ok: false,
@@ -599,7 +736,270 @@ export class ShoppingOrderService {
             : {}),
         };
       }
-    }, { preferHeadless: innerOpts?.preferHeadless === true, loginWaitMs: innerOpts?.loginWaitMs, suppressHandoff });
+    }, {
+      preferHeadless: innerOpts?.preferHeadless === true,
+      loginWaitMs: innerOpts?.loginWaitMs,
+      suppressHandoff,
+      // 免登录站点（苏宁/什么值得买）不因「没有 Cookie」被门禁挡住
+      allowAnonymous: adapter.authMode === "anonymous",
+    });
+  }
+
+  /**
+   * 读商品详情页的**全部**规格维度与选项（2026-11-06 用户要求）。
+   *
+   * 只读、无副作用；返回空数组表示这个商品确实没有可拆规格（或页面读不出），
+   * 调用方据此直接去结算——不给用户一个空规格页，也不编造选项。
+   */
+  async fetchProductSpecs(
+    ctx: ToolContext,
+    platform: string,
+    url: string,
+  ): Promise<ShoppingOrderResult> {
+    const adapter = this.requireAdapter(platform);
+    if (!adapter) {
+      return { ok: false, error: `平台「${platform}」暂不支持。已实现：${listSupportedPlatforms().join("/")}` };
+    }
+    const extract = adapter.extractSpecs;
+    if (!extract) return { ok: false, error: "该平台暂不支持读取规格" };
+    const actorId = resolveActorId(ctx);
+    // 刻意**不走** withShoppingPage：那条通道带登录门（京东详情页会弹登录浮层，
+    // detectLoginPage 判为登录后要白等 120 秒扫码），而读规格只是只读动作。
+    // 这里直接拿一个匿名/已登录页面，读到什么算什么，读不到就返回空。
+    let cookies: ImportedBrowserCookie[] = [];
+    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
+    if (cookieResult.ok) cookies = cookieResult.cookies;
+    const lease = await this.browserExecutor.acquirePage(actorId, url, {
+      siteId: platform,
+      cookies,
+      interactiveLogin: false,
+      preferHeadless: true,
+      allowAnonymous: true,
+    });
+    try {
+      await lease.page.waitForTimeout(2_000).catch(() => {});
+      const specs = await extract(lease.page);
+      const pageTitle = await lease.page.title().catch(() => "");
+      return {
+        ok: true,
+        summary: specs.length > 0 ? `读到 ${specs.length} 个规格维度` : "这个商品没有可拆的规格",
+        specs,
+        itemTitle: pageTitle.split(/[-_|（(]/)[0]?.trim() || undefined,
+      };
+    } finally {
+      await lease.release();
+    }
+  }
+
+  /**
+   * 开始卡内扫码登录：开页 → 若落在登录页 → 二维码落盘 → **持有 lease 等用户扫**。
+   *
+   * 与旧链路的区别：旧链路截完图就放页面、把码推到聊天流、让用户打字说「扫了」，
+   * 页面一关登录态就丢（扫码后的 Cookie 是那个页面自己轮询到的）。这里把 lease
+   * 留在会话里，check 时读 Cookie 落库才算完成。
+   */
+  async beginLoginHandoff(
+    ctx: ToolContext,
+    platform: string,
+    targetUrl: string,
+    /**
+     * force：跳过「打开商品页看是否被拦」的预检，直接去平台登录页截码。
+     * 场景：苏宁这类商品页匿名能看、**结算页**才要登录的平台——预检会误判
+     * 「已登录」，只有 placeOrder 真的撞了结算登录墙后才知道必须登录。
+     */
+    opts: { force?: boolean } = {},
+  ): Promise<
+    | { ok: true; alreadyLoggedIn: true }
+    | { ok: true; alreadyLoggedIn: false; token: string; imageUrl: string | null }
+    | { ok: false; error: string }
+  > {
+    const actorId = resolveActorId(ctx);
+    let cookies: ImportedBrowserCookie[] = [];
+    const cookieResult = await this.getCookieAndSiteId(actorId, platform);
+    if (cookieResult.ok) cookies = cookieResult.cookies;
+    let lease: BrowserPageLease;
+    try {
+      lease = await this.browserExecutor.acquirePage(actorId, targetUrl, {
+        siteId: platform,
+        cookies,
+        interactiveLogin: false,
+        preferHeadless: true,
+        allowAnonymous: true,
+      });
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+    try {
+      await lease.page.waitForTimeout(2_500).catch(() => {});
+      let det = await detectLoginPage(platform, lease.page);
+      if (!det.isLogin && opts.force === true) {
+        // 商品页匿名能看不等于已登录（结算页才要登录）：直接去平台登录页截码。
+        const loginUrl = PLATFORM_LOGIN_URLS[platform];
+        if (!loginUrl) {
+          await lease.release();
+          return { ok: false, error: `${this.platformLabel(platform)}没有已知的登录页入口` };
+        }
+        await lease.page.goto(loginUrl, { waitUntil: "domcontentloaded", timeout: 20_000 }).catch(() => {});
+        await lease.page.waitForTimeout(2_000).catch(() => {});
+        det = await detectLoginPage(platform, lease.page);
+      }
+      if (!det.isLogin) {
+        await lease.release();
+        return { ok: true, alreadyLoggedIn: true };
+      }
+      const imageUrl = await this.qrAssist.savePageQrPng(ctx, lease.page);
+      const token = randomUUID();
+      this.pendingLogins.set(token, {
+        token,
+        actorId,
+        platform,
+        targetUrl,
+        lease,
+        expiresAt: Date.now() + getLoginWaitMs(),
+        closed: false,
+      });
+      return { ok: true, alreadyLoggedIn: false, token, imageUrl };
+    } catch (err) {
+      await lease.release().catch(() => {});
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
+  }
+
+  /**
+   * 收割上一轮遗留的扫码登录会话（2026-11-06 修「超时后扫了码没人接」）：
+   * 工具超时返回后页面 lease 转入 pendingLogins 继续存活，聊天里那张二维码
+   * 仍然有效。用户扫完回复任意一句，下一次工具执行先到这里把登录态收下来——
+   * 已登录 → Cookie 落库并释放旧页，本轮直接带着登录态继续；没登录/已过期 →
+   * 释放旧页（聊天里的旧码作废），本轮照常出新码。
+   */
+  private async harvestPendingLogins(
+    ctx: ToolContext,
+    actorId: string,
+    platform: string,
+  ): Promise<void> {
+    for (const session of Array.from(this.pendingLogins.values())) {
+      if (session.closed || session.actorId !== actorId || session.platform !== platform) continue;
+      let loggedIn = false;
+      try {
+        const det = await detectLoginPage(session.platform, session.lease.page);
+        // URL 已离开登录页，或 Cookie 带正向登录信号，都算登录成功
+        loggedIn = !det.isLogin || (await isPlatformLoggedIn(session.platform, session.lease.page));
+      } catch {
+        loggedIn = false;
+      }
+      if (loggedIn) {
+        await this.persistLoginCookies(
+          ctx,
+          session.lease.page,
+          session.platform,
+          session.targetUrl,
+          "scan_login",
+          { agentAllowed: true },
+        );
+      }
+      await this.closeLoginSession(session);
+    }
+  }
+
+  /**
+   * 查卡内扫码结果：已登录 → 落 Cookie、释放页面。
+   * 还没扫到返回 stillWaiting，让用户再点一次「我扫好了」。
+   */
+  async checkLoginHandoff(
+    ctx: ToolContext,
+    token: string,
+  ): Promise<
+    | { ok: true; needsConsent: boolean }
+    | { ok: false; stillWaiting: boolean; error: string }
+  > {
+    const session = this.pendingLogins.get(token);
+    if (!session || session.closed) {
+      return { ok: false, stillWaiting: false, error: "这次登录已经失效了，重新点一次商品就行" };
+    }
+    if (Date.now() > session.expiresAt) {
+      await this.closeLoginSession(session);
+      return { ok: false, stillWaiting: false, error: "二维码过期了，重新点一次商品就行" };
+    }
+    await session.lease.page.waitForTimeout(1_200).catch(() => {});
+    const det = await detectLoginPage(session.platform, session.lease.page);
+    // Cookie 正向信号（2026-11-06）：扫码确认后页面常停在登录域的过渡页，
+    // URL 启发式会一直误判「还没登录」；Cookie 已带登录态就该放行。
+    const cookieLogin = det.isLogin
+      ? await isPlatformLoggedIn(session.platform, session.lease.page)
+      : false;
+    if (det.isLogin && !cookieLogin) {
+      return {
+        ok: false,
+        stillWaiting: true,
+        error: "还没识别到登录——手机上扫码并确认后，再点一下「我扫好了」",
+      };
+    }
+    // 保存 Cookie 是否要问用户（2026-11-06 用户定稿：**只问第一次**）。
+    // 统一授权键（答一次对所有平台生效）：已同意 → 静默落库；已拒绝 → 不存
+    // 也不再问；没表态（首次）→ 卡内询问，等用户选择。
+    const consent = await this.deps.browserSessionService.getCaptureConsent(
+      resolveActorId(ctx),
+      session.platform,
+    );
+    if (consent !== "ask") {
+      if (consent === "allow") {
+        await this.persistLoginCookies(
+          ctx,
+          session.lease.page,
+          session.platform,
+          session.targetUrl,
+          "scan_login",
+          { agentAllowed: true },
+        );
+      }
+      await this.closeLoginSession(session);
+      return { ok: true, needsConsent: false };
+    }
+    // 首次：登录态先不落库，把会话续期 3 分钟等用户在同意卡上做选择——
+    // 「保存登录」落库并记录统一授权（此后所有登录免问）；「不保存」直接放行
+    // （登录态还活在匿名浏览器的 context 里，够走完这一单，回收后自然失效）。
+    session.expiresAt = Math.max(session.expiresAt, Date.now() + 3 * 60_000);
+    return { ok: true, needsConsent: true };
+  }
+
+  /**
+   * 用户对「是否保存登录」做出选择（2026-11-06，只问第一次）：
+   * save=true → 记录**统一授权**（此后所有平台登录静默保存）+ 本次落库；
+   * save=false → 什么都不存也不记录（下次登录仍会问）。两种都释放会话。
+   */
+  async settleLoginConsent(
+    ctx: ToolContext,
+    token: string,
+    save: boolean,
+  ): Promise<{ ok: boolean; error?: string }> {
+    const session = this.pendingLogins.get(token);
+    if (!session || session.closed) {
+      return { ok: false, error: "这次登录已经失效了，重新点一次商品就行" };
+    }
+    if (save) {
+      await this.deps.browserSessionService.setCaptureConsent(
+        resolveActorId(ctx),
+        CAPTURE_CONSENT_ALL_SITES,
+        true,
+      );
+      await this.persistLoginCookies(
+        ctx,
+        session.lease.page,
+        session.platform,
+        session.targetUrl,
+        "scan_login",
+        { agentAllowed: true },
+      );
+    }
+    await this.closeLoginSession(session);
+    return { ok: true };
+  }
+
+  private async closeLoginSession(session: PendingLogin): Promise<void> {
+    if (session.closed) return;
+    session.closed = true;
+    this.pendingLogins.delete(session.token);
+    await session.lease.release().catch(() => {});
   }
 
   async placeOrder(
@@ -609,6 +1009,12 @@ export class ShoppingOrderService {
     quantity: number,
     confirm: boolean,
     confirmationToken?: string,
+    /**
+     * 用户在规格卡里选中的组合（维度名 → 选项文案）。只在阶段一生效：
+     * 进结算页之前先在详情页把这几个选项点一遍，否则结算页会按默认 SKU 走，
+     * 用户选了 512G 却拿到 256G 的单。
+     */
+    pickedSpecs?: Record<string, string>,
   ): Promise<ShoppingOrderResult> {
     const actorId = resolveActorId(ctx);
 
@@ -618,7 +1024,7 @@ export class ShoppingOrderService {
     }
 
     // 阶段一：confirm=false
-    return this.executePlaceStage1(ctx, platform, item, quantity);
+    return this.executePlaceStage1(ctx, platform, item, quantity, pickedSpecs);
   }
 
   private async executePlaceStage1(
@@ -626,6 +1032,7 @@ export class ShoppingOrderService {
     platform: string,
     item: string,
     quantity: number,
+    pickedSpecs?: Record<string, string>,
   ): Promise<ShoppingOrderResult> {
     const actorId = resolveActorId(ctx);
     const adapter = this.requireAdapter(platform);
@@ -665,6 +1072,11 @@ export class ShoppingOrderService {
         siteId: platform,
         cookies,
         interactiveLogin: ctx.pushMediaCards != null,
+        // 匿名可达的站点（苏宁商品页等）没有 Cookie 也要能开页：登录墙由
+        // ensureLoggedIn / 结算页检测接住并转成 loginRequired，而不是在这里
+        // 直接抛 no_cookie 把卡内扫码那条路堵死（手机端无内置浏览器）。
+        preferHeadless: true,
+        allowAnonymous: true,
       });
     } catch (err) {
       if (err instanceof BrowserPageUnavailableError) {
@@ -680,9 +1092,39 @@ export class ShoppingOrderService {
       const gate = await this.ensureLoggedIn(ctx, lease, platform, firstUrl);
       if (gate) return gate;
 
+      // 用户在规格卡里点过的组合：先在详情页把这几个选项点一遍，再进结算。
+      // 点选失败不阻断下单（页面默认 SKU 继续走），但结果里带 specApplied=false，
+      // 卡面必须如实说明「规格没选上，按默认规格结算」——不能默默换掉用户的选择。
+      let specApplied: boolean | undefined;
+      if (pickedSpecs && Object.keys(pickedSpecs).length > 0) {
+        if (adapter.applySpecs) {
+          const applied = await adapter
+            .applySpecs(lease.page, pickedSpecs)
+            .catch(() => ({ ok: false as const }));
+          specApplied = applied.ok === true;
+        } else {
+          specApplied = false;
+        }
+        await lease.page.waitForTimeout(900).catch(() => {});
+      }
+
       const snapshot = await adapter.navigateToCheckout(lease.page, product, qty);
-      if (!snapshot.ok) {
-        return { ok: false, error: snapshot.error ?? "走到结算页失败", retryable: snapshot.retryable };
+      // 结算页往往才是真正要登录的地方（商品页匿名能看，苏宁/京东都这样）：
+      // 撞墙就地返回 loginRequired，card.action 链路据此把二维码放进同一张卡，
+      // 而不是甩一句「走到结算页失败」让用户点坏了似的。
+      const postDet = await detectLoginPage(platform, lease.page).catch(() => ({
+        isLogin: false,
+        reason: "",
+      }));
+      if (postDet.isLogin) {
+        return {
+          ok: false,
+          error: `${this.platformLabel(platform)}的结算页要登录后才能进`,
+          retryable: true,
+          loginRequired: { platform },
+        };
+      }
+      if (!snapshot.ok) {        return { ok: false, error: snapshot.error ?? "走到结算页失败", retryable: snapshot.retryable };
       }
 
       // 单笔金额上限校验（平台覆盖优先，演出票等高价类目用 SHOPPING_ORDER_MAX_AMOUNT_<平台>_CNY 调高）
@@ -779,6 +1221,10 @@ export class ShoppingOrderService {
         screenshotBase64: snapshot.screenshotBase64,
         checkoutUrl: snapshot.checkoutUrl,
         expiresInMs: getConfirmationTtlMs(),
+        // 绝对到期时刻（给确认卡倒计时用）：客户端按它算剩余，不按渲染时刻起算，
+        // 历史消息回看时倒计时不会重新跑。
+        expiresAt: session.expiresAt,
+        ...(specApplied === undefined ? {} : { specApplied }),
         hint: "请向用户复述上述摘要，得到明确同意后，带 confirm=true + confirmationToken 再调用本工具完成提交",
       };
     } catch (err) {
@@ -1410,6 +1856,16 @@ export class ShoppingOrderService {
     return getShoppingPlatformAdapter(platform);
   }
 
+  /**
+   * 该用户在这个平台有没有已授权的登录 Cookie（2026-11-06）。
+   * 卡内下单链路用它决定「直接去结算」还是「先卡内扫码」——下单必须登录，
+   * 商品页匿名能看与否无关紧要，所以判 Cookie 而不是开页检测。
+   */
+  async hasLoginCookies(ctx: ToolContext, platform: string): Promise<boolean> {
+    const r = await this.getCookieAndSiteId(resolveActorId(ctx), platform);
+    return r.ok && r.cookies.length > 0;
+  }
+
   private async getCookieAndSiteId(
     actorId: string,
     platform: string,
@@ -1472,6 +1928,17 @@ export class ShoppingOrderService {
           pending.session.close().catch(() => {});
         }
         this.pendingConfirmations.delete(token);
+      }
+    }
+    // 扫码登录会话同样要清（2026-11-06 补）：过期不关会把无头浏览器实例
+    // 和页面一直占着；fire-and-forget，不阻塞定时器。
+    for (const [token, pending] of this.pendingLogins.entries()) {
+      if (now > pending.expiresAt) {
+        this.pendingLogins.delete(token);
+        if (!pending.closed) {
+          pending.closed = true;
+          pending.lease.release().catch(() => {});
+        }
       }
     }
   }

@@ -28,6 +28,20 @@ allprojects {
         // （com.huawei.hms:* 不在 Maven Central）
         maven("https://developer.huawei.com/repo/")
     }
+    // 某插件 POM 声明了动态版本 androidx.test:runner:1.2+，每次解析都要在线查
+    // 元数据；而本机直连 maven.google.com/download.flutter.io 会被挂死（无可用
+    // 代理）。缓存里已有 1.2.0，钉死成静态版本后可离线解析。
+    configurations.all {
+        resolutionStrategy {
+            force("androidx.test:runner:1.3.0")
+            force("androidx.test:monitor:1.3.0")
+            // integration_test 的 POM 同样声明了动态版本 androidx.test:rules:1.2+，
+            // 每次构建都要去 dl.google.com 查 maven-metadata —— 直连超时直接让
+            // assembleDebug 失败（2026-11-06 实测：Read timed out）。钉死成静态
+            // 版本后走本地缓存，构建不再依赖这一次网络往返。
+            force("androidx.test:rules:1.3.0")
+        }
+    }
 }
 
 val newBuildDir: Directory =

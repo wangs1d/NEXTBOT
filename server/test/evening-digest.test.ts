@@ -127,19 +127,22 @@ test("晚间 digest：明日行程 + 次日天气与穿衣确定性聚合与播�
   // 雨时段（brief.tomorrow.rainWindow）随天气块下发，概率百分比不下发
   assert.equal(digest.tomorrowWeather?.rainWindowLabel, "下午 14–18 点");
   assert.equal("rainPct" in (digest.tomorrowWeather ?? {}), false);
-  // 明日 17~23° 有雷暴雨 → 薄外套层 + 雨具（digest 数据块，全串口径）
-  assert.equal(digest.outfitTip, "薄外套或长袖叠穿；携带雨具（伞或雨衣）");
+  // 穿衣已整体移除（2026-11-06 用户定稿），digest 不再有 outfitTip 字段
+  assert.equal("outfitTip" in digest, false);
 
   // 播报（2026-10-13 活人感定调）：只说明天，回顾/晚安套话不进文案；
-  // 2026-10-16 天气/穿衣迁入且简短口径：一个层级 + 一个行动项，不念全串
+  // 2026-11-06 定稿：天气/穿衣一律不上文案——卡上「明天天气」块已承载
   assert.match(digest.narrationText, /明天就一件事/);
   assert.match(digest.narrationText, /项目周会/);
   assert.match(digest.narrationText, /到点我叫你/);
-  assert.match(digest.narrationText, /明天雷暴17~23度，雨集中在下午 14–18 点，长袖，记得带伞。/);
-  assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔|薄外套或长袖叠穿/);
+  assert.doesNotMatch(
+    digest.narrationText,
+    /雷暴|17~23|雨集中|带伞|长袖|薄外套|穿衣|天气/,
+  );
+  assert.doesNotMatch(digest.narrationText, /回顾|晚安|新增\d+笔/);
 });
 
-test("晚间 digest：雨时段进 prompt 数据段，概率百分比与贫嘴腔都禁", async () => {
+test("晚间 digest：天气不进 prompt 数据段（2026-11-06 定稿），贫嘴腔禁", async () => {
   const tomorrow = new Date();
   tomorrow.setDate(tomorrow.getDate() + 1);
   let capturedPrompt = "";
@@ -186,14 +189,15 @@ test("晚间 digest：雨时段进 prompt 数据段，概率百分比与贫嘴�
     } as never,
     llmComplete: async (prompt) => {
       capturedPrompt = prompt;
-      return "明天没安排，下午两点到五点可能有阵雨，伞放门口。早点睡。";
+      return "明天没安排，早点睡。";
     },
   });
   const digest = await svc.generateDigest(SESSION);
-  // 数据段：给时段，不给概率百分比（写法段里「别提降水概率」的禁令字样不算数）
+  // 2026-11-06 定稿：天气/穿衣不进文案数据面（只删数据，不加禁令——
+  // 口吻/纪律由 SpeechHub 人格 system 承担，user 段不放人格设定与禁令模板）
   const dataSection = capturedPrompt.split("\n写法：")[0] ?? "";
-  assert.match(dataSection, /雨大概集中在下午 14–17 点/);
-  assert.doesNotMatch(dataSection, /降水概率/);
+  assert.doesNotMatch(dataSection, /阵雨|雨大概集中|明天天气|明天穿衣/);
+  assert.doesNotMatch(capturedPrompt, /天气和穿衣一律不提|最熟的那个朋友/);
   // 写法段：贫嘴禁令在（治「就下雨这点事」式轻浮句）
   assert.match(capturedPrompt, /贫嘴/);
   assert.equal(digest.tomorrowWeather?.rainWindowLabel, "下午 14–17 点");
@@ -204,7 +208,6 @@ test("晚间 digest：依赖缺失/无数据时各块自然省略", async () => 
   const digest = await svc.generateDigest(SESSION);
   assert.deepEqual(digest.tomorrowSchedule, []);
   assert.equal(digest.tomorrowWeather, null);
-  assert.equal(digest.outfitTip, null);
   // 无数据：明天没安排的不打扰文案（无天气源 → 无预警无雨分支）
   assert.match(digest.narrationText, /明天没安排/);
   assert.doesNotMatch(digest.narrationText, /晚上好|晚安/);
@@ -248,7 +251,8 @@ test("晚间 digest：文案交给 agent —— soul 进 system + 预告段进�
       // night_before 不进明日数据（只查数据段；写法段指令提及「睡前备忘」无妨）
       const dataSection = prompt.split("写法：")[0] ?? "";
       assert.doesNotMatch(dataSection, /睡前备忘/);
-      assert.match(prompt, /最熟的那个朋友/);
+      // 2026-11-06：user 段不放人格设定（口吻由 soulProvider system 承担）
+      assert.doesNotMatch(prompt, /最熟的那个朋友/);
       assert.match(prompt, /只挑最早或最要紧/);
       assert.match(prompt, /九点半有个周会/);
       return `明天九点半有个周会，八点五十我喊你出门。早点睡。`;
@@ -334,7 +338,9 @@ test("晚间 digest：无天气位置偏好时按定位兜底取明日天气", a
   assert.deepEqual(providerCalls, [SESSION]);
   assert.deepEqual(calledWith, [25.09]);
   assert.equal(fallbackDigest.tomorrowWeather?.text, "小雨");
-  assert.match(fallbackDigest.narrationText, /明天没安排，小雨15~19度，外套，记得带伞/);
+  // 2026-11-06 定稿：兜底文案也不说天气（卡上天气块已承载）
+  assert.match(fallbackDigest.narrationText, /明天没安排/);
+  assert.doesNotMatch(fallbackDigest.narrationText, /小雨|15~19|外套|带伞/);
 
   // 显式位置偏好优先：有 prefs 时不打兜底口
   const prefsSvc = new EveningDigestService({

@@ -197,8 +197,26 @@ export function isPublicHttpUrl(raw: string): boolean {
   return true; // 公网域名
 }
 
-/** 校验围栏输入（工具层与服务层共用一份口径）。 */
-export function validateGeofenceInput(input: Partial<GeofenceInput>): string | null {
+/**
+ * 由围栏名称推断地点语义。
+ *
+ * 围栏是用户自己命名的（"家"、"公司"、"健身房"），名称本身就是最强的语义
+ * 信号——比坐标聚类可靠。关键词表刻意保守：只认明确的家/公司，其余一律
+ * other，宁可不知道也不猜错（猜错会让 Agent 说出「你已经到家了」这种话）。
+ */
+export function inferPlaceKind(name: string | undefined | null): "home" | "work" | "other" {
+  const n = (name ?? "").trim().toLowerCase();
+  if (!n) return "other";
+  if (/(^|[^a-z])(home|house|apartment)([^a-z]|$)/.test(n) || /家|住处|住宅|宿舍|家里/.test(n)) {
+    return "home";
+  }
+  if (/(^|[^a-z])(work|office|company)([^a-z]|$)/.test(n) || /公司|办公室|单位|工位|上班/.test(n)) {
+    return "work";
+  }
+  return "other";
+}
+
+/** 校验围栏输入（工具层与服务层共用一份口径）。 */export function validateGeofenceInput(input: Partial<GeofenceInput>): string | null {
   const name = String(input.name ?? "").trim();
   if (!name) return "缺少围栏名称 name";
   if (name.length > NAME_MAX) return `围栏名称过长（≤${NAME_MAX} 字符）`;
@@ -250,6 +268,9 @@ export class GeofenceService {
   private notifier:
     | ((event: GeofenceTriggeredEvent) => void | Promise<void>)
     | null = null;
+  /** 围栏配置变更通知（新建/删除/启停）：装配层据此把最新配置推给在线客户端
+   *  重新注册系统围栏。不下发就只在重连时生效，用户新建围栏后会「明明设了却不触发」。 */
+  private onChanged: ((actorId: string) => void) | null = null;
 
   constructor(opts?: GeofenceOptions) {
     const file = opts?.dbPath ?? getLocationDbPath();
@@ -259,6 +280,19 @@ export class GeofenceService {
     this.db.exec(SCHEMA);
     this.now = opts?.now ?? (() => new Date());
     this.minTriggerGapMs = opts?.minTriggerGapMs ?? 5 * 60 * 1000;
+  }
+
+  /** 配置变更出口（装配层接：向该 actor 的在线连接重新下发围栏）。 */
+  setOnChanged(fn: ((actorId: string) => void) | null): void {
+    this.onChanged = fn;
+  }
+
+  private fireChanged(actorId: string): void {
+    try {
+      this.onChanged?.(actorId);
+    } catch (err) {
+      console.log(`[GeofenceService] 变更通知失败（忽略）: ${err}`);
+    }
   }
 
   /** 事件出口（装配层接：审计 + 按 actionType 分发动作）。 */
@@ -304,6 +338,7 @@ export class GeofenceService {
         fence.createdAt,
         fence.updatedAt,
       );
+    this.fireChanged(actorId);
     return fence;
   }
 
@@ -326,7 +361,9 @@ export class GeofenceService {
       .prepare(`DELETE FROM geofences WHERE actor_id = ? AND id = ?`)
       .run(actorId, id);
     this.db.prepare(`DELETE FROM geofence_states WHERE fence_id = ?`).run(id);
-    return Number(info.changes) > 0;
+    const removed = Number(info.changes) > 0;
+    if (removed) this.fireChanged(actorId);
+    return removed;
   }
 
   setEnabled(actorId: string, id: string, enabled: boolean): GeofenceDefinition | null {
@@ -334,6 +371,7 @@ export class GeofenceService {
       .prepare(`UPDATE geofences SET enabled = ?, updated_at = ? WHERE actor_id = ? AND id = ?`)
       .run(enabled ? 1 : 0, this.now().toISOString(), actorId, id);
     if (Number(info.changes) === 0) return null;
+    this.fireChanged(actorId);
     return this.get(actorId, id);
   }
 
@@ -409,6 +447,29 @@ export class GeofenceService {
       }
     }
     return triggered;
+  }
+
+  /**
+   * 判定当前位置落在哪个围栏内（不产生事件、不推进状态）。
+   *
+   * 用途是**情境快照**的 placeKind（在家 / 在公司 / 在别处）：这是 State 层
+   * 需要的语义状态，与「到达/离开」事件是两件事——事件是一次性通知，状态是
+   * 持续事实。多个围栏重叠时取半径最小的那个（更具体的地点）。
+   */
+  matchPlace(
+    actorId: string,
+    loc: { latitude: number; longitude: number },
+  ): { fence: GeofenceDefinition; kind: "home" | "work" | "other"; radiusMeters: number } | null {
+    const fences = this.list(actorId).filter((f) => f.enabled);
+    let best: { fence: GeofenceDefinition; kind: "home" | "work" | "other"; radiusMeters: number } | null =
+      null;
+    for (const fence of fences) {
+      const distance = haversineMeters(loc, fence);
+      if (distance > fence.radiusMeters) continue;
+      if (best && fence.radiusMeters >= best.radiusMeters) continue;
+      best = { fence, kind: inferPlaceKind(fence.name), radiusMeters: fence.radiusMeters };
+    }
+    return best;
   }
 
   close(): void {

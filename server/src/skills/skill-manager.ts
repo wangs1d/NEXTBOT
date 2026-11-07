@@ -838,6 +838,19 @@ export class SkillManager {
       sessionId: context.sessionId,
       userId: context.userId,
       chatUserMessageId: context.chatUserMessageId,
+      // 环境上下文透传（2026-11-05 根修）：此前只传 sessionId/userId，导致技能里
+      // execContext.clientLocation / requestLocation 恒为空——「按用户当前位置算路程」
+      // （travel.compute-route 起点兜底、travel.departure-advice 出发地兜底、
+      // travel.plan-itinerary 出发城市兜底）在真实链路（ToolRegistry → SkillManager）
+      // 里永远拿不到坐标，只能反问用户。天气/打车等传统工具走 ToolRegistry 直调，
+      // 没受这个裁窄影响，所以问题只在技能族里长期潜伏。
+      ...(context.clientLocation ? { clientLocation: context.clientLocation } : {}),
+      ...(context.clientIp ? { clientIp: context.clientIp } : {}),
+      ...(context.requestLocation ? { requestLocation: context.requestLocation } : {}),
+      ...(context.getLastKnownLocation
+        ? { getLastKnownLocation: context.getLastKnownLocation }
+        : {}),
+      ...(context.signal ? { signal: context.signal } : {}),
       permissions: grantedPerms,
       grantedPermissions: grantedPerms,
       // 透传中途推卡（如支付宝钱包绑定二维码）：sandbox 以 ...context 展开进执行上下文

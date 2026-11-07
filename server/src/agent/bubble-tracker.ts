@@ -26,7 +26,16 @@ export class BubbleTracker {
     private readonly baseMessageId: string,
   ) {}
 
-  /** 分配一个已清洗 chunk 的出站 messageId 并记账泡文本。 */
+  /** 分配一个已清洗 chunk 的出站 messageId 并记账泡文本。
+   *
+   *  开泡条件（2026-11-06 深夜定稿）：emit 带 bubble:"new"，或本轮还没有
+   *  任何泡——两条都开新泡。其余（"continue"/直推段）追加当前末泡。
+   *  **tracker 自身没有「冻结」态**：信息类工具轮的「并回单泡」由 WS 层
+   *  通过分段器 disableBubbleMode（仅 search/weather/market/clock 埐）
+   *  定向关泡实现，无 meta 段落到这里自然并回当前泡/兜底开首泡。曾经的
+   *  tracker 冻结位会让冻结后首个 chunk 在无泡时对空数组取 [-1] 直接
+   *  TypeError、静默炸掉整条分泡出站——这正是 2026-11-06 截图事故根因，
+   *  勿以任何形式把冻结位加回 tracker。 */
   assign(
     cleanedChunk: string,
     meta?: StreamSegmentEmitMeta,

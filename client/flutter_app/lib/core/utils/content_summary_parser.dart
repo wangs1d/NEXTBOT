@@ -169,7 +169,6 @@ class ContentSummaryParser {
   static const Map<String, String> categoryLabels = <String, String>{
     "news": "资讯日报",
     "article": "长文详情",
-    "search_result": "搜索结果",
     "webpage": "网页内容",
     "document": "文档资料",
     "code": "代码片段",

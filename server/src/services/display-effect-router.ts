@@ -171,11 +171,9 @@ const TOOL_RULES: ReadonlyArray<ToolRule> = [
     strength: "strong",
     test: (t) => t === "search_images" || t === "search_videos",
   },
-  {
-    effect: "search_result",
-    strength: "strong",
-    test: (t) => t === "search_web" || t.startsWith("info."),
-  },
+  // 网页搜索不映射任何展示效果（2026-11-05 用户定稿）：搜索轮正文由模型总结，
+  // 不出「搜索结果」卡、不列来源。历史上这里有 search_web/info.* → search_result
+  // 的强工具规则，已整体退役——不要加回来。
   // ── 弱工具（宽泛关键字命中，只给倾向分；分词精确匹配避免误命中）──
   {
     effect: "compare",
@@ -740,7 +738,7 @@ export function scoreDisplayEffects(
 
   // 1) 内容型候选：全部并行评分（CANDIDATE_ORDER 顺序即平局兜底次序）
   for (const type of CANDIDATE_ORDER) addCandidate(type);
-  // 2) 纯工具型候选（weather/schedule/wallet/order/file/search_result/media 等，
+  // 2) 纯工具型候选（weather/schedule/wallet/order/file/media 等，
   //   无内容评分器）：工具命中时追加为候选
   if (toolSignal && !CANDIDATE_ORDER.includes(toolSignal.effect)) addCandidate(toolSignal.effect);
 

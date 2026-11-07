@@ -138,6 +138,11 @@ export type HttpRouteDeps = {
   /** 明日速览服务：仅供 /api/test/trigger-evening-digest 手动触发；未注入时该路由不挂载 */
   eveningDigestService?: import("../../services/evening-digest-service.js").EveningDigestService;
   /**
+   * 明日速览调度器：仅供 /api/test/trigger-evening-digest 的 markSent 参数——
+   * 补发即正式送达，占用当日推送额度，到点不再重复推。
+   */
+  eveningDigestScheduler?: import("../../services/evening-digest-scheduler.js").EveningDigestScheduler;
+  /**
    * agent pulse 手动触发（主动性聚合评审）：仅供 /api/test/trigger-agent-pulse，
    * 返回聚合材料/prompt/LLM 原始输出/最终文案/是否提交/管道 verdict 的完整留痕；
    * force 绕过 delta 指纹强制重评，fixture 注入替代材料走真实投递链路（测试用，

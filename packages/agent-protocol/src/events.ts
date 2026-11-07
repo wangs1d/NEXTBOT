@@ -16,6 +16,19 @@ export const ClientEventType = {
    */
   ChatUserAction: "chat.user_action",
   /**
+   * 卡片内动作（2026-11-06 定稿）：用户在**同一条回复的卡内**点了一步需要
+   * 服务端数据的操作（如比价卡「就在这家下单」）。
+   *
+   * 与 chat.user_action 的本质区别——不产生消息：
+   *   - user_action 会被服务端转写成 chat.user_message，因此必然多出
+   *     一条用户气泡 + 一整轮模型生成 + 一条助手回复（一次购物刷成十几条）；
+   *   - card.action 只请求「更新这张卡」，服务端回 card.update 就地换掉卡内
+   *     状态，消息列表长度不变、不进模型上下文、不落聊天历史。
+   *
+   * payload: { messageId, cardId?, actionId, stage?, payload? }
+   */
+  CardAction: "card.action",
+  /**
    * 用户取消一个后台任务（任务面 TaskHub 记录，payload 带 taskId）。
    * 与「打断前台回复」（发送新消息触发）语义分离：本事件只作用于
    * 后台任务——任务标记 cancelled 后不再向对话推送结果。
@@ -113,6 +126,16 @@ export const ClientEventType = {
   /** 客户端回传实时位置（响应 agent.location_request，或天气面板主动上报） */
   LocationReport: "client.location_report",
   /**
+   * 客户端上报设备时钟（2026-11-05 时间感知重构）。
+   *
+   * 与位置完全解耦：不申请定位权限、不等 GPS、不依赖逆地理。两个用途：
+   * 1) 连接建立时的首帧时区（session.init 已附带，这是补发/重连兜底）；
+   * 2) **常驻连接期间时区变化**（跨时区飞行/高铁落地系统切换时区）——用户
+   *    可能几小时不发消息，下一条主动消息不应还带着旧时区。
+   * 载荷与 `clientClockWireSchema` 一致。
+   */
+  ClockReport: "client.clock_report",
+  /**
    * 客户端上报语音模式切换（进入/退出纯语音模式）。
    * 服务端记录 per-actor 状态（proactivity/voice-mode-state），供诊断与
    * 后续主动消息投递通道矩阵（语音播报 vs 原生弹窗）消费。
@@ -140,7 +163,30 @@ export const ServerEventType = {
    */
   ChatTaskUpdate: "chat.task_update",
   ChatAssistantChunk: "chat.assistant_chunk",
+  /**
+   * 语音流式数据帧（2026-11-05 分层定稿）。
+   *
+   * 与 ChatAssistantChunk 的区别是**消费方**，不是数据形态：
+   * - ChatAssistantChunk 是「打字机显示帧」，已整体退役（出站 0 处）；
+   * - ChatAssistantSpeech 是「语音 TTS 数据帧」，模型 delta 经出口净化后实时
+   *   下发，客户端只喂逐句合成，绝不落消息列表、不产生任何文字渲染。
+   *
+   * 这样模型生成 → 服务端管道 → 语音播报全程仍是流式的，而文字回复只由
+   * ChatAssistantDone.finalText 一次性落屏（无逐字效果、无裸 JSON 闪现）。
+   * payload: { sessionId, messageId, traceId, chunk, sequence, phase, final,
+   *            finalText? }；final=true 为本轮收口帧，携带定稿全文兜底。
+   */
+  ChatAssistantSpeech: "chat.assistant_speech",
   ChatAssistantDone: "chat.assistant_done",
+  /**
+   * 卡片就地更新（2026-11-06 定稿，与 client 端 card.action 成对）：服务端按
+   * messageId 把某条消息里的卡片**原地换掉**，客户端只重建这张卡、不追加消息。
+   *
+   * payload: { messageId, cardType, title?, extra?: { shopping?: {...} },
+   *            items?: [...], footer?, ok, error? }
+   * 客户端找不到 messageId 对应消息（已被删/被滚出窗口）时静默丢弃。
+   */
+  CardUpdate: "card.update",
   /**
    * 会出卡片的轮次不流式（2026-10-08）：服务端在确认本轮将携带结构化卡片
    * （工具确定性附卡源 / 识图照片卡 / LLM 自产结构化标记）后推送此事件，
@@ -361,6 +407,20 @@ export const ServerEventType = {
    */
   LocationTrackingConfig: "agent.location_tracking_config",
   /**
+   * 地理围栏同步（2026-11-05 持续感知重构）。
+   *
+   * 服务端把用户的家/公司/自定义围栏下发，客户端注册为**系统级围栏**
+   * （Android `LocationManager.addProximityAlert`：系统服务托管，App 被杀也能
+   * 唤醒；iOS 对应 `CLCircularRegion`，上限约 20 个）。
+   *
+   * 为什么必须下沉到客户端：Android 8+ 后台非前台服务定位被限成「每小时几次」，
+   * 靠上报流在服务端判围栏在后台根本判不出来。「到达/离开」是事件型需求，
+   * 只有系统托管的围栏才能可靠触发。
+   *
+   * payload: { fences: GeofenceWire[], syncedAt: string }
+   */
+  GeofenceSync: "agent.geofence_sync",
+  /**
    * Surface-on-Demand：服务端（`surface.dismiss` 工具）要求客户端收起已
    * 展示的面板（如媒体中央展示页）。客户端按 surface 名执行，
    * 不支持的面板静默忽略；未展示时为 no-op。
@@ -486,6 +546,28 @@ export type LocationTrackingConfigPayload = {
   mode: "ondemand" | "continuous";
   /** 上报间隔（秒），服务端已夹紧到 30..3600 */
   intervalSec: number;
+};
+
+/**
+ * 下发给客户端的围栏定义（`agent.geofence_sync`）。
+ *
+ * 只带系统围栏需要的字段：客户端不需要知道 actionType/actionConfig——触发后
+ * 只上报「到了/离开了某个 fenceId」，具体动作由服务端决定（不在端上执行）.
+ */
+export type GeofenceWire = {
+  id: string;
+  name: string;
+  latitude: number;
+  longitude: number;
+  radiusMeters: number;
+  /** enter=进入触发；leave=离开触发；both=都触发 */
+  event: "enter" | "leave" | "both";
+};
+
+export type GeofenceSyncPayload = {
+  fences: GeofenceWire[];
+  /** 本次同步时刻（ISO）：客户端据此判断配置是否过期 */
+  syncedAt: string;
 };
 
 /** rhythm.profile_updated 载荷：节律画像摘要（Task 20 生活节律引擎） */

@@ -4,18 +4,7 @@ import "package:nextbot/app/phone_call_controller.dart";
 import "package:nextbot/core/models/agent_relay_models.dart";
 import "package:nextbot/core/services/account_profile_api.dart";
 import "package:nextbot/core/presentation/dynamic_island.dart";
-import "package:nextbot/core/presentation/foreground_banner.dart";
 import "package:flutter_test/flutter_test.dart";
-
-/// ForegroundBanner 桩：捕获横幅入参供断言。
-class _FakeBanner implements ForegroundBanner {
-  _FakeBanner({required this.onShow});
-
-  final Future<void> Function(String title, String message) onShow;
-
-  @override
-  Future<void> show(String title, String message) => onShow(title, message);
-}
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -91,7 +80,7 @@ void main() {
       expect(syncCalls, 2);
     });
 
-    test("reminder_fired: 单文案制（2026-10-19 定调：不带「标题 · 说明」前缀）经前台横幅端口可断言",
+    test("reminder_fired: 单文案制（2026-10-19 定调：不带「标题 · 说明」前缀）",
         () async {
       // 展示文本组装为纯函数直测（岛通道单测态 nativeReady=false 不出口）
       expect(
@@ -103,26 +92,11 @@ void main() {
       expect(IslandReminderScheduler.displayText("吃药", "  "), "吃药");
 
       // 单文案链（message → reminderMessage → title/shortTitle → 到点了）：
-      // 横幅只出主行文案，message 传空（副行收起），标题前缀不再拼接。
-      // 横幅端口是 ForegroundBanner 抽象接口（2026-10-21），测试用桩实现注入。
-      String? bannerTitle;
-      String? bannerMessage;
-      c.foregroundBanner = _FakeBanner(
-        onShow: (String title, String message) async {
-          bannerTitle = title;
-          bannerMessage = message;
-        },
-      );
-      addTearDown(() => c.foregroundBanner = null);
+      // 应用内横幅已删除（2026-11-04），移动端触达走系统通知（对话页除外），
+      // 文案组装由 onScheduleReminderFired 内联完成，此处仅验证不抛异常。
       await c.onScheduleReminderFired(<String, dynamic>{"title": "吃药"});
-      expect(bannerTitle, "吃药");
-      expect(bannerMessage, isEmpty);
-
-      // reminderMessage 优先：只出这一句，不带任务标题前缀
       await c.onScheduleReminderFired(
           <String, dynamic>{"title": "吃饭", "reminderMessage": "该吃饭啦"});
-      expect(bannerTitle, "该吃饭啦");
-      expect(bannerMessage, isEmpty);
     });
 
     test("inbox.message: 桌面前台走应用内呈现并 bump 角标", () async {

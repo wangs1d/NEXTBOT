@@ -100,6 +100,7 @@ List<Widget> formatContentSummaryDetailLines(
   Map<int, GlobalKey>? sectionKeys,
   List<String>? sectionTitles,
   Color? linkColor,
+  bool tableCardHeader = false,
 }) {
   final RegExp sectionHeader = RegExp(r"^(一|二|三|四|五|六|七|八|九|十)[、.．]");
   final RegExp markdownHeader = RegExp(r"^(#{1,6})\s+");
@@ -348,6 +349,7 @@ List<Widget> formatContentSummaryDetailLines(
             lines: lines.sublist(start, index),
             cs: cs,
             textTheme: textTheme,
+            showCardHeader: tableCardHeader,
           ),
         ),
       );
@@ -1076,11 +1078,17 @@ class MarkdownTableWidget extends StatelessWidget {
     required this.lines,
     required this.cs,
     required this.textTheme,
+    this.showCardHeader = false,
   });
 
   final List<String> lines;
   final ColorScheme cs;
   final TextTheme textTheme;
+
+  /// 是否渲染「表格」卡头（2026-11-06）：聊天气泡里的数据表在卡片顶部
+  /// 加一行标题栏（"表格" + 一键复制原文），对齐数据交付的卡片视觉。
+  /// 详情弹窗等文档化场景保持 false（标题栏在文档语境里是冗余）。
+  final bool showCardHeader;
 
   @override
   Widget build(BuildContext context) {
@@ -1207,30 +1215,135 @@ class MarkdownTableWidget extends StatelessWidget {
       builder: (BuildContext context, BoxConstraints box) {
         final double availableWidth =
             box.maxWidth.isFinite ? box.maxWidth : 280.0;
-        return DecoratedBox(
+        final Widget tableBody = ClipRRect(
+          borderRadius: BorderRadius.circular(showCardHeader ? 0 : 10),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minWidth: math.min(280.0, availableWidth),
+                maxWidth: availableWidth,
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: tableRows,
+              ),
+            ),
+          ),
+        );
+        if (!showCardHeader) {
+          return DecoratedBox(
+            decoration: BoxDecoration(
+              color: cs.surfaceContainerLow.withValues(alpha: 0.35),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: cs.outline.withValues(alpha: 0.16)),
+            ),
+            child: tableBody,
+          );
+        }
+        // 表格卡（2026-11-06）：标题栏（"表格" + 复制）与表体同卡，
+        // 卡头压深一档底色与表体分层，外框由卡容器统一提供。
+        return Container(
           decoration: BoxDecoration(
             color: cs.surfaceContainerLow.withValues(alpha: 0.35),
             borderRadius: BorderRadius.circular(10),
             border: Border.all(color: cs.outline.withValues(alpha: 0.16)),
           ),
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: SingleChildScrollView(
-              scrollDirection: Axis.horizontal,
-              child: ConstrainedBox(
-                constraints: BoxConstraints(
-                  minWidth: math.min(280.0, availableWidth),
-                  maxWidth: availableWidth,
-                ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: tableRows,
-                ),
+          clipBehavior: Clip.antiAlias,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              _TableCardHeader(
+                cs: cs,
+                textTheme: textTheme,
+                rawText: lines.join("\n"),
               ),
-            ),
+              tableBody,
+            ],
           ),
         );
       },
+    );
+  }
+}
+
+/// 表格卡标题栏：左侧「表格」小标，右侧一键复制表格原文（markdown 源）。
+class _TableCardHeader extends StatefulWidget {
+  const _TableCardHeader({
+    required this.cs,
+    required this.textTheme,
+    required this.rawText,
+  });
+
+  final ColorScheme cs;
+  final TextTheme textTheme;
+  final String rawText;
+
+  @override
+  State<_TableCardHeader> createState() => _TableCardHeaderState();
+}
+
+class _TableCardHeaderState extends State<_TableCardHeader> {
+  bool _copied = false;
+  Timer? _resetTimer;
+
+  @override
+  void dispose() {
+    _resetTimer?.cancel();
+    super.dispose();
+  }
+
+  void _copy() {
+    Clipboard.setData(ClipboardData(text: widget.rawText));
+    _resetTimer?.cancel();
+    setState(() => _copied = true);
+    _resetTimer = Timer(const Duration(milliseconds: 1600), () {
+      if (mounted) setState(() => _copied = false);
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Color fg = widget.cs.onSurfaceVariant;
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 6, 4, 6),
+      decoration: BoxDecoration(
+        color: widget.cs.surfaceContainerHigh.withValues(alpha: 0.45),
+        border: Border(
+          bottom: BorderSide(
+            color: widget.cs.outline.withValues(alpha: 0.16),
+          ),
+        ),
+      ),
+      child: Row(
+        children: <Widget>[
+          Text(
+            "表格",
+            style: widget.textTheme.bodySmall?.copyWith(
+              fontSize: AppTypography.secondary,
+              fontWeight: FontWeight.w600,
+              color: fg,
+            ),
+          ),
+          const Spacer(),
+          SizedBox(
+            width: 30,
+            height: 30,
+            child: IconButton(
+              onPressed: _copy,
+              tooltip: _copied ? "已复制" : "复制表格",
+              padding: EdgeInsets.zero,
+              iconSize: 15,
+              icon: Icon(
+                _copied ? Icons.check_rounded : Icons.copy_rounded,
+                size: 15,
+                color: _copied ? widget.cs.primary : fg,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

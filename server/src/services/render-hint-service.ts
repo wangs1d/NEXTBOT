@@ -8,19 +8,16 @@
  *   候选形态并行评分 → 内容分为主判据（权重见 render-scoring.ts）、工具分兜底
  *   → 最高分当选 → 最高分低于 plain 门槛时回落普通正文。候选形态：
  *   - image_text    图片识别/OCR 场景（识图工具在场即形态成立，场景唯一）
- *   - search_result 搜索工具结果（3-10 条列表项 → 专用搜索结果卡片）
- *   - data_brief    数据快报（≥3 个 KPI 数据点 + 字数适中，数字密集短文）
+ *   - long_text     搜索工具（search_web/info.*）：正文由模型总结，不出搜索卡
  *   - result_card   小汇报场景（≤300 字 + 列表；媒体搜索/天气工具有场景加成）
  *   - brief         简报增强（≤300 字 + 引导行 + 列表的晨报/资讯结构）
  *   - summary_card  长内容（≥800 字 + 结构化：板块/表格/列表+段落 → 折叠摘要）
  *   - long_text     其余长内容（≥300 字 / 意图 / 表格 → 结构化富文本）
  *   - plain         低于门槛的回落（闲聊、无结构短文、能力 dump）
  *
- * data_brief 触发设计（2026-08-25 新增）：
- *   - 面向「数字密集」内容：行情速报、指标对比、统计总结、评测打分等，
- *     渲染为 结论 + KPI 网格 + 详情 的数据快报卡，避免数字淹没在段落里；
- *   - 边界：weather.* 工具走专用天气小卡片；有板块/表格的「长结构化文档」
- *     仍归 summary_card 折叠（文档结构 > 数据速览）；<60 字的一句带数字闲聊不触发。
+ * data_brief 已退役（2026-11-06 用户定稿）：KPI 网格卡对真实正文的标签截断
+ * / 排版混乱不可控（出现「昨晚（」「递指涨超」这类碎片标签），数字密集正文
+ * 一律按 markdown/普通正文输出，不再切快报卡；payload 提取器一并删除。
  *
  * summary_card 触发设计（2026-08-25 重构）：
  *   - 不再限定搜索工具：整理/对比/调研/攻略类长文（通常非搜索工具）同样折叠；
@@ -39,11 +36,9 @@ export type RenderHintType =
   | "plain"
   | "result_card"
   | "summary_card"
-  | "search_result"
   | "long_text"
   | "image_text"
-  | "brief"
-  | "data_brief";
+  | "brief";
 
 export interface RenderHint {
   type: RenderHintType;
@@ -71,33 +66,6 @@ const STRUCTURED_TEXT_MIN_CHARS = 300;
  *  与 content-summary-service 同值；400 门槛过低导致短回复也出折叠卡） */
 const SUMMARY_MIN_CHARS = 800;
 
-/** data_brief 字数下限：短到一句话带数字的闲聊不触发 */
-const DATA_BRIEF_MIN_CHARS = 60;
-/** data_brief KPI 数据点下限：≥3 个数字/百分比/指标才算「数据快报」 */
-const DATA_BRIEF_MIN_KPIS = 3;
-/** data_brief 字数上限：超过则视为长文正文，不塞进快报卡 */
-const DATA_BRIEF_MAX_CHARS = 800;
-
-/**
- * 数据 KPI 数据点正则（data_brief 判定 + payload 提取共用检测）。
- * 两类 token 计数（引擎从左到右消费，互不重叠）：
- *   A. 数字 + 数据单位：12.5% / 3.2万亿 / 3567 点 / 85 元 / +1.23%
- *   B. 数据动词 + 数字：成交额 5600 / 同比增长 15%（单位缺失时的补救）
- */
-const DATA_TOKEN_RE =
-  /(?:[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿元|万元|亿|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家))|(?:(?:上涨|下跌|增长|下降|下滑|攀升|回落|同比|环比|净流入|净流出|成交额|成交|市值|营收|利润|评分|得分|涨幅|跌幅)\s*[:：]?\s*[+\-−±]?\d)/g;
-
-/** 单从句内提取 KPI 值（单位可缺省，如「创业板指 2876.54（+2.01%）」） */
-const DATA_VALUE_RE =
-  /[+\-−±]?\d[\d,]*(?:\.\d+)?\s*(?:%|万亿|亿元|万元|亿|万|点|元|美元|港元|台|辆|人次|公里|千米|度|级|倍|秒|分|小时|篇|条|家)?/;
-
-/** 从句内提取涨跌幅变化（带符号百分比） */
-const DATA_CHANGE_RE = /[+\-−±]\d+(?:\.\d+)?%/;
-/** 纯涨跌方向词（不作为独立 KPI 标签，而是挂到上一 KPI 的 change，如「涨 +1.23%」） */
-const CHANGE_WORD_ONLY_RE =
-  /^(?:上涨|下跌|上漲|下漲|收涨|收跌|涨|跌|升|降|攀升|回落|走强|走弱|上扬|下挫)$/;
-/** 指标标签尾部的动词噪声（如「上证指数收于」→「上证指数」） */
-const LABEL_TAIL_VERB_RE = /(?:收于|收报|报收|收在|现报|收盘报|收盘价)$/;
 /** 意图语义关键词：用户提问携带这些词 → 无视短字数，强制结构化富文本 */
 const INTENT_KEYWORDS_RE =
   /整理|对比|总结|方案|清单|步骤|脑图|表格|分析|比较|规划|计划|推荐|排行|排名|区别|异同|优缺点|攻略|分类|归纳|梳理|教程/i;
@@ -157,10 +125,9 @@ interface HintScoringContext {
   len: number;
   list: ListAnalysis;
   structural: ContentStructure;
-  kpiCount: number;
   hasTable: boolean;
   hasIntent: boolean;
-  /** 长结构化文档：有板块/表格且 ≥800 字（数据快报让位给折叠摘要）。 */
+  /** 长结构化文档：有板块/表格且 ≥800 字（直接折叠摘要）。 */
   isLongDoc: boolean;
   isImageTool: boolean;
   isSearchTool: boolean;
@@ -177,7 +144,6 @@ function buildHintScoringContext(text: string, ctx?: RenderHintContext): HintSco
     len: text.length,
     list,
     structural,
-    kpiCount: analyzeDataBrief(text).kpiCount,
     hasTable: hasMarkdownTable(text),
     hasIntent: !!ctx?.userText && INTENT_KEYWORDS_RE.test(ctx.userText),
     isLongDoc:
@@ -195,14 +161,14 @@ function buildHintScoringContext(text: string, ctx?: RenderHintContext): HintSco
  *
  * 规则顺序即优先级（每条都是硬信号，无评分、无竞争、无 plain 地板）：
  *   1. image_text    识图/OCR 工具在场（工具绑定语义）
- *   2. search_result 搜索工具 + 3-10 条列表，且无意图/表格让位
- *   3. data_brief    ≥3 个 KPI 数据点 + 60~800 字 + 非长文档
- *   4. result_card   短文本（≤300 字）+ 3-12 条列表（markdown 列表切卡）
- *   5. summary_card  ≥800 字 + 结构化（板块/表格/列表混排）→ 折叠摘要
- *   6. long_text     意图/表格触发，或 ≥300 字长文（结构化富文本）
- *   7. plain         无硬信号 → 纯文本（不硬塞形态）
+ *   2. long_text     搜索工具在场 → 结构化富文本（不出搜索卡/来源清单）
+ *   3. result_card   短文本（≤300 字）+ 3-12 条列表（markdown 列表切卡）
+ *   4. summary_card  ≥800 字 + 结构化（板块/表格/列表混排）→ 折叠摘要
+ *   5. long_text     意图/表格触发，或 ≥300 字长文（结构化富文本）
+ *   6. plain         无硬信号 → 纯文本（不硬塞形态）
  *
  * brief 不在规则链：定时简报有独立注入路径；对话内 brief 只认 L2 模型声明。
+ * data_brief 已退役（2026-11-06）：数字密集正文一律按 markdown/普通正文输出。
  *
  * @param text LLM 最终输出文本（未经标记注入）
  * @param ctx  上下文（工具名、用户原话等）
@@ -239,24 +205,14 @@ export function classifyRenderHint(
   // 1. 识图/OCR：工具在场即形态成立
   if (sc.isImageTool) return hit("image_text", "image-tool-present");
 
-  // 2. 搜索工具 + 3-10 条列表；意图/表格在场时让位富文本
-  if (sc.isSearchTool && !sc.hasIntent && !sc.hasTable) {
-    const n = sc.list.itemCount;
-    if (n >= 3 && n <= 10) return hit("search_result", "search-tool-list");
-  }
+  // 2. 搜索工具：**不切搜索卡**，正文一律走结构化富文本（2026-11-05 用户定稿）。
+  //    搜索回执只作为模型上下文，由模型自己总结；禁止「搜索结果」卡、来源清单
+  //    或原始条目出现在任一客户端（桌面端/手机端一致）。
+  if (sc.isSearchTool) return hit("long_text", "search-tool-summary", true);
 
-  // 3. 数据快报：数字密集适中长文
-  if (
-    !sc.isWeatherTool &&
-    sc.kpiCount >= DATA_BRIEF_MIN_KPIS &&
-    sc.len >= DATA_BRIEF_MIN_CHARS &&
-    sc.len <= DATA_BRIEF_MAX_CHARS &&
-    !sc.isLongDoc
-  ) {
-    return hit("data_brief", `kpi=${sc.kpiCount}`);
-  }
-
-  // 4. 短文本 + markdown 列表 → 列表切卡（findExtractableCardSegment 承接）
+  // 3. 短文本 + markdown 列表 → 列表切卡（findExtractableCardSegment 承接）
+  //    data_brief 已退役（2026-11-06）：数字密集但无列表的正文直接落到
+  //    后面的 summary_card / long_text / plain，按 markdown 排版输出。
   if (sc.len <= RESULT_CARD_MAX_CHARS && !sc.hasTable) {
     const n = sc.list.itemCount;
     if (n >= 3 && n <= 12) return hit("result_card", `list=${n}`);
@@ -277,13 +233,13 @@ export function classifyRenderHint(
     }
   }
 
-  // 5. 长文档折叠：≥800 字 + 结构化（板块/表格/列表混排）
+  // 4. 长文档折叠：≥800 字 + 结构化（板块/表格/列表混排）
   //    「有没有专属卡」不在这里判断——决策层看到结构化面就不会走到这一步。
   if (sc.len >= SUMMARY_MIN_CHARS && sc.structural.structured) {
     return hit("summary_card", "long-structured-doc");
   }
 
-  // 6. 结构化富文本：意图/表格触发（不设字数下限），或 ≥300 字长文
+  // 5. 结构化富文本：意图/表格触发（不设字数下限），或 ≥300 字长文
   if (sc.hasIntent || sc.hasTable) {
     return hit("long_text", "intent-or-table", true);
   }
@@ -380,151 +336,6 @@ export function analyzeListStructure(text: string): ListAnalysis {
     nonListLines,
     items,
   };
-}
-
-/**
- * 数据快报分析：统计文本中的 KPI 数据点数量（data_brief 判定）。
- * 数据点 = 数字+数据单位（12.5% / 3.2万亿 / 3567 点）或 数据动词+数字（成交额 5600）。
- */
-export interface DataBriefAnalysis {
-  /** 识别出的 KPI 数据点数量 */
-  kpiCount: number;
-}
-
-/** 统计文本中的 KPI 数据点数量 */
-export function analyzeDataBrief(text: string): DataBriefAnalysis {
-  const matches = text.match(DATA_TOKEN_RE) ?? [];
-  return { kpiCount: matches.length };
-}
-
-/** 判断文本是否含至少一个 KPI 数据点（用于结论句判定） */
-function containsDataToken(s: string): boolean {
-  const m = s.match(DATA_TOKEN_RE);
-  return !!m && m.length > 0;
-}
-
-export interface DataBriefPoint {
-  /** 指标标签（如「上证指数」「同比」） */
-  label: string;
-  /** 数值（含单位，如「3567.89 点」「+15%」） */
-  value: string;
-  /** 可选涨跌幅变化（如「+1.23%」） */
-  change?: string;
-}
-
-/** 数据快报 payload：结论 + KPI 网格 + 详情正文 */
-export interface DataBriefPayload {
-  /** 一句话结论（首句且不含 KPI 的短句），可为空 */
-  conclusion: string;
-  /** KPI 数据点（≤8 个） */
-  kpis: DataBriefPoint[];
-  /** 完整正文（excluding 结论），供「详情」查看 */
-  restText: string;
-}
-
-/**
- * 从数据类正文中提取数据快报 payload。
- *
- * 提取策略（确定性、无 LLM）：
- *   1. 结论：首句字数 ≤40 且不含 KPI 数据点 → 作为一句话结论；
- *   2. KPI：按 [。！？!?；;\n] 切句、再按 [，,、；;] 切从句，
- *      从句中取「标签 + 数值（+单位）」，标签必须非空且不含数字；
- *      纯涨跌方向词从句（「涨 +1.23%」）不新建 KPI，挂到上一 KPI 的 change；
- *   3. 涨跌幅：[+−-1.23%] 从句内存在时挂到 change 字段，
- *      若本身就是数值（如「环比 +15%」）则保留为 value；
- *   4. 去重（label|value|change），上限 8 条；
- *   5. 详情：保留原文结构，仅从原文本移除结论句（不重排句子，保住列表/换行）。
- */
-export function extractDataBriefPayload(text: string): DataBriefPayload {
-  const trimmed = text?.trim() ?? "";
-  if (!trimmed) return { conclusion: "", kpis: [], restText: "" };
-
-  const sentences = trimmed
-    .split(/\r?\n+/)
-    .flatMap((line) => line.split(/(?<=[。！？!?；;])/))
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-  let conclusion = "";
-  const first = sentences[0];
-  if (first && first.length <= 40 && !containsDataToken(first)) {
-    conclusion = first.replace(/[。！？!?；;]$/, "");
-  }
-
-  const searchPool =
-    conclusion && sentences.length > 1 ? sentences.slice(1) : sentences;
-
-  const kpis: DataBriefPoint[] = [];
-  const seen = new Set<string>();
-
-  for (const sentence of searchPool) {
-    if (kpis.length >= 8) break;
-    for (const rawClause of sentence.split(/[，,、；;]/)) {
-      if (kpis.length >= 8) break;
-      const clause = rawClause.trim();
-      if (!clause || clause.length > 80) continue;
-      const valueMatch = clause.match(DATA_VALUE_RE);
-      if (!valueMatch) continue;
-      const idx = valueMatch.index ?? 0;
-      // 标签 = 数值前缀文本，剔除前导标点/列表标记/数字序号；若仍含「：」取最后一段语义
-      // （如「对比两款手机：A 款」→「A 款」）
-      let label = clause
-        .slice(0, idx)
-        .replace(/^[\s：:，,、;；（(【[「"'、\-*•.．\d]+/, "")
-        .trim();
-      const lastColon = Math.max(label.lastIndexOf("："), label.lastIndexOf(":"));
-      if (lastColon >= 0) label = label.slice(lastColon + 1).trim();
-      // 尾部动词噪声（如「收于/报收」）与修饰语（如「为/是」），折叠内部空白
-      label = label
-        .replace(LABEL_TAIL_VERB_RE, "")
-        .replace(/[为是：:]$/, "")
-        .replace(/\s+/g, " ")
-        .trim();
-      if (!label || label.length > 20 || /\d/.test(label)) continue;
-      if (label.length > 16) label = label.slice(-16);
-
-      let value = valueMatch[0].trim();
-      const changeMatch = clause.match(DATA_CHANGE_RE);
-      let change: string | undefined;
-      if (changeMatch) {
-        const ch = changeMatch[0];
-        if (value.includes(ch)) {
-          const v2 = value.slice(0, value.indexOf(ch)).trim();
-          if (v2) {
-            value = v2;
-          } else {
-            value = ch;
-            change = undefined;
-          }
-        } else if (value !== ch) {
-          change = ch;
-        }
-      }
-      if (!value) continue;
-
-      // 纯涨跌方向词从句（「涨 +1.23%」「下跌 -0.45%」）：不新建 KPI，
-      // 归并到上一 KPI 作为涨跌幅变化，避免出现「涨 / 跌」这类无信息量标签。
-      if (CHANGE_WORD_ONLY_RE.test(label) && kpis.length > 0) {
-        const previous = kpis[kpis.length - 1];
-        if (previous.change == null) {
-          previous.change = change ?? value;
-        }
-        continue;
-      }
-
-      const key = `${label}|${value}|${change ?? ""}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      const point: DataBriefPoint = { label, value };
-      if (change) point.change = change;
-      kpis.push(point);
-    }
-  }
-
-  const restText =
-    conclusion && first.length > 0 ? trimmed.replace(first, "").trim() : trimmed;
-
-  return { conclusion, kpis, restText };
 }
 
 /**

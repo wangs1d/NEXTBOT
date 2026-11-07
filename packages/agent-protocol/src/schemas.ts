@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { clientLocationWireSchema } from "./client-location.js";
+import { clientClockWireSchema, clientLocationWireSchema } from "./client-location.js";
 
 const visionSourceKindSchema = z.enum(["device_camera", "external_stream", "agent_attachment"]);
 
@@ -38,6 +38,8 @@ export const userMessageSchema = z
     clientIp: z.string().optional(),
     /** 前端 GPS / 浏览器定位（优先于 IP） */
     clientLocation: clientLocationWireSchema.optional(),
+    /** 设备时区快照（与定位解耦：无定位权限也照常上报，时间注入以它为准） */
+    clientClock: clientClockWireSchema.optional(),
     /** 已废弃：沙箱模式已移除，Agent 始终以 full 运行；字段保留仅为协议兼容 */
     agentAccessMode: z.enum(["sandbox", "full"]).optional(),
     /** 消息内容类型；默认 "text"。当为 "audio" 时，text 可为空，

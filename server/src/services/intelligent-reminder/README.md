@@ -2,11 +2,12 @@
 
 ## 系统概述
 
-智能分析提醒系统提供三种提醒方式，并支持智能升级机制：
+智能分析提醒系统提供两种提醒方式，并支持智能升级机制：
 
 1. **弹窗文字提醒 (popup)** - 基础级别，显示简洁弹窗
-2. **闹钟TTS提醒 (tts_alarm)** - 中等级别，语音播报+渐强音量
-3. **电话呼叫提醒 (phone_call)** - 最高级别，双向交互确保接收
+2. **电话呼叫提醒 (phone_call)** - 最高级别，双向交互确保接收
+
+> 2026-11-04 定调：TTS 闹钟级（tts_alarm）已整体删除，升级链收敛为 popup → phone_call。
 
 ## 快速开始
 
@@ -63,27 +64,7 @@ await toolExecutor.execute("reminder.create", {
 });
 ```
 
-### 3. 创建 TTS 闹钟提醒（带渐强音量）
-
-```typescript
-await toolExecutor.execute("reminder.create", {
-  title: "重要截止日期",
-  message: "注意！项目报告提交截止时间还剩 1 小时",
-  priority: "high",
-  initialLevel: "tts_alarm",
-  ttsConfig: {
-    volumeStart: 0.3,
-    volumeEnd: 1.0,
-    rampUpDurationMs: 10000,
-    repeatIntervalMs: 15000,
-    voiceId: "zh-CN-WomanNeural",
-    speed: 1.1
-  },
-  metadata: { userId: "user_123" }
-});
-```
-
-### 4. 创建电话呼叫提醒（双向交互）
+### 3. 创建电话呼叫提醒（双向交互）
 
 ```typescript
 await toolExecutor.execute("reminder.create", {
@@ -103,7 +84,7 @@ await toolExecutor.execute("reminder.create", {
 });
 ```
 
-### 5. 智能级别选择（自动推荐）
+### 4. 智能级别选择（自动推荐）
 
 ```typescript
 // 让系统根据用户历史响应数据推荐最佳级别
@@ -118,43 +99,10 @@ await toolExecutor.execute("reminder.create", {
 
 ## 升级机制说明
 
-### 默认升级规则
-
-系统默认配置以下升级路径：
-
-1. **popup → tts_alarm**：30秒无响应后升级
-2. **tts_alarm → phone_call**：60秒无响应后升级
-
-### 自定义升级规则
-
-```typescript
-// 自定义升级规则
-reminderService.setEscalationRules([
-  {
-    fromLevel: "popup",
-    toLevel: "tts_alarm",
-    triggerCondition: "timeout",
-    timeoutMs: 20_000,  // 20秒后升级
-  },
-  {
-    fromLevel: "tts_alarm",
-    toLevel: "phone_call",
-    triggerCondition: "timeout",
-    timeoutMs: 45_000,  // 45秒后升级
-    maxEscalations: 2   // 最多升级2次
-  }
-]);
-```
-
-### 手动触发升级
-
-```typescript
-// 手动升级提醒
-await toolExecutor.execute("reminder.escalate", {
-  reminderId: "uuid-xxx",
-  reason: "用户长时间未响应"
-});
-```
+> **2026-11-05 定调：升级链路已斩断。** popup 级不再自动升级到 phone_call；
+> `setEscalationRules` / `reminder.escalate` 均已移除。电话触达仅保留为
+> `reminder.create` 的显式 `initialLevel: "phone_call"`（由 agent 直接指定）。
+> 服务重启恢复时也会剥离旧落盘数据里的升级规则，升级链无法复活。
 
 ## 用户响应处理
 
@@ -192,7 +140,7 @@ const result = await toolExecutor.execute("reminder.get_status", {
     id: "uuid-xxx",
     title: "会议提醒",
     status: "active",
-    currentLevel: "tts_alarm",
+    currentLevel: "phone_call",
     escalationCount: 1,
     createdAt: "2026-05-27T...",
     startedAt: "2026-05-27T..."
@@ -237,13 +185,7 @@ async function createBirthdayReminder(userName: string, relationship: string) {
     title: `🎂 ${userName}的生日提醒`,
     message: `明天是${relationship}${userName}的生日！别忘了准备祝福和礼物哦`,
     priority: "high",
-    initialLevel: "tts_alarm",
-    ttsConfig: {
-      volumeStart: 0.5,
-      volumeEnd: 1.0,
-      rampUpDurationMs: 8000,
-      repeatIntervalMs: 20000
-    },
+    initialLevel: "popup",
     scheduledAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
   });
 }
@@ -265,9 +207,7 @@ async function createUrgentEscalatingReminder(eventDescription: string) {
     }
   });
 
-  console.log(`创建提醒 ${instance.reminderId}，将按需自动升级`);
-  
-  // 系统会自动在30秒后升级到 TTS，再过60秒升级到电话
+  console.log(`创建提醒 ${instance.reminderId}（升级链已斩断：popup 恒为 popup，电话仅显式指定）`);
 }
 ```
 
@@ -303,17 +243,6 @@ async function scheduleBatchReminders(tasks: Array<{
 | confirmText | string | "我知道了" | 确认按钮文字 |
 | autoCloseAfterMs | number | undefined | 自动关闭时间（毫秒） |
 | position | string | "center" | 弹窗位置 |
-
-### TTSAlarmConfig
-
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|--------|------|
-| volumeStart | number | 0.3 | 初始音量（0-1） |
-| volumeEnd | number | 1.0 | 最终音量（0-1） |
-| rampUpDurationMs | number | 10000 | 渐强时长（毫秒） |
-| repeatIntervalMs | number | 15000 | 重复间隔（毫秒） |
-| voiceId | string | undefined | TTS语音ID |
-| speed | number | undefined | 语速（0.5-2.0） |
 
 ### PhoneCallConfig
 

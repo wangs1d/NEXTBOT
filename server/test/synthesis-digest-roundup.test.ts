@@ -43,14 +43,22 @@ test("search_web 的 items 结果被完整计入数据质量评估（不再截�
   assert.equal(quality.level, "high");
 });
 
-test("「最新动态」类盘点查询命中 digest_roundup 策略而不是求简分层", () => {
+test("「最新动态」类盘点查询命中 digest_roundup 策略，但策略层不再教版式", () => {
   const directive = evaluateAndSelectStrategy(
     [{ toolName: "search_web", ok: true, result: searchWebResult(16) }],
     "刘浩存 最新动态 2026年9月",
   );
   assert.equal(directive.strategy, "digest_roundup");
-  assert.ok(directive.instruction.includes("按主题分组展开"));
-  assert.ok(directive.instruction.includes("不要人为压缩"));
+  // 2026-11-05 架构收敛：版式归 render/scenes——strategy 名只作观测与场景路由，
+  // 指令里只剩数据事实（几个来源），不许再出现编号步骤/分组/篇幅这类版式措辞。
+  assert.ok(!directive.instruction.includes("按主题分组"));
+  assert.ok(!directive.instruction.includes("总体印象"));
+  assert.ok(!directive.instruction.includes("1."));
+  assert.ok(directive.instruction.includes("数据够了"));
+  assert.ok(
+    directive.instruction.length < 80,
+    `策略指令应只剩数据事实（当前 ${directive.instruction.length} 字）`,
+  );
 });
 
 test("动态盘点类查询不再被判成单一事实查询，求证类措辞保持原判定", () => {

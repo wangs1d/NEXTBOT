@@ -27,7 +27,9 @@ export interface SharedBrowserModuleDeps {
 function offlineResult() {
   return {
     ok: false,
-    error: "共用浏览器未连接：请让用户打开客户端「常用工具 → 浏览器」后重试",
+    error:
+      "共用浏览器未连接（客户端未打开内置浏览器，或当前是手机端等无可见浏览器的设备）。" +
+      "浏览器/网页任务请改用 agent_browser.*，在服务端远端浏览器执行。",
     retryable: false,
   };
 }

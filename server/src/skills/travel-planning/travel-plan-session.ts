@@ -2470,6 +2470,65 @@ function actorIdOf(request: FastifyRequest): string {
   });
 }
 
+/** 规划会话摘要（GET /travel/plan-sessions 与资料库聚合共用，口径必须一致）。 */
+export type PlanSessionSummary = {
+  id: string;
+  createdAt: number;
+  updatedAt: number;
+  destination: string | null;
+  days: number | null;
+  startDate: string | null;
+  endDate: string | null;
+  originalMessage: string;
+  state: string;
+  turnCount: number;
+  lastUserMessage: string;
+};
+
+/**
+ * 本 actor 规划会话摘要列表（按最近更新倒序）。
+ * 从 /travel/plan-sessions 处理器抽出：资料库聚合端点复用同一份逻辑，避免两处口径漂移。
+ */
+export function listPlanSessionSummaries(actorId: string, limit = 30): PlanSessionSummary[] {
+  pruneSessions();
+  const list: PlanSessionSummary[] = [];
+  const actorDir = actorSessionsDir(actorId);
+  try {
+    if (fs.existsSync(actorDir)) {
+      for (const f of fs.readdirSync(actorDir)) {
+        if (!f.endsWith(".json")) continue;
+        try {
+          const parsed = JSON.parse(
+            fs.readFileSync(path.join(actorDir, f), "utf8"),
+          ) as PlanSession;
+          if (!parsed?.id || !Array.isArray(parsed.history)) continue;
+          if (actorBucket(parsed.actorId) !== actorBucket(actorId)) continue;
+          const lastUser = [...parsed.history].reverse().find((h) => h.role === "user");
+          list.push({
+            id: parsed.id,
+            createdAt: parsed.createdAt,
+            updatedAt: parsed.updatedAt,
+            destination: parsed.destination ?? null,
+            days: effectiveDays(parsed),
+            startDate: parsed.startDate ?? null,
+            endDate: parsed.endDate ?? null,
+            originalMessage: parsed.originalMessage,
+            state: sessionStateLabel(parsed),
+            turnCount: parsed.history.length,
+            lastUserMessage: lastUser?.content ?? parsed.originalMessage,
+          });
+        } catch {
+          // 单个损坏文件跳过，不挡列表
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[travel-plan-session] list failed:", err);
+  }
+  list.sort((a, b) => b.updatedAt - a.updatedAt);
+  return list.slice(0, Math.min(Math.max(limit, 1), 100));
+}
+
 /**
  * 规划会话路由域（v3 旅游界面规划流专用）：
  *   POST /travel/plan-session           {message} 一句话发起
@@ -2506,55 +2565,7 @@ export function registerTravelPlanSessionRoutes(
     const query = (request.query ?? {}) as { limit?: string };
     const actorId = actorIdOf(request);
     const limit = Math.min(Math.max(Number(query.limit) || 30, 1), 100);
-    pruneSessions();
-    const list: Array<{
-      id: string;
-      createdAt: number;
-      updatedAt: number;
-      destination: string | null;
-      days: number | null;
-      startDate: string | null;
-      endDate: string | null;
-      originalMessage: string;
-      state: string;
-      turnCount: number;
-      lastUserMessage: string;
-    }> = [];
-    const actorDir = actorSessionsDir(actorId);
-    try {
-      if (fs.existsSync(actorDir)) {
-        for (const f of fs.readdirSync(actorDir)) {
-          if (!f.endsWith(".json")) continue;
-          try {
-            const parsed = JSON.parse(
-              fs.readFileSync(path.join(actorDir, f), "utf8"),
-            ) as PlanSession;
-            if (!parsed?.id || !Array.isArray(parsed.history)) continue;
-            if (actorBucket(parsed.actorId) !== actorBucket(actorId)) continue;
-            const lastUser = [...parsed.history].reverse().find((h) => h.role === "user");
-            list.push({
-              id: parsed.id,
-              createdAt: parsed.createdAt,
-              updatedAt: parsed.updatedAt,
-              destination: parsed.destination ?? null,
-              days: effectiveDays(parsed),
-              startDate: parsed.startDate ?? null,
-              endDate: parsed.endDate ?? null,
-              originalMessage: parsed.originalMessage,
-              state: sessionStateLabel(parsed),
-              turnCount: parsed.history.length,
-              lastUserMessage: lastUser?.content ?? parsed.originalMessage,
-            });
-          } catch {
-            // 单个损坏文件跳过，不挡列表
-          }
-        }
-      }
-    } catch (err) {
-      console.error("[travel-plan-session] list failed:", err);
-    }
-    list.sort((a, b) => b.updatedAt - a.updatedAt);
-    return { ok: true, sessions: list.slice(0, limit) };
+    return { ok: true, sessions: listPlanSessionSummaries(actorId, limit) };
   });
 
   // 一句话发起

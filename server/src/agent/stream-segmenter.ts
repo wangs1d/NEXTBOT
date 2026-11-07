@@ -56,9 +56,14 @@ export type StreamSegmenterOptions = {
    * 停顿拖慢，且 TTS 链路不消费气泡边界）。
    */
   bubbleMode?: boolean;
-  /** 气泡拆分模式：相邻两泡之间的最小/最大停顿（毫秒）。默认 500~800。 */
+  /** 气泡拆分模式：相邻两泡之间的停顿下限/上限（毫秒）。默认 400~1500。 */
   bubbleGapMinMs?: number;
   bubbleGapMaxMs?: number;
+  /** 气泡拆分模式：泡间停顿按**即将发出的泡**的可见字数动态计算
+   *  （2026-11-06 用户定稿「每条信息根据字数动态隔一点时间」）：
+   *  每字毫秒数 × 可见字数 + 抖动，再夹在 min~max 之间。默认 22ms/字
+   *  ——12 字短泡约 0.4s、30 字约 0.7s、长泡封顶 1.5s，像真人打字连发。 */
+  bubbleGapPerCharMs?: number;
   /** 气泡拆分模式：单轮气泡数上限，超出后剩余内容并入末气泡（防刷屏）。默认 4。 */
   maxBubbles?: number;
 };
@@ -89,6 +94,9 @@ const BUBBLE_MIN_CHARS = 12;
 /** 可见字符（字母/数字/汉字），用于气泡长度裁决——标点与空白不计。 */
 const BUBBLE_VISIBLE_CHAR_RE = /[\p{L}\p{N}]/u;
 
+/** 表格行特征：行首（允许空白）竖线。markdown 表格由连续表格行构成。 */
+const TABLE_ROW_LINE_RE = /^[ \t]*\|/;
+
 /** 泡尾/泡首需要剥掉的悬挂标点与空白（真人消息不以逗号开头/结尾）。 */
 const BUBBLE_EDGE_STRIP_RE = /^[\s，,、]+|[\s，,、]+$/gu;
 
@@ -117,6 +125,8 @@ export class StreamSegmenter {
   /** 气泡拆分模式：相邻两泡之间的停顿区间（毫秒）。 */
   private bubbleGapMinMs: number;
   private bubbleGapMaxMs: number;
+  /** 气泡拆分模式：泡间停顿的每字毫秒数（按泡长动态）。 */
+  private bubbleGapPerCharMs: number;
   /** 气泡拆分模式：单轮气泡数上限，超出并入末泡。 */
   private maxBubbles: number;
   /** 已推送的气泡数（气泡拆分模式重量上限）。 */
@@ -150,8 +160,9 @@ export class StreamSegmenter {
     this.maxStreamSegments = opts.maxStreamSegments ?? 4;
     this.holdFirstSentence = opts.holdFirstSentence ?? true;
     this.bubbleMode = opts.bubbleMode ?? false;
-    this.bubbleGapMinMs = opts.bubbleGapMinMs ?? 500;
-    this.bubbleGapMaxMs = opts.bubbleGapMaxMs ?? 800;
+    this.bubbleGapMinMs = opts.bubbleGapMinMs ?? 400;
+    this.bubbleGapMaxMs = opts.bubbleGapMaxMs ?? 1500;
+    this.bubbleGapPerCharMs = opts.bubbleGapPerCharMs ?? 22;
     this.maxBubbles = opts.maxBubbles ?? 4;
     // holdFirstSentence=false → 首句随到随发：interimDone 置位使首句按住逻辑
     // 全程短路（flushCompleteBlocks 不按住、dispatchSegment/flushFinal 走普通分支）
@@ -174,6 +185,19 @@ export class StreamSegmenter {
     this.bubbleMode = true;
     this.holdFirstSentence = false;
     this.interimDone = true;
+  }
+
+  /**
+   * 运行时关闭气泡拆分（2026-11-06 深夜收窄版，仅信息展示类工具轮）：
+   * WS 层在**检索/信息域**工具（search/weather/market/clock——查资料、天气、
+   * 行情、时间这类「结果需要一次完整展示」的轮）开始执行时调用，剩余正文
+   * 以不带 meta 的普通分段发出（由 BubbleTracker 并回当前泡/兜底开首泡）。
+   * **只对信息类域关泡**：操作类工具（提醒/日程/购物/智能家居/发消息…）
+   * 禁止调用——工具后正文照常分泡连发（「定好了，到点叫你。」+「不过…」
+   * 必须是两泡，2026-11-06 截图事故的回归红线）。允许在流中途调用。
+   */
+  disableBubbleMode(): void {
+    this.bubbleMode = false;
   }
 
   /**
@@ -226,9 +250,8 @@ export class StreamSegmenter {
         this.bubbleCount < this.maxBubbles &&
         BUBBLE_STRONG_BREAK_RE.test(deduped);
       if (this.bubbleCount === 0 || canOpenNew) {
-        if (this.bubbleCount > 0 && this.bubbleGapMaxMs > 0) {
-          const span = Math.max(1, this.bubbleGapMaxMs - this.bubbleGapMinMs + 1);
-          await sleep(this.bubbleGapMinMs + Math.floor(Math.random() * span));
+        if (this.bubbleCount > 0) {
+          await sleep(this.bubblePauseMs(deduped));
           if (this.disposed) return;
         }
         this.trackEmitted(deduped);
@@ -318,11 +341,23 @@ export class StreamSegmenter {
    *   饱满的泡，数量自然收敛，不再逐句碎裂）。
    * - 换行无条件切（段落/分行是模型刻意的结构分组，永远该换泡）。
    * - 泡尾/泡首剥悬挂逗号与空白（真人消息不以逗号开头/结尾）。
-   * - 首泡之前零停顿（TTFT 不受影响），第 2 泡起泡间随机停顿
-   *   bubbleGapMinMs~bubbleGapMaxMs，末泡之后无停顿。
+   * - 首泡之前零停顿（TTFT 不受影响），第 2 泡起按泡长动态停顿
+   *   （bubblePauseMs：字多停久点 + 抖动，min~max 夹逼），末泡之后无停顿。
    * - 超过 maxBubbles 后不再切泡，剩余内容留在缓冲，由 flushFinal 以
    *   "continue" 并入末泡（防刷屏重量上限）。
    */
+  /**
+   * 泡间停顿（2026-11-06 用户定稿）：按**即将发出的这条泡**的可见字数动态
+   * 计算——字多的泡前停久一点（像真人打字），字少的停顿短，再叠加随机抖动
+   * 去机械感。夹在 bubbleGapMinMs~bubbleGapMaxMs 之间。
+   */
+  private bubblePauseMs(text: string): number {
+    let visible = 0;
+    for (const ch of text) if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) visible += 1;
+    const raw = visible * this.bubbleGapPerCharMs + Math.floor(Math.random() * 150);
+    return Math.max(this.bubbleGapMinMs, Math.min(this.bubbleGapMaxMs, raw));
+  }
+
   private async flushCompleteBubbles(): Promise<void> {
     while (!this.disposed) {
       if (this.bubbleCount >= this.maxBubbles) break;
@@ -341,9 +376,8 @@ export class StreamSegmenter {
       if (!text || !BUBBLE_VISIBLE_CHAR_RE.test(text)) continue;
       const deduped = stripSentencesAlreadySaid(this.emittedText, text).trim();
       if (!deduped) continue; // 句级去重后为空（整句已说过）→ 不成泡
-      if (this.bubbleCount > 0 && this.bubbleGapMaxMs > 0) {
-        const span = Math.max(1, this.bubbleGapMaxMs - this.bubbleGapMinMs + 1);
-        await sleep(this.bubbleGapMinMs + Math.floor(Math.random() * span));
+      if (this.bubbleCount > 0) {
+        await sleep(this.bubblePauseMs(deduped));
         if (this.disposed) return;
       }
       this.trackEmitted(deduped);
@@ -356,15 +390,43 @@ export class StreamSegmenter {
    *  只在强边界切：换行无条件切（段落/分行是模型刻意的结构分组，永远该换泡）；
    *  句末标点须边界前可见字达标（首泡/后续泡两档下限）。字数只决定"句末边界
    *  到了切不切"（太短的句子并进下一泡），绝不是切点本身——逗号等句中位置
-   *  永不切泡（2026-09-29 用户反馈：一段话必须正确讲完，不靠字数随便截断）。 */
+   *  永不切泡（2026-09-29 用户反馈：一段话必须正确讲完，不靠字数随便截断）。
+   *
+   *  表格原子性（2026-11-06）：markdown 表格是「一行一对象」的数据交付形态，
+   *  逐行切泡会把一张表撕成 N 个碎泡、客户端拿到孤行渲染不出表。规则：
+   *  - 表格行内部（含行中句末标点、行尾换行接下一表格行）一律不切；
+   *  - 引子散文与表格之间正常切（可见字达标时表格独立成泡）；
+   *  - 表格末行与后续散文之间正常切（表格带着完整结构离场）；
+   *  - 可见字不足时表格与相邻散文并泡——宁可并泡绝不撕表。 */
   private findBubbleBreak(
     buf: string,
     minStrongChars: number,
   ): { index: number } | null {
     let visible = 0;
+    let lineStart = 0;
+    let curLineIsTableRow = false;
     for (let i = 0; i < buf.length; i++) {
+      if (i === lineStart) {
+        curLineIsTableRow = TABLE_ROW_LINE_RE.test(buf.slice(lineStart, lineStart + 64).split("\n")[0]);
+      }
       const ch = buf[i];
-      if (ch === "\n") return { index: i };
+      if (ch === "\n") {
+        // 下一行的首字符决定边界性质：当前行与下一行都是表格行 → 表格内部，永不切
+        let k = i + 1;
+        while (k < buf.length && (buf[k] === " " || buf[k] === "\t")) k++;
+        const nextIsTableRow = k < buf.length && buf[k] === "|";
+        const insideTable = curLineIsTableRow && nextIsTableRow;
+        if (!insideTable && visible >= minStrongChars) return { index: i };
+        lineStart = i + 1;
+        continue;
+      }
+      if (curLineIsTableRow) {
+        // 表格行内不认句末标点：单元格里的「。」/「；」是内容，竖线间的
+        // 任何字符都不是切泡点；可见字照常计数（表格自身体量应能让
+        // 「表格末行 → 后续散文」的切泡点达标，不并泡）
+        if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) visible += 1;
+        continue;
+      }
       if (BUBBLE_STRONG_BREAK_RE.test(ch)) {
         if (visible >= minStrongChars) return { index: i };
       } else if (BUBBLE_VISIBLE_CHAR_RE.test(ch)) {

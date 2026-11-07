@@ -2,7 +2,7 @@
  * 渲染决策层验收：形态在正确上下文触发，且不泄漏裸 JSON。
  *
  * 锁定 decideRender 的三条硬规则：
- *   R1 业务卡只从真实回执产出（含失败空态）；
+ *   R1 业务卡只从真实回执产出（失败不出卡：空态警示卡 2026-11-06 整体退役）；
  *   R2 fold 只在没有结构化卡且主题判得出来时出现；
  *   R3 结构化面在场时正文只是前导，任何块都和它的路由声明成对出现。
  */
@@ -93,21 +93,25 @@ test("没有工具回执的散文：不出任何业务卡", () => {
   assertNoBareJson(out, "prose");
 });
 
-test("业务工具失败：出空态卡说明「没拿到」，不伪装成搜索卡", () => {
-  const decision = decideRender({
-    text: "比价我试了，这次没成功。",
-    effects: [{ tool: "shopping.compare.prices", status: "error" }],
-  });
-  assert.equal(decision.cards.length, 1);
-  assert.equal(decision.cards[0].kind, "empty");
-  const out = applyCards(applyBodyForm("比价我试了，这次没成功。", decision), decision).text;
-  assert.ok(out.includes("[AGENT_RESULT_CARD_START]"), "空态也应成卡");
-  const cards = collectCardPayloads(out);
-  assert.equal(cards.length, 1);
-  const items = cards[0].items as Array<{ type: string; text: string }>;
-  assert.equal(items[0].type, "warn");
-  assert.ok(items[0].text.includes("没拿到"));
-  assertNoBareJson(out, "empty-state");
+test("失败空态警示卡整体退役：任何工具失败都不出卡，失败说明由正文承担", () => {
+  for (const tool of [
+    "shopping.order.place",
+    "shopping.compare.prices",
+    "shopping.recommend",
+    "weather.get_local",
+  ]) {
+    const decision = decideRender({
+      text: "这次没成。",
+      effects: [{ tool, status: "error" }],
+    });
+    assert.equal(
+      decision.cards.length,
+      0,
+      `${tool} 失败不应出任何卡（空态卡 2026-11-06 整体退役）`,
+    );
+    const out = applyCards(applyBodyForm("这次没成。", decision), decision).text;
+    assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), `${tool} 失败不应落卡块`);
+  }
 });
 
 test("媒体与搜索同时在场：只出媒体主形态，不再叠一张文字搜索卡", () => {
@@ -192,14 +196,14 @@ test("各形态出口：块与路由声明成对出现，可见正文无 JSON", 
       }),
     },
     {
-      name: "search_result",
+      name: "search（不出卡，正文原样）",
       out: process("翻了三篇。", {
         toolName: "search_web",
         toolResult: { items: [{ title: "攻略", url: "https://e.com/1", snippet: "s" }] },
       }),
     },
     {
-      name: "data_brief",
+      name: "KPI 数字密集正文（data_brief 已退役，不出卡）",
       out: process("今天A股收盘，创业板指报 2876.54 点（+2.01%），两市全天成交额 1.2万亿，北向资金净流入 85.6亿。", {
         userText: "今天行情怎么样",
       }),

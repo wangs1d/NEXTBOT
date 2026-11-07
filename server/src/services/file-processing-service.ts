@@ -1,5 +1,5 @@
 import { getDataDir } from "../config/data-dir.js";
-import { createReadStream, existsSync, mkdirSync, statSync, writeFileSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
 import { loadXlsx, sheetToJson } from "./xlsx-lazy.js";
@@ -436,6 +436,34 @@ export class FileProcessingService {
   /** 提供给 HTTP 路由用：返回 readable stream。 */
   createReadStream(path: string) {
     return createReadStream(path);
+  }
+
+  /**
+   * 列出该 actor 名下的产出文件（资料库聚合用）：按修改时间倒序。
+   * 只读元数据，不读文件内容；单条损坏跳过不挡列表。
+   */
+  listFiles(actorId: string, limit = 200): Array<{ name: string; size: number; updatedAt: string }> {
+    const safeActor = sanitizeActorId(actorId);
+    if (!safeActor) return [];
+    const dir = join(this.rootDir, safeActor);
+    try {
+      if (!existsSync(dir)) return [];
+      const out: Array<{ name: string; size: number; updatedAt: string }> = [];
+      for (const name of readdirSync(dir)) {
+        try {
+          const full = join(dir, name);
+          const st = statSync(full);
+          if (!st.isFile()) continue;
+          out.push({ name, size: st.size, updatedAt: st.mtime.toISOString() });
+        } catch {
+          // 单个文件 stat 失败跳过
+        }
+      }
+      out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return out.slice(0, Math.max(1, limit));
+    } catch {
+      return [];
+    }
   }
 
   /** 提供给 HTTP 路由用：根据文件扩展名推断 Content-Type。 */

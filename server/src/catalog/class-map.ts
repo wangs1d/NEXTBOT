@@ -166,6 +166,8 @@ const RULES: ClassRule[] = [
   { exact: "tool_discover", domain: "system", action: "manage", risk: "system" },
 
   { prefix: "hot_rankings", domain: "system", action: "query", risk: "read" },
+
+  { prefix: "market.", domain: "system", action: "query", risk: "read" },
 ];
 
 /** MCP server alias → 生活域（MCP 工具名形如 mcp.<alias>.<tool>）。 */

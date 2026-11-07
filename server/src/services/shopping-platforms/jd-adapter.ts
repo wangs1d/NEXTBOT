@@ -21,6 +21,7 @@ const CARD_SELECTOR = ".gl-item, [class*='product-item'], [data-sku]";
 export class JdAdapter implements ShoppingPlatformAdapter {
   readonly platform = "jd";
   readonly category = "general" as const;
+  readonly authMode = "login" as const;
 
   searchUrl(query: string, filters?: SearchFilters): string {
     const q = encodeURIComponent(query);

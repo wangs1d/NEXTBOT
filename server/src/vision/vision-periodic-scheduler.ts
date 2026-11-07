@@ -194,28 +194,11 @@ export class VisionPeriodicScheduler {
         return;
       }
 
-      let chunkSeq = 0;
-      // 视觉任务回复同样受 render 协议约束：NEXT_UP 块不能在流式阶段漏给用户。
-      const visionStreamGuard = createStreamMarkerGuard();
+      // 2026-11-05 文字打字机退役（模型仍流式生成）：视觉播报只由下方 ChatAssistantDone 一次性下发，
+      // 不再推打字机 chunk；delta 回调与流式标记 guard 一并移除。
       const reply = await this.deps.runtime.handleUserMessage(job.actorId, job.prompt, {
         chatUserMessageId: messageId,
         visionFrames: [frame],
-        onAssistantDelta: (delta) => {
-          const safe = visionStreamGuard.feed(delta);
-          if (!safe) return;
-          this.deps.wsRegistry.trySend(
-            job.actorId,
-            JSON.stringify({
-              type: ServerEventType.ChatAssistantChunk,
-              payload: {
-                sessionId: job.actorId,
-                messageId: assistantMsgId,
-                chunk: safe,
-                sequence: chunkSeq++,
-              },
-            }),
-          );
-        },
         onExternalToolExecuted: (info) => {
           this.deps.wsRegistry.trySend(
             job.actorId,
@@ -245,44 +228,12 @@ export class VisionPeriodicScheduler {
         },
       });
 
-      const visionTail = visionStreamGuard.flush();
-      if (visionTail) {
-        this.deps.wsRegistry.trySend(
-          job.actorId,
-          JSON.stringify({
-            type: ServerEventType.ChatAssistantChunk,
-            payload: {
-              sessionId: job.actorId,
-              messageId: assistantMsgId,
-              chunk: visionTail,
-              sequence: chunkSeq++,
-            },
-          }),
-        );
-      }
       // 定稿文本剥离 NEXT_UP 协议块（视觉任务不出胶囊，透出即噪音）。
       const displayText = extractNextUpSuggestions(
         dedupeAdjacentLines((reply.text ?? "").trim()),
       ).text;
 
-      if (!reply.streamedChunks) {
-        const chunks = chunkText(displayText, 12);
-        chunks.forEach((chunk, index) => {
-          this.deps.wsRegistry.trySend(
-            job.actorId,
-            JSON.stringify({
-              type: ServerEventType.ChatAssistantChunk,
-              payload: {
-                sessionId: job.actorId,
-                messageId: assistantMsgId,
-                chunk,
-                sequence: index,
-              },
-            }),
-          );
-        });
-      }
-
+      // 流式切块推送已退役：finalText 即完整正文，done 一次性落屏。
       this.deps.wsRegistry.trySend(
         job.actorId,
         JSON.stringify({

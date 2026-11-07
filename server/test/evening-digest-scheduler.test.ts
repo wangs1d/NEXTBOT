@@ -1,7 +1,16 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
 import { afterEach, describe, it, mock } from "node:test";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { EveningDigestScheduler } from "../src/services/evening-digest-scheduler.js";
+
+// 落盘隔离：已发标记文件指到一次性临时数据根，绝不碰真实数据
+// （直跑 node --test 时 npm_lifecycle_event 为空，调度器的测试进程守卫不生效）
+const TMP_DATA_DIR = mkdtempSync(join(tmpdir(), "evening-digest-sched-test-"));
+process.env.NEXTBOT_DATA_DIR = TMP_DATA_DIR;
+const SENT_DAY_FILE = join(TMP_DATA_DIR, "evening-digest-sent.json");
 
 /** 把私有 tick 暴露给测试（与生产每分钟 tick 同一入口） */
 async function tick(scheduler: EveningDigestScheduler): Promise<void> {
@@ -36,7 +45,6 @@ function makeScheduler(bedtimeHour: number | null = null) {
           date: "2026-10-16",
           tomorrowSchedule: [],
           tomorrowWeather: null,
-          outfitTip: null,
           narrationText: "明天没安排，想睡就多睡会儿。",
         };
       },
@@ -56,6 +64,8 @@ function setClock(h: number, min: number): void {
 
 afterEach(() => {
   mock.timers.reset();
+  // 用例间清落盘标记：各用例共用 sessionId "s1"，磁盘残留会跨用例判「已发」
+  rmSync(SENT_DAY_FILE, { force: true });
 });
 
 describe("EveningDigestScheduler：推送时刻动态学习（env 锁死 > 节律就寝前30min > 默认21点）", () => {
@@ -148,5 +158,50 @@ describe("EveningDigestScheduler：推送时刻动态学习（env 锁死 > 节�
     } finally {
       restoreEnv(saved);
     }
+  });
+});
+
+// ── 2026-11-05 接生产投递：最近一次 digest 缓存（聊天出口消费）───────────────
+describe("latestDigest：供应聊天里的明日预览", () => {
+  const digestOf = (date: string) =>
+    ({
+      date,
+      tomorrowSchedule: [{ id: "t1", title: "部门例会", time: "09:30" }],
+      tomorrowWeather: null,
+      narrationText: "",
+    }) as const;
+
+  it("推送后能取到当日 digest", async () => {
+    const saved = clearEnv();
+    try {
+      using _m = mock.timers;
+      setClock(21, 0);
+      const { scheduler } = makeScheduler();
+      scheduler.subscribe("s1");
+      await tick(scheduler);
+      const latest = scheduler.latestDigest("s1");
+      assert.ok(latest, "推送后应可回取");
+      assert.equal(latest?.date, "2026-10-16", "取到的必须是当日 digest");
+      scheduler.stop();
+    } finally {
+      restoreEnv(saved);
+    }
+  });
+
+  it("跨日自动失效：昨天的 digest 不再当明日预览用", () => {
+    const scheduler = new EveningDigestScheduler({
+      digestService: { generateDigest: async () => digestOf("2020-01-01") },
+      onDigestTriggered: () => {},
+    } as unknown as ConstructorParameters<typeof EveningDigestScheduler>[0]);
+    scheduler.rememberDigest("s1", digestOf("2020-01-01") as never);
+    assert.equal(scheduler.latestDigest("s1"), undefined);
+  });
+
+  it("未推送过的 session 返回 undefined（不凭空造预览）", () => {
+    const scheduler = new EveningDigestScheduler({
+      digestService: { generateDigest: async () => digestOf("2020-01-01") },
+      onDigestTriggered: () => {},
+    } as unknown as ConstructorParameters<typeof EveningDigestScheduler>[0]);
+    assert.equal(scheduler.latestDigest("nobody"), undefined);
   });
 });

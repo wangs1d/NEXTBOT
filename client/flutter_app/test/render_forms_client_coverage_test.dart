@@ -3,7 +3,6 @@ import "package:flutter_test/flutter_test.dart";
 
 import "package:nextbot/core/models/chat_models.dart";
 import "package:nextbot/features/chat/assistant_brief_message.dart";
-import "package:nextbot/features/chat/data_brief_message.dart";
 import "package:nextbot/features/chat/display_effects/chips_effect_card.dart";
 import "package:nextbot/features/chat/display_effects/comparison_table_effect_card.dart";
 import "package:nextbot/features/chat/display_effects/fold_list_effect_card.dart";
@@ -93,17 +92,24 @@ void main() {
     expect(find.textContaining("趴在键盘上睡觉"), findsNothing);
   });
 
-  testWidgets("形态 data_brief：KPI 快报组件（结论 + 瓦片 + 详情）", (tester) async {
+  // data_brief 快报组件已退役（2026-11-06）：服务端不再下发该形态。
+  testWidgets("历史 data_brief 消息：payload 块转写成正文，不裸奔 JSON", (tester) async {
     const String payload =
-        '{"conclusion":"今日A股收涨","kpis":[{"label":"上证指数","value":"3245.6 点","change":"+1.2%"},{"label":"两市成交额","value":"9800 亿元"}],"restText":"盘面上半导体板块领涨。"}';
+        '{"conclusion":"昨晚美股大涨","kpis":[{"label":"道指涨超","value":"3%"}],'
+        '"restText":"三大指数集体收涨，纳指涨1.44%。\\n\\n今天要看板块分化。"}';
     await pumpBody(
       tester,
       "[RENDER_AS:data_brief]\n[DATA_BRIEF_START]$payload[DATA_BRIEF_END]",
     );
-    expect(find.byType(DataBriefMessage), findsOneWidget);
-    expect(find.text("今日A股收涨"), findsOneWidget);
-    expect(find.text("上证指数"), findsOneWidget);
-    expect(find.text("3245.6 点"), findsOneWidget);
+    // 结论与详情 prose 正常可见（JSON 里的 \\n 已解码成真实换行段落；
+    // 纯叙述走内联排版，整段一个 Text，用 textContaining 断言段落存在）
+    expect(find.textContaining("昨晚美股大涨"), findsOneWidget);
+    expect(find.textContaining("三大指数集体收涨"), findsOneWidget);
+    expect(find.textContaining("板块分化"), findsOneWidget);
+    // 机器标记与 JSON 结构不外露
+    expect(find.textContaining("[DATA_BRIEF_START]"), findsNothing);
+    expect(find.textContaining("kpis"), findsNothing);
+    expect(find.byType(StructuredAssistantMessageBody), findsOneWidget);
   });
 
   // ─────────────────────────────────────────────────────────────────
@@ -236,7 +242,7 @@ void main() {
     expect(find.textContaining("种一棵树"), findsOneWidget);
   });
 
-  testWidgets("结果卡 search_result：搜索结果列表（条目不承载网页链接）", (tester) async {
+  testWidgets("结果卡 search_result：已退役——历史卡片整卡不渲染", (tester) async {
     await pumpBody(
       tester,
       "帮你查到了：\n"
@@ -247,10 +253,11 @@ void main() {
           '"footer":"共 2 条结果","actions":[],"speak":"high","cardId":"card_t9"}\n'
           "[AGENT_RESULT_CARD_END]",
     );
-    expect(find.text("搜索结果"), findsOneWidget);
-    expect(find.textContaining("鼓浪屿两日游攻略"), findsOneWidget);
-    expect(find.textContaining("共 2 条结果"), findsOneWidget);
-    // 旧载荷里仍带 url，卡片也不再渲染跳转入口（无箭头、整行不可点）
+    // 正文照常显示（内容是 agent 自己总结的），卡片本体一律不上屏
+    expect(find.textContaining("帮你查到了"), findsOneWidget);
+    expect(find.text("搜索结果"), findsNothing);
+    expect(find.textContaining("鼓浪屿两日游攻略"), findsNothing);
+    expect(find.textContaining("共 2 条结果"), findsNothing);
     expect(find.byIcon(Icons.chevron_right_rounded), findsNothing);
     expect(find.byIcon(Icons.open_in_new), findsNothing);
   });

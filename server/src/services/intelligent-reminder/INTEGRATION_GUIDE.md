@@ -129,7 +129,7 @@ return {
 | `reminder.cancel` | 取消提醒 | 清理资源 |
 | `reminder.get_status` | 查询状态 | 获取详情 |
 | `reminder.list_active` | 列出活跃提醒 | 批量管理 |
-| `reminder.escalate` | 手动升级 | 紧急情况强制升级 |
+| `reminder.escalate` | ~~手动升级~~ 已随升级链斩断移除（2026-11-05），电话仅保留为 reminder.create 的显式 initialLevel |
 | **`reminder.get_user_stats`** | **获取用户统计** | **查看响应率、偏好等** ⭐ |
 | **`reminder.get_response_history`** | **获取响应历史** | **查看最近N条记录** ⭐ |
 
@@ -179,10 +179,9 @@ const stats = await toolExecutor.execute("reminder.get_user_stats", {});
     responseRate: 0.8,
     averageResponseTimeMs: 25000, // 平均25秒响应
     ignoreRate: 0.13,           // 忽略率13%
-    preferredLevel: "tts_alarm", // 系统推荐用TTS
+    preferredLevel: "popup",    // 系统推荐用弹窗
     levelDistribution: {
-      popup: { count: 100, responses: 85, avgResponseTimeMs: 30000 },
-      tts_alarm: { count: 40, responses: 35, avgResponseTimeMs: 15000 },
+      popup: { count: 140, responses: 120, avgResponseTimeMs: 30000 },
       phone_call: { count: 10, responses: 10, avgResponseTimeMs: 5000 }
     }
   }
@@ -293,14 +292,14 @@ class EdgeTTS implements TTSProvider {
   userId: "user_123",
   reminderId: "uuid",
   reminderTitle: "会议提醒",
-  level: "tts_alarm",          // 最终触达的级别
+  level: "phone_call",         // 最终触达的级别
   priority: "high",
   triggeredAt: "2026-05-27T...",
   respondedAt: "2026-05-27T...", // 用户确认时间
   responseTimeMs: 15234,        // 响应耗时(ms)
   responded: true,              // 是否已确认
   escalationCount: 1,            // 升级了几次
-  finalLevel: "tts_alarm",       // 最终级别
+  finalLevel: "phone_call",      // 最终级别
   userFeedback: "positive"       // 用户反馈(可选)
 }
 ```
@@ -316,10 +315,9 @@ class EdgeTTS implements TTSProvider {
   averageResponseTimeMs: 25000,  // 25秒
   ignoreRate: 0.13,              // 13%
   escalationRate: 0.25,          // 25%
-  preferredLevel: "tts_alarm",   // AI推荐的最佳级别
+  preferredLevel: "popup",       // AI推荐的最佳级别
   levelDistribution: {           // 各级别详细统计
-    popup: { count: 100, responses: 85, avgResponseTimeMs: 30000 },
-    tts_alarm: { count: 40, responses: 35, avgResponseTimeMs: 15000 },
+    popup: { count: 140, responses: 120, avgResponseTimeMs: 30000 },
     phone_call: { count: 10, responses: 10, avgResponseTimeMs: 5000 }
   },
   hourlyResponsePattern: {       // 24小时活跃模式
@@ -335,7 +333,7 @@ class EdgeTTS implements TTSProvider {
 
 ### 立即可做：
 1. ✅ 在 `create-app-services.ts` 中添加初始化代码
-2. ✅ 测试基础弹窗和TTS功能
+2. ✅ 测试基础弹窗功能
 3. ✅ 测试电话呼叫功能（需要在线WebSocket连接）
 
 ### 后续优化：
@@ -366,5 +364,4 @@ class EdgeTTS implements TTSProvider {
 - [OpenAI ASR适配器](file:///e:/W/Project/Private%20AI%20Agent/server/src/services/voice-dialogue/adapters/openai-asr-adapter.ts)
 - [用户响应持久化服务](file:///e:/W-Project/Private%20AI%20Agent/server/src/services/intelligent-reminder/user-response-persistence.ts)
 - [更新后的电话处理器](file:///e:/W-Project/Private%20AI%20Agent/server/src/services/intelligent-reminder/phone-call-handler.ts)
-- [更新后的TTS闹钟处理器](file:///e:/W-Project/Private%20AI%20Agent/server/src/services/intelligent-reminder/tts-alarm-handler.ts)
 - [系统入口文件](file:///e:/W-Project/Private%20AI%20Agent/server/src/services/intelligent-reminder/index.ts)

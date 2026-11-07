@@ -244,8 +244,13 @@ function describeScheduleWrite(event: MemoryEventRecord): string | null {
       ? event.payload.title.trim().slice(0, 60)
       : "";
   if (!title) return null;
-  const when =
-    typeof event.payload.nextRunAtLocal === "string" ? event.payload.nextRunAtLocal.trim() : "";
+  // 回执时间字段 2026-11-05 由 nextRunAtLocal（`11/6 11:00`）改为口语版 whenSpoken
+  // （`明天上午十一点`）；记忆描述两种都认，旧事件仍可回放。
+  const rawWhen = (key: string) => {
+    const v = event.payload[key];
+    return typeof v === "string" ? v.trim() : "";
+  };
+  const when = rawWhen("whenSpoken") || rawWhen("nextRunAtLocal");
   return `[日程] ${when ? `${when} ` : ""}${title}`;
 }
 

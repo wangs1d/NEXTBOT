@@ -3,7 +3,6 @@ import "dart:convert";
 import "dart:developer" as developer;
 import "dart:io";
 
-import "package:file_picker/file_picker.dart";
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
@@ -50,6 +49,7 @@ import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
 import "core/services/schedule_reminder_sync.dart";
 import "core/services/world_api_client.dart";
+import "core/services/client_clock_service.dart";
 import "core/services/client_location_service.dart";
 import "core/services/agent_sphere_mood_bridge.dart";
 import "core/services/agent_sphere_embodiment_mapper.dart";
@@ -153,6 +153,9 @@ void main() async {
     // 运行通道（runtime 收回开关）：上次启动读到的 channel 必须先于任何网络
     // 请求生效——platform 形态下本机 runtime 不拉起，地址要整体切到控制面。
     await InstallIdentity.instance.applyBootChannel();
+    // 设备时区预热（零权限、零网络）：session.init 必须同步发出，而 IANA 时区
+    // 读取是异步平台调用——先预热，连接建立时 snapshotSync 才能给出完整快照。
+    unawaited(ClientClockService.warmUp());
     // 行程规划独立窗口模式：主应用 spawn 本 exe 并经环境变量传递信箱目录，
     // 命中即只运行行程窗口，不 bootstrap 完整应用（见 travel_plan_window.dart）。
     // 窗口进程常驻：再次打开行程时主应用只写信箱指针，不再重复 spawn。
@@ -652,11 +655,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 已弹窗处理的「其与 Agent 来电」callId，避免重复弹)
   String? _peerIncomingDialogCallId;
 
-  /// TTS 闹钟（tts_alarm_play）上一次真实起播时刻：服务端渐强循环会在约 10s 内
-  /// 连推约 20 个音量步事件，去抖避免音频重叠轰炸；与重复间隔（默认 15s）对齐
-  DateTime? _ttsAlarmLastPlayedAt;
-  static const int _ttsAlarmMinGapMs = 8000;
-
   /// 通话中是否静音（与 ConnectedCallWindow 同步）
   // ignore: unused_field
   bool _phoneMuted = false;
@@ -676,28 +674,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     unawaited(_loadAccountSession());
     // 本地正在播放的曲目（Windows SMTC）→ 换歌时拉歌词，供灵动岛展示
     unawaited(MediaSessionService.instance.start());
-    // debug 构建注册 VM service 扩展：远程直调决策弹窗链路做真机验收
-    // （WS 事件无法从脚本侧注入，须走 VM service websocket call extension）
-    if (kDebugMode) {
-      GlassNotify.debugSelfCapture = true;
-      developer.registerExtension("ext.pai.debug.triggerProactiveGlass", (
-        String method,
-        Map<String, String> parameters,
-      ) async {
-        final String title = parameters["title"] ?? "玻璃通知验收";
-        final String message = parameters["message"] ?? "主动性消息玻璃卡 E2E";
-        // 不等待卡片关闭（卡片落对话流即返回），立即返回便于脚本连续触发
-        _showProactivePopup(
-          title,
-          message,
-          "debug-${DateTime.now().microsecondsSinceEpoch}",
-        );
-        return developer.ServiceExtensionResponse.result(jsonEncode(<String, dynamic>{
-          "ok": true,
-        }));
-      });
-      debugPrint("[glass-notify] debug extension registered");
-    }
     // debug 构建的 VM service 直调通道：注册页表单有 ext.pai.debug.registerFill
     // （register_page.dart）；退出登录同理——全屏遮挡时注入点击不可靠，
     // 「确认框」UI 用截图验收，这里直调跳过确认的退出本体。
@@ -1493,6 +1469,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             }
             if (line.isNotEmpty) {
               _updateAgentStatusLine(line);
+            } else if (_agentStatusLine != null) {
+              // 新工具没带进度句：清掉上一把的遗留，让状态条退回工具族文案，
+              // 否则会把上一把的「我在查 XX」挂到这把工具头上。
+              setState(() {
+                _agentStatusLine = null;
+                _agentStatusPercent = null;
+              });
             }
           }
         }
@@ -1679,6 +1662,35 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               );
             }
           });
+          return;
+        }
+        // ====== 卡片原位更新（2026-11-06 Grok bot 式连续选择）======
+        // card.action 的回包：只把 messageId 那条消息里的卡换成新卡，
+        // 不新增消息、不动轮次状态。错误时不伪造卡片，走 SnackBar 提示。
+        if (type == "card.update") {
+          _applyCardUpdate(payload);
+          return;
+        }
+        // ====== 语音流式数据帧（2026-11-05 分层定稿）======
+        // 模型 delta 实时下发，只喂逐句 TTS；**绝不落消息列表**——文字回复仍由
+        // chat.assistant_done.finalText 一次性落屏（打字机已退役）。
+        // 这就是「流式还在、只是不打打字机」的落点：帧是数据，不是显示。
+        if (type == "chat.assistant_speech") {
+          final String? speechTraceId = payload["traceId"]?.toString();
+          final String? activeSpeechTraceId =
+              ChatTurnController.instance.activeTraceId;
+          if (activeSpeechTraceId == null ||
+              (speechTraceId != null &&
+                  speechTraceId.isNotEmpty &&
+                  speechTraceId != activeSpeechTraceId)) {
+            return;
+          }
+          PureVoiceModeController.instance.onSpeechFrame(
+            chunk: payload["chunk"]?.toString() ?? "",
+            isFinal: payload["final"] == true,
+            hasIncrements: payload["hasIncrements"] == true,
+            finalText: payload["finalText"]?.toString() ?? "",
+          );
           return;
         }
         if (type == "chat.assistant_chunk") {
@@ -2128,22 +2140,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "agent.proactive_message") {
           final String title = payload["title"]?.toString() ?? "Agent 主动联系";
           final String text = payload["text"]?.toString() ?? "";
-          // 统一主动性管道：高重要度主动消息走应用内玻璃卡触达，
-          // 确认/关闭/超时按卡片回调回传 outcome 反馈
+          // 决策卡已删除（2026-11-04 定调）：重要度只用于触达分级，所有主动
+          // 消息一律落对话流文本气泡（真实消息持久化）。
           final String importance = payload["importance"]?.toString() ?? "";
           final String deliveryId = payload["deliveryId"]?.toString() ?? "";
           final bool important = importance == "high" || importance == "critical";
-          // 手机后台（类微信常在线）：系统通知触达，点开回前台并回传 outcome
+          // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
           if (_isMobile && _appBackgrounded && important && deliveryId.isNotEmpty) {
             unawaited(LocalNotificationService.show(
               title: title, body: text, deliveryId: deliveryId,
             ));
-          } else if (mounted && important && deliveryId.isNotEmpty) {
-            // 决策卡落对话流（确认/忽略在卡上完成并回传 outcome）
-            _showProactivePopup(title, text, deliveryId);
-          } else if (mounted) {
+          }
+          if (mounted) {
             // 应用内展示即 impression：上报 viewed（服务端记为"已展示"，不算忽略，
-            // 也不进接受率分母——此前应用内阅读与忽略无法区分，学习信号有偏）
+            // 也不进接受率分母——决策卡删除后应用内无独立确认动作）
             if (deliveryId.isNotEmpty) {
               AmbientFeedsController.instance.sendProactiveOutcome(deliveryId, "viewed");
             }
@@ -2407,8 +2417,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String attentionId =
               payload["attentionId"]?.toString() ?? "";
 
-          // 手机端且 App 在后台：应用内弹窗看不见，升级链第 1 级就成了"推给空气"。
-          // 走系统通知触达（通知即弹窗，点开回前台），服务端升级链随之收敛。
+          // 手机端且 App 在后台：应用内没有常驻可见的对话页，升级链第 1 级
+          // 就成了"推给空气"。走系统通知触达（通知即弹窗，点开回前台）。
           if (_isMobile && _appBackgrounded) {
             unawaited(LocalNotificationService.show(
               title: priority == "urgent" ? "[紧急] $title" : title,
@@ -2416,40 +2426,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             ));
           }
 
-          // 决策卡落对话流：确认/忽略都在卡上完成，ack 由按钮回调回传
-          // （升级链随之收敛），不再飘弹窗。
-          _showAttentionPopup(title, message, priority, attentionId);
-        }
-
-        // ====== TTS 闹钟升级链事件（tts_alarm_start / tts_alarm_play）======
-        // 此前服务端推了音频但客户端无 handler——升级链第 2 级"有声无息"。
-        // start：使用场景只在手机端，手机后台走系统通知触达（桌面端不接线，
-        // 声音本身即提醒）；play：播 base64 mp3，带时间去抖——服务端渐强会在
-        // 10s 内连推约 20 个音量步，全部起播会重叠轰炸；两次真实起播至少
-        // 间隔 [._ttsAlarmMinGap]。
-        if (type == "tts_alarm_start") {
-          final String title = payload["title"]?.toString() ?? "语音提醒";
-          final String text = payload["message"]?.toString() ?? "";
-          final String priority = payload["priority"]?.toString() ?? "medium";
-          final bool important = priority == "urgent" || priority == "high";
-          if (_isMobile && _appBackgrounded) {
-            unawaited(LocalNotificationService.show(
-              title: important ? "[紧急语音] $title" : "[语音提醒] $title",
-              body: text,
-            ));
+          // 决策卡已删除（2026-11-04 定调）：提醒落对话流文本气泡（真实消息
+          // 持久化）。落流即已触达，自动回传 attention ack 让服务端升级链
+          // 收敛——升级链此后只在投递失败（离线/杀进程）时逐级升级。
+          if (attentionId.isNotEmpty) {
+            unawaited(() async {
+              try {
+                await AttentionApi().ack(attentionId, via: "chat_stream");
+              } catch (e) {
+                debugPrint("[reminder-popup] attention ack failed: $e");
+              }
+            }());
           }
-        }
-        if (type == "tts_alarm_play") {
-          final String? ttsBase64 =
-              PhoneCallController.extractTtsBase64(payload["tts"]);
-          if (ttsBase64 != null) {
-            final DateTime now = DateTime.now();
-            final DateTime? last = _ttsAlarmLastPlayedAt;
-            if (last == null ||
-                now.difference(last).inMilliseconds >= _ttsAlarmMinGapMs) {
-              _ttsAlarmLastPlayedAt = now;
-              unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
-            }
+          final String reminderBody = message.trim().isNotEmpty
+              ? message.trim()
+              : title.trim();
+          if (mounted && reminderBody.isNotEmpty) {
+            _appendAssistantText("assistant-reminder", reminderBody,
+                persist: true);
           }
         }
 
@@ -3197,8 +3191,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     final String sanitizedText = _sanitizeAssistantVisibleText(message.text);
     if (sanitizedText == message.text) return message;
     // copyWith 全字段保留：手抄重建清单曾漏 mediaCards（「重启后图片全部
-    // 消失」），2026-10-25 又漏 eveningDigest/decisionCard（明日速览卡重启
-    // 退化成纯文本气泡）——新增消息字段一律靠 copyWith 兜住，别再手抄。
+    // 消失」），2026-10-25 又漏 eveningDigest（明日速览卡重启退化成纯文本
+    // 气泡）——新增消息字段一律靠 copyWith 兜住，别再手抄。
     return message.copyWith(text: sanitizedText);
   }
 
@@ -3592,6 +3586,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 未绑定/未开启时为 null，服务端行为不变。
       if (AccessCredentialStore.instance.token != null)
         "token": AccessCredentialStore.instance.token,
+      // 设备时钟快照（时区与定位解耦）：连接即落库，首条消息前服务端就有正确时区
+      "clientClock": ClientClockService.snapshotSync(),
     };
     // 身份绑定：登录邮箱覆盖（未登录回落 USER_ID/sessionId）。
     // 无条件携带 userId——服务端 resolveActorId 以 userId 为准，
@@ -3725,7 +3721,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       "text": effectiveText.isEmpty && attachmentFrames != null
           ? ""
           : effectiveText,
-      "timestamp": DateTime.now().toIso8601String(),
+      // 绝对时刻（带 Z）：裸本地时间会被服务端按服务器时区解析
+      "timestamp": DateTime.now().toUtc().toIso8601String(),
+      // 每条消息随行上报设备时区（零权限成本），跨时区落地立即生效
+      "clientClock": await ClientClockService.snapshot(),
     };
     if (attachmentFrames != null && attachmentFrames.isNotEmpty) {
       userMsg["visionFrames"] =
@@ -3792,10 +3791,121 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   ///   - 复用「打断当前回复」「置 processing」等通用逻辑,保证按钮与键盘输入在 Agent 端一致
   ///   - [cardData] 由 chat_page 在渲染时绑定,包含 cardId/title/items,
   ///     用于后端审计/埋点精准定位到具体卡片,并让 Agent 理解上下文主动衔接
+  /// card.update 落地（与手机端 mobile_chat_controller._applyCardUpdate 同逻辑）：
+  /// 按 messageId 找到那条消息，把 text 里的 [AGENT_RESULT_CARD_START] 块和
+  /// renderBlocks/replyBlocks 里的 card 块换成新卡。text 是唯一真相源，
+  /// 持久化随 saveMessage 自动跟随。
+  void _applyCardUpdate(Map<String, dynamic> payload) {
+    final String messageId = (payload["messageId"] ?? "").toString();
+    if (messageId.isEmpty) return;
+    final int idx =
+        _messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final ChatMessage msg = _messages[idx];
+    final Object? card = payload["card"];
+    if (card is! Map) {
+      // 服务端明确报错：卡片停在原态，只提示，不伪造新卡
+      final String err = (payload["error"] ?? "").toString().trim();
+      if (err.isNotEmpty && mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          SnackBar(content: Text(err)),
+        );
+      }
+      return;
+    }
+    final Map<String, dynamic> cardMap = Map<String, dynamic>.from(card);
+    final String block =
+        "[AGENT_RESULT_CARD_START]\n${jsonEncode(cardMap)}\n[AGENT_RESULT_CARD_END]";
+    final RegExp marker =
+        RegExp(r"\[AGENT_RESULT_CARD_START\][\s\S]*?\[AGENT_RESULT_CARD_END\]");
+    final String nextText = marker.hasMatch(msg.text)
+        ? msg.text.replaceFirst(marker, block)
+        : "${msg.text}\n$block";
+    final ChatMessage replaced = msg.copyWith(
+      text: nextText,
+      renderBlocks: msg.renderBlocks == null
+          ? null
+          : _swapCardBlock(msg.renderBlocks!, cardMap),
+      replyBlocks: msg.replyBlocks == null
+          ? null
+          : _swapCardBlock(msg.replyBlocks!, cardMap),
+    );
+    _messages[idx] = replaced;
+    _store.saveMessage(replaced).catchError((Object e) {
+      debugPrint("[card-update] persist failed: $e");
+    });
+    if (mounted) setState(() {});
+  }
+
+  /// 把块序列里的第一张卡换成新卡；没有卡块就补在末尾（保序，不动文字/媒体）。
+  List<Map<String, dynamic>> _swapCardBlock(
+    List<Map<String, dynamic>> blocks,
+    Map<String, dynamic> cardMap,
+  ) {
+    final List<Map<String, dynamic>> out = <Map<String, dynamic>>[
+      for (final Map<String, dynamic> b in blocks)
+        b["type"] == "card"
+            ? <String, dynamic>{...b, "card": cardMap}
+            : b,
+    ];
+    if (!out.any((Map<String, dynamic> b) => b["type"] == "card")) {
+      out.add(<String, dynamic>{"type": "card", "card": cardMap});
+    }
+    return out;
+  }
+
   Future<void> _handleCardAction(
     AgentResultAction action, {
     required AgentResultData cardData,
+    String? messageId,
   }) async {
+    // 卡内动作分流（2026-11-06 定稿，与手机端 sendCardAction 同判据）：
+    // payload.cardAction 存在 = 走 card.action 通道——服务端只把这张卡原地
+    // 换掉，不转写用户消息、不跑模型、消息列表不动（Grok bot 式连续选择）。
+    final String cardAction =
+        (action.payload["cardAction"] ?? "").toString().trim();
+    if (cardAction.isNotEmpty) {
+      final String boundId = (messageId ?? "").trim();
+      if (!_ws.isConnected) {
+        _ws.retryConnect();
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text("正在连接服务器，请稍后再试")),
+          );
+        }
+        return;
+      }
+      if (boundId.isEmpty) {
+        // 没有消息锚点就无法回写这张卡：宁可不做，也不要错改别的卡
+        if (mounted) {
+          ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+            const SnackBar(content: Text("这张卡已经不在对话里了")),
+          );
+        }
+        return;
+      }
+      final Map<String, dynamic> data = <String, dynamic>{
+        for (final MapEntry<String, dynamic> e in action.payload.entries)
+          if (e.key != "cardAction") e.key: e.value,
+      };
+      final bool sent = _ws.sendCardActionEvent(
+        sessionId: ApiConfig.sessionId,
+        messageId: boundId,
+        actionId: cardAction,
+        cardId: cardData.cardId,
+        stage: (cardData.extra?["shopping"] is Map)
+            ? ((cardData.extra!["shopping"] as Map)["stage"] ?? "").toString()
+            : "",
+        payload: data,
+      );
+      if (!sent && mounted) {
+        ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+          const SnackBar(content: Text("按钮点击未发出：与服务器的连接尚未就绪")),
+        );
+      }
+      return;
+    }
+
     if (!_ws.isConnected) {
       _ws.retryConnect();
       if (mounted) {
@@ -3931,7 +4041,27 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 图片预览入口：媒体卡点击 → 在右侧双栏中打开大图预览。
+  ///
+  /// 手机端（窄屏）没有右侧双栏，直接推全屏查看页。注意手机端根壳不在
+  /// 嵌套 MaterialApp 的导航器内，必须用 [_mobileMainNavigatorKey] 的
+  /// context 推路由（正常情况下 MobileHomePage initState 会覆盖本 handler）。
   void _openImagePreview(ImagePreviewSnapshot item) {
+    if (MediaQuery.sizeOf(context).width < kWideLayoutBreakpoint) {
+      final BuildContext? navCtx = _mobileMainNavigatorKey.currentContext;
+      if (navCtx != null) {
+        final List<String> urls =
+            (item.gallery != null && item.gallery!.isNotEmpty)
+                ? item.gallery!
+                : <String>[item.url];
+        unawaited(showImagePreviewFullScreen(
+          navCtx,
+          urls: urls,
+          index: item.index < urls.length ? item.index : 0,
+          source: item.source,
+        ));
+      }
+      return;
+    }
     setState(() {
       _tabIndex = 0;
       _imagePreview = item;
@@ -4663,39 +4793,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // 调试手机端 UI 用独立入口 main_mobile.dart，不要动桌面路由。
   bool get _appBackgrounded => _lifecycleState != AppLifecycleState.resumed;
 
-  // ====== 统一主动性管道：决策卡 + outcome 反馈回传（2026-10-14 定稿）======
-
-  /// 高重要度主动消息 → 对话流决策卡（不飘弹窗/玻璃卡）。
-  /// 用户在卡上点「我知道了」→ outcome accepted；「忽略」→ dismissed。
-  void _showProactivePopup(String title, String text, String deliveryId) {
-    _appendDecisionCard(<String, dynamic>{
-      "kind": "proactive",
-      "title": title,
-      "message": text,
-      "priority": "high",
-      "state": "pending",
-      "deliveryId": deliveryId,
-    });
-  }
-
-  /// 提醒升级链 popup 级（reminder_popup）→ 对话流决策卡。
-  /// 确认与忽略都算已知晓：点击即 AttentionApi ack（via=chat_card），
-  /// 服务端升级链随之收敛。
-  void _showAttentionPopup(
-    String title,
-    String message,
-    String priority,
-    String attentionId,
-  ) {
-    _appendDecisionCard(<String, dynamic>{
-      "kind": "attention",
-      "title": title,
-      "message": message,
-      "priority": priority,
-      "state": "pending",
-      "attentionId": attentionId,
-    });
-  }
+  // ====== 统一主动性管道：outcome 反馈回传（2026-10-14 定稿；决策卡已删除）======
 
   /// 往对话流追加一条 assistant 纯文字气泡。[persist] 为 true 时落本地历史
   /// （agent 主动消息落流，2026-10-25 用户定调「主动消息都要保存」）；缺省
@@ -4778,77 +4876,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
     _appendAssistantText("assistant-evening-digest", text);
-  }
-
-  /// 往对话流追加一张决策卡（contentType="decision_card"）。追加即展示：
-  /// chat_page 的消息列表监听自动滚底。2026-10-25 定调（用户拍板：agent
-  /// 主动发送的消息都要保存）：随消息落本地历史，重启后仍以卡片形态渲染，
-  /// 终态翻转（_handleDecisionCardAction）时再存一次。
-  void _appendDecisionCard(Map<String, dynamic> card) {
-    final String title = card["title"]?.toString() ?? "";
-    final String body = card["message"]?.toString() ?? "";
-    final ChatMessage message = ChatMessage(
-      messageId: "decision-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: ApiConfig.effectiveActorId,
-      role: "assistant",
-      text: body.isNotEmpty ? body : title,
-      timestamp: DateTime.now(),
-      contentType: "decision_card",
-      decisionCard: card,
-    );
-    void apply() {
-      _messages.add(message);
-      _assistantMessageIndexById[message.messageId] = _messages.length - 1;
-    }
-
-    if (mounted) {
-      setState(apply);
-    } else {
-      apply();
-    }
-    _persistMessage(message, "decision-card");
-  }
-
-  /// 决策卡按钮回调：回传 ack/outcome + 原地翻转卡片为终态。
-  /// attention：确认/忽略都 ack（via=chat_card，升级链收敛）；
-  /// proactive：确认 accepted / 忽略 dismissed。
-  void _handleDecisionCardAction(String messageId, bool confirmed) {
-    final int? idx = _messageIndexById(messageId);
-    if (idx == null || idx >= _messages.length) return;
-    final ChatMessage msg = _messages[idx];
-    final Map<String, dynamic>? card = msg.decisionCard;
-    if (card == null || card["state"]?.toString() == "confirmed") return;
-
-    final String kind = card["kind"]?.toString() ?? "";
-    final String attentionId = card["attentionId"]?.toString() ?? "";
-    final String deliveryId = card["deliveryId"]?.toString() ?? "";
-    if (kind == "attention" && attentionId.isNotEmpty) {
-      unawaited(() async {
-        try {
-          await AttentionApi().ack(attentionId, via: "chat_card");
-        } catch (e) {
-          // ack 失败不影响本地卡片（升级链会随截止时间自然收敛）
-          debugPrint("[decision-card] attention ack failed: $e");
-        }
-      }());
-    } else if (kind == "proactive" && deliveryId.isNotEmpty) {
-      AmbientFeedsController.instance.sendProactiveOutcome(
-          deliveryId, confirmed ? "accepted" : "dismissed");
-    }
-
-    final Map<String, dynamic> updated =
-        Map<String, dynamic>.of(card)..["state"] = "confirmed";
-    void apply() {
-      _messages[idx] = msg.copyWith(decisionCard: updated);
-    }
-
-    if (mounted) {
-      setState(apply);
-    } else {
-      apply();
-    }
-    // 终态落库（2026-10-25）：重启后回看这张卡保持已确认形态
-    _persistMessage(_messages[idx], "decision-card");
   }
 
   // ====== 桌面端独立来电悬浮窗回调 ======
@@ -5287,8 +5314,17 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 持续模式单次上报：拉新 GPS（绕过展示缓存），静默失败，下个周期自然重试。
+  ///
+  /// 2026-11-05 降级为**仅前台轮询**：Android 8+ 应用在后台（非前台服务）时，
+  /// 系统把定位更新限制成「每小时几次」，请求 5 分钟一次也兑现不了——后台
+  /// 硬轮询只是白耗电。后台的「到达/离开」改由系统围栏触发（agent.geofence_sync
+  /// → 原生 addProximityAlert，App 被杀也能唤醒）。
   Future<void> _reportContinuousLocation() async {
     try {
+      final AppLifecycleState? lifecycle = WidgetsBinding.instance.lifecycleState;
+      if (lifecycle != null && lifecycle != AppLifecycleState.resumed) {
+        return; // 后台不轮询：系统会限流，靠围栏事件驱动
+      }
       final bool? consent = await ClientLocationService.getLocationConsent();
       if (consent != true) {
         // 用户撤回定位同意：立刻停表，直到重新授权前不再产生任何位置上报
@@ -5464,6 +5500,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             themeMode: mode,
             onThemeModeChanged: (ThemeMode m) => _mobileThemeMode.value = m,
             onLogout: _performLogout,
+            agentName: _agentName,
           ),
         );
       },
@@ -5793,18 +5830,14 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// 用户菜单「设置头像」：选图 → 上传 → 三处展示位即时刷新。
   Future<void> _setUserAvatar() async {
-    final FilePickerResult? picked = await FilePicker.platform.pickFiles(
-      type: FileType.image,
-      withData: true,
-    );
-    final PlatformFile? file = picked?.files.single;
+    final PickedImage? file = await pickGalleryImage();
     if (file == null) return;
-    if (file.bytes == null || file.bytes!.isEmpty) {
+    if (file.bytes.isEmpty) {
       _showUserMenuToast("读取图片失败，请换一张试试");
       return;
     }
-    final String? path =
-        await UserAvatarApi().uploadAvatar(file.bytes!, file.name);
+    final String? path = await UserAvatarApi()
+        .uploadAvatar(Uint8List.fromList(file.bytes), file.name);
     if (!mounted) return;
     if (path == null) {
       _showUserMenuToast("头像上传失败，请稍后再试");
@@ -6544,7 +6577,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 任务面回执聚合（状态带「N 个任务后台进行中」）+ 逐任务取消入口
       backgroundTaskCount: _taskPlaneState.activeCount,
       onCancelBackgroundTask: _cancelBackgroundTask,
-      onConfirmDecisionCard: _handleDecisionCardAction,
       // 豆包式列队发送：排队中的用户消息气泡显示「排队中」徽标
       queuedMessageIds: _queuedUserMessageIds,
       // 「为你推荐」：父级聚合空闲态 + 本地存储（出现时机治理持久化）

@@ -28,6 +28,8 @@ export type AcquireShoppingPageOptions = {
   interactiveLogin?: boolean;
   /** Playwright+Cookie 优先，内置浏览器兜底（比价/后台取数用）。 */
   preferHeadless?: boolean;
+  /** 匿名站点允许无 Cookie 直接开无头浏览器（苏宁/什么值得买等免登录取价源）。 */
+  allowAnonymous?: boolean;
 };
 
 /** 购物侧的薄封装：保留旧签名 (actorId, platform, targetUrl, opts)。 */
@@ -57,6 +59,7 @@ export class ShoppingBrowserExecutor {
       cookies: opts.cookies,
       interactiveLogin: opts.interactiveLogin,
       preferHeadless: opts.preferHeadless,
+      allowAnonymous: opts.allowAnonymous,
     });
   }
 }

@@ -22,7 +22,8 @@ import { travelTileCache } from "../../services/travel-tile-cache.js";
 import { composeTravelPlanRequest } from "../../agent/realtime-search-query.js";
 import { extractOrigin, looksLikeDestinationName } from "./intent-parser.js";
 import { resolveActorId } from "../../agent/actor-id.js";
-import { resolveOriginFromContext } from "./travel-origin.js";
+import { resolveOriginFromContext, resolveOriginPointFromContext } from "./travel-origin.js";
+import { estimateTravelTime, type TravelModeHint } from "../../services/route-duration-service.js";
 import {
   pricingService,
   formatQuotePriceInfo,
@@ -759,44 +760,120 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
     },
   };
 
-  /** 4. 两点间交通计算 */
+  /** 4. 两点间交通计算（2026-11-05：起点可缺省取实时定位，高德实时路况优先） */
   const compute_route: SkillDefinition = {
     metadata: {
       name: "travel.compute-route",
-      version: "1.0.0",
+      version: "1.1.0",
       displayName: "计算两点间交通",
       description:
-        "计算两个地点之间的交通方式、预计耗时与距离。" +
-        "from/to 支持「地名」（自动地理编码）或「纬度,经度」坐标。当用户询问「从A到B多远/多久」「两个景点之间怎么走」时调用。",
+        "算两点之间的交通方式、耗时与距离（高德驾车含实时路况、短距自动按步行；起点可省略=按用户实时定位，用户没说从哪出发时别反问，直接调用）。" +
+        "交通方式可显式指定（mode=walking/driving），不指定按距离自动选，不足 1.5 公里走步行。" +
+        "适用表达：「从A到B多远/多久」「我这到XX多远」「走过去还是打车」「现在出发几点到」「两个景点之间怎么走」。" +
+        "边界：要「几点出门」（结合天气与到达时间倒推）用 travel.departure-advice；叫车报价用 ride_hailing.quote；" +
+        "行程内逐段交通由 travel.plan-itinerary 自动排。" +
+        "坐标串用「经度,纬度」，写成「纬度,经度」会自动纠正。",
       kind: "builtin",
-      tags: ["travel", "交通", "路线", "距离", "耗时", "route"],
+      tags: ["travel", "交通", "路线", "距离", "耗时", "route", "多远", "多久", "当前位置"],
       icon: "🚗",
       parameters: [
-        { name: "from", type: "string", required: true, description: "起点（地名或「纬度,经度」）" },
-        { name: "to", type: "string", required: true, description: "终点（地名或「纬度,经度」）" },
+        {
+          name: "from",
+          type: "string",
+          required: false,
+          description:
+            "起点：地名（如「望京SOHO」「首都机场T3」）或坐标串「经度,纬度」（写成「纬度,经度」会自动纠正）。" +
+            "省略=用用户当前实时定位（推荐：用户没说从哪出发时直接省略）。",
+        },
+        {
+          name: "to",
+          type: "string",
+          required: true,
+          description: "目的地：地名或坐标串「经度,纬度」；地名尽量带城市或地标，如「上海虹桥火车站」",
+        },
+        {
+          name: "mode",
+          type: "string",
+          required: false,
+          enum: ["auto", "walking", "driving"],
+          description: "交通方式；缺省 auto=按直线距离自动选（≤1.5km 步行，其余驾车含实时路况）。用户明确说「走路/开车」时传对应值。",
+        },
       ],
       outputSchema: {
         ok: "是否成功",
-        mode: "交通方式（walking/driving/transit/cycling/taxi）",
-        durationMin: "预计耗时（分钟）",
+        from: "起点（省略时回填定位标签或「当前位置」）",
+        originSource: "起点来源：given=用户/模型给定；current-location=用户实时定位",
+        mode: "交通方式（walking/driving）",
+        durationMin: "预计耗时（分钟；amap 驾车含实时路况）",
         distanceKm: "距离（公里）",
-        note: "备注",
+        routeSource: "路线数据来源：amap=高德实时；osrm=无路况兜底估算",
+        note: "数据口径备注（如实转述给用户）",
+        error: "失败原因（ok=false 时）",
       },
       permissions: ["network:external"],
-      timeoutMs: 15_000,
+      timeoutMs: 20_000,
     },
-    handler: async (input) => {
-      const from = typeof input.from === "string" ? input.from.trim() : "";
+    handler: async (input, execContext) => {
       const to = typeof input.to === "string" ? input.to.trim() : "";
-      if (!from || !to) {
-        return { ok: false, error: "缺少必填参数 from 或 to" };
+      if (!to) return { ok: false, error: "缺少必填参数 to（目的地）" };
+
+      const fromRaw = typeof input.from === "string" ? input.from.trim() : "";
+      const modeRaw = typeof input.mode === "string" ? input.mode.trim() : "";
+      const mode: TravelModeHint =
+        modeRaw === "walking" || modeRaw === "driving" ? modeRaw : "auto";
+
+      let origin: string | { latitude: number; longitude: number };
+      let fromLabel: string;
+      let originSource: "given" | "current-location";
+      if (fromRaw) {
+        origin = fromRaw;
+        fromLabel = fromRaw;
+        originSource = "given";
+      } else {
+        const point = await resolveOriginPointFromContext(execContext);
+        if (!point) {
+          return {
+            ok: false,
+            needOrigin: true,
+            error:
+              "没拿到你的实时定位，算不了「从你这儿过去」的路程。请在 App/浏览器里允许定位，或者告诉我从哪里出发（如「从公司出发」）。",
+          };
+        }
+        origin = { latitude: point.latitude, longitude: point.longitude };
+        fromLabel = point.label || point.city || "当前位置";
+        originSource = "current-location";
       }
-      try {
-        const result = await travelPlanningService.computeRoute(from, to);
-        return { ok: true, ...result };
-      } catch (err) {
-        return { ok: false, error: `交通计算失败：${err instanceof Error ? err.message : String(err)}` };
+
+      const est = await estimateTravelTime({
+        origin,
+        destination: to,
+        mode,
+        // 高德失败才走兜底：computeRoute 自带 OSRM→直线估算梯度
+        osrmFallback: (from, dest) => travelPlanningService.computeRoute(from, dest),
+      });
+      if (!est) {
+        return {
+          ok: false,
+          error: "路线计算失败（高德与兜底均不可用），请稍后重试或换更具体的地名",
+        };
       }
+
+      return {
+        ok: true,
+        from: fromLabel,
+        to,
+        originSource,
+        mode: est.mode,
+        durationMin: est.durationMin,
+        distanceKm: est.distanceKm,
+        routeSource: est.source,
+        note:
+          est.source === "amap"
+            ? est.mode === "walking"
+              ? "步行耗时来自高德步行路径规划"
+              : "驾车耗时为高德实时路况估算"
+            : "高德不可用，已降级为无实时路况的估算值（约）",
+      };
     },
   };
 

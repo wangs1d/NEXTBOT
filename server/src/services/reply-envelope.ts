@@ -119,6 +119,7 @@ export function normalizeReplyCardLayout(text: string): string {
 
   const proseSegments: string[] = [];
   const genericCards: string[] = [];
+  const reminderCards: string[] = [];
   const travelCards: string[] = [];
   const briefCards: string[] = [];
   let cursor = 0;
@@ -141,6 +142,10 @@ export function normalizeReplyCardLayout(text: string): string {
     if (!card || typeof card !== "object" || Array.isArray(card)) return source;
     if ((card as Record<string, unknown>).cardType === "travel_itinerary") {
       travelCards.push(rawBlock);
+    } else if ((card as Record<string, unknown>).cardType === "reminder_confirm") {
+      // 提醒确认卡是「对话说完之后的凭据」（2026-11-07 定稿）：走 genericCards
+      // 会被提到正文前，变成先出卡再说话，与参考图和用户拍板相反。
+      reminderCards.push(rawBlock);
     } else if ((card as Record<string, unknown>).cardKind === "travel_brief") {
       // 简报卡跟行程卡同区（尾部）：它说的就是这张行程，提到正文前会读不通
       briefCards.push(rawBlock);
@@ -151,9 +156,9 @@ export function normalizeReplyCardLayout(text: string): string {
   }
   const tail = source.slice(cursor).trim();
   if (tail) proseSegments.push(tail);
-  if (genericCards.length + travelCards.length + briefCards.length === 0) return source;
+  if (genericCards.length + reminderCards.length + travelCards.length + briefCards.length === 0) return source;
 
-  return [...genericCards, ...proseSegments, ...travelCards, ...briefCards].join("\n\n").trim();
+  return [...genericCards, ...proseSegments, ...reminderCards, ...travelCards, ...briefCards].join("\n\n").trim();
 }
 
 /**

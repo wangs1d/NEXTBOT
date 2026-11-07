@@ -35,6 +35,26 @@ test("激活：new 开新泡，id 递增 b1/b2，bubbleIndex 对齐", () => {
   assert.ok(!a.messageId.startsWith("interim-"), "避开 interim- 保留前缀");
 });
 
+test("工具轮回归（2026-11-06 截图事故）：无预文的工具轮照常逐泡，不存在冻结态", () => {
+  // 事故复现路径：模型先调工具（无过程话），工具后才开始流式输出。
+  // 旧冻结态下第一个 chunk 会对空泡数组取 [-1] TypeError，整轮退化单泡。
+  const t = new BubbleTracker(true, BASE);
+  const a = t.assign("定好了，到点叫你。", { bubble: "new" });
+  const b = t.assign("不过你平时都是凌晨零点四十几才睡，这算是提前打烊？", {
+    bubble: "new",
+  });
+  assert.equal(a.messageId, `${BASE}-b1`);
+  assert.equal(b.messageId, `${BASE}-b2`, "工具后正文必须开新泡，不得并回首泡");
+  assert.deepEqual(t.snapshot, [
+    { id: `${BASE}-b1`, text: "定好了，到点叫你。" },
+    {
+      id: `${BASE}-b2`,
+      text: "不过你平时都是凌晨零点四十几才睡，这算是提前打烊？",
+    },
+  ]);
+  assert.equal(t.outboundDoneMessageId, `${BASE}-b2`);
+});
+
 test("激活：无 meta 直推段追加到当前末泡；尚无泡时兜底开第一泡", () => {
   const t = new BubbleTracker(true, BASE);
   const first = t.assign("兜底直推全文。");

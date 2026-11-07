@@ -166,7 +166,7 @@ test("travel itinerary JSON prefers fresh store snapshot (with images/reviews)",
   }
 });
 
-test("search result JSON still routes to search_result card (no false take-over)", () => {
+test("search result JSON is stripped, never turned into a card (2026-11-05)", () => {
   const out = processor.processAssistantText(
     JSON.stringify({
       items: [
@@ -177,8 +177,9 @@ test("search result JSON still routes to search_result card (no false take-over)
     }),
     { toolName: "search_web" },
   );
-  const card = parseCard(out);
-  assert.equal(card.cardType, "search_result");
+  assert.ok(!out.includes("[AGENT_RESULT_CARD_START]"), "搜索 JSON 不再转卡");
+  assert.ok(!out.includes('"provider"'), "原始 JSON 不应透出");
+  assert.equal(out.trim(), "", "只剩 JSON 时不下发任何内容（走 nothingToShow）");
 });
 
 test("JSON with days but no itinerary item structure is not converted", () => {
@@ -401,13 +402,13 @@ test("containsTravelItineraryCard: only true for parsable travel_itinerary block
 
 // ─────────────────────────────────────────────────────────────────────────────
 // stripMediaCardMarker 剥除策略（2026-08-30）：只剥与 mediaCards 重复的
-// cardType=media 卡；搜索结果卡/通用列表卡等文本场景卡必须保留
+// cardType=media 卡；通用列表卡/业务卡等文本场景卡必须保留
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("strip: non-media cards (search_result etc.) are preserved", () => {
+test("strip: non-media cards (generic list etc.) are preserved", () => {
   const searchCard =
     "[AGENT_RESULT_CARD_START]\n" +
-    JSON.stringify({ cardType: "search_result", title: "搜索结果", items: [{ text: "a: b" }] }) +
+    JSON.stringify({ cardType: "", title: "要点", items: [{ text: "a: b" }] }) +
     "\n[AGENT_RESULT_CARD_END]";
   const out = stripMediaCardMarker(`正文\n${searchCard}\n结语`);
   assert.ok(out.includes(searchCard), "非 media 卡不能被剥掉");

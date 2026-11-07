@@ -103,6 +103,10 @@ interface AgentBrowserSession {
   siteLabel?: string;
   /** 本会话已就哪个理由弹过交接（同一会话不重复打扰）。 */
   humanNotified?: HumanRequirementReason;
+  /** 已推送到聊天的交接图（登录二维码/验证页截图），同一理由不重复推。 */
+  humanCardPushed?: HumanRequirementReason;
+  /** 模型显式 handoff 的去重（同一条指引不重复推卡）。 */
+  lastHandoffInstruction?: string;
   /** 正在等用户本人处理（登录/验证）：TTL 清理跳过，避免用户还没登录会话就过期。 */
   awaitingHuman?: boolean;
   currentUrl: string;
@@ -136,10 +140,15 @@ function isUrlAllowed(rawUrl: string): { ok: boolean; error?: string } {
 }
 
 /** human-required 时给模型的固定指引（避免模型把登录/验证写成普通失败）。 */
-function humanHandoffHint(reason: HumanRequirementReason): string {
+function humanHandoffHint(reason: HumanRequirementReason, mode: "shared" | "headless"): string {
+  if (mode === "shared") {
+    return reason === "login"
+      ? "该站点需要你本人登录：页面已在内置浏览器打开，登录后点「我已完成」我继续。"
+      : "该站点需要你本人完成安全验证（滑块/验证码）：页面已停在内置浏览器里，验证后点「我已完成」我继续。";
+  }
   return reason === "login"
-    ? "该站点需要你本人登录：页面已在内置浏览器打开，登录后点「我已完成」我继续。"
-    : "该站点需要你本人完成安全验证（滑块/验证码）：页面已停在内置浏览器里，验证后点「我已完成」我继续。";
+    ? "该站点需要你本人登录：登录二维码图片卡已实时推送到用户聊天流（手机/电脑端都会直接显示），用户扫码完成后回复我继续。不要在回复正文里贴图片链接或 URL——卡片已经送达，正文只需口头提示扫码。"
+    : "该站点需要完成安全验证：验证页截图卡已实时推送到用户聊天流，完成后回复我继续。不要在回复正文里贴图片链接或 URL。";
 }
 
 // ─── 服务主体 ──────────────────────────────────────────────────────────────
@@ -323,24 +332,16 @@ export class AgentBrowserService {
 
     const title = await page.title().catch(() => "");
 
-    // 通用 human-required：登录页自动推二维码（best-effort）；可见浏览器里命中时
-    // 再交一次 handoff（在同一面板里让用户本人登录/过验证）。
+    // 通用 handoff：命中登录墙/验证码时把登录二维码或验证页截图推给手机端聊天。
+    // 两种执行模式都推；可见浏览器再额外进一次 handoff 等待（无头模式没有面板，
+    // 用户处理完后回复继续即可）。
     const human: HumanRequiredDetection = await detectHumanRequired(siteId ?? "", page).catch(
       () => ({ required: false }),
     );
     let loginQrImageUrl: string | undefined;
-    if (human.required && human.reason === "login" && this.deps.qrAssist) {
-      loginQrImageUrl =
-        (await this.deps.qrAssist
-          .pushPageCard(
-            ctx,
-            {
-              title: "打开网页需要登录",
-              caption: "登录页二维码已推给你，扫码后继续",
-            },
-            page,
-          )
-          .catch(() => undefined)) ?? undefined;
+    if (human.required && human.reason) {
+      const pushed = await this.pushHumanCard(ctx, session, human.reason);
+      if (human.reason === "login") loginQrImageUrl = pushed;
     }
     const humanRequired =
       human.required && human.reason && session.mode === "shared"
@@ -365,17 +366,22 @@ export class AgentBrowserService {
       browserMode: session.mode,
       cookieInjected,
       siteId: siteId ?? undefined,
-      ...(loginQrImageUrl ? { loginQrImageUrl } : {}),
+      // 不把图片相对路径直接给模型：模型曾把相对路径拼上页面源站编成错站
+      // 绝对 URL 写进正文（正文贴图 404）。卡片本就经 chat.media_ready 实时
+      // 送达客户端（按各端 httpBase 解析），模型只需知道「已推送」这个事实。
+      loginQrPushed: Boolean(loginQrImageUrl),
       ...(humanRequired ? { humanRequired } : {}),
       hint: humanRequired
-        ? `该站点需要你本人${humanRequired.reason === "login" ? "登录" : "完成安全验证"}：页面已在内置浏览器打开，完成后点「我已完成」我继续。`
-        : loginQrImageUrl
-          ? "该站点需要登录，已把登录二维码推送到聊天；用户扫码后重新执行操作即可。"
-          : cookieInjected
-            ? undefined
-            : siteId
-              ? `检测到 ${siteId} 站点但用户未导入/授权 Cookie，以未登录状态访问。如需登录态操作，引导用户在设置中导入 Cookie 并开启 agentAllowed。`
-              : undefined,
+        ? humanHandoffHint(humanRequired.reason, session.mode)
+        : human.required && human.reason
+          ? humanHandoffHint(human.reason, session.mode)
+          : loginQrImageUrl
+            ? "该站点需要登录，登录二维码图片卡已实时推送到用户聊天流；不要在正文贴图片链接，口头提示扫码即可，用户扫码后重新执行操作。"
+            : cookieInjected
+              ? undefined
+              : siteId
+                ? `检测到 ${siteId} 站点但用户未导入/授权 Cookie，以未登录状态访问。如需登录态操作，引导用户在设置中导入 Cookie 并开启 agentAllowed。`
+                : undefined,
     };
   }
 
@@ -407,7 +413,7 @@ export class AgentBrowserService {
         ok: true,
         url: session.page.url(),
         selector: sel,
-        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason) } : {}),
+        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason, session.mode) } : {}),
       };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
@@ -457,7 +463,7 @@ export class AgentBrowserService {
         ok: true,
         selector: sel,
         textLength: value.length,
-        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason) } : {}),
+        ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason, session.mode) } : {}),
       };
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
@@ -550,6 +556,64 @@ export class AgentBrowserService {
     } catch (e) {
       return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
     }
+  }
+
+  /**
+   * 通用人工交接（Manus/Muse 式 handoff）：任务推进到「必须用户本人操作」的
+   * 步骤时，把当前页面截图 + 这一步要做什么实时推到用户聊天流（手机/电脑端
+   * 都会收到图片卡）。适用：扫码登录、短信验证码、支付确认、选择商品选项、
+   * 授权同意等任何模型判断「该用户上了」的时刻。
+   *
+   * - 会话标记 awaitingHuman：TTL 清理跳过，用户慢慢操作会话不过期；
+   * - 同一会话同一条指引不重复推卡（防模型循环调用刷屏）；
+   * - 推送 best-effort：失败时回执 cardPushed=false，模型在正文里把要做的事说清楚。
+   */
+  async handoff(
+    ctx: ToolContext,
+    sessionId: string,
+    opts: { instruction: string; title?: string },
+  ): Promise<AgentBrowserResult> {
+    const session = this.getSessionForActor(ctx, sessionId);
+    if (!session) return { ok: false, error: "会话不存在或已过期" };
+
+    const instruction = String(opts?.instruction ?? "").trim();
+    if (!instruction) return { ok: false, error: "缺少 instruction（必须告诉用户这一步要做什么）" };
+
+    // 去重：同一会话同一条指引不重复推（模型重试/循环时防刷屏）
+    const duplicate = session.lastHandoffInstruction === instruction && session.awaitingHuman === true;
+    session.lastHandoffInstruction = instruction;
+    session.awaitingHuman = true;
+    session.lastActivityAt = Date.now();
+    // 注意不要走 touch()：它会把 awaitingHuman 重置为 false
+
+    let cardPushed = false;
+    if (!duplicate && this.deps.qrAssist) {
+      const title = (opts?.title ?? "").trim() || "需要你操作";
+      const imageUrl = await this.deps.qrAssist
+        .pushPageCard(ctx, { title, caption: instruction }, session.page)
+        .catch(() => undefined);
+      cardPushed = Boolean(imageUrl);
+    }
+
+    await this.audit(ctx, "handoff", sessionId, {
+      url: session.currentUrl,
+      duplicate,
+      cardPushed,
+      instruction: instruction.slice(0, 120),
+    });
+
+    return {
+      ok: true,
+      url: session.page.url(),
+      handedOff: true,
+      duplicate,
+      cardPushed,
+      hint: duplicate
+        ? "这条指引刚才已推送给用户，不要重复调用；等用户回复即可。"
+        : cardPushed
+          ? "当前页面截图和你的操作指引已实时推送到用户聊天流（手机端也会收到图片卡）。正文只需口头说明等待用户完成哪一步，不要贴图片链接；用户完成后会回复你，届时继续任务。"
+          : "推送通道不可用：请在正文里清楚告诉用户需要他做什么（具体步骤），用户完成后回复你继续。",
+    };
   }
 
   /**
@@ -688,6 +752,30 @@ export class AgentBrowserService {
   // ─── 内部方法 ────────────────────────────────────────────────────────────
 
   /**
+   * 交接图片统一推送：登录二维码 / 验证页截图都推到聊天（用户可能在手机上），
+   * 同一会话同一理由只推一次。无头与可见浏览器都走这里，不再分模式。
+   */
+  private async pushHumanCard(
+    ctx: ToolContext,
+    session: AgentBrowserSession,
+    reason: HumanRequirementReason,
+  ): Promise<string | undefined> {
+    if (!this.deps.qrAssist) return undefined;
+    if (session.humanCardPushed === reason) return undefined;
+    const imageUrl = await this.deps.qrAssist
+      .pushPageCard(
+        ctx,
+        reason === "login"
+          ? { title: "打开网页需要登录", caption: "登录页二维码已推给你，扫码完成后回复我继续" }
+          : { title: "打开网页需要安全验证", caption: "验证页截图已推给你，完成后回复我继续" },
+        session.page,
+      )
+      .catch(() => undefined);
+    if (imageUrl) session.humanCardPushed = reason;
+    return imageUrl ?? undefined;
+  }
+
+  /**
    * 命中 human-required：同一会话同一理由只弹一次（不重复打扰），
    * 经装配层建一个 task-plan 等待步（页面留在可见浏览器），用户回执后续跑。
    */
@@ -719,12 +807,15 @@ export class AgentBrowserService {
     ctx: ToolContext,
     session: AgentBrowserSession,
   ): Promise<{ reason: HumanRequirementReason; evidence?: string } | undefined> {
-    if (session.mode !== "shared") return undefined;
     const human: HumanRequiredDetection = await detectHumanRequired(session.siteId ?? "", session.page).catch(
       () => ({ required: false }),
     );
     if (!human.required || !human.reason) return undefined;
-    return this.notifyHuman(ctx, session, human.reason, human.evidence);
+    await this.pushHumanCard(ctx, session, human.reason);
+    if (session.mode === "shared") {
+      return this.notifyHuman(ctx, session, human.reason, human.evidence);
+    }
+    return { reason: human.reason, ...(human.evidence ? { evidence: human.evidence } : {}) };
   }
 
   /** 获取会话并校验 actorId 归属。 */

@@ -32,6 +32,39 @@ const LOGIN_URL_PATTERNS: Record<string, RegExp[]> = {
 /** 兜底正文关键词（URL 未命中时，正文出现即认为登录页）。 */
 const LOGIN_BODY_KEYWORDS = ["扫码登录", "二维码登录", "欢迎登录", "登录后查看"];
 
+/**
+ * 各平台「已登录」的正向 Cookie 信号（2026-11-06 真机取证补）。
+ *
+ * 只看「URL 还在不在登录页」会漏判成功：京东扫码确认后页面常停在
+ * passport.jd.com 的过渡/成功页，URL 启发式一直判「还是登录页」，
+ * waitForLogin 白等到 120s 超时——用户明明已确认登录却收到「没等到你扫」。
+ * 这些 Cookie 名在登录前不存在、登录后必落，命中即视为已登录。
+ */
+const LOGIN_COOKIE_MARKERS: Record<string, string[]> = {
+  jd: ["pin", "pt_pin", "thor"],
+  taobao: ["unb", "lgc", "_tb_token_"],
+  tmall: ["unb", "lgc", "_tb_token_"],
+  pdd: ["PDDUserID", "pdd_user_id"],
+};
+
+/**
+ * 正向判定「这个页面上下文是否已带该平台的登录态」。
+ * Cookie 读取失败（CDP 断开/页面跳转中）按「无正向信号」处理，不抛错。
+ */
+export async function isPlatformLoggedIn(
+  siteId: string,
+  page: Page,
+): Promise<boolean> {
+  const markers = LOGIN_COOKIE_MARKERS[siteId];
+  if (!markers || markers.length === 0) return false;
+  try {
+    const cookies = await page.context().cookies();
+    return cookies.some((c) => markers.includes(c.name));
+  } catch {
+    return false;
+  }
+}
+
 /** 扫码登录最长等待（毫秒）。可用 SHOPPING_LOGIN_WAIT_MS 覆盖。 */
 export function getLoginWaitMs(): number {
   const v = Number.parseInt(process.env.SHOPPING_LOGIN_WAIT_MS ?? "120000", 10);
@@ -157,8 +190,13 @@ export async function detectHumanRequired(
 }
 
 /**
- * 等待用户扫码登录：轮询检测登录页，成功后重新落回 targetUrl。
- * 调用方需在此之前完成二维码截图/推送（登录页不会自己消失，轮询只看 URL）。
+ * 等待用户扫码登录：轮询检测登录态，成功后重新落回 targetUrl。
+ * 调用方需在此之前完成二维码截图/推送。
+ *
+ * 判定顺序（2026-11-06 修「扫码确认了却一直等到超时」）：
+ * 1. 正向 Cookie 信号优先——扫码确认后页面常停在登录域的过渡页，URL 启发式
+ *    会一直误判「还在登录页」；Cookie 已带登录态就该立即放行。
+ * 2. URL/正文启发式兜底——页面确实离开了登录页也放行。
  */
 export async function waitForLogin(
   siteId: string,
@@ -171,17 +209,26 @@ export async function waitForLogin(
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     await page.waitForTimeout(intervalMs).catch(() => {});
+    // 正向信号优先：Cookie 已带登录态（URL 可能还挂在 passport 过渡页）
+    if (await isPlatformLoggedIn(siteId, page).catch(() => false)) {
+      await settleBackToTarget(page, targetUrl);
+      return { ok: true };
+    }
     const det = await detectLoginPage(siteId, page).catch(() => ({ isLogin: false }));
     if (!det.isLogin) {
       // 登录成功后站点通常跳到首页/个人页，重新落回目标页再交给调用方解析
-      if (page.url() !== targetUrl) {
-        await page
-          .goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15_000 })
-          .catch(() => {});
-        await page.waitForTimeout(2_000).catch(() => {});
-      }
+      await settleBackToTarget(page, targetUrl);
       return { ok: true };
     }
   }
   return { ok: false, error: `等待扫码登录超时（${Math.round(timeoutMs / 1000)}s）` };
+}
+
+/** 登录成功后把页面送回目标地址，失败不阻塞（调用方自己会再导航）。 */
+async function settleBackToTarget(page: Page, targetUrl: string): Promise<void> {
+  if (page.url() === targetUrl) return;
+  await page
+    .goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 15_000 })
+    .catch(() => {});
+  await page.waitForTimeout(2_000).catch(() => {});
 }

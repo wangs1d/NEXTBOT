@@ -13,8 +13,8 @@
 ///   - fold_list  长清单折叠（fold_list_effect_card.dart）
 ///   - compare    A/B 双图拖动对比滑杆（compare_slider.dart）
 ///   - comparison_table 文本 A/B 对比双栏卡（comparison_table_effect_card.dart）
-/// 其余 cardType（weather/schedule/.../timeline/progress/quote/media/
-/// search_result）仍由 agent_result_card.dart 内的既有组件渲染；
+/// 其余 cardType（weather/schedule/.../timeline/progress/quote/media）
+/// 仍由 agent_result_card.dart 内的既有组件渲染；
 /// [displayEffectsCard] 返回 null 即表示「无专用效果，走原有默认」。
 library;
 
@@ -50,10 +50,9 @@ Widget? displayEffectsCard({
     case "metric":
       return MetricEffectCard(data: data, cs: cs);
     case "weather":
-      // 天气平铺卡（2026-10-12）：两列大字网格 + 百分比进度条 + 着装整行，
-      // 一屏展示全部内容；返回 null 会回退通用列表卡并伴随正文 markdown
-      // 表格（横向滑动），不再走那条路。
-      return WeatherEffectCard(data: data, cs: cs);
+      // 2026-11-06 参考稿定稿：手机与桌面统一走内联卡（标题行 + 气温区间
+      // 大字 + 现象词），网格平铺卡与纯文字行均退役。
+      return WeatherInlineText(data: data, cs: cs);
     case "carousel":
       return CarouselEffectCard(data: data, cs: cs);
     case "chips":

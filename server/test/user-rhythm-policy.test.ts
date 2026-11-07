@@ -81,23 +81,26 @@ test("policy：rhythm.departurePrepMin 替换默认 prep，出发段偏移随之
   const defFactors = assessScheduleEventFactors({ ...base });
   assert.equal(defFactors.prepMinutes, 60);
 
-  // rhythm 生效：prep=25 → neededLead = travel + 25
+  // rhythm 生效：prep=25
   const rhythm = { departurePrepMin: 25, source: "explicit" as const };
   const custom = assessScheduleEventFactors({ ...base, rhythm });
   assert.equal(custom.prepMinutes, 25);
 
-  // 落到分段计划：prep 进的是「起床闹钟」段（neededLead = travel + prep），
-  // 出发段只含路程不变
+  // 2026-11-05 起床闹钟段停用：prep 不再改变任何一段的触发时刻（原先它进的是
+  // 闹钟段的 neededLead）。因子层照常算出 prepMinutes，供其他消费者使用；
+  // 出发段本来就只含路程，两版必须完全一致。
   const planDefault = buildReminderPolicy({ ...base });
   const planCustom = buildReminderPolicy({ ...base, rhythm });
   assert.ok(planDefault && planCustom);
-  const wakeDefault = planDefault.preReminders.find((p) => p.stage === "wake_alarm");
-  const wakeCustom = planCustom.preReminders.find((p) => p.stage === "wake_alarm");
-  assert.ok(wakeDefault && wakeCustom, "早晨 + 高代价事项应有起床闹钟段");
   assert.equal(
-    wakeCustom.offsetMinutes,
-    wakeDefault.offsetMinutes - (60 - 25),
-    "起床闹钟随用户节奏提前量收缩 35 分钟",
+    planDefault.preReminders.find((p) => p.stage === "wake_alarm"),
+    undefined,
+    "起床闹钟段已停用",
+  );
+  assert.deepEqual(
+    planCustom.remindBeforeMinutes,
+    planDefault.remindBeforeMinutes,
+    "prep 不再影响分段计划（闹钟段是它唯一的消费方）",
   );
   const departDefault = planDefault.preReminders.find((p) => p.stage === "depart");
   const departCustom = planCustom.preReminders.find((p) => p.stage === "depart");

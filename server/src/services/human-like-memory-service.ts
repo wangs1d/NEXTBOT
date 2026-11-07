@@ -41,6 +41,8 @@ const ASSISTANT_ROLE_RECALL_PENALTY = 0.22;
  * 用于 HumanLikeMemory 图谱节点的语义关联，替代原 string 精确匹配。
  */
 function cosineSimilarity(a: number[], b: number[]): number {
+  // 维度不一致 → 0：端点切换（远端 bge-m3 1024 维 ↔ 本地 bge-small 384 维）过渡期，
+  // 库里会同时存在两种维度的历史向量，混算 cosine 是 NaN 垃圾分，直接视为不相关。
   if (a.length !== b.length || a.length === 0) return 0;
   let dot = 0, normA = 0, normB = 0;
   for (let i = 0; i < a.length; i++) {

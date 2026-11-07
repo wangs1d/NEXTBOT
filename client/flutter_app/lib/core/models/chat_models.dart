@@ -111,9 +111,9 @@ class ChatMessage {
     this.summaryCard,
     this.renderBlocks,
     this.replyBlocks,
+    this.envelopeBlocks,
     this.pendingMediaCards,
     this.followUpPrompts,
-    this.decisionCard,
     this.eveningDigest,
     this.transferReminder,
     this.taskId,
@@ -209,6 +209,17 @@ class ChatMessage {
   /// 为空/缺失时回退到正文标记解析（旧服务端/旧消息兼容）。
   final List<Map<String, dynamic>>? replyBlocks;
 
+  /// v2 统一渲染信封块（P4 双端归一，2026-11-07）。
+  ///
+  /// 来自服务端 `chat.assistant_done` 的 `renderEnvelope.blocks`：服务端渲染
+  /// 出口的唯一权威序列，一条链按序承载 text / card / media / media_segments /
+  /// summary / structured。前端渲染层**信封优先**：本字段非空时按块直读渲染，
+  /// 为空或含客户端不认识的块时整体回退旧 7 层字段链（零回归）。
+  ///
+  /// 分泡轮只挂非 text 块（正文已在各气泡里），塌缩轮/单泡轮挂完整序列。
+  /// 持久化随 isar 落盘，历史回放与新轮渲染走同一条 dispatcher。
+  final List<Map<String, dynamic>>? envelopeBlocks;
+
   /// 边说边出图的临时媒体卡片（瞬态，不持久化）。
   ///
   /// 流式阶段收到 `chat.media_ready` 时，把已搜到的照片先挂到当前回复消息上，
@@ -223,23 +234,6 @@ class ChatMessage {
   /// 消息气泡下方渲染成可点击胶囊，点击即当作新消息发出。时机性内容——仅随
   /// done 实时下发，历史消息不带（对话推进后旧建议即失效）。
   final List<String>? followUpPrompts;
-
-  /// 对话流内决策卡（contentType="decision_card"，2026-10-14 定稿）。
-  ///
-  /// 决策类通知（reminder_popup / 高重要度主动性消息）不再飘独立弹窗或
-  /// 玻璃卡，直接落进对话流一张卡：用户点「确认/忽略」后由 main.dart
-  /// 原地翻转 state 并回传 attention ack / proactive outcome。
-  /// 2026-10-25 定调（用户拍板：agent 主动发送的消息都要保存）：随消息
-  /// 落本地历史（isar store 加密存储），重启后仍以卡片形态渲染，终态
-  /// 翻转时再存一次。
-  ///
-  /// 载荷：
-  ///   - kind: "attention" | "proactive"
-  ///   - title / message / priority
-  ///   - state: "pending" | "confirmed"
-  ///   - attentionId: reminder_popup 的 ack 目标（kind=attention）
-  ///   - deliveryId: 主动性消息的 outcome 目标（kind=proactive）
-  final Map<String, dynamic>? decisionCard;
 
   /// 睡前备忘卡（contentType="evening_digest"，2026-10-22 定调）。
   ///
@@ -256,7 +250,7 @@ class ChatMessage {
   /// 行程段临近到达（如高铁快到站）时服务端经 `agent.transfer_reminder`
   /// 下发，落对话流一张「接驳确认卡」：用户点「帮我叫车/不用了」后由
   /// 控制器以用户身份走原 chat 发送链路回复固定文本，并原地翻转终态。
-  /// 内存态不持久化（同 decisionCard：重启后消失，时刻窗已过的确认卡无意义）。
+  /// 内存态不持久化（重启后消失，时刻窗已过的确认卡无意义）。
   ///
   /// 载荷：
   ///   - message: 提醒文案
@@ -306,9 +300,9 @@ class ChatMessage {
     Map<String, dynamic>? summaryCard,
     List<Map<String, dynamic>>? renderBlocks,
     List<Map<String, dynamic>>? replyBlocks,
+    List<Map<String, dynamic>>? envelopeBlocks,
     List<Map<String, dynamic>>? pendingMediaCards,
     List<String>? followUpPrompts,
-    Map<String, dynamic>? decisionCard,
     Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
     String? taskId,
@@ -335,9 +329,9 @@ class ChatMessage {
       summaryCard: summaryCard ?? this.summaryCard,
       renderBlocks: renderBlocks ?? this.renderBlocks,
       replyBlocks: replyBlocks ?? this.replyBlocks,
+      envelopeBlocks: envelopeBlocks ?? this.envelopeBlocks,
       pendingMediaCards: pendingMediaCards ?? this.pendingMediaCards,
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
-      decisionCard: decisionCard ?? this.decisionCard,
       eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,
       taskId: taskId ?? this.taskId,
@@ -365,7 +359,7 @@ final RegExp _turnSuffixPattern = RegExp(r"^(.+?)(?:-b\d+|-hist-\d+)$");
 /// 分泡 `assistant-<userMsgId>-bN`（traceId 即 user 消息 id），跨端回填行同为
 /// `assistant-<userMsgId>-hist-N`——归属因此可精确判定，不必再按「user 到
 /// 下一条 user」的位置窗口推断。
-/// 主动推送（`assistant-proactive-*`）、睡前备忘、决策卡、后台任务结果不携带
+/// 主动推送（`assistant-proactive-*`）、睡前备忘、后台任务结果不携带
 /// 锚点——它们不属于任何一轮，删除某一轮时不得连带。
 String? turnAnchorOfMessage(ChatMessage message) {
   if (message.role == "user") return message.messageId;
@@ -379,7 +373,7 @@ String? turnAnchorOfMessage(ChatMessage message) {
 /// 点某条消息时应当一并摘除的消息 id 集合（即 UI 的「删除这一轮」范围）。
 ///
 /// 有轮次归属 → 同轮 user 消息 + 内嵌同一锚点的回复气泡；
-/// 无轮次归属（主动推送 / 睡前备忘 / 决策卡 / 后台任务结果）→ 只有它自己。
+/// 无轮次归属（主动推送 / 睡前备忘 / 后台任务结果）→ 只有它自己。
 /// 返回顺序与 [messages] 一致，便于 UI 直接高亮。
 List<String> turnMessageIdsFor(
   ChatMessage target,

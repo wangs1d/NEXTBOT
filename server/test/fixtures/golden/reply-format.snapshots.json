@@ -38,8 +38,8 @@
     },
     "pos-raw-search-json-rescue": {
       "hint": "plain",
-      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"搜索结果\",\"items\":[{\"type\":\"num\",\"text\":\"降噪耳机选购指南: 从降噪原理到佩戴舒适度的完整对比\"},{\"type\":\"num\",\"text\":\"2026 年耳机评测汇总: 10 款主流降噪耳机实测\"}],\"footer\":\"共 2 条结果\",\"cardType\":\"search_result\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
-      "cardType": "search_result"
+      "output": "",
+      "cardType": ""
     },
     "pos-raw-travel-json-rescue": {
       "hint": "long_text",
@@ -53,7 +53,7 @@
     },
     "tool-weather-prose-no-list": {
       "hint": "plain",
-      "output": "明天天气不错，温度很舒服，适合出门走走。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"明天晴转多云，适合出行\",\"items\":[{\"type\":\"num\",\"text\":\"晴转多云\"},{\"type\":\"num\",\"text\":\"气温 18–26\"},{\"type\":\"num\",\"text\":\"湿度 62%\"},{\"type\":\"num\",\"text\":\"风速 8 km/h\"},{\"type\":\"num\",\"text\":\"今天降水 10%\"}],\"footer\":\"早晚温差大，建议带件薄外套\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
+      "output": "明天天气不错，温度很舒服，适合出门走走。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"明天晴转多云，适合出行\",\"items\":[{\"type\":\"num\",\"text\":\"晴转多云\"},{\"type\":\"num\",\"text\":\"气温 18–26\"},{\"type\":\"num\",\"text\":\"湿度 62%\"},{\"type\":\"num\",\"text\":\"风速 8 km/h\"}],\"footer\":\"\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": "weather"
     },
     "tool-wallet-prose-no-list": {
@@ -97,8 +97,8 @@
       "cardType": ""
     },
     "neg-kpi-list-suppressed-by-data-brief": {
-      "hint": "data_brief",
-      "output": "[RENDER_AS:data_brief]\n[DATA_BRIEF_START]{\"conclusion\":\"本周进度小结：\",\"kpis\":[{\"label\":\"专注时长\",\"value\":\"320 分\"},{\"label\":\"跑步\",\"value\":\"12 公里\"},{\"label\":\"阅读\",\"value\":\"5 小时\"},{\"label\":\"目标达成率\",\"value\":\"85%\"}],\"restText\":\"- 专注时长 320 分钟\\n- 跑步 12 公里\\n- 阅读 5 小时\\n- 目标达成率 85%\\n整体节奏比上周稳了很多，下周继续保持这个状态就行，不用刻意加量。\"}[DATA_BRIEF_END]",
+      "hint": "result_card",
+      "output": "[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"本周进度小结：\",\"items\":[{\"type\":\"num\",\"text\":\"专注时长 320 分钟\",\"depth\":0},{\"type\":\"num\",\"text\":\"跑步 12 公里\",\"depth\":0},{\"type\":\"num\",\"text\":\"阅读 5 小时\",\"depth\":0},{\"type\":\"num\",\"text\":\"目标达成率 85%\",\"depth\":0}],\"footer\":\"整体节奏比上周稳了很多，下周继续保持这个状态就行，不用刻意加量。\",\"cardType\":\"\",\"actions\":[],\"speak\":\"\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": ""
     },
     "neg-markdown-table-with-list": {

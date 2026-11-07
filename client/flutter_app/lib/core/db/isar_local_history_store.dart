@@ -199,8 +199,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
             mediaCards: _decryptMediaCards(map["mediaCards"]),
             summaryCard: _decryptSummaryCard(map["summaryCard"]),
             renderBlocks: _decryptRenderBlocks(map["renderBlocks"]),
+            envelopeBlocks: _decryptRenderBlocks(map["envelopeBlocks"]),
             eveningDigest: _decryptEveningDigest(map["eveningDigest"]),
-            decisionCard: _decryptDecisionCard(map["decisionCard"]),
           );
         }).toList();
       }
@@ -674,7 +674,7 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     for (final ChatMessage message in deduped) {
       try {
         // copyWith 全字段保留、只解密 text：手抄构造清单曾漏 contentType /
-        // decisionCard（卡片消息读出后退化成纯文本气泡，2026-10-25）——
+        // eveningDigest（卡片消息读出后退化成纯文本气泡）——
         // 消息字段增长时这里最容易烂，别再手抄。
         out.add(message.copyWith(text: _decryptFor(message.text, _userPin)));
       } catch (e) {
@@ -742,8 +742,8 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
       mediaCards: message.mediaCards,
       summaryCard: message.summaryCard,
       renderBlocks: message.renderBlocks,
+      envelopeBlocks: message.envelopeBlocks,
       eveningDigest: message.eveningDigest,
-      decisionCard: message.decisionCard,
     );
     // 按 (sessionId, messageId) upsert：同一条消息（如流式期间先存部分文本、
     // done 后再存完整文本）只保留一条记录，避免本地历史出现重复气泡。
@@ -844,25 +844,6 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
     }
   }
 
-  /// 加密决策卡载荷（decisionCard，2026-10-25：agent 主动消息都要保存）：
-  /// null/空 → null。
-  String? _encryptDecisionCard(Map<String, dynamic>? card) {
-    if (card == null || card.isEmpty) return null;
-    return _encryptFor(jsonEncode(card), _userPin);
-  }
-
-  /// 解密决策卡载荷；损坏时不抛异常，返回 null（历史兼容）。
-  Map<String, dynamic>? _decryptDecisionCard(Object? stored) {
-    if (stored is! String || stored.isEmpty) return null;
-    try {
-      final Object? decoded = jsonDecode(_decryptFor(stored, _userPin));
-      if (decoded is! Map) return null;
-      return Map<String, dynamic>.from(decoded);
-    } catch (_) {
-      return null;
-    }
-  }
-
   /// 加密交错渲染块（renderBlocks）为存储字符串（结构同 mediaCards 的列表）。
   String? _encryptRenderBlocks(List<Map<String, dynamic>>? blocks) {
     if (blocks == null || blocks.isEmpty) return null;
@@ -937,10 +918,10 @@ class IsarLocalHistoryStore implements LocalHistoryStore {
                     "summaryCard": _encryptSummaryCard(m.summaryCard),
                   if (m.renderBlocks != null)
                     "renderBlocks": _encryptRenderBlocks(m.renderBlocks),
+                    if (m.envelopeBlocks != null)
+                      "envelopeBlocks": _encryptRenderBlocks(m.envelopeBlocks),
                   if (m.eveningDigest != null)
                     "eveningDigest": _encryptEveningDigest(m.eveningDigest),
-                  if (m.decisionCard != null)
-                    "decisionCard": _encryptDecisionCard(m.decisionCard),
                 },
               )
               .toList(),

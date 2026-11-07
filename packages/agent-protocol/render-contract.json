@@ -1,0 +1,157 @@
+{
+  "version": 2,
+  "generatedBy": "server/src/render/contract.ts",
+  "scenes": [
+    {
+      "id": "tomorrow_preview",
+      "label": "明日预览",
+      "priority": 90,
+      "phase": "pre",
+      "cardTypes": [],
+      "forms": [
+        "structured"
+      ],
+      "rewritesText": true,
+      "hasPromptBoundary": true
+    },
+    {
+      "id": "weather",
+      "label": "天气卡",
+      "priority": 80,
+      "phase": "pre",
+      "cardTypes": [
+        "weather"
+      ],
+      "forms": [],
+      "rewritesText": false,
+      "hasPromptBoundary": true
+    },
+    {
+      "id": "reminder_confirm",
+      "label": "提醒确认卡",
+      "priority": 75,
+      "phase": "pre",
+      "cardTypes": [
+        "reminder_confirm"
+      ],
+      "forms": [],
+      "rewritesText": false,
+      "hasPromptBoundary": true
+    },
+    {
+      "id": "tool_cards",
+      "label": "工具卡面",
+      "priority": 70,
+      "phase": "pre",
+      "cardTypes": [],
+      "forms": [],
+      "rewritesText": false,
+      "hasPromptBoundary": false
+    },
+    {
+      "id": "result_card",
+      "label": "结构卡",
+      "priority": 60,
+      "phase": "post",
+      "cardTypes": [
+        "carousel",
+        "chips",
+        "compare",
+        "comparison_table",
+        "file",
+        "fold_list",
+        "media",
+        "metric",
+        "order",
+        "permission_request",
+        "progress",
+        "quote",
+        "reminder_confirm",
+        "schedule",
+        "steps",
+        "timeline",
+        "travel_itinerary",
+        "wallet",
+        "weather"
+      ],
+      "forms": [],
+      "rewritesText": false,
+      "hasPromptBoundary": false
+    },
+    {
+      "id": "digest_roundup",
+      "label": "盘点清单",
+      "priority": 50,
+      "phase": "pre",
+      "cardTypes": [],
+      "forms": [
+        "structured"
+      ],
+      "rewritesText": true,
+      "hasPromptBoundary": true
+    },
+    {
+      "id": "markdown",
+      "label": "正文兜底",
+      "priority": 0,
+      "phase": "pre",
+      "cardTypes": [],
+      "forms": [
+        "brief",
+        "image_result",
+        "structured"
+      ],
+      "rewritesText": false,
+      "hasPromptBoundary": false
+    }
+  ],
+  "cardTypes": [
+    "carousel",
+    "chips",
+    "compare",
+    "comparison_table",
+    "file",
+    "fold_list",
+    "media",
+    "metric",
+    "order",
+    "permission_request",
+    "progress",
+    "quote",
+    "reminder_confirm",
+    "schedule",
+    "steps",
+    "timeline",
+    "travel_itinerary",
+    "wallet",
+    "weather"
+  ],
+  "forms": [
+    "brief",
+    "image_result",
+    "structured"
+  ],
+  "renderAsForms": [
+    "brief",
+    "structured",
+    "image_result",
+    "data_brief",
+    "video"
+  ],
+  "blockTypes": [
+    "text",
+    "card",
+    "form",
+    "structured",
+    "media",
+    "summary",
+    "followups",
+    "media_segments"
+  ],
+  "knownClientExempt": [
+    "file",
+    "order",
+    "schedule",
+    "wallet"
+  ]
+}

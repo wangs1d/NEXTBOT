@@ -13,6 +13,7 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(MobilePushPlugin())
         flutterEngine.plugins.add(MessageCapturePlugin())
         flutterEngine.plugins.add(AlarmClockPlugin())
+        flutterEngine.plugins.add(GeofencePlugin())
     }
 
     override fun onNewIntent(intent: Intent) {
