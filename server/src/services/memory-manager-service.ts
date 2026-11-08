@@ -6,7 +6,8 @@ import { getDailyJournalService, DailyJournalService } from "./daily-journal-ser
 import { join } from "node:path";
 import { RetentionMap, retentionMaxEntries } from "./resource-pool.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
-import { dedupeMemoryLines, limitLinesByChars, semanticFingerprint } from "./memory-record-utils.js";
+import { dedupeMemoryLines, limitLinesByChars, memoryDecayFactor, semanticFingerprint } from "./memory-record-utils.js";
+import { emotionalSalience, inferEmotionFromText } from "./emotion-memory.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { fetchOpenAiCompatibleEmbedding, resolveEmbeddingModel } from "./openai-embedding-client.js";
 
@@ -721,7 +722,16 @@ export class MemoryManagerService {
     const safeTs = Number.isFinite(ts) ? ts : now;
     const ageHours = Math.max(0, (now - safeTs) / 3_600_000);
 
-    let score = Math.exp(-ageHours / 96);
+    // P2 统一遗忘曲线：与情景日志/长期节点共用 memoryDecayFactor（7 天半衰期），
+    // 并叠加情绪显著性——高光/至暗行衰减更慢。halfLifeDays=4·ln2 与原 96h
+    // 指数衰减等价，保证中性行的保留边界不变。
+    const emotion = inferEmotionFromText(line);
+    const decay = memoryDecayFactor({
+      ageDays: ageHours / 24,
+      emotionalSalience: emotionalSalience(emotion),
+      halfLifeDays: 4 * Math.LN2,
+    });
+    let score = decay;
     score += semanticScore * 0.8;
     if (line.includes("【关系线程】")) score += 0.45;
     if (this.isHighValueEntry(line)) score += 1.15;

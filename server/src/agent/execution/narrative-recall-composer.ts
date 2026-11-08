@@ -1,11 +1,26 @@
 import type { MemoryRecallItem } from "../../brain/types.js";
+import { empathyGuidanceLine, formatEmotionBadge, type EmotionSignal } from "../../services/emotion-memory.js";
 
 export function recallItemsToNarrative(items: MemoryRecallItem[]): string | undefined {
   const lines: string[] = [];
+  let strongestEmotion: EmotionSignal | null = null;
   for (const item of items) {
     const content = typeof item?.content === "string" ? item.content.trim() : "";
-    if (content) lines.push(content);
+    if (!content) continue;
+    // 情绪徽标 + 模糊印象标记（P0/P2）：统一在叙事召回出口打标，
+    // 下游 prompt 无需知道排序细节也能看到"这条记忆的情绪/清晰度"。
+    const badge = formatEmotionBadge(item.emotion);
+    const faded = item.faded ? "（模糊印象）" : "";
+    lines.push(`${badge ? `[${badge}] ` : ""}${faded}${content}`);
+    if (
+      item.emotion &&
+      (!strongestEmotion || Math.abs(item.emotion.valence) > Math.abs(strongestEmotion.valence))
+    ) {
+      strongestEmotion = item.emotion;
+    }
   }
+  const empathy = empathyGuidanceLine(strongestEmotion, { scope: "memory" });
+  if (empathy) lines.push(empathy);
   return lines.length > 0 ? lines.join("\n") : undefined;
 }
 

@@ -24,6 +24,12 @@ import {
   semanticFingerprint,
   tokenOverlapRatio,
 } from "../services/memory-record-utils.js";
+import {
+  emotionMatchScore,
+  hasEmotionSignal,
+  inferEmotionFromText,
+  type EmotionSignal,
+} from "../services/emotion-memory.js";
 
 export type MemoryChannelId =
   | "agentic"
@@ -295,6 +301,7 @@ function computeFinalScore(
   queryTokens: Set<string> | null,
   strengthBoost: Map<string, number> | undefined,
   now = Date.now(),
+  queryEmotion: EmotionSignal | null = null,
 ): number {
   const hitChannels = entry.channels.size;
   let weightedSum = 0;
@@ -308,7 +315,13 @@ function computeFinalScore(
   const boost = 1 + config.multiChannelBoost * Math.max(0, hitChannels - 1);
   const recency = 0.75 + 0.25 * recencyFactor(entry.representative, now);
   const strength = strengthBoost?.get(entry.fingerprint) ?? 1;
-  return baseScore * boost * recency * overlapFactor(queryTokens, entry.representative) * strength;
+  // 情绪轴（P1 触景生情）：query 带情绪时，同情绪记忆最多 ×1.25；
+  // query 无情绪时恒为 0，不改变既有中性查询的排序。
+  const emotionBoost =
+    hasEmotionSignal(queryEmotion, 2)
+      ? 1 + 0.25 * emotionMatchScore(queryEmotion, entry.representative.emotion)
+      : 1;
+  return baseScore * boost * recency * overlapFactor(queryTokens, entry.representative) * strength * emotionBoost;
 }
 
 /** 分类配额（P4）：topN 内单个 domain 的最大占比，保证注入记忆的类型多样性。 */
@@ -359,10 +372,18 @@ export function arbitrateMemories(
   }
 
   const queryTokens = opts?.query ? contentTokenSet(opts.query) : null;
+  // P0/P1：query 情绪只推断一次；条目缺情绪标记时按内容补齐（统一出口保证每个
+  // 返回条目都带 emotion，调用方无需再各自推断）。
+  const queryEmotion = opts?.query ? inferEmotionFromText(opts.query) : null;
   const merged = dedupeAcrossChannels(channels);
+  for (const entry of merged) {
+    if (!entry.representative.emotion && entry.representative.content) {
+      entry.representative.emotion = inferEmotionFromText(entry.representative.content);
+    }
+  }
   const scored = merged
     .map((entry) => {
-      const finalScore = computeFinalScore(entry, config, queryTokens, opts?.strengthBoost);
+      const finalScore = computeFinalScore(entry, config, queryTokens, opts?.strengthBoost, Date.now(), queryEmotion);
       const sources = [...entry.channels].join(",");
       // tiebreaker：命中通道中的最高权重（同分时高权重通道优先，体现通道可信度）
       const maxChannelWeight = Math.max(

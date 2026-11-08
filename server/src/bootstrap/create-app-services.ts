@@ -4521,6 +4521,22 @@ export async function createAppServices(
             synapseBus as unknown as import("../brain/memory-cognitive/memory-forgetting-controller.js").SynapseBusLike,
           );
         }
+        // P2 遗忘曲线收尾：夜间巩固流水线跑完后统一衰减/剪枝（共享曲线 + 访问频率 +
+        // 情绪显著度）。注意这里用懒 getter，避免依赖 nightly 服务的创建顺序。
+        getNightlyMemoryTaskService()?.setDecayRunner(async (actorIds) => {
+          const totals = { scanned: 0, decayed: 0, pruned: 0 };
+          for (const actorId of actorIds) {
+            try {
+              const stats = await forgettingController.continuousScore(actorId);
+              totals.scanned += stats.scanned;
+              totals.decayed += stats.decayed;
+              totals.pruned += stats.pruned;
+            } catch (err) {
+              console.warn(`[MemoryForgetting] night decay failed for ${actorId}:`, err);
+            }
+          }
+          return totals;
+        });
         const salienceFilter = new MemorySalienceFilter();
         const experienceLearningLoop = new MemoryExperienceLearningLoop();
         // 图式形成（记忆建立联系）：同 sceneTag 经验 ≥3 条时 LCS 抽取公共步骤；

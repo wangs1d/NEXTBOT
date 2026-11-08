@@ -215,8 +215,12 @@ export class NightlyMemoryTaskService {
     archived: boolean;
     synced: boolean;
     slotResync?: Record<string, { facts: number; preferences: number; keptRecent: number }>;
-    /** ⑥ 巩固流水线收尾统计（关闭的悬空问句 / 生成的一日回顾条数） */
-    pipeline?: { recaps: number; questionsClosed: number };
+    /** ⑥ 巩固流水线收尾统计（关闭的悬空问句 / 生成的一日回顾条数 / 遗忘衰减扫描） */
+    pipeline?: {
+      recaps: number;
+      questionsClosed: number;
+      decay?: { scanned: number; decayed: number; pruned: number };
+    };
     error?: string;
   }> {
     const result = {
@@ -226,7 +230,13 @@ export class NightlyMemoryTaskService {
       slotResync: undefined as
         | Record<string, { facts: number; preferences: number; keptRecent: number }>
         | undefined,
-      pipeline: undefined as { recaps: number; questionsClosed: number } | undefined,
+      pipeline: undefined as
+        | {
+            recaps: number;
+            questionsClosed: number;
+            decay?: { scanned: number; decayed: number; pruned: number };
+          }
+        | undefined,
       error: undefined as string | undefined,
     };
     this.lastJournalFixation = null;
@@ -619,12 +629,14 @@ export class NightlyMemoryTaskService {
   private async runConsolidationPipeline(): Promise<{
     recaps: number;
     questionsClosed: number;
+    decay: { scanned: number; decayed: number; pruned: number };
   }> {
     const questionsClosed = getShortTermMemoryGatewayService()?.closePendingQuestions() ?? 0;
+    const actorIds = this.getAllActorIds();
 
     const digest = getDailyDigestService();
     let recaps = 0;
-    for (const actorId of this.getAllActorIds()) {
+    for (const actorId of actorIds) {
       try {
         if (digest.consolidateDayRecap(actorId)) recaps += 1;
       } catch (err) {
@@ -632,11 +644,39 @@ export class NightlyMemoryTaskService {
       }
     }
 
+    // P2 遗忘曲线收尾：巩固之后统一跑一次衰减/剪枝（共享曲线 + 访问频率 + 情绪显著度）。
+    // 通过注入的 decayRunner 调用 MemoryForgettingController，避免 nightly ⇄ brain 循环依赖。
+    const decay = { scanned: 0, decayed: 0, pruned: 0 };
+    if (this.decayRunner) {
+      try {
+        const stats = await this.decayRunner(actorIds);
+        decay.scanned = stats.scanned;
+        decay.decayed = stats.decayed;
+        decay.pruned = stats.pruned;
+      } catch (err) {
+        console.error("[NightlyMemory] decay sweep failed (ignored):", err);
+      }
+    }
+
     console.log(
-      `[NightlyMemory] Consolidation pipeline: questionsClosed=${questionsClosed} recaps=${recaps}`,
+      `[NightlyMemory] Consolidation pipeline: questionsClosed=${questionsClosed} recaps=${recaps} ` +
+        `decay(scanned=${decay.scanned}/decayed=${decay.decayed}/pruned=${decay.pruned})`,
     );
-    return { recaps, questionsClosed };
+    return { recaps, questionsClosed, decay };
   }
+
+  /** 注入遗忘衰减扫描（create-app-services 注册 MemoryForgettingController 时接线） */
+  setDecayRunner(
+    fn:
+      | ((actorIds: string[]) => Promise<{ scanned: number; decayed: number; pruned: number }>)
+      | null,
+  ): void {
+    this.decayRunner = fn;
+  }
+
+  private decayRunner:
+    | ((actorIds: string[]) => Promise<{ scanned: number; decayed: number; pruned: number }>)
+    | null = null;
 
   /** 事实主库（懒初始化；可用 USER_FACT_STORE_DIR 覆盖存储目录，测试注入用） */
   getFactStore(): UserFactStore {
@@ -956,7 +996,11 @@ export class NightlyMemoryTaskService {
    * upsert 维护的，这里不再触发整文重写。因此即使遍历全部历史 actor，
    * 也只是本地计算，不再产生 LLM 调用。
    */
-  private async runDreamPhase(): Promise<{ recaps: number; questionsClosed: number }> {
+  private async runDreamPhase(): Promise<{
+    recaps: number;
+    questionsClosed: number;
+    decay: { scanned: number; decayed: number; pruned: number };
+  }> {
     // ⑥ 巩固流水线：与 dreaming 同一入口、一次跑完（日结回顾 + 关闭悬空问句），
     // 之后才进入 cleanup → merge → reinforce → weaken 睡眠阶段。
     const pipeline = await this.runConsolidationPipeline();

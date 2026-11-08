@@ -47,7 +47,13 @@ import {
   getMemoryRerankerMinScore,
   getMemoryRerankerMode,
 } from "../agentic-memory/env.js";
-import { semanticFingerprint } from "../services/memory-record-utils.js";
+import { memoryDecayFactor, semanticFingerprint } from "../services/memory-record-utils.js";
+import {
+  emotionalSalience,
+  formatEmotionBadge,
+  inferEmotionFromText,
+  type EmotionSignal,
+} from "../services/emotion-memory.js";
 import {
   MemoryStrengthModel,
   type MemoryFeedbackInput,
@@ -208,6 +214,16 @@ interface HumanLikeMemoryLike {
    * （遗忘反弹：deletionStage 回退一级 + frequencyScore 反弹）。
    */
   findReawakenableNodeIds?(actorId: string, nodeIds: string[]): string[];
+  /**
+   * 可选：按情绪检索节点（P1 触景生情）。
+   * query 带明显情绪时，直接返回历史上同情绪的节点摘要，
+   * 与扩散激活并列为 association 通道候选。
+   */
+  findEmotionalNodes?(
+    actorId: string,
+    queryEmotion: EmotionSignal | null | undefined,
+    limit?: number,
+  ): Array<{ id: string; summary: string; emotion: EmotionSignal; matchScore: number }>;
 }
 
 // 叙事记忆睡眠巩固报告外观
@@ -781,9 +797,11 @@ export class MemoryCortex {
 
   /**
    * 遗忘梯度衰减分（「该忘的退得掉」读侧，2026-10-22 接线）：
-   * recency（72h 半衰期，与检索层一致）与 importance 各占 50%。
+   * 统一衰减曲线（memoryDecayFactor，7 天半衰期）+ 访问频率 + 情绪显著性，
+   * 与 importance 各占 50%。
    * 得分 < 0.5 的召回条目按 ForgettingController.compactRecallText 梯度截断——
-   * 褪色的记忆以残缺形式被想起，而不是要么完整要么消失。
+   * 褪色的记忆以残缺形式被想起（打 faded 标记），而不是要么完整要么消失。
+   * 情绪记忆（高光/至暗）衰减更慢：它们值得被更久地完整记住。
    * 容量治理（真删除）仍由 lifecycle TTL 两阶段遗忘承担，二者分工明确。
    */
   private applyForgettingGradient(items: MemoryRecallItem[]): MemoryRecallItem[] {
@@ -796,18 +814,22 @@ export class MemoryCortex {
         : item.importance === "high" ? 0.8
         : item.importance === "medium" ? 0.5
         : 0.2;
+      // 统一出口：读出条目情绪（缺失则按内容补一次），供衰减与共情注入共用。
+      const emotion = item.emotion ?? inferEmotionFromText(item.content);
+      const salience = emotionalSalience(emotion);
       let recencyFactor = 0.5; // 无时间戳按半新处理（保守，不轻易截断）
       if (item.timestamp) {
         const ts = Date.parse(item.timestamp);
         if (Number.isFinite(ts)) {
-          const ageHours = Math.max(0, (nowMs - ts) / 3_600_000);
-          recencyFactor = Math.pow(2, -ageHours / 72);
+          const ageDays = Math.max(0, (nowMs - ts) / 86_400_000);
+          recencyFactor = memoryDecayFactor({ ageDays, emotionalSalience: salience });
         }
       }
       const score = 0.5 * recencyFactor + 0.5 * importanceFactor;
-      if (score >= 0.5) return item;
+      const withEmotion: MemoryRecallItem = { ...item, emotion };
+      if (score >= 0.5) return withEmotion;
       const faded = this.forgettingController!.compactRecallText(item.content, score);
-      return faded === item.content ? item : { ...item, content: faded };
+      return faded === item.content ? withEmotion : { ...withEmotion, content: faded, faded: true };
     });
   }
 
@@ -2002,6 +2024,22 @@ export class MemoryCortex {
           domain: "semantic",
           source: "association",
           score: clamp01(predicted.confidence || 0.35),
+        });
+      }
+
+      // 情绪联想（P1 触景生情）：query 带明显情绪时，直接取历史同情绪节点。
+      // 与图扩散互补——扩散靠语义/实体边，这里靠情绪轴，覆盖"下雨→上次心情差"
+      // 这种词面不重合、但情绪一致的回忆。
+      const queryEmotion = inferEmotionFromText(query);
+      const emotionalNodes = this.humanLike?.findEmotionalNodes?.(actorId, queryEmotion, 2) ?? [];
+      for (const node of emotionalNodes) {
+        const badge = formatEmotionBadge(node.emotion);
+        items.push({
+          content: `${badge ? `[${badge}] ` : ""}情绪联想记忆: ${node.summary}`,
+          domain: "emotional",
+          source: "association",
+          score: clamp01(0.35 + 0.3 * node.matchScore),
+          emotion: node.emotion,
         });
       }
       return items;

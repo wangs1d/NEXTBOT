@@ -18,6 +18,11 @@
 //    经 triggerReawakenForFadedHits 触发（遗忘反弹）。
 
 import type { MemoryDeletionStage } from "../../services/human-like-memory-service.js";
+import { memoryDecayFactor } from "../../services/memory-record-utils.js";
+import {
+  emotionalSalience as computeEmotionalSalience,
+  emotionFromMetadata,
+} from "../../services/emotion-memory.js";
 
 // ─── 外观接口（结构兼容即可，不依赖具体实现） ─────────────────────────
 
@@ -31,6 +36,9 @@ interface MemoryNodeLike {
   accessCount: number;
   deletionStage: MemoryDeletionStage;
   lastAccessedAt: string;
+  /** 情绪标记（P0/P2）：metadata.emotion 优先，旧节点按 emotionTags 兜底 */
+  metadata?: Record<string, unknown>;
+  emotionTags?: string[];
 }
 
 /**
@@ -126,56 +134,105 @@ export class MemoryForgettingController {
   /**
    * 计算节点分数（纯函数，供外部调用）。
    * score = frequencyScore * 0.4 + recencyScore * 0.3 + importance * 0.2 + userFeedbackScore * 0.1
+   *
+   * P2 情绪保护：传入 emotionalSalience 时叠加最多 +0.10（截断到 1），
+   * 让高光/至暗记忆更抗遗忘；不传时与旧口径完全一致（兼容既有调用/测试）。
    */
-  computeNodeScore(node: {
-    frequencyScore: number;
-    recencyScore: number;
-    importance: number;
-    userFeedbackScore: number;
-  }): number {
-    return (
+  computeNodeScore(
+    node: {
+      frequencyScore: number;
+      recencyScore: number;
+      importance: number;
+      userFeedbackScore: number;
+    },
+    opts?: { emotionalSalience?: number },
+  ): number {
+    const base =
       node.frequencyScore * 0.4 +
       node.recencyScore * 0.3 +
       node.importance * 0.2 +
-      node.userFeedbackScore * 0.1
+      node.userFeedbackScore * 0.1;
+    if (!opts?.emotionalSalience) return base;
+    return Math.min(1, base + 0.1 * Math.max(0, Math.min(1, opts.emotionalSalience)));
+  }
+
+  /** 读取节点情绪显著性 0-1：metadata.emotion 优先，旧节点按 emotionTags 兜底。 */
+  private nodeEmotionalSalience(node: MemoryNodeLike): number {
+    const fromMeta = emotionFromMetadata(node.metadata);
+    if (fromMeta) return computeEmotionalSalience(fromMeta);
+    // 旧节点没有 metadata.emotion：用情绪标签粗估（含 positive/negative 视为弱情绪）
+    if (node.emotionTags && node.emotionTags.length > 0) {
+      const hasPolarity = node.emotionTags.some((t) => t === "positive" || t === "negative");
+      return hasPolarity ? 0.4 : 0.2;
+    }
+    return 0;
+  }
+
+  /**
+   * 统一节点评分（P2）：先用共享遗忘曲线（7 天半衰期 + 访问频率 + 情绪显著性）
+   * 重算"有效新颖度"，再交给 computeNodeScore。
+   * 这样即使 recencyScore 字段长期未刷新，久远且低频的节点也会被正确推进遗忘档位。
+   */
+  private scoreNode(node: MemoryNodeLike): number {
+    const salience = this.nodeEmotionalSalience(node);
+    const lastAccessTs = Date.parse(node.lastAccessedAt);
+    const ageDays = Number.isFinite(lastAccessTs)
+      ? Math.max(0, (Date.now() - lastAccessTs) / 86_400_000)
+      : 30;
+    const decayedRecency = memoryDecayFactor({
+      ageDays,
+      accessCount: node.accessCount,
+      emotionalSalience: salience,
+    });
+    const effectiveRecency = Math.min(node.recencyScore, decayedRecency);
+    return this.computeNodeScore(
+      { ...node, recencyScore: effectiveRecency },
+      { emotionalSalience: salience },
     );
   }
 
   /**
    * 连续打分器（BrainStem 45s 心跳触发）。
    *
-   * - 对所有节点计算 score
+   * - 对所有节点计算 score（统一遗忘曲线 + 情绪保护）
    * - score < decayThreshold(0.2) 时推进 deletionStage 一级
    * - score < pruneThreshold(0.1) 时调用 pruneNodeEdges
    *
-   * 不调 LLM。降级开关关闭或 humanLike 未注入时空操作。
+   * 不调 LLM。降级开关关闭或 humanLike 未注入时返回空统计。
    */
-  async continuousScore(actorId: string): Promise<void> {
-    if (!this.isEnabled()) return;
-    if (!this.humanLike) return;
+  async continuousScore(
+    actorId: string,
+  ): Promise<{ scanned: number; decayed: number; pruned: number }> {
+    const stats = { scanned: 0, decayed: 0, pruned: 0 };
+    if (!this.isEnabled()) return stats;
+    if (!this.humanLike) return stats;
 
     const nodes = this.humanLike.getAllNodes(actorId);
-    if (!nodes || nodes.length === 0) return;
+    if (!nodes || nodes.length === 0) return stats;
+    stats.scanned = nodes.length;
 
     const decayThreshold = this.getDecayThreshold();
     const pruneThreshold = this.getPruneThreshold();
 
     for (const node of nodes) {
-      const score = this.computeNodeScore(node);
+      const score = this.scoreNode(node);
 
       // 1) score < decayThreshold → 推进 deletionStage 一级
       if (score < decayThreshold) {
         const nextStage = this.nextStage(node.deletionStage);
         if (nextStage && nextStage !== node.deletionStage) {
           this.humanLike.updateDeletionStage(actorId, node.id, nextStage);
+          stats.decayed += 1;
         }
       }
 
       // 2) score < pruneThreshold → 清除该节点所有 edge
       if (score < pruneThreshold) {
         this.humanLike.pruneNodeEdges(actorId, node.id);
+        stats.pruned += 1;
       }
     }
+    return stats;
   }
 
   /**
@@ -227,7 +284,7 @@ export class MemoryForgettingController {
 
     const pruneThreshold = this.getPruneThreshold();
     for (const node of nodes) {
-      const score = this.computeNodeScore(node);
+      const score = this.scoreNode(node);
       if (score < pruneThreshold) {
         this.humanLike.pruneNodeEdges(actorId, node.id);
       }

@@ -8,7 +8,14 @@ import { join } from "node:path";
 import OpenAI from "openai";
 
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
-import { dedupeMemoryLines, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
+import { dedupeMemoryLines, memoryDecayFactor, normalizeMemoryLine, semanticFingerprint } from "./memory-record-utils.js";
+import {
+  emotionalSalience,
+  emotionFromMetadata,
+  emotionMatchScore,
+  inferEmotionFromText,
+  type EmotionSignal,
+} from "./emotion-memory.js";
 import { fetchOpenAiCompatibleEmbedding } from "./openai-embedding-client.js";
 import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sqlite-store.js";
 import { isPlaceholderApiKey } from "../config/api-key-validator.js";
@@ -31,6 +38,14 @@ import { auditChatCompletion } from "./llm-token-audit.js";
 function resolveNodeRole(node: MemoryNodeRecord): MemorySourceRole {
   const metaRole = node.metadata?.sourceRole;
   return typeof metaRole === "string" ? (metaRole as MemorySourceRole) : classifyMemorySourceRole(node.summary);
+}
+
+/**
+ * 读取节点情绪：优先 metadata.emotion（写入侧规则推断），旧节点按原文即时推断。
+ * P0 情感标记统一入口——召回、情绪边、衰减都从这里取同一口径。
+ */
+function resolveNodeEmotion(node: MemoryNodeRecord): EmotionSignal {
+  return emotionFromMetadata(node.metadata) ?? inferEmotionFromText(node.summary);
 }
 
 /** 助手角色节点在召回排序中的降权幅度：发言是行为记录，不是用户事实证据。 */
@@ -851,7 +866,27 @@ export class HumanLikeMemoryService {
     const confidence = this.computeConfidence(summary, opts?.metadata);
     // 来源角色打标（root fix）：每条记忆落库时记录谁说的，下游覆盖/召回治理都依赖它
     const sourceRole = classifyMemorySourceRole(summary);
-    const metadata: Record<string, unknown> = { ...(opts?.metadata ?? {}), sourceRole };
+    // 情感标记（P0 统一出入口）：外部显式传入优先，否则用共享词表推断。
+    // 只在高光/至暗等有明显情绪时落 metadata，避免给每条记忆都挂噪音标签。
+    const explicitEmotion = emotionFromMetadata(opts?.metadata);
+    const inferredEmotion = explicitEmotion ?? inferEmotionFromText(summary);
+    const hasEmotion = Math.abs(inferredEmotion.valence) >= 1 || inferredEmotion.arousal >= 0.25;
+    const emotionPatch = hasEmotion
+      ? {
+          emotion: {
+            valence: inferredEmotion.valence,
+            arousal: inferredEmotion.arousal,
+            tags: inferredEmotion.tags,
+            confidence: inferredEmotion.confidence,
+            timestamp: inferredEmotion.timestamp ?? nowIso(),
+          },
+        }
+      : {};
+    const metadata: Record<string, unknown> = {
+      ...(opts?.metadata ?? {}),
+      sourceRole,
+      ...emotionPatch,
+    };
 
     if (existing) {
       const versionId = this.appendVersion(existing, summary, confidence, importance);
@@ -874,8 +909,13 @@ export class HumanLikeMemoryService {
       existing.entityTags = uniqueStrings([...existing.entityTags, ...extractEntityTags(summary)], 12);
       existing.sceneTags = uniqueStrings([...existing.sceneTags, ...inferSceneTags(source, context, domainId)], 8);
       existing.emotionTags = uniqueStrings([...existing.emotionTags, ...extractEmotionTags(summary)], 8);
-      if (!existing.metadata?.sourceRole) {
-        existing.metadata = { ...(existing.metadata ?? {}), sourceRole };
+      existing.emotionTags = uniqueStrings([...existing.emotionTags, ...inferredEmotion.tags], 8);
+      if (!existing.metadata?.sourceRole || emotionPatch.emotion) {
+        existing.metadata = {
+          ...(existing.metadata ?? {}),
+          ...(existing.metadata?.sourceRole ? {} : { sourceRole }),
+          ...emotionPatch,
+        };
       }
       this.rebuildLinksForNode(existing);
       this.schedulePersist();
@@ -902,7 +942,7 @@ export class HumanLikeMemoryService {
       summary,
       keywords: extractKeywords(summary),
       sceneTags: inferSceneTags(source, context, domainId),
-      emotionTags: extractEmotionTags(summary),
+      emotionTags: uniqueStrings([...extractEmotionTags(summary), ...inferredEmotion.tags], 8),
       entityTags: extractEntityTags(summary),
       semanticFingerprint: fingerprint,
       vectorFingerprint: normalizeMemoryLine(summary),
@@ -1355,6 +1395,39 @@ export class HumanLikeMemoryService {
   }
 
   /**
+   * 按情绪检索节点（P1 触景生情：query 情绪 → 历史同情绪记忆）。
+   * 只返回与 query 情绪极性/类别匹配且情绪显著的节点，按情绪匹配度降序。
+   * 不调 LLM，扫描上限 300 条（与召回候选窗口一致）。
+   */
+  findEmotionalNodes(
+    actorId: string,
+    queryEmotion: EmotionSignal | null | undefined,
+    limit = 2,
+  ): Array<{ id: string; summary: string; emotion: EmotionSignal; matchScore: number }> {
+    if (!queryEmotion || Math.abs(queryEmotion.valence) < 3) return [];
+    const candidates = Object.values(this.store.nodes)
+      .filter(
+        (node) =>
+          node.actorId === actorId &&
+          node.deletionStage !== "hard_deleted" &&
+          node.deletionStage !== "soft_deleted" &&
+          !node.metadata?.superseded,
+      )
+      .slice(-300);
+
+    const matched = candidates
+      .map((node) => {
+        const emotion = resolveNodeEmotion(node);
+        const matchScore = emotionMatchScore(queryEmotion, emotion);
+        return { id: node.id, summary: node.summary, emotion, matchScore };
+      })
+      .filter((item) => item.matchScore >= 0.55 && Math.abs(item.emotion.valence) >= 3)
+      .sort((a, b) => b.matchScore - a.matchScore)
+      .slice(0, Math.max(1, limit));
+    return matched;
+  }
+
+  /**
    * 获取指定 actor 指定 sceneTag 的所有节点（供 MemorySchemaFormation.extractSchema 调用）。
    * 排除 hard_deleted 节点。返回节点数组的浅拷贝。
    */
@@ -1664,6 +1737,37 @@ export class HumanLikeMemoryService {
           ? relationScore.score
           : clamp(relationScore.score * ((this.policy.domains[node.domainId]?.recallWeight ?? 1) + (this.policy.domains[candidate.domainId]?.recallWeight ?? 1)) / 2, 0, 1);
       const threshold = node.domainId === candidate.domainId ? sameDomainThreshold : crossDomainThreshold;
+
+      // 情绪边（P1 联想检索）：同情绪极性且至少一侧是高光/至暗时，额外建一条
+      // relation="emotion" 的边（独立 id，不与 semantic 边互相覆盖）。
+      // 让扩散激活可以沿"情绪"而不是语义走向——"下雨"→"上次雨天心情差"。
+      // 该边不要求语义相似度过阈值：情绪关联本身就是弱语义关联。
+      const nodeEmotion = resolveNodeEmotion(node);
+      const candidateEmotion = resolveNodeEmotion(candidate);
+      const emotionOverlap = overlapScore(node.emotionTags, candidate.emotionTags);
+      const samePolarity = (nodeEmotion.valence >= 0) === (candidateEmotion.valence >= 0);
+      const strongEmotion =
+        Math.abs(nodeEmotion.valence) >= 4 || Math.abs(candidateEmotion.valence) >= 4;
+      if (emotionOverlap > 0 && strongEmotion) {
+        const emotionEdgeId = [
+          node.actorId,
+          "emotion",
+          ...[node.id, candidate.id].sort(),
+        ].join(":");
+        this.store.edges[emotionEdgeId] = {
+          id: emotionEdgeId,
+          actorId: node.actorId,
+          from: node.id,
+          to: candidate.id,
+          relation: "emotion",
+          weight: clamp(0.35 + 0.4 * emotionOverlap + (samePolarity ? 0.15 : 0), 0.1, 1),
+          createdAt: this.store.edges[emotionEdgeId]?.createdAt ?? nowIso(),
+          updatedAt: nowIso(),
+          decayFactor: 0.9,
+          hopCost: 1,
+        };
+      }
+
       if (finalWeight < threshold) continue;
 
       const edgeId = [node.actorId, ...[node.id, candidate.id].sort()].join(":");
@@ -1734,6 +1838,8 @@ export class HumanLikeMemoryService {
   ): HybridRetrievalCandidate[] {
     const queryKeywords = extractKeywords(query);
     const queryEntities = extractEntityTags(query);
+    // P1 触景生情：query 带情绪时，同情绪的历史节点获得相关性加成（中性 query 恒为 0）。
+    const queryEmotion = inferEmotionFromText(query);
     const candidates = Object.values(this.store.nodes)
       .filter((node) => {
         if (node.actorId !== actorId) return false;
@@ -1759,7 +1865,10 @@ export class HumanLikeMemoryService {
           // 同主题词共现兜底：query 与记忆都谈"居住地/配偶"等同一断言主题时，
           // 即便措辞词面零重叠（"搬到上海定居了" vs "住在哪个城市"）也给出
           // 词法分，避免同主题新事实被下面的相关性下限误杀
-          (sharedAssertionSubject(query, node.summary) ? 0.18 : 0);
+          (sharedAssertionSubject(query, node.summary) ? 0.18 : 0) +
+          // 情绪轴（P1）：情绪匹配同样构成召回理由（"下雨"→"上次雨天你说心情差"），
+          // 且情绪分单独不足 0.22，不会压过词面/向量的强相关条目。
+          emotionMatchScore(queryEmotion, resolveNodeEmotion(node)) * 0.22;
         // 方案 C：vectorScore 优先用真向量 cosine，无向量时降级到 cosineLikeScore
         let vectorScore: number;
         const nodeVec = parseVectorFingerprint(node.vectorFingerprint);
@@ -1784,13 +1893,17 @@ export class HumanLikeMemoryService {
         const forgettingFactor = policy?.forgettingFactor ?? 1.0;
         const lastAccessedTs = node.lastAccessedAt ? Date.parse(node.lastAccessedAt) : Date.parse(node.timestamp);
         const daysSinceAccess = Math.max(0, (Date.now() - lastAccessedTs) / 86_400_000);
-        // 衰减曲线：7 天内无惩罚，7-30 天线性增长到 0.3，30 天以上封顶 0.3
+        // 衰减曲线：7 天内无惩罚，7-30 天线性增长到 0.3，30 天以上封顶 0.3。
+        // P2 遗忘曲线：高光/至暗记忆（情绪显著度高）衰减更慢，不会因为"没再提起"
+        // 就被普通事实挤掉——这与人脑"情绪事件记得更久"一致。
+        const nodeEmotion = resolveNodeEmotion(node);
+        const emotionResistance = 1 - emotionalSalience(nodeEmotion) * 0.6;
         const inactivityPenalty =
           node.correctness === "confirmed"
             ? 0 // confirmed 节点不衰减（agent 对有用记忆是牢固的）
             : daysSinceAccess <= 7
               ? 0
-              : Math.min(0.3, (daysSinceAccess - 7) * 0.015 * forgettingFactor);
+              : Math.min(0.3, (daysSinceAccess - 7) * 0.015 * forgettingFactor * emotionResistance);
         // confirmed 节点召回 boost：确保流程回复能稳定记住重要记忆
         // 设计意图：用户澄清"agent 对有用记忆是牢固的"指的是
         //   agent 在对话/流程回复中能够稳定召回这些记忆，而不是"想不起"
@@ -2231,9 +2344,18 @@ export class HumanLikeMemoryService {
         // 下限保护：frequencyScore 不低于 0.1（保留召回可能性，不彻底丢失）
         const delta = action.delta;
         node.frequencyScore = clamp(node.frequencyScore - delta, 0.1, 5);
-        // recencyScore 从 1 衰减为连续值：未访问越久衰减越多
+        // recencyScore 用统一遗忘曲线（7 天半衰期 + 访问频率 + 情绪显著性），
+        // 与 MemoryForgettingController / KV 摘要保持同一口径。
         const daysSinceAccess = Math.max(0, (Date.now() - Date.parse(node.lastAccessedAt || node.timestamp)) / 86_400_000);
-        node.recencyScore = clamp(Math.exp(-daysSinceAccess / 7), 0, 1);
+        node.recencyScore = clamp(
+          memoryDecayFactor({
+            ageDays: daysSinceAccess,
+            accessCount: node.accessCount,
+            emotionalSalience: emotionalSalience(resolveNodeEmotion(node)),
+          }),
+          0,
+          1,
+        );
         // domainScore 轻微衰减（不影响 deletionStage）
         node.domainScore = clamp(node.domainScore - delta * 0.3, 0.1, 3);
         report.dailyCleanupCount += 1;

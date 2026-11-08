@@ -12,6 +12,7 @@ import { resolveActorId } from "../agent/actor-id.js";
 import type { RuntimeKernelPromptMode, RuntimeKernelState } from "../agent/runtime-kernel.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import type { BrainCenter } from "../brain/brain-center.js";
+import { empathyGuidanceLine } from "../services/emotion-memory.js";
 import type {
   AudioBufferRef,
   CapabilityDescriptor,
@@ -569,6 +570,16 @@ export function registerBrainTools(
         domain: domain as MemoryDomainKind | undefined,
         limit,
       });
+      // 情绪共情提示（P0）：召回结果里存在高光/至暗记忆时，给 LLM 一条明确的行为规则，
+      // 避免它对用户的痛苦记忆只做冷冰冰的事实复述。
+      const strongestEmotion = result.items
+        .map((item) => item.emotion)
+        .filter((emotion) => !!emotion)
+        .sort((a, b) => Math.abs(b!.valence) - Math.abs(a!.valence))[0];
+      const empathy = empathyGuidanceLine(strongestEmotion ?? null, { scope: "memory" });
+      const fadedHint = result.items.some((item) => item.faded)
+        ? "其中带 faded 标记的是已衰减的『模糊印象』，只能作为背景线索，不要当作精确事实（如具体日期、金额）复述。"
+        : "";
       return {
         ok: true,
         actorId: result.actorId,
@@ -580,7 +591,9 @@ export function registerBrainTools(
         // 明确身份隔离，防止历史记忆被当成当前轮语境（串台防线）。
         note:
           "历史记忆检索结果，可能来自较早的对话，并非用户本轮陈述；" +
-          "与当前对话冲突时，以用户最新消息为准。",
+          "与当前对话冲突时，以用户最新消息为准。" +
+          fadedHint +
+          (empathy ? ` ${empathy}` : ""),
       };
     } catch (err) {
       return {

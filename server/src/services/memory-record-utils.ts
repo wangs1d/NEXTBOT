@@ -244,6 +244,8 @@ export interface MemoryRankSignals {
   updatedAt?: number | string | null;
   /** 置信度 0-1；缺省 0.6（未标注来源的中性值） */
   confidence?: number | null;
+  /** 情绪显著性 0-1（来自 emotion-memory.emotionalSalience）；缺省 0 */
+  emotionalSalience?: number | null;
   /** 来源权重（如助手侧召回惩罚）；缺省 1 */
   sourceWeight?: number;
 }
@@ -253,22 +255,63 @@ const RECENCY_HALF_LIFE_DAYS = 7;
 
 /**
  * 统一记忆排序分（P4 检索排序统一）：
- *   相关度 × 0.55 + 时效 × 0.30 + 置信度 × 0.15，再乘来源权重。
+ *   相关度 × 0.50 + 时效 × 0.27 + 置信度 × 0.13 + 情绪显著性 × 0.10，再乘来源权重。
  *
  * 此前摘要命中、情景检索、长期召回各自算分（score+recencyBoost / cosine /
  * hybrid…），同一轮里不同来源的条目无法比较先后，也容易让高相关但陈旧、
  * 或低相关但新鲜的条目互相挤占 prompt 预算。统一到本函数后，跨来源只差
- * 喂进来的三个信号，排序与去重口径一致。
+ * 喂进来的四个信号，排序与去重口径一致。
+ *
+ * 情绪项（P0 情感标记）：高光/至暗记忆值得被优先想起来，但不能压过相关度——
+ * 权重固定 0.10，从原三项匀出，中性条目（salience=0）排序与旧口径一致。
  */
 export function unifiedMemoryScore(signals: MemoryRankSignals, now = Date.now()): number {
   const relevance = Math.max(0, Math.min(1, signals.relevance));
   const confidence =
     signals.confidence == null ? 0.6 : Math.max(0, Math.min(1, signals.confidence));
+  const emotional =
+    signals.emotionalSalience == null ? 0 : Math.max(0, Math.min(1, signals.emotionalSalience));
   const rawTs = signals.updatedAt;
   const ts =
     typeof rawTs === "number" ? rawTs : Date.parse(typeof rawTs === "string" ? rawTs : "");
   const ageDays = Number.isFinite(ts) ? Math.max(0, (now - ts) / 86_400_000) : 30;
   const recency = Math.pow(0.5, ageDays / RECENCY_HALF_LIFE_DAYS);
   const weight = signals.sourceWeight == null ? 1 : Math.max(0, signals.sourceWeight);
-  return (relevance * 0.55 + recency * 0.30 + confidence * 0.15) * weight;
+  return (relevance * 0.50 + recency * 0.27 + confidence * 0.13 + emotional * 0.10) * weight;
+}
+
+// ============================================================
+// 统一遗忘衰减（P2）：情景日志 / 长期节点 / KV 摘要共用同一曲线
+// ============================================================
+
+export interface MemoryDecayInput {
+  /** 距上次发生/访问的天数（>=0） */
+  ageDays: number;
+  /** 累计命中次数（间隔重复：越常用衰减越慢） */
+  accessCount?: number;
+  /** 情绪显著性 0-1（高光/至暗记忆衰减更慢） */
+  emotionalSalience?: number;
+  /** 半衰期天数，缺省 7 天 */
+  halfLifeDays?: number;
+}
+
+/**
+ * 人脑式遗忘曲线：
+ *   base = 0.5^(ageDays / halfLifeDays)
+ *   + 访问频率加成（最多 +0.35，accessCount=9 时封顶）
+ *   + 情绪加成（最多 +0.25）
+ * 结果 clamp 到 0..1。
+ *
+ * 三个存储层（情景日志、humanLike 节点、KV memory_summary）用同一个函数，
+ * 避免"同一段记忆在 A 存储还新鲜、在 B 存储已过期"的口径分裂。
+ */
+export function memoryDecayFactor(input: MemoryDecayInput): number {
+  const ageDays = Number.isFinite(input.ageDays) ? Math.max(0, input.ageDays) : 30;
+  const halfLife = Number.isFinite(input.halfLifeDays) && (input.halfLifeDays as number) > 0
+    ? (input.halfLifeDays as number)
+    : RECENCY_HALF_LIFE_DAYS;
+  const base = Math.pow(0.5, ageDays / halfLife);
+  const accessBoost = Math.min(0.35, Math.max(0, input.accessCount ?? 0) * 0.04);
+  const emotionBoost = Math.min(0.25, Math.max(0, Math.min(1, input.emotionalSalience ?? 0)) * 0.25);
+  return Math.max(0, Math.min(1, base + accessBoost + emotionBoost));
 }

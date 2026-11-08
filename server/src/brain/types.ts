@@ -2,6 +2,7 @@
 
 import type { RuntimeKernelState } from "../agent/runtime-kernel.js";
 import type { BodyState } from "../body/types.js";
+import type { EmotionSignal } from "../services/emotion-memory.js";
 
 // 能力描述符
 export type CapabilityStatus = "active" | "disabled" | "planned" | "deprecated";
@@ -429,6 +430,16 @@ export interface MemoryRecallItem {
    * 仅在 salience filter 路径下填充。
    */
   salienceScore?: number;
+  /**
+   * 情绪标记（P0 情感标记）：该记忆条目携带的情绪。
+   * 由 emotion-memory 统一推断/写入；|valence| ≥ 7 时召回侧会追加共情提示。
+   */
+  emotion?: EmotionSignal;
+  /**
+   * 模糊印象（P2 遗忘曲线）：该条目已衰减到"记得大概、细节模糊"档。
+   * 注入时不应作为精确事实断言（如具体日期/金额），只作为背景线索。
+   */
+  faded?: boolean;
 }
 
 // 记忆固化统计

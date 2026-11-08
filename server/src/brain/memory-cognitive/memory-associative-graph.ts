@@ -113,11 +113,27 @@ const OUTCOME_SEPARATOR = " | ";
  *
  * 不调 LLM。所有"联想"都是已有边的图扩散结果。
  */
+/**
+ * 知识缺口执行器（可选注入）。
+ * triggerExplorationIfNeeded 在低置信占比超阈值时异步调用它做主动学习；
+ * 失败/未注入时静默跳过，不阻塞召回主链路。
+ */
+export interface KnowledgeGapExecutorLike {
+  executeGapQuery(query: string): Promise<string | null>;
+}
+
 export class MemoryAssociativeGraph {
   private readonly humanLike: HumanLikeMemoryAssociativeLike | null;
+  private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
-  constructor(opts: { humanLike?: HumanLikeMemoryAssociativeLike | null } = {}) {
+  constructor(
+    opts: {
+      humanLike?: HumanLikeMemoryAssociativeLike | null;
+      knowledgeGapExecutor?: KnowledgeGapExecutorLike | null;
+    } = {},
+  ) {
     this.humanLike = opts.humanLike ?? null;
+    this.knowledgeGapExecutor = opts.knowledgeGapExecutor ?? null;
   }
 
   /**
@@ -364,6 +380,12 @@ export class MemoryAssociativeGraph {
 
     const ratio = lowConfidenceCount / result.activatedNodes.length;
     if (ratio <= cfg.exploreThreshold) return;
+
+    // 低置信占比超阈值 → 异步触发主动学习（fire-and-forget，绝不阻塞召回）。
+    // 结果由执行器自行回写记忆，这里只负责"想起来去查"。
+    if (this.knowledgeGapExecutor) {
+      void this.knowledgeGapExecutor.executeGapQuery(query).catch(() => undefined);
+    }
   }
 
   // ---- 内部工具 ----
