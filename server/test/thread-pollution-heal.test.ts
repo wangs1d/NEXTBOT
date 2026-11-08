@@ -67,7 +67,9 @@ test("A1 提醒文案转写走 ephemeral + 独立会话键（不写主聊天线�
   } as unknown as ExternalChatProvider;
 
   const svc = new ScheduleIntentService(fake);
-  const out = await svc.parse("2378709729@qq.com", "4分钟后提醒我去游泳");
+  // 2026-11-01 起文案干净时不再额外打 LLM（按需调用）；此处故意用看不出事项的
+  // 原句，让规则路径只能产出「到点提醒」兜底文案，从而真正走到文案转写子调用。
+  const out = await svc.parse("2378709729@qq.com", "4分钟后提醒我");
   assert.ok(out, "规则路径应解析出草案");
 
   assert.ok(calls.length > 0, "应有内部子调用");

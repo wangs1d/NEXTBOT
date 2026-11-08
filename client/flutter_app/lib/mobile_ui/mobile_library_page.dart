@@ -6,6 +6,7 @@ import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "../core/utils/link_utils.dart";
+import "../features/chat/media_disk_cache.dart";
 import "mobile_theme.dart";
 
 /// 手机端「资料库」页（按 2026-11-07 设计稿一比一还原）。
@@ -469,8 +470,8 @@ class _LibCard extends StatelessWidget {
                 child: SizedBox(
                   width: double.infinity,
                   child: isImage
-                      ? Image.network(
-                          item.fileUrl,
+                      ? CachedMediaImage(
+                          url: item.fileUrl,
                           fit: BoxFit.cover,
                           errorBuilder: (_, __, ___) => _iconTile(),
                         )

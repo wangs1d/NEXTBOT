@@ -747,10 +747,18 @@ function lexicalToolBoost(
       const overlap = tokenize(phrase).filter((token) => queryTokens.has(token)).length;
       if (overlap > 0) boost += Math.min(0.08, overlap * 0.025);
     }
+    // 负例口径与 hybrid 的 negativeMatch 对齐：整串出现，或 ≥2 token 重合。
+    // 单 token 重合不算（「取消提醒」里的「提醒」是 calendar.create 的正向核心词，
+    // 否则正面例句会被自己的负例表反噬）。
     const negatives = [...entry.negativeAliases, ...entry.negativeExamples];
     for (const phrase of negatives) {
-      const overlap = tokenize(phrase).filter((token) => queryTokens.has(token)).length;
-      if (overlap > 0) boost -= Math.min(0.12, overlap * 0.04);
+      const p = phrase.trim().toLowerCase();
+      const tokens = tokenize(phrase);
+      if (!p || tokens.length === 0) continue;
+      const direct = p.length >= 2 && query.includes(p);
+      const overlap = tokens.filter((token) => queryTokens.has(token)).length;
+      const effective = direct ? Math.max(overlap, 2) : overlap;
+      if (effective >= 2) boost -= Math.min(0.12, effective * 0.04);
     }
   }
   return boost;

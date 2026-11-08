@@ -47,6 +47,25 @@ export interface MemoryCortexLike {
 }
 
 /**
+ * 知识验证服务的最小化外观接口（可选注入）。
+ *
+ * 按节点 id 查询验证状态；未注入或查询失败时按"无验证状态"处理。
+ */
+export interface KnowledgeVerificationLike {
+  getStatus(knowledgeId: string): string | null;
+}
+
+/**
+ * 知识缺口执行器（可选注入）。
+ *
+ * 低置信占比超阈值时异步调用它做主动学习；失败/未注入时静默跳过，
+ * 不阻塞召回主链路。
+ */
+export interface KnowledgeGapExecutorLike {
+  executeGapQuery(query: string): Promise<string | null>;
+}
+
+/**
  * 节点元信息外观（用于 confidenceTier 计算）。
  *
  * 由于 MemoryRecallItem 不直接携带 accessCount / correctness / verificationStatus，
@@ -92,6 +111,10 @@ const VALID_SOURCE_TYPES = new Set<string>(["chat", "tool", "digest", "world", "
 export interface MemoryMetacognitionBridgeOpts {
   /** 记忆皮层（基础召回来源）；null 时优雅降级为空召回 */
   memoryCortex?: MemoryCortexLike | null;
+  /** 知识验证服务；null 时不做验证状态查询 */
+  knowledgeVerification?: KnowledgeVerificationLike | null;
+  /** 知识缺口执行器；低置信占比超阈值时异步触发主动学习 */
+  knowledgeGapExecutor?: KnowledgeGapExecutorLike | null;
 }
 
 // ============================================================
@@ -112,9 +135,13 @@ export interface MemoryMetacognitionBridgeOpts {
  */
 export class MemoryMetacognitionBridge {
   private readonly memoryCortex: MemoryCortexLike | null;
+  private readonly knowledgeVerification: KnowledgeVerificationLike | null;
+  private readonly knowledgeGapExecutor: KnowledgeGapExecutorLike | null;
 
   constructor(opts: MemoryMetacognitionBridgeOpts = {}) {
     this.memoryCortex = opts.memoryCortex ?? null;
+    this.knowledgeVerification = opts.knowledgeVerification ?? null;
+    this.knowledgeGapExecutor = opts.knowledgeGapExecutor ?? null;
   }
 
   // ------------------------------------------------------------
@@ -254,9 +281,7 @@ export class MemoryMetacognitionBridge {
    * 触发自我探索：unknown 占比超阈值时异步学习。
    *
    * - 计算 unknown 占比
-   * - 占比 > exploreThreshold 时：
-   *   - 调用 metaCognition.markShouldExplore(actorId, "low_confidence_recall")（若可用）
-   * - 不调 LLM
+   * - 占比 > exploreThreshold 时异步调用 knowledgeGapExecutor.executeGapQuery(query)
    *
    * 不会 await 它，因此调用方（如 recallWithProvenance）不会被阻塞。
    */
@@ -274,6 +299,12 @@ export class MemoryMetacognitionBridge {
     const ratio = this.computeUnknownRatio(items);
     if (ratio <= this.exploreThreshold) {
       return;
+    }
+
+    // 低置信占比超阈值 → 同步发起、异步等待（fire-and-forget），绝不阻塞召回。
+    // 结果由执行器自行回写记忆，这里只负责"想起来去查"。
+    if (this.knowledgeGapExecutor) {
+      void this.knowledgeGapExecutor.executeGapQuery(query).catch(() => undefined);
     }
   }
 
@@ -318,6 +349,15 @@ export class MemoryMetacognitionBridge {
     const sourceType = this.deriveSourceType(source);
     const capturedAt = item.timestamp ?? new Date().toISOString();
     const nodeId = this.deriveNodeId(item.content);
+    // 有验证服务时查询节点验证状态；缺失/异常一律按"无状态"处理
+    let verificationStatus: string | undefined;
+    if (this.knowledgeVerification) {
+      try {
+        verificationStatus = this.knowledgeVerification.getStatus(nodeId) ?? undefined;
+      } catch {
+        verificationStatus = undefined;
+      }
+    }
 
     return {
       nodeId,
@@ -325,6 +365,7 @@ export class MemoryMetacognitionBridge {
       accessCount: 0,
       // MemoryRecallItem 不携带 correctness，保守取 "unknown"
       correctness: "unknown",
+      verificationStatus,
       source,
       sourceType,
       capturedAt,

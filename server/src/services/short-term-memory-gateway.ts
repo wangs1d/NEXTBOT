@@ -381,6 +381,16 @@ export class ShortTermMemoryGatewayService {
     }
   }
 
+  /** 等待所有挂起的写入落盘（脚本 / 测试 / 关停用）。 */
+  async flush(): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      const pending = this.persistChain;
+      await pending;
+      // flush 期间又有新写入入队时继续等，直到链不再变化。
+      if (pending === this.persistChain) return;
+    }
+  }
+
   activateTask(sessionId: string, title: string, contextSummary: string): TaskStackEntry {
     const state = this.getSessionState(sessionId);
     const previousActive = state.tasks.find((task) => task.taskId === state.activeTaskId);

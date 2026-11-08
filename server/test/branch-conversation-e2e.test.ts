@@ -42,7 +42,7 @@ test("e2e：上传课表 → 对话消息撞出冲突 → 主动提案过仲裁 
   const dir = await mkdtemp(join(tmpdir(), "branch-e2e-"));
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   try {
-    const tasks = new ScheduleTaskService();
+    const tasks = new ScheduleTaskService({ now: () => new Date(NOW) });
     const conflicts = new ScheduleConflictService(tasks);
     const assertionStore = new ScheduleAssertionStore({
       persistPath: join(dir, "assertions.json"),
@@ -122,7 +122,7 @@ test("e2e 版本链：重传改过的课表 → 新主张入库，冲突匹配�
   const dir = await mkdtemp(join(tmpdir(), "branch-e2e-v2-"));
   process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
   try {
-    const tasks = new ScheduleTaskService();
+    const tasks = new ScheduleTaskService({ now: () => new Date(NOW) });
     const conflicts = new ScheduleConflictService(tasks);
     const assertionStore = new ScheduleAssertionStore({
       persistPath: join(dir, "assertions.json"),

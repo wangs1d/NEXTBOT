@@ -106,7 +106,9 @@ test("策略层：用户自述作息（source=chat/explicit）1 条即启用个�
   assert.ok(self);
   const night = self.preReminders.find((p) => p.stage === "night_before");
   assert.equal(night?.offsetMinutes, 570);
-  assert.match(night?.message ?? "", /按你平时约1:30入睡，到闹钟只睡得约6个半小时/);
+  // 2026-11-05 起床闹钟段停用后，收尾话术不再引用「到闹钟只睡得约 X」；
+  // 个性化仍由上面的 570min（入睡点前 1 小时）体现，文案回到统一收尾。
+  assert.match(night?.message ?? "", /【睡前备忘】.*到点会再提醒你/);
 
   // 无 source 且样本不足（2）→ 与无画像一致（默认 21:00 → 780）
   const untrusted = buildReminderPolicy({

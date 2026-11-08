@@ -3,7 +3,7 @@ import { watch, type FSWatcher } from "node:fs";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 import OpenAI from "openai";
 
@@ -127,9 +127,7 @@ export type SleepAgentStage =
   | "weekly_merge"
   | "monthly_abstract"
   | "consistency_audit"
-  | "promote_knowledge"
-  | "connection_pruning"
-  | "schema_formation";
+  | "promote_knowledge";
 
 export type MemoryVersionRecord = {
   versionId: string;
@@ -227,12 +225,8 @@ export type HumanLikeMemoryPolicyFile = {
   };
   sleepAgent: {
     enabled: boolean;
-    dailyCleanupHour: number;
-    weeklyMergeWeekday: number;
-    monthlyAbstractDay: number;
     maxNodesPerRun: number;
     maxActionsPerRun: number;
-    llmPlannerEnabled: boolean;
   };
 };
 
@@ -459,12 +453,8 @@ const DEFAULT_POLICY: HumanLikeMemoryPolicyFile = {
   },
   sleepAgent: {
     enabled: true,
-    dailyCleanupHour: 2,
-    weeklyMergeWeekday: 0,
-    monthlyAbstractDay: 1,
     maxNodesPerRun: 300,
     maxActionsPerRun: 120,
-    llmPlannerEnabled: true,
   },
 };
 
@@ -604,181 +594,33 @@ function cosineLikeScore(queryTokens: string[], targetTokens: string[]): number 
   return overlap / Math.sqrt(q.size * t.size);
 }
 
-/**
- * Sleep agent 每晚 LLM 预算闸（2026-09-12 token 治理，P0-C）：一次 runSleepCycle
- * 内允许的 LLM 调用上限（community 提炼 + planner + merge 合计，env
- * AGENT_MEMORY_SLEEP_LLM_BUDGET，默认 12）。community 提炼预留 1 个槽位给
- * planner；超出预算后剩余环节走确定性路径——merge 已有 dedupe fallback，
- * 提炼/planner 直接跳过，图的规则清理（衰减/冷存/去重）不受影响。
- */
-class SleepLlmBudget {
-  private remaining: number;
-  spent = 0;
-  constructor(limit: number) {
-    this.remaining = limit;
-  }
-  trySpend(reserve = 0): boolean {
-    if (this.remaining - reserve <= 0) return false;
-    this.remaining -= 1;
-    this.spent += 1;
-    return true;
-  }
-}
-
-function resolveSleepLlmBudgetLimit(): number {
-  const raw = Number.parseInt(process.env.AGENT_MEMORY_SLEEP_LLM_BUDGET ?? "", 10);
-  return Number.isFinite(raw) && raw > 0 ? raw : 12;
-}
-
 /** community 内容指纹：成员摘要集合未变化的 community 不值得再次提炼经验 */
 function communityContentFingerprint(label: string, summaries: string[]): string {
   return createHash("sha1").update(`${label}|${[...summaries].sort().join("§")}`).digest("hex").slice(0, 16);
 }
 
-async function llmMergeLines(lines: string[]): Promise<string[] | null> {
-  const llm = resolvePrimaryLlmClientConfig();
-  if (!llm || lines.length < 2) return null;
+/** 固化行元数据前缀/时间戳等「非内容」关键词：不参与主题聚类质量闸 */
+const GENERIC_META_KEYWORD_RE =
+  /^(?:日志固化|日志|固化|用户|助手|fact|prefer|commit|journal|consolidate|review|\d{4}|\d{1,2}:\d{2}|\d+)$/u;
 
-  try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
-    const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'You merge redundant or fragmented memories into concise durable summaries. Return JSON only: {"merged":["..."]}.',
-        },
-        { role: "user", content: JSON.stringify({ lines }) },
-      ],
-      ...bypassChatRequestExtras(),
-    });
-    auditChatCompletion({
-      stage: "sleep_agent",
-      messages: [
-        {
-          role: "system",
-          content:
-            'You merge redundant or fragmented memories into concise durable summaries. Return JSON only: {"merged":["..."]}.',
-        },
-        { role: "user", content: JSON.stringify({ lines }) },
-      ],
-      completion: response,
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-    });
-    const content = response.choices[0]?.message?.content?.trim();
-    if (!content) return null;
-    const parsed = JSON.parse(content) as { merged?: string[] };
-    if (!Array.isArray(parsed.merged)) return null;
-    return uniqueStrings(parsed.merged.map((item) => String(item)), 6);
-  } catch {
-    return null;
-  }
-}
-
-async function llmExtractExperience(lines: string[]): Promise<string | null> {
-  const llm = resolvePrimaryLlmClientConfig();
-  if (!llm || lines.length < 3) return null;
-
-  try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
-    const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-      temperature: 0.2,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'Extract a reusable experience rule from related memories. Return JSON only: {"summary":"..."}',
-        },
-        { role: "user", content: JSON.stringify({ lines }) },
-      ],
-      ...bypassChatRequestExtras(),
-    });
-    auditChatCompletion({
-      stage: "sleep_agent",
-      messages: [
-        {
-          role: "system",
-          content:
-            'Extract a reusable experience rule from related memories. Return JSON only: {"summary":"..."}',
-        },
-        { role: "user", content: JSON.stringify({ lines }) },
-      ],
-      completion: response,
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-    });
-    const content = response.choices[0]?.message?.content?.trim();
-    if (!content) return null;
-    const parsed = JSON.parse(content) as { summary?: string };
-    return typeof parsed.summary === "string" && parsed.summary.trim() ? parsed.summary.trim() : null;
-  } catch {
-    return null;
-  }
-}
-
-async function llmPlanSleepActions(
-  actorId: string,
-  nodes: MemoryNodeRecord[],
-  policy: HumanLikeMemoryPolicyFile,
-): Promise<SleepAction[] | null> {
-  const llm = resolvePrimaryLlmClientConfig();
-  if (!llm || !policy.sleepAgent.llmPlannerEnabled || nodes.length === 0) return null;
-
-  try {
-    const openai = new OpenAI({ apiKey: llm.apiKey, baseURL: llm.baseURL, maxRetries: 1 });
-    const planPayload = JSON.stringify({
-      actorId,
-      maxActions: Math.min(policy.sleepAgent.maxActionsPerRun, 24),
-      nodes: nodes.slice(0, 40).map((node) => ({
-        id: node.id,
-        domainId: node.domainId,
-        kind: node.kind,
-        summary: node.summary.slice(0, 160),
-        importance: node.importance,
-        confidence: node.confidence,
-        accessCount: node.accessCount,
-        correctness: node.correctness,
-        deletionStage: node.deletionStage,
-      })),
-    });
-    const response = await openai.chat.completions.create({
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-      messages: [
-        {
-          role: "system",
-          content:
-            'Plan incremental memory consolidation actions. Return JSON only: {"actions":[...]}. Allowed types: downrank,cold,soft_delete,hard_delete,merge,promote_knowledge,mark_error,mark_conflict.',
-        },
-        { role: "user", content: planPayload },
-      ],
-      ...bypassChatRequestExtras(),
-    });
-    auditChatCompletion({
-      stage: "sleep_agent",
-      messages: [
-        {
-          role: "system",
-          content:
-            'Plan incremental memory consolidation actions. Return JSON only: {"actions":[...]}. Allowed types: downrank,cold,soft_delete,hard_delete,merge,promote_knowledge,mark_error,mark_conflict.',
-        },
-        { role: "user", content: planPayload },
-      ],
-      completion: response,
-      model: process.env.AGENT_MEMORY_SLEEP_AGENT_MODEL?.trim() || llm.model || "gpt-4.1-mini",
-    });
-    const content = response.choices[0]?.message?.content?.trim();
-    if (!content) return null;
-    const parsed = JSON.parse(content) as { actions?: SleepAction[] };
-    return Array.isArray(parsed.actions) ? parsed.actions.slice(0, Math.min(policy.sleepAgent.maxActionsPerRun, 24)) : null;
-  } catch {
-    return null;
-  }
+/**
+ * 确定性社区 schema 提炼（零 LLM，M1-③）。
+ *
+ * 把一个社区里的多条碎片记忆归并为一条「主题知识」：正文取去重后的前三条
+ * 摘要（保最新），并附上跨条目共有的关键词。这样图式/泛化由聚类结构本身
+ * 产生，不依赖模型；同内容指纹已处理则跳过，避免重复提级。
+ */
+function deterministicCommunitySummary(label: string, lines: string[]): string {
+  const cleaned = dedupeMemoryLines(lines, { preferLatest: true })
+    .map((line) => line.replace(/^\[[^\]]+\]\s*/, "").trim())
+    .filter(Boolean);
+  if (cleaned.length < 2) return "";
+  const common = uniqueStrings(
+    cleaned.flatMap((line) => extractKeywords(line)),
+    6,
+  );
+  const body = cleaned.slice(-3).join("；");
+  return common.length > 0 ? `主题「${label}」：${body}（共性：${common.join("、")}）` : `主题「${label}」：${body}`;
 }
 
 export class HumanLikeMemoryService {
@@ -791,9 +633,7 @@ export class HumanLikeMemoryService {
   private graphPersist: GraphSqlitePersistence | null = null;
   private policyWatcher: FSWatcher | null = null;
   private reloadTimer: NodeJS.Timeout | null = null;
-  /** P0-C：每晚 sleep LLM 预算（runSleepCycle 期间有效；actor 循环串行，实例字段安全） */
-  private activeSleepLlmBudget: SleepLlmBudget | null = null;
-  /** P0-C：本轮计划中的 community 提炼（action.reason → 内容指纹），提升成功后标记已处理 */
+  /** 本轮计划中的 community 提炼（action.reason → 内容指纹），提升成功后标记已处理 */
   private pendingCommunityFps = new Map<string, string>();
   /** P0-C：已提升 community 指纹状态（actorId → fp → 首次提升日期），持久化到 data/ */
   private sleepCommunityState = new Map<string, Map<string, string>>();
@@ -2087,24 +1927,6 @@ export class HumanLikeMemoryService {
   }
 
   /**
-   * LLM planner 节点轮转窗口：此前固定 slice(0,40)（插入序=最老的 40 条），
-   * 每晚审查同一批节点、其余永远轮不到。现按 actor 维护游标，每轮前进一个
-   * 窗口，循环覆盖全量节点。
-   */
-  private readonly llmPlannerCursor = new Map<string, number>();
-  private static readonly LLM_PLANNER_WINDOW = 40;
-
-  private llmPlannerWindow(actorId: string, nodes: MemoryNodeRecord[]): MemoryNodeRecord[] {
-    const window = HumanLikeMemoryService.LLM_PLANNER_WINDOW;
-    if (nodes.length <= window) return nodes;
-    const start = (this.llmPlannerCursor.get(actorId) ?? 0) % nodes.length;
-    this.llmPlannerCursor.set(actorId, (start + window) % nodes.length);
-    const out: MemoryNodeRecord[] = [];
-    for (let i = 0; i < window; i++) out.push(nodes[(start + i) % nodes.length]!);
-    return out;
-  }
-
-  /**
    * 物理清除 hard_deleted 终态节点及其关联边：deletionStage 已是终态且所有
    * 读路径都过滤掉，此前只打标不删导致 store（JSON/SQLite）无限膨胀。
    * 社区/版本记录中的悬挂引用由既有可选链兜底，不影响召回。
@@ -2143,10 +1965,10 @@ export class HumanLikeMemoryService {
     };
     if (!this.policy.sleepAgent.enabled || nodes.length === 0) return report;
 
-    // P0-C：每晚 LLM 预算闸 + community 内容门控（见 SleepLlmBudget 注释）
-    this.activeSleepLlmBudget = new SleepLlmBudget(resolveSleepLlmBudgetLimit());
-    this.pendingCommunityFps.clear();
+    // 睡眠巩固全确定性：社区提炼/合并/规划均不再调用 LLM（每次夜间一次的
+    // 结构化 LLM 抽取由 nightly-memory-task 承担），这里只读状态用于内容去重。
     await this.loadSleepCommunityState();
+    this.pendingCommunityFps.clear();
 
     const actions: SleepAction[] = [];
     const now = Date.now();
@@ -2222,34 +2044,66 @@ export class HumanLikeMemoryService {
       }
     }
 
-    const communityGroups = Object.values(this.store.communities).filter((community) => community.actorId === actorId);
+    const communityGroups: Array<{ label: string; nodeIds: string[] }> = Object.values(
+      this.store.communities,
+    )
+      .filter((community) => community.actorId === actorId)
+      .map((community) => ({ label: community.label, nodeIds: community.nodeIds }));
+
+    // 兜底（零 LLM 图式提炼）：关键词聚类没形成社区时，同 actor 同 domain 的
+    // ≥3 个活跃节点也视为一个可提炼的主题组。否则当关键词首位分词不一致时，
+    // 同一主题碎片永远无法沉淀成可追溯的主题知识节点。
+    const coveredDomains = new Set(
+      Object.values(this.store.communities)
+        .filter((community) => community.actorId === actorId && community.nodeIds.length >= 3)
+        .map((community) => community.domainId),
+    );
+    const domainBuckets = new Map<string, string[]>();
+    for (const node of nodes) {
+      if (node.actorId !== actorId || node.deletionStage !== "active") continue;
+      const bucket = domainBuckets.get(node.domainId) ?? [];
+      bucket.push(node.id);
+      domainBuckets.set(node.domainId, bucket);
+    }
+    for (const [domainId, nodeIds] of domainBuckets) {
+      if (nodeIds.length < 3 || coveredDomains.has(domainId)) continue;
+      // 质量闸：至少要有一个关键词被 ≥3 个节点共享，才认为它们同属一个主题。
+      // 否则同域里彼此无关的闲聊/助手回复会被硬凑成一条低质主题知识。
+      const keywordHits = new Map<string, number>();
+      for (const id of nodeIds) {
+        for (const kw of new Set(this.store.nodes[id]?.keywords ?? [])) {
+          if (GENERIC_META_KEYWORD_RE.test(kw)) continue;
+          keywordHits.set(kw, (keywordHits.get(kw) ?? 0) + 1);
+        }
+      }
+      if (![...keywordHits.values()].some((count) => count >= 3)) continue;
+      communityGroups.push({ label: `domain:${domainId}`, nodeIds });
+    }
+
     for (const community of communityGroups) {
       if (community.nodeIds.length >= 3) {
-        const summaries = community.nodeIds.map((id) => this.store.nodes[id]?.summary).filter((value): value is string => Boolean(value));
-        // P0-C：内容未变化的 community 不再重复提炼（上次成功提升后指纹相同即跳过，
-        // 原实现每夜对同一批 community 重复调 LLM 产出相同经验）
+        const summaries = community.nodeIds
+          .map((id) => this.store.nodes[id]?.summary)
+          .filter((value): value is string => Boolean(value));
+        // 内容未变化的 community 不再重复提炼（指纹相同即跳过）。
         const fp = communityContentFingerprint(community.label, summaries);
         if (this.sleepCommunityState.get(actorId)?.has(fp)) continue;
-        // 预留 1 个槽位给 planner（planner 的合并/冲突动作优先级更高）
-        if (!this.activeSleepLlmBudget?.trySpend(1)) continue;
-        const experience = await llmExtractExperience(summaries);
-        if (experience) {
+        // 确定性 schema/主题提炼（零 LLM）：把同社区碎片归并为一条可追溯的
+        // 主题知识节点。泛化质量由「同社区多节点 + 去重 + 关键词共性」保证，
+        // 不依赖模型；LLM 只用于夜间一次的结构化事实抽取。
+        const schema = deterministicCommunitySummary(community.label, summaries);
+        if (schema) {
           this.pendingCommunityFps.set(`community:${community.label}`, fp);
           actions.push({
             type: "promote_knowledge",
             nodeIds: community.nodeIds.slice(0, 5),
             stage: "promote_knowledge",
             reason: `community:${community.label}`,
-            summary: experience,
+            summary: schema,
           });
         }
       }
     }
-
-    const llmActions = this.activeSleepLlmBudget.trySpend()
-      ? await llmPlanSleepActions(actorId, this.llmPlannerWindow(actorId, nodes), this.policy)
-      : null;
-    if (llmActions) actions.push(...llmActions);
 
     report.plannedActions = Math.min(actions.length, this.policy.sleepAgent.maxActionsPerRun);
     const beforeActive = nodes.filter((node) => node.deletionStage === "active").length;
@@ -2277,13 +2131,13 @@ export class HumanLikeMemoryService {
       ).toFixed(3),
     );
     this.schedulePersist();
-    this.activeSleepLlmBudget = null;
-    this.pendingCommunityFps.clear();
     return report;
   }
 
   private get sleepCommunityStatePath(): string {
-    return join(getDataDir(), "sleep-agent-state.json");
+    // 跟随本实例的记忆库路径，而不是全局 data 目录：测试/多实例各自独立的
+    // store 不应共享「已提炼指纹」，否则同内容在另一个库会被误跳过（隔离缺陷）。
+    return join(dirname(this.filePath), "sleep-agent-state.json");
   }
 
   private loadSleepCommunityState(): Promise<void> {
@@ -2397,14 +2251,10 @@ export class HumanLikeMemoryService {
     if (bucket.length < 2) return false;
 
     if (action.type === "merge") {
-      // P0-C：merge 受每晚预算闸；超预算时走确定性 dedupe fallback（原 null 分支）
-      const merged = action.summary
-        ? [action.summary]
-        : this.activeSleepLlmBudget?.trySpend()
-          ? await llmMergeLines(bucket.map((node) => node.summary))
-          : null;
+      // 确定性合并（零 LLM）：同指纹/碎片簇按 preferLatest 去重，取重要度最高
+      // 的节点作为 keeper，其余冷存。语义合并的质量由指纹聚类保证。
       const fallback = dedupeMemoryLines(bucket.map((node) => node.summary), { preferLatest: true }).slice(-1);
-      const mergedLines = merged && merged.length > 0 ? merged : fallback;
+      const mergedLines = action.summary ? [action.summary] : fallback;
       const keeper = bucket.sort((a, b) => b.importance - a.importance || b.confidence - a.confidence)[0]!;
       const versionId = this.appendVersion(keeper, mergedLines.join("；"), keeper.confidence, keeper.importance);
       keeper.summary = mergedLines.join("；");

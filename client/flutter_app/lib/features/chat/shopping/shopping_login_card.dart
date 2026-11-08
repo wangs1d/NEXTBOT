@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 
 import "../../../core/config/media_url.dart";
 import "../../../core/utils/agent_result_parser.dart";
+import "../media_disk_cache.dart";
 import "shopping_shared.dart";
 
 /// 购物登录卡（2026-11-06 用户定稿）：**二维码就在这张卡里，而且要大**。
@@ -146,8 +147,8 @@ class _ShoppingLoginCardState extends State<ShoppingLoginCard> {
                       color: cs.outline.withValues(alpha: 0.25),
                     ),
                   ),
-                  child: Image.network(
-                    MediaUrl.resolve(qr),
+                  child: CachedMediaImage(
+                    url: MediaUrl.resolve(qr),
                     fit: BoxFit.contain,
                     // 二维码是黑白的，放大时别被插值糊掉边
                     filterQuality: FilterQuality.high,

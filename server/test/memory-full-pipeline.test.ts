@@ -120,14 +120,41 @@ before(async () => {
 });
 
 after(async () => {
-  // 先关闭服务（释放 policyWatcher / 定时器 / 挂起持久化），
-  // 否则 watcher 仍监听临时目录，rmSync 时触发 EPERM uncaughtException
+  // 关停顺序：先停定时器（防止清理过程中再排入新写入），再逐层等待挂起写队列落盘，
+  // 最后关 humanLike（其 shutdown 会停 policyWatcher 并 await persistChain）。
+  // 否则 fire-and-forget 的写入会在 rmSync 之后才执行，mkdir/write 撞 ENOENT
+  // （全量并发跑时表现为测试结束后 uncaughtException）。
+  try {
+    await cortex.stop();
+  } catch {
+    // ignore
+  }
+  try {
+    await nightly.shutdown();
+  } catch {
+    // ignore
+  }
+  try {
+    await manager.shutdown();
+  } catch {
+    // ignore
+  }
+  try {
+    await memorySync.flush();
+  } catch {
+    // ignore
+  }
+  try {
+    await shortTerm.flush();
+  } catch {
+    // ignore
+  }
   try {
     await humanLike.shutdown();
   } catch {
     // ignore
   }
-  // 清理临时目录
+  // 清理临时目录（此时已无待写链路）
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {

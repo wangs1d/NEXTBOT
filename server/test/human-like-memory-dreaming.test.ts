@@ -107,11 +107,12 @@ test("Dreaming creates a traceable theme summary without requiring an LLM", asyn
     const summary = Object.values(getStore().nodes).find((node) => node.source === "system:knowledge_promotion");
     const communities = Object.values(getStore().communities).filter((c) => c.actorId === "user-theme");
 
-    // 无 LLM 时不会触发 promote_knowledge（需 llmExtractExperience 返回非空），
-    // 但 community（主题分组）仍会在 ingest 阶段自动建立。
+    // 新设计（M1-③）：社区 schema/主题提炼改为确定性（零 LLM）——同社区 ≥3 个
+    // 节点即归并为一条可追溯的 system:knowledge_promotion 知识节点。
     assert.ok(report);
-    assert.equal(report.knowledgePromotedCount, 0);
-    assert.ok(!summary);
+    assert.ok(report.knowledgePromotedCount >= 1);
+    assert.ok(summary);
+    assert.ok(summary!.summary.includes("主题"));
     assert.ok(communities.length >= 1);
     assert.ok(communities[0]!.nodeIds.length >= 3);
   });
@@ -184,7 +185,7 @@ function withScrubbedLlmEnv(fn: () => Promise<void>): () => Promise<void> {
   };
 }
 
-test("daily candidates are acknowledged only after narrative ingest succeeds", withScrubbedLlmEnv(async () => {
+test("daily candidates are consumed and cursor advances without dream: ingest", withScrubbedLlmEnv(async () => {
   const dir = await mkdtemp(join(tmpdir(), "dream-daily-buffer-"));
   try {
     const sync = new AgentMemorySyncService(join(dir, "sync.json"));
@@ -209,11 +210,11 @@ test("daily candidates are acknowledged only after narrative ingest succeeds", w
     // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
     await sleep(80);
 
-    // 新设计：consolidateNow 通过 performDreamRehearsal 将当天待整理内容以
-    // dream:replay / dream:theme_merge 等形式 ingest 到 narrative memory（多次调用）。
-    assert.ok(ingested.length >= 1);
-    assert.ok(ingested.some((item) => item.text.includes("prefer quiet mornings")));
-    // journal 消费游标已推进 = 当天行已被消费（原 getDailyPendingQueue().length === 0 语义）。
+    // 新设计（M1-③）：consolidateNow 只维护 memory_summary / 画像，不再通过
+    // dream:replay / dream:reinforce 逐行 ingest 到 narrative memory（那些行
+    // 会重复触发 LLM 抽取）；长期记忆固化统一由 journal 固化路径完成。
+    assert.equal(ingested.length, 0);
+    // journal 消费游标已推进 = 当天行已被 memory_summary 消费
     const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
       .journalConsumeCursor.get("user-buffer");
     assert.ok(cursor && cursor.lines >= 1, "journal 行应已被消费");

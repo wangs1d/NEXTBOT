@@ -130,7 +130,8 @@ test("问询：默认两条、心愿已答过就不再问，且永不阻塞", ()
   const brief = buildBrief({ destination: "成都", days: 5, prefs });
   const qs = briefOpenQuestions(brief);
   assert.equal(qs.length, 2);
-  assert.deepEqual(qs.map((q) => q.id), ["wishlist", "foodWishlist"]);
+  // 2026-11-07 起吃饭由用户自行决定，不再追问想吃的餐厅：默认两问是景点心愿 + 出发地
+  assert.deepEqual(qs.map((q) => q.id), ["wishlist", "origin"]);
 
   const answered = applyBriefAnswers(brief, { wishlist: ["都江堰"], foodWishlist: ["陈麻婆豆腐"] });
   assert.deepEqual(answered.wishlist, ["都江堰"]);

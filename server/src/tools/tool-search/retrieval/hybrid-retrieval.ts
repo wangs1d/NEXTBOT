@@ -290,18 +290,28 @@ function normalizeWeights(weights: HybridRetrievalWeights): HybridRetrievalWeigh
 
 /**
  * 负例命中度：query 命中的负例短语数归一到 0~1（每条 0.5，两条封顶）。
- * 命中判定 = 负例短语与 query 存在 token 重合（短语级软命中，非整串匹配）——
- * 与 applyIntentPrior 的 legacy 口径一致，短语 token 化后任一 token 出现即算。
+ *
+ * 命中判定（2026-11 修正）：
+ *   - 整串出现：负例短语（≥2 字符）原样出现在 query 中 → 命中；
+ *   - 否则要求 ≥2 个 token 重合。单 token 重合不算——中文负例短语
+ *     （如 calendar.create 的「取消提醒」）包含正向核心词（「提醒」），
+ *     按"任一 token 命中"会让本工具的正面例句（「明天早上九点提醒我开会」）
+ *     反过来吃满负例惩罚，create 被 delete/list 反超。
  */
 function negativeMatch(phrases: string[] | undefined, query: string): number {
   if (!phrases || phrases.length === 0) return 0;
+  const qLower = query.trim().toLowerCase();
   const qTokens = new Set(tokenize(query));
   if (qTokens.size === 0) return 0;
   let hits = 0;
   for (const phrase of phrases) {
+    const p = phrase.trim().toLowerCase();
+    if (!p) continue;
     const tokens = tokenize(phrase);
     if (tokens.length === 0) continue;
-    if (tokens.some((t) => qTokens.has(t))) hits += 1;
+    const direct = p.length >= 2 && qLower.includes(p);
+    const overlap = tokens.filter((t) => qTokens.has(t)).length;
+    if (direct || (tokens.length >= 2 && overlap >= 2)) hits += 1;
     if (hits >= 2) break;
   }
   return Math.min(1, hits * 0.5);

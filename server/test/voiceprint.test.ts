@@ -1,8 +1,9 @@
 /**
  * 声纹底座单测：WAV 解析 / 引擎确定性 / 存取回环 / 注册-验证-注销全链。
  *
- * 真实语音样本用 data/voiceprint_test_audio/case_*.wav（真人录音，同库样本视为
- * 同人正例）；白噪声/纯音为确定性负例（实测 cos 0.24/0.41 << 阈值）。
+ * WAV 解析 / 引擎契约用例用测试内生成的确定性音频（不依赖本地二进制资产）；
+ * 注册-验证全链用 data/voiceprint_test_audio/case_*.wav（真人录音，同库样本
+ * 视为同人正例）；白噪声/纯音为确定性负例（实测 cos 0.24/0.41 << 阈值）。
  * 模型资产缺失时引擎相关用例 skip。跑法：
  *   node --import tsx --test test/voiceprint.test.ts
  */
@@ -32,15 +33,41 @@ function synthPcm16(samples: number[], amp: (i: number) => number): Buffer {
   return buf;
 }
 
+/** 生成最小合法 16bit 单声道 RIFF/PCM WAV（用于解析与引擎契约用例） */
+function makeWavBuffer(sampleRate: number, sampleCount: number, amp: (i: number) => number): Buffer {
+  const data = synthPcm16(new Array(sampleCount).fill(0), amp);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0, "ascii");
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVE", 8, "ascii");
+  header.write("fmt ", 12, "ascii");
+  header.writeUInt32LE(16, 16); // fmt 块大小
+  header.writeUInt16LE(1, 20); // PCM
+  header.writeUInt16LE(1, 22); // mono
+  header.writeUInt32LE(sampleRate, 24);
+  header.writeUInt32LE(sampleRate * 2, 28); // byteRate
+  header.writeUInt16LE(2, 32); // blockAlign
+  header.writeUInt16LE(16, 34); // bits
+  header.write("data", 36, "ascii");
+  header.writeUInt32LE(data.length, 40);
+  return Buffer.concat([header, data]);
+}
+
+/** 确定性「类语音」波形：谐波叠加，任何采样率下同输入同输出 */
+const contractAmp = (sampleRate: number) => (i: number) => {
+  const t = i / sampleRate;
+  return 0.4 * Math.sin(2 * Math.PI * 180 * t) + 0.25 * Math.sin(2 * Math.PI * 720 * t) + 0.1 * Math.sin(2 * Math.PI * 1800 * t);
+};
+
 const CASE_DIR = join(process.cwd(), "data", "voiceprint_test_audio");
 const hasAssets = existsSync(join(CASE_DIR, "case_0.wav")) && existsSync(join(CASE_DIR, "case_1.wav"));
 const hasModel = resolveSpeakerModelDir() !== null;
 
 test("parseAudioToPcm16：WAV 头解析 + 裸 PCM16 兜底", () => {
-  assert.ok(hasAssets, "缺声纹测试音频");
-  const { pcm, sampleRate } = parseAudioToPcm16(loadWavBuffer(join(CASE_DIR, "case_0.wav")));
+  const wav = makeWavBuffer(22050, 44100, contractAmp(22050)); // 2s @22.05k
+  const { pcm, sampleRate } = parseAudioToPcm16(wav);
   assert.equal(sampleRate, 22050);
-  assert.ok(pcm.length > 16000, "4.5s 音频应有数万样本");
+  assert.ok(pcm.length > 16000, "2s 音频应有数万样本");
   const raw = synthPcm16(new Array(1600).fill(0), () => 0.5);
   const rawParsed = parseAudioToPcm16(raw);
   assert.equal(rawParsed.sampleRate, 16000);
@@ -50,7 +77,7 @@ test("parseAudioToPcm16：WAV 头解析 + 裸 PCM16 兜底", () => {
 test("引擎：确定性 + 维度跟随模型（CAM++ 192）+ L2 归一", { skip: !hasModel && "模型资产缺失" }, async () => {
   const engine = await initSpeakerEmbeddingEngine();
   assert.ok(engine);
-  const buf = loadWavBuffer(join(CASE_DIR, "case_0.wav"));
+  const buf = makeWavBuffer(22050, 44100, contractAmp(22050));
   const { pcm, sampleRate } = parseAudioToPcm16(buf);
   const a = await engine!.embedPcm16(pcm, sampleRate);
   const b = await engine!.embedPcm16(pcm, sampleRate);

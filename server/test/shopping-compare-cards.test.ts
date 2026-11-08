@@ -201,6 +201,10 @@ function stubOrderService(
 ): ShoppingOrderService {
   return {
     listSupportedPlatforms: () => Object.keys(productsByPlatform),
+    // 缺省比价集合 = 匿名平台 + 该用户已有授权 Cookie 的登录平台；
+    // 本 stub 把这些平台都当作已授权（否则缺省集合为空，comparePrices 直接判「未指定有效平台」）
+    listPlatformsWithCookies: async (_actorId: string, platforms: string[]) =>
+      platforms.filter((p) => p in productsByPlatform),
     // 测试环境没有可见浏览器：比价走无头并发路径
     canUseVisibleBrowser: () => false,
     searchProduct: async (_ctx: unknown, platform: string) => ({
@@ -367,7 +371,8 @@ test("comparePrices：型号子集（写法繁简）、数量无冲突 → bestI
     const service = new ShoppingCompareService({
       shoppingOrderService: stubOrderService({
         jd: [{ title: "戴森吹风机 HD08 紫红色", price: 3199 }],
-        pdd: [{ title: "戴森吹风机 HD08 AMR07 磁吸支架", price: 3299 }],
+        // 标题不能含「支架」等配件词：配件闸会把它当非主体商品丢弃（本用例要测的是型号子集可比性）
+        pdd: [{ title: "戴森吹风机 HD08 AMR07 紫红色", price: 3299 }],
       }),
       dataDir,
     });

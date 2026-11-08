@@ -4,6 +4,7 @@ import "package:flutter/material.dart";
 
 import "../../../core/config/media_url.dart";
 import "../../../core/utils/agent_result_parser.dart";
+import "../media_disk_cache.dart";
 import "shopping_shared.dart";
 
 /// 候选比价卡（设计稿 01 屏）：横向滑动、一屏露出约 2.5 张、逐卡吸附。
@@ -499,15 +500,14 @@ class _Thumb extends StatelessWidget {
       ),
     );
     if (url.isEmpty) return fallback;
-    // 云端取回的商品图是服务端本地路径（/agent/images/...），必须补成完整地址
-    // 再交给 NetworkImage——直接 Image.network("/agent/...") 没有 scheme，
-    // 会立刻走 errorBuilder，用户看到的就是一张灰色占位（"有价格没照片"）。
-    return Image.network(
-      MediaUrl.resolve(url),
+    // 云端取回的商品图是服务端本地路径（/agent/images/...），必须补成完整地址，
+    // 否则没有 scheme 会立刻失败，用户看到的就是一张灰色占位（"有价格没照片"）。
+    // 展示统一走磁盘缓存版网络图，重启后命中落盘文件就不会再空窗。
+    return CachedMediaImage(
+      url: MediaUrl.resolve(url),
       fit: BoxFit.cover,
+      loadingBuilder: (BuildContext c) => fallback,
       errorBuilder: (BuildContext c, Object e, StackTrace? s) => fallback,
-      loadingBuilder: (BuildContext c, Widget child, ImageChunkEvent? p) =>
-          p == null ? child : fallback,
     );
   }
 }

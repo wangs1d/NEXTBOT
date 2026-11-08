@@ -55,6 +55,11 @@ export interface UserFact {
   evidenceDays?: string[];
   /** 来源链路（最多保留 3 条） */
   sources: string[];
+  /**
+   * 冲突裁决退场的旧值（M3：同 subject 新值胜出时，旧值置 rejected 并保留审计）。
+   * 裁决优先级：显式纠正 > 新近 > 置信度 > 证据数。
+   */
+  retiredValues?: Array<{ value: string; status: "rejected"; retiredAt: string; reason?: string }>;
   createdAt: string;
   updatedAt: string;
 }
@@ -291,6 +296,13 @@ export class UserFactStore {
     const now = nowIso();
     const existing = shape.facts.find((f) => f.id === id);
     if (existing) {
+      if (existing.value.trim() !== value) {
+        // 同 subject 新值胜出：旧值退场置 rejected（保留审计，不静默丢弃）。
+        existing.retiredValues = [
+          ...(existing.retiredValues ?? []),
+          { value: existing.value, status: "rejected" as const, retiredAt: now, reason: input.source },
+        ].slice(-3);
+      }
       existing.value = value;
       existing.confidence = Math.max(existing.confidence, input.confidence ?? 0.7);
       existing.seenCount += 1;

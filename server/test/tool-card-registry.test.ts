@@ -82,7 +82,8 @@ test("shopping.pay.submit: ok → 支付确认按钮卡（actions 非空）", ()
     browserMode: "shared",
   });
   assert.ok(p);
-  assert.equal(p.cardType, "order");
+  // 2026-11 购物卡族满版化：支付确认卡是自绘的 shopping_pay（客户端据此渲染支付版面）
+  assert.equal(p.cardType, "shopping_pay");
   assert.equal(p.actions?.length, 2);
   assert.equal(p.actions?.[0]?.id, "shopping_pay_done");
   assert.equal(p.actions?.[0]?.label, "我已完成支付，帮我确认");

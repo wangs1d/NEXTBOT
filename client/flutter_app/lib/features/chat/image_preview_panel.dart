@@ -1,7 +1,6 @@
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
-import "../../core/config/media_url.dart";
 // import "../../core/services/image_preview_launcher.dart";
 // （图库入口暂时隐藏：恢复「在照片墙中查看」按钮时需一并恢复本 import）
 import "media_disk_cache.dart";
@@ -134,7 +133,7 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
 
   /// 跟踪当前照片的宽高比（幂等，build 里调用）。
   void _trackAspect() {
-    final String url = _currentUrl;
+    final String url = _resolvedUrl;
     if (_trackingUrl == url) return;
     _trackingUrl = url;
     _aspect = _aspectCache[url];
@@ -142,21 +141,27 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
     _aspectListener = null;
     _aspectStream = null;
     if (url.isEmpty || _aspect != null) return;
-    // 必须带凭证头：周界鉴权开启后裸请求 401，拿不到尺寸导致点位错误
-    final ImageStream stream = NetworkImage(url, headers: MediaUrl.headersFor(url))
-        .resolve(createLocalImageConfiguration(context));
-    late final ImageStreamListener listener;
-    listener = ImageStreamListener((ImageInfo info, bool _) {
-      final double ar = info.image.width / info.image.height;
-      _aspectCache[url] = ar;
-      stream.removeListener(listener);
-      if (_trackingUrl == url && mounted) {
-        setState(() => _aspect = ar);
-      }
+    // 尺寸从磁盘缓存文件解出（带凭证头、落盘持久）；磁盘层不可用时静默保持
+    // 默认点位，不再发起裸网络流请求。
+    MediaDiskCache.instance.warm(<String>[url]);
+    final String trackingUrl = url;
+    MediaDiskCache.instance.fileFor(url).then((file) {
+      if (file == null || !mounted || _trackingUrl != trackingUrl) return;
+      final ImageStream stream = FileImage(file)
+          .resolve(createLocalImageConfiguration(context));
+      late final ImageStreamListener listener;
+      listener = ImageStreamListener((ImageInfo info, bool _) {
+        final double ar = info.image.width / info.image.height;
+        _aspectCache[trackingUrl] = ar;
+        stream.removeListener(listener);
+        if (_trackingUrl == trackingUrl && mounted) {
+          setState(() => _aspect = ar);
+        }
+      });
+      _aspectListener = listener;
+      _aspectStream = stream;
+      stream.addListener(listener);
     });
-    _aspectListener = listener;
-    _aspectStream = stream;
-    stream.addListener(listener);
   }
 
   /// 页码指示点：每张照片一个小点；紧贴照片下沿外 6px（照片占满高度时

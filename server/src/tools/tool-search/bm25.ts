@@ -350,12 +350,19 @@ function registryNameSearchTokens(name: string): string[] {
   return [...segments, underscored !== name ? underscored : ""].filter(Boolean);
 }
 
+/** URL 本体的 registry 语义归一（与 expandSearchQueries 的 URL 规则同源）。 */
+function normalizeUrlNoise(query: string): string {
+  return query.replace(/https?:\/\/\S+/gi, "fetch_web 网页 url page read 读取 内容");
+}
+
 function applySearchRankingBoosts(
   hits: Bm25Hit[],
   query: string,
   docs: Bm25Document[],
 ): Bm25Hit[] {
-  const q = query.trim().toLowerCase();
+  // 先归一再取 token：否则 example.com 的 "example" 会命中
+  // self.generate_from_example 的 id 段并拿到 +0.6 的按位加权，压过 RRF 词面序。
+  const q = normalizeUrlNoise(query).trim().toLowerCase();
   if (!q) return hits;
 
   const docById = new Map(docs.map((d) => [d.id, d]));

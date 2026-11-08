@@ -5,6 +5,7 @@ import "dart:typed_data";
 import "package:flutter/material.dart";
 
 import "../../../core/utils/agent_result_parser.dart";
+import "../media_disk_cache.dart";
 import "shopping_shared.dart";
 
 /// 规格选择卡（设计稿 02 屏）。
@@ -960,12 +961,11 @@ class _CoverThumb extends StatelessWidget {
       ),
     );
     if (url.isEmpty) return fallback;
-    return Image.network(
-      url,
+    return CachedMediaImage(
+      url: url,
       fit: BoxFit.cover,
+      loadingBuilder: (BuildContext c) => fallback,
       errorBuilder: (BuildContext c, Object e, StackTrace? s) => fallback,
-      loadingBuilder: (BuildContext c, Widget child, ImageChunkEvent? p) =>
-          p == null ? child : fallback,
     );
   }
 }

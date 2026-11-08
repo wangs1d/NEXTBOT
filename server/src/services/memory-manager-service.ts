@@ -344,8 +344,6 @@ export class MemoryManagerService {
 
     if (!this.memorySync) return result;
 
-    let lastRetention: Awaited<ReturnType<MemoryManagerService["evaluateMemoryRetention"]>> | null =
-      null;
     try {
       const { revision, entries } = this.memorySync.getSnapshot(actorId, [
         "memory_summary",
@@ -385,7 +383,6 @@ export class MemoryManagerService {
         console.log(`[MemoryManager] consolidateNow: 当天高频话题加分 ${topTopics.length} 词 → ${actorId}`);
       }
       const retention = await this.evaluateMemoryRetention(consolidated, forgottenRaw, topTopics);
-      lastRetention = retention;
       result.entriesRemoved = retention.forgotten.length;
       result.rememberedCount = retention.remembered.length;
       result.fadedCount = retention.faded.length;
@@ -414,9 +411,8 @@ export class MemoryManagerService {
     }
 
     await this.synthesizeProfile(actorId);
-    if (lastRetention && this.narrativeMemory) {
-      await this.performDreamRehearsal(actorId, lastRetention);
-    }
+    // 夜间重放/强化不再走 dream:* ingest（那是逐行 LLM 抽取的重复开销）；
+    // 记忆图的重放/合并/提级由 narrative.runSleepConsolidation 确定性完成。
     // 画像维护不放这里：画像由对话内统一抽取（LLM 一次调用捎带 profileOps）
     // 确定性落位写入；mem0/扣子等主流做法同样不在记忆整理阶段整文重写画像，
     // 否则每轮整理都会重复调用一次大模型。
@@ -750,143 +746,6 @@ export class MemoryManagerService {
     if (ageHours > 168) score -= this.isHighValueEntry(line) ? 0.06 : 0.22;
 
     return { score, ts: safeTs };
-  }
-
-  private pickReinforcedLines(primary: string[], secondary: string[]): string[] {
-    const buckets = new Map<string, { line: string; count: number }>();
-    const ingest = (line: string): void => {
-      const key = semanticFingerprint(line) || stripTimestampPrefix(line).toLowerCase();
-      if (!key) return;
-      const existing = buckets.get(key);
-      if (existing) {
-        existing.count += 1;
-      } else {
-        buckets.set(key, { line, count: 1 });
-      }
-    };
-
-    for (const line of primary) ingest(line);
-    for (const line of secondary) ingest(line);
-
-    return [...buckets.values()]
-      .filter((entry) => entry.count >= 2 || this.isHighValueEntry(entry.line))
-      .sort((a, b) => b.count - a.count || b.line.length - a.line.length)
-      .slice(0, 8)
-      .map((entry) => entry.line);
-  }
-
-  private async performDreamRehearsal(
-    actorId: string,
-    retention: {
-      remembered: string[];
-      faded: string[];
-      forgotten: string[];
-      forgottenArchive: string[];
-    },
-  ): Promise<void> {
-    // 2026-09-12 token 治理：rehearsal 行跨夜去重。memory_summary 的 remembered/faded
-    // 集合夜间之间高度重叠，原实现每晚把同一批 dream 行重新 ingest（每行一次
-    // extractUnified LLM 调用，且在 Mem0 侧产生重复记忆再靠生命周期审查清理）。
-    // 现按行指纹只强化一次，跨夜零重复开销；新进入 remembered/faded 的行仍正常强化。
-    await this.loadDreamRehearsalState();
-    const replayLines = [...retention.remembered.slice(0, 6), ...retention.faded.slice(0, 3)];
-    const reinforcedLines = this.pickReinforcedLines(replayLines, retention.faded);
-    const mergedThemes = [...new Set(replayLines.map((line) => this.extractTopic(line)).filter(Boolean))];
-    const fadedNoise = retention.forgotten.slice(0, 4);
-
-    for (const line of replayLines) {
-      await this.ingestDreamLineOnce(actorId, `dream:replay | ${line}`, "memory:dream_replay", true);
-    }
-
-    for (const line of reinforcedLines) {
-      await this.ingestDreamLineOnce(actorId, `dream:reinforce | ${line}`, "memory:dream_reinforce", true);
-    }
-
-    if (mergedThemes.length > 0) {
-      await this.ingestDreamLineOnce(
-        actorId,
-        `dream:theme_merge | ${mergedThemes.slice(0, 6).join(" | ")}`,
-        "memory:dream_theme_merge",
-        true,
-      );
-    }
-
-    for (const line of fadedNoise) {
-      await this.ingestDreamLineOnce(actorId, `dream:fade | ${line}`, "memory:dream_fade", false);
-    }
-
-    void this.persistDreamRehearsalState();
-  }
-
-  /** dream rehearsal 已强化行状态（actorId → 行指纹 → 首次强化日期），持久化到 data/ */
-  private dreamRehearsed = new Map<string, Map<string, string>>();
-  private dreamRehearsedLoadPromise: Promise<void> | null = null;
-
-  private get dreamRehearsalStatePath(): string {
-    return join(getDataDir(), "dream-rehearsal-state.json");
-  }
-
-  /** 每 actor 保留的已强化指纹上限（Map 保插入序，超限裁最旧） */
-  private static readonly DREAM_REHEARSAL_MAX_FINGERPRINTS = 400;
-
-  private loadDreamRehearsalState(): Promise<void> {
-    if (this.dreamRehearsedLoadPromise) return this.dreamRehearsedLoadPromise;
-    this.dreamRehearsedLoadPromise = (async () => {
-      try {
-        const { readFile } = await import("node:fs/promises");
-        const raw = await readFile(this.dreamRehearsalStatePath, "utf8");
-        const parsed = JSON.parse(raw) as { actors?: Record<string, [string, string][]> };
-        for (const [id, entries] of Object.entries(parsed.actors ?? {})) {
-          this.dreamRehearsed.set(id, new Map(entries));
-        }
-      } catch {
-        // 首次运行/文件缺失：空状态启动
-      }
-    })();
-    return this.dreamRehearsedLoadPromise;
-  }
-
-  private async persistDreamRehearsalState(): Promise<void> {
-    try {
-      const actors: Record<string, [string, string][]> = {};
-      for (const [actorId, entries] of this.dreamRehearsed) {
-        actors[actorId] = [...entries];
-      }
-      await writeJsonAtomic(this.dreamRehearsalStatePath, { version: 1, actors });
-    } catch (err) {
-      console.warn("[MemoryManager] dream rehearsal state persist failed:", err);
-    }
-  }
-
-  /** 单行 dream ingest：同一行（指纹相同）跨夜只 ingest 一次，之后的夜晚静默跳过。 */
-  private async ingestDreamLineOnce(
-    actorId: string,
-    text: string,
-    kind: "memory:dream_replay" | "memory:dream_reinforce" | "memory:dream_theme_merge" | "memory:dream_fade",
-    highSignal: boolean,
-  ): Promise<void> {
-    const fp = semanticFingerprint(text) || text.slice(0, 64);
-    if (this.dreamRehearsed.get(actorId)?.has(fp)) return;
-
-    await this.narrativeMemory
-      ?.ingest(actorId, text, kind, { highSignal })
-      .catch(() => {});
-
-    let seen = this.dreamRehearsed.get(actorId);
-    if (!seen) {
-      seen = new Map();
-      this.dreamRehearsed.set(actorId, seen);
-    }
-    seen.set(fp, this.getTodayDayKey());
-    const max = MemoryManagerService.DREAM_REHEARSAL_MAX_FINGERPRINTS;
-    if (seen.size > max) {
-      const excess = seen.size - max;
-      let removed = 0;
-      for (const key of seen.keys()) {
-        seen.delete(key);
-        if (++removed >= excess) break;
-      }
-    }
   }
 
   private async synthesizeProfile(actorId: string): Promise<void> {

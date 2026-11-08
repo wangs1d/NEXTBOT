@@ -299,8 +299,10 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: ["提醒我", "定时提醒", "定个提醒", "设个提醒", "到点提醒"],
       examples: ["明天早上九点提醒我开会", "十分钟后提醒我", "提醒我交周报"],
-      negativeAliases: ["取消提醒", "删除提醒"],
-      negativeExamples: ["取消明天那个提醒", "把提醒删了"],
+      // 位置触发型提醒归 geofence.create：否则「到家/离家」类查询会被
+      // create 的「提醒我」正向词抢走（2026-11 golden 回归实测）。
+      negativeAliases: ["取消提醒", "删除提醒", "到家", "回到家", "离家", "离开公司"],
+      negativeExamples: ["取消明天那个提醒", "把提醒删了", "到家的时候提醒我拿快递"],
     },
   },
   {
@@ -347,7 +349,37 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     metadata: {
       aliases: ["关注话题", "追踪动态", "盯着", "追更", "话题更新", "有新消息告诉我", "有更新提醒我"],
       examples: ["帮我一直盯着这个话题有新消息就告诉我", "关注这个话题有更新告诉我", "追一下这部剧的动态"],
-      negativeAliases: ["发消息给", "回复消息", "语音消息"],
+      // 价格变动不是"话题追踪"，归 watch.track（kind=price）。
+      negativeAliases: ["发消息给", "回复消息", "语音消息", "降价", "价格变动", "商品价格", "打折降价"],
+    },
+  },
+  // 统一盯梢入口（2026-11 补登记）：kind=price 的「盯降价」表达在 discover
+  // 词面通道天生弱（英文点号名 + 无价格同义词），此前被 interest.manage 的
+  // 「盯着」别名抢走。这里登记价格语义别名/例句，让 watch.track 拿到词面与先验双重命中。
+  {
+    exact: "watch.track",
+    metadata: {
+      aliases: [
+        "盯着降价",
+        "盯着这款",
+        "降价了叫我",
+        "降价通知",
+        "价格变动",
+        "价格监控",
+        "监控价格",
+        "关注价格",
+        "降到多少钱",
+        "便宜了叫我",
+        "打折了叫我",
+        "蹲降价",
+      ],
+      examples: [
+        "帮我盯着这款耳机降价",
+        "这个耳机降到800以内叫我",
+        "帮我蹲一下这双鞋打折",
+        "价格降了多少告诉我",
+      ],
+      negativeAliases: ["发消息给", "回复消息", "定时提醒", "定个提醒"],
     },
   },
   {
