@@ -379,6 +379,9 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     socialFeedService: deps.socialFeedService,
     agentAccountService: deps.agentAccountService,
     goalBoard: deps.goalBoard ?? null,
+    // 改名广播依赖（2026-11-08 补）：漏传会导致 identity_renamed 静默丢失，
+    // 客户端顶栏名字只有重登才刷新
+    wsConnectionRegistry: deps.wsConnectionRegistry,
   });
   registerFeedbackRoutes(app, { inboxService: deps.inboxService ?? null });
   // 管理后台账号密码登录 + 可吊销会话（status/setup/login/logout；requireAdmin 已升级双通道）

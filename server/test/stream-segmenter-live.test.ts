@@ -232,6 +232,44 @@ test("分泡：后续泡 ≥12 字才切，短句合并成饱满的泡", async (
   );
 });
 
+test("分泡：独立一行的表情不并进下一泡，避免绿泡内分段（2026-11-08 用户反馈）", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("🙂\n\n有正事就说，没正事我劝你早点睡——煤球这会儿估计都摊成一张饼了。");
+  await seg.chain;
+  assert.equal(bubbles.length, 2, `表情独立成泡，正文再成一泡（实际 ${bubbles.length}）`);
+  assert.equal(bubbles[0].text, "🙂", "表情泡不夹带换行/正文");
+  assert.equal(bubbles[0].bubble, "new");
+  assert.ok(!bubbles[1].text.includes("\n"), "正文泡内不再有分段空行");
+  assert.ok(bubbles[1].text.startsWith("有正事就说"));
+});
+
+test("分泡：一行一条消息——极短条（嗯/？/表情）各自成泡，不再并泡", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("嗯\n？\n🙂\n那你要不要先睡？");
+  await seg.chain;
+  await seg.flushFinal();
+  assert.deepEqual(
+    bubbles.map((b) => b.text),
+    ["嗯", "？", "🙂", "那你要不要先睡？"],
+    "模型分条后每条只几个字也要照发，不被 12 字门槛并泡",
+  );
+});
+
+test("分泡：换行后的短尾句不并进上一条消息", async () => {
+  const { seg, bubbles, enable } = createBubbleRecorder();
+  enable();
+  seg.feed("今天别熬夜了。\n嗯");
+  await seg.chain;
+  assert.equal(bubbles.length, 1);
+  assert.equal(bubbles[0].text, "今天别熬夜了。");
+  await seg.flushFinal();
+  assert.equal(bubbles.length, 2, "换行后的「嗯」独立成泡");
+  assert.equal(bubbles[1].bubble, "new");
+  assert.equal(bubbles[1].text, "嗯");
+});
+
 test("分泡：泡数封顶，超出内容以 continue 并入末泡", async () => {
   const { seg, bubbles, enable } = createBubbleRecorder({ maxBubbles: 2 });
   enable();

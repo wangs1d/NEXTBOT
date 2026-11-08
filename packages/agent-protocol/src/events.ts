@@ -188,6 +188,15 @@ export const ServerEventType = {
    */
   CardUpdate: "card.update",
   /**
+   * 首启引导·取名卡（2026-11-08）：用户刚给出称呼、agent 这一轮把「想怎么
+   * 称呼我」问出口后，服务端紧跟着补发三个候选名，客户端把卡片挂在
+   * `messageId` 那条回复气泡下方；点选后按普通消息链路发送。
+   *
+   * payload: { messageId, title, choices: string[] }
+   * 客户端找不到 messageId 对应消息（已被删/被滚出窗口）时静默丢弃。
+   */
+  OnboardingNameChoices: "onboarding.name_choices",
+  /**
    * 会出卡片的轮次不流式（2026-10-08）：服务端在确认本轮将携带结构化卡片
    * （工具确定性附卡源 / 识图照片卡 / LLM 自产结构化标记）后推送此事件，
    * 客户端撤回该 trace 已流出的正文（清空流式气泡回到生成中状态），服务端

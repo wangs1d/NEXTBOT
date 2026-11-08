@@ -18,6 +18,7 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { WsConnectionRegistry } from "./ws-connection-registry.js";
 import {
   AGENT_NAME_KV_KEY,
+  AGENT_NAME_SUGGESTIONS,
   parseAgentIdentityKv,
 } from "./agent-identity.js";
 import {
@@ -47,6 +48,9 @@ export type OnboardingIntroDeps = {
 
 /** 两泡之间的间隔：像真人连发两条消息，不并成一坨。 */
 const SECOND_BUBBLE_DELAY_MS = 700;
+
+/** 取名卡抬头（候选名取自 AGENT_NAME_SUGGESTIONS）。 */
+const AGENT_NAME_CARD_TITLE = "你想怎么称呼我？之后随时可以改。";
 
 export class OnboardingIntroService {
   constructor(private readonly deps: OnboardingIntroDeps) {}
@@ -128,6 +132,22 @@ export class OnboardingIntroService {
   /** 主对话每轮的引导意图（只给状态与意图，措辞归人格 prompt）。 */
   hintForTurn(actorId: string): string | undefined {
     return onboardingTurnHint(this.deps.memorySync, actorId);
+  }
+
+  /**
+   * 取名卡（2026-11-08）：只在「等用户给 agent 取名」阶段给出三个候选名，
+   * 由本轮 assistant_done 之后补发，客户端挂在回复气泡下方。
+   */
+  nameChoiceCardFor(
+    actorId: string,
+  ): { title: string; choices: string[] } | null {
+    if (readOnboardingStage(this.deps.memorySync, actorId) !== "awaiting_agent_name") {
+      return null;
+    }
+    return {
+      title: AGENT_NAME_CARD_TITLE,
+      choices: AGENT_NAME_SUGGESTIONS.slice(0, 3).map((s) => s.displayName),
+    };
   }
 
   /** 走统一改名管道：KV → 账号 → prefs → 叙事线 → WS 广播，一处不落就整体失败。 */

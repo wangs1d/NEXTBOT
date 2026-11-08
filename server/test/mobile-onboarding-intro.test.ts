@@ -148,18 +148,29 @@ test("flow: 手机端只引导一次，称呼与名字都落账号级权威源",
   assert.equal(d.pushes.length, 2, "问候 + 介绍提问共两泡");
   assert.ok(d.pushes.every((p) => p.includes("first_meeting_intro")));
   assert.equal(readOnboardingStage(d.memorySync as never, "u1"), "awaiting_alias");
+  assert.equal(
+    d.service.nameChoiceCardFor("u1"),
+    null,
+    "问称呼阶段不给取名卡",
+  );
   assert.match(d.service.hintForTurn("u1") ?? "", /补一句问称呼/);
 
   await d.service.onUserText("u1", "叫我阿哲就行");
   assert.deepEqual(d.facts, [{ field: "称呼", value: "阿哲" }]);
   assert.equal(readOnboardingStage(d.memorySync as never, "u1"), "awaiting_agent_name");
   assert.match(d.service.hintForTurn("u1") ?? "", /接下来该问用户想怎么称呼你/);
+  const card = d.service.nameChoiceCardFor("u1");
+  assert.ok(card, "问名字阶段下发取名卡");
+  assert.equal(card!.choices.length, 3, "三个候选名");
+  assert.ok(card!.choices.every((c) => c.trim().length > 0));
+  assert.match(card!.title, /怎么称呼我/);
 
   await d.service.onUserText("u1", "叫你小来包吧");
   assert.deepEqual(d.renames, ["小来包"], "走统一改名管道");
   assert.ok(d.broadcasts.some((b) => b.includes("identity_renamed")), "广播给两端刷新顶栏");
   assert.equal(readOnboardingStage(d.memorySync as never, "u1"), "done");
   assert.equal(d.service.hintForTurn("u1"), undefined);
+  assert.equal(d.service.nameChoiceCardFor("u1"), null, "名字定了不再下发取名卡");
 
   // 重连/再登录不得重复发开场白
   const before = d.pushes.length;

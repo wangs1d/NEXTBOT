@@ -23,6 +23,7 @@ import {
   dedupeMemoryLines,
   limitLinesByChars,
   semanticFingerprint,
+  unifiedMemoryScore,
 } from "./memory-record-utils.js";
 import { redactSensitiveText } from "../utils/redact.js";
 
@@ -45,6 +46,15 @@ type PersistedShape = {
 function digestKey(actorId: string, day: string): string {
   return `${actorId}::${day}`;
 }
+
+/**
+ * 摘要卫生（P1）：今日摘要只作背景，不是待办清单。此前 digest 逐字回灌 agent
+ * 自己的问句，模型把「未答问题」当成待推进事项，于是每轮换说法反复追问
+ * （真机事故：凌晨四点半「你还不睡？」被复读多轮）。这里明确口径——问句留在
+ * ①原文窗口/情景日志，摘要侧只提供历史事实，不复述也不追问。
+ */
+const DIGEST_BACKGROUND_HEADER =
+  "（今日对话历史摘要，仅作背景：不是待办清单；其中早已问过但未获回答的问题不要复述、不要追问，除非用户本轮主动提起。行内角色标记：`用户=` 是用户原话，`Agent=` 是 Agent 自己说过的话，两者不可混用）";
 
 function firstLine(text: string, maxLen: number): string {
   const t = text.replace(/\s+/g, " ").trim();
@@ -94,18 +104,46 @@ function formatDigestPromptLine(line: string): string {
   const turnMatch = line.match(/^\[(\d{2}:\d{2})\]\s*用户:\s*(.+?)\s*\|\s*Agent:\s*(.+)$/);
   if (turnMatch) {
     const [, timeLabel, userText, assistantText] = turnMatch;
-    return `- turn|${timeLabel}|u=${compactDigestField(userText, 36)}|a=${compactDigestField(assistantText, 36)}`;
+    // 问句保真：助手侧含问句时放宽截断并保留问号——问句是原文窗口的一部分，
+    // 摘要把问句截成半句陈述会让模型误以为话题被结束、或反过来复述追问。
+    const hasQuestion = /[？?]/.test(assistantText);
+    return `- turn|${timeLabel}|用户=${compactDigestField(userText, 36)}|Agent=${compactDigestField(
+      assistantText,
+      hasQuestion ? 60 : 36,
+    )}`;
   }
 
   return `- note|${compactDigestField(line, 96)}`;
 }
 
+/**
+ * 中文查询切词（P4 检索统一的一部分）：旧实现用 `[\u4e00-\u9fff]{2,}` 贪婪匹配，
+ * 无空格的中文整句会变成一个超长 term——只有原文逐字包含整句时才命中，
+ * 摘要召回事实上长期失效。改为 2 字滑窗，过滤纯虚词组合与疑问词。
+ */
+const CJK_STOP_CHARS = new Set([
+  "的", "了", "是", "在", "和", "与", "我", "你", "他", "她", "它", "们",
+  "要", "有", "吗", "呢", "啊", "吧", "这", "那", "个", "就", "都", "也",
+  "很", "把", "被", "给", "对", "着", "过", "还", "又", "去", "来", "说",
+]);
+const CJK_STOP_TERMS = new Set(["什么", "怎么", "如何", "一下", "可以", "是不", "有没"]);
+
 function extractQueryTerms(text: string): string[] {
-  return Array.from(
-    new Set(
-      (text.toLowerCase().match(/[\u4e00-\u9fff]{2,}|[a-z]{3,}/g) ?? []).filter(Boolean),
-    ),
-  ).slice(0, 12);
+  const terms = new Set<string>();
+  for (const run of text.toLowerCase().match(/[\u4e00-\u9fff]+/g) ?? []) {
+    if (run.length === 2) {
+      if (!CJK_STOP_TERMS.has(run)) terms.add(run);
+      continue;
+    }
+    for (let i = 0; i + 2 <= run.length; i += 1) {
+      const gram = run.slice(i, i + 2);
+      if (CJK_STOP_TERMS.has(gram)) continue;
+      if ([...gram].every((ch) => CJK_STOP_CHARS.has(ch))) continue;
+      terms.add(gram);
+    }
+  }
+  for (const word of text.toLowerCase().match(/[a-z]{3,}/g) ?? []) terms.add(word);
+  return Array.from(terms).slice(0, 24);
 }
 
 function scoreDigestLine(
@@ -130,11 +168,19 @@ function scoreDigestLine(
     score += 2.5;
   }
 
+  // 无实际词面命中的行不注入（未命中零 token）。
   if (!matched) return 0;
 
-  const recencyBoost =
-    totalLines <= 1 ? 0 : (recencyRank / Math.max(totalLines - 1, 1)) * 1.5;
-  return score + recencyBoost;
+  // 统一排序口径（P4）：相关度 × 时效 × 置信度。摘要行没有逐行时间戳，
+  // 用行位置换算"越靠后越新"的近似时效，与记忆图/情景检索共用同一打分函数。
+  const relevance = Math.min(1, score / 4);
+  const recency01 = totalLines <= 1 ? 1 : recencyRank / Math.max(totalLines - 1, 1);
+  const ageDays = (1 - recency01) * 0.5;
+  return unifiedMemoryScore({
+    relevance,
+    updatedAt: Date.now() - ageDays * 86_400_000,
+    confidence: 0.7,
+  });
 }
 
 export class DailyDigestService {
@@ -173,7 +219,9 @@ export class DailyDigestService {
     if (!raw.trim()) return undefined;
     const max = this.config.digestPromptMaxChars;
     const body = raw.trim();
-    return body.length > max ? `...(earlier entries truncated)\n${body.slice(-max)}` : body;
+    const payload =
+      body.length > max ? `...(earlier entries truncated)\n${body.slice(-max)}` : body;
+    return `${DIGEST_BACKGROUND_HEADER}\n${payload}`;
   }
 
   getRelevantPromptDigest(
@@ -215,12 +263,48 @@ export class DailyDigestService {
 
     let text = [
       `DIGEST|hits=${ranked.length}`,
+      DIGEST_BACKGROUND_HEADER,
       ...ranked.map((line) => formatDigestPromptLine(line)),
     ].join("\n");
     if (text.length > this.config.digestPromptMaxChars) {
       text = `${text.slice(0, this.config.digestPromptMaxChars)}...`;
     }
     return text;
+  }
+
+  /**
+   * 夜间巩固·一句话回顾（确定性，零 LLM）。
+   * 把当日摘要压成一条 `- recap|日期 共 N 轮：话题…` 放在 summaryLayer 最前，
+   * 便于跨天/新会话快速知道"昨天聊过什么"。只追加一条回顾行，不改写、不删除
+   * ①原文窗口与问句行（用户定调：agent 自己的问句必须留在原文里）。
+   */
+  consolidateDayRecap(actorId: string, day = getCalendarDay()): string | null {
+    if (!this.config.digestEnabled) return null;
+    const rec = this.data.digests[digestKey(actorId, day)];
+    if (!rec) return null;
+
+    const topics: string[] = [];
+    for (const line of rec.recentTurns ?? []) {
+      const m = line.match(/用户:\s*(.+?)\s*\|\s*Agent:/);
+      if (m?.[1]) topics.push(compactDigestField(m[1], 24));
+    }
+    for (const line of rec.keyLines ?? []) {
+      // 人类不会把自己抛出的问句记成"事实/结论"：agent 侧问句只活在①原文窗口，
+      // 不进入日终回顾（否则又会被当成待推进事项复读）。
+      if (/^\[Agent 承诺\/结论\]/.test(line) && /[？?]/.test(line)) continue;
+      const cleaned = line.replace(/^\[(?:用户要求记住|Agent 承诺\/结论)\]\s*/, "").trim();
+      if (cleaned) topics.push(compactDigestField(cleaned, 24));
+    }
+    const uniq = Array.from(new Set(topics.filter(Boolean))).slice(-3);
+    if (uniq.length === 0) return null;
+
+    const recap = `- recap|${day.slice(5)} 共 ${rec.turnCount} 轮（用户侧话题）：${uniq.join(" / ")}`;
+    rec.summaryLayer = dedupeMemoryLines([recap, ...(rec.summaryLayer ?? [])], {
+      preferLatest: false,
+    }).slice(-10);
+    rec.text = materializeDigestText(rec);
+    this.schedulePersist();
+    return recap;
   }
 
   observeTurn(

@@ -4,6 +4,8 @@ import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { UnifiedExtraction } from "../agentic-memory/unified-extractor.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
+import { getDailyDigestService } from "./daily-digest-service.js";
+import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
 import { resolvePrimaryLlmClientConfig, bypassChatRequestExtras } from "../external-model/resolve-provider.js";
 import { UserFactStore } from "./user-fact-store.js";
 import OpenAI from "openai";
@@ -213,6 +215,8 @@ export class NightlyMemoryTaskService {
     archived: boolean;
     synced: boolean;
     slotResync?: Record<string, { facts: number; preferences: number; keptRecent: number }>;
+    /** ⑥ 巩固流水线收尾统计（关闭的悬空问句 / 生成的一日回顾条数） */
+    pipeline?: { recaps: number; questionsClosed: number };
     error?: string;
   }> {
     const result = {
@@ -222,6 +226,7 @@ export class NightlyMemoryTaskService {
       slotResync: undefined as
         | Record<string, { facts: number; preferences: number; keptRecent: number }>
         | undefined,
+      pipeline: undefined as { recaps: number; questionsClosed: number } | undefined,
       error: undefined as string | undefined,
     };
     this.lastJournalFixation = null;
@@ -240,7 +245,7 @@ export class NightlyMemoryTaskService {
       await this.extractFactsFromJournals();
       await this.consolidateUserProfiles();
       await this.consolidateDailyJournals();
-      await this.runDreamPhase();
+      result.pipeline = await this.runDreamPhase();
       result.consolidated = true;
 
       await this.syncToLongTermStorage();
@@ -601,6 +606,38 @@ export class NightlyMemoryTaskService {
     }
   }
 
+  /**
+   * ⑥ 巩固流水线收尾（一次跑完，2026-11-08）。
+   *
+   * 与现有 dreaming 共用同一入口，不新建独立巩固器：
+   *   日结摘要（digest）→ 事实升格（extractFactsFromJournals 已在上游完成）
+   *   → 关闭悬空问句（STM 会话状态槽）→ 一句话回顾（digest summaryLayer）
+   *
+   * 问句本体不删除：①原文窗口与情景日志里的 agent 问句保持原样，这里只清
+   * 「待追问」标记，保证夜间之后不会跨天复读同一个问题。
+   */
+  private async runConsolidationPipeline(): Promise<{
+    recaps: number;
+    questionsClosed: number;
+  }> {
+    const questionsClosed = getShortTermMemoryGatewayService()?.closePendingQuestions() ?? 0;
+
+    const digest = getDailyDigestService();
+    let recaps = 0;
+    for (const actorId of this.getAllActorIds()) {
+      try {
+        if (digest.consolidateDayRecap(actorId)) recaps += 1;
+      } catch (err) {
+        console.error(`[NightlyMemory] day recap failed for ${actorId}:`, err);
+      }
+    }
+
+    console.log(
+      `[NightlyMemory] Consolidation pipeline: questionsClosed=${questionsClosed} recaps=${recaps}`,
+    );
+    return { recaps, questionsClosed };
+  }
+
   /** 事实主库（懒初始化；可用 USER_FACT_STORE_DIR 覆盖存储目录，测试注入用） */
   getFactStore(): UserFactStore {
     if (!this.factStore) {
@@ -919,9 +956,13 @@ export class NightlyMemoryTaskService {
    * upsert 维护的，这里不再触发整文重写。因此即使遍历全部历史 actor，
    * 也只是本地计算，不再产生 LLM 调用。
    */
-  private async runDreamPhase(): Promise<void> {
+  private async runDreamPhase(): Promise<{ recaps: number; questionsClosed: number }> {
+    // ⑥ 巩固流水线：与 dreaming 同一入口、一次跑完（日结回顾 + 关闭悬空问句），
+    // 之后才进入 cleanup → merge → reinforce → weaken 睡眠阶段。
+    const pipeline = await this.runConsolidationPipeline();
+
     const actorIds = this.getAllActorIds().slice(0, this.config.consolidationBatchSize);
-    if (actorIds.length === 0) return;
+    if (actorIds.length === 0) return pipeline;
 
     console.log(
       `[NightlyMemory] Sleep agent phase: cleanup -> merge -> reinforce -> weaken for ${actorIds.length} actors`,
@@ -950,6 +991,7 @@ export class NightlyMemoryTaskService {
     if (hasSleepReports || this.lastJournalFixation) {
       await this.recordSleepAgentReport(actorIds, hasSleepReports ? sleepReports : [], this.lastJournalFixation);
     }
+    return pipeline;
   }
 
   private async recordSleepAgentReport(

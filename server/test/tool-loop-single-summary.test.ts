@@ -478,14 +478,12 @@ test("F. 轮内去重缓存：同工具+同参数的重复调用只真实执行 
   assert.equal(executed.length, 1, "重复的工具调用应命中轮内去重缓存，只真实执行 1 次");
 });
 
-test("G. fast 单波失败：波次耗尽 → 兜底无 schema 汇总（不劣化）", async () => {
+test("G. fast 单波失败：兜底汇总已删除——不编答案，返回空", async () => {
   resetLlmUsageAuditForTest();
 
   const { client, requests } = makeFakeClient([
     // wave 0（PLAN，maxRounds=1 唯一波次）
     toolCallChunks([{ id: "call_g1", name: "bench_search", args: { query: "特斯拉 交付" } }]),
-    // 兜底 SUMMARIZE（无 schema）：失败信息已在 tool 消息中，模型基于知识回答
-    textChunks(RETRY_ANSWER),
   ]);
 
   const { ctx, executed } = makeCtx({ failAll: true });
@@ -498,11 +496,11 @@ test("G. fast 单波失败：波次耗尽 → 兜底无 schema 汇总（不劣�
     { tools: FAKE_TOOLS as never, maxRounds: 1, audit: { sessionId: "bench-fast-fail" } },
   );
 
-  assert.ok(out.includes("46.6"), `失败兜底后仍应给出答案，实际: ${out.slice(0, 80)}`);
+  assert.equal(out, "", "失败后不再有兜底汇总，本轮不返回编造答案");
   assert.equal(executed.length, 3, "失败重试 2 次（共 3 次执行，含 500ms 退避重试）");
   const recs = readAudit("bench-fast-fail");
-  assert.equal(recs.length, 2, "fast 失败路径 = 规划 + 兜底汇总，共 2 次调用");
-  assert.equal(requests[1].tools, undefined, "兜底汇总请求不带 schema");
+  assert.equal(recs.length, 1, "只有规划波 1 次调用，不再有兜底汇总");
+  assert.equal(requests.length, 1, "不得再发起第二次无 schema 汇总调用");
 });
 
 /* ---------------- 质量保护闸（省 token 不牺牲质量） ---------------- */

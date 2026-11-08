@@ -431,6 +431,35 @@ class MobileChatController extends ChangeNotifier {
     return next;
   }
 
+  /// 取名卡挂载（onboarding.name_choices）：服务端只给候选名与抬头，卡片归属
+  /// 是本轮最后一条回复气泡（messageId 命中；找不到就丢弃，不新建气泡）。
+  void _applyNameChoices(Map<String, dynamic> payload) {
+    final String messageId = (payload["messageId"] ?? "").toString();
+    if (messageId.isEmpty) return;
+    final int idx =
+        messages.indexWhere((ChatMessage m) => m.messageId == messageId);
+    if (idx < 0) return;
+    final List<String> choices =
+        (payload["choices"] as List<dynamic>? ?? const <dynamic>[])
+            .map((Object? e) => (e ?? "").toString().trim())
+            .where((String e) => e.isNotEmpty)
+            .toList(growable: false);
+    if (choices.isEmpty) return;
+    messages[idx] = messages[idx].copyWith(
+      nameChoices: choices,
+      nameCardTitle: (payload["title"] ?? "").toString(),
+    );
+  }
+
+  /// 用户一开口（点选候选名或自己打字）就收起取名卡：答复已发出，卡不再有效。
+  void _settleNameCards() {
+    for (int i = 0; i < messages.length; i++) {
+      final ChatMessage m = messages[i];
+      if (m.nameChoices == null || m.nameChoices!.isEmpty) continue;
+      messages[i] = m.copyWith(nameChoices: const <String>[]);
+    }
+  }
+
   /// 消息落盘（fire-and-forget；失败静默，聊天主链路绝不因存储阻塞）。
   void _persist(ChatMessage message) {
     unawaited(
@@ -659,6 +688,7 @@ class MobileChatController extends ChangeNotifier {
           visionFrames.map((VisionWireFrame f) => f.toJson()).toList();
     }
     messages.add(userMsg);
+    _settleNameCards();
     _persist(userMsg);
     notifyListeners();
 
@@ -990,6 +1020,10 @@ class MobileChatController extends ChangeNotifier {
         // 这张卡、不追加消息。判据是 messageId 命中——找不到（消息被删/被滚出
         // 窗口）就静默丢弃，绝不新建气泡。
         _applyCardUpdate(payload);
+      case "onboarding.name_choices":
+        // 首启引导·取名卡（2026-11-08）：挂在指定回复气泡下方（先 done 后卡）。
+        _applyNameChoices(payload);
+        notifyListeners();
       case "chat.turn_started":
       case "chat.assistant_interim":
         _openStreamingMessage(payload);
@@ -1354,6 +1388,11 @@ class MobileChatController extends ChangeNotifier {
   /// （assistant-$traceId，非泡 id 且无正文）让位给第一个真泡。
   void _appendBubbleChunk(String id, String? traceId, String rawChunk) {
     final String chunk = stripAssistantProtocolFrames(rawChunk);
+    // 「边说边出图」的临时照片同一时刻只允许挂在正在流式的那一条消息上：
+    // 新泡开、旧泡定稿时把照片顺移给新泡，而不是留在旧泡。否则早推所在的
+    // 旧泡和 done 最终卡片所在的末泡会各渲染一次同一批照片，聊天里就是
+    // 「同几张照片重复发送」。
+    List<Map<String, dynamic>>? carriedPending;
     if (_streamingMessageId != null &&
         _streamingMessageId != id &&
         !_isBubbleId(_streamingMessageId!)) {
@@ -1361,6 +1400,7 @@ class MobileChatController extends ChangeNotifier {
         (m) => m.messageId == _streamingMessageId,
       );
       if (phIdx >= 0 && messages[phIdx].text.trim().isEmpty) {
+        carriedPending = messages[phIdx].pendingMediaCards;
         messages.removeAt(phIdx);
       }
     }
@@ -1375,13 +1415,17 @@ class MobileChatController extends ChangeNotifier {
             _bubbleTraceOf(m.messageId) != traceId) {
           continue;
         }
+        if (m.pendingMediaCards != null && m.pendingMediaCards!.isNotEmpty) {
+          carriedPending = m.pendingMediaCards;
+        }
         messages[i] = ChatMessage(
           messageId: m.messageId,
           sessionId: m.sessionId,
           role: m.role,
           text: m.text,
           timestamp: m.timestamp,
-          pendingMediaCards: m.pendingMediaCards,
+          // 定稿的旧泡不再持有照片：照片顺移给新泡，保证全程只渲染一份
+          pendingMediaCards: null,
           // streaming 不带 → false：定稿
         );
       }
@@ -1394,6 +1438,7 @@ class MobileChatController extends ChangeNotifier {
           text: chunk,
           timestamp: DateTime.now(),
           streaming: true,
+          pendingMediaCards: carriedPending,
         ));
       } else {
         final ChatMessage prev = messages[idx];
@@ -1404,7 +1449,7 @@ class MobileChatController extends ChangeNotifier {
           text: prev.text + chunk,
           timestamp: prev.timestamp,
           streaming: true,
-          pendingMediaCards: prev.pendingMediaCards,
+          pendingMediaCards: prev.pendingMediaCards ?? carriedPending,
         );
       }
       _streamingMessageId = id;

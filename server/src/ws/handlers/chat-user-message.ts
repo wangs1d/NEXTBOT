@@ -2266,6 +2266,26 @@ async function processBatchedMessage(
         },
       }),
     );
+    // 首启引导·取名卡（2026-11-08）：本轮回复刚把「想怎么称呼我」问出口时，
+    // done 之后再补一条三选一卡片（先 done 后卡，客户端按 messageId 挂到
+    // 末泡下方，顺序不会错）。
+    const onboardingNameCard = deps.onboardingIntroService?.nameChoiceCardFor(msgActor);
+    if (onboardingNameCard) {
+      try {
+        ctx.socket.send(
+          JSON.stringify({
+            type: ServerEventType.OnboardingNameChoices,
+            payload: {
+              messageId: bubbleTracker.outboundDoneMessageId,
+              title: onboardingNameCard.title,
+              choices: onboardingNameCard.choices,
+            },
+          }),
+        );
+      } catch {
+        // 连接已断：引导阶段仍在，下一轮会再补卡，不阻塞收口
+      }
+    }
     // 提醒确认卡：登记本轮新建卡，并用 card.update 原地刷新历史卡（修改 /
     // 取消不追加新卡）。放在 done 之后，客户端此时已按 messageId 落盘该消息。
     rememberReminderCards(msgActor, bubbleTracker.outboundDoneMessageId, structuredCards);

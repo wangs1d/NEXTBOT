@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 启动阶段底色：与 BootAnimation 的 _BootPainter._bg (#161616) 同源。
+         系统启动画面已去掉应用图标，只留这层纯色，Flutter 首帧与 N 光扫同色，
+         点开应用时视觉上只有 N 动画，不出现图标层、也不闪白/闪浅色加载页。 -->
+    <color name="boot_background">#FF161616</color>
+</resources>

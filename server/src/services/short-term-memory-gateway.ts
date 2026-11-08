@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
+import { unifiedMemoryScore } from "./memory-record-utils.js";
 
 export type TaskStackEntry = {
   taskId: string;
@@ -63,6 +64,20 @@ type SessionConversationMemory = {
   agentCommitments: string[];
   /** 连续 topic_switch 轮数（P2：连续切换 K 轮后旧 currentMission 失效置空） */
   topicSwitchStreak?: number;
+  /**
+   * Agent 自己上一轮抛出、尚未得到回应的问句（会话状态槽）。
+   * 问句本体仍活在①原文窗口与情景日志里，这里只存"最近一次"用于防重复追问：
+   * 最多再改述一次，之后只注入"别再提"的抑制行，下一轮没有新问句即自然消失。
+   */
+  pendingQuestion?: {
+    text: string;
+    /** 问句出现的会话轮次（turnSeq 口径） */
+    askedAtTurn: number;
+    /** true = 已经改述过一次（本轮起不再注入追问指令） */
+    restated: boolean;
+  } | null;
+  /** 会话已完成轮次计数（问句龄期判定；持久化后重启仍可判断） */
+  turnSeq?: number;
   lastUpdated: string;
 };
 
@@ -263,6 +278,30 @@ function bigramOverlapScore(a: string, b: string): number {
   return hits / Math.min(A.size, B.size);
 }
 
+const QUESTION_TAIL_RE = /[？?]\s*$/;
+const INTERROGATIVE_TAIL_RE =
+  /(?:吗|呢|么|好不好|行不行|要不要|怎么样|如何|是否|有没有|能不能|可不可以)\s*[？?]?\s*$/;
+
+/**
+ * 从助手回复里取最后一句真问句（问号结尾，或以疑问词收尾）。
+ * 问句本身仍留在①原文窗口/情景日志中——这里只为会话状态槽提供"最近一次"。 */
+function extractAssistantQuestion(text: string): string | null {
+  const normalized = normalizeInput(text);
+  if (!normalized) return null;
+  // 注意只按陈述句末切：问号留在片段里，才能被问句判定命中。
+  const sentences = normalized
+    .split(/[。！!；;\n]+/)
+    .map((s) => s.trim())
+    .filter((s) => s.length >= 2);
+  for (let i = sentences.length - 1; i >= 0; i--) {
+    const sentence = sentences[i]!;
+    if (QUESTION_TAIL_RE.test(sentence) || INTERROGATIVE_TAIL_RE.test(sentence)) {
+      return sentence.length > 80 ? `${sentence.slice(0, 77)}...` : sentence;
+    }
+  }
+  return null;
+}
+
 /**
  * 承诺判定：对**入栈首句**（而非全文）做承诺匹配 + 疑问排除。旧实现对全文匹配、
  * 只存首句，导致承诺栈里堆满"哎哟，被我将了一军"这类首句与承诺无关的闲聊。
@@ -295,6 +334,8 @@ function createEmptyConversationMemory(): SessionConversationMemory {
     facts: [],
     openLoops: [],
     agentCommitments: [],
+    pendingQuestion: null,
+    turnSeq: 0,
     lastUpdated: nowIso(),
   };
 }
@@ -492,6 +533,25 @@ export class ShortTermMemoryGatewayService {
     };
   }
 
+  /**
+   * 夜间巩固：关闭所有会话里悬空的 agent 问句（问句不再跨夜复发）。
+   * 不删除①原文窗口与情景日志中的问句本体——只清状态槽里的"待追问"标记。
+   */
+  closePendingQuestions(): number {
+    let closed = 0;
+    for (const state of Object.values(this.data.sessions)) {
+      if (state.conversationMemory?.pendingQuestion) {
+        state.conversationMemory.pendingQuestion = null;
+        closed += 1;
+      }
+    }
+    if (closed > 0) {
+      this.schedulePersist();
+      console.log(`[STM] closePendingQuestions 关闭悬空问句 ${closed} 条`);
+    }
+    return closed;
+  }
+
   buildPromptContext(
     sessionId: string,
     currentInput?: string,
@@ -515,6 +575,24 @@ export class ShortTermMemoryGatewayService {
       lines.push(
         "本条无新指令：对方只是称呼/寒暄，必须只回应这一声本身；不要延续任何旧话题、旧任务或未回答的问题。",
       );
+    }
+
+    // 会话状态槽·问句：上一轮 agent 抛出的问句若仍悬着，只在这一轮生效。
+    // 规则与用户定调一致——问句活在①原文窗口，1-2 轮后自然消失；最多改述一次，
+    // 之后只注入抑制行，避免「四点半还没睡」被逐轮换说法反复追问。
+    if (memory?.pendingQuestion) {
+      const ageTurns = (memory.turnSeq ?? 0) - memory.pendingQuestion.askedAtTurn;
+      if (ageTurns <= 1) {
+        if (!memory.pendingQuestion.restated) {
+          lines.push(
+            `重要 pending-question: [Agent 自己上一轮的话，不是用户说的] 你上一轮问过「${memory.pendingQuestion.text}」，用户还没正面回答。本轮不要原样重复；要确认只换一种说法问一次；仍不答就直接跳过、别再提。`,
+          );
+        } else {
+          lines.push(
+            "重要 pending-question-settled: [Agent 自己上一轮的话，不是用户说的] 这个问题已经改述过一次仍没得到回答，本轮起不再追问；也禁止借今日摘要/会话回顾把它翻出来复述。",
+          );
+        }
+      }
     }
 
     if (active && includeTaskScopedMemory) {
@@ -642,11 +720,41 @@ export class ShortTermMemoryGatewayService {
     const memory = state.conversationMemory ?? createEmptyConversationMemory();
     state.conversationMemory = memory;
 
+    const turnSeq = (memory.turnSeq ?? 0) + 1;
+    memory.turnSeq = turnSeq;
+
     const userSentence = firstSentence(userText);
     const assistantSentence = firstSentence(assistantText);
     const active = state.tasks.find((task) => task.taskId === state.activeTaskId) ?? null;
     const focus = this.resolveTurnFocus(userText, active, memory);
     const effectiveActive = focus.includeTaskScopedMemory ? active : null;
+
+    // 会话状态槽·问句账本：记录 agent 本轮抛出的最后一个问句；本轮没有再问
+    // → 上一轮问句自然消失（问句本体仍在①原文窗口/情景日志，不在这里长期留存）。
+    const askedQuestion = extractAssistantQuestion(assistantText);
+    if (askedQuestion) {
+      const previous = memory.pendingQuestion;
+      // 同一件事换说法复读的判定：上一轮问句仍悬着 + 本轮不是"新任务请求"，
+      // 且用户输入像在接话（延续/短回应），或新问句与旧问句字面有明显重叠。
+      // 换新话题的任务请求（"帮我订机票"）则重新计为首次追问。
+      const userNormalized = normalizeInput(userText);
+      const newTopicTurn = isTaskSeekingTurn(userText) && focus.kind !== "task_followup";
+      const continuingThread =
+        !newTopicTurn &&
+        (focus.kind !== "topic_switch" ||
+          isContinuityTurn(userText) ||
+          userNormalized.length <= 12);
+      const similar = previous
+        ? continuingThread || bigramOverlapScore(previous.text, askedQuestion) >= 0.25
+        : false;
+      memory.pendingQuestion = {
+        text: askedQuestion,
+        askedAtTurn: turnSeq,
+        restated: similar,
+      };
+    } else {
+      memory.pendingQuestion = null;
+    }
 
     memory.activeTopic =
       effectiveActive?.title || this.inferTopicFromUserText(userText) || memory.activeTopic || null;
@@ -858,7 +966,13 @@ export class ShortTermMemoryGatewayService {
       const rawBm25 = bm25Hits.get(String(turn.idx)) ?? 0;
       // BM25 原始分平滑到 (0,1)（单调：分越高越接近 1），与余弦同尺度可比
       const bm25Norm = rawBm25 > 0 ? rawBm25 / (rawBm25 + 3) : 0;
-      return { turn, score: Math.max(bm25Norm, cosine * 0.85) };
+      const relevance = Math.max(bm25Norm, cosine * 0.85);
+      // 统一排序口径（P4）：与摘要/长期召回共用 相关度×时效×置信度。
+      const score =
+        relevance > 0
+          ? unifiedMemoryScore({ relevance, updatedAt: turn.ts, confidence: 0.6 })
+          : 0;
+      return { turn, score };
     });
 
     // 词法检索只保留有实际命中的轮次（>0），再按近因偏置排序（同分取更新的）

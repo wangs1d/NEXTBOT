@@ -131,6 +131,10 @@ export class StreamSegmenter {
   private maxBubbles: number;
   /** 已推送的气泡数（气泡拆分模式重量上限）。 */
   private bubbleCount = 0;
+  /** 上一次切泡是否跨过了换行（换行 = 模型分条的边界）。
+   *  flushFinal 据此把"换行之后剩下的尾句"当成新的一条消息独立成泡，
+   *  而不是硬并进上一条（否则短尾句又变成泡内分段）。 */
+  private lastCutWasNewline = false;
   /** 串行队列：保证 feed 的异步停顿不交错、乱序 */
   private chain: Promise<void> = Promise.resolve();
   private disposed = false;
@@ -245,10 +249,13 @@ export class StreamSegmenter {
       if (!combined) return;
       const deduped = stripSentencesAlreadySaid(this.emittedText, combined).trim();
       if (!deduped) return;
+      // 残差成新泡的条件：上次切泡跨了换行（模型用换行分条，尾句是新一条
+      // 消息，哪怕只有"嗯"两个字），或残差本身含句末边界。碎片残差
+      // （无边界、且紧接同一句）仍并入末泡。
       const canOpenNew =
         this.bubbleCount > 0 &&
         this.bubbleCount < this.maxBubbles &&
-        BUBBLE_STRONG_BREAK_RE.test(deduped);
+        (this.lastCutWasNewline || BUBBLE_STRONG_BREAK_RE.test(deduped));
       if (this.bubbleCount === 0 || canOpenNew) {
         if (this.bubbleCount > 0) {
           await sleep(this.bubblePauseMs(deduped));
@@ -367,13 +374,18 @@ export class StreamSegmenter {
         firstBubble ? BUBBLE_MIN_STRONG_CHARS : BUBBLE_MIN_CHARS,
       );
       if (!brk) break; // 暂无达标的切泡点
+      const boundary = this.buffer[brk.index];
+      const restRaw = this.buffer.slice(brk.index + 1);
       const raw = this.buffer.slice(0, brk.index + 1);
+      // 换行即分条：边界本身是换行，或边界后的空白里还有换行，
+      // 都说明接下来这段属于新的一条消息（flushFinal 据此不并末泡）。
+      this.lastCutWasNewline = boundary === "\n" || /^\s*\n/u.test(restRaw);
       // 消费边界字符，并剥掉余文的leading逗号/顿号/空白
-      this.buffer = this.buffer
-        .slice(brk.index + 1)
-        .replace(/^[\s，,、]+/u, "");
+      this.buffer = restRaw.replace(/^[\s，,、]+/u, "");
       const text = raw.replace(BUBBLE_EDGE_STRIP_RE, "");
-      if (!text || !BUBBLE_VISIBLE_CHAR_RE.test(text)) continue;
+      // 空行/纯悬挂标点不成泡；其余（含"嗯""？""🙂"这种极短条）都算一条
+      // 真实消息——模型原生分条短到几个字也要照发，不再做并泡。
+      if (!text) continue;
       const deduped = stripSentencesAlreadySaid(this.emittedText, text).trim();
       if (!deduped) continue; // 句级去重后为空（整句已说过）→ 不成泡
       if (this.bubbleCount > 0) {
@@ -416,7 +428,9 @@ export class StreamSegmenter {
         while (k < buf.length && (buf[k] === " " || buf[k] === "\t")) k++;
         const nextIsTableRow = k < buf.length && buf[k] === "|";
         const insideTable = curLineIsTableRow && nextIsTableRow;
-        if (!insideTable && visible >= minStrongChars) return { index: i };
+        // 换行 = 模型分条的消息边界（prompt 协议：一行一条消息），无条件切，
+        // 只有表格内部例外。短到"嗯""？""🙂"的一条也照发，不做字数并泡。
+        if (!insideTable) return { index: i };
         lineStart = i + 1;
         continue;
       }

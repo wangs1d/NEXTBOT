@@ -416,36 +416,80 @@ class MobileSidebarState extends State<MobileSidebar> {
         ),
       );
     }
-    // 设计稿结构：列表末尾紧跟虚线「新建旁聊」卡（随列表滚动，不吸底）。
-    return ListView(
-      padding: const EdgeInsets.symmetric(horizontal: 10),
-      children: <Widget>[
-        if (_chats.isEmpty)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(6, 16, 6, 4),
-            child: Text(
-              _query.isEmpty ? "还没有旁聊" : "没有匹配的旁聊",
-              style: TextStyle(
-                fontFamily: "HarmonyOS Sans SC",
-                fontSize: 12.5,
-                color: p.textMuted,
-              ),
+    final List<Widget> children = <Widget>[];
+    if (_chats.isEmpty) {
+      children.add(
+        Padding(
+          padding: const EdgeInsets.fromLTRB(6, 16, 6, 4),
+          child: Text(
+            _query.isEmpty ? "还没有旁聊" : "没有匹配的旁聊",
+            style: TextStyle(
+              fontFamily: "HarmonyOS Sans SC",
+              fontSize: 12.5,
+              color: p.textMuted,
             ),
           ),
+        ),
+      );
+    } else {
+      // 2026-11-07 反馈：卡片不再显示「几分钟前」，改为按
+      // 今天 / 最近一周 / 更早 分组（参考图第二屏的分组列表）。
+      String? bucket;
+      for (final SideChatSummary chat in _chats) {
+        final String current = _bucketOf(chat.updatedAt);
+        if (current != bucket) {
+          bucket = current;
+          children.add(_buildGroupLabel(p, current));
+        }
         // 没有活跃旁聊时退化为高亮「最近一条」：抽屉只能从主会话打开，
         // 若严格按活跃态判断，用户在主会话里看到的将永远没有高亮（参考图 03
         // 明确要有一条高亮）。最近一条即列表第一条。
-        for (final SideChatSummary chat in _chats)
+        children.add(
           _buildChatItem(
             p,
             chat,
             chat.sessionId == widget.activeSessionId ||
                 (widget.activeSessionId == null && chat == _chats.first),
           ),
-        const SizedBox(height: 8),
-        _buildNewChatCard(p),
-      ],
+        );
+      }
+    }
+    // 设计稿结构：列表末尾紧跟虚线「新建旁聊」卡（随列表滚动，不吸底）。
+    children.add(const SizedBox(height: 8));
+    children.add(_buildNewChatCard(p));
+    return ListView(
+      padding: const EdgeInsets.symmetric(horizontal: 10),
+      children: children,
     );
+  }
+
+  /// 列表分组标签：今天 / 最近一周 / 更早。
+  Widget _buildGroupLabel(MobilePalette p, String label) {
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(8, 12, 8, 6),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontFamily: "HarmonyOS Sans SC",
+          fontSize: 13,
+          fontWeight: FontWeight.w500,
+          letterSpacing: 0.4,
+          color: dark ? const Color(0xFF7C808B) : p.textMuted,
+        ),
+      ),
+    );
+  }
+
+  /// 按自然日归档：今天 / 最近一周（1-6 天前）/ 更早。
+  String _bucketOf(DateTime time) {
+    final DateTime now = DateTime.now();
+    final int days = DateTime(now.year, now.month, now.day)
+        .difference(DateTime(time.year, time.month, time.day))
+        .inDays;
+    if (days <= 0) return "今天";
+    if (days < 7) return "最近一周";
+    return "更早";
   }
 
   Widget _buildChatItem(MobilePalette p, SideChatSummary chat, bool active) {
@@ -549,50 +593,32 @@ class MobileSidebarState extends State<MobileSidebar> {
               ),
             ),
             const SizedBox(width: 8),
-            // 右侧纵列：相对时间在上、删除键在下（2026-11-07 反馈：
-            // 每条旁聊右侧要有可点击的删除按钮，不再只能长按菜单删）。
-            Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: <Widget>[
-                Padding(
-                  padding: const EdgeInsets.only(top: 3),
-                  child: Text(
-                    _relativeTime(chat.updatedAt),
-                    style: TextStyle(
-                      fontFamily: "HarmonyOS Sans SC",
-                      fontSize: 12,
-                      color: dark ? const Color(0xFF6F737C) : p.textMuted,
-                    ),
+            // 右侧只保留可点击的删除键：卡片不再展示「几分钟前」相对时间，
+            // 时间维度改由上方「今天 / 最近一周 / 更早」分组承担。
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () => unawaited(_deleteChat(chat)),
+              child: Container(
+                width: 28,
+                height: 28,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: dark
+                      ? Colors.white.withValues(alpha: 0.05)
+                      : p.surface.withValues(alpha: 0.5),
+                  border: Border.all(
+                    color: dark
+                        ? Colors.white.withValues(alpha: 0.06)
+                        : p.divider.withValues(alpha: 0.5),
                   ),
                 ),
-                const SizedBox(height: 6),
-                GestureDetector(
-                  behavior: HitTestBehavior.opaque,
-                  onTap: () => unawaited(_deleteChat(chat)),
-                  child: Container(
-                    width: 28,
-                    height: 28,
-                    alignment: Alignment.center,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: dark
-                          ? Colors.white.withValues(alpha: 0.05)
-                          : p.surface.withValues(alpha: 0.5),
-                      border: Border.all(
-                        color: dark
-                            ? Colors.white.withValues(alpha: 0.06)
-                            : p.divider.withValues(alpha: 0.5),
-                      ),
-                    ),
-                    child: Icon(
-                      Icons.delete_outline_rounded,
-                      size: 15,
-                      color: dark ? const Color(0xFF8A8E98) : p.textMuted,
-                    ),
-                  ),
+                child: Icon(
+                  Icons.delete_outline_rounded,
+                  size: 15,
+                  color: dark ? const Color(0xFF8A8E98) : p.textMuted,
                 ),
-              ],
+              ),
             ),
           ],
         ),
@@ -792,18 +818,6 @@ class MobileSidebarState extends State<MobileSidebar> {
         ),
       ),
     );
-  }
-
-  String _relativeTime(DateTime time) {
-    final Duration diff = DateTime.now().difference(time);
-    if (diff.inMinutes < 1) return "刚刚";
-    if (diff.inMinutes < 60) return "${diff.inMinutes} 分钟前";
-    if (diff.inHours < 24) return "${diff.inHours} 小时前";
-    if (diff.inDays == 1) return "昨天";
-    if (diff.inDays < 7) return "${diff.inDays} 天前";
-    final String mm = time.month.toString().padLeft(2, "0");
-    final String dd = time.day.toString().padLeft(2, "0");
-    return "$mm/$dd";
   }
 }
 

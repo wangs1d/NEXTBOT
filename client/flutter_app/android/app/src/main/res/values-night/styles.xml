@@ -5,6 +5,10 @@
         <!-- Show a splash screen on the activity. Automatically removed when
              the Flutter engine draws its first frame -->
         <item name="android:windowBackground">@drawable/launch_background</item>
+        <!-- 夜间同样不展示应用图标层，只留与 N 光扫同色底（见 values/styles.xml）。 -->
+        <item name="android:windowSplashScreenBackground">@color/boot_background</item>
+        <item name="android:windowSplashScreenAnimatedIcon">@drawable/splash_no_icon</item>
+        <item name="android:windowSplashScreenAnimationDuration">0</item>
     </style>
     <!-- Theme applied to the Android Window as soon as the process has started.
          This theme determines the color of the Android Window while your

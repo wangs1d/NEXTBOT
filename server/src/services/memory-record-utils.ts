@@ -235,3 +235,40 @@ export function dropExpiredCommitmentLines(
     return ts >= cutoff;
   });
 }
+
+/** 统一排序信号（P4）：所有"按轮注入/召回"的记忆来源共用同一口径。 */
+export interface MemoryRankSignals {
+  /** 与本轮 query 的相关度，0-1（词面/向量/BM25 归一后） */
+  relevance: number;
+  /** 条目最近更新时间（ms 或 ISO）；缺省按"很久以前"计 */
+  updatedAt?: number | string | null;
+  /** 置信度 0-1；缺省 0.6（未标注来源的中性值） */
+  confidence?: number | null;
+  /** 来源权重（如助手侧召回惩罚）；缺省 1 */
+  sourceWeight?: number;
+}
+
+/** 时效半衰期：7 天。人脑式"最近的更清楚"，但旧事不会瞬间归零。 */
+const RECENCY_HALF_LIFE_DAYS = 7;
+
+/**
+ * 统一记忆排序分（P4 检索排序统一）：
+ *   相关度 × 0.55 + 时效 × 0.30 + 置信度 × 0.15，再乘来源权重。
+ *
+ * 此前摘要命中、情景检索、长期召回各自算分（score+recencyBoost / cosine /
+ * hybrid…），同一轮里不同来源的条目无法比较先后，也容易让高相关但陈旧、
+ * 或低相关但新鲜的条目互相挤占 prompt 预算。统一到本函数后，跨来源只差
+ * 喂进来的三个信号，排序与去重口径一致。
+ */
+export function unifiedMemoryScore(signals: MemoryRankSignals, now = Date.now()): number {
+  const relevance = Math.max(0, Math.min(1, signals.relevance));
+  const confidence =
+    signals.confidence == null ? 0.6 : Math.max(0, Math.min(1, signals.confidence));
+  const rawTs = signals.updatedAt;
+  const ts =
+    typeof rawTs === "number" ? rawTs : Date.parse(typeof rawTs === "string" ? rawTs : "");
+  const ageDays = Number.isFinite(ts) ? Math.max(0, (now - ts) / 86_400_000) : 30;
+  const recency = Math.pow(0.5, ageDays / RECENCY_HALF_LIFE_DAYS);
+  const weight = signals.sourceWeight == null ? 1 : Math.max(0, signals.sourceWeight);
+  return (relevance * 0.55 + recency * 0.30 + confidence * 0.15) * weight;
+}

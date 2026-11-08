@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Android 12+ 系统 SplashScreen 的图标位：占位透明 drawable。
+     用户定稿：点开应用不展示应用图标那一层，之后的 N 光扫动画是唯一开场，
+     故此处不引用 @mipmap/ic_launcher / ic_launcher_foreground。 -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <size android:width="1dp" android:height="1dp" />
+    <solid android:color="@android:color/transparent" />
+</shape>

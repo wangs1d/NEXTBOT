@@ -339,10 +339,13 @@ describe("记忆模块全流程", () => {
     });
 
     it("存量整理器标记行在下次整理时被清掉，真实承诺行保留", async () => {
+      // 时间戳用当前时刻：留存评分按时间衰减，旧硬编码日期（2026-10-30）会随
+      // 日历推移跌进 forgotten 区，测试与产品行为无关地过期。
+      const observeTs = new Date().toISOString();
       const legacy = [
         "[当日待整理 2026-10-30]",
         "[/当日待整理]",
-        "[2026-10-30T10:00:00.000Z] [topic:consolidate] 承诺：周六去游泳",
+        `[${observeTs}] [topic:consolidate] 承诺：周六去游泳`,
         "[当日待整理 2026-10-30]",
       ].join("\n");
       await memorySync.setEntryAndWait(ACTOR, "memory_summary", legacy);

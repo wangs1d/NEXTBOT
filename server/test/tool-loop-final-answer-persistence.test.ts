@@ -177,11 +177,12 @@ test("探测汇总收尾 + fold：线程是干净问→答对，无「未生成�
   assert.ok(answerMsg, "fold 后线程应保留含最终答案的 assistant 消息（问→答对完整）");
 });
 
-test("预算耗尽兜底汇总：同样必须把最终答案落进 messages 终态", async () => {
+test("预算耗尽：兜底汇总已删除——返回空，不把编造答案写回 messages", async () => {
   resetLlmUsageAuditForTest();
 
-  // maxRounds=1：波 1 执行完工具后预算耗尽 → break → runSchemaLessSummary(false)
-  const { client, calls } = makeFakeClient([ackThenToolChunks(ACK), textChunks(FINAL_ANSWER)]);
+  // maxRounds=1：波 1 执行完工具后预算耗尽。2026-11-08 起不再调用
+  // runSchemaLessSummary(false)——那一步脱离人格与当前轮事实编叙事，已整体删除。
+  const { client, calls } = makeFakeClient([ackThenToolChunks(ACK)]);
   const view: AnyMsg[] = [
     { role: "system", content: SYSTEM },
     { role: "user", content: USER },
@@ -195,14 +196,10 @@ test("预算耗尽兜底汇总：同样必须把最终答案落进 messages 终�
     { tools: TOOLS, maxRounds: 1, holdAnswer: "after_tool_use", audit: { sessionId: "persist-exhaust" } },
   );
 
-  // 确认走的是兜底汇总路径（第 2 次 create = 无 schema 汇总调用）
-  assert.ok(calls.length >= 2, "应发生主波 + 汇总两次 LLM 调用");
-  assert.ok(out.includes("15-20"), `返回值应含答案本体，实际: ${out.slice(0, 80)}`);
-
-  const last = view[view.length - 1];
-  assert.equal(last.role, "assistant", "messages 终态最后一条必须是 assistant");
+  assert.equal(calls.length, 1, "预算耗尽后不得再发起 schema-less 兜底汇总");
+  assert.equal(out, "", "本轮无正文 → 不返回任何编造答案");
   assert.ok(
-    String(last.content ?? "").includes("15-20"),
-    `assistant 正文应含最终答案，实际: ${JSON.stringify(last.content)?.slice(0, 120)}`,
+    !view.some((m) => m.role === "assistant" && String(m.content ?? "").includes("15-20")),
+    "不得把不存在的 assistant 答案写回 messages",
   );
 });

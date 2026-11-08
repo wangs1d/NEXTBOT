@@ -5587,6 +5587,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 顶在最前——重量级初始化照常在后台跑，注册成功落盘即切入主界面。
   Widget _buildApp() {
     if (!_sessionLoaded) {
+      // 手机端启动阶段：系统启动画面已去掉应用图标层，只留与 N 光扫同色的
+      // 纯底；不复用桌面初始化页（转圈 + 自绘标题栏），否则点开应用会在
+      // 系统层与 N 动画之间插进一层浅色加载页，破坏「只出现 N 动画」。
+      if (_isMobile) {
+        return const ColoredBox(color: Color(0xFF161616));
+      }
       return _buildLoadingApp();
     }
     // 手机端全链走手机 UI：登录门禁 → 手机主壳（对话/日程/我的）。

@@ -285,11 +285,21 @@ export function buildRenderEnvelope(input: RenderEnvelopeInput): RenderEnvelope 
   const mediaCards = input.mediaCards ?? [];
   const renderBlocks = input.renderBlocks ?? [];
   const followups = input.followups ?? [];
-  if (mediaCards.length > 0) {
+  // 媒体唯一出口（2026-11-08 收口，实测取证后定稿）：
+  // - renderBlocks 由服务端从 mediaCards 派生，内部已含同一批照片的 media 块；
+  //   此前把 mediaCards 再编成独立 media 块 + renderBlocks 整体编成
+  //   media_segments，同一组照片在信封里出现两遍 → v2 客户端画两遍。
+  // - renderBlocks 里的文字段与顶层 text 块是同一份正文的两种编码，一起下发
+  //   正文也会渲染两遍（手机端控制器此前剥文字段补救，属出口缝补）。
+  // 收口后：媒体只从 media_segments（仅 media 段）或兜底独立 media 块走一条路；
+  // 正文只由顶层 text 块承载。一个入口（mediaCards），一个出口（信封媒体块）。
+  const mediaOnlySegments = renderBlocks.filter(
+    (b) => (b as { type?: string }).type === "media",
+  );
+  if (mediaOnlySegments.length > 0) {
+    blocks.push({ type: "media_segments", segments: mediaOnlySegments, raw: "" });
+  } else if (mediaCards.length > 0) {
     blocks.push({ type: "media", cards: mediaCards, raw: "" });
-  }
-  if (renderBlocks.length > 0) {
-    blocks.push({ type: "media_segments", segments: renderBlocks, raw: "" });
   }
   if (input.summaryCard) {
     blocks.push({ type: "summary", card: input.summaryCard, raw: "" });

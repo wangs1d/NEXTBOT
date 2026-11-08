@@ -1736,7 +1736,7 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 //     时，进入带 schema 的 replan 波次（上限 maxRounds，默认
 //     PLAN_EXECUTE_MAX_WAVES=4，对话面轻量档 1）：模型基于已有结果继续规划或
 //     直接给出最终回答（文本回复即流式返回）。
-//   - 波次耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）。
+//   - 波次耗尽仍未收尾 → 直接结束本轮（不再发起兜底 SUMMARIZE，2026-11-08 删除）。
 // ═══════════════════════════════════════════════════════════════════
 
 /** 规划波次（plan + replan）默认上限；可用环境变量 PLAN_EXECUTE_MAX_WAVES 调整。 */
@@ -4080,22 +4080,14 @@ export async function streamCompletionWithTools(
     // 模型基于已有结果继续规划或直接给出最终回答）
   }
 
-  // ── 兜底 SUMMARIZE：波次耗尽仍未收尾的工具链（无逃生门的最终汇总，流式输出）──
-  const finalSummary = await runSchemaLessSummary(false);
+  // ── 兜底 SUMMARIZE 已整体删除（2026-11-08 用户指令）──
+  // 波次耗尽 = 模型把预算全花在工具上、始终没给出正文。历史上这里会再发起一次
+  // 无工具 schema 的"汇总收尾"，那一步脱离人格与当前轮事实，把上一轮的工具经历
+  // 当成本轮发生的事拼出假叙事（"刚翻了一下，图片没出来"事故），弊远大于利。
+  // 删除后本轮就以已流出的文本收场（通常为空），由上层按"本轮无回复"处理。
   logPrefixCacheStats();
-  // 出口自检（summary 路径，2026-09-05 统一）：波次已耗尽、且最终汇总仍未满足诉求
-  // → 无预算续波，如实收尾（记录日志供观测；不再返回升级哨兵/整轮重放）。
-  {
-    const summaryUnsatisfiedReason = assessTurnUnsatisfied(finalSummary.text);
-    if (summaryUnsatisfiedReason) {
-      console.info(
-        `[openai-tool-loop] summary 出口自检：${summaryUnsatisfiedReason}` +
-          `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 预算耗尽，如实收尾`,
-      );
-    }
-  }
   recordTurnFinished();
-      recordTurnTrace({
+  recordTurnTrace({
     ts: traceStartTs,
     stage: options?.audit?.stage ?? "main_chat_tools",
     model,
@@ -4107,23 +4099,18 @@ export async function streamCompletionWithTools(
       ? { routeConfidence: options.turnRouteConfidence }
       : {}),
     visibleTools: registryTools.length,
-        deferredActive: toolSearchPrepared.toolSearchActive,
-        deferredCount: toolSearchPrepared.deferredToolCount,
-        ...(recallInjectedNames.length > 0 ? { recallInjectedNames } : {}),
-        ...(userText ? { query: userText.slice(0, 160) } : {}),
+    deferredActive: toolSearchPrepared.toolSearchActive,
+    deferredCount: toolSearchPrepared.deferredToolCount,
+    ...(recallInjectedNames.length > 0 ? { recallInjectedNames } : {}),
+    ...(userText ? { query: userText.slice(0, 160) } : {}),
     waves: traceWavesUsed,
     toolCalls: traceToolCalls,
     ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
     ...(traceExitGate ? { exitGate: traceExitGate } : {}),
-    finalTextChars: finalSummary.text.length,
+    finalTextChars: 0,
     durationMs: Date.now() - traceStartTs,
   });
-  // 同上（2026-10-22 根修）：预算耗尽的兜底汇总同样只返回不落 messages，
-  // 线程会停在 tool 链上被折成「未生成可见回复」的动作台账 → 下一轮重复调工具。
-  if (finalSummary.text.trim()) {
-    messages.push({ role: "assistant", content: finalSummary.text });
-  }
-  return finalSummary.text;
+  return "";
 
   /**
    * SUMMARIZE 阶段：单次不带工具 schema 的汇总调用（流式）。
@@ -4205,30 +4192,11 @@ export async function streamCompletionWithTools(
           `来源=${strategyDirective.quality.sourceCount} 成功=${strategyDirective.quality.successCount} ` +
           `内容=${strategyDirective.quality.totalContentLength}字符 理由=${strategyDirective.quality.reason}`,
       );
-      // 零工具结果守卫（2026-08-28）：本轮没有任何工具执行（含搜索）时，
-      // 明确告知 LLM 禁止虚构"已查询/已翻阅/公开渠道没查到"——假搜索回复的
-      // 最后防线。正则门控（forced-tool）+ 强制联网兜底已在前置层拦住绝大多数，
-      // 这里兜住漏网：模型在无任何证据下编造"查过了"的叙述。
-      // 元工具兜底守卫（2026-08-29）：本轮只执行了 tool_discover / agent.query_capabilities
-      // 这类"查工具目录"的元工具（或全部失败）时，LLM 手里的"工具结果"只有能力描述文本。
-      // 若仍按"基于这些结果回答"引导，会产出"工具没返回内容，都是些功能说明"这种
-      // 把机制话透给用户的回复（fast maxRounds=1 下是高发路径：发现→执行需两轮，单波必断头）。
+      // 零工具/元工具守卫已删（2026-11-08 用户指令——「兜底收尾」链整体下线，
+      // 不再有"基于工具目录编答案"这条路）。
       const substantiveToolResults = allToolExecResults.filter(
         (r) => !META_TOOL_NAMES.has(r.toolName) && !BOOKKEEPING_TOOL_NAMES.has(r.toolName) && r.ok,
       );
-      const metaOnlyGuard =
-        allToolExecResults.length > 0 && substantiveToolResults.length === 0
-          ? `\n\n【重要】本轮只查询了工具目录/能力清单（或工具全部执行失败），没有拿到任何真实的外部内容。` +
-            `严禁把工具说明、能力描述、参数列表当作查询结果复述给用户；` +
-            `严禁说"工具没返回""都是些功能说明"这类暴露机制的话；也不要声称已经查到资料。` +
-            `请基于对话上下文自然回应；若用户要的是需要真正查询才能拿到的信息，就照实说你得现查。`
-          : "";
-      const zeroToolGuard =
-        allToolExecResults.length === 0
-          ? `\n\n【重要】本轮没有执行任何工具或检索。严禁声称已经查询、搜索、翻阅过任何资料` +
-            `（包括"翻了一圈""公开渠道没查到""据我了解最新消息"等说法）；` +
-            `也不要编造任何具体信息来源。请直接说明本轮未获取到外部信息。`
-          : "";
       // 求简指令与「组织充分/按主题分节」结构模板已删（2026-11-05 架构收敛：把主动权
       // 还给 agent——主流工具环在 tool result 回填后直接让模型续跑，不加修辞导演词；
       // 组织方式由 system 一层管，这里只剩「结果已返回，回答」这个事实）。
@@ -4242,9 +4210,7 @@ export async function streamCompletionWithTools(
           ? `工具结果已返回，直接回答用户的问题。`
           : `请基于本轮对话上下文回答用户的问题。`) +
         strategyBlock +
-        sceneBoundaryBlock +
-        zeroToolGuard +
-        metaOnlyGuard;
+        sceneBoundaryBlock;
       const escapeDirective = escapeAllowed
         ? `\n\n【重要】如果你认为现有工具结果不足以回答用户的问题（例如还需要抓取某个具体网页、` +
           `还需要换关键词再查一次），第一行只输出 ${NEED_MORE_TOOLS_MARKER}，不要输出任何其他内容。` +

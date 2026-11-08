@@ -154,6 +154,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
         (_lastMessageCount > 0 && _controller.isProcessing);
     _lastMessageCount = count;
     if (!needScroll) return;
+    // 开场介绍阶段列表是按顶部对齐的正向列表（见 _buildMessageList），
+    // offset 0 是顶部而非底部，不能套用「滚到底」语义。
+    if (!_hasUserMessage) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!_scroll.hasClients) return;
       // 已锚在底部（offset 0）：reverse 列表下新消息自动入画,免动画。
@@ -257,7 +260,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
       toolbarHeight: 52,
       centerTitle: true,
       titleSpacing: 0,
-      leadingWidth: side ? 100 : 60,
+      leadingWidth: 60,
       leading: Padding(
         padding: EdgeInsets.only(left: side ? 6 : 14, top: 7, bottom: 7),
         child: side
@@ -325,7 +328,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 旁聊顶栏「← 主会话」。
+  /// 旁聊顶栏返回：只留返回箭头，不再带「主会话」文案。
   Widget _buildBackToMain(MobilePalette p) {
     return GestureDetector(
       behavior: HitTestBehavior.opaque,
@@ -336,91 +339,36 @@ class _MobileChatPageState extends State<MobileChatPage> {
         }
         unawaited(_controller.returnToMain());
       },
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: <Widget>[
-          Icon(Icons.arrow_back_ios_new_rounded,
-              size: 16, color: p.textPrimary),
-          const SizedBox(width: 2),
-          Text(
-            "主会话",
-            style: TextStyle(
-              fontFamily: _kTopBarFontFamily,
-              fontSize: 13,
-              color: p.textPrimary,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ],
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Icon(
+          Icons.arrow_back_ios_new_rounded,
+          size: 18,
+          color: p.textPrimary,
+        ),
       ),
     );
   }
 
-  /// 旁聊顶栏标题：标题 + 「旁聊」标签 + 独立上下文副行。
+  /// 旁聊顶栏标题：只有首轮对话生成标题后才展示；未命名时不显示任何
+  /// 占位文案（「新旁聊」/「旁聊」标签/「独立上下文 · 不影响主会话」副行已删除）。
   Widget _buildSideChatTitle(MobilePalette p) {
     final String title = (_controller.activeSideTitle ?? "").trim();
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: <Widget>[
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: <Widget>[
-            ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 160),
-              child: Text(
-                title.isEmpty ? "旁聊" : title,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontFamily: _kTopBarFontFamily,
-                  color: p.textPrimary,
-                  fontSize: 17,
-                  fontWeight: FontWeight.w600,
-                  letterSpacing: 0.2,
-                ),
-              ),
-            ),
-            const SizedBox(width: 6),
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2),
-              decoration: BoxDecoration(
-                color: Theme.of(context).brightness == Brightness.dark
-                    ? Colors.white.withValues(alpha: 0.05)
-                    : p.surface.withValues(alpha: 0.5),
-                borderRadius: BorderRadius.circular(999),
-                border: Border.all(
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? Colors.white.withValues(alpha: 0.12)
-                      : p.divider.withValues(alpha: 0.8),
-                ),
-              ),
-              child: Text(
-                "旁聊",
-                style: TextStyle(
-                  fontFamily: _kTopBarFontFamily,
-                  fontSize: 10.5,
-                  letterSpacing: 0.5,
-                  color: Theme.of(context).brightness == Brightness.dark
-                      ? const Color(0xFFA9ADBA)
-                      : p.textSecondary,
-                ),
-              ),
-            ),
-          ],
+    if (title.isEmpty || title == "新旁聊") return const SizedBox.shrink();
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 220),
+      child: Text(
+        title,
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: TextStyle(
+          fontFamily: _kTopBarFontFamily,
+          color: p.textPrimary,
+          fontSize: 17,
+          fontWeight: FontWeight.w600,
+          letterSpacing: 0.2,
         ),
-        const SizedBox(height: 2),
-        Text(
-          "独立上下文 · 不影响主会话",
-          style: TextStyle(
-            fontFamily: _kTopBarFontFamily,
-            fontSize: 11.5,
-            letterSpacing: 0.2,
-            color: Theme.of(context).brightness == Brightness.dark
-                ? const Color(0xFF8A8E99)
-                : p.textMuted,
-          ),
-        ),
-      ],
+      ),
     );
   }
 
@@ -551,22 +499,31 @@ class _MobileChatPageState extends State<MobileChatPage> {
     return statusDot;
   }
 
+  /// 会话里是否已经有用户开口（false = 只有 agent 的开场介绍）。
+  bool get _hasUserMessage =>
+      _controller.messages.any((ChatMessage m) => m.role == "user");
+
   Widget _buildMessageList(BuildContext context, MobilePalette p) {
     if (_controller.messages.isEmpty) {
       return _buildEmpty(p);
     }
+    // 开场介绍（首启引导的两泡问候）还没有用户回复时，列表按顶部对齐：
+    // 底锚会让两泡问候孤零零贴在输入框上方、落在屏幕下半屏（2026-11-08
+    // 反馈要求放到界面上方）。用户开口后恢复常规底部锚定。
+    final bool openingOnly = !_hasUserMessage;
     // 长按/拖拽选中消息文字复制（与桌面端 SelectionArea 行为对齐）
     // reverse:true 底部锚定（2026-10-13）：index 0 = 最新消息（列表底部）,
     // 旧消息向视觉顶部延伸;offset 0 恒锚最新,重进不再需要滚位计算。
     return SelectionArea(
       child: ListView.builder(
         controller: _scroll,
-        reverse: true,
-        padding: const EdgeInsets.fromLTRB(14, 6, 14, 8),
+        reverse: !openingOnly,
+        padding: EdgeInsets.fromLTRB(14, openingOnly ? 24 : 6, 14, 8),
         itemCount: _controller.messages.length,
         itemBuilder: (context, index) {
-          final ChatMessage m =
-              _controller.messages[_controller.messages.length - 1 - index];
+          // 正向列表（开场介绍）index 即消息顺序；reverse 列表 index 0 是最新。
+          final ChatMessage m = _controller.messages[
+              openingOnly ? index : _controller.messages.length - 1 - index];
           final bool isUser = m.role == "user";
           if (m.streaming && m.text.isEmpty) {
             // 处理状态由输入框上方的状态条承载（对齐桌面端：占位不进消息流），
@@ -593,6 +550,24 @@ class _MobileChatPageState extends State<MobileChatPage> {
             );
           }
           if (!isUser) {
+            // 首启引导·取名卡（2026-11-08）：服务端把候选名挂在本轮回复气泡
+            // 上，卡跟在气泡下方（不框进气泡，卡自带完整外观）。
+            final List<String> nameChoices =
+                m.nameChoices ?? const <String>[];
+            if (nameChoices.isNotEmpty) {
+              return Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: <Widget>[
+                  _buildBubble(context, m, isUser, p),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 8),
+                    child: _buildNameChoicesCard(
+                        context, m, nameChoices, p),
+                  ),
+                ],
+              );
+            }
             // 气泡外独立卡（2026-11-07 拍板扩展）：travel_itinerary 大卡与
             // reminder_confirm 提醒确认卡都不框进气泡外壳——气泡只装文字，
             // 卡自带完整外观跟在下方作为独立消息元素（与桌面端同款做法见
@@ -623,6 +598,99 @@ class _MobileChatPageState extends State<MobileChatPage> {
           }
           return _buildBubble(context, m, isUser, p);
         },
+      ),
+    );
+  }
+
+  /// 首启引导·取名卡（2026-11-08）：抬头 + 三个候选名；点选即把答复以用户
+  /// 身份发出（走原发消息链路，服务端据此走统一改名管道）。
+  Widget _buildNameChoicesCard(
+    BuildContext context,
+    ChatMessage m,
+    List<String> choices,
+    MobilePalette p,
+  ) {
+    final String title = (m.nameCardTitle ?? "").trim();
+    const List<String> letters = <String>["A", "B", "C", "D"];
+    return Container(
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.sizeOf(context).width * 0.78,
+      ),
+      padding: const EdgeInsets.fromLTRB(14, 13, 14, 10),
+      decoration: BoxDecoration(
+        color: p.surface,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: p.divider),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          if (title.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 10),
+              child: Text(
+                title,
+                style: TextStyle(
+                  color: p.textPrimary,
+                  fontSize: 13.5,
+                  height: 1.45,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+          for (int i = 0; i < choices.length; i++)
+            _buildNameChoiceRow(
+              choices[i],
+              i < letters.length ? letters[i] : "·",
+              p,
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// 候选名一行：左侧 A/B/C 序号 + 名字，点整行即选中。
+  Widget _buildNameChoiceRow(String name, String letter, MobilePalette p) {
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Material(
+        color: dark ? Colors.white.withValues(alpha: 0.04) : p.background,
+        borderRadius: BorderRadius.circular(10),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(10),
+          onTap: () => unawaited(_controller.send("就叫你「$name」吧")),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+            child: Row(
+              children: <Widget>[
+                SizedBox(
+                  width: 18,
+                  child: Text(
+                    letter,
+                    style: TextStyle(
+                      color: p.textMuted,
+                      fontSize: 12,
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Text(
+                    name,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      color: p.textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

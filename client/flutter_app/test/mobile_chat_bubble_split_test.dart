@@ -185,6 +185,45 @@ void main() {
     expect(c.messages.first.pendingMediaCards, isNotNull);
   });
 
+  test("照片同一时刻只挂一条消息：新泡开时顺移，done 后只由末泡渲染一次", () {
+    final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
+    addTearDown(c.dispose);
+    c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "我去找几张。"));
+    c.debugHandleWsEvent(<String, dynamic>{
+      "type": "chat.media_ready",
+      "payload": <String, dynamic>{
+        "messageId": "assistant-trace-1",
+        "traceId": "trace-1",
+        "cards": <Map<String, dynamic>>[
+          <String, dynamic>{"type": "image", "title": "a"},
+          <String, dynamic>{"type": "image", "title": "b"},
+        ],
+      },
+    });
+    expect(c.messages.first.pendingMediaCards, isNotNull, reason: "流式阶段先展示");
+    c.debugHandleWsEvent(chunk("assistant-trace-1-b2", "给你挑了两张。"));
+    expect(c.messages[0].pendingMediaCards, isNull, reason: "旧泡定稿必须交还照片");
+    expect(c.messages[1].pendingMediaCards, isNotNull, reason: "照片顺移到当前流式泡，全程只有一条消息持有");
+    c.debugHandleWsEvent(done(
+      finalText: "我去找几张。给你挑了两张。",
+      bubbles: <Map<String, dynamic>>[
+        <String, dynamic>{"id": "assistant-trace-1-b1", "text": "我去找几张。"},
+        <String, dynamic>{"id": "assistant-trace-1-b2", "text": "给你挑了两张。"},
+      ],
+      mediaCards: <Map<String, dynamic>>[
+        <String, dynamic>{"type": "image", "title": "a"},
+        <String, dynamic>{"type": "image", "title": "b"},
+      ],
+    ));
+    expect(c.messages.length, 2);
+    expect(
+      c.messages.every((m) => m.pendingMediaCards == null),
+      isTrue,
+      reason: "done 后早推临时照片必须清空，否则同一批照片挂在旧泡+末泡被渲染两次",
+    );
+    expect(c.messages[1].mediaCards!.length, 2, reason: "最终卡片只挂末泡一次");
+  });
+
   test("回归：非分泡单泡链路行为不变", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);

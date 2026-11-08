@@ -84,6 +84,11 @@ class MobileHomePageState extends State<MobileHomePage>
   late final AnimationController _drawerAnim;
   bool _drawerOpen = false;
 
+  /// 进入旁聊时新界面的入场动画（0 = 在左侧屏幕外，1 = 归位）。
+  /// 2026-11-07 反馈：点「新建旁聊 / 打开旁聊」后，新界面要像从侧边栏里
+  /// 滑出来一样整体滑入，而不是主界面原地换内容。
+  late final AnimationController _sideEnterAnim;
+
   /// 底栏外圈灰光的呼吸动画（0 → 1 → 0 循环），只在暗色主题使用。
   late final AnimationController _glowAnim;
 
@@ -121,6 +126,12 @@ class MobileHomePageState extends State<MobileHomePage>
     _drawerAnim = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 240),
+    );
+    // 入场动画空闲态 = 1（无位移），只有进入旁聊时从 0 播到 1。
+    _sideEnterAnim = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+      value: 1,
     );
     // 呼吸灯：4.2s 一轮缓入缓出，明暗幅度很小，只做边缘微光。
     _glowAnim = AnimationController(
@@ -183,6 +194,7 @@ class MobileHomePageState extends State<MobileHomePage>
     c.isChatTabActive = null;
     c.syncSchedule = null;
     _drawerAnim.dispose();
+    _sideEnterAnim.dispose();
     _glowAnim.dispose();
     _chatController.dispose();
     super.dispose();
@@ -242,6 +254,7 @@ class MobileHomePageState extends State<MobileHomePage>
   Widget build(BuildContext context) {
     final MobilePalette p = MobileTheme.of(context);
     final double drawerWidth = _drawerWidthFor(context);
+    final double screenWidth = MediaQuery.sizeOf(context).width;
     final bool dark = Theme.of(context).brightness == Brightness.dark;
     // 主界面深色背景：整屏统一的中性灰（R=G=B），不再自上而下压黑。
     // 2026-11-07 反馈：底部原本渐变到 #0E0E0E，导致输入框/底栏所在的
@@ -273,13 +286,28 @@ class MobileHomePageState extends State<MobileHomePage>
       onHorizontalDragCancel: _handleDrawerDragCancel,
       child: Stack(
         children: <Widget>[
+          // 底色层：进入旁聊时主界面整体从左侧滑入，滑入过程中露出的
+          // 区域必须是与主界面一致的底色（不能透出 MaterialApp 默认底色）。
+          Positioned.fill(
+            child: Container(
+              color: dark ? const Color(0xFF171717) : p.background,
+            ),
+          ),
           // 主界面：抽屉打开时整体右移 288px，右侧只留 32px 窄缝（设计稿 02 屏）。
           AnimatedBuilder(
-            animation: _drawerAnim,
+            animation: Listenable.merge(
+              <Listenable>[_drawerAnim, _sideEnterAnim],
+            ),
             builder: (BuildContext context, Widget? child) {
               final double t = Curves.easeOutCubic.transform(_drawerAnim.value);
+              // 进入旁聊：新界面从屏幕左侧（侧边栏所在方向）滑入到位。
+              final double enter =
+                  Curves.easeOutCubic.transform(_sideEnterAnim.value);
               return Transform.translate(
-                offset: Offset(drawerWidth * t, 0),
+                offset: Offset(
+                  drawerWidth * t - screenWidth * (1 - enter),
+                  0,
+                ),
                 // 右侧窄缝直接展示真实主界面（只叠一层黑色遮罩），
                 // 不再做 ImageFiltered 模糊：Impeller 下离屏模糊容易出色块，
                 // 而且模糊后也看不出「主界面视角」。
@@ -434,17 +462,36 @@ class MobileHomePageState extends State<MobileHomePage>
   /// 点某条旁聊：关抽屉 → 切到独立线程（正在生成时拒绝，避免流式事件串线程）。
   Future<void> _openSideChat(SideChatSummary chat) async {
     _lastSideChatId = chat.sessionId;
-    _closeSidebar();
-    final bool ok =
-        await _chatController.enterSideChat(sessionId: chat.sessionId);
-    if (!mounted) return;
-    if (!ok) {
+    // 抽屉直接收起（不播反向滑动）：新界面要从侧边栏所在方向整体滑入，
+    // 抽屉同时滑出会与入场动画互相打架（2026-11-07 反馈）。
+    _stowDrawerForSideEnter();
+    if (!_chatController.canSwitchSession) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text("正在回复，稍后再切换旁聊")),
       );
       return;
     }
+    // enterSideChat 的同步段已完成切线程，紧接着播放入场动画。
+    final Future<bool> entering =
+        _chatController.enterSideChat(sessionId: chat.sessionId);
+    _playSideEnterAnimation();
+    final bool ok = await entering;
+    if (!mounted || !ok) return;
     _chatController.setActiveSideTitle(chat.title);
+  }
+
+  /// 收起抽屉但不播动画（进入旁聊专用）。
+  void _stowDrawerForSideEnter() {
+    _drawerAnim.stop();
+    _drawerAnim.value = 0;
+    if (_drawerOpen) setState(() => _drawerOpen = false);
+  }
+
+  /// 旁聊新界面从屏幕左侧（侧边栏方向）滑入到位。
+  void _playSideEnterAnimation() {
+    _sideEnterAnim.stop();
+    _sideEnterAnim.value = 0;
+    _sideEnterAnim.forward();
   }
 
   /// 左下角齿轮：设置不再占底栏一格，改为全屏「我的」页路由。

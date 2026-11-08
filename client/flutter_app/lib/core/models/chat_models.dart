@@ -116,6 +116,8 @@ class ChatMessage {
     this.followUpPrompts,
     this.eveningDigest,
     this.transferReminder,
+    this.nameChoices,
+    this.nameCardTitle,
     this.taskId,
     this.taskState,
     this.taskGoal,
@@ -259,6 +261,14 @@ class ChatMessage {
   ///   - state: "pending" | "accepted" | "declined"
   final Map<String, dynamic>? transferReminder;
 
+  /// 首启引导·取名卡（2026-11-08）：服务端在当前轮回复之后下发三个候选名，
+  /// 客户端把它们渲染成卡片挂在同一条回复气泡下方；用户点选/自己回答后清空。
+  /// 仅内存态（重启后随引导阶段由服务端补发，不落本地历史）。
+  final List<String>? nameChoices;
+
+  /// 取名卡抬头文案（如「你想怎么称呼我？之后随时可以改。」）。
+  final String? nameCardTitle;
+
   // ===== 后台任务回执（contentType="task_receipt" 专用，2026-09-08）=====
   //
   // 前后台分工：task.dispatch 派发后台任务后，服务端以 chat.task_update 推送
@@ -305,6 +315,8 @@ class ChatMessage {
     List<String>? followUpPrompts,
     Map<String, dynamic>? eveningDigest,
     Map<String, dynamic>? transferReminder,
+    List<String>? nameChoices,
+    String? nameCardTitle,
     String? taskId,
     String? taskState,
     String? taskGoal,
@@ -334,6 +346,8 @@ class ChatMessage {
       followUpPrompts: followUpPrompts ?? this.followUpPrompts,
       eveningDigest: eveningDigest ?? this.eveningDigest,
       transferReminder: transferReminder ?? this.transferReminder,
+      nameChoices: nameChoices ?? this.nameChoices,
+      nameCardTitle: nameCardTitle ?? this.nameCardTitle,
       taskId: taskId ?? this.taskId,
       taskState: taskState ?? this.taskState,
       taskGoal: taskGoal ?? this.taskGoal,
