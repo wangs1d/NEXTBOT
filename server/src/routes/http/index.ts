@@ -236,10 +236,11 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       externalChat: deps.externalChat ?? null,
     });
   }
-  // 资料库聚合（手机端「资料库」tab）：产出文件 + 笔记 + 行程规划会话一次取齐
+  // 资料库聚合（手机端「资料库」tab）：产出文件 + 图片 + 笔记 + 行程规划会话一次取齐
   registerLibraryRoutes(app, {
     fileProcessingService: deps.fileProcessingService,
     notesService: deps.notesService ?? null,
+    imageGenerationService: deps.imageGenerationService,
   });
   if (deps.webhookService && deps.hookBus) {
     registerWebhookRoutes(app, deps.webhookService, deps.hookBus);

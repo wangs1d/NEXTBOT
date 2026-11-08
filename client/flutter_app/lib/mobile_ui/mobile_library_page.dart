@@ -13,8 +13,10 @@ import "mobile_theme.dart";
 ///
 /// 布局：顶部搜索框 + 类型筛选 chips（全部/文档/表格/图片/笔记/行程）+
 /// 双列网格卡片（图片类带真缩略图，其余带类型色块），卡面含名称、类型、
-/// 时间、来源。文件点按经系统浏览器打开 `/agent/files/<actor>/<name>`。
-/// 数据源：GET /api/library/items?sessionId=<账号 id>（服务端一次聚合）。
+/// 时间、来源。文件点按经系统浏览器打开 `/agent/files/<actor>/<name>`，
+/// 图片点按打开 `/agent/images/<actor>/<name>`。
+/// 数据源：GET /api/library/items?sessionId=<账号 id>（服务端一次聚合，
+/// sections.files / sections.images / sections.notes / sections.travelPlans）。
 class MobileLibraryPage extends StatefulWidget {
   const MobileLibraryPage({super.key, this.client});
 
@@ -78,6 +80,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
       final List<_LibItem> items = <_LibItem>[
         for (final Map<String, dynamic> f in _asList(sections["files"]))
           _LibItem.fromFile(f),
+        for (final Map<String, dynamic> img in _asList(sections["images"]))
+          _LibItem.fromImage(img),
         for (final Map<String, dynamic> n in _asList(sections["notes"]))
           _LibItem.fromNote(n),
         for (final Map<String, dynamic> t in _asList(sections["travelPlans"]))
@@ -314,6 +318,7 @@ class _LibItem {
     required this.source,
     this.fileName = "",
     this.size = 0,
+    this.urlOverride = "",
   });
 
   factory _LibItem.fromFile(Map<String, dynamic> f) {
@@ -327,6 +332,22 @@ class _LibItem {
       source: "对话产出",
       fileName: name,
       size: (f["size"] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  /// 生成图 / 图搜转存图（`data/images/<actor>/`，服务端已给出可拉流 URL）。
+  factory _LibItem.fromImage(Map<String, dynamic> img) {
+    final String name = img["name"]?.toString() ?? "";
+    final DateTime t =
+        DateTime.tryParse(img["updatedAt"]?.toString() ?? "") ?? DateTime.now();
+    return _LibItem(
+      type: _LibType.image,
+      title: _imageTitle(t),
+      time: t,
+      source: "生成 / 搜图",
+      fileName: name,
+      size: (img["size"] as num?)?.toInt() ?? 0,
+      urlOverride: img["url"]?.toString() ?? "",
     );
   }
 
@@ -357,10 +378,22 @@ class _LibItem {
   final String title;
   final DateTime time;
 
-  /// 来源（设计稿卡面要素）：文件=对话产出，笔记=分类，行程=状态。
+  /// 来源（设计稿卡面要素）：文件=对话产出，图片=生成/搜图，笔记=分类，行程=状态。
   final String source;
   final String fileName;
   final int size;
+
+  /// 服务端已给的可拉流地址（图片类使用）；空则按产出文件路由拼。
+  final String urlOverride;
+
+  /// 图片没有可读文件名（服务端落盘名是「时间戳-uuid8.png」），用时间作卡面标题。
+  static String _imageTitle(DateTime t) {
+    final String mm = t.month.toString().padLeft(2, "0");
+    final String dd = t.day.toString().padLeft(2, "0");
+    final String hh = t.hour.toString().padLeft(2, "0");
+    final String mi = t.minute.toString().padLeft(2, "0");
+    return "图片 $mm-$dd $hh:$mi";
+  }
 
   static _LibType _typeOfFileName(String name) {
     final String ext = name.contains(".")
@@ -403,8 +436,9 @@ class _LibItem {
     return "${(size / 1024 / 1024).toStringAsFixed(1)} MB";
   }
 
-  String get fileUrl =>
-      "${ApiConfig.httpBase}/agent/files/${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}/${Uri.encodeQueryComponent(fileName)}";
+  String get fileUrl => urlOverride.isNotEmpty
+      ? "${ApiConfig.httpBase}$urlOverride"
+      : "${ApiConfig.httpBase}/agent/files/${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}/${Uri.encodeQueryComponent(fileName)}";
 }
 
 /// 网格卡片：图片类真缩略图，其余类型色块 + 图标。

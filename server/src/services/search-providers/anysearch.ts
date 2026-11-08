@@ -7,16 +7,17 @@ import { isObj, requestJson, str, toItems, withSource } from "./shared.js";
  *
  * 同一份实现同时服务「外接 API」与「本地部署」两种形态：端点由
  * ANYSEARCH_ENDPOINT 指定（默认官方 API），上层与契约均不感知部署位置。
- * 发行安装包默认指向云端代理（运营方 ECS，key 只存云端），因此本实现
- * 无 key 也可用（requiresApiKey=false）；直连官方端点而无 key 时由上游
- * 401 → 空结果 → 调用方降级爬虫兜底，行为仍正确。
+ * 发行安装包默认指向云端代理（运营方 ECS，key 只存云端），此时显式配置
+ * ANYSEARCH_ENDPOINT，无 key 也可用（requiresApiKey=false）。直连官方端点
+ * （api.anysearch.com）而缺 key 时不发匿名请求：匿名侧返回与 query 无关的
+ * URL（实测 cqvip 文献页），直接返回空（2026-11-08）。
  *
  * 网页搜索：POST /v1/search，Bearer 认证，返回 data.results[{ title, url, snippet, content }]，
  * 含清洗后的正文，对中文与垂直领域友好。
  *
  * 图片搜索：无独立端点，而是 /v1/search + tag={domain}.{sub_domain} 的垂直路由。
  * tag 由 GET /v1/sub-domains?domain=image 能力自发现（服务端灰度开放），
- * 或 ANYSEARCH_IMAGE_TAG 显式指定；未开放时返回 [] → 调用方回退必应爬页兜底。
+ * 或 ANYSEARCH_IMAGE_TAG 显式指定；未开放时返回 []（不回落必应爬页兜底）。
  */
 
 const ANYSEARCH_ENDPOINT =
@@ -29,34 +30,31 @@ const ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS = 2_500;
 const ANYSEARCH_IMAGE_PROBE_DOMAINS = ["image", "images", "photo"] as const;
 let anysearchImageProbe: { at: number; tag: string | null } | null = null;
 
+// 官方直连端点识别：空 key 的匿名请求实测返回与 query 无关的整页垃圾
+// （cqvip.com 文献页 / 随机符号），因此官方端点 + 空 key 时直接禁发请求、返回空。
+// 显式配置了 ANYSEARCH_ENDPOINT（云端代理/本地部署，key 只存服务端）时不拦。
+const ANYSEARCH_IS_OFFICIAL_ENDPOINT = /^https?:\/\/api\.anysearch\.com(\/|$)/i.test(ANYSEARCH_ENDPOINT);
+
+/** 空 key + 官方直连 → 匿名请求必须禁发（否则会把无关 URL 当成搜索结果返回）。 */
+function isAnonymousRequestBlocked(cfg: SearchApiConfig): boolean {
+  return ANYSEARCH_IS_OFFICIAL_ENDPOINT && !cfg.apiKey;
+}
+
 /** 仅供测试：清空 AnySearch 图片能力探测缓存，隔离用例间的模块级状态。 */
 export function resetAnySearchImageProbeForTests(): void {
   anysearchImageProbe = null;
 }
 
 /**
- * 失效 key 自愈（2026-11-05 真机事故）：SEARCH_API_KEY 过期后，每个请求都被上游
- * 401 打回 → 空结果 → 调用方降级爬虫，表现为「搜索能力整块消失」，而官方端点
- * 匿名访问本来是通的。一个脏配置不该让整条联网链路判死，故：遇到 401 时把该 key
- * 在进程内判死一段时间，改匿名直连并当场重试一次。换回有效 key 时只影响首个
- * 请求（先带 key 后 401 再匿名），其余路径不变。
+ * AnySearch 请求头：无 key（云端代理形态）时不带 authorization 头。
+ *
+ * 2026-11-08 起删除了「401 → 判死 key 并匿名重试」的自愈兜底：key 失效时静默
+ * 匿名直连会掩盖配置问题，且匿名侧返回的是与 query 无关的垃圾结果
+ * （实测整页维普文献页），比明确失败更有害。现在 401 直接告警并返回空。
  */
-const API_KEY_REJECT_COOLDOWN_MS = 10 * 60 * 1000;
-let apiKeyRejectedUntil = 0;
-
-function isApiKeyRejected(now = Date.now()): boolean {
-  return apiKeyRejectedUntil > now;
-}
-
-/** 仅供测试：清除失效 key 判死窗口。 */
-export function resetAnySearchKeyRejectionForTests(): void {
-  apiKeyRejectedUntil = 0;
-}
-
-/** AnySearch 请求头：无 key（云端代理形态）或 key 已判死时不带 authorization 头。 */
-function anysearchHeaders(cfg: SearchApiConfig, opts: { anonymous?: boolean } = {}): Record<string, string> {
+function anysearchHeaders(cfg: SearchApiConfig): Record<string, string> {
   const headers: Record<string, string> = { "content-type": "application/json" };
-  if (cfg.apiKey && !opts.anonymous && !isApiKeyRejected()) headers.authorization = `Bearer ${cfg.apiKey}`;
+  if (cfg.apiKey) headers.authorization = `Bearer ${cfg.apiKey}`;
   return headers;
 }
 
@@ -90,7 +88,7 @@ async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | 
   if (!tag) {
     console.warn(
       `[SearchApi] AnySearch 图片垂直能力未开放（探测 ${ANYSEARCH_IMAGE_PROBE_DOMAINS.join("/")} 域均不可用），` +
-        `search_images 暂走必应爬页兜底；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
+        `search_images 返回空图、不回落必应爬页；能力开放后 ${Math.round(ANYSEARCH_IMAGE_PROBE_TTL_MS / 60_000)} 分钟内自动切换，` +
         `或设 ANYSEARCH_IMAGE_TAG=<tag> 强制启用`,
     );
   }
@@ -98,6 +96,14 @@ async function resolveAnySearchImageTag(cfg: SearchApiConfig): Promise<string | 
 }
 
 async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): Promise<InfoSearchItem[]> {
+  // 空 key 禁止匿名请求：官方匿名侧会返回与 query 无关的 URL（cqvip 文献页等），
+  // 直接把这类 URL 交给上层等于交付垃圾搜索结果。
+  if (isAnonymousRequestBlocked(cfg)) {
+    console.warn(
+      `[SearchApi] AnySearch 未配置 SEARCH_API_KEY：禁止匿名直连官方端点（匿名结果与 query 无关），返回空 -> query="${keyword.slice(0, 40)}"`,
+    );
+    return [];
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
   const body = JSON.stringify({
@@ -106,22 +112,18 @@ async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): 
     zone: cfg.anysearchZone === "intl" ? "intl" : "cn",
     language: cfg.anysearchLang,
   });
-  const send = (anonymous: boolean) =>
-    fetch(ANYSEARCH_ENDPOINT, {
+  try {
+    const response = await fetch(ANYSEARCH_ENDPOINT, {
       method: "POST",
-      headers: anysearchHeaders(cfg, { anonymous }),
+      headers: anysearchHeaders(cfg),
       body,
       signal: controller.signal,
     });
-  try {
-    let response = await send(false);
-    // 401 + 确实带了 key → key 失效，判死并当场匿名重试（见 isApiKeyRejected 注释）
-    if (response.status === 401 && cfg.apiKey && !isApiKeyRejected()) {
-      apiKeyRejectedUntil = Date.now() + API_KEY_REJECT_COOLDOWN_MS;
+    // 401 不再改匿名重试：直接告警，让失效 key 暴露出来（见 anysearchHeaders 注释）
+    if (response.status === 401) {
       console.warn(
-        `[SearchApi] AnySearch 401：SEARCH_API_KEY 已失效，${Math.round(API_KEY_REJECT_COOLDOWN_MS / 60_000)} 分钟内改匿名直连（检查 server/.env.local）`,
+        `[SearchApi] AnySearch 401：SEARCH_API_KEY 无效（检查 server/.env.local），不做匿名降级 -> query="${keyword.slice(0, 40)}"`,
       );
-      response = await send(true);
     }
     if (!response.ok) {
       console.warn(
@@ -183,6 +185,12 @@ async function searchWeb(keyword: string, limit: number, cfg: SearchApiConfig): 
 }
 
 async function searchImages(keyword: string, limit: number, cfg: SearchApiConfig): Promise<ImageApiItem[]> {
+  if (isAnonymousRequestBlocked(cfg)) {
+    console.warn(
+      `[SearchApi] AnySearch 未配置 SEARCH_API_KEY：禁止匿名图片请求（匿名侧无有效图源），返回空 -> query="${keyword.slice(0, 40)}"`,
+    );
+    return [];
+  }
   const tag = await resolveAnySearchImageTag(cfg);
   if (!tag) return [];
   const json = await requestJson(
@@ -237,8 +245,9 @@ async function searchImages(keyword: string, limit: number, cfg: SearchApiConfig
 export function createAnySearchProvider(cfg: SearchApiConfig): SearchProvider {
   return {
     name: "AnySearch",
-    // 无 key 可用：发行默认走云端代理（key 只存云端）；直连官方端点缺 key 时
-    // 由上游 401 → 空结果降级，不在此前置拦截（拦截会把无 key 安装包判死）
+    // 无 key 可用：发行默认走云端代理（key 只存云端，显式 ANYSEARCH_ENDPOINT）；
+    // 直连官方端点缺 key 时由 isAnonymousRequestBlocked 前置拦截返回空，
+    // 不发起匿名请求，避免把无关 URL（cqvip 文献页）当成搜索结果。
     requiresApiKey: false,
     searchWeb: (keyword, limit) => searchWeb(keyword, limit, cfg),
     searchImages: (keyword, limit) => searchImages(keyword, limit, cfg),

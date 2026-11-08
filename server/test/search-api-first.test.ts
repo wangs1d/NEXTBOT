@@ -6,8 +6,8 @@
  * limit，混进结果集后在下游 quality 排序里还挤到真实结果前面（实测
  * 「刘浩存 泰国」query）。新契约：
  *   1. API 返回任何真实结果 → 原样直出，爬虫不再混入；
- *   2. API 未配置/失败/空 → 百度/搜狗应急兜底，逐条过相关性闸门；
- *   3. 兜底全不相关 → 返回空（宁可爱模型说「没查到」，不给垃圾）。
+ *   2. API 未配置/失败/空 → 直接返回空，不再回落百度/搜狗兜底（2026-11-08 删除兜底）；
+ *   3. API 结果整页与 query 零相关 → 丢弃并返回空（宁可爱模型说「没查到」，不给垃圾）。
  */
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
@@ -91,18 +91,16 @@ test("API 优先：anysearch 有结果时爬虫不补足、结果全部来自 AP
   }
 });
 
-test("应急兜底：API 失败时保留相关结果、剔除必应式垃圾", async () => {
+test("删除兜底：API 失败时不调百度/搜狗，直接返回空", async () => {
   setApiEnv();
+  let baiduCalled = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("api.anysearch.com")) return new Response("server error", { status: 500 });
     if (url.includes("baidu.com/s")) {
+      baiduCalled += 1;
       return new Response(
-        baiduHtml([
-          ["https://news.example.com/real1", "刘浩存泰国归来！亮相直播"],
-          ["https://baike.example.com/liu", "刘姓起源和刘姓祖先的故事"],
-          ["https://news.example.com/real2", "刘浩存 更新 泰国 plog，暮色蓝调照"],
-        ]),
+        baiduHtml([["https://news.example.com/real1", "刘浩存泰国归来！亮相直播"]]),
         { status: 200 },
       );
     }
@@ -111,37 +109,35 @@ test("应急兜底：API 失败时保留相关结果、剔除必应式垃圾", a
 
   try {
     const items = await searchWebMultiEngine("刘浩存 泰国", 8, opts);
-    assert.ok(items.length >= 2, "两条真实结果应保留");
-    for (const it of items) {
-      const hay = `${it.title}${it.snippet ?? ""}`;
-      assert.match(hay, /刘浩存|泰国/, `不应包含不相关垃圾：${it.title}`);
-    }
-    assert.ok(items.every((it) => !it.title.includes("刘姓起源")), "「刘姓起源」垃圾必须被剔除");
+    assert.equal(items.length, 0, "API 失败时应返回空，不得用兜底引擎填充");
+    assert.equal(baiduCalled, 0, "只信 anysearch：不得请求百度兜底");
   } finally {
     clearApiEnv();
   }
 });
 
-test("应急兜底：API 不可用且兜底全不相关时返回空（不给垃圾）", async () => {
+test("零相关守卫：API 整页跑偏时丢弃并返回空（不回落爬虫）", async () => {
   setApiEnv();
+  let baiduCalled = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes("api.anysearch.com")) return new Response("down", { status: 503 });
+    if (url.includes("api.anysearch.com")) {
+      return anysearchOk([
+        { title: "刘姓（中国姓氏）_百度百科", url: "https://baike.example.com/liu" },
+        { title: "刘的意思,刘的解释,刘的拼音", url: "https://zidian.example.com/liu" },
+      ]);
+    }
     if (url.includes("baidu.com/s")) {
-      return new Response(
-        baiduHtml([
-          ["https://baike.example.com/liu", "刘姓（中国姓氏）_百度百科"],
-          ["https://zidian.example.com/liu", "刘的意思,刘的解释,刘的拼音"],
-        ]),
-        { status: 200 },
-      );
+      baiduCalled += 1;
+      return new Response("", { status: 200 });
     }
     return new Response("", { status: 200 });
   }) as unknown as typeof fetch;
 
   try {
     const items = await searchWebMultiEngine("刘浩存 泰国", 8, opts);
-    assert.equal(items.length, 0, "全部不相关时应返回空，由模型如实说没查到");
+    assert.equal(items.length, 0, "整页零相关时应返回空，由模型如实说没查到");
+    assert.equal(baiduCalled, 0, "只信 anysearch：不得请求百度兜底");
   } finally {
     clearApiEnv();
   }

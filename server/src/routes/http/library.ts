@@ -5,21 +5,27 @@
  *
  * 把散在各处的「产出物」一次取齐，避免客户端打多个接口再拼：
  *   - files       file.write_text / file.export_format 落盘的产出文件（FileProcessingService）
+ *   - images      文生图 / 图生图 / 图搜转存后的本地 PNG（ImageGenerationService，data/images/<actor>/）
  *   - notes       学习/知识笔记（NotesService，按 sessionId 归属）
  *   - travelPlans 行程规划会话摘要（travel-plan-session 落盘会话，复用 listPlanSessionSummaries）
  *
- * 只读聚合，不落任何新数据；单源缺失不挡整体（files/notes 可为空数组）。
+ * 只读聚合，不落任何新数据；单源缺失不挡整体（files/images/notes 可为空数组）。
  */
 import type { FastifyInstance, FastifyRequest } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
 import type { FileProcessingService } from "../../services/file-processing-service.js";
+import type { ImageGenerationService } from "../../services/image-generation-service.js";
 import type { NotesService } from "../../services/notes-service.js";
 import { listPlanSessionSummaries } from "../../skills/travel-planning/travel-plan-session.js";
 
 export function registerLibraryRoutes(
   app: FastifyInstance,
-  deps: { fileProcessingService: FileProcessingService; notesService: NotesService | null },
+  deps: {
+    fileProcessingService: FileProcessingService;
+    notesService: NotesService | null;
+    imageGenerationService: ImageGenerationService;
+  },
 ): void {
   app.get("/api/library/items", async (request) => {
     const q = (request.query ?? {}) as { userId?: string; sessionId?: string; limit?: string };
@@ -29,6 +35,10 @@ export function registerLibraryRoutes(
 
     // 产出文件：FileProcessingService 按 actor 分区落盘（data/user-files/<actor>/）
     const files = deps.fileProcessingService.listFiles(actorId, limit);
+
+    // 图片：生成（文生图/图生图）与图搜转存共用 ImageGenerationService 的
+    // data/images/<actor>/ 目录，统一在此列出，客户端不再另打图片接口。
+    const images = deps.imageGenerationService.listImages(actorId, limit);
 
     // 笔记：NotesService 按 sessionId 分桶 + actor 归属过滤（与 /notes 同口径）
     const notes = deps.notesService
@@ -58,9 +68,10 @@ export function registerLibraryRoutes(
     return {
       ok: true,
       actorId,
-      sections: { files, notes, travelPlans },
+      sections: { files, images, notes, travelPlans },
       counts: {
         files: files.length,
+        images: images.length,
         notes: notes.length,
         travelPlans: travelPlans.length,
       },

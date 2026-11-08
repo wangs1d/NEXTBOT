@@ -317,62 +317,39 @@ export function filterByQueryFragments<T extends { title: string; snippet?: stri
 export async function searchWebMultiEngine(
   query: string,
   limit: number,
-  opts: DomesticFetchOptions,
+  _opts: DomesticFetchOptions,
 ): Promise<InfoSearchItem[]> {
   const keyword = query.trim();
   if (!keyword) return [];
   const boundedLimit = clampInt(limit, 1, 25);
 
-  // 主路：稳定搜索 API（AnySearch 等）。只要返回了真实结果就原样返回——
-  // 爬虫不再「数量不足补足」：必应对多词中文 query（人名+地点）会返回
-  // 「刘姓起源」类垃圾凑满 limit，混进结果集后在下游 quality 排序里还会
-  // 挤到真实结果前面（2026-09-12 实测「刘浩存 泰国」）。API 结果少比结果
-  // 脏好：模型可对已有结果 fetch_web 深读，拿到垃圾却会自信地答错。
+  // 「只信 anysearch」策略（2026-11-08）：搜索 API 是唯一来源，失败/空/零相关
+  // 一律返回空，不再回落百度/搜狗爬虫。此前兜底会静默替换掉用户指定的源，
+  // 实测把无关的「维普文献页」当成搜索结果（人物搜图事故链的起点）。
   const apiResults = await searchViaSearchApi(keyword, boundedLimit);
-  const apiItems = apiResults
-    ? applySearchFreshness(apiResults, { query: keyword }).items.slice(0, boundedLimit)
-    : [];
-  if (apiItems.length > 0) {
-    // 零相关守卫（2026-11-06 实测新增）：引擎对多词中文 query 偶发整页跑偏——
-    // 「美股 收盘 纳斯达克 标普 道指」8/8 返回「热流道/有道/泪道阻塞」（单字
-    // 「道」命中）。整页与 query 片段零命中时视同 API 失败，回落爬虫链：垃圾
-    // 结果模型会当真复述（行情事故链第一环），比空结果危险得多。部分命中
-    // （≥1 条）不动——API 结果少比结果脏好，避免误杀改写型标题。
-    if (filterByQueryFragments(apiItems, keyword).length === 0) {
-      console.warn(
-        `[Search] API ${apiItems.length} 条与 query 零相关（整页跑偏），丢弃并回落爬虫 -> query="${keyword.slice(0, 30)}"`,
-      );
-    } else {
-      return apiItems;
-    }
-  }
-
-  // 应急兜底：仅当 API 未配置/失败/空结果时才走国内引擎爬虫。每条必须过
-  // 相关性闸门，全部不相关时返回空——宁可爱模型如实说「没查到」，也不要
-  // 整页垃圾被模型当成搜索结果复述给用户。必应与 DDG 已从兜底链删除：
-  // 前者是多词中文 query 的系统性垃圾源（RSS 只按首字匹配），后者从部署
-  // 网络恒返回 0 条（白付超时）。兜底阶段加软上限：反爬限流时个别引擎会
-  // 拖满自身超时，不能让整段搜索无上界。
-  const fallbackDeadlineMs = Math.max(4_000, Math.min(8_000, opts.timeoutMs ?? DEFAULT_TIMEOUT_MS));
-  const [baidu, sogou] = await Promise.race([
-    Promise.all([
-      searchBaiduChina(keyword, boundedLimit, opts),
-      searchSogouChina(keyword, boundedLimit, opts),
-    ]),
-    new Promise<[InfoSearchItem[], InfoSearchItem[]]>((resolve) =>
-      setTimeout(() => resolve([[], []]), fallbackDeadlineMs),
-    ),
-  ]);
-  const fallback = [...baidu, ...sogou].filter((x) => x.url && /^https?:\/\//i.test(x.url));
-  const relevant = filterByQueryFragments(dedupeByUrl(fallback), keyword);
-  if (relevant.length > 0) {
-    console.log(
-      `[Search] API 不可用，国内引擎兜底 ${fallback.length} 条中保留相关 ${relevant.length} 条 -> query="${keyword.slice(0, 30)}"`,
+  if (!apiResults) {
+    console.warn(
+      `[Search] 搜索 API 未配置（SEARCH_API_PROVIDER=none/缺 key），按只信 anysearch 策略返回空 -> query="${keyword.slice(0, 30)}"`,
     );
-    return relevant.slice(0, boundedLimit);
+    return [];
   }
-  console.log(`[Search] API 不可用且兜底引擎无相关结果，返回空 -> query="${keyword.slice(0, 30)}"`);
-  return [];
+  const apiItems = applySearchFreshness(apiResults, { query: keyword }).items.slice(0, boundedLimit);
+  if (apiItems.length === 0) {
+    console.warn(
+      `[Search] 搜索 API 返回 0 条（请求失败/业务失败/空结果），按只信 anysearch 策略返回空 -> query="${keyword.slice(0, 30)}"`,
+    );
+    return [];
+  }
+  // 零相关守卫：整页与 query 片段零命中时视同失败（API 结果少比结果脏好）。
+  // 垃圾结果模型会当真复述，比空结果危险得多；部分命中（≥1 条）不动，
+  // 避免误杀改写型标题。
+  if (filterByQueryFragments(apiItems, keyword).length === 0) {
+    console.warn(
+      `[Search] API ${apiItems.length} 条与 query 零相关（整页跑偏），丢弃返回空 -> query="${keyword.slice(0, 30)}"`,
+    );
+    return [];
+  }
+  return apiItems;
 }
 
 function clampInt(input: number, min: number, max: number): number {

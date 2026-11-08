@@ -1,6 +1,6 @@
 import { getDataDir } from "../config/data-dir.js";
 import { randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadSharp } from "./sharp-lazy.js";
@@ -240,6 +240,45 @@ export class ImageGenerationService {
       return s.isFile();
     } catch {
       return false;
+    }
+  }
+
+  /**
+   * 列出该 actor 名下的图片（资料库聚合用）：按修改时间倒序。
+   * 生成图与图搜转存图共用本目录，故一个列表即覆盖「创建过 / 搜索过」的照片。
+   * 只读元数据，不读文件内容；仅返回可经 /agent/images/ 拉流的合法 PNG。
+   */
+  listImages(actorId: string, limit = 200): Array<{
+    name: string;
+    size: number;
+    updatedAt: string;
+    url: string;
+  }> {
+    const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
+    const dir = join(this.storageRoot, safeActorId);
+    try {
+      if (!existsSync(dir)) return [];
+      const out: Array<{ name: string; size: number; updatedAt: string; url: string }> = [];
+      for (const name of readdirSync(dir)) {
+        // 与 resolveFilePath 校验一致：只收时间戳-uuid8.png，避免脏文件拉流 404。
+        if (!/^\d+-[a-f0-9]{8}\.png$/.test(name)) continue;
+        try {
+          const st = statSync(join(dir, name));
+          if (!st.isFile()) continue;
+          out.push({
+            name,
+            size: st.size,
+            updatedAt: st.mtime.toISOString(),
+            url: `/agent/images/${safeActorId}/${name}`,
+          });
+        } catch {
+          // 单个文件 stat 失败跳过
+        }
+      }
+      out.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+      return out.slice(0, Math.max(1, limit));
+    } catch {
+      return [];
     }
   }
 

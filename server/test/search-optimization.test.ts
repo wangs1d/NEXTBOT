@@ -27,11 +27,10 @@ function stubFetch(urlHandler: (url: string) => string): void {
   }) as unknown as typeof fetch;
 }
 
-// ---- 多引擎降级：必应失败时由百度/搜狗/DDG 兜底 ----
-test("多引擎：必应返回空时，由备用引擎兜底返回结果", async () => {
+// ---- 只信 anysearch：API 不可用时不回落百度/搜狗，直接返回空 ----
+test("多引擎：API 不可用时不调用百度/搜狗兜底，直接返回空", async () => {
   let baiduHitCount = 0;
   stubFetch((url) => {
-    if (url.includes("cn.bing.com")) return ""; // 必应失败
     if (url.includes("baidu.com/s")) {
       baiduHitCount++;
       return '<html><body><a href="https://baike.example.com/alpha">航天电子主营业务介绍</a></body></html>';
@@ -41,8 +40,8 @@ test("多引擎：必应返回空时，由备用引擎兜底返回结果", async
   });
 
   const items = await searchWebMultiEngine("航天电子 最新动态", 8, opts);
-  assert.ok(baiduHitCount >= 1, "应调用百度备用引擎");
-  assert.ok(items.length >= 1, "必应失败时仍应返回兜底结果");
+  assert.equal(baiduHitCount, 0, "只信 anysearch：不得调用百度兜底");
+  assert.equal(items.length, 0, "API 不可用时应返回空，不给兜底结果");
 });
 
 // ---- 百度解析：合法的绝对链接 + 足够长的标题才算一条 ----

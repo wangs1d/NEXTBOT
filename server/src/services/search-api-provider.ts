@@ -24,8 +24,8 @@ import {
  * 入 = 实现一份 SearchProvider 契约 + registerSearchProvider 注册一行。
  *
  * 行为约定：
- *   - 未配置（SEARCH_API_PROVIDER=none / 缺 key）→ null（网页）/ []（图片），调用方走多引擎爬网页兜底
- *   - 已配置但请求失败 → []（优雅降级）
+ *   - 未配置（SEARCH_API_PROVIDER=none / 缺 key）→ null（网页）/ []（图片），调用方直接返回空
+ *   - 已配置但请求失败 → []（优雅降级，不回落爬虫兜底）
  *   - 成功 → 去重归一化后的 InfoSearchItem[] / ImageApiItem[]（不超过 limit）
  */
 
@@ -133,23 +133,23 @@ export async function searchViaSearchApi(
   const boundedLimit = Math.max(1, Math.min(20, Math.floor(limit) || 8));
 
   if (cfg.provider === "none") {
-    console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，联网搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
+    console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，按只信 anysearch 策略返回空 -> query="${keyword.slice(0, 40)}"`);
     return null;
   }
   const provider = resolveSearchProvider(cfg);
   if (!provider) return null;
   if (provider.requiresApiKey && !cfg.apiKey) {
-    console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
+    console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，按只信 anysearch 策略返回空 -> query="${keyword.slice(0, 40)}"`);
     return null;
   }
 
   console.log(`[SearchApi] 请求 ${cfg.provider}  查询="${keyword.slice(0, 40)}"  limit=${boundedLimit}`);
   const result = await provider.searchWeb(keyword, boundedLimit);
   // 可观测性：已配置的 API 返回 0 条（请求失败/业务失败/空结果）时显式告警。
-  // 此前静默回退爬虫链，日志里完全看不出「配了 anysearch 却没走 anysearch」。
+  // 2026-11-08 起不再回落爬虫兜底，此告警即最终结论。
   if (result.length === 0) {
     console.warn(
-      `[SearchApi] ${cfg.provider} 返回 0 条结果（请求失败/业务失败/空结果），回退爬虫链 -> query="${keyword.slice(0, 40)}"`,
+      `[SearchApi] ${cfg.provider} 返回 0 条结果（请求失败/业务失败/空结果），按只信 anysearch 策略返回空 -> query="${keyword.slice(0, 40)}"`,
     );
   }
   return result;
@@ -170,17 +170,17 @@ export async function searchImagesViaSearchApi(
   const boundedLimit = Math.max(1, Math.min(12, Math.floor(limit) || 8));
 
   if (cfg.provider === "none") {
-    console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，图片搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
+    console.warn(`[SearchApi] 未配置 SEARCH_API_PROVIDER(或值非法)，按只信 anysearch 策略返回空图 -> query="${keyword.slice(0, 40)}"`);
     return [];
   }
   const provider = resolveSearchProvider(cfg);
   if (!provider) return [];
   if (provider.requiresApiKey && !cfg.apiKey) {
-    console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，图片搜索走爬虫兜底 -> query="${keyword.slice(0, 40)}"`);
+    console.warn(`[SearchApi] provider=${cfg.provider} 已配置但缺少 SEARCH_API_KEY，按只信 anysearch 策略返回空图 -> query="${keyword.slice(0, 40)}"`);
     return [];
   }
   if (!provider.searchImages) {
-    // 提供方无图片能力（如 Jina）→ 回退到爬图片网页兜底。
+    // 提供方无图片能力（如 Jina）→ 直接返回空，不回落图片网页兜底。
     return [];
   }
 

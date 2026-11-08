@@ -3,7 +3,7 @@
  *
  * 背景：AnySearch 无独立图片端点，图片搜索是 /v1/search + tag={domain}.{sub_domain}
  * 垂直路由；tag 由 GET /v1/sub-domains?domain=image 能力自发现（服务端灰度开放），
- * 或 ANYSEARCH_IMAGE_TAG 显式指定。未开放时返回 [] → 调用方回退必应爬页兜底。
+ * 或 ANYSEARCH_IMAGE_TAG 显式指定。未开放时返回 []（不回落必应爬页兜底）。
  */
 import { afterEach, test } from "node:test";
 import assert from "node:assert/strict";
@@ -105,7 +105,7 @@ test("能力自发现：sub-domains 探测到 image 域时用发现的 tag 搜�
   assert.equal(items[0]?.mediaUrl, "https://img.example.com/k.jpg");
 });
 
-test("能力未开放：探测被拒后返回空数组，调用方回退必应爬页兜底", async () => {
+test("能力未开放：探测被拒后返回空数组（调用方不再回落必应）", async () => {
   setProvider();
   let searchCalled = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
@@ -125,7 +125,7 @@ test("能力未开放：探测被拒后返回空数组，调用方回退必应�
   assert.equal(searchCalled, 0, "能力未开放时不应发起图片搜索请求");
 });
 
-test("ANYSEARCH_IMAGE_TAG=off 关闭探测，不发任何请求直接回退", async () => {
+test("ANYSEARCH_IMAGE_TAG=off 关闭探测，不发任何请求直接返回空", async () => {
   setProvider();
   process.env.ANYSEARCH_IMAGE_TAG = "off";
   let called = 0;
