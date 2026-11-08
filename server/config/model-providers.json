@@ -68,12 +68,16 @@
       "name": "智谱 GLM",
       "tagline": "GLM-5.3 旗舰 · 有免费模型",
       "baseUrl": "https://open.bigmodel.cn/api/paas/v4",
-      "defaultModel": "glm-5.3",
+      "defaultModel": "glm-5.3-flash",
       "models": [
         {
-          "id": "glm-5.3",
-          "label": "glm-5.3 · 旗舰（推荐）",
+          "id": "glm-5.3-flash",
+          "label": "glm-5.3-flash · 始终思考（推荐）",
           "recommended": true
+        },
+        {
+          "id": "glm-5.3",
+          "label": "glm-5.3 · 旗舰"
         },
         {
           "id": "glm-5.2",

@@ -3,6 +3,7 @@ import { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 import { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
 import { MiniMaxProvider } from "./providers/minimax-provider.js";
 import { DeepSeekProvider } from "./providers/deepseek-provider.js";
+import { ZhipuProvider } from "./providers/zhipu-provider.js";
 
 /** 在 failover 链等场景使用的已知 id（与各类的 `id` 字段一致，并含别名）。 */
 export function instantiateKnownProvider(token: string): ExternalChatProvider | null {
@@ -18,6 +19,9 @@ export function instantiateKnownProvider(token: string): ExternalChatProvider | 
   }
   if (n === "deepseek" || n === "ds") {
     return new DeepSeekProvider();
+  }
+  if (n === "zhipu" || n === "glm") {
+    return new ZhipuProvider();
   }
   return null;
 }

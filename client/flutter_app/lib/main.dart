@@ -3654,16 +3654,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       return;
     }
 
-    // 旅游规划主战场在旅游入口的规划对话（2026-10-24）：主对话只保留
-    // 天气/票价这类单点查询，识别到规划意图就把原话交接过去。
-    if (!isRetry &&
-        attachmentFrames == null &&
-        looksLikeTravelPlanningRequest(effectiveText)) {
-      _inputController.clear();
-      _openTravelArchive(seedMessage: effectiveText);
-      return;
-    }
-
     // 豆包式列队发送（2026-09-14）：Agent 处理中收到的新输入不再打断当前轮，
     // 而是排队等待依次处理（服务端 MessageBatchProcessor 同语义，每条独立回复）。
     // 429 退避重发同样走排队：服务端按到达顺序排在已排队消息之后，两端顺序一致。

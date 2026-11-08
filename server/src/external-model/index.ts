@@ -33,6 +33,7 @@ export { MoonshotKimiProvider } from "./providers/moonshot-kimi-provider.js";
 export { OpenAiOfficialProvider } from "./providers/openai-official-provider.js";
 export { MiniMaxProvider } from "./providers/minimax-provider.js";
 export { DeepSeekProvider } from "./providers/deepseek-provider.js";
+export { ZhipuProvider } from "./providers/zhipu-provider.js";
 export { FailoverChatProvider } from "./failover-chat-provider.js";
 export { instantiateKnownProvider } from "./instantiate-provider.js";
 export {

@@ -42,6 +42,8 @@ class Graphics;
 ///     等常驻/残留进程不再把豁免永久焊死）。2026-10-25 根修：抑制期间定位
 ///     不再带 SWP_SHOWWINDOW（显示模式切换曾把岛重新弹到独占全屏游戏之上），
 ///     且抑制心跳每跳强制兜底隐藏；全屏判定补「前台全屏」与「跨浮层扫描」
+///   - 提醒豁免的结束判定以墙钟为准（2026-11-05）：动画心跳停摆时由抑制
+///     心跳/看门狗兜底收口，杜绝 attention 状态滞留把抑制永久关掉
 ///
 /// 尺寸即声明（islandTransition 思路）：壳层只在「声明尺寸档」之间插值，
 /// 不按文案实时测量——每种内容态一个标准宽度档，杜绝文案长短引起的抖动。
@@ -228,6 +230,8 @@ class DynamicIslandWindow {
   void LowerToBottom();      // 落回常态沉底（隐藏时清掉临时置顶，防复活骑屏）
   void UpdateAnimations();   // 定时器驱动：推进动画相位并重绘
   void Render();             // 整体重绘（GDI+ -> UpdateLayeredWindow）
+  bool AttentionWallClockExpired() const;  // 墙钟判定提醒是否播完（不依赖动画心跳）
+  void FinishAttention();    // 就地收口：复位时间轴 / 撤临时条目 / 落回沉底
   int CompactWidthFor(Kind kind) const;  // 声明档：该内容态的标准胶囊宽
   int CompactWidth() const;              // 当前条目按档取宽（待机回待机档）
   int CompactHeight() const;             // 音乐有词双行胶囊高一档，其余回常规胶囊高
@@ -350,6 +354,10 @@ class DynamicIslandWindow {
 
   // attention 提醒动画：0=无，>0 = attention 开始时刻（now_s_ 基准）
   double attention_start_s_ = -1.0;
+  // 同一时刻的墙钟锚点（GetTickCount64）。now_s_ 只在 16ms 动画心跳里推进，
+  // Hide/抑制/重建都会停心跳；提醒豁免的「结束」必须有独立时间基准，
+  // 否则 attention_active 恒真会让全屏抑制永久失效（2026-11-05 根修）。
+  ULONGLONG attention_start_ms_ = 0;
   double attention_hold_s_ = kAttnHoldS;  // 本次保持段时长（秒），可变档
   std::wstring attention_title_;    // 高亮时显示的标题（可选，空=沿用当前 entry）
   std::wstring attention_trailing_;

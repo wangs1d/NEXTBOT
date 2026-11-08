@@ -107,14 +107,47 @@ export function deepseekThinkingExtras(
   return { thinking: { type: "disabled" } };
 }
 
+/**
+ * 智谱 GLM 系「关思考」意图的请求参数（provider 路径与裸 SDK 旁路共用同一判定）。
+ *
+ * 2026-11-05 实测（glm-5.3-flash，OpenAI 兼容端点 open.bigmodel.cn/api/paas/v4）：
+ * - `thinking: {type:"disabled"}` → 400 / 错误码 1210（"该模型始终思考，不支持关闭
+ *   思考；请使用 low、high 或 max"）——硬拒，同 MiniMax M3.1 模式；
+ * - `thinking: {type:"enabled",effort:"low"}` → 200 但仍烧 47 个思考 token（只是降档）；
+ * - `reasoning_effort: "low"` → 200 且 `reasoning_tokens=0`（**唯一等效关思考的姿势**，
+ *   正文干净）。
+ * 因此「关思考」降级为 effort=low；思考开启时允许 `ZHIPU_REASONING_EFFORT`
+ * （low|high|max）调档，不设则用服务端默认。
+ */
+export function zhipuThinkingExtras(
+  model: string,
+  disableThinking: boolean,
+): Record<string, unknown> {
+  void model; // 关思考姿势与具体 GLM 型号无关（1210 报错文案即指向 effort 档位）
+  if (!disableThinking) {
+    const effort = process.env.ZHIPU_REASONING_EFFORT?.trim().toLowerCase();
+    return effort ? { reasoning_effort: effort } : {};
+  }
+  return { reasoning_effort: "low" };
+}
+
 export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
   openai: {
-    // openai 槽位可能托管 gpt 系（无思考）或 DeepSeek（deepseek-flash 默认带思考，
-    // 由 openai-official-provider.buildExtraBody 自动下发 thinking:disabled）。
+    // openai 槽位可能托管 gpt 系（无思考）、DeepSeek（deepseek-flash 默认带思考，
+    // 由 openai-official-provider.buildExtraBody 自动下发 thinking:disabled）或
+    // 经 service-config 钉进来的智谱 GLM（目录商统一走 OpenAI 兼容网关）。
     thinkingProne: false,
     canDisableThinking: true,
-    bypassRequestExtras: (model) =>
-      model.toLowerCase().includes("deepseek-flash") ? disableThinking() : {},
+    bypassRequestExtras: (model) => {
+      const m = model.toLowerCase();
+      if (m.includes("deepseek-flash")) return disableThinking();
+      // glm-5.3 系「始终思考」且硬拒 thinking:disabled（400/1210）：openai 槽位
+      // 托管时旁路同样走 reasoning_effort:"low" 等效关思考（2026-11-05 实测
+      // reasoning_tokens=0），判定与 zhipu 原生 profile 同源，避免旁路热路径
+      // 被思考链饿死。
+      if (m.includes("glm-5.3")) return zhipuThinkingExtras(model, true);
+      return {};
+    },
     ...FAST_ROUTE,
     supportsJsonMode: true,
   },
@@ -144,6 +177,18 @@ export const PROVIDER_MODEL_PROFILES: Record<string, ProviderModelProfile> = {
     thinkingProne: true,
     canDisableThinking: true,
     bypassRequestExtras: (model) => minimaxThinkingExtras(model, true),
+    ...THINKING_ROUTE,
+    supportsJsonMode: true,
+  },
+  zhipu: {
+    // GLM-5.3 系「始终思考」：thinking:disabled 硬拒（400/1210），等效关思考走
+    // reasoning_effort:"low"（2026-11-05 实测 reasoning_tokens=0，判定收敛在
+    // {@link zhipuThinkingExtras}）。思考计入输出预算（实测 max_tokens=32 被思考
+    // 全额吃光、正文为空），路由预算按思考型放大。图像输入未实测，vision-support
+    // 未登记 glm-5.3 模式——不会注入 image_url，按纯文本对待最稳。
+    thinkingProne: true,
+    canDisableThinking: false,
+    bypassRequestExtras: (model) => zhipuThinkingExtras(model, true),
     ...THINKING_ROUTE,
     supportsJsonMode: true,
   },

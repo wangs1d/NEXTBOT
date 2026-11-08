@@ -19,6 +19,7 @@ import {
 import type { AgentStreamOptions, ToolExposureProfile } from "./types.js";
 // 从 tool-search/catalog 具体模块导入而非 gateway/index 大桶——本模块被 abstract-chat-provider 引用，经桶文件会回连 providers/* 形成循环
 import { estimateToolsSchemaTokens } from "../tools/tool-search/catalog.js";
+import { applyVisibleToolBudget } from "./visible-tool-stabilizer.js";
 
 export type ResolvedChatToolPlan = {
   visibleTools: ChatCompletionTool[];
@@ -417,7 +418,7 @@ function dropOfflineDesktopTools(
   );
 }
 
-export function resolveChatToolPlanForStream(
+function resolveChatToolPlanForStreamInner(
   userText?: string,
   streamOpts?: AgentStreamOptions,
 ): ResolvedChatToolPlan {  // 2026-08-01 性能优化：轻量档小工具集短路。
@@ -531,4 +532,27 @@ export function resolveChatToolPlanForStream(
     visibleTools: ranked,
     searchableTools: accessFiltered,
   };
+}
+
+/**
+ * visible 工具集收口（2026-11-05 首字延迟治理）。
+ *
+ * 所有暴露档位（light / contextual / scoped / delegate / explicit）的出口都汇聚到
+ * 这里，统一过一次**数量预算**。
+ *
+ * 与 `stabilizeToolOrderForSession` 的分工：那层负责「顺序逐字节稳定」（会话冻结，
+ * 只增不减），本层负责「数量不失控」。两层缺一不可——只有顺序稳定，25 个工具的
+ * prefill 依然要 5-7s；只压数量不保顺序，缓存又会因为顺序抖动打不中。
+ *
+ * 放在最外层而不是各分支里改，是为了「换 provider / 加档位」不再需要逐个分支适配
+ * ——与 provider-profiles 同一条设计原则：规则集中一处，调用点只消费。
+ */
+export function resolveChatToolPlanForStream(
+  userText?: string,
+  streamOpts?: AgentStreamOptions,
+): ResolvedChatToolPlan {
+  const plan = resolveChatToolPlanForStreamInner(userText, streamOpts);
+  const visibleTools = applyVisibleToolBudget(plan.visibleTools);
+  if (visibleTools === plan.visibleTools) return plan;
+  return { ...plan, visibleTools };
 }

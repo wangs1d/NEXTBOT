@@ -596,6 +596,10 @@ void DynamicIslandWindow::Show() {
 }
 
 void DynamicIslandWindow::Hide() {
+  // 整岛隐藏（登录门禁等）即终止进行中的提醒：Hide 会停掉 16ms 动画心跳，
+  // 留着 attention_start_s_ 会把「提醒豁免」滞留到墙钟兜底，临时条目与
+  // urgent 置顶态也会残留。就地收口，不用等下一次抑制心跳。
+  FinishAttention();
   visible_ = false;
   hovering_ = false;
   UpdateWheelHook();
@@ -1121,6 +1125,9 @@ void DynamicIslandWindow::StartAttention(const std::string& title,
     now_s_ = static_cast<double>(GetTickCount64() - anim_epoch_ms_) / 1000.0;
   }
   attention_start_s_ = now_s_;
+  // 墙钟锚点与动画时间轴并行记录：提醒豁免的结束判定不能只靠 16ms 心跳
+  // （见 UpdateFullscreenSuppression 开头的兜底，2026-11-05）。
+  attention_start_ms_ = GetTickCount64();
   // 宽度自适应（2026-10-07）：按本次提醒文本实测取档，attention 激活
   // 期间 CompactWidth 以此为准（含覆盖在常规条目上的情况）。
   attention_capsule_w_ = MeasureAttentionCapsuleW(attention_title_,
@@ -1215,6 +1222,37 @@ double DynamicIslandWindow::AttentionScale() const {
     return kAttentionScale + (1.0 - kAttentionScale) * EaseOutCubic(x);
   }
   return 1.0;  // 已结束（调用方负责清 attention_start_s_）
+}
+
+// 提醒是否按墙钟播完。旧版只在 Render 的动画时间轴（now_s_）里复位，而
+// now_s_ 仅由 16ms 动画心跳推进——Hide()/抑制/窗口重建都会停掉它，此时
+// attention_start_s_ 永远停在 >=0，attention_active 恒真、busy 恒 false，
+// 全屏抑制从此永久失效（岛在游戏里常驻）。2026-11-05 根修：结束判定改用
+// 与动画无关的墙钟，抑制心跳（2s）与看门狗（15s）都会执行兜底收口。
+bool DynamicIslandWindow::AttentionWallClockExpired() const {
+  if (attention_start_s_ < 0 || attention_start_ms_ == 0) return false;
+  // holdS 来自服务端事件，异常大值不该把豁免拖成永久：给时间上界兜底，
+  // 同时避免 double -> ULONGLONG 的溢出转换（UB）。
+  constexpr double kMaxAttentionS = 3600.0;
+  const double total_s = std::min(
+      kAttnInS + attention_hold_s_ + kAttnOutS, kMaxAttentionS);
+  const ULONGLONG total_ms = static_cast<ULONGLONG>(total_s * 1000.0 + 0.5);
+  return GetTickCount64() - attention_start_ms_ >= total_ms;
+}
+
+// 就地收口一次进行中的提醒：复位时间轴 + 撤掉临时条目 + 落回沉底。
+// 刻意不做抑制重算与重绘：本函数同时被 Render、抑制心跳与 Hide 调用，
+// 后续动作交给调用方，避免递归。urgent 曾临时置顶，收口即落底，
+// 否则「隐藏 + 顶层」会被任意 Show 路径复活并骑在全屏应用之上。
+void DynamicIslandWindow::FinishAttention() {
+  if (attention_start_s_ < 0) return;
+  attention_start_s_ = -1.0;
+  attention_start_ms_ = 0;
+  if (entry_.id == "attention") {
+    has_entry_ = false;
+    entry_ = Entry{};
+  }
+  LowerToBottom();
 }
 
 void DynamicIslandWindow::SetDpiScale(double scale) {
@@ -1314,6 +1352,15 @@ void LogSuppressSource(HWND covering, bool fg_fullscreen, int quns_state) {
 // 日程到点）；非紧急档在抑制中由 StartAttention 整体跳过。urgent attention
 // 播完/点击收口后由各结束点回推一次本函数立即让位，心跳 2s 兜底。
 void DynamicIslandWindow::UpdateFullscreenSuppression() {
+  // 2026-11-05 根修：先按墙钟收口已播完的提醒。旧版复位只发生在 Render 的
+  // 动画时间轴里，一旦 Hide()/抑制/重建停掉 16ms 心跳，attention_active 就
+  // 恒真 → busy 恒 false → 全屏抑制永久失效。抑制心跳（2s）与 Dart 看门狗
+  // （15s）都会走到这里，任何心跳停摆都能自愈；日志只在「动画没跑完而由
+  // 墙钟兜底」时打一条，正常收口不打扰。
+  if (AttentionWallClockExpired()) {
+    IslandLifecycleLog(window_handle_, L"attention-expired-wallclock");
+    FinishAttention();
+  }
   // QUNS 只是三条独立证据之一，查询失败（独占全屏 / DWM 合成关闭时 shell
   // 偶尔给不出状态）绝不能连几何判定一起丢——旧代码直接 return，那一刻
   // 起岛就再没人管了。
@@ -1337,7 +1384,8 @@ void DynamicIslandWindow::UpdateFullscreenSuppression() {
   }
   // 提醒豁免收紧（2026-10-13 定调）：只有 urgent attention（外卖等高优
   // 消息、日程到点）可豁免全屏抑制；非紧急档由 StartAttention 在抑制中
-  // 整体跳过，不破屏。
+  // 整体跳过，不破屏。该豁免有时间上界（AttentionWallClockExpired），
+  // 不会因动画心跳停摆而变成永久豁免（2026-11-05）。
   const bool attention_active = attention_start_s_ >= 0 && attention_urgent_;
   // 压在岛上面的窗口与全屏同权：盖住岛就让位（2026-10-09 拍板最大化让位，
   // 自家主窗口一视同仁；2026-10-23 根修：判定对象换成 Z 序命中岛形的那个
@@ -1787,19 +1835,17 @@ void DynamicIslandWindow::Render() {
     double att = AttentionScale();
     bool attention_active = attention_start_s_ >= 0;
     if (attention_start_s_ >= 0 &&
-        now_s_ - attention_start_s_ >
-            kAttnInS + attention_hold_s_ + kAttnOutS) {
-      attention_start_s_ = -1;  // 动画播完自动复位
+        (now_s_ - attention_start_s_ >
+             kAttnInS + attention_hold_s_ + kAttnOutS ||
+         AttentionWallClockExpired())) {
+      // 动画播完，或心跳停摆但墙钟已到期：统一走 FinishAttention 收口，
+      // 保证两个时间基准与临时条目一起复位（就地清，勿调 ClearEntry——
+      // 本帧正在 Render，会递归重入）。
+      FinishAttention();
       att = 1.0;
       attention_active = false;
-      if (entry_.id == "attention") {
-        // 临时条目随提醒结束退场（就地清，勿调 ClearEntry——本帧正在 Render，
-        // 递归重入；且此处 attention 已复位，ClearEntry 的进行中守卫也不适用）。
-        has_entry_ = false;
-        entry_ = Entry{};
-      }
       // 提醒结束立即让位：全屏环境仍在时回抑制态（幂等），不等下一跳。
-      // urgent 曾临时置顶，这里落回常态沉底（抑制时窗口已藏，落位幂等）。
+      // urgent 曾临时置顶，FinishAttention 已落回沉底，这里只做定位。
       UpdateFullscreenSuppression();
       if (attention_urgent_) PositionAtTopCenter();
     }
@@ -2560,9 +2606,8 @@ LRESULT DynamicIslandWindow::HandleMessage(HWND hwnd, UINT message,
       // attention 进行中点击 = 知道了：提前收口（临时条目一并清），
       // 并让 Dart 打开日程页（到点提醒的确认出口，2026-10-05 定调）。
       if (attention_start_s_ >= 0) {
-        attention_start_s_ = -1;
-        if (entry_.id == "attention") ClearEntry();
-        else Render();
+        FinishAttention();
+        Render();
         FireEvent(EventType::kAction, "打开日程");
         // 提前收口后立即让位：全屏环境仍在时回抑制态，不等下一跳。
         // urgent 曾临时置顶，落回常态沉底。

@@ -64,8 +64,8 @@ const FALLBACK_PROVIDERS: ModelProviderDto[] = [
     id: "zhipu",
     name: "智谱 GLM",
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
-    defaultModel: "glm-5.3",
-    models: [{ id: "glm-5.3", recommended: true }, { id: "glm-4.7-flash" }],
+    defaultModel: "glm-5.3-flash",
+    models: [{ id: "glm-5.3-flash", recommended: true }, { id: "glm-5.3" }, { id: "glm-4.7-flash" }],
     consoleUrl: "https://open.bigmodel.cn/usercenter/apikeys",
   },
   {

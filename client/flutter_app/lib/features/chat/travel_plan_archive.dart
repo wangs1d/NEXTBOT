@@ -317,25 +317,6 @@ class _PlanSessionSummary {
 // 页面骨架：宽窗双栏（左栏行程 + 主区规划流） / 窄窗顶部切换
 // ═══════════════════════════════════════════════════════════════════
 
-/// 主对话 → 旅游入口的交接判定（2026-10-24）：旅游规划主战场在旅游界面的
-/// 规划对话，主对话只保留单点查询（天气/票价等）。命中即把用户原话带过去。
-bool looksLikeTravelPlanningRequest(String text) {
-  final String t = text.trim();
-  if (t.isEmpty || t.length > 200) return false;
-  final bool planWord = RegExp(r"行程|攻略|规划|度假|旅游|旅行|自由行|自驾游|多日游")
-      .hasMatch(t);
-  final bool dayWord = RegExp(r"(\d+|[一二三四五六七八九十两])\s*[天日]").hasMatch(t);
-  final bool tripPhrase =
-      RegExp(r"(去|到)[^\s，。！？]{2,10}(玩|旅游|度假|逛|游)").hasMatch(t);
-  if (!(planWord || tripPhrase)) return false;
-  // 单点查询不交接：「三亚明天天气」「门票多少钱」不是规划行程
-  if (!dayWord &&
-      RegExp(r"天气|气温|下雨|门票|票价|机票|高铁票|酒店价格|多少钱").hasMatch(t)) {
-    return false;
-  }
-  return true;
-}
-
 class TravelPlanArchivePage extends StatefulWidget {
   const TravelPlanArchivePage({super.key, this.seedMessage, this.agentName});
 

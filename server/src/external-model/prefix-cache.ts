@@ -126,6 +126,16 @@ function resolvePromptCacheProfile(providerId: string, model: string): PromptCac
     };
   }
 
+  if (normalized === "zhipu") {
+    // 智谱 BigModel 端点为服务端隐式前缀缓存（按 2026-11-05 接入时未实测逐块命中，
+    // model-providers.json 目录标记 per-node）：不走 openai 槽的 explicit-key，
+    // 与 MiniMax 同按隐式对待。
+    return {
+      mode: envEnabled("ZHIPU_PREFIX_CACHE_ENABLED", true) ? "implicit-prefix" : "none",
+      namespace: process.env.ZHIPU_PROMPT_CACHE_NAMESPACE?.trim() || DEFAULT_NAMESPACE,
+    };
+  }
+
   if (normalized === "minimax") {
     // MiniMax 实测（2026-10-07 受控探针）：服务端多副本缓存不一致，被动缓存对
     // 字节级相同请求也会随机 128↔全量命中。显式断点（anthropic 风格块状

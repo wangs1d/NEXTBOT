@@ -196,10 +196,13 @@ function Invoke-BuildAndDeploy {
   # 字体文件 → Remove-Item 报「正在被另一进程使用」）。robocopy /MIR 对
   # 「时间戳+大小相同」的文件直接跳过，不会去写那类锁住的未变文件；内容真变了
   # 的文件照样会失败——那才是需要人介入的失败。
-  $copyArgs = @($src, $dest, '/MIR', '/R:1', '/W:1', '/NFL', '/NDL', '/NJH', '/NJS')
-  $copy = Start-Process -FilePath 'robocopy.exe' -ArgumentList $copyArgs -NoNewWindow -Wait -PassThru
-  if ($copy.ExitCode -ge 8) {
-    Write-Error "robocopy to $dest failed (code $($copy.ExitCode))"
+  # 直接调用而非 Start-Process：环境里同时存在 HTTPS_PROXY 与 https_proxy
+  # （仅大小写不同）时，PowerShell 5.1 的 Start-Process 构造子进程环境字典
+  # 会抛「已添加了具有相同键的项」，编译已成功却把整次构建判成失败
+  # （2026-11-05 实证）。robocopy 退出码 0-7 均为成功，>=8 才是失败。
+  & robocopy.exe $src $dest /MIR /R:1 /W:1 /NFL /NDL /NJH /NJS
+  if ($LASTEXITCODE -ge 8) {
+    Write-Error "robocopy to $dest failed (code $LASTEXITCODE)"
   }
 
   Write-Host ''
