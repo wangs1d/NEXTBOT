@@ -175,7 +175,13 @@ export interface ShoppingCompareServiceDeps {
    * PNG 再给卡片，客户端只跟自己的服务端打交道。未注入时保留原始 URL（降级）。
    */
   imageStore?: {
-    downloadAndStorePng(remoteUrl: string, actorId: string, timeoutMs?: number): Promise<string>;
+    downloadAndStorePng(
+      remoteUrl: string,
+      actorId: string,
+      timeoutMs?: number,
+      sessionId?: string,
+      opts?: { libraryHidden?: boolean },
+    ): Promise<string>;
   };
 }
 
@@ -523,7 +529,10 @@ export class ShoppingCompareService {
           let local = cache.get(remote);
           if (!local) {
             try {
-              local = await store.downloadAndStorePng(remote, actorId, 8_000);
+              // 商品图只服务比价卡片，不进资料库（购物数据不参与「对话产出」归档）。
+              local = await store.downloadAndStorePng(remote, actorId, 8_000, undefined, {
+                libraryHidden: true,
+              });
               cache.set(remote, local);
             } catch {
               return; // 落地失败：保留原 URL

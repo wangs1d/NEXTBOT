@@ -194,7 +194,6 @@ for (const sc of SCENARIOS) {
         toolCalled, toolOk,
         waves: trace?.waves, calls: trace?.toolCalls?.length,
         requestCard: trace?.requestCard?.fired === true,
-        exitGate: trace?.exitGate?.reason ?? null,
         durationMs: Date.now() - t0,
         finalTextHead: String(finalText).slice(0, 50),
       });

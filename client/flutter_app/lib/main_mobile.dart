@@ -2,6 +2,7 @@ import "dart:async";
 
 import "package:flutter/foundation.dart";
 import "package:flutter/material.dart";
+import "package:flutter/services.dart";
 
 import "app/ambient_feeds_controller.dart";
 import "core/config/api_config.dart";
@@ -32,7 +33,9 @@ import "mobile_ui/mobile_theme.dart";
 /// - 真机(手机与后端在同一局域网)：
 ///   改用手机连的局域网 IP,如 `--dart-define=HTTP_BASE=http://192.168.1.100:3000`
 ///
-/// 登录门禁：仅提供邮箱登录（与桌面端 /accounts/web 两步式同协议）。
+/// 登录门禁：邮箱两步验证，**登录与注册是两个界面**（2026-11 拆分）。
+/// 老用户走 `POST /accounts/login`（只登录不建档，注册过的直接进），新用户走
+/// `POST /accounts/register`（填名称建号）；走错门时两界面互相自动切换。
 /// 登录邮箱写入 [ApiConfig.runtimeUserId]——WS `session.init`/HTTP/本地存储
 /// 全链按该 userId 落库，与桌面端登录同一账号即共享全部数据。已登录会话
 /// 读盘恢复（account_session.json），退出登录回到登录页。
@@ -42,6 +45,19 @@ import "mobile_ui/mobile_theme.dart";
 /// 功能与桌面端同源同数据,详见 mobile_home.dart。
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
+  // 边到边（2026-11-10 反馈修复）：内容延伸到系统导航条（手势条/三键条）区域。
+  // 之前从未开 edge-to-edge，系统导航条区域由 Android 主题默认画成纯白，
+  // 主界面底部因此露出一条白条；开启后该区域由主壳主题底色接管。
+  // 主壳 extendBody + 底栏 SafeArea 已按 inset 适配，输入栏不会压进手势条。
+  SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  SystemChrome.setSystemUIOverlayStyle(
+    const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      systemNavigationBarColor: Colors.transparent,
+      // Android 10+ 对透明导航条强制加对比度遮罩，关掉才真正全透明
+      systemNavigationBarContrastEnforced: false,
+    ),
+  );
   runApp(const MobileApp());
 }
 
@@ -160,13 +176,32 @@ class _MobileAppState extends State<MobileApp> {
     return ValueListenableBuilder<ThemeMode>(
       valueListenable: _themeMode,
       builder: (BuildContext context, ThemeMode mode, _) {
+        // edge-to-edge 后系统栏区域透出页面底色，系统栏图标亮度按
+        // 实际生效的主题（跟随系统时看平台亮度）切，保证可读。
+        final bool effectiveDark = switch (mode) {
+          ThemeMode.dark => true,
+          ThemeMode.light => false,
+          ThemeMode.system =>
+            MediaQuery.platformBrightnessOf(context) == Brightness.dark,
+        };
         return MaterialApp(
           debugShowCheckedModeBanner: false,
           title: "NEXTBOT",
           theme: MobileTheme.light,
           darkTheme: MobileTheme.dark,
           themeMode: mode,
-          home: _buildHome(mode),
+          home: AnnotatedRegion<SystemUiOverlayStyle>(
+            value: SystemUiOverlayStyle(
+              statusBarColor: Colors.transparent,
+              statusBarIconBrightness:
+                  effectiveDark ? Brightness.light : Brightness.dark,
+              systemNavigationBarColor: Colors.transparent,
+              systemNavigationBarContrastEnforced: false,
+              systemNavigationBarIconBrightness:
+                  effectiveDark ? Brightness.light : Brightness.dark,
+            ),
+            child: _buildHome(mode),
+          ),
         );
       },
     );

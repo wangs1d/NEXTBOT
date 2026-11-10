@@ -478,12 +478,15 @@ test("F. 轮内去重缓存：同工具+同参数的重复调用只真实执行 
   assert.equal(executed.length, 1, "重复的工具调用应命中轮内去重缓存，只真实执行 1 次");
 });
 
-test("G. fast 单波失败：兜底汇总已删除——不编答案，返回空", async () => {
+test("G. fast 单波失败：收尾叙述保底波——如实说没查到，不编答案", async () => {
   resetLlmUsageAuditForTest();
 
   const { client, requests } = makeFakeClient([
-    // wave 0（PLAN，maxRounds=1 唯一波次）
+    // wave 0（maxRounds=1 唯一预算波次）
     toolCallChunks([{ id: "call_g1", name: "bench_search", args: { query: "特斯拉 交付" } }]),
+    // wave 1（2026-11-09 收尾叙述保底波）：预算耗尽但本波执行了工具且零正文
+    // → 授予一次叙述波；模型如实说没查到（不编答案），不注入任何指令。
+    textChunks("这会儿没查到特斯拉的交付数据，稍后再问我一次。"),
   ]);
 
   const { ctx, executed } = makeCtx({ failAll: true });
@@ -496,11 +499,15 @@ test("G. fast 单波失败：兜底汇总已删除——不编答案，返回空
     { tools: FAKE_TOOLS as never, maxRounds: 1, audit: { sessionId: "bench-fast-fail" } },
   );
 
-  assert.equal(out, "", "失败后不再有兜底汇总，本轮不返回编造答案");
-  assert.equal(executed.length, 3, "失败重试 2 次（共 3 次执行，含 500ms 退避重试）");
+  assert.equal(
+    out,
+    "这会儿没查到特斯拉的交付数据，稍后再问我一次。",
+    "保底波如实交付失败说明，不编造答案",
+  );
+  assert.equal(executed.length, 3, "失败重试 2 次（共 3 次执行，含 500ms 退避重试），保底波不再执行工具");
   const recs = readAudit("bench-fast-fail");
-  assert.equal(recs.length, 1, "只有规划波 1 次调用，不再有兜底汇总");
-  assert.equal(requests.length, 1, "不得再发起第二次无 schema 汇总调用");
+  assert.equal(recs.length, 2, "规划波 1 次 + 收尾叙述保底波 1 次（2026-11-09 根修）");
+  assert.equal(requests.length, 2, "预算波 1 次 + 保底波 1 次，有界不失控");
 });
 
 /* ---------------- 质量保护闸（省 token 不牺牲质量） ---------------- */

@@ -145,6 +145,15 @@ class AgentResultCard extends StatelessWidget {
             cs: cs,
             onUserAction: onUserAction,
           );
+        case "travel_requirement":
+          // 需求确认卡（travel.plan-itinerary 返回 needInput 时下发）：
+          // 缺什么由工具声明，点选项即回传，不做语义判定。同旅游家族 oss 闸。
+          if (ApiConfig.isOssEdition) return const SizedBox.shrink();
+          return _TravelRequirementCard(
+            data: data,
+            cs: cs,
+            onUserAction: onUserAction,
+          );
         case "product_compare":
           // 注意：这是 shopping.suggest（开源保留）的二分化对比卡， oss 不闸
           return _ProductCompareCard(data: data, cs: cs);
@@ -2504,4 +2513,134 @@ class _MorningBriefingChatCard extends StatelessWidget {
       ),
     );
   }
+}
+
+/// 需求确认卡（`travel.plan-itinerary` 返回 `needInput` 时随 done 下发）。
+///
+/// 追问能力的卡面载体：缺什么由工具自己声明（`extra.questions`），前端只
+/// 负责把声明渲染成可点选项——点选即按该选项回传用户消息，模型带着明确
+/// 参数重新调用工具。这里不做任何"什么时候该问"的判断，也绝不编造选项：
+/// 载荷缺失（旧服务端/历史消息）时落通用列表卡。
+class _TravelRequirementCard extends StatelessWidget {
+  const _TravelRequirementCard({
+    required this.data,
+    required this.cs,
+    this.onUserAction,
+  });
+
+  final AgentResultData data;
+  final ColorScheme cs;
+  final void Function(
+    AgentResultAction action, {
+    required AgentResultData cardData,
+  })? onUserAction;
+
+  List<Map<String, dynamic>> get _questions {
+    final Object? raw = data.extra?["questions"];
+    if (raw is! List) return const <Map<String, dynamic>>[];
+    return <Map<String, dynamic>>[
+      for (final Object? q in raw)
+        if (q is Map) Map<String, dynamic>.from(q),
+    ];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<Map<String, dynamic>> questions = _questions;
+    if (questions.isEmpty) {
+      return _SpecializedCard(data: data, cs: cs);
+    }
+    final TextTheme tt = Theme.of(context).textTheme;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.4),
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.6)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (data.title.isNotEmpty)
+            Text(
+              data.title,
+              style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
+            ),
+          for (final Map<String, dynamic> q in questions) ...<Widget>[
+            const SizedBox(height: 10),
+            Text(
+              (q["title"]?.toString().isNotEmpty ?? false)
+                  ? q["title"].toString()
+                  : (q["key"]?.toString() ?? ""),
+              style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+            ),
+            if ((q["hint"]?.toString().isNotEmpty ?? false)) ...<Widget>[
+              const SizedBox(height: 2),
+              Text(
+                q["hint"].toString(),
+                style: tt.bodySmall?.copyWith(
+                  color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+                ),
+              ),
+            ],
+            const SizedBox(height: 6),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: <Widget>[
+                for (final _RequirementOption opt in _optionsOf(q))
+                  ActionChip(
+                    label: Text(opt.label),
+                    onPressed: () => onUserAction?.call(
+                      AgentResultAction(
+                        id: "requirement_pick",
+                        label:
+                            "${q["title"] ?? q["key"]}：${opt.label}",
+                        payload: <String, dynamic>{
+                          "key": q["key"]?.toString() ?? "info",
+                          "value": opt.value,
+                        },
+                      ),
+                      cardData: data,
+                    ),
+                  ),
+              ],
+            ),
+          ],
+          if (data.footer.isNotEmpty) ...<Widget>[
+            const SizedBox(height: 10),
+            Text(
+              data.footer,
+              style: tt.bodySmall?.copyWith(
+                color: cs.onSurfaceVariant.withValues(alpha: 0.85),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  static List<_RequirementOption> _optionsOf(Map<String, dynamic> q) {
+    final Object? raw = q["options"];
+    if (raw is! List) return const <_RequirementOption>[];
+    return <_RequirementOption>[
+      for (final Object? o in raw)
+        if (o is Map)
+          _RequirementOption(
+            value: o["value"]?.toString() ?? "",
+            label: (o["label"]?.toString().isNotEmpty ?? false)
+                ? o["label"].toString()
+                : (o["value"]?.toString() ?? ""),
+          ),
+    ];
+  }
+}
+
+class _RequirementOption {
+  const _RequirementOption({required this.value, required this.label});
+  final String value;
+  final String label;
 }

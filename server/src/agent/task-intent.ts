@@ -49,8 +49,7 @@ const REALTIME_ONLY_RE =
  * 「注入即可回答」的单一查询（时间/日期/身份）——【当前时间】块每轮注入，
  * 设计上不调工具（2026-10-07 拍板：工具查时间又慢又费 token）。
  * 天气刻意不在此列：天气必须真调工具（weather_get_local），正是
- * ZERO_TOOL_UNSAFE_RE 收录它的原因。出口对账闸的怀疑信号用它排除
- * 「无需工具」的轮次。
+ * ZERO_TOOL_UNSAFE_RE 收录它的原因。
  */
 const INJECTION_ANSWERED_RE =
   /现在.*几点|几点了|星期几|今天.*几号|明天.*几号|当前.*时间|你叫什么|你是谁/i;

@@ -103,7 +103,6 @@ test("自检门：非法 produces 声明在启动期就被 fail-fast 拦下", ()
     produces: {
       cardTypes: ["not_registered"],
       forms: ["not_a_client_case"],
-      rewritesText: true,
     },
     detect: () => ({ reason: "x" }),
     plan: () => ({ sceneId: "bad_scene", label: "非法场景", cards: [], reason: "x" }),
@@ -112,7 +111,6 @@ test("自检门：非法 produces 声明在启动期就被 fail-fast 拦下", ()
   const problems = assertRenderContract(registry);
   assert.ok(problems.some((p) => p.includes("not_registered")));
   assert.ok(problems.some((p) => p.includes("not_a_client_case")));
-  assert.ok(problems.some((p) => p.includes("phase")), "重写正文却不是 pre 必须报错");
   assert.ok(problems.some((p) => p.includes("markdown")), "缺兜底场景必须报错");
 });
 
@@ -123,9 +121,7 @@ test("全场景声明门：每个场景都有 produces，pre/post 分工明确",
     assert.ok(scene.priority >= 0);
     assert.ok(scene.label);
   }
-  const rewriteScenes = contractJson.scenes
-    .filter((s) => s.rewritesText)
-    .map((s) => s.id)
-    .sort();
-  assert.deepEqual(rewriteScenes, ["digest_roundup", "tomorrow_preview"]);
+  // 2026-11-09 用户指令：取消「场景接管正文」，所有场景都不许重写模型正文
+  const takeover = contractJson.scenes.filter((s) => "rewritesText" in s);
+  assert.equal(takeover.length, 0, "契约里不得再有 rewritesText");
 });

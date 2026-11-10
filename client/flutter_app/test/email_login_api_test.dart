@@ -52,23 +52,42 @@ void main() {
     expect(r.error, contains("频繁"));
   });
 
-  test("registerOrLogin：新号 200 ok", () async {
+  test("register：新号 200 ok，带 mode=register", () async {
     final EmailLoginApi api = EmailLoginApi(
       client: MockClient((http.Request req) async {
         final Map<String, dynamic> body =
             jsonDecode(req.body) as Map<String, dynamic>;
+        expect(req.url.path, "/accounts/register");
         expect(body["userId"], "a@b.com");
         expect(body["otpCode"], "123456");
         expect(body["displayName"], "a");
+        expect(body["mode"], "register");
         return _json(<String, dynamic>{"ok": true}, 200);
       }),
     );
     final EmailLoginResult r =
-        await api.registerOrLogin("a@b.com", code: "123456");
+        await api.register("a@b.com", code: "123456");
     expect(r.ok, isTrue);
   });
 
-  test("registerOrLogin：已存在按登录成功（幂等，与桌面端同语义）", () async {
+  test("register：409 ACCOUNT_EXISTS 不再当登录成功", () async {
+    final EmailLoginApi api = EmailLoginApi(
+      client: MockClient((_) async => _json(
+            <String, dynamic>{
+              "ok": false,
+              "code": "ACCOUNT_EXISTS",
+              "message": "该邮箱已注册，请直接登录",
+            },
+            409,
+          )),
+    );
+    final EmailLoginResult r = await api.register("a@b.com");
+    expect(r.ok, isFalse);
+    expect(r.accountExists, isTrue);
+    expect(r.error, contains("已注册"));
+  });
+
+  test("register：老服务端只有文案没有 code，仍识别为已注册", () async {
     final EmailLoginApi api = EmailLoginApi(
       client: MockClient((_) async => _json(
             <String, dynamic>{
@@ -77,11 +96,83 @@ void main() {
             400,
           )),
     );
-    final EmailLoginResult r = await api.registerOrLogin("a@b.com");
+    final EmailLoginResult r = await api.register("a@b.com");
+    expect(r.ok, isFalse);
+    expect(r.accountExists, isTrue);
+  });
+
+  test("login：200 ok 只带 otpCode，不带 displayName", () async {
+    final EmailLoginApi api = EmailLoginApi(
+      client: MockClient((http.Request req) async {
+        expect(req.url.path, "/accounts/login");
+        final Map<String, dynamic> body =
+            jsonDecode(req.body) as Map<String, dynamic>;
+        expect(body["userId"], "a@b.com");
+        expect(body["otpCode"], "123456");
+        expect(body.containsKey("displayName"), isFalse);
+        return _json(<String, dynamic>{"ok": true}, 200);
+      }),
+    );
+    final EmailLoginResult r = await api.login("A@B.com", code: "123456");
     expect(r.ok, isTrue);
   });
 
-  test("registerOrLogin：白名单拦截文案透传", () async {
+  test("login：404 ACCOUNT_NOT_FOUND 提示去注册", () async {
+    final EmailLoginApi api = EmailLoginApi(
+      client: MockClient((_) async => _json(
+            <String, dynamic>{
+              "ok": false,
+              "code": "ACCOUNT_NOT_FOUND",
+              "message": "该邮箱还没有注册，请先创建账号",
+            },
+            404,
+          )),
+    );
+    final EmailLoginResult r = await api.login("new@b.com", code: "123456");
+    expect(r.ok, isFalse);
+    expect(r.accountNotFound, isTrue);
+  });
+
+  test("login：验证码错误透传文案", () async {
+    final EmailLoginApi api = EmailLoginApi(
+      client: MockClient((_) async => _json(
+            <String, dynamic>{
+              "ok": false,
+              "code": "OTP_INVALID",
+              "message": "验证码不正确或已过期，请重新获取",
+            },
+            400,
+          )),
+    );
+    final EmailLoginResult r = await api.login("a@b.com", code: "000000");
+    expect(r.ok, isFalse);
+    expect(r.accountNotFound, isFalse);
+    expect(r.error, contains("验证码"));
+  });
+
+  test("checkRegistered：200 registered=true / 404 false / 网络错误 null", () async {
+    final EmailLoginApi yes = EmailLoginApi(
+      client: MockClient((http.Request req) async {
+        expect(req.url.path, "/accounts/me");
+        expect(req.url.queryParameters["userId"], "a@b.com");
+        return _json(<String, dynamic>{"ok": true, "registered": true}, 200);
+      }),
+    );
+    expect(await yes.checkRegistered("A@B.com"), isTrue);
+
+    final EmailLoginApi no = EmailLoginApi(
+      client: MockClient((_) async =>
+          _json(<String, dynamic>{"ok": false, "registered": false}, 404)),
+    );
+    expect(await no.checkRegistered("new@b.com"), isFalse);
+
+    final EmailLoginApi broken = EmailLoginApi(
+      client: MockClient((_) async => throw Exception("boom")),
+    );
+    expect(await broken.checkRegistered("a@b.com"), isNull);
+  });
+
+  test("register：白名单拦截文案透传", () async {
     final EmailLoginApi api = EmailLoginApi(
       client: MockClient((_) async => _json(
             <String, dynamic>{
@@ -90,8 +181,9 @@ void main() {
             403,
           )),
     );
-    final EmailLoginResult r = await api.registerOrLogin("a@b.com");
+    final EmailLoginResult r = await api.register("a@b.com");
     expect(r.ok, isFalse);
+    expect(r.accountExists, isFalse);
     expect(r.error, contains("候补"));
   });
 }

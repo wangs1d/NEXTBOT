@@ -81,16 +81,21 @@ export class SceneRegistry {
     const matched: string[] = [];
     const boundaries: string[] = [];
     const failures: string[] = [];
-    let rewritesText = false;
     for (const scene of this.list()) {
       if (scene.phase !== "pre") continue;
       try {
         if (!scene.detect(guarded)) continue;
         matched.push(scene.id);
-        const produces = scene.produces;
-        const boundary = produces?.promptBoundary?.trim();
-        if (boundary && !boundaries.includes(boundary)) boundaries.push(boundary);
-        if (produces?.rewritesText) rewritesText = true;
+        const staticBoundary = scene.produces?.promptBoundary?.trim() ?? "";
+        let dynamicBoundary = "";
+        try {
+          dynamicBoundary = scene.promptBoundaryFor?.(guarded)?.trim() ?? "";
+        } catch (err) {
+          const message = err instanceof Error ? err.message : String(err);
+          failures.push(`${scene.id}:boundary:${message}`);
+        }
+        const merged = [staticBoundary, dynamicBoundary].filter(Boolean).join("\n");
+        if (merged && !boundaries.includes(merged)) boundaries.push(merged);
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         failures.push(`${scene.id}:${message}`);
@@ -99,7 +104,6 @@ export class SceneRegistry {
     return {
       matched,
       boundaries,
-      rewritesText,
       failures,
       reason: [
         matched.length ? `pre-scenes=${matched.join(",")}` : "no-pre-scene",

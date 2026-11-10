@@ -16,6 +16,10 @@
 
 import type { ClientLocationWire } from "@nextbot/agent-protocol";
 
+import {
+  reverseGeocodeCoordinates,
+  type ReverseGeocodeHit,
+} from "./reverse-geocode-service.js";
 import type { ActorContextService, ActorPlaceKind } from "./actor-context-service.js";
 import type { GeofenceService } from "./geofence-service.js";
 import type { LocationHistoryService, LocationSampleSource } from "./location-history-service.js";
@@ -39,12 +43,19 @@ export type LocationIngestDeps = {
   minIntervalMs?: number;
   /** 时钟注入（测试用），缺省 Date.now */
   now?: () => number;
+  /**
+   * 坐标→时区反解器（测试可注入假实现）；缺省 reverseGeocodeCoordinates。
+   * 进程内 30min LRU 缓存 + in-flight 去重，同坐标重复上报零网络。
+   */
+  reverseGeocode?: (latitude: number, longitude: number) => Promise<ReverseGeocodeHit | null>;
 };
 
 export class LocationIngestPipeline {
   private readonly minIntervalMs: number;
   private readonly now: () => number;
   private readonly lastIngestAt = new Map<string, number>();
+  /** 最近一次在途逆地理修正（测试同步等待用）。 */
+  private inflightEnrichment: Promise<void> = Promise.resolve();
 
   constructor(private readonly deps: LocationIngestDeps) {
     this.minIntervalMs = deps.minIntervalMs ?? 10_000;
@@ -101,8 +112,31 @@ export class LocationIngestPipeline {
         /* 围栏查询失败：placeKind 保持 unknown，不影响坐标快照 */
       }
       context.updateLocation(actorId, loc, source, place);
+      // 坐标→时区逆地理修正（2026-11-10 真机时间错乱根治）：客户端上报的
+      // location.timezone 是设备读数回声，设备钟坏了会把 GMT 写进快照，
+      // resolveClock 的 geo 冲突保护就拿 GMT 比 GMT 永远不触发。这里用
+      // 服务端反解结果覆盖修正（fire-and-forget，任何失败静默——修正缺席
+      // 只是退回旧行为，绝不阻塞上报主链路）。缓存命中时零网络。
+      this.inflightEnrichment = this.enrichLocation(actorId, loc);
     } catch (err) {
       console.log(`[LocationIngest] 快照更新失败（忽略）: ${err}`);
+    }
+  }
+
+  /** 测试钩子：等待在途逆地理修正落盘（生产路径 fire-and-forget 不等）。 */
+  async waitForEnrichmentForTest(): Promise<void> {
+    await this.inflightEnrichment;
+  }
+
+  private async enrichLocation(actorId: string, loc: ClientLocationWire): Promise<void> {
+    const context = this.deps.context;
+    if (!context) return;
+    const geocode = this.deps.reverseGeocode ?? reverseGeocodeCoordinates;
+    try {
+      const hit = await geocode(loc.latitude, loc.longitude);
+      if (hit) context.enrichLocationFromGeocode(actorId, hit);
+    } catch {
+      /* 逆地理失败：快照保持客户端原值，resolveClock 走原有降级链 */
     }
   }
 }

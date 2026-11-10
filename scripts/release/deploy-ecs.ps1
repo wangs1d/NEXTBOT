@@ -85,6 +85,32 @@ export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 # CPU 二进制本就捆绑在包里，ECS 也只做惰性 import（声纹/本地嵌入是桌面特性）——直接跳过下载。
 export ONNXRUNTIME_NODE_INSTALL=skip
 npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3
+# Chromium for the cloud headless browser lane (2026-11-10): mobile
+# price-compare / order / booking all execute through the SERVER-side headless
+# browser (mobile has no embedded browser). npm ci installs the playwright
+# module but never the browser binary - without this every agent_browser.* /
+# shopping.* call fails with "Executable doesn't exist". Idempotent: probe the
+# binary first, install only when missing. npmmirror mirror first (mainland
+# ECS cannot reach playwright CDN reliably), official CDN as fallback.
+if node -e "require('playwright').chromium.executablePath()" >/dev/null 2>&1; then
+  echo '[ecs] chromium binary already present, skip install'
+else
+  echo '[ecs] installing playwright chromium (npmmirror first, official CDN fallback)'
+  export PLAYWRIGHT_DOWNLOAD_HOST=https://cdn.npmmirror.com/binaries/playwright
+  npx playwright install chromium 2>&1 | tail -2 \
+    || { unset PLAYWRIGHT_DOWNLOAD_HOST; npx playwright install chromium 2>&1 | tail -2; }
+  # System libraries for headless chromium (Ubuntu). install-deps needs apt;
+  # tolerate failure here - /api/browser/health is the real gate below.
+  npx playwright install-deps chromium >/dev/null 2>&1 || true
+fi
+# Travel pricing (flyai CLI) is a runtime system dependency, not an npm dep:
+# npm ci never installs it, so a rebuilt box silently loses realtime quotes
+# and every price degrades to "pending check" with no visible cause.
+# Same class of gap as Chromium (also absent here by design of npm-only deploy).
+if ! command -v flyai >/dev/null 2>&1; then
+  npm i -g @fly-ai/flyai-cli 2>&1 | tail -2
+fi
+FLYAI_BIN_PATH=$(command -v flyai || echo /usr/local/bin/flyai)
 cat > /etc/systemd/system/nextbot.service <<UNIT
 [Unit]
 Description=Nextbot runtime (manifest + platform API)
@@ -116,6 +142,10 @@ Environment=AGENT_BG_TASK_MAX_PARALLEL=2
 # Design the crash boundary instead of V8's default (~894 MB heap on this box):
 # old-space cap 768 MB keeps headroom under MemoryHigh=1200M for native + children.
 Environment=NODE_OPTIONS=--max-old-space-size=768
+# systemd PATH excludes the npm global dir: without an explicit FLYAI_BIN the
+# quote layer cannot resolve the CLI even when it is installed (resolveFlyAiBin
+# only searches PATH + npm prefix), and every price silently degrades.
+Environment=FLYAI_BIN=${FLYAI_BIN_PATH}
 # Memory guardrails: MemoryHigh puts the cgroup into reclaim first; MemoryMax only
 # kills this service (Restart=always brings it back) so a leak cannot take nginx or
 # sshd down with it. 1200M throttle sits above the observed 1072M peak, 1450M kill
@@ -141,10 +171,17 @@ done
 systemctl is-active nextbot
 # 终验带重试：冷启动偶发超过首轮 30s 时，单独一次 curl 会误报部署失败（实际服务 active 且健康）
 for i in `$(seq 1 15); do
-  if curl -sf http://127.0.0.1:3000/api/client/manifest; then echo; echo '[ecs] deploy verify OK'; exit 0; fi
+  if curl -sf http://127.0.0.1:3000/api/client/manifest; then echo; echo '[ecs] manifest verify OK'; break; fi
   sleep 2
 done
-echo '[ecs] deploy verify FAILED: manifest 不可达' >&2
+# Browser lane final gate (2026-11-10): a deploy without a working headless
+# chromium silently breaks every mobile shopping/booking turn - fail the deploy
+# instead of shipping a regression the user only discovers mid-chat.
+if curl -sf -m 15 http://127.0.0.1:3000/api/browser/health | grep -q '"ok":true'; then
+  echo '[ecs] browser health OK (chromium launches)'
+  echo '[ecs] deploy verify OK'; exit 0
+fi
+echo '[ecs] deploy verify FAILED: browser health not ok (chromium missing or launch failed; see journalctl -u nextbot)' >&2
 exit 1
 "@
 $remoteScript | & ssh $Remote "bash -s"

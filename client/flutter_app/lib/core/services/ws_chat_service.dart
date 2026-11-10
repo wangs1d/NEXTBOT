@@ -3,7 +3,9 @@ import "dart:convert";
 
 import "package:flutter/foundation.dart";
 import "package:web_socket_channel/web_socket_channel.dart";
-import "package:web_socket_channel/status.dart" as status;
+
+import "../config/api_config.dart";
+import "ws_session_init.dart";
 
 class _PendingWsEvent {
   const _PendingWsEvent({required this.type, required this.payload});
@@ -14,6 +16,12 @@ class _PendingWsEvent {
 
 class WsChatService {
   WsChatService({required this.url});
+
+  /// 进程内唯一连接：连接、解码、心跳、重连、在途重投、握手 `session.init`
+  /// 全部唯一（对齐主流"一站一条长连接"的做法）。业务事件由
+  /// [WsEventRouter] 按归属表分拣，各模块只订阅自己的通道。
+  /// 需要独立连接的场景（测试注入 wsBaseUrl）继续走构造函数。
+  static final WsChatService shared = WsChatService(url: ApiConfig.wsUrl);
 
   final String url;
   WebSocketChannel? _channel;
@@ -119,7 +127,7 @@ class WsChatService {
           final Map<String, dynamic> event =
               jsonDecode(data.toString()) as Map<String, dynamic>;
           _confirmChatDelivery(event);
-          _eventsController.add(event);
+          _emitEvent(event);
         },
         onError: (Object error) {
           _handleDisconnect(channel);
@@ -139,7 +147,10 @@ class WsChatService {
           _lastInboundAt = DateTime.now();
           _connectedAt = _lastInboundAt;
           _startHeartbeat(channel);
-          _eventsController.add(<String, dynamic>{
+          // 握手即上报身份：连接层唯一一份 session.init，必须先于任何业务事件
+          // 与重连补发队列（否则服务端把消息归错车道）。
+          _sendSessionInit();
+          _emitEvent(<String, dynamic>{
             "type": "ws_connected",
             "payload": <String, dynamic>{
               "url": url,
@@ -147,7 +158,7 @@ class WsChatService {
             },
           });
           // session.init 必须先于补发队列：重连补发的 chat.user_message 若抢在
-          // session.init 之前到达，服务端会归错车道。旧实现先 flush 后 init。
+          // session.init 之前到达，服务端会归错车道。
           onConnected?.call();
           _flushPendingOutbound();
         }).catchError((Object _) {
@@ -161,11 +172,29 @@ class WsChatService {
     }
   }
 
+  /// 事件出口统一收口：连接被 close（页面销毁 / 测试收尾）之后仍有迟到的
+  /// socket 回调，直接丢弃，避免 "Bad state: Cannot add new events after
+  /// calling close" 把整个测试进程带崩。
+  void _emitEvent(Map<String, dynamic> event) {
+    if (_eventsController.isClosed) return;
+    _eventsController.add(event);
+  }
+
+  /// 握手后的唯一一份 `session.init`（每次（重）连都补发：服务端按连接重新
+  /// 登记 actor / 设备类别 / 时区 / 鉴权 token）。集中在此的原因见 [shared]。
+  void _sendSessionInit() {
+    try {
+      _sendNow("session.init", buildWsSessionInit());
+    } catch (e) {
+      debugPrint("[ws] session.init 组装失败：$e");
+    }
+  }
+
   void _notifyDisconnected() {
     final bool wasConnected = _isConnected;
     _markDisconnected();
     if (wasConnected) {
-      _eventsController.add(<String, dynamic>{
+      _emitEvent(<String, dynamic>{
         "type": "ws_disconnected",
         "payload": <String, dynamic>{
           "message": "与服务器的连接已断开",
@@ -303,7 +332,7 @@ class WsChatService {
         "Max reconnection attempts reached. Please check your network "
         "connection and server status.",
       );
-      _eventsController.add(<String, dynamic>{
+      _emitEvent(<String, dynamic>{
         "type": "connection_error",
         "payload": <String, dynamic>{
           "message": "无法连接到服务器，请检查网络连接和服务器状态",

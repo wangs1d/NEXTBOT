@@ -116,16 +116,14 @@ function chatLaneMaxOutputTokens(): number | undefined {
 }
 
 /**
- * chat 车道工具波预算（2026-09-19 静态双车道）：静态 Core 直调 1 波 + 结果回写
- * 收尾 1 波 + 延迟目录可达性（tool_discover→schema 转正 或 tool_request 转正）各留
- * 余量。旧 maxRounds=2 是 disableToolSearch（零目录）下的配平值，目录可达后必须
- * ≥3，否则"发现→执行"两波必断头。env: AGENT_CHAT_LANE_MAX_ROUNDS（1-4）。
+ * 对话面工具波次（2026-11-10 取消上限，与主流 agent 对齐）。
+ *
+ * 曾经的三道闸（车道写死 3 波、env 夹 1-4、fastProfile→1）全部删除：多步任务
+ * （比价 → 结算 → 确认 → 支付、查页 → 改参 → 再查）没有固定轮数可言，写死
+ * 波次只会把链路腰斩在中间。现在循环的唯一出口是模型不再发 tool_calls，
+ * 可靠性靠单工具超时 + 轮内去重 + 用户可打断，而不是"跑够几轮就砍"。
+ * 因此这里不再有 AGENT_CHAT_LANE_MAX_ROUNDS，也不再向 toolLoop 传 maxRounds。
  */
-function chatLaneMaxRounds(): number {
-  const raw = process.env.AGENT_CHAT_LANE_MAX_ROUNDS?.trim();
-  const n = raw ? Number.parseInt(raw, 10) : Number.NaN;
-  return Number.isFinite(n) && n >= 1 && n <= 4 ? n : 3;
-}
 
 import type { AgentReply } from "../agent/types.js";
 import { PromptContextBuilder } from "../agent/prompt-context-builder.js";
@@ -237,7 +235,7 @@ import {
 } from "../render/protocol.js";
 import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import { attachTravelBriefCard, resolveTravelReceipt } from "./deterministic-card-chain.js";
-import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/intent-router.js";
+import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/task-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
 import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, mediaToolNameForText, type TravelPlanRequest } from "../agent/realtime-search-query.js";
 import { needsToolChoiceRequired } from "../gateway/forced-tool.js";
@@ -432,7 +430,6 @@ export class AgentCore {
       getBrainCenter: () => this.brainCenter,
     });
     this.turnFinalizer = new TurnFinalizer({
-      provider: this.externalChat,
       turnLifecycle: this.turnLifecycle,
       shortTermMemoryGateway: this.shortTermMemoryGateway,
       getBrainCenter: () => this.brainCenter,
@@ -924,8 +921,17 @@ export class AgentCore {
     const perfStartTime = Date.now();
 
     if (!this.chatProviderFor(actorId)?.isEnabled()) {
-      const available = this.toolRegistry.list().join(", ");
-      const fallback = `已收到：${text}。当前可用工具：${available}`;
+      // 2026-11-10 根修：这里原本拼的是 `已收到：${text}。当前可用工具：${registry.list()}`
+      // —— 把工具清单当正文吐给用户（真机截图复现：新账号没有 BYOK key 时，
+      // 一句问候换回一屏工具名）。工具名属于内部事实，任何情况下都不该出现在
+      // 对话正文里；用户需要的是「为什么不能聊、去哪儿修」。
+      const fallback =
+        "模型服务还没配置好，我现在没法正常回答。" +
+        "请到「设置 → 模型」里绑定一个可用的 API Key，配好之后就能聊了。";
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[agent-core] 无可用 chat provider，已回退配置引导文案 actor=${actorId}`,
+      );
       this.turnLifecycle.finalizeTurn({
         actorId,
         userText: text,
@@ -1934,7 +1940,7 @@ if (route.plane === "task") {
       toolRecallOnly?: boolean;
       /**
        * 单轮 LLM 主路径预算（阶段2-1）：首次进入时自动创建并占用主调用槽位，
-       * 升级重跑（意图升级/出口闸）经 tryUpgrade 扣减，默认上限 3 次。
+       * 升级重跑（意图升级）经 tryUpgrade 扣减，默认上限 3 次。
        * 递归时随 {...ctx} 透传同一实例，保证整轮共享预算。
        */
       turnBudget?: TurnBudget;
@@ -2163,7 +2169,8 @@ if (route.plane === "task") {
           ];
           return growNames.length > 0 ? { toolFaceGrowNames: growNames } : {};
         })(),
-        toolLoop: { maxRounds: chatLaneMaxRounds() },
+        // 2026-11-10：不传 toolLoop.maxRounds——工具循环默认不限轮次，
+        // 由模型自然收尾（见 openai-compatible-tool-loop 的终止契约）。
       };
     };
     const baseStreamOpts = this.isChatLane(mode)
@@ -2237,7 +2244,7 @@ if (route.plane === "task") {
     // 「搜索插件节点 → LLM 节点」结构：路由器已判定 realtime_lookup 并生成
     // search_query（结合最近对话解决指代），这里**确定性**执行一次真实搜索，
     // 把证据块注入 system 上下文——模型拿到的是已检索的事实，没有「要不要搜」
-    // 的选择权。search 失败静默跳过（回退模型自决 + 出口闸兜底）。
+    // 的选择权。search 失败静默跳过（回退模型自决）。
     // 2026-09-23 两处收紧（工具自决权改造）：
     //   1) 显式禁网轮直接跳过整块（用户指令 > 架构的"必先搜"）；
     //   2) 投机证据（speculative，查询词=用户原话）只准任务面消费——对话面注入
@@ -2413,17 +2420,10 @@ if (route.plane === "task") {
       pinnedToolNames: runtimePlan.enabled
         ? [...(baseStreamOpts.pinnedToolNames ?? []), ...runtimePlan.pinnedToolNames]
         : baseStreamOpts.pinnedToolNames,
-      // 任务面工具波预算（2026-09-05）：由路由层 TurnPlan 决定（realtime/media=2，
-      // write/multi-step=3，词法 veto 升级=3），取代旧硬编码。对话面无工具循环，
-      // 不受此配置影响。保底 1、封顶 4，防预算失控。
-      ...(this.isChatLane(mode)
-        ? {}
-        : {
-            toolLoop: {
-              ...(baseStreamOpts.toolLoop ?? {}),
-              maxRounds: Math.min(4, Math.max(1, ctx.turnPlan?.budget ?? 3)),
-            },
-          }),
+      // 工具波次（2026-11-10 彻底取消上限）：对话面与任务面都不再传 maxRounds，
+      // 循环到模型自然收尾。多步链路（比价→结算→确认→支付）本来就没有固定轮数，
+      // 任何"预算"在长链路面前都只是把任务砍半。中断手段仍是用户发新消息 abort
+      // 与单工具超时，不是轮数闸。
       maxThreadMessages: runtimePlan.promptMode === "conversation_only"
         ? Number.parseInt(process.env.AGENT_RUNTIME_KERNEL_MAX_THREAD_MESSAGES ?? "12", 10)
         : baseStreamOpts.maxThreadMessages,
@@ -2760,7 +2760,7 @@ if (route.plane === "task") {
       messageId: opts?.chatUserMessageId,
       sessionId: opts?.sessionId,
       toolTraces,
-    }, opts?.onAssistantDelta);
+    });
     if (attemptedToolCalls.length > 0) {
       reply.attemptedToolCalls = attemptedToolCalls;
     }
@@ -3384,8 +3384,7 @@ if (route.plane === "task") {
    * turn WAL / 当日日志缺失该轮。
    *
    * 本方法以「已送达的部分回复」完成最小化收尾：STM 挂起项结清、WAL/日志记账、
-   * 高信号记忆种植。只做记账，不触发任何 LLM 调用（finish 的 regenerateEmptyReply
-   * 仅在文本为空时触发，此处文本非空不会走到）。幂等安全：reconcile/入栈均为
+   * 高信号记忆种植。只做记账，不触发任何 LLM 调用。幂等安全：reconcile/入栈均为
    * 去重幂等操作，重复调用无副作用。
    *
    * @param partialAssistantText 已流式送达用户的部分回复（空串时为无操作）

@@ -9,6 +9,7 @@ import {
   accountEmailRegisterPendingQuerySchema,
   accountEmailRegisterStartBodySchema,
   accountEmailRegisterVerifyBodySchema,
+  accountLoginBodySchema,
   accountMeQuerySchema,
   accountRegisterBodySchema,
 } from "../../schemas/api.js";
@@ -142,12 +143,23 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
     const actorId = accountActorFromBody(parsed.data);
     // email 字段同样归一：账号名单里同一邮箱只有一种写法
     const email = parsed.data.email ? normalizeEmailLikeActor(parsed.data.email) : undefined;
+    const alreadyRegistered = agentAccountService.getByActorId(actorId);
+    // 显式「只注册」（客户端注册界面）：已存在不再是「视为登录成功」的幂等
+    // 成功，而是明确的冲突，让客户端把用户引回登录界面。不传 mode 的旧调用
+    // （桌面 /accounts/web、机器身份自注册）行为原样保留。
+    if (parsed.data.mode === "register" && alreadyRegistered) {
+      return reply.code(409).send({
+        ok: false,
+        code: "ACCOUNT_EXISTS",
+        message: "该邮箱已注册，请直接登录",
+      });
+    }
     // 内测注册闸：邮箱形态的新注册须在白名单内（名单空 = 未设闸，见
     // beta-whitelist-service）。已注册主体视为登录放行（往下走 register 报
     // 「已存在」，客户端按登录成功处理）；inst_* / session-* 等机器身份不受闸
     // 约束，保障客户端启动自注册与后台运营数据不断。
     const whitelistCandidate = actorId.includes("@") ? actorId : email;
-    if (betaWhitelistService && whitelistCandidate && !agentAccountService.getByActorId(actorId)) {
+    if (betaWhitelistService && whitelistCandidate && !alreadyRegistered) {
       const allowed = await betaWhitelistService.allows(whitelistCandidate);
       if (!allowed) {
         console.info(`[accounts] 内测白名单拦截注册：${whitelistCandidate}`);
@@ -189,6 +201,53 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       const message = e instanceof Error ? e.message : String(e);
       return reply.code(400).send({ ok: false, message });
     }
+  });
+
+  /**
+   * 邮箱登录（POST /accounts/login）：**只登录，不建档**。
+   *
+   * 与 `/accounts/register` 的两点区别，正是「登录界面 / 注册界面」分开后
+   * 客户端的需要：
+   *  - 账号不存在 → 404 `ACCOUNT_NOT_FOUND`，客户端据此把用户切到注册；
+   *  - 已存在不会走「重复注册」的幂等分支（那条分支在 OTP 闸开启时根本
+   *    不验码）。这里 OTP 闸开启就必须验码并通过才放行，验证码一次性作废。
+   *
+   * OTP 闸关闭（无 SMTP 凭据/显式关闭，多为单机开发）时免码直登，与注册
+   * 同口径，避免把自己锁在门外。
+   */
+  app.post("/accounts/login", async (request, reply) => {
+    const parsed = accountLoginBodySchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ ok: false, message: "请输入有效的邮箱地址" });
+    }
+    const actorId = accountActorFromBody(parsed.data);
+    const account = agentAccountService.getByActorId(actorId);
+    if (!account) {
+      return reply.code(404).send({
+        ok: false,
+        code: "ACCOUNT_NOT_FOUND",
+        message: "该邮箱还没有注册，请先创建账号",
+      });
+    }
+    if (isEmailOtpEnforced(deps) && emailOtpService && actorId.includes("@")) {
+      const code = parsed.data.otpCode?.trim() ?? "";
+      if (!code) {
+        return reply.code(400).send({
+          ok: false,
+          code: "OTP_REQUIRED",
+          message: "请输入邮箱验证码",
+        });
+      }
+      if (!emailOtpService.verify(actorId, code, { consume: true })) {
+        return reply.code(400).send({
+          ok: false,
+          code: "OTP_INVALID",
+          message: "验证码不正确或已过期，请重新获取",
+        });
+      }
+    }
+    agentAccountService.touchLastActive(actorId);
+    return { ok: true, account };
   });
 
   /**

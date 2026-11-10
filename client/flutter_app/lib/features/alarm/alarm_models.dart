@@ -78,6 +78,11 @@ class Alarm {
   int snoozeCount;
   final String createdAt;
 
+  /// 服务端在建钟时生成并预合成的叫醒话术（Agent 文案 + mp3 base64）。
+  /// 下行展开字段，非领域必填：没有时原生层退化为系统闹铃。
+  String? voiceText;
+  String? ttsBase64;
+
   Alarm({
     required this.id,
     required this.actorId,
@@ -92,6 +97,8 @@ class Alarm {
     this.nextFireAt,
     this.snoozeCount = 0,
     required this.createdAt,
+    this.voiceText,
+    this.ttsBase64,
   });
 
   factory Alarm.fromJson(Map<String, dynamic> j) => Alarm(
@@ -108,6 +115,8 @@ class Alarm {
         nextFireAt: j["nextFireAt"]?.toString(),
         snoozeCount: (j["snoozeCount"] as num?)?.toInt() ?? 0,
         createdAt: j["createdAt"]?.toString() ?? "",
+        voiceText: j["voiceText"]?.toString(),
+        ttsBase64: j["ttsBase64"]?.toString(),
       );
 
   Map<String, dynamic> toJson() => {
@@ -124,6 +133,8 @@ class Alarm {
         "nextFireAt": nextFireAt,
         "snoozeCount": snoozeCount,
         "createdAt": createdAt,
+        if (voiceText != null) "voiceText": voiceText,
+        if (ttsBase64 != null) "ttsBase64": ttsBase64,
       };
 
   String encode() => jsonEncode(toJson());

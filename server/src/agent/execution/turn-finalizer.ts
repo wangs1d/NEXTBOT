@@ -3,7 +3,6 @@ import type { AgentReply } from "../types.js";
 import { getRuntimeKernel } from "../runtime-kernel.js";
 import { TurnLifecycle } from "../turn-lifecycle.js";
 import type { TaskExecutionPlan } from "../plan-execute-loop.js";
-import type { ExternalChatProvider } from "../../external-model/types.js";
 import type { ShortTermMemoryGatewayService } from "../../services/short-term-memory-gateway.js";
 import { getDailyJournalService } from "../../services/daily-journal-service.js";
 import { normalizeTraditionalToSimplified } from "../../utils/simplified-chinese.js";
@@ -22,7 +21,6 @@ export type FinishTurnMeta = {
 };
 
 export type TurnFinalizerDeps = {
-  provider: ExternalChatProvider | null;
   turnLifecycle: TurnLifecycle;
   shortTermMemoryGateway: ShortTermMemoryGatewayService | null;
   getBrainCenter: () => BrainCenter | null;
@@ -39,15 +37,15 @@ export class TurnFinalizer {
    * 归 prompt 层（【说话方式】基准）；本层只保留：
    *   - 输出安全检查（brain-center 事实性安全，非文风）；
    *   - 繁→简出口正规化（确定性 1:1 字符映射，不改变措辞）；
-   *   - 空回复重生（空 = 无内容可改，不构成「换稿」）；
    *   - 轨迹 / 记忆 / 日志记账。
+   * 空回复重生于 2026-11-09 按用户指令整体删除：本轮没有正文就如实收尾，
+   * 不再补跑一次 LLM——所有「在模型输出之后追加生成」的兜底均已退役。
    */
   async finish(
     actorId: string,
     userText: string,
     assistantText: string,
     meta: FinishTurnMeta,
-    onAssistantDelta?: (delta: string) => void,
   ): Promise<AgentReply> {
     const outputSafety = this.deps.getBrainCenter()?.checkOutputSafety(assistantText, {
       actorId,
@@ -80,10 +78,12 @@ export class TurnFinalizer {
 
     const trimmed = sanitizedOutput.trim();
     if (!trimmed) {
-      const regenerated = await this.regenerateEmptyReply(actorId, userText, onAssistantDelta);
+      // 空回复重生兜底已删除（2026-11-09 用户指令）：空就如实收尾，
+      // 不再补跑一次 LLM。空轮不进 quota/记忆/日志记账，与旧空分支一致。
+      console.warn("[TurnFinalizer] received empty output, finishing as-is");
       return {
-        text: regenerated,
-        streamedChunks: regenerated ? meta.streamedChunks : false,
+        text: "",
+        streamedChunks: meta.streamedChunks,
       };
     }
 
@@ -115,38 +115,5 @@ export class TurnFinalizer {
       text: quotaSuffix ? `${trimmed}\n\n${quotaSuffix}` : trimmed,
       streamedChunks: meta.streamedChunks,
     };
-  }
-
-  private async regenerateEmptyReply(
-    actorId: string,
-    userText: string,
-    onAssistantDelta?: (delta: string) => void,
-  ): Promise<string> {
-    try {
-      const provider = this.deps.provider;
-      if (!provider?.isEnabled()) return "";
-      console.warn("[TurnFinalizer] received empty output, regenerating once");
-      const regenerateText = await provider.streamCompletion(
-        `regen-${actorId}-${Date.now()}`,
-        {
-          text:
-            `${userText}\n\n` +
-            "[system hint: the previous turn produced no response text. Answer the user directly in natural language. Do not apologize and do NOT say 'not found / unable / could not / I don't have this'. Give the most helpful answer you can based on what you know, and if you lack one piece of info, name exactly what clue you need.]",
-        },
-        (delta) => onAssistantDelta?.(delta),
-        undefined,
-        {
-          ephemeralTurn: true,
-          disableThinking: true,
-          maxThreadMessages: 4,
-        },
-      );
-      // 反道歉指令：不再下发任何固定"未完成/没查到"道歉文案，
-      // 直接返回重生成的真实内容（若仍为空，交由上层自然处理）。
-      return regenerateText.trim();
-    } catch (err) {
-      console.error("[TurnFinalizer] regeneration failed", err);
-      return "";
-    }
   }
 }

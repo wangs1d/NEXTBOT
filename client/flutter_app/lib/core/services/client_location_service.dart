@@ -10,6 +10,11 @@ import "nb_http.dart";
 import "../config/api_config.dart";
 
 /// 前端 GPS 定位结果（随 chat.user_message 上报；服务端用经纬度逆地理，不用 IP）。
+///
+/// 2026-11-10 精确定位引擎：坐标本身不构成可信位置，必须携带精度元数据
+/// （这个 fix 有多准、何时采的）服务端才能做质量裁决——与主流 App
+/// （Android FusedLocationProvider 的 accuracy / iOS CLLocationManager 的
+/// horizontalAccuracy）同一范式。
 class ClientLocationPayload {
   const ClientLocationPayload({
     required this.latitude,
@@ -20,6 +25,11 @@ class ClientLocationPayload {
     this.country,
     this.timezone,
     this.label,
+    this.accuracyMeters,
+    this.altitudeMeters,
+    this.speedMps,
+    this.headingDegrees,
+    this.capturedAt,
   });
 
   final double latitude;
@@ -30,6 +40,16 @@ class ClientLocationPayload {
   final String? country;
   final String? timezone;
   final String? label;
+  /// 水平精度半径（米，68% 置信）；null=设备未提供
+  final double? accuracyMeters;
+  /// 海拔（米）
+  final double? altitudeMeters;
+  /// 瞬时速度（米/秒）
+  final double? speedMps;
+  /// 航向（度，0=正北顺时针）
+  final double? headingDegrees;
+  /// fix 采集时刻（UTC ISO）；null=设备未提供
+  final String? capturedAt;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
         "latitude": latitude,
@@ -40,6 +60,11 @@ class ClientLocationPayload {
         if (country != null && country!.isNotEmpty) "country": country,
         if (timezone != null && timezone!.isNotEmpty) "timezone": timezone,
         if (label != null && label!.isNotEmpty) "label": label,
+        if (accuracyMeters != null) "accuracyMeters": accuracyMeters,
+        if (altitudeMeters != null) "altitudeMeters": altitudeMeters,
+        if (speedMps != null) "speedMps": speedMps,
+        if (headingDegrees != null) "headingDegrees": headingDegrees,
+        if (capturedAt != null && capturedAt!.isNotEmpty) "capturedAt": capturedAt,
       };
 
   factory ClientLocationPayload.fromJson(Map<String, dynamic> json) {
@@ -52,6 +77,11 @@ class ClientLocationPayload {
       country: json["country"] as String?,
       timezone: json["timezone"] as String?,
       label: json["label"] as String?,
+      accuracyMeters: (json["accuracyMeters"] as num?)?.toDouble(),
+      altitudeMeters: (json["altitudeMeters"] as num?)?.toDouble(),
+      speedMps: (json["speedMps"] as num?)?.toDouble(),
+      headingDegrees: (json["headingDegrees"] as num?)?.toDouble(),
+      capturedAt: json["capturedAt"] as String?,
     );
   }
 }
@@ -196,13 +226,8 @@ class ClientLocationService {
       }
       _residentSub = Geolocator.getPositionStream(locationSettings: settings)
           .listen((Position position) async {
-        final ClientLocationPayload payload = ClientLocationPayload(
-          latitude: position.latitude,
-          longitude: position.longitude,
-          timezone: await _deviceTimezone(),
-          label:
-              "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
-        );
+        // 常驻流同样带全量精度元数据（服务端据此区分可信/降级 fix）
+        final ClientLocationPayload payload = await _payloadFrom(position);
         await _remember(payload);
         onFix(payload);
       }, onError: (Object e) {
@@ -286,19 +311,15 @@ class ClientLocationService {
       debugPrint("[ClientLocationService] 定位权限未授予，按需回包回 null");
       return null;
     }
-    final Position position = await Geolocator.getCurrentPosition(
-      locationSettings: const LocationSettings(
-        accuracy: LocationAccuracy.medium,
-        timeLimit: Duration(seconds: 5),
-      ),
+    // 快速窗口契约：服务端只等 12s，本方法外层封顶 8s。引擎预算 6s：
+    // last-known 快路毫秒级；高精度流拿到 ≤150m 的 fix 即刻返回，预算耗尽
+    // 给最佳 fix；GPS 零 fix 时降级中精度 4s（在 6s 预算内）。
+    final Position? position = await _fetchPrecisePosition(
+      budget: const Duration(seconds: 6),
+      maxAccuracyMeters: 150,
     );
-    return ClientLocationPayload(
-      latitude: position.latitude,
-      longitude: position.longitude,
-      timezone: await _deviceTimezone(),
-      label:
-          "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
-    );
+    if (position == null) return null;
+    return _payloadFrom(position);
   }
 
   /// 读取设备真实 IANA 时区（如 America/New_York）；失败返回 null（不上报，交服务端判定）。
@@ -313,11 +334,110 @@ class ClientLocationService {
     return null;
   }
 
-  /// 实际执行一次 GPS 抓取 + 逆地理；任何异常都返回磁盘/内存兜底。
-  ///
-  /// 两级精度兜底：high 冷启动在室内/搜星慢时容易一直拿不到 fix 直到
-  /// timeLimit 抛错 → 退 medium（WiFi/基站定位，秒级出 fix），城市级场景
-  /// （天气面板/聊天上报）精度足够。
+  // ─── 精确定位引擎（2026-11-10）──────────────────────────────────────
+  //
+  // 主流范式（Android FusedLocationProviderClient.getCurrentLocation 的
+  // maxUpdateAgeMillis/accuracy + iOS CLLocationManager requestLocation）：
+  //   1. 快路：系统 last-known fix 足够新且足够准 → 毫秒级直接采用。
+  //   2. 精路：开高精度定位流，拿到第一个满足精度门槛的 fix 立即返回；
+  //      预算耗尽仍未达标则返回其中精度最好的一个（带真实精度元数据）。
+  //   3. 降级：高精度流一个 fix 都没有（室内/搜星慢/无 GPS 硬件）才退
+  //      中精度（WiFi/基站）再给一小段预算。
+  //
+  // 与旧实现的本质区别：不再「high 挂满超时→退 medium→无脑采纳第一个
+  // fix」，而是带精度门槛的择优；低精度 fix 永远以 accuracyMeters 如实
+  // 上报，服务端可据此裁决。
+
+  /// last-known fix 的最大可信龄期：超过它宁可重新定位。
+  static const Duration _lastKnownMaxAge = Duration(seconds: 45);
+
+  static Future<Position?> _fetchPrecisePosition({
+    required Duration budget,
+    required double maxAccuracyMeters,
+  }) async {
+    // 快路：last-known 足够新且达标 → 毫秒级返回。
+    try {
+      final Position? last = await Geolocator.getLastKnownPosition();
+      if (last != null) {
+        final Duration age = DateTime.now().difference(last.timestamp);
+        if (age >= Duration.zero &&
+            age <= _lastKnownMaxAge &&
+            last.accuracy > 0 &&
+            last.accuracy <= maxAccuracyMeters) {
+          return last;
+        }
+      }
+    } catch (e) {
+      debugPrint("[ClientLocationService] last-known 读取失败（忽略，走精路）: $e");
+    }
+
+    // 精路：高精度流，预算内择优。
+    final Position? best = await _collectBestFix(
+      accuracy: LocationAccuracy.high,
+      budget: budget,
+      maxAccuracyMeters: maxAccuracyMeters,
+    );
+    if (best != null) return best;
+
+    // 降级：高精度零 fix（室内/无 GPS 硬件的桌面）→ 中精度短预算。
+    return _collectBestFix(
+      accuracy: LocationAccuracy.medium,
+      budget: const Duration(seconds: 4),
+      maxAccuracyMeters: maxAccuracyMeters,
+    );
+  }
+
+  /// 开一段定位流：返回第一个达标 fix；预算耗尽仍未达标则返回最佳者。
+  static Future<Position?> _collectBestFix({
+    required LocationAccuracy accuracy,
+    required Duration budget,
+    required double maxAccuracyMeters,
+  }) async {
+    Position? best;
+    try {
+      final Stream<Position> stream = Geolocator.getPositionStream(
+        locationSettings: LocationSettings(
+          accuracy: accuracy,
+          distanceFilter: 0,
+        ),
+      ).timeout(budget, onTimeout: (EventSink<Position> sink) {
+        sink.close();
+      });
+      await for (final Position position in stream) {
+        // 模拟器/异常源可能报 (0,0)，直接丢弃
+        if (position.latitude == 0 && position.longitude == 0) continue;
+        if (best == null || position.accuracy < best.accuracy) {
+          best = position;
+        }
+        if (position.accuracy > 0 && position.accuracy <= maxAccuracyMeters) {
+          return position;
+        }
+      }
+    } catch (e) {
+      debugPrint("[ClientLocationService] ${accuracy.name} 定位流结束: $e");
+    }
+    return best;
+  }
+
+  /// Position → 带完整精度元数据的 payload。
+  static Future<ClientLocationPayload> _payloadFrom(Position position) async {
+    final double? heading =
+        (position.heading >= 0 && !position.heading.isNaN) ? position.heading : null;
+    return ClientLocationPayload(
+      latitude: position.latitude,
+      longitude: position.longitude,
+      accuracyMeters: position.accuracy > 0 ? position.accuracy : null,
+      altitudeMeters: position.altitude,
+      speedMps: position.speed >= 0 ? position.speed : null,
+      headingDegrees: heading,
+      capturedAt: position.timestamp.toUtc().toIso8601String(),
+      timezone: await _deviceTimezone(),
+      label:
+          "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
+    );
+  }
+
+  /// 实际执行一次精确定位 + 逆地理；任何异常都返回磁盘/内存兜底。
   static Future<ClientLocationPayload?> _fetchFresh(
     ClientLocationPayload? disk,
   ) async {
@@ -329,44 +449,38 @@ class ClientLocationService {
         return disk ?? _cached;
       }
 
-      Position? position;
-      try {
-        position = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.high,
-            timeLimit: Duration(seconds: 8),
-          ),
-        );
-      } catch (e) {
-        debugPrint("[ClientLocationService] high 精度定位失败，退 medium 重试: $e");
-        position = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.medium,
-            timeLimit: Duration(seconds: 8),
-          ),
-        );
+      final Position? position = await _fetchPrecisePosition(
+        budget: const Duration(seconds: 7),
+        maxAccuracyMeters: 100,
+      );
+      if (position == null) {
+        debugPrint("[ClientLocationService] 预算内未取到任何 fix，回缓存兜底");
+        return _cached ?? disk;
       }
 
-      final ClientLocationPayload? resolved = await _reverseGeocodeViaServer(
-        position.latitude,
-        position.longitude,
-      );
-
-      if (resolved != null) {
-        await _remember(resolved);
-        return resolved;
-      }
-
-      // 服务端逆地理失败兜底：上报设备真实时区（不再硬编码 Asia/Shanghai），
-      // 让服务端拿到正确用户时区，避免「在美国却报北京时间」。
-      final ClientLocationPayload coordsOnlyPayload = ClientLocationPayload(
-        latitude: position.latitude,
-        longitude: position.longitude,
-        timezone: await _deviceTimezone(),
-        label: "${position.latitude.toStringAsFixed(4)}, ${position.longitude.toStringAsFixed(4)}",
-      );
-      await _remember(coordsOnlyPayload);
-      return coordsOnlyPayload;
+      final ClientLocationPayload coordsPayload = await _payloadFrom(position);
+      final ClientLocationPayload? resolved =
+          await _reverseGeocodeViaServer(coordsPayload.latitude, coordsPayload.longitude);
+      // 逆地理只补城市文本与时区（定位→当地时区的主路）；精度元数据原样保留
+      final ClientLocationPayload merged = resolved == null
+          ? coordsPayload
+          : ClientLocationPayload(
+              latitude: coordsPayload.latitude,
+              longitude: coordsPayload.longitude,
+              city: resolved.city,
+              district: resolved.district,
+              region: resolved.region,
+              country: resolved.country,
+              timezone: resolved.timezone ?? coordsPayload.timezone,
+              label: resolved.label ?? coordsPayload.label,
+              accuracyMeters: coordsPayload.accuracyMeters,
+              altitudeMeters: coordsPayload.altitudeMeters,
+              speedMps: coordsPayload.speedMps,
+              headingDegrees: coordsPayload.headingDegrees,
+              capturedAt: coordsPayload.capturedAt,
+            );
+      await _remember(merged);
+      return merged;
     } catch (e) {
       debugPrint("[ClientLocationService] 获取定位失败: $e");
       return _cached ?? disk;

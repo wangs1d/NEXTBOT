@@ -101,6 +101,8 @@ export type AlarmTriggerPayload = {
   /** epoch ms，客户端可据此决定是否本地已触发（去重） */
   via: "server" | "local";
   wakeMode?: AlarmWakeMode;
+  /** Agent 生成的叫醒话术文本（无音频时端侧可按文本兜底展示） */
+  voiceText?: string | null;
   /** 服务端已合成的开场白语音（mp3 base64）；无 TTS 能力时为 null（客户端按文本兜底） */
   tts?: { format: "mp3"; base64: string } | null;
 };

@@ -9,7 +9,7 @@
 import { resolveActorId } from "../agent/actor-id.js";
 import { primarySubjectOf } from "../proactivity/discovery-layer.js";
 import type { ScheduleAssertionStore } from "../proactivity/branches/schedule-assertion-store.js";
-import { isAlarmLikeReminderText, repeatRuleFromRecurrence, type ScheduleRecurrence } from "../services/alarm-clock/alarm-intent.js";
+import { repeatRuleFromRecurrence, type ScheduleRecurrence } from "../services/alarm-clock/alarm-intent.js";
 import type { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
 import type { ScheduleConflictService } from "../services/schedule-conflict-service.js";
 import { buildConflictToolResult, precheckCreateConflict } from "../services/schedule-conflict-service.js";
@@ -227,25 +227,31 @@ export function buildScheduleCreateInput(
 }
 
 /**
- * 闹钟类提醒（「明早7点叫我起床」）在日程任务之外补建真闹钟（kind=alarm）。
+ * 睡觉叫醒（「明早7点叫我起床」）在日程任务之外补建真闹钟（kind=alarm）。
+ *
+ * 2026-11-09 用户定调：废除正则文本匹配，是否建真闹钟的唯一判定 = 模型传入的
+ * alarmIntent（calendar.create schema 字段），且只覆盖一种情形——睡觉叫醒；
+ * 「定个闹钟」这类没有睡觉语境的表述不建。模型之外的保护仍是确定性代码：
+ * 时间必须成立、RRULE 子集支持。
  *
  * 日程任务照常创建（今日安排/编辑/删除生态不动）；真闹钟经 alarm-clock 链路
  * alarm.sync 下发到手机端本地精确调度（AlarmManager，杀进程也响）。
  * 幂等由 AlarmStore.findDuplicate（同 label 同 fireAt ±60s）兜底，口头重复不炸双响。
  *
- * 返回建好的闹钟摘要；不满足条件（非闹钟类 / 服务未装配 / 时间已过 / yearly 重复）
+ * 返回建好的闹钟摘要；alarmIntent 非 true / 服务未装配 / 时间已过 / yearly 重复
  * 返回 null，调用方按纯日程提醒转述。
  */
-export function createLinkedAlarmIfAlarmLike(
+export function createLinkedAlarmIfRequested(
   getAlarmClockService: (() => AlarmClockService | null) | undefined,
-  input: { text: string; label: string; runAt: string; recurrence: string; actorId: string },
+  input: { alarmIntent: boolean; label: string; runAt: string; recurrence: string; actorId: string },
 ): { alarmId: string; nextFireAt: string | null; repeatRule: string | null; label: string } | null {
   const alarmClockService = getAlarmClockService?.();
   if (!alarmClockService) return null;
+  // 模型没明确表态 = 用户没要睡觉叫醒：宁缺勿滥，绝不误建会真的响铃的闹钟
+  if (input.alarmIntent !== true) return null;
   // 时间语义必须成立：过去时刻/非法时间不建闹钟（日程层自会给出自己的报错路径）
   const fireMs = new Date(input.runAt).getTime();
   if (!Number.isFinite(fireMs) || fireMs <= Date.now()) return null;
-  if (!isAlarmLikeReminderText(input.text)) return null;
   const { rule, ok } = repeatRuleFromRecurrence(input.recurrence as ScheduleRecurrence);
   if (!ok) return null;
   const label = input.label.trim().slice(0, 24) || "闹钟";
@@ -257,6 +263,9 @@ export function createLinkedAlarmIfAlarmLike(
       fireAt: input.runAt,
       repeatRule: rule,
       source: "agent",
+      // 语音叫醒：服务端在建钟时由 SpeechHub 生成话术 + 预合成 mp3，随 alarm.sync
+      // 下发到端侧缓存；到点本地 AlarmManager 直接播，不依赖联网。
+      wakeMode: { level: "voice_talk", volumeRamp: true },
     });
     return { alarmId: alarm.id, nextFireAt: alarm.nextFireAt ?? null, repeatRule: rule, label };
   } catch {
@@ -290,7 +299,7 @@ export function registerCalendarTools(
     task: ScheduleTaskRecord,
     timezone: string,
     summary: string,
-    linkedAlarm: ReturnType<typeof createLinkedAlarmIfAlarmLike> = null,
+    linkedAlarm: ReturnType<typeof createLinkedAlarmIfRequested> = null,
   ): Record<string, unknown> => ({
     ok: true,
     matched: true,
@@ -355,8 +364,9 @@ export function registerCalendarTools(
       }
       const payload = buildScheduleCreateInput(draft, sessionId, tz);
       const task = await scheduleTaskService.createTask(payload);
-      const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
-        text: `${text} ${draft.description}`,
+      const linkedAlarm = createLinkedAlarmIfRequested(getAlarmClockService, {
+        // 睡觉叫醒判定唯一来源 = 模型填的 alarmIntent（schema 字段），服务端不做文本猜测
+        alarmIntent: input.alarmIntent === true,
         label:
           draft.shortTitle?.trim() ||
           draft.title?.trim() ||
@@ -446,8 +456,8 @@ export function registerCalendarTools(
           location,
           remindBeforeMinutes,
         });
-        const linkedAlarm = createLinkedAlarmIfAlarmLike(getAlarmClockService, {
-          text: `${title} ${description} ${reminderMessage}`,
+        const linkedAlarm = createLinkedAlarmIfRequested(getAlarmClockService, {
+          alarmIntent: input.alarmIntent === true,
           label: shortTitle || task.shortTitle || task.reminderMessage || task.title || description,
           runAt: task.nextRunAt ?? runAt,
           recurrence,

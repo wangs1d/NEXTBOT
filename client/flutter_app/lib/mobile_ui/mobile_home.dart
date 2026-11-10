@@ -269,7 +269,15 @@ class MobileHomePageState extends State<MobileHomePage>
             backgroundColor: Colors.transparent,
             // 玻璃底栏压在页面内容之上（backdrop 才能糊到消息/列表）
             extendBody: true,
-            body: IndexedStack(index: _tabIndex, children: _buildTabs()),
+            // edge-to-edge 后（main_mobile.dart 开启）：底部 inset 由玻璃底栏
+            // 内的 SafeArea 吸收；顶部状态栏 inset 在这里吃掉——四个 tab 页
+            // 都按「窗口从状态栏下方开始」设计，行为与未开 edge-to-edge 时一致，
+            // 而状态栏区域透出主壳底色（不再由系统画白）。
+            body: SafeArea(
+              top: true,
+              bottom: false,
+              child: IndexedStack(index: _tabIndex, children: _buildTabs()),
+            ),
             bottomNavigationBar: _buildBottomBar(context),
           ),
         ],

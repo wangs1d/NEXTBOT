@@ -26,6 +26,7 @@ import type { ClientClockWire, ClientLocationWire } from "@nextbot/agent-protoco
 
 import { getDataDir } from "../config/data-dir.js";
 import { writeJsonAtomic } from "../storage/atomic-json.js";
+import type { ReverseGeocodeHit } from "./reverse-geocode-service.js";
 
 export type ActorActivity = "still" | "walking" | "vehicle" | "unknown";
 export type ActorPlaceKind = "home" | "work" | "other" | "unknown";
@@ -142,16 +143,36 @@ export function serverTimezone(): string {
  */
 export function resolveUserClock(input: ResolveUserClockInput): ResolvedUserClock {
   const clientTz = input.clientTimezone?.trim();
+  // 设备时区字符串 ↔ 自报偏移 ↔ geo 三方对账（2026-11-10 真机实证加固）：
+  // 同一台手机的两个读数通道可以互相矛盾（时钟快照 GMT/0、定位通道
+  // Asia/Shanghai，见 data/location/actor-context.json 2378709729@qq.com）。
+  // 字符串与自报偏移矛盾时**不作废字符串**——那可能只是跨夏令时的过期快照
+  // （洛杉矶 PDT→PST 实测会误伤）；正确语义是：geo 偏移与设备自报偏移一致
+  // 时（设备钟与定位互相印证）信 geo，否则保留字符串（没有更优源时矮子里
+  // 拔将军）。设备整台钟都错的场景由 geo 冲突保护 + 逆地理修正兜住。
   if (isValidIanaTimezone(clientTz)) {
     const geoTz = input.geoTimezone?.trim();
-    if (isValidIanaTimezone(geoTz) && geoTz !== clientTz) {
-      const atMs = input.nowMs ?? Date.now();
-      const clientOffset = zoneOffsetMinutes(clientTz!, atMs);
+    const geoValid = isValidIanaTimezone(geoTz);
+    const atMs = input.nowMs ?? Date.now();
+    const clientStringOffset = zoneOffsetMinutes(clientTz!, atMs);
+    const reportedOffset =
+      typeof input.clientUtcOffsetMinutes === "number" ? input.clientUtcOffsetMinutes : undefined;
+    if (
+      reportedOffset !== undefined &&
+      clientStringOffset !== undefined &&
+      clientStringOffset !== reportedOffset &&
+      geoValid &&
+      zoneOffsetMinutes(geoTz!, atMs) === reportedOffset
+    ) {
+      // 字符串过期/损坏，但 geo 与设备钟偏移互相印证 → 信 geo
+      return { timezone: geoTz!, source: "geo" };
+    }
+    if (geoValid && geoTz !== clientTz) {
       const geoOffset = zoneOffsetMinutes(geoTz!, atMs);
       if (
-        clientOffset !== undefined &&
+        clientStringOffset !== undefined &&
         geoOffset !== undefined &&
-        clientOffset !== geoOffset
+        clientStringOffset !== geoOffset
       ) {
         return { timezone: geoTz!, source: "geo" };
       }
@@ -307,11 +328,22 @@ export class ActorContextService {
     }
     const ctx = this.ensure(actorId);
     const at = this.now();
+    // 龄期诚实原则：capturedAt 是 fix 的真实采集时刻（设备钟），能用就用——
+    // 否则传输/排队延迟会被抹掉，服务端把 5 分钟前的坐标当"刚刚"。
+    // 设备钟不可信（偏差过大）时回退服务端接收时刻。
+    let observedAt = at;
+    if (loc.capturedAt) {
+      const capturedMs = Date.parse(loc.capturedAt);
+      if (Number.isFinite(capturedMs)) {
+        const skewMs = Math.abs(at - capturedMs);
+        observedAt = skewMs <= 10 * 60_000 ? capturedMs : at;
+      }
+    }
     ctx.location = {
       latitude: loc.latitude,
       longitude: loc.longitude,
-      accuracyMeters: typeof (loc as { accuracy?: number }).accuracy === "number"
-        ? (loc as { accuracy?: number }).accuracy
+      accuracyMeters: typeof loc.accuracyMeters === "number" && loc.accuracyMeters > 0
+        ? loc.accuracyMeters
         : undefined,
       label: loc.label?.trim() || undefined,
       city: loc.city?.trim() || undefined,
@@ -319,7 +351,7 @@ export class ActorContextService {
       region: loc.region?.trim() || undefined,
       country: loc.country?.trim() || undefined,
       timezone: loc.timezone?.trim() || undefined,
-      observedAt: at,
+      observedAt,
       source,
       placeKind: place?.kind ?? "unknown",
       placeLabel: place?.label?.trim() || undefined,
@@ -339,6 +371,37 @@ export class ActorContextService {
     ctx.updatedAt = at;
     this.afterUpdate();
     return ctx;
+  }
+
+  /**
+   * 用服务端逆地理结果修正位置快照（2026-11-10 真机时间错乱根治）。
+   *
+   * 背景：`updateLocation` 落库的 `location.timezone` 是客户端上报原样回声，
+   * 而客户端时区读数可能是错的（真机实证：设备钟通道报 GMT+0，人却在贵州）。
+   * 快照里 geo 时区被同一个坏读数污染后，resolveClock 的 geo 冲突保护拿
+   * GMT 比 GMT 永远不触发 →【当前时间】块按 UTC 渲染 → 手机端"没有时间感知"。
+   *
+   * 这里用坐标反解（reverse-geocode-service，open-meteo timezone=auto）的
+   * 时区**覆盖** location.timezone（仅当反解成功且为合法 IANA 时区）；文本
+   * 字段（label/city/district/region/country）只补空、不改写。设备钟原值
+   * 仍留在 clock 块不动——存储层如实记录上报，解析层（resolveClock）拿
+   * 修正后的 geo 时区与设备钟做偏移冲突裁决，冲突时信定位。
+   */
+  enrichLocationFromGeocode(actorId: string, hit: ReverseGeocodeHit): void {
+    const ctx = this.contexts.get(actorId);
+    const loc = ctx?.location;
+    if (!ctx || !loc) return;
+    const at = this.now();
+    if (isValidIanaTimezone(hit.timezone) && hit.timezone !== loc.timezone) {
+      loc.timezone = hit.timezone;
+    }
+    if (!loc.label?.trim() && hit.label?.trim()) loc.label = hit.label.trim();
+    if (!loc.city?.trim() && hit.city?.trim()) loc.city = hit.city.trim();
+    if (!loc.district?.trim() && hit.district?.trim()) loc.district = hit.district.trim();
+    if (!loc.region?.trim() && hit.region?.trim()) loc.region = hit.region.trim();
+    if (!loc.country?.trim() && hit.country?.trim()) loc.country = hit.country.trim();
+    ctx.updatedAt = at;
+    this.afterUpdate();
   }
 
   /** 写入运动状态（CoreMotion / Activity Recognition 融合结果）。 */

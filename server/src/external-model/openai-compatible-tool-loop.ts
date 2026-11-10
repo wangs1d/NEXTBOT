@@ -128,8 +128,6 @@ import {
   type CapabilityModuleDeps,
 } from "../tools/capability-modules/index.js";
 import { isExplicitPhoneCallRequest } from "../agent/phone-call-intent.js";
-import { resolveExplicitActionTool } from "../gateway/forced-tool.js";
-import { recordExitGateFire, recordTurnFinished } from "./exit-gate-metrics.js";
 import { buildRecoveryHint } from "../agent/loop/tool-metadata.js";
 import {
   isToolCallIdNotFoundError,
@@ -1733,17 +1731,23 @@ function extractUserTextFromMessages(messages: ChatCompletionMessageParam[]): st
 //     NEED_MORE_TOOLS 可升级）；探测通过 → 直接 SUMMARIZE 收尾（2 次调用，
 //     token 最省路径）。
 //   - 存在失败 / 元工具（tool_search 桥接）/ 交互式工具（浏览器/桌面/代码链路）
-//     时，进入带 schema 的 replan 波次（上限 maxRounds，默认
-//     PLAN_EXECUTE_MAX_WAVES=4，对话面轻量档 1）：模型基于已有结果继续规划或
-//     直接给出最终回答（文本回复即流式返回）。
-//   - 波次耗尽仍未收尾 → 直接结束本轮（不再发起兜底 SUMMARIZE，2026-11-08 删除）。
+//     时，进入带 schema 的 replan 波次（2026-11-10 起**不限轮次**，与 Claude Code /
+//     Codex 一致：循环到模型不再发 tool_calls；仅测试与内部原子编排显式传 maxRounds
+//     收紧）：模型基于已有结果继续规划或直接给出最终回答（文本回复即流式返回）。
+//   - 显式上限耗尽仍未收尾 → 直接结束本轮（不再发起兜底 SUMMARIZE，2026-11-08 删除）。
 // ═══════════════════════════════════════════════════════════════════
 
-/** 规划波次（plan + replan）默认上限；可用环境变量 PLAN_EXECUTE_MAX_WAVES 调整。 */
-const PLAN_EXECUTE_MAX_WAVES_DEFAULT = (() => {
-  const raw = Number.parseInt(process.env.PLAN_EXECUTE_MAX_WAVES ?? "", 10);
-  return Number.isFinite(raw) && raw >= 1 ? raw : 4;
-})();
+/**
+ * 循环终止契约（2026-11-10 彻底取消波次上限）：
+ *
+ * 主流 agent（Claude Code / Codex CLI / Cursor Agent）都不设"最多几轮"的业务闸，
+ * 循环的唯一正常出口是**模型不再发出 tool_calls**——它给出正文即结束。可靠性的
+ * 来源不是轮数上限，而是：单工具超时、轮内去重（同工具同参数只真跑一次）、
+ * 失败回执交给模型自己换路、用户可随时打断。
+ *
+ * 本文件保留 `options.maxRounds` 只是给**测试与内部原子编排**（如
+ * agent-task-orchestrator 每轮一个动作）显式收紧用；生产链路不传 = 不限。
+ */
 
 /** 充分性探测的升级标记：汇总调用首行输出该标记表示"结果不足，需要 replan"。 */
 const NEED_MORE_TOOLS_MARKER = "NEED_MORE_TOOLS";
@@ -2038,9 +2042,9 @@ export async function streamCompletionWithTools(
     /** Moonshot Kimi：如 `{ thinking: { type: "disabled" } }` */
     extraBody?: Record<string, unknown>;
     /**
-     * 路由意图标签（来自 streamOpts.turnIntent，如 action_write）：出口检查
-     * 据此确定性拦截"路由判定要动手但模型零工具尝试"的轮次。
-     * 2026-09-23 扩面：realtime_lookup / media_retrieval 同样纳入（详见出口检查处）。
+     * 路由意图标签（来自 streamOpts.turnIntent，如 action_write）：仅作观测与
+     * 策略注入用途。原「出口检查据此拦截」的行为已于 2026-11-08 随出口对账闸
+     * 整体删除（已流式即定稿），字段保留以兼容调用方与 turn-trace。
      */
     turnIntent?: string;
     /**
@@ -2051,9 +2055,8 @@ export async function streamCompletionWithTools(
      */
     renderPayloads?: Record<string, unknown> | Promise<Record<string, unknown> | undefined>;
     /**
-     * 本轮是否已注入前置检索证据块（【实时检索结果】）。realtime_lookup 轮
-     * 证据已注入时模型零工具直答是**正确行为**（答的就是刚检索的事实），
-     * 出口检查据此豁免；未注入时零工具直答才拦截（2026-09-23）。
+     * 本轮是否已注入前置检索证据块（【实时检索结果】）。原供出口检查豁免判定，
+     * 出口对账闸已于 2026-11-08 删除；字段保留以兼容调用方与 turn-trace 观测。
      */
     turnEvidenceInjected?: boolean;
     /** 路由置信度（观测用，进 turn-trace 便于量化路由误判率） */
@@ -2112,19 +2115,14 @@ export async function streamCompletionWithTools(
     const preset = getToolResultBudget(toolName);
     return preset === undefined ? undefined : Math.round(preset * toolBudgetScale);
   };
-  // 2026-08-01 性能优化：从 extraBody 推断 fastProfile（对话面轻量档）。该档
-  // system prompt 已注入 currentTime / userLocation / scheduleSnapshot，只影响
-  // 波次预算；tool_choice 已统一 auto，不再有请求层强制（2026-10-22）。
-  // fastProfile = 对话为主，system prompt 已注入 currentTime / userLocation / scheduleSnapshot，
-  // 强制工具调用会多 1 次 round trip，徒增延迟。
-  const fastProfile = Boolean(options?.extraBody?.fastProfile === true);
+  // 2026-11-10：fastProfile（extraBody 轻量档标记）不再参与波次预算——它现在的
+  // 唯一语义留在 provider 层（是否跳过请求级强制 tool_choice），本循环不读。
   // ObservationPack（SoL-Pi 借鉴）：大结果句柄存储。传 sessionId 时跨对话轮复用
   // （后续轮可读回此前轮归档的结果），无 sessionId 则本轮独立。
   const obsPack = getObservationPack(options?.audit?.sessionId);
-  const maxWaves = Math.max(
-    1,
-    options?.maxRounds ?? (fastProfile ? 1 : PLAN_EXECUTE_MAX_WAVES_DEFAULT),
-  );
+  // 波次上限（2026-11-10 起**默认不存在**）：undefined = 循环到模型自然收尾。
+  // 只有测试与内部原子编排会显式传 maxRounds 收紧；生产链路（agent-core）不传。
+  const waveLimit = options?.maxRounds;
   
   // ── handoff 工具面收缩（2026-10-19 根修，docs §10 的落地）──
   // 计划里有一步在等用户自己操作（点外卖/付款/授权）时，**外部动作类工具整族
@@ -2243,7 +2241,6 @@ export async function streamCompletionWithTools(
   const traceToolCalls: ToolCallTraceEntry[] = [];
   const traceCallStartByCallId = new Map<string, number>();
   let traceRequestCard: { fired: boolean; loaded: string[]; blockedRisk?: string[] } | undefined;
-  let traceExitGate: { fired: boolean; reason?: string } | undefined;
   let traceWavesUsed = 0;
   let lastAssistantText = "";
   const thinkingDisabled = isThinkingDisabled(options?.extraBody);
@@ -2255,35 +2252,6 @@ export async function streamCompletionWithTools(
     result: Record<string, unknown>;
   }> = [];
 
-  // ── 统一出口自检 TurnOutcomeGate（2026-09-05，话题无关）──
-  // 判定不使用任何话题关键词（价格/新闻/媒体词表已随话题路由一起删除）：
-  // "这轮是否需要工具"由路由层的语义分类决定，本门只负责事实核查——
-  // 任务面轮次结束时有「实质成功的工具结果」才算诉求被满足；
-  // 没有成功结果且收尾是道歉式/机制话（风格判定，话题无关）→ 换路续波一次。
-  // 置信而答的直答（含模型凭既有知识回答）不拦截，避免空转烧 token。
-  /**
-   * 派发型成功（2026-10-22 完成语义契约）：工具返回了 ok，但用户要的答案还不存在。
-   * 判定只看结果体/工具名，不猜措辞；`queued` 的轮次一律不算「已办完」。
-   */
-  const isQueuedResult = (r: { toolName: string; result: Record<string, unknown> }): boolean => {
-    if ((r.result as { produces?: unknown } | null)?.produces === "queued") return true;
-    // 名字兜底：allToolExecResults 存的是 wire 名（API 形态，点号已转下划线，
-    // 如 task_dispatch），而 QUEUED_PRODUCER_TOOLS 用的是注册表名。此处归一化后比较。
-    const registryName = r.toolName.replace(/_/g, ".");
-    return QUEUED_PRODUCER_TOOLS.has(registryName) || QUEUED_PRODUCER_TOOLS.has(r.toolName);
-  };
-  /**
-   * 有实质产出的成功工具数：元工具（能力查询/目录检索）、上下文管线支撑工具（obs_recall）、
-   * 失败执行、**派发型（queued）**均不计入——「完成 = 返回了能回答用户的内容」。
-   */
-  const countSubstantiveOkResults = (): number =>
-    allToolExecResults.filter(
-      (r) =>
-        r.ok &&
-        !isQueuedResult(r) &&
-        !META_TOOL_NAMES.has(r.toolName) &&
-        !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
-    ).length;
   // ── 答案留存闸（2026-10-13 根修：工具轮的答案不进流式通道）──
   // 决策点唯一且确定性：本函数是唯一知道「本轮是否执行过工具」的地方。
   // 命中后波内直推（onContentDelta → onDelta → chat.assistant_chunk）对正文
@@ -2293,58 +2261,15 @@ export async function streamCompletionWithTools(
     options?.holdAnswer === "always" ||
     (options?.holdAnswer === "after_tool_use" &&
       allToolExecResults.some((r) => isSubstantiveToolExecution(r.toolName)));
-  /** 出口自检：本轮收尾是否「用户诉求未满足」。null = 满足，可正常收尾。 */
-  const assessTurnUnsatisfied = (finalText: string): string | null => {
-    if (countSubstantiveOkResults() > 0) return null;
-    // 派发型成功 ≠ 完成（2026-10-22 完成语义契约）：本轮只把活派出去了，
-    // 服务端没有任何 content 类结果。与静态架构的 queued_without_content 同构。
-    if (allToolExecResults.some((r) => r.ok && isQueuedResult(r))) {
-      return "queued_without_content";
-    }
-    // 事实判定（话题无关）：任务面轮次尝试过实质工具但零成功 → 诉求未满足。
-    // 任务面本身由路由层语义分类选定（声明了能力需求），"有没有真的办成"
-    // 只看服务端工具执行结果，不猜话题、不看措辞。
-    if (allToolExecResults.length > 0) {
-      return "substantive_tools_attempted_but_none_succeeded";
-    }
-    // 零尝试但用户明确要求外部动作（2026-10-22，事前指定门的替代）：与静态
-    // 架构出口闸同构——只看服务端有没有对应工具的执行记录，不看回复措辞。
-    // 放在道歉式判定之前：道歉也不能顶替「明确要求的动作」。
-    const explicitActionTool = resolveExplicitActionTool(userText);
-    if (
-      explicitActionTool &&
-      !allToolExecResults.some((r) => r.toolName === explicitActionTool) &&
-      finalText.trim()
-    ) {
-      return "explicit_action_no_attempt";
-    }
-    // 零尝试：仅当收尾是道歉式/机制话（风格判定，天然话题无关）才续波——
-    // 置信的知识直答与向用户追问澄清的轮次不拦截，避免空转烧 token。
-    if (isApologyStyleFallback(finalText.trim())) {
-      return "no_attempt_and_hedged";
-    }
-    // 「零尝试 + 办事怀疑信号 + 宣称办过」词面判据已于 2026-10-22 删除：
-    // 判断「该不该调工具」的权限归模型，服务端只核对账目（有没有 content 结果），
-    // 不再用话题词表 + 完成态措辞反推意图。
-    return null;
-  };
   // 轮内去重缓存：同一工具 + 同一参数在本轮对话内只真实执行一次（用完即丢，
   // 不跨轮持久——跨轮缓存由 ctx.getCachedToolResult 的 TTL 缓存负责）。
   // 值为共享 Promise：同一波内并发出现的相同调用 await 同一个执行（含确定性重试），
   // 消除并行重复执行；失败结果落定后立即摘除，后续 replan 波次仍可重新执行。
   const turnDedupeCache = new Map<string, Promise<ToolExecOutcome>>();
-  // 空正文整合兜底（2026-08-29）：模型调完工具只发 tool_calls 就收尾、零正文时，
-  // 强制它基于工具结果说人话（而非把工具 JSON 原文糊给用户），只授予一次。
-  let narrationEnforced = false;
-  // 统一出口自检（2026-09-05 TurnOutcomeGate）：轨迹内「换路续波」只授予一次，
-  // 不再区分 fast/complex 车道（2026-09-05 双面架构后只有任务面进工具循环）。
-  let outcomeGateEnforced = false;
   // 请求卡（2026-09-19，MCP-Zero 式意图检索）：模型正文输出 <tool_request> 后
   // 由检索层从延迟目录转正工具，每轮最多一次。
   let requestCardUsed = false;
   const requestCardLoadedNames = new Set<string>();
-  // 单一出口检查（2026-09-19 静态架构）：一轮最多续波一次。
-  let exitGateEnforced = false;
   // 2026-10-22 架构定稿：全项目不再存在任何非 auto 的 tool_choice。
   // 原 forceRequiredNextWave（出口闸授权下一波 required）已彻底删除——
   // Anthropic 明确强制调用会让模型跳过 thinking、把推理挤进参数，
@@ -2412,12 +2337,14 @@ export async function streamCompletionWithTools(
     );
   }
 
-  // 失败换路预算（2026-09-02）：存在失败的工具执行时，fast 追加 1 波
-  // 「换工具重试」预算（如 search_images 失败 → 改 search_web/fetch_web），
-  // 不挤占正常收尾预算；complex 波次充裕不追加。总上限 4，防失败循环膨胀。
-  // 用闭包函数而非常量：for 条件与波次终止决策读取同一份动态预算（失败发生后生效）。
-  const effectiveMaxWaves = (): number =>
-    fastProfile ? Math.min(maxWaves + (allToolExecResults.some((r) => !r.ok) ? 1 : 0), 4) : maxWaves;
+  // 收尾叙述保底波（2026-11-09 根修）：**仅在调用方显式设了 waveLimit 时**才有
+  // 意义——上限耗尽那一刻若本波刚执行完工具且整轮还没有面向用户的正文，允许一次
+  // 额外叙述波，避免腰斩在「工具波→结果→正文」的中间。无上限时永远不会耗尽，
+  // 也就永远不需要这波。这不是出口对账闸（已删）：闸是把已流出的正文塞回
+  // messages 改稿；这里正文从未存在，不存在复述，也不注入任何指令。
+  let narrationGraceWaves = 0;
+  const waveBudget = (): number =>
+    waveLimit === undefined ? Number.POSITIVE_INFINITY : waveLimit + narrationGraceWaves;
 
   // ── 确定性媒体预执行（2026-10-10 根治「搜图轮时有时无」）──
   // 执行器：单次超时竞速（与主路径同源的超时预算与 abort 语义），轮级去重
@@ -2566,7 +2493,26 @@ export async function streamCompletionWithTools(
   let wavesWithToolCalls = 0;
   let planNudgeSent = false;
 
-  for (let wave = 0; wave < effectiveMaxWaves(); wave++) {
+  // 生成前场景边界（2026-11-09）：第 0 波就可能零工具直答（「明天什么安排」的
+  // 数据已由 scheduleSnapshot 进上下文，模型不调工具，合成轮根本不会跑）——
+  // pre 场景的【本轮渲染边界】必须在第 0 波请求前进 prompt，否则模型自己排
+  // 版式（实证：## 📅 + 加粗列表直穿气泡）。payloads 允许未决 Promise
+  // （明日预览取数 2.5s 内部超时，此刻早已 settle，await 零等待）。
+  // 同轮合成轮的注入以 preWaveBoundaryBlock 为 existingInstruction 去重，不会双份。
+  const preWavePayloads = await Promise.resolve(options?.renderPayloads).catch(
+    () => undefined,
+  );
+  const preWaveScenePlan = planPreRenderScene({
+    userText,
+    ...(preWavePayloads ? { payloads: preWavePayloads } : {}),
+  });
+  const preWaveBoundaryBlock = buildSceneBoundaryBlock(preWaveScenePlan);
+  if (preWaveBoundaryBlock) {
+    // 同 tryPushPlanNudge：追加普通 user 消息（轮内脚手架，不改正文不换稿）
+    messages.push({ role: "user", content: preWaveBoundaryBlock.trim() });
+  }
+
+  for (let wave = 0; wave < waveBudget(); wave++) {
     traceWavesUsed = wave + 1;
     // 只在真有执行压力时出现：闲聊轮凑不到阈值 = 零触发、零 token。
     // 追加的是普通 user 消息（不改正文、不换稿），下一波自然带上。
@@ -2980,9 +2926,6 @@ export async function streamCompletionWithTools(
     // 这对事实的收敛责任在展示侧：WS 层用 UtteranceAssembler（agent/utterance-assembler.ts）
     // 把确认语与结论装配成同一条发言，检索轮两段都保留（先应一句、停顿、再细说），
     // 记账轮等语义重复时裁掉确认语，避免"同一句话变成两条消息"。
-    // 注意：下方收尾闸门（出口检查/出口自检/空正文兜底）命中 continue 重试前
-    // 会清空本累积——重试轮「替换」上一轮文本而非拼接，否则上一轮的自语会
-    // 和重试后的新答案拼成一条两句同义的回复（2026-09-09 实测事故）。
     if (finishReason !== "tool_calls" || normalizedToolCalls.length === 0) {
       lastAssistantText = (lastAssistantText ? lastAssistantText + "\n" : "") + fullText;
     }
@@ -3004,13 +2947,13 @@ export async function streamCompletionWithTools(
       // 完成任务：检索层对延迟目录做语义召回，命中工具追加进本轮 tools 数组
       // （会话排序基准自动吸收新工具），下一波模型原生 tool_calls 直调。
       // 取代"要求弱模型自觉写好检索词调 tool_discover"的两步协议——模型只说
-      // 意图，检索层负责终审。每轮最多一次；未命中不续波（下方出口检查兜底）。
+      // 意图，检索层负责终审。每轮最多一次；未命中不续波（出口闸已删除，直接收尾）。
       if (
         staticToolArch &&
         !requestCardUsed &&
         toolSearchPrepared.toolSearchActive &&
         toolSearchPrepared.deferredCatalog.entries.length > 0 &&
-        wave + 1 < effectiveMaxWaves()
+        wave + 1 < waveBudget()
       ) {
         const cardMatch = /<tool_request>([\s\S]{1,300}?)<\/tool_request>/i.exec(fullText);
         if (cardMatch?.[1]?.trim()) {
@@ -3031,7 +2974,7 @@ export async function streamCompletionWithTools(
           const loaded: string[] = [];
           const alreadyVisible: string[] = [];
           // top-1 语义：请求卡表达的是模型当下的意图，加载=top-1（最小 schema 增量）；
-          // top-1 已可见（预召回先注入）→ 指回直调；top-1 分数不足 → 不加载（出口检查兜底）。
+          // top-1 已可见（预召回先注入）→ 指回直调；top-1 分数不足 → 不加载（出口闸已删除，直接收尾）。
           const best = matches.find((m) => m.score >= REQUEST_CARD_MIN_SCORE);
           if (best) {
             // 高危拦截（2026-09-19 P1-1）：资金/外发类工具不因请求卡自动转正进
@@ -3118,201 +3061,23 @@ export async function streamCompletionWithTools(
         }
       }
 
-      // ── 单一出口检查（2026-10-22：静态架构下只保留与服务端事实相关的循环行为）──
-      // 判定「这轮要不要工具」的权责划分（去路由化后）：
-      //   - 请求层：恒 tool_choice="auto"，不做任何事前预判（2026-10-22 定稿：
-      //     不预测，只验证；原指定门与祈使扳机已退役，见 forced-tool.ts）；
-      //   - 本出口：只做事实对账——不管措辞像不像「办过」，只看服务端工具
-      //     执行结果是否兑现用户明确诉求（宣称未兑现 / 显式动作未执行 → 续波）。
-      // 保留的循环行为：
-      //   1) 工具全失败 → 换关键词/换工具再试一次；
-      //   2) 调了工具但零正文 → 要求补叙述；
-      //   3) 只发现不执行 → 按 schema 真正执行；
-      //   4) 零实质成功却宣称办过 → required 续波（2026-10-22 新增，兜底
-      //     「该调没调」；与 2026-10-06 下线的宣告兜底的区别是多了服务端
-      //      事实对账与办事怀疑信号双条件，误判只剩一次可逆 round trip）；
-      //   5) 显式动作（打电话/报位置）整轮未执行 → required 续波并指名工具
-      //     （2026-10-22，事前指定门的替代：不看措辞，只看执行记录）。
-      if (staticToolArch && !exitGateEnforced && stableApiTools.length > 0) {
-        let gateReason: string | null = null;
-        let gateInstruction = "";
-        // 实质尝试：排除元工具/管线支撑工具（obs_recall、tool_discover、query_capabilities）——
-        // "只查了能力清单"不是失败，对话面回答"你会什么"这类轮次不该被续波。
-        const hasSubstantiveAttempt = allToolExecResults.some(
-          (r) => !META_TOOL_NAMES.has(r.toolName) && !SUPPORT_PLUMBING_TOOLS.has(r.toolName),
-        );
-        // 只发现、不执行（2026-10-21 评估抓到的真实 miss）：模型调了
-        // tool_discover 拿到 schema 后直接收尾，业务工具一次都没调。此时
-        // 必须再给一波让它按 schema 真正执行，而不是停在发现阶段。
-        const discoverSucceeded = allToolExecResults.some(
-          (r) =>
-            r.ok &&
-            (r.toolName === "tool_discover" ||
-              r.toolName === "tool_search" ||
-              r.toolName === "tool_describe"),
-        );
-        // 显式外部动作未执行（2026-10-22，事前指定门的替代）：用户明确要求打电话/
-        // 报位置，而服务端整轮没有该工具的执行记录——确定性违约事实，不看回复
-        // 措辞（沉默幻觉、敷衍推脱也拦得住）。这是「显式请求最终必执行」的保证。
-        // 排除两种不该打回的情形：fastProfile（system 已注入定位，直答是正确的）
-        // 与最后一波（没有续波预算，continue 只会空转）。
-        const explicitActionTool = resolveExplicitActionTool(userText);
-        const explicitActionMissing =
-          explicitActionTool != null &&
-          !allToolExecResults.some((r) => r.toolName === explicitActionTool);
-        const explicitActionAnswerableByInjection =
-          fastProfile && explicitActionTool === "clock.get_user_location";
-        if (
-          explicitActionTool &&
-          explicitActionMissing &&
-          !explicitActionAnswerableByInjection &&
-          finalText.trim() &&
-          wave + 1 < effectiveMaxWaves()
-        ) {
-          gateReason = "explicit_action_no_attempt";
-          gateInstruction =
-            `出口对账：用户明确提出了${explicitActionTool === "phone.call_user" ? "打电话" : "查询位置"}的请求，` +
-            `但服务端记录显示本轮还没有调用过 ${explicitActionTool}。请立即调用该工具完成动作（参数按 schema）；` +
-            `若确实无法完成（如缺少联系方式/定位权限），如实向用户说明卡点，不要用文字假装已完成。`;
-        } else if (!hasSubstantiveAttempt && discoverSucceeded) {
-          gateReason = "discover_without_execution";
-          gateInstruction =
-            "你已经从延迟工具目录加载了工具 schema，但本轮还没有调用任何具体业务工具。" +
-            "请立即按用户目标调用刚加载的工具（参数参照 schema），拿到真实结果后再回复；" +
-            "不要停在发现阶段，也不要只复述工具清单。";
-        } else if (
-          // 派发代替执行（2026-10-22 完成度判据，取代原「宣称未兑现」词面闸）：
-          // 本轮把活派给了后台，服务端没有任何 content 类结果。只报状态、不下命令，
-          // 两条出路都合法：当场查完再答，或如实告诉用户稍后才会有结果。
-          finalText.trim() &&
-          allToolExecResults.some((r) => r.ok && isQueuedResult(r)) &&
-          countSubstantiveOkResults() === 0
-        ) {
-          gateReason = "queued_without_content";
-          const queuedNames = Array.from(
-            new Set(allToolExecResults.filter((r) => isQueuedResult(r)).map((r) => r.toolName)),
-          );
-          gateInstruction =
-            `本轮只完成了派发（${queuedNames.join("、")}），还没有拿到能回答用户的内容。用户仍在等。` +
-            `如果这件事现在用工具就能查完，就直接查完再答；` +
-            `如果确实需要后台长跑，就明确告诉他结果稍后出现——不要说得像已经办好了。`;
-        } else if (
-          finalText.trim() &&
-          hasSubstantiveAttempt &&
-          countSubstantiveOkResults() === 0
-        ) {
-          gateReason = "substantive_tools_attempted_but_none_succeeded";
-          const failedSummary = allToolExecResults
-            .filter((r) => !r.ok)
-            .slice(0, 3)
-            .map((r) => `${r.toolName}: ${JSON.stringify(r.result ?? {}).slice(0, 120)}`)
-            .join("；");
-          gateInstruction =
-            `出口检查：本轮尝试过的工具全部失败${failedSummary ? `（${failedSummary}）` : ""}。` +
-            `请换一个关键词、换一个工具或换数据源再试一次，拿到真实结果后再回答；` +
-            `若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。`;
-        } else if (!finalText.trim() && allToolExecResults.length > 0) {
-          gateReason = "tools_ran_without_narration";
-          gateInstruction =
-            "你刚才调用了工具但还没有向用户输出任何正文。请立即基于以上工具结果用自然口语回复用户，把关键信息讲清楚；" +
-            "不要输出 JSON 或原始数据结构（那由前端结构化渲染负责）。若结果为空或失败，请如实向用户说明。";
-        }
-        if (gateReason) {
-          exitGateEnforced = true;
-          // 续波不再收紧请求（tool_choice 恒 auto）：靠 gateInstruction 里的
-          // 具体信息 + 模型自决。这是 Anthropic 官方给的替代路径
-          // （auto + 提示里点名 + 事后检查再重试）。
-          traceExitGate = { fired: true, reason: gateReason };
-          recordExitGateFire(gateReason, options?.audit?.sessionId);
-          console.info(`[openai-tool-loop] 出口检查续波：${gateReason}`);
-          messages.push({ role: "assistant", content: finalText || fullText || "" });
-          messages.push(markTurnScaffold({ role: "system", content: gateInstruction }));
-          lastAssistantText = "";
-          continue;
-        }
-      }
-      // ── legacy 收尾兜底链（2026-09-05；AGENT_TOOL_ARCH=legacy 时保留）──
-      // 旧链中的「强制联网重试」依赖 FRESH_WEB_LOOKUP_RE 等话题词表判定"需要联网"，
-      // 属于关键词打地鼠，已删除——"需不需要外部信息"由路由层语义分类承担，
-      // "有没有真的查"由下方出口自检（风格判定）承担，不再需要话题词预判。
-      // 行动宣告未兑现兜底（文本正则判承诺）已于 2026-10-06 整体下线（误伤两次，
-      // 工具调用质量由语义路由+出口自检承担），不再有该分支。
-      // 统一出口自检（2026-09-05 TurnOutcomeGate，不分车道）：「诉求未满足」且预算
-      // 还有余量 → 注入一次换路续波指令（换关键词/换工具/换数据源），在原轨迹内纠错。
-      // 预算耗尽 → 如实收尾（honest 策略），不再有升级哨兵/整轮重放。
-      // 仅当本轮有工具可调时生效——零工具轮（对话面）不在这里空转。
-      if (!staticToolArch && stableApiTools.length > 0) {
-        const unsatisfiedReason = assessTurnUnsatisfied(finalText);
-        if (
-          unsatisfiedReason &&
-          !outcomeGateEnforced &&
-          wave + 1 < effectiveMaxWaves()
-        ) {
-          outcomeGateEnforced = true;
-          recordExitGateFire(unsatisfiedReason, options?.audit?.sessionId);
-          console.info(
-            `[openai-tool-loop] 出口自检：${unsatisfiedReason}` +
-              `（工具尝试 ${allToolExecResults.length} 次，成功实质 ${countSubstantiveOkResults()} 次）→ 换路续波`,
-          );
-          messages.push({
-            role: "assistant",
-            content: finalText || fullText || "",
-          });
-          messages.push({
-            role: "system",
-            content:
-              unsatisfiedReason === "queued_without_content"
-                ? "本轮只完成了派发，还没有拿到能回答用户的内容，用户仍在等。" +
-                  "如果这件事现在用工具就能查完，就直接查完再答；如果确实需要后台长跑，" +
-                  "就明确告诉他结果稍后出现——不要说得像已经办好了。"
-                : unsatisfiedReason === "explicit_action_no_attempt"
-                  ? `出口对账：用户明确提出了${resolveExplicitActionTool(userText) === "phone.call_user" ? "打电话" : "查询位置"}的请求，` +
-                    "但服务端记录显示本轮还没有调用过对应工具。请立即调用该工具完成动作（参数按 schema）；" +
-                    "若确实无法完成（如缺少联系方式/定位权限），如实向用户说明卡点，不要用文字假装已完成。"
-                  : "出口自检：到目前为止还没有任何一次成功的工具结果能回答用户的问题。" +
-                    "请换一个关键词重搜、换一个工具（如 search_web / fetch_web / internet.*）或换数据源再试一次，" +
-                    "拿到真实结果后再回答。若所有途径确实都不可用，请如实向用户说明卡点，不要编造结果。",
-          });
-          // 同宣告闸门：重试轮替换而非拼接，上一轮自语/道歉文本不进最终回复。
-          lastAssistantText = "";
-          continue;
-        }
-        if (unsatisfiedReason) {
-          console.info(
-            `[openai-tool-loop] 出口自检：${unsatisfiedReason}（预算耗尽）→ 如实收尾`,
-          );
-        }
-      }
-      // 空正文整合兜底（2026-08-29）：LLM 调用了工具但没输出任何正文时，先注入一次
-      // 指令强制模型基于工具结果用自然口语回复（任务完成保障，保留）。
-      // wave 预算守卫：fast（maxWaves=1）与最后一波不授予，避免 continue 越过预算。
-      if (
-        !staticToolArch &&
-        !finalText.trim() &&
-        allToolExecResults.length > 0 &&
-        !narrationEnforced &&
-        wave + 1 < maxWaves
-      ) {
-        narrationEnforced = true;
-        messages.push({
-          role: "assistant",
-          content: fullText || "",
-        });
-        messages.push({
-          role: "system",
-          content:
-            "你刚才调用了工具但还没有向用户输出任何正文。请立即基于以上工具结果用自然口语回复用户，把关键信息讲清楚；" +
-            "不要输出 JSON 或原始数据结构（那由前端结构化渲染负责）。若结果为空或失败，请如实向用户说明。",
-        });
-        // 同宣告闸门：重试轮替换而非拼接。
-        lastAssistantText = "";
-        continue;
-      }
+      // ── 出口对账闸已整体删除（2026-11-08 用户指令）──
+      // 原「单一出口检查」五道（explicit_action_no_attempt / discover_without_execution /
+      // queued_without_content / substantive_tools_attempted_but_none_succeeded /
+      // tools_ran_without_narration）与 legacy 出口自检链（assessTurnUnsatisfied：
+      // queued_without_content / substantive_tools_attempted_but_none_succeeded /
+      // explicit_action_no_attempt / no_attempt_and_hedged）全部退役。
+      // 根因：续波把已流出的正文当草稿——messages.push(已流正文) + system 指令后
+      // continue，模型在同一轮里再生成一稿更短/换措辞的复述（「你知道我在哪吗」
+      // 第三泡事故），直接违反「已流式即定稿」。判责与修复记录见
+      // .workbuddy/memory/2026-11-08.md。
+      // 「该不该调工具」的判断权完全归还模型（tool_choice 恒 auto）。
+      // 空正文整合兜底已于 2026-11-09 按用户指令删除：工具跑完零正文就如实收尾，
+      // 全项目不再存在任何「在模型输出之后追加生成」的轮内兜底。
       // 道歉式兜底已彻底删除（2026-09-08 用户指令）：LLM 输出道歉/空文本时，不再用
       // lastToolOutputFallback（工具输出原文）替换回复——那会把工具原始 JSON 直接糊给
       // 用户，正是「先流式说没搜到、突然变成搜索结果卡」的直接源头。LLM 说没搜到就
-      // 如实收尾；任务完成由上方「出口自检 → 换路续波」重试与空正文整合兜底保证，
-      // 不靠兜底换货。
+      // 如实收尾，不靠兜底换货。
       const effectiveFinalText = normalizeTraditionalToSimplified(finalText).text;
       // 流式推送最终内容到 onDelta（→ onAssistantDelta → 前端 chat.assistant_chunk）
       // 根源净化：先把 LLM 混进正文的内部控制标签（[STOP...] / [话题切换...]）剥离，
@@ -3352,7 +3117,6 @@ export async function streamCompletionWithTools(
         content: sanitizedFinalText || null,
       });
       logPrefixCacheStats();
-      recordTurnFinished();
       recordTurnTrace({
         ts: traceStartTs,
         stage: options?.audit?.stage ?? "main_chat_tools",
@@ -3371,7 +3135,6 @@ export async function streamCompletionWithTools(
         waves: traceWavesUsed,
         toolCalls: traceToolCalls,
         ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
-        ...(traceExitGate ? { exitGate: traceExitGate } : {}),
         finalTextChars: sanitizedFinalText.length,
         durationMs: Date.now() - traceStartTs,
       });
@@ -3876,8 +3639,8 @@ export async function streamCompletionWithTools(
       }),
     );
 
-    // 2026-09-05：escalate 哨兵短路已删除——升级/重放机制退役，
-    // 出口自检在 final-text 分支统一处理（见上方 outcomeGateEnforced）。
+    // 2026-09-05：escalate 哨兵短路已删除——升级/重放机制退役。
+    // 2026-11-08：出口自检/出口对账闸整体删除（已流式即定稿）。
 
     // 本波最后一条成功工具消息的下标：充分性提示只追加一次。
     // 此前每条成功消息都重复追加同一段提示（5 个并行工具 = 5 份相同文本）。
@@ -4012,20 +3775,31 @@ export async function streamCompletionWithTools(
       toolResults,
     });
 
-    // ── 波次终止决策 ──（与 for 条件共用 effectiveMaxWaves：失败发生后预算 +1）
-    const wavesRemaining = wave + 1 < effectiveMaxWaves();
+    // ── 波次终止决策 ──
+    // 正常出口在上一段的「模型不再发 tool_calls」分支；这里只处理显式上限
+    // （测试/内部原子编排传了 maxRounds）耗尽的情形。无上限时 waveBudget()
+    // 是 Infinity，本段恒不触发——不存在任何"跑够几轮就砍"的业务闸。
+    const wavesRemaining =
+      wave + 1 < waveBudget() ||
+      (toolResults.length > 0 && !lastAssistantText.trim() && narrationGraceWaves === 0);
     if (!wavesRemaining) {
-      // 预算耗尽仍有未收尾的工具链 → 兜底 SUMMARIZE（失败信息已在 tool 消息中）
+      // 显式上限耗尽仍有未收尾的工具链 → 直接结束（失败信息已在 tool 消息中）
       break;
+    }
+    if (waveLimit !== undefined && wave + 1 >= waveLimit && narrationGraceWaves === 0) {
+      narrationGraceWaves = 1;
+      console.info(
+        `[plan-execute] wave=${wave} 显式上限耗尽但本波执行了工具且尚无正文 → 保留一次收尾叙述波`,
+      );
     }
 
     const allSucceeded = toolResults.length > 0 && toolResults.every((r) => r.ok);
     const hasMetaTool = toolResults.some((r) => META_TOOL_NAMES.has(r.name));
     // 完成语义契约（2026-10-22）：派发型（queued）成功 ≠ 有内容。全部成功但
     // 成功项都是派发时，禁走汇总捷径——捷径会把「已派发」直接收尾成最终回复
-    // （模型据 dispatch 的 ack 写「已经让后台去查了」，出口闸被整个绕过，这正是
-    // search_movies 病灶）。必须回落正常波次循环：模型带着派发回执继续，要么
-    // 真正查询，要么如实说明「稍后给」；若零内容收尾，出口闸 queued_without_content 兜底。
+    // （模型据 dispatch 的 ack 写「已经让后台去查了」，这正是 search_movies 病灶）。
+    // 必须回落正常波次循环：模型带着派发回执继续，要么真正查询，要么如实说明
+    // 「稍后给」。出口对账闸已删（2026-11-08），零内容收尾即如实收尾，不再打回。
     const allQueued =
       allSucceeded &&
       toolResults.every((r) => QUEUED_PRODUCER_TOOLS.has(r.name.replace(/_/g, ".")));
@@ -4040,7 +3814,6 @@ export async function streamCompletionWithTools(
           `[plan-execute] wave=${wave} ${toolResults.length} 个工具全部成功，探测通过 → 无 schema 汇总收尾（工具 schema 不再重发）`,
         );
         logPrefixCacheStats();
-        recordTurnFinished();
       recordTurnTrace({
           ts: traceStartTs,
           stage: options?.audit?.stage ?? "main_chat_tools",
@@ -4058,7 +3831,6 @@ export async function streamCompletionWithTools(
           waves: traceWavesUsed,
           toolCalls: traceToolCalls,
           ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
-          ...(traceExitGate ? { exitGate: traceExitGate } : {}),
           finalTextChars: probe.text.length,
           durationMs: Date.now() - traceStartTs,
         });
@@ -4086,7 +3858,6 @@ export async function streamCompletionWithTools(
   // 当成本轮发生的事拼出假叙事（"刚翻了一下，图片没出来"事故），弊远大于利。
   // 删除后本轮就以已流出的文本收场（通常为空），由上层按"本轮无回复"处理。
   logPrefixCacheStats();
-  recordTurnFinished();
   recordTurnTrace({
     ts: traceStartTs,
     stage: options?.audit?.stage ?? "main_chat_tools",
@@ -4106,7 +3877,6 @@ export async function streamCompletionWithTools(
     waves: traceWavesUsed,
     toolCalls: traceToolCalls,
     ...(traceRequestCard ? { requestCard: traceRequestCard } : {}),
-    ...(traceExitGate ? { exitGate: traceExitGate } : {}),
     finalTextChars: 0,
     durationMs: Date.now() - traceStartTs,
   });
@@ -4182,7 +3952,9 @@ export async function streamCompletionWithTools(
       });
       const sceneBoundaryBlock = buildSceneBoundaryBlock(
         scenePrePlan,
-        strategyDirective.instruction,
+        // 第 0 波前已注入过的边界在此去重（2026-11-09）：preWave 注入与合成轮
+        // 注入同源，重复只会变成套路（铁律 0）。
+        strategyDirective.instruction + preWaveBoundaryBlock,
       );
       if (scenePrePlan.failures.length > 0) {
         console.warn(`[render-scenes] 生成前预决策降级：${scenePrePlan.reason}`);

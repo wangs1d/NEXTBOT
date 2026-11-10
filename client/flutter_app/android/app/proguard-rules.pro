@@ -9,3 +9,6 @@
 -dontwarn org.bouncycastle.**
 -dontwarn com.xiaomi.push.**
 -keep class com.huawei.hms.** { *; }
+
+# Flutter / HMS 等 JNI 入口的 native 方法不能重命名（通用规则）。
+-keepclasseswithmembernames class * { native <methods>; }

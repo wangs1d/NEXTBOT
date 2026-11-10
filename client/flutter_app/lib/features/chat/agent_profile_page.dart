@@ -138,7 +138,13 @@ class _AgentProfilePageState extends State<AgentProfilePage> {
         title: const Text("Agent 主页"),
       ),
       body: ListView(
-        padding: const EdgeInsets.all(20),
+        // edge-to-edge 后补底部手势条 inset（此页被手机端「我的」页推入）
+        padding: EdgeInsets.fromLTRB(
+          20,
+          20,
+          20,
+          20 + MediaQuery.paddingOf(context).bottom,
+        ),
         children: <Widget>[
           Container(
             padding: const EdgeInsets.all(20),

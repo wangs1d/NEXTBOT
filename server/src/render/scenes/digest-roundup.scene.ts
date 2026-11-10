@@ -1,26 +1,19 @@
 /**
- * 盘点类场景（2026-11-05 二次根改：数据面直供，不要求模型配合）。
+ * 盘点类场景（2026-11-09 三次收敛：只供事实，不接管正文）。
  *
- * ── 为什么要推倒重来 ────────────────────────────────────────────────
- * 上一版让模型输出 `[AGENT_DIGEST_START]{...}[AGENT_DIGEST_END]` 槽位块，
- * 实测真实模型配合率不是 100%：有时漏标记甩裸 JSON，有时自写 `**加粗**` 分组，
- * 有时干脆写散文。为了兜住这三种偏差，服务端被迫写了裸 JSON 扫描器、
- * 加粗分组归一化器、流式标记守卫——**规则越加越多，而且全都在猜模型**。
+ * ── 演进 ──────────────────────────────────────────────────────────
+ * 第一版：让模型输出 `[AGENT_DIGEST_START]{...}` 槽位块。实测配合率不是 100%
+ *   （漏标记甩裸 JSON / 自写加粗分组 / 干脆写散文），服务端为此写了裸 JSON
+ *   扫描器、加粗归一化器、流式标记守卫——规则越加越多，全都在猜模型。
+ * 第二版：不让模型输出结构，改由服务端从工具回执确定性渲染整段正文，
+ *   模型只保留「语气散句」，出口整段替换（rewritesText）。
+ * 第三版（当前，用户指令）：**正文交回模型**，一次生成；服务端只负责在
+ *   生成前把本轮回执里的事实清单喂给它。理由：
+ *     - 整段替换让正文与分泡分叉，收口逻辑复杂且容易和「已流式即定稿」冲突；
+ *     - 语气散句+固定清单的拼接读起来是两个人写的；
+ *     - 模型拿到干净的事实清单，本来就写得出清楚的回答，不需要服务端排版。
  *
- * 根源诊断：「让模型输出机器可读结构」本身就不可靠，任何依赖它配合的
- * 契约都只是概率方案。真正的解法是**不让模型输出结构**：
- *
- *   结构数据 = 本轮工具回执（search_web / fetch_web 的 items[]），由服务端确定性渲染
- *   模型产出 = 只剩语气层（开场句、判断、收尾），不写任何标记/标题/列表/JSON
- *
- * 于是：
- *   - 配合率问题消失（不要求模型配合任何格式，模型怎么写都不影响版式）
- *   - 裸 JSON / 标记泄漏问题消失（模型没有理由写 JSON，prompt 里也没有契约）
- *   - 同一份回执 → 逐字节一致的版式
- *   - 模型仍提供内容与语气，符合「agent 只给内容+语气，其余由程序层组装」
- *
- * 代价（如实记录）：语义主题分组（「新片 / 维权 / 活动」）需要模型的分类判断，
- * 现在换成固定的「要点」清单。信息完整性与版式确定性优先于分组粒度。
+ * 不变的一条：**清单条目只来自本轮工具回执**，模型不许自己造条目。
  */
 
 import { DIGEST_ROUNDUP_BOUNDARY } from "./prompts.js";
@@ -41,8 +34,6 @@ const ROUNDUP_TOOLS = new Set([
 const MAX_ITEMS = 12;
 const MAX_TITLE_LEN = 60;
 const MAX_SNIPPET_LEN = 180;
-const MAX_TONE_SENTENCES = 2;
-const MAX_TONE_LEN = 240;
 
 export interface RoundupItem {
   title: string;
@@ -81,7 +72,7 @@ export function collectRoundupItems(ctx: SceneContext): RoundupItem[] {
       const detail = cleanText(raw.snippet ?? raw.content ?? raw.summary, MAX_SNIPPET_LEN);
       const source = cleanText(raw.source, 24) || effect.tool;
       if (!title) continue;
-      // 同一条结果被多个工具重复带回时不重复渲染
+      // 同一条结果被多个工具重复带回时只留一份
       const key = `${title}|${detail.slice(0, 40)}`;
       if (seen.has(key)) continue;
       seen.add(key);
@@ -92,75 +83,17 @@ export function collectRoundupItems(ctx: SceneContext): RoundupItem[] {
   return out;
 }
 
-/** 确定性渲染：同一份 items 多次调用字节一致，不读时钟、不猜语义 */
-export function renderRoundupMarkdown(items: RoundupItem[]): string {
-  const lines = items.map((item) => {
-    const detail = item.detail && item.detail !== item.title ? ` — ${item.detail}` : "";
-    return `- ${item.title}${detail}`;
-  });
-  return [`**要点**`, ...lines].join("\n");
-}
-
-/** 结构化痕迹：标题、加粗、列表、引用、标记、JSON、表格、分隔线、编号 */
-const STRUCTURAL_LINE_RE =
-  /^\s*(?:#{1,6}\s|\*\*|[-*•]\s|>\s|\[[A-Z_]+\]|\{.*\}\s*$|\|.*\|\s*$|-{3,}\s*$|\d+[.、]\s)/;
-
-/** 把句子和回执都切成字 bigram，重合率高就是复述（清单里已有，不必再说一遍） */
-function bigrams(s: string): Set<string> {
-  const t = s.replace(/[\s\p{P}]/gu, "");
-  const out = new Set<string>();
-  for (let i = 0; i + 1 < t.length; i += 1) out.add(t.slice(i, i + 2));
-  return out;
-}
-
-function isRestatement(sentence: string, items: RoundupItem[]): boolean {
-  const grams = bigrams(sentence);
-  if (grams.size < 6) return false;
-  for (const item of items) {
-    const source = bigrams(`${item.title}${item.detail}`);
-    let hit = 0;
-    for (const g of grams) if (source.has(g)) hit += 1;
-    if (hit / grams.size >= 0.3) return true;
-  }
-  return false;
-}
-
-/** 模型正文里剥出「语气层」：只留判断/开场散句，事实复述与自写版式一律剔除 */
-export function extractToneSentences(text: string, items: RoundupItem[]): string[] {
-  const candidates = (text ?? "")
-    .split("\n")
-    .map((l) => l.trim())
-    .filter((l) => l && !STRUCTURAL_LINE_RE.test(l));
-
-  const sentences: string[] = [];
-  for (const line of candidates) {
-    for (const piece of line.split(/(?<=[。！？!?])\s*/)) {
-      const s = piece.trim();
-      if (!s || STRUCTURAL_LINE_RE.test(s)) continue;
-      if (isRestatement(s, items)) continue;
-      if (sentences.includes(s)) continue;
-      sentences.push(s);
-      if (sentences.length >= MAX_TONE_SENTENCES) break;
-    }
-    if (sentences.length >= MAX_TONE_SENTENCES) break;
-  }
-  // 总长度硬上限：语气层是点缀，不能反过来盖过结构化清单
-  const kept: string[] = [];
-  let used = 0;
-  for (const s of sentences) {
-    if (used + s.length > MAX_TONE_LEN) break;
-    kept.push(s);
-    used += s.length;
-  }
-  return kept;
-}
-
-/** 开场句放清单前、其余放清单后（顺序确定性，不做语义猜测） */
-function assemble(items: RoundupItem[], tone: string[]): string {
-  const rendered = renderRoundupMarkdown(items);
-  const lead = tone.slice(0, 1).join(" ");
-  const tail = tone.slice(1).join(" ");
-  return [lead, rendered, tail].filter(Boolean).join("\n\n");
+/**
+ * 把清单条目序列化成给模型看的事实行（纯数据，不含版式指令）。
+ * 同一份 items 多次调用字节一致：不读时钟、不猜语义。
+ */
+export function renderRoundupFacts(items: RoundupItem[]): string {
+  return items
+    .map((item) => {
+      const detail = item.detail && item.detail !== item.title ? ` — ${item.detail}` : "";
+      return `- ${item.title}${detail}`;
+    })
+    .join("\n");
 }
 
 function isRoundupQuestion(userText?: string): boolean {
@@ -174,34 +107,39 @@ export const digestRoundupScene: RenderScene = {
   phase: "pre",
   produces: {
     forms: ["structured"],
-    rewritesText: true,
+    singleBubble: true,
     promptBoundary: DIGEST_ROUNDUP_BOUNDARY,
   },
   contract:
-    "结构数据唯一来源=工具回执 items[]；模型只写语气散句，不输出任何标记/JSON/版式。版式由服务端确定性渲染。",
+    "清单条目唯一来源=本轮工具回执 items[]；条目以事实行注入 prompt，正文由模型一次写成，服务端不再排版或替换。",
 
   detect(ctx: SceneContext): SceneMatch | null {
     if (!isRoundupQuestion(ctx.userText)) return null;
     const items = collectRoundupItems(ctx);
     // 单条结果不需要清单化，交给常规正文，避免把单一事实硬拆成结构
     if (items.length < 2) return null;
-    return { reason: `回执含 ${items.length} 条清单数据，版式由服务端产出（不依赖模型）` };
+    return { reason: `回执含 ${items.length} 条清单数据，作为事实注入 prompt` };
+  },
+
+  /** 生成前把条目喂给模型：这是本场景对回答的唯一贡献 */
+  promptBoundaryFor(ctx: SceneContext): string | undefined {
+    const items = collectRoundupItems(ctx);
+    if (items.length < 2) return undefined;
+    return `【本轮事实·清单条目】\n${renderRoundupFacts(items)}`;
   },
 
   plan(ctx, match) {
     const items = collectRoundupItems(ctx);
     if (items.length < 2) return null;
-    const tone = extractToneSentences(ctx.text ?? "", items);
     return {
       sceneId: this.id,
       label: this.label,
       cards: [],
       bodyForm: "markdown",
-      text: assemble(items, tone),
       constraints: [
-        "清单来自工具回执",
-        "模型不写标题层级/JSON",
-        "模型正文只保留语气散句",
+        "清单条目来自工具回执",
+        "正文由模型自己组织，服务端不替换",
+        "不得编造回执之外的条目",
       ],
       reason: match.reason,
     };

@@ -5,7 +5,9 @@ import "dart:ui" show PathMetric;
 
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
+import "package:flutter_map/flutter_map.dart";
 import "package:http/http.dart" as http;
+import "package:latlong2/latlong.dart" as ll;
 import "package:url_launcher/url_launcher.dart";
 import "../../core/services/nb_http.dart";
 
@@ -424,6 +426,10 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
 
   static const Duration _httpTimeout = Duration(seconds: 6);
 
+  /// 逐站横滑控制器：一屏一站，左右滑直接切站。
+  /// 此前切站只有 7px 高的小圆点可点，用户第一反应是「点进去动不了」。
+  late final PageController _stopPager = PageController();
+
   bool get _hasPlanId => _plan.planId.isNotEmpty;
 
   @override
@@ -460,6 +466,7 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
   void dispose() {
     _signalTimer?.cancel();
     _progressDebounce?.cancel();
+    _stopPager.dispose();
     super.dispose();
   }
 
@@ -472,6 +479,25 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
   _Stop? get _curStop => _curDay.stops.isEmpty ? null : _curDay.stops[_safeCur];
 
   String get _moodText => _signalMood ?? "刚刚好";
+
+  /// 今日花费：只从站点 priceInfo 里解析 ¥数字 求和（与桌面页 desktop.html
+  /// 的「今日预计花费」同算法）。一项都解析不出就整枚隐藏——待核价与免费
+  /// 活动都不该被算成 0 或猜一个数。
+  String get _dayCostText {
+    double total = 0;
+    int hits = 0;
+    for (final _Stop s in _curDay.stops) {
+      final RegExpMatch? m =
+          RegExp(r'[¥￥]\s*(\d+(?:\.\d+)?)').firstMatch(s.price);
+      if (m == null) continue;
+      final double? v = double.tryParse(m.group(1) ?? "");
+      if (v == null) continue;
+      total += v;
+      hits++;
+    }
+    if (hits == 0) return "";
+    return "今日约 ¥${total.round()}";
+  }
 
   String get _hintText => switch (_signalEvent) {
         "rain" => "Agent 感知到下雨 · 已切雨天室内",
@@ -501,6 +527,11 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
         _cur = stop;
       }
     });
+    // 横滑与点击共用 _setStop 这一个状态源：点击/圆点/DOM 触发的切站要把
+    // pager 对齐到同一页；横滑触发时 page 已等于目标页，这里不会二次跳动。
+    if (_stopPager.hasClients && (_stopPager.page?.round() ?? -1) != _safeCur) {
+      _stopPager.jumpToPage(_safeCur);
+    }
     _scheduleProgressUpload();
   }
 
@@ -788,16 +819,24 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
     );
   }
 
-  void _openDetail() {
-    final _Stop? stop = _curStop;
-    if (stop == null) return;
+  void _openDetail({int? index}) {
+    if (_curDay.stops.isEmpty) return;
+    final int i = (index ?? _safeCur).clamp(0, _curDay.stops.length - 1);
+    // 详情页的 stopIndex 与提意见/加站的索引必须指向同一站：
+    // 快速横滑后立刻点卡片时 onPageChanged 可能还没落定，这里对齐一次
+    // （只动 _cur，不上报进度——用户还没确认到站）。
+    if (i != _cur) setState(() => _cur = i);
+    final _Stop stop = _curDay.stops[i];
     Navigator.of(context).push<void>(
       MaterialPageRoute<void>(
         builder: (BuildContext context) => _StopDetailPage(
-          destination: widget.plan.destination,
+          // 热更新后的行程标题/目的地以 _plan 为准（widget.plan 是进页时的快照）
+          destination: _plan.destination.isEmpty
+              ? widget.plan.destination
+              : _plan.destination,
           day: _curDay,
           dayIndex: _day,
-          stopIndex: _safeCur,
+          stopIndex: i,
           onPickStop: (int d, int s) {
             Navigator.of(context).pop(); // 回主页
             _setStop(d, s);
@@ -849,33 +888,49 @@ class _TravelPlanMobilePageState extends State<TravelPlanMobilePage> {
                           cur: _safeCur,
                           mood: _moodText,
                           altCount: _alts.length,
+                          costText: _dayCostText,
                           onPick: (int i) => _setStop(_day, i),
                         ),
                         Expanded(
-                          child: ListView(
-                            padding: const EdgeInsets.fromLTRB(24, 18, 24, 8),
-                            children: <Widget>[
-                              _NowCard(
-                                stop: cur!,
-                                next: next,
-                                onTap: _openDetail,
-                              ),
-                              const SizedBox(height: 14),
-                              _StopDots(
-                                count: _curDay.stops.length,
-                                cur: _safeCur,
-                                onPick: (int i) => _setStop(_day, i),
-                              ),
-                              // Agent 信号气泡（设计稿 agent-bubble）：有感知结果才出现
-                              if (_signalNote != null) ...<Widget>[
-                                const SizedBox(height: 14),
-                                _AgentNoteBubble(
-                                  text: _signalNote!,
-                                  onDismiss: () =>
-                                      setState(() => _signalNote = null),
-                                ),
-                              ],
-                            ],
+                          // 逐站横滑：一屏一站，左右滑直接切站。
+                          // 与点击圆点/节奏带共用 _setStop 这一个状态源。
+                          child: PageView.builder(
+                            controller: _stopPager,
+                            itemCount: _curDay.stops.length,
+                            onPageChanged: (int i) => _setStop(_day, i),
+                            itemBuilder: (BuildContext context, int i) {
+                              final _Stop stop = _curDay.stops[i];
+                              final _Stop? stopNext =
+                                  i + 1 < _curDay.stops.length
+                                      ? _curDay.stops[i + 1]
+                                      : null;
+                              return ListView(
+                                padding:
+                                    const EdgeInsets.fromLTRB(24, 18, 24, 8),
+                                children: <Widget>[
+                                  _NowCard(
+                                    stop: stop,
+                                    next: stopNext,
+                                    onTap: () => _openDetail(index: i),
+                                  ),
+                                  const SizedBox(height: 14),
+                                  _StopDots(
+                                    count: _curDay.stops.length,
+                                    cur: _safeCur,
+                                    onPick: (int k) => _setStop(_day, k),
+                                  ),
+                                  // Agent 信号气泡（设计稿 agent-bubble）：有感知结果才出现
+                                  if (i == _safeCur && _signalNote != null) ...<Widget>[
+                                    const SizedBox(height: 14),
+                                    _AgentNoteBubble(
+                                      text: _signalNote!,
+                                      onDismiss: () =>
+                                          setState(() => _signalNote = null),
+                                    ),
+                                  ],
+                                ],
+                              );
+                            },
                           ),
                         ),
                         _SignalHint(text: _hintText),
@@ -1019,6 +1074,7 @@ class _JourneyBand extends StatelessWidget {
     required this.mood,
     required this.altCount,
     required this.onPick,
+    this.costText = "",
   });
 
   final List<_Stop> stops;
@@ -1028,6 +1084,9 @@ class _JourneyBand extends StatelessWidget {
   /// Agent 收起的备选站数量（旅程带尾部虚线段）
   final int altCount;
   final ValueChanged<int> onPick;
+
+  /// 今日花费（从站点 priceInfo 汇总，全是待核价时为空串）
+  final String costText;
 
   @override
   Widget build(BuildContext context) {
@@ -1044,13 +1103,20 @@ class _JourneyBand extends StatelessWidget {
                   style: const TextStyle(
                       fontSize: 12.5, color: _T.amber, fontWeight: FontWeight.w600)),
               const Spacer(),
+              if (costText.isNotEmpty) ...<Widget>[
+                Text(costText,
+                    style: const TextStyle(fontSize: 11, color: _T.amber)),
+                const SizedBox(width: 8),
+              ],
               Text("预计 ${_t2s(last.end)} 结束",
                   style: const TextStyle(fontSize: 11, color: _T.t3)),
             ],
           ),
           const SizedBox(height: 9),
           SizedBox(
-            height: 7,
+            // 视觉仍是 7px 细条，热区抬到 26px：
+            // 此前可点区域只有 7px 高，用户基本点不中，表现为「切站失灵」。
+            height: 26,
             child: Row(
               children: <Widget>[
                 for (int i = 0; i < stops.length; i++)
@@ -1059,21 +1125,24 @@ class _JourneyBand extends StatelessWidget {
                     child: GestureDetector(
                       behavior: HitTestBehavior.opaque,
                       onTap: () => onPick(i),
-                      child: Container(
-                        margin: const EdgeInsets.symmetric(horizontal: 1.5),
-                        decoration: BoxDecoration(
-                          color: i < cur
-                              ? const Color(0x38FFFFFF)
-                              : (i == cur ? _T.amber : const Color(0x1AFFFFFF)),
-                          borderRadius: BorderRadius.circular(99),
-                          boxShadow: i == cur
-                              ? <BoxShadow>[
-                                  BoxShadow(
-                                    color: _T.amber.withValues(alpha: 0.6),
-                                    blurRadius: 10,
-                                  ),
-                                ]
-                              : null,
+                      child: Center(
+                        child: Container(
+                          height: 7,
+                          margin: const EdgeInsets.symmetric(horizontal: 1.5),
+                          decoration: BoxDecoration(
+                            color: i < cur
+                                ? const Color(0x38FFFFFF)
+                                : (i == cur ? _T.amber : const Color(0x1AFFFFFF)),
+                            borderRadius: BorderRadius.circular(99),
+                            boxShadow: i == cur
+                                ? <BoxShadow>[
+                                    BoxShadow(
+                                      color: _T.amber.withValues(alpha: 0.6),
+                                      blurRadius: 10,
+                                    ),
+                                  ]
+                                : null,
+                          ),
                         ),
                       ),
                     ),
@@ -1140,6 +1209,11 @@ class _NowCard extends StatelessWidget {
                     CachedMediaImage(
                       url: stop.images.first,
                       fit: BoxFit.cover,
+                      // 不按解码原尺寸加载：行程图常是 2000px+ 的实拍，
+                      // 全尺寸解码在低端机上表现为长时间空白（不是没网）。
+                      cacheWidth: (MediaQuery.sizeOf(context).width *
+                              MediaQuery.devicePixelRatioOf(context))
+                          .round(),
                       errorBuilder: (_, __, ___) => const _NoImageFallback(),
                     )
                   else
@@ -1373,13 +1447,20 @@ class _StopDots extends StatelessWidget {
           GestureDetector(
             behavior: HitTestBehavior.opaque,
             onTap: () => onPick(i),
+            // 视觉 7px、热区 28px 高：指示点本身太小，此前直接作为点击目标
+            // 用户几乎点不中，被理解成「圆点只是装饰、不能切站」。
             child: Container(
-              width: i == cur ? 20 : 7,
-              height: 7,
-              margin: const EdgeInsets.symmetric(horizontal: 4),
-              decoration: BoxDecoration(
-                color: i == cur ? _T.amber : const Color(0x29FFFFFF),
-                borderRadius: BorderRadius.circular(99),
+              height: 28,
+              alignment: Alignment.center,
+              color: Colors.transparent,
+              padding: const EdgeInsets.symmetric(horizontal: 5),
+              child: Container(
+                width: i == cur ? 20 : 7,
+                height: 7,
+                decoration: BoxDecoration(
+                  color: i == cur ? _T.amber : const Color(0x29FFFFFF),
+                  borderRadius: BorderRadius.circular(99),
+                ),
               ),
             ),
           ),
@@ -1905,6 +1986,13 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
       AnimationController(vsync: this, duration: const Duration(milliseconds: 1800))
         ..repeat();
 
+  /// ≥2 站带真实坐标才挂真底图；否则回落手绘画布（环形兜底）。
+  bool get _hasRealGeo =>
+      widget.stops
+          .where((_Stop s) => s.latitude != null && s.longitude != null)
+          .length >=
+      2;
+
   /// 沿线高分餐厅（只作地图参考，不进行程/预算；失败静默空列表）
   List<RouteRestaurantPoi> _restaurants = const <RouteRestaurantPoi>[];
   String _restaurantKey = "";
@@ -2025,17 +2113,25 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
             Expanded(
               child: Padding(
                 padding: const EdgeInsets.symmetric(horizontal: 18),
-                child: _RouteCanvas(
-                  stops: widget.stops,
-                  cur: widget.cur,
-                  flow: _flow,
-                  ping: _ping,
-                  restaurants: _restaurants,
-                  selectedRestaurant: _selectedRestaurant,
-                  onPick: widget.onPick,
-                  onPickRestaurant: (int? index) =>
-                      setState(() => _selectedRestaurant = index),
-                ),
+                // ≥2 站有真实坐标 → 真底图（服务端代理瓦片）；
+                // 坐标不足 → 手绘画布（环形兜底），不把假布局画在真地图上。
+                child: _hasRealGeo
+                    ? _RealMapPane(
+                        stops: widget.stops,
+                        cur: widget.cur,
+                        onPick: widget.onPick,
+                      )
+                    : _RouteCanvas(
+                        stops: widget.stops,
+                        cur: widget.cur,
+                        flow: _flow,
+                        ping: _ping,
+                        restaurants: _restaurants,
+                        selectedRestaurant: _selectedRestaurant,
+                        onPick: widget.onPick,
+                        onPickRestaurant: (int? index) =>
+                            setState(() => _selectedRestaurant = index),
+                      ),
               ),
             ),
             if (_restaurants.isNotEmpty)
@@ -2111,6 +2207,194 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
               ),
             ),
           ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 真实底图面板（flutter_map + 服务端瓦片代理）。
+///
+/// 瓦片一律走本机服务端的白名单代理 `/travel-basemap/fetch`：
+/// - 手机端不直连第三方瓦片源，不携带任何 key；
+/// - 与桌面端共用同一份服务端磁盘缓存与离线包；
+/// - 底图源 = Esri World Street Map（栅格 PNG；代理白名单已含
+///   arcgisonline.com，代理按 query 的 z/x/y 替换 URL 令牌，Esri 的
+///   `{z}/{y}/{x}` 路径顺序天然对齐，服务端无需为手机端做任何改动）。
+///
+/// 至少两站带真实坐标才有意义；坐标不足时调用方回落手绘画布。
+class _RealMapPane extends StatelessWidget {
+  const _RealMapPane({
+    required this.stops,
+    required this.cur,
+    required this.onPick,
+  });
+
+  final List<_Stop> stops;
+  final int cur;
+  final ValueChanged<int> onPick;
+
+  /// 服务端代理瓦片模板：u= 上游 URL（令牌保留原样），z/x/y 由 flutter_map
+  /// 填进 query，服务端再替换进上游路径。
+  static String _tileTemplate() {
+    final String esri = Uri.encodeComponent(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    );
+    return "${ApiConfig.httpBase}/travel-basemap/fetch?u=$esri&z={z}&x={x}&y={y}";
+  }
+
+  /// 站点顺序连线（跳过无坐标站，保持相对顺序）
+  List<List<ll.LatLng>> get _routeLines {
+    final List<ll.LatLng> pts = <ll.LatLng>[
+      for (final _Stop s in stops)
+        if (s.latitude != null && s.longitude != null)
+          ll.LatLng(s.latitude!, s.longitude!),
+    ];
+    return pts.length >= 2 ? <List<ll.LatLng>>[pts] : const <List<ll.LatLng>>[];
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<_Stop> withCoord = <_Stop>[
+      for (int i = 0; i < stops.length; i++)
+        if (stops[i].latitude != null && stops[i].longitude != null) stops[i],
+    ];
+    final List<ll.LatLng> pts = <ll.LatLng>[
+      for (final _Stop s in withCoord) ll.LatLng(s.latitude!, s.longitude!),
+    ];
+    ll.LatLng initialCenter = pts.isNotEmpty
+        ? pts.first
+        : const ll.LatLng(30.25, 120.16);
+    double initialZoom = 12.5;
+    if (pts.length >= 2) {
+      final double minLat = pts.map((ll.LatLng p) => p.latitude).reduce(math.min);
+      final double maxLat = pts.map((ll.LatLng p) => p.latitude).reduce(math.max);
+      final double minLng = pts.map((ll.LatLng p) => p.longitude).reduce(math.min);
+      final double maxLng = pts.map((ll.LatLng p) => p.longitude).reduce(math.max);
+      initialCenter = ll.LatLng((minLat + maxLat) / 2, (minLng + maxLng) / 2);
+      // 自算适配缩放（flutter_map 8 不再公开 LatLngBounds/CameraFit 组合）：
+      // 用 Web 墨卡托粗算「跨度塞进可视区域（预留站点钉/底部卡 padding）」的 zoom。
+      final Size size = MediaQuery.sizeOf(context);
+      final double availW = math.max(120, size.width - 112);
+      final double availH = math.max(160, size.height - 260);
+      final double spanX = math.max(maxLng - minLng, 1e-4);
+      final double spanY = math.max(maxLat - minLat, 1e-4);
+      final double zx = math.log(360 / spanX * availW / 256) / math.ln2;
+      final double zy = math.log(180 / spanY * availH / 256) / math.ln2;
+      initialZoom = math.max(3.0, math.min(17.0, math.min(zx, zy)));
+    } else if (pts.isNotEmpty) {
+      initialZoom = 15;
+    }
+
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(20),
+      child: Stack(
+        children: <Widget>[
+          FlutterMap(
+            options: MapOptions(
+              initialCenter: initialCenter,
+              initialZoom: initialZoom,
+              interactionOptions: const InteractionOptions(
+                flags: InteractiveFlag.drag | InteractiveFlag.pinchZoom,
+              ),
+            ),
+            children: <Widget>[
+              TileLayer(
+                urlTemplate: _tileTemplate(),
+                userAgentPackageName: "com.nextbot.app",
+                // 服务端代理已带长缓存；本地禁 HTTP 缓存避免旧瓦片压住更新
+                tileProvider: NetworkTileProvider(),
+                keepBuffer: 3,
+                panBuffer: 1,
+              ),
+              PolylineLayer(
+                polylines: <Polyline>[
+                  for (final List<ll.LatLng> line in _routeLines)
+                    Polyline(
+                      points: line,
+                      strokeWidth: 3.2,
+                      color: _T.amber.withValues(alpha: 0.75),
+                    ),
+                ],
+              ),
+              MarkerLayer(
+                markers: <Marker>[
+                  for (int i = 0; i < stops.length; i++)
+                    if (stops[i].latitude != null &&
+                        stops[i].longitude != null)
+                      Marker(
+                        point:
+                            ll.LatLng(stops[i].latitude!, stops[i].longitude!),
+                        width: 30,
+                        height: 30,
+                        alignment: Alignment.topCenter,
+                        child: GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: () => onPick(i),
+                          child: _MapStopPin(
+                            index: i,
+                            active: i == cur,
+                            label: stops[i].name,
+                          ),
+                        ),
+                      ),
+                ],
+              ),
+              const SimpleAttributionWidget(
+                source: Text("© Esri", style: TextStyle(fontSize: 10)),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 底图站点标钉：当前站琥珀大钉，其余深灰小点。点按即切站。
+class _MapStopPin extends StatelessWidget {
+  const _MapStopPin({
+    required this.index,
+    required this.active,
+    required this.label,
+  });
+
+  final int index;
+  final bool active;
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Tooltip(
+      message: label,
+      triggerMode: TooltipTriggerMode.longPress,
+      child: Container(
+        width: active ? 26 : 18,
+        height: active ? 26 : 18,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: active ? _T.amber : _T.card,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: active ? const Color(0xFFFFFFFF) : _T.line,
+            width: active ? 2.5 : 1.5,
+          ),
+          boxShadow: active
+              ? <BoxShadow>[
+                  BoxShadow(
+                    color: _T.amber.withValues(alpha: 0.45),
+                    blurRadius: 10,
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          "${index + 1}",
+          style: TextStyle(
+            fontSize: active ? 12 : 10,
+            fontWeight: FontWeight.w700,
+            color: active ? const Color(0xFF201407) : _T.txt,
+          ),
         ),
       ),
     );
@@ -2653,6 +2937,11 @@ class _StopDetailPage extends StatelessWidget {
                     CachedMediaImage(
                       url: stop.images.first,
                       fit: BoxFit.cover,
+                      // 不按解码原尺寸加载：行程图常是 2000px+ 的实拍，
+                      // 全尺寸解码在低端机上表现为长时间空白（不是没网）。
+                      cacheWidth: (MediaQuery.sizeOf(context).width *
+                              MediaQuery.devicePixelRatioOf(context))
+                          .round(),
                       errorBuilder: (_, __, ___) => const _NoImageFallback(),
                     )
                   else
@@ -2810,6 +3099,34 @@ class _StopDetailPage extends StatelessWidget {
                   if (day.stops.length > 1) ...<Widget>[
                     const SizedBox(height: 22),
                     const _SecHeader("本日站点"),
+                    const SizedBox(height: 10),
+                    // 上一站/下一站固定入口：此前切站只有底部 chips 可点，
+                    // 用户进详情页看到的是「死路」——不知道还能换站。
+                    Row(
+                      children: <Widget>[
+                        if (stopIndex > 0)
+                          Expanded(
+                            child: _DetailGhostButton(
+                              icon: Icons.chevron_left_rounded,
+                              label: "上一站",
+                              onTap: () => onPickStop(dayIndex, stopIndex - 1),
+                            ),
+                          )
+                        else
+                          const Spacer(),
+                        const SizedBox(width: 10),
+                        if (stopIndex + 1 < day.stops.length)
+                          Expanded(
+                            child: _DetailGhostButton(
+                              icon: Icons.chevron_right_rounded,
+                              label: "下一站",
+                              onTap: () => onPickStop(dayIndex, stopIndex + 1),
+                            ),
+                          )
+                        else
+                          const Spacer(),
+                      ],
+                    ),
                     const SizedBox(height: 10),
                     Wrap(
                       spacing: 8,

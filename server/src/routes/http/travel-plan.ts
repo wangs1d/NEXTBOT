@@ -16,6 +16,7 @@ import {
   type PricingContext,
 } from "../../skills/travel-planning/pricing-service.js";
 import type { PlanningService } from "../../skills/travel-planning/travel-planning-service.js";
+import { probeTravelCapabilities } from "../../skills/travel-planning/pricing-capability.js";
 import {
   travelMediaStore,
   type PoiMediaType,
@@ -301,9 +302,23 @@ export function registerTravelPlanRoutes(
       "GET    /travel/share/:code/page                     分享 H5 只读页（手机浏览器可直接打开）",
       "GET    /travel/favorites                            收藏列表（type:name 键）",
       "POST   /travel/favorites                            {favorites:[…]} 全量同步收藏",
+      "GET    /travel/capabilities                         能力自检（查价/POI/地图是否就绪）",
     ],
     note: "planId 来自 travel_itinerary 卡 travelPlan.planId；分享码读取使用独立前缀 /travel/share/:code 避免与 :planId 参数段歧义",
   }));
+
+  /**
+   * 能力自检：查价（flyai CLI）/ POI 库 / 地图瓦片是否就绪。
+   *
+   * 存在的理由：此前查价失败一律静默落成「待核价」，客户端与运维都无法区分
+   * 「服务没装 / 没配 key / 平台无货」。这个端点把「环境是否具备能力」变成
+   * 可查询的事实，客户端进入行程规划页时读一次即可给出准确提示。
+   * 不依赖 travelPlanningService（能力探测与规划引擎装配无关）。
+   */
+  app.get("/travel/capabilities", async (_request, reply) => {
+    reply.header("Cache-Control", "no-cache");
+    return probeTravelCapabilities();
+  });
 
   /** 完整行程（前端双面板直读/编辑的权威数据源） */
   app.get<{ Params: { planId: string } }>("/travel/plans/:planId", async (request, reply) => {

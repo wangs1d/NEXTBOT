@@ -10,7 +10,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 const { composeTravelPlanRequest } = await import("../src/agent/realtime-search-query.js");
-const { INTENT_ROUTING_TABLE, parseIntentJson } = await import("../src/agent/intent-router.js");
 
 test("真机事故轮原话：马尔代夫一周游 → 目的地+7天", () => {
   const r = composeTravelPlanRequest("帮我规划一下去马尔代夫游玩一个星期左右的行程");
@@ -83,20 +82,4 @@ test("上下文实体兜底：纯指代轮从最近对话消解出目的地", ()
 
 test("空输入 → 空请求", () => {
   assert.deepEqual(composeTravelPlanRequest(""), { input: "" });
-});
-
-test("路由表：travel_planning → 任务面 full 束 / budget 3 / flash", () => {
-  assert.deepEqual(INTENT_ROUTING_TABLE.travel_planning, {
-    plane: "task",
-    capabilities: ["full"],
-    budget: 3,
-    tier: "flash",
-  });
-});
-
-test("别名解析：travel_plan / trip / itinerary 都归 travel_planning", () => {
-  for (const raw of ["travel_planning", "travel_plan", "trip", "itinerary", "travel"]) {
-    const parsed = parseIntentJson(`{"intent":"${raw}","confidence":0.9}`);
-    assert.equal(parsed?.intent, "travel_planning", `别名 ${raw} 应归 travel_planning`);
-  }
 });

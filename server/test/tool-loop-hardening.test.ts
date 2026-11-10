@@ -267,7 +267,11 @@ describe("tool-loop 加固（假 client 端到端）", () => {
       assert.equal(toolResults[0].ok, false);
       assert.equal(toolResults[0].result.errorCode, UnifiedErrorCode.ToolTimeout);
       assert.match(String(toolResults[0].result.error), /超时/);
-      assert.equal(text, "", "超时失败且预算耗尽：兜底汇总已删除，本轮无正文");
+      assert.equal(
+        text,
+        FINAL_ANSWER,
+        "出口对账闸已删除（2026-11-08，已流式即定稿）：工具超时后不再打回续波/兜底汇总，模型 wave1 的正文如实收尾",
+      );
       // 等待底层工具残留落定 + 原 timer 应已清除（600ms > 150ms timer）
       await new Promise((r) => setTimeout(r, 700));
       assert.equal(unhandled.length, 0, `不应有 unhandledRejection（${JSON.stringify(unhandled)}）`);

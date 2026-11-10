@@ -10,6 +10,7 @@ class EmailLoginResult {
   const EmailLoginResult({
     required this.ok,
     this.error,
+    this.code,
     this.otpChannelDisabled = false,
     this.retryAfterSeconds,
   });
@@ -19,21 +20,33 @@ class EmailLoginResult {
   /// 失败文案（直接可展示给用户）。
   final String? error;
 
+  /// 服务端错误码（ACCOUNT_NOT_FOUND / ACCOUNT_EXISTS / OTP_REQUIRED /
+  /// OTP_INVALID）：界面据此在「登录」与「注册」之间自动切换。
+  final String? code;
+
   /// 服务端 OTP 闸未开启（SMTP 未配置/显式关闭）：可跳过验证码直接登录。
   final bool otpChannelDisabled;
 
   /// 发码限频：多少秒后可重试。
   final int? retryAfterSeconds;
+
+  /// 该邮箱还没有账号 → 应该走注册。
+  bool get accountNotFound => code == "ACCOUNT_NOT_FOUND";
+
+  /// 该邮箱已经注册过 → 应该走登录。
+  bool get accountExists => code == "ACCOUNT_EXISTS";
 }
 
 /// 手机端邮箱登录 API 客户端（服务端实现：server/src/routes/http/accounts.ts）。
 ///
-/// 与桌面端网页登录（/accounts/web 两步式）完全同协议：
-///  1. POST /accounts/email/otp/start {email} → 向邮箱发 6 位验证码
+/// 登录与注册是**两个界面、两个接口**（手机端 2026-11 拆分）：
+///  1. `POST /accounts/email/otp/start {email}` → 向邮箱发 6 位验证码
 ///     （OTP 闸关闭时 503，调用方视 [EmailLoginResult.otpChannelDisabled]
 ///     允许免码直登）
-///  2. POST /accounts/register {userId: email, displayName, email, otpCode?}
-///     → 新邮箱即注册、已注册即登录（幂等）；白名单拦截 403 原样透传文案
+///  2. 登录：`POST /accounts/login {userId: email, otpCode}` —— **只登录不建档**，
+///     账号不存在返回 404 `ACCOUNT_NOT_FOUND`（界面据此切到注册）
+///  3. 注册：`POST /accounts/register {userId, displayName, email, otpCode,
+///     mode:"register"}` —— 已存在返回 409 `ACCOUNT_EXISTS`（界面据此切到登录）
 ///
 /// 登录主体恒为邮箱本身（userId=email）：与桌面端「登录邮箱=运行时身份
 /// 覆盖」同源，聊天/记忆/画像等全部数据按该 userId 落库，两端自动共享。
@@ -88,19 +101,44 @@ class EmailLoginApi {
     }
   }
 
-  /// 步骤 2：注册或登录（幂等）。[code] 为 null/空时按免码直登处理
+  /// 账号是否已注册（登录界面的分流依据）。
+  ///
+  /// 复用公开探活入口 `GET /accounts/me?userId=`（未注册 404 且
+  /// `registered:false`）。网络异常返回 null —— 调用方应把 null 当成
+  /// 「不知道」，照常继续当前流程，不要因此拦住用户。
+  Future<bool?> checkRegistered(String email) async {
+    final String mail = email.trim().toLowerCase();
+    try {
+      final http.Response res = await _client
+          .get(Uri.parse(
+              "$_baseUrl/accounts/me?userId=${Uri.encodeQueryComponent(mail)}"))
+          .timeout(_timeout);
+      final Map<String, dynamic> data =
+          jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      if (res.statusCode == 200) return data["registered"] == true;
+      if (res.statusCode == 404) return false;
+      return null;
+    } catch (e) {
+      debugPrint("[EmailLoginApi] checkRegistered failed: $e");
+      return null;
+    }
+  }
+
+  /// 登录（只登录，不建档）。[code] 为 null/空时按免码直登处理
   /// （仅当服务端 OTP 闸关闭时才会成功）。
-  Future<EmailLoginResult> registerOrLogin(String email, {String? code}) async {
+  ///
+  /// 账号不存在时返回 [EmailLoginResult.accountNotFound]，界面据此把用户
+  /// 引到注册界面，而不是像旧版那样「新邮箱自动注册」。
+  Future<EmailLoginResult> login(String email, {String? code}) async {
     final String mail = email.trim().toLowerCase();
     final String otp = code?.trim() ?? "";
     try {
       final http.Response res = await _client
           .post(
-            Uri.parse("$_baseUrl/accounts/register"),
+            Uri.parse("$_baseUrl/accounts/login"),
             headers: const <String, String>{"Content-Type": "application/json"},
             body: jsonEncode(<String, dynamic>{
               "userId": mail,
-              "displayName": mail.split("@").first,
               "email": mail,
               if (otp.isNotEmpty) "otpCode": otp,
             }),
@@ -111,17 +149,62 @@ class EmailLoginApi {
       if (res.statusCode == 200 && data["ok"] == true) {
         return const EmailLoginResult(ok: true);
       }
-      // 幂等：已存在账号视为登录成功（与桌面端 /accounts/web 同语义）
-      final String message = data["message"]?.toString() ?? "";
-      if (message.contains("已存在")) {
+      return EmailLoginResult(
+        ok: false,
+        code: data["code"]?.toString(),
+        error: data["message"]?.toString() ?? "登录失败，请稍后重试",
+      );
+    } catch (e) {
+      debugPrint("[EmailLoginApi] login failed: $e");
+      return const EmailLoginResult(ok: false, error: "网络错误，请检查网络后重试");
+    }
+  }
+
+  /// 注册（只注册，不登录已有账号）。
+  ///
+  /// [name] 是注册表单里的「你的名称」：新账号作为 displayName 落库，开场白
+  /// 用它称呼用户。邮箱已注册时服务端返回 409 → [EmailLoginResult.accountExists]。
+  Future<EmailLoginResult> register(String email,
+      {String? code, String? name}) async {
+    final String mail = email.trim().toLowerCase();
+    final String otp = code?.trim() ?? "";
+    final String userName = name?.trim() ?? "";
+    try {
+      final http.Response res = await _client
+          .post(
+            Uri.parse("$_baseUrl/accounts/register"),
+            headers: const <String, String>{"Content-Type": "application/json"},
+            body: jsonEncode(<String, dynamic>{
+              "userId": mail,
+              "displayName": userName.isNotEmpty ? userName : mail.split("@").first,
+              "email": mail,
+              "mode": "register",
+              if (otp.isNotEmpty) "otpCode": otp,
+            }),
+          )
+          .timeout(_timeout);
+      final Map<String, dynamic> data =
+          jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
+      if (res.statusCode == 200 && data["ok"] == true) {
         return const EmailLoginResult(ok: true);
+      }
+      final String message = data["message"]?.toString() ?? "";
+      final String? code2 = data["code"]?.toString();
+      // 老服务端没有 code 字段：沿用文案识别，行为不倒退
+      if (code2 == "ACCOUNT_EXISTS" || message.contains("已存在")) {
+        return EmailLoginResult(
+          ok: false,
+          code: "ACCOUNT_EXISTS",
+          error: message.isNotEmpty ? message : "该邮箱已注册，请直接登录",
+        );
       }
       return EmailLoginResult(
         ok: false,
-        error: message.isNotEmpty ? message : "登录失败，请稍后重试",
+        code: code2,
+        error: message.isNotEmpty ? message : "注册失败，请稍后重试",
       );
     } catch (e) {
-      debugPrint("[EmailLoginApi] registerOrLogin failed: $e");
+      debugPrint("[EmailLoginApi] register failed: $e");
       return const EmailLoginResult(ok: false, error: "网络错误，请检查网络后重试");
     }
   }

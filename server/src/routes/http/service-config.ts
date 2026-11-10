@@ -246,6 +246,12 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
     if (!result.ok) {
       return reply.code(502).send({ ok: false, error: result.reason });
     }
-    return { ok: true, provider: result.provider, bytes: result.base64.length };
+    // 带上音质门禁结果：连通性「绿」不等于音频能听，采样率偏低/坏音频要当场可见
+    return {
+      ok: true,
+      provider: result.provider,
+      bytes: result.base64.length,
+      quality: result.quality ?? null,
+    };
   });
 }

@@ -53,6 +53,7 @@ import { registerPresenceDetectRoutes } from "./presence-detect.js";
 import { registerProactivitySuppressionRoutes } from "./proactivity-suppression.js";
 import { registerProactivityPipelineRoutes, registerAutonomyRoutes } from "./proactivity.js";
 import { registerCapabilityReadinessRoutes } from "./capability-readiness.js";
+import { registerBrowserHealthRoutes } from "./browser-health.js";
 import { registerChatSuggestionRoutes } from "./chat-suggestions.js";
 import { registerMemoryCrudRoutes } from "./memory-crud.js";
 import { registerProfileManageRoutes } from "./profile-manage.js";
@@ -98,7 +99,6 @@ import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/tr
 import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerShoppingDecisionRoutes } from "./shopping-decision.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
-import { registerExitGateMetricsRoutes } from "./exit-gate-metrics.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
 import { registerWebhookRoutes } from "../../services/webhook/webhook-routes.js";
 import type { HttpRouteDeps } from "./types.js";
@@ -156,8 +156,6 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
     });
     // 旅行数据维护（快照 + 主动刷新：存量图片本地化 / 按目的地补图）
     registerTravelDataRoutes(app);
-    // 出口闸触发率看板（L4 运营闭环：持续高触发 ⇒ 改描述不加闸）
-    registerExitGateMetricsRoutes(app);
     registerPhoneRoutes(app, deps);
   }
   registerCompanionRoutes(app, deps);
@@ -239,7 +237,7 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
       externalChat: deps.externalChat ?? null,
     });
   }
-  // 资料库聚合（手机端「资料库」tab）：产出文件 + 图片 + 笔记 + 行程规划会话一次取齐
+  // 资料库聚合（手机端「资料库」tab）：产出文件 + 图片 + 笔记 + 已完成行程一次取齐
   registerLibraryRoutes(app, {
     fileProcessingService: deps.fileProcessingService,
     notesService: deps.notesService ?? null,
@@ -316,6 +314,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   });
   // 能力就绪状态（渐进式解锁卡片）+ 记忆管理 + 支付护栏/回执（自包含，无 deps）
   registerCapabilityReadinessRoutes(app);
+  // 云端无头浏览器自检（手机端比价/下单/预订的唯一执行通道，部署终验用）
+  registerBrowserHealthRoutes(app);
   // 聊天推荐项（「为你推荐」，联查能力就绪状态后抽样）
   registerChatSuggestionRoutes(app);
   registerMemoryCrudRoutes(app);

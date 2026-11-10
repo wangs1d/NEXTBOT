@@ -600,7 +600,7 @@ import { SpeechHub } from "../proactivity/speech-express.js";
 import { OnboardingIntroService } from "../services/onboarding-intro-service.js";
 import { setOnboardingHintRuntime } from "../services/onboarding-state.js";
 import { MobilePushService } from "../proactivity/mobile-push-service.js";
-import { AlarmClockService } from "../services/alarm-clock/alarm-clock-service.js";
+import { AlarmClockService, buildWakeFallback } from "../services/alarm-clock/alarm-clock-service.js";
 import { registerAlarmRoutes } from "../routes/http/alarms.js";
 import { ProactivePipeline, IN_CONVERSATION_WINDOW_MS } from "../proactivity/proactive-pipeline.js";
 import { SilenceLog } from "../proactivity/silence-log.js";
@@ -7389,11 +7389,42 @@ export async function createAppServices(
     wsRegistry: wsConnectionRegistry,
     mobilePush: proactivePushService,
     dataDir: join(getDataDir(), "alarm-clock"),
-    // 二阶段语音叫醒：TTS 合成开场白随 alarm.trigger 下发；不可用时客户端文本兜底
+    // 话术里的「触发时刻」必须按用户时区念（服务器可能跑在 UTC）：唯一来源
+    // 与 prompt-context-builder 同源 —— actorContext.resolveClock().timezone
+    resolveTimezone: (actorId) => {
+      try {
+        return actorContext.resolveClock(actorId).timezone;
+      } catch {
+        return undefined;
+      }
+    },
+    // 语音叫醒：建钟时预合成开场白，随 alarm.sync 下发到端侧缓存（到点不依赖联网）；
+    // 到点的 alarm.trigger 只作为兜底路复用同一份音频。
     synthesizeSpeech: async (text) => {
       const result = await ttsService.synthesizeMp3Base64(text);
+      // 失败原因必须可见：TTS 账户欠费 / 网关不支持 audio/speech 是最常见的
+      // 「闹钟响铃但没有语音」根因，静默降级会让问题看起来像链路 bug。
+      if (!result.ok) app.log.warn(`[alarm-clock] TTS 合成失败：${result.reason}`);
       return result.ok ? { format: "mp3", base64: result.base64 } : null;
     },
+    // Agent 话术统一走 SpeechHub（人格 + 画像浅层 + 单一主动开口指令块，禁 per-kind 提示词）。
+    // kind 只作为事实材料标签；fallback 保证 LLM 熔断/超时也永不空口。
+    composeWakeScript: async ({ actorId, label, fireAtLocal, fireAtLocalHour, repeatRule }) =>
+      speechHub.speak({
+        kind: "alarm_wake",
+        sessionId: actorId,
+        title: "到点叫用户起床",
+        facts: {
+          闹钟事项: label,
+          触发时刻: fireAtLocal, // 已按用户时区本地化（如「11月9日周一 19:45」），禁用 UTC ISO 原串
+          重复规则: repeatRule ?? "仅一次",
+          场景: "这是闹钟到点时要念给用户听的起床话，不是聊天回复",
+        },
+        fallback: buildWakeFallback(label, fireAtLocal, fireAtLocalHour),
+        tier: "light",
+        importance: "high",
+        maxChars: 48,
+      }),
     log: {
       info: (msg) => app.log.info(`[alarm-clock] ${msg}`),
       warn: (msg) => app.log.warn(`[alarm-clock] ${msg}`),
@@ -7680,14 +7711,14 @@ export async function createAppServices(
     reflexArc,
   });
 
-  // 手机端对话式首启引导（2026-11-07）：唯一编排点，装配在 WS 层之前。
-  // 开场白走 SpeechHub 现有人格 prompt；称呼/名字由服务端确定性落库，
-  // 不依赖 LLM 自觉调工具（agent.update_identity 默认不在常驻工具集）。
+  // 手机端对话式首启引导（2026-11-09 定稿）：唯一编排点，装配在 WS 层之前。
+  // 开场白为确定性文案（注册称呼 + 管家定位 + 直接问 agent 名字）；
+  // 名字由服务端确定性落库，不依赖 LLM 自觉调工具（agent.update_identity
+  // 默认不在常驻工具集）。
   const onboardingIntroService = new OnboardingIntroService({
     accounts: agentAccountService,
     memorySync: agentMemorySyncService,
     wsRegistry: wsConnectionRegistry,
-    speech: speechHub,
     now: () => Date.now(),
   });
   setOnboardingHintRuntime(onboardingIntroService);

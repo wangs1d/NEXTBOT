@@ -23,6 +23,20 @@ export const clientLocationWireSchema = z.object({
   /** 围栏触发时的围栏 id 与原始触发时刻（ISO），用于审计与去重 */
   fenceId: z.string().max(80).optional(),
   triggeredAt: z.string().max(64).optional(),
+  // ─── 定位精度元数据（2026-11-10 精确定位引擎）────────────────────────
+  // 主流范式（Android FusedLocationProvider / iOS CLLocationManager）：坐标
+  // 本身不构成可信位置，必须携带「这个 fix 有多准、何时采的」才可被服务端
+  // 做质量裁决（精度门槛、龄期校验、降级策略）。全部可选以兼容旧客户端。
+  /** 水平精度半径（米，68% 置信），即坐标真实位置有 68% 概率在此半径内 */
+  accuracyMeters: z.number().finite().nonnegative().max(100_000).optional(),
+  /** 海拔（米） */
+  altitudeMeters: z.number().finite().min(-1000).max(10_000).optional(),
+  /** 瞬时速度（米/秒，非负） */
+  speedMps: z.number().finite().nonnegative().max(400).optional(),
+  /** 航向（度，0=正北顺时针） */
+  headingDegrees: z.number().finite().min(0).max(360).optional(),
+  /** fix 采集时刻（ISO，带 Z 或 offset）。缺省由服务端按接收时刻处理 */
+  capturedAt: z.string().max(64).optional(),
 });
 
 export type ClientLocationWire = z.infer<typeof clientLocationWireSchema>;

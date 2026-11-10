@@ -119,6 +119,41 @@ test("P1: WAL 目录不存在/空 → 返回空数组不抛错", async () => {
   assert.deepEqual(missing, []);
 });
 
+test("mediaCards 透传（2026-11-09）：出口补写的媒体卡随转史下发，旧行不受影响", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wal-media-"));
+  try {
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, "2026-11-09.jsonl"),
+      [
+        JSON.stringify({
+          ts: "2026-11-09T10:00:00+08:00",
+          actorId: "m@x",
+          userText: "找几张柴犬的照片",
+          assistantText: "给找到了几张",
+          messageId: "mm1",
+          mediaCards: [{ type: "image", mediaUrl: "/agent/images/a.png" }],
+        }),
+        JSON.stringify({
+          ts: "2026-11-09T10:01:00+08:00",
+          actorId: "m@x",
+          userText: "普通轮",
+          assistantText: "普通回复",
+          messageId: "mm2",
+        }),
+        "",
+      ].join("\n"),
+      "utf8",
+    );
+    const turns = await readActorTranscriptFromWal(dir, "m@x");
+    assert.equal(turns.length, 2);
+    assert.deepEqual(turns[0].mediaCards, [{ type: "image", mediaUrl: "/agent/images/a.png" }]);
+    assert.equal(turns[1].mediaCards, undefined, "无卡轮不得带空 mediaCards");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("清空可见性（2026-10-16）：cleared-at 之前的轮次不下发，之后的照常回填", async () => {
   const dir = await mkdtemp(join(tmpdir(), "wal-cleared-"));
   try {

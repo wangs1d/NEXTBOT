@@ -242,7 +242,7 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
   const staticRun = await runLoop({ name: "A-static", lane: "chat", script, plan: chatLanePlanStatic(), userText: "现在几点了" });
   check("A-static：clock 真实执行 ok", staticRun.trace?.toolCalls?.[0]?.ok === true, JSON.stringify(staticRun.trace?.toolCalls));
   check("A-static：2 次 LLM 调用收尾", staticRun.llmCalls === 2, `actual=${staticRun.llmCalls}`);
-  check("A-static：无出口检查/请求卡", !staticRun.trace?.exitGate?.fired && !staticRun.trace?.requestCard?.fired);
+  check("A-static：请求卡不触发", !staticRun.trace?.requestCard?.fired);
 
   failNextSearchExecutions = 0;
   const legacyRun = await runLoop({ name: "A-legacy", lane: "chat", script, plan: chatLanePlanLegacy("现在几点了"), userText: "现在几点了" });
@@ -301,42 +301,38 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
   originalConsoleInfo("");
 }
 
-// 场景 C：出口检查——尝试全败 → 续波换路 → 成功
+// 场景 C：出口对账闸已删除（2026-11-08）——尝试全败 → 如实收尾，不再打回续波
 {
-  originalConsoleInfo("【C】出口检查（task 车道，capabilities=[search]）首轮全败 → 换路续波");
+  originalConsoleInfo("【C】出口闸已删除（task 车道，capabilities=[search]）首轮全败 → 如实收尾");
   const script: LoopScriptStep[] = [
     { kind: "tool", id: "c1", name: "search_web", args: { query: "上海 天气" } },
     { kind: "text", text: "抱歉，现在暂时没查到相关结果。" },
-    { kind: "tool", id: "c2", name: "search_web", args: { query: "上海 明天 降雨 概率" } },
-    { kind: "text", text: "查到了：上海明天多云，24 度，降雨概率低。" },
   ];
   failNextSearchExecutions = 3; // 首次调用 + 确定性重试×2（2026-09-19 退避增强）都失败
   const run = await runLoop({ name: "C-static-task", lane: "task", script, plan: taskLanePlanStatic(["search"]), userText: "上海明天会下雨吗" });
   failNextSearchExecutions = 0;
-  check("C：出口检查触发（尝试全败）", run.trace?.exitGate?.fired === true && run.trace?.exitGate?.reason === "substantive_tools_attempted_but_none_succeeded", JSON.stringify(run.trace?.exitGate));
-  check("C：续波后工具执行 ok", run.trace?.toolCalls?.some((c) => c.ok) === true, JSON.stringify(run.trace?.toolCalls));
-  check("C：最终回复非道歉式空话", run.finalText.includes("查到了"), run.finalText.slice(0, 60));
-  check("C：出口检查整轮只触发一次", (run.trace?.exitGate?.fired ? 1 : 0) === 1);
+  check("C：不打回续波（llmCalls=2：工具波+文本波）", run.llmCalls === 2, `actual=${run.llmCalls}`);
+  check("C：如实收尾（不做第二稿）", run.finalText.includes("没查到"), run.finalText.slice(0, 60));
   originalConsoleInfo("");
 }
 
-// 场景 D：宣告未兑现 → 出口检查补打
+// 场景 D：出口对账闸已删除——「宣告未兑现」不再触发补打（原 announcement_unfulfilled 闸已于 2026-10-06 下线）
 {
-  originalConsoleInfo("【D】宣告未兑现（chat 车道）只承诺不兑现 → 补打真实工具");
+  originalConsoleInfo("【D】宣告未兑现（chat 车道）不再打回，模型自决的调用照常执行");
   const script: LoopScriptStep[] = [
     { kind: "text", text: "我这就帮你查一下特斯拉的股价。" },
     { kind: "tool", id: "c1", name: "search_web", args: { query: "特斯拉 股价 最新" } },
     { kind: "text", text: "特斯拉最新股价 312.4 美元，涨了 3.2%。" },
   ];
   const run = await runLoop({ name: "D-static-chat", lane: "chat", script, plan: chatLanePlanStatic(), userText: "帮我看看特斯拉股价" });
-  check("D：出口检查触发（宣告未兑现）", run.trace?.exitGate?.fired === true && run.trace?.exitGate?.reason === "announcement_unfulfilled", JSON.stringify(run.trace?.exitGate));
-  check("D：补打后 search_web ok", run.trace?.toolCalls?.some((c) => c.name === "search_web" && c.ok) === true, JSON.stringify(run.trace?.toolCalls));
+  check("D：search_web 照常真实执行 ok", run.trace?.toolCalls?.some((c) => c.name === "search_web" && c.ok) === true, JSON.stringify(run.trace?.toolCalls));
+  check("D：最终回复是查到的结果", run.finalText.includes("312.4"), run.finalText.slice(0, 60));
   originalConsoleInfo("");
 }
 
-// 场景 D2：写操作意图零尝试 → 出口检查确定性拦截（turnIntent=action_write，非风格正则）
+// 场景 D2：出口对账闸已删除——写操作意图零尝试不再强制拦截（决策权归模型）
 {
-  originalConsoleInfo("【D2】写意图零尝试（chat 车道）模型自信假完成 → 出口检查强制真办");
+  originalConsoleInfo("【D2】写意图轮（chat 车道）无打回，脚本化调用照常执行");
   const script: LoopScriptStep[] = [
     { kind: "text", text: "好的，已经帮你记下来啦，明天早上九点准时叫你！" },
     { kind: "tool", id: "c1", name: "reminder_plan", args: { content: "明天早上九点开会" } },
@@ -346,9 +342,8 @@ originalConsoleInfo(`\n=== 工具调用架构 E2E：mode=${MODE} 全量语料=${
     name: "D2-static-chat", lane: "chat", script, plan: chatLanePlanStatic(),
     userText: "明天早上九点提醒我开会", turnIntent: "action_write",
   });
-  check("D2：出口检查触发（写意图零尝试）", run.trace?.exitGate?.reason === "write_intent_never_attempted", JSON.stringify(run.trace?.exitGate));
-  check("D2：续波后 reminder.plan 真实执行 ok", run.trace?.toolCalls?.some((c) => c.name === "reminder.plan" && c.ok) === true, JSON.stringify(run.trace?.toolCalls));
-  check("D2：续波仅一次", run.llmCalls === 3, `actual=${run.llmCalls}`);
+  check("D2：reminder.plan 照常真实执行 ok", run.trace?.toolCalls?.some((c) => c.name === "reminder.plan" && c.ok) === true, JSON.stringify(run.trace?.toolCalls));
+  check("D2：无额外续波（llmCalls=3）", run.llmCalls === 3, `actual=${run.llmCalls}`);
   originalConsoleInfo("");
 }
 

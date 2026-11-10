@@ -63,6 +63,11 @@ export function createImageGenerateHandler(
           return { ok: false, error: result.error ?? "图像生成失败", retryable: true };
         }
 
+        // worker 直接写盘，主线程补记归属对话（资料库按对话折叠）
+        if (result.imageUrl) {
+          imageGenerationService.recordImageOwner(actorId, result.imageUrl, context.sessionId);
+        }
+
         return {
           ok: true,
           imageUrl: result.imageUrl,
@@ -82,6 +87,7 @@ export function createImageGenerateHandler(
       model,
       imageSize,
       batchSize,
+      sessionId: context.sessionId,
     });
 
     if (!result.ok) {

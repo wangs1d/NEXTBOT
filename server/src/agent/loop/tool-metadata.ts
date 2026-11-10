@@ -276,7 +276,11 @@ function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
 }
 
 function inferCachePolicy(toolName: string): ToolMetadata["cachePolicy"] | undefined {
-  if (/^(weather\.get_local|search_web|search_images|search_videos|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
+  // search_images 故意不给缓存（2026-11-09 用户真机反馈：「再来几张」会返回前面
+  // 已经返回过的照片）。图片结果天生是「要给下一批」的语义，而缓存键只有
+  // name+input、TTL 60s，同 query 追轮会直接命中上一轮结果，把同一批图再发一遍。
+  // 图片搜索必须每次重跑 + 会话级去重（services/media-shown-ledger.ts）。
+  if (/^(weather\.get_local|search_web|search_videos|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
     return { enabled: true, ttlMs: 60_000 };
   }
   return undefined;

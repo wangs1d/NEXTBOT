@@ -1,3 +1,5 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("kotlin-android")
@@ -5,6 +7,28 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
     // HMS AGC 插件：构建期把 app/agconnect-services.json 处理进资源（须在 AGP 之后应用）
     id("com.huawei.agconnect")
+}
+
+// 签名凭据只从本机忽略文件或环境变量读取，绝不写进版本库。
+// 优先级：CI 环境变量 > android/key.properties（已被 .gitignore 忽略）> 明确报错。
+// debug/release 共用正式签名（HMS AGC 指纹强校验），缺凭据时不静默降级到 debug.keystore。
+// 注意：脚本作用域里 `java` 是 Gradle 的 Java 扩展，不能用 java.util.Properties 全限定名，
+// 必须走顶部 import；同理避免 takeIf/it 的类型推断歧义，写成显式 if。
+val keystoreProperties = Properties()
+val keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.isFile) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+
+fun signingCredential(envName: String, propKey: String): String {
+    val fromEnv = System.getenv(envName)
+    if (!fromEnv.isNullOrBlank()) return fromEnv
+    val fromFile = keystoreProperties.getProperty(propKey)
+    if (!fromFile.isNullOrBlank()) return fromFile
+    throw org.gradle.api.GradleException(
+        "缺少 Android 签名口令：请设置环境变量 $envName，或在 android/key.properties 中配置 " +
+            "$propKey=<口令>（该文件已被 .gitignore 忽略，禁止提交）。"
+    )
 }
 
 android {
@@ -49,19 +73,24 @@ android {
     // NextBot 正式签名（2026-10-13）：nextbot-release.jks 与华为 AGC 登记的
     // SHA-256 指纹绑定（HMS 注册强校验），debug/release 统一用它——任何构建
     // 的签名指纹都与 AGC 登记一致。keystore 备份在桌面 nextbot-signing/。
+    // 口令不落版本库：见文件顶部的 signingCredential（key.properties / 环境变量）。
     signingConfigs {
         create("nextbot") {
             storeFile = file("nextbot-release.jks")
-            storePassword = "Nextbot@2026"
+            storePassword = signingCredential("NEXTBOT_STORE_PASSWORD", "storePassword")
             keyAlias = "nextbot"
-            keyPassword = "Nextbot@2026"
+            keyPassword = signingCredential("NEXTBOT_KEY_PASSWORD", "keyPassword")
         }
     }
 
     buildTypes {
         release {
             signingConfig = signingConfigs.getByName("nextbot")
-            // R8：HMS 可选类 dontwarn 规则（proguard-rules.pro）
+            // R8：此前只声明 proguardFiles 却没开 minify，规则从未生效。
+            // 开启后 DEX 会被压缩/改名；HMS、JNI 的 keep 规则见 proguard-rules.pro。
+            // isShrinkResources 暂不开启：Flutter 插件资源误删风险高于体积收益，待 release 冒烟后再评估。
+            isMinifyEnabled = true
+            // HMS 可选类 dontwarn 规则（proguard-rules.pro）
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro",

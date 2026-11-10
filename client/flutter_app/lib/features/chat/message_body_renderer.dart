@@ -38,14 +38,6 @@ Widget buildMessageBody(
   void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction,
 
-  /// 打字机「已 reveal」的原文前缀；null 时显示完整原文。
-  /// 仅作用于纯文本分支（卡片/摘要仍用完整原文解析）。
-  String? typewriterRawText,
-
-  /// 是否处于打字机打字中：光标常驻，闪烁节奏由渲染层的
-  /// [_BlinkingCursor] 自带（480ms），布局不随闪烁跳动。
-  bool typewriterCursor = false,
-
   /// 「接下来你可以」接续建议点击回调（传入即作为新消息发送）。
   /// null 时不渲染建议行（未接线方/纯展示场景）。
   void Function(String prompt)? onFollowupTap,
@@ -67,18 +59,12 @@ Widget buildMessageBody(
     isUser: isUser,
     contentSummary: contentSummary,
     onUserAction: onUserAction,
-    typewriterRawText: typewriterRawText,
-    typewriterCursor: typewriterCursor,
     excludeTravelCard: excludeTravelCard,
     excludeCardTypes: excludeCardTypes,
   );
   if (isUser || onFollowupTap == null) return body;
   final List<String> followUps = message.followUpPrompts ?? const <String>[];
   if (followUps.isEmpty) return body;
-  // 时机门：打字机逐字 reveal 未完成时先不出建议行。done 载荷（携带
-  // followups）先于 reveal 结束到达，若立即渲染会「正文还在打字、建议已
-  // 挂出来」；reveal 结束后本组件随 TypewriterReveal 通知重建，此处放行。
-  if (typewriterRawText != null) return body;
   return Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     mainAxisSize: MainAxisSize.min,
@@ -176,8 +162,6 @@ Widget _buildAssistantBodyInner(
   ContentSummaryParseResult? contentSummary,
   void Function(AgentResultAction action, {required AgentResultData cardData})?
       onUserAction,
-  String? typewriterRawText,
-  bool typewriterCursor = false,
   bool excludeTravelCard = false,
   List<String> excludeCardTypes = const <String>[],
 }) {
@@ -266,7 +250,7 @@ Widget _buildAssistantBodyInner(
         summary: structuredSummary,
         briefText: "",
         extraText: ContentSummaryParser.stripSummaryBlocks(
-          typewriterRawText ?? message.text,
+          message.text,
         ),
         onCardTap: () {
           if (!ContentSummaryLauncher.open(structuredSummary)) {
@@ -353,7 +337,7 @@ Widget _buildAssistantBodyInner(
 
   // [RENDER_AS:xxx] 标记路由：后端注入的显式展示形式声明
   {
-    final String raw = typewriterRawText ?? message.text;
+    final String raw = message.text;
     final String? renderAs = _extractRenderAsMarker(raw);
     if (renderAs != null) {
       final String cleanText = _stripRenderAsMarker(raw);
@@ -368,14 +352,12 @@ Widget _buildAssistantBodyInner(
             text: cleanText,
             cs: cs,
             textTheme: Theme.of(context).textTheme,
-            showCursor: typewriterCursor,
           );
         case "image_result":
           return ImageResultMessage(
             text: cleanText,
             cs: cs,
             textTheme: Theme.of(context).textTheme,
-            showCursor: typewriterCursor,
           );
         case "data_brief":
           // data_brief 已退役（2026-11-06）：服务端不再下发。历史消息残留的
@@ -385,7 +367,6 @@ Widget _buildAssistantBodyInner(
             text: _legacyDataBriefToProse(cleanText),
             cs: cs,
             textTheme: Theme.of(context).textTheme,
-            showCursor: typewriterCursor,
           );
         case "video": {
           // 视频抓取：解析 [VIDEO_MEDIA_START] 媒体块，内联渲染可播放视频
@@ -414,7 +395,6 @@ Widget _buildAssistantBodyInner(
             text: cleanText,
             cs: cs,
             textTheme: Theme.of(context).textTheme,
-            showCursor: typewriterCursor,
           );
         }
         default:
@@ -444,10 +424,9 @@ Widget _buildAssistantBodyInner(
   // 正文——历史消息（任务面旧结果等）残留的声明行按字面漏出的根因，渲染前
   // 兜底剥离，已落库的历史消息也能显示干净。
   return StructuredAssistantMessageBody(
-    text: _stripRenderDeclarationLines(typewriterRawText ?? message.text),
+    text: _stripRenderDeclarationLines(message.text),
     cs: cs,
     textTheme: Theme.of(context).textTheme,
-    showCursor: typewriterCursor,
   );
 }
 
@@ -497,15 +476,22 @@ Widget? _buildEnvelopeBlocksBody(
   List<String> excludeCardTypes = const <String>[],
 }) {
   final List<Map<String, dynamic>> blocks = message.envelopeBlocks!;
-  // 兼容闸门：有不认识的块 → 整体回退旧链，绝不半渲染
-  for (final Map<String, dynamic> block in blocks) {
+  // 兼容闸门（2026-11-10 改口径）：不认识的块只跳过该块，不再整条回退。
+  //
+  // 旧策略是「只要有一个客户端不认识的形态块 → 整条信封放弃，回退旧字段链」。
+  // 后果是：服务端新增一种卡（或某个块带 form）会让同一条消息里**所有已知
+  // 卡片一起消失**，表现就是用户说的「卡被吞」。现在逐块过滤，只有「一个
+  // 可渲染块都不剩」时才回退，单块不识别不再拖垮整轮。
+  final List<Map<String, dynamic>> renderableBlocks = blocks.where((block) {
     final String type = block["type"]?.toString() ?? "text";
-    if (type == "form") return null;
+    if (type == "form") return false;
     if (type == "structured" &&
         block["kind"]?.toString() != "content_summary") {
-      return null;
+      return false;
     }
-  }
+    return true;
+  }).toList();
+  if (renderableBlocks.isEmpty) return null;
 
   final List<Widget> blockWidgets = <Widget>[];
   bool hasTextBlock = false;
@@ -579,7 +565,7 @@ Widget? _buildEnvelopeBlocksBody(
     }
   }
 
-  for (final Map<String, dynamic> block in blocks) {
+  for (final Map<String, dynamic> block in renderableBlocks) {
     appendBlock(block);
   }
   // 无 text 块的分泡轮：正文（气泡文本）在最前，卡/媒体块随后

@@ -1497,6 +1497,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               phoneCallCoordinator,
               actorContext,
               onboardingIntroService,
+              locationIngest,
             },
           );
           return;
@@ -1537,6 +1538,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
               phoneCallCoordinator,
               actorContext,
               onboardingIntroService,
+              locationIngest,
             },
           );
           return;

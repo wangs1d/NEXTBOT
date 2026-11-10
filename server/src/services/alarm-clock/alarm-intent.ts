@@ -1,28 +1,15 @@
 /**
- * 闹钟类意图识别与重复规则映射（纯代码确定性判定，无 LLM）。
+ * 闹钟意图辅助：recurrence → RRULE 映射（纯代码确定性逻辑，无 LLM）。
  *
- * 背景（2026-10-13 P0 接线）：聊天里「明早7点叫我起床」此前只走日程提醒链
+ * 历史（2026-10-13 P0 接线）：聊天里「明早7点叫我起床」此前只走日程提醒链
  * （schedule-task → schedule.reminder_fired 应用内通知，App 杀进程就不响），
  * 真正会响铃的本地闹钟引擎（Android AlarmManager + AlarmRingService）没有创建入口。
  *
- * 本模块给 calendar 建任务链路提供确定性的「这是闹钟类请求」判定：
- *   命中 → 日程任务照常创建（今日安排/编辑/删除生态不动），
- *          同时补建 kind=alarm 的真闹钟（alarmClockService.createAlarm →
- *          alarm.sync → 手机端写入本地闹钟库并预约精确闹钟，杀进程也响）。
- *
- * 服务端铁律：意图判定必须是确定性代码，不交给模型现场决定；
- * 判定语义与 schedule-intent-service 的起床类默认重复判定（原 isWakeAlarmLikeText，
- * L543）同源，改一处须同步另一处。
+ * 2026-11-09 用户定调改版：是否建真闹钟的意图判定废除正则文本匹配，交给模型 ——
+ * calendar.create schema 新增 alarmIntent 字段，唯一覆盖「睡觉叫醒」一种情形
+ * （「定个闹钟」等无睡觉语境的表述不建）。本模块只保留确定性保护：
+ * recurrence → RRULE 子集映射（yearly 不支持 → 回退日程提醒，不给错语义的响铃）。
  */
-
-/**
- * 闹钟/叫醒类意图（含口语「叫我起床」等）。
- * 与 schedule-intent-service.ts L543 保持同源；保守收窄：不含裸「叫我/喊我」
- * （「下午3点叫我开会」是会议提醒，不是闹钟）。
- */
-export function isAlarmLikeReminderText(text: string): boolean {
-  return /叫我起床|起床|闹钟|叫醒|定时叫|叫早/.test(text.trim());
-}
 
 export type ScheduleRecurrence = "none" | "daily" | "weekly" | "yearly";
 

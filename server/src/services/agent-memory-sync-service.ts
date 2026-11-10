@@ -75,19 +75,29 @@ export class AgentMemorySyncService {
     const keys = ["memory_summary", "session_recap", "memory_summary_forgotten"] as const;
     let sessions = 0;
     let removed = 0;
+    // 空 handle 残括号：改名叙事行曾无条件拼「（@handle）」，handle 为空
+    // （模型取名只给 displayName）就留下「「17赫兹」（@）」这种半截括号。
+    let strippedEmptyHandle = 0;
     for (const session of Object.values(this.data.sessions)) {
       const entries = session?.entries;
       if (!entries) continue;
       let dirty = false;
       for (const key of keys) {
-        const value = entries[key];
-        if (typeof value !== "string" || !value) continue;
+        const raw = entries[key];
+        if (typeof raw !== "string" || !raw) continue;
+        let value: string = raw;
         const r = sanitizeMemoryLinesForPrompt(value);
         if (r.dropped > 0) {
-          entries[key] = r.text;
+          value = r.text;
           removed += r.dropped;
           dirty = true;
         }
+        if (value.includes("（@）")) {
+          strippedEmptyHandle += value.split("（@）").length - 1;
+          value = value.split("（@）").join("");
+          dirty = true;
+        }
+        entries[key] = value;
       }
       if (dirty) {
         session.revision += 1;
@@ -99,8 +109,13 @@ export class AgentMemorySyncService {
         `[agent-memory-sync] 启动治愈：清理存量污染行 ${removed} 条（${sessions} 个会话）` +
           `——逐字对话行/协议残留不进长期记忆`,
       );
-      this.schedulePersist();
     }
+    if (strippedEmptyHandle > 0) {
+      console.warn(
+        `[agent-memory-sync] 启动治愈：去掉空 handle 残括号 ${strippedEmptyHandle} 处（${sessions} 个会话）`,
+      );
+    }
+    if (removed > 0 || strippedEmptyHandle > 0) this.schedulePersist();
   }
 
   /**

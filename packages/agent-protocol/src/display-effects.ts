@@ -28,6 +28,7 @@ export type DisplayEffectType =
   | "fold_list" // 折叠列表卡（内容：≥8 条长清单）
   | "quote" // 引用强调卡（markdown 引用块 / 引用式单句结论）
   | "travel_itinerary" // 旅游行程卡（工具：travel.*；前端以独立界面打开）
+  | "travel_requirement" // 需求确认卡（工具回执声明 needInput 时下发，点选回传）
   | "reminder_confirm" // 提醒确认卡（工具：calendar.create；只读、卡内多行）
   | "";
 
@@ -50,6 +51,7 @@ export const DISPLAY_EFFECT_TYPES = [
   "fold_list",
   "quote",
   "travel_itinerary",
+  "travel_requirement",
   "reminder_confirm",
   "",
 ] as const satisfies readonly DisplayEffectType[];

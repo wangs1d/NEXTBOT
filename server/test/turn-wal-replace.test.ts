@@ -84,3 +84,33 @@ test("半截行（进程被杀）不阻断其余行解析", () => {
   assert.ok(lines[0].startsWith('{"actorId":"a@x.com","messageId":"msg-1","assistantText":"旧"'));
   assert.equal(JSON.parse(lines[1]).assistantText, CARD_TEXT);
 });
+
+test("mediaCards 一并补写（2026-11-09）：无卡轮不添字段，有卡轮原样落行", () => {
+  // 无卡：行里不得出现 mediaCards 字段
+  const noCard = replaceAssistantTextInJsonl(raw0(), {
+    actorId: "a@x.com",
+    messageId: "msg-1",
+    assistantText: CARD_TEXT,
+  });
+  assert.ok(noCard);
+  assert.ok(!(JSON.parse((noCard ?? "").trimEnd().split("\n")[1]) as Record<string, unknown>).mediaCards);
+
+  // 有卡：原样补写，供 /api/chat-data/history?full=1 透传
+  const cards = [
+    { type: "image", mediaUrl: "/agent/images/demo.png", thumbnailUrl: "/agent/images/demo.png" },
+  ];
+  const withCard = replaceAssistantTextInJsonl(raw0(), {
+    actorId: "a@x.com",
+    messageId: "msg-1",
+    assistantText: CARD_TEXT,
+    mediaCards: cards,
+  });
+  assert.ok(withCard);
+  const replaced = JSON.parse((withCard ?? "").trimEnd().split("\n")[1]) as Record<string, unknown>;
+  assert.deepEqual(replaced.mediaCards, cards);
+  assert.equal(replaced.userText, "帮我规划三亚2天", "其余字段不能被回写抹掉");
+});
+
+function raw0(): string {
+  return `${line({ messageId: "msg-0", assistantText: "上一轮" })}\n${line({})}\n`;
+}

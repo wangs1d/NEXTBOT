@@ -310,7 +310,8 @@ export class NotesService {
     const all = this.bySession.get(sessionId) ?? [];
     const fromMs = filter.from ? new Date(filter.from).getTime() : -Infinity;
     const toMs = filter.to ? new Date(filter.to).getTime() : Number.POSITIVE_INFINITY;
-    const limit = Math.max(1, Math.min(200, filter.limit ?? 50));
+    // 笔记存在本机内存/磁盘，不做人为上限；调用方传多少给多少（默认 50 仅用于列表接口）
+    const limit = Math.max(1, filter.limit ?? 50);
     return all
       .filter((n) => ownedBy(n, filter.actorId))
       .filter((n) => !filter.category || n.category === filter.category)
@@ -321,6 +322,22 @@ export class NotesService {
       })
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
       .slice(0, limit);
+  }
+
+  /**
+   * 跨会话列出某 actor 的全部笔记（资料库按对话折叠用）。
+   * 每条笔记自带 sessionId，调用方据此归组；无 session 归属的旧笔记按 actor 兜底。
+   */
+  listNotesForActor(actorId: string, limit = 500): Note[] {
+    const all: Note[] = [];
+    for (const list of this.bySession.values()) {
+      for (const n of list) {
+        if (ownedBy(n, actorId)) all.push(n);
+      }
+    }
+    return all
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+      .slice(0, Math.max(1, limit));
   }
 
   /**

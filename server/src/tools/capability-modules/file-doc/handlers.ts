@@ -60,6 +60,7 @@ export function createFileWriteTextHandler(
       actorId,
       fileName,
       encoding: encoding as BufferEncoding | undefined,
+      sessionId: context.sessionId,
     });
     if (!result.ok) {
       return { ok: false, error: result.error, ...(result.retryable != null ? { retryable: result.retryable } : {}) };
@@ -162,6 +163,7 @@ export function createFileExportFormatHandler(
       actorId,
       fileName,
       sheetName,
+      sessionId: context.sessionId,
     });
     if (!result.ok) {
       return { ok: false, error: result.error, ...(result.retryable != null ? { retryable: result.retryable } : {}) };

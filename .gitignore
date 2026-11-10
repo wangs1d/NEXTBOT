@@ -137,3 +137,5 @@ desktop-visual/shot-screen.ps1
 desktop-visual/evidence-*.png
 desktop-visual/loop/
 sphere-overlay-py/*shot*.png
+# 下线资源的可恢复隔离区（本地 TTS 模型 / AAR / 实验样本等）
+.quarantine/

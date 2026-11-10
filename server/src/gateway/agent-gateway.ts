@@ -4,7 +4,7 @@
  * 所有工具/技能/MCP 资源的「准备、检索、桥接执行」都经由本模块发起，
  * 底层委托：
  *   - tool-search/：延迟目录（deferred catalog 构建 + 进程内 adaptive 检索 + 桥接执行）
- *   - gateway/forced-tool.ts：办事信号供给（只作出口对账授权，不再事前强制）
+ *   - gateway/forced-tool.ts：办事信号供给（只喂 agent-core 的显式规划升级）
  *
  * 网关职责：
  *   1. prepareTools：core/deferred 工具切分 + tool_discover 桥注入（trace: tool_prepare）
@@ -12,7 +12,7 @@
  *   3. searchResources：直接检索延迟目录（诊断/管理端，trace: resource_search）
  *
  * 2026-10-22：resolveForcedTool（事实型问题强制 tool_choice）已退役——请求层
- * 恒 auto，确定性全部后移到工具循环的出口对账闸（不预测，只验证）。
+ * 恒 auto，工具调用交模型自决；出口对账闸亦已于 2026-11-08 删除，不再有事后打回。
  *
  * 调用方一律 import gateway（不直接 import tool-search），保证路由行为可追踪、可治理。
  */

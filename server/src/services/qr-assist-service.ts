@@ -19,7 +19,14 @@ export class QrAssistService {
   constructor(
     private readonly deps: {
       /** PNG 落盘 + /agent/images/ 相对路径返回；未注入时推卡不可用。 */
-      imageStore?: { savePng(actorId: string, png: Buffer): Promise<string> };
+      imageStore?: {
+        savePng(
+          actorId: string,
+          png: Buffer,
+          sessionId?: string,
+          opts?: { libraryHidden?: boolean },
+        ): Promise<string>;
+      };
     } = {},
   ) {}
 
@@ -34,7 +41,12 @@ export class QrAssistService {
     try {
       const png = await captureQrFocused(page);
       if (!png) return null;
-      return await this.deps.imageStore.savePng(ctx.userId ?? ctx.sessionId, png);
+      return await this.deps.imageStore.savePng(
+        ctx.userId ?? ctx.sessionId,
+        png,
+        ctx.sessionId,
+        { libraryHidden: true },
+      );
     } catch {
       return null;
     }
@@ -76,7 +88,10 @@ export class QrAssistService {
   ): Promise<string | null> {
     if (!ctx.pushMediaCards || !this.deps.imageStore) return null;
     const actorId = ctx.userId ?? ctx.sessionId;
-    const imageUrl = await this.deps.imageStore.savePng(actorId, png);
+    // 扫码/登录/支付截图属于工具性图片，只服务当前对话，不进资料库。
+    const imageUrl = await this.deps.imageStore.savePng(actorId, png, ctx.sessionId, {
+      libraryHidden: true,
+    });
     // mediaType=qr + 真实像素宽高：客户端按「完整露出」版式渲染二维码
     // （contain + 白底），并拿到 1:1 自然宽高比——不再按 3:4 兜底把方码裁掉。
     const dims = pngDimensions(png);

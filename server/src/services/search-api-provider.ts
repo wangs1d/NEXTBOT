@@ -117,6 +117,24 @@ export function resolveSearchProvider(cfg: SearchApiConfig): SearchProvider | nu
   return factory(cfg);
 }
 
+/**
+ * 图片搜索是否只能落到「爬必应图片页」这一层（2026-11-09）。
+ *
+ * 与 `searchImagesViaSearchApi` 的早退条件逐条对齐：未配置 API / 提供方未注册 /
+ * 提供方无图片能力（Jina）/ 需要 key 但缺 key —— 这四种情况下图片搜索的唯一
+ * 出口就是 cn.bing.com 图片页。用户口径：**纯人名的查询词约束只针对必应这一层**，
+ * 接入真正的图片搜索 API 后查询词应原样透传（不裁剪）。
+ */
+export function isBingImagePageFallbackOnly(env: NodeJS.ProcessEnv = process.env): boolean {
+  const cfg = getSearchApiConfig(env);
+  if (cfg.provider === "none") return true;
+  const provider = resolveSearchProvider(cfg);
+  if (!provider) return true;
+  if (!provider.searchImages) return true;
+  if (provider.requiresApiKey && !cfg.apiKey) return true;
+  return false;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // 门面：上层唯一入口（签名与降级语义自抽象前保持不变）
 // ─────────────────────────────────────────────────────────────────────────────

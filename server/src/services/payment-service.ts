@@ -114,8 +114,8 @@ export class PaymentService {
     );
   }
 
-  /** 该 provider 本次下单实际走的模式（配置 mock 或凭证缺失都按 mock）。 */
-  private modeFor(provider: "wechat" | "alipay"): "mock" | "live" {
+  /** 该 provider 本次下单实际走的模式（配置 mock 或凭证缺失都按 mock）。公开：运维自检 /api/payment/status 与下单共用同一判定。 */
+  modeFor(provider: "wechat" | "alipay"): "mock" | "live" {
     if (provider === "wechat") {
       return this.wechatMode() === "mock" || !this.wechatCredentialsAvailable() ? "mock" : "live";
     }

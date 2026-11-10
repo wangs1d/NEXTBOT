@@ -14,14 +14,24 @@
  *     均已退役，不要再恢复 LLM 前置分类。
  */
 
-import { TASK_PLANE_FALLBACK_BUDGET, routePlanForIntent } from "./intent-router.js";
-
 /** 执行车道：chat=统一对话车道（工具自决、当轮执行）；task=后台任务执行器。 */
 export type LlmExecutionMode = "chat" | "task";
 
-export type TurnPlane = import("./intent-router.js").TurnPlane;
-export type TurnCapability = import("./intent-router.js").TurnCapability;
-export type TurnTier = import("./intent-router.js").TurnTier;
+/**
+ * 任务面兜底预算（2026-11-10 意图表删除后唯一保留的常量）。
+ *
+ * 只作 `RouteDecision.budget` 的占位值：波次预算已改为「不设业务上限、循环到
+ * 模型自然收尾」，这个字段不再驱动任何循环闸，保留是为了不破坏
+ * RouteDecision 的既有形状与观测字段。
+ */
+export const TASK_PLANE_FALLBACK_BUDGET = 3;
+
+/** 执行平面：chat=对话面；task=后台任务执行器。 */
+export type TurnPlane = "chat" | "task";
+/** 能力束标签（意图表删除后仅作观测/兼容，不再参与工具裁剪）。 */
+export type TurnCapability = "search" | "media" | "write" | "desktop" | "full" | "commerce" | "browser";
+/** 模型档位。 */
+export type TurnTier = "flash" | "pro";
 
 /** 本轮话头锚定目标（语义理解，模型判定）。 */
 export type TurnReference =
@@ -63,8 +73,11 @@ export type RouteDecision = {
   reasons: string[];
   /** 是否需要对回复做短句分段（对话面分段，任务面信息性内容不分段）。 */
   segmentable: boolean;
-  /** 语义路由识别的意图标签 + 置信度（降级路径可能缺省）。 */
-  intent?: import("./intent-router.js").IntentLabel;
+  /**
+   * 观测用标签（意图表已删除，2026-11-10）：只用于对话状态记录与轨迹，
+   * 不参与任何路由/工具裁剪。目前唯一写入方是计划续跑（"multi_step_task"）。
+   */
+  intent?: string;
   confidence?: number;
   /** 执行平面：chat=对话面零工具直答；task=任务面后台执行。 */
   plane: TurnPlane;
@@ -124,7 +137,12 @@ export function buildPlanContinuationDecision(): RouteDecision {
     segmentable: false,
     intent: "multi_step_task",
     confidence: 1,
-    ...routePlanForIntent("multi_step_task"),
+    // 意图表已删（2026-11-10）：原 routePlanForIntent("multi_step_task") 的等价
+    // 字面量。budget 不再驱动波次闸，仅作观测占位。
+    plane: "task",
+    capabilities: ["full"],
+    budget: TASK_PLANE_FALLBACK_BUDGET,
+    tier: "flash",
   };
 }
 

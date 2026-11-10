@@ -19,7 +19,6 @@ import { applyBodyForm } from "./body.js";
 import { applyCards, collectCardPayloads, unfoldIfCardsPresent } from "./cards.js";
 import { buildRenderEnvelope } from "./protocol.js";
 import { buildReplyBlocks } from "../services/reply-envelope.js";
-import { sceneRegistry } from "./scenes/index.js";
 import type { RenderDecision, RenderInput } from "./types.js";
 import type { RenderEnvelope } from "./protocol.js";
 
@@ -48,7 +47,7 @@ export function renderTurn(input: RenderInput, mode: RenderTurnMode = "full"): R
     text = decision.cards.length > 0 ? unfoldIfCardsPresent(input.text) : input.text;
     text = applyCards(text, decision).text;
   } else {
-    // 场景对正文有确定性改写时以它为准（明日预览渲染结果 / 结构卡坏块剥离）
+    // 场景对正文的确定性加工（目前只剩 structure 卡坏块剥离）以它为准
     const bodyText = decision.text ?? input.text;
     text = applyBodyForm(bodyText, decision, {
       userText: input.userText,
@@ -60,13 +59,11 @@ export function renderTurn(input: RenderInput, mode: RenderTurnMode = "full"): R
   }
 
   const cards = collectCardPayloads(text);
-  const scene = decision.scene ? sceneRegistry.get(decision.scene.id) : undefined;
   const envelope = buildRenderEnvelope({
     finalText: text,
     legacyBlocks: buildReplyBlocks(text),
     sceneId: decision.scene?.id,
     failures: decision.failures,
-    rewritesText: scene?.produces?.rewritesText === true && decision.text !== undefined,
   });
 
   return { text, cards, decision, envelope, mode };

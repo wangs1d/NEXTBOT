@@ -17,14 +17,6 @@ import { getShortTermMemoryConfig } from "./short-term-memory-config.js";
  * 聊天记录归 WAL 管——ChatGPT/Coze 同构。
  */
 
-export type WalTranscriptTurn = {
-  /** 轮次时刻（ms）；WAL 条目缺 ts 时 null（客户端按顺序兜底）。 */
-  ts: number | null;
-  userText: string;
-  assistantText: string;
-  clientMessageId?: string;
-};
-
 type WalRawEntry = {
   ts?: string;
   actorId?: string;
@@ -32,6 +24,18 @@ type WalRawEntry = {
   assistantText?: string;
   messageId?: string;
   context?: string;
+  /** 出口补写的本轮媒体卡（2026-11-09）；旧行/无媒体轮缺省。 */
+  mediaCards?: unknown[];
+};
+
+export type WalTranscriptTurn = {
+  /** 轮次时刻（ms）；WAL 条目缺 ts 时 null（客户端按顺序兜底）。 */
+  ts: number | null;
+  userText: string;
+  assistantText: string;
+  clientMessageId?: string;
+  /** 本轮媒体卡（照片/视频卡原样透传，供历史回填重建图片气泡）。 */
+  mediaCards?: unknown[];
 };
 
 /** 文件名即日期（YYYY-MM-DD.jsonl），字典序=时间序，倒序读最近的先。 */
@@ -136,6 +140,9 @@ export async function readActorTranscriptFromWal(
       if (byKey.has(key)) continue;
       const turn: WalTranscriptTurn = { ts, userText, assistantText };
       if (entry.messageId?.trim()) turn.clientMessageId = entry.messageId.trim();
+      if (Array.isArray(entry.mediaCards) && entry.mediaCards.length > 0) {
+        turn.mediaCards = entry.mediaCards;
+      }
       byKey.set(key, turn);
     }
   }

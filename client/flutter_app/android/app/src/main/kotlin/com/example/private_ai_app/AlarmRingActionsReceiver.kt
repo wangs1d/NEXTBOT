@@ -29,6 +29,11 @@ class AlarmRingActionsReceiver : BroadcastReceiver() {
         }
         // 无论 Dart 是否存活，先物理停铃
         AlarmRingService.stopAll(context)
+        // 关闭 = 这一跳用完：立即删端侧动态音频（Dart 侧的 dismiss 也会调一次，幂等）。
+        // 贪睡要再响一次，音频必须保留。
+        if (action == "dismiss") {
+            AlarmClockPlugin.releaseVoiceClip(context, alarmId)
+        }
 
         val handler = dartActionHandler
         if (handler != null) {

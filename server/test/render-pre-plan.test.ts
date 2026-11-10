@@ -81,7 +81,7 @@ test("天气轮：场景边界与 strategy 同源，去重后 prompt 零变化",
   assert.match(buildSceneBoundaryBlock(pre, ""), /天气轮/);
 });
 
-test("盘点轮：边界真正进 prompt，且标记 rewritesText", () => {
+test("盘点轮：边界真正进 prompt，并带上条目事实", () => {
   const pre = planPreRenderScene({
     userText: "最近有什么新消息",
     toolResults: [
@@ -98,8 +98,8 @@ test("盘点轮：边界真正进 prompt，且标记 rewritesText", () => {
     ],
   });
   assert.ok(pre.matched.includes("digest_roundup"));
-  assert.equal(pre.rewritesText, true);
-  assert.ok(pre.boundaries.includes(DIGEST_ROUNDUP_BOUNDARY));
+  assert.ok(pre.boundaries.some((b) => b.startsWith(DIGEST_ROUNDUP_BOUNDARY)));
+  assert.ok(pre.boundaries.some((b) => b.includes("- 第一条")), "条目事实必须进 prompt");
   assert.match(buildSceneBoundaryBlock(pre, ""), /盘点轮/);
   // 出口计划必须命中同一场景（不再两处各猜一次）
   const post = planRenderScene({
@@ -127,8 +127,8 @@ test("明日预览：数据面在生成前注入即可命中，边界进 prompt"
     payloads: { eveningDigest: DIGEST, tomorrowPreview: true },
   });
   assert.ok(pre.matched.includes("tomorrow_preview"));
-  assert.equal(pre.rewritesText, true);
-  assert.ok(pre.boundaries.includes(TOMORROW_PREVIEW_BOUNDARY));
+  assert.ok(pre.boundaries.some((b) => b.startsWith(TOMORROW_PREVIEW_BOUNDARY)));
+  assert.ok(pre.boundaries.some((b) => b.includes("09:00 站会")), "行程事实必须进 prompt");
   assert.match(buildSceneBoundaryBlock(pre, ""), /明日预览/);
 });
 

@@ -9,6 +9,8 @@
  *   DELETE /api/alarms/:id                   取消（软删 → canceled，跨设备同步停响）
  *   POST   /api/alarms/:id/snooze            贪睡 { minutes }
  *   POST   /api/alarms/:id/dismiss           停止本次响铃（重复闹钟推进下一跳）
+ *   GET    /api/alarms/:id/voice             单独取叫醒语音（按需补拉；已消费则为 null）
+ *   POST   /api/alarms/:id/voice/consume     端侧确认音频已落盘 → 云端立即「用完即删」
  *   POST   /api/alarms/:id/trigger-callback  客户端触发回执（幂等，驱动服务端兜底判定）
  *   GET    /api/alarms/:id/triggers          触发台账
  *   POST   /api/reminders                    创建即时提醒（kind=reminder 薄壳）
@@ -76,7 +78,7 @@ export function registerAlarmRoutes(
       remindText: b.remindText,
     };
     const { alarm, duplicate } = service.createAlarm(input);
-    return reply.code(duplicate ? 200 : 201).send({ ok: true, alarm, duplicate });
+    return reply.code(duplicate ? 200 : 201).send({ ok: true, alarm: service.toPayload(alarm), duplicate });
   });
 
   app.get("/api/alarms", async (request, reply) => {
@@ -84,7 +86,8 @@ export function registerAlarmRoutes(
     const actorId = resolveActor(request.query, null);
     if (!actorId) return reply.code(400).send({ ok: false, error: "actorId 必填" });
     const status = (request.query as { status?: string }).status;
-    const alarms = service.listAlarms(actorId, status);
+    // 对账列表带预合成语音：客户端启动/重连时一次拉齐，本地精确闹钟即可离线播
+    const alarms = service.listAlarmsPayload(actorId, status);
     return { ok: true, alarms, count: alarms.length };
   });
 
@@ -92,14 +95,32 @@ export function registerAlarmRoutes(
     if (!service) return reply.code(503).send({ ok: false, error: "alarm-clock service not enabled" });
     const alarm = service.getAlarm(request.params.id);
     if (!alarm) return reply.code(404).send({ ok: false, error: "闹钟不存在" });
-    return { ok: true, alarm };
+    return { ok: true, alarm: service.toPayload(alarm) };
+  });
+
+  /** 单独取叫醒语音（客户端按需补拉，避免列表里重复携带大 base64） */
+  app.get<{ Params: { id: string } }>("/api/alarms/:id/voice", async (request, reply) => {
+    if (!service) return reply.code(503).send({ ok: false, error: "alarm-clock service not enabled" });
+    if (!service.getAlarm(request.params.id)) return reply.code(404).send({ ok: false, error: "闹钟不存在" });
+    return { ok: true, voice: service.getVoiceClip(request.params.id) };
+  });
+
+  /**
+   * 「用完即删除」回执：端侧把 mp3 落到应用私有文件、本地精确闹钟排好后调用。
+   * 服务端立即删内存与 voice-clips/*.json；幂等（重复 ACK 返回 consumed=false）。
+   * 没收到这个回执（端侧离线/旧版本/被杀）时由兜底 TTL 最终清扫。
+   */
+  app.post<{ Params: { id: string } }>("/api/alarms/:id/voice/consume", async (request, reply) => {
+    if (!service) return reply.code(503).send({ ok: false, error: "alarm-clock service not enabled" });
+    if (!service.getAlarm(request.params.id)) return reply.code(404).send({ ok: false, error: "闹钟不存在" });
+    return { ok: true, ...service.consumeVoiceClip(request.params.id) };
   });
 
   app.patch<{ Params: { id: string }; Body: Partial<CreateBody> }>("/api/alarms/:id", async (request, reply) => {
     if (!service) return reply.code(503).send({ ok: false, error: "alarm-clock service not enabled" });
     const alarm = service.updateAlarm(request.params.id, request.body as Partial<AlarmCreateInput>);
     if (!alarm) return reply.code(404).send({ ok: false, error: "闹钟不存在" });
-    return { ok: true, alarm };
+    return { ok: true, alarm: service.toPayload(alarm) };
   });
 
   app.delete<{ Params: { id: string } }>("/api/alarms/:id", async (request, reply) => {

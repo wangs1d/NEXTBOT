@@ -573,7 +573,7 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
       // 此前 reminder.plan / calendar.create_from_text / calendar.create_task 三件
       // 套并存，同一句话在两轮里各挑一个工具，会落成两条到点提醒。
       description:
-        "【内置 Calendar】创建提醒/日程/定时任务的唯一入口。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。",
+        "【内置 Calendar】创建提醒/日程/定时任务的唯一入口。优先把用户原句放进 text（含时间与事项，如「明天 9:00 提醒我开会」），服务端确定性解析时间与事项；只有时间/类型已结构化时才用下方字段。常见触发：「明天早上九点提醒我开会」「十分钟后提醒我」「到点叫我吃药」「定个明早七点的闹钟」（睡觉叫醒须传 alarmIntent=true）「提醒我交周报」（每天循环的喝水/睡觉/运动习惯走 care.rhythm_reminder）。带明确时间点时直接调用，不要追问；仅当返回 needsRecurrenceConfirm=true 时按 suggestedQuestion 追问一次后重调。kind=reminder 时返回 whenSpoken（口语时间，如「明天上午十一点」；**仅在时间不是用户说的、或与他说的不同时才用它交代一句，用户刚说过就别重复**，也别把钟点念成 11:00、别念 11/6 这种日期）；advanceReminderKinds 只说明提前提醒的性质（departure=出发前、evening_before=前一晚），是事实不是台词：要不要提起、怎么提起你自己判断，别提字段名、别说几级、别报时点；hasAdvanceReminder 为 true 时说明另有提前提醒，别让用户以为只响一次，但不要解释提醒是怎么排的，也不要罗列提醒时间点。提醒方式默认弹窗；仅用户明确要求电话/语音才升级。",
       parameters: {
         type: "object",
         properties: {
@@ -603,6 +603,13 @@ export const CALENDAR_CHAT_TOOLS: ChatCompletionTool[] = [
           },
           reminderMessage: { type: "string", description: "仅 kind=reminder。到点展示文案，如「该睡觉啦！」；禁止复述原句、禁止带时间表述、不要写称呼。" },
           forceCreate: { type: "boolean", description: "用户明知时间冲突仍坚持创建时传 true（跳过冲突拦截）" },
+          alarmIntent: {
+            type: "boolean",
+            description:
+              "仅一种情形传 true：睡觉叫醒——用户要在睡觉后被叫醒（「明早七点叫我起床」「六点半叫醒我」「明早叫早」）。" +
+              "其余一切（会议提醒、吃药、日程、批量导入课表，以及「定个闹钟」这类没有睡觉语境的表述）一律不传。" +
+              "传 true 会创建手机本地闹钟（到点响铃 + 语音叫醒，杀进程也响），误传会把用户真的吵醒，宁缺勿滥。",
+          },
           action: {
             type: "object",
             description: "仅 kind=action",

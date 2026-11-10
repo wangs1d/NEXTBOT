@@ -156,6 +156,7 @@ export function registerChatDataRoutes(
           text: string;
           ts: number | null;
           clientMessageId?: string;
+          mediaCards?: unknown[];
         }> = [];
         for (const turn of turns) {
           if (turn.userText) {
@@ -169,14 +170,25 @@ export function registerChatDataRoutes(
             messages.push(item);
           }
           if (turn.assistantText) {
-            messages.push({
+            const assistantItem: {
+              role: "user" | "assistant";
+              text: string;
+              ts: number | null;
+              mediaCards?: unknown[];
+            } = {
               role: "assistant",
               text: capAssistantTextForHistory(turn.assistantText),
               // 同轮 user/assistant 共享同一 ts（同一毫秒）会让客户端渲染层
               // 的不稳定排序随机翻序（回复冒到提问上面）——assistant 恒 +1ms
               // 保证「问在上、答在下」的次序在一切排序下确定（2026-10-16）。
               ts: turn.ts == null ? null : turn.ts + 1,
-            });
+            };
+            // 本轮媒体卡随行下发（2026-11-09）：客户端重装/换设备后回填历史
+            // 才能重建照片气泡；URL 指向服务端转存资产，跨设备仍可加载。
+            if (turn.mediaCards && turn.mediaCards.length > 0) {
+              assistantItem.mediaCards = turn.mediaCards;
+            }
+            messages.push(assistantItem);
           }
         }
         return {

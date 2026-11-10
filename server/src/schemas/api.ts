@@ -87,6 +87,10 @@ export const accountRegisterBodySchema = z
     // 邮箱所有权验证码（可选字段；OTP 闸开启时邮箱形态主体必须携带，
     // 见 routes/http/accounts.ts 的 enforcement 说明）。
     otpCode: z.string().max(8).optional(),
+    // 动作意图：缺省＝旧语义「注册或登录」（新邮箱建档、已存在按登录幂等）；
+    // "register"＝只注册（已存在直接 409，供客户端的注册界面使用，避免把
+    // 「重复注册」悄悄当成登录）。登录走独立 POST /accounts/login。
+    mode: z.enum(["register"]).optional(),
   })
   .superRefine(accountActorRefine);
 
@@ -94,6 +98,20 @@ export const accountRegisterBodySchema = z
 export const accountEmailOtpStartBodySchema = z.object({
   email: z.string().min(3).max(254),
 });
+
+/**
+ * 邮箱登录（POST /accounts/login）：只登录、不建档。账号必须已存在，
+ * 否则 404 ACCOUNT_NOT_FOUND —— 客户端据此把用户引到注册界面。
+ */
+export const accountLoginBodySchema = z
+  .object({
+    userId: z.string().optional(),
+    sessionId: z.string().optional(),
+    email: z.string().optional(),
+    // OTP 闸开启时必填（由路由按闸状态校验，不在此强制）。
+    otpCode: z.string().max(8).optional(),
+  })
+  .superRefine(accountActorRefine);
 
 /** 内测候补申请（登录页自助排队）：邮箱必填，备注可选。 */
 export const accountBetaApplyBodySchema = z.object({

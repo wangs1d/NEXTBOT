@@ -190,9 +190,12 @@ export async function applyAgentIdentityRename(
   );
 
   // 4) 叙事记忆：命名是人生史事件，不是配置变更
+  // 网络名（handle）往往为空——模型取名只给 displayName。空 handle 不拼
+  // 「（@）」，否则记忆里会留一行「「17赫兹」（@）」的残括号。
+  const nameRef = handle ? `「${name}」（@${handle}）` : `「${name}」`;
   const narrative = reason
-    ? `${origin === "user" ? "用户为我取名" : "我为自己取名"}「${name}」（@${handle}）——${reason}`
-    : `${origin === "user" ? "用户为我取名" : "我为自己取名"}「${name}」（@${handle}）`;
+    ? `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}——${reason}`
+    : `${origin === "user" ? "用户为我取名" : "我为自己取名"}${nameRef}`;
   deps.memorySync.appendMemorySummaryLine(actorId, narrative, "identity");
 
   pushToActor(deps, actorId, "identity_renamed", {

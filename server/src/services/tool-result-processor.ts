@@ -839,11 +839,14 @@ export class ToolResultProcessor {
       /** 场景数据面（如 eveningDigest）：由持有数据的调用方注入 */
       renderPayloads?: Record<string, unknown>;
       /**
-       * rewritesText 场景（明日预览/盘点）在出口整体接管正文时回调。调用方
-       * （chat done 装配）据此把分泡活轮收口成整段替换——分泡里还是模型原稿、
-       * finalText 已是确定性版式，不收口 = 版式永远不落屏（气泡与正文不同源）。
+       * 出口信封回传（2026-11-09）：done 装配要拿 meta.sceneId/preSceneIds
+       * 拼 wire 信封——singleBubble（禁分泡）的判据就在 sceneId 上。不回传
+       * 的话 done 帧从 finalText 重拼信封，场景信息丢失（实证：出口命中
+       * tomorrow_preview 而 wire meta.sceneId=none，气泡照拆不收口）。
        */
-      onSceneRewrite?: (info: { sceneId: string }) => void;
+      onRenderEnvelope?: (envelope: {
+        meta: { sceneId: string; failures: string[]; preSceneIds: string[] };
+      }) => void;
     },
   ): string {
     if (!this.options.enabled) {
@@ -881,9 +884,7 @@ export class ToolResultProcessor {
       `[ToolResultProcessor] render: ${result.decision.reason} media=${opts?.mediaCardCount ?? 0}` +
         ` scene=${result.envelope.meta.sceneId} failures=${result.envelope.meta.failures.length}`,
     );
-    if (result.envelope.meta.rewritesText) {
-      opts?.onSceneRewrite?.({ sceneId: result.envelope.meta.sceneId ?? "" });
-    }
+    opts?.onRenderEnvelope?.(result.envelope);
     return result.text;
   }
 

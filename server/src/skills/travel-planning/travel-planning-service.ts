@@ -979,7 +979,14 @@ export class PlanningService {
 
     // 1. 解析用户输入
     const destName = extractDestination(request.input, request.destination);
-    const dayCount = request.days || extractDays(request.input) || 3;
+    const dayCount = request.days || extractDays(request.input) || 0;
+    if (!dayCount) {
+      // 无默认天数：绝不替用户猜。
+      // 此前这里是 `|| 3`，用户只说「想去大理玩」会被静默排成 3 天，
+      // 用户看到一份完整行程却不知道天数是代码猜的。缺口由工具层返回，
+      // 这里只作为最后一道防线抛错（正常链路不会走到）。
+      throw new Error("缺少行程天数：需先确认玩几天后再生成行程");
+    }
     const preferences = extractPreferences(request.input, request.preferences, destName, request.profileHints, {
       // 结构化槽位（工具入参 / 简报卡回传）与原文同权，来源标 'user'
       explicit: {
@@ -2323,12 +2330,10 @@ export class PlanningService {
       for (const it of day.items) {
         if (it.type === 'hotel') {
           const live = hotelPrices.get(it.name);
-          if (live) {
-            // 预算合计允许用同城同档中位数兜底，但取的是 reference 字段——
-            // 它不是本店报价，所以 note 必须带着「中位数参考」原文进合计。
-            const basis = live.kind === 'exact' ? live.amount : live.reference;
-            const q = pricingService.quoteLivePrice(basis, 'hotel', it.name, ctx, {
-              note: live.kind === 'market' ? live.note : '飞猪实时房价，以下单页为准',
+          if (live && live.kind === 'exact' && live.amount != null) {
+            // 本店实价：可计入合计
+            const q = pricingService.quoteLivePrice(live.amount, 'hotel', it.name, ctx, {
+              note: '飞猪实时房价，以下单页为准',
             });
             it.priceQuote = q;
             it.priceInfo = this._formatPriceInfo(q);
@@ -2337,7 +2342,18 @@ export class PlanningService {
               { name: '标准间', pricePerNight: q.finalPrice, capacity: 2, amenities: ['WiFi', '空调', '独立卫浴'], image: '' },
               { name: '豪华房', pricePerNight: Math.round(q.finalPrice * 1.4), capacity: 2, amenities: ['WiFi', '空调', '独立卫浴', '观景窗'], image: '' },
             ];
-            if (live.kind === 'market') marketHotels++;
+          } else if (live && live.kind === 'market') {
+            // 同城同档中位数不是本店报价：只作参考展示，不进合计。
+            // 此前把 reference 当 basis 走 quoteLivePrice，pricePending=false，
+            // 非本店价被直接算进 totalCost——预算虚高且无法追溯来源。
+            it.priceQuote = pricingService.quotePending('hotel', it.name, ctx, '未取到本店报价，仅同城同档参考');
+            it.priceInfo = live.reference != null
+              ? `参考 ¥${Math.round(live.reference)}（同城同档中位数，非本店价）`
+              : '待核价';
+            it.pricePerNight = 0;
+            it.rooms = [];
+            marketHotels++;
+            pendingKeys.add(`hotel:${it.name}`);
           } else {
             it.priceQuote = pricingService.quotePending('hotel', it.name, ctx, '未取到该酒店实时房价，待核价');
             it.priceInfo = '待核价';

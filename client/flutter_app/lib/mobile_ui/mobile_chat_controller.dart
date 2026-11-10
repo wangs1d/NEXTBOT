@@ -1,5 +1,6 @@
 import "dart:async";
 import "dart:convert";
+import "dart:io" show Platform;
 
 import "package:flutter/foundation.dart";
 import "package:http/http.dart" as http;
@@ -7,6 +8,7 @@ import "../core/services/nb_http.dart";
 import "package:url_launcher/url_launcher.dart";
 
 import "../app/ambient_feeds_controller.dart";
+import "../app/phone_call_controller.dart";
 import "../core/config/api_config.dart";
 import "../core/db/isar_local_history_store.dart";
 import "../core/db/local_history_store.dart";
@@ -17,9 +19,10 @@ import "../core/services/attention_api.dart";
 import "../core/services/client_clock_service.dart";
 import "../core/services/client_geofence_service.dart";
 import "../core/services/client_location_service.dart";
-import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/local_notification_service.dart";
+import "../core/services/tts_player.dart";
 import "../core/services/ws_chat_service.dart";
+import "../core/services/ws_event_router.dart";
 import "../core/utils/agent_activity_label.dart";
 import "../core/utils/agent_result_parser.dart";
 import "../core/utils/assistant_text_sanitizer.dart";
@@ -40,6 +43,19 @@ bool _isBubbleId(String messageId) => _bubbleIdPattern.hasMatch(messageId);
 String? _bubbleTraceOf(String messageId) =>
     _bubbleIdPattern.firstMatch(messageId)?.group(1);
 
+/// 分泡揭示队列条目（2026-11-10）：泡完成才整泡落屏的排队单元。
+class _PendingBubbleReveal {
+  _PendingBubbleReveal({
+    required this.bubbleId,
+    required this.traceId,
+    required this.sessionId,
+  });
+
+  final String bubbleId;
+  final String traceId;
+  final String sessionId;
+}
+
 /// 手机端对话控制器：复用 [WsChatService] 连接与桌面端同一后端，数据/会话自动同步。
 ///
 /// 协议(与桌面端一致)：
@@ -49,15 +65,34 @@ String? _bubbleTraceOf(String messageId) =>
 ///   `chat.media_ready`(边说边出图临时照片)、`chat.assistant_done`(收尾最终文本,
 ///   含结构化 mediaCards/renderBlocks 字段,与桌面端一致)
 class MobileChatController extends ChangeNotifier {
-  MobileChatController({String? wsBaseUrl, LocalHistoryStore? historyStore}) {
-    _service = WsChatService(url: wsBaseUrl ?? ApiConfig.wsUrl);
-    _service.onConnected = _sendSessionInit;
-    _subscription = _service.events.listen(_onWsEvent);
+  /// 是否跑在 flutter_test 里（框架注入 FLUTTER_TEST=true）。
+  /// 测试必须自建连接：共享连接会连真实地址，把网络异步异常灌进全局流，
+  /// 让本该纯内存的单测成片失败。
+  static bool get _isFlutterTest =>
+      !kIsWeb && Platform.environment["FLUTTER_TEST"] == "true";
+
+  MobileChatController({String? wsBaseUrl, LocalHistoryStore? historyStore})
+      : _ownsConnection = wsBaseUrl != null || _isFlutterTest {
+    // 生产形态复用进程内唯一连接（WsChatService.shared）：服务端只登记一条
+    // 连接，心跳/重连/在途重投只有一份。只有测试注入 wsBaseUrl / 跑在
+    // flutter_test 里时才自建独立连接——否则单测会连生产地址、把异步异常
+    // 灌进全局流。
+    _service = _ownsConnection
+        ? WsChatService(url: wsBaseUrl ?? ApiConfig.wsUrl)
+        : WsChatService.shared;
+    // 事件走路由器 chat 通道（ws_event_router.dart 归属表）：只收 chatOnly /
+    // both，本控制器是这批业务事件的唯一 owner。测试自建连接时直连自己的事件流。
+    _subscription = _ownsConnection
+        ? _service.events.listen(_onWsEvent)
+        : WsEventRouter.instance.chatEvents.listen(_onWsEvent);
     _service.connect();
     _store = historyStore ?? IsarLocalHistoryStore(userPin: ApiConfig.localPin);
     unawaited(_bootstrapHistory());
   }
 
+  /// 是否自持连接：仅测试注入 `wsBaseUrl` 时为 true。共享连接归进程所有，
+  /// 控制器销毁时只解订阅，绝不 close（否则根状态的闹钟/提醒链路一起断）。
+  final bool _ownsConnection;
   late final WsChatService _service;
   StreamSubscription? _subscription;
 
@@ -183,6 +218,45 @@ class MobileChatController extends ChangeNotifier {
   /// 当前流式助手消息 id。
   String? _streamingMessageId;
 
+  // ===== 分泡逐泡揭示（2026-11-10）：打字机下线后的新节奏 =====
+  //
+  // 分泡轮的流式 chunk 不再直接进 messages 打字，而是先攒进缓冲；
+  // 泡完成（下一泡开 / done 收口）才入揭示队列，由定时器按固定间隔
+  // 逐泡整条弹出——观感是助手像真人一样一条一条发消息，泡与泡之间
+  // 有停顿，而不是第一泡打字机、第二泡瞬发。
+
+  /// 两条揭示泡之间的最小间隔。
+  static const Duration _bubbleRevealGap = Duration(milliseconds: 600);
+
+  /// 待揭示泡队列条目：泡 id + 所属 trace + 落屏目标会话（中途切会话时
+  /// 泡仍落回它自己的线程，不窜到当前激活会话）。
+  ///
+  /// 定义在 MobileChatController 之外（库私有顶层），避免 this 绑定问题。
+  final List<_PendingBubbleReveal> _revealQueue = <_PendingBubbleReveal>[];
+
+  /// 流式中未落屏的泡正文缓冲（bubbleId -> 已缓冲正文）。
+  final Map<String, String> _bubbleBuffers = <String, String>{};
+
+  /// 泡首次 chunk 到达时所在的会话线程键（揭示时按它落屏）。
+  final Map<String, String> _bubbleSessionOf = <String, String>{};
+
+  /// done 对账下发的最终文本覆盖（揭示时优先于缓冲文本）。
+  final Map<String, String> _revealFinalText = <String, String>{};
+
+  /// done 对账下发的末泡附件（mediaCards/summaryCard/块序列/followups）。
+  final Map<String, Map<String, dynamic>> _revealAttachments =
+      <String, Map<String, dynamic>>{};
+
+  /// 当前正在缓冲的泡 id（null = 没有正在收 chunk 的泡）。
+  String? _activeBubbleId;
+
+  /// 当前正在缓冲的泡所属 trace（从 chunk payload 取，兜底从 id 解析）。
+  String? _activeBubbleTrace;
+
+  /// 揭示定时器与上一泡揭示时刻（实现泡间最小间隔）。
+  Timer? _revealTimer;
+  DateTime _lastBubbleRevealAt = DateTime.fromMillisecondsSinceEpoch(0);
+
   /// 当前正在调用的工具名（`tool.call` 置位、`tool.result`/收尾清空）。
   /// 输入框上方的状态条据此查「工具族 → 进行时文案」映射表。
   String? currentToolName;
@@ -246,8 +320,22 @@ class MobileChatController extends ChangeNotifier {
   void reset() {
     messages.clear();
     _streamingMessageId = null;
+    _discardRevealState();
     _resetActivityState();
     notifyListeners();
+  }
+
+  /// 清空分泡揭示的全部状态（缓冲 / 队列 / 附件 / 活跃泡）。
+  void _discardRevealState() {
+    _revealTimer?.cancel();
+    _revealTimer = null;
+    _revealQueue.clear();
+    _bubbleBuffers.clear();
+    _bubbleSessionOf.clear();
+    _revealFinalText.clear();
+    _revealAttachments.clear();
+    _activeBubbleId = null;
+    _activeBubbleTrace = null;
   }
 
   // ===== 聊天历史持久化（2026-10-08）：本地落盘 + 服务端线程漫游回填 =====
@@ -432,13 +520,20 @@ class MobileChatController extends ChangeNotifier {
   }
 
   /// 取名卡挂载（onboarding.name_choices）：服务端只给候选名与抬头，卡片归属
-  /// 是本轮最后一条回复气泡（messageId 命中；找不到就丢弃，不新建气泡）。
+  /// 是本轮最后一条回复气泡（messageId 命中）。开场白第二泡还在排队等揭示时
+  /// 卡会先到——先暂存，气泡落屏那一刻再补挂（见 [_attachPendingNameCard]）。
   void _applyNameChoices(Map<String, dynamic> payload) {
     final String messageId = (payload["messageId"] ?? "").toString();
     if (messageId.isEmpty) return;
     final int idx =
         messages.indexWhere((ChatMessage m) => m.messageId == messageId);
-    if (idx < 0) return;
+    if (idx < 0) {
+      // 泡还没揭示（首启引导依次到达）：暂存，等它落屏再挂。
+      if (_introQueue.any((ChatMessage q) => q.messageId == messageId)) {
+        _pendingNameCards[messageId] = payload;
+      }
+      return;
+    }
     final List<String> choices =
         (payload["choices"] as List<dynamic>? ?? const <dynamic>[])
             .map((Object? e) => (e ?? "").toString().trim())
@@ -449,10 +544,23 @@ class MobileChatController extends ChangeNotifier {
       nameChoices: choices,
       nameCardTitle: (payload["title"] ?? "").toString(),
     );
+    // 落盘 + 立即刷新：开场白取名卡随主动消息下发时，后续没有 done 帧
+    // 触发重建，不主动 notify 用户要等下一次交互才能看到卡。
+    _persist(messages[idx]);
+    notifyListeners();
+  }
+
+  /// 早到没处挂的取名卡（第二泡还在排队时先到）：气泡落屏那一刻补挂。
+  void _attachPendingNameCard(String messageId) {
+    final Map<String, dynamic>? payload = _pendingNameCards.remove(messageId);
+    if (payload == null) return;
+    _applyNameChoices(payload);
   }
 
   /// 用户一开口（点选候选名或自己打字）就收起取名卡：答复已发出，卡不再有效。
+  /// 仍在排队的卡一并丢弃，避免用户说完名字后又冒出一张过期的卡。
   void _settleNameCards() {
+    _pendingNameCards.clear();
     for (int i = 0; i < messages.length; i++) {
       final ChatMessage m = messages[i];
       if (m.nameChoices == null || m.nameChoices!.isEmpty) continue;
@@ -507,12 +615,22 @@ class MobileChatController extends ChangeNotifier {
             role == "user" && (clientMessageId?.isNotEmpty ?? false)
                 ? clientMessageId!
                 : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+        // 媒体卡回填（2026-11-09）：服务端 WAL 透传本轮 mediaCards，重装/
+        // 换设备后历史里的照片气泡才能重建（URL 指向服务端转存资产，可直接加载）。
+        final List<Map<String, dynamic>>? mediaCards = (item["mediaCards"]
+                as List<dynamic>?)
+            ?.whereType<Map<dynamic, dynamic>>()
+            .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
+            .toList();
         incoming.add(ChatMessage(
           messageId: messageId,
           sessionId: key,
           role: role,
           text: text,
           timestamp: ts,
+          mediaCards: (mediaCards != null && mediaCards.isNotEmpty)
+              ? mediaCards
+              : null,
         ));
       }
       if (incoming.isEmpty) return;
@@ -612,38 +730,6 @@ class MobileChatController extends ChangeNotifier {
     if (mutated && _activeSessionKey == key) notifyListeners();
   }
 
-  void _sendSessionInit() {
-    final Map<String, dynamic> init = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-      "deviceId": "mobile-${defaultTargetPlatform.name}",
-      "userAlias": "owner",
-      // 设备类别自报（与桌面端 main.dart 同源）：服务端 normalizeDeviceClass 归一后
-      // 随连接登记，供【运行环境】块与 critical 升级链区分电脑端/移动端。
-      // 缺省会按 desktop 处理——手机聊天会被注入"用户在电脑桌面端"的错误环境块。
-      "platform": "mobile",
-      // 登录邮箱覆盖（未登录回落 USER_ID/sessionId），服务端按 userId 绑定 actor
-      "userId": ApiConfig.effectiveActorId,
-      // 访问鉴权开启时服务端校验此 token；未绑定/未开启时为 null
-      if (AccessCredentialStore.instance.token != null)
-        "token": AccessCredentialStore.instance.token,
-      // 设备时钟快照（时区与定位解耦）：连接即落库，首条消息之前服务端的
-      // 【当前时间】块就已经是用户本地时区——不依赖定位权限/GPS/逆地理。
-      "clientClock": ClientClockService.snapshotSync(),
-    };
-    // 用户自有模型三元组随连接上送：key 只存本机，服务端按 actor 纯内存驻留。
-    // 明文 ws 绝不送 key（服务端同样拒绝非 TLS 上送）。
-    if (ApiConfig.wsUrl.startsWith("wss://")) {
-      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
-      if (binding.isConfigured) {
-        init["modelProvider"] = <String, dynamic>{
-          "baseUrl": binding.baseUrl,
-          "apiKey": binding.apiKey,
-          "model": binding.model,
-        };
-      }
-    }
-    _service.sendEvent("session.init", init);
-  }
 
   /// 发送一条用户消息(空文本+无图忽略)。携带 [visionFrames] 时与桌面端
   /// 同协议走 `chat.user_message.visionFrames`(base64,服务端视觉管线)。
@@ -818,6 +904,10 @@ class MobileChatController extends ChangeNotifier {
   /// 测试入口：直接驱动 WS 事件（生产路径走 [_subscription] → 本方法）。
   @visibleForTesting
   void debugHandleWsEvent(Map<String, dynamic> event) => _onWsEvent(event);
+
+  /// 测试入口：跳过揭示间隔，把缓冲/队列里的分泡立即整泡落屏（同步断言用）。
+  @visibleForTesting
+  void debugFlushBubbleReveals() => _flushHiddenBubblesNow();
 
   /// 测试注入点：定位解析器（生产为 null → 走 ClientLocationService 实时定位）。
   @visibleForTesting
@@ -999,6 +1089,35 @@ class MobileChatController extends ChangeNotifier {
         // 主动性消息（2026-11-07）：引导开场白等告知类文本落文字气泡，
         // 服务端按分泡节奏连推两条即两泡。
         _handleProactiveMessageEvent(payload);
+      case "agent.proactive_voice":
+        // Agent 语音联系：手机端唯一 owner——TTS 播放与后台系统通知都在
+        // 这里完成（桌面端由根分发器处理，见归属表）。
+        _playEventTts(payload);
+        if (_appBackgrounded) {
+          final String vt = payload["text"]?.toString() ?? "";
+          if (vt.trim().isNotEmpty) {
+            unawaited(LocalNotificationService.show(
+                title: payload["title"]?.toString() ?? "Agent 语音联系",
+                body: vt));
+          }
+        }
+      case "agent.voice.alarm":
+        // 语音提醒：同上（唯一 owner）。
+        _playEventTts(payload);
+        if (_appBackgrounded) {
+          final String vt = payload["text"]?.toString() ?? "";
+          if (vt.trim().isNotEmpty) {
+            final String vTitle = payload["title"]?.toString() ?? "语音提醒";
+            unawaited(LocalNotificationService.show(
+                title: payload["priority"]?.toString() == "urgent"
+                    ? "[紧急] $vTitle"
+                    : vTitle,
+                body: vt));
+          }
+        }
+      case "agent.voice.speak":
+        // 底层 voice.speak 工具触发的即时播报：轻量事件，只出声不建卡。
+        _playEventTts(payload);
       case "identity_renamed":
         // 对话中用户给 agent 取名：服务端统一改名管道（账号 + agent.name KV
         // + prefs 三处同写）成功后广播，顶栏胶囊当场更新，无需重进应用。
@@ -1014,6 +1133,8 @@ class MobileChatController extends ChangeNotifier {
       case "connection_error":
         isConnected = false;
         connection.value = false;
+        // 断连兜底：缓冲/队列里的泡立即整泡落屏，正文不因断连凭空消失
+        _flushHiddenBubblesNow();
         notifyListeners();
       case "card.update":
         // 卡片就地更新（2026-11-06）：服务端把这条消息里的卡换掉，客户端只重建
@@ -1046,8 +1167,7 @@ class MobileChatController extends ChangeNotifier {
       case "chat.stream_reset":
         _handleStreamReset(payload);
       case "chat.media_ready":
-        _handleMediaReady(payload);
-      case "tool.call":
+        _handleMediaReady(payload);      case "tool.call":
         currentToolName = payload["toolName"]?.toString().trim() ?? "";
         // 上一把工具的口语化进度不能挂到新工具头上：先清空，等服务端为
         // 新工具下发参数化文案（没有就退回工具族映射表）。
@@ -1066,6 +1186,8 @@ class MobileChatController extends ChangeNotifier {
         _maybeAutoOpenTravelCard(payload);
       case "chat.error":
         errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
+        // 出错兜底：已流出的泡正文立即整泡落屏，不因报错凭空丢失
+        _flushHiddenBubblesNow();
         _resetActivityState();
         notifyListeners();
     }
@@ -1189,23 +1311,31 @@ class MobileChatController extends ChangeNotifier {
   }
 
   /// 主动性消息（agent.proactive_message）→ 一律落对话流文本气泡。
-  /// 决策卡已删除（2026-11-04 定调）：重要度只用于触达分级——后台的重要
-  /// 消息补系统通知，其余靠落流 + 重连补投；展示即 impression（viewed，
-  /// 不进接受率分母，应用内已无独立确认动作）。
+  /// 决策卡已删除（2026-11-04 定调）。2026-11-10 根修（用户定调）：分级
+  /// 触达把控全部删除——后台一律系统通知，不再按 normal/high/critical
+  /// 分路（normal 级被静默正是「消息发不出来」的客户端侧根源）。
+  /// 播放事件内联 TTS（proactive_voice / voice.alarm / voice.speak 共用）。
+  /// 未配置 TTS 时静默返回——文本已由对话流或系统通知承载。
+  void _playEventTts(Map<String, dynamic> payload) {
+    final String? base64 =
+        PhoneCallController.extractTtsBase64(payload["tts"]);
+    if (base64 != null) {
+      unawaited(TtsPlayer.instance.playFromBase64(base64));
+    }
+  }
+
   void _handleProactiveMessageEvent(Map<String, dynamic> payload) {
     final String title = payload["title"]?.toString() ?? "Agent 主动联系";
     final String text = payload["text"]?.toString() ?? "";
-    final String importance = payload["importance"]?.toString() ?? "";
     final String deliveryId = payload["deliveryId"]?.toString() ?? "";
-    final bool important = importance == "high" || importance == "critical";
     if (deliveryId.isNotEmpty) {
       AmbientFeedsController.instance
           .sendProactiveOutcome(deliveryId, "viewed");
     }
-    if (important && _appBackgrounded) {
+    if (_appBackgrounded && text.trim().isNotEmpty) {
       // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
       unawaited(LocalNotificationService.show(
-          title: title, body: text, deliveryId: deliveryId));
+          title: title, body: text, deliveryId: deliveryId.isEmpty ? null : deliveryId));
     }
     if (text.trim().isEmpty) return;
     // 应用内顶部弹窗已删除（2026-11-04 定调）：告知类只落对话流气泡，
@@ -1214,16 +1344,81 @@ class MobileChatController extends ChangeNotifier {
     // 同等地位落本地历史（重启后仍在），而非一次性浮层。
     // 2026-10-26 定调：气泡只放正文（与正常对话格式一致），title 留给
     // 横幅/系统通知；离开时长等缘由由服务端写进正文。
+    // 服务端带 messageId 时沿用（首启引导取名卡要挂到该泡下，两端必须同 id）；
+    // 其余主动性消息仍由客户端本地生成 id。
+    final String serverMessageId = payload["messageId"]?.toString() ?? "";
     final ChatMessage proactive = ChatMessage(
-      messageId: "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
+      messageId: serverMessageId.isNotEmpty
+          ? serverMessageId
+          : "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
       sessionId: _activeSessionKey,
       role: "assistant",
       text: text,
       timestamp: DateTime.now(),
     );
+    // 首启引导两泡（kind=first_meeting_intro）：不走「收到即落屏」，进排队通道
+    // 按节奏逐条揭示——服务端两条相隔不到一秒，直接 append 会两泡一起刷在
+    // 界面里，看不出「一条条发过来」（2026-11-09 反馈）。
+    if ((payload["kind"]?.toString() ?? "") == "first_meeting_intro") {
+      _enqueueIntroBubble(proactive);
+      return;
+    }
     messages.add(proactive);
     _persist(proactive);
     notifyListeners();
+  }
+
+  // ===== 首启引导两泡：依次到达（2026-11-09）=====
+
+  /// 两泡之间的最小间隔：像真人连发两条，前一条读得完再来下一条。
+  static const Duration _introRevealGap = Duration(milliseconds: 1400);
+
+  /// 已收到但还没落屏的开场白气泡（FIFO）。
+  final List<ChatMessage> _introQueue = <ChatMessage>[];
+  bool _introPumping = false;
+  DateTime? _lastIntroRevealAt;
+
+  /// 早到没处挂的取名卡：messageId → 卡片载荷。
+  final Map<String, Map<String, dynamic>> _pendingNameCards =
+      <String, Map<String, dynamic>>{};
+
+  bool _disposed = false;
+
+  /// 开场白正在「输入中」（排队中还有气泡没落屏）：页面据此显示打字气泡。
+  bool get isIntroTyping => _introQueue.isNotEmpty;
+
+  void _enqueueIntroBubble(ChatMessage m) {
+    _introQueue.add(m);
+    notifyListeners();
+    unawaited(_pumpIntroQueue());
+  }
+
+  /// 逐条揭示：第一条立即落屏，之后每条至少间隔 [_introRevealGap]。
+  Future<void> _pumpIntroQueue() async {
+    if (_introPumping) return;
+    _introPumping = true;
+    try {
+      while (_introQueue.isNotEmpty) {
+        final DateTime? last = _lastIntroRevealAt;
+        if (last != null) {
+          final Duration wait = _introRevealGap - DateTime.now().difference(last);
+          if (wait > Duration.zero) {
+            await Future<void>.delayed(wait);
+          }
+        }
+        if (_disposed || _introQueue.isEmpty) break;
+        final ChatMessage m = _introQueue.removeAt(0);
+        messages.add(m);
+        _persist(m);
+        _lastIntroRevealAt = DateTime.now();
+        // 卡可能比泡先到：泡落屏这一刻补挂。
+        _attachPendingNameCard(m.messageId);
+        notifyListeners();
+      }
+    } finally {
+      _introPumping = false;
+      if (!_disposed) notifyListeners();
+    }
   }
 
   // ===== 接驳确认卡（agent.transfer_reminder，2026-10-18）=====
@@ -1384,78 +1579,146 @@ class MobileChatController extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// 真·分绿泡：分泡 chunk 追加。新泡开=旧泡完；turn_started 建的空占位
-  /// （assistant-$traceId，非泡 id 且无正文）让位给第一个真泡。
+  /// 真·分绿泡：分泡 chunk 追加（2026-11-10 改版：泡完成才整泡落屏）。
+  ///
+  /// chunk 只进缓冲不进 messages：泡文本在后台攒齐，泡完成（下一泡开 /
+  /// done 收口）才入揭示队列按固定间隔逐条弹出。turn_started 建的空占位
+  /// （assistant-$traceId，非泡 id）全程保留为本轮流式锚点——继续展示
+  /// 「正在输入」，`chat.media_ready` 的照片也挂它，done 收口时才撤。
   void _appendBubbleChunk(String id, String? traceId, String rawChunk) {
     final String chunk = stripAssistantProtocolFrames(rawChunk);
-    // 「边说边出图」的临时照片同一时刻只允许挂在正在流式的那一条消息上：
-    // 新泡开、旧泡定稿时把照片顺移给新泡，而不是留在旧泡。否则早推所在的
-    // 旧泡和 done 最终卡片所在的末泡会各渲染一次同一批照片，聊天里就是
-    // 「同几张照片重复发送」。
-    List<Map<String, dynamic>>? carriedPending;
-    if (_streamingMessageId != null &&
-        _streamingMessageId != id &&
-        !_isBubbleId(_streamingMessageId!)) {
-      final int phIdx = messages.indexWhere(
-        (m) => m.messageId == _streamingMessageId,
-      );
-      if (phIdx >= 0 && messages[phIdx].text.trim().isEmpty) {
-        carriedPending = messages[phIdx].pendingMediaCards;
-        messages.removeAt(phIdx);
-      }
+    if (chunk.isEmpty) return;
+    // 新泡开=旧泡完：旧泡正文攒齐，入揭示队列等间隔弹出
+    if (_activeBubbleId != null && _activeBubbleId != id) {
+      _enqueueBubbleReveal(_activeBubbleId!);
     }
-    if (chunk.isNotEmpty) {
-      // 同 trace 的其他流式泡定稿（打字机收尾），新泡从头逐字
-      for (int i = 0; i < messages.length; i++) {
-        final ChatMessage m = messages[i];
-        if (!m.streaming || m.messageId == id) continue;
-        if (!_isBubbleId(m.messageId)) continue;
-        if (traceId != null &&
-            traceId.isNotEmpty &&
-            _bubbleTraceOf(m.messageId) != traceId) {
-          continue;
-        }
-        if (m.pendingMediaCards != null && m.pendingMediaCards!.isNotEmpty) {
-          carriedPending = m.pendingMediaCards;
-        }
-        messages[i] = ChatMessage(
-          messageId: m.messageId,
-          sessionId: m.sessionId,
-          role: m.role,
-          text: m.text,
-          timestamp: m.timestamp,
-          // 定稿的旧泡不再持有照片：照片顺移给新泡，保证全程只渲染一份
-          pendingMediaCards: null,
-          // streaming 不带 → false：定稿
-        );
-      }
-      final int idx = messages.indexWhere((m) => m.messageId == id);
-      if (idx < 0) {
-        messages.add(ChatMessage(
-          messageId: id,
-          sessionId: _activeSessionKey,
-          role: "assistant",
-          text: chunk,
-          timestamp: DateTime.now(),
-          streaming: true,
-          pendingMediaCards: carriedPending,
-        ));
-      } else {
-        final ChatMessage prev = messages[idx];
-        messages[idx] = ChatMessage(
-          messageId: prev.messageId,
-          sessionId: prev.sessionId,
-          role: prev.role,
-          text: prev.text + chunk,
-          timestamp: prev.timestamp,
-          streaming: true,
-          pendingMediaCards: prev.pendingMediaCards ?? carriedPending,
-        );
-      }
-      _streamingMessageId = id;
+    _activeBubbleId = id;
+    _activeBubbleTrace = (traceId != null && traceId.isNotEmpty)
+        ? traceId
+        : _bubbleTraceOf(id);
+    _bubbleSessionOf.putIfAbsent(id, () => _activeSessionKey);
+    _bubbleBuffers[id] = (_bubbleBuffers[id] ?? "") + chunk;
+    // 占位消息缺失（无 turn_started 直接来 chunk）：补一个空占位当锚点
+    if (_streamingMessageId == null) {
+      _openStreamingMessage(<String, dynamic>{
+        if (traceId != null && traceId.isNotEmpty) "traceId": traceId,
+      });
     }
     isProcessing = true;
     notifyListeners();
+  }
+
+  // ===== 分泡揭示泵：泡完成 → 入队 → 按 [_bubbleRevealGap] 间隔逐条落屏 =====
+
+  /// 泡完成入队（旧泡完成 / done 对账 / 异常兜底共用）。
+  void _enqueueBubbleReveal(String bubbleId, {String? sessionId}) {
+    if (!_revealQueue.any((e) => e.bubbleId == bubbleId)) {
+      _revealQueue.add(_PendingBubbleReveal(
+        bubbleId: bubbleId,
+        traceId:
+            _bubbleTraceOf(bubbleId) ?? _activeBubbleTrace ?? "",
+        sessionId: sessionId ??
+            _bubbleSessionOf[bubbleId] ??
+            _activeSessionKey,
+      ));
+    }
+    _scheduleNextBubbleReveal();
+  }
+
+  /// 排定下一次揭示：队列非空且没有在途定时器时，距上一泡不足
+  /// [_bubbleRevealGap] 就补足等待，否则立即弹。
+  void _scheduleNextBubbleReveal() {
+    if (_revealQueue.isEmpty) return;
+    final Timer? pending = _revealTimer;
+    if (pending != null && pending.isActive) return;
+    final Duration since = DateTime.now().difference(_lastBubbleRevealAt);
+    final Duration wait = since >= _bubbleRevealGap
+        ? Duration.zero
+        : _bubbleRevealGap - since;
+    _revealTimer = Timer(wait, () {
+      _revealTimer = null;
+      if (_revealQueue.isEmpty) return;
+      _revealOneBubble(_revealQueue.removeAt(0));
+      _lastBubbleRevealAt = DateTime.now();
+      _scheduleNextBubbleReveal();
+    });
+  }
+
+  /// 整泡落屏一条：优先用 done 对账文本，其次用缓冲正文；只剩内部帧的
+  /// 泡（清洗后为空）不落屏。
+  void _revealOneBubble(_PendingBubbleReveal entry) {
+    final String text =
+        (_revealFinalText.remove(entry.bubbleId) ??
+                _bubbleBuffers.remove(entry.bubbleId) ??
+                "")
+            .trim();
+    final Map<String, dynamic>? attachments =
+        _revealAttachments.remove(entry.bubbleId);
+    _bubbleSessionOf.remove(entry.bubbleId);
+    // 正文为空但带附件（纯卡轮）也必须落屏：此前无条件 return 会让
+    // 揭示队列里的卡片一起消失。
+    final bool hasAttachments = attachments != null &&
+        (attachments["mediaCards"] != null ||
+            attachments["summaryCard"] != null ||
+            attachments["renderBlocks"] != null ||
+            attachments["replyBlocks"] != null ||
+            attachments["envelopeBlocks"] != null ||
+            attachments["followUps"] != null);
+    if (text.isEmpty && !hasAttachments) return;
+    final List<ChatMessage> list = _sessionMessages.putIfAbsent(
+      entry.sessionId,
+      () => <ChatMessage>[],
+    );
+    // 防御：已被其他路径（done 直落）挂上的泡不重复落屏
+    if (list.any((m) => m.messageId == entry.bubbleId)) return;
+    final Map<String, dynamic> att = attachments ?? const <String, dynamic>{};
+    list.add(ChatMessage(
+      messageId: entry.bubbleId,
+      sessionId: entry.sessionId,
+      role: "assistant",
+      text: text,
+      timestamp: DateTime.now(),
+      mediaCards: att["mediaCards"] as List<Map<String, dynamic>>?,
+      summaryCard: att["summaryCard"] as Map<String, dynamic>?,
+      renderBlocks: att["renderBlocks"] as List<Map<String, dynamic>>?,
+      replyBlocks: att["replyBlocks"] as List<Map<String, dynamic>>?,
+      envelopeBlocks: att["envelopeBlocks"] as List<Map<String, dynamic>>?,
+      followUpPrompts: att["followUps"] as List<String>?,
+    ));
+    _persist(list.last);
+    // 不动 isProcessing：done 收口后揭示队列仍在排水（末泡延迟落屏），
+    // 此时不能再点亮「处理中」状态条。isProcessing 由轮次事件自己管理。
+    if (entry.sessionId == _activeSessionKey) {
+      notifyListeners();
+    }
+  }
+
+  /// 异常收尾兜底（出错 / 断连）：把缓冲与队列里的泡立即整泡落屏（零间隔），
+  /// 避免已流出的正文因异常收尾凭空丢失。只提前揭示，不改任何文本。
+  void _flushHiddenBubblesNow() {
+    final String? active = _activeBubbleId;
+    if (active != null) {
+      _enqueueBubbleReveal(active);
+      _activeBubbleId = null;
+    }
+    while (_revealQueue.isNotEmpty) {
+      _revealOneBubble(_revealQueue.removeAt(0));
+    }
+    notifyListeners();
+  }
+
+  /// 丢弃指定 trace 的未落屏泡（卡片轮转静默）：缓冲 / 队列 / 附件一并清，
+  /// 防止出卡片的轮次后来又弹出文字泡。
+  void _dropHiddenBubblesForTrace(String traceId) {
+    _bubbleBuffers.removeWhere((id, _) => _bubbleTraceOf(id) == traceId);
+    _revealFinalText.removeWhere((id, _) => _bubbleTraceOf(id) == traceId);
+    _revealAttachments.removeWhere((id, _) => _bubbleTraceOf(id) == traceId);
+    _bubbleSessionOf.removeWhere((id, _) => _bubbleTraceOf(id) == traceId);
+    _revealQueue.removeWhere((e) => e.traceId == traceId);
+    final String? active = _activeBubbleId;
+    if (active != null && _bubbleTraceOf(active) == traceId) {
+      _activeBubbleId = null;
+    }
   }
 
   /// 会出卡片的轮次不流式（2026-10-08）：服务端确认本轮将携带结构化卡片
@@ -1469,6 +1732,11 @@ class MobileChatController extends ChangeNotifier {
         ? "assistant-$traceId"
         : (_streamingMessageId ?? "");
     if (mainId.isEmpty) return;
+    // 卡片轮转静默：还在揭示缓冲/队列里的同 trace 泡一并丢弃，
+    // 防止出卡片的轮次后来又弹出文字泡
+    if (traceId != null && traceId.isNotEmpty) {
+      _dropHiddenBubblesForTrace(traceId);
+    }
     bool changed = false;
     for (int i = 0; i < messages.length; i++) {
       final ChatMessage m = messages[i];
@@ -1568,6 +1836,30 @@ class MobileChatController extends ChangeNotifier {
   }
 
   void _finalizeReply(Map<String, dynamic> payload) {
+    // 后台触达（2026-11-10）：用户发完消息切走，回复到达时应用内气泡不可见
+    // ——系统通知弹横幅（类微信会话新消息）。卡片轮正文为空不通知；
+    // 主动消息/提醒有各自通知通道，这里只管「对话轮的回复」。
+    if (_appBackgrounded) {
+      String notifyText =
+          stripAssistantProtocolFrames(payload["finalText"]?.toString() ?? "")
+              .trim();
+      if (notifyText.isEmpty) {
+        final List<Map<String, dynamic>> bgBubbles =
+            _parseStructuredList(payload, "bubbles") ??
+                const <Map<String, dynamic>>[];
+        notifyText = bgBubbles
+            .map((b) => b["text"]?.toString() ?? "")
+            .where((t) => t.trim().isNotEmpty)
+            .join("\n")
+            .trim();
+      }
+      if (notifyText.isNotEmpty) {
+        final String trimmed = notifyText.length > 120
+            ? "${notifyText.substring(0, 120)}…"
+            : notifyText;
+        unawaited(LocalNotificationService.show(title: "Agent", body: trimmed));
+      }
+    }
     // 真·分绿泡：带 bubbles 对账数组的轮次按泡收口（不走单泡 finalText 替换）
     final List<Map<String, dynamic>>? bubbles =
         _parseStructuredList(payload, "bubbles");
@@ -1575,6 +1867,9 @@ class MobileChatController extends ChangeNotifier {
       _finalizeBubbles(payload, bubbles);
       return;
     }
+    // 分泡轮的 done 应走 _finalizeBubbles；万一服务端不带 bubbles 对账
+    // 数组（旧版兼容），把揭示缓冲里的泡立即整泡落屏，不留黑洞。
+    _flushHiddenBubblesNow();
     final String? traceId = payload["traceId"]?.toString();
     final String? messageId = payload["messageId"]?.toString();
     // 优先用已经打开的流式消息;否则尝试按 trace 对齐
@@ -1717,6 +2012,14 @@ class MobileChatController extends ChangeNotifier {
                     _bubbleTraceOf(m.messageId) == traceId);
         return hit;
       });
+      // 还在揭示缓冲/队列里的同 trace 泡一并丢弃（塌缩后不留旧泡）
+      if (traceId != null && traceId.isNotEmpty) {
+        _dropHiddenBubblesForTrace(traceId);
+      }
+      // 空占位让位：塌缩单泡 id = assistant-$traceId，与占位同 id，必须先撤
+      messages.removeWhere(
+        (m) => m.streaming && m.text.trim().isEmpty && !_isBubbleId(m.messageId),
+      );
       if (finalText.trim().isEmpty &&
           mediaCards == null &&
           summaryCard == null &&
@@ -1806,28 +2109,51 @@ class MobileChatController extends ChangeNotifier {
           stripAssistantProtocolFrames(b["text"]?.toString() ?? "");
       final int idx = messages.indexWhere((m) => m.messageId == id);
       if (idx < 0) {
-        // 客户端漏收该泡 chunk：按对账补建（整泡只剩内部帧时不补建空泡）
-        if (text.trim().isEmpty) continue;
-        messages.add(ChatMessage(
-          messageId: id,
-          sessionId: _activeSessionKey,
-          role: "assistant",
-          text: text,
-          timestamp: DateTime.now(),
-          mediaCards: isLast ? mediaCards : null,
-          summaryCard: isLast ? summaryCard : null,
-          renderBlocks: isLast ? renderBlocksForLast : null,
-          replyBlocks: isLast ? replyBlocksForLast : null,
-          envelopeBlocks: isLast ? envelopeBlocksForLast : null,
-          followUpPrompts: isLast ? followUps : null,
-        ));
-        _persist(messages.last);
+        // 泡尚未落屏（还在揭示缓冲/队列里，或漏收该泡 chunk）：不直接落屏，
+        // 记下对账文本与末泡附件，进揭示队列按间隔弹出（整泡只剩内部帧时
+        // 不入队，不弹空泡）
+        //
+        // 正文为空 ≠ 本轮没内容：纯卡轮（工具只产卡、模型没写正文）的正文
+        // 天然是空的，此时卡片全挂在末泡附件上。此前无条件 continue 会把
+        // 整组 envelopeBlocks/mediaCards 一起丢掉，用户看到的就是「卡被吞」。
+        // 口径对齐桌面 main.dart：有卡就建泡。
+        final bool hasAttachments = isLast &&
+            (mediaCards != null ||
+                summaryCard != null ||
+                renderBlocksForLast != null ||
+                replyBlocksForLast != null ||
+                envelopeBlocksForLast != null ||
+                followUps != null);
+        if (text.trim().isEmpty && !hasAttachments) continue;
+        if (isLast) {
+          _revealAttachments[id] = <String, dynamic>{
+            if (mediaCards != null) "mediaCards": mediaCards,
+            if (summaryCard != null) "summaryCard": summaryCard,
+            if (renderBlocksForLast != null) "renderBlocks": renderBlocksForLast,
+            if (replyBlocksForLast != null) "replyBlocks": replyBlocksForLast,
+            if (envelopeBlocksForLast != null)
+              "envelopeBlocks": envelopeBlocksForLast,
+            if (followUps != null) "followUps": followUps,
+          };
+        }
+        _revealFinalText[id] = text;
+        _enqueueBubbleReveal(id);
       } else {
         final ChatMessage prev = messages[idx];
-        // 该泡只剩内部帧（清洗后为空）且此前也没流到正文 → 撤泡，不留空白
+        // 该泡只剩内部帧（清洗后为空）且此前也没流到正文 → 撤泡，不留空白。
+        // 但若末泡带着卡/媒体，撤泡会把附件一起删掉，此时必须保留。
         if (text.trim().isEmpty && prev.text.trim().isEmpty) {
-          messages.removeAt(idx);
-          continue;
+          final bool keepForAttachments = isLast &&
+              (mediaCards != null ||
+                  summaryCard != null ||
+                  renderBlocksForLast != null ||
+                  replyBlocksForLast != null ||
+                  envelopeBlocksForLast != null ||
+                  followUps != null);
+          if (!keepForAttachments) {
+            messages.removeAt(idx);
+            continue;
+          }
         }
         messages[idx] = ChatMessage(
           messageId: prev.messageId,
@@ -1858,6 +2184,17 @@ class MobileChatController extends ChangeNotifier {
         _persist(messages[idx]);
       }
     }
+    // 本轮收口：活跃缓冲泡清位；同 trace 的空文本缓冲残留一并清掉
+    _activeBubbleId = null;
+    _activeBubbleTrace = null;
+    if (traceId != null && traceId.isNotEmpty) {
+      _bubbleBuffers.removeWhere((id, _) =>
+          _bubbleTraceOf(id) == traceId &&
+          !_revealQueue.any((e) => e.bubbleId == id));
+      _bubbleSessionOf.removeWhere((id, _) =>
+          _bubbleTraceOf(id) == traceId &&
+          !_revealQueue.any((e) => e.bubbleId == id));
+    }
     _streamingMessageId = null;
     _resetActivityState();
     notifyListeners();
@@ -1879,9 +2216,14 @@ class MobileChatController extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _introQueue.clear();
     _clockWatchTimer?.cancel();
+    _revealTimer?.cancel();
     unawaited(_subscription?.cancel());
-    _service.close();
+    // 共享连接归进程所有：聊天页销毁不得把整条链路关掉，根状态还要靠它
+    // 收闹钟/提醒。自建连接（测试）才自己关闭。
+    if (_ownsConnection) _service.close();
     connection.dispose();
     super.dispose();
   }

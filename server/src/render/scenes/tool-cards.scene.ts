@@ -60,14 +60,61 @@ export function decideToolCards(
     cards.push({ kind: "card", topic: "travel_brief", payload: travel.result });
   }
 
+  // 工具声明了信息缺口（如缺天数）：出「需求确认卡」，由用户点选补齐。
+  //
+  // 这是追问能力的载体：工具自己声明缺什么（needInput），不需要在代码里
+  // 判定「用户这句话是不是开放意图」。模型把卡给用户，用户点选后带着
+  // 明确的参数再调一次工具即可。
+  const needInputResult = effects.find(
+    (e) =>
+      e.tool === TRAVEL_TOOL &&
+      e.result &&
+      Array.isArray((e.result as Record<string, unknown>).needInput) &&
+      ((e.result as Record<string, unknown>).needInput as unknown[]).length > 0,
+  );
+  if (needInputResult) {
+    const questions = (
+      (needInputResult.result as Record<string, unknown>).needInput as Array<{
+        key?: string;
+        title?: string;
+        hint?: string;
+        options?: Array<{ value: string; label: string }>;
+      }>
+    ).filter((q) => q && typeof q === "object");
+    if (questions.length > 0) {
+      const keyOf = (q: { key?: string }) => (typeof q.key === "string" && q.key ? q.key : "info");
+      cards.push({
+        kind: "card",
+        topic: "travel_requirement",
+        payload: {
+          cardType: "travel_requirement",
+          // 卡身份按缺口集合生成：同一组缺口不重复出卡，不同缺口可并列
+          cardId: `req_${questions.map(keyOf).join("_")}`,
+          title: "还差几件事就能开工",
+          items: questions.map((q) => ({
+            type: "choice" as const,
+            text: typeof q.title === "string" && q.title ? q.title : keyOf(q),
+            side: keyOf(q),
+            sideLabel: typeof q.hint === "string" ? q.hint : "",
+          })),
+          footer: "选好之后我按你的实际需求排，不替你猜",
+          extra: { questions },
+        },
+      });
+    }
+  }
+
+  // 同轮允许多张同类卡：指纹去重只拦「完全同一张」（同工具多波重复回执），
+  // 不再按 cardType 一刀切——那样同轮两张不同的选择卡只会剩一张。
   const seenTopics = new Set<string>();
   for (const effect of effects) {
     if (!isRegistryBusinessTool(effect.tool)) continue;
     if (effect.status === "ok" && effect.result) {
       const payload = buildToolCard(effect.tool, effect.result);
       if (!payload || payload.items.length === 0) continue;
-      if (seenTopics.has(payload.cardType)) continue;
-      seenTopics.add(payload.cardType);
+      const fingerprint = `${payload.cardType}|${payload.title}|${payload.items[0]?.text ?? ""}`;
+      if (seenTopics.has(fingerprint)) continue;
+      seenTopics.add(fingerprint);
       cards.push({
         kind: "card",
         topic: payload.cardType,

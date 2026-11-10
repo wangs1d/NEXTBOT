@@ -61,6 +61,7 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/api/auth/pairing-code",
   "/accounts/email/otp/start",
   "/accounts/register",
+  "/accounts/login", // 老用户登录入口（只登录不建档，OTP 闸在路由内把关）
   "/accounts/beta/apply",
   "/accounts/beta/status",
   // ③ 装机/开机链路：安装包自检版本与启动台账发生在「配对」之前，
@@ -71,6 +72,8 @@ const PUBLIC_EXACT_PATHS = new Set([
   // ② 健康探针
   "/api/resource/health-check",
   "/api/memory/health",
+  "/api/browser/health", // 云端无头浏览器自检（无用户数据、无副作用，部署终验用）
+  "/api/payment/status", // 支付通道就绪自检（只出模式布尔值，无用户数据、无密钥）
 ]);
 
 const PUBLIC_PATH_PREFIXES = [

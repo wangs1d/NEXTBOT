@@ -119,13 +119,12 @@ export function buildSceneBoundaryBlock(
 export { sceneRegistry, SceneRegistry } from "./registry.js";
 export { planRenderScene, listSceneContracts } from "./plan.js";
 export { weatherScene } from "./weather.scene.js";
-export { tomorrowPreviewScene, renderTomorrowPreviewMarkdown, formatPreviewDate } from "./tomorrow-preview.scene.js";
+export { tomorrowPreviewScene, renderTomorrowPreviewFacts, formatPreviewDate } from "./tomorrow-preview.scene.js";
 export { resultCardScene, auditResultCards, stripResultCardBlocks } from "./result-card.scene.js";
 export {
   digestRoundupScene,
   collectRoundupItems,
-  renderRoundupMarkdown,
-  extractToneSentences,
+  renderRoundupFacts,
 } from "./digest-roundup.scene.js";
 export {
   reminderConfirmScene,

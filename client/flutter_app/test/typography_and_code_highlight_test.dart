@@ -1,88 +1,15 @@
-import "package:fake_async/fake_async.dart";
+/// 排版与代码高亮回归测试（原 typography_and_typewriter_test：
+/// 2026-11-10 打字机全量下线，TypewriterReveal 组随类一并删除）。
+library;
+
 import "package:flutter/material.dart";
 import "package:flutter_test/flutter_test.dart";
 import "package:highlight/highlight.dart" as hl;
 
 import "package:nextbot/core/theme/app_typography.dart";
 import "package:nextbot/features/chat/code_highlight.dart";
-import "package:nextbot/features/chat/typewriter_reveal.dart";
 
 void main() {
-  group("TypewriterReveal", () {
-    test("非动画模式直接显示全文", () {
-      final TypewriterReveal tw = TypewriterReveal("你好世界", animate: false);
-      expect(tw.revealed, "你好世界");
-      expect(tw.isPartial, isFalse);
-      expect(tw.active, isFalse);
-      tw.dispose();
-    });
-
-    test("流式追加逐字 reveal,句末按句长停顿", () {
-      fakeAsync((FakeAsync async) {
-        final TypewriterReveal tw =
-            TypewriterReveal("第一句。第二句", animate: true);
-        // 初始为空,开始打字
-        async.elapse(const Duration(milliseconds: 10));
-        expect(tw.isRevealing, isTrue);
-
-        // 打完第一句(含句号,共 4 字):4 次 20ms tick
-        async.elapse(const Duration(milliseconds: 200));
-        expect(tw.revealed, "第一句。");
-        expect(tw.isPartial, isTrue);
-
-        // 句末停顿(短句 260ms)后继续打第二句
-        async.elapse(const Duration(milliseconds: 300));
-        expect(tw.revealed.length, greaterThan(4));
-
-        // 打完全部内容后停止
-        async.elapse(const Duration(seconds: 2));
-        expect(tw.isPartial, isFalse);
-        expect(tw.isRevealing, isFalse);
-        tw.dispose();
-      });
-    });
-
-    test("内容被替换时直接显示全文", () {
-      fakeAsync((FakeAsync async) {
-        final TypewriterReveal tw = TypewriterReveal("原始内容", animate: true);
-        async.elapse(const Duration(milliseconds: 60));
-        // 先打出一部分,确认处于打字中
-        expect(tw.isRevealing, isTrue);
-        // 完全不同的内容(非前缀延伸)→ 立即全文
-        tw.updateTarget("替换后的内容");
-        expect(tw.revealed, "替换后的内容");
-        expect(tw.isRevealing, isFalse);
-        tw.dispose();
-      });
-    });
-
-    test("前缀延伸时从中途继续逐字 reveal", () {
-      fakeAsync((FakeAsync async) {
-        final TypewriterReveal tw =
-            TypewriterReveal("一二三四五", animate: true);
-        async.elapse(const Duration(milliseconds: 50));
-        final int revealedSoFar = tw.revealed.length;
-        expect(revealedSoFar, inInclusiveRange(1, 4));
-
-        tw.updateTarget("一二三四五六七八九十");
-        async.elapse(const Duration(seconds: 1));
-        expect(tw.revealed, "一二三四五六七八九十");
-        tw.dispose();
-      });
-    });
-
-    test("showAll 立即显示全文", () {
-      fakeAsync((FakeAsync async) {
-        final TypewriterReveal tw = TypewriterReveal("慢慢打字", animate: true);
-        async.elapse(const Duration(milliseconds: 10));
-        tw.showAll();
-        expect(tw.revealed, "慢慢打字");
-        expect(tw.active, isFalse);
-        tw.dispose();
-      });
-    });
-  });
-
   group("buildHighlightedCode", () {
     test("dart 代码高亮:关键字着色为 TextSpan 树", () {
       const TextStyle base = TextStyle(fontSize: 13);

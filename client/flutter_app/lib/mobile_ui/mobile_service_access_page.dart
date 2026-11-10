@@ -523,7 +523,13 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       );
     }
     return ListView(
-      padding: const EdgeInsets.symmetric(vertical: 12),
+      // edge-to-edge 后补底部手势条 inset（原 12px 是按非全屏窗口底设计的）
+      padding: EdgeInsets.fromLTRB(
+        0,
+        12,
+        0,
+        12 + MediaQuery.paddingOf(context).bottom,
+      ),
       children: <Widget>[
         Padding(
           padding: const EdgeInsets.fromLTRB(20, 4, 20, 12),

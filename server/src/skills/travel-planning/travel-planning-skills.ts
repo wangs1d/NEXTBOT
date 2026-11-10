@@ -20,7 +20,7 @@ import { travelItineraryStore } from "./travel-itinerary-store.js";
 import { travelPlanStore, type StoredTravelPlan } from "./travel-plan-store.js";
 import { travelTileCache } from "../../services/travel-tile-cache.js";
 import { composeTravelPlanRequest } from "../../agent/realtime-search-query.js";
-import { extractOrigin, looksLikeDestinationName } from "./intent-parser.js";
+import { extractDays, extractOrigin, looksLikeDestinationName } from "./intent-parser.js";
 import { resolveActorId } from "../../agent/actor-id.js";
 import { resolveOriginFromContext, resolveOriginPointFromContext } from "./travel-origin.js";
 import { estimateTravelTime, type TravelModeHint } from "../../services/route-duration-service.js";
@@ -338,11 +338,11 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "严禁不调工具自己手写逐日行程——系统会把结构化行程卡附在回复末尾（可点开看地图与逐日明细），手写文本没有这张卡。" +
         "触发表达包括但不限于「帮我规划去X的行程」「去X玩几天怎么安排」「X旅游攻略」「X自由行」「周末附近游玩」；" +
         "规划对话进行中用户只回复目的地名称（如单独发「兴义」）或天数/偏好时，同样视为规划请求，必须调用。" +
-        "开放意图分流：用户只是表达「想去X玩」还没确认具体清单时，先调 travel.destination-guide 出种草选择卡让用户勾选，再按选中项（wishlist/foodWishlist/stayWishlist）调本工具；用户已确认清单或明确要直接出行程时跳过分流直接调用。参数：input 为自然语言需求（如「去成都玩5天，喜欢美食和古迹，预算中等」）；destination 可显式指定目的地；days 指定天数；preferences 为偏好标签数组。" +
+        "travel.destination-guide 产出的景点/酒店/餐厅候选可直接作为 wishlist/foodWishlist/stayWishlist 传入本工具；用户已在对话里点名的清单无需再走候选。天数（days）是本工具的必需前提：用户没给、也无法从需求里解析出来时，本工具会返回需要确认的缺口（不自行假定天数），拿到答案后再调用。参数：input 为自然语言需求（如「去成都玩5天，喜欢美食和古迹，预算中等」）；destination 可显式指定目的地；days 指定天数；preferences 为偏好标签数组。" +
         "用户点名了具体地方或餐厅/酒店时，务必同时用 wishlist / foodWishlist / stayWishlist 传入名字数组——工具会保证点名点排进日程" +
         "（候选池没有的会定向补搜，补不到会在回执里如实标注）；说了出发地/出发日期/同行人/住宿落位（靠海·近机场·近车站·近某景点·市中心）" +
         "时，用 origin / startDate / party / hotelFocus(+hotelFocusRef) 显式传入，别只写在 input 里靠正则猜。" +
-        "用户没说出发地时绝不要反问「从哪个城市出发/从哪里坐飞机」：直接调用本工具，服务端会按用户实时定位补默认出发地（无直飞时自动给枢纽转机方案并在价格明细标注）；仅当用户主动质疑出发地时才向其确认。" +
+        "用户没说出发地时，服务端按用户实时定位补默认出发地并在回执里标注「按定位」（无直飞时自动给枢纽转机方案并标注经停）。出发地属于可后补信息，不必因它阻塞规划；仅当用户主动想改/追问出发地时才与其确认。" +
         "若 input 已含目的地/天数/偏好则无需重复传参。生成后可配合 travel.destination-info 补充签证/货币等实用信息。" +
         "用户想订行程中的酒店/机票时，接 travel_booking.search 实时比价（飞猪实时价，选项自带预订链接）→ travel_booking.book 两阶段确认下单。",
       kind: "builtin",
@@ -351,9 +351,9 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
       parameters: [
         { name: "input", type: "string", required: true, description: "用户自然语言需求（如「去成都玩5天，喜欢美食和古迹」）" },
         { name: "destination", type: "string", required: false, description: "目的地（如 成都/大理/东京），input 已含时可不传" },
-        { name: "days", type: "number", required: false, description: "行程天数，默认 3" },
+        { name: "days", type: "number", required: false, description: "行程天数。未提供且无法从需求中解析时，本工具返回需要确认的缺口，不自行假定天数" },
         { name: "preferences", type: "array", required: false, description: "偏好标签数组（如 ['美食','古迹','亲子']）" },
-        { name: "origin", type: "string", required: false, description: "出发地城市（大交通方式判定的前提）；用户说了才传，没说不要反问——服务端按定位补默认值" },
+        { name: "origin", type: "string", required: false, description: "出发地城市（大交通方式判定的前提）；未传时服务端按实时定位补并在回执标注「按定位」" },
         { name: "startDate", type: "string", required: false, description: "出发日 YYYY-MM-DD；未传按今天起排" },
         { name: "party", type: "string", required: false, enum: ["solo", "solo_female", "couple", "family", "friends"], description: "同行人构成（安全/节奏/住宿取向的判据）" },
         { name: "wishlist", type: "array", required: false, description: "用户点名的景点（必须排进日程；候选池没有的会自动定向补搜，补不到在回执里如实标注）" },
@@ -418,6 +418,29 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         userPrefs ?? [],
       );
       const mergedPrefs = [...(userPrefs ?? []), ...memoryPrefs.filter((p) => !(userPrefs ?? []).includes(p))];
+
+      // 天数缺口：不猜。
+      // 此前服务端用 `days || 3` 兜底，用户只说「想去大理玩」也会被排成 3 天——
+      // 表面正常，实际是代码替用户做了决定，且用户无从察觉这份行程是按默认值排的。
+      // 这里只做「参数是否明确」的判断（不是语义分流、不看关键词）：
+      // 明确才排；不明确就返回缺口 + 可选项，由模型向用户确认后再调用。
+      const explicitDays =
+        typeof input.days === "number" && input.days > 0 ? input.days : extractDays(rawInput);
+      if (!explicitDays) {
+        return {
+          ok: false,
+          needInput: [
+            {
+              key: "days",
+              title: "打算玩几天？",
+              hint: "天数决定每天排几个站、住几晚、预算按几晚算",
+              options: [2, 3, 4, 5, 7].map((d) => ({ value: String(d), label: `${d} 天` })),
+            },
+          ],
+          error: "缺少行程天数：先向用户确认玩几天（或几号到几号），拿到天数后再调用本工具。",
+        };
+      }
+
       try {
         // 出发地按定位兜底（2026-10-26）：模型没传、原话也没说时，用用户实时定位
         // 城市作默认出发地（简报卡如实标「按定位」），不再反问「从哪个城市出发」。

@@ -169,16 +169,7 @@ test("extractContentSummaryCard: 无块文本原样返回（不误伤）", () =>
   assert.equal(out.text, plain);
 });
 
-test("IMAGE_RESULT 块与 RENDER_AS:image_result 路由强制配对（附块必有路由）", async () => {
-  const { attachImageResultPhotos } = await import("../src/services/vision-photo-cards.js");
-  // 无 RENDER_AS 声明的叙事文本：附块后必须补上路由，否则客户端按普通正文渲染裸 JSON
-  const attached = attachImageResultPhotos("这是一段识图描述", [
-    { url: "/agent/images/a/x.jpg", caption: "一只橘猫" },
-  ]);
-  assert.ok(attached.includes("[IMAGE_RESULT_START]"));
-  // 服务端补路由后的最终形态
-  const finalText = attached.includes("[RENDER_AS:image_result]")
-    ? attached
-    : `[RENDER_AS:image_result]\n${attached}`;
-  assert.ok(finalText.startsWith("[RENDER_AS:image_result]"));
-});
+// 识图照片卡已退役（2026-11-10 根修）：vision-photo-cards 模块与
+// attachImageResultPhotos 已随生产路径一并删除，原「附块必有路由」配对测试
+// 不再有生产者——[IMAGE_RESULT_*] 标记仅保留在协议层（stream guard / reply
+// envelope / 客户端旧消息渲染）用于历史消息兼容。

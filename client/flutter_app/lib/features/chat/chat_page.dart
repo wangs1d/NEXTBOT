@@ -24,7 +24,6 @@ import "message_body_renderer.dart";
 import "agent_result_card.dart";
 import "evening_digest_card.dart";
 import "plan_steps_card.dart";
-import "typewriter_reveal.dart";
 import "mood_driven_emotion_ball.dart";
 import "chat_suggestions.dart";
 import "composer_skill.dart";
@@ -2547,16 +2546,7 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
   /// 下方 —— 看得见、点不到，「删除」按钮因此完全无响应。
   static const double _deleteConfirmBarBand = 50;
 
-  // ===== 打字机式流式显示 =====
-  // 逐字 reveal 的节奏控制(自适应语速 + 句末停顿)已抽到共享控制器
-  // [TypewriterReveal],桌面端与手机端共用同一实现。
-  late final TypewriterReveal _typewriter = TypewriterReveal(
-    widget.mainMessage.text,
-    animate: widget.mainMessage.streaming && widget.mainMessage.text.isNotEmpty,
-  );
-
-  String get _rawTarget => widget.mainMessage.text;
-
+  // ===== 打字机已全量下线（2026-11-10）：正文整泡/整段落屏，不再逐字 reveal =====
   // 消息内嵌的 Agent 结果卡（按文本记忆化：流式期间逐帧 build，
   // 避免每帧对全文重复跑正则 + JSON 解析）。
   AgentResultData? _cachedAgentResult;
@@ -2569,42 +2559,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       _cachedAgentResultSource = text;
     }
     return _cachedAgentResult;
-  }
-
-  /// 是否处于打字机展示中(打字中或光标闪烁中)
-  bool get _typewriterActive => _typewriter.active;
-
-  @override
-  void initState() {
-    super.initState();
-    _typewriter.addListener(_onTypewriterChanged);
-  }
-
-  void _onTypewriterChanged() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void didUpdateWidget(covariant _HoverableMessageContent oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.mainMessage.text != oldWidget.mainMessage.text) {
-      _syncTypewriter();
-    }
-  }
-
-  @override
-  void dispose() {
-    _typewriter.dispose();
-    super.dispose();
-  }
-
-  void _syncTypewriter() {
-    if (widget.isUser) {
-      // 用户消息:直接显示全文
-      _typewriter.showAll();
-      return;
-    }
-    _typewriter.updateTarget(_rawTarget);
   }
 
   @override
@@ -3235,13 +3189,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 contentSummary: widget.contentSummary,
                 onUserAction: widget.onUserAction,
                 onFollowupTap: widget.onFollowupTap,
-                // 打字机：assistant 流式消息用「已 reveal」前缀渲染，
-                // 光标随打字闪烁；非打字场景传 null 走原文。
-                typewriterRawText: (!widget.isUser && _typewriter.isPartial)
-                    ? _typewriter.revealed
-                    : null,
-                typewriterCursor:
-                    _typewriter.isRevealing && _typewriter.cursorOn,
               ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后
@@ -3287,13 +3234,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
 
     /// 「接下来你可以」接续建议点击回调（null 不渲染建议行）
     void Function(String prompt)? onFollowupTap,
-
-    /// 打字机「已 reveal」的原文前缀；null 时显示完整原文。
-    /// 仅作用于下方纯文本分支（卡片/摘要仍用完整原文解析）。
-    String? typewriterRawText,
-
-    /// 是否在文本末尾显示闪烁光标（打字机进行中）
-    bool typewriterCursor = false,
   }) {
     return buildMessageBody(
       context,
@@ -3303,8 +3243,6 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       contentSummary: contentSummary,
       onUserAction: onUserAction,
       onFollowupTap: onFollowupTap,
-      typewriterRawText: typewriterRawText,
-      typewriterCursor: typewriterCursor,
       // 行程卡由消息行在气泡外独立渲染（第二条消息形态），body 内不再重复。
       excludeTravelCard: true,
     );

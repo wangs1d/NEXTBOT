@@ -36,6 +36,7 @@ import "core/utils/agent_result_parser.dart";
 import "core/utils/assistant_text_sanitizer.dart";
 import "core/utils/content_summary_parser.dart";
 import "core/services/app_auto_start.dart";
+import "core/services/agent_name_store.dart";
 import "core/services/app_tray_service.dart";
 import "core/services/client_update_checker.dart";
 import "core/services/desk_pet_session.dart";
@@ -68,6 +69,7 @@ import "core/services/windows_webview_bootstrap.dart";
 import "core/services/window_bounds_preference.dart";
 import "core/services/shared_browser_host.dart";
 import "core/services/ws_chat_service.dart";
+import "core/services/ws_event_router.dart";
 import "core/services/inbox_api.dart";
 import "core/services/control_plane_account.dart";
 import "core/services/account_session_store.dart";
@@ -87,6 +89,9 @@ import "features/onboarding/onboarding_flow.dart";
 import "features/chat/agent_profile_page.dart";
 import "features/chat/agent_home_page.dart";
 import "features/chat/chat_page.dart";
+// v2 统一渲染信封（P4，2026-11-10 桌面端接入）：done 载荷抽信封块序列，
+// 与手机端 mobile_chat_controller 同一入口、同一挂载规则。
+import "features/chat/render_envelope_dispatcher.dart" show extractEnvelopeBlocks;
 import "features/chat/composer_skill.dart";
 import "features/chat/chat_layout.dart";
 import "features/chat/content_summary_detail_modal.dart";
@@ -114,6 +119,7 @@ import "core/services/phone_call_session.dart";
 import "core/services/pure_voice_mode.dart";
 import "core/presentation/phone_call_page.dart";
 import "core/services/local_notification_service.dart";
+import "core/services/keep_alive_service.dart";
 import "core/services/media_playback_service.dart";
 import "core/services/mobile_briefing_launcher.dart";
 import "core/services/presence_gate_service.dart";
@@ -188,6 +194,18 @@ void main() async {
     // 预加载云端连接版「用户自有模型」配置，确保首次 session.init 就能带上
     // （仅云端连接版消费；byok 本地版不读此文件）。
     await CloudModelBindingStore.instance.load();
+    // 手机端：账号会话读盘提前到首帧之前。系统启动画面（已去掉应用图标层）
+    // 与 Flutter 首帧之间不再插「等读盘」的静止画面——首帧即按登录态武装
+    // N 光扫动画，点开应用直接进入动画，不留任何延迟层。
+    // 桌面端不预读，保持原 initState 异步读盘时序，零影响。
+    final bool bootMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+    String? bootAccountEmail;
+    if (bootMobile) {
+      await AccountSessionStore.instance.load();
+      bootAccountEmail = AccountSessionStore.instance.email;
+      // 首个 session.init/HTTP 在首帧就可能发出，身份必须先落位。
+      ApiConfig.runtimeUserId = bootAccountEmail;
+    }
     _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
     // WebView2 环境进程内只初始化一次：共用浏览器 CDP 调试端口（默认开启，
     // Agent 比价/下单页面直接开在内置浏览器，登录态即本人）必须在这里传入，
@@ -262,7 +280,10 @@ void main() async {
       return;
     }
     _writeCrashLog("[BOOT]", "stage 7: calling runApp", StackTrace.current);
-    runApp(const PrivateAiApp());
+    runApp(PrivateAiApp(
+      initialAccountEmail: bootAccountEmail,
+      initialSessionLoaded: bootMobile,
+    ));
     // 上次会话桌宠开着 → 起稳后自动恢复；从没召唤过则保持不出现。
     unawaited(Future<void>.delayed(
       const Duration(seconds: 3),
@@ -342,7 +363,19 @@ String? _bubbleTraceOf(String messageId) {
 }
 
 class PrivateAiApp extends StatefulWidget {
-  const PrivateAiApp({super.key});
+  const PrivateAiApp({
+    super.key,
+    this.initialAccountEmail,
+    this.initialSessionLoaded = false,
+  });
+
+  /// 手机端在 runApp 前预读的本机会话邮箱（null = 未登录）。只用于决定首帧
+  /// 是否直接武装 N 光扫；桌面端与测试入口保持默认（null / false）。
+  final String? initialAccountEmail;
+
+  /// 会话是否已在首帧前读完。true 时根 State 直接用预读结果构建门禁并开播
+  /// N 动画，不再异步读盘、不再 setState 重挂动画，避免中间出现静止等待帧。
+  final bool initialSessionLoaded;
 
   @override
   State<PrivateAiApp> createState() => _PrivateAiAppState();
@@ -361,7 +394,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       GlobalKey<NavigatorState>();
   final IsarLocalHistoryStore _store =
       IsarLocalHistoryStore(userPin: ApiConfig.localPin);
-  final WsChatService _ws = WsChatService(url: ApiConfig.wsUrl);
+  // 进程内唯一连接：根状态与手机聊天控制器共用，事件经 WsEventRouter 分拣。
+  final WsChatService _ws = WsChatService.shared;
+
   final WorldApiClient _worldApi = WorldApiClient(baseUrl: ApiConfig.httpBase);
   // 站内信：拉取/已读（快捷查看 UI 在用户菜单「站内信」消息框，列表 UI
   // 也在邮箱页；这里负责收到 inbox.message 的提醒与已读回执）
@@ -561,6 +596,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
 
   /// N 开场动画武装位：只在大门放行后播放——已登录冷启动（读盘有会话）
   /// 或注册/登录完成首次切入主界面时置位。未登录停在注册页期间绝不播放。
+  /// 手机端已把读盘前置到 main()：首帧就置位，点开应用即开播，中间没有
+  /// 等待读盘的静止帧（用户 2026-11-08：前一层连图标带停留时间都不要）。
   bool _playBootAnimation = false;
   bool _bootAnimDone = false;   // 开场动画是否已播完（每次武装前重置）
 
@@ -670,7 +707,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // 账号门禁读盘（毫秒级文件读）：未注册先亮注册页，重量级初始化照常并行
+    // 账号门禁读盘（毫秒级文件读）：未注册先亮注册页，重量级初始化照常并行。
+    // 手机端已在 main() 首帧前预读：这里直接把状态摆好，让 N 动画从第一帧
+    // 就开播，不再有「系统启动画面 → 等读盘的静止帧 → N 动画」这段延迟
+    // （用户 2026-11-08 定稿：前一层连图标带停留时间整体不要）。
+    if (widget.initialSessionLoaded) {
+      _accountEmail = widget.initialAccountEmail;
+      _sessionLoaded = true;
+      _playBootAnimation = _accountEmail != null;
+      ApiConfig.runtimeUserId = _accountEmail;
+    }
     unawaited(_loadAccountSession());
     // 本地正在播放的曲目（Windows SMTC）→ 换歌时拉歌词，供灵动岛展示
     unawaited(MediaSessionService.instance.start());
@@ -831,6 +877,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 主动消息挂起等重连——回前台先确保在线（已连接空转）；手机桥接同款。
       _ws.ensureConnected();
       PhoneBridgeService.instance.pokeReconnect();
+      // 保活自愈（2026-11-10）：前台服务若被系统回收（低版本 dataSync 限额、
+      // 厂商强杀），回前台的前台时机补拉一次——start 幂等，运行中空转。
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+        unawaited(KeepAliveService.start());
+      }
       // 推送 token 注册自愈（2026-10-14）：回到前台时补一次注册——首装后 HMS
       // token 就绪可能晚于启动重试窗口，用户打开 App 的每个时机都补一次
       // （内部按 actorId 去重，已注册则空转）。
@@ -869,6 +920,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   Future<void> _bootstrap() async {
+    // 后台保活（2026-11-10 根修）：App 切后台成为 cached 进程后会被系统冻结
+    // （进程在、Dart 引擎全线程挂起），WS 心跳停摆 → 主动消息/提醒全部静默
+    // 丢失。前台服务进程不参与冻结，主 WS 后台持续在线；必须在启动（前台）
+    // 时机拉起，Android 12+ 禁止后台启动前台服务。
+    if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+      unawaited(KeepAliveService.start());
+    }
     // 移动端系统通知初始化（后台收 WS 消息时用系统通知提醒，类微信）
     await LocalNotificationService.init();
     LocalNotificationService.onOutcome = (String deliveryId, String outcome) {
@@ -1165,32 +1223,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _onScheduleReloadSignal();
     unawaited(_flushScheduleOfflineDeletes());
 
-    _ws.onConnected = () {
-      SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
-      _sendSessionInit();
-      // 断线重连后服务端已清 CDP 端点（unbindIfSocket），这里补报，
-      // 让共用浏览器桥（比价/下单页面开在内置浏览器）不掉线。
-      SharedBrowserHost.instance.announceCdpEndpoint();
-      // 共用开启时提前拉起浏览器宿主（否则首次开面板前驱动不存在、
-      // 端点永远报不上去）；_start 完成后会自行 announce。
-      if (SharedBrowserHost.instance.remoteDebugPort != null) {
-        unawaited(SharedBrowserHost.instance.ensureStarted());
-      }
-      unawaited(_flushScheduleOfflineDeletes());
-      if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
-        DesktopBridgeService.instance.start();
-        unawaited(_tryShowDesktopLaunchBriefing());
-      }
-      // 闹钟服务端对账（2026-10-13）：每次 WS 连上（含断线重连）都拉一次服务端
-      // 活跃闹钟补挂本地——建钟那一刻不在线的闹钟由此收敛进本地库。
-      if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android ||
-          defaultTargetPlatform == TargetPlatform.iOS)) {
-        unawaited(AlarmEngine.instance.syncFromServer());
-        // 推送 token 重注册：登录后 effectiveActorId 才是真实身份，连接成功
-        // 时补一次（内部按 actorId 去重，同身份不重复上报）。
-        unawaited(MobilePushRegistrar.registerIfNeeded());
-      }
-    };
+    // 连上后的副作用（session.init 已下沉到连接层统一发送，见 WsChatService.shared）
+    _ws.onConnected = _onWsConnected;
     ClientLocationService.bindPreferences(
       read: _store.getPreference,
       write: _store.savePreference,
@@ -1211,7 +1245,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         );
       }());
     }
+    // 唯一连接的事件源先接进路由器，再建立连接——归属表
+    // （ws_event_router.dart）是唯一事实源，本文件不再逐 type 判断。
+    WsEventRouter.instance.bindPlatform(isMobile: _isMobile);
+    WsEventRouter.instance.attach(_ws.events);
     _ws.connect();
+    // 共享连接可能已被手机聊天控制器先行拉起（两端共用同一条 WS）：那种情况
+    // onConnected 不会再触发，这里回放一次"连上就该做"的补挂动作（各动作幂等：
+    // 闹钟按服务端全量收敛、CDP 端点补报、推送登记按 actorId 去重）。
+    if (_ws.isConnected) _onWsConnected();
     _startMessagePolling();
     // 控制面账号自注册：把当前登录身份（登录邮箱优先）补进管理后台的
     // 收件人列表，否则后台「全体用户」群发站内信时不会包含本机
@@ -1301,7 +1343,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       // 自启重认领：已启用则把 Run 键重写为当前 exe 路径（详见 AppAutoStart.reassert）。
       unawaited(AppAutoStart.reassert());
     });
-    _ws.events.listen((Map<String, dynamic> event) async {
+    // 根通道：只收 rootOnly / both，手机端业务动作（聊天流、主动消息、
+    // 提醒、定位）由聊天控制器的 chat 通道独占。
+    WsEventRouter.instance.rootEvents.listen((Map<String, dynamic> event) async {
       final String type = event["type"] as String? ?? "";
       final Map<String, dynamic> payload =
           (event["payload"] as Map?)?.cast<String, dynamic>() ??
@@ -1870,6 +1914,20 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           final String resolvedText = finalText.trim().isNotEmpty
               ? finalText
               : sanitizedBuffered;
+          // 后台触达（2026-11-10）：用户发完消息切走，回复到达时应用内气泡
+          // 不可见——系统通知弹横幅（类微信会话新消息）。正文为空的卡片轮
+          // 不通知（无内容可弹）；回到前台即恢复应用内呈现，无重复打扰。
+          if (_isMobile &&
+              _appBackgrounded &&
+              resolvedText.trim().isNotEmpty) {
+            final String trimmed = resolvedText.trim();
+            unawaited(LocalNotificationService.show(
+              title: (_agentName?.trim().isNotEmpty ?? false)
+                  ? _agentName!.trim()
+                  : "Agent",
+              body: trimmed.length > 120 ? "${trimmed.substring(0, 120)}…" : trimmed,
+            ));
+          }
           final String traceKey = (doneTraceId?.isNotEmpty == true)
               ? doneTraceId!
               : (messageId.startsWith("assistant-")
@@ -1908,6 +1966,10 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                       .whereType<Map<String, dynamic>>()
                       .toList()
                   : null;
+          // v2 统一信封块（P4，2026-11-10 桌面端接入，对齐手机端）：唯一权威
+          // 序列，渲染层信封优先直读；非 v2 帧为 null，回退旧字段链（零回归）。
+          final List<Map<String, dynamic>>? envelopeBlocksFromPayload =
+              extractEnvelopeBlocks(payload);
           // 「接下来你可以」接续建议（NEXT_UP 协议）：模型生成的下一步任务句，
           // 服务端已从正文剥离标记块。时机性内容不持久化，仅实时渲染。
           final List<String>? followUpsFromPayload = payload["followups"] is List
@@ -1931,6 +1993,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               summaryCardFromPayload != null ||
               renderBlocksFromPayload != null ||
               replyBlocksFromPayload != null ||
+              envelopeBlocksFromPayload != null ||
               followUpsFromPayload != null;
 
           // 真·分绿泡收口：出口重写/自检重跑让最终文本与已流文本分叉时
@@ -1951,17 +2014,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               summaryCard: summaryCardFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
+              envelopeBlocks: envelopeBlocksFromPayload,
               followUps: followUpsFromPayload,
             );
           } else if (bubblesFromPayload != null &&
               bubblesFromPayload.isNotEmpty) {
             // 正常分泡收口：逐泡以服务端定稿文本为准定稿（含漏收 chunk 的补建），
-            // 卡片/建议/playUrl 挂末泡（服务端收口链的附着目标）。
+            // 卡片/建议/playUrl/信封块挂末泡（服务端收口链的附着目标）。
             await _reconcileBubblesOnDone(
               bubbles: bubblesFromPayload,
               mediaCards: mediaCardsFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
+              envelopeBlocks: envelopeBlocksFromPayload,
               followUps: followUpsFromPayload,
               playUrl: playUrl,
               summaryCard: summaryCardFromPayload,
@@ -2027,6 +2092,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   summaryCard: summaryCardFromPayload ?? previous.summaryCard,
                   renderBlocks: renderBlocksFromPayload,
                   replyBlocks: replyBlocksFromPayload,
+                  envelopeBlocks:
+                      envelopeBlocksFromPayload ?? previous.envelopeBlocks,
                   followUpPrompts: followUpsFromPayload,
                 );
               });
@@ -2048,6 +2115,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               summaryCard: summaryCardFromPayload,
               renderBlocks: renderBlocksFromPayload,
               replyBlocks: replyBlocksFromPayload,
+              envelopeBlocks: envelopeBlocksFromPayload,
               followUpPrompts: followUpsFromPayload,
             );
             setState(() {
@@ -2140,17 +2208,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "agent.proactive_message") {
           final String title = payload["title"]?.toString() ?? "Agent 主动联系";
           final String text = payload["text"]?.toString() ?? "";
-          // 决策卡已删除（2026-11-04 定调）：重要度只用于触达分级，所有主动
-          // 消息一律落对话流文本气泡（真实消息持久化）。
-          final String importance = payload["importance"]?.toString() ?? "";
+          // 决策卡已删除（2026-11-04 定调）：所有主动消息一律落对话流文本
+          // 气泡（真实消息持久化）。2026-11-10 根修（用户定调）：分级触达
+          // 把控全部删除——后台一律系统通知，不再按 normal/high/critical
+          // 分路（normal 被静默就是「消息发不出来」的客户端侧根源）。
           final String deliveryId = payload["deliveryId"]?.toString() ?? "";
-          final bool important = importance == "high" || importance == "critical";
-          // 手机后台（类微信常在线）：系统通知触达，点开回前台看气泡
-          if (_isMobile && _appBackgrounded && important && deliveryId.isNotEmpty) {
-            unawaited(LocalNotificationService.show(
-              title: title, body: text, deliveryId: deliveryId,
-            ));
-          }
+          // 本分支只在桌面端执行（手机端由路由器投给 MobileChatController，
+          // 见 ws_event_router.dart 归属表），系统通知出口在两端各只有一个。
           if (mounted) {
             // 应用内展示即 impression：上报 viewed（服务端记为"已展示"，不算忽略，
             // 也不进接受率分母——决策卡删除后应用内无独立确认动作）
@@ -2224,6 +2288,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (ttsBase64 != null) {
             unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
           }
+          // 后台触达由 MobileChatController 统一发系统通知（2026-11-10），
+          // 这里只负责 TTS 播放，避免共用连接后弹两条横幅。
           if (mounted) {
             final controller = ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
@@ -2283,6 +2349,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (ttsBase64 != null) {
             unawaited(TtsPlayer.instance.playFromBase64(ttsBase64));
           }
+          // 后台触达由 MobileChatController 统一发系统通知（2026-11-10），
+          // 这里只负责 TTS 播放，避免共用连接后弹两条横幅。
           if (mounted) {
             ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(
@@ -2413,18 +2481,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "reminder_popup") {
           final String title = payload["title"]?.toString() ?? "提醒";
           final String message = payload["message"]?.toString() ?? "";
-          final String priority = payload["priority"]?.toString() ?? "normal";
           final String attentionId =
               payload["attentionId"]?.toString() ?? "";
 
-          // 手机端且 App 在后台：应用内没有常驻可见的对话页，升级链第 1 级
-          // 就成了"推给空气"。走系统通知触达（通知即弹窗，点开回前台）。
-          if (_isMobile && _appBackgrounded) {
-            unawaited(LocalNotificationService.show(
-              title: priority == "urgent" ? "[紧急] $title" : title,
-              body: message,
-            ));
-          }
+          // 后台触达由 MobileChatController 发系统通知（手机端唯一 owner，
+          // 见 ws_event_router.dart 归属表），本分支（桌面）只负责落对话流
+          // 与 attention ack。
 
           // 决策卡已删除（2026-11-04 定调）：提醒落对话流文本气泡（真实消息
           // 持久化）。落流即已触达，自动回传 attention ack 让服务端升级链
@@ -2911,6 +2973,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           mediaCards: m.mediaCards,
           renderBlocks: m.renderBlocks,
           replyBlocks: m.replyBlocks,
+          envelopeBlocks: m.envelopeBlocks,
           followUpPrompts: m.followUpPrompts,
           // streaming 不带 → false：打字机定稿、光标消失
         );
@@ -2931,14 +2994,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   ///   兜住客户端漏收/少收的增量）。
   /// - 客户端没收到某泡的 chunk（WS 抖动）时按对账补建。
   /// - 卡片类附着全部挂末泡（服务端确定性收口链的附着目标）：
-  ///   mediaCards/replyBlocks/followups/playUrl → 末泡；多泡时 renderBlocks /
-  ///   replyBlocks 只保留非 text 块（text 块按全文切分，挂末泡会整段复读）。
+  ///   mediaCards/replyBlocks/followups/playUrl/信封块 → 末泡；多泡时
+  ///   renderBlocks / replyBlocks / envelopeBlocks 只保留非 text 块
+  ///   （text 块按全文切分，挂末泡会整段复读）。
   Future<void> _reconcileBubblesOnDone({
     required List<Map<String, dynamic>> bubbles,
     required List<Map<String, dynamic>>? mediaCards,
     required Map<String, dynamic>? summaryCard,
     required List<Map<String, dynamic>>? renderBlocks,
     required List<Map<String, dynamic>>? replyBlocks,
+    required List<Map<String, dynamic>>? envelopeBlocks,
     required List<String>? followUps,
     required String? playUrl,
   }) async {
@@ -2957,6 +3022,35 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           .where((b) => b["type"]?.toString() != "text")
           .toList();
       lastRenderBlocks = mediaOnly.isEmpty ? null : mediaOnly;
+    }
+    // v2 信封块（P4，2026-11-10 桌面端接入，与手机端 _finalizeBubbles 同规则）：
+    // 多泡时正文已在各气泡里，只留非 text/followups 块挂末泡；media_segments
+    // 里夹的文字段同理剥掉（只保 media 段）。单泡轮保留完整序列。
+    List<Map<String, dynamic>>? lastEnvelopeBlocks = envelopeBlocks;
+    if (multiBubble && envelopeBlocks != null) {
+      final List<Map<String, dynamic>> noText = <Map<String, dynamic>>[];
+      for (final Map<String, dynamic> b in envelopeBlocks) {
+        final String type = b["type"]?.toString() ?? "text";
+        if (type == "text" || type == "followups") continue;
+        if (type == "media_segments") {
+          final Object? segs = b["segments"];
+          if (segs is! List) continue;
+          final List<Map<String, dynamic>> mediaOnlySegs = segs
+              .whereType<Map>()
+              .map((Map m) => Map<String, dynamic>.from(m))
+              .where((Map<String, dynamic> s) =>
+                  s["type"]?.toString() == "media")
+              .toList(growable: false);
+          if (mediaOnlySegs.isEmpty) continue;
+          noText.add(<String, dynamic>{
+            "type": "media_segments",
+            "segments": mediaOnlySegs,
+          });
+          continue;
+        }
+        noText.add(b);
+      }
+      lastEnvelopeBlocks = noText.isEmpty ? null : noText;
     }
     final List<ChatMessage> toSave = <ChatMessage>[];
     for (int i = 0; i < bubbles.length; i++) {
@@ -2993,6 +3087,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 : previous.summaryCard,
             renderBlocks: isLast ? lastRenderBlocks : previous.renderBlocks,
             replyBlocks: isLast ? lastReplyBlocks : previous.replyBlocks,
+            envelopeBlocks:
+                isLast ? (lastEnvelopeBlocks ?? previous.envelopeBlocks) : previous.envelopeBlocks,
             followUpPrompts: isLast ? followUps : previous.followUpPrompts,
             // streaming 不带 → false：定稿
           );
@@ -3004,6 +3100,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                   summaryCard != null ||
                   lastRenderBlocks != null ||
                   lastReplyBlocks != null ||
+                  lastEnvelopeBlocks != null ||
                   followUps != null))) {
         // 空泡既无正文也无卡片：不补建（服务端对账数组里的占位泡）
         continue;
@@ -3018,14 +3115,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           playUrl: isLast ? playUrl : null,
           mediaCards: isLast ? mediaCards : null,
           summaryCard: isLast ? summaryCard : null,
-          renderBlocks: isLast ? lastRenderBlocks : null,
-          replyBlocks: isLast ? lastReplyBlocks : null,
-          followUpPrompts: isLast ? followUps : null,
-        );
-        setState(() {
-          _messages.add(rebuilt);
-          _assistantMessageIndexById[id] = _messages.length - 1;
-        });
+        renderBlocks: isLast ? lastRenderBlocks : null,
+        replyBlocks: isLast ? lastReplyBlocks : null,
+        envelopeBlocks: isLast ? lastEnvelopeBlocks : null,
+        followUpPrompts: isLast ? followUps : null,
+      );
+      setState(() {
+        _messages.add(rebuilt);
+        _assistantMessageIndexById[id] = _messages.length - 1;
+      });
         toSave.add(rebuilt);
       }
     }
@@ -3046,6 +3144,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     required Map<String, dynamic>? summaryCard,
     required List<Map<String, dynamic>>? renderBlocks,
     required List<Map<String, dynamic>>? replyBlocks,
+    required List<Map<String, dynamic>>? envelopeBlocks,
     required List<String>? followUps,
   }) async {
     final List<String> removedIds = <String>[];
@@ -3073,6 +3172,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         summaryCard != null ||
         renderBlocks != null ||
         replyBlocks != null ||
+        envelopeBlocks != null ||
         followUps != null;
     // 整轮无正文也无卡片：分泡已撤、不再落空泡（不填假文案）
     if (finalText.trim().isEmpty && !hasCards) return;
@@ -3099,6 +3199,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         summaryCard: summaryCard ?? previous.summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        envelopeBlocks: envelopeBlocks ?? previous.envelopeBlocks,
         followUpPrompts: followUps,
       );
       setState(() {
@@ -3116,6 +3217,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         summaryCard: summaryCard,
         renderBlocks: renderBlocks,
         replyBlocks: replyBlocks,
+        envelopeBlocks: envelopeBlocks,
         followUpPrompts: followUps,
       );
       setState(() {
@@ -3570,53 +3672,32 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
   }
 
-  void _sendSessionInit() {
-    final Map<String, dynamic> sessionInit = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
-      "deviceId": InstallIdentity.instance.cachedInstallId ?? "local-device",
-      "userAlias": "owner",
-      // 共用浏览器桥：本连接即浏览器执行器（Agent 与用户共用 WebView2）
-      "browserBridge": true,
-      // 设备类别自报：服务端升级链据此区分电脑端/移动端触达（弹窗→TTS→推送/电话）
-      "platform": _devicePlatform,
-      // 媒体播放能力声明：服务端凭此放行 media.play（未声明时 media.play 如实失败）。
-      // 分发区已接线 MediaPlaybackService，声明即真实可消费，不再是"信令没人消费"的假成功。
-      "capabilities": <String, dynamic>{"mediaPlayback": kMediaPlaybackCapability},
-      // 访问鉴权（ACCESS_AUTH_REQUIRED）开启时服务端校验此 token；
-      // 未绑定/未开启时为 null，服务端行为不变。
-      if (AccessCredentialStore.instance.token != null)
-        "token": AccessCredentialStore.instance.token,
-      // 设备时钟快照（时区与定位解耦）：连接即落库，首条消息前服务端就有正确时区
-      "clientClock": ClientClockService.snapshotSync(),
-    };
-    // 身份绑定：登录邮箱覆盖（未登录回落 USER_ID/sessionId）。
-    // 无条件携带 userId——服务端 resolveActorId 以 userId 为准，
-    // 这是按账号隔离记忆/世界/配额的第一闸。
-    sessionInit["userId"] = ApiConfig.effectiveActorId;
-    // 云端连接版 BYOK（2026-10-20）：用户自有模型三元组随 session.init 上送。
-    // 门控三重：非捆绑形态（云端连接版）+ 已配置 + wss 连接——明文 ws 绝不送
-    // key。服务端按 actor 绑定、纯内存驻留 24h，重连重传自愈；byok 本地版
-    // （isBundled）不走此路径，模型 key 仍只进本地 runtime 的 config.env。
-    if (!kIsWeb && !LocalRuntimeManager.isBundled && ApiConfig.wsUrl.startsWith("wss://")) {
-      final CloudModelBindingStore binding = CloudModelBindingStore.instance;
-      if (binding.isConfigured) {
-        sessionInit["modelProvider"] = <String, dynamic>{
-          "baseUrl": binding.baseUrl,
-          "apiKey": binding.apiKey,
-          "model": binding.model,
-        };
-      }
+  /// WS 连上后的根状态副作用。握手与 `session.init` 已下沉到连接层（见
+  /// `WsChatService.shared`），这里只做"重连之后必须重来一遍"的补挂动作。
+  void _onWsConnected() {
+    SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
+    // 断线重连后服务端已清 CDP 端点（unbindIfSocket），这里补报，
+    // 让共用浏览器桥（比价/下单页面开在内置浏览器）不掉线。
+    SharedBrowserHost.instance.announceCdpEndpoint();
+    // 共用开启时提前拉起浏览器宿主（否则首次开面板前驱动不存在、
+    // 端点永远报不上去）；_start 完成后会自行 announce。
+    if (SharedBrowserHost.instance.remoteDebugPort != null) {
+      unawaited(SharedBrowserHost.instance.ensureStarted());
     }
-    _ws.sendEvent("session.init", sessionInit);
-  }
-
-  /// 当前设备类别标识：手机系 → "mobile"，桌面/网页 → "desktop"。
-  /// 服务端 normalizeDeviceClass 归一后随 WS 连接登记，供 critical 升级链
-  /// 做"电脑端弹窗 / 移动端系统通知+来电"的分级触达与全离线判断。
-  String get _devicePlatform {
-    if (kIsWeb) return "desktop";
-    if (Platform.isAndroid || Platform.isIOS) return "mobile";
-    return "desktop";
+    unawaited(_flushScheduleOfflineDeletes());
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.windows) {
+      DesktopBridgeService.instance.start();
+      unawaited(_tryShowDesktopLaunchBriefing());
+    }
+    // 闹钟服务端对账（2026-10-13）：每次 WS 连上（含断线重连）都拉一次服务端
+    // 活跃闹钟补挂本地——建钟那一刻不在线的闹钟由此收敛进本地库。
+    if (!kIsWeb && (defaultTargetPlatform == TargetPlatform.android ||
+        defaultTargetPlatform == TargetPlatform.iOS)) {
+      unawaited(AlarmEngine.instance.syncFromServer());
+      // 推送 token 重注册：登录后 effectiveActorId 才是真实身份，连接成功
+      // 时补一次（内部按 actorId 去重，同身份不重复上报）。
+      unawaited(MobilePushRegistrar.registerIfNeeded());
+    }
   }
 
   Future<void> _sendMessage({String? text, bool isRetry = false}) async {
@@ -4287,9 +4368,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
                 .whereType<Map<String, dynamic>>()
                 .toList()
             : null;
+    // v2 统一信封块（P4，2026-11-10 桌面端接入，对齐前台轮次）：非 v2 帧为 null。
+    final List<Map<String, dynamic>>? envelopeBlocksFromPayload =
+        extractEnvelopeBlocks(payload);
     if (finalText.trim().isEmpty &&
         (mediaCardsFromPayload == null || mediaCardsFromPayload.isEmpty) &&
-        summaryCardFromPayload == null) {
+        summaryCardFromPayload == null &&
+        envelopeBlocksFromPayload == null) {
       return;
     }
     final int? idx = _messageIndexById(messageId);
@@ -4304,6 +4389,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       mediaCards: mediaCardsFromPayload,
       summaryCard: summaryCardFromPayload,
       replyBlocks: replyBlocksFromPayload,
+      envelopeBlocks: envelopeBlocksFromPayload,
     );
     void apply() {
       if (idx != null && idx < _messages.length) {
@@ -4521,12 +4607,24 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             role == "user" && (clientMessageId?.isNotEmpty ?? false)
                 ? clientMessageId!
                 : "hist-$role-${ts.millisecondsSinceEpoch}-${fallbackSeq++}";
+        // 媒体卡回填（2026-11-09）：服务端 WAL 透传本轮 mediaCards，重装/
+        // 换设备后历史里的照片气泡才能重建（与手机端 mobile_chat_controller
+        // 同一套解析口径）。
+        final List<Map<String, dynamic>>? histMediaCards =
+            (item["mediaCards"] as List<dynamic>?)
+                ?.whereType<Map<dynamic, dynamic>>()
+                .map((Map<dynamic, dynamic> c) => Map<String, dynamic>.from(c))
+                .toList();
         incoming.add(ChatMessage(
           messageId: messageId,
           sessionId: actorId,
           role: role,
           text: text,
           timestamp: ts,
+          mediaCards:
+              (histMediaCards != null && histMediaCards.isNotEmpty)
+                  ? histMediaCards
+                  : null,
         ));
       }
 
@@ -5577,9 +5675,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 顶在最前——重量级初始化照常在后台跑，注册成功落盘即切入主界面。
   Widget _buildApp() {
     if (!_sessionLoaded) {
-      // 手机端启动阶段：系统启动画面已去掉应用图标层，只留与 N 光扫同色的
-      // 纯底；不复用桌面初始化页（转圈 + 自绘标题栏），否则点开应用会在
-      // 系统层与 N 动画之间插进一层浅色加载页，破坏「只出现 N 动画」。
+      // 兜底分支：手机端会话已在 main() 首帧前读完，正常启动不会走到这里。
+      // 万一预读未完成，也只给与 N 光扫同色的纯底，不复用桌面初始化页
+      // （转圈 + 自绘标题栏），避免中间插进一层浅色加载页。
       if (_isMobile) {
         return const ColoredBox(color: Color(0xFF161616));
       }
@@ -5797,20 +5895,30 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   }
 
   /// 读本机账号会话：已注册（冷启动）武装 N 开场动画后进主界面；
-  /// 未注册直接亮注册页，不播开场动画。
+  /// 未注册直接亮注册页，不播开场动画。手机端已在 main() 首帧前读完，
+  /// 这里只补后台动作（灵动岛门禁/头像），不重复读盘、不重挂动画。
   /// 冷启动一律直达主界面——首启向导只在「本次回连真正新建账号」那一刻
   /// 由 [_completeWebAuth] 触发，已注册邮箱换机重登不再重跑向导（2026-10-16）。
   /// 登录邮箱同步写进 [ApiConfig.runtimeUserId]——WS/HTTP/本地存储的
   /// 身份全链以邮箱为准，不同账号数据互不串台。
   Future<void> _loadAccountSession() async {
-    await AccountSessionStore.instance.load();
+    if (widget.initialSessionLoaded) {
+      // 手机端已在 main() 首帧前读完：留一个事件循环边界，灵动岛/头像等
+      // 平台侧动作不挤在 initState 内同步执行；此时 N 动画已在首帧开播，
+      // 绝不 setState 重挂（重挂会重置动画进度，等于又插一段空白）。
+      await Future<void>.delayed(Duration.zero);
+    } else {
+      await AccountSessionStore.instance.load();
+    }
     ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
     if (!mounted) return;
-    setState(() {
-      _accountEmail = AccountSessionStore.instance.email;
-      _sessionLoaded = true;
-      _playBootAnimation = _accountEmail != null;
-    });
+    if (!widget.initialSessionLoaded) {
+      setState(() {
+        _accountEmail = AccountSessionStore.instance.email;
+        _sessionLoaded = true;
+        _playBootAnimation = _accountEmail != null;
+      });
+    }
     _syncIslandGate();
     if (_accountEmail != null) {
       unawaited(_loadUserAvatar());
@@ -5942,10 +6050,13 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _performLogout() async {
     await AccountSessionStore.instance.clear();
     ApiConfig.runtimeUserId = null;
+    // 账号级名字清空，避免换账号后顶栏还挂着上一个 agent 的名牌。
+    AgentNameStore.instance.clear();
     if (!mounted) return;
     setState(() {
       _accountEmail = null;
       _userAvatarPath = null;
+      _agentName = null;
     });
     // 先关岛上屏门禁，再清残留条目（清空会触发一次同步，门禁已挡）。
     _syncIslandGate();
@@ -6259,6 +6370,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           await _preferencesApi.getPreferences(ApiConfig.effectiveActorId);
       final AgentProfileData profile = AgentProfileData.fromPreferences(prefs);
       if (!mounted) return;
+      // 手机端顶栏名牌读同一活水源：档案里的名字灌进来，对话中改名再被
+      // identity_renamed 覆盖（main_mobile 同构）。
+      AgentNameStore.instance.set(profile.displayName);
       setState(() {
         _agentProfile = profile;
         _agentName = profile.displayName;

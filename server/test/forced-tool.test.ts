@@ -1,70 +1,22 @@
 /**
- * 办事信号供给测试（2026-10-22 架构定稿：不预测，只验证）。
+ * 词面工具存留测试（2026-11-09 更新）。
  *
- * 请求层已不做任何 tool_choice 预判——原 resolveForcedToolChoice（电话/位置
- * 指定门 + 祈使扳机）整体退役。本文件测的两类东西都只作**出口对账闸的授权**：
- *   - needsToolChoiceRequired / turnSuggestsToolNeed：允许出口闸在「零成功
- *     工具 + 宣称办过」时打回一次 required 续波；
- *   - resolveExplicitActionTool：允许出口闸在「显式动作整轮未执行」时打回
- *     一次 required 续波并指名工具（事前指定门的替代，只看执行记录）。
- * 以及词面工具：claimsActionCompleted / isInjectionAnsweredQuery。
+ * 出口对账闸已于 2026-11-08 整体删除（「你知道我在哪吗」第三泡复述事故），
+ * 它曾消费的怀疑信号与显式动作识别（turnSuggestsToolNeed /
+ * resolveExplicitActionTool）随闸退役，不再有测试对象。
+ * 本文件现只测仍存留的三个词面工具：
+ *   - needsToolChoiceRequired：agent-core 显式规划升级（useExplicitPlanner）
+ *     的「这轮像不像要办事」确定性信号（只作提示，不作强制）；
+ *   - isInjectionAnsweredQuery：时间/日期/身份类注入直答判定；
+ *   - claimsActionCompleted：完成态宣告词面（供调用方合取条件使用）。
  */
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  needsToolChoiceRequired,
-  resolveExplicitActionTool,
-  turnSuggestsToolNeed,
-} from "../src/gateway/forced-tool.js";
+import { needsToolChoiceRequired } from "../src/gateway/forced-tool.js";
 import { claimsActionCompleted, isInjectionAnsweredQuery } from "../src/agent/task-intent.js";
 
-/* ---------------- 显式外部动作识别（出口闸指名工具用） ---------------- */
-
-test("resolveExplicitActionTool：显式电话请求 → phone.call_user", () => {
-  for (const text of [
-    "帮我打个电话给老婆",
-    "给妈妈打电话说我晚点回去",
-    "帮我打个电话提醒我三点开会",
-  ]) {
-    assert.equal(resolveExplicitActionTool(text), "phone.call_user", `${text} 应识别为电话动作`);
-  }
-});
-
-test("resolveExplicitActionTool：明确位置问题 → clock.get_user_location", () => {
-  for (const text of ["我现在在哪", "当前位置是哪里", "我所在城市是哪个"]) {
-    assert.equal(
-      resolveExplicitActionTool(text),
-      "clock.get_user_location",
-      `${text} 应识别为位置动作`,
-    );
-  }
-});
-
-test("resolveExplicitActionTool：解释性提问/闲聊/实时单一查询不命中", () => {
-  for (const text of [
-    "电话是什么时候发明的",
-    "哈哈笑死我了",
-    "现在几点了",
-    "明天天气怎么样",
-    "帮我查查最新的新闻",
-    "把客厅的灯打开",
-  ]) {
-    assert.equal(resolveExplicitActionTool(text), null, `${text} 不该识别为显式动作`);
-  }
-});
-
-test("resolveExplicitActionTool：否定句不命中（「别给我打电话」不是请求）", () => {
-  for (const text of [
-    "别给我打电话",
-    "不用打电话了，我马上就到",
-    "甭打那个电话",
-  ]) {
-    assert.equal(resolveExplicitActionTool(text), null, `${text} 是拒绝外呼，不是请求`);
-  }
-});
-
-/* ---------------- 办事信号（只授权出口闸，不再驱动 tool_choice） ---------------- */
+/* ---------------- 办事信号（显式规划升级的确定性输入） ---------------- */
 
 test("needsToolChoiceRequired：提醒/闹钟句式命中（信号）", () => {
   for (const text of [
@@ -105,39 +57,16 @@ test("needsToolChoiceRequired：闲聊/纯提问/知识问答/既往陈述不命
     // 2026-10-22 把字句负例：既往陈述（把前带主语）不是祈使
     "我把门关了",
     "他已经把灯关了就走了",
+    // 2026-11-08 事故回归：确认式反问「你知道我在哪吗」曾被位置正则判成
+    // 显式动作并触发出口闸打回，产生第二稿复述泡。闸已删，这里回归确认式
+    // 反问一律不命中。
+    "你知道我在哪吗",
   ]) {
     assert.equal(needsToolChoiceRequired(text), false, `${text} 不该命中办事信号`);
   }
 });
 
-/* ---------------- 出口对账闸的怀疑信号 ---------------- */
-
-test("turnSuggestsToolNeed：办事类消息命中", () => {
-  for (const text of [
-    "明天天气怎么样",
-    "我钱包余额还有多少",
-    "给妈妈发消息说我到家了",
-    "明天早上9点提醒我开会",
-    "帮我看看最近的日程",
-    "查一下我的快递",
-  ]) {
-    assert.equal(turnSuggestsToolNeed(text), true, `${text} 应命中办事怀疑信号`);
-  }
-});
-
-test("turnSuggestsToolNeed：闲聊/实时单一查询/知识问答不命中", () => {
-  for (const text of [
-    "哈哈笑死我了",
-    "现在几点了",
-    "今天几号",
-    "你叫什么名字",
-    "为什么天空是蓝色的",
-    "什么是量子纠缠",
-    "哎呀 这不是在做独立开发吗 我要追我老婆呀",
-  ]) {
-    assert.equal(turnSuggestsToolNeed(text), false, `${text} 不该命中办事怀疑信号`);
-  }
-});
+/* ---------------- 注入直答判定 ---------------- */
 
 test("isInjectionAnsweredQuery：时间/日期/身份类（天气不在内）", () => {
   assert.equal(isInjectionAnsweredQuery("现在几点了"), true);
@@ -148,7 +77,7 @@ test("isInjectionAnsweredQuery：时间/日期/身份类（天气不在内）", 
   assert.equal(isInjectionAnsweredQuery("帮我订明天中午的餐厅"), false);
 });
 
-/* ---------------- 完成态宣告词面（出口对账闸的另一半） ---------------- */
+/* ---------------- 完成态宣告词面 ---------------- */
 
 test("claimsActionCompleted：外部动作完成宣告命中", () => {
   for (const text of [

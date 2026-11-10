@@ -22,6 +22,14 @@ export type TurnWalEntry = {
    * 会读这条全文。缺省由 append 自动判定；测试/调用方可显式覆盖。
    */
   profileCandidate?: boolean;
+  /**
+   * 媒体卡（2026-11-09）：本轮 done 帧下发的照片/视频卡（search_images /
+   * 图像生成 / 中途推卡）。WAL 首次 append 时还不存在（done 阶段才构建），
+   * 由出口 replaceAssistantText 一并补写。没有这个字段，重装/换设备后
+   * /api/chat-data/history?full=1 回填的文字历史永远没有图片。
+   * URL 指向服务端转存资产（/agent/images/*.png），卡片原样透传不脱敏。
+   */
+  mediaCards?: unknown[];
 };
 
 /**
@@ -77,6 +85,8 @@ export class TurnWalService {
     actorId: string;
     messageId: string;
     assistantText: string;
+    /** 本轮最终媒体卡（done 阶段构建）；有值时一并补写进 WAL 行。 */
+    mediaCards?: unknown[];
     now?: Date;
   }): Promise<boolean> {
     const target = entry.messageId.trim();
@@ -95,6 +105,7 @@ export class TurnWalService {
         actorId: entry.actorId,
         messageId: target,
         assistantText: redactSensitiveText(entry.assistantText),
+        ...(entry.mediaCards ? { mediaCards: entry.mediaCards } : {}),
       });
       if (replaced == null) return false;
       // 整文件重写走临时文件 + rename，避免进程中断留下半截 JSONL
@@ -107,12 +118,18 @@ export class TurnWalService {
 }
 
 /**
- * 在 JSONL 原文里把匹配 (actorId, messageId) 的那一行的 assistantText 换掉。
- * 未命中返回 null（调用方据此跳过重写）；其余行逐字保留。
+ * 在 JSONL 原文里把匹配 (actorId, messageId) 的那一行的 assistantText 换掉
+ * （可选：一并补写本轮 mediaCards）。未命中返回 null（调用方据此跳过重写）；
+ * 其余行逐字保留。
  */
 export function replaceAssistantTextInJsonl(
   raw: string,
-  entry: { actorId: string; messageId: string; assistantText: string },
+  entry: {
+    actorId: string;
+    messageId: string;
+    assistantText: string;
+    mediaCards?: unknown[];
+  },
 ): string | null {
   let hit = false;
   const lines = raw.split("\n").map((line) => {
@@ -127,7 +144,13 @@ export function replaceAssistantTextInJsonl(
       return line;
     }
     hit = true;
-    return JSON.stringify({ ...parsed, assistantText: entry.assistantText });
+    return JSON.stringify({
+      ...parsed,
+      assistantText: entry.assistantText,
+      ...(entry.mediaCards && entry.mediaCards.length > 0
+        ? { mediaCards: entry.mediaCards }
+        : {}),
+    });
   });
   return hit ? lines.join("\n") : null;
 }

@@ -5,8 +5,7 @@
  * 一份机器可读契约，并做启动期交叉校验：
  *   - forms ⊆ RENDER_AS_FORMS（客户端 switch 的 case 集合）；
  *   - cardTypes ⊆ DISPLAY_EFFECT_TYPES ∪ 显式许可（permission_request 等）；
- *   - 每个 pre 场景声明了 promptBoundary 就必须真有内容（防空声明骗过门）；
- *   - rewritesText 场景必须有 phase=pre（否则生成前无法接管正文）。
+ *   - 每个 pre 场景声明了 promptBoundary 就必须真有内容（防空声明骗过门）。
  *
  * 新增形态只需要：写一个 scene + produces 声明 + 注册一行。
  * 契约 JSON 由 `npm run render:contract` 导出，双端测试读同一份文件比对。
@@ -57,7 +56,6 @@ export interface RenderContractScene {
   phase: "pre" | "post";
   cardTypes: string[];
   forms: string[];
-  rewritesText: boolean;
   hasPromptBoundary: boolean;
 }
 
@@ -81,7 +79,6 @@ export function buildRenderContract(registry: SceneRegistry): RenderContract {
     phase: scene.phase ?? "post",
     cardTypes: [...(scene.produces?.cardTypes ?? [])].sort(),
     forms: [...(scene.produces?.forms ?? [])].sort(),
-    rewritesText: scene.produces?.rewritesText === true,
     hasPromptBoundary: Boolean(scene.produces?.promptBoundary?.trim()),
   }));
   const cardTypes = [...new Set(scenes.flatMap((s) => s.cardTypes))].sort();
@@ -118,9 +115,6 @@ export function assertRenderContract(registry: SceneRegistry): string[] {
       if (!allowedForms.has(form)) {
         problems.push(`${scene.id}: 客户端没有 case 的 RENDER_AS 形态「${form}」`);
       }
-    }
-    if (produces?.rewritesText && (scene.phase ?? "post") !== "pre") {
-      problems.push(`${scene.id}: 重写正文的场景必须声明 phase:"pre"`);
     }
     if (produces && "promptBoundary" in produces && !produces.promptBoundary?.trim()) {
       problems.push(`${scene.id}: promptBoundary 声明了却为空`);

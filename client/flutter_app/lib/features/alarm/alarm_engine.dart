@@ -5,6 +5,10 @@
 ///  4. 降级链：精确闹钟权限缺失 → 粗略预约照旧（系统允许范围内）→ flutter_local_notifications
 ///     本地通知 → 应用内横幅；语音模型不可用（/api/voice/health available=false）→ 普通闹铃。
 ///
+/// 「用完即删除」（2026-11-09）：音频只在「服务端下发 → 原生落盘」这一段短暂存在于
+/// Dart 内存/JSON；落盘成功即清掉本地库里的 base64，关闭 / 取消时再让原生层删 mp3。
+/// 端侧不留长期音频副本，云端收到消费回执后同样立即删。
+///
 /// 纯逻辑与 IO 收口在本类，可注入 fake 单测。
 library;
 
@@ -146,8 +150,14 @@ class AlarmEngine {
     if (alarmId.isEmpty) return;
     final firedAtMs = (payload["firedAtMs"] as num?)?.toInt() ?? _now().millisecondsSinceEpoch;
     final label = payload["label"]?.toString() ?? "";
-    final ttsBase64 = _extractTtsBase64(payload["tts"]);
-    final alarm = _store.get(alarmId);
+    // 服务端 trigger 自带音频/话术（在线兜底路）；没有时回读本地库里预约阶段缓存的那份
+    final cached = _store.get(alarmId);
+    final ttsBase64 = _extractTtsBase64(payload["tts"]) ?? cached?.ttsBase64;
+    final serverScript = payload["voiceText"]?.toString();
+    final voiceText = (serverScript != null && serverScript.isNotEmpty)
+        ? serverScript
+        : cached?.voiceText;
+    final alarm = cached;
 
     final localNext = alarm?.nextFireLocal(_now());
     final serverFired = DateTime.fromMillisecondsSinceEpoch(firedAtMs);
@@ -160,7 +170,12 @@ class AlarmEngine {
       return;
     }
     // 本端没响（离线/调度失败）→ 立即拉起响铃并回报
-    await AlarmPlatform.ringNow(alarmId: alarmId, label: label, ttsBase64: ttsBase64);
+    await AlarmPlatform.ringNow(
+      alarmId: alarmId,
+      label: label,
+      ttsBase64: ttsBase64,
+      voiceText: voiceText,
+    );
     await _store.markFired(alarmId, now: _now());
     unawaited(_reportTrigger(alarmId, firedAtMs, via: "server", outcome: "ringing"));
   }
@@ -171,7 +186,11 @@ class AlarmEngine {
     final reminderId = payload["reminderId"]?.toString() ?? "";
     final text = payload["text"]?.toString() ?? "";
     if (text.isEmpty) return;
-    await AlarmPlatform.ringNow(alarmId: reminderId.isNotEmpty ? reminderId : "reminder_local", label: text);
+    await AlarmPlatform.ringNow(
+      alarmId: reminderId.isNotEmpty ? reminderId : "reminder_local",
+      label: text,
+      ttsBase64: reminderId.isEmpty ? null : _store.get(reminderId)?.ttsBase64,
+    );
     if (reminderId.isNotEmpty) {
       unawaited(_reportTrigger(reminderId, _now().millisecondsSinceEpoch, via: "server", outcome: "ringing"));
     }
@@ -189,7 +208,21 @@ class AlarmEngine {
   Future<bool> _scheduleAlarmLocal(Alarm alarm) async {
     final next = alarm.nextFireLocal(_now());
     if (next == null) return false;
-    return AlarmPlatform.scheduleNext(alarmId: alarm.id, at: next, label: alarm.label);
+    final ok = await AlarmPlatform.scheduleNext(
+      alarmId: alarm.id,
+      at: next,
+      label: alarm.label,
+      // 预置音频随预约落到原生私有文件，本地 AlarmManager 到点无需联网即可播；
+      // 话术文本随 extra 同步落到原生层，无 mp3 时交系统 TTS 念出来
+      ttsBase64: alarm.ttsBase64,
+      voiceText: alarm.voiceText,
+    );
+    if (ok) {
+      // 原生层已落盘并回报云端删除；Dart 的 alarm-clock.json 不再保留大 base64。
+      // 桥不可用时保守保留，供 ringNow / watchdog 兜底。
+      await _store.clearVoice(alarm.id);
+    }
+    return ok;
   }
 
   /// 看门狗：扫描到点闹钟 → 本地响铃（方法桥失败的最后防线）
@@ -199,7 +232,12 @@ class AlarmEngine {
       final next = alarm.nextFireLocal(now);
       if (next == null) continue;
       if (next.isBefore(now)) {
-        await AlarmPlatform.ringNow(alarmId: alarm.id, label: alarm.label);
+        await AlarmPlatform.ringNow(
+          alarmId: alarm.id,
+          label: alarm.label,
+          ttsBase64: alarm.ttsBase64,
+          voiceText: alarm.voiceText,
+        );
         await _store.markFired(alarm.id, now: now);
         unawaited(_reportTrigger(alarm.id, next.millisecondsSinceEpoch, via: "local", outcome: "ringing"));
       }
@@ -212,11 +250,16 @@ class AlarmEngine {
   Future<void> dismiss(String alarmId) async {
     await AlarmPlatform.stopRing();
     await _store.markFired(alarmId, now: _now());
+    // 用完即删：删原生私有 mp3 + 清本地库字节。重复闹钟下一跳由服务端按新时刻
+    // 重新实时生成并再次下发，绝不复用上一跳的音频。
+    await AlarmPlatform.releaseVoice(alarmId);
+    await _store.clearVoice(alarmId);
     await _post("/api/alarms/$alarmId/dismiss", <String, dynamic>{});
     await _scheduleAlarmLocalIfActive(alarmId);
   }
 
-  /// 贪睡：本地先顺延（离线可用），再同步服务端（2026-10-13 定调：贪睡档 10 分钟）
+  /// 贪睡：本地先顺延（离线可用），再同步服务端（2026-10-13 定调：贪睡档 10 分钟）。
+  /// 贪睡后还要再响一次，音频保留，不调 releaseVoice。
   Future<void> snooze(String alarmId, {int minutes = 10}) async {
     await AlarmPlatform.stopRing();
     await _store.applySnooze(alarmId, minutes);

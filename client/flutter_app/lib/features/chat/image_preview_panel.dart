@@ -1,3 +1,5 @@
+import "dart:typed_data";
+
 import "package:flutter/material.dart";
 
 import "../../core/config/api_config.dart";
@@ -432,6 +434,317 @@ class _ImagePreviewFullScreenPage extends StatelessWidget {
           urls: urls,
           index: index,
           showSidebar: false,
+        ),
+      ),
+    );
+  }
+}
+
+/// 字节版全屏图片查看页：用户气泡里**自己发出的照片**只有内存字节、
+/// 没有 URL（服务端不回显用户图），点开后在这里看大图。
+///
+/// 多图切换为**跟手分页**（2026-11-10，相册式）：拖动时当前图与邻图同屏
+/// 平移（能同时看到前后两张），松手按位移过半 / 横向速度吸附。缩放由
+/// InteractiveViewer 承担（minScale=1 保证未缩放时它对拖拽零视觉响应，
+/// 与分页平移不打架）；放大态下拖动只平移大图、不切图。
+Future<void> showImagePreviewFullScreenFromBytes(
+  BuildContext context, {
+  required List<Uint8List> images,
+  int index = 0,
+  String? source,
+}) {
+  final List<Uint8List> valid =
+      images.where((Uint8List b) => b.isNotEmpty).toList(growable: false);
+  if (valid.isEmpty) return Future<void>.value();
+  return Navigator.of(context, rootNavigator: true).push(
+    MaterialPageRoute<void>(
+      fullscreenDialog: true,
+      builder: (BuildContext context) => _BytesPreviewFullScreenPage(
+        images: valid,
+        index: index.clamp(0, valid.length - 1),
+        source: source,
+      ),
+    ),
+  );
+}
+
+class _BytesPreviewFullScreenPage extends StatefulWidget {
+  const _BytesPreviewFullScreenPage({
+    required this.images,
+    required this.index,
+    this.source,
+  });
+
+  final List<Uint8List> images;
+  final int index;
+  final String? source;
+
+  @override
+  State<_BytesPreviewFullScreenPage> createState() =>
+      _BytesPreviewFullScreenPageState();
+}
+
+class _BytesPreviewFullScreenPageState
+    extends State<_BytesPreviewFullScreenPage>
+    with SingleTickerProviderStateMixin {
+  late int _index = widget.index;
+
+  // 缩放态（InteractiveViewer）：放大后拖动=平移大图，不参与分页。
+  final TransformationController _transform = TransformationController();
+  bool _zoomed = false;
+
+  // ── 跟手分页拖拽 ──
+  // raw Listener 只观察指针（不进手势竞技场，事件必达）；InteractiveViewer
+  // 在 scale=1 时 pan 被钳制为零位移，与这里的平移互不干扰。
+  double _dx = 0; // 当前分页位移（<0 露出下一张，>0 露出上一张）
+  bool _dragging = false;
+  int _pointers = 0;
+  int _lastMoveMs = 0;
+  double _lastVx = 0; // 最近一次 move 的横向速度（px/s，拖拽判定用）
+  double _width = 0;
+
+  late final AnimationController _snap = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 230),
+  );
+  double _snapFrom = 0;
+  double _snapTo = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _transform.addListener(_onTransformChanged);
+    _snap.addListener(() {
+      final double t = Curves.easeOutCubic.transform(_snap.value);
+      setState(() => _dx = _snapFrom + (_snapTo - _snapFrom) * t);
+    });
+    _snap.addStatusListener((AnimationStatus status) {
+      if (status != AnimationStatus.completed) return;
+      final double to = _snapTo;
+      _snapFrom = 0;
+      _snapTo = 0;
+      _snap.value = 0; // listener 把 _dx 归零
+      if (_width > 0 && to.abs() >= _width - 1) {
+        // 吸附到邻图：提交索引，重置缩放
+        final int delta = to < 0 ? 1 : -1;
+        _transform.value = Matrix4.identity();
+        _zoomed = false;
+        setState(() {
+          _index =
+              (_index + delta).clamp(0, widget.images.length - 1);
+        });
+      }
+    });
+  }
+
+  void _onTransformChanged() {
+    final bool zoomed = _transform.value.getMaxScaleOnAxis() > 1.01;
+    if (zoomed == _zoomed) return;
+    _zoomed = zoomed;
+    if (_zoomed && _dx != 0) {
+      // 拖拽途中起手势捏合：分页位移先弹回，让位给大图平移
+      _startSnap(0);
+    }
+  }
+
+  void _startSnap(double target) {
+    if (target == _dx) {
+      if (_dx != 0) setState(() => _dx = 0);
+      return;
+    }
+    _snapFrom = _dx;
+    _snapTo = target;
+    _snap.forward(from: 0);
+  }
+
+  bool get _canPrev => _index > 0;
+  bool get _canNext => _index < widget.images.length - 1;
+
+  void _onPointerDown(PointerDownEvent e) {
+    _pointers += 1;
+    if (_pointers > 1 || _zoomed) {
+      // 多指（捏合）或已在放大态：不进入分页拖拽，已在拖拽中的先弹回
+      _dragging = false;
+      if (_dx != 0) _startSnap(0);
+      return;
+    }
+    _snap.stop();
+    _dragging = true;
+    _lastMoveMs = 0;
+    _lastVx = 0;
+  }
+
+  void _onPointerMove(PointerMoveEvent e) {
+    if (!_dragging || _zoomed || _width <= 0) return;
+    final int ms = e.timeStamp.inMilliseconds;
+    if (_lastMoveMs > 0) {
+      final int dt = ms - _lastMoveMs;
+      if (dt >= 8) {
+        _lastVx = e.delta.dx / dt * 1000;
+      }
+    }
+    _lastMoveMs = ms;
+    // 边界钳制：第一张不往右露、最后一张不往左露
+    final double lo = _canNext ? -_width : 0;
+    final double hi = _canPrev ? _width : 0;
+    setState(() => _dx = (_dx + e.delta.dx).clamp(lo, hi));
+  }
+
+  void _onPointerUp(PointerUpEvent e) {
+    _pointers = (_pointers - 1).clamp(0, 1 << 30);
+    _finishDrag();
+  }
+
+  void _onPointerCancel(PointerCancelEvent e) {
+    _pointers = (_pointers - 1).clamp(0, 1 << 30);
+    _finishDrag(forceBack: true);
+  }
+
+  /// 松手吸附：位移过半 或 快速轻扫（|vx|>1000px/s）→ 换图；否则弹回。
+  void _finishDrag({bool forceBack = false}) {
+    _dragging = false;
+    if (_width <= 0) return;
+    if (_dx == 0) return;
+    final double half = _width / 2;
+    bool toNext = false;
+    bool toPrev = false;
+    if (!forceBack) {
+      if (_dx < -half || _lastVx < -1000) {
+        toNext = _canNext;
+      } else if (_dx > half || _lastVx > 1000) {
+        toPrev = _canPrev;
+      }
+    }
+    if (toNext) {
+      _startSnap(-_width);
+    } else if (toPrev) {
+      _startSnap(_width);
+    } else {
+      _startSnap(0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _transform.dispose();
+    _snap.dispose();
+    super.dispose();
+  }
+
+  Widget _neighborPage(int i) => Center(
+        child: Image.memory(
+          widget.images[i],
+          fit: BoxFit.contain,
+          gaplessPlayback: true,
+        ),
+      );
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+        leading: const CloseButton(color: Colors.white),
+        title: Text(
+          widget.source?.trim().isNotEmpty == true
+              ? widget.source!.trim()
+              : "图片预览",
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+        ),
+      ),
+      body: GestureDetector(
+        // 点击任意处退出全屏；缩放/拖拽由更深层持有，不会误触退出。
+        behavior: HitTestBehavior.translucent,
+        onTap: () => Navigator.of(context).pop(),
+        child: LayoutBuilder(
+          builder: (BuildContext context, BoxConstraints c) {
+            _width = c.maxWidth;
+            return Stack(
+              fit: StackFit.expand,
+              children: <Widget>[
+                Listener(
+                  behavior: HitTestBehavior.translucent,
+                  onPointerDown: _onPointerDown,
+                  onPointerMove: _onPointerMove,
+                  onPointerUp: _onPointerUp,
+                  onPointerCancel: _onPointerCancel,
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: <Widget>[
+                      // 邻图只在拖拽时挂载（省内存），与当前图同屏平移
+                      if (_dx > 0 && _canPrev)
+                        Positioned(
+                          left: _dx - _width,
+                          width: _width,
+                          top: 0,
+                          bottom: 0,
+                          child: _neighborPage(_index - 1),
+                        ),
+                      Positioned(
+                        left: _dx,
+                        width: _width,
+                        top: 0,
+                        bottom: 0,
+                        child: InteractiveViewer(
+                          key: ValueKey<int>(_index),
+                          transformationController: _transform,
+                          minScale: 1.0,
+                          maxScale: 6,
+                          child: Center(
+                            child: Image.memory(
+                              widget.images[_index],
+                              fit: BoxFit.contain,
+                              gaplessPlayback: true,
+                            ),
+                          ),
+                        ),
+                      ),
+                      if (_dx < 0 && _canNext)
+                        Positioned(
+                          left: _dx + _width,
+                          width: _width,
+                          top: 0,
+                          bottom: 0,
+                          child: _neighborPage(_index + 1),
+                        ),
+                    ],
+                  ),
+                ),
+                // 页码指示：多图时贴底部居中，纯白低调
+                if (widget.images.length > 1)
+                  Positioned(
+                    left: 0,
+                    right: 0,
+                    bottom: 14,
+                    child: IgnorePointer(
+                      child: Center(
+                        child: Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: Colors.black.withValues(alpha: 0.45),
+                            borderRadius: BorderRadius.circular(999),
+                          ),
+                          child: Text(
+                            "${_index + 1} / ${widget.images.length}",
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: Colors.white,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            );
+          },
         ),
       ),
     );

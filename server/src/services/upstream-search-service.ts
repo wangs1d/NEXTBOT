@@ -10,6 +10,7 @@ import {
 import { searchImagesViaSearchApi, type ImageApiItem } from "./search-api-provider.js";
 import { filterByQueryFragments, primaryRelevanceRatio } from "./domestic-web-providers.js";
 import { rerankImagesByVlm } from "./image-relevance-vlm.js";
+import { filterUnseenMedia, rememberShownMedia } from "./media-shown-ledger.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -251,7 +252,7 @@ export class UpstreamSearchService {
     return result;
   }
 
-  async searchImages(query: string, limit = 4, actorId = "anonymous"): Promise<{
+  async searchImages(query: string, limit = 4, actorId = "anonymous", sessionId = ""): Promise<{
     provider: string;
     mediaType: "image";
     items: MediaSearchItem[];
@@ -284,8 +285,11 @@ export class UpstreamSearchService {
         })),
         keyword,
       );
-      const items = await this.materializeImageResults(ranked, actorId, boundedLimit);
+      // 「再来几张」去重（2026-11-09）：同会话已展示过的原图不再重复下发
+      const fresh = filterUnseenMedia(sessionId, ranked).slice(0, boundedLimit);
+      const items = await this.materializeImageResults(fresh, actorId, boundedLimit, sessionId);
       if (items.length > 0) {
+        rememberShownMedia(sessionId, fresh.slice(0, items.length));
         const { items: reranked } = await rerankImagesByVlm(items, keyword);
         return {
           provider: "search-api-images",
@@ -356,7 +360,22 @@ export class UpstreamSearchService {
       };
     }
     const merged = dedupeMediaItems(scored.flatMap((b) => b.items));
-    const items = await this.materializeImageResults(merged, actorId, boundedLimit);
+    // 「再来几张」去重（2026-11-09）：同一 query 每次抓回的结果集是稳定的，
+    // 逐轮展示必须扣掉本会话已给过的原图，否则「再来几张」会重复同一批。
+    const unseen = filterUnseenMedia(sessionId, merged);
+    if (merged.length > 0 && unseen.length === 0) {
+      return {
+        provider: `bing-images:${winner.label}`,
+        mediaType: "image",
+        items: [],
+        notes: [
+          `该查询词下的图片已全部展示过（本会话共 ${merged.length} 张），没有新的可给；` +
+            `换一个更具体的方向（活动名/造型/年份/场景）再搜才有新图`,
+        ],
+      };
+    }
+    const picked = unseen.slice(0, boundedLimit + 3);
+    const items = await this.materializeImageResults(picked, actorId, boundedLimit, sessionId);
     if (items.length === 0) {
       return {
         provider: "bing-images",
@@ -365,6 +384,9 @@ export class UpstreamSearchService {
         notes: ["已找到图片候选但全部转存失败（防盗链/格式），本次未返回图片"],
       };
     }
+
+    // 记账：本批候选已交付（下一轮「再来几张」不再重复）
+    rememberShownMedia(sessionId, picked);
 
     // ③ 像素级复核：独立视觉模型只做重排，不删图；失败/超时原序返回，
     //    保证「一定能拿到图片」不因复核链路而破功。
@@ -434,6 +456,7 @@ export class UpstreamSearchService {
     dimensions: string[] | undefined,
     limitPerGroup: number,
     actorId: string,
+    sessionId = "",
   ): Promise<{
     provider: string;
     mediaType: "image";
@@ -483,8 +506,8 @@ export class UpstreamSearchService {
     const settled = await Promise.allSettled(
       groups.map(async (g) => {
         const [a, b] = await Promise.all([
-          this.searchImages(g.qA, perSide, actorId),
-          g.qB ? this.searchImages(g.qB, perSide, actorId) : Promise.resolve(null),
+          this.searchImages(g.qA, perSide, actorId, sessionId),
+          g.qB ? this.searchImages(g.qB, perSide, actorId, sessionId) : Promise.resolve(null),
         ]);
         return { g, a, b };
       }),
@@ -515,7 +538,7 @@ export class UpstreamSearchService {
 
     // 5) 兜底：全组失败 → 退化单侧搜索，保证至少出图
     if (mediaGroups.length === 0) {
-      const fallback = await this.searchImages(sideA, perSide, actorId);
+      const fallback = await this.searchImages(sideA, perSide, actorId, sessionId);
       if (fallback.items.length > 0) {
         const dim = pair ? cleanDimension(longestCommonSubstring(sideA, sideB ?? "")) : "";
         mediaGroups.push({
@@ -1223,6 +1246,7 @@ export class UpstreamSearchService {
     items: MediaSearchItem[],
     actorId: string,
     limit: number,
+    sessionId = "",
   ): Promise<MediaSearchItem[]> {
     // 来源闸（2026-10-15 同兴山庄实证）：图搜「住宅区/山庄/小区名」高频返回
     // 百度地图位置截图与图库水印图，转存后顶着 POI 名义展示给用户。三条搜索
@@ -1249,11 +1273,13 @@ export class UpstreamSearchService {
     // 导致前端媒体卡片无法注入、照片展示不出来。这里返回"已达成的部分结果"即可。
     const deadline = Date.now() + IMAGE_MATERIALIZE_BUDGET_MS;
     let cursor = 0;
+    const attempted = new Set<number>();
 
     const workers = Array.from({ length: IMAGE_MATERIALIZE_CONCURRENCY }, async () => {
       while (out.length < limit) {
         if (Date.now() >= deadline) return;
         const idx = cursor++;
+        attempted.add(idx);
         const item = items[idx];
         if (!item) return;
         const remoteUrl = item.mediaUrl || item.thumbnailUrl;
@@ -1263,7 +1289,7 @@ export class UpstreamSearchService {
         try {
           // 用剩余预算作为本次下载的截断超时，确保并发任务不会越过预算、
           // Promise.all 能及时收尾，避免整体超时导致 items 丢失。
-          const pngUrl = await storage.downloadAndStorePng(remoteUrl, actorId, remaining);
+          const pngUrl = await storage.downloadAndStorePng(remoteUrl, actorId, remaining, sessionId);
           out.push({
             ...item,
             mediaUrl: pngUrl,
@@ -1277,7 +1303,33 @@ export class UpstreamSearchService {
     });
 
     await Promise.all(workers);
+    // 预算内没轮到的（大图/慢网）转后台补写：聊天里即便仍显示远程 URL，
+    // 文件稍后也会落进 data/images/<actor>/，资料库照样能看到。
+    const shortfall = Math.max(0, limit - out.length);
+    const pending = shortfall > 0
+      ? items.filter((_, idx) => !attempted.has(idx)).slice(0, shortfall)
+      : [];
+    if (pending.length > 0) void this.materializeInBackground(pending, actorId, sessionId);
     return out;
+  }
+
+  /** 预算外的转存补写：串行、单张限时，失败静默（只影响资料库收录，不影响本轮回复）。 */
+  private async materializeInBackground(
+    items: MediaSearchItem[],
+    actorId: string,
+    sessionId = "",
+  ): Promise<void> {
+    const storage = this.imageStorageService;
+    if (!storage) return;
+    for (const item of items) {
+      const remoteUrl = item.mediaUrl || item.thumbnailUrl;
+      if (!remoteUrl) continue;
+      try {
+        await storage.downloadAndStorePng(remoteUrl, actorId, 20_000, sessionId);
+      } catch {
+        // 防盗链/格式不支持：跳过
+      }
+    }
   }
 }
 

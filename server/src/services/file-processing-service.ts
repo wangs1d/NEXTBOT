@@ -3,6 +3,7 @@ import { createReadStream, existsSync, mkdirSync, readdirSync, statSync, writeFi
 import { readFile } from "node:fs/promises";
 import { join, resolve, extname } from "node:path";
 import { loadXlsx, sheetToJson } from "./xlsx-lazy.js";
+import { mediaSessionOf, recordMediaSession } from "./library-meta.js";
 
 // pdf-parse / mammoth / xlsx（合计 ~40MB）只在真正解析文件时动态加载：
 // 它们占模块图加载时间与常驻内存的大头，而绝大多数进程生命周期里一个文件都不传。
@@ -150,6 +151,8 @@ export class FileProcessingService {
     actorId: string;
     fileName: string;
     encoding?: BufferEncoding;
+    /** 归属对话：资料库按对话折叠用，缺省归入历史组。 */
+    sessionId?: string;
   }): Promise<WriteTextResult> {
     const fileName = sanitizeFileName(input.fileName);
     if (!fileName) {
@@ -170,6 +173,7 @@ export class FileProcessingService {
     const encoding: BufferEncoding = (input.encoding as BufferEncoding) || "utf-8";
     const buffer = Buffer.from(input.content, encoding);
     writeFileSync(normalized, buffer);
+    recordMediaSession(input.actorId, "files", fileName, input.sessionId);
 
     const fileUrl = `/agent/files/${safeActor}/${fileName}`;
     return {
@@ -329,6 +333,8 @@ export class FileProcessingService {
     fileName?: string;
     /** xlsx 导出时若 content 为对象，按其 keys 取列；为数组时按行展开。 */
     sheetName?: string;
+    /** 归属对话：资料库按对话折叠用，缺省归入历史组。 */
+    sessionId?: string;
   }): Promise<ExportFormatResult> {
     const { format, actorId, content } = input;
     if (!actorId) {
@@ -405,6 +411,7 @@ export class FileProcessingService {
     }
 
     writeFileSync(normalized, buffer);
+    recordMediaSession(actorId, "files", finalName, input.sessionId);
     const fileUrl = `/agent/files/${safeActor}/${finalName}`;
     return {
       ok: true,
@@ -442,19 +449,35 @@ export class FileProcessingService {
    * 列出该 actor 名下的产出文件（资料库聚合用）：按修改时间倒序。
    * 只读元数据，不读文件内容；单条损坏跳过不挡列表。
    */
-  listFiles(actorId: string, limit = 200): Array<{ name: string; size: number; updatedAt: string }> {
+  listFiles(actorId: string, limit = 200): Array<{
+    name: string;
+    size: number;
+    updatedAt: string;
+    /** 产出该文件的对话 id；历史文件为空串（资料库归入「历史记录」组）。 */
+    sessionId: string;
+  }> {
     const safeActor = sanitizeActorId(actorId);
     if (!safeActor) return [];
     const dir = join(this.rootDir, safeActor);
     try {
       if (!existsSync(dir)) return [];
-      const out: Array<{ name: string; size: number; updatedAt: string }> = [];
+      const out: Array<{
+        name: string;
+        size: number;
+        updatedAt: string;
+        sessionId: string;
+      }> = [];
       for (const name of readdirSync(dir)) {
         try {
           const full = join(dir, name);
           const st = statSync(full);
           if (!st.isFile()) continue;
-          out.push({ name, size: st.size, updatedAt: st.mtime.toISOString() });
+          out.push({
+            name,
+            size: st.size,
+            updatedAt: st.mtime.toISOString(),
+            sessionId: mediaSessionOf(actorId, "files", name),
+          });
         } catch {
           // 单个文件 stat 失败跳过
         }

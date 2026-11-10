@@ -42,6 +42,8 @@ dependencies:
   # 开机简报在座检测：摄像头抓拍一帧交服务端视觉模型判定（Windows 端 camera_windows 实现）
   camera: ^0.11.0
   package_info_plus: ^9.0.1
+  flutter_map: ^8.3.2
+  latlong2: ^0.10.1
 
 dev_dependencies:
   flutter_test:

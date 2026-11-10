@@ -13,6 +13,11 @@ import android.util.Log
  * 消息桥接常驻前台服务：拉一条低优先级常驻通知保持进程存活，
  * 让通知监听服务、桥接 WS 与捕获消息上报不被系统回收。
  * 具体的 WS/上报/定时定位逻辑都在 Dart 侧（PhoneBridgeService），本服务只负责保活。
+ *
+ * 2026-11-10 起兼作主聊天 WS 的后台保活（KeepAlivePlugin 拉起）：Android 14+
+ * 对 dataSync 类型有 6h/24h 累计限额，超时系统会强停服务——故 API 34+ 改用
+ * specialUse 类型（Manifest 已声明 PROPERTY_SPECIAL_USE_FGS_SUBTYPE），
+ * 限额不适用；低版本仍走 dataSync。
  */
 class MessageBridgeForegroundService : Service() {
 
@@ -59,7 +64,13 @@ class MessageBridgeForegroundService : Service() {
                 .setContentText("正在保持消息同步与远程控制通道")
                 .setSmallIcon(android.R.drawable.stat_notify_sync)
                 .setOngoing(true)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                // API 34+：specialUse 类型规避 dataSync 的 6h/24h 强停限额
+                startForeground(
+                    NOTIFICATION_ID, builder.build(),
+                    android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE,
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 startForeground(NOTIFICATION_ID, builder.build(), android.content.pm.ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
             } else {
                 startForeground(NOTIFICATION_ID, builder.build())

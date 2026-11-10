@@ -144,6 +144,8 @@ function makeScriptedClient(limit: number, requests: Array<Record<string, unknow
 test("任务面单点查询预算封顶：realtime 轮（budget=2）最多消耗预算内波次，不跑满 4 波", async () => {
   // budget=2：波次耗尽后走 schema-less summary 收尾（无 schema 的最终汇总）。
   // 断言：带 schema 的规划轮 ≤ budget（不旧硬编码的 4 波）。
+  // 2026-11-09 收尾叙述保底波：预算耗尽且零正文时额外授予一次叙述波（有界 +1），
+  // 本 mock 每波都想调工具、从不叙述 → 保底波后仍只发调用，如实空收尾。
   const requests: Array<Record<string, unknown>> = [];
   const client = makeScriptedClient(99, requests); // 模型每波都想调工具
   const ctx = {
@@ -171,12 +173,12 @@ test("任务面单点查询预算封顶：realtime 轮（budget=2）最多消耗
   // maxRounds=2 + 失败换路预算只在有失败时追加（这里全部成功，不追加）
   // → 波次 2 + 充分性探测 1 = 3 次调用；绝不能出现 4+ 波的失控循环
   assert.ok(
-    requests.length <= 4,
-    `单点查询的 LLM 调用应封顶在预算内，实际 ${requests.length}`,
+    requests.length <= 5,
+    `单点查询的 LLM 调用应封顶在预算内（budget 波 + 每波探测 + 保底波 1 次），实际 ${requests.length}`,
   );
   const schemaRounds = requests.filter((r) => Array.isArray(r.tools)).length;
   assert.ok(
     schemaRounds <= 3,
-    `带 schema 的规划轮应 ≤ 3（budget=2 + 换路余量），实际 ${schemaRounds}`,
+    `带 schema 的规划轮应 ≤ 3（budget=2 + 保底波 1 次），实际 ${schemaRounds}`,
   );
 });

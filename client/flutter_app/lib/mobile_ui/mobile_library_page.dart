@@ -6,17 +6,21 @@ import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "../core/utils/link_utils.dart";
+import "../features/chat/image_preview_panel.dart";
 import "../features/chat/media_disk_cache.dart";
+import "../features/chat/travel_plan_mobile_page.dart";
+import "../features/chat/travel_plan_models.dart";
 import "mobile_theme.dart";
 
-/// 手机端「资料库」页（按 2026-11-07 设计稿一比一还原）。
+/// 手机端「资料库」页。
 ///
-/// 布局：顶部搜索框 + 类型筛选 chips（全部/文档/表格/图片/笔记/行程）+
-/// 双列网格卡片（图片类带真缩略图，其余带类型色块），卡面含名称、类型、
-/// 时间、来源。文件点按经系统浏览器打开 `/agent/files/<actor>/<name>`，
-/// 图片点按打开 `/agent/images/<actor>/<name>`。
-/// 数据源：GET /api/library/items?sessionId=<账号 id>（服务端一次聚合，
-/// sections.files / sections.images / sections.notes / sections.travelPlans）。
+/// 2026-11-09 改版：产物按「每次对话」折叠成一张卡——
+/// 一次对话产出的照片 / 文件 / 笔记 / 行程装在同一张卡里，卡面显示
+/// 最多 3 张缩略图 + 「N 张图片 · M 个文件」统计；点卡进会话详情页，
+/// 照片以网格呈现，点任意照片进全屏查看页（与聊天共用左右滑动/缩放），
+/// 不再跳系统浏览器。无来源信息的历史产物统一归入「历史记录」卡。
+///
+/// 数据源：GET /api/library/items（groups 字段由服务端按 sessionId 折叠）。
 class MobileLibraryPage extends StatefulWidget {
   const MobileLibraryPage({super.key, this.client});
 
@@ -27,15 +31,20 @@ class MobileLibraryPage extends StatefulWidget {
   State<MobileLibraryPage> createState() => MobileLibraryPageState();
 }
 
-/// 资料条目类型（筛选 chips 与卡片角标共用）。
+/// 资料条目类型（卡面角标 / 详情页分区用）。
 enum _LibType { doc, table, image, note, travel }
+
+/// 筛选维度（chip）：文件把「文档 + 表格」合为一类，避免按后缀切碎筛选轴。
+enum _LibFilter { file, image, note, travel }
 
 class MobileLibraryPageState extends State<MobileLibraryPage> {
   bool _loading = true;
   String? _error;
-  List<_LibItem> _items = const <_LibItem>[];
-  _LibType? _filter;
+  List<_LibGroup> _groups = const <_LibGroup>[];
+  _LibFilter? _filter;
   final TextEditingController _search = TextEditingController();
+  /// 行程详情拉取中：防止连点重复推路由。
+  bool _openingPlan = false;
 
   @override
   void initState() {
@@ -74,22 +83,13 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
       if (body["ok"] != true) {
         throw Exception(body["error"]?.toString() ?? "未知错误");
       }
-      final Map<String, dynamic> sections =
-          (body["sections"] as Map<String, dynamic>?) ??
-              const <String, dynamic>{};
-      final List<_LibItem> items = <_LibItem>[
-        for (final Map<String, dynamic> f in _asList(sections["files"]))
-          _LibItem.fromFile(f),
-        for (final Map<String, dynamic> img in _asList(sections["images"]))
-          _LibItem.fromImage(img),
-        for (final Map<String, dynamic> n in _asList(sections["notes"]))
-          _LibItem.fromNote(n),
-        for (final Map<String, dynamic> t in _asList(sections["travelPlans"]))
-          _LibItem.fromTravel(t),
-      ]..sort((a, b) => b.time.compareTo(a.time));
+      final List<_LibGroup> groups = <_LibGroup>[
+        for (final Map<String, dynamic> g in _asList(body["groups"]))
+          _LibGroup.fromJson(g),
+      ];
       if (!mounted) return;
       setState(() {
-        _items = items;
+        _groups = groups;
         _loading = false;
       });
     } catch (e) {
@@ -107,13 +107,79 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         .toList(growable: false);
   }
 
-  List<_LibItem> get _filtered {
+  /// 打开已完成行程：先拉完整行程（GET /travel/plans/:id），再推原生行程页。
+  Future<void> _openTravelPlan(_LibItem item) async {
+    if (item.planId.isEmpty || _openingPlan) return;
+    if (ApiConfig.isOssEdition) return;
+    _openingPlan = true;
+    try {
+      final Uri uri = Uri.parse(
+        "${ApiConfig.httpBase}/travel/plans/${Uri.encodeComponent(item.planId)}"
+        "?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}",
+      );
+      final http.Response res = await (widget.client ?? http.Client())
+          .get(uri)
+          .timeout(const Duration(seconds: 20));
+      if (res.statusCode != 200) {
+        throw Exception("服务端返回 ${res.statusCode}");
+      }
+      final Object? decoded = jsonDecode(res.body);
+      final Object? rawPlan = decoded is Map ? decoded["plan"] : null;
+      if (rawPlan is! Map<String, dynamic>) {
+        throw Exception("行程数据缺失");
+      }
+      if (!mounted) return;
+      await TravelPlanMobilePage.show(
+        context,
+        plan: TravelPlanData.fromPlanJson(rawPlan),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text("行程加载失败：$e", style: const TextStyle(fontSize: 12)),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } finally {
+      _openingPlan = false;
+    }
+  }
+
+  List<_LibGroup> get _shown {
     final String q = _search.text.trim().toLowerCase();
-    return _items.where((i) {
-      if (_filter != null && i.type != _filter) return false;
+    return _groups.where((g) {
+      if (_filter != null && !g.hasType(_filter!)) return false;
       if (q.isEmpty) return true;
-      return i.title.toLowerCase().contains(q);
-    }).toList();
+      return g.matchesQuery(q);
+    }).toList(growable: false);
+  }
+
+  /// 筛选 chip 的计数：按条目数（与改版前一致，用户点前就知道筛完有多少条）。
+  int _countOf(_LibFilter filter) {
+    int n = 0;
+    for (final _LibGroup g in _groups) {
+      n += g.items.where((i) => _matchFilter(i.type, filter)).length;
+    }
+    return n;
+  }
+
+  int get _totalItems =>
+      _groups.fold<int>(0, (sum, g) => sum + g.items.length);
+
+  /// 「文件」= 文档 + 表格；其余三类与条目类型一一对应。
+  static bool _matchFilter(_LibType type, _LibFilter filter) {
+    switch (filter) {
+      case _LibFilter.file:
+        return type == _LibType.doc || type == _LibType.table;
+      case _LibFilter.image:
+        return type == _LibType.image;
+      case _LibFilter.note:
+        return type == _LibType.note;
+      case _LibFilter.travel:
+        return type == _LibType.travel;
+    }
   }
 
   @override
@@ -166,7 +232,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
   }
 
   Widget _buildBody(MobilePalette p) {
-    final List<_LibItem> shown = _filtered;
+    final List<_LibGroup> shown = _shown;
     return ListView(
       padding: const EdgeInsets.only(bottom: 24),
       children: [
@@ -198,17 +264,17 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             ),
           ),
         ),
-        // 类型筛选 chips（设计稿：文档/表格/图片/笔记/行程）
+        // 类型筛选 chips：单一筛选轴（全部/文件/图片/笔记/行程）。
         SizedBox(
           height: 44,
           child: ListView(
             scrollDirection: Axis.horizontal,
             padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
             children: [
-              _chip(p, "全部", null, _items.length),
-              for (final _LibType t in _LibType.values)
-                _chip(p, _typeLabel(t), t,
-                    _items.where((i) => i.type == t).length),
+              _chip(p, "全部", null, _totalItems),
+              for (final _LibFilter f in _LibFilter.values)
+                if (_countOf(f) > 0 || _filter == f)
+                  _chip(p, _filterLabel(f), f, _countOf(f)),
             ],
           ),
         ),
@@ -220,8 +286,8 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
                 Icon(Icons.folder_outlined, size: 44, color: p.textMuted),
                 const SizedBox(height: 12),
                 Text(
-                  _items.isEmpty
-                      ? "还没有产出物\n对话里生成的文件、笔记、行程规划\n都会自动归档到这里"
+                  _groups.isEmpty
+                      ? "还没有产出物\n对话里生成的文件、照片、笔记、行程\n都会按对话归档到这里"
                       : "没有匹配的资料",
                   textAlign: TextAlign.center,
                   style:
@@ -231,46 +297,51 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             ),
           )
         else
-          // 双列网格卡片（设计稿：缩略图 + 类型 + 时间 + 来源）
-          GridView.builder(
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
-            gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
-              crossAxisCount: 2,
-              mainAxisSpacing: 10,
-              crossAxisSpacing: 10,
-              childAspectRatio: 0.92,
+          // 每次对话一张卡：缩略图 + 对话标题 + 产出统计
+          for (final _LibGroup g in shown)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+              child: _GroupCard(
+                p: p,
+                group: g,
+                onTap: () => unawaited(_openGroup(g)),
+              ),
             ),
-            itemCount: shown.length,
-            itemBuilder: (BuildContext context, int index) =>
-                _LibCard(p: p, item: shown[index]),
-          ),
       ],
     );
   }
 
-  static String _typeLabel(_LibType t) {
-    switch (t) {
-      case _LibType.doc:
-        return "文档";
-      case _LibType.table:
-        return "表格";
-      case _LibType.image:
+  /// 进入会话详情：照片网格 → 全屏滑动查看；文件 → 仍在详情页点开。
+  Future<void> _openGroup(_LibGroup group) {
+    return Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (BuildContext context) => _GroupDetailPage(
+          group: group,
+          onOpenTravel: _openTravelPlan,
+        ),
+      ),
+    );
+  }
+
+  static String _filterLabel(_LibFilter f) {
+    switch (f) {
+      case _LibFilter.file:
+        return "文件";
+      case _LibFilter.image:
         return "图片";
-      case _LibType.note:
+      case _LibFilter.note:
         return "笔记";
-      case _LibType.travel:
+      case _LibFilter.travel:
         return "行程";
     }
   }
 
-  Widget _chip(MobilePalette p, String label, _LibType? type, int count) {
-    final bool selected = _filter == type;
+  Widget _chip(MobilePalette p, String label, _LibFilter? filter, int count) {
+    final bool selected = _filter == filter;
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: GestureDetector(
-        onTap: () => setState(() => _filter = type),
+        onTap: () => setState(() => _filter = filter),
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
@@ -291,7 +362,6 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
                   fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
                 ),
               ),
-              // 计数恒展示（含 0）：chips 宽度节奏一致
               const SizedBox(width: 5),
               Text(
                 "$count",
@@ -310,6 +380,84 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
   }
 }
 
+/// 一次对话的产出集合（服务端 groups[] 的一项）。
+class _LibGroup {
+  _LibGroup({
+    required this.sessionId,
+    required this.title,
+    required this.updatedAt,
+    required this.items,
+  });
+
+  final String sessionId;
+  final String title;
+  final DateTime updatedAt;
+  final List<_LibItem> items;
+
+  bool get isHistory => sessionId.isEmpty;
+
+  /// 卡面标题：旁聊用注册表标题；主对话/历史按时间兜底。
+  String get displayTitle {
+    if (title.trim().isNotEmpty) return title.trim();
+    if (isHistory) return "历史记录";
+    return "对话 · ${_LibItem._fmt(updatedAt)}";
+  }
+
+  List<_LibItem> get photos =>
+      items.where((i) => i.type == _LibType.image && i.fileName.isNotEmpty).toList();
+
+  /// 非图片条目（详情页分区展示；图片统一走照片网格）。
+  List<_LibItem> get others =>
+      items.where((i) => i.type != _LibType.image).toList();
+
+  bool hasType(_LibFilter filter) {
+    return items.any((i) => MobileLibraryPageState._matchFilter(i.type, filter));
+  }
+
+  bool matchesQuery(String q) {
+    if (displayTitle.toLowerCase().contains(q)) return true;
+    return items.any((i) => i.title.toLowerCase().contains(q));
+  }
+
+  /// 卡面统计：「3 张图片 · 1 个文件 · 1 条笔记」。
+  String get summary {
+    final int images = photos.length;
+    final int files =
+        items.where((i) => i.type == _LibType.doc || i.type == _LibType.table).length;
+    final int notes = items.where((i) => i.type == _LibType.note).length;
+    final int travels = items.where((i) => i.type == _LibType.travel).length;
+    final List<String> parts = <String>[
+      if (images > 0) "$images 张图片",
+      if (files > 0) "$files 个文件",
+      if (notes > 0) "$notes 条笔记",
+      if (travels > 0) "$travels 个行程",
+    ];
+    return parts.isEmpty ? "暂无产出" : parts.join(" · ");
+  }
+
+  static _LibGroup fromJson(Map<String, dynamic> json) {
+    final Map<String, dynamic> items =
+        (json["items"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+    final DateTime t =
+        DateTime.tryParse(json["updatedAt"]?.toString() ?? "") ?? DateTime.now();
+    return _LibGroup(
+      sessionId: json["sessionId"]?.toString() ?? "",
+      title: json["title"]?.toString() ?? "",
+      updatedAt: t,
+      items: <_LibItem>[
+        for (final Map<String, dynamic> f in MobileLibraryPageState._asList(items["files"]))
+          _LibItem.fromFile(f),
+        for (final Map<String, dynamic> img in MobileLibraryPageState._asList(items["images"]))
+          _LibItem.fromImage(img),
+        for (final Map<String, dynamic> n in MobileLibraryPageState._asList(items["notes"]))
+          _LibItem.fromNote(n),
+        for (final Map<String, dynamic> p in MobileLibraryPageState._asList(items["travelPlans"]))
+          _LibItem.fromTravel(p),
+      ],
+    );
+  }
+}
+
 class _LibItem {
   const _LibItem({
     required this.type,
@@ -319,6 +467,8 @@ class _LibItem {
     this.fileName = "",
     this.size = 0,
     this.urlOverride = "",
+    this.planId = "",
+    this.coverUrl = "",
   });
 
   factory _LibItem.fromFile(Map<String, dynamic> f) {
@@ -342,7 +492,7 @@ class _LibItem {
         DateTime.tryParse(img["updatedAt"]?.toString() ?? "") ?? DateTime.now();
     return _LibItem(
       type: _LibType.image,
-      title: _imageTitle(t),
+      title: "图片 ${_fmt(t)}",
       time: t,
       source: "生成 / 搜图",
       fileName: name,
@@ -362,23 +512,33 @@ class _LibItem {
     );
   }
 
+  /// 已完成行程（服务端来自 travelPlanStore，与桌面端「行程」归档同一数据源）。
   factory _LibItem.fromTravel(Map<String, dynamic> t) {
-    final int ms = (t["updatedAt"] as num?)?.toInt() ?? 0;
+    final int ms = (t["createdAt"] as num?)?.toInt() ?? 0;
+    final String title = (t["title"]?.toString() ?? "").trim();
+    final String dest = (t["destination"]?.toString() ?? "").trim();
+    final int days = (t["dayCount"] as num?)?.toInt() ?? 0;
+    final int stops = (t["stopCount"] as num?)?.toInt() ?? 0;
+    final String start = t["startDate"]?.toString() ?? "";
+    final String end = t["endDate"]?.toString() ?? "";
+    final List<String> bits = <String>[
+      if (days > 0) "$days 天",
+      if (stops > 0) "$stops 站",
+      if (start.isNotEmpty && end.isNotEmpty) "$start ~ $end",
+    ];
     return _LibItem(
       type: _LibType.travel,
-      title: (t["destination"]?.toString() ?? "").isNotEmpty
-          ? t["destination"].toString()
-          : (t["originalMessage"]?.toString() ?? "未命名行程"),
+      title: title.isNotEmpty ? title : (dest.isNotEmpty ? dest : "未命名行程"),
       time: ms > 0 ? DateTime.fromMillisecondsSinceEpoch(ms) : DateTime.now(),
-      source: t["state"]?.toString() ?? "行程规划",
+      source: bits.isEmpty ? "行程规划" : bits.join(" · "),
+      planId: t["planId"]?.toString() ?? "",
+      coverUrl: t["coverImage"]?.toString() ?? "",
     );
   }
 
   final _LibType type;
   final String title;
   final DateTime time;
-
-  /// 来源（设计稿卡面要素）：文件=对话产出，图片=生成/搜图，笔记=分类，行程=状态。
   final String source;
   final String fileName;
   final int size;
@@ -386,13 +546,18 @@ class _LibItem {
   /// 服务端已给的可拉流地址（图片类使用）；空则按产出文件路由拼。
   final String urlOverride;
 
-  /// 图片没有可读文件名（服务端落盘名是「时间戳-uuid8.png」），用时间作卡面标题。
-  static String _imageTitle(DateTime t) {
+  /// 已完成行程 id（非空表示点按可打开原生行程页）。
+  final String planId;
+
+  /// 行程封面（可为 `/agent/travel-media/...` 相对地址）。
+  final String coverUrl;
+
+  static String _fmt(DateTime t) {
     final String mm = t.month.toString().padLeft(2, "0");
     final String dd = t.day.toString().padLeft(2, "0");
     final String hh = t.hour.toString().padLeft(2, "0");
     final String mi = t.minute.toString().padLeft(2, "0");
-    return "图片 $mm-$dd $hh:$mi";
+    return "$mm-$dd $hh:$mi";
   }
 
   static _LibType _typeOfFileName(String name) {
@@ -421,13 +586,7 @@ class _LibItem {
     }
   }
 
-  String get timeLabel {
-    final String mm = time.month.toString().padLeft(2, "0");
-    final String dd = time.day.toString().padLeft(2, "0");
-    final String hh = time.hour.toString().padLeft(2, "0");
-    final String mi = time.minute.toString().padLeft(2, "0");
-    return "$mm-$dd $hh:$mi";
-  }
+  String get timeLabel => _fmt(time);
 
   String get sizeLabel {
     if (size <= 0) return "";
@@ -441,136 +600,89 @@ class _LibItem {
       : "${ApiConfig.httpBase}/agent/files/${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}/${Uri.encodeQueryComponent(fileName)}";
 }
 
-/// 网格卡片：图片类真缩略图，其余类型色块 + 图标。
-class _LibCard extends StatelessWidget {
-  const _LibCard({required this.p, required this.item});
+/// 对话卡片：最多 3 张照片缩略图 + 标题 + 产出统计，点卡进详情。
+class _GroupCard extends StatelessWidget {
+  const _GroupCard({required this.p, required this.group, required this.onTap});
 
   final MobilePalette p;
-  final _LibItem item;
-
-  IconData get _icon {
-    switch (item.type) {
-      case _LibType.doc:
-        return Icons.description_outlined;
-      case _LibType.table:
-        return Icons.table_chart_outlined;
-      case _LibType.image:
-        return Icons.image_outlined;
-      case _LibType.note:
-        return Icons.sticky_note_2_outlined;
-      case _LibType.travel:
-        return Icons.luggage_outlined;
-    }
-  }
-
-  Color get _tileColor {
-    switch (item.type) {
-      case _LibType.doc:
-        return const Color(0xFF5B8DEF);
-      case _LibType.table:
-        return const Color(0xFF34A853);
-      case _LibType.image:
-        return const Color(0xFFEA8C3C);
-      case _LibType.note:
-        return const Color(0xFF9B7BDE);
-      case _LibType.travel:
-        return const Color(0xFF2BB3A3);
-    }
-  }
+  final _LibGroup group;
+  final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final bool isImage =
-        item.type == _LibType.image && item.fileName.isNotEmpty;
+    final List<_LibItem> photos = group.photos.take(3).toList(growable: false);
     return InkWell(
       borderRadius: BorderRadius.circular(14),
-      onTap: item.fileName.isEmpty
-          ? null
-          : () => unawaited(LinkUtils.launchExternal(item.fileUrl)),
+      onTap: onTap,
       child: Container(
+        padding: const EdgeInsets.all(10),
         decoration: BoxDecoration(
           color: p.surface,
           borderRadius: BorderRadius.circular(14),
           border: Border.all(color: p.divider.withValues(alpha: 0.5)),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
+        child: Row(
           children: [
-            // 缩略图区：图片 = 真图；其余 = 类型色块
-            Expanded(
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(13)),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: isImage
-                      ? CachedMediaImage(
-                          url: item.fileUrl,
-                          fit: BoxFit.cover,
-                          errorBuilder: (_, __, ___) => _iconTile(),
-                        )
-                      : _iconTile(),
-                ),
-              ),
+            // 缩略图区：1~3 张并排；纯文件/笔记对话用类型色块兜底
+            SizedBox(
+              width: 116,
+              height: 76,
+              child: photos.isEmpty
+                  ? _iconTile()
+                  : Row(
+                      children: [
+                        for (int i = 0; i < photos.length; i++)
+                          Expanded(
+                            child: Padding(
+                              padding: EdgeInsets.only(left: i == 0 ? 0 : 3),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: CachedMediaImage(
+                                  url: photos[i].fileUrl,
+                                  fit: BoxFit.cover,
+                                  errorBuilder: (_, __, ___) => _iconTile(),
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
             ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(10, 8, 10, 10),
+            const SizedBox(width: 12),
+            Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    item.title,
+                    group.displayTitle,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       color: p.textPrimary,
-                      fontSize: 13,
-                      fontWeight: FontWeight.w500,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
                     ),
                   ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 1),
-                        decoration: BoxDecoration(
-                          color: _tileColor.withValues(alpha: 0.12),
-                          borderRadius: BorderRadius.circular(999),
-                        ),
-                        child: Text(
-                          item.typeLabel,
-                          style: TextStyle(color: _tileColor, fontSize: 10),
-                        ),
-                      ),
-                      const Spacer(),
-                      Text(
-                        item.timeLabel,
-                        style: TextStyle(color: p.textMuted, fontSize: 10),
-                      ),
-                    ],
+                  const SizedBox(height: 5),
+                  Text(
+                    group.summary,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: p.textSecondary, fontSize: 12),
                   ),
-                  const SizedBox(height: 3),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          item.source,
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                          style: TextStyle(color: p.textMuted, fontSize: 10),
-                        ),
-                      ),
-                      if (item.sizeLabel.isNotEmpty)
-                        Text(
-                          item.sizeLabel,
-                          style: TextStyle(color: p.textMuted, fontSize: 10),
-                        ),
-                    ],
+                  const SizedBox(height: 5),
+                  Text(
+                    group.isHistory
+                        ? "来源信息缺失的早期产出"
+                        : _LibItem._fmt(group.updatedAt),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(color: p.textMuted, fontSize: 11),
                   ),
                 ],
               ),
             ),
+            Icon(Icons.chevron_right, size: 20, color: p.textMuted),
           ],
         ),
       ),
@@ -578,10 +690,218 @@ class _LibCard extends StatelessWidget {
   }
 
   Widget _iconTile() {
+    final _LibItem? first = group.items.isEmpty ? null : group.items.first;
+    final Color color = first == null ? const Color(0xFF9B7BDE) : _typeColor(first.type);
     return Container(
-      color: _tileColor.withValues(alpha: 0.08),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(10),
+      ),
       alignment: Alignment.center,
-      child: Icon(_icon, size: 34, color: _tileColor.withValues(alpha: 0.75)),
+      child: Icon(
+        first == null ? Icons.folder_outlined : _typeIcon(first.type),
+        size: 30,
+        color: color.withValues(alpha: 0.8),
+      ),
     );
+  }
+}
+
+/// 会话详情页：照片网格（点开全屏可左右滑）+ 文件 / 笔记 / 行程分区。
+class _GroupDetailPage extends StatelessWidget {
+  const _GroupDetailPage({required this.group, required this.onOpenTravel});
+
+  final _LibGroup group;
+  final Future<void> Function(_LibItem) onOpenTravel;
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = MobileTheme.of(context);
+    final List<_LibItem> photos = group.photos;
+    final List<_LibItem> others = group.others;
+    return Scaffold(
+      backgroundColor: p.background,
+      appBar: AppBar(
+        title: Text(
+          group.displayTitle,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+      ),
+      body: ListView(
+        // edge-to-edge 后补底部手势条 inset，末尾条目不被手势区压住
+        padding: EdgeInsets.fromLTRB(
+          16,
+          12,
+          16,
+          28 + MediaQuery.paddingOf(context).bottom,
+        ),
+        children: [
+          Text(
+            group.summary,
+            style: TextStyle(color: p.textMuted, fontSize: 12),
+          ),
+          if (photos.isNotEmpty) ...[
+            _sectionTitle(p, "照片 · ${photos.length}"),
+            _photoGrid(context, photos),
+          ],
+          if (others.isNotEmpty) ...[
+            _sectionTitle(p, "文件与记录 · ${others.length}"),
+            for (final _LibItem item in others) _otherTile(context, p, item),
+          ],
+        ],
+      ),
+    );
+  }
+
+  Widget _sectionTitle(MobilePalette p, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 18, bottom: 8),
+      child: Text(
+        text,
+        style: TextStyle(
+          color: p.textPrimary,
+          fontSize: 13,
+          fontWeight: FontWeight.w600,
+        ),
+      ),
+    );
+  }
+
+  /// 照片网格：点任意一张 → 全屏查看（图池 = 本对话全部照片，左右滑动换图）。
+  Widget _photoGrid(BuildContext context, List<_LibItem> photos) {
+    return GridView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+        crossAxisCount: 3,
+        mainAxisSpacing: 6,
+        crossAxisSpacing: 6,
+      ),
+      itemCount: photos.length,
+      itemBuilder: (BuildContext context, int index) {
+        final _LibItem photo = photos[index];
+        return GestureDetector(
+          onTap: () => unawaited(showImagePreviewFullScreen(
+            context,
+            urls: photos.map((i) => i.fileUrl).toList(growable: false),
+            index: index,
+            source: group.displayTitle,
+          )),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(8),
+            child: CachedMediaImage(
+              url: photo.fileUrl,
+              fit: BoxFit.cover,
+              errorBuilder: (_, __, ___) => Container(
+                color: _typeColor(_LibType.image).withValues(alpha: 0.10),
+                alignment: Alignment.center,
+                child: Icon(Icons.broken_image_outlined,
+                    size: 22, color: _typeColor(_LibType.image)),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _otherTile(BuildContext context, MobilePalette p, _LibItem item) {
+    final Color color = _typeColor(item.type);
+    final VoidCallback? onTap = item.planId.isNotEmpty
+        ? () => unawaited(onOpenTravel(item))
+        : (item.type == _LibType.note
+            ? null
+            : () => unawaited(LinkUtils.launchExternal(item.fileUrl)));
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: p.surface,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: p.divider.withValues(alpha: 0.5)),
+          ),
+          child: Row(
+            children: [
+              Container(
+                width: 34,
+                height: 34,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.10),
+                  borderRadius: BorderRadius.circular(9),
+                ),
+                alignment: Alignment.center,
+                child: Icon(_typeIcon(item.type), size: 18, color: color),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      item.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: p.textPrimary, fontSize: 13),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      <String>[
+                        item.typeLabel,
+                        item.source,
+                        if (item.sizeLabel.isNotEmpty) item.sizeLabel,
+                      ].join(" · "),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(color: p.textMuted, fontSize: 11),
+                    ),
+                  ],
+                ),
+              ),
+              if (onTap != null)
+                Icon(
+                  item.planId.isNotEmpty ? Icons.chevron_right : Icons.open_in_new,
+                  size: 16,
+                  color: p.textMuted,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+IconData _typeIcon(_LibType type) {
+  switch (type) {
+    case _LibType.doc:
+      return Icons.description_outlined;
+    case _LibType.table:
+      return Icons.table_chart_outlined;
+    case _LibType.image:
+      return Icons.image_outlined;
+    case _LibType.note:
+      return Icons.sticky_note_2_outlined;
+    case _LibType.travel:
+      return Icons.luggage_outlined;
+  }
+}
+
+Color _typeColor(_LibType type) {
+  switch (type) {
+    case _LibType.doc:
+      return const Color(0xFF5B8DEF);
+    case _LibType.table:
+      return const Color(0xFF34A853);
+    case _LibType.image:
+      return const Color(0xFFEA8C3C);
+    case _LibType.note:
+      return const Color(0xFF9B7BDE);
+    case _LibType.travel:
+      return const Color(0xFF2BB3A3);
   }
 }

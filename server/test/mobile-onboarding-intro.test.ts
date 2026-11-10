@@ -1,7 +1,8 @@
 /**
- * 手机端对话式首启引导回归（2026-11-07）：
- *  1. 两泡结构：问候独占一泡，能力介绍+问称呼一泡且只有一个句末问号；
- *  2. 答案抽取：称呼/名字的确定性解析，抽不到不推进阶段；
+ * 手机端对话式首启引导回归（2026-11-09 改版）：
+ *  1. 开场白为确定性两泡：嗨+注册称呼+管家定位一泡，直接问 agent 名字一泡；
+ *     取名卡随第二泡挂载下发（onboarding.name_choices，messageId 对齐）。
+ *  2. 答案抽取：名字的确定性解析，抽不到不推进阶段；明确的「叫我X」补称呼事实。
  *  3. 端到端状态机：只跑一次、桌面端不触发、称呼进 structured_facts、
  *     名字走统一改名管道、完成后 hint 消失。
  *
@@ -20,32 +21,31 @@ process.env.AGENT_ACCOUNTS_FILE = join(testTmp, "accounts.json");
 process.env.USER_PREFERENCES_FILE = join(testTmp, "prefs.json");
 
 const {
-  INTRO_FALLBACK,
-  splitIntroIntoBubbles,
+  buildIntroBubbles,
   extractUserAlias,
   extractAgentName,
+  explicitUserAlias,
   readOnboardingStage,
   ONBOARDING_STATE_KV_KEY,
 } = await import("../src/services/onboarding-state.js");
 const { OnboardingIntroService } = await import("../src/services/onboarding-intro-service.js");
 const { registerMemoryComponents } = await import("../src/agentic-memory/index.js");
 
-test("intro: 兜底正文拆成两泡，第二泡只有一个句末问号", () => {
-  const bubbles = splitIntroIntoBubbles(INTRO_FALLBACK);
-  assert.equal(bubbles.length, 2);
-  assert.match(bubbles[0]!, /今天正式上岗。$/);
-  assert.ok(bubbles[1]!.includes("晨报"));
-  assert.ok(bubbles[1]!.includes("怎么称呼你"));
-  const body = bubbles[1]!.slice(0, -1);
-  assert.ok(!/[。！？!?；;\n]/.test(body), "第二泡内部不能有句末标点/换行（否则会被切泡）");
+test("intro: 开场白确定性两泡，带注册称呼时问候带名字", () => {
+  const [first, second] = buildIntroBubbles("阿哲");
+  assert.ok(first.startsWith("嗨，阿哲，"), "问候要带上用户名称");
+  assert.ok(first.includes("私人管家"), "定位是私人管家");
+  assert.ok(first.includes("😊"), "笑脸收尾");
+  assert.ok(first.includes("交给我就好"), "生活事务交给管家");
+  assert.equal(second, "你想叫我什么呢，之后你也可以修改。");
 });
 
-test("intro: LLM 只给一段时也能按首个句末标点拆两泡", () => {
-  const bubbles = splitIntroIntoBubbles("嗨，今天上岗。定提醒、管日程，先认识一下——平时怎么称呼你？");
-  assert.equal(bubbles.length, 2);
-  assert.equal(bubbles[0], "嗨，今天上岗。");
-  assert.ok(bubbles[1]!.endsWith("？"));
-  assert.ok(bubbles[1]!.includes("定提醒"));
+test("intro: 没有注册称呼时退化为无名字问候（不出现空占位）", () => {
+  const [first, second] = buildIntroBubbles(undefined);
+  assert.equal(first, "嗨，我是你的私人管家，以后生活中的事情交给我就好 😊");
+  const [firstBlank] = buildIntroBubbles("   ");
+  assert.equal(firstBlank, first, "纯空白称呼视同缺失");
+  assert.ok(second.includes("想叫我什么"));
 });
 
 test("extract: 称呼与名字的口语句式、尾缀、引号", () => {
@@ -53,15 +53,18 @@ test("extract: 称呼与名字的口语句式、尾缀、引号", () => {
   assert.equal(extractUserAlias("叫我「王哥」吧"), "王哥");
   assert.equal(extractUserAlias("阿哲"), "阿哲");
   assert.equal(extractUserAlias("明天早上提醒我开会"), null);
+  assert.equal(explicitUserAlias("叫我阿哲就行"), "阿哲", "明确句式才算自我称呼");
+  assert.equal(explicitUserAlias("阿哲"), null, "短名兜底不算明确自我称呼");
   assert.equal(extractAgentName("叫你小来包吧"), "小来包");
   assert.equal(extractAgentName("你就叫晚潮好了"), "晚潮");
   assert.equal(extractAgentName("小来包"), "小来包");
+  assert.equal(extractAgentName("叫我阿哲就行"), null, "「叫我X」是自我称呼，不是给 agent 取名");
   assert.equal(extractAgentName("帮我查一下明天天气"), null);
 });
 
 type FakeDeps = ReturnType<typeof makeDeps>;
 
-function makeDeps() {
+function makeDeps(accountDisplayName?: string) {
   const kv = new Map<string, string>();
   const pushes: string[] = [];
   const broadcasts: string[] = [];
@@ -102,7 +105,7 @@ function makeDeps() {
   };
   const accounts = {
     getByActorId() {
-      return null;
+      return accountDisplayName ? { displayName: accountDisplayName } : undefined;
     },
     async register(_actorId: string, displayName: string) {
       renames.push(displayName);
@@ -112,11 +115,6 @@ function makeDeps() {
     async updateDisplayName(_actorId: string, displayName: string) {
       renames.push(displayName);
       return { accountId: "acc-1" };
-    },
-  };
-  const speech = {
-    async speakRaw() {
-      return INTRO_FALLBACK;
     },
   };
   const factStore = {
@@ -135,35 +133,38 @@ function makeDeps() {
     accounts: accounts as never,
     memorySync: memorySync as never,
     wsRegistry: wsRegistry as never,
-    speech: speech as never,
     now,
     secondBubbleDelayMs: 0,
   });
   return { service, kv, pushes, broadcasts, facts, renames, memorySync };
 }
 
-test("flow: 手机端只引导一次，称呼与名字都落账号级权威源", async () => {
-  const d: FakeDeps = makeDeps();
+test("flow: 开场白两泡+取名卡随第二泡下发，注册称呼进事实库", async () => {
+  const d: FakeDeps = makeDeps("小明");
   await d.service.maybeStart("u1", "mobile");
-  assert.equal(d.pushes.length, 2, "问候 + 介绍提问共两泡");
-  assert.ok(d.pushes.every((p) => p.includes("first_meeting_intro")));
-  assert.equal(readOnboardingStage(d.memorySync as never, "u1"), "awaiting_alias");
-  assert.equal(
-    d.service.nameChoiceCardFor("u1"),
-    null,
-    "问称呼阶段不给取名卡",
-  );
-  assert.match(d.service.hintForTurn("u1") ?? "", /补一句问称呼/);
-
-  await d.service.onUserText("u1", "叫我阿哲就行");
-  assert.deepEqual(d.facts, [{ field: "称呼", value: "阿哲" }]);
+  // 两泡 + 一张取名卡（onboarding.name_choices 帧）
+  assert.equal(d.pushes.length, 3, "问候泡 + 问名泡 + 取名卡");
+  const bubbleFrames = d.pushes.filter((p) => p.includes("first_meeting_intro"));
+  assert.equal(bubbleFrames.length, 2);
+  const first = JSON.parse(bubbleFrames[0]!).payload;
+  const second = JSON.parse(bubbleFrames[1]!).payload;
+  assert.match(first.text, /嗨，小明，/);
+  assert.ok(first.text.includes("😊"));
+  assert.equal(second.text, "你想叫我什么呢，之后你也可以修改。");
+  // 第二泡带服务端 messageId，取名卡挂同一个 id
+  assert.ok(second.messageId, "第二泡带 messageId");
+  const cardFrame = d.pushes.find((p) => p.includes("onboarding.name_choices"));
+  assert.ok(cardFrame, "取名卡帧已推送");
+  const cardPayload = JSON.parse(cardFrame!).payload;
+  assert.equal(cardPayload.messageId, second.messageId, "卡与泡同 messageId");
+  assert.equal(cardPayload.choices.length, 3, "三个候选名");
+  assert.match(cardPayload.title, /想叫我什么/);
+  // 注册称呼立即落 structured_facts
+  assert.deepEqual(d.facts, [{ field: "称呼", value: "小明" }]);
+  // 状态机直接进「等取名」阶段
   assert.equal(readOnboardingStage(d.memorySync as never, "u1"), "awaiting_agent_name");
-  assert.match(d.service.hintForTurn("u1") ?? "", /接下来该问用户想怎么称呼你/);
-  const card = d.service.nameChoiceCardFor("u1");
-  assert.ok(card, "问名字阶段下发取名卡");
-  assert.equal(card!.choices.length, 3, "三个候选名");
-  assert.ok(card!.choices.every((c) => c.trim().length > 0));
-  assert.match(card!.title, /怎么称呼我/);
+  assert.ok(d.service.nameChoiceCardFor("u1"), "等取名阶段可补挂取名卡");
+  assert.match(d.service.hintForTurn("u1") ?? "", /等用户给你取名/);
 
   await d.service.onUserText("u1", "叫你小来包吧");
   assert.deepEqual(d.renames, ["小来包"], "走统一改名管道");
@@ -179,25 +180,29 @@ test("flow: 手机端只引导一次，称呼与名字都落账号级权威源",
   assert.ok(d.kv.has(`u1:${ONBOARDING_STATE_KV_KEY}`));
 });
 
-test("flow: 桌面端不触发；一句话同时给称呼和名字时两步并一步", async () => {
+test("flow: 等取名阶段「叫我X」只补称呼事实，不推进阶段不改 agent 名", async () => {
   const d: FakeDeps = makeDeps();
-  await d.service.maybeStart("u2", "desktop");
-  assert.equal(d.pushes.length, 0);
-
-  await d.service.maybeStart("u3", "mobile");
-  await d.service.onUserText("u3", "叫我阿哲，叫你小来包吧");
+  await d.service.maybeStart("u2", "mobile");
+  d.facts.length = 0;
+  await d.service.onUserText("u2", "叫我阿哲就行");
   assert.deepEqual(d.facts, [{ field: "称呼", value: "阿哲" }]);
+  assert.equal(readOnboardingStage(d.memorySync as never, "u2"), "awaiting_agent_name");
+  assert.deepEqual(d.renames, [], "没有把自我称呼当成 agent 名");
+
+  await d.service.onUserText("u2", "明天早上七点叫我起床");
+  assert.equal(d.facts.length, 1, "任务句不误收");
+  assert.deepEqual(d.renames, []);
+
+  await d.service.onUserText("u2", "叫你小来包吧");
   assert.deepEqual(d.renames, ["小来包"]);
-  assert.equal(readOnboardingStage(d.memorySync as never, "u3"), "done");
+  assert.equal(readOnboardingStage(d.memorySync as never, "u2"), "done");
 });
 
-test("flow: 抽不到答案保持阶段，不误把任务句当成名字", async () => {
+test("flow: 桌面端不触发", async () => {
   const d: FakeDeps = makeDeps();
-  await d.service.maybeStart("u4", "mobile");
-  await d.service.onUserText("u4", "明天早上七点叫我起床");
-  assert.equal(readOnboardingStage(d.memorySync as never, "u4"), "awaiting_alias");
-  assert.equal(d.facts.length, 0);
-  assert.equal(d.renames.length, 0);
+  await d.service.maybeStart("u3", "desktop");
+  assert.equal(d.pushes.length, 0);
+  assert.equal(readOnboardingStage(d.memorySync as never, "u3"), null);
 });
 
 /**
@@ -227,6 +232,9 @@ test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发�
   const factStore = new StructuredFactStore(openAgenticSqlite(join(testTmp, "facts-e2e.db")));
   registerMemoryComponents({ factStore: factStore as never });
 
+  // 注册（新流程：称呼在注册表单填写，落账号 displayName）
+  await accounts.register(actor, "小明", actor);
+
   // 真实连接注册表 + 假手机 socket（只当收帧探针）
   const phoneFrames: string[] = [];
   const registry = new WsConnectionRegistry();
@@ -240,16 +248,22 @@ test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发�
     accounts,
     memorySync: memorySync as never,
     wsRegistry: registry,
-    speech: null, // 不依赖 LLM：走 INTRO_FALLBACK，行为确定
     now: () => 1_762_000_000_000,
     secondBubbleDelayMs: 0,
   });
 
-  // 1) 新用户手机端首次 session.init → 触发：两泡推到手机 socket，状态落真实 KV
+  // 1) 新用户手机端首次 session.init → 触发：两泡 + 取名卡推到手机 socket
   await service.maybeStart(actor, "mobile");
   const introFrames = phoneFrames.filter((f) => f.includes("first_meeting_intro"));
-  assert.equal(introFrames.length, 2, "问候 + 介绍提问两泡都送达手机端");
-  assert.equal(readOnboardingStage(memorySync as never, actor), "awaiting_alias");
+  assert.equal(introFrames.length, 2, "问候 + 问名两泡都送达手机端");
+  const firstBubble = JSON.parse(introFrames[0]!).payload;
+  assert.match(firstBubble.text, /嗨，小明，/, "问候带注册称呼");
+  assert.ok(
+    phoneFrames.some((f) => f.includes("onboarding.name_choices")),
+    "取名卡帧已推送",
+  );
+  assert.equal(factStore.getFact(actor, "称呼")?.value, "小明", "注册称呼落事实库");
+  assert.equal(readOnboardingStage(memorySync as never, actor), "awaiting_agent_name");
 
   // 2) 重连（真实注册表再登记一次）不重复打扰
   await service.maybeStart(actor, "mobile");
@@ -259,12 +273,7 @@ test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发�
     "重连后不再发开场白",
   );
 
-  // 3) 答称呼 → 落真实 sqlite structured_facts
-  await service.onUserText(actor, "叫我阿哲就行");
-  assert.equal(factStore.getFact(actor, "称呼")?.value, "阿哲");
-  assert.equal(readOnboardingStage(memorySync as never, actor), "awaiting_agent_name");
-
-  // 4) 答名字 → 走真实统一改名管道：KV + 账号 + prefs + identity_renamed 广播
+  // 3) 答名字 → 走真实统一改名管道：KV + 账号 + prefs + identity_renamed 广播
   await service.onUserText(actor, "叫你小来包吧");
   const identity = parseAgentIdentityKv(
     memorySync.getSnapshot(actor, [AGENT_NAME_KV_KEY]).entries[AGENT_NAME_KV_KEY],
@@ -281,12 +290,12 @@ test("e2e: 真实 KV+账号+prefs+事实库下，新用户手机端首连触发�
   );
   assert.equal(readOnboardingStage(memorySync as never, actor), "done");
 
-  // 5) 重启级持久化：用同一 KV 文件新开实例（生产启动由 bootstrap 显式 load）
+  // 4) 重启级持久化：用同一 KV 文件新开实例（生产启动由 bootstrap 显式 load）
   const reloaded = new AgentMemorySyncService(kvFile);
   await reloaded.load();
   assert.equal(readOnboardingStage(reloaded as never, actor), "done", "重启后不重复引导");
 
-  // 6) 桌面端老账号（已有名字）手机端登录只标完成、不打扰
+  // 5) 桌面端老账号（已有名字）手机端登录只标完成、不打扰
   const veteran = "veteran@example.com";
   patchAgentProfile(veteran, { displayName: "老伙计" }, { allowIdentity: true });
   await service.maybeStart(veteran, "mobile");

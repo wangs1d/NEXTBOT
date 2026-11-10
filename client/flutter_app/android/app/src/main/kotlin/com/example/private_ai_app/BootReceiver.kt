@@ -54,6 +54,14 @@ private object AlarmClockPluginBootHelper {
                 action = "com.example.private_ai_app.alarm.FIRE"
                 putExtra(AlarmClockPlugin.EXTRA_ALARM_ID, alarmId)
                 putExtra(AlarmClockPlugin.EXTRA_LABEL, entry.optString("label", ""))
+                val ttsFile = entry.optString("ttsFile", "")
+                if (ttsFile.isNotEmpty() && java.io.File(ttsFile).exists()) {
+                    putExtra(AlarmClockPlugin.EXTRA_TTS_FILE, ttsFile)
+                }
+                val voiceText = entry.optString("voiceText", "")
+                if (voiceText.isNotBlank()) {
+                    putExtra(AlarmClockPlugin.EXTRA_VOICE_TEXT, voiceText)
+                }
             }
             val pi = android.app.PendingIntent.getBroadcast(
                 context,

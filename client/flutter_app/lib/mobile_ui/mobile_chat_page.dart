@@ -5,6 +5,7 @@ import "package:flutter/material.dart";
 
 import "../core/config/api_config.dart";
 import "../core/models/chat_models.dart";
+import "../core/services/agent_name_store.dart";
 import "../core/services/side_chat_api.dart";
 import "../core/theme/app_typography.dart";
 import "../core/utils/agent_result_parser.dart";
@@ -12,8 +13,8 @@ import "../core/vision/pick_gallery_vision.dart";
 import "../core/vision/vision_wire_frame.dart";
 import "../features/chat/agent_result_card.dart";
 import "../features/chat/evening_digest_card.dart";
+import "../features/chat/image_preview_panel.dart";
 import "../features/chat/message_body_renderer.dart";
-import "../features/chat/typewriter_reveal.dart";
 import "mobile_agent_status_orb.dart";
 import "mobile_chat_controller.dart";
 import "mobile_theme.dart";
@@ -27,7 +28,7 @@ const String _kTopBarFontFamily = "HarmonyOS Sans SC";
 
 /// 手机端对话主界面(白黑极简,跟随主题)。
 ///
-/// - 顶栏：居中标题 + 在线状态点
+/// - 顶栏：居中 agent 名牌胶囊（名称来自 [AgentNameStore]，未取名时留空）
 /// - 消息区：用户黑底白字右对齐、助手浅灰底黑字左对齐
 /// - 底部输入栏：圆角输入框(右侧「+」选照片) + 纯黑发送按钮
 ///
@@ -42,8 +43,10 @@ class MobileChatPage extends StatefulWidget {
 
   final MobileChatController? controller;
 
-  /// 用户给 agent 取的名称（服务端 agentProfile.displayName）；
-  /// 空/null 时顶栏不显示文字标题，只留在线状态点。
+  /// 用户给 agent 取的名称（服务端 agentProfile.displayName）。
+  ///
+  /// 只作 [AgentNameStore] 尚未灌值时的兜底：真名以 store 为准，
+  /// 这样对话中取名（服务端 `identity_renamed`）顶栏胶囊当场浮现。
   final String? agentName;
 
   /// 左上角玻璃按钮：打开左侧边栏（旁聊列表）。
@@ -71,6 +74,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
   void initState() {
     super.initState();
     _controller = widget.controller ?? MobileChatController();
+    // 兜底灌值：外部已拿到名字（登录时读档案）就直接进唯一活水源，
+    // 之后对话中改名由 identity_renamed 覆盖，不必等外部重建。
+    _seedAgentName();
     _input.addListener(() {
       final bool now = _canSendNow();
       if (now != _canSend) {
@@ -91,6 +97,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
       _controller = widget.controller!;
       _lastMessageCount = 0;
     }
+    // 外部档案晚到（登录后才拉到名字）：补灌进 store，顶栏胶囊随之出现。
+    if (widget.agentName != oldWidget.agentName) _seedAgentName();
   }
 
   @override
@@ -481,22 +489,66 @@ class _MobileChatPageState extends State<MobileChatPage> {
         .showSnackBar(SnackBar(content: Text(message)));
   }
 
+  /// 把外部传入的名字灌进唯一活水源（store 已有值时不覆盖）。
+  void _seedAgentName() {
+    final String staged = (widget.agentName ?? "").trim();
+    if (staged.isEmpty) return;
+    // 延后到帧末写入：store 的监听者（含本页顶栏）会 setState，
+    // initState / didUpdateWidget 阶段同步通知会撞 build。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final String current = (AgentNameStore.instance.name.value ?? "").trim();
+      if (current.isNotEmpty) return;
+      AgentNameStore.instance.set(staged);
+    });
+  }
+
+  /// 顶栏名牌（2026-11-09 反馈定稿）：
+  /// - 名字套一枚椭圆胶囊，居中显示，长名单行省略；
+  /// - 不再有绿色在线状态点；
+  /// - 未取名时整块留空（不显示空胶囊）。
+  ///
+  /// 名字读 [AgentNameStore]：对话中取名 → 服务端广播 `identity_renamed`
+  /// → 控制器写 store → 这里即时重建，无需重进应用。
   Widget _buildTitle(BuildContext context, MobilePalette p) {
-    // 2026-11-07 反馈：顶栏不再展示 agent 名字（小蛇），只保留在线状态点。
-    final Widget statusDot = ListenableBuilder(
-      listenable: _controller,
-      builder: (context, _) {
+    return ValueListenableBuilder<String?>(
+      valueListenable: AgentNameStore.instance.name,
+      builder: (BuildContext context, String? storeName, _) {
+        final String title = (storeName ?? widget.agentName ?? "").trim();
+        if (title.isEmpty) return const SizedBox.shrink();
+        final bool dark = Theme.of(context).brightness == Brightness.dark;
         return Container(
-          width: 6,
-          height: 6,
+          constraints: const BoxConstraints(maxWidth: 200),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
           decoration: BoxDecoration(
-            shape: BoxShape.circle,
-            color: _controller.isConnected ? p.online : p.textMuted,
+            // 与左上角玻璃按钮同一种玻璃底，顶栏两块元素读起来是一套。
+            color: dark
+                ? Colors.white.withValues(alpha: 0.07)
+                : p.surface.withValues(alpha: 0.55),
+            borderRadius: BorderRadius.circular(999),
+            border: Border.all(
+              color: dark
+                  ? Colors.white.withValues(alpha: 0.10)
+                  : p.divider.withValues(alpha: 0.8),
+            ),
+          ),
+          child: Text(
+            title,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              fontFamily: _kTopBarFontFamily,
+              color: dark ? const Color(0xFFE9EAEF) : p.textPrimary,
+              fontSize: 14,
+              fontWeight: FontWeight.w600,
+              letterSpacing: 0.2,
+              height: 1.2,
+            ),
           ),
         );
       },
     );
-    return statusDot;
   }
 
   /// 会话里是否已经有用户开口（false = 只有 agent 的开场介绍）。
@@ -511,6 +563,9 @@ class _MobileChatPageState extends State<MobileChatPage> {
     // 底锚会让两泡问候孤零零贴在输入框上方、落在屏幕下半屏（2026-11-08
     // 反馈要求放到界面上方）。用户开口后恢复常规底部锚定。
     final bool openingOnly = !_hasUserMessage;
+    // 开场白两泡依次到达（2026-11-09）：后一泡还在排队时，末尾挂一个
+    // 「正在输入」气泡，让停顿看起来是对方在打字，而不是界面上凭空多一条。
+    final bool typing = openingOnly && _controller.isIntroTyping;
     // 长按/拖拽选中消息文字复制（与桌面端 SelectionArea 行为对齐）
     // reverse:true 底部锚定（2026-10-13）：index 0 = 最新消息（列表底部）,
     // 旧消息向视觉顶部延伸;offset 0 恒锚最新,重进不再需要滚位计算。
@@ -519,8 +574,11 @@ class _MobileChatPageState extends State<MobileChatPage> {
         controller: _scroll,
         reverse: !openingOnly,
         padding: EdgeInsets.fromLTRB(14, openingOnly ? 24 : 6, 14, 8),
-        itemCount: _controller.messages.length,
+        itemCount: _controller.messages.length + (typing ? 1 : 0),
         itemBuilder: (context, index) {
+          if (typing && index == _controller.messages.length) {
+            return _buildTypingBubble(p);
+          }
           // 正向列表（开场介绍）index 即消息顺序；reverse 列表 index 0 是最新。
           final ChatMessage m = _controller.messages[
               openingOnly ? index : _controller.messages.length - 1 - index];
@@ -550,23 +608,13 @@ class _MobileChatPageState extends State<MobileChatPage> {
             );
           }
           if (!isUser) {
-            // 首启引导·取名卡（2026-11-08）：服务端把候选名挂在本轮回复气泡
-            // 上，卡跟在气泡下方（不框进气泡，卡自带完整外观）。
+            // 首启引导·取名卡（2026-11-09 改版）：开场白第二泡自带候选名，
+            // 问题正文与候选名列表合在同一个助手气泡块里（主动推送，无需
+            // 用户先说话），点选即把答复以用户身份发出。
             final List<String> nameChoices =
                 m.nameChoices ?? const <String>[];
             if (nameChoices.isNotEmpty) {
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  _buildBubble(context, m, isUser, p),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 8),
-                    child: _buildNameChoicesCard(
-                        context, m, nameChoices, p),
-                  ),
-                ],
-              );
+              return _buildNameChoicesCard(context, m, nameChoices, p);
             }
             // 气泡外独立卡（2026-11-07 拍板扩展）：travel_itinerary 大卡与
             // reminder_confirm 提醒确认卡都不框进气泡外壳——气泡只装文字，
@@ -602,92 +650,116 @@ class _MobileChatPageState extends State<MobileChatPage> {
     );
   }
 
-  /// 首启引导·取名卡（2026-11-08）：抬头 + 三个候选名；点选即把答复以用户
-  /// 身份发出（走原发消息链路，服务端据此走统一改名管道）。
+  /// 首启引导·取名卡（2026-11-09 改版，对照参考稿）：问题正文 + 候选名
+  /// 整行铺满列表合在同一个助手气泡块里；配色全部走 [MobilePalette]
+  /// （与主题一致，浅深色自适应）。点选即把答复以用户身份发出（走原发
+  /// 消息链路，服务端据此走统一改名管道）。
   Widget _buildNameChoicesCard(
     BuildContext context,
     ChatMessage m,
     List<String> choices,
     MobilePalette p,
   ) {
-    final String title = (m.nameCardTitle ?? "").trim();
-    const List<String> letters = <String>["A", "B", "C", "D"];
-    return Container(
-      constraints: BoxConstraints(
-        maxWidth: MediaQuery.sizeOf(context).width * 0.78,
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 13, 14, 10),
-      decoration: BoxDecoration(
-        color: p.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: p.divider),
-      ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          if (title.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(bottom: 10),
-              child: Text(
-                title,
-                style: TextStyle(
-                  color: p.textPrimary,
-                  fontSize: 13.5,
-                  height: 1.45,
-                  fontWeight: FontWeight.w500,
+    final String title = m.text.trim().isNotEmpty
+        ? m.text.trim()
+        : (m.nameCardTitle ?? "").trim();
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.sizeOf(context).width * 0.738,
+        ),
+        margin: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.fromLTRB(15, 11, 15, 5),
+        decoration: BoxDecoration(
+          color: p.assistantBubble,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(6),
+            topRight: Radius.circular(MobileTheme.bubbleRadius),
+            bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
+            bottomRight: Radius.circular(MobileTheme.bubbleRadius),
+          ),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            if (title.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 10, left: 2, right: 2),
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    color: p.assistantBubbleText,
+                    fontSize: 13.5,
+                    height: 1.45,
+                  ),
                 ),
               ),
+            for (final String name in choices) _buildNameChoiceRow(name, p),
+            // 末尾：自己起名（2026-11-09 反馈）——候选名之外留一个输入框，
+            // 填完回车或点右侧圆钮即以用户身份发出，与点选候选名同一条链路。
+            _CustomNameInput(
+              palette: p,
+              onSubmit: (String name) =>
+                  unawaited(_controller.send("就叫你「$name」吧")),
             ),
-          for (int i = 0; i < choices.length; i++)
-            _buildNameChoiceRow(
-              choices[i],
-              i < letters.length ? letters[i] : "·",
-              p,
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
 
-  /// 候选名一行：左侧 A/B/C 序号 + 名字，点整行即选中。
-  Widget _buildNameChoiceRow(String name, String letter, MobilePalette p) {
-    final bool dark = Theme.of(context).brightness == Brightness.dark;
+  /// 「正在输入」气泡（首启引导两泡之间的停顿）：与助手气泡同形同色，
+  /// 三点依次呼吸；下一泡落屏时它随之消失。
+  Widget _buildTypingBubble(MobilePalette p) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: Container(
+        margin: const EdgeInsets.symmetric(vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+        decoration: BoxDecoration(
+          color: p.assistantBubble,
+          borderRadius: const BorderRadius.only(
+            topLeft: Radius.circular(6),
+            topRight: Radius.circular(MobileTheme.bubbleRadius),
+            bottomLeft: Radius.circular(MobileTheme.bubbleRadius),
+            bottomRight: Radius.circular(MobileTheme.bubbleRadius),
+          ),
+        ),
+        child: _TypingDots(color: p.assistantBubbleText),
+      ),
+    );
+  }
+
+  /// 候选名一行（参考稿样式）：整行铺满的圆角块（页面底色 + divider 描边），
+  /// 点整行即选中。
+  Widget _buildNameChoiceRow(String name, MobilePalette p) {
     return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
+      padding: const EdgeInsets.only(bottom: 8),
       child: Material(
-        color: dark ? Colors.white.withValues(alpha: 0.04) : p.background,
-        borderRadius: BorderRadius.circular(10),
+        color: p.background,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: p.divider),
+        ),
         child: InkWell(
           borderRadius: BorderRadius.circular(10),
           onTap: () => unawaited(_controller.send("就叫你「$name」吧")),
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
-            child: Row(
-              children: <Widget>[
-                SizedBox(
-                  width: 18,
-                  child: Text(
-                    letter,
-                    style: TextStyle(
-                      color: p.textMuted,
-                      fontSize: 12,
-                    ),
-                  ),
+          child: SizedBox(
+            width: double.infinity,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 11),
+              child: Text(
+                name,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  color: p.textPrimary,
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
                 ),
-                Expanded(
-                  child: Text(
-                    name,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      color: p.textPrimary,
-                      fontSize: 14,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
-              ],
+              ),
             ),
           ),
         ),
@@ -1022,15 +1094,25 @@ class _MobileChatPageState extends State<MobileChatPage> {
                         runSpacing: 6,
                         alignment: WrapAlignment.end,
                         children: <Widget>[
-                          for (final Uint8List bytes in images)
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(8),
-                              child: Image.memory(
-                                bytes,
-                                width: 76,
-                                height: 76,
-                                fit: BoxFit.cover,
-                                gaplessPlayback: true,
+                          // 点击缩略图 → 全屏大图查看（缩放/多图滑动/页码）。
+                          // 用户图只有内存字节，走字节版查看页（无 URL）。
+                          for (int i = 0; i < images.length; i++)
+                            GestureDetector(
+                              onTap: () => showImagePreviewFullScreenFromBytes(
+                                ctx,
+                                images: images,
+                                index: i,
+                                source: "发出的照片",
+                              ),
+                              child: ClipRRect(
+                                borderRadius: BorderRadius.circular(8),
+                                child: Image.memory(
+                                  images[i],
+                                  width: 76,
+                                  height: 76,
+                                  fit: BoxFit.cover,
+                                  gaplessPlayback: true,
+                                ),
                               ),
                             ),
                         ],
@@ -1067,8 +1149,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
               )
             // 助手消息：复用桌面端同一共享渲染器，保证卡片 / 图文交错 /
             // [RENDER_AS] 标记等结构化内容与桌面端渲染效果完全一致；
-            // 并接入与桌面端共用的打字机逐字 reveal。
-            : _TypewriterAssistantBody(
+            // 正文整泡落屏，不做打字机逐字 reveal（2026-11-10 下线）。
+            : _AssistantBody(
                 message: m,
                 cs: Theme.of(context).colorScheme,
                 // 卡片动作：带 messageId 交给控制器——有 cardAction 的按钮走
@@ -1306,21 +1388,28 @@ class _MobileChatPageState extends State<MobileChatPage> {
 /// 与桌面端 chat_page._agentResult 同口径：优先从消息文本解析卡片标记
 /// （行程卡的权威通道——服务端确定性附卡写在 finalText 里）；blocks 信封
 /// 里的 card 块作兜底（text 通道被剥卡的历史消息仍能取到）。
-AgentResultData? _travelItineraryCardOf(ChatMessage m) {
-  if (m.role == "user") return null;
-  final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
-  if (parsed != null && parsed.cardType == "travel_itinerary") return parsed;
-  final List<Map<String, dynamic>>? blocks = m.replyBlocks;
-  if (blocks == null) return null;
-  for (final Map<String, dynamic> b in blocks) {
-    if ((b["type"]?.toString() ?? "") != "card") continue;
-    final Object? cardJson = b["card"];
-    if (cardJson is! Map<String, dynamic>) continue;
-    final AgentResultData data = AgentResultData.fromJson(cardJson);
-    if (data.cardType == "travel_itinerary") return data;
+  AgentResultData? _travelItineraryCardOf(ChatMessage m) {
+    if (m.role == "user") return null;
+    final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
+    if (parsed != null && parsed.cardType == "travel_itinerary") return parsed;
+    // 信封通道必须读：分泡活轮里卡片标记只写 finalText，各气泡的 text 只有
+    // 自己那段正文，行程卡只挂在末泡的 envelopeBlocks 上。此前这里只读
+    // replyBlocks，于是分泡轮的行程卡「正文被 excludeTravelCard 排除 + 这里
+    // 取不到」= 彻底消失。口径与 _reminderConfirmCardOf 保持一致。
+    for (final List<Map<String, dynamic>>? blocks
+        in <List<Map<String, dynamic>>?>[m.envelopeBlocks, m.replyBlocks]) {
+      if (blocks == null) continue;
+      for (final Map<String, dynamic> b in blocks) {
+        if ((b["type"]?.toString() ?? "") != "card") continue;
+        final Object? cardJson = b["card"];
+        if (cardJson is! Map) continue;
+        final AgentResultData data =
+            AgentResultData.fromJson(Map<String, dynamic>.from(cardJson));
+        if (data.cardType == "travel_itinerary") return data;
+      }
+    }
+    return null;
   }
-  return null;
-}
 
 /// 提取助手消息携带的 reminder_confirm 提醒确认卡（无则 null）。
 ///
@@ -1372,10 +1461,168 @@ bool _assistantBubbleHasVisibleText(ChatMessage m) {
   return false;
 }
 
-/// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器与
-/// [TypewriterReveal] 打字机控制器,保证两端结构与流式节奏一致。
-class _TypewriterAssistantBody extends StatefulWidget {
-  const _TypewriterAssistantBody({
+/// 取名卡末尾的「自己起个名字」输入框（2026-11-09 反馈）。
+///
+/// 候选名之外的另一条路：输入 1–12 字 → 回车或点右侧圆钮 → 以用户身份把
+/// 「就叫你「X」吧」发出去（与点选候选名走同一条发消息链路，改名仍由服务端
+/// 确定性管道落库，不额外开后门）。
+class _CustomNameInput extends StatefulWidget {
+  const _CustomNameInput({required this.palette, required this.onSubmit});
+
+  final MobilePalette palette;
+  final ValueChanged<String> onSubmit;
+
+  @override
+  State<_CustomNameInput> createState() => _CustomNameInputState();
+}
+
+class _CustomNameInputState extends State<_CustomNameInput> {
+  final TextEditingController _ctrl = TextEditingController();
+  bool _canSend = false;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    final String name = _ctrl.text.trim();
+    if (name.isEmpty) return;
+    _ctrl.clear();
+    setState(() => _canSend = false);
+    widget.onSubmit(name);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final MobilePalette p = widget.palette;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Container(
+        padding: const EdgeInsets.only(left: 12, right: 5, top: 3, bottom: 3),
+        decoration: BoxDecoration(
+          color: p.background,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: p.divider),
+        ),
+        child: Row(
+          children: <Widget>[
+            Expanded(
+              child: TextField(
+                controller: _ctrl,
+                maxLength: 12,
+                textInputAction: TextInputAction.done,
+                cursorColor: p.textPrimary,
+                style: TextStyle(color: p.textPrimary, fontSize: 14),
+                decoration: InputDecoration(
+                  isDense: true,
+                  counterText: "",
+                  border: InputBorder.none,
+                  hintText: "自己取一个…",
+                  hintStyle: TextStyle(color: p.textMuted, fontSize: 13.5),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 11),
+                ),
+                onChanged: (String v) {
+                  final bool now = v.trim().isNotEmpty;
+                  if (now != _canSend) setState(() => _canSend = now);
+                },
+                onSubmitted: (_) => _submit(),
+              ),
+            ),
+            const SizedBox(width: 6),
+            SizedBox(
+              width: 30,
+              height: 30,
+              child: Material(
+                color: _canSend ? p.accent : p.divider,
+                shape: const CircleBorder(),
+                child: InkWell(
+                  customBorder: const CircleBorder(),
+                  onTap: _canSend ? _submit : null,
+                  child: Icon(
+                    Icons.arrow_upward_rounded,
+                    size: 17,
+                    color: _canSend ? p.onAccent : p.textMuted,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 三点「正在输入」：依次呼吸，只在开场白两泡之间短暂出现。
+class _TypingDots extends StatefulWidget {
+  const _TypingDots({required this.color});
+
+  final Color color;
+
+  @override
+  State<_TypingDots> createState() => _TypingDotsState();
+}
+
+class _TypingDotsState extends State<_TypingDots>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 1080),
+  )..repeat();
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  /// 三角波（不引 dart:math）：相位错开 1/3 圈，透明度 0.3~0.9 呼吸。
+  double _opacityOf(int i) {
+    final double phase = (_c.value + i / 3) % 1.0;
+    final double wave =
+        phase < 0.5 ? phase * 2 : (1.0 - phase) * 2;
+    return 0.3 + 0.6 * wave;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (BuildContext context, _) {
+        return Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            for (int i = 0; i < 3; i++)
+              Padding(
+                padding: EdgeInsets.only(right: i == 2 ? 0 : 5),
+                child: Opacity(
+                  opacity: _opacityOf(i),
+                  child: Container(
+                    width: 6,
+                    height: 6,
+                    decoration: BoxDecoration(
+                      color: widget.color,
+                      shape: BoxShape.circle,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// 助手消息正文(手机端):与桌面端共用 [buildMessageBody] 渲染器，保证
+/// 卡片 / 图文交错 / [RENDER_AS] 标记等结构化内容渲染一致。
+/// 2026-11-10：打字机逐字 reveal 在手机端下线——分泡轮正文整泡落屏
+/// （由控制器按固定间隔逐泡揭示，观感是真人一条条发消息），
+/// 不再逐字放大、不再渲染打字光标。
+class _AssistantBody extends StatelessWidget {
+  const _AssistantBody({
     required this.message,
     required this.cs,
     this.onUserAction,
@@ -1394,60 +1641,21 @@ class _TypewriterAssistantBody extends StatefulWidget {
   final void Function(String prompt)? onFollowupTap;
 
   @override
-  State<_TypewriterAssistantBody> createState() =>
-      _TypewriterAssistantBodyState();
-}
-
-class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
-  late final TypewriterReveal _typewriter = TypewriterReveal(
-    widget.message.text,
-    animate: widget.message.streaming && widget.message.text.isNotEmpty,
-  );
-
-  @override
-  void initState() {
-    super.initState();
-    _typewriter.addListener(_onTypewriterChanged);
-  }
-
-  void _onTypewriterChanged() {
-    if (mounted) setState(() {});
-  }
-
-  @override
-  void didUpdateWidget(covariant _TypewriterAssistantBody oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (widget.message.text != oldWidget.message.text) {
-      _typewriter.updateTarget(widget.message.text);
-    }
-  }
-
-  @override
-  void dispose() {
-    _typewriter.dispose();
-    super.dispose();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final ChatMessage m = widget.message;
+    final ChatMessage m = message;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisSize: MainAxisSize.min,
       children: <Widget>[
         buildMessageBody(
           context,
-          widget.cs,
+          cs,
           m,
           isUser: false,
           // 卡片动作（选择型卡/chips）：与桌面端同协议回传 chat.user_action。
-          onUserAction: widget.onUserAction,
+          onUserAction: onUserAction,
           // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
-          onFollowupTap: widget.onFollowupTap,
-          // 打字机:流式消息用「已 reveal」前缀渲染,光标随打字闪烁。
-          typewriterRawText:
-              _typewriter.isPartial ? _typewriter.revealed : null,
-          typewriterCursor: _typewriter.isRevealing,
+          onFollowupTap: onFollowupTap,
           // 行程卡由消息行在气泡外独立渲染（与桌面端同款第二条消息形态）,
           // body 内不再重复,避免双份。
           excludeTravelCard: true,
@@ -1456,12 +1664,12 @@ class _TypewriterAssistantBodyState extends State<_TypewriterAssistantBody> {
           excludeCardTypes: const <String>["reminder_confirm"],
         ),
         // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
-        // 插在正在打字的正文下方实时展示；`chat.assistant_done` 后
+        // 插在正文下方实时展示；`chat.assistant_done` 后
         // 由 renderBlocks 的最终顺序接管（与桌面端一致）。
         if (m.pendingMediaCards != null && m.pendingMediaCards!.isNotEmpty)
           Padding(
             padding: const EdgeInsets.only(top: 8),
-            child: buildPendingMediaCards(m.pendingMediaCards!, widget.cs),
+            child: buildPendingMediaCards(m.pendingMediaCards!, cs),
           ),
       ],
     );

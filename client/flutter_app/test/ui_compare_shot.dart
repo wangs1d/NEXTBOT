@@ -474,27 +474,4 @@ void main() {
       ),
     );
   });
-
-  testWidgets("面板 C：打字机光标", (WidgetTester tester) async {
-    if (Platform.environment["UI_COMPARE"] == "1") {
-      return;
-    }
-    await _capturePanel(
-      tester,
-      name: "03-typewriter-cursor",
-      panelKey: "panel-c",
-      width: 720,
-      height: 190,
-      harness: () => _panel(
-        panelKey: "panel-c",
-        height: 190,
-        child: StructuredAssistantMessageBody(
-          text: "正在为你确认最后两晚的房态，稍等，马上把报价单整理出来。",
-          cs: AppTheme.of(AppThemeVariant.dark).colorScheme,
-          textTheme: _withEmojiFallback(AppTheme.of(AppThemeVariant.dark)).textTheme,
-          showCursor: true,
-        ),
-      ),
-    );
-  });
 }

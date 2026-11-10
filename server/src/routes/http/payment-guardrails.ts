@@ -1,5 +1,8 @@
 // HTTP 路由：支付护栏视图 + 代付回执（用户侧）
 //
+//   GET /api/payment/status           支付通道就绪状态（wechat/alipay 各自的
+//                                     mode + 凭证是否齐备；无任何用户数据，
+//                                     运维/部署自检用）
 //   GET /api/payment/guardrails        当前护栏（单笔上限/日预算/类别授权）+ 今日已用
 //   GET /api/payment/orders?limit=     最近代付订单（回执时间线，来自支付台账）
 //
@@ -9,10 +12,32 @@
 import type { FastifyInstance } from "fastify";
 
 import { resolveActorId } from "../../agent/actor-id.js";
-import { getPaymentGuardrailConfig } from "../../config/payment-config.js";
+import { getPaymentConfig, getPaymentGuardrailConfig } from "../../config/payment-config.js";
 import { getPaymentOrderLedger } from "../../services/payment-order-ledger.js";
+import { PaymentService } from "../../services/payment-service.js";
 
 export function registerPaymentGuardrailRoutes(app: FastifyInstance): void {
+  // 支付通道就绪自检（2026-11-10）：配置完 WECHAT_PAY_*/ALIPAY_* 后一眼确认
+  // 是否真的切到 live——mock 是默认值，凭证缺失也会静默回落 mock，肉眼从
+  // .env 根本看不出实际生效的是哪档。只暴露模式布尔值，不含任何密钥。
+  app.get("/api/payment/status", async () => {
+    const config = getPaymentConfig();
+    const paymentService = new PaymentService();
+    return {
+      ok: true,
+      wechat: {
+        configured: Boolean(config.wechatAppId && config.wechatMchId),
+        mode: paymentService.modeFor("wechat"),
+      },
+      alipay: {
+        configured: Boolean(config.alipayAppId && config.alipayPrivateKey),
+        mode: paymentService.modeFor("alipay"),
+      },
+      notifyBaseUrlSet: Boolean(config.paymentNotifyBaseUrl),
+      guardrails: getPaymentGuardrailConfig(),
+    };
+  });
+
   app.get("/api/payment/guardrails", async (request) => {
     const q = request.query as { userId?: string; sessionId?: string };
     const actorId = resolveActorId({ userId: q.userId, sessionId: q.sessionId ?? "" });

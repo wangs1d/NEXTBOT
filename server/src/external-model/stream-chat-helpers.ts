@@ -1452,7 +1452,19 @@ const SENTENCE_END_RE = /[。！？!?\n]/;
 const META_BACKSTAGE_RE =
   /(?:(?:系统|后台)[^。！？\n]{0,10}(?:配好|配了|排好|排了|设好|设了|设置|安排)[^。！？\n]{0,10}(?:提醒|备忘|闹钟|预告)|[一二三四五两]级提醒)/;
 const META_DECISION_HARD_RE =
-  /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|已注入[^。！？\n]{0,10}(?:提示|时间|上下文)|\[系统注入\]|\[system[-_ ]?context\]|（system注入）|已为你联网检索|已为你查到|已联网检索到|调用\s*clock)/;
+  /(根据(?:规范|规则|要求)|按照(?:规范|规则|要求)|遵守(?:规范|规则)|遵循(?:规范|规则)|强制(?:调用)?规则|必须调用|应当调用|禁止臆测|系统已注入|已注入[^。！？\n]{0,10}(?:提示|时间|上下文)|\[系统注入\]|\[system[-_ ]?context\]|（system注入）|调用\s*clock)/;
+/** 完成宣告（2026-11-09 从 HARD_RE 拆出）：「已为你查到 / 已为你联网检索 /
+ *  已联网检索到」是正常回复的开头（「已为你查到3个航班了」），单命中即删会把
+ *  带数据的正常句整句删成空轮（stream-chat-helpers 误杀事故）。改为**纯宣告才删**：
+ *  去掉宣告词与标点/语气词后剩余内容 ≤ META_ANNOUNCE_MAX_REMAINDER 字 → 删；
+ *  有数据一律放行（宁误放不误删——误删是空轮，误放最多一句多余宣告）。
+ */
+const META_COMPLETION_ANNOUNCE_RE = /(已为你联网检索|已为你查到|已联网检索到)/;
+/** 纯宣告尾语白名单：宣告词之后的剩余内容只有这些「无数据承接语」（或为空）才删。
+ *  带任何其他内容（「3个航班」「明天多云」）一律放行——误删是空轮，误放最多
+ *  一句多余宣告。 */
+const META_ANNOUNCE_TAIL_RE =
+  /^(?:正在整理|正在汇总|正在准备|请稍等|请稍候|稍等一下|稍等|马上来|马上好|请看|请看上面|如下|整理好了|好了)*$/u;
 /** 软判据：整句就是一句光秃秃的动作宣告（「直接调用。」「先调用工具。」），
  *  只在整句≤8 字且没有别的内容时删——避免误伤「直接调用这个接口就行」这类正文。 */
 const META_DECISION_SOFT_RE =
@@ -1468,6 +1480,13 @@ function isMetaDecisionSentence(sentence: string): boolean {
   if (!raw) return false;
   if (raw.length > META_DECISION_MAX_CHARS) return false;
   if (CODE_CONTEXT_RE.test(raw)) return false;
+  // 完成宣告（2026-11-09 从单命中即删改为纯宣告才删）：带数据的正常句放行
+  if (META_COMPLETION_ANNOUNCE_RE.test(raw)) {
+    const remainder = raw
+      .replace(/已为你联网检索|已为你查到|已联网检索到/g, "")
+      .replace(/[，,。．！？!?、：:；;\s了啦哦嗯呢～~]+/gu, "");
+    return META_ANNOUNCE_TAIL_RE.test(remainder) || !remainder;
+  }
   // 比较前剥掉句末标点与括号（「直接调用。」→「直接调用」）
   const bare = raw.replace(/^[\s（(【\[]+|[\s。！？!?：:，,、）)】\]\n]+$/gu, "");
   if (!bare) return false;

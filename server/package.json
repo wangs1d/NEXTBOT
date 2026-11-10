@@ -29,7 +29,8 @@
     "eval:turn-accuracy": "node test/tools/eval-turn-accuracy.mjs",
     "eval:neural-ab": "tsx scripts/compare-neural-ab.ts",
     "bench:tool-chain": "tsx scripts/bench-tool-chain.ts",
-    "eval:dispatch-tag": "tsx scripts/eval-dispatch-tag.ts"
+    "eval:dispatch-tag": "tsx scripts/eval-dispatch-tag.ts",
+    "migrate:library": "tsx scripts/migrate-library-assets.ts"
   },
   "dependencies": {
     "@fastify/cors": "^11.2.0",

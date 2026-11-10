@@ -87,7 +87,7 @@ function execOnce(cmd: string, args: string[], timeoutMs: number): Promise<ExecO
  * Windows cmd.exe 的「不是内部或外部命令」是 GBK 编码，按 UTF-8 解码成乱码后
  * 文本匹配永远失败）。返回绝对路径；找不到返回 null。
  */
-function resolveFlyAiBin(bin: string): string | null {
+export function resolveFlyAiBin(bin: string): string | null {
   if (bin.includes("\\") || bin.includes("/")) {
     return existsSync(bin) ? bin : null;
   }

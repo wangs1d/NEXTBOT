@@ -1,15 +1,17 @@
 /**
  * 明日预览数据面桥（2026-11-05 接生产投递）。
  *
- * 背景：明日预览的确定性渲染器（render/scenes/tomorrow-preview.scene.ts）此前只在
- * 探针里可用——生产链路没有任何调用方注入 `payloads.eveningDigest`，所以场景永远
- * 不命中。本桥是「数据持有者」与「渲染出口」之间的唯一接口：
+ * 背景：明日预览场景（render/scenes/tomorrow-preview.scene.ts）此前只在探针里可用——
+ * 生产链路没有任何调用方注入 `payloads.eveningDigest`，所以场景永远不命中。
+ * 本桥是「数据持有者」与「场景数据面」之间的唯一接口：
  *
  *   装配层 registerPreviewDigestSource(取数口)
  *        ↓
  *   聊天出口 resolvePreviewPayloads(sessionId, userText)
  *        ↓ 命中明日意图且拿到当日 digest
- *   tool-result-processor → decideRender({ payloads }) → tomorrow_preview 场景
+ *   planPreRenderScene({ payloads }) → tomorrow_preview.promptBoundaryFor
+ *        ↓
+ *   事实块随 prompt 注入，正文由模型自己写（2026-11-09：不再接管正文）
  *
  * 设计约束：
  *   1. **绝不阻塞主对话**：取数超过 PREVIEW_PAYLOAD_TIMEOUT_MS 就放弃注入，

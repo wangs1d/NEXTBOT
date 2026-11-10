@@ -13,7 +13,7 @@
 //  - 模型钉位：BRANCH_CONDENSE_MODEL > PROACTIVITY_MODEL > provider 默认
 //
 // 设计红线：本器是入站信号处理器，只加工"要上报的内容"；绝不碰对话正文与已流式
-// 输出（出口闸铁律）。
+// 输出（已流式即定稿）。
 import { createHash } from "node:crypto";
 
 import type { ExternalChatProvider } from "../../external-model/types.js";

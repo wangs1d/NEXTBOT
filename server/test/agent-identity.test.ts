@@ -160,6 +160,13 @@ test("identity: 未注册账号时改名 = 自助注册（给自己取网络名�
   assert.ok(account);
   assert.equal(account.displayName, "17赫兹");
   assert.equal(account.setupComplete, true);
+
+  // 5) 叙事记忆：只有 displayName、没有 handle 时不许拼出「（@）」残括号
+  //    （2026-11-09 真实数据里出现过「用户为我取名「17赫兹」（@）」）
+  await memorySync.flush();
+  const summary = String(memorySync.getSnapshot(actorId, ["memory_summary"]).entries["memory_summary"] ?? "");
+  assert.match(summary, /取名「17赫兹」/);
+  assert.ok(!summary.includes("（@）"), `叙事行残留空 handle 括号: ${summary}`);
 });
 
 test("identity: prefs 落盘持久化（重启不丢名字）", async () => {

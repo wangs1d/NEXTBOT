@@ -115,7 +115,10 @@ class AmbientFeedsController {
         // 时跳过：到点气泡经 schedule_reminder 主动消息即刻落进对话流，
         // 视内可见无需再通知。
         // 单文案制：标题即全部内容，body 留空避免系统通知里自我重复。
-        if (!(isChatTabActive?.call() ?? false)) {
+        // 2026-11-10 修复：正停在对话页但 App 已切后台时，「气泡落流」用户
+        // 根本看不见（进程可能被冻结后恢复，视内早已不可见）——后台一律发
+        // 系统通知；前台保持原跳过逻辑（对话页视内可见，无需通知）。
+        if (!(isChatTabActive?.call() ?? false) || _backgrounded) {
           unawaited(LocalNotificationService.show(title: text, body: ""));
         }
       } else {

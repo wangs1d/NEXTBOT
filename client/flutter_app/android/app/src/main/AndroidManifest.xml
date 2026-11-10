@@ -60,6 +60,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
+    <!-- specialUse（API 34+）：保活前台服务规避 dataSync 6h/24h 强停限额 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"/>
     <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"/>
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED"/>
 
@@ -73,6 +75,8 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -131,11 +135,16 @@
             </intent-filter>
         </service>
 
-        <!-- 消息桥接前台服务：常驻通知保活 WS 桥接与消息上报、定位低频回传 -->
+        <!-- 消息桥接前台服务：常驻通知保活主聊天 WS、桥接 WS 与消息上报、定位低频回传；
+             API 34+ 以 specialUse 类型启动（规避 dataSync 限额） -->
         <service
             android:name=".MessageBridgeForegroundService"
             android:exported="false"
-            android:foregroundServiceType="dataSync|location"/>
+            android:foregroundServiceType="dataSync|location|specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="keep_agent_chat_websocket_alive_in_background"/>
+        </service>
 
         <!-- 远程拍照：camera 类型前台服务 + CameraX -->
         <service
@@ -200,6 +209,11 @@
         <intent>
             <action android:name="android.intent.action.PROCESS_TEXT"/>
             <data android:mimeType="text/plain"/>
+        </intent>
+        <!-- Android 11+ 包可见性：TextToSpeech 需能解析系统 TTS 引擎，
+             否则语音叫醒的系统 TTS 降级会静默失败（2026-11-09） -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE"/>
         </intent>
     </queries>
 </manifest>

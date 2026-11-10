@@ -525,7 +525,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
         if (!ephemeral) {
           // 回写工具循环新增的消息（assistant tool_calls / tool 结果 / 规划注入）到线程。
           // 循环操作的是视图副本；这里按边界 + 对象身份只回写新增，剥离克隆不入线程。
-          // 轮内脚手架（域卡/时间轴/请求卡与出口闸的转向指令）同样排除：它们只对
+          // 轮内脚手架（域卡/时间轴/请求卡等转向指令）同样排除：它们只对
           // 本轮请求有效，落库会变成每轮重发的大块死 token + 前缀漂移源
           // （2026-10-22 实测：8,266 字符域卡常驻历史，历史段缓存 0 命中）。
           if (llmViewAppendBoundary >= 0) {

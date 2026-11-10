@@ -1,15 +1,23 @@
-/// 真·分绿泡（2026-09-28）：MobileChatController 分泡链路测试。
+/// 真·分绿泡（2026-09-28，2026-11-10 改版）：MobileChatController 分泡链路测试。
+///
+/// 2026-11-10 节奏改版：分泡 chunk 只进缓冲不直接落屏，泡完成（下一泡开 /
+/// done 收口）才入揭示队列按 ≥600ms 间隔逐泡整条弹出——打字机效果下线，
+/// 观感是助手像真人一样一条一条发消息。
 ///
 /// 覆盖：
-/// - 分泡 chunk 组装：占位让位、新泡开=旧泡完、逐泡累积
-/// - done 对账：服务端文本为准、漏收补建、卡片挂末泡、多泡 text 块过滤
-/// - 塌缩：finalTextReplacesStream 删泡落单泡
+/// - 分泡 chunk 缓冲：流式期间不落屏、旧泡完成入队、flush 后按序整泡落屏
+/// - done 对账：服务端文本为准、漏收补建（走揭示队列）、卡片挂末泡、
+///   多泡 text 块过滤、占位泡撤除
+/// - 塌缩：finalTextReplacesStream 删泡落单泡（含占位让位防 id 撞车）
 /// - 回归：非分泡单泡链路行为不变
+/// - 跨轮隔离：他轮 trace 的缓冲泡不受本轮 done 影响
+library;
+
 import "dart:io";
 
+import "package:fake_async/fake_async.dart";
 import "package:flutter_test/flutter_test.dart";
 
-import "package:nextbot/core/models/chat_models.dart";
 import "package:nextbot/mobile_ui/mobile_chat_controller.dart";
 
 /// 本地 WebSocket 服务器：控制器构造即连接，连不上会走重连定时器并触发
@@ -79,7 +87,7 @@ void main() {
         "payload": <String, dynamic>{"traceId": traceId},
       };
 
-  test("分泡 chunk 组装：占位让位、两泡独立、旧泡先定稿", () {
+  test("分泡 chunk 组装：流式只缓冲不落屏，flush 后按序整泡弹出", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(turnStarted());
@@ -87,23 +95,28 @@ void main() {
     expect(c.messages.first.streaming, isTrue);
 
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "哎，在呢。"));
-    expect(c.messages.length, 1, reason: "空占位让位给第一泡");
-    expect(c.messages.first.messageId, "assistant-trace-1-b1");
-    expect(c.messages.first.text, "哎，在呢。");
-    expect(c.messages.first.streaming, isTrue);
+    expect(c.messages.length, 1,
+        reason: "流式泡不直接落屏，正文在缓冲里；占位泡继续展示生成中");
+    expect(c.messages.first.messageId, "assistant-trace-1");
 
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "还没睡吧？"));
-    expect(c.messages.first.text, "哎，在呢。还没睡吧？", reason: "同泡 chunk 续写");
+    expect(c.messages.length, 1, reason: "同泡 chunk 继续缓冲");
 
     c.debugHandleWsEvent(chunk("assistant-trace-1-b2", "有什么事？"));
-    expect(c.messages.length, 2);
-    expect(c.messages[0].streaming, isFalse, reason: "新泡开=旧泡完");
-    expect(c.messages[1].messageId, "assistant-trace-1-b2");
-    expect(c.messages[1].text, "有什么事？");
-    expect(c.messages[1].streaming, isTrue);
+    expect(c.messages.length, 1, reason: "b1 完成入队未揭示，b2 开始缓冲");
+
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 3, reason: "占位 + 两泡按序落屏");
+    expect(c.messages[1].messageId, "assistant-trace-1-b1");
+    expect(c.messages[1].text, "哎，在呢。还没睡吧？",
+        reason: "同泡 chunk 缓冲拼接");
+    expect(c.messages[1].streaming, isFalse, reason: "整泡落屏即定稿");
+    expect(c.messages[2].messageId, "assistant-trace-1-b2");
+    expect(c.messages[2].text, "有什么事？");
+    expect(c.messages[2].streaming, isFalse);
   });
 
-  test("done 对账：逐泡定稿、服务端文本为准、多泡块只留非 text 块", () {
+  test("done 对账：逐泡定稿、服务端文本为准、占位撤除、多泡块只留非 text 块", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "哎，在呢。"));
@@ -119,9 +132,12 @@ void main() {
         <String, dynamic>{"type": "card", "card": <String, dynamic>{"kind": "x"}},
       ],
     ));
-    expect(c.messages.length, 2);
+    expect(c.messages.where((m) => _isBubbleMsg(m.messageId)).length, 0,
+        reason: "done 后泡还在揭示队列里，尚未落屏");
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 2, reason: "占位被 done 撤除，两泡落屏");
     expect(c.messages.every((m) => !m.streaming), isTrue, reason: "全部定稿");
-    expect(c.messages[0].text, "哎，在呢。");
+    expect(c.messages[0].text, "哎，在呢。", reason: "服务端对账文本为准");
     expect(c.messages[1].text, "有什么事？");
     // 卡片挂末泡，text 块被过滤（防整段复读）
     expect(c.messages[0].replyBlocks, isNull);
@@ -131,7 +147,7 @@ void main() {
     expect(c.isProcessing, isFalse);
   });
 
-  test("done 对账：漏收 b2 chunk 时按对账补建", () {
+  test("done 对账：漏收 b2 chunk 时按对账走揭示队列补建", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "在呢。"));
@@ -141,13 +157,16 @@ void main() {
         <String, dynamic>{"id": "assistant-trace-1-b2", "text": "说吧。"},
       ],
     ));
-    expect(c.messages.length, 2, reason: "b2 补建");
+    expect(c.messages.where((m) => _isBubbleMsg(m.messageId)).length, 0,
+        reason: "补建泡先进揭示队列，按间隔弹出");
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 2, reason: "b2 补建落屏");
     expect(c.messages[1].messageId, "assistant-trace-1-b2");
     expect(c.messages[1].text, "说吧。");
     expect(c.messages[1].streaming, isFalse);
   });
 
-  test("塌缩：finalTextReplacesStream 删全部分泡落单泡", () {
+  test("塌缩：finalTextReplacesStream 删全部分泡落单泡（占位让位不撞 id）", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "旧版说法一。"));
@@ -160,13 +179,15 @@ void main() {
         <String, dynamic>{"id": "assistant-trace-1-b2", "text": "旧版说法二。"},
       ],
     ));
-    expect(c.messages.length, 1, reason: "分泡全部删除，只落塌缩单泡");
+    expect(c.messages.length, 1, reason: "分泡（含占位）全部删除，只落塌缩单泡");
     expect(c.messages.first.messageId, "assistant-trace-1");
     expect(c.messages.first.text, "重写后的完整新版本回复。");
     expect(c.messages.first.streaming, isFalse);
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 1, reason: "塌缩后揭示队列已清空，不弹旧泡");
   });
 
-  test("分泡轮 media_ready 挂当前泡，不开幻影占位", () {
+  test("分泡轮 media_ready 挂占位泡，不开幻影占位", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "找了几张图。"));
@@ -181,11 +202,11 @@ void main() {
         ],
       },
     });
-    expect(c.messages.length, 1, reason: "不得新建 assistant-trace-1 占位");
+    expect(c.messages.length, 1, reason: "流式锚点占位已存在，不得新建");
     expect(c.messages.first.pendingMediaCards, isNotNull);
   });
 
-  test("照片同一时刻只挂一条消息：新泡开时顺移，done 后只由末泡渲染一次", () {
+  test("照片流式挂占位、done 后清空，最终卡片只挂末泡渲染一次", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "我去找几张。"));
@@ -201,9 +222,8 @@ void main() {
       },
     });
     expect(c.messages.first.pendingMediaCards, isNotNull, reason: "流式阶段先展示");
-    c.debugHandleWsEvent(chunk("assistant-trace-1-b2", "给你挑了两张。"));
-    expect(c.messages[0].pendingMediaCards, isNull, reason: "旧泡定稿必须交还照片");
-    expect(c.messages[1].pendingMediaCards, isNotNull, reason: "照片顺移到当前流式泡，全程只有一条消息持有");
+    expect(c.messages.where((m) => m.pendingMediaCards != null).length, 1,
+        reason: "照片同一时刻只挂一条消息（流式锚点占位）");
     c.debugHandleWsEvent(done(
       finalText: "我去找几张。给你挑了两张。",
       bubbles: <Map<String, dynamic>>[
@@ -215,11 +235,12 @@ void main() {
         <String, dynamic>{"type": "image", "title": "b"},
       ],
     ));
-    expect(c.messages.length, 2);
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 2, reason: "占位撤除，两泡落屏");
     expect(
       c.messages.every((m) => m.pendingMediaCards == null),
       isTrue,
-      reason: "done 后早推临时照片必须清空，否则同一批照片挂在旧泡+末泡被渲染两次",
+      reason: "done 后流式临时照片必须清空，否则同一批照片挂两处被渲染两次",
     );
     expect(c.messages[1].mediaCards!.length, 2, reason: "最终卡片只挂末泡一次");
   });
@@ -241,8 +262,7 @@ void main() {
     expect(c.messages.first.streaming, isFalse);
   });
 
-  test("ChatMessage 分泡 id 与 trace 提取（同桌面端正则语义）", () {
-    // 通过补建路径间接验证 id 解析：非同 trace 的泡不互相干扰
+  test("跨轮隔离：他轮 trace 的缓冲泡不受本轮 done 收口影响", () {
     final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
     addTearDown(c.dispose);
     c.debugHandleWsEvent(chunk("assistant-trace-A-b1", "A 轮第一泡。"));
@@ -253,9 +273,72 @@ void main() {
         <String, dynamic>{"id": "assistant-trace-A-b1", "text": "A 轮第一泡。"},
       ],
     ));
-    // trace-B 的流式泡不应被 trace-A 的 done 定稿或删除
+    c.debugFlushBubbleReveals();
+    expect(c.messages.length, 1, reason: "A 轮泡落屏；B 轮泡仍在缓冲中不落屏");
+    expect(c.messages.first.messageId, "assistant-trace-A-b1");
+    expect(c.messages.first.streaming, isFalse);
+
+    // B 轮自己的 done 收口后，B 泡才走自己的揭示队列落屏
+    c.debugHandleWsEvent(done(
+      traceId: "trace-B",
+      bubbles: <Map<String, dynamic>>[
+        <String, dynamic>{"id": "assistant-trace-B-b1", "text": "B 轮第一泡。"},
+      ],
+    ));
+    c.debugFlushBubbleReveals();
     expect(c.messages.length, 2);
     expect(c.messages[1].messageId, "assistant-trace-B-b1");
-    expect(c.messages[1].streaming, isTrue, reason: "他轮泡不受本轮收口影响");
+    expect(c.messages[1].text, "B 轮第一泡。");
+    expect(c.messages[1].streaming, isFalse);
+  });
+
+  test("揭示泵：泡整条落屏、done 后末泡按间隔补排（fakeAsync 计时）", () {
+    fakeAsync((FakeAsync async) {
+      final MobileChatController c = MobileChatController(wsBaseUrl: wsUrl());
+      c.debugHandleWsEvent(chunk("assistant-trace-1-b1", "第一泡。"));
+      c.debugHandleWsEvent(chunk("assistant-trace-1-b2", "第二泡。"));
+      // b1 完成（b2 开）即入队；事件循环转起来之前不落屏
+      expect(
+        c.messages.where((m) => m.messageId.endsWith("-b1")).length,
+        0,
+        reason: "定时器未触发，泡不落屏",
+      );
+      async.elapse(const Duration(milliseconds: 50));
+      expect(
+        c.messages.where((m) => m.messageId == "assistant-trace-1-b1").length,
+        1,
+        reason: "队首泡整条落屏（不做逐字打字）",
+      );
+      expect(
+        c.messages
+            .firstWhere((m) => m.messageId == "assistant-trace-1-b1")
+            .streaming,
+        isFalse,
+        reason: "整泡落屏即定稿",
+      );
+      expect(
+        c.messages.where((m) => m.messageId.endsWith("-b2")).length,
+        0,
+        reason: "b2 未完成（无下一泡/done），仍缓冲",
+      );
+      c.debugHandleWsEvent(done(
+        finalText: "第一泡。第二泡。",
+        bubbles: <Map<String, dynamic>>[
+          <String, dynamic>{"id": "assistant-trace-1-b1", "text": "第一泡。"},
+          <String, dynamic>{"id": "assistant-trace-1-b2", "text": "第二泡。"},
+        ],
+      ));
+      async.elapse(const Duration(seconds: 2));
+      expect(
+        c.messages.where((m) => m.messageId == "assistant-trace-1-b2").length,
+        1,
+        reason: "done 收口后末泡按间隔整泡落屏",
+      );
+      c.dispose();
+    });
   });
 }
+
+/// 判定消息 id 是否为分泡 id（与控制器内 `_isBubbleId` 同正则语义）。
+bool _isBubbleMsg(String messageId) =>
+    RegExp(r"^assistant-(.+)-b(\d+)$").hasMatch(messageId);

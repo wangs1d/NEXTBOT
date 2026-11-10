@@ -1,6 +1,6 @@
 import { getDataDir } from "../../config/data-dir.js";
 import { randomUUID } from "crypto";
-import { readFile, writeFile, mkdir } from "fs/promises";
+import { readFile, writeFile, mkdir, rename } from "fs/promises";
 import { dirname, join } from "path";
 import type {
   ReminderLevel,
@@ -67,7 +67,16 @@ export class UserResponsePersistenceService {
   async load(): Promise<void> {
     try {
       const raw = await readFile(this.persistPath, "utf8");
-      this.data = JSON.parse(raw) as PersistedData;
+      // 进程被强杀/磁盘满时可能留下 0 字节文件，不能让它把整个服务启动带崩
+      if (!raw.trim()) {
+        console.warn("[UserResponsePersistence] 数据文件为空，按空库启动");
+        return;
+      }
+      const parsed = JSON.parse(raw) as Partial<PersistedData>;
+      this.data = {
+        responses: Array.isArray(parsed.responses) ? parsed.responses : [],
+        analytics: parsed.analytics ?? {},
+      };
       console.log(
         `[UserResponsePersistence] Loaded ${this.data.responses.length} records, ${Object.keys(this.data.analytics).length} users`,
       );
@@ -75,6 +84,15 @@ export class UserResponsePersistenceService {
       const err = e as NodeJS.ErrnoException;
       if (err.code === "ENOENT") {
         console.log("[UserResponsePersistence] No existing data file, starting fresh");
+        return;
+      }
+      if (e instanceof SyntaxError) {
+        // 截断的 JSON：备份损坏文件后按空库启动，避免无人工干预起不来
+        const backup = `${this.persistPath}.corrupt-${Date.now()}`;
+        await rename(this.persistPath, backup).catch(() => undefined);
+        console.warn(
+          `[UserResponsePersistence] 数据文件无法解析，已备份为 ${backup}，按空库启动`,
+        );
         return;
       }
       throw err;

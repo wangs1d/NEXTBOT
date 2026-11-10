@@ -81,6 +81,21 @@ class LocalNotificationService {
     String? deliveryId,
   }) async {
     if (!_initialized) return;
+    // Android 13+ 通知权限未授权时，插件的 show 是静默 no-op——用户侧表现
+    // 即「后台触达全盲但毫无日志」。这里显式探测一次并打日志，便于诊断。
+    if (Platform.isAndroid) {
+      try {
+        final PermissionStatus status = await Permission.notification.status;
+        if (!status.isGranted) {
+          debugPrint(
+              "[local-notification] permission=$status 通知不会展示"
+              "（系统设置里需开启 App 通知权限）");
+          return;
+        }
+      } catch (e) {
+        debugPrint("[local-notification] permission probe failed: $e");
+      }
+    }
     const AndroidNotificationDetails androidDetails =
         AndroidNotificationDetails(
       "proactive",

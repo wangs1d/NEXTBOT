@@ -15,8 +15,6 @@ export {
 
 export {
   needsToolChoiceRequired,
-  turnSuggestsToolNeed,
-  resolveExplicitActionTool,
 } from "./forced-tool.js";
 
 export {

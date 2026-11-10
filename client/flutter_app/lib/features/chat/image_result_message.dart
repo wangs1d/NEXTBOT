@@ -26,13 +26,11 @@ class ImageResultMessage extends StatelessWidget {
     required this.text,
     required this.cs,
     required this.textTheme,
-    this.showCursor = false,
   });
 
   final String text;
   final ColorScheme cs;
   final TextTheme textTheme;
-  final bool showCursor;
 
   static final RegExp _payloadBlock = RegExp(
     r"\[IMAGE_RESULT_START\]([\s\S]*?)\[IMAGE_RESULT_END\]",
@@ -170,7 +168,7 @@ class ImageResultMessage extends StatelessWidget {
 
     final bool hasContent =
         photoCardMode || urls.isNotEmpty || textOnly.isNotEmpty;
-    if (!hasContent && !showCursor) {
+    if (!hasContent) {
       return const SizedBox.shrink();
     }
 
@@ -316,17 +314,6 @@ class ImageResultMessage extends StatelessWidget {
               const SizedBox(height: 8),
             ...formatContentSummaryDetailLines(bodyAfterPhotos, cs, textTheme),
           ],
-          if (showCursor)
-            Padding(
-              padding: const EdgeInsets.only(top: 2),
-              child: Text(
-                "▍",
-                style: bodyStyle.copyWith(
-                  color: cs.primary,
-                  fontWeight: FontWeight.w700,
-                ),
-              ),
-            ),
         ],
       ),
     );

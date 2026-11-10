@@ -15,10 +15,11 @@ import { decideRender } from "./src/render/decide.js";
 import { applyBodyForm } from "./src/render/body.js";
 import { applyCards, collectCardPayloads } from "./src/render/cards.js";
 import { SceneRegistry, sceneRegistry } from "./src/render/scenes/registry.js";
-import { renderTomorrowPreviewMarkdown } from "./src/render/scenes/tomorrow-preview.scene.js";
+import { renderTomorrowPreviewFacts } from "./src/render/scenes/tomorrow-preview.scene.js";
 import { auditResultCards } from "./src/render/scenes/result-card.scene.js";
-import { collectRoundupItems, renderRoundupMarkdown } from "./src/render/scenes/digest-roundup.scene.js";
+import { collectRoundupItems, renderRoundupFacts } from "./src/render/scenes/digest-roundup.scene.js";
 import { listSceneContracts } from "./src/render/scenes/plan.js";
+import { planPreRenderScene } from "./src/render/scenes/index.js";
 import {
   registerPreviewDigestSource,
   resolvePreviewPayloads,
@@ -90,7 +91,7 @@ const digest = {
   deadlineReminders: [{ title: "交实验报告", dueAt: "11-06" }],
   importantDays: [{ label: "妈妈生日", daysUntil: 3 }],
 };
-const renders = [1, 2, 3].map(() => renderTomorrowPreviewMarkdown(digest));
+const renders = [1, 2, 3].map(() => renderTomorrowPreviewFacts(digest));
 console.log(`三次输出逐字节一致：${renders[0] === renders[1] && renders[1] === renders[2]}  长度：${renders[0].length} 字`);
 console.log(renders[0]);
 
@@ -101,8 +102,11 @@ const preview = run({
 });
 console.log(
   `\n场景：${preview.decision.scene?.id}  正文形态：${preview.decision.body.form}  ` +
-    `正文来自渲染器：${Boolean(preview.decision.text)}  模型原稿被替换：${!String(preview.decision.text).includes("模型原稿")}`,
+    `场景接管正文：${preview.decision.text !== undefined}（新口径应为 false）  ` +
+    `模型原稿原样保留：${String(preview.out).includes("模型原稿")}`,
 );
+console.log("—— 用户可见 ——");
+console.log(String(preview.out).split("\n").map((l) => `   ${l}`).join("\n"));
 
 // ── 2b. 生产投递（2026-11-05 接生产链路：桥 → 渲染出口）───────────────────
 line();
@@ -130,13 +134,11 @@ for (const text of intentCases) {
     `\n   注入载荷：${Object.keys(payloads ?? {}).join(",")}  场景：${decision.scene?.id}  ` +
       `正文形态：${decision.body.form}`,
   );
-  console.log(`   模型原稿被渲染器替换：${!String(decision.text ?? "").includes("模型原稿")}`);
-  console.log("   —— 用户可见 ——");
+  console.log(`   场景接管正文：${decision.text !== undefined}（新口径应为 false）`);
+  const pre = planPreRenderScene({ userText: "明天什么安排", payloads });
+  console.log("   —— 生成前注入 prompt 的边界 ——");
   console.log(
-    String(decision.text ?? "")
-      .split("\n")
-      .map((l) => `   ${l}`)
-      .join("\n"),
+    pre.boundaries.join("\n").split("\n").map((l) => `   ${l}`).join("\n"),
   );
 }
 
@@ -213,7 +215,7 @@ console.log(`四种写法的清单逐字节一致：${new Set(shapes).size === 1
 console.log("—— 用户可见（以「只写语气」为例）——");
 console.log(String(run({ text: variants[0][1], userText: "她最近有什么动态", effects: roundupEffects }).decision.text ?? "")
   .split("\n").map((l) => `   ${l}`).join("\n"));
-console.log(`渲染器直出（无模型参与）：\n${renderRoundupMarkdown(collectRoundupItems({ text: "", effects: roundupEffects }))
+console.log(`事实行（注入 prompt，正文由模型写）：\n${renderRoundupFacts(collectRoundupItems({ text: "", effects: roundupEffects }))
   .split("\n").map((l) => `   ${l}`).join("\n")}`);
 
 // ── 5. 扩展性 ──────────────────────────────────────────────────────────────

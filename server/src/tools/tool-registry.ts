@@ -145,7 +145,6 @@ const CACHEABLE_TOOLS = new Set([
   "internet.live_check",
   "internet.verify",
   "search_web",
-  "search_images",
   "search_videos",
   "fetch_web",
   "info.inspect_webpage",
@@ -155,6 +154,13 @@ const CACHEABLE_TOOLS = new Set([
   // 注意：用户维度只读工具（wallet.get_*/calendar.list_tasks/brain.recall/
   // perception.overview 等）故意不进——缓存键只有 name+input，跨 actor 复用
   // 会串台；actor 无关的全网热搜才安全。
+  //
+  // search_images / search_images_batch 故意不进（2026-11-09 用户真机反馈）：
+  // 缓存键只有 name+input、TTL 60s，于是「再来几张」这种同 query 的追轮会直接
+  // 命中上一轮缓存，把**同一批 4 张图**原样再发一遍（用户侧就是「返回了前面已经
+  // 返回过的照片」）。图片结果天生是「要给下一批」的语义，同参追轮必须在
+  // UpstreamSearchService 里重跑 + 会话级去重（services/media-shown-ledger.ts），
+  // 不能复用上一轮的结果。同轮并行重复调用由工具循环的 turnDedupeCache 兜住。
 ]);
 
 /** 生成工具缓存键 */

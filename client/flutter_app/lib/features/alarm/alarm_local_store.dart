@@ -57,16 +57,34 @@ class AlarmLocalStore {
   Alarm? get(String id) => _alarms[id];
 
   /// 跨设备同步 upsert（服务端为事实源）
+  ///
+  /// 下行不一定每次都带语音（如 cancel/贪睡后的一次纯状态同步），此时沿用本地
+  /// 已缓存的音频，避免把上一步预置的叫醒语音洗掉。
   Future<Alarm> upsertFromServer(Alarm alarm) async {
+    final prev = _alarms[alarm.id];
+    if (prev != null) {
+      alarm.ttsBase64 ??= prev.ttsBase64;
+      alarm.voiceText ??= prev.voiceText;
+    }
     _alarms[alarm.id] = alarm;
     await _flush();
     return alarm;
+  }
+
+  /// 「用完即删除」：音频已交给原生层私有文件后，本地 JSON 不再长期存大 base64。
+  /// 只清 ttsBase64；voiceText 是文本话术，保留给系统 TTS 兜底。
+  Future<void> clearVoice(String id) async {
+    final a = _alarms[id];
+    if (a == null || a.ttsBase64 == null) return;
+    a.ttsBase64 = null;
+    await _flush();
   }
 
   Future<void> cancel(String id) async {
     final a = _alarms[id];
     if (a == null) return;
     a.status = AlarmStatus.canceled;
+    a.ttsBase64 = null;
     await _flush();
   }
 
@@ -84,6 +102,8 @@ class AlarmLocalStore {
       a.status = AlarmStatus.done;
       a.nextFireAt = null;
     }
+    // 这一跳已经响过：本地库不再留音频字节（重复闹钟下一跳由服务端重新实时生成）
+    a.ttsBase64 = null;
     await _flush();
   }
 

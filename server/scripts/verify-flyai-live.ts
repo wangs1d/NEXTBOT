@@ -18,11 +18,25 @@ const ctx: ToolContext = { sessionId: "verify-flyai-live", userId: "u-verify" };
 
 async function main() {
   const aggregator = buildQuoteAggregator({});
+  // 日期动态生成：此前硬编码 2026-09-25，日期一过飞猪就返回
+  // 「入离时间校验失败/出发日期非法」，脚本永远 FAIL 且误判为链路问题。
+  // 验证脚本只关心链路可达，与具体日期无关——统一取未来 7/8/10 天。
+  const ymd = (d: Date): string =>
+    `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  const inDays = (n: number): string => {
+    const d = new Date();
+    d.setDate(d.getDate() + n);
+    return ymd(d);
+  };
+  const checkIn = inDays(7);
+  const checkOut = inDays(8);
+  const flightDep = inDays(7);
+  const flightIntl = inDays(10);
   const cases: Array<{ label: string; req: Parameters<typeof aggregator.aggregate>[0] }> = [
-    { label: "酒店·杭州（国内）", req: { type: "hotel", city: "杭州", checkInDate: "2026-09-25", checkOutDate: "2026-09-26" } },
-    { label: "酒店·东京（国外）", req: { type: "hotel", city: "东京", checkInDate: "2026-09-25", checkOutDate: "2026-09-26" } },
-    { label: "机票·北京→上海", req: { type: "flight", from: "北京", to: "上海", departTime: "2026-09-25" } },
-    { label: "机票·上海→东京（国际）", req: { type: "flight", from: "上海", to: "东京", departTime: "2026-09-28" } },
+    { label: "酒店·杭州（国内）", req: { type: "hotel", city: "杭州", checkInDate: checkIn, checkOutDate: checkOut } },
+    { label: "酒店·东京（国外）", req: { type: "hotel", city: "东京", checkInDate: checkIn, checkOutDate: checkOut } },
+    { label: "机票·北京→上海", req: { type: "flight", from: "北京", to: "上海", departTime: flightDep } },
+    { label: "机票·上海→东京（国际）", req: { type: "flight", from: "上海", to: "东京", departTime: flightIntl } },
   ];
 
   let reachable = 0;

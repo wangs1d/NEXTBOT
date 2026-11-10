@@ -24,7 +24,8 @@ import {
 } from "../src/services/reminder-card-state.js";
 import { SceneRegistry, sceneRegistry } from "../src/render/scenes/registry.js";
 import { planRenderScene, listSceneContracts } from "../src/render/scenes/plan.js";
-import { renderTomorrowPreviewMarkdown, formatPreviewDate } from "../src/render/scenes/tomorrow-preview.scene.js";
+import { planPreRenderScene } from "../src/render/scenes/index.js";
+import { renderTomorrowPreviewFacts, formatPreviewDate } from "../src/render/scenes/tomorrow-preview.scene.js";
 import { auditResultCards } from "../src/render/scenes/result-card.scene.js";
 import { WEATHER_CARD_INSTRUCTION } from "../src/agent/synthesis-strategy.js";
 import type { RenderScene, SceneContext } from "../src/render/scenes/types.js";
@@ -289,23 +290,21 @@ test("天气场景的 prompt 片段与 synthesis 再导出同源（防两处漂�
 
 // ── 3. 明日预览（Tier B：服务端确定性排版） ───────────────────────────────────
 
-test("明日预览：同一份载荷两次渲染字节一致，且版式固定", () => {
-  const a = renderTomorrowPreviewMarkdown(DIGEST);
-  const b = renderTomorrowPreviewMarkdown(DIGEST);
-  assert.equal(a, b, "确定性渲染：同输入必须同输出");
-  assert.match(a, /^## 明天 · 11月6日 周五/);
-  assert.match(a, /\*\*行程\*\*/);
-  assert.match(a, /- 09:30 部门例会/);
-  assert.match(a, /- 14:00 牙医复诊/);
-  assert.match(a, /\*\*天气\*\*/);
+test("明日预览：同一份载荷两次序列化字节一致，事实齐全", () => {
+  const a = renderTomorrowPreviewFacts(DIGEST);
+  const b = renderTomorrowPreviewFacts(DIGEST);
+  assert.equal(a, b, "确定性序列化：同输入必须同输出");
+  // digest.date 是「今天」，事实块里的日期必须是 +1 天的明天
+  assert.match(a, /明天 11月7日 周六/);
+  assert.match(a, /09:30 部门例会/);
+  assert.match(a, /14:00 牙医复诊/);
   assert.match(a, /多云转晴 12–22℃/);
   assert.match(a, /降雨集中在 下午 14–17 点/);
   assert.match(a, /预警：大风/);
-  assert.doesNotMatch(a, /穿衣/);
-  assert.match(a, /\*\*明天到期\*\*/);
-  assert.match(a, /- 交实验报告（11-06 到期）/);
-  assert.match(a, /\*\*近期\*\*/);
-  assert.match(a, /- 妈妈生日（还有 3 天）/);
+  assert.match(a, /交实验报告（今天到期）/);
+  assert.match(a, /妈妈生日（还有 3 天）/);
+  // 到期时刻必须是人话，不是 ISO 原文
+  assert.doesNotMatch(a, /T18:00|00Z/);
 });
 
 test("明日预览：无载荷/无明日意图不命中（不往每轮回复里塞预览）", () => {
@@ -319,16 +318,28 @@ test("明日预览：无载荷/无明日意图不命中（不往每轮回复里�
   assert.notEqual(noIntent.scene?.id, "tomorrow_preview");
 });
 
-test("明日预览：命中时正文由场景接管，模型原稿不参与排版", () => {
+test("明日预览：命中时不接管正文，正文仍由模型自己写", () => {
   const decision = decideRender({
-    text: "好的我看看（这段是模型原稿，应被确定性渲染替换）",
+    text: "好的我看看（模型自己写的正文，必须原样保留）",
     userText: "明天什么安排",
     payloads: { eveningDigest: DIGEST },
   });
   assert.equal(decision.scene?.id, "tomorrow_preview");
   assert.equal(decision.body.form, "markdown");
-  assert.ok(decision.text?.startsWith("## 明天"), "正文应由场景渲染");
-  assert.ok(!decision.text?.includes("模型原稿"));
+  assert.equal(decision.text, undefined, "场景不得替换正文");
+});
+
+test("结构化摘要轮声明 singleBubble：整块呈现，不分泡", () => {
+  for (const id of ["tomorrow_preview", "digest_roundup"]) {
+    assert.equal(
+      sceneRegistry.get(id)?.produces?.singleBubble,
+      true,
+      `${id} 是整块内容，拆成几条绿泡就散了`,
+    );
+  }
+  // 这条只给摘要类，不许把闲聊/天气带走
+  assert.notEqual(sceneRegistry.get("markdown")?.produces?.singleBubble, true);
+  assert.notEqual(sceneRegistry.get("weather")?.produces?.singleBubble, true);
 });
 
 test("明日预览：日期解析容错", () => {
@@ -525,64 +536,57 @@ const roundupCtx = (text: string, userText = "刘浩存最近有什么新动态�
   effects: [{ tool: "search_web", status: "ok" as const, result: ROUNDUP_RECEIPT }],
 });
 
-const EXPECTED_LIST = [
-  "**要点**",
+const EXPECTED_FACTS = [
   "- 《想飞的女孩》定档 12 月 12 日 — 文晏执导，刘浩存、文淇演一对表姐妹，影片曾入围柏林电影节主竞赛单元。",
   "- 出席品牌活动 谈新角色准备 — 11 月 3 日现身上海，受访说为新片学了三个月现代舞，每天训练 5 小时。",
   "- 工作室通报维权进展 — 10 月 28 日通报：已对 12 个侵权账号取证，其中 5 个已公开道歉。",
 ].join("\n");
 
-test("盘点清单：结构只来自工具回执，模型正文完全不参与排版", () => {
+test("盘点清单：条目只作为事实进 prompt，正文不再被服务端接管", () => {
   const d = decideRender(roundupCtx("她最近重心明显在电影上。"));
   assert.equal(d.scene?.id, "digest_roundup");
-  assert.equal(d.text, ["她最近重心明显在电影上。", EXPECTED_LIST].join("\n\n"));
-  // 同一回执反复渲染逐字节一致
-  assert.equal(decideRender(roundupCtx("她最近重心明显在电影上。")).text, d.text);
+  assert.equal(d.text, undefined, "场景不得替换正文");
+  const pre = planPreRenderScene({
+    userText: "刘浩存最近有什么新动态？",
+    toolResults: [{ toolName: "search_web", ok: true, result: ROUNDUP_RECEIPT }],
+  });
+  assert.ok(pre.matched.includes("digest_roundup"));
+  const boundary = pre.boundaries.join("\n");
+  assert.ok(boundary.includes(EXPECTED_FACTS), "事实行必须进 prompt");
+  assert.match(boundary, /盘点轮/);
 });
 
-test("盘点清单：模型四种写法 → 版式逐字节一致（配合率 100% 的可测定义）", () => {
+test("盘点清单：模型四种写法都不再被服务端重排", () => {
   const variants = [
     "她最近重心明显在电影上。", // 不写任何结构
     "**新片**\n- 定档 12 月 12 日\n\n**维权**\n- 5 个账号道歉", // 自写加粗分组
     '{"summary":"两件事","groups":[{"title":"新片","items":["a"]}]}', // 甩裸 JSON
     "## 汇总\n| 项目 | 值 |\n| --- | --- |\n最值得盯的是那部片子。", // markdown 表格
   ];
-  const rendered = variants.map((v) => decideRender(roundupCtx(v)).text ?? "");
-  // 清单主体在四种写法里逐字节相同
-  for (const out of rendered) {
-    assert.ok(out.includes(EXPECTED_LIST), `清单缺失：\n${out}`);
-  }
-  const listOnly = (s: string) => s.slice(s.indexOf("**要点**"));
-  assert.equal(new Set(rendered.map(listOnly)).size, 1, "清单版式不应随模型写法变化");
-  // 裸 JSON / 模型自写版式都不该出现在用户可见文本里
-  for (const out of rendered) {
-    assert.ok(!out.includes('"groups"'), "裸 JSON 不得透出");
-    assert.ok(!out.includes("## 汇总"), "模型自写标题不得透出");
+  for (const v of variants) {
+    assert.equal(
+      decideRender(roundupCtx(v)).text,
+      undefined,
+      `正文由模型自己写，服务端不得重排：${v}`,
+    );
   }
 });
 
-test("盘点清单：语气散句保留，结构化行与回执复述句被剔除", () => {
+test("盘点清单：模型正文原样保留（不再剥语气句、不再去结构化行）", () => {
   const text = [
     "先给你捋一下。",
     "",
     "**新片**",
-    "- 《想飞的女孩》定档 12 月 12 日 — 文晏执导，刘浩存、文淇演一对表姐妹。",
-    "文晏执导，刘浩存、文淇演一对表姐妹，影片曾入围柏林电影节主竞赛单元。", // 复述回执
+    "- 定档 12 月 12 日",
     "",
     "最值得盯的是那部片子。",
   ].join("\n");
-  const d = decideRender(roundupCtx(text));
-  assert.ok(d.text?.startsWith("先给你捋一下。"), "开场语气句应保留");
-  assert.ok(d.text?.includes("最值得盯的是那部片子。"), "判断句应保留");
-  assert.ok(!d.text?.includes("**新片**"), "模型自写分组标题应剔除");
-  assert.ok(!d.text?.includes("文晏执导，刘浩存、文淇演一对表姐妹，影片曾入围柏林电影节主竞赛单元。\n\n最值得"), "复述句不应重复出现");
-  assert.equal((d.text?.match(/\*\*要点\*\*/g) ?? []).length, 1, "清单只应有一份");
+  assert.equal(decideRender(roundupCtx(text)).text, undefined);
 });
 
 test("盘点清单：非盘点意图 / 少于 2 条 / 失败回执都不命中", () => {
   const chat = decideRender(roundupCtx("她最近重心明显在电影上。", "在吗"));
   assert.notEqual(chat.scene?.id, "digest_roundup");
-  assert.equal(chat.text, undefined);
 
   const one = decideRender({
     text: "就这一条。",
@@ -597,19 +601,17 @@ test("盘点清单：非盘点意图 / 少于 2 条 / 失败回执都不命中",
     effects: [{ tool: "search_web", status: "error", result: { ok: false } }],
   });
   assert.notEqual(failed.scene?.id, "digest_roundup");
-  assert.equal(failed.text, undefined);
 });
 
-test("盘点清单：多个工具带回同一条结果时去重", () => {
-  const d = decideRender({
-    text: "两条线。",
+test("盘点清单：多个工具带回同一条结果时事实行去重", () => {
+  const boundary = planPreRenderScene({
     userText: "她最近有什么动态",
-    effects: [
-      { tool: "search_web", status: "ok" as const, result: ROUNDUP_RECEIPT },
-      { tool: "fetch_web", status: "ok" as const, result: ROUNDUP_RECEIPT },
+    toolResults: [
+      { toolName: "search_web", ok: true, result: ROUNDUP_RECEIPT },
+      { toolName: "fetch_web", ok: true, result: ROUNDUP_RECEIPT },
     ],
-  });
-  assert.equal((d.text?.match(/^- /gm) ?? []).length, 3);
+  }).boundaries.join("\n");
+  assert.equal((boundary.match(/^- /gm) ?? []).length, 3);
 });
 
 test("盘点清单：输出顺序在结构卡之后（卡片优先）", () => {

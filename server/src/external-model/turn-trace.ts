@@ -7,7 +7,7 @@
  * 结构化汇总视图，用于前后对比验收：
  *   - 工具成功率 = okCalls / totalCalls
  *   - 行为一致性 = 同 query 复测 visibleTools hash diff
- *   - 纠错成本 = exitGate / requestCard 触发次数
+ *   - 纠错成本 = requestCard 触发次数
  */
 
 export type ToolCallTraceEntry = {
@@ -90,8 +90,6 @@ export type TurnTraceRecord = {
     alreadyVisible?: string[];
     blockedRisk?: string[];
   };
-  /** 出口检查：是否触发续波及原因 */
-  exitGate?: { fired: boolean; reason?: string };
   finalTextChars: number;
   durationMs: number;
 };
@@ -111,7 +109,6 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
   okRate: number;
   avgWaves: number;
   requestCardFired: number;
-  exitGateFired: number;
   /** 幻觉转正调用数（未检索直呼不可见名且被执行） */
   hallucinationPromotedCalls: number;
   /** 幻觉转正中成功执行的占比（转正通道可用性） */
@@ -155,7 +152,6 @@ export function summarizeTurnTraces(records: TurnTraceRecord[]): {
     okRate: totalCalls > 0 ? okCalls / totalCalls : 0,
     avgWaves,
     requestCardFired: records.filter((r) => r.requestCard?.fired).length,
-    exitGateFired: records.filter((r) => r.exitGate?.fired).length,
     hallucinationPromotedCalls: promotedCalls.length,
     hallucinationPromotedOkRate:
       promotedCalls.length > 0

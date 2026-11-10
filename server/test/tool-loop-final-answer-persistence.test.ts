@@ -177,12 +177,17 @@ test("探测汇总收尾 + fold：线程是干净问→答对，无「未生成�
   assert.ok(answerMsg, "fold 后线程应保留含最终答案的 assistant 消息（问→答对完整）");
 });
 
-test("预算耗尽：兜底汇总已删除——返回空，不把编造答案写回 messages", async () => {
+test("预算耗尽：收尾叙述保底波一次——如实交付，不把编造答案写回 messages", async () => {
   resetLlmUsageAuditForTest();
 
   // maxRounds=1：波 1 执行完工具后预算耗尽。2026-11-08 起不再调用
   // runSchemaLessSummary(false)——那一步脱离人格与当前轮事实编叙事，已整体删除。
-  const { client, calls } = makeFakeClient([ackThenToolChunks(ACK)]);
+  // 2026-11-09 收尾叙述保底波：预算耗尽且整轮零正文 → 授予一次叙述波
+  // （不注入任何指令），模型如实说明结果/卡点；仍不把不存在的答案写回 messages。
+  const { client, calls } = makeFakeClient([
+    ackThenToolChunks(ACK),
+    textChunks("这会儿天气数据没拿到，稍后再问我一次。"),
+  ]);
   const view: AnyMsg[] = [
     { role: "system", content: SYSTEM },
     { role: "user", content: USER },
@@ -196,8 +201,12 @@ test("预算耗尽：兜底汇总已删除——返回空，不把编造答案�
     { tools: TOOLS, maxRounds: 1, holdAnswer: "after_tool_use", audit: { sessionId: "persist-exhaust" } },
   );
 
-  assert.equal(calls.length, 1, "预算耗尽后不得再发起 schema-less 兜底汇总");
-  assert.equal(out, "", "本轮无正文 → 不返回任何编造答案");
+  assert.equal(calls.length, 2, "预算波 1 次 + 收尾叙述保底波 1 次（有界，不失控）");
+  assert.equal(
+    out,
+    "这会儿天气数据没拿到，稍后再问我一次。",
+    "保底波如实交付，不返回编造答案",
+  );
   assert.ok(
     !view.some((m) => m.role === "assistant" && String(m.content ?? "").includes("15-20")),
     "不得把不存在的 assistant 答案写回 messages",

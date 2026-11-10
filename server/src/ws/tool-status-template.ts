@@ -13,6 +13,9 @@
  *    状态位是给人看的一句话，不是工程日志。
  */
 
+import { normalizeImageSearchQuery } from "../services/image-query-normalizer.js";
+import { isBingImagePageFallbackOnly } from "../services/search-api-provider.js";
+
 /** 参数值最大展示长度（含省略号前的部分）。 */
 const MAX_PARAM_CHARS = 14;
 
@@ -98,7 +101,11 @@ export function renderToolStatusLine(
     return city ? `我看下${city}的天气` : null;
   }
   if (hasPrefix(tool, ["search_images"])) {
-    return query ? `我找找「${query}」的图` : null;
+    // 与执行侧同源：只有图片搜索实际落到「爬必应图片页」时才显示净化后的词
+    // （用户口径：纯人名约束只针对必应这一层）。接入真正的图片搜索 API 后
+    // 查询词原样透传，状态位也照原样显示。
+    const shown = isBingImagePageFallbackOnly() ? normalizeImageSearchQuery(query ?? "") : query;
+    return shown ? `我找找「${shown}」的图` : null;
   }
   if (hasPrefix(tool, ["search_videos"])) {
     return query ? `我找个「${query}」的视频` : null;

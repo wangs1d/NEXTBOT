@@ -19,6 +19,7 @@ import { wireToolExecuted, wireToolExecuteStart } from "../chat-tool-wire.js";
 import { subscribeTravelProgress } from "../../skills/travel-planning/travel-progress-bus.js";
 import { getTurnWalService } from "../../services/turn-wal-service.js";
 import { resolvePreviewPayloads } from "../../services/tomorrow-preview-bridge.js";
+import { sceneRegistry } from "../../render/scenes/index.js";
 import { updateEventAnswerSafely } from "../../agentic-memory/event-store.js";
 import { parseAgentAccessMode } from "../../agent/agent-access-mode.js";
 import {
@@ -77,7 +78,6 @@ import {
   sniffItineraryDays,
   type ExecutedToolReceipt,
 } from "../../services/deterministic-card-chain.js";
-import { buildVisionPhotoCards, attachImageResultPhotos } from "../../services/vision-photo-cards.js";
 import { domainsForTool } from "../../tools/tool-search/tool-category.js";
 import { captionMediaCards, isImageCaptionEnabled } from "../../services/image-caption-service.js";
 import { stripDsmlToolCallMarkup } from "../../external-model/stream-chat-helpers.js";
@@ -344,6 +344,12 @@ export type ChatUserMessageHandlerDeps = {
    */
   actorContext?: import("../../services/actor-context-service.js").ActorContextService | null;
   /**
+   * 位置上报接入管线（可选）：聊天消息自带的 `clientLocation` 坐标经此落
+   * 情境快照并触发服务端逆地理时区修正（2026-11-10 坏钟手机根治）。缺省时
+   * 聊天坐标只进 prompt【用户位置】块，不落快照。
+   */
+  locationIngest?: import("../../services/location-ingest-pipeline.js").LocationIngestPipeline | null;
+  /**
    * 电话代办协调器（可选）：等待确认期间用户文本明确「确认拨打」时的
    * 兜底确认入口（确认卡按钮渲染失败/旧客户端场景）。权威确认仍是
    * connection.ts 在 chat.user_action 原点记录的卡片点击。
@@ -465,6 +471,19 @@ export async function handleChatUserMessageEvent(
     deps.actorContext?.updateClock(msgActor, data.clientClock);
   } catch (err) {
     console.log(`[ChatUserMessage] 时钟快照更新失败（忽略）: ${err}`);
+  }
+  // 聊天自带坐标 → 情境快照 + 服务端逆地理时区修正（2026-11-10 坏钟手机根治）。
+  // 此前聊天坐标只进【用户位置】块，不落快照——快照 geo 时区若被客户端坏钟
+  // 回声污染（GMT），要等下一次独立定位上报才有机会修正。现在每条带坐标的
+  // 聊天都刷新快照并触发修正，坏钟在当轮或次轮即被纠正。fire-and-forget，
+  // 任何失败不影响本轮对话主链路。
+  try {
+    const chatLoc = data.clientLocation;
+    if (chatLoc) {
+      deps.locationIngest?.ingest(msgActor, chatLoc, "report");
+    }
+  } catch (err) {
+    console.log(`[ChatUserMessage] 聊天坐标落快照失败（忽略）: ${err}`);
   }
 
   let visionFrames: VisionFrame[] | undefined;
@@ -640,14 +659,15 @@ async function processBatchedMessage(
 
   // 流式出口静默 + 撤回（2026-10-13 根修后收窄）：工具卡片轮的「不流式」
   // 已由工具循环 holdAnswer 在通道上根除（见 agent-core / tool-loop），本层
-  // 机制只保留两个出口防御职责——识图轮（done 阶段确定性附照片卡，轮次
-  // 开局即知）与流中出现的模型自产结构化标记/垃圾回显（recap echo）。触发
-  // 时撤回已流文本（chat.stream_reset）并静默，最终内容由 assistant_done
-  // 结构化一次性下发（卡片 + renderBlocks + 正文同帧呈现，无二次重排）。
-  let turnWillCarryCards = batched.visionFrames?.length
-    ? // 识图轮：done 阶段确定性附照片卡（buildVisionPhotoCards），天然是卡片轮
-      true
-    : false;
+  // 机制只剩一个出口防御职责——流中出现的模型自产结构化标记/垃圾回显
+  // （recap echo）。触发时撤回已流文本（chat.stream_reset）并静默，最终内容
+  // 由 assistant_done 结构化一次性下发（卡片 + renderBlocks + 正文同帧呈现）。
+  // 识图轮降级为普通文本轮（2026-11-10 根修）：用户发照片的回复直接以正文
+  // 流式送达（照片经 visionFrames 进模型上下文，视觉模型照常作答）。不再
+  // done 阶段确定性附「识图照片卡」——那会把真正的回复正文整段吞进卡片形态
+  // （客户端 image_result 只渲染 caption），且照片 URL 手机端加载不出，只剩
+  // 空占位 + 一句描述。流中若出现模型自产结构化标记，仍由下方 guard 撤回静默。
+  let turnWillCarryCards = false;
   let suppressStreamForCards = false;
   let anyStreamChunkSent = false;
   let streamResetSent = false;
@@ -1710,13 +1730,11 @@ async function processBatchedMessage(
 
     // 工具成功但 LLM 末轮没出正文时，用工具结果文本作为回复（不再用合成的"已查到见上面"）。
     // 真实数据比提示语更有价值——用户能看到工具到底返回了什么。
-    if (
-      !finalText &&
-      reply.toolName &&
-      toolResult?.ok &&
-      toolResult.result &&
-      !chunkSeq
-    ) {
+    // 2026-11-09 放宽：不再要求 `!chunkSeq`。finalText 为空意味着模型整轮没产出
+    // 任何可用正文，此时已流出的只有工具波确认语/被元句过滤器拦下的内容——
+    // 确认语+数据投影是期望的两段式（先应一句、再给结果），不构成重复。
+    // 若真有正文流出，reply.text 非空，根本走不进这个分支。
+    if (!finalText && reply.toolName && toolResult?.ok && toolResult.result) {
       const toolResultText = formatToolResultAsReply(reply.toolName, toolResult.result);
       if (toolResultText) finalText = toolResultText;
     }
@@ -1765,6 +1783,22 @@ async function processBatchedMessage(
         turnEffects.push({ tool, status: "error" });
       }
     }
+    // 空轮收尾投影（2026-11-09，配「零兜底」铁律）：LLM 整轮未产出正文（主要形态：
+    // holdAnswer 轮末波以 tool_calls 收尾或空 content，tool-loop 波次耗尽 return ""）
+    // 时，不再交付空文本——从本轮**成功的**工具回执做确定性投影
+    // （formatToolResultAsReply 拼现成数据，零 LLM、不产生第二稿，不违反
+    // 「已流式即定稿」），保证终态必含 assistant(content)。没有任何成功回执
+    // 时才如实空收尾（撤泡路径）。
+    if (!finalText && turnEffects.length > 0) {
+      for (const eff of turnEffects) {
+        if (eff.status !== "ok" || !eff.result) continue;
+        const projected = formatToolResultAsReply(eff.tool, eff.result);
+        if (projected) {
+          finalText = projected;
+          break;
+        }
+      }
+    }
     const mediaCardCount = turnEffects.reduce((count, effect) => {
       if (!effect.result) return count;
       if (
@@ -1780,10 +1814,9 @@ async function processBatchedMessage(
     // 明日预览数据面：复用生成前发起的那份取数（已 settle，await 零等待），
     // 不再二次调用 resolvePreviewPayloads——两处各取一次会让 digest 双份/漂移。
     const previewPayloads = await previewPayloadsPromise.catch(() => undefined);
-    // rewritesText 观测（P3 治理）：场景在出口整体接管正文（明日预览/盘点）时置位，
-    // 下方 done 装配据此把分泡活轮收口成整段替换——分泡里还是模型原稿、
-    // finalText 已是确定性版式，不收口 = 版式永远不落屏、刷新后文本对不上。
-    const sceneRewrite: { sceneId?: string } = {};
+    // 出口信封的场景 meta 回传（2026-11-09）：singleBubble 禁分泡的判据在
+    // meta.sceneId 上，不回传则 done 帧从 finalText 重拼信封时场景信息丢失。
+    let doneSceneMeta: { sceneId: string; failures: string[]; preSceneIds: string[] } | undefined;
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
       toolName: reply.toolName,
@@ -1794,9 +1827,8 @@ async function processBatchedMessage(
       effects: turnEffects,
       mediaCardCount,
       renderPayloads: previewPayloads,
-      onSceneRewrite: (info) => {
-        sceneRewrite.sceneId = info.sceneId;
-        console.log(`[chat] scene_rewrite: ${info.sceneId} 收口为整段替换（气泡与正文同源）`);
+      onRenderEnvelope: (envelope) => {
+        doneSceneMeta = envelope.meta;
       },
     });
     // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
@@ -1934,8 +1966,8 @@ async function processBatchedMessage(
       /* 状态记账失败不影响交付 */
     }
     // 行程卡缺席自检（2026-10-12 贵阳轮事故）：路由**明确**判为行程规划轮、却没附上
-    // 行程卡 = 用户诉求未兑现的硬信号（事故形态：回执被预算击杀 → 无卡 → 出口闸判
-    // 「工具全败」→ 模型手写逐日行程直穿气泡）。此前这个症状只能靠人肉比对 trace
+    // 行程卡 = 用户诉求未兑现的硬信号（事故形态：回执被预算击杀 → 无卡 →
+    // 模型手写逐日行程直穿气泡）。此前这个症状只能靠人肉比对 trace
     // 才认得出，现在当场打出来。判据抽在 deterministic-card-chain.classifyTravelCardMissing
     // （纯函数，回归可测）——硬档锚在确定性事实（跑过规划/拿到回执），不靠 LLM 单点。
     const travelCardGap = classifyTravelCardMissing({
@@ -2042,39 +2074,10 @@ async function processBatchedMessage(
       finalText = promoteImageUrlsToMedia(finalText);
     }
 
-    // 识图照片卡（Coze 式「一图一句」，用户要求的 image_result 真实设计）：
-    // 用户本轮发来的照片（visionFrames，此前只进模型上下文从不落盘）逐张落盘，
-    // VLM 逐张看图生成「画面内容 + 可推断拍摄场景/地点」的一句话描述，
-    // 以 [IMAGE_RESULT_START] 结构化块确定性附着——照片与描述绑定下发，
-    // 客户端渲染为「照片卡片 + 下方描述」，不再展示「结论 + 要点」散文形态。
-    if (batched.visionFrames?.length) {
-      try {
-        const photoItems = await buildVisionPhotoCards({
-          actorId: msgActor,
-          frames: batched.visionFrames,
-          locationHint: batched.clientLocation?.label?.trim() || undefined,
-          voice: { userText: batched.text, replyText: finalText },
-        });
-        finalText = attachImageResultPhotos(finalText, photoItems);
-        // 路由配对不变量（与 CONTENT_SUMMARY 泄漏同源）：块存在 ⇒ 路由必在。
-        // [IMAGE_RESULT_START] 块只有 [RENDER_AS:image_result] 路由的消费者；
-        // LLM 叙事文本若被路由到其它形态（plain/brief/structured），客户端
-        // 不会解析该块 → 裸 JSON 顶在正文最前面。附块而缺路由时强制补声明。
-        if (
-          finalText.includes("[IMAGE_RESULT_START]") &&
-          !finalText.includes("[RENDER_AS:image_result]")
-        ) {
-          console.log("[chat] vision photos: force-pairing RENDER_AS:image_result");
-          finalText = `[RENDER_AS:image_result]\n${finalText}`;
-        }
-      } catch (err) {
-        console.info(
-          `[chat] 识图照片卡构建失败（忽略，照片不入卡）: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-      }
-    }
+    // 识图照片卡已退役（2026-11-10 根修）：用户发照片的轮次不再落盘建卡、
+    // 不再附 [IMAGE_RESULT_START] / 强制 [RENDER_AS:image_result]。回复正文
+    // 就是视觉模型的直接回答，按普通文本轮走流式 + 绿泡。历史消息里已有的
+    // image_result 块仍由客户端旧渲染兼容展示。
 
     // 结构化通道迁移（2026-10-10 搜图轮 CONTENT_SUMMARY 裸 JSON 泄漏根治）：
     // 摘要卡是「路由资产」，永远不该以 JSON 内嵌在正文里透出。这里把正文中的
@@ -2141,11 +2144,14 @@ async function processBatchedMessage(
     // 回写 WAL 定稿文本（2026-10-24）：WAL 在 turn-finalizer 落的是模型原文，
     // 这里的卡片附加与协议标记剥离都发生在它之后——不覆盖的话，聊天记录回放
     // 既没有行程卡，又会把 [RENDER_HINT]/[NEXT_UP_*] 当正文漏给用户。
+    // 2026-11-09：本轮最终 mediaCards 一并补写——媒体卡是 done 帧的 side-channel，
+    // 正文文本通道不携带，WAL 里不落的话重装/换设备后历史回填永远没有照片。
     void getTurnWalService()
       .replaceAssistantText({
         actorId: msgActor,
         messageId: batched.originalMessageId,
         assistantText: finalText,
+        ...(mediaCards.length > 0 ? { mediaCards } : {}),
       })
       .catch(() => {});
     updateEventAnswerSafely(msgActor, batched.originalMessageId, finalText);
@@ -2188,6 +2194,15 @@ async function processBatchedMessage(
       ...(summaryCard ? { summaryCard } : {}),
       followups,
       legacyBlocks: buildReplyBlocks(finalText, renderBlocks),
+      // 出口真实命中的场景信息（2026-11-09）：meta.sceneId 是 singleBubble
+      // 禁分泡的唯一判据，preSceneIds 供观测；出口未进渲染决策时缺省。
+      ...(doneSceneMeta
+        ? {
+            sceneId: doneSceneMeta.sceneId,
+            failures: doneSceneMeta.failures,
+            preSceneIds: doneSceneMeta.preSceneIds,
+          }
+        : {}),
     });
     const doneEnvelopeFields = expandEnvelopeToDoneFields(renderEnvelope);
 
@@ -2207,12 +2222,18 @@ async function processBatchedMessage(
     // 普通单泡轮）照旧整段替换。桌面端与手机端都消费 bubbles 对账数组
     // （main.dart _reconcileBubblesOnDone / mobile_chat_controller
     // _finalizeBubbles），两端逐泡落屏行为一致。
-    // rewritesText 轮（P3 治理，2026-11-07）不进分泡活态：分泡里是模型原稿、
-    // finalText 已被场景整体接管（语气句 + 确定性版式），逐泡落屏会让版式
-    // 永远不落屏。收口为整段替换（finalTextReplacesStream + bubbles 作塌缩
-    // 清单），客户端用 finalText 重渲染；语音帧仍按已流正文，不重播。
+    // rewritesText 机制已删（2026-11-09）：场景不再整体接管正文，正文只由模型
+    // 一次生成，因此不存在「分泡里是原稿、finalText 是另一个人写的」这种分叉。
+    // 但「结构化摘要轮不分泡」这条要保留（用户 2026-11-09：「对于这些不能分泡，
+    // 应该是这样的样式」）：明日速览/盘点这类内容拆成几条绿泡就散了，必须整块
+    // 看完。判定走场景声明 produces.singleBubble，与正文是否被改写无关。
+    const sceneBlocksBubbles =
+      sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
     const bubbleSplitLive =
-      bubbleTracker.hasBubbles && !utteranceCollapse && !streamResetSent && !sceneRewrite.sceneId;
+      bubbleTracker.hasBubbles &&
+      !utteranceCollapse &&
+      !streamResetSent &&
+      !sceneBlocksBubbles;
 
     ctx.socket.send(
       JSON.stringify({
@@ -2251,8 +2272,9 @@ async function processBatchedMessage(
           // 卡片轮撤回（2026-10-08）：stream_reset 已撤回正文，done 必须
           // 整段替换（桌面端 done 默认保留已流正文，不强制会保留空泡）。
           // 分泡活轮（bubbleSplitLive）不带该字段：客户端逐泡落屏，不塌缩。
-          // rewritesText 轮强制整段替换（气泡与正文同源，见 bubbleSplitLive 注释）。
-          ...(!bubbleSplitLive && (finalTextReplacesStream || streamResetSent || sceneRewrite.sceneId)
+          // singleBubble 场景（明日速览/盘点）已在流式期间可能产生过泡，
+          // 必须让客户端用 finalText 收口成一条（否则同轮多泡并存）。
+          ...(!bubbleSplitLive && (finalTextReplacesStream || streamResetSent || (sceneBlocksBubbles && bubbleTracker.hasBubbles))
             ? { finalTextReplacesStream: true }
             : {}),
           toolCalls: reply.toolName ? [reply.toolName] : [],

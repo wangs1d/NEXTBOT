@@ -267,7 +267,13 @@ export type ToolRankingHint = {
 export type AgentStreamOptions = {
   promptContext?: { memory?: AgentPromptMemoryContext };
   toolLoop?: {
-    /** 规划波次上限（plan + replan 总次数，Plan-and-Execute）；fast 场景建议 1 */
+    /**
+     * 工具循环轮次上限（2026-11-10 起默认**不存在**）。
+     *
+     * 生产链路不传：循环到模型不再发 tool_calls 为止（与 Claude Code / Codex 一致）。
+     * 只有测试的脚本化模型、以及「每轮只做一个原子动作」的内部编排
+     * （agent-task-orchestrator 等）才显式传它来收紧。
+     */
     maxRounds?: number;
     onAfterToolBatch?: (info: ToolLoopAfterBatchInfo) => void;
   };
@@ -339,7 +345,7 @@ export type AgentStreamOptions = {
    * 确定性媒体预执行调用（2026-10-10）：media_retrieval 轮由代码在工具循环
    * 开场先真搜一次（查询词来自路由层 composeMediaSearchQuery），模型只叙述。
    * provider 必须把本字段透传进 streamCompletionWithTools——白名单漏掉它
-   * 会导致预执行静默失效、退回「出口闸拉回补搜」的事后补丁路径。
+   * 会导致预执行静默失效、退回事后补搜的补丁路径。
    */
   deterministicToolCalls?: Array<{ name: string; args: Record<string, unknown> }>;
   /**

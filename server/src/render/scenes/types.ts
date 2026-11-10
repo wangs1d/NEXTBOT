@@ -75,9 +75,19 @@ export interface SceneProduces {
   cardTypes?: string[];
   /** 本场景可能产出的 [RENDER_AS:*] 形态名（客户端必须有 case） */
   forms?: string[];
-  /** 是否整体重写模型正文（流式定稿链需特别处理，见 renderTurn） */
-  rewritesText?: boolean;
-  /** 生成前要注入模型的内容边界（只写内容约束，不写版式修辞） */
+  /**
+   * 整块呈现：本轮正文**不分泡**（2026-11-09 用户指令）。
+   *
+   * 结构化摘要类内容（明日速览/盘点清单）拆成几条绿泡就散了——用户要的是
+   * 一整块看完。声明为 true 后，done 帧走 finalTextReplacesStream，客户端把
+   * 流式期间产生的泡收口成一条；**注意与旧的 rewritesText 不同：这不改正文**，
+   * 正文仍由模型一次写。
+   */
+  singleBubble?: boolean;
+  /**
+   * 生成前要注入模型的内容边界（静态部分，只写内容约束，不写版式修辞）。
+   * 需要带本轮数据的场景用 RenderScene.promptBoundaryFor 追加动态部分。
+   */
   promptBoundary?: string;
 }
 
@@ -85,7 +95,6 @@ export interface SceneProduces {
 export interface ScenePrePlanResult {
   matched: string[];
   boundaries: string[];
-  rewritesText: boolean;
   failures: string[];
   reason: string;
 }
@@ -106,6 +115,12 @@ export interface RenderScene {
   phase?: "pre" | "post";
   /** 产出声明：契约生成与交叉校验的唯一事实源 */
   produces?: SceneProduces;
+  /**
+   * 生成前边界的动态部分（2026-11-09）：detect 命中后、模型生成之前调用，
+   * 把本轮真实数据（明日预览的 digest 等）编进 prompt，让模型自己组织回答。
+   * 与 pre detect 同一守卫：禁止读取 ctx.text（模型正文此刻还不存在）。
+   */
+  promptBoundaryFor?(ctx: SceneContext): string | undefined;
   /** 判断本轮是否属于该场景；null = 不命中 */
   detect(ctx: SceneContext): SceneMatch | null;
   /** 命中后产出计划；返回 null = 放弃（继续尝试下一个场景） */

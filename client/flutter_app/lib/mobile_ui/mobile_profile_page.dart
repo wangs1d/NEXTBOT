@@ -175,7 +175,13 @@ class _MobileProfilePageState extends State<MobileProfilePage> {
         ),
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: 8),
+        // edge-to-edge 后底部手势条 inset 由列表滚动余量吃掉，最后一条不被压住
+        padding: EdgeInsets.fromLTRB(
+          0,
+          8,
+          0,
+          8 + MediaQuery.paddingOf(context).bottom,
+        ),
         children: [
           _AccountCard(
             actorId: ApiConfig.effectiveActorId,

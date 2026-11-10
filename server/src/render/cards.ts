@@ -92,11 +92,34 @@ export function diagnoseRegisteredCardPayload(
 /** 按决策顺序把卡附到正文上，返回最终文本与结构化卡载荷。 */
 export function applyCards(text: string, decision: RenderDecision): AppliedCards {
   let out = text;
-  // 同类型卡只留一张：processAssistantText 可能已经出过卡，done 阶段再从回执
-  // 兜底补一遍就会重复（客户端会渲染两张一模一样的比价卡）。
+  // 去重口径：同一张卡不重复附，但同轮允许多张同类卡。
+  //
+  // 旧口径按 cardType 去重（"同类型只留一张"），动机是 processAssistantText
+  // 已出过卡、done 阶段回执兜底再补一遍会产生两张一模一样的比价卡。
+  // 但按类型去重把业务需求一起误杀了：同轮两张不同的景点选择卡、两张不同的
+  // 酒店卡只会剩一张，用户看不到完整选项。这里把键细化为
+  // 「cardType + 业务标识」，去重目标（同一张卡）保留，多卡能力打开。
+  const cardIdentity = (payload: Record<string, unknown>): string => {
+    const type = typeof payload.cardType === "string" ? payload.cardType : "";
+    if (!type) return "";
+    const extra =
+      payload.extra && typeof payload.extra === "object"
+        ? (payload.extra as Record<string, unknown>)
+        : {};
+    const id =
+      (typeof payload.cardId === "string" && payload.cardId) ||
+      (typeof payload.planId === "string" && payload.planId) ||
+      (typeof extra.cardId === "string" && extra.cardId) ||
+      (typeof extra.planId === "string" && extra.planId) ||
+      (typeof extra.poiId === "string" && extra.poiId) ||
+      (typeof extra.sessionId === "string" && extra.sessionId) ||
+      "";
+    // 无业务标识的卡退回按类型去重（保持旧行为，避免同卡重复渲染）
+    return `${type}#${id || "singleton"}`;
+  };
   const presentTypes = new Set(
     collectCardPayloads(out)
-      .map((c) => (typeof c.cardType === "string" ? c.cardType : ""))
+      .map((c) => cardIdentity(c as unknown as Record<string, unknown>))
       .filter(Boolean),
   );
   for (const spec of decision.cards) {
@@ -131,10 +154,10 @@ export function applyCards(text: string, decision: RenderDecision): AppliedCards
       continue;
     }
     const payload = spec.payload as Record<string, unknown>;
-    const cardType = payload.cardType as string;
-    if (!presentTypes.has(cardType)) {
+    const identity = cardIdentity(payload);
+    if (!presentTypes.has(identity)) {
       out = buildCardMarker(payload as unknown as ToolCardPayload, out);
-      presentTypes.add(cardType);
+      presentTypes.add(identity);
     }
   }
 

@@ -15,13 +15,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { ActorContextService } from "../src/services/actor-context-service.js";
+import { ActorContextService, resolveUserClock } from "../src/services/actor-context-service.js";
 import { GeofenceService, inferPlaceKind } from "../src/services/geofence-service.js";
-import { LocationIngestPipeline } from "../src/services/location-ingest-pipeline.js";
+import {
+  LocationIngestPipeline,
+  type LocationIngestDeps,
+} from "../src/services/location-ingest-pipeline.js";
 
 const NOW = Date.UTC(2026, 10, 5, 1, 0, 0);
 
-async function makeStack() {
+async function makeStack(pipelineOverrides?: Partial<LocationIngestDeps>) {
   const dir = await mkdtemp(join(tmpdir(), "ingest-ctx-"));
   const context = new ActorContextService({
     persistPath: join(dir, "actor-context.json"),
@@ -39,6 +42,7 @@ async function makeStack() {
     context,
     minIntervalMs: 10_000,
     now: () => NOW,
+    ...pipelineOverrides,
   });
   return {
     context,
@@ -90,6 +94,43 @@ test("上报即更新快照：位置、时区、placeKind 一次到位", async (
     // 旧客户端只随位置带时区：仍应被采纳（标记 legacy-location）
     assert.equal(ctx?.clock?.source, "legacy-location");
     assert.equal(stack.context.resolveClock("u1").timezone, "Asia/Shanghai");
+  } finally {
+    await stack.dispose();
+  }
+});
+
+test("精度元数据落快照：accuracyMeters 与 capturedAt 龄期诚实", async () => {
+  const stack = await makeStack();
+  try {
+    // 正常偏差（30s）：观测时刻用 fix 的真实采集时刻
+    const capturedAt = new Date(NOW - 30_000).toISOString();
+    stack.pipeline.ingest(
+      "u8",
+      {
+        latitude: 31.23,
+        longitude: 121.47,
+        accuracyMeters: 12.5,
+        altitudeMeters: 1100.2,
+        speedMps: 1.4,
+        headingDegrees: 213.5,
+        capturedAt,
+      },
+      "report",
+    );
+    const loc = stack.context.get("u8")?.location;
+    assert.equal(loc?.accuracyMeters, 12.5);
+    assert.equal(loc?.observedAt, Date.parse(capturedAt));
+
+    // 设备钟偏差过大（>10min，如坏钟手机）：回退服务端接收时刻，不把钟差写进龄期
+    const bogusAt = new Date(NOW - 90 * 60_000).toISOString();
+    stack.pipeline.ingest(
+      "u9",
+      { latitude: 30.0, longitude: 120.0, accuracyMeters: 35, capturedAt: bogusAt },
+      "report",
+    );
+    const loc9 = stack.context.get("u9")?.location;
+    assert.equal(loc9?.observedAt, NOW);
+    assert.equal(loc9?.accuracyMeters, 35);
   } finally {
     await stack.dispose();
   }
@@ -213,4 +254,95 @@ test("legacy 时钟不顶掉设备直报（高权威来源不动）", async () =
   } finally {
     await stack.dispose();
   }
+});
+
+test("设备钟坏了（报 GMT+0）人在中国：逆地理修正 geo 后解析信定位", async () => {
+  // 真机实证场景（2378709729@qq.com，2026-11-09）：设备钟快照 GMT+0，
+  // 坐标在贵州兴义。客户端回声把快照 geo 时区污染成 GMT，geo 冲突保护
+  // 拿 GMT 比 GMT 永远不触发 → 时间块按 UTC 渲染（差 8 小时）。
+  const stack = await makeStack({
+    reverseGeocode: async () => ({
+      city: "兴义市",
+      district: "黄草街道",
+      region: "贵州省",
+      country: "中华人民共和国",
+      timezone: "Asia/Shanghai",
+      label: "黄草街道 · 兴义市 · 贵州省 · 中华人民共和国",
+      source: "bigdatacloud",
+    }),
+  });
+  try {
+    stack.context.updateClock("u8", {
+      timezone: "GMT",
+      utcOffsetMinutes: 0,
+      source: "snapshot",
+    });
+    stack.pipeline.ingest(
+      "u8",
+      { latitude: 25.088, longitude: 104.896, timezone: "GMT" },
+      "report",
+    );
+    await stack.pipeline.waitForEnrichmentForTest();
+    // 快照层：location.timezone 被服务端反解覆盖修正，缺失文本字段补齐
+    const loc = stack.context.get("u8")?.location;
+    assert.equal(loc?.timezone, "Asia/Shanghai", "快照 geo 时区必须被反解结果修正");
+    assert.ok(loc?.label?.includes("兴义市"), "逆地理 label 应补进快照");
+    // 解析层：设备 GMT（偏移 0）与 geo Asia/Shanghai（偏移 +480）冲突 → 信定位
+    const clock = stack.context.resolveClock("u8");
+    assert.equal(clock.timezone, "Asia/Shanghai");
+    assert.equal(clock.source, "geo");
+  } finally {
+    await stack.dispose();
+  }
+});
+
+test("逆地理失败时快照保持客户端原值（修正缺席不劣化）", async () => {
+  const stack = await makeStack({ reverseGeocode: async () => null });
+  try {
+    stack.pipeline.ingest(
+      "u9",
+      { latitude: 25.088, longitude: 104.896, timezone: "GMT", city: "手工上报城市" },
+      "report",
+    );
+    await stack.pipeline.waitForEnrichmentForTest();
+    const loc = stack.context.get("u9")?.location;
+    assert.equal(loc?.timezone, "GMT");
+    assert.equal(loc?.city, "手工上报城市");
+  } finally {
+    await stack.dispose();
+  }
+});
+
+test("设备时区字符串与自报偏移自相矛盾：geo 印证偏移时信 geo", () => {
+  // 变体场景：字符串说 Asia/Shanghai(+480) 但设备自报偏移 0。
+  // geo=Europe/London（冬季偏移 0）与设备钟互相印证 → 字符串是过期/损坏读数，信 geo。
+  const geoConfirm = resolveUserClock({
+    clientTimezone: "Asia/Shanghai",
+    clientUtcOffsetMinutes: 0,
+    clientSource: "snapshot",
+    geoTimezone: "Europe/London",
+    serverTimezone: "Asia/Shanghai",
+  });
+  assert.equal(geoConfirm.timezone, "Europe/London");
+  assert.equal(geoConfirm.source, "geo");
+
+  // geo 与字符串一致（两个源互相印证）、只有自报偏移是异类 → 保留设备字符串
+  const keepClient = resolveUserClock({
+    clientTimezone: "Asia/Shanghai",
+    clientUtcOffsetMinutes: 0,
+    clientSource: "snapshot",
+    geoTimezone: "Asia/Shanghai",
+    serverTimezone: "Asia/Shanghai",
+  });
+  assert.equal(keepClient.timezone, "Asia/Shanghai");
+  assert.equal(keepClient.source, "client-snapshot");
+
+  // 自洽的正常设备不受影响：字符串与偏移一致 → 仍信设备
+  const trusted = resolveUserClock({
+    clientTimezone: "Asia/Shanghai",
+    clientUtcOffsetMinutes: 480,
+    clientSource: "snapshot",
+  });
+  assert.equal(trusted.timezone, "Asia/Shanghai");
+  assert.equal(trusted.source, "client-snapshot");
 });

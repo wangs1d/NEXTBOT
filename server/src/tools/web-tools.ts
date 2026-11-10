@@ -33,13 +33,21 @@ export function registerWebTools(
   });
 
   toolRegistry.register("search_images", async (input, context) => {
+    // 查询词原样透传：纯人名约束只针对「爬必应图片页」这一层（2026-11-09 用户
+    // 口径），净化做在 upstream-search-service 的必应分支里——接入真正的图片
+    // 搜索 API 后查询词应保持完整，不在工具层裁剪。
     const query = String(input.query ?? "").trim();
     // 默认 4、上限 8：贴合「少而精+图文混排」的产品诉求。
     // 需要多张时应让 LLM 拆成多个细粒度 query 并行搜，
     // 由前端 renderBlocks 把每段文字对应的照片自然交错展示。
     const limit = toBoundedLimit(input.limit, 4);
     if (!query) return { provider: "none", mediaType: "image", items: [], notes: ["query 不能为空"] };
-    return upstreamSearchService.searchImages(query, limit, resolveActorId(context));
+    return upstreamSearchService.searchImages(
+      query,
+      limit,
+      resolveActorId(context),
+      context.sessionId,
+    );
   });
 
   /**
@@ -69,6 +77,7 @@ export function registerWebTools(
       dimensions.length > 0 ? dimensions : undefined,
       limitPerGroup,
       actorId,
+      context.sessionId,
     );
   });
 

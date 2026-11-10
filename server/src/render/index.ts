@@ -29,7 +29,7 @@ export {
   planPreRenderScene,
   buildSceneBoundaryBlock,
   listSceneContracts,
-  renderTomorrowPreviewMarkdown,
+  renderTomorrowPreviewFacts,
   auditResultCards,
   stripResultCardBlocks,
   RESULT_CARD_TYPES,

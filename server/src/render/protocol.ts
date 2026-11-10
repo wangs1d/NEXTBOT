@@ -89,8 +89,6 @@ export interface RenderEnvelope {
     cardTypes: string[];
     forms: string[];
     blockTypes: string[];
-    /** 本轮是否由场景整体重写了模型正文（流式定稿链的观测信号，P3） */
-    rewritesText: boolean;
     /** 生成前已命中的场景 id（P3：出口与 prompt 复用同一批场景） */
     preSceneIds: string[];
     /** 是否可安全下发给 v1 blocks 消费者（含 v1 不认识的形态时降级） */
@@ -109,8 +107,6 @@ export interface RenderEnvelopeInput {
   legacyBlocks?: ReplyBlock[] | null;
   sceneId?: string;
   failures?: string[];
-  /** 出口阶段命中的场景是否整体重写正文 */
-  rewritesText?: boolean;
   /** 生成前预决策命中的场景（由调用方注入，出口不重复猜） */
   preSceneIds?: string[];
 }
@@ -276,7 +272,7 @@ const V1_UNSUPPORTED_FORMS = new Set(["video", "data_brief", "image_result"]);
 export function buildRenderEnvelope(input: RenderEnvelopeInput): RenderEnvelope {
   const blocks: EnvelopeBlock[] = decodeLegacyText(input.finalText ?? "");
   // 恒返回门：正文可能被形态块/结构化块完全占满（如只有 [RENDER_AS:video]
-  // 的卡片轮），也必须有 text 块作为空回复重生与语音兜底的落点。
+  // 的卡片轮），也必须有 text 块作为正文与语音的落点。
   // raw 为空 → 不改变 finalText 投影。
   if (!blocks.some((b) => b.type === "text")) {
     blocks.push({ type: "text", text: "", raw: "" });
@@ -346,7 +342,6 @@ export function buildRenderEnvelope(input: RenderEnvelopeInput): RenderEnvelope 
         .filter(Boolean),
       forms,
       blockTypes: blocks.map((b) => b.type),
-      rewritesText: input.rewritesText === true,
       preSceneIds: input.preSceneIds ?? [],
       v1Compatible,
     },
