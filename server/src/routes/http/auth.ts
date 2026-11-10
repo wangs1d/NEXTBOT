@@ -79,6 +79,10 @@ const PUBLIC_PATH_PREFIXES = [
   "/chat/assets/", // WebView 里的 3D 形象构建产物（数据走 /ws，自带握手鉴权）
   "/gallery-wall/vendor/",
   "/accounts/web",
+  // 官网充值面：页面自带邮箱 OTP 会话（HttpOnly Cookie），付款前必须登录本站账号；
+  // 与设备 token 无关，套上周界鉴权会让支付宝回跳与付款页都打不开
+  "/recharge",
+  "/api/recharge/",
   "/downloads/", // 安装包固定直链（发给用户的链接不能带设备凭证）
   // ② 运维/发现
   "/metrics",

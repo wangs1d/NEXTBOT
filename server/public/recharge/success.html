@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NextBot — 充值结果</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #060607;
+    --text: #ffffff;
+    --muted: rgba(255, 255, 255, 0.62);
+    --dim: rgba(255, 255, 255, 0.38);
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --glass-strong: rgba(255, 255, 255, 0.085);
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+
+  html, body { min-height: 100%; }
+
+  body {
+    font-family: "Inter", "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: #060607;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 80px 24px;
+  }
+
+  .bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 460px at 50% -10%, rgba(255, 255, 255, 0.10), transparent 62%),
+      radial-gradient(720px 420px at 88% 18%, rgba(255, 255, 255, 0.045), transparent 66%),
+      #060607;
+  }
+
+  .done-wrap { position: relative; z-index: 1; max-width: 560px; margin: 0 auto; width: 100%; }
+
+  .done {
+    padding: 44px 40px 36px;
+    border-radius: 30px;
+    background: var(--glass-strong);
+    border: 1px solid var(--line-strong);
+    text-align: center;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+
+  .done-icon {
+    width: 64px; height: 64px; margin: 0 auto;
+    border-radius: 50%;
+    background: #ffffff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .done-icon svg { width: 30px; height: 30px; }
+  .done-icon.wait { background: rgba(255, 255, 255, 0.12); }
+
+  h1 { margin-top: 24px; font-size: 30px; font-weight: 700; letter-spacing: -0.025em; }
+  .sub { margin-top: 10px; font-size: 14px; line-height: 1.7; color: var(--muted); }
+
+  .receipt { margin-top: 26px; padding: 6px 20px; border-radius: 18px; background: rgba(0, 0, 0, 0.28); border: 1px solid rgba(255, 255, 255, 0.07); text-align: left; }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 14px; padding: 13px 0; font-size: 13px; color: var(--muted); }
+  .row b { font-weight: 500; color: var(--text); text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .row .mono { font-family: var(--mono); font-size: 12px; }
+
+  .acts { margin-top: 24px; display: flex; gap: 10px; }
+  .btn {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 48px;
+    border-radius: 100px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+    border: none;
+    cursor: pointer;
+    font-family: inherit;
+  }
+  .btn.primary { background: linear-gradient(180deg, #ffffff 0%, #e4e4e8 100%); color: #060607; }
+  .btn.ghost { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.14); color: var(--text); }
+  .note { margin-top: 18px; font-size: 12px; color: var(--dim); }
+  .hidden { display: none !important; }
+
+  @media (max-width: 480px) {
+    body { padding: 48px 16px; }
+    .done { padding: 36px 24px 30px; }
+    h1 { font-size: 25px; }
+    .acts { flex-direction: column; }
+  }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<div class="done-wrap">
+  <div class="done">
+    <div class="done-icon wait" id="icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#060607" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+    </div>
+    <h1 id="title">确认支付结果</h1>
+    <p class="sub" id="sub">正在向服务端确认订单状态，请稍候…</p>
+
+    <div class="receipt hidden" id="receipt">
+      <div class="row"><span>商品</span><b>API 充值</b></div>
+      <div class="row"><span>到账账号</span><b id="account">—</b></div>
+      <div class="row"><span>金额</span><b id="amount">—</b></div>
+      <div class="row"><span>订单号</span><b class="mono" id="orderNo">—</b></div>
+    </div>
+
+    <div class="acts">
+      <a class="btn ghost" href="/recharge">返回充值</a>
+      <a class="btn primary" href="/">完成</a>
+    </div>
+    <div class="note" id="note">充值记录可在充值页查看</div>
+  </div>
+</div>
+
+<script>
+(function () {
+  var params = new URLSearchParams(location.search);
+  var outTradeNo = params.get('outTradeNo') || '';
+  var title = document.getElementById('title');
+  var sub = document.getElementById('sub');
+  var receipt = document.getElementById('receipt');
+  var note = document.getElementById('note');
+  var icon = document.getElementById('icon');
+  var tries = 0;
+  var MAX_TRIES = 20;
+
+  function money(n) {
+    var num = Number(n);
+    return '¥' + (isFinite(num) ? num.toFixed(2) : '0.00');
+  }
+
+  function checkIcon() {
+    icon.classList.remove('wait');
+    icon.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="#060607" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>';
+  }
+
+  function show(data) {
+    receipt.classList.remove('hidden');
+    document.getElementById('account').textContent = data.masked || '—';
+    document.getElementById('amount').textContent = money(data.amount);
+    document.getElementById('orderNo').textContent = data.outTradeNo || '—';
+  }
+
+  function render(data) {
+    show(data);
+    if (data.status === 'paid') {
+      checkIcon();
+      title.textContent = '充值成功';
+      sub.textContent = money(data.amount) + ' 已到账，当前余额 ' + money(data.balance) + '。';
+      note.textContent = '充值记录可在充值页查看';
+      return true;
+    }
+    if (data.status === 'closed') {
+      title.textContent = '订单已关闭';
+      sub.textContent = '这笔订单未完成支付，如已扣款请稍后刷新或联系服务方。';
+      note.textContent = '可返回充值页重新发起';
+      return true;
+    }
+    title.textContent = '确认支付结果';
+    sub.textContent = '正在向服务端确认订单状态，请稍候…';
+    return false;
+  }
+
+  function poll() {
+    if (!outTradeNo) {
+      title.textContent = '缺少订单号';
+      sub.textContent = '请从充值页重新发起支付。';
+      return;
+    }
+    fetch('/api/recharge/orders/' + encodeURIComponent(outTradeNo), { credentials: 'same-origin' })
+      .then(function (res) {
+        return res.json().catch(function () { return {}; }).then(function (data) {
+          return { status: res.status, data: data };
+        });
+      })
+      .then(function (r) {
+        if (r.status === 401) {
+          title.textContent = '登录状态已失效';
+          sub.textContent = '请先登录再查看这笔充值的结果。';
+          note.textContent = '登录后可看到这个账号的余额与充值记录';
+          return;
+        }
+        if (r.status !== 200 || !r.data.ok) throw new Error((r.data && r.data.message) || '查询失败');
+        var done = render(r.data);
+        if (done) return;
+        tries += 1;
+        if (tries < MAX_TRIES) {
+          setTimeout(poll, 3000);
+        } else {
+          sub.textContent = '支付结果仍在确认中，可稍后刷新本页查看。';
+          note.textContent = '到账以服务端确认的支付宝结果为准';
+        }
+      })
+      .catch(function () {
+        tries += 1;
+        if (tries < MAX_TRIES) setTimeout(poll, 3000);
+        else sub.textContent = '暂时无法查询订单状态，请稍后刷新重试。';
+      });
+  }
+
+  poll();
+})();
+</script>
+</body>
+</html>

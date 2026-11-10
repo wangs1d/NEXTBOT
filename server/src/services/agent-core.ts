@@ -2314,6 +2314,7 @@ if (route.plane === "task") {
       const persona = buildPersonaPrompt({
         userAlias: aliasMatch?.[1],
         identityLine: identity ? buildIdentityNameLine(identity) : undefined,
+        selfName: identity?.displayName,
       });
       if (persona) memoryBeforeSanitize.persona = persona;
       memoryBeforeSanitize.personaMood = buildPersonaMoodBlock(

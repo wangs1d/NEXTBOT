@@ -2,13 +2,10 @@ import type { InfoSearchItem } from "./info-hub-service.js";
 import { searchViaSearchApi } from "./search-api-provider.js";
 import {
   applySearchFreshness,
-  prependRecencyQueryVariants,
   type RssHealthMonitor,
 } from "./search-enhancements.js";
 
-const BING_CN_SEARCH = "https://cn.bing.com/search";
 const DEFAULT_TIMEOUT_MS = 6_000;
-const MAX_QUERY_VARIANTS = 6;
 
 const DOMESTIC_TECH_RSS_FEEDS: Array<{ source: string; url: string }> = [
   { source: "36氪", url: "https://36kr.com/feed" },
@@ -145,42 +142,9 @@ export type DomesticFetchOptions = {
   rssHealth?: RssHealthMonitor;
 };
 
-/**
- * 必应中国搜索（并行变体 + 快速返回）。query 由 LLM 按语义组织、原样透传：
- * 不做拆短变体、实体提取、锚点过滤等机械断句处理（历史版本把这些做在服务端，
- * 曾把「金色亮片抹胸鱼尾·红毯杀手」切碎成噪音查询并误删正确结果，2026-09 删除）。
- * 时效性话题由 prependRecencyQueryVariants 在完整 query 基础上追加年月/「最新」。
- */
-export async function searchBingChina(
-  query: string,
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[]> {
-  const keyword = query.trim();
-  if (!keyword) return [];
-
-  const variants = prependRecencyQueryVariants([keyword], keyword)
-    .slice(0, MAX_QUERY_VARIANTS)
-    .map((v) => v.trim())
-    .filter(Boolean);
-  if (variants.length === 0) return [];
-
-  const batches = await fetchBingVariantBatch(variants, limit, opts);
-  // 合并去重后只调用一次 applySearchFreshness（避免冗余排序）
-  return applySearchFreshness(dedupeByUrl(batches.flat()), { query: keyword }).items.slice(0, limit);
-}
-
-/** 兼容别名：与 searchBingChina 一致（历史上是「跳过相关性过滤」的宽松版，现在主路径即宽松）。 */
-export async function searchBingChinaRelaxed(
-  query: string,
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[]> {
-  return searchBingChina(query, limit, opts);
-}
-
 // ============================================================
-// 多引擎降级链：必应为主，百度/搜狗/DuckDuckGo 兜底（消除单点故障）
+// 国内兜底引擎：百度/搜狗网页搜索（必应中文页抓取已于 2026-11-09 整体移除：
+// 主链只信 AnySearch，必应 RSS/HTML 解析代码随之退役；视频页抓取同日移除）。
 // 任一引擎失败都会返回空数组，整体优雅降级，不会 throw。
 // ============================================================
 
@@ -355,68 +319,6 @@ export async function searchWebMultiEngine(
 function clampInt(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
   return Math.max(min, Math.min(max, Math.floor(input)));
-}
-
-function calculateTimeoutPerVariant(totalBudgetMs: number, variantCount: number): number {
-  const safeCount = Math.max(1, variantCount);
-  const perVariant = Math.floor(totalBudgetMs / safeCount);
-  const minPerVariant = 2_000;
-  const maxPerVariant = 8_000;
-  return Math.max(minPerVariant, Math.min(maxPerVariant, perVariant));
-}
-
-async function fetchBingVariantBatch(
-  variants: string[],
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[][]> {
-  if (variants.length === 0) return [];
-  const timeoutPerVariant = calculateTimeoutPerVariant(opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, variants.length);
-  const results = await Promise.allSettled(
-    variants.map((variant) =>
-      fetchBingChinaOnceWithTimeout(variant, limit, { ...opts, timeoutMs: timeoutPerVariant }),
-    ),
-  );
-  return results
-    .filter((result): result is PromiseFulfilledResult<InfoSearchItem[]> => result.status === "fulfilled")
-    .map((result) => result.value)
-    .filter((items) => items.length > 0);
-}
-
-async function fetchBingChinaOnceWithTimeout(
-  keyword: string,
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[]> {
-  try {
-    return await fetchBingChinaOnce(keyword, limit, opts);
-  } catch {
-    return [];
-  }
-}
-
-async function fetchBingChinaOnce(
-  keyword: string,
-  limit: number,
-  opts: DomesticFetchOptions,
-): Promise<InfoSearchItem[]> {
-  const rssUrl = `${BING_CN_SEARCH}?q=${encodeURIComponent(keyword)}&format=rss`;
-  const xml = await fetchText(rssUrl, opts);
-  if (xml) {
-    const fromRss = parseRssItems(xml).map((item) => ({
-      title: item.title,
-      url: item.link,
-      snippet: item.description.slice(0, 220),
-      source: "必应中国",
-      publishedAt: item.pubDate,
-    }));
-    if (fromRss.length > 0) return fromRss;
-  }
-
-  const htmlUrl = `${BING_CN_SEARCH}?q=${encodeURIComponent(keyword)}`;
-  const html = await fetchText(htmlUrl, opts);
-  if (!html) return [];
-  return extractBingHtmlResults(html);
 }
 
 /** 国内科技 RSS 聚合；可按关键词过滤标题/摘要。 */
@@ -765,7 +667,7 @@ export async function discoverHtmlSourcesFromResults(
   return batches.flat();
 }
 
-/** 国内新闻：必应 RSS + 科技 RSS + 官方媒体 RSS（实时性最优组合）。 */
+/** 国内新闻：科技 RSS + 官方媒体 RSS（必应 RSS 源已随 2026-11-09 必应抓取退役移除）。 */
 export async function fetchDomesticNews(
   topic: string,
   limit: number,
@@ -774,13 +676,12 @@ export async function fetchDomesticNews(
   const keyword = topic.trim();
   if (!keyword) return [];
 
-  const [bing, tech, official] = await Promise.all([
-    searchBingChina(keyword, limit, opts),
+  const [tech, official] = await Promise.all([
     fetchDomesticTechNews(keyword, Math.min(6, limit), opts),
     fetchDomesticOfficialNews(keyword, Math.min(8, limit), opts),
   ]);
-  // 官方媒体 RSS 排前面（实时性最高），然后必应，然后科技 RSS
-  return applySearchFreshness(dedupeByUrl([...official, ...bing, ...tech]), { query: keyword }).items.slice(
+  // 官方媒体 RSS 排前面（实时性最高），然后科技 RSS
+  return applySearchFreshness(dedupeByUrl([...official, ...tech]), { query: keyword }).items.slice(
     0,
     limit,
   );
@@ -863,36 +764,4 @@ function decodeHtmlEntities(text: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
     .replace(/&#39;/g, "'");
-}
-
-function extractBingHtmlResults(html: string): InfoSearchItem[] {
-  const out: InfoSearchItem[] = [];
-  const seen = new Set<string>();
-  const blockRe = /<li[^>]*class="[^"]*b_algo[^"]*"[^>]*>([\s\S]*?)<\/li>/gi;
-  let block: RegExpExecArray | null = null;
-  while ((block = blockRe.exec(html))) {
-    const chunk = block[1] ?? "";
-    const linkMatch = chunk.match(/<h2[^>]*>\s*<a[^>]*href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/i);
-    if (!linkMatch) continue;
-    const href = decodeHtmlEntities(linkMatch[1] ?? "").trim();
-    const title = decodeHtmlEntities((linkMatch[2] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim());
-    if (!href || !title || href.startsWith("javascript:")) continue;
-    let url: string;
-    try {
-      url = new URL(href, BING_CN_SEARCH).toString();
-    } catch {
-      continue;
-    }
-    if (seen.has(url)) continue;
-    seen.add(url);
-    const snippetMatch = chunk.match(/<p[^>]*>([\s\S]*?)<\/p>/i);
-    const snippet = snippetMatch
-      ? decodeHtmlEntities((snippetMatch[1] ?? "").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim()).slice(
-          0,
-          220,
-        )
-      : "";
-    out.push({ title, url, snippet, source: "必应中国" });
-  }
-  return out;
 }

@@ -97,6 +97,9 @@ ExecStart=`${NODE_BIN} dist/index.js
 Environment=FUNASR_AUTO_START=0
 Environment=NODE_ENV=production
 Environment=DOWNLOADS_DIR=$DeployDir/downloads
+# /v1 metered API retail price in cents per 1M tokens (input 1.00 CNY, output 3.50 CNY).
+Environment=RECHARGE_API_PRICE_INPUT_CENTS_PER_MTOK=100
+Environment=RECHARGE_API_PRICE_OUTPUT_CENTS_PER_MTOK=350
 # Pin the data root: this unit is rewritten wholesale on every deploy, and without an
 # explicit value the service silently falls back to platform-default root resolution.
 # Keep this ASCII -- non-ASCII here-string content arrives mojibake on the server.

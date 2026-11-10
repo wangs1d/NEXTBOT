@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NextBot — 计费说明</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --text: #ffffff;
+    --muted: rgba(255, 255, 255, 0.62);
+    --dim: rgba(255, 255, 255, 0.38);
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --glass: rgba(255, 255, 255, 0.045);
+    --glass-strong: rgba(255, 255, 255, 0.085);
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+
+  html, body { min-height: 100%; }
+
+  body {
+    font-family: "Inter", "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: #060607;
+    color: var(--text);
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 460px at 50% -10%, rgba(255, 255, 255, 0.10), transparent 62%),
+      radial-gradient(720px 420px at 88% 18%, rgba(255, 255, 255, 0.045), transparent 66%),
+      #060607;
+  }
+
+  .nav {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: calc(100% - 48px);
+    max-width: 1180px;
+    padding: 12px 14px 12px 22px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 50;
+    border-radius: 100px;
+    background: rgba(12, 12, 14, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(130%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .logo { color: #ffffff; text-decoration: none; font-size: 17px; font-weight: 800; letter-spacing: 0.02em; white-space: nowrap; }
+  .logo .bot { color: rgba(255, 255, 255, 0.52); font-weight: 700; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 100px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .nav-links a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 100px;
+  }
+  .nav-links a:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+  .nav-links a.on { color: #060607; background: #ffffff; font-weight: 600; }
+  .nav-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 18px;
+    border-radius: 100px;
+    background: linear-gradient(180deg, #ffffff 0%, #e2e2e6 100%);
+    color: #060607;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .nav-cta svg { width: 14px; height: 14px; }
+
+  main { position: relative; z-index: 1; padding: 128px 24px 72px; }
+  .wrap { max-width: 820px; margin: 0 auto; }
+
+  .head { text-align: center; }
+  .eyebrow { font-size: 12px; letter-spacing: 0.3em; text-transform: uppercase; color: rgba(255, 255, 255, 0.42); }
+  h1 { margin-top: 14px; font-size: 36px; line-height: 1.2; font-weight: 700; letter-spacing: -0.025em; }
+  .sub { margin-top: 12px; font-size: 15px; line-height: 1.75; color: var(--muted); }
+
+  .card {
+    margin-top: 26px;
+    padding: 28px 30px;
+    border-radius: 24px;
+    background: var(--glass);
+    border: 1px solid var(--line);
+  }
+  .card-t { font-size: 13px; font-weight: 600; color: var(--muted); letter-spacing: 0.03em; }
+
+  .amounts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px; }
+  .amount {
+    padding: 12px 20px;
+    border-radius: 12px;
+    background: rgba(255, 255, 255, 0.06);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 15px;
+    font-weight: 600;
+  }
+  .amount small { display: block; margin-top: 4px; font-size: 11px; font-weight: 400; color: var(--dim); }
+
+  .rules { margin-top: 14px; }
+  .rule { display: flex; gap: 14px; padding: 14px 0; border-top: 1px solid rgba(255, 255, 255, 0.07); font-size: 13.5px; line-height: 1.75; color: var(--muted); }
+  .rule:first-child { border-top: none; }
+  .rule b { flex: none; width: 104px; font-weight: 600; color: var(--text); }
+  .rule code {
+    padding: 2px 6px;
+    border-radius: 6px;
+    background: rgba(255, 255, 255, 0.06);
+    font-family: var(--mono);
+    font-size: 12px;
+    color: rgba(255, 255, 255, 0.82);
+  }
+
+  .cta { margin-top: 24px; display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: 48px;
+    padding: 0 32px;
+    border-radius: 100px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .btn.primary { background: linear-gradient(180deg, #ffffff 0%, #e4e4e8 100%); color: #060607; }
+  .btn.ghost { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.14); color: var(--text); }
+
+  @media (max-width: 640px) {
+    main { padding: 108px 16px 56px; }
+    h1 { font-size: 28px; }
+    .nav-links { display: none; }
+    .card { padding: 22px 20px; }
+    .rule { flex-direction: column; gap: 4px; }
+    .rule b { width: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<nav class="nav">
+  <a class="logo" href="/"><span class="next">Next</span><span class="bot">Bot</span></a>
+  <div class="nav-links">
+    <a href="/">首页</a>
+    <a href="/recharge" class="on">API 充值</a>
+  </div>
+  <a class="nav-cta" href="/beta">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 21h16"/></svg>
+    下载
+  </a>
+</nav>
+
+<main>
+  <div class="wrap">
+    <div class="head">
+      <div class="eyebrow">PRICING</div>
+      <h1>计费说明</h1>
+      <p class="sub">先充值到账号，再按实际 token 用量扣减；余额不足时接口会拒绝调用，不透支。</p>
+    </div>
+
+    <div class="card">
+      <div class="card-t">充值金额</div>
+      <div class="amounts">
+        <div class="amount">¥10</div>
+        <div class="amount">¥20</div>
+        <div class="amount">¥50</div>
+        <div class="amount">¥100</div>
+        <div class="amount">¥300</div>
+        <div class="amount">¥500</div>
+        <div class="amount">自定义<small>1 ~ 100000 元</small></div>
+      </div>
+    </div>
+
+    <div class="card" id="priceCard" style="display:none">
+      <div class="card-t">单价</div>
+      <div class="rules">
+        <div class="rule"><b>输入 token</b><span id="priceIn">—</span></div>
+        <div class="rule"><b>输出 token</b><span id="priceOut">—</span></div>
+        <div class="rule"><b>计价精度</b><span>按 token 用量折算，不足 1 分的零头累计到后续调用，不四舍五入多收。</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-t">接口</div>
+      <div class="rules">
+        <div class="rule"><b>接口地址</b><span><code id="apiBase">/v1/chat/completions</code>（OpenAI 兼容，支持流式返回）</span></div>
+        <div class="rule"><b>模型</b><span id="apiModel">—</span></div>
+        <div class="rule"><b>授权方式</b><span>登录充值页即可获得调用凭据，放在 <code>Authorization: Bearer &lt;凭据&gt;</code> 请求头；账号即授权，无需手动创建密钥。</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-t">计费规则</div>
+      <div class="rules">
+        <div class="rule"><b>计费方式</b><span>按输入与输出的 token 数量从账户余额中扣减。</span></div>
+        <div class="rule"><b>账户绑定</b><span>充值金额直接计入当前登录账号（邮箱），接口调用使用同一账号。</span></div>
+        <div class="rule"><b>余额下限</b><span>余额为 0 时无法继续调用接口，不会产生欠费或透支。</span></div>
+        <div class="rule"><b>有效期</b><span>充值余额不过期，可长期用于接口调用。</span></div>
+        <div class="rule"><b>到账时间</b><span>支付宝付款成功后实时计入余额；以服务端确认的支付结果为准。</span></div>
+      </div>
+    </div>
+
+    <div class="cta">
+      <a class="btn primary" href="/recharge">去充值</a>
+      <a class="btn ghost" href="/">返回首页</a>
+    </div>
+  </div>
+</main>
+<script>
+(function () {
+  document.getElementById('apiBase').textContent = location.origin + '/v1/chat/completions';
+  function money(cents) { return '¥' + (cents / 100).toFixed(2) + ' / 百万 token'; }
+  fetch('/api/recharge/pricing', { credentials: 'same-origin' }).then(function (res) {
+    return res.json();
+  }).then(function (d) {
+    if (!d || !d.ok) return;
+    if (d.model) document.getElementById('apiModel').textContent = d.model;
+    if (d.configured) {
+      document.getElementById('priceIn').textContent = money(d.inputCentsPerMTok);
+      document.getElementById('priceOut').textContent = money(d.outputCentsPerMTok);
+      document.getElementById('priceCard').style.display = '';
+    }
+  }).catch(function () {});
+})();
+</script>
+</body>
+</html>

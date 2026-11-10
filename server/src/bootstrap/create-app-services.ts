@@ -2492,12 +2492,14 @@ export async function createAppServices(
     try {
       // 名字自我认知（与聊天面同源：记忆同步 KV 的 agent.name）
       let identityLine: string | undefined;
+      let selfName: string | undefined;
       try {
         const identityRaw = agentMemorySyncService
           .getSnapshot(sessionId, [AGENT_NAME_KV_KEY])
           .entries[AGENT_NAME_KV_KEY];
         const identity = parseAgentIdentityKv(identityRaw);
         identityLine = identity ? buildIdentityNameLine(identity) : undefined;
+        selfName = identity?.displayName;
       } catch {
         /* 名字缺失不阻塞人格正文 */
       }
@@ -2510,7 +2512,7 @@ export async function createAppServices(
       } catch {
         /* 称呼缺失不阻塞人格正文 */
       }
-      return buildPersonaPrompt({ userAlias, identityLine }) || null;
+      return buildPersonaPrompt({ userAlias, identityLine, selfName }) || null;
     } catch {
       return null;
     }

@@ -58,6 +58,15 @@ test("buildPersonaPrompt：名字自我认知行排最前（覆盖冻结层里�
   assert.ok(body.startsWith("你现在的名字是「小来包」。"), prompt);
 });
 
+test("buildPersonaPrompt：用户起的名字替换正文 {{AGENT_NAME}}，未起名回落产品名", () => {
+  writeSoulDoc("# SOUL\n\n我是 {{AGENT_NAME}}。\n");
+  const named = buildPersonaPrompt({ selfName: "小来包" });
+  assert.ok(named.includes("我是 小来包。"), named);
+  assert.equal(named.includes("{{AGENT_NAME}}"), false, "占位符不得漏进 prompt");
+  const unnamed = buildPersonaPrompt();
+  assert.ok(unnamed.includes("我是 NEXTBOT。"), unnamed);
+});
+
 test("buildPersonaPrompt：演化层条目在标点处截成一句，残句整条丢掉", () => {
   writeSoulDoc("我是 NEXTBOT。\n");
   writeDisposition(

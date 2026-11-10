@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NextBot — API 充值（设计稿）</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  :root {
+    --bg: #060607;
+    --text: #ffffff;
+    --muted: rgba(255, 255, 255, 0.62);
+    --dim: rgba(255, 255, 255, 0.38);
+    --line: rgba(255, 255, 255, 0.09);
+    --line-strong: rgba(255, 255, 255, 0.16);
+    --glass: rgba(255, 255, 255, 0.045);
+    --glass-strong: rgba(255, 255, 255, 0.085);
+    --radius: 26px;
+    --mono: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  }
+
+  html, body { height: 100%; }
+
+  body {
+    font-family: "Inter", "Noto Sans SC", "Microsoft YaHei UI", "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .bg {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    background:
+      radial-gradient(900px 460px at 50% -10%, rgba(255, 255, 255, 0.10), transparent 62%),
+      radial-gradient(720px 420px at 88% 18%, rgba(255, 255, 255, 0.045), transparent 66%),
+      #060607;
+  }
+
+  /* ── 导航（与现有 landing 一致的黑玻璃胶囊） ── */
+  .nav {
+    position: fixed;
+    top: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: calc(100% - 48px);
+    max-width: 1180px;
+    padding: 12px 14px 12px 22px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    z-index: 50;
+    border-radius: 100px;
+    background: rgba(12, 12, 14, 0.72);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(20px) saturate(130%);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  }
+  .logo { color: #ffffff; text-decoration: none; font-size: 17px; font-weight: 800; letter-spacing: 0.02em; white-space: nowrap; }
+  .logo .bot { color: rgba(255, 255, 255, 0.52); font-weight: 700; }
+  .nav-links {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px;
+    border-radius: 100px;
+    background: rgba(255, 255, 255, 0.035);
+    border: 1px solid rgba(255, 255, 255, 0.06);
+  }
+  .nav-links a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 8px 16px;
+    border-radius: 100px;
+  }
+  .nav-links a:hover { color: var(--text); background: rgba(255, 255, 255, 0.08); }
+  .nav-links a.on { color: #060607; background: #ffffff; font-weight: 600; }
+  .nav-cta {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 9px 18px;
+    border-radius: 100px;
+    background: linear-gradient(180deg, #ffffff 0%, #e2e2e6 100%);
+    color: #060607;
+    font-size: 13px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .nav-cta svg { width: 14px; height: 14px; }
+
+  main { position: relative; z-index: 1; }
+
+  .screen { display: none; min-height: 100vh; padding: 128px 24px 72px; }
+  .screen.on { display: block; }
+
+  .wrap { max-width: 1180px; margin: 0 auto; }
+
+  /* ── 页头 ── */
+  .head { text-align: center; padding-top: 6px; }
+  .eyebrow {
+    font-size: 12px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.42);
+  }
+  h1 { margin-top: 14px; font-size: 40px; line-height: 1.18; font-weight: 700; letter-spacing: -0.025em; }
+  .sub { margin-top: 12px; font-size: 15px; line-height: 1.75; color: var(--muted); }
+
+  /* ── 登录账号条 ── */
+  .account {
+    max-width: 720px;
+    margin: 30px auto 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 15px 20px;
+    border-radius: 20px;
+    background: var(--glass);
+    border: 1px solid var(--line);
+  }
+  .who { display: flex; align-items: center; gap: 12px; }
+  .avatar {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: #ffffff;
+    color: #060607;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700;
+  }
+  .who .em { font-size: 14px; font-weight: 500; }
+  .who .st { margin-top: 3px; display: flex; align-items: center; gap: 6px; font-size: 11.5px; color: var(--dim); }
+  .live { width: 6px; height: 6px; border-radius: 50%; background: #ffffff; }
+  .bal { text-align: right; font-size: 11.5px; color: var(--dim); }
+  .bal b { display: block; margin-top: 3px; font-size: 18px; font-weight: 600; letter-spacing: -0.02em; color: var(--text); }
+
+  /* ── 支付表单卡 ── */
+  .pay-card {
+    max-width: 720px;
+    margin: 16px auto 0;
+    padding: 34px 34px 30px;
+    border-radius: var(--radius);
+    background: var(--glass-strong);
+    border: 1px solid var(--line-strong);
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.14);
+  }
+  .sec-label { font-size: 13.5px; font-weight: 600; color: rgba(255, 255, 255, 0.78); }
+
+  /* 金额胶囊 */
+  .chips { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 14px; align-items: center; }
+  .chip {
+    padding: 11px 20px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.065);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.82);
+    white-space: nowrap;
+  }
+  .chip.on { background: #ffffff; border-color: #ffffff; color: #060607; font-weight: 600; }
+  .price-link { margin-left: auto; font-size: 13px; color: var(--muted); text-decoration: none; }
+  .price-link:hover { color: var(--text); }
+
+  /* 支付方式 */
+  .method {
+    margin-top: 14px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 14px 16px;
+    border-radius: 14px;
+    background: rgba(0, 0, 0, 0.32);
+    border: 1.5px solid rgba(255, 255, 255, 0.88);
+  }
+  .alipay-mark {
+    width: 42px; height: 42px;
+    border-radius: 9px;
+    background: #1677ff;
+    display: flex; align-items: center; justify-content: center;
+    flex: none;
+  }
+  .alipay-mark span { font-size: 24px; font-weight: 700; color: #ffffff; line-height: 1; }
+  .m-name { font-size: 15px; font-weight: 600; letter-spacing: 0.01em; }
+  .m-en { margin-top: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.24em; color: rgba(255, 255, 255, 0.42); }
+
+  .to-account {
+    margin-top: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 12.5px;
+    color: var(--dim);
+  }
+  .to-account b { font-weight: 500; color: rgba(255, 255, 255, 0.68); }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    height: 48px;
+    padding: 0 36px;
+    border-radius: 100px;
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    white-space: nowrap;
+  }
+  .btn.primary { background: linear-gradient(180deg, #ffffff 0%, #e4e4e8 100%); color: #060607; }
+  .btn.ghost { background: rgba(255, 255, 255, 0.05); border: 1px solid rgba(255, 255, 255, 0.14); color: var(--text); }
+  .btn.block { width: 100%; margin-top: 24px; height: 50px; font-size: 15px; padding: 0; }
+
+  .pay-note { margin-top: 14px; text-align: center; font-size: 12px; line-height: 1.8; color: var(--dim); }
+
+  /* ── 充值后入口条 ── */
+  .api-cta {
+    max-width: 720px;
+    margin: 16px auto 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 20px;
+    padding: 20px 24px;
+    border-radius: 20px;
+    background: var(--glass);
+    border: 1px solid var(--line);
+  }
+  .api-cta .t { font-size: 14px; font-weight: 600; }
+  .api-cta .d { margin-top: 6px; font-size: 12px; color: var(--muted); }
+  .link { font-size: 13px; color: var(--muted); text-decoration: none; flex: none; }
+  .link:hover { color: var(--text); }
+
+  .mono { font-family: var(--mono); }
+
+  /* ── 充值成功 ── */
+  .screen[data-screen="success"].on { display: flex; align-items: center; justify-content: center; padding-top: 80px; }
+  .done-wrap { max-width: 560px; margin: 0 auto; width: 100%; }
+  .done {
+    padding: 44px 40px 36px;
+    border-radius: 30px;
+    background: var(--glass-strong);
+    border: 1px solid var(--line-strong);
+    text-align: center;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.16);
+  }
+  .done-icon {
+    width: 64px; height: 64px; margin: 0 auto;
+    border-radius: 50%;
+    background: #ffffff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .done-icon svg { width: 30px; height: 30px; }
+  .done h1 { margin-top: 24px; font-size: 30px; }
+  .done .sub { margin-top: 10px; font-size: 14px; }
+  .receipt { margin-top: 26px; padding: 6px 20px; border-radius: 18px; background: rgba(0, 0, 0, 0.28); border: 1px solid rgba(255, 255, 255, 0.07); text-align: left; }
+  .row { display: flex; align-items: center; justify-content: space-between; padding: 13px 0; font-size: 13px; color: var(--muted); }
+  .row b { font-weight: 500; color: var(--text); }
+  .done-acts { margin-top: 24px; display: flex; gap: 10px; }
+  .done-acts .btn { flex: 1; padding: 0; }
+  .done-note { margin-top: 18px; font-size: 12px; color: var(--dim); }
+</style>
+</head>
+<body>
+<div class="bg"></div>
+
+<!-- 站点导航：首页 / API 充值 -->
+<nav class="nav" id="siteNav">
+  <a class="logo" href="#"><span class="next">Next</span><span class="bot">Bot</span></a>
+  <div class="nav-links">
+    <a href="#">首页</a>
+    <a href="#" class="on">API 充值</a>
+  </div>
+  <a class="nav-cta" href="#">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M4 21h16"/></svg>
+    下载
+  </a>
+</nav>
+
+<main>
+  <!-- ══════════ 1. API 充值 / 支付页 ══════════ -->
+  <section class="screen on" data-screen="api">
+    <div class="wrap">
+      <div class="head">
+        <div class="eyebrow">API</div>
+        <h1>充值到你的账号</h1>
+        <p class="sub">金额直接计入当前登录账号，按 token 扣减。接口调用同样使用这个账号，无需另外创建密钥。</p>
+      </div>
+
+      <div class="account">
+        <div class="who">
+          <div class="avatar">W</div>
+          <div>
+            <div class="em">wangs***@qq.com</div>
+            <div class="st"><span class="live"></span>已登录 · 充值额度与接口调用均绑定此账号</div>
+          </div>
+        </div>
+        <div class="bal">当前余额<b>¥128.40</b></div>
+      </div>
+
+      <div class="pay-card">
+        <div class="sec-label">支付金额</div>
+        <div class="chips">
+          <span class="chip">¥10</span>
+          <span class="chip">¥20</span>
+          <span class="chip">¥50</span>
+          <span class="chip on">¥100</span>
+          <span class="chip">¥300</span>
+          <span class="chip">¥500</span>
+          <span class="chip">自定义</span>
+          <a class="price-link" href="#">查看价格</a>
+        </div>
+
+        <div class="sec-label" style="margin-top:30px">支付方式</div>
+        <div class="method">
+          <div class="alipay-mark"><span>支</span></div>
+          <div>
+            <div class="m-name">支付宝</div>
+            <div class="m-en">ALIPAY</div>
+          </div>
+        </div>
+
+        <div class="to-account">
+          <span>到账账号 <b>wangs***@qq.com</b></span>
+          <span>余额不过期</span>
+        </div>
+
+        <a class="btn primary block" href="#">立即充值 ¥100.00</a>
+        <div class="pay-note">支付宝付款实时到账 · 支持开具电子发票 · 充值记录在账户中可查</div>
+      </div>
+
+      <div class="api-cta">
+        <div>
+          <div class="t">充值到账后即可调用</div>
+          <div class="d">接口用你的登录账号授权，额度从账户余额中扣减，无需另外创建密钥。</div>
+        </div>
+        <a class="link" href="#">查看 API 文档 →</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ══════════ 2. 充值成功 ══════════ -->
+  <section class="screen" data-screen="success">
+    <div class="done-wrap">
+      <div class="done">
+        <div class="done-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="#060607" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"/></svg>
+        </div>
+        <h1>充值成功</h1>
+        <p class="sub">¥100.00 已到账，当前余额 ¥228.40。</p>
+
+        <div class="receipt">
+          <div class="row"><span>商品</span><b>API 充值</b></div>
+          <div class="row"><span>到账账号</span><b>wangs***@qq.com</b></div>
+          <div class="row"><span>金额</span><b>¥100.00</b></div>
+          <div class="row"><span>订单号</span><b class="mono" style="font-size:12px">NB20261109-000137</b></div>
+        </div>
+
+        <div class="done-acts">
+          <a class="btn ghost" href="#">查看账单</a>
+          <a class="btn primary" href="#">完成</a>
+        </div>
+        <div class="done-note">发票可在「账单」中申请</div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<script>
+  (function () {
+    var params = new URLSearchParams(location.search);
+    var target = params.get('screen') || 'api';
+    var screens = document.querySelectorAll('.screen');
+
+    screens.forEach(function (el) {
+      el.classList.toggle('on', el.dataset.screen === target);
+    });
+
+    // 成功页保持极简，不显示站点导航
+    document.getElementById('siteNav').style.display = target === 'success' ? 'none' : 'flex';
+  })();
+</script>
+</body>
+</html>

@@ -59,6 +59,9 @@ import { registerProfileManageRoutes } from "./profile-manage.js";
 import { registerHealthRhythmRoutes } from "./health-rhythm.js";
 import { registerUserAvatarRoutes } from "./user-avatar.js";
 import { registerPaymentGuardrailRoutes } from "./payment-guardrails.js";
+import { registerWebpayRoutes } from "./webpay.js";
+import { registerRechargeRoutes } from "./recharge.js";
+import { registerV1GatewayRoutes } from "./v1-gateway.js";
 import { registerBriefingTestRoutes, registerEveningDigestTestRoutes } from "./briefing-test.js";
 import { registerBriefingTtsRoutes } from "./briefing-tts.js";
 import { registerVoiceRealtimeRoutes } from "./voice-realtime.js";
@@ -324,6 +327,12 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   // 声纹注册/验证（首启向导 + 语音对话说话人闸；引擎本地 ONNX，缺失时优雅降级）
   registerVoiceprintRoutes(app);
   registerPaymentGuardrailRoutes(app);
+  // AI 网页应用收款（自包含页面 + /api/webpay/*；未配置时端点 503，不影响其他路由）
+  registerWebpayRoutes(app);
+  // 官网 API 充值（邮箱 OTP 会话 + 金额计入登录账号；支付仍走上面同一套 webpay）
+  registerRechargeRoutes(app, deps);
+  // /v1 对话网关（OpenAI 兼容，余额按 token 扣减；单价/模型未配置时端点自报 503）
+  registerV1GatewayRoutes(app);
   registerAgentActivityRoutes(app, { activityStore: deps.agentActivityStore, auditTrailService: deps.auditTrailService });
   registerBriefingTestRoutes(app, {
     wsConnectionRegistry: deps.wsConnectionRegistry,

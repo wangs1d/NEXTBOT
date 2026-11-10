@@ -26,7 +26,9 @@ const ANYSEARCH_ENDPOINT =
 const ANYSEARCH_SUB_DOMAINS_ENDPOINT = ANYSEARCH_ENDPOINT.replace(/\/v1\/search$/, "/v1/sub-domains");
 
 const ANYSEARCH_IMAGE_PROBE_TTL_MS = 10 * 60 * 1000;
-const ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS = 2_500;
+// 能力拓扑探测必须短：图片域未开放时每次 search_images 都要先等这段超时才回落
+// 爬页兜底（2026-11-08 实测 2500ms 串行探测拖慢整轮）。能力开放后仍按 TTL 自动切换。
+const ANYSEARCH_IMAGE_PROBE_TIMEOUT_MS = 1_200;
 const ANYSEARCH_IMAGE_PROBE_DOMAINS = ["image", "images", "photo"] as const;
 let anysearchImageProbe: { at: number; tag: string | null } | null = null;
 

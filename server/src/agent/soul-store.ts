@@ -112,12 +112,19 @@ export type PersonaPromptInput = {
   userAlias?: string;
   /** 名字自我认知行（agent-identity.buildIdentityNameLine），缺省不写 */
   identityLine?: string;
+  /** 用户给 agent 起的名字（agent.name 的 displayName），替换正文里的 {{AGENT_NAME}} */
+  selfName?: string;
 };
+
+/** 冻结层正文里的名字占位符；用户起名前回落到产品名 */
+const SELF_NAME_TOKEN = "{{AGENT_NAME}}";
+const DEFAULT_SELF_NAME = "NEXTBOT";
 
 let personaCache: { key: string; text: string } | null = null;
 
 /**
  * 唯一的【人格】块：名字自我认知 + 冻结层正文 + 称呼行 + 演化层几条默契。
+ * 冻结层正文里的 {{AGENT_NAME}} 按用户起的名字替换（缺省回落产品名）。
  * 全空返回空串（零注入）。mtime 为缓存键，文件一动即重算。
  */
 export function buildPersonaPrompt(input: PersonaPromptInput = {}): string {
@@ -133,14 +140,16 @@ export function buildPersonaPrompt(input: PersonaPromptInput = {}): string {
   }
   const alias = input.userAlias?.trim() ?? "";
   const identityLine = input.identityLine?.trim() ?? "";
-  const cacheKey = `${soulStamp}|${dispositionStamp}|${alias}|${identityLine}`;
+  const selfName = input.selfName?.trim() || DEFAULT_SELF_NAME;
+  const cacheKey = `${soulStamp}|${dispositionStamp}|${alias}|${identityLine}|${selfName}`;
   if (personaCache?.key === cacheKey) return personaCache.text;
 
   const sections: string[] = [];
   if (identityLine) sections.push(identityLine);
   if (soulPath) {
     try {
-      const prose = soulProse(readFileSync(soulPath, "utf8"));
+      const raw = readFileSync(soulPath, "utf8").split(SELF_NAME_TOKEN).join(selfName);
+      const prose = soulProse(raw);
       if (prose) sections.push(prose);
     } catch {
       /* 文档读失败按无冻结层处理 */

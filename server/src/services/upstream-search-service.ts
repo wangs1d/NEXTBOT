@@ -8,6 +8,8 @@ import {
   SearchCache,
 } from "./search-enhancements.js";
 import { searchImagesViaSearchApi, type ImageApiItem } from "./search-api-provider.js";
+import { filterByQueryFragments, primaryRelevanceRatio } from "./domestic-web-providers.js";
+import { rerankImagesByVlm } from "./image-relevance-vlm.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
 
 const execFileAsync = promisify(execFile);
@@ -263,12 +265,15 @@ export class UpstreamSearchService {
     // LLM 需要更多张时应拆成多个细粒度 query 并行搜（如多个地点/多个主题各搜一次），
     // 由前端 renderBlocks 把「每段文字→对应一组照片」自然交错。
     const boundedLimit = clamp(limit, 1, 8);
+    // 候选池放大 5 倍：远程图防盗链 / 格式不支持时转存层会跳过并继续取下一张，
+    // 池子太浅会出现「整批下载失败 → 0 张图」，用户拿不到任何照片。
+    // 转存层一旦凑够 boundedLimit 张即停止，放大池子只增加解析量、不增加下载量。
+    const candidateLimit = boundedLimit * 5;
 
-    // 优先走已接入的搜索 API（search-images-via-search-api）拿真实图源 URL；
-    // 与正文搜索 searchWeb 同源策略：API 优先，爬图片网页仅作兜底。
+    // ① 搜索 API 图片主路（配置可用时优先，仍是唯一「正式」图源）
     const apiItems = await searchImagesViaSearchApi(keyword, boundedLimit);
     if (apiItems.length > 0) {
-      const items = await this.materializeImageResults(
+      const ranked = rankImageCandidates(
         apiItems.map((it) => ({
           type: "image" as const,
           title: it.title,
@@ -277,42 +282,139 @@ export class UpstreamSearchService {
           thumbnailUrl: it.thumbnailUrl,
           source: it.source || "SearchApi",
         })),
-        actorId,
-        boundedLimit,
+        keyword,
       );
+      const items = await this.materializeImageResults(ranked, actorId, boundedLimit);
       if (items.length > 0) {
+        const { items: reranked } = await rerankImagesByVlm(items, keyword);
         return {
           provider: "search-api-images",
           mediaType: "image",
-          items,
-          notes: [`搜索 API 图片搜索优先（已转存 PNG）；pageUrl 保留原始来源页`],
+          items: reranked,
+          notes: ["搜索 API 图片搜索优先（已转存 PNG）；pageUrl 保留原始来源页"],
         };
       }
     }
 
-    // API 未接入/缺 key/失败/空结果 → 回退到爬 cn.bing.com 图片网页兜底。
-    const url = `https://cn.bing.com/images/search?q=${encodeURIComponent(keyword)}&form=HDRSC2`;
-    const html = await this.fetchText(url, IMAGE_FETCH_TIMEOUT_MS);
-    const rawItems = parseBingImageResults(html, boundedLimit);
-    const items = await this.materializeImageResults(rawItems, actorId, boundedLimit);
-    if (items.length > 0) {
+    // ② Bing 图片页兜底：同一个 query 并行打 cn / cn-async / www 三个端点，
+    //    按文本相关性择优合并。query 质量由模型在工具层负责（builtin-chat-tools
+    //    的 search_images query 描述约束为短实体词），本层不改写。
+    //
+    //    兜底前的 query 形态硬闸（2026-11-09 实测）：cn.bing.com 中文图片索引只对
+    //    两类 query 有可靠召回——① 单实体词（100%）；② 非人物普通名词组合（100%）。
+    //    「人名+任何修饰词」哪怕 2 个词段也 0% 可用（17/17 全灭，引擎用随机填充
+    //    顶满页面）。因此只允许短 query 进入抓取：去空白 ≤16 字且词段 ≤2；
+    //    超限直接拒绝并在 notes 说明，让模型改发单一实体词重试。
+    const querySegments = keyword.split(/[\s,，、。；;:：/|?？!！]+/).filter((s) => s.trim().length > 0);
+    if (keyword.replace(/\s+/g, "").length > 16 || querySegments.length > 2) {
+      const hint = querySegments[0] ?? "";
       return {
         provider: "bing-images",
         mediaType: "image",
-        items,
-        notes: ["mediaUrl/thumbnailUrl 已转存为服务端本地 PNG；pageUrl 保留原始来源页"],
+        items: [],
+        notes: [
+          `query 过长已拒绝（${querySegments.length} 个词段 / ${keyword.length} 字）：Bing 中文图片搜索只对单一实体词与普通名词组合有可靠召回，人名+修饰词组合只会返回随机无关填充`,
+          `要继续出图：用「${hint}」（仅此一词，不带任何修饰）重新调用一次即可拿到该主体的照片；普通事物可用「事物 场景」两词组合`,
+        ],
       };
     }
 
-    // 2026-11-08 只删最后一层「文章页抠图」：AnySearch 文本返回零相关文献页时，
-    // 该层会把无关站点的 header logo（维普）当人物照片转存展示。必应图片页保留——
-    // 实测它是近期照片搜索真正出货的一层，且结果与 query 相关（见下方兜底）。
+    const batches = await this.fetchBingImageBatches(keyword, candidateLimit);
+    const scored = batches
+      .map((b) => {
+        const items = rankImageCandidates(b.items, b.query);
+        return { ...b, items, ratio: imageRelevanceRatio(b.items, b.query) };
+      })
+      .filter((b) => b.items.length > 0)
+      .sort((a, b) => b.ratio - a.ratio || b.items.length - a.items.length);
+
+    if (scored.length === 0) {
+      return {
+        provider: "bing-images",
+        mediaType: "image",
+        items: [],
+        notes: ["搜索 API 与必应图片页多端点均未命中；文章页抠图兜底已关闭（避免无关站点配图混入）"],
+      };
+    }
+
+    const winner = scored[0]!;
+    // 分级相关率守卫（2026-11-09）：入口形态闸无法区分「人名+修饰」与「普通名词
+    // 组合」（那是语义判断），但两者在结果层签名完全不同——普通名词组合实测
+    // 100% 候选命中，人名+修饰实测恒为 0。因此多词 query 要求 ≥50% 候选命中才
+    // 交付，单实体词保持零相关守卫。低于阈值一律拒绝交付，让模型改词重试。
+    const minRatio = imageBatchGuardRatio(querySegments.length);
+    if (winner.ratio <= minRatio) {
+      const hint = querySegments[0] ?? "";
+      return {
+        provider: `bing-images:${winner.label}`,
+        mediaType: "image",
+        items: [],
+        notes: [
+          `多端点结果与 query 的相关率 ${Math.round(winner.ratio * 100)}% 低于交付阈值 ${Math.round(minRatio * 100)}%（判定为搜索引擎召回失效/随机填充），已拒绝交付`,
+          `要继续出图：用「${hint}」（仅此一词，不带任何修饰）重新调用一次即可拿到该主体的照片`,
+        ],
+      };
+    }
+    const merged = dedupeMediaItems(scored.flatMap((b) => b.items));
+    const items = await this.materializeImageResults(merged, actorId, boundedLimit);
+    if (items.length === 0) {
+      return {
+        provider: "bing-images",
+        mediaType: "image",
+        items: [],
+        notes: ["已找到图片候选但全部转存失败（防盗链/格式），本次未返回图片"],
+      };
+    }
+
+    // ③ 像素级复核：独立视觉模型只做重排，不删图；失败/超时原序返回，
+    //    保证「一定能拿到图片」不因复核链路而破功。
+    const vlm = await rerankImagesByVlm(items, keyword);
     return {
-      provider: "bing-images",
+      provider: `bing-images:${winner.label}`,
       mediaType: "image",
-      items: [],
-      notes: ["搜索 API 与必应图片页均未命中；已关闭文章页抠图兜底（避免无关站点 logo 混入）"],
+      items: vlm.items,
+      notes: [
+        "mediaUrl/thumbnailUrl 已转存为服务端本地 PNG；pageUrl 保留原始来源页",
+        `多端点择优：${scored.length} 批候选，采用 ${winner.label} 端点（相关度 ${winner.ratio.toFixed(2)}）`,
+        ...(vlm.applied ? [] : ["视觉复核未启用或不可用，已按文本相关性顺序交付"]),
+      ],
     };
+  }
+
+  /**
+   * 并行抓取 Bing 图片结果页：同一个 query 同时打 cn 搜索页 / cn 异步接口 /
+   * www 国际版三个端点。所有请求同时发起，整体耗时 ≈ 单端点超时，结果按端点
+   * 标注供上层做文本相关性择优；单端点失败不影响其他端点。
+   */
+  private async fetchBingImageBatches(
+    keyword: string,
+    candidateLimit: number,
+  ): Promise<Array<{ label: string; query: string; items: MediaSearchItem[] }>> {
+    // query 质量由模型负责（工具描述已约束为短实体词）；本层只把同一个 query
+    // 并行打到 cn 搜索页 / cn 异步接口 / www 国际版三个端点，整体耗时 ≈ 单端点超时，
+    // 按文本相关度择优——单端点被风控/改版打掉时其余端点仍能出货。
+    const enc = encodeURIComponent(keyword);
+    const targets: Array<{ label: string; url: string }> = [
+      { label: "cn", url: `https://cn.bing.com/images/search?q=${enc}&form=HDRSC2` },
+      { label: "cn-async", url: `https://cn.bing.com/images/async?q=${enc}&first=0&count=20&relp=20&lostate=r&mmasync=1` },
+      { label: "www", url: `https://www.bing.com/images/search?q=${enc}&form=HDRSC2` },
+    ];
+
+    const settled = await Promise.allSettled(
+      targets.map(async (t) => ({
+        label: t.label,
+        query: keyword,
+        items: parseBingImageResults(await this.fetchText(t.url, IMAGE_FETCH_TIMEOUT_MS), candidateLimit),
+      })),
+    );
+    const out: Array<{ label: string; query: string; items: MediaSearchItem[] }> = [];
+    for (const s of settled) {
+      if (s.status === "fulfilled" && s.value.items.length > 0) out.push(s.value);
+    }
+    if (out.length === 0) {
+      console.warn(`[UpstreamSearch] Bing 图片多端点全部未出货 -> query="${keyword.slice(0, 40)}"`);
+    }
+    return out;
   }
 
   /**
@@ -457,22 +559,16 @@ export class UpstreamSearchService {
     }
     const boundedLimit = clamp(limit, 1, 12);
 
-    // 三源并行（2026-09-13 根修「搜出来的视频不对」）：
-    //  - Bing 视频页直抓：改版后 mmeta/vrhm 只剩推广位携带，服务端直抓的有机结果
-    //    常为 0-1 条且混着广告位视频（真实测试：搜「刘浩存」首位是「新笔记本设置」），
-    //    解析后按查询词相关性门禁剔除推广位；
-    //  - B站公开搜索接口：无需登录直出播放页+真实缩略图+时长，覆盖质量稳定；
+    // 两源并行（2026-09-13 根修「搜出来的视频不对」；2026-11-09 移除 Bing 视频页源：
+    // 实测对当前页面结构解析产出恒为 0 条，纯白耗 10s 预算，页面抓取链整体退役）：
+    //  - B站公开搜索接口：无需登录直出播放页+真实缩略图+时长，覆盖质量稳定（主力）；
     //  - 社交平台中转：与 search_web 的微博/抖音源同口径——平台 MCP 未配置时用
     //    site: 限定搜索过滤出视频播放页直链（抖音/微博/腾讯视频/西瓜），实测
-    //    产出稀疏但真实，作为第三源补充（任一源失败不拖垮其余源）。
-    // 各源按比例分配名额：B站源质量最高（真实缩略图+时长）占大头，中转源
-    // 留出固定份额——否则先到源带满 limit 名额，后到源永远进不了最终列表。
+    //    产出稀疏但真实，作为补充（任一源失败不拖垮其余源）。
+    // B站源占大头，中转源留出固定份额——否则先到源带满 limit 名额，后到源永远进不了最终列表。
     const biliLimit = Math.max(3, Math.ceil(boundedLimit * 0.75));
     const relayLimit = Math.max(2, Math.ceil(boundedLimit * 0.5));
-    const [bingParsed, biliItems, relayItems] = await Promise.all([
-      this.fetchText(`https://cn.bing.com/videos/search?q=${encodeURIComponent(keyword)}`, 10_000)
-        .then((html) => parseBingVideoResults(html, boundedLimit, keyword))
-        .catch(() => [] as MediaSearchItem[]),
+    const [biliItems, relayItems] = await Promise.all([
       this.searchBilibiliVideos(keyword, biliLimit).catch(() => [] as MediaSearchItem[]),
       Promise.race([
         this.searchSocialVideoRelay(keyword, relayLimit),
@@ -480,22 +576,14 @@ export class UpstreamSearchService {
       ]).catch(() => [] as MediaSearchItem[]),
     ]);
 
-    // 合并名额（2026-10-02 根修）：Bing 视频源产出几乎全是抖音页，而抖音页当前
-    // 解析不出可播流（yby6 MCP 上游恒失败）——若让 Bing 先带满 limit，B站候选会被
-    // 整段挤掉，「按内容找视频」只能回一堆点不开的链接。现在给 Bing/中转各留固定
-    // 份额，B站源在名额内优先占位，剩余额度再由 Bing 补满（保召回也保可播）。
-    const bingQuota = Math.max(2, Math.round(boundedLimit * 0.35));
     const relayQuota = Math.max(1, Math.round(boundedLimit * 0.15));
     const merged = dedupeMediaByPageUrl([
-      ...bingParsed.slice(0, bingQuota),
       ...biliItems,
       ...relayItems.slice(0, relayQuota),
-      ...bingParsed.slice(bingQuota),
       ...relayItems.slice(relayQuota),
     ]).slice(0, boundedLimit);
     if (merged.length >= Math.min(3, boundedLimit)) {
       const sources = [
-        bingParsed.length > 0 ? "bing-videos" : null,
         biliItems.length > 0 ? "bilibili-api" : null,
         relayItems.length > 0 ? "social-relay" : null,
       ].filter(Boolean);
@@ -523,7 +611,6 @@ export class UpstreamSearchService {
       }));
     const items = dedupeMediaByPageUrl([...merged, ...fallback]).slice(0, boundedLimit);
     const sources = [
-      bingParsed.length > 0 ? "bing-videos" : null,
       biliItems.length > 0 ? "bilibili-api" : null,
       relayItems.length > 0 ? "social-relay" : null,
       fallback.length > 0 ? "web-fallback" : null,
@@ -1139,12 +1226,20 @@ export class UpstreamSearchService {
   ): Promise<MediaSearchItem[]> {
     // 来源闸（2026-10-15 同兴山庄实证）：图搜「住宅区/山庄/小区名」高频返回
     // 百度地图位置截图与图库水印图，转存后顶着 POI 名义展示给用户。三条搜索
-    // 路径（search-api / bing 图片页 / 文章页抠图）统一在此单点拦截。
-    const usable = items.filter((it) => !isBlockedImageSource(it));
-    if (usable.length < items.length) {
-      console.log(`[UpstreamSearch] 图片来源闸拦截 ${items.length - usable.length} 张（地图截图/水印图库）`);
+    // 路径（search-api / Bing 图片页多端点）统一在此单点拦截。
+    // 2026-11-08 改为软闸：水印图库站候选降权到队尾而不是直接删除——
+    // 干净候选全部下载失败时仍能由队尾候选出货，保证用户拿得到图片；
+    // 地图截图 / 装饰图 / 迷你图属于硬闸，仍然直接丢弃。
+    const strict: MediaSearchItem[] = [];
+    const relaxed: MediaSearchItem[] = [];
+    for (const it of items) {
+      if (!isBlockedImageSource(it)) strict.push(it);
+      else if (!isBlockedImageSource(it, { allowWatermarkStock: true })) relaxed.push(it);
     }
-    items = usable;
+    if (relaxed.length > 0) {
+      console.log(`[UpstreamSearch] 图片来源闸降权 ${relaxed.length} 张（水印图库站，队尾保底）`);
+    }
+    items = [...strict, ...relaxed];
 
     const storage = this.imageStorageService;
     if (!storage) return items.slice(0, limit);
@@ -1190,9 +1285,11 @@ export class UpstreamSearchService {
 const IMAGE_MATERIALIZE_CONCURRENCY = 3;
 // 图片转存阶段的硬预算：在此时间内返回已达成的部分 items，
 // 保证 search_images 在工具超时前正常 resolve，前端能拿到媒体卡片。
-const IMAGE_MATERIALIZE_BUDGET_MS = 6_500;
-// 图片结果页抓取超时：配合转存预算，保证"抓取 + 转存"总耗时 < 12s 工具预算。
-const IMAGE_FETCH_TIMEOUT_MS = 5_000;
+// 2026-11-08：总预算按「抓取 3.5s + 转存 5s + VLM 复核 2.2s < 12s」重排。
+const IMAGE_MATERIALIZE_BUDGET_MS = 5_000;
+// 图片结果页抓取超时：cn / async / www 三个端点并行抓取，取相关性最高的一批，
+// 因此这里约束的是「单端点」耗时而不是三个端点之和。
+const IMAGE_FETCH_TIMEOUT_MS = 3_500;
 
 function clamp(input: number, min: number, max: number): number {
   if (!Number.isFinite(input)) return min;
@@ -1232,7 +1329,19 @@ const WATERMARK_STOCK_HOST_SUFFIXES = [
   'photophoto.cn',
   'quanjing.com',
   'dfic.cn',         // 东方 IC
+  // 2026-11-08 事故链实证：长 query 跑偏时这些站的缩略图/水印图会被当成人物照
+  'nximg.cn',        // 昵图网图床（灯塔摄影图水印）
+  'ztupic.com',      // 众图网素材图
+  'picoriline.com',  // 壁纸站（截图里灯塔图底部水印）
+  'grok4ai.com',     // 垃圾站缩略图
+  'weibomingzi.com', // 简笔画素材站
+  '58pic.com',
+  'ooopic.com',
+  'tooopen.com',
 ] as const;
+
+/** 图片 URL 路径里的装饰图/占位图特征（候选池已放大，误杀成本很低） */
+const BAD_IMAGE_PATH_RE = /(?:logo|icon|avatar|qrcode|watermark|sprite|placeholder|loading|blank|spacer|noimage|default_)/i;
 
 /** 标题特征词（软件图/示意图；裸「地图」不收防误杀「地图鱼」等实拍主题） */
 const IMAGE_TITLE_BLOCKED_WORDS = [
@@ -1245,24 +1354,36 @@ const IMAGE_TITLE_BLOCKED_WORDS = [
  * pageUrl / mediaUrl / thumbnailUrl 任一命中黑名单 host 即拒——地图截图常以
  * 来源页（pageUrl）而非图片直链暴露地图域。
  */
-function isBlockedImageSource(item: {
-  title?: string;
-  pageUrl?: string;
-  mediaUrl?: string;
-  thumbnailUrl?: string;
-}): boolean {
+export function isBlockedImageSource(
+  item: {
+    title?: string;
+    pageUrl?: string;
+    mediaUrl?: string;
+    thumbnailUrl?: string;
+    width?: number;
+    height?: number;
+  },
+  opts: { allowWatermarkStock?: boolean } = {},
+): boolean {
   const urls = [item.pageUrl, item.mediaUrl, item.thumbnailUrl]
     .filter((u): u is string => typeof u === 'string' && /^https?:\/\//.test(u));
   for (const u of urls) {
     try {
-      const host = new URL(u).hostname.toLowerCase();
-      const blocked = [...MAP_SCREENSHOT_HOST_SUFFIXES, ...WATERMARK_STOCK_HOST_SUFFIXES]
-        .some((s) => host === s || host.endsWith(`.${s}`));
-      if (blocked) return true;
+      const parsed = new URL(u);
+      const host = parsed.hostname.toLowerCase();
+      const match = (list: readonly string[]) => list.some((s) => host === s || host.endsWith(`.${s}`));
+      // 水印图库站是「软闸」：候选充足时降权到队尾，真没图时仍可放行保底。
+      if (!opts.allowWatermarkStock && match(WATERMARK_STOCK_HOST_SUFFIXES)) return true;
+      if (match(MAP_SCREENSHOT_HOST_SUFFIXES)) return true;
+      if (BAD_IMAGE_PATH_RE.test(parsed.pathname)) return true;
     } catch { /* 非法 URL 不因它拒，交给下载层 */ }
   }
+  // 明确的迷你图（Bing 会带 w/h；缺失尺寸时不误杀）
+  const w = Number(item.width ?? 0);
+  const h = Number(item.height ?? 0);
+  if (w > 0 && h > 0 && (w < 180 || h < 180)) return true;
   const title = String(item.title ?? '');
-  return IMAGE_TITLE_BLOCKED_WORDS.some((w) => title.includes(w));
+  return IMAGE_TITLE_BLOCKED_WORDS.some((w2) => title.includes(w2));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1412,7 +1533,69 @@ function dedupeText(items: string[]): string[] {
   return Array.from(set);
 }
 
-function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
+// ─────────────────────────────────────────────────────────────────────────────
+// 图片候选文本相关性软闸（2026-11-08）
+//
+// 实证：Bing 中文图片页对修饰词长 query 会整页跑偏（返回「红军长征路线图」
+// 「林业局」甚至垃圾站缩略图），query 质量由模型在工具层负责（见
+// builtin-chat-tools.ts 的 search_images query 描述约束），本层不做 query 改写。
+// 这里只对候选按 CJK 片段命中做软排序与多端点择优，但**绝不因为过滤把结果
+// 清空**（保底仍交付原候选），保证用户一定能拿到图片。
+// 片段算法复用 domestic-web-providers 的 filterByQueryFragments，避免第二份实现漂移。
+// ─────────────────────────────────────────────────────────────────────────────
+
+function toRelevanceShape(items: MediaSearchItem[]): Array<{ title: string; snippet: string; url: string; i: number }> {
+  return items.map((it, i) => ({
+    title: it.title || "",
+    snippet: it.snippet ?? "",
+    url: it.pageUrl ?? "",
+    i,
+  }));
+}
+
+/** 一批候选与 query 的文本相关比例（0~1），用于多端点择优。 */
+export function imageRelevanceRatio(items: MediaSearchItem[], query: string): number {
+  if (items.length === 0) return 0;
+  const shapes = toRelevanceShape(items);
+  return filterByQueryFragments(shapes, query).length / shapes.length;
+}
+
+/**
+ * Bing 图片兜底的分级交付阈值（按 query 词段数）。
+ * 实测（2026-11-09 修饰词矩阵）：普通名词组合（「灯塔 风景」）100% 候选命中，
+ * 「人名+修饰词」恒为 0 命中——以 0.5 为多词 query 的交付线可精确切分两类；
+ * 单实体词实测恒 100%，保持零相关守卫即可。
+ */
+export function imageBatchGuardRatio(segmentCount: number): number {
+  return segmentCount >= 2 ? 0.5 : 0;
+}
+
+/**
+ * 相关性软闸：命中 query 片段的候选置顶；命中数 ≥2 时剔除零命中项（跑偏图）。
+ * 命中不足时保留全部原候选，只做排序 —— 宁可相关度低，也不能让用户拿到 0 张图。
+ */
+export function rankImageCandidates(items: MediaSearchItem[], query: string): MediaSearchItem[] {
+  if (items.length <= 1) return items;
+  const hit = new Set(filterByQueryFragments(toRelevanceShape(items), query).map((s) => s.i));
+  const scored = items.map((it, i) => ({ it, i, hit: hit.has(i) ? 1 : 0 }));
+  const keep = hit.size >= 2 ? scored.filter((s) => s.hit === 1) : scored;
+  return keep.sort((a, b) => b.hit - a.hit || a.i - b.i).map((s) => s.it);
+}
+
+/** 跨端点合并时按图片直链去重（保留首次出现，即相关度最高的批次）。 */
+function dedupeMediaItems(items: MediaSearchItem[]): MediaSearchItem[] {
+  const seen = new Set<string>();
+  const out: MediaSearchItem[] = [];
+  for (const it of items) {
+    const key = (it.mediaUrl || it.thumbnailUrl || it.pageUrl || "").toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
+  }
+  return out;
+}
+
+export function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
   const out: MediaSearchItem[] = [];
   const seen = new Set<string>();
   const attrRe = /\bm=(["'])([\s\S]*?)\1/gi;
@@ -1447,193 +1630,6 @@ function parseBingImageResults(html: string, limit: number): MediaSearchItem[] {
   return out;
 }
 
-/** 导出供回归测试（Bing 视频页新/旧结构与推广位门禁） */
-export function parseBingVideoResults(
-  html: string,
-  limit: number,
-  query = "",
-): MediaSearchItem[] {
-  // 必应视频页结果解析（2026-09-13 根修）：
-  //   0) 2026-09 新结构：结果单元是 <a class="mc_vtvc_link ..." href="播放页直链"
-  //      aria-label="标题 来源: … · 时长: …">，内层 mc_vtvc_title（标题）/
-  //      mc_bc_rc（时长）/ img（缩略图）。改版后 mmeta/vrhm 属性只剩推广位携带，
-  //      旧解析因此只会命中广告位视频（真实测试：搜「刘浩存」首位是「新笔记本
-  //      设置」推广视频）——新结构必须优先解析；
-  //   1/2) 旧结构 mmeta/vrhm 兼容保留；
-  //   3) 全部缺失时退回 <a> 链接启发式解析。
-  // 直抓解析出的条目统一过查询词相关性门禁（见 gateVideoResultsByQuery）。
-  const out: MediaSearchItem[] = [];
-  const seen = new Set<string>();
-
-  // 0) mc_vtvc_link 新结构
-  for (const match of html.matchAll(/class="mc_vtvc_link/g)) {
-    const classIdx = match.index ?? 0;
-    const tagStart = html.lastIndexOf("<a", classIdx);
-    const tagEnd = html.indexOf(">", classIdx);
-    if (tagStart < 0 || tagEnd < 0) continue;
-    const openTag = html.slice(tagStart, tagEnd + 1);
-    const nextClass = html.indexOf('class="mc_vtvc_link', tagEnd + 1);
-    const block = html.slice(tagEnd + 1, nextClass > 0 ? nextClass : tagEnd + 1 + 8000);
-    const rawHref =
-      /\bhref="([^"]+)"/.exec(openTag)?.[1] ??
-      /\bourl="([^"]+)"/.exec(block)?.[1];
-    if (!rawHref) continue;
-    const pageUrl = decodeHtmlEntities(rawHref).trim();
-    if (!/^https?:\/\//i.test(pageUrl)) continue;
-    const key = pageUrl.toLowerCase();
-    if (seen.has(key)) continue;
-    const ariaLabel = decodeHtmlEntities(/\baria-label="([^"]*)"/.exec(openTag)?.[1] ?? "");
-    const rawTitle = /class="mc_vtvc_title[^>]*>([\s\S]{0,500}?)<\/div>/.exec(block)?.[1] ?? "";
-    const title =
-      stripTags(rawTitle).trim() || ariaLabel.split(/\s*来源:/)[0].trim();
-    const duration =
-      /\bclass="mc_bc_rc[^"]*"[^>]*>\s*([0-9]{1,2}(?::[0-9]{2}){1,2})\s*</.exec(block)?.[1];
-    const rawThumb =
-      /data-src-hq="([^"]+)"/.exec(block)?.[1] ??
-      /<img\b[^>]*\bsrc="([^"]+)"/.exec(block)?.[1];
-    seen.add(key);
-    out.push({
-      type: "video",
-      title: title || "视频结果",
-      pageUrl,
-      mediaUrl: pageUrl,
-      thumbnailUrl: rawThumb ? absolutizeBingUrl(decodeHtmlEntities(rawThumb)) : undefined,
-      duration,
-      source: inferMediaSource(pageUrl, "Bing Videos"),
-    });
-    if (out.length >= limit) break;
-  }
-
-  // 1) mmeta：播放页 + 缩略图（aria-label 兜底标题跟在容器后的首个 <a> 上）
-  const metaByKey = new Map<string, { pageUrl: string; thumbnailUrl?: string; ariaLabel?: string }>();
-  const mmetaRe =
-    /class="mc_vtvc[^"]*"[^>]*\smmeta="([^"]*)"[^>]*>\s*<a[^>]*aria-label="([^"]*)"/g;
-  let m: RegExpExecArray | null = null;
-  while ((m = mmetaRe.exec(html))) {
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(decodeHtmlEntities(m[1] ?? ""));
-    } catch {
-      continue;
-    }
-    const pageUrl = pickString(data.purl) || pickString(data.murl) || pickString(data.pgurl);
-    if (!pageUrl || !/^https?:\/\//i.test(pageUrl)) continue;
-    const key = pageUrl.toLowerCase();
-    if (metaByKey.has(key)) continue;
-    metaByKey.set(key, {
-      pageUrl,
-      thumbnailUrl: pickString(data.turl),
-      ariaLabel: m[2],
-    });
-  }
-
-  // 2) vrhm：标题 + 时长（按播放页 URL 关联到 mmeta 条目）
-  const titleByKey = new Map<string, { title?: string; duration?: string }>();
-  const vrhmRe = /class="vrhdata"[^>]*\svrhm="([^"]*)"/g;
-  while ((m = vrhmRe.exec(html))) {
-    let data: Record<string, unknown>;
-    try {
-      data = JSON.parse(decodeHtmlEntities(m[1] ?? ""));
-    } catch {
-      continue;
-    }
-    const pageUrl = pickString(data.purl) || pickString(data.murl) || pickString(data.pgurl);
-    if (!pageUrl) continue;
-    const key = pageUrl.toLowerCase();
-    if (titleByKey.has(key)) continue;
-    titleByKey.set(key, { title: pickString(data.vt), duration: pickString(data.du) });
-  }
-
-  // 3) 合并输出：mmeta 有缩略图的条目优先；缺标题时用容器 aria-label 兜底
-  for (const { pageUrl, thumbnailUrl, ariaLabel } of metaByKey.values()) {
-    const key = pageUrl.toLowerCase();
-    // 新结构（步骤 0）可能已收录同一播放页，跳过避免重复条目
-    if (seen.has(key)) continue;
-    const meta = titleByKey.get(key);
-    const title =
-      meta?.title ||
-      decodeHtmlEntities(ariaLabel ?? "")
-        .replace(/来源:.*$/, "")
-        .replace(/·\s*时长.*$/, "")
-        .trim()
-        .slice(0, 160);
-    seen.add(key);
-    out.push({
-      type: "video",
-      title: title || "视频结果",
-      pageUrl,
-      mediaUrl: pageUrl,
-      thumbnailUrl,
-      duration: meta?.duration,
-      source: inferMediaSource(pageUrl, "Bing Videos"),
-    });
-    if (out.length >= limit) break;
-  }
-  const gated = gateVideoResultsByQuery(out, query);
-  if (gated.length > 0) return gated;
-
-  // 兜底：mmeta/vrhm 都缺失时退回 <a> 链接启发式解析（结果质量差但聊胜于无）
-  const blockRe = /<a\b[^>]*href=(["'])(.*?)\1[^>]*>([\s\S]*?)<\/a>/gi;
-  let a: RegExpExecArray | null = null;
-  while ((a = blockRe.exec(html))) {
-    const rawHref = decodeHtmlEntities(a[2] ?? "").trim();
-    if (!rawHref || rawHref.startsWith("#") || rawHref.startsWith("javascript:")) continue;
-    let pageUrl = rawHref;
-    try {
-      pageUrl = new URL(rawHref, "https://cn.bing.com/videos/search").toString();
-    } catch {
-      continue;
-    }
-    if (!isLikelyVideoUrl(pageUrl) && !/\/videos\//i.test(pageUrl)) continue;
-    // 排除站内筛选/翻页链接（"全部/短视频/时长筛选"），只留外部播放页
-    if (/cn\.bing\.com\/videos\/search/i.test(pageUrl)) continue;
-    const chunk = a[0];
-    const title = decodeHtmlEntities(stripTags(a[3] ?? "")).slice(0, 160) || "视频结果";
-    // 优先取结果块自带的 data-thumbnail（真实缩略图地址），其次 <img> 的 src；
-    // 两者都没有则该视频无真实缩略图（前端显示视频占位图标，不再把播放页/
-    // 搜索页 URL 当作图片地址下发，避免前端 Image.network 加载 HTML 破图）。
-    const dataThumb = chunk.match(/data-thumbnail=(["'])([^"']+)\1/i);
-    const imgSrc = chunk.match(/<img\b[^>]*\bsrc=(["'])([^"']+)\1/i);
-    const rawThumb = dataThumb?.[2] ?? imgSrc?.[2];
-    const thumbnailUrl = rawThumb ? absolutizeBingUrl(decodeHtmlEntities(rawThumb)) : undefined;
-    const key = pageUrl.toLowerCase();
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({
-      type: "video",
-      title,
-      pageUrl,
-      mediaUrl: pageUrl,
-      thumbnailUrl,
-      source: inferMediaSource(pageUrl, "Bing Videos"),
-    });
-    if (out.length >= limit) break;
-  }
-  return gateVideoResultsByQuery(out, query);
-}
-
-/**
- * 查询词相关性门禁：直抓页面上的推广位视频（小游戏/带货/推荐流）与查询词毫无
- * 字面交集，却带着缩略图和时长排在首位（真实测试实证），是「搜出来的视频不对」
- * 的直接来源。解析条目标题与查询词无任何 token 交集时剔除。只对 Bing 页面直抓
- * 解析的条目生效——网页搜索兜底由搜索引擎按相关性排序，不适用本门禁（中英文
- * 标题不一致会被误杀）。
- */
-function gateVideoResultsByQuery(items: MediaSearchItem[], query: string): MediaSearchItem[] {
-  const tokens = queryEntityTokens(query);
-  if (tokens.length === 0) return items;
-  return items.filter((it) => {
-    const title = (it.title ?? "").toLowerCase();
-    return tokens.some((tok) => title.includes(tok));
-  });
-}
-
-/** 查询词 token：CJK 连续串（≥2 字）与拉丁词（小写化）。 */
-function queryEntityTokens(query: string): string[] {
-  const t = (query ?? "").toLowerCase();
-  if (!t.trim()) return [];
-  return [...t.matchAll(/[\u4e00-\u9fff]{2,}|[a-z0-9][a-z0-9'.+-]{1,}/g)].map((m) => m[0]);
-}
 
 // B站风控（HTTP 412）对无 cookie 的直查按词间歇触发：先访首页种下 buvid3 等
 // cookie 再调接口即可放行（真实测试实证）。cookie 进程级缓存 30 分钟。
@@ -1730,18 +1726,6 @@ function tryParseJson<T>(text: string): T | null {
   }
 }
 
-function stripTags(html: string): string {
-  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
-}
-
-function absolutizeBingUrl(raw: string): string | undefined {
-  if (!raw) return undefined;
-  try {
-    return new URL(raw, "https://cn.bing.com").toString();
-  } catch {
-    return undefined;
-  }
-}
 
 function isLikelyVideoUrl(url: string): boolean {
   return /(?:youtube\.com\/watch|youtu\.be\/|bilibili\.com\/video\/|v\.qq\.com|ixigua\.com|douyin\.com|kuaishou\.com|youku\.com|iqiyi\.com|mgtv\.com|weibo\.com\/tv|video\.weibo\.com|\/video\/)/i.test(url);
