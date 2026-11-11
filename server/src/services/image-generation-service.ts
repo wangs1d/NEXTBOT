@@ -4,7 +4,7 @@ import { createReadStream, existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, writeFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import { loadSharp } from "./sharp-lazy.js";
-import { isMediaHidden, mediaSessionOf, recordMediaSession } from "./library-meta.js";
+import { isMediaHidden, mediaEntryOf, recordMediaSession, type MediaTurnInfo } from "./library-meta.js";
 
 import type { ImageGenerationProvider, ImageGenerationResult, ImageGenerateInput } from "./image-generation-providers.js";
 import { OpenAICompatibleImageProvider, GeminiImageProvider } from "./image-generation-providers.js";
@@ -57,6 +57,8 @@ export class ImageGenerationService {
       batchSize?: number;
       /** 归属对话：资料库按对话折叠用，缺省归入历史组。 */
       sessionId?: string;
+      /** 轮次归属（2026-11-12）：资料库「每次对话一张卡」 */
+      turn?: MediaTurnInfo;
     } = {},
   ): Promise<{ ok: true; imageUrl: string; model: string; seed?: number; revisedPrompt?: string } | { ok: false; error: string }> {
     if (!this.isEnabled()) {
@@ -77,7 +79,7 @@ export class ImageGenerationService {
           batchSize: options.batchSize ?? 1,
         });
         // 落盘第一张图到本地
-        const localUrl = await this.storeFirstImage(result.images[0], actorId, options.sessionId);
+        const localUrl = await this.storeFirstImage(result.images[0], actorId, options.sessionId, options.turn);
         return {
           ok: true,
           imageUrl: localUrl,
@@ -109,6 +111,8 @@ export class ImageGenerationService {
       aspectRatio?: string;
       /** 归属对话：资料库按对话折叠用，缺省归入历史组。 */
       sessionId?: string;
+      /** 轮次归属（2026-11-12）：资料库「每次对话一张卡」 */
+      turn?: MediaTurnInfo;
     } = {},
   ): Promise<{ ok: true; imageUrl: string; model: string; seed?: number; revisedPrompt?: string } | { ok: false; error: string }> {
     if (!input?.dataBase64?.trim()) {
@@ -134,7 +138,7 @@ export class ImageGenerationService {
           aspectRatio: options.aspectRatio,
           image: input,
         });
-        const localUrl = await this.storeFirstImage(result.images[0], actorId, options.sessionId);
+        const localUrl = await this.storeFirstImage(result.images[0], actorId, options.sessionId, options.turn);
         return {
           ok: true,
           imageUrl: localUrl,
@@ -155,12 +159,13 @@ export class ImageGenerationService {
     image: ImageGenerationResult["images"][number],
     actorId: string,
     sessionId?: string,
+    turn?: MediaTurnInfo,
   ): Promise<string> {
     if (image.url) {
-      return this.downloadAndStorePng(image.url, actorId, undefined, sessionId);
+      return this.downloadAndStorePng(image.url, actorId, undefined, sessionId, { turn });
     }
     if (image.base64) {
-      return this.saveImageBuffer(actorId, Buffer.from(image.base64, "base64"), sessionId);
+      return this.saveImageBuffer(actorId, Buffer.from(image.base64, "base64"), sessionId, turn);
     }
     throw new Error("上游返回的图片既无 url 也无 base64 数据");
   }
@@ -169,7 +174,7 @@ export class ImageGenerationService {
    * 把图片 buffer 统一转成 PNG 落盘（Gemini 系直接返回 base64 数据时使用），
    * 复用 data/images/{actorId}/ 目录与 /agent/images/ 静态拉流路由。
    */
-  async saveImageBuffer(actorId: string, buf: Buffer, sessionId?: string): Promise<string> {
+  async saveImageBuffer(actorId: string, buf: Buffer, sessionId?: string, turn?: MediaTurnInfo): Promise<string> {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
@@ -177,7 +182,7 @@ export class ImageGenerationService {
     const sharp = await loadSharp();
     const png = await sharp(buf, { animated: false }).rotate().png().toBuffer();
     await writeFile(join(dir, fileName), png);
-    recordMediaSession(actorId, "images", fileName, sessionId);
+    recordMediaSession(actorId, "images", fileName, sessionId, false, turn);
     return `/agent/images/${safeActorId}/${fileName}`;
   }
 
@@ -190,14 +195,14 @@ export class ImageGenerationService {
     actorId: string,
     png: Buffer,
     sessionId?: string,
-    opts: { libraryHidden?: boolean } = {},
+    opts: { libraryHidden?: boolean; turn?: MediaTurnInfo } = {},
   ): Promise<string> {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
     await mkdir(dir, { recursive: true });
     const fileName = `${Date.now()}-${randomUUID().slice(0, 8)}.png`;
     await writeFile(join(dir, fileName), png);
-    recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true);
+    recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true, opts.turn);
     return `/agent/images/${safeActorId}/${fileName}`;
   }
 
@@ -205,9 +210,9 @@ export class ImageGenerationService {
    * 记录已落盘图片所属的对话（worker 线程直接写盘的图片由主线程补记）。
    * 入参为 `/agent/images/<actor>/<file>` 形式的相对 URL。
    */
-  recordImageOwner(actorId: string, imageUrl: string, sessionId?: string): void {
+  recordImageOwner(actorId: string, imageUrl: string, sessionId?: string, turn?: MediaTurnInfo): void {
     const fileName = imageUrl.split("/").pop() ?? "";
-    recordMediaSession(actorId, "images", fileName, sessionId);
+    recordMediaSession(actorId, "images", fileName, sessionId, false, turn);
   }
 
   /** 把远程图片下载并统一转成 PNG 落盘，返回可访问的相对路径。 */
@@ -216,7 +221,7 @@ export class ImageGenerationService {
     actorId: string,
     timeoutMs = 30_000,
     sessionId?: string,
-    opts: { libraryHidden?: boolean } = {},
+    opts: { libraryHidden?: boolean; turn?: MediaTurnInfo } = {},
   ): Promise<string> {
     // actorId 限制为 [a-zA-Z0-9_-]，避免路径穿越
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
@@ -239,7 +244,7 @@ export class ImageGenerationService {
       .png()
       .toBuffer();
     await writeFile(fullPath, png);
-    recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true);
+    recordMediaSession(actorId, "images", fileName, sessionId, opts.libraryHidden === true, opts.turn);
 
     // 返回相对路径，供客户端拼接 base URL 拉流
     return `/agent/images/${safeActorId}/${fileName}`;
@@ -280,6 +285,10 @@ export class ImageGenerationService {
     url: string;
     /** 产出该图的对话 id；历史图片为空串（资料库归入「历史记录」组）。 */
     sessionId: string;
+    /** 产出该图的轮次 id（chat.user_message.messageId）；主对话按轮次细分卡片用 */
+    turnId: string;
+    /** 用户请求原文片段（≤40 字），资料库卡片标题 */
+    turnTitle: string;
   }> {
     const safeActorId = actorId.replace(/[^a-zA-Z0-9_-]/g, "_") || "anonymous";
     const dir = join(this.storageRoot, safeActorId);
@@ -291,6 +300,8 @@ export class ImageGenerationService {
         updatedAt: string;
         url: string;
         sessionId: string;
+        turnId: string;
+        turnTitle: string;
       }> = [];
       for (const name of readdirSync(dir)) {
         // 与 resolveFilePath 校验一致：只收时间戳-uuid8.png，避免脏文件拉流 404。
@@ -300,12 +311,15 @@ export class ImageGenerationService {
         try {
           const st = statSync(join(dir, name));
           if (!st.isFile()) continue;
+          const entry = mediaEntryOf(actorId, "images", name);
           out.push({
             name,
             size: st.size,
             updatedAt: st.mtime.toISOString(),
             url: `/agent/images/${safeActorId}/${name}`,
-            sessionId: mediaSessionOf(actorId, "images", name),
+            sessionId: entry?.sessionId ?? "",
+            turnId: entry?.turnId ?? "",
+            turnTitle: entry?.title ?? "",
           });
         } catch {
           // 单个文件 stat 失败跳过

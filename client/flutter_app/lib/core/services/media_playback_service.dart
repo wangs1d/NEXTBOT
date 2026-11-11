@@ -6,6 +6,8 @@ import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
 import "../config/media_url.dart";
+import "access_auth_api.dart";
+import "nb_http.dart";
 import "ws_event_router.dart"
     show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
@@ -131,6 +133,11 @@ class AudioPlayersAdapter extends MediaPlaybackAdapter {
   Future<String?> _downloadToTempFile(String url) async {
     HttpClient? client;
     try {
+      // 临期先续期：这段是 Windows 桌面专用下载路径，401 后会如实报错，
+      // 提前换新凭据能避免「刚好卡在过期窗口」的静默失败。
+      if (AccessCredentialStore.instance.needsRefresh) {
+        await NbHttp.ensureRefreshed();
+      }
       client = HttpClient();
       client.connectionTimeout = const Duration(seconds: 10);
       // 网易云 CDN 对非浏览器 UA 会 403

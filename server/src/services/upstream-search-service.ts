@@ -12,6 +12,7 @@ import { filterByQueryFragments, primaryRelevanceRatio } from "./domestic-web-pr
 import { rerankImagesByVlm } from "./image-relevance-vlm.js";
 import { filterUnseenMedia, rememberShownMedia } from "./media-shown-ledger.js";
 import type { ImageGenerationService } from "./image-generation-service.js";
+import type { MediaTurnInfo } from "./library-meta.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -252,7 +253,14 @@ export class UpstreamSearchService {
     return result;
   }
 
-  async searchImages(query: string, limit = 4, actorId = "anonymous", sessionId = ""): Promise<{
+  async searchImages(
+    query: string,
+    limit = 4,
+    actorId = "anonymous",
+    sessionId = "",
+    /** 轮次归属（2026-11-12）：资料库「每次对话一张卡」 */
+    turn?: MediaTurnInfo,
+  ): Promise<{
     provider: string;
     mediaType: "image";
     items: MediaSearchItem[];
@@ -287,7 +295,7 @@ export class UpstreamSearchService {
       );
       // 「再来几张」去重（2026-11-09）：同会话已展示过的原图不再重复下发
       const fresh = filterUnseenMedia(sessionId, ranked).slice(0, boundedLimit);
-      const items = await this.materializeImageResults(fresh, actorId, boundedLimit, sessionId);
+      const items = await this.materializeImageResults(fresh, actorId, boundedLimit, sessionId, turn);
       if (items.length > 0) {
         rememberShownMedia(sessionId, fresh.slice(0, items.length));
         const { items: reranked } = await rerankImagesByVlm(items, keyword);
@@ -375,7 +383,7 @@ export class UpstreamSearchService {
       };
     }
     const picked = unseen.slice(0, boundedLimit + 3);
-    const items = await this.materializeImageResults(picked, actorId, boundedLimit, sessionId);
+    const items = await this.materializeImageResults(picked, actorId, boundedLimit, sessionId, turn);
     if (items.length === 0) {
       return {
         provider: "bing-images",
@@ -457,6 +465,8 @@ export class UpstreamSearchService {
     limitPerGroup: number,
     actorId: string,
     sessionId = "",
+    /** 轮次归属（2026-11-12）：资料库「每次对话一张卡」 */
+    turn?: MediaTurnInfo,
   ): Promise<{
     provider: string;
     mediaType: "image";
@@ -506,8 +516,8 @@ export class UpstreamSearchService {
     const settled = await Promise.allSettled(
       groups.map(async (g) => {
         const [a, b] = await Promise.all([
-          this.searchImages(g.qA, perSide, actorId, sessionId),
-          g.qB ? this.searchImages(g.qB, perSide, actorId, sessionId) : Promise.resolve(null),
+          this.searchImages(g.qA, perSide, actorId, sessionId, turn),
+          g.qB ? this.searchImages(g.qB, perSide, actorId, sessionId, turn) : Promise.resolve(null),
         ]);
         return { g, a, b };
       }),
@@ -1247,6 +1257,7 @@ export class UpstreamSearchService {
     actorId: string,
     limit: number,
     sessionId = "",
+    turn?: MediaTurnInfo,
   ): Promise<MediaSearchItem[]> {
     // 来源闸（2026-10-15 同兴山庄实证）：图搜「住宅区/山庄/小区名」高频返回
     // 百度地图位置截图与图库水印图，转存后顶着 POI 名义展示给用户。三条搜索
@@ -1289,7 +1300,7 @@ export class UpstreamSearchService {
         try {
           // 用剩余预算作为本次下载的截断超时，确保并发任务不会越过预算、
           // Promise.all 能及时收尾，避免整体超时导致 items 丢失。
-          const pngUrl = await storage.downloadAndStorePng(remoteUrl, actorId, remaining, sessionId);
+          const pngUrl = await storage.downloadAndStorePng(remoteUrl, actorId, remaining, sessionId, { turn });
           out.push({
             ...item,
             mediaUrl: pngUrl,
@@ -1309,7 +1320,7 @@ export class UpstreamSearchService {
     const pending = shortfall > 0
       ? items.filter((_, idx) => !attempted.has(idx)).slice(0, shortfall)
       : [];
-    if (pending.length > 0) void this.materializeInBackground(pending, actorId, sessionId);
+    if (pending.length > 0) void this.materializeInBackground(pending, actorId, sessionId, turn);
     return out;
   }
 
@@ -1318,6 +1329,7 @@ export class UpstreamSearchService {
     items: MediaSearchItem[],
     actorId: string,
     sessionId = "",
+    turn?: MediaTurnInfo,
   ): Promise<void> {
     const storage = this.imageStorageService;
     if (!storage) return;
@@ -1325,7 +1337,7 @@ export class UpstreamSearchService {
       const remoteUrl = item.mediaUrl || item.thumbnailUrl;
       if (!remoteUrl) continue;
       try {
-        await storage.downloadAndStorePng(remoteUrl, actorId, 20_000, sessionId);
+        await storage.downloadAndStorePng(remoteUrl, actorId, 20_000, sessionId, { turn });
       } catch {
         // 防盗链/格式不支持：跳过
       }

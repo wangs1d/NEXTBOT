@@ -104,8 +104,17 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
       // 密钥是否真加密落盘（未配主密钥时单机退回明文文件，如实报出）
       encryptedAtRest: serviceSecretsEncryptedAtRest(),
       model: {
-        configured: Boolean(byok?.configured || persisted?.model?.apiKey || binding?.apiKey),
+        // 2026-11-11 根修：多租户云端的全站写入链已关闭（PUT 409），存量
+        // data/service-config.json 也不再是任何人的会话绑定。过去这里仍把
+        // persisted?.model?.apiKey / env binding 算成 configured=true，接口
+        // 报「已配置」而实际每轮都回落「模型服务还没配置好」，状态与事实相反。
+        // 云端只认按 actor 的 BYOK 绑定；单机形态维持原口径。
+        configured: sharedTenant
+          ? Boolean(byok?.configured)
+          : Boolean(persisted?.model?.apiKey || binding?.apiKey),
         providerId: persisted?.model?.providerId ?? binding?.providerId ?? null,
+        // baseUrl/model 仍回显存量值作表单预填建议（云端用户重填 Key 时不必
+        // 再手输网关与模型名）；它们不代表「已生效的绑定」，configured 说了算。
         baseUrl: byok?.baseUrl ?? persisted?.model?.baseUrl ?? binding?.baseUrl ?? null,
         model: byok?.model ?? persisted?.model?.model ?? binding?.model ?? null,
         keyTail: sharedTenant
@@ -113,7 +122,15 @@ export function registerServiceConfigRoutes(app: FastifyInstance, deps: ServiceC
             ? "****(本机会话)"
             : null
           : maskServiceKey(persisted?.model?.apiKey ?? binding?.apiKey),
-        source: byok?.configured ? "session-byok" : persisted?.model ? "service-config" : binding ? "env" : null,
+        source: byok?.configured
+          ? "session-byok"
+          : sharedTenant
+            ? null
+            : persisted?.model
+              ? "service-config"
+              : binding
+                ? "env"
+                : null,
         updatedAt: persisted?.model?.updatedAt ?? null,
       },
       tts: {

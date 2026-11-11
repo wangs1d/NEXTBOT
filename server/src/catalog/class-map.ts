@@ -154,8 +154,10 @@ const RULES: ClassRule[] = [
   // ── system 系统基础 ──
   { prefix: "clock.", domain: "system", action: "query", risk: "read" },
   { prefix: "search", domain: "system", action: "query", risk: "read" },
+  { prefix: "web_search", domain: "system", action: "query", risk: "read" },
   { exact: "fetch_web", domain: "system", action: "query", risk: "read" },
   { prefix: "fetch_web", domain: "system", action: "query", risk: "read" },
+  { prefix: "web_fetch", domain: "system", action: "query", risk: "read" },
   { prefix: "upstream", domain: "system", action: "query", risk: "read" },
   { exact: "tool_discover", domain: "system", action: "manage", risk: "system" },
 

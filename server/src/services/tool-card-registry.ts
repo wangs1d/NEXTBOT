@@ -19,6 +19,7 @@
  */
 import { BROWSER_SESSION_SITES } from "./browser-session-sites.js";
 import { platformSupportsCheckout } from "./shopping-platforms/index.js";
+import { stableCardId } from "./card-identity.js";
 
 /** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
@@ -1181,9 +1182,17 @@ function containsStructuredMarker(text: string): boolean {
   return STRUCTURED_MARKERS.some((m) => text.includes(m));
 }
 
-/** 与 agent-result-formatter 的 cardId 规则一致（cardType 非空才生成） */
+/**
+ * 与 agent-result-formatter 的 cardId 规则一致（cardType 非空才生成）。
+ * 2026-11-12 根修：cardId 改为 payload 内容寻址（card-identity.ts）——
+ * 同一张卡跨阶段重算（full 主链路 + done 兜底）cardId 恒一致，附卡去重
+ * 才能幂等；时间戳随机 id 曾致提醒确认卡两端双卡。
+ */
 export function buildCardMarker(payload: ToolCardPayload, leadText: string): string {
-  const cardId = `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // 场景自带语义 cardId（如行程需求卡 req_days）时保留；否则内容寻址生成
+  const selfId = (payload as unknown as Record<string, unknown>).cardId;
+  const cardId =
+    typeof selfId === "string" && selfId.trim() ? selfId : stableCardId(payload);
   const json = JSON.stringify({
     avatar: "NB",
     avatarStyle: "default",

@@ -124,7 +124,7 @@ export function registerLibraryRoutes(
       // 标题缺失不影响分组
     }
 
-    const groups = buildGroups({ files, images, notes, travelPlans, titles });
+    const groups = buildGroups({ actorId, files, images, notes, travelPlans, titles });
 
     return {
       ok: true,
@@ -141,8 +141,24 @@ export function registerLibraryRoutes(
   });
 }
 
-/** 把各来源产物按 sessionId 折叠成对话分组；无归属统一进「历史记录」组。 */
-function buildGroups(input: {
+/** 无轮次归属的主对话历史产物按时间间隙聚类的阈值：30 分钟内的产出视为同一次对话。 */
+const LEGACY_TURN_CLUSTER_GAP_MS = 30 * 60 * 1000;
+
+/** 组键分隔符（不可见字符，不与 sessionId/turnId 字符集冲突）。 */
+const KEY_SEP = "\u241E";
+
+/** 把各来源产物折叠成「每次对话一张卡」；无归属统一进「历史记录」组。
+ * 2026-11-12 改版：主对话是单一会话（sessionId=actorId 恒定），原来按 sessionId
+ * 折叠会把主对话全部产物挤进一张卡。现规则：
+ *   - 主对话产物带轮次归属（turnId，落盘时记录）→ 每次对话一张卡，卡标题取用户请求原文；
+ *   - 主对话历史产物（升级前落盘，无轮次）→ 按 30 分钟时间间隙聚类近似还原「每次对话」；
+ *   - 旁聊等其它会话 → 仍按会话一张卡（标题取旁聊注册表）；
+ *   - 无归属产物 → 「历史记录」组，永远排最后。
+ *
+ * 导出仅为单测（library-groups.test.ts）。
+ */
+export function buildGroups(input: {
+  actorId: string;
   files: LibraryFileItem[];
   images: LibraryImageItem[];
   notes: LibraryNoteItem[];
@@ -151,12 +167,12 @@ function buildGroups(input: {
 }): LibraryGroup[] {
   const byKey = new Map<string, LibraryGroup>();
 
-  const ensure = (key: string): LibraryGroup => {
+  const ensure = (key: string, title = ""): LibraryGroup => {
     let group = byKey.get(key);
     if (!group) {
       group = {
         sessionId: key,
-        title: key ? (input.titles.get(key) ?? "") : "",
+        title: key ? title : "",
         updatedAt: "",
         counts: { files: 0, images: 0, notes: 0, travelPlans: 0 },
         items: { files: [], images: [], notes: [], travelPlans: [] },
@@ -170,33 +186,134 @@ function buildGroups(input: {
     if (iso && iso > group.updatedAt) group.updatedAt = iso;
   };
 
+  /**
+   * 组键裁决：
+   *   - 无归属 → 历史组（""）；
+   *   - 主对话 + 有轮次 → 每次对话独立组；
+   *   - 其余（旁聊会话 / 主对话无轮次）→ 返回 null 表示交给调用方细分
+   *     （旁聊直接整组，主对话无轮次走时间聚类）。
+   */
+  const keyFor = (sessionId: string, turnId: string): string | null => {
+    if (!sessionId) return "";
+    if (sessionId === input.actorId) {
+      return turnId ? `${sessionId}${KEY_SEP}turn${KEY_SEP}${turnId}` : null;
+    }
+    return sessionId;
+  };
+
+  // 主对话无轮次归属的产物（升级前落盘）：按 updatedAt 时间间隙聚类
+  type LegacyWrap = {
+    kind: "files" | "images" | "notes" | "travelPlans";
+    sessionId: string;
+    updatedAt: string;
+    item: LibraryFileItem | LibraryImageItem | LibraryNoteItem | LibraryTravelItem;
+  };
+  const legacyPending: LegacyWrap[] = [];
+  const pushOrDefer = (
+    wrap: LegacyWrap,
+    write: (group: LibraryGroup) => void,
+  ): void => {
+    const key = keyFor(wrap.sessionId, "");
+    if (key !== null) {
+      write(ensure(key, input.titles.get(key) ?? ""));
+      return;
+    }
+    legacyPending.push(wrap);
+  };
+
   for (const f of input.files) {
-    const g = ensure(f.sessionId ?? "");
-    g.items.files.push(f);
-    g.counts.files += 1;
-    touch(g, f.updatedAt);
+    // 轮次拆分只作用于主对话：旁聊等其它会话保持「一整个会话一张卡」。
+    const turnKey = f.sessionId === input.actorId && f.turnId
+      ? `${f.sessionId}${KEY_SEP}turn${KEY_SEP}${f.turnId}`
+      : null;
+    if (turnKey) {
+      const g = ensure(turnKey, f.turnTitle ?? "");
+      g.items.files.push(f);
+      g.counts.files += 1;
+      touch(g, f.updatedAt);
+    } else {
+      pushOrDefer(
+        { kind: "files", sessionId: f.sessionId ?? "", updatedAt: f.updatedAt, item: f },
+        (g) => {
+          g.items.files.push(f);
+          g.counts.files += 1;
+          touch(g, f.updatedAt);
+        },
+      );
+    }
   }
   for (const img of input.images) {
-    const g = ensure(img.sessionId ?? "");
-    g.items.images.push(img);
-    g.counts.images += 1;
-    touch(g, img.updatedAt);
+    const turnKey = img.sessionId === input.actorId && img.turnId
+      ? `${img.sessionId}${KEY_SEP}turn${KEY_SEP}${img.turnId}`
+      : null;
+    if (turnKey) {
+      const g = ensure(turnKey, img.turnTitle ?? "");
+      g.items.images.push(img);
+      g.counts.images += 1;
+      touch(g, img.updatedAt);
+    } else {
+      pushOrDefer(
+        { kind: "images", sessionId: img.sessionId ?? "", updatedAt: img.updatedAt, item: img },
+        (g) => {
+          g.items.images.push(img);
+          g.counts.images += 1;
+          touch(g, img.updatedAt);
+        },
+      );
+    }
   }
   for (const n of input.notes) {
-    // 无 sessionId 的旧笔记：只有 sessionId 恰好等于 actor 时才归主对话，否则进历史组。
-    const g = ensure(n.sessionId ?? "");
-    g.items.notes.push(n);
-    g.counts.notes += 1;
-    touch(g, n.updatedAt);
+    // 笔记只有会话归属（无轮次）：主对话笔记按时间聚类，其余按会话整组。
+    pushOrDefer(
+      { kind: "notes", sessionId: n.sessionId ?? "", updatedAt: n.updatedAt, item: n },
+      (g) => {
+        g.items.notes.push(n);
+        g.counts.notes += 1;
+        touch(g, n.updatedAt);
+      },
+    );
   }
   for (const p of input.travelPlans) {
-    const g = ensure(p.sessionId ?? "");
-    g.items.travelPlans.push(p);
-    g.counts.travelPlans += 1;
     const ms = Number(p.createdAt ?? 0);
-    if (Number.isFinite(ms) && ms > 0) {
-      touch(g, new Date(ms).toISOString());
+    const iso = Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString() : "";
+    pushOrDefer(
+      { kind: "travelPlans", sessionId: p.sessionId ?? "", updatedAt: iso, item: p },
+      (g) => {
+        g.items.travelPlans.push(p);
+        g.counts.travelPlans += 1;
+        touch(g, iso);
+      },
+    );
+  }
+
+  // 主对话无轮次的产物：新→旧排序后按 30 分钟间隙切簇，每簇一张卡（标题空 → 客户端按时间兜底）。
+  legacyPending.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  let current: { key: string; lastMs: number } | null = null;
+  for (const w of legacyPending) {
+    const ms = w.updatedAt ? Date.parse(w.updatedAt) : NaN;
+    const sameCluster =
+      current !== null &&
+      Number.isFinite(ms) &&
+      current.lastMs - ms <= LEGACY_TURN_CLUSTER_GAP_MS;
+    if (!sameCluster) {
+      current = { key: `${w.sessionId}${KEY_SEP}gap${KEY_SEP}${w.updatedAt}`, lastMs: Number.isFinite(ms) ? ms : 0 };
     }
+    if (!current) continue;
+    const g = ensure(current.key);
+    if (w.kind === "files") {
+      g.items.files.push(w.item as LibraryFileItem);
+      g.counts.files += 1;
+    } else if (w.kind === "images") {
+      g.items.images.push(w.item as LibraryImageItem);
+      g.counts.images += 1;
+    } else if (w.kind === "notes") {
+      g.items.notes.push(w.item as LibraryNoteItem);
+      g.counts.notes += 1;
+    } else {
+      g.items.travelPlans.push(w.item as LibraryTravelItem);
+      g.counts.travelPlans += 1;
+    }
+    touch(g, w.updatedAt);
   }
 
   const list = [...byKey.values()].filter(

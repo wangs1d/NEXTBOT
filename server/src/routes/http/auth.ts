@@ -24,6 +24,11 @@ import { isAccessAuthRequired, trustsPayloadAccountIdentity } from "../../config
 import { decideHttpIdentity, type HttpIdentitySource } from "../../http/http-identity.js";
 import { AccessAuthService } from "../../services/access-auth-service.js";
 import type { EmailOtpService } from "../../services/email-otp-service.js";
+import { resolveAdminSession } from "./admin-session-auth.js";
+import { isStructuredSessionId } from "../../ws/session-identity.js";
+
+// HTTP/WS 共用同一份结构性会话键判据，这里保留导出供既有调用/测试使用。
+export { isStructuredSessionId };
 
 export interface AuthRouteDeps {
   accessAuthService: AccessAuthService;
@@ -85,6 +90,14 @@ const PUBLIC_EXACT_PATHS = new Set([
   "/api/memory/health",
   "/api/browser/health", // 云端无头浏览器自检（无用户数据、无副作用，部署终验用）
   "/api/payment/status", // 支付通道就绪自检（只出模式布尔值，无用户数据、无密钥）
+  // 官网支付（webpay）：页面壳与支付宝同步回跳 / 异步通知都由支付网关或浏览器
+  // 发起，不带设备 token。只放行这四条——订单创建/查询/退款仍需设备鉴权。
+  // notify 与 return/verify 在 webpay.ts 内各自验签；页面壳不含用户数据。
+  "/webpay/checkout",
+  "/webpay/return",
+  "/api/webpay/config-status",
+  "/api/webpay/return/verify",
+  "/api/webpay/notify",
 ]);
 
 const PUBLIC_PATH_PREFIXES = [
@@ -122,10 +135,33 @@ const PUBLIC_PATH_PREFIXES = [
   "/api/admin/",
 ];
 
+/**
+ * 前缀必须按路径段边界匹配。
+ *
+ * `"/ws"`、`"/admin"`、`"/recharge"`、`"/metrics"` 等项没有尾斜杠，
+ * 直接 startsWith 会把 `/ws-evil/...`、`/administrator/...` 也放进公开面
+ * ——周界鉴权就出现一条可构造的绕行。以 `/` 结尾的前缀保持原语义。
+ */
+function matchesPublicPrefix(path: string, prefix: string): boolean {
+  if (prefix.endsWith("/")) return path.startsWith(prefix);
+  return path === prefix || path.startsWith(`${prefix}/`);
+}
+
 /** 该路径是否属于公开面。 */
 export function isPublicAccessPath(path: string): boolean {
   if (PUBLIC_EXACT_PATHS.has(path)) return true;
-  return PUBLIC_PATH_PREFIXES.some((p) => path.startsWith(p));
+  return PUBLIC_PATH_PREFIXES.some((p) => matchesPublicPrefix(path, p));
+}
+
+/**
+ * 管理后台与 App 共用的路径：后台用 HttpOnly 会话 Cookie（不是设备 token），
+ * 只在会话有效时放行，否则仍由周界按设备凭据裁决。
+ *
+ * 2026-11-11 回写：这段放行此前只存在于线上 `dist` 的热补丁里，源码没有，
+ * 走一次完整发版就会把它抹掉，后台反馈页随即 401。产物与源码必须同字节语义。
+ */
+export function isAdminSharedPath(path: string): boolean {
+  return path === "/api/feedback" || path.startsWith("/api/feedback/");
 }
 
 /**
@@ -180,6 +216,7 @@ export function registerAccessAuthHook(app: FastifyInstance, accessAuthService: 
   app.addHook("onRequest", async (request, reply) => {
     const path = (request.url || "").split("?")[0];
     if (isPublicAccessPath(path)) return;
+    if (isAdminSharedPath(path) && resolveAdminSession(request)) return;
     const query = (request.query ?? {}) as Record<string, unknown>;
     const queryToken = typeof query.token === "string" ? query.token : undefined;
     const token = AccessAuthService.extractToken({
@@ -215,10 +252,11 @@ export function registerAccessAuthHook(app: FastifyInstance, accessAuthService: 
       source: decision.source,
       placeholder: decision.placeholder ?? false,
     };
-    // 身份钉死：只钉 userId/actorId，**不动 sessionId**。
-    // sessionId 是会话键（`master:`/`notes:`/`side:` 前缀），改成邮箱会把所有
-    // 会话挤成一条；而 actor 解析由 resolveActorId 优先读 userId，userId 钉死
-    // 后 sessionId 里的伪造值已经影响不到归属。
+    // 身份钉死：userId/actorId 一律取裁决结果；sessionId 只在「本身就是自报
+    // 账号」时改写，结构性会话键（`side:`/`notes:`/`incognito:`/`master:` 等）
+    // 必须原样保留——它们内部带账号邮箱，误改会把旁聊历史挤成主会话历史。
+    // actor 解析由 resolveActorId 优先读 userId，userId 钉死后 sessionId 里的
+    // 伪造值已经影响不到归属。
     pinIdentity(query, decision.actorId);
   });
 
@@ -230,18 +268,49 @@ export function registerAccessAuthHook(app: FastifyInstance, accessAuthService: 
       !Array.isArray(request.body) &&
       !Buffer.isBuffer(request.body)
     ) {
-      pinIdentity(request.body as Record<string, unknown>, request.accessIdentity.actorId);
+      pinBodyIdentity(request.body as Record<string, unknown>, request.accessIdentity.actorId);
     }
   });
 }
 
-/** 把 query/body 的身份通道统一到裁决结果。 */
-function pinIdentity(target: Record<string, unknown>, actorId: string): void {
+/**
+ * query 侧身份钉死：一律注入裁决后的 userId（大量路由靠 `?userId=` 解析
+ * actor），并钉掉自报的 actorId。结构性会话键原样保留——它们内部带邮箱，
+ * 误改会把旁聊历史挤成主会话历史（2026-11-11）。
+ */
+export function pinIdentity(target: Record<string, unknown>, actorId: string): void {
   target.userId = actorId;
   if ("actorId" in target) target.actorId = actorId;
-  // sessionId 只在「是账号形态」时改写：正常会话键必须保留，邮箱形态则一定是伪造。
   const sid = target.sessionId;
-  if (typeof sid === "string" && sid.includes("@")) target.sessionId = actorId;
+  if (
+    typeof sid === "string" &&
+    sid.includes("@") &&
+    !isStructuredSessionId(sid)
+  ) {
+    target.sessionId = actorId;
+  }
+}
+
+/**
+ * body 侧身份钉死：**只覆盖调用方确实传了的身份字段，绝不凭空注入**。
+ *
+ * 与 query 版分开的原因：body 是业务对象，无条件塞一个 `userId` 会让
+ * `if (!body.userId)` 这类"必须提供身份"的校验永久通过，也会给下游
+ * 透传/落库的对象掺入不属于它的字段。自报的 userId/actorId 仍必须钉死
+ * （否则 POST 能冒充别人），但调试接口想指定别的 actor 请用
+ * `targetActorId`——那是显式业务字段，不参与身份裁决。
+ */
+export function pinBodyIdentity(target: Record<string, unknown>, actorId: string): void {
+  if ("userId" in target) target.userId = actorId;
+  if ("actorId" in target) target.actorId = actorId;
+  const sid = target.sessionId;
+  if (
+    typeof sid === "string" &&
+    sid.includes("@") &&
+    !isStructuredSessionId(sid)
+  ) {
+    target.sessionId = actorId;
+  }
 }
 
 /** 从请求里取 token 并裁决身份（query 阶段用；body 阶段只做钉死）。 */

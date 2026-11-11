@@ -1227,10 +1227,10 @@ async function processBatchedMessage(
   // 漏卡。按执行顺序捕获，done 阶段取第一张建成功的卡；搜索/天气有专属
   // 合并附卡路径，捕获时排除防重复。
   const executedRegistryToolResults: Array<ExecutedToolReceipt> = [];
-  // 提醒/日程创建·修改·删除（2026-11-07）：calendar.create 没有 registry
-  // builder，走上面的捕获条件会被 lookupToolCardBuilder 挡掉，tool-loop 轮次
-  // 拿不到回执 → 提醒确认卡恒不出。单独捕获，只进 effects 决策层，不进
-  // registryResults（避免 done 阶段二次建卡），同时供原地刷新状态机定位任务。
+  // 提醒/日程创建·修改·删除（2026-11-07）：按 action 分流的唯一入列点是下方
+  // onToolExecuted 捕获块（create/update/delete_task 进这里，list_tasks 进
+  // registry 列表）——只进 effects 决策层，不重复进 registryResults（避免
+  // done 阶段兜底重算二次建卡），同时供原地刷新状态机定位任务。
   const executedReminderToolResults: Array<ExecutedToolReceipt> = [];
   // 视频抓取（video.grab）的真实结果聚合：媒体标记此前只接 reply.toolName
   // 直跑路径，loop 轮次解析到可播放视频也不会带 [RENDER_AS:video] 标记。
@@ -1367,6 +1367,9 @@ async function processBatchedMessage(
       },
       onExternalToolExecuted: (info) => {
         if (isStale()) return;
+        // 复合工具语义归一：下游媒体卡/搜索卡/状态/效果表全部按真实执行器名匹配
+        // （web_search + action=images → search_images）；非复合工具原样。
+        const effectiveTool = info.effectiveTool ?? info.toolName;
         // 发言模型：登记工具名（直跑路径可能只有完成回调、没有 start 回调）
         utterance.noteToolExecuted(info.toolName);
         wireToolExecuted(
@@ -1381,56 +1384,63 @@ async function processBatchedMessage(
         // 清除工具执行心跳
         stopToolHeartbeat(info.toolName);
         if (!info.ok) {
-          executedFailedToolNames.push(info.toolName);
+          executedFailedToolNames.push(effectiveTool);
         }
         // 确认轮标记（与 agent-core CALENDAR_CONFIRM_TOOLS 同源）：分泡轮
         // 说话算话裁决的确认轮例外——确认轮保留出口收口塌缩。
-        if (info.ok && CALENDAR_CONFIRM_TOOLS.has(info.toolName)) {
+        if (info.ok && CALENDAR_CONFIRM_TOOLS.has(effectiveTool)) {
           bubbleTracker.confirmationAnchored = true;
         }
         // 捕获搜索类工具的真实结果（仅记账/效果列表，不建卡：搜索信息只喂模型）
         if (
           info.ok &&
           info.result &&
-          (info.toolName === "search_web" || info.toolName === "info.search")
+          (effectiveTool === "search_web" || effectiveTool === "info.search")
         ) {
           executedSearchToolResults.push({
-            toolName: info.toolName,
+            toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
           // 卡片轮不流式由工具循环 holdAnswer 承担（2026-10-13 根修），
           // 回执只负责捕获，不再反写流式状态（反应式扣流闸已退役）。
         }
         // 捕获天气工具的真实结果，供 done 阶段确定性附 weather 卡（L1，与搜索同理）
-        if (info.ok && info.result && info.toolName === "weather.get_local") {
+        if (info.ok && info.result && effectiveTool === "weather.get_local") {
           executedWeatherToolResults.push({
-            toolName: info.toolName,
+            toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
         }
-        // 提醒确认卡的唯一事实源：创建成功才出卡，修改/删除成功只用于把
-        // 历史里那张卡原地刷成新状态（card.update），绝不追加新卡。
-        if (
-          info.ok &&
-          info.result &&
-          info.toolName === "calendar"
-        ) {
-          executedReminderToolResults.push({
-            toolName: info.toolName,
-            result: info.result as Record<string, unknown>,
-          });
+        // calendar 回执单入列（2026-11-12 根修，一条回执恰好进一个列表）：
+        //   - create/update/delete_task → reminder 列表（提醒确认卡唯一事实源；
+        //     改/删成功只用于把历史卡原地刷新，绝不追加新卡）；
+        //   - list_tasks（日程列表卡）→ registry 列表（tool-card-registry 建卡）。
+        // 此前复合化后 create 回执同时进两个列表，done 阶段 registryResults
+        // 兜底重算让提醒场景二次命中，叠加易变 cardId 去重失效 → 两端双卡。
+        if (info.ok && info.result && effectiveTool === "calendar") {
+          const action = typeof (info.result as Record<string, unknown>).action === "string"
+            ? (info.result as Record<string, unknown>).action as string
+            : "";
+          const receipt = { toolName: effectiveTool, result: info.result as Record<string, unknown> };
+          if (action === "create" || action === "update_task" || action === "delete_task") {
+            executedReminderToolResults.push(receipt);
+          } else {
+            executedRegistryToolResults.push(receipt);
+          }
         }
-        // 捕获其余注册工具（wallet/calendar/shopping…）的真实结果（L1，同上）
+        // 捕获其余注册工具（wallet/shopping…）的真实结果（L1，同上）。
+        // calendar 已按 action 在上方分流，这里不再重复捕获。
         if (
           info.ok &&
           info.result &&
-          lookupToolCardBuilder(info.toolName) &&
-          info.toolName !== "search_web" &&
-          info.toolName !== "info.search" &&
-          info.toolName !== "weather.get_local"
+          effectiveTool !== "calendar" &&
+          lookupToolCardBuilder(effectiveTool) &&
+          effectiveTool !== "search_web" &&
+          effectiveTool !== "info.search" &&
+          effectiveTool !== "weather.get_local"
         ) {
           executedRegistryToolResults.push({
-            toolName: info.toolName,
+            toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
         }
@@ -1439,15 +1449,15 @@ async function processBatchedMessage(
         if (
           info.ok &&
           info.result &&
-          (info.toolName === "video.grab" || info.toolName === "video.find")
+          (effectiveTool === "video.grab" || effectiveTool === "video.find")
         ) {
           executedVideoToolResults.push({
-            toolName: info.toolName,
+            toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
         }
         // 捕获媒体搜索工具的真实结果，供 done 阶段构建 mediaCards（见上方说明）
-        if (info.toolName === "travel.plan-itinerary") {
+        if (effectiveTool === "travel.plan-itinerary") {
           // 尝试标记（成功与否都算）：手写行程兜底对已尝试轮不再补跑
           executedTravelPlanAttempted = true;
           if (info.ok && info.result) {
@@ -1460,13 +1470,13 @@ async function processBatchedMessage(
         if (
           info.ok &&
           info.result &&
-          (info.toolName === "search_images" ||
-            info.toolName === "search_images_batch" ||
-            info.toolName === "search_videos" ||
-            info.toolName === "image.generate")
+          (effectiveTool === "search_images" ||
+            effectiveTool === "search_images_batch" ||
+            effectiveTool === "search_videos" ||
+            effectiveTool === "image.generate")
         ) {
           executedMediaToolResults.push({
-            toolName: info.toolName,
+            toolName: effectiveTool,
             result: info.result as Record<string, unknown>,
           });
           // 边说边出图：媒体工具一执行完，先把该批照片结构化推给前端，
@@ -1474,7 +1484,7 @@ async function processBatchedMessage(
           try {
             const earlyCards = dedupMediaCards(
               extractMediaCards(
-                info.toolName,
+                effectiveTool,
                 info.result as Record<string, unknown>,
               ),
             ).filter((c) => {
@@ -1947,7 +1957,8 @@ async function processBatchedMessage(
       travelResult: travelReceiptResolution.result,
       // 业务工具回执兜底补卡：processAssistantText 的 effect 捕获并非每轮都拿到
       // （实测同一句「比价」两次，一次出卡一次只剩 markdown 表格）。渲染层在这里
-      // 用同一份回执再算一次，`applyCards` 按 cardType 去重，已出过的卡不会重复。
+      // 用同一份回执再算一次，`applyCards` 按稳定业务身份去重（card-identity.ts，
+      // 内容寻址 cardId 跨渲染恒一致），已出过的卡不会重复。
       registryResults: executedRegistryToolResults,
     });
     finalText = cardResult.text;

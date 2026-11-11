@@ -6,6 +6,7 @@ import "package:http/http.dart" as http;
 import "package:path_provider/path_provider.dart";
 
 import "../config/api_config.dart";
+import "nb_http.dart";
 
 /// 远程配置下发·地基（2026-11-10）：运行期地址解析。
 ///
@@ -66,7 +67,9 @@ class RemoteConfig {
   /// 任何失败（网络/超时/解析/HTTP 非 200）静默返回 false，当前行为不变。
   Future<bool> refreshAndPersist() async {
     try {
-      final http.Response resp = await http
+      // 控制面与接口面同源：走统一出口才能带上设备凭证（强制鉴权下裸 http
+      // 必 401，而这个失败是静默的——远程配置会永远拉不到）。
+      final http.Response resp = await NbHttp
           .get(Uri.parse("${ApiConfig.controlPlaneBase}/api/client/config"))
           .timeout(_fetchTimeout);
       if (resp.statusCode != 200) return false;

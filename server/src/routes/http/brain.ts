@@ -10,11 +10,25 @@ import type {
 import type { MemoryFeedbackOutcome } from "../../brain/memory-strength-model.js";
 
 /**
+ * `body.actorId` 会被周界 hook 钉成裁决身份（防冒充）。调试/运维需要指定
+ * 别的 actor 时，用显式业务字段 `targetActorId`——它不参与身份裁决，只是
+ * 这些内部接口的执行目标。请求本身仍须过 token/周界。
+ */
+function requestedActor(body: Record<string, unknown>): string {
+  return String(body.targetActorId ?? body.actorId ?? "").trim();
+}
+
+function optionalRequestedActor(body: Record<string, unknown>): string | undefined {
+  const raw = body.targetActorId ?? body.actorId;
+  return raw != null ? String(raw) : undefined;
+}
+
+/**
  * 从请求体构建 Brain 信号输入（用于 /brain/proactive/test）。
  * 校验必填字段，组装为 BrainSignalInput。
  */
 function buildSignal(body: Record<string, unknown>): BrainSignalInput {
-  const actorId = String(body.actorId ?? "").trim();
+  const actorId = requestedActor(body);
   if (!actorId) throw new Error("actorId is required");
   const kind = String(body.kind ?? "").trim();
   if (!kind) throw new Error("kind is required");
@@ -160,7 +174,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
         return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
       }
       const body = (request.body ?? {}) as Record<string, unknown>;
-      const actorId = String(body.actorId ?? "").trim();
+      const actorId = requestedActor(body);
       if (!actorId) throw new Error("actorId is required");
       const itemBody = body.item as
         | {
@@ -200,7 +214,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
         return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
       }
       const body = (request.body ?? {}) as Record<string, unknown>;
-      const actorId = String(body.actorId ?? "").trim();
+      const actorId = requestedActor(body);
       if (!actorId) throw new Error("actorId is required");
       const query = String(body.query ?? "").trim();
       if (!query) throw new Error("query is required");
@@ -221,7 +235,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
         return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
       }
       const body = (request.body ?? {}) as Record<string, unknown>;
-      const actorId = String(body.actorId ?? "").trim();
+      const actorId = requestedActor(body);
       if (!actorId) throw new Error("actorId is required");
       const content = String(body.content ?? "").trim();
       if (!content) throw new Error("content is required");
@@ -244,7 +258,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
         return reply.code(503).send({ ok: false, error: "Brain Center not enabled" });
       }
       const body = (request.body ?? {}) as Record<string, unknown>;
-      const actorId = String(body.actorId ?? "").trim();
+      const actorId = requestedActor(body);
       if (!actorId) throw new Error("actorId is required");
       const result = deps.brainCenter.diagnoseContinuity(actorId);
       return reply.send({ ok: true, result });
@@ -269,7 +283,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
         body.data && typeof body.data === "object"
           ? (body.data as Record<string, unknown>)
           : {};
-      const actorId = body.actorId != null ? String(body.actorId) : undefined;
+      const actorId = optionalRequestedActor(body);
       const source = body.source != null ? String(body.source) : undefined;
       const result = deps.brainCenter.fire(type, data, { actorId, source });
       if (result.error) {
@@ -352,7 +366,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       const body = (request.body ?? {}) as Record<string, unknown>;
       const goal = String(body.goal ?? "").trim();
       if (!goal) throw new Error("goal is required");
-      const actorId = body.actorId != null ? String(body.actorId) : undefined;
+      const actorId = optionalRequestedActor(body);
       const maxSteps = body.maxSteps != null ? Number(body.maxSteps) : undefined;
       const result = await deps.brainCenter.plan(goal, { actorId, maxSteps });
       return reply.send({ ok: true, result });
@@ -371,7 +385,7 @@ export function registerBrainRoutes(app: FastifyInstance, deps: HttpRouteDeps): 
       const body = (request.body ?? {}) as Record<string, unknown>;
       const userMessage = String(body.userMessage ?? "").trim();
       if (!userMessage) throw new Error("userMessage is required");
-      const actorId = body.actorId != null ? String(body.actorId) : undefined;
+      const actorId = optionalRequestedActor(body);
       const result = deps.brainCenter.routeSystem(userMessage, { actorId });
       return reply.send({ ok: true, result });
     } catch (error) {

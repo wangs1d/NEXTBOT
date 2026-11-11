@@ -17,6 +17,19 @@
 
 export type MemorySourceRole = "user" | "assistant" | "mixed" | "tool" | "system" | "unknown";
 
+/**
+ * 用户是否在明确询问「助手说过/答应过什么」。
+ * 只有这类询问才允许助手发言进入召回；其余（我叫什么、我多大）一律不把助手发言
+ * 当证据——否则当时的一句调侃/猜测会被当成用户事实复述。
+ */
+const ASSISTANT_VOICE_QUERY_RE =
+  /你说过|你上次说|你之前说|你当时说|你跟我(?:说|讲)|你答应|你承诺|你回复|你怎么回答|你告诉我的|问过你/;
+
+/** 召回意图判定：允许助手自己的历史发言作为答案来源。 */
+export function isAssistantVoiceQuery(query: string): boolean {
+  return ASSISTANT_VOICE_QUERY_RE.test(query ?? "");
+}
+
 const JOURNAL_USER_RE = /日志固化[^\]]*·(?:用户|fact|prefer)\]/;
 const JOURNAL_ASSISTANT_RE = /日志固化[^\]]*·(?:助手|commit|Agent)\]/;
 const USER_REMEMBER_RE = /\[用户要求记住\]/;

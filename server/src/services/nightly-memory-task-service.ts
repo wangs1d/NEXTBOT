@@ -3,6 +3,7 @@ import type { MemoryManagerService } from "./memory-manager-service.js";
 import type { AgentMemorySyncService } from "./agent-memory-sync-service.js";
 import type { NarrativeMemoryPort } from "./narrative-memory-port.js";
 import type { UnifiedExtraction } from "../agentic-memory/unified-extractor.js";
+import { isReverseAddressClaim } from "../agentic-memory/unified-extractor.js";
 import { getDailyJournalService } from "./daily-journal-service.js";
 import { getDailyDigestService } from "./daily-digest-service.js";
 import { getShortTermMemoryGatewayService } from "./short-term-memory-gateway.js";
@@ -1185,6 +1186,9 @@ export class NightlyMemoryTaskService {
         "习惯纪律：单日/单次观察到的行为不得写成 preference 或带「习惯/总是/每天」字样的 fact；" +
         "设提醒/定闹钟≠事件已发生：「用户定了9点闹钟」不能推出「用户9点起床」，更不能推出作息习惯；" +
         "一次性事务（比价、下单、当次安排）不提取为 fact/preference。" +
+        "归属铁律：日志行 [日期 时间 A] 是助手发言、[日期 时间 U] 才是用户自述；助手话里的「你」指用户、「我」指助手。" +
+        "「喊你X/叫你X/以后喊你X」是助手对用户的称呼（方向 Agent→用户），只能写成「用户希望被称作「X」」，" +
+        "绝不能写成「用户把助手称作X」或「用户称呼助手为X」；只有 U/fact/prefer 行可作为用户事实的证据。" +
         "text 用第三人称中文短句（以「用户」开头或无主语短语），禁止以「我/我的」开头。" +
         '没有可提取内容时返回 {"facts":[]}。';
       const response = await openai.chat.completions.create({
@@ -1231,6 +1235,7 @@ export class NightlyMemoryTaskService {
           f &&
           typeof f.text === "string" &&
           f.text.trim() &&
+          !isReverseAddressClaim(f.text) &&
           validKind(f.kind, ["preference", "fact", "commitment"]) &&
           hasEvidence(f.evidence)
         ) {
@@ -1246,6 +1251,7 @@ export class NightlyMemoryTaskService {
           c &&
           typeof c.text === "string" &&
           c.text.trim() &&
+          !isReverseAddressClaim(c.text) &&
           validKind(c.kind, ["preference", "fact"]) &&
           hasEvidence(c.evidence)
         ) {

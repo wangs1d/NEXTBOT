@@ -28,6 +28,7 @@
 import { appendFileSync } from "node:fs";
 
 import { LIST_ITEM_RE } from "./render-hint-service.js";
+import { stableCardId } from "./card-identity.js";
 import {
   hasBlockquote,
   routeDisplayEffect,
@@ -631,7 +632,7 @@ export function formatAgentResultForChat(
     cardType,
     actions,
     speak,
-    cardId: actions.length > 0 || cardType ? `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}` : undefined,
+    cardId: actions.length > 0 || cardType ? stableCardId({ title: segment.title, items, footer: segment.footer, cardType }) : undefined,
   };
 
   // travel_itinerary 卡：注入结构化行程数据（前端双面板直读，无则前端回退文本解析）
@@ -731,7 +732,7 @@ export function formatQuoteResultForChat(
     cardType: "quote",
     actions: llmActions,
     speak: "high",
-    cardId: `card_${Date.now()}_${Math.random().toString(36).substr(2, 6)}`,
+    cardId: stableCardId({ title: unquoted, footer, cardType: "quote" }),
   };
   const cardBlock = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;
 

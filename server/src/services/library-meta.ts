@@ -17,7 +17,21 @@ import { getDataDir } from "../config/data-dir.js";
 
 export type LibraryMediaKind = "images" | "files";
 
-type MediaSessionEntry = { sessionId: string; at: string; hidden?: boolean };
+/**
+ * 产出资料所属的「这次对话」粒度信息。
+ *
+ * 2026-11-12：主对话是单一会话（sessionId=actorId 恒定），只按 sessionId 折叠会把
+ * 主对话全部产物挤进一张卡。落盘时额外记 `chatUserMessageId`（触发本轮工具执行的
+ * 用户消息 id）作为轮次键，卡标题取用户请求原文前 40 字。
+ */
+export type MediaTurnInfo = {
+  /** 触发本轮的 `chat.user_message.messageId`；空 = 无法细分，按会话/时间聚类兜底 */
+  turnId?: string;
+  /** 用户请求原文片段（≤40 字），资料库卡片标题 */
+  title?: string;
+};
+
+type MediaSessionEntry = { sessionId: string; at: string; hidden?: boolean; turnId?: string; title?: string };
 type LibraryMetaFile = {
   images?: Record<string, MediaSessionEntry>;
   files?: Record<string, MediaSessionEntry>;
@@ -58,16 +72,22 @@ export function recordMediaSession(
   sessionId?: string,
   /** hidden=true 的产物不进资料库（购物比价商品图、扫码截图等工具性图片） */
   hidden = false,
+  /** 轮次归属（2026-11-12）：主对话按「每次对话」细分成卡的依据 */
+  turn?: MediaTurnInfo,
 ): void {
   const sid = sessionId?.trim();
   const name = fileName.trim();
   if (!sid && !hidden) return;
   const meta = loadMeta(actorId);
   const bucket = (meta[kind] ??= {});
+  const turnId = turn?.turnId?.trim();
+  const title = turn?.title?.trim();
   bucket[name] = {
     sessionId: sid ?? "",
     at: new Date().toISOString(),
     ...(hidden ? { hidden: true } : {}),
+    ...(turnId ? { turnId } : {}),
+    ...(title ? { title } : {}),
   };
   try {
     const path = metaPath(actorId);
@@ -94,4 +114,30 @@ export function mediaSessionOf(
   fileName: string,
 ): string {
   return loadMeta(actorId)[kind]?.[fileName]?.sessionId ?? "";
+}
+
+/** 查单个落盘产物的完整归属条目（含轮次）；没有记录返回 null。 */
+export function mediaEntryOf(
+  actorId: string,
+  kind: LibraryMediaKind,
+  fileName: string,
+): MediaSessionEntry | null {
+  return loadMeta(actorId)[kind]?.[fileName] ?? null;
+}
+
+/**
+ * 从工具执行上下文提取轮次归属（资料库「每次对话一张卡」用）。
+ * 入参走结构化类型，避免 library-meta 反向依赖 tool-registry。
+ */
+export function mediaTurnFromContext(ctx: {
+  chatUserMessageId?: string;
+  userText?: string;
+}): MediaTurnInfo | undefined {
+  const turnId = ctx.chatUserMessageId?.trim();
+  const text = ctx.userText?.trim().replace(/\s+/g, " ");
+  if (!turnId && !text) return undefined;
+  return {
+    ...(turnId ? { turnId } : {}),
+    ...(text ? { title: text.slice(0, 40) } : {}),
+  };
 }

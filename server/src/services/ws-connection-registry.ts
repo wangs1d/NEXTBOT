@@ -13,6 +13,8 @@ export type DeviceClass = "desktop" | "mobile";
 export type WsLike = {
   send(data: string): void;
   readyState?: number;
+  /** 服务端主动关闭这条连接（token 吊销 / 换号登录时用）。 */
+  close?(code?: number, reason?: string): void;
 };
 
 /** session.init 自报的 platform/deviceClass 归一：手机系 → mobile，其余（含缺省）→ desktop。
@@ -28,6 +30,8 @@ export function normalizeDeviceClass(raw: unknown): DeviceClass {
 interface SocketEntry {
   socket: WsLike;
   deviceClass: DeviceClass;
+  /** session.init 自报的安装标识；token 吊销时按它定位「同一台设备」的旧连接。 */
+  deviceId?: string;
   /** 终端最近一次"真人活动"时间（非 keepalive 的业务消息刷新；设备智能路由用） */
   lastActiveAt: number;
 }
@@ -38,13 +42,18 @@ export class WsConnectionRegistry {
   /** 连接变化回调（PresenceService 在场感知接线；首连接 true / 末断开 false，fire-and-forget） */
   onConnectionChange?: (actorId: string, connected: boolean) => void;
 
-  register(sessionId: string, socket: WsLike, meta?: { deviceClass?: DeviceClass }): void {
+  register(sessionId: string, socket: WsLike, meta?: { deviceClass?: DeviceClass; deviceId?: string }): void {
     let set = this.connections.get(sessionId);
     if (!set) {
       set = new Set();
       this.connections.set(sessionId, set);
     }
-    set.add({ socket, deviceClass: meta?.deviceClass ?? "desktop", lastActiveAt: Date.now() });
+    set.add({
+      socket,
+      deviceClass: meta?.deviceClass ?? "desktop",
+      deviceId: meta?.deviceId?.trim() || undefined,
+      lastActiveAt: Date.now(),
+    });
     if (set.size === 1) {
       try {
         this.onConnectionChange?.(sessionId, true);
@@ -71,6 +80,33 @@ export class WsConnectionRegistry {
         /* 回调失败不影响连接清理 */
       }
     }
+  }
+
+  /**
+   * 按设备断开该设备上的全部连接。
+   *
+   * 换号登录 / 重复登录 / 主动吊销 token 时，旧 token 只是从凭据表里删掉，
+   * 已经建立的 WS 仍然以旧 actorId 注册着——它会继续读写上一个账号的记忆、
+   * 钱包与凭据，直到心跳超时。这里按 `deviceId` 精确踢掉那台设备的连接，
+   * 不影响同账号在别的设备上的会话。
+   */
+  closeByDevice(deviceId: string, code = 1008, reason = "credential_revoked"): number {
+    const target = deviceId?.trim();
+    if (!target) return 0;
+    let closed = 0;
+    for (const [sessionId, set] of [...this.connections]) {
+      for (const entry of [...set]) {
+        if (entry.deviceId !== target) continue;
+        try {
+          entry.socket.close?.(code, reason);
+        } catch {
+          /* 半开连接 close 可能抛错：照常摘除登记 */
+        }
+        this.dropSocket(sessionId, entry.socket);
+        closed += 1;
+      }
+    }
+    return closed;
   }
 
   /** 当前有活连接的 session 键（调试/手动触发用：不传 sessionId 时取它） */

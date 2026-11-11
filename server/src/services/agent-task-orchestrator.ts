@@ -72,7 +72,9 @@ export const STATE_MACHINE_TOOL_ALLOWLIST: string[] = [
   "desktop.web_search",
   "desktop.web_fetch",
   "desktop.visual.screenshot",
-  // 服务端联网工具
+  // 服务端联网工具（复合入口 + 被收编执行器名都保留，兼容历史回执判断）
+  "web_search",
+  "web_fetch",
   "search_web",
   "search_images",
   "search_videos",
@@ -543,10 +545,8 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
 
 ## 联网能力(服务端工具)
 当任务需要"上网查信息"时,优先用以下工具,不要用 shell curl:
-- search_web {query, limit?}: **服务端联网搜索**,返回标题+URL+摘要。支持多查询并行
-- search_images {query, limit?}: **服务端图片搜索**,返回可预览图片 URL + 来源页 URL
-- search_videos {query, limit?}: **服务端视频搜索**,返回视频标题 + 播放页 URL + 缩略图
-- fetch_web {url, include_links?}: **服务端抓取网页正文**,自动去噪(导航栏/广告/页脚)
+- web_search {action: web|deep|images|images_batch|videos|hot|weather|quote, query}: **服务端联网检索**（web=标题+URL+摘要，支持多查询并行；images=图片搜索，返回可预览图片 URL + 来源页；videos=视频搜索，返回标题+播放页+缩略图）
+- web_fetch {action: read|inspect|navigate|raw, url}: **服务端抓取/巡检网页正文**，自动去噪(导航栏/广告/页脚)
 - http.request {url, method?, headers?, body?, timeoutMs?}: **通用 HTTP 客户端**(GET/POST/PUT/DELETE 等),带 SSRF 防护。调外部 API/Webhook 用此工具
 - info.inspect_webpage {url}: 巡检网页,返回链接列表(便于继续导航)
 - info.navigate_site {startUrl, goalKeywords?}: 同站多页 BFS 爬取

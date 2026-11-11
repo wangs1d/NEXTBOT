@@ -9,6 +9,7 @@ import "../core/config/api_config.dart";
 import "../core/services/access_auth_api.dart";
 import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/model_api_tester.dart";
+import "../core/services/ws_chat_service.dart";
 import "../features/settings/access_pairing_card.dart";
 import "mobile_theme.dart";
 import "../core/services/nb_http.dart";
@@ -140,7 +141,10 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
         client
-            .get(Uri.parse("${ApiConfig.httpBase}/api/model-providers"),
+            // 强制鉴权下这个目录也过周界：必须带身份（登录态由同源 token 钉死，
+            // 未登录带 inst_… 的 guest 身份），否则 403 IDENTITY_REQUIRED、
+            // 目录加载失败只剩「自定义」手填。
+            .get(_authed("/api/model-providers"),
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15)),
         client
@@ -282,11 +286,19 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         err = "保存本机配置失败：$e";
       }
       if (!mounted) return;
+      // 2026-11-11 根修：三元组只在 session.init 上送，保存后必须立刻补发
+      // 一帧，否则当前连接上的服务端收不到新 key，用户会一直看到
+      // 「模型服务还没配置好」。服务端允许同连接重复 init，无需断线重连。
+      final bool announced =
+          err == null && WsChatService.shared.reannounceSessionInit();
       setState(() {
         _savingModel = false;
         _modelConfigured = binding.isConfigured;
         _modelKeyTail = binding.isConfigured ? _tailOf(key) : null;
-        _modelMessage = err ?? "已存本机，重连后生效（服务端按你的账号加密保存，离线提醒也用这把 key）";
+        _modelMessage = err ??
+            (announced
+                ? "已保存并即时生效，直接开聊即可"
+                : "已存本机，连上服务器后自动生效（服务端会按你的账号加密保存）");
         _modelMessageError = err != null;
       });
       return;
@@ -313,6 +325,29 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
         _modelMessage = err;
         _modelMessageError = true;
       }
+    });
+  }
+
+  /// 停用自有模型（仅 session-byok 形态有本机三元组）：清本机 + 补发 init
+  /// 让服务端当场撤绑，回到平台默认 provider。与保存路径同一套握手语义。
+  Future<void> _clearModel() async {
+    setState(() {
+      _savingModel = true;
+      _modelMessage = null;
+    });
+    await CloudModelBindingStore.instance.clear();
+    if (!mounted) return;
+    final bool announced =
+        WsChatService.shared.reannounceSessionInit(clearModelBinding: true);
+    setState(() {
+      _savingModel = false;
+      _modelConfigured = false;
+      _modelKeyTail = null;
+      _apiKey.clear();
+      _modelMessage = announced
+          ? "已停用自有模型，改用平台默认模型"
+          : "已停用自有模型，连上服务器后生效";
+      _modelMessageError = false;
     });
   }
 
@@ -656,6 +691,16 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
           busy: _savingModel,
           onPressed: _saveModel,
         ),
+        if (_sessionByok && _modelConfigured) ...<Widget>[
+          const SizedBox(height: 4),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton(
+              onPressed: _savingModel ? null : _clearModel,
+              child: const Text("停用自有模型，改用平台默认模型"),
+            ),
+          ),
+        ],
         if (_modelMessage != null) ...<Widget>[
           const SizedBox(height: 10),
           Text(
@@ -945,7 +990,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   Future<void> _loadBranches() async {
     setState(() => _branchesLoading = true);
     try {
-      final http.Response resp = await http
+      final http.Response resp = await NbHttp
           .get(Uri.parse("${ApiConfig.httpBase}/api/proactivity/branches"),
               headers: AccessCredentialStore.instance.authHeaders)
           .timeout(const Duration(seconds: 15));
@@ -959,7 +1004,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
       }
       List<Map<String, dynamic>> watchTasks = const <Map<String, dynamic>>[];
       try {
-        final http.Response wt = await http
+        final http.Response wt = await NbHttp
             .get(Uri.parse("${ApiConfig.httpBase}/api/proactivity/watch-tasks"),
                 headers: AccessCredentialStore.instance.authHeaders)
             .timeout(const Duration(seconds: 15));
@@ -1002,7 +1047,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     bool? condense,
   }) async {
     try {
-      final http.Response resp = await http
+      final http.Response resp = await NbHttp
           .post(
             Uri.parse("${ApiConfig.httpBase}/api/proactivity/branches/config"),
             headers: AccessCredentialStore.instance.authHeaders,
@@ -1029,7 +1074,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
 
   Future<void> _patchWatchTask(String actorId, String id, String action) async {
     try {
-      final http.Response resp = await http
+      final http.Response resp = await NbHttp
           .post(
             Uri.parse(
                 "${ApiConfig.httpBase}/api/proactivity/watch-tasks/config"),

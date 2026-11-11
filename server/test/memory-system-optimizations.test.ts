@@ -19,6 +19,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import {
+  isReverseAddressClaim,
   normalize as normalizeUnified,
   parseJsonObject,
 } from "../src/agentic-memory/unified-extractor.js";
@@ -58,6 +59,34 @@ test("normalizeUnified：决策校验 / 纠正项 / 无效决策拒绝", () => {
 
   assert.equal(normalizeUnified({ decision: "maybe" }), null);
   assert.equal(normalizeUnified({ decision: "reject", memories: ["不应带出"] })!.memories.length, 0);
+});
+
+test("normalizeUnified：称呼方向守卫——用户设定 Agent 喊自己「大哥」不得反写", () => {
+  // 方向乌龙（2026-11-12）：正确语义是「用户指定 Agent 称呼自己为大哥」。
+  assert.equal(isReverseAddressClaim("王铭川（二十岁）把助手称作「大哥」，互动中显示出亲近的称呼习惯。"), true);
+  assert.equal(isReverseAddressClaim("用户称呼助手为「大哥」"), true);
+  assert.equal(isReverseAddressClaim("用户要求以后称呼他为「大哥」"), false);
+  assert.equal(isReverseAddressClaim("助手称呼用户为「大哥」"), false);
+
+  const ok = normalizeUnified({
+    decision: "remember",
+    memories: [
+      "用户明确要求以后称呼他为「大哥」",
+      "王铭川（二十岁）把助手称作「大哥」，2026年11月10日的互动中显示出这种亲近的称呼习惯。",
+    ],
+    understandings: [
+      { topic: "称呼", note: "用户把助手称作「大哥」，属于亲近的称呼习惯", kind: "other" },
+      { topic: "称呼", note: "用户希望被称作「大哥」，属于长期称呼偏好", kind: "preference" },
+    ],
+    facts: [{ field: "称呼", value: "大哥", confidence: 0.9 }],
+  });
+  assert.ok(ok);
+  assert.deepEqual(ok.memories, ["用户明确要求以后称呼他为「大哥」"]);
+  assert.deepEqual(ok.understandings.map((u) => u.note), [
+    "用户希望被称作「大哥」，属于长期称呼偏好",
+  ]);
+  // 正确方向的事实保留：称呼=大哥 供「你该叫我什么」直答
+  assert.deepEqual(ok.facts.map((f) => `${f.field}:${f.value}`), ["称呼:大哥"]);
 });
 
 test("normalizeUnified：referents 角色指代映射规范化（写时结构化，realtime 消解数据源）", () => {

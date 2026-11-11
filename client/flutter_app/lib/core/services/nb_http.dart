@@ -24,11 +24,13 @@ class NbHttp {
   static Map<String, String> headersFor(Uri uri) =>
       MediaUrl.headersFor(uri.toString());
 
+  /// 凭证一律以本机存储为准：`headersFor` 放在展开**之后**，覆盖调用方可能
+  /// 手写的旧 token。续期后旧值已经废了，留着会让重放继续 401（2026-11-11）。
   static Map<String, String> _merge(
     Uri uri,
     Map<String, String>? extra,
   ) =>
-      <String, String>{...headersFor(uri), ...?extra};
+      <String, String>{...?extra, ...headersFor(uri)};
 
   /// 续期一次（并发去重）。返回是否拿到了新凭据。
   ///
@@ -43,12 +45,22 @@ class NbHttp {
     Map<String, String>? extra,
   ) async {
     final http.Response first = await run(_merge(uri, extra));
-    if (first.statusCode != 401) return first;
+    if (first.statusCode != 401 && !_identityRejected(first)) return first;
     if (!MediaUrl.isOwnOrigin(uri.toString())) return first;
     final bool refreshed = await _refreshOnce();
     if (!refreshed) return first;
     // 重试时用新 token 重新取头；extra 保持不变（调用方的 Content-Type 等）。
     return run(_merge(uri, extra));
+  }
+
+  /// 403 + `IDENTITY_REQUIRED` 也值得先续期一次。
+  ///
+  /// 服务端把「自称账号却没有可用凭证」判 403（区分于 401 的"没被认出来"）。
+  /// 冷启动时凭据常常只是还没就绪，本地其实有可续期的 token——不试一次续期
+  /// 就直接回登录门禁，会把本来能自愈的请求变成"登录状态已过期"。
+  static bool _identityRejected(http.Response res) {
+    if (res.statusCode != 403) return false;
+    return res.body.contains("IDENTITY_REQUIRED");
   }
 
   /// 续期一次（并发去重）。返回是否拿到了新凭据。

@@ -4,6 +4,7 @@ import type { VideoGrabService } from "../services/video-grab-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
 import { enrichVideosWithPlayable } from "./video-tools.js";
 import { resolveActorId } from "../agent/actor-id.js";
+import { mediaTurnFromContext } from "../services/library-meta.js";
 import { fetchHotRankings, type HotRankSource } from "../services/hot-rankings.js";
 
 function toBoundedLimit(input: unknown, fallback: number): number {
@@ -47,6 +48,7 @@ export function registerWebTools(
       limit,
       resolveActorId(context),
       context.sessionId,
+      mediaTurnFromContext(context),
     );
   });
 
@@ -78,6 +80,7 @@ export function registerWebTools(
       limitPerGroup,
       actorId,
       context.sessionId,
+      mediaTurnFromContext(context),
     );
   });
 

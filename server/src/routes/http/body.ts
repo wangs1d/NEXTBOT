@@ -81,7 +81,9 @@ export function registerBodyRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
         typeof body.args === "object" && body.args !== null && !Array.isArray(body.args)
           ? (body.args as Record<string, unknown>)
           : {};
-      const actorId = typeof body.actorId === "string" ? body.actorId : undefined;
+      // `actorId` 已被周界钉成裁决身份；调试要指定别的 actor 用 targetActorId。
+      const rawActor = body.targetActorId ?? body.actorId;
+      const actorId = typeof rawActor === "string" ? rawActor : undefined;
       const source = typeof body.source === "string" ? body.source : "external";
       const action: BodyAction = { tool, args, actorId, source };
       const result = await deps.bodyCenter.act(action);

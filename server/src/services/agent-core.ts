@@ -73,8 +73,10 @@ export const CALENDAR_CONFIRM_TOOLS = new Set(["calendar"]);
 function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[] {
   const base = (() => {
     if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
-    const searchWeb = getBuiltinAgentChatTools().find(
-      (tool) => tool.type === "function" && tool.function?.name === "search_web",
+    const searchWeb = getBuiltinAgentChatTools().filter(
+      (tool) =>
+        tool.type === "function" &&
+        (tool.function?.name === "web_search" || tool.function?.name === "web_fetch"),
     );
     const inlineWriteTools = getBuiltinAgentChatTools().filter(
       (tool) =>
@@ -83,7 +85,7 @@ function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[]
     _foregroundToolWhitelist = [
       ...inlineWriteTools,
       TASK_DISPATCH_TOOL_DEFINITION,
-      ...(searchWeb ? [searchWeb] : []),
+      ...searchWeb,
     ];
     return _foregroundToolWhitelist;
   })();
@@ -237,7 +239,7 @@ import { createStreamMarkerGuard } from "../utils/stream-marker-guard.js";
 import { attachTravelBriefCard, resolveTravelReceipt } from "./deterministic-card-chain.js";
 import { TASK_PLANE_FALLBACK_BUDGET } from "../agent/task-router.js";
 import { isActionableTaskRequest } from "../agent/task-intent.js";
-import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, mediaToolNameForText, type TravelPlanRequest } from "../agent/realtime-search-query.js";
+import { isDirectCurrentTimeQuestion, isMediaOnlyRequest, type TravelPlanRequest } from "../agent/realtime-search-query.js";
 import { needsToolChoiceRequired } from "../gateway/forced-tool.js";
 import { buildCurrentTimePrompt } from "../agent/prompt-builder.js";
 import {
@@ -2026,7 +2028,7 @@ if (route.plane === "task") {
           if (
             holdAnswer === "after_tool_use" &&
             info.ok &&
-            receiptProducesCard(info.toolName, info.result)
+            receiptProducesCard(info.effectiveTool ?? info.toolName, info.result)
           ) {
             answerStreamHeld = true;
           }
@@ -2134,17 +2136,13 @@ if (route.plane === "task") {
       // 就必须保证留下的这一个真的在手上。
       const mediaPinnedTools = (() => {
         if (!isMediaOnlyRequest(text)) return [] as ChatCompletionTool[];
-        const wanted = mediaToolNameForText(text) === "search_videos"
-          ? ["search_videos", "video.find"]
-          : ["search_images", "search_images_batch"];
-        const byName = new Map<string, ChatCompletionTool>();
-        for (const tool of corpusLane) {
-          const name = tool.type === "function" ? tool.function?.name ?? "" : "";
-          if (name && !coreNames.has(name) && !byName.has(name)) byName.set(name, tool);
-        }
-        return wanted
-          .map((name) => byName.get(name))
-          .filter((tool): tool is ChatCompletionTool => Boolean(tool));
+        // 复合化后图片/视频均收编进 web_search（action=images/images_batch/videos）：
+        // 它已是核心常驻工具时无需 pin；不在核心集时才补进本轮可见面。
+        if (coreNames.has("web_search")) return [] as ChatCompletionTool[];
+        const pinned = corpusLane.find(
+          (tool) => tool.type === "function" && tool.function?.name === "web_search",
+        );
+        return pinned ? [pinned] : [];
       })();
       const preloadTools = buildDomainPreloadTools(text, corpusLane, coreNames);
       return {
@@ -3157,9 +3155,10 @@ if (route.plane === "task") {
             // opts.onExternalToolExecuted 在后台路径不会被读取（挂错层 = 卡片恒空）。
             backgroundOnToolExecuted: (info) => {
               if (info.ok && info.result) {
-                capturedMedia.push({ toolName: info.toolName, result: info.result });
-                if (info.toolName === "travel.plan-itinerary") {
-                  capturedTravel.push({ toolName: info.toolName, result: info.result });
+                const effective = info.effectiveTool ?? info.toolName;
+                capturedMedia.push({ toolName: effective, result: info.result });
+                if (effective === "travel.plan-itinerary") {
+                  capturedTravel.push({ toolName: effective, result: info.result });
                 }
               }
             },
@@ -3206,9 +3205,10 @@ if (route.plane === "task") {
               ...carriedTurnCtx,
               backgroundOnToolExecuted: (info) => {
                 if (info.ok && info.result) {
-                  capturedMedia.push({ toolName: info.toolName, result: info.result });
-                  if (info.toolName === "travel.plan-itinerary") {
-                    capturedTravel.push({ toolName: info.toolName, result: info.result });
+                  const effective = info.effectiveTool ?? info.toolName;
+                  capturedMedia.push({ toolName: effective, result: info.result });
+                  if (effective === "travel.plan-itinerary") {
+                    capturedTravel.push({ toolName: effective, result: info.result });
                   }
                 }
               },

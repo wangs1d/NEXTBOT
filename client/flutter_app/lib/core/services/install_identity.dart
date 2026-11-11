@@ -1,20 +1,24 @@
 import "dart:convert";
 import "dart:io";
 
-import "package:flutter/foundation.dart" show debugPrint;
+import "package:flutter/foundation.dart" show debugPrint, visibleForTesting;
 import "package:path_provider/path_provider.dart";
 
 import "../config/api_config.dart";
 import "account_session_store.dart";
+import "device_key_backup.dart";
 
 /// 控制面身份与启动状态：反馈、站内信、运行埋点等运营数据以此 actor 身份
 /// 落库到管理后台；`channel` 落盘供下次启动决定是否拉起本机 runtime。
 ///
 /// 优先级：登录邮箱（账号会话，已归一化，按账号隔离）>
 /// `USER_ID`（部署配置，显式指定）> 持久化安装 ID。
-/// 安装 ID 首次使用时生成并写入应用支持目录，卸载重装后变化——
-/// 仅作未登录时的兜底，保证管理后台能区分不同设备，
-/// 而不是全员撞在同一个烤死的 sessionId 上。
+///
+/// 安装 ID 在 Android 上由 `ANDROID_ID` 派生（见 DeviceKeyBackupPlugin）：
+/// Android 8+ 按「设备 + 用户 + 应用签名」分区，**同签名卸载重装保持不变**。
+/// 这一点是用户自有模型 key 跨卸载生效的关键——服务端把加密绑定存在
+/// `model-keys/<actor>.enc`，随机 id 重装后一换就永远认不出来。
+/// 桌面端/取不到设备标识时回落随机 `inst_…`，语义与旧版一致。
 class InstallIdentity {
   InstallIdentity._();
 
@@ -22,37 +26,87 @@ class InstallIdentity {
 
   static const String _fileName = "install_identity.json";
 
+  /// 目录解析可替换：单测钉到临时目录，生产用 path_provider。
+  static Future<Directory> Function() directoryResolver =
+      getApplicationSupportDirectory;
+
+  /// 仅单测：清空内存态，让下一轮 _ensureLoaded() 真的走一遍稳定 id 决议。
+  @visibleForTesting
+  void resetForTest() {
+    _loaded = false;
+    _installId = null;
+    _channel = null;
+    _legacyInstallId = null;
+  }
+
   String? _installId;
   String? _channel;
+  String? _legacyInstallId;
   bool _loaded = false;
 
   Future<void> _ensureLoaded() async {
     if (_loaded) return;
     _loaded = true;
+    // 先取稳定设备标识：即使私有文件被卸载清掉，重装后仍落到同一个 actor。
+    final String? stableId = await DeviceKeyBackup.instance.stableInstallId();
+    String? fileId;
+    bool fileExists = false;
     try {
-      final Directory dir = await getApplicationSupportDirectory();
+      final Directory dir = await directoryResolver();
       final File file = File("${dir.path}/$_fileName");
-      if (await file.exists()) {
+      fileExists = await file.exists();
+      if (fileExists) {
         final Map<String, dynamic> json =
             jsonDecode(await file.readAsString()) as Map<String, dynamic>;
         final String id = json["installId"]?.toString() ?? "";
-        if (id.isNotEmpty) _installId = id;
+        if (id.isNotEmpty) fileId = id;
         final String channel = json["channel"]?.toString() ?? "";
         if (channel.isNotEmpty) _channel = channel;
-        if (_installId != null) return;
+        final String legacy = json["legacyInstallId"]?.toString() ?? "";
+        if (legacy.isNotEmpty) _legacyInstallId = legacy;
       }
-      // 首次生成：inst_ + 毫秒时间戳(36进制) + 微秒尾数(36进制)，避免并发撞号
-      final String id =
-          "inst_${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}_${(DateTime.now().microsecondsSinceEpoch % 1679616).toRadixString(36)}";
-      _installId = id;
-      await file.writeAsString(jsonEncode(<String, String>{
-        "installId": id,
-        if (_channel != null) "channel": _channel!,
-      }));
     } catch (e) {
-      debugPrint("[InstallIdentity] 读写安装身份失败（用临时 id）: $e");
-      _installId ??=
-          "inst_tmp_${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}";
+      debugPrint("[InstallIdentity] 读安装身份文件失败: $e");
+    }
+
+    if (stableId != null && stableId.isNotEmpty) {
+      final String? legacy =
+          (fileId != null && fileId != stableId) ? fileId : _legacyInstallId;
+      _installId = stableId;
+      if (legacy != null && legacy.isNotEmpty) _legacyInstallId = legacy;
+      // 已是稳定 id 且文件完好就不重写，避免每次启动都做一次磁盘 I/O。
+      if (fileId != stableId || !fileExists) {
+        await _persist();
+      }
+      return;
+    }
+
+    if (fileId != null && fileId.isNotEmpty) {
+      _installId = fileId;
+      return;
+    }
+
+    // 非 Android / 取不到 ANDROID_ID：沿用旧的随机安装 id。
+    final String id =
+        "inst_${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}_${(DateTime.now().microsecondsSinceEpoch % 1679616).toRadixString(36)}";
+    _installId = id;
+    await _persist();
+  }
+
+  Future<void> _persist() async {
+    try {
+      final Directory dir = await directoryResolver();
+      await File("${dir.path}/$_fileName").writeAsString(
+        jsonEncode(<String, String>{
+          if (_installId != null) "installId": _installId!,
+          if (_channel != null) "channel": _channel!,
+          if (_legacyInstallId != null && _legacyInstallId!.isNotEmpty)
+            "legacyInstallId": _legacyInstallId!,
+        }),
+        flush: true,
+      );
+    } catch (e) {
+      debugPrint("[InstallIdentity] 落盘安装身份失败（内存态仍可用）: $e");
     }
   }
 
@@ -93,14 +147,6 @@ class InstallIdentity {
     await _ensureLoaded();
     if (_channel == c) return;
     _channel = c;
-    try {
-      final Directory dir = await getApplicationSupportDirectory();
-      await File("${dir.path}/$_fileName").writeAsString(jsonEncode(<String, String>{
-        if (_installId != null) "installId": _installId!,
-        "channel": c,
-      }));
-    } catch (e) {
-      debugPrint("[InstallIdentity] 落盘 channel 失败（下次启动仍用旧值）: $e");
-    }
+    await _persist();
   }
 }

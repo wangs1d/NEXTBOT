@@ -40,7 +40,12 @@ import {
   messageBatchProcessor,
 } from "./handlers/chat-user-message.js";
 import { handleCardActionEvent } from "./handlers/card-action.js";
-import { isGuestActorId, looksLikeAccountId, resolveSessionIdentity } from "./session-identity.js";
+import {
+  isGuestActorId,
+  isStructuredSessionId,
+  looksLikeAccountId,
+  resolveSessionIdentity,
+} from "./session-identity.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import {
@@ -718,7 +723,11 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
                 // 两种拒因给不同码，客户端才能选对动作：
                 //  - 自报了账号却没有凭证 → IDENTITY_REQUIRED（清凭据回登录）
                 //  - 什么都没报 → AUTH_REQUIRED（先登录再连）
-                const claimsAccount = looksLikeAccountId(claimedForGate);
+                // 结构性会话键（side:<邮箱>:<id> 等）含 @ 但不是身份声明：
+                // 判 AUTH_REQUIRED（没凭据）而不是 IDENTITY_REQUIRED（自称账号
+                // → 清凭据回登录），否则一次带会话键的重连会把用户踢下线。
+                const claimsAccount =
+                  looksLikeAccountId(claimedForGate) && !isStructuredSessionId(claimedForGate);
                 safeSocketSend(
                   ws,
                   JSON.stringify({
@@ -966,6 +975,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             // critical 升级链据此区分电脑端/移动端触达；旧客户端缺省按桌面端处理
             wsConnectionRegistry.register(actorId, socket, {
               deviceClass,
+              deviceId,
             });
             // 手机端对话式首启引导（2026-11-07）：账号级一次性闸门，仅手机端、
             // 且从未引导过、没名字没称呼的账号才主动开口。异步不阻塞 session.init。

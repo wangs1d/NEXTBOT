@@ -51,10 +51,19 @@ export function startDesktopBridgeAutoClient(opts: DesktopBridgeAutoStarterOptio
   const wsHost = env.DESKTOP_BRIDGE_WS_HOST?.trim() || "127.0.0.1";
   const wsUrl =
     env.DESKTOP_BRIDGE_WS_URL?.trim() || `ws://${wsHost}:${opts.port}/ws`;
+  // 强鉴权后占位身份不再代表任何账号：绑到 session-mvp-001 只会让执行器
+  // 挂在共享桶上，主通道（邮箱 / inst_…）永远查不到它。没有显式用户时
+  // 宁可不启动，也不要制造「看起来在跑」的假象（2026-11-11 身份收尾）。
   const userId =
     env.DESKTOP_BRIDGE_USER_ID?.trim() ||
-    env.DESKTOP_BRIDGE_AUTO_USER_ID?.trim() ||
-    "session-mvp-001";
+    env.DESKTOP_BRIDGE_AUTO_USER_ID?.trim();
+  if (!userId) {
+    log(
+      "[desktop-bridge] 跳过自启动：未配置 DESKTOP_BRIDGE_USER_ID。" +
+        "强鉴权下不能用 session-mvp-001 这类占位身份绑定桌面执行器。",
+    );
+    return () => {};
+  }
 
   let stopped = false;
   let child: ChildProcessByStdio<null, Readable, Readable> | null = null;

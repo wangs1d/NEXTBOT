@@ -25,6 +25,8 @@ const ROUNDUP_INTENT =
 
 /** 会带 items[] 的检索类工具；工具名是唯一判据，不猜回执内容 */
 const ROUNDUP_TOOLS = new Set([
+  "web_search",
+  "web_fetch",
   "search_web",
   "fetch_web",
   "news.search",

@@ -29,6 +29,27 @@ export type UnifiedBridgeInboundBody = {
   autoReply?: boolean;
 };
 
+let warnedDefaultBridgeActor = false;
+
+/**
+ * 入站消息在「没有显式 userId/sessionId 绑定」时的归属 actor。
+ *
+ * 显式配置优先；都没有时保留 session-mvp-001 兜底（旧部署不断），但只告警
+ * 一次：强鉴权后占位身份不代表任何账号，消息落进去就是共享桶。
+ */
+function defaultBridgeActorId(env: NodeJS.ProcessEnv): string {
+  const explicit = env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim();
+  if (explicit) return explicit;
+  if (!warnedDefaultBridgeActor) {
+    warnedDefaultBridgeActor = true;
+    console.warn(
+      "[message-bridge] 未配置 MESSAGE_BRIDGE_DEFAULT_ACTOR_ID：" +
+        "未显式绑定账号的入站消息会落到 session-mvp-001 共享桶。",
+    );
+  }
+  return "session-mvp-001";
+}
+
 export class MessageBridgeService {
   constructor(
     private readonly runtime: RuntimeFacade,
@@ -77,7 +98,7 @@ export class MessageBridgeService {
     // AGENT_CHANNEL_SESSION_ISOLATION=0 回退旧行为。
     const baseActorId = resolveActorId({
       userId: body.userId,
-      sessionId: body.sessionId?.trim() || this.env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || "session-mvp-001",
+      sessionId: body.sessionId?.trim() || defaultBridgeActorId(this.env),
     });
     const hasExplicitBinding = Boolean(body.userId?.trim() || body.sessionId?.trim());
     const actorId =

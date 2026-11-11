@@ -16,6 +16,7 @@ import { readFileSync } from "node:fs";
 import { decideRender } from "../src/render/decide.js";
 import { applyBodyForm } from "../src/render/body.js";
 import { applyCards, collectCardPayloads, diagnoseRegisteredCardPayload } from "../src/render/cards.js";
+import { renderTurn } from "../src/render/turn.js";
 import { buildReminderConfirmPayload } from "../src/render/scenes/reminder-confirm.scene.js";
 import { normalizeReplyCardLayout } from "../src/services/reply-envelope.js";
 import {
@@ -194,6 +195,32 @@ test("提醒确认卡：按 taskId 去重；失败轮 / 缺时区不出卡", () 
     effects: reminderEffects([{ ...REMINDER_RECEIPT, timezone: undefined }]),
   });
   assert.equal(noTimezone.cards.length, 0, "时区缺失时宁可不出卡，也不猜时间");
+});
+
+test("提醒确认卡：full 出卡后 done 兜底重算不再追加第二张（2026-11-12 双卡事故回归）", () => {
+  // 事故链路：2026-11-11 calendar 拿到 registry builder 后，同一份创建回执
+  // 同时进 reminder 捕获与 registryResults → done 阶段 cards-only 重算时
+  // 场景再次命中；applyCards 去重键若含 buildCardMarker 盖的生成 cardId
+  // （每次构建必变），同一张卡会被当成「另一张」再附一遍 → 两端双卡。
+  const effects = reminderEffects([{ ...REMINDER_RECEIPT }]);
+  const full = renderTurn({ text: "定好了，明早七点叫你。", effects }, "full");
+  assert.equal(collectCardPayloads(full.text).length, 1, "full 阶段恰好一张");
+  // done 兜底：同一份回执再算一次（registryResults 通道），文本已是 full 产物
+  const done = renderTurn({ text: full.text, effects }, "cards-only");
+  assert.equal(
+    collectCardPayloads(done.text).length,
+    1,
+    "done 兜底重算后仍只有一张：生成 cardId 不参与去重身份",
+  );
+  // 强不变量：full 与 done 兜底建出的是**同一张卡**（cardId 内容寻址，恒一致）
+  const [fullCard] = collectCardPayloads(full.text);
+  const [doneCard] = collectCardPayloads(done.text);
+  assert.equal(fullCard.cardId, doneCard.cardId, "同卡跨阶段 cardId 必须逐字节一致");
+  // 纯函数层锁死：同一决策对已含卡的文本重复 applyCards 必须幂等
+  const decision = decideRender({ text: "定好了。", effects });
+  const once = applyCards("定好了。", decision).text;
+  const twice = applyCards(once, decision).text;
+  assert.equal(collectCardPayloads(twice).length, 1, "applyCards 重复附卡必须幂等");
 });
 
 test("提醒确认卡：脚注仅重复规则 / 跨时区时出现", () => {

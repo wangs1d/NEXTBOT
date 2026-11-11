@@ -46,6 +46,7 @@ import { BROWSER_SESSION_LIST_CHAT_TOOL } from "../tools/browser-session-chat-to
 import {
   COMPOSITE_ABSORBED_TOOL_NAMES,
   COMPOSITE_CHAT_TOOLS,
+  resolveEffectiveToolName,
 } from "./composite-chat-tools.js";
 import { INTEREST_WATCH_CHAT_TOOLS } from "../tools/interest-watch-tools.js";
 import { LIFE_MANAGE_CHAT_TOOLS } from "../tools/life-manage-tools.js";
@@ -205,6 +206,10 @@ const OBS_PACK_ENABLED = process.env.OBS_PACK_ENABLED !== "0";
 // 400 字符，预算随之上调（原 5000），保证多来源标题+摘要不因截断丢细节。
 // fetch_web 4500 / deep_search 6000：深读正文要支撑细节复述，截太狠等于白抓。
 const TOOL_RESULT_PRESET_MAX_CHARS: Record<string, number> = {
+  // 复合工具按最宽子分支给预算：web_search 含 web(7000)/images(1200)/videos(1200)，
+  // 取 max；web_fetch 含 read(4500)/inspect/raw，取 4500。
+  "web_search": 7000,
+  "web_fetch": 4500,
   "search_web": 7000,
   "search_images": 1200,
   "search_videos": 1200,
@@ -472,6 +477,10 @@ function resolveBaseToolExecutionTimeoutMs(registryToolName: string): number {
     "weather": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
     "weather.get_local": Number.parseInt(process.env.TOOL_TIMEOUT_WEATHER_MS ?? "15000", 10),
     "search_web": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_MS ?? "6500", 10),
+    // 复合工具：web_search 一次可能落 images/images_batch/videos（12s 档）或 web（6.5s 档），
+    // 外层按最宽分支给 12s；web_fetch 对应 read/inspect（15s 档）。
+    "web_search": Number.parseInt(process.env.TOOL_TIMEOUT_SEARCH_IMAGES_MS ?? "12000", 10),
+    "web_fetch": Number.parseInt(process.env.TOOL_TIMEOUT_FETCH_MS ?? "15000", 10),
     // 图片搜索独立 12s 档：内部链路是「结果页抓取 ≤5s + 图片转存硬预算 6.5s ≈ 11.5s」，
     // 按外圈 12s 设计。曾共享 search_web 的 6.5s 档，慢源查询（如「科莫多」这类图片
     // 多在境外站 CDN 的小众目的地）必被外层击杀、items 归零，LLM 只能回「搜索超时」。
@@ -2420,7 +2429,7 @@ export async function streamCompletionWithTools(
         continue;
       }
       const detStart = Date.now();
-      ctx.onToolExecuteStart?.({ toolName: registryName, input: detArgs });
+      ctx.onToolExecuteStart?.({ toolName: registryName, input: detArgs, effectiveTool: resolveEffectiveToolName(registryName, detArgs) });
       let exec: ToolExecOutcome;
       try {
         exec = await executeDeterministicToolCall(registryName, detArgs);
@@ -2466,9 +2475,11 @@ export async function streamCompletionWithTools(
         input: detArgs,
         ok: exec.ok,
         result: exec.result,
+        effectiveTool: resolveEffectiveToolName(registryName, detArgs),
       });
       allToolExecResults.push({
-        toolName: registryName,
+        // 语义归一：策略评估/纯图轮判定/结果提取都按真实执行器名（与历史口径一致）
+        toolName: resolveEffectiveToolName(registryName, detArgs),
         ok: exec.ok,
         input: detArgs,
         result: exec.result,
@@ -3226,6 +3237,7 @@ export async function streamCompletionWithTools(
         toolName: notifyToolName,
         input: args,
         assistantPreamble: fullText.trim() || undefined,
+        effectiveTool: resolveEffectiveToolName(notifyToolName, args),
       });
       workItems.push({
         tc,
@@ -3730,13 +3742,16 @@ export async function streamCompletionWithTools(
         input: item.parsedArgs,
         ok: exec.ok,
         result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,
+        effectiveTool: resolveEffectiveToolName(wireToolName, item.parsedArgs),
       });
       // 累积工具结果供 summary 调用做策略评估（input 供升级继承记录关键入参）。
       // 上下文管线支撑工具（obs_recall）只回读历史归档，不产生新数据，不参与评估，
       // 也不计入出口自检的「尝试过实质工具」判定（见 SUPPORT_PLUMBING_TOOLS）。
       if (!SUPPORT_PLUMBING_TOOLS.has(wireToolName)) {
         allToolExecResults.push({
-          toolName: wireToolName,
+          // 同确定性预执行：统一记真实执行器名，策略评估与纯图轮判定才认得出
+          // web_search(action=images) 就是 search_images。
+          toolName: resolveEffectiveToolName(wireToolName, item.parsedArgs),
           ok: exec.ok,
           input: item.parsedArgs,
           result: settled.status === "fulfilled" ? settled.value.resultForWire : exec.result,

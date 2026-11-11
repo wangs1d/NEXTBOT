@@ -5,6 +5,8 @@
  * 无身份请求的记忆被收拢进同一 `""` 共享桶（跨请求串台）。
  */
 
+import { PLACEHOLDER_ACTOR_IDS } from "../ws/session-identity.js";
+
 export const ANONYMOUS_ACTOR_ID = "anonymous";
 
 export function resolveActorId(ctx: { userId?: string | undefined; sessionId: string }): string {
@@ -22,7 +24,11 @@ export function resolveActorId(ctx: { userId?: string | undefined; sessionId: st
  */
 export function isEphemeralActorId(actorId: string | undefined | null): boolean {
   const t = actorId?.trim();
-  return !t || t === ANONYMOUS_ACTOR_ID;
+  if (!t || t === ANONYMOUS_ACTOR_ID) return true;
+  // 占位值（session-mvp-001 / local-device / default_user …）同样不是任何人的
+  // 账号：强鉴权改版后它们被降级为 guest，长期记忆写进去就是跨用户共享桶
+  // （2026-11-11 身份裁决重构的收尾）。
+  return PLACEHOLDER_ACTOR_IDS.has(t.toLowerCase());
 }
 
 const warnedEphemeralActors = new Set<string>();

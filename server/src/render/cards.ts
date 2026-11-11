@@ -18,6 +18,7 @@ import {
   attachVideoMediaMarker,
 } from "../services/tool-result-processor.js";
 import { extractContentSummaryCard } from "../services/content-summary-service.js";
+import { stableCardId, cardIdentityContent } from "../services/card-identity.js";
 import type { CardSpec, RenderDecision } from "./types.js";
 
 export interface AppliedCards {
@@ -97,25 +98,21 @@ export function applyCards(text: string, decision: RenderDecision): AppliedCards
   // 旧口径按 cardType 去重（"同类型只留一张"），动机是 processAssistantText
   // 已出过卡、done 阶段回执兜底再补一遍会产生两张一模一样的比价卡。
   // 但按类型去重把业务需求一起误杀了：同轮两张不同的景点选择卡、两张不同的
-  // 酒店卡只会剩一张，用户看不到完整选项。这里把键细化为
-  // 「cardType + 业务标识」，去重目标（同一张卡）保留，多卡能力打开。
+  // 酒店卡只会剩一张，用户看不到完整选项。
+  //
+  // 身份铁律（2026-11-12 双卡事故根修，与 services/card-identity.ts 同规）：
+  // 身份 = **规范化内容寻址**，不从任何"渲染时刻生成的 id"来。
+  //   - 决策层拿到的是场景 payload，去重层扫已附文本解析出的是 marker payload
+  //     （多 avatar/avatarStyle/speak/cardId 壳键、键序不同）——两侧经
+  //     cardIdentityContent 剥壳 + canonicalize 排序后，同一张卡字节等价、
+  //     hash 恒等；不同卡内容不同、hash 必异。
+  //   - 因此跨阶段重算（full 主链路 → done 兜底）天然幂等，无需任何场景
+  //     自律；时间戳随机 id（VOLATILE_CARD_ID_RE）即便再被某处引入也进不了
+  //     身份——cardId 键本身就在剥壳清单里。
   const cardIdentity = (payload: Record<string, unknown>): string => {
     const type = typeof payload.cardType === "string" ? payload.cardType : "";
     if (!type) return "";
-    const extra =
-      payload.extra && typeof payload.extra === "object"
-        ? (payload.extra as Record<string, unknown>)
-        : {};
-    const id =
-      (typeof payload.cardId === "string" && payload.cardId) ||
-      (typeof payload.planId === "string" && payload.planId) ||
-      (typeof extra.cardId === "string" && extra.cardId) ||
-      (typeof extra.planId === "string" && extra.planId) ||
-      (typeof extra.poiId === "string" && extra.poiId) ||
-      (typeof extra.sessionId === "string" && extra.sessionId) ||
-      "";
-    // 无业务标识的卡退回按类型去重（保持旧行为，避免同卡重复渲染）
-    return `${type}#${id || "singleton"}`;
+    return `${type}#${stableCardId(cardIdentityContent(payload))}`;
   };
   const presentTypes = new Set(
     collectCardPayloads(out)

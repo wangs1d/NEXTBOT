@@ -81,13 +81,15 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
             await MobilePageCache.instance.read(_cacheKey);
         if (!mounted) return;
         if (cached != null) {
+          final List<_LibGroup> cachedGroups = <_LibGroup>[
+            for (final Map<String, dynamic> g in _asList(cached["groups"]))
+              _LibGroup.fromJson(g),
+          ];
           setState(() {
-            _groups = <_LibGroup>[
-              for (final Map<String, dynamic> g in _asList(cached["groups"]))
-                _LibGroup.fromJson(g),
-            ];
+            _groups = cachedGroups;
             _loading = false;
           });
+          _warmMedia(cachedGroups);
           unawaited(_fetch(silent: true));
           return;
         }
@@ -126,6 +128,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         _loading = false;
         _error = null;
       });
+      _warmMedia(groups);
     } catch (e) {
       if (!mounted) return;
       // 静默刷新失败：已有数据保持展示（不闪错误页）；无数据才落到错误态。
@@ -141,6 +144,29 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
     return ((raw as List<dynamic>?) ?? const <dynamic>[])
         .whereType<Map<String, dynamic>>()
         .toList(growable: false);
+  }
+
+  /// 预加载上限：资料全部在本机服务端，量级可控；封顶防极端大库挤爆弱网。
+  static const int _warmImageCap = 120;
+
+  /// 图片预加载（2026-11-12）：数据一到就把照片（新→旧）+ 行程封面
+  /// 预热进磁盘缓存，卡片/详情渲染即秒解，不再「进页后图慢慢浮出来」。
+  /// warm 内部有界并发（4 路）+ 静默容错，失败不影响展示。
+  void _warmMedia(List<_LibGroup> groups) {
+    final List<String> urls = <String>[];
+    for (final _LibGroup g in groups) {
+      for (final _LibItem i in g.photos) {
+        urls.add(i.fileUrl);
+      }
+      for (final _LibItem i in g.items) {
+        final String cover = i.coverUrl.trim();
+        if (cover.isEmpty) continue;
+        urls.add(cover.startsWith("http") ? cover : "${ApiConfig.httpBase}$cover");
+      }
+      if (urls.length >= _warmImageCap) break;
+    }
+    if (urls.isEmpty) return;
+    MediaDiskCache.instance.warm(urls.take(_warmImageCap));
   }
 
   /// 打开已完成行程：先拉完整行程（GET /travel/plans/:id），再推原生行程页。

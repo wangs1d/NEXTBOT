@@ -311,4 +311,34 @@ void main() {
       reason: "脏身份必须清掉，否则每次重连都会带着它再被拒一次",
     );
   });
+
+  test("BYOK 保存/停用后：补发握手当场重送三元组，不必断线重连", () async {
+    ApiConfig.runtimeUserId = "owner@example.com";
+    final _Harness server = await _startServer();
+    final WsChatService service = _service(server.url);
+    addTearDown(() async {
+      await service.close();
+      await server.close();
+    });
+
+    service.connect();
+    await _waitFor(() => service.isConnected);
+    await _waitFor(() => server.ofType("session.init").isNotEmpty);
+    final int before = server.ofType("session.init").length;
+
+    expect(service.reannounceSessionInit(), isTrue);
+    await _waitFor(() => server.ofType("session.init").length > before);
+    expect(server.ofType("session.init").length, before + 1);
+    expect(
+      server.payloadOf(server.ofType("session.init").last)["userId"],
+      "owner@example.com",
+      reason: "补发的握手仍带当前生效身份，服务端按同一 actor 重绑 modelProvider",
+    );
+  });
+
+  test("未连接时补发握手返回 false：下次建连自然会带最新三元组", () {
+    final WsChatService service = _service("ws://127.0.0.1:1/ws");
+    addTearDown(() => service.close());
+    expect(service.reannounceSessionInit(), isFalse);
+  });
 }

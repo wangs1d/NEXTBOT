@@ -73,6 +73,15 @@ export class AccessAuthService {
   private lastSeenDirty = false;
   private lastSeenFlushTimer: NodeJS.Timeout | null = null;
 
+  /**
+   * 设备凭据被吊销时的回调（换号登录 / 重复登录 / 主动登出）。
+   *
+   * 吊销只删凭据表记录，**不会**自动影响已经建立的 WS：那条连接仍以旧
+   * actorId 注册着，会继续读写上一个账号的数据直到心跳超时。装配层把这个
+   * 回调接到 `WsConnectionRegistry.closeByDevice`，按设备精确踢掉旧连接。
+   */
+  onDeviceRevoked?: (deviceId: string, userId: string) => void;
+
   private get persistPath(): string {
     return process.env.ACCESS_TOKENS_FILE ?? join(getDataDir(), "access-tokens.json");
   }
@@ -200,10 +209,12 @@ export class AccessAuthService {
     // 撤销同设备旧 token：一台设备只保留最新一枚有效凭据。
     // 不按 userId 过滤——同设备换账号登录时，上一个账号的凭据也必须失效，
     // 否则旧 token 仍能通过校验、把连接绑到已经登出的账号上。
+    const revokedUsers: string[] = [];
     for (const [tokenId, rec] of this.tokens) {
       if (rec.deviceId !== device) continue;
       this.hashIndex.delete(rec.tokenHash);
       this.tokens.delete(tokenId);
+      revokedUsers.push(rec.userId);
     }
     const token = generateToken();
     const ttlMs = accessTokenTtlMs();
@@ -220,6 +231,14 @@ export class AccessAuthService {
     this.tokens.set(record.tokenId, record);
     this.hashIndex.set(record.tokenHash, record.tokenId);
     await this.persist();
+    // 旧凭据已废：踢掉该设备上仍以旧身份活着的连接（换号时尤其重要）。
+    if (revokedUsers.length > 0) {
+      try {
+        this.onDeviceRevoked?.(device, revokedUsers[revokedUsers.length - 1] ?? actor);
+      } catch {
+        /* 踢连接失败不影响发证 */
+      }
+    }
     return {
       token,
       tokenId: record.tokenId,
@@ -361,6 +380,11 @@ export class AccessAuthService {
     this.tokens.delete(tokenId);
     this.hashIndex.delete(rec.tokenHash);
     await this.persist();
+    try {
+      this.onDeviceRevoked?.(rec.deviceId, rec.userId);
+    } catch {
+      /* 踢连接失败不影响吊销结果 */
+    }
     return true;
   }
 

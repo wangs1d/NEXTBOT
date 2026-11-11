@@ -1,5 +1,6 @@
 import type { ToolHandler, ToolContext } from "../../tool-registry.js";
 import { resolveActorId } from "../../../agent/actor-id.js";
+import { mediaTurnFromContext } from "../../../services/library-meta.js";
 import type { FileProcessingService } from "../../../services/file-processing-service.js";
 
 /**
@@ -61,6 +62,7 @@ export function createFileWriteTextHandler(
       fileName,
       encoding: encoding as BufferEncoding | undefined,
       sessionId: context.sessionId,
+      turn: mediaTurnFromContext(context),
     });
     if (!result.ok) {
       return { ok: false, error: result.error, ...(result.retryable != null ? { retryable: result.retryable } : {}) };
@@ -164,6 +166,7 @@ export function createFileExportFormatHandler(
       fileName,
       sheetName,
       sessionId: context.sessionId,
+      turn: mediaTurnFromContext(context),
     });
     if (!result.ok) {
       return { ok: false, error: result.error, ...(result.retryable != null ? { retryable: result.retryable } : {}) };

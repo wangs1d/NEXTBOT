@@ -9,6 +9,7 @@ import "package:http/http.dart" as http;
 import "package:path_provider/path_provider.dart";
 
 import "../../core/config/media_url.dart";
+import "../../core/services/nb_http.dart";
 
 /// 聊天媒体磁盘缓存（2026-10-12 预缓存根治）。
 ///
@@ -96,8 +97,10 @@ class MediaDiskCache {
   Future<File?> _download(String url, File target) async {
     await _acquireSlot();
     try {
-      final http.Response resp = await http
-          .get(Uri.parse(url), headers: MediaUrl.headersFor(url))
+      // 走统一出口：同源媒体带设备凭证，401/403 时静默续期后重放一次。
+      // 裸 http.get 只有「当时的」凭证，token 过期后历史照片会整片加载不出。
+      final http.Response resp = await NbHttp
+          .get(Uri.parse(url))
           .timeout(_downloadTimeout);
       if (resp.statusCode != 200 || resp.bodyBytes.isEmpty) return null;
       final File tmp = File("${target.path}.part");

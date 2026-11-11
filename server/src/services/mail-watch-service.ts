@@ -252,6 +252,29 @@ export function adaptiveMailDelayMs(pollSec: number, idleRounds: number, idleMax
   return Math.min(idleMaxSec * 1000, baseMs * 2 ** Math.min(idleRounds, 4));
 }
 
+let warnedDefaultMailActor = false;
+
+/**
+ * 邮件盯梢的归属 actor。
+ *
+ * 显式配置优先；都没有时保留 `default_user` 兜底（部署方自用邮箱的单机形态
+ * 仍要能跑），但只告警一次：强鉴权后占位身份不代表任何账号，邮件落进去
+ * 用户就查不到、提醒也投不到人。
+ */
+function resolveMailWatchActor(env: NodeJS.ProcessEnv): string {
+  const explicit =
+    env.MAIL_WATCH_ACTOR_ID?.trim() || env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim();
+  if (explicit) return explicit;
+  if (!warnedDefaultMailActor) {
+    warnedDefaultMailActor = true;
+    console.warn(
+      "[mail-watch] 未配置 MAIL_WATCH_ACTOR_ID：新邮件/日程/账单会落到 default_user 共享桶，" +
+        "按账号查询的设置页与提醒都看不到。请把它配成你的账号邮箱。",
+    );
+  }
+  return "default_user";
+}
+
 export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailWatchConfig {
   const portRaw = Number(env.MAIL_WATCH_PORT ?? "");
   const pollRaw = Number(env.MAIL_WATCH_POLL_SEC ?? "");
@@ -277,8 +300,9 @@ export function readMailWatchConfig(env: NodeJS.ProcessEnv = process.env): MailW
     idleMaxSec: Math.min(MAX_POLL_SEC, Math.max(pollSec, Number.isFinite(idleRaw) && idleRaw > 0 ? Math.trunc(idleRaw) : DEFAULT_IDLE_MAX_SEC)),
     markSeen: parseBooleanEnv(env.MAIL_WATCH_MARK_SEEN),
     // actorId 归属约定：优先显式 MAIL_WATCH_ACTOR_ID；否则沿用消息桥的默认用户 env；
-    // 都没有时兜底 default_user（私人管家单用户场景的约定名）
-    actorId: env.MAIL_WATCH_ACTOR_ID?.trim() || env.MESSAGE_BRIDGE_DEFAULT_ACTOR_ID?.trim() || "default_user",
+    // 都没有时兜底 default_user，但**必须告警**——强鉴权后占位身份不再代表任何
+    // 账号，新邮件落进共享桶后，设置页按账号查不到、提醒也投不到人。
+    actorId: resolveMailWatchActor(env),
     vipSenders: (env.MAIL_WATCH_VIP_SENDERS ?? "")
       .split(",")
       .map((s) => s.trim())

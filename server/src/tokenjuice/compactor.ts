@@ -59,7 +59,7 @@ function resolveMaxChars(input: ToolOutputCompactInput): number {
  * 只影响喂给 LLM 的内容，归档原文（rawText/originalText）与客户端展示
  * （resultForWire 走原始结果）不受影响。AGENT_SEARCH_LLM_TRIM=0 关闭。
  */
-const SEARCH_LLM_TRIM_TOOLS = new Set(["search_web", "info.search", "search"]);
+const SEARCH_LLM_TRIM_TOOLS = new Set(["web_search", "search_web", "info.search", "search"]);
 
 function searchLlmTrimEnabled(): boolean {
   const raw = process.env.AGENT_SEARCH_LLM_TRIM?.trim().toLowerCase();

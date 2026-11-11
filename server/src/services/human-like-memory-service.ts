@@ -18,6 +18,7 @@ import { GraphSqlitePersistence, resolveHumanMemoryStoreMode } from "./graph-sql
 import {
   classifyMemorySourceRole,
   extractEchoQueryFromAssistantReply,
+  isAssistantVoiceQuery,
   type MemorySourceRole,
 } from "./memory-source-role.js";
 import {
@@ -1917,6 +1918,10 @@ export class HumanLikeMemoryService {
         if (resolveNodeRole(node) === "assistant") {
           if (isRelationshipHedgeLine(node.summary)) return null;
           if (this.isEchoReplyNode(node.summary, queryKeywords, query)) return null;
+          // 跟修（2026-11-12）：助手自己的历史发言默认不进召回。用户问「我叫什么」时，
+          // 当时助手一句「二十岁，喊你大哥那位」会被高相似度拖回来当成用户事实复述。
+          // 只有用户明确在问「你说过/答应过什么」时才放行（放行后仍整体降权）。
+          if (!isAssistantVoiceQuery(query)) return null;
         }
         const assistantPenalty = resolveNodeRole(node) === "assistant" ? ASSISTANT_ROLE_RECALL_PENALTY : 0;
         const finalScore =
@@ -2094,7 +2099,9 @@ export class HumanLikeMemoryService {
       // 时间标签（2026-10-19 时间认知）：此前只输出 summary，模型完全不知道
       // 这些事发生在什么时候，注入后会把多年前的旧事当近况。这里用节点的
       // 记录时刻做绝对日期标注（不写"3 天前"——相对值每轮都变，且模型能自己算）。
-      const base = `${index + 1}. [${node.domainId}/${node.kind}] ${node.summary}（记于 ${this.recallRecordDate(node)}）`;
+      // 跟修（2026-11-12）：逐条标注说话人。原文里的「我/你」是当时对话的代词，
+      // 不标来源模型就会把助手的一句调侃当成用户自述。
+      const base = `${index + 1}. [${node.domainId}/${node.kind}] ${this.recallRoleTag(node)}${node.summary}（记于 ${this.recallRecordDate(node)}）`;
       if (detailLevel === "summary") return base;
       if (detailLevel === "detail") {
         return `${base} | 重要性=${node.importance.toFixed(2)} | 置信度=${node.confidence.toFixed(2)} | 访问=${node.accessCount}`;
@@ -2104,9 +2111,23 @@ export class HumanLikeMemoryService {
     return [
       header,
       `当前任务: ${query.slice(0, 120)}`,
-      "以下内容为按当前任务裁剪后的柔性回忆，不是原始对话回放。",
+      "以下内容为按当前任务裁剪后的柔性回忆，不是原始对话回放；只回答用户这轮问的内容，不要罗列全部条目，标注「助手当时说的」不是用户事实。",
       ...facts,
     ].join("\n");
+  }
+
+  /** 召回行的说话人标注；无法判定时不加，避免给出错误归属。 */
+  private recallRoleTag(node: MemoryNodeRecord): string {
+    switch (resolveNodeRole(node)) {
+      case "user":
+        return "（用户说的）";
+      case "assistant":
+        return "（助手当时说的，不是用户事实）";
+      case "mixed":
+        return "（对话记录，含用户与助手）";
+      default:
+        return "";
+    }
   }
 
   /** 召回条目的记录日期（YYYY-MM-DD）；时间戳损坏时如实标注，不猜。 */

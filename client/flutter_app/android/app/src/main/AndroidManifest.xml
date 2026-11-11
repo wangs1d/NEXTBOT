@@ -5,6 +5,11 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE"/>
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE"/>
 
+    <!-- 用户自有模型 key 的跨卸载备份：仅 Android 9 及以下走公共 Downloads 文件读写。
+         Android 10+ 改走 MediaStore.Downloads（分区存储下不需要任何存储权限）。 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" android:maxSdkVersion="28"/>
+
     <!-- 厂商推送（华为 HMS 直连）：HMS SDK manifest 自带权限合并；指纹与
          agconnect-services.json 见 docs/mobile-push-jpush-setup.md -->
     <uses-permission android:name="android.permission.RECEIVE_USER_PRESENT"/>

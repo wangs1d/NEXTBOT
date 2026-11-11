@@ -13,6 +13,7 @@ import "../../core/services/cloud_model_binding_store.dart";
 import "../../core/services/model_api_tester.dart";
 import "../../core/services/phone_bridge_service.dart";
 import "../../core/services/phone_capture_service.dart";
+import "../../core/services/ws_chat_service.dart";
 import "../../core/theme/app_theme.dart";
 import "../chat/voiceprint_registration_page.dart";
 import "access_pairing_card.dart";
@@ -413,10 +414,16 @@ class _SettingsPageState extends State<SettingsPage>
       apiKey: draft.apiKey.trim(),
       model: draft.model.trim(),
     );
+    // 三元组只在 session.init 上送：保存后立刻补发一帧，当前连接上的服务端
+    // 当场绑定（否则要等断线重连，用户会以为配置没生效）。
+    WsChatService.shared.reannounceSessionInit();
   }
 
   Future<void> _clearCloudModelConfig() async {
     await CloudModelBindingStore.instance.clear();
+    // 显式撤绑：服务端对「modelProvider 字段缺失」是保留绑定，只有空对象
+    // 才撤——不传这个标记，云端绑定撤不掉，重装后会幽灵复活。
+    WsChatService.shared.reannounceSessionInit(clearModelBinding: true);
     if (!mounted) return;
     setState(() {
       _cloudConfigured = false;

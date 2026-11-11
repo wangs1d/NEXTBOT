@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   describeSessionIdentity,
   isAccountIdentitySource,
+  isStructuredSessionId,
   resolveSessionIdentity,
 } from "../src/ws/session-identity.js";
 
@@ -136,4 +137,39 @@ test("描述文案能直接看出身份来源（排查用）", () => {
   if (!token.ok || !guest.ok) return;
   assert.match(describeSessionIdentity(token), /token 权威/);
   assert.match(describeSessionIdentity(guest), /占位身份/);
+});
+
+// 结构性会话键判据由 HTTP/WS 共用：含 @ 不等于「自报账号」。
+test("结构性会话键：含邮箱但不是身份声明", () => {
+  const actor = "me@example.com";
+  for (const key of [
+    `side:${actor}:abc123`,
+    `notes:${actor}`,
+    `incognito:${actor}`,
+    `master:${actor}`,
+    `master-delegate:${actor}`,
+    `${actor}@telegram`,
+  ]) {
+    assert.equal(isStructuredSessionId(key), true, key);
+  }
+  assert.equal(isStructuredSessionId(actor), false);
+  assert.equal(isStructuredSessionId("session-mvp-001"), false);
+  assert.equal(isStructuredSessionId(""), false);
+});
+
+// 2026-11-11 旁聊事故的同型第二例：未登录设备的 actorId 本身不含 @，
+// 派生出的渠道键 `inst_xxx@wechat` 只有 1 个 @。旧判据要求 >2 段，
+// 于是周界把它当成自报邮箱改写成裸 actorId，渠道线程串回主线程。
+test("guest 渠道隔离键（单 @ 形态）也是结构性会话键", () => {
+  for (const key of [
+    "inst_ab12cd@wechat",
+    "inst_ab12cd@wechat-bot",
+    "guest_ab12@telegram",
+    "session-mvp-001@feishu",
+  ]) {
+    assert.equal(isStructuredSessionId(key), true, key);
+  }
+  // 非 guest 主体的两段形态仍按自报账号处理，避免放宽过头
+  assert.equal(isStructuredSessionId("user@localhost"), false);
+  assert.equal(isStructuredSessionId("someone@example.com"), false);
 });

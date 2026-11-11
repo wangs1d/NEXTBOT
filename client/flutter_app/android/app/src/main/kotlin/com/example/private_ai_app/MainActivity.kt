@@ -5,6 +5,7 @@ import android.os.Build
 import android.os.Bundle
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
 
 class MainActivity : FlutterActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -39,6 +40,11 @@ class MainActivity : FlutterActivity() {
         flutterEngine.plugins.add(AlarmClockPlugin())
         flutterEngine.plugins.add(GeofencePlugin())
         flutterEngine.plugins.add(KeepAlivePlugin())
+        // 用户自有模型 key 的跨卸载保活：稳定设备身份 + 公共目录加密备份。
+        // 必须在 Dart 侧 applyBootChannel()/CloudModelBindingStore.load() 之前注册，
+        // 否则首帧握手拿不到稳定 actorId，服务端那份加密绑定会认不出来。
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, DeviceKeyBackupPlugin.CHANNEL)
+            .setMethodCallHandler(DeviceKeyBackupPlugin(this))
     }
 
     override fun onNewIntent(intent: Intent) {

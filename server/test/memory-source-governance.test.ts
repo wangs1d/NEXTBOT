@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { HumanLikeMemoryService } from "../src/services/human-like-memory-service.js";
+import { MemoryCortex } from "../src/brain/memory-cortex.js";
 import {
   classifyMemorySourceRole,
   extractEchoQueryFromAssistantReply,
@@ -184,4 +185,62 @@ test("图谱：召回侧冲突消解兜底（legacy 未作废数据也不并列�
     assert.ok(!(hasOld && hasNew), "同主题两个值不得并列注入");
     assert.ok(hasNew, "应保留最新值");
   });
+});
+
+test("跟修：助手历史调侃默认不进召回，召回行带说话人标注", async () => {
+  await withService(async (service) => {
+    await service.ingest(
+      "actor-4",
+      "[日志固化 2026-11-10 21:00·用户] 我叫王铭川，今年二十岁",
+      "journal:consolidate",
+      { highSignal: true },
+    );
+    await service.ingest(
+      "actor-4",
+      "[日志固化 2026-11-10 21:01·助手] 王铭川，二十岁，喊你大哥那位",
+      "journal:consolidate",
+    );
+
+    const recall = await service.buildRecall("actor-4", "还记得我叫什么吗");
+    assert.ok(recall.text.includes("王铭川"), "用户自述应被召回");
+    assert.ok(!recall.text.includes("喊你大哥那位"), "助手当时的调侃不得当作用户事实召回");
+    assert.ok(recall.text.includes("（用户说的）"), "召回行必须标注说话人");
+  });
+});
+
+test("跟修：用户明确问「你说过什么」时助手节点才放行", async () => {
+  await withService(async (service) => {
+    await service.ingest(
+      "actor-5",
+      "[日志固化 2026-11-10 21:01·助手] 喊你大哥那位",
+      "journal:consolidate",
+    );
+
+    const recall = await service.buildRecall("actor-5", "你上次说喊你大哥那位是什么意思");
+    assert.ok(recall.text.includes("喊你大哥那位"), "明确询问助手发言时应放行");
+    assert.ok(recall.text.includes("（助手当时说的，不是用户事实）"));
+  });
+});
+
+test("跟修：问个人属性时只保留该类事实，助手互动习惯不混入", () => {
+  const cortex = new MemoryCortex();
+  const items = [
+    { content: "[日志固化 2026-11-10 21:00·用户] 我叫王铭川，今年二十岁", domain: "episodic", score: 0.6 },
+    { content: "用户名叫王铭川，截至2026年11月10日时年二十岁。", domain: "semantic", score: 0.5 },
+    {
+      content: "王铭川（二十岁）把助手称作「大哥」，2026年11月10日的互动中显示出这种亲近的称呼习惯。",
+      domain: "semantic",
+      score: 0.5,
+    },
+  ];
+  const narrow = (cortex as unknown as {
+    narrowByQuestionIntent(list: unknown[], query: string): Array<{ content: string }>;
+  }).narrowByQuestionIntent.bind(cortex);
+
+  const nameAnswer = narrow(items, "还记得我叫什么吗");
+  assert.ok(nameAnswer.some((item) => item.content.includes("名叫王铭川")));
+  assert.ok(!nameAnswer.some((item) => item.content.includes("把助手称作")));
+
+  const assistantAnswer = narrow(items, "你上次说喊我什么");
+  assert.equal(assistantAnswer.length, 3);
 });

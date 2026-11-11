@@ -183,8 +183,10 @@ class _GalleryPageState extends State<GalleryPage> {
             ),
           );
         }
+        // 统一出口：MultipartRequest 交给 NbClient 才会带设备凭证。
+        // 流式请求不重放（重发会变成空体），与 NbClient 的设计一致。
         final http.StreamedResponse streamed =
-            await request.send().timeout(const Duration(seconds: 60));
+            await NbClient().send(request).timeout(const Duration(seconds: 60));
         if (streamed.statusCode == 200) {
           success += 1;
         }

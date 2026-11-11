@@ -19,6 +19,7 @@ import {
   PLACEHOLDER_ACTOR_IDS,
   GUEST_ACTOR_RE,
   looksLikeAccountId,
+  isStructuredSessionId,
 } from "../ws/session-identity.js";
 
 export type HttpIdentitySource = "token" | "guest" | "compat" | "anonymous";
@@ -78,8 +79,16 @@ export function decideHttpIdentity(
   const claimedUserId = clean(input.claimedUserId);
   const claimedActorId = clean(input.claimedActorId);
   const claimedSessionId = clean(input.claimedSessionId);
-  const claimed = claimedUserId || claimedActorId || claimedSessionId;
+  // 身份声明只看 userId / actorId；sessionId 是会话键，不是身份声明。
+  const declaredIdentity = claimedUserId || claimedActorId;
+  const claimed = declaredIdentity || claimedSessionId;
   const claimedDiffers = claimed !== "" && claimed !== verified;
+  // 只报了一个结构性会话键（side:/notes:/… /渠道隔离键）、没有任何身份字段：
+  // 这属于「没带凭证」，不是「自称账号」。见下方 ③'。
+  const sessionKeyOnly =
+    declaredIdentity === "" &&
+    claimedSessionId !== "" &&
+    isStructuredSessionId(claimedSessionId);
 
   // ① 有可用 token：token 归属即身份，自报值只做留痕。
   if (input.tokenPresent && verified) {
@@ -116,6 +125,20 @@ export function decideHttpIdentity(
       };
     }
     return { ok: true, actorId: "anonymous", source: "anonymous" };
+  }
+
+  // ③' 只报结构性会话键：按 401 no_identity 拒，让客户端走静默续期。
+  //     若落进 ④ 变成 403 claimed_account，客户端（NbHttp 只对 401 续期）
+  //     不会重试，冷启动凭据尚未就绪的请求会被直接判成"该重新登录"。
+  //     也不能放行：会话键里带的是账号邮箱，无凭据读它的数据仍是越权。
+  if (sessionKeyOnly) {
+    return {
+      ok: false,
+      code: "IDENTITY_REQUIRED",
+      reason: "no_identity",
+      message: "需要访问凭证：请登录后重试",
+      claimedActorId: claimed,
+    };
   }
 
   // ④ 账号形态（邮箱）必须由 token 证明。这一条与开关无关——自报账号从来

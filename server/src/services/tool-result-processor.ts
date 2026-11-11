@@ -1,6 +1,7 @@
 import { travelItineraryStore } from "../skills/travel-planning/travel-itinerary-store.js";
 import { travelPlanStore } from "../skills/travel-planning/travel-plan-store.js";
 import type { InfoSearchItem } from "./info-hub-service.js";
+import { stableCardId } from "./card-identity.js";
 import { effectStatusOf, renderTurn } from "../render/index.js";
 import type { TurnEffect } from "../render/types.js";
 import {
@@ -142,7 +143,8 @@ function normalizeModelCardJson(rawJson: string): string | null {
     cardType,
     actions: [],
     speak: "high",
-    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    // 内容寻址 id（card-identity.ts）：同一张模型声明卡两次归一化 id 一致
+    cardId: stableCardId({ title, items, footer, cardType }),
   });
 }
 
@@ -639,7 +641,8 @@ function buildTravelItineraryCardFromPlan(
     // 逐日展示安排，不再自动弹出双面板（autoOpen=false）；完整明细由用户
     // 点卡片上的「打开行程规划」按钮按需进入。
     autoOpen: false,
-    cardId: `card_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    // 内容寻址 id（card-identity.ts）：行程卡重附（done 兜底/任务面收尾）id 恒一致
+    cardId: stableCardId({ title, items, footer, travelPlan }),
     travelPlan,
   };
   const card = `[AGENT_RESULT_CARD_START]\n${JSON.stringify(payload)}\n[AGENT_RESULT_CARD_END]`;

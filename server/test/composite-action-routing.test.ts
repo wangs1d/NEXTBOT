@@ -210,7 +210,7 @@ test("转发正确：44 个 action 全部落到对应执行器，且 action 字�
   }
 });
 
-test("非法 action：软降级到只读默认分支，不中断也不误触写操作", async () => {
+test("非法 action：明确报错并列出可选值，不静默降级也不误触写操作", async () => {
   const executed: string[] = [];
   const handlers = new Map<string, (input: Record<string, unknown>, ctx: unknown) => Promise<unknown>>();
   const fakeRegistry = {
@@ -224,9 +224,13 @@ test("非法 action：软降级到只读默认分支，不中断也不误触写�
   };
   registerCompositeTools(fakeRegistry as never);
   for (const spec of COMPOSITE_ACTION_SPECS) {
-    const out = (await handlers.get(spec.name)!({ action: "nonsense" }, {})) as { ok?: boolean };
-    assert.equal(out.ok, true, `${spec.name} 非法 action 应软降级`);
-    const defaultTool = spec.actions.find((a) => a.action === spec.defaultAction)!.tool;
-    assert.equal(executed.pop(), defaultTool, `${spec.name} 应降级到只读默认分支`);
+    const out = (await handlers.get(spec.name)!({ action: "nonsense" }, {})) as {
+      ok?: boolean;
+      error?: string;
+    };
+    assert.equal(out.ok, false, `${spec.name} 非法 action 必须报错`);
+    assert.match(String(out.error), /nonsense/, `${spec.name} 错误信息应回显非法值`);
+    assert.match(String(out.error), /可用/, `${spec.name} 错误信息应列出可选 action`);
+    assert.deepEqual(executed, [], `${spec.name} 非法 action 不应触达任何底层执行器`);
   }
 });

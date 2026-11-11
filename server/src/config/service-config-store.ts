@@ -16,15 +16,23 @@
  * 邮箱授权码不在这里：它是「这个人这个邮箱」的凭据，改由邮箱注册表按 actor 加密保存
  * （mail-watch/pass/<actor>.enc），本文件里只剩老装机的存量字段，重放时挪进加密仓。
  *
- * 多租户云端（ACCESS_AUTH_REQUIRED=1）整条链关闭：一份 key 会全站生效，用户自有 key
- * 走 session.init 上送 + 按 actor 加密落盘（见 bootstrap 的 applyPersistedServiceConfig
- * 调用点与 routes/http/service-config.ts 的 409）。
+ * 多租户云端（ACCESS_AUTH_REQUIRED=1）**整条装机配置链**关闭：用户自有 key 一律走
+ * session.init 上送 + 按 actor 加密落盘（PUT 返回 409，见
+ * routes/http/service-config.ts），启动时也不重放这份文件。平台默认模型 provider
+ * 由部署方在 server/.env 独立显式声明，与用户配置彻底分离。
+ *
+ * 2026-11-12 根因：本文件过去承担了「平台默认 provider」的隐职责——
+ * applyServiceConfigToEnv 会把 .env 里显式写的 EXTERNAL_MODEL_PROVIDER 静默覆写成
+ * openai，于是运维声明与代码行为互相打架。现在 applyServiceConfigToEnv 在云端形态
+ * 跳过 model 段（守卫），即使有人误调 applyPersistedServiceConfig 也不会把一份
+ * 用户自配 key 变成全站 provider。这个守卫是防回归闸，勿删。
  *
  * env 语义与桌面端写 config.env 完全同键：OPENAI_API_KEY / OPENAI_BASE_URL /
- * OPENAI_MODEL（OpenAI 兼容网关），并显式置 EXTERNAL_MODEL_PROVIDER=openai，
+ * OPENAI_MODEL（OpenAI 兼容网关）；单机形态下显式置 EXTERNAL_MODEL_PROVIDER=openai，
  * 防止部署机残留的 MOONSHOT/MINIMAX 等密钥在 auto 模式下抢占用户自配的绑定。
  */
 
+import { isAccessAuthRequired } from "./env.js";
 import { getDataDir } from "./data-dir.js";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -178,9 +186,13 @@ export async function readServiceConfigFile(
 export function applyServiceConfigToEnv(
   cfg: ServiceConfigFile,
   env: NodeJS.ProcessEnv = process.env,
+  opts: { sharedTenant?: boolean } = {},
 ): void {
+  // 防回归闸：多租户云端下装机配置不再是任何人的模型来源，平台默认 provider
+  // 只认 server/.env。绝不在这里覆写部署方显式声明的 EXTERNAL_MODEL_PROVIDER。
+  const sharedTenant = opts.sharedTenant ?? isAccessAuthRequired();
   const model = cfg.model;
-  if (model && model.apiKey.trim()) {
+  if (model && model.apiKey.trim() && !sharedTenant) {
     env.OPENAI_API_KEY = model.apiKey.trim();
     if (model.baseUrl.trim()) env.OPENAI_BASE_URL = model.baseUrl.trim();
     if (model.model.trim()) env.OPENAI_MODEL = model.model.trim();

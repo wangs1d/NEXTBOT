@@ -438,6 +438,11 @@ export type ToolExecuteStartInfo = {
   input: Record<string, unknown>;
   /** 模型在调用工具前输出的 assistant 文本（若有） */
   assistantPreamble?: string;
+  /**
+   * 复合工具的真实执行器名（如 web_search + action=images → search_images）。
+   * 下游状态文案/媒体卡/搜索卡按它匹配旧表，缺省回退 toolName。
+   */
+  effectiveTool?: string;
 };
 
 /** 工具执行完成后 */
@@ -446,6 +451,8 @@ export type ToolExecutedInfo = {
   input: Record<string, unknown>;
   ok: boolean;
   result: Record<string, unknown>;
+  /** 复合工具的真实执行器名，语义同 ToolExecuteStartInfo.effectiveTool。 */
+  effectiveTool?: string;
 };
 
 /** 外部模型 function calling 与本地 ToolRegistry 之间的桥接。 */

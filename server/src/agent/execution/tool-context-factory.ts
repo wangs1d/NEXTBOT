@@ -134,6 +134,7 @@ export class ToolContextFactory {
       sessionId: base.sessionId,
       userId: base.userId,
       chatUserMessageId: base.chatUserMessageId,
+      userText: base.userText,
       clientIp: base.clientIp,
       clientLocation: base.clientLocation,
       agentAccessMode: base.access?.agentAccessMode,

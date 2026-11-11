@@ -274,9 +274,12 @@ class WsChatService {
 
   /// 握手后的唯一一份 `session.init`（每次（重）连都补发：服务端按连接重新
   /// 登记 actor / 设备类别 / 时区 / 鉴权 token）。集中在此的原因见 [shared]。
-  void _sendSessionInit() {
+  void _sendSessionInit({bool announceModelUnbind = false}) {
     try {
-      final bool sent = _sendNow("session.init", buildWsSessionInit());
+      final bool sent = _sendNow(
+        "session.init",
+        buildWsSessionInit(announceModelUnbind: announceModelUnbind),
+      );
       // 只有真正写进 socket 才记为「已上报」：否则下一次发送会误以为身份
       // 已经同步过，继续带着旧绑定发消息。
       if (sent) _announcedActorId = ApiConfig.effectiveActorId;
@@ -298,6 +301,24 @@ class WsChatService {
     if (_announcedActorId == ApiConfig.effectiveActorId) return false;
     debugPrint("[ws] identity changed, re-announcing session.init");
     _sendSessionInit();
+    return true;
+  }
+
+  /// 本机 BYOK 三元组变化（保存/停用自有模型）后立刻重发一条 `session.init`。
+  ///
+  /// 2026-11-11 根修：`buildWsSessionInit` 只在建连那一刻带 `modelProvider`，
+  /// 服务端也只在这一帧按 actor 绑定/撤绑。服务接入页保存后旧实现既不重连
+  /// 也不补发，当前连接上的服务端永远收不到新 key，用户看到「配置好了却
+  /// 仍提示模型服务没配置好」。服务端允许同一连接重复 init 且以最后一帧
+  /// 为准，因此这里补一帧即可即时生效，不必断线重连（闹钟/推送等旁路不受影响）。
+  /// 未连接时返回 false——下次建连的握手自然会带上最新三元组。
+  ///
+  /// [clearModelBinding]：停用自有模型时必须置 true——服务端对「字段缺失」
+  /// 是保留绑定，只有显式空对象才撤绑；不传的话云端绑定撤不掉，重装后
+  /// 会幽灵复活（2026-11-12 修复）。
+  bool reannounceSessionInit({bool clearModelBinding = false}) {
+    if (!_isConnected) return false;
+    _sendSessionInit(announceModelUnbind: clearModelBinding);
     return true;
   }
 

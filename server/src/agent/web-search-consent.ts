@@ -31,9 +31,9 @@ export function isExplicitNoWebRequest(text: string): boolean {
   return EXPLICIT_NO_WEB_RE.test(t);
 }
 
-/** 联网检索族工具名（禁网轮从可见集中剥离）。 */
+/** 联网检索族工具名（禁网轮从可见集中剥离）。复合名 web_search/web_fetch 同属联网族。 */
 const WEB_SEARCH_TOOL_RE =
-  /^(search_web|search_images|search_videos|search_images_batch|deep_search|fetch_web|hot_rankings|internet\.|info\.inspect_webpage|info\.navigate_site|info\.read_webpage|info\.search)/;
+  /^(web_search|web_fetch|search_web|search_images|search_videos|search_images_batch|deep_search|fetch_web|hot_rankings|internet\.|info\.inspect_webpage|info\.navigate_site|info\.read_webpage|info\.search)/;
 
 export function filterWebSearchTools(tools: import("openai/resources/chat/completions").ChatCompletionTool[]): import("openai/resources/chat/completions").ChatCompletionTool[] {
   return tools.filter((t) => !WEB_SEARCH_TOOL_RE.test(("function" in t ? t.function?.name : "") ?? ""));
@@ -46,9 +46,13 @@ export function filterWebSearchTools(tools: import("openai/resources/chat/comple
  * 词面预载召回、又被 pin 规则重新塞回可见集，模型就会"顺手"查人物近况，最后
  * 把日期/来源表格贴到照片下面。媒体意图的工具面必须只有媒体工具——不是靠
  * 出口删文字，而是让网页检索这一轮根本不存在。
+ *
+ * 2026-11-12 复合化适配：图片/视频执行器已收编进 web_search（action=images/
+ * images_batch/videos），所以 web_search 必须保留（否则本轮无法出图）；
+ * 只剥纯文本的 web_fetch 一族。模态收敛改由 action 描述 + 提示词约束。
  */
 const TEXT_SEARCH_TOOL_RE =
-  /^(search_web|deep_search|fetch_web|hot_rankings|internet\.|info\.inspect_webpage|info\.navigate_site|info\.read_webpage|info\.search)/;
+  /^(web_fetch|search_web|deep_search|fetch_web|hot_rankings|internet\.|info\.inspect_webpage|info\.navigate_site|info\.read_webpage|info\.search)/;
 
 export function filterTextSearchTools(tools: import("openai/resources/chat/completions").ChatCompletionTool[]): import("openai/resources/chat/completions").ChatCompletionTool[] {
   return tools.filter((t) => !TEXT_SEARCH_TOOL_RE.test(("function" in t ? t.function?.name : "") ?? ""));
@@ -67,6 +71,8 @@ export function filterMediaModalityTools(
   text: string,
 ): import("openai/resources/chat/completions").ChatCompletionTool[] {
   if (!isMediaOnlyRequest(text)) return tools;
+  // 2026-11-12 复合化适配：web_search 内含 images/images_batch/videos 三个模态，
+  // 名字级过滤无法只留一个模态，故保留整个复合工具；另一模态靠 action 描述约束。
   const wantsVideo = mediaToolNameForText(text) === "search_videos";
   const dropRe = wantsVideo
     ? /^(search_images|search_images_batch)$/

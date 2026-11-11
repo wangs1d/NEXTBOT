@@ -103,7 +103,7 @@ function builtinPlan(goal: string): PlanResult {
       id: "s1",
       title: "信息检索",
       description: "根据用户需求检索相关信息",
-      expectedTools: ["search_web", "fetch_web"],
+      expectedTools: ["web_search", "web_fetch"],
       status: "pending",
     });
   }

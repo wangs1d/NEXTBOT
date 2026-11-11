@@ -2201,14 +2201,21 @@ export async function createAppServices(
     },
   });
 
-  // 服务接入（内测 byok）：先重放自配密钥（service-config.json + 加密仓 → env），
-  // 再解析 provider 装入可热替换代理——用户在客户端「服务接入」页保存密钥后，
-  // PUT /api/service-config 经 externalChatSwapper 热生效，无需重启
-  // （见 routes/http/service-config.ts 与 config/service-config-store.ts）。
-  // 多租户云端不重放：那份文件是「一个用户的 key 全站生效」的单用户形态；云端一律
-  // 按 actor 加密落盘（模型 key 走 session.init 上送 → model-keys/<actor>.enc，
-  // 邮箱授权码走 POST /api/mail-watch/pass → mail-watch/pass/<actor>.enc），
-  // 离线期间的主动轮次用的就是用户自己那份凭据。
+  // 服务接入（内测 byok）：单机形态先重放自配密钥（service-config.json + 加密仓 → env），
+  // 再解析 provider 装入可热替换代理；PUT /api/service-config 经 externalChatSwapper 热生效。
+  //
+  // 多租户云端（ACCESS_AUTH_REQUIRED=1）**不重放**：那份装机文件是「一个用户的 key
+  // 全站生效」的单用户形态。平台默认模型 provider 由部署方在 server/.env 独立显式声明
+  // （EXTERNAL_MODEL_PROVIDER=openai + OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_MODEL）；
+  // 用户自有 key 一律按 actor 加密落盘（session.init 上送 → model-keys/<actor>.enc），
+  // agent-core.chatProviderFor 优先取用户 BYOK、无绑定才回落平台默认。
+  //
+  // 2026-11-12 根因：旧实现里平台 provider 寄生在「装机配置重放」上——
+  // applyServiceConfigToEnv 会把 .env 中显式写的 EXTERNAL_MODEL_PROVIDER=none 静默覆写成
+  // openai。开强制鉴权时把整条重放 gate 掉，.env 的 none 立刻生效，
+  // createExternalChatProviderFromEnv() 返回 null，所有未绑定 BYOK 的用户每轮都吃
+  // 「模型服务还没配置好」。根治 = 两个配置源彻底解耦，而不是恢复重放——恢复重放
+  // 等于把一份用户自配 key 重新变成全站默认，与多租户隔离相冲突。
   if (!isAccessAuthRequired()) {
     const replayed = await applyPersistedServiceConfig();
     if (replayed?.model?.apiKey && !serviceSecretsEncryptedAtRest()) {
@@ -2217,7 +2224,16 @@ export async function createAppServices(
       );
     }
   }
-  const externalChatHost = new MutableExternalChatProvider(createExternalChatProviderFromEnv());
+  const platformChatProvider = createExternalChatProviderFromEnv();
+  if (isAccessAuthRequired() && !platformChatProvider) {
+    // 启动期就把「平台没配模型」暴露出来，别等用户报「配了却说没配置好」。
+    console.warn(
+      "[PlatformModel] 多租户云端没有可用的平台默认模型 provider：未绑定 BYOK 的用户每轮都会收到「模型服务还没配置好」。" +
+        "要平台兜底请在 server/.env 显式配 EXTERNAL_MODEL_PROVIDER=openai 与 OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL；" +
+        "若刻意要求用户全部自带 key，可忽略本告警（但兜底文案应改成明确的引导流程）。",
+    );
+  }
+  const externalChatHost = new MutableExternalChatProvider(platformChatProvider);
   const externalChat = externalChatHost;
   // 按 actor 的用户自有模型绑定（云端连接版 BYOK）：session.init 上送时由 ws 层写入，
   // 加密落盘一份（离线期间的主动轮次要用用户自己的 key），agent-core 经 chatProviderFor 取用。
@@ -2903,6 +2919,14 @@ export async function createAppServices(
   // 未开启时零行为变更。
   const accessAuthService = new AccessAuthService();
   await accessAuthService.load();
+  // 凭据吊销 → 踢掉该设备的旧连接：只删 token 不踢连接，旧 socket 会继续
+  // 以旧账号身份读写，直到心跳超时（换号登录/登出后尤其危险）。
+  accessAuthService.onDeviceRevoked = (deviceId) => {
+    const closed = wsConnectionRegistry.closeByDevice(deviceId);
+    if (closed > 0) {
+      console.log(`[access-auth] 凭据吊销，已断开设备 ${deviceId} 的 ${closed} 条连接`);
+    }
+  };
   // 过期超过续期宽限期的记录在启动时清掉：不清理会让 access-tokens.json
   // 无限增长，且 /api/auth/devices 里出现早已作废的幽灵设备。
   const prunedTokens = accessAuthService.cleanupExpiredTokens();

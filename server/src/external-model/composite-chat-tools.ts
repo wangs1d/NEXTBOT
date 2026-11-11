@@ -486,6 +486,56 @@ const COMPOSITE_SPECS: CompositeSpec[] = [
   },
 ];
 
+/**
+ * 旧工具名 → 复合 action 的兼容别名表（自动从 COMPOSITE_SPECS 派生）。
+ *
+ * 只做「名字归一」，不做语义打分：模型按旧提示词/历史习惯把 `action` 填成
+ * `search_images` 这类原工具名时，直接映射到对应分支，而不是被当成非法值
+ * 静默降级到 defaultAction（曾导致「找图」实际执行 search_web 只回文本）。
+ */
+const COMPOSITE_ACTION_ALIASES: Record<string, Record<string, string>> = (() => {
+  const out: Record<string, Record<string, string>> = {};
+  for (const spec of COMPOSITE_SPECS) {
+    const map: Record<string, string> = {};
+    for (const [action, actionSpec] of Object.entries(spec.actions)) {
+      map[action] = action;
+      map[actionSpec.tool] = action;
+      map[actionSpec.tool.replace(/\./g, "_")] = action;
+    }
+    out[spec.name] = map;
+  }
+  return out;
+})();
+
+/** action 归一：合法 action 或旧工具名别名 → 标准 action；未知返回 null。 */
+export function normalizeCompositeAction(
+  toolName: string,
+  rawAction: unknown,
+): string | null {
+  const map = COMPOSITE_ACTION_ALIASES[toolName];
+  if (!map) return null;
+  const key = typeof rawAction === "string" ? rawAction.trim() : "";
+  if (!key) return null;
+  return map[key] ?? null;
+}
+
+/**
+ * 复合调用 → 真实执行器名（下游语义判断的唯一依据）。
+ *
+ * 媒体卡、搜索卡、状态行、预算/超时、缓存族等消费方都按**真实执行器名**
+ * 匹配；复合工具名只出现在模型接口层。非复合工具原样返回。
+ */
+export function resolveEffectiveToolName(
+  toolName: string,
+  input?: Record<string, unknown>,
+): string {
+  const spec = COMPOSITE_SPECS.find((s) => s.name === toolName);
+  if (!spec) return toolName;
+  const action = resolveCompositeAction(toolName, input ?? {});
+  const target = action ? spec.actions[action]?.tool : undefined;
+  return target ?? toolName;
+}
+
 export const COMPOSITE_CHAT_TOOLS: ChatCompletionTool[] = COMPOSITE_SPECS.map(buildSchema);
 
 /** 供测试/巡检读取的复合工具与 action 声明。 */
@@ -519,7 +569,11 @@ export function resolveCompositeAction(
   const spec = COMPOSITE_SPECS.find((s) => s.name === toolName);
   if (!spec) return null;
   const explicit = typeof input.action === "string" ? input.action.trim() : "";
-  if (explicit && spec.actions[explicit]) return explicit;
+  if (explicit) {
+    // 显式给了 action 就只认它：合法值或旧工具名别名；无法识别时返回 null，
+    // 由 handler 明确报错——绝不静默降级到 defaultAction（会掩盖模型选错分支）。
+    return normalizeCompositeAction(toolName, explicit);
+  }
 
   let best: string | null = null;
   let bestScore = 0;
@@ -542,12 +596,22 @@ export function registerCompositeTools(registry: ToolRegistry): void {
     const handler: ToolHandler = async (input, context) => {
       const action = resolveCompositeAction(spec.name, input);
       if (!action) {
+        // 业务失败标记（ok:false）必须回流：执行层只认抛异常，下游按
+        // isBusinessFailurePayload 判 error，否则失败会被包装成「成功但没数据」。
         return {
+          ok: false,
           error: `未知 action: ${String(input.action ?? "(空)")}，可用: ${Object.keys(spec.actions).join(" / ")}`,
         };
       }
       const result = await registry.execute(spec.actions[action]!.tool, withoutAction(input), context);
-      return result.result;
+      // 透传底层 ok：被收编执行器失败时，复合层不能伪装成功（否则不重试、不报错）。
+      // 仅显式 ok:false 视为失败，兼容旧 handler 返回裸结果的形态。
+      if (result.ok !== false) return result.result;
+      const payload =
+        result.result && typeof result.result === "object" && !Array.isArray(result.result)
+          ? (result.result as Record<string, unknown>)
+          : { error: String(result.result ?? "工具执行失败") };
+      return { ...payload, ok: false };
     };
     registry.register(spec.name, handler);
   }

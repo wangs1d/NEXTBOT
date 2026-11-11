@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import test, { after, beforeEach } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -205,6 +205,49 @@ test("多租户云端：拒绝全站密钥写入，外出字段不含密钥，�
 
     const other = await app.inject({ method: "GET", url: "/api/service-config?userId=u2@example.com" });
     assert.equal(other.json().model.source !== "session-byok", true, "他人会话看不到本机绑定");
+  } finally {
+    delete process.env.ACCESS_AUTH_REQUIRED;
+    await app.close();
+  }
+});
+
+test("多租户云端：存量全站 key 不再冒充「已配置」，只认按 actor 的 BYOK", async () => {
+  process.env.ACCESS_AUTH_REQUIRED = "1";
+  // 11-09 那种存量装机：data/service-config.json 里还留着一份全站模型 key。
+  // 云端写入链已关、这份文件不再属于任何人的会话绑定，状态口必须如实报未配置。
+  writeFileSync(
+    serviceConfigFilePath(SCRATCH),
+    JSON.stringify({
+      version: 1,
+      updatedAt: "2026-11-09T18:11:28.145Z",
+      model: {
+        providerId: "deepseek",
+        baseUrl: "https://api.deepseek.com",
+        model: "deepseek-flash",
+        apiKey: "sk-legacy-global",
+        updatedAt: "2026-11-09T18:11:28.145Z",
+      },
+    }),
+  );
+  const { app } = makeApp();
+  try {
+    const unbound = await app.inject({
+      method: "GET",
+      url: "/api/service-config?userId=u2@example.com",
+    });
+    const model = unbound.json().model;
+    assert.equal(model.configured, false, "存量全站 key 已停用，不能报已配置");
+    assert.equal(model.source, null, "云端不把停用配置报成生效来源");
+    assert.equal(model.keyTail, null, "云端不回显存量/运营方密钥尾号");
+    assert.equal(model.baseUrl, "https://api.deepseek.com", "网关/模型仍可作表单预填建议");
+    assert.ok(!JSON.stringify(unbound.json()).includes("sk-legacy-global"));
+
+    const bound = await app.inject({
+      method: "GET",
+      url: "/api/service-config?userId=u1@example.com",
+    });
+    assert.equal(bound.json().model.configured, true, "有 BYOK 绑定才算已配置");
+    assert.equal(bound.json().model.source, "session-byok");
   } finally {
     delete process.env.ACCESS_AUTH_REQUIRED;
     await app.close();

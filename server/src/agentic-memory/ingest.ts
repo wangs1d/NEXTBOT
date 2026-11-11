@@ -3,6 +3,7 @@ import type { Memory } from "mem0ai/oss";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { isProfileWriteBatchMode } from "../services/profile-write-scheduler.js";
 import { factValueInText } from "../services/memory-record-utils.js";
+import { classifyMemorySourceRole } from "../services/memory-source-role.js";
 import { isEphemeralActorId, warnEphemeralActorMemoryBlocked } from "../agent/actor-id.js";
 import { gateLtmWrite } from "./ltm-write-gate.js";
 import {
@@ -244,6 +245,15 @@ export class AgenticMemoryIngestService {
     body: string,
     context: "main" | "notes",
   ): Promise<void> {
+    // 来源角色治理（2026-11-12 称呼事故）：助手发言不参与抽取。抽取协议只服务
+    // 「用户自身的字面陈述」；助手话（如「喊你大哥那位」）被蒸馏后会被反写成
+    // 用户事实或主体错乱的第三人，召回后直接把回答带偏。助手发言只按原文直存
+    // 时间线（infer:false + sourceRole），供明确问「你上次说过什么」时召回。
+    if (classifyMemorySourceRole(body) === "assistant") {
+      await this.writeDecidedDetailed(actorId, sourceId, body, context, true);
+      return;
+    }
+
     // P1-6 统一抽取：决策 + 记忆 + 纠正 + 事实 一次 LLM 完成。
     // 返回 null（无 key/失败）时整体回退旧三段路径。
     const unifiedEnabled = isMemoryUnifiedExtractEnabled();
@@ -489,6 +499,11 @@ export class AgenticMemoryIngestService {
     }
 
     const trimmed = t.length > 12_000 ? `${t.slice(0, 12_000)}...` : t;
+    // 来源角色治理（2026-11-12 称呼事故）：整段都是助手发言时不做 infer——Mem0 内置
+    // 抽取器会从 assistant 消息里蒸馏「用户事实」，把「喊你大哥」反写成「用户把助手
+    // 称作大哥」。助手发言只保留原文时间线（infer:false），供「你上次说过什么」按
+    // 来源角色过滤后召回，绝不参与用户事实抽取。
+    const assistantOnly = classifyMemorySourceRole(trimmed) === "assistant";
     const addResult = (await this.memory.add([{ role: "user", content: trimmed }], {
       userId: actorId,
       metadata: {
@@ -500,11 +515,12 @@ export class AgenticMemoryIngestService {
         // 连续重要性分缺省（infer 路径无统一抽取分数）：高信号 0.7 / 低信号 0.3，
         // 调用方可经 extraMetadata 覆盖（如 ingestHighSignal 回退路径带真实决策分）
         importance: highSignal ? 0.7 : 0.3,
+        ...(assistantOnly ? { sourceRole: "assistant" } : {}),
         // 主题标签（旅游等，词表零成本判定；检索侧按 tag 过滤/加权）
         ...(topicTagsFor(trimmed) ? { topicTags: topicTagsFor(trimmed) } : {}),
         ...extraMetadata,
       },
-      infer: true,
+      infer: !assistantOnly,
     })) as unknown as { results?: Mem0WrittenItem[] };
 
     const results = addResult?.results ?? [];

@@ -91,6 +91,8 @@ const MEDIA_SEARCH_TOOLS = new Set(["search_images", "search_videos"]);
 
 /** 搜索工具集合 */
 const SEARCH_ELIGIBLE_TOOLS = new Set([
+  "web_search",
+  "web_fetch",
   "search_web",
   "fetch_web",
   "info.search",

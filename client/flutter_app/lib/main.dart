@@ -136,6 +136,7 @@ import "features/settings/settings_page.dart";
 import "features/approvals/approvals_panel.dart";
 import "core/services/access_auth_api.dart";
 import "core/services/cloud_model_binding_store.dart";
+import "core/services/nb_http.dart";
 import "core/services/attention_api.dart";
 import "core/vision/pick_gallery_vision.dart";
 import "core/vision/vision_wire_frame.dart";
@@ -4514,7 +4515,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     String? userText,
   ) async {
     try {
-      final http.Response res = await http
+      final http.Response res = await NbHttp
           .post(
             Uri.parse("${ApiConfig.httpBase}/api/chat-data/delete-turn"),
             headers: <String, String>{
@@ -4583,8 +4584,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         "limit": "200",
         "full": "1",
       });
-      final http.Response res = await http
-          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+      final http.Response res = await NbHttp
+          .get(uri)
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> body =
@@ -6089,6 +6090,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 账号进线（服务端按 token 归属绑定 actor，不看客户端自报）。
     await AccessCredentialStore.instance.clear();
     ApiConfig.runtimeUserId = null;
+    // 本机 BYOK 三元组必须一起清：它不按 actor 分桶（单文件单例），登出后
+    // 紧接着的 ensureIdentityAnnounced() 会把它当新身份的 modelProvider 上送，
+    // 等于把上一个账号的密钥绑到 guest / 下一个账号（2026-11-11 审计）。
+    // 用户重新登录后如需自有模型，在服务接入页重填一次即可。
+    await CloudModelBindingStore.instance.clear();
     // 登出同样要重绑（回落默认身份），否则连接上还钉着上一个账号。
     WsChatService.shared.ensureIdentityAnnounced();
     // 账号级名字清空，避免换账号后顶栏还挂着上一个 agent 的名牌。
@@ -6268,8 +6274,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final Uri uri = Uri.parse(
         "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
       );
-      final http.Response res = await http
-          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+      final http.Response res = await NbHttp
+          .get(uri)
           .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> data =
@@ -6307,8 +6313,8 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final Uri uri = Uri.parse(
         "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&format=narration",
       );
-      final http.Response res = await http
-          .get(uri, headers: AccessCredentialStore.instance.authHeaders)
+      final http.Response res = await NbHttp
+          .get(uri)
           .timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) return;
       final Map<String, dynamic> data =

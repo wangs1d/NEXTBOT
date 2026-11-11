@@ -267,6 +267,13 @@ test("isPublicAccessPath 口径：凭证链与静态/探针之外一律不公开
   assert.equal(isPublicAccessPath("/gallery-wall/layout"), false);
   assert.equal(isPublicAccessPath("/notes"), false);
   assert.equal(isPublicAccessPath("/accounts/register/email/pending"), false, "自报 actorId 就能拿验证码，不进公开面");
+  // webpay：页面与支付网关回调由浏览器/支付宝发起，不带设备 token；
+  // 订单创建/查询/退款仍必须走设备鉴权。
+  assert.equal(isPublicAccessPath("/webpay/checkout"), true);
+  assert.equal(isPublicAccessPath("/webpay/return"), true);
+  assert.equal(isPublicAccessPath("/api/webpay/notify"), true, "支付宝异步通知");
+  assert.equal(isPublicAccessPath("/api/webpay/return/verify"), true);
+  assert.equal(isPublicAccessPath("/api/webpay/orders"), false, "创建/查询订单仍需设备鉴权");
 });
 
 test("开机链路免凭证（未配对设备也要能更新自检与注册探活）", () => {

@@ -153,7 +153,8 @@ export function wireToolExecuteStart(ctx: ChatToolWireContext, info: ToolExecute
   // 自己的工具族映射表，不在协议层塞通用话术。
   const userStatusLine =
     pickToolUserStatusLine(info.input, info.assistantPreamble) ??
-    renderToolStatusLine(info.toolName, info.input);
+    // 复合工具按真实执行器名出状态文案（web_search + action=images → “找「xx」的图片”）
+    renderToolStatusLine(info.effectiveTool ?? info.toolName, info.input);
   if (userStatusLine) {
     embodimentThinking(ctx.sessionId, ctx.send, userStatusLine, {
       phase: "tool_start",

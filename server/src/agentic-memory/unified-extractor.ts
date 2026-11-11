@@ -208,6 +208,7 @@ const SYSTEM_PROMPT = [
   "  // 【时态铁律】temporal 必填：现状（住/是/在做）→current；以前/之前/曾经/小时候/搬走了→past（「我以前住浙江」→居住地:浙江,past,eventTime:以前）；同一句含过去与现在（「以前在杭州，现在搬来兴义了」）→两条：杭州/past + 兴义/current；未来长期状态变更（下月搬去成都/明年换工作/毕业后去深圳）→upcoming + validFrom，不算已发生、不覆盖现状；临时行程（周末去上海玩/下周出差）不进 facts（属 plan/decay）",
   "  // 【证据铁律】计划不得写成已发生：「我要搬去成都」只能 upcoming，除非「我已经搬过来了/我到了」；validFrom/validTo 只写用户明确给出的时间，把去年/上个月按给定当前时间换算成绝对时间，至今→省略 validTo，无法确定就省略，不要编日期",
   "  // 疑问/玩笑/粉丝式称呼/比喻/假设不进 facts（只进 understandings）；例外：Agent 给用户起昵称且用户接受（没纠正、自然继续）→ 称呼:X，confidence≈0.6，用户表示不喜欢则不输出",
+  "  // 【称呼方向铁律】「喊我X/叫我X/以后叫我X/称呼我X」= 用户指定 Agent 对用户的称呼 → 称呼:X（方向 Agent→用户，X 是喊用户的那个称呼）。绝不能反向写成「用户把助手称作X/用户称呼助手为X」，这类反向描述也不进 memories/understandings",
   "  // field 用 ≤6 字短字段名（称呼|职业|居住地|技术栈|生日|公司|学历|出门准备…）；「我20分钟就能出门/我收拾要半小时」→ 出门准备:20分钟|30分钟，value ≤20 字并改写成无主语短值（我在兴义→居住地:兴义），禁止以「我/我的/我在」开头；用户更正旧信息时输出新值（字段级覆盖由系统完成）",
   '"forget":["字段名"],  // 仅用户明确要求忘掉/清除档案字段时输出（「别记我住哪了」→["居住地"]），拿不准就不删；与 facts 同轮冲突时以 forget 为准',
   '"referents":[{"role":"称谓","name":"人名","confidence":0到1}],',
@@ -215,7 +216,7 @@ const SYSTEM_PROMPT = [
   '"corrections":[{"oldClaim":"被纠正的旧陈述","newClaim":"纠正后的新陈述"}]  // 用户明确否认/更正既有信息时才有',
   "}",
   "规则：memories 合并重复信息、拒绝寒暄；",
-  "归属铁律：Assistant 话中的「我」指 Agent——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；",
+  "归属铁律：Assistant 话中的「我」指 Agent、「你」指用户——Agent 的自述/建议/行为（订了票/推荐了X）绝不进 facts、memories、understandings，它们只记录用户；助手说「喊你X/叫你X」是 Agent 对用户的称呼（方向 Agent→用户），不得反写成用户对 Agent 的称呼；",
   "裁决基准：持久性与影响范围双低的琐事（天气/吃了什么/喝咖啡/寒暄/今天心情）必须 reject；今天的安排/临时事项 decay；只有长期有效且影响未来回答的信息才 remember；",
   "corrections 仅在否定/更正旧信息时输出（「不对，会议改到周三了」），旧陈述原文不确定时用最接近的概括。",
 ].join("\n");
@@ -241,6 +242,19 @@ function asStringArray(raw: unknown): string[] {
     .map((s) => s.trim())
     .filter((s) => s.length >= 4)
     .slice(0, 8);
+}
+
+/**
+ * 反向称呼断言（2026-11-12 称呼事故）：把「Agent 喊用户 X」写反成「用户把助手称作 X」。
+ * 该条目一旦落库，召回后会被当成用户事实，回答会把称呼方向说反（「你叫我大哥」）。
+ * 只拦「用户 → 助手」方向；「助手称呼用户为 X」是正确方向，放行。
+ */
+export function isReverseAddressClaim(text: string): boolean {
+  const t = (text ?? "").toLowerCase();
+  if (!t) return false;
+  if (/(?:把|将|对)(?:助手|ai|agent|智能体)(?:称作|称为|叫做|叫|称呼|喊)/.test(t)) return true;
+  if (/(?:称呼|称|叫|喊)(?:助手|ai|agent|智能体)(?:为|作)/.test(t)) return true;
+  return false;
 }
 
 /** 从 LLM 输出剥 JSON（容忍 ``` 围栏与前后杂文；导出供测试） */
@@ -282,6 +296,8 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
           const topic = typeof u.topic === "string" ? u.topic.trim() : "";
           const note = typeof u.note === "string" ? u.note.trim() : "";
           if (!topic || !note) return null;
+          // 落库守卫（2026-11-12）：反向称呼断言不得作为「理解」沉淀。
+          if (isReverseAddressClaim(note)) return null;
           // 落库守卫（2026-10-20）：疑问句不是「理解」，别把用户的提问当事实沉淀。
           if (/[？?]\s*$/.test(note)) return null;
           const conf = Number(u.confidence);
@@ -310,6 +326,8 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
           // 约定一致，但从"靠模型自觉"落成确定性兜底——第一人称主语（会让 prompt
           // 分不清「我」指谁）、含问号、超 20 字的都不是确定的档案字段值。
           if (/^(我|我的|我在)/.test(value) || /[？?]/.test(value) || value.length > 20) return null;
+          // 落库守卫（2026-11-12）：称呼方向写反的值（用户称呼助手）不进档案。
+          if (isReverseAddressClaim(value)) return null;
           const conf = Number(f.confidence);
           // 时态：只认 past/upcoming/current 三个字面值；其余（含缺失）按现状
           // 处理——兼容旧模型输出，同时不因偶发脏值把现状误判成历史/计划。
@@ -410,7 +428,10 @@ export function normalize(raw: RawUnified): UnifiedExtraction | null {
     ...(typeof raw.semanticClass === "string" ? { semanticClass: raw.semanticClass } : {}),
     importance: clampImportance(raw.importance, decision),
     ...(scores ? { scores } : {}),
-    memories: decision === "reject" ? [] : asStringArray(raw.memories),
+    memories:
+      decision === "reject"
+        ? []
+        : asStringArray(raw.memories).filter((m) => !isReverseAddressClaim(m)),
     corrections,
     understandings,
     facts,

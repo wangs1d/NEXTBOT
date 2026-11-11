@@ -45,6 +45,8 @@ export type ToolContext = {
   userId?: string;
   /** 触发本轮工具执行的 `chat.user_message.messageId`（发送方主会话），用于审计与中继关联 */
   chatUserMessageId?: string;
+  /** 触发本轮的用户请求原文（资料库落盘记录轮次标题用；主动任务等场景可能为空） */
+  userText?: string;
   /** 客户端 IP（仅在前端未上报定位时作兜底） */
   clientIp?: string;
   /** 前端 GPS / 浏览器定位（优先于 IP 地理库） */

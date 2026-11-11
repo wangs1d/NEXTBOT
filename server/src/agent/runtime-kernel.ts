@@ -504,7 +504,7 @@ export class RuntimeKernel {
       pins.push("calendar");
     }
     if (hasAnyKeyword(text, KEYWORDS.search)) {
-      pins.push("search_web", "search_images", "search_videos", "fetch_web");
+      pins.push("web_search", "web_fetch", "search_web", "search_images", "search_videos", "fetch_web");
       // 「解析/保存视频」类消息会命中 search 关键词（含「视频」），链接解析与
       // 按内容找视频（直接出可播流）一并纳入 scoped 集
       pins.push("video.grab", "video.find");

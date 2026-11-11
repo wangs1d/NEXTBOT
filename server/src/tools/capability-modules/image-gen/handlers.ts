@@ -1,5 +1,6 @@
 import type { ToolHandler, ToolContext } from "../../tool-registry.js";
 import { resolveActorId } from "../../../agent/actor-id.js";
+import { mediaTurnFromContext } from "../../../services/library-meta.js";
 import type { ImageGenerationService } from "../../../services/image-generation-service.js";
 
 /**
@@ -29,6 +30,7 @@ export function createImageGenerateHandler(
     }
 
     const actorId = resolveActorId(context);
+    const turn = mediaTurnFromContext(context);
     const model = input.model != null ? String(input.model).trim() : undefined;
     const imageSize = input.imageSize != null ? String(input.imageSize).trim() : undefined;
     const batchSize =
@@ -65,7 +67,7 @@ export function createImageGenerateHandler(
 
         // worker 直接写盘，主线程补记归属对话（资料库按对话折叠）
         if (result.imageUrl) {
-          imageGenerationService.recordImageOwner(actorId, result.imageUrl, context.sessionId);
+          imageGenerationService.recordImageOwner(actorId, result.imageUrl, context.sessionId, turn);
         }
 
         return {
@@ -88,6 +90,7 @@ export function createImageGenerateHandler(
       imageSize,
       batchSize,
       sessionId: context.sessionId,
+      turn,
     });
 
     if (!result.ok) {

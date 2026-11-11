@@ -27,7 +27,7 @@ String wsDevicePlatform() {
 /// 事件里的 `userId/sessionId`、HTTP `?userId=` 完全同源。曾经这里报
 /// `sessionId: session-mvp-001`、消息报登录邮箱，两套算法算出的身份不一致，
 /// 服务端只能判 `FORBIDDEN`，界面就永远停在「我看看」（2026-11-11 事故）。
-Map<String, dynamic> buildWsSessionInit() {
+Map<String, dynamic> buildWsSessionInit({bool announceModelUnbind = false}) {
   final String deviceId =
       InstallIdentity.instance.cachedInstallId ?? "local-device";
   final String? token = AccessCredentialStore.instance.token;
@@ -53,6 +53,11 @@ Map<String, dynamic> buildWsSessionInit() {
 
   // 云端连接版 BYOK：绑定形态的模型 key 只进本地 runtime，绝不随连接上送；
   // 明文 ws 同样不送（服务端也拒绝非 TLS 上送）。
+  //
+  // 服务端语义（connection.ts）：字段缺失 = 保留已有绑定；存在但字段不全
+  // （含空对象）= 撤绑。因此「停用自有模型」必须显式发一个空对象——只删
+  // 本机文件再补发一帧普通 init，服务端会把云端绑定保留下来，重装后幽灵
+  // 复活（2026-11-12 修复）。
   if (!kIsWeb &&
       !LocalRuntimeManager.isBundled &&
       ApiConfig.wsUrl.startsWith("wss://")) {
@@ -63,6 +68,8 @@ Map<String, dynamic> buildWsSessionInit() {
         "apiKey": binding.apiKey,
         "model": binding.model,
       };
+    } else if (announceModelUnbind) {
+      init["modelProvider"] = <String, dynamic>{};
     }
   }
   return init;

@@ -62,6 +62,9 @@ export const PLACEHOLDER_ACTOR_IDS = new Set([
   "local-device",
   "default",
   "anonymous",
+  // 离线旁路（邮件盯梢 / 消息桥）在未显式配置归属时的历史兜底名。
+  // 它不是任何人的账号，写进长期记忆只会形成跨用户共享桶。
+  "default_user",
 ]);
 
 /** 本机安装标识：`inst_…`（客户端 InstallIdentity），兼容 `guest_…`。 */
@@ -76,6 +79,40 @@ function clean(raw: string | null | undefined): string {
 /** 账号身份形态：本服务的账号 actorId 是归一化邮箱（accounts 路由同规则）。 */
 export function looksLikeAccountId(actorId: string): boolean {
   return actorId.includes("@");
+}
+
+/** 结构性会话键前缀：键内部带账号邮箱，但键本身不是「自报账号」。 */
+export const SESSION_KEY_PREFIXES = [
+  "side:",
+  "notes:",
+  "incognito:",
+  "master:",
+  "master-delegate:",
+] as const;
+
+/**
+ * 是否为结构性会话键（旁聊 / 笔记 / 隐身 / master 委派 / 渠道隔离）。
+ *
+ * HTTP 与 WS 两侧共用这一判据：旁聊键是 `side:<邮箱>:<id>`，含 `@` 但它
+ * 不是身份声明。只看 `@` 就把会话键当成自报账号，会把周界改写、403 拒连、
+ * 历史串线程等一整串误判带出来（2026-11-11）。
+ */
+export function isStructuredSessionId(sid: string): boolean {
+  if (!sid) return false;
+  if (SESSION_KEY_PREFIXES.some((prefix) => sid.startsWith(prefix))) return true;
+  // 渠道隔离键 `<actorId>@<channel>`，末段是无点的渠道名。
+  // 两种形态都要认：
+  //   - 登录态：`user@x.com@wechat`（3 段）
+  //   - 未登录：`inst_xxx@wechat`（2 段，actorId 本身不含 @）
+  // 旧判据只认「>2 段」，guest 的渠道键会被周界当成自报邮箱改写成裸
+  // actorId，微信/入站线程的历史串回主线程（2026-11-11 旁聊事故的同型第二例）。
+  // 两段形态只认 guest/机器身份开头——`user@localhost` 这类仍按自报账号处理。
+  const parts = sid.split("@");
+  if (parts.length < 2) return false;
+  const last = parts[parts.length - 1] ?? "";
+  if (!/^[\w-]+$/.test(last)) return false;
+  if (parts.length > 2) return true;
+  return /^(?:inst|guest|session)[._-][A-Za-z0-9._-]+$/i.test(parts[0] ?? "");
 }
 
 /** 该值是否是「未登录设备」的合法身份（安装标识或旧占位值）。 */

@@ -70,6 +70,8 @@ export interface ToolMetadata {
 
 // 工具元数据默认值（无历史数据时用）
 const DEFAULT_TOOL_META: Record<string, ToolMetadata> = {
+  web_search: { name: "web_search", category: "search", avgTokens: 800, avgDurationMs: 2000, criticality: "medium" },
+  web_fetch: { name: "web_fetch", category: "fetch", avgTokens: 2000, avgDurationMs: 3000, criticality: "medium" },
   search_web: { name: "search_web", category: "search", avgTokens: 800, avgDurationMs: 2000, criticality: "medium" },
   fetch_page: { name: "fetch_page", category: "fetch", avgTokens: 2000, avgDurationMs: 3000, criticality: "medium" },
   weather_query: { name: "weather_query", category: "compute", avgTokens: 300, avgDurationMs: 800, criticality: "low" },
@@ -173,8 +175,9 @@ export class ToolPlanningCortex {
     const criticalTool = toolChain.find((t) => t.critical);
     if (criticalTool) {
       switch (criticalTool.name) {
+        case "web_search":
         case "search_web":
-          fallback = { tool: "fetch_page", reason: "search_web 失败时直接 fetch_page 抓取目标 URL" };
+          fallback = { tool: "web_fetch", reason: "检索失败时直接抓取目标 URL" };
           break;
         case "desktop_open":
         case "desktop_uia_query":

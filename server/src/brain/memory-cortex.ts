@@ -49,6 +49,10 @@ import {
 } from "../agentic-memory/env.js";
 import { memoryDecayFactor, semanticFingerprint } from "../services/memory-record-utils.js";
 import {
+  classifyMemorySourceRole,
+  isAssistantVoiceQuery,
+} from "../services/memory-source-role.js";
+import {
   emotionalSalience,
   formatEmotionBadge,
   inferEmotionFromText,
@@ -2067,6 +2071,38 @@ export class MemoryCortex {
     return kept;
   }
 
+  /** 问某类个人属性时，只保留该类事实；否则「问名字」会把「把助手称作大哥」一起端上来。 */
+  private narrowByQuestionIntent(items: MemoryRecallItem[], query: string): MemoryRecallItem[] {
+    const rules: Array<{ ask: RegExp; keep: RegExp }> = [
+      { ask: /名字|叫什么|姓名|怎么称呼|我是谁/, keep: /名字|名叫|叫做|叫什|我叫|姓名|昵称/ },
+      { ask: /多大|年龄|几岁/, keep: /岁|年龄/ },
+      { ask: /住哪|住在|地址|家在|哪个城市/, keep: /住|地址|家在|城市/ },
+      { ask: /生日|出生/, keep: /生日|出生/ },
+    ];
+    const matched = rules.filter((rule) => rule.ask.test(query));
+    if (matched.length === 0) return items;
+    const keep = new RegExp(matched.map((rule) => rule.keep.source).join("|"));
+    const assistantAboutUser = /把助手称作|称助手为|称呼助手|对助手说|助手当时说的/;
+    return items.filter((item) => {
+      const content = String(item.content ?? "");
+      return keep.test(content) && !assistantAboutUser.test(content);
+    });
+  }
+
+  /**
+   * 召回收口处过滤「助手自己的历史发言」。
+   * 仅在用户明确询问助手说过/答应过什么时放行；其余场景下助手发言是行为记录，
+   * 不是用户事实证据，混进召回会被当成用户自述复述（2026-11-12 事故）。
+   */
+  private dropAssistantVoiceItems(items: MemoryRecallItem[], query: string): MemoryRecallItem[] {
+    if (isAssistantVoiceQuery(query)) return items;
+    return items.filter((item) => {
+      const content = typeof item.content === "string" ? item.content : "";
+      if (!content.trim()) return false;
+      return classifyMemorySourceRole(content) !== "assistant";
+    });
+  }
+
   /**
    * 统一召回收尾：敏感过滤 → 反馈加成重排 → 精排（可选）→ 去重限长，并异步触发
    * 「记忆联想合成」与「引用锚点记录」两个后置副作用。
@@ -2084,7 +2120,13 @@ export class MemoryCortex {
     opts?: { includeRestricted?: boolean; limit?: number; skipStrengthBoost?: boolean },
   ): Promise<MemoryRecallItem[]> {
     const limit = Math.max(1, opts?.limit ?? this.arbitratorConfig.topN);
-    const filtered = this.filterBySensitivity(items, opts?.includeRestricted);
+    // 跟修（2026-11-12）：助手自己的历史发言默认从召回里剔除（除非用户明确在问
+    // 助手说过/答应过什么）。写入侧已按 role 打标，但 bridge/agentic/kv 通道的
+    // 候选不经过 humanLike 的 role 过滤——这里在统一收口处兜底，防止当时一句
+    // 调侃（「二十岁，喊你大哥那位」）被当作用户事实复述。
+    const voiceFiltered = this.dropAssistantVoiceItems(items, query);
+    const intentNarrowed = this.narrowByQuestionIntent(voiceFiltered, query);
+    const filtered = this.filterBySensitivity(intentNarrowed, opts?.includeRestricted);
     // 仲裁路径（skipStrengthBoost=true）已在统一排序中应用强度因子，此处跳过，
     // 避免仲裁后二次重排；分域/短路等未走仲裁的路径仍保留强度重排。
     const boosted = opts?.skipStrengthBoost
@@ -2602,13 +2644,42 @@ export class MemoryCortex {
     domain: MemoryDomainKind,
   ): MemoryRecallItem[] {
     if (!result || !result.text) return [];
-    return [
-      {
-        content: result.text,
-        domain,
-        score: result.confidence,
-      },
+    // 跟修（2026-11-12）：按编号事实行逐条拆成独立 item，不再把整段重构文本折叠成
+    // 一条。折叠时 finalizeRecallItems 的去重/精排/配额/遗忘梯度只能看到 1 个巨型
+    // item，等于对这条召回全部失效——模型于是拿到「一次塞满的全部记忆」。
+    const factLines = result.text
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => /^\d+\.\s*\[[^\]]+\]/.test(line));
+    if (factLines.length === 0) {
+      return [{ content: result.text, domain, score: result.confidence }];
+    }
+    return factLines.map((line, index) => {
+      const parsed = line.match(/^\d+\.\s*\[([^/\]]+)\/[^\]]+\]\s*(.+)$/);
+      return {
+        content: (parsed?.[2] ?? line).trim(),
+        domain: this.asMemoryDomainKind(parsed?.[1]) ?? domain,
+        // 重构结果只给整体置信度：按原排序轻微递减，保持条目只做相对排序用。
+        score: Math.max(0, result.confidence - index * 0.01),
+      };
+    });
+  }
+
+  /** 召回行里的域标签转合法域；不认识时返回 undefined（由调用方用默认域）。 */
+  private asMemoryDomainKind(raw: string | undefined): MemoryDomainKind | undefined {
+    const value = (raw ?? "").trim();
+    const known: MemoryDomainKind[] = [
+      "working",
+      "episodic",
+      "semantic",
+      "procedural",
+      "emotional",
+      "narrative",
+      "personality",
+      "relationship",
+      "world",
     ];
+    return known.includes(value as MemoryDomainKind) ? (value as MemoryDomainKind) : undefined;
   }
 
   /** 安全调用异步召回，捕获异常并返回 null */

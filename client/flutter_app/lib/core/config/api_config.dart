@@ -229,15 +229,16 @@ class ApiConfig {
   }
 
   /// `POST /accounts/register` 请求体（与 [accountAuthQuery] 规则一致）。
+  ///
+  /// 未登录时的机器身份必须是本机安装标识（`effectiveActorId` = `inst_…`），
+  /// **不能**再用连接标签 `sessionId`——那是全设备共享的占位值，会把所有
+  /// 未登录设备注册成同一个 `session-mvp-001` 账号（2026-11-11 审计：
+  /// 同一文件里 query 已用 `inst_…`、body 还发占位值，两套算法互相打架）。
   static Map<String, String> accountRegisterBody(String displayName) {
     final String name = displayName.trim();
     final String u = _runtimeUserIdOverride ?? userId.trim();
     final Map<String, String> m = <String, String>{"displayName": name};
-    if (u.isNotEmpty) {
-      m["userId"] = u;
-    } else {
-      m["sessionId"] = sessionId;
-    }
+    m["userId"] = u.isNotEmpty ? u : effectiveActorId;
     return m;
   }
 
@@ -245,11 +246,7 @@ class ApiConfig {
   static Map<String, String> accountEmailVerifyBody(String code) {
     final String u = _runtimeUserIdOverride ?? userId.trim();
     final Map<String, String> m = <String, String>{"code": code.trim()};
-    if (u.isNotEmpty) {
-      m["userId"] = u;
-    } else {
-      m["sessionId"] = sessionId;
-    }
+    m["userId"] = u.isNotEmpty ? u : effectiveActorId;
     return m;
   }
 

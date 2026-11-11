@@ -646,6 +646,18 @@ class MobileChatController extends ChangeNotifier {
       if (res.statusCode != 200) return 0;
       final Map<String, dynamic> body =
           jsonDecode(res.body) as Map<String, dynamic>;
+      // 旁聊历史必须严格属于请求的会话键。服务端一旦把请求钉到别的线程
+      // （周界身份改写 / 路由缺陷），合并进来的就是主会话历史，且
+      // _mergeServerTurnsFor 会逐条 _persist 落盘，污染会永久留在这条旁聊里。
+      // 宁可本次不回填，也不能把别人的对话写进新会话（2026-11-11 回归）。
+      final String returnedSessionId = body["sessionId"]?.toString() ?? "";
+      if (isSide && returnedSessionId != key) {
+        debugPrint(
+          "[MobileChatController] 旁聊历史响应 sessionId 不匹配，丢弃: "
+          "expected=$key actual=$returnedSessionId",
+        );
+        return 0;
+      }
       final List<dynamic> raw = body["messages"] as List<dynamic>? ?? const [];
       final List<ChatMessage> incoming = <ChatMessage>[];
       int fallbackSeq = 0;
