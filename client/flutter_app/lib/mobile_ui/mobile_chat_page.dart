@@ -161,12 +161,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
   Widget _buildConnectionBanner(BuildContext context, MobilePalette p) {
     if (_controller.isConnected) return const SizedBox.shrink();
     final bool dark = Theme.of(context).brightness == Brightness.dark;
-    final Color bg = dark
-        ? const Color(0xFF3A2A12)
-        : const Color(0xFFFDF3E1);
-    final Color fg = dark
-        ? const Color(0xFFF5C169)
-        : const Color(0xFF8A5A16);
+    final Color bg = dark ? const Color(0xFF3A2A12) : const Color(0xFFFDF3E1);
+    final Color fg = dark ? const Color(0xFFF5C169) : const Color(0xFF8A5A16);
     return Material(
       color: bg,
       child: SizedBox(
@@ -296,9 +292,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
     if (seed.isEmpty) return;
     final String compact = seed.replaceAll(RegExp(r"\s+"), " ").trim();
     final List<int> runes = compact.runes.toList();
-    final String title = runes.length > 16
-        ? String.fromCharCodes(runes.take(16))
-        : compact;
+    final String title =
+        runes.length > 16 ? String.fromCharCodes(runes.take(16)) : compact;
     _controller.setActiveSideTitle(title);
     final String shortId = fullId.contains(":")
         ? fullId.substring(fullId.lastIndexOf(":") + 1)
@@ -626,6 +621,22 @@ class _MobileChatPageState extends State<MobileChatPage> {
         reverse: !openingOnly,
         padding: EdgeInsets.fromLTRB(14, openingOnly ? 24 : 6, 14, 8),
         itemCount: _controller.messages.length + (typing ? 1 : 0),
+        // 按消息 id 复用 Element（2026-11-11 闪卡根治）：reverse 列表下每追加
+        // 一条消息（用户气泡 / turn_started 空占位），所有已有消息的 index 都
+        // 后移一格；无 key 时 Sliver 按位置匹配，相邻消息 widget 结构不同就整
+        // 棵子树重建——AgentResultCard 的入场动画重播，表现为「提问时卡片闪
+        // 一下」。key + findChildIndexCallback 让漂移后仍按 id 找回旧 Element。
+        findChildIndexCallback: (Key key) {
+          if (key is! ValueKey<String>) return null;
+          final int msgIndex = _controller.messages
+              .indexWhere((ChatMessage m) => m.messageId == key.value);
+          if (msgIndex < 0) return null;
+          final int viewIndex = openingOnly
+              ? msgIndex
+              : _controller.messages.length - 1 - msgIndex;
+          if (typing && viewIndex >= _controller.messages.length) return null;
+          return viewIndex;
+        },
         itemBuilder: (context, index) {
           if (typing && index == _controller.messages.length) {
             return _buildTypingBubble(p);
@@ -633,77 +644,82 @@ class _MobileChatPageState extends State<MobileChatPage> {
           // 正向列表（开场介绍）index 即消息顺序；reverse 列表 index 0 是最新。
           final ChatMessage m = _controller.messages[
               openingOnly ? index : _controller.messages.length - 1 - index];
-          final bool isUser = m.role == "user";
-          if (m.streaming && m.text.isEmpty) {
-            // 处理状态由输入框上方的状态条承载（对齐桌面端：占位不进消息流），
-            // 这里只留空位，避免多出一个空气泡。
-            return const SizedBox.shrink();
-          }
-          if (m.contentType == "transfer_reminder") {
-            // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
-            // 服务端推送，「帮我叫车/不用了」一键回复。
-            return _buildTransferReminderCard(context, m, p);
-          }
-          if (m.contentType == "evening_digest" && m.eveningDigest != null) {
-            // 睡前备忘卡（2026-10-22 与桌面端对齐）：结构化块专属渲染，
-            // 不框进气泡外壳（独立消息元素形态，卡自带完整外观）。
-            return Align(
-              alignment: Alignment.centerLeft,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 4),
-                child: ConstrainedBox(
-                  constraints: const BoxConstraints(maxWidth: 360),
-                  child: EveningDigestCard(digest: m.eveningDigest!),
-                ),
-              ),
-            );
-          }
-          if (!isUser) {
-            // 首启引导·取名卡（2026-11-09 改版）：开场白第二泡自带候选名，
-            // 问题正文与候选名列表合在同一个助手气泡块里（主动推送，无需
-            // 用户先说话），点选即把答复以用户身份发出。
-            final List<String> nameChoices =
-                m.nameChoices ?? const <String>[];
-            if (nameChoices.isNotEmpty) {
-              return _buildNameChoicesCard(context, m, nameChoices, p);
-            }
-            // 气泡外独立卡·全量外移（2026-11-10 泛化）：气泡只装文字，
-            // 所有结果卡一律全宽渲染在气泡下方。此前只有 travel_itinerary
-            // 与 reminder_confirm 外移，其余卡（种草选择卡/需求确认卡等）
-            // 挤在 73.8% 宽的气泡壳里，横向内容根本没法用。
-            // 卡从信封块/正文标记原位读出，card.update 原地换卡同样实时生效。
-            final List<AgentResultData> standaloneCards = _standaloneCardsOf(m);
-            if (standaloneCards.isNotEmpty) {
-              final bool hasBubbleText = _assistantBubbleHasVisibleText(m);
-              final List<String> cardTypes = <String>[
-                for (final AgentResultData c in standaloneCards) c.cardType,
-              ];
-              return Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: <Widget>[
-                  if (hasBubbleText)
-                    _buildBubble(context, m, isUser, p,
-                        excludeCardTypes: cardTypes),
-                  for (int i = 0; i < standaloneCards.length; i++)
-                    Padding(
-                      padding: EdgeInsets.only(
-                          top: (hasBubbleText || i > 0)
-                              ? AppTypography.space2
-                              : 0),
-                      child: Align(
-                        alignment: Alignment.centerLeft,
-                        child: AgentResultCard(data: standaloneCards[i]),
-                      ),
-                    ),
-                ],
-              );
-            }
-          }
-          return _buildBubble(context, m, isUser, p);
+          return KeyedSubtree(
+            key: ValueKey<String>(m.messageId),
+            child: _buildMessageItem(context, m, p),
+          );
         },
       ),
     );
+  }
+
+  /// 单条消息 → widget 的分发（不含 key 外壳，见 _buildMessageList）。
+  Widget _buildMessageItem(
+      BuildContext context, ChatMessage m, MobilePalette p) {
+    final bool isUser = m.role == "user";
+    if (m.streaming && m.text.isEmpty) {
+      // 处理状态由输入框上方的状态条承载（对齐桌面端：占位不进消息流），
+      // 这里只留空位，避免多出一个空气泡。
+      return const SizedBox.shrink();
+    }
+    if (m.contentType == "transfer_reminder") {
+      // 接驳确认卡（agent.transfer_reminder）：行程段临近到达时
+      // 服务端推送，「帮我叫车/不用了」一键回复。
+      return _buildTransferReminderCard(context, m, p);
+    }
+    if (m.contentType == "evening_digest" && m.eveningDigest != null) {
+      // 睡前备忘卡（2026-10-22 与桌面端对齐）：结构化块专属渲染，
+      // 不框进气泡外壳（独立消息元素形态，卡自带完整外观）。
+      return Align(
+        alignment: Alignment.centerLeft,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 4),
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 360),
+            child: EveningDigestCard(digest: m.eveningDigest!),
+          ),
+        ),
+      );
+    }
+    if (!isUser) {
+      // 首启引导·取名卡（2026-11-09 改版）：开场白第二泡自带候选名，
+      // 问题正文与候选名列表合在同一个助手气泡块里（主动推送，无需
+      // 用户先说话），点选即把答复以用户身份发出。
+      final List<String> nameChoices = m.nameChoices ?? const <String>[];
+      if (nameChoices.isNotEmpty) {
+        return _buildNameChoicesCard(context, m, nameChoices, p);
+      }
+      // 气泡外独立卡·全量外移（2026-11-10 泛化）：气泡只装文字，
+      // 所有结果卡一律全宽渲染在气泡下方。此前只有 travel_itinerary
+      // 与 reminder_confirm 外移，其余卡（种草选择卡/需求确认卡等）
+      // 挤在 73.8% 宽的气泡壳里，横向内容根本没法用。
+      // 卡从信封块/正文标记原位读出，card.update 原地换卡同样实时生效。
+      final List<AgentResultData> standaloneCards = _standaloneCardsOf(m);
+      if (standaloneCards.isNotEmpty) {
+        final bool hasBubbleText = _assistantBubbleHasVisibleText(m);
+        final List<String> cardTypes = <String>[
+          for (final AgentResultData c in standaloneCards) c.cardType,
+        ];
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            if (hasBubbleText)
+              _buildBubble(context, m, isUser, p, excludeCardTypes: cardTypes),
+            for (int i = 0; i < standaloneCards.length; i++)
+              Padding(
+                padding: EdgeInsets.only(
+                    top: (hasBubbleText || i > 0) ? AppTypography.space2 : 0),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: AgentResultCard(data: standaloneCards[i]),
+                ),
+              ),
+          ],
+        );
+      }
+    }
+    return _buildBubble(context, m, isUser, p);
   }
 
   /// 首启引导·取名卡（2026-11-09 改版，对照参考稿）：问题正文 + 候选名
@@ -1621,8 +1637,7 @@ class _TypingDotsState extends State<_TypingDots>
   /// 三角波（不引 dart:math）：相位错开 1/3 圈，透明度 0.3~0.9 呼吸。
   double _opacityOf(int i) {
     final double phase = (_c.value + i / 3) % 1.0;
-    final double wave =
-        phase < 0.5 ? phase * 2 : (1.0 - phase) * 2;
+    final double wave = phase < 0.5 ? phase * 2 : (1.0 - phase) * 2;
     return 0.3 + 0.6 * wave;
   }
 
