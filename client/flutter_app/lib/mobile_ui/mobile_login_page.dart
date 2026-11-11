@@ -3,6 +3,7 @@ import "dart:async";
 import "package:flutter/material.dart";
 import "package:flutter/services.dart";
 
+import "../core/services/access_auth_api.dart";
 import "../core/services/email_login_api.dart";
 
 /// 登录 / 注册两种界面形态。
@@ -397,6 +398,21 @@ class _AuthCardState extends State<_AuthCard> {
     if (!mounted) return;
 
     if (r.ok) {
+      // 认证即发证：token 先落盘，根组件随后把 runtimeUserId 与连接身份
+      // 一起收敛（有凭据的身份才是权威身份，不依赖本地读盘时序）。
+      final String? token = r.accessToken?.trim();
+      if (token != null && token.isNotEmpty) {
+        await AccessCredentialStore.instance.save(
+          AccessDeviceBinding(
+            token: token,
+            userId: email,
+            tokenId: r.accessTokenId,
+            expiresAt: r.accessTokenExpiresAt,
+          ),
+          deviceId: r.deviceId,
+        );
+      }
+      if (!mounted) return;
       // 先关卡片再落登录态（根组件负责 runtimeUserId 覆盖与进主壳）
       Navigator.of(context).pop();
       widget.onLoggedIn(email);

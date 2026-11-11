@@ -47,10 +47,10 @@ const WEB_SEARCH_SYSTEM_SUFFIX =
 const PHONE_CALL_SYSTEM_SUFFIX =
   "\n\n【语音通知与电话通话 · 静默触达】调用时直接执行，禁止在回复中提前告知或重复承诺。\n\n"
   + "三套能力：\n"
-  + "1. voice.speak（播报）: 用户说「读一下」「念给我听」→ 单向 TTS 即时播，无 UI。\n"
-  + "2. voice.send_message（语音消息）: 用户说「发语音」「用语音回复」→ 落地为可重播语音气泡。\n"
-  + "3. phone.call_user（电话通话）: 用户说「给我打电话」→ 振铃-接通-TTS。参数 spokenMessage 填要说的话，ringStyle 默认 peer（reminder 为闹钟式）。\n\n"
-  + "【禁止】回复中提前告知或复述「马上打过去」「现在给你打」等；phone.call_user 一轮只调一次，多次无效。发语音消息后不要在文本回复里复述语音内容。";
+  + "1. voice（action=speak，播报）: 用户说「读一下」「念给我听」→ 单向 TTS 即时播，无 UI。\n"
+  + "2. voice（action=message，语音消息）: 用户说「发语音」「用语音回复」→ 落地为可重播语音气泡。\n"
+  + "3. phone（action=call，电话通话）: 用户说「给我打电话」→ 振铃-接通-TTS。参数 spokenMessage 填要说的话，ringStyle 默认 peer（reminder 为闹钟式）。\n\n"
+  + "【禁止】回复中提前告知或复述「马上打过去」「现在给你打」等；phone action=call 一轮只调一次，多次无效。发语音消息后不要在文本回复里复述语音内容。";
 
 /** 生活管家能力清单（能力描述区）：给 LLM 一份口语化的日常代办范围，减少"只口头建议不动手"。 */
 export const LIFE_STEWARD_SYSTEM_SUFFIX_MARKER = "【生活管家】";

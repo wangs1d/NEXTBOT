@@ -29,7 +29,7 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 /** 旧前缀表（S0 删除前的 lane-tool-sets 原文，等价性基准） */
 const LEGACY_PREFIXES: Record<string, string[]> = {
   search: ["search_web", "search", "fetch_web", "deep_search", "hot_rankings", "info.", "weather.", "clock."],
-  media: ["search_images", "search_videos", "photo", "vision.", "media", "image"],
+  media: ["search_images", "search_videos", "photo", "media", "image"],
   write: [
     "calendar.", "reminder", "voice.", "phone.", "shopping.", "commitment.",
     "wallet.", "agent.", "surface.", "smart_home.",
@@ -63,10 +63,15 @@ test("束投影等价性：域投影 ⊇ 旧前缀表；media/write/desktop 精�
     // write + budget.calculate、media + video.grab、
     // desktop + browser 全族（ROUTE_BEAM_DOMAINS.desktop 显式并上 browser 域）。
     const conscious: Record<string, string[]> = {
-      search: ["internet."],
-      write: ["budget.calculate"],
-      desktop: ["browser.", "shared_browser", "agent_browser", "fetch_web", "search_web"],
-      media: ["video.grab"],
+      // 复合工具面（2026-11）：search_web/fetch_web 收编为 web_search/web_fetch，
+      // 两者仍归检索域，属同一「有意识超集」。
+      search: ["internet.", "web_search", "web_fetch"],
+      // 复合工具面（2026-11）：calendar/voice/phone/smart_home 由整族收编为裸名，
+      // 旧前缀表只认带点号的细名，故裸名同样记为有意识超集。
+      write: ["budget.calculate", "calendar", "voice", "phone", "smart_home"],
+      desktop: ["browser.", "shared_browser", "agent_browser", "fetch_web", "search_web", "web_fetch", "web_search"],
+      // media 束：复合后图片/视频检索统一走 web_search，属有意识超集。
+      media: ["video.grab", "web_search"],
     };
     const allowed = conscious[cap] ?? [];
     const stray = extra.filter((n) => !allowed.some((a) => n === a || n.startsWith(a)));
@@ -96,7 +101,7 @@ test("注册表自洽：域名唯一；束域引用全部存在；misc 无前缀
 });
 
 test("确定性：同一工具名多次查询恒同归属（域卡/域拉取的字节稳定性前提）", () => {
-  for (const n of ["search_web", "calendar.create_task", "vision.see_device", "unknown.tool.x"]) {
+  for (const n of ["search_web", "calendar.create_task", "photo.ocr", "unknown.tool.x"]) {
     assert.deepEqual(domainsForTool(n), domainsForTool(n));
   }
 });

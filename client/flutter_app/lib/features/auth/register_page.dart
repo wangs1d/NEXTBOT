@@ -13,8 +13,12 @@ import "package:url_launcher/url_launcher.dart";
 import "package:window_manager/window_manager.dart";
 
 import "../../core/config/api_config.dart";
+import "../../core/services/access_auth_api.dart";
+import "../../core/services/email_login_api.dart";
+import "../../core/services/install_identity.dart";
 import "../../core/theme/app_theme.dart";
 import "../../widgets/app_window_titlebar.dart";
+import "../../core/services/nb_http.dart";
 
 /// 登录界面（NEXTBOT 桌面端）。
 ///
@@ -29,6 +33,19 @@ import "../../widgets/app_window_titlebar.dart";
 ///
 /// 预览入口：环境变量 `PAI_REGISTER_PREVIEW=1` 启动独立预览窗口
 /// （不 bootstrap 主应用任何服务），见 [runRegisterPreviewWindow]。
+
+/// 网页登录回连结果：邮箱 + 新建标记 + 服务端签发的设备凭据。
+///
+/// 凭据必须由这一趟带回来：OTP 闸开启时验证码一次性作废，回到桌面端再调
+/// `/accounts/login` 只会拿到 `OTP_REQUIRED`，用户会被迫二次登录。
+typedef _WebAuthResult = ({
+  String email,
+  bool freshCreated,
+  String token,
+  String tokenId,
+  int expiresAt,
+  String deviceId,
+});
 
 /// 独立预览窗口模式的环境变量开关（在 main.dart 最早期检查）。
 const String kRegisterPreviewEnv = "PAI_REGISTER_PREVIEW";
@@ -72,7 +89,7 @@ Future<void> registerAccountToControlPlane(
 }) async {
   // 邮箱即账号主键，统一小写（与 /accounts/web 页面、服务端同规则）
   final String mail = email.trim().toLowerCase();
-  final http.Client client = http.Client();
+  final http.Client client = NbClient();
   try {
     final http.Response res = await client
         .post(
@@ -159,7 +176,7 @@ class _RegisterPageState extends State<RegisterPage> {
   String? _authError;
   HttpServer? _loopbackServer;
   Uri? _webAuthUrl;
-  Completer<({String email, bool freshCreated})>? _callbackCompleter;
+  Completer<_WebAuthResult>? _callbackCompleter;
 
   @override
   void initState() {
@@ -212,17 +229,30 @@ class _RegisterPageState extends State<RegisterPage> {
       _loopbackServer = server;
       final String state = _randomState();
       final String cb = "http://127.0.0.1:${server.port}/callback";
+      // 设备标识随授权页带去：服务端在验过邮箱验证码后按它签发设备凭据，
+      // 回连时把 token 交回来。桌面端自己不重新跑一次登录——验证码是一次性
+      // 的，回调之后再登录拿不到码（OTP 闸开启时）。
+      final String deviceId = await InstallIdentity.instance.installId();
       _webAuthUrl = Uri.parse(
         "${ApiConfig.controlPlaneBase}/accounts/web"
-        "?cb=${Uri.encodeComponent(cb)}&state=$state",
+        "?cb=${Uri.encodeComponent(cb)}&state=$state"
+        "&deviceId=${Uri.encodeComponent(deviceId)}"
+        "&deviceLabel=${Uri.encodeComponent("NEXTBOT Desktop")}",
       );
       unawaited(launchUrl(
         _webAuthUrl!,
         mode: LaunchMode.externalApplication,
       ));
-      final (:email, freshCreated: bool fresh) = await _waitLoopbackCallback(server, state);
+      final _WebAuthResult r = await _waitLoopbackCallback(server, state);
       if (!mounted) return;
-      await _completeAuth(email, freshCreated: fresh);
+      await _completeAuth(
+        r.email,
+        freshCreated: r.freshCreated,
+        token: r.token,
+        tokenId: r.tokenId,
+        expiresAt: r.expiresAt,
+        deviceId: r.deviceId,
+      );
     } catch (e) {
       if (mounted && e is! _WebAuthCancelled) {
         setState(() => _authError = _friendlyAuthError(e));
@@ -237,12 +267,12 @@ class _RegisterPageState extends State<RegisterPage> {
   /// 等待网页回连：只认 path=/callback 且 state 匹配的请求，取邮箱与
   /// 新建标记（fresh=1，仅本次真正新建账号时由网页附加）交给完成态。
   /// 5 分钟未回连视为超时；取消由 [_cancelWebAuth] 注入 [_WebAuthCancelled]。
-  Future<({String email, bool freshCreated})> _waitLoopbackCallback(
+  Future<_WebAuthResult> _waitLoopbackCallback(
     HttpServer server,
     String state,
   ) {
-    final Completer<({String email, bool freshCreated})> completer =
-        Completer<({String email, bool freshCreated})>();
+    final Completer<_WebAuthResult> completer =
+        Completer<_WebAuthResult>();
     _callbackCompleter = completer;
     server.listen((HttpRequest req) async {
       if (req.uri.path != "/callback") {
@@ -258,6 +288,9 @@ class _RegisterPageState extends State<RegisterPage> {
       }
       final String email = (req.uri.queryParameters["email"] ?? "").trim();
       final bool freshCreated = req.uri.queryParameters["fresh"] == "1";
+      final Map<String, String> q = req.uri.queryParameters;
+      final String token = (q["token"] ?? "").trim();
+      final int expiresAt = int.tryParse(q["expiresAt"] ?? "") ?? 0;
       // 浏览器停留在回连页：给一句终态提示，窗口可自行关闭
       req.response.headers.contentType = ContentType.html;
       req.response.write(_loopbackAckHtml());
@@ -266,13 +299,43 @@ class _RegisterPageState extends State<RegisterPage> {
         completer.completeError(Exception("回连参数缺少有效邮箱"));
         return;
       }
-      completer.complete((email: email, freshCreated: freshCreated));
+      completer.complete((
+        email: email,
+        freshCreated: freshCreated,
+        token: token,
+        tokenId: (q["tokenId"] ?? "").trim(),
+        expiresAt: expiresAt,
+        deviceId: (q["deviceId"] ?? "").trim(),
+      ));
     });
     return completer.future.timeout(const Duration(minutes: 5));
   }
 
   /// 登录成功（真实回连或 debug 直调）后的收尾：交调用方落会话并切主界面。
-  Future<void> _completeAuth(String email, {bool freshCreated = false}) async {
+  Future<void> _completeAuth(
+    String email, {
+    bool freshCreated = false,
+    String token = "",
+    String tokenId = "",
+    int expiresAt = 0,
+    String deviceId = "",
+  }) async {
+    if (token.isNotEmpty) {
+      // 首选：网页登录那一趟已经换好的凭据（OTP 闸开启时唯一可行的路径）。
+      await AccessCredentialStore.instance.save(
+        AccessDeviceBinding(
+          token: token,
+          userId: email.trim().toLowerCase(),
+          tokenId: tokenId.isEmpty ? null : tokenId,
+          expiresAt: expiresAt,
+        ),
+        deviceId: deviceId.isEmpty ? null : deviceId,
+      );
+    } else {
+      // 兜底：网页没带凭据（旧版页面 / 服务端未发证）。OTP 闸关闭时能成功；
+      // 闸开启时会失败，桌面端退回 guest 身份（不串账号数据），不阻断登录。
+      await _issueDeviceTokenQuietly(email, freshCreated: freshCreated);
+    }
     if (widget.onAuthenticated != null) {
       await widget.onAuthenticated!(email, freshCreated: freshCreated);
     } else {
@@ -281,6 +344,37 @@ class _RegisterPageState extends State<RegisterPage> {
     }
     if (!mounted) return;
     setState(() => _done = true);
+  }
+
+  /// 用刚确认过的邮箱换一枚设备 token 并落盘（失败静默）。
+  ///
+  /// 复用手机端同一套 `/accounts/login`：网页登录已经验证过邮箱归属，这里
+  /// 只是把「已认证」这件事换成可携带的凭据。OTP 闸开启时这一步会失败，
+  /// 那时桌面端退回 guest 身份（不串账号数据），不影响主流程。
+  Future<void> _issueDeviceTokenQuietly(
+    String email, {
+    required bool freshCreated,
+  }) async {
+    if (AccessCredentialStore.instance.hasCredentials) return;
+    try {
+      final EmailLoginApi api = EmailLoginApi();
+      final EmailLoginResult r = freshCreated
+          ? await api.register(email, name: email.split("@").first)
+          : await api.login(email);
+      final String? token = r.accessToken;
+      if (!r.ok || token == null || token.isEmpty) return;
+      await AccessCredentialStore.instance.save(
+        AccessDeviceBinding(
+          token: token,
+          userId: email.trim().toLowerCase(),
+          tokenId: r.accessTokenId,
+          expiresAt: r.accessTokenExpiresAt,
+        ),
+        deviceId: r.deviceId,
+      );
+    } catch (e) {
+      debugPrint("[auth] 换设备凭据失败（按 guest 继续）: $e");
+    }
   }
 
   /// debug 直调通道的完成路径（跳过浏览器，直接走回调）。
@@ -300,7 +394,7 @@ class _RegisterPageState extends State<RegisterPage> {
   }
 
   void _cancelWebAuth() {
-    final Completer<({String email, bool freshCreated})>? completer =
+    final Completer<_WebAuthResult>? completer =
         _callbackCompleter;
     if (completer != null && !completer.isCompleted) {
       completer.completeError(const _WebAuthCancelled());

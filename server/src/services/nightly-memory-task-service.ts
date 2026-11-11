@@ -381,14 +381,15 @@ export class NightlyMemoryTaskService {
   private async checkSleepingAndTriggerDreaming(): Promise<void> {
     if (!this.awarenessCortex) return;
     const today = this.getTodayKey();
-    // 新一天开始时清空已触发记录
+    // 新一天开始时清空已触发记录。
+    // 注意：这里存的是 getTodayKey()（服务器本地日期），不能再存 UTC ISO 再
+    // slice(0,10) 比——服务器在 Asia/Shanghai 时，凌晨 00:00-08:00 的 UTC 日期
+    // 是前一天，两边永远不等 → 每分钟 clear 一次 → 「entered sleeping」日志
+    // 每分钟刷一轮、observe() 白跑（2026-11-11 排查发现）。
     if (this.dreamingTriggeredActors.size > 0) {
-      const firstTriggerDate = this.dreamingTriggeredActors.values().next().value;
-      if (firstTriggerDate) {
-        const triggerDay = firstTriggerDate.slice(0, 10);
-        if (triggerDay !== today) {
-          this.dreamingTriggeredActors.clear();
-        }
+      const firstTriggerDay = this.dreamingTriggeredActors.values().next().value;
+      if (firstTriggerDay !== undefined && firstTriggerDay !== today) {
+        this.dreamingTriggeredActors.clear();
       }
     }
 
@@ -399,7 +400,7 @@ export class NightlyMemoryTaskService {
         const state = this.awarenessCortex.observe(actorId);
         if (state?.activity === "sleeping") {
           console.log(`[NightlyMemory] Actor ${actorId} entered sleeping, triggering dreaming...`);
-          this.dreamingTriggeredActors.set(actorId, new Date().toISOString());
+          this.dreamingTriggeredActors.set(actorId, today);
           // 逐 actor 触发：只处理该 actor 的当日流水，后睡者独立补跑，
           // 不再被其他 actor 的全局水位线挡住（M1-①）。
           await this.runNightTasks([actorId]);
@@ -655,10 +656,13 @@ export class NightlyMemoryTaskService {
         if (unconsolidated.length === 0) continue;
 
         const dateKeys: string[] = [];
+        const consumedTurnIds: string[] = [];
+        const failedDates = new Set<string>();
         let eventLines = 0;
         let failed = 0;
-        for (const { dateKey, lines } of unconsolidated) {
+        for (const { dateKey, lines, turnIds } of unconsolidated) {
           let ingested = 0;
+          let noiseSkipped = 0;
           for (const line of lines) {
             // 行格式: - [HH:mm] sessId? U|A|fact|prefer|commit: content
             const m = line.match(/^- \[(\d{2}:\d{2})\]\s*(.*)$/);
@@ -676,7 +680,10 @@ export class NightlyMemoryTaskService {
                 ? { sourceEventIds: [`evt:${actorId}:${journalToken.slice(2)}`] }
                 : {};
             // P2-6：U/A 闲聊/语气填充行不固化（fact/prefer/commit 恒保留）
-            if (isNoiseLogLine(role, content)) continue;
+            if (isNoiseLogLine(role, content)) {
+              noiseSkipped += 1;
+              continue;
+            }
             const roleLabel = role === "U" ? "用户" : role === "A" ? "助手" : role;
             const isEventLine = provenance.sourceEventIds !== undefined;
             const highSignal = role === "prefer" || role === "fact" || role === "commit";
@@ -698,28 +705,52 @@ export class NightlyMemoryTaskService {
               importance: isEventLine ? 0.5 : highSignal ? 0.7 : 0.3,
             };
             try {
-              await this.narrativeMemory!.writeDecided(
+              const outcome = await this.narrativeMemory!.writeDecided(
                 actorId,
                 fixationText,
                 "journal:consolidate",
                 { context: "main", highSignal, ...provenance },
                 fixationExtraction,
               );
-              ingested += 1;
-              if (isEventLine) eventLines += 1;
+              // 只有真正落库（或未配置落库侧）才允许后续删除 journal 原文
+              if (outcome === undefined || outcome.persisted) {
+                ingested += 1;
+                if (isEventLine) eventLines += 1;
+              } else {
+                failed += 1;
+                failedDates.add(dateKey);
+                console.error(
+                  `[NightlyMemory] journal 行固化未落库（保留原文待重试）: actor=${actorId} date=${dateKey}`,
+                );
+              }
             } catch (err) {
               failed += 1;
+              failedDates.add(dateKey);
               console.log(`[NightlyMemory] journal 行固化失败（跳过该行）: ${err}`);
             }
           }
-          if (ingested > 0) dateKeys.push(dateKey);
+          // 当天存在任何未落库的行时，整天都不标记已固化，避免删除后不可重试。
+          // 纯噪音轮次（全部被 isNoiseLogLine 过滤）同样视为已消费，否则永远 pending。
+          if ((ingested > 0 || noiseSkipped > 0 || lines.length === 0) && !failedDates.has(dateKey)) {
+            dateKeys.push(dateKey);
+            consumedTurnIds.push(...turnIds);
+          }
           totalIngested += ingested;
         }
         totalEventLines += eventLines;
         totalFailed += failed;
 
+        if (failedDates.size > 0) {
+          // 失败日期保持 pending：turns 原文不丢，outbox 记录 attempts 供次日重试
+          journal.recordConsolidationFailure(
+            actorId,
+            [...failedDates],
+            "journal line consolidation failed",
+          );
+        }
+
         if (dateKeys.length > 0) {
-          await journal.markConsolidated(actorId, dateKeys);
+          await journal.markConsolidated(actorId, dateKeys, consumedTurnIds);
           consolidatedActors += 1;
           console.log(
             `[NightlyMemory] journal 固化: actor=${actorId} dates=${dateKeys.join(",")} 已入长期记忆`,
@@ -741,6 +772,17 @@ export class NightlyMemoryTaskService {
         `[NightlyMemory] journal consolidation total ingested: ${totalIngested} lines` +
           (totalEventLines > 0 ? `（事件行 ${totalEventLines}）` : "") +
           (totalFailed > 0 ? `，失败 ${totalFailed}` : ""),
+      );
+    } else if (totalFailed > 0) {
+      // 全部未落库：保留原文，但要把失败暴露出来，避免静默
+      this.lastJournalFixation = {
+        actors: consolidatedActors,
+        lines: 0,
+        eventLines: totalEventLines,
+        failed: totalFailed,
+      };
+      console.error(
+        `[NightlyMemory] journal consolidation 全部未落库，原文已保留待重试：失败 ${totalFailed} 行`,
       );
     } else {
       this.lastJournalFixation = null;

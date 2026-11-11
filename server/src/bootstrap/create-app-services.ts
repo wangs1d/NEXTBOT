@@ -133,7 +133,6 @@ import {
   initDailyChatSyncService,
   getDailyChatSyncService,
 } from "../services/daily-chat-sync-service.js";
-import { SkillGenerator } from "../services/skill-generator.js";
 import { ProactiveAgentCenter } from "../services/proactive-agent-center.js";
 import { ProactiveOutboundMessageService } from "../services/proactive-outbound-message-service.js";
 import {
@@ -271,14 +270,12 @@ import {
   parseAgentIdentityKv,
 } from "../services/agent-identity.js";
 import { buildPersonaPrompt } from "../agent/soul-store.js";
-import { registerWalletTools } from "../tools/wallet-tools.js";
 import { registerPaymentTools } from "../tools/payment-tools.js";
 import { QrAssistService } from "../services/qr-assist-service.js";
 import { registerWechatClawTools } from "../tools/wechat-claw-tools.js";
 import { registerMeituanTools } from "../tools/meituan-tools.js";
 import { registerAgentPhoneTools } from "../tools/agent-phone-tools.js";
 import { registerAgentVoiceTools } from "../tools/agent-voice-tools.js";
-import { registerSurfaceTools } from "../tools/surface-tools.js";
 import {
   buildCapabilityModules,
   getAllCapabilityModuleIntentRules,
@@ -296,10 +293,10 @@ import { registerAgentLinkTools, registerWorldStatusTools } from "../tools/agent
 import { registerAgentRelayTools } from "../tools/agent-relay-tools.js";
 import { formatNextRunAtLocal, registerCalendarTools } from "../tools/calendar-tools.js";
 import { registerClockTools } from "../tools/clock-tools.js";
-import { registerAgentActivityTools } from "../tools/agent-activity-tools.js";
 import { registerLifeTools } from "../tools/life-tools.js";
 import { registerSmartHomeTools } from "../tools/smart-home-tools.js";
 import { registerDeviceTools } from "../tools/device-tools.js";
+import { registerCompositeTools } from "../external-model/composite-chat-tools.js";
 import { SmartHomeService } from "../services/smart-home-service.js";
 import { DeviceRegistry } from "../device-bus/device-registry.js";
 import { createHomeAdapterFactory } from "../device-bus/adapters/home-adapter.js";
@@ -341,14 +338,11 @@ import { MessageBridgeService } from "../services/message-bridge-service.js";
 import { createDesktopVisualFromEnv } from "../services/desktop-visual-subprocess.js";
 import { registerDesktopVisualTools } from "../tools/desktop-visual-tools.js";
 import { registerPhoneBridgeTools } from "../tools/phone-bridge-tools.js";
-import { registerMessageHubTools } from "../tools/message-hub-tools.js";
 import { PhoneBridgeCoordinator } from "../services/phone-bridge-coordinator.js";
 import { PhoneCallCoordinator } from "../services/phone-call-coordinator.js";
-import { registerVisionTools } from "../tools/vision-tools.js";
 import { registerWebTools } from "../tools/web-tools.js";
 import { registerMarketQuoteTools } from "../tools/market-quote-tools.js";
 import { registerVideoTools } from "../tools/video-tools.js";
-import { registerInternetIntelligenceTools } from "../tools/internet-intelligence-tools.js";
 import { registerHttpTools } from "../tools/http-tools.js";
 import { registerMcpTools } from "../tools/mcp-tools.js";
 import { buildMcpChatTools } from "../tools/mcp-tools.js";
@@ -361,9 +355,6 @@ import { MEMORY_INVALIDATION_CHAT_TOOLS } from "../tools/memory-invalidation-too
 import { configureMemoryConsolidation } from "../services/memory-consolidation-service.js";
 import { registerBrowserTools } from "../tools/browser-tools.js";
 import { BrowserSessionService } from "../services/browser-session-service.js";
-import { InternetIntelligenceService } from "../services/internet-intelligence-service.js";
-import { registerSelfProgrammingTools } from "../tools/self-programming-tools.js";
-import { registerAISkillGenerationTools } from "../tools/ai-skill-generation-tools.js";
 import { registerSkillManageTools } from "../tools/skill-manage-tools.js";
 import { registerNotesTools } from "../tools/notes-tools.js";
 import { NotesService } from "../services/notes-service.js";
@@ -401,7 +392,6 @@ import {
 } from "../config/env.js";
 import { registerHttpRateLimit } from "../http-rate-limit/http-rate-limit.js";
 import type { AppServices } from "./types.js";
-import { VisionPeriodicScheduler } from "../vision/vision-periodic-scheduler.js";
 import { CompanionService } from "../services/companion-service.js";
 import { MarketSignalService } from "../services/market-signal-service.js";
 import { MoodInferenceService } from "../services/mood-inference-service.js";
@@ -588,7 +578,6 @@ import { WatchTaskStore, WatchTaskWatcher } from "../proactivity/branches/watch-
 import { IntelService } from "../proactivity/intel/intel-service.js";
 import { createIntelJudge } from "../proactivity/intel/intel-judge.js";
 import { createIntelComposer } from "../proactivity/intel/intel-compose.js";
-import { registerIntelPanelTools } from "../tools/intel-panel-tools.js";
 import { registerWatchTaskTools } from "../tools/watch-task-tools.js";
 import { WatchBoard } from "../services/watch-board.js";
 import { UserRhythmStore, parsePrepMinutesFromFact } from "../services/user-rhythm-store.js";
@@ -613,7 +602,6 @@ import {
   registerProactivityFeedbackTools,
 } from "../tools/proactivity-feedback-tools.js";
 import { registerAgentTasksTools } from "../tools/agent-tasks-tools.js";
-import { registerRhythmReminderTools } from "../tools/rhythm-reminder-tools.js";
 import {
   ConsumptionLedgerListener,
   isConsumptionTool,
@@ -749,11 +737,6 @@ export async function createAppServices(
   const upstreamSearchService = new UpstreamSearchService(infoHubService);
   const videoGrabService = new VideoGrabService();
   setVideoGrabServiceRef(videoGrabService);
-  const internetIntelligenceService = new InternetIntelligenceService({
-    search: upstreamSearchService,
-    pages: infoHubService,
-    weather: weatherService,
-  });
   const realFundsWallet = new RealFundsWalletService();
   const paymentService = new PaymentService();
   const meituanService = new MeituanService();
@@ -836,7 +819,6 @@ export async function createAppServices(
 
   registerWebTools(toolRegistry, infoHubService, upstreamSearchService, videoGrabService);
   registerVideoTools(toolRegistry, videoGrabService, upstreamSearchService);
-  registerInternetIntelligenceTools(toolRegistry, internetIntelligenceService);
   registerHttpTools(toolRegistry);
 
   // ========== MCP 客户端服务 ==========
@@ -1154,7 +1136,7 @@ export async function createAppServices(
     },
   });
   registerPhoneBridgeTools(toolRegistry, { bridge: phoneBridgeCoordinator });
-  // messages.reply 的 sms 平台经手机桥真发（SmsManager + 手机确认窗）
+  // 站内消息的 sms 平台经手机桥真发（SmsManager + 手机确认窗）
   messagePlatformGateway.setPhoneBridgeSender({
     hasExecutor: (actorId) => phoneBridgeCoordinator.hasExecutor(actorId),
     invoke: (actorId, action, params) => phoneBridgeCoordinator.invoke(actorId, action, params),
@@ -1374,8 +1356,7 @@ export async function createAppServices(
   const betaWaitlistService = new BetaWaitlistService();
   const betaInviteService = new BetaInviteService();
   const friendService = new FriendService();
-  // 站内好友消息统一投递内核（2026-10-15 闭环）：world.link.send_message / messages.reply
-  // (friend) / HTTP /friends/messages 三出口共用；hub 持久落库解决离线必达。
+  // 站内好友消息统一投递内核（2026-10-15 闭环）：world.link.send_message / HTTP /friends/messages 共用；hub 持久落库解决离线必达。
   const friendMessageService = new FriendMessageService({
     hub: messageHubService,
     relay: agentRelayService,
@@ -1402,7 +1383,6 @@ export async function createAppServices(
     app.log.error({ err }, "Failed to load persisted data");
   });
   
-  registerWalletTools(toolRegistry, friendService);
   registerPaymentTools(toolRegistry, paymentService, new QrAssistService({ imageStore: imageGenerationService }));
   registerMeituanTools(toolRegistry, meituanService);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：中继/虚拟电话工具族
@@ -1417,11 +1397,6 @@ export async function createAppServices(
     registerAgentPhoneTools(toolRegistry, virtualPhoneService);
   }
   registerAgentVoiceTools(toolRegistry, voiceCapabilityService);
-  // Surface-on-Demand：surface.dismiss（收起媒体页等浮层）。surface.show 已于
-  // 2026-10-22 删除——召唤面板不由 LLM 工具实现。
-  registerSurfaceTools(toolRegistry, {
-    trySend: (actorId, data) => wsConnectionRegistry.trySend(actorId, data),
-  });
   // task.dispatch（2026-09-05 前后台架构）：前台派后台任务原语。launch 晚绑定——
   // 工具注册发生在 registry 装配期（agentCore 尚未创建），agentCore 就绪后接上。
   const taskDispatchLauncherRef: {
@@ -1690,6 +1665,20 @@ export async function createAppServices(
     initShortTermMemoryGatewayService(),
   ]);
   initDailyJournalService();
+
+  // 启动时统一向量空间：缺向量 / 维度与当前 embedding 端点不一致的节点全部重算。
+  // 召回侧不再用关键词集合冒充向量，因此这一步是语义召回可用的前提。
+  void humanLikeMemory
+    .backfillNodeVectors()
+    .then((r) => {
+      if (r.embedded > 0 || r.failed > 0) {
+        console.log(
+          `[memory-backfill] 向量回填完成: 扫描 ${r.scanned}，回填 ${r.embedded}，失败 ${r.failed}`,
+        );
+      }
+    })
+    .catch((err) => console.error("[memory-backfill] 向量回填异常:", err));
+
 
   // ─── 方案 A/B/D：agentic-memory 三件套（桥接 / 账本 / 溯源）───
   // 共用同一 SQLite 文件（AGENT_AGENTIC_MEMORY_DB，缺省 data/agentic_memory/
@@ -2914,6 +2903,12 @@ export async function createAppServices(
   // 未开启时零行为变更。
   const accessAuthService = new AccessAuthService();
   await accessAuthService.load();
+  // 过期超过续期宽限期的记录在启动时清掉：不清理会让 access-tokens.json
+  // 无限增长，且 /api/auth/devices 里出现早已作废的幽灵设备。
+  const prunedTokens = accessAuthService.cleanupExpiredTokens();
+  if (prunedTokens > 0) {
+    console.log(`[access-auth] 启动清理过期设备凭据 ${prunedTokens} 条`);
+  }
   // 把同一份实例交给限流 hook（限流在 690 行附近先注册，此时还没 new 出来）
   accessAuthServiceForLimit = accessAuthService;
   if (isAccessAuthRequired() && !accessAuthService.hasAnyTokens()) {
@@ -2989,6 +2984,8 @@ export async function createAppServices(
   });
 
   registerDeviceTools(toolRegistry, deviceRegistry, devicePairingService);
+  // 复合工具层：把同链路的细分执行器收进 action 分流（模型只见复合入口）。
+  registerCompositeTools(toolRegistry);
   const promptContextBuilder = new PromptContextBuilder({
     agentMemorySyncService,
     worldService,
@@ -3213,9 +3210,6 @@ export async function createAppServices(
   // 启用 brain 时：实例化四皮层、注册子系统、注入 prompt builder、启动。
   // 关闭 brain 时（BRAIN_CENTER_ENABLED=0）：整个 brain/ 模块不实例化、不启动，
   //   旧路径完全保留（proactiveCenter / proactiveLifeRuntimeService 已在上面 start）。
-  // 共享实例：供 brain 皮层与 agent 工具共用同一份状态
-  const skillGenerator = new SkillGenerator(externalChat);
-
   let brainCenter: BrainCenter | null = null;
   // synapseBus 在 brainNeuroEnabled 块内创建；此处预先声明，
   // 供 brainEnabled 块内的主动决策闭环在 neuro 未启用时降级为 null。
@@ -3607,12 +3601,6 @@ export async function createAppServices(
   app.log.info(`[AgentRuntime] ${formatAgentRuntimeConfigSummary(getAgentRuntimeConfig())}`);
 
   const desktopVisual = createDesktopVisualFromEnv();
-  const visionPeriodicScheduler = new VisionPeriodicScheduler({
-    runtime,
-    wsRegistry: wsConnectionRegistry,
-    // 懒引用（desktopVisual 在上方一行才创建；桥/本机视觉均走该端口）
-    getVisualPort: () => desktopVisual,
-  });
   // 主动性在场服务引用（proactivityPresence 在下方才构造；桌面同步回调运行时已就绪）
   let proactivityPresenceRef: import("../proactivity/presence-service.js").PresenceService | null = null;
   const desktopBridgeCoordinator = new DesktopBridgeCoordinator({
@@ -3633,9 +3621,6 @@ export async function createAppServices(
     },
   });
 
-  // vision 工具族需要 desktopBridgeCoordinator 才能走 desktop:bridge 截图路径，
-  // 必须在 desktopBridgeCoordinator 实例化后注册。
-  registerVisionTools(toolRegistry, visionPeriodicScheduler, deviceRegistry, desktopBridgeCoordinator);
   registerDesktopVisualTools(toolRegistry, {
     localVisual: desktopVisual,
     bridge: desktopBridgeCoordinator,
@@ -4847,11 +4832,6 @@ export async function createAppServices(
   });
   messageBridgeService = new MessageBridgeService(runtime, messageHubService);
 
-  registerMessageHubTools(toolRegistry, { hub: messageHubService, gateway: messagePlatformGateway, runtime, friendMessages: friendMessageService, phoneBridgeCoordinator });
-
-  // ========== 注册自我编程和智能生成工具 ==========
-  registerSelfProgrammingTools(toolRegistry, skillManager);
-  registerAISkillGenerationTools(toolRegistry, externalChat, skillManager, skillGenerator);
   registerNotesTools(
     toolRegistry,
     notesService,
@@ -5064,8 +5044,9 @@ export async function createAppServices(
       const note = String(fence.actionConfig.note ?? "").trim();
       void toolRegistry
         .execute(
-          "calendar.create",
+          "calendar",
           {
+            action: "create",
             kind: "reminder",
             title,
             shortTitle: title.slice(0, 12),
@@ -5972,7 +5953,6 @@ export async function createAppServices(
     },
   });
   intelService.start();
-  registerIntelPanelTools(toolRegistry, intelService);
   console.log("[Bootstrap] 情报链路已装配（统一闸口 + 面板 + 判断/成稿两段模型；巡检 60s）");
 
   // ─── 用户邮箱盯梢（MailWatch）───
@@ -6731,7 +6711,7 @@ export async function createAppServices(
     );
   };
   // 代办足迹执行类上报工具：Agent 办完代办（订牛奶/缴费/改日程…）后自主调用落账
-  registerAgentActivityTools(toolRegistry, agentActivityStore);
+  // 代办足迹写入仍由 HTTP 侧（POST /agent/activities）承担。
   // 身份与主页打理工具：agent.update_identity（取名/改名唯一写入口）+ agent.update_homepage
   registerAgentIdentityTools(toolRegistry, {
     accounts: agentAccountService,
@@ -7314,10 +7294,10 @@ export async function createAppServices(
   // ─── Task 19 健康关怀装配（场景E）───
   // 1) health.query 已随 health-fitness 能力模块注册（"这周跑了几次步"类确定性
   //    统计，服务端聚合返回数字，LLM 只负责措辞）
-  // 2) 节律提醒模板：喝水/睡觉/运动预设（care.rhythm_reminder 工具，默认不创建），
+  // 2) 节律提醒由后台调度器承接：喝水/睡觉/运动预设（默认不创建），
   //    开启 → ScheduleTaskService 每日任务 → 到点 reminderHandler → WS 推送 +
   //    proactivity speak（Task 18 已接通）
-  registerRhythmReminderTools(toolRegistry, scheduleTaskService);
+  // 节律提醒由后台调度器与 calendar 承接，不再暴露独立工具。
   console.log("[Bootstrap] 健康关怀已装配（health.query 统计问答 + 节律提醒模板）");
 
   // ─── 财务入站邮件记账装配（财务管家 P1）───
@@ -7379,7 +7359,9 @@ export async function createAppServices(
     reachRouter,
   });
 
-  // 设备自绑定鉴权周界（仅 ACCESS_AUTH_REQUIRED=1 时挂载 hook；未开启零行为变更）
+  // 设备自绑定鉴权周界（**始终挂载**：分级裁决 token / guest / 拒伪造）。
+  // ACCESS_AUTH_REQUIRED 只决定「完全无身份的请求」是否放行，不再决定
+  // 「自报邮箱能不能冒充账号」——那一条永远拒绝。
   registerAccessAuthHook(app, accessAuthService);
 
   // ─── 闹钟/即时提醒（docs/mobile-agent-reminder-alarm-design.md）───
@@ -7767,6 +7749,8 @@ export async function createAppServices(
     phoneCallCoordinator,
     // 卡片内动作通道（card.action）：卡内下单/支付/物流直接执行，不发消息
     shoppingOrderService,
+    // 卡内收款确认（payment.pay.check）：queryOrder 原地换卡
+    paymentService,
     agentAccountService,
     actorModelBindings,
     petReactionChat: externalChat,

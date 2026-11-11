@@ -19,6 +19,11 @@ const PERSISTENT_ACTION_RE =
 const CODE_OR_PROJECT_RE =
   /code|repo|project|file|bug|test|build|lint|typescript|javascript|flutter|server|client|代码|项目|文件|报错|测试|构建|类型|前端|后端|优化|修复|实现/i;
 
+// 确定性记忆问句：模型理解经常漏标 recallIntent/reference，这类句子即使很短
+// 也必须走叙事召回（例如“我昨天说的那个演员是谁”只有 11 个字）。
+const MEMORY_QUERY_RE =
+  /记得|还记得|忘了吗|上次|上回|之前(说|提|聊|要|让)|以前(说|提)|我说过|我说的是什么|让你(找|搜|查|做)|帮我(找|搜|查)过|给我(取|起)的名|叫什么名|昨天|前天|那天|当时/;
+
 export function buildTaskContextProfile(
   message: string,
   understanding?: TurnUnderstanding,
@@ -32,8 +37,9 @@ export function buildTaskContextProfile(
     needsNarrativeRecall: understanding
       ? understanding.recallIntent ||
         understanding.memoryInstruction ||
-        understanding.reference !== "none"
-      : t.length > 16,
+        understanding.reference !== "none" ||
+        MEMORY_QUERY_RE.test(t)
+      : t.length > 16 || MEMORY_QUERY_RE.test(t),
     likelyNeedsFreshFacts: FRESH_FACT_RE.test(t),
     likelyPersistsState: PERSISTENT_ACTION_RE.test(t),
     likelyCodeOrProjectWork: CODE_OR_PROJECT_RE.test(t),

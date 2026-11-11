@@ -63,6 +63,7 @@ import {
   type TurnEventEmitter,
 } from "../../agent/turn-events.js";
 import { getToolResultProcessor, attachMediaSearchMarker, extractMediaCards, dedupMediaCards, trimMediaCardsByTopic, buildInterleavedRenderBlocks, buildCaptionedRenderBlocks, allImageCardsHaveCaption, isFlatImageGallery, stripMediaCardMarker, isMediaSearchTool, type MediaCardItem } from "../../services/tool-result-processor.js";
+import { receiptProducesCard } from "../../services/receipt-card-projection.js";
 import type { TurnEffect } from "../../render/types.js";
 import { collectCardPayloads, effectStatusOf } from "../../render/index.js";
 import { stripContentSummaryBlock, extractContentSummaryCard } from "../../services/content-summary-service.js";
@@ -206,7 +207,6 @@ function formatToolResultAsReply(toolName: string, result: Record<string, unknow
     "tool_search",
     "tool_describe",
     "agent.query_capabilities",
-    "self.list_custom_skills",
   ]);
   if (META_TOOL_NAMES.has(toolName)) return "";
 
@@ -421,11 +421,15 @@ export async function handleChatUserMessageEvent(
   deps: ChatUserMessageHandlerDeps,
 ): Promise<boolean> {
   if (!ctx.boundActorId) {
-    ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ErrorEvent,
-        payload: { code: "SESSION_REQUIRED", message: "请先发送 session.init" },
-      }),
+    // 带 traceId 回给客户端：客户端据此把「这条消息失败」和某个气泡对上，
+    // 不再只能干等 ack（见 WsChatService._handleServerRejection）。
+    const rawMid = payload && typeof payload === "object"
+      ? String((payload as Record<string, unknown>).messageId ?? "")
+      : "";
+    ctx.sendUnifiedError(
+      "SESSION_REQUIRED",
+      "请先发送 session.init",
+      rawMid || undefined,
     );
     return true;
   }
@@ -456,11 +460,27 @@ export async function handleChatUserMessageEvent(
   const data = parsed.data;
   const msgActor = resolveActorId({ userId: data.userId, sessionId: data.sessionId });
   if (msgActor !== ctx.boundActorId) {
-    ctx.socket.send(
-      JSON.stringify({
-        type: ServerEventType.ErrorEvent,
-        payload: { code: "FORBIDDEN", message: "userId/sessionId 与当前连接不一致" },
-      }),
+    // 连接身份 ≠ 本条消息身份：直接丢弃，客户端必须重新 session.init 后重发。
+    //
+    // **必须留审计**：2026-11-11 真机「消息发出去永远没有回复」就是这条分支
+    // 静默丢弃——audit.log 里只有 session.init、运维侧查不到任何痕迹，最后只能
+    // 靠逐层排除才定位到「建连时身份还是默认 session-mvp-001」。
+    void deps.auditService
+      .record({
+        type: "chat.user_message_rejected",
+        reason: "actor_mismatch",
+        sessionId: ctx.boundActorId,
+        boundActorId: ctx.boundActorId,
+        claimedActor: msgActor,
+        userId: data.userId,
+        messageId: data.messageId,
+        text: typeof data.text === "string" ? data.text.slice(0, 200) : undefined,
+      })
+      .catch(() => {});
+    ctx.sendUnifiedError(
+      "FORBIDDEN",
+      `userId/sessionId 与当前连接不一致（连接身份 ${ctx.boundActorId}，消息身份 ${msgActor}）`,
+      data.messageId,
     );
     return true;
   }
@@ -689,27 +709,14 @@ async function processBatchedMessage(
   };
 
   /** 直跑路径工具回执是否产得出结构化卡片（runToolIfNeeded 补判用）。
-   *  与 done 阶段 attachDeterministicCards 的建卡条件同口径：媒体类看真实
-   *  items，天气/行程/视频有成功回执即出卡，注册工具看 buildToolCard。
-   *  网页搜索不产卡（2026-11-05 定稿）→ 不在此列，正文原样流式送达。 */
+   *  与答案留存闸（tool-loop answerHeld）共用同一份判定 receiptProducesCard：
+   *  媒体类看真实 items，天气/行程/视频有成功回执即出卡，注册工具看
+   *  buildToolCard。网页搜索不产卡（2026-11-05 定稿）→ 不在此列，
+   *  正文原样流式送达。 */
   const directPathToolProducesCard = (
     toolName: string,
     result: Record<string, unknown>,
-  ): boolean => {
-    if (SEARCH_MEDIA_TOOL_NAMES.has(toolName) || toolName === "image.generate") {
-      return extractMediaCards(toolName, result).length > 0;
-    }
-    if (
-      toolName === "weather.get_local" ||
-      toolName === "travel.plan-itinerary" ||
-      toolName === "video.grab" ||
-      toolName === "video.find"
-    ) {
-      return true;
-    }
-    const payload = buildToolCard(toolName, result);
-    return !!payload && payload.items.length > 0;
-  };
+  ): boolean => receiptProducesCard(toolName, result);
 
   // [ts:...] 是系统注入的元数据标记，仅供 LLM 上下文使用，绝不能透出到用户可见消息。
   // 2026-09-03 收紧：此前只剥首块，后续块里模型复述的时间戳帧（含残缺帧）会直透前端。
@@ -952,10 +959,9 @@ async function processBatchedMessage(
     recentUserTurns = [];
     entityContextLines = [];
   }
-  // 路由决策以 Promise 下传：WS 层不再串行等待路由 LLM 调用（此前在这里
-  // await 最多 3s），agent-core 侧与记忆认知（cognize）并行消费。
-  // 面板事件 / 实时流式开关等路由衍生配置在 .then 里就绪——首个主回复 delta
-  // 必然晚于路由决策（agent-core 的主 LLM 调用依赖平面/工具束），无竞态。
+  // 车道决策（统一车道恒对话面，见 task-router.buildUnifiedLaneDecision）。
+  // 分泡门禁在决策就绪后置位——首个主回复 delta 必然晚于此（主 LLM 由本
+  // Promise 之后启动），无竞态。
   const decisionPromise = batched.planContinuation
     ? Promise.resolve(buildPlanContinuationDecision())
     : deps.runtime.routeTurnForWs(msgActor, batched.text, recentUserTurns, entityContextLines, dialogStateLines);
@@ -994,10 +1000,9 @@ async function processBatchedMessage(
       // 证据轮由 agent-core 置 "always"，reply.answerStreamHeld 如实带回；
       // 本层只在 done 裁决消费该信号（见下方裁决处）。意图标签/回执时机
       // 的前置/反应式扣流闸均已退役（缝补删除）。
-      // 真·分绿泡门禁（2026-09-28）：仅对话面（segmentable=plane chat）拆泡；
-      // 语音轮不拆（泡间停顿会拖慢 done，且语音 TTS 不消费气泡边界）；
-      // AGENT_BUBBLE_SPLIT=0 可整体关停（回退单泡协议）。
-      // 置位点在首个主回复 delta 之前（agent-core 主 LLM 依赖同一决策），无竞态。
+      // 真·分绿泡门禁（2026-09-28）：文字对话轮拆泡，语音轮不拆（泡间停顿
+      // 会拖慢 done，且语音 TTS 不消费气泡边界）；AGENT_BUBBLE_SPLIT=0 可
+      // 整体关停（回退单泡协议）。置位点在首个主回复 delta 之前，无竞态。
       if (
         decision.segmentable &&
         !isVoiceMode(msgActor) &&
@@ -1046,12 +1051,8 @@ async function processBatchedMessage(
       pauseMs: 0,
       minSegmentChars: 6,
       interimReplyGapMs: 0,
-      // 2026-08-28 修复"分段回复一次性整段渲染"：原按路由决策
-      // （decision.segmentable）关闭工具/搜索/知识问答轮的分段，工具循环的
-      // 最终文本只在收尾时经一次 onDelta 整段喂入 → segmentationEnabled=false
-      // 时 flushFinal 把全文作为单个 stream chunk 推出，前端一条气泡一次性
-      // 渲染全部内容。改为所有轮次统一启用信息块分段：无论闲聊还是工具轮，
-      // 回复都按信息块逐条推送（块间 400ms 停顿），前端一条一条渲染。
+      // 所有轮次统一启用信息块分段：无论闲聊还是工具轮，回复都按信息块
+      // 逐条推送，前端一条一条渲染。
       segmentationEnabled: true,
       // 信息块目标字符数（同话题短句累积到该长度切块）；正文块数上限从 8 提到 24：
       // 8 块 × 56 字 ≈ 450 字，普通长回复就会触顶，超限内容并入 tailBuffer 后在
@@ -1412,9 +1413,7 @@ async function processBatchedMessage(
         if (
           info.ok &&
           info.result &&
-          (info.toolName === "calendar.create" ||
-            info.toolName === "calendar.update_task" ||
-            info.toolName === "calendar.delete_task")
+          info.toolName === "calendar"
         ) {
           executedReminderToolResults.push({
             toolName: info.toolName,
@@ -1816,7 +1815,15 @@ async function processBatchedMessage(
     const previewPayloads = await previewPayloadsPromise.catch(() => undefined);
     // 出口信封的场景 meta 回传（2026-11-09）：singleBubble 禁分泡的判据在
     // meta.sceneId 上，不回传则 done 帧从 finalText 重拼信封时场景信息丢失。
-    let doneSceneMeta: { sceneId: string; failures: string[]; preSceneIds: string[] } | undefined;
+    let doneSceneMeta:
+      | {
+          sceneId: string;
+          failures: string[];
+          preSceneIds: string[];
+          bodyForm?: string;
+          structuredBody?: boolean;
+        }
+      | undefined;
     finalText = processor.processAssistantText(finalText, {
       userText: batched.text,
       toolName: reply.toolName,
@@ -1828,7 +1835,7 @@ async function processBatchedMessage(
       mediaCardCount,
       renderPayloads: previewPayloads,
       onRenderEnvelope: (envelope) => {
-        doneSceneMeta = envelope.meta;
+        doneSceneMeta = { ...envelope.meta, bodyForm: envelope.bodyForm };
       },
     });
     // 旅游行程确定性附卡：工具返回已瘦身，LLM 口头回复不再携带明细、也写不出
@@ -2229,11 +2236,20 @@ async function processBatchedMessage(
     // 看完。判定走场景声明 produces.singleBubble，与正文是否被改写无关。
     const sceneBlocksBubbles =
       sceneRegistry.get(renderEnvelope.meta.sceneId ?? "")?.produces?.singleBubble === true;
+    // markdown/fold 形态（长文整块）或正文含 markdown 结构（表格/列表/板块
+    // 标题）——用户定稿（2026-11-10）：markdown 内容不分泡，流式期间按换行
+    // 切出的碎泡在 done 收口成一条整块呈现。纯聊天（plain 短句分条）不受
+    // 影响，照常逐泡落屏。
+    const longFormSingleBubble =
+      doneSceneMeta?.bodyForm === "markdown" ||
+      doneSceneMeta?.bodyForm === "fold" ||
+      doneSceneMeta?.structuredBody === true;
     const bubbleSplitLive =
       bubbleTracker.hasBubbles &&
       !utteranceCollapse &&
       !streamResetSent &&
-      !sceneBlocksBubbles;
+      !sceneBlocksBubbles &&
+      !longFormSingleBubble;
 
     ctx.socket.send(
       JSON.stringify({

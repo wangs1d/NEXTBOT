@@ -14,7 +14,7 @@
  */
 
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
-import { bm25HitsForQuery, domainVotesForQuery, priorDirectMatchesForQuery, PRIOR_DIRECT_LIMIT, topToolMatchesForQuery } from "../tools/tool-search/index.js";
+import { bm25HitsForQuery, domainVotesForQuery, topToolMatchesForQuery } from "../tools/tool-search/index.js";
 import { firstSentence } from "../tools/tool-search/schema-slim.js";
 import {
   domainsForTool,
@@ -44,34 +44,29 @@ export function isStaticToolArchEnabled(): boolean {
  * brain.recall 由 setMemoryChatTools 在 bootstrap 注入，测试环境缺省属正常。
  */
 export const CHAT_LANE_CORE_NAMES: readonly string[] = [
-  // 时间/位置/天气（感知）
-  "clock.get_current_time",
+  // 时间/位置（感知）
   "clock.get_user_location",
   // 2026-10-07：此前只在 task 车道，chat 车道模型看不到天气工具，
   // 实证会嘴硬「没有联网天气接口的访问权限」而非 discover——天气是对话高频
-  // 动作，提为 chat 常驻（profile.update 同款教训）。
-  "weather.get_local",
+  // 动作，提为 chat 常驻（profile.update 同款教训）。2026-11 起天气/行情/检索
+  // 统一走复合 web_search（action=weather/quote/web），一个 schema 覆盖三态。
   // 2026-11-06：行情报价常驻。事故链：行情走 search_web → 新闻快照无日期
   // 新旧混杂 → 11·5 大跌被答成「大涨」。报价类事实必须走行情接口直出，
   // 常驻可见才能保证模型不先抓搜索（价格高频变动，快照永远慢一拍）。
-  "market.quote",
   // 联网信息（只读）
   // 2026-10-21 工具面收敛：媒体/热榜三件套移入延迟目录——它们是低频按需检索，
   // 且 media 域有 BM25 域预载兜底（"找张图/猫咪视频/热搜"会确定性带回来），
-  // 每轮常驻约 850 字符并不划算。search_web/fetch_web 仍是对话刚需，常驻。
-  "search_web",
-  "fetch_web",
-  // 日程/提醒（轻动作，唯一创建工具 calendar.create）
-  "calendar.create",
-  "calendar.list_tasks",
+  // 每轮常驻约 850 字符并不划算。web_search/web_fetch 仍是对话刚需，常驻。
+  "web_search",
+  "web_fetch",
+  // 日程/提醒（轻动作，唯一入口 calendar）
+  "calendar",
   // 通讯（轻动作）
-  // phone.ensure_my_number 保留常驻（2026-10-21 实测）：「我的手机号」这类口语
+  // phone 复合（action=number）保留常驻（2026-10-21 实测）：「我的手机号」这类口语
   // 召回不稳（BM25 top-10 缺位），而它一旦进目录，模型会直接嘴硬"查不到号码"。
   // 228 字符换掉一次"没权限"事故，划算。
-  "phone.ensure_my_number",
-  "messages.overview",
-  "messages.reply",
-  "world.link.send_message",
+  "phone",
+  "world.link",
   // 记忆（感知）
   "brain.recall",
   // 用户画像自编辑（2026-09-29）：「越来越了解用户」是对话基本动作；
@@ -81,9 +76,8 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
   // 世界板/晨报）会**主动**推送感知信号，"我刚才在干嘛"属低频回查，留在延迟
   // 目录由 BM25 召回（描述含「我刚才在干嘛/你看到什么了」，词面可命中）。
   // 自我/能力（模型自救入口）
-  // agent.query_capabilities 必须常驻：它是模型"以为没权限"时的自救入口。
-  // self.list_custom_skills 低频，移入延迟目录（"我会什么/自定义技能"可召回）。
-  "agent.query_capabilities",
+  // agent 复合（action=capabilities）必须常驻：它是模型"以为没权限"时的自救入口。
+  "agent",
   // 重活逃生门（委派后台）+ 委派闭环（查询/取消，2026-09-19 P0-2）
   "task.dispatch",
   "task.status",
@@ -94,47 +88,32 @@ export const CHAT_LANE_CORE_NAMES: readonly string[] = [
  * 后台任务执行器 Core（task_plane 专用）：在 chat 常驻基础上换进执行主力
  * （深网/桌面/代码）。2026-10-21 去路由化后不存在"task 车道"前置分类——
  * 本清单只服务 task.dispatch 派发的后台重活与计划续跑。
- * 长尾（购物订单、智能家居、财务域、vision.periodic_* 等）留在延迟目录。
+ * 长尾（购物订单、智能家居、财务域等）留在延迟目录。
  */
 export const TASK_LANE_CORE_NAMES: readonly string[] = [
-  // 搜索全档
-  "search_web",
-  "fetch_web",
-  "deep_search",
-  "search_images",
-  "search_videos",
-  "hot_rankings",
-  "internet.research",
-  // 深读/站点导航
-  "info.inspect_webpage",
-  "info.navigate_site",
+  // 搜索全档（web/deep/images/images_batch/videos/find_video/parse_video/hot/
+  // weather/quote 全部收在 web_search 的 action 里）
+  "web_search",
+  // 深读/站点导航/原始 HTTP
+  "web_fetch",
   "browser.session.list",
   // 感知
-  "clock.get_current_time",
   "clock.get_user_location",
-  "weather.get_local",
   // 日程/提醒
-  "calendar.create",
-  "calendar.list_tasks",
+  "calendar",
   // 通讯
-  "messages.overview",
-  "messages.reply",
-  "world.link.send_message",
+  "world.link",
   // 桌面（桥/本机视觉离线时由调用方过滤）
   "desktop.visual.screenshot",
-  // 代码沙箱（self-programming 注册，缺失自动跳过）
+  // 代码沙箱（缺失自动跳过）
   "code.run",
   "code.write_file",
   "code.read_file",
   // 记忆/能力
   "brain.recall",
-  "agent.query_capabilities",
-  "self.list_custom_skills",
+  "agent",
   // 持续感知回溯（只读，2026-09-19 P0-1）
   "perception.overview",
-  // 钱（只读）
-  "wallet.get_balance",
-  "wallet.get_transactions",
   // ObservationPack 读回（压缩补偿，常驻才有意义）
   "obs_recall",
   // 元工具桥 + 逃生门 + 委派闭环（2026-09-19 P0-2）
@@ -293,14 +272,14 @@ export function isToolRecallEnabled(): boolean {
  * 时对用户文本做确定性 BM25 域多数票，命中域全族瘦身 schema 直接进本轮可见集——
  * 把「要不要找工具」从模型自觉拿回代码裁决。
  *
- * L1 增强（2026-10-09）四通道递进：
- *   1. 强域命中（票 ≥3/5）→ 域全族注入；次强域（票 ≥2）同注入（多域意图，
+ * L1 增强（2026-10-09，2026-11-11 去点信号）：
+ *   1. BM25 点信号：与 query 强匹配的单个工具先占位（纯检索算法，无意图规则）。
+ *   2. 强域命中（票 ≥3/5）→ 域全族补齐；次强域（票 ≥2）同注入（多域意图，
  *      如「去北京旅游顺便查天气」→ travel + weather 两族）。
- *   2. 先验直取（点信号）：意图别名/例句命中（token 重叠加分 ≥0.4）的工具
- *      直取 ≤2 个，排在域族之前——确切意图证据优先于族广度（否则 12 工具的
- *      desktop 族会把 cap 挤满、点信号被 slice 丢弃，实测教训）。
- *   3. 无强域 → BM25 top-K 工具直取兜底（双闸过滤噪声，见 topToolMatchesForQuery）。
- *   4. AGENT_TOOL_RECALL=off → 空集（基线/回退）。
+ *   3. AGENT_TOOL_RECALL=off → 空集（基线/回退）。
+ *
+ * 不再按意图别名/例句做「先验直取」：那是代码替模型点工具。确切意图由模型
+ * 自己写 tool_discover 查询决定，预载只保留与语义无关的 BM25 点信号与域族聚合。
  *
  * excludeNames：车道 Core 已含的工具不重复注入（先排除后截断，填满 cap 的都是
  * 增量工具）；任务面 router-first 可见集 = 纯预载，传空集即退化为原语义。
@@ -332,15 +311,16 @@ export function buildDomainPreloadTools(
     if (name) byName.set(name, t);
   }
 
-  // 2. 先验直取（点信号，最先生成）：别名/例句意图命中（≥0.4）直取 ≤2 个。
-  //    与 BM25 词面通道互补——描述与 query 零词面重叠的意图（买耳机/盯话题/
-  //    到家提醒）靠别名召回；raw/先验双 top-1 不再被假强域整族顶掉。
-  for (const m of priorDirectMatchesForQuery(trimmed, corpus, PRIOR_DIRECT_LIMIT, excludeNames)) {
-    const tool = byName.get(m.name);
+  // 1. BM25 点信号优先：单个工具与 query 的强匹配先占位，域族随后补齐。
+  //    去掉别名直取后，这是唯一的「点信号」通道；它完全由检索算法产生，
+  //    不含任何意图规则。先放点信号再放族，避免大族（12 个 desktop 工具）
+  //    把 cap 占满、把真正命中的单个工具 slice 掉。
+  for (const match of topToolMatchesForQuery(trimmed, corpus, DOMAIN_PRELOAD_TOPK, excludeNames)) {
+    const tool = byName.get(match.name);
     if (tool) push(tool);
   }
 
-  // 1. 域多数票：top-1 强信号（≥3/5）才注入；强域 + 次强域（≥2 票）全族
+  // 2. 域多数票：top-1 强信号（≥3/5）才注入；强域 + 次强域（≥2 票）全族
   //    （多域意图如「去北京旅游顺便查天气」→ travel + weather）。top-1 只有 2 票
   //    = 无强信号（噪声校准：噪声票恰在 2/5），整组不注入、走 top-K 兜底。
   // 子句切分（2026-10-09 L1）：连词/标点切开后按子句投票再取强域并集——
@@ -377,10 +357,10 @@ export function buildDomainPreloadTools(
   }
   // 族内按 BM25 相关性降序注入（2026-10-10 族序修正）：域命中只说明「意图在
   // 域里」，全族按注册表序截断会让大族里的无关工具占满 cap——实证「音乐暂停
-  // 一下」命中 media 域后 11 个 vision.*（同域前缀混域）把 media.pause（族内
-  // #14）挤掉，task 车道直达率的 2 条 miss 全栽在这。排序依据用域投票同索引的
+  // 一下」命中 media 域后，同域前缀工具过多把 media.pause（族内 #14）挤掉，
+  // task 车道直达率的 2 条 miss 全栽在这。排序依据用域投票同索引的
   // 命中全表（bm25HitsForQuery，投票的证据本身排序族内工具——searchDeferredTools
-  // 通道对该类 CJK query 失真，top1 是 vision 噪声、media.* 反而落榜，不可用）；
+  // 通道对该类 CJK query 失真，不可用）；
   // 同语料同 query 恒同输出，确定性成立，未上榜工具保持注册表序垫底。
   const familyScore = new Map<string, number>();
   if (strongDomains.length > 0) {
@@ -399,14 +379,7 @@ export function buildDomainPreloadTools(
     for (const tool of family) push(tool);
   }
 
-  // 3. 弱信号兜底：无强域时 BM25 top-K 工具直取（先验直取不算强信号，不影响此闸）
-  if (strongDomains.length === 0) {
-    for (const match of topToolMatchesForQuery(trimmed, corpus, DOMAIN_PRELOAD_TOPK, excludeNames)) {
-      const tool = byName.get(match.name);
-      if (tool) push(tool);
-    }
-  }
-
+  // 3. 域族按上一步的强域注入（族内按 BM25 相关性排序，避免无关工具占满 cap）。
   const finalPicked = picked.slice(0, cap);
   // L5 回流：记录本轮实际预载名（负反馈判定的注入侧数据源；执行侧在
   // ToolContextFactory.execute）。AGENT_TOOL_RECALL=off / 空集不记录。
@@ -430,11 +403,8 @@ function toolNameOfPreload(tool: ChatCompletionTool): string {
  * 不再赌词面召回；长尾重活仍走预载/discover/晋升通道。
  */
 export const TASK_LANE_ROUTER_FIRST_LIGHT_NAMES: readonly string[] = [
-  "clock.get_current_time",
-  "calendar.create",
-  "calendar.list_tasks",
-  "messages.overview",
-  "messages.reply",
+  "calendar",
+  "world.link",
   "profile.update",
 ];
 
@@ -494,7 +464,7 @@ export const CAPABILITY_BRIDGE_TOOLS: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "agent.query_capabilities",
+  "agent",
 ]);
 
 /**

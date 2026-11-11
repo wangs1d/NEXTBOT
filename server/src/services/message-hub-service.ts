@@ -16,8 +16,7 @@ import { gateInboundMessage } from "./message-gate.js";
 // alipay（2026-09-18）：手机通知监听捕捉的支付宝推送——财务实时入账（钱迹模式）的专用平台，
 // 普通消息聚合不经过此平台（通知监听白名单里只有支付宝包名映射到它）
 // friend（2026-10-15）：站内好友消息（Agent Link）。world.link.send_message 出站/好友回信入站
-// 都落 hub（platform=friend，channelId=对方 actorId），持久化 + agent 可经
-// messages.overview / read_conversation 读取——闭合「agent 给好友发消息」收发环。
+// 都落 hub（platform=friend，channelId=对方 actorId），持久化 + 服务端消息中心可读取——闭合「agent 给好友发消息」收发环。
 export type MessageHubPlatform = "wechat" | "qq" | "feishu" | "sms" | "email" | "alipay" | "friend" | "generic";
 export type MessageHubDirection = "inbound" | "outbound";
 export type MessageHubImportance = "high" | "normal";
@@ -400,7 +399,7 @@ export class MessageHubService {
     return this.requireStore().getMessageByExternalId(actorId, platform, externalMessageId);
   }
 
-  /** 关键词检索消息（messages.search 工具用）。 */
+  /** 关键词检索消息（消息检索用）。 */
   searchMessages(
     actorId: string,
     opts?: { query?: string; platform?: string; since?: string; limit?: number },
@@ -413,12 +412,12 @@ export class MessageHubService {
     });
   }
 
-  /** 通知捕捉统计（messages.capture_status 工具用，断流判断数据源）。 */
+  /** 通知捕捉统计（断流判断数据源）。 */
   captureStats(actorId: string): Array<{ platform: string; lastInboundAt: string; count24h: number }> {
     return this.requireStore().captureStats(actorId);
   }
 
-  /** 各平台未读/会话统计（messages.overview 工具用，纯计数不总结）。 */
+  /** 各平台未读/会话统计（纯计数不总结）。 */
   overview(actorId: string): MessageHubOverview {
     const platforms = this.requireStore().overviewStats(actorId);
     return {

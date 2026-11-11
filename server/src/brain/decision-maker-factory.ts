@@ -27,7 +27,7 @@ import type { ExternalChatProvider } from "../external-model/types.js";
  *
  * 行为与原 bootstrap 内联实现完全等价：
  *   - 一次 LLM 完成"要不要说+说什么+要不要顺手做事"
- *   - 支持环境控制动作输出（calendar.create / smart_home.scene）
+ *   - 支持环境控制动作输出（calendar / smart_home）
  *   - LLM 失败 → speak=false 兜底
  */
 export function createDefaultEndToEndDecisionMaker(): EndToEndDecisionMaker {
@@ -52,7 +52,7 @@ export function createDefaultEndToEndDecisionMaker(): EndToEndDecisionMaker {
         `判断是否要主动开口告诉用户这个信号，如果要，给出自然的话术。\n` +
         `注意：如果用户当前正在聊的话题与信号无关，不要强行把话题扯回信号内容。\n` +
         `同时判断是否需要顺手执行环境控制动作（如出行→建日程、深夜→晚安场景）。\n` +
-        `可用工具：calendar.create(args:{title,description,runAt?})、smart_home.scene(args:{action:"activate",scene_name})。\n` +
+        `可用工具：calendar(args:{action:"create",title,description,runAt?})、smart_home(args:{action:"scene",scene_action:"activate",scene_name})。\n` +
         `只输出 JSON：{"speak": true/false, "message": "话术或空", "reason": "简短理由", "actions": [{"tool":"工具名","args":{...},"reason":"原因"}]}\n` +
         `actions 可为空数组。仅在信号明显匹配工具场景时才填。`;
       let raw = "";

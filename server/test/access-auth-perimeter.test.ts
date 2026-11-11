@@ -57,7 +57,7 @@ async function bindFirstDevice(accessAuthService: AccessAuthService): Promise<st
   return token;
 }
 
-test("开启鉴权：裸路径与 /api/* 同等拦截，无凭证一律 401", async () => {
+test("开启鉴权：裸路径与 /api/* 同等拦截，无身份一律 401", async () => {
   process.env.ACCESS_AUTH_REQUIRED = "1";
   const { app } = makeApp();
   try {
@@ -65,6 +65,73 @@ test("开启鉴权：裸路径与 /api/* 同等拦截，无凭证一律 401", as
       const res = await app.inject({ method: "GET", url });
       assert.equal(res.statusCode, 401, `${url} 必须要求凭证`);
       assert.equal(res.json().ok, false);
+      assert.equal(res.json().code, "IDENTITY_REQUIRED");
+    }
+  } finally {
+    await app.close();
+  }
+});
+
+test("开启鉴权：未登录设备（inst_）按 guest 放行，但仍拿不到账号数据", async () => {
+  process.env.ACCESS_AUTH_REQUIRED = "1";
+  const { app } = makeApp();
+  try {
+    const res = await app.inject({ method: "GET", url: "/notes?userId=inst_9f8e7d6c5b4a3210" });
+    assert.equal(res.statusCode, 200, "未登录设备是合法身份，不该被 401");
+  } finally {
+    await app.close();
+  }
+});
+
+test("未登录设备用请求头表明身份（图片/音频/WebView 发不出 query）", async () => {
+  process.env.ACCESS_AUTH_REQUIRED = "1";
+  const { app } = makeApp();
+  try {
+    const ok = await app.inject({
+      method: "GET",
+      url: "/picture/assets",
+      headers: { "x-nb-actor": "inst_9f8e7d6c5b4a3210" },
+    });
+    assert.equal(ok.statusCode, 200, "设备标识头是未登录设备的合法身份来源");
+    assert.equal((ok.json().query as Record<string, string>).userId, "inst_9f8e7d6c5b4a3210");
+
+    // 头里塞邮箱不能当成账号：没有 token 就是没有账号身份。
+    const forged = await app.inject({
+      method: "GET",
+      url: "/picture/assets",
+      headers: { "x-nb-actor": VICTIM },
+    });
+    assert.equal(forged.statusCode, 403, "邮箱走请求头同样必须带 token 才认");
+  } finally {
+    await app.close();
+  }
+});
+
+test("无 token 自报邮箱：一律 403，与鉴权开关无关", async () => {
+  for (const strict of ["1", undefined]) {
+    if (strict) process.env.ACCESS_AUTH_REQUIRED = strict;
+    else delete process.env.ACCESS_AUTH_REQUIRED;
+    const { app } = makeApp();
+    try {
+      const res = await app.inject({
+        method: "GET",
+        url: "/gallery-wall/layout?userId=victim@example.com",
+      });
+      assert.equal(res.statusCode, 403, `strict=${strict} 时自报账号必须被拒`);
+      assert.equal(res.json().code, "IDENTITY_REQUIRED");
+    } finally {
+      await app.close();
+    }
+  }
+});
+
+test("无 token 把邮箱塞进 sessionId 或 actorId：同样 403", async () => {
+  delete process.env.ACCESS_AUTH_REQUIRED;
+  const { app } = makeApp();
+  try {
+    for (const q of ["sessionId=victim@example.com", "actorId=victim@example.com"]) {
+      const res = await app.inject({ method: "GET", url: `/gallery-wall/layout?${q}` });
+      assert.equal(res.statusCode, 403, `${q} 不能被当成身份`);
     }
   } finally {
     await app.close();
@@ -178,7 +245,7 @@ test("对象型 body 的身份字段一并钉死", async () => {
   }
 });
 
-test("未开启鉴权：周界不挂载，裸路径照旧免凭证（零行为变更）", async () => {
+test("未开启鉴权：完全无身份的请求按匿名放行（宽松模式兼容旧客户端）", async () => {
   delete process.env.ACCESS_AUTH_REQUIRED;
   const { app } = makeApp();
   try {

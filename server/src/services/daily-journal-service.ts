@@ -1,17 +1,15 @@
 /**
  * 当日对话日志（Daily Journal）—— 记忆架构重构写入层
  *
- * 设计原则（白天只写不捞）：
- * - 每轮对话结束，把「规则精简行」（时间戳 + 角色 + 精简内容 + 事实提取）
- *   追加写入当日 md 文件：data/journal/{actorId}/journal-YYYYMMDD.md；
- * - 同一天多 session 追加写同一文件，时间戳天然区分；
- * - 当天的问题只对这一个文件做零-embedding 词法检索（searchToday）；
- * - 夜晚固化（NightlyMemoryTaskService）消费未固化日志 → 入长期记忆图
- *   → 标记已固化（consolidated.json 记录已处理日期）→ 删除对应 md 原始对话，
- *     实现短期/长期隔离：md 只承载「未固化的当天记忆」，固化后改由图谱/KV 长期召回。
+ * 统一真相源（2026-11-11）：
+ * - 每轮对话先 append-only 写入同库 `hm_turns`（L0 原始文本，不因固化删除），
+ *   并在同一事务登记 `hm_memory_jobs` 抽取任务（outbox）；
+ * - data/journal/{actorId}/journal-YYYYMMDD.md 只是 turns 的人类可读派生视图，
+ *   用于当天检索 / 今日回顾；它可随时由 turns 重建，不是权威数据。
  *
- * 写入零 LLM、零 embedding：事实提取复用 STM gateway 同款正则
- * （USER_FACT_RE / USER_PREFERENCE_RE / ASSISTANT_COMMITMENT_RE）。
+ * 为什么改：旧实现只把「首句 + 窄正则命中」写进 md，且夜间固化后删除 md，
+ * 一旦固化链路漏掉一行，原文就永久消失。现在原文先落库，任何下游失败都
+ * 只是 pending job，次日继续重试。
  */
 
 import { getDataDir } from "../config/data-dir.js";
@@ -19,21 +17,23 @@ import { mkdir, readFile, writeFile, appendFile, readdir, unlink } from "node:fs
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { sanitizeActorKey } from "../agentic-memory/actor-key.js";
+import {
+  TurnLedgerStore,
+  type MemoryTurnRecord,
+} from "./graph-sqlite-store.js";
+import { classifyMemorySentence } from "./memory-signal-rules.js";
 
-/** 单行内容截断（精简记录，防失控长文本） */
-const JOURNAL_MAX_LINE_CHARS = 160;
+/** 派生视图单行内容上限（turns 里保留全文，md 只做展示/检索） */
+const JOURNAL_MAX_LINE_CHARS = 2000;
 /** 当日检索命中行上限（直接对应注入 prompt 的 token 费用） */
 const JOURNAL_SEARCH_K = 6;
 /** 检索命中总字符预算 */
 const JOURNAL_SEARCH_CHAR_BUDGET = 700;
-/** 保留最近 N 天日志文件（磁盘有界） */
+/** 保留最近 N 天日志文件（磁盘有界；turns 原文不受此限制） */
 const JOURNAL_RETENTION_DAYS = 45;
-/** appendTurn 幂等防抖窗口：同一 actor+session+同一首句在窗口内重复写入视为同一轮（防多路径双写） */
+/** appendTurn 幂等防抖窗口：同一 actor+session+同一全文在窗口内重复写入视为同一轮（防多路径双写） */
 const APPEND_DEDUP_WINDOW_MS = 30_000;
 
-const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|remember|prefer/i;
-const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我住在|我需要|我叫|我在.*工作/i;
-const ASSISTANT_COMMITMENT_RE = /我会|我将|已经帮你|已为你|稍后|接下来|我帮你|i will|i'll/i;
 
 export type JournalHit = {
   /** YYYY-MM-DD（对应 journal 文件名日期） */
@@ -74,14 +74,12 @@ function normalizeLine(text: string): string {
   return text.replace(/\s+/g, " ").trim();
 }
 
-/** 取首句并截断（精简记录：一行 = 一个语义单元） */
-function firstSentence(text: string): string {
+/** 全文归一 + 上限保护（turns 保留原始全文，md 视图按此上限展示） */
+function journalText(text: string): string {
   const normalized = normalizeLine(text);
-  if (!normalized) return "";
-  const sentence = normalized.split(/[。！？!?\n]/)[0]?.trim() || normalized;
-  return sentence.length > JOURNAL_MAX_LINE_CHARS
-    ? `${sentence.slice(0, JOURNAL_MAX_LINE_CHARS - 3).trimEnd()}...`
-    : sentence;
+  return normalized.length > JOURNAL_MAX_LINE_CHARS
+    ? `${normalized.slice(0, JOURNAL_MAX_LINE_CHARS - 3).trimEnd()}...`
+    : normalized;
 }
 
 function splitSentences(text: string): string[] {
@@ -89,6 +87,48 @@ function splitSentences(text: string): string[] {
     .split(/(?<=[。！？!?])|[\n]/)
     .map((s) => s.trim())
     .filter(Boolean);
+}
+
+/**
+ * 把一轮原始文本渲染成 journal 行（事实/偏好/承诺仍在派生视图层零模型抽取）。
+ * 与旧实现的区别：U/A 行写全文而非首句；原文权威副本在 turns 表里。
+ */
+function journalLinesFromText(
+  time: string,
+  sessionId: string,
+  userText: string,
+  assistantText: string,
+): string[] {
+  const lines: string[] = [];
+  const sess = sessionId.slice(0, 8);
+  const user = journalText(userText);
+  const assistant = journalText(assistantText);
+  if (user) lines.push(`- [${time}] ${sess} U: ${user}`);
+  if (assistant) lines.push(`- [${time}] ${sess} A: ${assistant}`);
+  for (const s of splitSentences(userText)) {
+    const role = classifyMemorySentence(s, "user");
+    if (!role) continue;
+    lines.push(`- [${time}] ${role}: ${journalText(s)}`);
+  }
+  for (const s of splitSentences(assistantText)) {
+    if (classifyMemorySentence(s, "assistant") === "commit") {
+      lines.push(`- [${time}] commit: ${journalText(s)}`);
+    }
+  }
+  return lines;
+}
+
+/** 把 turns 记录还原成夜间固化认识的 journal 行格式（含事实/偏好/承诺派生行）。 */
+function journalLinesFromTurn(turn: MemoryTurnRecord): string[] {
+  const sess = turn.sessionId.slice(0, 8);
+  const prefix = `- [${turn.timeLabel}] ${sess} `;
+  if (turn.kind === "event") {
+    const body = journalText(turn.eventText);
+    if (!body) return [];
+    const token = turn.token && /^e-[\w-]+$/.test(turn.token) ? `${turn.token} ` : "";
+    return [`${prefix}${token}fact: ${body}`];
+  }
+  return journalLinesFromText(turn.timeLabel, turn.sessionId, turn.userText, turn.assistantText);
 }
 
 /**
@@ -127,6 +167,8 @@ function overlapScore(left: string, right: string): number {
 
 export class DailyJournalService {
   private readonly rootDir: string;
+  /** L0 原始轮次 + 抽取 outbox（唯一真相源；md 是派生视图） */
+  private readonly ledger: TurnLedgerStore;
   /** 写入串行链（保证 append 顺序） */
   private writeChain: Promise<void> = Promise.resolve();
   /** 已固化日期索引缓存：actorId → Set<dateKey> */
@@ -136,10 +178,15 @@ export class DailyJournalService {
     string,
     { session: string; user: string; assistant: string; ts: number }
   >();
+  /** 历史 md 一次性迁入 turns（只跑一次） */
+  private legacyMigration: Promise<void> | null = null;
 
-  constructor(rootDir?: string) {
+  constructor(rootDir?: string, ledger?: TurnLedgerStore) {
     this.rootDir =
       rootDir ?? process.env.AGENT_JOURNAL_DIR?.trim() ?? join(getDataDir(), "journal");
+    // 显式传入 rootDir（测试/独立实例）时账本跟随该目录，避免污染全局记忆库；
+    // 生产默认与 hm_nodes 共用 data/human-memory.sqlite（同库才是一套真相）。
+    this.ledger = ledger ?? new TurnLedgerStore(rootDir ? join(rootDir, "memory-turns.sqlite") : undefined);
   }
 
   private actorDir(actorId: string): string {
@@ -157,9 +204,8 @@ export class DailyJournalService {
   }
 
   /**
-   * 每轮对话结束调用：规则精简行追加写当日 journal（fire-and-forget，不阻塞对话）。
-   * 记录内容：user/assistant 首句 + 正则命中的事实/偏好/承诺原句。
-   * 幂等：同一 actor+session+同一首句在 APPEND_DEDUP_WINDOW_MS 内重复调用视为同一轮，
+   * 每轮对话结束调用：先 append-only 落 turns（真相），再写 md（派生视图）。
+   * 幂等：同一 actor+session+同一全文在 APPEND_DEDUP_WINDOW_MS 内重复调用视为同一轮，
    * 直接跳过（标准主答 / complex 后台 / parallel 续接等路径都调这里，防双写）。
    */
   appendTurn(actorId: string, sessionId: string, userText: string, assistantText: string): void {
@@ -167,40 +213,42 @@ export class DailyJournalService {
     const now = nowShanghai();
     const dateKey = toDateKey(now);
     const time = toTimeLabel(now);
+    const userFull = normalizeLine(userText);
+    const assistantFull = normalizeLine(assistantText);
+    if (!userFull && !assistantFull) return;
 
-    const lines: string[] = [];
-    const userLine = firstSentence(userText);
-    const assistantLine = firstSentence(assistantText);
-    if (userLine) lines.push(`- [${time}] ${sessionId.slice(0, 8)} U: ${userLine}`);
-    if (assistantLine) lines.push(`- [${time}] ${sessionId.slice(0, 8)} A: ${assistantLine}`);
-
-    // 事实提取：偏好/事实/承诺原句（跨会话固化的数据源）
-    for (const s of splitSentences(userText)) {
-      const trimmed = s.slice(0, JOURNAL_MAX_LINE_CHARS);
-      if (USER_FACT_RE.test(s)) lines.push(`- [${time}] fact: ${trimmed}`);
-      else if (USER_PREFERENCE_RE.test(s)) lines.push(`- [${time}] prefer: ${trimmed}`);
-    }
-    for (const s of splitSentences(assistantText)) {
-      if (ASSISTANT_COMMITMENT_RE.test(s)) {
-        lines.push(`- [${time}] commit: ${s.slice(0, JOURNAL_MAX_LINE_CHARS)}`);
-      }
-    }
-
-    if (lines.length === 0) return;
-
-    // 幂等防抖：同轮（同 session + 同双首句）在窗口内重复出现 → 跳过，避免重复行污染当日检索/固化
+    // 幂等防抖：同轮（同 session + 同全文）在窗口内重复出现 → 跳过，避免重复轮次污染
     const guard = this.lastAppendGuard.get(actorId);
     if (
       guard &&
       guard.session === sessionId &&
-      guard.user === userLine &&
-      guard.assistant === assistantLine &&
+      guard.user === userFull &&
+      guard.assistant === assistantFull &&
       Date.now() - guard.ts < APPEND_DEDUP_WINDOW_MS
     ) {
       return;
     }
-    this.lastAppendGuard.set(actorId, { session: sessionId, user: userLine, assistant: assistantLine, ts: Date.now() });
+    this.lastAppendGuard.set(actorId, {
+      session: sessionId,
+      user: userFull,
+      assistant: assistantFull,
+      ts: Date.now(),
+    });
 
+    // 真相源先落库：同步写（better-sqlite3），失败会抛出而不是静默丢轮
+    this.ledger.appendTurn({
+      actorId,
+      sessionId,
+      kind: "dialogue",
+      userText: userFull,
+      assistantText: assistantFull,
+      createdAt: now.toISOString(),
+      dateKey,
+      timeLabel: time,
+    });
+
+    const lines = journalLinesFromText(time, sessionId, userFull, assistantFull);
+    if (lines.length === 0) return;
     this.writeChain = this.writeChain
       .then(async () => {
         await mkdir(this.actorDir(actorId), { recursive: true });
@@ -209,13 +257,13 @@ export class DailyJournalService {
         await this.cleanupOldJournals(actorId).catch(() => {});
       })
       .catch((err) => {
-        console.log(`[DailyJournal] appendTurn 失败（忽略）: ${err}`);
+        console.error(`[DailyJournal] 派生视图写入失败（turns 已落库，不影响记忆）: ${err}`);
       });
   }
 
   /**
-   * 实质事件行（工具结果等）：写进与对话流水同一个当日文件，夜间沿同一固化链路
-   * 进长期记忆。事件时间决定落在哪一天（跨零点不会记错日期）。
+   * 实质事件行（工具结果等）：先落 turns（kind=event），再写当日派生文件。
+   * 事件时间决定落在哪一天（跨零点不会记错日期）。
    * token 仅用于固化时回溯来源事件 id，固化正文不含它。
    */
   appendEventLine(
@@ -226,12 +274,24 @@ export class DailyJournalService {
     if (!actorId) return;
     const at = new Date(eventTime);
     if (Number.isNaN(at.getTime())) return;
-    const body = normalizeLine(entry.content).slice(0, JOURNAL_MAX_LINE_CHARS);
+    const body = journalText(entry.content);
     if (!body) return;
-    const token = entry.token && /^[\w-]{1,10}$/.test(entry.token) ? `${entry.token} ` : "";
-    const line = `- [${toTimeLabel(at)}] ${token}fact: ${body}\n`;
+    const token = entry.token && /^[\w-]{1,10}$/.test(entry.token) ? entry.token : null;
     const dateKey = toDateKey(at);
+    const timeLabel = toTimeLabel(at);
 
+    this.ledger.appendTurn({
+      actorId,
+      sessionId: "event",
+      kind: "event",
+      eventText: body,
+      token,
+      createdAt: at.toISOString(),
+      dateKey,
+      timeLabel,
+    });
+
+    const line = `- [${timeLabel}] ${token ? `${token} ` : ""}fact: ${body}\n`;
     this.writeChain = this.writeChain
       .then(async () => {
         await mkdir(this.actorDir(actorId), { recursive: true });
@@ -240,7 +300,7 @@ export class DailyJournalService {
         await this.cleanupOldJournals(actorId).catch(() => {});
       })
       .catch((err) => {
-        console.log(`[DailyJournal] appendEventLine 失败（忽略）: ${err}`);
+        console.error(`[DailyJournal] 事件派生视图写入失败（turns 已落库）: ${err}`);
       });
   }
 
@@ -402,59 +462,147 @@ export class DailyJournalService {
   }
 
   /**
-   * 夜晚固化消费接口：返回所有「未固化」日志的行内容（按日期升序）。
-   * 跨天未处理（服务器隔夜未开机等）也一并返回，由固化层统一补跑。
+   * 夜晚固化消费接口：以 turns 的 pending job 为准（不再读 md）。
+   * 返回按日期分组的 journal 行，跨天未处理（服务器隔夜未开机等）一并返回。
+   * 首次调用前会把历史 md 一次性迁入 turns（迁移后 md 彻底降级为派生视图）。
    */
-  async getUnconsolidatedLines(actorId: string): Promise<Array<{ dateKey: string; lines: string[] }>> {
-    let files: string[] = [];
-    try {
-      files = await readdir(this.actorDir(actorId));
-    } catch {
-      return [];
-    }
-    const consolidated = await this.loadConsolidated(actorId);
-    const out: Array<{ dateKey: string; lines: string[] }> = [];
+  async getUnconsolidatedLines(
+    actorId: string,
+  ): Promise<Array<{ dateKey: string; lines: string[]; turnIds: string[] }>> {
+    await this.ensureLegacyMigrated();
+    const turns = this.ledger.listPendingTurns(actorId);
+    if (turns.length === 0) return [];
 
-    for (const file of files) {
-      const m = file.match(/^journal-(\d{4}-\d{2}-\d{2})\.md$/);
-      if (!m) continue;
-      const dateKey = m[1]!;
-      if (consolidated.has(dateKey)) continue;
-      try {
-        const raw = await readFile(this.journalFile(actorId, dateKey), "utf8");
-        const lines = raw
-          .split("\n")
-          .map((l) => l.trim())
-          .filter((l) => l.startsWith("- ["));
-        if (lines.length > 0) out.push({ dateKey, lines });
-      } catch {
-        /* 单文件读取失败跳过 */
-      }
+    const byDate = new Map<string, { lines: string[]; turnIds: string[] }>();
+    for (const turn of turns) {
+      const lines = journalLinesFromTurn(turn);
+      const bucket = byDate.get(turn.dateKey) ?? { lines: [], turnIds: [] };
+      bucket.lines.push(...lines);
+      bucket.turnIds.push(turn.id);
+      byDate.set(turn.dateKey, bucket);
     }
-    out.sort((a, b) => a.dateKey.localeCompare(b.dateKey));
-    return out;
+    return [...byDate.entries()]
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([dateKey, value]) => ({ dateKey, lines: value.lines, turnIds: value.turnIds }));
   }
 
   /**
-   * 标记日期已固化（短期/长期隔离：固化后删除 md 原始对话历史，
-   * 内容已入长期记忆图，md 只承载「未固化的当天记忆」，不再留存已处理的对话）。
-   * 幂等：重复标记同一日期无副作用（文件已删则跳过）。
+   * 标记已固化：先关闭 turns/jobs（真相层），再删 md 派生视图。
+   *
+   * 传入 turnIds 时按 id 精确关闭，且只有该日期已无 pending 轮次才删 md——
+   * 避免「固化快照之后新写入的轮次」被误标已处理或丢派生行。
+   * 不传 turnIds 时按日期整体关闭（历史调用 / 测试兼容）。
    */
-  async markConsolidated(actorId: string, dateKeys: string[]): Promise<void> {
+  async markConsolidated(actorId: string, dateKeys: string[], turnIds?: string[]): Promise<void> {
     if (dateKeys.length === 0) return;
+    let deletableDates = dateKeys;
+    if (turnIds && turnIds.length > 0) {
+      this.ledger.markConsolidatedByTurnIds(actorId, turnIds);
+      deletableDates = dateKeys.filter((key) => this.ledger.countPendingForDate(actorId, key) === 0);
+    } else {
+      this.ledger.markConsolidatedByDate(actorId, dateKeys);
+    }
+    if (deletableDates.length === 0) return;
+
     const set = await this.loadConsolidated(actorId);
-    for (const key of dateKeys) set.add(key);
+    for (const key of deletableDates) set.add(key);
     this.consolidatedCache.set(actorId, set);
     try {
       await mkdir(this.actorDir(actorId), { recursive: true });
       await writeFile(this.consolidatedFile(actorId), `${JSON.stringify([...set], null, 2)}\n`, "utf8");
-      // 固化成功后再删 md，避免落盘失败导致已处理日期记录与文件状态不一致
-      for (const key of dateKeys) {
+      // 真相层已提交后再删派生文件
+      for (const key of deletableDates) {
         await unlink(this.journalFile(actorId, key)).catch(() => {});
       }
     } catch (err) {
       console.log(`[DailyJournal] markConsolidated 失败: ${err}`);
     }
+  }
+
+  /** 固化失败：job 保持 pending，累加 attempts/lastError，次日重试。 */
+  recordConsolidationFailure(actorId: string, dateKeys: string[], error: string): void {
+    this.ledger.recordFailureByDate(actorId, dateKeys, error);
+  }
+
+  /**
+   * 历史 md 一次性迁入 turns：旧版本只把首句写进 md，且固化后删除文件。
+   * 这里把「未固化日期的 md 行」原样补写为 turns 行，让旧数据也进入统一真相源；
+   * 之后夜间固化统一从 turns 消费。每个日期只迁一次（以 turns 是否已存在判定）。
+   */
+  private ensureLegacyMigrated(): Promise<void> {
+    this.legacyMigration ??= this.migrateLegacyJournals();
+    return this.legacyMigration;
+  }
+
+  private async migrateLegacyJournals(): Promise<void> {
+    let actorDirs: string[] = [];
+    try {
+      actorDirs = (await readdir(this.rootDir)).filter(Boolean);
+    } catch {
+      return;
+    }
+    for (const dir of actorDirs) {
+      const actorId = dir;
+      const consolidated = await this.loadConsolidated(actorId);
+      let files: string[] = [];
+      try {
+        files = await readdir(join(this.rootDir, dir));
+      } catch {
+        continue;
+      }
+      for (const file of files) {
+        const m = file.match(/^journal-(\d{4}-\d{2}-\d{2})\.md$/);
+        if (!m) continue;
+        const dateKey = m[1]!;
+        if (consolidated.has(dateKey)) continue;
+        if (this.ledger.hasTurnsForDate(actorId, dateKey)) continue;
+        let raw: string;
+        try {
+          raw = await readFile(join(this.rootDir, dir, file), "utf8");
+        } catch {
+          continue;
+        }
+        for (const line of raw.split("\n")) {
+          const t = line.trim();
+          if (!t.startsWith("- [")) continue;
+          const parsed = t.match(/^- \[(\d{2}:\d{2})\]\s+(?:([\w-]{1,10})\s+)?(U|A|fact|prefer|commit):\s*(.+)$/);
+          if (!parsed) continue;
+          const timeLabel = parsed[1]!;
+          const token = parsed[2] ?? null;
+          const role = parsed[3]!;
+          const content = parsed[4]!;
+          const createdAt = `${dateKey}T${timeLabel}:00+08:00`;
+          if (role === "U" || role === "A") {
+            this.ledger.appendTurn({
+              actorId,
+              sessionId: "legacy",
+              kind: "dialogue",
+              userText: role === "U" ? content : "",
+              assistantText: role === "A" ? content : "",
+              createdAt,
+              dateKey,
+              timeLabel,
+            });
+          } else {
+            this.ledger.appendTurn({
+              actorId,
+              sessionId: "legacy",
+              kind: "event",
+              eventText: content,
+              token: role === "fact" ? token : null,
+              createdAt,
+              dateKey,
+              timeLabel,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  /** 关闭真相层连接（测试清理 / 进程退出；md 派生视图无需关闭）。 */
+  close(): void {
+    this.ledger.close();
   }
 
   /** 磁盘有界：删除超出保留期的 journal 文件（consolidated.json 同步收缩） */

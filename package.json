@@ -26,7 +26,8 @@
     "dev:remote": "node scripts/dev-all.mjs --remote",
     "dev:all:runtime": "npm run dev:runtime --workspace=server",
     "render:contract": "node --import tsx scripts/export-render-contract.mts",
-    "render:test": "node --import tsx --test server/test/render-scenes.test.ts server/test/render-protocol.test.ts server/test/render-pre-plan.test.ts server/test/render-contract.test.ts"
+    "render:test": "node --import tsx --test server/test/render-scenes.test.ts server/test/render-protocol.test.ts server/test/render-pre-plan.test.ts server/test/render-contract.test.ts",
+    "ws:parity": "node scripts/verify-ws-event-parity.mjs"
   },
   "dependencies": {
     "better-sqlite3": "^12.10.0"

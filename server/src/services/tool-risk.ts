@@ -44,13 +44,50 @@ const READ_ONLY_PATTERNS: RegExp[] = [
 ];
 
 /**
+ * 复合工具（单入口 + `action` 分流）的 action 级风险覆盖。
+ *
+ * 2026-11-11 起 calendar / geofence / smart_home 合并为单函数名，按名匹配
+ * （delete→irreversible、list→read_only）失效：必须看调用参数里的 action。
+ * 未传 args 或 action 不在表内 → 落回按名分级（保守 write）。
+ */
+const COMPOSITE_ACTION_RISK: Record<string, Record<string, ToolRiskClass>> = {
+  calendar: {
+    list_tasks: "read_only",
+    find_free_slots: "read_only",
+    create: "write",
+    batch_create: "write",
+    update_task: "write",
+    delete_task: "irreversible",
+  },
+  geofence: {
+    list: "read_only",
+    create: "write",
+    delete: "irreversible",
+  },
+  smart_home: {
+    list_devices: "read_only",
+    control_device: "write",
+    scene: "write",
+  },
+};
+
+/**
  * 分级（优先级 irreversible > money > read_only > write）。
  * 未知工具按 write 对待——分级错误的代价不对称：把读误判为写只损失一点便利，
  * 把写误判为读可能变成静默执行的资金/数据事故。
  */
-export function classifyToolRisk(toolName: string): ToolRiskClass {
+export function classifyToolRisk(
+  toolName: string,
+  args?: Record<string, unknown> | null,
+): ToolRiskClass {
   const name = String(toolName ?? "").trim();
   if (!name) return "write";
+  const composite = COMPOSITE_ACTION_RISK[name];
+  if (composite) {
+    const action = String(args?.action ?? "").trim();
+    const mapped = composite[action];
+    if (mapped) return mapped;
+  }
   for (const re of IRREVERSIBLE_PATTERNS) if (re.test(name)) return "irreversible";
   for (const re of MONEY_PATTERNS) if (re.test(name)) return "money";
   for (const re of READ_ONLY_PATTERNS) if (re.test(name)) return "read_only";
@@ -58,7 +95,10 @@ export function classifyToolRisk(toolName: string): ToolRiskClass {
 }
 
 /** 敏感工具（审计 + 幂等闸 + 自主执行强制的消费口径）：money 或 irreversible */
-export function isSensitiveTool(toolName: string): boolean {
-  const risk = classifyToolRisk(toolName);
+export function isSensitiveTool(
+  toolName: string,
+  args?: Record<string, unknown> | null,
+): boolean {
+  const risk = classifyToolRisk(toolName, args);
   return risk === "money" || risk === "irreversible";
 }

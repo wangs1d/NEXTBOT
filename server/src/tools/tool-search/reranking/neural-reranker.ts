@@ -52,7 +52,7 @@ function clampEnvInt(name: string, fallback: number, min: number, max: number): 
 /**
  * 采信门槛（2026-09-12 A/B 两次实测教训，门禁实现在 reranking-pipeline）：
  * golden 20 条本就是按词面+校准调优出来的，rerank 无条件接管把 golden top-1
- * 打到 15-16/20（「现在几点了」→ clock.get_date），RRF 融合也挡不住。
+ * 打到 15-16/20（「现在几点了」→ clock.get_user_location），RRF 融合也挡不住。
  * 最终策略：管线仅在 head 内全部候选 keyword_score=0（query 与任何候选零词面
  * 命中——纯改写场景）时才进入本重排器。N2 定位收窄为「词面完全失效时的交叉
  * 编码救援」：golden 零风险，改写集收益保留。此处无需重复判断，也无需与词面

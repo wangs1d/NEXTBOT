@@ -76,8 +76,8 @@ export function buildReminderCardUpdate(
 ): { messageId: string; card: Record<string, unknown> } | null {
   for (const effect of effects) {
     if (effect.status !== "ok" || !effect.result) continue;
-    const isDelete = effect.tool === "calendar.delete_task";
-    const isUpdate = effect.tool === "calendar.update_task";
+    const isDelete = effect.result.action === "delete_task";
+    const isUpdate = effect.result.action === "update_task";
     if (!isDelete && !isUpdate) continue;
 
     const taskId = str(effect.result.taskId);

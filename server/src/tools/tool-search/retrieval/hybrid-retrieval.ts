@@ -150,7 +150,7 @@ export class HybridRetrievalEngine {
  *   - 无 query 向量：embedding 权重归零、关键词主导。
  *     此前无向量时用 hashTextToVector(query) 与工具哈希向量做 cosine——两个独立哈希的
  *     相似度是噪声，却在中文 bigram 分词把 token 数抬高后按"长句"拿 0.6 权重，
- *     直接把 surface.dismiss / shopping.suggest 之类无关工具顶到 top-1。
+ *     直接把 weather.get_local / shopping.suggest 之类无关工具顶到 top-1。
  *     legacy 通道（catalog.ts）从来只在真实向量存在时才启用 embedding，这里对齐。
  */
 export function weightsForQuery(query: string, hasQueryVector = true): HybridRetrievalWeights {

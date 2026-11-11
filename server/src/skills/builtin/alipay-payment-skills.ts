@@ -49,7 +49,7 @@ function extractAuthLink(stdout: string): string {
  * → bind-wallet」的首次授权流程；绑定后该用户的支付都从本人支付宝扣款。
  *
  * 与现有能力的边界：
- *   - wallet.purchase：仅记账（余额扣减），不产生真实交易
+ *   - payment.*：真实提交/记账
  *   - shopping.order.*：无头浏览器下单到结算页，不自动支付
  *   - payment.create_order：走商户号支付网关（需商户资质配置）
  *   本 skill 走支付宝官方 AI 支付通道，用户扫二维码即可完成真实付款。

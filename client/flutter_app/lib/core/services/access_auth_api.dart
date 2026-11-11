@@ -6,6 +6,7 @@ import "package:http/http.dart" as http;
 import "package:path_provider/path_provider.dart";
 
 import "../config/api_config.dart";
+import "./nb_http.dart";
 
 /// 访问鉴权 API 通用结果包装（与 DeviceApiResult 同风格）。
 class AccessAuthResult<T> {
@@ -52,17 +53,22 @@ class AccessDeviceBinding {
     required this.token,
     required this.userId,
     this.tokenId,
+    this.expiresAt = 0,
   });
 
   final String token;
   final String userId;
   final String? tokenId;
 
+  /// 过期时刻（毫秒时间戳）；0 = 服务端未启用 TTL（永不过期）。
+  final int expiresAt;
+
   factory AccessDeviceBinding.fromJson(Map<String, dynamic> json) {
     return AccessDeviceBinding(
       token: json["token"] as String? ?? "",
       userId: json["userId"] as String? ?? "",
       tokenId: json["tokenId"] as String?,
+      expiresAt: (json["expiresAt"] as num?)?.toInt() ?? 0,
     );
   }
 }
@@ -105,14 +111,34 @@ class AccessCredentialStore {
   String? _userId;
   String? _tokenId;
   String? _deviceId;
+  int _expiresAt = 0;
   bool _loaded = false;
 
   String? get token => _token;
   String? get userId => _userId;
   String? get tokenId => _tokenId;
 
+  /// 过期时刻（毫秒）；0 = 无 TTL。
+  int get expiresAt => _expiresAt;
+
+  /// 凭据是否已过期（无 TTL 时永远 false）。
+  bool get isExpired =>
+      _expiresAt > 0 && DateTime.now().millisecondsSinceEpoch >= _expiresAt;
+
+  /// 是否该提前续期：剩余不足 7 天就换，避免用户正用着突然 401。
+  bool get needsRefresh {
+    if (_token == null || _token!.isEmpty) return false;
+    if (_expiresAt <= 0) return false;
+    const int weekMs = 7 * 24 * 60 * 60 * 1000;
+    return _expiresAt - DateTime.now().millisecondsSinceEpoch < weekMs;
+  }
+
   /// 本机设备标识：首次绑定时生成并随凭据持久化，重装后变化。
-  String get deviceId => _deviceId ?? "local-device";
+  ///
+  /// 回落值不能是 `local-device`：那个字符串在服务端是「占位身份」黑名单成员，
+  /// 多台设备挤在一起会被判成同一个 guest。这里生成一枚进程内唯一值兜底。
+  String get deviceId =>
+      _deviceId ?? "dev-${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}";
 
   /// 是否已有可用凭据。
   bool get hasCredentials =>
@@ -142,20 +168,33 @@ class AccessCredentialStore {
       _userId = json["userId"] as String?;
       _tokenId = json["tokenId"] as String?;
       _deviceId = json["deviceId"] as String?;
+      _expiresAt = (json["expiresAt"] as num?)?.toInt() ?? 0;
     } catch (e) {
       debugPrint("[AccessAuth] 读取本机凭据失败（视为未绑定）: $e");
       _token = null;
       _userId = null;
       _tokenId = null;
+      _expiresAt = 0;
     }
   }
 
-  /// 绑定成功后保存凭据；首次会生成本机 deviceId。
-  Future<void> save(AccessDeviceBinding binding) async {
+  /// 绑定/登录成功后保存凭据；首次会生成本机 deviceId。
+  ///
+  /// [deviceId] 优先用设备安装标识（`inst_…`）——与 WS `session.init` 上报的
+  /// `deviceId` 同源，服务端 access-tokens 清单里能直接和设备对上；缺省时
+  /// 生成 `dev-…`（历史配对链路的行为不变）。
+  Future<void> save(AccessDeviceBinding binding, {String? deviceId}) async {
     _token = binding.token;
     _userId = binding.userId;
     _tokenId = binding.tokenId;
-    _deviceId ??= "dev-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}";
+    _expiresAt = binding.expiresAt;
+    final String? explicit = deviceId?.trim();
+    if (explicit != null && explicit.isNotEmpty) {
+      _deviceId = explicit;
+    } else {
+      _deviceId ??=
+          "dev-${DateTime.now().millisecondsSinceEpoch.toRadixString(36)}";
+    }
     await _write();
   }
 
@@ -164,6 +203,7 @@ class AccessCredentialStore {
     _token = null;
     _userId = null;
     _tokenId = null;
+    _expiresAt = 0;
     await _write();
   }
 
@@ -182,6 +222,7 @@ class AccessCredentialStore {
         "userId": _userId,
         "tokenId": _tokenId,
         "deviceId": _deviceId,
+        "expiresAt": _expiresAt,
         "updatedAt": DateTime.now().toIso8601String(),
       }));
     } catch (e) {
@@ -199,7 +240,7 @@ class AccessCredentialStore {
 class AccessAuthApi {
   AccessAuthApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;
@@ -210,6 +251,51 @@ class AccessAuthApi {
         "Content-Type": "application/json",
         ...AccessCredentialStore.instance.authHeaders,
       };
+
+  /// POST /api/auth/refresh：用现有 token 换新 token（滑动续期）。
+  ///
+  /// 服务端允许「已过期但未超宽限期」的凭据来换，所以这个调用既可以在
+  /// 建连前主动做（临期续期），也可以在收到 401 时被动做（兜底）。
+  /// 成功后新凭据立即落盘，旧 token 在服务端同时作废。
+  Future<AccessAuthResult<bool>> refresh() async {
+    final String? current = AccessCredentialStore.instance.token;
+    if (current == null || current.isEmpty) {
+      return AccessAuthResult.failure("本机没有可用凭据");
+    }
+    try {
+      final http.Response res = await _client
+          .post(
+            Uri.parse("$_baseUrl/api/auth/refresh"),
+            headers: <String, String>{
+              "Content-Type": "application/json",
+              "Authorization": "Bearer $current",
+            },
+            body: jsonEncode(<String, dynamic>{"token": current}),
+          )
+          .timeout(_timeout);
+      final Map<String, dynamic> data = res.body.isEmpty
+          ? <String, dynamic>{}
+          : jsonDecode(res.body) as Map<String, dynamic>;
+      final String? fresh = data["token"] as String?;
+      if (res.statusCode != 200 || data["ok"] != true || fresh == null || fresh.isEmpty) {
+        return AccessAuthResult.failure(
+          data["error"]?.toString() ?? "续期失败: ${res.statusCode}",
+        );
+      }
+      await AccessCredentialStore.instance.save(
+        AccessDeviceBinding(
+          token: fresh,
+          userId: data["userId"]?.toString() ?? AccessCredentialStore.instance.userId ?? "",
+          tokenId: data["tokenId"]?.toString(),
+          expiresAt: (data["expiresAt"] as num?)?.toInt() ?? 0,
+        ),
+        deviceId: data["deviceId"]?.toString(),
+      );
+      return AccessAuthResult.success(true);
+    } catch (e) {
+      return AccessAuthResult.failure("网络错误: $e");
+    }
+  }
 
   /// GET /api/auth/status：服务器鉴权开关与本机绑定状态。
   Future<AccessAuthResult<AccessAuthStatus>> status() async {

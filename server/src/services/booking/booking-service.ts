@@ -838,7 +838,7 @@ export class BookingService {
       kind,
       navigation: {
         platformHint:
-          "经用户批准后，用 agent_browser.open 打开原下单平台的「我的订单」页（如携程 my.ctrip.com、12306 订单页、酒店平台订单页），" +
+          "经用户批准后，用 agent_browser（action=\"open\"）打开原下单平台的「我的订单」页（如携程 my.ctrip.com、12306 订单页、酒店平台订单页），" +
           "定位该订单进入退改签入口；页面上的「提交退票/改签」最终确认必须由用户本人点击，Agent 不得代点",
         cashierUrl: typeof order.params.cashierUrl === "string" ? order.params.cashierUrl : null,
       },

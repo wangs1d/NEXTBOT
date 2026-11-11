@@ -1,7 +1,6 @@
 // Task 19 健康关怀测试：
 //  1. health.query：确定性统计聚合（count/days/sum/mean/mean_daily + 备注关键词过滤 + 自定义区间）
-//  2. care.rhythm_reminder：节律提醒预设（enable 建每日任务 / list 状态 / disable 删除 / 重复开启幂等）
-//  3. agent.tasks.list：任务状态查询（active 过滤 + 进度字段）
+//  2. agent.tasks.list：任务状态查询（active 过滤 + 进度字段）
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -10,9 +9,7 @@ import { test } from "node:test";
 
 import { HealthFitnessService } from "../src/services/health-fitness-service.js";
 import { createHealthQueryHandler } from "../src/tools/capability-modules/health-fitness/handlers.js";
-import { ScheduleTaskService } from "../src/services/schedule-task-service.js";
 import { ToolRegistry } from "../src/tools/tool-registry.js";
-import { registerRhythmReminderTools } from "../src/tools/rhythm-reminder-tools.js";
 import {
   getAgentTaskStore,
   resetAgentTaskStoreForTests,
@@ -156,81 +153,7 @@ test("health.query：custom 区间 + 无记录 + 参数校验", async () => {
   }
 });
 
-// ── 2. 节律提醒预设模板 ────────────────────────────────
-
-test("节律提醒：enable 创建每日任务 → list 可见 → disable 删除 → 重复开启幂等", async () => {
-  const dir = await mkdtemp(join(tmpdir(), "rhythm-schedule-"));
-  const prevFile = process.env.SCHEDULE_TASKS_FILE;
-  process.env.SCHEDULE_TASKS_FILE = join(dir, "schedule-tasks.json");
-  try {
-    const schedule = new ScheduleTaskService();
-    const registry = new ToolRegistry();
-    registerRhythmReminderTools(registry, schedule);
-
-    // enable：自定义两个时刻
-    const r1 = (await registry.execute(
-      "care.rhythm_reminder",
-      { action: "enable", preset: "water", times: ["09:30", "18:00"] },
-      ctx,
-    )) as { ok: boolean; result: Record<string, unknown> };
-    assert.equal(r1.ok, true);
-    assert.deepEqual(r1.result.times, ["09:30", "18:00"]);
-    assert.equal(schedule.listTasksBySession(ACTOR).length, 2);
-
-    // list：water enabled，sleep/exercise 未开启
-    const r2 = (await registry.execute("care.rhythm_reminder", { action: "list" }, ctx)) as {
-      ok: boolean;
-      result: { presets: Array<{ preset: string; enabled: boolean }> };
-    };
-    assert.equal(r2.ok, true);
-    const water = r2.result.presets.find((p) => p.preset === "water");
-    const sleep = r2.result.presets.find((p) => p.preset === "sleep");
-    assert.equal(water?.enabled, true);
-    assert.equal(sleep?.enabled, false);
-
-    // 重复 enable：不叠加（幂等，先删旧再建新）
-    const r3 = (await registry.execute(
-      "care.rhythm_reminder",
-      { action: "enable", preset: "water" },
-      ctx,
-    )) as { ok: boolean; result: Record<string, unknown> };
-    assert.equal(r3.ok, true);
-    assert.equal(schedule.listTasksBySession(ACTOR).length, 3); // 默认 3 个时刻
-
-    // disable：删除该预设全部任务
-    const r4 = (await registry.execute(
-      "care.rhythm_reminder",
-      { action: "disable", preset: "water" },
-      ctx,
-    )) as { ok: boolean; result: Record<string, unknown> };
-    assert.equal(r4.ok, true);
-    assert.equal(r4.result.removed, 3);
-    assert.equal(schedule.listTasksBySession(ACTOR).length, 0);
-
-    // 未开启时 disable：不报错
-    const r5 = (await registry.execute(
-      "care.rhythm_reminder",
-      { action: "disable", preset: "sleep" },
-      ctx,
-    )) as { ok: boolean; result: Record<string, unknown> };
-    assert.equal(r5.ok, true);
-    assert.equal(r5.result.removed, 0);
-
-    // 非法参数
-    const r6 = (await registry.execute(
-      "care.rhythm_reminder",
-      { action: "enable", preset: "running" },
-      ctx,
-    )) as { ok: boolean; result: Record<string, unknown> };
-    assert.equal(r6.result.ok, false);
-  } finally {
-    if (prevFile === undefined) delete process.env.SCHEDULE_TASKS_FILE;
-    else process.env.SCHEDULE_TASKS_FILE = prevFile;
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-// ── 3. agent.tasks.list 任务查询 ──────────────────────
+// ── 2. agent.tasks.list 任务查询 ──────────────────────
 
 test("agent.tasks.list：active 过滤 + 进度字段（我还有什么待办）", async () => {
   const dir = await mkdtemp(join(tmpdir(), "agent-tasks-"));

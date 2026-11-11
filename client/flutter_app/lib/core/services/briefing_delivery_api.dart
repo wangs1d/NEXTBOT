@@ -6,7 +6,7 @@ import "nb_http.dart";
 
 class BriefingDeliveryApi {
   BriefingDeliveryApi({required this.baseUrl, http.Client? client})
-      : _client = client ?? http.Client();
+      : _client = client ?? NbClient();
 
   final String baseUrl;
   final http.Client _client;

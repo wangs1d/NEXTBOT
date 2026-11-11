@@ -15,8 +15,65 @@ import "dart:io";
 
 import "package:flutter_test/flutter_test.dart";
 
+import "package:nextbot/core/db/local_history_store.dart";
+import "package:nextbot/core/models/chat_models.dart";
 import "package:nextbot/core/services/client_location_service.dart";
 import "package:nextbot/mobile_ui/mobile_chat_controller.dart";
+
+/// 空历史存储：不碰本机共享 Isar（诊断结论 2026-11-10：共享库残留了旧
+/// `assistant-t1` 空壳消息，hits.last 命中历史垃圾导致断言失败——落屏
+/// 链路本身没问题，是测试隔离缺失）。
+class _EmptyHistoryStore implements LocalHistoryStore {
+  @override
+  Future<void> init() async {}
+
+  @override
+  Future<void> saveSession(ChatSession session) async {}
+
+  @override
+  Future<void> saveMessage(ChatMessage message) async {}
+
+  @override
+  Future<List<ChatSession>> listSessions() async => <ChatSession>[];
+
+  @override
+  Future<List<ChatMessage>> listMessages(String sessionId) async =>
+      <ChatMessage>[];
+
+  @override
+  Future<int> migrateAssistantTimestampFrames() async => 0;
+
+  @override
+  Future<void> deleteMessage(String messageId) async {}
+
+  @override
+  Future<void> deleteMessagesForSession(String sessionId) async {}
+
+  @override
+  Future<void> clearAllMessages() async {}
+
+  @override
+  Future<dynamic> getPreference(String key) async => null;
+
+  @override
+  Future<void> savePreference(String key, dynamic value) async {}
+
+  @override
+  Future<List<Map<String, dynamic>>> listPendingUserMessages() async =>
+      <Map<String, dynamic>>[];
+
+  @override
+  Future<void> enqueuePendingUserMessage(Map<String, dynamic> payload) async {}
+
+  @override
+  Future<void> dequeuePendingUserMessage(String messageId) async {}
+
+  @override
+  Future<bool> getBiometricRegistrationStatus() async => false;
+
+  @override
+  Future<void> saveBiometricRegistrationStatus(bool isRegistered) async {}
+}
 
 /// 本地 WebSocket 服务器：控制器构造即连接，连不上会走重连定时器并触发
 /// web_socket 包的异步断连错误污染测试 zone。起真监听端最稳。
@@ -47,8 +104,10 @@ void main() {
   String wsUrl() => "ws://127.0.0.1:${_wsServer!.port}";
 
   Future<MobileChatController> newController() async {
-    final MobileChatController controller = MobileChatController(wsBaseUrl: wsUrl())
-      ..debugCaptureSentEvents = true;
+    final MobileChatController controller = MobileChatController(
+      wsBaseUrl: wsUrl(),
+      historyStore: _EmptyHistoryStore(),
+    )..debugCaptureSentEvents = true;
     // 真连接成功也会触发 ws_connected → 启动上报，等事件泵排空。
     await pumpEventQueue();
     return controller;
@@ -151,8 +210,19 @@ void main() {
       },
     });
     await pumpEventQueue();
+    // 分泡逐泡揭示（2026-11-10）：done 后泡先进揭示队列按间隔定时弹出，
+    // 同步断言前先跳过间隔立即整泡落屏（controller 提供的测试钩子）。
+    controller.debugFlushBubbleReveals();
 
-    expect(controller.messages.last.text, "你好，世界");
+    // 按 messageId 精确断言，不用 messages.last：controller 构造时
+    // _bootstrapHistory 会从共享 Isar 本地库恢复其他测试文件落盘的
+    // 旧消息（跨文件测试污染），last 未必是本用例的消息。
+    final List<ChatMessage> hits = controller.messages
+        .where((m) => m.messageId == "assistant-t1")
+        .toList();
+
+    expect(hits, isNotEmpty);
+    expect(hits.last.text, "你好，世界");
     expect(controller.debugSentEvents.where((e) => e.key == "client.location_report"),
         isEmpty);
   });

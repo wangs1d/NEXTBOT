@@ -8,6 +8,8 @@ import {
   NightlyMemoryTaskService,
   type NightlySleepAgentReport,
 } from "../src/services/nightly-memory-task-service.js";
+import { initDailyJournalService } from "../src/services/daily-journal-service.js";
+import type { NarrativeMemoryPort } from "../src/services/narrative-memory-port.js";
 
 function withTempReportFile(): { reportFile: string; cleanup: () => void } {
   const dir = mkdtempSync(join(tmpdir(), "nightly-report-"));
@@ -63,5 +65,39 @@ test("夜间报告：当天无固化且无睡眠报告时不留空报告", async
     assert.equal(svc.getLatestReport(), null);
   } finally {
     cleanup();
+  }
+});
+
+test("journal 固化未落库时保留原文；落库成功才标记并删除", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "nightly-journal-keep-"));
+  const prevDataDir = process.env.NEXTBOT_DATA_DIR;
+  process.env.NEXTBOT_DATA_DIR = dir;
+  const journal = initDailyJournalService(dir);
+  try {
+    const svc = new NightlyMemoryTaskService({ enabled: true });
+    const internals = svc as unknown as { consolidateDailyJournals(ids: string[]): Promise<void> };
+
+    journal.appendTurn("u-keep", "s-1", "用户喜欢在周末爬山，每周都去", "记住了，周末爬山");
+    await new Promise((r) => setTimeout(r, 80));
+    let port = {
+      writeDecided: async () => ({ persisted: false }),
+    } as unknown as NarrativeMemoryPort;
+    svc.setDependencies(null, null, port);
+    await internals.consolidateDailyJournals(["u-keep"]);
+    const kept = await journal.getUnconsolidatedLines("u-keep");
+    assert.ok(kept.length > 0 && kept[0]!.lines.length > 0, "未落库时必须保留原文待重试");
+
+    port = {
+      writeDecided: async () => ({ persisted: true }),
+    } as unknown as NarrativeMemoryPort;
+    svc.setDependencies(null, null, port);
+    await internals.consolidateDailyJournals(["u-keep"]);
+    const after = await journal.getUnconsolidatedLines("u-keep");
+    assert.equal(after.length, 0, "落库成功后应标记已固化");
+  } finally {
+    journal.close();
+    if (prevDataDir === undefined) delete process.env.NEXTBOT_DATA_DIR;
+    else process.env.NEXTBOT_DATA_DIR = prevDataDir;
+    rmSync(dir, { recursive: true, force: true });
   }
 });

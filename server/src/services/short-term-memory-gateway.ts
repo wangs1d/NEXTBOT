@@ -4,6 +4,7 @@ import { writeJsonAtomic } from "../storage/atomic-json.js";
 import { join } from "node:path";
 import { Bm25LiteIndex } from "../agent/retrieval/bm25-lite.js";
 import { unifiedMemoryScore } from "./memory-record-utils.js";
+import { USER_FACT_RE, USER_PREFERENCE_RE, classifyMemorySentence } from "./memory-signal-rules.js";
 import {
   emotionalSalience,
   emotionMatchScore,
@@ -154,8 +155,7 @@ function resolveLoopTtlMs(): number {
   return Number.isFinite(n) && n >= 0 ? n : 6 * 60 * 60 * 1000;
 }
 
-const USER_PREFERENCE_RE = /喜欢|讨厌|偏好|习惯|不要|别|禁忌|生日|纪念日|remember|prefer/i;
-const USER_FACT_RE = /我是|我在做|我最近在|我的项目|我正在|我计划|我住在|我需要/i;
+// 事实/偏好句式规则统一走 memory-signal-rules（与 daily-journal 同源，防漂移）
 const REQUEST_RE = /请|帮我|需要|想要|分析|总结|提醒|安排|继续|修复|优化|看看|做一个/i;
 const CONTINUITY_TURN_RE =
   /^(?:这个|那个|这块|那块|它|他|她|他们|这些|那些|这里|那里|刚才那个|上面那个|继续|接着|往下|然后呢|再说说|展开|细说|具体点|详细点|怎么做|怎么办|咋办|改一下|修一下|优化一下|继续做|继续看|继续修|继续优化|this|that|it|they|continue|go on|next|then|fix it|improve it)(?:[。！？?!,.，\s]*|呢|啊|吧|哈|嘛|呀)*$/i;
@@ -893,8 +893,9 @@ export class ShortTermMemoryGatewayService {
     const candidates: Array<{ kind: EpisodicFact["kind"]; sentence: string }> = [];
 
     for (const sentence of this.splitSentences(userText)) {
-      if (USER_FACT_RE.test(sentence)) candidates.push({ kind: "fact", sentence });
-      else if (USER_PREFERENCE_RE.test(sentence)) candidates.push({ kind: "preference", sentence });
+      const role = classifyMemorySentence(sentence, "user");
+      if (role === "fact") candidates.push({ kind: "fact", sentence });
+      else if (role === "prefer") candidates.push({ kind: "preference", sentence });
     }
     for (const sentence of this.splitSentences(assistantText)) {
       if (ASSISTANT_COMMITMENT_RE.test(sentence)) candidates.push({ kind: "context", sentence });
@@ -1343,14 +1344,6 @@ export class ShortTermMemoryGatewayService {
     }
 
     return [];
-  }
-
-  private shouldInjectTaskScopedMemory(
-    currentInput: string | undefined,
-    active: TaskStackEntry | null,
-    memory: SessionConversationMemory | undefined,
-  ): boolean {
-    return this.resolveTurnFocus(currentInput, active, memory).includeTaskScopedMemory;
   }
 
   private inferMissionFromTurn(

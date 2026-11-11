@@ -1,12 +1,15 @@
 /**
- * 答案留存契约测试（2026-10-13 根修：工具轮的答案不进流式通道）。
+ * 答案留存契约测试（2026-10-13 根修：工具轮的答案不进流式通道；
+ * 2026-11-10 判据收窄为「回执出卡」——receiptProducesCard）。
  *
  * 用户定调：流式打字机只在闲聊轮。工具轮的跳变（先流式输出天气/查询正文
- * → done 弹卡）从**通道**上根除：工具循环对执行过实质工具的轮次不再经
- * onDelta 直推正文，答案随返回值交 done 与卡片同帧下发。
+ * → done 弹卡）从**通道**上根除：工具循环对「回执会出卡」的轮次不再经
+ * onDelta 直推正文，答案随返回值交 done 与卡片同帧下发。不出卡的回执
+ * （查记忆/记账/失败回执）不扣流，正文照常流式分泡。
  *
- * 决策点唯一且确定性：tool-loop 是唯一知道「本轮是否执行过工具」的地方。
- * 旧机制（WS 层回执反应式扣流 + stream_reset 撤回 + 意图标签前置闸）均已退役。
+ * 决策点唯一且确定性：tool-loop 是唯一知道「本轮是否执行过工具」的地方，
+ * 回执在手即判。旧机制（WS 层回执反应式扣流 + stream_reset 撤回 +
+ * 意图标签前置闸）均已退役。
  */
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -19,9 +22,10 @@ process.env.PA_DATA_DIR = DATA_DIR;
 process.env.AGENT_TOKENJUICE_ENABLED = "0";
 process.env.AGENT_TOOL_ARCH = "legacy";
 
-const { streamCompletionWithTools, isSubstantiveToolExecution } = await import(
+const { streamCompletionWithTools } = await import(
   "../src/external-model/openai-compatible-tool-loop.js"
 );
+const { receiptProducesCard } = await import("../src/services/receipt-card-projection.js");
 const { resetLlmUsageAuditForTest } = await import("../src/services/llm-token-audit.js");
 
 type AnyChunk = Record<string, unknown>;
@@ -44,7 +48,7 @@ function ackThenToolChunks(ack: string, thinking: string): AnyChunk[] {
                 id: "call_h1",
                 type: "function",
                 function: {
-                  name: "weather_get_local",
+                  name: "weather.get_local",
                   arguments: JSON.stringify({ city: "兴义" }),
                 },
               },
@@ -97,7 +101,7 @@ const TOOLS = [
   {
     type: "function" as const,
     function: {
-      name: "weather_get_local",
+      name: "weather.get_local",
       description: "获取本地天气实况。",
       parameters: {
         type: "object",
@@ -186,10 +190,50 @@ test("holdAnswer=always：从第一波就留存（前置检索证据轮），零
   assert.equal(streamed, "", "always 模式下任何内容不得直推（答案随 done 下发）");
 });
 
-test("isSubstantiveToolExecution：元工具/支撑管线不算实质执行（口径与循环内一致）", () => {
-  assert.equal(isSubstantiveToolExecution("weather.get_local"), true);
-  assert.equal(isSubstantiveToolExecution("search_web"), true);
-  assert.equal(isSubstantiveToolExecution("travel.plan-itinerary"), true);
-  // 元工具（目录检索/桥调用）与支撑管线不改变「这轮调过工具吗」的答案
-  assert.equal(isSubstantiveToolExecution("tool_discover"), false);
+test("receiptProducesCard：出卡回执扣流、查记忆/失败回执不扣流（口径与循环内一致）", () => {
+  // 出卡：确定性工具 + 成功回执
+  assert.equal(receiptProducesCard("weather.get_local", { weatherText: "小雨" }), true);
+  assert.equal(receiptProducesCard("travel.plan-itinerary", { plan: { days: [] } }), true);
+  // 不出卡：查记忆（结果只进上下文，永不产卡）→ 不扣流，正文照常分泡
+  assert.equal(receiptProducesCard("brain.recall", { items: [{ content: "上午说的马尔代夫" }] }), false);
+  // 不出卡：失败回执（无卡可建）→ 不扣流，不再黑等
+  assert.equal(receiptProducesCard("weather.get_local", undefined), false);
+  assert.equal(receiptProducesCard("brain.recall", undefined), false);
+});
+
+test("holdAnswer=after_tool_use 且回执不出卡：正文照常流式（查记忆轮分泡回归）", async () => {
+  resetLlmUsageAuditForTest();
+
+  const memoryReply = "翻到了，你上午说的是马尔代夫，5 天 4 晚。";
+  const client = makeFakeClient([
+    ackThenToolChunks("我看一下哈。", "查一下上午的记忆。").map((c) => {
+      // 把天气工具换成 brain.recall（不出卡）
+      const choice = c?.choices?.[0];
+      const call = choice?.delta?.tool_calls?.[0];
+      if (call) {
+        call.function.name = "brain.recall";
+        call.function.arguments = JSON.stringify({ query: "马尔代夫" });
+      }
+      return c;
+    }),
+    textChunks(memoryReply),
+  ]);
+  let streamed = "";
+  const out = await streamCompletionWithTools(
+    client,
+    "deepseek-chat",
+    [
+      { role: "system", content: "你是私人助理。" },
+      { role: "user", content: "还记得我上午说的马尔代夫吗" },
+    ] as never,
+    (d: string) => {
+      streamed += d;
+    },
+    { executeTool: async () => ({ ok: true, result: { items: [{ content: "马尔代夫 5 天 4 晚" }] } }) } as never,
+    { maxRounds: 4, holdAnswer: "after_tool_use", audit: { sessionId: "answer-hold-recall" } },
+  );
+
+  // 记忆检索不出卡 → 答案照常流式（不扣流），返回值也完整
+  assert.ok(streamed.includes("马尔代夫"), `不出卡回执的正文应照常流式，实际: ${JSON.stringify(streamed)}`);
+  assert.ok(out.includes("马尔代夫"), "返回值应包含答案本体");
 });

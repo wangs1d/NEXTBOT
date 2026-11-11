@@ -4,6 +4,7 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "./nb_http.dart";
 
 /// 手机桥接在线状态（桌面「手机」页顶部的连接条）。
 class PhoneRemoteStatus {
@@ -55,7 +56,7 @@ class PhoneRemoteApi {
   PhoneRemoteApi({String? baseUrl, String? actorId, http.Client? client})
       : baseUrl = baseUrl ?? ApiConfig.httpBase,
         actorId = actorId ?? ApiConfig.effectiveActorId,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String baseUrl;
   final String actorId;

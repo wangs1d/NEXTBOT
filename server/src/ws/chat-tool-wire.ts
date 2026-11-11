@@ -266,11 +266,13 @@ export function wireToolExecuted(ctx: ChatToolWireContext, info: ToolExecutedInf
     info.result.ok === true &&
     info.result.taskId
   ) {
-    const normalized = info.toolName.replace(/_/g, ".");
+    // 2026-11-11 复合：calendar 单入口下 action 分流信息在入参 info.input.action，
+    // 而非 toolName（toolName 恒为 "calendar"）。
+    const calAction = String(info.input?.action ?? "").trim();
     const action =
-      normalized === "calendar.delete_task"
+      calAction === "delete_task"
         ? "deleted"
-        : normalized === "calendar.update_task"
+        : calAction === "update_task"
           ? "updated"
           : "created";
     sendScheduleTasksChanged(ctx, {

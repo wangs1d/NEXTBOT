@@ -40,6 +40,7 @@ import {
   messageBatchProcessor,
 } from "./handlers/chat-user-message.js";
 import { handleCardActionEvent } from "./handlers/card-action.js";
+import { isGuestActorId, looksLikeAccountId, resolveSessionIdentity } from "./session-identity.js";
 import { getTaskOutbox } from "../task-plane/task-outbox.js";
 import { getTaskHub } from "../task-plane/task-hub.js";
 import {
@@ -83,7 +84,7 @@ import {
   unifiedMemoryPatchSchema,
   unifiedQuotaAdjustSchema,
 } from "@nextbot/agent-world";
-import { isAgentWorldSocialEnabled, isAccessAuthRequired } from "../config/env.js";
+import { isAgentWorldSocialEnabled, isAccessAuthRequired, trustsPayloadAccountIdentity } from "../config/env.js";
 import { UnifiedErrorCode } from "../protocol-unified-errors.js";
 import type { AgentMemorySyncService } from "../services/agent-memory-sync-service.js";
 import { clearAllMemoryForActor } from "../services/memory-clear-service.js";
@@ -251,6 +252,11 @@ export type WsRouteDeps = {
   petReactionChat?: PetReactionChatLike | null;
   /** 手机端对话式首启引导（可选）：session.init 时按账号级一次性闸门主动开口。 */
   onboardingIntroService?: import("../services/onboarding-intro-service.js").OnboardingIntroService | null;
+  /**
+   * 支付服务（可选）：card.action 的 payment.pay.check 卡内确认专用
+   * （payment.create_order 卡「我已完成支付」→ queryOrder 原地换卡）。
+   */
+  paymentService?: import("../services/payment-service.js").PaymentService | null;
 };
 
 export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps): void {
@@ -286,6 +292,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
     accessAuthService,
     phoneCallCoordinator,
     shoppingOrderService,
+    paymentService,
     agentAccountService,
     actorModelBindings,
     petReactionChat,
@@ -648,50 +655,148 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           const declaredCapabilities = payload.capabilities as
             | Record<string, unknown>
             | undefined;
-          // ─── 设备自绑定鉴权门（ACCESS_AUTH_REQUIRED=1 且未在 upgrade query 预验时）───
-          // 非桥接通道须在 payload.token 携带有效 access token；desktopBridge /
-          // phoneBridge 通道豁免（继续走各自 PHONE_BRIDGE_TOKEN / DESKTOP_BRIDGE_TOKEN
-          // 注册流程）。缺失/无效 → error.frame + 关闭连接。
+          // ─── 身份钉死（主流：认证即发证，token 归属优先）───
+          // 2026-11-11：不再把 token 校验绑在 ACCESS_AUTH_REQUIRED 开关上。
+          // 只要客户端带了 token 就验，验过即以 token 归属为 actor，忽略
+          // payload 里自报的 userId/sessionId。这样「建连时本地账号还没读出来
+          // → 报默认 session-mvp-001」这类故障从根上不可能发生：没凭据就是
+          // 没登录，有凭据身份就一定对。
+          // 失效/过期 token → TOKEN_INVALID + 关连接（与开关无关）：客户端据此
+          // 决定「先静默续期」还是「回登录页」，两种收尾都比默默用错身份好。
+          // 无 token 时：只接受「本机安装标识」这类 guest 身份。账号形态身份必须
+          // 有 token 证明，否则 IDENTITY_REQUIRED 拒连；什么都没报则 AUTH_REQUIRED
+          // （强制模式）/ BAD_SESSION_INIT（宽松模式）——不再有兜底自报路径。
+          // 豁免通道（desktopBridge / phoneBridge）继续走各自桥接 token。
           if (
-            accessAuthActive &&
             accessAuthServiceImpl &&
             !accessAuthUserId &&
             !isDesktopBridgeChannel &&
             !isPhoneBridgeChannel
           ) {
             const initToken = typeof payload.token === "string" ? payload.token.trim() : "";
-            const verified = initToken ? accessAuthServiceImpl.verifyToken(initToken) : null;
-            if (!verified) {
+            // 用 inspectToken 而不是 verifyToken：要区分「过期」与「不存在」。
+            // 过期还能续期（客户端拿旧 token 换新），不存在只能重登——两者给
+            // 客户端的错误码必须不同，否则它会卡在「不知道该怎么办」的状态。
+            const tokenState = initToken
+              ? accessAuthServiceImpl.inspectToken(initToken, { allowExpired: true })
+              : null;
+            if (tokenState?.status === "ok") {
+              accessAuthUserId = tokenState.userId;
+              if (userIdRaw && userIdRaw !== tokenState.userId) {
+                // 客户端自报与 token 归属不一致：以 token 为准，但留痕——
+                // 这正是历史故障（报默认身份后发真账号消息）的观测点。
+                console.warn(
+                  `[ws] session.init 身份以 token 为准：自报=${userIdRaw} token=${tokenState.userId}`,
+                );
+              }
+            } else if (tokenState?.status === "expired") {
+              // 过期 ≠ 没凭据。回 TOKEN_INVALID 让客户端先去续期（它能拿这份
+              // 过期 token 换新），而不是 AUTH_REQUIRED——后者会让客户端以为
+              // 必须重新登录，直接把用户踢回登录页。
               safeSocketSend(
                 ws,
                 JSON.stringify({
                   type: ServerEventType.ErrorEvent,
                   payload: {
-                    code: "AUTH_REQUIRED",
-                    message:
-                      "服务已开启访问鉴权：请在 WS 连接 query 或 session.init payload 携带有效 token（POST /api/auth/bind 获取）",
+                    code: "TOKEN_INVALID",
+                    message: "登录状态已过期，正在自动续期",
                   },
                 }),
               );
               try {
-                ws.close(1008, "auth_required");
+                ws.close(1008, "token_expired");
+              } catch {
+                // Ignore close failures on broken sockets.
+              }
+              return;
+            } else if (accessAuthActive) {
+              // 强制模式：没凭据时**只放行未登录设备**（`inst_…`/占位值）。
+              // 第三层要求「未登录也要能用闹钟与主动消息」，但账号数据必须
+              // 认证——guest 身份的数据本来就与账号隔离，放行是安全的。
+              const claimedForGate = userIdRaw || sessionIdRaw;
+              if (!isGuestActorId(claimedForGate)) {
+                // 两种拒因给不同码，客户端才能选对动作：
+                //  - 自报了账号却没有凭证 → IDENTITY_REQUIRED（清凭据回登录）
+                //  - 什么都没报 → AUTH_REQUIRED（先登录再连）
+                const claimsAccount = looksLikeAccountId(claimedForGate);
+                safeSocketSend(
+                  ws,
+                  JSON.stringify({
+                    type: ServerEventType.ErrorEvent,
+                    payload: {
+                      code: claimsAccount ? "IDENTITY_REQUIRED" : "AUTH_REQUIRED",
+                      message: claimsAccount
+                        ? "登录状态已失效，请重新登录以确认账号身份"
+                        : "服务已开启访问鉴权：请登录后重连（或使用本机安装标识作为未登录身份）",
+                    },
+                  }),
+                );
+                try {
+                  ws.close(1008, claimsAccount ? "identity_required" : "auth_required");
+                } catch {
+                  // Ignore close failures on broken sockets.
+                }
+                return;
+              }
+            } else if (initToken) {
+              // 非强制模式下的失效 token：必须先让客户端知道凭据已废，再断链。
+              // 继续用自报身份放行会让它永远拿错误身份发消息（历史故障形态）。
+              safeSocketSend(
+                ws,
+                JSON.stringify({
+                  type: ServerEventType.ErrorEvent,
+                  payload: {
+                    code: "TOKEN_INVALID",
+                    message: "本机访问凭据已失效，请重新登录",
+                  },
+                }),
+              );
+              try {
+                ws.close(1008, "token_invalid");
               } catch {
                 // Ignore close failures on broken sockets.
               }
               return;
             }
-            accessAuthUserId = verified.userId;
           }
-          // 身份钉死：token 归属优先，忽略 payload 里客户端声明的 userId/sessionId
-          const actorId = accessAuthUserId ?? (userIdRaw || sessionIdRaw);
-          if (!actorId) {
-            socket.send(
+          // 身份裁决唯一入口：token → bridge → guest/compat，绝不「猜」账号。
+          const identity = resolveSessionIdentity({
+            verifiedTokenUserId: accessAuthUserId,
+            claimedUserId: userIdRaw,
+            claimedSessionId: sessionIdRaw,
+            isBridgeChannel: isDesktopBridgeChannel || isPhoneBridgeChannel,
+            trustPayloadAccountIdentity: trustsPayloadAccountIdentity(),
+          });
+          if (!identity.ok) {
+            safeSocketSend(
+              ws,
               JSON.stringify({
                 type: ServerEventType.ErrorEvent,
-                payload: { code: "BAD_SESSION_INIT", message: "需要 userId 或 sessionId" },
+                payload: { code: identity.code, message: identity.message },
               }),
             );
+            if (identity.code === "IDENTITY_REQUIRED") {
+              // 账号身份没凭据背书：断链逼客户端走重新登录（客户端收到
+              // TOKEN_INVALID/IDENTITY_REQUIRED 会清本地凭据并回登录门禁）。
+              try {
+                ws.close(1008, "identity_required");
+              } catch {
+                // Ignore close failures on broken sockets.
+              }
+            }
             return;
+          }
+          const actorId = identity.actorId;
+          if (identity.placeholder) {
+            console.warn(
+              `[ws] session.init 使用占位身份 ${actorId}（按 guest 处理，不挂账号数据）`,
+            );
+          }
+          if (identity.claimedActorId && identity.source !== "token") {
+            // token 分支上面已经告警过，这里只覆盖「无凭据但自报了别的身份」。
+            console.warn(
+              `[ws] session.init 自报身份 ${identity.claimedActorId} 未被采纳，实际 actor=${actorId}（${identity.source}）`,
+            );
           }
           // ─── 集群归属闸：多节点注册表下同一 actor 只在一个节点落地 ───
           // 未设 NEXTBOT_NODES 时永远是自己，此处零开销直通。
@@ -956,7 +1061,13 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
             sessionId: actorId,
             deviceId,
             userAlias: userAlias ?? "",
-            userId: userIdRaw || undefined,
+            // 记录**最终绑定**的身份，而不是客户端自报值。token 权威上线后
+            // 自报值可能被忽略，只记 userIdRaw 会让审计看起来像「这笔连接
+            // 绑在默认身份上」——2026-11-11 排查真机故障时正是被这一点带偏。
+            userId: actorId,
+            identitySource: identity.source,
+            ...(identity.claimedActorId ? { claimedUserId: identity.claimedActorId } : {}),
+            ...(identity.placeholder ? { placeholderIdentity: true } : {}),
           });
           return;
         }
@@ -1515,7 +1626,7 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           await handleCardActionEvent(
             { socket, boundActorId, sendUnifiedError },
             event.payload,
-            { shoppingOrderService },
+            { shoppingOrderService, paymentService },
           );
           return;
         }

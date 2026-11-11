@@ -10,7 +10,7 @@ import "nb_http.dart";
 /// 负责存储包括"早安简报"在内的用户个性化配置。
 class UserPreferencesApi {
   UserPreferencesApi({required this.baseUrl, http.Client? client})
-      : _client = client ?? http.Client();
+      : _client = client ?? NbClient();
 
   final String baseUrl;
   final http.Client _client;

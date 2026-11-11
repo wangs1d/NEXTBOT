@@ -16,7 +16,7 @@ import android.widget.TextView
 import androidx.core.content.ContextCompat
 
 /**
- * 短信代发确认全屏窗：Agent 远程发起 send_sms（messages.reply → 短信会话）时先弹此窗，
+ * 短信代发确认全屏窗：Agent 远程发起 send_sms（短信会话）时先弹此窗，
  * 展示接收号码与完整内容，用户点「确认发送」才走 SmsManager 真发；
  * 取消 / 超时 / 授权被拒 / 发送异常都回执 cancelled 或 send_failed，绝不静默发送。
  */

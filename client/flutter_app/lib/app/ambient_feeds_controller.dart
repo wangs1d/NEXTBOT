@@ -4,6 +4,8 @@ import "dart:io";
 
 import "package:flutter/foundation.dart";
 import "../core/services/nb_http.dart";
+import "../core/services/ws_event_router.dart"
+    show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
 import "../core/config/api_config.dart";
 import "../core/models/agent_relay_models.dart";
@@ -23,6 +25,40 @@ class AmbientFeedsController {
   AmbientFeedsController._();
 
   static final AmbientFeedsController instance = AmbientFeedsController._();
+
+  static bool _busWired = false;
+
+  /// 事件总线自订阅（main.dart 装配时调用一次；幂等）。
+  ///
+  /// schedule.reminder_fired / schedule.tasks_changed 归本模块 owned：
+  /// - 手机端原由 mobile_chat_controller 的 chat 通道 case 转发到这里；
+  /// - 桌面端原由 main.dart 根监听器分支转发到这里。
+  /// 两处接线都撤掉，改由 scope=auto 直投（每端至多一次）。附带修复：
+  /// 手机端首帧前聊天通道「无监听即丢弃」导致到点提醒无触达的窗口期。
+  static void ensureBusSubscription() {
+    if (_busWired) return;
+    _busWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "ambient-feeds",
+      types: WsEventCatalog.ambientFeeds,
+      scope: WsSubscribeScope.auto,
+      onEvent: (Map<String, dynamic> event) {
+        final String type = event["type"] as String? ?? "";
+        final Map<String, dynamic> payload = wsEventPayload(event);
+        // Future 交给总线信箱：同模块串行保序、异常由总线统一捕获。
+        if (type == "schedule.reminder_fired") {
+          return instance.onScheduleReminderFired(payload);
+        } else if (type == "schedule.tasks_changed") {
+          return instance.onScheduleTasksChanged(payload);
+        } else if (type == "inbox.message") {
+          // 站内信：服务端已落盘必达，这里只做即时提醒，两端同一处理。
+          return instance.onInboxMessage(payload);
+        } else if (type == "agent.peer_message") {
+          return instance.onPeerMessage(payload);
+        }
+      },
+    );
+  }
 
   // ── UI 端口（main.dart 装配时注入） ──
 

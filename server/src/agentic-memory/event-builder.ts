@@ -51,7 +51,7 @@ export type TurnEventInput = {
 
 /** 工具名 → 事件 kind（有序匹配，首个命中生效）。新增业务域只加一行。 */
 const KIND_RULES: Array<[RegExp, string]> = [
-  [/^shopping\.compare\./, "price_compare"],
+  [/^shopping\.compare/, "price_compare"],
   [/^shopping\.order\./, "order"],
   [/^shopping\.suggest$/, "shopping_suggest"],
   [/^weather\./, "weather_query"],

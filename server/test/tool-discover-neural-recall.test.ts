@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tool_discover 神经召回集成测试（N1/N2/N3 在线验收，2026-09-11）。
  *
  * 与 golden 回归的分工：
@@ -34,11 +34,9 @@ const sidecarUp = await probeNeuralSidecar(1_000);
  */
 const NEURAL_GOLDEN: Array<{ query: string; expect: string[]; topK?: number }> = [
   { query: "外头冷不冷", expect: ["weather.get_local"], topK: 3 },
-  { query: "卡里还剩多少", expect: ["wallet.get_balance"], topK: 3 },
   { query: "我现在在哪儿", expect: ["clock.get_user_location"], topK: 3 },
-  { query: "帮我定个明早七点的闹钟", expect: ["calendar.create"], topK: 3 },
-  { query: "家门口有人吗帮我瞅瞅", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
-  { query: "客厅有点暗", expect: ["smart_home.control_device"], topK: 3 },
+  { query: "帮我定个明早七点的闹钟", expect: ["calendar"], topK: 3 },
+  { query: "客厅有点暗", expect: ["smart_home"], topK: 3 },
 ];
 
 type DiscoverMatch = { name: string; routing?: { confidence?: number } };

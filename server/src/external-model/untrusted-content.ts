@@ -71,7 +71,6 @@ const FENCE_SKIP_TOOLS: ReadonlySet<string> = new Set([
   "tool_search",
   "tool_describe",
   "agent.query_capabilities",
-  "self.list_custom_skills",
   "obs_recall",
   "task.status",
   "world.status",

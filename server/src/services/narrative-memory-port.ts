@@ -21,6 +21,9 @@ export type MemoryWriteProvenance = {
   eventTime?: string;
 };
 
+/** 写入结果：persisted=false 表示所有配置的落库侧都抛错，调用方不应丢弃源流水。 */
+export type WriteDecidedOutcome = { persisted: boolean };
+
 export type NarrativeMemoryPort = {
   ingest(
     actorId: string,
@@ -43,7 +46,7 @@ export type NarrativeMemoryPort = {
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
-  ): Promise<void>;
+  ): Promise<WriteDecidedOutcome | void>;
   buildNarrativeRecall(actorId: string, query: string): Promise<string>;
   buildCrossContextRecall(actorId: string, query: string): Promise<string>;
   buildDetailedRecall(actorId: string, query: string): Promise<string>;
@@ -144,11 +147,11 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
-  ): Promise<void> {
+  ): Promise<WriteDecidedOutcome> {
     const context = opts.context as MemoryContextKind;
     const provenance = pickProvenance(opts);
     if (this.bridge) {
-      await this.bridge.writeUnified(
+      const result = await this.bridge.writeUnified(
         actorId,
         source,
         text,
@@ -160,37 +163,53 @@ export class NarrativeMemoryFacade implements NarrativeMemoryPort {
         unified,
       );
       this.fireOnWrite(actorId, text, source);
-      return;
+      return { persisted: result.ok };
     }
+    let attempted = 0;
+    let failed = 0;
     if (this.humanLikeMemory) {
-      await this.humanLikeMemory.ingest(actorId, text, source, {
-        context,
-        metadata: { highSignal: opts.highSignal, ...provenance },
-      });
+      attempted++;
+      try {
+        await this.humanLikeMemory.ingest(actorId, text, source, {
+          context,
+          metadata: { highSignal: opts.highSignal, ...provenance },
+        });
+      } catch (err) {
+        failed++;
+        console.error("[NarrativeMemoryFacade] 海马体写入失败:", err);
+      }
     }
     if (this.agenticIngest) {
-      if (unified) {
-        await this.agenticIngest.persistUnifiedExtraction(
-          actorId,
-          source,
-          unified,
-          context,
-          opts.highSignal,
-          text,
-          provenance,
-        );
-      } else {
-        await this.agenticIngest.writeDecided(
-          actorId,
-          source,
-          text,
-          context,
-          opts.highSignal,
-          provenance,
-        );
+      attempted++;
+      try {
+        if (unified) {
+          await this.agenticIngest.persistUnifiedExtraction(
+            actorId,
+            source,
+            unified,
+            context,
+            opts.highSignal,
+            text,
+            provenance,
+          );
+        } else {
+          await this.agenticIngest.writeDecided(
+            actorId,
+            source,
+            text,
+            context,
+            opts.highSignal,
+            provenance,
+          );
+        }
+      } catch (err) {
+        failed++;
+        console.error("[NarrativeMemoryFacade] Mem0 写入失败:", err);
       }
     }
     this.fireOnWrite(actorId, text, source);
+    // 只有“配置了落库侧且全部失败”才算未持久化；未配置任何落库侧视为无操作成功
+    return { persisted: attempted === 0 || failed < attempted };
   }
 
   /** 写入后钩子（fire-and-forget，异常只记日志不抛出） */
@@ -400,12 +419,18 @@ class NarrativeHybridAdapter implements NarrativeMemoryPort {
     source: string,
     opts: { context: NarrativeMemoryContext; highSignal: boolean } & MemoryWriteProvenance,
     unified?: import("../agentic-memory/unified-extractor.js").UnifiedExtraction,
-  ): Promise<void> {
+  ): Promise<WriteDecidedOutcome> {
     const skipVector = this.bridgeActive && text.trim().length < this.hybrid.chunkChars;
-    await Promise.all([
+    // hybrid 只是附加索引，失败不影响主落库结论（由 facade 返回）
+    const hybridWrite = this.hybrid
+      .ingest(actorId, text, source, { skipVector })
+      .catch((err) => console.error("[NarrativeMemoryPort] hybrid 索引写入失败（忽略）:", err));
+    const [outcome] = await Promise.all([
       this.facade.writeDecided(actorId, text, source, opts, unified),
-      this.hybrid.ingest(actorId, text, source, { skipVector }),
+      hybridWrite,
     ]);
+    // facade 未返回结论（旧 fake / 未实现）时不假设成功，避免“静默当已落库”
+    return outcome ?? { persisted: false };
   }
 
   async buildNarrativeRecall(actorId: string, query: string): Promise<string> {

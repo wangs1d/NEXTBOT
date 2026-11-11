@@ -80,15 +80,8 @@ export const STATE_MACHINE_TOOL_ALLOWLIST: string[] = [
   "http.request",
   "info.inspect_webpage",
   "info.navigate_site",
-  // 服务端 Playwright 无头浏览器
-  "agent_browser.open",
-  "agent_browser.click",
-  "agent_browser.type",
-  "agent_browser.scroll",
-  "agent_browser.screenshot",
-  "agent_browser.extract_text",
-  "agent_browser.wait_for",
-  "agent_browser.close",
+  // 服务端 Playwright 无头浏览器（复合工具，action 分流）
+  "agent_browser",
 ];
 
 /** 格式化子任务进度 section(给 system prompt 用) */
@@ -561,14 +554,16 @@ ${input.recentHistory.length > 0 ? input.recentHistory.join("\n") : "(暂无历�
 
 ## 浏览器自动化(服务端 Playwright 无头浏览器)
 当任务需要"在网页上操作"(填表单/点按钮/多步交互/JS 渲染页面)时用以下工具:
-- agent_browser.open {url}: 打开 URL,返回 sessionId(后续操作都须传此 ID)
-- agent_browser.click {sessionId, selector}: 点击元素(CSS/text=/xpath= 选择器)
-- agent_browser.type {sessionId, selector, text}: 在输入框输入文本
-- agent_browser.scroll {sessionId, selector?/deltaY?/x?/y?}: 滚动页面
-- agent_browser.extract_text {sessionId, selector?}: **提取页面文本+可交互元素列表**,比截图省 token
-- agent_browser.screenshot {sessionId, fullPage?}: 截图(仅在复杂页面需要视觉定位时用)
-- agent_browser.wait_for {sessionId, selector}: 等待元素出现
-- agent_browser.close {sessionId}: 关闭会话(完成后应主动调用)
+- agent_browser {action, ...}: 复合工具,按 action 分流(以下动作共用同一 sessionId):
+  - action="open" {url}: 打开 URL,返回 sessionId(后续动作都须传此 ID)
+  - action="click" {sessionId, selector/ref}: 点击元素(CSS/text=/xpath= 选择器)
+  - action="type" {sessionId, selector/ref, text}: 在输入框输入文本
+  - action="scroll" {sessionId, selector?/deltaY?/x?/y?}: 滚动页面
+  - action="extract_text" {sessionId, selector?}: **提取页面文本+可交互元素列表**,比截图省 token
+  - action="screenshot" {sessionId, fullPage?}: 截图(仅在复杂页面需要视觉定位时用)
+  - action="wait_for" {sessionId, selector/ref}: 等待元素出现
+  - action="handoff" {sessionId, instruction}: 把截图+指引推给用户,等其完成
+  - action="close" {sessionId}: 关闭会话(完成后应主动调用)
 
 ## 输出格式
 - 如果要调用工具:直接产出 tool_call(OpenAI function calling 格式)

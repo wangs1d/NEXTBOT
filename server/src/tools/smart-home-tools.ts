@@ -2,69 +2,57 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
 import type { SmartHomeService } from "../services/smart-home-service.js";
 import type { ToolRegistry } from "./tool-registry.js";
 
+/**
+ * 2026-11-11 复合：smart_home.list_devices / control_device / scene 三个名字
+ * 收敛为单入口 `smart_home`，用 `action` 分流（list_devices/control_device/scene）。
+ * 原 control_device 的 `action`（设备操作）改名为 `operation`，原 scene 的 `action`
+ * 改名为 `scene_action`，避免与顶层的分流字段 `action` 冲突。
+ */
 export const SMART_HOME_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "smart_home.list_devices",
+      name: "smart_home",
       description:
-        "列出 HomeAssistant 中所有智能设备及其当前状态。用户问「有哪些设备」「家里设备状态」时调用。返回设备名、entity_id 及开关/亮度/温度等状态。",
-      parameters: {
-        type: "object",
-        properties: {},
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "smart_home.control_device",
-      description:
-        "控制 HomeAssistant 中的智能设备。支持开关灯、调亮度/色温、开关插座、设置空调温度/模式、开关窗帘/卷帘等。用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时调用。",
+        "HomeAssistant 智能家居统一入口（用 action 分流）。\n" +
+        "action=list_devices：列出所有智能设备及其当前状态。用户问「有哪些设备」「家里设备状态」时调用。\n" +
+        "action=control_device：控制设备。支持开关灯、调亮度/色温、开关插座、设置空调温度/模式、开关窗帘/卷帘等。用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时调用。\n" +
+        "action=scene：场景控制。用户说「回家模式」「离家模式」「晚安」等预设场景时调用。",
       parameters: {
         type: "object",
         properties: {
-          entity_id: {
-            type: "string",
-            description: "设备 entity_id，如 light.keting、switch.shui_hu、climate.woshi、cover.chuang_lian。从 smart_home.list_devices 结果中选取。",
-          },
           action: {
             type: "string",
+            enum: ["list_devices", "control_device", "scene"],
+            description: "要执行的智能家居动作。",
+          },
+          // action=control_device
+          entity_id: {
+            type: "string",
+            description: "action=control_device：设备 entity_id，如 light.keting、switch.shui_hu、climate.woshi、cover.chuang_lian。从 list_devices 结果中选取。",
+          },
+          operation: {
+            type: "string",
             enum: ["turn_on", "turn_off", "toggle", "set_brightness", "set_temperature", "set_mode", "set_position", "open_cover", "close_cover"],
-            description: "操作类型：turn_on=开、turn_off=关、toggle=切换、set_brightness=亮度、set_temperature=温度、set_mode=模式、set_position=位置百分比、open_cover=开窗帘、close_cover=关窗帘",
+            description: "action=control_device：操作类型：turn_on=开、turn_off=关、toggle=切换、set_brightness=亮度、set_temperature=温度、set_mode=模式、set_position=位置百分比、open_cover=开窗帘、close_cover=关窗帘",
           },
           value: {
             type: "number",
-            description: "操作数值。亮度0-255、温度(°C)、位置0-100(0=关/100=全开)。仅 set_brightness/set_temperature/set_position 需要。",
+            description: "action=control_device：操作数值。亮度0-255、温度(°C)、位置0-100(0=关/100=全开)。仅 set_brightness/set_temperature/set_position 需要。",
           },
           mode: {
             type: "string",
-            description: "模式名称，如 hvac_mode(cool/heat/auto/off)、fan_mode。仅 set_mode 需要。",
+            description: "action=control_device：模式名称，如 hvac_mode(cool/heat/auto/off)、fan_mode。仅 set_mode 需要。",
           },
-        },
-        required: ["entity_id", "action"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "smart_home.scene",
-      description:
-        "HomeAssistant 场景控制。用户说「回家模式」「离家模式」「晚安」等预设场景时调用。唤醒/激活某个 HA 场景自动执行一系列设备操作。",
-      parameters: {
-        type: "object",
-        properties: {
-          action: {
+          // action=scene
+          scene_action: {
             type: "string",
             enum: ["list", "activate"],
-            description: "list=列出所有场景, activate=激活指定场景",
+            description: "action=scene：list=列出所有场景, activate=激活指定场景",
           },
           scene_name: {
             type: "string",
-            description: "场景名称或 entity_id（如 scene.wan_an），仅 activate 时必填。",
+            description: "action=scene：场景名称或 entity_id（如 scene.wan_an），仅 scene_action=activate 时必填。",
           },
         },
         required: ["action"],
@@ -78,7 +66,7 @@ export function registerSmartHomeTools(
   registry: ToolRegistry,
   smartHome: SmartHomeService,
 ): void {
-  registry.register("smart_home.list_devices", async () => {
+  const handleListDevices = async () => {
     try {
       const states = await smartHome.getAllStates();
       const list = smartHome.formatDeviceList(states);
@@ -96,12 +84,12 @@ export function registerSmartHomeTools(
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
     }
-  });
+  };
 
-  registry.register("smart_home.control_device", async (input) => {
+  const handleControlDevice = async (input: Record<string, unknown>) => {
     try {
       const entityId = String(input.entity_id ?? "").trim();
-      const action = String(input.action ?? "").trim();
+      const action = String(input.operation ?? "").trim();
       if (!entityId) return { ok: false, error: "entity_id 为必填项" };
 
       const domain = entityId.split(".")[0];
@@ -161,11 +149,11 @@ export function registerSmartHomeTools(
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
     }
-  });
+  };
 
-  registry.register("smart_home.scene", async (input) => {
+  const handleScene = async (input: Record<string, unknown>) => {
     try {
-      const action = String(input.action ?? "list").trim();
+      const action = String(input.scene_action ?? "list").trim();
       if (action === "list") {
         const states = await smartHome.getAllStates();
         const scenes = states.filter((s) => s.entity_id.startsWith("scene."));
@@ -192,6 +180,21 @@ export function registerSmartHomeTools(
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
+    }
+  };
+
+  // 2026-11-11 复合：单一入口 `smart_home`，按 action 分流。
+  registry.register("smart_home", async (input) => {
+    const action = String(input.action ?? "").trim();
+    switch (action) {
+      case "list_devices":
+        return handleListDevices();
+      case "control_device":
+        return handleControlDevice(input);
+      case "scene":
+        return handleScene(input);
+      default:
+        return { ok: false, error: `未知 action「${action || "(空)"}」，可选值：list_devices、control_device、scene` };
     }
   });
 }

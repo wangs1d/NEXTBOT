@@ -12,6 +12,7 @@ import { registerBrainRoutes } from "./brain.js";
 import { registerCatalogRoutes } from "./catalog.js";
 import { registerChatRoutes } from "./chat.js";
 import { registerClientManifestRoutes } from "./client-manifest.js";
+import { registerClientConfigRoutes } from "./client-config.js";
 import { registerClientTelemetryRoutes } from "./client-telemetry.js";
 import { registerInternalManifestEventRoutes } from "./internal-manifest-events.js";
 import { registerModelProviderRoutes } from "./model-providers.js";
@@ -117,6 +118,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerSystemRoutes(app, deps);
   // 客户端版本清单（自包含，无 deps）：桌面客户端启动检查 + 后期 runtime 收回总开关
   registerClientManifestRoutes(app);
+  // 客户端远程配置（自包含，无 deps）：运行期地址下发（远程配置下发地基，2026-11-10）
+  registerClientConfigRoutes(app);
   // 安装包运行埋点（自包含，无 deps）：客户端启动上报 + 管理端 runtime 收回决策台账
   registerClientTelemetryRoutes(app);
   // 清单变化 SSE 事件流（自包含；MANIFEST_EVENT_TOKEN 未配置时 403 禁用）：

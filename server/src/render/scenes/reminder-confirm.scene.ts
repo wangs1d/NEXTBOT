@@ -1,5 +1,5 @@
 /**
- * 提醒确认场景（2026-11-07 用户拍板「方案 A」）：calendar.create 成功回执
+ * 提醒确认场景（2026-11-07 用户拍板「方案 A」）：calendar(action=create) 成功回执
  * → 一张只读确认卡，卡内多行、一轮一张。
  *
  * 三条硬规则：
@@ -19,7 +19,7 @@ import type { TurnEffect } from "../types.js";
 import type { RenderScene, SceneContext, SceneMatch } from "./types.js";
 import { REMINDER_CONFIRM_BOUNDARY } from "./prompts.js";
 
-const CREATE_TOOL = "calendar.create";
+const CREATE_TOOL = "calendar";
 
 /** 时间口径：设备时区是工具入参，回执里带回来，渲染层不猜、不用服务端兜底。 */
 const DAY_PREFIXES = ["大后天", "明早", "今早", "明晚", "今晚", "明天", "后天", "今天"];
@@ -121,6 +121,7 @@ function collectRows(effects: ReadonlyArray<TurnEffect>): ReminderConfirmRow[] {
   const rows: ReminderConfirmRow[] = [];
   for (const effect of effects) {
     if (effect.tool !== CREATE_TOOL || effect.status !== "ok" || !effect.result) continue;
+    if (effect.result.action !== "create") continue;
     const row = reminderRowFromReceipt(effect.result);
     if (!row || seen.has(row.taskId)) continue;
     seen.add(row.taskId);
@@ -134,6 +135,7 @@ function collectFacts(effects: ReadonlyArray<TurnEffect>): { recurrences: string
   let timezone = "";
   for (const effect of effects) {
     if (effect.tool !== CREATE_TOOL || effect.status !== "ok" || !effect.result) continue;
+    if (effect.result.action !== "create") continue;
     const recurrence = str(effect.result.recurrence);
     if (recurrence && recurrence !== "none" && !recurrences.includes(recurrence)) {
       recurrences.push(recurrence);
@@ -198,7 +200,7 @@ export const reminderConfirmScene: RenderScene = {
     promptBoundary: REMINDER_CONFIRM_BOUNDARY,
   },
   contract:
-    "卡只从 calendar.create 成功回执产出；按 taskId 去重，一轮一张；" +
+    "卡只从 calendar(action=create) 成功回执产出；按 taskId 去重，一轮一张；" +
     "rows 全量下发，界面一次只渲染一条、上下轮动且邻项渐隐，不做折叠收口；" +
     "时间/事项原样取回执，正文不复述；失败与澄清轮不出卡；actions 恒为空。",
 

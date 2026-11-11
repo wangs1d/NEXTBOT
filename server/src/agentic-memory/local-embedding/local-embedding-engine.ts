@@ -12,7 +12,7 @@
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { serverRoot } from "../../config/paths.js";
 
 import type { InferenceSession, Tensor } from "onnxruntime-node";

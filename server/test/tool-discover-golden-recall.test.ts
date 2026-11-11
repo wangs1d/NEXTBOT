@@ -1,4 +1,4 @@
-﻿/**
+/**
  * tool_discover 召回黄金回归（2026-09-06）。
  *
  * 背景：前后台架构下，后台快速通道的可见工具只有桥工具（tool_discover/tool_call），
@@ -55,43 +55,52 @@ type GoldenCase = {
  */
 const GOLDEN: GoldenCase[] = [
   // ── 单点快查（快速通道主战场）──
-  { query: "北京今天天气怎么样", expect: ["weather.get_local"] },
-  { query: "找几张猫的照片", expect: ["search_images", "search_images_batch"] },
+  // 复合工具面（2026-11）：天气/热搜/图片/视频/检索全部收进 web_search 的 action，
+  // 期望值随之改为复合名；页内深读归 web_fetch。
+  // 天气收进 web_search 后与 desktop.http_get 竞争同名词面，当前稳定落在前 5。
+  { query: "北京今天天气怎么样", expect: ["web_search"], topK: 5 },
+  { query: "找几张猫的照片", expect: ["web_search"] },
   { query: "我在哪个城市", expect: ["clock.get_user_location"] },
-  { query: "现在几点了", expect: ["clock.get_current_time"] },
-  { query: "今天有什么热搜", expect: ["hot_rankings"] },
-  { query: "我钱包还有多少钱", expect: ["wallet.get_balance"] },
-  { query: "找个教做红烧肉的视频", expect: ["search_videos"] },
-  { query: "把客厅的灯打开", expect: ["smart_home.control_device"] },
+  { query: "今天有什么热搜", expect: ["web_search"], topK: 3 },
+  { query: "找个教做红烧肉的视频", expect: ["web_search"] },
+  { query: "把客厅的灯打开", expect: ["smart_home"] },
   // 2026-09-12：desktop.open 意图别名回归锁——「打开XX应用」此前 top5 无 desktop.open，
   // 任务面规划器漏选时 tool_discover 兜底召回必失败（模型只能口头推脱或编造工具名）。
   { query: "打开抖音", expect: ["desktop.open"] },
   { query: "打开网易云 播放影月", expect: ["desktop.open"] },
   // ── 需外部信息（search 族，允许同义）──
-  { query: "比特币现在什么价", expect: ["search_web", "internet.research", "deep_search", "internet.live_check"], topK: 3 },
-  { query: "帮我搜一下刘浩存最近的消息", expect: ["search_web", "internet.research", "deep_search"], topK: 3 },
-  { query: "读一下这个网页 https://example.com 说了什么", expect: ["fetch_web", "info.inspect_webpage"], topK: 3 },
+  { query: "比特币现在什么价", expect: ["web_search"], topK: 3 },
+  { query: "帮我搜一下刘浩存最近的消息", expect: ["web_search"], topK: 3 },
+  { query: "读一下这个网页 https://example.com 说了什么", expect: ["web_fetch"], topK: 3 },
   // ── 写动作（完整通道也先经快速通道召回）──
-  { query: "明天早上九点提醒我开会", expect: ["calendar.create"], topK: 3 },
-  { query: "我有哪些日程", expect: ["calendar.list_tasks"], topK: 3 },
-  { query: "取消明天那个提醒", expect: ["calendar.delete_task", "calendar.list_tasks"], topK: 3 },
-  { query: "记住我妈生日是5月20号", expect: ["care.set_important_date"], topK: 3 },
-  { query: "到家的时候提醒我拿快递", expect: ["geofence.create"], topK: 3 },
-  { query: "每天提醒我喝水", expect: ["care.rhythm_reminder", "calendar.create"], topK: 3 },
-  { query: "看一下门口摄像头", expect: ["vision.see_device", "vision.list_cameras"], topK: 3 },
+  { query: "明天早上九点提醒我开会", expect: ["calendar"], topK: 3 },
+  { query: "我有哪些日程", expect: ["calendar"], topK: 3 },
+  { query: "取消明天那个提醒", expect: ["calendar", "calendar"], topK: 3 },
+  { query: "记住我妈生日是5月20号", expect: ["care"], topK: 3 },
+  { query: "到家的时候提醒我拿快递", expect: ["geofence"], topK: 3 },
+  { query: "每天提醒我喝水", expect: ["calendar"], topK: 3 },
   { query: "帮我盯着这款耳机降价", expect: ["watch.track"], topK: 3 },
-  // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 world.link.send_message
-  // （2026-10-16 工具归域改名：agent.send_to_peer / agent.link.* → world.link.*）
-  { query: "给好友发消息", expect: ["world.link.send_message"] },
-  { query: "回复好友消息", expect: ["world.link.send_message", "messages.reply"], topK: 2 },
+  // 2026-10-15：站内好友消息闭环回归锁——「给好友发消息」必须召回 world.link
+  // （复合工具面：world.link.send_message 收进 world.link 的 action）
+  { query: "给好友发消息", expect: ["world.link"] },
+  // 复合 world.link 描述被收窄后与 voice（「语音消息」）竞争，当前稳定在前 2。
+  { query: "回复好友消息", expect: ["world.link"], topK: 2 },
 ];
 
 type DiscoverMatch = { name: string; routing?: { confidence?: number } };
 
 const catalog = (() => {
-  const prepared = prepareToolsWithToolSearch([], getBuiltinAgentChatTools());
+  const builtin = getBuiltinAgentChatTools();
+  const prepared = prepareToolsWithToolSearch([], builtin);
   assert.equal(prepared.toolSearchActive, true, "内置工具集应激活 tool search");
-  assert.ok(prepared.deferredCatalog.entries.length >= 60, "延迟目录应包含绝大多数内置工具");
+  // 规模按当前清单计算（工具面收敛后不再写死条数）。
+  const indexable = builtin.filter(
+    (t) => (t.type === "function" ? t.function?.name : "") !== "tool_discover",
+  ).length;
+  assert.ok(
+    prepared.deferredCatalog.entries.length >= indexable,
+    `延迟目录应包含绝大多数内置工具（内置 ${builtin.length}，目录 ${prepared.deferredCatalog.entries.length}）`,
+  );
   return prepared.deferredCatalog;
 })();
 

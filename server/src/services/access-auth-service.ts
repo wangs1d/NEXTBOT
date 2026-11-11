@@ -20,6 +20,7 @@
  *    并在启动时向控制台打印一枚引导码（wire 在 create-app-services 装配层）
  */
 import { getDataDir } from "../config/data-dir.js";
+import { accessTokenRefreshGraceMs, accessTokenTtlMs } from "../config/env.js";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "path";
 
@@ -35,6 +36,11 @@ export interface AccessTokenRecord {
   deviceLabel: string;
   createdAt: number;
   lastSeenAt: number;
+  /**
+   * 过期时刻（毫秒）。0 / 缺失 = 永不过期（旧文件兼容 + TTL 关闭时）。
+   * 过期后 verifyToken 判无效，但仍在宽限期内可 refresh 换新。
+   */
+  expiresAt: number;
 }
 
 interface AccessTokenFileShape {
@@ -146,6 +152,7 @@ export class AccessAuthService {
     pending.used = true;
     this.pendingCodes.delete(normalized);
     const token = generateToken();
+    const ttlMs = accessTokenTtlMs();
     const record: AccessTokenRecord = {
       tokenId: `at_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`,
       tokenHash: sha256Hex(token),
@@ -154,6 +161,7 @@ export class AccessAuthService {
       deviceLabel: (deviceLabel ?? "").trim() || deviceId.trim(),
       createdAt: Date.now(),
       lastSeenAt: Date.now(),
+      expiresAt: ttlMs > 0 ? Date.now() + ttlMs : 0,
     };
     this.tokens.set(record.tokenId, record);
     this.hashIndex.set(record.tokenHash, record.tokenId);
@@ -161,23 +169,177 @@ export class AccessAuthService {
     return { token, userId: record.userId, record };
   }
 
+  /**
+   * 为已认证账号直接签发设备 token —— 账号登录/注册成功后调用。
+   *
+   * 与 [consumeBindingCode] 的区别：不需要 6 位绑定码。邮箱验证码本身
+   * 已经证明「这个邮箱是我的」，再叠一层配对码只是历史包袱（配对码是给
+   * 「另一台设备接管已有账号」用的，不是登录的必经环节）。
+   *
+   * 主流做法是认证即发证：登录成功拿到 token，连接与 HTTP 全部以 token
+   * 归属为身份权威，客户端不再自报 userId（见 connection.ts 身份钉死）。
+   *
+   * 同一 deviceId 重复登录：撤销该设备的旧 token 再签发新的，避免每次
+   * 登录都往 access-tokens.json 里堆记录（一台手机一天几十条）。
+   */
+  async issueDeviceToken(
+    userId: string,
+    deviceId: string,
+    deviceLabel?: string,
+  ): Promise<{
+    token: string;
+    tokenId: string;
+    userId: string;
+    deviceId: string;
+    expiresAt: number;
+  }> {
+    const actor = userId?.trim();
+    const device = deviceId?.trim();
+    if (!actor) throw new Error("userId 不能为空");
+    if (!device) throw new Error("deviceId 不能为空");
+    // 撤销同设备旧 token：一台设备只保留最新一枚有效凭据。
+    // 不按 userId 过滤——同设备换账号登录时，上一个账号的凭据也必须失效，
+    // 否则旧 token 仍能通过校验、把连接绑到已经登出的账号上。
+    for (const [tokenId, rec] of this.tokens) {
+      if (rec.deviceId !== device) continue;
+      this.hashIndex.delete(rec.tokenHash);
+      this.tokens.delete(tokenId);
+    }
+    const token = generateToken();
+    const ttlMs = accessTokenTtlMs();
+    const record: AccessTokenRecord = {
+      tokenId: `at_${Date.now().toString(36)}_${randomBytes(3).toString("hex")}`,
+      tokenHash: sha256Hex(token),
+      userId: actor,
+      deviceId: device,
+      deviceLabel: (deviceLabel ?? "").trim() || device,
+      createdAt: Date.now(),
+      lastSeenAt: Date.now(),
+      expiresAt: ttlMs > 0 ? Date.now() + ttlMs : 0,
+    };
+    this.tokens.set(record.tokenId, record);
+    this.hashIndex.set(record.tokenHash, record.tokenId);
+    await this.persist();
+    return {
+      token,
+      tokenId: record.tokenId,
+      userId: actor,
+      deviceId: device,
+      expiresAt: record.expiresAt,
+    };
+  }
+
   // ------------------------------------------------------------------ //
   // 校验 / 管理
   // ------------------------------------------------------------------ //
 
   /**
-   * 校验明文 token：命中 → { userId, tokenId } 并（防抖）刷新 lastSeenAt；
-   * 未命中 → null。
+   * 校验明文 token：命中且未过期 → { userId, tokenId } 并（防抖）刷新 lastSeenAt；
+   * 未命中或已过期 → null。
    */
-  verifyToken(token: string): { userId: string; tokenId: string } | null {
+  verifyToken(token: string): { userId: string; tokenId: string; expiresAt: number } | null {
+    // 注意：**不删除**过期记录。宽限期内的 refresh 还要靠这条记录认出
+    // 「是哪台设备」，删了就变成「过期即必须重登」。真正的清理在启动时
+    // cleanupExpiredTokens() 里做（只清超过宽限期的）。
+    const state = this.inspectToken(token, { allowExpired: true });
+    if (state.status !== "ok") return null;
+    return { userId: state.userId, tokenId: state.tokenId, expiresAt: state.expiresAt };
+  }
+
+  /**
+   * 清理「过期已超过宽限期」的记录（启动时调用）。
+   *
+   * 只清这批：留在宽限期内的要能续期，清早了用户就得重登。返回清理条数，
+   * 供启动日志确认 token 库规模。
+   */
+  cleanupExpiredTokens(): number {
+    const graceMs = accessTokenRefreshGraceMs();
+    const now = Date.now();
+    let removed = 0;
+    for (const [tokenId, rec] of this.tokens) {
+      const expiresAt = rec.expiresAt ?? 0;
+      if (expiresAt <= 0) continue;
+      if (now - expiresAt <= graceMs) continue;
+      this.hashIndex.delete(rec.tokenHash);
+      this.tokens.delete(tokenId);
+      removed += 1;
+    }
+    if (removed > 0) void this.persist();
+    return removed;
+  }
+
+  /**
+   * 详细校验结果：区分「不存在」与「已过期」。
+   *
+   * 分开的意义是错误文案与动作不同——不存在 = 换机登陆/被吊销，只能重新登录；
+   * 已过期 = 还能静默续期，客户端应该先 refresh 而不是把用户踢回登录页。
+   */
+  inspectToken(
+    token: string,
+    opts: { allowExpired?: boolean } = {},
+  ): {
+    status: "ok" | "expired" | "not_found";
+    userId: string;
+    tokenId: string;
+    tokenHash: string;
+    expiresAt: number;
+    deviceId: string;
+    deviceLabel: string;
+  } {
+    const empty = {
+      userId: "",
+      tokenId: "",
+      tokenHash: "",
+      expiresAt: 0,
+      deviceId: "",
+      deviceLabel: "",
+    };
     const hash = sha256Hex(token);
     const tokenId = this.hashIndex.get(hash);
-    if (!tokenId) return null;
+    if (!tokenId) return { status: "not_found", ...empty };
     const rec = this.tokens.get(tokenId);
-    if (!rec) return null;
+    if (!rec) return { status: "not_found", ...empty };
+    const expiresAt = rec.expiresAt ?? 0;
+    const base = {
+      userId: rec.userId,
+      tokenId: rec.tokenId,
+      tokenHash: rec.tokenHash,
+      expiresAt,
+      deviceId: rec.deviceId,
+      deviceLabel: rec.deviceLabel,
+    };
+    if (expiresAt > 0 && Date.now() >= expiresAt) {
+      return { status: "expired", ...base };
+    }
     rec.lastSeenAt = Date.now();
     this.scheduleLastSeenFlush();
-    return { userId: rec.userId, tokenId: rec.tokenId };
+    return { status: "ok", ...base };
+  }
+
+  /**
+   * 用旧 token 换新 token（滑动续期）。
+   *
+   * 允许两种输入：仍在有效期内的 token（客户端主动提前续），或过期未超过
+   * 宽限期的 token（用户久未打开 App）。超过宽限期才算真的失效，必须重登。
+   *
+   * 换新时沿用原 deviceId/deviceLabel：`issueDeviceToken` 会顺带吊销同设备
+   * 旧 token，所以换完之后旧凭据立即作废，不留可用副本。
+   */
+  async refreshToken(token: string): Promise<{
+    token: string;
+    tokenId: string;
+    userId: string;
+    deviceId: string;
+    expiresAt: number;
+  } | { error: "NOT_FOUND" | "EXPIRED" }> {
+    const state = this.inspectToken(token, { allowExpired: true });
+    if (state.status === "not_found") return { error: "NOT_FOUND" };
+    if (state.status === "expired") {
+      const graceMs = accessTokenRefreshGraceMs();
+      // state.expiresAt 已过期：now - expiresAt 超过宽限期就不再认这台设备。
+      if (Date.now() - state.expiresAt > graceMs) return { error: "EXPIRED" };
+    }
+    return this.issueDeviceToken(state.userId, state.deviceId, state.deviceLabel);
   }
 
   /** 从 Authorization: Bearer 头或 ?token= 提取明文 token（供 hook / WS 复用）。 */
@@ -203,16 +365,22 @@ export class AccessAuthService {
   }
 
   /** 列出某用户的全部设备 token（不含哈希等敏感字段）。 */
-  listTokens(userId: string): Array<Pick<AccessTokenRecord, "tokenId" | "userId" | "deviceId" | "deviceLabel" | "createdAt" | "lastSeenAt">> {
+  listTokens(userId: string): Array<
+    Pick<
+      AccessTokenRecord,
+      "tokenId" | "userId" | "deviceId" | "deviceLabel" | "createdAt" | "lastSeenAt" | "expiresAt"
+    >
+  > {
     return [...this.tokens.values()]
       .filter((t) => t.userId === userId)
-      .map(({ tokenId, userId: u, deviceId, deviceLabel, createdAt, lastSeenAt }) => ({
+      .map(({ tokenId, userId: u, deviceId, deviceLabel, createdAt, lastSeenAt, expiresAt }) => ({
         tokenId,
         userId: u,
         deviceId,
         deviceLabel,
         createdAt,
         lastSeenAt,
+        expiresAt: expiresAt ?? 0,
       }));
   }
 

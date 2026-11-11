@@ -75,19 +75,28 @@ test("Dreaming reinforces an explicitly important memory", async () => {
   });
 });
 
-test("Dreaming fades low-value one-off chatter", async () => {
+test("Dreaming 不在第一晚判新记忆无用，长期未访问才衰减权重", async () => {
   await withMemoryService(async (service, getStore) => {
     await service.ingest("user-2", "The loading spinner appeared briefly on this page.", "chat:user", {
       metadata: { salience: 0.1, userImportance: 0.1 },
     });
 
-    const [report] = await service.runSleepCycleForActors(["user-2"]);
+    const [first] = await service.runSleepCycleForActors(["user-2"]);
     const node = Object.values(getStore().nodes)[0]!;
 
-    assert.ok(report);
-    assert.ok(report.dailyCleanupCount >= 1);
-    assert.equal(report.knowledgePromotedCount, 0);
-    assert.ok(node.deletionStage === "downranked" || node.deletionStage === "cold");
+    assert.ok(first);
+    // 新记忆保留观察期：不因 accessCount=0 在第一晚被降级
+    assert.equal(first.dailyCleanupCount, 0);
+    assert.equal(first.knowledgePromotedCount, 0);
+    assert.equal(node.deletionStage, "active");
+
+    // 模拟长期未访问（8 天）→ 连续衰减权重，但仍是 active、仍可召回
+    node.lastAccessedAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    node.frequencyScore = 1;
+    const [second] = await service.runSleepCycleForActors(["user-2"]);
+    assert.ok(second.dailyCleanupCount >= 1);
+    assert.ok(node.frequencyScore < 1, "长期未访问应衰减权重");
+    assert.equal(node.deletionStage, "active", "衰减不改变可召回状态");
   });
 });
 
@@ -148,9 +157,9 @@ test("recall marks a faded memory as a candidate and repeated discussion reactiv
     await service.runSleepCycleForActors(["user-3"]);
 
     const node = Object.values(getStore().nodes)[0]!;
-    // 新设计：低价值节点（accessCount=0）被 sleep cycle 降级为 "downranked"，
-    // 但仍可被召回（hybridRetrieve 不过滤 downranked 节点）。
-    assert.equal(node.deletionStage, "downranked");
+    // 2026-11-11：不再因 accessCount=0 在第一晚降级——新记忆保留观察期，价值由后续
+    // 访问/确认决定，而不是“没被问到就判无用”。
+    assert.equal(node.deletionStage, "active");
 
     const recall = await service.buildRecall("user-3", "loading spinner page", { crossDomain: true });
     assert.ok(recall.recalledNodeIds.length > 0);
@@ -163,7 +172,7 @@ test("recall marks a faded memory as a candidate and repeated discussion reactiv
     // 新设计无 reactivation 概念：re-ingest 只增加 accessCount，不恢复 deletionStage。
     // 反复召回/re-ingest 达到 AUTO_CONFIRM_THRESHOLD(3) 后才自动确认。
     assert.ok(node.accessCount >= 2);
-    assert.equal(node.deletionStage, "downranked");
+    assert.equal(node.deletionStage, "active");
   });
 });
 
@@ -204,20 +213,24 @@ test("daily candidates are consumed and cursor advances without dream: ingest", 
       profileUpdateThreshold: 99,
     }, journal);
 
-    journal.appendTurn("user-buffer", "sess-buffer", "Please remember that I prefer quiet mornings.", "I will remember that.");
-    await sleep(80);
-    await manager.consolidateNow("user-buffer");
-    // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
-    await sleep(80);
+    try {
+      journal.appendTurn("user-buffer", "sess-buffer", "Please remember that I prefer quiet mornings.", "I will remember that.");
+      await sleep(80);
+      await manager.consolidateNow("user-buffer");
+      // 等待 journal/sync 的 fire-and-forget 写链落盘，再清理临时目录
+      await sleep(80);
 
-    // 新设计（M1-③）：consolidateNow 只维护 memory_summary / 画像，不再通过
-    // dream:replay / dream:reinforce 逐行 ingest 到 narrative memory（那些行
-    // 会重复触发 LLM 抽取）；长期记忆固化统一由 journal 固化路径完成。
-    assert.equal(ingested.length, 0);
-    // journal 消费游标已推进 = 当天行已被 memory_summary 消费
-    const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
-      .journalConsumeCursor.get("user-buffer");
-    assert.ok(cursor && cursor.lines >= 1, "journal 行应已被消费");
+      // 新设计（M1-③）：consolidateNow 只维护 memory_summary / 画像，不再通过
+      // dream:replay / dream:reinforce 逐行 ingest 到 narrative memory（那些行
+      // 会重复触发 LLM 抽取）；长期记忆固化统一由 journal 固化路径完成。
+      assert.equal(ingested.length, 0);
+      // journal 消费游标已推进 = 当天行已被 memory_summary 消费
+      const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
+        .journalConsumeCursor.get("user-buffer");
+      assert.ok(cursor && cursor.lines >= 1, "journal 行应已被消费");
+    } finally {
+      journal.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }
@@ -239,15 +252,19 @@ test("daily buffer survives a failed Dreaming ingest", withScrubbedLlmEnv(async 
       profileUpdateThreshold: 99,
     }, journal);
 
-    journal.appendTurn("user-failure", "sess-failure", "Remember my weekly planning habit.", "Understood.");
-    await sleep(80);
-    // 新设计：consolidateNow 内部用 try/catch 和 .catch(() => {}) 吞掉 ingest 错误，
-    // 不再向上抛出；journal 消费游标正常推进，原始行保留在 journal 文件中（夜间固化兜底）。
-    await manager.consolidateNow("user-failure");
-    await sleep(80);
-    const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
-      .journalConsumeCursor.get("user-failure");
-    assert.ok(cursor && cursor.lines >= 1, "消费游标应推进（journal 行保留作夜间固化兜底）");
+    try {
+      journal.appendTurn("user-failure", "sess-failure", "Remember my weekly planning habit.", "Understood.");
+      await sleep(80);
+      // 新设计：consolidateNow 内部用 try/catch 和 .catch(() => {}) 吞掉 ingest 错误，
+      // 不再向上抛出；journal 消费游标正常推进，原始行保留在 journal 文件中（夜间固化兜底）。
+      await manager.consolidateNow("user-failure");
+      await sleep(80);
+      const cursor = (manager as unknown as { journalConsumeCursor: Map<string, { lines: number }> })
+        .journalConsumeCursor.get("user-failure");
+      assert.ok(cursor && cursor.lines >= 1, "消费游标应推进（journal 行保留作夜间固化兜底）");
+    } finally {
+      journal.close();
+    }
   } finally {
     await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 20 });
   }

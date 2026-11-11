@@ -85,6 +85,22 @@ class MobileChatController extends ChangeNotifier {
     _subscription = _ownsConnection
         ? _service.events.listen(_onWsEvent)
         : WsEventRouter.instance.chatEvents.listen(_onWsEvent);
+    // 【订阅后同步连接状态】（2026-11-10「连接一直断开」误报根修）
+    // shared 连接在 app 启动早期就建立（main.dart _bootstrap），`ws_connected`
+    // 是一次性事件——发出时 chat 通道往往还没有监听者，被路由器的
+    // no-listener 保护丢弃；错过这一次，本控制器 isConnected 永久 false，
+    // 聊天页显示「已断开」而实际连接健康（服务端视角零重连）。与桌面端
+    // main.dart `if (_ws.isConnected) _onWsConnected()` 同款补丁：订阅后
+    // 立即查询一次，已连则本地重放 ws_connected（补定位/时钟/围栏装配）。
+    if (!_ownsConnection && _service.isConnected) {
+      _onWsEvent(<String, dynamic>{
+        "type": "ws_connected",
+        "payload": <String, dynamic>{
+          "connectedAt": DateTime.now().toIso8601String(),
+          "replayed": true,
+        },
+      });
+    }
     _service.connect();
     _store = historyStore ?? IsarLocalHistoryStore(userPin: ApiConfig.localPin);
     unawaited(_bootstrapHistory());
@@ -101,6 +117,9 @@ class MobileChatController extends ChangeNotifier {
 
   /// 服务端线程历史拉取去重闸（每个线程只拉一次）。
   final Set<String> _serverHistoryPulled = <String>{};
+
+  /// 是否已连上过一次（区分首连与重连：重连要做漏消息对账，见 ws_connected）。
+  bool _everConnected = false;
 
   /// 对话历史(含正在流式生成的助手消息)。
   ///
@@ -121,7 +140,7 @@ class MobileChatController extends ChangeNotifier {
   String _activeSessionKey = ApiConfig.effectiveActorId;
 
   /// 当前激活会话发给服务端的 sessionId（主会话用连接级 sessionId）。
-  String _activeServerSessionId = ApiConfig.sessionId;
+  String _activeServerSessionId = ApiConfig.effectiveActorId;
 
   /// 当前旁聊 id（null = 主会话）。
   String? _activeSideSessionId;
@@ -182,7 +201,7 @@ class MobileChatController extends ChangeNotifier {
   Future<void> returnToMain() async {
     if (!canSwitchSession) return;
     if (_activeSessionKey == _mainSessionKey) return;
-    _activateSession(_mainSessionKey, serverSessionId: ApiConfig.sessionId);
+    _activateSession(_mainSessionKey, serverSessionId: ApiConfig.effectiveActorId);
     notifyListeners();
     await _loadSessionHistory(_mainSessionKey);
   }
@@ -303,11 +322,42 @@ class MobileChatController extends ChangeNotifier {
     _planPhase = false;
     _delegatePhase = false;
     _sawChunk = false;
+    _deliveryStallTimer?.cancel();
+    _deliveryStallTimer = null;
+    _deliveryStallNotified = false;
     isProcessing = false;
   }
 
   /// 离线补发进行中闸（防 ws_connected 风暴期间并发 flush 乱序重复发送）。
   bool _flushingPending = false;
+
+  /// 投递无响应的看门狗（UI 侧）：发出后长时间连协议级 ack 都没回来，
+  /// 界面必须从「我看看」切到一句能解释的话，而不是无限转圈。
+  Timer? _deliveryStallTimer;
+  bool _deliveryStallNotified = false;
+  static const String _deliveryStallHint = "网络似乎不太顺，正在自动重试…";
+  /// 服务端拒收后的过渡提示（连接层正在补发 session.init 并重投）。
+  static const String _identityResyncHint = "正在重新同步账号身份，消息会自动重发…";
+
+  void _armDeliveryStallWatch() {
+    _deliveryStallTimer?.cancel();
+    _deliveryStallNotified = false;
+    _deliveryStallTimer = Timer(const Duration(seconds: 12), () {
+      if (!isProcessing || _sawChunk) return;
+      _deliveryStallNotified = true;
+      errorMessage = _deliveryStallHint;
+      notifyListeners();
+    });
+  }
+
+  void _clearDeliveryStallWatch() {
+    _deliveryStallTimer?.cancel();
+    _deliveryStallTimer = null;
+    if (_deliveryStallNotified) {
+      _deliveryStallNotified = false;
+      if (errorMessage == _deliveryStallHint) errorMessage = null;
+    }
+  }
 
   /// 时区变化侦测定时器（15 分钟）。
   ///
@@ -579,8 +629,8 @@ class MobileChatController extends ChangeNotifier {
 
   /// 服务端线程历史拉取：主会话走 WAL 全量（`full=1`），旁聊走 `sessionId=`
   /// 指定的独立线程（服务端只读该线程最近一段）。按 user 锚去重后落本地。
-  Future<void> _pullServerHistoryFor(String key) async {
-    if (_serverHistoryPulled.contains(key)) return;
+  Future<int> _pullServerHistoryFor(String key) async {
+    if (_serverHistoryPulled.contains(key)) return 0;
     _serverHistoryPulled.add(key);
     final bool isSide = key.startsWith("side:");
     try {
@@ -593,7 +643,7 @@ class MobileChatController extends ChangeNotifier {
       final http.Response res = await NbHttp.get(uri,
               headers: AccessCredentialStore.instance.authHeaders)
           .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) return;
+      if (res.statusCode != 200) return 0;
       final Map<String, dynamic> body =
           jsonDecode(res.body) as Map<String, dynamic>;
       final List<dynamic> raw = body["messages"] as List<dynamic>? ?? const [];
@@ -633,15 +683,34 @@ class MobileChatController extends ChangeNotifier {
               : null,
         ));
       }
-      if (incoming.isEmpty) return;
-      _mergeServerTurnsFor(key, incoming);
+      if (incoming.isEmpty) return 0;
+      return _mergeServerTurnsFor(key, incoming);
     } catch (e) {
       debugPrint("[MobileChatController] 服务端历史拉取失败(跳过回填): $e");
+      return 0;
     }
   }
 
-  /// 兼容入口：主会话首次启动加载。
-  Future<void> _pullServerHistory() => _pullServerHistoryFor(_mainSessionKey);
+  /// 兼容入口：主会话首次启动加载；重连对账复用（返回回填条数）。
+  Future<int> _pullServerHistory() => _pullServerHistoryFor(_mainSessionKey);
+
+  /// 重连对账：补拉服务端历史并回填漏掉的轮次；App 在后台时把漏收的
+  /// 回复/主动消息按最后一条补系统通知（横幅触达）。
+  Future<void> _reconcileAfterReconnect() async {
+    final int backfilled = await _pullServerHistory();
+    if (backfilled <= 0) return;
+    debugPrint("[MobileChatController] 重连对账回填 $backfilled 条漏收消息");
+    if (!_appBackgrounded) return;
+    final List<ChatMessage> list = _sessionMessages[_mainSessionKey] ??
+        const <ChatMessage>[];
+    for (final ChatMessage m in list.reversed) {
+      if (m.role == "assistant" && m.text.trim().isNotEmpty) {
+        unawaited(LocalNotificationService.show(
+            title: "有新消息", body: m.text.trim()));
+        break;
+      }
+    }
+  }
 
   /// 跨端回填合并（turn 级锚定去重）：
   /// - 锚 = 用户消息。服务端轮与本机重复的判定：clientMessageId 命中本地 id、
@@ -649,7 +718,8 @@ class MobileChatController extends ChangeNotifier {
   /// - 助手消息随锚走：锚轮已存在 → 整轮跳过（分泡/塌缩形态差异不再制造双份）；
   ///   无锚的孤儿助手消息按正文包含关系去重后插入。
   /// - 插入位置按时间戳落位，回填后逐条写进本地 store（下次启动直接命中）。
-  void _mergeServerTurnsFor(String key, List<ChatMessage> incoming) {
+  /// 返回实际回填（新增落盘）的消息条数——重连对账据此判断有无漏收。
+  int _mergeServerTurnsFor(String key, List<ChatMessage> incoming) {
     final List<ChatMessage> target = _sessionMessages.putIfAbsent(
       key,
       () => <ChatMessage>[],
@@ -712,6 +782,7 @@ class MobileChatController extends ChangeNotifier {
     }
 
     bool mutated = false;
+    int insertedCount = 0;
     for (final List<ChatMessage> turn in turns) {
       if (turnExistsLocally(turn)) continue;
       for (final ChatMessage m in turn) {
@@ -719,6 +790,7 @@ class MobileChatController extends ChangeNotifier {
         if (m.role == "assistant") backfilledAssistantTexts.add(m.text.trim());
         insertByTimestamp(m);
         mutated = true;
+        insertedCount++;
         if (m.role == "user") {
           localUserIds.add(m.messageId);
           localUserTexts.add(m.text.trim());
@@ -728,6 +800,7 @@ class MobileChatController extends ChangeNotifier {
       }
     }
     if (mutated && _activeSessionKey == key) notifyListeners();
+    return insertedCount;
   }
 
 
@@ -793,7 +866,16 @@ class MobileChatController extends ChangeNotifier {
     isProcessing = true;
     errorMessage = null;
     notifyListeners();
-    _service.sendEvent("chat.user_message", payload);
+    final bool accepted = _service.sendEvent("chat.user_message", payload);
+    if (!accepted) {
+      // 连接层未受理（当前不在连接上）：消息已进它的待发队列，连上后自动补发。
+      // 必须显式告诉用户，否则界面停在「我看看」上无限等待——用户无法区分
+      // 「正在想」和「根本没发出去」（2026-11-11 真机）。
+      errorMessage = "正在连接服务器，消息会在连上后自动发出";
+      notifyListeners();
+    }
+    // 无论受理与否都上表：12s 内连 acks 都没有，就把「我看看」换成可解释的状态。
+    _armDeliveryStallWatch();
     return userMsg.messageId;
   }
 
@@ -1042,6 +1124,14 @@ class MobileChatController extends ChangeNotifier {
     final Map<String, dynamic> payload = event["payload"] is Map
         ? event["payload"] as Map<String, dynamic>
         : const {};
+    // 任何入站都说明链路有回应：撤掉「无响应」提示（下一次发送会重新上表）。
+    _clearDeliveryStallWatch();
+    // 身份重同步只是过渡态：重投成功后收到任何聊天事件即视为已恢复。
+    if (errorMessage == _identityResyncHint &&
+        type.startsWith("chat.") &&
+        type != "chat.error") {
+      errorMessage = null;
+    }
     switch (type) {
       case "ws_connected":
         isConnected = true;
@@ -1061,6 +1151,16 @@ class MobileChatController extends ChangeNotifier {
         );
         // 离线待发消息补发（session.init 已由 onConnected 同步先行发出）
         unawaited(_flushPendingUserMessages());
+        // 重连对账（2026-11-10）：后台被冻结期间服务端的回复/主动消息已落
+        // 服务端 WAL，但本机 WS 收不到——重连后清一次历史拉取闸并补拉主
+        // 线程，漏掉的轮次按 turn 级锚定去重回填对话流；旁聊线程在下次
+        // 打开时经同一闸补拉。后台时按最后一条漏收消息补横幅触达。
+        final bool isReconnect = _everConnected;
+        _everConnected = true;
+        if (isReconnect && !_ownsConnection) {
+          _serverHistoryPulled.clear();
+          unawaited(_reconcileAfterReconnect());
+        }
       case "agent.location_request":
         unawaited(_handleLocationRequest(payload));
       case "agent.geofence_sync":
@@ -1072,15 +1172,6 @@ class MobileChatController extends ChangeNotifier {
                 .toList(growable: false)
             : const <Map<String, dynamic>>[];
         unawaited(ClientGeofenceService.sync(fences));
-      case "schedule.reminder_fired":
-        // 到点提醒（2026-10-12 接通）：编排层按前后台分流——后台系统通知，
-        // 前台应用内横幅。此前手机端不监听本事件，到点无任何触达。
-        unawaited(
-            AmbientFeedsController.instance.onScheduleReminderFired(payload));
-      case "schedule.tasks_changed":
-        // 日程变更同步（创建/更新/删除）→ 编排层刷新日程页本地镜像。
-        unawaited(
-            AmbientFeedsController.instance.onScheduleTasksChanged(payload));
       case "reminder_popup":
         // 提醒升级链 popup 级（2026-10-14 与桌面端对齐）：决策卡落对话流。
         // 后台时应用内卡片看不见，补一条系统通知触达（点开回前台后卡在流里）。
@@ -1187,6 +1278,32 @@ class MobileChatController extends ChangeNotifier {
       case "chat.error":
         errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
         // 出错兜底：已流出的泡正文立即整泡落屏，不因报错凭空丢失
+        _flushHiddenBubblesNow();
+        _resetActivityState();
+        notifyListeners();
+      case "error.event":
+        // 服务端统一错误帧。桌面端由根分发器管窗口/toast，手机端必须在这里
+        // 收口：`FORBIDDEN`/`SESSION_REQUIRED` 的成因只有一个——连接绑定的
+        // actor 与本机当前身份不一致（启动期账号读盘晚于建连、登录/切换账号
+        // 后没重新 init）。服务端会**直接丢弃且不落审计**，客户端只看得到
+        // 「永远等不到回复」，这就是 2026-11-11「思考组件卡在我看看」的真身。
+        // 连接层已在 _handleServerRejection 里补发 session.init 并按原
+        // messageId 重投，所以这里只提示、不复位轮次——重投成功会照常由
+        // turn_started/chunk/done 接手。
+        final String errCode = payload["code"]?.toString() ?? "";
+        if (errCode == "FORBIDDEN" || errCode == "SESSION_REQUIRED") {
+          errorMessage = _identityResyncHint;
+        } else {
+          errorMessage = payload["message"]?.toString() ?? "出错了,请重试";
+          _flushHiddenBubblesNow();
+          _resetActivityState();
+        }
+        notifyListeners();
+      case "chat_delivery_failed":
+        // 重投次数用尽（链路反复判死 / 服务端持续拒收）：如实告诉用户，
+        // 绝不留在「处理中」骗人。
+        errorMessage =
+            payload["message"]?.toString() ?? "消息没能送达服务器，请检查网络后重试";
         _flushHiddenBubblesNow();
         _resetActivityState();
         notifyListeners();
@@ -2220,6 +2337,8 @@ class MobileChatController extends ChangeNotifier {
     _introQueue.clear();
     _clockWatchTimer?.cancel();
     _revealTimer?.cancel();
+    _deliveryStallTimer?.cancel();
+    _deliveryStallTimer = null;
     unawaited(_subscription?.cancel());
     // 共享连接归进程所有：聊天页销毁不得把整条链路关掉，根状态还要靠它
     // 收闹钟/提醒。自建连接（测试）才自己关闭。

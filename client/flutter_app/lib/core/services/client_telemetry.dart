@@ -8,6 +8,7 @@ import "package:package_info_plus/package_info_plus.dart";
 import "../config/api_config.dart";
 import "install_identity.dart";
 import "local_runtime_manager.dart";
+import "./nb_http.dart";
 
 /// 安装包运行埋点：每次启动把「本机后端起来了吗、花了多久、什么版本/通道」
 /// 上报到控制面（`POST /api/telemetry/client-boot`）。
@@ -17,7 +18,7 @@ import "local_runtime_manager.dart";
 class ClientTelemetry {
   ClientTelemetry._();
 
-  static final http.Client _client = http.Client();
+  static final http.Client _client = NbClient();
 
   static Future<void> reportBoot(RuntimeBootResult boot) async {
     if (kDebugMode) return; // 开发构建不进台账（避免本机噪声）

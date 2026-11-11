@@ -2568,45 +2568,78 @@ class _TravelRequirementCard extends StatelessWidget {
               data.title,
               style: tt.titleSmall?.copyWith(fontWeight: FontWeight.w600),
             ),
-          for (final Map<String, dynamic> q in questions) ...<Widget>[
-            const SizedBox(height: 10),
-            Text(
-              (q["title"]?.toString().isNotEmpty ?? false)
-                  ? q["title"].toString()
-                  : (q["key"]?.toString() ?? ""),
-              style: tt.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
+          for (int qi = 0; qi < questions.length; qi++) ...<Widget>[
+            const SizedBox(height: 12),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: <Widget>[
+                Container(
+                  width: 20,
+                  height: 20,
+                  alignment: Alignment.center,
+                  decoration: BoxDecoration(
+                    color: cs.primary.withValues(alpha: 0.14),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Text(
+                    "${qi + 1}",
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w700,
+                      color: cs.primary,
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 7),
+                Expanded(
+                  child: Text(
+                    (questions[qi]["title"]?.toString().isNotEmpty ?? false)
+                        ? questions[qi]["title"].toString()
+                        : (questions[qi]["key"]?.toString() ?? ""),
+                    style: tt.bodyMedium?.copyWith(
+                        fontWeight: FontWeight.w600),
+                  ),
+                ),
+              ],
             ),
-            if ((q["hint"]?.toString().isNotEmpty ?? false)) ...<Widget>[
-              const SizedBox(height: 2),
-              Text(
-                q["hint"].toString(),
-                style: tt.bodySmall?.copyWith(
-                  color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+            if ((questions[qi]["hint"]?.toString().isNotEmpty ?? false)) ...<Widget>[
+              const SizedBox(height: 3),
+              Padding(
+                padding: const EdgeInsets.only(left: 27),
+                child: Text(
+                  questions[qi]["hint"].toString(),
+                  style: tt.bodySmall?.copyWith(
+                    color: cs.onSurfaceVariant.withValues(alpha: 0.9),
+                  ),
                 ),
               ),
             ],
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 8,
-              runSpacing: 8,
-              children: <Widget>[
-                for (final _RequirementOption opt in _optionsOf(q))
-                  ActionChip(
-                    label: Text(opt.label),
-                    onPressed: () => onUserAction?.call(
-                      AgentResultAction(
-                        id: "requirement_pick",
-                        label:
-                            "${q["title"] ?? q["key"]}：${opt.label}",
-                        payload: <String, dynamic>{
-                          "key": q["key"]?.toString() ?? "info",
-                          "value": opt.value,
-                        },
+            const SizedBox(height: 8),
+            Padding(
+              padding: const EdgeInsets.only(left: 27),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: <Widget>[
+                  for (final _RequirementOption opt
+                      in _optionsOf(questions[qi]))
+                    ActionChip(
+                      label: Text(opt.label),
+                      onPressed: () => onUserAction?.call(
+                        AgentResultAction(
+                          id: "requirement_pick",
+                          label:
+                              "${questions[qi]["title"] ?? questions[qi]["key"]}：${opt.label}",
+                          payload: <String, dynamic>{
+                            "key": questions[qi]["key"]?.toString() ?? "info",
+                            "value": opt.value,
+                          },
+                        ),
+                        cardData: data,
                       ),
-                      cardData: data,
                     ),
-                  ),
-              ],
+                ],
+              ),
             ),
           ],
           if (data.footer.isNotEmpty) ...<Widget>[

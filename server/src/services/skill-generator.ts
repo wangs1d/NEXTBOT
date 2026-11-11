@@ -78,7 +78,7 @@ export class SkillGenerator {
         error: "需要配置外部聊天提供商才能使用智能生成功能",
         suggestions: [
           "请配置 OPENAI_API_KEY 或其他聊天提供商",
-          "或者手动编写技能代码并使用 self.create_skill 工具",
+          "或者手动编写技能代码并放入技能目录",
         ],
       };
     }

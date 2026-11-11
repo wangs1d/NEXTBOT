@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 import "../config/api_config.dart";
 import "../config/media_url.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 用户头像 API 客户端（服务端实现：server/src/routes/http/user-avatar.ts）。
 ///
@@ -19,7 +20,7 @@ import "access_auth_api.dart";
 class UserAvatarApi {
   UserAvatarApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

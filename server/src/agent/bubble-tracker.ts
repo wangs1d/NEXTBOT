@@ -21,7 +21,7 @@ export class BubbleTracker {
   confirmationAnchored = false;
 
   constructor(
-    /** 是否激活（WS 门禁：对话面 + 非语音轮 + env 开关）。 */
+    /** 是否激活（WS 门禁：文字轮 + 非语音 + env 开关）。 */
     public active = false,
     private readonly baseMessageId: string,
   ) {}

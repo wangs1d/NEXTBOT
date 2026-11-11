@@ -4,6 +4,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 注意力（分级触达）API 通用结果包装。
 class AttentionResult<T> {
@@ -163,7 +164,7 @@ class AttentionSnapshot {
 class AttentionApi {
   AttentionApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

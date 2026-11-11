@@ -56,7 +56,7 @@ class HealthRhythm {
 class HealthRhythmApi {
   HealthRhythmApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

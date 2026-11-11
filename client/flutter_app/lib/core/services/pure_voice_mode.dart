@@ -5,11 +5,14 @@ import "package:flutter/foundation.dart";
 import "package:window_manager/window_manager.dart";
 
 import "../presentation/dynamic_island.dart";
+import "../../app/chat_turn_controller.dart";
 import "agent_sphere_voice_controller.dart";
 import "briefing_tts_api.dart";
 import "tts_player.dart";
 import "voice_duplex_service.dart";
 import "../config/api_config.dart";
+import "ws_event_router.dart"
+    show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
 /// 纯语音模式阶段（岛条目跟随该阶段而非自由映射状态文案）。
 enum PureVoicePhase { ambient, thinking, speaking }
@@ -43,6 +46,44 @@ class PureVoiceModeController {
   PureVoiceModeController._();
 
   static final PureVoiceModeController instance = PureVoiceModeController._();
+
+  static bool _busWired = false;
+
+  /// 事件总线自订阅（main.dart 装配时调用一次；幂等）。
+  ///
+  /// chat.assistant_speech 语音流帧（2026-11-05 分层定稿）只进语音通道，
+  /// **绝不落消息列表**——文字回复仍由 chat.assistant_done.finalText 一次性
+  /// 落屏。帧是数据，不是显示。迟到帧按 activeTraceId 过滤（原 main.dart
+  /// 根监听器分支的收口）。
+  static void ensureBusSubscription() {
+    if (_busWired) return;
+    _busWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "pure-voice-speech",
+      types: WsEventCatalog.pureVoiceSpeech,
+      scope: WsSubscribeScope.root,
+      onEvent: _handleSpeechBusEvent,
+    );
+  }
+
+  static void _handleSpeechBusEvent(Map<String, dynamic> event) {
+    final Map<String, dynamic> payload = wsEventPayload(event);
+    final String? speechTraceId = payload["traceId"]?.toString();
+    final String? activeSpeechTraceId =
+        ChatTurnController.instance.activeTraceId;
+    if (activeSpeechTraceId == null ||
+        (speechTraceId != null &&
+            speechTraceId.isNotEmpty &&
+            speechTraceId != activeSpeechTraceId)) {
+      return;
+    }
+    instance.onSpeechFrame(
+      chunk: payload["chunk"]?.toString() ?? "",
+      isFinal: payload["final"] == true,
+      hasIncrements: payload["hasIncrements"] == true,
+      finalText: payload["finalText"]?.toString() ?? "",
+    );
+  }
 
   /// 是否处于纯语音模式（主窗口隐藏、岛为唯一视觉）。
   final ValueNotifier<bool> isActive = ValueNotifier<bool>(false);

@@ -30,20 +30,20 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "search",
     summary: "联网检索/深读网页/热搜榜/情报核实",
-    prefixes: ["search", "fetch_web", "deep_search", "hot_rankings", "info.", "internet."],
+    prefixes: ["search", "fetch_web", "deep_search", "hot_rankings", "info.", "internet.", "web_search", "web_fetch"],
     secondaryTools: [],
   },
   {
     name: "weather",
     summary: "天气/气温/预报",
     prefixes: ["weather."],
-    secondaryTools: [],
+    secondaryTools: ["web_search"],
   },
   {
     name: "market",
     summary: "股票/指数/行情实时报价",
     prefixes: ["market."],
-    secondaryTools: [],
+    secondaryTools: ["web_search"],
   },
   {
     name: "clock",
@@ -54,13 +54,13 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "media",
     summary: "找图/找视频/壁纸/摄像头画面",
-    prefixes: ["photo", "vision.", "media", "image"],
-    secondaryTools: ["search_images", "search_images_batch", "search_videos", "video.grab"],
+    prefixes: ["photo", "media", "image"],
+    secondaryTools: ["web_search"],
   },
   {
     name: "calendar",
     summary: "日程/会议/待办的创建与查询",
-    prefixes: ["calendar."],
+    prefixes: ["calendar", "calendar."],
     secondaryTools: [],
   },
   {
@@ -78,19 +78,13 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "geofence",
     summary: "位置围栏（到家/离家触发提醒）",
-    prefixes: ["geofence."],
+    prefixes: ["geofence", "geofence."],
     secondaryTools: [],
   },
   {
     name: "care",
     summary: "长期关怀（重要日期/节奏习惯）",
-    prefixes: ["care."],
-    secondaryTools: [],
-  },
-  {
-    name: "message",
-    summary: "消息读取与回复（微信/QQ/飞书/短信/邮件，含代发建议）",
-    prefixes: ["messages."],
+    prefixes: ["care.", "care"],
     secondaryTools: [],
   },
   {
@@ -102,13 +96,13 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "phone",
     summary: "电话/短信/号码管理",
-    prefixes: ["phone."],
+    prefixes: ["phone.", "phone"],
     secondaryTools: [],
   },
   {
     name: "voice",
     summary: "语音合成/转写/语音消息",
-    prefixes: ["voice."],
+    prefixes: ["voice.", "voice"],
     secondaryTools: [],
   },
   {
@@ -150,13 +144,13 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
   {
     name: "smart_home",
     summary: "智能家居控制（灯/空调/窗帘/插座）",
-    prefixes: ["smart_home."],
+    prefixes: ["smart_home", "smart_home."],
     secondaryTools: [],
   },
   {
     name: "device",
     summary: "设备状态与控制",
-    prefixes: ["device."],
+    prefixes: ["device.", "device"],
     secondaryTools: [],
   },
   {
@@ -185,18 +179,18 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
       "服务端无头浏览器会话与网页读取（agent_browser.* 多步操作、browser.* 只读单页、" +
       "fetch_web/search_web）：无需用户在场，但不带用户登录态",
     prefixes: ["browser.", "agent_browser"],
-    secondaryTools: ["fetch_web", "search_web"],
+    secondaryTools: ["web_fetch", "web_search"],
   },
   {
     name: "agent",
     summary: "智能体自我与跨agent协作（注册/能力查询）",
-    prefixes: ["agent."],
+    prefixes: ["agent.", "agent"],
     secondaryTools: [],
   },
   {
     name: "proactivity",
     summary: "主动性反馈（确认/解释/校准）",
-    prefixes: ["proactivity."],
+    prefixes: ["proactivity.", "proactivity"],
     secondaryTools: [],
   },
   {
@@ -206,21 +200,15 @@ export const DOMAIN_REGISTRY: DomainDef[] = [
     secondaryTools: [],
   },
   {
-    name: "self",
-    summary: "自我能力（自定义技能创建/分析/进化）",
-    prefixes: ["self."],
-    secondaryTools: [],
-  },
-  {
     name: "world",
     summary: "Agent World 注册/房间/好友联络（world.link.*）",
-    prefixes: ["world."],
+    prefixes: ["world.", "world"],
     secondaryTools: [],
   },
   {
     name: "aip",
     summary: "AIP 协议分发",
-    prefixes: ["aip."],
+    prefixes: ["aip.", "aip"],
     secondaryTools: [],
   },
   {

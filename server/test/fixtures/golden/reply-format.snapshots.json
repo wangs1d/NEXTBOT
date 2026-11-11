@@ -56,11 +56,6 @@
       "output": "明天天气不错，温度很舒服，适合出门走走。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"明天晴转多云，适合出行\",\"items\":[{\"type\":\"num\",\"text\":\"晴转多云\"},{\"type\":\"num\",\"text\":\"气温 18–26\"},{\"type\":\"num\",\"text\":\"湿度 62%\"},{\"type\":\"num\",\"text\":\"风速 8 km/h\"}],\"footer\":\"\",\"cardType\":\"weather\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
       "cardType": "weather"
     },
-    "tool-wallet-prose-no-list": {
-      "hint": "plain",
-      "output": "查好了，余额充足，放心花。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"钱包余额\",\"items\":[{\"type\":\"num\",\"text\":\"1000 CNY\"}],\"footer\":\"查询成功\",\"cardType\":\"wallet\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",
-      "cardType": "wallet"
-    },
     "tool-calendar-prose-no-list": {
       "hint": "plain",
       "output": "接下来就这两个安排，都记着呢。\n\n[AGENT_RESULT_CARD_START]\n{\"avatar\":\"NB\",\"avatarStyle\":\"default\",\"title\":\"日程安排\",\"items\":[{\"type\":\"num\",\"text\":\"09-10 09:30 牙医复诊\"},{\"type\":\"num\",\"text\":\"09-11 20:00 给妈妈打电话\"}],\"footer\":\"共 2 项\",\"cardType\":\"schedule\",\"actions\":[],\"speak\":\"\",\"cardId\":\"card_<id>\"}\n[AGENT_RESULT_CARD_END]",

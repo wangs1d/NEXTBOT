@@ -6,6 +6,7 @@ import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
 import "mobile_theme.dart";
+import "../core/services/nb_http.dart";
 
 /// 手机端「每日简报」页。
 ///
@@ -45,7 +46,7 @@ class _MobileBriefingPageState extends State<MobileBriefingPage> {
       // 在途行程段只投手机端：手机端显式开启（电脑端不传，晨报里没有行程段）
       final Uri uri = Uri.parse(
           "${ApiConfig.httpBase}/api/morning-briefing?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&includeInProgressTravel=1");
-      final http.Response res = await (widget.client ?? http.Client())
+      final http.Response res = await (widget.client ?? NbClient())
           .get(uri)
           .timeout(const Duration(seconds: 20));
       if (res.statusCode != 200) {

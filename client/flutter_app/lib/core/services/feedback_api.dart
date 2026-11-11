@@ -5,6 +5,7 @@ import "package:http/http.dart" as http;
 import "../config/api_config.dart";
 import "access_auth_api.dart";
 import "install_identity.dart";
+import "./nb_http.dart";
 
 /// 反馈提交/查询的通用结果包装。
 class FeedbackResult<T> {
@@ -84,7 +85,7 @@ class FeedbackRecord {
 class FeedbackApi {
   FeedbackApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.controlPlaneBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

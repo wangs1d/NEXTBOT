@@ -142,6 +142,10 @@ function renderAccountWebPage(otpEnabled: boolean): string {
     var qs = new URLSearchParams(location.search);
     var cb = qs.get("cb") || "";
     var state = qs.get("state") || "";
+    // 桌面端把本机设备标识一并带来：登录成功时服务端按它签发设备凭据，
+    // 由回连地址带回。浏览器页拿不到桌面端文件系统，只有这里能绑定。
+    var deviceId = qs.get("deviceId") || "";
+    var deviceLabel = qs.get("deviceLabel") || "";
     var msg = document.getElementById("msg");
     var form = document.getElementById("f");
     var btn = document.getElementById("btn");
@@ -250,7 +254,11 @@ function renderAccountWebPage(otpEnabled: boolean): string {
           userId: email,
           displayName: email.split("@")[0],
           email: email,
-          otpCode: code || undefined
+          otpCode: code || undefined,
+          // 带上设备标识：服务端据此「认证即发证」，回连时把凭据交回桌面端。
+          // 不带的话桌面端登录后没有 token，在周界鉴权下只能以 guest 身份运行。
+          deviceId: deviceId || undefined,
+          deviceLabel: deviceLabel || undefined
         })
       }).then(function (res) {
         return res.json().then(function (data) {
@@ -265,14 +273,26 @@ function renderAccountWebPage(otpEnabled: boolean): string {
           // ok=true 仅当本次调用真正新建了账号（已存在走 400「已存在」）；
           // 回连据此带 fresh=1，桌面端仅对新建账号跑首启向导，已注册邮箱
           // 在任意机器登录直达主界面（2026-10-16）。
-          return ok;
+          // 设备凭据：新建走 200 响应，已存在走「已存在」响应，两处都带
+          // accessToken（服务端在验过邮箱验证码后签发），一并交回桌面端。
+          return {
+            fresh: ok,
+            token: (data && data.accessToken) || "",
+            expiresAt: (data && data.accessTokenExpiresAt) || 0,
+            tokenId: (data && data.accessTokenId) || "",
+            boundDeviceId: (data && data.deviceId) || ""
+          };
         });
-      }).then(function (fresh) {
+      }).then(function (r) {
         setMsg("成功，正在回连桌面端…", "ok");
         var sep = cb.indexOf("?") >= 0 ? "&" : "?";
         window.location.href = cb + sep + "state=" + encodeURIComponent(state)
           + "&email=" + encodeURIComponent(email)
-          + (fresh ? "&fresh=1" : "");
+          + (r.fresh ? "&fresh=1" : "")
+          + (r.token ? "&token=" + encodeURIComponent(r.token) : "")
+          + (r.token ? "&tokenId=" + encodeURIComponent(r.tokenId) : "")
+          + (r.token ? "&expiresAt=" + encodeURIComponent(String(r.expiresAt)) : "")
+          + (r.boundDeviceId ? "&deviceId=" + encodeURIComponent(r.boundDeviceId) : "");
       }).catch(function (e) {
         setMsg(e && e.message ? e.message : "登录失败，请稍后重试", "err");
         btn.disabled = false;

@@ -98,10 +98,10 @@ export function buildDeviceEnvironmentBlock(
       "回复保持口语短句，不写长文/多级列表；但数据类内容（行情、指标、多对象对比）" +
       "仍用紧凑的 markdown 表格交付——小屏读表格比读段落清楚，这条不随端收窄。" +
       "手机端没有可视内置浏览器，但浏览器能力与桌面端一致：" +
-      "购物比价/找最低价一律用 shopping.compare.prices（服务端浏览器执行，已导入 Cookie 自动注入；" +
+      "购物比价/找最低价一律用 shopping.compare（action=prices；服务端浏览器执行，已导入 Cookie 自动注入；" +
       "撞到登录墙会把二维码推到聊天，用户扫码后继续），不要用 search_web 凑答案；" +
-      "通用网页浏览用 agent_browser.*（同样在服务端远端浏览器执行，结果与截图会回到聊天）；" +
-      "用户给了链接或要求打开某网站时，直接调用 agent_browser.open，不要只查工具描述就放弃。" +
+      "通用网页浏览用 agent_browser（action=open/click/type/extract_text/...，同样在服务端远端浏览器执行，结果与截图会回到聊天）；" +
+      "用户给了链接或要求打开某网站时，直接调用 agent_browser(action=\"open\", url=...)，不要只查工具描述就放弃。" +
       "不要调用 shared_browser.*，也不要让用户去打开客户端「常用工具 → 浏览器」。" +
       "涉及电脑才能做的事，别让用户自己去电脑上点——你具备电脑远控能力，可直接调用 " +
       "desktop.* 工具（如 desktop.visual.screenshot 截图、desktop.open 打开程序/网页/文件、" +

@@ -20,7 +20,8 @@
  */
 import type { FastifyInstance } from "fastify";
 
-import { isAccessAuthRequired } from "../../config/env.js";
+import { isAccessAuthRequired, trustsPayloadAccountIdentity } from "../../config/env.js";
+import { decideHttpIdentity, type HttpIdentitySource } from "../../http/http-identity.js";
 import { AccessAuthService } from "../../services/access-auth-service.js";
 import type { EmailOtpService } from "../../services/email-otp-service.js";
 
@@ -32,8 +33,17 @@ export interface AuthRouteDeps {
 
 declare module "fastify" {
   interface FastifyRequest {
-    /** 周界鉴权解出的 token 归属；仅 ACCESS_AUTH_REQUIRED=1 且校验通过时由 hook 写入 */
+    /** 周界鉴权解出的 token 归属（仅 token 来源时写入） */
     accessUserId?: string;
+    /**
+     * 本次请求的身份裁决结果（token / guest / compat / anonymous）。
+     * 路由需要区分「登录用户」与「未登录设备」时读这里，不要自己再解析 query。
+     */
+    accessIdentity?: {
+      actorId: string;
+      source: HttpIdentitySource;
+      placeholder: boolean;
+    };
   }
 }
 
@@ -58,6 +68,7 @@ const PUBLIC_EXACT_PATHS = new Set([
   // ① 凭证获取链（绑定码一次性、注册须邮箱 OTP，均在路由内自门禁）
   "/api/auth/status",
   "/api/auth/bind",
+  "/api/auth/refresh", // 用（可能已过期的）token 换新，必须能穿过周界才叫续期
   "/api/auth/pairing-code",
   "/accounts/email/otp/start",
   "/accounts/register",
@@ -146,70 +157,116 @@ function accessCookieToken(cookieHeader: string | undefined): string | undefined
 }
 
 /**
- * 周界鉴权 hook（仅 ACCESS_AUTH_REQUIRED=1 时挂载；未开启零行为变更）。
+ * 周界鉴权 hook（**始终挂载**，不依赖 ACCESS_AUTH_REQUIRED）。
  *
- *  - 默认拦截除公开面以外的一切路径（/api/* 与裸路径同等对待）；
- *  - token 取自 `Authorization: Bearer <t>` 或 `?token=`（<img>/WebView 发不出
- *    请求头，媒体 URL 只能走 query token）；无效/缺失 → 401；
- *  - 身份钉死：验证通过后把 `query.userId` 强制改写为 token 归属用户、删除
- *    `query.sessionId`，并对对象型 body（JSON / urlencoded）同步改写——
- *    下游 resolveActorId 无论读哪个通道都拿不到伪造身份。
+ * 2026-11-11 起语义从「开关打开就全拒」变成分级裁决（`http/http-identity.ts`）：
+ *
+ *  | 请求携带 | 结果 |
+ *  |---|---|
+ *  | 有效 token | 放行，身份 = token 归属，query/body 的自报值被改写 |
+ *  | 无效/过期 token | 401 TOKEN_INVALID（客户端据此清凭据并续期或重登） |
+ *  | 无 token + 自报邮箱 | 403 IDENTITY_REQUIRED（**与开关无关**） |
+ *  | 无 token + `inst_…`/占位值 | 放行，按 guest 身份（数据与账号隔离） |
+ *  | 无 token + 无身份 | 强制模式下 401，宽松模式下按匿名（旧行为） |
+ *
+ * 「无 token 自报邮箱必须拒」这条不看开关：它和 WS 侧同一个漏洞——自报
+ * 账号从来不是身份，只可能是冒充。ACCESS_AUTH_REQUIRED 只影响最后一行
+ * （完全没身份的请求），用来逐步收紧匿名面。
  *
  * 分两个 hook 是因为 body 在 onRequest 之后才解析：单钩子里读
  * `request.body` 永远是 undefined，body 侧的伪造身份会原样漏到路由下面。
  */
 export function registerAccessAuthHook(app: FastifyInstance, accessAuthService: AccessAuthService): void {
-  if (!isAccessAuthRequired()) return;
   app.addHook("onRequest", async (request, reply) => {
     const path = (request.url || "").split("?")[0];
     if (isPublicAccessPath(path)) return;
-    const query = (request.query ?? {}) as { token?: string };
-    const queryToken = query.token;
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const queryToken = typeof query.token === "string" ? query.token : undefined;
     const token = AccessAuthService.extractToken({
       authorization: request.headers.authorization,
       queryToken,
-    }) ?? accessCookieToken(request.headers.cookie);
-    const verified = token ? accessAuthService.verifyToken(token) : null;
-    if (!verified) {
-      return reply.code(401).send({
+    }) ?? accessCookieToken(request.headers.cookie) ?? null;
+
+    const decision = decideFromRequest(request, query, token, accessAuthService);
+    if (!decision.ok) {
+      // 401 = 你还没被认出来（去登录/续期）；403 = 你自称了某个账号但没有凭证。
+      // 分开的意义：客户端可以对 401 走「静默续期 → 仍失败才回登录页」，
+      // 而 403 说明它手里压根没有可用凭据，续期没有意义，直接回登录门禁。
+      const status = decision.reason === "claimed_account" ? 403 : 401;
+      return reply.code(status).send({
         ok: false,
-        error: "缺少或无效的访问 token（Authorization: Bearer <token> 或 ?token=，经 /api/auth/bind 获取）",
+        code: decision.code,
+        error: decision.message,
       });
     }
-    request.accessUserId = verified.userId;
-    // HTML 页：query token 落一次同站 Cookie，页面内部的 fetch/图片才拿得到凭证
-    if (queryToken && HTML_PAGE_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) {
-      void reply.header(
-        "set-cookie",
-        `${ACCESS_COOKIE_NAME}=${queryToken}; Path=/; HttpOnly; SameSite=Strict`,
-      );
+
+    if (decision.source === "token") {
+      request.accessUserId = decision.actorId;
+      // HTML 页：query token 落一次同站 Cookie，页面内部的 fetch/图片才拿得到凭证
+      if (queryToken && HTML_PAGE_PATHS.some((p) => path === p || path.startsWith(`${p}/`))) {
+        void reply.header(
+          "set-cookie",
+          `${ACCESS_COOKIE_NAME}=${queryToken}; Path=/; HttpOnly; SameSite=Strict`,
+        );
+      }
     }
-    // 身份钉死（query 通道；body 通道见下面的 preValidation 钩子）
-    // sessionId 一并改写而非删除：历史路由的 zod schema 仍带 sessionId 字段，
-    // 删掉会让这些端点在开启鉴权后直接 400；改写成同一归属既兼容又不可伪造。
-    // actorId 也一并钉死：部分路由（记忆/健康/闹钟/大脑）直接读 ?actorId，
-    // 不改写就能凭邮箱冒充别人。
-    pinIdentity(request.query as Record<string, unknown>, verified.userId);
+    request.accessIdentity = {
+      actorId: decision.actorId,
+      source: decision.source,
+      placeholder: decision.placeholder ?? false,
+    };
+    // 身份钉死：只钉 userId/actorId，**不动 sessionId**。
+    // sessionId 是会话键（`master:`/`notes:`/`side:` 前缀），改成邮箱会把所有
+    // 会话挤成一条；而 actor 解析由 resolveActorId 优先读 userId，userId 钉死
+    // 后 sessionId 里的伪造值已经影响不到归属。
+    pinIdentity(query, decision.actorId);
   });
 
   app.addHook("preValidation", async (request) => {
-    if (!request.accessUserId) return;
+    if (!request.accessIdentity) return;
     if (
       request.body !== null &&
       typeof request.body === "object" &&
       !Array.isArray(request.body) &&
       !Buffer.isBuffer(request.body)
     ) {
-      pinIdentity(request.body as Record<string, unknown>, request.accessUserId);
+      pinIdentity(request.body as Record<string, unknown>, request.accessIdentity.actorId);
     }
   });
 }
 
-/** 把 userId/sessionId/actorId 三个身份通道统一到 token 归属。 */
-function pinIdentity(target: Record<string, unknown>, userId: string): void {
-  target.userId = userId;
-  target.sessionId = userId;
-  if ("actorId" in target) target.actorId = userId;
+/** 把 query/body 的身份通道统一到裁决结果。 */
+function pinIdentity(target: Record<string, unknown>, actorId: string): void {
+  target.userId = actorId;
+  if ("actorId" in target) target.actorId = actorId;
+  // sessionId 只在「是账号形态」时改写：正常会话键必须保留，邮箱形态则一定是伪造。
+  const sid = target.sessionId;
+  if (typeof sid === "string" && sid.includes("@")) target.sessionId = actorId;
+}
+
+/** 从请求里取 token 并裁决身份（query 阶段用；body 阶段只做钉死）。 */
+function decideFromRequest(
+  request: { headers: Record<string, unknown>; query: unknown },
+  query: Record<string, unknown>,
+  token: string | null,
+  accessAuthService: AccessAuthService,
+): ReturnType<typeof decideHttpIdentity> {
+  const verified = token ? accessAuthService.inspectToken(token) : null;
+  const str = (v: unknown): string | null => (typeof v === "string" ? v : null);
+  const headers = request.headers ?? {};
+  const headerActor = str(headers["x-nb-actor"] ?? headers["X-Nb-Actor"]);
+  return decideHttpIdentity({
+    tokenPresent: Boolean(token),
+    verifiedUserId: verified?.status === "ok" ? verified.userId : null,
+    tokenExpired: verified?.status === "expired",
+    // 设备标识头只在没有 token 时才有意义：发不出请求头的消费方（图片/音频/
+    // WebView）靠它表明「我是这台还没登录的设备」。有 token 时一律以 token 为准。
+    claimedUserId: str(query.userId) ?? (token ? null : headerActor),
+    claimedSessionId: str(query.sessionId),
+    claimedActorId: str(query.actorId),
+    strict: isAccessAuthRequired(),
+    trustPayloadAccountIdentity: trustsPayloadAccountIdentity(),
+  });
 }
 
 /** 从请求中提取明文 token（Bearer 头优先，其次 ?token= query）。 */
@@ -304,12 +361,55 @@ export function registerAuthRoutes(app: FastifyInstance, deps: AuthRouteDeps): v
         token,
         userId,
         tokenId: record.tokenId,
+        expiresAt: record.expiresAt ?? 0,
         message: "绑定成功：token 请妥善保存，仅本次返回（服务端只存哈希）",
       };
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       return reply.code(400).send({ ok: false, error: message });
     }
+  });
+
+  /**
+   * POST /api/auth/refresh：用现有 token 换新 token（滑动续期，免周界）。
+   *
+   * 为什么免周界：过期的 token 过不了周界，如果这个端点也被拦，客户端就陷入
+   * 「过期 → 401 → 想续期 → 还是 401」的死循环，只能让用户重登。这里允许它
+   * 穿过周界，由本路由自己按「有效 / 过期但未超宽限期 / 彻底失效」判定。
+   *
+   * token 从三处取：Authorization: Bearer、body.token、?token=。客户端在
+   * 建连/请求前发现临期会主动调一次，用户无感。
+   */
+  app.post("/api/auth/refresh", async (request, reply) => {
+    const body = (request.body ?? {}) as Record<string, unknown>;
+    const query = (request.query ?? {}) as Record<string, unknown>;
+    const token =
+      AccessAuthService.extractToken({
+        authorization: request.headers.authorization,
+        queryToken: asString(body.token) || asString(query.token) || undefined,
+      }) ?? accessCookieToken(request.headers.cookie);
+    if (!token) {
+      return reply.code(400).send({ ok: false, code: "TOKEN_MISSING", error: "缺少 token" });
+    }
+    const result = await accessAuthService.refreshToken(token);
+    if ("error" in result) {
+      return reply.code(401).send({
+        ok: false,
+        code: result.error === "EXPIRED" ? "TOKEN_EXPIRED" : "TOKEN_INVALID",
+        error:
+          result.error === "EXPIRED"
+            ? "登录状态已超过续期宽限期，请重新登录"
+            : "本机访问凭据已失效，请重新登录",
+      });
+    }
+    return {
+      ok: true,
+      token: result.token,
+      tokenId: result.tokenId,
+      userId: result.userId,
+      deviceId: result.deviceId,
+      expiresAt: result.expiresAt,
+    };
   });
 
   /**

@@ -1,5 +1,5 @@
 /**
- * 降低 SSRF 风险：`vision.http_pull` 与定时拉流仅允许访问非公网保留地址的目标，
+ * 降低 SSRF 风险：互联网图像拉取仅允许访问非公网保留地址的目标，
  * 除非配置严格放行列表 {@link isVisionPullHostExplicitlyAllowedByEnv}.
  */
 

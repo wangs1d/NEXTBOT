@@ -309,7 +309,7 @@ const CAPABILITY_BRIDGE_TOOLS = new Set([
   "tool_search",
   "tool_discover",
   "tool_describe",
-  "agent.query_capabilities",
+  "agent",
 ]);
 
 function filterToolsByCapabilities(

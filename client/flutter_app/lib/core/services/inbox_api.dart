@@ -5,6 +5,7 @@ import "package:http/http.dart" as http;
 import "../config/api_config.dart";
 import "access_auth_api.dart";
 import "install_identity.dart";
+import "./nb_http.dart";
 
 /// 站内信 API 通用结果包装。
 class InboxApiResult<T> {
@@ -168,12 +169,12 @@ class InboxApi {
   })  : _control = _SingleSourceInboxApi(
           baseUrl: controlPlaneBase ?? ApiConfig.controlPlaneBase,
           userIdResolver: InstallIdentity.instance.actorId,
-          client: client ?? http.Client(),
+          client: client ?? NbClient(),
         ),
         _local = _SingleSourceInboxApi(
           baseUrl: localBase ?? ApiConfig.httpBase,
           userIdResolver: () async => ApiConfig.effectiveActorId,
-          client: client ?? http.Client(),
+          client: client ?? NbClient(),
         );
 
   final _SingleSourceInboxApi _control;

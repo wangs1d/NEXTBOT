@@ -501,9 +501,9 @@ export function registerCalendarTools(
         });
         return buildCreateResponse(task, timezone, "Agent 自动化任务已写入日程");
       }
-      const actionIn = input.action as Record<string, unknown> | undefined;
+      const actionIn = input.httpAction as Record<string, unknown> | undefined;
       const url = String(actionIn?.url ?? input.actionUrl ?? "").trim();
-      if (!url) return { ok: false, error: "action 任务需提供 action.url 或 actionUrl" };
+      if (!url) return { ok: false, error: "action 任务需提供 httpAction.url 或 actionUrl" };
       const methodRaw = String(actionIn?.method ?? input.actionMethod ?? "POST").toUpperCase();
       const method = ["GET", "POST", "PUT", "PATCH", "DELETE"].includes(methodRaw)
         ? (methodRaw as "GET" | "POST" | "PUT" | "PATCH" | "DELETE")
@@ -527,13 +527,13 @@ export function registerCalendarTools(
   };
 
   // 模型侧唯一创建入口：text 优先走确定性解析，无 text 时走结构化字段。
-  registry.register("calendar.create", async (input, context) => {
+  const handleCreate = async (input: Record<string, unknown>, context: ToolContext) => {
     const text = String(input.text ?? "").trim();
     if (text) return createFromText(text, input, context);
     return createFromStructured(input, context);
-  });
+  };
 
-  registry.register("calendar.list_tasks", async (input, context) => {
+  const handleListTasks = async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = resolveActorId(context);
     const now = Date.now();
     const from =
@@ -561,9 +561,9 @@ export function registerCalendarTools(
         timezone: t.timezone,
       })),
     };
-  });
+  };
 
-  registry.register("calendar.delete_task", async (input, context) => {
+  const handleDeleteTask = async (input: Record<string, unknown>, context: ToolContext) => {
     const taskId = String(input.taskId ?? "").trim();
     if (!taskId) {
       return { ok: false, error: "taskId 不能为空" };
@@ -577,12 +577,12 @@ export function registerCalendarTools(
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
     }
-  });
+  };
 
-  registry.register("calendar.update_task", async (input, context) => {
+  const handleUpdateTask = async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = resolveActorId(context);
     const taskId = String(input.taskId ?? "").trim();
-    if (!taskId) return { ok: false, error: "taskId 不能为空（来自 calendar.list_tasks）" };
+    if (!taskId) return { ok: false, error: "taskId 不能为空（来自 calendar 的 action=list_tasks）" };
     const existing = scheduleTaskService.getTask(taskId);
     if (!existing || existing.sessionId !== sessionId) {
       return { ok: false, error: `日程 ${taskId} 不存在` };
@@ -660,9 +660,9 @@ export function registerCalendarTools(
       const msg = e instanceof Error ? e.message : String(e);
       return { ok: false, error: msg };
     }
-  });
+  };
 
-  registry.register("calendar.find_free_slots", async (input, context) => {
+  const handleFindFreeSlots = async (input: Record<string, unknown>, context: ToolContext) => {
     if (!conflictService) return { ok: false, error: "空闲时段查询未启用" };
     const sessionId = resolveActorId(context);
     const durationMinutes = Number(input.durationMinutes ?? 60);
@@ -713,11 +713,11 @@ export function registerCalendarTools(
           ? "把空闲时段转述给用户（用 startLocal/endLocal 展示），由用户选择后再创建或改期。"
           : "没有可用空闲时段时，如实告知用户并询问是否缩小范围、缩短时长或改天。",
     };
-  });
+  };
 
   // 批量创建（课表/排班表/会议日程等一次性导入场景）：逐条走与 create_task 相同的
   // 冲突预检与幂等创建；部分失败不影响其余条目，逐条结果回传给模型转述。
-  registry.register("calendar.batch_create", async (input, context) => {
+  const handleBatchCreate = async (input: Record<string, unknown>, context: ToolContext) => {
     const sessionId = resolveActorId(context);
     const timezone = String(input.timezone ?? "Asia/Shanghai").trim() || "Asia/Shanghai";
     const forceCreate = input.forceCreate === true;
@@ -845,5 +845,41 @@ export function registerCalendarTools(
       failed,
       results,
     };
+  };
+
+  // 2026-11-11 复合：单一入口 `calendar`，按 action 分流到原 6 个 handler。
+  registry.register("calendar", async (input, context) => {
+    const action = String(input.action ?? "").trim();
+    switch (action) {
+      case "create": {
+        const r = await handleCreate(input, context);
+        return { ...r, action: "create" };
+      }
+      case "batch_create": {
+        const r = await handleBatchCreate(input, context);
+        return { ...r, action: "batch_create" };
+      }
+      case "list_tasks": {
+        const r = await handleListTasks(input, context);
+        return { ...r, action: "list_tasks" };
+      }
+      case "delete_task": {
+        const r = await handleDeleteTask(input, context);
+        return { ...r, action: "delete_task" };
+      }
+      case "update_task": {
+        const r = await handleUpdateTask(input, context);
+        return { ...r, action: "update_task" };
+      }
+      case "find_free_slots": {
+        const r = await handleFindFreeSlots(input, context);
+        return { ...r, action: "find_free_slots" };
+      }
+      default:
+        return {
+          ok: false,
+          error: `未知 action「${action || "(空)"}」，可选值：create、batch_create、list_tasks、delete_task、update_task、find_free_slots`,
+        };
+    }
   });
 }

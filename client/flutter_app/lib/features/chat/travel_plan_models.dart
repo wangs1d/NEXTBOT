@@ -3,6 +3,7 @@ import "dart:convert";
 import "package:http/http.dart" as http;
 
 import "../../core/config/media_url.dart";
+import "../../core/services/nb_http.dart";
 import "../../core/utils/agent_result_parser.dart";
 
 /// 行程链路远程图床域（Wikimedia 家族）：这些域在国内网络直连不可达
@@ -104,7 +105,7 @@ class TravelLiveCover {
       ),
     );
     final http.Response resp =
-        await http.get(uri).timeout(const Duration(seconds: 6));
+        await NbHttp.get(uri).timeout(const Duration(seconds: 6));
     if (resp.statusCode != 200) return null;
     final dynamic body = jsonDecode(resp.body);
     final String url = (body is Map ? body["url"] : null)?.toString() ?? "";

@@ -106,7 +106,7 @@ const SUGGESTION_POOL: SuggestionPoolEntry[] = [
     tag: "搜索",
     prompt: "帮我查一下这周末有什么展，挑个值得去的",
     usedPrompt: "帮我查查这周有什么新动态，挑重点讲给我",
-    toolSignals: ["search_web", "search_images", "search_videos", "web_search", "internet.research"],
+    toolSignals: ["search_web", "search_images", "search_videos", "web_search"],
     core: true,
   },
   {

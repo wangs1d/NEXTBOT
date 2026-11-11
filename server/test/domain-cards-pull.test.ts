@@ -131,16 +131,25 @@ test("技能族域可见性（2026-10-10 根修回归）：habit 等派生域在
       .map((e) => e.registryName)
       .filter((n) => n.startsWith(`${family}.`));
     if (members.length === 0) continue; // 该族未注册进语料（环境裁剪）→ 不误判
-    // 紧凑模式：卡片行是「- 域名｜摘要」，派生域 def.name 即域名本身。
-    assert.ok(cards.includes(`- ${family}｜`), `域卡缺失技能族 ${family}（能力面对模型不可见）`);
-    const r = await executeToolSearchBridge("tool_discover", { domain: family }, catalog);
+    // 紧凑模式：卡片行是「- 域名｜摘要」。复合工具面后裸名前缀会与技能族共享域
+    //（如 agentworld.* 归 agent 域），域从成员实际归属解析，不写死「族名=域名」。
+    const domain = domainsForTool(members[0])[0];
+    assert.ok(cards.includes(`- ${domain}｜`), `域卡缺失技能族 ${family} 的域 ${domain}（能力面对模型不可见）`);
+    const r = await executeToolSearchBridge("tool_discover", { domain }, catalog);
     assert.equal(r.ok, true, `按域拉取 ${family} 失败：${JSON.stringify(r.result)}`);
     const result = r.result as { mode: string; domain: string; matches: Array<{ name: string }> };
     assert.equal(result.mode, "domain");
-    assert.equal(result.domain, family);
+    assert.equal(result.domain, domain);
     assert.ok(result.matches.length > 0, `${family} 域拉取为空`);
+    assert.ok(
+      result.matches.some((m) => members.includes(m.name)),
+      `${family} 域拉取未含族成员: ${result.matches.map((m) => m.name).join(",")}`,
+    );
     for (const m of result.matches) {
-      assert.ok(m.name.startsWith(`${family}.`), `${family} 域拉取混入异族成员: ${m.name}`);
+      assert.ok(
+        domainsForTool(m.name).includes(domain),
+        `${family} 域拉取混入异域成员: ${m.name}`,
+      );
     }
   }
 });

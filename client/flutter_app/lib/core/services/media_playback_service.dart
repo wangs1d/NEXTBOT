@@ -6,10 +6,13 @@ import "package:flutter/foundation.dart";
 import "package:path_provider/path_provider.dart";
 
 import "../config/media_url.dart";
+import "ws_event_router.dart"
+    show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 
 /// session.init 上报给服务端的能力声明：本客户端已实现 agent.media.* 消费
-/// （MediaPlaybackService 挂入 WS 分发后置 true，服务端 media.play 工具因此放行）。
-/// 注意：只有在 main.dart 实际接线 handleMediaEvent 之后才允许声明，否则又回到
+/// （MediaPlaybackService 经事件总线自订阅（ensureBusSubscription）后置 true，
+/// 服务端 media.play 工具因此放行）。注意：只有在装配层实际调用了
+/// ensureBusSubscription 之后才允许声明，否则又回到
 /// 2026-09-12 的"信令发了但没人消费"假成功事故。
 const bool kMediaPlaybackCapability = true;
 
@@ -231,6 +234,25 @@ class MediaPlaybackService {
       : _adapter = adapter;
 
   static final MediaPlaybackService instance = MediaPlaybackService._();
+
+  static bool _busWired = false;
+
+  /// 事件总线自订阅（main.dart 装配时调用一次；幂等）。
+  ///
+  /// agent.media.play/pause/resume/stop 归本模块 owned，main 根监听器不再接线。
+  static void ensureBusSubscription() {
+    if (_busWired) return;
+    _busWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "media-playback",
+      types: WsEventCatalog.mediaPlayback,
+      scope: WsSubscribeScope.root,
+      onEvent: (Map<String, dynamic> event) => instance.handleMediaEvent(
+        event["type"] as String? ?? "",
+        wsEventPayload(event),
+      ),
+    );
+  }
 
   final MediaPlaybackAdapter _adapter;
   StreamSubscription<void>? _completeSub;

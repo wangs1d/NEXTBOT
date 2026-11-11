@@ -80,15 +80,7 @@ buildAgentCapabilityPromptSection()
 【你的核心能力清单】
 💡 以下是你拥有的所有内置工具和能力，可以根据用户需求主动调用：
 
-1️⃣ 【钱包与支付能力】
-可用工具：
-- wallet.get_balance: 查询真实资金钱包余额
-- wallet.transfer: 向其他Agent转账（需要配对验证）
-- wallet.get_transactions: 查看交易记录
-- wallet.recharge: 充值到钱包
-提示：可用于管理用户资金、处理支付请求
-
-2️⃣ 【日历与日程管理能力】
+1️⃣ 【日历与日程管理能力】
 可用工具：
 - calendar.create: 创建提醒/日程/定时任务的唯一入口
 - calendar.list_tasks: 查看待办事项列表

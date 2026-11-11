@@ -4,6 +4,8 @@ import "package:flutter/foundation.dart" show debugPrint;
 import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
+import "install_identity.dart";
+import "./nb_http.dart";
 
 /// 邮箱登录两步式的通用结果。
 class EmailLoginResult {
@@ -13,6 +15,10 @@ class EmailLoginResult {
     this.code,
     this.otpChannelDisabled = false,
     this.retryAfterSeconds,
+    this.accessToken,
+    this.accessTokenId,
+    this.deviceId,
+    this.accessTokenExpiresAt = 0,
   });
 
   final bool ok;
@@ -29,6 +35,23 @@ class EmailLoginResult {
 
   /// 发码限频：多少秒后可重试。
   final int? retryAfterSeconds;
+
+  /// 登录/注册成功后签发的本机 access token（明文只返回这一次）。
+  ///
+  /// 这是「认证即发证」的凭据：落盘后 WS `session.init` 与 HTTP 请求都会带它，
+  /// 服务端以 token 归属为身份权威（不再信任客户端自报的 userId）。
+  /// 老服务端不返回该字段（null），客户端仍按自报身份工作。
+  final String? accessToken;
+
+  /// 服务端侧的 token 记录 id（吊销/排查用）。
+  final String? accessTokenId;
+
+  /// 服务端登记的设备标识（与安装标识同源时可直接落盘）。
+  final String? deviceId;
+
+  /// 凭据过期时刻（毫秒）；0 = 服务端未启用 TTL。
+  /// 落盘后客户端可在临期前静默续期，而不是等 401 才补救。
+  final int accessTokenExpiresAt;
 
   /// 该邮箱还没有账号 → 应该走注册。
   bool get accountNotFound => code == "ACCOUNT_NOT_FOUND";
@@ -59,7 +82,7 @@ class EmailLoginResult {
 class EmailLoginApi {
   EmailLoginApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.controlPlaneBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;
@@ -132,6 +155,7 @@ class EmailLoginApi {
   Future<EmailLoginResult> login(String email, {String? code}) async {
     final String mail = email.trim().toLowerCase();
     final String otp = code?.trim() ?? "";
+    final String deviceId = await InstallIdentity.instance.installId();
     try {
       final http.Response res = await _client
           .post(
@@ -141,13 +165,23 @@ class EmailLoginApi {
               "userId": mail,
               "email": mail,
               if (otp.isNotEmpty) "otpCode": otp,
+              // 认证即发证：服务端按该设备标识签发 access token，
+              // 与 WS session.init 上报的 deviceId 同源，便于排查对账。
+              "deviceId": deviceId,
             }),
           )
           .timeout(_timeout);
       final Map<String, dynamic> data =
           jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
       if (res.statusCode == 200 && data["ok"] == true) {
-        return const EmailLoginResult(ok: true);
+        return EmailLoginResult(
+          ok: true,
+          accessToken: data["accessToken"]?.toString(),
+          accessTokenId: data["accessTokenId"]?.toString(),
+          deviceId: data["deviceId"]?.toString(),
+          accessTokenExpiresAt:
+              (data["accessTokenExpiresAt"] as num?)?.toInt() ?? 0,
+        );
       }
       return EmailLoginResult(
         ok: false,
@@ -169,6 +203,7 @@ class EmailLoginApi {
     final String mail = email.trim().toLowerCase();
     final String otp = code?.trim() ?? "";
     final String userName = name?.trim() ?? "";
+    final String deviceId = await InstallIdentity.instance.installId();
     try {
       final http.Response res = await _client
           .post(
@@ -180,13 +215,21 @@ class EmailLoginApi {
               "email": mail,
               "mode": "register",
               if (otp.isNotEmpty) "otpCode": otp,
+              "deviceId": deviceId,
             }),
           )
           .timeout(_timeout);
       final Map<String, dynamic> data =
           jsonDecode(utf8.decode(res.bodyBytes)) as Map<String, dynamic>;
       if (res.statusCode == 200 && data["ok"] == true) {
-        return const EmailLoginResult(ok: true);
+        return EmailLoginResult(
+          ok: true,
+          accessToken: data["accessToken"]?.toString(),
+          accessTokenId: data["accessTokenId"]?.toString(),
+          deviceId: data["deviceId"]?.toString(),
+          accessTokenExpiresAt:
+              (data["accessTokenExpiresAt"] as num?)?.toInt() ?? 0,
+        );
       }
       final String message = data["message"]?.toString() ?? "";
       final String? code2 = data["code"]?.toString();

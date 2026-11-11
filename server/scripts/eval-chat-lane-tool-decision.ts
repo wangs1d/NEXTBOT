@@ -98,10 +98,6 @@ function buildToolContext() {
   const infoHub = new InfoHubService();
   const upstream = new UpstreamSearchService(infoHub);
   const registry = new ToolRegistry() as any;
-  registry.register("clock.get_current_time", async () => {
-    const now = new Date();
-    return { iso: now.toISOString(), timezone: "Asia/Shanghai", local: now.toLocaleString("zh-CN") };
-  });
   registry.register("clock.get_user_location", async () => ({
     city: "上海市", latitude: 31.2304, longitude: 121.4737, source: "eval-fixture",
   }));
@@ -114,7 +110,7 @@ function buildToolContext() {
   }));
   // 其余 Core 工具（钱包/消息/日程/派发等）本台架不接执行器：明确报错而非静默假成功
   const stub = async (name: string) => ({ ok: false, result: { error: `eval-harness: ${name} 未接执行器` } });
-  for (const name of ["wallet.get_balance", "wallet.get_transactions", "messages.overview", "calendar.list_tasks", "brain.recall", "agent.query_capabilities", "self.list_custom_skills", "task.dispatch", "task.status", "task.cancel", "calendar.create", "calendar.create", "phone.ensure_my_number", "phone.virtual_call", "messages.reply", "world.link.send_message", "fetch_web", "deep_search", "search_videos"]) {
+  for (const name of ["calendar", "brain.recall", "agent.query_capabilities", "task.dispatch", "task.status", "task.cancel", "phone.ensure_my_number", "phone.virtual_call", "world.link.send_message", "fetch_web", "deep_search", "search_videos"]) {
     registry.register(name, stub.bind(null, name));
   }
   const calls: Array<{ name: string; ok: boolean }> = [];

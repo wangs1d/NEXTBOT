@@ -2120,6 +2120,10 @@ class _RouteMapOverlayState extends State<_RouteMapOverlay>
                         stops: widget.stops,
                         cur: widget.cur,
                         onPick: widget.onPick,
+                        restaurants: _restaurants,
+                        selectedRestaurant: _selectedRestaurant,
+                        onPickRestaurant: (int? index) =>
+                            setState(() => _selectedRestaurant = index),
                       )
                     : _RouteCanvas(
                         stops: widget.stops,
@@ -2228,11 +2232,20 @@ class _RealMapPane extends StatelessWidget {
     required this.stops,
     required this.cur,
     required this.onPick,
+    this.restaurants = const <RouteRestaurantPoi>[],
+    this.selectedRestaurant,
+    this.onPickRestaurant,
   });
 
   final List<_Stop> stops;
   final int cur;
   final ValueChanged<int> onPick;
+
+  /// 沿线餐厅（服务端 /travel-map/restaurants）：与手绘画布同数据源，
+  /// 点选后由外层浮卡（_RestaurantTipCard）展示详情。
+  final List<RouteRestaurantPoi> restaurants;
+  final int? selectedRestaurant;
+  final ValueChanged<int?>? onPickRestaurant;
 
   /// 服务端代理瓦片模板：u= 上游 URL（令牌保留原样），z/x/y 由 flutter_map
   /// 填进 query，服务端再替换进上游路径。
@@ -2340,6 +2353,32 @@ class _RealMapPane extends StatelessWidget {
                       ),
                 ],
               ),
+              // 沿线餐厅：评分小标，点选弹浮卡（与手绘画布同一交互契约）
+              if (restaurants.isNotEmpty && onPickRestaurant != null)
+                MarkerLayer(
+                  markers: <Marker>[
+                    for (int r = 0; r < restaurants.length; r++)
+                      if (restaurants[r].lat != 0 ||
+                          restaurants[r].lng != 0)
+                        Marker(
+                          point: ll.LatLng(
+                              restaurants[r].lat, restaurants[r].lng),
+                          width: 40,
+                          height: 24,
+                          alignment: Alignment.topCenter,
+                          child: GestureDetector(
+                            behavior: HitTestBehavior.opaque,
+                            onTap: () => onPickRestaurant!(
+                                selectedRestaurant == r ? null : r),
+                            child: _MapRestaurantChip(
+                              label: restaurants[r].rating
+                                  .toStringAsFixed(1),
+                              selected: selectedRestaurant == r,
+                            ),
+                          ),
+                        ),
+                  ],
+                ),
               const SimpleAttributionWidget(
                 source: Text("© Esri", style: TextStyle(fontSize: 10)),
               ),
@@ -2352,8 +2391,7 @@ class _RealMapPane extends StatelessWidget {
 }
 
 /// 底图站点标钉：当前站琥珀大钉，其余深灰小点。点按即切站。
-class _MapStopPin extends StatelessWidget {
-  const _MapStopPin({
+class _MapStopPin extends StatelessWidget {  const _MapStopPin({
     required this.index,
     required this.active,
     required this.label,
@@ -2396,6 +2434,52 @@ class _MapStopPin extends StatelessWidget {
             color: active ? const Color(0xFF201407) : _T.txt,
           ),
         ),
+      ),
+    );
+  }
+}
+
+/// 底图餐厅小标：评分数字 chip，选中态琥珀高亮（与 _RestaurantTipCard 联动）。
+class _MapRestaurantChip extends StatelessWidget {
+  const _MapRestaurantChip({required this.label, required this.selected});
+
+  final String label;
+  final bool selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
+      decoration: BoxDecoration(
+        color: selected ? _T.amber : _T.card,
+        borderRadius: BorderRadius.circular(999),
+        border: Border.all(
+          color: selected ? _T.amber : _T.line,
+          width: 1,
+        ),
+        boxShadow: <BoxShadow>[
+          BoxShadow(
+            color: const Color(0xFF000000).withValues(alpha: 0.35),
+            blurRadius: 6,
+          ),
+        ],
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(Icons.restaurant_rounded,
+              size: 10,
+              color: selected ? const Color(0xFF201407) : _T.amber),
+          const SizedBox(width: 3),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 10.5,
+              fontWeight: FontWeight.w700,
+              color: selected ? const Color(0xFF201407) : _T.txt,
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -2888,6 +2972,100 @@ class _RestaurantTipCard extends StatelessWidget {
 }
 
 // ═══════════════════════════════════════════════════════════════════
+/// 站点详情页头图轮播：多图横滑 + 页码点。
+///
+/// 桌面端每站带 imgs[] 多图，此前手机只画 images.first——同一份数据
+/// 桌面能看到多张，手机只看到一张。这里对齐：全量图轮播，站点切换
+/// （图片集变化）时回到第一张。
+class _StopHeaderGallery extends StatefulWidget {
+  const _StopHeaderGallery({required this.images, required this.overlay});
+
+  final List<String> images;
+
+  /// 覆盖在图片上的层（底部渐变 + SafeArea 标题区），原样透传
+  final List<Widget> overlay;
+
+  @override
+  State<_StopHeaderGallery> createState() => _StopHeaderGalleryState();
+}
+
+class _StopHeaderGalleryState extends State<_StopHeaderGallery> {
+  final PageController _controller = PageController();
+  int _page = 0;
+
+  @override
+  void didUpdateWidget(_StopHeaderGallery oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 图片集变了（切换了站点）：回到第一张，别停在上一站的第 3 张
+    if (oldWidget.images.join("|") != widget.images.join("|")) {
+      _page = 0;
+      if (_controller.hasClients) _controller.jumpToPage(0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final List<String> imgs = widget.images;
+    return SizedBox(
+      height: 300,
+      child: Stack(
+        fit: StackFit.expand,
+        children: <Widget>[
+          if (imgs.isEmpty)
+            const _NoImageFallback()
+          else ...<Widget>[
+            PageView.builder(
+              controller: _controller,
+              itemCount: imgs.length,
+              onPageChanged: (int i) => setState(() => _page = i),
+              itemBuilder: (BuildContext context, int i) => CachedMediaImage(
+                url: imgs[i],
+                fit: BoxFit.cover,
+                // 不按解码原尺寸加载：行程图常是 2000px+ 的实拍，
+                // 全尺寸解码在低端机上表现为长时间空白（不是没网）。
+                cacheWidth: (MediaQuery.sizeOf(context).width *
+                        MediaQuery.devicePixelRatioOf(context))
+                    .round(),
+                errorBuilder: (_, __, ___) => const _NoImageFallback(),
+              ),
+            ),
+            if (imgs.length > 1)
+              Positioned(
+                left: 0,
+                right: 0,
+                bottom: 96,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: <Widget>[
+                    for (int i = 0; i < imgs.length; i++)
+                      Container(
+                        width: i == _page ? 16 : 5,
+                        height: 5,
+                        margin: const EdgeInsets.symmetric(horizontal: 3),
+                        decoration: BoxDecoration(
+                          color: i == _page
+                              ? _T.amber
+                              : const Color(0x59FFFFFF),
+                          borderRadius: BorderRadius.circular(99),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+          ],
+          ...widget.overlay,
+        ],
+      ),
+    );
+  }
+}
+
 // 站点详情页：大图头图 + 时间档 + 事实 chip + 安排理由 + 介绍/贴士/
 // 实用信息 + 到达·下一站动线 + 本日站点 chips
 // ═══════════════════════════════════════════════════════════════════
@@ -2927,35 +3105,20 @@ class _StopDetailPage extends StatelessWidget {
         body: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
-            // ── 大图头图 ──
-            SizedBox(
-              height: 300,
-              child: Stack(
-                fit: StackFit.expand,
-                children: <Widget>[
-                  if (stop.images.isNotEmpty)
-                    CachedMediaImage(
-                      url: stop.images.first,
-                      fit: BoxFit.cover,
-                      // 不按解码原尺寸加载：行程图常是 2000px+ 的实拍，
-                      // 全尺寸解码在低端机上表现为长时间空白（不是没网）。
-                      cacheWidth: (MediaQuery.sizeOf(context).width *
-                              MediaQuery.devicePixelRatioOf(context))
-                          .round(),
-                      errorBuilder: (_, __, ___) => const _NoImageFallback(),
-                    )
-                  else
-                    const _NoImageFallback(),
-                  const DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.topCenter,
-                        end: Alignment.bottomCenter,
-                        stops: <double>[0.30, 1.0],
-                        colors: <Color>[Colors.transparent, Color(0xF00B0C0E)],
-                      ),
+            // ── 大图头图（多图轮播，与桌面每站 imgs[] 对齐）──
+            _StopHeaderGallery(
+              images: stop.images,
+              overlay: <Widget>[
+                const DecoratedBox(
+                  decoration: BoxDecoration(
+                    gradient: LinearGradient(
+                      begin: Alignment.topCenter,
+                      end: Alignment.bottomCenter,
+                      stops: <double>[0.30, 1.0],
+                      colors: <Color>[Colors.transparent, Color(0xF00B0C0E)],
                     ),
                   ),
+                ),
                   SafeArea(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -3008,7 +3171,6 @@ class _StopDetailPage extends StatelessWidget {
                     ),
                   ),
                 ],
-              ),
             ),
             // ── 滚动内容 ──
             Expanded(

@@ -21,12 +21,12 @@ test("参数化模板：天气/购物/日程各取各的字段", () => {
     "我在比「耳机」的价",
   );
   assert.equal(
-    renderToolStatusLine("calendar.create", { title: "周会" }),
+    renderToolStatusLine("calendar", { action: "create", title: "周会" }),
     "我在排「周会」",
   );
   assert.equal(
-    renderToolStatusLine("messages.reply", { contactName: "老妈" }),
-    "我回老妈一句",
+    renderToolStatusLine("email.send", { contactName: "老妈" }),
+    "我在给老妈写邮件",
   );
 });
 

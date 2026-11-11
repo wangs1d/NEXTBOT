@@ -2,7 +2,7 @@
  * Agent 虚拟浏览器能力模块（capability-module）。
  *
  * 与 image-gen / code-sandbox / shopping-order 同结构，导出：
- *   - `AGENT_BROWSER_CHAT_TOOLS`          LLM 工具 schema（8 个工具）
+ *   - `AGENT_BROWSER_CHAT_TOOLS`          LLM 工具 schema（1 个复合工具 agent_browser）
  *   - `AGENT_BROWSER_INTENT_RULES`        意图元数据（接 BM25 调权）
  *   - `AGENT_BROWSER_CATEGORY_MAPPING`    关键词分类映射
  *   - `registerAgentBrowserTools`         注册到 ToolRegistry

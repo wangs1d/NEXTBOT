@@ -4,6 +4,7 @@ import "dart:io";
 import "package:flutter/foundation.dart"
     show ChangeNotifier, debugPrint, visibleForTesting;
 import "package:http/http.dart" as http;
+import "./nb_http.dart";
 
 /// ZCode 式一键更新的应用内下载与静默安装编排。
 ///
@@ -26,7 +27,7 @@ class ClientUpdateFlowController extends ChangeNotifier {
     Directory? storageDir,
   }) : _downloadUrl = downloadUrl,
        _version = version,
-       _httpClient = httpClient ?? http.Client(),
+       _httpClient = httpClient ?? NbClient(),
        _storageDirOverride = storageDir;
 
   final String _downloadUrl;

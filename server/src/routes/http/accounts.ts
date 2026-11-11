@@ -84,7 +84,47 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
     betaWaitlistService,
     emailOtpService,
     emailSmsService,
+    accessAuthService,
   } = deps;
+
+  /**
+   * 认证通过后签发本机 access token（主流「认证即发证」）。
+   *
+   * 邮箱验证码已经证明账号归属，登录成功就应当拿到凭据：此后 WS 的
+   * `session.init` 与 HTTP 请求都以 token 归属为身份权威，客户端不再靠
+   * 自报 userId（见 ws/connection.ts 身份钉死）。这样「建连时报了什么身份」
+   * 不再取决于本地读盘时序——没有 token 就是没登录，有 token 就一定对。
+   *
+   * 发证失败不阻断登录本身：老客户端只认 `ok/account`，凭据缺失时它们
+   * 仍能按旧路径（自报 userId）工作，只是享受不到身份钉死。
+   */
+  const issueAccountCredential = async (
+    actorId: string,
+    body: { deviceId?: string; deviceLabel?: string },
+  ): Promise<Record<string, unknown>> => {
+    if (!accessAuthService) return {};
+    // 没有显式 deviceId 就不发证：随机造一个「设备」会每次调用都留下一枚
+    // 永远没人使用、也永远不会被吊销的 token（同设备换号只吊销同 deviceId）。
+    // 调用方（手机登录 / 桌面网页登录 / 机器注册）都必须自报设备标识。
+    const deviceId = body.deviceId?.trim();
+    if (!deviceId) return {};
+    try {
+      const issued = await accessAuthService.issueDeviceToken(
+        actorId,
+        deviceId,
+        body.deviceLabel,
+      );
+      return {
+        accessToken: issued.token,
+        accessTokenId: issued.tokenId,
+        accessTokenExpiresAt: issued.expiresAt,
+        deviceId: issued.deviceId,
+      };
+    } catch (e) {
+      console.warn(`[accounts] 签发 access token 失败（登录仍成功）：${String(e)}`);
+      return {};
+    }
+  };
 
   /**
    * 邮箱所有权验证码签发（POST /accounts/email/otp/start）：向用户自报的
@@ -194,12 +234,20 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       const accountEmail = actorId.includes("@") ? actorId : email;
       const account = await agentAccountService.register(actorId, displayName, accountEmail);
       await agentAccountService.markSetupComplete(actorId);
-      return { ok: true, account };
+      return {
+        ok: true,
+        account,
+        ...(await issueAccountCredential(actorId, parsed.data)),
+      };
     } catch (e) {
-      // 「已存在」报错即重复登录（客户端按登录成功处理）：顺手记一次活跃
+      // 「已存在」报错即重复登录（客户端按登录成功处理）：顺手记一次活跃。
+      // 这一分支之前邮箱验证码已经验过（闸开启时），所以可以顺手发设备凭据：
+      // 桌面端网页登录必须靠它拿到 token（验证码一次性，回调后再登录拿不到码）。
       agentAccountService.touchLastActive(actorId);
       const message = e instanceof Error ? e.message : String(e);
-      return reply.code(400).send({ ok: false, message });
+      return reply
+        .code(400)
+        .send({ ok: false, message, ...(await issueAccountCredential(actorId, parsed.data)) });
     }
   });
 
@@ -247,7 +295,11 @@ export function registerAccountRoutes(app: FastifyInstance, deps: HttpRouteDeps)
       }
     }
     agentAccountService.touchLastActive(actorId);
-    return { ok: true, account };
+    return {
+      ok: true,
+      account,
+      ...(await issueAccountCredential(actorId, parsed.data)),
+    };
   });
 
   /**

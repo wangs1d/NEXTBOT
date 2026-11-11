@@ -1,18 +1,14 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 /**
- * Agent 虚拟浏览器能力 —— ChatCompletionTool schema。
+ * Agent 虚拟浏览器能力 —— ChatCompletionTool schema（复合工具，单入口）。
  *
- * 工具族（点号命名空间 `agent_browser.*`）：
- *   - agent_browser.open          打开 URL，返回 sessionId
- *   - agent_browser.click         点击元素
- *   - agent_browser.type          在输入框输入文本
- *   - agent_browser.scroll        滚动页面
- *   - agent_browser.screenshot    截图（返回 base64）
- *   - agent_browser.extract_text  提取页面文本 + 可交互元素列表
- *   - agent_browser.wait_for      等待元素出现
- *   - agent_browser.close         关闭会话
- *   - agent_browser.handoff       通用人工交接（页面截图+指引推给用户）
+ * 对外只暴露一个函数 `agent_browser`，用 `action` 分流到 9 个内部动作：
+ *   open / click / type / scroll / screenshot / extract_text / wait_for / close / handoff
+ *
+ * 为什么合并：延迟目录的可见面按「函数名」占槽位（会话工具面 48 上限），
+ * 9 个名字 = 9 个槽位；合并后只占 1 个，召回与转正只需命中一个函数，
+ * 前缀缓存也更稳定。动作语义、参数、回执形状与合并前完全一致。
  *
  * 核心定位：通用浏览器层（客户端在线时优先在**用户可见的内置浏览器**里操作，
  * 登录态即用户本人、全程可见可接管；不在线时回退服务端无头浏览器），维持有状态
@@ -26,35 +22,49 @@ import type { ChatCompletionTool } from "openai/resources/chat/completions";
  *   - shopping.order.*：仅限购物平台业务流程；本工具是通用网页操作
  *   - desktop.visual.run_task：操控用户桌面软件；本工具在服务端无头浏览器
  *
- * 安全护栏（不依赖访问模式，沙箱下也可用）：
+ * 安全护栏：
  *   - 任意 https URL 允许 open（http 仅限 localhost），所有操作走审计日志
  *   - 对白名单站点（淘宝/京东/携程等 10 个）自动注入用户已授权 Cookie
  *   - 会话绑定 actorId 跨用户隔离；TTL 10 分钟 + LRU 上限 8 个自动清理
- *
- * 走 deferred（BM25 索引），不进 CORE_TOOL_LIBRARY：
- *   1. 用户不会每轮都操作浏览器，进核心会浪费 token
- *   2. 关键词触发（"打开网页" / "帮我操作" / "填表单"）时由 tool_discover 拉出
  */
 export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
   {
     type: "function",
     function: {
-      name: "agent_browser.open",
+      name: "agent_browser",
       description:
-        "优先在用户可见的内置浏览器（WebView2）里打开，登录态即用户本人；手机端没有可视浏览器，" +
-        "或客户端不在线时自动回退服务端无头浏览器（远端执行，结果与截图会回到聊天）。\n" +
-        "后续所有操作（click/type/scroll/screenshot/extract_text/wait_for/close）都须传此 sessionId。\n" +
-        "适用场景：用户说「帮我打开某网站」「去这个链接看看」「帮我在网页上操作」等。\n" +
-        "**撞到登录墙/验证码时**：回执带 humanRequired，页面会保留等待；可视浏览器里由用户直接登录，无头模式会把登录二维码推到聊天，用户完成后回复即可继续，别把失败当成普通报错。\n" +
-        "安全：https 任意 URL 允许；http 仅限 localhost。对已授权站点（淘宝/京东/携程等）自动注入用户 Cookie。\n" +
-        "沙箱模式下也可用。会话空闲 10 分钟自动过期。\n" +
-        "与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作。",
+        "云端/内置浏览器操作（有状态多步）。先 action=open 打开网址拿到 sessionId，" +
+        "之后 click/type/scroll/extract_text/screenshot/wait_for/handoff/close 都要带同一个 sessionId。\n" +
+        "客户端在线且支持可视浏览器时优先在用户可见的内置浏览器里操作（登录态即用户本人）；手机端或无客户端时自动回退服务端无头浏览器，结果与截图回到聊天。\n" +
+        "**优先用 extract_text 获取页面信息**（省 token 且带可交互元素 ref 列表），只有需要视觉确认时才 screenshot。\n" +
+        "**撞到登录墙/验证码/支付确认等只有用户本人能做的步骤**：open/click 回执会带 humanRequired 并自动推图；也可主动用 action=handoff 把截图+指引推到聊天（手机端也能收到），然后等用户回复再继续，别把这种情况当普通失败。\n" +
+        "安全：https 任意 URL；http 仅限 localhost。沙箱下也可用。会话空闲 10 分钟过期，用完请 action=close。\n" +
+        "与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作。\n" +
+        "action 说明：" +
+        "open=打开网址；click=点击元素；type=输入文本；scroll=滚动；extract_text=提取页面文本与可交互元素；" +
+        "screenshot=截图（base64 较大，>2000 字符会被截断，慎用）；wait_for=等待元素出现；close=关闭会话；" +
+        "handoff=把截图和操作指引推给用户并等待其完成。",
       parameters: {
         type: "object",
         properties: {
+          action: {
+            type: "string",
+            enum: [
+              "open",
+              "click",
+              "type",
+              "scroll",
+              "extract_text",
+              "screenshot",
+              "wait_for",
+              "close",
+              "handoff",
+            ],
+            description: "要执行的浏览器动作。",
+          },
           url: {
             type: "string",
-            description: "要打开的 https URL（http 仅限 localhost/127.0.0.1）。",
+            description: "action=open 必填：要打开的 https URL（http 仅限 localhost/127.0.0.1）。",
           },
           viewport: {
             type: "object",
@@ -63,271 +73,94 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
               height: { type: "integer", description: "视口高度（像素），默认 720。" },
             },
             additionalProperties: false,
-            description: "浏览器视口尺寸，影响页面渲染布局。",
+            description: "action=open：浏览器视口尺寸，影响页面渲染布局。",
           },
           waitUntil: {
             type: "string",
             enum: ["load", "domcontentloaded", "networkidle"],
-            description: "页面加载完成判定：load=完全加载, domcontentloaded=DOM 就绪（默认）, networkidle=网络空闲。",
+            description:
+              "action=open：页面加载完成判定。load=完全加载, domcontentloaded=DOM 就绪（默认）, networkidle=网络空闲。",
           },
-          timeout: {
-            type: "integer",
-            description: "导航超时（毫秒），默认 30000。",
+          sessionId: {
+            type: "string",
+            description: "除 open 外全部必填：action=open 返回的会话 ID。",
           },
-        },
-        required: ["url"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.click",
-      description:
-        "在指定会话的浏览器页面中点击元素。\n" +
-        "定位二选一：优先传 ref（extract_text 返回的元素引用，如 \"e5\"）；否则传 selector（CSS / text=登录 / xpath=）。\n" +
-        "适用场景：点击按钮、链接、复选框等。元素不在视口内会自动滚动。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
           ref: {
             type: "string",
-            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
+            description:
+              "click/type/wait_for 定位用：extract_text 返回的元素引用（如 \"e5\"），优先于 selector。",
           },
           selector: {
             type: "string",
-            description: "Playwright 选择器（未传 ref 时必填）。例如 '#submit-btn' / 'text=登录'。",
+            description:
+              "click/type/wait_for/scroll/screenshot/extract_text 的 Playwright 选择器；未传 ref 时 click/type/wait_for 必填。",
           },
           button: {
             type: "string",
             enum: ["left", "right"],
-            description: "鼠标按键，默认 left。",
+            description: "action=click：鼠标按键，默认 left。",
           },
           doubleClick: {
             type: "boolean",
-            description: "是否双击，默认 false。",
+            description: "action=click：是否双击，默认 false。",
           },
-          timeout: {
-            type: "integer",
-            description: "操作超时（毫秒），默认 15000。",
-          },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.type",
-      description:
-        "在指定会话的浏览器页面输入框中输入文本。\n" +
-        "定位二选一：优先传 ref（extract_text 返回的元素引用）；否则传 selector。\n" +
-        "默认替换模式（append=false）：清空后填入。追加模式（append=true）可设 delay 模拟真人打字。\n" +
-        "适用场景：填写表单、搜索框输入、登录凭证输入等。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
-          ref: {
+          text: {
             type: "string",
-            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
+            description: "action=type 必填：要输入的文本内容。",
           },
-          selector: {
-            type: "string",
-            description: "目标输入框的 Playwright 选择器（未传 ref 时必填）。例如 '#search-input' / 'input[name=\"q\"]'。",
-          },
-          text: { type: "string", description: "要输入的文本内容。" },
           append: {
             type: "boolean",
-            description: "是否追加模式（在现有内容后输入）。默认 false（替换整个输入框内容）。",
+            description:
+              "action=type：是否追加模式（在现有内容后输入）。默认 false（替换整个输入框内容）。",
           },
           delay: {
             type: "integer",
-            description: "追加模式下逐字符输入的延迟（毫秒），默认 0。设 50-100 可模拟真人打字。",
+            description: "action=type：追加模式下逐字符输入的延迟（毫秒），默认 0。50-100 可模拟真人打字。",
           },
           clear: {
             type: "boolean",
-            description: "追加模式下是否先清空输入框。默认 false。",
-          },
-        },
-        required: ["sessionId", "text"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.scroll",
-      description:
-        "在指定会话的浏览器页面中滚动。\n" +
-        "支持三种模式：\n" +
-        "  1. 滚动到指定元素（传 selector）\n" +
-        "  2. 相对滚动（传 deltaY，正数向下负数向上）\n" +
-        "  3. 滚动到绝对坐标（传 x/y）\n" +
-        "适用场景：加载更多内容、查看页脚、定位屏幕外的元素。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
-          selector: {
-            type: "string",
-            description: "滚动到指定元素（Playwright 选择器）。传此参数时忽略 x/y/deltaY。",
+            description: "action=type：追加模式下是否先清空输入框。默认 false。",
           },
           deltaY: {
             type: "integer",
-            description: "相对滚动量（像素）。正数向下，负数向上。传此参数时忽略 x/y/selector。",
+            description: "action=scroll：相对滚动量（像素），正数向下负数向上；传此参数时忽略 x/y/selector。",
           },
           x: {
             type: "integer",
-            description: "滚动到的水平坐标（像素）。与 y 配合使用。",
+            description: "action=scroll：滚动到的水平坐标（像素），与 y 配合使用。",
           },
           y: {
             type: "integer",
-            description: "滚动到的垂直坐标（像素）。与 x 配合使用。",
+            description: "action=scroll：滚动到的垂直坐标（像素），与 x 配合使用。",
           },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.screenshot",
-      description:
-        "对指定会话的当前页面截图，返回 JPEG base64。\n" +
-        "⚠️ token 消耗提示：截图 base64 较大（>2000 字符会被截断），优先用 agent_browser.extract_text 获取页面结构。\n" +
-        "仅在复杂页面需要视觉定位时使用截图。\n" +
-        "可截整页（fullPage=true）、指定元素（selector）或当前视口。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
           fullPage: {
             type: "boolean",
-            description: "是否截取整个页面（含滚动区域），默认 false（仅当前视口）。",
-          },
-          selector: {
-            type: "string",
-            description: "截取指定元素（Playwright 选择器）。传此参数时忽略 fullPage。",
+            description: "action=screenshot：是否截取整个页面（含滚动区域），默认 false（仅当前视口）。",
           },
           quality: {
             type: "integer",
-            description: "JPEG 质量（20-90），默认 70。越低文件越小但越模糊。",
-          },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.extract_text",
-      description:
-        "提取指定会话当前页面的文本内容，并附带可交互元素列表。\n" +
-        "这是 Agent 浏览网页的**主要信息获取工具**，比 screenshot 更省 token 且信息更结构化。\n" +
-        "返回：页面 URL、标题、正文文本（截断 4000 字）、可交互元素列表（每行 `ref role \"名称\" [状态]`，如 `e5 button \"领券购买\"`）。\n" +
-        "拿到 ref 后传给 click/type/wait_for 的 ref 参数即可精确定位操作；列表最多 300 行。\n" +
-        "可用 selector 只提取某元素的文本（如 '.article-content'）。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
-          selector: {
-            type: "string",
-            description: "只提取指定元素的文本（Playwright 选择器）。省略则提取整页 body 文本。",
+            description: "action=screenshot：JPEG 质量（20-90），默认 70。",
           },
           includeInteractive: {
             type: "boolean",
-            description: "是否附带可交互元素列表，默认 true。设 false 可减少返回体积。",
-          },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.wait_for",
-      description:
-        "等待指定会话页面中某元素出现并可见。\n" +
-        "定位二选一：优先传 ref（extract_text 返回的元素引用）；否则传 selector。\n" +
-        "适用场景：点击后等待弹窗、提交后等待结果加载。超时返回错误（retryable=true）。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
-          ref: {
-            type: "string",
-            description: "元素引用（extract_text 返回列表中的 ref 值）。优先于 selector。",
-          },
-          selector: {
-            type: "string",
-            description: "等待出现的元素选择器（未传 ref 时必填）。",
+            description: "action=extract_text：是否附带可交互元素列表，默认 true。设 false 可减少返回体积。",
           },
           timeout: {
             type: "integer",
-            description: "等待超时（毫秒），默认 15000，上限 60000。",
+            description:
+              "open/click/wait_for 的操作超时（毫秒）。open 默认 30000；click 默认 15000；wait_for 默认 15000、上限 60000。",
           },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.close",
-      description:
-        "关闭指定浏览器会话，释放服务端资源。\n" +
-        "完成操作后应主动调用此工具关闭会话；空闲 10 分钟的会话也会被自动清理。\n" +
-        "关闭后 sessionId 失效，不可再用。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "要关闭的会话 ID。" },
-        },
-        required: ["sessionId"],
-        additionalProperties: false,
-      },
-    },
-  },
-  {
-    type: "function",
-    function: {
-      name: "agent_browser.handoff",
-      description:
-        "通用人工交接：把当前页面截图和你写的操作指引实时推送到用户聊天流（手机端也会收到图片卡），然后等待用户完成。\n" +
-        "**何时必须用**：任务推进到只有用户本人能做的步骤时——扫码登录、输入短信验证码、支付/付款确认、选择商品规格或选项、点击「同意授权」、人脸/实名核验等。\n" +
-        "用法：先截到该步骤所在的页面状态（必要时先 click/scroll 让页面停在待操作处），再调用本工具，instruction 写清楚「这一步要做什么」。\n" +
-        "推送成功后回执 cardPushed=true：正文只需口头提示用户完成哪一步，**不要**在正文贴图片链接或 URL；用户完成后会回复你，届时继续任务（会话在等待期间不会过期）。\n" +
-        "同一条指引不会重复推送（防刷屏）；普通报错/加载失败不是交接理由，不要用本工具。\n" +
-        "注：撞到登录墙/验证码时 open/click 回执会自动带 humanRequired 并自动推图，那种情况不必再手动调用本工具。",
-      parameters: {
-        type: "object",
-        properties: {
-          sessionId: { type: "string", description: "agent_browser.open 返回的会话 ID。" },
           instruction: {
             type: "string",
-            description: "告诉用户这一步具体要做什么（必填）。例如：「请用微信扫描二维码登录，完成后回复我」。",
+            description:
+              "action=handoff 必填：告诉用户这一步具体要做什么，例如「请用微信扫描二维码登录，完成后回复我」。",
           },
           title: {
             type: "string",
-            description: "卡片标题（可选）。缺省为「需要你操作」；例如「扫码支付」「选择房型」。",
+            description: "action=handoff：卡片标题（可选），缺省「需要你操作」，例如「扫码支付」「选择房型」。",
           },
         },
-        required: ["sessionId", "instruction"],
+        required: ["action"],
         additionalProperties: false,
       },
     },

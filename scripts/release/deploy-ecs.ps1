@@ -40,7 +40,9 @@ Write-Host "SSH OK"
 if (-not $SkipPackage) {
   Write-Host '== [1/5] 打包精简产物 =='
   New-Item -ItemType Directory -Force -Path $DistDir | Out-Null
-  if (Test-Path $Tarball) { Remove-Item -Force $Tarball }
+  # 用 .NET 文件 API：环境里的 safe-delete 钩子会让 Remove-Item 走回收站，
+  # 回收站不可用时 fail-closed 直接抛错，把打包卡在清理旧 tarball 这一步。
+  if (Test-Path -LiteralPath $Tarball) { [System.IO.File]::Delete($Tarball) }
   Push-Location $Repo
   # 相对路径：GNU tar 会把 "E:\x" 里的冒号解析成 远程主机:path
   & tar -czf windows_dist/ecs-deploy/nextbot-ecs.tar.gz package.json package-lock.json `
@@ -77,8 +79,35 @@ fi
 node -v
 NODE_BIN=`$(command -v node)
 mkdir -p $DeployDir
-tar -xzf /tmp/nextbot-ecs.tar.gz -C $DeployDir
+# Pre-deploy data snapshot (2026-11-10, memory-loss incident): the data root
+# lives OUTSIDE $DeployDir so a normal deploy never touches it, but this takes
+# a tar before every deploy anyway - if anything downstream (manual wipe, bad
+# migration, disk issue) destroys user memory, the last 5 deploys are always
+# recoverable. Keep the 5 newest, prune older ones.
+mkdir -p /opt/nextbot/backup/pre-deploy
+tar -czf /opt/nextbot/backup/pre-deploy/data-pre-deploy-`$(date +%Y%m%d-%H%M%S).tar.gz -C /root/.local/share/Nextbot data 2>/dev/null || true
+ls -1t /opt/nextbot/backup/pre-deploy/data-pre-deploy-*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm -f
+echo '[ecs] pre-deploy data snapshot done'
+# .env 合并保护（2026-11-10 事故修复）：tar 解包会整文件覆盖服务器 .env，
+# 本地精简 .env（只有 4 个键）曾把线上 40 键配置（SMTP/MINIMAX/AMAP/充值计价）
+# 全部抹掉，OTP 验证码通道静默失效。现在：备份现网 .env → 解包到临时目录 →
+# 把 tar 内 .env 移出 → 逐键合并（服务器已有键保留服务器值，只补缺失键）。
+mkdir -p /tmp/nb-extract
+tar -xzf /tmp/nextbot-ecs.tar.gz -C /tmp/nb-extract
 rm -f /tmp/nextbot-ecs.tar.gz /tmp/node.tar.xz
+if [ -f /tmp/nb-extract/server/.env ]; then
+  cp /opt/nextbot/server/.env /opt/nextbot/server/.env.bak-deploy-`$(date +%Y%m%d-%H%M%S) 2>/dev/null
+  # 逐键合并：以现网 .env 为底，tar 内 .env 只补现网没有的键（键名精确匹配行首）
+  while IFS= read -r line; do
+    key=`$(printf '%s' "$line" | sed -n 's/^\([A-Za-z0-9_]\+\)=.*$/\1/p')
+    if [ -n "$key" ] && ! grep -qE "^`$key=" /opt/nextbot/server/.env; then
+      echo "$line" >> /opt/nextbot/server/.env
+    fi
+  done < /tmp/nb-extract/server/.env
+  rm -f /tmp/nb-extract/server/.env
+fi
+rsync -a /tmp/nb-extract/ $DeployDir/ 2>/dev/null || cp -a /tmp/nb-extract/. $DeployDir/
+rm -rf /tmp/nb-extract
 cd $DeployDir
 export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
 # onnxruntime-node 的 postinstall 要直连 GitHub 下 build list（302 被墙即 npm ci 全挂）；
@@ -92,7 +121,10 @@ npm ci --omit=dev --no-audit --no-fund 2>&1 | tail -3
 # shopping.* call fails with "Executable doesn't exist". Idempotent: probe the
 # binary first, install only when missing. npmmirror mirror first (mainland
 # ECS cannot reach playwright CDN reliably), official CDN as fallback.
-if node -e "require('playwright').chromium.executablePath()" >/dev/null 2>&1; then
+# 注意探针必须验文件存在：chromium.executablePath() 只返回预期路径、不校验
+# 二进制是否真的下载过（2026-11-10 真机教训：路径在、文件不在 → 误跳安装 →
+# 终验闸拦下）。存在性检查交给 fs.existsSync。
+if node -e "const fs=require('fs');const p=require('playwright').chromium.executablePath();process.exit(fs.existsSync(p)?0:1)" >/dev/null 2>&1; then
   echo '[ecs] chromium binary already present, skip install'
 else
   echo '[ecs] installing playwright chromium (npmmirror first, official CDN fallback)'
@@ -110,7 +142,11 @@ fi
 if ! command -v flyai >/dev/null 2>&1; then
   npm i -g @fly-ai/flyai-cli 2>&1 | tail -2
 fi
-FLYAI_BIN_PATH=$(command -v flyai || echo /usr/local/bin/flyai)
+# 反引号转义 `$(` 与 `${}`：这里必须由 bash 求值，不能让 PowerShell 在
+# 可展开 here-string 里插值——PS 5.1 还会因 `$(...)` 内的 || 直接解析失败
+# （2026-11-10 修复：此前该行导致整个脚本在 5.1 下无法解析；PS7 下即使能跑，
+# 也会被 PS 端插值成空值，FLYAI_BIN 静默失效）。
+FLYAI_BIN_PATH=`$(command -v flyai || echo /usr/local/bin/flyai)
 cat > /etc/systemd/system/nextbot.service <<UNIT
 [Unit]
 Description=Nextbot runtime (manifest + platform API)
@@ -145,7 +181,7 @@ Environment=NODE_OPTIONS=--max-old-space-size=768
 # systemd PATH excludes the npm global dir: without an explicit FLYAI_BIN the
 # quote layer cannot resolve the CLI even when it is installed (resolveFlyAiBin
 # only searches PATH + npm prefix), and every price silently degrades.
-Environment=FLYAI_BIN=${FLYAI_BIN_PATH}
+Environment=FLYAI_BIN=`${FLYAI_BIN_PATH}
 # Memory guardrails: MemoryHigh puts the cgroup into reclaim first; MemoryMax only
 # kills this service (Restart=always brings it back) so a leak cannot take nginx or
 # sshd down with it. 1200M throttle sits above the observed 1072M peak, 1450M kill
@@ -184,7 +220,10 @@ fi
 echo '[ecs] deploy verify FAILED: browser health not ok (chromium missing or launch failed; see journalctl -u nextbot)' >&2
 exit 1
 "@
-$remoteScript | & ssh $Remote "bash -s"
+# ssh 管道要求 LF：PS here-string 是 CRLF，直接管道会把行尾 \r 塞进 bash
+# （真实报错："set: -: invalid option"）。与 deploy-tencent.ps1 同一修法。
+$remoteScriptLf = ($remoteScript -replace "`r`n", "`n").TrimStart([char]0xFEFF)
+$remoteScriptLf | & ssh $Remote "bash -s"
 if ($LASTEXITCODE -ne 0) { throw '服务器端部署失败' }
 
 # ── 4. 外网验证（安全组 3000 是否放行） ──

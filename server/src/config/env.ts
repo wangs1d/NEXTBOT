@@ -224,3 +224,44 @@ export function isAgentWorldSocialEnabled(): boolean {
 export function isAccessAuthRequired(): boolean {
   return envFlagEnabled("ACCESS_AUTH_REQUIRED");
 }
+
+/**
+ * WS_TRUST_PAYLOAD_ACCOUNT_IDENTITY：允许 `session.init` 在没有 token 时
+ * 信任客户端自报的**账号形态**身份（归一化邮箱）。
+ *
+ * 默认**关闭**：账号身份只能由服务端签发的 token 证明（认证即发证）。开着
+ * 等于「谁都能报别人的邮箱」，会把记忆/钱包/世界串到别人头上——2026-11-11
+ * 真机「卡在思考中」正是这条兜底路径造成的。只在迁移期、明确知道自己在
+ * 干什么时临时打开。
+ */
+export function trustsPayloadAccountIdentity(): boolean {
+  return envFlagEnabled("WS_TRUST_PAYLOAD_ACCOUNT_IDENTITY");
+}
+
+/**
+ * 设备 token 有效期（天）。默认 90。
+ *
+ * 之前 token 永不过期：一旦令牌泄漏（截图、日志、备份）就永久有效，只能靠
+ * 「同设备重新登录」把它挤掉——用户永远不知道自己被冒用。加上 TTL 后，泄漏
+ * 窗口有上限，且客户端可以在临期前静默续期，用户无感。
+ *
+ * 设 0 可关闭过期（仅排障用）。
+ */
+export function accessTokenTtlMs(): number {
+  const days = Number(process.env.ACCESS_TOKEN_TTL_DAYS ?? "90");
+  if (!Number.isFinite(days) || days <= 0) return 0;
+  return Math.round(days * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * 过期 token 的续期宽限期（天）。默认 30。
+ *
+ * 用户出差/不打开 App 超过 TTL 后，不该被强制重登（体验代价太大）。宽限期内
+ * 仍可凭旧 token 换新，超过则必须重新登录。宽限期不是「有效期」，只是
+ * 「还认得出这台设备」的窗口，换到的新 token 仍是全新的 TTL。
+ */
+export function accessTokenRefreshGraceMs(): number {
+  const days = Number(process.env.ACCESS_TOKEN_REFRESH_GRACE_DAYS ?? "30");
+  if (!Number.isFinite(days) || days < 0) return 30 * 24 * 60 * 60 * 1000;
+  return Math.round(days * 24 * 60 * 60 * 1000);
+}

@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 import "package:package_info_plus/package_info_plus.dart";
 
 import "../config/api_config.dart";
+import "./nb_http.dart";
 
 /// 服务端 `GET /api/client/manifest` 下发的客户端版本清单。
 ///
@@ -58,7 +59,7 @@ class ClientUpdateCheckResult {
 /// 可用」时触发（url 为空时没有升级出口，一律按可继续使用处理）。
 /// 复用持久连接：首次 `http.get` 顶层用法每次新建客户端，Windows debug 下
 /// 首调含 ~180ms 初始化开销；保活后手动检查稳定在 ~10ms。
-final http.Client _updateHttpClient = http.Client();
+final http.Client _updateHttpClient = NbClient();
 
 /// 会话内结果缓存：检查成功过的结果 5 分钟内直接复用，手动「检查更新」
 /// 不再等一次网络往返——没有新版本时通知必须立马弹出。缓存随进程存活

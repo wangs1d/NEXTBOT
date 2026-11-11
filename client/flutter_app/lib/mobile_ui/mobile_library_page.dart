@@ -10,7 +10,9 @@ import "../features/chat/image_preview_panel.dart";
 import "../features/chat/media_disk_cache.dart";
 import "../features/chat/travel_plan_mobile_page.dart";
 import "../features/chat/travel_plan_models.dart";
+import "mobile_page_cache.dart";
 import "mobile_theme.dart";
+import "../core/services/nb_http.dart";
 
 /// 手机端「资料库」页。
 ///
@@ -60,19 +62,49 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
   }
 
   /// 主壳切到本 tab 时触发重拉。
+  /// 已有数据时静默后台刷新（秒进不转圈），无数据才走完整加载。
   void refresh() {
-    if (!_loading) unawaited(_load());
+    if (!_loading) unawaited(_load(silent: _groups.isNotEmpty));
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  /// 磁盘缓存 key：上次成功响应体原样落盘（stale-while-revalidate 用）。
+  static String get _cacheKey =>
+      "library_items_${ApiConfig.effectiveActorId}";
+
+  /// [silent]=true 时已有数据保持展示，成功换数据、失败不闪错误页。
+  Future<void> _load({bool silent = false}) async {
+    // 无数据时的完整加载（首次进入 / 错误重试）：
+    // 初次进入先读磁盘缓存，命中立即上屏（秒进），网络后台静默刷新。
+    if (!silent && _groups.isEmpty) {
+      if (_error == null) {
+        final Map<String, dynamic>? cached =
+            await MobilePageCache.instance.read(_cacheKey);
+        if (!mounted) return;
+        if (cached != null) {
+          setState(() {
+            _groups = <_LibGroup>[
+              for (final Map<String, dynamic> g in _asList(cached["groups"]))
+                _LibGroup.fromJson(g),
+            ];
+            _loading = false;
+          });
+          unawaited(_fetch(silent: true));
+          return;
+        }
+      }
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    await _fetch(silent: silent);
+  }
+
+  Future<void> _fetch({required bool silent}) async {
     try {
       final Uri uri = Uri.parse(
           "${ApiConfig.httpBase}/api/library/items?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}");
-      final http.Response res = await (widget.client ?? http.Client())
+      final http.Response res = await (widget.client ?? NbClient())
           .get(uri)
           .timeout(const Duration(seconds: 20));
       if (res.statusCode != 200) {
@@ -87,13 +119,17 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         for (final Map<String, dynamic> g in _asList(body["groups"]))
           _LibGroup.fromJson(g),
       ];
+      MobilePageCache.instance.write(_cacheKey, body);
       if (!mounted) return;
       setState(() {
         _groups = groups;
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted) return;
+      // 静默刷新失败：已有数据保持展示（不闪错误页）；无数据才落到错误态。
+      if (silent && _groups.isNotEmpty) return;
       setState(() {
         _error = e.toString();
         _loading = false;
@@ -117,7 +153,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
         "${ApiConfig.httpBase}/travel/plans/${Uri.encodeComponent(item.planId)}"
         "?sessionId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}",
       );
-      final http.Response res = await (widget.client ?? http.Client())
+      final http.Response res = await (widget.client ?? NbClient())
           .get(uri)
           .timeout(const Duration(seconds: 20));
       if (res.statusCode != 200) {
@@ -193,7 +229,9 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
           IconButton(
             tooltip: "刷新",
             icon: const Icon(Icons.refresh, size: 22),
-            onPressed: _loading ? null : () => unawaited(_load()),
+            onPressed: _loading
+                ? null
+                : () => unawaited(_load(silent: _groups.isNotEmpty)),
           ),
         ],
       ),
@@ -202,7 +240,7 @@ class MobileLibraryPageState extends State<MobileLibraryPage> {
           : _error != null
               ? _buildError(p)
               : RefreshIndicator(
-                  onRefresh: _load,
+                  onRefresh: () => _load(silent: true),
                   child: _buildBody(p),
                 ),
     );

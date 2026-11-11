@@ -5,6 +5,7 @@ import "package:http/http.dart" as http;
 import "../config/api_config.dart";
 import "account_session_store.dart";
 import "install_identity.dart";
+import "./nb_http.dart";
 
 /// 控制面账号自注册。
 ///
@@ -25,7 +26,7 @@ class ControlPlaneAccount {
 
   /// 确保当前登录身份在控制面有账号行。返回是否就绪（新注册或已存在）。
   static Future<bool> ensureRegistered({http.Client? client}) async {
-    final http.Client c = client ?? http.Client();
+    final http.Client c = client ?? NbClient();
     try {
       // 自带 load（幂等）：不依赖调用方先初始化账号会话，避免启动竞态
       await AccountSessionStore.instance.load();

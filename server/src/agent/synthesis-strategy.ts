@@ -142,7 +142,7 @@ export function isBookkeepingOnlyToolSet(toolNames: readonly string[]): boolean 
  * 提醒/日程创建类，本轮任一成功返回即按「办妥确认轮」收口）。此处不复用该
  * 导出——services→agent 的反向依赖不进策略层，两侧各自维护并以注释互指。
  */
-const CALENDAR_CONFIRM_TOOL_NAMES = new Set(["calendar.create"]);
+const CALENDAR_CONFIRM_TOOL_NAMES = new Set(["calendar"]);
 
 /**
  * 过程话（工具执行前的过渡话）许可：

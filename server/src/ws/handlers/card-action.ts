@@ -3,6 +3,7 @@ import type { WebSocket } from "ws";
 import { ServerEventType } from "../../protocol.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 import type { ShoppingOrderService } from "../../services/shopping-order-service.js";
+import type { PaymentService } from "../../services/payment-service.js";
 import { BROWSER_SESSION_SITES } from "../../services/browser-session-sites.js";
 import { buildToolCard } from "../../services/tool-card-registry.js";
 
@@ -31,6 +32,8 @@ export type CardActionContext = {
 
 export type CardActionDeps = {
   shoppingOrderService?: ShoppingOrderService | null;
+  /** 支付服务（可选）：payment.pay.check 卡内确认用，未装配时如实报错 */
+  paymentService?: PaymentService | null;
 };
 
 type CardActionPayload = {
@@ -107,16 +110,25 @@ export async function handleCardActionEvent(
   };
 
   const service = deps.shoppingOrderService;
-  const shopping = payload.actionId.startsWith("shopping.");
-  if (!shopping) {
+  const paymentService = deps.paymentService;
+  const isShopping = payload.actionId.startsWith("shopping.");
+  const isPayment = payload.actionId.startsWith("payment.");
+  if (!isShopping && !isPayment) {
     // 未知族：明确回错误，别让卡片一直转圈
     send({ ok: false, error: `不支持的动作：${payload.actionId}` });
     return true;
   }
-  if (!service) {
+  if (isShopping && !service) {
     send({ ok: false, error: "购物服务未装配" });
     return true;
   }
+  if (isPayment && !paymentService) {
+    send({ ok: false, error: "支付服务未装配" });
+    return true;
+  }
+  // 收窄：shopping 族动作走到这里时 service 必非空（上方闸已回）；
+  // payment 族不经过它，别名仅 shopping 分支消费。
+  const shoppingService = service as ShoppingOrderService;
 
   const toolContext: ToolContext = {
     sessionId: ctx.boundActorId,
@@ -140,7 +152,7 @@ export async function handleCardActionEvent(
    */
   const sendLoginCard = async (nextAction: string, force = false): Promise<boolean> => {
     const targetUrl = item || `https://www.${platform}.com`;
-    const handoff = await service.beginLoginHandoff(toolContext, platform, targetUrl, { force });
+    const handoff = await shoppingService.beginLoginHandoff(toolContext, platform, targetUrl, { force });
     if (!handoff.ok) {
       send({ ok: false, error: handoff.error });
       return true;
@@ -194,10 +206,10 @@ export async function handleCardActionEvent(
         // 下单必须登录（2026-11-06 定稿语义）：没有授权 Cookie 就地出码，
         // 不再开商品页预检——苏宁这类商品页匿名能看、结算页才拦的平台，
         // 预检只会误判「已登录」然后在结算那一步炸掉。有 Cookie 直接去结算。
-        if (!(await service.hasLoginCookies(toolContext, platform))) {
+        if (!(await shoppingService.hasLoginCookies(toolContext, platform))) {
           if (await sendLoginCard("shopping.place.start", true)) return true;
         }
-        const result = await service.placeOrder(
+        const result = await shoppingService.placeOrder(
           toolContext,
           platform,
           item,
@@ -230,7 +242,7 @@ export async function handleCardActionEvent(
           send({ ok: false, error: "缺少平台或商品链接" });
           return true;
         }
-        const specResult = await service.fetchProductSpecs(toolContext, platform, item);
+        const specResult = await shoppingService.fetchProductSpecs(toolContext, platform, item);
         const rawSpecs = (specResult as { specs?: unknown }).specs;
         const specs = Array.isArray(rawSpecs) ? (rawSpecs as Array<Record<string, unknown>>) : [];
         if (specResult.ok && specs.length > 0) {
@@ -279,7 +291,7 @@ export async function handleCardActionEvent(
           send({ ok: false, error: "登录会话已失效，重新点一次商品" });
           return true;
         }
-        const checked = await service.checkLoginHandoff(toolContext, token);
+        const checked = await shoppingService.checkLoginHandoff(toolContext, token);
         if (!checked.ok) {
           send({ ok: false, error: checked.error, stillWaiting: checked.stillWaiting });
           return true;
@@ -328,7 +340,7 @@ export async function handleCardActionEvent(
           send({ ok: false, error: "登录会话已失效，重新点一次商品" });
           return true;
         }
-        const settled = await service.settleLoginConsent(toolContext, token, data.save === true);
+        const settled = await shoppingService.settleLoginConsent(toolContext, token, data.save === true);
         if (!settled.ok) {
           send({ ok: false, error: settled.error });
           return true;
@@ -355,7 +367,7 @@ export async function handleCardActionEvent(
           send({ ok: false, error: "确认凭据已失效，请重新选择商品" });
           return true;
         }
-        const result = await service.placeOrder(toolContext, platform, item, quantity, true, token);
+        const result = await shoppingService.placeOrder(toolContext, platform, item, quantity, true, token);
         const card = buildToolCard("shopping.order.place", result as unknown as Record<string, unknown>);
         if (!card) {
           // 不再兜底写死警示文案（2026-11-06 用户定稿：服务端不编话，由真实错误如实透出）
@@ -373,7 +385,7 @@ export async function handleCardActionEvent(
           send({ ok: false, error: "缺少订单号" });
           return true;
         }
-        const result = await service.checkPayment(toolContext, orderId);
+        const result = await shoppingService.checkPayment(toolContext, orderId);
         const card = buildToolCard(
           "shopping.order.status",
           result as unknown as Record<string, unknown>,
@@ -387,12 +399,74 @@ export async function handleCardActionEvent(
         return true;
       }
 
+      // 收款单卡内确认（2026-11-10）：payment.create_order 卡的「我已完成支付」。
+      // 直接查支付网关真实状态：SUCCESS → 卡面翻成已支付；未付 → 卡面原样 +
+      // 提示还没到账，绝不说「已支付」（实数只认真值，同一契约）。
+      case "payment.pay.check": {
+        const payment = paymentService;
+        const outTradeNo = str(data.outTradeNo);
+        const provider = str(data.provider) === "alipay" ? "alipay" : "wechat";
+        if (!payment) {
+          send({ ok: false, error: "支付服务未装配" });
+          return true;
+        }
+        if (!outTradeNo) {
+          send({ ok: false, error: "缺少订单号" });
+          return true;
+        }
+        const result = await payment.queryOrder(outTradeNo, provider, ctx.boundActorId);
+        if (!result.ok) {
+          send({ ok: false, error: result.error || "订单查询失败" });
+          return true;
+        }
+        const paid =
+          result.tradeState === "SUCCESS" || result.tradeState === "TRADE_SUCCESS";
+        const providerName = provider === "alipay" ? "支付宝" : "微信支付";
+        const description =
+          (result as unknown as { description?: string }).description || outTradeNo;
+        send({
+          ok: true,
+          card: {
+            title: paid ? "✅ 支付成功" : "💳 待支付",
+            items: [
+              { type: "check", text: `订单：${description}` },
+              {
+                type: result.amount != null ? "num" : "check",
+                text: `金额：${result.amount != null ? `¥${result.amount}` : "见收银台"} · ${providerName}`,
+              },
+            ],
+            footer: paid
+              ? `已确认到账（${result.tradeStateDesc || "SUCCESS"}）${result.payTime ? ` · ${result.payTime}` : ""}`
+              : "还没查到到账记录——扫码支付后几秒内到账，稍等片刻再点一次确认",
+            cardType: "shopping_pay",
+            extra: {
+              shopping: {
+                stage: paid ? "shipment" : "pay",
+                title: paid ? `${providerName} · 支付成功` : `${providerName} · 待支付`,
+                ...(result.amount != null ? { amount: `${result.amount}` } : {}),
+                amountLabel: "实付金额",
+                orderNo: outTradeNo,
+                platformLabel: providerName,
+                note: paid
+                  ? "这笔收款已确认，无需再操作"
+                  : "还没查到到账记录 · 扫码支付后稍等几秒再点确认",
+              },
+            },
+          },
+        });
+        return true;
+      }
+
       case "shopping.track": {
         if (!platform) {
           send({ ok: false, error: "缺少平台" });
           return true;
         }
-        const result = await service.trackOrder(toolContext, platform, str(data.orderId) || undefined);
+        const result = await shoppingService.trackOrder(
+          toolContext,
+          platform,
+          str(data.orderId) || undefined,
+        );
         const card = buildToolCard(
           "shopping.order.status",
           result as unknown as Record<string, unknown>,

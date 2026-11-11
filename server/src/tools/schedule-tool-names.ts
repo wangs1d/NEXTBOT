@@ -1,11 +1,7 @@
-/** 会写入 ScheduleTaskService 的日程/提醒工具（注册名，带点号）。 */
-export const SCHEDULE_CREATE_TOOL_NAMES = new Set(["calendar.create"]);
+/** 会写入 ScheduleTaskService 的日程/提醒工具（注册名）。2026-11-11 复合为单入口 `calendar`。 */
+export const SCHEDULE_CREATE_TOOL_NAMES = new Set(["calendar"]);
 
-export const SCHEDULE_MUTATION_TOOL_NAMES = new Set([
-  ...SCHEDULE_CREATE_TOOL_NAMES,
-  "calendar.update_task",
-  "calendar.delete_task",
-]);
+export const SCHEDULE_MUTATION_TOOL_NAMES = new Set(["calendar"]);
 
 export function isScheduleCreateToolName(toolName: string): boolean {
   const n = toolName.trim();

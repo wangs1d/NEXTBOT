@@ -43,9 +43,6 @@ import OpenAI from "openai";
 const corpus: any[] = [...getBuiltinAgentChatTools(), TASK_DISPATCH_TOOL_DEFINITION];
 
 const registry = new ToolRegistry() as any;
-registry.register("clock.get_current_time", async () => ({
-  iso: new Date().toISOString(), timezone: "Asia/Shanghai",
-}));
 registry.register("search_web", async (input: any) => ({
   results: [
     { title: "结果 1", snippet: `「${input?.query ?? ""}」的抓取摘要（live 台架 fixture，非真实互联网数据）。`, url: "https://example.com/1" },
@@ -141,7 +138,6 @@ const SCENARIOS: Array<{
   /** 期望被调用的工具集合：任一命中即算该场景的工具调用成功（都是合理的工具选择） */
   expectAny: string[]; caps?: string[]; turnIntent?: string;
 }> = [
-  { name: "core直调-时钟", lane: "chat", userText: "现在几点了？", expectAny: ["clock.get_current_time"], turnIntent: undefined },
   { name: "core直调-提醒", lane: "chat", userText: "明天早上九点提醒我开会", expectAny: ["calendar.create"], turnIntent: "action_write" },
   { name: "预召回+请求卡-智能家居", lane: "chat", userText: "把客厅空调调到26度", expectAny: ["smart_home.control_device"], turnIntent: "action_write" },
   { name: "task-天气/搜索", lane: "task", userText: "上海今天会下雨吗", expectAny: ["search_web", "weather.get_local"], caps: ["search"] },

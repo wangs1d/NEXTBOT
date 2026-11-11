@@ -1,5 +1,10 @@
 /**
- * agent_browser.* 工具意图元数据 + 关键词分类映射。
+ * agent_browser 工具意图元数据 + 关键词分类映射。
+ *
+ * 工具已合并为单个复合函数 `agent_browser`（action 分流 open/click/type/scroll/
+ * extract_text/screenshot/wait_for/close/handoff），因此这里只需一条规则：
+ * 把 9 个动作的别名/例句合并到同一份元数据，任意动作的口语表述都能召回到这个函数，
+ * 具体动作由模型填 `action` 决定。
  *
  * `AGENT_BROWSER_INTENT_RULES` 与 `intent-metadata.ts` 中 `DEFAULT_TOOL_INTENT_RULES`
  * 同结构（`ToolIntentRule`），通过 `setExtraIntentRules` 在启动时合并到全局规则表，
@@ -18,9 +23,10 @@ import type { ToolIntentRule } from "../../tool-search/intent-metadata.js";
 
 export const AGENT_BROWSER_INTENT_RULES: ToolIntentRule[] = [
   {
-    prefix: "agent_browser.",
+    exact: "agent_browser",
     metadata: {
       aliases: [
+        // 族级：浏览器 / 网页操作
         "browser", "web browser", "open page", "open url", "navigate to",
         "click button", "fill form", "type in", "scroll page", "web automation",
         "virtual browser", "agent browser", "web page operation",
@@ -28,6 +34,18 @@ export const AGENT_BROWSER_INTENT_RULES: ToolIntentRule[] = [
         "网页操作", "帮我操作", "在网页上", "填表单", "填表格",
         "点按钮", "点击按钮", "输入框", "网页上点", "滚动页面",
         "虚拟浏览器", "帮我浏览", "去网页",
+        // 动作级：open / click / type / scroll
+        "visit website", "访问网页", "去这个网址", "点链接", "按下", "点一下",
+        "输入文本", "填入", "打字", "往下拉", "往上拉", "滚到", "翻页",
+        // 动作级：extract_text / screenshot / wait_for / close
+        "extract text", "read page", "read content", "page text", "get content",
+        "提取文本", "读取页面", "获取内容", "页面内容", "读取网页",
+        "screenshot", "capture", "snapshot", "截图", "截屏", "截个图", "抓图",
+        "wait for selector", "等待元素", "等元素出现", "等加载",
+        "close browser", "关闭浏览器", "关闭会话", "关掉网页", "结束浏览",
+        // 动作级：handoff（人工接管）
+        "扫码登录", "扫码支付", "验证码", "登录验证", "人工接管", "需要我操作",
+        "handoff", "take over",
       ],
       negativeAliases: [
         "search web", "web search", "fetch page", "fetch url", "read price",
@@ -43,158 +61,16 @@ export const AGENT_BROWSER_INTENT_RULES: ToolIntentRule[] = [
         "帮我操作一下这个网页",
         "open this url and click the submit button",
         "帮我在浏览器里查一下这个页面的内容",
+        "帮我截个当前页面的图",
+        "帮我在搜索框里输入 iPhone 15 然后点搜索",
+        "往下滚动加载更多",
+        "扫码登录后告诉我要点哪里",
       ],
       negativeExamples: [
         "帮我搜一下今天的新闻",
         "在淘宝下单这个商品",
         "帮我操控电脑打开微信",
         "读一下这个商品的价格",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.open",
-    metadata: {
-      aliases: [
-        "open url", "open page", "navigate to", "go to url", "visit website",
-        "打开网址", "打开网页", "打开链接", "去网站", "访问网页", "去这个网址",
-      ],
-      examples: [
-        "帮我打开 https://example.com",
-        "去这个链接看看",
-        "访问这个网页",
-        "open this url for me",
-      ],
-      negativeExamples: [
-        "帮我搜一下这个页面内容",
-        "截个当前页面的图",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.click",
-    metadata: {
-      aliases: [
-        "click", "click button", "click link", "press button", "tap",
-        "点击", "点按钮", "点链接", "按下", "点一下",
-      ],
-      examples: [
-        "帮我点一下页面上的登录按钮",
-        "点击提交按钮",
-        "click the login button",
-      ],
-      negativeExamples: [
-        "帮我输入用户名",
-        "截个图看看",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.type",
-    metadata: {
-      aliases: [
-        "type", "input", "fill", "enter text", "write", "type in",
-        "输入", "填写", "填入", "打字", "输入文本", "填表单",
-      ],
-      examples: [
-        "帮我在搜索框里输入 iPhone 15",
-        "填写用户名和密码",
-        "type hello in the input box",
-      ],
-      negativeExamples: [
-        "帮我点一下按钮",
-        "等一下页面加载",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.scroll",
-    metadata: {
-      aliases: [
-        "scroll", "scroll down", "scroll up", "scroll to", "page down",
-        "滚动", "往下拉", "往上拉", "滚到", "翻页", "向下滚",
-      ],
-      examples: [
-        "帮我往下滚动一下页面",
-        "滚动到页脚",
-        "scroll down to see more",
-      ],
-      negativeExamples: [
-        "帮我点一下按钮",
-        "截个图",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.extract_text",
-    metadata: {
-      aliases: [
-        "extract text", "get text", "read page", "read content", "page text",
-        "get content", "inspect page",
-        "提取文本", "读取页面", "获取内容", "页面内容", "看看页面有什么", "读取网页",
-      ],
-      examples: [
-        "帮我看看这个页面有什么内容",
-        "提取页面文本",
-        "read the page content for me",
-      ],
-      negativeExamples: [
-        "帮我截个图",
-        "帮我点按钮",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.screenshot",
-    metadata: {
-      aliases: [
-        "screenshot", "capture", "snapshot", "take picture",
-        "截图", "截屏", "截个图", "页面截图", "抓图",
-      ],
-      examples: [
-        "帮我截个当前页面的图",
-        "截一下屏",
-        "take a screenshot of the page",
-      ],
-      negativeExamples: [
-        "帮我提取页面文本",
-        "帮我点按钮",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.wait_for",
-    metadata: {
-      aliases: [
-        "wait for", "wait until", "wait element", "wait for selector",
-        "等待", "等一下", "等元素出现", "等加载",
-      ],
-      examples: [
-        "等一下页面加载完成",
-        "等待弹窗出现",
-        "wait for the result to appear",
-      ],
-      negativeExamples: [
-        "帮我点按钮",
-        "帮我截图",
-      ],
-    },
-  },
-  {
-    exact: "agent_browser.close",
-    metadata: {
-      aliases: [
-        "close browser", "close session", "close page", "finish browsing",
-        "关闭浏览器", "关闭会话", "关掉网页", "结束浏览",
-      ],
-      examples: [
-        "关闭浏览器",
-        "用完了关掉",
-        "close the browser session",
-      ],
-      negativeExamples: [
-        "帮我打开新网页",
-        "帮我截图",
       ],
     },
   },

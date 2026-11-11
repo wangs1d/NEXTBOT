@@ -680,7 +680,8 @@ test("集成: 召回命中 downranked 节点时触发再唤醒反弹（deletionS
   try {
     await humanLike.load();
 
-    // 低价值一次性事实 → sleep cycle 后进入 downranked
+    // 低价值一次性事实：sleep cycle 不再自动降级（accessCount=0 不判无用），
+    // 这里显式置为 downranked 以验证「召回命中褪色节点 → 再唤醒」链路。
     await humanLike.ingest("user-int", "The loading spinner appeared briefly on this page.", "chat:user", {
       metadata: { salience: 0.1, userImportance: 0.1 },
     });
@@ -689,7 +690,8 @@ test("集成: 召回命中 downranked 节点时触发再唤醒反弹（deletionS
     const nodeIds = Object.keys(store.nodes);
     assert.ok(nodeIds.length >= 1, "应已产生记忆节点");
     const nodeId = nodeIds[0];
-    assert.equal(store.nodes[nodeId].deletionStage, "downranked");
+    assert.equal(store.nodes[nodeId].deletionStage, "active", "新记忆应保留观察期");
+    humanLike.updateDeletionStage("user-int", nodeId, "downranked");
 
     // 装配 MemoryCortex + 遗忘控制器（真实接线）
     const controller = new MemoryForgettingController();

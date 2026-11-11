@@ -1,4 +1,4 @@
-﻿/**
+/**
  * calendar.batch_create 批量创建工具：
  *   多条一次创建 / 坏条目不拖垮整批 / 冲突跳过回传详情 / 幂等（同批重发同 taskId）。
  */
@@ -35,9 +35,9 @@ async function withRegistry<T>(fn: (registry: ToolRegistry, tasks: ScheduleTaskS
 test("batch_create：多条一次创建，坏条目单独报错不拖垮整批", async () => {
   await withRegistry(async (registry, tasks) => {
     const result = await registry.execute(
-      "calendar.batch_create",
-      {
-        timezone: "Asia/Shanghai",
+      "calendar", {
+      action: "batch_create",
+      timezone: "Asia/Shanghai",
         items: [
           { description: "高数 课上", runAt: "2099-03-02T01:00:00Z", durationMinutes: 90 },
           { description: "英语 课上", runAt: "2099-03-02T04:00:00Z" },
@@ -63,13 +63,14 @@ test("batch_create：冲突条目跳过并回传冲突详情（不强制）", as
   await withRegistry(async (registry) => {
     // 先占住 10:00-11:30
     await registry.execute(
-      "calendar.create",
-      { description: "项目评审", runAt: "2099-03-05T10:00:00", timezone: "Asia/Shanghai", durationMinutes: 90 },
+      "calendar",
+      { action: "create", description: "项目评审", runAt: "2099-03-05T10:00:00", timezone: "Asia/Shanghai", durationMinutes: 90 },
       ctx,
     );
     const result = await registry.execute(
-      "calendar.batch_create",
+      "calendar",
       {
+        action: "batch_create",
         timezone: "Asia/Shanghai",
         items: [
           { description: "撞车会议", runAt: "2099-03-05T10:30:00", durationMinutes: 60 },
@@ -91,8 +92,8 @@ test("batch_create：同批重发幂等（同 taskId，不重复建）", async (
       { description: "每周组会", runAt: "2099-03-09T02:00:00Z", recurrence: "weekly" },
       { description: "周报截止", runAt: "2099-03-13T10:00:00Z" },
     ];
-    const first = await registry.execute("calendar.batch_create", { items }, ctx);
-    const second = await registry.execute("calendar.batch_create", { items }, ctx);
+    const first = await registry.execute("calendar", { action: "batch_create", items }, ctx);
+    const second = await registry.execute("calendar", { action: "batch_create", items }, ctx);
     const ids1 = (first.result.results as Array<{ taskId?: string }>).map((r) => r.taskId);
     const ids2 = (second.result.results as Array<{ taskId?: string }>).map((r) => r.taskId);
     assert.deepEqual(ids2, ids1, "重复创建应返回已有 taskId");
@@ -102,11 +103,11 @@ test("batch_create：同批重发幂等（同 taskId，不重复建）", async (
 
 test("batch_create：空 items 拒绝；超 60 条拒绝", async () => {
   await withRegistry(async (registry) => {
-    const empty = await registry.execute("calendar.batch_create", { items: [] }, ctx);
+    const empty = await registry.execute("calendar", { action: "batch_create", items: [] }, ctx);
     assert.equal(empty.result.ok, false);
     const tooMany = await registry.execute(
-      "calendar.batch_create",
-      { items: Array.from({ length: 61 }, (_, i) => ({ description: `t${i}`, runAt: "2099-03-02T01:00:00Z" })) },
+      "calendar",
+      { action: "batch_create", items: Array.from({ length: 61 }, (_, i) => ({ description: `t${i}`, runAt: "2099-03-02T01:00:00Z" })) },
       ctx,
     );
     assert.equal(tooMany.result.ok, false);

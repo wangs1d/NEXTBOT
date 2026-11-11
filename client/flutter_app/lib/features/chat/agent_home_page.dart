@@ -7,6 +7,7 @@ import "package:http/http.dart" as http;
 
 import "../../core/config/api_config.dart";
 import "../settings/profile_insight_section.dart";
+import "../../core/services/nb_http.dart";
 
 /// Agent 主页。
 ///
@@ -696,7 +697,7 @@ class AgentHomepageApi {
   /// 测试注入口：注入 MockClient 后走桩，不触网
   static http.Client? clientOverride;
 
-  static http.Client get _client => clientOverride ?? http.Client();
+  static http.Client get _client => clientOverride ?? NbClient();
 
   static const Duration _timeout = Duration(seconds: 8);
 

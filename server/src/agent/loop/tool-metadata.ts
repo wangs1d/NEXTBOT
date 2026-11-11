@@ -18,7 +18,6 @@ export type ToolCategory =
   | "wallet"
   | "social"
   | "phone"
-  | "vision"
   | "voice"
   | "clock"
   | "life"
@@ -60,45 +59,19 @@ export interface ToolMetadata {
 // ────────────────────────────────────────────────────────────
 
 const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
-  // web
-  search_web: "web",
-  search_images: "web",
-  search_videos: "web",
-  fetch_web: "web",
-  "internet.research": "web",
-  "internet.live_check": "web",
-  "internet.verify": "web",
-  "info.inspect_webpage": "web",
-  "info.navigate_site": "web",
+  // web（复合：web/deep/images/videos/hot/weather/quote）
+  web_search: "web",
+  // web（复合：read/inspect/navigate/raw）
+  web_fetch: "web",
   "info.search": "web",
-  "weather.get_local": "web",
-  "market.quote": "web",
   // calendar
-  "calendar.create": "calendar",
-  "calendar.list_tasks": "calendar",
-  // wallet
-  "wallet.get_balance": "wallet",
-  "wallet.get_transactions": "wallet",
-  "wallet.transfer": "wallet",
-  "wallet.recharge": "wallet",
-  "wallet.purchase": "wallet",
-  // phone
-  "phone.ensure_my_number": "phone",
-  "phone.call_user": "phone",
-  // vision
-  "vision.http_pull": "vision",
-  "vision.periodic_start": "vision",
-  "vision.periodic_stop": "vision",
-  "vision.periodic_stop_all": "vision",
-  "vision.periodic_list": "vision",
-  // voice
-  "voice.speak": "voice",
-  "voice.send_message": "voice",
+  "calendar": "calendar",
+  // phone（复合：number/call）
+  phone: "phone",
+  // voice（复合：speak/message）
+  voice: "voice",
   // clock
-  "clock.get_current_time": "clock",
   "clock.get_user_location": "clock",
-  "clock.get_date": "clock",
-  "clock.format_timestamp": "clock",
   // life
   "budget.calculate": "life",
   "shopping.suggest": "life",
@@ -116,15 +89,8 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "desktop.web_fetch": "desktop",
   "desktop.window": "desktop",
   "desktop.clipboard": "desktop",
-  // agent_browser (Playwright 无头浏览器)
-  "agent_browser.open": "web",
-  "agent_browser.click": "web",
-  "agent_browser.type": "web",
-  "agent_browser.scroll": "web",
-  "agent_browser.screenshot": "web",
-  "agent_browser.extract_text": "web",
-  "agent_browser.wait_for": "web",
-  "agent_browser.close": "web",
+  // agent_browser（Playwright 无头浏览器，复合工具 action 分流）
+  "agent_browser": "web",
   // shared_browser（用户与 Agent 共用客户端浏览器，WS 桥转发）
   "shared_browser.navigate": "web",
   "shared_browser.control": "web",
@@ -138,20 +104,15 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
   "shopping.order.track": "life",
   "shopping.order.cancel": "life",
   // smart_home
-  "smart_home.list_devices": "smart_home",
-  "smart_home.control_device": "smart_home",
-  "smart_home.scene": "smart_home",
-  // capability
-  "agent.query_capabilities": "capability",
-  // social / messages（消息聚合中心：两级获取，reply 为短信代发写操作）
-  "messages.overview": "social",
-  "messages.list_conversations": "social",
-  "messages.read_conversation": "social",
-  "messages.reply": "social",
-  "messages.mark_read": "social",
-  "messages.suggest_reply": "social",
-  "messages.search": "social",
-  "messages.capture_status": "social",
+  "smart_home": "smart_home",
+  // 复合工具（细分入口已收编进各自 action）
+  agent: "agent",
+  "world.link": "world",
+  world: "world",
+  proactivity: "proactivity",
+  care: "care",
+  device: "device",
+  aip: "aip",
 };
 
 // ────────────────────────────────────────────────────────────
@@ -164,20 +125,13 @@ const TOOL_TO_CATEGORY: Record<string, ToolCategory> = {
  * P2 初期只覆盖 desktop/web/shopping，其余靠同类 category 自动兜底。
  */
 const TOOL_ALTERNATIVES: Record<string, string[]> = {
-  "internet.research": ["search_web", "fetch_web"],
-  "internet.live_check": ["weather.get_local", "search_web"],
-  "internet.verify": ["search_web"],
   // desktop.open 失败 → 截图确认状态 / run_preset 查找 / run_shell 直接启动
   // （对齐 buildToolFailureReminder L427-428 现有建议）
   "desktop.open": ["desktop.visual.screenshot", "desktop.run_preset", "desktop.run_shell"],
-  // search_web 失败 → fetch_web 直接抓取 / info.search 换引擎
-  search_web: ["fetch_web", "info.search"],
-  search_images: ["search_web", "info.search"],
-  search_videos: ["search_web", "info.search"],
-  // fetch_web 失败 → search_web 先搜再抓 / info.inspect_webpage 换抓取器
-  fetch_web: ["search_web", "info.inspect_webpage"],
-  // info.navigate_site 失败 → info.inspect_webpage 换方式
-  "info.navigate_site": ["info.inspect_webpage", "fetch_web"],
+  // web_search 失败 → web_fetch 直接抓取 / info.search 换引擎
+  web_search: ["web_fetch", "info.search"],
+  // web_fetch 失败 → web_search 先搜再抓（复合内 action=read/inspect 可换方式）
+  web_fetch: ["web_search", "info.search"],
   // shopping.order.place 失败 → search 先确认商品再重试
   "shopping.order.place": ["shopping.order.search"],
   // 统一预订层（方案 A）：book 失败 → 先 quote/search 确认选项再重试
@@ -197,12 +151,10 @@ const HONEST_FAILURE_TOOLS = new Set<string>([
   "desktop.run_preset",
   "desktop.run_shell",
   "shopping.order.place",
-  "wallet.transfer",
-  "wallet.purchase",
   // 提醒/日程创建（2026-10-12）：matched=false（时间解析不出/周期需确认）时
   // 严禁转述成「已设置」——用户据此以为到点会提醒，实际什么都没创建
   //（真实事故：提醒轮无落库、日程页无数据、到点无通知）。
-  "calendar.create",
+  "calendar",
   // 统一预订层（方案 A）：下单工具禁止假成功（模拟模式必须如实标注 simulated）
   "ride_hailing.book",
   "home_service.book",
@@ -266,10 +218,10 @@ export function hasExternalSideEffect(toolName: string): boolean {
 }
 
 function inferRiskLevel(toolName: string): ToolMetadata["riskLevel"] {
-  if (/wallet\.transfer|wallet\.purchase|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
+  if (/shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book|desktop\.run_shell|desktop\.run_input|desktop\.run_automation|phone\.call/.test(toolName)) {
     return "high";
   }
-  if (/desktop\.open|desktop\.run_preset|agent_browser\.click|agent_browser\.type|smart_home\.control/.test(toolName)) {
+  if (/desktop\.open|desktop\.run_preset|agent_browser|smart_home\.control/.test(toolName)) {
     return "medium";
   }
   return "low";
@@ -280,7 +232,7 @@ function inferCachePolicy(toolName: string): ToolMetadata["cachePolicy"] | undef
   // 已经返回过的照片）。图片结果天生是「要给下一批」的语义，而缓存键只有
   // name+input、TTL 60s，同 query 追轮会直接命中上一轮结果，把同一批图再发一遍。
   // 图片搜索必须每次重跑 + 会话级去重（services/media-shown-ledger.ts）。
-  if (/^(weather\.get_local|search_web|search_videos|fetch_web|internet\.research|internet\.live_check|internet\.verify|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
+  if (/^(weather\.get_local|search_web|search_videos|fetch_web|info\.inspect_webpage|info\.navigate_site|info\.search)$/.test(toolName)) {
     return { enabled: true, ttlMs: 60_000 };
   }
   return undefined;

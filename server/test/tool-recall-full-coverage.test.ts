@@ -68,7 +68,12 @@ async function recallTop10(query: string): Promise<Set<string>> {
 
 test("A. 快速通道可见集仅桥工具——业务工具不靠全量 schema", () => {
   assert.equal(prepared.toolSearchActive, true, "延迟目录应激活");
-  assert.ok(prepared.deferredToolCount >= 50, `延迟目录应有足量工具（实际 ${prepared.deferredToolCount}）`);
+  // 全量业务 schema 必须都进延迟目录（复合工具面后工具数不再写死，防漏建索引）
+  assert.equal(
+    prepared.deferredToolCount,
+    getBuiltinAgentChatTools().length,
+    `延迟目录应覆盖全部业务工具（实际 ${prepared.deferredToolCount}）`,
+  );
   const visibleNames = prepared.visibleTools
     .map((t) => (t.type === "function" ? t.function?.name : null))
     .filter((n): n is string => Boolean(n));

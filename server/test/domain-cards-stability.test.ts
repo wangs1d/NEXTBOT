@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 能力域目录字节稳定性契约（2026-10-22）。
  *
  * 病根：域卡每域只展示前 `CARD_TOOLS_PER_DOMAIN` 个（位置截断），而语料顺序
@@ -39,7 +39,7 @@ const CORPUS = [
   tool("weather.get_local"),
   tool("weather.get_forecast"),
   tool("calendar.create_event"),
-  tool("calendar.create"),
+  tool("calendar"),
   tool("travel.plan_trip"),
   tool("search_web"),
 ];

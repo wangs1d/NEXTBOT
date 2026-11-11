@@ -1,24 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- 网络安全配置：默认禁止明文流量，仅对局域网后端/本机调试地址放行明文 HTTP/WS。
-     后端地址按局域网 IP 收窄，改动机器或 IP 后请同步更新下方 192.168.10.2。 -->
+<!-- 网络安全配置：主路是 https 域名（https://api.nextbot.top，烤入于
+     build_apk.ps1，与桌面云版同一先例），https 走系统 CA 不需要任何豁免。
+     下面的明文白名单仅供 -Lan 本机联调形态（http://<局域网IP>:3000），
+     改动开发机或 IP 后请同步更新对应条目。 -->
 <network-security-config>
-    <!-- 全局默认：禁止明文流量（Android 9+ 默认行为），仅信任系统 CA。 -->
+    <!-- 全局默认：禁止明文流量（Android 9+ 默认行为），仅信任系统 CA。
+         Let's Encrypt（ISRG Root X1）在 Android 7.1+ 系统信任库内，无需额外配置。 -->
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors>
             <certificates src="system" />
         </trust-anchors>
     </base-config>
 
-    <!-- 放行明文流量的白名单（release 变体生效；debug/profile 由各自 source
-         set 覆盖为全放行）。换电脑/WiFi 导致后端 IP 变化时，请在此追加
-         <domain includeSubdomains="false">新IP</domain>，并与 build_apk.ps1
-         烤入的 HTTP_BASE 保持一致 —— 否则 http 请求被系统掐掉，登录页只会
-         显示笼统的「网络错误」。生产请直接用 https 域名（如
-         https://login.nextbot.top），无需维护此表。 -->
+    <!-- -Lan 联调白名单（release 变体生效；debug/profile 由各自 source set
+         覆盖为全放行）。构建时 dart-define 传 http://<IP>:3000 且该 IP 不在
+         下表 → 请求被系统掐掉，登录页只会显示笼统的「网络错误」。 -->
     <domain-config cleartextTrafficPermitted="true">
-        <!-- 云服务器部署机（腾讯云，生产后端） -->
-        <domain includeSubdomains="false">159.75.52.2</domain>
-        <!-- 真实后端：当前电脑的局域网 IP（构建时 dart-define 传 HTTP_BASE=http://192.168.10.2:3000） -->
+        <!-- 当前电脑的局域网 IP（构建时 -Lan 传 http://192.168.10.2:3000） -->
         <domain includeSubdomains="false">192.168.10.2</domain>
         <!-- 当前开发机 WLAN IP（2026-11-05 探测） -->
         <domain includeSubdomains="false">192.168.10.12</domain>

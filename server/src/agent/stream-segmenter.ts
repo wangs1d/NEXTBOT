@@ -179,9 +179,9 @@ export class StreamSegmenter {
   }
 
   /**
-   * 运行时开启气泡拆分模式（真·分绿泡）。供 WS 层在路由决策就绪后调用——
-   * 门禁依赖 decision.segmentable（对话面）与语音态，二者在首个主回复 delta
-   * 之前必然就绪（agent-core 主 LLM 依赖同一决策），故不存在拆分态竞态。
+   * 运行时开启气泡拆分模式（真·分绿泡）。供 WS 层在轮次门禁就绪后调用——
+   * 门禁依赖语音态（文字轮才拆）与 env 开关，二者在首个主回复 delta
+   * 之前必然就绪，故不存在拆分态竞态。
    * 必须在任何 feed 之前调用。
    */
   enableBubbleMode(): void {

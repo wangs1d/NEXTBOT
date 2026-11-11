@@ -11,6 +11,7 @@ import "package:window_manager/window_manager.dart";
 
 import "app/ambient_feeds_controller.dart";
 import "app/chat_turn_controller.dart";
+import "app/mobile_bootstrap.dart";
 import "app/phone_call_controller.dart";
 import "core/config/api_config.dart";
 import "core/theme/app_theme.dart";
@@ -45,6 +46,7 @@ import "core/services/local_runtime_config.dart";
 import "core/services/local_runtime_manager.dart";
 import "core/services/client_telemetry.dart";
 import "core/services/install_identity.dart";
+import "core/services/remote_config.dart";
 import "core/presentation/api_key_setup_dialog.dart";
 import "core/services/schedule_api_client.dart";
 import "core/services/schedule_offline_delete_queue.dart";
@@ -58,6 +60,8 @@ import "core/services/sphere_embodiment_motion_bridge.dart";
 import "core/services/agent_sphere_interact_bridge.dart";
 import "core/services/desktop_bridge_service.dart";
 import "core/services/phone_bridge_service.dart";
+import "core/services/agent_location_responder.dart";
+import "core/services/schedule_tool_result_sync.dart";
 import "core/services/sphere_entity_controller.dart";
 import "core/services/user_avatar_api.dart";
 import "core/services/user_preferences_api.dart";
@@ -151,6 +155,11 @@ void main() async {
   _installGlobalErrorHooks();
   runZonedGuarded(() async {
     WidgetsFlutterBinding.ensureInitialized();
+    // 手机端系统栏配置（2026-11-10 底部白条修复）：装配单源在
+    // app/mobile_bootstrap.dart。手机 UI 一律经本生产入口调试
+    // （模拟器/真机 flutter run），杜绝入口分家导致的「调试正常、
+    // 真机没变」。桌面平台内部 no-op，不影响桌面端。
+    configureMobileSystemUI();
     // org 迁移（com.example → top.nextbot）：必须先于一切 app-support 目录
     // 消费者（AccessCredentialStore / WindowBoundsSaver / Isar 历史库 / 账号
     // 会话……），否则新目录为空、老用户表现为「重新登录 + 聊天历史消失」。
@@ -159,6 +168,12 @@ void main() async {
     // 运行通道（runtime 收回开关）：上次启动读到的 channel 必须先于任何网络
     // 请求生效——platform 形态下本机 runtime 不拉起，地址要整体切到控制面。
     await InstallIdentity.instance.applyBootChannel();
+    // 远程配置下发·地基（2026-11-10）：上次启动从控制面拉到的地址覆盖
+    // 先于一切网络请求生效（与 applyBootChannel 同语义：上次取到的，本次
+    // 生效）；随后后台静默刷新，只落盘不立即应用——当前会话的连接已按
+    // 启动地址建立，新值下次启动接管。拉取失败 fail-open，行为不变。
+    await RemoteConfig.instance.applyCached();
+    unawaited(RemoteConfig.instance.refreshAndPersist());
     // 设备时区预热（零权限、零网络）：session.init 必须同步发出，而 IANA 时区
     // 读取是异步平台调用——先预热，连接建立时 snapshotSync 才能给出完整快照。
     unawaited(ClientClockService.warmUp());
@@ -198,13 +213,35 @@ void main() async {
     // 与 Flutter 首帧之间不再插「等读盘」的静止画面——首帧即按登录态武装
     // N 光扫动画，点开应用直接进入动画，不留任何延迟层。
     // 桌面端不预读，保持原 initState 异步读盘时序，零影响。
+    // 未登录时的匿名身份源：两端都用本机安装标识当 actor，不再挤在
+    // 编译期 sessionId（session-mvp-001）上串记忆/世界/配额。桌面端若还按
+    // 旧约定回落 session-mvp-001，就会出现「init 报 A、消息报 B」的身份
+    // 不一致（2026-11-11 事故形态），所以这里两端必须同一套。
+    // 安装标识在 applyBootChannel() 里已同步装载（runApp 之前），此处可直读。
+    ApiConfig.installIdentityProvider =
+        () => InstallIdentity.instance.cachedInstallId;
     final bool bootMobile = !kIsWeb && (Platform.isAndroid || Platform.isIOS);
     String? bootAccountEmail;
     if (bootMobile) {
       await AccountSessionStore.instance.load();
       bootAccountEmail = AccountSessionStore.instance.email;
+      // 身份来源（主流顺序：凭据优先）
+      //  ① 本机 access token 的归属——登录时由服务端签发，不受读盘时序影响，
+      //     也不可能出现「文件丢了就报默认身份」；
+      //  ② 账号会话文件里的邮箱（老版本落盘 / 服务端未签发 token 的场景）；
+      // 两者都没有 = 真正未登录，回落到设备匿名身份（ApiConfig.effectiveActorId）。
+      final String credentialUserId = AccessCredentialStore.instance.hasCredentials
+          ? (AccessCredentialStore.instance.userId ?? "")
+          : "";
+      final String bootIdentity = (bootAccountEmail?.isNotEmpty ?? false)
+          ? bootAccountEmail!
+          : credentialUserId;
+      bootAccountEmail = bootIdentity.isEmpty ? null : bootIdentity;
       // 首个 session.init/HTTP 在首帧就可能发出，身份必须先落位。
       ApiConfig.runtimeUserId = bootAccountEmail;
+      // 身份一变就要重新绑定服务端 actor：连接可能已经带着旧身份建好了
+      // （见 WsChatService._announcedActorId）。
+      WsChatService.shared.ensureIdentityAnnounced();
     }
     _writeCrashLog("[BOOT]", "stage 2: after cred load, before webview bootstrap", StackTrace.current);
     // WebView2 环境进程内只初始化一次：共用浏览器 CDP 调试端口（默认开启，
@@ -716,6 +753,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       _sessionLoaded = true;
       _playBootAnimation = _accountEmail != null;
       ApiConfig.runtimeUserId = _accountEmail;
+      // 读盘/回连晚于建连时，连接上钉的还是默认身份——补发一次 session.init
+      // 把它改绑到真实账号，否则后续消息会被服务端判 FORBIDDEN 丢弃。
+      WsChatService.shared.ensureIdentityAnnounced();
     }
     unawaited(_loadAccountSession());
     // 本地正在播放的曲目（Windows SMTC）→ 换歌时拉歌词，供灵动岛展示
@@ -1248,6 +1288,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 唯一连接的事件源先接进路由器，再建立连接——归属表
     // （ws_event_router.dart）是唯一事实源，本文件不再逐 type 判断。
     WsEventRouter.instance.bindPlatform(isMobile: _isMobile);
+    // 模块级总线订阅（单连接 + 事件总线）：各业务模块自行声明 owned 的
+    // 事件类型（见各文件 ensureBusSubscription），main 根监听器只保留
+    // 强绑定本 State 的 UI 分支。必须在 attach 之前全部就位。
+    SharedBrowserHost.ensureBusSubscription();
+    MediaPlaybackService.ensureBusSubscription();
+    AlarmEngine.ensureBusSubscription();
+    AmbientFeedsController.ensureBusSubscription();
+    PureVoiceModeController.ensureBusSubscription();
+    AgentLocationResponder.ensureBusSubscription();
+    ScheduleToolResultSync.ensureBusSubscription(
+      store: _store,
+      onViewsChanged: _notifyScheduleViewsChanged,
+    );
     WsEventRouter.instance.attach(_ws.events);
     _ws.connect();
     // 共享连接可能已被手机聊天控制器先行拉起（两端共用同一条 WS）：那种情况
@@ -1357,26 +1410,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         if (type == "shared.browser.busy" && payload["busy"] == true && mounted) {
           _openBrowserPanel();
         }
-        // 共用浏览器桥：Agent 的 shared_browser.* 动作转发到内嵌浏览器执行，
-        // 结果经 browser.bridge.result 回传（jobId 配对；未命中类型内部直接返回）
-        unawaited(SharedBrowserHost.instance.handleServerEvent(type, payload));
-        // 媒体音乐播放闭环：agent.media.play/pause/resume/stop 真正出声
-        // （session.init 已声明 mediaPlayback 能力；未命中类型内部直接忽略）
-        unawaited(MediaPlaybackService.instance.handleMediaEvent(type, payload));
-        // 服务端按需请求实时位置：Agent 需要位置时（如天气工具）才拉一次 GPS。
-        // 纯坐标秒回（不做客户端逆地理）：服务端拿到坐标后自行反查城市，
-        // 避免客户端逆地理 HTTP 把回包拖超时（服务端 requestLocation 只等 12s）。
-        if (type == "agent.location_request") {
-          final String jobId = payload["jobId"]?.toString() ?? "";
-          final ClientLocationPayload? loc =
-              await ClientLocationService.getCurrentLocationForAgentReply();
-          // 拿不到坐标也回 jobId 空包：让服务端立即结算（resolve null），
-          // 不白等满 12s 超时（与手机端 _handleLocationRequest 同语义）。
-          _ws.sendEvent("client.location_report", <String, dynamic>{
-            if (jobId.isNotEmpty) "jobId": jobId,
-            ...?loc?.toJson(),
-          });
-        }
+        // 共用浏览器桥（shared.browser.* / browser.bridge.*）与媒体播放闭环
+        // （agent.media.*）已迁往各自模块的总线自订阅：见 SharedBrowserHost /
+        // MediaPlaybackService.ensureBusSubscription，main 不再逐条接线。
+        // 服务端按需请求实时位置（agent.location_request）同理：
+        // AgentLocationResponder.ensureBusSubscription（手机端归聊天控制器）。
         // 持续定位配置（服务端 LOCATION_TRACKING_MODE=continuous 时随 session 绑定下发）：
         // 客户端按 intervalSec 定时上报位置（source:"continuous"），供位置历史/
         // 地理围栏/常去地点挖掘使用。隐私：服务端默认 ondemand 不下发本事件；
@@ -1457,6 +1495,21 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             setState(_failedUserMessageIds.clear);
           }
         }
+        if (type == "ws_auth_expired") {
+          // 本机 access token 被服务端判废（换机登录顶号 / 记录被清）。
+          // 凭据已被连接层清掉，这里把会话与界面一并收起回登录门禁——
+          // 否则界面还挂着主壳，用户发出的每条消息都会被服务端拒收。
+          final String message =
+              payload["message"]?.toString() ?? "登录状态已失效，请重新登录";
+          if (_accountEmail != null) {
+            unawaited(_performLogout());
+          }
+          if (mounted) {
+            ScaffoldMessenger.maybeOf(context)?.showSnackBar(
+              SnackBar(content: Text(message)),
+            );
+          }
+        }
         if (type == "error.event") {
           // 与当前chat 轮次无关的错误需立即解除「思考中」；CHAT_HANDLER_ERROR 仍会→ assistant_done←
           final String? traceId = payload["traceId"]?.toString();
@@ -1469,7 +1522,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             _clearAgentProcessingState();
           }
           final String message = payload["message"]?.toString() ?? "服务器处理失败";
-          if (mounted) {
+          // 身份绑定类拒收由手机聊天控制器接管（它会把提示文案换成用户能读懂的
+          // 「正在重新同步账号身份」并等重投结果），根分发器不再弹一份技术细节。
+          final String errCode = payload["code"]?.toString() ?? "";
+          final bool identityReject = errCode == "FORBIDDEN" ||
+              errCode == "SESSION_REQUIRED";
+          if (mounted && !(_isMobile && identityReject)) {
             ScaffoldMessenger.maybeOf(context)?.showSnackBar(
               SnackBar(content: Text(message)),
             );
@@ -1563,44 +1621,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               }
             }
           }
-          if (toolOk && result != null) {
-            try {
-              final String normalizedTool = toolName.replaceAll("_", ".");
-              if (normalizedTool == "calendar.delete_task") {
-                final String? deletedId = result["taskId"]?.toString();
-                if (deletedId != null && deletedId.isNotEmpty) {
-                  await removeLocalScheduleForDeletedTask(_store, deletedId);
-                  _notifyScheduleViewsChanged();
-                }
-              } else {
-                final bool synced = await upsertLocalScheduleFromToolResult(
-                  _store,
-                  toolName,
-                  result,
-                );
-                if (synced) {
-                  _notifyScheduleViewsChanged();
-                }
-              }
-            } catch (e, st) {
-              debugPrint("[schedule] tool.result sync failed: $e\n$st");
-            }
-          }
+          // 日程类工具结果 → 本地日程镜像同步已迁往 ScheduleToolResultSync
+          // 总线自订阅（ensureBusSubscription，store/刷新信号经端口注入）。
         }
-        if (type == "schedule.tasks_changed") {
-          await AmbientFeedsController.instance
-              .onScheduleTasksChanged(payload);
-        }
-        if (type == "schedule.reminder_fired") {
-          await AmbientFeedsController.instance
-              .onScheduleReminderFired(payload);
-        }
-        // ====== 闹钟/即时提醒（手机端本地调度主路的服务端事件） ======
-        if (type == "alarm.sync" || type == "alarm.trigger" || type == "reminder.deliver") {
-          unawaited(
-            AlarmEngine.instance.handleServerEvent(type, payload),
-          );
-        }
+        // schedule.tasks_changed / schedule.reminder_fired 归 AmbientFeeds、
+        // alarm.sync / alarm.trigger / reminder.deliver 归 AlarmEngine：
+        // 均已迁往各自模块的总线自订阅（ensureBusSubscription），main 不再接线。
         // hub.message_arrived 即时上岛已撤（2026-10-14）：消息类内容统一由
         // agent 后台扫描、判定有价值后走主动提案链路推送，不再每条直展。
         if (type == "surface.show") {
@@ -1716,27 +1742,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           return;
         }
         // ====== 语音流式数据帧（2026-11-05 分层定稿）======
-        // 模型 delta 实时下发，只喂逐句 TTS；**绝不落消息列表**——文字回复仍由
-        // chat.assistant_done.finalText 一次性落屏（打字机已退役）。
-        // 这就是「流式还在、只是不打打字机」的落点：帧是数据，不是显示。
-        if (type == "chat.assistant_speech") {
-          final String? speechTraceId = payload["traceId"]?.toString();
-          final String? activeSpeechTraceId =
-              ChatTurnController.instance.activeTraceId;
-          if (activeSpeechTraceId == null ||
-              (speechTraceId != null &&
-                  speechTraceId.isNotEmpty &&
-                  speechTraceId != activeSpeechTraceId)) {
-            return;
-          }
-          PureVoiceModeController.instance.onSpeechFrame(
-            chunk: payload["chunk"]?.toString() ?? "",
-            isFinal: payload["final"] == true,
-            hasIncrements: payload["hasIncrements"] == true,
-            finalText: payload["finalText"]?.toString() ?? "",
-          );
-          return;
-        }
+        // chat.assistant_speech 已迁往 PureVoiceModeController 总线自订阅
+        // （ensureBusSubscription）：帧只进语音通道，绝不落消息列表；
+        // 迟到帧按 activeTraceId 过滤。main 不再接线。
         if (type == "chat.assistant_chunk") {
           _resetAgentReplyWatchdog();
           // 丢弃「已结束轮次」的迟到 chunk：避免在 chat.assistant_done 之后
@@ -2148,9 +2156,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             unawaited(PureVoiceModeController.instance.notifyReply(resolvedText));
           }
         }
-        if (type == "agent.peer_message") {
-          await AmbientFeedsController.instance.onPeerMessage(payload);
-        }
+        // ====== 站内信 / Agent 间消息：均归 AmbientFeedsController 总线自订阅 ======
         // ====== Agent 语音消息（voice.send_message 工具触发）======
         // 服务端推送 `agent.voice.message` 事件，客户端落为一条 assistant
         // 语音消息（contentType=audio + attachments=[audio]），渲染为微信式
@@ -2274,10 +2280,6 @@ class _PrivateAiAppState extends State<PrivateAiApp>
               }
             });
           }
-        }
-        // ====== 站内信：平台/运营侧推送（服务端已落盘必达，此处只做即时提醒） ======
-        if (type == "inbox.message") {
-          await AmbientFeedsController.instance.onInboxMessage(payload);
         }
         if (type == "agent.proactive_voice") {
           final String title = payload["title"]?.toString() ?? "Agent 语音联系";
@@ -3513,7 +3515,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     _reportedAgentProcessingUiActive = active;
     if (!_ws.isConnected) return;
     final Map<String, dynamic> payload = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
+      "sessionId": ApiConfig.effectiveActorId,
       "active": active,
       "userId": ApiConfig.effectiveActorId,
     };
@@ -3787,7 +3789,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       await _store.saveMessage(userMessage);
     }
     final Map<String, dynamic> userMsg = <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
+      "sessionId": ApiConfig.effectiveActorId,
       "messageId": userMessage.messageId,
       "text": effectiveText.isEmpty && attachmentFrames != null
           ? ""
@@ -3960,7 +3962,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           if (e.key != "cardAction") e.key: e.value,
       };
       final bool sent = _ws.sendCardActionEvent(
-        sessionId: ApiConfig.sessionId,
+        sessionId: ApiConfig.effectiveActorId,
         messageId: boundId,
         actionId: cardAction,
         cardId: cardData.cardId,
@@ -4018,7 +4020,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
 
     final bool sent = _ws.sendCardAction(
-      sessionId: ApiConfig.sessionId,
+      sessionId: ApiConfig.effectiveActorId,
       messageId: actionMessageId,
       actionId: action.id,
       label: label,
@@ -4329,7 +4331,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void _cancelBackgroundTask(String taskId) {
     if (taskId.isEmpty) return;
     _ws.sendEvent("chat.task_cancel", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
+      "sessionId": ApiConfig.effectiveActorId,
       "taskId": taskId,
     });
   }
@@ -4555,7 +4557,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     }
     // 通知服务端同步清除 ChatThreadStore
     _ws.sendEvent("chat.clear_history", <String, dynamic>{
-      "sessionId": ApiConfig.sessionId,
+      "sessionId": ApiConfig.effectiveActorId,
     });
     setState(() {
       _messages.removeRange(fromIdx, _messages.length);
@@ -4878,7 +4880,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   // ⚠️ 铁律（用户 2026-10-13 明令）：_isMobile 必须永远只按平台判定
   // （Android/iOS）。桌面 exe（Windows/macOS/Linux）绝不允许为了调试手机 UI
   // 而伪造这个值（加调试开关、环境变量、写死 true 等一律禁止）。
-  // 调试手机端 UI 用独立入口 main_mobile.dart，不要动桌面路由。
+  // 调试手机端 UI 走本入口生产路径（模拟器/真机 flutter run），不要动桌面路由。
   bool get _appBackgrounded => _lifecycleState != AppLifecycleState.resumed;
 
   // ====== 统一主动性管道：outcome 反馈回传（2026-10-14 定稿；决策卡已删除）======
@@ -5563,14 +5565,18 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       theme: AppTheme.of(AppThemeVariant.dark).copyWith(
         scaffoldBackgroundColor: Colors.black,
       ),
-      home: MobileLoginPage(
-        onLoggedIn: (String email) => unawaited(_completeWebAuth(email)),
+      // 黑底门禁页：edge-to-edge 下系统栏全透明 + 亮色图标（装配单源）
+      home: MobileSystemBars(
+        themeMode: ThemeMode.dark,
+        child: MobileLoginPage(
+          onLoggedIn: (String email) => unawaited(_completeWebAuth(email)),
+        ),
       ),
     );
   }
 
-  /// 手机端主壳：对话/日程/我的（与独立调试入口 main_mobile.dart 同构，
-  /// 用 MobileTheme，主题档与桌面端 AppThemeVariant 互不串扰）。
+  /// 手机端主壳：对话/日程/我的（用 MobileTheme，主题档与桌面端
+  /// AppThemeVariant 互不串扰）。
   /// 登录后直接切入，不等桌面端的向导与 N 光扫；退出登录复用
   /// [_performLogout]（清会话 + 清身份覆盖 → 回手机登录门禁）。
   Widget _buildMobileMainGate() {
@@ -5584,11 +5590,15 @@ class _PrivateAiAppState extends State<PrivateAiApp>
           theme: MobileTheme.light,
           darkTheme: MobileTheme.dark,
           themeMode: mode,
-          home: MobileHomePage(
+          // 系统栏装配单源见 app/mobile_bootstrap.dart（与调试入口共用）
+          home: MobileSystemBars(
             themeMode: mode,
-            onThemeModeChanged: (ThemeMode m) => _mobileThemeMode.value = m,
-            onLogout: _performLogout,
-            agentName: _agentName,
+            child: MobileHomePage(
+              themeMode: mode,
+              onThemeModeChanged: (ThemeMode m) => _mobileThemeMode.value = m,
+              onLogout: _performLogout,
+              agentName: _agentName,
+            ),
           ),
         );
       },
@@ -5690,7 +5700,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // ⚠️ 铁律（用户 2026-10-13 明令）：这个分支只在真手机平台生效。
     // 桌面 exe 必须永远落到下方桌面链路（注册门禁 → 首启向导 → 桌面主壳
     // AppSidebar），任何调试/排查都不许让桌面 exe 路由进手机壳
-    // （MobileLoginPage / MobileHomePage）。调手机 UI 走 main_mobile.dart。
+    // （MobileLoginPage / MobileHomePage）。手机 UI 一律走本生产入口调试。
     if (_isMobile) {
       if (_accountEmail == null) {
         return _buildMobileLoginGate();
@@ -5901,6 +5911,26 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 由 [_completeWebAuth] 触发，已注册邮箱换机重登不再重跑向导（2026-10-16）。
   /// 登录邮箱同步写进 [ApiConfig.runtimeUserId]——WS/HTTP/本地存储的
   /// 身份全链以邮箱为准，不同账号数据互不串台。
+  /// 本机身份解析（主流顺序：凭据优先）。
+  ///
+  /// ① account token 的归属——登录时服务端签发，身份权威来自服务端而不是
+  ///    本地某个文件是否存在；
+  /// ② 账号会话文件里的邮箱（老版本落盘 / 服务端未签发 token 的场景）。
+  ///
+  /// 两者都没有才是真正未登录，此时 [ApiConfig.effectiveActorId] 回落到设备
+  /// 匿名身份（installId），不再用编译期 `sessionId` 冒充账号——否则所有
+  /// 未登录设备会挤在同一个 actor 上，记忆/世界/配额互相串台。
+  String? _resolveLocalIdentity(String? sessionEmail) {
+    final String mail = ApiConfig.normalizeIdentity(sessionEmail);
+    if (mail.isNotEmpty) return mail;
+    if (AccessCredentialStore.instance.hasCredentials) {
+      final String fromToken =
+          ApiConfig.normalizeIdentity(AccessCredentialStore.instance.userId);
+      if (fromToken.isNotEmpty) return fromToken;
+    }
+    return null;
+  }
+
   Future<void> _loadAccountSession() async {
     if (widget.initialSessionLoaded) {
       // 手机端已在 main() 首帧前读完：留一个事件循环边界，灵动岛/头像等
@@ -5910,7 +5940,11 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     } else {
       await AccountSessionStore.instance.load();
     }
-    ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
+    ApiConfig.runtimeUserId = _resolveLocalIdentity(
+      AccountSessionStore.instance.email,
+    );
+    // 账号读写都在鉴权链路里：身份一确定就重绑连接（登录/切换/回连共用此路）。
+    WsChatService.shared.ensureIdentityAnnounced();
     if (!mounted) return;
     if (!widget.initialSessionLoaded) {
       setState(() {
@@ -5975,7 +6009,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   Future<void> _completeWebAuth(String email, {bool freshCreated = false}) async {
     final String mail = email.trim();
     await AccountSessionStore.instance.save(mail);
-    ApiConfig.runtimeUserId = AccountSessionStore.instance.email;
+    ApiConfig.runtimeUserId = _resolveLocalIdentity(mail);
+    // 账号读写都在鉴权链路里：身份一确定就重绑连接（登录/切换/回连共用此路）。
+    WsChatService.shared.ensureIdentityAnnounced();
     unawaited(ControlPlaneAccount.ensureRegistered());
     if (!mounted) return;
     setState(() {
@@ -6049,7 +6085,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 控制面账号行保留（同邮箱重新注册幂等），本机登录态即刻失效。
   Future<void> _performLogout() async {
     await AccountSessionStore.instance.clear();
+    // 凭据必须同步清：token 是身份权威，留着等于没登出——重连仍会以旧
+    // 账号进线（服务端按 token 归属绑定 actor，不看客户端自报）。
+    await AccessCredentialStore.instance.clear();
     ApiConfig.runtimeUserId = null;
+    // 登出同样要重绑（回落默认身份），否则连接上还钉着上一个账号。
+    WsChatService.shared.ensureIdentityAnnounced();
     // 账号级名字清空，避免换账号后顶栏还挂着上一个 agent 的名牌。
     AgentNameStore.instance.clear();
     if (!mounted) return;
@@ -6371,7 +6412,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
       final AgentProfileData profile = AgentProfileData.fromPreferences(prefs);
       if (!mounted) return;
       // 手机端顶栏名牌读同一活水源：档案里的名字灌进来，对话中改名再被
-      // identity_renamed 覆盖（main_mobile 同构）。
+      // identity_renamed 覆盖。
       AgentNameStore.instance.set(profile.displayName);
       setState(() {
         _agentProfile = profile;

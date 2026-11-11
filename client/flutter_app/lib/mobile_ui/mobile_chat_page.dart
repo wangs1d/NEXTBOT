@@ -129,6 +129,12 @@ class _MobileChatPageState extends State<MobileChatPage> {
       ),
       body: Column(
         children: [
+          // 断线横幅（2026-11-10）：WS 掉线/重连期间必须可见——「假在线」曾让
+          // 用户以为消息已发出，实际全沉在离线队列（服务端 WAL 半天无一条）。
+          ListenableBuilder(
+            listenable: _controller,
+            builder: (context, _) => _buildConnectionBanner(context, p),
+          ),
           Expanded(
             child: ListenableBuilder(
               listenable: _controller,
@@ -145,6 +151,51 @@ class _MobileChatPageState extends State<MobileChatPage> {
             builder: (context, _) => _buildInputBar(context, p),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 断线横幅：WS 未连接时在消息区上方显示「连接断开 / 正在重连」。
+  /// isConnected 由 ws_connected / ws_disconnected 事件驱动（controller），
+  /// 首帧未连上时也会短暂显示「正在连接」——这是真实状态，不遮掩。
+  Widget _buildConnectionBanner(BuildContext context, MobilePalette p) {
+    if (_controller.isConnected) return const SizedBox.shrink();
+    final bool dark = Theme.of(context).brightness == Brightness.dark;
+    final Color bg = dark
+        ? const Color(0xFF3A2A12)
+        : const Color(0xFFFDF3E1);
+    final Color fg = dark
+        ? const Color(0xFFF5C169)
+        : const Color(0xFF8A5A16);
+    return Material(
+      color: bg,
+      child: SizedBox(
+        width: double.infinity,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: <Widget>[
+              SizedBox(
+                width: 12,
+                height: 12,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation<Color>(fg),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  "连接断开，正在自动重连…（期间发出的消息会在恢复后送达）",
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 12.5, color: fg),
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -616,30 +667,35 @@ class _MobileChatPageState extends State<MobileChatPage> {
             if (nameChoices.isNotEmpty) {
               return _buildNameChoicesCard(context, m, nameChoices, p);
             }
-            // 气泡外独立卡（2026-11-07 拍板扩展）：travel_itinerary 大卡与
-            // reminder_confirm 提醒确认卡都不框进气泡外壳——气泡只装文字，
-            // 卡自带完整外观跟在下方作为独立消息元素（与桌面端同款做法见
-            // chat_page._buildMessageColumn）。卡从信封块/正文标记原位读出，
-            // card.update 原地换卡后这里同样实时生效。
-            final AgentResultData? travelCard = _travelItineraryCardOf(m);
-            final AgentResultData? reminderCard =
-                travelCard == null ? _reminderConfirmCardOf(m) : null;
-            final AgentResultData? standaloneCard = travelCard ?? reminderCard;
-            if (standaloneCard != null) {
+            // 气泡外独立卡·全量外移（2026-11-10 泛化）：气泡只装文字，
+            // 所有结果卡一律全宽渲染在气泡下方。此前只有 travel_itinerary
+            // 与 reminder_confirm 外移，其余卡（种草选择卡/需求确认卡等）
+            // 挤在 73.8% 宽的气泡壳里，横向内容根本没法用。
+            // 卡从信封块/正文标记原位读出，card.update 原地换卡同样实时生效。
+            final List<AgentResultData> standaloneCards = _standaloneCardsOf(m);
+            if (standaloneCards.isNotEmpty) {
               final bool hasBubbleText = _assistantBubbleHasVisibleText(m);
+              final List<String> cardTypes = <String>[
+                for (final AgentResultData c in standaloneCards) c.cardType,
+              ];
               return Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: <Widget>[
-                  if (hasBubbleText) _buildBubble(context, m, isUser, p),
-                  Padding(
-                    padding: EdgeInsets.only(
-                        top: hasBubbleText ? AppTypography.space2 : 0),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: AgentResultCard(data: standaloneCard),
+                  if (hasBubbleText)
+                    _buildBubble(context, m, isUser, p,
+                        excludeCardTypes: cardTypes),
+                  for (int i = 0; i < standaloneCards.length; i++)
+                    Padding(
+                      padding: EdgeInsets.only(
+                          top: (hasBubbleText || i > 0)
+                              ? AppTypography.space2
+                              : 0),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: AgentResultCard(data: standaloneCards[i]),
+                      ),
                     ),
-                  ),
                 ],
               );
             }
@@ -1054,7 +1110,8 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 
   Widget _buildBubble(
-      BuildContext context, ChatMessage m, bool isUser, MobilePalette p) {
+      BuildContext context, ChatMessage m, bool isUser, MobilePalette p,
+      {List<String> excludeCardTypes = const <String>[]}) {
     final Color bubble = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
     return Align(
@@ -1166,6 +1223,7 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 // 「接下来你可以」接续建议：点击即作为新消息发送（与桌面端同链路）。
                 onFollowupTap: (String prompt) =>
                     unawaited(_controller.send(prompt)),
+                excludeCardTypes: excludeCardTypes,
               ),
       ),
     );
@@ -1383,59 +1441,41 @@ class _MobileChatPageState extends State<MobileChatPage> {
   }
 }
 
-/// 提取助手消息携带的 travel_itinerary 行程卡（无则 null）。
+/// 提取助手消息携带的全部结果卡（气泡外全量外移渲染用）。
 ///
-/// 与桌面端 chat_page._agentResult 同口径：优先从消息文本解析卡片标记
-/// （行程卡的权威通道——服务端确定性附卡写在 finalText 里）；blocks 信封
-/// 里的 card 块作兜底（text 通道被剥卡的历史消息仍能取到）。
-  AgentResultData? _travelItineraryCardOf(ChatMessage m) {
-    if (m.role == "user") return null;
-    final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
-    if (parsed != null && parsed.cardType == "travel_itinerary") return parsed;
-    // 信封通道必须读：分泡活轮里卡片标记只写 finalText，各气泡的 text 只有
-    // 自己那段正文，行程卡只挂在末泡的 envelopeBlocks 上。此前这里只读
-    // replyBlocks，于是分泡轮的行程卡「正文被 excludeTravelCard 排除 + 这里
-    // 取不到」= 彻底消失。口径与 _reminderConfirmCardOf 保持一致。
-    for (final List<Map<String, dynamic>>? blocks
-        in <List<Map<String, dynamic>>?>[m.envelopeBlocks, m.replyBlocks]) {
-      if (blocks == null) continue;
-      for (final Map<String, dynamic> b in blocks) {
-        if ((b["type"]?.toString() ?? "") != "card") continue;
-        final Object? cardJson = b["card"];
-        if (cardJson is! Map) continue;
-        final AgentResultData data =
-            AgentResultData.fromJson(Map<String, dynamic>.from(cardJson));
-        if (data.cardType == "travel_itinerary") return data;
-      }
-    }
-    return null;
+/// 三条通道合并去重，顺序即渲染顺序：
+/// 1. `envelopeBlocks` —— 分泡活轮的唯一活水：卡片标记只写 finalText，
+///    各气泡的 text 只有自己那段正文，卡全挂在末泡信封块上；
+/// 2. `replyBlocks` —— 旧帧链兜底（text 通道被剥卡的历史消息仍能取到）；
+/// 3. 正文标记解析 —— 塌缩轮/历史消息的卡写在 finalText 里。
+///
+/// 此前只有 travel_itinerary / reminder_confirm 走外移（各自一个专属
+/// 取卡函数），其余卡挤在 73.8% 宽的气泡壳里。现在全量外移：任何结果卡
+/// 都在全宽区渲染，`search_result`（已退役卡型）继续吞掉不渲染。
+List<AgentResultData> _standaloneCardsOf(ChatMessage m) {
+  if (m.role == "user") return const <AgentResultData>[];
+  final List<AgentResultData> out = <AgentResultData>[];
+  final Set<String> seen = <String>{};
+  void add(AgentResultData? d) {
+    if (d == null) return;
+    if (d.cardType == "search_result") return;
+    final String key = "${d.cardType}|${d.cardId}|${d.title}";
+    if (!seen.add(key)) return;
+    out.add(d);
   }
 
-/// 提取助手消息携带的 reminder_confirm 提醒确认卡（无则 null）。
-///
-/// 与 [_travelItineraryCardOf] 同口径，但多一条信封块通道：分泡活轮的卡片
-/// 标记不会写进气泡文本（finalText 才有标记，气泡只装各自的分段正文），
-/// 卡只挂在末泡的 envelopeBlocks 里——信封通道是分泡轮的唯一活水，
-/// 正文标记解析兜底历史消息与塌缩轮。
-AgentResultData? _reminderConfirmCardOf(ChatMessage m) {
-  if (m.role == "user") return null;
-  final AgentResultData? parsed = AgentResultParser.parse(m.text).data;
-  if (parsed != null && parsed.cardType == "reminder_confirm") return parsed;
   for (final List<Map<String, dynamic>>? blocks
-      in <List<Map<String, dynamic>>?>[
-    m.envelopeBlocks,
-    m.replyBlocks,
-  ]) {
+      in <List<Map<String, dynamic>>?>[m.envelopeBlocks, m.replyBlocks]) {
     if (blocks == null) continue;
     for (final Map<String, dynamic> b in blocks) {
       if ((b["type"]?.toString() ?? "") != "card") continue;
       final Object? cardJson = b["card"];
-      if (cardJson is! Map<String, dynamic>) continue;
-      final AgentResultData data = AgentResultData.fromJson(cardJson);
-      if (data.cardType == "reminder_confirm") return data;
+      if (cardJson is! Map) continue;
+      add(AgentResultData.fromJson(Map<String, dynamic>.from(cardJson)));
     }
   }
-  return null;
+  add(AgentResultParser.parse(m.text).data);
+  return out;
 }
 
 /// 气泡里还有没有可见正文：卡外置后，若消息只剩卡（正文全被剥掉的历史形态），
@@ -1627,10 +1667,15 @@ class _AssistantBody extends StatelessWidget {
     required this.cs,
     this.onUserAction,
     this.onFollowupTap,
+    this.excludeCardTypes = const <String>[],
   });
 
   final ChatMessage message;
   final ColorScheme cs;
+
+  /// 由消息行注入的外移卡型列表：这些卡在气泡外的全宽区渲染（见
+  /// [_ChatMessagesState 的外移机制]），body 内跳过避免双份。
+  final List<String> excludeCardTypes;
 
   /// 卡片动作回调（与桌面端 chat_page 同链路）：选择型卡按钮 / chips
   /// 效果卡点击经它回传控制器，走 `chat.user_action` 协议。
@@ -1656,12 +1701,10 @@ class _AssistantBody extends StatelessWidget {
           onUserAction: onUserAction,
           // 「接下来你可以」接续建议胶囊：与桌面端同渲染、同点击发送链路。
           onFollowupTap: onFollowupTap,
-          // 行程卡由消息行在气泡外独立渲染（与桌面端同款第二条消息形态）,
-          // body 内不再重复,避免双份。
+          // 行程卡等外移卡由消息行在气泡外全宽渲染，body 内不再重复。
           excludeTravelCard: true,
-          // reminder_confirm 提醒确认卡同款外移（2026-11-07 拍板）：卡由
-          // 消息行在气泡外独立渲染，body 内跳过。
-          excludeCardTypes: const <String>["reminder_confirm"],
+          // 外移卡型动态注入：reminder_confirm + 本轮所有外移卡（全量外移机制）。
+          excludeCardTypes: excludeCardTypes,
         ),
         // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
         // 插在正文下方实时展示；`chat.assistant_done` 后

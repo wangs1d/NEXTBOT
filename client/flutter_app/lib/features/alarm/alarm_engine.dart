@@ -12,11 +12,14 @@
 /// 纯逻辑与 IO 收口在本类，可注入 fake 单测。
 library;
 
+import "../../core/services/nb_http.dart";
 import "dart:async";
 import "dart:convert";
 
 import "package:http/http.dart" as http;
 
+import "../../core/services/ws_event_router.dart"
+    show WsEventRouter, WsSubscribeScope, WsEventCatalog, wsEventPayload;
 import "alarm_local_store.dart";
 import "alarm_models.dart";
 import "alarm_platform.dart";
@@ -30,6 +33,29 @@ class AlarmEngine {
 
   AlarmEngine._();
 
+  static bool _busWired = false;
+
+  /// 事件总线自订阅（main.dart 装配时调用一次；幂等）。
+  ///
+  /// alarm.sync / alarm.trigger / reminder.deliver 归本引擎 owned：服务端
+  /// 闹钟事件由引擎自己消费，main 根监听器不再逐 type 接线。
+  static void ensureBusSubscription() {
+    if (_busWired) return;
+    _busWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "alarm-engine",
+      types: WsEventCatalog.alarmEngine,
+      scope: WsSubscribeScope.root,
+      // alarm.sync 是幂等「全量状态同步」：断线重连瞬间连发多次时，只跑最后
+      // 一次与逐次对账等价，积压时合并可避免一串过期的建钟/撤钟操作。
+      coalesceTypes: const <String>{"alarm.sync"},
+      onEvent: (Map<String, dynamic> event) => instance.handleServerEvent(
+        event["type"] as String? ?? "",
+        wsEventPayload(event),
+      ),
+    );
+  }
+
   factory AlarmEngine.forTest({
     required AlarmLocalStore store,
     required ActorIdGetter actorId,
@@ -42,7 +68,7 @@ class AlarmEngine {
     e._actorId = actorId;
     e._httpBase = httpBase;
     e._now = now ?? DateTime.now;
-    e._client = client ?? http.Client();
+    e._client = client ?? NbClient();
     return e;
   }
 
@@ -82,7 +108,7 @@ class AlarmEngine {
     final String actorId = _actorId();
     if (actorId.isEmpty) return;
     try {
-      final resp = await (_client ?? http.Client())
+      final resp = await (_client ?? NbClient())
           .get(Uri.parse(
               "$_httpBase/api/alarms?actorId=${Uri.encodeComponent(actorId)}&status=active"))
           .timeout(const Duration(seconds: 5));
@@ -107,7 +133,7 @@ class AlarmEngine {
     _watchdog = null;
   }
 
-  // ─── 服务端事件入口（main.dart WS 分发器调用） ───
+  // ─── 服务端事件入口（事件总线订阅 ensureBusSubscription 调用） ───
 
   Future<void> handleServerEvent(String type, Map<String, dynamic> payload) async {
     switch (type) {
@@ -299,7 +325,7 @@ class AlarmEngine {
   Future<bool> isVoiceModelAvailable() async {
     if (_httpBase.isEmpty) return false;
     try {
-      final resp = await (_client ?? http.Client())
+      final resp = await (_client ?? NbClient())
           .get(Uri.parse("$_httpBase/api/voice/health"))
           .timeout(const Duration(milliseconds: 1500));
       if (resp.statusCode != 200) return false;
@@ -313,7 +339,7 @@ class AlarmEngine {
   Future<Map<String, dynamic>?> _post(String path, Map<String, dynamic> body) async {
     if (_httpBase.isEmpty) return null;
     try {
-      final resp = await (_client ?? http.Client())
+      final resp = await (_client ?? NbClient())
           .post(
             Uri.parse("$_httpBase$path"),
             headers: {"Content-Type": "application/json"},

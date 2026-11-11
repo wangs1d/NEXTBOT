@@ -372,7 +372,7 @@ export function createTravelCommuteBuiltinSkills(deps: Deps): SkillDefinition[] 
             arriveTime: base.arriveTime,
             remindAt: formatLocal(remindAt),
             note:
-              "请用 calendar.create 创建一条 reminder：" +
+              "请用 calendar（action=create）创建一条 reminder：" +
               `「${base.arriveTime} ${carrier}${code ? ` ${code}` : ""} 即将到站${base.toStation ?? base.toCity ?? ""}，用户已预约到站约车协助」，` +
               "创建成功后再调一次本工具（带 ticketId 与 markRideReminderCreated=true）防止重复提醒。",
           };

@@ -183,7 +183,7 @@ const HIGH_RISK_TOOL_PATTERNS: HighRiskRule[] = [
  * 不再依赖逐个补本名单。
  *
  * 2026-09-28 去掉 includes("payment"/"transfer"/"wallet") 子串规则：子串命中
- * 不看 risk 轴，把 wallet.get_balance / payment.query_order 等纯只读工具也拦成
+ * 不看 risk 轴，把 payment.query_order 等纯只读工具也拦成
  * 高危（trajectories 实证：social.get_feed 被拦 6 次、wallet 查询 4 次）。
  * 资金/外发治理以 FeatureCatalog 分类为唯一口径；静态名单只保留需两阶段确认的
  * 四件套作兜底（与 TWO_PHASE_CONFIRM_TOOLS 同集）。

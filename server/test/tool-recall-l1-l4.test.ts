@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 工具召回链五层根修单测（2026-10-09 L1/L3/L4/L5）。
  *
  * L1 感知增强：buildDomainPreloadTools 多域注入 + BM25 top-K 弱信号兜底。
@@ -81,11 +81,11 @@ test("L1 多域：主域强信号 + 子句切分（长多意图 query 整句投�
     names.some((n) => n.startsWith("travel.")),
     `子句 1 的 travel 域应注入: ${names.join(",")}`,
   );
-  // 天气子句由 Core 常驻覆盖（weather.get_local 在 chat Core，结构上单工具域
-  // 凑不满 3 票——多域注入解决的是非 Core 域的覆盖，Core 已见工具不归它管）
+  // 天气子句由 Core 常驻覆盖（复合工具面后天气收进 web_search(action=weather)，
+  // 结构上单工具域凑不满 3 票——多域注入解决的是非 Core 域的覆盖）
   assert.ok(
-    laneSets.CHAT_LANE_CORE_NAMES.includes("weather.get_local"),
-    "weather.get_local 应为 Core 常驻",
+    laneSets.CHAT_LANE_CORE_NAMES.includes("web_search"),
+    "web_search 应为 Core 常驻（天气分支随其常驻）",
   );
 });
 
@@ -105,7 +105,7 @@ test("L1 次域纪律：top-1 只有 2 票（无强信号）→ 整组不注入�
   // 不应有域全族灌入（media 全族 N 个），兜底双闸下相关工具按分数进
   const preload = laneSets.buildDomainPreloadTools("找个猫咪视频", corpus);
   const names = preload.map(toolName);
-  const mediaFamily = names.filter((n) => n.startsWith("search_images") || n.startsWith("video.") || n.startsWith("vision."));
+  const mediaFamily = names.filter((n) => n.startsWith("search_images") || n.startsWith("video."));
   // 兜底最多 4 个，不得整族倾倒
   assert.ok(preload.length <= laneSets.DOMAIN_PRELOAD_TOPK, `兜底超 top-K: ${names.join(",")}`);
   assert.ok(mediaFamily.length <= laneSets.DOMAIN_PRELOAD_TOPK);
@@ -131,24 +131,24 @@ test("L1 兜底噪声闸：纯寒暄零注入（错误预载比不预载更糟�
   assert.deepEqual(laneSets.buildDomainPreloadTools("然后呢", corpus), []);
 });
 
-// ── L1：先验直取通道（意图别名/例句 = 独立于 BM25 词面的召回面） ──
+// ── L1：点信号通道（BM25 top-K；不再按意图别名直取） ──
 
-test("L1 先验直取：整短语意图命中直接注入，不被假强域整族顶掉（到家提醒→geofence）", () => {
-  // 「到家的时候提醒我拿快递」：calendar 凑 4 票成假强域，而 geofence.create 是
-  // raw/先验双 top-1——域通道（面信号）不得吞掉先验直取（点信号）
+test("L1 点信号：BM25 命中先于域族注入，不被假强域整族顶掉（到家提醒→geofence）", () => {
+  // 「到家的时候提醒我拿快递」：calendar 可能凑成假强域，但 geofence 是 BM25 点信号——
+  // 域通道（面信号）不得吞掉点信号。点信号现在完全由检索算法产生，不含意图规则。
   const names = laneSets
     .buildDomainPreloadTools("到家的时候提醒我拿快递", corpus)
     .map(toolName);
   assert.ok(
-    names.includes("geofence.create"),
-    `先验直取应注入 geofence.create: ${names.join(",")}`,
+    names.includes("geofence"),
+    `点信号应注入 geofence: ${names.join(",")}`,
   );
 });
 
-test("L1 先验直取：描述零词面重叠的意图靠别名/例句召回", () => {
+test("L1 点信号：别名/例句只作检索文本，经 BM25 命中后注入", () => {
   const cases: Array<[string, string]> = [
     ["帮我一直盯着这个话题有新消息就告诉我", "interest.manage"],
-    ["帮我打开回家模式", "smart_home.scene"],
+    ["帮我打开回家模式", "smart_home"],
     ["双十一买什么耳机性价比高帮我看看", "shopping.suggest"],
   ];
   for (const [query, expected] of cases) {
@@ -157,7 +157,7 @@ test("L1 先验直取：描述零词面重叠的意图靠别名/例句召回", (
   }
 });
 
-test("L1 先验直取通词闸：IDF 加权 + 证据去重，通词堆不出意图", async () => {
+test("L1 点信号通词闸：IDF 加权 + 证据去重，通词堆不出意图", async () => {
   // calendar.list_tasks 别名「有什么安排」/「今天有什么安排」含全域通词 什么/有什；
   // 无 IDF 加权时「十一去北京玩有什么攻略」会经通词重叠误命中 calendar——
   // IDF 让通词归零、意图词（攻略/景点/门票）高贡献；travel 族应正确命中
@@ -169,7 +169,7 @@ test("L1 先验直取通词闸：IDF 加权 + 证据去重，通词堆不出意�
     new Set(),
   ).map((m) => m.name);
   assert.equal(
-    prior.includes("calendar.list_tasks"),
+    prior.includes("calendar"),
     false,
     `点信号层通词不得泄漏进 calendar.list_tasks: ${prior.join(",")}`,
   );
@@ -187,6 +187,19 @@ test("idfOf：索引中无 df 证据的 token 贡献为 0（语料没见过 ≠ 
   const idx = new Bm25Index([{ id: "a", text: "天气 晴朗 适合 出行" }]);
   assert.ok(idx.idfOf("天气") > 0, "索引内 token 应有正 IDF");
   assert.equal(idx.idfOf("凭空捏造词"), 0, "零 df token 无证据贡献");
+});
+
+test("声明层只允许负向护栏：正向关键词加权已退役", async () => {
+  const { TOOL_CLASSIFICATION_OVERRIDES } = await import(
+    "../src/tools/tool-search/classification-overrides.js"
+  );
+  const positive: string[] = [];
+  for (const [tool, override] of Object.entries(TOOL_CLASSIFICATION_OVERRIDES)) {
+    for (const rule of override.recallBoost ?? []) {
+      if (rule.weight > 0) positive.push(`${tool}: ${rule.pattern} (${rule.weight})`);
+    }
+  }
+  assert.deepEqual(positive, [], `正向加权会覆盖模型的排序判断，只允许负向护栏:\n${positive.join("\n")}`);
 });
 
 // ── 总开关 ──
@@ -241,7 +254,7 @@ test("L4 阈值：近窗成功 ≥3 次晋升，失败不计、跨窗口衰减",
 test("L4 名单纪律：桥/元工具/委派控制面永不晋升", () => {
   promotion.resetToolPromotionState();
   const actor = "actor-promote-2";
-  for (const name of ["tool_discover", "obs_recall", "task.dispatch", "agent.query_capabilities"]) {
+  for (const name of ["tool_discover", "obs_recall", "task.dispatch", "agent"]) {
     for (let i = 0; i < 5; i++) promotion.recordToolUsageForPromotion(actor, name, true);
   }
   assert.deepEqual(promotion.getPromotedToolNames(actor), [], "召回通道工具不得晋升");
@@ -333,8 +346,8 @@ test("② 三条实证 miss 补齐：提醒/回复/记一下 在 router-first �
   // 三条 query 的期望工具均由轻量常驻兜底，不再赌词面
   const light = new Set(laneSets.buildTaskLaneRouterFirstLightTools(corpus).map(toolName));
   const CASES: Array<[string, string]> = [
-    ["明早八点提醒我交周报", "calendar.create"],
-    ["回复妈妈微信说我马上到家", "messages.reply"],
+    ["明早八点提醒我交周报", "calendar"],
+    ["回复妈妈微信说我马上到家", "world.link"],
     ["帮我记一下，我女儿叫小雨今年三岁", "profile.update"],
   ];
   for (const [query, expected] of CASES) {

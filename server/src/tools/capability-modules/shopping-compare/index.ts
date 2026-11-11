@@ -2,7 +2,7 @@
  * 购物比价能力模块（capability-module）。
  *
  * 与 shopping-order 同结构，导出：
- *   - `SHOPPING_COMPARE_CHAT_TOOLS`         LLM 工具 schema（3 个工具）
+ *   - `SHOPPING_COMPARE_CHAT_TOOLS`         LLM 工具 schema（1 个复合工具 shopping.compare）
  *   - `SHOPPING_COMPARE_INTENT_RULES`       意图元数据（接 BM25 调权）
  *   - `SHOPPING_COMPARE_CATEGORY_MAPPING`   关键词分类映射
  *   - `registerShoppingCompareTools`        注册到 ToolRegistry

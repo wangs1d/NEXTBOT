@@ -65,6 +65,24 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeExamples: ["compare the price of a phone"],
     },
   },
+  // 设备控制入口没有专属词面前缀（工具名 smart_home 推不出灯/空调），
+  // 用别名补足检索文本；这些词只进索引，不再触发任何直取。
+  {
+    exact: "smart_home",
+    metadata: {
+      aliases: [
+        "灯", "客厅的灯", "开灯", "关灯", "灯光", "调亮", "调暗", "色温",
+        "空调", "窗帘", "插座", "开关", "回家模式", "离家模式", "晚安模式",
+        "智能家居", "智能设备", "家里设备",
+      ],
+      negativeAliases: [
+        "打开应用", "打开软件", "打开程序", "截图", "截屏",
+        "监控画面", "实时画面",
+      ],
+      examples: ["把客厅的灯打开", "空调调到26度", "打开回家模式", "把窗帘拉上"],
+      negativeExamples: ["打开抖音", "帮我截个图", "看看家里的摄像头"],
+    },
+  },
   {
     prefix: "wallet.",
     metadata: {
@@ -93,7 +111,7 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
-    prefix: "phone.",
+    prefix: "phone",
     metadata: {
       aliases: ["phone", "call", "message", "ring", "电话", "短信"],
       negativeAliases: ["shopping", "price compare", "weather"],
@@ -102,7 +120,7 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
     },
   },
   {
-    prefix: "voice.",
+    prefix: "voice",
     metadata: {
       aliases: [
         "voice", "speak", "tts", "text to speech", "speech synthesis",
@@ -110,21 +128,27 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
         "语音", "语音合成", "语音播报", "语音消息", "配音", "合成语音",
         "音频生成", "念给我听", "读给我听", "发语音",
       ],
-      negativeAliases: ["shopping", "desktop screenshot", "wallet transfer"],
+      negativeAliases: ["shopping", "desktop screenshot", "wallet transfer", "好友消息", "加好友", "好友申请"],
       examples: [
         "念给我听", "用语音告诉我", "发一条语音消息", "读一下这段话",
         "你能做语音合成吗", "帮我把这句话播报出来",
       ],
-      negativeExamples: ["推荐一款耳机", "现在几点了"],
+      negativeExamples: ["推荐一款耳机", "现在几点了", "回复好友消息"],
     },
   },
   {
-    prefix: "calendar.",
+    exact: "calendar",
     metadata: {
-      aliases: ["calendar", "schedule", "todo", "reminder", "日程", "提醒", "待办"],
-      negativeAliases: ["shopping", "desktop control"],
-      examples: ["remind me tomorrow at 10am"],
-      negativeExamples: ["read this webpage"],
+      aliases: [
+        "calendar", "schedule", "todo", "reminder", "日程", "提醒", "待办",
+        "提醒我", "定时提醒", "定个提醒", "设个提醒", "到点提醒",
+        "有哪些日程", "我的日程", "有什么安排", "查看日程", "列出日程", "日程列表", "今天有什么安排",
+        "什么时候有空", "有空时段", "空闲时间", "约时间", "帮我约", "几点有空",
+        "改期", "换个时间", "推迟", "提前到", "改到", "暂停提醒", "恢复提醒",
+      ],
+      negativeAliases: ["shopping", "desktop control", "到家", "回到家", "离家", "离开公司"],
+      examples: ["remind me tomorrow at 10am", "我有哪些日程", "什么时候有空"],
+      negativeExamples: ["read this webpage", "到家的时候提醒我拿快递"],
     },
   },
   {
@@ -198,6 +222,11 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
       negativeAliases: [
         "read webpage content",
         "读网页正文", "搜索网页内容",
+        // 设备控制不是「打开应用」：把用户最常见的家居说法明确排除，
+        // 否则 desktop.open 会靠「打开」二字抢走 smart_home 的召回。
+        "开灯", "关灯", "灯光", "客厅的灯", "台灯",
+        "空调", "窗帘", "插座", "回家模式", "离家模式",
+        "智能家居", "设备控制",
       ],
       examples: [
         "打开抖音", "帮我打开微信", "打开网易云播放影月", "启动记事本", "open wechat",
@@ -228,120 +257,111 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   // 别名是"用户口语里会出现的短语"：命中（query 整串包含别名）即把 registryName
   // 拼进检索变体，让 registry 通道给正确工具加权。只收高频、语义明确的表达。
   {
-    exact: "search_web",
+    exact: "web_search",
     metadata: {
-      aliases: ["行情", "价格", "股价", "汇率", "涨跌", "新闻", "最新消息", "什么价"],
-      examples: ["比特币现在什么价", "帮我搜一下最近的新闻"],
+      aliases: [
+        "行情", "价格", "股价", "汇率", "涨跌", "新闻", "最新消息", "什么价",
+        "照片", "图片", "找图", "壁纸", "表情包", "头像",
+        // 复合 action 覆盖（2026-11-11）：天气/热搜/视频/深读各自要有词面入口
+        "天气", "气温", "下雨", "温度", "空气质量",
+        "热搜", "热点", "热榜", "榜单", "趋势",
+        "视频", "短视频", "影片", "找个视频",
+        "深度调研", "详细查一下", "多找几个来源", "核实一下",
+      ],
+      examples: [
+        "比特币现在什么价", "帮我搜一下最近的新闻", "找几张猫的照片", "帮我找壁纸",
+        "北京今天天气怎么样", "今天有什么热搜", "找个教做红烧肉的视频", "这个说法帮我核实一下",
+      ],
     },
   },
   {
-    exact: "wallet.get_balance",
+    exact: "web_fetch",
     metadata: {
-      aliases: ["余额", "还有多少钱", "账上还有", "余额查询"],
-      examples: ["我钱包还有多少钱", "查一下我的余额"],
+      aliases: ["网页", "网址", "链接", "读了什么", "说了什么", "网页内容", "站内", "这个网站里", "点开这个链接"],
+      examples: ["读一下这个网页说了什么", "帮我打开这个链接看看内容", "在这个网站里找一下报名入口"],
+      negativeAliases: ["搜一下", "找几张", "热搜"],
+    },
+  },
+  // ── 复合 action 覆盖（2026-11-11）：细分名收编后，各 action 的用户口语
+  //    必须还能命中复合入口，否则模型看到的是空召回。──
+  {
+    exact: "world.link",
+    metadata: {
+      aliases: ["好友", "好友列表", "我的好友", "加好友", "添加好友", "好友申请", "谁加我", "发消息", "回复好友", "给好友", "私信", "发一句"],
+      examples: ["给好友发消息", "回复好友消息", "看看我有哪些好友", "同意他的好友申请"],
+      negativeAliases: ["语音消息", "朗读", "播报"],
+      negativeExamples: ["把这段话念给我听"],
     },
   },
   {
-    exact: "fetch_web",
+    exact: "agent",
     metadata: {
-      aliases: ["网页", "网址", "链接", "读了什么", "说了什么", "网页内容"],
-      examples: ["读一下这个网页说了什么", "帮我打开这个链接看看内容"],
+      aliases: [
+        "你会什么", "你能做什么", "能不能办", "能力边界", "支持什么",
+        "待办", "任务进度", "办到哪", "跑完了吗",
+        "改名字", "改名", "签名", "叫你什么",
+        "主页", "简介", "自我介绍", "个人介绍",
+        "档案", "画像", "用户资料", "我的资料", "我的信息", "你了解我",
+      ],
+      examples: ["你能做什么", "我之前让你办的事到哪一步了", "把自己的名字改成小满", "你还记得我的资料吗"],
+      negativeAliases: ["帮我订", "购物", "下单", "agent 世界", "Agent 世界", "在线状态", "接入状态"],
     },
   },
   {
-    exact: "clock.get_current_time",
+    exact: "proactivity",
     metadata: {
-      aliases: ["几点", "现在时间", "什么时间", "当前时间"],
-      examples: ["现在几点了"],
+      aliases: ["怎么没提醒", "为什么没说", "怎么没动静", "没告诉我", "沉默", "为什么不提醒", "怎么不说话了", "太吵", "别提醒", "别发了", "打扰", "少提醒", "批准", "就这么办"],
+      examples: ["你最近怎么没提醒我", "提醒太频繁了别发了", "这个提议我批准了"],
+      negativeAliases: ["定时提醒", "日程", "待办"],
     },
   },
   {
-    exact: "search_images",
+    exact: "care",
     metadata: {
-      aliases: ["照片", "图片", "找图", "壁纸", "表情包", "头像"],
-      examples: ["找几张猫的照片", "帮我找壁纸"],
+      aliases: ["生日", "纪念日", "重要日子", "重要日期", "结婚纪念", "我妈生日", "爸爸生日", "女朋友生日"],
+      examples: ["记住我妈生日是5月20号", "我记了哪些重要日期", "把那个纪念日删掉"],
+      negativeAliases: ["定时提醒", "十分钟后", "明天早上"],
     },
   },
   {
-    exact: "smart_home.control_device",
+    exact: "device",
     metadata: {
-      aliases: ["开灯", "关灯", "灯光", "空调", "窗帘", "插座", "智能设备"],
-      examples: ["把客厅的灯打开", "空调调到26度"],
+      aliases: ["设备", "设备列表", "有哪些设备", "摄像头", "监控画面", "实时画面", "直播画面", "看家里"],
+      examples: ["我有哪些绑定的设备", "打开客厅的摄像头看看", "看一下家里的实时画面"],
+      negativeAliases: ["开灯", "关灯", "窗帘", "空调", "插座"],
     },
   },
   {
-    exact: "vision.see_device",
+    exact: "aip",
     metadata: {
-      aliases: ["摄像头", "监控", "看家", "看一下门口", "实时画面"],
-      examples: ["看一下门口摄像头", "看看家里现在什么情况"],
+      aliases: ["协作", "协作状态", "配对", "联盟", "协作请求", "派给助手", "转给另一个 agent", "提案", "提议"],
+      examples: ["我的协作状态怎么样", "把这个任务派给配对的助手", "看一下对方的提案"],
+      negativeAliases: ["好友消息", "加好友"],
     },
   },
   {
-    exact: "geofence.create",
+    exact: "world",
+    metadata: {
+      aliases: ["世界状态", "在线状态", "我的世界", "Agent 世界", "接入状态", "开房间", "建房间", "创建房间", "注册挑战", "开放注册"],
+      examples: ["我在 Agent 世界的状态怎么样", "给我开个房间", "帮我拿一下开放注册的挑战题"],
+      negativeAliases: ["好友消息", "加好友", "发消息"],
+    },
+  },
+  {
+    exact: "smart_home",
+    metadata: {
+      aliases: ["开灯", "关灯", "灯光", "空调", "窗帘", "插座", "智能设备", "回家模式", "离家模式", "观影模式", "睡眠场景", "场景模式", "一键场景", "灯光场景"],
+      examples: ["把客厅的灯打开", "空调调到26度", "帮我打开回家模式"],
+      negativeAliases: ["打开软件", "打开应用", "启动应用", "运行软件"],
+    },
+  },
+  {
+    exact: "geofence",
     metadata: {
       aliases: ["到家提醒", "离家提醒", "位置提醒", "围栏", "到家的时候", "离开公司"],
       examples: ["到家的时候提醒我拿快递", "离开公司提醒我打卡"],
       negativeAliases: ["定时提醒", "十分钟后"],
       negativeExamples: ["明天早上九点提醒我开会", "十分钟后提醒我", "定个提醒"],
-    },
-  },
-  {
-    exact: "care.rhythm_reminder",
-    metadata: {
-      aliases: ["每天提醒", "定期提醒", "天天提醒", "喝水提醒", "睡觉提醒", "运动提醒"],
-      examples: ["每天提醒我喝水", "到点提醒我睡觉"],
-    },
-  },
-  // ── calendar 族内区分（2026-09-08 新增 update_task/find_free_slots 后黄金回归防挤占）──
-  // 前缀别名让所有 calendar.* 共享「日程/提醒/待办」，族内排名靠各自专属词。
-  {
-    exact: "calendar.create",
-    metadata: {
-      aliases: ["提醒我", "定时提醒", "定个提醒", "设个提醒", "到点提醒"],
-      examples: ["明天早上九点提醒我开会", "十分钟后提醒我", "提醒我交周报"],
-      // 位置触发型提醒归 geofence.create：否则「到家/离家」类查询会被
-      // create 的「提醒我」正向词抢走（2026-11 golden 回归实测）。
-      negativeAliases: ["取消提醒", "删除提醒", "到家", "回到家", "离家", "离开公司"],
-      negativeExamples: ["取消明天那个提醒", "把提醒删了", "到家的时候提醒我拿快递"],
-    },
-  },
-  {
-    exact: "care.rhythm_reminder",
-    metadata: {
-      negativeAliases: ["取消提醒", "删除提醒", "暂停提醒", "改期提醒"],
-      negativeExamples: ["取消明天那个提醒", "把提醒关掉", "那个提醒不要了"],
-    },
-  },
-  {
-    exact: "calendar.list_tasks",
-    metadata: {
-      aliases: ["有哪些日程", "我的日程", "有什么安排", "查看日程", "列出日程", "日程列表", "今天有什么安排"],
-      examples: ["我有哪些日程", "看看我的日程安排", "列出本周的日程"],
-    },
-  },
-  {
-    exact: "calendar.find_free_slots",
-    metadata: {
-      aliases: ["什么时候有空", "有空时段", "空闲时间", "约时间", "帮我约", "几点有空"],
-      examples: ["我明天什么时候有空", "帮我找个有空的时间约她", "下午有哪些空闲时段"],
-      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会"],
-    },
-  },
-  {
-    exact: "calendar.update_task",
-    metadata: {
-      aliases: ["改期", "换个时间", "推迟", "提前到", "改到", "暂停提醒", "恢复提醒"],
-      examples: ["把会议改期到下午三点", "那个提醒推迟半小时", "暂停每天喝水的提醒"],
-      negativeAliases: ["暂停音乐", "音乐暂停", "暂停视频", "暂停播放", "暂停导航"],
-      negativeExamples: ["我有哪些日程", "取消明天那个提醒", "明天早上九点提醒我开会", "音乐暂停一下"],
-    },
-  },
-  {
-    exact: "smart_home.scene",
-    metadata: {
-      aliases: ["回家模式", "离家模式", "观影模式", "睡眠场景", "场景模式", "一键场景", "灯光场景"],
-      examples: ["帮我打开回家模式", "切到观影模式", "启动睡眠场景"],
-      negativeAliases: ["打开软件", "打开应用", "启动应用", "运行软件"],
     },
   },
   {
@@ -385,8 +405,21 @@ const DEFAULT_TOOL_INTENT_RULES: ToolIntentRule[] = [
   {
     exact: "travel.plan-itinerary",
     metadata: {
-      aliases: ["旅游攻略", "行程规划", "旅行计划", "自由行", "怎么安排", "帮我规划"],
-      examples: ["帮我规划去成都玩5天的行程", "周末去周边游玩怎么安排", "十一去北京玩有什么攻略"],
+      aliases: [
+        "旅游攻略", "行程规划", "旅行计划", "自由行", "怎么安排", "帮我规划",
+        // 口语入口（2026-11-11）：用户很少说「规划行程」，更多是「有什么攻略/去X玩几天」。
+        // 用带上下文的长短语而不是裸「攻略」——裸词会把「王者荣耀攻略」也拉进来。
+        // 这些词只作检索文本，不触发直取；选择权仍在模型。
+        "有什么攻略", "玩攻略", "旅行攻略", "游玩攻略", "玩几天", "玩什么", "去哪玩",
+        "周边游", "短途游", "亲子游", "带娃去哪", "出游", "旅游", "旅行",
+      ],
+      negativeAliases: ["游戏攻略", "通关攻略", "装机攻略", "王者荣耀", "王者", "荣耀", "英雄联盟", "原神", "开黑", "出装", "副本", "手游"],
+      examples: [
+        "帮我规划去成都玩5天的行程",
+        "周末去周边游玩怎么安排",
+        "十一去北京玩有什么攻略",
+        "去大理玩三天怎么安排",
+      ],
     },
   },
   {

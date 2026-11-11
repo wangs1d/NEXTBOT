@@ -19,6 +19,14 @@
  *
  * 接线：create-app-services 中按 AGENT_MEMORY_BRIDGE_ENABLED（缺省开）注入
  * NarrativeMemoryFacade；关闭时回退旧的双写 + 短路召回行为。
+ *
+ * 【真相源定位（P2-2）】认知图（hm_nodes）+ 结构化事实库是权威数据；Mem0 是
+ * **可重建的二级索引**：它的条目全部由 persistUnifiedExtraction 直存派生而来，
+ * 丢失/重建只影响召回通道（graph / fts 仍可用），不影响事实本身。因此：
+ *   - 写入侧永远先落图、再落 Mem0（本节 writeUnified 的顺序即契约）；
+ *   - Mem0 写入失败只记录、不回滚图节点；
+ *   - 遗忘以图节点 deletionStage 为准，由 syncForgetting 反向清理 Mem0。
+ * 同理，KV 槽位（memory_* 键）与 journal md 也都是从权威层派生的可重建视图。
  */
 
 import type { Database as SqliteDatabase } from "better-sqlite3";
@@ -140,6 +148,8 @@ export interface FusedMemoryCandidate {
 export interface BridgeWriteResult {
   graphNodeId: string | null;
   mem0Items: Mem0WrittenItem[];
+  /** 两侧是否至少有一侧未抛错（false = 双写都失败，调用方不应丢弃原始流水） */
+  ok: boolean;
 }
 
 /** 遗忘同步单条执行明细 */
@@ -254,17 +264,20 @@ export class MemoryBridgeService {
     if (opts.eventTime) provenance.eventTime = opts.eventTime;
     const baseMetadata = { highSignal: opts.highSignal, ...provenance };
     let graphNodeId: string | null = null;
+    let graphFailed = false;
     try {
       graphNodeId = await this.graph.ingest(actorId, text, sourceId, {
         context,
         metadata: baseMetadata,
       });
     } catch (err) {
+      graphFailed = true;
       console.error("[memory-bridge] 认知图写入失败（继续 Mem0 侧）:", err);
     }
 
     const extraMetadata = { ...(graphNodeId ? { graphNodeId } : {}), ...provenance };
     let mem0Items: Mem0WrittenItem[] = [];
+    let mem0Failed = false;
     try {
       if (unified && typeof this.ingest.persistUnifiedExtraction === "function") {
         mem0Items = await this.ingest.persistUnifiedExtraction(
@@ -287,6 +300,7 @@ export class MemoryBridgeService {
         );
       }
     } catch (err) {
+      mem0Failed = true;
       console.error("[memory-bridge] Mem0 写入失败（认知图侧已落）:", err);
     }
 
@@ -306,7 +320,7 @@ export class MemoryBridgeService {
       this.insertLink(actorId, sourceId, graphNodeId, mem0Ids);
     }
 
-    return { graphNodeId, mem0Items };
+    return { graphNodeId, mem0Items, ok: !(graphFailed && mem0Failed) };
   }
 
   private findNodeMem0Ids(actorId: string, nodeId: string): string[] {

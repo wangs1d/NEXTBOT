@@ -119,8 +119,51 @@ export function createCompareWatchHandler(service: ShoppingCompareService): Tool
   };
 }
 
+/** 复合工具支持的动作（与 chat-tools 的 action 枚举保持一致）。 */
+export const SHOPPING_COMPARE_ACTIONS = [
+  "prices",
+  "research",
+  "watch_add",
+  "watch_remove",
+  "watch_list",
+] as const;
+
+/** watch_* 动作 → 原 watch handler 的内部 action。 */
+const WATCH_ACTION_OF: Record<string, "add" | "remove" | "list"> = {
+  watch_add: "add",
+  watch_remove: "remove",
+  watch_list: "list",
+};
+
 /**
- * 注册 shopping-compare 全部工具到 ToolRegistry。
+ * shopping.compare —— 复合入口：按 `action` 分流到比价 / 调研 / 降价监控。
+ *
+ * 合并原因：可见工具面按函数名占槽位，3 个名字占 3 个槽位，收敛成 1 个。
+ * 动作语义与回执保持不变；缺参校验仍由各动作 handler 给出具体原因。
+ */
+export function createShoppingCompareHandler(service: ShoppingCompareService): ToolHandler {
+  const prices = createComparePricesHandler(service);
+  const research = createCompareResearchHandler(service);
+  const watch = createCompareWatchHandler(service);
+
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const action = typeof input.action === "string" ? input.action.trim().toLowerCase() : "";
+    if (!action) {
+      return { ok: false, error: `缺少 action（可选：${SHOPPING_COMPARE_ACTIONS.join("/")}）` };
+    }
+    if (action === "prices") return prices(input, context);
+    if (action === "research") return research(input, context);
+    const watchAction = WATCH_ACTION_OF[action];
+    if (watchAction) return watch({ ...input, action: watchAction }, context);
+    return {
+      ok: false,
+      error: `未知 action「${action}」。可选：${SHOPPING_COMPARE_ACTIONS.join(" / ")}`,
+    };
+  };
+}
+
+/**
+ * 注册 shopping-compare 复合工具到 ToolRegistry。
  *
  * 调用方：`capability-modules/index.ts` 的 `buildCapabilityModules` 闭包。
  */
@@ -128,8 +171,5 @@ export function registerShoppingCompareTools(
   registry: ToolRegistry,
   deps: ShoppingCompareModuleDeps,
 ): void {
-  const { shoppingCompareService } = deps;
-  registry.register("shopping.compare.prices", createComparePricesHandler(shoppingCompareService));
-  registry.register("shopping.compare.research", createCompareResearchHandler(shoppingCompareService));
-  registry.register("shopping.compare.watch", createCompareWatchHandler(shoppingCompareService));
+  registry.register("shopping.compare", createShoppingCompareHandler(deps.shoppingCompareService));
 }

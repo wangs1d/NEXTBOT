@@ -63,14 +63,6 @@ const FAKE_TOOLS = [
   {
     type: "function",
     function: {
-      name: "wallet.get_balance",
-      description: "查询钱包余额。",
-      parameters: { type: "object", properties: {} },
-    },
-  },
-  {
-    type: "function",
-    function: {
       name: "desktop.visual.screenshot",
       description: "截取当前屏幕画面，用于桌面视觉理解。",
       parameters: { type: "object", properties: {} },
@@ -92,7 +84,7 @@ const CASES: Array<{ query: string; expect: string[]; negative: string[] }> = [
   {
     query: "语音合成 配音 音频 generation tts 生成语音",
     expect: ["voice.speak", "voice.send_message"],
-    negative: ["wallet.get_balance"],
+    negative: [],
   },
   {
     query: "帮我把这句话播报出来",
@@ -117,11 +109,6 @@ const CASES: Array<{ query: string; expect: string[]; negative: string[] }> = [
   {
     query: "截个屏",
     expect: ["desktop.visual.screenshot"],
-    negative: [],
-  },
-  {
-    query: "我钱包里还有多少钱",
-    expect: ["wallet.get_balance"],
     negative: [],
   },
 ];

@@ -36,7 +36,7 @@ test("tool signals win when no confident content signal", () => {
     route("今日天气", ["湿度 60%", "降水概率 80%", "紫外线 50%"], "weather.get"),
     "progress",
   );
-  assert.equal(route("日程", ["09:00 开会"], "calendar.list_tasks"), "schedule");
+  assert.equal(route("日程", ["09:00 开会"], "calendar"), "schedule");
   assert.equal(route("账单", ["支出 100 元"], "wallet.list"), "wallet");
   assert.equal(route("订单", ["已发货"], "order.query"), "order");
   assert.equal(route("文件", ["a.pdf"], "file.read"), "file");
@@ -443,7 +443,7 @@ test("metric: dual-representation scoring keeps form score despite prose noise",
   // 修复前：语义碎片条目数 ≥ 结构化条目时整体替换，前导碎句打破
   // metric 的 every() 校验（1.0 掉到 0.5），遇强工具竞争即丢卡。
   const input = {
-    toolName: "calendar.list_tasks",
+    toolName: "calendar",
     title: "手机参数",
     items: [{ text: "屏幕尺寸：6.7英寸" }, { text: "机身重量：199g" }, { text: "峰值亮度：2000nit" }],
     fullText:

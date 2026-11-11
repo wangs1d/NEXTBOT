@@ -8,6 +8,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "soda_lyric_cache.dart";
+import "./nb_http.dart";
 
 /// 逐字时间轴上的一个唱段（字/词/音节，取决于歌曲的逐字歌词粒度）。
 class MediaLyricChar {
@@ -98,7 +99,7 @@ class MediaSessionService {
   static const MethodChannel _islandChannel =
       MethodChannel("pai/dynamic_island");
 
-  final http.Client _client = http.Client();
+  final http.Client _client = NbClient();
 
   bool _started = false;
   NowPlayingMedia? _nowPlaying;

@@ -16,23 +16,14 @@ export const CORE_TOOL_LIBRARY = {
   essential: {
     label: "会话基础设施",
     names: [
-      "clock.get_current_time",
       "clock.get_user_location",
-      "clock.get_date",
-      "clock.format_timestamp",
       // 天气常驻核心（2026-10-08 真机实证）：天气与时间/定位同为环境基础设施。
       // 留在延迟目录时轻任务面（realtime_lookup）分类召回不稳定——LLM 拿到
       // 位置后搜不到天气工具，直接幻觉编造「晴朗17°C风速2.6m/s」（真机事故）。
-      "weather.get_local",
-      "agent.query_capabilities",
-      "internet.research",
-      "internet.live_check",
-      "internet.verify",
-      "search_web",
-      "search_images",
-      "search_images_batch",
-      "search_videos",
-      "fetch_web",
+      // 2026-11：天气/行情/图片/视频/热搜/深搜统一收在复合 web_search 的 action 里。
+      "web_search",
+      "agent",
+      "web_fetch",
       "browser.session.list",
       // ObservationPack 读回工具（SoL-Pi 借鉴）：压缩/折叠损失的原文按句柄分页读回，
       // 常驻 core 档——它服务的正是「其他工具结果被压缩」的每轮场景，进延迟目录会失效。
@@ -42,15 +33,12 @@ export const CORE_TOOL_LIBRARY = {
   dialogue: {
     label: "主对话高频",
     names: [
-      "calendar.create",
-      "calendar.list_tasks",
-      "calendar.delete_task",
+      "calendar",
       // 用户画像自编辑（2026-09-29）：「越来越了解用户」是每轮对话的基本动作，
       // 进延迟目录模型会忘记搜、直接嘴硬说记了（真机实证），必须常驻可见。
       "profile.update",
-      "phone.ensure_my_number",
-      "phone.call_user",
-      "world.link.send_message",
+      "phone",
+      "world.link",
       "budget.calculate",
       "shopping.suggest",
       // 接驳下单两件套（travel-upgrade-plan P2，2026-10-18 live e2e 实证）：core 层级
@@ -60,17 +48,16 @@ export const CORE_TOOL_LIBRARY = {
       // status/cancel 低频，留在延迟目录按需召回。
       "ride_hailing.quote",
       "ride_hailing.book",
-      "self.list_custom_skills",
     ],
     prefixes: [
       "calendar.",
-      "phone.",
-      "voice.",
-      "world.link.",
-      "care.",
+      "phone",
+      "voice",
+      "world.link",
+      "care",
       "wallet.get_",
       "protocol.unified.",
-      "aip.",
+      "aip",
     ],
   },
   desktop: {
@@ -94,12 +81,11 @@ export const CORE_TOOL_LIBRARY = {
  * 这些工具在开源版不注册执行器，留在 core 名单会变成 LLM 可见但不可调的死条目。
  */
 const OSS_EXCLUDED_CORE_EXACT = new Set<string>([
-  "phone.ensure_my_number",
-  "phone.call_user",
-  "world.link.send_message",
+  "phone",
+  "world.link",
 ]);
 
-const OSS_EXCLUDED_CORE_PREFIXES: readonly string[] = ["phone.", "world.link."];
+const OSS_EXCLUDED_CORE_PREFIXES: readonly string[] = ["phone", "world.link"];
 
 const CORE_EXACT_NAMES = new Set<string>([
   ...CORE_TOOL_LIBRARY.essential.names,

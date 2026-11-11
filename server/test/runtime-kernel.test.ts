@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 
 import { RuntimeKernel } from "../src/agent/runtime-kernel.js";
@@ -27,8 +27,7 @@ test("dynamic mode strips stable prompt fields and keeps dynamic ones", () => {
   assert.equal(plan.promptMode, "dynamic");
   assert.equal(plan.toolExposureProfile, "scoped");
   assert.deepEqual(plan.pinnedToolNames, [
-    "calendar.list_tasks",
-    "calendar.create",
+    "calendar",
     "search_web",
     "search_images",
     "search_videos",
@@ -91,8 +90,7 @@ test("scoped tool exposure keeps only the pinned tool suite", () => {
     .sort();
 
   assert.deepEqual(names, [
-    "calendar.create",
-    "calendar.list_tasks",
+    "calendar",
     "fetch_web",
     "search_images",
     "search_videos",

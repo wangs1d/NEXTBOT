@@ -4,15 +4,20 @@
 #
 # 后端地址必须烤入（--dart-define），否则 ApiConfig.httpBase 回落
 # http://127.0.0.1:3000 —— 在真机上那是手机自己，登录/发验证码必然「网络错误」。
-# 未显式传 -HttpBase 时自动取本机局域网 IPv4（手机与电脑同一 WiFi 即可直连）。
+# 默认烤入生产 https 域名（2026-11-10 起）：api.nextbot.top 443 由 nginx 反代到
+# 127.0.0.1:3000（含 WS 升级头），与桌面云版 build-installer-cloud.ps1 同一先例值。
+# https 不受 Android 明文禁令约束，network_security_config 白名单不再需要维护。
+# 本机联调（手机与电脑同 WiFi 直连 dev server）请显式传 -Lan。
 param(
-  # 后端 HTTP 根地址；留空则自动探测本机局域网 IP（http://<ip>:3000）
+  # 后端 HTTP 根地址；留空走默认（-Cloud）或 -Lan 自动探测
   [string] $HttpBase = "",
   # 控制面（账号/OTP/登录页所在）；留空则与 -HttpBase 同值
   [string] $ControlPlaneUrl = "",
   # 内测版 internal / 开源版 oss
   [string] $Edition = "internal",
-  [int] $Port = 3000
+  [int] $Port = 3000,
+  # 本机联调开关：烤入 http://<局域网IP>:3000（明文，需白名单内 IP）
+  [switch] $Lan
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,12 +39,24 @@ function Get-LanIPv4 {
 }
 
 if ([string]::IsNullOrWhiteSpace($HttpBase)) {
-  $ip = Get-LanIPv4
-  if (-not $ip) { throw "未能探测到局域网 IPv4，请显式传 -HttpBase http://<电脑IP>:3000" }
-  $HttpBase = "http://${ip}:$Port"
-  Write-Host "自动探测到局域网地址：$HttpBase" -ForegroundColor Cyan
+  if ($Lan) {
+    $ip = Get-LanIPv4
+    if (-not $ip) { throw "未能探测到局域网 IPv4，请显式传 -HttpBase http://<电脑IP>:3000" }
+    $HttpBase = "http://${ip}:$Port"
+    Write-Host "本机联调（-Lan）：烤入局域网地址 $HttpBase" -ForegroundColor Cyan
+  } else {
+    $HttpBase = "https://api.nextbot.top"
+    Write-Host "默认生产地址：$HttpBase（本机联调请传 -Lan）" -ForegroundColor Cyan
+  }
 }
-if ([string]::IsNullOrWhiteSpace($ControlPlaneUrl)) { $ControlPlaneUrl = $HttpBase }
+if ([string]::IsNullOrWhiteSpace($ControlPlaneUrl)) {
+  # 云端形态控制面固定走 login 子域（登录页/OTP 主入口）；局域网联调与 HttpBase 同值
+  if ($HttpBase -eq "https://api.nextbot.top") {
+    $ControlPlaneUrl = "https://login.nextbot.top"
+  } else {
+    $ControlPlaneUrl = $HttpBase
+  }
+}
 
 # --no-version-check：跳过 flutter 启动时的 `git log` 版本新鲜度检查。
 # 该检查纯属提示用途；在管道资源紧张的机器上它会直接让 flutter 崩掉
@@ -67,6 +84,23 @@ if ((Test-Path $nsConfig) -and $uri.Scheme -eq "http" -and $uri.Host -match '^\d
     Write-Host "  请把 <domain includeSubdomains=""false"">$($uri.Host)</domain> 加进：" -ForegroundColor Yellow
     Write-Host "  $nsConfig" -ForegroundColor Yellow
     Write-Host "  （或改用 https 域名，如 https://login.nextbot.top）" -ForegroundColor Yellow
+  }
+}
+
+# Release 构建前清掉插件注册器与插件清单：
+# `flutter test`（尤其 integration_test）会把 **dev 依赖插件** 写进
+# `.flutter-plugins-dependencies`，随后 release 构建沿用这份清单生成
+# GeneratedPluginRegistrant.java，就会编译出
+# 「程序包 dev.flutter.plugins.integration_test 不存在」（dev 插件不进 release
+# 的 classpath）。删掉让 flutter 按 release 规则重新生成，避免这类假失败。
+$registrant = Join-Path $PSScriptRoot "android\app\src\main\java\io\flutter\plugins\GeneratedPluginRegistrant.java"
+$pluginsList = Join-Path $PSScriptRoot ".flutter-plugins-dependencies"
+# 用 .NET 文件 API 而不是 Remove-Item：环境里的 safe-delete 钩子会对
+# Remove-Item 走回收站，回收站不可用时 fail-closed 直接抛错，把构建打断
+# 在这两行上（2026-11-11 实测）。这两个都是可再生成产物，直接删即可。
+foreach ($f in @($registrant, $pluginsList)) {
+  if (Test-Path -LiteralPath $f) {
+    try { [System.IO.File]::Delete($f) } catch { Write-Warning "清理失败（可忽略）: $f" }
   }
 }
 

@@ -897,7 +897,6 @@ function inferLatencyMs(domain: string, resourceType: ResourceType): number {
 
 function looksLikeSessionSkill(entry: DeferredToolEntry): boolean {
   const name = entry.registryName;
-  if (name.startsWith("self.")) return false;
   if (/^(agent|aip|browser|calendar|clock|desktop|fetch|info|phone|search|shopping|wallet|weather|world)\b/.test(name)) {
     return false;
   }
@@ -912,8 +911,8 @@ function inferDomains(name: string, resourceType: ResourceType): string[] {
   for (const inferred of getEntryCategoryNames(name, TOOL_CATEGORIES)) domains.add(inferred);
   const namespace = firstNamespace(name);
 
-  if (name === "search_web") domains.add("search");
-  if (name === "fetch_web") {
+  if (name === "web_search") domains.add("search");
+  if (name === "web_fetch") {
     domains.add("search");
     domains.add("browser");
   }
@@ -962,11 +961,11 @@ function inferCapabilities(
     }
   }
 
-  if (name === "search_web") {
+  if (name === "web_search") {
     capabilities.add("search.query");
     capabilities.add("search.web");
   }
-  if (name === "fetch_web") {
+  if (name === "web_fetch") {
     capabilities.add("search.fetch");
     capabilities.add("browser.navigate");
     capabilities.add("browser.read");
@@ -974,7 +973,6 @@ function inferCapabilities(
   if (name.includes("automation")) capabilities.add("desktop.automation");
   if (name.includes("screenshot")) capabilities.add("desktop.screenshot");
   if (name.startsWith("mcp.")) capabilities.add("mcp.general");
-  if (resourceType === ResourceType.Skill) capabilities.add("self.skill");
 
   capabilities.add(cleanCapability(name));
   return dedupe([...capabilities].filter(Boolean));
@@ -1154,7 +1152,6 @@ function inferDomainGroups(domains: string[], resourceType: ResourceType): strin
       case "desktop":
       case "device":
       case "smart_home":
-      case "vision":
         groups.add("execution");
         break;
       case "weather":
@@ -1301,7 +1298,7 @@ function tryFastPathIntent(query: string): ParsedIntent | null {
     return { intent: "MCP 工具查询", domain_candidates: ["mcp", "misc"], primary_capability: "mcp.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
   if (/\bskill\b|\b技能\b|\bcapabilit(?:y|ies)\b|\b能力\b/.test(q)) {
-    return { intent: "技能查询", domain_candidates: ["self", "agent"], primary_capability: "self.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
+    return { intent: "技能查询", domain_candidates: ["agent"], primary_capability: "agent.query", confidence: 0.85, query_constraints: ro, param_extract: {}, is_compound_task: false, sub_intents: [] };
   }
 
   return null;
@@ -1374,18 +1371,16 @@ function namespaceToDomain(namespace: string): string {
     wallet: "wallet",
     weather: "weather",
     world: "world",
-    self: "self",
     smart: "smart_home",
     device: "device",
     voice: "voice",
-    vision: "vision",
   };
   return map[namespace] ?? cleanDomain(namespace || "misc");
 }
 
 function firstNamespace(name: string): string {
-  if (name === "search_web") return "search";
-  if (name === "fetch_web") return "fetch";
+  if (name === "web_search") return "search";
+  if (name === "web_fetch") return "fetch";
   return name.split(/[._-]/)[0]?.toLowerCase() ?? "misc";
 }
 

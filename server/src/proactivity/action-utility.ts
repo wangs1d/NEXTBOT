@@ -244,7 +244,7 @@ export function deriveRiskFromSteps(
     const tool = step.tool ?? "";
     // 权威分级优先（tool-risk.ts 单一口径）：money→金融高档、irreversible→不可逆；
     // 正则族保留作兜底（覆盖未入表的新工具名模式）
-    const riskClass = classifyToolRisk(tool);
+    const riskClass = classifyToolRisk(tool, step.args as Record<string, unknown> | undefined);
     if (riskClass === "irreversible" || IRREVERSIBLE_TOOL_RE.test(tool)) reversible = false;
     if (riskClass === "money" || FINANCIAL_TOOL_RE.test(tool)) financialImpact = "high";
     if (SENSITIVE_DATA_TOOL_RE.test(tool) && dataSensitivity === "none") dataSensitivity = "personal";

@@ -2,6 +2,7 @@ import "dart:async";
 import "dart:convert";
 
 import "package:http/http.dart" as http;
+import "./nb_http.dart";
 
 /// 日程 API 调用结果（区分网络故障与业务错误）。
 class ScheduleApiResult<T> {
@@ -27,7 +28,7 @@ class ScheduleApiResult<T> {
 /// 服务端日程任务 API（`GET/DELETE/PATCH /schedule/tasks`）。
 class ScheduleApiClient {
   ScheduleApiClient({required this.baseUrl, http.Client? client})
-      : _client = client ?? http.Client();
+      : _client = client ?? NbClient();
 
   final String baseUrl;
   final http.Client _client;

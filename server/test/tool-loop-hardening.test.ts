@@ -368,15 +368,24 @@ describe("reportChatToolDrift", () => {
   test("schema 无执行器 → schemaOnly；别名归一后命中不算漂移", () => {
     const schemas = [
       { type: "function", function: { name: "calendar.create_from_text", parameters: {} } },
-      { type: "function", function: { name: "self.list_custom_skills", parameters: {} } },
+      { type: "function", function: { name: "desktop_visual_screenshot", parameters: {} } },
       { type: "function", function: { name: "tool_discover", parameters: {} } },
     ] as never[];
     const report = reportChatToolDrift({
       schemas,
-      registeredToolNames: ["calendar.create_from_text", "skill.list", "search_web"],
+      registeredToolNames: ["calendar.create_from_text", "desktop.visual.screenshot", "orphan_executor"],
     });
-    assert.deepEqual(report.schemaOnly, [], "别名归一（self.list_custom_skills→skill.list）不应报漂移");
-    assert.ok(report.executorOnly.includes("search_web"), "无 schema 的执行器应被点名");
+    assert.deepEqual(report.schemaOnly, [], "别名归一（desktop_visual_screenshot→desktop.visual.screenshot）不应报漂移");
+    assert.ok(report.executorOnly.includes("orphan_executor"), "无 schema 的执行器应被点名");
+  });
+
+  test("复合工具收编的执行器不算漂移", () => {
+    // search_web 已被 web_search 收编，仅由复合 handler 内部转发，无需独立 schema。
+    const report = reportChatToolDrift({
+      schemas: [],
+      registeredToolNames: ["search_web"],
+    });
+    assert.deepEqual(report.executorOnly, [], "收编执行器不应报 executorOnly 漂移");
   });
 });
 

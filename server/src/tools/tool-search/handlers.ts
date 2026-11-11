@@ -594,7 +594,7 @@ async function searchWithAdaptiveFallback(
 function inferFallbackDomain(name: string, resourceType: ResourceType): string[] {
   if (resourceType === ResourceType.McpServer) return ["mcp"];
   if (resourceType === ResourceType.Skill) return ["self"];
-  if (name === "search_web" || name === "fetch_web") return ["search"];
+  if (name === "web_search" || name === "web_fetch") return ["search"];
   return [name.split(/[._-]/)[0]?.toLowerCase() || "misc"];
 }
 

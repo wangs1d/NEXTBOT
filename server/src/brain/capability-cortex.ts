@@ -39,13 +39,11 @@ export type CapabilityExpansionProposal = {
  *   - social_outreach 走无 `world.` 前缀的 `social.post / social.comment / ...`
  */
 const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
-  wallet: ["wallet.", "payment.", "alipay."],
   agent_link: ["world.link."],
   calendar: ["calendar.", "reminder."],
   weather: ["weather."],
   sub_agent: ["master."],
   aip: ["aip."],
-  vision: ["vision."],
   desktop: ["desktop.", "browser.session.", "browser.fetch_page"],
   web: ["search_web", "search_images", "search_videos", "fetch_web", "info."],
   life_assistant: ["budget.", "shopping.suggest", "payment.", "alipay."],
@@ -53,7 +51,6 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   phone: ["phone.", "phone_bridge."],
   // entertainment 暂无对应工具
   social_feed: ["world.social."],
-  self_programming: ["self."],
   world: ["world."],
   smart_home: ["smart_home."],
   notes: ["notes."],
@@ -74,7 +71,7 @@ const DOMAIN_TOOL_PATTERNS: Record<string, string[]> = {
   ],
   code_sandbox: ["code."],
   shopping_order: ["shopping.order."],
-  agent_browser: ["agent_browser."],
+  agent_browser: ["agent_browser"],
   shared_browser: ["shared_browser."],
 };
 

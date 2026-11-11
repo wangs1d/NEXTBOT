@@ -1,10 +1,5 @@
-import OpenAI from "openai";
 import type { Memory } from "mem0ai/oss";
 
-import {
-  resolveOpenAiApiKey,
-  getAgenticMemoryLlmModel,
-} from "./env.js";
 import { decideMemoryWrite } from "../services/memory-decision-engine.js";
 import { isProfileWriteBatchMode } from "../services/profile-write-scheduler.js";
 import { factValueInText } from "../services/memory-record-utils.js";
@@ -67,18 +62,6 @@ export type LowSignalSink = (entry: {
   text: string;
   context: "main" | "notes";
 }) => void;
-
-function extractKeyLowSignalLines(text: string): string[] {
-  return text
-    .split(/\n+/)
-    .map((line) => line.trim())
-    .filter((line) =>
-      /\[.*\]|喜欢|不喜欢|讨厌|偏好|记住|提醒|承诺|决定|计划|待办|重要|生日|纪念日/i.test(
-        line,
-      ),
-    )
-    .slice(0, 6);
-}
 
 export class AgenticMemoryIngestService {
   private lowSignalSink: LowSignalSink | null = null;
@@ -298,7 +281,9 @@ export class AgenticMemoryIngestService {
   /**
    * 统一抽取产物直存（所有 unified 路径共用的落库核心）：
    *   - memories 以 infer:false 直存（抽取已在 extractUnified 完成，Mem0 不再二次调 LLM）；
- *   - 落库后 fire 钩子，携带 results + understandings + corrections + facts——
+   *   - Mem0 只是可重建的二级索引（P2-2）：权威事实在认知图 + 结构化事实库，
+   *     本方法落库失败不影响上游已落的事实；
+   *   - 落库后 fire 钩子，携带 results + understandings + corrections + facts——
  *     bootstrap 钩子据此做账本落账 / 理解档案 upsert（含演变历史）/ 纠正级联 / 事实库更新；
    *   - decision=reject 时记忆不落库，但纠正/理解仍经钩子落地（P0-2 解耦语义）；
    *   - memories 为空且非 reject 时回退 fallbackText（高信号=原句；整合路径传截断后的合并文本）。

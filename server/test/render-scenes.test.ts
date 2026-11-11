@@ -104,6 +104,7 @@ test("注册表：重复 id 直接抛错（防热更两次逻辑翻倍）", () =
 // ── 1b. 提醒确认卡（2026-11-07 方案 A：一轮一张卡、卡内多行、只读） ──────────
 
 const REMINDER_RECEIPT = {
+  action: "create",
   ok: true,
   taskId: "task-1",
   title: "叫阿哲起床",
@@ -120,7 +121,7 @@ const REMINDER_RECEIPT = {
 type ReminderEffect = { tool: string; status: "ok"; result: Record<string, unknown> };
 
 function reminderEffects(results: Array<Record<string, unknown>>): ReminderEffect[] {
-  return results.map((result) => ({ tool: "calendar.create", status: "ok" as const, result }));
+  return results.map((result) => ({ tool: "calendar", status: "ok" as const, result }));
 }
 
 function reminderOf(card: Record<string, unknown>): Record<string, unknown> {
@@ -185,7 +186,7 @@ test("提醒确认卡：按 taskId 去重；失败轮 / 缺时区不出卡", () 
   assert.equal(reminderOf(collectCardPayloads(duplicated)[0]).total, 1);
   const failed = decideRender({
     text: "没设成。",
-    effects: [{ tool: "calendar.create", status: "error" }],
+    effects: [{ tool: "calendar", status: "error" }],
   });
   assert.equal(failed.cards.length, 0);
   const noTimezone = decideRender({
@@ -196,7 +197,7 @@ test("提醒确认卡：按 taskId 去重；失败轮 / 缺时区不出卡", () 
 });
 
 test("提醒确认卡：脚注仅重复规则 / 跨时区时出现", () => {
-  const base = [{ tool: "calendar.create", status: "ok" as const, result: { ...REMINDER_RECEIPT } }];
+  const base = [{ tool: "calendar", status: "ok" as const, result: { ...REMINDER_RECEIPT } }];
   assert.equal(buildReminderConfirmPayload(base, "Asia/Shanghai")?.footer, "");
   const weekly = [{ ...base[0], result: { ...REMINDER_RECEIPT, recurrence: "weekly" } }];
   assert.equal(buildReminderConfirmPayload(weekly, "Asia/Shanghai")?.footer, "每周");
@@ -213,10 +214,11 @@ test("提醒确认卡：修改 / 取消走 card.update 原地刷新，不追加�
 
   const updated = buildReminderCardUpdate("actor-reminder-test", [
     {
-      tool: "calendar.update_task",
+      tool: "calendar",
       status: "ok",
       result: {
         ...REMINDER_RECEIPT,
+        action: "update_task",
         nextRunAt: "2026-11-06T23:30:00.000Z",
         runAt: "2026-11-06T23:30:00.000Z",
         whenSpoken: "明早七点半",
@@ -232,9 +234,9 @@ test("提醒确认卡：修改 / 取消走 card.update 原地刷新，不追加�
 
   const cancelled = buildReminderCardUpdate("actor-reminder-test", [
     {
-      tool: "calendar.delete_task",
+      tool: "calendar",
       status: "ok",
-      result: { ok: true, taskId: "task-1", status: "cancelled" },
+      result: { ok: true, action: "delete_task", taskId: "task-1", status: "cancelled" },
     },
   ]);
   assert.ok(cancelled);
@@ -245,9 +247,9 @@ test("提醒确认卡：修改 / 取消走 card.update 原地刷新，不追加�
     text: "改好了。",
     effects: [
       {
-        tool: "calendar.update_task",
+        tool: "calendar",
         status: "ok",
-        result: { ...REMINDER_RECEIPT, status: "active" },
+        result: { ...REMINDER_RECEIPT, action: "update_task", status: "active" },
       },
     ],
   });
@@ -407,9 +409,9 @@ test("工具卡面：calendar.list_tasks 回执 → schedule 卡，正文只作�
     text: "今天两项。",
     effects: [
       {
-        tool: "calendar.list_tasks",
+        tool: "calendar",
         status: "ok",
-        result: { ok: true, tasks: [{ title: "部门例会", nextRunAt: "2026-11-05T09:30:00+08:00" }], count: 1 },
+        result: { ok: true, action: "list_tasks", tasks: [{ title: "部门例会", nextRunAt: "2026-11-05T09:30:00+08:00" }], count: 1 },
       },
     ],
   });

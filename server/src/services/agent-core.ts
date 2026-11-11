@@ -54,7 +54,7 @@ import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUI
 /**
  * 前台小工具集白名单（2026-09-06 P0 修复，原生 function calling）。
  *
- * 契约：前台可见工具为提醒/日程直写（calendar.create，
+ * 契约：前台可见工具为提醒/日程直写（calendar 且 action=create，
  * 2026-09-08：简单写操作对话面当场办成，不派后台、不出任务回执）+
  * task.dispatch（派后台）+ search_web（快查），以 explicit profile 注入
  * （chatToolsBuiltin 即最终可见集，无延迟目录、无 contextual 筛选）。
@@ -63,13 +63,13 @@ import { CHAT_PLANE_ROLE_GUIDANCE, TASK_PLANE_ROLE_GUIDANCE, FOREGROUND_ROLE_GUI
  * 注册表侧 task.dispatch 的 launch 回调由 bootstrap 晚绑定（create-app-services）。
  */
 let _foregroundToolWhitelist: ChatCompletionTool[] | null = null;
-const FOREGROUND_INLINE_TOOL_NAMES = new Set(["calendar.create"]);
+const FOREGROUND_INLINE_TOOL_NAMES = new Set(["calendar"]);
 /**
  * 日历/提醒创建类工具（2026-09-24）：本轮任一成功返回 → 该轮按「办妥确认轮」
  * 执法回复风格闸（不吃结构豁免），堵"订阅确认写成五段导购"的废话出口。
  */
 /** 确认轮工具集（WS 层同源消费：分泡轮说话算话裁决的确认轮例外，见 bubble-tracker.ts） */
-export const CALENDAR_CONFIRM_TOOLS = new Set(["calendar.create"]);
+export const CALENDAR_CONFIRM_TOOLS = new Set(["calendar"]);
 function getForegroundChatToolWhitelist(userText?: string): ChatCompletionTool[] {
   const base = (() => {
     if (_foregroundToolWhitelist) return _foregroundToolWhitelist;
@@ -174,9 +174,9 @@ import { getPromotedToolNames } from "../tools/tool-search/tool-promotion.js";
 import { toolsInDomain } from "../tools/tool-search/tool-category.js";
 import {
   getBuiltinAgentChatTools,
-  isSubstantiveToolExecution,
   selectForegroundCapabilityToolAdditions,
 } from "../external-model/openai-compatible-tool-loop.js";
+import { receiptProducesCard } from "./receipt-card-projection.js";
 import { isVoiceMode } from "../proactivity/voice-mode-state.js";
 import { describeMemoryAge, semanticFingerprint } from "./memory-record-utils.js";
 
@@ -2019,10 +2019,15 @@ if (route.plane === "task") {
         // media/行程回执的数据源——二者职责不同，不能互相短路。
         onToolExecuted: (info: ToolExecutedInfo) => {
           if (toolTraces.length < 16) toolTraces.push(info);
-          // 答案留存记账（2026-10-13 根修）：holdAnswer="after_tool_use" 时，
-          // 实质工具执行 = 工具循环已对本轮答案关闸（与循环内 answerHeld()
-          // 同一判定函数 isSubstantiveToolExecution，口径恒一致）。
-          if (holdAnswer === "after_tool_use" && isSubstantiveToolExecution(info.toolName)) {
+          // 答案留存记账（2026-10-13 根修；2026-11-10 判据收窄为「回执出卡」）：
+          // holdAnswer="after_tool_use" 时，回执会确定性出卡 = 工具循环已对
+          // 本轮答案关闸（与循环内 answerHeld() 同一判定函数 receiptProducesCard，
+          // 口径恒一致）。不出卡的回执（查记忆/记账/失败回执）不扣流。
+          if (
+            holdAnswer === "after_tool_use" &&
+            info.ok &&
+            receiptProducesCard(info.toolName, info.result)
+          ) {
             answerStreamHeld = true;
           }
           ctx.orchestrateToolCtx?.onToolExecuted?.(info);

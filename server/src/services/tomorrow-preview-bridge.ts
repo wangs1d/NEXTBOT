@@ -44,18 +44,26 @@ export function resetPreviewDigestSource(): void {
 const TOMORROW_WORD = /明天|明日|明早|明晚|明儿/;
 /** 强安排词：出现即认定为在问日程（即使同时提了天气） */
 const SCHEDULE_WORD = /安排|行程|日程|计划|待办|预告|预览|要做|做什么|干啥|有事|忙什么/;
+/** 问句信号：短追问（「明天呢」「说说明天」「明早几点要出门」）没有安排词，
+ *  但确实是在问明天——问句词在场同样认定。陈述句（「明天再去游泳」）
+ *  两类词都不沾，不认。 */
+const ASK_WORD = /几点|什么|啥|哪些|呢|吗|说说|看看|讲讲/;
 const WEATHER_WORD = /天气|气温|几度|下雨|降雨|雨|雪|冷|热|穿|带伞|风/;
 
 /**
  * 这条消息是不是在问明日安排。
  *
- * 只看措辞，不做语义猜测：含「明天」是前提；提到安排/行程类强信号就认；
- * 只是问天气（「明天几点下雨」）则不认——天气轮有自己的卡与边界，
- * 被 90 优先级的预览场景抓走会同时丢卡和丢数据。
+ * 只看措辞，不做语义猜测：含「明天」且**确实在问**（强安排词或问句词在场）
+ * 才认；纯陈述的闲聊（「明天再去游泳」）不认——tomorrow_preview 场景
+ * （singleBubble）会把已分好的绿泡在 done 整体塌缩成一条，闲聊轮绝不能被
+ * 抓走（2026-11-10 分泡回归根修，真链探针实证）。只是问天气（「明天几点
+ * 下雨」）也不认——天气轮有自己的卡与边界，被 90 优先级的预览场景抓走会
+ * 同时丢卡和丢数据。
  */
 export function wantsTomorrowPreview(userText: string): boolean {
   const text = (userText ?? "").trim();
   if (!text || !TOMORROW_WORD.test(text)) return false;
+  if (!SCHEDULE_WORD.test(text) && !ASK_WORD.test(text)) return false;
   // 天气词在场且没有强安排词 → 归天气轮
   if (WEATHER_WORD.test(text) && !SCHEDULE_WORD.test(text)) return false;
   return true;

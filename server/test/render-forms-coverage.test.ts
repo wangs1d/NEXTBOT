@@ -321,20 +321,11 @@ test("不变量：行程载荷自报失败不附行程卡", () => {
   assert.ok(!out.includes("travel_itinerary"), "失败载荷不该建行程卡");
 });
 
-test("L1 wallet：wallet.get_balance 回执 → wallet 专用卡", () => {
-  const out = processor.processAssistantText("余额查好了。", {
-    toolName: "wallet.get_balance",
-    toolResult: { balance: 12345.67, currency: "CNY", summary: "人民币余额" },
-  });
-  const card = parseCard(out);
-  assert.equal(card.cardType, "wallet");
-  assert.ok(card.items[0].text.includes("12345.67"));
-});
-
 test("L1 calendar：calendar.list_tasks 回执 → schedule 专用卡", () => {
   const out = processor.processAssistantText("明天有两个安排。", {
-    toolName: "calendar.list_tasks",
+    toolName: "calendar",
     toolResult: {
+      action: "list_tasks",
       tasks: [
         { title: "部门例会", start: "2026-09-16T09:30:00" },
         { title: "牙医复诊", start: "2026-09-16T14:00:00" },
@@ -464,7 +455,7 @@ test("形态 data_brief 退役：KPI 富集短报不再切快报卡，正文原�
 
 test("形态 image_result：识图工具 → [RENDER_AS:image_result]", () => {
   const out = processor.processAssistantText("照片里是一只橘猫，趴在键盘上睡觉，旁边有一杯咖啡。", {
-    toolName: "vision.recognize",
+    toolName: "photo.recognize",
     userText: "帮我看看这张照片",
   });
   assert.ok(out.startsWith("[RENDER_AS:image_result]"), `实际输出：${out.slice(0, 200)}`);

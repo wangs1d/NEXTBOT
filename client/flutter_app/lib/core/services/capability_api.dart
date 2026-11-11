@@ -4,6 +4,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 能力就绪状态。
 ///
@@ -71,7 +72,7 @@ class CapabilityOverview {
 class CapabilityApi {
   CapabilityApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

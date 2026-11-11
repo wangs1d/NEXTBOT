@@ -46,7 +46,6 @@ test("媒体轮工具面：文字检索族全剥离，图片/视频检索保留"
     tool("fetch_web"),
     tool("hot_rankings"),
     tool("info.inspect_webpage"),
-    tool("internet.research"),
     tool("search_images"),
     tool("search_images_batch"),
     tool("search_videos"),

@@ -6,10 +6,9 @@
  *      发送方 hub 留档（outbound）+ WS 直推（含 fromName）+ lastMessageAt 双向
  *   2. 对方离线（trySend=false）→ 消息仍持久落库；hub 重建（模拟重启）后不丢
  *   3. 重连补投 replayUnread：未读会话重推最新一条；标读后不再推
- *   4. messages.reply 在 friend 平台会话上真实回信（经同一投递内核）
- *   5. 入口闸豁免：friend 平台带强模板词（验证码/中奖）的好友消息不被吞
- *   6. seq 单调递增 + sinceSeq 增量拉取（2026-10-17 断线补拉游标）
- *   7. 已读回执：标读后对端收到 agent.peer_read_receipt，lastReadSeq
+ *   4. 入口闸豁免：friend 平台带强模板词（验证码/中奖）的好友消息不被吞
+ *   5. seq 单调递增 + sinceSeq 增量拉取（2026-10-17 断线补拉游标）
+ *   6. 已读回执：标读后对端收到 agent.peer_read_receipt，lastReadSeq
  *      经 externalMessageId 翻译到对端会话空间（2026-10-17）
  *
  * 测试封闭：临时目录 SQLite/JSON，无外部依赖；AGENT_TOOL_PROMOTION_STATE_PATH
@@ -30,7 +29,6 @@ import { MessageHubService } from "../src/services/message-hub-service.js";
 import { gateInboundMessage } from "../src/services/message-gate.js";
 import { registerAgentLinkTools } from "../src/tools/agent-link-tools.js";
 import { registerAgentRelayTools } from "../src/tools/agent-relay-tools.js";
-import { registerMessageHubTools } from "../src/tools/message-hub-tools.js";
 import { ToolRegistry, type ToolContext } from "../src/tools/tool-registry.js";
 
 type PushRecord = { targetId: string; envelope: Record<string, unknown> };
@@ -106,12 +104,6 @@ async function buildHarness(): Promise<Harness> {
     arePaired: () => true,
   } as never, accounts);
   registerAgentLinkTools(registry, friends, accounts, worldService as never);
-  registerMessageHubTools(registry, {
-    hub,
-    gateway: { send: async () => ({ ok: false, delivered: false, message: "unused" }) } as never,
-    runtime: {} as never,
-    friendMessages,
-  });
 
   return {
     dir, accounts, friends, relay, hub, friendMessages, ws, registry,
@@ -253,50 +245,6 @@ test("对方离线也必达：hub 持久落库，模拟重启后消息仍在且�
   }
 });
 
-test("messages.reply 在 friend 会话上真实回信", async () => {
-  const h = await buildHarness();
-  try {
-    await makeFriends(h);
-    // 鲍勃的爱丽丝会话（由 alice 先发一条建立）
-    await h.registry.execute(
-      "world.link.send_message",
-      { targetSessionId: "bob@test.local", body: "在吗" },
-      ALICE_CTX,
-    );
-    const bobConv = h.hub
-      .listConversations("bob@test.local", { platform: "friend" })
-      .find((c) => c.channelId === "alice@test.local");
-    assert.ok(bobConv);
-
-    const before = h.ws.pushed.length;
-    const result = await h.registry.execute(
-      "messages.reply",
-      { conversationId: bobConv.conversationId, text: "在的，怎么了" },
-      BOB_CTX,
-    );
-    assert.ok(result.ok, `messages.reply 应成功：${JSON.stringify(result.result)}`);
-    assert.equal(result.result.delivered, true);
-
-    // 爱丽丝侧收到入站
-    const aliceConv = h.hub
-      .listConversations("alice@test.local", { platform: "friend" })
-      .find((c) => c.channelId === "bob@test.local");
-    assert.ok(aliceConv);
-    assert.equal(aliceConv.unreadCount, 1);
-    const aliceMessages = h.hub.listMessages("alice@test.local", aliceConv.conversationId);
-    const last = aliceMessages[aliceMessages.length - 1];
-    assert.equal(last.direction, "inbound");
-    assert.equal(last.text, "在的，怎么了");
-    assert.equal(last.senderName, "鲍勃");
-
-    // WS 又推了一条（直推爱丽丝在线连接）
-    assert.equal(h.ws.pushed.length, before + 1);
-    assert.equal(h.ws.pushed[h.ws.pushed.length - 1].targetId, "alice@test.local");
-  } finally {
-    await teardown(h);
-  }
-});
-
 test("入口闸豁免 friend 平台：强模板词的好友消息不被吞", () => {
   const verdict = gateInboundMessage({
     actorId: "bob@test.local",
@@ -380,43 +328,6 @@ test("门禁：非好友（未注册）调 world.link.send_message → NOT_FRIEN
       .listConversations("carol@test.local", { platform: "friend" })
       .find((c) => c.channelId === "alice@test.local");
     assert.equal(carolConv, undefined, "接收方不应有 friend 会话");
-    assert.equal(h.ws.pushed.length, 0);
-    assert.equal(h.relay.listInbox("carol@test.local").length, 0);
-  } finally {
-    await teardown(h);
-  }
-});
-
-test("门禁：messages.reply 对非好友 friend 会话返回 NOT_FRIENDS 结构", async () => {
-  const h = await buildHarness();
-  try {
-    // 模拟「曾是好友后被删」的残留会话：carol 给 bob 灌一条 friend 入站建立会话
-    await h.hub.ingestInbound({
-      actorId: "bob@test.local",
-      platform: "friend",
-      channelId: "carol@test.local",
-      text: "还加我好友吗",
-      participantId: "carol@test.local",
-      participantName: "卡罗尔",
-      senderId: "carol@test.local",
-      senderName: "卡罗尔",
-    });
-    const bobConv = h.hub
-      .listConversations("bob@test.local", { platform: "friend" })
-      .find((c) => c.channelId === "carol@test.local");
-    assert.ok(bobConv, "前置：残留 friend 会话已建立");
-
-    const result = await h.registry.execute(
-      "messages.reply",
-      { conversationId: bobConv.conversationId, text: "不加" },
-      BOB_CTX,
-    );
-    assert.ok(result.ok, "execute 层应成功（结构化失败放在 result 内）");
-    const failure = result.result as { ok?: boolean; error?: string; reason?: string };
-    assert.equal(failure.ok, false, "非好友回信应失败");
-    assert.equal(failure.reason, "NOT_FRIENDS");
-    assert.match(failure.error ?? "", /world\.link\.send_friend_request/);
-    // 对方未收到任何东西
     assert.equal(h.ws.pushed.length, 0);
     assert.equal(h.relay.listInbox("carol@test.local").length, 0);
   } finally {

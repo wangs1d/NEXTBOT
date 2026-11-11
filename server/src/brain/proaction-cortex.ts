@@ -573,8 +573,9 @@ export class ProactionCortex {
 
     if (/travel|出行|出差|旅游|出发/.test(kind) || /travel|出行|出差/.test(title)) {
       actions.push({
-        tool: "calendar.create",
+        tool: "calendar",
         args: {
+          action: "create",
           title: `出行提醒: ${signal.title}`,
           description: signal.summary ?? "",
           dueTime: "tomorrow_morning",
@@ -585,8 +586,9 @@ export class ProactionCortex {
 
     if (/deadline|截止|到期|due/.test(kind) || /deadline|截止|到期/.test(title)) {
       actions.push({
-        tool: "calendar.create",
+        tool: "calendar",
         args: {
+          action: "create",
           title: `待办: ${signal.title}`,
           description: signal.summary ?? "",
         },
@@ -597,8 +599,8 @@ export class ProactionCortex {
     if (/late_night|深夜|熬夜/.test(kind) || /late_night|深夜/.test(title)) {
       // 深夜活动 → 激活"晚安"场景（若设备可用）
       actions.push({
-        tool: "smart_home.scene",
-        args: { action: "activate", scene_name: "晚安" },
+        tool: "smart_home",
+        args: { action: "scene", scene_action: "activate", scene_name: "晚安" },
         reason: "深夜活动触发晚安场景",
       });
     }
@@ -610,9 +612,8 @@ export class ProactionCortex {
 
   /** 允许 LLM 调用的环境控制工具白名单 */
   private static readonly ACTION_TOOL_WHITELIST = new Set([
-    "calendar.create",
-    "smart_home.scene",
-    "smart_home.control_device",
+    "calendar",
+    "smart_home",
     // ProactivityHub act 模式：过劳干预放音乐等场景
     "media.search",
     "media.play",
@@ -624,9 +625,9 @@ export class ProactionCortex {
    * 未在映射中的信号场景 → 允许全部白名单工具（保守放行，避免过度过滤）。
    */
   private static readonly SIGNAL_TOOL_MAP: Array<{ keywords: RegExp; tools: Set<string> }> = [
-    { keywords: /travel|出行|出差|旅游|出发|trip|flight|deadline|截止|到期|due|schedule|日程|待办|todo/, tools: new Set(["calendar.create"]) },
-    { keywords: /late_night|深夜|熬夜|night|晚安|sleep|休息/, tools: new Set(["smart_home.scene", "smart_home.control_device"]) },
-    { keywords: /weather|天气|温度|temperature|hot|cold|热|冷/, tools: new Set(["smart_home.control_device"]) },
+    { keywords: /travel|出行|出差|旅游|出发|trip|flight|deadline|截止|到期|due|schedule|日程|待办|todo/, tools: new Set(["calendar"]) },
+    { keywords: /late_night|深夜|熬夜|night|晚安|sleep|休息/, tools: new Set(["smart_home"]) },
+    { keywords: /weather|天气|温度|temperature|hot|cold|热|冷/, tools: new Set(["smart_home"]) },
   ];
 
   /**

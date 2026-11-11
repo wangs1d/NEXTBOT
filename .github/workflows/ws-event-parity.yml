@@ -1,0 +1,29 @@
+name: ws-event-parity
+
+# 跨端事件对账守护：服务端发出的 WS 事件 ↔ 客户端归属表 / 消费点。
+# 只读文件、零依赖，所以不安装 node_modules，跑一个脚本即可。
+on:
+  push:
+    paths:
+      - "server/src/**"
+      - "client/flutter_app/lib/**"
+      - "packages/agent-protocol/**"
+      - "scripts/verify-ws-event-parity.mjs"
+  pull_request:
+    paths:
+      - "server/src/**"
+      - "client/flutter_app/lib/**"
+      - "packages/agent-protocol/**"
+      - "scripts/verify-ws-event-parity.mjs"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: 跨端事件对账
+        run: node scripts/verify-ws-event-parity.mjs

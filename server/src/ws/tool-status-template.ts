@@ -172,7 +172,7 @@ export function renderToolStatusLine(
   }
 
   // ── 日程 / 提醒 ──
-  if (hasPrefix(tool, ["calendar.create", "calendar.update"])) {
+  if (hasPrefix(tool, ["calendar"])) {
     return title ? `我在排「${title}」` : null;
   }
   if (hasPrefix(tool, ["reminder."])) {
@@ -182,9 +182,6 @@ export function renderToolStatusLine(
   // ── 沟通 ──
   if (hasPrefix(tool, ["phone.dial", "phone.call_user", "phone_call.start"])) {
     return person ? `我打给${person}` : null;
-  }
-  if (hasPrefix(tool, ["messages.reply", "messages.suggest_reply"])) {
-    return person ? `我回${person}一句` : null;
   }
   if (hasPrefix(tool, ["email.send"])) {
     return person ? `我在给${person}写邮件` : null;
@@ -202,7 +199,7 @@ export function renderToolStatusLine(
   if (hasPrefix(tool, ["desktop.open", "desktop_open"])) {
     return app ? `我打开${app}` : null;
   }
-  if (hasPrefix(tool, ["smart_home.control_device"])) {
+  if (hasPrefix(tool, ["smart_home"])) {
     return device ? `我调一下${device}` : null;
   }
   if (hasPrefix(tool, ["file.parse", "file.read"])) {

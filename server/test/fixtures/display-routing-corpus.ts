@@ -59,7 +59,7 @@ export const CARD_CORPUS: CardCase[] = [
   },
   {
     name: "tool: calendar/schedule strong",
-    input: { title: "日程", items: items(["09:00 开会"]), toolName: "calendar.list_tasks" },
+    input: { title: "日程", items: items(["09:00 开会"]), toolName: "calendar" },
     expected: "schedule",
   },
   {
@@ -190,7 +190,7 @@ export const CARD_CORPUS: CardCase[] = [
   {
     name: "metric: dual representation survives prose noise (calendar tool)",
     input: {
-      toolName: "calendar.list_tasks",
+      toolName: "calendar",
       title: "手机参数",
       items: items(["屏幕尺寸：6.7英寸", "机身重量：199g", "峰值亮度：2000nit"]),
       fullText:
@@ -366,7 +366,7 @@ export const HINT_CORPUS: HintCase[] = [
   {
     name: "image tool → image_text",
     text: "识别结果：这是一张办公室场景照片，桌上有笔记本电脑。",
-    toolName: "vision.ocr",
+    toolName: "photo.ocr",
     expected: "image_text",
   },
   {

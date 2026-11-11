@@ -528,7 +528,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 
-  "calendar.list_tasks": (r) => {
+  // 2026-11-11 复合：calendar 单入口按 action 分流，日程列表卡只认 action=list_tasks 的回执。
+  "calendar": (r) => {
+    if (str(r.action) !== "list_tasks") return null;
     const tasks = Array.isArray(r.tasks) ? r.tasks : [];
     if (tasks.length === 0) return null;
     const items: ToolCardItem[] = tasks.slice(0, 8).map((t) => {
@@ -910,6 +912,69 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
    * user_message，由 LLM 调 shopping.pay.check 同步状态。按钮不直接触发
    * 资金动作——支付前的确认仍由两阶段 confirmationToken 把守。
    */
+  // 支付下单卡（2026-11-10）：payment.create_order（微信/支付宝 native 收款码）。
+  // 复用手机端 ShoppingPayCard 的 extra.shopping stage=pay 载荷（零客户端改动）：
+  // 金额 + 订单号 + 二维码（服务端生成的 dataURI，手机卡内直接可扫）。
+  // 「我已完成支付」走 card.action → payment.pay.check → queryOrder 原地换卡。
+  // ── 预订族报价卡（2026-11-10）：travel_booking.search / ride_hailing.quote /
+  // restaurant.search / home_service.search 共用 BookingService.search 的选项
+  // 形状（BookingOption[]）。此前零卡片——四族报价全部塌成正文长文本。通用
+  // 列表卡（cardType=""）手机端现成渲染，每行一个选项：价格 + 名称 + 价格来源
+  // 如实标注（api/scraped/database/estimated），模拟报价必须带标记。
+  // book 阶段仍由模型带着 optionId 走两阶段确认，卡不代点。
+  "travel_booking.search": buildBookingSearchCard,
+  "ride_hailing.quote": buildBookingSearchCard,
+  "restaurant.search": buildBookingSearchCard,
+  "home_service.search": buildBookingSearchCard,
+
+  "payment.create_order": (r) => {
+    const outTradeNo = str(r.outTradeNo);
+    if (!outTradeNo) return null;
+    const provider = str(r.provider) === "alipay" ? "alipay" : "wechat";
+    const providerName = provider === "alipay" ? "支付宝" : "微信支付";
+    const amount = num(r.amount);
+    const description = str(r.description);
+    const qrImage = str(r.qrCodeDataUrl);
+    const items: ToolCardItem[] = [
+      { type: "check", text: `订单：${description || outTradeNo}` },
+      {
+        type: amount != null && amount > 0 ? "num" : "check",
+        text: `金额：${amount != null ? `¥${amount}` : "见收银台"} · ${providerName}`,
+      },
+    ];
+    return {
+      title: "💳 支付确认",
+      items,
+      footer:
+        str(r.instruction) ||
+        `请使用${providerName}扫码完成付款，完成后点下方确认`,
+      cardType: "shopping_pay",
+      extra: {
+        shopping: {
+          stage: "pay",
+          title: `${providerName} · 待支付`,
+          amount: amount != null ? `${amount}` : "",
+          amountLabel: "应付金额",
+          orderNo: outTradeNo,
+          platformLabel: providerName,
+          // dataURI 二维码（服务端生成）：ShoppingPayCard 内嵌展示，手机直接扫
+          ...(qrImage ? { qrImage } : {}),
+          note: "我不保存你的支付信息，也不代你扣款 · 支付完成后点下面确认",
+        },
+      },
+      actions: [
+        {
+          id: "payment_pay_done",
+          label: "我已完成支付，帮我确认",
+          variant: "primary",
+          cardAction: "payment.pay.check",
+          payload: { outTradeNo, provider },
+        },
+        { id: "payment_later", label: "稍后再说", variant: "secondary" },
+      ],
+    };
+  },
+
   "shopping.pay.submit": (r) => {
     if (r.ok !== true) return null;
     const localOrderId = str(r.orderId) || str(r.localOrderId);
@@ -959,6 +1024,70 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     };
   },
 };
+
+/**
+ * 复合工具 shopping.compare：按回执形状分派到原来的三个 builder。
+ * 旧名（prices/research/watch）继续保留——历史事件与回放里的老工具名仍需能建卡，
+ * 但新对话只会有 shopping.compare。
+ */
+BUILDERS["shopping.compare"] = (r) => {
+  const name = Array.isArray(r.watches)
+    ? "shopping.compare.watch"
+    : Array.isArray(r.sources)
+      ? "shopping.compare.research"
+      : "shopping.compare.prices";
+  return BUILDERS[name]?.(r) ?? null;
+};
+
+/** 预订族报价来源标签（价格按来源如实标注，估算不得当实价汇报）。 */
+const BOOKING_PRICE_SOURCE_LABELS: Record<string, string> = {
+  api: "实时接口",
+  scraped: "页面代查",
+  database: "价格库",
+  list: "价格库",
+  estimated: "估算",
+};
+
+/** 预订族报价 → 通用列表卡（travel/ride/restaurant/home_service 四族共用）。 */
+function buildBookingSearchCard(r: Record<string, unknown>): ToolCardPayload | null {
+  const rawOptions = Array.isArray(r.options) ? r.options : [];
+  if (rawOptions.length === 0) return null;
+  const providerLabel = str(r.providerLabel) || str(r.provider);
+  const items: ToolCardItem[] = [];
+  for (const raw of rawOptions.slice(0, 8)) {
+    const o = (raw ?? {}) as Record<string, unknown>;
+    const price = num(o.amountCny);
+    const title = str(o.title).slice(0, 40);
+    if (!title) continue;
+    const desc = str(o.description).slice(0, 30);
+    const extra = (o.extra ?? {}) as Record<string, unknown>;
+    const sourceLabel = BOOKING_PRICE_SOURCE_LABELS[str(extra.priceSource)] ?? "";
+    const simulated = o.simulated === true;
+    const parts = [
+      price != null && price > 0 ? `¥${price}` : "价格以平台为准",
+      title,
+      desc ? `（${desc}）` : "",
+      sourceLabel ? ` · 来源：${sourceLabel}` : "",
+      simulated ? " · 模拟报价" : "",
+    ].filter(Boolean);
+    items.push({ type: price != null && price > 0 ? "num" : "check", text: parts.join(" ") });
+  }
+  if (items.length === 0) return null;
+  const note = str(r.note);
+  const footer = [
+    providerLabel ? `来源：${providerLabel}` : "",
+    note,
+    "价格按来源如实标注，下单结算以平台实价为准",
+  ]
+    .filter(Boolean)
+    .join(" · ");
+  return {
+    title: "📋 可选报价",
+    items,
+    footer,
+    cardType: "",
+  };
+}
 
 /** 查注册 builder；未注册返回 null */
 export function lookupToolCardBuilder(toolName: string): ToolCardBuilder | null {

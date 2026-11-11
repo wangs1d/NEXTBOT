@@ -11,6 +11,7 @@ import "../core/services/cloud_model_binding_store.dart";
 import "../core/services/model_api_tester.dart";
 import "../features/settings/access_pairing_card.dart";
 import "mobile_theme.dart";
+import "../core/services/nb_http.dart";
 
 /// 手机端「服务接入」页（内测 byok）。
 ///
@@ -131,7 +132,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     });
     try {
       await CloudModelBindingStore.instance.load();
-      final http.Client client = http.Client();
+      final http.Client client = NbClient();
       final List<http.Response> responses =
           await Future.wait(<Future<http.Response>>[
         client
@@ -424,7 +425,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
     String? err;
     String okMsg = "测试通过：服务端已能合成语音";
     try {
-      final http.Client client = http.Client();
+      final http.Client client = NbClient();
       final http.Response res = await client
           .post(
             Uri.parse("${ApiConfig.httpBase}/api/service-config/tts-test"),
@@ -454,7 +455,7 @@ class _MobileServiceAccessPageState extends State<MobileServiceAccessPage> {
   /// PUT /api/service-config；返回 null=成功，否则为错误信息。
   Future<String?> _putServiceConfig(Map<String, dynamic> payload) async {
     try {
-      final http.Client client = http.Client();
+      final http.Client client = NbClient();
       final http.Response res = await client
           .put(
             Uri.parse("${ApiConfig.httpBase}/api/service-config"),

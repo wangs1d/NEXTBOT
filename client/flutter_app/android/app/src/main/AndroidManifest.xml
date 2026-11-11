@@ -51,7 +51,7 @@
     <!-- 手机桥接拨号（phone.dial）：确认窗确认后直接拨出 -->
     <uses-permission android:name="android.permission.CALL_PHONE"/>
 
-    <!-- 短信代发（messages.reply / send_sms）：确认窗确认后发送 -->
+    <!-- 短信代发（send_sms）：确认窗确认后发送 -->
     <uses-permission android:name="android.permission.SEND_SMS"/>
 
     <!-- 前台服务与电池优化白名单 -->

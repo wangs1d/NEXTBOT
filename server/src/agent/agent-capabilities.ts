@@ -12,7 +12,6 @@ export const CAPABILITY_DOMAINS = [
   "market",
   "sub_agent",
   "aip",
-  "vision",
   "desktop",
   "web",
   "life_assistant",
@@ -20,11 +19,11 @@ export const CAPABILITY_DOMAINS = [
   "phone",
   "entertainment",
   "social_feed",
-  "self_programming",
   "agent_account",
   "world",
   "smart_home",
   "notes",
+  "system",
   "image_gen",
   "file_doc",
   "email_sms",
@@ -54,7 +53,6 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   market: "行情报价（股票/指数实时报价）",
   sub_agent: "任务执行（后台 plan-and-execute 统一执行）",
   aip: "AIP协议（dispatch/状态/提案）",
-  vision: "视觉能力（HTTP抓帧/定时巡检）",
   desktop: "桌面自动化（VLM视觉操控电脑）",
   web: "Web浏览（搜索/抓取网页）",
   life_assistant: "生活助手（预算计算/购物建议）",
@@ -62,11 +60,11 @@ export const DOMAIN_LABELS: Record<CapabilityDomain, string> = {
   phone: "语音触达（语音提醒/闹钟式TTS播报 + 电话通话/TTS-only来电）",
   entertainment: "娱乐互动",
   social_feed: "社交推文站（发帖/评论/点赞/浏览动态）",
-  self_programming: "自我编程（创建/更新/删除/生成Skill）",
   agent_account: "Agent账号注册",
   world: "Agent World（世界状态/社交/市场）",
   smart_home: "智能家居（HomeAssistant：设备列表/开关/调温/灯控/场景）",
   notes: "学习笔记（学习/会议/视频/读书/灵感沉淀、摘要、抽问、复习）",
+  system: "系统管理（记忆和上下文、系统配置）",
   image_gen: "图像生成（text-to-image，OpenAI 兼容图像模型）",
   file_doc: "文件/文档处理（read/write/parse_pdf/parse_office/export_format）",
   email_sms: "邮件/短信主动发送（SMTP + 阿里云短信）",
@@ -99,7 +97,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "wallet",
       lines: [
-        "1️⃣ 钱包（用户真实资金CNY，非Agent私有）：wallet.get_balance / wallet.get_transactions / wallet.transfer（须用户同意，仅限好友）/ wallet.purchase（须授权，覆盖全消费场景）/ wallet.recharge",
+        "1️⃣ 钱包与支付：真实资金/微信支付宝通道尚未接入，Agent 不代持资金；支付走 payment.* / alipay.* 技能族",
       ],
     },
     {
@@ -111,7 +109,7 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "calendar",
       lines: [
-        "3️⃣ 日程：calendar.create（提醒/日程/定时任务统一入口）/ list_tasks / update_task / delete_task",
+        "3️⃣ 日程：calendar（统一入口，action=create 提醒/日程/定时任务、list_tasks、update_task、delete_task、find_free_slots、batch_create）",
       ],
     },
     {
@@ -139,12 +137,6 @@ function buildStaticSections(): CapabilitySection[] {
       ],
     },
     {
-      domain: "vision",
-      lines: [
-        "7️⃣ 视觉：vision.http_pull / vision.periodic_start / periodic_stop / periodic_list（须「完全访问」）",
-      ],
-    },
-    {
       domain: "desktop",
       lines: [
         "8️⃣ 电商读价：browser.session.list / browser.fetch_page（用户导入 Cookie 并按站点授权 agentAllowed +「完全访问」）",
@@ -163,11 +155,9 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "smart_home",
       lines: [
         "🏠 智能家居（HomeAssistant，需用户已部署 HA 并配置 HA_BASE_URL / HA_TOKEN）：",
-        "   smart_home.list_devices — 列出所有智能设备及状态（灯/开关/空调/窗帘/传感器）",
-        "   smart_home.control_device — 控制设备：开灯/关灯、调亮度/色温、开关插座、设空调温度/模式、开关窗帘",
-        "   smart_home.scene — HA 场景：列出+激活（回家/离家/晚安等）",
-        "   用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时自动调用对应操作。",
-        "   操作前先 list_devices 了解有哪些设备；勿猜 entity_id。",
+        "   smart_home — 统一入口：action=list_devices 列设备（灯/开关/空调/窗帘/传感器）；action=control_device 控制设备（开灯/关灯、调亮度/色温、开关插座、设空调温度/模式、开关窗帘）；action=scene 列/激活 HA 场景（回家/离家/晚安等）",
+        "   用户说「开灯」「关空调」「窗帘打开」「灯调暗」「温度调到26」时自动调用 action=control_device。",
+        "   操作前先 action=list_devices 了解有哪些设备；勿猜 entity_id。",
       ],
     },
     {
@@ -180,14 +170,14 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "voice",
       lines: [
         "🔊 语音能力（Agent 底层语音能力，可自调度）：",
-        "   - voice.speak（即时播报）：合成语音并直接播报给用户，无需走电话流程",
+        "   - voice（action=speak，即时播报）：合成语音并直接播报给用户，无需走电话流程",
         "     · mode=\"instant\"（默认）：轻量即时播报，客户端后台播放，无 UI 强制",
         "     · mode=\"reminder\"：提醒式播报，带标题/优先级，客户端可显示卡片",
-        "   - voice.send_message（语音消息）：发送微信式可重播语音消息",
+        "   - voice（action=message，语音消息）：发送微信式可重播语音消息",
         "     · 把文本合成为 mp3 落地，客户端渲染为微信式语音气泡（带时长 / 声波 / 可重播）",
-        "     · 与 voice.speak 区别：speak 是一次性即时播报无 UI；send_message 是落地可重播语音消息",
+        "     · 与 voice（action=speak） 区别：speak 是一次性即时播报无 UI；message 是落地可重播语音消息",
         "     · 适用场景：用户说「发语音」「发条语音消息」「用语音回复」，或长回复用语音更自然",
-        "   - 与 phone.call_user 区别：voice.* 是底层语音能力（无来电 UI/振铃），phone.call_user 是完整电话触达体验",
+        "   - 与 phone（action=call） 区别：voice 族是底层语音能力（无来电 UI/振铃），phone（action=call） 是完整电话触达体验",
         "   - TTS 提供商：优先 MiniMax（中文），回退 OpenAI；均未配置时客户端用本地 TTS 兜底",
       ],
     },
@@ -205,10 +195,9 @@ function buildStaticSections(): CapabilitySection[] {
       ],
     },
     {
-      domain: "self_programming",
+      domain: "system",
       lines: [
         "1️⃣5️⃣ 系统管理：管理记忆和上下文、调整系统配置",
-        "1️⃣6️⃣ 自我编程：self.create_skill / update_skill / delete_skill / generate_skill / …（须「完全访问」）",
       ],
     },
     {
@@ -220,7 +209,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - notes.summarize（生成摘要，懒写回）",
         "   - notes.flashcards（生成记忆卡片 q/a）",
         "   - notes.quiz（生成自测题）",
-        "   - notes.schedule_review（创建复习提醒，调用 calendar.create 落地）",
+        "   - notes.schedule_review（创建复习提醒，调用 calendar(action=create) 落地）",
         "适用：学习（看书/视频/课程）、会议纪要、读书摘录、灵感闪念、视频字幕沉淀等。",
         "状态连续性：写之前先 notes.search 查重；update/delete 必须基于返回的 id。",
       ],
@@ -254,8 +243,7 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "email_sms",
       lines: [
         "📧 邮件/短信（收件 + 主动发送）：",
-        "   - 收件：邮件盯件（IMAP）自动把新邮件收进消息中心（platform=email），" +
-        "用 messages.overview / messages.read_conversation 查看；重要邮件会主动提醒，" +
+        "   - 收件：邮件盯件（IMAP）自动把新邮件收进消息中心（platform=email）；重要邮件会主动提醒，" +
         "验证码/账单/票务类邮件自动提取处理（验证码播报、账单入账、票务转日程）",
         "   - email.send（发邮件）：SMTP 发送，需配置 OUTBOUND_SMTP_* 环境变量",
         "   - sms.send（发短信）：阿里云短信，需配置 ALIYUN_SMS_* 环境变量",
@@ -329,7 +317,6 @@ function buildStaticSections(): CapabilitySection[] {
         "     · 适用：pip install 装包、grep 搜索文件、ffmpeg 转码、git log 查历史、zip 压缩等",
         "   - code.list_files / code.read_file / code.write_file：工作目录文件管理",
         "   - 适用场景：复杂计算（矩阵/统计）、数据清洗/格式转换、算法验证、批量文件操作、数据可视化、装包/文件操作/格式转换",
-        "   - 与 self_programming 区别：self.* 是创建/更新 Agent 的 Skill 模块（持久化能力），code.* 是一次性执行临时脚本",
       ],
     },
     {
@@ -349,7 +336,7 @@ function buildStaticSections(): CapabilitySection[] {
         "   - 一次登录长期有效：扫码/内置浏览器登录成功后平台 Cookie 自动加密持久化（授权只升不降），运行期刷新的 Cookie 自动回写——之后的查询/下单在客户端离线时也能走无头兜底，无需重复登录",
         "   - 安全护栏不依赖访问模式：Cookie 双重门禁 + 两阶段确认 + 单笔上限 SHOPPING_ORDER_MAX_AMOUNT_CNY（默认 5000，可按平台覆盖）+ 单日预算 SHOPPING_ORDER_DAILY_BUDGET_CNY（默认 10000）",
         "   - 支付边界：只提交订单不支付；支付宝收银台可代付（用户本人确认扣款），其余平台引导用户 App 内支付",
-        "   - 与 browser.fetch_page（只读读价）/ shopping.suggest（仅建议）/ wallet.purchase（仅记账）区别：本工具真实提交订单",
+        "   - 与 browser.fetch_page（只读读价）/ shopping.suggest（仅建议）/ payment.*（真实提交/记账）的区别：本工具真实提交订单",
         "   - 下单前必须先返回确认摘要让用户确认，得到用户明确同意后再带 confirm=true+token 执行",
       ],
     },
@@ -357,9 +344,7 @@ function buildStaticSections(): CapabilitySection[] {
       domain: "shopping_compare",
       lines: [
         "🏷️ 购物比价（只读零副作用：比价/降价监控/调研对比，不下单）：",
-        "   - shopping.compare.prices（跨平台比价）：并行搜多平台，同款归一聚合，按价格升序返回分组报价；低置信组标注「疑似同款」",
-        "   - shopping.compare.research（保险/服务调研比价）：保险/宽带/会员等无法抓价的领域，web 检索权威来源，由 LLM 汇总成对比表（资料清单只作素材，不复述标题/链接，注明以官方条款为准）",
-        "   - shopping.compare.watch（降价监控）：关注某平台某商品的目标价，后台定时复查（默认 60min），到价且为新低价时主动提醒",
+        "   - shopping.compare（复合工具，必填 action）：action=prices 跨平台比价（并行搜多平台、同款归一聚合、按价格升序返回分组报价，低置信组标注「疑似同款」）；action=research 保险/服务调研比价（web 检索权威来源，由你汇总成对比表，资料清单只作素材、不复述标题/链接，注明以官方条款为准）；action=watch_add/watch_remove/watch_list 降价监控（关注某平台某商品目标价，后台定时复查默认 60min，到价且为新低价时主动提醒）",
         "   - 手机端没有可视浏览器但能力与桌面端一致：直接走服务端浏览器通道（已导入 Cookie 自动注入；登录墙/验证码会把二维码推到聊天，扫码后继续），不要改用 search_web 凑价格",
         "   - 与 shopping.order.*（真实下单）的边界：比完价用户确认后再下单；本模块不产生订单或支付",
       ],
@@ -367,16 +352,17 @@ function buildStaticSections(): CapabilitySection[] {
     {
       domain: "agent_browser",
       lines: [
-        "🌐 Agent 通用网页操作（内置浏览器优先，客户端不在线时回退无头浏览器；多步操作）：",
-        "   - agent_browser.open（打开 URL）：优先在用户可见的内置浏览器打开 https URL，返回 sessionId；对已授权站点自动注入用户 Cookie",
-        "   - agent_browser.click（点击）：传 sessionId + selector 点击元素（支持 CSS / text= / xpath= 选择器）",
-        "   - agent_browser.type（输入）：在输入框输入文本，默认替换模式，append=true 可追加并模拟打字延迟",
-        "   - agent_browser.scroll（滚动）：三种模式 — selector 滚到元素 / deltaY 相对滚动 / x,y 绝对坐标",
-        "   - agent_browser.extract_text（提取文本）：**主要信息获取工具**，返回页面文本 + 可交互元素列表（tag/text/selector）",
-        "   - agent_browser.screenshot（截图）：返回 JPEG base64（⚠️token 消耗大，优先用 extract_text）",
-        "   - agent_browser.wait_for（等待）：等待元素出现并可见，默认超时 15s",
-        "   - agent_browser.close（关闭）：完成操作后主动关闭会话释放资源",
-        "   - 有状态会话：open 返回 sessionId 后，后续操作复用同一 Page，支持多步流程（open → extract_text → click → type → extract_text → close）",
+        "🌐 Agent 通用网页操作（复合工具 agent_browser，必填 action；内置浏览器优先，客户端不在线时回退无头浏览器；多步操作）：",
+        "   - action=open（打开 URL）：优先在用户可见的内置浏览器打开 https URL，返回 sessionId；对已授权站点自动注入用户 Cookie",
+        "   - action=click（点击）：传 sessionId + selector/ref 点击元素（支持 CSS / text= / xpath= 选择器）",
+        "   - action=type（输入）：在输入框输入文本，默认替换模式，append=true 可追加并模拟打字延迟",
+        "   - action=scroll（滚动）：三种模式 — selector 滚到元素 / deltaY 相对滚动 / x,y 绝对坐标",
+        "   - action=extract_text（提取文本）：**主要信息获取工具**，返回页面文本 + 可交互元素列表（tag/text/selector）",
+        "   - action=screenshot（截图）：返回 JPEG base64（⚠️token 消耗大，优先用 extract_text）",
+        "   - action=wait_for（等待）：等待元素出现并可见，默认超时 15s",
+        "   - action=close（关闭）：完成操作后主动关闭会话释放资源",
+        "   - action=handoff（人工交接）：把当前页面截图 + 操作指引推到用户聊天，等用户完成后继续",
+        "   - 有状态会话：open 返回 sessionId 后，后续动作复用同一 Page，支持多步流程（open → extract_text → click → type → extract_text → close）",
         "   - 撞登录墙/验证码：回执带 humanRequired，页面留在内置浏览器，用户登录/验证后点「我已完成」继续（普通失败不交人）",
         "   - 与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）/ desktop.visual.run_task（操控桌面软件）的区别：本工具是通用多步浏览器操作",
         "   - 典型流程：open 打开页面 → extract_text 看页面结构和可点元素 → click/type 操作 → extract_text 确认结果 → close 关闭",
@@ -443,7 +429,7 @@ function buildStaticSections(): CapabilitySection[] {
         "✈️ 机票/火车票/酒店预订（统一预订抽象层 + 多源报价比价）：",
         "   - travel_booking.search（报价比价）：多源聚合实时报价，每条带 priceSource（api=实时接口 / scraped=页面代查 / database|list=本地价格库 / estimated=估算）。机票/火车票需 from/to（+departTime 更准），酒店需 city。酒店筛选参数（keywords 靠海/poiName 商圈/hotelStars 星级/hotelTypes 民宿/maxPrice 价格上限/sort 便宜→price_asc）必须从用户本次原话动态提取，没提的不填——不要替用户假设档次或价格区间",
         "   - travel_booking.book（下单）：两阶段确认。confirm=false 返回订单摘要+token；confirm=true+token 创建「待支付」订单（bkg_*）",
-        "   - 商家真实下单拿收银台链接：travel_booking.book 拿到待支付订单后，用 agent_browser.open/click/type/extract_text 在商家站点（携程/飞猪/12306 等）走完下单流程，从支付页提取收银台链接/订单串；把链接经 cashierUrl 传给 travel_booking.book（或 booking.travel-pay 的 paymentLink）即可发起真实支付。登录态失效/需验证码时把页面情况如实告知用户并请其手动完成该步",
+        "   - 商家真实下单拿收银台链接：travel_booking.book 拿到待支付订单后，用 agent_browser（action=open/click/type/extract_text）在商家站点（携程/飞猪/12306 等）走完下单流程，从支付页提取收银台链接/订单串；把链接经 cashierUrl 传给 travel_booking.book（或 booking.travel-pay 的 paymentLink）即可发起真实支付。登录态失效/需验证码时把页面情况如实告知用户并请其手动完成该步",
         "   - 支付闭环（下单后接力，非本模块工具）：booking.travel-pay（用户本人支付宝真实扣款）→ booking.travel-pay-check（查支付结果）→ booking.travel-issue（出票入票夹）→ travel.arrival-monitor（到站管家）",
         "   - travel_booking.status（状态）：订单状态查询；不传 orderId 返回最近旅行订单",
         "   - travel_booking.cancel（取消）：两阶段确认；仅限未出票订单",
@@ -459,12 +445,12 @@ function buildStaticSections(): CapabilitySection[] {
 
 /** Agent system prompt：语音触达能力（两种模式 + 未来路线图）。 */
 const PHONE_MODEL_LINES = [
-  "【语音触达 · 静默触达】通过 phone.call_user 工具实现，调用时直接执行，不在回复中提及。",
+  "【语音触达 · 静默触达】通过 phone（action=call） 工具实现，调用时直接执行，不在回复中提及。",
   "【模式一 · 语音提醒（闹钟式）】适用「提醒我xxx」「语音告诉我」—— 单向 TTS 播报，无来电 UI。spokenMessage 填内容，ringStyle=\"reminder\"。",
   "【模式二 · 电话通话（来电式）】适用「给我打个电话」—— 振铃8秒 → 自动接通 → TTS 播放。spokenMessage 填对用户说的话。当前为 TTS-only 单向模式。",
   "【号码归属】6 位站内号登记在本 Agent 名下，即用户的站内电话号，申领后方可呼出虚拟电话；接收来电不要求对方有号。",
-  "【Agent↔Agent 联络】Agent 之间不打电话，用 world.link.send_message 文本通道联系（仅限好友）。",
-  "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone.call_user。",
+  "【Agent↔Agent 联络】Agent 之间不打电话，用 world.link（action=send_message） 文本通道联系（仅限好友）。",
+  "【禁止】禁止回复「马上给你打过去」「好的我给您打电话」「现在打确认」—— 直接调工具即可，不要废话。同一条消息禁止多次调用 phone（action=call）。",
 ];
 
 function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: string): string[] {
@@ -472,8 +458,8 @@ function buildPhoneCapabilityLines(hasVirtualPhone: boolean, virtualPhone?: stri
     ? `📞 语音触达（您的联络号码：${virtualPhone}，登记在 Agent 名下）`
     : "📞 语音触达（尚未申领 6 位联络号码）";
   const tools = hasVirtualPhone
-    ? "★ phone.call_user（核心工具：语音提醒/电话通话，spokenMessage 填内容）| phone.ensure_my_number（查询号码）"
-    : "★ phone.call_user（尚未申领号码：呼出会被拒绝，可引导用户说「帮我申请虚拟号码」后由 phone.ensure_my_number 办理）| phone.ensure_my_number（用户明确要求时申领）";
+    ? "★ phone（action=call）（核心工具：语音提醒/电话通话，spokenMessage 填内容）| phone（action=number）（查询号码）"
+    : "★ phone（action=call）（尚未申领号码：呼出会被拒绝，可引导用户说「帮我申请虚拟号码」后由 phone（action=number） 办理）| phone（action=number）（用户明确要求时申领）";
   return [header, ...PHONE_MODEL_LINES, tools];
 }
 

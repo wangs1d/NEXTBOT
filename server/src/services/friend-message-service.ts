@@ -18,8 +18,8 @@ import type { AgentRelayService } from "./agent-relay-service.js";
  *   3. 发送方 hub createOutbound——代发留档；
  *   4. WS AgentPeerMessage 直推（含 fromName，客户端 toast/通知直接可读）；
  *   5. friendService lastMessageAt 双向刷新。
- * world.link.send_message、messages.reply（friend 平台）、HTTP /friends/messages
- * 三个出口全部走这里，保证语义一致。
+ * world.link.send_message、HTTP /friends/messages
+ * 两个出口全部走这里，保证语义一致。
  */
 
 export type FriendMessageSendInput = {
@@ -29,7 +29,7 @@ export type FriendMessageSendInput = {
   subject?: string;
   traceId?: string;
   chatUserMessageId?: string;
-  /** 引用的对方消息 ID（messages.reply 带 replyToMessageId 回信时透传留档） */
+  /** 引用的对方消息 ID（回复好友消息时透传留档） */
   replyToMessageId?: string;
 };
 
@@ -209,7 +209,7 @@ export class FriendMessageService {
   }
 
   /**
-   * 标读好友会话（等价 messages.mark_read，HTTP 面用）。
+   * 标读好友会话（HTTP 面用）。
    * 成功后推已读回执（agent.peer_read_receipt）给对端：读取进度经
    * externalMessageId 翻译到对端会话空间（对端副本的 seq），对端客户端把
    * seq ≤ lastReadSeq 的气泡标为已读。尽力而为：翻译失败/对端离线都静默。

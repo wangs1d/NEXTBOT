@@ -90,9 +90,9 @@ function normalizeWhitespace(text: string): string {
 /**
  * 长期记忆写入门主入口。
  * @param raw 候选文本（一行或一段）
- * @param source 写入来源标签（诊断用，如 "chat:fast_path"）
+ * @param _source 来源标签（调用方保留用于诊断定位；门主逻辑不依赖来源）
  */
-export function gateLtmWrite(raw: string, source = ""): LtmGateVerdict {
+export function gateLtmWrite(raw: string, _source = ""): LtmGateVerdict {
   const trimmed = (raw ?? "").trim();
   if (trimmed.length < 4) {
     return { admit: false, reason: "too_short", cleaned: "" };
@@ -152,6 +152,6 @@ export function gateLtmWrite(raw: string, source = ""): LtmGateVerdict {
 }
 
 /** 批量便捷判断：文本是否允许进长期记忆（不取清洗版时用） */
-export function isLtmAdmitted(raw: string, source = ""): boolean {
-  return gateLtmWrite(raw, source).admit;
+export function isLtmAdmitted(raw: string, _source = ""): boolean {
+  return gateLtmWrite(raw, _source).admit;
 }

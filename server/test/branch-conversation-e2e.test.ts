@@ -53,9 +53,9 @@ test("e2e：上传课表 → 对话消息撞出冲突 → 主动提案过仲裁 
 
     // ① 用户上传课表（对话内 LLM 已解析成结构化条目——此处直接走真实工具）
     const upload = await registry.execute(
-      "calendar.batch_create",
-      {
-        sourceName: "我的课表",
+      "calendar", {
+      action: "batch_create",
+      sourceName: "我的课表",
         timezone: "Asia/Shanghai",
         items: [
           { description: "高等数学", runAt: iso(NOW + 2 * DAY), durationMinutes: 90 },
@@ -141,8 +141,8 @@ test("e2e 版本链：重传改过的课表 → 新主张入库，冲突匹配�
       { description: "高等数学", runAt: iso(NOW + 8 * DAY), durationMinutes: 90 },
       { description: "大学英语", runAt: iso(NOW + 3 * DAY), durationMinutes: 60 },
     ];
-    await registry.execute("calendar.batch_create", { sourceName: "我的课表", timezone: "Asia/Shanghai", items: v1Items }, ctx);
-    const v2 = await registry.execute("calendar.batch_create", { sourceName: "我的课表", timezone: "Asia/Shanghai", items: v2Items }, ctx);
+    await registry.execute("calendar", { action: "batch_create", sourceName: "我的课表", timezone: "Asia/Shanghai", items: v1Items }, ctx);
+    const v2 = await registry.execute("calendar", { action: "batch_create", sourceName: "我的课表", timezone: "Asia/Shanghai", items: v2Items }, ctx);
     const rows = v2.result.results as Array<Record<string, unknown>>;
     assert.equal(rows.find((r) => r.assertionVersion)?.assertionVersion, 2, "重传推进版本链");
 

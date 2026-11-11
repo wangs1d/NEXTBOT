@@ -7,10 +7,35 @@ import "package:web_socket_channel/web_socket_channel.dart";
 
 import "../config/api_config.dart";
 import "desktop_screen_capture.dart";
+import "ws_connection_runner.dart";
 
 /// Flutter Windows desktop bridge executor.
 class DesktopBridgeService {
-  DesktopBridgeService._();
+  DesktopBridgeService._() {
+    _runner = WsConnectionRunner(
+      name: "desktop-bridge",
+      urlProvider: () => ApiConfig.wsUrl,
+      gate: () => DesktopScreenCapture.isSupported,
+      heartbeatInterval: _heartbeatInterval,
+      heartbeatTimeout: _heartbeatTimeout,
+      reconnectDelay: _reconnectDelay,
+      onConnected: (WebSocketChannel channel) {
+        bridgeConnected.value = true;
+        _sendSessionInit();
+        // 口令模式（服务端配置 DESKTOP_BRIDGE_TOKEN≥8）下，session.init 不会自动
+        // 绑定执行器，必须显式发 register 携带 token；无口令模式下这条消息幂等
+        // （服务端直接回 ack）。缺这一步服务端 hasExecutor 恒为 false，desktop.*
+        // 工具会被当成「桥离线」从规划目录/可见集剔除，"打开XX应用"类任务失能。
+        _send("desktop.bridge.register", <String, dynamic>{
+          if (_bridgeTokenFromEnv.isNotEmpty) "token": _bridgeTokenFromEnv,
+        });
+      },
+      onMessage: (Object? data) => _onMessage(data),
+      onDisconnected: (bool willReconnect) {
+        bridgeConnected.value = false;
+      },
+    );
+  }
 
   static final DesktopBridgeService instance = DesktopBridgeService._();
 
@@ -23,132 +48,24 @@ class DesktopBridgeService {
   static const Duration _heartbeatTimeout = Duration(seconds: 45);
   static const Duration _runTaskTimeout = Duration(minutes: 10);
 
-  WebSocketChannel? _channel;
-  StreamSubscription<dynamic>? _subscription;
-  Timer? _reconnectTimer;
-  Timer? _heartbeatTimer;
-  bool _connecting = false;
-  bool _connected = false;
-  DateTime _lastInboundAt = DateTime.fromMillisecondsSinceEpoch(0);
+  late final WsConnectionRunner _runner;
 
   final ValueNotifier<bool> bridgeConnected = ValueNotifier<bool>(false);
 
-  bool get isActive => _connected;
+  bool get isActive => _runner.connected;
 
   void start() {
-    if (!DesktopScreenCapture.isSupported) return;
-    if (_connecting || _connected) return;
-    _connect();
+    _runner.start();
   }
 
   void stop() {
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _stopHeartbeat();
-    unawaited(_subscription?.cancel());
-    _subscription = null;
-    try {
-      _channel?.sink.close(1000);
-    } catch (_) {}
-    _channel = null;
-    _connecting = false;
-    _connected = false;
+    _runner.stop();
     bridgeConnected.value = false;
   }
 
-  void _connect() {
-    _connecting = true;
-    try {
-      final WebSocketChannel ch =
-          WebSocketChannel.connect(Uri.parse(ApiConfig.wsUrl));
-      _channel = ch;
-      _subscription = ch.stream.listen(
-        (dynamic data) {
-          if (!identical(_channel, ch)) return;
-          _lastInboundAt = DateTime.now();
-          _onMessage(data);
-        },
-        onError: (_) => _handleDisconnect(ch),
-        onDone: () => _handleDisconnect(ch),
-        cancelOnError: false,
-      );
-      unawaited(
-        ch.ready.then((_) {
-          if (!identical(_channel, ch)) return;
-          _connected = true;
-          _connecting = false;
-          _lastInboundAt = DateTime.now();
-          bridgeConnected.value = true;
-          _startHeartbeat(ch);
-          _sendSessionInit();
-          // 口令模式（服务端配置 DESKTOP_BRIDGE_TOKEN≥8）下，session.init 不会自动
-          // 绑定执行器，必须显式发 register 携带 token；无口令模式下这条消息幂等
-          // （服务端直接回 ack）。缺这一步服务端 hasExecutor 恒为 false，desktop.*
-          // 工具会被当成「桥离线」从规划目录/可见集剔除，"打开XX应用"类任务失能。
-          _send("desktop.bridge.register", <String, dynamic>{
-            if (_bridgeTokenFromEnv.isNotEmpty) "token": _bridgeTokenFromEnv,
-          });
-        }).catchError((_) {
-          if (!identical(_channel, ch)) return;
-          _handleDisconnect(ch);
-        }),
-      );
-    } catch (_) {
-      _handleDisconnect(_channel);
-    }
-  }
-
-  void _handleDisconnect(WebSocketChannel? channel) {
-    if (channel != null && !identical(_channel, channel)) return;
-    final bool shouldReconnect = _channel != null || _connected || _connecting;
-    _stopHeartbeat();
-    unawaited(_subscription?.cancel());
-    _subscription = null;
-    try {
-      _channel?.sink.close(1000);
-    } catch (_) {}
-    _channel = null;
-    _connecting = false;
-    _connected = false;
-    bridgeConnected.value = false;
-    if (!shouldReconnect) return;
-    _scheduleReconnect();
-  }
-
-  void _scheduleReconnect() {
-    if (!DesktopScreenCapture.isSupported) return;
-    if (_reconnectTimer != null) return;
-    _reconnectTimer = Timer(_reconnectDelay, () {
-      _reconnectTimer = null;
-      if (!_connected && !_connecting) {
-        start();
-      }
-    });
-  }
-
-  void _startHeartbeat(WebSocketChannel channel) {
-    _stopHeartbeat();
-    _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) {
-      if (!identical(_channel, channel)) {
-        _stopHeartbeat();
-        return;
-      }
-      if (!_connected) return;
-      final Duration idle = DateTime.now().difference(_lastInboundAt);
-      if (idle > _heartbeatTimeout) {
-        _handleDisconnect(channel);
-        return;
-      }
-      _send("ws.keepalive", <String, dynamic>{
-        "clientTime": DateTime.now().toIso8601String(),
-      });
-    });
-  }
-
-  void _stopHeartbeat() {
-    _heartbeatTimer?.cancel();
-    _heartbeatTimer = null;
-  }
+  // 连接/心跳/重连/判死已收编到 WsConnectionRunner（连接生命周期基座）：
+  // 原手写 connect/ready 守卫/心跳判死/固定 4s 重连整体删除，语义并入基座
+  // （重连由固定间隔升级为指数退避，判死阈值不变）。
 
   void _sendSessionInit() {
     final String actor = ApiConfig.effectiveActorId;
@@ -592,14 +509,7 @@ class DesktopBridgeService {
   }
 
   void _send(String type, Map<String, dynamic> payload) {
-    final WebSocketChannel? ch = _channel;
-    if (ch == null) return;
-    try {
-      ch.sink
-          .add(jsonEncode(<String, dynamic>{"type": type, "payload": payload}));
-    } catch (e) {
-      debugPrint("[DesktopBridge] send failed: $e");
-    }
+    _runner.send(type, payload);
   }
 }
 

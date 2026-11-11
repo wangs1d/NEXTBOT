@@ -2,11 +2,13 @@ import "package:flutter_test/flutter_test.dart";
 
 import "package:nextbot/core/config/api_config.dart";
 
-/// 登录身份覆盖与归一化：邮箱登录后全链身份=登录邮箱（按账号隔离），
-/// 退出登录回落编译期默认；同一邮箱大小写不同写法归一成同一身份。
+/// 登录身份覆盖与归一化：有凭据/邮箱时全链身份=登录账号（按账号隔离），
+/// 真正未登录时回落**设备匿名身份**（installId），不再用编译期 sessionId
+/// 冒充账号——否则所有未登录设备挤在同一个 actor 上串记忆/世界/配额。
 void main() {
   tearDown(() {
     ApiConfig.runtimeUserId = null;
+    ApiConfig.installIdentityProvider = null;
   });
 
   group("ApiConfig.normalizeIdentity", () {
@@ -26,10 +28,50 @@ void main() {
   });
 
   group("ApiConfig.runtimeUserId 覆盖", () {
-    test("未登录时回落默认会话身份", () {
+    test("未登录且无安装标识时回落 guest 占位，绝不回落 session-mvp-001", () {
       ApiConfig.runtimeUserId = null;
-      expect(ApiConfig.effectiveActorId, ApiConfig.sessionId);
-      expect(ApiConfig.accountAuthQuery, <String, String>{"sessionId": ApiConfig.sessionId});
+      ApiConfig.installIdentityProvider = null;
+      expect(ApiConfig.effectiveActorId, ApiConfig.guestFallbackActorId);
+      expect(ApiConfig.effectiveActorId, isNot(ApiConfig.sessionId));
+      expect(
+        ApiConfig.accountAuthQuery,
+        <String, String>{"userId": ApiConfig.guestFallbackActorId},
+      );
+    });
+
+    test("未登录但已有安装标识：用设备匿名身份，不占 session-mvp-001", () {
+      ApiConfig.runtimeUserId = null;
+      ApiConfig.installIdentityProvider = () => "inst_mwayz1k7_fd56";
+      expect(ApiConfig.effectiveActorId, "inst_mwayz1k7_fd56");
+      expect(
+        ApiConfig.accountAuthQuery,
+        <String, String>{"userId": "inst_mwayz1k7_fd56"},
+      );
+      expect(ApiConfig.effectiveActorId, isNot(ApiConfig.sessionId));
+    });
+
+    test("登录后匿名身份让位：账号身份优先于安装标识", () {
+      ApiConfig.installIdentityProvider = () => "inst_mwayz1k7_fd56";
+      ApiConfig.runtimeUserId = "User@Example.COM";
+      expect(ApiConfig.effectiveActorId, "user@example.com");
+      expect(
+        ApiConfig.accountAuthQuery,
+        <String, String>{"userId": "user@example.com"},
+      );
+    });
+
+    test("退出登录后回到本机匿名身份（不是默认账号）", () {
+      ApiConfig.installIdentityProvider = () => "inst_mwayz1k7_fd56";
+      ApiConfig.runtimeUserId = "a@x.com";
+      expect(ApiConfig.effectiveActorId, "a@x.com");
+      ApiConfig.runtimeUserId = null;
+      expect(ApiConfig.effectiveActorId, "inst_mwayz1k7_fd56");
+    });
+
+    test("安装标识尚未就绪（provider 返空）时不炸，回落 guest 占位", () {
+      ApiConfig.runtimeUserId = null;
+      ApiConfig.installIdentityProvider = () => null;
+      expect(ApiConfig.effectiveActorId, ApiConfig.guestFallbackActorId);
     });
 
     test("登录后全链身份切换为登录邮箱", () {
@@ -55,11 +97,12 @@ void main() {
       expect(ApiConfig.effectiveActorId, "b@x.com");
     });
 
-    test("退出登录（置空）回落默认会话身份", () {
+    test("退出登录（置空）回落 guest 占位", () {
       ApiConfig.runtimeUserId = "a@x.com";
       ApiConfig.runtimeUserId = null;
       expect(ApiConfig.runtimeUserId, isNull);
-      expect(ApiConfig.effectiveActorId, ApiConfig.sessionId);
+      ApiConfig.installIdentityProvider = null;
+      expect(ApiConfig.effectiveActorId, ApiConfig.guestFallbackActorId);
     });
 
     test("空白/无效覆盖等同未登录", () {

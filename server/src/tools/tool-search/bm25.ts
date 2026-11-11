@@ -360,8 +360,8 @@ function applySearchRankingBoosts(
   query: string,
   docs: Bm25Document[],
 ): Bm25Hit[] {
-  // 先归一再取 token：否则 example.com 的 "example" 会命中
-  // self.generate_from_example 的 id 段并拿到 +0.6 的按位加权，压过 RRF 词面序。
+  // 先归一再取 token：否则 example.com 的 "example" 会命中工具 id 段
+  // 并拿到 +0.6 的按位加权，压过 RRF 词面序。
   const q = normalizeUrlNoise(query).trim().toLowerCase();
   if (!q) return hits;
 
@@ -527,10 +527,10 @@ function expandSearchQueries(query: string, aliasEntries?: SearchAliasEntry[]): 
     [/几点(?:了)?|现在时间|什么时间|当前时间/gi, "clock 时间 几点 当前 current_time"],
     [/价格|行情|多少钱|什么价|股价|汇率|涨跌|涨了|跌了|币价|净值/gi, "search_web 实时 行情 价格 查询 search 最新"],
     [/网页|网址|链接|这个页面|读了?什么|说了?什么|内容是什么/gi, "fetch_web 网页 读取 内容 page url read"],
-    // URL 本体会把无关工具的 registry 词（如 example.com → self.generate_from_example）
-    // 经 registry/trigram 通道顶到最前；归一化成 fetch 语义信号并消除噪声源。
+    // URL 本体会把无关工具的 registry 词经 registry/trigram 通道顶到最前；
+    // 归一化成 fetch 语义信号并消除噪声源。
     [/https?:\/\/\S+/gi, "fetch_web 网页 url page read 读取 内容"],
-    [/摄像头|监控画面|看家|门口/gi, "摄像头 vision camera 监控 看一眼 画面"],
+    [/摄像头|监控画面|看家|门口/gi, "摄像头 画面 监控 看一眼"],
     [/(?:开|关|调)(?:一下)?灯|灯光|调亮|调暗|空调|窗帘|插座/gi, "smart_home 设备 开关 灯 空调 窗帘 control"],
     [/到家|回到家|离家|出门|离开公司|到达/gi, "geofence 位置 围栏 到达 离开 提醒"],
     [/每天提醒|定期提醒|天天提醒|周期提醒/gi, "每天 定时 提醒 rhythm 周期 reminder"],

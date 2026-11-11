@@ -457,7 +457,7 @@ export class MessageHubSqliteStore {
   }
 
   /**
-   * 关键词检索消息（messages.search 工具用）：LIKE 字面匹配 + 可选平台/起始时间过滤，
+   * 关键词检索消息（消息检索用）：LIKE 字面匹配 + 可选平台/起始时间过滤，
    * 时间倒序。direction 不限（查"收到的话"和"让他人办的事"都有用）。
    */
   searchMessages(
@@ -490,7 +490,7 @@ export class MessageHubSqliteStore {
   }
 
   /**
-   * 通知捕捉统计（messages.capture_status 工具用）：按 platform 聚合
+   * 通知捕捉统计（断流判断数据源）：按 platform 聚合
    * phone_capture 来源的入站消息最近捕获时间与 24h 条数。断流判断的数据源。
    */
   captureStats(
@@ -528,7 +528,7 @@ export class MessageHubSqliteStore {
     return result.changes > 0;
   }
 
-  /** 各平台统计（messages.overview 用）：未读数 / 会话数 / 最近 3 条会话预览。 */
+  /** 各平台统计：未读数 / 会话数 / 最近 3 条会话预览。 */
   overviewStats(actorId: string, latestPerPlatform = 3): PlatformStat[] {
     const platforms = this.db
       .prepare(`SELECT DISTINCT platform FROM mh_conversations WHERE actor_id = ?`)

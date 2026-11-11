@@ -3,7 +3,7 @@
  *
  * 背景：LLM schema（builtin-chat-tools / capability-modules / MCP / Brain / Body 注入）
  * 与执行器（ToolRegistry.register）此前是两套手工维护的清单，漂移只能等运行期暴露：
- *  - schema 有、执行器无 → 模型一调用就报「未知工具」（2026-08-30 self.list_custom_skills 事故）；
+ *  - schema 有、执行器无 → 模型一调用就报「未知工具」；
  *  - 执行器有、schema 无 → 工具对 LLM 永久不可见（延迟目录里也无 schema 可加载）。
  *
  * 本模块在 bootstrap 完成「全部注册 + schema 注入」后做一次双向 diff，漂移以
@@ -12,6 +12,7 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
 import { resolveRegistryToolName } from "./tool-registry.js";
+import { COMPOSITE_ABSORBED_TOOL_NAMES } from "../external-model/composite-chat-tools.js";
 
 export interface ChatToolDriftReport {
   /** 有 LLM schema 但注册表无执行器（模型一调用就报未知工具的故障类） */
@@ -36,7 +37,7 @@ const SCHEMA_ONLY_ALLOWLIST = new Set<string>([
  * executor-only 豁免前缀：由运行时动态获得 schema 的执行器
  * （SkillManager 按会话合并 function 列表、BodyGateway 预路由等）。
  */
-const EXECUTOR_ONLY_ALLOWLIST_PREFIXES = ["skill.", "self.", "world."];
+const EXECUTOR_ONLY_ALLOWLIST_PREFIXES = ["skill.", "world."];
 
 function apiSideName(schemaName: string): string {
   return schemaName.replace(/\./g, "_");
@@ -60,7 +61,7 @@ export function reportChatToolDrift(opts: {
   for (const name of schemaNames) {
     if (SCHEMA_ONLY_ALLOWLIST.has(name)) continue;
     if (registryNames.has(name)) continue;
-    // 别名归一后命中（如 self.list_custom_skills → skill.list）
+    // 别名归一后命中
     if (registryNames.has(resolveRegistryToolName(name))) continue;
     // API 侧下划线名注册的场景（历史路径）
     if (registryNames.has(apiSideName(name))) continue;
@@ -72,6 +73,8 @@ export function reportChatToolDrift(opts: {
     if (schemaNames.has(name)) continue;
     // 注册名换算成 API 下划线名后命中（等价可见）
     if (schemaNames.has(name.replace(/\./g, "_"))) continue;
+    // 复合工具收编的细分执行器：仅由复合 handler 内部转发，不再需要独立 schema。
+    if (COMPOSITE_ABSORBED_TOOL_NAMES.has(name)) continue;
     if (EXECUTOR_ONLY_ALLOWLIST_PREFIXES.some((p) => name.startsWith(p))) continue;
     executorOnly.push(name);
   }

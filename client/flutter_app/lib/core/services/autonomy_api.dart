@@ -5,6 +5,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 自主性设置（服务端：server/src/services/autonomy-settings-store.ts）。
 ///
@@ -31,7 +32,7 @@ class AutonomySettings {
 class AutonomyApi {
   AutonomyApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

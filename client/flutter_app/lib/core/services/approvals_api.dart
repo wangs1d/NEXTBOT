@@ -4,6 +4,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 待确认收件箱 API 通用结果包装。
 class ApprovalsResult<T> {
@@ -138,7 +139,7 @@ class ApprovalsSnapshot {
 class ApprovalsApi {
   ApprovalsApi({String? baseUrl, http.Client? client})
       : _baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String _baseUrl;
   final http.Client _client;

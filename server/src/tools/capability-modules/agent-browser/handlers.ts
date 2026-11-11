@@ -188,8 +188,56 @@ export function createAgentBrowserHandoffHandler(
   };
 }
 
+/** 复合工具支持的动作（与 chat-tools 的 action 枚举保持一致）。 */
+export const AGENT_BROWSER_ACTIONS = [
+  "open",
+  "click",
+  "type",
+  "scroll",
+  "extract_text",
+  "screenshot",
+  "wait_for",
+  "close",
+  "handoff",
+] as const;
+
+type AgentBrowserAction = (typeof AGENT_BROWSER_ACTIONS)[number];
+
 /**
- * 注册 agent-browser 全部工具到 ToolRegistry。
+ * agent_browser —— 复合入口：按 `action` 分流到上面的 9 个动作 handler。
+ *
+ * 合并原因：延迟目录的可见工具面按函数名占槽位，9 个名字占 9 个槽位；
+ * 收敛成 1 个名字后只占 1 个。每个动作的参数与回执保持不变，
+ * 缺参校验仍由各动作 handler 给出具体原因。
+ */
+export function createAgentBrowserHandler(service: AgentBrowserService): ToolHandler {
+  const byAction: Record<AgentBrowserAction, ToolHandler> = {
+    open: createAgentBrowserOpenHandler(service),
+    click: createAgentBrowserClickHandler(service),
+    type: createAgentBrowserTypeHandler(service),
+    scroll: createAgentBrowserScrollHandler(service),
+    extract_text: createAgentBrowserExtractTextHandler(service),
+    screenshot: createAgentBrowserScreenshotHandler(service),
+    wait_for: createAgentBrowserWaitForHandler(service),
+    close: createAgentBrowserCloseHandler(service),
+    handoff: createAgentBrowserHandoffHandler(service),
+  };
+
+  return async (input: Record<string, unknown>, context: ToolContext) => {
+    const action = typeof input.action === "string" ? input.action.trim() : "";
+    if (!action) {
+      return { ok: false, error: `缺少 action（可选：${AGENT_BROWSER_ACTIONS.join("/")}）` };
+    }
+    const handler = byAction[action as AgentBrowserAction];
+    if (!handler) {
+      return { ok: false, error: `未知 action: ${action}（可选：${AGENT_BROWSER_ACTIONS.join("/")}）` };
+    }
+    return handler(input, context);
+  };
+}
+
+/**
+ * 注册 agent-browser 复合工具到 ToolRegistry。
  *
  * 调用方：`capability-modules/index.ts` 的 `buildCapabilityModules` 闭包，
  * 最终由 `registerAllCapabilityModules` 在启动阶段统一调用。
@@ -198,14 +246,5 @@ export function registerAgentBrowserTools(
   registry: ToolRegistry,
   deps: AgentBrowserModuleDeps,
 ): void {
-  const { agentBrowserService } = deps;
-  registry.register("agent_browser.open", createAgentBrowserOpenHandler(agentBrowserService));
-  registry.register("agent_browser.click", createAgentBrowserClickHandler(agentBrowserService));
-  registry.register("agent_browser.type", createAgentBrowserTypeHandler(agentBrowserService));
-  registry.register("agent_browser.scroll", createAgentBrowserScrollHandler(agentBrowserService));
-  registry.register("agent_browser.screenshot", createAgentBrowserScreenshotHandler(agentBrowserService));
-  registry.register("agent_browser.extract_text", createAgentBrowserExtractTextHandler(agentBrowserService));
-  registry.register("agent_browser.wait_for", createAgentBrowserWaitForHandler(agentBrowserService));
-  registry.register("agent_browser.close", createAgentBrowserCloseHandler(agentBrowserService));
-  registry.register("agent_browser.handoff", createAgentBrowserHandoffHandler(agentBrowserService));
+  registry.register("agent_browser", createAgentBrowserHandler(deps.agentBrowserService));
 }

@@ -285,6 +285,49 @@ test("NarrativeMemoryFacade：注入 bridge 后写入与召回都走桥接", asy
   });
 });
 
+test("writeUnified：两侧都失败时 ok=false，调用方可据此保留 journal 原文", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "memory-bridge-fail-"));
+  const savedEnv = new Map(LLM_ENV_KEYS.map((k) => [k, process.env[k]] as const));
+  for (const k of LLM_ENV_KEYS) delete process.env[k];
+
+  const failingGraph = {
+    async ingest() {
+      throw new Error("graph down");
+    },
+  } as unknown as BridgeGraphLike;
+  const failingMemory = {
+    async add() {
+      throw new Error("mem0 down");
+    },
+  } as unknown as Memory;
+  const ingest = new AgenticMemoryIngestService(failingMemory);
+  const db = openAgenticSqlite(join(dir, "bridge.db"));
+  const bridge = new MemoryBridgeService(
+    failingMemory,
+    failingGraph,
+    ingest,
+    makeFakeRetrieval({ candidates: [] }),
+    db,
+  );
+
+  try {
+    const result = await bridge.writeUnified("user-1", "journal:consolidate", "用户喜欢在周末爬山，每周都去", {
+      context: "main",
+      highSignal: true,
+    });
+    assert.equal(result.ok, false, "双写都抛错时 ok 必须为 false");
+    assert.equal(result.graphNodeId, null);
+    assert.deepEqual(result.mem0Items, []);
+  } finally {
+    bridge.close();
+    await rm(dir, { recursive: true, force: true });
+    for (const [k, v] of savedEnv) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+});
+
 test("createMemoryBridgeIfEnabled：enabled=false 或依赖缺失返回 null", async () => {
   await withBridgeEnv(async ({ graph, ingest, calls }) => {
     const memory = makeFakeMemory(calls, []);

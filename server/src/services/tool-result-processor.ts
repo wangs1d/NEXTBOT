@@ -9,6 +9,7 @@ import {
   isSystemFrameText,
   stripInternalFrames,
 } from "../external-model/internal-frames.js";
+import { analyzeContentStructure, hasMarkdownTable } from "./render-hint-service.js";
 
 /** 摘要折叠字数阈值（与 content-summary-service / render-hint-service 保持一致：800。
  *  2026-10-28 定版：正文须超过 800 字才折叠——400 门槛把日常比价/问答回复也折进卡里，
@@ -843,9 +844,15 @@ export class ToolResultProcessor {
        * 拼 wire 信封——singleBubble（禁分泡）的判据就在 sceneId 上。不回传
        * 的话 done 帧从 finalText 重拼信封，场景信息丢失（实证：出口命中
        * tomorrow_preview 而 wire meta.sceneId=none，气泡照拆不收口）。
+       * 2026-11-10 追加：bodyForm（markdown/fold = 长文整块呈现）与
+       * structuredBody（正文含 markdown 结构：表格/列表/板块标题）。
+       * done 据此把已分的绿泡收口成一条（用户定稿：markdown 内容不分泡，
+       * 纯聊天 plain 形态照常逐泡）。
        */
       onRenderEnvelope?: (envelope: {
         meta: { sceneId: string; failures: string[]; preSceneIds: string[] };
+        bodyForm?: string;
+        structuredBody?: boolean;
       }) => void;
     },
   ): string {
@@ -884,7 +891,21 @@ export class ToolResultProcessor {
       `[ToolResultProcessor] render: ${result.decision.reason} media=${opts?.mediaCardCount ?? 0}` +
         ` scene=${result.envelope.meta.sceneId} failures=${result.envelope.meta.failures.length}`,
     );
-    opts?.onRenderEnvelope?.(result.envelope);
+    // markdown 整块判定（2026-11-10 用户定稿「markdown 内容不分泡」）：
+    // 出口形态是 markdown/fold（长文整块），或正文本身含 markdown 结构
+    // （表格 / ≥2 条列表 / 板块标题）——这类内容拆成碎泡难读，done 整块
+    // 收口。纯聊天（plain 短句分条）不命中，照常逐泡落屏。
+    const structuredBody =
+      result.decision.body.form === "markdown" ||
+      result.decision.body.form === "fold" ||
+      hasMarkdownTable(workingText) ||
+      analyzeContentStructure(workingText).listCount >= 2 ||
+      analyzeContentStructure(workingText).sectionCount >= 1;
+    opts?.onRenderEnvelope?.({
+      meta: result.envelope.meta,
+      bodyForm: result.decision.body.form,
+      structuredBody,
+    });
     return result.text;
   }
 

@@ -6,12 +6,12 @@ import "package:flutter/foundation.dart";
 import "package:flutter/services.dart";
 import "package:geolocator/geolocator.dart";
 import "package:web_socket_channel/web_socket_channel.dart";
-import "package:web_socket_channel/status.dart" as ws_status;
 
 import "../config/api_config.dart";
 import "phone_capture_service.dart";
 import "phone_dial_invoker.dart";
 import "phone_sms_invoker.dart";
+import "ws_connection_runner.dart";
 
 /// 手机桥接连接状态（供设置页开关旁的状态展示）。
 enum PhoneBridgeStatus { disabled, connecting, online, offline }
@@ -44,9 +44,45 @@ class _PendingReportBatch {
 ///  - 口令模式：需再发 `phone.bridge.register` 携带 token。本服务两种都发，
 ///    重复 register 在无口令模式下只是幂等重复绑定，服务端行为安全。
 class PhoneBridgeService {
-  PhoneBridgeService._();
+  PhoneBridgeService._() {
+    _runner = WsConnectionRunner(
+      name: "phone-bridge",
+      urlProvider: () => ApiConfig.wsUrl,
+      gate: () => _enabled,
+      heartbeatInterval: _keepaliveInterval,
+      // 手机桥不做入站静默判死（与收编前一致：仅依赖底层断连事件）
+      reconnectDelay: _initialReconnectDelay,
+      maxReconnectDelay: _maxReconnectDelay,
+      keepalivePayload: () => <String, dynamic>{
+        "clientTime": DateTime.now().toIso8601String(),
+        "reason": "phone_bridge",
+      },
+      onConnected: (WebSocketChannel channel) {
+        // 绑定成功（register_ack）后才算 online，这里先回 offline
+        status.value = PhoneBridgeStatus.offline;
+        unawaited(() async {
+          // 注册前查一次通知使用权授权状态，随 deviceInfo 上报——服务端
+          // 消息捕捉统计读它决定是否引导 agent 发 permission_request 卡
+          _reportedListenerEnabled =
+              await PhoneCaptureService.instance.isListenerEnabled();
+          _send("session.init", _sessionInitPayload());
+          _send("phone.bridge.register", _registerPayload());
+        }());
+      },
+      onMessage: (Object? data) => _handleServerMessage(data.toString()),
+      onDisconnected: (bool willReconnect) {
+        _stopLocationReporting();
+        if (willReconnect) {
+          status.value = PhoneBridgeStatus.connecting;
+        }
+        // 非重连收尾（手动 stop/disable）：状态由调用方决定（disabled 等）
+      },
+    );
+  }
 
   static final PhoneBridgeService instance = PhoneBridgeService._();
+
+  late final WsConnectionRunner _runner;
 
   /// 本地偏好 key（是否启用手机桥接；默认开启，仅 Android 生效）
   static const String _prefKeyEnabled = "phone_bridge.enabled";
@@ -69,14 +105,9 @@ class PhoneBridgeService {
   bool _locReportEnabled = false;
   bool get isLocationReportEnabled => _locReportEnabled;
 
-  WebSocketChannel? _channel;
-  StreamSubscription<dynamic>? _subscription;
+  // 连接通道/订阅/重连定时器/退避计数等生命周期状态已收编进 WsConnectionRunner
   StreamSubscription<List<CapturedPhoneMessage>>? _captureSub;
-  Timer? _reconnectTimer;
-  Timer? _keepaliveTimer;
   Timer? _locReportTimer;
-  int _reconnectAttempts = 0;
-  bool _manualStopped = false;
 
   /// 捕获消息上报：待 ack 批次（重连后原样重发）与批量计数器
   final List<_PendingReportBatch> _pendingReports = <_PendingReportBatch>[];
@@ -172,25 +203,18 @@ class PhoneBridgeService {
 
   /// 建立桥接连接（幂等：已连接/连接中时跳过）。
   void start() {
-    _manualStopped = false;
-    if (_channel != null || _reconnectTimer != null) return;
     PhoneCaptureService.instance.ensureInitialized();
     _captureSub ??= PhoneCaptureService.instance.onBatch.listen(
       (List<CapturedPhoneMessage> batch) => _queueCapturedMessages(batch),
     );
     status.value = PhoneBridgeStatus.connecting;
-    _connect();
+    _runner.start();
   }
 
   /// 断开并停止重连（设置页关闭开关时调用）。
   void stop() {
-    _manualStopped = true;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _keepaliveTimer?.cancel();
-    _keepaliveTimer = null;
+    _runner.stop();
     _stopLocationReporting();
-    _teardownChannel();
   }
 
   /// 确保连接可用（App 回前台时调用，2026-10-20）。
@@ -198,48 +222,9 @@ class PhoneBridgeService {
   /// 已连接则空转；断线时取消挂着的退避定时器、重置退避计数后立即补连——
   /// 后台放久了指数退避拉到 30s，回前台不等退避直接试。
   void pokeReconnect() {
-    if (!_enabled || _manualStopped || _channel != null) return;
-    _reconnectTimer?.cancel();
-    _reconnectTimer = null;
-    _reconnectAttempts = 0;
+    if (!_enabled) return;
     status.value = PhoneBridgeStatus.connecting;
-    _connect();
-  }
-
-  void _connect() {
-    if (_manualStopped || !_enabled) return;
-    final WebSocketChannel channel = WebSocketChannel.connect(
-      Uri.parse(ApiConfig.wsUrl),
-    );
-    _channel = channel;
-
-    _subscription = channel.stream.listen(
-      (dynamic data) {
-        if (!identical(_channel, channel)) return;
-        _handleServerMessage(data.toString());
-      },
-      onError: (Object _) => _handleDisconnect(channel),
-      onDone: () => _handleDisconnect(channel),
-      cancelOnError: false,
-    );
-
-    unawaited(
-      channel.ready.then((_) async {
-        if (!identical(_channel, channel)) return;
-        _reconnectAttempts = 0;
-        status.value = PhoneBridgeStatus.offline; // 绑定成功后才算 online
-        // 注册前查一次通知使用权授权状态，随 deviceInfo 上报——服务端
-        // messages.capture_status 读它决定是否引导 agent 发 permission_request 卡
-        _reportedListenerEnabled =
-            await PhoneCaptureService.instance.isListenerEnabled();
-        _send("session.init", _sessionInitPayload());
-        _send("phone.bridge.register", _registerPayload());
-        _startKeepalive(channel);
-      }).catchError((Object _) {
-        if (!identical(_channel, channel)) return;
-        _handleDisconnect(channel);
-      }),
-    );
+    _runner.pokeReconnect();
   }
 
   /// 最近一次注册前查到的通知使用权授权状态（null = 尚未查过，不随注册上报）
@@ -633,74 +618,11 @@ class PhoneBridgeService {
   }
 
   // ─── 连接生命周期 ───
-
-  void _startKeepalive(WebSocketChannel channel) {
-    _keepaliveTimer?.cancel();
-    _keepaliveTimer = Timer.periodic(_keepaliveInterval, (_) {
-      if (!identical(_channel, channel)) {
-        _keepaliveTimer?.cancel();
-        _keepaliveTimer = null;
-        return;
-      }
-      _sendNow("ws.keepalive", <String, dynamic>{
-        "clientTime": DateTime.now().toIso8601String(),
-        "reason": "phone_bridge",
-      });
-    });
-  }
-
-  void _handleDisconnect(WebSocketChannel channel) {
-    if (!identical(_channel, channel)) return;
-    _keepaliveTimer?.cancel();
-    _keepaliveTimer = null;
-    _stopLocationReporting();
-    _teardownChannel();
-    if (_manualStopped || !_enabled) return;
-    status.value = PhoneBridgeStatus.offline;
-    _scheduleReconnect();
-  }
-
-  void _teardownChannel() {
-    unawaited(_subscription?.cancel());
-    _subscription = null;
-    try {
-      _channel?.sink.close(ws_status.goingAway);
-    } catch (_) {
-      // 已断开时 close 可能抛错，忽略
-    }
-    _channel = null;
-  }
-
-  void _scheduleReconnect() {
-    if (_reconnectTimer != null) return;
-    final int exponent = _reconnectAttempts.clamp(0, 8);
-    final int delaySec = (_initialReconnectDelay.inSeconds * (1 << exponent)).clamp(
-      _initialReconnectDelay.inSeconds,
-      _maxReconnectDelay.inSeconds,
-    );
-    _reconnectAttempts += 1;
-    status.value = PhoneBridgeStatus.connecting;
-    _reconnectTimer = Timer(Duration(seconds: delaySec), () {
-      _reconnectTimer = null;
-      _connect();
-    });
-  }
+  // 连接/心跳/重连/退避已收编到 WsConnectionRunner（连接生命周期基座）：
+  // 原手写 connect/ready 守卫/keepalive/指数退避整体删除，语义并入基座
+  // （基座补上了与桌面桥同款的「入站静默判死」能力位，本服务暂不开）。
 
   bool _send(String type, Map<String, dynamic> payload) {
-    return _sendNow(type, payload);
-  }
-
-  bool _sendNow(String type, Map<String, dynamic> payload) {
-    final channel = _channel;
-    if (channel == null || channel.closeCode != null) return false;
-    try {
-      channel.sink.add(jsonEncode(<String, dynamic>{
-        "type": type,
-        "payload": payload,
-      }));
-      return true;
-    } catch (_) {
-      return false;
-    }
+    return _runner.send(type, payload);
   }
 }

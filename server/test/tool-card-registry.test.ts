@@ -37,17 +37,8 @@ test("weather: missing weather fields → null（回退文本路由）", () => {
   assert.equal(buildToolCard("weather.get_local", { weatherText: "" }), null);
 });
 
-test("wallet: balance → wallet card；缺余额 → null", () => {
-  const p = buildToolCard("wallet.get_balance", { balance: 1000, currency: "CNY" });
-  assert.ok(p);
-  assert.equal(p.cardType, "wallet");
-  assert.equal(p.items[0]?.text, "1000 CNY");
-  assert.equal(buildToolCard("wallet.get_balance", { balance: "很多" }), null);
-});
-
 test("calendar: tasks → schedule card，时间截取格式化（跨时区稳定）", () => {
-  const p = buildToolCard("calendar.list_tasks", {
-    count: 2,
+  const p = buildToolCard("calendar", { action: "list_tasks", count: 2,
     tasks: [
       { title: "牙医复诊", nextRunAt: "2026-09-10T09:30:00" },
       { title: "给妈妈打电话", nextRunAt: "2026-09-11T20:00:00" },
@@ -62,8 +53,8 @@ test("calendar: tasks → schedule card，时间截取格式化（跨时区稳�
 });
 
 test("calendar: 空 tasks → null", () => {
-  assert.equal(buildToolCard("calendar.list_tasks", { tasks: [] }), null);
-  assert.equal(buildToolCard("calendar.list_tasks", {}), null);
+  assert.equal(buildToolCard("calendar", { action: "list_tasks", tasks: [] }), null);
+  assert.equal(buildToolCard("calendar", { action: "list_tasks", }), null);
 });
 
 test("unregistered tool → null", () => {

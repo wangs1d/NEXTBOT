@@ -12,6 +12,7 @@ import "../browser/shared_browser_protocol.dart" as proto;
 import "../browser/webview_windows_driver.dart";
 import "browser_panel_preference.dart";
 import "windows_webview_bootstrap.dart" show kSharedWebViewDebugPort;
+import "ws_event_router.dart" show WsEventRouter, WsSubscribeScope, wsEventPayload;
 
 export "../browser/shared_browser_protocol.dart"
     show SbActionTrace, SbConfirmRequest, resolveInputToUrl, searchUrlFor;
@@ -58,6 +59,26 @@ class SharedBrowserHost {
   SharedBrowserHost._();
 
   static final SharedBrowserHost instance = SharedBrowserHost._();
+
+  static bool _busWired = false;
+
+  /// 事件总线自订阅（main.dart 装配时调用一次；幂等）。
+  ///
+  /// shared.browser.* / browser.bridge.* 服务端事件归本模块 owned：总线根
+  /// 通道资格内的每条事件都交给 [handleServerEvent] 内部过滤（未命中类型
+  /// 直接返回），与迁出前 main.dart 根监听器的接线行为逐字节一致。
+  static void ensureBusSubscription() {
+    if (_busWired) return;
+    _busWired = true;
+    WsEventRouter.instance.subscribe(
+      module: "shared-browser-host",
+      scope: WsSubscribeScope.root,
+      onEvent: (Map<String, dynamic> event) {
+        final String type = event["type"] as String? ?? "";
+        return instance.handleServerEvent(type, wsEventPayload(event));
+      },
+    );
+  }
 
   /// 注入运行时资产（framework-free JS，见 assets/shared_browser/）。
   static const String _runtimeAsset =

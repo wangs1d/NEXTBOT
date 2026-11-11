@@ -268,9 +268,10 @@ test("风险分级口径：money/irreversible 命中、未知工具保守归 wri
   assert.equal(classifyToolRisk("finance.pay_bill"), "money");
   assert.equal(classifyToolRisk("desktop.run_shell"), "irreversible");
   assert.equal(classifyToolRisk("care.delete_important_date"), "irreversible");
-  assert.equal(classifyToolRisk("geofence.delete"), "irreversible");
+  assert.equal(classifyToolRisk("geofence", { action: "delete" }), "irreversible");
   assert.equal(classifyToolRisk("wallet.get_balance"), "read_only");
-  assert.equal(classifyToolRisk("calendar.list_tasks"), "read_only");
+  assert.equal(classifyToolRisk("calendar", { action: "list_tasks" }), "read_only");
+  assert.equal(classifyToolRisk("calendar", { action: "create" }), "write");
   assert.equal(classifyToolRisk("brand.new.unknown_tool"), "write", "未知工具保守按 write");
   assert.ok(isSensitiveTool("wallet.transfer"));
   assert.ok(!isSensitiveTool("wallet.get_balance"));
@@ -304,7 +305,7 @@ test("多条挂起确认且未指明 confirmId：拒绝默认批最新，返回�
   confirmations.register({
     actorId: "u1",
     kind: "k1",
-    steps: [{ tool: "messages.reply", args: {} }],
+    steps: [{ tool: "world.link.send_message", args: {} }],
     rationale: "给妈妈回复生日祝福",
     createdAt: Date.now(),
     expiresAt: Date.now() + 600_000,

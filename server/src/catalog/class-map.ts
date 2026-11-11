@@ -75,10 +75,6 @@ const RULES: ClassRule[] = [
   { exact: "alipay.proxy-trade", domain: "finance", action: "book", risk: "spend" },
   { exact: "alipay.query-payment", domain: "finance", action: "query", risk: "read" },
   { prefix: "alipay.", domain: "finance" },
-  { exact: "wallet.transfer", domain: "finance", action: "book", risk: "spend" },
-  { exact: "wallet.purchase", domain: "finance", action: "book", risk: "spend" },
-  { exact: "wallet.recharge", domain: "finance", action: "book", risk: "spend" },
-  { prefix: "wallet.", domain: "finance" },
   // 查支付方式/查订单是只读，exact 前置；家族前缀默认 spend
   { exact: "payment.list_methods", domain: "finance", action: "query", risk: "read" },
   { exact: "payment.query_order", domain: "finance", action: "query", risk: "read" },
@@ -113,7 +109,6 @@ const RULES: ClassRule[] = [
   { exact: "notes.search", domain: "learning", action: "query", risk: "read" },
   { exact: "notes.list", domain: "learning", action: "query", risk: "read" },
   { prefix: "notes.", domain: "learning" },
-  { prefix: "internet.research", domain: "learning", action: "query", risk: "read" },
   // ── work 生产力 ──
   { prefix: "calendar.", domain: "work" },
   { prefix: "reminder", domain: "work", trigger: "scheduled" },
@@ -122,7 +117,7 @@ const RULES: ClassRule[] = [
   { prefix: "file.", domain: "work", action: "query", risk: "read" },
   { prefix: "code.", domain: "work", action: "execute", risk: "write" },
   { prefix: "desktop.", domain: "work", action: "execute", risk: "write" },
-  { prefix: "agent_browser.", domain: "work", action: "execute", risk: "write" },
+  { prefix: "agent_browser", domain: "work", action: "execute", risk: "write" },
   { prefix: "shared_browser.", domain: "work", action: "execute", risk: "write" },
   // ── comms 通讯触达 ──
   // phone.call_user：Agent 打给用户本人的站内 App 来电（无话费、不触第三方），
@@ -144,7 +139,6 @@ const RULES: ClassRule[] = [
   { exact: "brain.recall", domain: "self", action: "query", risk: "read" },
   { exact: "brain.remember", domain: "self", action: "manage", risk: "write" },
   { prefix: "brain.", domain: "self" },
-  { prefix: "self.", domain: "self", action: "execute", risk: "write" },
   { prefix: "skill.", domain: "self" },
   { prefix: "habit.", domain: "self", action: "automate" },
   { prefix: "world.", domain: "self" },

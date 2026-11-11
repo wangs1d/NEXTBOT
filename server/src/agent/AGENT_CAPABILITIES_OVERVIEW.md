@@ -10,7 +10,6 @@
 - ✅ 天气查询
 - ✅ Agent间通信
 - ✅ AIP协议
-- ✅ 视觉识别
 - ✅ 桌面自动化
 - ✅ Web浏览
 - ✅ 生活助手
@@ -81,65 +80,49 @@ import {
 【你的核心能力清单】
 💡 以下是你拥有的所有内置工具和能力，可以根据用户需求主动调用：
 
-1️⃣ 【钱包与支付能力】
-可用工具：
-- wallet.get_balance: 查询真实资金钱包余额
-- wallet.transfer: 向其他Agent转账（需要配对验证）
-- wallet.get_transactions: 查看交易记录
-- wallet.recharge: 充值到钱包
-提示：可用于管理用户资金、处理支付请求
-
-2️⃣ 【日历与日程管理能力】
+1️⃣ 【日历与日程管理能力】
 可用工具：
 - calendar.create: 创建提醒/日程/定时任务的唯一入口（text 自然语言优先，或结构化字段）
 - calendar.list_tasks: 查看待办事项列表
 提示：可帮助用户管理时间、设置提醒、安排会议
 
-3️⃣ 【天气查询能力】
+2️⃣ 【天气查询能力】
 可用工具：
-- weather.get_local: 获取本地天气预报
+- web_search（action="weather"）: 获取本地天气预报
 提示：可提供天气信息、出行建议
 
-4️⃣ 【Agent间通信能力】
+3️⃣ 【Agent间通信能力】
 可用工具：
-- world.link.send_message: 向好友Agent发送站内消息（仅限好友关系）
+- world.link（action="send_message"）: 向好友Agent发送站内消息（仅限好友关系）
 提示：需要双方完成配对才能通信
 
-5️⃣ 【AIP协议能力】
+4️⃣ 【AIP协议能力】
 可用工具：
-- aip.dispatch: 分发任务到其他Agent
-- aip.list_my_state: 查看当前Agent状态
-- aip.get_proposal: 获取协作提案
+- aip（action="dispatch"）: 分发任务到其他Agent
+- aip（action="state"）: 查看当前Agent状态
+- aip（action="proposal"）: 获取协作提案
 提示：用于多Agent协作场景
 
-6️⃣ 【视觉识别能力】
-可用工具：
-- vision.http_pull: 从HTTP地址拉取图像进行分析
-- vision.periodic_start: 启动周期性视觉监控
-- vision.periodic_stop: 停止视觉监控
-- vision.periodic_list: 查看正在运行的视觉监控任务
-提示：可分析屏幕内容、监控变化
-
-7️⃣ 【桌面自动化能力】
+5️⃣ 【桌面自动化能力】
 可用工具：
 - desktop.visual.screenshot: 截取电脑屏幕（或指定区域）并返回 PNG 图片
 - desktop.visual.run_task: 执行桌面视觉自动化任务（VLM驱动键鼠操作）
 提示：可截取屏幕查看内容、操作用户桌面、自动执行任务
 
-8️⃣ 【Web浏览能力】
+6️⃣ 【Web浏览能力】
 可用工具：
 - web.search: 执行网络搜索
 - web.fetch: 获取网页内容
 提示：可帮助用户查找信息、浏览网页
 
-9️⃣ 【生活助手能力】
+7️⃣ 【生活助手能力】
 可用工具：
 - budget.calculate: 计算预算和收支
 - shopping.suggest: 提供购物建议
 - reminder.plan: 已并入 calendar.create（历史叫法）
 提示：可提供生活建议、财务管理
 
-🔟 【协议统一管理能力】
+8️⃣ 【协议统一管理能力】
 可用工具：
 - protocol.unified.quota_adjust: 调整计算配额
 - protocol.unified.memory_patch: 更新记忆
@@ -151,13 +134,13 @@ import {
 【虚拟电话能力】
 ✅ 您的虚拟联络号：123456（登记在 Agent 名下，与您共用）
 三种通路：
-- Agent↔Agent：phone.virtual_call（双方均须已申领联络号）
-- Agent→用户：phone.call_user
+- Agent↔Agent：phone（action="call"，双方均须已申领联络号）
+- Agent→用户：phone（action="call"）
 - 用户→Agent：App 内呼叫（不必再输 6 位号）
 
 【其他 Agent 的虚拟电话】
 - 拨打另一 Agent 前，对方 Agent 也须已申领 6 位号码
-- 与用户通话不要用 virtual_call，用 phone.call_user 或等用户来电
+- 与用户通话不要用 virtual_call，用 phone（action="call"）或等用户来电
 ```
 
 ---
@@ -198,10 +181,9 @@ Agent 可以：
 2. 日历管理：创建日程、设置提醒
 3. 天气查询：获取本地天气预报
 4. 虚拟电话：申领号码、拨打语音电话
-5. 视觉识别：分析屏幕内容
-6. 桌面自动化：执行自动化任务
-7. Web浏览：搜索信息、获取网页内容
-8. 生活助手：预算管理、购物建议
+5. 桌面自动化：执行自动化任务
+6. Web浏览：搜索信息、获取网页内容
+7. 生活助手：预算管理、购物建议
 ...等等
 
 请问您需要哪方面的帮助？"
@@ -224,11 +206,11 @@ Agent 可以：
 
 预期 Agent 回答：
 "要打给其他 Agent 的话，我先确认您是否已申领虚拟联络号…"
-[调用 phone.ensure_my_number]
+[调用 phone（action="number"）]
 
 "您的虚拟号码是 123456（与 Agent 共用）。请提供对方 Agent 的 6 位号码；对方也需已申领才能接通。
 
-若只是在 App 里让我通知您，可用 phone.call_user，不必再输号码。"
+若只是在 App 里让我通知您，可用 phone（action="call"），不必再输号码。"
 ```
 
 ### 场景 D：组合能力使用
@@ -255,7 +237,6 @@ Agent 可以：
 | 天气查询 | 1 | 天气预报、出行建议 |
 | Agent通信 | 1 | Agent间消息传递 |
 | AIP协议 | 3 | 多Agent协作、任务分发 |
-| 视觉识别 | 4 | 图像分析、屏幕监控 |
 | 桌面自动化 | 1 | 桌面操作、自动任务 |
 | Web浏览 | 2 | 网络搜索、网页获取 |
 | 生活助手 | 3 | 预算、购物、提醒计划 |

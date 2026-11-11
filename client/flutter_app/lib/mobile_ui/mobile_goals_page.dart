@@ -5,7 +5,9 @@ import "package:flutter/material.dart";
 import "package:http/http.dart" as http;
 
 import "../core/config/api_config.dart";
+import "mobile_page_cache.dart";
 import "mobile_theme.dart";
+import "../core/services/nb_http.dart";
 
 /// 手机端「目标」页（在办事项统一视图，按 2026-11-07 设计稿一比一还原）。
 ///
@@ -46,19 +48,57 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
   }
 
   /// 主壳切到本 tab 时触发重拉（IndexedStack 保活下 initState 只走一次）。
+  /// 已有数据时静默后台刷新（秒进不转圈），无数据才走完整加载。
   void refresh() {
-    if (!_loading) unawaited(_load());
+    if (!_loading) unawaited(_load(silent: _items.isNotEmpty));
   }
 
-  Future<void> _load() async {
-    setState(() {
-      _loading = true;
-      _error = null;
-    });
+  /// 磁盘缓存 key：上次成功响应体原样落盘（stale-while-revalidate 用）。
+  static String get _cacheKey =>
+      "goals_view_${ApiConfig.effectiveActorId}";
+
+  /// 服务端响应体 → 列表条目（网络与缓存两条路共用同一解析）。
+  static List<Map<String, dynamic>> _parseItems(Map<String, dynamic> body) {
+    final Map<String, dynamic> view =
+        (body["view"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
+    final List<dynamic> rawItems =
+        (view["items"] as List<dynamic>?) ?? const <dynamic>[];
+    return rawItems
+        .whereType<Map<String, dynamic>>()
+        .toList(growable: false);
+  }
+
+  /// [silent]=true 时已有数据保持展示，成功换数据、失败不闪错误页。
+  Future<void> _load({bool silent = false}) async {
+    // 无数据时的完整加载（首次进入 / 错误重试）：
+    // 初次进入先读磁盘缓存，命中立即上屏（秒进），网络后台静默刷新。
+    if (!silent && _items.isEmpty) {
+      if (_error == null) {
+        final Map<String, dynamic>? cached =
+            await MobilePageCache.instance.read(_cacheKey);
+        if (!mounted) return;
+        if (cached != null) {
+          setState(() {
+            _items = _parseItems(cached);
+            _loading = false;
+          });
+          unawaited(_fetch(silent: true));
+          return;
+        }
+      }
+      setState(() {
+        _loading = true;
+        _error = null;
+      });
+    }
+    await _fetch(silent: silent);
+  }
+
+  Future<void> _fetch({required bool silent}) async {
     try {
       final Uri uri = Uri.parse(
           "${ApiConfig.httpBase}/api/proactivity/goals/view?actorId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}&includeDone=1");
-      final http.Response res = await (widget.client ?? http.Client())
+      final http.Response res = await (widget.client ?? NbClient())
           .get(uri)
           .timeout(const Duration(seconds: 20));
       if (res.statusCode != 200) {
@@ -69,18 +109,17 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
       if (body["ok"] != true) {
         throw Exception(body["error"]?.toString() ?? "未知错误");
       }
-      final Map<String, dynamic> view =
-          (body["view"] as Map<String, dynamic>?) ?? const <String, dynamic>{};
-      final List<dynamic> rawItems =
-          (view["items"] as List<dynamic>?) ?? const <dynamic>[];
+      MobilePageCache.instance.write(_cacheKey, body);
       if (!mounted) return;
       setState(() {
-        _items =
-            rawItems.whereType<Map<String, dynamic>>().toList(growable: false);
+        _items = _parseItems(body);
         _loading = false;
+        _error = null;
       });
     } catch (e) {
       if (!mounted) return;
+      // 静默刷新失败：已有数据保持展示（不闪错误页）；无数据才落到错误态。
+      if (silent && _items.isNotEmpty) return;
       setState(() {
         _error = e.toString();
         _loading = false;
@@ -96,7 +135,7 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
     try {
       final Uri uri = Uri.parse(
           "${ApiConfig.httpBase}/api/proactivity/goals/${Uri.encodeQueryComponent(id)}?actorId=${Uri.encodeQueryComponent(ApiConfig.effectiveActorId)}");
-      final http.Response res = await (widget.client ?? http.Client())
+      final http.Response res = await (widget.client ?? NbClient())
           .delete(uri)
           .timeout(const Duration(seconds: 20));
       final Map<String, dynamic> body =
@@ -203,7 +242,9 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
           IconButton(
             tooltip: "刷新",
             icon: const Icon(Icons.refresh, size: 22),
-            onPressed: _loading ? null : () => unawaited(_load()),
+            onPressed: _loading
+                ? null
+                : () => unawaited(_load(silent: _items.isNotEmpty)),
           ),
         ],
       ),
@@ -212,7 +253,7 @@ class MobileGoalsPageState extends State<MobileGoalsPage> {
           : _error != null
               ? _buildError(p)
               : RefreshIndicator(
-                  onRefresh: _load,
+                  onRefresh: () => _load(silent: true),
                   child: _buildList(p),
                 ),
     );

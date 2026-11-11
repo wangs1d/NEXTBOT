@@ -1,16 +1,14 @@
 import type { ChatCompletionTool } from "openai/resources/chat/completions";
 
-import { VISION_SANDBOX_RESTRICTED_CHAT_TOOLS } from "../external-model/openai-compatible-tool-loop.js";
 import { BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS } from "../tools/browser-session-chat-tools.js";
 import { DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS } from "../tools/desktop-visual-chat-tools.js";
 import { PHONE_BRIDGE_CHAT_TOOL_DEFINITIONS } from "../tools/phone-bridge-chat-tools.js";
-import { SELF_PROGRAMMING_CHAT_TOOLS } from "../tools/self-programming-chat-tools.js";
 
 /**
  * 客户端 `chat.user_message.agentAccessMode`。
  *
  * 历史上曾区分 `sandbox` / `full` 两档权限：沙箱下屏蔽 desktop.visual.*、
- * vision.periodic_*、self.*、phone.* 等高权限工具。现已废弃沙箱模式，
+ * phone.* 等高权限工具。现已废弃沙箱模式，
  * Agent 始终以最高权限运行；保留联合类型与 `parseAgentAccessMode` 仅用于
  * 兼容旧客户端仍会发送 `"sandbox"` 字段的线上协议。
  */
@@ -84,13 +82,11 @@ export function getPhoneBridgeChatTools(): ChatCompletionTool[] {
   return [...PHONE_BRIDGE_CHAT_TOOL_DEFINITIONS];
 }
 
-/** 完全访问时应补发给模型的工具定义（含 desktop.visual.*、视觉巡检、自我编程等高权限工具）。 */
+/** 完全访问时应补发给模型的工具定义（含 desktop.visual.* 等高权限工具）。 */
 export function getSandboxRestrictedChatTools(): ChatCompletionTool[] {
   return [
     ...DESKTOP_VISUAL_CHAT_TOOL_DEFINITIONS,
     ...BROWSER_SANDBOX_RESTRICTED_CHAT_TOOLS,
-    ...VISION_SANDBOX_RESTRICTED_CHAT_TOOLS,
-    ...SELF_PROGRAMMING_CHAT_TOOLS,
   ];
 }
 
@@ -152,9 +148,9 @@ export function buildAgentAccessModeSystemSuffix(
     return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接 + 手机桥接（均在线）
-Agent 已开启完全访问，可调用 desktop.visual.screenshot / desktop.visual.run_task、视觉巡检、自我编程、远程控制真实手机（phone.*）等高权限工具。
+Agent 已开启完全访问，可调用 desktop.visual.screenshot / desktop.visual.run_task、远程控制真实手机（phone.*）等高权限工具。
 电脑桥接与手机桥接均已在线，涉及用户手机的操作（查电量、定位、响铃、同步短信/通话记录等）请优先调用 phone.* 工具。
-远程拨打电话（phone.dial）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
+远程拨打电话（phone，action=call）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
 执行转账、真实消费、桌面自动化、远程拍照等敏感操作前仍须征得用户明确同意。`;
   }
 
@@ -162,7 +158,7 @@ Agent 已开启完全访问，可调用 desktop.visual.screenshot / desktop.visu
     return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接（在线）
-可调用桌面操控、视觉巡检、自我编程等高权限工具。
+可调用桌面操控等高权限工具。
 电脑桥接已在线（与手机同 userId）。
 执行转账、真实消费等敏感操作前须征得用户明确同意。`;
   }
@@ -171,16 +167,16 @@ ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 电脑桥接（在线）
     return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问 + 手机桥接（在线）
-Agent 已开启完全访问，可调用 desktop.visual.*、视觉巡检、自我编程、phone.* 等高权限工具。
+Agent 已开启完全访问，可调用 desktop.visual.*、phone.* 等高权限工具。
 用户真实手机已连接，涉及用户手机的操作请优先调用 phone.* 工具（电量、通知、定位、响铃、短信、通话记录等）。
-远程拨打电话（phone.dial）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
+远程拨打电话（phone，action=call）属敏感操作：拨打前必须在对话中向用户确认被叫号码与意图，未经确认不得调用。
 执行转账、真实消费、远程拍照等敏感操作前仍须征得用户明确同意。`;
   }
 
   return `
 
 ${AGENT_ACCESS_MODE_SYSTEM_MARKER} · 完全访问（已开启）
-可调用桌面操控、视觉巡检、自我编程、远程控制真实手机（phone.*）等高权限工具。
+可调用桌面操控、远程控制真实手机（phone.*）等高权限工具。
 执行转账、真实消费等敏感操作前仍须征得用户明确同意。`;
 }
 

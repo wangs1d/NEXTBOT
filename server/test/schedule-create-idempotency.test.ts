@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 幂等创建：设置提醒只落一条任务。
  *
  * 提醒创建的写入方是模型前台工具调用（calendar.create → createTask），
@@ -201,8 +201,9 @@ test("工具层端到端：模型重复调用 calendar.create 只落一条任务
 
     // 第二击：同一轮模型又调用了 calendar.create（同内容同时间）
     const byTool = await registry.execute(
-      "calendar.create",
-      { description: "2点提醒我睡觉", title: "2点提醒我睡觉", runAt: "2099-03-05T14:00:00", timezone: "Asia/Shanghai" },
+      "calendar", {
+      action: "create",
+      description: "2点提醒我睡觉", title: "2点提醒我睡觉", runAt: "2099-03-05T14:00:00", timezone: "Asia/Shanghai" },
       ctx,
     );
     assert.equal(byTool.ok, true);

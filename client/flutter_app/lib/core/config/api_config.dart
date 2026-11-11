@@ -26,6 +26,42 @@ class ApiConfig {
   /// 捆绑形态（本地 runtime 监听 127.0.0.1:3000）不受影响。
   static bool? _windowsReleaseFallbackBlocked;
 
+  // ── 远程配置下发·运行期覆盖（2026-11-10 地基）────────────────────────
+  // 编译期烤入的地址是"上次发版时的快照"；服务端 /api/client/config 可下发
+  // 运行期覆盖（换机房/迁域名不重烤包）。由 RemoteConfig.applyCached() 在
+  // main() 早期调用（上次启动拉到的，本次生效，语义与 applyRuntimeChannel
+  // 一致）；空串 = 不覆盖，保持烤入值。覆盖值优先于一切烤入值——它是运维
+  // 最新决定，服务端控制的就是它自己的接入地址。
+
+  static String? _remoteHttpBase;
+  static String? _remoteControlPlaneUrl;
+  static String? _remoteUpdateManifestUrl;
+
+  /// 应用远程配置覆盖（非空字段生效；全空调用是无害 no-op）。
+  /// 幂等：重复调用以最后一次为准。
+  static void applyRemoteOverrides({
+    String? httpBase,
+    String? controlPlaneUrl,
+    String? updateManifestUrl,
+  }) {
+    _remoteHttpBase = _normalizeBase(httpBase);
+    _remoteControlPlaneUrl = _normalizeBase(controlPlaneUrl);
+    _remoteUpdateManifestUrl = _normalizeBase(updateManifestUrl);
+  }
+
+  /// 地址归一：去尾部斜杠，避免拼接出 `//path`。协议必须 http/https，非法值
+  /// 丢弃（防御服务端配置手误把整条请求链打挂——覆盖错了比不覆盖更糟）。
+  static String? _normalizeBase(String? raw) {
+    final String t = (raw ?? "").trim().replaceAll(RegExp(r"/+$"), "");
+    final Uri? uri = Uri.tryParse(t);
+    if (uri == null ||
+        (uri.scheme != "http" && uri.scheme != "https") ||
+        uri.host.isEmpty) {
+      return null;
+    }
+    return t;
+  }
+
   /// 运行通道（runtime 收回开关）："byok" = 本机 runtime（默认）；
   /// "platform" = 统一 API 服务。由 main() 在 runApp 前从本地安装身份文件
   /// 同步读入（`applyRuntimeChannel`），值是上一次启动从服务端清单拿到的 channel。
@@ -51,6 +87,9 @@ class ApiConfig {
   }
 
   static String get httpBase {
+    // 远程配置覆盖（运维最新决定）优先于一切烤入值；null = 从未下发/下发为空。
+    final String? remote = _remoteHttpBase;
+    if (remote != null) return remote;
     // runtime 收回（channel=platform）：本机后端不再拉起，请求一律走烤入的控制面。
     if (_runtimeChannel == "platform" && _controlPlaneFromEnv.isNotEmpty) {
       return _controlPlaneFromEnv;
@@ -79,7 +118,12 @@ class ApiConfig {
     return "http://127.0.0.1:3000";
   }
 
-  /// 连接级会话 id（设备/实例）；`session.init` 会原样上报，与 [userId] 并存时后端以 [userId] 为 actor。
+  /// 连接/通道标签（设备实例名）。**不是身份**：身份一律取 [effectiveActorId]。
+  ///
+  /// 历史包袱：它曾同时充当「未登录时的 actor」，于是所有设备撞在同一个
+  /// `session-mvp-001` 上；现在只剩两个用途——本地联调区分双实例
+  /// （`--dart-define=SESSION_ID=session-b`）与桥接通道命名。任何 WS/HTTP
+  /// 载荷里的身份字段都禁止引用本值。
   static const String sessionId = String.fromEnvironment(
     "SESSION_ID",
     defaultValue: "session-mvp-001",
@@ -96,6 +140,7 @@ class ApiConfig {
   /// 浏览器地址栏）。
   /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源）。
   static String get updateManifestUrl {
+    if (_remoteUpdateManifestUrl != null) return _remoteUpdateManifestUrl!;
     if (_updateManifestUrlFromEnv.isNotEmpty) return _updateManifestUrlFromEnv;
     return httpBase;
   }
@@ -111,6 +156,7 @@ class ApiConfig {
   /// 用户可见，必须用域名而非裸 IP；必须 https，80 已 301 跨协议重定向不可靠）。
   /// 未配置时回落 [httpBase]（单机部署/开发联调形态，两者同源，行为不变）。
   static String get controlPlaneBase {
+    if (_remoteControlPlaneUrl != null) return _remoteControlPlaneUrl!;
     final String c = _controlPlaneFromEnv.trim();
     return c.isNotEmpty ? c : httpBase;
   }
@@ -144,23 +190,42 @@ class ApiConfig {
     return t.contains("@") ? t.toLowerCase() : t;
   }
 
-  /// 生效登录主体：登录邮箱覆盖 → 编译期 USER_ID → [sessionId]。
-  /// 与后端 `boundActorId` 一致。HTTP `?sessionId=`、本地存储桶、钱包等应使用本值。
+  /// 未登录时的设备匿名身份提供者（boot 早期由 InstallIdentity 注入，两端都装）。
+  ///
+  /// 主流做法里「未登录」是一种真实的身份状态，不是「用某个默认账号顶着」。
+  /// 注入后 [effectiveActorId] 会回落到本机安装标识（`inst_…`）：
+  ///  - 多台未登录设备不会挤在同一个 `session-mvp-001` 上串记忆/世界/配额；
+  ///  - 服务端审计里能直接看出「这台设备还没登录」，而不是一个假账号。
+  static String? Function()? installIdentityProvider;
+
+  /// 安装标识连读盘都失败时的最后身份：明确标成 guest。
+  ///
+  /// 保留它只是为了「永远返回一个非空值」——**不再**回落到编译期 [sessionId]
+  /// （`session-mvp-001`）：那是所有设备共享的假账号，正是身份对不上的源头。
+  static const String guestFallbackActorId = "guest_local";
+
+  /// 生效身份（**全链路唯一权威值**）。
+  ///
+  /// 顺序：登录身份覆盖（含 token 归属）→ 编译期 `USER_ID` → 本机安装标识 →
+  /// [guestFallbackActorId]。`session.init`、每条业务事件的 `userId/sessionId`、
+  /// HTTP `?userId=`、本地存储桶、钱包**都必须**取本值。
+  ///
+  /// 反例（2026-11-11 真机故障）：`session.init` 用一份算法、消息用另一份算法，
+  /// 两边算出来不一致 → 服务端判 `FORBIDDEN` → 界面永远停在「我看看」。
   static String get effectiveActorId {
     final String o = _runtimeUserIdOverride ?? "";
     if (o.isNotEmpty) return o;
     final String u = userId.trim();
-    return u.isNotEmpty ? u : sessionId;
+    if (u.isNotEmpty) return u;
+    final String anon = installIdentityProvider?.call()?.trim() ?? "";
+    if (anon.isNotEmpty) return anon;
+    return guestFallbackActorId;
   }
 
   /// `GET /accounts/me` 等查询参数：有登录身份（覆盖或 USER_ID）时只传
-  /// `userId`，否则传 `sessionId`。
+  /// `userId`，未登录传本机匿名身份（与 [effectiveActorId] 同值）。
   static Map<String, String> get accountAuthQuery {
-    final String u = _runtimeUserIdOverride ?? userId.trim();
-    if (u.isNotEmpty) {
-      return <String, String>{"userId": u};
-    }
-    return <String, String>{"sessionId": sessionId};
+    return <String, String>{"userId": effectiveActorId};
   }
 
   /// `POST /accounts/register` 请求体（与 [accountAuthQuery] 规则一致）。

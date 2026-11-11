@@ -218,7 +218,7 @@ class MobileHomePageState extends State<MobileHomePage>
 
   /// 装配环境信息流编排层端口（与桌面端 main.dart 同构）：
   /// 前后台判定、对话页停留判定、日程页刷新。系统通知由
-  /// LocalNotificationService 承接（main_mobile.dart 启动时 init）。
+  /// LocalNotificationService 承接（main.dart 启动时 init）。
   void _wireAmbientFeeds() {
     final AmbientFeedsController c = AmbientFeedsController.instance;
     c.isAppBackgrounded = () => _appBackgrounded;
@@ -269,10 +269,10 @@ class MobileHomePageState extends State<MobileHomePage>
             backgroundColor: Colors.transparent,
             // 玻璃底栏压在页面内容之上（backdrop 才能糊到消息/列表）
             extendBody: true,
-            // edge-to-edge 后（main_mobile.dart 开启）：底部 inset 由玻璃底栏
-            // 内的 SafeArea 吸收；顶部状态栏 inset 在这里吃掉——四个 tab 页
-            // 都按「窗口从状态栏下方开始」设计，行为与未开 edge-to-edge 时一致，
-            // 而状态栏区域透出主壳底色（不再由系统画白）。
+            // edge-to-edge 后（app/mobile_bootstrap.dart 开启）：底部 inset
+            // 由玻璃底栏内的 SafeArea 吸收；顶部状态栏 inset 在这里吃掉——
+            // 四个 tab 页都按「窗口从状态栏下方开始」设计，行为与未开
+            // edge-to-edge 时一致，状态栏区域透出主壳底色（不再由系统画白）。
             body: SafeArea(
               top: true,
               bottom: false,

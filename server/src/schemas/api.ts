@@ -91,6 +91,10 @@ export const accountRegisterBodySchema = z
     // "register"＝只注册（已存在直接 409，供客户端的注册界面使用，避免把
     // 「重复注册」悄悄当成登录）。登录走独立 POST /accounts/login。
     mode: z.enum(["register"]).optional(),
+    // 设备标识：登录/注册成功后按它签发本机 access token（同设备重复登录
+    // 只保留最新一枚）。可缺省——缺省时服务端按随机 id 签发，行为不变。
+    deviceId: z.string().max(120).optional(),
+    deviceLabel: z.string().max(120).optional(),
   })
   .superRefine(accountActorRefine);
 
@@ -110,6 +114,9 @@ export const accountLoginBodySchema = z
     email: z.string().optional(),
     // OTP 闸开启时必填（由路由按闸状态校验，不在此强制）。
     otpCode: z.string().max(8).optional(),
+    // 设备标识：成功后按它签发本机 access token（见 /accounts/register 同名字段）。
+    deviceId: z.string().max(120).optional(),
+    deviceLabel: z.string().max(120).optional(),
   })
   .superRefine(accountActorRefine);
 

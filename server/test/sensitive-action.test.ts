@@ -16,13 +16,11 @@ test("工具分档：外部副作用前缀 → act_external", () => {
     "phone_call.start",
     "message.send",
     // 2026-10-21 表对齐真实工具名（旧表漏掉 → 被误判 act_internal，handoff/自动推进失守）
-    "messages.reply",
     "world.link.send_message",
     "email.send",
     "phone.dial",
     "phone.call_user",
-    "smart_home.control_device",
-    "smart_home.scene",
+    "smart_home",
     "alipay.submit-payment",
     "alipay.proxy-trade",
   ]) {
@@ -34,6 +32,12 @@ test("工具分档：alipay 只读/查询族不升档", () => {
   assert.equal(classifyToolSensitivity("alipay.query-payment"), "act_internal");
   assert.equal(classifyToolSensitivity("alipay.check-wallet"), "act_internal");
   assert.equal(classifyToolSensitivity("alipay.merchant-list"), "act_internal");
+});
+
+test("工具分档：复合工具按 action 分化（读类不升档）", () => {
+  assert.equal(classifyToolSensitivity("smart_home", { action: "list_devices" }), "read");
+  assert.equal(classifyToolSensitivity("smart_home", { action: "control_device" }), "act_external");
+  assert.equal(classifyToolSensitivity("smart_home", { action: "scene" }), "act_external");
 });
 
 test("工具分档：只读前缀 → read；未知工具 → act_internal", () => {

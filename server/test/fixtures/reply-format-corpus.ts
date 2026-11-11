@@ -207,19 +207,13 @@ const TOOL_REGISTRY: ReplyFormatCase[] = [
     },
   },
   {
-    name: "tool-wallet-prose-no-list",
-    note: "钱包工具 + 纯叙述回复——注册表直出 wallet 卡",
-    text: "查好了，余额充足，放心花。",
-    toolName: "wallet.get_balance",
-    toolResult: { summary: "查询成功", balance: 1000, currency: "CNY" },
-  },
-  {
     name: "tool-calendar-prose-no-list",
     note: "日程工具 + 纯叙述回复——注册表直出 schedule 卡，时间取自 nextRunAt（截取格式化，不经 Date，跨时区稳定）",
     text: "接下来就这两个安排，都记着呢。",
-    toolName: "calendar.list_tasks",
+    toolName: "calendar",
     toolResult: {
       ok: true,
+      action: "list_tasks",
       count: 2,
       tasks: [
         { taskId: "t1", title: "牙医复诊", nextRunAt: "2026-09-10T09:30:00", status: "active" },

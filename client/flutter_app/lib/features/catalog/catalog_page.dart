@@ -14,7 +14,7 @@ import "../../core/services/nb_http.dart";
 class CatalogApiClient {
   CatalogApiClient({String? baseUrl, http.Client? client})
       : baseUrl = baseUrl ?? ApiConfig.httpBase,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String baseUrl;
   final http.Client _client;

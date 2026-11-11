@@ -268,11 +268,11 @@ test("geofence.* 工具：create/list/delete round trip", async () => {
     // 工具 schema 并入 LLM 清单的形态校验
     assert.deepEqual(
       GEOFENCE_CHAT_TOOLS.map((t) => t.function.name),
-      ["geofence.create", "geofence.list", "geofence.delete"],
+      ["geofence"],
     );
 
     const ctx = { sessionId: "u1", userId: "u1" };
-    const createdRes = (await registry.execute("geofence.create", validInput(), ctx)) as {
+    const createdRes = (await registry.execute("geofence", { ...validInput(), action: "create" }, ctx)) as {
       ok: boolean;
       result: { ok: boolean; geofence: { id: string; name: string } };
     };
@@ -280,21 +280,21 @@ test("geofence.* 工具：create/list/delete round trip", async () => {
     assert.equal(createdRes.result.ok, true);
     assert.equal(createdRes.result.geofence.name, "家");
 
-    const bad = (await registry.execute("geofence.create", validInput({ latitude: 999 }), ctx)) as {
+    const bad = (await registry.execute("geofence", { ...validInput({ latitude: 999 }), action: "create" }, ctx)) as {
       ok: boolean;
       result: { ok: boolean; error: string };
     };
     assert.equal(bad.ok, true);
     assert.equal(bad.result.ok, false);
 
-    const listed = (await registry.execute("geofence.list", {}, ctx)) as {
+    const listed = (await registry.execute("geofence", { action: "list" }, ctx)) as {
       result: { count: number };
     };
     assert.equal(listed.result.count, 1);
 
     const removed = (await registry.execute(
-      "geofence.delete",
-      { id: createdRes.result.geofence.id },
+      "geofence",
+      { action: "delete", id: createdRes.result.geofence.id },
       ctx,
     )) as { result: { ok: boolean } };
     assert.equal(removed.result.ok, true);

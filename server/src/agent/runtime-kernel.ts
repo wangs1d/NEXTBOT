@@ -489,19 +489,19 @@ export class RuntimeKernel {
     const pins: string[] = [];
 
     if (hasAnyKeyword(text, KEYWORDS.device)) {
-      pins.push("device.list", "device.use", "device.stream");
+      pins.push("device");
     }
     if (hasAnyKeyword(text, KEYWORDS.smartHome)) {
-      pins.push("smart_home.list_devices", "smart_home.control_device", "smart_home.scene");
+      pins.push("smart_home");
     }
     if (hasAnyKeyword(text, KEYWORDS.desktop)) {
       pins.push("desktop.open", "desktop.uia_query", "desktop.visual.screenshot");
     }
     if (hasAnyKeyword(text, KEYWORDS.phone)) {
-      pins.push("phone.call_user", "voice.speak", "voice.send_message");
+      pins.push("phone", "voice");
     }
     if (hasAnyKeyword(text, KEYWORDS.calendar)) {
-      pins.push("calendar.list_tasks", "calendar.create");
+      pins.push("calendar");
     }
     if (hasAnyKeyword(text, KEYWORDS.search)) {
       pins.push("search_web", "search_images", "search_videos", "fetch_web");

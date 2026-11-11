@@ -76,7 +76,7 @@ export class ToolCallGuard {
    * 仅对 money/irreversible 生效；过期/超量条目顺手清理。
    */
   checkReplay(actorId: string, tool: string, args: Record<string, unknown>): ToolGuardReplay | null {
-    if (!isSensitiveTool(tool)) return null;
+    if (!isSensitiveTool(tool, args)) return null;
     const now = this.nowFn();
     for (const [k, v] of this.idempotency) if (v.expiresAt <= now) this.idempotency.delete(k);
     const entry = this.idempotency.get(this.key(actorId, tool, args));
@@ -92,9 +92,9 @@ export class ToolCallGuard {
     ok: boolean,
     result: Record<string, unknown>,
   ): void {
-    if (!isSensitiveTool(tool)) return;
+    if (!isSensitiveTool(tool, args)) return;
     const at = this.nowFn();
-    this.appendAudit({ at, actorId, tool, risk: classifyToolRisk(tool), ok, args: redactArgs(args), result: redactArgs(result) });
+    this.appendAudit({ at, actorId, tool, risk: classifyToolRisk(tool, args), ok, args: redactArgs(args), result: redactArgs(result) });
     if (!ok) return;
     this.idempotency.set(this.key(actorId, tool, args), { expiresAt: at + this.ttlMs, result: snapshot(result) });
     while (this.idempotency.size > MAX_IDEMPOTENCY_ENTRIES) {

@@ -171,25 +171,14 @@ test("search×media 零图兜底：搜图全挂时也不出文字搜索卡", () 
   assert.equal(out, text, "正文原样");
 });
 
-test("wallet: 查余额 → wallet 卡", () => {
-  const out = runLoopTurn("我还有多少钱", "查了一下，你的余额情况在这里：", {
-    registry: [
-      { toolName: "wallet.get_balance", result: { ok: true, balance: 1286.5, currency: "CNY" } },
-    ],
-  });
-  const card = parseCardBlock(out);
-  assert.ok(card, `应附上 wallet 卡，实际文本: ${out}`);
-  assert.equal(card.cardType, "wallet");
-  assert.equal(card.title, "钱包余额");
-});
-
 test("schedule: 查日程 → schedule 卡", () => {
   const out = runLoopTurn("我今天有什么安排", "今天的日程帮你看过了：", {
     registry: [
       {
-        toolName: "calendar.list_tasks",
+        toolName: "calendar",
         result: {
           ok: true,
+          action: "list_tasks",
           count: 2,
           tasks: [
             { title: "项目周会", nextRunAt: "2026-09-16T10:00:00" },

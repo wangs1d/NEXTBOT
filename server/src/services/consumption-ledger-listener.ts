@@ -1,7 +1,7 @@
 // ConsumptionLedgerListener —— 消费管家闭环（Task 16 场景B）
 //
 // 链路：工具执行成功 → HookBus "tool.executed" 事件 → 本监听器：
-//   1. 消费类工具（payment.* / wallet.* / meituan.* / shopping.order.place）
+//   1. 消费类工具（payment.* / meituan.* / shopping.order.place）
 //      → finance-deep 自动入账（金额/分类按工具类型映射/来源工具/时间）
 //   2. 入账后检测：预算 warning（80%）/ exceeded（100%）分级提醒
 //      （getBudgetStatus level）+ 异常消费检测（≥ 近30天同分类均值 3 倍且 ≥ ¥100）
@@ -21,7 +21,7 @@ import type {
 
 /** 消费类工具判定（正则；仅这些工具成功后入账，查询/取消类不重复入账） */
 const CONSUMPTION_TOOL_RE =
-  /^(payment\.create_order|wallet\.(transfer|purchase|recharge)|meituan\.create_order|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book)$/;
+  /^(payment\.create_order|meituan\.create_order|shopping\.order\.place|ride_hailing\.book|home_service\.book|restaurant\.book)$/;
 
 /** 消费管家依赖（装配层注入，全部可 mock） */
 export interface ConsumptionLedgerListenerDeps {
@@ -50,70 +50,6 @@ export interface ConsumptionLedgerListenerDeps {
 /** 异常检测阈值：≥ 近 30 天同分类均值 3 倍且 ≥ ¥100 */
 const ANOMALY_MULTIPLIER = 3;
 const MIN_ANOMALY_AMOUNT = 100;
-
-/** wallet.purchase 的细分类别 → 财务账本大类映射 */
-const WALLET_CATEGORY_MAP: Record<string, FinanceCategory> = {
-  // 餐饮
-  food_delivery: "餐饮",
-  dine_in: "餐饮",
-  // 交通
-  taxi: "交通",
-  ride_hailing: "交通",
-  public_transit: "交通",
-  parking: "交通",
-  bus_ticket: "交通",
-  train: "交通",
-  flight: "交通",
-  travel: "交通",
-  courier: "交通",
-  // 购物
-  shopping: "购物",
-  digital: "购物",
-  software: "购物",
-  cloud_service: "购物",
-  office: "购物",
-  printing: "购物",
-  book: "购物",
-  gift: "购物",
-  flower: "购物",
-  pet: "购物",
-  pet_food: "购物",
-  pet_grooming: "购物",
-  rental: "购物",
-  // 娱乐
-  entertainment: "娱乐",
-  concert: "娱乐",
-  sports_event: "娱乐",
-  exhibition: "娱乐",
-  movie: "娱乐",
-  beauty: "娱乐",
-  spa: "娱乐",
-  hair_salon: "娱乐",
-  massage: "娱乐",
-  gym: "娱乐",
-  subscription: "娱乐",
-  // 医疗
-  medical: "医疗",
-  pharmacy: "医疗",
-  health: "医疗",
-  pet_medical: "医疗",
-  // 教育
-  education: "教育",
-  course: "教育",
-  // 居住
-  utility: "居住",
-  phone_bill: "居住",
-  electricity: "居住",
-  water: "居住",
-  gas: "居住",
-  internet: "居住",
-  hotel: "居住",
-  home_service: "居住",
-  cleaning: "居住",
-  repair: "居住",
-  moving: "居住",
-  insurance: "居住",
-};
 
 /** 判断工具是否消费类（装配层据此过滤 tool.executed 事件发布） */
 export function isConsumptionTool(toolName: string): boolean {
@@ -172,42 +108,6 @@ export function extractLedgerEntry(info: {
         category: "购物",
         description: String(result.description ?? input.description ?? "扫码支付"),
         source: "payment_tool",
-      };
-    }
-    case "wallet.transfer": {
-      const amount = amountOf(result.amount ?? input.amount);
-      if (!amount) return null;
-      return {
-        amount,
-        type: "expense",
-        category: "其他",
-        description: `转账给 ${String(result.recipientId ?? input.recipientId ?? "好友")}`,
-        source: "wallet_tool",
-      };
-    }
-    case "wallet.recharge": {
-      // 充值记为收入（账本净额平衡；非真实工资）
-      const amount = amountOf(result.amount ?? input.amount);
-      if (!amount) return null;
-      return {
-        amount,
-        type: "income",
-        category: "其他",
-        description: "钱包充值",
-        source: "wallet_tool",
-      };
-    }
-    case "wallet.purchase": {
-      const amount = amountOf(result.amount ?? input.amount);
-      if (!amount) return null;
-      const rawCategory = String(result.category ?? input.category ?? "other");
-      return {
-        amount,
-        type: "expense",
-        category: WALLET_CATEGORY_MAP[rawCategory] ?? "购物",
-        merchant: result.merchant ? String(result.merchant) : undefined,
-        description: String(result.description ?? input.description ?? "钱包消费"),
-        source: "wallet_tool",
       };
     }
     case "meituan.create_order": {

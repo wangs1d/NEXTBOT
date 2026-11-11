@@ -1,4 +1,4 @@
-﻿import test from "node:test";
+import test from "node:test";
 import assert from "node:assert/strict";
 
 import { evaluateAndSelectStrategy } from "../src/agent/synthesis-strategy.js";
@@ -13,7 +13,7 @@ test("calendar.create 成功轮短路为 confirm_receipt，且不再要求转告
   const directive = evaluateAndSelectStrategy(
     [
       {
-        toolName: "calendar.create",
+        toolName: "calendar",
         ok: true,
         result: {
           ok: true,
@@ -56,7 +56,7 @@ test("calendar.create 成功轮短路为 confirm_receipt，且不再要求转告
 
 test("calendar.create 成功轮同样短路", () => {
   const directive = evaluateAndSelectStrategy(
-    [{ toolName: "calendar.create", ok: true, result: { ok: true, matched: true } }],
+    [{ toolName: "calendar", ok: true, result: { ok: true, matched: true } }],
     "帮我记一下周三下午3点开会",
   );
   assert.equal(directive.strategy, "confirm_receipt");
@@ -64,7 +64,7 @@ test("calendar.create 成功轮同样短路", () => {
 
 test("确认工具失败轮不短路：失败要向用户解释原因", () => {
   const directive = evaluateAndSelectStrategy(
-    [{ toolName: "calendar.create", ok: false, result: { ok: false, error: "时间解析失败" } }],
+    [{ toolName: "calendar", ok: false, result: { ok: false, error: "时间解析失败" } }],
     "明天早上我10点我要去看牙医",
   );
   assert.notEqual(directive.strategy, "confirm_receipt");
@@ -73,7 +73,7 @@ test("确认工具失败轮不短路：失败要向用户解释原因", () => {
 test("确认轮混检索轮不短路：真实数据仍按质量分档组织", () => {
   const mixed = evaluateAndSelectStrategy(
     [
-      { toolName: "calendar.create", ok: true, result: { ok: true, summary: "提醒已写入日程" } },
+      { toolName: "calendar", ok: true, result: { ok: true, summary: "提醒已写入日程" } },
       { toolName: "search_web", ok: true, result: { items: [{ title: "t", snippet: "s" }] } },
     ],
     "查一下协和牙科再帮我约明天10点",
@@ -87,7 +87,7 @@ test("calendar.create 解析失败（matched:false）不得当办妥确认", () 
   const directive = evaluateAndSelectStrategy(
     [
       {
-        toolName: "calendar.create",
+        toolName: "calendar",
         ok: true,
         result: { ok: true, matched: false, hint: "未能解析时间或事项" },
       },

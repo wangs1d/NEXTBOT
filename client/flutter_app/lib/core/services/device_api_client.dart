@@ -5,6 +5,7 @@ import "package:http/http.dart" as http;
 
 import "../config/api_config.dart";
 import "access_auth_api.dart";
+import "./nb_http.dart";
 
 /// 设备 API 通用结果包装。
 class DeviceApiResult<T> {
@@ -100,7 +101,7 @@ class DeviceApiClient {
     http.Client? client,
   })  : baseUrl = baseUrl ?? ApiConfig.httpBase,
         sessionId = sessionId ?? ApiConfig.effectiveActorId,
-        _client = client ?? http.Client();
+        _client = client ?? NbClient();
 
   final String baseUrl;
   final String sessionId;

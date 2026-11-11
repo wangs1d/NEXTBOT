@@ -6,8 +6,7 @@
  * 验证目标（2026-10-21 去路由化后：工具真实调用）：
  *   ① 真实搜索工具：registry.execute("search_web") 走真实 AnySearch 链路返回结果；
  *   ② 真实图片工具：registry.execute("search_images") 返回真实照片；
- *   ③ 其他工具：registry.execute("clock.get_current_time") 正确返回；
- *   ④ 真实端到端 tool-loop：真实 LLM + 真实工具执行器——搜索类请求是否
+ *   ③ 真实端到端 tool-loop：真实 LLM + 真实工具执行器——搜索类请求是否
  *      「真的去调用了工具并基于结果作答」（文字搜索 + 照片各跑一轮）。
  */
 import dotenv from "dotenv";
@@ -38,9 +37,9 @@ registerClockTools(registry);
 const section = (title: string) =>
   console.log(`\n════════════════════ ${title} ════════════════════`);
 
-/* ── ①②③ 真实工具直调 ── */
+/* ── ①② 真实工具直调 ── */
 async function smokeDirectTools() {
-  section("①②③ 真实工具直调（registry.execute → 真实 AnySearch / 图片链路 / 时钟）");
+  section("①② 真实工具直调（registry.execute → 真实 AnySearch / 图片链路）");
   const ctx = { sessionId: "smoke-real-tools" };
 
   const web = await registry.execute("search_web", { query: "刘浩存 最新消息", limit: 5 }, ctx);
@@ -61,12 +60,7 @@ async function smokeDirectTools() {
         : ""),
   );
 
-  const clock = await registry.execute("clock.get_current_time", {}, ctx);
-  console.log(
-    `clock.get_current_time ok=${clock.ok} 结果=${JSON.stringify(clock.result).slice(0, 120)}`,
-  );
-
-  return { webOk: web.ok && webItems.length > 0, imgOk: imgs.ok && imgItems.length > 0, clockOk: clock.ok };
+  return { webOk: web.ok && webItems.length > 0, imgOk: imgs.ok && imgItems.length > 0 };
 }
 
 /* ── ④ 真实端到端 tool-loop（真实 LLM + 真实工具执行器）── */
@@ -118,7 +112,6 @@ try {
 } catch (e) {
   results.webOk = false;
   results.imgOk = false;
-  results.clockOk = false;
   console.error("工具直调冒烟失败:", e);
 }
 try {

@@ -1088,7 +1088,10 @@ export class ProactivityHub {
     const results: Array<Record<string, unknown>> = [];
     const outcomes: Array<{ tool: string; ok: boolean; blocked?: boolean }> = [];
     for (const step of steps.slice(0, ACT_MAX_STEPS)) {
-      if (ACT_TOOL_DENY_RE.test(step.tool) || classifyToolRisk(step.tool) === "irreversible") {
+      if (
+        ACT_TOOL_DENY_RE.test(step.tool) ||
+        classifyToolRisk(step.tool, step.args as Record<string, unknown> | undefined) === "irreversible"
+      ) {
         console.log(`[ProactivityHub] act 步骤被安全门拦截（危险操作）: ${step.tool}`);
         outcomes.push({ tool: step.tool, ok: false, blocked: true });
         continue;

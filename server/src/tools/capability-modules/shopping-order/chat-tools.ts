@@ -129,7 +129,7 @@ export const SHOPPING_ORDER_CHAT_TOOLS: ChatCompletionTool[] = [
         "确认 token 5 分钟过期；**只提交订单、不支付**。\n" +
         "提交成功后订单落本地表（状态 pending_payment）：拿到支付宝收银台链接的订单可用 " +
         "shopping.pay.submit 代付（用户本人支付宝确认扣款），其余引导用户去平台 App 支付。\n" +
-        "与 wallet.purchase（仅记账）/ shopping.suggest（仅建议）/ shopping.compare.prices（只读比价）的区别：本工具真实提交订单。\n" +
+        "与 wallet.purchase（仅记账）/ shopping.suggest（仅建议）/ shopping.compare（只读比价）的区别：本工具真实提交订单。\n" +
         "下单前必须先返回确认摘要让用户确认，得到用户明确同意后再带 confirm=true+token 执行。",
       parameters: {
         type: "object",

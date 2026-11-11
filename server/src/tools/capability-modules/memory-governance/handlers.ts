@@ -4,7 +4,7 @@ import type { InterestWatcher } from "../../../proactivity/interest-watcher.js";
 import type { AuditTrailService } from "../../../proactivity/audit-timeline.js";
 import type { GoalBoard } from "../../../proactivity/goal-board.js";
 import type { ShoppingCompareService } from "../../../services/shopping-compare-service.js";
-import { getAgenticMemoryRuntime } from "../../../agentic-memory/index.js";
+import { getAgenticMemoryRuntime, getMemoryComponents } from "../../../agentic-memory/index.js";
 import { actorIdVariants } from "../../../agentic-memory/actor-key.js";
 import { getEventMemoryStore } from "../../../agentic-memory/event-store.js";
 import { formatEventLine } from "../../../agentic-memory/event-recall.js";
@@ -287,9 +287,48 @@ export function createProfileUpdateHandler(_deps: MemoryGovernanceModuleDeps): T
   };
 }
 
+/**
+ * memory.invalidate（溯源作废）：用户撤回消息/否认说过，或某条断言被证伪。
+ *
+ * schema 一直由 MEMORY_INVALIDATION_CHAT_TOOLS 下发给模型，但此前没有注册
+ * 执行器——模型真调用时会拿到「未知工具」。级联能力（账本标记 void、Mem0
+ * 删除、认知图节点 overridden）早已在 ProvenanceService 里实现，这里只做
+ * 参数校验与接线，不重复实现删除逻辑。
+ */
+export function createInvalidateHandler(_deps: MemoryGovernanceModuleDeps): ToolHandler {
+  return async (input: Record<string, unknown>) => {
+    const sourceRef = typeof input.sourceRef === "string" ? input.sourceRef.trim() : "";
+    const claimId = typeof input.claimId === "string" ? input.claimId.trim() : "";
+    const reason = typeof input.reason === "string" ? input.reason.trim() : "";
+    if (!reason) return { ok: false, error: "reason 必填（说明为什么要作废）" };
+    if (!sourceRef && !claimId) {
+      return { ok: false, error: "sourceRef 与 claimId 至少提供一个" };
+    }
+
+    const provenance = getMemoryComponents().provenance;
+    if (!provenance) return { ok: false, error: "溯源作废未启用（AGENT_PROVENANCE 关闭）" };
+
+    const report = sourceRef
+      ? await provenance.invalidateSource(sourceRef, reason)
+      : await provenance.invalidateClaim(claimId, reason);
+    const touched = report.ledgerSuperseded + report.mem0Deleted + report.graphOverridden;
+    return {
+      ok: true,
+      ...(sourceRef ? { sourceRef } : {}),
+      ...(claimId ? { claimId } : {}),
+      ...report,
+      hint:
+        touched > 0
+          ? "已作废并完成级联清理。向用户简短确认即可，不要展开内部存储细节。"
+          : "没有找到可作废的记录（来源/断言不存在或已作废）。如实告诉用户没找到，不要编造。",
+    };
+  };
+}
+
 export function registerMemoryGovernanceTools(registry: ToolRegistry, deps: MemoryGovernanceModuleDeps): void {
   registry.register("memory.forget", createForgetHandler(deps));
   registry.register("activity.timeline", createTimelineHandler(deps));
   registry.register("memory.recall", createRecallHandler(deps));
   registry.register("profile.update", createProfileUpdateHandler(deps));
+  registry.register("memory.invalidate", createInvalidateHandler(deps));
 }

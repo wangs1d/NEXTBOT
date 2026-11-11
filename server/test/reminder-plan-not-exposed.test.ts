@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 分级预告计划**不进模型可见回执**（2026-11-05 用户定调）。
  *
  * 历史：2026-10-25 为了让聊天层知道「另有提前提醒」，calendar.create 回执透出了
@@ -42,8 +42,9 @@ async function withService<T>(fn: (registry: ToolRegistry) => Promise<T>) {
 test("牙医提醒：回执不透出分级计划，只留 hasAdvanceReminder", async () => {
   await withService(async (registry) => {
     const reply = await registry.execute(
-      "calendar.create",
-      { text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
+      "calendar", {
+      action: "create",
+      text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
       ctx,
     );
     assert.equal(reply.ok, true);
@@ -68,8 +69,9 @@ test("牙医提醒：回执不透出分级计划，只留 hasAdvanceReminder", a
 test("trivia 琐事提醒不做提前提醒：hasAdvanceReminder 不为 true", async () => {
   await withService(async (registry) => {
     const reply = await registry.execute(
-      "calendar.create",
-      { text: "明天 14:00 提醒我喝水", category: "trivia", timezone: "Asia/Shanghai" },
+      "calendar", {
+      action: "create",
+      text: "明天 14:00 提醒我喝水", category: "trivia", timezone: "Asia/Shanghai" },
       ctx,
     );
     assert.equal(reply.ok, true);
@@ -82,8 +84,9 @@ test("trivia 琐事提醒不做提前提醒：hasAdvanceReminder 不为 true", a
 test("回执的时间是口语说法，不是 11/6 11:00（2026-11-05 活人感）", async () => {
   await withService(async (registry) => {
     const reply = await registry.execute(
-      "calendar.create",
-      { text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
+      "calendar", {
+      action: "create",
+      text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
       ctx,
     );
     const result = reply.result as Record<string, unknown>;
@@ -99,8 +102,9 @@ test("回执的时间是口语说法，不是 11/6 11:00（2026-11-05 活人感�
 test("提前提醒只给枚举事实，不给任何成句台词（2026-11-05 二次定调）", async () => {
   await withService(async (registry) => {
     const reply = await registry.execute(
-      "calendar.create",
-      { text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
+      "calendar", {
+      action: "create",
+      text: "明天 10:00 提醒我看牙医", timezone: "Asia/Shanghai" },
       ctx,
     );
     const result = reply.result as Record<string, unknown>;

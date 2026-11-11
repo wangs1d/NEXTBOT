@@ -59,40 +59,45 @@ function tag(platform: string, title: string, price?: number): TaggedProduct {
   return { platform, product: { title, price, url: `https://${platform}.com/x` } };
 }
 
-test("SHOPPING_COMPARE_CHAT_TOOLS has 3 tools with correct names", () => {
+test("SHOPPING_COMPARE_CHAT_TOOLS 是单个复合工具，action 覆盖比价/调研/监控", () => {
   const names = SHOPPING_COMPARE_CHAT_TOOLS
     .map((t) => (t.type === "function" ? t.function?.name : null))
     .filter((n): n is string => Boolean(n));
-  assert.equal(names.length, 3);
-  assert.deepEqual([...names].sort(), [
-    "shopping.compare.prices",
-    "shopping.compare.research",
-    "shopping.compare.watch",
+  assert.deepEqual(names, ["shopping.compare"]);
+  const tool = SHOPPING_COMPARE_CHAT_TOOLS[0];
+  assert.equal(tool?.type, "function");
+  assert.ok(tool?.function.description?.length);
+  const params = tool?.function.parameters as
+    | { required?: string[]; additionalProperties?: boolean; properties?: Record<string, { enum?: string[] }> }
+    | undefined;
+  assert.equal(params?.additionalProperties, false);
+  assert.deepEqual(params?.required, ["action"]);
+  assert.deepEqual(params?.properties?.action?.enum, [
+    "prices",
+    "research",
+    "watch_add",
+    "watch_remove",
+    "watch_list",
   ]);
-  for (const tool of SHOPPING_COMPARE_CHAT_TOOLS) {
-    if (tool.type !== "function") continue;
-    assert.ok(tool.function.description?.length);
-    assert.ok(tool.function.parameters);
-    assert.equal(tool.function.parameters?.additionalProperties, false);
-  }
 });
 
-test("registerShoppingCompareTools registers 3 tools in registry", () => {
+test("registerShoppingCompareTools 只注册 1 个复合工具", () => {
   const registry = new MockRegistry();
   const service = {} as ShoppingCompareService;
   registerShoppingCompareTools(registry as unknown as ToolRegistry, { shoppingCompareService: service });
-  assert.equal(registry.handlers.size, 3);
-  for (const name of ["shopping.compare.prices", "shopping.compare.research", "shopping.compare.watch"]) {
-    assert.ok(registry.handlers.has(name), `未注册 ${name}`);
-  }
+  assert.equal(registry.handlers.size, 1);
+  assert.ok(registry.handlers.has("shopping.compare"));
 });
 
-test("SHOPPING_COMPARE_INTENT_RULES has prefix rule with order/place negatives", () => {
-  const prefixRules = SHOPPING_COMPARE_INTENT_RULES.filter((r) => "prefix" in r);
-  assert.equal(prefixRules.length, 1);
-  const meta = prefixRules[0]?.metadata;
+test("SHOPPING_COMPARE_INTENT_RULES 合并为单条规则，保留下单负例", () => {
+  const rules = SHOPPING_COMPARE_INTENT_RULES;
+  assert.equal(rules.length, 1);
+  assert.equal((rules[0] as { exact?: string }).exact, "shopping.compare");
+  const meta = rules[0]?.metadata;
   assert.ok(meta?.negativeAliases?.some((a) => /下单|购买/.test(a)));
-  assert.ok(meta?.aliases?.some((a) => /比价|降价/.test(a)));
+  assert.ok(meta?.aliases?.some((a) => /比价/.test(a)));
+  assert.ok(meta?.aliases?.some((a) => /降价/.test(a)));
+  assert.ok(meta?.aliases?.some((a) => /保险/.test(a)));
 });
 
 test("normalizeTitle strips marketing noise; extractSpecTokens finds specs", () => {

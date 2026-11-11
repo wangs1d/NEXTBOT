@@ -4,17 +4,17 @@
 // 定位（2026-09-16 明确）：「可回溯的代办账本」而非通知流——通知实时性由对话流
 // （proactive_pipeline fan-out 弹窗）承担，本台账只回答两类问题：
 //   1. 执行类条目：「助手替我办的事办得怎么样了」（订牛奶/缴水电费/改日程…），
-//      由 Agent 工具链 activity.report 工具在办完后上报，status 走
+//      由 POST /agent/activities 在办完后上报，status 走
 //      pending（进行中）→ done/failed（完结）；
 //   2. 告知类条目：「助手替我盯到了什么」（日程变动等入站信号），投递成功后由
 //      delivery 层自动落库，status=changed + statusLabel=「已告知」——它记录的
 //      是「我告诉过你」而非「我办完了」，后续 Agent 真正代办（用户在对话中确认）
-//      时由 activity.report 另行落一条执行类条目，两条构成「盯到 → 办完」的弧线。
+//      时由 POST /agent/activities 另行落一条执行类条目，两条构成「盯到 → 办完」的弧线。
 // actorId 归一：一律按基础 actor（裸 id）归属，渠道 scoped 会话在触发器侧已剥回。
 //
 // 写入方：
 //  1. ProactiveDeliveryService 投递成功后，kind 以 "action." 开头的提案自动落库（告知类）；
-//  2. activity.report 工具 / POST /agent/activities（执行类，可携带结构化 detail）。
+//  2. POST /agent/activities（执行类，可携带结构化 detail）。
 // 持久化：单 JSON 文件（persist-file 原子替换），每个 actor 最多保留 MAX_PER_ACTOR 条。
 import { readJson, writeJson } from "./persist-file.js";
 

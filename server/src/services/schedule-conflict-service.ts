@@ -395,7 +395,7 @@ export function buildConflictToolResult(
     matched: false,
     conflict: true,
     hint:
-      "新日程与已有日程时间冲突，尚未创建。请向用户逐条转述 conflicts（标题+时间+重叠时长），并给出选项：①改到其他空闲时段（可调 calendar.find_free_slots 拿建议）②仍然创建（用户明确坚持时带 forceCreate=true 重调）③取消。用户答复前不要声称已创建。",
+      "新日程与已有日程时间冲突，尚未创建。请向用户逐条转述 conflicts（标题+时间+重叠时长），并给出选项：①改到其他空闲时段（可调 calendar 的 action=find_free_slots 拿建议）②仍然创建（用户明确坚持时带 forceCreate=true 重调）③取消。用户答复前不要声称已创建。",
     conflicts: conflicts.map((c) => ({
       taskId: c.taskId,
       title: c.title,
