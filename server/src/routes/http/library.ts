@@ -29,7 +29,7 @@ import { travelPlanStore } from "../../skills/travel-planning/travel-plan-store.
 
 type LibraryFileItem = ReturnType<FileProcessingService["listFiles"]>[number];
 type LibraryImageItem = ReturnType<ImageGenerationService["listImages"]>[number];
-type LibraryNoteItem = { id: string; title: string; category: string; tags: string[]; updatedAt: string; sessionId: string };
+type LibraryNoteItem = { id: string; title: string; category: string; tags: string[]; updatedAt: string; sessionId: string; turnId: string; turnTitle: string };
 type LibraryTravelItem = {
   planId: string;
   title: string;
@@ -94,6 +94,8 @@ export function registerLibraryRoutes(
           tags: n.tags,
           updatedAt: n.updatedAt,
           sessionId: n.sessionId,
+          turnId: n.turnId ?? "",
+          turnTitle: n.turnTitle ?? "",
         }))
       : [];
 
@@ -263,15 +265,25 @@ export function buildGroups(input: {
     }
   }
   for (const n of input.notes) {
-    // 笔记只有会话归属（无轮次）：主对话笔记按时间聚类，其余按会话整组。
-    pushOrDefer(
-      { kind: "notes", sessionId: n.sessionId ?? "", updatedAt: n.updatedAt, item: n },
-      (g) => {
-        g.items.notes.push(n);
-        g.counts.notes += 1;
-        touch(g, n.updatedAt);
-      },
-    );
+    // 笔记：主对话带轮次 → 每次对话一张卡；其余（旁聊/无轮次）走会话整组或时间聚类。
+    const turnKey = n.sessionId === input.actorId && n.turnId
+      ? `${n.sessionId}${KEY_SEP}turn${KEY_SEP}${n.turnId}`
+      : null;
+    if (turnKey) {
+      const g = ensure(turnKey, n.turnTitle ?? "");
+      g.items.notes.push(n);
+      g.counts.notes += 1;
+      touch(g, n.updatedAt);
+    } else {
+      pushOrDefer(
+        { kind: "notes", sessionId: n.sessionId ?? "", updatedAt: n.updatedAt, item: n },
+        (g) => {
+          g.items.notes.push(n);
+          g.counts.notes += 1;
+          touch(g, n.updatedAt);
+        },
+      );
+    }
   }
   for (const p of input.travelPlans) {
     const ms = Number(p.createdAt ?? 0);
@@ -282,6 +294,13 @@ export function buildGroups(input: {
         g.items.travelPlans.push(p);
         g.counts.travelPlans += 1;
         touch(g, iso);
+        // 行程卡标题：规划会话不在旁聊注册表里，用行程自身标题/目的地兜底
+        // （规划 sessionId 每次规划独立 → 天然一次规划一张卡）。
+        // 历史组（sessionId 空）不设标题，客户端保持「历史记录」展示。
+        if (g.sessionId && !g.title) {
+          const planTitle = (p.title ?? "").trim() || (p.destination ?? "").trim();
+          if (planTitle) g.title = planTitle;
+        }
       },
     );
   }

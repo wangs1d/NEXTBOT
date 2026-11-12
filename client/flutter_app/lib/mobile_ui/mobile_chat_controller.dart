@@ -131,6 +131,10 @@ class MobileChatController extends ChangeNotifier {
   /// 主会话本地线程键（服务端主线程 = 裸 actorId）。
   String get _mainSessionKey => ApiConfig.effectiveActorId;
 
+  /// 主会话线程的消息桶（主动消息落流的唯一去处）。
+  List<ChatMessage> get _mainThreadMessages =>
+      _sessionMessages.putIfAbsent(_mainSessionKey, () => <ChatMessage>[]);
+
   List<ChatMessage> get messages => _sessionMessages.putIfAbsent(
         _activeSessionKey,
         () => <ChatMessage>[],
@@ -1394,14 +1398,16 @@ class MobileChatController extends ChangeNotifier {
     final String body =
         message.trim().isNotEmpty ? message.trim() : title.trim();
     if (body.isEmpty) return;
+    // 服务端主动触达只回主界面（2026-11-12 用户定调）：旁聊是用户主动开的
+    // 旁支上下文，提醒/升级链弹窗与旁聊内容无关，落旁聊线程会「回错会话」。
     final ChatMessage reminder = ChatMessage(
       messageId: "assistant-reminder-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: _activeSessionKey,
+      sessionId: _mainSessionKey,
       role: "assistant",
       text: body,
       timestamp: DateTime.now(),
     );
-    messages.add(reminder);
+    _mainThreadMessages.add(reminder);
     _persist(reminder);
     notifyListeners();
   }
@@ -1421,10 +1427,11 @@ class MobileChatController extends ChangeNotifier {
     }
     if (text.trim().isEmpty) return;
     // 睡前提醒同为「真实消息」（2026-10-21）：落本地历史，重启后仍在。
+    // 只落主会话线程（2026-11-12）：睡前提醒与旁聊无关。
     final ChatMessage digest = ChatMessage(
       messageId:
           "assistant-evening-digest-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: _activeSessionKey,
+      sessionId: _mainSessionKey,
       role: "assistant",
       text: text.trim(),
       timestamp: DateTime.now(),
@@ -1434,7 +1441,7 @@ class MobileChatController extends ChangeNotifier {
       eveningDigest:
           (digestMap != null && digestMap.isNotEmpty) ? digestMap : null,
     );
-    messages.add(digest);
+    _mainThreadMessages.add(digest);
     _persist(digest);
     notifyListeners();
   }
@@ -1476,14 +1483,23 @@ class MobileChatController extends ChangeNotifier {
     // 服务端带 messageId 时沿用（首启引导取名卡要挂到该泡下，两端必须同 id）；
     // 其余主动性消息仍由客户端本地生成 id。
     final String serverMessageId = payload["messageId"]?.toString() ?? "";
+    // 主动性消息只落主会话线程（2026-11-12 用户定调）：提醒/主动触达与旁聊
+    // 无关，此刻即使停在旁聊里也不允许把气泡带进旁聊线程。
+    // 离线补推的到点提醒带 firedAt（原定触发时刻，epoch ms）：气泡按原时间
+    // 落屏——补推不冒充"刚刚发的"；无 firedAt 的常规主动消息用到达时刻。
+    final dynamic rawFiredAt = payload["firedAt"];
+    final int? firedAtMs =
+        rawFiredAt == null ? null : int.tryParse(rawFiredAt.toString());
     final ChatMessage proactive = ChatMessage(
       messageId: serverMessageId.isNotEmpty
           ? serverMessageId
           : "assistant-proactive-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: _activeSessionKey,
+      sessionId: _mainSessionKey,
       role: "assistant",
       text: text,
-      timestamp: DateTime.now(),
+      timestamp: firedAtMs != null && firedAtMs > 0
+          ? DateTime.fromMillisecondsSinceEpoch(firedAtMs)
+          : DateTime.now(),
     );
     // 首启引导两泡（kind=first_meeting_intro）：不走「收到即落屏」，进排队通道
     // 按节奏逐条揭示——服务端两条相隔不到一秒，直接 append 会两泡一起刷在
@@ -1492,7 +1508,7 @@ class MobileChatController extends ChangeNotifier {
       _enqueueIntroBubble(proactive);
       return;
     }
-    messages.add(proactive);
+    _mainThreadMessages.add(proactive);
     _persist(proactive);
     notifyListeners();
   }
@@ -1537,7 +1553,8 @@ class MobileChatController extends ChangeNotifier {
         }
         if (_disposed || _introQueue.isEmpty) break;
         final ChatMessage m = _introQueue.removeAt(0);
-        messages.add(m);
+        // 开场白是首启引导（只发生在主会话）：揭示时若已不在主线程也落主线程。
+        _mainThreadMessages.add(m);
         _persist(m);
         _lastIntroRevealAt = DateTime.now();
         // 卡可能比泡先到：泡落屏这一刻补挂。
@@ -1572,9 +1589,9 @@ class MobileChatController extends ChangeNotifier {
         body: message,
       ));
     }
-    messages.add(ChatMessage(
+    _mainThreadMessages.add(ChatMessage(
       messageId: "transfer-reminder-${DateTime.now().microsecondsSinceEpoch}",
-      sessionId: _activeSessionKey,
+      sessionId: _mainSessionKey,
       role: "assistant",
       text: message,
       timestamp: DateTime.now(),

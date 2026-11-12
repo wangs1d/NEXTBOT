@@ -556,6 +556,16 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// 站内信未读轮询定时器（MessageHub 前端陈列撤除后仅服务站内信角标）。
   Timer? _messagePollTimer;
 
+  /// 进程存活心跳 + 启动信标（2026-11-12 手机端「断开重连」远程诊断）。
+  ///
+  /// 轮询 tick 每 4 次（60s）把「最后存活时刻」落盘一次；下次引擎启动读出
+  /// 差值随 `ws.client_boot` 上报服务端：差值几十秒内 ≈ 上个进程崩溃/被杀，
+  /// 几分钟以上 ≈ 冻结后解冻或正常冷启动。免 USB 即可远程判定断连根因分布。
+  static const String _kLastAlivePrefKey = "client.lastAliveAtMs";
+  int _aliveTick = 0;
+  int _bootLastAliveAgeMs = -1;
+  bool _bootBeaconSent = false;
+
   /// 站内信（平台→用户收件箱）未读数：随消息轮询刷新 + WS 推送即时 +1，
   /// 进侧栏「站内信」红点角标。
   int _inboxUnread = 0;
@@ -967,6 +977,9 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     // 时机拉起，Android 12+ 禁止后台启动前台服务。
     if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
       unawaited(KeepAliveService.start());
+      // 电池优化豁免（2026-11-12）：前台服务仍被 ROM 冻结的关键兜底。
+      // 未豁免时拉起系统对话框，用户点一次「允许」永久生效；已豁免空转。
+      unawaited(KeepAliveService.ensureBatteryExemption());
     }
     // 移动端系统通知初始化（后台收 WS 消息时用系统通知提醒，类微信）
     await LocalNotificationService.init();
@@ -984,6 +997,19 @@ class _PrivateAiAppState extends State<PrivateAiApp>
         debugPrint("[Bootstrap] _store.init() retry also failed: $e2");
         // 不再抛出，让应用继续运行
       }
+    }
+
+    // 启动信标（2026-11-12）：读出「上次进程存活时刻」距今的差值，随
+    // ws.client_boot 上报（见 _onWsConnected）。差值小 = 崩溃/被杀重启，
+    // 差值大 = 冻结解冻或正常冷启动。
+    try {
+      final dynamic lastAlive = _store.getPreference(_kLastAlivePrefKey);
+      if (lastAlive is num && lastAlive > 0) {
+        _bootLastAliveAgeMs =
+            DateTime.now().millisecondsSinceEpoch - lastAlive.toInt();
+      }
+    } catch (_) {
+      // 诊断辅助，失败按无历史处理
     }
 
     // 一次性清理历史上「裸 taskId」格式的孤儿日程事项（详见 store 注释）。
@@ -3679,6 +3705,31 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   /// `WsChatService.shared`），这里只做"重连之后必须重来一遍"的补挂动作。
   void _onWsConnected() {
     SphereEmbodimentMotionBridge.instance.setMainAgentLinked(true);
+    // 进程启动信标（2026-11-12）：每次进程的首条连接上报一次启动诊断，
+    // 服务端日志可远程判定「断开重连」是崩溃重启还是冻结解冻（免 USB）。
+    if (!_bootBeaconSent) {
+      _bootBeaconSent = true;
+      unawaited(() async {
+        try {
+          final bool fgsRunning = await KeepAliveService.isRunning();
+          final bool batteryExempt = await KeepAliveService.isBatteryExempt();
+          _ws.sendEvent("ws.client_boot", <String, dynamic>{
+            "lastAliveAgeMs": _bootLastAliveAgeMs,
+            "fgsRunning": fgsRunning,
+            "batteryExempt": batteryExempt,
+            "platform": defaultTargetPlatform.name,
+            "bootAt": DateTime.now().toIso8601String(),
+          });
+        } catch (_) {
+          // 诊断信标，失败不影响业务
+        }
+      }());
+    }
+    // 档案自愈（2026-11-12）：每次连上（含断线重连）都补拉一次 agent 档案。
+    // 改名广播 identity_renamed 是一次性 trySend，不落 WAL 不重放——登录改绑
+    // / 断线窗口里错过的改名，靠这里的幂等 GET 收敛，顶栏名牌不再依赖
+    // 「恰好在线的那一下推送」。
+    unawaited(_loadAgentProfile());
     // 断线重连后服务端已清 CDP 端点（unbindIfSocket），这里补报，
     // 让共用浏览器桥（比价/下单页面开在内置浏览器）不掉线。
     SharedBrowserHost.instance.announceCdpEndpoint();
@@ -4091,9 +4142,25 @@ class _PrivateAiAppState extends State<PrivateAiApp>
   void _startMessagePolling() {
     _stopMessagePolling();
     _pollUnreadMessages();
+    _aliveTick = 1;
+    unawaited(_touchAliveBeacon());
     _messagePollTimer = Timer.periodic(const Duration(seconds: 15), (_) {
       _pollUnreadMessages();
+      _touchAliveBeacon();
     });
+  }
+
+  /// 存活心跳落盘（60s 节流）：进程被冻结/杀死后，这个时间戳就停在最后一刻，
+  /// 下次启动读差值即可远程区分「崩溃」与「冻结」。
+  Future<void> _touchAliveBeacon() async {
+    _aliveTick++;
+    if (_aliveTick % 4 != 2) return; // 15s × 4 ≈ 60s 写一次
+    try {
+      await _store.savePreference(_kLastAlivePrefKey,
+          DateTime.now().millisecondsSinceEpoch);
+    } catch (_) {
+      // 诊断辅助写入，失败不影响业务
+    }
   }
 
   void _stopMessagePolling() {
@@ -4127,7 +4194,7 @@ class _PrivateAiAppState extends State<PrivateAiApp>
             (item.gallery != null && item.gallery!.isNotEmpty)
                 ? item.gallery!
                 : <String>[item.url];
-        unawaited(showImagePreviewFullScreen(
+        unawaited(showImagePreviewFullScreenFromUrls(
           navCtx,
           urls: urls,
           index: item.index < urls.length ? item.index : 0,
@@ -6024,6 +6091,12 @@ class _PrivateAiAppState extends State<PrivateAiApp>
     });
     _syncIslandGate();
     unawaited(_loadUserAvatar());
+    // 登录成功即刻拉一次 agent 档案（2026-11-12 修复）：_loadAgentProfile
+    // 此前只在 _bootstrap 跑一次，首次登录时那一次用的是登录前的 guest 身份
+    // （inst_… 名下没有 agentProfile）——服务端账号名下的名字（改名管道写
+    // prefs）在本次会话里永远到不了顶栏，要等下次冷启动才补上。这里身份
+    // 已就位，立即补拉，顶栏胶囊当场出现。
+    unawaited(_loadAgentProfile());
   }
 
   /// 向导完成：切入主界面（N 光扫不再补播，向导的进度条动画就是本次开场）。

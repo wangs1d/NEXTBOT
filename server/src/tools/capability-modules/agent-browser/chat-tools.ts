@@ -36,7 +36,7 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
         "云端/内置浏览器操作（有状态多步）。先 action=open 打开网址拿到 sessionId，" +
         "之后 click/type/scroll/extract_text/screenshot/wait_for/handoff/close 都要带同一个 sessionId。\n" +
         "客户端在线且支持可视浏览器时优先在用户可见的内置浏览器里操作（登录态即用户本人）；手机端或无客户端时自动回退服务端无头浏览器，结果与截图回到聊天。\n" +
-        "**优先用 extract_text 获取页面信息**（省 token 且带可交互元素 ref 列表），只有需要视觉确认时才 screenshot。\n" +
+        "**open/click/type/wait_for 的回执自带当前页面可交互元素表（pageState.interactive，带 ref 编号）**：成功时直接从中选 ref 继续下一步；失败时也附了最新元素表，从中挑正确的 ref 重试（页面已变化，原 ref 可能失效），都不要单独再调 extract_text。需要页面正文文本时才用 extract_text；只有需要视觉确认时才 screenshot。\n" +
         "**撞到登录墙/验证码/支付确认等只有用户本人能做的步骤**：open/click 回执会带 humanRequired 并自动推图；也可主动用 action=handoff 把截图+指引推到聊天（手机端也能收到），然后等用户回复再继续，别把这种情况当普通失败。\n" +
         "安全：https 任意 URL；http 仅限 localhost。沙箱下也可用。会话空闲 10 分钟过期，用完请 action=close。\n" +
         "与 browser.fetch_page（只读单页无状态）/ shopping.order.*（仅购物业务）的区别：本工具是通用多步浏览器操作。\n" +
@@ -88,7 +88,7 @@ export const AGENT_BROWSER_CHAT_TOOLS: ChatCompletionTool[] = [
           ref: {
             type: "string",
             description:
-              "click/type/wait_for 定位用：extract_text 返回的元素引用（如 \"e5\"），优先于 selector。",
+              "click/type/wait_for 定位用：元素引用（如 \"e5\"），来自最近一次回执的 pageState.interactive 或 extract_text 返回的元素表，优先于 selector。",
           },
           selector: {
             type: "string",

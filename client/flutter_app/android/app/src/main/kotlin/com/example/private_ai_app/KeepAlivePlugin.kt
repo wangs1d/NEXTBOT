@@ -72,6 +72,44 @@ class KeepAlivePlugin : FlutterPlugin, MethodChannel.MethodCallHandler {
                 result.success(true)
             }
             "isRunning" -> result.success(running)
+            /**
+             * 电池优化豁免（2026-11-12）：部分 ROM 即使进程挂着前台服务，
+             * 仍会按「电池优化白名单」之外的标准把 App 冻结/回收——保活服务
+             * 在就等于没开。这里在未豁免时拉起系统确认对话框（用户点一次
+             * 「允许」永久生效）；已豁免时空转返回 true。
+             */
+            "ensureBatteryExempt" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                try {
+                    val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                    if (pm.isIgnoringBatteryOptimizations(ctx.packageName)) {
+                        result.success(true)
+                        return
+                    }
+                    val intent =
+                        Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                            .setData(android.net.Uri.parse("package:${ctx.packageName}"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    ctx.startActivity(intent)
+                    result.success(true)
+                } catch (e: Exception) {
+                    android.util.Log.w("KeepAlive", "request battery exemption failed", e)
+                    result.success(false)
+                }
+            }
+            "isBatteryExempt" -> {
+                val ctx = context
+                if (ctx == null) {
+                    result.success(false)
+                    return
+                }
+                val pm = ctx.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager
+                result.success(pm.isIgnoringBatteryOptimizations(ctx.packageName))
+            }
             else -> result.notImplemented()
         }
     }

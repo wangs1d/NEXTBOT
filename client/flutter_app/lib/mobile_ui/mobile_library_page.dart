@@ -846,7 +846,7 @@ class _GroupDetailPage extends StatelessWidget {
       itemBuilder: (BuildContext context, int index) {
         final _LibItem photo = photos[index];
         return GestureDetector(
-          onTap: () => unawaited(showImagePreviewFullScreen(
+          onTap: () => unawaited(showImagePreviewFullScreenFromUrls(
             context,
             urls: photos.map((i) => i.fileUrl).toList(growable: false),
             index: index,

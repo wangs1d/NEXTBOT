@@ -43,6 +43,13 @@ const CARD_END_LINE = "[AGENT_RESULT_CARD_END]";
  *  一律按「方括号 token 内同时含 UP 与 START/END」识别。 */
 const NEXT_UP_START_RE = /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】]/i;
 const NEXT_UP_END_RE = /[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]/i;
+/** 裸 END token（2026-11-12 真机事故）：模型会把 [NEXT_UP_END] 简写成 [END]
+ *  （不含 UP）。只认全大写内容，避免误伤 [Weekend]/[append] 这类正文；排除
+ *  结构化卡/媒体标记（AGENT_RESULT_CARD_END 等由各自的块剥离机制处理）。 */
+const BARE_END_RE =
+  /[【\[](?!AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)[A-Z0-9_\- ]*END[A-Z0-9_\- ]*[】\]]/;
+const BARE_END_GLOBAL_RE =
+  /[【\[](?!AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)[A-Z0-9_\- ]*END[A-Z0-9_\- ]*[】\]]/g;
 const NEXT_UP_MARKER_TOKEN_RE =
   /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
 
@@ -108,11 +115,19 @@ export function createStreamMarkerGuard(): StreamMarkerGuard {
     // 的正文照发，与 extraction 的 replace 语义一致）；非丢弃态遇行内嵌 START，
     // START 前的正文照发并进入丢弃态；单行完整块（START…END 同行）取块外两段。
     const startMatch = NEXT_UP_START_RE.exec(line);
-    const endMatch = NEXT_UP_END_RE.exec(line);
+    // 终止符：标准 UP-END 或裸 `[END]`，取行内先出现的（2026-11-12 真机事故）
+    const endUp = NEXT_UP_END_RE.exec(line);
+    const endBare = BARE_END_RE.exec(line);
+    const endMatch =
+      endUp && endBare ? (endBare.index < endUp.index ? endBare : endUp) : (endUp ?? endBare);
     const startIdx = startMatch ? startMatch.index : -1;
     const endIdx = endMatch ? endMatch.index : -1;
     const cleanInline = (part: string): string =>
-      part.replace(MARKER_TOKEN_RE, "").replace(NEXT_UP_MARKER_TOKEN_RE, "").replace(RENDER_DECL_VARIANT_RE, "");
+      part
+        .replace(MARKER_TOKEN_RE, "")
+        .replace(NEXT_UP_MARKER_TOKEN_RE, "")
+        .replace(BARE_END_GLOBAL_RE, "")
+        .replace(RENDER_DECL_VARIANT_RE, "");
     if (inNextUpBlock) {
       if (endIdx === -1) return null;
       inNextUpBlock = false;

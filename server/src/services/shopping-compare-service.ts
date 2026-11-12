@@ -405,6 +405,8 @@ export class ShoppingCompareService {
   private started = false;
   /** 比价单平台超时由 searchProduct 控制；并行平台数上限防滥用 */
   private readonly maxPlatforms = readEnvInt("SHOPPING_COMPARE_MAX_PLATFORMS", 4);
+  /** 缺省轮首次比价的登录探测平台数：一次做齐多平台登录建档（2026-11-12）。 */
+  private readonly loginProbeCount = readEnvInt("SHOPPING_COMPARE_LOGIN_PROBE_COUNT", 3);
   /** 监控复查间隔（默认 60 分钟） */
   private readonly watchTickMs = Math.max(readEnvInt("PRICE_WATCH_TICK_MS", 60 * 60 * 1000), 5 * 60 * 1000);
 
@@ -569,15 +571,22 @@ export class ShoppingCompareService {
       limit?: number;
       /** 内置浏览器可用时占着唯一面板，必须串行取数 */
       preferVisible?: boolean;
+      /**
+       * 覆盖登录等待时长。缺省轮的登录探测平台用短等待：推码确认送达后
+       * 快速转 pendingLogins 后台续命（二维码仍有效，用户扫码后下一轮收割），
+       * 不让一次没人在场的扫码把整轮比价拖住两分钟。
+       */
+      loginWaitMsOverride?: number;
     } = {},
   ): Promise<PlatformQuotes> {
     const limit = Math.min(Math.max(opts.limit ?? 5, 1), 10);
     // 无头通道下二维码是用户登录的唯一入口：能推聊天时给足扫码时间，
     // 否则二维码刚推出去页面就被释放，手机端等于没有登录能力。
     const canReceiveQr = ctx.pushMediaCards != null;
-    const loginWaitMs = opts.preferVisible === true || !canReceiveQr
-      ? 20_000
-      : Math.max(20_000, getLoginWaitMs());
+    const loginWaitMs = opts.loginWaitMsOverride
+      ?? (opts.preferVisible === true || !canReceiveQr
+        ? 20_000
+        : Math.max(20_000, getLoginWaitMs()));
     const res = await this.deps.shoppingOrderService.searchProduct(
       ctx,
       platform,
@@ -628,41 +637,64 @@ export class ShoppingCompareService {
     const q = query.trim();
     if (!q) return { ok: false, error: "缺少 query（比价关键词）" };
     const supported = this.deps.shoppingOrderService.listSupportedPlatforms();
-    // 缺省平台：综合电商（淘宝/天猫/京东/拼多多/抖音）∩ 已实现 adapter。
+    // 免登录平台（苏宁/什么值得买）：匿名能读到真实价，是每轮比价的保底出价来源。
     // 列表由 adapter.category 派生（见 listDefaultComparePlatforms），非手写数组。
     // 本地生活（美团/大众点评）与演出票务不参与商品比价缺省——它们不卖标准
     // 商品，混进来只会白搜一轮还挤掉拼多多等真正可比的平台。
     const defaultPlatforms = listDefaultComparePlatforms().filter((p) => supported.includes(p));
-    // 缺省集合 = 匿名可读真实价的平台（苏宁/什么值得买）+ 该用户**已有授权 Cookie**
-    // 的登录类平台（淘宝/京东/拼多多…）。没登录态的平台不塞进缺省：手机端没有可视
-    // 浏览器，塞进去只会整轮变成登录交接、一个价也拿不到。
-    // 用户显式指定平台时按用户说的来（哪怕要登录）。
+    // 缺省轮平台池 = 免登录平台 + 该用户**已有授权 Cookie** 的登录类平台
+    // （淘宝/京东/拼多多…）+ **首次比价一次做齐的多平台登录探测**（2026-11-12
+    // 二次改版，见下）。用户显式指定平台时按用户说的来（哪怕要登录）。
+    const isDefaultRound = !opts.platforms?.length;
     let platformPool = opts.platforms?.length ? opts.platforms : defaultPlatforms;
-    if (!opts.platforms?.length) {
+    const loginCandidates = listLoginRequiredL1Platforms().filter((p) => supported.includes(p));
+    let loginProbePlatforms: string[] = [];
+    if (isDefaultRound) {
       const loggedIn = await this.deps.shoppingOrderService
-        .listPlatformsWithCookies(actorId, listLoginRequiredL1Platforms().filter((p) => supported.includes(p)))
+        .listPlatformsWithCookies(actorId, loginCandidates)
         .catch(() => [] as string[]);
       platformPool = [...defaultPlatforms, ...loggedIn];
+      // 登录探测：用户还没有登录态的主流登录平台**一次带上多家**（注册表序，
+      // 默认前 3 家）。第一次比价就是登录建档的时机：各自把登录二维码推到聊天
+      // （手机端唯一登录入口），用户一次扫完，Cookie 落库后以后每轮比价自动
+      // 带上这些平台的实时价——而不是「比一次扫一次」。撞墙推码、短等待、
+      // 超时转 pendingLogins 下一轮收割，免登录平台照常保底出价。
+      loginProbePlatforms = loginCandidates
+        // tmall 与淘宝同账号同 SSO，淘宝搜索结果本就覆盖天猫店（offers 常直接
+        // 出现天猫商品），单独探测只会多一张重复的码；tmall 已有 Cookie 时
+        // 照常走 loggedIn 并入池，不受此影响。
+        .filter((p) => p !== "tmall")
+        .filter((p) => !loggedIn.includes(p))
+        .slice(0, this.loginProbeCount);
+      platformPool.push(...loginProbePlatforms);
     }
-    let requested = platformPool
+    const requestedRaw = platformPool
       .map((p) => p.trim())
-      .filter(Boolean)
-      .slice(0, this.maxPlatforms);
+      .filter(Boolean);
+    let requested = [...new Set(requestedRaw)].slice(0, this.maxPlatforms);
+    // 登录探测平台不参与截断：免登录 + 已登录平台照常进池，探测平台追加在
+    // 尾部（无头通道并行取数，多两三个探测页成本可控；换首次建档的体验值）。
+    if (loginProbePlatforms.length > 0) {
+      const missing = loginProbePlatforms.filter((p) => !requested.includes(p));
+      if (missing.length > 0) {
+        requested = [...requested.slice(0, this.maxPlatforms), ...missing];
+      }
+    }
     if (requested.length === 0) return { ok: false, error: "未指定有效平台" };
     const unsupported = requested.filter((p) => !supported.includes(p));
     if (unsupported.length === requested.length) {
       return { ok: false, error: `平台 ${unsupported.join("/")} 暂不支持。已实现：${supported.join("/")}` };
     }
 
-    // 显式指定的平台**全是需要登录态**而且该用户一个都没登录时，这一轮注定
-    // 只能出登录二维码（手机端尤其显著：模型自己填了 jd/pdd，用户等半天只等到
-    // 一个扫码页）。这里先按免登录平台给出一轮真实报价，并在回执里说清楚
-    // 「你要的那几家需要登录，这轮先用能读的平台比」——有价总比全是码有用，
-    // 登录后下一轮自然覆盖到那几家。
+    // 用户显式点名的平台**全是需要登录态**而且该用户一个都没登录时（2026-11-12
+    // 改版）：**不再整体回退到免登录平台**——原实现会把 requested 整个替换成
+    // 免登录平台，登录墙永远碰不到，二维码永远不会推（用户投诉的根因）。
+    // 现改为：点名的平台照常进池尝试（撞墙即推码），同时并入免登录平台保底
+    // 出价——「有价」与「能登录」两者兼得，回执里说明清楚即可。
     let loginFallbackNote = "";
     const loginPlatforms = new Set(listLoginRequiredL1Platforms());
     if (
-      requested.length > 0 &&
+      !isDefaultRound &&
       requested.every((p) => loginPlatforms.has(p)) &&
       defaultPlatforms.length > 0
     ) {
@@ -670,9 +702,17 @@ export class ShoppingCompareService {
         .listPlatformsWithCookies(actorId, requested)
         .catch(() => [] as string[]);
       if (withCookies.length === 0) {
-        loginFallbackNote =
-          `${requested.map(platformLabel).join("、")}要登录才能读价，这轮先用免登录平台给你比：`;
-        requested = defaultPlatforms.slice(0, this.maxPlatforms);
+        const requestedLabels = requested.map(platformLabel).join("、");
+        // 点名登录平台**不再截断**、保底平台追加在尾部：截断会让「首次比价登录
+        // 多平台建档」少推码（实测模型常一次填 taobao/tmall/jd/pdd 四家，截到 2 家
+        // 只推 2 张码）；而「保底被挤光 → 整轮零报价」的教训靠追加而非挤占来解决。
+        // 无头通道并行取数，多两三个探测页成本可控。
+        const extra = defaultPlatforms.filter((p) => !requested.includes(p)).slice(0, 2);
+        if (extra.length > 0) {
+          requested = [...requested, ...extra];
+          loginFallbackNote =
+            `${requestedLabels}要登录才能读价，这轮先尝试（一次只推一张登录二维码，其余等你扫完我再逐个接入），同时用免登录平台保底先比：`;
+        }
       }
     }
 
@@ -681,41 +721,76 @@ export class ShoppingCompareService {
     // 否则无头并行（Playwright + 已授权 Cookie，不抢面板）。
     const visible = this.deps.shoppingOrderService.canUseVisibleBrowser(ctx);
     const fetchOpts = { ...opts, preferVisible: visible };
+    // 缺省轮登录探测平台的扫码等待：推码确认后快速交回（后台 pendingLogins 续命），
+    // 不让一次没人在场的扫码把整轮比价拖住两分钟。可用 env 调整。
+    const probeWaitMs = readEnvInt("SHOPPING_COMPARE_LOGIN_PROBE_WAIT_MS", 30_000);
+    const waitOverrideFor = (platform: string): number | undefined =>
+      isDefaultRound && loginProbePlatforms.includes(platform) ? probeWaitMs : undefined;
+
+    // ── 推码预算（2026-11-12 用户拍板：**一次只推一张二维码**）──
+    // 登录族平台（需要登录态的，含已有 Cookie 的）全部**串行**取数：第一个
+    // 真正撞上登录墙/验证码并推送交接卡的平台用掉本轮预算，之后的登录平台
+    // **不再取数**、如实延后到下一轮（用户完成扫码后逐个接入）——避免一轮
+    // 把聊天刷成码墙。免登录平台不受预算约束，照常（并行/串行）取数保底。
+    let qrBudgetUsed = false;
+    const deferredLoginPlatforms: string[] = [];
+    const loginQueue = requested.filter((p) => loginPlatforms.has(p));
+    const nonLoginPlatforms = requested.filter((p) => !loginPlatforms.has(p));
+
     const outcomes: Array<{ platform: string; quotes: PlatformQuotes }> = [];
+    let handoffPending = false;
+    const tryFetch = async (platform: string, preferVisible: boolean): Promise<void> => {
+      const waitOverride = waitOverrideFor(platform);
+      try {
+        outcomes.push({
+          platform,
+          quotes: await this.fetchPlatformQuotes(ctx, platform, q, {
+            ...fetchOpts,
+            preferVisible,
+            ...(waitOverride ? { loginWaitMsOverride: waitOverride } : {}),
+          }),
+        });
+      } catch (reason) {
+        outcomes.push({
+          platform,
+          quotes: { products: [], error: reason instanceof Error ? reason.message : String(reason) },
+        });
+      }
+    };
+
+    // 免登录平台先取价：它们是本轮报价主体，不该被登录等待拖住。
     if (visible) {
-      // 可见面板只有一个：某平台被登录墙/验证码拦住后，面板必须留在该页面等
-      // 用户操作（最后统一 handoff）。此前直接 break，排在被墙平台之后的平台
-      // 连尝试都没有——这是「比价只拿到一家」的主要代码层根因。
-      // 现改为：被墙平台记入 pendingHandoff，其余平台回落**无头**通道继续取数
-      // （无头不抢面板，登录页得以保留），最后仍合并成一次交接。
-      let handoffPending = false;
-      for (const platform of requested) {
-        try {
-          outcomes.push({
-            platform,
-            quotes: await this.fetchPlatformQuotes(ctx, platform, q, {
-              ...fetchOpts,
-              preferVisible: !handoffPending,
-            }),
-          });
-        } catch (reason) {
-          outcomes.push({
-            platform,
-            quotes: { products: [], error: reason instanceof Error ? reason.message : String(reason) },
-          });
-        }
+      // 可见面板只有一个：被登录墙/验证码拦住的平台留在面板上等用户操作，
+      // 其余平台回落**无头**通道继续取数（不抢面板），最后仍合并成一次交接。
+      for (const platform of nonLoginPlatforms) {
+        await tryFetch(platform, !handoffPending);
         const last = outcomes[outcomes.length - 1]?.quotes;
         if (last?.loginRequired || last?.humanRequired) handoffPending = true;
       }
     } else {
       const settled = await Promise.allSettled(
-        requested.map(async (platform) => ({
+        nonLoginPlatforms.map(async (platform) => ({
           platform,
           quotes: await this.fetchPlatformQuotes(ctx, platform, q, fetchOpts),
         })),
       );
       for (const s of settled) {
         if (s.status === "fulfilled") outcomes.push(s.value);
+      }
+    }
+
+    // 登录族平台串行过推码预算：撞墙即停（后续延后），没撞墙（匿名可读或
+    // 已有 Cookie 正常出价）则继续下一家。
+    for (const platform of loginQueue) {
+      if (qrBudgetUsed) {
+        deferredLoginPlatforms.push(platform);
+        continue;
+      }
+      await tryFetch(platform, visible && !handoffPending);
+      const quotes = outcomes[outcomes.length - 1]?.quotes;
+      if (quotes?.loginRequired || quotes?.humanRequired || quotes?.loginQrImage) {
+        qrBudgetUsed = true;
+        handoffPending = true;
       }
     }
 
@@ -733,7 +808,7 @@ export class ShoppingCompareService {
       humanRequired: boolean;
       detail?: string;
     }> = [];
-    let loginPending: string | null = null;
+    const loginPendingPlatforms: string[] = [];
     /** 登录二维码确实推到了聊天的平台（按真实推送结果记账，不按「在线」猜）。 */
     const qrPushedLabels: string[] = [];
     for (const { platform, quotes } of outcomes) {
@@ -758,10 +833,21 @@ export class ShoppingCompareService {
         humanRequired: reason !== "no_data",
         ...(quotes.error ? { detail: quotes.error } : {}),
       });
-      if (quotes.loginRequired) loginPending = platform;
+      if (quotes.loginRequired) loginPendingPlatforms.push(platform);
       if (quotes.loginQrImage) qrPushedLabels.push(platformLabel(platform));
       if (quotes.error) failedPlatforms.push(`${platformLabel(platform)}（${platform}）：${quotes.error}`);
     }
+
+    // 普通失败（无匹配/读取失败）平台的自主兜底衔接：对齐主流「固定脚本 →
+    // 智能体兜底」——结构化取价失败不等于任务失败，指引模型用通用多步浏览器
+    // 自主打开搜索页提取（撞登录墙/验证码会自动推码交接），而不是把
+    // 「没抓到」当结论收工。这是回执数据（不是 prompt）：模型读到才知道有这条路。
+    const noDataForRetry = unavailable.filter((u) => u.reason === "no_data");
+    const retryHint = noDataForRetry.length > 0
+      ? `${noDataForRetry.map((u) => u.label).join("、")}未取到结构化报价（无匹配或页面读取失败）。` +
+        "如用户坚持要这几家的价格，可改用通用多步浏览器操作自主打开其搜索页逐步提取" +
+        "（撞登录墙/验证码会自动推码交接），不要直接告知用户无法比价。"
+      : undefined;
 
     // 只有浏览器层判到 human-required（登录墙/验证码）才把执行权交给用户；
     // 一轮里有多个这样的平台时合并成**一次**交接。普通失败不打扰用户。
@@ -829,6 +915,7 @@ export class ShoppingCompareService {
         retryable: true,
         ...(unavailable.length > 0 ? { unavailablePlatforms: unavailable } : {}),
         ...(handoff ? { handoff } : {}),
+        ...(retryHint ? { retryHint } : {}),
       };
     }
 
@@ -865,8 +952,22 @@ export class ShoppingCompareService {
     const platformSummary = searchedPlatforms.join("/");
     const bestText =
       comparable && bestOffer?.priceCny != null ? `，同规格最低 ¥${bestOffer.priceCny}（${bestOffer.platform}）` : "";
-    const loginText = loginPending
-      ? `；${platformLabel(loginPending)}需要登录，登录完我接着把${platformLabel(loginPending)}的价补上`
+    const loginText = loginPendingPlatforms.length > 0
+      ? `；${loginPendingPlatforms.map(platformLabel).join("、")}需要登录，扫码登录后回复我，我接着把价补上`
+      : "";
+    // 推码预算用尽后延后的登录平台：如实说明「一轮只推一张码」，用户完成
+    // 本轮扫码后下一轮逐个接入（pendingLogins 收割后它们自动并入常规池）。
+    const deferredText = deferredLoginPlatforms.length > 0
+      ? `；${deferredLoginPlatforms.map(platformLabel).join("、")}这轮先不推码（一次只推一个），你完成上面的扫码后我再逐个接入`
+      : "";
+    // 首次比价登录建档：真实推了码的探测平台点名说明——这是「扫码建档」
+    // 的入口文案，用户扫完这张码，以后每轮比价自动带上这家的实时价；
+    // 其余平台按「一次只推一张」的节奏逐轮接入。
+    const onboardingLabels = isDefaultRound
+      ? loginProbePlatforms.filter((p) => qrPushedLabels.includes(platformLabel(p)))
+      : [];
+    const onboardingNote = onboardingLabels.length >= 1
+      ? `。首次比价顺手建档：${onboardingLabels.map(platformLabel).join("、")}的登录二维码已推到聊天，扫码登录后以后比价这家就有实时价（其他平台我会逐个带你登录）`
       : "";
     // 没取到数的平台分两类文案：需要用户登录/验证的（交人），与普通无匹配/读取失败的（如实说明）
     const noDataLabels = unavailable.filter((u) => !u.humanRequired).map((u) => u.label);
@@ -898,7 +999,7 @@ export class ShoppingCompareService {
 
     return {
       ok: true,
-      summary: `${loginFallbackNote}「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${verifyText}${noDataText}`,
+      summary: `${loginFallbackNote}「${q}」跨 ${platformSummary || requested.length} 个平台聚合出 ${groups.length} 组报价${bestText}${loginText}${onboardingNote}${deferredText}${verifyText}${noDataText}`,
       query: q,
       platforms: requested,
       searchedPlatforms,
@@ -906,9 +1007,12 @@ export class ShoppingCompareService {
       bestOffer,
       bestIndex,
       fetchedAt,
-      ...(loginPending ? { loginRequired: { platform: loginPending, label: platformLabel(loginPending) } } : {}),
+      ...(loginPendingPlatforms.length > 0
+        ? { loginRequired: { platform: loginPendingPlatforms[0], label: platformLabel(loginPendingPlatforms[0]) } }
+        : {}),
       ...(unavailable.length > 0 ? { unavailablePlatforms: unavailable } : {}),
       ...(handoff ? { handoff } : {}),
+      ...(retryHint ? { retryHint } : {}),
       ...(decisionPageUrl ? { decisionPageUrl } : {}),
     };
   }

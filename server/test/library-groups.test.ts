@@ -23,6 +23,10 @@ function image(name: string, sessionId: string, updatedAt: string, turnId = "", 
   return { name, size: 10, updatedAt, url: `/agent/images/${ACTOR}/${name}`, sessionId, turnId, turnTitle };
 }
 
+function note(id: string, sessionId: string, updatedAt: string, turnId = "", turnTitle = "") {
+  return { id, title: `笔记${id}`, category: "study", tags: [], updatedAt, sessionId, turnId, turnTitle };
+}
+
 describe("library buildGroups（每次对话一张卡）", () => {
   it("主对话带轮次：每次对话独立成卡，标题=用户请求原文", () => {
     const groups = buildGroups({
@@ -101,5 +105,71 @@ describe("library buildGroups（每次对话一张卡）", () => {
     assert.equal(groups[0].sessionId.includes(ACTOR), true); // 轮次组在前（键含分隔符）
     assert.equal(groups[groups.length - 1].sessionId, ""); // 历史组最后
     assert.equal(groups[groups.length - 1].counts.images, 1);
+  });
+
+  it("主对话笔记带轮次：每次对话独立成卡，标题=用户请求原文", () => {
+    const groups = buildGroups({
+      actorId: ACTOR,
+      files: [],
+      images: [],
+      notes: [
+        note("n1", ACTOR, "2026-11-12T02:00:00.000Z", "turn-a", "整理机器学习笔记"),
+        note("n2", ACTOR, "2026-11-12T00:00:00.000Z", "turn-b", "记录会议要点"),
+      ],
+      travelPlans: [],
+      titles: new Map(),
+    });
+
+    assert.equal(groups.length, 2);
+    assert.equal(groups[0].title, "整理机器学习笔记");
+    assert.equal(groups[1].title, "记录会议要点");
+    assert.equal(groups[0].counts.notes, 1);
+    assert.equal(groups[1].counts.notes, 1);
+  });
+
+  it("行程卡标题取行程自身标题；无归属行程不污染历史组标题", () => {
+    const groups = buildGroups({
+      actorId: ACTOR,
+      files: [],
+      images: [],
+      notes: [],
+      travelPlans: [
+        {
+          planId: "p1",
+          title: "东京 5 日游",
+          destination: "东京",
+          startDate: "2026-12-01",
+          endDate: "2026-12-05",
+          dayCount: 5,
+          stopCount: 12,
+          createdAt: 1764000000000,
+          coverImage: "",
+          totalCost: null,
+          sessionId: "tplan-abc123",
+        },
+        {
+          planId: "p2",
+          title: "无归属旧行程",
+          destination: "大阪",
+          startDate: "",
+          endDate: "",
+          dayCount: 0,
+          stopCount: 0,
+          createdAt: 1763000000000,
+          coverImage: "",
+          totalCost: null,
+          sessionId: "",
+        },
+      ],
+      titles: new Map(),
+    });
+
+    assert.equal(groups.length, 2);
+    const planGroup = groups.find((g) => g.sessionId === "tplan-abc123");
+    assert.ok(planGroup);
+    assert.equal(planGroup.title, "东京 5 日游");
+    const history = groups[groups.length - 1];
+    assert.equal(history.sessionId, "");
+    assert.equal(history.title, ""); // 历史组保持空标题 → 客户端显示「历史记录」
   });
 });

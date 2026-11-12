@@ -47,4 +47,27 @@ class KeepAliveService {
       return false;
     }
   }
+
+  /// 请求电池优化豁免（2026-11-12）：前台服务仍被 ROM 冻结时的关键兜底。
+  /// 已豁免则空转返回 true；未豁免会拉起系统确认对话框，用户点一次
+  /// 「允许」永久生效。失败（无权限/系统拒绝）返回 false，不影响运行。
+  static Future<bool> ensureBatteryExemption() async {
+    try {
+      return await _channel.invokeMethod<bool>("ensureBatteryExempt") ?? false;
+    } on MissingPluginException {
+      return false;
+    } on PlatformException catch (e) {
+      debugPrint("[keep-alive] battery exemption failed: ${e.code} ${e.message}");
+      return false;
+    }
+  }
+
+  /// 电池优化是否已被豁免（诊断上报用）。
+  static Future<bool> isBatteryExempt() async {
+    try {
+      return await _channel.invokeMethod<bool>("isBatteryExempt") ?? false;
+    } on Exception {
+      return false;
+    }
+  }
 }

@@ -43,6 +43,8 @@ export class ProactiveDeliveryService {
         kind: p.kind,
         proposalId: p.proposalId,
         source: p.source,
+        // 离线补推的到点提醒带原定触发时刻：客户端气泡按原时间落屏（2026-11-12）
+        ...(typeof p.firedAt === "number" ? { firedAt: p.firedAt } : {}),
         ...(popup ? { display: "popup" } : {}),
       },
     };

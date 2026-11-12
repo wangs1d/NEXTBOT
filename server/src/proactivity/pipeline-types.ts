@@ -36,6 +36,11 @@ export type ProactiveProposal = {
   deliverAfter?: number;
   /** 保质期 ms：过期作废（如会议开始后"提前提醒"提案无意义） */
   expiresAt?: number;
+  /**
+   * 原定触发时刻 ms（2026-11-12）：到点提醒离线补推时，客户端气泡按此时间
+   * 落屏（如实展示"这是几点该响的提醒"），而不是补推到达时刻。
+   */
+  firedAt?: number;
   /** 是否允许打断进行中的对话（critical 默认允许） */
   interruptible?: boolean;
   source: string;

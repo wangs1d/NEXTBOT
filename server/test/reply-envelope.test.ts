@@ -400,6 +400,45 @@ test("nextup: 正文中间含建议字样的普通句子不受影响", () => {
   assert.ok(out.includes("明早八点叫我起床这件事我记下了。"));
 });
 
+// ── 2026-11-12 裸 [END] 事故回归：模型把 [NEXT_UP_END] 简写成 [END] ──────
+test("nextup: 裸 [END] 终止——不进 followups、正文剥离干净", () => {
+  const text =
+    "其他我自己定。\n" +
+    "[NEXT_UP_START]\n" +
+    "下个月出发，人均一万五\n" +
+    "就按居民岛省钱版排\n" +
+    "[END]";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, ["下个月出发，人均一万五", "就按居民岛省钱版排"]);
+  assert.equal(out, "其他我自己定。");
+  assert.ok(!out.includes("[END]"), `正文残留裸 END：${out}`);
+  assert.ok(!followups.some((f) => f.includes("END")), `建议混入裸 END：${JSON.stringify(followups)}`);
+});
+
+test("nextup: 裸 [END] 与正文同行——token 剥掉、建议保留", () => {
+  const text =
+    "正文。\n" +
+    "[NEXT_UP_START]\n" +
+    "下个月出发，人均一万五\n" +
+    "就按居民岛省钱版排 [END]";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, ["下个月出发，人均一万五", "就按居民岛省钱版排"]);
+  assert.ok(!out.includes("[END]"));
+});
+
+test("nextup: 无 START 的孤立裸 [END] 也清理掉", () => {
+  const { text: out, followups } = extractNextUpSuggestions("正文说完了。\n[END]\n下一句。");
+  assert.deepEqual(followups, []);
+  assert.equal(out, "正文说完了。\n下一句。");
+});
+
+test("nextup: 裸 END token 不误伤正文里的普通括注", () => {
+  const text = "比赛打完了 [注1]，下周继续。";
+  const { text: out, followups } = extractNextUpSuggestions(text);
+  assert.deepEqual(followups, []);
+  assert.equal(out, "比赛打完了 [注1]，下周继续。");
+});
+
 // ── 2026-10-11 变体声明剥离 ────────────────────────────────────────────
 test("stripRenderHintDeclarations：剥变体 [RENDER_HINT]:brief", () => {
   assert.equal(

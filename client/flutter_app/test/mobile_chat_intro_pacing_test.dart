@@ -14,7 +14,8 @@ import "package:nextbot/core/models/chat_models.dart";
 import "package:nextbot/mobile_ui/mobile_chat_controller.dart";
 
 /// 空历史存储：不碰本机 Isar（否则会灌进真实历史，污染条数断言）。
-class _EmptyHistoryStore implements LocalHistoryStore {
+/// 空历史存储（公开导出：线程路由回归测试复用）。
+class EmptyHistoryStoreForTest implements LocalHistoryStore {
   final List<ChatMessage> saved = <ChatMessage>[];
 
   @override
@@ -115,7 +116,7 @@ void main() {
 
   test("两泡依次到达：第二泡排队，卡随第二泡落屏", () async {
     final MobileChatController c = MobileChatController(
-        wsBaseUrl: wsUrl(), historyStore: _EmptyHistoryStore());
+        wsBaseUrl: wsUrl(), historyStore: EmptyHistoryStoreForTest());
     addTearDown(c.dispose);
 
     c.debugHandleWsEvent(intro("嗨，阿哲，我是你的私人管家，以后生活中的事情交给我就好 😊"));
@@ -136,7 +137,7 @@ void main() {
 
   test("非开场白的主动消息不受排队影响：收到即落屏", () {
     final MobileChatController c = MobileChatController(
-        wsBaseUrl: wsUrl(), historyStore: _EmptyHistoryStore());
+        wsBaseUrl: wsUrl(), historyStore: EmptyHistoryStoreForTest());
     addTearDown(c.dispose);
 
     c.debugHandleWsEvent(<String, dynamic>{

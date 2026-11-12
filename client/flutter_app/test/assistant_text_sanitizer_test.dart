@@ -119,6 +119,27 @@ void main() {
     );
   });
 
+  /// 2026-11-12 真机事故：模型把 [NEXT_UP_END] 简写成裸 [END]（不含 UP），
+  /// 旧正则不认 → 漏进建议列表/正文。
+  test("strips bare [END] shorthand terminator (2026-11-12 leak)", () {
+    expect(
+      stripAssistantProtocolFrames(
+        "其他我自己定。\n[NEXT_UP_START]\n下个月出发，人均一万五\n就按居民岛省钱版排\n[END]",
+      ).trim(),
+      "其他我自己定。",
+    );
+    // 无 START 的孤立裸 [END] 也清掉
+    expect(
+      stripAssistantProtocolFrames("正文说完了。\n[END]\n下一句。").trim(),
+      "正文说完了。\n下一句。",
+    );
+    // 不误伤普通括注
+    expect(
+      stripAssistantProtocolFrames("比赛打完了 [注1]，下周继续。"),
+      "比赛打完了 [注1]，下周继续。",
+    );
+  });
+
   test("ingest strips NEXT_UP block arriving mid-stream", () {
     final AssistantTextSanitizer sanitizer = AssistantTextSanitizer();
 

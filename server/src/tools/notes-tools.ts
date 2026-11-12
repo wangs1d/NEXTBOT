@@ -3,6 +3,7 @@
  * 让 Agent 在对话中能直接落库/检索/摘要/抽问/排复习。
  */
 import { resolveActorId } from "../agent/actor-id.js";
+import { mediaTurnFromContext } from "../services/library-meta.js";
 import type { ExternalChatProvider } from "../external-model/types.js";
 import {
   generateNoteFlashcards,
@@ -75,6 +76,8 @@ export function registerNotesTools(
     }
 
     try {
+      // 轮次归属：资料库按「每次对话」折叠成卡（主对话细分离散卡片）
+      const turn = mediaTurnFromContext(context);
       const note = await notesService.createNote({
         sessionId,
         actorId: sessionId,
@@ -83,6 +86,8 @@ export function registerNotesTools(
         category,
         tags,
         source,
+        ...(turn?.turnId ? { turnId: turn.turnId } : {}),
+        ...(turn?.title ? { turnTitle: turn.title } : {}),
       });
       return { ok: true, note, summary: "笔记已创建" };
     } catch (e) {

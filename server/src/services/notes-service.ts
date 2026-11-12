@@ -56,6 +56,10 @@ export type Note = {
   updatedAt: string;
   lastReviewedAt?: string;
   reviewCount: number;
+  /** 产出该笔记的轮次 id（chat.user_message.messageId）；资料库「每次对话一张卡」用 */
+  turnId?: string;
+  /** 用户请求原文片段（≤40 字），资料库卡片标题 */
+  turnTitle?: string;
 };
 
 export type CreateNoteInput = {
@@ -66,6 +70,9 @@ export type CreateNoteInput = {
   category?: NoteCategory;
   tags?: string[];
   source?: string;
+  /** 轮次归属（2026-11-12）：资料库按「每次对话」折叠用 */
+  turnId?: string;
+  turnTitle?: string;
 };
 
 export type UpdateNoteInput = Partial<{
@@ -222,6 +229,8 @@ export class NotesService {
       createdAt: nowIso(),
       updatedAt: nowIso(),
       reviewCount: 0,
+      ...(input.turnId?.trim() ? { turnId: input.turnId.trim() } : {}),
+      ...(input.turnTitle?.trim() ? { turnTitle: input.turnTitle.trim().slice(0, 40) } : {}),
     };
     const list = this.bySession.get(sessionId) ?? [];
     list.push(note);

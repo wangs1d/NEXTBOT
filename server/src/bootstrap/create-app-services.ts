@@ -7281,10 +7281,16 @@ export async function createAppServices(
     void financeIngestService.handleInboundMessage(input).catch(() => {});
   };
   // 到点提醒手机端不在场 → 定向手机端的管道提案（directText 零 LLM）：手机重连
-  // 即直推（targetDeviceClass 定向，桌面不吃重复），或升级手机系统推送（proactivePushService 已配置时）
+  // 即直推（targetDeviceClass 定向，桌面不吃重复），或升级手机系统推送（proactivePushService 已配置时）。
+  // 补推语义（2026-11-12 定稿，用户拍板）：不设保质期——用户打开 App 就要立即收到
+  // 错过的提醒（这条不是可丢的打扰，是没送达的承诺）；但提案必须带 firedAt=原定
+  // 触发时刻，客户端气泡按原时间落屏，补推不冒充"刚刚发的"。
   onReminderOfflineToPipeline = (taskId, sessionId, title, message, runAt, preReminder) => {
+    const submittedAt = Date.now();
+    // runAt 是 ISO 字符串（task.nextRunAt ?? task.runAt）；解析失败兜底为提交时刻
+    const firedAt = Number.isFinite(Date.parse(runAt)) ? Date.parse(runAt) : submittedAt;
     proactivePipeline.submitProposal({
-      proposalId: `p_${Date.now().toString(36)}_rm${taskId.slice(-6)}`,
+      proposalId: `p_${submittedAt.toString(36)}_rm${taskId.slice(-6)}`,
       actorId: sessionId,
       kind: "schedule_reminder",
       tier: "must",
@@ -7301,7 +7307,8 @@ export async function createAppServices(
         "mobile_not_reachable",
       ],
       directText: message,
-      createdAt: Date.now(),
+      createdAt: submittedAt,
+      firedAt,
       source: "schedule",
       // 定向手机端（2026-10-13）：桌面在线不构成对手机的送达；投递/挂起/推送兜底均只面向手机
       targetDeviceClass: "mobile",

@@ -376,68 +376,77 @@ class _ImagePreviewPanelState extends State<ImagePreviewPanel> {
   }
 }
 
-/// 手机端全屏图片查看页：窄屏（< kWideLayoutBreakpoint）没有右侧双栏，
-/// 媒体卡点击后直接推全屏路由，复用 [ImagePreviewPanel] 的大图/切换能力。
-///
-/// 用法见 [showImagePreviewFullScreen]。
-Future<void> showImagePreviewFullScreen(
+/// 相对地址（/agent/images/... 等）按 httpBase 补全；http(s) 原样返回。
+String _resolveMediaUrl(String url) {
+  final String u = url.trim();
+  if (u.isEmpty ||
+      u.startsWith("http://") ||
+      u.startsWith("https://")) {
+    return u;
+  }
+  final String base = ApiConfig.httpBase;
+  return u.startsWith("/") ? "$base$u" : "$base/$u";
+}
+
+/// 图片加载失败的占位（全屏查看页与预览面板共用）。
+Widget _brokenImagePlaceholder(BuildContext context) {
+  final ColorScheme cs = Theme.of(context).colorScheme;
+  return Column(
+    mainAxisSize: MainAxisSize.min,
+    children: <Widget>[
+      Icon(Icons.broken_image_outlined, size: 48, color: cs.onSurfaceVariant),
+      const SizedBox(height: 8),
+      Text(
+        "图片加载失败",
+        style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+      ),
+    ],
+  );
+}
+
+/// URL 版全屏图片查看页（跟手分页，相册式）：助手发的媒体卡、资料库照片墙
+/// 等一切有 URL 的照片统一入口。多图切换为**跟手分页**：拖动时当前图与邻图
+/// 同屏平移（能同时看到前后两张），松手按位移过半 / 横向速度吸附；缩放由
+/// InteractiveViewer 承担，放大态下拖动只平移大图、不切图。
+Future<void> showImagePreviewFullScreenFromUrls(
   BuildContext context, {
   required List<String> urls,
   int index = 0,
   String? source,
 }) {
+  final List<String> valid = urls
+      .map((String u) => u.trim())
+      .where((String u) => u.isNotEmpty)
+      .toList(growable: false);
+  if (valid.isEmpty) return Future<void>.value();
   return Navigator.of(context, rootNavigator: true).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
-      builder: (BuildContext context) => _ImagePreviewFullScreenPage(
-        urls: urls,
-        index: index,
+      builder: (BuildContext context) => _PagedPreviewFullScreenPage(
+        pages: <WidgetBuilder>[
+          for (final String u in valid)
+            (BuildContext pageContext) => Center(
+                  child: CachedMediaImage(
+                    url: _resolveMediaUrl(u),
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                    loadingBuilder: (BuildContext context) => const SizedBox(
+                      width: 36,
+                      height: 36,
+                      child:
+                          CircularProgressIndicator(strokeWidth: 2.5),
+                    ),
+                    errorBuilder: (BuildContext context, Object error,
+                            StackTrace? stackTrace) =>
+                        _brokenImagePlaceholder(context),
+                  ),
+                ),
+        ],
+        index: index.clamp(0, valid.length - 1),
         source: source,
       ),
     ),
   );
-}
-
-class _ImagePreviewFullScreenPage extends StatelessWidget {
-  const _ImagePreviewFullScreenPage({
-    required this.urls,
-    required this.index,
-    this.source,
-  });
-
-  final List<String> urls;
-  final int index;
-  final String? source;
-
-  @override
-  Widget build(BuildContext context) {
-    return Scaffold(
-      backgroundColor: Colors.black,
-      appBar: AppBar(
-        backgroundColor: Colors.black,
-        foregroundColor: Colors.white,
-        elevation: 0,
-        leading: const CloseButton(color: Colors.white),
-        title: Text(
-          source?.trim().isNotEmpty == true ? source!.trim() : "图片预览",
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-          style: const TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-        ),
-      ),
-      body: GestureDetector(
-        // 点击图片区（含白色留白）任意处退出全屏；导航按钮/缩放手势
-        // 在手势竞技场中优先级更高（更深层），不会误触退出。
-        behavior: HitTestBehavior.translucent,
-        onTap: () => Navigator.of(context).pop(),
-        child: ImagePreviewPanel(
-          urls: urls,
-          index: index,
-          showSidebar: false,
-        ),
-      ),
-    );
-  }
 }
 
 /// 字节版全屏图片查看页：用户气泡里**自己发出的照片**只有内存字节、
@@ -459,8 +468,17 @@ Future<void> showImagePreviewFullScreenFromBytes(
   return Navigator.of(context, rootNavigator: true).push(
     MaterialPageRoute<void>(
       fullscreenDialog: true,
-      builder: (BuildContext context) => _BytesPreviewFullScreenPage(
-        images: valid,
+      builder: (BuildContext context) => _PagedPreviewFullScreenPage(
+        pages: <WidgetBuilder>[
+          for (final Uint8List b in valid)
+            (BuildContext pageContext) => Center(
+                  child: Image.memory(
+                    b,
+                    fit: BoxFit.contain,
+                    gaplessPlayback: true,
+                  ),
+                ),
+        ],
         index: index.clamp(0, valid.length - 1),
         source: source,
       ),
@@ -468,24 +486,26 @@ Future<void> showImagePreviewFullScreenFromBytes(
   );
 }
 
-class _BytesPreviewFullScreenPage extends StatefulWidget {
-  const _BytesPreviewFullScreenPage({
-    required this.images,
+/// 全屏图片查看页统一实现（URL 版 / 字节版共用）：[pages] 第 i 项返回
+/// 第 i 张图的展示 widget。跟手分页拖拽逻辑见 [showImagePreviewFullScreenFromBytes] 注释。
+class _PagedPreviewFullScreenPage extends StatefulWidget {
+  const _PagedPreviewFullScreenPage({
+    required this.pages,
     required this.index,
     this.source,
   });
 
-  final List<Uint8List> images;
+  final List<WidgetBuilder> pages;
   final int index;
   final String? source;
 
   @override
-  State<_BytesPreviewFullScreenPage> createState() =>
-      _BytesPreviewFullScreenPageState();
+  State<_PagedPreviewFullScreenPage> createState() =>
+      _PagedPreviewFullScreenPageState();
 }
 
-class _BytesPreviewFullScreenPageState
-    extends State<_BytesPreviewFullScreenPage>
+class _PagedPreviewFullScreenPageState
+    extends State<_PagedPreviewFullScreenPage>
     with SingleTickerProviderStateMixin {
   late int _index = widget.index;
 
@@ -530,8 +550,7 @@ class _BytesPreviewFullScreenPageState
         _transform.value = Matrix4.identity();
         _zoomed = false;
         setState(() {
-          _index =
-              (_index + delta).clamp(0, widget.images.length - 1);
+          _index = (_index + delta).clamp(0, widget.pages.length - 1);
         });
       }
     });
@@ -558,7 +577,7 @@ class _BytesPreviewFullScreenPageState
   }
 
   bool get _canPrev => _index > 0;
-  bool get _canNext => _index < widget.images.length - 1;
+  bool get _canNext => _index < widget.pages.length - 1;
 
   void _onPointerDown(PointerDownEvent e) {
     _pointers += 1;
@@ -632,11 +651,7 @@ class _BytesPreviewFullScreenPageState
   }
 
   Widget _neighborPage(int i) => Center(
-        child: Image.memory(
-          widget.images[i],
-          fit: BoxFit.contain,
-          gaplessPlayback: true,
-        ),
+        child: widget.pages[i](context),
       );
 
   @override
@@ -696,11 +711,7 @@ class _BytesPreviewFullScreenPageState
                           minScale: 1.0,
                           maxScale: 6,
                           child: Center(
-                            child: Image.memory(
-                              widget.images[_index],
-                              fit: BoxFit.contain,
-                              gaplessPlayback: true,
-                            ),
+                            child: widget.pages[_index](context),
                           ),
                         ),
                       ),
@@ -716,7 +727,7 @@ class _BytesPreviewFullScreenPageState
                   ),
                 ),
                 // 页码指示：多图时贴底部居中，纯白低调
-                if (widget.images.length > 1)
+                if (widget.pages.length > 1)
                   Positioned(
                     left: 0,
                     right: 0,
@@ -731,7 +742,7 @@ class _BytesPreviewFullScreenPageState
                             borderRadius: BorderRadius.circular(999),
                           ),
                           child: Text(
-                            "${_index + 1} / ${widget.images.length}",
+                            "${_index + 1} / ${widget.pages.length}",
                             style: const TextStyle(
                               fontSize: 12,
                               color: Colors.white,

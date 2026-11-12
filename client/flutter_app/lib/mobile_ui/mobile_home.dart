@@ -168,7 +168,7 @@ class MobileHomePageState extends State<MobileHomePage>
     final List<String> urls = (item.gallery != null && item.gallery!.isNotEmpty)
         ? item.gallery!
         : <String>[item.url];
-    unawaited(showImagePreviewFullScreen(
+    unawaited(showImagePreviewFullScreenFromUrls(
       context,
       urls: urls,
       index: item.index < urls.length ? item.index : 0,
@@ -223,7 +223,9 @@ class MobileHomePageState extends State<MobileHomePage>
     final AmbientFeedsController c = AmbientFeedsController.instance;
     c.isAppBackgrounded = () => _appBackgrounded;
     // 对话页停留判定（2026-11-04 微信同款）：正在对话 tab 就不发系统通知。
-    c.isChatTabActive = () => _tabIndex == 0;
+    // 2026-11-12 修订：主动消息只落主会话线程——停在旁聊里等于「主线程的
+    // 气泡看不见」，必须照发系统通知，否则提醒静默丢失。
+    c.isChatTabActive = () => _tabIndex == 0 && !_chatController.isSideChatActive;
     c.syncSchedule = () async {
       _scheduleKey.currentState?.refresh();
     };

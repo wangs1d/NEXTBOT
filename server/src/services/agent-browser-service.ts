@@ -9,6 +9,11 @@
  * 人工接管对齐主流 Browser Agent：只在 human-required（登录墙 / 验证码）时停一次，
  * 页面留在可见浏览器里，用户回执后由 Plan 续跑；普通失败/空结果不交人。
  *
+ * 观察回路对齐主流「行动+观察合一 / 错误+状态一起回喂」（browser-use 同款）：
+ * open/click/type/wait_for 的回执统一附带当前页面的紧凑可交互元素表
+ * （pageState.interactive）——成功时模型直接从中选 ref 继续下一步（省一轮
+ * extract_text）；失败时错误与新状态一起回喂，一步完成自纠正（换 ref 而不是盲试）。
+ *
  * 安全护栏（不依赖 agentAccessMode，沙箱下也可用）：
  *   1. 任意 https URL 允许 open（http 仅限 localhost），所有操作走审计日志
  *   2. 对 browser-session-sites 白名单内站点，自动注入用户已授权的 Cookie（无头路径）
@@ -76,6 +81,17 @@ const TEXT_BUDGET = 4000;
 
 /** extract_text 附带的 ariaSnapshot 紧凑元素行数上限（每行 ~10 token）。 */
 const INTERACTIVE_BUDGET = 300;
+
+/**
+ * open/click/type/wait_for 回执附带的页面快照行数上限。
+ * 主流 Browser Agent（browser-use 等）的「行动+观察合一」：动作回执直接带新页面
+ * 的可交互元素表，模型一步完成观察与下一步决策，省一整轮 LLM 往返。
+ * 动作回执比 extract_text 紧（120 行 ≈ 1.2k token）。
+ */
+const ACTION_SNAPSHOT_BUDGET = 120;
+
+/** 动作后页面状态捕获总超时（毫秒）——best-effort，绝不拖慢动作回执。 */
+const ACTION_STATE_CAPTURE_MS = 2500;
 
 /** screenshot base64 截断上限（字符），避免 tool loop token 膨胀。 */
 const SCREENSHOT_BASE64_BUDGET = 2000;
@@ -358,6 +374,9 @@ export class AgentBrowserService {
       humanRequired: humanRequired?.reason,
     });
 
+    // 打开即观察（主流同款）：open 回执直接带可交互元素表，模型首步不用再 extract_text
+    const pageState = await this.capturePageState(session);
+
     return {
       ok: true,
       sessionId,
@@ -366,6 +385,7 @@ export class AgentBrowserService {
       browserMode: session.mode,
       cookieInjected,
       siteId: siteId ?? undefined,
+      ...(pageState ? { pageState } : {}),
       // 不把图片相对路径直接给模型：模型曾把相对路径拼上页面源站编成错站
       // 绝对 URL 写进正文（正文贴图 404）。卡片本就经 chat.media_ready 实时
       // 送达客户端（按各端 httpBase 解析），模型只需知道「已推送」这个事实。
@@ -407,16 +427,21 @@ export class AgentBrowserService {
       });
       this.touch(session);
       await this.audit(ctx, "click", sessionId, { selector: sel, url: session.currentUrl });
+      // 点击常触发跳转：先等导航稳定再取快照（best-effort，不拖垮回执）
+      await this.waitForNavSettled(session);
       // 动作后检查页面是否落到登录墙/验证码（主流 Agent 的动作后 checkpoint）
       const human = await this.checkHumanAfterAction(ctx, session);
-      return {
+      const base: AgentBrowserResult = {
         ok: true,
         url: session.page.url(),
         selector: sel,
         ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason, session.mode) } : {}),
       };
+      return await this.withPageState(base, session);
     } catch (e) {
-      return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      // 自纠正回路：错误 + 当前页面最新元素表一起回喂（browser-use 同款）
+      const base: AgentBrowserResult = { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      return await this.withPageState(base, session);
     }
   }
 
@@ -458,15 +483,18 @@ export class AgentBrowserService {
         textLength: value.length,
         append,
       });
+      await this.waitForNavSettled(session);
       const human = await this.checkHumanAfterAction(ctx, session);
-      return {
+      const base: AgentBrowserResult = {
         ok: true,
         selector: sel,
         textLength: value.length,
         ...(human ? { humanRequired: human, hint: humanHandoffHint(human.reason, session.mode) } : {}),
       };
+      return await this.withPageState(base, session);
     } catch (e) {
-      return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      const base: AgentBrowserResult = { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      return await this.withPageState(base, session);
     }
   }
 
@@ -631,9 +659,9 @@ export class AgentBrowserService {
    *   e5 button "领券购买"
    *
    * 仅保留可交互角色 + heading（页面语义文本已由正文 text 覆盖）；
-   * 丢弃 /url 子行与 cursor 标记；行数上限 INTERACTIVE_BUDGET。
+   * 丢弃 /url 子行与 cursor 标记；行数上限可调（动作回执用更紧的预算）。
    */
-  private compactAriaSnapshot(snapshot: string): string {
+  private compactAriaSnapshot(snapshot: string, budget: number = INTERACTIVE_BUDGET): string {
     const KEEP_ROLES = new Set([
       "button", "link", "textbox", "searchbox", "checkbox", "radio", "combobox",
       "menuitem", "menuitemcheckbox", "menuitemradio", "tab", "option", "slider",
@@ -658,7 +686,7 @@ export class AgentBrowserService {
       const name = m[2] ? ` "${m[2]}"` : "";
       const state = stateMarks.length ? ` [${stateMarks.join("] [")}]` : "";
       lines.push(ref ? `${ref} ${role}${name}${state}` : `${role}${name}${state}`);
-      if (lines.length >= INTERACTIVE_BUDGET) break;
+      if (lines.length >= budget) break;
     }
     return lines.join("\n");
   }
@@ -732,9 +760,12 @@ export class AgentBrowserService {
       await session.page.waitForSelector(sel, { state: "visible", timeout: waitTimeout });
       this.touch(session);
       await this.audit(ctx, "wait_for", sessionId, { selector: sel, timeout: waitTimeout });
-      return { ok: true, selector: sel, url: session.page.url() };
+      const base: AgentBrowserResult = { ok: true, selector: sel, url: session.page.url() };
+      return await this.withPageState(base, session);
     } catch (e) {
-      return { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      // 等不到元素时把当前页面元素表一并回喂：模型能看到「实际在页面上的是什么」
+      const base: AgentBrowserResult = { ok: false, error: this.formatPlaywrightError(e), retryable: true };
+      return await this.withPageState(base, session);
     }
   }
 
@@ -750,6 +781,73 @@ export class AgentBrowserService {
   }
 
   // ─── 内部方法 ────────────────────────────────────────────────────────────
+
+  /**
+   * 点击/输入后的导航稳定等待（best-effort）：仅真实 Playwright page 支持
+   * waitForLoadState；测试桩/特殊页面没有该方法时直接跳过。
+   */
+  private async waitForNavSettled(session: AgentBrowserSession): Promise<void> {
+    const page = session.page as Partial<Page>;
+    if (typeof page.waitForLoadState !== "function") return;
+    await page.waitForLoadState("domcontentloaded", { timeout: 3000 }).catch(() => {});
+  }
+
+  /**
+   * 捕获当前页面状态（主流循环的「观察」）：url + title + 紧凑可交互元素表。
+   * best-effort：快照失败/超时返回 undefined，绝不阻塞或拖垮动作回执
+   * （无头假页、跨域 iframe、页面跳转中都会走到这条路）。
+   */
+  private async capturePageState(
+    session: AgentBrowserSession,
+  ): Promise<{ url: string; title: string; interactive?: string } | undefined> {
+    let timer: NodeJS.Timeout | undefined;
+    const work = (async () => {
+      const page = session.page;
+      const title = await page.title().catch(() => "");
+      let interactive: string | undefined;
+      try {
+        const snapshot = await page.locator("body").ariaSnapshot({ mode: "ai" });
+        interactive = this.compactAriaSnapshot(snapshot, ACTION_SNAPSHOT_BUDGET);
+      } catch {
+        interactive = undefined;
+      }
+      return { url: page.url(), title, ...(interactive ? { interactive } : {}) };
+    })();
+    const timeout = new Promise<undefined>((resolve) => {
+      timer = setTimeout(() => resolve(undefined), ACTION_STATE_CAPTURE_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([work, timeout]);
+    } catch {
+      return undefined;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * 「行动+观察」合一（browser-use 同款）：open/click/type/wait_for 的回执统一
+   * 附当前页面状态，模型一步完成观察与下一步决策。
+   * - 成功：直接从 pageState.interactive 选 ref 继续，不用再调 extract_text；
+   * - 失败（retryable）：错误 + 最新元素表一起回喂，一步完成自纠正（换 ref
+   *   重试而不是盲试同一个），这是主流 agent 长程任务成功率的来源。
+   */
+  private async withPageState(
+    result: AgentBrowserResult,
+    session: AgentBrowserSession,
+  ): Promise<AgentBrowserResult> {
+    const state = await this.capturePageState(session);
+    if (!state) return result;
+    const hint = result.ok
+      ? "回执已附当前页面可交互元素表（pageState.interactive）：直接从中选 ref 继续下一步，不要单独再调 extract_text。"
+      : "失败原因和当前页面最新元素表一起返回了：从中挑正确的 ref 重试（页面已变化，原 ref 可能失效），不要盲目重试同一个 ref。";
+    return {
+      ...result,
+      pageState: state,
+      hint: (result as { hint?: string }).hint ?? hint,
+    } as AgentBrowserResult;
+  }
 
   /**
    * 交接图片统一推送：登录二维码 / 验证页截图都推到聊天（用户可能在手机上），

@@ -375,13 +375,31 @@ final RegExp _nextUpOrphanRe = RegExp(
   r"[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]",
   caseSensitive: false,
 );
+/// 裸 END token（2026-11-12 真机事故）：模型会把 [NEXT_UP_END] 简写成 [END]
+/// （不含 UP → 上面的正则不认 → 漏进建议列表/正文）。只认全大写内容，
+/// 避免误伤 [Weekend]/[append] 这类正文；排除结构化卡/媒体标记
+/// （AGENT_RESULT_CARD_END 等由各自的块剥离机制处理，裸规则绝不能碰）。
+final RegExp _bareEndTokenRe = RegExp(
+  r"[【\[](?!AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)[A-Z0-9_\- ]*END[A-Z0-9_\- ]*[】\]]",
+);
+/// 整行只有裸 END token：连同行尾换行一起删（与服务端行过滤同构，不留空行）。
+final RegExp _bareEndTokenLineRe = RegExp(
+  r"^[ \t]*[【\[](?!AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)[A-Z0-9_\- ]*END[A-Z0-9_\- ]*[】\]][ \t]*\r?\n?",
+  multiLine: true,
+);
 
 String _stripNextUpProtocolBlocks(String text) {
-  // 错写变体（NOEXTUP）不含 NEXT 子串，按 UP 判定才能拦住。
-  if (!text.toLowerCase().contains("up")) return text;
-  final String out = text
+  // 错写变体（NOEXTUP）不含 NEXT 子串，按 UP 判定才能拦住；块本身必含
+  // NEXT_UP（带 up），裸 [END] 孤儿（不带 up）按大写 END 判定。
+  final bool hasUp = text.toLowerCase().contains("up");
+  final bool hasBareEnd = _bareEndTokenRe.hasMatch(text);
+  if (!hasUp && !hasBareEnd) return text;
+  String out = text
       .replaceAll(_nextUpBlockRe, "")
       .replaceAll(_nextUpOrphanRe, "");
+  if (hasBareEnd) {
+    out = out.replaceAll(_bareEndTokenLineRe, "").replaceAll(_bareEndTokenRe, "");
+  }
   return out.replaceAll(RegExp(r"\n{3,}"), "\n\n");
 }
 

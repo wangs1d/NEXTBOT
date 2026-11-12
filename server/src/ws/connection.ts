@@ -489,6 +489,27 @@ export function registerWebSocketRoute(app: FastifyInstance, deps: WsRouteDeps):
           return;
         }
 
+        // 进程启动信标（2026-11-12 手机端「连接不稳定」远程诊断）：客户端每次
+        // 引擎启动、WS 连上后发一帧。lastAliveAgeMs = 本进程启动时刻距上一次
+        // 进程存活心跳（客户端 60s 落盘一次）的差值：几十秒内 ≈ 上个进程崩溃/
+        // 被杀；几分钟以上 ≈ 冻结后解冻或正常冷启动。fgsRunning/batteryExempt
+        // 反映保活前台服务与电池优化豁免的真实状态（保活失效 = 后台必被冻结）。
+        // 只记日志不回包，任何时刻都可安全发送。
+        if (event.type === "ws.client_boot") {
+          const bootPl = (event.payload ?? {}) as Record<string, unknown>;
+          app.log.info(
+            {
+              actorId: boundActorId,
+              lastAliveAgeMs: bootPl.lastAliveAgeMs,
+              fgsRunning: bootPl.fgsRunning,
+              batteryExempt: bootPl.batteryExempt,
+              platform: bootPl.platform,
+            },
+            "[client-boot] process start beacon",
+          );
+          return;
+        }
+
         // 设备活跃度刷新（提醒智能路由）：业务消息（非 keepalive）代表"人在这台设备上"，
         // 刷新该连接 lastActiveAt；后台挂机仅有心跳的连接不会被误判为用户所在端。
         if (boundActorId) {

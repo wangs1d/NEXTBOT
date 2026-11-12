@@ -267,17 +267,45 @@ const NEXT_UP_END_RE = /[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]/i;
 const NEXT_UP_TOKEN_RE = /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/i;
 const NEXT_UP_TOKEN_GLOBAL_RE = /[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】]/gi;
 const NEXT_UP_BLOCK_GLOBAL_RE =
-  /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|$)/gi;
+  /[\[【][^\]】\n]*UP[^\]】\n]*START[^\]】\n]*[\]】][\s\S]*?(?:[\[【][^\]】\n]*UP[^\]】\n]*END[^\]】\n]*[\]】]|[【\[](?!AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)[A-Z0-9_\- ]*END[A-Z0-9_\- ]*[】\]]|$)/gi;
+/**
+ * 裸 END token（2026-11-12 真机事故）：模型会把 NEXT_UP 块的结束标记简写成
+ * `[END]`（token 不含 UP → 旧 NEXT_UP_END_RE 不认 → 整块走「无 END」分支，
+ * `[END]` 行不含 UP 也不被建议过滤器排除 → 被当成一条建议渲染成胶囊）。
+ * 终止符/过滤器都加裸 token 分支；只认全大写内容，避免误伤 [Weekend]/[append]；
+ * 并排除结构化卡/媒体标记（AGENT_RESULT_CARD_END 等也全大写含 END，但由各自的
+ * 块剥离机制处理，裸规则绝不能碰——否则卡片块剥残只剩裸 JSON）。
+ */
+const BARE_END_EXCLUDE_LOOKAHEAD =
+  "(?![\\]】]|AGENT_RESULT_CARD_|IMAGE_RESULT_|DATA_BRIEF_|VIDEO_MEDIA_|CHAT_MEDIA_|CONTENT_SUMMARY_V2_|RENDER_)";
+const BARE_END_TOKEN_RE = new RegExp(
+  `[【\\[]${BARE_END_EXCLUDE_LOOKAHEAD}[A-Z0-9_\\- ]*END[A-Z0-9_\\- ]*[】\\]]`,
+);
+const BARE_END_TOKEN_GLOBAL_RE = new RegExp(
+  `[【\\[]${BARE_END_EXCLUDE_LOOKAHEAD}[A-Z0-9_\\- ]*END[A-Z0-9_\\- ]*[】\\]]`,
+  "g",
+);
+/** 整行只有裸协议 token（[END]/[START]/[STOP]/[FIN]）：永远不该被捞成建议条目
+ *  （[1]/[NOTE] 等不含这些词的 token 不受影响；结构化标记同上排除）。 */
+const BARE_PROTOCOL_TOKEN_LINE_RE = new RegExp(
+  `^[ \\t]*[【\\[]${BARE_END_EXCLUDE_LOOKAHEAD}[A-Z0-9_\\- ]*(?:END|START|STOP|FIN)[A-Z0-9_\\- ]*[】\\]][ \\t]*$`,
+);
 /** 整行只有 NEXT_UP 协议 token：永远不该被捞成建议条目（不误删 [1]/[NOTE] 等正文）。 */
 const PROTOCOL_TOKEN_LINE_RE =
   /^[ \t]*[\[【][^\]】\n]*UP[^\]】\n]*(?:START|END)[^\]】\n]*[\]】][ \t]*$/i;
 
 /** 剥掉正文里的孤立/错写协议 token 与纯 token 行（含 END 后残留的尾巴）。 */
 function stripProtocolTokenLines(text: string): string {
-  const kept = text.split("\n").filter((line) => !PROTOCOL_TOKEN_LINE_RE.test(line));
+  const kept = text
+    .split("\n")
+    .filter(
+      (line) =>
+        !PROTOCOL_TOKEN_LINE_RE.test(line) && !BARE_PROTOCOL_TOKEN_LINE_RE.test(line),
+    );
   return kept
     .join("\n")
     .replace(NEXT_UP_TOKEN_GLOBAL_RE, "")
+    .replace(BARE_END_TOKEN_GLOBAL_RE, "")
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -330,7 +358,12 @@ export function extractNextUpSuggestions(
   }
   const startIndex = start.index;
   const tail = text.slice(startIndex + start[0].length);
-  const end = NEXT_UP_END_RE.exec(tail);
+  // 块终止符：标准 UP-END token 或裸 `[END]`，取两者中先出现的
+  // （模型实测会把 [NEXT_UP_END] 简写成 [END]，2026-11-12 真机事故）。
+  const endUp = NEXT_UP_END_RE.exec(tail);
+  const endBare = BARE_END_TOKEN_RE.exec(tail);
+  const end =
+    endUp && endBare ? (endBare.index < endUp.index ? endBare : endUp) : (endUp ?? endBare);
   // 配对 END 时保留 END 之后的正文（与流式 guard 的语义一致）；残缺块则截到流尾。
   const rawBlock = end ? tail.slice(0, end.index) : tail;
   let out: string;
@@ -346,15 +379,22 @@ export function extractNextUpSuggestions(
     out = text.slice(0, startIndex);
   }
   // 错写的 END（如 `[NOEXTUP_END]`）曾被切行后当成第 3 条建议：纯 token 行与
-  // 含协议 token 的行一律排除，只保留真正的用户口吻任务句。
+  // 含协议 token 的行一律排除，只保留真正的用户口吻任务句。裸 `[END]`（2026-11-12
+  // 真机事故）同样排除：行内嵌的裸 token 剥掉、整行只剩裸 token 的丢弃。
   const followups = rawBlock
     .split("\n")
-    .map((line) => line.replace(/^[-*•\d.、\s]+/, "").trim())
+    .map((line) =>
+      line
+        .replace(/^[-*•\d.、\s]+/, "")
+        .replace(BARE_END_TOKEN_GLOBAL_RE, "")
+        .trim(),
+    )
     .filter(
       (line) =>
         line.length > 0 &&
         line.length <= 40 &&
         !PROTOCOL_TOKEN_LINE_RE.test(line) &&
+        !BARE_PROTOCOL_TOKEN_LINE_RE.test(line) &&
         !NEXT_UP_TOKEN_RE.test(line),
     )
     .slice(0, 3);
