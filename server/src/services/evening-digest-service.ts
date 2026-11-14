@@ -143,6 +143,47 @@ function localTimeHm(ts: number): string {
   return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
 }
 
+/**
+ * 时刻/日期键的任务时区版（2026-11-15 时区错显示根治）。
+ *
+ * 此前明日行程的时刻与「明天」判定全走服务器本地时区（localDateKey/localTimeHm）：
+ * UTC 容器部署时，北京时间 08:00 的任务在事实块里显示「00:00」、且日界整体
+ * 偏移 8 小时——与日程快照（按任务时区换算的 08:00）互相矛盾，模型收到两个
+ * 互相打架的权威时间，用户看到的回复与卡片跟着错。
+ * 用 Intl 按任务时区换算；时区非法回退服务器本地（旧行为）。
+ */
+function tzParts(ms: number, timezone?: string): { dateKey: string; hm: string } | null {
+  const tz = timezone?.trim();
+  if (!tz) return null;
+  try {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const v: Record<string, string> = {};
+    for (const p of fmt.formatToParts(new Date(ms))) {
+      if (p.type !== "literal") v[p.type] = p.value;
+    }
+    if (!v.year || !v.month || !v.day) return null;
+    return {
+      dateKey: `${v.year}-${v.month}-${v.day}`,
+      hm: `${v.hour}:${v.minute}`,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** 任务时区下的 HH:mm（时区非法回退服务器本地时刻，旧行为） */
+function hmInTaskTz(ms: number, timezone?: string): string {
+  return tzParts(ms, timezone)?.hm ?? localTimeHm(ms);
+}
+
 /** 条目标题钳长（睡前文案一行一项，超长截断兜底） */
 function clipItemTitle(raw: string): string {
   const s = raw.trim().replace(/\s+/g, " ");
@@ -361,12 +402,21 @@ export class EveningDigestService {
     if (!this.deps.scheduleTaskService) return [];
     const tomorrowStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
     const tomorrowKey = localDateKey(tomorrowStart);
+    // 明日判定按任务自身时区（2026-11-15 根治）：服务器时区与用户时区不一致时
+    // （UTC 容器 × 北京用户），日界整体偏移——用户「明天早上」的任务被漏掉、
+    // 「今晚」的任务反而混进明日列表。逐任务用它落库的 timezone 换算日键。
+    const nowPlusDay = now.getTime() + 24 * 60 * 60 * 1000;
     try {
       const tasks = this.deps.scheduleTaskService.listTasksBySession(sessionId);
       return tasks
         .filter((t) => {
           const ts = Date.parse(t.nextRunAt ?? t.runAt ?? "");
           if (Number.isNaN(ts)) return false;
+          const inTz = tzParts(ts, t.timezone);
+          if (inTz) {
+            const tomorrowKeyInTz = tzParts(nowPlusDay, t.timezone)?.dateKey ?? tomorrowKey;
+            return inTz.dateKey === tomorrowKeyInTz;
+          }
           return localDateKey(new Date(ts)) === tomorrowKey;
         })
         .slice(0, 5)
@@ -390,13 +440,14 @@ export class EveningDigestService {
             }))
             .filter((p): p is { at: number; label: string } => p.at !== null)
             .sort((a, b) => a.at - b.at)
-            .map((p) => `${localTimeHm(p.at)}${p.label}`);
+            .map((p) => `${hmInTaskTz(p.at, t.timezone)}${p.label}`);
           return {
             id: t.taskId,
             title,
-            // 本地 HH:mm（2026-10-13 修复：原 slice(11,16) 取的是 UTC 时刻，
-            // 东八区文案「9:00」实际是 17:00，差 8 小时）
-            time: Number.isNaN(ts) ? undefined : localTimeHm(ts),
+            // 任务时区 HH:mm（2026-10-13 修复原 slice(11,16) 取 UTC 时刻；
+            // 2026-11-15 再修：localTimeHm 是服务器本地时区，UTC 容器下仍是
+            // UTC 时刻——统一按任务落库的 timezone 换算）
+            time: Number.isNaN(ts) ? undefined : hmInTaskTz(ts, t.timezone),
             ...(advanceNotes.length > 0 ? { advanceNotes } : {}),
           };
         });

@@ -159,6 +159,38 @@ function shortTime(value: unknown): string {
   return `${m[2]}-${m[3]} ${m[4]}:${m[5]}`;
 }
 
+/**
+ * ISO 时间 → 任务时区下的「MM-DD HH:mm」（日程卡专用，2026-11-15 时间错显示根治）。
+ *
+ * 事故：日程卡此前用 shortTime 直接截取 UTC 原串——`2026-11-15T00:00:00Z`
+ * （北京时间 08:00）被截成「11-15 00:00」，同一事件三处显示各说各话：
+ * 模型正文（快照按任务时区换算）说「八点」、手机日程页（设备本地时区）
+ * 显示 08:00、聊天卡却显示 00:00（快 8 小时）。
+ * 这里改经 Date + Intl 按任务时区格式化（hourCycle h23 防部分 Node 版本
+ * 午夜落 h24）；时区非法/时间不可解析回退原串截取（旧行为，不至于空白）。
+ */
+function shortTimeInTz(value: unknown, timezone: unknown): string {
+  const raw = str(value);
+  const ms = new Date(raw).getTime();
+  const tz = str(timezone);
+  if (!Number.isFinite(ms) || !tz) return shortTime(raw);
+  try {
+    const fmt = new Intl.DateTimeFormat("zh-CN", {
+      timeZone: tz,
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hourCycle: "h23",
+    });
+    const parts = fmt.formatToParts(new Date(ms));
+    const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "";
+    return `${get("month")}-${get("day")} ${get("hour")}:${get("minute")}`;
+  } catch {
+    return shortTime(raw);
+  }
+}
+
 const BUILDERS: Record<string, ToolCardBuilder> = {
   /**
    * 注意（2026-11-05 用户定稿）：search_web / info.search **不再注册 builder**。
@@ -537,7 +569,9 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
     const items: ToolCardItem[] = tasks.slice(0, 8).map((t) => {
       const rec = (t ?? {}) as Record<string, unknown>;
       const title = str(rec.title) || str(rec.reminderMessage) || "（无标题）";
-      const time = shortTime(rec.nextRunAt) || shortTime(rec.runAt);
+      // 时刻必须按任务时区渲染（2026-11-15 根治 UTC 直出「00:00」事故），
+      // 落库的 nextRunAt/runAt 是 UTC ISO，纯截取会快/慢一个时区差。
+      const time = shortTimeInTz(rec.nextRunAt, rec.timezone) || shortTimeInTz(rec.runAt, rec.timezone);
       return { type: "num", text: time ? `${time} ${title}` : title };
     });
     const count = num(r.count) ?? tasks.length;
