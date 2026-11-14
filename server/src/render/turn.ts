@@ -12,14 +12,12 @@
  * （已流式即定稿），绝不能重跑 applyBodyForm 或整体替换正文。
  *
  * 纯编排：不含业务判定，不读文件，不打日志。
- * （唯一例外：schedule-grounding 正文对账——见 renderTurn 内注释。）
  */
 
 import { decideRender } from "./decide.js";
 import { applyBodyForm } from "./body.js";
 import { applyCards, collectCardPayloads, unfoldIfCardsPresent } from "./cards.js";
 import { buildRenderEnvelope } from "./protocol.js";
-import { groundScheduleBody } from "./schedule-grounding.js";
 import { buildReplyBlocks } from "../services/reply-envelope.js";
 import type { RenderDecision, RenderInput } from "./types.js";
 import type { RenderEnvelope } from "./protocol.js";
@@ -55,19 +53,6 @@ export function renderTurn(input: RenderInput, mode: RenderTurnMode = "full"): R
       userText: input.userText,
       toolName: input.toolName,
     });
-    // 日程查询轮正文对账（2026-11-15「红树林赶海」根修，唯一的编排外确定性
-    // 加工）：本轮有 calendar.list_tasks 回执时，正文里无回执依据的日程主张
-    // 在此剔除。必须在 applyCards 之前——卡块标记随后追加，不能被对账误改；
-    // 也必须在 done 装配之前——文字回复只由 finalText 一次性落屏，日程卡轮
-    // 不流式，这里剔掉的内容用户不会看到。cards-only 正文已定稿，不对账。
-    const grounded = groundScheduleBody(text, input.effects);
-    if (grounded.strippedClauses.length > 0) {
-      text = grounded.text;
-      console.log(
-        `[render] schedule-grounding: stripped ${grounded.strippedClauses.length} clause(s): ` +
-          grounded.strippedClauses.join(" | "),
-      );
-    }
     if (!input.plainTextMode) {
       text = applyCards(text, decision).text;
     }
