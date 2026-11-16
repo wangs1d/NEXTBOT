@@ -1610,6 +1610,85 @@ export function createStreamMetaSentenceFilter(maxPendingChars = 1024) {
   };
 }
 
+const REQUEST_CARD_OPEN = "<tool_request>";
+const REQUEST_CARD_CLOSE = "</tool_request>";
+
+/**
+ * 整串剥离请求卡标记（`<tool_request>…</tool_request>`）。
+ *
+ * 请求卡内容只供服务端做意图检索，绝不能出现在用户气泡或语音里。这里同时处理：
+ * - 成对标记：整段删除；
+ * - **未闭合**标记（弱模型常只写开标签，尾部内容被截断）：从开标签处截断，
+ *   避免 JSON 参数原样透出；
+ * - 大小写混写。
+ */
+export function stripRequestCardTags(text: string): string {
+  if (!text) return text;
+  let out = text.replace(/<tool_request>[\s\S]*?<\/tool_request>/gi, "");
+  const dangling = out.toLowerCase().indexOf(REQUEST_CARD_OPEN);
+  if (dangling >= 0) out = out.slice(0, dangling);
+  // 残留的孤立标签（只有闭合标签 / 被切成两半）也不能漏出。
+  out = out.replace(/<\/?tool_request>/gi, "");
+  return out.trim();
+}
+
+/** 返回 `s` 的尾部中最长的、同时是 `tag` 前缀的长度（用于跨 chunk 的半截标签）。 */
+function partialTagSuffixLen(s: string, tag: string): number {
+  const lower = s.toLowerCase();
+  const max = Math.min(lower.length, tag.length - 1);
+  for (let len = max; len > 0; len--) {
+    if (lower.endsWith(tag.slice(0, len))) return len;
+  }
+  return 0;
+}
+
+/**
+ * 流式请求卡净化器：逐 delta 吞掉 `<tool_request>…</tool_request>`。
+ *
+ * 与整串版互补——流式路径（provider 直推 / 工具波直推）在最终文本剥离之前
+ * 就已经把内容推给前端，成对或未闭合的请求卡都会原样漏进气泡。这里用状态机
+ * 处理标签被 chunk 切开的情况，并吞掉流末尾的半截开标签。
+ */
+export function createStreamRequestCardFilter() {
+  let pending = "";
+  let inCard = false;
+
+  return function feed(delta: string): string {
+    pending += delta;
+    const lower = pending.toLowerCase();
+    let out = "";
+    let cursor = 0;
+
+    while (cursor < pending.length) {
+      if (!inCard) {
+        const start = lower.indexOf(REQUEST_CARD_OPEN, cursor);
+        if (start < 0) {
+          const keep = partialTagSuffixLen(pending.slice(cursor), REQUEST_CARD_OPEN);
+          out += pending.slice(cursor, pending.length - keep);
+          pending = pending.slice(pending.length - keep);
+          return out;
+        }
+        out += pending.slice(cursor, start);
+        cursor = start + REQUEST_CARD_OPEN.length;
+        inCard = true;
+      } else {
+        const end = lower.indexOf(REQUEST_CARD_CLOSE, cursor);
+        if (end < 0) {
+          // 仍在卡内：只保留可能是闭合标签前缀的尾巴，其余全部丢弃。
+          const keep = partialTagSuffixLen(pending.slice(cursor), REQUEST_CARD_CLOSE);
+          pending = pending.slice(pending.length - keep);
+          return out;
+        }
+        cursor = end + REQUEST_CARD_CLOSE.length;
+        inCard = false;
+      }
+    }
+
+    pending = "";
+    return out;
+  };
+}
+
 /** 整串剥离内部控制标签前缀（可匹配多个连续标签）。 */
 export function stripInternalControlTags(text: string): string {
   if (!text) return text;

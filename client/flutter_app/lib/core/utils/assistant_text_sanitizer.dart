@@ -61,6 +61,26 @@ String stripAllTimestampFrameLines(String text) {
       .replaceAll(RegExp(r"[ \t]+\n"), "\n");
 }
 
+// ── 请求卡标记 `<tool_request>…</tool_request>`（与服务端
+//    `stream-chat-helpers.ts` 的 stripRequestCardTags 同构）──────────────
+// 请求卡只供服务端做意图检索，内容通常是工具名或 JSON 参数。服务端在最终文本
+// 已剥离，但流式分片/历史回放仍可能把开标签和 JSON 原样送到气泡（真机事故：
+// 用户看到 `<tool_request>{"name":"shared_browser.navigate",…}`）。
+// 闭合块整块删；未闭合时从开标签处截断，宁可少显示也不能把协议内容透给用户。
+final RegExp _toolRequestBlockRe = RegExp(
+  r"<tool_request>[\s\S]*?</tool_request>",
+  caseSensitive: false,
+);
+
+String stripToolRequestCards(String text) {
+  if (text.isEmpty || !text.toLowerCase().contains("tool_request")) return text;
+  String out = text.replaceAll(_toolRequestBlockRe, "");
+  final int dangling = out.toLowerCase().indexOf("<tool_request>");
+  if (dangling >= 0) out = out.substring(0, dangling);
+  out = out.replaceAll(RegExp(r"</?tool_request>", caseSensitive: false), "");
+  return out.trim();
+}
+
 String stripDsmlToolCallMarkup(String text) {
   if (text.isEmpty || !text.toLowerCase().contains("dsml")) return text;
   return text
@@ -212,7 +232,11 @@ bool isSystemFrameText(String text) {
 bool _isPartialSystemOpener(String text) {
   final String t = text.trimLeft().toLowerCase();
   if (t.isEmpty || t.contains(">")) return false;
-  for (final String target in const <String>["<system-reminder>", "<system>"]) {
+  for (final String target in const <String>[
+    "<system-reminder>",
+    "<system>",
+    "<tool_request>",
+  ]) {
     if (target.startsWith(t)) return true;
   }
   return false;
@@ -405,12 +429,14 @@ String _stripNextUpProtocolBlocks(String text) {
 
 String stripAssistantProtocolFrames(String text) {
   // 先剥 recap 回显块，再剥线程内部帧（整块围栏 / 帧整行 / 开头连续帧），
-  // 再剥行首时间戳帧、删整行时间戳帧，最后剥 DSML 工具调用标记。
-  return stripDsmlToolCallMarkup(
-    stripAllTimestampFrameLines(
-      stripAssistantTimestampFrames(
-        _stripNextUpProtocolBlocks(
-          stripInternalFrames(stripRecapEchoBlocks(text)),
+  // 再剥行首时间戳帧、删整行时间戳帧，剥 DSML 工具调用标记，最后剥请求卡标记。
+  return stripToolRequestCards(
+    stripDsmlToolCallMarkup(
+      stripAllTimestampFrameLines(
+        stripAssistantTimestampFrames(
+          _stripNextUpProtocolBlocks(
+            stripInternalFrames(stripRecapEchoBlocks(text)),
+          ),
         ),
       ),
     ),

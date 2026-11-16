@@ -17,6 +17,7 @@ import {
   adaptOpenAiChatCompletionStream,
   consumeNormalizedStream,
   createStreamControlTagSanitizer,
+  createStreamRequestCardFilter,
   createStreamMetaSentenceFilter,
   pickVisibleText,
   StreamIdleTimeoutError,
@@ -622,6 +623,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
     let toolIntentCalls: NormalToolCall[] = [];
     try {
       const sanitizer = createStreamControlTagSanitizer();
+      const requestCardFilter = createStreamRequestCardFilter();
       const metaFilter = createStreamMetaSentenceFilter();
       // LLM 计时（2026-09-28 延迟诊断配套）：request 发出 → 首个可见 delta → 流结束，
       // 区分「API 排队/首 token 慢」与「生成长」。首 delta 为空（净化后无输出）
@@ -645,7 +647,7 @@ export abstract class AbstractChatProvider implements ExternalChatProvider {
             // 混进 content，逐 chunk 直推这里时先过净化器，避免标签透出到前端气泡。
             // 2026-08-29 扩展：再叠一层元术语整句过滤（"上一轮转入规划任务..."），
             // 兜底 LLM 在流式中把系统元描述整段写进回复。
-            const clean = metaFilter(sanitizer(d));
+            const clean = metaFilter(requestCardFilter(sanitizer(d)));
             if (clean) {
               // 繁→简出口正规化（2026-10-11）：流式与累计（streamedVisible）用同一
               // 归一文本，1:1 等长替换不破坏流式分段。

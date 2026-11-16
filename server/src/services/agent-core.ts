@@ -270,7 +270,11 @@ import {
   isNotesChatSessionId,
 } from "../agent/master-chat-session.js";
 import { getChatThreadStore } from "../external-model/chat-thread-store.js";
-import { stripInternalControlTags, ToolIntentWithoutToolsError } from "../external-model/stream-chat-helpers.js";
+import {
+  stripInternalControlTags,
+  stripRequestCardTags,
+  ToolIntentWithoutToolsError,
+} from "../external-model/stream-chat-helpers.js";
 import { AgentTaskOrchestrator } from "./agent-task-orchestrator.js";
 import type { AgentTaskOrchestratorDeps, RunTaskOptions } from "./agent-task-orchestrator.js";
 import { getAgentTaskStore } from "./agent-task-store.js";
@@ -3592,7 +3596,7 @@ private async finishLlmTurn(
     //  - 话题切换标签：[话题切换，只答这个] / [Topic switched — don't revisit.]
     //  - 停止/待用户输入信号：[STOP needs a message from the user]
     // 零 token 程序层剥离，不做重生成。
-    sanitizedOutput = stripInternalControlTags(sanitizedOutput);
+    sanitizedOutput = stripRequestCardTags(stripInternalControlTags(sanitizedOutput));
 
     // 钩子 3：RuntimeKernel 后置校验（零 token，程序层拦截违规输出）
     // 全程不向 LLM 发任何约束 prompt，纯规则匹配。违规时记录日志但不阻断输出（避免循环重生成）

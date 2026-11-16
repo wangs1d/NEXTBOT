@@ -149,7 +149,9 @@ import {
   StreamIdleTimeoutError,
   stripInlineThinkBlocks,
   stripInternalControlTags,
+  stripRequestCardTags,
   createStreamControlTagSanitizer,
+  createStreamRequestCardFilter,
   createStreamMetaSentenceFilter,
   stripMetaSentences,
   type NormalChatChunk,
@@ -2011,12 +2013,72 @@ const PHOTO_REPLY_HINT =
   "正文一两句话自然引入即可，不要按主题分节盘点，不要写「已确认的/能说的/没查到的」式小节，也不要逐张复述照片内容。";
 
 /**
- * 剥除正文中的请求卡标记（<tool_request>…</tool_request>）。
- * 静态架构下请求卡已在收尾分支被拦截续波，不会走到这里；legacy 回退模式下
- * 卡片无处理通道，标记会滞留在正文——统一剥除，防止协议标记透出到用户。
+ * 提取请求卡内容（成对标记优先；弱模型只写开标签时取尾部兜底）。
+ * 返回 null 表示本轮没有请求卡。
  */
-function stripRequestCardTags(text: string): string {
-  return text.replace(/<tool_request>[\s\S]*?<\/tool_request>/gi, "").trim();
+function extractRequestCardContent(text: string): string | null {
+  if (!text) return null;
+  const closedRe = /<tool_request>([\s\S]*?)<\/tool_request>/gi;
+  let closed: RegExpExecArray | null;
+  while ((closed = closedRe.exec(text))) {
+    if (closed[1]?.trim()) return closed[1].trim();
+  }
+  // 没有内容非空的成对标记时，再看是否有未闭合的开标签（弱模型截断场景）。
+  // 从最后一个闭合标签之后找，避免把已闭合卡片的尾部误判成新卡。
+  const lower = text.toLowerCase();
+  const closedEnd = lower.lastIndexOf("</tool_request>") + "</tool_request>".length;
+  const open = lower.indexOf("<tool_request>", closedEnd);
+  if (open < 0) return null;
+  const rest = text.slice(open + "<tool_request>".length).trim();
+  return rest ? rest.slice(0, 4000) : null;
+}
+
+/**
+ * 解析请求卡内容。除了提示词约定的自然语言意图，还兼容模型实际会写出的
+ * 两种形态：直接写工具名，或写一段 JSON（{"name"/"tool"/"action": …}）。
+ * 后者在真机事故里会让 BM25 把 JSON 当查询词、召回失败，导航类工具因此
+ * 永远进不了会话工具面。
+ */
+function parseRequestCardContent(raw: string): { query: string; toolName?: string } {
+  const content = raw.trim();
+  if (!content) return { query: "" };
+
+  const directName = /^(?:tool\s*[:=]\s*)?([a-z][a-z0-9_]*(?:[._][a-z0-9_-]+)+)$/i.exec(content);
+  if (directName?.[1]) return { query: content, toolName: directName[1] };
+
+  if (/^[[{]/.test(content)) {
+    try {
+      const parsed = JSON.parse(content) as unknown;
+      const obj = (Array.isArray(parsed) ? parsed[0] : parsed) as Record<string, unknown> | null;
+      if (obj && typeof obj === "object") {
+        const pick = (...keys: string[]): string | undefined => {
+          for (const key of keys) {
+            const value = obj[key];
+            if (typeof value === "string" && value.trim()) return value.trim();
+          }
+          return undefined;
+        };
+        // 兼容 OpenAI 原生调用形态：{"function":{"name":"…"}} / {"tool_calls":[…]}
+        const fn = obj.function as Record<string, unknown> | undefined;
+        const nestedName =
+          fn && typeof fn === "object" && typeof fn.name === "string" ? fn.name : undefined;
+        const firstCall = Array.isArray(obj.tool_calls)
+          ? (obj.tool_calls[0] as Record<string, unknown> | undefined)
+          : undefined;
+        const firstCallFn = firstCall?.function as Record<string, unknown> | undefined;
+        const nestedCallName =
+          firstCallFn && typeof firstCallFn.name === "string" ? firstCallFn.name : undefined;
+        const toolName =
+          pick("name", "tool", "tool_name", "toolName", "action") ?? nestedName ?? nestedCallName;
+        const query = pick("intent", "query", "goal", "task", "description", "reason", "purpose");
+        return { query: query || content, toolName };
+      }
+    } catch {
+      // JSON 解析失败时按自然语言查询兜底
+    }
+  }
+
+  return { query: content };
 }
 
 export async function streamCompletionWithTools(
@@ -2795,6 +2857,7 @@ export async function streamCompletionWithTools(
     // 波内直推的逐 delta 净化栈（与纯文本分支同款）：跨块控制标签状态机 +
     // 元话语整句过滤，think 块已在 consumer 咽喉剥过。
     const waveTagSanitizer = createStreamControlTagSanitizer();
+    const waveRequestCardFilter = createStreamRequestCardFilter();
     const waveMetaFilter = createStreamMetaSentenceFilter();
     // 流末尾 chunk 的 usage（可能缺失）；声明在 try 外，供块外审计使用
     let streamUsage: NormalUsage | undefined;
@@ -2873,7 +2936,9 @@ export async function streamCompletionWithTools(
               // 闸门规则：本波出现 tool_call 增量前 → 直推（确认语打字机透出）；
               // 关闸后 → 滞留 waveHeldText（工具波丢弃、最终波冲刷），思考过程
               // 不再透出。与最终文本的分叉由 WS 层收口裁决承接。
-              const clean0 = waveMetaFilter(waveTagSanitizer(d));
+              const clean0 = waveMetaFilter(
+                waveRequestCardFilter(waveTagSanitizer(d)),
+              );
               if (!clean0) return;
               // 繁→简出口正规化（2026-10-11）：累计（waveStreamedText/waveHeldText）
               // 与直推用同一归一文本，1:1 等长替换不破坏闸门滞留与残差对账。
@@ -3019,52 +3084,67 @@ export async function streamCompletionWithTools(
         toolSearchPrepared.deferredCatalog.entries.length > 0 &&
         wave + 1 < waveBudget()
       ) {
-        const cardMatch = /<tool_request>([\s\S]{1,300}?)<\/tool_request>/i.exec(fullText);
-        if (cardMatch?.[1]?.trim()) {
+        const cardContent = extractRequestCardContent(fullText);
+        if (cardContent) {
           requestCardUsed = true;
-          const intent = cardMatch[1].trim();
+          const parsedCard = parseRequestCardContent(cardContent);
+          const intent = parsedCard.query || cardContent;
+          // 模型可能直接报工具名或写成 JSON（{"name":"shared_browser.navigate",…}）。
+          // 这类请求必须按名字精确转正；把它丢进 BM25 当自由文本检索，导航类工具
+          // 会因中英文词面向量不一致而全部落选（真机事故的根因）。
+          const directEntry = parsedCard.toolName
+            ? toolSearchPrepared.deferredCatalog.byName.get(parsedCard.toolName) ??
+              toolSearchPrepared.deferredCatalog.byApiName.get(
+                parsedCard.toolName.replace(/\./g, "_"),
+              )
+            : undefined;
           let matches: Awaited<ReturnType<typeof searchResources>> = [];
-          try {
-            matches = await searchResources(
-              toolSearchPrepared.deferredCatalog,
-              intent,
-              3,
-              { includeSchema: true },
-            );
-          } catch {
-            matches = [];
+          if (!directEntry) {
+            try {
+              matches = await searchResources(
+                toolSearchPrepared.deferredCatalog,
+                intent,
+                3,
+                { includeSchema: true },
+              );
+            } catch {
+              matches = [];
+            }
           }
           const known = new Set(stableApiTools.map(apiToolNameOf));
           const loaded: string[] = [];
           const alreadyVisible: string[] = [];
           // top-1 语义：请求卡表达的是模型当下的意图，加载=top-1（最小 schema 增量）；
           // top-1 已可见（预召回先注入）→ 指回直调；top-1 分数不足 → 不加载（出口闸已删除，直接收尾）。
-          const best = matches.find((m) => m.score >= REQUEST_CARD_MIN_SCORE);
-          if (best) {
+          const bestName =
+            directEntry?.registryName ??
+            matches.find((m) => m.score >= REQUEST_CARD_MIN_SCORE)?.name;
+          if (bestName) {
             // 高危拦截（2026-09-19 P1-1）：资金/外发类工具不因请求卡自动转正进
             // chat 车道——引导模型走 task.dispatch 派发后台（人工审批兜底），
             // 防弱模型一句 <tool_request> 就把支付工具拉进可见集直接调用。
             const stage = options?.audit?.stage ?? "";
-            if (stage.startsWith("main_chat") && isHighRiskToolName(best.name)) {
+            if (stage.startsWith("main_chat") && isHighRiskToolName(bestName)) {
               requestCardUsed = true;
-              traceRequestCard = { fired: true, loaded: [], blockedRisk: [best.name] };
+              traceRequestCard = { fired: true, loaded: [], blockedRisk: [bestName] };
               messages.push({ role: "assistant", content: fullText || "" });
               messages.push(markTurnScaffold({
                 role: "system",
                 content:
-                  `你请求的能力（${best.name}）涉及资金或对外发送，属于高危操作，系统不会自动加载。` +
+                  `你请求的能力（${bestName}）涉及资金或对外发送，属于高危操作，系统不会自动加载。` +
                   `如用户明确要求办理，请改用 task.dispatch 把它派发为后台任务（会经人工审批），` +
                   `并先向用户复述将执行的操作内容；不要再次输出请求标记直接索要该工具。`,
               }));
               lastAssistantText = "";
               console.info(
-                `[openai-tool-loop] 请求卡高危拦截：${best.name}（stage=${stage}）`,
+                `[openai-tool-loop] 请求卡高危拦截：${bestName}（stage=${stage}）`,
               );
               continue;
             }
             const entry =
-              toolSearchPrepared.deferredCatalog.byName.get(best.name) ??
-              toolSearchPrepared.deferredCatalog.byApiName.get(best.name.replace(/\./g, "_"));
+              directEntry ??
+              toolSearchPrepared.deferredCatalog.byName.get(bestName) ??
+              toolSearchPrepared.deferredCatalog.byApiName.get(bestName.replace(/\./g, "_"));
             const tool = entry?.tool;
             if (tool) {
               const apiTool = registerApiTool(tool);
@@ -3096,9 +3176,11 @@ export async function streamCompletionWithTools(
           };
           console.info(
             `[openai-tool-loop] 请求卡：intent="${intent.slice(0, 60)}" ` +
-              `candidates=[${matches
-                .map((m) => `${m.name}:${m.score.toFixed(2)}`)
-                .join(", ")}] → loaded=[${loaded.join(", ")}]`,
+              `candidates=[${
+                directEntry
+                  ? `${directEntry.registryName}:direct`
+                  : matches.map((m) => `${m.name}:${m.score.toFixed(2)}`).join(", ")
+              }] → loaded=[${loaded.join(", ")}]`,
           );
           if (loaded.length > 0) {
             messages.push({ role: "assistant", content: fullText || "" });
@@ -3165,8 +3247,11 @@ export async function streamCompletionWithTools(
       // 后半段正文属于最终回复，冲刷补齐，不丢内容。答案留存轮例外：滞留
       // 文本随返回值交 done（2026-10-13），不再补推到流式通道。
       if (waveHeldText && !answerHeld()) {
-        onDelta(waveHeldText);
-        waveStreamedText += waveHeldText;
+        const held = stripRequestCardTags(waveHeldText);
+        if (held) {
+          onDelta(held);
+          waveStreamedText += held;
+        }
         waveHeldText = "";
       }
       // 本波已直推过（波内直推）→ 不再整段重推；与 sanitizedFinalText 的差异
@@ -3231,7 +3316,9 @@ export async function streamCompletionWithTools(
     if (finishReason === "tool_calls" && normalizedToolCalls.length > 0 && fullText.trim()) {
       const preamble = firstAckSentence(
         normalizeTraditionalToSimplified(
-          stripInternalControlTags(stripMetaSentences(stripInlineThinkBlocks(fullText))),
+          stripRequestCardTags(
+            stripInternalControlTags(stripMetaSentences(stripInlineThinkBlocks(fullText))),
+          ),
         ).text,
       );
       // 波内已直推过前导话 → 不重复推（同最终收尾的跳过语义）。
