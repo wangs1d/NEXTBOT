@@ -1,0 +1,1119 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-theme="">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>动态 tab 改版设计稿 · 2026-11-16</title>
+<style>
+  :root{
+    /* —— App 内配色（与 MobilePalette 对齐）—— */
+    --bg:#F7F7F8; --surface:#FFFFFF; --surface2:#F2F2F4;
+    --text:#111112; --text2:#70707A; --muted:#A6A6AF;
+    --divider:#EDEDEF; --accent:#000000; --on-accent:#FFFFFF;
+    --link:#3B82F6;
+    --green:#1F9D55; --green-bg:#EAF7EF;
+    --amber:#B26A00; --amber-bg:#FFF5E5;
+    --red:#D93036;   --red-bg:#FDECEC;
+    --blue-bg:#EAF2FE;
+    /* —— 设计稿页面自身配色 —— */
+    --doc-text:#141416; --doc-muted:#6B6B74; --doc-line:#DCDCE0; --doc-card:#F7F7F8; --doc-page:#ECECEE;
+  }
+  html[data-theme="dark"]{
+    --bg:#121214; --surface:#1B1B1E; --surface2:#26262B;
+    --text:#F2F2F4; --text2:#9A9AA2; --muted:#6C6C75;
+    --divider:#26262B; --accent:#FFFFFF; --on-accent:#000000;
+    --link:#5B9DFF;
+    --green:#6BD39A; --green-bg:rgba(44,140,60,.22);
+    --amber:#E8A94A; --amber-bg:rgba(232,169,74,.16);
+    --red:#FF7B7F;   --red-bg:rgba(229,72,77,.18);
+    --blue-bg:rgba(59,130,246,.18);
+    --doc-text:#E9E9EC; --doc-muted:#9A9AA2; --doc-line:#2A2A2F; --doc-card:#17171A; --doc-page:#0B0B0C;
+  }
+
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0}
+  body{
+    background:var(--doc-page); color:var(--doc-text);
+    font-family:"MiSans","PingFang SC","Noto Sans CJK SC","Source Han Sans SC",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1560px;margin:0 auto;padding:44px 34px 90px}
+
+  /* ============ 文档头 ============ */
+  .doc-head{display:flex;align-items:flex-start;justify-content:space-between;gap:24px;flex-wrap:wrap}
+  .eyebrow{font-size:11.5px;letter-spacing:2px;color:var(--doc-muted);text-transform:uppercase}
+  h1{font-size:30px;line-height:1.25;margin:10px 0 10px;letter-spacing:-0.4px;font-weight:650}
+  .doc-head p{margin:0;font-size:13.5px;line-height:1.8;color:var(--doc-muted);max-width:720px}
+  .meta{margin-top:14px;display:flex;gap:8px;flex-wrap:wrap}
+  .meta span{font-size:11px;padding:5px 10px;border-radius:999px;border:1px solid var(--doc-line);color:var(--doc-muted)}
+  .theme-toggle{
+    flex:none;margin-top:6px;font:inherit;font-size:12px;cursor:pointer;
+    padding:9px 15px;border-radius:10px;border:1px solid var(--doc-line);
+    background:var(--doc-card);color:var(--doc-text);
+  }
+
+  /* ============ 色板 ============ */
+  .tokens{display:flex;gap:8px;flex-wrap:wrap;margin-top:22px}
+  .token{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--doc-muted);
+    border:1px solid var(--doc-line);border-radius:9px;padding:6px 10px;background:var(--doc-card)}
+  .token i{width:12px;height:12px;border-radius:4px;display:block}
+
+  /* ============ 信息架构 ============ */
+  .sec-title{display:flex;align-items:baseline;gap:10px;margin:54px 0 14px}
+  .sec-title b{font-size:17px;letter-spacing:-0.2px}
+  .sec-title span{font-size:11.5px;color:var(--doc-muted)}
+  .ia{display:flex;align-items:stretch;gap:10px;flex-wrap:wrap}
+  .ia .box{flex:1 1 190px;min-width:180px;border:1px solid var(--doc-line);background:var(--doc-card);
+    border-radius:12px;padding:12px 13px}
+  .ia .box em{display:block;font-style:normal;font-size:10px;letter-spacing:1.5px;color:var(--doc-muted);margin-bottom:6px}
+  .ia .box b{font-size:12.5px;display:block}
+  .ia .box span{display:block;font-size:11px;line-height:1.65;color:var(--doc-muted);margin-top:4px}
+  .ia .arrow{align-self:center;color:var(--doc-muted);font-size:16px;padding:0 2px}
+  .ia-note{margin-top:12px;font-size:11.5px;line-height:1.75;color:var(--doc-muted)}
+
+  /* ============ 屏幕网格 ============ */
+  .screens{display:grid;grid-template-columns:repeat(auto-fit,minmax(432px,1fr));gap:52px 34px;margin-top:34px;align-items:start}
+  .screen{display:flex;flex-direction:column;align-items:center}
+
+  .phone{
+    position:relative;width:390px;height:844px;flex:none;
+    background:var(--bg);color:var(--text);
+    border:1px solid var(--doc-line);border-radius:46px;overflow:hidden;
+    box-shadow:0 28px 64px rgba(0,0,0,.16), 0 1px 0 rgba(255,255,255,.5) inset;
+    display:flex;flex-direction:column;
+  }
+  html[data-theme="dark"] .phone{box-shadow:0 28px 64px rgba(0,0,0,.55), 0 1px 0 rgba(255,255,255,.06) inset}
+
+  /* 状态栏 */
+  .sb{height:44px;display:flex;align-items:center;justify-content:space-between;padding:0 26px;font-size:12.5px;font-weight:600;flex:none}
+  .sb .r{display:flex;align-items:center;gap:5px;opacity:.85}
+  .sb .bat{width:20px;height:10px;border:1.2px solid currentColor;border-radius:3px;position:relative}
+  .sb .bat::after{content:"";position:absolute;inset:2px;background:currentColor;border-radius:1px;right:6px}
+  .sb .sig{display:flex;align-items:flex-end;gap:1.5px;height:9px}
+  .sb .sig i{width:2.5px;background:currentColor;border-radius:1px;display:block}
+  .sb .sig i:nth-child(1){height:4px}.sb .sig i:nth-child(2){height:6px}
+  .sb .sig i:nth-child(3){height:8px}.sb .sig i:nth-child(4){height:9px}
+
+  /* 导航栏 */
+  .nav{height:48px;flex:none;position:relative;display:flex;align-items:center;justify-content:center}
+  .nav h2{margin:0;font-size:17px;font-weight:600;letter-spacing:.2px}
+  .nav .left,.nav .right{position:absolute;top:0;height:48px;display:flex;align-items:center;gap:6px;padding:0 14px}
+  .nav .left{left:0;color:var(--text)}
+  .nav .right{right:0;color:var(--text)}
+  .nav .txt{font-size:12px;color:var(--text2)}
+
+  .i{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.6;stroke-linecap:round;stroke-linejoin:round;display:block}
+  .i.s{width:15px;height:15px}
+  .i.xs{width:12px;height:12px}
+
+  /* 内容区 */
+  .content{flex:1;padding:4px 14px 96px;overflow:hidden;position:relative}
+  .label{font-size:11.5px;font-weight:600;color:var(--text2);margin:13px 4px 7px;display:flex;align-items:center;gap:6px}
+  .label .count{font-weight:500;color:var(--muted);font-size:10.5px}
+
+  .card{background:var(--surface);border:1px solid var(--divider);border-radius:12px;padding:12px}
+  .card + .card{margin-top:9px}
+  .card.hot{border-color:color-mix(in srgb, var(--text) 55%, transparent)}
+
+  /* 未读横幅 */
+  .unread{display:flex;align-items:center;gap:8px;background:var(--surface);border:1px solid var(--divider);
+    border-radius:11px;padding:8px 10px;margin-top:6px;font-size:11px;color:var(--text2)}
+  .unread .dot{width:5px;height:5px;border-radius:50%;background:var(--link);flex:none}
+  .unread b{color:var(--text);font-weight:600}
+  .unread .x{margin-left:auto;color:var(--muted);display:flex}
+
+  /* 待处理队列 */
+  .qrow{display:flex;align-items:center;gap:10px;padding:9px 0;border-bottom:1px solid var(--divider)}
+  .qrow:last-child{border-bottom:0;padding-bottom:2px}
+  .qicon{width:30px;height:30px;border-radius:9px;background:var(--surface2);display:grid;place-items:center;flex:none;color:var(--text)}
+  .qmain{flex:1;min-width:0}
+  .qtitle{font-size:12.5px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .qmeta{font-size:10.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+  .btn{font-size:11px;font-weight:500;padding:6px 10px;border-radius:8px;background:var(--accent);color:var(--on-accent);
+    white-space:nowrap;flex:none}
+  .btn.ghost{background:transparent;color:var(--text);border:1px solid var(--divider)}
+  .btn.tiny{font-size:10px;padding:4px 8px;border-radius:7px}
+
+  /* 摘要卡 */
+  .digest{background:var(--surface);border:1px solid var(--divider);border-radius:14px;padding:12px 13px}
+  .digest .top{display:flex;align-items:center;gap:7px;font-size:11px;color:var(--text2);font-weight:600}
+  .digest .top .spark{width:18px;height:18px;border-radius:6px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center}
+  .digest p{margin:8px 0 9px;font-size:13px;line-height:1.6;font-weight:500}
+  .digest p b{font-weight:650}
+  .digest .chips{display:flex;gap:6px;flex-wrap:wrap}
+  .dchip{font-size:10px;color:var(--text2);background:var(--surface2);border-radius:999px;padding:3px 8px}
+  .dchip b{color:var(--text);font-weight:600}
+
+  /* 分组卡 */
+  .ghead{display:flex;align-items:center;gap:8px}
+  .gicon{width:26px;height:26px;border-radius:8px;background:var(--surface2);display:grid;place-items:center;flex:none;color:var(--text)}
+  .gtitle{font-size:13px;font-weight:600}
+  .pill{font-size:10px;line-height:1.4;padding:2px 7px;border-radius:999px;background:var(--surface2);color:var(--text2);white-space:nowrap}
+  .pill.solid{background:var(--accent);color:var(--on-accent)}
+  .chev{margin-left:auto;color:var(--muted);display:flex}
+
+  .lrow{display:flex;align-items:center;gap:10px;padding:8px 0;border-bottom:1px solid var(--divider)}
+  .lrow:last-child{border-bottom:0}
+  .lrow .main{flex:1;min-width:0}
+  .ltitle{font-size:12.5px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .lmeta{font-size:10.5px;color:var(--muted);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .amount{font-size:13px;font-weight:600;white-space:nowrap}
+  .amount.wrong{text-decoration:line-through;color:var(--muted)}
+
+  .code{background:var(--accent);color:var(--on-accent);border-radius:8px;padding:4px 9px;text-align:center;line-height:1.25;flex:none}
+  .code span{display:block;font-size:8px;letter-spacing:1px;opacity:.62}
+  .code b{display:block;font-size:13px;font-weight:600;letter-spacing:.2px}
+
+  .gfoot{margin-top:7px;padding-top:8px;border-top:1px solid var(--divider);display:flex;align-items:center;gap:5px;font-size:11px;color:var(--text2)}
+  .gfoot b{color:var(--text);font-weight:500}
+  .gfoot .chev{margin-left:auto}
+
+  /* 订阅卡 */
+  .savecard{margin-top:9px;background:var(--surface);border:1px solid color-mix(in srgb, var(--text) 55%, transparent);border-radius:12px;padding:11px 12px}
+  .savecard .row1{display:flex;align-items:center;gap:8px}
+  .savecard .tag{font-size:9.5px;padding:2px 6px;border-radius:6px;background:var(--green-bg);color:var(--green);font-weight:600}
+  .savecard .save{margin:7px 0 0;font-size:11px;color:var(--text2);line-height:1.6}
+  .savecard .save b{color:var(--green);font-weight:600}
+
+  /* 底栏 */
+  .tabbar{position:absolute;left:10px;right:10px;bottom:9px;height:60px;border-radius:30px;
+    background:color-mix(in srgb, var(--surface) 72%, transparent);
+    backdrop-filter:blur(24px);-webkit-backdrop-filter:blur(24px);
+    border:1px solid var(--divider);display:flex;align-items:center;z-index:3}
+  html[data-theme="dark"] .tabbar{border-color:transparent;background:rgba(16,16,18,.88)}
+  .tab{flex:1;height:60px;display:grid;place-items:center;color:var(--muted);position:relative}
+  .tab.on{color:var(--text)}
+  .tab .badge{position:absolute;top:12px;right:50%;transform:translateX(14px);
+    min-width:15px;height:15px;border-radius:999px;background:var(--red);color:#fff;
+    font-size:9px;font-weight:600;display:grid;place-items:center;padding:0 4px;
+    border:1.5px solid var(--surface)}
+
+  /* 搜索 / 筛选 */
+  .search{display:flex;align-items:center;gap:8px;height:34px;border-radius:10px;background:var(--surface2);
+    padding:0 10px;color:var(--muted);font-size:12px;margin-top:4px}
+  .chips{display:flex;gap:6px;margin-top:9px;overflow:hidden}
+  .chip{font-size:11px;padding:4px 9px;border-radius:999px;background:var(--surface2);color:var(--text2);white-space:nowrap}
+  .chip.on{background:var(--accent);color:var(--on-accent)}
+
+  /* 统计卡 */
+  .stat{padding:12px 13px}
+  .stat .big{display:flex;align-items:flex-end;gap:7px}
+  .stat .big b{font-size:24px;font-weight:650;letter-spacing:-.4px;line-height:1}
+  .stat .big span{font-size:10.5px;color:var(--muted);padding-bottom:1px}
+  .stat .sub{font-size:10.5px;color:var(--text2);margin-top:5px}
+  .breakdown{margin-top:9px;display:flex;flex-direction:column;gap:6px}
+  .bl{display:grid;grid-template-columns:58px 1fr 62px;align-items:center;gap:8px;font-size:10.5px}
+  .bl .name{color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .bl .val{text-align:right;color:var(--text2);font-variant-numeric:tabular-nums}
+  .bar{height:3px;border-radius:3px;background:var(--surface2);overflow:hidden}
+  .bar i{display:block;height:100%;border-radius:3px;background:var(--text)}
+
+  /* 状态 chip */
+  .st{font-size:9.5px;padding:2px 6px;border-radius:999px;white-space:nowrap}
+  .st.green{background:var(--green-bg);color:var(--green)}
+  .st.amber{background:var(--amber-bg);color:var(--amber)}
+  .st.red{background:var(--red-bg);color:var(--red)}
+  .st.gray{background:var(--surface2);color:var(--text2)}
+  .st.blue{background:var(--blue-bg);color:var(--link)}
+
+  /* 分段 */
+  .seg{display:flex;gap:4px;background:var(--surface2);border-radius:10px;padding:3px;margin-top:4px}
+  .seg span{flex:1;text-align:center;font-size:11.5px;padding:5px 0;border-radius:8px;color:var(--text2)}
+  .seg span.on{background:var(--surface);color:var(--text);font-weight:600;box-shadow:0 1px 3px rgba(0,0,0,.06)}
+
+  /* 操作条（多选） */
+  .actionbar{position:absolute;left:14px;right:14px;bottom:80px;border-radius:12px;background:var(--accent);color:var(--on-accent);
+    padding:9px 12px;display:flex;align-items:center;gap:8px;font-size:11px;z-index:4}
+  .actionbar .n{font-weight:600}
+  .actionbar .sp{flex:1}
+  .actionbar .ab{font-size:10.5px;padding:5px 8px;border-radius:7px;border:1px solid color-mix(in srgb, var(--on-accent) 34%, transparent)}
+
+  /* 详情 */
+  .hero{padding:16px;border-radius:16px}
+  .hero .pills{display:flex;gap:6px;flex-wrap:wrap}
+  .hero .money{margin-top:12px;display:flex;align-items:flex-end;gap:8px}
+  .hero .money b{font-size:32px;font-weight:650;letter-spacing:-.6px;line-height:1.08}
+  .hero .money em{font-style:normal;font-size:14px;font-weight:500;padding-bottom:5px}
+  .hero .desc{font-size:12.5px;color:var(--text2);margin-top:4px}
+  .hero .state{margin-left:auto;padding-bottom:5px}
+
+  .actions{display:flex;gap:7px;margin-top:9px}
+  .actions .btn{flex:1;text-align:center;display:flex;align-items:center;justify-content:center;gap:5px;height:34px;border-radius:10px}
+  .actions .btn.ghost{background:var(--surface)}
+
+  .irow{display:flex;align-items:center;padding:9px 0;border-bottom:1px solid var(--divider);font-size:11.5px}
+  .irow:last-child{border-bottom:0}
+  .irow .k{color:var(--text2)}
+  .irow .v{margin-left:auto;color:var(--text);text-align:right}
+  .irow .v.mono{font-variant-numeric:tabular-nums;letter-spacing:.3px}
+
+  .hintcard{background:var(--surface);border:1px solid var(--divider);border-radius:12px;padding:11px 12px;margin-top:9px}
+  .hintcard .h{display:flex;align-items:center;gap:7px;font-size:11.5px;font-weight:600}
+  .hintcard p{margin:5px 0 0;font-size:10.5px;line-height:1.6;color:var(--text2)}
+
+  /* 设置行 */
+  .srow{display:flex;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--divider)}
+  .srow:last-child{border-bottom:0}
+  .srow .main{flex:1;min-width:0}
+  .srow .t{font-size:12px;font-weight:500}
+  .srow .d{font-size:10px;color:var(--muted);margin-top:1px}
+  .switch{width:34px;height:20px;border-radius:999px;background:var(--surface2);position:relative;flex:none}
+  .switch i{position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--surface);box-shadow:0 1px 2px rgba(0,0,0,.2);display:block}
+  .switch.on{background:var(--accent)}
+  .switch.on i{left:auto;right:2px;background:var(--on-accent)}
+
+  /* 弹层 */
+  .scrim{position:absolute;inset:0;background:rgba(0,0,0,.34);z-index:5}
+  .sheet{position:absolute;left:0;right:0;bottom:0;background:var(--surface);border-radius:20px 20px 0 0;
+    padding:12px 16px 24px;box-shadow:0 -14px 44px rgba(0,0,0,.22);z-index:6}
+  .sheet .grab{width:34px;height:4px;border-radius:999px;background:var(--divider);margin:0 auto 12px}
+  .sheet h3{margin:0 0 3px;font-size:14px}
+  .sheet p.sub{margin:0 0 8px;font-size:10.5px;color:var(--muted)}
+  .sheet .opt{display:flex;align-items:center;gap:9px;padding:11px 0;border-bottom:1px solid var(--divider);font-size:12px}
+  .sheet .opt:last-child{border-bottom:0}
+  .sheet .opt .i{color:var(--text2)}
+  .sheet .cancel{margin-top:10px;height:38px;border-radius:10px;background:var(--surface2);display:grid;place-items:center;font-size:12px;color:var(--text2)}
+
+  /* 说明文字 */
+  .cap{width:390px;margin-top:16px}
+  .cap h3{margin:0 0 5px;font-size:14.5px;letter-spacing:-.2px}
+  .cap .lead{margin:0 0 9px;font-size:12px;line-height:1.7;color:var(--doc-muted)}
+  .cap ul{margin:0;padding-left:15px;font-size:11.5px;line-height:1.8;color:var(--doc-muted)}
+  .cap ul b{color:var(--doc-text);font-weight:600}
+  .cap .tagline{display:inline-block;margin-bottom:7px;font-size:10px;letter-spacing:1.4px;color:var(--doc-muted)}
+
+  /* 规格区 */
+  .spec-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:16px;margin-top:16px}
+  .spec{border:1px solid var(--doc-line);background:var(--doc-card);border-radius:14px;padding:16px 18px}
+  .spec h4{margin:0 0 9px;font-size:13px}
+  .spec ul{margin:0;padding-left:16px;font-size:11.5px;line-height:1.85;color:var(--doc-muted)}
+  .spec ul b{color:var(--doc-text);font-weight:600}
+  .spec code{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:10.5px;
+    background:color-mix(in srgb, var(--doc-text) 7%, transparent);padding:1px 5px;border-radius:5px;color:var(--doc-text)}
+
+  .footnote{margin-top:36px;font-size:11px;line-height:1.8;color:var(--doc-muted);border-top:1px solid var(--doc-line);padding-top:16px}
+
+  @media (max-width:520px){
+    .wrap{padding:26px 14px 60px}
+    .phone{transform:scale(.86);transform-origin:top center;margin-bottom:-118px}
+    .cap{width:100%}
+  }
+</style>
+</head>
+<body>
+
+<svg style="position:absolute;width:0;height:0;overflow:hidden" aria-hidden="true">
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M4 5.5h16v10.5H9.5L4 20V5.5z"/></symbol>
+  <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M3.5 9.5h17M8 3.5v3M16 3.5v3"/></symbol>
+  <symbol id="i-act" viewBox="0 0 24 24"><path d="M3 12h4l2.5-6 4 13L16 12h5"/></symbol>
+  <symbol id="i-lib" viewBox="0 0 24 24"><path d="M3.5 7.5h6l1.8 2.2h9.2v9.8a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2V7.5z"/></symbol>
+  <symbol id="i-tune" viewBox="0 0 24 24"><path d="M4 7h9M19 7h1M4 17h4M13 17h7"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></symbol>
+  <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.7"/><path d="M20 4.5V10h-5.5"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4 4"/></symbol>
+  <symbol id="i-right" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
+  <symbol id="i-ship" viewBox="0 0 24 24"><path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/><circle cx="7" cy="18" r="1.6"/><circle cx="17.5" cy="18" r="1.6"/></symbol>
+  <symbol id="i-card" viewBox="0 0 24 24"><rect x="3" y="5.5" width="18" height="13" rx="2.5"/><path d="M3 10h18M6.5 15h4"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+  <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 8v4.5l3 1.8"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M9 4h6l-1 5 3 3v2H7v-2l3-3-1-5z"/><path d="M12 14v6"/></symbol>
+  <symbol id="i-archive" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="4" rx="1.5"/><path d="M5 8.5v10h14v-10M9.5 12.5h5"/></symbol>
+  <symbol id="i-mail" viewBox="0 0 24 24"><rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/><path d="M4 7l8 6 8-6"/></symbol>
+  <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6.5 16v-4.5a5.5 5.5 0 0 1 11 0V16l2 2H4.5l2-2z"/><path d="M10 20a2 2 0 0 0 4 0"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13 3L5 14h6l-1 7 8-11h-6l1-7z"/></symbol>
+  <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.8 5.2 5.2 1.8-5.2 1.8L12 17.5l-1.8-5.2L5 10.5l5.2-1.8L12 3.5z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+  <symbol id="i-filter" viewBox="0 0 24 24"><path d="M4 6h16M7 12h10M10 18h4"/></symbol>
+  <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.4-2.9 7.4-7 9-4.1-1.6-7-4.6-7-9V6l7-3z"/><path d="M9 12l2 2 4-4"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="M4 8h13a3 3 0 0 1 3 3v1"/><path d="M8 4L4 8l4 4"/><path d="M20 16H7a3 3 0 0 1-3-3v-1"/><path d="M16 12l4 4-4 4"/></symbol>
+</svg>
+
+<div class="wrap">
+
+  <header class="doc-head">
+    <div>
+      <div class="eyebrow">Dynamics Tab · Redesign v1</div>
+      <h1>从「消息展示」到「可处理的收件箱」</h1>
+      <p>动态 tab 的下一版：顶部先给出需要处理的事，再往下是分类聚合；账单侧新增「订阅与续费」扫描，帮用户发现并取消不值得的自动续费。低价值消息不再折叠，而是在入口层直接拦截、不入库。</p>
+      <div class="meta">
+        <span>2026-11-16</span>
+        <span>6 屏 · 浅色 / 深色</span>
+        <span>沿用现有卡片语言：12–16 圆角 / 细分隔线 / 黑白主色</span>
+      </div>
+      <div class="tokens">
+        <div class="token"><i style="background:var(--bg);border:1px solid var(--divider)"></i>页面底</div>
+        <div class="token"><i style="background:var(--surface);border:1px solid var(--divider)"></i>卡片</div>
+        <div class="token"><i style="background:var(--text)"></i>主文字 / 强调</div>
+        <div class="token"><i style="background:var(--muted)"></i>弱化文字</div>
+        <div class="token"><i style="background:var(--green)"></i>已报销</div>
+        <div class="token"><i style="background:var(--amber)"></i>待处理 / 疑似</div>
+        <div class="token"><i style="background:var(--red)"></i>记错了 / 重复</div>
+      </div>
+    </div>
+    <button class="theme-toggle" id="themeBtn">切换深色</button>
+  </header>
+
+  <div class="sec-title"><b>信息架构</b><span>先处理、再浏览、最后才是管理</span></div>
+  <div class="ia">
+    <div class="box">
+      <em>01 ENTRY</em>
+      <b>动态 tab</b>
+      <span>底栏徽标显示未处理数；进入后顶部固定「需要你处理」。</span>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <em>02 QUEUE</em>
+      <b>待处理队列</b>
+      <span>快递待取、待还款、待确认、异常账单；行内直接给动作。</span>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <em>03 AGGREGATE</em>
+      <b>分类聚合</b>
+      <span>快递 / 账单 / 提醒 / 邮件要事 / 订阅与续费，各自进列表或详情。</span>
+    </div>
+    <div class="arrow">→</div>
+    <div class="box">
+      <em>04 ACT</em>
+      <b>动作闭环</b>
+      <span>标记已取件、已报销、记错了、稍后提醒、归档、问 Agent。</span>
+    </div>
+  </div>
+  <div class="ia-note">数据源层：短信 / 通知 / 邮件 → <b>拦截层</b>（验证码、营销推广、重复物流更新直接丢弃，不落台账）→ 账单快递台账 → 动态 tab。拦截量只回计数，不展示内容。</div>
+
+  <div class="sec-title"><b>屏幕设计</b><span>6 个关键状态</span></div>
+  <div class="screens">
+
+    <!-- ============ 01 首页 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"></div>
+          <h2>动态</h2>
+          <div class="right">
+            <svg class="i"><use href="#i-tune"/></svg>
+            <svg class="i"><use href="#i-refresh"/></svg>
+          </div>
+        </div>
+        <div class="content">
+
+          <div class="unread">
+            <span class="dot"></span>
+            <span><b>新增 3 条</b> · 上次查看 09:12</span>
+            <span class="x"><svg class="i xs"><use href="#i-x"/></svg></span>
+          </div>
+
+          <div class="label">需要你处理 <span class="count">3 件</span></div>
+          <div class="card">
+            <div class="qrow">
+              <div class="qicon"><svg class="i s"><use href="#i-ship"/></svg></div>
+              <div class="qmain">
+                <div class="qtitle">顺丰速运 · 取件码 8-2-3010</div>
+                <div class="qmeta">已到驿站 · 今天 10:24</div>
+              </div>
+              <span class="btn tiny">标记已取件</span>
+            </div>
+            <div class="qrow">
+              <div class="qicon"><svg class="i s"><use href="#i-card"/></svg></div>
+              <div class="qmain">
+                <div class="qtitle">信用卡还款 · ¥1,280.00</div>
+                <div class="qmeta">11月20日到期 · 还有 4 天</div>
+              </div>
+              <span class="btn tiny">去还款</span>
+            </div>
+            <div class="qrow">
+              <div class="qicon"><svg class="i s"><use href="#i-check"/></svg></div>
+              <div class="qmain">
+                <div class="qtitle">差旅报销单待确认</div>
+                <div class="qmeta">Agent 已填好，等待你确认</div>
+              </div>
+              <span class="btn tiny ghost">去处理</span>
+            </div>
+          </div>
+
+          <div class="digest" style="margin-top:9px">
+            <div class="top"><span class="spark"><svg class="i xs"><use href="#i-spark"/></svg></span>今日摘要</div>
+            <p>今天 <b>2 件快递待取</b>；11月20日有 1 笔 <b>¥1,280.00</b> 还款；有 1 笔账单疑似重复。</p>
+            <div class="chips">
+              <span class="dchip">待取 <b>2</b></span>
+              <span class="dchip">近 30 天 <b>¥3,482.50</b></span>
+              <span class="dchip">待处理 <b>3</b></span>
+            </div>
+          </div>
+
+          <div class="savecard">
+            <div class="row1">
+              <div class="gicon"><svg class="i s"><use href="#i-repeat"/></svg></div>
+              <span class="gtitle">订阅与续费</span>
+              <span class="pill">3 个 · ¥46/月</span>
+              <span class="tag">预计省 ¥25/月</span>
+              <span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span>
+            </div>
+            <p class="save">爱奇艺连续包月近 90 天使用很少，取消后 <b>每月省 ¥25</b>。</p>
+          </div>
+
+          <div class="label">最近动态</div>
+
+          <div class="card">
+            <div class="ghead">
+              <div class="gicon"><svg class="i s"><use href="#i-ship"/></svg></div>
+              <span class="gtitle">快递</span>
+              <span class="pill solid">2 件待取</span>
+              <span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span>
+            </div>
+            <div class="lrow" style="margin-top:2px">
+              <div class="main">
+                <div class="ltitle">顺丰速运 · 已到驿站</div>
+                <div class="lmeta">单号 SF1234567890 · 今天 10:24</div>
+              </div>
+              <div class="code"><span>取件码</span><b>8-2-3010</b></div>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">京东物流 · 派送中</div>
+                <div class="lmeta">单号 JD8849302211 · 今天 09:05</div>
+              </div>
+              <span class="st gray">无需取件码</span>
+            </div>
+            <div class="gfoot"><b>查看全部快递</b><span>3 件</span><span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span></div>
+          </div>
+
+          <div class="card">
+            <div class="ghead">
+              <div class="gicon"><svg class="i s"><use href="#i-card"/></svg></div>
+              <span class="gtitle">账单</span>
+              <span class="pill">12 笔 · ¥3,482.50</span>
+              <span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span>
+            </div>
+            <div class="lrow" style="margin-top:2px">
+              <div class="main">
+                <div class="ltitle">中国移动 · 本月话费</div>
+                <div class="lmeta">短信 · 今天 09:12</div>
+              </div>
+              <span class="amount">-¥35.50</span>
+              <span class="st green">已报销</span>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">招商银行 · 信用卡还款</div>
+                <div class="lmeta">短信 · 昨天 20:41 · 疑似重复</div>
+              </div>
+              <span class="amount">-¥1,280.00</span>
+            </div>
+            <div class="gfoot"><b>查看全部账单</b><span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span></div>
+          </div>
+
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg><span class="badge">3</span></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 01 · 首页</span>
+        <h3>先处理，再浏览</h3>
+        <p class="lead">进入动态 tab 第一眼看到的是「要做什么」，而不是「有什么」。未读横幅只在有新增时出现，看过后消失。</p>
+        <ul>
+          <li><b>待处理队列</b>：快递 / 还款 / 审批 / 异常，最多 3 条，行内直接给动作。</li>
+          <li><b>今日摘要</b>：一句话结论 + 3 个关键数字，点击可让 Agent 展开解释。</li>
+          <li><b>订阅与续费</b>：独立卡片，用绿色「预计省」直接表达价值。</li>
+          <li><b>未读</b>：本地记录上次查看时间，按条目时间差计算「新增 N 条」，底栏同步徽标。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ============ 02 订阅与续费 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"><svg class="i"><use href="#i-right"/></svg></div>
+          <h2>订阅与续费</h2>
+          <div class="right"><span class="txt">说明</span></div>
+        </div>
+        <div class="content">
+
+          <div class="card" style="padding:15px;border-radius:14px">
+            <div style="display:flex;align-items:center;gap:8px">
+              <span class="pill solid">省钱助手</span>
+              <span class="st green">本月可省 ¥25</span>
+            </div>
+            <div class="big" style="display:flex;align-items:flex-end;gap:7px;margin-top:11px">
+              <b style="font-size:28px;font-weight:650;letter-spacing:-.6px;line-height:1">¥46.00</b>
+              <span style="font-size:10.5px;color:var(--muted);padding-bottom:2px">本月自动续费</span>
+            </div>
+            <div style="font-size:10.5px;color:var(--text2);margin-top:6px">3 个订阅 · 下次扣款 11月20日 · 建议取消 1 个</div>
+            <div style="display:flex;gap:7px;margin-top:10px">
+              <span class="btn ghost tiny" style="flex:1;text-align:center;height:30px;display:flex;align-items:center;justify-content:center">提醒我续费前 3 天</span>
+              <span class="btn tiny" style="flex:1;text-align:center;height:30px;display:flex;align-items:center;justify-content:center">查看全部扣款</span>
+            </div>
+          </div>
+
+          <div class="hintcard" style="border-color:var(--green);background:var(--green-bg)">
+            <div class="h" style="color:var(--green)"><svg class="i xs"><use href="#i-spark"/></svg>发现 1 个可以省掉的订阅</div>
+            <p style="color:var(--text2)">爱奇艺黄金 VIP 近 90 天没有相关使用记录，按 ¥25/月 计算，取消后每年可省 <b style="color:var(--green)">¥300</b>。</p>
+          </div>
+
+          <div class="label">自动续费中 <span class="count">3 项</span></div>
+          <div class="card">
+            <div class="lrow" style="align-items:flex-start;padding:10px 0">
+              <div class="gicon" style="margin-top:1px"><svg class="i s"><use href="#i-repeat"/></svg></div>
+              <div class="main">
+                <div class="ltitle">网易云音乐 · 黑胶 VIP</div>
+                <div class="lmeta">连续包月 ¥15.00/月 · 下次 11月20日 · 已扣 6 次</div>
+              </div>
+              <span class="btn ghost tiny">保留</span>
+            </div>
+            <div class="lrow" style="align-items:flex-start;padding:10px 0">
+              <div class="gicon" style="margin-top:1px"><svg class="i s"><use href="#i-repeat"/></svg></div>
+              <div class="main">
+                <div class="ltitle">爱奇艺黄金 VIP</div>
+                <div class="lmeta">连续包月 ¥25.00/月 · 下次 11月28日 · 使用很少</div>
+              </div>
+              <span class="btn tiny">去取消</span>
+            </div>
+            <div class="lrow" style="align-items:flex-start;padding:10px 0">
+              <div class="gicon" style="margin-top:1px"><svg class="i s"><use href="#i-repeat"/></svg></div>
+              <div class="main">
+                <div class="ltitle">iCloud+ 50GB</div>
+                <div class="lmeta">按月 ¥6.00/月 · 下次 12月01日 · 已扣 14 次</div>
+              </div>
+              <span class="btn ghost tiny">保留</span>
+            </div>
+          </div>
+
+          <div class="label">可能重复 / 已涨价</div>
+          <div class="card">
+            <div class="lrow">
+              <div class="gicon"><svg class="i s"><use href="#i-repeat"/></svg></div>
+              <div class="main">
+                <div class="ltitle">视频会员存在 2 个重叠订阅</div>
+                <div class="lmeta">爱奇艺 + 腾讯视频 · 同一天到期</div>
+              </div>
+              <span class="st amber">建议合并</span>
+            </div>
+            <div class="lrow">
+              <div class="gicon"><svg class="i s"><use href="#i-card"/></svg></div>
+              <div class="main">
+                <div class="ltitle">云存储从 ¥6 涨到 ¥8</div>
+                <div class="lmeta">3 个月前调价 · 可在设置中降级</div>
+              </div>
+              <span class="st amber">已涨价</span>
+            </div>
+          </div>
+
+          <div class="hintcard">
+            <div class="h"><svg class="i xs"><use href="#i-shield"/></svg>这些结论怎么来的</div>
+            <p>只读取已入账的账单与短信里的「连续包月 / 自动续费 / 扣款」关键词，不登录任何第三方账号；「去取消」只给出官方路径，不代操作。</p>
+          </div>
+
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 02 · 订阅与续费</span>
+        <h3>把「省钱」做成可执行清单</h3>
+        <p class="lead">基于台账里的账单记录做续费识别，给出三个层级的结论：能省多少、哪些值得保留、哪些可能重复或涨价。</p>
+        <ul>
+          <li><b>总额与建议</b>：本月固定支出、订阅数、下次扣款日、预计每月可省。</li>
+          <li><b>每项订阅</b>：周期、金额、下次扣款、已扣次数、使用频率信号。</li>
+          <li><b>安全边界</b>：只读账单与短信关键词，不登录第三方；取消只给路径。</li>
+          <li><b>数据来源</b>：服务端新增 <code>subscriptions</code> 聚合块，随 <code>/api/dynamics</code> 下发。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ============ 03 账单列表 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"><svg class="i"><use href="#i-right"/></svg></div>
+          <h2>账单</h2>
+          <div class="right"><svg class="i"><use href="#i-filter"/></svg></div>
+        </div>
+        <div class="content">
+          <div class="search"><svg class="i s"><use href="#i-search"/></svg>搜索商家、单号、金额</div>
+          <div class="chips">
+            <span class="chip on">全部</span>
+            <span class="chip">短信</span>
+            <span class="chip">邮件</span>
+            <span class="chip">通知</span>
+          </div>
+          <div class="chips" style="margin-top:5px">
+            <span class="chip">全部类型</span>
+            <span class="chip">还款扣款</span>
+            <span class="chip">话费通信</span>
+            <span class="chip">银行卡</span>
+            <span class="chip">其他</span>
+          </div>
+
+          <div class="card stat" style="margin-top:9px">
+            <div class="big"><b>¥3,482.50</b><span>近 30 天 · 12 笔</span></div>
+            <div class="sub">已报销 1 笔 · 记错了 1 笔（已从合计扣除）</div>
+            <div class="breakdown">
+              <div class="bl"><span class="name">还款扣款</span><span class="bar"><i style="width:37%"></i></span><span class="val">¥1,280.00</span></div>
+              <div class="bl"><span class="name">话费通信</span><span class="bar"><i style="width:18%"></i></span><span class="val">¥235.50</span></div>
+              <div class="bl"><span class="name">其他</span><span class="bar"><i style="width:100%"></i></span><span class="val">¥1,967.00</span></div>
+            </div>
+          </div>
+
+          <div class="label">今天</div>
+          <div class="card">
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">中国移动 · 本月话费</div>
+                <div class="lmeta">短信 · 今天 09:12</div>
+              </div>
+              <span class="amount">-¥35.50</span>
+              <span class="st green">已报销</span>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">招商银行 · 信用卡还款</div>
+                <div class="lmeta">短信 · 今天 08:40 · 与昨天金额相同</div>
+              </div>
+              <span class="amount">-¥1,280.00</span>
+              <span class="st amber">疑似重复</span>
+            </div>
+          </div>
+
+          <div class="label">昨天</div>
+          <div class="card">
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">招商银行 · 信用卡还款</div>
+                <div class="lmeta">短信 · 昨天 20:41</div>
+              </div>
+              <span class="amount">-¥1,280.00</span>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">美团 · 外卖订单</div>
+                <div class="lmeta">邮件 · 昨天 19:03</div>
+              </div>
+              <span class="amount">-¥46.00</span>
+            </div>
+          </div>
+
+          <div class="label">更早</div>
+          <div class="card">
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle">某平台会员续费</div>
+                <div class="lmeta">短信 · 11月12日 · 已标记记错了</div>
+              </div>
+              <span class="amount wrong">-¥25.00</span>
+              <span class="st red">记错了</span>
+            </div>
+          </div>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 03 · 账单列表</span>
+        <h3>搜索、筛选、按天分组</h3>
+        <p class="lead">列表页承担「查」的需求：顶部搜索 + 来源/类型筛选，下面先给统计，再按今天 / 昨天 / 更早分组。</p>
+        <ul>
+          <li><b>搜索</b>：商家、标题、运单号、取件码、金额模糊匹配。</li>
+          <li><b>筛选</b>：来源（短信/邮件/通知）+ 账单类型双维度，可组合。</li>
+          <li><b>统计</b>：近 30 天合计、笔数、分类占比条（复用现有 byType）。</li>
+          <li><b>状态</b>：已报销绿标、记错了红标且金额删除线、疑似重复琥珀标。</li>
+          <li><b>滑动</b>：左滑归档、右滑标记完成，带撤销提示。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ============ 04 快递列表 + 多选 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"><svg class="i"><use href="#i-right"/></svg></div>
+          <h2>快递</h2>
+          <div class="right"><span class="txt" style="color:var(--text)">选择</span></div>
+        </div>
+        <div class="content">
+          <div class="seg">
+            <span class="on">待取 2</span>
+            <span>已取 3</span>
+            <span>全部 5</span>
+          </div>
+
+          <div class="label">待取件 <span class="count">2 件 · 取件码优先</span></div>
+          <div class="card hot">
+            <div class="lrow" style="align-items:flex-start;padding:10px 0">
+              <div class="main">
+                <div class="ltitle">顺丰速运 · 已到驿站</div>
+                <div class="lmeta">单号 SF1234567890 · 今天 10:24</div>
+              </div>
+              <div class="code"><span>取件码</span><b>8-2-3010</b></div>
+            </div>
+            <div class="lrow" style="align-items:flex-start;padding:10px 0">
+              <div class="main">
+                <div class="ltitle">中通快递 · 已到丰巢</div>
+                <div class="lmeta">单号 ZT9930281122 · 昨天 18:12</div>
+              </div>
+              <div class="code"><span>取件码</span><b>6-1-8842</b></div>
+            </div>
+          </div>
+
+          <div class="label">已取件 <span class="count">3 件</span></div>
+          <div class="card">
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle" style="color:var(--text2)">京东物流 · 已签收</div>
+                <div class="lmeta">单号 JD8849302211 · 11月14日 已取件</div>
+              </div>
+              <span class="st gray">已取件</span>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle" style="color:var(--text2)">韵达快递 · 已签收</div>
+                <div class="lmeta">单号 YD1029384756 · 11月11日 已取件</div>
+              </div>
+              <span class="st gray">已取件</span>
+            </div>
+            <div class="lrow">
+              <div class="main">
+                <div class="ltitle" style="color:var(--text2)">邮政 EMS · 已签收</div>
+                <div class="lmeta">单号 EM7749301122 · 11月09日 已取件</div>
+              </div>
+              <span class="st gray">已取件</span>
+            </div>
+          </div>
+
+          <div class="label">长按任意一条进入多选</div>
+          <div class="card" style="border-style:dashed;background:transparent">
+            <div style="font-size:11px;color:var(--text2);line-height:1.75">
+              多选后可批量「标记已取件 / 稍后提醒 / 归档」。<br>
+              已取件的包裹自动移入「已取件」，不再计入待取数量与底栏徽标。
+            </div>
+          </div>
+
+        </div>
+        <div class="actionbar">
+          <span class="n">已选 2 项</span>
+          <span class="sp"></span>
+          <span class="ab">标记已取件</span>
+          <span class="ab">稍后提醒</span>
+          <span class="ab">归档</span>
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg><span class="badge">3</span></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 04 · 快递列表</span>
+        <h3>待取 / 已取分离，多选批量处理</h3>
+        <p class="lead">快递的核心信息始终是取件码。待取件保持黑底 chip 并强调描边；已取件整体降级为灰色，不再抢占注意力。</p>
+        <ul>
+          <li><b>分段</b>：待取 / 已取 / 全部，默认停在待取。</li>
+          <li><b>多选</b>：长按进入，底部黑色操作条；批量标记已取件、稍后提醒、归档。</li>
+          <li><b>已取件</b>：行置灰、取件码隐藏、显示「已取件」灰标，可撤销。</li>
+          <li><b>口径</b>：待取 = 有取件码且未标记已取；已取不再计入首页待取数。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ============ 05 账单详情 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"><svg class="i"><use href="#i-right"/></svg></div>
+          <h2>账单详情</h2>
+          <div class="right"></div>
+        </div>
+        <div class="content">
+          <div class="card hero">
+            <div class="pills">
+              <span class="pill solid">支出</span>
+              <span class="pill">话费通信</span>
+              <span class="pill" style="background:var(--blue-bg);color:var(--link)">连续包月</span>
+            </div>
+            <div class="money">
+              <em>¥</em><b>35.50</b>
+              <span class="state st green">已报销</span>
+            </div>
+            <div class="desc">中国移动 · 本月话费</div>
+          </div>
+
+          <div class="actions">
+            <span class="btn ghost"><svg class="i xs"><use href="#i-check"/></svg>已报销</span>
+            <span class="btn ghost" style="color:var(--red)"><svg class="i xs"><use href="#i-x"/></svg>记错了</span>
+            <span class="btn"><svg class="i xs"><use href="#i-spark"/></svg>问 Agent</span>
+          </div>
+
+          <div class="card" style="margin-top:14px;padding:2px 12px">
+            <div class="irow"><span class="k">发生时间</span><span class="v">今天 09:12</span></div>
+            <div class="irow"><span class="k">识别来源</span><span class="v">短信</span></div>
+            <div class="irow"><span class="k">账单类型</span><span class="v">话费通信</span></div>
+            <div class="irow"><span class="k">入账状态</span><span class="v">已计入近 30 天汇总</span></div>
+          </div>
+
+          <div class="hintcard" style="border-color:var(--link);background:var(--blue-bg)">
+            <div class="h" style="color:var(--link)"><svg class="i xs"><use href="#i-repeat"/></svg>识别为自动续费</div>
+            <p>本笔为连续包月，下次扣款 <b>12月20日 ¥35.50</b>。可提前 3 天提醒我。</p>
+            <div style="display:flex;gap:7px;margin-top:8px">
+              <span class="btn ghost tiny" style="background:transparent;border-color:var(--link);color:var(--link)">查看订阅</span>
+              <span class="btn ghost tiny" style="background:transparent;border-color:var(--link);color:var(--link)">续费前提醒</span>
+            </div>
+          </div>
+
+          <div class="label">原始凭证</div>
+          <div class="card">
+            <div style="font-size:11.5px;line-height:1.75;color:var(--text2)">
+              【中国移动】您本月话费账单已出，扣款金额 35.50 元，已从绑定账户扣除。
+            </div>
+            <div style="margin-top:6px;font-size:10.5px;color:var(--link)">查看完整原文</div>
+          </div>
+
+          <div class="label">同期同类 <span class="count">近 30 天</span></div>
+          <div class="card" style="padding:4px 12px">
+            <div style="padding:7px 0" class="bl"><span class="name">话费通信</span><span class="bar"><i style="width:100%"></i></span><span class="val">¥235.50</span></div>
+            <div style="padding:7px 0" class="bl"><span class="name">还款扣款</span><span class="bar"><i style="width:74%"></i></span><span class="val">¥1,280.00</span></div>
+            <div style="padding:7px 0" class="bl"><span class="name">其他</span><span class="bar"><i style="width:28%"></i></span><span class="val">¥486.00</span></div>
+          </div>
+
+        </div>
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 05 · 账单详情</span>
+        <h3>详情页承担「确认与纠错」</h3>
+        <p class="lead">金额和原始凭证之外，详情页补上三个动作：标记已报销、标记记错了、直接问 Agent。续费识别结果也在这里落地。</p>
+        <ul>
+          <li><b>状态动作</b>：已报销（绿色）/ 记错了（红色），均可再次点击撤销。</li>
+          <li><b>记错了口径</b>：从近 30 天合计与分类占比中扣除，列表保留但金额删除线。</li>
+          <li><b>问 Agent</b>：带上当前账单上下文跳转对话，例如「这笔为什么记为话费？」。</li>
+          <li><b>续费提示</b>：识别为连续包月时展示下次扣款日，并可直接加入提醒。</li>
+        </ul>
+      </div>
+    </div>
+
+    <!-- ============ 06 来源规则 + 稍后提醒 ============ -->
+    <div class="screen">
+      <div class="phone">
+        <div class="sb"><span>9:41</span><span class="r"><span class="sig"><i></i><i></i><i></i><i></i></span><span class="bat"></span></span></div>
+        <div class="nav">
+          <div class="left"><svg class="i"><use href="#i-right"/></svg></div>
+          <h2>消息设置</h2>
+          <div class="right"></div>
+        </div>
+        <div class="content">
+          <div class="label">数据源状态</div>
+          <div class="card" style="padding:2px 12px">
+            <div class="srow">
+              <div class="gicon"><svg class="i s"><use href="#i-bell"/></svg></div>
+              <div class="main"><div class="t">通知捕捉</div><div class="d">已开启 · 最近同步 2 分钟前</div></div>
+              <span class="st green">正常</span>
+            </div>
+            <div class="srow">
+              <div class="gicon"><svg class="i s"><use href="#i-mail"/></svg></div>
+              <div class="main"><div class="t">邮件监听</div><div class="d">已配置 · 最近同步 8 分钟前</div></div>
+              <span class="st green">正常</span>
+            </div>
+            <div class="srow">
+              <div class="gicon"><svg class="i s"><use href="#i-clock"/></svg></div>
+              <div class="main"><div class="t">最近同步</div><div class="d">今天 09:39 · 服务端正常</div></div>
+              <span class="st gray">刚刚</span>
+            </div>
+          </div>
+
+          <div class="label">来源规则</div>
+          <div class="card" style="padding:2px 12px">
+            <div class="srow">
+              <div class="main"><div class="t">银行短信</div><div class="d">高优先 · 直接进待处理队列</div></div>
+              <span class="switch on"><i></i></span>
+            </div>
+            <div class="srow">
+              <div class="main"><div class="t">电商营销</div><div class="d">不进入动态页 · 入口层直接丢弃</div></div>
+              <span class="switch"><i></i></span>
+            </div>
+            <div class="srow">
+              <div class="main"><div class="t">快递通知</div><div class="d">正常 · 取件码优先展示</div></div>
+              <span class="switch on"><i></i></span>
+            </div>
+            <div class="srow">
+              <div class="main"><div class="t">群聊通知</div><div class="d">免打扰 · 不生成动态</div></div>
+              <span class="switch"><i></i></span>
+            </div>
+          </div>
+
+          <div class="label">已拦截 <span class="count">本周</span></div>
+          <div class="card">
+            <div style="display:flex;align-items:center;gap:8px">
+              <div class="gicon"><svg class="i s"><use href="#i-shield"/></svg></div>
+              <div class="main">
+                <div class="ltitle">23 条未进入动态页</div>
+                <div class="lmeta">营销推广 15 · 验证码 6 · 重复物流 2</div>
+              </div>
+              <span class="chev"><svg class="i xs"><use href="#i-right"/></svg></span>
+            </div>
+          </div>
+
+          <div class="hintcard">
+            <div class="h"><svg class="i xs"><use href="#i-archive"/></svg>管理动作</div>
+            <p>列表页支持左滑归档、右滑完成；长按可稍后提醒（1 小时 / 明天 9:00 / 本周末）。</p>
+          </div>
+
+        </div>
+
+        <div class="scrim"></div>
+        <div class="sheet">
+          <div class="grab"></div>
+          <h3>稍后提醒</h3>
+          <p class="sub">到点后重新回到「需要你处理」</p>
+          <div class="opt"><svg class="i s"><use href="#i-clock"/></svg>1 小时后<span style="margin-left:auto;color:var(--muted)">12:40</span></div>
+          <div class="opt"><svg class="i s"><use href="#i-clock"/></svg>明天 9:00<span style="margin-left:auto;color:var(--muted)">11月17日</span></div>
+          <div class="opt"><svg class="i s"><use href="#i-clock"/></svg>本周末<span style="margin-left:auto;color:var(--muted)">11月22日</span></div>
+          <div class="cancel">取消</div>
+        </div>
+
+        <div class="tabbar">
+          <div class="tab"><svg class="i"><use href="#i-chat"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-cal"/></svg></div>
+          <div class="tab on"><svg class="i"><use href="#i-act"/></svg></div>
+          <div class="tab"><svg class="i"><use href="#i-lib"/></svg></div>
+        </div>
+      </div>
+      <div class="cap">
+        <span class="tagline">SCREEN 06 · 管理与拦截</span>
+        <h3>真实状态 + 来源规则 + 稍后提醒</h3>
+        <p class="lead">「数据源」不再是写死的说明，而是真实读取通知使用权与邮箱监听状态；低价值消息不折叠，直接在入口层拦截，只保留可审计的计数。</p>
+        <ul>
+          <li><b>真实状态</b>：通知使用权、邮件监听、最近同步时间，失败时给「去开启 / 去配置」。</li>
+          <li><b>来源规则</b>：高优先 / 正常 / 免打扰 / 不进入，按来源配置。</li>
+          <li><b>拦截统计</b>：本周拦截条数按类型拆分，可进入明细核对，但不展示正文。</li>
+          <li><b>稍后提醒</b>：底部弹层，1 小时 / 明天 9:00 / 本周末，服务端存 <code>snoozeUntil</code>。</li>
+        </ul>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- ============ 规格 ============ -->
+  <div class="sec-title"><b>实现说明</b><span>字段、接口与状态口径</span></div>
+  <div class="spec-grid">
+
+    <div class="spec">
+      <h4>台账新增字段</h4>
+      <ul>
+        <li><code>pickedUpAt?: number|null</code>：快递已取件时刻；待取 = 有取件码且为空。</li>
+        <li><code>billStatus?: "reimbursed"|"wrong"|null</code>：已报销 / 记错了。</li>
+        <li><code>snoozeUntil?: number|null</code>：稍后提醒到点时间。</li>
+        <li><code>pinned?: boolean</code> / <code>archivedAt?: number|null</code>：置顶与归档。</li>
+        <li><code>subscription?: { name, cycle, amount, nextChargeAt, chargedCount, suggestion }</code>：续费识别结果。</li>
+        <li><code>duplicateOf?: string</code>：同商户同金额疑似重复时指向原条目。</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>接口</h4>
+      <ul>
+        <li><code>POST /api/dynamics/parcels/:id/pickup</code> <code>{pickedUp}</code></li>
+        <li><code>POST /api/dynamics/bills/:id/review</code> <code>{status: reimbursed|wrong|clear}</code></li>
+        <li><code>POST /api/dynamics/entries/:id/snooze</code> <code>{until}</code></li>
+        <li><code>POST /api/dynamics/entries/:id/pin|archive</code></li>
+        <li><code>GET /api/dynamics/subscriptions</code> / <code>POST .../:id/dismiss</code></li>
+        <li><code>GET|PUT /api/dynamics/source-rules</code></li>
+        <li><code>GET /api/dynamics</code> 增加：<code>bills.reimbursedCount / wrongCount</code>、<code>parcels.pickedUp</code>、<code>subscriptions</code>、<code>sources</code>、<code>blockedThisWeek</code></li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>状态与口径</h4>
+      <ul>
+        <li><b>待取件</b>：有取件码且 <code>pickedUpAt</code> 为空；已取件不计入首页待取与徽标。</li>
+        <li><b>记错了</b>：从近 30 天合计、分类占比中扣除；列表保留并显示删除线。</li>
+        <li><b>已报销</b>：金额仍计入合计，单独统计笔数。</li>
+        <li><b>疑似重复</b>：同商户 + 同金额 + 48 小时内 ≥2 笔，仅提示不自动删。</li>
+        <li><b>订阅</b>：账单/短信命中「连续包月 / 自动续费 / 每月」等关键词，且近 90 天 ≥2 次同额扣款。</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>低价值拦截（入口层）</h4>
+      <ul>
+        <li><b>验证码</b>：MailWatch 整封丢弃，<code>/api/dynamics</code> 再兜底过滤。</li>
+        <li><b>营销推广</b>：命中「退订 / 促销 / 优惠券 / 活动」等关键词的短信与通知不落台账。</li>
+        <li><b>重复物流</b>：同单号多次更新只在轨迹里累积，动态页只保留一条。</li>
+        <li><b>群聊通知</b>：默认不进动态页，来源规则可单独开启。</li>
+        <li><b>可审计</b>：只回 <code>blockedThisWeek</code> 计数与分类，不展示正文。</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>交互细节</h4>
+      <ul>
+        <li>动作后局部更新 + 顶部 3 秒「撤销」，返回首页静默刷新。</li>
+        <li>多选：长按进入，底部黑色操作条，退出清空选择。</li>
+        <li>滑动：左滑归档、右滑完成，仅列表页启用。</li>
+        <li>失败：卡片内联错误 + 重试，不整页报错。</li>
+        <li>未读：本地记录上次查看时间，按条目时间差计算；进入即清零。</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>其余已确认能力（增量）</h4>
+      <ul>
+        <li><b>按实体聚合</b>：商家 / 发件人 / 承运商卡片，点入看该实体全部动态。</li>
+        <li><b>物流轨迹折叠</b>：同单号多次更新合成一条，详情页展开轨迹。</li>
+        <li><b>消息日历 / 热力图</b>：按天看消息量与类型分布，作为首页顶部切换视图。</li>
+        <li><b>卡片问 Agent</b>：带上当前实体上下文跳转对话（本稿已在账单详情落地）。</li>
+        <li><b>小组件 / 月度报告 / 导出</b>：待取件数与今日支出上桌面；账单 CSV 与报销单导出。</li>
+        <li><b>日程与审批联动</b>：到站提醒加日程、审批一键通过。</li>
+      </ul>
+    </div>
+
+    <div class="spec">
+      <h4>落地顺序建议</h4>
+      <ul>
+        <li><b>第一批</b>：待处理队列、今日摘要（模板）、未读与底栏徽标、时间分组、搜索筛选。</li>
+        <li><b>第二批</b>：已取件 / 已报销 / 记错了动作闭环 + 台账字段与接口。</li>
+        <li><b>第三批</b>：订阅与续费扫描、疑似重复检测。</li>
+        <li><b>第四批</b>：来源规则、稍后提醒、归档/置顶、拦截统计。</li>
+        <li><b>第五批</b>：数据源真实状态、问 Agent 上下文入口。</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <div class="footnote">
+    设计稿说明：所有屏幕按 390 × 844 绘制，沿用现有 MobilePalette 与卡片语言；深色模式可通过右上角按钮切换。数据均为示意，实际以 <code>/api/dynamics</code> 返回为准。标注中的接口与字段为建议方案，落地时可再收敛。
+  </div>
+
+</div>
+
+<script>
+  const btn = document.getElementById("themeBtn");
+  btn.addEventListener("click", function () {
+    const isDark = document.documentElement.getAttribute("data-theme") === "dark";
+    document.documentElement.setAttribute("data-theme", isDark ? "" : "dark");
+    btn.textContent = isDark ? "切换深色" : "切换浅色";
+  });
+</script>
+</body>
+</html>
