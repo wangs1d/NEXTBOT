@@ -27,6 +27,7 @@ class MobileSidebar extends StatefulWidget {
     required this.onOpenChat,
     required this.onOpenSettings,
     this.activeSessionId,
+    this.currentSessionId,
     this.onDeleted,
   });
 
@@ -40,6 +41,11 @@ class MobileSidebar extends StatefulWidget {
 
   /// 当前激活的旁聊线程键（高亮选中项）。
   final String? activeSessionId;
+
+  /// 当前真正停留的旁聊线程键（null = 主会话）。
+  /// 与 [activeSessionId] 的「最近一条兜底高亮」不同：退回主会话后这里
+  /// 必须为 null，否则新建入口会误判成「已经在最新会话」而不导航。
+  final String? currentSessionId;
 
   /// 删除成功回调（主壳若删的是当前旁聊则回主会话）。
   final ValueChanged<String>? onDeleted;
@@ -92,16 +98,49 @@ class MobileSidebarState extends State<MobileSidebar> {
     });
   }
 
+  /// 是否已有新建请求在途（防连点重复建出多条空白旁聊）。
+  bool _creating = false;
+
+  /// 最新一条旁聊若是空白（0 条消息），新建入口直接复用它。
+  /// 服务端列表已按 updatedAt 倒序，第一条就是最近一条。
+  SideChatSummary? _latestEmptyChat(List<SideChatSummary> chats) {
+    if (chats.isEmpty) return null;
+    final SideChatSummary latest = chats.first;
+    return latest.messageCount == 0 ? latest : null;
+  }
+
   Future<void> _createChat() async {
-    final SideChatSummary? created = await _api.create();
-    if (!mounted) return;
-    if (created == null) {
-      _toast("新建旁聊失败，请稍后再试");
-      return;
+    if (_creating) return;
+    _creating = true;
+    try {
+      // 搜索过滤态 / 列表未加载完时先取全量，避免漏判已有的空白旁聊。
+      final List<SideChatSummary> all =
+          (_query.isEmpty && !_loading) ? _chats : await _api.list();
+      if (!mounted) return;
+      final SideChatSummary? empty = _latestEmptyChat(all);
+      if (empty != null) {
+        // 已经停在这条空白旁聊里：底部提示，不再堆一条新的空白会话。
+        if (widget.currentSessionId == empty.sessionId) {
+          widget.onClose();
+          _toast("已经在最新会话");
+        } else {
+          // 不在该会话：直接导航过去，同样不新建。
+          widget.onOpenChat(empty);
+        }
+        return;
+      }
+      final SideChatSummary? created = await _api.create();
+      if (!mounted) return;
+      if (created == null) {
+        _toast("新建旁聊失败，请稍后再试");
+        return;
+      }
+      await reload();
+      if (!mounted) return;
+      widget.onOpenChat(created);
+    } finally {
+      _creating = false;
     }
-    await reload();
-    if (!mounted) return;
-    widget.onOpenChat(created);
   }
 
   Future<void> _renameChat(SideChatSummary chat) async {

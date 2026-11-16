@@ -427,6 +427,7 @@ class MobileHomePageState extends State<MobileHomePage>
                   key: _sidebarKey,
                   activeSessionId:
                       _chatController.activeSideSessionId ?? _lastSideChatId,
+                  currentSessionId: _chatController.activeSideSessionId,
                   onClose: _closeSidebar,
                   onOpenChat: (SideChatSummary chat) =>
                       unawaited(_openSideChat(chat)),
