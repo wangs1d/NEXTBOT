@@ -7,8 +7,8 @@
  *
  * 能力：给用户真实路网的逐向导航链接（高德 Web 导航 URI），不是网页搜索、不是只算距离。
  *   - 配了 AMAP_WEB_KEY 时先用高德把起点/目的地解析成精确坐标（GCJ-02）；
- *   - 解析失败自动降级为地名导航，链接始终可用；
- *   - 起点省略 = 用户实时定位；定位也拿不到 = 交给高德按用户当前位置导航。
+ *   - 解析失败自动降级为高德搜索页（链接始终可用，但绝不冒充逐向导航）；
+ *   - 起点省略 = 用户实时定位；定位也拿不到 = 打开路线页由高德引导选择起点。
  *
  * 依赖通过 deps 注入（定位、路线兜底），避免通用能力反向依赖旅游模块。
  */
@@ -16,8 +16,12 @@
 import type { SkillDefinition } from "../../skills/types.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 import { resolveCurrentGeoPoint } from "../user-location-service.js";
-import { estimateTravelTime, type GeoPoint } from "../route-duration-service.js";
-import { buildAmapNavigationUrl, type NavTravelMode } from "./nav-provider.js";
+import { estimateTravelTime, amapGeocode, type GeoPoint } from "../route-duration-service.js";
+import {
+  buildAmapNavigationUrl,
+  buildAmapSearchUrl,
+  type NavTravelMode,
+} from "./nav-provider.js";
 
 /** 可作为导航起点的定位点（label/city 仅用于回执文案） */
 export type NavigationOriginPoint = {
@@ -52,6 +56,12 @@ function parseCoordText(text: string): { lng: number; lat: number } | null {
   return { lng, lat };
 }
 
+/** 高德地理编码返回的「经度,纬度」→ GeoPoint */
+function parseLngLat(raw: string): GeoPoint | null {
+  const p = parseCoordText(raw);
+  return p ? { latitude: p.lat, longitude: p.lng } : null;
+}
+
 export function createNavigationBuiltinSkills(
   register: (skill: SkillDefinition) => void,
   deps: NavigationSkillDeps = {},
@@ -66,7 +76,7 @@ export function createNavigationBuiltinSkills(
       description:
         "给用户真实路网的逐向导航链接（高德 Web 导航），不是网页搜索、不是只算距离。" +
         "日常出行与旅游规划通用：通勤、赴约、找店、景点之间移动都可用。" +
-        "配了 AMAP_WEB_KEY 时先用高德把目的地/起点解析成精确坐标（GCJ-02），失败自动降级为地名导航，链接始终可用。" +
+        "配了 AMAP_WEB_KEY 时先用高德把目的地/起点解析成精确坐标（GCJ-02），解析不到目的地坐标时降级为高德搜索页（仍可点开选点导航）。" +
         "适用表达：「导航去XX」「带我去XX」「开车/走路/坐公交怎么去XX」「从A导航到B」「给我开个导航」。" +
         "起点可省略=按用户实时定位；用户没说从哪出发时别反问，直接调用。" +
         "边界：只问距离/耗时（不要求点开导航）用路线耗时工具；叫车报价用 ride_hailing.quote；" +
@@ -97,7 +107,7 @@ export function createNavigationBuiltinSkills(
       ],
       outputSchema: {
         ok: "是否成功",
-        url: "高德导航链接（真实逐向导航）",
+        url: "高德导航链接（真实逐向导航；目的地坐标不可得时为高德搜索页）",
         from: "起点名称（省略时为「当前位置」）",
         to: "目的地名称",
         mode: "交通方式",
@@ -163,15 +173,23 @@ export function createNavigationBuiltinSkills(
         }
       }
 
-      const url = buildAmapNavigationUrl({
-        from: fromPoint
-          ? { name: fromLabel, lat: fromPoint.latitude, lng: fromPoint.longitude }
-          : null,
-        to: toPoint
-          ? { name: toLabel, lat: toPoint.latitude, lng: toPoint.longitude }
-          : { name: toLabel },
-        mode,
-      });
+      // 高德导航 URI 必须带目的地坐标（纯地名会生成 to[lnglat]=名称,undefined 的坏链接）。
+      // 起点缺失时不会走估时，或估时失败时，这里单独编码一次目的地。
+      if (!toPoint && !toCoord) {
+        const destGeo = await amapGeocode(toRaw).catch(() => null);
+        const p = destGeo ? parseLngLat(destGeo) : null;
+        if (p) toPoint = p;
+      }
+
+      const url = toPoint
+        ? buildAmapNavigationUrl({
+            from: fromPoint
+              ? { name: fromLabel, lat: fromPoint.latitude, lng: fromPoint.longitude }
+              : null,
+            to: { name: toLabel, lat: toPoint.latitude, lng: toPoint.longitude },
+            mode,
+          })
+        : buildAmapSearchUrl(toLabel);
 
       // 公交/骑行没有对应估时（estimateTravelTime 只支持步行/驾车），
       // 不能把驾车时长当成公交时长返回；这两种方式让高德页面自己算。
@@ -184,11 +202,12 @@ export function createNavigationBuiltinSkills(
         mode,
         ...(reportEstimate && durationMin != null ? { durationMin } : {}),
         ...(reportEstimate && distanceKm != null ? { distanceKm } : {}),
-        displayNote:
-          "把 url 作为 Markdown 链接「开始导航」呈现（如 [开始导航](url)），不要直接铺开长链接、不要展示经纬度；" +
-          "导航由用户点击后在高德网页开始，不要声称已替用户开始导航。" +
-          (fromPoint ? "" : "（未取到精确起点，已交给高德按用户当前位置导航）") +
-          (toPoint ? "" : "（目的地未解析到精确坐标，已按地名导航）"),
+        displayNote: toPoint
+          ? "把 url 作为 Markdown 链接「开始导航」呈现（如 [开始导航](url)），不要直接铺开长链接、不要展示经纬度；" +
+            "导航由用户点击后在高德网页开始，不要声称已替用户开始导航。" +
+            (fromPoint ? "" : "（未取到精确起点，已打开路线页，高德会让你选择或定位起点）")
+          : "目的地未解析到精确坐标，url 是高德搜索页：用 Markdown 链接「查看地点」呈现（如 [查看地点](url)），" +
+            "说明点开后可在高德地图选中目的地再开始导航；不要声称已开始导航、不要展示经纬度。",
       };
     },
   };
