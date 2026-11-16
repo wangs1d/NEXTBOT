@@ -515,6 +515,57 @@ async function searchRouteRestaurants(
     .slice(0, limit);
 }
 
+/** 请求来源绝对地址（worker 内无法解析相对路径，改写 URL 必须带 origin） */
+function originOf(req: FastifyRequest): string {
+  return `${req.protocol}://${req.headers.host ?? "127.0.0.1:3000"}`;
+}
+
+/**
+ * GET /travel-basemap/fetch?u= — 白名单上游资源代理（磁盘缓存 + SWR）。
+ * 变体路由 fetch.json / fetch.png：MapLibre 会把 sprite 的扩展名插到 query
+ * 之前（/fetch.json?u=...），这里把后缀补回上游 URL。
+ * `@2x` 变体同理由 MapLibre 插在扩展名前（/fetch@2x.json?u=...）：缺这两条
+ * 路由时高分屏 sprite 会 404（控制台噪音 + symbol 图层无图标）。
+ *
+ * 单独导出（2026-11-16）：对话内导航卡是**通用能力**（导航不属于旅游家族），
+ * 底图代理必须在版本闸外注册，否则开源版导航卡没有瓦片。
+ */
+export function registerBasemapFetchRoutes(app: FastifyInstance): void {
+  const fetchHandler = (ext: string) => async (req: FastifyRequest, reply: FastifyReply) => {
+    const q = req.query as { u?: string; z?: string; x?: string; y?: string };
+    let u = q.u ?? "";
+    if (!u) return reply.code(400).type("text/plain").send("missing u");
+    if (ext && !/\.(json|png|webp)$/.test(u)) u += ext;
+    // 兜底：若客户端未替换 {z}/{x}/{y} 令牌（留在 query 里），在此替换
+    if (/\{z\}/.test(u)) {
+      const z = q.z ?? "", x = q.x ?? "", y = q.y ?? "";
+      if (z && x && y) u = u.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
+    }
+    const res = await travelTileCache.fetch(u);
+    if (!res.ok) return reply.code(res.status).type("text/plain").send(res.body.toString());
+    reply.header("X-Tile-Cache", res.fromCache ? "hit" : "miss");
+    // 清单类 JSON（TileJSON / sprite.json）内容改写：tiles[] 若还是上游绝对地址，
+    // MapLibre worker 会绕过代理直连 CDN（国内网络下挂起 → 地图永远渲染不出）。
+    // 不能按 .json 后缀判断：OpenFreeMap 的 TileJSON 引用是无扩展名的 /planet。
+    if (res.contentType.includes("json")) {
+      // JSON 清单（style/tiles.json）内容会随改写行为升级：浏览器侧必须可失效，
+      // 服务端磁盘缓存兜底速度（ms 级）
+      reply.header("Cache-Control", "no-cache");
+      reply.type("application/json");
+      return reply.send(travelTileCache.rewriteWhitelistedUrls(res.body.toString("utf-8"), originOf(req)));
+    }
+    // 瓦片/精灵/字形二进制不可变：浏览器 + 服务端双层长缓存
+    reply.header("Cache-Control", "public, max-age=86400");
+    reply.type(res.contentType);
+    return reply.send(res.body);
+  };
+  app.get("/travel-basemap/fetch", fetchHandler(""));
+  app.get("/travel-basemap/fetch.json", fetchHandler(".json"));
+  app.get("/travel-basemap/fetch.png", fetchHandler(".png"));
+  app.get("/travel-basemap/fetch@2x.json", fetchHandler("@2x.json"));
+  app.get("/travel-basemap/fetch@2x.png", fetchHandler("@2x.png"));
+}
+
 export function registerTravelMapRoutes(app: FastifyInstance): void {
   /** GET /travel-map — 行程规划页面（自包含 HTML；按 UA 分流手机竖屏版/桌面双栏版） */
   app.get("/travel-map", async (req, reply) => {
@@ -593,10 +644,6 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
 
   // ══════════ 底图本地代理（瓦片/样式/字形经磁盘缓存，规划完成即预热）══════════
 
-  /** 请求来源绝对地址（worker 内无法解析相对路径，改写 URL 必须带 origin） */
-  const originOf = (req: FastifyRequest): string =>
-    `${req.protocol}://${req.headers.host ?? "127.0.0.1:3000"}`;
-
   /** GET /travel-basemap/style/dark — OpenFreeMap 暗色矢量样式（内部 URL 已改写为本地代理） */
   app.get("/travel-basemap/style/dark", async (req, reply) => {
     const style = await travelTileCache.darkStyleProxied(originOf(req));
@@ -605,45 +652,6 @@ export function registerTravelMapRoutes(app: FastifyInstance): void {
     reply.type("application/json");
     return style.body;
   });
-
-  /** GET /travel-basemap/fetch?u= — 白名单上游资源代理（磁盘缓存 + SWR）。
-   *  变体路由 fetch.json / fetch.png：MapLibre 会把 sprite 的扩展名插到 query
-   *  之前（/fetch.json?u=...），这里把后缀补回上游 URL。
-   *  `@2x` 变体同理由 MapLibre 插在扩展名前（/fetch@2x.json?u=...）：缺这两条
-   *  路由时高分屏 sprite 会 404（控制台噪音 + symbol 图层无图标）。 */
-  const fetchHandler = (ext: string) => async (req: FastifyRequest, reply: FastifyReply) => {
-    const q = req.query as { u?: string; z?: string; x?: string; y?: string };
-    let u = q.u ?? "";
-    if (!u) return reply.code(400).type("text/plain").send("missing u");
-    if (ext && !/\.(json|png|webp)$/.test(u)) u += ext;
-    // 兜底：若客户端未替换 {z}/{x}/{y} 令牌（留在 query 里），在此替换
-    if (/\{z\}/.test(u)) {
-      const z = q.z ?? "", x = q.x ?? "", y = q.y ?? "";
-      if (z && x && y) u = u.replace(/\{z\}/g, z).replace(/\{x\}/g, x).replace(/\{y\}/g, y);
-    }
-    const res = await travelTileCache.fetch(u);
-    if (!res.ok) return reply.code(res.status).type("text/plain").send(res.body.toString());
-    reply.header("X-Tile-Cache", res.fromCache ? "hit" : "miss");
-    // 清单类 JSON（TileJSON / sprite.json）内容改写：tiles[] 若还是上游绝对地址，
-    // MapLibre worker 会绕过代理直连 CDN（国内网络下挂起 → 地图永远渲染不出）。
-    // 不能按 .json 后缀判断：OpenFreeMap 的 TileJSON 引用是无扩展名的 /planet。
-    if (res.contentType.includes("json")) {
-      // JSON 清单（style/tiles.json）内容会随改写行为升级：浏览器侧必须可失效，
-      // 服务端磁盘缓存兜底速度（ms 级）
-      reply.header("Cache-Control", "no-cache");
-      reply.type("application/json");
-      return reply.send(travelTileCache.rewriteWhitelistedUrls(res.body.toString("utf-8"), originOf(req)));
-    }
-    // 瓦片/精灵/字形二进制不可变：浏览器 + 服务端双层长缓存
-    reply.header("Cache-Control", "public, max-age=86400");
-    reply.type(res.contentType);
-    return reply.send(res.body);
-  };
-  app.get("/travel-basemap/fetch", fetchHandler(""));
-  app.get("/travel-basemap/fetch.json", fetchHandler(".json"));
-  app.get("/travel-basemap/fetch.png", fetchHandler(".png"));
-  app.get("/travel-basemap/fetch@2x.json", fetchHandler("@2x.json"));
-  app.get("/travel-basemap/fetch@2x.png", fetchHandler("@2x.png"));
 
   /** GET /travel-basemap/stats — 瓦片缓存诊断 */
   app.get("/travel-basemap/stats", async () => travelTileCache.stats());

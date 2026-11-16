@@ -20,6 +20,15 @@
 import { BROWSER_SESSION_SITES } from "./browser-session-sites.js";
 import { platformSupportsCheckout } from "./shopping-platforms/index.js";
 import { stableCardId } from "./card-identity.js";
+import { navigationCardStore } from "./navigation/navigation-card-store.js";
+
+/** 交通方式展示名（导航卡标题/正文共用） */
+const NAV_MODE_LABELS: Record<string, string> = {
+  driving: "驾车",
+  walking: "步行",
+  transit: "公交",
+  cycling: "骑行",
+};
 
 /** 与 agent-result-formatter 的 items 类型推断一致：check/warn/num；条目只承载展示内容，不带网页跳转链接 */
 export interface ToolCardItem {
@@ -476,6 +485,65 @@ const BUILDERS: Record<string, ToolCardBuilder> = {
         ? { ugc: ugcPayload }
         : {}),
       footer: pickHeadline || "参数来自商品库，价格以实际渠道为准",
+    };
+  },
+
+  /**
+   * navigation.navigate → navigation 卡（对话内地图 + 起终点 + 距离/耗时）。
+   *
+   * 工具回执只带 navigationCardId：路线几何（数百点）存进程内 Store 后按 id 取，
+   * 避免进入 LLM 上下文。快照过期/回放时退化为无地图的信息卡（items 仍在）。
+   * 前端 cardType=navigation 消费 extra.navigation（坐标为 WGS-84）。
+   */
+  "navigation.navigate": (r) => {
+    if (r.ok !== true) return null;
+    const id = str(r.navigationCardId);
+    const snap = id ? navigationCardStore.get(id) : undefined;
+    const toName = snap?.to?.name || str(r.to) || "目的地";
+    const fromName = snap?.from?.name || str(r.from) || "当前位置";
+    const mode = snap?.mode || str(r.mode) || "driving";
+    const modeLabel = NAV_MODE_LABELS[mode] ?? "驾车";
+    const distanceKm = snap?.distanceKm ?? num(r.distanceKm);
+    const durationMin = snap?.durationMin ?? num(r.durationMin);
+    const items: ToolCardItem[] = [
+      { type: "check", text: `起点：${fromName}` },
+      { type: "check", text: `终点：${toName}` },
+    ];
+    if (distanceKm != null || durationMin != null) {
+      items.push({
+        type: "num",
+        text: [
+          distanceKm != null ? `${distanceKm} 公里` : "",
+          durationMin != null ? `约 ${durationMin} 分钟` : "",
+        ]
+          .filter(Boolean)
+          .join(" · "),
+      });
+    }
+    return {
+      title: `导航 · ${modeLabel}去${toName}`,
+      items,
+      footer:
+        mode === "driving"
+          ? "路线与耗时按高德实时路况估算 · 仅供出行参考"
+          : "路线为高德规划结果 · 仅供出行参考",
+      cardType: "navigation",
+      ...(snap
+        ? {
+            extra: {
+              navigation: {
+                from: snap.from,
+                to: snap.to,
+                fromName,
+                toName,
+                mode,
+                ...(distanceKm != null ? { distanceKm } : {}),
+                ...(durationMin != null ? { durationMin } : {}),
+                polyline: snap.polyline,
+              },
+            },
+          }
+        : {}),
     };
   },
 

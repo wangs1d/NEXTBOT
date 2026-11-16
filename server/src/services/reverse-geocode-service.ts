@@ -110,6 +110,19 @@ export function wgs84ToGcj02(lat: number, lon: number): { latitude: number; long
   return { latitude: lat + dLat, longitude: lon + dLon };
 }
 
+/**
+ * GCJ-02 → WGS-84 近似逆变换（仅用于把高德坐标画到 WGS-84 底图上，
+ * 误差米级，不用于导航计算）。取正向偏移量反推。
+ */
+export function gcj02ToWgs84(lat: number, lon: number): { latitude: number; longitude: number } {
+  if (outOfChina(lat, lon)) return { latitude: lat, longitude: lon };
+  const forward = wgs84ToGcj02(lat, lon);
+  return {
+    latitude: lat - (forward.latitude - lat),
+    longitude: lon - (forward.longitude - lon),
+  };
+}
+
 function outOfChina(lat: number, lon: number): boolean {
   return lon < 72.004 || lon > 137.8347 || lat < 0.8293 || lat > 55.8271;
 }

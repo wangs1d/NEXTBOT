@@ -1,7 +1,10 @@
 import "../../core/ui/card_metrics.dart";
 import "dart:async";
+import "dart:math" as math;
 
 import "package:flutter/material.dart";
+import "package:flutter_map/flutter_map.dart";
+import "package:latlong2/latlong.dart" as ll;
 
 import "../../core/config/api_config.dart";
 import "../../core/config/media_url.dart";
@@ -183,6 +186,10 @@ class AgentResultCard extends StatelessWidget {
           return ReminderConfirmCard(data: data, cs: cs);
         case "permission_request":
           return _PermissionRequestCard(data: data, cs: cs);
+        case "navigation":
+          // 导航卡（navigation.navigate）：对话内直接展示路线地图与距离/耗时，
+          // 不打开浏览器。载荷在 extra.navigation；缺失时回退通用卡。
+          return _NavigationCard(data: data, cs: cs);
         case "morning_briefing":
           // 简报卡（岛上条目退役后简报的聊天流落点）：extra 携带原始简报
           // 载荷，渲染复用 MorningBriefingCard（与兜底 Dialog 同一组件）。
@@ -2698,4 +2705,274 @@ class _RequirementOption {
   const _RequirementOption({required this.value, required this.label});
   final String value;
   final String label;
+}
+
+/// 导航卡（navigation.navigate）：在对话内直接展示真实路线，不打开浏览器。
+///
+/// 载荷来自服务端 `extra.navigation`（坐标为 WGS-84——高德 GCJ-02 已在服务端
+/// 反算，底图 Esri 瓦片同源走 `/travel-basemap/fetch` 代理，无需客户端再转换）。
+/// 地图只读（InteractiveFlag.none）：聊天流里拖动会抢竖向滚动，展示态即可。
+class _NavigationCard extends StatelessWidget {
+  const _NavigationCard({required this.data, required this.cs});
+
+  final AgentResultData data;
+  final ColorScheme cs;
+
+  @override
+  Widget build(BuildContext context) {
+    final Object? rawNav = data.extra?["navigation"];
+    final Map<String, dynamic>? nav =
+        rawNav is Map ? Map<String, dynamic>.from(rawNav) : null;
+    if (nav == null) return _SpecializedCard(data: data, cs: cs);
+
+    final List<ll.LatLng> polyline = _decodeLine(nav["polyline"]);
+    final _NavPoint? from = _decodePoint(nav["from"]);
+    final _NavPoint? to = _decodePoint(nav["to"]);
+    final List<ll.LatLng> anchors = <ll.LatLng>[
+      if (from != null) ll.LatLng(from.lat, from.lng),
+      if (to != null) ll.LatLng(to.lat, to.lng),
+      ...polyline,
+    ];
+    final String fromName = _nameOf(nav["fromName"], from?.name, "当前位置");
+    final String toName = _nameOf(nav["toName"], to?.name, "目的地");
+    final String modeLabel = switch (nav["mode"]?.toString()) {
+      "walking" => "步行",
+      "transit" => "公交",
+      "cycling" => "骑行",
+      _ => "驾车",
+    };
+    final double? distance = (nav["distanceKm"] as num?)?.toDouble();
+    final num? duration = nav["durationMin"] as num?;
+    final String meta = <String>[
+      if (distance != null) "${_trimNum(distance)} 公里",
+      if (duration != null) "约 ${duration.round()} 分钟",
+    ].join(" · ");
+
+    return Container(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerLowest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.55)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          if (anchors.isNotEmpty)
+            SizedBox(
+              height: 176,
+              child: LayoutBuilder(
+                builder: (BuildContext context, BoxConstraints box) =>
+                    _buildMap(
+                  anchors: anchors,
+                  polyline: polyline,
+                  from: from,
+                  to: to,
+                  width: box.maxWidth,
+                  height: 176,
+                ),
+              ),
+            ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                Text(
+                  data.title.isNotEmpty
+                      ? data.title
+                      : "${modeLabel}去$toName",
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14.5,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurface,
+                  ),
+                ),
+                if (meta.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 4),
+                  Text(
+                    meta,
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w600,
+                      color: cs.primary,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                _placeRow(const Color(0xFF16A34A), fromName),
+                const SizedBox(height: 4),
+                _placeRow(const Color(0xFFE5484D), toName),
+                if (data.footer.isNotEmpty) ...<Widget>[
+                  const SizedBox(height: 8),
+                  Text(
+                    data.footer,
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      height: 1.35,
+                      color: cs.onSurfaceVariant.withValues(alpha: 0.85),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMap({
+    required List<ll.LatLng> anchors,
+    required List<ll.LatLng> polyline,
+    required _NavPoint? from,
+    required _NavPoint? to,
+    required double width,
+    required double height,
+  }) {
+    double minLat = anchors.first.latitude;
+    double maxLat = minLat;
+    double minLng = anchors.first.longitude;
+    double maxLng = minLng;
+    for (final ll.LatLng p in anchors) {
+      if (p.latitude < minLat) minLat = p.latitude;
+      if (p.latitude > maxLat) maxLat = p.latitude;
+      if (p.longitude < minLng) minLng = p.longitude;
+      if (p.longitude > maxLng) maxLng = p.longitude;
+    }
+    // 自算适配缩放（与行程页一致：flutter_map 8 不公开 bounds 适配组合）
+    final double spanX = math.max(maxLng - minLng, 1e-4);
+    final double spanY = math.max(maxLat - minLat, 1e-4);
+    final double zx =
+        math.log(360 / spanX * math.max(120, width - 48) / 256) / math.ln2;
+    final double zy =
+        math.log(180 / spanY * math.max(80, height - 32) / 256) / math.ln2;
+    final double zoom =
+        math.max(3.0, math.min(16.5, math.min(zx, zy) - 0.15));
+
+    return FlutterMap(
+      options: MapOptions(
+        initialCenter: ll.LatLng(
+          (minLat + maxLat) / 2,
+          (minLng + maxLng) / 2,
+        ),
+        initialZoom: zoom,
+        interactionOptions:
+            const InteractionOptions(flags: InteractiveFlag.none),
+      ),
+      children: <Widget>[
+        TileLayer(
+          urlTemplate: _tileTemplate(),
+          userAgentPackageName: "com.nextbot.app",
+        ),
+        if (polyline.length >= 2)
+          PolylineLayer(
+            polylines: <Polyline>[
+              Polyline(
+                points: polyline,
+                strokeWidth: 4,
+                color: cs.primary,
+              ),
+            ],
+          ),
+        MarkerLayer(
+          markers: <Marker>[
+            if (from != null) _marker(from, const Color(0xFF16A34A)),
+            if (to != null) _marker(to, const Color(0xFFE5484D)),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Marker _marker(_NavPoint p, Color color) {
+    return Marker(
+      point: ll.LatLng(p.lat, p.lng),
+      width: 20,
+      height: 20,
+      child: Container(
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white, width: 2.5),
+          boxShadow: const <BoxShadow>[
+            BoxShadow(color: Color(0x33000000), blurRadius: 4),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _placeRow(Color color, String text) {
+    return Row(
+      children: <Widget>[
+        Container(
+          width: 7,
+          height: 7,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 7),
+        Expanded(
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: TextStyle(
+              fontSize: 12.5,
+              color: cs.onSurface.withValues(alpha: 0.9),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  static String _tileTemplate() {
+    final String esri = Uri.encodeComponent(
+      "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    );
+    return "${ApiConfig.httpBase}/travel-basemap/fetch?u=$esri&z={z}&x={x}&y={y}";
+  }
+
+  static List<ll.LatLng> _decodeLine(Object? raw) {
+    if (raw is! List) return const <ll.LatLng>[];
+    final List<ll.LatLng> out = <ll.LatLng>[];
+    for (final Object? p in raw) {
+      if (p is List && p.length >= 2) {
+        final double? lat = (p[0] as num?)?.toDouble();
+        final double? lng = (p[1] as num?)?.toDouble();
+        if (lat != null && lng != null) out.add(ll.LatLng(lat, lng));
+      }
+    }
+    return out;
+  }
+
+  static String _nameOf(Object? raw, String? fallback, String defaultValue) {
+    final String primary = raw is String ? raw.trim() : "";
+    if (primary.isNotEmpty) return primary;
+    final String secondary = fallback?.trim() ?? "";
+    return secondary.isNotEmpty ? secondary : defaultValue;
+  }
+
+  static _NavPoint? _decodePoint(Object? raw) {
+    if (raw is! Map) return null;
+    final double? lat = (raw["lat"] as num?)?.toDouble();
+    final double? lng = (raw["lng"] as num?)?.toDouble();
+    if (lat == null || lng == null) return null;
+    return _NavPoint((raw["name"] ?? "").toString(), lat, lng);
+  }
+
+  static String _trimNum(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toStringAsFixed(1);
+}
+
+class _NavPoint {
+  const _NavPoint(this.name, this.lat, this.lng);
+  final String name;
+  final double lat;
+  final double lng;
 }

@@ -793,7 +793,7 @@ export function createTravelPlanningBuiltinSkills(deps: Deps): SkillDefinition[]
         "交通方式可显式指定（mode=walking/driving），不指定按距离自动选，不足 1.5 公里走步行。" +
         "适用表达：「从A到B多远/多久」「我这到XX多远」「走过去还是打车」「现在出发几点到」「两个景点之间怎么走」。" +
         "边界：要「几点出门」（结合天气与到达时间倒推）用 travel.departure-advice；叫车报价用 ride_hailing.quote；" +
-        "要真的点开逐向导航（「导航去XX」「带我去XX」）用 navigation.navigate，本工具只算距离/耗时；" +
+        "要在对话里看导航卡/真实路线（「导航去XX」「带我去XX」）用 navigation.navigate，本工具只算距离/耗时；" +
         "行程内逐段交通由 travel.plan-itinerary 自动排。" +
         "坐标串用「经度,纬度」，写成「纬度,经度」会自动纠正。",
       kind: "builtin",

@@ -5,10 +5,11 @@
  * 「导航去 XX」都是同一个诉求。因此本模块放在 services/navigation 下，注册在
  * 版本闸（isOssEdition 剔除 travel.*）之外，任何场景（含旅游规划）都复用同一实现。
  *
- * 能力：给用户真实路网的逐向导航链接（高德 Web 导航 URI），不是网页搜索、不是只算距离。
- *   - 配了 AMAP_WEB_KEY 时先用高德把起点/目的地解析成精确坐标（GCJ-02）；
- *   - 解析失败自动降级为高德搜索页（链接始终可用，但绝不冒充逐向导航）；
- *   - 起点省略 = 用户实时定位；定位也拿不到 = 打开路线页由高德引导选择起点。
+ * 能力：在对话内以**导航卡**展示真实路线（内置地图 + 起终点 + 距离/耗时），
+ * 不打开浏览器、不返回外链。
+ *   - 配了 AMAP_WEB_KEY 时先用高德把起点/目的地解析成精确坐标并取路径几何；
+ *   - 起点省略 = 用户实时定位；定位也拿不到 = 卡片只展示目的地名称；
+ *   - 公交/骑行不虚报驾车时长（高德估时只支持驾车/步行）。
  *
  * 依赖通过 deps 注入（定位、路线兜底），避免通用能力反向依赖旅游模块。
  */
@@ -17,11 +18,9 @@ import type { SkillDefinition } from "../../skills/types.js";
 import type { ToolContext } from "../../tools/tool-registry.js";
 import { resolveCurrentGeoPoint } from "../user-location-service.js";
 import { estimateTravelTime, amapGeocode, type GeoPoint } from "../route-duration-service.js";
-import {
-  buildAmapNavigationUrl,
-  buildAmapSearchUrl,
-  type NavTravelMode,
-} from "./nav-provider.js";
+import { gcj02ToWgs84 } from "../reverse-geocode-service.js";
+import { navigationCardStore } from "./navigation-card-store.js";
+import type { NavTravelMode } from "./nav-provider.js";
 
 /** 可作为导航起点的定位点（label/city 仅用于回执文案） */
 export type NavigationOriginPoint = {
@@ -74,12 +73,12 @@ export function createNavigationBuiltinSkills(
       version: "1.0.0",
       displayName: "真实路径导航（高德）",
       description:
-        "给用户真实路网的逐向导航链接（高德 Web 导航），不是网页搜索、不是只算距离。" +
+        "在对话内展示真实路线的导航卡（内置地图 + 起终点 + 距离/耗时），不是网页搜索、不是只算距离、也不打开浏览器。" +
         "日常出行与旅游规划通用：通勤、赴约、找店、景点之间移动都可用。" +
-        "配了 AMAP_WEB_KEY 时先用高德把目的地/起点解析成精确坐标（GCJ-02），解析不到目的地坐标时降级为高德搜索页（仍可点开选点导航）。" +
+        "配了 AMAP_WEB_KEY 时先用高德把目的地/起点解析成精确坐标并取真实路径。" +
         "适用表达：「导航去XX」「带我去XX」「开车/走路/坐公交怎么去XX」「从A导航到B」「给我开个导航」。" +
         "起点可省略=按用户实时定位；用户没说从哪出发时别反问，直接调用。" +
-        "边界：只问距离/耗时（不要求点开导航）用路线耗时工具；叫车报价用 ride_hailing.quote；" +
+        "边界：只问距离/耗时（不要求看导航）用路线耗时工具；叫车报价用 ride_hailing.quote；" +
         "浏览器里打开网页用 agent_browser/shared_browser，不要拿本工具当网页导航。",
       kind: "builtin",
       tags: ["navigation", "导航", "路线", "驾车", "步行", "公交", "骑行", "地图", "高德", "amap"],
@@ -107,12 +106,12 @@ export function createNavigationBuiltinSkills(
       ],
       outputSchema: {
         ok: "是否成功",
-        url: "高德导航链接（真实逐向导航；目的地坐标不可得时为高德搜索页）",
         from: "起点名称（省略时为「当前位置」）",
         to: "目的地名称",
         mode: "交通方式",
         durationMin: "预计耗时（分钟；高德实时成功时给出）",
         distanceKm: "距离（公里；高德实时成功时给出）",
+        navigationCardId: "导航卡数据 ID（服务端建卡用，不要向用户展示）",
         displayNote: "展示提示",
         error: "失败原因（ok=false 时）",
       },
@@ -129,11 +128,11 @@ export function createNavigationBuiltinSkills(
           : "driving"
       ) as NavTravelMode;
 
-      // 坐标串不进用户可见文案（经纬度禁令）；坐标只出现在导航 URI 参数里。
+      // 坐标串不进用户可见文案（经纬度禁令）；坐标只进卡片载荷。
       const toCoord = parseCoordText(toRaw);
       const toLabel = toCoord ? "目的地" : toRaw;
 
-      // 起点：给定优先；省略取实时定位；都拿不到 → 起点留空交给高德按当前位置导航。
+      // 起点：给定优先；省略取实时定位；都拿不到 → 卡片只有终点。
       let origin: string | GeoPoint | null = null;
       let fromCoord: { lng: number; lat: number } | null = null;
       let fromLabel = "当前位置";
@@ -156,8 +155,10 @@ export function createNavigationBuiltinSkills(
       let toPoint: GeoPoint | null = toCoord
         ? { latitude: toCoord.lat, longitude: toCoord.lng }
         : null;
+      let fromIsGcj = Boolean(fromCoord);
       let durationMin: number | undefined;
       let distanceKm: number | undefined;
+      let polylineGcj: GeoPoint[] | undefined;
       if (origin) {
         const est = await estimateTravelTime({
           origin,
@@ -170,44 +171,59 @@ export function createNavigationBuiltinSkills(
           toPoint = est.destinationPoint ?? toPoint;
           durationMin = est.durationMin;
           distanceKm = est.distanceKm;
+          // 公交/骑行没有对应路径规划：估时是借驾车算的，几何不能画成公交路线
+          if (mode === "driving" || mode === "walking") polylineGcj = est.polyline;
+          // estimateTravelTime 返回的 originPoint 一律是 GCJ-02：
+          // 客户端 GPS 进来时已按 WGS-84 转成高德串再解析（OSRM 兜底也复用该坐标）。
+          if (est.originPoint) fromIsGcj = true;
         }
       }
 
-      // 高德导航 URI 必须带目的地坐标（纯地名会生成 to[lnglat]=名称,undefined 的坏链接）。
-      // 起点缺失时不会走估时，或估时失败时，这里单独编码一次目的地。
+      // 起点缺失不会走估时；这里单独编码一次目的地，保证卡片有终点坐标。
       if (!toPoint && !toCoord) {
         const destGeo = await amapGeocode(toRaw).catch(() => null);
         const p = destGeo ? parseLngLat(destGeo) : null;
         if (p) toPoint = p;
       }
 
-      const url = toPoint
-        ? buildAmapNavigationUrl({
-            from: fromPoint
-              ? { name: fromLabel, lat: fromPoint.latitude, lng: fromPoint.longitude }
-              : null,
-            to: { name: toLabel, lat: toPoint.latitude, lng: toPoint.longitude },
-            mode,
-          })
-        : buildAmapSearchUrl(toLabel);
+      // 卡片底图是 WGS-84（Esri 瓦片）：高德坐标统一做一次 GCJ→WGS 近似逆变换。
+      const fromWgs = fromPoint
+        ? fromIsGcj
+          ? gcj02ToWgs84(fromPoint.latitude, fromPoint.longitude)
+          : fromPoint
+        : null;
+      const toWgs = toPoint ? gcj02ToWgs84(toPoint.latitude, toPoint.longitude) : null;
+      const polylineWgs: Array<[number, number]> = (polylineGcj ?? []).map((p) => {
+        const w = gcj02ToWgs84(p.latitude, p.longitude);
+        return [w.latitude, w.longitude];
+      });
 
       // 公交/骑行没有对应估时（estimateTravelTime 只支持步行/驾车），
-      // 不能把驾车时长当成公交时长返回；这两种方式让高德页面自己算。
+      // 不能把驾车时长当成公交时长展示。
       const reportEstimate = mode === "driving" || mode === "walking";
+      const navigationCardId = navigationCardStore.set({
+        from: fromWgs
+          ? { name: fromLabel, lat: fromWgs.latitude, lng: fromWgs.longitude }
+          : null,
+        to: toWgs ? { name: toLabel, lat: toWgs.latitude, lng: toWgs.longitude } : null,
+        mode,
+        ...(reportEstimate && durationMin != null ? { durationMin } : {}),
+        ...(reportEstimate && distanceKm != null ? { distanceKm } : {}),
+        polyline: polylineWgs,
+      });
+
       return {
         ok: true,
-        url,
         from: fromLabel,
         to: toLabel,
         mode,
         ...(reportEstimate && durationMin != null ? { durationMin } : {}),
         ...(reportEstimate && distanceKm != null ? { distanceKm } : {}),
-        displayNote: toPoint
-          ? "把 url 作为 Markdown 链接「开始导航」呈现（如 [开始导航](url)），不要直接铺开长链接、不要展示经纬度；" +
-            "导航由用户点击后在高德网页开始，不要声称已替用户开始导航。" +
-            (fromPoint ? "" : "（未取到精确起点，已打开路线页，高德会让你选择或定位起点）")
-          : "目的地未解析到精确坐标，url 是高德搜索页：用 Markdown 链接「查看地点」呈现（如 [查看地点](url)），" +
-            "说明点开后可在高德地图选中目的地再开始导航；不要声称已开始导航、不要展示经纬度。",
+        navigationCardId,
+        displayNote:
+          "导航卡已由系统在对话中自动展示（内置地图 + 起终点 + 距离/耗时），正文用一两句话确认即可：" +
+          "不要贴链接、不要展示经纬度、不要逐条复述路线，也不要声称已替用户开始导航。" +
+          (toWgs ? "" : "（未解析到目的地精确坐标，卡片只能显示名称，如实说明即可）"),
       };
     },
   };

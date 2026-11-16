@@ -125,7 +125,34 @@ export async function amapGeocode(address: string, city?: string): Promise<strin
   return null;
 }
 
-type AmapRouteMinutes = { durationMin: number; distanceKm: number } | null;
+type AmapRouteMinutes = {
+  durationMin: number;
+  distanceKm: number;
+  /** 路径几何（GCJ-02，用于对话内导航卡绘制；调用方按需转 WGS-84 上底图） */
+  polyline?: GeoPoint[];
+} | null;
+
+/** 高德 steps[].polyline（`lng,lat;lng,lat…`）→ 点列；抽稀到 ≤240 点避免卡片载荷过大 */
+function extractPathPolyline(path: {
+  steps?: Array<{ polyline?: string }>;
+}): GeoPoint[] | undefined {
+  const points: GeoPoint[] = [];
+  for (const step of path.steps ?? []) {
+    for (const pair of (step.polyline ?? "").split(";")) {
+      const p = parseAmapLocation(pair.trim());
+      if (p) points.push(p);
+    }
+  }
+  if (points.length < 2) return undefined;
+  const maxPoints = 240;
+  if (points.length <= maxPoints) return points;
+  const stride = Math.ceil(points.length / maxPoints);
+  const sampled: GeoPoint[] = [];
+  for (let i = 0; i < points.length; i += stride) sampled.push(points[i]!);
+  const last = points[points.length - 1]!;
+  if (sampled[sampled.length - 1] !== last) sampled.push(last);
+  return sampled;
+}
 
 async function amapDirection(
   base: string,
@@ -140,13 +167,24 @@ async function amapDirection(
     const res = await fetch(`${base}?${params}`, { signal: AbortSignal.timeout(AMAP_TIMEOUT_MS) });
     const json = (await res.json()) as {
       status?: string;
-      route?: { paths?: Array<{ duration?: string; distance?: string }> };
+      route?: {
+        paths?: Array<{
+          duration?: string;
+          distance?: string;
+          steps?: Array<{ polyline?: string }>;
+        }>;
+      };
     };
     const path = json.route?.paths?.[0];
     if (json.status === "1" && path?.duration) {
       const durationMin = Math.round(Number(path.duration) / 60);
       if (!Number.isFinite(durationMin)) return null;
-      return { durationMin, distanceKm: Math.round(Number(path.distance ?? 0) / 100) / 10 };
+      const polyline = extractPathPolyline(path);
+      return {
+        durationMin,
+        distanceKm: Math.round(Number(path.distance ?? 0) / 100) / 10,
+        ...(polyline ? { polyline } : {}),
+      };
     }
   } catch {
     // 降级
@@ -179,6 +217,8 @@ export type TravelEstimate = {
   /** 解析到的起点/终点坐标（地理编码成功时给出，供上层复用免二次编码） */
   originPoint?: GeoPoint;
   destinationPoint?: GeoPoint;
+  /** 路径几何（仅高德驾车/步行成功时给出，GCJ-02） */
+  polyline?: GeoPoint[];
 };
 
 export type TravelTimeInput = {
@@ -258,6 +298,7 @@ export async function estimateTravelTime(input: TravelTimeInput): Promise<Travel
           source: "amap",
           ...(fromPoint ? { originPoint: fromPoint } : {}),
           ...(destPoint ? { destinationPoint: destPoint } : {}),
+          ...(r.polyline ? { polyline: r.polyline } : {}),
         };
       }
     }

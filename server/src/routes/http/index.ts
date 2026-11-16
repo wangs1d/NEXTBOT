@@ -100,7 +100,7 @@ import { registerAgentActivityRoutes } from "./agent-activities.js";
 import { registerAgentHomepageRoutes } from "./agent-homepage.js";
 import { registerTravelPlanRoutes } from "./travel-plan.js";
 import { registerTravelPlanSessionRoutes } from "../../skills/travel-planning/travel-plan-session.js";
-import { registerTravelMapRoutes, registerPoiDetailsRoute } from "./travel-map.js";
+import { registerTravelMapRoutes, registerBasemapFetchRoutes, registerPoiDetailsRoute } from "./travel-map.js";
 import { registerShoppingDecisionRoutes } from "./shopping-decision.js";
 import { registerTravelDataRoutes } from "./travel-data.js";
 import { registerRecommendationRoutes } from "../../recommendation/http.js";
@@ -143,6 +143,8 @@ export function registerHttpRoutes(app: FastifyInstance, deps: HttpRouteDeps): v
   registerScheduleRoutes(app, deps);
   registerWeatherRoutes(app, deps);
   registerGeoRoutes(app);
+  // 底图瓦片代理是通用能力（对话内导航卡依赖），不随旅游家族裁剪
+  registerBasemapFetchRoutes(app);
   // 版本闸（NEXTBOT_EDITION=oss 开源版剔除）：旅游全家桶（媒体/行程/地图）+ 虚拟电话
   if (!isOssEdition()) {
     registerTravelMediaRoutes(app, deps);
