@@ -1,0 +1,1237 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>手机端 · 动态 tab · 卡片即入口 · 设计稿</title>
+<style>
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Regular.otf"); font-weight: 400; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Medium.otf"); font-weight: 500; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Semibold.otf"); font-weight: 600; }
+  @font-face { font-family: "MiSans"; src: url("../client/flutter_app/assets/fonts/MiSans-Bold.otf"); font-weight: 700; }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background:
+      radial-gradient(900px 500px at 78% -6%, rgba(72, 92, 128, .16), transparent 62%),
+      radial-gradient(700px 500px at 6% 108%, rgba(82, 104, 96, .12), transparent 60%),
+      #08090b;
+    color: #e9eaef;
+    font-family: "MiSans", "PingFang SC", "Microsoft YaHei", sans-serif;
+    padding: 42px 46px 80px;
+    min-height: 100vh;
+  }
+  .page { max-width: 1760px; margin: 0 auto; }
+
+  /* ── 页头 ── */
+  .hd { display: flex; align-items: flex-end; gap: 16px; flex-wrap: wrap; }
+  .hd h1 { font-size: 21px; font-weight: 600; letter-spacing: .2px; }
+  .hd .sub { font-size: 12px; line-height: 18px; color: #6f727c; padding-bottom: 2px; }
+  .hd .v { margin-left: auto; font-size: 11px; letter-spacing: .8px; color: #8d8998;
+    border: 1px solid rgba(255,255,255,.08); border-radius: 999px; padding: 4px 11px; }
+  .lead { margin-top: 12px; max-width: 1120px; font-size: 12.5px; line-height: 21px; color: #878b96; }
+  .lead b { color: #c6cad4; font-weight: 500; }
+  .lead code { color: #b9c4d6; font-size: 11.5px; background: rgba(255,255,255,.05);
+    border: 1px solid rgba(255,255,255,.06); border-radius: 5px; padding: 1px 5px; }
+
+  /* ── 结论 ── */
+  .verdict { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 26px; }
+  .vcard { border-radius: 14px; padding: 15px 17px 14px; background: rgba(255,255,255,.032);
+    border: 1px solid rgba(255,255,255,.07); }
+  .vcard .tag { display: inline-flex; align-items: center; gap: 6px; font-size: 10px;
+    letter-spacing: .8px; color: #8d919c; text-transform: uppercase; }
+  .vcard .tag i { width: 5px; height: 5px; border-radius: 50%; background: #5f6878; }
+  .vcard .tag.ok i { background: #22C55E; }
+  .vcard .tag.warn i { background: #F59E0B; }
+  .vcard h3 { margin-top: 9px; font-size: 14px; font-weight: 600; color: #edeef3; }
+  .vcard p { margin-top: 7px; font-size: 11.5px; line-height: 19px; color: #858995; }
+  .vcard p b { color: #c9cdd7; font-weight: 500; }
+  .vcard ul { margin-top: 7px; }
+  .vcard li { list-style: none; font-size: 11.5px; line-height: 19px; color: #858995;
+    padding-left: 13px; position: relative; }
+  .vcard li::before { content: ""; position: absolute; left: 0; top: 7px; width: 4px; height: 4px;
+    border-radius: 1px; background: #4b5564; }
+
+  /* ── 数据链路 ── */
+  .flow-wrap { margin-top: 30px; border-radius: 16px; border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.02); padding: 20px 22px 22px; }
+  .flow-hd { display: flex; align-items: baseline; gap: 10px; }
+  .flow-hd h2 { font-size: 14px; font-weight: 600; }
+  .flow-hd span { font-size: 11.5px; color: #6f727c; }
+  .flow { display: flex; align-items: stretch; gap: 10px; margin-top: 16px; flex-wrap: wrap; }
+  .flow-col { flex: 1 1 0; min-width: 150px; display: flex; flex-direction: column; gap: 8px; }
+  .flow-col .cl { font-size: 10px; letter-spacing: .8px; color: #70747f; margin-bottom: 1px; }
+  .fbox { border-radius: 10px; padding: 9px 11px; background: rgba(255,255,255,.038);
+    border: 1px solid rgba(255,255,255,.07); }
+  .fbox b { display: block; font-size: 11.5px; font-weight: 500; color: #d3d6df; }
+  .fbox span { display: block; margin-top: 2px; font-size: 10.5px; line-height: 15px; color: #737783; }
+  .fbox.hot { border-color: rgba(90, 150, 120, .28); background: rgba(46, 96, 74, .13); }
+  .fbox.cold { border-color: rgba(200, 140, 70, .22); background: rgba(110, 76, 36, .10); }
+  .arrowcol { display: flex; align-items: center; justify-content: center; width: 22px;
+    color: #4c5360; font-size: 15px; flex-shrink: 0; }
+  .flow-note { margin-top: 12px; font-size: 11px; line-height: 18px; color: #787c87; }
+  .flow-note b { color: #b9bdc7; font-weight: 500; }
+
+  /* ── 三屏 / 五屏 ── */
+  .screens { display: flex; gap: 34px; flex-wrap: wrap; margin-top: 38px; align-items: flex-start; }
+  .slot { width: 320px; }
+  .sc-cap { margin-bottom: 12px; display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .sc-cap .no { font-size: 11px; font-weight: 600; color: #7f8492; letter-spacing: 1px; }
+  .sc-cap b { font-size: 13.5px; font-weight: 600; }
+  .sc-cap span { font-size: 11.5px; color: #6f727c; }
+  .notes { margin-top: 14px; }
+  .notes li { list-style: none; padding-left: 13px; position: relative; margin-top: 5px;
+    font-size: 11.5px; line-height: 18px; color: #82868f; }
+  .notes li::before { content: ""; position: absolute; left: 0; top: 6px; width: 5px; height: 5px;
+    border-radius: 1px; background: #4b5564; }
+  .notes li b { color: #c2c6d0; font-weight: 500; }
+  .notes li em { font-style: normal; color: #9db4c9; }
+
+  /* ── 手机壳 ── */
+  .phone {
+    position: relative; width: 320px; height: 690px; border-radius: 38px; overflow: hidden;
+    background: #fff;
+    border: 1px solid rgba(255,255,255,.14);
+    box-shadow: 0 34px 90px rgba(0,0,0,.62), inset 0 1px 0 rgba(255,255,255,.06);
+    display: flex; flex-direction: column;
+  }
+  .phone.dark { background: #121214; }
+
+  .statusbar {
+    position: relative; z-index: 3; height: 30px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 20px; font-size: 10.5px;
+    letter-spacing: .3px; color: #111112;
+  }
+  .dark .statusbar { color: rgba(255,255,255,.72); }
+  .statusbar .notch { position: absolute; left: 50%; top: 6px; transform: translateX(-50%);
+    width: 72px; height: 20px; border-radius: 12px; background: #000; }
+  .statusbar .sig { display: flex; align-items: center; gap: 5px; }
+  .statusbar .bars { display: flex; align-items: flex-end; gap: 2px; }
+  .statusbar .bars i { width: 2px; background: currentColor; border-radius: 1px; opacity: .75; }
+  .statusbar .bars i:nth-child(1) { height: 4px; }
+  .statusbar .bars i:nth-child(2) { height: 6px; }
+  .statusbar .bars i:nth-child(3) { height: 8px; }
+  .statusbar .batt { width: 18px; height: 8px; border: 1px solid currentColor;
+    border-radius: 2px; position: relative; opacity: .8; }
+  .statusbar .batt::after { content: ""; position: absolute; inset: 1px; right: 3px;
+    background: currentColor; border-radius: 1px; }
+
+  /* ── AppBar ── */
+  .appbar { position: relative; height: 48px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: center; background: #fff; }
+  .dark .appbar { background: #1B1B1E; }
+  .appbar .title { font-size: 17px; font-weight: 600; letter-spacing: .2px; color: #111112; }
+  .dark .appbar .title { color: #F2F2F4; }
+  .appbar .left, .appbar .right { position: absolute; top: 0; height: 48px; display: flex;
+    align-items: center; color: #111112; }
+  .dark .appbar .left, .dark .appbar .right { color: #F2F2F4; }
+  .appbar .left { left: 14px; }
+  .appbar .right { right: 14px; }
+  .appbar svg { width: 20px; height: 20px; }
+
+  .body { flex: 1; min-height: 0; overflow: hidden; background: #F7F7F8; padding: 0 14px; }
+  .dark .body { background: #121214; }
+
+  /* ── 汇总卡 ── */
+  .summary-row { display: flex; gap: 9px; margin-top: 10px; }
+  .sum-card { flex: 1; min-width: 0; border-radius: 14px; padding: 12px 12px 11px;
+    background: #fff; border: 1px solid #EDEDEF; position: relative; }
+  .dark .sum-card { background: #1B1B1E; border-color: #26262B; }
+  .sum-top { display: flex; align-items: center; justify-content: space-between; }
+  .sum-label { font-size: 11px; color: #70707A; }
+  .dark .sum-label { color: #9A9AA2; }
+  .sum-top svg { width: 12px; height: 12px; color: #A6A6AF; }
+  .sum-value { margin-top: 6px; font-size: 23px; line-height: 27px; font-weight: 600;
+    color: #111112; letter-spacing: -.3px; }
+  .dark .sum-value { color: #F2F2F4; }
+  .sum-value .unit { font-size: 12px; font-weight: 500; margin-left: 2px; color: #70707A; }
+  .sum-hint { margin-top: 3px; font-size: 10px; line-height: 14px; color: #A6A6AF;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sum-card .tap-dot { position: absolute; right: 10px; bottom: 10px; width: 4px; height: 4px;
+    border-radius: 50%; background: #D9D9DE; }
+  .dark .sum-card .tap-dot { background: #3a3a41; }
+
+  /* ── 分区标题 ── */
+  .sec-label { margin: 14px 0 7px 4px; font-size: 11.5px; font-weight: 600; color: #70707A; }
+  .dark .sec-label { color: #9A9AA2; }
+
+  /* ── 组件卡 ── */
+  .card { border-radius: 12px; background: #fff; border: 1px solid #EDEDEF;
+    margin-bottom: 9px; overflow: hidden; }
+  .dark .card { background: #1B1B1E; border-color: #26262B; }
+  .card.hot { border-color: rgba(17,17,18,.55); }
+  .dark .card.hot { border-color: rgba(242,242,244,.42); }
+
+  .card-head { display: flex; align-items: center; gap: 8px; padding: 11px 12px 0; }
+  .ico { width: 26px; height: 26px; border-radius: 8px; display: flex; align-items: center;
+    justify-content: center; background: #F2F2F4; color: #111112; flex-shrink: 0; }
+  .dark .ico { background: #26262B; color: #F2F2F4; }
+  .ico svg { width: 15px; height: 15px; }
+  .card-title { font-size: 13px; font-weight: 600; color: #111112; }
+  .dark .card-title { color: #F2F2F4; }
+  .pill { margin-left: 2px; font-size: 10px; padding: 2px 7px; border-radius: 999px;
+    background: #F2F2F4; color: #70707A; white-space: nowrap; }
+  .dark .pill { background: #26262B; color: #9A9AA2; }
+  .pill.solid { background: #111112; color: #fff; }
+  .dark .pill.solid { background: #F2F2F4; color: #000; }
+  .card-head .chev { margin-left: auto; color: #B9B9C0; }
+  .card-head .chev svg { width: 14px; height: 14px; display: block; }
+  .dark .card-head .chev { color: #55555e; }
+
+  .card-body { padding: 4px 12px 0; }
+  .card-foot { display: flex; align-items: center; gap: 5px; padding: 8px 12px 10px;
+    font-size: 11px; color: #70707A; border-top: 1px solid #F3F3F5; margin-top: 7px; }
+  .dark .card-foot { color: #9A9AA2; border-top-color: #222227; }
+  .card-foot b { font-weight: 500; color: #111112; }
+  .dark .card-foot b { color: #F2F2F4; }
+  .card-foot svg { width: 11px; height: 11px; margin-left: auto; color: #B9B9C0; }
+
+  .row-title { font-size: 12.5px; line-height: 18px; font-weight: 500; color: #111112;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dark .row-title { color: #F2F2F4; }
+  .row-meta { margin-top: 1px; font-size: 10.5px; line-height: 15px; color: #A6A6AF;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .row-sub { margin-top: 2px; font-size: 10.5px; line-height: 15px; color: #70707A;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .dark .row-sub { color: #9A9AA2; }
+
+  /* 快递：取件码 chip */
+  .pickup-row { display: flex; align-items: center; gap: 10px; margin-top: 7px; }
+  .pickup-main { flex: 1; min-width: 0; }
+  .code-chip { flex-shrink: 0; border-radius: 8px; background: #111112; color: #fff;
+    padding: 5px 9px; text-align: center; }
+  .dark .code-chip { background: #F2F2F4; color: #000; }
+  .code-chip span { display: block; font-size: 8px; letter-spacing: 1px; opacity: .62; }
+  .code-chip b { display: block; margin-top: 1px; font-size: 13px; font-weight: 600;
+    letter-spacing: .2px; }
+
+  /* 账单行 */
+  .list-row { display: flex; align-items: center; gap: 10px; padding: 7px 0;
+    border-bottom: 1px solid #F5F5F7; }
+  .dark .list-row { border-bottom-color: #222227; }
+  .list-row:last-of-type { border-bottom: 0; }
+  .lr-main { flex: 1; min-width: 0; }
+  .amount { flex-shrink: 0; font-size: 13px; font-weight: 600; color: #111112; }
+  .dark .amount { color: #F2F2F4; }
+  .amount.pos { color: #1F9D55; }
+
+  /* 提醒行 */
+  .alert-row { display: flex; align-items: flex-start; gap: 7px; padding: 6px 0; }
+  .alert-dot { width: 5px; height: 5px; border-radius: 50%; background: #E5484D;
+    margin-top: 6px; flex-shrink: 0; }
+  .alert-dot.normal { background: #C7C7CD; }
+  .dark .alert-dot.normal { background: #4a4a52; }
+  .alert-main { flex: 1; min-width: 0; }
+
+  .mail-row { padding: 3px 0 2px; }
+  .mail-src { display: flex; align-items: center; gap: 5px; margin-bottom: 2px; }
+  .mail-src .dot { width: 4px; height: 4px; border-radius: 50%; background: #3B82F6; }
+
+  /* ── 底部玻璃 Tab ── */
+  .tabbar { flex-shrink: 0; height: 60px; margin: 8px 10px 9px; border-radius: 30px;
+    border: 1px solid #EDEDEF;
+    background: linear-gradient(180deg, rgba(255,255,255,.72), rgba(255,255,255,.46));
+    backdrop-filter: blur(24px) saturate(160%);
+    -webkit-backdrop-filter: blur(24px) saturate(160%);
+    box-shadow: 0 10px 26px rgba(20,24,34,.10), inset 0 1px 0 rgba(255,255,255,.7);
+    display: flex; align-items: center; padding: 0 2px; }
+  .dark .tabbar { background: linear-gradient(180deg, rgba(22,22,22,.88), rgba(16,16,16,.94));
+    border: 0; box-shadow: inset 0 1px 0 rgba(255,255,255,.06); }
+  .tab { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px;
+    color: #A6A6AF; }
+  .dark .tab { color: #6C6C75; }
+  .tab svg { width: 21px; height: 21px; }
+  .tab span { font-size: 9.5px; letter-spacing: .2px; }
+  .tab.on { color: #111112; }
+  .dark .tab.on { color: #F2F2F4; }
+  .tab.on span { font-weight: 600; }
+
+  /* ── 快递详情 ── */
+  .detail-body { flex: 1; min-height: 0; overflow: hidden; padding: 0 14px; background: #F7F7F8; }
+  .dark .detail-body { background: #121214; }
+  .hero { margin-top: 10px; border-radius: 16px; padding: 16px; background: #fff;
+    border: 1px solid #EDEDEF; text-align: center; }
+  .dark .hero { background: #1B1B1E; border-color: #26262B; }
+  .hero .cap { font-size: 10.5px; letter-spacing: 3px; color: #A6A6AF; }
+  .hero .code { margin-top: 7px; font-size: 34px; line-height: 40px; font-weight: 600;
+    letter-spacing: 2px; color: #111112; }
+  .dark .hero .code { color: #F2F2F4; }
+  .hero .where { margin-top: 4px; font-size: 12px; color: #70707A; }
+  .dark .hero .where { color: #9A9AA2; }
+  .hero .deadline { display: inline-block; margin-top: 9px; font-size: 10.5px; color: #B26A00;
+    background: #FFF5E5; border-radius: 999px; padding: 3px 10px; }
+  .dark .hero .deadline { color: #E8A94A; background: rgba(200,140,50,.14); }
+  .hero .copy { margin-top: 13px; height: 34px; border-radius: 10px; background: #111112;
+    color: #fff; font-size: 12px; font-weight: 500; display: flex; align-items: center;
+    justify-content: center; gap: 6px; }
+  .dark .hero .copy { background: #F2F2F4; color: #000; }
+  .hero .copy svg { width: 13px; height: 13px; }
+
+  .info-card { margin-top: 10px; border-radius: 12px; background: #fff; border: 1px solid #EDEDEF;
+    padding: 4px 12px; }
+  .dark .info-card { background: #1B1B1E; border-color: #26262B; }
+  .info-row { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 9px 0; border-bottom: 1px solid #F5F5F7; font-size: 12px; }
+  .dark .info-row { border-bottom-color: #222227; }
+  .info-row:last-child { border-bottom: 0; }
+  .info-row .k { color: #70707A; flex-shrink: 0; font-size: 11.5px; }
+  .dark .info-row .k { color: #9A9AA2; }
+  .info-row .v { color: #111112; text-align: right; display: flex; align-items: center; gap: 5px;
+    min-width: 0; }
+  .dark .info-row .v { color: #F2F2F4; }
+  .info-row .v.mono { font-variant-numeric: tabular-nums; letter-spacing: .2px; }
+  .info-row .v svg { width: 12px; height: 12px; color: #B9B9C0; flex-shrink: 0; }
+
+  .h2 { margin: 14px 0 7px 4px; font-size: 11.5px; font-weight: 600; color: #70707A; }
+  .dark .h2 { color: #9A9AA2; }
+
+  .timeline { border-radius: 12px; background: #fff; border: 1px solid #EDEDEF;
+    padding: 13px 14px 10px; }
+  .dark .timeline { background: #1B1B1E; border-color: #26262B; }
+  .tl-item { position: relative; padding: 0 0 15px 18px; }
+  .tl-item:last-child { padding-bottom: 2px; }
+  .tl-item::before { content: ""; position: absolute; left: 0; top: 3px; width: 7px; height: 7px;
+    border-radius: 50%; border: 1.5px solid #C7C7CD; background: #fff; }
+  .dark .tl-item::before { border-color: #4a4a52; background: #1B1B1E; }
+  .tl-item::after { content: ""; position: absolute; left: 3px; top: 12px; bottom: 2px;
+    width: 1px; background: #EDEDEF; }
+  .dark .tl-item::after { background: #26262B; }
+  .tl-item:last-child::after { display: none; }
+  .tl-item.on::before { border-color: #111112; background: #111112; }
+  .dark .tl-item.on::before { border-color: #F2F2F4; background: #F2F2F4; }
+  .tl-item .t { font-size: 12px; font-weight: 500; color: #111112; }
+  .dark .tl-item .t { color: #F2F2F4; }
+  .tl-item .d { margin-top: 1px; font-size: 10.5px; color: #A6A6AF; }
+
+  /* ── 账单详情 ── */
+  .bill-hero { margin-top: 10px; border-radius: 16px; padding: 16px; background: #fff;
+    border: 1px solid #EDEDEF; }
+  .dark .bill-hero { background: #1B1B1E; border-color: #26262B; }
+  .bill-hero .top { display: flex; align-items: center; gap: 8px; }
+  .bill-hero .top .pill { margin-left: 0; }
+  .bill-hero .amt { margin-top: 12px; font-size: 32px; line-height: 36px; font-weight: 600;
+    letter-spacing: -.5px; color: #111112; }
+  .dark .bill-hero .amt { color: #F2F2F4; }
+  .bill-hero .amt small { font-size: 15px; font-weight: 500; margin-right: 2px; }
+  .bill-hero .merchant { margin-top: 4px; font-size: 12.5px; color: #70707A; }
+  .dark .bill-hero .merchant { color: #9A9AA2; }
+  .bill-hero .amt-row { display: flex; align-items: flex-end; justify-content: space-between; }
+  .bill-hero .badge { font-size: 10px; color: #1F9D55; background: #EAF7EF;
+    border-radius: 999px; padding: 3px 9px; margin-bottom: 4px; }
+  .dark .bill-hero .badge { color: #6BD39A; background: rgba(50,150,90,.14); }
+
+  .excerpt { border-radius: 12px; background: #fff; border: 1px solid #EDEDEF; padding: 12px 13px; }
+  .dark .excerpt { background: #1B1B1E; border-color: #26262B; }
+  .excerpt .quote { font-size: 11.5px; line-height: 19px; color: #70707A; }
+  .dark .excerpt .quote { color: #9A9AA2; }
+  .excerpt .more { margin-top: 6px; font-size: 10.5px; color: #3B82F6; }
+
+  .type-row { display: flex; align-items: center; gap: 8px; padding: 7px 0; font-size: 12px; }
+  .type-row .tn { flex: 1; color: #111112; }
+  .dark .type-row .tn { color: #F2F2F4; }
+  .type-row .tc { font-size: 10.5px; color: #A6A6AF; width: 34px; text-align: right; }
+  .type-row .tv { width: 58px; text-align: right; font-weight: 500; color: #111112; }
+  .dark .type-row .tv { color: #F2F2F4; }
+  .bar { height: 3px; border-radius: 3px; background: #F0F0F3; flex: 1; overflow: hidden; }
+  .dark .bar { background: #26262B; }
+  .bar i { display: block; height: 100%; border-radius: 3px; background: #111112; }
+  .dark .bar i { background: #F2F2F4; }
+
+  /* ── 空态 ── */
+  .empty { padding: 26px 12px 8px; text-align: center; }
+  .empty .ring { width: 66px; height: 66px; margin: 0 auto; border-radius: 50%;
+    border: 1px dashed #D9D9DE; display: flex; align-items: center; justify-content: center;
+    color: #C7C7CD; }
+  .dark .empty .ring { border-color: #3a3a41; color: #4a4a52; }
+  .empty .ring svg { width: 26px; height: 26px; }
+  .empty h4 { margin-top: 13px; font-size: 13.5px; font-weight: 600; color: #111112; }
+  .dark .empty h4 { color: #F2F2F4; }
+  .empty p { margin: 5px auto 0; max-width: 230px; font-size: 11px; line-height: 17px;
+    color: #A6A6AF; }
+
+  .status-card { margin-top: 14px; border-radius: 12px; background: #fff; border: 1px solid #EDEDEF;
+    padding: 4px 12px; }
+  .dark .status-card { background: #1B1B1E; border-color: #26262B; }
+  .st-row { display: flex; align-items: center; gap: 9px; padding: 10px 0;
+    border-bottom: 1px solid #F5F5F7; }
+  .dark .st-row { border-bottom-color: #222227; }
+  .st-row:last-child { border-bottom: 0; }
+  .st-ico { width: 24px; height: 24px; border-radius: 7px; display: flex; align-items: center;
+    justify-content: center; background: #F2F2F4; color: #70707A; flex-shrink: 0; }
+  .dark .st-ico { background: #26262B; color: #9A9AA2; }
+  .st-ico svg { width: 13px; height: 13px; }
+  .st-main { flex: 1; min-width: 0; }
+  .st-main b { display: block; font-size: 12px; font-weight: 500; color: #111112; }
+  .dark .st-main b { color: #F2F2F4; }
+  .st-main span { display: block; margin-top: 1px; font-size: 10px; color: #A6A6AF; }
+  .st-act { font-size: 10.5px; font-weight: 500; color: #3B82F6; flex-shrink: 0; }
+  .st-act.done { color: #1F9D55; }
+  .st-act.off { color: #B26A00; }
+
+  /* ── 规格区 ── */
+  .spec { margin-top: 44px; }
+  .spec h2 { font-size: 16px; font-weight: 600; }
+  .spec .sub { margin-top: 5px; font-size: 11.5px; color: #6f727c; }
+  .spec-grid { display: grid; grid-template-columns: 1.25fr .95fr; gap: 18px; margin-top: 18px; }
+  .panel { border-radius: 14px; border: 1px solid rgba(255,255,255,.07);
+    background: rgba(255,255,255,.022); padding: 16px 18px; }
+  .panel h3 { font-size: 12.5px; font-weight: 600; color: #d8dbe3; }
+  table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+  th, td { text-align: left; font-size: 11px; line-height: 17px; padding: 7px 8px 7px 0;
+    border-bottom: 1px solid rgba(255,255,255,.055); vertical-align: top; }
+  th { font-size: 10px; letter-spacing: .5px; color: #70747f; font-weight: 500; }
+  td { color: #9094a0; }
+  td b { color: #c9cdd7; font-weight: 500; }
+  td code { font-size: 10.5px; color: #a9b8ca; background: rgba(255,255,255,.045);
+    border-radius: 4px; padding: 1px 4px; }
+  .panel ul { margin-top: 9px; }
+  .panel li { list-style: none; position: relative; padding-left: 14px; margin-top: 7px;
+    font-size: 11.5px; line-height: 19px; color: #858995; }
+  .panel li::before { content: ""; position: absolute; left: 0; top: 7px; width: 5px; height: 5px;
+    border-radius: 1px; background: #4b5564; }
+  .panel li b { color: #c9cdd7; font-weight: 500; }
+  .panel li em { font-style: normal; color: #e0b070; }
+
+  .ft { margin-top: 34px; padding-top: 14px; border-top: 1px solid rgba(255,255,255,.06);
+    font-size: 10.5px; line-height: 18px; color: #5f636d; }
+
+  @media (max-width: 1500px) {
+    .screens { gap: 30px; }
+  }
+  @media (max-width: 760px) {
+    body { padding: 26px 18px 60px; }
+    .verdict { grid-template-columns: 1fr; }
+    .spec-grid { grid-template-columns: 1fr; }
+    .flow { flex-direction: column; }
+    .arrowcol { width: 100%; height: 16px; transform: rotate(90deg); }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="hd">
+    <h1>手机端 · 动态 tab · 卡片即入口</h1>
+    <div class="sub">MobileDynamicsPage / GET /api/dynamics · 2026-11-16</div>
+    <div class="v">设计稿 v1</div>
+  </div>
+  <p class="lead">
+    先回答数据问题：<b>不是没接入，链路是通的</b>。服务端 <code>/api/dynamics</code> 已注册，账单/快递来自
+    <code>BillParcelLedger</code>（手机通知、短信、邮件三路上游汇入），提醒/足迹来自 <code>AttentionStore</code> /
+    <code>AgentActivityStore</code>，邮件要事来自 <code>SourceStore</code> 的 mail 流。
+    页面看起来“没有数据”，通常是上游没有产出：Android 通知使用权未开启、邮件监听未配置、或 30 天窗口内确实没有识别到条目；
+    另外当前页面<b>所有卡片都没有点击行为</b>，只是平铺展示。
+    本稿把汇总卡与四类信息卡都改成“表面即数据、整卡可点进详情”的形态。
+  </p>
+
+  <div class="verdict">
+    <div class="vcard">
+      <div class="tag ok"><i></i>已接入</div>
+      <h3>服务端聚合与落库都在</h3>
+      <p>通知/短信 → <b>MessageHub</b> → <b>BillParcelIngest</b> → 台账；邮件 → <b>MailWatch</b> → 同一台账。
+      路由在 <b>index.ts</b> 无条件注册，缺数据源时返回各区块空数组，接口恒 <b>ok:true</b>。</p>
+    </div>
+    <div class="vcard">
+      <div class="tag warn"><i></i>为什么像没数据</div>
+      <h3>上游产出有前提</h3>
+      <ul>
+        <li><b>通知使用权</b>未开启 → 短信/菜鸟/银行通知进不来</li>
+        <li><b>MAIL_WATCH_ENABLED</b> 默认关闭，需 IMAP 账号</li>
+        <li>汇总窗口是<b>滚动 30 天</b>，不是自然月</li>
+        <li>页面 20s 超时或服务端不可达 → 落错误态</li>
+      </ul>
+    </div>
+    <div class="vcard">
+      <div class="tag"><i></i>本稿改动</div>
+      <h3>从“看一眼”到“点进去”</h3>
+      <ul>
+        <li>汇总卡直接显示<b>最新一条</b>摘要，整卡可点</li>
+        <li>每类信息收成<b>一张聚合卡</b>：最近 2 条 + 查看全部</li>
+        <li>新增<b>快递 / 账单详情页</b>，字段一一对应</li>
+        <li>空态给出<b>数据源状态与去开启入口</b></li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="flow-wrap">
+    <div class="flow-hd">
+      <h2>数据链路现状</h2>
+      <span>绿色 = 已通；橙色 = 需要用户开启或配置后才产出</span>
+    </div>
+    <div class="flow">
+      <div class="flow-col">
+        <div class="cl">上游</div>
+        <div class="fbox cold"><b>系统通知</b><span>短信 / 菜鸟 / 淘宝 / 京东 / 银行</span></div>
+        <div class="fbox cold"><b>邮件</b><span>IMAP 轮询 + 账单/票务粗筛</span></div>
+        <div class="fbox"><b>微信 / IM</b><span>消息流（非账单主源）</span></div>
+      </div>
+      <div class="arrowcol">→</div>
+      <div class="flow-col">
+        <div class="cl">采集</div>
+        <div class="fbox cold"><b>NotificationListener</b><span>需系统“通知使用权”</span></div>
+        <div class="fbox cold"><b>MailWatchService</b><span>需 MAIL_WATCH_* 配置</span></div>
+        <div class="fbox"><b>MessageHub</b><span>WS 入站统一收口</span></div>
+      </div>
+      <div class="arrowcol">→</div>
+      <div class="flow-col">
+        <div class="cl">识别与落库</div>
+        <div class="fbox hot"><b>BillParcelIngest</b><span>零 LLM 规则：金额 / 单号 / 取件码</span></div>
+        <div class="fbox hot"><b>BillParcelLedger</b><span>JSON 台账 · 去重 · 30 天汇总</span></div>
+        <div class="fbox"><b>Attention / Activity</b><span>提醒与主动动作台账</span></div>
+      </div>
+      <div class="arrowcol">→</div>
+      <div class="flow-col">
+        <div class="cl">出口</div>
+        <div class="fbox hot"><b>GET /api/dynamics</b><span>bills / parcels / alerts / mail</span></div>
+        <div class="fbox"><b>磁盘缓存</b><span>stale-while-revalidate</span></div>
+        <div class="fbox hot"><b>动态 tab</b><span>区块独立空态，互不拖累</span></div>
+      </div>
+    </div>
+    <p class="flow-note">
+      所以如果四个区块全空，先看 <b>手机设置 → 通知使用权</b> 是否给到本 App，再看服务端是否配置了 <b>MAIL_WATCH</b>，
+      最后确认服务端台账文件里是否已有条目；这三处任一没就绪，页面就只能是空的，而不是接口没接。
+    </p>
+  </div>
+
+  <div class="screens">
+
+    <!-- ═════════ 01 浅色首页 ═════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">01</span><b>动态首页 · 浅色</b><span>卡片即入口</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <div class="notch"></div>
+          <div class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </div>
+        </div>
+        <div class="appbar">
+          <span class="title">动态</span>
+          <span class="right">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>
+            </svg>
+          </span>
+        </div>
+
+        <div class="body">
+          <div class="summary-row">
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">本月账单</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">¥3,482.50</div>
+              <div class="sum-hint">12 笔 · 点击看明细</div>
+              <span class="tap-dot"></span>
+            </div>
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">待取快递</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">4<span class="unit">件</span></div>
+              <div class="sum-hint">最新 8-2-3010</div>
+              <span class="tap-dot"></span>
+            </div>
+          </div>
+
+          <div class="sec-label">今天</div>
+
+          <!-- 快递聚合卡 -->
+          <div class="card hot">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/>
+                  <circle cx="7" cy="18" r="1.6"/><circle cx="17.5" cy="18" r="1.6"/>
+                </svg>
+              </span>
+              <span class="card-title">快递</span>
+              <span class="pill solid">4 件待取</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="pickup-row">
+                <div class="pickup-main">
+                  <div class="row-title">顺丰速运 · 包裹已到菜鸟驿站</div>
+                  <div class="row-meta">单号 SF1234567890 · 今天 10:24</div>
+                </div>
+                <div class="code-chip"><span>取件码</span><b>8-2-3010</b></div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部快递</b><span>4 件</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+
+          <!-- 账单聚合卡 -->
+          <div class="card">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 3h12v18l-2-1.4L14 21l-2-1.4L10 21l-2-1.4L6 21z"/>
+                  <path d="M9 7h6M9 11h6M9 15h4"/>
+                </svg>
+              </span>
+              <span class="card-title">账单</span>
+              <span class="pill">12 笔 · ¥3,482.50</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="list-row">
+                <div class="lr-main">
+                  <div class="row-title">中国移动 · 话费充值</div>
+                  <div class="row-meta">短信 · 今天 09:12</div>
+                </div>
+                <div class="amount">-¥128.00</div>
+              </div>
+              <div class="list-row">
+                <div class="lr-main">
+                  <div class="row-title">美团外卖</div>
+                  <div class="row-meta">通知 · 昨天 19:40</div>
+                </div>
+                <div class="amount">-¥36.50</div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部账单</b>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+
+          <!-- 提醒聚合卡 -->
+          <div class="card">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/>
+                  <path d="M10.5 20a2 2 0 0 0 3 0"/>
+                </svg>
+              </span>
+              <span class="card-title">提醒</span>
+              <span class="pill">2 条</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="alert-row">
+                <span class="alert-dot"></span>
+                <div class="alert-main">
+                  <div class="row-title">15:00 前取快递（菜鸟驿站 3 号柜）</div>
+                  <div class="row-meta">取件码 8-2-3010 · 还有 40 分钟</div>
+                </div>
+              </div>
+              <div class="alert-row">
+                <span class="alert-dot normal"></span>
+                <div class="alert-main">
+                  <div class="row-title">晚上 8 点提醒给妈妈打电话</div>
+                  <div class="row-meta">日程提醒 · 今天 20:00</div>
+                </div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部提醒</b>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+
+          <!-- 邮件要事（底部截断，暗示可滚动） -->
+          <div class="card">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M4 7l8 6 8-6"/>
+                </svg>
+              </span>
+              <span class="card-title">邮件要事</span>
+              <span class="pill">3 封</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="mail-row">
+                <div class="mail-src"><span class="dot"></span><span class="row-meta">招商银行 · 今天 08:05</span></div>
+                <div class="row-title">信用卡账单已出，本期应还 ¥2,860.00</div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabbar">
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/>
+            </svg><span>对话</span>
+          </div>
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/>
+            </svg><span>日程</span>
+          </div>
+          <div class="tab on">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12h4l2-5 3 10 2.5-6 1.8 3H21"/>
+            </svg><span>动态</span>
+          </div>
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5h6v15H4zM13 5h7v15h-7z"/><path d="M6.5 8h1M6.5 11h1M15.5 8h2"/>
+            </svg><span>资料库</span>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li><b>汇总卡升级：</b>数字之外补一行“最新一条”，账单显示笔数、快递显示最新取件码，整卡可点。</li>
+        <li><b>每类一张聚合卡：</b>头部是类型 + 计数徽标，卡内最多两条最近条目，底部“查看全部”进列表。</li>
+        <li><b>快递卡描边加重</b>（有待取件时），沿用现有取件码黑底 chip，一眼能读。</li>
+      </ul>
+    </div>
+
+    <!-- ═════════ 02 深色首页 ═════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">02</span><b>动态首页 · 深色</b><span>同一结构换肤</span></div>
+      <div class="phone dark">
+        <div class="statusbar">
+          <span>9:41</span>
+          <div class="notch"></div>
+          <div class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </div>
+        </div>
+        <div class="appbar">
+          <span class="title">动态</span>
+          <span class="right">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>
+            </svg>
+          </span>
+        </div>
+
+        <div class="body">
+          <div class="summary-row">
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">本月账单</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">¥3,482.50</div>
+              <div class="sum-hint">12 笔 · 点击看明细</div>
+              <span class="tap-dot"></span>
+            </div>
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">待取快递</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">4<span class="unit">件</span></div>
+              <div class="sum-hint">最新 8-2-3010</div>
+              <span class="tap-dot"></span>
+            </div>
+          </div>
+
+          <div class="sec-label">今天</div>
+
+          <div class="card hot">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 7h11v9H3z"/><path d="M14 10h4l3 3v3h-7z"/>
+                  <circle cx="7" cy="18" r="1.6"/><circle cx="17.5" cy="18" r="1.6"/>
+                </svg>
+              </span>
+              <span class="card-title">快递</span>
+              <span class="pill solid">4 件待取</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="pickup-row">
+                <div class="pickup-main">
+                  <div class="row-title">顺丰速运 · 包裹已到菜鸟驿站</div>
+                  <div class="row-meta">单号 SF1234567890 · 今天 10:24</div>
+                </div>
+                <div class="code-chip"><span>取件码</span><b>8-2-3010</b></div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部快递</b><span>4 件</span>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M6 3h12v18l-2-1.4L14 21l-2-1.4L10 21l-2-1.4L6 21z"/>
+                  <path d="M9 7h6M9 11h6M9 15h4"/>
+                </svg>
+              </span>
+              <span class="card-title">账单</span>
+              <span class="pill">12 笔 · ¥3,482.50</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="list-row">
+                <div class="lr-main">
+                  <div class="row-title">中国移动 · 话费充值</div>
+                  <div class="row-meta">短信 · 今天 09:12</div>
+                </div>
+                <div class="amount">-¥128.00</div>
+              </div>
+              <div class="list-row">
+                <div class="lr-main">
+                  <div class="row-title">美团外卖</div>
+                  <div class="row-meta">通知 · 昨天 19:40</div>
+                </div>
+                <div class="amount">-¥36.50</div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部账单</b>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+
+          <div class="card">
+            <div class="card-head">
+              <span class="ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/>
+                  <path d="M10.5 20a2 2 0 0 0 3 0"/>
+                </svg>
+              </span>
+              <span class="card-title">提醒</span>
+              <span class="pill">2 条</span>
+              <span class="chev">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </span>
+            </div>
+            <div class="card-body">
+              <div class="alert-row">
+                <span class="alert-dot"></span>
+                <div class="alert-main">
+                  <div class="row-title">15:00 前取快递（菜鸟驿站 3 号柜）</div>
+                  <div class="row-meta">取件码 8-2-3010 · 还有 40 分钟</div>
+                </div>
+              </div>
+              <div class="alert-row">
+                <span class="alert-dot normal"></span>
+                <div class="alert-main">
+                  <div class="row-title">晚上 8 点提醒给妈妈打电话</div>
+                  <div class="row-meta">日程提醒 · 今天 20:00</div>
+                </div>
+              </div>
+            </div>
+            <div class="card-foot"><b>查看全部提醒</b>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                   stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+            </div>
+          </div>
+        </div>
+
+        <div class="tabbar">
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 12a8 8 0 0 1-11.6 7.1L4 20l1-4.2A8 8 0 1 1 20 12Z"/>
+            </svg><span>对话</span>
+          </div>
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <rect x="4" y="5" width="16" height="15" rx="2"/><path d="M8 3v4M16 3v4M4 10h16"/>
+            </svg><span>日程</span>
+          </div>
+          <div class="tab on">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12h4l2-5 3 10 2.5-6 1.8 3H21"/>
+            </svg><span>动态</span>
+          </div>
+          <div class="tab">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 5h6v15H4zM13 5h7v15h-7z"/><path d="M6.5 8h1M6.5 11h1M15.5 8h2"/>
+            </svg><span>资料库</span>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li>深色沿用 <b>MobilePalette.dark</b>：底 #121214、卡面 #1B1B1E、描边 #26262B。</li>
+        <li>取件码 chip 反色为白底黑字，与用户气泡的反色规则一致。</li>
+      </ul>
+    </div>
+
+    <!-- ═════════ 03 快递详情 ═════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">03</span><b>快递详情</b><span>取件码是第一信息</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <div class="notch"></div>
+          <div class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </div>
+        </div>
+        <div class="appbar">
+          <span class="left">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </span>
+          <span class="title">快递详情</span>
+        </div>
+
+        <div class="detail-body">
+          <div class="hero">
+            <div class="cap">取件码</div>
+            <div class="code">8-2-3010</div>
+            <div class="where">菜鸟驿站 · 3 号柜</div>
+            <span class="deadline">请在今天 15:00 前取件</span>
+            <div class="copy">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/>
+              </svg>
+              复制取件码
+            </div>
+          </div>
+
+          <div class="info-card">
+            <div class="info-row"><span class="k">承运商</span><span class="v">顺丰速运</span></div>
+            <div class="info-row"><span class="k">运单号</span><span class="v mono">SF1234567890
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5h10"/>
+              </svg></span></div>
+            <div class="info-row"><span class="k">到达时间</span><span class="v">今天 10:24</span></div>
+            <div class="info-row"><span class="k">识别来源</span><span class="v">短信通知</span></div>
+          </div>
+
+          <div class="h2">物流进度</div>
+          <div class="timeline">
+            <div class="tl-item on">
+              <div class="t">已到站 · 待取件</div>
+              <div class="d">今天 10:24 · 菜鸟驿站（3 号柜）</div>
+            </div>
+            <div class="tl-item">
+              <div class="t">派送中</div>
+              <div class="d">今天 09:02 · 快递员 李师傅</div>
+            </div>
+            <div class="tl-item">
+              <div class="t">已揽收</div>
+              <div class="d">昨天 18:40 · 杭州中转场</div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li><b>数据字段：</b>取件码 <em>pickupCode</em>、承运商 <em>carrier</em>、单号 <em>trackingNo</em>、
+          时间 <em>occurredAt</em>、原文 <em>excerpt</em>。</li>
+        <li>物流进度当前台账里只有单条记录，时间线先按“已到站 / 派送中 / 已揽收”三段展示；
+          后续若接入承运商轨迹接口可直接替换数据源，版式不变。</li>
+        <li>整页只有一个主操作“复制取件码”，避免详情页堆按钮。</li>
+      </ul>
+    </div>
+
+    <!-- ═════════ 04 账单详情 ═════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">04</span><b>账单详情</b><span>金额 + 原文可追溯</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <div class="notch"></div>
+          <div class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </div>
+        </div>
+        <div class="appbar">
+          <span class="left">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                 stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg>
+          </span>
+          <span class="title">账单详情</span>
+        </div>
+
+        <div class="detail-body">
+          <div class="bill-hero">
+            <div class="top">
+              <span class="pill solid">支出</span>
+              <span class="pill">通讯费</span>
+            </div>
+            <div class="amt-row">
+              <div class="amt"><small>¥</small>128.00</div>
+              <span class="badge">已自动入账</span>
+            </div>
+            <div class="merchant">中国移动 · 话费充值</div>
+          </div>
+
+          <div class="info-card">
+            <div class="info-row"><span class="k">发生时间</span><span class="v">今天 09:12</span></div>
+            <div class="info-row"><span class="k">识别来源</span><span class="v">短信</span></div>
+            <div class="info-row"><span class="k">账单类型</span><span class="v">通讯费</span></div>
+            <div class="info-row"><span class="k">入账状态</span><span class="v">已计入近 30 天汇总</span></div>
+          </div>
+
+          <div class="h2">原始凭证</div>
+          <div class="excerpt">
+            <div class="quote">【中国移动】尊敬的客户，您于 11 月 16 日 09:12 成功充值话费 128.00 元，
+              当前账户余额 86.42 元。如需查询请登录掌上营业厅。</div>
+            <div class="more">查看完整原文</div>
+          </div>
+
+          <div class="h2">同期同类</div>
+          <div class="info-card">
+            <div class="type-row">
+              <span class="tn">通讯费</span>
+              <span class="bar"><i style="width:64%"></i></span>
+              <span class="tc">2 笔</span>
+              <span class="tv">¥198.00</span>
+            </div>
+            <div class="type-row">
+              <span class="tn">餐饮</span>
+              <span class="bar"><i style="width:100%"></i></span>
+              <span class="tc">9 笔</span>
+              <span class="tv">¥1,204.00</span>
+            </div>
+            <div class="type-row">
+              <span class="tn">购物</span>
+              <span class="bar"><i style="width:38%"></i></span>
+              <span class="tc">1 笔</span>
+              <span class="tv">¥2,080.50</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li><b>明细可追溯：</b>详情页必须能看到被识别的那段原文，用户才能判断 Agent 有没有记错。</li>
+        <li><b>字段：</b><em>title / amount / billType / source / occurredAt / excerpt</em>；
+          “同期同类”来自 <em>bills.byType</em>。</li>
+        <li><b>口径提示：</b>当前接口窗口是滚动 30 天，卡片却写“本月账单”，建议统一改成“近 30 天”或在服务端按自然月计算。</li>
+      </ul>
+    </div>
+
+    <!-- ═════════ 05 空态 ═════════ -->
+    <div class="slot">
+      <div class="sc-cap"><span class="no">05</span><b>空态 · 数据源未就绪</b><span>把原因说清楚</span></div>
+      <div class="phone">
+        <div class="statusbar">
+          <span>9:41</span>
+          <div class="notch"></div>
+          <div class="sig">
+            <span class="bars"><i></i><i></i><i></i></span>
+            <span class="batt"></span>
+          </div>
+        </div>
+        <div class="appbar">
+          <span class="title">动态</span>
+          <span class="right">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                 stroke-linecap="round" stroke-linejoin="round">
+              <path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/>
+            </svg>
+          </span>
+        </div>
+
+        <div class="body">
+          <div class="summary-row">
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">本月账单</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">—</div>
+              <div class="sum-hint">暂无识别到的账单</div>
+            </div>
+            <div class="sum-card">
+              <div class="sum-top">
+                <span class="sum-label">待取快递</span>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+              </div>
+              <div class="sum-value">—</div>
+              <div class="sum-hint">暂无待取件</div>
+            </div>
+          </div>
+
+          <div class="empty">
+            <div class="ring">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"
+                   stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3 12h4l2-5 3 10 2.5-6 1.8 3H21"/>
+              </svg>
+            </div>
+            <h4>还没有可展示的动态</h4>
+            <p>Agent 需要先拿到短信、通知或邮件，才能识别账单与快递。</p>
+          </div>
+
+          <div class="status-card">
+            <div class="st-row">
+              <span class="st-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M18 9a6 6 0 1 0-12 0c0 5-2 6-2 6h16s-2-1-2-6"/><path d="M10.5 20a2 2 0 0 0 3 0"/>
+                </svg>
+              </span>
+              <div class="st-main"><b>通知捕捉</b><span>未开启，短信/物流通知进不来</span></div>
+              <span class="st-act off">去开启</span>
+            </div>
+            <div class="st-row">
+              <span class="st-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="3" y="5" width="18" height="14" rx="2"/><path d="M4 7l8 6 8-6"/>
+                </svg>
+              </span>
+              <div class="st-main"><b>邮件监听</b><span>未配置 IMAP，账单邮件不会入账</span></div>
+              <span class="st-act">去配置</span>
+            </div>
+            <div class="st-row">
+              <span class="st-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <rect x="7" y="3" width="10" height="18" rx="2"/><path d="M10 18h4"/>
+                </svg>
+              </span>
+              <div class="st-main"><b>短信权限</b><span>已授权</span></div>
+              <span class="st-act done">已完成</span>
+            </div>
+            <div class="st-row">
+              <span class="st-ico">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>
+                </svg>
+              </span>
+              <div class="st-main"><b>最近同步</b><span>2 分钟前 · 服务端正常</span></div>
+              <span class="st-act done">正常</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      <ul class="notes">
+        <li><b>空态不是一句话：</b>直接列数据源状态，用户知道该去开哪个开关。</li>
+        <li>“通知捕捉 / 邮件监听”跳设置页对应区块；“短信权限”只读展示。</li>
+        <li>各区块仍独立空态：只有快递为空时，账单卡照常展示，不整页空白。</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- ═════════ 规格 ═════════ -->
+  <div class="spec">
+    <h2>实现规格与字段映射</h2>
+    <div class="sub">现有接口已够支撑本稿；详情页建议直接复用列表项对象，不额外请求。</div>
+
+    <div class="spec-grid">
+      <div class="panel">
+        <h3>卡片 → 接口字段 → 交互</h3>
+        <table>
+          <thead>
+            <tr><th>区域</th><th>数据</th><th>点击行为</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>汇总 · 账单</b></td>
+              <td><code>bills.count</code> / <code>bills.totalAmount</code></td>
+              <td>账单列表 → 单条详情（传 item）</td>
+            </tr>
+            <tr>
+              <td><b>汇总 · 快递</b></td>
+              <td><code>parcels.awaitingPickup</code> / <code>parcels.latestPickup</code></td>
+              <td>快递列表 → 单条详情</td>
+            </tr>
+            <tr>
+              <td><b>快递卡</b></td>
+              <td><code>parcels.recent[]</code>：pickupCode / carrier / trackingNo / occurredAt</td>
+              <td>整卡 → 快递列表；单行 → 详情</td>
+            </tr>
+            <tr>
+              <td><b>账单卡</b></td>
+              <td><code>bills.recent[]</code>：title / amount / billType / source / occurredAt</td>
+              <td>整卡 → 账单列表；单行 → 详情</td>
+            </tr>
+            <tr>
+              <td><b>提醒卡</b></td>
+              <td><code>alerts.pending[]</code>：title / summary / urgency</td>
+              <td>复用现有提醒详情 / 对话定位</td>
+            </tr>
+            <tr>
+              <td><b>邮件卡</b></td>
+              <td><code>mail.recent[]</code>：title / text / at</td>
+              <td>邮件详情（已有邮件模块）</td>
+            </tr>
+            <tr>
+              <td><b>足迹</b></td>
+              <td><code>alerts.activity[]</code>：title / summary / statusLabel</td>
+              <td>可选：折叠在“更多动态”里</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="panel">
+        <h3>交互与状态</h3>
+        <ul>
+          <li><b>整卡可点：</b>InkWell 包整张卡，按下态 <em>0.55</em> 透明；右侧 chevron 只做提示，不单独响应。</li>
+          <li><b>下拉刷新：</b>保留现有 RefreshIndicator；静默刷新失败不清空已有数据。</li>
+          <li><b>首屏：</b>磁盘缓存先出（stale-while-revalidate），再静默换新，避免转圈。</li>
+          <li><b>加载态：</b>首屏无缓存时用骨架卡（3 张灰条），不用整页 spinner。</li>
+          <li><b>超时：</b>20s；错误态保留“服务端地址 + 重试”，和现有实现一致。</li>
+          <li><b>去重：</b>台账已按单号/取件码去重，列表直接渲染，不再客户端合并。</li>
+          <li><b>详情页数据：</b>列表项已含 <em>excerpt</em>，直接带入；若做“全部列表”，请求
+            <code>/api/dynamics?limit=50</code> 后按 category 过滤。</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+
+  <div class="ft">
+    设计稿文件：design/mobile-dynamics-cards-2026-11-16.html · 对应实现：
+    client/flutter_app/lib/mobile_ui/mobile_dynamics_page.dart、server/src/routes/http/dynamics.ts
+  </div>
+
+</div>
+</body>
+</html>
