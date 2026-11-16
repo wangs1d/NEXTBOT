@@ -1164,6 +1164,14 @@ class _MobileChatPageState extends State<MobileChatPage> {
       {List<String> excludeCardTypes = const <String>[]}) {
     final Color bubble = isUser ? p.userBubble : p.assistantBubble;
     final Color text = isUser ? p.userBubbleText : p.assistantBubbleText;
+    final List<Uint8List>? sentImages =
+        isUser ? _sentImageBytes[m.messageId] : null;
+    // 纯图消息：正文占位「（见图）」只是跨端去重锚点，气泡里不展示文案，
+    // 让图片自己占一个绿泡（用户 2026-11-17 定稿）。
+    final bool userHasImages = isUser &&
+        ((sentImages?.isNotEmpty ?? false) || m.attachmentImageCount > 0);
+    final bool hideImageOnlyPlaceholder =
+        userHasImages && m.text.trim() == "（见图）";
     return Align(
       alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
@@ -1189,13 +1197,38 @@ class _MobileChatPageState extends State<MobileChatPage> {
                 children: [
                   // 随消息发出的照片缩略图（发送时记下的内存字节）
                   Builder(builder: (BuildContext ctx) {
-                    final List<Uint8List>? images =
-                        _sentImageBytes[m.messageId];
+                    final List<Uint8List>? images = sentImages;
                     if (images == null || images.isEmpty) {
-                      return const SizedBox.shrink();
+                      if (!hideImageOnlyPlaceholder) {
+                        return const SizedBox.shrink();
+                      }
+                      // 重启/历史加载后内存字节已不在：只留「配图 ×N」，
+                      // 不再用「（见图）」文案占位。
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 0),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: <Widget>[
+                            Icon(
+                              Icons.photo_camera_outlined,
+                              size: 14,
+                              color: text.withValues(alpha: 0.8),
+                            ),
+                            const SizedBox(width: 4),
+                            Text(
+                              "配图 ×${m.attachmentImageCount}",
+                              style: TextStyle(
+                                fontSize: 12,
+                                color: text.withValues(alpha: 0.8),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
                     }
                     return Padding(
-                      padding: const EdgeInsets.only(bottom: 4),
+                      padding: EdgeInsets.only(
+                          bottom: hideImageOnlyPlaceholder ? 0 : 4),
                       child: Wrap(
                         spacing: 6,
                         runSpacing: 6,
@@ -1226,13 +1259,15 @@ class _MobileChatPageState extends State<MobileChatPage> {
                       ),
                     );
                   }),
-                  Text(
-                    m.text,
-                    style: const TextStyle(
-                      fontSize: AppTypography.bodyLarge,
-                      height: AppTypography.bodyLineHeight,
-                    ).copyWith(color: text),
-                  ),
+                  // 消息正文（纯图消息不出「（见图）」文案）
+                  if (!hideImageOnlyPlaceholder)
+                    Text(
+                      m.text,
+                      style: const TextStyle(
+                        fontSize: AppTypography.bodyLarge,
+                        height: AppTypography.bodyLineHeight,
+                      ).copyWith(color: text),
+                    ),
                   // 离线待发送角标：断网时发出的消息入队等联网补发
                   if (m.pendingDelivery)
                     Padding(

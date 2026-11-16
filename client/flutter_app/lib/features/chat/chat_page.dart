@@ -3126,6 +3126,14 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
       );
     }
 
+    // 纯图消息：正文占位「（见图）」只是跨端去重锚点，气泡里不展示文案，
+    // 让图片自己占一个绿泡（用户 2026-11-17 定稿）。
+    final bool userHasImages = widget.isUser &&
+        ((widget.userGalleryImages?.isNotEmpty ?? false) ||
+            widget.mainMessage.attachmentImageCount > 0);
+    final bool hideImageOnlyPlaceholder =
+        userHasImages && widget.mainMessage.text.trim() == "（见图）";
+
     return Container(
       decoration: highlight
           ? BoxDecoration(
@@ -3155,13 +3163,15 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                 // 「图确实发出去了、发的是这几张」。字节仅在内存，
                 // 重启/历史加载后走下方「配图 ×N」文案回退。
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 5),
+                  padding: EdgeInsets.only(
+                      bottom: hideImageOnlyPlaceholder ? 0 : 5),
                   child: _buildSentGalleryThumbnails(
                       widget.userGalleryImages!, cs),
                 )
               else if (widget.mainMessage.attachmentImageCount > 0)
                 Padding(
-                  padding: const EdgeInsets.only(bottom: 3),
+                  padding: EdgeInsets.only(
+                      bottom: hideImageOnlyPlaceholder ? 0 : 3),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: <Widget>[
@@ -3186,16 +3196,17 @@ class _HoverableMessageContentState extends State<_HoverableMessageContent> {
                     ],
                   ),
                 ),
-              // 消息正文
-              _buildMessageTextInner(
-                context,
-                widget.cs,
-                widget.mainMessage,
-                isUser: widget.isUser,
-                contentSummary: widget.contentSummary,
-                onUserAction: widget.onUserAction,
-                onFollowupTap: widget.onFollowupTap,
-              ),
+              // 消息正文（纯图消息不出「（见图）」文案）
+              if (!hideImageOnlyPlaceholder)
+                _buildMessageTextInner(
+                  context,
+                  widget.cs,
+                  widget.mainMessage,
+                  isUser: widget.isUser,
+                  contentSummary: widget.contentSummary,
+                  onUserAction: widget.onUserAction,
+                  onFollowupTap: widget.onFollowupTap,
+                ),
               // 边说边出图：流式阶段 `chat.media_ready` 推送的临时照片，
               // 插在正在打字的正文下方实时展示；`chat.assistant_done` 到达后
               // pendingMediaCards 被清空，由 renderBlocks 的最终顺序接管。
